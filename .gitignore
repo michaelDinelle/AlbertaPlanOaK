@@ -1,0 +1,44 @@
+# Swift Package Manager
+/.build/
+/.swiftpm/
+/Packages/
+
+# Xcode and Apple toolchains
+/DerivedData/
+*.xcodeproj/xcuserdata/
+*.xcworkspace/xcuserdata/
+*.xcuserstate
+*.xcscmblueprint
+
+# Python caches and local environments
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.pyre/
+.hypothesis/
+.tox/
+.nox/
+.coverage
+.coverage.*
+htmlcov/
+.ipynb_checkpoints/
+/.venv/
+/venv/
+/env/
+/ENV/
+.python-version
+
+# Local configuration
+.env
+.env.*
+!.env.example
+
+# macOS metadata
+.DS_Store
+
+# Local runtime assets
+/CARLA_0.9.15

@@ -1,0 +1,23 @@
+# Core - works on Python 3.11
+gymnasium==0.29.1
+numpy==1.26.4
+
+# PyFlyt
+PyFlyt==0.4.0
+pygame==2.5.2
+
+# DM Control (let pip resolve versions for 3.11)
+dm-control
+mujoco
+
+# MiniGrid
+minigrid==2.3.1
+
+# FinRL
+finrl
+pandas
+yfinance
+
+# PyTorch (for FinRL)
+torch
+torchvision

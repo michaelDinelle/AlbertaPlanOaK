@@ -1,0 +1,15 @@
+{
+  "originHash" : "2c2c6520acbbc40ca2dfbf3aae42543e32df37cbd9be32b3e3a36be5e0919e80",
+  "pins" : [
+    {
+      "identity" : "pythonkit",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/pvieito/PythonKit",
+      "state" : {
+        "revision" : "6fee7617cfa910fbac7035276e295ba967adbbb4",
+        "version" : "0.5.1"
+      }
+    }
+  ],
+  "version" : 3
+}
