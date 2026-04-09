@@ -27,15 +27,13 @@ source venv/bin/activate
 
 
 ## Environments
-### All 8 run concurrently in same process:
+### All 6 run concurrently in same process:
 
 
 - PyFlyt QuadX (drone hover)
 - CARLA (autonomous driving)
 - DM Control Cheetah/Walker/Humanoid
 - MiniGrid (navigation)
-- Habitat (embodied AI)
-- FinRL (trading)
 
 
 Swift (OaK Core) <--> PythonKit <--> Python Envs

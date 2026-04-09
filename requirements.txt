@@ -12,12 +12,3 @@ mujoco
 
 # MiniGrid
 minigrid==2.3.1
-
-# FinRL
-finrl
-pandas
-yfinance
-
-# PyTorch (for FinRL)
-torch
-torchvision

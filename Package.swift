@@ -11,8 +11,13 @@ let package = Package(
         .executableTarget(
             name: "OaK",
             dependencies: ["PythonKit"],
-            path: "Sources"
-            // remove any resources: [.process("Kernels.metal")]
-        )
+            path: "Sources",
+            resources: [.process("Kernels.metal")]
+        ),
+        .testTarget(
+            name: "OaKTests",
+            dependencies: ["OaK"],
+            path: "Tests/OaKTests"
+        ),
     ]
 )
