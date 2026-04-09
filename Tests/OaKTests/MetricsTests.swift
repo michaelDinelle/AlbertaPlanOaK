@@ -3,6 +3,31 @@ import XCTest
 @testable import OaK
 
 final class MetricsTests: XCTestCase {
+    func testCPUForegroundCoreIncreasesActiveRankWhenBudgetExpands() {
+        let core = CPUForegroundCore(obsDim: 64, actDim: 8, seed: 7)
+        let obs = (0..<64).map { index in Float(index) / 64 }
+        let prevAction = Array(repeating: Float(0), count: 8)
+
+        let lowBudget = core.step(input: StepInput(obs: obs, prevAction: prevAction, prevReward: 0, wallClockBudgetNs: 1))
+        let highBudget = core.step(input: StepInput(obs: obs, prevAction: lowBudget.action, prevReward: 0.25, wallClockBudgetNs: 1_000_000))
+
+        XCTAssertGreaterThanOrEqual(lowBudget.telemetry.activeRank, 1)
+        XCTAssertGreaterThanOrEqual(highBudget.telemetry.activeRank, lowBudget.telemetry.activeRank)
+        XCTAssertTrue(highBudget.action.allSatisfy(\.isFinite))
+    }
+
+    func testCoreSignalEnvIsContinuousAndNonTerminal() {
+        let env = CoreSignalEnv()
+        let initialObservation = env.reset()
+        let result = env.step(Array(repeating: 0.1, count: env.actDim))
+
+        XCTAssertEqual(initialObservation.count, env.obsDim)
+        XCTAssertEqual(result.0.count, env.obsDim)
+        XCTAssertTrue(result.1.isFinite)
+        XCTAssertFalse(result.2)
+        XCTAssertNotEqual(initialObservation, result.0)
+    }
+
     func testRollingSummaryAggregatesKnownSequence() throws {
         let aggregator = RunMetricsAggregator(runId: "run-1", envName: "minigrid", policyName: "oak", backend: "metal", windowSize: 2)
 
