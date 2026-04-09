@@ -44,32 +44,93 @@ private func shellQuoted(_ value: String) -> String {
     "'" + value.replacingOccurrences(of: "'", with: "'\\''") + "'"
 }
 
-private let sys: PythonObject = {
-    let sys = Python.import("sys")
+private final class PythonRuntime: @unchecked Sendable {
+    static let shared = PythonRuntime()
 
-    sys.path.append("/opt/homebrew/lib/python3.11/site-packages")
+    private let lock = NSLock()
+    private var configured = false
+    private var moduleCache: [String: PythonObject] = [:]
 
-    for path in nativeHostCarlaPythonSearchPaths() {
-        sys.path.append(path)
+    private init() {}
+
+    var sys: PythonObject {
+        module(named: "sys")
     }
 
-    return sys
-}()
+    var gym: PythonObject {
+        module(named: "gymnasium")
+    }
 
-private let gym: PythonObject = {
-    _ = sys
-    return Python.import("gymnasium")
-}()
+    var numpy: PythonObject {
+        module(named: "numpy")
+    }
 
-private let np: PythonObject = {
-    _ = sys
-    return Python.import("numpy")
-}()
+    var random: PythonObject {
+        module(named: "random")
+    }
 
-private let pyRandom: PythonObject = {
-    _ = sys
-    return Python.import("random")
-}()
+    func module(named name: String) -> PythonObject {
+        lock.lock()
+        defer { lock.unlock() }
+
+        configureIfNeededLocked()
+        if let cached = moduleCache[name] {
+            return cached
+        }
+
+        do {
+            let imported = try Python.attemptImport(name)
+            moduleCache[name] = imported
+            return imported
+        } catch {
+            fatalError("Missing Python module '\(name)'. Run ./doctor.sh python for details. Underlying error: \(error)")
+        }
+    }
+
+    func hasModule(named name: String) -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+
+        configureIfNeededLocked()
+        if moduleCache[name] != nil {
+            return true
+        }
+
+        do {
+            let imported = try Python.attemptImport(name)
+            moduleCache[name] = imported
+            return true
+        } catch {
+            return false
+        }
+    }
+
+    func require(modules names: [String]) {
+        for name in names {
+            _ = module(named: name)
+        }
+    }
+
+    private func configureIfNeededLocked() {
+        guard !configured else {
+            return
+        }
+
+        do {
+            let importedSys = try Python.attemptImport("sys")
+            moduleCache["sys"] = importedSys
+            importedSys.path.append("/opt/homebrew/lib/python3.11/site-packages")
+
+            for path in nativeHostCarlaPythonSearchPaths() {
+                importedSys.path.append(path)
+            }
+
+            configured = true
+        } catch {
+            fatalError("Python runtime unavailable. Run ./doctor.sh python for details. Underlying error: \(error)")
+        }
+    }
+}
 
 private func logWarning(_ message: String) {
     fputs("[OaK] \(message)\n", stderr)
@@ -104,6 +165,7 @@ private func clampAction(_ action: [Float], low: [Float], high: [Float]) -> [Flo
 }
 
 private func pythonFlatArray(_ object: PythonObject) -> [Float] {
+    let np = PythonRuntime.shared.numpy
     let flattened = np.asarray(object, dtype: np.float32).flatten()
     return Array(flattened).map { sanitizeScalar(Float($0) ?? 0) }
 }
@@ -133,9 +195,107 @@ private func configuredRunSeed(environment: [String: String] = ProcessInfo.proce
     return seed
 }
 
+private func configuredStepBudgetNs(environment: [String: String] = ProcessInfo.processInfo.environment) -> UInt64? {
+    guard let rawBudget = environment["OAK_STEP_BUDGET_NS"], !rawBudget.isEmpty else {
+        return nil
+    }
+    guard let budget = UInt64(rawBudget), budget > 0 else {
+        fatalError("Invalid OAK_STEP_BUDGET_NS '\(rawBudget)'. Expected a positive integer.")
+    }
+    return budget
+}
+
+private func currentProcessArchitecture() -> String {
+#if arch(arm64)
+    "arm64"
+#elseif arch(x86_64)
+    "x86_64"
+#else
+    "unknown"
+#endif
+}
+
+private func runMetalDoctor(arguments: ArraySlice<String>) -> Int32 {
+    let quiet = arguments.contains("--quiet")
+    let devices = MTLCopyAllDevices()
+    let defaultDevice = MTLCreateSystemDefaultDevice()
+
+    func emit(_ message: String) {
+        if !quiet {
+            print(message)
+        }
+    }
+
+    emit("metal_doctor arch=\(currentProcessArchitecture())")
+    emit("metal_doctor default_device=\(defaultDevice?.name ?? "nil")")
+    emit("metal_doctor device_count=\(devices.count)")
+    for (index, device) in devices.enumerated() {
+        emit("metal_doctor device[\(index)]=\(device.name) headless=\(device.isHeadless) low_power=\(device.isLowPower) removable=\(device.isRemovable)")
+    }
+
+    guard let device = defaultDevice ?? devices.first else {
+        fputs("Metal doctor failed: no Metal device available to this process.\n", stderr)
+        return 1
+    }
+
+    let kernelSource = """
+    #include <metal_stdlib>
+    using namespace metal;
+    kernel void probe(device float *output [[buffer(0)]], uint index [[thread_position_in_grid]]) {
+        if (index == 0) {
+            output[0] = 42.0f;
+        }
+    }
+    """
+
+    do {
+        let library = try device.makeLibrary(source: kernelSource, options: nil)
+        guard let function = library.makeFunction(name: "probe") else {
+            throw NSError(domain: "MetalDoctor", code: 1, userInfo: [NSLocalizedDescriptionKey: "Failed to compile probe function"])
+        }
+        let pipeline = try device.makeComputePipelineState(function: function)
+        guard let queue = device.makeCommandQueue() else {
+            throw NSError(domain: "MetalDoctor", code: 2, userInfo: [NSLocalizedDescriptionKey: "Failed to create Metal command queue"])
+        }
+        guard let outputBuffer = device.makeBuffer(length: MemoryLayout<Float>.stride, options: [.storageModeShared]) else {
+            throw NSError(domain: "MetalDoctor", code: 3, userInfo: [NSLocalizedDescriptionKey: "Failed to allocate Metal probe buffer"])
+        }
+        guard let commandBuffer = queue.makeCommandBuffer(),
+              let encoder = commandBuffer.makeComputeCommandEncoder() else {
+            throw NSError(domain: "MetalDoctor", code: 4, userInfo: [NSLocalizedDescriptionKey: "Failed to create Metal command encoder"])
+        }
+
+        encoder.setComputePipelineState(pipeline)
+        encoder.setBuffer(outputBuffer, offset: 0, index: 0)
+        let gridSize = MTLSize(width: 1, height: 1, depth: 1)
+        let threadgroupSize = MTLSize(width: 1, height: 1, depth: 1)
+        encoder.dispatchThreads(gridSize, threadsPerThreadgroup: threadgroupSize)
+        encoder.endEncoding()
+
+        commandBuffer.commit()
+        commandBuffer.waitUntilCompleted()
+
+        if let commandError = commandBuffer.error {
+            throw commandError
+        }
+
+        let result = outputBuffer.contents().assumingMemoryBound(to: Float.self)[0]
+        guard abs(result - 42) < 0.001 else {
+            throw NSError(domain: "MetalDoctor", code: 5, userInfo: [NSLocalizedDescriptionKey: "Probe kernel returned \(result), expected 42"])
+        }
+
+        emit("metal_doctor compute_submission=ok result=\(result)")
+        return 0
+    } catch {
+        fputs("Metal doctor failed: \(error)\n", stderr)
+        return 1
+    }
+}
+
 private func seedPythonGlobals(_ seed: Int) {
-    pyRandom.seed(seed)
-    np.random.seed(seed)
+    let runtime = PythonRuntime.shared
+    runtime.random.seed(seed)
+    runtime.numpy.random.seed(seed)
 }
 
 private func seedSpace(_ space: PythonObject, seed: Int?) {
@@ -249,8 +409,9 @@ final class PyFlytEnv: PyEnv {
 
     init() {
         let baseSeed = configuredRunSeed()
-        _ = Python.import("PyFlyt.gym_envs")
-        env = gym.make("PyFlyt/QuadX-Hover-v0")
+        let runtime = PythonRuntime.shared
+        runtime.require(modules: ["PyFlyt.gym_envs", "gymnasium", "numpy"])
+        env = runtime.gym.make("PyFlyt/QuadX-Hover-v0")
         resetSeedSequence = ResetSeedSequence(baseSeed: baseSeed)
         if let baseSeed {
             seedPythonGlobals(baseSeed)
@@ -267,6 +428,7 @@ final class PyFlytEnv: PyEnv {
     }
 
     func step(_ action: [Float]) -> ([Float], Float, Bool) {
+        let np = PythonRuntime.shared.numpy
         let result = env.step(np.array(action))
         let obs = Array(result[0]).map { Float($0)! }
         let reward = Float(result[1])!
@@ -287,7 +449,9 @@ final class GymContinuousEnv: PyEnv {
 
     init(id: String) {
         let baseSeed = configuredRunSeed()
-        env = gym.make(id)
+        let runtime = PythonRuntime.shared
+        runtime.require(modules: ["gymnasium", "numpy"])
+        env = runtime.gym.make(id)
         resetSeedSequence = ResetSeedSequence(baseSeed: baseSeed)
         if let baseSeed {
             seedPythonGlobals(baseSeed)
@@ -316,11 +480,69 @@ final class GymContinuousEnv: PyEnv {
 
     func step(_ action: [Float]) -> ([Float], Float, Bool) {
         let safeAction = clampAction(action, low: actionLow, high: actionHigh)
+        let np = PythonRuntime.shared.numpy
         let result = env.step(np.array(safeAction, dtype: np.float32))
         let reward = sanitizeScalar(Float(result[1]) ?? 0)
         let terminated = Bool(result[2]) ?? false
         let truncated = Bool(result[3]) ?? false
         return (pythonFlatArray(result[0]), reward, terminated || truncated)
+    }
+}
+
+final class CoreSignalEnv: PyEnv {
+    private let rewardProjector: [Float]
+    private let driftKernel: [Float]
+    private let baseObservation: [Float]
+    private var observation: [Float]
+    let obsDim: Int
+    let actDim: Int
+
+    init() {
+        let environment = ProcessInfo.processInfo.environment
+        let processorScale = max(ProcessInfo.processInfo.activeProcessorCount, 1)
+        let resolvedObsDim = max(environment["OAK_CORE_OBS_DIM"].flatMap(Int.init) ?? (processorScale * processorScale), 1)
+        let resolvedActDim = max(environment["OAK_CORE_ACT_DIM"].flatMap(Int.init) ?? processorScale, 1)
+        obsDim = resolvedObsDim
+        actDim = resolvedActDim
+
+        let rng = deriveSeed(configuredRunSeed(environment: environment), salt: 0x4001).map(SeededRNG.init)
+        let projectorScale = Float(1 / sqrt(Double(max(resolvedObsDim, 1))))
+        let driftScale = Float(1 / sqrt(Double(max(resolvedActDim, 1))))
+        rewardProjector = (0..<resolvedObsDim).map { index in
+            let base = rng?.nextFloat(in: -projectorScale...projectorScale) ?? Float(index + 1) / Float(resolvedObsDim + 1)
+            return sanitizeScalar(base)
+        }
+        driftKernel = (0..<resolvedActDim).map { index in
+            let base = rng?.nextFloat(in: -driftScale...driftScale) ?? Float(index + 1) / Float(resolvedActDim + 1)
+            return sanitizeScalar(base, clamp: -1...1)
+        }
+        baseObservation = (0..<resolvedObsDim).map { index in
+            let phase = Float(index + 1) / Float(resolvedObsDim + 1)
+            return sin(phase * .pi)
+        }
+        observation = baseObservation
+    }
+
+    func reset() -> [Float] {
+        observation = baseObservation
+        return observation
+    }
+
+    func step(_ action: [Float]) -> ([Float], Float, Bool) {
+        let safeAction = sanitizeVector(action, count: actDim, clamp: -1...1)
+        let projectedAction = (0..<obsDim).map { rewardProjector[$0] * safeAction[$0 % actDim] }
+        let reward = zip(observation, projectedAction).reduce(Float(0)) { partial, pair in
+            partial + pair.0 * pair.1
+        } / Float(max(obsDim, 1))
+
+        var nextObservation = Array(repeating: Float(0), count: obsDim)
+        for index in 0..<obsDim {
+            let neighbor = observation[(index + 1) % obsDim]
+            let actionInfluence = driftKernel[index % actDim] * safeAction[index % actDim]
+            nextObservation[index] = sanitizeScalar(tanh(observation[index] + neighbor + actionInfluence + reward))
+        }
+        observation = nextObservation
+        return (observation, sanitizeScalar(reward), false)
     }
 }
 
@@ -339,8 +561,9 @@ final class DirectCARLAEnv: PyEnv {
     let actDim: Int
 
     init() {
-        _ = sys
-        let carla = Python.import("carla")
+        let runtime = PythonRuntime.shared
+        runtime.require(modules: ["carla", "numpy"])
+        let carla = runtime.module(named: "carla")
         client = carla.Client("localhost", 2000)
         client.set_timeout(10.0)
         world = client.get_world()
@@ -361,7 +584,9 @@ final class DirectCARLAEnv: PyEnv {
         if destroyedActors {
             world.tick()
         }
-        let carla = Python.import("carla")
+        let runtime = PythonRuntime.shared
+        let carla = runtime.module(named: "carla")
+        let np = runtime.numpy
         let blueprint = world.get_blueprint_library().find("vehicle.tesla.model3")
         blueprint.set_attribute("role_name", Self.vehicleRoleName)
         vehicle = spawnVehicle(with: blueprint)
@@ -398,7 +623,7 @@ final class DirectCARLAEnv: PyEnv {
             return (image, 0, true)
         }
         let safeAction = sanitizeVector(action, count: actDim, clamp: -1...1)
-        let carla = Python.import("carla")
+        let carla = PythonRuntime.shared.module(named: "carla")
         let control = carla.VehicleControl()
         control.steer = PythonObject(safeAction[0])
         control.throttle = PythonObject(max(0, safeAction[1]))
@@ -849,7 +1074,7 @@ final class CARLAEnv: PyEnv {
 
     init() {
         let environment = ProcessInfo.processInfo.environment
-        if environment["OAK_CARLA_BRIDGE"] != "1", (try? Python.attemptImport("carla")) != nil {
+        if environment["OAK_CARLA_BRIDGE"] != "1", PythonRuntime.shared.hasModule(named: "carla") {
             backend = DirectCARLAEnv()
         } else if let configuration = WhiskyCARLAConfiguration.resolve() {
             backend = WhiskyCARLAEnv(configuration: configuration)
@@ -878,7 +1103,9 @@ final class DMControlEnv: PyEnv {
     let actDim: Int
 
     init(domain: String, task: String) {
-        let suite = Python.import("dm_control.suite")
+        let runtime = PythonRuntime.shared
+        runtime.require(modules: ["dm_control.suite", "numpy", "random"])
+        let suite = runtime.module(named: "dm_control.suite")
         let baseSeed = configuredRunSeed()
         if let baseSeed {
             seedPythonGlobals(baseSeed)
@@ -908,6 +1135,7 @@ final class DMControlEnv: PyEnv {
 
     func step(_ action: [Float]) -> ([Float], Float, Bool) {
         let safeAction = clampAction(action, low: actionLow, high: actionHigh)
+        let np = PythonRuntime.shared.numpy
         let timeStep = env.step(np.array(safeAction, dtype: np.float32))
         let reward = timeStep.reward
         let rewardValue = sanitizeScalar(Float(reward) ?? 0)
@@ -932,8 +1160,9 @@ final class MiniGridEnv: PyEnv {
 
     init(id: String = "MiniGrid-Empty-8x8-v0") {
         let baseSeed = configuredRunSeed()
-        _ = Python.import("minigrid")
-        env = gym.make(id)
+        let runtime = PythonRuntime.shared
+        runtime.require(modules: ["minigrid", "gymnasium", "numpy"])
+        env = runtime.gym.make(id)
         resetSeedSequence = ResetSeedSequence(baseSeed: baseSeed)
         if let baseSeed {
             seedPythonGlobals(baseSeed)
@@ -973,416 +1202,30 @@ final class MiniGridEnv: PyEnv {
     }
 }
 
-private protocol OaKEngine {
-    var backendName: String { get }
-    func step(obs: [Float], reward: Float) -> AgentStepResult
-}
-
 private protocol PolicyRunner {
     var policyName: String { get }
     var backendName: String { get }
-    func step(obs: [Float], reward: Float) -> AgentStepResult
-}
-
-private final class CPUOaKEngine: OaKEngine {
-    private let obsDim: Int
-    private let actDim: Int
-    private let stateDim: Int
-    private let inputDim: Int
-    private var perceptionW: [Float]
-    private var policyW: [Float]
-    private var valueTheta: [Float]
-    private var valueRho: Float
-    private var valueWealth: Float
-    private var valueGSum: Float
-    private var lastState: [Float]
-    private var lastAction: [Float]
-    let backendName = "cpu"
-
-    init(obsDim: Int, actDim: Int, seed: Int? = nil) {
-        self.obsDim = obsDim
-        self.actDim = actDim
-        stateDim = obsDim
-        inputDim = obsDim + actDim
-
-        let perceptionSize = stateDim * inputDim
-        let perceptionScale = 1 / sqrt(Float(max(inputDim, 1)))
-        let perceptionRNG = deriveSeed(seed, salt: 0x1001).map(SeededRNG.init)
-        perceptionW = (0..<perceptionSize).map { _ in seededFloat(in: -perceptionScale...perceptionScale, rng: perceptionRNG) }
-
-        let policySize = actDim * stateDim
-        let policyScale = 1 / sqrt(Float(max(stateDim, 1)))
-        let policyRNG = deriveSeed(seed, salt: 0x1002).map(SeededRNG.init)
-        policyW = (0..<policySize).map { _ in seededFloat(in: -policyScale...policyScale, rng: policyRNG) }
-
-        valueTheta = Array(repeating: 0, count: stateDim)
-        valueRho = 0
-        valueWealth = 1
-        valueGSum = 0
-        lastState = Array(repeating: 0, count: stateDim)
-        lastAction = Array(repeating: 0, count: actDim)
-    }
-
-    func step(obs: [Float], reward: Float) -> AgentStepResult {
-        let stepStart = currentTimeMilliseconds()
-        let safeObs = sanitizeVector(obs, count: obsDim)
-        let input = safeObs + sanitizeVector(lastAction, count: actDim, clamp: -1...1)
-        var state = Array(repeating: Float(0), count: stateDim)
-
-        for row in 0..<stateDim {
-            var sum: Float = 0
-            let base = row * inputDim
-            for column in 0..<inputDim {
-                sum += perceptionW[base + column] * input[column]
-            }
-            state[row] = Float(tanh(Double(sum)))
-        }
-
-        let value = dot(valueTheta, lastState)
-        let nextValue = dot(valueTheta, state)
-        let delta = reward - valueRho + nextValue - value
-        valueRho += delta / (1 + abs(delta))
-
-        for index in 0..<stateDim {
-            let grad = delta * lastState[index]
-            valueGSum += abs(grad)
-            let eta = valueWealth / (valueGSum + Float.ulpOfOne)
-            valueTheta[index] += grad * eta
-            if index == 0 {
-                valueWealth += -grad * valueTheta[index] * eta
-            }
-        }
-
-        var action = Array(repeating: Float(0), count: actDim)
-        for row in 0..<actDim {
-            var sum: Float = 0
-            let base = row * stateDim
-            for column in 0..<stateDim {
-                sum += policyW[base + column] * state[column]
-            }
-            action[row] = Float(tanh(Double(sum)))
-        }
-
-        normalizePerceptionRows()
-        lastState = state
-        lastAction = action
-        let telemetry = AgentTelemetry(
-            rewardInput: reward,
-            obs: safeObs,
-            state: state,
-            action: action,
-            agentStepMs: currentTimeMilliseconds() - stepStart,
-            backend: backendName
-        )
-        return AgentStepResult(action: action, telemetry: telemetry)
-    }
-
-    private func dot(_ lhs: [Float], _ rhs: [Float]) -> Float {
-        var sum: Float = 0
-        for index in 0..<min(lhs.count, rhs.count) {
-            sum += lhs[index] * rhs[index]
-        }
-        return sum
-    }
-
-    private func normalizePerceptionRows() {
-        guard inputDim > 0 else {
-            return
-        }
-
-        for row in 0..<stateDim {
-            let base = row * inputDim
-            var norm: Float = 0
-            for column in 0..<inputDim {
-                let weight = perceptionW[base + column]
-                norm += weight * weight
-            }
-
-            norm = sqrt(norm)
-            guard norm.isFinite, norm > Float.ulpOfOne else {
-                continue
-            }
-
-            let inverseNorm = 1 / norm
-            for column in 0..<inputDim {
-                perceptionW[base + column] *= inverseNorm
-            }
-        }
-    }
-}
-
-private final class MetalOaKEngine: OaKEngine {
-    private let device: MTLDevice
-    private let queue: MTLCommandQueue
-    private let pipelines: [String: MTLComputePipelineState]
-    private var perceptionW: MTLBuffer
-    private var perceptionAlpha: MTLBuffer
-    private var policyW: MTLBuffer
-    private var valueTheta: MTLBuffer
-    private var valueRho: MTLBuffer
-    private var valueWealth: MTLBuffer
-    private var valueGSum: MTLBuffer
-    private var modelW: MTLBuffer
-    private var modelProj: MTLBuffer
-    private let obsDim: Int
-    private let actDim: Int
-    private let stateDim: Int
-    private let profileEnabled: Bool
-    private var lastState: [Float]
-    private var lastAction: [Float]
-    private var stepCount: Int
-    let backendName = "metal"
-
-    init(obsDim: Int, actDim: Int, device: MTLDevice, seed: Int? = nil) {
-        self.obsDim = obsDim
-        self.actDim = actDim
-        self.stateDim = obsDim
-        self.profileEnabled = ProcessInfo.processInfo.environment["OAK_PROFILE_METAL"] == "1"
-        self.stepCount = 0
-
-        self.device = device
-        queue = device.makeCommandQueue()!
-        let kernelsURL = Bundle.module.url(forResource: "Kernels", withExtension: "metal")!
-        let kernelsSource = try! String(contentsOf: kernelsURL, encoding: .utf8)
-        let library = try! device.makeLibrary(source: kernelsSource, options: nil)
-
-        pipelines = [
-            "fire": try! device.makeComputePipelineState(function: library.makeFunction(name: "fire")!),
-            "perception_forward": try! device.makeComputePipelineState(function: library.makeFunction(name: "perception_forward")!),
-            "perception_update": try! device.makeComputePipelineState(function: library.makeFunction(name: "perception_update")!),
-            "value_update": try! device.makeComputePipelineState(function: library.makeFunction(name: "value_update")!),
-            "policy_act": try! device.makeComputePipelineState(function: library.makeFunction(name: "policy_act")!),
-            "policy_update": try! device.makeComputePipelineState(function: library.makeFunction(name: "policy_update")!),
-            "model_predict": try! device.makeComputePipelineState(function: library.makeFunction(name: "model_predict")!),
-            "model_update": try! device.makeComputePipelineState(function: library.makeFunction(name: "model_update")!),
-        ]
-
-        let perceptionSize = stateDim * (obsDim + actDim)
-        perceptionW = device.makeBuffer(length: perceptionSize * 4, options:.storageModeShared)!
-        perceptionAlpha = device.makeBuffer(length: perceptionSize * 4, options:.storageModeShared)!
-        let perceptionPtr = perceptionW.contents().bindMemory(to: Float.self, capacity: perceptionSize)
-        let alphaPtr = perceptionAlpha.contents().bindMemory(to: Float.self, capacity: perceptionSize)
-        let perceptionScale = 1 / sqrt(Float(obsDim + actDim))
-        let perceptionRNG = deriveSeed(seed, salt: 0x2001).map(SeededRNG.init)
-        for i in 0..<perceptionSize {
-            perceptionPtr[i] = seededFloat(in: -perceptionScale...perceptionScale, rng: perceptionRNG)
-            alphaPtr[i] = 1 / Float(perceptionSize)
-        }
-
-        let policySize = actDim * stateDim
-        policyW = device.makeBuffer(length: policySize * 4, options:.storageModeShared)!
-        let policyPtr = policyW.contents().bindMemory(to: Float.self, capacity: policySize)
-        let policyScale = 1 / sqrt(Float(stateDim))
-        let policyRNG = deriveSeed(seed, salt: 0x2002).map(SeededRNG.init)
-        for i in 0..<policySize {
-            policyPtr[i] = seededFloat(in: -policyScale...policyScale, rng: policyRNG)
-        }
-
-        valueTheta = device.makeBuffer(length: stateDim * 4, options:.storageModeShared)!
-        valueRho = device.makeBuffer(length: 4, options:.storageModeShared)!
-        valueWealth = device.makeBuffer(length: 4, options:.storageModeShared)!
-        valueGSum = device.makeBuffer(length: 4, options:.storageModeShared)!
-        zeroBuffer(valueTheta)
-        zeroBuffer(valueRho)
-        zeroBuffer(valueWealth)
-        zeroBuffer(valueGSum)
-        valueWealth.contents().bindMemory(to: Float.self, capacity: 1)[0] = 1
-
-        let initialPdim = 1
-        modelW = device.makeBuffer(length: stateDim * initialPdim * 4, options:.storageModeShared)!
-        modelProj = device.makeBuffer(length: (stateDim + actDim) * initialPdim * 4, options:.storageModeShared)!
-        let modelPtr = modelW.contents().bindMemory(to: Float.self, capacity: stateDim * initialPdim)
-        let projPtr = modelProj.contents().bindMemory(to: Float.self, capacity: (stateDim + actDim) * initialPdim)
-        let modelScale = 1 / sqrt(Float(initialPdim))
-        let modelRNG = deriveSeed(seed, salt: 0x2003).map(SeededRNG.init)
-        for i in 0..<(stateDim * initialPdim) {
-            modelPtr[i] = seededFloat(in: -modelScale...modelScale, rng: modelRNG)
-        }
-        let projScale = 1 / sqrt(Float(initialPdim))
-        let projRNG = deriveSeed(seed, salt: 0x2004).map(SeededRNG.init)
-        for i in 0..<((stateDim + actDim) * initialPdim) {
-            projPtr[i] = seededFloat(in: -projScale...projScale, rng: projRNG)
-        }
-
-        lastState = Array(repeating: 0, count: stateDim)
-        lastAction = Array(repeating: 0, count: actDim)
-    }
-
-    func step(obs: [Float], reward: Float) -> AgentStepResult {
-        let stepStart = currentTimeMilliseconds()
-        stepCount += 1
-        let safeObs = sanitizeVector(obs, count: obsDim)
-        let input = safeObs + sanitizeVector(lastAction, count: actDim, clamp: -1...1)
-        if profileEnabled {
-            logWarning("Metal profile step \(stepCount): obsDim=\(obsDim) actDim=\(actDim) inputDim=\(input.count)")
-        }
-        let inputBuf = device.makeBuffer(bytes: input, length: input.count * 4, options:.storageModeShared)!
-        let stateBuf = device.makeBuffer(length: stateDim * 4, options:.storageModeShared)!
-        zeroBuffer(stateBuf)
-        let cmd1 = queue.makeCommandBuffer()!
-        let enc1 = cmd1.makeComputeCommandEncoder()!
-        enc1.setComputePipelineState(pipelines["perception_forward"]!)
-        enc1.setBuffer(perceptionW, offset: 0, index: 0)
-        enc1.setBuffer(inputBuf, offset: 0, index: 1)
-        enc1.setBuffer(stateBuf, offset: 0, index: 2)
-        var outDim = UInt32(stateDim)
-        var inDim = UInt32(input.count)
-        enc1.setBytes(&outDim, length: 4, index: 3)
-        enc1.setBytes(&inDim, length: 4, index: 4)
-        let threadsPerGroup = min(stateDim, 256)
-        enc1.dispatchThreads(MTLSize(width: stateDim, height: 1, depth: 1), threadsPerThreadgroup: MTLSize(width: threadsPerGroup, height: 1, depth: 1))
-        enc1.endEncoding()
-        let cmd1Start = currentTimeMilliseconds()
-        if profileEnabled {
-            logWarning("Metal cmd1 perception_forward start")
-        }
-        cmd1.commit()
-        cmd1.waitUntilCompleted()
-        let cmd1Ms = currentTimeMilliseconds() - cmd1Start
-        if profileEnabled {
-            logWarning(String(format: "Metal cmd1 perception_forward finished in %.2f ms", cmd1Ms))
-        }
-        let statePtr = stateBuf.contents().bindMemory(to: Float.self, capacity: stateDim)
-        let state = sanitizeVector(Array(UnsafeBufferPointer(start: statePtr, count: stateDim)), count: stateDim)
-
-        let sBuf = device.makeBuffer(bytes: lastState, length: lastState.count * 4, options:.storageModeShared)!
-        let sNextBuf = device.makeBuffer(bytes: state, length: state.count * 4, options:.storageModeShared)!
-        let rewardBuf = device.makeBuffer(bytes: [reward], length: 4, options:.storageModeShared)!
-        let cmd2 = queue.makeCommandBuffer()!
-        let enc2 = cmd2.makeComputeCommandEncoder()!
-        enc2.setComputePipelineState(pipelines["value_update"]!)
-        enc2.setBuffer(valueTheta, offset: 0, index: 0)
-        enc2.setBuffer(sBuf, offset: 0, index: 1)
-        enc2.setBuffer(sNextBuf, offset: 0, index: 2)
-        enc2.setBuffer(valueRho, offset: 0, index: 3)
-        enc2.setBuffer(valueWealth, offset: 0, index: 4)
-        enc2.setBuffer(valueGSum, offset: 0, index: 5)
-        enc2.setBuffer(rewardBuf, offset: 0, index: 6)
-        var dim = UInt32(stateDim)
-        enc2.setBytes(&dim, length: 4, index: 7)
-        enc2.dispatchThreads(MTLSize(width: stateDim, height: 1, depth: 1), threadsPerThreadgroup: MTLSize(width: threadsPerGroup, height: 1, depth: 1))
-        enc2.endEncoding()
-        let cmd2Start = currentTimeMilliseconds()
-        if profileEnabled {
-            logWarning("Metal cmd2 value_update start")
-        }
-        cmd2.commit()
-        cmd2.waitUntilCompleted()
-        let cmd2Ms = currentTimeMilliseconds() - cmd2Start
-        if profileEnabled {
-            logWarning(String(format: "Metal cmd2 value_update finished in %.2f ms", cmd2Ms))
-        }
-
-        let actionBuf = device.makeBuffer(length: actDim * 4, options:.storageModeShared)!
-        zeroBuffer(actionBuf)
-        let cmd3 = queue.makeCommandBuffer()!
-        let enc3 = cmd3.makeComputeCommandEncoder()!
-        enc3.setComputePipelineState(pipelines["policy_act"]!)
-        enc3.setBuffer(policyW, offset: 0, index: 0)
-        enc3.setBuffer(stateBuf, offset: 0, index: 1)
-        enc3.setBuffer(actionBuf, offset: 0, index: 2)
-        var aDim = UInt32(actDim)
-        var sDim = UInt32(stateDim)
-        enc3.setBytes(&aDim, length: 4, index: 3)
-        enc3.setBytes(&sDim, length: 4, index: 4)
-        let policyThreads = min(actDim, 256)
-        enc3.dispatchThreads(MTLSize(width: actDim, height: 1, depth: 1), threadsPerThreadgroup: MTLSize(width: policyThreads, height: 1, depth: 1))
-        enc3.endEncoding()
-        let cmd3Start = currentTimeMilliseconds()
-        if profileEnabled {
-            logWarning("Metal cmd3 policy_act start")
-        }
-        cmd3.commit()
-        cmd3.waitUntilCompleted()
-        let cmd3Ms = currentTimeMilliseconds() - cmd3Start
-        if profileEnabled {
-            logWarning(String(format: "Metal cmd3 policy_act finished in %.2f ms", cmd3Ms))
-        }
-        let actionPtr = actionBuf.contents().bindMemory(to: Float.self, capacity: actDim)
-        let action = sanitizeVector(Array(UnsafeBufferPointer(start: actionPtr, count: actDim)), count: actDim, clamp: -1...1)
-
-        let phiBuf = device.makeBuffer(length: 1 * 4, options:.storageModeShared)!
-        zeroBuffer(phiBuf)
-        let errBuf = device.makeBuffer(length: stateDim * 4, options:.storageModeShared)!
-        let errPtr = errBuf.contents().bindMemory(to: Float.self, capacity: stateDim)
-        for i in 0..<stateDim {
-            errPtr[i] = state[i] - lastState[i]
-        }
-
-        let cmd4 = queue.makeCommandBuffer()!
-        let enc4 = cmd4.makeComputeCommandEncoder()!
-        enc4.setComputePipelineState(pipelines["model_update"]!)
-        enc4.setBuffer(modelW, offset: 0, index: 0)
-        enc4.setBuffer(phiBuf, offset: 0, index: 1)
-        enc4.setBuffer(errBuf, offset: 0, index: 2)
-        enc4.setBytes(&sDim, length: 4, index: 3)
-        var pDim = UInt32(1)
-        enc4.setBytes(&pDim, length: 4, index: 4)
-        enc4.dispatchThreads(MTLSize(width: stateDim, height: 1, depth: 1), threadsPerThreadgroup: MTLSize(width: 1, height: 1, depth: 1))
-        enc4.endEncoding()
-        let cmd4Start = currentTimeMilliseconds()
-        if profileEnabled {
-            logWarning("Metal cmd4 model_update start")
-        }
-        cmd4.commit()
-        cmd4.waitUntilCompleted()
-        let cmd4Ms = currentTimeMilliseconds() - cmd4Start
-        if profileEnabled {
-            logWarning(String(format: "Metal cmd4 model_update finished in %.2f ms", cmd4Ms))
-        }
-
-        let cmd5 = queue.makeCommandBuffer()!
-        let enc5 = cmd5.makeComputeCommandEncoder()!
-        enc5.setComputePipelineState(pipelines["fire"]!)
-        enc5.setBuffer(perceptionW, offset: 0, index: 0)
-        var n = UInt32(stateDim)
-        var d = UInt32(obsDim + actDim)
-        enc5.setBytes(&n, length: 4, index: 1)
-        enc5.setBytes(&d, length: 4, index: 2)
-        let fireThreads = MTLSize(width: min(Int(n), 16), height: min(Int(d), 16), depth: 1)
-        enc5.dispatchThreads(MTLSize(width: Int(n), height: Int(d), depth: 1), threadsPerThreadgroup: fireThreads)
-        enc5.endEncoding()
-        let cmd5Start = currentTimeMilliseconds()
-        if profileEnabled {
-            logWarning("Metal cmd5 fire start")
-        }
-        cmd5.commit()
-        cmd5.waitUntilCompleted()
-        let cmd5Ms = currentTimeMilliseconds() - cmd5Start
-        if profileEnabled {
-            logWarning(String(format: "Metal cmd5 fire finished in %.2f ms", cmd5Ms))
-        }
-
-        lastState = state
-        lastAction = action
-        let telemetry = AgentTelemetry(
-            rewardInput: reward,
-            obs: safeObs,
-            state: state,
-            action: action,
-            agentStepMs: currentTimeMilliseconds() - stepStart,
-            backend: backendName,
-            metalTimings: MetalCommandTimings(
-                cmd1Ms: cmd1Ms,
-                cmd2Ms: cmd2Ms,
-                cmd3Ms: cmd3Ms,
-                cmd4Ms: cmd4Ms,
-                cmd5Ms: cmd5Ms
-            )
-        )
-        return AgentStepResult(action: action, telemetry: telemetry)
-    }
+    func step(obs: [Float], reward: Float, wallClockBudgetNs: UInt64) -> AgentStepResult
 }
 
 final class OaK: PolicyRunner {
-    private let engine: any OaKEngine
+    private let obsDim: Int
+    private let actDim: Int
+    private let core: any ForegroundCore
+    private var lastAction: [Float]
 
     init(obsDim: Int, actDim: Int, seed: Int? = configuredRunSeed()) {
-        if let device = MTLCreateSystemDefaultDevice() {
-            engine = MetalOaKEngine(obsDim: obsDim, actDim: actDim, device: device, seed: seed)
+        let resolvedDevice = MTLCreateSystemDefaultDevice()
+            ?? MTLCopyAllDevices().first(where: { !$0.isHeadless })
+            ?? MTLCopyAllDevices().first
+        self.obsDim = obsDim
+        self.actDim = actDim
+        lastAction = Array(repeating: 0, count: actDim)
+        if let device = resolvedDevice {
+            core = MetalForegroundCore(obsDim: obsDim, actDim: actDim, device: device, seed: seed)
         } else if ProcessInfo.processInfo.environment["OAK_ALLOW_CPU_FALLBACK"] == "1" {
             logWarning("Metal is unavailable in this runtime; using the CPU OaK backend because OAK_ALLOW_CPU_FALLBACK=1.")
-            engine = CPUOaKEngine(obsDim: obsDim, actDim: actDim, seed: seed)
+            core = CPUForegroundCore(obsDim: obsDim, actDim: actDim, seed: seed)
         } else {
             fatalError("Metal device unavailable. OaK requires Metal in normal runs.")
         }
@@ -1393,11 +1236,18 @@ final class OaK: PolicyRunner {
     }
 
     var backendName: String {
-        engine.backendName
+        core.backendName
     }
 
-    func step(obs: [Float], reward: Float) -> AgentStepResult {
-        engine.step(obs: obs, reward: reward)
+    func step(obs: [Float], reward: Float, wallClockBudgetNs: UInt64) -> AgentStepResult {
+        let output = core.step(input: StepInput(
+            obs: sanitizeVector(obs, count: obsDim),
+            prevAction: sanitizeVector(lastAction, count: actDim, clamp: -1...1),
+            prevReward: reward,
+            wallClockBudgetNs: wallClockBudgetNs
+        ))
+        lastAction = output.action
+        return AgentStepResult(action: output.action, telemetry: output.telemetry)
     }
 }
 
@@ -1413,7 +1263,7 @@ private final class RandomPolicyRunner: PolicyRunner {
         rng = deriveSeed(seed, salt: 0x3001).map(SeededRNG.init)
     }
 
-    func step(obs: [Float], reward: Float) -> AgentStepResult {
+    func step(obs: [Float], reward: Float, wallClockBudgetNs _: UInt64) -> AgentStepResult {
         let stepStart = currentTimeMilliseconds()
         let safeObs = sanitizeVector(obs)
         let action = (0..<actDim).map { _ in seededFloat(in: -1...1, rng: rng) }
@@ -1429,8 +1279,14 @@ private final class RandomPolicyRunner: PolicyRunner {
 
 @main struct Main {
     static func main() {
+        let cliArguments = Array(CommandLine.arguments.dropFirst())
+        if let command = cliArguments.first, command == "doctor-metal" {
+            Foundation.exit(runMetalDoctor(arguments: cliArguments.dropFirst()))
+        }
+
         print("OaK - Alberta Plan")
         let availableEnvs: [(String, () -> PyEnv)] = [
+            ("core", { CoreSignalEnv() }),
             ("pyflyt", { PyFlytEnv() }),
             ("carla", { CARLAEnv() }),
             ("cheetah", { DMControlEnv(domain: "cheetah", task: "run") }),
@@ -1440,10 +1296,11 @@ private final class RandomPolicyRunner: PolicyRunner {
         ]
 
         let requestedEnv = ProcessInfo.processInfo.environment["OAK_ENV"]
-            ?? CommandLine.arguments.dropFirst().first
+            ?? cliArguments.first
             ?? "all"
         let requestedPolicy = (ProcessInfo.processInfo.environment["OAK_POLICY"] ?? "oak").lowercased()
         let runSeed = configuredRunSeed()
+        let configuredBudgetNs = configuredStepBudgetNs()
         let runControl = RunControl.resolve()
         let maxEnvironmentSteps = ProcessInfo.processInfo.environment["OAK_MAX_STEPS"].flatMap(Int.init)
         let envsToRun = requestedEnv == "all"
@@ -1497,6 +1354,7 @@ private final class RandomPolicyRunner: PolicyRunner {
             var measuredSeconds = 0.0
             var measurementStartMs: Double?
             var stopReason = "completed"
+            var adaptiveBudgetNs: UInt64 = configuredBudgetNs ?? 1
             defer {
                 let finalRecord = metrics.runEndRecord(
                     control: runControl,
@@ -1525,7 +1383,7 @@ private final class RandomPolicyRunner: PolicyRunner {
                         print("[metrics] warmup_complete env=\(name) policy=\(runner.policyName) warmup_steps=\(runControl.warmupSteps)")
                     }
                 }
-                let agentResult = runner.step(obs: obs, reward: pendingReward)
+                let agentResult = runner.step(obs: obs, reward: pendingReward, wallClockBudgetNs: adaptiveBudgetNs)
                 if carlaDebugEnabled {
                     logWarning("Stepping environment \(name) step \(nextEnvironmentStep)")
                 }
@@ -1533,6 +1391,9 @@ private final class RandomPolicyRunner: PolicyRunner {
                 let result = env.step(agentResult.action)
                 let envStepMs = currentTimeMilliseconds() - envStepStart
                 let totalStepMs = currentTimeMilliseconds() - totalStepStart
+                if configuredBudgetNs == nil {
+                    adaptiveBudgetNs = max(UInt64(totalStepMs * 1_000_000), 1)
+                }
                 totalEnvironmentSteps = nextEnvironmentStep
                 var shouldStop = false
                 if isMeasuredStep {

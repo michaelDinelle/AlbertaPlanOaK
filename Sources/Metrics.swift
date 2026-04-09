@@ -6,6 +6,10 @@ struct AgentStepResult {
     let telemetry: AgentTelemetry
 }
 
+private func metricsFinite(_ value: Double, default defaultValue: Double = 0) -> Double {
+    value.isFinite ? value : defaultValue
+}
+
 struct AgentTelemetry: Equatable {
     let rewardInput: Double
     let obsMean: Double
@@ -21,6 +25,12 @@ struct AgentTelemetry: Equatable {
     let stateL2: Double
     let agentStepMs: Double
     let backend: String
+    let plannerStepMs: Double
+    let computeBudgetNs: Double
+    let activeRank: Int
+    let activeGVFs: Int
+    let activeOptions: Int
+    let snapshotToken: Int
     let cmd1Ms: Double?
     let cmd2Ms: Double?
     let cmd3Ms: Double?
@@ -34,13 +44,19 @@ struct AgentTelemetry: Equatable {
         action: [Float],
         agentStepMs: Double,
         backend: String,
-        metalTimings: MetalCommandTimings? = nil
+        metalTimings: MetalCommandTimings? = nil,
+        plannerStepMs: Double = 0,
+        computeBudgetNs: UInt64 = 0,
+        activeRank: Int = 0,
+        activeGVFs: Int = 0,
+        activeOptions: Int = 0,
+        snapshotToken: Int = 0
     ) {
         let obsStats = VectorSummary(obs)
         let actionStats = VectorSummary(action)
         let stateStats = VectorSummary(state)
 
-        self.rewardInput = Double(rewardInput)
+        self.rewardInput = metricsFinite(Double(rewardInput))
         obsMean = obsStats.mean
         obsStd = obsStats.std
         obsL2 = obsStats.l2
@@ -52,8 +68,14 @@ struct AgentTelemetry: Equatable {
         stateMean = stateStats.mean
         stateStd = stateStats.std
         stateL2 = stateStats.l2
-        self.agentStepMs = agentStepMs
+        self.agentStepMs = metricsFinite(agentStepMs)
         self.backend = backend
+        self.plannerStepMs = metricsFinite(plannerStepMs)
+        self.computeBudgetNs = metricsFinite(Double(computeBudgetNs))
+        self.activeRank = activeRank
+        self.activeGVFs = activeGVFs
+        self.activeOptions = activeOptions
+        self.snapshotToken = snapshotToken
         cmd1Ms = metalTimings?.cmd1Ms
         cmd2Ms = metalTimings?.cmd2Ms
         cmd3Ms = metalTimings?.cmd3Ms
@@ -68,7 +90,13 @@ struct AgentTelemetry: Equatable {
             state: [],
             action: action,
             agentStepMs: agentStepMs,
-            backend: "random"
+            backend: "random",
+            plannerStepMs: 0,
+            computeBudgetNs: 0,
+            activeRank: 0,
+            activeGVFs: 0,
+            activeOptions: 0,
+            snapshotToken: 0
         )
     }
 }
@@ -94,6 +122,10 @@ struct RollingWindowStats: Equatable {
     private var totalStepMsSum = 0.0
     private var actionL2Sum = 0.0
     private var stateL2Sum = 0.0
+    private var plannerStepMsSum = 0.0
+    private var activeRankSum = 0.0
+    private var activeGVFsSum = 0.0
+    private var activeOptionsSum = 0.0
 
     mutating func record(step: Int, reward: Double, done: Bool, resetDelta: Int, telemetry: AgentTelemetry, envStepMs: Double, totalStepMs: Double) {
         if count == 0 {
@@ -102,15 +134,20 @@ struct RollingWindowStats: Equatable {
 
         count += 1
         endStep = step
-        rewardSum += reward
-        rewardSquaredSum += reward * reward
+        let safeReward = metricsFinite(reward)
+        rewardSum += safeReward
+        rewardSquaredSum += safeReward * safeReward
         doneCount += done ? 1 : 0
         resetCount += resetDelta
-        agentStepMsSum += telemetry.agentStepMs
-        envStepMsSum += envStepMs
-        totalStepMsSum += totalStepMs
-        actionL2Sum += telemetry.actionL2
-        stateL2Sum += telemetry.stateL2
+        agentStepMsSum += metricsFinite(telemetry.agentStepMs)
+        envStepMsSum += metricsFinite(envStepMs)
+        totalStepMsSum += metricsFinite(totalStepMs)
+        actionL2Sum += metricsFinite(telemetry.actionL2)
+        stateL2Sum += metricsFinite(telemetry.stateL2)
+        plannerStepMsSum += metricsFinite(telemetry.plannerStepMs)
+        activeRankSum += metricsFinite(Double(telemetry.activeRank))
+        activeGVFsSum += metricsFinite(Double(telemetry.activeGVFs))
+        activeOptionsSum += metricsFinite(Double(telemetry.activeOptions))
     }
 
     var rewardMean: Double {
@@ -152,6 +189,22 @@ struct RollingWindowStats: Equatable {
 
     var stateL2Mean: Double {
         count > 0 ? stateL2Sum / Double(count) : 0
+    }
+
+    var plannerStepMsMean: Double {
+        count > 0 ? plannerStepMsSum / Double(count) : 0
+    }
+
+    var activeRankMean: Double {
+        count > 0 ? activeRankSum / Double(count) : 0
+    }
+
+    var activeGVFsMean: Double {
+        count > 0 ? activeGVFsSum / Double(count) : 0
+    }
+
+    var activeOptionsMean: Double {
+        count > 0 ? activeOptionsSum / Double(count) : 0
     }
 
     var rewardTotal: Double {
@@ -413,6 +466,16 @@ struct MetricsRecord: Codable {
     let totalStepMsMean: Double?
     let actionL2Mean: Double?
     let stateL2Mean: Double?
+    let plannerStepMs: Double?
+    let computeBudgetNs: Double?
+    let activeRank: Int?
+    let activeGVFs: Int?
+    let activeOptions: Int?
+    let snapshotToken: Int?
+    let plannerStepMsMean: Double?
+    let activeRankMean: Double?
+    let activeGVFsMean: Double?
+    let activeOptionsMean: Double?
 
     init(
         type: String,
@@ -463,7 +526,17 @@ struct MetricsRecord: Codable {
         envStepMsMean: Double? = nil,
         totalStepMsMean: Double? = nil,
         actionL2Mean: Double? = nil,
-        stateL2Mean: Double? = nil
+        stateL2Mean: Double? = nil,
+        plannerStepMs: Double? = nil,
+        computeBudgetNs: Double? = nil,
+        activeRank: Int? = nil,
+        activeGVFs: Int? = nil,
+        activeOptions: Int? = nil,
+        snapshotToken: Int? = nil,
+        plannerStepMsMean: Double? = nil,
+        activeRankMean: Double? = nil,
+        activeGVFsMean: Double? = nil,
+        activeOptionsMean: Double? = nil
     ) {
         self.type = type
         self.timestamp = timestamp
@@ -514,6 +587,16 @@ struct MetricsRecord: Codable {
         self.totalStepMsMean = totalStepMsMean
         self.actionL2Mean = actionL2Mean
         self.stateL2Mean = stateL2Mean
+        self.plannerStepMs = plannerStepMs
+        self.computeBudgetNs = computeBudgetNs
+        self.activeRank = activeRank
+        self.activeGVFs = activeGVFs
+        self.activeOptions = activeOptions
+        self.snapshotToken = snapshotToken
+        self.plannerStepMsMean = plannerStepMsMean
+        self.activeRankMean = activeRankMean
+        self.activeGVFsMean = activeGVFsMean
+        self.activeOptionsMean = activeOptionsMean
     }
 
     static func stepRecord(
@@ -562,7 +645,13 @@ struct MetricsRecord: Codable {
             cmd4Ms: telemetry.cmd4Ms,
             cmd5Ms: telemetry.cmd5Ms,
             envStepMs: envStepMs,
-            totalStepMs: totalStepMs
+            totalStepMs: totalStepMs,
+            plannerStepMs: telemetry.plannerStepMs,
+            computeBudgetNs: telemetry.computeBudgetNs,
+            activeRank: telemetry.activeRank,
+            activeGVFs: telemetry.activeGVFs,
+            activeOptions: telemetry.activeOptions,
+            snapshotToken: telemetry.snapshotToken
         )
     }
 
@@ -610,7 +699,11 @@ struct MetricsRecord: Codable {
             envStepMsMean: stats.envStepMsMean,
             totalStepMsMean: stats.totalStepMsMean,
             actionL2Mean: stats.actionL2Mean,
-            stateL2Mean: stats.stateL2Mean
+            stateL2Mean: stats.stateL2Mean,
+            plannerStepMsMean: stats.plannerStepMsMean,
+            activeRankMean: stats.activeRankMean,
+            activeGVFsMean: stats.activeGVFsMean,
+            activeOptionsMean: stats.activeOptionsMean
         )
     }
 }
@@ -711,7 +804,7 @@ private struct VectorSummary: Equatable {
         var maxValue = Double(values[0])
 
         for value in values {
-            let numericValue = Double(value)
+            let numericValue = metricsFinite(Double(value))
             sum += numericValue
             sumSquares += numericValue * numericValue
             minValue = Swift.min(minValue, numericValue)

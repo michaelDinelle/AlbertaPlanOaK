@@ -2,8 +2,8 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "$0")" && pwd)"
-DEFAULT_ENVS=(pyflyt cheetah walker humanoid minigrid)
-VALID_ENVS=(pyflyt carla cheetah walker humanoid minigrid)
+DEFAULT_ENVS=(core pyflyt cheetah walker humanoid minigrid)
+VALID_ENVS=(core pyflyt carla cheetah walker humanoid minigrid)
 POLICIES=(oak random)
 MODE="${OAK_BENCH_MODE:-quality}"
 SEED_START="${OAK_BENCH_SEED_START:-0}"
@@ -22,7 +22,7 @@ Usage: ./benchmark.sh [env ...]
 Runs seeded OaK-vs-random benchmarks and writes artifacts to .oak-benchmarks/.
 
 Defaults:
-  envs: pyflyt cheetah walker humanoid minigrid
+  envs: core pyflyt cheetah walker humanoid minigrid
   mode: quality
   seeds: 0..9
 
@@ -35,11 +35,6 @@ Environment variables:
   OAK_BENCH_WARMUP_STEPS=<int>
   OAK_BENCH_QUALITY_STEPS=<int>
   OAK_BENCH_THROUGHPUT_SECONDS=<float>
-
-Per-environment overrides:
-  OAK_BENCH_<ENV>_WARMUP_STEPS
-  OAK_BENCH_<ENV>_QUALITY_STEPS
-  OAK_BENCH_<ENV>_THROUGHPUT_SECONDS
 
 Notes:
   - CARLA is benchmarked only when you pass `carla` explicitly.
@@ -58,102 +53,9 @@ is_valid_env() {
     return 1
 }
 
-normalize_env_key() {
-    printf '%s' "$1" | tr '[:lower:]-' '[:upper:]_'
-}
-
-default_warmup_steps() {
-    case "$1" in
-        pyflyt|minigrid)
-            printf '%s\n' 200
-            ;;
-        cheetah|walker|humanoid)
-            printf '%s\n' 1000
-            ;;
-        carla)
-            printf '%s\n' 20
-            ;;
-        *)
-            printf 'Unknown environment: %s\n' "$1" >&2
-            exit 1
-            ;;
-    esac
-}
-
-default_quality_steps() {
-    case "$1" in
-        pyflyt|minigrid)
-            printf '%s\n' 10000
-            ;;
-        cheetah|walker|humanoid)
-            printf '%s\n' 20000
-            ;;
-        carla)
-            printf '%s\n' 1000
-            ;;
-        *)
-            printf 'Unknown environment: %s\n' "$1" >&2
-            exit 1
-            ;;
-    esac
-}
-
-default_throughput_seconds() {
-    case "$1" in
-        carla)
-            printf '%s\n' 30
-            ;;
-        pyflyt|minigrid|cheetah|walker|humanoid)
-            printf '%s\n' 10
-            ;;
-        *)
-            printf 'Unknown environment: %s\n' "$1" >&2
-            exit 1
-            ;;
-    esac
-}
-
-override_or_default() {
-    local global_var="$1"
-    local env_var="$2"
-    local default_value="$3"
-    local value=""
-
-    value="${!env_var:-}"
-    if [ -n "$value" ]; then
-        printf '%s\n' "$value"
-        return
-    fi
-
-    value="${!global_var:-}"
-    if [ -n "$value" ]; then
-        printf '%s\n' "$value"
-        return
-    fi
-
-    printf '%s\n' "$default_value"
-}
-
-warmup_steps_for_env() {
-    local env="$1"
-    local env_key
-    env_key="$(normalize_env_key "$env")"
-    override_or_default "OAK_BENCH_WARMUP_STEPS" "OAK_BENCH_${env_key}_WARMUP_STEPS" "$(default_warmup_steps "$env")"
-}
-
-quality_steps_for_env() {
-    local env="$1"
-    local env_key
-    env_key="$(normalize_env_key "$env")"
-    override_or_default "OAK_BENCH_QUALITY_STEPS" "OAK_BENCH_${env_key}_QUALITY_STEPS" "$(default_quality_steps "$env")"
-}
-
-throughput_seconds_for_env() {
-    local env="$1"
-    local env_key
-    env_key="$(normalize_env_key "$env")"
-    override_or_default "OAK_BENCH_THROUGHPUT_SECONDS" "OAK_BENCH_${env_key}_THROUGHPUT_SECONDS" "$(default_throughput_seconds "$env")"
-}
+DEFAULT_WARMUP_STEPS="${OAK_BENCH_DEFAULT_WARMUP_STEPS:-1000}"
+DEFAULT_QUALITY_STEPS="${OAK_BENCH_DEFAULT_QUALITY_STEPS:-10000}"
+DEFAULT_THROUGHPUT_SECONDS="${OAK_BENCH_DEFAULT_THROUGHPUT_SECONDS:-10}"
 
 validate_positive_integer() {
     local label="$1"
@@ -196,6 +98,43 @@ build_if_needed() {
     )
 }
 
+bench_requires_python() {
+    local env_name
+    for env_name in "${ENVS[@]}"; do
+        case "$env_name" in
+            core|carla)
+                ;;
+            *)
+                return 0
+                ;;
+        esac
+    done
+    return 1
+}
+
+run_doctor_gates() {
+    if [ "${OAK_BENCH_SKIP_DOCTOR:-0}" = "1" ]; then
+        return
+    fi
+
+    if [ "${OAK_ALLOW_CPU_FALLBACK:-0}" = "1" ]; then
+        printf 'Normal benchmark mode requires Metal. Unset OAK_ALLOW_CPU_FALLBACK or set OAK_BENCH_SKIP_DOCTOR=1 for diagnosis-only runs.\n' >&2
+        exit 1
+    fi
+
+    (
+        cd "$ROOT_DIR"
+        OAK_DOCTOR_SKIP_BUILD=1 ./doctor.sh metal
+    )
+
+    if bench_requires_python; then
+        (
+            cd "$ROOT_DIR"
+            OAK_DOCTOR_SKIP_BUILD=1 ./doctor.sh python
+        )
+    fi
+}
+
 run_one() {
     local mode="$1"
     local env="$2"
@@ -212,6 +151,7 @@ run_one() {
 
     if ! (
         cd "$ROOT_DIR"
+        OAK_ALLOW_CPU_FALLBACK=0 \
         OAK_POLICY="$policy" \
         OAK_SEED="$seed" \
         OAK_WARMUP_STEPS="$warmup_steps" \
@@ -281,19 +221,20 @@ validate_positive_integer "OAK_BENCH_SEED_COUNT" "$SEED_COUNT"
 
 printf '[bench] output_dir=%s\n' "$BENCH_DIR"
 build_if_needed
+run_doctor_gates
 
 for mode in "${MODES[@]}"; do
     for env in "${ENVS[@]}"; do
-        warmup_steps="$(warmup_steps_for_env "$env")"
+        warmup_steps="${OAK_BENCH_WARMUP_STEPS:-$DEFAULT_WARMUP_STEPS}"
         validate_nonnegative_integer "warmup steps for $env" "$warmup_steps"
 
         stop_steps=""
         stop_seconds=""
         if [ "$mode" = "quality" ]; then
-            stop_steps="$(quality_steps_for_env "$env")"
+            stop_steps="${OAK_BENCH_QUALITY_STEPS:-$DEFAULT_QUALITY_STEPS}"
             validate_positive_integer "quality steps for $env" "$stop_steps"
         else
-            stop_seconds="$(throughput_seconds_for_env "$env")"
+            stop_seconds="${OAK_BENCH_THROUGHPUT_SECONDS:-$DEFAULT_THROUGHPUT_SECONDS}"
         fi
 
         seed="$SEED_START"

@@ -4,16 +4,94 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "$0")" && pwd)"
 source "$ROOT_DIR/scripts/carla_whisky_env.sh"
 
+OAK_BINARY="${OAK_BINARY:-$ROOT_DIR/.build/release/OaK}"
 CONDA_ENV_DIR="${CONDA_ENV_DIR:-$HOME/miniforge3/envs/oak}"
 PYTHON_VERSION="${OAK_PYTHON_VERSION:-3.11}"
+PYTHON_BIN="$CONDA_ENV_DIR/bin/python"
 PYTHON_SITE_PACKAGES="$CONDA_ENV_DIR/lib/python$PYTHON_VERSION/site-packages"
 PYTHON_LIB="$CONDA_ENV_DIR/lib/libpython$PYTHON_VERSION.dylib"
 REQUESTED_ENV="${OAK_ENV:-${1:-all}}"
+REQUESTED_POLICY="$(printf '%s' "${OAK_POLICY:-oak}" | tr '[:upper:]' '[:lower:]')"
 CARLA_RENDER_MODE="${OAK_CARLA_RENDER_MODE:-offscreen}"
 CARLA_MODE_FILE="${OAK_CARLA_MODE_FILE:-$ROOT_DIR/.oak-carla-mode}"
 CARLA_STARTED_SERVER=0
 CARLA_PREEXISTING_PIDS=""
 CARLA_STARTED_PIDS=""
+
+die() {
+    echo "$*" >&2
+    exit 1
+}
+
+validate_release_binary() {
+    [ -x "$OAK_BINARY" ] || die "Missing release binary at $OAK_BINARY. Run 'swift build -c release' or './doctor.sh metal'."
+}
+
+requires_python_prefix() {
+    case "$REQUESTED_ENV" in
+        core|carla)
+            return 1
+            ;;
+        *)
+            return 0
+            ;;
+    esac
+}
+
+python_import_snippet() {
+    case "$REQUESTED_ENV" in
+        pyflyt)
+            printf '%s\n' 'import gymnasium, numpy, PyFlyt, PyFlyt.gym_envs'
+            ;;
+        minigrid)
+            printf '%s\n' 'import gymnasium, numpy, minigrid'
+            ;;
+        cheetah|walker|humanoid)
+            printf '%s\n' 'import numpy, dm_control.suite, mujoco'
+            ;;
+        all)
+            printf '%s\n' 'import gymnasium, numpy, minigrid, PyFlyt, PyFlyt.gym_envs, dm_control.suite, mujoco'
+            ;;
+        *)
+            printf '%s\n' ''
+            ;;
+    esac
+}
+
+validate_python_prefix() {
+    [ -d "$CONDA_ENV_DIR" ] || die "Missing conda environment at $CONDA_ENV_DIR. Run './doctor.sh python' or './setup.sh'."
+    [ -f "$CONDA_ENV_DIR/conda-meta/history" ] || die "Invalid conda environment at $CONDA_ENV_DIR: missing conda-meta/history. Run './doctor.sh python' or './setup.sh'."
+    [ -x "$PYTHON_BIN" ] || die "Missing Python executable at $PYTHON_BIN. Run './doctor.sh python' or './setup.sh'."
+    [ -f "$PYTHON_LIB" ] || die "Missing Python library at $PYTHON_LIB. Run './doctor.sh python' or './setup.sh'."
+}
+
+export_python_runtime() {
+    export PYTHONHOME="$CONDA_ENV_DIR"
+    export PYTHONPATH="$PYTHON_SITE_PACKAGES${PYTHONPATH:+:$PYTHONPATH}"
+    export PYTHON_LIBRARY="$PYTHON_LIB"
+}
+
+validate_python_imports() {
+    local snippet
+    snippet="$(python_import_snippet)"
+    [ -n "$snippet" ] || return 0
+
+    if ! "$PYTHON_BIN" -c "$snippet" >/dev/null 2>&1; then
+        die "Python preflight failed for '$REQUESTED_ENV'. Run './doctor.sh python' for details."
+    fi
+}
+
+should_preflight_metal() {
+    [ "$REQUESTED_POLICY" = "random" ] && return 1
+    [ "${OAK_ALLOW_CPU_FALLBACK:-0}" = "1" ] && return 1
+    return 0
+}
+
+validate_metal_runtime() {
+    if ! "$OAK_BINARY" doctor-metal --quiet >/dev/null 2>&1; then
+        die "Metal preflight failed for this runtime. Run './doctor.sh metal' for details."
+    fi
+}
 
 carla_server_listening() {
     lsof -nP -iTCP:"$OAK_CARLA_PORT" -sTCP:LISTEN >/dev/null 2>&1
@@ -161,27 +239,24 @@ validate_existing_carla_mode() {
 
 trap shutdown_started_carla_server EXIT
 
-if [ ! -d "$CONDA_ENV_DIR" ]; then
-    echo "Missing conda environment at $CONDA_ENV_DIR" >&2
-    exit 1
-fi
-
-if [ ! -f "$PYTHON_LIB" ]; then
-    echo "Missing Python library at $PYTHON_LIB" >&2
-    exit 1
-fi
-
-export PYTHONHOME="$CONDA_ENV_DIR"
-export PYTHONPATH="$PYTHON_SITE_PACKAGES${PYTHONPATH:+:$PYTHONPATH}"
-export PYTHON_LIBRARY="$PYTHON_LIB"
+validate_release_binary
 export OAK_ROOT_DIR="$ROOT_DIR"
 export OAK_CARLA_HOST="${OAK_CARLA_HOST:-127.0.0.1}"
 export OAK_CARLA_PORT="${OAK_CARLA_PORT:-2000}"
 
+if requires_python_prefix; then
+    validate_python_prefix
+    export_python_runtime
+    validate_python_imports
+fi
+
+if should_preflight_metal; then
+    validate_metal_runtime
+fi
+
 if [ "$REQUESTED_ENV" = "carla" ] || [ "$REQUESTED_ENV" = "all" ]; then
     if ! oak_export_carla_whisky_env "$ROOT_DIR"; then
-        echo "Missing Whisky CARLA configuration. Run ./setup.sh after installing the matching Windows Python version for the packaged CARLA client inside the Whisky bottle." >&2
-        exit 1
+        die "Missing Whisky CARLA configuration. Run './doctor.sh carla' or './setup.sh' after installing the matching Windows Python version for the packaged CARLA client inside the Whisky bottle."
     fi
 
     if carla_server_listening; then
@@ -192,8 +267,7 @@ if [ "$REQUESTED_ENV" = "carla" ] || [ "$REQUESTED_ENV" = "all" ]; then
         CARLA_PREEXISTING_PIDS="$(carla_process_ids | tr '\n' ' ')"
 
         if [ "${OAK_CARLA_AUTOSTART:-1}" != "1" ]; then
-            echo "CARLA is not listening on $OAK_CARLA_HOST:$OAK_CARLA_PORT. Start it in Whisky first or rerun with OAK_CARLA_AUTOSTART=1." >&2
-            exit 1
+            die "CARLA is not listening on $OAK_CARLA_HOST:$OAK_CARLA_PORT. Start it in Whisky first or rerun with OAK_CARLA_AUTOSTART=1. For diagnostics, run './doctor.sh carla'."
         fi
 
         if ! validate_carla_autostart_policy; then
@@ -218,7 +292,7 @@ if [ "$REQUESTED_ENV" = "carla" ] || [ "$REQUESTED_ENV" = "all" ]; then
 fi
 
 set +e
-"$ROOT_DIR/.build/release/OaK" "$@"
+"$OAK_BINARY" "$@"
 OAK_EXIT_CODE=$?
 set -e
 exit "$OAK_EXIT_CODE"

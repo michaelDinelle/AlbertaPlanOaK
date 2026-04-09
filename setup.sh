@@ -17,6 +17,9 @@ CONDA_DIR="$HOME/miniforge3"
 CONDA_BIN="$CONDA_DIR/bin/conda"
 CONDA_SH="$CONDA_DIR/etc/profile.d/conda.sh"
 OAK_ENV_DIR="$CONDA_DIR/envs/oak"
+REQUIREMENTS_FILE="$ROOT_DIR/requirements.txt"
+DIRECT_PYTHON="$OAK_ENV_DIR/bin/python"
+PYTHON_IMPORT_CHECK='import gymnasium, minigrid, PyFlyt, dm_control, mujoco'
 
 if [ ! -f "$CONDA_BIN" ]; then
     echo "Installing Miniforge3..."
@@ -37,7 +40,11 @@ source "$CONDA_SH"
 echo "Creating oak environment..."
 if [ -d "$OAK_ENV_DIR" ]; then
     echo "Removing existing oak environment..."
-    conda env remove -y -p "$OAK_ENV_DIR"
+    if [ -f "$OAK_ENV_DIR/conda-meta/history" ]; then
+        conda env remove -y -p "$OAK_ENV_DIR"
+    else
+        rm -rf "$OAK_ENV_DIR"
+    fi
 fi
 
 conda create -y -p "$OAK_ENV_DIR" python=3.11
@@ -45,7 +52,8 @@ conda create -y -p "$OAK_ENV_DIR" python=3.11
 
 conda activate "$OAK_ENV_DIR"
 [ "${CONDA_PREFIX:-}" = "$OAK_ENV_DIR" ] || fail "Expected CONDA_PREFIX=$OAK_ENV_DIR, got ${CONDA_PREFIX:-<unset>}"
-[ -x "$OAK_ENV_DIR/bin/python" ] || fail "Python executable not found at $OAK_ENV_DIR/bin/python"
+[ -x "$DIRECT_PYTHON" ] || fail "Python executable not found at $DIRECT_PYTHON"
+[ -f "$REQUIREMENTS_FILE" ] || fail "Missing requirements file at $REQUIREMENTS_FILE"
 
 # 4. Install pybullet from conda-forge (pre-built ARM64)
 echo "Installing pybullet..."
@@ -53,27 +61,14 @@ conda install -c conda-forge pybullet -y
 
 # 5. Install all Python packages in one go
 echo "Installing Python packages..."
-pip install --upgrade pip setuptools wheel
+"$DIRECT_PYTHON" -m pip install --upgrade pip setuptools wheel
+"$DIRECT_PYTHON" -m pip install -r "$REQUIREMENTS_FILE"
 
-pip install \
-    "numpy==1.26.4" \
-    "scipy" \
-    "matplotlib" \
-    "typing-extensions>=4.3.0" \
-    "tqdm" \
-    "requests" \
-    "protobuf>=3.19.4" \
-    "lxml" \
-    "pyopengl>=3.1.4" \
-    "pyparsing>=3.0.0" \
-    "wrapt>=1.11.2" \
-    "pillow" \
-    "gymnasium==0.29.1" \
-    "PyFlyt==0.4.0" \
-    "pygame==2.5.2" \
-    "mujoco>=3.6.0" \
-    "dm-control" \
-    "minigrid==2.3.1"
+echo "Validating oak environment..."
+[ -f "$OAK_ENV_DIR/conda-meta/history" ] || fail "Conda environment metadata missing after install at $OAK_ENV_DIR/conda-meta/history"
+"$DIRECT_PYTHON" -c "$PYTHON_IMPORT_CHECK" >/dev/null || fail "Direct prefix Python import validation failed"
+"$CONDA_BIN" run -p "$OAK_ENV_DIR" python -c "$PYTHON_IMPORT_CHECK" >/dev/null || fail "conda run -p validation failed"
+echo "✓ Python environment validated"
 
 # 6. Configure CARLA
 echo ""
