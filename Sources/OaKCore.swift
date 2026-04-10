@@ -1165,9 +1165,222 @@ class BaseSelfScalingCore: ForegroundCore {
     }
 }
 
-final class CPUForegroundCore: BaseSelfScalingCore {
+final class CPUForegroundCore: ForegroundCore {
+    let obsDim: Int
+    let actDim: Int
+    let signalDim: Int
+    let capacityLimit: Int
+    let backendName = "cpu"
+
+    let perception: AdaptivePerception
+    let control: ReactiveControl
+
+    private var currentBatchSize = 1
+    private var bufferIndex = 0
+    private var stepCount = 0
+
+    private var signal: SharedFloatStorage
+    private var state: SharedFloatStorage
+    private var prevState: SharedFloatStorage
+    private var action: SharedFloatStorage
+    private var reward: SharedFloatStorage
+    private var reconstruction: SharedFloatStorage
+    private var residual: SharedFloatStorage
+    private var plannedBias: SharedFloatStorage
+
+    private var nsPerWorkUnitEstimate: Double
+    private var snapshotToken: Int
+
     init(obsDim: Int, actDim: Int, seed: Int?) {
-        super.init(obsDim: obsDim, actDim: actDim, device: nil, backendName: "cpu", seed: seed)
+        self.obsDim = obsDim
+        self.actDim = actDim
+        signalDim = obsDim + actDim + 1
+        capacityLimit = max(1, Int(ceil(sqrt(Double(max(signalDim, 1))))))
+
+        let rootSeed = oakDeriveSeed(seed, salt: 0x5000) ?? 0x9E3779B97F4A7C15
+        let rng = CoreSeededRNG(seed: rootSeed)
+
+        signal = SharedFloatStorage(count: max(signalDim * 2, 1), device: nil)
+        state = SharedFloatStorage(count: max(capacityLimit * 2, 1), device: nil)
+        prevState = SharedFloatStorage(count: max(capacityLimit * 2, 1), device: nil)
+        action = SharedFloatStorage(count: max(actDim * 2, 1), device: nil)
+        reward = SharedFloatStorage(count: max(2, 1), device: nil)
+        reconstruction = SharedFloatStorage(count: max(signalDim * 2, 1), device: nil)
+        residual = SharedFloatStorage(count: max(signalDim * 2, 1), device: nil)
+        plannedBias = SharedFloatStorage(count: max(actDim * 2, 1), device: nil)
+
+        perception = AdaptivePerception(signalDim: signalDim, capacityLimit: capacityLimit, device: nil, rng: rng)
+        control = ReactiveControl(actDim: actDim, capacityLimit: capacityLimit, device: nil, rng: rng)
+        nsPerWorkUnitEstimate = 1
+        snapshotToken = 0
+    }
+
+    func step(input: StepInput) -> StepOutput {
+        ensureBatchSize(input.batchSize)
+        let stepStartNs = oakCurrentTimeNanoseconds()
+        let activeIdx = bufferIndex
+        let prevIdx = 1 - bufferIndex
+
+        loadSignal(
+            obs: input.obs,
+            prevAction: input.prevAction,
+            prevReward: input.prevReward,
+            batchSize: input.batchSize,
+            bufferIndex: activeIdx
+        )
+        zeroStorage(plannedBias, offset: activeIdx * input.batchSize * actDim, count: input.batchSize * actDim)
+
+        let capacityDecision = decideCapacity(budgetNs: input.wallClockBudgetNs)
+        var activeRank = max(1, min(capacityDecision.allowedRank, perception.activeRank))
+        var residualEnergyByBatch = Array(repeating: 0.0, count: input.batchSize)
+
+        for b in 0..<input.batchSize {
+            let sigOff = (activeIdx * input.batchSize + b) * signalDim
+            let stOff = (activeIdx * input.batchSize + b) * capacityLimit
+            let reconOff = (activeIdx * input.batchSize + b) * signalDim
+            let resOff = (activeIdx * input.batchSize + b) * signalDim
+            zeroStorage(reconstruction, offset: reconOff, count: signalDim)
+            zeroStorage(residual, offset: resOff, count: signalDim)
+
+            let encoding = perception.encode(
+                signal: signal,
+                signalOffset: sigOff,
+                state: state,
+                stateOffset: stOff,
+                reconstruction: reconstruction,
+                reconOffset: reconOff,
+                residual: residual,
+                resOffset: resOff,
+                allowedRank: b == 0 ? capacityDecision.allowedRank : activeRank
+            )
+            residualEnergyByBatch[b] = encoding.residualEnergy
+            activeRank = perception.currentActiveRank(budget: capacityDecision)
+        }
+
+        let foregroundComputeStartMs = oakCurrentTimeMilliseconds()
+        for b in 0..<input.batchSize {
+            let stOff = (activeIdx * input.batchSize + b) * capacityLimit
+            let planOff = (activeIdx * input.batchSize + b) * actDim
+            control.actCPU(
+                state: state,
+                stateOffset: stOff,
+                plannedBias: plannedBias,
+                plannedOffset: planOff,
+                activeRank: activeRank,
+                action: action,
+                actOffset: planOff
+            )
+        }
+        let foregroundComputeMs = oakCurrentTimeMilliseconds() - foregroundComputeStartMs
+
+        if stepCount > 0 {
+            for b in 0..<input.batchSize {
+                let prevStateOff = (prevIdx * input.batchSize + b) * capacityLimit
+                let stateOff = (activeIdx * input.batchSize + b) * capacityLimit
+                let prevActionOff = (prevIdx * input.batchSize + b) * actDim
+                let rewardValue = reward[(activeIdx * input.batchSize) + b]
+
+                let tdDelta = control.update(
+                    prevState: prevState,
+                    prevOffset: prevStateOff,
+                    state: state,
+                    stateOffset: stateOff,
+                    prevAction: action,
+                    prevActOffset: prevActionOff,
+                    reward: rewardValue,
+                    activeRank: activeRank
+                )
+
+                let utilitySignal = Double(abs(tdDelta)) + residualEnergyByBatch[b]
+                for index in 0..<activeRank {
+                    perception.recordUtility(index: index, value: utilitySignal)
+                }
+            }
+        }
+
+        for b in 0..<input.batchSize {
+            let stateOff = (activeIdx * input.batchSize + b) * capacityLimit
+            let prevStateOff = (activeIdx * input.batchSize + b) * capacityLimit
+            for index in 0..<capacityLimit {
+                prevState[prevStateOff + index] = state[stateOff + index]
+            }
+        }
+
+        snapshotToken &+= 1
+        let stepNs = oakCurrentTimeNanoseconds() - stepStartNs
+        let workUnits = max(Double(activeRank * (signalDim + actDim + activeRank) * input.batchSize), 1)
+        let measuredNsPerWorkUnit = Double(stepNs) / workUnits
+        nsPerWorkUnitEstimate = (nsPerWorkUnitEstimate + measuredNsPerWorkUnit) / 2
+
+        let telemetry = input.obs.withUnsafeBufferPointer { obsPtr in
+            AgentTelemetry(
+                rewardInput: input.prevReward[0],
+                obs: UnsafeBufferPointer(start: obsPtr.baseAddress, count: min(obsPtr.count, obsDim)),
+                state: state.immutableBufferPointer(offset: (activeIdx * input.batchSize) * capacityLimit, length: activeRank),
+                action: action.immutableBufferPointer(offset: (activeIdx * input.batchSize) * actDim, length: actDim),
+                agentStepMs: Double(stepNs) / 1_000_000,
+                backend: backendName,
+                metalTimings: MetalCommandTimings(cmd1Ms: foregroundComputeMs, cmd2Ms: 0, cmd3Ms: 0, cmd4Ms: 0, cmd5Ms: 0),
+                plannerStepMs: 0,
+                computeBudgetNs: input.wallClockBudgetNs,
+                activeRank: activeRank,
+                activeGVFs: 0,
+                activeOptions: 0,
+                snapshotToken: snapshotToken
+            )
+        }
+
+        bufferIndex = prevIdx
+        stepCount += 1
+
+        let actionOffset = (activeIdx * input.batchSize) * actDim
+        let outAction = action.snapshot(offset: actionOffset, prefix: actDim * input.batchSize)
+        return StepOutput(action: outAction, telemetry: telemetry, snapshotToken: snapshotToken)
+    }
+
+    private func ensureBatchSize(_ batchSize: Int) {
+        guard batchSize > currentBatchSize else { return }
+        currentBatchSize = batchSize
+        signal = SharedFloatStorage(count: max(signalDim * batchSize * 2, 1), device: nil)
+        state = SharedFloatStorage(count: max(capacityLimit * batchSize * 2, 1), device: nil)
+        prevState = SharedFloatStorage(count: max(capacityLimit * batchSize * 2, 1), device: nil)
+        action = SharedFloatStorage(count: max(actDim * batchSize * 2, 1), device: nil)
+        reward = SharedFloatStorage(count: max(batchSize * 2, 1), device: nil)
+        reconstruction = SharedFloatStorage(count: max(signalDim * batchSize * 2, 1), device: nil)
+        residual = SharedFloatStorage(count: max(signalDim * batchSize * 2, 1), device: nil)
+        plannedBias = SharedFloatStorage(count: max(actDim * batchSize * 2, 1), device: nil)
+    }
+
+    private func decideCapacity(budgetNs: UInt64) -> CapacityDecision {
+        let safeBudget = max(Double(budgetNs), 1)
+        let budgetWorkUnits = safeBudget / max(nsPerWorkUnitEstimate, Double(Float.ulpOfOne))
+        let dimensionality = Double(signalDim + actDim)
+        let rankByBudget = Int(max(1, floor((sqrt(dimensionality * dimensionality + 4 * budgetWorkUnits) - dimensionality) / 2)))
+        return CapacityDecision(allowedRank: max(1, min(capacityLimit, rankByBudget)), budgetWorkUnits: budgetWorkUnits)
+    }
+
+    private func loadSignal(obs: [Float], prevAction: [Float], prevReward: [Float], batchSize: Int, bufferIndex: Int) {
+        for b in 0..<batchSize {
+            let sigOff = (bufferIndex * batchSize + b) * signalDim
+            let obsOff = b * obsDim
+            let actOff = b * actDim
+            for index in 0..<obsDim {
+                signal[sigOff + index] = oakSafeScalar(obs[obsOff + index])
+            }
+            for index in 0..<actDim {
+                signal[sigOff + obsDim + index] = oakSafeScalar(prevAction[actOff + index], clamp: -1...1)
+            }
+            let rewardValue = oakSafeScalar(prevReward[b])
+            signal[sigOff + signalDim - 1] = rewardValue
+            reward[bufferIndex * batchSize + b] = rewardValue
+        }
+    }
+
+    private func zeroStorage(_ storage: SharedFloatStorage, offset: Int, count: Int) {
+        guard count > 0 else { return }
+        for index in 0..<count {
+            storage[offset + index] = 0
+        }
     }
 }
 

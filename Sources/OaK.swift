@@ -2,7 +2,6 @@ import Darwin
 import Foundation
 import Metal
 import PythonKit
-import MLX
 
 private func candidateCarlaRoots() -> [String] {
     let fileManager = FileManager.default
@@ -167,16 +166,10 @@ private func clampAction(_ action: [Float], low: [Float], high: [Float]) -> [Flo
     }
 }
 
-private func pythonFlatArray(_ object: PythonObject) -> [Float] {
+func pythonFlatArray(_ object: PythonObject) -> [Float] {
     let np = PythonRuntime.shared.numpy
     let flattened = np.asarray(object, dtype: np.float32).flatten()
     return Array(flattened).map { sanitizeScalar(Float($0) ?? 0) }
-}
-
-private func discreteActionIndex(from value: Float, count: Int) -> Int {
-    let normalized = sanitizeScalar(value, clamp: -1...1)
-    let scaled = ((normalized + 1) * 0.5) * Float(count)
-    return min(max(Int(scaled), 0), count - 1)
 }
 
 private func zeroBuffer(_ buffer: MTLBuffer) {
@@ -400,6 +393,7 @@ struct Vector {
 protocol PyEnv {
     var obsDim: Int { get }
     var actDim: Int { get }
+    var schema: EnvironmentSchemaFingerprint { get }
     func reset() -> [Float]
     func step(_ action: [Float]) -> ([Float], Float, Bool)
 }
@@ -409,6 +403,7 @@ final class PyFlytEnv: PyEnv {
     private var resetSeedSequence: ResetSeedSequence
     let obsDim: Int
     let actDim: Int
+    let schema: EnvironmentSchemaFingerprint
 
     init() {
         let baseSeed = configuredRunSeed()
@@ -423,20 +418,24 @@ final class PyFlytEnv: PyEnv {
         }
         obsDim = Int(env.observation_space.shape[0])!
         actDim = Int(env.action_space.shape[0])!
+        schema = EnvironmentSchemaFingerprint(
+            observation: pythonSpaceSchema(env.observation_space),
+            action: pythonSpaceSchema(env.action_space)
+        )
     }
 
     func reset() -> [Float] {
         let result = resetPythonEnv(env, seed: resetSeedSequence.nextResetSeed())
-        return Array(result[0]).map { Float($0)! }
+        return pythonFlattenedObservation(result[0])
     }
 
     func step(_ action: [Float]) -> ([Float], Float, Bool) {
         let np = PythonRuntime.shared.numpy
         let result = env.step(np.array(action))
-        let obs = Array(result[0]).map { Float($0)! }
-        let reward = Float(result[1])!
-        let terminated = Bool(result[2])!
-        let truncated = Bool(result[3])!
+        let obs = pythonFlattenedObservation(result[0])
+        let reward = sanitizeScalar(Float(result[1]) ?? 0)
+        let terminated = Bool(result[2]) ?? false
+        let truncated = Bool(result[3]) ?? false
         return (obs, reward, terminated || truncated)
     }
 }
@@ -449,6 +448,7 @@ final class GymContinuousEnv: PyEnv {
     private var initialObservation: [Float]?
     let obsDim: Int
     let actDim: Int
+    let schema: EnvironmentSchemaFingerprint
 
     init(id: String) {
         let baseSeed = configuredRunSeed()
@@ -466,9 +466,13 @@ final class GymContinuousEnv: PyEnv {
         actionLow = pythonFlatArray(actionSpace.low)
         actionHigh = pythonFlatArray(actionSpace.high)
         let result = resetPythonEnv(env, seed: resetSeedSequence.nextResetSeed())
-        let initialObservation = pythonFlatArray(result[0])
+        let initialObservation = pythonFlattenedObservation(result[0])
         self.initialObservation = initialObservation
         obsDim = initialObservation.count
+        schema = EnvironmentSchemaFingerprint(
+            observation: pythonSpaceSchema(env.observation_space),
+            action: pythonSpaceSchema(actionSpace)
+        )
     }
 
     func reset() -> [Float] {
@@ -488,7 +492,7 @@ final class GymContinuousEnv: PyEnv {
         let reward = sanitizeScalar(Float(result[1]) ?? 0)
         let terminated = Bool(result[2]) ?? false
         let truncated = Bool(result[3]) ?? false
-        return (pythonFlatArray(result[0]), reward, terminated || truncated)
+        return (pythonFlattenedObservation(result[0]), reward, terminated || truncated)
     }
 }
 
@@ -505,6 +509,7 @@ final class DirectCARLAEnv: PyEnv {
     private var image: [Float]
     let obsDim: Int
     let actDim: Int
+    let schema: EnvironmentSchemaFingerprint
 
     init() {
         let runtime = PythonRuntime.shared
@@ -516,6 +521,10 @@ final class DirectCARLAEnv: PyEnv {
         imageSize = carlaImageSize()
         obsDim = imageSize * imageSize * 3
         actDim = 2
+        schema = EnvironmentSchemaFingerprint(
+            observation: .box(flattenedDim: obsDim, shape: [imageSize, imageSize, 3]),
+            action: .box(flattenedDim: actDim, shape: [actDim])
+        )
         image = Array(repeating: 0, count: obsDim)
         let settings = world.get_settings()
         originalSynchronousMode = Bool(settings.synchronous_mode) ?? false
@@ -693,6 +702,7 @@ final class WhiskyCARLAEnv: PyEnv {
     private let debugEnabled: Bool
     private(set) var obsDim: Int
     private(set) var actDim: Int
+    private(set) var schema: EnvironmentSchemaFingerprint
 
     fileprivate init(configuration: WhiskyCARLAConfiguration) {
         process = Process()
@@ -701,6 +711,10 @@ final class WhiskyCARLAEnv: PyEnv {
         debugEnabled = ProcessInfo.processInfo.environment["OAK_CARLA_DEBUG"] == "1"
         obsDim = 0
         actDim = 0
+        schema = EnvironmentSchemaFingerprint(
+            observation: .box(flattenedDim: 1, shape: [1]),
+            action: .box(flattenedDim: 1, shape: [1])
+        )
 
         let shellCommand = """
         eval "$(\(shellQuoted(configuration.whiskyCmd)) shellenv \(shellQuoted(configuration.bottleName)))" && exec wine64 \(shellQuoted(configuration.windowsPython)) \(shellQuoted(configuration.windowsBridgeScript)) serve \(shellQuoted(configuration.windowsCarlaEgg)) \(shellQuoted(configuration.windowsCarlaPythonAPI)) \(shellQuoted(configuration.bridgeHost)) \(shellQuoted(configuration.bridgePort)) \(shellQuoted(configuration.carlaHost)) \(shellQuoted(configuration.carlaPort))
@@ -733,6 +747,10 @@ final class WhiskyCARLAEnv: PyEnv {
             let dimensions = try Self.parseReadyDimensions(from: readyResponse)
             obsDim = dimensions.obsDim
             actDim = dimensions.actDim
+            schema = EnvironmentSchemaFingerprint(
+                observation: .box(flattenedDim: obsDim, shape: [obsDim]),
+                action: .box(flattenedDim: actDim, shape: [actDim])
+            )
             if debugEnabled {
                 logWarning("CARLA Whisky bridge ready with obsDim \(obsDim) and actDim \(actDim)")
             }
@@ -1017,6 +1035,7 @@ final class CARLAEnv: PyEnv {
     private let backend: PyEnv
     let obsDim: Int
     let actDim: Int
+    let schema: EnvironmentSchemaFingerprint
 
     init() {
         let environment = ProcessInfo.processInfo.environment
@@ -1029,6 +1048,7 @@ final class CARLAEnv: PyEnv {
         }
         obsDim = backend.obsDim
         actDim = backend.actDim
+        schema = backend.schema
     }
 
     func reset() -> [Float] {
@@ -1047,6 +1067,7 @@ final class DMControlEnv: PyEnv {
     private var initialObservation: [Float]?
     let obsDim: Int
     let actDim: Int
+    let schema: EnvironmentSchemaFingerprint
 
     init(domain: String, task: String) {
         let runtime = PythonRuntime.shared
@@ -1064,9 +1085,13 @@ final class DMControlEnv: PyEnv {
         actionLow = pythonFlatArray(actionSpec.minimum)
         actionHigh = pythonFlatArray(actionSpec.maximum)
         let timeStep = env.reset()
-        let initialObservation = Self.flattenObservation(timeStep.observation)
+        let initialObservation = pythonFlattenedObservation(timeStep.observation)
         self.initialObservation = initialObservation
         obsDim = initialObservation.count
+        schema = EnvironmentSchemaFingerprint(
+            observation: .box(flattenedDim: obsDim, shape: [obsDim]),
+            action: .box(flattenedDim: actDim, shape: [actDim])
+        )
     }
 
     func reset() -> [Float] {
@@ -1076,7 +1101,7 @@ final class DMControlEnv: PyEnv {
         }
 
         let timeStep = env.reset()
-        return Self.flattenObservation(timeStep.observation)
+        return pythonFlattenedObservation(timeStep.observation)
     }
 
     func step(_ action: [Float]) -> ([Float], Float, Bool) {
@@ -1085,15 +1110,7 @@ final class DMControlEnv: PyEnv {
         let timeStep = env.step(np.array(safeAction, dtype: np.float32))
         let reward = timeStep.reward
         let rewardValue = sanitizeScalar(Float(reward) ?? 0)
-        return (Self.flattenObservation(timeStep.observation), rewardValue, Bool(timeStep.last()) ?? false)
-    }
-
-    private static func flattenObservation(_ observation: PythonObject) -> [Float] {
-        var result: [Float] = []
-        for key in observation.keys() {
-            result.append(contentsOf: pythonFlatArray(observation[key]))
-        }
-        return result
+        return (pythonFlattenedObservation(timeStep.observation), rewardValue, Bool(timeStep.last()) ?? false)
     }
 }
 
@@ -1109,6 +1126,7 @@ final class VectorEnv {
     let numEnvs: Int
     let obsDim: Int
     let actDim: Int
+    let schema: EnvironmentSchemaFingerprint
     
     init(name: String, count: Int, factory: (() -> PyEnv)? = nil, envpoolTaskId: String? = nil) {
         self.numEnvs = count
@@ -1131,6 +1149,7 @@ final class VectorEnv {
             self.envs = nil
             self.obsDim = self.envpoolEnv!.obsDim
             self.actDim = self.envpoolEnv!.actDim
+            self.schema = self.envpoolEnv!.schema
         } else {
             guard let factory else {
                 fatalError("Environment \(name) requires a PyEnv factory but none was provided.")
@@ -1139,13 +1158,13 @@ final class VectorEnv {
             self.envpoolEnv = nil
             self.obsDim = self.envs![0].obsDim
             self.actDim = self.envs![0].actDim
+            self.schema = self.envs![0].schema
         }
     }
     
     func reset() -> [Float] {
         if let envpoolEnv {
-            let mlxObs = envpoolEnv.reset()
-            return mlxObs.asArray(Float.self)
+            return envpoolEnv.reset()
         }
         
         var obs: [Float] = []
@@ -1158,12 +1177,7 @@ final class VectorEnv {
     
     func step(_ action: [Float]) -> ([Float], [Float], [Bool]) {
         if let envpoolEnv {
-            let mlxAction = MLXArray(action, [numEnvs, actDim])
-            let result = envpoolEnv.step(mlxAction)
-            let nextObs = result.obs.asArray(Float.self)
-            let rewards = result.reward.asArray(Float.self)
-            let dones = result.done.asArray(Bool.self)
-            return (nextObs, rewards, dones)
+            return envpoolEnv.step(action)
         }
         
         var nextObs: [Float] = []
@@ -1318,6 +1332,8 @@ private func envRunsForRequest(availableEnvs: [(String, (() -> PyEnv)?)], reques
         for (name, factory) in availableEnvs {
             if name == "minigrid" {
                 runs.append(contentsOf: resolveMinigridRuns())
+            } else if let fixed = EnvPoolCatalog.logicalNameToFixedEnvId[name] {
+                runs.append(EnvRun(baseName: name, envpoolTaskId: fixed, factory: nil))
             } else {
                 runs.append(EnvRun(baseName: name, envpoolTaskId: nil, factory: factory))
             }
@@ -1329,6 +1345,10 @@ private func envRunsForRequest(availableEnvs: [(String, (() -> PyEnv)?)], reques
         return resolveMinigridRuns()
     }
 
+    if let fixed = EnvPoolCatalog.logicalNameToFixedEnvId[req] {
+        return [EnvRun(baseName: req, envpoolTaskId: fixed, factory: nil)]
+    }
+
     return availableEnvs
         .filter { $0.0.lowercased() == req }
         .map { EnvRun(baseName: $0.0, envpoolTaskId: nil, factory: $0.1) }
@@ -1336,6 +1356,10 @@ private func envRunsForRequest(availableEnvs: [(String, (() -> PyEnv)?)], reques
 
 @main struct Main {
     static func main() {
+        run()
+    }
+
+    private static func run() {
         let cliArguments = Array(CommandLine.arguments.dropFirst())
         if let command = cliArguments.first, command == "doctor-metal" {
             Foundation.exit(runMetalDoctor(arguments: cliArguments.dropFirst()))
@@ -1373,6 +1397,7 @@ private func envRunsForRequest(availableEnvs: [(String, (() -> PyEnv)?)], reques
         }
 
         let numEnvs = ProcessInfo.processInfo.environment["OAK_NUM_ENVS"].flatMap(Int.init) ?? 1
+        let benchmarkLeague = ProcessInfo.processInfo.environment["OAK_BENCH_LEAGUE"]?.trimmingCharacters(in: .whitespacesAndNewlines)
 
         for run in envsToRun {
             let name = run.baseName
@@ -1386,8 +1411,12 @@ private func envRunsForRequest(availableEnvs: [(String, (() -> PyEnv)?)], reques
             let metricsConfiguration = MetricsConfiguration.resolve(envName: metricsEnvName, policyName: runner.policyName)
             let metrics = RunMetricsAggregator(
                 envName: metricsEnvName,
+                logicalEnvName: name,
+                concreteEnvId: metricsEnvName,
+                leagueName: benchmarkLeague?.isEmpty == false ? benchmarkLeague : nil,
                 policyName: runner.policyName,
                 backend: runner.backendName,
+                schema: env.schema,
                 windowSize: metricsConfiguration.windowSize,
                 seed: runSeed
             )
@@ -1462,11 +1491,9 @@ private func envRunsForRequest(availableEnvs: [(String, (() -> PyEnv)?)], reques
                         measuredSeconds = max((currentTimeMilliseconds() - measurementStartMs) / 1000, 0)
                     }
 
-                    let avgReward = result.1.reduce(0, +) / Float(numEnvs)
-                    let anyDone = result.2.contains(true)
                     let metricsRecords = metrics.recordStep(
-                        reward: avgReward,
-                        done: anyDone,
+                        rewards: result.1,
+                        dones: result.2,
                         telemetry: agentResult.telemetry,
                         envStepMs: envStepMs,
                         totalStepMs: totalStepMs
