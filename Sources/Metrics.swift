@@ -39,9 +39,9 @@ struct AgentTelemetry: Equatable {
 
     init(
         rewardInput: Float,
-        obs: [Float],
-        state: [Float],
-        action: [Float],
+        obs: UnsafeBufferPointer<Float>,
+        state: UnsafeBufferPointer<Float>,
+        action: UnsafeBufferPointer<Float>,
         agentStepMs: Double,
         backend: String,
         metalTimings: MetalCommandTimings? = nil,
@@ -83,11 +83,11 @@ struct AgentTelemetry: Equatable {
         cmd5Ms = metalTimings?.cmd5Ms
     }
 
-    static func randomPolicy(rewardInput: Float, obs: [Float], action: [Float], agentStepMs: Double) -> AgentTelemetry {
+    static func randomPolicy(rewardInput: Float, obs: UnsafeBufferPointer<Float>, action: UnsafeBufferPointer<Float>, agentStepMs: Double) -> AgentTelemetry {
         AgentTelemetry(
             rewardInput: rewardInput,
             obs: obs,
-            state: [],
+            state: UnsafeBufferPointer<Float>(start: nil, count: 0),
             action: action,
             agentStepMs: agentStepMs,
             backend: "random",
@@ -168,7 +168,8 @@ struct RollingWindowStats: Equatable {
         guard totalStepMsSum > 0 else {
             return 0
         }
-        return Double(count) / (totalStepMsSum / 1000)
+        let numEnvs = ProcessInfo.processInfo.environment["OAK_NUM_ENVS"].flatMap(Int.init) ?? 1
+        return Double(count * numEnvs) / (totalStepMsSum / 1000)
     }
 
     var agentStepMsMean: Double {
@@ -788,7 +789,7 @@ private struct VectorSummary: Equatable {
     let min: Double
     let max: Double
 
-    init(_ values: [Float]) {
+    init(_ values: UnsafeBufferPointer<Float>) {
         guard !values.isEmpty else {
             mean = 0
             std = 0
@@ -800,8 +801,8 @@ private struct VectorSummary: Equatable {
 
         var sum = 0.0
         var sumSquares = 0.0
-        var minValue = Double(values[0])
-        var maxValue = Double(values[0])
+        var minValue = metricsFinite(Double(values[0]))
+        var maxValue = metricsFinite(Double(values[0]))
 
         for value in values {
             let numericValue = metricsFinite(Double(value))
@@ -828,10 +829,14 @@ private func resolveMetricsPath(_ path: String, rootDirectory: String) -> URL {
     return URL(fileURLWithPath: rootDirectory).appendingPathComponent(path)
 }
 
-private func metricsRecordTimestamp(_ date: Date) -> String {
+nonisolated(unsafe) private let metricsRecordFormatter: ISO8601DateFormatter = {
     let formatter = ISO8601DateFormatter()
     formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-    return formatter.string(from: date)
+    return formatter
+}()
+
+private func metricsRecordTimestamp(_ date: Date) -> String {
+    return metricsRecordFormatter.string(from: date)
 }
 
 private func metricsFilenameTimestamp(_ date: Date) -> String {

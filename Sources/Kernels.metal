@@ -7,18 +7,25 @@ kernel void encode_state(
     device float *state [[buffer(2)]],
     constant uint &signalDim [[buffer(3)]],
     constant uint &rank [[buffer(4)]],
-    uint gid [[thread_position_in_grid]]
+    constant uint &stateStride [[buffer(5)]],
+    constant uint &signalOffsetElement [[buffer(6)]],
+    constant uint &stateOffsetElement [[buffer(7)]],
+    uint2 gid [[thread_position_in_grid]]
 ) {
-    if (gid >= rank) {
+    uint feature_idx = gid.x;
+    uint batch_idx = gid.y;
+    
+    if (feature_idx >= rank) {
         return;
     }
 
     float sum = 0.0f;
-    uint rowOffset = gid * signalDim;
+    uint basisOffset = feature_idx * signalDim;
+    uint signalOffset = signalOffsetElement + batch_idx * signalDim;
     for (uint column = 0; column < signalDim; column++) {
-        sum += basis[rowOffset + column] * signal[column];
+        sum += basis[basisOffset + column] * signal[signalOffset + column];
     }
-    state[gid] = tanh(sum);
+    state[stateOffsetElement + batch_idx * stateStride + feature_idx] = tanh(sum);
 }
 
 kernel void policy_action(
@@ -29,16 +36,24 @@ kernel void policy_action(
     constant uint &rank [[buffer(4)]],
     constant uint &actDim [[buffer(5)]],
     constant uint &policyStride [[buffer(6)]],
-    uint gid [[thread_position_in_grid]]
+    constant uint &stateStride [[buffer(7)]],
+    constant uint &stateOffsetElement [[buffer(8)]],
+    constant uint &plannedBiasOffsetElement [[buffer(9)]],
+    constant uint &actionOffsetElement [[buffer(10)]],
+    uint2 gid [[thread_position_in_grid]]
 ) {
-    if (gid >= actDim) {
+    uint action_idx = gid.x;
+    uint batch_idx = gid.y;
+
+    if (action_idx >= actDim) {
         return;
     }
 
-    float sum = plannedBias[gid];
-    uint rowOffset = gid * policyStride;
+    float sum = plannedBias[plannedBiasOffsetElement + batch_idx * actDim + action_idx];
+    uint rowOffset = action_idx * policyStride;
+    uint stateOffset = stateOffsetElement + batch_idx * stateStride;
     for (uint column = 0; column < rank; column++) {
-        sum += policy[rowOffset + column] * state[column];
+        sum += policy[rowOffset + column] * state[stateOffset + column];
     }
-    action[gid] = tanh(sum);
+    action[actionOffsetElement + batch_idx * actDim + action_idx] = tanh(sum);
 }

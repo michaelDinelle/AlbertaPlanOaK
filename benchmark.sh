@@ -152,6 +152,7 @@ run_one() {
     if ! (
         cd "$ROOT_DIR"
         OAK_ALLOW_CPU_FALLBACK=0 \
+        OAK_NUM_ENVS="${OAK_BENCH_NUM_ENVS:-8}" \
         OAK_POLICY="$policy" \
         OAK_SEED="$seed" \
         OAK_WARMUP_STEPS="$warmup_steps" \
@@ -223,6 +224,7 @@ printf '[bench] output_dir=%s\n' "$BENCH_DIR"
 build_if_needed
 run_doctor_gates
 
+pids=()
 for mode in "${MODES[@]}"; do
     for env in "${ENVS[@]}"; do
         warmup_steps="${OAK_BENCH_WARMUP_STEPS:-$DEFAULT_WARMUP_STEPS}"
@@ -239,12 +241,22 @@ for mode in "${MODES[@]}"; do
 
         seed="$SEED_START"
         seed_limit=$((SEED_START + SEED_COUNT))
+        pids=()
         while [ "$seed" -lt "$seed_limit" ]; do
             for policy in "${POLICIES[@]}"; do
-                run_one "$mode" "$env" "$policy" "$seed" "$warmup_steps" "$stop_steps" "$stop_seconds"
+                run_one "$mode" "$env" "$policy" "$seed" "$warmup_steps" "$stop_steps" "$stop_seconds" &
+                pids+=($!)
             done
             seed=$((seed + 1))
         done
+        
+        # Wait for all seeds and policies for this environment to finish before moving to the next
+        if [ ${#pids[@]} -gt 0 ]; then
+            for pid in "${pids[@]}"; do
+                wait "$pid" || true
+            done
+        fi
+        pids=()
     done
 done
 
