@@ -119,6 +119,8 @@ private final class PythonRuntime: @unchecked Sendable {
         do {
             let importedSys = try Python.attemptImport("sys")
             moduleCache["sys"] = importedSys
+            let currentDir = ProcessInfo.processInfo.environment["OAK_ROOT_DIR"] ?? FileManager.default.currentDirectoryPath
+            importedSys.path.append("\(currentDir)/scripts")
             importedSys.path.append("/opt/homebrew/lib/python3.11/site-packages")
 
             for path in nativeHostCarlaPythonSearchPaths() {
@@ -1205,7 +1207,114 @@ final class MiniGridEnv: PyEnv {
 private protocol PolicyRunner {
     var policyName: String { get }
     var backendName: String { get }
-    func step(obs: [Float], reward: Float, wallClockBudgetNs: UInt64) -> AgentStepResult
+    func step(obs: [Float], reward: [Float], wallClockBudgetNs: UInt64, batchSize: Int) -> AgentStepResult
+}
+
+final class VectorEnv {
+    private let envs: [PyEnv]?
+    private let batchedEnv: PythonObject?
+    let numEnvs: Int
+    let obsDim: Int
+    let actDim: Int
+    
+    init(name: String, factory: () -> PyEnv, count: Int) {
+        self.numEnvs = count
+        
+        let supportedBatchEnvs = ["pyflyt", "minigrid", "cheetah", "walker", "humanoid"]
+        if count > 1 && supportedBatchEnvs.contains(name) {
+            let runtime = PythonRuntime.shared
+            let batchedModule = runtime.module(named: "batched_env_bridge")
+            let Bridge = batchedModule.BatchedEnvBridge
+            
+            let envType: String
+            var envArgs: [PythonObject] = []
+            let baseSeed = configuredRunSeed()
+            let pySeed = baseSeed.map { PythonObject($0) } ?? PythonObject(Python.None)
+            
+            switch name {
+            case "cheetah":
+                envType = "dm_control"
+                envArgs = ["cheetah", "run", pySeed]
+            case "walker":
+                envType = "dm_control"
+                envArgs = ["walker", "walk", pySeed]
+            case "humanoid":
+                envType = "dm_control"
+                envArgs = ["humanoid", "stand", pySeed]
+            case "pyflyt":
+                envType = "pyflyt"
+                envArgs = ["PyFlyt/QuadX-Hover-v0", pySeed]
+            case "minigrid":
+                envType = "minigrid"
+                envArgs = ["MiniGrid-Empty-8x8-v0", pySeed]
+            default:
+                fatalError("Unsupported batched env")
+            }
+            
+            self.batchedEnv = Bridge(envType, envArgs, count)
+            self.envs = nil
+            self.obsDim = Int(batchedEnv!.get_obs_dim())!
+            self.actDim = Int(batchedEnv!.get_act_dim())!
+        } else {
+            self.envs = (0..<count).map { _ in factory() }
+            self.batchedEnv = nil
+            self.obsDim = self.envs![0].obsDim
+            self.actDim = self.envs![0].actDim
+        }
+    }
+    
+    func reset() -> [Float] {
+        if let batchedEnv {
+            let pyObs = batchedEnv.initial_reset()
+            return pythonFlatArray(pyObs)
+        }
+        
+        var obs: [Float] = []
+        obs.reserveCapacity(numEnvs * obsDim)
+        for env in envs! {
+            obs.append(contentsOf: env.reset())
+        }
+        return obs
+    }
+    
+    func step(_ action: [Float]) -> ([Float], [Float], [Bool]) {
+        if let batchedEnv {
+            let np = PythonRuntime.shared.numpy
+            let npAction = np.array(action, dtype: np.float32)
+            let result = batchedEnv.step(npAction)
+            let nextObs = pythonFlatArray(result[0])
+            let rewards = pythonFlatArray(result[1])
+            let dones = pythonFlatArray(result[2]).map { $0 > 0.5 }
+            return (nextObs, rewards, dones)
+        }
+        
+        var nextObs: [Float] = []
+        var rewards: [Float] = []
+        var dones: [Bool] = []
+        nextObs.reserveCapacity(numEnvs * obsDim)
+        rewards.reserveCapacity(numEnvs)
+        dones.reserveCapacity(numEnvs)
+        
+        for i in 0..<numEnvs {
+            let actSlice = Array(action[(i * actDim)..<((i + 1) * actDim)])
+            var result = envs![i].step(actSlice)
+            
+            if result.2 {
+                result.0 = envs![i].reset()
+                result.1 = 0 // Continual abstraction
+            }
+            
+            nextObs.append(contentsOf: result.0)
+            rewards.append(result.1)
+            dones.append(result.2)
+        }
+        
+        return (nextObs, rewards, dones)
+    }
+
+    func close() {
+        batchedEnv?.close()
+    }
 }
 
 final class OaK: PolicyRunner {
@@ -1220,7 +1329,7 @@ final class OaK: PolicyRunner {
             ?? MTLCopyAllDevices().first
         self.obsDim = obsDim
         self.actDim = actDim
-        lastAction = Array(repeating: 0, count: actDim)
+        lastAction = []
         if let device = resolvedDevice {
             core = MetalForegroundCore(obsDim: obsDim, actDim: actDim, device: device, seed: seed)
         } else if ProcessInfo.processInfo.environment["OAK_ALLOW_CPU_FALLBACK"] == "1" {
@@ -1239,11 +1348,15 @@ final class OaK: PolicyRunner {
         core.backendName
     }
 
-    func step(obs: [Float], reward: Float, wallClockBudgetNs: UInt64) -> AgentStepResult {
+    func step(obs: [Float], reward: [Float], wallClockBudgetNs: UInt64, batchSize: Int) -> AgentStepResult {
+        if lastAction.count < actDim * batchSize {
+            lastAction = Array(repeating: 0, count: actDim * batchSize)
+        }
         let output = core.step(input: StepInput(
-            obs: sanitizeVector(obs, count: obsDim),
-            prevAction: sanitizeVector(lastAction, count: actDim, clamp: -1...1),
-            prevReward: reward,
+            obs: sanitizeVector(obs, count: obsDim * batchSize),
+            prevAction: sanitizeVector(lastAction, count: actDim * batchSize, clamp: -1...1),
+            prevReward: sanitizeVector(reward, count: batchSize),
+            batchSize: batchSize,
             wallClockBudgetNs: wallClockBudgetNs
         ))
         lastAction = output.action
@@ -1252,27 +1365,35 @@ final class OaK: PolicyRunner {
 }
 
 private final class RandomPolicyRunner: PolicyRunner {
+    private let obsDim: Int
     private let actDim: Int
     private let rng: SeededRNG?
 
     let policyName = "random"
     let backendName = "random"
 
-    init(actDim: Int, seed: Int? = configuredRunSeed()) {
+    init(obsDim: Int, actDim: Int, seed: Int? = configuredRunSeed()) {
+        self.obsDim = obsDim
         self.actDim = actDim
         rng = deriveSeed(seed, salt: 0x3001).map(SeededRNG.init)
     }
 
-    func step(obs: [Float], reward: Float, wallClockBudgetNs _: UInt64) -> AgentStepResult {
+    func step(obs: [Float], reward: [Float], wallClockBudgetNs _: UInt64, batchSize: Int) -> AgentStepResult {
         let stepStart = currentTimeMilliseconds()
         let safeObs = sanitizeVector(obs)
-        let action = (0..<actDim).map { _ in seededFloat(in: -1...1, rng: rng) }
-        let telemetry = AgentTelemetry.randomPolicy(
-            rewardInput: reward,
-            obs: safeObs,
-            action: action,
-            agentStepMs: currentTimeMilliseconds() - stepStart
-        )
+        let action = (0..<(actDim * batchSize)).map { _ in seededFloat(in: -1...1, rng: rng) }
+        
+        let telemetry = safeObs.withUnsafeBufferPointer { obsPtr in
+            action.withUnsafeBufferPointer { actPtr in
+                AgentTelemetry.randomPolicy(
+                    rewardInput: reward.first ?? 0,
+                    obs: UnsafeBufferPointer(start: obsPtr.baseAddress, count: obsDim),
+                    action: UnsafeBufferPointer(start: actPtr.baseAddress, count: actDim),
+                    agentStepMs: currentTimeMilliseconds() - stepStart
+                )
+            }
+        }
+        
         return AgentStepResult(action: action, telemetry: telemetry)
     }
 }
@@ -1318,10 +1439,12 @@ private final class RandomPolicyRunner: PolicyRunner {
             Foundation.exit(1)
         }
 
+        let numEnvs = ProcessInfo.processInfo.environment["OAK_NUM_ENVS"].flatMap(Int.init) ?? 1
+
         for (name, makeEnv) in envsToRun {
-            let env = makeEnv()
+            let env = VectorEnv(name: name, factory: makeEnv, count: numEnvs)
             let runner: any PolicyRunner = requestedPolicy == "random"
-                ? RandomPolicyRunner(actDim: env.actDim, seed: runSeed)
+                ? RandomPolicyRunner(obsDim: env.obsDim, actDim: env.actDim, seed: runSeed)
                 : OaK(obsDim: env.obsDim, actDim: env.actDim, seed: runSeed)
             let seedSuffix = runSeed.map { " seed=\($0)" } ?? ""
             print("\n\(name) (\(type(of: env))) [policy=\(runner.policyName)\(seedSuffix)]")
@@ -1345,7 +1468,7 @@ private final class RandomPolicyRunner: PolicyRunner {
                 logWarning("Resetting environment \(name)")
             }
             var obs = env.reset()
-            var pendingReward: Float = 0
+            var pendingRewards = Array(repeating: Float(0), count: numEnvs)
             if carlaDebugEnabled {
                 logWarning("Environment \(name) reset complete")
             }
@@ -1371,7 +1494,7 @@ private final class RandomPolicyRunner: PolicyRunner {
                 }
             }
             while true {
-                let nextEnvironmentStep = totalEnvironmentSteps + 1
+                let nextEnvironmentStep = totalEnvironmentSteps + numEnvs
                 let isMeasuredStep = nextEnvironmentStep > runControl.warmupSteps
                 if carlaDebugEnabled {
                     logWarning("Computing action for environment \(name) step \(nextEnvironmentStep)")
@@ -1383,28 +1506,31 @@ private final class RandomPolicyRunner: PolicyRunner {
                         print("[metrics] warmup_complete env=\(name) policy=\(runner.policyName) warmup_steps=\(runControl.warmupSteps)")
                     }
                 }
-                let agentResult = runner.step(obs: obs, reward: pendingReward, wallClockBudgetNs: adaptiveBudgetNs)
+                let agentResult = runner.step(obs: obs, reward: pendingRewards, wallClockBudgetNs: adaptiveBudgetNs, batchSize: numEnvs)
                 if carlaDebugEnabled {
                     logWarning("Stepping environment \(name) step \(nextEnvironmentStep)")
                 }
                 let envStepStart = currentTimeMilliseconds()
-                let result = env.step(agentResult.action)
+                let cleanAction = sanitizeVector(agentResult.action, count: numEnvs * env.actDim, clamp: -1...1)
+                let result = env.step(cleanAction)
                 let envStepMs = currentTimeMilliseconds() - envStepStart
                 let totalStepMs = currentTimeMilliseconds() - totalStepStart
                 if configuredBudgetNs == nil {
-                    adaptiveBudgetNs = max(UInt64(totalStepMs * 1_000_000), 1)
+                    adaptiveBudgetNs = 10_000 // Fixed 10us budget for continual planning
                 }
                 totalEnvironmentSteps = nextEnvironmentStep
                 var shouldStop = false
                 if isMeasuredStep {
-                    measuredSteps += 1
+                    measuredSteps += numEnvs
                     if let measurementStartMs {
                         measuredSeconds = max((currentTimeMilliseconds() - measurementStartMs) / 1000, 0)
                     }
 
+                    let avgReward = result.1.reduce(0, +) / Float(numEnvs)
+                    let anyDone = result.2.contains(true)
                     let metricsRecords = metrics.recordStep(
-                        reward: result.1,
-                        done: result.2,
+                        reward: avgReward,
+                        done: anyDone,
                         telemetry: agentResult.telemetry,
                         envStepMs: envStepMs,
                         totalStepMs: totalStepMs
@@ -1441,15 +1567,8 @@ private final class RandomPolicyRunner: PolicyRunner {
                     shouldStop = true
                 }
 
-                if result.2 {
-                    pendingReward = 0
-                    if !shouldStop {
-                        obs = env.reset()
-                    }
-                } else {
-                    obs = result.0
-                    pendingReward = result.1
-                }
+                obs = result.0
+                pendingRewards = result.1
 
                 if shouldStop {
                     if metricsConfiguration.emitStdoutSummaries {
@@ -1458,6 +1577,7 @@ private final class RandomPolicyRunner: PolicyRunner {
                     if carlaDebugEnabled {
                         logWarning("Stopping environment \(name) because \(stopReason)")
                     }
+                    env.close()
                     break
                 }
             }
