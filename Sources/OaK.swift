@@ -2,6 +2,7 @@ import Darwin
 import Foundation
 import Metal
 import PythonKit
+import MLX
 
 private func candidateCarlaRoots() -> [String] {
     let fileManager = FileManager.default
@@ -44,7 +45,7 @@ private func shellQuoted(_ value: String) -> String {
     "'" + value.replacingOccurrences(of: "'", with: "'\\''") + "'"
 }
 
-private final class PythonRuntime: @unchecked Sendable {
+final class PythonRuntime: @unchecked Sendable {
     static let shared = PythonRuntime()
 
     private let lock = NSLock()
@@ -1096,57 +1097,6 @@ final class DMControlEnv: PyEnv {
     }
 }
 
-final class MiniGridEnv: PyEnv {
-    private let env: PythonObject
-    private var resetSeedSequence: ResetSeedSequence
-    private var initialObservation: [Float]?
-    let obsDim: Int
-    let actDim: Int
-
-    init(id: String = "MiniGrid-Empty-8x8-v0") {
-        let baseSeed = configuredRunSeed()
-        let runtime = PythonRuntime.shared
-        runtime.require(modules: ["minigrid", "gymnasium", "numpy"])
-        env = runtime.gym.make(id)
-        resetSeedSequence = ResetSeedSequence(baseSeed: baseSeed)
-        if let baseSeed {
-            seedPythonGlobals(baseSeed)
-            seedSpace(env.action_space, seed: baseSeed)
-            seedSpace(env.observation_space, seed: baseSeed)
-        }
-        actDim = Int(env.action_space.n) ?? 7
-        let result = resetPythonEnv(env, seed: resetSeedSequence.nextResetSeed())
-        let initialObservation = Self.encodeObservation(result[0])
-        self.initialObservation = initialObservation
-        obsDim = initialObservation.count
-    }
-
-    func reset() -> [Float] {
-        if let initialObservation {
-            self.initialObservation = nil
-            return initialObservation
-        }
-
-        let result = resetPythonEnv(env, seed: resetSeedSequence.nextResetSeed())
-        return Self.encodeObservation(result[0])
-    }
-
-    func step(_ action: [Float]) -> ([Float], Float, Bool) {
-        let actionIndex = discreteActionIndex(from: action.first ?? 0, count: actDim)
-        let result = env.step(actionIndex)
-        let obs = Self.encodeObservation(result[0])
-        let reward = sanitizeScalar(Float(result[1]) ?? 0)
-        let terminated = Bool(result[2]) ?? false
-        let truncated = Bool(result[3]) ?? false
-        return (obs, reward, terminated || truncated)
-    }
-
-    private static func encodeObservation(_ observation: PythonObject) -> [Float] {
-        let image = observation["image"]
-        return pythonFlatArray(image).map { $0 / 10.0 }
-    }
-}
-
 private protocol PolicyRunner {
     var policyName: String { get }
     var backendName: String { get }
@@ -1155,61 +1105,47 @@ private protocol PolicyRunner {
 
 final class VectorEnv {
     private let envs: [PyEnv]?
-    private let batchedEnv: PythonObject?
+    private let envpoolEnv: EnvPoolEnv?
     let numEnvs: Int
     let obsDim: Int
     let actDim: Int
     
-    init(name: String, factory: () -> PyEnv, count: Int) {
+    init(name: String, count: Int, factory: (() -> PyEnv)? = nil, envpoolTaskId: String? = nil) {
         self.numEnvs = count
         
-        let supportedBatchEnvs = ["pyflyt", "minigrid", "cheetah", "walker", "humanoid"]
-        if count > 1 && supportedBatchEnvs.contains(name) {
-            let runtime = PythonRuntime.shared
-            let batchedModule = runtime.module(named: "batched_env_bridge")
-            let Bridge = batchedModule.BatchedEnvBridge
-            
-            let envType: String
-            var envArgs: [PythonObject] = []
+        let supportedEnvPoolEnvs = ["cheetah", "walker", "humanoid", "minigrid"]
+        if supportedEnvPoolEnvs.contains(name) {
             let baseSeed = configuredRunSeed()
-            let pySeed = baseSeed.map { PythonObject($0) } ?? PythonObject(Python.None)
-            
-            switch name {
-            case "cheetah":
-                envType = "dm_control"
-                envArgs = ["cheetah", "run", pySeed]
-            case "walker":
-                envType = "dm_control"
-                envArgs = ["walker", "walk", pySeed]
-            case "humanoid":
-                envType = "dm_control"
-                envArgs = ["humanoid", "stand", pySeed]
-            case "pyflyt":
-                envType = "pyflyt"
-                envArgs = ["PyFlyt/QuadX-Hover-v0", pySeed]
-            case "minigrid":
-                envType = "minigrid"
-                envArgs = ["MiniGrid-Empty-8x8-v0", pySeed]
-            default:
-                fatalError("Unsupported batched env")
+            let envId: String
+            if let task = envpoolTaskId, !task.isEmpty {
+                envId = task
+            } else if let fixed = EnvPoolCatalog.logicalNameToFixedEnvId[name] {
+                envId = fixed
+            } else {
+                fatalError(
+                    "EnvPool logical name '\(name)' needs a concrete gym id. " +
+                        "For suite-style families pass envpoolTaskId from the runner, or set OAK_ENVPOOL_TASK_ID."
+                )
             }
-            
-            self.batchedEnv = Bridge(envType, envArgs, count)
+            self.envpoolEnv = EnvPoolEnv(id: envId, numEnvs: count, seed: baseSeed)
             self.envs = nil
-            self.obsDim = Int(batchedEnv!.get_obs_dim())!
-            self.actDim = Int(batchedEnv!.get_act_dim())!
+            self.obsDim = self.envpoolEnv!.obsDim
+            self.actDim = self.envpoolEnv!.actDim
         } else {
+            guard let factory else {
+                fatalError("Environment \(name) requires a PyEnv factory but none was provided.")
+            }
             self.envs = (0..<count).map { _ in factory() }
-            self.batchedEnv = nil
+            self.envpoolEnv = nil
             self.obsDim = self.envs![0].obsDim
             self.actDim = self.envs![0].actDim
         }
     }
     
     func reset() -> [Float] {
-        if let batchedEnv {
-            let pyObs = batchedEnv.initial_reset()
-            return pythonFlatArray(pyObs)
+        if let envpoolEnv {
+            let mlxObs = envpoolEnv.reset()
+            return mlxObs.asArray(Float.self)
         }
         
         var obs: [Float] = []
@@ -1221,13 +1157,12 @@ final class VectorEnv {
     }
     
     func step(_ action: [Float]) -> ([Float], [Float], [Bool]) {
-        if let batchedEnv {
-            let np = PythonRuntime.shared.numpy
-            let npAction = np.array(action, dtype: np.float32)
-            let result = batchedEnv.step(npAction)
-            let nextObs = pythonFlatArray(result[0])
-            let rewards = pythonFlatArray(result[1])
-            let dones = pythonFlatArray(result[2]).map { $0 > 0.5 }
+        if let envpoolEnv {
+            let mlxAction = MLXArray(action, [numEnvs, actDim])
+            let result = envpoolEnv.step(mlxAction)
+            let nextObs = result.obs.asArray(Float.self)
+            let rewards = result.reward.asArray(Float.self)
+            let dones = result.done.asArray(Bool.self)
             return (nextObs, rewards, dones)
         }
         
@@ -1256,7 +1191,7 @@ final class VectorEnv {
     }
 
     func close() {
-        batchedEnv?.close()
+        envpoolEnv?.close()
     }
 }
 
@@ -1341,6 +1276,64 @@ private final class RandomPolicyRunner: PolicyRunner {
     }
 }
 
+private struct EnvRun {
+    let baseName: String
+    let envpoolTaskId: String?
+    let factory: (() -> PyEnv)?
+}
+
+private func envRunsForRequest(availableEnvs: [(String, (() -> PyEnv)?)], requestedEnv: String) -> [EnvRun] {
+    let req = requestedEnv.lowercased()
+
+    func expandSuiteRuns(logicalName: String, prefix: String) -> [EnvRun] {
+        let ids = EnvPoolCatalog.registeredEnvIds(withPrefix: prefix)
+        guard !ids.isEmpty else {
+            fatalError("envpool has no registered ids with prefix '\(prefix)'. Check envpool build and prefix.")
+        }
+        return ids.map { EnvRun(baseName: logicalName, envpoolTaskId: $0, factory: nil) }
+    }
+
+    /// `minigrid` is a short name for "EnvPool tasks under the default MiniGrid family prefix"; suite vs one task is generic envpool config.
+    func resolveMinigridRuns() -> [EnvRun] {
+        let primary = ProcessInfo.processInfo.environment["OAK_ENVPOOL_TASK_ID"]?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let legacy = ProcessInfo.processInfo.environment["OAK_MINIGRID_ENV_ID"]?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let task: String
+        if let p = primary, !p.isEmpty {
+            task = p
+        } else if let l = legacy, !l.isEmpty {
+            task = l
+        } else {
+            task = ""
+        }
+        if !task.isEmpty, task.lowercased() != "suite" {
+            return [EnvRun(baseName: "minigrid", envpoolTaskId: task, factory: nil)]
+        }
+        let prefixEnv = ProcessInfo.processInfo.environment["OAK_ENVPOOL_SUITE_PREFIX"]?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let prefix = (prefixEnv?.isEmpty == false) ? prefixEnv! : EnvPoolCatalog.minigridSuitePrefix
+        return expandSuiteRuns(logicalName: "minigrid", prefix: prefix)
+    }
+
+    if req == "all" {
+        var runs: [EnvRun] = []
+        for (name, factory) in availableEnvs {
+            if name == "minigrid" {
+                runs.append(contentsOf: resolveMinigridRuns())
+            } else {
+                runs.append(EnvRun(baseName: name, envpoolTaskId: nil, factory: factory))
+            }
+        }
+        return runs
+    }
+
+    if req == "minigrid" {
+        return resolveMinigridRuns()
+    }
+
+    return availableEnvs
+        .filter { $0.0.lowercased() == req }
+        .map { EnvRun(baseName: $0.0, envpoolTaskId: nil, factory: $0.1) }
+}
+
 @main struct Main {
     static func main() {
         let cliArguments = Array(CommandLine.arguments.dropFirst())
@@ -1349,13 +1342,13 @@ private final class RandomPolicyRunner: PolicyRunner {
         }
 
         print("OaK - Alberta Plan")
-        let availableEnvs: [(String, () -> PyEnv)] = [
+        let availableEnvs: [(String, (() -> PyEnv)?)] = [
             ("pyflyt", { PyFlytEnv() }),
             ("carla", { CARLAEnv() }),
-            ("cheetah", { DMControlEnv(domain: "cheetah", task: "run") }),
-            ("walker", { DMControlEnv(domain: "walker", task: "walk") }),
-            ("humanoid", { DMControlEnv(domain: "humanoid", task: "stand") }),
-            ("minigrid", { MiniGridEnv() }),
+            ("cheetah", nil),
+            ("walker", nil),
+            ("humanoid", nil),
+            ("minigrid", nil),
         ]
 
         let requestedEnv = ProcessInfo.processInfo.environment["OAK_ENV"]
@@ -1366,9 +1359,7 @@ private final class RandomPolicyRunner: PolicyRunner {
         let configuredBudgetNs = configuredStepBudgetNs()
         let runControl = RunControl.resolve()
         let maxEnvironmentSteps = ProcessInfo.processInfo.environment["OAK_MAX_STEPS"].flatMap(Int.init)
-        let envsToRun = requestedEnv == "all"
-            ? availableEnvs
-            : availableEnvs.filter { $0.0 == requestedEnv.lowercased() }
+        let envsToRun = envRunsForRequest(availableEnvs: availableEnvs, requestedEnv: requestedEnv)
 
         guard ["oak", "random"].contains(requestedPolicy) else {
             fputs("Unknown policy '\(requestedPolicy)'. Choose one of: oak, random\n", stderr)
@@ -1383,16 +1374,18 @@ private final class RandomPolicyRunner: PolicyRunner {
 
         let numEnvs = ProcessInfo.processInfo.environment["OAK_NUM_ENVS"].flatMap(Int.init) ?? 1
 
-        for (name, makeEnv) in envsToRun {
-            let env = VectorEnv(name: name, factory: makeEnv, count: numEnvs)
+        for run in envsToRun {
+            let name = run.baseName
+            let metricsEnvName: String = run.envpoolTaskId ?? name
+            let env = VectorEnv(name: name, count: numEnvs, factory: run.factory, envpoolTaskId: run.envpoolTaskId)
             let runner: any PolicyRunner = requestedPolicy == "random"
                 ? RandomPolicyRunner(obsDim: env.obsDim, actDim: env.actDim, seed: runSeed)
                 : OaK(obsDim: env.obsDim, actDim: env.actDim, seed: runSeed)
             let seedSuffix = runSeed.map { " seed=\($0)" } ?? ""
-            print("\n\(name) (\(type(of: env))) [policy=\(runner.policyName)\(seedSuffix)]")
-            let metricsConfiguration = MetricsConfiguration.resolve(envName: name, policyName: runner.policyName)
+            print("\n\(metricsEnvName) (\(type(of: env))) [policy=\(runner.policyName)\(seedSuffix)]")
+            let metricsConfiguration = MetricsConfiguration.resolve(envName: metricsEnvName, policyName: runner.policyName)
             let metrics = RunMetricsAggregator(
-                envName: name,
+                envName: metricsEnvName,
                 policyName: runner.policyName,
                 backend: runner.backendName,
                 windowSize: metricsConfiguration.windowSize,
@@ -1407,12 +1400,12 @@ private final class RandomPolicyRunner: PolicyRunner {
             }
             let carlaDebugEnabled = ProcessInfo.processInfo.environment["OAK_CARLA_DEBUG"] == "1"
             if carlaDebugEnabled {
-                logWarning("Resetting environment \(name)")
+                logWarning("Resetting environment \(metricsEnvName)")
             }
             var obs = env.reset()
             var pendingRewards = Array(repeating: Float(0), count: numEnvs)
             if carlaDebugEnabled {
-                logWarning("Environment \(name) reset complete")
+                logWarning("Environment \(metricsEnvName) reset complete")
             }
             var totalEnvironmentSteps = 0
             var measuredSteps = 0
@@ -1424,7 +1417,8 @@ private final class RandomPolicyRunner: PolicyRunner {
                 let finalRecord = metrics.runEndRecord(
                     control: runControl,
                     stopReason: stopReason,
-                    measuredSeconds: measuredSeconds
+                    measuredSeconds: measuredSeconds,
+                    globalMeasuredEnvSteps: measuredSteps
                 )
                 do {
                     try metricsSink.write(finalRecord)
@@ -1439,18 +1433,18 @@ private final class RandomPolicyRunner: PolicyRunner {
                 let nextEnvironmentStep = totalEnvironmentSteps + numEnvs
                 let isMeasuredStep = nextEnvironmentStep > runControl.warmupSteps
                 if carlaDebugEnabled {
-                    logWarning("Computing action for environment \(name) step \(nextEnvironmentStep)")
+                    logWarning("Computing action for environment \(metricsEnvName) step \(nextEnvironmentStep)")
                 }
                 let totalStepStart = currentTimeMilliseconds()
                 if isMeasuredStep && measurementStartMs == nil {
                     measurementStartMs = totalStepStart
                     if runControl.warmupSteps > 0, metricsConfiguration.emitStdoutSummaries {
-                        print("[metrics] warmup_complete env=\(name) policy=\(runner.policyName) warmup_steps=\(runControl.warmupSteps)")
+                        print("[metrics] warmup_complete env=\(metricsEnvName) policy=\(runner.policyName) warmup_steps=\(runControl.warmupSteps)")
                     }
                 }
                 let agentResult = runner.step(obs: obs, reward: pendingRewards, wallClockBudgetNs: adaptiveBudgetNs, batchSize: numEnvs)
                 if carlaDebugEnabled {
-                    logWarning("Stepping environment \(name) step \(nextEnvironmentStep)")
+                    logWarning("Stepping environment \(metricsEnvName) step \(nextEnvironmentStep)")
                 }
                 let envStepStart = currentTimeMilliseconds()
                 let cleanAction = sanitizeVector(agentResult.action, count: numEnvs * env.actDim, clamp: -1...1)
@@ -1502,7 +1496,7 @@ private final class RandomPolicyRunner: PolicyRunner {
                     }
                 }
                 if carlaDebugEnabled {
-                    logWarning("Environment \(name) step \(totalEnvironmentSteps) complete")
+                    logWarning("Environment \(metricsEnvName) step \(totalEnvironmentSteps) complete")
                 }
                 if let maxEnvironmentSteps, totalEnvironmentSteps >= maxEnvironmentSteps {
                     stopReason = "max_env_steps"
@@ -1517,7 +1511,7 @@ private final class RandomPolicyRunner: PolicyRunner {
                         print("Stopping after \(measuredSteps) measured steps (\(totalEnvironmentSteps) total env steps), reason=\(stopReason)")
                     }
                     if carlaDebugEnabled {
-                        logWarning("Stopping environment \(name) because \(stopReason)")
+                        logWarning("Stopping environment \(metricsEnvName) because \(stopReason)")
                     }
                     env.close()
                     break

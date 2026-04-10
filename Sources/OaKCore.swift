@@ -1,6 +1,8 @@
 import Darwin
 import Foundation
 import Metal
+import MLX
+import MLXNN
 
 struct StepInput {
     let obs: [Float] // Flattened batchSize * obsDim
@@ -339,7 +341,7 @@ final class ReactiveControl {
     let capacityLimit: Int
     let policy: SharedFloatStorage
     let valueWeights: SharedFloatStorage
-    private(set) var rewardRate: Float
+    var rewardRate: Float
 
     init(actDim: Int, capacityLimit: Int, device: MTLDevice?, rng: CoreSeededRNG) {
         self.actDim = actDim
@@ -400,101 +402,144 @@ final class ReactiveControl {
     }
 }
 
-final class PredictiveKnowledge {
+final class PredictiveKnowledge: Module {
     let capacityLimit: Int
-    let weights: SharedFloatStorage
-    let alpha: SharedFloatStorage
-    let h: SharedFloatStorage
-    let v: SharedFloatStorage
+    @ModuleInfo var weights: MLXArray
+    @ModuleInfo var alpha: MLXArray
+    @ModuleInfo var h: MLXArray
+    @ModuleInfo var v: MLXArray
     private(set) var utility: [Double]
 
     let mu: Float
     let tau: Float
+
+    private var compiledUpdate: (([MLXArray]) -> [MLXArray])?
+    private var compiledRank: Int = -1
 
     init(capacityLimit: Int) {
         self.capacityLimit = capacityLimit
         self.mu = 1.0 / Float(max(capacityLimit, 1))
         self.tau = Float(capacityLimit * capacityLimit)
         
-        let numWeights = max(capacityLimit * capacityLimit, 1)
-        weights = SharedFloatStorage(count: numWeights, device: nil)
-        alpha = SharedFloatStorage(count: numWeights, device: nil)
-        h = SharedFloatStorage(count: numWeights, device: nil)
-        v = SharedFloatStorage(count: numWeights, device: nil)
+        let numWeights = max(capacityLimit, 1)
+        self.weights = MLXArray.zeros([numWeights, numWeights])
+        self.alpha = MLXArray.zeros([numWeights, numWeights]) + 0.1
+        self.h = MLXArray.zeros([numWeights, numWeights])
+        self.v = MLXArray.zeros([numWeights, numWeights])
         
-        for i in 0..<numWeights {
-            alpha[i] = 0.1
-            h[i] = 0.0
-            v[i] = 0.0
-        }
-        
-        utility = Array(repeating: 0, count: capacityLimit)
+        self.utility = Array(repeating: 0, count: capacityLimit)
+        super.init()
     }
 
-    func update(prevState: SharedFloatStorage, prevOffset: Int, state: SharedFloatStorage, stateOffset: Int, activeRank: Int) -> Double {
+    func updateBatched(prevState: SharedFloatStorage, prevIdx: Int, state: SharedFloatStorage, stateIdx: Int, batchSize: Int, capacityLimit: Int, activeRank: Int) -> Double {
         guard activeRank > 0 else { return 0 }
-        var totalError = 0.0
-        for target in 0..<activeRank {
-            var prediction: Float = 0
-            let rowOffset = target * capacityLimit
-            for column in 0..<activeRank {
-                prediction += weights[rowOffset + column] * prevState[prevOffset + column]
-            }
-            let error = state[stateOffset + target] - prediction
-            totalError += Double(abs(error))
-            utility[target] += Double(abs(error))
-            
-            // Loop 1: Update v and tentative alpha
-            for column in 0..<activeRank {
-                let x = prevState[prevOffset + column]
-                let idx = rowOffset + column
-                let deltaXh = error * x * h[idx]
+        
+        let pOffset = prevIdx * batchSize * capacityLimit
+        let sOffset = stateIdx * batchSize * capacityLimit
+        
+        let xArray = Array(prevState.immutableBufferPointer(offset: pOffset, length: batchSize * capacityLimit))
+        let targetArray = Array(state.immutableBufferPointer(offset: sOffset, length: batchSize * capacityLimit))
+        
+        let xFull = MLXArray(xArray, [batchSize, capacityLimit])
+        let targetFull = MLXArray(targetArray, [batchSize, capacityLimit])
+        
+        let x = xFull[0..<batchSize, 0..<activeRank]
+        let target = targetFull[0..<batchSize, 0..<activeRank]
+        
+        if compiledUpdate == nil || compiledRank != activeRank {
+            compiledUpdate = MLX.compile(inputs: [self], outputs: [self], shapeless: false) { [weak self] arrays in
+                guard let self = self else { return [] }
+                let x = arrays[0]
+                let target = arrays[1]
+                let batchSize = x.shape[0]
+                let activeRank = x.shape[1]
+                
+                let w = self.weights[0..<activeRank, 0..<activeRank]
+                let a = self.alpha[0..<activeRank, 0..<activeRank]
+                let h_trace = self.h[0..<activeRank, 0..<activeRank]
+                let v_trace = self.v[0..<activeRank, 0..<activeRank]
+                
+                let gradFn = valueAndGrad(model: self) { (model: PredictiveKnowledge, input: MLXArray, tgt: MLXArray) -> MLXArray in
+                    let activeW = model.weights[0..<activeRank, 0..<activeRank]
+                    // input is [batchSize, activeRank], activeW is [activeRank, activeRank]
+                    // pred should be [batchSize, activeRank] -> matmul(input, activeW.T)
+                    let pred = matmul(input, activeW.T)
+                    return (0.5 / Float(batchSize)) * sum(square(pred - tgt))
+                }
+                let (_, grads) = gradFn(self, x, target)
+                let grad = grads[unwrapping: "weights"]![0..<activeRank, 0..<activeRank]
+                
+                let pred = matmul(x, w.T)
+                let error = pred - target
+                
+                let deltaXh = -grad * h_trace
                 let absDeltaXh = abs(deltaXh)
                 
-                v[idx] = max(absDeltaXh, v[idx] + (1.0 / tau) * alpha[idx] * x * x * (absDeltaXh - v[idx]))
-                if v[idx] != 0.0 {
-                    alpha[idx] *= exp(mu * deltaXh / v[idx])
-                }
-            }
-            
-            // Calculate M with tentative alpha
-            var currentM: Float = 0.0
-            for column in 0..<activeRank {
-                let x = prevState[prevOffset + column]
-                let idx = rowOffset + column
-                currentM += alpha[idx] * x * x
-            }
-            let m_eff = max(currentM, 1.0)
-            
-            // Loop 2: Cap alpha, update weights and traces
-            for column in 0..<activeRank {
-                let x = prevState[prevOffset + column]
-                let idx = rowOffset + column
+                // x2 is averaged over the batch
+                let x2 = mean(square(x), axes: [0]).reshaped([1, activeRank])
                 
-                alpha[idx] /= m_eff
-                let currentAlpha = alpha[idx]
+                let vDiff = absDeltaXh - v_trace
+                let vUpdate = (1.0 / self.tau) * a * x2 * vDiff
+                let newV = maximum(absDeltaXh, v_trace + vUpdate)
+                let vZeroMask = newV .== 0.0
+                let safeV = MLX.where(vZeroMask, MLXArray(1.0), newV)
+                let muFactor = MLXArray(self.mu) * deltaXh / safeV
+                var newA = a * exp(muFactor)
+                newA = MLX.where(vZeroMask, a, newA)
                 
-                weights[idx] += currentAlpha * error * x
-                h[idx] = h[idx] * (1.0 - currentAlpha * x * x) + currentAlpha * error * x
+                let currentM = sum(newA * x2, axes: [1], keepDims: true)
+                let m_eff = maximum(currentM, MLXArray(1.0))
+                
+                newA = newA / m_eff
+                
+                let gradStep = newA * grad
+                let newWeights = w - gradStep
+                let hDecay = h_trace * (1.0 - newA * x2)
+                let newH = hDecay - gradStep
+                
+                self.alpha[0..<activeRank, 0..<activeRank] = newA
+                self.v[0..<activeRank, 0..<activeRank] = newV
+                self.h[0..<activeRank, 0..<activeRank] = newH
+                self.weights[0..<activeRank, 0..<activeRank] = newWeights
+                
+                return [error]
             }
+            compiledRank = activeRank
         }
+        
+        let outputs = compiledUpdate!([x, target])
+        let error = outputs[0]
+        
+        let totalError = Double(sum(abs(error)).item(Float.self))
+        
+        let errorMean = mean(abs(error), axes: [0]).asArray(Float.self)
+        for i in 0..<activeRank {
+            utility[i] += Double(errorMean[i])
+        }
+        
+        eval(self, self.alpha, self.v, self.h, self.weights)
+        
         return totalError
     }
 }
 
-final class WorldModel {
+final class WorldModel: Module {
     let capacityLimit: Int
     let actDim: Int
     let inputWidth: Int
-    let weights: SharedFloatStorage
-    let alpha: SharedFloatStorage
-    let h: SharedFloatStorage
-    let v: SharedFloatStorage
+    @ModuleInfo var weights: MLXArray
+    @ModuleInfo var alpha: MLXArray
+    @ModuleInfo var h: MLXArray
+    @ModuleInfo var v: MLXArray
     private let inputStorage: SharedFloatStorage
     private let predictionStorage: SharedFloatStorage
 
     let mu: Float
     let tau: Float
+
+    private var compiledUpdate: (([MLXArray]) -> [MLXArray])?
+    private var compiledPredict: (([MLXArray]) -> [MLXArray])?
+    private var compiledRank: Int = -1
 
     init(capacityLimit: Int, actDim: Int) {
         self.capacityLimit = capacityLimit
@@ -504,78 +549,140 @@ final class WorldModel {
         self.mu = 1.0 / Float(max(capacityLimit, 1))
         self.tau = Float(capacityLimit * capacityLimit)
         
-        let numWeights = max((capacityLimit + 1) * inputWidth, 1)
-        weights = SharedFloatStorage(count: numWeights, device: nil)
-        alpha = SharedFloatStorage(count: numWeights, device: nil)
-        h = SharedFloatStorage(count: numWeights, device: nil)
-        v = SharedFloatStorage(count: numWeights, device: nil)
-        
-        for i in 0..<numWeights {
-            alpha[i] = 0.1
-            h[i] = 0.0
-            v[i] = 0.0
-        }
+        let numWeights = max(capacityLimit + 1, 1)
+        self.weights = MLXArray.zeros([numWeights, inputWidth])
+        self.alpha = MLXArray.zeros([numWeights, inputWidth]) + 0.1
+        self.h = MLXArray.zeros([numWeights, inputWidth])
+        self.v = MLXArray.zeros([numWeights, inputWidth])
         
         inputStorage = SharedFloatStorage(count: max(inputWidth, 1), device: nil)
         predictionStorage = SharedFloatStorage(count: max(capacityLimit + 1, 1), device: nil)
+        super.init()
     }
 
-    func update(prevState: SharedFloatStorage, prevOffset: Int, state: SharedFloatStorage, stateOffset: Int, prevAction: SharedFloatStorage, prevActOffset: Int, reward: Float, activeRank: Int) -> Double {
+    func updateBatched(prevState: SharedFloatStorage, prevIdx: Int, state: SharedFloatStorage, stateIdx: Int, prevAction: SharedFloatStorage, activeIdx: Int, reward: SharedFloatStorage, batchSize: Int, capacityLimit: Int, activeRank: Int) -> Double {
         guard activeRank > 0 else { return 0 }
-        encodeInput(state: prevState, stateOffset: prevOffset, action: prevAction, actOffset: prevActOffset, activeRank: activeRank)
-        var totalError = 0.0
-
-        for row in 0...activeRank {
-            let target: Float = row == 0 ? reward : state[stateOffset + row - 1]
-            let prediction = predictRow(row: row, activeRank: activeRank)
-            let error = target - prediction
-            totalError += Double(abs(error))
-            
-            let rowOffset = row * inputWidth
-            
-            // Loop 1: Update v and tentative alpha
-            for column in 0..<inputWidth {
-                let x = inputStorage[column]
-                let idx = rowOffset + column
-                let deltaXh = error * x * h[idx]
+        
+        let pOffset = prevIdx * batchSize * capacityLimit
+        let sOffset = stateIdx * batchSize * capacityLimit
+        let aOffset = prevIdx * batchSize * actDim
+        let rOffset = activeIdx * batchSize
+        
+        let pArray = Array(prevState.immutableBufferPointer(offset: pOffset, length: batchSize * capacityLimit))
+        let sArray = Array(state.immutableBufferPointer(offset: sOffset, length: batchSize * capacityLimit))
+        let actArray = Array(prevAction.immutableBufferPointer(offset: aOffset, length: batchSize * actDim))
+        let rArray = Array(reward.immutableBufferPointer(offset: rOffset, length: batchSize))
+        
+        let pFull = MLXArray(pArray, [batchSize, capacityLimit])
+        let sFull = MLXArray(sArray, [batchSize, capacityLimit])
+        let actFull = MLXArray(actArray, [batchSize, actDim])
+        let rFull = MLXArray(rArray, [batchSize, 1])
+        
+        let pActive = pFull[0..<batchSize, 0..<activeRank]
+        let sActive = sFull[0..<batchSize, 0..<activeRank]
+        
+        let padding = MLXArray.zeros([batchSize, capacityLimit - activeRank])
+        let ones = MLXArray.ones([batchSize, 1])
+        let x = concatenated([pActive, padding, actFull, ones], axis: 1)
+        
+        let target = concatenated([rFull, sActive], axis: 1)
+        
+        if compiledUpdate == nil || compiledRank != activeRank {
+            compiledUpdate = MLX.compile(inputs: [self], outputs: [self], shapeless: false) { [weak self] arrays in
+                guard let self = self else { return [] }
+                let x = arrays[0]
+                let target = arrays[1]
+                let batchSize = x.shape[0]
+                let activeRank = target.shape[1] - 1
+                
+                let w = self.weights[0...activeRank, 0..<self.inputWidth]
+                let a = self.alpha[0...activeRank, 0..<self.inputWidth]
+                let h_trace = self.h[0...activeRank, 0..<self.inputWidth]
+                let v_trace = self.v[0...activeRank, 0..<self.inputWidth]
+                
+                let gradFn = valueAndGrad(model: self) { (model: WorldModel, input: MLXArray, tgt: MLXArray) -> MLXArray in
+                    let activeW = model.weights[0...activeRank, 0..<model.inputWidth]
+                    let pred = matmul(input, activeW.T)
+                    return (0.5 / Float(batchSize)) * sum(square(pred - tgt))
+                }
+                let (_, grads) = gradFn(self, x, target)
+                let grad = grads[unwrapping: "weights"]![0...activeRank, 0..<self.inputWidth]
+                
+                let pred = matmul(x, w.T)
+                let error = pred - target
+                
+                let deltaXh = -grad * h_trace
                 let absDeltaXh = abs(deltaXh)
                 
-                v[idx] = max(absDeltaXh, v[idx] + (1.0 / tau) * alpha[idx] * x * x * (absDeltaXh - v[idx]))
-                if v[idx] != 0.0 {
-                    alpha[idx] *= exp(mu * deltaXh / v[idx])
-                }
-            }
-            
-            // Calculate M with tentative alpha
-            var currentM: Float = 0.0
-            for column in 0..<inputWidth {
-                let x = inputStorage[column]
-                let idx = rowOffset + column
-                currentM += alpha[idx] * x * x
-            }
-            let m_eff = max(currentM, 1.0)
-            
-            // Loop 2: Cap alpha, update weights and traces
-            for column in 0..<inputWidth {
-                let x = inputStorage[column]
-                let idx = rowOffset + column
+                let x2 = mean(square(x), axes: [0]).reshaped([1, self.inputWidth])
                 
-                alpha[idx] /= m_eff
-                let currentAlpha = alpha[idx]
+                let vDiff = absDeltaXh - v_trace
+                let vUpdate = (1.0 / self.tau) * a * x2 * vDiff
+                let newV = maximum(absDeltaXh, v_trace + vUpdate)
+                let vZeroMask = newV .== 0.0
+                let safeV = MLX.where(vZeroMask, MLXArray(1.0), newV)
+                let muFactor = MLXArray(self.mu) * deltaXh / safeV
+                var newA = a * exp(muFactor)
+                newA = MLX.where(vZeroMask, a, newA)
                 
-                weights[idx] += currentAlpha * error * x
-                h[idx] = h[idx] * (1.0 - currentAlpha * x * x) + currentAlpha * error * x
+                let currentM = sum(newA * x2, axes: [1], keepDims: true)
+                let m_eff = maximum(currentM, MLXArray(1.0))
+                
+                newA = newA / m_eff
+                
+                let gradStep = newA * grad
+                let newWeights = w - gradStep
+                let hDecay = h_trace * (1.0 - newA * x2)
+                let newH = hDecay - gradStep
+                
+                self.alpha[0...activeRank, 0..<self.inputWidth] = newA
+                self.v[0...activeRank, 0..<self.inputWidth] = newV
+                self.h[0...activeRank, 0..<self.inputWidth] = newH
+                self.weights[0...activeRank, 0..<self.inputWidth] = newWeights
+                
+                return [error]
             }
+            compiledRank = activeRank
         }
+        
+        let outputs = compiledUpdate!([x, target])
+        let error = outputs[0]
+        
+        let totalError = Double(sum(abs(error)).item(Float.self)) / Double(batchSize)
+        
+        eval(self, self.alpha, self.v, self.h, self.weights)
+        
         return totalError
     }
 
     func predict(state: SharedFloatStorage, stateOffset: Int, action: SharedFloatStorage, actOffset: Int, activeRank: Int, nextState: SharedFloatStorage, nextOffset: Int) -> Float {
         guard activeRank > 0 else { return 0 }
         encodeInput(state: state, stateOffset: stateOffset, action: action, actOffset: actOffset, activeRank: activeRank)
-        let rewardPrediction = predictRow(row: 0, activeRank: activeRank)
+        
+        let xArray = Array(inputStorage.immutableBufferPointer(offset: 0, length: inputWidth))
+        let x = MLXArray(xArray, [inputWidth])
+        
+        if compiledPredict == nil || compiledRank != activeRank {
+            compiledPredict = MLX.compile(inputs: [self], outputs: [self], shapeless: false) { [weak self] arrays in
+                guard let self = self else { return [] }
+                let x = arrays[0]
+                let activeRank = self.compiledRank
+                let w = self.weights[0...activeRank, 0..<self.inputWidth]
+                let pred = matmul(w, x)
+                return [pred]
+            }
+            compiledRank = activeRank
+        }
+        
+        let outputs = compiledPredict!([x])
+        let pred = outputs[0]
+        
+        eval(pred)
+        let predArray = pred.asArray(Float.self)
+        
+        let rewardPrediction = predArray[0]
         for row in 0..<activeRank {
-            nextState[nextOffset + row] = predictRow(row: row + 1, activeRank: activeRank)
+            nextState[nextOffset + row] = predArray[row + 1]
         }
         if activeRank < capacityLimit {
             for row in activeRank..<capacityLimit {
@@ -594,16 +701,6 @@ final class WorldModel {
             inputStorage[capacityLimit + index] = oakSafeScalar(actionValue, clamp: -1...1)
         }
         inputStorage[inputWidth - 1] = 1
-    }
-
-    private func predictRow(row: Int, activeRank: Int) -> Float {
-        let rowOffset = row * inputWidth
-        var sum: Float = 0
-        for column in 0..<inputWidth {
-            sum += weights[rowOffset + column] * inputStorage[column]
-        }
-        predictionStorage[row] = sum
-        return sum
     }
 }
 
@@ -871,21 +968,32 @@ class BaseSelfScalingCore: ForegroundCore {
         // 3. Compute Learning Updates on the PREVIOUS buffer
         var planningMs = 0.0
         if stepCount > 0 {
+            // Batched MLX Updates
+            let gvfErrorMean = predictiveKnowledge.updateBatched(
+                prevState: prevState, prevIdx: prevIdx, state: state, stateIdx: activeIdx,
+                batchSize: input.batchSize, capacityLimit: capacityLimit, activeRank: perception.activeRank
+            )
+            
+            let modelErrorMean = worldModel.updateBatched(
+                prevState: prevState, prevIdx: prevIdx, state: state, stateIdx: activeIdx,
+                prevAction: action, activeIdx: activeIdx, reward: reward,
+                batchSize: input.batchSize, capacityLimit: capacityLimit, activeRank: perception.activeRank
+            )
+            
+            let gvfErrorPerItem = gvfErrorMean
+            let modelErrorPerItem = modelErrorMean
+
             for b in 0..<input.batchSize {
                 let pStOff = (prevIdx * input.batchSize + b) * capacityLimit
-                let pPrevStOff = (prevIdx * input.batchSize + b) * capacityLimit // We need state(t-1), which is what we saved in prevState
+                let pPrevStOff = (prevIdx * input.batchSize + b) * capacityLimit
                 let pActOff = (prevIdx * input.batchSize + b) * actDim
                 
-                // learning for step N-1 to N
-                let r = reward[(activeIdx * input.batchSize) + b] // The reward is received at step N
-                
-                let gvfError = predictiveKnowledge.update(prevState: prevState, prevOffset: pPrevStOff, state: state, stateOffset: pStOff, activeRank: perception.activeRank)
+                let r = reward[(activeIdx * input.batchSize) + b]
                 
                 let tdDelta = control.update(prevState: prevState, prevOffset: pPrevStOff, state: state, stateOffset: pStOff, prevAction: action, prevActOffset: pActOff, reward: r, activeRank: perception.activeRank)
-                let modelError = worldModel.update(prevState: prevState, prevOffset: pPrevStOff, state: state, stateOffset: pStOff, prevAction: action, prevActOffset: pActOff, reward: r, activeRank: perception.activeRank)
                 
                 for index in 0..<perception.activeRank {
-                    let utilitySignal = Double(abs(tdDelta * prevState[pPrevStOff + index])) + gvfError + modelError + encoding.residualEnergy // approx residual
+                    let utilitySignal = Double(abs(tdDelta * prevState[pPrevStOff + index])) + gvfErrorPerItem + modelErrorPerItem + encoding.residualEnergy
                     perception.recordUtility(index: index, value: utilitySignal)
                     optionBank.recordUtility(index: index, value: utilitySignal)
                 }
@@ -979,6 +1087,82 @@ class BaseSelfScalingCore: ForegroundCore {
             reward[bufferIndex * batchSize + b] = r
         }
     }
+
+    func saveCheckpoint(url: URL) throws {
+        var stateDict: [String: MLXArray] = [:]
+        
+        let pkParams = predictiveKnowledge.parameters().flattened()
+        for (k, v) in pkParams { stateDict["pk.\(k)"] = v }
+        stateDict["pk.alpha"] = predictiveKnowledge.alpha
+        stateDict["pk.h"] = predictiveKnowledge.h
+        stateDict["pk.v"] = predictiveKnowledge.v
+        
+        let wmParams = worldModel.parameters().flattened()
+        for (k, v) in wmParams { stateDict["wm.\(k)"] = v }
+        stateDict["wm.alpha"] = worldModel.alpha
+        stateDict["wm.h"] = worldModel.h
+        stateDict["wm.v"] = worldModel.v
+        
+        let policyArray = Array(control.policy.immutableBufferPointer())
+        stateDict["control.policy"] = MLXArray(policyArray, [control.actDim * capacityLimit])
+        let valueWeightsArray = Array(control.valueWeights.immutableBufferPointer())
+        stateDict["control.valueWeights"] = MLXArray(valueWeightsArray, [capacityLimit])
+        stateDict["control.rewardRate"] = MLXArray(control.rewardRate)
+        
+        let basisArray = Array(perception.basis.immutableBufferPointer())
+        stateDict["perception.basis"] = MLXArray(basisArray, [capacityLimit * signalDim])
+        
+        let optionWeightsArray = Array(optionBank.weights.immutableBufferPointer())
+        stateDict["optionBank.weights"] = MLXArray(optionWeightsArray, [capacityLimit * actDim])
+        
+        try MLX.save(arrays: stateDict, url: url)
+    }
+
+    func loadCheckpoint(url: URL) throws {
+        var loadedDict = try MLX.loadArrays(url: url)
+        
+        if let a = loadedDict.removeValue(forKey: "pk.alpha") { predictiveKnowledge.alpha = a }
+        if let h = loadedDict.removeValue(forKey: "pk.h") { predictiveKnowledge.h = h }
+        if let v = loadedDict.removeValue(forKey: "pk.v") { predictiveKnowledge.v = v }
+        
+        var pkParams: [String: MLXArray] = [:]
+        for key in loadedDict.keys.filter({ $0.hasPrefix("pk.") }) {
+            let val = loadedDict.removeValue(forKey: key)!
+            let subKey = String(key.dropFirst(3))
+            pkParams[subKey] = val
+        }
+        predictiveKnowledge.update(parameters: ModuleParameters.unflattened(pkParams))
+        
+        if let a = loadedDict.removeValue(forKey: "wm.alpha") { worldModel.alpha = a }
+        if let h = loadedDict.removeValue(forKey: "wm.h") { worldModel.h = h }
+        if let v = loadedDict.removeValue(forKey: "wm.v") { worldModel.v = v }
+        
+        var wmParams: [String: MLXArray] = [:]
+        for key in loadedDict.keys.filter({ $0.hasPrefix("wm.") }) {
+            let val = loadedDict.removeValue(forKey: key)!
+            let subKey = String(key.dropFirst(3))
+            wmParams[subKey] = val
+        }
+        worldModel.update(parameters: ModuleParameters.unflattened(wmParams))
+        
+        if let policyArr = loadedDict.removeValue(forKey: "control.policy") {
+            control.policy.copy(from: policyArr.asArray(Float.self))
+        }
+        if let vwArr = loadedDict.removeValue(forKey: "control.valueWeights") {
+            control.valueWeights.copy(from: vwArr.asArray(Float.self))
+        }
+        if let rrArr = loadedDict.removeValue(forKey: "control.rewardRate") {
+            control.rewardRate = rrArr.item(Float.self)
+        }
+        
+        if let basisArr = loadedDict.removeValue(forKey: "perception.basis") {
+            perception.basis.copy(from: basisArr.asArray(Float.self))
+        }
+        
+        if let owArr = loadedDict.removeValue(forKey: "optionBank.weights") {
+            optionBank.weights.copy(from: owArr.asArray(Float.self))
+        }
+    }
 }
 
 final class CPUForegroundCore: BaseSelfScalingCore {
@@ -1002,9 +1186,14 @@ final class MetalForegroundCore: BaseSelfScalingCore {
     init(obsDim: Int, actDim: Int, device: MTLDevice, seed: Int?) {
         self.device = device
         queue = device.makeCommandQueue()!
-        let kernelsURL = Bundle.module.url(forResource: "Kernels", withExtension: "metal")!
-        let kernelsSource = try! String(contentsOf: kernelsURL, encoding: .utf8)
-        let library = try! device.makeLibrary(source: kernelsSource, options: nil)
+        let library: MTLLibrary
+        if let defaultLib = try? device.makeDefaultLibrary(bundle: Bundle.module) {
+            library = defaultLib
+        } else {
+            let kernelsURL = Bundle.module.url(forResource: "Kernels", withExtension: "metal")!
+            let kernelsSource = try! String(contentsOf: kernelsURL, encoding: .utf8)
+            library = try! device.makeLibrary(source: kernelsSource, options: nil)
+        }
         encodePipeline = try! device.makeComputePipelineState(function: library.makeFunction(name: "encode_state")!)
         actionPipeline = try! device.makeComputePipelineState(function: library.makeFunction(name: "policy_action")!)
         super.init(obsDim: obsDim, actDim: actDim, device: device, backendName: "metal", seed: seed)

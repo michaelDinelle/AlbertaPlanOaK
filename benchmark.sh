@@ -4,6 +4,8 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "$0")" && pwd)"
 DEFAULT_ENVS=(pyflyt cheetah walker humanoid minigrid)
 VALID_ENVS=(pyflyt carla cheetah walker humanoid minigrid)
+HARDWARE_OPTIMAL_ENVS=(cheetah walker humanoid minigrid)
+SLOW_ENVS=(pyflyt carla)
 POLICIES=(oak random)
 MODE="${OAK_BENCH_MODE:-quality}"
 SEED_START="${OAK_BENCH_SEED_START:-0}"
@@ -20,6 +22,10 @@ usage() {
 Usage: ./benchmark.sh [env ...]
 
 Runs seeded OaK-vs-random benchmarks and writes artifacts to .oak-benchmarks/.
+
+You can also pass tier groups instead of specific environments:
+  hardware-optimal : Runs the EnvPool C++ tier (cheetah, walker, humanoid) built for millions of SPS.
+  slow             : Runs the complex/Python-bound environments (pyflyt, carla) where SPS is bottlenecked.
 
 Defaults:
   envs: pyflyt cheetah walker humanoid minigrid
@@ -39,6 +45,8 @@ Environment variables:
 Notes:
   - CARLA is benchmarked only when you pass `carla` explicitly.
   - CARLA autostart is forced off unless you override OAK_CARLA_AUTOSTART.
+  - EnvPool suite: logical name `minigrid` expands to every registered id matching OAK_ENVPOOL_SUITE_PREFIX
+    (default MiniGrid-). One task: OAK_ENVPOOL_TASK_ID=MiniGrid-Empty-8x8-v0. Legacy: OAK_MINIGRID_ENV_ID still read if set.
 EOF
 }
 
@@ -53,8 +61,20 @@ is_valid_env() {
     return 1
 }
 
+is_hardware_optimal() {
+    local candidate="$1"
+    local env
+    for env in "${HARDWARE_OPTIMAL_ENVS[@]}"; do
+        if [ "$env" = "$candidate" ]; then
+            return 0
+        fi
+    done
+    return 1
+}
+
 DEFAULT_WARMUP_STEPS="${OAK_BENCH_DEFAULT_WARMUP_STEPS:-1000}"
-DEFAULT_QUALITY_STEPS="${OAK_BENCH_DEFAULT_QUALITY_STEPS:-10000}"
+# Global env steps counted after warmup until OAK_STOP_AFTER_STEPS (batched envpool steps).
+DEFAULT_QUALITY_STEPS="${OAK_BENCH_DEFAULT_QUALITY_STEPS:-50000}"
 DEFAULT_THROUGHPUT_SECONDS="${OAK_BENCH_DEFAULT_THROUGHPUT_SECONDS:-10}"
 
 validate_positive_integer() {
@@ -94,7 +114,8 @@ build_if_needed() {
 
     (
         cd "$ROOT_DIR"
-        swift build -c release
+        echo "[info] Building OaK and MLX Shaders via xcodebuild..."
+        xcodebuild -scheme OaK -configuration Release -destination 'platform=macOS' SYMROOT="$(pwd)/.build" -quiet
     )
 }
 
@@ -146,13 +167,22 @@ run_one() {
     local metrics_path="$RUNS_DIR/${env}-${policy}-${mode}-seed${seed}.jsonl"
     local log_path="$RUNS_DIR/${env}-${policy}-${mode}-seed${seed}.log"
 
-    printf '[bench] mode=%s env=%s policy=%s seed=%s warmup=%s stop_steps=%s stop_seconds=%s\n' \
-        "$mode" "$env" "$policy" "$seed" "$warmup_steps" "${stop_steps:-na}" "${stop_seconds:-na}"
+    local num_envs="${OAK_BENCH_NUM_ENVS:-}"
+    if [ -z "$num_envs" ]; then
+        if is_hardware_optimal "$env"; then
+            num_envs=1024
+        else
+            num_envs=8
+        fi
+    fi
+
+    printf '[bench] mode=%s env=%s policy=%s seed=%s warmup=%s stop_steps=%s stop_seconds=%s batch_size=%s\n' \
+        "$mode" "$env" "$policy" "$seed" "$warmup_steps" "${stop_steps:-na}" "${stop_seconds:-na}" "$num_envs"
 
     if ! (
         cd "$ROOT_DIR"
         OAK_ALLOW_CPU_FALLBACK=0 \
-        OAK_NUM_ENVS="${OAK_BENCH_NUM_ENVS:-8}" \
+        OAK_NUM_ENVS="$num_envs" \
         OAK_POLICY="$policy" \
         OAK_SEED="$seed" \
         OAK_WARMUP_STEPS="$warmup_steps" \
@@ -186,6 +216,16 @@ if [ "$#" -gt 0 ]; then
     for requested_env in "$@"; do
         if [ "$requested_env" = "all" ]; then
             ENVS+=("${DEFAULT_ENVS[@]}")
+            continue
+        fi
+
+        if [ "$requested_env" = "hardware-optimal" ]; then
+            ENVS+=("${HARDWARE_OPTIMAL_ENVS[@]}")
+            continue
+        fi
+
+        if [ "$requested_env" = "slow" ]; then
+            ENVS+=("${SLOW_ENVS[@]}")
             continue
         fi
 
@@ -344,7 +384,8 @@ with open(manifest_path, "r", encoding="utf-8") as manifest_handle:
             "total_ms": float(run_end.get("totalStepMsMean", 0.0)),
             "action_l2": float(run_end.get("actionL2Mean", 0.0)),
             "state_l2": float(run_end.get("stateL2Mean", 0.0)),
-            "measured_steps": int(run_end.get("measuredStepCount", run_end.get("step", 0))),
+            "global_env_steps": int(run_end.get("measuredStepCount", run_end.get("step", 0))),
+            "vector_updates": int(run_end.get("vectorUpdateCount", run_end.get("step", 0))),
             "measured_seconds": float(run_end.get("measuredSeconds", 0.0)),
             "stop_reason": run_end.get("stopReason"),
             "run_start": run_start,
@@ -378,7 +419,8 @@ for (mode, env, policy), entries in sorted(grouped_runs.items()):
         "stepsPerSecond": summarize(entry["sps"] for entry in entries),
         "doneCount": summarize(entry["done_count"] for entry in entries),
         "resetCount": summarize(entry["reset_count"] for entry in entries),
-        "measuredSteps": summarize(entry["measured_steps"] for entry in entries),
+        "globalEnvSteps": summarize(entry["global_env_steps"] for entry in entries),
+        "vectorUpdates": summarize(entry["vector_updates"] for entry in entries),
         "measuredSeconds": summarize(entry["measured_seconds"] for entry in entries),
         "agentStepMs": summarize(entry["agent_ms"] for entry in entries),
         "envStepMs": summarize(entry["env_ms"] for entry in entries),
@@ -427,21 +469,32 @@ with open(summary_json_path, "w", encoding="utf-8") as handle:
     json.dump(summary, handle, indent=2, sort_keys=True)
     handle.write("\n")
 
+first = runs[0] if runs else {}
 lines = [
     "# OaK Benchmark",
     "",
     f"- Generated: {summary['generatedAt']}",
     f"- Output dir: `{bench_dir}`",
     f"- Runs: {summary['runs']}",
+    "",
+    "## Methodology",
+    "",
+    "- **Stopping rule (quality mode):** after `OAK_WARMUP_STEPS`, stop once **global environment steps** (sum over parallel envs each vector step) reach `OAK_STOP_AFTER_STEPS` (benchmark default `OAK_BENCH_QUALITY_STEPS`, see manifest per run).",
+    "- **`measuredStepCount` in JSONL `run_end`:** global env steps in the measured window (not vector-update count). **`vectorUpdateCount`:** number of batched agent+env iterations.",
+    "- **SPS (`stepsPerSecond`):** global steps per second (throughput), from final run aggregates.",
+    "- **Intelligence proxy:** compare **oak vs random** on paired seeds using **reward sum/mean** over the measured window (external reward only); win = oak `rewardSum` > random on that seed.",
+    "",
+    f"- **This run (from first manifest row):** warmup_steps={first.get('warmup_steps', 'n/a')}, configured_stop_steps={first.get('configured_stop_steps', 'n/a')}, batch implied by env tier (hardware-optimal uses 1024 unless `OAK_BENCH_NUM_ENVS` set).",
+    "",
 ]
 
 for mode in sorted(summary["groups"]):
     lines.extend([
         "",
-        f"## {mode.title()}",
+        f"## {mode.title()} — throughput and reward",
         "",
-        "| env | policy | n | reward_sum | reward_mean | sps | resets | measured_steps | stop |",
-        "| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | --- |",
+        "| env | policy | n | global_env_steps | vector_updates | reward_sum | reward_mean | reward_std | sps | resets | stop |",
+        "| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |",
     ])
     for env in sorted(summary["groups"][mode]):
         for policy in ("oak", "random"):
@@ -450,11 +503,13 @@ for mode in sorted(summary["groups"]):
                 continue
             lines.append(
                 f"| {env} | {policy} | {policy_summary['n']} | "
+                f"{format_stat(policy_summary['globalEnvSteps'], digits=0)} | "
+                f"{format_stat(policy_summary['vectorUpdates'], digits=1)} | "
                 f"{format_stat(policy_summary['rewardSum'])} | "
                 f"{format_stat(policy_summary['rewardMean'])} | "
+                f"{format_stat(policy_summary['rewardStd'])} | "
                 f"{format_stat(policy_summary['stepsPerSecond'], digits=2)} | "
                 f"{format_stat(policy_summary['resetCount'], digits=2)} | "
-                f"{format_stat(policy_summary['measuredSteps'], digits=2)} | "
                 f"{', '.join(policy_summary['stopReasons'])} |"
             )
 
@@ -462,7 +517,7 @@ for mode in sorted(summary["groups"]):
     if comparisons:
         lines.extend([
             "",
-            f"### {mode.title()} vs Random",
+            f"### {mode.title()} — oak vs random (intelligence proxy)",
             "",
             "| env | paired_seeds | reward_sum_delta | reward_mean_delta | sps_delta | win/loss/tie |",
             "| --- | ---: | ---: | ---: | ---: | --- |",
@@ -480,6 +535,11 @@ for mode in sorted(summary["groups"]):
 with open(summary_md_path, "w", encoding="utf-8") as handle:
     handle.write("\n".join(lines))
     handle.write("\n")
+
+report_path = os.path.join(bench_dir, "REPORT.md")
+with open(report_path, "w", encoding="utf-8") as handle:
+    handle.write(open(summary_md_path, "r", encoding="utf-8").read())
 PY
 
 cat "$SUMMARY_MD"
+printf '\n[bench] Wrote REPORT.md (copy of summary) and summary.json in %s\n' "$BENCH_DIR"

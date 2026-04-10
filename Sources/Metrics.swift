@@ -396,7 +396,7 @@ final class RunMetricsAggregator {
         return (stepRecord, summaryRecord)
     }
 
-    func runEndRecord(control: RunControl = .unbounded, stopReason: String = "completed", measuredSeconds: Double = 0, at date: Date = Date()) -> MetricsRecord {
+    func runEndRecord(control: RunControl = .unbounded, stopReason: String = "completed", measuredSeconds: Double = 0, globalMeasuredEnvSteps: Int, at date: Date = Date()) -> MetricsRecord {
         MetricsRecord.summaryRecord(
             type: "run_end",
             timestamp: metricsRecordTimestamp(date),
@@ -407,7 +407,8 @@ final class RunMetricsAggregator {
             step: stepCount,
             seed: seed,
             warmupSteps: control.warmupSteps,
-            measuredStepCount: stepCount,
+            measuredStepCount: globalMeasuredEnvSteps,
+            vectorUpdateCount: stepCount,
             measuredSeconds: measuredSeconds,
             stopReason: stopReason,
             stopAfterMeasuredSteps: control.stopAfterMeasuredSteps,
@@ -477,6 +478,8 @@ struct MetricsRecord: Codable {
     let activeRankMean: Double?
     let activeGVFsMean: Double?
     let activeOptionsMean: Double?
+    /// For `run_end`: number of vectorized agent+env update iterations (batch steps); `measuredStepCount` is global env steps.
+    let vectorUpdateCount: Int?
 
     init(
         type: String,
@@ -537,7 +540,8 @@ struct MetricsRecord: Codable {
         plannerStepMsMean: Double? = nil,
         activeRankMean: Double? = nil,
         activeGVFsMean: Double? = nil,
-        activeOptionsMean: Double? = nil
+        activeOptionsMean: Double? = nil,
+        vectorUpdateCount: Int? = nil
     ) {
         self.type = type
         self.timestamp = timestamp
@@ -598,6 +602,7 @@ struct MetricsRecord: Codable {
         self.activeRankMean = activeRankMean
         self.activeGVFsMean = activeGVFsMean
         self.activeOptionsMean = activeOptionsMean
+        self.vectorUpdateCount = vectorUpdateCount
     }
 
     static func stepRecord(
@@ -667,6 +672,7 @@ struct MetricsRecord: Codable {
         seed: Int? = nil,
         warmupSteps: Int? = nil,
         measuredStepCount: Int? = nil,
+        vectorUpdateCount: Int? = nil,
         measuredSeconds: Double? = nil,
         stopReason: String? = nil,
         stopAfterMeasuredSteps: Int? = nil,
@@ -704,7 +710,8 @@ struct MetricsRecord: Codable {
             plannerStepMsMean: stats.plannerStepMsMean,
             activeRankMean: stats.activeRankMean,
             activeGVFsMean: stats.activeGVFsMean,
-            activeOptionsMean: stats.activeOptionsMean
+            activeOptionsMean: stats.activeOptionsMean,
+            vectorUpdateCount: vectorUpdateCount
         )
     }
 }
@@ -714,7 +721,8 @@ func formatMetricsSummary(_ record: MetricsRecord) -> String {
     let startStep = record.windowStartStep ?? record.step
     let endStep = record.windowEndStep ?? record.step
     let seedLabel = record.seed.map { " seed=\($0)" } ?? ""
-    let measuredStepCount = record.measuredStepCount ?? endStep
+    let globalEnvSteps = record.measuredStepCount ?? endStep
+    let vectorUpdates = record.vectorUpdateCount ?? record.step
     let measuredSecondsLabel = record.measuredSeconds.map { String(format: " measured_s=%.2f", $0) } ?? ""
     let stopReasonLabel = record.stopReason.map { " stop=\($0)" } ?? ""
     let rewardSum = record.rewardSum ?? 0
@@ -730,13 +738,14 @@ func formatMetricsSummary(_ record: MetricsRecord) -> String {
     let stateL2Mean = record.stateL2Mean ?? 0
 
     return String(
-        format: "[metrics] %@ env=%@%@ steps=%d-%d measured_steps=%d%@%@ reward_sum=%.5f reward_mean=%.5f reward_std=%.5f done=%d resets=%d sps=%.2f agent_ms=%.2f env_ms=%.2f total_ms=%.2f action_l2=%.5f state_l2=%.5f",
+        format: "[metrics] %@ env=%@%@ window_steps=%d-%d global_env_steps=%d vector_updates=%d%@%@ reward_sum=%.5f reward_mean=%.5f reward_std=%.5f done=%d resets=%d sps=%.2f agent_ms=%.2f env_ms=%.2f total_ms=%.2f action_l2=%.5f state_l2=%.5f",
         label,
         "\(record.env) policy=\(record.policy)",
         seedLabel,
         startStep,
         endStep,
-        measuredStepCount,
+        globalEnvSteps,
+        vectorUpdates,
         measuredSecondsLabel,
         stopReasonLabel,
         rewardSum,

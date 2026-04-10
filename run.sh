@@ -4,13 +4,14 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "$0")" && pwd)"
 source "$ROOT_DIR/scripts/carla_whisky_env.sh"
 
-OAK_BINARY="${OAK_BINARY:-$ROOT_DIR/.build/release/OaK}"
+OAK_BINARY="${OAK_BINARY:-$ROOT_DIR/.build/Release/OaK}"
 CONDA_ENV_DIR="${CONDA_ENV_DIR:-$HOME/miniforge3/envs/oak}"
 PYTHON_VERSION="${OAK_PYTHON_VERSION:-3.11}"
 PYTHON_BIN="$CONDA_ENV_DIR/bin/python"
 PYTHON_SITE_PACKAGES="$CONDA_ENV_DIR/lib/python$PYTHON_VERSION/site-packages"
 PYTHON_LIB="$CONDA_ENV_DIR/lib/libpython$PYTHON_VERSION.dylib"
 REQUESTED_ENV="${OAK_ENV:-${1:-all}}"
+# EnvPool: OAK_ENVPOOL_TASK_ID=<one gym id> or omit for suite; OAK_ENVPOOL_SUITE_PREFIX overrides default (MiniGrid-) for logical name minigrid.
 REQUESTED_POLICY="$(printf '%s' "${OAK_POLICY:-oak}" | tr '[:upper:]' '[:lower:]')"
 CARLA_RENDER_MODE="${OAK_CARLA_RENDER_MODE:-offscreen}"
 CARLA_MODE_FILE="${OAK_CARLA_MODE_FILE:-$ROOT_DIR/.oak-carla-mode}"
@@ -24,7 +25,7 @@ die() {
 }
 
 validate_release_binary() {
-    [ -x "$OAK_BINARY" ] || die "Missing release binary at $OAK_BINARY. Run 'swift build -c release' or './doctor.sh metal'."
+    [ -x "$OAK_BINARY" ] || die "Missing release binary at $OAK_BINARY. Run 'xcodebuild -scheme OaK -configuration Release -destination 'platform=macOS' SYMROOT=\"\$(pwd)/.build\"' or './doctor.sh metal'."
 }
 
 requires_python_prefix() {
@@ -43,14 +44,11 @@ python_import_snippet() {
         pyflyt)
             printf '%s\n' 'import gymnasium, numpy, PyFlyt, PyFlyt.gym_envs'
             ;;
-        minigrid)
-            printf '%s\n' 'import gymnasium, numpy, minigrid'
-            ;;
-        cheetah|walker|humanoid)
-            printf '%s\n' 'import numpy, dm_control.suite, mujoco'
+        minigrid|cheetah|walker|humanoid)
+            printf '%s\n' 'import numpy, envpool'
             ;;
         all)
-            printf '%s\n' 'import gymnasium, numpy, minigrid, PyFlyt, PyFlyt.gym_envs, dm_control.suite, mujoco'
+            printf '%s\n' 'import gymnasium, numpy, PyFlyt, PyFlyt.gym_envs, envpool'
             ;;
         *)
             printf '%s\n' ''
