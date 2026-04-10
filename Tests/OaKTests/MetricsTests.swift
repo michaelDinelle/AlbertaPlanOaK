@@ -76,7 +76,7 @@ final class MetricsTests: XCTestCase {
         )
         try sink.write(stepRecords.step)
         try sink.write(try XCTUnwrap(stepRecords.summary))
-        try sink.write(aggregator.runEndRecord(control: control, stopReason: "measured_steps", measuredSeconds: 1.5, at: Date(timeIntervalSince1970: 22)))
+        try sink.write(aggregator.runEndRecord(control: control, stopReason: "measured_steps", measuredSeconds: 1.5, globalMeasuredEnvSteps: 1, at: Date(timeIntervalSince1970: 22)))
 
         let fileContents = try String(contentsOf: fileURL, encoding: .utf8)
         let lines = fileContents.split(separator: "\n")
@@ -158,7 +158,7 @@ final class MetricsTests: XCTestCase {
         )
         XCTAssertEqual(step3.step.resetCount, 1)
 
-        let runEnd = aggregator.runEndRecord()
+        let runEnd = aggregator.runEndRecord(globalMeasuredEnvSteps: 3)
         XCTAssertEqual(runEnd.type, "run_end")
         XCTAssertEqual(runEnd.doneCount, 1)
         XCTAssertEqual(runEnd.resetCount, 1)
