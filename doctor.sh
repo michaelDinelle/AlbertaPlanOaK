@@ -26,7 +26,7 @@ Usage: ./doctor.sh [python|metal|envs|carla|all]
 Checks:
   python  Verify the oak Conda prefix, direct imports, and conda run -p imports.
   metal   Verify the release binary sees a Metal device and can submit a compute kernel.
-  envs    Run bounded launcher smoke tests for core, minigrid, pyflyt, cheetah, walker, and humanoid.
+  envs    Run bounded launcher smoke tests for minigrid, pyflyt, cheetah, walker, and humanoid.
   carla   Verify Whisky CARLA paths and the bridge healthcheck without autostarting the server.
   all     Run python, metal, envs, and carla in order.
 EOF
@@ -70,15 +70,6 @@ doctor_metal() {
 
 doctor_envs() {
     build_release_if_needed
-    echo "[doctor] envs: core"
-    (
-        cd "$ROOT_DIR"
-        OAK_ALLOW_CPU_FALLBACK=0 \
-        OAK_MAX_STEPS="${OAK_DOCTOR_CORE_STEPS:-5}" \
-        OAK_METRICS_STDOUT_SUMMARIES=0 \
-        ./run.sh core
-    )
-
     for env_name in minigrid pyflyt cheetah walker humanoid; do
         echo "[doctor] envs: $env_name"
         (

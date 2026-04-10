@@ -8,24 +8,12 @@ final class MetricsTests: XCTestCase {
         let obs = (0..<64).map { index in Float(index) / 64 }
         let prevAction = Array(repeating: Float(0), count: 8)
 
-        let lowBudget = core.step(input: StepInput(obs: obs, prevAction: prevAction, prevReward: 0, wallClockBudgetNs: 1))
-        let highBudget = core.step(input: StepInput(obs: obs, prevAction: lowBudget.action, prevReward: 0.25, wallClockBudgetNs: 1_000_000))
+        let lowBudget = core.step(input: StepInput(obs: obs, prevAction: prevAction, prevReward: [0], batchSize: 1, wallClockBudgetNs: 1))
+        let highBudget = core.step(input: StepInput(obs: obs, prevAction: lowBudget.action, prevReward: [0.25], batchSize: 1, wallClockBudgetNs: 1_000_000))
 
         XCTAssertGreaterThanOrEqual(lowBudget.telemetry.activeRank, 1)
         XCTAssertGreaterThanOrEqual(highBudget.telemetry.activeRank, lowBudget.telemetry.activeRank)
         XCTAssertTrue(highBudget.action.allSatisfy(\.isFinite))
-    }
-
-    func testCoreSignalEnvIsContinuousAndNonTerminal() {
-        let env = CoreSignalEnv()
-        let initialObservation = env.reset()
-        let result = env.step(Array(repeating: 0.1, count: env.actDim))
-
-        XCTAssertEqual(initialObservation.count, env.obsDim)
-        XCTAssertEqual(result.0.count, env.obsDim)
-        XCTAssertTrue(result.1.isFinite)
-        XCTAssertFalse(result.2)
-        XCTAssertNotEqual(initialObservation, result.0)
     }
 
     func testRollingSummaryAggregatesKnownSequence() throws {
@@ -186,17 +174,26 @@ final class MetricsTests: XCTestCase {
         state: [Float] = [0.25, 0.75],
         action: [Float] = [0.1, -0.2]
     ) -> AgentTelemetry {
-        AgentTelemetry(
-            rewardInput: rewardInput,
-            obs: obs,
-            state: state,
-            action: action,
-            agentStepMs: agentStepMs,
-            backend: backend,
-            metalTimings: backend == "metal"
-                ? MetalCommandTimings(cmd1Ms: 0.1, cmd2Ms: 0.2, cmd3Ms: 0.3, cmd4Ms: 0.4, cmd5Ms: 0.5)
-                : nil
-        )
+        var mutableObs = obs
+        var mutableState = state
+        var mutableAction = action
+        return mutableObs.withUnsafeBufferPointer { obsPtr in
+            mutableState.withUnsafeBufferPointer { statePtr in
+                mutableAction.withUnsafeBufferPointer { actionPtr in
+                    AgentTelemetry(
+                        rewardInput: rewardInput,
+                        obs: obsPtr,
+                        state: statePtr,
+                        action: actionPtr,
+                        agentStepMs: agentStepMs,
+                        backend: backend,
+                        metalTimings: backend == "metal"
+                            ? MetalCommandTimings(cmd1Ms: 0.1, cmd2Ms: 0.2, cmd3Ms: 0.3, cmd4Ms: 0.4, cmd5Ms: 0.5)
+                            : nil
+                    )
+                }
+            }
+        }
     }
 
     private func jsonObject(from line: Substring) throws -> [String: Any] {
