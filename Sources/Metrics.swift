@@ -113,6 +113,7 @@ struct RollingWindowStats: Equatable {
     private(set) var count = 0
     private(set) var startStep = 0
     private(set) var endStep = 0
+    private(set) var globalEnvStepCount = 0
     private var rewardSum = 0.0
     private var rewardSquaredSum = 0.0
     private(set) var doneCount = 0
@@ -123,44 +124,53 @@ struct RollingWindowStats: Equatable {
     private var actionL2Sum = 0.0
     private var stateL2Sum = 0.0
     private var plannerStepMsSum = 0.0
+    private var plannerActiveStepCount = 0
     private var activeRankSum = 0.0
+    private var activeRankObservedMin = Int.max
+    private var activeRankObservedMax = 0
     private var activeGVFsSum = 0.0
     private var activeOptionsSum = 0.0
 
-    mutating func record(step: Int, reward: Double, done: Bool, resetDelta: Int, telemetry: AgentTelemetry, envStepMs: Double, totalStepMs: Double) {
+    mutating func record(step: Int, rewards: [Float], doneCountBatch: Int, telemetry: AgentTelemetry, envStepMs: Double, totalStepMs: Double) {
         if count == 0 {
             startStep = step
         }
 
         count += 1
         endStep = step
-        let safeReward = metricsFinite(reward)
-        rewardSum += safeReward
-        rewardSquaredSum += safeReward * safeReward
-        doneCount += done ? 1 : 0
-        resetCount += resetDelta
+        globalEnvStepCount += rewards.count
+        for reward in rewards {
+            let safeReward = metricsFinite(Double(reward))
+            rewardSum += safeReward
+            rewardSquaredSum += safeReward * safeReward
+        }
+        doneCount += doneCountBatch
+        resetCount += doneCountBatch
         agentStepMsSum += metricsFinite(telemetry.agentStepMs)
         envStepMsSum += metricsFinite(envStepMs)
         totalStepMsSum += metricsFinite(totalStepMs)
         actionL2Sum += metricsFinite(telemetry.actionL2)
         stateL2Sum += metricsFinite(telemetry.stateL2)
         plannerStepMsSum += metricsFinite(telemetry.plannerStepMs)
+        plannerActiveStepCount += telemetry.plannerStepMs > 0 ? 1 : 0
         activeRankSum += metricsFinite(Double(telemetry.activeRank))
+        activeRankObservedMin = min(activeRankObservedMin, telemetry.activeRank)
+        activeRankObservedMax = max(activeRankObservedMax, telemetry.activeRank)
         activeGVFsSum += metricsFinite(Double(telemetry.activeGVFs))
         activeOptionsSum += metricsFinite(Double(telemetry.activeOptions))
     }
 
     var rewardMean: Double {
-        count > 0 ? rewardSum / Double(count) : 0
+        globalEnvStepCount > 0 ? rewardSum / Double(globalEnvStepCount) : 0
     }
 
     var rewardStd: Double {
-        guard count > 0 else {
+        guard globalEnvStepCount > 0 else {
             return 0
         }
 
         let mean = rewardMean
-        let variance = max((rewardSquaredSum / Double(count)) - (mean * mean), 0)
+        let variance = max((rewardSquaredSum / Double(globalEnvStepCount)) - (mean * mean), 0)
         return sqrt(variance)
     }
 
@@ -168,8 +178,7 @@ struct RollingWindowStats: Equatable {
         guard totalStepMsSum > 0 else {
             return 0
         }
-        let numEnvs = ProcessInfo.processInfo.environment["OAK_NUM_ENVS"].flatMap(Int.init) ?? 1
-        return Double(count * numEnvs) / (totalStepMsSum / 1000)
+        return Double(globalEnvStepCount) / (totalStepMsSum / 1000)
     }
 
     var agentStepMsMean: Double {
@@ -196,8 +205,20 @@ struct RollingWindowStats: Equatable {
         count > 0 ? plannerStepMsSum / Double(count) : 0
     }
 
+    var plannerActiveFraction: Double {
+        count > 0 ? Double(plannerActiveStepCount) / Double(count) : 0
+    }
+
     var activeRankMean: Double {
         count > 0 ? activeRankSum / Double(count) : 0
+    }
+
+    var activeRankMin: Int {
+        count > 0 ? activeRankObservedMin : 0
+    }
+
+    var activeRankMax: Int {
+        count > 0 ? activeRankObservedMax : 0
     }
 
     var activeGVFsMean: Double {
@@ -312,9 +333,17 @@ final class JSONLMetricsSink {
     }
 }
 
+struct RunMetadata: Equatable {
+    let logicalEnvName: String
+    let concreteEnvId: String
+    let leagueName: String?
+    let schema: EnvironmentSchemaFingerprint
+}
+
 final class RunMetricsAggregator {
     let runId: String
     let envName: String
+    let metadata: RunMetadata
     let policyName: String
     let backend: String
     let windowSize: Int
@@ -326,9 +355,26 @@ final class RunMetricsAggregator {
     private var totalStats = RollingWindowStats()
     private var windowStats = RollingWindowStats()
 
-    init(runId: String = UUID().uuidString, envName: String, policyName: String, backend: String, windowSize: Int, seed: Int? = nil) {
+    init(
+        runId: String = UUID().uuidString,
+        envName: String,
+        logicalEnvName: String,
+        concreteEnvId: String,
+        leagueName: String? = nil,
+        policyName: String,
+        backend: String,
+        schema: EnvironmentSchemaFingerprint,
+        windowSize: Int,
+        seed: Int? = nil
+    ) {
         self.runId = runId
         self.envName = envName
+        metadata = RunMetadata(
+            logicalEnvName: logicalEnvName,
+            concreteEnvId: concreteEnvId,
+            leagueName: leagueName,
+            schema: schema
+        )
         self.policyName = policyName
         self.backend = backend
         self.windowSize = max(windowSize, 1)
@@ -341,25 +387,52 @@ final class RunMetricsAggregator {
             timestamp: metricsRecordTimestamp(date),
             runId: runId,
             env: envName,
+            logicalEnv: metadata.logicalEnvName,
+            concreteEnvId: metadata.concreteEnvId,
+            league: metadata.leagueName,
             policy: policyName,
             backend: backend,
             step: 0,
             seed: seed,
             warmupSteps: control.warmupSteps,
             stopAfterMeasuredSteps: control.stopAfterMeasuredSteps,
-            stopAfterMeasuredSeconds: control.stopAfterMeasuredSeconds
+            stopAfterMeasuredSeconds: control.stopAfterMeasuredSeconds,
+            observationSpaceKind: metadata.schema.observation.kind,
+            observationFlatDim: metadata.schema.observation.flattenedDim,
+            actionSpaceKind: metadata.schema.action.kind,
+            actionFlatDim: metadata.schema.action.flattenedDim,
+            actionDiscreteCount: metadata.schema.action.discreteCount,
+            actionShape: metadata.schema.action.shape,
+            schemaFingerprint: metadata.schema.schemaFingerprint
         )
     }
 
-    func recordStep(reward: Float, done: Bool, telemetry: AgentTelemetry, envStepMs: Double, totalStepMs: Double, at date: Date = Date()) -> (step: MetricsRecord, summary: MetricsRecord?) {
+    func recordStep(rewards: [Float], dones: [Bool], telemetry: AgentTelemetry, envStepMs: Double, totalStepMs: Double, at date: Date = Date()) -> (step: MetricsRecord, summary: MetricsRecord?) {
         stepCount += 1
-        let rewardValue = Double(reward)
-        let resetDelta = done ? 1 : 0
-        doneCount += done ? 1 : 0
-        resetCount += resetDelta
+        let rewardValues = rewards.map { metricsFinite(Double($0)) }
+        let rewardSumBatch = rewardValues.reduce(0, +)
+        let rewardMeanBatch = rewardValues.isEmpty ? 0 : rewardSumBatch / Double(rewardValues.count)
+        let doneCountBatch = dones.reduce(0) { $0 + ($1 ? 1 : 0) }
+        let doneAnyBatch = doneCountBatch > 0
+        doneCount += doneCountBatch
+        resetCount += doneCountBatch
 
-        totalStats.record(step: stepCount, reward: rewardValue, done: done, resetDelta: resetDelta, telemetry: telemetry, envStepMs: envStepMs, totalStepMs: totalStepMs)
-        windowStats.record(step: stepCount, reward: rewardValue, done: done, resetDelta: resetDelta, telemetry: telemetry, envStepMs: envStepMs, totalStepMs: totalStepMs)
+        totalStats.record(
+            step: stepCount,
+            rewards: rewards,
+            doneCountBatch: doneCountBatch,
+            telemetry: telemetry,
+            envStepMs: envStepMs,
+            totalStepMs: totalStepMs
+        )
+        windowStats.record(
+            step: stepCount,
+            rewards: rewards,
+            doneCountBatch: doneCountBatch,
+            telemetry: telemetry,
+            envStepMs: envStepMs,
+            totalStepMs: totalStepMs
+        )
 
         let stepRecord = MetricsRecord.stepRecord(
             timestamp: metricsRecordTimestamp(date),
@@ -369,9 +442,13 @@ final class RunMetricsAggregator {
             backend: backend,
             step: stepCount,
             seed: seed,
-            reward: rewardValue,
-            done: done,
+            reward: rewardMeanBatch,
+            done: doneAnyBatch,
             resetCount: resetCount,
+            rewardSumBatch: rewardSumBatch,
+            rewardMeanBatch: rewardMeanBatch,
+            doneCountBatch: doneCountBatch,
+            doneAnyBatch: doneAnyBatch,
             telemetry: telemetry,
             envStepMs: envStepMs,
             totalStepMs: totalStepMs
@@ -388,6 +465,16 @@ final class RunMetricsAggregator {
                 backend: backend,
                 step: stepCount,
                 seed: seed,
+                logicalEnv: metadata.logicalEnvName,
+                concreteEnvId: metadata.concreteEnvId,
+                league: metadata.leagueName,
+                observationSpaceKind: metadata.schema.observation.kind,
+                observationFlatDim: metadata.schema.observation.flattenedDim,
+                actionSpaceKind: metadata.schema.action.kind,
+                actionFlatDim: metadata.schema.action.flattenedDim,
+                actionDiscreteCount: metadata.schema.action.discreteCount,
+                actionShape: metadata.schema.action.shape,
+                schemaFingerprint: metadata.schema.schemaFingerprint,
                 stats: windowStats
             )
             windowStats.reset()
@@ -406,6 +493,9 @@ final class RunMetricsAggregator {
             backend: backend,
             step: stepCount,
             seed: seed,
+            logicalEnv: metadata.logicalEnvName,
+            concreteEnvId: metadata.concreteEnvId,
+            league: metadata.leagueName,
             warmupSteps: control.warmupSteps,
             measuredStepCount: globalMeasuredEnvSteps,
             vectorUpdateCount: stepCount,
@@ -413,6 +503,13 @@ final class RunMetricsAggregator {
             stopReason: stopReason,
             stopAfterMeasuredSteps: control.stopAfterMeasuredSteps,
             stopAfterMeasuredSeconds: control.stopAfterMeasuredSeconds,
+            observationSpaceKind: metadata.schema.observation.kind,
+            observationFlatDim: metadata.schema.observation.flattenedDim,
+            actionSpaceKind: metadata.schema.action.kind,
+            actionFlatDim: metadata.schema.action.flattenedDim,
+            actionDiscreteCount: metadata.schema.action.discreteCount,
+            actionShape: metadata.schema.action.shape,
+            schemaFingerprint: metadata.schema.schemaFingerprint,
             stats: totalStats
         )
     }
@@ -423,6 +520,9 @@ struct MetricsRecord: Codable {
     let timestamp: String
     let runId: String
     let env: String
+    let logicalEnv: String?
+    let concreteEnvId: String?
+    let league: String?
     let policy: String
     let backend: String
     let step: Int
@@ -436,10 +536,20 @@ struct MetricsRecord: Codable {
     let reward: Double?
     let done: Bool?
     let resetCount: Int?
+    let rewardSumBatch: Double?
+    let rewardMeanBatch: Double?
+    let doneCountBatch: Int?
+    let doneAnyBatch: Bool?
     let rewardInput: Double?
+    let observationSpaceKind: String?
+    let observationFlatDim: Int?
     let obsMean: Double?
     let obsStd: Double?
     let obsL2: Double?
+    let actionSpaceKind: String?
+    let actionFlatDim: Int?
+    let actionDiscreteCount: Int?
+    let actionShape: [Int]?
     let actionMean: Double?
     let actionStd: Double?
     let actionL2: Double?
@@ -475,9 +585,13 @@ struct MetricsRecord: Codable {
     let activeOptions: Int?
     let snapshotToken: Int?
     let plannerStepMsMean: Double?
+    let plannerActiveFraction: Double?
     let activeRankMean: Double?
+    let activeRankMin: Int?
+    let activeRankMax: Int?
     let activeGVFsMean: Double?
     let activeOptionsMean: Double?
+    let schemaFingerprint: String?
     /// For `run_end`: number of vectorized agent+env update iterations (batch steps); `measuredStepCount` is global env steps.
     let vectorUpdateCount: Int?
 
@@ -486,6 +600,9 @@ struct MetricsRecord: Codable {
         timestamp: String,
         runId: String,
         env: String,
+        logicalEnv: String? = nil,
+        concreteEnvId: String? = nil,
+        league: String? = nil,
         policy: String,
         backend: String,
         step: Int,
@@ -499,10 +616,20 @@ struct MetricsRecord: Codable {
         reward: Double? = nil,
         done: Bool? = nil,
         resetCount: Int? = nil,
+        rewardSumBatch: Double? = nil,
+        rewardMeanBatch: Double? = nil,
+        doneCountBatch: Int? = nil,
+        doneAnyBatch: Bool? = nil,
         rewardInput: Double? = nil,
+        observationSpaceKind: String? = nil,
+        observationFlatDim: Int? = nil,
         obsMean: Double? = nil,
         obsStd: Double? = nil,
         obsL2: Double? = nil,
+        actionSpaceKind: String? = nil,
+        actionFlatDim: Int? = nil,
+        actionDiscreteCount: Int? = nil,
+        actionShape: [Int]? = nil,
         actionMean: Double? = nil,
         actionStd: Double? = nil,
         actionL2: Double? = nil,
@@ -538,15 +665,22 @@ struct MetricsRecord: Codable {
         activeOptions: Int? = nil,
         snapshotToken: Int? = nil,
         plannerStepMsMean: Double? = nil,
+        plannerActiveFraction: Double? = nil,
         activeRankMean: Double? = nil,
+        activeRankMin: Int? = nil,
+        activeRankMax: Int? = nil,
         activeGVFsMean: Double? = nil,
         activeOptionsMean: Double? = nil,
+        schemaFingerprint: String? = nil,
         vectorUpdateCount: Int? = nil
     ) {
         self.type = type
         self.timestamp = timestamp
         self.runId = runId
         self.env = env
+        self.logicalEnv = logicalEnv
+        self.concreteEnvId = concreteEnvId
+        self.league = league
         self.policy = policy
         self.backend = backend
         self.step = step
@@ -560,10 +694,20 @@ struct MetricsRecord: Codable {
         self.reward = reward
         self.done = done
         self.resetCount = resetCount
+        self.rewardSumBatch = rewardSumBatch
+        self.rewardMeanBatch = rewardMeanBatch
+        self.doneCountBatch = doneCountBatch
+        self.doneAnyBatch = doneAnyBatch
         self.rewardInput = rewardInput
+        self.observationSpaceKind = observationSpaceKind
+        self.observationFlatDim = observationFlatDim
         self.obsMean = obsMean
         self.obsStd = obsStd
         self.obsL2 = obsL2
+        self.actionSpaceKind = actionSpaceKind
+        self.actionFlatDim = actionFlatDim
+        self.actionDiscreteCount = actionDiscreteCount
+        self.actionShape = actionShape
         self.actionMean = actionMean
         self.actionStd = actionStd
         self.actionL2 = actionL2
@@ -599,9 +743,13 @@ struct MetricsRecord: Codable {
         self.activeOptions = activeOptions
         self.snapshotToken = snapshotToken
         self.plannerStepMsMean = plannerStepMsMean
+        self.plannerActiveFraction = plannerActiveFraction
         self.activeRankMean = activeRankMean
+        self.activeRankMin = activeRankMin
+        self.activeRankMax = activeRankMax
         self.activeGVFsMean = activeGVFsMean
         self.activeOptionsMean = activeOptionsMean
+        self.schemaFingerprint = schemaFingerprint
         self.vectorUpdateCount = vectorUpdateCount
     }
 
@@ -616,6 +764,10 @@ struct MetricsRecord: Codable {
         reward: Double,
         done: Bool,
         resetCount: Int,
+        rewardSumBatch: Double,
+        rewardMeanBatch: Double,
+        doneCountBatch: Int,
+        doneAnyBatch: Bool,
         telemetry: AgentTelemetry,
         envStepMs: Double,
         totalStepMs: Double
@@ -632,6 +784,10 @@ struct MetricsRecord: Codable {
             reward: reward,
             done: done,
             resetCount: resetCount,
+            rewardSumBatch: rewardSumBatch,
+            rewardMeanBatch: rewardMeanBatch,
+            doneCountBatch: doneCountBatch,
+            doneAnyBatch: doneAnyBatch,
             rewardInput: telemetry.rewardInput,
             obsMean: telemetry.obsMean,
             obsStd: telemetry.obsStd,
@@ -670,6 +826,9 @@ struct MetricsRecord: Codable {
         backend: String,
         step: Int,
         seed: Int? = nil,
+        logicalEnv: String? = nil,
+        concreteEnvId: String? = nil,
+        league: String? = nil,
         warmupSteps: Int? = nil,
         measuredStepCount: Int? = nil,
         vectorUpdateCount: Int? = nil,
@@ -677,6 +836,13 @@ struct MetricsRecord: Codable {
         stopReason: String? = nil,
         stopAfterMeasuredSteps: Int? = nil,
         stopAfterMeasuredSeconds: Double? = nil,
+        observationSpaceKind: String? = nil,
+        observationFlatDim: Int? = nil,
+        actionSpaceKind: String? = nil,
+        actionFlatDim: Int? = nil,
+        actionDiscreteCount: Int? = nil,
+        actionShape: [Int]? = nil,
+        schemaFingerprint: String? = nil,
         stats: RollingWindowStats
     ) -> MetricsRecord {
         MetricsRecord(
@@ -684,6 +850,9 @@ struct MetricsRecord: Codable {
             timestamp: timestamp,
             runId: runId,
             env: env,
+            logicalEnv: logicalEnv,
+            concreteEnvId: concreteEnvId,
+            league: league,
             policy: policy,
             backend: backend,
             step: step,
@@ -695,6 +864,12 @@ struct MetricsRecord: Codable {
             stopAfterMeasuredSteps: stopAfterMeasuredSteps,
             stopAfterMeasuredSeconds: stopAfterMeasuredSeconds,
             resetCount: stats.resetCount,
+            observationSpaceKind: observationSpaceKind,
+            observationFlatDim: observationFlatDim,
+            actionSpaceKind: actionSpaceKind,
+            actionFlatDim: actionFlatDim,
+            actionDiscreteCount: actionDiscreteCount,
+            actionShape: actionShape,
             windowStartStep: stats.startStep,
             windowEndStep: stats.endStep,
             rewardSum: stats.rewardTotal,
@@ -708,9 +883,13 @@ struct MetricsRecord: Codable {
             actionL2Mean: stats.actionL2Mean,
             stateL2Mean: stats.stateL2Mean,
             plannerStepMsMean: stats.plannerStepMsMean,
+            plannerActiveFraction: stats.plannerActiveFraction,
             activeRankMean: stats.activeRankMean,
+            activeRankMin: stats.activeRankMin,
+            activeRankMax: stats.activeRankMax,
             activeGVFsMean: stats.activeGVFsMean,
             activeOptionsMean: stats.activeOptionsMean,
+            schemaFingerprint: schemaFingerprint,
             vectorUpdateCount: vectorUpdateCount
         )
     }
@@ -736,9 +915,11 @@ func formatMetricsSummary(_ record: MetricsRecord) -> String {
     let totalStepMsMean = record.totalStepMsMean ?? 0
     let actionL2Mean = record.actionL2Mean ?? 0
     let stateL2Mean = record.stateL2Mean ?? 0
+    let plannerActiveFraction = record.plannerActiveFraction ?? 0
+    let completionRate = globalEnvSteps > 0 ? Double(doneCount) / Double(globalEnvSteps) : 0
 
     return String(
-        format: "[metrics] %@ env=%@%@ window_steps=%d-%d global_env_steps=%d vector_updates=%d%@%@ reward_sum=%.5f reward_mean=%.5f reward_std=%.5f done=%d resets=%d sps=%.2f agent_ms=%.2f env_ms=%.2f total_ms=%.2f action_l2=%.5f state_l2=%.5f",
+        format: "[metrics] %@ env=%@%@ window_steps=%d-%d global_env_steps=%d vector_updates=%d%@%@ reward_sum=%.5f reward_mean=%.5f reward_std=%.5f done=%d resets=%d completion=%.5f sps=%.2f agent_ms=%.2f env_ms=%.2f total_ms=%.2f action_l2=%.5f state_l2=%.5f planner_active=%.5f",
         label,
         "\(record.env) policy=\(record.policy)",
         seedLabel,
@@ -753,12 +934,14 @@ func formatMetricsSummary(_ record: MetricsRecord) -> String {
         rewardStd,
         doneCount,
         resetCount,
+        completionRate,
         stepsPerSecond,
         agentStepMsMean,
         envStepMsMean,
         totalStepMsMean,
         actionL2Mean,
-        stateL2Mean
+        stateL2Mean,
+        plannerActiveFraction
     )
 }
 
