@@ -491,63 +491,6 @@ final class GymContinuousEnv: PyEnv {
     }
 }
 
-final class CoreSignalEnv: PyEnv {
-    private let rewardProjector: [Float]
-    private let driftKernel: [Float]
-    private let baseObservation: [Float]
-    private var observation: [Float]
-    let obsDim: Int
-    let actDim: Int
-
-    init() {
-        let environment = ProcessInfo.processInfo.environment
-        let processorScale = max(ProcessInfo.processInfo.activeProcessorCount, 1)
-        let resolvedObsDim = max(environment["OAK_CORE_OBS_DIM"].flatMap(Int.init) ?? (processorScale * processorScale), 1)
-        let resolvedActDim = max(environment["OAK_CORE_ACT_DIM"].flatMap(Int.init) ?? processorScale, 1)
-        obsDim = resolvedObsDim
-        actDim = resolvedActDim
-
-        let rng = deriveSeed(configuredRunSeed(environment: environment), salt: 0x4001).map(SeededRNG.init)
-        let projectorScale = Float(1 / sqrt(Double(max(resolvedObsDim, 1))))
-        let driftScale = Float(1 / sqrt(Double(max(resolvedActDim, 1))))
-        rewardProjector = (0..<resolvedObsDim).map { index in
-            let base = rng?.nextFloat(in: -projectorScale...projectorScale) ?? Float(index + 1) / Float(resolvedObsDim + 1)
-            return sanitizeScalar(base)
-        }
-        driftKernel = (0..<resolvedActDim).map { index in
-            let base = rng?.nextFloat(in: -driftScale...driftScale) ?? Float(index + 1) / Float(resolvedActDim + 1)
-            return sanitizeScalar(base, clamp: -1...1)
-        }
-        baseObservation = (0..<resolvedObsDim).map { index in
-            let phase = Float(index + 1) / Float(resolvedObsDim + 1)
-            return sin(phase * .pi)
-        }
-        observation = baseObservation
-    }
-
-    func reset() -> [Float] {
-        observation = baseObservation
-        return observation
-    }
-
-    func step(_ action: [Float]) -> ([Float], Float, Bool) {
-        let safeAction = sanitizeVector(action, count: actDim, clamp: -1...1)
-        let projectedAction = (0..<obsDim).map { rewardProjector[$0] * safeAction[$0 % actDim] }
-        let reward = zip(observation, projectedAction).reduce(Float(0)) { partial, pair in
-            partial + pair.0 * pair.1
-        } / Float(max(obsDim, 1))
-
-        var nextObservation = Array(repeating: Float(0), count: obsDim)
-        for index in 0..<obsDim {
-            let neighbor = observation[(index + 1) % obsDim]
-            let actionInfluence = driftKernel[index % actDim] * safeAction[index % actDim]
-            nextObservation[index] = sanitizeScalar(tanh(observation[index] + neighbor + actionInfluence + reward))
-        }
-        observation = nextObservation
-        return (observation, sanitizeScalar(reward), false)
-    }
-}
-
 final class DirectCARLAEnv: PyEnv {
     private static let vehicleRoleName = "oak_vehicle"
     private static let cameraRoleName = "oak_camera"
@@ -1407,7 +1350,6 @@ private final class RandomPolicyRunner: PolicyRunner {
 
         print("OaK - Alberta Plan")
         let availableEnvs: [(String, () -> PyEnv)] = [
-            ("core", { CoreSignalEnv() }),
             ("pyflyt", { PyFlytEnv() }),
             ("carla", { CARLAEnv() }),
             ("cheetah", { DMControlEnv(domain: "cheetah", task: "run") }),

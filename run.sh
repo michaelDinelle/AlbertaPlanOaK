@@ -29,7 +29,7 @@ validate_release_binary() {
 
 requires_python_prefix() {
     case "$REQUESTED_ENV" in
-        core|carla)
+        carla)
             return 1
             ;;
         *)

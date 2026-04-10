@@ -403,19 +403,36 @@ final class ReactiveControl {
 final class PredictiveKnowledge {
     let capacityLimit: Int
     let weights: SharedFloatStorage
+    let alpha: SharedFloatStorage
+    let h: SharedFloatStorage
+    let v: SharedFloatStorage
     private(set) var utility: [Double]
+
+    let mu: Float
+    let tau: Float
 
     init(capacityLimit: Int) {
         self.capacityLimit = capacityLimit
-        weights = SharedFloatStorage(count: max(capacityLimit * capacityLimit, 1), device: nil)
+        self.mu = 1.0 / Float(max(capacityLimit, 1))
+        self.tau = Float(capacityLimit * capacityLimit)
+        
+        let numWeights = max(capacityLimit * capacityLimit, 1)
+        weights = SharedFloatStorage(count: numWeights, device: nil)
+        alpha = SharedFloatStorage(count: numWeights, device: nil)
+        h = SharedFloatStorage(count: numWeights, device: nil)
+        v = SharedFloatStorage(count: numWeights, device: nil)
+        
+        for i in 0..<numWeights {
+            alpha[i] = 0.1
+            h[i] = 0.0
+            v[i] = 0.0
+        }
+        
         utility = Array(repeating: 0, count: capacityLimit)
     }
 
     func update(prevState: SharedFloatStorage, prevOffset: Int, state: SharedFloatStorage, stateOffset: Int, activeRank: Int) -> Double {
         guard activeRank > 0 else { return 0 }
-        let prevStateBuffer = prevState.immutableBufferPointer(offset: prevOffset, length: capacityLimit)
-        let stateNorm = max(oakDot(prevStateBuffer, prevStateBuffer, count: activeRank), Float.ulpOfOne)
-        let step = 1 / (1 + stateNorm)
         var totalError = 0.0
         for target in 0..<activeRank {
             var prediction: Float = 0
@@ -426,8 +443,39 @@ final class PredictiveKnowledge {
             let error = state[stateOffset + target] - prediction
             totalError += Double(abs(error))
             utility[target] += Double(abs(error))
+            
+            // Loop 1: Update v and tentative alpha
             for column in 0..<activeRank {
-                weights[rowOffset + column] += step * error * prevState[prevOffset + column]
+                let x = prevState[prevOffset + column]
+                let idx = rowOffset + column
+                let deltaXh = error * x * h[idx]
+                let absDeltaXh = abs(deltaXh)
+                
+                v[idx] = max(absDeltaXh, v[idx] + (1.0 / tau) * alpha[idx] * x * x * (absDeltaXh - v[idx]))
+                if v[idx] != 0.0 {
+                    alpha[idx] *= exp(mu * deltaXh / v[idx])
+                }
+            }
+            
+            // Calculate M with tentative alpha
+            var currentM: Float = 0.0
+            for column in 0..<activeRank {
+                let x = prevState[prevOffset + column]
+                let idx = rowOffset + column
+                currentM += alpha[idx] * x * x
+            }
+            let m_eff = max(currentM, 1.0)
+            
+            // Loop 2: Cap alpha, update weights and traces
+            for column in 0..<activeRank {
+                let x = prevState[prevOffset + column]
+                let idx = rowOffset + column
+                
+                alpha[idx] /= m_eff
+                let currentAlpha = alpha[idx]
+                
+                weights[idx] += currentAlpha * error * x
+                h[idx] = h[idx] * (1.0 - currentAlpha * x * x) + currentAlpha * error * x
             }
         }
         return totalError
@@ -439,14 +487,35 @@ final class WorldModel {
     let actDim: Int
     let inputWidth: Int
     let weights: SharedFloatStorage
+    let alpha: SharedFloatStorage
+    let h: SharedFloatStorage
+    let v: SharedFloatStorage
     private let inputStorage: SharedFloatStorage
     private let predictionStorage: SharedFloatStorage
+
+    let mu: Float
+    let tau: Float
 
     init(capacityLimit: Int, actDim: Int) {
         self.capacityLimit = capacityLimit
         self.actDim = actDim
         inputWidth = capacityLimit + actDim + 1
-        weights = SharedFloatStorage(count: max((capacityLimit + 1) * inputWidth, 1), device: nil)
+        
+        self.mu = 1.0 / Float(max(capacityLimit, 1))
+        self.tau = Float(capacityLimit * capacityLimit)
+        
+        let numWeights = max((capacityLimit + 1) * inputWidth, 1)
+        weights = SharedFloatStorage(count: numWeights, device: nil)
+        alpha = SharedFloatStorage(count: numWeights, device: nil)
+        h = SharedFloatStorage(count: numWeights, device: nil)
+        v = SharedFloatStorage(count: numWeights, device: nil)
+        
+        for i in 0..<numWeights {
+            alpha[i] = 0.1
+            h[i] = 0.0
+            v[i] = 0.0
+        }
+        
         inputStorage = SharedFloatStorage(count: max(inputWidth, 1), device: nil)
         predictionStorage = SharedFloatStorage(count: max(capacityLimit + 1, 1), device: nil)
     }
@@ -454,9 +523,6 @@ final class WorldModel {
     func update(prevState: SharedFloatStorage, prevOffset: Int, state: SharedFloatStorage, stateOffset: Int, prevAction: SharedFloatStorage, prevActOffset: Int, reward: Float, activeRank: Int) -> Double {
         guard activeRank > 0 else { return 0 }
         encodeInput(state: prevState, stateOffset: prevOffset, action: prevAction, actOffset: prevActOffset, activeRank: activeRank)
-        let inputBuffer = inputStorage.immutableBufferPointer()
-        let inputNorm = max(oakDot(inputBuffer, inputBuffer, count: inputWidth), Float.ulpOfOne)
-        let step = 1 / (1 + inputNorm)
         var totalError = 0.0
 
         for row in 0...activeRank {
@@ -464,9 +530,41 @@ final class WorldModel {
             let prediction = predictRow(row: row, activeRank: activeRank)
             let error = target - prediction
             totalError += Double(abs(error))
+            
             let rowOffset = row * inputWidth
+            
+            // Loop 1: Update v and tentative alpha
             for column in 0..<inputWidth {
-                weights[rowOffset + column] += step * error * inputStorage[column]
+                let x = inputStorage[column]
+                let idx = rowOffset + column
+                let deltaXh = error * x * h[idx]
+                let absDeltaXh = abs(deltaXh)
+                
+                v[idx] = max(absDeltaXh, v[idx] + (1.0 / tau) * alpha[idx] * x * x * (absDeltaXh - v[idx]))
+                if v[idx] != 0.0 {
+                    alpha[idx] *= exp(mu * deltaXh / v[idx])
+                }
+            }
+            
+            // Calculate M with tentative alpha
+            var currentM: Float = 0.0
+            for column in 0..<inputWidth {
+                let x = inputStorage[column]
+                let idx = rowOffset + column
+                currentM += alpha[idx] * x * x
+            }
+            let m_eff = max(currentM, 1.0)
+            
+            // Loop 2: Cap alpha, update weights and traces
+            for column in 0..<inputWidth {
+                let x = inputStorage[column]
+                let idx = rowOffset + column
+                
+                alpha[idx] /= m_eff
+                let currentAlpha = alpha[idx]
+                
+                weights[idx] += currentAlpha * error * x
+                h[idx] = h[idx] * (1.0 - currentAlpha * x * x) + currentAlpha * error * x
             }
         }
         return totalError
@@ -569,28 +667,54 @@ final class SearchControl {
                 candidateAction[column] = bounded
             }
 
-            let predictedReward = worldModel.predict(state: state, stateOffset: stateOffset, action: candidateAction, actOffset: 0, activeRank: activeRank, nextState: predictedState, nextOffset: 0)
+            // Unroll loop for temporally extended action search
+            var accumulatedReward = 0.0
+            var optionTrainingSignal = 0.0
+            let horizon = 3
+            
+            for step in 0..<horizon {
+                let s = step == 0 ? state : predictedState
+                let sOff = step == 0 ? stateOffset : 0
+                
+                let stepReward = worldModel.predict(state: s, stateOffset: sOff, action: candidateAction, actOffset: 0, activeRank: activeRank, nextState: predictedState, nextOffset: 0)
+                accumulatedReward += Double(stepReward)
+                
+                if step == 0 {
+                    // Option training signal (representation bottleneck) from the first step
+                    optionTrainingSignal = Double(predictedState[optionIndex] - state[stateOffset + optionIndex])
+                }
+                
+                // If we ran out of budget during unrolling, break early
+                if oakCurrentTimeNanoseconds() - start >= budgetNs {
+                    break
+                }
+            }
+            
             let currentValue = control.evaluate(state: state, stateOffset: stateOffset, activeRank: activeRank)
             let nextValue = control.evaluate(state: predictedState, stateOffset: 0, activeRank: activeRank)
+            
             var optionNorm = 0.0
             for column in 0..<optionBank.actDim {
                 let value = Double(optionBank.weights[rowOffset + column])
                 optionNorm += value * value
             }
             optionNorm = max(sqrt(optionNorm), Double(Float.ulpOfOne))
-            let score = Double(predictedReward - control.rewardRate + nextValue - currentValue) / (1 + optionNorm)
-            optionBank.recordUtility(index: optionIndex, value: score)
-            perception.recordUtility(index: optionIndex, value: score)
+            
+            // Search score combines multi-step accumulated reward + value of final predicted state
+            let searchScore = (accumulatedReward - Double(control.rewardRate) + Double(nextValue) - Double(currentValue)) / (1 + optionNorm)
+            
+            optionBank.recordUtility(index: optionIndex, value: abs(optionTrainingSignal))
+            perception.recordUtility(index: optionIndex, value: abs(optionTrainingSignal))
 
-            let adapt = Float(1 / max(1 + abs(score), Double(Float.ulpOfOne)))
+            let adapt = Float(1 / max(1 + abs(optionTrainingSignal), Double(Float.ulpOfOne)))
             let featureActivation = state[stateOffset + optionIndex]
             for column in 0..<optionBank.actDim {
                 let candidate = candidateAction[column]
-                optionBank.weights[rowOffset + column] += adapt * featureActivation * Float(score) * (1 - candidate * candidate)
+                optionBank.weights[rowOffset + column] += adapt * featureActivation * Float(optionTrainingSignal) * (1 - candidate * candidate)
             }
 
-            if score > bestScore {
-                bestScore = score
+            if searchScore > bestScore {
+                bestScore = searchScore
                 bestIndex = optionIndex
             }
             if cursor >= activeRank, oakCurrentTimeNanoseconds() - start >= budgetNs { break }
@@ -755,8 +879,9 @@ class BaseSelfScalingCore: ForegroundCore {
                 // learning for step N-1 to N
                 let r = reward[(activeIdx * input.batchSize) + b] // The reward is received at step N
                 
-                let tdDelta = control.update(prevState: prevState, prevOffset: pPrevStOff, state: state, stateOffset: pStOff, prevAction: action, prevActOffset: pActOff, reward: r, activeRank: perception.activeRank)
                 let gvfError = predictiveKnowledge.update(prevState: prevState, prevOffset: pPrevStOff, state: state, stateOffset: pStOff, activeRank: perception.activeRank)
+                
+                let tdDelta = control.update(prevState: prevState, prevOffset: pPrevStOff, state: state, stateOffset: pStOff, prevAction: action, prevActOffset: pActOff, reward: r, activeRank: perception.activeRank)
                 let modelError = worldModel.update(prevState: prevState, prevOffset: pPrevStOff, state: state, stateOffset: pStOff, prevAction: action, prevActOffset: pActOff, reward: r, activeRank: perception.activeRank)
                 
                 for index in 0..<perception.activeRank {

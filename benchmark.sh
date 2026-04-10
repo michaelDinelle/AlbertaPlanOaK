@@ -2,8 +2,8 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "$0")" && pwd)"
-DEFAULT_ENVS=(core pyflyt cheetah walker humanoid minigrid)
-VALID_ENVS=(core pyflyt carla cheetah walker humanoid minigrid)
+DEFAULT_ENVS=(pyflyt cheetah walker humanoid minigrid)
+VALID_ENVS=(pyflyt carla cheetah walker humanoid minigrid)
 POLICIES=(oak random)
 MODE="${OAK_BENCH_MODE:-quality}"
 SEED_START="${OAK_BENCH_SEED_START:-0}"
@@ -22,7 +22,7 @@ Usage: ./benchmark.sh [env ...]
 Runs seeded OaK-vs-random benchmarks and writes artifacts to .oak-benchmarks/.
 
 Defaults:
-  envs: core pyflyt cheetah walker humanoid minigrid
+  envs: pyflyt cheetah walker humanoid minigrid
   mode: quality
   seeds: 0..9
 
@@ -102,7 +102,7 @@ bench_requires_python() {
     local env_name
     for env_name in "${ENVS[@]}"; do
         case "$env_name" in
-            core|carla)
+            carla)
                 ;;
             *)
                 return 0

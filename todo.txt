@@ -24,3 +24,9 @@ This is concerning though. i feel like steps should have the same budget, right?
 This is unclear i guess oak needs to decide that. we do?
 
 STEP 1: envStepMs=0.02001953125, totalStepMs=3.76806640625, newBudget=20019
+
+
+
+I need to run muliple benchmarks in a row to see if they agree with eachother
+
+    The 10 seeds should rule this out but if we get different results everytime something is fucked
