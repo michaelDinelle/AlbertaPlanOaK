@@ -1,1 +1,26 @@
 Switch to venv entirely instead of conda?
+
+
+
+
+
+
+
+
+
+
+
+So my idea is that the only thing we give our agent is a compute budget.
+And a time budget
+
+
+
+We can get our device parameters into a budget
+
+
+and then take that budget and a given time budget and put it into the agent 
+
+This is concerning though. i feel like steps should have the same budget, right??
+This is unclear i guess oak needs to decide that. we do?
+
+STEP 1: envStepMs=0.02001953125, totalStepMs=3.76806640625, newBudget=20019

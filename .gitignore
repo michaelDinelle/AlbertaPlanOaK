@@ -46,3 +46,8 @@ htmlcov/
 /.oak-benchmarks/
 /.oak-carla.log
 /.oak-carla-mode
+
+# Traces and temp
+*.trace/
+.cursor/
+*.sample.txt
