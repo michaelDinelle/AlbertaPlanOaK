@@ -74,9 +74,7 @@ doctor_envs() {
         echo "[doctor] envs: $env_name"
         (
             cd "$ROOT_DIR"
-            OAK_ALLOW_CPU_FALLBACK=0 \
             OAK_MAX_STEPS="${OAK_DOCTOR_ENV_STEPS:-1}" \
-            OAK_METRICS_STDOUT_SUMMARIES=0 \
             ./run.sh "$env_name"
         )
     done

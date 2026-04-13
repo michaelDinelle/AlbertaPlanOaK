@@ -28,6 +28,7 @@ class CPUComputeFuture: ComputeFuture {
 
 protocol ForegroundCore {
     var backendName: String { get }
+    var telemetrySchema: DynamicTelemetrySchema { get }
     func step(input: StepInput) -> StepOutput
 }
 
@@ -171,6 +172,45 @@ final class SharedFloatStorage {
         let safePrefix = min(max(prefix, 0), count - offset)
         return Array(UnsafeBufferPointer(start: pointer.advanced(by: offset), count: safePrefix))
     }
+}
+
+private func summarizeStridedRows(storage: SharedFloatStorage, offset: Int, rowCount: Int, rowStride: Int, valueCount: Int) -> TelemetryVectorSummary {
+    guard rowCount > 0, rowStride > 0, valueCount > 0 else {
+        return .zero
+    }
+
+    var totalCount = 0
+    var sum = 0.0
+    var sumSquares = 0.0
+    var minValue = Double.greatestFiniteMagnitude
+    var maxValue = -Double.greatestFiniteMagnitude
+
+    for row in 0..<rowCount {
+        let rowOffset = offset + row * rowStride
+        for index in 0..<valueCount {
+            let numericValue = metricsFinite(Double(storage[rowOffset + index]))
+            sum += numericValue
+            sumSquares += numericValue * numericValue
+            minValue = min(minValue, numericValue)
+            maxValue = max(maxValue, numericValue)
+            totalCount += 1
+        }
+    }
+
+    guard totalCount > 0 else {
+        return .zero
+    }
+
+    let count = Double(totalCount)
+    let mean = sum / count
+    let variance = max((sumSquares / count) - (mean * mean), 0)
+    return TelemetryVectorSummary(
+        mean: mean,
+        std: sqrt(variance),
+        l2: sqrt(sumSquares),
+        min: minValue,
+        max: maxValue
+    )
 }
 
 struct CapacityDecision {
@@ -748,15 +788,25 @@ final class SearchControl {
         self.predictedState = predictedState
     }
 
-    func plan(state: SharedFloatStorage, stateOffset: Int, reactiveAction: SharedFloatStorage, actOffset: Int, plannedOffset: Int, activeRank: Int, budgetNs: UInt64) -> Double {
-        guard budgetNs > 0, activeRank > 0 else { return 0 }
+    struct SearchTelemetry {
+        let elapsedMs: Double
+        let expansions: Int
+        let bestScore: Double
+    }
+
+    func plan(state: SharedFloatStorage, stateOffset: Int, reactiveAction: SharedFloatStorage, actOffset: Int, plannedOffset: Int, activeRank: Int, budgetNs: UInt64) -> SearchTelemetry {
+        guard budgetNs > 0, activeRank > 0 else {
+            return SearchTelemetry(elapsedMs: 0, expansions: 0, bestScore: 0)
+        }
         let start = oakCurrentTimeNanoseconds()
         var bestScore = -Double.greatestFiniteMagnitude
         var bestIndex = 0
+        var expansions = 0
 
         while oakCurrentTimeNanoseconds() - start < budgetNs {
             let optionIndex = cursor % activeRank
             cursor += 1
+            expansions += 1
             let rowOffset = optionIndex * optionBank.actDim
             for column in 0..<optionBank.actDim {
                 let blended = reactiveAction[actOffset + column] + optionBank.weights[rowOffset + column]
@@ -823,7 +873,11 @@ final class SearchControl {
             let target = optionBank.weights[winnerOffset + column]
             plannedBias[plannedOffset + column] += (target - plannedBias[plannedOffset + column]) / blendDenominator
         }
-        return Double(oakCurrentTimeNanoseconds() - start) / 1_000_000
+        return SearchTelemetry(
+            elapsedMs: Double(oakCurrentTimeNanoseconds() - start) / 1_000_000,
+            expansions: expansions,
+            bestScore: bestScore.isFinite ? bestScore : 0
+        )
     }
 }
 
@@ -833,6 +887,7 @@ class BaseSelfScalingCore: ForegroundCore {
     let signalDim: Int
     let capacityLimit: Int
     let backendName: String
+    let telemetrySchema: DynamicTelemetrySchema
 
     let perception: AdaptivePerception
     let control: ReactiveControl
@@ -866,6 +921,23 @@ class BaseSelfScalingCore: ForegroundCore {
         signalDim = obsDim + actDim + 1
         capacityLimit = max(1, Int(ceil(sqrt(Double(max(signalDim, 1))))))
         self.backendName = backendName
+        telemetrySchema = DynamicTelemetrySchema(
+            descriptors: [
+                DynamicTelemetryDescriptor(key: "budget.input_ns", unit: "ns"),
+                DynamicTelemetryDescriptor(key: "budget.work_units", unit: "work_units"),
+                DynamicTelemetryDescriptor(key: "capacity.allowed_rank", unit: "rank"),
+                DynamicTelemetryDescriptor(key: "perception.active_rank", unit: "rank"),
+                DynamicTelemetryDescriptor(key: "perception.residual_energy", unit: "energy"),
+                DynamicTelemetryDescriptor(key: "perception.total_energy", unit: "energy"),
+                DynamicTelemetryDescriptor(key: "predictive_knowledge.error_mean", unit: "loss"),
+                DynamicTelemetryDescriptor(key: "world_model.error_mean", unit: "loss"),
+                DynamicTelemetryDescriptor(key: "control.td_abs_mean", unit: "delta"),
+                DynamicTelemetryDescriptor(key: "control.reward_rate", unit: "reward"),
+                DynamicTelemetryDescriptor(key: "search.calls", unit: "count"),
+                DynamicTelemetryDescriptor(key: "search.expansions", unit: "count"),
+                DynamicTelemetryDescriptor(key: "search.best_score", unit: "score"),
+            ]
+        )
 
         let rootSeed = oakDeriveSeed(seed, salt: 0x5000) ?? 0x9E3779B97F4A7C15
         let rng = CoreSeededRNG(seed: rootSeed)
@@ -960,21 +1032,27 @@ class BaseSelfScalingCore: ForegroundCore {
         // 2. Dispatch GPU inference asynchronously
         let computeFuture = performActionInferenceAsync(activeRank: perception.activeRank, batchSize: input.batchSize, bufferIndex: activeIdx)
         
-        // Await inference BEFORE updating weights. This prevents tearing data races where the GPU reads `basis` and `policy` while the CPU mutates them.
+        // Await inference BEFORE updating weights. This prevents tearing data races where the GPU reads `basis` and `policy` while the host mutates them.
         computeFuture.wait()
         
         let foregroundComputeMs = oakCurrentTimeMilliseconds() - encodeStartMs
 
         // 3. Compute Learning Updates on the PREVIOUS buffer
         var planningMs = 0.0
+        var gvfErrorMean = 0.0
+        var modelErrorMean = 0.0
+        var tdAbsMean = 0.0
+        var searchCalls = 0.0
+        var searchExpansions = 0.0
+        var searchBestScore = -Double.greatestFiniteMagnitude
         if stepCount > 0 {
             // Batched MLX Updates
-            let gvfErrorMean = predictiveKnowledge.updateBatched(
+            gvfErrorMean = predictiveKnowledge.updateBatched(
                 prevState: prevState, prevIdx: prevIdx, state: state, stateIdx: activeIdx,
                 batchSize: input.batchSize, capacityLimit: capacityLimit, activeRank: perception.activeRank
             )
             
-            let modelErrorMean = worldModel.updateBatched(
+            modelErrorMean = worldModel.updateBatched(
                 prevState: prevState, prevIdx: prevIdx, state: state, stateIdx: activeIdx,
                 prevAction: action, activeIdx: activeIdx, reward: reward,
                 batchSize: input.batchSize, capacityLimit: capacityLimit, activeRank: perception.activeRank
@@ -991,6 +1069,7 @@ class BaseSelfScalingCore: ForegroundCore {
                 let r = reward[(activeIdx * input.batchSize) + b]
                 
                 let tdDelta = control.update(prevState: prevState, prevOffset: pPrevStOff, state: state, stateOffset: pStOff, prevAction: action, prevActOffset: pActOff, reward: r, activeRank: perception.activeRank)
+                tdAbsMean += Double(abs(tdDelta))
                 
                 for index in 0..<perception.activeRank {
                     let utilitySignal = Double(abs(tdDelta * prevState[pPrevStOff + index])) + gvfErrorPerItem + modelErrorPerItem + encoding.residualEnergy
@@ -1002,13 +1081,18 @@ class BaseSelfScalingCore: ForegroundCore {
                 let remainingBudgetNs = input.wallClockBudgetNs > elapsedBeforePlanning ? (input.wallClockBudgetNs - elapsedBeforePlanning) / UInt64(input.batchSize - b) : 0
                 
                 let planOff = (activeIdx * input.batchSize + b) * actDim
-                planningMs += searchControl.plan(
+                let searchTelemetry = searchControl.plan(
                     state: state, stateOffset: pStOff,
                     reactiveAction: action, actOffset: pActOff,
                     plannedOffset: planOff,
                     activeRank: perception.activeRank, budgetNs: remainingBudgetNs
                 )
+                planningMs += searchTelemetry.elapsedMs
+                searchCalls += searchTelemetry.elapsedMs > 0 ? 1 : 0
+                searchExpansions += Double(searchTelemetry.expansions)
+                searchBestScore = max(searchBestScore, searchTelemetry.bestScore)
             }
+            tdAbsMean /= Double(max(input.batchSize, 1))
         }
         
         for b in 0..<input.batchSize {
@@ -1025,24 +1109,53 @@ class BaseSelfScalingCore: ForegroundCore {
         let workUnits = max(Double(perception.activeRank * (signalDim + actDim + perception.activeRank) * input.batchSize), 1)
         let measuredNsPerWorkUnit = Double(stepNs) / workUnits
         nsPerWorkUnitEstimate = (nsPerWorkUnitEstimate + measuredNsPerWorkUnit) / 2
-
-        let telemetry = input.obs.withUnsafeBufferPointer { obsPtr in
-            AgentTelemetry(
-                rewardInput: input.prevReward[0],
-                obs: UnsafeBufferPointer(start: obsPtr.baseAddress, count: min(obsPtr.count, obsDim)),
-                state: state.immutableBufferPointer(offset: (activeIdx * input.batchSize) * capacityLimit, length: perception.activeRank),
-                action: action.immutableBufferPointer(offset: (activeIdx * input.batchSize) * actDim, length: actDim),
-                agentStepMs: Double(stepNs) / 1_000_000,
-                backend: backendName,
-                metalTimings: MetalCommandTimings(cmd1Ms: foregroundComputeMs, cmd2Ms: 0, cmd3Ms: 0, cmd4Ms: 0, cmd5Ms: planningMs),
-                plannerStepMs: planningMs,
-                computeBudgetNs: input.wallClockBudgetNs,
-                activeRank: perception.activeRank,
-                activeGVFs: perception.activeRank,
-                activeOptions: perception.activeRank,
-                snapshotToken: snapshotToken
+        let rewardInputMean = input.prevReward.isEmpty ? 0 : Double(input.prevReward.reduce(Float.zero, +)) / Double(input.prevReward.count)
+        let obsSummary = input.obs.withUnsafeBufferPointer { VectorSummary($0).telemetrySummary }
+        let actionSummary = VectorSummary(
+            action.immutableBufferPointer(
+                offset: (activeIdx * input.batchSize) * actDim,
+                length: actDim * input.batchSize
             )
-        }
+        ).telemetrySummary
+        let stateSummary = summarizeStridedRows(
+            storage: state,
+            offset: (activeIdx * input.batchSize) * capacityLimit,
+            rowCount: input.batchSize,
+            rowStride: capacityLimit,
+            valueCount: perception.activeRank
+        )
+        let dynamicTelemetryValues = [
+            Double(input.wallClockBudgetNs),
+            capacityDecision.budgetWorkUnits,
+            Double(capacityDecision.allowedRank),
+            Double(perception.activeRank),
+            encoding.residualEnergy,
+            encoding.totalEnergy,
+            gvfErrorMean,
+            modelErrorMean,
+            tdAbsMean,
+            Double(control.rewardRate),
+            searchCalls,
+            searchExpansions,
+            searchBestScore.isFinite && searchBestScore > -Double.greatestFiniteMagnitude ? searchBestScore : 0,
+        ]
+
+        let telemetry = AgentTelemetry(
+            rewardInput: rewardInputMean,
+            obsSummary: obsSummary,
+            stateSummary: stateSummary,
+            actionSummary: actionSummary,
+            agentStepMs: Double(stepNs) / 1_000_000,
+            backend: backendName,
+            metalTimings: MetalCommandTimings(cmd1Ms: foregroundComputeMs, cmd2Ms: 0, cmd3Ms: 0, cmd4Ms: 0, cmd5Ms: planningMs),
+            plannerStepMs: planningMs,
+            computeBudgetNs: input.wallClockBudgetNs,
+            activeRank: perception.activeRank,
+            activeGVFs: perception.activeRank,
+            activeOptions: perception.activeRank,
+            snapshotToken: snapshotToken,
+            dynamicTelemetryValues: dynamicTelemetryValues
+        )
         
         bufferIndex = prevIdx
         stepCount += 1
@@ -1161,225 +1274,6 @@ class BaseSelfScalingCore: ForegroundCore {
         
         if let owArr = loadedDict.removeValue(forKey: "optionBank.weights") {
             optionBank.weights.copy(from: owArr.asArray(Float.self))
-        }
-    }
-}
-
-final class CPUForegroundCore: ForegroundCore {
-    let obsDim: Int
-    let actDim: Int
-    let signalDim: Int
-    let capacityLimit: Int
-    let backendName = "cpu"
-
-    let perception: AdaptivePerception
-    let control: ReactiveControl
-
-    private var currentBatchSize = 1
-    private var bufferIndex = 0
-    private var stepCount = 0
-
-    private var signal: SharedFloatStorage
-    private var state: SharedFloatStorage
-    private var prevState: SharedFloatStorage
-    private var action: SharedFloatStorage
-    private var reward: SharedFloatStorage
-    private var reconstruction: SharedFloatStorage
-    private var residual: SharedFloatStorage
-    private var plannedBias: SharedFloatStorage
-
-    private var nsPerWorkUnitEstimate: Double
-    private var snapshotToken: Int
-
-    init(obsDim: Int, actDim: Int, seed: Int?) {
-        self.obsDim = obsDim
-        self.actDim = actDim
-        signalDim = obsDim + actDim + 1
-        capacityLimit = max(1, Int(ceil(sqrt(Double(max(signalDim, 1))))))
-
-        let rootSeed = oakDeriveSeed(seed, salt: 0x5000) ?? 0x9E3779B97F4A7C15
-        let rng = CoreSeededRNG(seed: rootSeed)
-
-        signal = SharedFloatStorage(count: max(signalDim * 2, 1), device: nil)
-        state = SharedFloatStorage(count: max(capacityLimit * 2, 1), device: nil)
-        prevState = SharedFloatStorage(count: max(capacityLimit * 2, 1), device: nil)
-        action = SharedFloatStorage(count: max(actDim * 2, 1), device: nil)
-        reward = SharedFloatStorage(count: max(2, 1), device: nil)
-        reconstruction = SharedFloatStorage(count: max(signalDim * 2, 1), device: nil)
-        residual = SharedFloatStorage(count: max(signalDim * 2, 1), device: nil)
-        plannedBias = SharedFloatStorage(count: max(actDim * 2, 1), device: nil)
-
-        perception = AdaptivePerception(signalDim: signalDim, capacityLimit: capacityLimit, device: nil, rng: rng)
-        control = ReactiveControl(actDim: actDim, capacityLimit: capacityLimit, device: nil, rng: rng)
-        nsPerWorkUnitEstimate = 1
-        snapshotToken = 0
-    }
-
-    func step(input: StepInput) -> StepOutput {
-        ensureBatchSize(input.batchSize)
-        let stepStartNs = oakCurrentTimeNanoseconds()
-        let activeIdx = bufferIndex
-        let prevIdx = 1 - bufferIndex
-
-        loadSignal(
-            obs: input.obs,
-            prevAction: input.prevAction,
-            prevReward: input.prevReward,
-            batchSize: input.batchSize,
-            bufferIndex: activeIdx
-        )
-        zeroStorage(plannedBias, offset: activeIdx * input.batchSize * actDim, count: input.batchSize * actDim)
-
-        let capacityDecision = decideCapacity(budgetNs: input.wallClockBudgetNs)
-        var activeRank = max(1, min(capacityDecision.allowedRank, perception.activeRank))
-        var residualEnergyByBatch = Array(repeating: 0.0, count: input.batchSize)
-
-        for b in 0..<input.batchSize {
-            let sigOff = (activeIdx * input.batchSize + b) * signalDim
-            let stOff = (activeIdx * input.batchSize + b) * capacityLimit
-            let reconOff = (activeIdx * input.batchSize + b) * signalDim
-            let resOff = (activeIdx * input.batchSize + b) * signalDim
-            zeroStorage(reconstruction, offset: reconOff, count: signalDim)
-            zeroStorage(residual, offset: resOff, count: signalDim)
-
-            let encoding = perception.encode(
-                signal: signal,
-                signalOffset: sigOff,
-                state: state,
-                stateOffset: stOff,
-                reconstruction: reconstruction,
-                reconOffset: reconOff,
-                residual: residual,
-                resOffset: resOff,
-                allowedRank: b == 0 ? capacityDecision.allowedRank : activeRank
-            )
-            residualEnergyByBatch[b] = encoding.residualEnergy
-            activeRank = perception.currentActiveRank(budget: capacityDecision)
-        }
-
-        let foregroundComputeStartMs = oakCurrentTimeMilliseconds()
-        for b in 0..<input.batchSize {
-            let stOff = (activeIdx * input.batchSize + b) * capacityLimit
-            let planOff = (activeIdx * input.batchSize + b) * actDim
-            control.actCPU(
-                state: state,
-                stateOffset: stOff,
-                plannedBias: plannedBias,
-                plannedOffset: planOff,
-                activeRank: activeRank,
-                action: action,
-                actOffset: planOff
-            )
-        }
-        let foregroundComputeMs = oakCurrentTimeMilliseconds() - foregroundComputeStartMs
-
-        if stepCount > 0 {
-            for b in 0..<input.batchSize {
-                let prevStateOff = (prevIdx * input.batchSize + b) * capacityLimit
-                let stateOff = (activeIdx * input.batchSize + b) * capacityLimit
-                let prevActionOff = (prevIdx * input.batchSize + b) * actDim
-                let rewardValue = reward[(activeIdx * input.batchSize) + b]
-
-                let tdDelta = control.update(
-                    prevState: prevState,
-                    prevOffset: prevStateOff,
-                    state: state,
-                    stateOffset: stateOff,
-                    prevAction: action,
-                    prevActOffset: prevActionOff,
-                    reward: rewardValue,
-                    activeRank: activeRank
-                )
-
-                let utilitySignal = Double(abs(tdDelta)) + residualEnergyByBatch[b]
-                for index in 0..<activeRank {
-                    perception.recordUtility(index: index, value: utilitySignal)
-                }
-            }
-        }
-
-        for b in 0..<input.batchSize {
-            let stateOff = (activeIdx * input.batchSize + b) * capacityLimit
-            let prevStateOff = (activeIdx * input.batchSize + b) * capacityLimit
-            for index in 0..<capacityLimit {
-                prevState[prevStateOff + index] = state[stateOff + index]
-            }
-        }
-
-        snapshotToken &+= 1
-        let stepNs = oakCurrentTimeNanoseconds() - stepStartNs
-        let workUnits = max(Double(activeRank * (signalDim + actDim + activeRank) * input.batchSize), 1)
-        let measuredNsPerWorkUnit = Double(stepNs) / workUnits
-        nsPerWorkUnitEstimate = (nsPerWorkUnitEstimate + measuredNsPerWorkUnit) / 2
-
-        let telemetry = input.obs.withUnsafeBufferPointer { obsPtr in
-            AgentTelemetry(
-                rewardInput: input.prevReward[0],
-                obs: UnsafeBufferPointer(start: obsPtr.baseAddress, count: min(obsPtr.count, obsDim)),
-                state: state.immutableBufferPointer(offset: (activeIdx * input.batchSize) * capacityLimit, length: activeRank),
-                action: action.immutableBufferPointer(offset: (activeIdx * input.batchSize) * actDim, length: actDim),
-                agentStepMs: Double(stepNs) / 1_000_000,
-                backend: backendName,
-                metalTimings: MetalCommandTimings(cmd1Ms: foregroundComputeMs, cmd2Ms: 0, cmd3Ms: 0, cmd4Ms: 0, cmd5Ms: 0),
-                plannerStepMs: 0,
-                computeBudgetNs: input.wallClockBudgetNs,
-                activeRank: activeRank,
-                activeGVFs: 0,
-                activeOptions: 0,
-                snapshotToken: snapshotToken
-            )
-        }
-
-        bufferIndex = prevIdx
-        stepCount += 1
-
-        let actionOffset = (activeIdx * input.batchSize) * actDim
-        let outAction = action.snapshot(offset: actionOffset, prefix: actDim * input.batchSize)
-        return StepOutput(action: outAction, telemetry: telemetry, snapshotToken: snapshotToken)
-    }
-
-    private func ensureBatchSize(_ batchSize: Int) {
-        guard batchSize > currentBatchSize else { return }
-        currentBatchSize = batchSize
-        signal = SharedFloatStorage(count: max(signalDim * batchSize * 2, 1), device: nil)
-        state = SharedFloatStorage(count: max(capacityLimit * batchSize * 2, 1), device: nil)
-        prevState = SharedFloatStorage(count: max(capacityLimit * batchSize * 2, 1), device: nil)
-        action = SharedFloatStorage(count: max(actDim * batchSize * 2, 1), device: nil)
-        reward = SharedFloatStorage(count: max(batchSize * 2, 1), device: nil)
-        reconstruction = SharedFloatStorage(count: max(signalDim * batchSize * 2, 1), device: nil)
-        residual = SharedFloatStorage(count: max(signalDim * batchSize * 2, 1), device: nil)
-        plannedBias = SharedFloatStorage(count: max(actDim * batchSize * 2, 1), device: nil)
-    }
-
-    private func decideCapacity(budgetNs: UInt64) -> CapacityDecision {
-        let safeBudget = max(Double(budgetNs), 1)
-        let budgetWorkUnits = safeBudget / max(nsPerWorkUnitEstimate, Double(Float.ulpOfOne))
-        let dimensionality = Double(signalDim + actDim)
-        let rankByBudget = Int(max(1, floor((sqrt(dimensionality * dimensionality + 4 * budgetWorkUnits) - dimensionality) / 2)))
-        return CapacityDecision(allowedRank: max(1, min(capacityLimit, rankByBudget)), budgetWorkUnits: budgetWorkUnits)
-    }
-
-    private func loadSignal(obs: [Float], prevAction: [Float], prevReward: [Float], batchSize: Int, bufferIndex: Int) {
-        for b in 0..<batchSize {
-            let sigOff = (bufferIndex * batchSize + b) * signalDim
-            let obsOff = b * obsDim
-            let actOff = b * actDim
-            for index in 0..<obsDim {
-                signal[sigOff + index] = oakSafeScalar(obs[obsOff + index])
-            }
-            for index in 0..<actDim {
-                signal[sigOff + obsDim + index] = oakSafeScalar(prevAction[actOff + index], clamp: -1...1)
-            }
-            let rewardValue = oakSafeScalar(prevReward[b])
-            signal[sigOff + signalDim - 1] = rewardValue
-            reward[bufferIndex * batchSize + b] = rewardValue
-        }
-    }
-
-    private func zeroStorage(_ storage: SharedFloatStorage, offset: Int, count: Int) {
-        guard count > 0 else { return }
-        for index in 0..<count {
-            storage[offset + index] = 0
         }
     }
 }

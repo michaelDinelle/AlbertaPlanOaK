@@ -6,8 +6,37 @@ struct AgentStepResult {
     let telemetry: AgentTelemetry
 }
 
-private func metricsFinite(_ value: Double, default defaultValue: Double = 0) -> Double {
+func metricsFinite(_ value: Double, default defaultValue: Double = 0) -> Double {
     value.isFinite ? value : defaultValue
+}
+
+struct DynamicTelemetryDescriptor: Codable, Equatable {
+    let key: String
+    let unit: String
+}
+
+struct DynamicTelemetrySchema: Codable, Equatable {
+    let descriptors: [DynamicTelemetryDescriptor]
+
+    static let empty = DynamicTelemetrySchema(descriptors: [])
+}
+
+struct TelemetryVectorSummary: Equatable {
+    let mean: Double
+    let std: Double
+    let l2: Double
+    let min: Double
+    let max: Double
+
+    static let zero = TelemetryVectorSummary(mean: 0, std: 0, l2: 0, min: 0, max: 0)
+
+    init(mean: Double, std: Double, l2: Double, min: Double, max: Double) {
+        self.mean = metricsFinite(mean)
+        self.std = metricsFinite(std)
+        self.l2 = metricsFinite(l2)
+        self.min = metricsFinite(min)
+        self.max = metricsFinite(max)
+    }
 }
 
 struct AgentTelemetry: Equatable {
@@ -36,6 +65,7 @@ struct AgentTelemetry: Equatable {
     let cmd3Ms: Double?
     let cmd4Ms: Double?
     let cmd5Ms: Double?
+    let dynamicTelemetryValues: [Double]
 
     init(
         rewardInput: Float,
@@ -50,24 +80,59 @@ struct AgentTelemetry: Equatable {
         activeRank: Int = 0,
         activeGVFs: Int = 0,
         activeOptions: Int = 0,
-        snapshotToken: Int = 0
+        snapshotToken: Int = 0,
+        dynamicTelemetryValues: [Double] = []
     ) {
         let obsStats = VectorSummary(obs)
         let actionStats = VectorSummary(action)
         let stateStats = VectorSummary(state)
 
-        self.rewardInput = metricsFinite(Double(rewardInput))
-        obsMean = obsStats.mean
-        obsStd = obsStats.std
-        obsL2 = obsStats.l2
-        actionMean = actionStats.mean
-        actionStd = actionStats.std
-        actionL2 = actionStats.l2
-        actionMin = actionStats.min
-        actionMax = actionStats.max
-        stateMean = stateStats.mean
-        stateStd = stateStats.std
-        stateL2 = stateStats.l2
+        self.init(
+            rewardInput: Double(rewardInput),
+            obsSummary: obsStats.telemetrySummary,
+            stateSummary: stateStats.telemetrySummary,
+            actionSummary: actionStats.telemetrySummary,
+            agentStepMs: agentStepMs,
+            backend: backend,
+            metalTimings: metalTimings,
+            plannerStepMs: plannerStepMs,
+            computeBudgetNs: computeBudgetNs,
+            activeRank: activeRank,
+            activeGVFs: activeGVFs,
+            activeOptions: activeOptions,
+            snapshotToken: snapshotToken,
+            dynamicTelemetryValues: dynamicTelemetryValues
+        )
+    }
+
+    init(
+        rewardInput: Double,
+        obsSummary: TelemetryVectorSummary,
+        stateSummary: TelemetryVectorSummary,
+        actionSummary: TelemetryVectorSummary,
+        agentStepMs: Double,
+        backend: String,
+        metalTimings: MetalCommandTimings? = nil,
+        plannerStepMs: Double = 0,
+        computeBudgetNs: UInt64 = 0,
+        activeRank: Int = 0,
+        activeGVFs: Int = 0,
+        activeOptions: Int = 0,
+        snapshotToken: Int = 0,
+        dynamicTelemetryValues: [Double] = []
+    ) {
+        self.rewardInput = metricsFinite(rewardInput)
+        obsMean = obsSummary.mean
+        obsStd = obsSummary.std
+        obsL2 = obsSummary.l2
+        actionMean = actionSummary.mean
+        actionStd = actionSummary.std
+        actionL2 = actionSummary.l2
+        actionMin = actionSummary.min
+        actionMax = actionSummary.max
+        stateMean = stateSummary.mean
+        stateStd = stateSummary.std
+        stateL2 = stateSummary.l2
         self.agentStepMs = metricsFinite(agentStepMs)
         self.backend = backend
         self.plannerStepMs = metricsFinite(plannerStepMs)
@@ -81,6 +146,7 @@ struct AgentTelemetry: Equatable {
         cmd3Ms = metalTimings?.cmd3Ms
         cmd4Ms = metalTimings?.cmd4Ms
         cmd5Ms = metalTimings?.cmd5Ms
+        self.dynamicTelemetryValues = dynamicTelemetryValues.map { metricsFinite($0) }
     }
 
     static func randomPolicy(rewardInput: Float, obs: UnsafeBufferPointer<Float>, action: UnsafeBufferPointer<Float>, agentStepMs: Double) -> AgentTelemetry {
@@ -96,7 +162,8 @@ struct AgentTelemetry: Equatable {
             activeRank: 0,
             activeGVFs: 0,
             activeOptions: 0,
-            snapshotToken: 0
+            snapshotToken: 0,
+            dynamicTelemetryValues: []
         )
     }
 }
@@ -130,6 +197,7 @@ struct RollingWindowStats: Equatable {
     private var activeRankObservedMax = 0
     private var activeGVFsSum = 0.0
     private var activeOptionsSum = 0.0
+    private var dynamicTelemetrySums: [Double] = []
 
     mutating func record(step: Int, rewards: [Float], doneCountBatch: Int, telemetry: AgentTelemetry, envStepMs: Double, totalStepMs: Double) {
         if count == 0 {
@@ -158,6 +226,12 @@ struct RollingWindowStats: Equatable {
         activeRankObservedMax = max(activeRankObservedMax, telemetry.activeRank)
         activeGVFsSum += metricsFinite(Double(telemetry.activeGVFs))
         activeOptionsSum += metricsFinite(Double(telemetry.activeOptions))
+        if dynamicTelemetrySums.count < telemetry.dynamicTelemetryValues.count {
+            dynamicTelemetrySums.append(contentsOf: Array(repeating: 0, count: telemetry.dynamicTelemetryValues.count - dynamicTelemetrySums.count))
+        }
+        for index in 0..<telemetry.dynamicTelemetryValues.count {
+            dynamicTelemetrySums[index] += metricsFinite(telemetry.dynamicTelemetryValues[index])
+        }
     }
 
     var rewardMean: Double {
@@ -229,6 +303,13 @@ struct RollingWindowStats: Equatable {
         count > 0 ? activeOptionsSum / Double(count) : 0
     }
 
+    var dynamicTelemetryMeanValues: [Double]? {
+        guard count > 0, !dynamicTelemetrySums.isEmpty else {
+            return nil
+        }
+        return dynamicTelemetrySums.map { $0 / Double(count) }
+    }
+
     var rewardTotal: Double {
         rewardSum
     }
@@ -241,33 +322,29 @@ struct RollingWindowStats: Equatable {
 struct MetricsConfiguration {
     let windowSize: Int
     let fileURL: URL
-    let emitStepRecords: Bool
-    let emitSummaryRecords: Bool
-    let emitStdoutSummaries: Bool
 
-    init(windowSize: Int, fileURL: URL, emitStepRecords: Bool = true, emitSummaryRecords: Bool = true, emitStdoutSummaries: Bool = true) {
+    init(windowSize: Int, fileURL: URL) {
         self.windowSize = windowSize
         self.fileURL = fileURL
-        self.emitStepRecords = emitStepRecords
-        self.emitSummaryRecords = emitSummaryRecords
-        self.emitStdoutSummaries = emitStdoutSummaries
     }
 
-    static func resolve(envName: String, policyName: String, rootDirectory: String? = nil, environment: [String: String] = ProcessInfo.processInfo.environment, processId: Int32 = getpid()) -> MetricsConfiguration {
+    static func resolve(
+        envName: String,
+        policyName: String,
+        runControl: RunControl,
+        numEnvs: Int,
+        rootDirectory: String? = nil,
+        environment: [String: String] = ProcessInfo.processInfo.environment,
+        processId: Int32 = getpid()
+    ) -> MetricsConfiguration {
         let fileManager = FileManager.default
         let baseDirectory = rootDirectory ?? environment["OAK_ROOT_DIR"] ?? fileManager.currentDirectoryPath
-        let windowSize = max(environment["OAK_METRICS_WINDOW"].flatMap(Int.init) ?? 100, 1)
-        let emitStepRecords = metricsFlag(named: "OAK_METRICS_STEP_RECORDS", defaultValue: true, environment: environment)
-        let emitSummaryRecords = metricsFlag(named: "OAK_METRICS_SUMMARY_RECORDS", defaultValue: true, environment: environment)
-        let emitStdoutSummaries = metricsFlag(named: "OAK_METRICS_STDOUT_SUMMARIES", defaultValue: true, environment: environment)
+        let windowSize = deriveMetricsWindowSize(runControl: runControl, numEnvs: numEnvs)
 
         if let overridePath = environment["OAK_METRICS_JSONL_PATH"], !overridePath.isEmpty {
             return MetricsConfiguration(
                 windowSize: windowSize,
-                fileURL: resolveMetricsPath(overridePath, rootDirectory: baseDirectory),
-                emitStepRecords: emitStepRecords,
-                emitSummaryRecords: emitSummaryRecords,
-                emitStdoutSummaries: emitStdoutSummaries
+                fileURL: resolveMetricsPath(overridePath, rootDirectory: baseDirectory)
             )
         }
 
@@ -276,10 +353,7 @@ struct MetricsConfiguration {
         let filename = "\(metricsFilenameTimestamp(Date()))-\(envName)-\(policyName)-\(processId).jsonl"
         return MetricsConfiguration(
             windowSize: windowSize,
-            fileURL: directoryURL.appendingPathComponent(filename),
-            emitStepRecords: emitStepRecords,
-            emitSummaryRecords: emitSummaryRecords,
-            emitStdoutSummaries: emitStdoutSummaries
+            fileURL: directoryURL.appendingPathComponent(filename)
         )
     }
 }
@@ -338,6 +412,7 @@ struct RunMetadata: Equatable {
     let concreteEnvId: String
     let leagueName: String?
     let schema: EnvironmentSchemaFingerprint
+    let dynamicTelemetrySchema: DynamicTelemetrySchema
 }
 
 final class RunMetricsAggregator {
@@ -364,6 +439,7 @@ final class RunMetricsAggregator {
         policyName: String,
         backend: String,
         schema: EnvironmentSchemaFingerprint,
+        dynamicTelemetrySchema: DynamicTelemetrySchema = .empty,
         windowSize: Int,
         seed: Int? = nil
     ) {
@@ -373,7 +449,8 @@ final class RunMetricsAggregator {
             logicalEnvName: logicalEnvName,
             concreteEnvId: concreteEnvId,
             leagueName: leagueName,
-            schema: schema
+            schema: schema,
+            dynamicTelemetrySchema: dynamicTelemetrySchema
         )
         self.policyName = policyName
         self.backend = backend
@@ -403,7 +480,8 @@ final class RunMetricsAggregator {
             actionFlatDim: metadata.schema.action.flattenedDim,
             actionDiscreteCount: metadata.schema.action.discreteCount,
             actionShape: metadata.schema.action.shape,
-            schemaFingerprint: metadata.schema.schemaFingerprint
+            schemaFingerprint: metadata.schema.schemaFingerprint,
+            dynamicTelemetrySchema: metadata.dynamicTelemetrySchema
         )
     }
 
@@ -475,6 +553,7 @@ final class RunMetricsAggregator {
                 actionDiscreteCount: metadata.schema.action.discreteCount,
                 actionShape: metadata.schema.action.shape,
                 schemaFingerprint: metadata.schema.schemaFingerprint,
+                dynamicTelemetryValues: windowStats.dynamicTelemetryMeanValues,
                 stats: windowStats
             )
             windowStats.reset()
@@ -510,6 +589,7 @@ final class RunMetricsAggregator {
             actionDiscreteCount: metadata.schema.action.discreteCount,
             actionShape: metadata.schema.action.shape,
             schemaFingerprint: metadata.schema.schemaFingerprint,
+            dynamicTelemetryValues: totalStats.dynamicTelemetryMeanValues,
             stats: totalStats
         )
     }
@@ -592,6 +672,8 @@ struct MetricsRecord: Codable {
     let activeGVFsMean: Double?
     let activeOptionsMean: Double?
     let schemaFingerprint: String?
+    let dynamicTelemetrySchema: DynamicTelemetrySchema?
+    let dynamicTelemetryValues: [Double]?
     /// For `run_end`: number of vectorized agent+env update iterations (batch steps); `measuredStepCount` is global env steps.
     let vectorUpdateCount: Int?
 
@@ -672,6 +754,8 @@ struct MetricsRecord: Codable {
         activeGVFsMean: Double? = nil,
         activeOptionsMean: Double? = nil,
         schemaFingerprint: String? = nil,
+        dynamicTelemetrySchema: DynamicTelemetrySchema? = nil,
+        dynamicTelemetryValues: [Double]? = nil,
         vectorUpdateCount: Int? = nil
     ) {
         self.type = type
@@ -750,6 +834,8 @@ struct MetricsRecord: Codable {
         self.activeGVFsMean = activeGVFsMean
         self.activeOptionsMean = activeOptionsMean
         self.schemaFingerprint = schemaFingerprint
+        self.dynamicTelemetrySchema = dynamicTelemetrySchema
+        self.dynamicTelemetryValues = dynamicTelemetryValues?.map { metricsFinite($0) }
         self.vectorUpdateCount = vectorUpdateCount
     }
 
@@ -813,7 +899,8 @@ struct MetricsRecord: Codable {
             activeRank: telemetry.activeRank,
             activeGVFs: telemetry.activeGVFs,
             activeOptions: telemetry.activeOptions,
-            snapshotToken: telemetry.snapshotToken
+            snapshotToken: telemetry.snapshotToken,
+            dynamicTelemetryValues: telemetry.dynamicTelemetryValues
         )
     }
 
@@ -843,6 +930,7 @@ struct MetricsRecord: Codable {
         actionDiscreteCount: Int? = nil,
         actionShape: [Int]? = nil,
         schemaFingerprint: String? = nil,
+        dynamicTelemetryValues: [Double]? = nil,
         stats: RollingWindowStats
     ) -> MetricsRecord {
         MetricsRecord(
@@ -890,6 +978,7 @@ struct MetricsRecord: Codable {
             activeGVFsMean: stats.activeGVFsMean,
             activeOptionsMean: stats.activeOptionsMean,
             schemaFingerprint: schemaFingerprint,
+            dynamicTelemetryValues: dynamicTelemetryValues,
             vectorUpdateCount: vectorUpdateCount
         )
     }
@@ -959,22 +1048,20 @@ private func positiveDouble(from rawValue: String?) -> Double? {
     return parsed
 }
 
-private func metricsFlag(named name: String, defaultValue: Bool, environment: [String: String]) -> Bool {
-    guard let rawValue = environment[name]?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased(), !rawValue.isEmpty else {
-        return defaultValue
+private func deriveMetricsWindowSize(runControl: RunControl, numEnvs: Int) -> Int {
+    let safeNumEnvs = max(numEnvs, 1)
+    if let stopAfterMeasuredSteps = runControl.stopAfterMeasuredSteps {
+        let estimatedVectorUpdates = max(Int(ceil(Double(stopAfterMeasuredSteps) / Double(safeNumEnvs))), 1)
+        let targetSummaryCount = 8
+        return max(Int(ceil(Double(estimatedVectorUpdates) / Double(targetSummaryCount))), 1)
     }
-
-    switch rawValue {
-    case "1", "true", "yes", "on":
-        return true
-    case "0", "false", "no", "off":
-        return false
-    default:
-        return defaultValue
+    if runControl.stopAfterMeasuredSeconds != nil {
+        return 25
     }
+    return 50
 }
 
-private struct VectorSummary: Equatable {
+struct VectorSummary: Equatable {
     let mean: Double
     let std: Double
     let l2: Double
@@ -1011,6 +1098,10 @@ private struct VectorSummary: Equatable {
         l2 = sqrt(sumSquares)
         min = minValue
         max = maxValue
+    }
+
+    var telemetrySummary: TelemetryVectorSummary {
+        TelemetryVectorSummary(mean: mean, std: std, l2: l2, min: min, max: max)
     }
 }
 

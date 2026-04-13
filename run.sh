@@ -81,7 +81,6 @@ validate_python_imports() {
 
 should_preflight_metal() {
     [ "$REQUESTED_POLICY" = "random" ] && return 1
-    [ "${OAK_ALLOW_CPU_FALLBACK:-0}" = "1" ] && return 1
     return 0
 }
 
