@@ -1117,6 +1117,7 @@ final class DMControlEnv: PyEnv {
 private protocol PolicyRunner {
     var policyName: String { get }
     var backendName: String { get }
+    var telemetrySchema: DynamicTelemetrySchema { get }
     func step(obs: [Float], reward: [Float], wallClockBudgetNs: UInt64, batchSize: Int) -> AgentStepResult
 }
 
@@ -1222,14 +1223,10 @@ final class OaK: PolicyRunner {
         self.obsDim = obsDim
         self.actDim = actDim
         lastAction = []
-        if let device = resolvedDevice {
-            core = MetalForegroundCore(obsDim: obsDim, actDim: actDim, device: device, seed: seed)
-        } else if ProcessInfo.processInfo.environment["OAK_ALLOW_CPU_FALLBACK"] == "1" {
-            logWarning("Metal is unavailable in this runtime; using the CPU OaK backend because OAK_ALLOW_CPU_FALLBACK=1.")
-            core = CPUForegroundCore(obsDim: obsDim, actDim: actDim, seed: seed)
-        } else {
-            fatalError("Metal device unavailable. OaK requires Metal in normal runs.")
+        guard let device = resolvedDevice else {
+            fatalError("Metal device unavailable. OaK is a Metal-only runtime.")
         }
+        core = MetalForegroundCore(obsDim: obsDim, actDim: actDim, device: device, seed: seed)
     }
 
     var policyName: String {
@@ -1238,6 +1235,10 @@ final class OaK: PolicyRunner {
 
     var backendName: String {
         core.backendName
+    }
+
+    var telemetrySchema: DynamicTelemetrySchema {
+        core.telemetrySchema
     }
 
     func step(obs: [Float], reward: [Float], wallClockBudgetNs: UInt64, batchSize: Int) -> AgentStepResult {
@@ -1263,6 +1264,7 @@ private final class RandomPolicyRunner: PolicyRunner {
 
     let policyName = "random"
     let backendName = "random"
+    let telemetrySchema = DynamicTelemetrySchema.empty
 
     init(obsDim: Int, actDim: Int, seed: Int? = configuredRunSeed()) {
         self.obsDim = obsDim
@@ -1274,13 +1276,14 @@ private final class RandomPolicyRunner: PolicyRunner {
         let stepStart = currentTimeMilliseconds()
         let safeObs = sanitizeVector(obs)
         let action = (0..<(actDim * batchSize)).map { _ in seededFloat(in: -1...1, rng: rng) }
+        let rewardMean = reward.isEmpty ? 0 : reward.reduce(Float.zero, +) / Float(reward.count)
         
         let telemetry = safeObs.withUnsafeBufferPointer { obsPtr in
             action.withUnsafeBufferPointer { actPtr in
                 AgentTelemetry.randomPolicy(
-                    rewardInput: reward.first ?? 0,
-                    obs: UnsafeBufferPointer(start: obsPtr.baseAddress, count: obsDim),
-                    action: UnsafeBufferPointer(start: actPtr.baseAddress, count: actDim),
+                    rewardInput: rewardMean,
+                    obs: UnsafeBufferPointer(start: obsPtr.baseAddress, count: obsPtr.count),
+                    action: UnsafeBufferPointer(start: actPtr.baseAddress, count: actPtr.count),
                     agentStepMs: currentTimeMilliseconds() - stepStart
                 )
             }
@@ -1408,7 +1411,12 @@ private func envRunsForRequest(availableEnvs: [(String, (() -> PyEnv)?)], reques
                 : OaK(obsDim: env.obsDim, actDim: env.actDim, seed: runSeed)
             let seedSuffix = runSeed.map { " seed=\($0)" } ?? ""
             print("\n\(metricsEnvName) (\(type(of: env))) [policy=\(runner.policyName)\(seedSuffix)]")
-            let metricsConfiguration = MetricsConfiguration.resolve(envName: metricsEnvName, policyName: runner.policyName)
+            let metricsConfiguration = MetricsConfiguration.resolve(
+                envName: metricsEnvName,
+                policyName: runner.policyName,
+                runControl: runControl,
+                numEnvs: numEnvs
+            )
             let metrics = RunMetricsAggregator(
                 envName: metricsEnvName,
                 logicalEnvName: name,
@@ -1417,6 +1425,7 @@ private func envRunsForRequest(availableEnvs: [(String, (() -> PyEnv)?)], reques
                 policyName: runner.policyName,
                 backend: runner.backendName,
                 schema: env.schema,
+                dynamicTelemetrySchema: runner.telemetrySchema,
                 windowSize: metricsConfiguration.windowSize,
                 seed: runSeed
             )
@@ -1454,9 +1463,7 @@ private func envRunsForRequest(availableEnvs: [(String, (() -> PyEnv)?)], reques
                 } catch {
                     fatalError("Failed to write metrics run_end record: \(error)")
                 }
-                if metricsConfiguration.emitStdoutSummaries {
-                    print(formatMetricsSummary(finalRecord))
-                }
+                print(formatMetricsSummary(finalRecord))
             }
             while true {
                 let nextEnvironmentStep = totalEnvironmentSteps + numEnvs
@@ -1467,7 +1474,7 @@ private func envRunsForRequest(availableEnvs: [(String, (() -> PyEnv)?)], reques
                 let totalStepStart = currentTimeMilliseconds()
                 if isMeasuredStep && measurementStartMs == nil {
                     measurementStartMs = totalStepStart
-                    if runControl.warmupSteps > 0, metricsConfiguration.emitStdoutSummaries {
+                    if runControl.warmupSteps > 0 {
                         print("[metrics] warmup_complete env=\(metricsEnvName) policy=\(runner.policyName) warmup_steps=\(runControl.warmupSteps)")
                     }
                 }
@@ -1499,16 +1506,9 @@ private func envRunsForRequest(availableEnvs: [(String, (() -> PyEnv)?)], reques
                         totalStepMs: totalStepMs
                     )
                     do {
-                        if metricsConfiguration.emitStepRecords {
-                            try metricsSink.write(metricsRecords.step)
-                        }
                         if let summaryRecord = metricsRecords.summary {
-                            if metricsConfiguration.emitSummaryRecords {
-                                try metricsSink.write(summaryRecord)
-                            }
-                            if metricsConfiguration.emitStdoutSummaries {
-                                print(formatMetricsSummary(summaryRecord))
-                            }
+                            try metricsSink.write(summaryRecord)
+                            print(formatMetricsSummary(summaryRecord))
                         }
                     } catch {
                         fatalError("Failed to write metrics record: \(error)")
@@ -1534,9 +1534,7 @@ private func envRunsForRequest(availableEnvs: [(String, (() -> PyEnv)?)], reques
                 pendingRewards = result.1
 
                 if shouldStop {
-                    if metricsConfiguration.emitStdoutSummaries {
-                        print("Stopping after \(measuredSteps) measured steps (\(totalEnvironmentSteps) total env steps), reason=\(stopReason)")
-                    }
+                    print("Stopping after \(measuredSteps) measured steps (\(totalEnvironmentSteps) total env steps), reason=\(stopReason)")
                     if carlaDebugEnabled {
                         logWarning("Stopping environment \(metricsEnvName) because \(stopReason)")
                     }

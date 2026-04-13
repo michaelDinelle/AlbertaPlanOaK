@@ -4,39 +4,28 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPORT_SCRIPT="$ROOT_DIR/scripts/benchmark_report.py"
 CONDA_ENV_DIR="${CONDA_ENV_DIR:-$HOME/miniforge3/envs/oak}"
-PYTHON_VERSION="${OAK_PYTHON_VERSION:-3.11}"
 PYTHON_BIN="$CONDA_ENV_DIR/bin/python"
 
-DEFAULT_REQUESTS=("${OAK_BENCH_DEFAULT_REQUEST:-smoke}")
-VALID_REQUESTS=(pyflyt carla cheetah walker humanoid minigrid all hardware-optimal slow smoke core)
+DEFAULT_REQUESTS=(core)
+VALID_REQUESTS=(pyflyt carla cheetah walker humanoid minigrid smoke core)
 HARDWARE_OPTIMAL_ENVS=(cheetah walker humanoid minigrid)
-SLOW_ENVS=(pyflyt carla)
 
-MODE="${OAK_BENCH_MODE:-quality}"
 SEED_START="${OAK_BENCH_SEED_START:-0}"
 SEED_COUNT="${OAK_BENCH_SEED_COUNT:-10}"
 TIMESTAMP="$(date +"%Y%m%d-%H%M%S")"
 BENCH_DIR="${OAK_BENCH_DIR:-$ROOT_DIR/.oak-benchmarks/$TIMESTAMP}"
 RUNS_DIR="$BENCH_DIR/runs"
-RESOLVED_MANIFEST_PATH="$BENCH_DIR/resolved_manifest.tsv"
-LEGACY_MANIFEST_PATH="$BENCH_DIR/manifest.tsv"
-SUMMARY_JSON="$BENCH_DIR/summary.json"
-TASK_SUMMARY_JSON="$BENCH_DIR/task_summary.json"
-FAMILY_SUMMARY_JSON="$BENCH_DIR/family_summary.json"
-RESEARCH_VERDICT_JSON="$BENCH_DIR/research_verdict.json"
-SUMMARY_MD="$BENCH_DIR/summary.md"
-REPORT_MD="$BENCH_DIR/REPORT.md"
-
+MANIFEST_PATH="$RUNS_DIR/.benchmark_manifest.tsv"
+BENCHMARK_JSON="$BENCH_DIR/benchmark.json"
 DEFAULT_WARMUP_STEPS="${OAK_BENCH_DEFAULT_WARMUP_STEPS:-1000}"
-DEFAULT_QUALITY_STEPS="${OAK_BENCH_DEFAULT_QUALITY_STEPS:-50000}"
-DEFAULT_THROUGHPUT_SECONDS="${OAK_BENCH_DEFAULT_THROUGHPUT_SECONDS:-10}"
+DEFAULT_BENCHMARK_STEPS="${OAK_BENCH_DEFAULT_STEPS:-50000}"
 RESOLVE_ONLY=0
 
 usage() {
     cat <<'EOF'
 Usage: ./benchmark.sh [--resolve-only] [request ...]
 
-Scientific benchmark harness for OaK.
+Single benchmark harness for OaK.
 
 Requests:
   smoke             Resolve the fast iteration league.
@@ -47,17 +36,12 @@ Requests:
   walker            Run Walker2d-v4 directly.
   humanoid          Run Humanoid-v4 directly.
   minigrid          Run the MiniGrid family (or one task if OAK_ENVPOOL_TASK_ID is set).
-  hardware-optimal  Expand to cheetah walker humanoid minigrid.
-  slow              Expand to pyflyt carla.
-  all               Expand to pyflyt cheetah walker humanoid minigrid.
 
 Defaults:
-  requests: smoke
-  mode: quality
+  requests: core
   seeds: 0..9
 
 Environment variables:
-  OAK_BENCH_MODE=quality|throughput|both
   OAK_BENCH_POLICIES=oak,random
   OAK_BENCH_BASELINE_POLICY=<policy>
   OAK_BENCH_SEED_START=<int>
@@ -66,8 +50,7 @@ Environment variables:
   OAK_BENCH_SKIP_BUILD=1
   OAK_BENCH_SKIP_DOCTOR=1
   OAK_BENCH_WARMUP_STEPS=<int>
-  OAK_BENCH_QUALITY_STEPS=<int>
-  OAK_BENCH_THROUGHPUT_SECONDS=<float>
+  OAK_BENCH_STEPS=<int>
   OAK_BENCH_NUM_ENVS=<int>
   OAK_BENCH_SMOKE_MINIGRID_LIMIT=<int>        default 3
   OAK_ENVPOOL_TASK_ID=<gym-id>                single-task ad hoc mode only
@@ -75,13 +58,9 @@ Environment variables:
   OAK_ENVPOOL_SUITE_PREFIX=<prefix>           ad hoc family mode only
 
 Artifacts:
-  resolved_manifest.tsv
-  task_summary.json
-  family_summary.json
-  research_verdict.json
-  summary.json
-  summary.md
-  REPORT.md
+  benchmark.json
+  runs/*.jsonl
+  runs/*.log
 
 Notes:
   - League runs ignore inherited task-selection env vars and resolve concrete tasks explicitly.
@@ -181,7 +160,6 @@ FIXED = {
     "walker": "Walker2d-v4",
     "humanoid": "Humanoid-v4",
 }
-DEFAULT_ENVS = ["pyflyt", "cheetah", "walker", "humanoid", "minigrid"]
 SMOKE_MINIGRID_PREFERRED = [
     "MiniGrid-Empty-8x8-v0",
     "MiniGrid-DoorKey-8x8-v0",
@@ -263,21 +241,6 @@ def expand_request(request, rows, seen):
             append(rows, seen, "smoke", "minigrid", concrete_env_id)
         return
 
-    if request == "hardware-optimal":
-        for env_name in ["cheetah", "walker", "humanoid", "minigrid"]:
-            expand_request(env_name, rows, seen)
-        return
-
-    if request == "slow":
-        for env_name in ["pyflyt", "carla"]:
-            expand_request(env_name, rows, seen)
-        return
-
-    if request == "all":
-        for env_name in DEFAULT_ENVS:
-            expand_request(env_name, rows, seen)
-        return
-
     if request in FIXED:
         append(rows, seen, "adhoc", request, FIXED[request])
         return
@@ -333,11 +296,6 @@ run_doctor_gates() {
         return
     fi
 
-    if [ "${OAK_ALLOW_CPU_FALLBACK:-0}" = "1" ]; then
-        printf 'Normal benchmark mode requires Metal. Unset OAK_ALLOW_CPU_FALLBACK or set OAK_BENCH_SKIP_DOCTOR=1 for diagnosis-only runs.\n' >&2
-        exit 1
-    fi
-
     (
         cd "$ROOT_DIR"
         OAK_DOCTOR_SKIP_BUILD=1 ./doctor.sh metal
@@ -361,16 +319,14 @@ validate_and_write_row() {
     local league="$3"
     local logical_env="$4"
     local concrete_env_id="$5"
-    local mode="$6"
-    local policy="$7"
-    local seed="$8"
-    local num_envs="$9"
-    local warmup_steps="${10}"
-    local stop_steps="${11}"
-    local stop_seconds="${12}"
-    local log_path="${13}"
+    local policy="$6"
+    local seed="$7"
+    local num_envs="$8"
+    local warmup_steps="$9"
+    local stop_steps="${10}"
+    local log_path="${11}"
 
-    python3 - "$metrics_path" "$row_path" "$league" "$logical_env" "$concrete_env_id" "$mode" "$policy" "$seed" "$num_envs" "$warmup_steps" "$stop_steps" "$stop_seconds" "$log_path" <<'PY'
+    python3 - "$metrics_path" "$row_path" "$league" "$logical_env" "$concrete_env_id" "$policy" "$seed" "$num_envs" "$warmup_steps" "$stop_steps" "$log_path" <<'PY'
 import json
 import sys
 from pathlib import Path
@@ -381,13 +337,11 @@ from pathlib import Path
     league,
     logical_env,
     concrete_env_id,
-    mode,
     policy,
     seed,
     num_envs,
     warmup_steps,
     stop_steps,
-    stop_seconds,
     log_path,
 ) = sys.argv[1:]
 
@@ -415,10 +369,14 @@ if run_start.get("concreteEnvId") != concrete_env_id:
     )
 if run_start.get("schemaFingerprint") in {None, ""}:
     raise SystemExit(f"Missing schema fingerprint in run_start for {metrics_path}")
+backend = run_start.get("backend") or run_end.get("backend") or ""
+if policy == "oak" and backend != "metal":
+    raise SystemExit(
+        f"OaK benchmark must run on Metal, but {metrics_path} reported backend={backend!r}"
+    )
 
 row = [
     league,
-    mode,
     logical_env,
     concrete_env_id,
     run_start.get("backend") or run_end.get("backend") or "",
@@ -427,7 +385,6 @@ row = [
     num_envs,
     warmup_steps,
     stop_steps,
-    stop_seconds,
     str(run_end.get("runId") or run_start.get("runId") or ""),
     metrics_path,
     log_path,
@@ -443,19 +400,52 @@ Path(row_path).write_text("\t".join(row) + "\n", encoding="utf-8")
 PY
 }
 
+print_run_completion() {
+    local metrics_path="$1"
+    local logical_env="$2"
+    local concrete_env_id="$3"
+    local policy="$4"
+    local seed="$5"
+
+    python3 - "$metrics_path" "$logical_env" "$concrete_env_id" "$policy" "$seed" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+metrics_path, logical_env, concrete_env_id, policy, seed = sys.argv[1:]
+records = [json.loads(line) for line in Path(metrics_path).read_text(encoding="utf-8").splitlines() if line.strip()]
+run_end = next((record for record in reversed(records) if record.get("type") == "run_end"), None)
+if run_end is None:
+    raise SystemExit(f"Metrics file {metrics_path} is missing run_end")
+
+def fmt(value):
+    return f"{value:.4f}" if isinstance(value, float) else str(value)
+
+print(
+    "[bench] done env={env} task={task} policy={policy} seed={seed} reward_sum={reward} done_count={done} steps_per_second={sps} stop_reason={stop}".format(
+        env=logical_env,
+        task=concrete_env_id,
+        policy=policy,
+        seed=seed,
+        reward=fmt(float(run_end.get("rewardSum", 0.0) or 0.0)),
+        done=fmt(float(run_end.get("doneCount", 0.0) or 0.0)),
+        sps=fmt(float(run_end.get("stepsPerSecond", 0.0) or 0.0)),
+        stop=run_end.get("stopReason") or "",
+    )
+)
+PY
+}
+
 run_one() {
-    local mode="$1"
-    local league="$2"
-    local logical_env="$3"
-    local concrete_env_id="$4"
-    local policy="$5"
-    local seed="$6"
-    local warmup_steps="$7"
-    local stop_steps="$8"
-    local stop_seconds="$9"
+    local league="$1"
+    local logical_env="$2"
+    local concrete_env_id="$3"
+    local policy="$4"
+    local seed="$5"
+    local warmup_steps="$6"
+    local stop_steps="$7"
 
     local num_envs="${OAK_BENCH_NUM_ENVS:-}"
-    local allow_cpu_fallback="${OAK_ALLOW_CPU_FALLBACK:-0}"
     if [ -z "$num_envs" ]; then
         if is_hardware_optimal "$logical_env"; then
             num_envs=1024
@@ -466,13 +456,13 @@ run_one() {
 
     local safe_concrete
     safe_concrete="$(sanitize_filename "$concrete_env_id")"
-    local stem="${logical_env}-${safe_concrete}-${policy}-${mode}-seed${seed}"
+    local stem="${logical_env}-${safe_concrete}-${policy}-seed${seed}"
     local metrics_path="$RUNS_DIR/${stem}.jsonl"
     local log_path="$RUNS_DIR/${stem}.log"
     local row_path="$RUNS_DIR/${stem}.row.tsv"
 
-    printf '[bench] league=%s mode=%s env=%s task=%s policy=%s seed=%s warmup=%s stop_steps=%s stop_seconds=%s batch_size=%s\n' \
-        "$league" "$mode" "$logical_env" "$concrete_env_id" "$policy" "$seed" "$warmup_steps" "${stop_steps:-na}" "${stop_seconds:-na}" "$num_envs"
+    printf '[bench] start league=%s env=%s task=%s policy=%s seed=%s warmup=%s stop_steps=%s batch_size=%s\n' \
+        "$league" "$logical_env" "$concrete_env_id" "$policy" "$seed" "$warmup_steps" "${stop_steps:-na}" "$num_envs"
 
     local task_envpool_id=""
     if [ "$logical_env" = "minigrid" ]; then
@@ -482,17 +472,13 @@ run_one() {
     if ! (
         cd "$ROOT_DIR"
         PYGAME_HIDE_SUPPORT_PROMPT=1 \
-        OAK_ALLOW_CPU_FALLBACK="$allow_cpu_fallback" \
         OAK_NUM_ENVS="$num_envs" \
         OAK_POLICY="$policy" \
         OAK_SEED="$seed" \
         OAK_WARMUP_STEPS="$warmup_steps" \
         OAK_STOP_AFTER_STEPS="$stop_steps" \
-        OAK_STOP_AFTER_SECONDS="$stop_seconds" \
+        OAK_STOP_AFTER_SECONDS= \
         OAK_METRICS_JSONL_PATH="$metrics_path" \
-        OAK_METRICS_STEP_RECORDS=0 \
-        OAK_METRICS_SUMMARY_RECORDS=0 \
-        OAK_METRICS_STDOUT_SUMMARIES=0 \
         OAK_CARLA_AUTOSTART="${OAK_CARLA_AUTOSTART:-0}" \
         OAK_BENCH_LEAGUE="$league" \
         OAK_ENVPOOL_TASK_ID="$task_envpool_id" \
@@ -510,14 +496,14 @@ run_one() {
         "$league" \
         "$logical_env" \
         "$concrete_env_id" \
-        "$mode" \
         "$policy" \
         "$seed" \
         "$num_envs" \
         "$warmup_steps" \
         "$stop_steps" \
-        "$stop_seconds" \
         "$log_path"
+
+    print_run_completion "$metrics_path" "$logical_env" "$concrete_env_id" "$policy" "$seed"
 }
 
 ARGS=()
@@ -573,68 +559,50 @@ fi
 
 mkdir -p "$RUNS_DIR"
 
-MODES=()
-case "$MODE" in
-    quality)
-        MODES=(quality)
-        ;;
-    throughput)
-        MODES=(throughput)
-        ;;
-    both)
-        MODES=(quality throughput)
-        ;;
-    *)
-        printf 'Unknown OAK_BENCH_MODE: %s\n' "$MODE" >&2
-        exit 1
-        ;;
-esac
+cleanup_benchmark_intermediates() {
+    find "$RUNS_DIR" -name '*.row.tsv' -delete 2>/dev/null || true
+    rm -f "$MANIFEST_PATH"
+}
+
+trap 'cleanup_benchmark_intermediates' EXIT
 
 printf '[bench] output_dir=%s\n' "$BENCH_DIR"
 build_if_needed
 run_doctor_gates "$resolved_rows"
 
 while IFS=$'\t' read -r league logical_env concrete_env_id; do
-    for mode in "${MODES[@]}"; do
-        warmup_steps="${OAK_BENCH_WARMUP_STEPS:-$DEFAULT_WARMUP_STEPS}"
-        validate_nonnegative_integer "warmup steps for $logical_env/$concrete_env_id" "$warmup_steps"
+    warmup_steps="${OAK_BENCH_WARMUP_STEPS:-$DEFAULT_WARMUP_STEPS}"
+    validate_nonnegative_integer "warmup steps for $logical_env/$concrete_env_id" "$warmup_steps"
 
-        stop_steps=""
-        stop_seconds=""
-        if [ "$mode" = "quality" ]; then
-            stop_steps="${OAK_BENCH_QUALITY_STEPS:-$DEFAULT_QUALITY_STEPS}"
-            validate_positive_integer "quality steps for $logical_env/$concrete_env_id" "$stop_steps"
-        else
-            stop_seconds="${OAK_BENCH_THROUGHPUT_SECONDS:-$DEFAULT_THROUGHPUT_SECONDS}"
-        fi
+    stop_steps="${OAK_BENCH_STEPS:-$DEFAULT_BENCHMARK_STEPS}"
+    validate_positive_integer "benchmark steps for $logical_env/$concrete_env_id" "$stop_steps"
 
-        seed="$SEED_START"
-        seed_limit=$((SEED_START + SEED_COUNT))
-        pids=()
-        while [ "$seed" -lt "$seed_limit" ]; do
-            for policy in "${POLICIES[@]}"; do
-                run_one "$mode" "$league" "$logical_env" "$concrete_env_id" "$policy" "$seed" "$warmup_steps" "$stop_steps" "$stop_seconds" &
-                pids+=($!)
-            done
-            seed=$((seed + 1))
+    seed="$SEED_START"
+    seed_limit=$((SEED_START + SEED_COUNT))
+    pids=()
+    while [ "$seed" -lt "$seed_limit" ]; do
+        for policy in "${POLICIES[@]}"; do
+            run_one "$league" "$logical_env" "$concrete_env_id" "$policy" "$seed" "$warmup_steps" "$stop_steps" &
+            pids+=($!)
         done
-
-        failed=0
-        if [ ${#pids[@]} -gt 0 ]; then
-            for pid in "${pids[@]}"; do
-                if ! wait "$pid"; then
-                    failed=1
-                fi
-            done
-        fi
-        if [ "$failed" -ne 0 ]; then
-            printf 'One or more benchmark runs failed for %s/%s in %s mode.\n' "$logical_env" "$concrete_env_id" "$mode" >&2
-            exit 1
-        fi
+        seed=$((seed + 1))
     done
+
+    failed=0
+    if [ ${#pids[@]} -gt 0 ]; then
+        for pid in "${pids[@]}"; do
+            if ! wait "$pid"; then
+                failed=1
+            fi
+        done
+    fi
+    if [ "$failed" -ne 0 ]; then
+        printf 'One or more benchmark runs failed for %s/%s.\n' "$logical_env" "$concrete_env_id" >&2
+        exit 1
+    fi
 done <<<"$resolved_rows"
 
-printf 'league\tmode\tlogical_env\tconcrete_env_id\tbackend\tpolicy\tseed\tnum_envs\twarmup_steps\tstop_steps\tstop_seconds\trun_id\tmetrics_path\tlog_path\tschema_fingerprint\tobservation_space_kind\tobservation_flat_dim\taction_space_kind\taction_flat_dim\taction_discrete_count\taction_shape\n' >"$RESOLVED_MANIFEST_PATH"
+printf 'league\tlogical_env\tconcrete_env_id\tbackend\tpolicy\tseed\tnum_envs\twarmup_steps\tstop_steps\trun_id\tmetrics_path\tlog_path\tschema_fingerprint\tobservation_space_kind\tobservation_flat_dim\taction_space_kind\taction_flat_dim\taction_discrete_count\taction_shape\n' >"$MANIFEST_PATH"
 
 row_files=()
 while IFS= read -r row_file; do
@@ -642,14 +610,13 @@ while IFS= read -r row_file; do
 done < <(find "$RUNS_DIR" -name '*.row.tsv' | sort)
 
 if [ "${#row_files[@]}" -eq 0 ]; then
-    printf 'No resolved manifest rows were generated in %s\n' "$RUNS_DIR" >&2
+    printf 'No benchmark manifest rows were generated in %s\n' "$RUNS_DIR" >&2
     exit 1
 fi
 
 for row_file in "${row_files[@]}"; do
-    cat "$row_file" >>"$RESOLVED_MANIFEST_PATH"
+    cat "$row_file" >>"$MANIFEST_PATH"
 done
-cp "$RESOLVED_MANIFEST_PATH" "$LEGACY_MANIFEST_PATH"
 
 GIT_REVISION="$(git -C "$ROOT_DIR" rev-parse HEAD 2>/dev/null || printf 'unknown')"
 BASELINE_POLICY="${OAK_BENCH_BASELINE_POLICY:-}"
@@ -667,16 +634,32 @@ fi
 
 python3 "$REPORT_SCRIPT" \
     --bench-dir "$BENCH_DIR" \
-    --manifest "$RESOLVED_MANIFEST_PATH" \
-    --summary-json "$SUMMARY_JSON" \
-    --task-summary-json "$TASK_SUMMARY_JSON" \
-    --family-summary-json "$FAMILY_SUMMARY_JSON" \
-    --research-verdict-json "$RESEARCH_VERDICT_JSON" \
-    --summary-md "$SUMMARY_MD" \
-    --report-md "$REPORT_MD" \
+    --manifest "$MANIFEST_PATH" \
+    --benchmark-json "$BENCHMARK_JSON" \
     --git-revision "$GIT_REVISION" \
     --python-bin "$PYTHON_BIN" \
     --baseline-policy "$BASELINE_POLICY"
 
-cat "$SUMMARY_MD"
-printf '\n[bench] Wrote scientific benchmark artifacts to %s\n' "$BENCH_DIR"
+task_count="$(python3 - "$BENCHMARK_JSON" <<'PY'
+import json
+import sys
+
+with open(sys.argv[1], "r", encoding="utf-8") as handle:
+    benchmark = json.load(handle)
+print(benchmark["config"]["resolvedTaskCount"])
+PY
+)"
+
+run_count="$(python3 - "$BENCHMARK_JSON" <<'PY'
+import json
+import sys
+
+with open(sys.argv[1], "r", encoding="utf-8") as handle:
+    benchmark = json.load(handle)
+print(benchmark["config"]["runCount"])
+PY
+)"
+
+printf '[bench] task_count=%s\n' "$task_count"
+printf '[bench] run_count=%s\n' "$run_count"
+printf '[bench] benchmark_json=%s\n' "$BENCHMARK_JSON"
