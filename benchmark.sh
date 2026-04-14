@@ -3,11 +3,40 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPORT_SCRIPT="$ROOT_DIR/scripts/benchmark_report.py"
-CONDA_ENV_DIR="${CONDA_ENV_DIR:-$HOME/miniforge3/envs/oak}"
-PYTHON_BIN="$CONDA_ENV_DIR/bin/python"
+OAK_PYTHON_PREFIX="${OAK_PYTHON_PREFIX:-$ROOT_DIR/.venv}"
+PYTHON_BIN="$OAK_PYTHON_PREFIX/bin/python"
+PYTHON_LIB=""
+# Embedding must see the real stdlib (encodings, …) plus venv site-packages; venvs do not duplicate stdlib under .venv.
+PYTHONHOME_EMBED=""
+OAK_PYTHON_SITE_PACKAGES=""
+OAK_BINARY="${OAK_BINARY:-$ROOT_DIR/.build/Release/OaK}"
+
+resolve_oak_python_library() {
+    if [ -n "${OAK_PYTHON_LIBRARY:-}" ]; then
+        PYTHON_LIB="$OAK_PYTHON_LIBRARY"
+        return 0
+    fi
+    PYTHON_LIB="$("$PYTHON_BIN" -c 'import os, sys, sysconfig
+ldl = sysconfig.get_config_var("LDLIBRARY") or ""
+libdir = sysconfig.get_config_var("LIBDIR") or ""
+if not ldl:
+    raise SystemExit("LDLIBRARY unset")
+candidates = [
+    os.path.normpath(os.path.join(libdir, ldl)),
+    os.path.normpath(os.path.join(sys.base_prefix, ldl)),
+    os.path.normpath(os.path.join(sys.base_prefix, "Python")),
+]
+for path in candidates:
+    if path and os.path.isfile(path):
+        print(path)
+        break
+else:
+    raise SystemExit("could not resolve embedded Python library path from sysconfig")
+')" || return 1
+}
 
 DEFAULT_REQUESTS=(core)
-VALID_REQUESTS=(pyflyt carla cheetah walker humanoid minigrid smoke core)
+VALID_REQUESTS=(pyflyt cheetah walker humanoid minigrid smoke core)
 HARDWARE_OPTIMAL_ENVS=(cheetah walker humanoid minigrid)
 
 SEED_START="${OAK_BENCH_SEED_START:-0}"
@@ -15,7 +44,6 @@ SEED_COUNT="${OAK_BENCH_SEED_COUNT:-10}"
 TIMESTAMP="$(date +"%Y%m%d-%H%M%S")"
 BENCH_DIR="${OAK_BENCH_DIR:-$ROOT_DIR/.oak-benchmarks/$TIMESTAMP}"
 RUNS_DIR="$BENCH_DIR/runs"
-MANIFEST_PATH="$RUNS_DIR/.benchmark_manifest.tsv"
 BENCHMARK_JSON="$BENCH_DIR/benchmark.json"
 DEFAULT_WARMUP_STEPS="${OAK_BENCH_DEFAULT_WARMUP_STEPS:-1000}"
 DEFAULT_BENCHMARK_STEPS="${OAK_BENCH_DEFAULT_STEPS:-50000}"
@@ -31,7 +59,6 @@ Requests:
   smoke             Resolve the fast iteration league.
   core              Resolve the scientific promotion league.
   pyflyt            Run the PyFlyt task directly.
-  carla             Run the CARLA task directly.
   cheetah           Run HalfCheetah-v4 directly.
   walker            Run Walker2d-v4 directly.
   humanoid          Run Humanoid-v4 directly.
@@ -42,13 +69,14 @@ Defaults:
   seeds: 0..9
 
 Environment variables:
+  OAK_PYTHON_PREFIX=<path>                  default <repo>/.venv
+  OAK_PYTHON_LIBRARY=<path>                 optional; auto from sysconfig if unset
   OAK_BENCH_POLICIES=oak,random
   OAK_BENCH_BASELINE_POLICY=<policy>
   OAK_BENCH_SEED_START=<int>
   OAK_BENCH_SEED_COUNT=<int>
   OAK_BENCH_DIR=<path>
   OAK_BENCH_SKIP_BUILD=1
-  OAK_BENCH_SKIP_DOCTOR=1
   OAK_BENCH_WARMUP_STEPS=<int>
   OAK_BENCH_STEPS=<int>
   OAK_BENCH_NUM_ENVS=<int>
@@ -58,8 +86,8 @@ Environment variables:
   OAK_ENVPOOL_SUITE_PREFIX=<prefix>           ad hoc family mode only
 
 Artifacts:
-  benchmark.json
-  runs/*.jsonl
+  benchmark.json                 Schema oak.benchmark: dense ordered stats, provenance
+  runs/*.jsonl                   Per-run metrics (single source of truth for benchmark_report)
   runs/*.log
 
 Notes:
@@ -121,18 +149,84 @@ validate_nonnegative_integer() {
 }
 
 validate_python_prefix() {
-    [ -d "$CONDA_ENV_DIR" ] || {
-        printf 'Missing conda environment at %s. Run ./doctor.sh python or ./setup.sh.\n' "$CONDA_ENV_DIR" >&2
+    [ -d "$OAK_PYTHON_PREFIX" ] || {
+        printf 'Missing Python environment at %s. Run ./setup.sh.\n' "$OAK_PYTHON_PREFIX" >&2
         exit 1
     }
     [ -x "$PYTHON_BIN" ] || {
-        printf 'Missing Python executable at %s. Run ./doctor.sh python or ./setup.sh.\n' "$PYTHON_BIN" >&2
+        printf 'Missing Python executable at %s. Run ./setup.sh.\n' "$PYTHON_BIN" >&2
+        exit 1
+    }
+    resolve_oak_python_library || {
+        printf 'Could not resolve libpython for embedding. Set OAK_PYTHON_LIBRARY to the libpython dylib/framework path.\n' >&2
+        exit 1
+    }
+    [ -f "$PYTHON_LIB" ] || {
+        printf 'Missing Python library at %s. Run ./setup.sh or set OAK_PYTHON_LIBRARY.\n' "$PYTHON_LIB" >&2
+        exit 1
+    }
+    PYTHONHOME_EMBED="$("$PYTHON_BIN" -c 'import sys; print(sys.base_prefix)')"
+    OAK_PYTHON_SITE_PACKAGES="$("$PYTHON_BIN" -c 'import site; p = site.getsitepackages(); print(p[0] if p else "")')"
+    [ -n "$PYTHONHOME_EMBED" ] || {
+        printf 'Could not resolve sys.base_prefix for embedding.\n' >&2
+        exit 1
+    }
+    [ -n "$OAK_PYTHON_SITE_PACKAGES" ] || {
+        printf 'Could not resolve venv site-packages path.\n' >&2
         exit 1
     }
 }
 
+# OaK embedding: PYTHONHOME = stdlib prefix (base_prefix); PYTHONPATH = venv site-packages only.
+# Exporting these in the parent shell breaks plain `python3`; keep them inside the subshell around OaK.
+validate_oak_release_binary() {
+    [ -x "$OAK_BINARY" ] || {
+        printf 'Missing release binary at %s. Run ./setup.sh or xcodebuild -scheme OaK -configuration Release, or set OAK_BINARY.\n' "$OAK_BINARY" >&2
+        exit 1
+    }
+}
+
+with_oak_python_embedding() {
+    (
+        export OAK_ROOT_DIR="${OAK_ROOT_DIR:-$ROOT_DIR}"
+        export PYTHONHOME="$PYTHONHOME_EMBED"
+        export PYTHONPATH="$OAK_PYTHON_SITE_PACKAGES"
+        export PYTHON_LIBRARY="$PYTHON_LIB"
+        "$@"
+    )
+}
+
+validate_oak_python_imports_for_benchmark() {
+    # Covers every logical env this harness may run (union of per-env import checks).
+    PYGAME_HIDE_SUPPORT_PROMPT=1 "$PYTHON_BIN" -c 'import gymnasium, numpy, PyFlyt, PyFlyt.gym_envs, envpool' >/dev/null 2>&1 || {
+        printf 'Python import preflight failed for benchmark suite. Run ./setup.sh.\n' >&2
+        exit 1
+    }
+}
+
+validate_oak_metal_if_needed() {
+    local policy
+    for policy in "${POLICIES[@]}"; do
+        if [ "$policy" = "oak" ]; then
+            if ! with_oak_python_embedding "$OAK_BINARY" doctor-metal --quiet >/dev/null 2>&1; then
+                printf 'Metal preflight failed. Run ./setup.sh or ensure a Metal-capable GPU is available.\n' >&2
+                exit 1
+            fi
+            return 0
+        fi
+    done
+}
+
+prepare_oak_benchmark_runtime() {
+    validate_oak_release_binary
+    validate_python_prefix
+    export OAK_ROOT_DIR="$ROOT_DIR"
+    validate_oak_python_imports_for_benchmark
+    validate_oak_metal_if_needed
+}
+
 parse_policies() {
-    python3 - "$1" <<'PY'
+    "$PYTHON_BIN" - "$1" <<'PY'
 import sys
 
 raw = sys.argv[1]
@@ -250,7 +344,7 @@ def expand_request(request, rows, seen):
             append(rows, seen, "adhoc", "minigrid", concrete_env_id)
         return
 
-    if request in {"pyflyt", "carla"}:
+    if request == "pyflyt":
         append(rows, seen, "adhoc", request, request)
         return
 
@@ -279,125 +373,8 @@ build_if_needed() {
     )
 }
 
-bench_requires_python() {
-    local manifest_rows="$1"
-    while IFS=$'\t' read -r _league logical_env _concrete_env; do
-        if [ "$logical_env" != "carla" ]; then
-            return 0
-        fi
-    done <<<"$manifest_rows"
-    return 1
-}
-
-run_doctor_gates() {
-    local resolved_rows="$1"
-
-    if [ "${OAK_BENCH_SKIP_DOCTOR:-0}" = "1" ]; then
-        return
-    fi
-
-    (
-        cd "$ROOT_DIR"
-        OAK_DOCTOR_SKIP_BUILD=1 ./doctor.sh metal
-    )
-
-    if bench_requires_python "$resolved_rows"; then
-        (
-            cd "$ROOT_DIR"
-            OAK_DOCTOR_SKIP_BUILD=1 ./doctor.sh python
-        )
-    fi
-}
-
 sanitize_filename() {
     printf '%s' "$1" | tr -cs '[:alnum:]' '-'
-}
-
-validate_and_write_row() {
-    local row_path="$1"
-    local metrics_path="$2"
-    local league="$3"
-    local logical_env="$4"
-    local concrete_env_id="$5"
-    local policy="$6"
-    local seed="$7"
-    local num_envs="$8"
-    local warmup_steps="$9"
-    local stop_steps="${10}"
-    local log_path="${11}"
-
-    python3 - "$metrics_path" "$row_path" "$league" "$logical_env" "$concrete_env_id" "$policy" "$seed" "$num_envs" "$warmup_steps" "$stop_steps" "$log_path" <<'PY'
-import json
-import sys
-from pathlib import Path
-
-(
-    metrics_path,
-    row_path,
-    league,
-    logical_env,
-    concrete_env_id,
-    policy,
-    seed,
-    num_envs,
-    warmup_steps,
-    stop_steps,
-    log_path,
-) = sys.argv[1:]
-
-records = [json.loads(line) for line in Path(metrics_path).read_text(encoding="utf-8").splitlines() if line.strip()]
-run_start = next((record for record in records if record.get("type") == "run_start"), None)
-run_end = next((record for record in reversed(records) if record.get("type") == "run_end"), None)
-if run_start is None or run_end is None:
-    raise SystemExit(f"Metrics file {metrics_path} is missing run_start or run_end")
-
-if run_start.get("env") != concrete_env_id:
-    raise SystemExit(
-        f"Task-resolution mismatch for {metrics_path}: run_start env={run_start.get('env')!r}, expected {concrete_env_id!r}"
-    )
-if run_end.get("env") != concrete_env_id:
-    raise SystemExit(
-        f"Run-end mismatch for {metrics_path}: run_end env={run_end.get('env')!r}, expected {concrete_env_id!r}"
-    )
-if run_start.get("logicalEnv") != logical_env:
-    raise SystemExit(
-        f"Logical env mismatch for {metrics_path}: run_start logicalEnv={run_start.get('logicalEnv')!r}, expected {logical_env!r}"
-    )
-if run_start.get("concreteEnvId") != concrete_env_id:
-    raise SystemExit(
-        f"Concrete env id mismatch for {metrics_path}: run_start concreteEnvId={run_start.get('concreteEnvId')!r}, expected {concrete_env_id!r}"
-    )
-if run_start.get("schemaFingerprint") in {None, ""}:
-    raise SystemExit(f"Missing schema fingerprint in run_start for {metrics_path}")
-backend = run_start.get("backend") or run_end.get("backend") or ""
-if policy == "oak" and backend != "metal":
-    raise SystemExit(
-        f"OaK benchmark must run on Metal, but {metrics_path} reported backend={backend!r}"
-    )
-
-row = [
-    league,
-    logical_env,
-    concrete_env_id,
-    run_start.get("backend") or run_end.get("backend") or "",
-    policy,
-    seed,
-    num_envs,
-    warmup_steps,
-    stop_steps,
-    str(run_end.get("runId") or run_start.get("runId") or ""),
-    metrics_path,
-    log_path,
-    str(run_start.get("schemaFingerprint") or ""),
-    str(run_start.get("observationSpaceKind") or ""),
-    str(run_start.get("observationFlatDim") or ""),
-    str(run_start.get("actionSpaceKind") or ""),
-    str(run_start.get("actionFlatDim") or ""),
-    str(run_start.get("actionDiscreteCount") or ""),
-    json.dumps(run_start.get("actionShape") or []),
-]
-Path(row_path).write_text("\t".join(row) + "\n", encoding="utf-8")
-PY
 }
 
 print_run_completion() {
@@ -407,7 +384,7 @@ print_run_completion() {
     local policy="$4"
     local seed="$5"
 
-    python3 - "$metrics_path" "$logical_env" "$concrete_env_id" "$policy" "$seed" <<'PY'
+    "$PYTHON_BIN" - "$metrics_path" "$logical_env" "$concrete_env_id" "$policy" "$seed" <<'PY'
 import json
 import sys
 from pathlib import Path
@@ -459,7 +436,6 @@ run_one() {
     local stem="${logical_env}-${safe_concrete}-${policy}-seed${seed}"
     local metrics_path="$RUNS_DIR/${stem}.jsonl"
     local log_path="$RUNS_DIR/${stem}.log"
-    local row_path="$RUNS_DIR/${stem}.row.tsv"
 
     printf '[bench] start league=%s env=%s task=%s policy=%s seed=%s warmup=%s stop_steps=%s batch_size=%s\n' \
         "$league" "$logical_env" "$concrete_env_id" "$policy" "$seed" "$warmup_steps" "${stop_steps:-na}" "$num_envs"
@@ -471,6 +447,10 @@ run_one() {
 
     if ! (
         cd "$ROOT_DIR"
+        export OAK_ROOT_DIR="$ROOT_DIR"
+        export PYTHONHOME="$PYTHONHOME_EMBED"
+        export PYTHONPATH="$OAK_PYTHON_SITE_PACKAGES"
+        export PYTHON_LIBRARY="$PYTHON_LIB"
         PYGAME_HIDE_SUPPORT_PROMPT=1 \
         OAK_NUM_ENVS="$num_envs" \
         OAK_POLICY="$policy" \
@@ -479,29 +459,15 @@ run_one() {
         OAK_STOP_AFTER_STEPS="$stop_steps" \
         OAK_STOP_AFTER_SECONDS= \
         OAK_METRICS_JSONL_PATH="$metrics_path" \
-        OAK_CARLA_AUTOSTART="${OAK_CARLA_AUTOSTART:-0}" \
         OAK_BENCH_LEAGUE="$league" \
         OAK_ENVPOOL_TASK_ID="$task_envpool_id" \
         OAK_MINIGRID_ENV_ID= \
         OAK_ENVPOOL_SUITE_PREFIX= \
-        ./run.sh "$logical_env" >"$log_path" 2>&1
+        "$OAK_BINARY" "$logical_env" >"$log_path" 2>&1
     ); then
         printf '[bench] run failed; see %s\n' "$log_path" >&2
         return 1
     fi
-
-    validate_and_write_row \
-        "$row_path" \
-        "$metrics_path" \
-        "$league" \
-        "$logical_env" \
-        "$concrete_env_id" \
-        "$policy" \
-        "$seed" \
-        "$num_envs" \
-        "$warmup_steps" \
-        "$stop_steps" \
-        "$log_path"
 
     print_run_completion "$metrics_path" "$logical_env" "$concrete_env_id" "$policy" "$seed"
 }
@@ -559,16 +525,9 @@ fi
 
 mkdir -p "$RUNS_DIR"
 
-cleanup_benchmark_intermediates() {
-    find "$RUNS_DIR" -name '*.row.tsv' -delete 2>/dev/null || true
-    rm -f "$MANIFEST_PATH"
-}
-
-trap 'cleanup_benchmark_intermediates' EXIT
-
 printf '[bench] output_dir=%s\n' "$BENCH_DIR"
 build_if_needed
-run_doctor_gates "$resolved_rows"
+prepare_oak_benchmark_runtime
 
 while IFS=$'\t' read -r league logical_env concrete_env_id; do
     warmup_steps="${OAK_BENCH_WARMUP_STEPS:-$DEFAULT_WARMUP_STEPS}"
@@ -602,64 +561,75 @@ while IFS=$'\t' read -r league logical_env concrete_env_id; do
     fi
 done <<<"$resolved_rows"
 
-printf 'league\tlogical_env\tconcrete_env_id\tbackend\tpolicy\tseed\tnum_envs\twarmup_steps\tstop_steps\trun_id\tmetrics_path\tlog_path\tschema_fingerprint\tobservation_space_kind\tobservation_flat_dim\taction_space_kind\taction_flat_dim\taction_discrete_count\taction_shape\n' >"$MANIFEST_PATH"
+(cd "$BENCH_DIR" && "$PYTHON_BIN" "$REPORT_SCRIPT")
 
-row_files=()
-while IFS= read -r row_file; do
-    row_files+=("$row_file")
-done < <(find "$RUNS_DIR" -name '*.row.tsv' | sort)
-
-if [ "${#row_files[@]}" -eq 0 ]; then
-    printf 'No benchmark manifest rows were generated in %s\n' "$RUNS_DIR" >&2
-    exit 1
-fi
-
-for row_file in "${row_files[@]}"; do
-    cat "$row_file" >>"$MANIFEST_PATH"
+policies_csv=""
+for policy in "${POLICIES[@]}"; do
+    if [ -n "$policies_csv" ]; then
+        policies_csv+=","
+    fi
+    policies_csv+="$policy"
 done
 
-GIT_REVISION="$(git -C "$ROOT_DIR" rev-parse HEAD 2>/dev/null || printf 'unknown')"
-BASELINE_POLICY="${OAK_BENCH_BASELINE_POLICY:-}"
-if [ -z "$BASELINE_POLICY" ]; then
-    for policy in "${POLICIES[@]}"; do
-        if [ "$policy" = "random" ]; then
-            BASELINE_POLICY="random"
-            break
-        fi
-    done
-fi
-if [ -z "$BASELINE_POLICY" ]; then
-    BASELINE_POLICY="${POLICIES[0]}"
-fi
-
-python3 "$REPORT_SCRIPT" \
-    --bench-dir "$BENCH_DIR" \
-    --manifest "$MANIFEST_PATH" \
-    --benchmark-json "$BENCHMARK_JSON" \
-    --git-revision "$GIT_REVISION" \
-    --python-bin "$PYTHON_BIN" \
-    --baseline-policy "$BASELINE_POLICY"
-
-task_count="$(python3 - "$BENCHMARK_JSON" <<'PY'
-import json
-import sys
-
-with open(sys.argv[1], "r", encoding="utf-8") as handle:
-    benchmark = json.load(handle)
-print(benchmark["config"]["resolvedTaskCount"])
-PY
-)"
-
-run_count="$(python3 - "$BENCHMARK_JSON" <<'PY'
-import json
-import sys
-
-with open(sys.argv[1], "r", encoding="utf-8") as handle:
-    benchmark = json.load(handle)
-print(benchmark["config"]["runCount"])
-PY
-)"
-
-printf '[bench] task_count=%s\n' "$task_count"
-printf '[bench] run_count=%s\n' "$run_count"
+printf '\n[bench] ─── results (paths and headline metrics) ───\n'
+printf '[bench] bench_dir=%s\n' "$BENCH_DIR"
 printf '[bench] benchmark_json=%s\n' "$BENCHMARK_JSON"
+printf '[bench] requests=%s\n' "${ARGS[*]}"
+printf '[bench] seed_range=%s..%s\n' "$SEED_START" "$((SEED_START + SEED_COUNT - 1))"
+printf '[bench] policies=%s\n' "$policies_csv"
+
+"$PYTHON_BIN" - "$BENCHMARK_JSON" <<'PY'
+import json
+import sys
+
+path = sys.argv[1]
+with open(path, encoding="utf-8") as handle:
+    b = json.load(handle)
+
+tasks = b["tasks"]
+stat_columns = b["statColumns"]
+comparison_delta_order = b["comparisonDeltaOrder"]
+mean_idx = stat_columns.index("mean")
+reward_sum_delta_idx = comparison_delta_order.index("rewardSumDelta")
+
+run_count = sum(
+    len(pol["artifacts"])
+    for t in tasks
+    for pol in t["policies"].values()
+)
+
+print(f"[bench] task_count={len(tasks)}")
+print(f"[bench] run_count={run_count}")
+print(f"[bench] schema={b.get('schema', '')}")
+print(f"[bench] generated_at={b['generatedAt']}")
+print(f"[bench] git_revision={b['gitRevision']}")
+print(f"[bench] config_hash={b['configHash']}")
+print(f"[bench] baseline_policy={b['baselinePolicy']}")
+
+pv = b.get("pythonVersions") or {}
+if pv:
+    bits = " ".join(f"{k}={v}" for k, v in sorted(pv.items()))
+    print(f"[bench] python_versions {bits}")
+
+for t in tasks:
+    league = t["league"]
+    logical = t["logicalEnv"]
+    cid = t["concreteEnvId"]
+    print(f"[bench] task {league}/{logical}/{cid}")
+    comps = t.get("comparisons") or {}
+    for pair_name in sorted(comps.keys()):
+        c = comps[pair_name]
+        rs = c["deltas"][reward_sum_delta_idx]
+        sig = c["sig"]
+        mean = rs[mean_idx] if len(rs) > mean_idx else None
+        p = sig[0] if sig else None
+        parts = [pair_name]
+        if mean is not None:
+            parts.append(f"reward_sum_delta_mean={mean:.6g}")
+        if p is not None:
+            parts.append(f"sign_test_p={p:.6g}")
+        print(f"[bench]   compare {' | '.join(parts)}")
+PY
+
+printf '[bench] per-run metrics: %s/runs/*.jsonl\n' "$BENCH_DIR"
+printf '[bench] per-run logs: %s/runs/*.log\n' "$BENCH_DIR"

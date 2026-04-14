@@ -305,6 +305,12 @@ final class AdaptivePerception {
         }
     }
 
+    /// Mean cumulative feature utility over active basis rows (diagnostic; same signal drives rank adaptation).
+    func meanCumulativeFeatureUtility() -> Double {
+        guard activeRank > 0 else { return 0 }
+        return featureUtility.prefix(activeRank).reduce(0, +) / Double(activeRank)
+    }
+
     private func updateBasis(signal: UnsafeBufferPointer<Float>, state: SharedFloatStorage, stateOffset: Int) {
         for row in 0..<activeRank {
             let rate = Float(1 / max(featureEnergy[row], Double(Float.ulpOfOne)))
@@ -766,6 +772,12 @@ final class OptionBank {
     func recordUtility(index: Int, value: Double) {
         if utility.indices.contains(index) { utility[index] += abs(value) }
     }
+
+    func meanCumulativeBankUtility(activeRank: Int) -> Double {
+        let r = max(0, min(activeRank, capacityLimit))
+        guard r > 0 else { return 0 }
+        return utility.prefix(r).reduce(0, +) / Double(r)
+    }
 }
 
 final class SearchControl {
@@ -796,7 +808,7 @@ final class SearchControl {
 
     func plan(state: SharedFloatStorage, stateOffset: Int, reactiveAction: SharedFloatStorage, actOffset: Int, plannedOffset: Int, activeRank: Int, budgetNs: UInt64) -> SearchTelemetry {
         guard budgetNs > 0, activeRank > 0 else {
-            return SearchTelemetry(elapsedMs: 0, expansions: 0, bestScore: 0)
+            return SearchTelemetry(elapsedMs: 0, expansions: 0, bestScore: -Double.greatestFiniteMagnitude)
         }
         let start = oakCurrentTimeNanoseconds()
         var bestScore = -Double.greatestFiniteMagnitude
@@ -896,6 +908,9 @@ class BaseSelfScalingCore: ForegroundCore {
     let optionBank: OptionBank
     let searchControl: SearchControl
 
+    /// Pre-sized once to `telemetrySchema.descriptors.count`; filled by index each step (no per-step heap growth).
+    private var telemetryOutput: [Double]
+
     // Double-Buffered Shared Memory State
     var currentBatchSize = 1
     var bufferIndex = 0 // Toggles 0/1
@@ -921,23 +936,7 @@ class BaseSelfScalingCore: ForegroundCore {
         signalDim = obsDim + actDim + 1
         capacityLimit = max(1, Int(ceil(sqrt(Double(max(signalDim, 1))))))
         self.backendName = backendName
-        telemetrySchema = DynamicTelemetrySchema(
-            descriptors: [
-                DynamicTelemetryDescriptor(key: "budget.input_ns", unit: "ns"),
-                DynamicTelemetryDescriptor(key: "budget.work_units", unit: "work_units"),
-                DynamicTelemetryDescriptor(key: "capacity.allowed_rank", unit: "rank"),
-                DynamicTelemetryDescriptor(key: "perception.active_rank", unit: "rank"),
-                DynamicTelemetryDescriptor(key: "perception.residual_energy", unit: "energy"),
-                DynamicTelemetryDescriptor(key: "perception.total_energy", unit: "energy"),
-                DynamicTelemetryDescriptor(key: "predictive_knowledge.error_mean", unit: "loss"),
-                DynamicTelemetryDescriptor(key: "world_model.error_mean", unit: "loss"),
-                DynamicTelemetryDescriptor(key: "control.td_abs_mean", unit: "delta"),
-                DynamicTelemetryDescriptor(key: "control.reward_rate", unit: "reward"),
-                DynamicTelemetryDescriptor(key: "search.calls", unit: "count"),
-                DynamicTelemetryDescriptor(key: "search.expansions", unit: "count"),
-                DynamicTelemetryDescriptor(key: "search.best_score", unit: "score"),
-            ]
-        )
+        telemetrySchema = .oakSelfScalingCore
 
         let rootSeed = oakDeriveSeed(seed, salt: 0x5000) ?? 0x9E3779B97F4A7C15
         let rng = CoreSeededRNG(seed: rootSeed)
@@ -964,6 +963,7 @@ class BaseSelfScalingCore: ForegroundCore {
             optionBank: optionBank, worldModel: worldModel, control: control,
             perception: perception, plannedBias: plannedBias, candidateAction: candidateAction, predictedState: predictedState
         )
+        telemetryOutput = Array(repeating: 0, count: telemetrySchema.descriptors.count)
         nsPerWorkUnitEstimate = 1
         snapshotToken = 0
     }
@@ -1038,6 +1038,7 @@ class BaseSelfScalingCore: ForegroundCore {
         let foregroundComputeMs = oakCurrentTimeMilliseconds() - encodeStartMs
 
         // 3. Compute Learning Updates on the PREVIOUS buffer
+        let learningStep = stepCount > 0 ? 1.0 : 0.0
         var planningMs = 0.0
         var gvfErrorMean = 0.0
         var modelErrorMean = 0.0
@@ -1045,6 +1046,8 @@ class BaseSelfScalingCore: ForegroundCore {
         var searchCalls = 0.0
         var searchExpansions = 0.0
         var searchBestScore = -Double.greatestFiniteMagnitude
+        var searchBudgetNsSum = 0.0
+        var searchInvocations = 0.0
         if stepCount > 0 {
             // Batched MLX Updates
             gvfErrorMean = predictiveKnowledge.updateBatched(
@@ -1088,11 +1091,14 @@ class BaseSelfScalingCore: ForegroundCore {
                     activeRank: perception.activeRank, budgetNs: remainingBudgetNs
                 )
                 planningMs += searchTelemetry.elapsedMs
-                searchCalls += searchTelemetry.elapsedMs > 0 ? 1 : 0
+                searchBudgetNsSum += Double(remainingBudgetNs)
+                let hadSearchBudgetOrWork = remainingBudgetNs > 0 || searchTelemetry.expansions > 0
+                searchCalls += hadSearchBudgetOrWork ? 1.0 : 0.0
                 searchExpansions += Double(searchTelemetry.expansions)
                 searchBestScore = max(searchBestScore, searchTelemetry.bestScore)
             }
             tdAbsMean /= Double(max(input.batchSize, 1))
+            searchInvocations = Double(input.batchSize)
         }
         
         for b in 0..<input.batchSize {
@@ -1124,22 +1130,49 @@ class BaseSelfScalingCore: ForegroundCore {
             rowStride: capacityLimit,
             valueCount: perception.activeRank
         )
-        let dynamicTelemetryValues = [
-            Double(input.wallClockBudgetNs),
-            capacityDecision.budgetWorkUnits,
-            Double(capacityDecision.allowedRank),
-            Double(perception.activeRank),
-            encoding.residualEnergy,
-            encoding.totalEnergy,
-            gvfErrorMean,
-            modelErrorMean,
-            tdAbsMean,
-            Double(control.rewardRate),
-            searchCalls,
-            searchExpansions,
-            searchBestScore.isFinite && searchBestScore > -Double.greatestFiniteMagnitude ? searchBestScore : 0,
-        ]
+        let searchBudgetNsMean = input.batchSize > 0 ? searchBudgetNsSum / Double(input.batchSize) : 0.0
+        let featureUtilityMean = perception.meanCumulativeFeatureUtility()
+        let bankUtilityMean = optionBank.meanCumulativeBankUtility(activeRank: perception.activeRank)
 
+        var w = 0
+        telemetryOutput[w] = Double(input.wallClockBudgetNs); w += 1
+        telemetryOutput[w] = capacityDecision.budgetWorkUnits; w += 1
+        telemetryOutput[w] = Double(capacityDecision.allowedRank); w += 1
+        telemetryOutput[w] = Double(perception.activeRank); w += 1
+        telemetryOutput[w] = encoding.residualEnergy; w += 1
+        telemetryOutput[w] = encoding.totalEnergy; w += 1
+        telemetryOutput[w] = gvfErrorMean; w += 1
+        telemetryOutput[w] = modelErrorMean; w += 1
+        telemetryOutput[w] = tdAbsMean; w += 1
+        telemetryOutput[w] = Double(control.rewardRate); w += 1
+        telemetryOutput[w] = searchCalls; w += 1
+        telemetryOutput[w] = searchExpansions; w += 1
+        telemetryOutput[w] = searchBestScore.isFinite && searchBestScore > -Double.greatestFiniteMagnitude ? searchBestScore : 0; w += 1
+        telemetryOutput[w] = searchBudgetNsMean; w += 1
+        telemetryOutput[w] = searchInvocations; w += 1
+        telemetryOutput[w] = learningStep; w += 1
+        telemetryOutput[w] = rewardInputMean; w += 1
+        telemetryOutput[w] = obsSummary.mean; w += 1
+        telemetryOutput[w] = obsSummary.std; w += 1
+        telemetryOutput[w] = obsSummary.l2; w += 1
+        telemetryOutput[w] = actionSummary.mean; w += 1
+        telemetryOutput[w] = actionSummary.std; w += 1
+        telemetryOutput[w] = actionSummary.l2; w += 1
+        telemetryOutput[w] = actionSummary.min; w += 1
+        telemetryOutput[w] = actionSummary.max; w += 1
+        telemetryOutput[w] = stateSummary.mean; w += 1
+        telemetryOutput[w] = stateSummary.std; w += 1
+        telemetryOutput[w] = stateSummary.l2; w += 1
+        telemetryOutput[w] = Double(stepNs) / 1_000_000; w += 1
+        telemetryOutput[w] = planningMs; w += 1
+        telemetryOutput[w] = Double(perception.activeRank); w += 1
+        telemetryOutput[w] = Double(perception.activeRank); w += 1
+        telemetryOutput[w] = Double(perception.activeRank); w += 1
+        telemetryOutput[w] = featureUtilityMean; w += 1
+        telemetryOutput[w] = bankUtilityMean; w += 1
+        precondition(w == telemetryOutput.count && w == telemetrySchema.descriptors.count)
+
+        let telemetrySanitized: [DynamicTelemetryChannel] = telemetryOutput.map(DynamicTelemetryChannel.init(finiteOrNan:))
         let telemetry = AgentTelemetry(
             rewardInput: rewardInputMean,
             obsSummary: obsSummary,
@@ -1154,7 +1187,7 @@ class BaseSelfScalingCore: ForegroundCore {
             activeGVFs: perception.activeRank,
             activeOptions: perception.activeRank,
             snapshotToken: snapshotToken,
-            dynamicTelemetryValues: dynamicTelemetryValues
+            dynamicTelemetryValues: telemetrySanitized
         )
         
         bufferIndex = prevIdx

@@ -6,8 +6,53 @@ struct AgentStepResult {
     let telemetry: AgentTelemetry
 }
 
+/// Replaces non-finite scalars where a numeric default is required (e.g. timing strings). Dynamic telemetry uses ``DynamicTelemetryChannel`` instead.
 func metricsFinite(_ value: Double, default defaultValue: Double = 0) -> Double {
     value.isFinite ? value : defaultValue
+}
+
+/// One dynamic-telemetry channel in metrics JSON: a finite number, or JSON `null` (non-finite source value, or no finite samples in an aggregate).
+enum DynamicTelemetryChannel: Codable, Equatable, Sendable {
+    case finite(Double)
+    case invalid
+
+    init(finiteOrNan raw: Double) {
+        if raw.isFinite {
+            self = .finite(raw)
+        } else {
+            self = .invalid
+        }
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.singleValueContainer()
+        if container.decodeNil() {
+            self = .invalid
+            return
+        }
+        let d = try container.decode(Double.self)
+        self = d.isFinite ? .finite(d) : .invalid
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.singleValueContainer()
+        switch self {
+        case .finite(let d):
+            try container.encode(d)
+        case .invalid:
+            try container.encodeNil()
+        }
+    }
+
+    /// For ``PerChannelRunningStats`` only: invalid steps aggregate as `nan` internally (never written to JSON).
+    var doubleForAggregation: Double {
+        switch self {
+        case .finite(let x):
+            return x
+        case .invalid:
+            return .nan
+        }
+    }
 }
 
 struct DynamicTelemetryDescriptor: Codable, Equatable {
@@ -20,6 +65,52 @@ struct DynamicTelemetrySchema: Codable, Equatable {
 
     static let empty = DynamicTelemetrySchema(descriptors: [])
 }
+
+extension DynamicTelemetrySchema {
+    /// Single source of truth for `BaseSelfScalingCore` dynamic telemetry: descriptor order matches `dynamicTelemetryValues` in `step`.
+    ///
+    /// **Inventory (learning paths → channels):** budget/capacity (`budget.*`, `capacity.*`); perception encode (`perception.*` except utilities); predictive knowledge (`predictive_knowledge.*`); world model (`world_model.*`); reactive control TD/reward rate (`control.*`); search/planner (`search.*`); learning gate (`learning.step`); signal summaries (`signal.*`); timings (`timing.*`); structural snapshots (`snapshot.*`); perception utility roll-up (`perception.feature_utility_mean`); option bank utility roll-up (`options.bank_utility_mean`).
+    static let oakSelfScalingCore = DynamicTelemetrySchema(
+        descriptors: [
+            DynamicTelemetryDescriptor(key: "budget.input_ns", unit: "ns"),
+            DynamicTelemetryDescriptor(key: "budget.work_units", unit: "work_units"),
+            DynamicTelemetryDescriptor(key: "capacity.allowed_rank", unit: "rank"),
+            DynamicTelemetryDescriptor(key: "perception.active_rank", unit: "rank"),
+            DynamicTelemetryDescriptor(key: "perception.residual_energy", unit: "energy"),
+            DynamicTelemetryDescriptor(key: "perception.total_energy", unit: "energy"),
+            DynamicTelemetryDescriptor(key: "predictive_knowledge.error_mean", unit: "loss"),
+            DynamicTelemetryDescriptor(key: "world_model.error_mean", unit: "loss"),
+            DynamicTelemetryDescriptor(key: "control.td_abs_mean", unit: "delta"),
+            DynamicTelemetryDescriptor(key: "control.reward_rate", unit: "reward"),
+            DynamicTelemetryDescriptor(key: "search.calls", unit: "count"),
+            DynamicTelemetryDescriptor(key: "search.expansions", unit: "count"),
+            DynamicTelemetryDescriptor(key: "search.best_score", unit: "score"),
+            DynamicTelemetryDescriptor(key: "search.budget_ns", unit: "ns"),
+            DynamicTelemetryDescriptor(key: "search.invocations", unit: "count"),
+            DynamicTelemetryDescriptor(key: "learning.step", unit: "unitless"),
+            DynamicTelemetryDescriptor(key: "signal.reward_input", unit: "reward"),
+            DynamicTelemetryDescriptor(key: "signal.obs_mean", unit: "signal"),
+            DynamicTelemetryDescriptor(key: "signal.obs_std", unit: "signal"),
+            DynamicTelemetryDescriptor(key: "signal.obs_l2", unit: "signal"),
+            DynamicTelemetryDescriptor(key: "signal.action_mean", unit: "signal"),
+            DynamicTelemetryDescriptor(key: "signal.action_std", unit: "signal"),
+            DynamicTelemetryDescriptor(key: "signal.action_l2", unit: "signal"),
+            DynamicTelemetryDescriptor(key: "signal.action_min", unit: "signal"),
+            DynamicTelemetryDescriptor(key: "signal.action_max", unit: "signal"),
+            DynamicTelemetryDescriptor(key: "signal.state_mean", unit: "signal"),
+            DynamicTelemetryDescriptor(key: "signal.state_std", unit: "signal"),
+            DynamicTelemetryDescriptor(key: "signal.state_l2", unit: "signal"),
+            DynamicTelemetryDescriptor(key: "timing.agent_step_ms", unit: "ms"),
+            DynamicTelemetryDescriptor(key: "timing.planner_step_ms", unit: "ms"),
+            DynamicTelemetryDescriptor(key: "snapshot.active_rank", unit: "rank"),
+            DynamicTelemetryDescriptor(key: "snapshot.active_gvfs", unit: "count"),
+            DynamicTelemetryDescriptor(key: "snapshot.active_options", unit: "count"),
+            DynamicTelemetryDescriptor(key: "perception.feature_utility_mean", unit: "utility"),
+            DynamicTelemetryDescriptor(key: "options.bank_utility_mean", unit: "utility"),
+        ]
+    )
+}
+
 
 struct TelemetryVectorSummary: Equatable {
     let mean: Double
@@ -65,7 +156,8 @@ struct AgentTelemetry: Equatable {
     let cmd3Ms: Double?
     let cmd4Ms: Double?
     let cmd5Ms: Double?
-    let dynamicTelemetryValues: [Double]
+    /// `nil` when the policy does not emit the oak schema vector. Otherwise one ``DynamicTelemetryChannel`` per schema row (invalid encodes as JSON `null`).
+    let dynamicTelemetryValues: [DynamicTelemetryChannel]?
 
     init(
         rewardInput: Float,
@@ -81,7 +173,7 @@ struct AgentTelemetry: Equatable {
         activeGVFs: Int = 0,
         activeOptions: Int = 0,
         snapshotToken: Int = 0,
-        dynamicTelemetryValues: [Double] = []
+        dynamicTelemetryValues: [DynamicTelemetryChannel]? = nil
     ) {
         let obsStats = VectorSummary(obs)
         let actionStats = VectorSummary(action)
@@ -119,7 +211,7 @@ struct AgentTelemetry: Equatable {
         activeGVFs: Int = 0,
         activeOptions: Int = 0,
         snapshotToken: Int = 0,
-        dynamicTelemetryValues: [Double] = []
+        dynamicTelemetryValues: [DynamicTelemetryChannel]? = nil
     ) {
         self.rewardInput = metricsFinite(rewardInput)
         obsMean = obsSummary.mean
@@ -146,10 +238,16 @@ struct AgentTelemetry: Equatable {
         cmd3Ms = metalTimings?.cmd3Ms
         cmd4Ms = metalTimings?.cmd4Ms
         cmd5Ms = metalTimings?.cmd5Ms
-        self.dynamicTelemetryValues = dynamicTelemetryValues.map { metricsFinite($0) }
+        self.dynamicTelemetryValues = dynamicTelemetryValues
     }
 
-    static func randomPolicy(rewardInput: Float, obs: UnsafeBufferPointer<Float>, action: UnsafeBufferPointer<Float>, agentStepMs: Double) -> AgentTelemetry {
+    static func randomPolicy(
+        rewardInput: Float,
+        obs: UnsafeBufferPointer<Float>,
+        action: UnsafeBufferPointer<Float>,
+        agentStepMs: Double,
+        dynamicTelemetryValues: [DynamicTelemetryChannel]? = nil
+    ) -> AgentTelemetry {
         AgentTelemetry(
             rewardInput: rewardInput,
             obs: obs,
@@ -163,8 +261,37 @@ struct AgentTelemetry: Equatable {
             activeGVFs: 0,
             activeOptions: 0,
             snapshotToken: 0,
-            dynamicTelemetryValues: []
+            dynamicTelemetryValues: dynamicTelemetryValues
         )
+    }
+
+    static func == (lhs: AgentTelemetry, rhs: AgentTelemetry) -> Bool {
+        lhs.rewardInput == rhs.rewardInput
+            && lhs.obsMean == rhs.obsMean
+            && lhs.obsStd == rhs.obsStd
+            && lhs.obsL2 == rhs.obsL2
+            && lhs.actionMean == rhs.actionMean
+            && lhs.actionStd == rhs.actionStd
+            && lhs.actionL2 == rhs.actionL2
+            && lhs.actionMin == rhs.actionMin
+            && lhs.actionMax == rhs.actionMax
+            && lhs.stateMean == rhs.stateMean
+            && lhs.stateStd == rhs.stateStd
+            && lhs.stateL2 == rhs.stateL2
+            && lhs.agentStepMs == rhs.agentStepMs
+            && lhs.backend == rhs.backend
+            && lhs.plannerStepMs == rhs.plannerStepMs
+            && lhs.computeBudgetNs == rhs.computeBudgetNs
+            && lhs.activeRank == rhs.activeRank
+            && lhs.activeGVFs == rhs.activeGVFs
+            && lhs.activeOptions == rhs.activeOptions
+            && lhs.snapshotToken == rhs.snapshotToken
+            && lhs.cmd1Ms == rhs.cmd1Ms
+            && lhs.cmd2Ms == rhs.cmd2Ms
+            && lhs.cmd3Ms == rhs.cmd3Ms
+            && lhs.cmd4Ms == rhs.cmd4Ms
+            && lhs.cmd5Ms == rhs.cmd5Ms
+            && lhs.dynamicTelemetryValues == rhs.dynamicTelemetryValues
     }
 }
 
@@ -174,6 +301,88 @@ struct MetalCommandTimings: Equatable {
     let cmd3Ms: Double
     let cmd4Ms: Double
     let cmd5Ms: Double
+}
+
+/// Per-channel running mean, temporal population std, min/max over **finite** samples, plus non-finite observation counts.
+struct PerChannelRunningStats: Equatable {
+    private var finiteSum: [Double] = []
+    private var finiteSumSq: [Double] = []
+    private var finiteCount: [Int] = []
+    private var nonFiniteCount: [Int] = []
+    private var minVal: [Double] = []
+    private var maxVal: [Double] = []
+
+    mutating func record(values: [Double]) {
+        if values.isEmpty { return }
+        if finiteSum.count < values.count {
+            let old = finiteSum.count
+            for _ in old..<values.count {
+                finiteSum.append(0)
+                finiteSumSq.append(0)
+                finiteCount.append(0)
+                nonFiniteCount.append(0)
+                minVal.append(.greatestFiniteMagnitude)
+                maxVal.append(-.greatestFiniteMagnitude)
+            }
+        }
+        for i in 0..<values.count {
+            let v = values[i]
+            if v.isFinite {
+                finiteSum[i] += v
+                finiteSumSq[i] += v * v
+                finiteCount[i] += 1
+                minVal[i] = Swift.min(minVal[i], v)
+                maxVal[i] = Swift.max(maxVal[i], v)
+            } else {
+                nonFiniteCount[i] += 1
+            }
+        }
+    }
+
+    /// Per-channel mean over **finite** samples only. ``DynamicTelemetryChannel/invalid`` means no finite samples (not numeric zero).
+    var means: [DynamicTelemetryChannel]? {
+        guard !finiteSum.isEmpty else { return nil }
+        return (0..<finiteSum.count).map { i in
+            if finiteCount[i] > 0 {
+                return .finite(finiteSum[i] / Double(finiteCount[i]))
+            }
+            return .invalid
+        }
+    }
+
+    var temporalStd: [DynamicTelemetryChannel]? {
+        guard !finiteSum.isEmpty else { return nil }
+        return (0..<finiteSum.count).map { i in
+            let c = finiteCount[i]
+            guard c > 0 else { return .invalid }
+            let m = finiteSum[i] / Double(c)
+            let variance = max(finiteSumSq[i] / Double(c) - m * m, 0)
+            return .finite(sqrt(variance))
+        }
+    }
+
+    var mins: [DynamicTelemetryChannel]? {
+        guard !minVal.isEmpty else { return nil }
+        return (0..<minVal.count).map { i in
+            finiteCount[i] > 0 ? .finite(minVal[i]) : .invalid
+        }
+    }
+
+    var maxs: [DynamicTelemetryChannel]? {
+        guard !maxVal.isEmpty else { return nil }
+        return (0..<maxVal.count).map { i in
+            finiteCount[i] > 0 ? .finite(maxVal[i]) : .invalid
+        }
+    }
+
+    var nonFiniteCounts: [Int]? {
+        guard !nonFiniteCount.isEmpty else { return nil }
+        return nonFiniteCount
+    }
+
+    mutating func reset() {
+        self = PerChannelRunningStats()
+    }
 }
 
 struct RollingWindowStats: Equatable {
@@ -197,7 +406,7 @@ struct RollingWindowStats: Equatable {
     private var activeRankObservedMax = 0
     private var activeGVFsSum = 0.0
     private var activeOptionsSum = 0.0
-    private var dynamicTelemetrySums: [Double] = []
+    private var dynamicTelemetry = PerChannelRunningStats()
 
     mutating func record(step: Int, rewards: [Float], doneCountBatch: Int, telemetry: AgentTelemetry, envStepMs: Double, totalStepMs: Double) {
         if count == 0 {
@@ -226,11 +435,8 @@ struct RollingWindowStats: Equatable {
         activeRankObservedMax = max(activeRankObservedMax, telemetry.activeRank)
         activeGVFsSum += metricsFinite(Double(telemetry.activeGVFs))
         activeOptionsSum += metricsFinite(Double(telemetry.activeOptions))
-        if dynamicTelemetrySums.count < telemetry.dynamicTelemetryValues.count {
-            dynamicTelemetrySums.append(contentsOf: Array(repeating: 0, count: telemetry.dynamicTelemetryValues.count - dynamicTelemetrySums.count))
-        }
-        for index in 0..<telemetry.dynamicTelemetryValues.count {
-            dynamicTelemetrySums[index] += metricsFinite(telemetry.dynamicTelemetryValues[index])
+        if let dyn = telemetry.dynamicTelemetryValues {
+            dynamicTelemetry.record(values: dyn.map(\.doubleForAggregation))
         }
     }
 
@@ -303,11 +509,31 @@ struct RollingWindowStats: Equatable {
         count > 0 ? activeOptionsSum / Double(count) : 0
     }
 
-    var dynamicTelemetryMeanValues: [Double]? {
-        guard count > 0, !dynamicTelemetrySums.isEmpty else {
-            return nil
-        }
-        return dynamicTelemetrySums.map { $0 / Double(count) }
+    var dynamicTelemetryMeanValues: [DynamicTelemetryChannel]? {
+        guard count > 0 else { return nil }
+        return dynamicTelemetry.means
+    }
+
+    /// Population standard deviation of each dynamic telemetry channel over vectorized update steps in this window (finite samples).
+    var dynamicTelemetryStdValues: [DynamicTelemetryChannel]? {
+        guard count > 0 else { return nil }
+        return dynamicTelemetry.temporalStd
+    }
+
+    var dynamicTelemetryMinValues: [DynamicTelemetryChannel]? {
+        guard count > 0 else { return nil }
+        return dynamicTelemetry.mins
+    }
+
+    var dynamicTelemetryMaxValues: [DynamicTelemetryChannel]? {
+        guard count > 0 else { return nil }
+        return dynamicTelemetry.maxs
+    }
+
+    /// Per-channel count of non-finite step observations in this window (parallel to schema).
+    var dynamicTelemetryNonFiniteCounts: [Int]? {
+        guard count > 0 else { return nil }
+        return dynamicTelemetry.nonFiniteCounts
     }
 
     var rewardTotal: Double {
@@ -321,9 +547,10 @@ struct RollingWindowStats: Equatable {
 
 struct MetricsConfiguration {
     let windowSize: Int
-    let fileURL: URL
+    /// When `nil`, metrics are printed to the terminal only (no JSONL file).
+    let fileURL: URL?
 
-    init(windowSize: Int, fileURL: URL) {
+    init(windowSize: Int, fileURL: URL?) {
         self.windowSize = windowSize
         self.fileURL = fileURL
     }
@@ -348,13 +575,16 @@ struct MetricsConfiguration {
             )
         }
 
-        let metricsDirectory = environment["OAK_METRICS_DIR"] ?? ".oak-metrics"
-        let directoryURL = resolveMetricsPath(metricsDirectory, rootDirectory: baseDirectory)
-        let filename = "\(metricsFilenameTimestamp(Date()))-\(envName)-\(policyName)-\(processId).jsonl"
-        return MetricsConfiguration(
-            windowSize: windowSize,
-            fileURL: directoryURL.appendingPathComponent(filename)
-        )
+        if let metricsDirectory = environment["OAK_METRICS_DIR"], !metricsDirectory.isEmpty {
+            let directoryURL = resolveMetricsPath(metricsDirectory, rootDirectory: baseDirectory)
+            let filename = "\(metricsFilenameTimestamp(Date()))-\(envName)-\(policyName)-\(processId).jsonl"
+            return MetricsConfiguration(
+                windowSize: windowSize,
+                fileURL: directoryURL.appendingPathComponent(filename)
+            )
+        }
+
+        return MetricsConfiguration(windowSize: windowSize, fileURL: nil)
     }
 }
 
@@ -380,16 +610,16 @@ final class JSONLMetricsSink {
     private let handle: FileHandle
     private let encoder: JSONEncoder
 
-    init(configuration: MetricsConfiguration) throws {
+    init(fileURL: URL) throws {
         let fileManager = FileManager.default
-        let directoryURL = configuration.fileURL.deletingLastPathComponent()
+        let directoryURL = fileURL.deletingLastPathComponent()
         try fileManager.createDirectory(at: directoryURL, withIntermediateDirectories: true, attributes: nil)
-        if !fileManager.fileExists(atPath: configuration.fileURL.path) {
-            fileManager.createFile(atPath: configuration.fileURL.path, contents: nil)
+        if !fileManager.fileExists(atPath: fileURL.path) {
+            fileManager.createFile(atPath: fileURL.path, contents: nil)
         }
 
-        fileURL = configuration.fileURL
-        handle = try FileHandle(forWritingTo: configuration.fileURL)
+        self.fileURL = fileURL
+        handle = try FileHandle(forWritingTo: fileURL)
         try handle.seekToEnd()
 
         encoder = JSONEncoder()
@@ -423,6 +653,7 @@ final class RunMetricsAggregator {
     let backend: String
     let windowSize: Int
     let seed: Int?
+    let numEnvs: Int
 
     private(set) var stepCount = 0
     private(set) var doneCount = 0
@@ -441,7 +672,8 @@ final class RunMetricsAggregator {
         schema: EnvironmentSchemaFingerprint,
         dynamicTelemetrySchema: DynamicTelemetrySchema = .empty,
         windowSize: Int,
-        seed: Int? = nil
+        seed: Int? = nil,
+        numEnvs: Int = 1
     ) {
         self.runId = runId
         self.envName = envName
@@ -456,6 +688,7 @@ final class RunMetricsAggregator {
         self.backend = backend
         self.windowSize = max(windowSize, 1)
         self.seed = seed
+        self.numEnvs = max(numEnvs, 1)
     }
 
     func runStartRecord(control: RunControl = .unbounded, at date: Date = Date()) -> MetricsRecord {
@@ -471,6 +704,7 @@ final class RunMetricsAggregator {
             backend: backend,
             step: 0,
             seed: seed,
+            numEnvs: numEnvs,
             warmupSteps: control.warmupSteps,
             stopAfterMeasuredSteps: control.stopAfterMeasuredSteps,
             stopAfterMeasuredSeconds: control.stopAfterMeasuredSeconds,
@@ -554,6 +788,9 @@ final class RunMetricsAggregator {
                 actionShape: metadata.schema.action.shape,
                 schemaFingerprint: metadata.schema.schemaFingerprint,
                 dynamicTelemetryValues: windowStats.dynamicTelemetryMeanValues,
+                dynamicTelemetryStd: windowStats.dynamicTelemetryStdValues,
+                dynamicTelemetryMin: windowStats.dynamicTelemetryMinValues,
+                dynamicTelemetryMax: windowStats.dynamicTelemetryMaxValues,
                 stats: windowStats
             )
             windowStats.reset()
@@ -590,6 +827,9 @@ final class RunMetricsAggregator {
             actionShape: metadata.schema.action.shape,
             schemaFingerprint: metadata.schema.schemaFingerprint,
             dynamicTelemetryValues: totalStats.dynamicTelemetryMeanValues,
+            dynamicTelemetryStd: totalStats.dynamicTelemetryStdValues,
+            dynamicTelemetryMin: totalStats.dynamicTelemetryMinValues,
+            dynamicTelemetryMax: totalStats.dynamicTelemetryMaxValues,
             stats: totalStats
         )
     }
@@ -607,6 +847,8 @@ struct MetricsRecord: Codable {
     let backend: String
     let step: Int
     let seed: Int?
+    /// Vectorized env batch width for this run (present on `run_start` for benchmark provenance).
+    let numEnvs: Int?
     let warmupSteps: Int?
     let measuredStepCount: Int?
     let measuredSeconds: Double?
@@ -673,7 +915,16 @@ struct MetricsRecord: Codable {
     let activeOptionsMean: Double?
     let schemaFingerprint: String?
     let dynamicTelemetrySchema: DynamicTelemetrySchema?
-    let dynamicTelemetryValues: [Double]?
+    /// Per-channel aggregates (``DynamicTelemetryChannel/invalid`` is JSON `null`, not zero).
+    let dynamicTelemetryValues: [DynamicTelemetryChannel]?
+    /// Temporal population std of each `dynamicTelemetrySchema` channel over steps in the `summary` / `run_end` window.
+    let dynamicTelemetryStd: [DynamicTelemetryChannel]?
+    /// Temporal min per channel over steps in the window.
+    let dynamicTelemetryMin: [DynamicTelemetryChannel]?
+    /// Temporal max per channel over steps in the window.
+    let dynamicTelemetryMax: [DynamicTelemetryChannel]?
+    /// Per-channel count of non-finite step observations in the `summary` / `run_end` window (parallel to schema).
+    let dynamicTelemetryNonFiniteCounts: [Int]?
     /// For `run_end`: number of vectorized agent+env update iterations (batch steps); `measuredStepCount` is global env steps.
     let vectorUpdateCount: Int?
 
@@ -689,6 +940,7 @@ struct MetricsRecord: Codable {
         backend: String,
         step: Int,
         seed: Int? = nil,
+        numEnvs: Int? = nil,
         warmupSteps: Int? = nil,
         measuredStepCount: Int? = nil,
         measuredSeconds: Double? = nil,
@@ -755,7 +1007,11 @@ struct MetricsRecord: Codable {
         activeOptionsMean: Double? = nil,
         schemaFingerprint: String? = nil,
         dynamicTelemetrySchema: DynamicTelemetrySchema? = nil,
-        dynamicTelemetryValues: [Double]? = nil,
+        dynamicTelemetryValues: [DynamicTelemetryChannel]? = nil,
+        dynamicTelemetryStd: [DynamicTelemetryChannel]? = nil,
+        dynamicTelemetryMin: [DynamicTelemetryChannel]? = nil,
+        dynamicTelemetryMax: [DynamicTelemetryChannel]? = nil,
+        dynamicTelemetryNonFiniteCounts: [Int]? = nil,
         vectorUpdateCount: Int? = nil
     ) {
         self.type = type
@@ -769,6 +1025,7 @@ struct MetricsRecord: Codable {
         self.backend = backend
         self.step = step
         self.seed = seed
+        self.numEnvs = numEnvs
         self.warmupSteps = warmupSteps
         self.measuredStepCount = measuredStepCount
         self.measuredSeconds = measuredSeconds
@@ -835,7 +1092,11 @@ struct MetricsRecord: Codable {
         self.activeOptionsMean = activeOptionsMean
         self.schemaFingerprint = schemaFingerprint
         self.dynamicTelemetrySchema = dynamicTelemetrySchema
-        self.dynamicTelemetryValues = dynamicTelemetryValues?.map { metricsFinite($0) }
+        self.dynamicTelemetryValues = dynamicTelemetryValues
+        self.dynamicTelemetryStd = dynamicTelemetryStd
+        self.dynamicTelemetryMin = dynamicTelemetryMin
+        self.dynamicTelemetryMax = dynamicTelemetryMax
+        self.dynamicTelemetryNonFiniteCounts = dynamicTelemetryNonFiniteCounts
         self.vectorUpdateCount = vectorUpdateCount
     }
 
@@ -930,7 +1191,10 @@ struct MetricsRecord: Codable {
         actionDiscreteCount: Int? = nil,
         actionShape: [Int]? = nil,
         schemaFingerprint: String? = nil,
-        dynamicTelemetryValues: [Double]? = nil,
+        dynamicTelemetryValues: [DynamicTelemetryChannel]? = nil,
+        dynamicTelemetryStd: [DynamicTelemetryChannel]? = nil,
+        dynamicTelemetryMin: [DynamicTelemetryChannel]? = nil,
+        dynamicTelemetryMax: [DynamicTelemetryChannel]? = nil,
         stats: RollingWindowStats
     ) -> MetricsRecord {
         MetricsRecord(
@@ -979,6 +1243,10 @@ struct MetricsRecord: Codable {
             activeOptionsMean: stats.activeOptionsMean,
             schemaFingerprint: schemaFingerprint,
             dynamicTelemetryValues: dynamicTelemetryValues,
+            dynamicTelemetryStd: dynamicTelemetryStd,
+            dynamicTelemetryMin: dynamicTelemetryMin,
+            dynamicTelemetryMax: dynamicTelemetryMax,
+            dynamicTelemetryNonFiniteCounts: stats.dynamicTelemetryNonFiniteCounts,
             vectorUpdateCount: vectorUpdateCount
         )
     }

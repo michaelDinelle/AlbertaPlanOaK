@@ -1,6 +1,3 @@
-Switch to venv entirely instead of conda?
-
-
 
 
 
@@ -11,7 +8,7 @@ Switch to venv entirely instead of conda?
 
 
 So my idea is that the only thing we give our agent is a compute budget.
-And a time budget
+And a time budget actually no never mind this is hand tuning and stupid 
 
 
 

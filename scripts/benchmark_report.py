@@ -1,13 +1,19 @@
 #!/usr/bin/env python3
-"""Generate a single canonical benchmark.json from benchmark run artifacts."""
+"""Generate benchmark.json (schema oak.benchmark).
+
+Root defines column orders once: policyStatOrder, statColumns, comparisonDeltaOrder, deltaStatColumns,
+artifactColumns. Policy stats are a dense array parallel to policyStatOrder; dt/dsw/dts/dtmn/dtmx/dtfc are
+dense arrays parallel to dynamicTelemetrySchema rows (dt/dsw: temporal mean summaries; dts/dtmn/dtmx:
+within-run temporal std/min/max per seed; dtfc: non-finite sample counts per channel). Comparisons use a deltas matrix
+parallel to comparisonDeltaOrder plus seeds, record, and sig [pValue, significant]."""
 
 from __future__ import annotations
 
 import argparse
-import csv
 import hashlib
 import json
 import math
+import os
 import random
 import statistics
 import subprocess
@@ -18,16 +24,76 @@ from itertools import combinations
 from pathlib import Path
 from typing import Any
 
+BENCHMARK_SCHEMA = "oak.benchmark"
+STAT_COLUMNS = ["n", "mean", "std", "median", "min", "max"]
+DELTA_STAT_COLUMNS = ["n", "mean", "std", "median", "min", "max", "ci95Low", "ci95High"]
+ARTIFACT_COLUMNS = ["seed", "metricsPath", "logPath", "runId", "stopReason"]
 
-def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Generate a canonical OaK benchmark JSON artifact")
-    parser.add_argument("--bench-dir", required=True)
-    parser.add_argument("--manifest", required=True)
-    parser.add_argument("--benchmark-json", required=True)
-    parser.add_argument("--git-revision", required=True)
-    parser.add_argument("--python-bin", required=True)
-    parser.add_argument("--baseline-policy", required=True)
-    return parser.parse_args()
+# Order matches build_policy_summary; each value is a summarize() dict before compaction.
+POLICY_STAT_KEYS = (
+    "rewardSum",
+    "rewardMean",
+    "rewardStd",
+    "doneCount",
+    "resetCount",
+    "measuredStepCount",
+    "vectorUpdateCount",
+    "measuredSeconds",
+    "stepsPerSecond",
+    "completionRate",
+    "plannerStepMsMean",
+    "plannerActiveFraction",
+    "activeRankMean",
+    "activeRankMin",
+    "activeRankMax",
+    "activeGVFsMean",
+    "activeOptionsMean",
+    "actionL2Mean",
+    "stateL2Mean",
+    "agentStepMsMean",
+    "envStepMsMean",
+    "totalStepMsMean",
+)
+
+COMPARISON_DELTA_ORDER = (
+    "rewardSumDelta",
+    "rewardMeanDelta",
+    "stepsPerSecondDelta",
+    "completionRateDelta",
+)
+
+
+def parse_args() -> None:
+    parser = argparse.ArgumentParser(
+        description="Generate oak.benchmark benchmark.json (dense ordered arrays, compact telemetry). "
+        "Run with cwd set to the bench directory (writes benchmark.json; discovers runs/*.jsonl)."
+    )
+    parser.parse_args()
+
+
+def resolve_git_revision(bench_dir: Path) -> str:
+    try:
+        return subprocess.check_output(
+            ["git", "rev-parse", "HEAD"],
+            cwd=bench_dir,
+            text=True,
+            stderr=subprocess.DEVNULL,
+        ).strip()
+    except (subprocess.CalledProcessError, FileNotFoundError, OSError):
+        return "unknown"
+
+
+def infer_baseline_policy(entries: list[dict[str, Any]]) -> str:
+    order: list[str] = []
+    seen: set[str] = set()
+    for row in entries:
+        p = str(row.get("policy", ""))
+        if p and p not in seen:
+            seen.add(p)
+            order.append(p)
+    if "random" in seen:
+        return "random"
+    return order[0] if order else "oak"
 
 
 def stable_json(value: Any) -> str:
@@ -70,14 +136,142 @@ def is_finite_number(value: Any) -> bool:
 def summarize(values: list[float]) -> dict[str, Any] | None:
     if not values:
         return None
+    n = len(values)
     return {
-        "n": len(values),
-        "mean": sum(values) / len(values),
-        "std": statistics.stdev(values) if len(values) > 1 else 0.0,
+        "n": n,
+        "mean": statistics.fmean(values),
+        "std": statistics.stdev(values) if n > 1 else 0.0,
         "median": statistics.median(values),
         "min": min(values),
         "max": max(values),
     }
+
+
+def compact_stat(summary: dict[str, Any] | None) -> list[Any] | None:
+    if summary is None:
+        return None
+    return [summary["n"], summary["mean"], summary["std"], summary["median"], summary["min"], summary["max"]]
+
+
+def compact_dt_schema(schema: list[dict[str, Any]]) -> list[list[str]]:
+    return [[str(d.get("key", "")), str(d.get("unit", ""))] for d in schema]
+
+
+def compact_delta(delta: dict[str, Any]) -> list[Any]:
+    ci = delta.get("bootstrapCI95") or {"low": 0.0, "high": 0.0}
+    return [
+        delta["n"],
+        delta["mean"],
+        delta["std"],
+        delta["median"],
+        delta["min"],
+        delta["max"],
+        float(ci["low"]),
+        float(ci["high"]),
+    ]
+
+
+def artifact_matrix(run_artifacts: list[dict[str, Any]]) -> list[list[Any]]:
+    rows: list[list[Any]] = []
+    for row in run_artifacts:
+        rows.append(
+            [
+                row["seed"],
+                row["metricsPath"],
+                row["logPath"],
+                row["runId"],
+                row.get("stopReason"),
+            ]
+        )
+    return rows
+
+
+def policy_stats_row(policy: dict[str, Any]) -> list[Any]:
+    return [compact_stat(policy.get(key)) for key in POLICY_STAT_KEYS]
+
+
+def dense_dynamic_rows(schema: list[dict[str, Any]], summaries: dict[str, Any]) -> list[Any]:
+    rows: list[Any] = []
+    for index, descriptor in enumerate(schema):
+        key = str(descriptor.get("key") or f"metric_{index}")
+        rows.append(compact_stat(summaries.get(key)))
+    return rows
+
+
+def to_compact_policy(policy: dict[str, Any]) -> dict[str, Any]:
+    schema = policy.get("dynamicTelemetrySchema") or []
+    return {
+        "runCount": policy["runCount"],
+        "seeds": policy["seeds"],
+        "backend": policy["backend"],
+        "numEnvs": policy["numEnvs"],
+        "warmupSteps": policy["warmupSteps"],
+        "stopSteps": policy["stopSteps"],
+        "stats": policy_stats_row(policy),
+        "dynamicTelemetrySchema": compact_dt_schema(schema),
+        "dt": dense_dynamic_rows(schema, policy.get("dynamicTelemetry") or {}),
+        "dsw": dense_dynamic_rows(schema, policy.get("dynamicTelemetrySummaryWindows") or {}),
+        "dts": dense_dynamic_rows(schema, policy.get("dynamicTelemetryTemporalStd") or {}),
+        "dtmn": dense_dynamic_rows(schema, policy.get("dynamicTelemetryTemporalMin") or {}),
+        "dtmx": dense_dynamic_rows(schema, policy.get("dynamicTelemetryTemporalMax") or {}),
+        "dtfc": dense_dynamic_rows(schema, policy.get("dynamicTelemetryNonFinite") or {}),
+        "stopReasonCounts": policy.get("stopReasonCounts") or {},
+        "artifacts": artifact_matrix(policy.get("runArtifacts") or []),
+    }
+
+
+def to_compact_comparison(comparison: dict[str, Any]) -> dict[str, Any]:
+    sig = comparison["significance"]
+    deltas = [compact_delta(comparison[name]) for name in COMPARISON_DELTA_ORDER]
+    return {
+        "seeds": comparison["pairedSeeds"],
+        "deltas": deltas,
+        "wins": comparison["wins"],
+        "losses": comparison["losses"],
+        "ties": comparison["ties"],
+        "sig": [sig["pValue"], sig["significant"]],
+    }
+
+
+def validate_benchmark_shapes(benchmark: dict[str, Any]) -> None:
+    """Fail fast if layout invariants are broken (alignment of parallel arrays)."""
+    porder = benchmark["policyStatOrder"]
+    delta_order = benchmark["comparisonDeltaOrder"]
+    stat_len = len(benchmark["statColumns"])
+    delta_len = len(benchmark["deltaStatColumns"])
+    if len(porder) != len(POLICY_STAT_KEYS) or porder != list(POLICY_STAT_KEYS):
+        raise ValueError("policyStatOrder must match POLICY_STAT_KEYS")
+    if len(delta_order) != len(COMPARISON_DELTA_ORDER) or delta_order != list(COMPARISON_DELTA_ORDER):
+        raise ValueError("comparisonDeltaOrder must match COMPARISON_DELTA_ORDER")
+    for task in benchmark["tasks"]:
+        for policy in task["policies"].values():
+            stats_row = policy["stats"]
+            if len(stats_row) != len(porder):
+                raise ValueError("policy stats row length must match policyStatOrder")
+            for cell in stats_row:
+                if cell is None:
+                    continue
+                if not isinstance(cell, list) or len(cell) != stat_len:
+                    raise ValueError("each non-null policy stat must be statColumns-sized")
+            schema = policy["dynamicTelemetrySchema"]
+            dt_group = ("dt", "dsw", "dts", "dtmn", "dtmx", "dtfc")
+            for name in dt_group:
+                if len(policy[name]) != len(schema):
+                    raise ValueError(f"{name} must match dynamicTelemetrySchema length")
+            for vec in (*policy["dt"], *policy["dsw"], *policy["dts"], *policy["dtmn"], *policy["dtmx"], *policy["dtfc"]):
+                if vec is None:
+                    continue
+                if not isinstance(vec, list) or len(vec) != stat_len:
+                    raise ValueError("each non-null dt/dsw/dts/dtmn/dtmx/dtfc entry must be statColumns-sized")
+        for comp in task["comparisons"].values():
+            if len(comp["deltas"]) != len(delta_order):
+                raise ValueError("comparison deltas must match comparisonDeltaOrder length")
+            for row in comp["deltas"]:
+                if not isinstance(row, list) or len(row) != delta_len:
+                    raise ValueError("each comparison delta row must be deltaStatColumns-sized")
+            sig = comp["sig"]
+            if not isinstance(sig, list) or len(sig) != 2:
+                raise ValueError("sig must be [pValue, significant]")
 
 
 def bootstrap_mean_ci(values: list[float], seed_key: str, samples: int = 2000) -> dict[str, float]:
@@ -106,10 +300,58 @@ def exact_sign_test(wins: int, losses: int) -> dict[str, Any]:
     return {"test": "exact_sign_test", "pValue": p_value, "significant": p_value < 0.05}
 
 
-def parse_manifest(manifest_path: Path) -> list[dict[str, Any]]:
-    with manifest_path.open("r", encoding="utf-8") as handle:
-        reader = csv.DictReader(handle, delimiter="\t")
-        return list(reader)
+def discover_metrics_jsonl(runs_dir: Path) -> list[Path]:
+    return sorted(runs_dir.glob("*.jsonl"))
+
+
+def _opt_int_field(raw: Any) -> int | None:
+    if raw is None or raw == "":
+        return None
+    return int(raw)
+
+
+def entry_from_metrics_path(metrics_path: Path) -> dict[str, Any]:
+    """Build report entry fields plus run_start/run_end from a single metrics JSONL."""
+    run_start, run_end = read_records(metrics_path)
+    rs = run_start or {}
+    action_shape = rs.get("actionShape")
+    if not isinstance(action_shape, list):
+        action_shape = []
+    warmup_steps = int(rs.get("warmupSteps") or 0)
+    stop_steps_val = _opt_int_field(rs.get("stopAfterMeasuredSteps"))
+    raw_num = rs.get("numEnvs")
+    num_envs = int(raw_num) if raw_num not in (None, "") else 1
+
+    log_candidate = metrics_path.with_suffix(".log")
+    log_path = str(log_candidate.resolve()) if log_candidate.is_file() else ""
+
+    ofd = rs.get("observationFlatDim")
+    afd = rs.get("actionFlatDim")
+    adc = rs.get("actionDiscreteCount")
+
+    return {
+        "league": str(rs.get("league") or ""),
+        "logical_env": str(rs.get("logicalEnv") or ""),
+        "concrete_env_id": str(rs.get("concreteEnvId") or rs.get("env") or ""),
+        "backend": str(rs.get("backend") or ""),
+        "policy": str(rs.get("policy") or ""),
+        "seed": int(rs["seed"]) if rs.get("seed") is not None else 0,
+        "num_envs": num_envs,
+        "warmup_steps": warmup_steps,
+        "stop_steps": stop_steps_val,
+        "run_id": str(rs.get("runId") or ""),
+        "metrics_path": str(metrics_path.resolve()),
+        "log_path": log_path,
+        "schema_fingerprint": str(rs.get("schemaFingerprint") or ""),
+        "observation_space_kind": str(rs.get("observationSpaceKind") or ""),
+        "observation_flat_dim": int(ofd) if ofd not in (None, "") else None,
+        "action_space_kind": str(rs.get("actionSpaceKind") or ""),
+        "action_flat_dim": int(afd) if afd not in (None, "") else None,
+        "action_discrete_count": int(adc) if adc not in (None, "") else None,
+        "action_shape": action_shape,
+        "run_start": run_start,
+        "run_end": run_end,
+    }
 
 
 def read_records(metrics_path: Path) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
@@ -133,18 +375,60 @@ def extract_dynamic_schema(record: dict[str, Any] | None) -> list[dict[str, Any]
     return []
 
 
-def extract_dynamic_values(record: dict[str, Any] | None) -> list[float]:
+def extract_dynamic_values(record: dict[str, Any] | None) -> list[float | None]:
+    """Parallel to schema; `None` preserves JSON null (no finite value — not a substitute zero)."""
     if record is None:
         return []
     values = record.get("dynamicTelemetryValues")
+    if values is None:
+        return []
     if not isinstance(values, list):
         return []
-    output: list[float] = []
+    output: list[float | None] = []
     for value in values:
-        if is_finite_number(value):
+        if value is None:
+            output.append(None)
+        elif is_finite_number(value):
             output.append(float(value))
         else:
-            output.append(0.0)
+            output.append(None)
+    return output
+
+
+def extract_dynamic_non_finite_counts(record: dict[str, Any] | None) -> list[int]:
+    if record is None:
+        return []
+    values = record.get("dynamicTelemetryNonFiniteCounts")
+    if values is None:
+        return []
+    if not isinstance(values, list):
+        return []
+    out: list[int] = []
+    for value in values:
+        if isinstance(value, bool):
+            continue
+        if isinstance(value, int):
+            out.append(value)
+        elif isinstance(value, float) and value.is_integer():
+            out.append(int(value))
+    return out
+
+
+def extract_dynamic_field(record: dict[str, Any] | None, field: str) -> list[float | None]:
+    """Same layout as dynamicTelemetryValues for optional parallel arrays (std/min/max)."""
+    if record is None:
+        return []
+    values = record.get(field)
+    if not isinstance(values, list):
+        return []
+    output: list[float | None] = []
+    for value in values:
+        if value is None:
+            output.append(None)
+        elif is_finite_number(value):
+            output.append(float(value))
+        else:
+            output.append(None)
     return output
 
 
@@ -188,47 +472,133 @@ def stop_reason_counts(entries: list[dict[str, Any]]) -> dict[str, int]:
     return dict(sorted(counts.items()))
 
 
-def summarize_dynamic_telemetry(entries: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+def summarize_dynamic_telemetry(
+    entries: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], dict[str, Any], dict[str, Any], dict[str, Any], dict[str, Any], dict[str, Any]]:
     if not entries:
-        return [], {}
+        return [], {}, {}, {}, {}, {}
 
     schema = extract_dynamic_schema(entries[0].get("run_start"))
     if not schema:
-        return [], {}
+        return [], {}, {}, {}, {}, {}
 
-    summaries: dict[str, Any] = {}
+    summaries_mean: dict[str, Any] = {}
+    summaries_std: dict[str, Any] = {}
+    summaries_tmin: dict[str, Any] = {}
+    summaries_tmax: dict[str, Any] = {}
+    summaries_nonfinite: dict[str, Any] = {}
     for index, descriptor in enumerate(schema):
         key = str(descriptor.get("key") or f"metric_{index}")
-        values: list[float] = []
+        values_mean: list[float] = []
+        values_std: list[float] = []
+        values_tmin: list[float] = []
+        values_tmax: list[float] = []
+        values_nf: list[float] = []
         for entry in entries:
-            run_end_values = extract_dynamic_values(entry.get("run_end"))
+            run_end = entry.get("run_end")
+            run_end_values = extract_dynamic_values(run_end)
             if index < len(run_end_values) and is_finite_number(run_end_values[index]):
-                values.append(float(run_end_values[index]))
-        if values:
-            summaries[key] = summarize(values)
-    return schema, summaries
+                values_mean.append(float(run_end_values[index]))
+            std_list = extract_dynamic_field(run_end, "dynamicTelemetryStd")
+            if index < len(std_list) and is_finite_number(std_list[index]):
+                values_std.append(float(std_list[index]))
+            mn_list = extract_dynamic_field(run_end, "dynamicTelemetryMin")
+            if index < len(mn_list) and is_finite_number(mn_list[index]):
+                values_tmin.append(float(mn_list[index]))
+            mx_list = extract_dynamic_field(run_end, "dynamicTelemetryMax")
+            if index < len(mx_list) and is_finite_number(mx_list[index]):
+                values_tmax.append(float(mx_list[index]))
+            nf_list = extract_dynamic_non_finite_counts(run_end)
+            if index < len(nf_list):
+                values_nf.append(float(nf_list[index]))
+        if values_mean:
+            summaries_mean[key] = summarize(values_mean)
+        if values_std:
+            summaries_std[key] = summarize(values_std)
+        if values_tmin:
+            summaries_tmin[key] = summarize(values_tmin)
+        if values_tmax:
+            summaries_tmax[key] = summarize(values_tmax)
+        if values_nf:
+            summaries_nonfinite[key] = summarize(values_nf)
+    return schema, summaries_mean, summaries_std, summaries_tmin, summaries_tmax, summaries_nonfinite
+
+
+def summarize_dynamic_telemetry_from_summary_windows(
+    entries: list[dict[str, Any]],
+    schema: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """Exact n/mean/sample-std/median/min/max over every rolling `summary` line (finite values only).
+
+    One pass over JSONL per metrics file; memory O(len(schema) * N) for N summary rows.
+    Uses the same ``summarize`` helper as seed-aggregated ``run_end`` telemetry.
+    """
+    if not schema or not entries:
+        return {}
+
+    nkey = len(schema)
+    buckets: list[list[float]] = [[] for _ in range(nkey)]
+    loads = json.loads
+
+    for entry in entries:
+        metrics_path = Path(str(entry.get("metrics_path") or ""))
+        if not metrics_path.is_file():
+            continue
+        try:
+            with metrics_path.open(encoding="utf-8") as handle:
+                for raw_line in handle:
+                    line = raw_line.strip()
+                    if not line:
+                        continue
+                    try:
+                        record = loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    if record.get("type") != "summary":
+                        continue
+                    vals = extract_dynamic_values(record)
+                    nvals = len(vals)
+                    if nvals < nkey:
+                        upper = nvals
+                    else:
+                        upper = nkey
+                    for i in range(upper):
+                        v = vals[i]
+                        if not is_finite_number(v):
+                            continue
+                        buckets[i].append(v)
+        except OSError:
+            continue
+
+    out: dict[str, Any] = {}
+    for index, descriptor in enumerate(schema):
+        key = str(descriptor.get("key") or f"metric_{index}")
+        stats = summarize(buckets[index])
+        if stats is not None:
+            out[key] = stats
+    return out
 
 
 def build_policy_summary(entries: list[dict[str, Any]]) -> dict[str, Any]:
     first = entries[0] if entries else {}
-    dynamic_schema, dynamic_telemetry = summarize_dynamic_telemetry(entries)
+    (
+        dynamic_schema,
+        dynamic_telemetry,
+        dynamic_telemetry_std,
+        dynamic_telemetry_tmin,
+        dynamic_telemetry_tmax,
+        dynamic_telemetry_nonfinite,
+    ) = summarize_dynamic_telemetry(entries)
+    summary_window_telemetry: dict[str, Any] = {}
+    if dynamic_schema and str(first.get("policy") or "") == "oak":
+        summary_window_telemetry = summarize_dynamic_telemetry_from_summary_windows(entries, dynamic_schema)
     return {
         "runCount": len(entries),
         "seeds": sorted(entry["seed"] for entry in entries),
         "backend": first.get("backend", ""),
-        "league": first.get("league", ""),
-        "logicalEnv": first.get("logical_env", ""),
-        "concreteEnvId": first.get("concrete_env_id", ""),
         "numEnvs": first.get("num_envs"),
         "warmupSteps": first.get("warmup_steps"),
         "stopSteps": first.get("stop_steps"),
-        "schemaFingerprint": first.get("schema_fingerprint", ""),
-        "observationSpaceKind": first.get("observation_space_kind", ""),
-        "observationFlatDim": first.get("observation_flat_dim"),
-        "actionSpaceKind": first.get("action_space_kind", ""),
-        "actionFlatDim": first.get("action_flat_dim"),
-        "actionDiscreteCount": first.get("action_discrete_count"),
-        "actionShape": first.get("action_shape", []),
         "rewardSum": summarize_metric(entries, "rewardSum"),
         "rewardMean": summarize_metric(entries, "rewardMean"),
         "rewardStd": summarize_metric(entries, "rewardStd"),
@@ -253,6 +623,11 @@ def build_policy_summary(entries: list[dict[str, Any]]) -> dict[str, Any]:
         "totalStepMsMean": summarize_metric(entries, "totalStepMsMean"),
         "dynamicTelemetrySchema": dynamic_schema,
         "dynamicTelemetry": dynamic_telemetry,
+        "dynamicTelemetryTemporalStd": dynamic_telemetry_std,
+        "dynamicTelemetryTemporalMin": dynamic_telemetry_tmin,
+        "dynamicTelemetryTemporalMax": dynamic_telemetry_tmax,
+        "dynamicTelemetryNonFinite": dynamic_telemetry_nonfinite,
+        "dynamicTelemetrySummaryWindows": summary_window_telemetry,
         "stopReasonCounts": stop_reason_counts(entries),
         "runArtifacts": [
             {
@@ -326,40 +701,6 @@ def build_comparison(pair_key: str, left_entries: list[dict[str, Any]], right_en
     }
 
 
-def build_runs(entries: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    runs: list[dict[str, Any]] = []
-    for entry in sorted(entries, key=lambda item: (item["league"], item["logical_env"], item["concrete_env_id"], item["policy"], item["seed"])):
-        run_end = entry.get("run_end") or {}
-        run_start = entry.get("run_start") or {}
-        runs.append(
-            {
-                "league": entry["league"],
-                "logicalEnv": entry["logical_env"],
-                "concreteEnvId": entry["concrete_env_id"],
-                "backend": entry["backend"],
-                "policy": entry["policy"],
-                "seed": entry["seed"],
-                "numEnvs": entry["num_envs"],
-                "warmupSteps": entry["warmup_steps"],
-                "stopSteps": entry["stop_steps"],
-                "runId": run_end.get("runId") or run_start.get("runId") or "",
-                "metricsPath": entry["metrics_path"],
-                "logPath": entry["log_path"],
-                "schemaFingerprint": entry["schema_fingerprint"],
-                "observationSpaceKind": entry["observation_space_kind"],
-                "observationFlatDim": entry["observation_flat_dim"],
-                "actionSpaceKind": entry["action_space_kind"],
-                "actionFlatDim": entry["action_flat_dim"],
-                "actionDiscreteCount": entry["action_discrete_count"],
-                "actionShape": entry["action_shape"],
-                "stopReason": run_end.get("stopReason"),
-                "dynamicTelemetrySchema": extract_dynamic_schema(run_start),
-                "dynamicTelemetryValues": extract_dynamic_values(run_end),
-            }
-        )
-    return runs
-
-
 def validate_numeric_record(record: dict[str, Any] | None, label: str) -> list[str]:
     if record is None:
         return []
@@ -394,40 +735,38 @@ def validate_entry(entry: dict[str, Any]) -> list[str]:
     messages: list[str] = []
     run_start = entry.get("run_start")
     run_end = entry.get("run_end")
+    metrics_path = entry["metrics_path"]
 
     if run_start is None:
-        messages.append(f"{descriptor}: missing run_start in {entry['metrics_path']}")
+        messages.append(f"{descriptor}: missing run_start in {metrics_path}")
     if run_end is None:
-        messages.append(f"{descriptor}: missing run_end in {entry['metrics_path']}")
+        messages.append(f"{descriptor}: missing run_end in {metrics_path}")
 
     if run_start is not None:
-        start_concrete = str(run_start.get("concreteEnvId") or run_start.get("env") or "")
-        start_logical = str(run_start.get("logicalEnv") or "")
-        if start_concrete != entry["concrete_env_id"]:
+        env_field = str(run_start.get("env") or "")
+        conc_field = str(run_start.get("concreteEnvId") or "")
+        if env_field and conc_field and env_field != conc_field:
             messages.append(
                 f"{descriptor}: task resolution mismatch in run_start; "
-                f"recorded {start_concrete!r}, expected {entry['concrete_env_id']!r}"
-            )
-        if start_logical != entry["logical_env"]:
-            messages.append(
-                f"{descriptor}: logical env mismatch in run_start; "
-                f"recorded {start_logical!r}, expected {entry['logical_env']!r}"
+                f"recorded {env_field!r}, expected {conc_field!r}"
             )
         if str(run_start.get("schemaFingerprint") or "") == "":
             messages.append(f"{descriptor}: missing schema fingerprint in run_start")
 
-    if run_end is not None:
+    if run_start is not None and run_end is not None:
+        start_concrete = str(run_start.get("concreteEnvId") or run_start.get("env") or "")
+        start_logical = str(run_start.get("logicalEnv") or "")
         end_concrete = str(run_end.get("concreteEnvId") or run_end.get("env") or "")
         end_logical = str(run_end.get("logicalEnv") or "")
-        if end_concrete != entry["concrete_env_id"]:
+        if start_concrete and end_concrete and start_concrete != end_concrete:
             messages.append(
                 f"{descriptor}: task resolution mismatch in run_end; "
-                f"recorded {end_concrete!r}, expected {entry['concrete_env_id']!r}"
+                f"recorded {end_concrete!r}, expected {start_concrete!r}"
             )
-        if end_logical != entry["logical_env"]:
+        if start_logical and end_logical and start_logical != end_logical:
             messages.append(
                 f"{descriptor}: logical env mismatch in run_end; "
-                f"recorded {end_logical!r}, expected {entry['logical_env']!r}"
+                f"recorded {end_logical!r}, expected {start_logical!r}"
             )
 
     backend = str(
@@ -486,37 +825,27 @@ def validate_policy_group(entries: list[dict[str, Any]]) -> list[str]:
 
 
 def main() -> int:
-    args = parse_args()
-    bench_dir = Path(args.bench_dir)
-    manifest_path = Path(args.manifest)
-    benchmark_json_path = Path(args.benchmark_json)
+    parse_args()
+    bench_dir = Path.cwd().resolve()
+    runs_dir = bench_dir / "runs"
+    benchmark_json_path = bench_dir / "benchmark.json"
     if benchmark_json_path.exists():
         benchmark_json_path.unlink()
 
-    manifest_rows = parse_manifest(manifest_path)
-    python_versions = load_python_package_versions(args.python_bin)
+    jsonl_paths = discover_metrics_jsonl(runs_dir)
+    if not jsonl_paths:
+        print(f"No metrics JSONL files in {runs_dir}", file=sys.stderr)
+        return 1
+
+    run_entries: list[dict[str, Any]] = [entry_from_metrics_path(p) for p in jsonl_paths]
+    baseline_env = (os.environ.get("OAK_BENCH_BASELINE_POLICY") or "").strip()
+    baseline_policy = baseline_env if baseline_env else infer_baseline_policy(run_entries)
+    git_revision = resolve_git_revision(bench_dir)
+    python_versions = load_python_package_versions(sys.executable)
     generated_at = datetime.now(timezone.utc).isoformat()
 
-    run_entries: list[dict[str, Any]] = []
     validation_messages: list[str] = []
-    for row in manifest_rows:
-        metrics_path = Path(row["metrics_path"])
-        run_start, run_end = read_records(metrics_path)
-        action_shape = json.loads(row["action_shape"]) if row.get("action_shape") else []
-        entry = {
-            **row,
-            "seed": int(row["seed"]),
-            "num_envs": int(row["num_envs"]),
-            "warmup_steps": int(row["warmup_steps"]),
-            "stop_steps": int(row["stop_steps"]) if row["stop_steps"] else None,
-            "observation_flat_dim": int(row["observation_flat_dim"]) if row["observation_flat_dim"] else None,
-            "action_flat_dim": int(row["action_flat_dim"]) if row["action_flat_dim"] else None,
-            "action_discrete_count": int(row["action_discrete_count"]) if row["action_discrete_count"] else None,
-            "action_shape": action_shape,
-            "run_start": run_start,
-            "run_end": run_end,
-        }
-        run_entries.append(entry)
+    for entry in run_entries:
         validation_messages.extend(validate_entry(entry))
 
     task_buckets: dict[tuple[str, str, str], dict[str, list[dict[str, Any]]]] = defaultdict(lambda: defaultdict(list))
@@ -549,20 +878,21 @@ def main() -> int:
         for entry in run_entries
     ]
     config_hash = hashlib.sha256(stable_json(config_signature).encode("utf-8")).hexdigest()
-    policies = sorted({entry["policy"] for entry in run_entries})
 
     tasks: list[dict[str, Any]] = []
     for (league, logical_env, concrete_env_id), policy_map in sorted(task_buckets.items()):
         task_entries = [entry for entries in policy_map.values() for entry in entries]
         policy_summaries = {
-            policy: build_policy_summary(entries)
+            policy: to_compact_policy(build_policy_summary(entries))
             for policy, entries in sorted(policy_map.items())
         }
         comparisons = {
-            f"{left_policy}__vs__{right_policy}": build_comparison(
-                f"{left_policy}__vs__{right_policy}",
-                policy_map[left_policy],
-                policy_map[right_policy],
+            f"{left_policy}__vs__{right_policy}": to_compact_comparison(
+                build_comparison(
+                    f"{left_policy}__vs__{right_policy}",
+                    policy_map[left_policy],
+                    policy_map[right_policy],
+                )
             )
             for left_policy, right_policy in combinations(sorted(policy_map), 2)
         }
@@ -585,24 +915,26 @@ def main() -> int:
             }
         )
 
-    runs = build_runs(run_entries)
     benchmark = {
+        "schema": BENCHMARK_SCHEMA,
+        "policyStatOrder": list(POLICY_STAT_KEYS),
+        "comparisonDeltaOrder": list(COMPARISON_DELTA_ORDER),
+        "statColumns": STAT_COLUMNS,
+        "deltaStatColumns": DELTA_STAT_COLUMNS,
+        "artifactColumns": ARTIFACT_COLUMNS,
+        "significanceTest": "exact_sign_test",
         "generatedAt": generated_at,
         "benchDir": str(bench_dir),
-        "gitRevision": args.git_revision,
+        "gitRevision": git_revision,
         "configHash": config_hash,
-        "baselinePolicy": args.baseline_policy,
-        "policies": policies,
+        "baselinePolicy": baseline_policy,
         "pythonVersions": python_versions,
-        "config": {
-            "resolvedTaskCount": len(tasks),
-            "runCount": len(runs),
-        },
-        "runs": runs,
         "tasks": tasks,
     }
 
-    benchmark_json_path.write_text(json.dumps(benchmark, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    validate_benchmark_shapes(benchmark)
+
+    benchmark_json_path.write_text(stable_json(benchmark) + "\n", encoding="utf-8")
     return 0
 
 
