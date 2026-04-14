@@ -23,3 +23,9 @@ mujoco
 
 # MiniGrid
 minigrid==2.3.1
+
+# EnvPool (benchmark harness / vector MiniGrid)
+envpool==1.2.0
+
+# PyBullet (PyFlyt dependency; macOS installs build from PyPI sdist — Xcode Command Line Tools required)
+pybullet==3.2.7

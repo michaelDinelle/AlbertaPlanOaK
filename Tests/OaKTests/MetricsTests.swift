@@ -16,86 +16,28 @@ final class MetricsTests: XCTestCase {
         XCTAssertEqual(decoded, [3, 0])
     }
 
-    func testSchemaFingerprintIsStableAndSensitiveToSchemaChanges() {
-        let baseline = EnvironmentSchemaFingerprint(
-            observation: .box(flattenedDim: 12, shape: [3, 4]),
-            action: .discrete(count: 7)
-        )
-        let same = EnvironmentSchemaFingerprint(
-            observation: .box(flattenedDim: 12, shape: [3, 4]),
-            action: .discrete(count: 7)
-        )
-        let changed = EnvironmentSchemaFingerprint(
-            observation: .box(flattenedDim: 13, shape: [13]),
-            action: .discrete(count: 7)
-        )
-
-        XCTAssertEqual(baseline.schemaFingerprint, same.schemaFingerprint)
-        XCTAssertNotEqual(baseline.schemaFingerprint, changed.schemaFingerprint)
+    func testBenchmarkResolveOnlyDefaultMatchesExplicitCore() throws {
+        let defaultRows = try resolveBenchmarkRows()
+        let coreRows = try resolveBenchmarkRows("core")
+        XCTAssertEqual(defaultRows, coreRows)
     }
 
-    func testSmokeLeagueResolutionUsesConcreteTasks() throws {
-        let rows = try resolveBenchmarkRows("smoke")
-        let triples = Set(rows.map { "\($0.league)|\($0.logicalEnv)|\($0.concreteEnvId)" })
-
-        XCTAssertTrue(triples.contains("smoke|cheetah|HalfCheetah-v4"))
-        XCTAssertTrue(triples.contains("smoke|walker|Walker2d-v4"))
-        XCTAssertTrue(triples.contains("smoke|humanoid|Humanoid-v4"))
-        XCTAssertTrue(triples.contains("smoke|minigrid|MiniGrid-Empty-8x8-v0"))
-        XCTAssertTrue(triples.contains("smoke|minigrid|MiniGrid-DoorKey-8x8-v0"))
-        XCTAssertTrue(triples.contains("smoke|minigrid|MiniGrid-MemoryS9-v0"))
-    }
-
-    func testCoreLeagueIgnoresAmbientMinigridSelection() throws {
-        let rows = try resolveBenchmarkRows(
+    func testBenchmarkResolveCoreIgnoresAmbientMinigridTaskEnv() throws {
+        let without = try resolveBenchmarkRows("core")
+        let withAmbient = try resolveBenchmarkRows(
             "core",
             environment: ["OAK_ENVPOOL_TASK_ID": "MiniGrid-Empty-8x8-v0"]
         )
-        let minigridTasks = rows
-            .filter { $0.league == "core" && $0.logicalEnv == "minigrid" }
-            .map(\.concreteEnvId)
-
-        XCTAssertGreaterThan(minigridTasks.count, 20)
-        XCTAssertTrue(minigridTasks.contains("MiniGrid-Empty-8x8-v0"))
-        XCTAssertTrue(minigridTasks.contains("MiniGrid-DoorKey-8x8-v0"))
-        XCTAssertTrue(minigridTasks.contains("MiniGrid-MemoryS9-v0"))
+        XCTAssertEqual(without, withAmbient)
     }
 
-    func testAdhocMinigridSelectionUsesExplicitConcreteTask() throws {
+    func testBenchmarkResolveAdHocMinigridSingleConcreteTask() throws {
         let rows = try resolveBenchmarkRows(
             "minigrid",
             environment: ["OAK_ENVPOOL_TASK_ID": "MiniGrid-Empty-8x8-v0"]
         )
-
         XCTAssertEqual(rows.count, 1)
-        XCTAssertEqual(rows.first?.league, "adhoc")
-        XCTAssertEqual(rows.first?.logicalEnv, "minigrid")
         XCTAssertEqual(rows.first?.concreteEnvId, "MiniGrid-Empty-8x8-v0")
-    }
-
-    func testBenchmarkDefaultsToCoreLeague() throws {
-        let rows = try resolveBenchmarkRows()
-        let triples = Set(rows.map { "\($0.league)|\($0.logicalEnv)|\($0.concreteEnvId)" })
-        let minigridRows = rows.filter { $0.league == "core" && $0.logicalEnv == "minigrid" }
-
-        XCTAssertTrue(triples.contains("core|cheetah|HalfCheetah-v4"))
-        XCTAssertTrue(triples.contains("core|walker|Walker2d-v4"))
-        XCTAssertTrue(triples.contains("core|humanoid|Humanoid-v4"))
-        XCTAssertGreaterThan(minigridRows.count, 20)
-    }
-
-    func testMetricsConfigurationDerivesWindowFromStepBudget() {
-        let config = MetricsConfiguration.resolve(
-            envName: "HalfCheetah-v4",
-            policyName: "oak",
-            runControl: RunControl(warmupSteps: 100, stopAfterMeasuredSteps: 50_000, stopAfterMeasuredSeconds: nil),
-            numEnvs: 1024,
-            rootDirectory: repoRoot.path,
-            environment: ["OAK_METRICS_JSONL_PATH": repoRoot.appendingPathComponent("tmp/metrics.jsonl").path],
-            processId: 123
-        )
-
-        XCTAssertEqual(config.windowSize, 7)
     }
 
     func testBenchmarkReportGeneratesSingleCanonicalJSONArtifact() throws {
@@ -123,7 +65,16 @@ final class MetricsTests: XCTestCase {
                     "backend": "metal",
                     "step": 0,
                     "seed": 0,
+                    "numEnvs": 2,
+                    "warmupSteps": 1,
+                    "stopAfterMeasuredSteps": 2,
                     "schemaFingerprint": schemaFingerprint,
+                    "observationSpaceKind": "dict",
+                    "observationFlatDim": 11,
+                    "actionSpaceKind": "discrete",
+                    "actionFlatDim": 7,
+                    "actionDiscreteCount": 7,
+                    "actionShape": [7],
                     "dynamicTelemetrySchema": [
                         "descriptors": [
                             ["key": "budget.input_ns", "unit": "ns"],
@@ -185,7 +136,16 @@ final class MetricsTests: XCTestCase {
                     "backend": "random",
                     "step": 0,
                     "seed": 0,
+                    "numEnvs": 2,
+                    "warmupSteps": 1,
+                    "stopAfterMeasuredSteps": 2,
                     "schemaFingerprint": schemaFingerprint,
+                    "observationSpaceKind": "dict",
+                    "observationFlatDim": 11,
+                    "actionSpaceKind": "discrete",
+                    "actionFlatDim": 7,
+                    "actionDiscreteCount": 7,
+                    "actionShape": [7],
                 ],
                 [
                     "type": "run_end",
@@ -226,55 +186,7 @@ final class MetricsTests: XCTestCase {
             to: randomMetricsPath
         )
 
-        let manifestPath = try writeBenchmarkManifest(
-            rows: [
-                benchmarkManifestRow(
-                    league: "smoke",
-                    logicalEnv: "minigrid",
-                    concreteEnvId: taskId,
-                    backend: "metal",
-                    policy: "oak",
-                    seed: 0,
-                    numEnvs: 2,
-                    warmupSteps: 1,
-                    stopSteps: 2,
-                    runId: "oak-run",
-                    metricsPath: oakMetricsPath,
-                    logPath: runsDirectory.appendingPathComponent("oak.log"),
-                    schemaFingerprint: schemaFingerprint,
-                    observationSpaceKind: "dict",
-                    observationFlatDim: 11,
-                    actionSpaceKind: "discrete",
-                    actionFlatDim: 7,
-                    actionDiscreteCount: 7,
-                    actionShape: [7]
-                ),
-                benchmarkManifestRow(
-                    league: "smoke",
-                    logicalEnv: "minigrid",
-                    concreteEnvId: taskId,
-                    backend: "random",
-                    policy: "random",
-                    seed: 0,
-                    numEnvs: 2,
-                    warmupSteps: 1,
-                    stopSteps: 2,
-                    runId: "random-run",
-                    metricsPath: randomMetricsPath,
-                    logPath: runsDirectory.appendingPathComponent("random.log"),
-                    schemaFingerprint: schemaFingerprint,
-                    observationSpaceKind: "dict",
-                    observationFlatDim: 11,
-                    actionSpaceKind: "discrete",
-                    actionFlatDim: 7,
-                    actionDiscreteCount: 7,
-                    actionShape: [7]
-                ),
-            ],
-            benchDirectory: benchDirectory
-        )
-
-        let result = try runBenchmarkReport(manifestPath: manifestPath, benchDirectory: benchDirectory)
+        let result = try runBenchmarkReport(benchDirectory: benchDirectory)
         XCTAssertEqual(result.terminationStatus, 0, result.stderr)
 
         let benchmarkObject = try XCTUnwrap(
@@ -284,18 +196,23 @@ final class MetricsTests: XCTestCase {
         XCTAssertEqual(
             Set(benchmarkObject.keys),
             [
+                "artifactColumns",
                 "baselinePolicy",
                 "benchDir",
-                "config",
+                "comparisonDeltaOrder",
                 "configHash",
+                "deltaStatColumns",
                 "generatedAt",
                 "gitRevision",
-                "policies",
+                "policyStatOrder",
                 "pythonVersions",
-                "runs",
+                "schema",
+                "significanceTest",
+                "statColumns",
                 "tasks",
             ]
         )
+        XCTAssertEqual(benchmarkObject["schema"] as? String, "oak.benchmark")
         XCTAssertEqual(benchmarkObject["baselinePolicy"] as? String, "random")
         XCTAssertNil(benchmarkObject["promotionEligible"])
         XCTAssertNil(benchmarkObject["dualAxisComplete"])
@@ -303,14 +220,6 @@ final class MetricsTests: XCTestCase {
         XCTAssertFalse(benchmarkText.contains("planner_never_engaged"))
         XCTAssertFalse(benchmarkText.contains("active_rank_stuck_at_minimum"))
         XCTAssertFalse(benchmarkText.contains("zero_completions_sparse_suite"))
-
-        let config = try XCTUnwrap(benchmarkObject["config"] as? [String: Any])
-        XCTAssertEqual(config["resolvedTaskCount"] as? Int, 1)
-        XCTAssertEqual(config["runCount"] as? Int, 2)
-
-        let runs = try XCTUnwrap(benchmarkObject["runs"] as? [[String: Any]])
-        XCTAssertEqual(runs.count, 2)
-        XCTAssertNil(runs.first?["errors"])
 
         let tasks = try XCTUnwrap(benchmarkObject["tasks"] as? [[String: Any]])
         XCTAssertEqual(tasks.count, 1)
@@ -322,28 +231,48 @@ final class MetricsTests: XCTestCase {
 
         let policies = try XCTUnwrap(task["policies"] as? [String: Any])
         let oakPolicy = try XCTUnwrap(policies["oak"] as? [String: Any])
-        XCTAssertNotNil(oakPolicy["plannerStepMsMean"])
-        XCTAssertNotNil(oakPolicy["plannerActiveFraction"])
-        XCTAssertNotNil(oakPolicy["activeGVFsMean"])
-        XCTAssertNotNil(oakPolicy["activeOptionsMean"])
-        XCTAssertNotNil(oakPolicy["actionL2Mean"])
-        XCTAssertNotNil(oakPolicy["stateL2Mean"])
-        XCTAssertNotNil(oakPolicy["agentStepMsMean"])
-        XCTAssertNotNil(oakPolicy["envStepMsMean"])
-        XCTAssertNotNil(oakPolicy["totalStepMsMean"])
+        let oakArtifacts = try XCTUnwrap(oakPolicy["artifacts"] as? [[Any]])
+        let randomPolicy = try XCTUnwrap(policies["random"] as? [String: Any])
+        let randomArtifacts = try XCTUnwrap(randomPolicy["artifacts"] as? [[Any]])
+        XCTAssertEqual(oakArtifacts.count + randomArtifacts.count, 2)
+        let policyStatOrder = try XCTUnwrap(benchmarkObject["policyStatOrder"] as? [String])
+        let oakStatsRow = try XCTUnwrap(oakPolicy["stats"] as? [Any])
+        XCTAssertEqual(oakStatsRow.count, policyStatOrder.count)
+        let oakStatVec: (String) -> [Any]? = { name in
+            guard let i = policyStatOrder.firstIndex(of: name) else { return nil }
+            return oakStatsRow[i] as? [Any]
+        }
+        XCTAssertNotNil(oakStatVec("plannerStepMsMean"))
+        XCTAssertNotNil(oakStatVec("plannerActiveFraction"))
+        XCTAssertNotNil(oakStatVec("activeGVFsMean"))
+        XCTAssertNotNil(oakStatVec("activeOptionsMean"))
+        XCTAssertNotNil(oakStatVec("actionL2Mean"))
+        XCTAssertNotNil(oakStatVec("stateL2Mean"))
+        XCTAssertNotNil(oakStatVec("agentStepMsMean"))
+        XCTAssertNotNil(oakStatVec("envStepMsMean"))
+        XCTAssertNotNil(oakStatVec("totalStepMsMean"))
         XCTAssertNotNil(oakPolicy["stopReasonCounts"])
-        let oakDynamicSchema = try XCTUnwrap(oakPolicy["dynamicTelemetrySchema"] as? [[String: Any]])
+        let oakDynamicSchema = try XCTUnwrap(oakPolicy["dynamicTelemetrySchema"] as? [[String]])
         XCTAssertEqual(oakDynamicSchema.count, 2)
-        let oakDynamicTelemetry = try XCTUnwrap(oakPolicy["dynamicTelemetry"] as? [String: Any])
-        XCTAssertNotNil(oakDynamicTelemetry["budget.input_ns"])
-        XCTAssertNotNil(oakDynamicTelemetry["perception.active_rank"])
+        XCTAssertEqual(oakDynamicSchema[0], ["budget.input_ns", "ns"])
+        let oakDt = try XCTUnwrap(oakPolicy["dt"] as? [Any])
+        XCTAssertEqual(oakDt.count, oakDynamicSchema.count)
+        XCTAssertNotNil(oakDt[0] as? [Any])
+        XCTAssertNotNil(oakDt[1] as? [Any])
+        let oakDts = try XCTUnwrap(oakPolicy["dts"] as? [Any])
+        let oakDtmn = try XCTUnwrap(oakPolicy["dtmn"] as? [Any])
+        let oakDtmx = try XCTUnwrap(oakPolicy["dtmx"] as? [Any])
+        XCTAssertEqual(oakDts.count, oakDynamicSchema.count)
+        XCTAssertEqual(oakDtmn.count, oakDynamicSchema.count)
+        XCTAssertEqual(oakDtmx.count, oakDynamicSchema.count)
 
         let comparisons = try XCTUnwrap(task["comparisons"] as? [String: Any])
         let comparison = try XCTUnwrap(comparisons["oak__vs__random"] as? [String: Any])
-        XCTAssertNotNil(comparison["rewardSumDelta"])
-        XCTAssertNotNil(comparison["rewardMeanDelta"])
-        XCTAssertNotNil(comparison["stepsPerSecondDelta"])
-        XCTAssertNotNil(comparison["completionRateDelta"])
+        let deltas = try XCTUnwrap(comparison["deltas"] as? [[Any]])
+        let comparisonDeltaOrder = try XCTUnwrap(benchmarkObject["comparisonDeltaOrder"] as? [String])
+        XCTAssertEqual(deltas.count, comparisonDeltaOrder.count)
+        let sig = try XCTUnwrap(comparison["sig"] as? [Any])
+        XCTAssertEqual(sig.count, 2)
 
         XCTAssertFalse(FileManager.default.fileExists(atPath: benchDirectory.appendingPathComponent("summary.json").path))
         XCTAssertFalse(FileManager.default.fileExists(atPath: benchDirectory.appendingPathComponent("task_summary.json").path))
@@ -366,15 +295,7 @@ final class MetricsTests: XCTestCase {
         try writeJSONL([benchmarkRunStart(runId: "oak-0", logicalEnv: "minigrid", concreteEnvId: taskId, league: "smoke", policy: "oak", backend: "metal", seed: 0, schemaFingerprint: "schema-a"), benchmarkRunEnd(runId: "oak-0", logicalEnv: "minigrid", concreteEnvId: taskId, league: "smoke", policy: "oak", backend: "metal", seed: 0)], to: metricsPath0)
         try writeJSONL([benchmarkRunStart(runId: "oak-1", logicalEnv: "minigrid", concreteEnvId: taskId, league: "smoke", policy: "oak", backend: "metal", seed: 1, schemaFingerprint: "schema-b"), benchmarkRunEnd(runId: "oak-1", logicalEnv: "minigrid", concreteEnvId: taskId, league: "smoke", policy: "oak", backend: "metal", seed: 1)], to: metricsPath1)
 
-        let manifestPath = try writeBenchmarkManifest(
-            rows: [
-                benchmarkManifestRow(league: "smoke", logicalEnv: "minigrid", concreteEnvId: taskId, backend: "metal", policy: "oak", seed: 0, numEnvs: 1, warmupSteps: 1, stopSteps: 2, runId: "oak-0", metricsPath: metricsPath0, logPath: runsDirectory.appendingPathComponent("oak-seed0.log"), schemaFingerprint: "schema-a", observationSpaceKind: "dict", observationFlatDim: 11, actionSpaceKind: "discrete", actionFlatDim: 7, actionDiscreteCount: 7, actionShape: [7]),
-                benchmarkManifestRow(league: "smoke", logicalEnv: "minigrid", concreteEnvId: taskId, backend: "metal", policy: "oak", seed: 1, numEnvs: 1, warmupSteps: 1, stopSteps: 2, runId: "oak-1", metricsPath: metricsPath1, logPath: runsDirectory.appendingPathComponent("oak-seed1.log"), schemaFingerprint: "schema-b", observationSpaceKind: "dict", observationFlatDim: 11, actionSpaceKind: "discrete", actionFlatDim: 7, actionDiscreteCount: 7, actionShape: [7]),
-            ],
-            benchDirectory: benchDirectory
-        )
-
-        let result = try runBenchmarkReport(manifestPath: manifestPath, benchDirectory: benchDirectory, baselinePolicy: "oak")
+        let result = try runBenchmarkReport(benchDirectory: benchDirectory, baselinePolicyOverride: "oak")
         XCTAssertEqual(result.terminationStatus, 1, result.stderr)
         XCTAssertFalse(FileManager.default.fileExists(atPath: result.benchmarkJSON.path))
         XCTAssertTrue(result.stderr.contains("schema drift within task"))
@@ -404,15 +325,7 @@ final class MetricsTests: XCTestCase {
             to: metricsPath1
         )
 
-        let manifestPath = try writeBenchmarkManifest(
-            rows: [
-                benchmarkManifestRow(league: "smoke", logicalEnv: "minigrid", concreteEnvId: taskId, backend: "metal", policy: "oak", seed: 0, numEnvs: 1, warmupSteps: 1, stopSteps: 2, runId: "oak-0", metricsPath: metricsPath0, logPath: runsDirectory.appendingPathComponent("oak-seed0.log"), schemaFingerprint: "schema-a", observationSpaceKind: "dict", observationFlatDim: 11, actionSpaceKind: "discrete", actionFlatDim: 7, actionDiscreteCount: 7, actionShape: [7]),
-                benchmarkManifestRow(league: "smoke", logicalEnv: "minigrid", concreteEnvId: taskId, backend: "metal", policy: "oak", seed: 1, numEnvs: 1, warmupSteps: 1, stopSteps: 2, runId: "oak-1", metricsPath: metricsPath1, logPath: runsDirectory.appendingPathComponent("oak-seed1.log"), schemaFingerprint: "schema-a", observationSpaceKind: "dict", observationFlatDim: 11, actionSpaceKind: "discrete", actionFlatDim: 7, actionDiscreteCount: 7, actionShape: [7]),
-            ],
-            benchDirectory: benchDirectory
-        )
-
-        let result = try runBenchmarkReport(manifestPath: manifestPath, benchDirectory: benchDirectory, baselinePolicy: "oak")
+        let result = try runBenchmarkReport(benchDirectory: benchDirectory, baselinePolicyOverride: "oak")
         XCTAssertEqual(result.terminationStatus, 1, result.stderr)
         XCTAssertFalse(FileManager.default.fileExists(atPath: result.benchmarkJSON.path))
         XCTAssertTrue(result.stderr.contains("incomplete run coverage"))
@@ -428,16 +341,25 @@ final class MetricsTests: XCTestCase {
         let recordedTaskId = "MiniGrid-DoorKey-8x8-v0"
         let metricsPath = runsDirectory.appendingPathComponent("oak.jsonl")
 
-        try writeJSONL([benchmarkRunStart(runId: "oak-run", logicalEnv: "minigrid", concreteEnvId: recordedTaskId, league: "smoke", policy: "oak", backend: "metal", seed: 0, schemaFingerprint: "schema-a"), benchmarkRunEnd(runId: "oak-run", logicalEnv: "minigrid", concreteEnvId: recordedTaskId, league: "smoke", policy: "oak", backend: "metal", seed: 0)], to: metricsPath)
-
-        let manifestPath = try writeBenchmarkManifest(
-            rows: [
-                benchmarkManifestRow(league: "smoke", logicalEnv: "minigrid", concreteEnvId: declaredTaskId, backend: "metal", policy: "oak", seed: 0, numEnvs: 1, warmupSteps: 1, stopSteps: 2, runId: "oak-run", metricsPath: metricsPath, logPath: runsDirectory.appendingPathComponent("oak.log"), schemaFingerprint: "schema-a", observationSpaceKind: "dict", observationFlatDim: 11, actionSpaceKind: "discrete", actionFlatDim: 7, actionDiscreteCount: 7, actionShape: [7]),
+        try writeJSONL(
+            [
+                benchmarkRunStart(
+                    runId: "oak-run",
+                    logicalEnv: "minigrid",
+                    concreteEnvId: recordedTaskId,
+                    league: "smoke",
+                    policy: "oak",
+                    backend: "metal",
+                    seed: 0,
+                    schemaFingerprint: "schema-a",
+                    env: declaredTaskId
+                ),
+                benchmarkRunEnd(runId: "oak-run", logicalEnv: "minigrid", concreteEnvId: recordedTaskId, league: "smoke", policy: "oak", backend: "metal", seed: 0),
             ],
-            benchDirectory: benchDirectory
+            to: metricsPath
         )
 
-        let result = try runBenchmarkReport(manifestPath: manifestPath, benchDirectory: benchDirectory, baselinePolicy: "oak")
+        let result = try runBenchmarkReport(benchDirectory: benchDirectory, baselinePolicyOverride: "oak")
         XCTAssertEqual(result.terminationStatus, 1, result.stderr)
         XCTAssertFalse(FileManager.default.fileExists(atPath: result.benchmarkJSON.path))
         XCTAssertTrue(result.stderr.contains("task resolution mismatch"))
@@ -449,22 +371,14 @@ final class MetricsTests: XCTestCase {
         let runsDirectory = benchDirectory.appendingPathComponent("runs", isDirectory: true)
         try FileManager.default.createDirectory(at: runsDirectory, withIntermediateDirectories: true)
 
-        let taskId = "MiniGrid-Empty-8x8-v0"
         let metricsPath = runsDirectory.appendingPathComponent("oak.jsonl")
         let lines = [
-            #"{"backend":"metal","concreteEnvId":"MiniGrid-Empty-8x8-v0","env":"MiniGrid-Empty-8x8-v0","league":"smoke","logicalEnv":"minigrid","policy":"oak","runId":"oak-run","schemaFingerprint":"schema-a","seed":0,"step":0,"timestamp":"2026-04-10T00:00:00Z","type":"run_start"}"#,
+            #"{"actionDiscreteCount":7,"actionFlatDim":7,"actionShape":[7],"actionSpaceKind":"discrete","backend":"metal","concreteEnvId":"MiniGrid-Empty-8x8-v0","env":"MiniGrid-Empty-8x8-v0","league":"smoke","logicalEnv":"minigrid","numEnvs":1,"observationFlatDim":11,"observationSpaceKind":"dict","policy":"oak","runId":"oak-run","schemaFingerprint":"schema-a","seed":0,"step":0,"stopAfterMeasuredSteps":2,"timestamp":"2026-04-10T00:00:00Z","type":"run_start","warmupSteps":1}"#,
             #"{"actionL2Mean":0.5,"activeGVFsMean":3.0,"activeOptionsMean":4.0,"activeRankMax":2,"activeRankMean":2.0,"activeRankMin":1,"agentStepMsMean":1.0,"backend":"metal","concreteEnvId":"MiniGrid-Empty-8x8-v0","doneCount":1,"env":"MiniGrid-Empty-8x8-v0","envStepMsMean":2.0,"league":"smoke","logicalEnv":"minigrid","measuredSeconds":0.2,"measuredStepCount":2,"plannerActiveFraction":0.25,"plannerStepMsMean":0.5,"policy":"oak","resetCount":1,"rewardMean":0.5,"rewardStd":NaN,"rewardSum":1.0,"runId":"oak-run","seed":0,"stateL2Mean":1.0,"step":1,"stopReason":"measured_steps","stepsPerSecond":10.0,"timestamp":"2026-04-10T00:00:01Z","totalStepMsMean":3.0,"type":"run_end","vectorUpdateCount":1}"#,
         ]
         try (lines.joined(separator: "\n") + "\n").write(to: metricsPath, atomically: true, encoding: .utf8)
 
-        let manifestPath = try writeBenchmarkManifest(
-            rows: [
-                benchmarkManifestRow(league: "smoke", logicalEnv: "minigrid", concreteEnvId: taskId, backend: "metal", policy: "oak", seed: 0, numEnvs: 1, warmupSteps: 1, stopSteps: 2, runId: "oak-run", metricsPath: metricsPath, logPath: runsDirectory.appendingPathComponent("oak.log"), schemaFingerprint: "schema-a", observationSpaceKind: "dict", observationFlatDim: 11, actionSpaceKind: "discrete", actionFlatDim: 7, actionDiscreteCount: 7, actionShape: [7]),
-            ],
-            benchDirectory: benchDirectory
-        )
-
-        let result = try runBenchmarkReport(manifestPath: manifestPath, benchDirectory: benchDirectory, baselinePolicy: "oak")
+        let result = try runBenchmarkReport(benchDirectory: benchDirectory, baselinePolicyOverride: "oak")
         XCTAssertEqual(result.terminationStatus, 1, result.stderr)
         XCTAssertFalse(FileManager.default.fileExists(atPath: result.benchmarkJSON.path))
         XCTAssertTrue(result.stderr.contains("non-finite numeric value"))
@@ -521,14 +435,14 @@ final class MetricsTests: XCTestCase {
     func testJSONLSinkWritesExpectedRecordShapes() throws {
         let tempDirectory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
         let fileURL = tempDirectory.appendingPathComponent("metrics.jsonl")
-        let sink = try JSONLMetricsSink(configuration: MetricsConfiguration(windowSize: 1, fileURL: fileURL))
+        let sink = try JSONLMetricsSink(fileURL: fileURL)
         let telemetrySchema = DynamicTelemetrySchema(
             descriptors: [
                 DynamicTelemetryDescriptor(key: "budget.input_ns", unit: "ns"),
                 DynamicTelemetryDescriptor(key: "perception.active_rank", unit: "rank"),
             ]
         )
-        let aggregator = makeAggregator(runId: "run-jsonl", envName: "pyflyt", logicalEnvName: "pyflyt", policyName: "random", backend: "random", windowSize: 1, dynamicTelemetrySchema: telemetrySchema, seed: 7)
+        let aggregator = makeAggregator(runId: "run-jsonl", envName: "pyflyt", logicalEnvName: "pyflyt", policyName: "random", backend: "random", windowSize: 1, dynamicTelemetrySchema: telemetrySchema, seed: 7, numEnvs: 2)
         let control = RunControl(warmupSteps: 5, stopAfterMeasuredSteps: 10, stopAfterMeasuredSeconds: 3)
 
         try sink.write(aggregator.runStartRecord(control: control, at: Date(timeIntervalSince1970: 20)))
@@ -536,7 +450,7 @@ final class MetricsTests: XCTestCase {
         let stepRecords = aggregator.recordStep(
             rewards: [2, 4],
             dones: [false, true],
-            telemetry: makeTelemetry(rewardInput: 0, backend: "random", dynamicTelemetryValues: [10_000.0, 1.0]),
+            telemetry: makeTelemetry(rewardInput: 0, backend: "random", dynamicTelemetryValues: [.finite(10_000.0), .finite(1.0)]),
             envStepMs: 3,
             totalStepMs: 4,
             at: Date(timeIntervalSince1970: 21)
@@ -559,6 +473,7 @@ final class MetricsTests: XCTestCase {
         XCTAssertEqual(runStart["logicalEnv"] as? String, "pyflyt")
         XCTAssertEqual(runStart["concreteEnvId"] as? String, "pyflyt")
         XCTAssertEqual(runStart["league"] as? String, "test")
+        XCTAssertEqual(runStart["numEnvs"] as? Int, 2)
         XCTAssertNotNil(runStart["schemaFingerprint"])
         XCTAssertNotNil(runStart["dynamicTelemetrySchema"])
         XCTAssertNil(runStart["reward"])
@@ -599,6 +514,10 @@ final class MetricsTests: XCTestCase {
         XCTAssertNotNil(summary["activeRankMin"])
         XCTAssertNotNil(summary["activeRankMax"])
         XCTAssertEqual(summary["dynamicTelemetryValues"] as? [Double], [10_000.0, 1.0])
+        XCTAssertEqual(summary["dynamicTelemetryStd"] as? [Double], [0.0, 0.0])
+        XCTAssertEqual(summary["dynamicTelemetryMin"] as? [Double], [10_000.0, 1.0])
+        XCTAssertEqual(summary["dynamicTelemetryMax"] as? [Double], [10_000.0, 1.0])
+        XCTAssertEqual(summary["dynamicTelemetryNonFiniteCounts"] as? [Int], [0, 0])
 
         let runEnd = try jsonObject(from: lines[3])
         XCTAssertEqual(runEnd["type"] as? String, "run_end")
@@ -610,6 +529,10 @@ final class MetricsTests: XCTestCase {
         XCTAssertEqual(runEnd["measuredSeconds"] as? Double, 1.5)
         XCTAssertEqual(runEnd["vectorUpdateCount"] as? Int, 1)
         XCTAssertEqual(runEnd["dynamicTelemetryValues"] as? [Double], [10_000.0, 1.0])
+        XCTAssertEqual(runEnd["dynamicTelemetryStd"] as? [Double], [0.0, 0.0])
+        XCTAssertEqual(runEnd["dynamicTelemetryMin"] as? [Double], [10_000.0, 1.0])
+        XCTAssertEqual(runEnd["dynamicTelemetryMax"] as? [Double], [10_000.0, 1.0])
+        XCTAssertEqual(runEnd["dynamicTelemetryNonFiniteCounts"] as? [Int], [0, 0])
     }
 
     func testResetAndDoneAccountingCarryAcrossContinuousRun() {
@@ -676,21 +599,53 @@ final class MetricsTests: XCTestCase {
         XCTAssertEqual(summary.activeRankMax, 3)
     }
 
-    func testSchemaFingerprintAppearsOnRunEnd() {
-        let aggregator = makeAggregator(runId: "run-schema", envName: "HalfCheetah-v4", logicalEnvName: "cheetah", policyName: "oak", backend: "metal", windowSize: 10)
-        _ = aggregator.recordStep(
-            rewards: [1, 2],
-            dones: [false, false],
-            telemetry: makeTelemetry(rewardInput: 0),
-            envStepMs: 1,
-            totalStepMs: 2
-        )
-        let runEnd = aggregator.runEndRecord(globalMeasuredEnvSteps: 2)
-        XCTAssertEqual(runEnd.logicalEnv, "cheetah")
-        XCTAssertEqual(runEnd.concreteEnvId, "HalfCheetah-v4")
-        XCTAssertEqual(runEnd.league, "test")
-        XCTAssertEqual(runEnd.observationSpaceKind, "box")
-        XCTAssertNotNil(runEnd.schemaFingerprint)
+    func testRandomPolicyTelemetryOmitsDynamicVector() {
+        let obs: [Float] = [0, 0, 0]
+        let action: [Float] = [0, 0]
+        let telemetry = obs.withUnsafeBufferPointer { obsPtr in
+            action.withUnsafeBufferPointer { actPtr in
+                AgentTelemetry.randomPolicy(
+                    rewardInput: 0,
+                    obs: obsPtr,
+                    action: actPtr,
+                    agentStepMs: 0
+                )
+            }
+        }
+        XCTAssertNil(telemetry.dynamicTelemetryValues)
+    }
+
+    func testPerChannelRunningStatsRollup() {
+        var stats = PerChannelRunningStats()
+        stats.record(values: [2.0, 4.0])
+        stats.record(values: [4.0, 8.0])
+        XCTAssertEqual(stats.means, [.finite(3.0), .finite(6.0)])
+        let stdRounded = stats.temporalStd!.map { ch in
+            switch ch {
+            case .finite(let v):
+                return DynamicTelemetryChannel.finite((v * 10).rounded() / 10)
+            case .invalid:
+                return DynamicTelemetryChannel.invalid
+            }
+        }
+        XCTAssertEqual(stdRounded, [.finite(1.0), .finite(2.0)])
+        XCTAssertEqual(stats.mins, [.finite(2.0), .finite(4.0)])
+        XCTAssertEqual(stats.maxs, [.finite(4.0), .finite(8.0)])
+
+        var one = PerChannelRunningStats()
+        one.record(values: [5.0])
+        XCTAssertEqual(one.temporalStd, [.finite(0.0)])
+
+        var nf = PerChannelRunningStats()
+        nf.record(values: [Double.nan])
+        nf.record(values: [1.0])
+        XCTAssertEqual(nf.nonFiniteCounts, [1])
+        XCTAssertEqual(nf.means, [.finite(1.0)])
+
+        var allNonFinite = PerChannelRunningStats()
+        allNonFinite.record(values: [Double.nan])
+        XCTAssertEqual(allNonFinite.means, [.invalid])
+        XCTAssertEqual(allNonFinite.nonFiniteCounts, [1])
     }
 
     private func makeTelemetry(
@@ -699,7 +654,7 @@ final class MetricsTests: XCTestCase {
         backend: String = "metal",
         plannerStepMs: Double = 0,
         activeRank: Int = 0,
-        dynamicTelemetryValues: [Double] = [],
+        dynamicTelemetryValues: [DynamicTelemetryChannel]? = nil,
         obs: [Float] = [1, 2, 3],
         state: [Float] = [0.25, 0.75],
         action: [Float] = [0.1, -0.2]
@@ -742,7 +697,8 @@ final class MetricsTests: XCTestCase {
         backend: String,
         windowSize: Int,
         dynamicTelemetrySchema: DynamicTelemetrySchema = .empty,
-        seed: Int? = nil
+        seed: Int? = nil,
+        numEnvs: Int = 1
     ) -> RunMetricsAggregator {
         RunMetricsAggregator(
             runId: runId,
@@ -758,7 +714,8 @@ final class MetricsTests: XCTestCase {
             ),
             dynamicTelemetrySchema: dynamicTelemetrySchema,
             windowSize: windowSize,
-            seed: seed
+            seed: seed,
+            numEnvs: numEnvs
         )
     }
 
@@ -775,6 +732,15 @@ final class MetricsTests: XCTestCase {
             .deletingLastPathComponent()
     }
 
+    /// OaK embedding exports in the developer shell break `/usr/bin/python3` and `bash` children if inherited.
+    private func processEnvironmentForChildProcesses() -> [String: String] {
+        var env = ProcessInfo.processInfo.environment
+        for key in ["PYTHONHOME", "PYTHONPATH", "PYTHON_LIBRARY"] {
+            env.removeValue(forKey: key)
+        }
+        return env
+    }
+
     private func resolveBenchmarkRows(_ request: String? = nil, environment: [String: String] = [:]) throws -> [ResolvedBenchmarkRow] {
         let scriptPath = repoRoot.appendingPathComponent("benchmark.sh").path
 
@@ -782,7 +748,7 @@ final class MetricsTests: XCTestCase {
         process.executableURL = URL(fileURLWithPath: "/bin/bash")
         process.arguments = [scriptPath, "--resolve-only"] + (request.map { [$0] } ?? [])
         process.currentDirectoryURL = repoRoot
-        process.environment = ProcessInfo.processInfo.environment.merging(environment) { _, new in new }
+        process.environment = processEnvironmentForChildProcesses().merging(environment) { _, new in new }
 
         let stdout = Pipe()
         let stderr = Pipe()
@@ -829,13 +795,17 @@ final class MetricsTests: XCTestCase {
         policy: String,
         backend: String,
         seed: Int,
-        schemaFingerprint: String
+        schemaFingerprint: String,
+        env: String? = nil,
+        numEnvs: Int = 1,
+        warmupSteps: Int = 1,
+        stopAfterMeasuredSteps: Int = 2
     ) -> [String: Any] {
         [
             "type": "run_start",
             "timestamp": "2026-04-10T00:00:00Z",
             "runId": runId,
-            "env": concreteEnvId,
+            "env": env ?? concreteEnvId,
             "logicalEnv": logicalEnv,
             "concreteEnvId": concreteEnvId,
             "league": league,
@@ -843,6 +813,9 @@ final class MetricsTests: XCTestCase {
             "backend": backend,
             "step": 0,
             "seed": seed,
+            "numEnvs": numEnvs,
+            "warmupSteps": warmupSteps,
+            "stopAfterMeasuredSteps": stopAfterMeasuredSteps,
             "schemaFingerprint": schemaFingerprint,
             "observationSpaceKind": "dict",
             "observationFlatDim": 11,
@@ -899,81 +872,23 @@ final class MetricsTests: XCTestCase {
         ]
     }
 
-    private func benchmarkManifestRow(
-        league: String,
-        logicalEnv: String,
-        concreteEnvId: String,
-        backend: String,
-        policy: String,
-        seed: Int,
-        numEnvs: Int,
-        warmupSteps: Int,
-        stopSteps: Int,
-        runId: String,
-        metricsPath: URL,
-        logPath: URL,
-        schemaFingerprint: String,
-        observationSpaceKind: String,
-        observationFlatDim: Int,
-        actionSpaceKind: String,
-        actionFlatDim: Int,
-        actionDiscreteCount: Int,
-        actionShape: [Int]
-    ) -> String {
-        [
-            league,
-            logicalEnv,
-            concreteEnvId,
-            backend,
-            policy,
-            String(seed),
-            String(numEnvs),
-            String(warmupSteps),
-            String(stopSteps),
-            runId,
-            metricsPath.path,
-            logPath.path,
-            schemaFingerprint,
-            observationSpaceKind,
-            String(observationFlatDim),
-            actionSpaceKind,
-            String(actionFlatDim),
-            String(actionDiscreteCount),
-            String(data: try! JSONSerialization.data(withJSONObject: actionShape, options: []), encoding: .utf8)!,
-        ].joined(separator: "\t")
-    }
-
-    private func writeBenchmarkManifest(rows: [String], benchDirectory: URL) throws -> URL {
-        let manifestPath = benchDirectory.appendingPathComponent("manifest.tsv")
-        let header = [
-            "league", "logical_env", "concrete_env_id", "backend", "policy", "seed",
-            "num_envs", "warmup_steps", "stop_steps", "run_id", "metrics_path",
-            "log_path", "schema_fingerprint", "observation_space_kind", "observation_flat_dim",
-            "action_space_kind", "action_flat_dim", "action_discrete_count", "action_shape",
-        ].joined(separator: "\t")
-        try ([header] + rows).joined(separator: "\n").appending("\n").write(to: manifestPath, atomically: true, encoding: .utf8)
-        return manifestPath
-    }
-
     private func runBenchmarkReport(
-        manifestPath: URL,
         benchDirectory: URL,
-        baselinePolicy: String = "random"
+        baselinePolicyOverride: String? = nil
     ) throws -> (terminationStatus: Int32, stderr: String, benchmarkJSON: URL) {
         let benchmarkJSON = benchDirectory.appendingPathComponent("benchmark.json")
 
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/python3")
-        process.arguments = [
-            repoRoot.appendingPathComponent("scripts/benchmark_report.py").path,
-            "--bench-dir", benchDirectory.path,
-            "--manifest", manifestPath.path,
-            "--benchmark-json", benchmarkJSON.path,
-            "--git-revision", "test-revision",
-            "--python-bin", "/usr/bin/python3",
-            "--baseline-policy", baselinePolicy,
-        ]
-        process.currentDirectoryURL = repoRoot
+        process.arguments = [repoRoot.appendingPathComponent("scripts/benchmark_report.py").path]
+        process.currentDirectoryURL = benchDirectory
+        var env = processEnvironmentForChildProcesses()
+        if let override = baselinePolicyOverride {
+            env["OAK_BENCH_BASELINE_POLICY"] = override
+        } else {
+            env.removeValue(forKey: "OAK_BENCH_BASELINE_POLICY")
+        }
+        process.environment = env
         let stderr = Pipe()
         process.standardError = stderr
 

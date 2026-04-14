@@ -27,6 +27,7 @@ __pycache__/
 htmlcov/
 .ipynb_checkpoints/
 /.venv/
+/.oak-setup-cache/
 /venv/
 /env/
 /ENV/
@@ -41,13 +42,10 @@ htmlcov/
 .DS_Store
 
 # Local runtime assets
-/CARLA_0.9.15
-/.oak-metrics/
 /.oak-benchmarks/
-/.oak-carla.log
-/.oak-carla-mode
 
 # Traces and temp
 *.trace/
+*.profraw
 .cursor/
 *.sample.txt
