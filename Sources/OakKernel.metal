@@ -1,527 +1,902 @@
 #include <metal_stdlib>
 using namespace metal;
 
-struct KernelConfig {
-    uint obsDim;
-    uint rank;
-    uint actDim;
-    uint batchSize;
-    float offeredNs;
-};
-
-struct KernelScalars {
-    uint activeRank;
-    uint rewardCount;
-    uint reserved0;
-    uint reserved1;
-    float rewardRate;
-};
-
+struct KernelConfig { uint phase, obsDim, rank, actDim, batchSize, actionIsDiscrete; };
+struct KernelScalars { uint stepCount, rewardCount, activeCount; float rewardRate; };
 struct KernelStats {
-    float residualMean;
-    float totalMean;
-    float rewardRate;
-    float tdAbsMean;
-    float actionDeltaL2;
-    float gvfErrorMean;
-    float gvfPredictionAbsMean;
-    float modelErrorMean;
-    float rewardPredictionAbsMean;
-    float statePredictionAbsMean;
-    float optionSelectionFraction;
-    float optionTrainingSignalMean;
-    float optionScoreMean;
-    float planningCandidateCount;
-    float planningScoreMean;
-    float planningScoreMax;
-    float planningActionChangeL2;
-    float rawNonFiniteCount;
-    float sanitizedNonFiniteCount;
-    float fatalNonFiniteCount;
+    float rewardRate, latentPredictionMSE, rewardPredictionMSE, latentVarianceTrace, activeRank, actionDeltaL2Mean, planningActionChangeL2Mean;
+    float rawNonFiniteCount, sanitizedNonFiniteCount, encodeNonFiniteCount, learnNonFiniteCount, planNonFiniteCount;
+    float maxAbsLatentPrediction, maxAbsRewardPrediction, maxAbsPolicyOutput;
 };
 
-inline float oak_sanitize(float value, thread float& rawCount, thread float& sanitizedCount) {
-    if (isfinite(value)) {
-        return value;
-    }
-    rawCount += 1.0f;
-    sanitizedCount += 1.0f;
+inline float oak_sanitize(float value, thread uint& raw, thread uint& sanitized) {
+    if (isfinite(value)) return value;
+    raw += 1u;
+    sanitized += 1u;
     return 0.0f;
 }
 
-inline float oak_safe_tanh(float value, thread float& rawCount, thread float& sanitizedCount) {
-    return oak_sanitize(tanh(value), rawCount, sanitizedCount);
+inline void oak_flush(device atomic_uint *counters, uint phase, uint raw, uint sanitized) {
+    if (raw) atomic_fetch_add_explicit(&counters[0], raw, memory_order_relaxed);
+    if (sanitized) atomic_fetch_add_explicit(&counters[1], sanitized, memory_order_relaxed);
+    if (phase < 3u && raw) atomic_fetch_add_explicit(&counters[2u + phase], raw, memory_order_relaxed);
 }
 
-inline float oak_inverse_rms(
+inline float oak_masked_dot(
+    device const float *weights,
+    uint weightOffset,
     device const float *values,
-    uint offset,
-    uint count,
-    thread float& rawCount,
-    thread float& sanitizedCount
+    uint valueOffset,
+    device const uint *activeList,
+    uint activeCount,
+    thread uint& raw,
+    thread uint& sanitized
 ) {
-    float sumSquares = 0.0f;
-    for (uint index = 0; index < count; ++index) {
-        const float value = oak_sanitize(values[offset + index], rawCount, sanitizedCount);
-        sumSquares += value * value;
+    float sum = 0.0f;
+    for (uint slot = 0; slot < activeCount; ++slot) {
+        const uint index = activeList[slot];
+        sum += weights[weightOffset + index] * oak_sanitize(values[valueOffset + index], raw, sanitized);
     }
-    const float meanSquare = sumSquares / float(max(count, 1u));
-    return rsqrt(max(meanSquare, FLT_EPSILON));
+    return oak_sanitize(sum, raw, sanitized);
+}
+
+inline uint oak_discrete_index(
+    device const float *actionValues,
+    uint actionOffset,
+    uint actDim,
+    thread uint& raw,
+    thread uint& sanitized
+) {
+    uint best = 0u;
+    float bestValue = -FLT_MAX;
+    for (uint actionIndex = 0; actionIndex < actDim; ++actionIndex) {
+        const float value = oak_sanitize(actionValues[actionOffset + actionIndex], raw, sanitized);
+        if (value > bestValue) {
+            bestValue = value;
+            best = actionIndex;
+        }
+    }
+    return best;
+}
+
+inline float oak_reward_prediction_continuous(
+    device const float *rewardWeights,
+    device const float *stateValues,
+    uint stateOffset,
+    device const float *actionValues,
+    uint actionOffset,
+    device const uint *activeList,
+    uint activeCount,
+    uint rank,
+    uint actDim,
+    thread uint& raw,
+    thread uint& sanitized
+) {
+    float sum = oak_masked_dot(rewardWeights, 0u, stateValues, stateOffset, activeList, activeCount, raw, sanitized);
+    for (uint actionIndex = 0; actionIndex < actDim; ++actionIndex) sum += rewardWeights[rank + actionIndex] * oak_sanitize(actionValues[actionOffset + actionIndex], raw, sanitized);
+    return oak_sanitize(sum, raw, sanitized);
+}
+
+inline float oak_reward_prediction_discrete(
+    device const float *rewardWeights,
+    device const float *stateValues,
+    uint stateOffset,
+    device const uint *activeList,
+    uint activeCount,
+    uint rank,
+    uint actionIndex,
+    thread uint& raw,
+    thread uint& sanitized
+) {
+    const uint weightOffset = actionIndex * (rank + 1u);
+    return oak_sanitize(
+        oak_masked_dot(rewardWeights, weightOffset, stateValues, stateOffset, activeList, activeCount, raw, sanitized) + rewardWeights[weightOffset + rank],
+        raw,
+        sanitized
+    );
+}
+
+inline float oak_feature_transition(
+    device const float *weights,
+    uint weightOffset,
+    float featureValue,
+    device const float *actionValues,
+    uint actionOffset,
+    uint discreteIndex,
+    bool actionIsDiscrete,
+    uint actDim,
+    thread uint& raw,
+    thread uint& sanitized
+) {
+    const float recurrentWeight = oak_sanitize(weights[weightOffset], raw, sanitized);
+    const float feature = oak_sanitize(featureValue, raw, sanitized);
+    float norm = recurrentWeight * recurrentWeight;
+    if (actionIsDiscrete) {
+        const float actionWeight = oak_sanitize(weights[weightOffset + 1u + discreteIndex], raw, sanitized);
+        const float inverseNorm = rsqrt(max(norm + actionWeight * actionWeight, FLT_EPSILON));
+        return oak_sanitize(recurrentWeight * inverseNorm * feature + actionWeight * inverseNorm, raw, sanitized);
+    }
+    float sum = recurrentWeight * feature;
+    for (uint actionIndex = 0; actionIndex < actDim; ++actionIndex) {
+        const float actionWeight = oak_sanitize(weights[weightOffset + 1u + actionIndex], raw, sanitized);
+        norm += actionWeight * actionWeight;
+    }
+    const float inverseNorm = rsqrt(max(norm, FLT_EPSILON));
+    sum = recurrentWeight * inverseNorm * feature;
+    for (uint actionIndex = 0; actionIndex < actDim; ++actionIndex) {
+        const float actionWeight = oak_sanitize(weights[weightOffset + 1u + actionIndex], raw, sanitized);
+        sum += actionWeight * inverseNorm * oak_sanitize(actionValues[actionOffset + actionIndex], raw, sanitized);
+    }
+    return oak_sanitize(sum, raw, sanitized);
+}
+
+inline void oak_predict_state(
+    device const float *stateWeights,
+    device const float *sourceState,
+    uint sourceOffset,
+    device float *targetState,
+    uint targetOffset,
+    device const float *actionValues,
+    uint actionOffset,
+    uint discreteIndex,
+    bool actionIsDiscrete,
+    device const uint *activeList,
+    uint activeCount,
+    uint rank,
+    uint actDim,
+    thread uint& raw,
+    thread uint& sanitized
+) {
+    for (uint slot = 0; slot < activeCount; ++slot) {
+        const uint feature = activeList[slot];
+        targetState[targetOffset + feature] = oak_sanitize(
+            oak_feature_transition(
+                stateWeights,
+                feature * (1u + actDim),
+                sourceState[sourceOffset + feature],
+                actionValues,
+                actionOffset,
+                discreteIndex,
+                actionIsDiscrete,
+                actDim,
+                raw,
+                sanitized
+            ),
+            raw,
+            sanitized
+        );
+    }
+}
+
+inline float oak_residual_trace(
+    device const float *featureResidual,
+    device const float *stateValues,
+    uint stateOffset,
+    device const uint *activeList,
+    uint activeCount,
+    thread uint& raw,
+    thread uint& sanitized
+) {
+    float residualMean = 0.0f;
+    for (uint slot = 0; slot < activeCount; ++slot) {
+        const uint feature = activeList[slot];
+        residualMean += oak_sanitize(featureResidual[feature], raw, sanitized);
+    }
+    const float residualScale = max(
+        activeCount > 0u ? residualMean / float(activeCount) : 0.0f,
+        FLT_EPSILON
+    );
+    float weighted = 0.0f;
+    float energy = 0.0f;
+    for (uint slot = 0; slot < activeCount; ++slot) {
+        const uint feature = activeList[slot];
+        const float value = oak_sanitize(stateValues[stateOffset + feature], raw, sanitized);
+        const float contribution = value * value;
+        energy += contribution;
+        weighted += (oak_sanitize(featureResidual[feature], raw, sanitized) / residualScale) * contribution;
+    }
+    return oak_sanitize(energy > FLT_EPSILON ? weighted / energy : 0.0f, raw, sanitized);
+}
+
+inline uint oak_argmax(device const float *values, uint offset, uint count, thread uint& raw, thread uint& sanitized) {
+    uint best = 0u;
+    float bestValue = -FLT_MAX;
+    for (uint index = 0; index < count; ++index) {
+        const float candidate = oak_sanitize(values[offset + index], raw, sanitized);
+        if (candidate > bestValue) {
+            bestValue = candidate;
+            best = index;
+        }
+    }
+    return best;
+}
+
+inline float oak_active_delta_energy(
+    device const float *source,
+    uint sourceOffset,
+    device const float *target,
+    uint targetOffset,
+    device const uint *activeList,
+    uint activeCount,
+    thread uint& raw,
+    thread uint& sanitized
+) {
+    float energy = 0.0f;
+    for (uint slot = 0; slot < activeCount; ++slot) {
+        const uint feature = activeList[slot];
+        const float delta = oak_sanitize(target[targetOffset + feature] - source[sourceOffset + feature], raw, sanitized);
+        energy += delta * delta;
+    }
+    return oak_sanitize(activeCount > 0u ? energy / float(activeCount) : 0.0f, raw, sanitized);
+}
+
+inline float oak_standardized_feature(
+    device const float *featureMean,
+    device const float *featureSecondMoment,
+    device const float *stateValues,
+    uint stateOffset,
+    device const float *latentPower,
+    uint row,
+    uint feature,
+    thread uint& raw,
+    thread uint& sanitized
+) {
+    const float value = oak_sanitize(stateValues[stateOffset + feature], raw, sanitized) * sqrt(max(latentPower[row], FLT_EPSILON));
+    const float mean = oak_sanitize(featureMean[feature], raw, sanitized);
+    const float secondMoment = oak_sanitize(featureSecondMoment[feature], raw, sanitized);
+    const float variance = max(secondMoment - mean * mean, FLT_EPSILON);
+    return oak_sanitize((value - mean) * rsqrt(variance), raw, sanitized);
+}
+
+inline void oak_normalize_active_state(
+    device float *values,
+    uint offset,
+    device const uint *activeList,
+    uint activeCount,
+    thread uint& raw,
+    thread uint& sanitized
+) {
+    float norm = 0.0f;
+    for (uint slot = 0; slot < activeCount; ++slot) {
+        const uint feature = activeList[slot];
+        const float value = oak_sanitize(values[offset + feature], raw, sanitized);
+        norm += value * value;
+    }
+    if (activeCount == 0u) return;
+    const float scale = rsqrt(max(norm / float(activeCount), FLT_EPSILON));
+    for (uint slot = 0; slot < activeCount; ++slot) {
+        const uint feature = activeList[slot];
+        values[offset + feature] = oak_sanitize(values[offset + feature] * scale, raw, sanitized);
+    }
 }
 
 kernel void oak_step(
     device const float *observation [[buffer(0)]],
-    device float *encoderWeights [[buffer(1)]],
-    device float *policyWeights [[buffer(2)]],
-    device float *valueWeights [[buffer(3)]],
-    device float *gvfWeights [[buffer(4)]],
-    device float *rewardModelWeights [[buffer(5)]],
-    device float *stateModelWeights [[buffer(6)]],
+    device float *observationMean [[buffer(1)]],
+    device float *encoderWeights [[buffer(2)]],
+    device float *policyWeights [[buffer(3)]],
+    device float *valueWeights [[buffer(4)]],
+    device float *rewardWeights [[buffer(5)]],
+    device float *stateWeights [[buffer(6)]],
     device float *optionPolicyWeights [[buffer(7)]],
-    device float *optionValueWeights [[buffer(8)]],
+    device float *optionValues [[buffer(8)]],
     device float *previousState [[buffer(9)]],
     device float *previousAction [[buffer(10)]],
     device const float *reward [[buffer(11)]],
-    device const float *done [[buffer(12)]],
+    device uint *done [[buffer(12)]],
     device float *state [[buffer(13)]],
     device float *action [[buffer(14)]],
-    device KernelScalars *scalars [[buffer(15)]],
-    device KernelStats *statsOut [[buffer(16)]],
-    constant KernelConfig &config [[buffer(17)]],
-    uint tid [[thread_position_in_grid]]
+    device float *latentError [[buffer(15)]],
+    device float *rewardPrediction [[buffer(16)]],
+    device float *td [[buffer(17)]],
+    device float *actionGrad [[buffer(18)]],
+    device float *obsScale [[buffer(19)]],
+    device float *featureMean [[buffer(20)]],
+    device KernelScalars *scalars [[buffer(21)]],
+    device KernelStats *statsOut [[buffer(22)]],
+    device float *featureSecondMoment [[buffer(23)]],
+    device float *featureResidual [[buffer(24)]],
+    device uint *activeState [[buffer(25)]],
+    device float *rolloutState [[buffer(26)]],
+    device float *latentPower [[buffer(27)]],
+    device const float *actionBounds [[buffer(28)]],
+    device atomic_uint *counters [[buffer(29)]],
+    constant KernelConfig &config [[buffer(30)]],
+    uint gid [[thread_position_in_grid]]
 ) {
-    if (tid != 0) {
-        return;
-    }
-
-    const uint obsDim = config.obsDim;
+    const uint obsDim = max(config.obsDim, 1u);
     const uint rank = max(config.rank, 1u);
     const uint actDim = max(config.actDim, 1u);
     const uint batchSize = max(config.batchSize, 1u);
-    uint activeRank = min(max(scalars->activeRank, 1u), rank);
+    const bool actionIsDiscrete = config.actionIsDiscrete != 0u;
+    device uint *activeMask = activeState;
+    device uint *activeList = activeState + rank;
+    const uint activeCount = min(max(scalars->activeCount, 1u), rank);
+    uint raw = 0u, sanitized = 0u;
 
-    float rawNonFiniteCount = 0.0f;
-    float sanitizedNonFiniteCount = 0.0f;
-    float fatalNonFiniteCount = 0.0f;
+    if (config.phase == 0u) {
+        const uint row = gid / rank;
+        const uint feature = gid % rank;
+        if (row < batchSize) {
+            const uint obsOffset = row * obsDim;
+            const uint stateOffset = row * rank;
+            const float centered = oak_sanitize(observation[obsOffset + feature] - observationMean[feature], raw, sanitized);
+            const float projected = oak_sanitize(centered * encoderWeights[feature], raw, sanitized);
+            state[stateOffset + feature] = projected;
+            rolloutState[stateOffset + feature] = centered * centered;
+            latentError[stateOffset + feature] = projected * projected;
+        }
+        oak_flush(counters, 0u, raw, sanitized);
+        return;
+    }
 
-    float residualSum = 0.0f;
-    float totalEnergySum = 0.0f;
+    if (config.phase == 1u) {
+        if (gid < batchSize) {
+            const uint stateOffset = gid * rank;
+            const uint actionOffset = gid * actDim;
+            float norm = 0.0f;
+            float obsEnergy = 0.0f;
+            for (uint feature = 0; feature < rank; ++feature) {
+                norm += oak_sanitize(latentError[stateOffset + feature], raw, sanitized);
+                obsEnergy += oak_sanitize(rolloutState[stateOffset + feature], raw, sanitized);
+            }
+            latentPower[gid] = max(norm / float(rank), FLT_EPSILON);
+            const float stateScale = rsqrt(max(norm / float(rank), FLT_EPSILON));
+            for (uint feature = 0; feature < rank; ++feature) state[stateOffset + feature] = oak_sanitize(state[stateOffset + feature] * stateScale, raw, sanitized);
+            obsScale[gid] = rsqrt(max(obsEnergy / float(obsDim), FLT_EPSILON));
 
-    for (uint row = 0; row < batchSize; ++row) {
-        const uint obsOffset = row * obsDim;
-        const uint stateOffset = row * rank;
+            if (scalars->stepCount == 0u) {
+                rewardPrediction[gid] = 0.0f;
+                td[gid] = 0.0f;
+                for (uint feature = 0; feature < rank; ++feature) latentError[stateOffset + feature] = 0.0f;
+                for (uint actionIndex = 0; actionIndex < actDim; ++actionIndex) actionGrad[actionOffset + actionIndex] = 0.0f;
+                oak_flush(counters, 0u, raw, sanitized);
+                return;
+            }
 
+            const bool terminal = done[gid] != 0u;
+            const uint previousDiscreteIndex = actionIsDiscrete ? oak_discrete_index(previousAction, actionOffset, actDim, raw, sanitized) : 0u;
+            rewardPrediction[gid] = actionIsDiscrete
+                ? oak_reward_prediction_discrete(rewardWeights, previousState, stateOffset, activeList, activeCount, rank, previousDiscreteIndex, raw, sanitized)
+                : oak_reward_prediction_continuous(rewardWeights, previousState, stateOffset, previousAction, actionOffset, activeList, activeCount, rank, actDim, raw, sanitized);
+            if (!terminal) {
+                oak_predict_state(
+                    stateWeights,
+                    previousState,
+                    stateOffset,
+                    rolloutState,
+                    stateOffset,
+                    previousAction,
+                    actionOffset,
+                    previousDiscreteIndex,
+                    actionIsDiscrete,
+                    activeList,
+                    activeCount,
+                    rank,
+                    actDim,
+                    raw,
+                    sanitized
+                );
+                oak_normalize_active_state(rolloutState, stateOffset, activeList, activeCount, raw, sanitized);
+            }
+            float latentEnergy = 0.0f;
+            for (uint slot = 0; slot < activeCount; ++slot) {
+                const uint feature = activeList[slot];
+                const float predicted = terminal ? 0.0f : rolloutState[stateOffset + feature];
+                const float error = oak_sanitize(terminal ? 0.0f : state[stateOffset + feature] - predicted, raw, sanitized);
+                latentError[stateOffset + feature] = error;
+                latentEnergy += error * error;
+            }
+            const float latentScale = terminal ? 1.0f : rsqrt(max(latentEnergy / float(rank), FLT_EPSILON));
+            obsScale[gid] *= latentScale;
+
+            const float rewardNow = oak_sanitize(reward[gid], raw, sanitized);
+            const float valuePrev = oak_masked_dot(valueWeights, 0u, previousState, stateOffset, activeList, activeCount, raw, sanitized);
+            const float valueNow = terminal ? 0.0f : oak_masked_dot(valueWeights, 0u, state, stateOffset, activeList, activeCount, raw, sanitized);
+            const float tdRaw = rewardNow - scalars->rewardRate + valueNow - valuePrev;
+            td[gid] = oak_sanitize(tdRaw / max(fabs(rewardNow) + fabs(scalars->rewardRate) + fabs(valueNow) + fabs(valuePrev), FLT_EPSILON), raw, sanitized);
+
+            if (!actionIsDiscrete) {
+                float gradNorm = 0.0f;
+                for (uint actionIndex = 0; actionIndex < actDim; ++actionIndex) {
+                    float grad = rewardWeights[rank + actionIndex];
+                    for (uint slot = 0; slot < activeCount; ++slot) {
+                        const uint feature = activeList[slot];
+                        grad += valueWeights[feature] * stateWeights[feature * (1u + actDim) + 1u + actionIndex];
+                    }
+                    const float sanitizedGrad = oak_sanitize(grad, raw, sanitized);
+                    actionGrad[actionOffset + actionIndex] = sanitizedGrad;
+                    gradNorm += sanitizedGrad * sanitizedGrad;
+                }
+                const float gradScale = rsqrt(max(gradNorm / float(actDim), FLT_EPSILON));
+                for (uint actionIndex = 0; actionIndex < actDim; ++actionIndex) actionGrad[actionOffset + actionIndex] = oak_sanitize(actionGrad[actionOffset + actionIndex] * gradScale, raw, sanitized);
+            } else {
+                for (uint actionIndex = 0; actionIndex < actDim; ++actionIndex) actionGrad[actionOffset + actionIndex] = 0.0f;
+            }
+            for (uint slot = 0; slot < activeCount; ++slot) {
+                const uint feature = activeList[slot];
+                rolloutState[stateOffset + feature] = oak_standardized_feature(
+                    featureMean,
+                    featureSecondMoment,
+                    state,
+                    stateOffset,
+                    latentPower,
+                    gid,
+                    feature,
+                    raw,
+                    sanitized
+                );
+            }
+        }
+        oak_flush(counters, 0u, raw, sanitized);
+        return;
+    }
+
+    if (config.phase == 2u) {
+        if (scalars->stepCount == 0u) {
+            oak_flush(counters, 1u, raw, sanitized);
+            return;
+        }
+        const uint encoderSpan = obsDim;
+        const uint rewardSpan = actionIsDiscrete ? actDim * (rank + 1u) : rank + actDim;
+        const uint stateSpan = rank * (1u + actDim);
+        const uint valueSpan = rank;
+        const uint policySpan = actDim * rank;
+        const uint optionValueSpan = 2u * rank;
+        const uint optionPolicySpan = 2u * rank * actDim;
+        if (gid < encoderSpan) {
+            const uint feature = gid;
+            if (activeMask[feature] != 0u) {
+                float sum = 0.0f;
+                for (uint row = 0; row < batchSize; ++row) {
+                    const uint obsOffset = row * obsDim;
+                    sum += obsScale[row] * latentError[row * rank + feature] * oak_sanitize(observation[obsOffset + feature] - observationMean[feature], raw, sanitized);
+                }
+                encoderWeights[gid] = oak_sanitize(encoderWeights[gid] + sum / float(batchSize), raw, sanitized);
+            }
+        } else if (gid < encoderSpan + rewardSpan) {
+            const uint index = gid - encoderSpan;
+            float sum = 0.0f;
+            if (!actionIsDiscrete && (index >= rank || activeMask[index] != 0u)) {
+                for (uint row = 0; row < batchSize; ++row) {
+                    const uint stateOffset = row * rank;
+                    const uint actionOffset = row * actDim;
+                    const uint discreteIndex = actionIsDiscrete ? oak_discrete_index(previousAction, actionOffset, actDim, raw, sanitized) : 0u;
+                    const float input = index < rank
+                        ? oak_sanitize(previousState[stateOffset + index], raw, sanitized)
+                        : (actionIsDiscrete
+                            ? float(index - rank == discreteIndex)
+                            : oak_sanitize(previousAction[actionOffset + index - rank], raw, sanitized));
+                    const float rewardValue = oak_sanitize(reward[row], raw, sanitized);
+                    const float rewardError = rewardValue - rewardPrediction[row];
+                    sum += rewardError * input / max(fabs(rewardValue) + fabs(rewardPrediction[row]), FLT_EPSILON);
+                }
+                rewardWeights[index] = oak_sanitize(rewardWeights[index] + sum / float(batchSize), raw, sanitized);
+            } else if (actionIsDiscrete) {
+                const uint actionIndex = index / (rank + 1u);
+                const uint feature = index % (rank + 1u);
+                if (feature == rank || activeMask[feature] != 0u) {
+                    for (uint row = 0; row < batchSize; ++row) {
+                        const uint stateOffset = row * rank;
+                        const uint actionOffset = row * actDim;
+                        const uint discreteIndex = oak_discrete_index(previousAction, actionOffset, actDim, raw, sanitized);
+                        if (discreteIndex != actionIndex) continue;
+                        const float input = feature == rank
+                            ? 1.0f
+                            : oak_sanitize(previousState[stateOffset + feature], raw, sanitized);
+                        const float rewardValue = oak_sanitize(reward[row], raw, sanitized);
+                        const float rewardError = rewardValue - rewardPrediction[row];
+                        sum += rewardError * input / max(fabs(rewardValue) + fabs(rewardPrediction[row]), FLT_EPSILON);
+                    }
+                    rewardWeights[index] = oak_sanitize(rewardWeights[index] + sum / float(batchSize), raw, sanitized);
+                }
+            }
+        } else if (gid < encoderSpan + rewardSpan + stateSpan) {
+            const uint local = gid - encoderSpan - rewardSpan;
+            const uint feature = local / (1u + actDim);
+            const uint inputIndex = local % (1u + actDim);
+            if (activeMask[feature] != 0u) {
+                float sum = 0.0f;
+                for (uint row = 0; row < batchSize; ++row) {
+                    const uint stateOffset = row * rank;
+                    const uint actionOffset = row * actDim;
+                    const uint discreteIndex = actionIsDiscrete ? oak_discrete_index(previousAction, actionOffset, actDim, raw, sanitized) : 0u;
+                    const float input = inputIndex == 0u
+                        ? oak_sanitize(previousState[stateOffset + feature], raw, sanitized)
+                        : (actionIsDiscrete
+                            ? float(inputIndex - 1u == discreteIndex)
+                            : oak_sanitize(previousAction[actionOffset + inputIndex - 1u], raw, sanitized));
+                    sum += obsScale[row] * latentError[stateOffset + feature] * input;
+                }
+                stateWeights[local] = oak_sanitize(stateWeights[local] + sum / float(batchSize), raw, sanitized);
+            }
+        } else if (gid < encoderSpan + rewardSpan + stateSpan + valueSpan) {
+            const uint feature = gid - encoderSpan - rewardSpan - stateSpan;
+            if (activeMask[feature] != 0u) {
+                float sum = 0.0f;
+                for (uint row = 0; row < batchSize; ++row) sum += obsScale[row] * td[row] * oak_sanitize(previousState[row * rank + feature], raw, sanitized);
+                valueWeights[feature] = oak_sanitize(valueWeights[feature] + sum / float(batchSize), raw, sanitized);
+            }
+        } else if (gid < encoderSpan + rewardSpan + stateSpan + valueSpan + policySpan) {
+            const uint local = gid - encoderSpan - rewardSpan - stateSpan - valueSpan;
+            const uint actionIndex = local / rank;
+            const uint feature = local % rank;
+            if (activeMask[feature] != 0u) {
+                float sum = 0.0f;
+                for (uint row = 0; row < batchSize; ++row) {
+                    const uint actionOffset = row * actDim;
+                    const uint discreteIndex = actionIsDiscrete ? oak_discrete_index(previousAction, actionOffset, actDim, raw, sanitized) : 0u;
+                    const float policySignal = actionIsDiscrete
+                        ? float(actionIndex == discreteIndex)
+                        : oak_sanitize(actionGrad[actionOffset + actionIndex], raw, sanitized);
+                    sum += obsScale[row] * td[row] * policySignal * oak_sanitize(previousState[row * rank + feature], raw, sanitized);
+                }
+                policyWeights[local] = oak_sanitize(policyWeights[local] + sum / float(batchSize), raw, sanitized);
+            }
+        } else if (gid < encoderSpan + rewardSpan + stateSpan + valueSpan + policySpan + optionValueSpan) {
+            const uint optionIndex = gid - encoderSpan - rewardSpan - stateSpan - valueSpan - policySpan;
+            const uint targetFeature = optionIndex / 2u;
+            const float direction = optionIndex % 2u == 0u ? -1.0f : 1.0f;
+            if (activeMask[targetFeature] != 0u) {
+                float sum = 0.0f;
+                const float currentValue = oak_sanitize(optionValues[optionIndex], raw, sanitized);
+                for (uint row = 0; row < batchSize; ++row) {
+                    const uint stateOffset = row * rank;
+                    const float standardized = oak_sanitize(rolloutState[stateOffset + targetFeature], raw, sanitized);
+                    const float subtaskReturn = oak_sanitize(
+                        oak_sanitize(reward[row], raw, sanitized) - scalars->rewardRate + direction * standardized,
+                        raw,
+                        sanitized
+                    );
+                    sum += subtaskReturn - currentValue;
+                }
+                optionValues[optionIndex] = oak_sanitize(currentValue + sum / float(batchSize), raw, sanitized);
+            }
+        } else if (gid < encoderSpan + rewardSpan + stateSpan + valueSpan + policySpan + optionValueSpan + optionPolicySpan) {
+            const uint local = gid - encoderSpan - rewardSpan - stateSpan - valueSpan - policySpan - optionValueSpan;
+            const uint optionIndex = local / actDim;
+            const uint actionIndex = local % actDim;
+            const uint targetFeature = optionIndex / 2u;
+            const float direction = optionIndex % 2u == 0u ? -1.0f : 1.0f;
+            if (activeMask[targetFeature] != 0u) {
+                float sum = 0.0f;
+                for (uint row = 0; row < batchSize; ++row) {
+                    const uint stateOffset = row * rank;
+                    const uint actionOffset = row * actDim;
+                    const float standardized = oak_sanitize(rolloutState[stateOffset + targetFeature], raw, sanitized);
+                    const float optionSignal = oak_sanitize(obsScale[row] * (td[row] + direction * standardized), raw, sanitized);
+                    const float actionSignal = actionIsDiscrete
+                        ? float(actionIndex == oak_discrete_index(previousAction, actionOffset, actDim, raw, sanitized))
+                        : oak_sanitize(previousAction[actionOffset + actionIndex], raw, sanitized);
+                    sum += optionSignal * actionSignal;
+                }
+                optionPolicyWeights[local] = oak_sanitize(optionPolicyWeights[local] + sum / float(batchSize), raw, sanitized);
+            }
+        }
+        oak_flush(counters, 1u, raw, sanitized);
+        return;
+    }
+
+    if (config.phase == 3u) {
+        const uint row = gid / actDim;
+        const uint actionIndex = gid % actDim;
+        if (row < batchSize) {
+            const uint stateOffset = row * rank;
+            const uint actionOffset = row * actDim;
+            action[actionOffset + actionIndex] = oak_masked_dot(policyWeights, actionIndex * rank, state, stateOffset, activeList, activeCount, raw, sanitized);
+        }
+        oak_flush(counters, 2u, raw, sanitized);
+        return;
+    }
+
+    if (config.phase == 4u) {
+        if (gid < batchSize) {
+            const uint stateOffset = gid * rank;
+            const uint actionOffset = gid * actDim;
+            const uint rolloutOffset = gid * rank;
+
+            if (actionIsDiscrete) {
+                const uint reactiveIndex = oak_argmax(action, actionOffset, actDim, raw, sanitized);
+                oak_predict_state(stateWeights, state, stateOffset, rolloutState, rolloutOffset, action, actionOffset, reactiveIndex, true, activeList, activeCount, rank, actDim, raw, sanitized);
+                oak_normalize_active_state(rolloutState, rolloutOffset, activeList, activeCount, raw, sanitized);
+                const float reactiveValue = oak_masked_dot(valueWeights, 0u, rolloutState, rolloutOffset, activeList, activeCount, raw, sanitized);
+                const float reactiveVariance = oak_residual_trace(featureResidual, rolloutState, rolloutOffset, activeList, activeCount, raw, sanitized);
+                const float reactiveReward = oak_reward_prediction_discrete(rewardWeights, state, stateOffset, activeList, activeCount, rank, reactiveIndex, raw, sanitized);
+                const float reactiveScore = oak_sanitize(reactiveReward - scalars->rewardRate + reactiveValue, raw, sanitized);
+                float bestScore = reactiveScore;
+                float bestControl = oak_active_delta_energy(state, stateOffset, rolloutState, rolloutOffset, activeList, activeCount, raw, sanitized);
+                uint bestIndex = reactiveIndex;
+
+                for (uint candidateIndex = 0; candidateIndex < actDim; ++candidateIndex) {
+                    oak_predict_state(stateWeights, state, stateOffset, rolloutState, rolloutOffset, action, actionOffset, candidateIndex, true, activeList, activeCount, rank, actDim, raw, sanitized);
+                    oak_normalize_active_state(rolloutState, rolloutOffset, activeList, activeCount, raw, sanitized);
+                    const float valuePrediction = oak_masked_dot(valueWeights, 0u, rolloutState, rolloutOffset, activeList, activeCount, raw, sanitized);
+                    const float varianceTrace = oak_residual_trace(featureResidual, rolloutState, rolloutOffset, activeList, activeCount, raw, sanitized);
+                    const float controlEnergy = oak_active_delta_energy(state, stateOffset, rolloutState, rolloutOffset, activeList, activeCount, raw, sanitized);
+                    const float rewardPredictionValue = oak_reward_prediction_discrete(rewardWeights, state, stateOffset, activeList, activeCount, rank, candidateIndex, raw, sanitized);
+                    const float candidateScore = oak_sanitize(rewardPredictionValue - scalars->rewardRate + valuePrediction, raw, sanitized);
+                    if (varianceTrace > reactiveVariance) continue;
+                    if (
+                        candidateScore > bestScore ||
+                        (candidateScore == bestScore && controlEnergy > bestControl)
+                    ) {
+                        bestIndex = candidateIndex;
+                        bestScore = candidateScore;
+                        bestControl = controlEnergy;
+                    }
+                }
+
+                for (uint slot = 0; slot < activeCount; ++slot) {
+                    const uint feature = activeList[slot];
+                    for (uint signIndex = 0u; signIndex < 2u; ++signIndex) {
+                        const uint optionIndex = feature * 2u + signIndex;
+                        uint optionAction = 0u;
+                        float optionPreference = -FLT_MAX;
+                        for (uint actionIndex = 0; actionIndex < actDim; ++actionIndex) {
+                            const float preference = oak_sanitize(optionPolicyWeights[optionIndex * actDim + actionIndex], raw, sanitized);
+                            if (preference > optionPreference) {
+                                optionPreference = preference;
+                                optionAction = actionIndex;
+                            }
+                        }
+                        oak_predict_state(stateWeights, state, stateOffset, rolloutState, rolloutOffset, action, actionOffset, optionAction, true, activeList, activeCount, rank, actDim, raw, sanitized);
+                        oak_normalize_active_state(rolloutState, rolloutOffset, activeList, activeCount, raw, sanitized);
+                        const float varianceTrace = oak_residual_trace(featureResidual, rolloutState, rolloutOffset, activeList, activeCount, raw, sanitized);
+                        if (varianceTrace > reactiveVariance) continue;
+                        const float controlEnergy = oak_active_delta_energy(state, stateOffset, rolloutState, rolloutOffset, activeList, activeCount, raw, sanitized);
+                        const float rewardPredictionValue = oak_reward_prediction_discrete(rewardWeights, state, stateOffset, activeList, activeCount, rank, optionAction, raw, sanitized);
+                        const float optionScore = oak_sanitize(
+                            rewardPredictionValue - scalars->rewardRate + oak_sanitize(optionValues[optionIndex], raw, sanitized),
+                            raw,
+                            sanitized
+                        );
+                        if (optionScore > bestScore || (optionScore == bestScore && controlEnergy > bestControl)) {
+                            bestIndex = optionAction;
+                            bestScore = optionScore;
+                            bestControl = controlEnergy;
+                        }
+                    }
+                }
+
+                float deltaSum = 0.0f;
+                float planningSum = 0.0f;
+                for (uint actionIndex = 0; actionIndex < actDim; ++actionIndex) {
+                    const float reactive = actionIndex == reactiveIndex ? 1.0f : 0.0f;
+                    const float finalAction = actionIndex == bestIndex ? 1.0f : 0.0f;
+                    const float previous = done[gid] != 0u ? 0.0f : previousAction[actionOffset + actionIndex];
+                    const float planDelta = finalAction - reactive;
+                    const float actionDelta = finalAction - previous;
+                    planningSum += planDelta * planDelta;
+                    deltaSum += actionDelta * actionDelta;
+                    action[actionOffset + actionIndex] = finalAction;
+                    previousAction[actionOffset + actionIndex] = finalAction;
+                }
+                td[gid] = sqrt(deltaSum / float(actDim));
+                obsScale[gid] = sqrt(planningSum / float(actDim));
+            } else {
+                for (uint actionIndex = 0; actionIndex < actDim; ++actionIndex) {
+                    action[actionOffset + actionIndex] = clamp(
+                        oak_sanitize(action[actionOffset + actionIndex], raw, sanitized),
+                        actionBounds[actionIndex],
+                        actionBounds[actDim + actionIndex]
+                    );
+                }
+                oak_predict_state(stateWeights, state, stateOffset, rolloutState, rolloutOffset, action, actionOffset, 0u, false, activeList, activeCount, rank, actDim, raw, sanitized);
+                oak_normalize_active_state(rolloutState, rolloutOffset, activeList, activeCount, raw, sanitized);
+                const float baselineValue = oak_masked_dot(valueWeights, 0u, rolloutState, rolloutOffset, activeList, activeCount, raw, sanitized);
+                const float baselineVariance = oak_residual_trace(featureResidual, rolloutState, rolloutOffset, activeList, activeCount, raw, sanitized);
+                const float baselineReward = oak_reward_prediction_continuous(rewardWeights, state, stateOffset, action, actionOffset, activeList, activeCount, rank, actDim, raw, sanitized);
+                const float baselineScore = oak_sanitize(baselineReward - scalars->rewardRate + baselineValue, raw, sanitized);
+                float bestImprovement = 0.0f;
+                bool improved = false;
+                for (uint slot = 0; slot < activeCount; ++slot) {
+                    const uint feature = activeList[slot];
+                    for (uint signIndex = 0u; signIndex < 2u; ++signIndex) {
+                        const uint optionIndex = feature * 2u + signIndex;
+                        for (uint actionIndex = 0; actionIndex < actDim; ++actionIndex) {
+                            actionGrad[actionOffset + actionIndex] = clamp(
+                                action[actionOffset + actionIndex] + oak_sanitize(optionPolicyWeights[optionIndex * actDim + actionIndex], raw, sanitized),
+                                actionBounds[actionIndex],
+                                actionBounds[actDim + actionIndex]
+                            );
+                        }
+                        oak_predict_state(stateWeights, state, stateOffset, rolloutState, rolloutOffset, actionGrad, actionOffset, 0u, false, activeList, activeCount, rank, actDim, raw, sanitized);
+                        oak_normalize_active_state(rolloutState, rolloutOffset, activeList, activeCount, raw, sanitized);
+                        const float varianceTrace = oak_residual_trace(featureResidual, rolloutState, rolloutOffset, activeList, activeCount, raw, sanitized);
+                        const float rewardPredictionValue = oak_reward_prediction_continuous(rewardWeights, state, stateOffset, actionGrad, actionOffset, activeList, activeCount, rank, actDim, raw, sanitized);
+                        const float improvement = oak_sanitize(
+                            rewardPredictionValue - scalars->rewardRate + oak_sanitize(optionValues[optionIndex], raw, sanitized) - baselineScore,
+                            raw,
+                            sanitized
+                        );
+                        if (varianceTrace <= baselineVariance && improvement > bestImprovement) {
+                            bestImprovement = improvement;
+                            improved = true;
+                            for (uint actionIndex = 0; actionIndex < actDim; ++actionIndex) action[actionOffset + actionIndex] = actionGrad[actionOffset + actionIndex];
+                        }
+                    }
+                }
+
+                float deltaSum = 0.0f;
+                float planningSum = 0.0f;
+                for (uint actionIndex = 0; actionIndex < actDim; ++actionIndex) {
+                    const float reactive = action[actionOffset + actionIndex];
+                    const float finalAction = improved ? action[actionOffset + actionIndex] : reactive;
+                    const float previous = done[gid] != 0u ? 0.0f : previousAction[actionOffset + actionIndex];
+                    const float planDelta = finalAction - reactive;
+                    const float actionDelta = finalAction - previous;
+                    planningSum += planDelta * planDelta;
+                    deltaSum += actionDelta * actionDelta;
+                    action[actionOffset + actionIndex] = finalAction;
+                    previousAction[actionOffset + actionIndex] = finalAction;
+                }
+                td[gid] = sqrt(deltaSum / float(actDim));
+                obsScale[gid] = sqrt(planningSum / float(actDim));
+            }
+
+            for (uint feature = 0; feature < rank; ++feature) previousState[stateOffset + feature] = state[stateOffset + feature];
+        }
+        oak_flush(counters, 2u, raw, sanitized);
+        return;
+    }
+
+    if (config.phase == 5u) {
+        const uint oldCount = scalars->rewardCount;
+        const uint newCount = oldCount + batchSize;
+        const float countScale = float(batchSize) / float(max(newCount, 1u));
+        if (gid < obsDim) {
+            const uint obsIndex = gid;
+            float batchMean = 0.0f;
+            for (uint row = 0; row < batchSize; ++row) batchMean += oak_sanitize(observation[row * obsDim + obsIndex], raw, sanitized);
+            batchMean /= float(batchSize);
+            observationMean[obsIndex] += (batchMean - observationMean[obsIndex]) * countScale;
+        }
+        if (gid < rank) {
+            const uint feature = gid;
+            float mean = 0.0f;
+            float meanSq = 0.0f;
+            float residual = 0.0f;
+            for (uint row = 0; row < batchSize; ++row) {
+                const float value = oak_sanitize(state[row * rank + feature] * sqrt(max(latentPower[row], FLT_EPSILON)), raw, sanitized);
+                mean += value;
+                meanSq += value * value;
+                const float error = oak_sanitize(latentError[row * rank + feature], raw, sanitized);
+                residual += error * error;
+            }
+            mean /= float(batchSize);
+            meanSq /= float(batchSize);
+            residual /= float(batchSize);
+            featureMean[feature] += (mean - featureMean[feature]) * countScale;
+            featureSecondMoment[feature] += (meanSq - featureSecondMoment[feature]) * countScale;
+            featureResidual[feature] += ((activeMask[feature] != 0u ? residual : 0.0f) - featureResidual[feature]) * countScale;
+        }
+        oak_flush(counters, 5u, raw, sanitized);
+        return;
+    }
+
+    if (config.phase == 6u && gid == 0u) {
+        float rewardSum = 0.0f;
+        float varianceTrace = 0.0f;
+        float traceSquared = 0.0f;
+        float bestVariance = -FLT_MAX;
+        uint bestFeature = 0u;
+        const uint oldCount = scalars->rewardCount;
+        const uint newCount = oldCount + batchSize;
+        const float countScale = float(batchSize) / float(max(newCount, 1u));
+        for (uint row = 0; row < batchSize; ++row) rewardSum += oak_sanitize(reward[row], raw, sanitized);
         for (uint feature = 0; feature < rank; ++feature) {
-            float projection = 0.0f;
-            const uint weightOffset = feature * obsDim;
-            for (uint index = 0; index < obsDim; ++index) {
-                const float observed = oak_sanitize(observation[obsOffset + index], rawNonFiniteCount, sanitizedNonFiniteCount);
-                projection += encoderWeights[weightOffset + index] * observed;
+            const float variance = max(featureSecondMoment[feature] - featureMean[feature] * featureMean[feature], 0.0f);
+            varianceTrace += variance;
+            traceSquared += variance * variance;
+            activeMask[feature] = 0u;
+            if (variance > bestVariance) {
+                bestVariance = variance;
+                bestFeature = feature;
             }
-            state[stateOffset + feature] = oak_sanitize(projection, rawNonFiniteCount, sanitizedNonFiniteCount);
         }
-
-        const float stateScale = oak_inverse_rms(state, stateOffset, rank, rawNonFiniteCount, sanitizedNonFiniteCount);
-        for (uint feature = 0; feature < rank; ++feature) {
-            state[stateOffset + feature] = oak_sanitize(state[stateOffset + feature] * stateScale, rawNonFiniteCount, sanitizedNonFiniteCount);
-        }
-
-        float residual = 0.0f;
-        float total = 0.0f;
-        for (uint index = 0; index < obsDim; ++index) {
-            const float observed = oak_sanitize(observation[obsOffset + index], rawNonFiniteCount, sanitizedNonFiniteCount);
-            float rebuilt = 0.0f;
-            for (uint feature = 0; feature < activeRank; ++feature) {
-                rebuilt += state[stateOffset + feature] * encoderWeights[feature * obsDim + index];
+        uint activeCount = uint(ceil((varianceTrace * varianceTrace) / max(traceSquared, FLT_EPSILON)));
+        activeCount = min(max(activeCount, 1u), rank);
+        for (uint slot = 0u; slot < activeCount; ++slot) {
+            float currentBest = -FLT_MAX;
+            uint currentIndex = bestFeature;
+            for (uint feature = 0; feature < rank; ++feature) {
+                if (activeMask[feature] != 0u) continue;
+                const float variance = max(featureSecondMoment[feature] - featureMean[feature] * featureMean[feature], 0.0f);
+                if (variance > currentBest) {
+                    currentBest = variance;
+                    currentIndex = feature;
+                }
             }
-            const float delta = observed - oak_sanitize(rebuilt, rawNonFiniteCount, sanitizedNonFiniteCount);
-            residual += delta * delta;
-            total += observed * observed;
+            activeMask[currentIndex] = 1u;
+            activeList[slot] = currentIndex;
         }
-        residualSum += residual;
-        totalEnergySum += total;
+        for (uint slot = activeCount; slot < rank; ++slot) activeList[slot] = 0u;
+        const float batchRewardMean = rewardSum / float(batchSize);
+        scalars->rewardCount = newCount;
+        scalars->activeCount = activeCount;
+        scalars->rewardRate += (batchRewardMean - scalars->rewardRate) * countScale;
+        scalars->stepCount += 1u;
+        scalars->rewardRate = oak_sanitize(scalars->rewardRate, raw, sanitized);
+        statsOut[0].latentVarianceTrace = varianceTrace;
+        statsOut[0].activeRank = float(activeCount);
+        oak_flush(counters, 6u, raw, sanitized);
+        return;
     }
 
-    const float residualMean = residualSum / float(batchSize);
-    const float totalMean = totalEnergySum / float(batchSize);
-    const float encodeAlpha = 1.0f / float(max(obsDim, 1u));
-    for (uint row = 0; row < batchSize; ++row) {
-        const uint obsOffset = row * obsDim;
-        const uint stateOffset = row * rank;
-        for (uint index = 0; index < obsDim; ++index) {
-            const float observed = oak_sanitize(observation[obsOffset + index], rawNonFiniteCount, sanitizedNonFiniteCount);
-            float rebuilt = 0.0f;
-            for (uint feature = 0; feature < activeRank; ++feature) {
-                rebuilt += state[stateOffset + feature] * encoderWeights[feature * obsDim + index];
+    if (config.phase == 7u) {
+        if (gid < batchSize) {
+            const uint stateOffset = gid * rank;
+            const uint actionOffset = gid * actDim;
+            float latentErrorMean = 0.0f;
+            float maxLatentPredictionAbs = 0.0f;
+            float maxPolicyOutputAbs = 0.0f;
+            for (uint slot = 0; slot < activeCount; ++slot) {
+                const uint feature = activeList[slot];
+                const float error = oak_sanitize(latentError[stateOffset + feature], raw, sanitized);
+                latentErrorMean += error * error;
+                maxLatentPredictionAbs = max(
+                    maxLatentPredictionAbs,
+                    fabs(oak_sanitize(state[stateOffset + feature] - error, raw, sanitized))
+                );
             }
-            const float delta = observed - oak_sanitize(rebuilt, rawNonFiniteCount, sanitizedNonFiniteCount);
-            for (uint feature = 0; feature < activeRank; ++feature) {
-                const uint weightIndex = feature * obsDim + index;
-                const float updated = encoderWeights[weightIndex] + encodeAlpha * delta * state[stateOffset + feature];
-                encoderWeights[weightIndex] = oak_sanitize(updated, rawNonFiniteCount, sanitizedNonFiniteCount);
+            latentPower[gid] = oak_sanitize(activeCount > 0u ? latentErrorMean / float(activeCount) : 0.0f, raw, sanitized);
+            rolloutState[stateOffset] = maxLatentPredictionAbs;
+            for (uint actionIndex = 0; actionIndex < actDim; ++actionIndex) {
+                maxPolicyOutputAbs = max(
+                    maxPolicyOutputAbs,
+                    fabs(oak_masked_dot(policyWeights, actionIndex * rank, state, stateOffset, activeList, activeCount, raw, sanitized))
+                );
             }
+            actionGrad[actionOffset] = maxPolicyOutputAbs;
         }
+        oak_flush(counters, 7u, raw, sanitized);
+        return;
     }
 
-    const float unexplainedFraction = totalMean > FLT_EPSILON ? clamp(residualMean / totalMean, 0.0f, 1.0f) : 0.0f;
-    activeRank = min(max(uint(ceil(float(rank) * sqrt(unexplainedFraction))), 1u), rank);
-    scalars->activeRank = activeRank;
-
-    float batchReward = 0.0f;
-    for (uint row = 0; row < batchSize; ++row) {
-        batchReward += oak_sanitize(reward[row], rawNonFiniteCount, sanitizedNonFiniteCount);
-    }
-    batchReward /= float(batchSize);
-
-    const bool hasPreviousTransition = scalars->rewardCount > 0u;
-    scalars->rewardCount += batchSize;
-    const float rewardCount = float(max(scalars->rewardCount, 1u));
-    const float previousRewardRate = scalars->rewardRate;
-    scalars->rewardRate += (batchReward - scalars->rewardRate) / rewardCount;
-    const float rewardRate = oak_sanitize(scalars->rewardRate, rawNonFiniteCount, sanitizedNonFiniteCount);
-
-    float tdAbsSum = 0.0f;
-    float gvfErrorSum = 0.0f;
-    float gvfPredictionAbsSum = 0.0f;
-    float gvfSampleCount = 0.0f;
-    float modelErrorSum = 0.0f;
-    float rewardPredictionAbsSum = 0.0f;
-    float statePredictionAbsSum = 0.0f;
-    float modelSampleCount = 0.0f;
-    const float optionAlpha = 1.0f / float(max(activeRank, 1u));
-
-    if (hasPreviousTransition) {
-        const float featureAlpha = 1.0f / float(max(activeRank, 1u));
-        const float transitionAlpha = 1.0f / float(max(activeRank + actDim, 1u));
-
+    if (config.phase == 8u && gid == 0u) {
+        float rewardSum = 0.0f;
+        float rewardErrorSum = 0.0f;
+        float latentErrorSum = 0.0f;
+        float actionDeltaSum = 0.0f;
+        float planningDeltaSum = 0.0f;
+        float maxLatentPredictionAbs = 0.0f;
+        float maxRewardPredictionAbs = 0.0f;
+        float maxPolicyOutputAbs = 0.0f;
+        const float varianceTrace = statsOut[0].latentVarianceTrace;
+        const uint activeCount = uint(statsOut[0].activeRank);
         for (uint row = 0; row < batchSize; ++row) {
             const uint stateOffset = row * rank;
             const uint actionOffset = row * actDim;
-            const bool terminated = oak_sanitize(done[row], rawNonFiniteCount, sanitizedNonFiniteCount) > 0.5f;
-            const float rowReward = oak_sanitize(reward[row], rawNonFiniteCount, sanitizedNonFiniteCount);
-            const float previousScale = oak_inverse_rms(previousState, stateOffset, activeRank, rawNonFiniteCount, sanitizedNonFiniteCount);
-            const float currentScale = oak_inverse_rms(state, stateOffset, activeRank, rawNonFiniteCount, sanitizedNonFiniteCount);
-
-            float valuePrev = 0.0f;
-            float valueNow = 0.0f;
-            for (uint feature = 0; feature < activeRank; ++feature) {
-                valuePrev += valueWeights[feature] * previousState[stateOffset + feature] * previousScale;
-                if (!terminated) {
-                    valueNow += valueWeights[feature] * state[stateOffset + feature] * currentScale;
-                }
-            }
-            const float td = oak_sanitize(rowReward - previousRewardRate + valueNow - valuePrev, rawNonFiniteCount, sanitizedNonFiniteCount);
-            const float tdUpdate = oak_safe_tanh(td, rawNonFiniteCount, sanitizedNonFiniteCount);
-            tdAbsSum += fabs(td);
-
-            for (uint feature = 0; feature < activeRank; ++feature) {
-                const float updatedValue = valueWeights[feature] + featureAlpha * tdUpdate * previousState[stateOffset + feature] * previousScale;
-                valueWeights[feature] = oak_sanitize(updatedValue, rawNonFiniteCount, sanitizedNonFiniteCount);
-            }
-            float actionGradSquareSum = 0.0f;
-            for (uint actionIndex = 0; actionIndex < actDim; ++actionIndex) {
-                float actionGrad = rewardModelWeights[rank + actionIndex];
-                for (uint predictedFeature = 0; predictedFeature < activeRank; ++predictedFeature) {
-                    const uint rowOffset = predictedFeature * (rank + actDim);
-                    actionGrad += valueWeights[predictedFeature] * stateModelWeights[rowOffset + rank + actionIndex];
-                }
-                actionGrad = oak_sanitize(actionGrad, rawNonFiniteCount, sanitizedNonFiniteCount);
-                actionGradSquareSum += actionGrad * actionGrad;
-            }
-            const float actionGradScale = rsqrt(max(actionGradSquareSum / float(max(actDim, 1u)), FLT_EPSILON));
-            for (uint actionIndex = 0; actionIndex < actDim; ++actionIndex) {
-                const uint rowOffset = actionIndex * rank;
-                float actionGrad = rewardModelWeights[rank + actionIndex];
-                for (uint predictedFeature = 0; predictedFeature < activeRank; ++predictedFeature) {
-                    const uint modelOffset = predictedFeature * (rank + actDim);
-                    actionGrad += valueWeights[predictedFeature] * stateModelWeights[modelOffset + rank + actionIndex];
-                }
-                actionGrad = oak_sanitize(actionGrad * actionGradScale, rawNonFiniteCount, sanitizedNonFiniteCount);
-                const float behaviorAction = oak_sanitize(previousAction[actionOffset + actionIndex], rawNonFiniteCount, sanitizedNonFiniteCount);
-                const float target = oak_safe_tanh(behaviorAction + actionGrad, rawNonFiniteCount, sanitizedNonFiniteCount);
-                float policyLogit = 0.0f;
-                for (uint feature = 0; feature < activeRank; ++feature) {
-                    policyLogit += policyWeights[rowOffset + feature] * previousState[stateOffset + feature] * previousScale;
-                }
-                const float policyAction = oak_safe_tanh(policyLogit, rawNonFiniteCount, sanitizedNonFiniteCount);
-                const float policyError = oak_sanitize(target - policyAction, rawNonFiniteCount, sanitizedNonFiniteCount);
-                for (uint feature = 0; feature < activeRank; ++feature) {
-                    const uint index = rowOffset + feature;
-                    const float updatedPolicy = policyWeights[index] + featureAlpha * policyError * previousState[stateOffset + feature] * previousScale;
-                    policyWeights[index] = oak_sanitize(updatedPolicy, rawNonFiniteCount, sanitizedNonFiniteCount);
-                }
-            }
-
-            for (uint question = 0; question < activeRank + 1u; ++question) {
-                const uint weightOffset = question * rank;
-                float prediction = 0.0f;
-                for (uint feature = 0; feature < activeRank; ++feature) {
-                    prediction += gvfWeights[weightOffset + feature] * previousState[stateOffset + feature] * previousScale;
-                }
-                prediction = oak_sanitize(prediction, rawNonFiniteCount, sanitizedNonFiniteCount);
-                const float target = question == 0u ? rowReward : (terminated ? 0.0f : state[stateOffset + question - 1u] * currentScale);
-                const float error = oak_sanitize(target - prediction, rawNonFiniteCount, sanitizedNonFiniteCount);
-                const float errorUpdate = oak_safe_tanh(error, rawNonFiniteCount, sanitizedNonFiniteCount);
-                gvfErrorSum += fabs(error);
-                gvfPredictionAbsSum += fabs(prediction);
-                gvfSampleCount += 1.0f;
-                for (uint feature = 0; feature < activeRank; ++feature) {
-                    const uint index = weightOffset + feature;
-                    const float updated = gvfWeights[index] + featureAlpha * errorUpdate * previousState[stateOffset + feature] * previousScale;
-                    gvfWeights[index] = oak_sanitize(updated, rawNonFiniteCount, sanitizedNonFiniteCount);
-                }
-            }
-
-            float rewardPrediction = 0.0f;
-            for (uint feature = 0; feature < activeRank; ++feature) {
-                rewardPrediction += rewardModelWeights[feature] * previousState[stateOffset + feature] * previousScale;
-            }
-            for (uint actionIndex = 0; actionIndex < actDim; ++actionIndex) {
-                rewardPrediction += rewardModelWeights[rank + actionIndex] * previousAction[actionOffset + actionIndex];
-            }
-            rewardPrediction = oak_sanitize(rewardPrediction, rawNonFiniteCount, sanitizedNonFiniteCount);
-            const float rewardError = oak_sanitize(rowReward - rewardPrediction, rawNonFiniteCount, sanitizedNonFiniteCount);
-            const float rewardUpdate = oak_safe_tanh(rewardError, rawNonFiniteCount, sanitizedNonFiniteCount);
-            rewardPredictionAbsSum += fabs(rewardPrediction);
-            modelErrorSum += fabs(rewardError);
-            modelSampleCount += 1.0f;
-            for (uint feature = 0; feature < activeRank; ++feature) {
-                const float updated = rewardModelWeights[feature] + transitionAlpha * rewardUpdate * previousState[stateOffset + feature] * previousScale;
-                rewardModelWeights[feature] = oak_sanitize(updated, rawNonFiniteCount, sanitizedNonFiniteCount);
-            }
-            for (uint actionIndex = 0; actionIndex < actDim; ++actionIndex) {
-                const uint index = rank + actionIndex;
-                const float updated = rewardModelWeights[index] + transitionAlpha * rewardUpdate * previousAction[actionOffset + actionIndex];
-                rewardModelWeights[index] = oak_sanitize(updated, rawNonFiniteCount, sanitizedNonFiniteCount);
-            }
-
-            if (!terminated) {
-                for (uint stateIndex = 0; stateIndex < activeRank; ++stateIndex) {
-                    const uint rowOffset = stateIndex * (rank + actDim);
-                    float prediction = 0.0f;
-                    for (uint feature = 0; feature < activeRank; ++feature) {
-                        prediction += stateModelWeights[rowOffset + feature] * previousState[stateOffset + feature] * previousScale;
-                    }
-                    for (uint actionIndex = 0; actionIndex < actDim; ++actionIndex) {
-                        prediction += stateModelWeights[rowOffset + rank + actionIndex] * previousAction[actionOffset + actionIndex];
-                    }
-                    prediction = oak_sanitize(prediction, rawNonFiniteCount, sanitizedNonFiniteCount);
-                    const float target = state[stateOffset + stateIndex] * currentScale;
-                    const float error = oak_sanitize(target - prediction, rawNonFiniteCount, sanitizedNonFiniteCount);
-                    const float errorUpdate = oak_safe_tanh(error, rawNonFiniteCount, sanitizedNonFiniteCount);
-                    statePredictionAbsSum += fabs(prediction);
-                    modelErrorSum += fabs(error);
-                    modelSampleCount += 1.0f;
-                    for (uint feature = 0; feature < activeRank; ++feature) {
-                        const uint index = rowOffset + feature;
-                        const float updated = stateModelWeights[index] + transitionAlpha * errorUpdate * previousState[stateOffset + feature] * previousScale;
-                        stateModelWeights[index] = oak_sanitize(updated, rawNonFiniteCount, sanitizedNonFiniteCount);
-                    }
-                    for (uint actionIndex = 0; actionIndex < actDim; ++actionIndex) {
-                        const uint index = rowOffset + rank + actionIndex;
-                        const float updated = stateModelWeights[index] + transitionAlpha * errorUpdate * previousAction[actionOffset + actionIndex];
-                        stateModelWeights[index] = oak_sanitize(updated, rawNonFiniteCount, sanitizedNonFiniteCount);
-                    }
-                }
-            }
-
+            const float rewardValue = oak_sanitize(reward[row], raw, sanitized);
+            const float rewardEstimate = oak_sanitize(rewardPrediction[row], raw, sanitized);
+            const float rewardError = rewardValue - rewardEstimate;
+            rewardSum += rewardValue;
+            rewardErrorSum += rewardError * rewardError;
+            latentErrorSum += oak_sanitize(latentPower[row], raw, sanitized);
+            actionDeltaSum += oak_sanitize(td[row], raw, sanitized);
+            planningDeltaSum += oak_sanitize(obsScale[row], raw, sanitized);
+            maxLatentPredictionAbs = max(maxLatentPredictionAbs, fabs(oak_sanitize(rolloutState[stateOffset], raw, sanitized)));
+            maxRewardPredictionAbs = max(maxRewardPredictionAbs, fabs(rewardEstimate));
+            maxPolicyOutputAbs = max(maxPolicyOutputAbs, fabs(oak_sanitize(actionGrad[actionOffset], raw, sanitized)));
         }
+
+        statsOut[0] = {
+            scalars->rewardRate,
+            latentErrorSum / float(batchSize),
+            rewardErrorSum / float(batchSize),
+            varianceTrace,
+            float(activeCount),
+            actionDeltaSum / float(batchSize),
+            planningDeltaSum / float(batchSize),
+            float(atomic_load_explicit(&counters[0], memory_order_relaxed)),
+            float(atomic_load_explicit(&counters[1], memory_order_relaxed)),
+            float(atomic_load_explicit(&counters[2], memory_order_relaxed)),
+            float(atomic_load_explicit(&counters[3], memory_order_relaxed)),
+            float(atomic_load_explicit(&counters[4], memory_order_relaxed)),
+            maxLatentPredictionAbs,
+            maxRewardPredictionAbs,
+            maxPolicyOutputAbs
+        };
+        oak_flush(counters, 8u, raw, sanitized);
     }
-
-    float actionDeltaSquares = 0.0f;
-    float optionSelectionCount = 0.0f;
-    float optionTrainingSignalSum = 0.0f;
-    float optionScoreSum = 0.0f;
-    float planningCandidateSum = 0.0f;
-    float planningScoreSum = 0.0f;
-    float planningScoreMax = -FLT_MAX;
-    float planningActionChangeSquares = 0.0f;
-    const uint planningWorkScale = max(obsDim + actDim + activeRank, 1u);
-    const uint candidateLimit = config.offeredNs > 0.0f
-        ? min(activeRank, max(uint(config.offeredNs / float(planningWorkScale)), 1u))
-        : 0u;
-
-    for (uint row = 0; row < batchSize; ++row) {
-        const uint stateOffset = row * rank;
-        const uint actionOffset = row * actDim;
-        const float currentScale = oak_inverse_rms(state, stateOffset, activeRank, rawNonFiniteCount, sanitizedNonFiniteCount);
-
-        for (uint actionIndex = 0; actionIndex < actDim; ++actionIndex) {
-            float logit = 0.0f;
-            const uint rowOffset = actionIndex * rank;
-            for (uint feature = 0; feature < activeRank; ++feature) {
-                logit += policyWeights[rowOffset + feature] * state[stateOffset + feature] * currentScale;
-            }
-            action[actionOffset + actionIndex] = oak_safe_tanh(logit, rawNonFiniteCount, sanitizedNonFiniteCount);
-        }
-
-        float baselineRewardPrediction = 0.0f;
-        for (uint feature = 0; feature < activeRank; ++feature) {
-            baselineRewardPrediction += rewardModelWeights[feature] * state[stateOffset + feature] * currentScale;
-        }
-        for (uint actionIndex = 0; actionIndex < actDim; ++actionIndex) {
-            baselineRewardPrediction += rewardModelWeights[rank + actionIndex] * action[actionOffset + actionIndex];
-        }
-        float baselineValue = 0.0f;
-        for (uint predictedFeature = 0; predictedFeature < activeRank; ++predictedFeature) {
-            const uint rowOffset = predictedFeature * (rank + actDim);
-            float predictedState = 0.0f;
-            for (uint feature = 0; feature < activeRank; ++feature) {
-                predictedState += stateModelWeights[rowOffset + feature] * state[stateOffset + feature] * currentScale;
-            }
-            for (uint actionIndex = 0; actionIndex < actDim; ++actionIndex) {
-                predictedState += stateModelWeights[rowOffset + rank + actionIndex] * action[actionOffset + actionIndex];
-            }
-            baselineValue += oak_sanitize(predictedState, rawNonFiniteCount, sanitizedNonFiniteCount) * valueWeights[predictedFeature];
-        }
-        const float baselineScore = oak_safe_tanh(baselineRewardPrediction, rawNonFiniteCount, sanitizedNonFiniteCount)
-            + oak_safe_tanh(baselineValue, rawNonFiniteCount, sanitizedNonFiniteCount);
-
-        float candidateScoreTotal = 0.0f;
-        float bestImprovement = -FLT_MAX;
-        int bestOption = -1;
-
-        for (uint option = 0; option < candidateLimit; ++option) {
-            float rewardPrediction = 0.0f;
-            for (uint feature = 0; feature < activeRank; ++feature) {
-                rewardPrediction += rewardModelWeights[feature] * state[stateOffset + feature] * currentScale;
-            }
-            for (uint actionIndex = 0; actionIndex < actDim; ++actionIndex) {
-                const float candidateAction = oak_safe_tanh(
-                    action[actionOffset + actionIndex] + optionPolicyWeights[option * actDim + actionIndex] * state[stateOffset + option] * currentScale,
-                    rawNonFiniteCount,
-                    sanitizedNonFiniteCount
-                );
-                rewardPrediction += rewardModelWeights[rank + actionIndex] * candidateAction;
-            }
-            float predictedValue = 0.0f;
-            float predictedOptionState = 0.0f;
-            for (uint predictedFeature = 0; predictedFeature < activeRank; ++predictedFeature) {
-                const uint rowOffset = predictedFeature * (rank + actDim);
-                float predictedState = 0.0f;
-                for (uint feature = 0; feature < activeRank; ++feature) {
-                    predictedState += stateModelWeights[rowOffset + feature] * state[stateOffset + feature] * currentScale;
-                }
-                for (uint actionIndex = 0; actionIndex < actDim; ++actionIndex) {
-                    const float candidateAction = oak_safe_tanh(
-                        action[actionOffset + actionIndex] + optionPolicyWeights[option * actDim + actionIndex] * state[stateOffset + option] * currentScale,
-                        rawNonFiniteCount,
-                        sanitizedNonFiniteCount
-                    );
-                    predictedState += stateModelWeights[rowOffset + rank + actionIndex] * candidateAction;
-                }
-                predictedState = oak_sanitize(predictedState, rawNonFiniteCount, sanitizedNonFiniteCount);
-                if (predictedFeature == option) {
-                    predictedOptionState = predictedState;
-                }
-                predictedValue += predictedState * valueWeights[predictedFeature];
-            }
-            float optionValue = 0.0f;
-            const uint optionValueOffset = option * rank;
-            for (uint feature = 0; feature < activeRank; ++feature) {
-                optionValue += optionValueWeights[optionValueOffset + feature] * state[stateOffset + feature] * currentScale;
-            }
-            optionValue = oak_safe_tanh(optionValue, rawNonFiniteCount, sanitizedNonFiniteCount);
-            const float optionProgress = oak_safe_tanh(predictedOptionState - state[stateOffset + option] * currentScale, rawNonFiniteCount, sanitizedNonFiniteCount);
-            const float candidateScore = oak_sanitize(
-                oak_safe_tanh(rewardPrediction, rawNonFiniteCount, sanitizedNonFiniteCount)
-                    + oak_safe_tanh(predictedValue, rawNonFiniteCount, sanitizedNonFiniteCount)
-                    + optionValue
-                    + optionProgress,
-                rawNonFiniteCount,
-                sanitizedNonFiniteCount
-            );
-            const float candidateImprovement = oak_sanitize(candidateScore - baselineScore, rawNonFiniteCount, sanitizedNonFiniteCount);
-            candidateScoreTotal += candidateImprovement;
-            if (bestOption < 0 || candidateImprovement > bestImprovement) {
-                bestImprovement = candidateImprovement;
-                bestOption = int(option);
-            }
-            planningScoreMax = max(planningScoreMax, candidateImprovement);
-        }
-
-        planningCandidateSum += float(candidateLimit);
-        planningScoreSum += candidateScoreTotal;
-        optionScoreSum += bestOption >= 0 ? bestImprovement : 0.0f;
-
-        if (bestOption >= 0 && bestImprovement > 0.0f) {
-            optionSelectionCount += 1.0f;
-        }
-        const float optionSignal = bestOption >= 0
-            ? oak_safe_tanh(bestImprovement, rawNonFiniteCount, sanitizedNonFiniteCount)
-            : 0.0f;
-        optionTrainingSignalSum += fabs(optionSignal);
-
-        float rowPlanningChangeSquares = 0.0f;
-        for (uint actionIndex = 0; actionIndex < actDim; ++actionIndex) {
-            const float reactiveAction = action[actionOffset + actionIndex];
-            float finalAction = reactiveAction;
-            if (bestOption >= 0 && bestImprovement > 0.0f) {
-                finalAction = oak_safe_tanh(
-                    reactiveAction + optionSignal * optionPolicyWeights[uint(bestOption) * actDim + actionIndex] * state[stateOffset + uint(bestOption)] * currentScale,
-                    rawNonFiniteCount,
-                    sanitizedNonFiniteCount
-                );
-            }
-            const float deltaReactive = finalAction - reactiveAction;
-            const float previous = oak_sanitize(done[row], rawNonFiniteCount, sanitizedNonFiniteCount) > 0.5f
-                ? 0.0f
-                : oak_sanitize(previousAction[actionOffset + actionIndex], rawNonFiniteCount, sanitizedNonFiniteCount);
-            const float deltaPrevious = finalAction - previous;
-            rowPlanningChangeSquares += deltaReactive * deltaReactive;
-            actionDeltaSquares += deltaPrevious * deltaPrevious;
-            action[actionOffset + actionIndex] = finalAction;
-        }
-        planningActionChangeSquares += rowPlanningChangeSquares;
-
-        if (hasPreviousTransition && bestOption >= 0) {
-            const uint option = uint(bestOption);
-            const float scale = state[stateOffset + option] * currentScale;
-            for (uint actionIndex = 0; actionIndex < actDim; ++actionIndex) {
-                const uint index = option * actDim + actionIndex;
-                const float updated = optionPolicyWeights[index] + optionAlpha * optionSignal * scale * action[actionOffset + actionIndex];
-                optionPolicyWeights[index] = oak_sanitize(updated, rawNonFiniteCount, sanitizedNonFiniteCount);
-            }
-            const uint valueOffset = option * rank;
-            for (uint feature = 0; feature < activeRank; ++feature) {
-                const uint index = valueOffset + feature;
-                const float updated = optionValueWeights[index] + optionAlpha * optionSignal * scale * state[stateOffset + feature] * currentScale;
-                optionValueWeights[index] = oak_sanitize(updated, rawNonFiniteCount, sanitizedNonFiniteCount);
-            }
-        }
-    }
-
-    for (uint row = 0; row < batchSize; ++row) {
-        const uint stateOffset = row * rank;
-        const uint actionOffset = row * actDim;
-        for (uint feature = 0; feature < rank; ++feature) {
-            previousState[stateOffset + feature] = state[stateOffset + feature];
-        }
-        for (uint actionIndex = 0; actionIndex < actDim; ++actionIndex) {
-            previousAction[actionOffset + actionIndex] = action[actionOffset + actionIndex];
-        }
-    }
-
-    KernelStats stats;
-    stats.residualMean = residualMean;
-    stats.totalMean = totalMean;
-    stats.rewardRate = rewardRate;
-    stats.tdAbsMean = batchSize > 0 ? tdAbsSum / float(batchSize) : 0.0f;
-    stats.actionDeltaL2 = sqrt(actionDeltaSquares / float(max(batchSize * actDim, 1u)));
-    stats.gvfErrorMean = gvfSampleCount > 0.0f ? gvfErrorSum / gvfSampleCount : 0.0f;
-    stats.gvfPredictionAbsMean = gvfSampleCount > 0.0f ? gvfPredictionAbsSum / gvfSampleCount : 0.0f;
-    stats.modelErrorMean = modelSampleCount > 0.0f ? modelErrorSum / modelSampleCount : 0.0f;
-    stats.rewardPredictionAbsMean = float(batchSize) > 0.0f ? rewardPredictionAbsSum / float(batchSize) : 0.0f;
-    stats.statePredictionAbsMean = float(max(batchSize * activeRank, 1u)) > 0.0f ? statePredictionAbsSum / float(max(batchSize * activeRank, 1u)) : 0.0f;
-    stats.optionSelectionFraction = optionSelectionCount / float(batchSize);
-    stats.optionTrainingSignalMean = optionTrainingSignalSum / float(batchSize);
-    stats.optionScoreMean = optionScoreSum / float(batchSize);
-    stats.planningCandidateCount = planningCandidateSum / float(batchSize);
-    stats.planningScoreMean = planningCandidateSum > 0.0f ? planningScoreSum / planningCandidateSum : 0.0f;
-    stats.planningScoreMax = planningScoreMax == -FLT_MAX ? 0.0f : planningScoreMax;
-    stats.planningActionChangeL2 = sqrt(planningActionChangeSquares / float(max(batchSize * actDim, 1u)));
-    stats.rawNonFiniteCount = rawNonFiniteCount;
-    stats.sanitizedNonFiniteCount = sanitizedNonFiniteCount;
-    stats.fatalNonFiniteCount = fatalNonFiniteCount;
-    statsOut[0] = stats;
 }
