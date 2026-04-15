@@ -409,7 +409,7 @@ final class OakMetalEngine {
     private let scalarsPointer: UnsafeMutablePointer<KernelScalars>
     private let statsPointer: UnsafeMutablePointer<KernelStats>
 
-    private let observationMean, encoder, policy, valueWeights, rewardWeights, stateWeights, optionPolicyWeights, optionValues, featureMean, featureSecondMoment, featureResidual: SharedFloats
+    private let observationMean, encoder, policy, valueWeights, rewardWeights, stateWeights, optionPolicyWeights, optionValues, featureResidual: SharedFloats
     private let observation, reward, state, previousState, previousAction, latentError, rewardPrediction, td, actionGrad, obsScale, actionBuffer, rolloutState, latentPower: SharedFloats
     private let done, activeMask, counters: SharedUInts
     private var hostAction: [Float]
@@ -459,8 +459,6 @@ final class OakMetalEngine {
         stateWeights = floats(rank * (1 + actDim))
         optionPolicyWeights = floats(2 * rank * actDim)
         optionValues = floats(2 * rank)
-        featureMean = floats(rank)
-        featureSecondMoment = floats(rank)
         featureResidual = floats(rank)
         observation = floats(batchSize * obsDim)
         reward = floats(batchSize)
@@ -521,21 +519,22 @@ final class OakMetalEngine {
         let buffers: [MTLBuffer?] = [
             observation.buffer, observationMean.buffer, encoder.buffer, policy.buffer, valueWeights.buffer, rewardWeights.buffer, stateWeights.buffer,
             optionPolicyWeights.buffer, optionValues.buffer, previousState.buffer, previousAction.buffer, reward.buffer, done.buffer, state.buffer, actionBuffer.buffer,
-            latentError.buffer, rewardPrediction.buffer, td.buffer, actionGrad.buffer, obsScale.buffer, featureMean.buffer, scalarsBuffer, statsBuffer,
-            featureSecondMoment.buffer, featureResidual.buffer, activeMask.buffer, rolloutState.buffer, latentPower.buffer, actionBoundsBuffer, counters.buffer
+            latentError.buffer, rewardPrediction.buffer, td.buffer, actionGrad.buffer, obsScale.buffer, observationMean.buffer, scalarsBuffer, statsBuffer,
+            observationMean.buffer, featureResidual.buffer, activeMask.buffer, rolloutState.buffer, latentPower.buffer, actionBoundsBuffer, counters.buffer
         ]
-        let rewardSpan = actionIsDiscrete ? actDim * (rank + 1) : rank + actDim
-        let phase1Span = obsDim + rewardSpan + rank * (1 + actDim) + rank + actDim * rank + (2 * rank) + (2 * rank * actDim)
-        let phase5Span = max(obsDim, rank)
-        let spans = [batchSize * rank, batchSize, phase1Span, batchSize * actDim, batchSize, phase5Span, 1, batchSize, 1]
+        
         guard let encoder = commandBuffer.makeComputeCommandEncoder() else { throw OakError.message("Failed to create Metal compute encoder.") }
         encoder.setComputePipelineState(pipeline)
         encoder.setBuffers(buffers, offsets: Array(repeating: 0, count: buffers.count), range: 0..<buffers.count)
-        for (phase, span) in spans.enumerated() {
-            var config = KernelConfig(phase: UInt32(phase), obsDim: UInt32(obsDim), rank: UInt32(rank), actDim: UInt32(actDim), batchSize: UInt32(batchSize), actionIsDiscrete: actionIsDiscrete ? 1 : 0)
+        
+        // Order of phases: Representation -> Prediction -> Learning -> Control -> Pruning -> RewardUpdate -> Stats
+        let phases: [UInt32] = [0, 1, 2, 3, 4, 5, 6]
+        for phase in phases {
+            var config = KernelConfig(phase: phase, obsDim: UInt32(obsDim), rank: UInt32(rank), actDim: UInt32(actDim), batchSize: UInt32(batchSize), actionIsDiscrete: actionIsDiscrete ? 1 : 0)
             encoder.setBytes(&config, length: MemoryLayout<KernelConfig>.stride, index: 30)
-            encoder.dispatchThreads(MTLSize(width: max(span, 1), height: 1, depth: 1), threadsPerThreadgroup: MTLSize(width: width, height: 1, depth: 1))
+            encoder.dispatchThreads(MTLSize(width: max(batchSize * rank, 1), height: 1, depth: 1), threadsPerThreadgroup: MTLSize(width: width, height: 1, depth: 1))
         }
+        
         encoder.endEncoding()
         commandBuffer.commit()
         commandBuffer.waitUntilCompleted()
@@ -602,7 +601,7 @@ final class OakMetalEngine {
         }
         let resolvedEnv = ProcessInfo.processInfo.environment["OAK_ENV"] ?? envId ?? ""
         guard !resolvedEnv.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
-            throw OakError.message("Missing environment id. Use `OaK diagnose <env-id>`.")
+            throw OakError.message("Use `OaK diagnose <env-id>`.")
         }
         let seed = ProcessInfo.processInfo.environment["OAK_SEED"].flatMap(Int.init)
         let warmup = max(ProcessInfo.processInfo.environment["OAK_DIAG_WARMUP_STEPS"].flatMap(Int.init) ?? 0, 0)
@@ -681,7 +680,7 @@ final class OakMetalEngine {
     }
 
     private static func metalDevice() throws -> MTLDevice {
-        guard let device = MTLCreateSystemDefaultDevice() else { throw OakError.message("Metal device unavailable. OaK is a Metal-only runtime.") }
+        guard let device = MTLCreateSystemDefaultDevice() else { throw OakError.message("Metal device unavailable.") }
         return device
     }
 
@@ -813,8 +812,8 @@ final class OakMetalEngine {
             prevAction = actionBatch.floats
         }
         let updates = max(measuredSteps / numEnvs, 1)
-        let agentSeconds = agentMsSum / 1_000
-        let envSeconds = envMsSum / 1_000
+        let agentSeconds = agentMsSum / 1000
+        let envSeconds = envMsSum / 1000
         let hostSeconds = max(measuredSeconds - agentSeconds - envSeconds, 0)
         let diagnostic: RunDiagnostic? = health.diagnosticSnapshot().map {
             return RunDiagnostic(
@@ -890,7 +889,7 @@ final class OakMetalEngine {
                 policySections[policy.rawValue] = [
                     "reward": section([("sum", bucket.map(\.end.rewardSum))]),
                     "termination": section([("doneCount", bucket.map { Double($0.end.doneCount ?? 0) })]),
-                    "speed": section([("measuredEnvSteps", bucket.map { Double($0.end.measuredStepCount ?? 0) }), ("measuredSeconds", bucket.map(\.end.measuredSeconds)), ("stepsPerSecond", bucket.map(\.end.stepsPerSecond))]),
+                    "speed": section([("measuredEnvSteps", bucket.map { $0.end.measuredStepCount.map(Double.init) }), ("measuredSeconds", bucket.map(\.end.measuredSeconds)), ("stepsPerSecond", bucket.map(\.end.stepsPerSecond))]),
                     "runtime": section([("agentStepMs", bucket.map(\.end.agentStepMsMean)), ("envStepMs", bucket.map(\.end.envStepMsMean))]),
                     "health": section(healthEntries)
                 ]
@@ -940,12 +939,9 @@ private func readRunBundle(from url: URL) throws -> RunBundle {
     for line in lines {
         let record = try decoder.decode(Record.self, from: Data(line.utf8))
         switch record.type {
-        case "run_start":
-            start = record
-        case "run_end":
-            end = record
-        default:
-            continue
+        case "run_start": start = record
+        case "run_end": end = record
+        default: continue
         }
     }
     guard

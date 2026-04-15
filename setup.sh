@@ -19,6 +19,13 @@ MUJOCO_DIR="$("$PYTHON" -c 'import mujoco, pathlib; print(pathlib.Path(mujoco.__
 MUJOCO_LIB="$("$PYTHON" -c 'import mujoco, pathlib; libs=sorted(pathlib.Path(mujoco.__file__).resolve().parent.glob("libmujoco*.dylib")); print(libs[0] if libs else "")' )"
 [ -n "$MUJOCO_LIB" ] || { echo "Missing libmujoco dylib in $MUJOCO_DIR" >&2; exit 1; }
 
+# Pip wheels ship libmujoco with LC_ID_DYLIB @rpath/mujoco.framework/... but no framework on disk.
+# Copy next to liboakenv and retag so @loader_path resolves at runtime.
+mkdir -p "$NATIVE_DIR"
+MUJOCO_LIB_LOCAL="$NATIVE_DIR/$(basename "$MUJOCO_LIB")"
+cp -f "$MUJOCO_LIB" "$MUJOCO_LIB_LOCAL"
+install_name_tool -id "@loader_path/$(basename "$MUJOCO_LIB")" "$MUJOCO_LIB_LOCAL"
+
 mkdir -p "$ROOT_DIR/.build" "$NATIVE_DIR"/{src,generated,deps,include/absl/log}
 [ -d "$SRC_DIR/.git" ] || git clone --depth 1 --branch v1.2.0 https://github.com/sail-sg/envpool.git "$SRC_DIR"
 
@@ -301,7 +308,7 @@ for src in "$SRC_DIR"/envpool/minigrid/impl/*.cc; do case "$(basename "$src")" i
   -I"$SRC_DIR" -I"$NATIVE_DIR/generated" -I"$NATIVE_DIR/include" -I"$NATIVE_DIR/deps" \
   -I"$MUJOCO_DIR/include" -I"$MUJOCO_DIR/include/mujoco" \
   -I/opt/homebrew/include/eigen3 -I/opt/homebrew/include \
-  "$MUJOCO_LIB" \
+  "$MUJOCO_LIB_LOCAL" \
   -Wno-deprecated-this-capture -Wno-gnu-string-literal-operator-template -Wno-return-type \
   -Wl,-rpath,@loader_path -Wl,-rpath,"$MUJOCO_DIR" \
   -o "$NATIVE_DIR/liboakenv.dylib"
