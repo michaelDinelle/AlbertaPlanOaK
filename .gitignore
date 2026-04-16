@@ -41,9 +41,6 @@ htmlcov/
 # macOS metadata
 .DS_Store
 
-# Local runtime assets
-/.oak-benchmarks/
-
 # Traces and temp
 *.trace/
 *.profraw
