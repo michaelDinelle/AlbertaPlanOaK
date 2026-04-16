@@ -123,17 +123,40 @@ Primary sources in `references/papers/`: *The Alberta Plan for AI Research* ([ar
 
 ## Performance: run metrics JSON (throughput and host timing)
 
-Each **`run`**, **`diagnose`**, and **`benchmark`** writes one **pretty-printed** JSON file with **stable, alphabetical key order** (encoder **`sortedKeys`**): **`schemaVersion`** (see emitted JSON; extended fields use **`2`**), **`command`**, and one flat run description—identity and config (**`envId`**, **`policy`**, **`seed`**, **`numEnvs`**, **`warmupSteps`**, **`stopAfterMeasuredSteps`**, **`observationDim`**, **`actionDim`**, optional **`actionDiscreteCount`**), measured window (**`measuredStepCount`**, **`measuredBatchCount`**, **`measuredSeconds`**, **`stepsPerSecond`**, **`rewardSum`**, **`doneCount`**, **`stopReason`**), per-batch timing means (**`agentStepMsMean`**, **`envStepMsMean`**), optional **`discreteAction`** when **`actionDiscreteCount`** is set (**`histogram`**, **`uniqueCount`**), optional **`continuousAction`** when actions are continuous (**`meanPerDim`**, **`stdPerDim`**, **`meanL2`**, **`stdL2`** over env-step samples in the measured window—near-zero **`stdPerDim`** / **`stdL2`** suggests collapsed or near-constant actuation), optional **`health`** (kernel stats; omitted for **`random`** when there is nothing to record), optional **`diagnostic`** (host/GPU timing shares; **`diagnose`** only). Keys with no value are **omitted** (not `null`), aside from numeric fields that are legitimately zero.
+Each **`run`**, **`diagnose`**, and **`benchmark`** writes one **pretty-printed** JSON file with **stable, alphabetical key order** (encoder **`sortedKeys`**): **`schemaVersion`** (see emitted JSON; extended fields use **`2`**), **`command`**, and one flat run description—identity and config (**`envId`**, **`policy`**, **`seed`**, **`numEnvs`**, **`warmupSteps`**, **`stopAfterMeasuredSteps`**, **`observationDim`**, **`actionDim`**, optional **`actionDiscreteCount`**), measured window (**`measuredStepCount`**, **`measuredBatchCount`**, **`measuredSeconds`**, **`stepsPerSecond`**, **`rewardSum`**, **`doneCount`**, **`stopReason`**), per-batch timing means (**`agentStepMsMean`**, **`envStepMsMean`**), optional **`discreteAction`** when **`actionDiscreteCount`** is set (**`histogram`**, **`uniqueCount`**), optional **`continuousAction`** when actions are continuous (**`meanPerDim`**, **`stdPerDim`**, **`meanL2`**, **`stdL2`** over env-step samples in the measured window—near-zero **`stdPerDim`** / **`stdL2`** suggests collapsed or near-constant actuation), optional **`health`** (kernel stats; omitted for **`random`** when there is nothing to record), optional **`diagnostic`** (host/GPU timing shares; **`diagnose`** enables GPU phase timing in **`diagnostic`** when configured). Keys with no value are **omitted** (not `null`), aside from numeric fields that are legitimately zero.
 
 - **Default directory:** **`.oak-benchmarks/<run-id>/metrics/`** (override with **`OAK_METRICS_STORAGE`** to a directory path).
 - **`benchmark`:** snapshots go to **`<bench-dir>/metrics/`** unless **`OAK_METRICS_STORAGE`** is set (then all benchmark snapshots use that directory). **`*.log`** stems match the **`*.json`** snapshot stem (**`env-policy-seed`**).
 - **`diagnose`:** **stderr** prints the snapshot file path after a successful write.
+- **`run`:** **stderr** prints the **`metrics/`** directory path when the run starts (same **`.oak-benchmarks/<run-id>/metrics/`** tree as the final snapshot) and the final **`*.json`** path when the run finishes.
 
 **Stop / batch semantics:** The measured window counts **aggregate environment steps** (`measuredStepCount` ≈ batches × `num_envs`). **`measuredBatchCount`** is `measuredStepCount / num_envs`. **`OAK_BENCH_STEPS`** sets the measured-step target for **`benchmark`**.
 
 **Env vs agent (serial MDP):** Each iteration runs **Metal `oak_step` then native `env.step`**. Without an async batched env API, throughput is bounded by this split (see **`diagnostic`** shares). Native env code is built by **`setup.sh`** into **`.build/oak-native/liboakenv.dylib`**.
 
-**Discrete control:** the vector sent to **`env.step`** uses **indices sampled from softmax(logits)** produced in the meta-policy phase (not deterministic argmax), and the host **`floats`** are set to the matching **one-hot** so **`previousAction`** matches what was executed.
+**Discrete control:** the vector sent to **`env.step`** uses **indices sampled from softmax(logits)** produced in the meta-policy phase (not deterministic argmax), and the host **`floats`** are set to the matching **one-hot** so **`previousAction`** matches what was executed. Logits are **clamped** to **`±min(√(rank·actDim), log(max finite float32))`** (`OakMetalLayout.discreteLogitHalfWidth`) so Metal’s `clamp` is not a no-op on ±`greatestFiniteMagnitude` and host **`exp`** stays in range.
+
+### Long runs (depth + width at high SPS)
+
+Default **`benchmark`** sweeps all native env ids with modest **`OAK_BENCH_STEPS`** and **`OAK_BENCH_SEED_COUNT`** — good for coverage, **not** for maximizing per-trajectory learning depth. For one env and long horizons, use **`OaK run`** with explicit limits.
+
+| Quantity | Role |
+|----------|------|
+| **`numEnvs`** | Parallel width (see **`directNumEnvs`** in `Main.swift`; override with **`OAK_NUM_ENVS`** or **`OAK_BENCH_NUM_ENVS`** for **`benchmark`** only). |
+| **`OAK_STOP_AFTER_STEPS`** | **Aggregate** measured step target (same counter as JSON **`measuredStepCount`**). |
+| **`measuredBatchCount`** | **`measuredStepCount / numEnvs`** ≈ **measured steps per env** in the window. |
+
+**Throughput calibration:** run **`diagnose`** on the target env with the **`OAK_NUM_ENVS`** you intend for the long job; read **`diagnostic.agentShare`**, **`envShare`**, **`hostShare`** and adjust width so neither agent nor native env dominates if the goal is maximum aggregate **`stepsPerSecond`**.
+
+**Sizing:** aggregate steps available in wall time \(T\) ≈ **`stepsPerSecond × T`** (from a recent JSON). Per-env depth ≈ **`OAK_STOP_AFTER_STEPS / numEnvs`**. Example: ~2M steps per env with **`numEnvs=512`** → **`OAK_STOP_AFTER_STEPS ≈ 512 × 2_000_000`**. Set **`OAK_WARMUP_STEPS`** to a smaller aggregate prefix so most time is measured learning.
+
+**Helper:** **`scripts/oak_longrun.sh`** requires **`OAK_STOP_AFTER_STEPS`** and runs **`OaK run`** with env id as **`$1`** or **`OAK_ENV`**. Release binary: **`swift build -c release`** first.
+
+**Progress:** **`OAK_HEARTBEAT_STEPS`** writes **`stem.heartbeat-NNNNNN.json`** in the same **`metrics/`** tree as **`stem.json`** (same schema; **`stopReason`** **`heartbeat`**; default **off**).
+
+**Baseline:** **`OAK_BASELINE_RANDOM_STEPS`** > 0 with **`OAK_POLICY=oak`** prepends a matching **`random`** snapshot (**`*-random-*.json`**) in the same **`metrics/`** dir.
+
+**Continual signal scale:** encoder output, GVF **`latentError`**, reward prediction, and **TD** are **clamped** in the Metal kernel to **`±(rank × batchSize)`** — the same capacity volume term used in **`capacity_ridge`** (`structural_activation_cap` in `OakKernel.metal`) — so forward quantities cannot diverge toward float overflow on an infinite horizon.
 
 ## Performance: Metal trace (GPU truth surface)
 

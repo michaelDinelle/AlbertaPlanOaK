@@ -98,7 +98,7 @@ private final class MeasuredActionCollector {
         sumsq = q
     }
 
-    func finish(actDim: Int) -> (DiscreteActionMetrics?, ContinuousActionMetrics?) {
+    func partialMetrics(actDim: Int) -> (DiscreteActionMetrics?, ContinuousActionMetrics?) {
         let d = discrete.map { DiscreteActionMetrics(histogram: $0, uniqueCount: $0.filter { $0 > 0 }.count) }
         guard let s = sum, let q = sumsq, n > 0 else { return (d, nil) }
         let nn = Double(n)
@@ -127,6 +127,7 @@ private struct RunMetricsFile: Encodable {
     let measuredBatchCount: Int
     let measuredSeconds: Double
     let stepsPerSecond: Double?
+    let heartbeatSequence: Int?
     let rewardSum: Double
     let doneCount: Int
     let stopReason: String
@@ -449,22 +450,76 @@ final class EnvPoolEnv {
     }
 }
 
+/// Must match `KernelConfig` in `OakKernel.metal` (packed floats/ints only; no Swift-only padding assumptions).
 private struct KernelConfig {
-    var phase: UInt32 = 0
     var obsDim: UInt32 = 0
     var rank: UInt32 = 0
     var actDim: UInt32 = 0
     var batchSize: UInt32 = 0
     var actionIsDiscrete: UInt32 = 0
-    /// Interface-derived width: min(rank, actDim); must match Metal `KernelConfig.optionCount`.
     var optionCount: UInt32 = 0
     var primitivePackedSize: UInt32 = 0
     var optionForwardStride: UInt32 = 0
     var planK: UInt32 = 0
-    /// Env observation width before optional aux concat (`OAK_AUX_DIM`); encoder NLMS only for `feat < baseObsDim`.
     var baseObsDim: UInt32 = 0
+    var pEncoder: UInt32 = 0
+    var pPolicy: UInt32 = 0
+    var pValue: UInt32 = 0
+    var pReward: UInt32 = 0
+    var pStateWeights: UInt32 = 0
+    var pOptPolicy: UInt32 = 0
+    var pOptValues: UInt32 = 0
+    var pOptCritic: UInt32 = 0
+    var pFeatSecondMoment: UInt32 = 0
+    var pFeatResidual: UInt32 = 0
+    var sObservation: UInt32 = 0
+    var sObsMean: UInt32 = 0
+    var sPrevState: UInt32 = 0
+    var sPrevAction: UInt32 = 0
+    var sReward: UInt32 = 0
+    var sState: UInt32 = 0
+    var sAction: UInt32 = 0
+    var sLatentError: UInt32 = 0
+    var sRewardPred: UInt32 = 0
+    var sTd: UInt32 = 0
+    var sActionGrad: UInt32 = 0
+    var sRollout: UInt32 = 0
+    var sLatentPower: UInt32 = 0
+    var uDone: UInt32 = 0
+    var uActive: UInt32 = 0
+    var uStomp: UInt32 = 0
+    var uCounters: UInt32 = 0
+    var floatArenaAutostepBase: UInt32 = 0
+    var floatArenaTdOptionBase: UInt32 = 0
+    var floatArenaPlanDeltaBase: UInt32 = 0
+    var floatArenaGvfWeightsBase: UInt32 = 0
+    var floatArenaGvfCumulantBase: UInt32 = 0
+    var floatArenaGvfTdBase: UInt32 = 0
+    var floatArenaGvfRhoBase: UInt32 = 0
+    var floatArenaKeyboardBase: UInt32 = 0
+    var floatArenaKeyboardPredBase: UInt32 = 0
+    var floatArenaUtilityBase: UInt32 = 0
+    var floatArenaFeatureGenBase: UInt32 = 0
+    var floatArenaSubtaskRhoBase: UInt32 = 0
+    var floatArenaOptionBetaBase: UInt32 = 0
+    /// Offset (float index from floatArena start) to device scratch: prediction rows + planning k-step/probe + learn grad slots.
+    var floatArenaDeviceScratchBase: UInt32 = 0
+    var genDirectionCount: UInt32 = 0
+    var floatArenaOffsetInLatentPower: UInt32 = 0
+    var phase: UInt32 = 0
+    /// Fixed-point γ for subtask GVF TD and Horde extension (`value / 1_000_000`).
+    var gammaSubtaskMilli: UInt32 = 0
+    /// Structural β learning rate scale (`value / 1_000_000`).
+    var betaLearnRateMilli: UInt32 = 0
 }
-private struct KernelScalars { var stepCount: UInt32 = 0, rewardCount: UInt32 = 0, activeCount: UInt32 = 0, rewardRate: Float = 0 }
+
+private struct KernelScalars {
+    var stepCount: UInt32 = 0
+    var rewardCount: UInt32 = 0
+    var activeCount: UInt32 = 0
+    var admissionCursor: UInt32 = 0
+    var rewardRate: Float = 0
+}
 /// Phase ids must match `kPhase*` in `OakKernel.metal`.
 private enum OakKernelPhase: UInt32 {
     case encode = 0
@@ -481,8 +536,8 @@ private enum OakKernelPhase: UInt32 {
 private enum OakMetalLayout {
     /// Three learn bands in Metal (value head, GVF block, forward block); structural, not a tuned hyperparameter.
     static let learnParallelRowBands = 3
-    /// Must match `constant KernelConfig &config [[buffer(N)]]` in `OakKernel.metal` (after STOMP/Oak buffers).
-    static let kernelConfigBufferIndex = 30
+    /// Must match `constant KernelConfig &config [[buffer(N)]]` in `OakKernel.metal` (packed arenas).
+    static let kernelConfigBufferIndex = 6
 
     /// Option slots = min(signal ranks) from the interface; no fixed width (see project invariants).
     static func derivedOptionCount(rank: Int, actDim: Int) -> Int {
@@ -530,10 +585,19 @@ private enum OakMetalLayout {
         return oc * rank + oc
     }
 
-    /// `latentPower` tail packs: keyboard (`batch*oc` floats) + option feedback EMA (`3*oc`: model error, forward-use, planning-share) after `2*batch` NLMS slots (Metal `kbd0` / `ofb0`).
-    static func latentPowerPackedSize(rank: Int, actDim: Int, batchSize: Int) -> Int {
+    static func rewardWeightParameterCount(actDim: Int, rank: Int, actionIsDiscrete: Bool) -> Int {
+        actionIsDiscrete ? actDim * (rank + 1) : rank + actDim
+    }
+
+    /// Core `latentPower` (before appended float arena): keyboard (`batch*oc` floats) + option feedback EMA (`3*oc`) after `2*batch` NLMS slots (Metal `kbd0` / `ofb0`).
+    static func latentPowerCorePackedSize(rank: Int, actDim: Int, batchSize: Int) -> Int {
         let oc = derivedOptionCount(rank: rank, actDim: actDim)
         return 2 * batchSize + batchSize * oc + 3 * oc
+    }
+
+    /// Includes **`floatArena`** tail (Autostep, tdOption, planning delta, GVF demon, keyboard, utilities, feature generator).
+    static func latentPowerPackedSize(rank: Int, actDim: Int, batchSize: Int) -> Int {
+        latentPowerCorePackedSize(rank: rank, actDim: actDim, batchSize: batchSize) + floatArenaSize(rank: rank, actDim: actDim, batchSize: batchSize)
     }
 
     /// `stompState` uints: `4*batch` STOMP row state + `batch` batch-dynamics tags (packed, buffer bound).
@@ -541,10 +605,150 @@ private enum OakMetalLayout {
         max(5 * batchSize, 5)
     }
 
-    /// Matches Metal `kPhaseLearn`: value + GVF + fused option forward NLMS + policy + option critics (no separate primitive band).
-    static func learnPhaseThreadCount(rank: Int, actDim: Int) -> Int {
+    /// Candidate feature directions (structural; bounded rank budget).
+    static func structuralGenDirectionCount(rank: Int) -> Int {
+        min(32, max(rank, 1))
+    }
+
+    /// Packed `floatArena`: autostep + tdOption + plan + gvf(W,U,Td) + horde ρ + keyboard + … + featureGen + subtask ρ + option β.
+    static func floatArenaSize(rank: Int, actDim: Int, batchSize: Int) -> Int {
         let oc = derivedOptionCount(rank: rank, actDim: actDim)
-        return max(4 * rank + oc * rank, 1)
+        let m = structuralGenDirectionCount(rank: rank)
+        let autostep = 2 * rank
+        let tdOpt = batchSize
+        let plan = batchSize * actDim
+        let gvfWU = rank + rank
+        let gvfTd = batchSize
+        let gvfRho = 1
+        let kbd = batchSize * oc
+        let kbdPred = oc
+        let util = 2 * rank + 2 * oc
+        let fgen = m * rank
+        let subRho = oc
+        let optBeta = oc
+        let devScratch = floatArenaDeviceScratchSize(rank: rank, actDim: actDim, batchSize: batchSize)
+        return autostep + tdOpt + plan + gvfWU + gvfTd + gvfRho + kbd + kbdPred + util + fgen + subRho + optBeta + devScratch
+    }
+
+    /// Device scratch: prediction (2·B·R per row), planning k-step (B·R) + probe (B·128), learn GVF/forward/policy bands (non-overlapping slots).
+    static func floatArenaDeviceScratchSize(rank: Int, actDim: Int, batchSize: Int) -> Int {
+        let predPlan = 3 * batchSize * rank + 128 * batchSize
+        let learn = rank * rank + rank * (rank + actDim)
+        return predPlan + learn
+    }
+
+    /// Offsets (float index) into `floatArena` for kernel config (must match `OakMetalLayout.floatArenaSize` order).
+    static func floatArenaOffsets(rank: Int, actDim: Int, batchSize: Int) -> (
+        autostep: Int, tdOption: Int, planDelta: Int, gvfW: Int, gvfU: Int, gvfTd: Int, gvfRho: Int, keyboard: Int, keyboardPred: Int, utility: Int, featureGen: Int, subtaskRho: Int, optionBeta: Int, deviceScratch: Int
+    ) {
+        let oc = derivedOptionCount(rank: rank, actDim: actDim)
+        let m = structuralGenDirectionCount(rank: rank)
+        var o = 0
+        let autostep = o; o += 2 * rank
+        let tdOption = o; o += batchSize
+        let planDelta = o; o += batchSize * actDim
+        let gvfW = o; o += rank
+        let gvfU = o; o += rank
+        let gvfTd = o; o += batchSize
+        let gvfRho = o; o += 1
+        let keyboard = o; o += batchSize * oc
+        let keyboardPred = o; o += oc
+        let utility = o; o += 2 * rank + 2 * oc
+        let featureGen = o; o += m * rank
+        let subtaskRho = o; o += oc
+        let optionBeta = o; o += oc
+        let deviceScratch = o; o += floatArenaDeviceScratchSize(rank: rank, actDim: actDim, batchSize: batchSize)
+        _ = o
+        return (autostep, tdOption, planDelta, gvfW, gvfU, gvfTd, gvfRho, keyboard, keyboardPred, utility, featureGen, subtaskRho, optionBeta, deviceScratch)
+    }
+
+    struct ParamArenaLayout {
+        let encoder: Int, policy: Int, value: Int, reward: Int, stateWeights: Int
+        let optionPolicy: Int, optionValues: Int, optionCritic: Int, featureSM: Int, featureResidual: Int
+        let totalFloats: Int
+    }
+
+    static func paramArenaLayout(obsDim: Int, rank: Int, actDim: Int, batchSize: Int, actionIsDiscrete: Bool) -> ParamArenaLayout {
+        let rw = rewardWeightParameterCount(actDim: actDim, rank: rank, actionIsDiscrete: actionIsDiscrete)
+        var o = 0
+        let enc = o; o += obsDim
+        let pol = o; o += actDim * rank
+        let val = o; o += rank
+        let rew = o; o += rw
+        let st = o; o += packedStateWeightsSize(rank: rank, actDim: actDim)
+        let op = o; o += optionPolicyParameterCount(rank: rank, actDim: actDim)
+        let ov = o; o += optionValueParameterCount(rank: rank, actDim: actDim)
+        let ocrit = o; o += optionCriticBufferSize(rank: rank, actDim: actDim)
+        let fsm = o; o += rank
+        let fres = o; o += rank
+        return ParamArenaLayout(encoder: enc, policy: pol, value: val, reward: rew, stateWeights: st, optionPolicy: op, optionValues: ov, optionCritic: ocrit, featureSM: fsm, featureResidual: fres, totalFloats: o)
+    }
+
+    struct StateArenaLayout {
+        let observation: Int
+        let observationMean: Int
+        let previousState: Int
+        let previousAction: Int
+        let reward: Int
+        let state: Int
+        let action: Int
+        let latentError: Int
+        let rewardPrediction: Int
+        let td: Int
+        let actionGrad: Int
+        let rolloutState: Int
+        let latentPower: Int
+        let totalFloats: Int
+    }
+
+    static func stateArenaLayout(obsDim: Int, rank: Int, actDim: Int, batchSize: Int) -> StateArenaLayout {
+        var o = 0
+        let obs = o; o += batchSize * obsDim
+        let mean = o; o += obsDim
+        let prevS = o; o += batchSize * rank
+        let prevA = o; o += batchSize * actDim
+        let rew = o; o += batchSize
+        let st = o; o += batchSize * rank
+        let act = o; o += batchSize * actDim
+        let latE = o; o += batchSize * rank
+        let rPred = o; o += batchSize
+        let td = o; o += batchSize
+        let aG = o; o += batchSize * actDim
+        let roll = o; o += batchSize * rank
+        let lp = o
+        let lpSz = latentPowerPackedSize(rank: rank, actDim: actDim, batchSize: batchSize)
+        o += lpSz
+        return StateArenaLayout(observation: obs, observationMean: mean, previousState: prevS, previousAction: prevA, reward: rew, state: st, action: act, latentError: latE, rewardPrediction: rPred, td: td, actionGrad: aG, rolloutState: roll, latentPower: lp, totalFloats: o)
+    }
+
+    struct UIntArenaLayout {
+        let done: Int
+        let active: Int
+        let stomp: Int
+        let counters: Int
+        let totalUInts: Int
+    }
+
+    static func uintArenaLayout(rank: Int, batchSize: Int) -> UIntArenaLayout {
+        var o = 0
+        let d = o; o += batchSize
+        let a = o; o += 2 * rank
+        let st = o; o += stompStatePackedSize(batchSize: batchSize)
+        let c = o; o += 5
+        return UIntArenaLayout(done: d, active: a, stomp: st, counters: c, totalUInts: o)
+    }
+
+    /// Matches Metal `kPhaseLearn`: value + GVF bank + fused option forward + policy + Horde head (no separate option-critic band).
+    static func learnPhaseThreadCount(rank: Int, actDim: Int) -> Int {
+        max(5 * rank, 1)
+    }
+
+    /// Finite half-width for discrete policy logits in Metal before host softmax. `√(rank·actDim)` scales the linear
+    /// head; `log(max finite float)` is the IEEE float32 ceiling so `exp(logit)` stays finite in host softmax.
+    static func discreteLogitHalfWidth(rank: Int, actDim: Int) -> Float {
+        let pool = sqrtf(Float(max(rank * actDim, 1)))
+        let expFiniteCeil = logf(Float.greatestFiniteMagnitude)
+        return min(pool, expFiniteCeil)
     }
 }
 
@@ -567,6 +771,10 @@ fileprivate struct KernelStats {
     var optionModelPredictionMSE: Float = 0
     var planningUsedOptionDynamicsMean: Float = 0
     var oakOptionReinitCount: Float = 0
+    var utilityFeatureMean: Float = 0
+    var utilitySubtaskMean: Float = 0
+    var utilityOptionMean: Float = 0
+    var utilityPlanningMean: Float = 0
 }
 
 private final class SharedArray<Element> {
@@ -587,6 +795,32 @@ private final class SharedArray<Element> {
 
 private typealias SharedFloats = SharedArray<Float>
 private typealias SharedUInts = SharedArray<UInt32>
+
+/// Orthonormal rows for `featureGenDirections` (Representation II constructive pool).
+private func fillOrthonormalFeatureGenerator(rank: Int, directionCount: Int, destination: UnsafeMutablePointer<Float>, baseIndex: Int, rng: GKMersenneTwisterRandomSource?) {
+    var rows = [[Float]](repeating: [Float](repeating: 0, count: rank), count: directionCount)
+    for r in 0..<directionCount {
+        for c in 0..<rank {
+            rows[r][c] = (rng?.nextUniform() ?? Float.random(in: 0..<1)) * 2 - 1
+        }
+    }
+    for i in 0..<directionCount {
+        for j in 0..<i {
+            var d: Float = 0
+            for c in 0..<rank { d += rows[i][c] * rows[j][c] }
+            for c in 0..<rank { rows[i][c] -= d * rows[j][c] }
+        }
+        var n: Float = 0
+        for c in 0..<rank { n += rows[i][c] * rows[i][c] }
+        n = sqrt(max(n, 1e-12))
+        for c in 0..<rank { rows[i][c] /= n }
+    }
+    for r in 0..<directionCount {
+        for c in 0..<rank {
+            destination[baseIndex + r * rank + c] = rows[r][c]
+        }
+    }
+}
 
 /// Softmax sample + one-hot host view for discrete envs. Continuous runs omit this object entirely.
 private final class DiscreteSoftmaxBehavior {
@@ -643,20 +877,27 @@ final class OakMetalEngine {
     private let queue: MTLCommandQueue
     /// Unretained command-buffer refs: kernel buffers stay alive on `self` until `waitUntilCompleted` returns.
     private let commandBufferDescriptor: MTLCommandBufferDescriptor
-    private let pipeline: MTLComputePipelineState
+    /// One pipeline per `phaseThreadPlan` phase — each Metal kernel binds only the shared 7-buffer arena layout.
+    private let pipelines: [MTLComputePipelineState]
     private let actionBoundsBuffer: MTLBuffer
     private let scalarsBuffer: MTLBuffer
     private let statsBuffer: MTLBuffer
     private let scalarsPointer: UnsafeMutablePointer<KernelScalars>
     private let statsPointer: UnsafeMutablePointer<KernelStats>
-    /// Fixed zero offsets for `setBuffers` (one allocation in `init`, none per dispatch).
+    /// Fixed zero offsets for `setBuffers` (params, state, uint, scalars, stats, bounds).
     private let bufferZeroOffsets: [Int]
 
-    private let observationMean, encoder, policy, valueWeights, rewardWeights, stateWeights, optionPolicyWeights, optionValues, featureSecondMoment, featureResidual: SharedFloats
-    private let observation, reward, state, previousState, previousAction, latentError, rewardPrediction, td, actionGrad, actionBuffer, rolloutState, latentPower: SharedFloats
-    private let optionCriticWeights: SharedFloats
-    private let done, activeMask, counters: SharedUInts
-    private let stompState: SharedUInts
+    private let paramsArena: SharedFloats
+    private let stateArena: SharedFloats
+    private let uintArena: SharedUInts
+    private let paramLayout: OakMetalLayout.ParamArenaLayout
+    private let stateLayout: OakMetalLayout.StateArenaLayout
+    private let uintLayout: OakMetalLayout.UIntArenaLayout
+    /// Float index inside the `latentPower` region where packed `floatArena` begins.
+    private let arenaBaseInLatent: Int
+    private let arenaOffsets: (
+        autostep: Int, tdOption: Int, planDelta: Int, gvfW: Int, gvfU: Int, gvfTd: Int, gvfRho: Int, keyboard: Int, keyboardPred: Int, utility: Int, featureGen: Int, subtaskRho: Int, optionBeta: Int, deviceScratch: Int
+    )
     /// When `OAK_METAL_SIGNPOSTS=1`, inserts `insertDebugSignpost` between phase dispatches for Instruments / GPU capture (no effect on math).
     private let metalDebugSignposts: Bool
     /// When true (e.g. `diagnose`), measured steps use one command buffer per phase so `MTLCommandBuffer.gpuStartTime`/`gpuEndTime` yield per-phase GPU time in JSON. Warmup uses the fast single-buffer path.
@@ -669,15 +910,29 @@ final class OakMetalEngine {
     private var hostDiscrete: [Int32]
     private let discreteBehavior: DiscreteSoftmaxBehavior?
 
-    private static func makePipeline(device: MTLDevice) throws -> MTLComputePipelineState {
+    private static let phaseKernelNames = [
+        "oak_phase_encode",
+        "oak_phase_prediction",
+        "oak_phase_forward_model",
+        "oak_phase_learn",
+        "oak_phase_planning",
+        "oak_phase_meta_policy",
+        "oak_phase_bookkeeping",
+    ]
+
+    private static func makePipelines(device: MTLDevice) throws -> [MTLComputePipelineState] {
         let library = try device.makeLibrary(URL: try kernelURL())
-        guard let function = library.makeFunction(name: "oak_step") else { throw OakError.message("Missing oak_step in OakKernel.metallib.") }
-        return try device.makeComputePipelineState(function: function)
+        return try phaseKernelNames.map { name in
+            guard let function = library.makeFunction(name: name) else { throw OakError.message("Missing \(name) in OakKernel.metallib.") }
+            return try device.makeComputePipelineState(function: function)
+        }
     }
 
     static func executionWidth(device: MTLDevice) throws -> Int {
-        let pipeline = try makePipeline(device: device)
-        return max(pipeline.threadExecutionWidth, 1)
+        let states = try makePipelines(device: device)
+        var w = 1
+        for p in states { w = max(w, p.threadExecutionWidth) }
+        return max(w, 1)
     }
 
     private static func kernelURL() throws -> URL {
@@ -704,13 +959,12 @@ final class OakMetalEngine {
         let cbDesc = MTLCommandBufferDescriptor()
         cbDesc.retainedReferences = false
         commandBufferDescriptor = cbDesc
-        pipeline = try Self.makePipeline(device: device)
-        // Discrete: env does not expose box bounds; use wide finite limits so `clamp` in Metal is a single path
-        // (logits are not squeezed to 0,0 — the old placeholder broke planning + bookkeeping).
-        let wideLo = -Float.greatestFiniteMagnitude
-        let wideHi = Float.greatestFiniteMagnitude
-        let lows = actionIsDiscrete ? Array(repeating: wideLo, count: actDim) : actionLow
-        let highs = actionIsDiscrete ? Array(repeating: wideHi, count: actDim) : actionHigh
+        pipelines = try Self.makePipelines(device: device)
+        // Discrete: env does not expose box bounds; Metal still needs **finite** clamps so logits cannot diverge on
+        // an infinite horizon (continual stability). Host softmax uses these logits; cap keeps float32 exp in range.
+        let half = OakMetalLayout.discreteLogitHalfWidth(rank: rank, actDim: actDim)
+        let lows = actionIsDiscrete ? Array(repeating: -half, count: actDim) : actionLow
+        let highs = actionIsDiscrete ? Array(repeating: half, count: actDim) : actionHigh
         actionBoundsBuffer = device.makeBuffer(bytes: lows + highs, length: 2 * actDim * MemoryLayout<Float>.stride, options: [.storageModeShared])!
         scalarsBuffer = device.makeBuffer(length: MemoryLayout<KernelScalars>.stride, options: [.storageModeShared])!
         statsBuffer = device.makeBuffer(length: MemoryLayout<KernelStats>.stride, options: [.storageModeShared])!
@@ -718,38 +972,50 @@ final class OakMetalEngine {
         statsPointer = statsBuffer.contents().bindMemory(to: KernelStats.self, capacity: 1)
         scalarsPointer.initialize(to: KernelScalars())
         statsPointer.initialize(to: KernelStats())
-        bufferZeroOffsets = [Int](repeating: 0, count: 30)
+        bufferZeroOffsets = [Int](repeating: 0, count: 6)
 
         func floats(_ count: Int) -> SharedFloats { SharedFloats(device: device, count: count, repeating: 0) }
         func uints(_ count: Int) -> SharedUInts { SharedUInts(device: device, count: count, repeating: 0) }
-        observationMean = floats(obsDim)
-        encoder = floats(obsDim)
-        policy = floats(actDim * rank)
-        valueWeights = floats(rank)
-        rewardWeights = floats(actionIsDiscrete ? actDim * (rank + 1) : rank + actDim)
-        stateWeights = floats(OakMetalLayout.packedStateWeightsSize(rank: rank, actDim: actDim))
-        optionPolicyWeights = floats(OakMetalLayout.optionPolicyParameterCount(rank: rank, actDim: actDim))
-        optionValues = floats(OakMetalLayout.optionValueParameterCount(rank: rank, actDim: actDim))
-        optionCriticWeights = floats(OakMetalLayout.optionCriticBufferSize(rank: rank, actDim: actDim))
-        featureSecondMoment = floats(rank)
-        featureResidual = floats(rank)
-        observation = floats(batchSize * obsDim)
-        reward = floats(batchSize)
-        state = floats(batchSize * rank)
-        previousState = floats(batchSize * rank)
-        previousAction = floats(batchSize * actDim)
-        latentError = floats(batchSize * rank)
-        rewardPrediction = floats(batchSize)
-        td = floats(batchSize)
-        actionGrad = floats(batchSize * actDim)
-        actionBuffer = floats(batchSize * actDim)
-        rolloutState = floats(batchSize * rank)
-        latentPower = floats(OakMetalLayout.latentPowerPackedSize(rank: rank, actDim: actDim, batchSize: batchSize))
-        done = uints(batchSize)
-        activeMask = uints(2 * rank)
-        counters = uints(5)
+        paramLayout = OakMetalLayout.paramArenaLayout(obsDim: obsDim, rank: rank, actDim: actDim, batchSize: batchSize, actionIsDiscrete: actionIsDiscrete)
+        stateLayout = OakMetalLayout.stateArenaLayout(obsDim: obsDim, rank: rank, actDim: actDim, batchSize: batchSize)
+        uintLayout = OakMetalLayout.uintArenaLayout(rank: rank, batchSize: batchSize)
+        paramsArena = floats(paramLayout.totalFloats)
+        stateArena = floats(stateLayout.totalFloats)
+        uintArena = uints(uintLayout.totalUInts)
+        let ao = OakMetalLayout.floatArenaOffsets(rank: rank, actDim: actDim, batchSize: batchSize)
+        let ab = OakMetalLayout.latentPowerCorePackedSize(rank: rank, actDim: actDim, batchSize: batchSize)
+        arenaOffsets = ao
+        arenaBaseInLatent = ab
         let ocInit = OakMetalLayout.derivedOptionCount(rank: rank, actDim: actDim)
-        stompState = uints(OakMetalLayout.stompStatePackedSize(batchSize: batchSize))
+        let latentPowerPtr = stateArena.pointer.advanced(by: stateLayout.latentPower)
+        let arenaPtr = latentPowerPtr.advanced(by: ab)
+        let capF = Float(max(rank * max(batchSize, 1), 1))
+        let alpha0 = 1.0 / capF
+        for f in 0..<rank {
+            arenaPtr[ao.autostep + 2 * f] = 0
+            arenaPtr[ao.autostep + 2 * f + 1] = alpha0
+        }
+        arenaPtr[ao.gvfRho] = 0
+        for k in 0..<ocInit {
+            arenaPtr[ao.subtaskRho + k] = 0
+            let beta0 = 1.0 / Float(max(ocInit + rank, 1))
+            arenaPtr[ao.optionBeta + k] = beta0
+        }
+        let rngArena = seed.map { GKMersenneTwisterRandomSource(seed: UInt64(bitPattern: Int64($0))) }
+        let mGen = OakMetalLayout.structuralGenDirectionCount(rank: rank)
+        fillOrthonormalFeatureGenerator(rank: rank, directionCount: mGen, destination: arenaPtr, baseIndex: ao.featureGen, rng: rngArena)
+        var gvfUSq: Float = 0
+        for f in 0..<rank {
+            let z = ((rngArena?.nextUniform() ?? Float.random(in: 0..<1)) * 2 - 1)
+            arenaPtr[ao.gvfU + f] = z
+            gvfUSq += z * z
+        }
+        let invUn = 1.0 / sqrt(max(gvfUSq, 1e-12))
+        for f in 0..<rank { arenaPtr[ao.gvfU + f] *= invUn }
+        let gvfScale = Float(1.0 / sqrt(Double(max(rank, 1))))
+        for f in 0..<rank {
+            arenaPtr[ao.gvfW + f] = ((rngArena?.nextUniform() ?? Float.random(in: 0..<1)) * 2 - 1) * gvfScale
+        }
         metalDebugSignposts = ProcessInfo.processInfo.environment["OAK_METAL_SIGNPOSTS"] == "1"
         self.diagnosticGpuPhaseTiming = diagnosticGpuPhaseTiming
         phaseGpuTimeSumSeconds = Array(repeating: 0, count: 7)
@@ -758,9 +1024,10 @@ final class OakMetalEngine {
         hostDiscrete = Array(repeating: 0, count: batchSize)
         discreteBehavior = actionIsDiscrete ? DiscreteSoftmaxBehavior(actDim: actDim, engineSeed: seed) : nil
         scalarsPointer.pointee.activeCount = UInt32(rank)
+        let activePtr = uintArena.pointer.advanced(by: uintLayout.active)
         for feature in 0..<rank {
-            activeMask.pointer[feature] = 1
-            activeMask.pointer[rank + feature] = UInt32(feature)
+            activePtr[feature] = 1
+            activePtr[rank + feature] = UInt32(feature)
         }
 
         let kbd0 = 2 * batchSize
@@ -768,62 +1035,76 @@ final class OakMetalEngine {
         let invKey = 1.0 / Float(max(ocInit, 1))
         for row in 0..<batchSize {
             for k in 0..<ocInit {
-                latentPower.pointer[kbd0 + row * ocInit + k] = invKey
+                latentPowerPtr[kbd0 + row * ocInit + k] = invKey
+                arenaPtr[ao.keyboard + row * ocInit + k] = invKey
             }
         }
+        for k in 0..<ocInit {
+            arenaPtr[ao.keyboardPred + k] = 0
+        }
         for i in 0..<(3 * ocInit) {
-            latentPower.pointer[ofb0 + i] = 0
+            latentPowerPtr[ofb0 + i] = 0
         }
 
         let rng = seed.map { GKMersenneTwisterRandomSource(seed: UInt64(bitPattern: Int64($0))) }
         let encoderScale: Float = 1.0
         let transitionScale = Float(1.0 / sqrt(Double(max(1 + actDim, 1))))
-        for (storage, scale) in [(encoder, encoderScale), (policy, transitionScale), (valueWeights, transitionScale), (rewardWeights, transitionScale), (stateWeights, transitionScale), (optionPolicyWeights, transitionScale), (optionValues, transitionScale), (optionCriticWeights, transitionScale)] {
-            for index in 0..<storage.count { storage.pointer[index] = ((rng?.nextUniform() ?? Float.random(in: 0..<1)) * 2 - 1) * scale }
+        func randScale(_ count: Int, _ base: UnsafeMutablePointer<Float>, _ scale: Float) {
+            for index in 0..<count { base[index] = ((rng?.nextUniform() ?? Float.random(in: 0..<1)) * 2 - 1) * scale }
         }
-        // Subtask / option diagonal emphasis (STOMP): align option `k` with latent dimension `k` at init (signal-only, no env IDs).
+        randScale(obsDim, paramsArena.pointer.advanced(by: paramLayout.encoder), encoderScale)
+        randScale(actDim * rank, paramsArena.pointer.advanced(by: paramLayout.policy), transitionScale)
+        randScale(rank, paramsArena.pointer.advanced(by: paramLayout.value), transitionScale)
+        let rwCount = OakMetalLayout.rewardWeightParameterCount(actDim: actDim, rank: rank, actionIsDiscrete: actionIsDiscrete)
+        randScale(rwCount, paramsArena.pointer.advanced(by: paramLayout.reward), transitionScale)
+        randScale(OakMetalLayout.packedStateWeightsSize(rank: rank, actDim: actDim), paramsArena.pointer.advanced(by: paramLayout.stateWeights), transitionScale)
+        randScale(OakMetalLayout.optionPolicyParameterCount(rank: rank, actDim: actDim), paramsArena.pointer.advanced(by: paramLayout.optionPolicy), transitionScale)
+        randScale(OakMetalLayout.optionValueParameterCount(rank: rank, actDim: actDim), paramsArena.pointer.advanced(by: paramLayout.optionValues), transitionScale)
+        randScale(OakMetalLayout.optionCriticBufferSize(rank: rank, actDim: actDim), paramsArena.pointer.advanced(by: paramLayout.optionCritic), transitionScale)
+        randScale(rank, paramsArena.pointer.advanced(by: paramLayout.featureSM), transitionScale)
+        randScale(rank, paramsArena.pointer.advanced(by: paramLayout.featureResidual), transitionScale)
+        let ov = paramsArena.pointer.advanced(by: paramLayout.optionValues)
         for opt in 0..<ocInit {
-            optionValues.pointer[opt * rank + opt] += 1.0
+            ov[opt * rank + opt] += 1.0
         }
     }
 
     /// Observation must be exactly `batchSize * obsDim` contiguous floats (typically `env.observationScratch` or padded aux view).
     fileprivate func step(obs: UnsafeBufferPointer<Float>, prevAction: [Float], prevReward: [Float], prevDone: [UInt8], accumulatePhaseGpu: Bool) throws -> (ActionBatch, Double, KernelStats) {
         let start = DispatchTime.now().uptimeNanoseconds
-        memcpy(latentPower.pointer, latentPower.pointer.advanced(by: batchSize), batchSize * MemoryLayout<Float>.stride)
+        let lp = stateArena.pointer.advanced(by: stateLayout.latentPower)
+        memcpy(lp, lp.advanced(by: batchSize), batchSize * MemoryLayout<Float>.stride)
         let obsCount = batchSize * obsDim
         precondition(obs.count == obsCount)
-        memcpy(observation.pointer, obs.baseAddress!, obsCount * MemoryLayout<Float>.stride)
+        memcpy(stateArena.pointer.advanced(by: stateLayout.observation), obs.baseAddress!, obsCount * MemoryLayout<Float>.stride)
         precondition(prevReward.count == batchSize)
         _ = prevReward.withUnsafeBufferPointer { buf in
-            memcpy(reward.pointer, buf.baseAddress!, batchSize * MemoryLayout<Float>.stride)
+            memcpy(stateArena.pointer.advanced(by: stateLayout.reward), buf.baseAddress!, batchSize * MemoryLayout<Float>.stride)
         }
         let paCount = batchSize * actDim
         precondition(prevAction.count == paCount)
         _ = prevAction.withUnsafeBufferPointer { buf in
-            memcpy(previousAction.pointer, buf.baseAddress!, paCount * MemoryLayout<Float>.stride)
+            memcpy(stateArena.pointer.advanced(by: stateLayout.previousAction), buf.baseAddress!, paCount * MemoryLayout<Float>.stride)
         }
-        for index in 0..<batchSize { done.pointer[index] = UInt32(prevDone[index]) }
-        // Latent predecessor for TD / forward model / GVF targets (must match last step's `state` after encode).
-        memcpy(previousState.pointer, state.pointer, batchSize * rank * MemoryLayout<Float>.stride)
-        counters.fill(with: 0)
+        let donePtr = uintArena.pointer.advanced(by: uintLayout.done)
+        for index in 0..<batchSize { donePtr[index] = UInt32(prevDone[index]) }
+        memcpy(stateArena.pointer.advanced(by: stateLayout.previousState), stateArena.pointer.advanced(by: stateLayout.state), batchSize * rank * MemoryLayout<Float>.stride)
+        let pd0 = arenaOffsets.planDelta
+        let pdc = batchSize * actDim
+        memset(lp.advanced(by: arenaBaseInLatent + pd0), 0, pdc * MemoryLayout<Float>.stride)
+        let ctr = uintArena.pointer.advanced(by: uintLayout.counters)
+        for i in 0..<5 { ctr[i] = 0 }
         statsPointer.pointee = KernelStats()
         try runKernel(accumulatePhaseGpu: accumulatePhaseGpu)
         _ = hostAction.withUnsafeMutableBufferPointer { buf in
-            memcpy(buf.baseAddress!, actionBuffer.pointer, batchSize * actDim * MemoryLayout<Float>.stride)
+            memcpy(buf.baseAddress!, stateArena.pointer.advanced(by: stateLayout.action), batchSize * actDim * MemoryLayout<Float>.stride)
         }
         discreteBehavior?.apply(hostAction: &hostAction, hostDiscrete: &hostDiscrete, batchSize: batchSize)
         return (ActionBatch(floats: hostAction, indices: actionIsDiscrete ? hostDiscrete : nil), Double(DispatchTime.now().uptimeNanoseconds - start) / 1_000_000, statsPointer.pointee)
     }
 
     private func kernelBuffers() -> [MTLBuffer?] {
-        [
-            observation.buffer, observationMean.buffer, encoder.buffer, policy.buffer, valueWeights.buffer, rewardWeights.buffer, stateWeights.buffer,
-            optionPolicyWeights.buffer, optionValues.buffer, previousState.buffer, previousAction.buffer, reward.buffer, done.buffer, state.buffer, actionBuffer.buffer,
-            latentError.buffer, rewardPrediction.buffer, td.buffer, actionGrad.buffer, scalarsBuffer, statsBuffer,
-            featureSecondMoment.buffer, featureResidual.buffer, activeMask.buffer, rolloutState.buffer, latentPower.buffer, actionBoundsBuffer, counters.buffer,
-            optionCriticWeights.buffer, stompState.buffer
-        ]
+        [paramsArena.buffer, stateArena.buffer, uintArena.buffer, scalarsBuffer, statsBuffer, actionBoundsBuffer]
     }
 
     private func phaseThreadPlan() -> [(OakKernelPhase, Int)] {
@@ -832,25 +1113,78 @@ final class OakMetalEngine {
             (.prediction, batchSize),
             (.forwardModel, batchSize * rank),
             (.learn, OakMetalLayout.learnPhaseThreadCount(rank: rank, actDim: actDim)),
-            (.metaPolicy, batchSize * actDim),
             (.planning, batchSize),
+            (.metaPolicy, batchSize * actDim),
             (.bookkeeping, 1)
         ]
     }
 
     private func makeKernelConfig(prim: Int, ofs: Int) -> KernelConfig {
-        KernelConfig(
-            phase: 0,
+        let o = arenaOffsets
+        let m = UInt32(OakMetalLayout.structuralGenDirectionCount(rank: rank))
+        let oc = OakMetalLayout.derivedOptionCount(rank: rank, actDim: actDim)
+        let gammaMilli = UInt32(min(max((1.0 - 1.0 / Double(max(rank + 25, 26))) * 1_000_000, 0), Double(UInt32.max)))
+        let betaMilli = UInt32(min(max((1.0 / Double(max(rank * rank, 1))) * 1_000_000, 0), Double(UInt32.max)))
+        let p = paramLayout
+        let s = stateLayout
+        let u = uintLayout
+        return KernelConfig(
             obsDim: UInt32(obsDim),
             rank: UInt32(rank),
             actDim: UInt32(actDim),
             batchSize: UInt32(batchSize),
             actionIsDiscrete: actionIsDiscrete ? 1 : 0,
-            optionCount: UInt32(OakMetalLayout.derivedOptionCount(rank: rank, actDim: actDim)),
+            optionCount: UInt32(oc),
             primitivePackedSize: UInt32(prim),
             optionForwardStride: UInt32(ofs),
             planK: UInt32(OakMetalLayout.structuralPlanK(rank: rank)),
-            baseObsDim: UInt32(baseObsDim)
+            baseObsDim: UInt32(baseObsDim),
+            pEncoder: UInt32(p.encoder),
+            pPolicy: UInt32(p.policy),
+            pValue: UInt32(p.value),
+            pReward: UInt32(p.reward),
+            pStateWeights: UInt32(p.stateWeights),
+            pOptPolicy: UInt32(p.optionPolicy),
+            pOptValues: UInt32(p.optionValues),
+            pOptCritic: UInt32(p.optionCritic),
+            pFeatSecondMoment: UInt32(p.featureSM),
+            pFeatResidual: UInt32(p.featureResidual),
+            sObservation: UInt32(s.observation),
+            sObsMean: UInt32(s.observationMean),
+            sPrevState: UInt32(s.previousState),
+            sPrevAction: UInt32(s.previousAction),
+            sReward: UInt32(s.reward),
+            sState: UInt32(s.state),
+            sAction: UInt32(s.action),
+            sLatentError: UInt32(s.latentError),
+            sRewardPred: UInt32(s.rewardPrediction),
+            sTd: UInt32(s.td),
+            sActionGrad: UInt32(s.actionGrad),
+            sRollout: UInt32(s.rolloutState),
+            sLatentPower: UInt32(s.latentPower),
+            uDone: UInt32(u.done),
+            uActive: UInt32(u.active),
+            uStomp: UInt32(u.stomp),
+            uCounters: UInt32(u.counters),
+            floatArenaAutostepBase: UInt32(o.autostep),
+            floatArenaTdOptionBase: UInt32(o.tdOption),
+            floatArenaPlanDeltaBase: UInt32(o.planDelta),
+            floatArenaGvfWeightsBase: UInt32(o.gvfW),
+            floatArenaGvfCumulantBase: UInt32(o.gvfU),
+            floatArenaGvfTdBase: UInt32(o.gvfTd),
+            floatArenaGvfRhoBase: UInt32(o.gvfRho),
+            floatArenaKeyboardBase: UInt32(o.keyboard),
+            floatArenaKeyboardPredBase: UInt32(o.keyboardPred),
+            floatArenaUtilityBase: UInt32(o.utility),
+            floatArenaFeatureGenBase: UInt32(o.featureGen),
+            floatArenaSubtaskRhoBase: UInt32(o.subtaskRho),
+            floatArenaOptionBetaBase: UInt32(o.optionBeta),
+            floatArenaDeviceScratchBase: UInt32(o.deviceScratch),
+            genDirectionCount: m,
+            floatArenaOffsetInLatentPower: UInt32(arenaBaseInLatent),
+            phase: 0,
+            gammaSubtaskMilli: gammaMilli,
+            betaLearnRateMilli: betaMilli
         )
     }
 
@@ -879,19 +1213,20 @@ final class OakMetalEngine {
 
     private func runKernelSingleBuffer() throws {
         guard let commandBuffer = queue.makeCommandBuffer(descriptor: commandBufferDescriptor) else { throw OakError.message("Failed to create Metal command buffer.") }
-        let width = min(max(pipeline.threadExecutionWidth, 1), pipeline.maxTotalThreadsPerThreadgroup)
         let buffers = kernelBuffers()
         guard let computeEncoder = commandBuffer.makeComputeCommandEncoder() else { throw OakError.message("Failed to create Metal compute encoder.") }
-        computeEncoder.setComputePipelineState(pipeline)
-        computeEncoder.setBuffers(buffers, offsets: bufferZeroOffsets, range: 0..<buffers.count)
+        computeEncoder.setBuffers(buffers, offsets: bufferZeroOffsets, range: 0..<6)
         let phaseThreads = phaseThreadPlan()
         let dynBase = OakMetalLayout.optionDynamicsRegionBase(rank: rank)
         let ofs = OakMetalLayout.optionForwardStride(rank: rank, actDim: actDim)
-        var config = makeKernelConfig(prim: dynBase, ofs: ofs)
-        for (phase, threadCount) in phaseThreads {
+        let config = makeKernelConfig(prim: dynBase, ofs: ofs)
+        var configCopy = config
+        for (index, (phase, threadCount)) in phaseThreads.enumerated() {
+            let pip = pipelines[index]
+            let width = min(max(pip.threadExecutionWidth, 1), pip.maxTotalThreadsPerThreadgroup)
+            computeEncoder.setComputePipelineState(pip)
             if metalDebugSignposts { computeEncoder.insertDebugSignpost(String(describing: phase)) }
-            config.phase = phase.rawValue
-            computeEncoder.setBytes(&config, length: MemoryLayout<KernelConfig>.stride, index: OakMetalLayout.kernelConfigBufferIndex)
+            computeEncoder.setBytes(&configCopy, length: MemoryLayout<KernelConfig>.stride, index: OakMetalLayout.kernelConfigBufferIndex)
             let w = max(threadCount, 1)
             computeEncoder.dispatchThreads(MTLSize(width: w, height: 1, depth: 1), threadsPerThreadgroup: MTLSize(width: min(width, w), height: 1, depth: 1))
         }
@@ -902,20 +1237,21 @@ final class OakMetalEngine {
     }
 
     private func runKernelSplitRecordingGpu() throws {
-        let width = min(max(pipeline.threadExecutionWidth, 1), pipeline.maxTotalThreadsPerThreadgroup)
         let buffers = kernelBuffers()
         let phaseThreads = phaseThreadPlan()
         let dynBase = OakMetalLayout.optionDynamicsRegionBase(rank: rank)
         let ofs = OakMetalLayout.optionForwardStride(rank: rank, actDim: actDim)
-        var config = makeKernelConfig(prim: dynBase, ofs: ofs)
+        let config = makeKernelConfig(prim: dynBase, ofs: ofs)
+        var configCopy = config
         for (index, (phase, threadCount)) in phaseThreads.enumerated() {
+            let pip = pipelines[index]
+            let width = min(max(pip.threadExecutionWidth, 1), pip.maxTotalThreadsPerThreadgroup)
             guard let commandBuffer = queue.makeCommandBuffer(descriptor: commandBufferDescriptor) else { throw OakError.message("Failed to create Metal command buffer.") }
             guard let computeEncoder = commandBuffer.makeComputeCommandEncoder() else { throw OakError.message("Failed to create Metal compute encoder.") }
-            computeEncoder.setComputePipelineState(pipeline)
-            computeEncoder.setBuffers(buffers, offsets: bufferZeroOffsets, range: 0..<buffers.count)
+            computeEncoder.setComputePipelineState(pip)
+            computeEncoder.setBuffers(buffers, offsets: bufferZeroOffsets, range: 0..<6)
             if metalDebugSignposts { computeEncoder.insertDebugSignpost(String(describing: phase)) }
-            config.phase = phase.rawValue
-            computeEncoder.setBytes(&config, length: MemoryLayout<KernelConfig>.stride, index: OakMetalLayout.kernelConfigBufferIndex)
+            computeEncoder.setBytes(&configCopy, length: MemoryLayout<KernelConfig>.stride, index: OakMetalLayout.kernelConfigBufferIndex)
             let w = max(threadCount, 1)
             computeEncoder.dispatchThreads(MTLSize(width: w, height: 1, depth: 1), threadsPerThreadgroup: MTLSize(width: min(width, w), height: 1, depth: 1))
             computeEncoder.endEncoding()
@@ -936,23 +1272,30 @@ final class OakMetalEngine {
 private enum RunSnapshot {
     private static let persistLock = NSLock()
 
-    static func write(_ file: RunMetricsFile, metricsDir: URL?) throws -> URL {
-        let dir = metricsDir ?? storageFromEnvironment() ?? Main.defaultMetricsDirectory()
+    private static func storageFromEnvironment() -> URL? {
+        guard let raw = ProcessInfo.processInfo.environment["OAK_METRICS_STORAGE"]?.trimmingCharacters(in: .whitespacesAndNewlines), !raw.isEmpty else { return nil }
+        return URL(fileURLWithPath: (raw as NSString).expandingTildeInPath, isDirectory: true)
+    }
+
+    fileprivate static func resolveMetricsDirectory(explicit: URL?) -> URL {
+        if let explicit { return explicit }
+        if let s = storageFromEnvironment() { return s }
+        let root = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+        return root.appendingPathComponent(".oak-benchmarks/\(Main.oakBenchmarksRunId())/metrics", isDirectory: true)
+    }
+
+    static func persist(_ file: RunMetricsFile, metricsDir: URL) throws -> URL {
         let stem = snapshotStem(envId: file.envId, policy: file.policy, seed: file.seed)
-        let url = dir.appendingPathComponent("\(stem).json", isDirectory: false)
+        let leaf = file.heartbeatSequence.map { "\(stem).heartbeat-\(String(format: "%06d", $0)).json" } ?? "\(stem).json"
+        let url = metricsDir.appendingPathComponent(leaf, isDirectory: false)
         let enc = JSONEncoder()
         enc.outputFormatting = [.prettyPrinted, .sortedKeys]
         let data = try enc.encode(file)
         persistLock.lock()
         defer { persistLock.unlock() }
-        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: metricsDir, withIntermediateDirectories: true)
         try data.write(to: url, options: .atomic)
         return url
-    }
-
-    private static func storageFromEnvironment() -> URL? {
-        guard let raw = ProcessInfo.processInfo.environment["OAK_METRICS_STORAGE"]?.trimmingCharacters(in: .whitespacesAndNewlines), !raw.isEmpty else { return nil }
-        return URL(fileURLWithPath: (raw as NSString).expandingTildeInPath, isDirectory: true)
     }
 
     fileprivate static func snapshotStem(envId: String, policy: Policy, seed: Int?) -> String {
@@ -991,7 +1334,18 @@ private enum RunSnapshot {
         let auxProbe = max(ProcessInfo.processInfo.environment["OAK_AUX_DIM"].flatMap(Int.init) ?? 0, 0)
         let defaultNumEnvs = try directNumEnvs(obsDim: probe.obsDim + auxProbe, actDim: probe.actDim, actionDiscreteCount: probe.actionDiscreteCount, device: device)
         let numEnvs = max(ProcessInfo.processInfo.environment["OAK_NUM_ENVS"].flatMap(Int.init) ?? defaultNumEnvs, 1)
-        _ = try runSingle(envId: envId, policy: policy, seed: seed, warmup: warmup, stopAfter: max(ProcessInfo.processInfo.environment["OAK_STOP_AFTER_STEPS"].flatMap(Int.init) ?? numEnvs, numEnvs), numEnvs: numEnvs, device: device, command: "run").0
+        let stopAfter = max(ProcessInfo.processInfo.environment["OAK_STOP_AFTER_STEPS"].flatMap(Int.init) ?? numEnvs, numEnvs)
+        let baseline = max(ProcessInfo.processInfo.environment["OAK_BASELINE_RANDOM_STEPS"].flatMap(Int.init) ?? 0, 0)
+        if policy == .oak, ProcessInfo.processInfo.environment["OAK_STOP_AFTER_STEPS"] == nil {
+            fputs("OaK: OAK_STOP_AFTER_STEPS unset (short run). See AGENTS.md (Long runs).\n", stderr)
+        }
+        let dir = RunSnapshot.resolveMetricsDirectory(explicit: nil)
+        let phases: [(Policy, Int)] = policy == .oak && baseline > 0 ? [(.random, baseline), (policy, stopAfter)] : [(policy, stopAfter)]
+        var metricsURL: URL!
+        for (p, steps) in phases {
+            (_, metricsURL) = try runSingle(envId: envId, policy: p, seed: seed, warmup: warmup, stopAfter: steps, numEnvs: numEnvs, device: device, command: "run", metricsDir: dir)
+        }
+        fputs("\(metricsURL.path)\n", stderr)
     }
 
     private static func diagnose(_ args: [String]) throws {
@@ -1150,6 +1504,10 @@ private enum RunSnapshot {
     }
 
     private static func runSingle(envId: String, policy: Policy, seed: Int?, warmup: Int, stopAfter: Int, numEnvs: Int, device: MTLDevice, command: String, includeDiagnostic: Bool = false, metricsDir: URL? = nil) throws -> (RunMetricsFile, URL) {
+        let metricsDirResolved = RunSnapshot.resolveMetricsDirectory(explicit: metricsDir)
+        try FileManager.default.createDirectory(at: metricsDirResolved, withIntermediateDirectories: true)
+        fputs("OaK metrics \(metricsDirResolved.path)\n", stderr)
+        fflush(stderr)
         let env = try EnvPoolEnv(id: envId, numEnvs: numEnvs, seed: seed)
         let encoder = seed.map { GKMersenneTwisterRandomSource(seed: UInt64(bitPattern: Int64($0))) }
         let auxDim = max(ProcessInfo.processInfo.environment["OAK_AUX_DIM"].flatMap(Int.init) ?? 0, 0)
@@ -1204,6 +1562,20 @@ private enum RunSnapshot {
         var envMsSum = 0.0
         var health = HealthAccumulator()
         let actionCol = MeasuredActionCollector(discreteCount: env.actionDiscreteCount, actDim: env.actDim)
+        let hb = max(ProcessInfo.processInfo.environment["OAK_HEARTBEAT_STEPS"].flatMap(Int.init) ?? 0, 0)
+        var pulse = 0
+        func snap(_ seq: Int?) -> RunMetricsFile {
+            let u = max(measuredSteps / numEnvs, 1), a = agentMsSum / 1000, e = envMsSum / 1000, h = max(measuredSeconds - a - e, 0)
+            let merged = health.diagnosticSnapshot().map { b in
+                let (mm, mi) = engine?.metalPhaseGpuDiagnostics(measuredBatchSteps: u) ?? (nil, nil)
+                return RunDiagnostic(nonFiniteByPhase: b.nonFiniteByPhase, maxAbsLatentPrediction: b.maxAbsLatentPrediction, maxAbsRewardPrediction: b.maxAbsRewardPrediction, maxAbsPolicyOutput: b.maxAbsPolicyOutput, agentShare: measuredSeconds > 0 ? a / measuredSeconds : nil, envShare: measuredSeconds > 0 ? e / measuredSeconds : nil, hostShare: measuredSeconds > 0 ? h / measuredSeconds : nil, metalPhaseGpuMsMean: mm, metalPhaseGpuTimingInvalid: mi)
+            }
+            let diagOut: RunDiagnostic? = ((seq != nil && policy == .oak) || (seq == nil && includeDiagnostic)) ? merged : nil
+            let (dA, cA) = actionCol.partialMetrics(actDim: env.actDim)
+            let sps = measuredSeconds > 0 ? Double(measuredSteps) / measuredSeconds : nil
+            let reason = seq == nil ? "measured_steps" : "heartbeat"
+            return RunMetricsFile(schemaVersion: 2, command: command, envId: envId, policy: policy, seed: seed, numEnvs: numEnvs, warmupSteps: warmup, stopAfterMeasuredSteps: stopAfter, observationDim: totalObsDim, actionDim: env.actDim, actionDiscreteCount: env.actionDiscreteCount, measuredStepCount: measuredSteps, measuredBatchCount: u, measuredSeconds: measuredSeconds, stepsPerSecond: sps, heartbeatSequence: seq, rewardSum: rewardSum, doneCount: doneCount, stopReason: reason, agentStepMsMean: agentMsSum / Double(u), envStepMsMean: envMsSum / Double(u), discreteAction: dA, continuousAction: cA, health: health.snapshot(), diagnostic: diagOut)
+        }
         while measuredSteps < stopAfter {
             let nextTotal = totalSteps + numEnvs
             let measured = nextTotal > warmup && totalSteps > 0
@@ -1238,6 +1610,10 @@ private enum RunSnapshot {
             if measured {
                 measuredSteps += numEnvs
                 if let measurementStart { measuredSeconds = Double(DispatchTime.now().uptimeNanoseconds - measurementStart) / 1_000_000_000 }
+                if hb > 0, (measuredSteps - numEnvs) / hb < measuredSteps / hb {
+                    pulse += 1
+                    _ = try RunSnapshot.persist(snap(pulse), metricsDir: metricsDirResolved)
+                }
                 doneCount += env.doneScratch.reduce(into: 0) { $0 += Int($1) }
                 for value in env.rewardScratch {
                     guard value.isFinite else { throw OakError.message("Environment produced a non-finite reward.") }
@@ -1276,53 +1652,8 @@ private enum RunSnapshot {
                 }
             }
         }
-        let updates = max(measuredSteps / numEnvs, 1)
-        let agentSeconds = agentMsSum / 1000
-        let envSeconds = envMsSum / 1000
-        let hostSeconds = max(measuredSeconds - agentSeconds - envSeconds, 0)
-        let diagnostic: RunDiagnostic? = health.diagnosticSnapshot().map { base in
-            let (metalMean, metalInvalid) = engine?.metalPhaseGpuDiagnostics(measuredBatchSteps: updates) ?? (nil, nil)
-            return RunDiagnostic(
-                nonFiniteByPhase: base.nonFiniteByPhase,
-                maxAbsLatentPrediction: base.maxAbsLatentPrediction,
-                maxAbsRewardPrediction: base.maxAbsRewardPrediction,
-                maxAbsPolicyOutput: base.maxAbsPolicyOutput,
-                agentShare: measuredSeconds > 0 ? agentSeconds / measuredSeconds : nil,
-                envShare: measuredSeconds > 0 ? envSeconds / measuredSeconds : nil,
-                hostShare: measuredSeconds > 0 ? hostSeconds / measuredSeconds : nil,
-                metalPhaseGpuMsMean: metalMean,
-                metalPhaseGpuTimingInvalid: metalInvalid
-            )
-        }
-        let stepsPerSecond = measuredSeconds > 0 ? Double(measuredSteps) / measuredSeconds : nil
-        let (discreteAction, continuousAction) = actionCol.finish(actDim: env.actDim)
-        let file = RunMetricsFile(
-            schemaVersion: 2,
-            command: command,
-            envId: envId,
-            policy: policy,
-            seed: seed,
-            numEnvs: numEnvs,
-            warmupSteps: warmup,
-            stopAfterMeasuredSteps: stopAfter,
-            observationDim: totalObsDim,
-            actionDim: env.actDim,
-            actionDiscreteCount: env.actionDiscreteCount,
-            measuredStepCount: measuredSteps,
-            measuredBatchCount: updates,
-            measuredSeconds: measuredSeconds,
-            stepsPerSecond: stepsPerSecond,
-            rewardSum: rewardSum,
-            doneCount: doneCount,
-            stopReason: "measured_steps",
-            agentStepMsMean: agentMsSum / Double(updates),
-            envStepMsMean: envMsSum / Double(updates),
-            discreteAction: discreteAction,
-            continuousAction: continuousAction,
-            health: health.snapshot(),
-            diagnostic: includeDiagnostic ? diagnostic : nil
-        )
-        let metricsURL = try RunSnapshot.write(file, metricsDir: metricsDir)
+        let file = snap(nil)
+        let metricsURL = try RunSnapshot.persist(file, metricsDir: metricsDirResolved)
         return (file, metricsURL)
     }
 
@@ -1333,10 +1664,5 @@ private enum RunSnapshot {
         formatter.timeZone = TimeZone(secondsFromGMT: 0)
         formatter.dateFormat = "yyyyMMdd-HHmmss"
         return formatter.string(from: Date()) + "-\(ProcessInfo.processInfo.processIdentifier)"
-    }
-
-    fileprivate static func defaultMetricsDirectory() -> URL {
-        let root = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
-        return root.appendingPathComponent(".oak-benchmarks/\(oakBenchmarksRunId())/metrics", isDirectory: true)
     }
 }
