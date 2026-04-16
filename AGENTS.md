@@ -2,7 +2,7 @@
 
 ## Alberta Plan Slide Law
 
-### The 12 steps of the Alberta Plan
+### The Alberta Plan roadmap (steps 1–11)
 
 1. Representation I: Continual supervised learning with given features.
 2. Representation II: Supervised feature finding.
@@ -15,7 +15,6 @@
 9. Planning II: Search control and exploration.
 10. Prototype-AI II: The STOMP progression.
 11. Prototype-AI III: Oak.
-12. Prototype-IA: Intelligence amplification.
 
 ### The Alberta Plan's Research vision: Intelligence as signal processing over time
 
@@ -32,7 +31,7 @@ Four key features of DeepMind Alberta's AI research
 - The Alberta Plan is a direct run at this great prize
 - emphasizing intelligence as the acquisition of new knowledge
 - My motivation for the plan stems from the Oak architecture, a complete conceptual design for a Model-based RL agent, a Proto-AI
-- The Alberta Plan is a massive retreat; going back to the most basic algorithms; re-vamping them for continual and meta-learning (in 12 steps)
+- The Alberta Plan is a massive retreat; going back to the most basic algorithms; re-vamping them for continual and meta-learning along the roadmap steps above
 
 ### First, the Big World Perspective
 
@@ -98,6 +97,16 @@ Why?
 - The consumers of state and time abstractions support, evaluate, and shape the abstractions
 - Cycle of discovery produces abstractions tailored to the environment and ultimately tied to reward
 
+## Literature anchors (Alberta Plan & reward-respecting STOMP)
+
+Primary sources in `references/papers/`: *The Alberta Plan for AI Research* ([arXiv:2208.11173](https://arxiv.org/abs/2208.11173)); *Reward-Respecting Subtasks for Model-Based Reinforcement Learning* ([arXiv:2202.03466](https://arxiv.org/abs/2202.03466), Artificial Intelligence 2023). The following is implementation-agnostic content from those documents—constraints on this codebase remain the **Paper-Grounded Corollaries** below.
+
+- **Base agent (Alberta Plan).** Perception builds **state** shared by all parts; **reactive policies** (the primary policy and possibly others); **value functions** for learning those policies; **transition model** learned from experience. The model may be **temporally abstract**: it can take an **option** (a way of behaving plus a **termination condition**) and predict state at termination and cumulative reward along the way. **Planning** uses the model to imagine outcomes evaluated by value functions; it is **continual** and treated as ongoing background work while perception, policy, and value updates run on every step in the foreground.
+- **STOMP progression (both sources).** **Subtask → Option → Model → Planning**: pose a subtask, learn an option solving it, learn that option’s transition model, then use the model in planning. The papers present the steps sequentially for clarity but state they can also run **in parallel** in the long-run architecture.
+- **Reward-respecting subtasks (Reward-Respecting Subtasks paper).** Subsidiary tasks should be chosen so option models are **useful to planning**, not only easy to discover. A **reward-respecting** subtask uses the **main task reward** as the cumulant and defines **stopping values** using the agent’s **value estimates**, including **feature-attainment** variants where stopping is encouraged when a selected feature is **high** (via a **bonus** on top of the estimated value for that feature). That sharply narrows the space of options compared to subtasks that optimize unrelated cumulants. Learning is framed with **GVFs** and **off-policy** updates where appropriate.
+- **Oak (Prototype-AI III in the Alberta Plan).** Extends STOMP with **feedback**: continually assess the **utility** of **features, subtasks, options, and option models**; **remove or replace** elements that are not pulling their weight (e.g. an option model **unused in planning** should not persist indefinitely with its option and subtask). **Features** are **reranked** by usefulness to learning and planning so the set of feature-based subtasks can change. **Option keyboard:** a real-valued vector with one component per subtask-linked option; a **chord** (several nonzero components) refers to a combination. The Plan describes **two** keyboard designs: (1) learn component options in the usual way and treat a chord as a **fixed blend** of those options, with the model learning **chord** dynamics as played; (2) interpret the vector as defining a **single** multi-component subtask (main reward plus a terminal value tied to all active keys), with options learned toward that joint subtask while the model treats the vector as an opaque **descriptor** of the option.
+- **FC-STOMP (Reward-Respecting Subtasks, §8).** **Feature construction** feeding STOMP, with **feedback from later stages to earlier**—e.g. planning effectiveness and **search control** influencing which **features** warrant **feature-attainment** options and models—is identified with the **Oak** architecture in that paper’s terminology. Open directions there include **search control** over which states receive planning updates, planning to improve **subtask** value functions, and **compositional** modeling (higher-level transition structure built from lower-level models)—all subject to the same **no domain knowledge / no benchmark patching** rules as the rest of this project.
+
 ## Hard Rules
 
 - Project is greenfield. It should never have legacy code or legacy fallbacks. Replace or refactor old paths instead of adding compatibility fallbacks.
@@ -111,6 +120,20 @@ Why?
 - Oak must include reward-respecting subtasks, multiple policies and value functions, and models of options used by planning.
 - Domain knowledge is forbidden. No environment-specific heuristics, no benchmark-specific shaping, and no task-identity-conditioned control logic.
 - Computational cost and response time are first-class. Do not grow repo-resident diagnostic frameworks in the hot path.
+
+## Performance: run metrics JSON (throughput and host timing)
+
+Each **`run`**, **`diagnose`**, and **`benchmark`** writes one **pretty-printed** JSON file with **stable, alphabetical key order** (encoder **`sortedKeys`**): **`schemaVersion`** (see emitted JSON; extended fields use **`2`**), **`command`**, and one flat run description—identity and config (**`envId`**, **`policy`**, **`seed`**, **`numEnvs`**, **`warmupSteps`**, **`stopAfterMeasuredSteps`**, **`observationDim`**, **`actionDim`**, optional **`actionDiscreteCount`**), measured window (**`measuredStepCount`**, **`measuredBatchCount`**, **`measuredSeconds`**, **`stepsPerSecond`**, **`rewardSum`**, **`doneCount`**, **`stopReason`**), per-batch timing means (**`agentStepMsMean`**, **`envStepMsMean`**), optional **`discreteAction`** when **`actionDiscreteCount`** is set (**`histogram`**, **`uniqueCount`**), optional **`continuousAction`** when actions are continuous (**`meanPerDim`**, **`stdPerDim`**, **`meanL2`**, **`stdL2`** over env-step samples in the measured window—near-zero **`stdPerDim`** / **`stdL2`** suggests collapsed or near-constant actuation), optional **`health`** (kernel stats; omitted for **`random`** when there is nothing to record), optional **`diagnostic`** (host/GPU timing shares; **`diagnose`** only). Keys with no value are **omitted** (not `null`), aside from numeric fields that are legitimately zero.
+
+- **Default directory:** **`.oak-benchmarks/<run-id>/metrics/`** (override with **`OAK_METRICS_STORAGE`** to a directory path).
+- **`benchmark`:** snapshots go to **`<bench-dir>/metrics/`** unless **`OAK_METRICS_STORAGE`** is set (then all benchmark snapshots use that directory). **`*.log`** stems match the **`*.json`** snapshot stem (**`env-policy-seed`**).
+- **`diagnose`:** **stderr** prints the snapshot file path after a successful write.
+
+**Stop / batch semantics:** The measured window counts **aggregate environment steps** (`measuredStepCount` ≈ batches × `num_envs`). **`measuredBatchCount`** is `measuredStepCount / num_envs`. **`OAK_BENCH_STEPS`** sets the measured-step target for **`benchmark`**.
+
+**Env vs agent (serial MDP):** Each iteration runs **Metal `oak_step` then native `env.step`**. Without an async batched env API, throughput is bounded by this split (see **`diagnostic`** shares). Native env code is built by **`setup.sh`** into **`.build/oak-native/liboakenv.dylib`**.
+
+**Discrete control:** the vector sent to **`env.step`** uses **indices sampled from softmax(logits)** produced in the meta-policy phase (not deterministic argmax), and the host **`floats`** are set to the matching **one-hot** so **`previousAction`** matches what was executed.
 
 ## Performance: Metal trace (GPU truth surface)
 
@@ -131,10 +154,6 @@ OAK_METAL_SIGNPOSTS=1 xctrace record --no-prompt \
 
 **Export:** `xctrace export --input … --toc`; then `--xpath` tables: **`metal-driver-intervals`**, **`metal-application-intervals`**, **`metal-shader-profiler-shader-list`**. Treat **`metal-shader-profiler-intervals`** as best-effort in CLI export (often empty even with Shader Timeline on). Prefer **short `--time-limit`** and **`--launch`** one process (not `--all-processes`) to keep traces small.
 
-**Consistent summary:** After recording, run **`python3 scripts/oak_trace_report.py /path/to/capture.trace`** (add **`--json`** for machine-readable output). It aggregates the same exports; combine with **`OaK diagnose …`** JSON for **agentShare / envShare** (the script does not run diagnose).
-
-**`diagnose` JSON:** includes **`diagnostic.metalPhaseGpuMsMean`** (per-phase mean GPU ms per batch step from `MTLCommandBuffer` timing; **`diagnose` only**, one command buffer per phase on measured steps) plus **`agentShare` / `envShare`**. Use that for bottleneck work; `xctrace export` remains supplementary.
-
-**Supporting only:** `benchmark.json` / run JSONL — throughput and health aggregates; benchmark runs do not emit `metalPhaseGpuMsMean` unless you add a metrics path.
+**Consistent summary:** After recording, run **`python3 scripts/oak_trace_report.py /path/to/capture.trace`** (add **`--json`** for machine-readable output). Cross-check **agent / env** splits against **`diagnose`** JSON (**`diagnostic.agentShare`**, **`envShare`**, **`metalPhaseGpuMsMean`**) with the same env configuration. `xctrace export` remains supplementary.
 
 **Do not:** argue dominant kernel phase from **`sample` / Time Profiler alone**; treat tiny **encode** rows in application intervals as the whole step (total work includes GPU execution on driver/GPU tracks).

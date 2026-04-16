@@ -33,7 +33,7 @@ struct KernelConfig {
     uint batchSize;
     uint actionIsDiscrete;
     uint optionCount;
-    /// Float count of the primitive packed block: GVF bank + one forward transition (must match Swift `packedDynamicsParameterCount`).
+    /// Float offset to the first contiguous **option dynamics** block (= GVF bank size). Block `k` is at `primitivePackedSize + k * optionForwardStride`. Option 0 is the shared one-step model (no duplicate “primitive” copy).
     uint primitivePackedSize;
     /// Floats per option dynamics slice (= `rank * (rank + actDim)`), appended after the primitive block.
     uint optionForwardStride;
@@ -47,6 +47,12 @@ struct KernelStats {
     float rewardRate, latentPredictionMSE, rewardPredictionMSE, latentStateMeanSquare, activeRank, actionDeltaL2Mean, planningActionChangeL2Mean;
     float rawNonFiniteCount, sanitizedNonFiniteCount, encodeNonFiniteCount, learnNonFiniteCount, planNonFiniteCount;
     float maxAbsLatentPrediction, maxAbsRewardPrediction, maxAbsPolicyOutput;
+    /// Mean squared (sanitized) error between `state` and `rolloutState` for rows where dynamics matched `batchDynOpt` (STOMP option-model quality).
+    float optionModelPredictionMSE;
+    /// Batch mean fraction of planning rows using a **non-default** option dynamics slice (`po > 0`; slice 0 is shared one-step dynamics).
+    float planningUsedOptionDynamicsMean;
+    /// Count of option slices zeroed this bookkeeping pass (continual replacement / capacity discipline).
+    float oakOptionReinitCount;
 };
 
 inline float sanitize(float v, thread uint& raw, thread uint& san) {
@@ -95,7 +101,7 @@ inline float forward_wa(device const float *packed, uint rank, uint actDim, uint
     return packed[base + aIdx];
 }
 
-/// Option-only forward block (no GVF): base = primitivePacked + opt * optionForwardStride.
+/// Option dynamics block `opt`: `base = primitivePacked + opt * optionForwardStride` (`primitivePacked` = GVF size).
 inline float opt_forward_ws(device const float *packed, uint blockBase, uint rank, uint actDim, uint outRow, uint inIdx) {
     return packed[blockBase + outRow * (rank + actDim) + inIdx];
 }
@@ -103,10 +109,15 @@ inline float opt_forward_wa(device const float *packed, uint blockBase, uint ran
     return packed[blockBase + outRow * (rank + actDim) + rank + aIdx];
 }
 
+/// `stompState` layout: indices `[0, 4*batch)` phase/elapsed per row (4 uints/row); `[4*batch, 5*batch)` batch dynamics option index (STOMP).
 inline bool use_option_rollout(device const uint *stompState, uint row, uint rank) {
-    uint phase = stompState[row * 2u];
-    uint elapsed = stompState[row * 2u + 1u];
+    uint phase = stompState[row * 4u];
+    uint elapsed = stompState[row * 4u + 1u];
     return phase == 1u && elapsed < rank;
+}
+
+inline uint batch_dynamics_opt(device const uint *stompState, uint batchSize, uint row) {
+    return stompState[4u * batchSize + row];
 }
 
 inline uint pick_option_slice(device const uint *stompState, device const float *latentPower, uint row, uint rank, float prevOptF, uint optionCount) {
@@ -118,8 +129,18 @@ inline uint pick_option_slice(device const uint *stompState, device const float 
     return 0u;
 }
 
-/// One-step lookahead V(f̂(s,a')) using primitive forward weights (continuous probes); secondary critic on predicted features.
-inline float lookahead_value_thread(device const float *stateWeights, device const float *valueWeights, device const float *optionCriticWeights,
+/// Start of the packed **forward** segment: after GVF bank (same layout for primitive and option slices).
+inline uint forward_segment_base(uint rank) { return gvf_bank_size(rank); }
+
+inline float dyn_forward_ws(device const float *packed, uint forwardBase, uint rank, uint actDim, uint outRow, uint inIdx) {
+    return packed[forwardBase + outRow * (rank + actDim) + inIdx];
+}
+inline float dyn_forward_wa(device const float *packed, uint forwardBase, uint rank, uint actDim, uint outRow, uint aIdx) {
+    return packed[forwardBase + outRow * (rank + actDim) + rank + aIdx];
+}
+
+/// One-step lookahead V(f̂(s,a')) using forward dynamics at `forwardBase` (primitive or option slice); secondary critic on predicted features.
+inline float lookahead_value_thread(device const float *stateWeights, uint forwardBase, device const float *valueWeights, device const float *optionCriticWeights,
     uint criticOpt, device const float *lat, uint sOff, uint actDim, uint rank, device const uint *activeList, uint activeCount, thread uint& raw, thread uint& san,
     thread const float *actionVec) {
     float vCand = 0.0f;
@@ -128,11 +149,11 @@ inline float lookahead_value_thread(device const float *stateWeights, device con
         float ps = 0.0f;
         for (uint lj = 0u; lj < activeCount; ++lj) {
             uint jdx = activeList[lj];
-            ps += forward_ws(stateWeights, rank, actDim, idx, jdx) * sanitize(lat[sOff + jdx], raw, san);
+            ps += dyn_forward_ws(stateWeights, forwardBase, rank, actDim, idx, jdx) * sanitize(lat[sOff + jdx], raw, san);
         }
         float pa = 0.0f;
         for (uint a = 0u; a < actDim; ++a) {
-            pa += forward_wa(stateWeights, rank, actDim, idx, a) * sanitize(actionVec[a], raw, san);
+            pa += dyn_forward_wa(stateWeights, forwardBase, rank, actDim, idx, a) * sanitize(actionVec[a], raw, san);
         }
         float predNext = sanitize(ps + pa, raw, san);
         float pri = valueWeights[idx] * predNext;
@@ -142,8 +163,8 @@ inline float lookahead_value_thread(device const float *stateWeights, device con
     return vCand;
 }
 
-/// Discrete: one-step value after primitive transition, primary + optional secondary critic head.
-inline float discrete_lookahead1(device const float *stateWeights, device const float *valueWeights,
+/// Discrete: one-step value after transition at `forwardBase`, primary + optional secondary critic head.
+inline float discrete_lookahead1(device const float *stateWeights, uint forwardBase, device const float *valueWeights,
     device const float *optionCriticWeights, uint criticOpt,
     device const float *lat, uint sOff, uint actDim, uint rank, device const uint *activeList, uint activeCount,
     uint cand, thread uint& raw, thread uint& san) {
@@ -153,9 +174,9 @@ inline float discrete_lookahead1(device const float *stateWeights, device const 
         float ps = 0.0f;
         for (uint lj = 0u; lj < activeCount; ++lj) {
             uint jdx = activeList[lj];
-            ps += forward_ws(stateWeights, rank, actDim, idx, jdx) * sanitize(lat[sOff + jdx], raw, san);
+            ps += dyn_forward_ws(stateWeights, forwardBase, rank, actDim, idx, jdx) * sanitize(lat[sOff + jdx], raw, san);
         }
-        float pa = forward_wa(stateWeights, rank, actDim, idx, cand);
+        float pa = dyn_forward_wa(stateWeights, forwardBase, rank, actDim, idx, cand);
         float predNext = sanitize(ps + pa, raw, san);
         float pri = valueWeights[idx] * predNext;
         float sec = optionCriticWeights[criticOpt * rank + idx] * predNext;
@@ -164,8 +185,8 @@ inline float discrete_lookahead1(device const float *stateWeights, device const 
     return vCand;
 }
 
-/// Roll greedy discrete lookaheads on primitive dynamics; return accumulated sum_k [(V_{k+1}-V_k) - rho].
-inline float kstep_plan_discrete(device const float *stateWeights, device const float *valueWeights,
+/// Roll greedy discrete lookaheads on dynamics at `forwardBase`; return accumulated sum_k [(V_{k+1}-V_k) - rho].
+inline float kstep_plan_discrete(device const float *stateWeights, uint forwardBase, device const float *valueWeights,
     device const float *optionCriticWeights, uint criticOpt,
     device const KernelScalars *scalars, device const float *lat, uint sOff, uint actDim, uint rank,
     device const uint *activeList, uint activeCount, uint planK, thread uint& raw, thread uint& san,
@@ -189,9 +210,9 @@ inline float kstep_plan_discrete(device const float *stateWeights, device const 
                 float ps = 0.0f;
                 for (uint lj = 0u; lj < activeCount; ++lj) {
                     uint jdx = activeList[lj];
-                    ps += forward_ws(stateWeights, rank, actDim, idx, jdx) * scratch[jdx];
+                    ps += dyn_forward_ws(stateWeights, forwardBase, rank, actDim, idx, jdx) * scratch[jdx];
                 }
-                float pa = forward_wa(stateWeights, rank, actDim, idx, cand);
+                float pa = dyn_forward_wa(stateWeights, forwardBase, rank, actDim, idx, cand);
                 float predNext = sanitize(ps + pa, raw, san);
                 vCand += valueWeights[idx] * predNext + optionCriticWeights[criticOpt * rank + idx] * predNext;
             }
@@ -204,9 +225,9 @@ inline float kstep_plan_discrete(device const float *stateWeights, device const 
             float ps = 0.0f;
             for (uint i = 0u; i < activeCount; ++i) {
                 uint idx = activeList[i];
-                ps += forward_ws(stateWeights, rank, actDim, feat, idx) * scratch[idx];
+                ps += dyn_forward_ws(stateWeights, forwardBase, rank, actDim, feat, idx) * scratch[idx];
             }
-            float pa = forward_wa(stateWeights, rank, actDim, feat, bestA);
+            float pa = dyn_forward_wa(stateWeights, forwardBase, rank, actDim, feat, bestA);
             scratch[feat] = sanitize(ps + pa, raw, san);
         }
         float vNext = 0.0f;
@@ -336,6 +357,8 @@ kernel void oak_step(
         return;
     }
 
+    // One-step rollout: reads the same `stateWeights` option slice as planning (`primitivePacked + dynOpt * stride`).
+    // Option 0 is the shared default dynamics; slices 1…oc−1 are additional STOMP heads (no duplicate primitive tensor).
     if (config.phase == kPhaseForwardModel) {
         uint row = gid / rank;
         uint feat = gid % rank;
@@ -345,6 +368,9 @@ kernel void oak_step(
             float prevOptF = latentPower[row];
             uint dynOpt = pick_option_slice(stompState, latentPower, row, rank, prevOptF, optionCount);
             uint blockBase = primitivePacked + dynOpt * optionForwardStride;
+            if (feat == 0u) {
+                stompState[4u * batchSize + row] = dynOpt;
+            }
             float ps = 0.0f;
             for (uint i = 0u; i < activeCount; ++i) {
                 uint idx = activeList[i];
@@ -360,9 +386,9 @@ kernel void oak_step(
     }
 
     if (config.phase == kPhaseLearn) {
-        // Fused option-dynamics NLMS: one thread per outRow loops over option slices (same FLOPs, fewer threads vs oc×rank separate threads).
-        const uint policyBase = 4u * rank;
-        const uint criticBase = 5u * rank;
+        // Fused option-dynamics NLMS only (option 0 slice = former primitive forward; no duplicate unmasked band).
+        const uint policyBase = 3u * rank;
+        const uint criticBase = 4u * rank;
 
         if (gid < rank) {
             uint feat = gid;
@@ -409,36 +435,8 @@ kernel void oak_step(
                 stateWeights[gvfBase + i] += (gradAcc[i] / float(batchSize)) * step;
             }
         }
-        if (gid >= rank + rank && gid < rank + rank + rank) {
-            uint outRow = gid - rank - rank;
-            uint fwdBase = gvf_bank_size(rank) + outRow * (rank + actDim);
-            // One err per (row, outRow); reuse across all i and a (same math, fewer loads / subs).
-            thread float gradAcc[384];
-            for (uint i = 0u; i < rank; ++i) { gradAcc[i] = 0.0f; }
-            thread float gradAccA[384];
-            for (uint a = 0u; a < actDim; ++a) { gradAccA[a] = 0.0f; }
-            for (uint row = 0u; row < batchSize; ++row) {
-                uint sOff = row * rank;
-                uint aOff = row * actDim;
-                float err = sanitize(state[row * rank + outRow] - rolloutState[row * rank + outRow], raw, san);
-                for (uint i = 0u; i < rank; ++i) {
-                    gradAcc[i] += err * sanitize(previousState[sOff + i], raw, san);
-                }
-                for (uint a = 0u; a < actDim; ++a) {
-                    gradAccA[a] += err * sanitize(previousAction[aOff + a], raw, san);
-                }
-            }
-            for (uint i = 0u; i < rank; ++i) {
-                float step = 1.0f / (featureSecondMoment[i] + ridge);
-                stateWeights[fwdBase + i] += (gradAcc[i] / float(batchSize)) * step;
-            }
-            for (uint a = 0u; a < actDim; ++a) {
-                float stepA = 1.0f / (featureSecondMoment[outRow] + ridge);
-                stateWeights[fwdBase + rank + a] += (gradAccA[a] / float(batchSize)) * stepA;
-            }
-        }
-        if (gid >= 3u * rank && gid < 4u * rank) {
-            uint outRow = gid - 3u * rank;
+        if (gid >= 2u * rank && gid < 3u * rank) {
+            uint outRow = gid - 2u * rank;
             // err and NLMS grads do not depend on option index; compute once, apply to every option slice (same math as prior per-opt recompute).
             thread float gradAcc[384];
             thread float gradAccA[384];
@@ -457,14 +455,20 @@ kernel void oak_step(
             }
             float invB = 1.0f / float(batchSize);
             for (uint opt = 0u; opt < optionCount; ++opt) {
+                float wMask = 0.0f;
+                for (uint row = 0u; row < batchSize; ++row) {
+                    if (batch_dynamics_opt(stompState, batchSize, row) == opt) wMask += 1.0f;
+                }
+                wMask *= invB;
+                if (wMask < 1e-8f) continue;
                 uint blockBase = primitivePacked + opt * optionForwardStride;
                 for (uint i = 0u; i < rank; ++i) {
                     float step = 1.0f / (featureSecondMoment[i] + ridge);
-                    stateWeights[blockBase + outRow * (rank + actDim) + i] += gradAcc[i] * invB * step;
+                    stateWeights[blockBase + outRow * (rank + actDim) + i] += gradAcc[i] * invB * step * wMask;
                 }
                 for (uint a = 0u; a < actDim; ++a) {
                     float stepA = 1.0f / (featureSecondMoment[outRow] + ridge);
-                    stateWeights[blockBase + outRow * (rank + actDim) + rank + a] += gradAccA[a] * invB * stepA;
+                    stateWeights[blockBase + outRow * (rank + actDim) + rank + a] += gradAccA[a] * invB * stepA * wMask;
                 }
             }
         }
@@ -543,8 +547,8 @@ kernel void oak_step(
             float prevOptF = latentPower[row];
             uint poPrev = uint(floor(prevOptF + 0.5f));
             if (poPrev >= optionCount) poPrev = optionCount - 1u;
-            uint phase = stompState[row * 2u];
-            uint elapsed = stompState[row * 2u + 1u];
+            uint phase = stompState[row * 4u];
+            uint elapsed = stompState[row * 4u + 1u];
             uint activeOption = 0u;
             float pickScore = 0.0f;
             if (phase == 1u && elapsed < rank) {
@@ -554,6 +558,12 @@ kernel void oak_step(
                     pickScore += optionValues[activeOption * rank + idx] * sanitize(state[sOff + idx], raw, san);
                 }
             } else {
+                // Option keyboard (Alberta Plan): Design B — one subtask/option episode selects a **single** terminal shaping
+                // vector (`optionValues` row); chords are not a separate blend kernel (bounded `optionCount` slots).
+                const uint kbd0 = 2u * batchSize;
+                float kbSum = 0.0f;
+                for (uint k = 0u; k < optionCount; ++k) kbSum += max(latentPower[kbd0 + row * optionCount + k], 1e-6f);
+                float invKb = 1.0f / kbSum;
                 float bestScore = -1e10f;
                 for (uint opt = 0u; opt < optionCount; ++opt) {
                     float score = 0.0f;
@@ -563,17 +573,30 @@ kernel void oak_step(
                         float sv = sanitize(state[sOff + idx], raw, san);
                         score += optionValues[off + idx] * sv;
                     }
-                    if (opt == 0u || score > bestScore) {
-                        bestScore = score;
+                    // STOMP / reward-respecting tie: terminal feature emphasis for subtask `opt` (generic latent index).
+                    if (opt < rank) {
+                        score += sanitize(state[sOff + opt], raw, san) * (1.0f / float(max(rank, 1u)));
+                    }
+                    float w = latentPower[kbd0 + row * optionCount + opt] * invKb * float(optionCount);
+                    float weighted = score * w;
+                    if (opt == 0u || weighted > bestScore) {
+                        bestScore = weighted;
                         activeOption = opt;
                     }
                 }
                 pickScore = bestScore;
                 if (actIdx == 0u) {
-                    stompState[row * 2u] = 1u;
-                    stompState[row * 2u + 1u] = 0u;
+                    stompState[row * 4u] = 1u;
+                    stompState[row * 4u + 1u] = 0u;
                     uint ocR = optionCount * rank;
                     optionCriticWeights[ocR + activeOption] += (pickScore - optionCriticWeights[ocR + activeOption]) * invT;
+                    // Option keyboard (Oak): soft track toward one-hot on chosen key (continual, no extra phase).
+                    for (uint k = 0u; k < optionCount; ++k) {
+                        float tgt = (k == activeOption) ? 1.0f : 0.0f;
+                        uint kix = kbd0 + row * optionCount + k;
+                        float oldv = latentPower[kix];
+                        latentPower[kix] += (tgt - oldv) * invT;
+                    }
                 }
             }
             uint base = activeOption * rank * actDim;
@@ -591,7 +614,7 @@ kernel void oak_step(
         return;
     }
 
-    // Planning: average-reward lookahead — K-step greedy roll (structural K) + primary/secondary critics; objective-only (Invariant 8).
+    // Planning: average-reward lookahead — imagination uses **option-conditioned** dynamics for `po` (STOMP: Model → Planning).
     if (config.phase == kPhasePlanning) {
         if (gid < batchSize) {
             uint aOff = gid * actDim;
@@ -599,6 +622,7 @@ kernel void oak_step(
             float prevOptF = latentPower[gid];
             uint po = uint(floor(prevOptF + 0.5f));
             if (po >= optionCount) po = optionCount - 1u;
+            uint forwardPlanBase = primitivePacked + po * optionForwardStride;
             float vNow = masked_dot(valueWeights, 0, state, sOff, activeList, activeCount, raw, san);
             float vSecNow = dot_active(optionCriticWeights, po * rank, state, sOff, activeList, activeCount, raw, san);
             vNow += vSecNow;
@@ -607,7 +631,7 @@ kernel void oak_step(
                 uint bestA = 0u;
                 float bestV = -1e10f;
                 for (uint cand = 0u; cand < actDim; ++cand) {
-                    float vCand = discrete_lookahead1(stateWeights, valueWeights, optionCriticWeights, po,
+                    float vCand = discrete_lookahead1(stateWeights, forwardPlanBase, valueWeights, optionCriticWeights, po,
                         state, sOff, actDim, rank, activeList, activeCount, cand, raw, san);
                     if (cand == 0u || vCand > bestV) {
                         bestV = vCand;
@@ -620,7 +644,7 @@ kernel void oak_step(
                     thread float scratch[384];
                     const uint maxR = 384u;
                     uint capRank = min(rank, maxR);
-                    float advK = kstep_plan_discrete(stateWeights, valueWeights, optionCriticWeights, po,
+                    float advK = kstep_plan_discrete(stateWeights, forwardPlanBase, valueWeights, optionCriticWeights, po,
                         scalars, state, sOff, actDim, rank, activeList, activeCount, planK, raw, san, scratch, capRank);
                     adv = max(adv1, advK);
                 }
@@ -640,8 +664,14 @@ kernel void oak_step(
                 thread float probeAct[64];
                 thread float bestVec[64];
                 uint adCap = min(actDim, 64u);
+                uint acP = min(activeCount, rank);
                 for (uint a = 0u; a < adCap; ++a) bestVec[a] = action[aOff + a];
-                for (uint dim = 0u; dim < adCap; ++dim) {
+                // Search control: probe action coordinates in an order derived from the active latent list (no full-state sweep).
+                for (uint pi = 0u; pi < adCap; ++pi) {
+                    uint dim = pi;
+                    if (acP > 0u) {
+                        dim = (activeList[pi % acP] + pi) % adCap;
+                    }
                     float span = actionBounds[actDim + dim] - actionBounds[dim];
                     float eps = span / float(max(rank + actDim, 1u));
                     for (uint sp = 0u; sp < 2u; ++sp) {
@@ -649,7 +679,7 @@ kernel void oak_step(
                         for (uint a = 0u; a < adCap; ++a) probeAct[a] = action[aOff + a];
                         float trial = probeAct[dim] + sgn * eps;
                         probeAct[dim] = clamp(trial, actionBounds[dim], actionBounds[actDim + dim]);
-                        float vCand = lookahead_value_thread(stateWeights, valueWeights, optionCriticWeights, po, state, sOff, actDim, rank, activeList, activeCount, raw, san, probeAct);
+                        float vCand = lookahead_value_thread(stateWeights, forwardPlanBase, valueWeights, optionCriticWeights, po, state, sOff, actDim, rank, activeList, activeCount, raw, san, probeAct);
                         if (vCand > bestV) {
                             bestV = vCand;
                             for (uint a = 0u; a < adCap; ++a) bestVec[a] = probeAct[a];
@@ -677,16 +707,6 @@ kernel void oak_step(
     // squared terms are then divided by bound² so reported means are O(1) (fraction of worst-case telemetry scale).
     // TD/learn phases use `sanitize` on raw errors without this bound—use `maxAbs*` in stats when tails matter.
     if (config.phase == kPhaseBookkeeping && gid == 0u) {
-        for (uint row = 0u; row < batchSize; ++row) {
-            uint p = stompState[row * 2u];
-            if (p == 1u) {
-                stompState[row * 2u + 1u] += 1u;
-                if (stompState[row * 2u + 1u] >= rank) {
-                    stompState[row * 2u] = 0u;
-                    stompState[row * 2u + 1u] = 0u;
-                }
-            }
-        }
         float totalUtility = 0.0f;
         for (uint i = 0u; i < rank; ++i) totalUtility += featureResidual[i];
         float threshold = totalUtility / float(max(rank * rank, 1u));
@@ -699,7 +719,70 @@ kernel void oak_step(
                 activeMask[i] = 0u;
             }
         }
-        scalars->activeCount = count > 0u ? count : 1u;
+        if (count == 0u) {
+            activeMask[0] = 1u;
+            activeList[0] = 0u;
+            count = 1u;
+        }
+        scalars->activeCount = count;
+        const uint ac = max(scalars->activeCount, 1u);
+        // Oak / FC-STOMP: swap one low-utility active feature for the strongest inactive candidate (single swap, bounded work).
+        if (count > 1u && count < rank) {
+            uint worstIdx = activeList[0];
+            float worstRes = featureResidual[worstIdx];
+            for (uint j = 1u; j < count; ++j) {
+                uint ix = activeList[j];
+                float r = featureResidual[ix];
+                if (r < worstRes) { worstRes = r; worstIdx = ix; }
+            }
+            uint bestIn = 0u;
+            float bestR = 0.0f;
+            bool found = false;
+            for (uint i = 0u; i < rank; ++i) {
+                if (activeMask[i] != 0u) continue;
+                float r = featureResidual[i];
+                if (!found || r > bestR) { bestR = r; bestIn = i; found = true; }
+            }
+            if (found && bestR > worstRes * 1.01f) {
+                activeMask[worstIdx] = 0u;
+                activeMask[bestIn] = 1u;
+                for (uint j = 0u; j < count; ++j) {
+                    if (activeList[j] == worstIdx) { activeList[j] = bestIn; break; }
+                }
+            }
+        }
+        // STOMP option rollout: reward-respecting stop (zStop vs subtask value) + horizon cap (average-reward Oak adaptation).
+        for (uint row = 0u; row < batchSize; ++row) {
+            uint p = stompState[row * 4u];
+            if (p != 1u) continue;
+            uint elapsed = stompState[row * 4u + 1u];
+            uint sOff = row * rank;
+            float prevOptF = latentPower[row];
+            uint po = uint(floor(prevOptF + 0.5f));
+            if (po >= optionCount) po = optionCount - 1u;
+            float vSub = 0.0f;
+            float zStop = 0.0f;
+            for (uint li = 0u; li < ac; ++li) {
+                uint idx = activeList[li];
+                float sv = state[sOff + idx];
+                if (!isfinite(sv)) sv = 0.0f;
+                vSub += optionValues[po * rank + idx] * sv;
+                zStop += valueWeights[idx] * sv;
+            }
+            if (po < rank) {
+                float t = state[sOff + po];
+                if (!isfinite(t)) t = 0.0f;
+                zStop += t * (1.0f / float(max(rank, 1u)));
+            }
+            bool horizon = (elapsed + 1u >= rank);
+            bool valueStop = (zStop >= vSub);
+            if (horizon || valueStop) {
+                stompState[row * 4u] = 0u;
+                stompState[row * 4u + 1u] = 0u;
+            } else {
+                stompState[row * 4u + 1u] = elapsed + 1u;
+            }
+        }
 
         float batchR = 0.0f;
         for (uint i = 0u; i < batchSize; ++i) batchR += reward[i];
@@ -796,6 +879,98 @@ kernel void oak_step(
             float batchMean = sumObsByF[f] * invBatch;
             observationMean[f] += invStep * (batchMean - observationMean[f]);
         }
+        float latentPredMean = lmse / denom;
+        const uint kbd0bk = 2u * batchSize;
+        const uint ofb0 = kbd0bk + batchSize * optionCount;
+        // Match latentPredictionMSE: sanitize, clamp to stats_abs_bound, divide by bound² so telemetry stays O(1) and finite.
+        float optPredAcc = 0.0f;
+        for (uint row = 0u; row < batchSize; ++row) {
+            uint sOff = row * rank;
+            for (uint k = 0u; k < rank; ++k) {
+                float ds = sanitize(state[sOff + k] - rolloutState[row * rank + k], stRaw, stSan);
+                float dc = clamp(ds, -boundLat, boundLat);
+                float nlc = dc * invBoundLat;
+                optPredAcc = fma(nlc, nlc, optPredAcc);
+            }
+        }
+        statsOut->optionModelPredictionMSE = optPredAcc / denom;
+        float planNonDefault = 0.0f;
+        for (uint row = 0u; row < batchSize; ++row) {
+            float prevPo = latentPower[row];
+            uint ip = uint(floor(prevPo + 0.5f));
+            if (ip > 0u && ip < optionCount) planNonDefault += 1.0f;
+        }
+        statsOut->planningUsedOptionDynamicsMean = planNonDefault * invBatch;
+        float invLife = 1.0f / float(max(scalars->stepCount, 1u));
+        for (uint opt = 0u; opt < optionCount; ++opt) {
+            float sumErr = 0.0f;
+            uint cntTerms = 0u;
+            uint cntRows = 0u;
+            uint cntPlanPick = 0u;
+            for (uint row = 0u; row < batchSize; ++row) {
+                float prevPo = latentPower[row];
+                uint poP = uint(floor(prevPo + 0.5f));
+                if (poP >= optionCount) poP = optionCount - 1u;
+                if (poP == opt) cntPlanPick++;
+                if (batch_dynamics_opt(stompState, batchSize, row) != opt) continue;
+                cntRows++;
+                uint sOff = row * rank;
+                for (uint k = 0u; k < rank; ++k) {
+                    float ds = sanitize(state[sOff + k] - rolloutState[row * rank + k], stRaw, stSan);
+                    float dc = clamp(ds, -boundLat, boundLat);
+                    float nlc = dc * invBoundLat;
+                    sumErr = fma(nlc, nlc, sumErr);
+                }
+                cntTerms += rank;
+            }
+            float meanErr = cntTerms > 0u ? sumErr / float(cntTerms) : 0.0f;
+            float prevE = latentPower[ofb0 + opt];
+            latentPower[ofb0 + opt] = prevE + (meanErr - prevE) * invLife;
+            float useFrac = float(cntRows) / float(max(batchSize, 1u));
+            uint uix = ofb0 + optionCount + opt;
+            float prevU = latentPower[uix];
+            latentPower[uix] = prevU + (useFrac - prevU) * invLife;
+            float planFrac = float(cntPlanPick) * invBatch;
+            uint pix = ofb0 + 2u * optionCount + opt;
+            float prevP = latentPower[pix];
+            latentPower[pix] = prevP + (planFrac - prevP) * invLife;
+        }
+        float reinits = 0.0f;
+        float invKey = 1.0f / float(max(optionCount, 1u));
+        for (uint opt = 0u; opt < optionCount; ++opt) {
+            float oe = latentPower[ofb0 + opt];
+            float ou = latentPower[ofb0 + optionCount + opt];
+            float opPick = latentPower[ofb0 + 2u * optionCount + opt];
+            if (oe > latentPredMean * 4.0f && ou < 0.05f && opPick < 0.05f) {
+                uint bb = primitivePacked + opt * optionForwardStride;
+                for (uint i = 0u; i < optionForwardStride; ++i) {
+                    stateWeights[bb + i] = 0.0f;
+                }
+                uint polBase = opt * rank * actDim;
+                for (uint i = 0u; i < rank * actDim; ++i) {
+                    optionPolicyWeights[polBase + i] = 0.0f;
+                }
+                for (uint i = 0u; i < rank; ++i) {
+                    optionValues[opt * rank + i] = 0.0f;
+                }
+                if (opt < rank) {
+                    optionValues[opt * rank + opt] += 1.0f;
+                }
+                uint ocR = optionCount * rank;
+                for (uint i = 0u; i < rank; ++i) {
+                    optionCriticWeights[opt * rank + i] = 0.0f;
+                }
+                optionCriticWeights[ocR + opt] = 0.0f;
+                for (uint row = 0u; row < batchSize; ++row) {
+                    latentPower[kbd0bk + row * optionCount + opt] = invKey;
+                }
+                latentPower[ofb0 + opt] = 0.0f;
+                latentPower[ofb0 + optionCount + opt] = 0.0f;
+                latentPower[ofb0 + 2u * optionCount + opt] = 0.0f;
+                reinits += 1.0f;
+            }
+        }
+        statsOut->oakOptionReinitCount = reinits;
         statsOut->rewardRate = scalars->rewardRate;
         statsOut->latentPredictionMSE = lmse / denom;
         statsOut->rewardPredictionMSE = rmse / float(max(batchSize, 1u));
