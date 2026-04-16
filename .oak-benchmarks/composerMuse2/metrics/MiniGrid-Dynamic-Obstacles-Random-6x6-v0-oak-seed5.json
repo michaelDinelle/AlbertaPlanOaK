@@ -1,0 +1,44 @@
+{
+  "actionDim" : 3,
+  "actionDiscreteCount" : 3,
+  "agentStepMsMean" : 965.4709039230768,
+  "command" : "benchmark",
+  "discreteAction" : {
+    "histogram" : [
+      6779,
+      42073,
+      4396
+    ],
+    "uniqueCount" : 3
+  },
+  "doneCount" : 536,
+  "envId" : "MiniGrid-Dynamic-Obstacles-Random-6x6-v0",
+  "envStepMsMean" : 25.873182538461545,
+  "health" : {
+    "actionDeltaL2Mean" : 5.173980742500834e-33,
+    "activeRank" : 124,
+    "latentPredictionMSE" : 1.9927978179545672e-30,
+    "latentVarianceTrace" : 6.496375004627797e-34,
+    "nonFiniteRawTotal" : 0,
+    "nonFiniteSanitizedTotal" : 0,
+    "oakOptionReinitCount" : 0,
+    "optionModelPredictionMSE" : 2.1392717078399287e-30,
+    "planningActionChangeL2Mean" : 0,
+    "planningUsedOptionDynamicsMean" : 0,
+    "rewardPredictionMSE" : 4.612425170465763e-33,
+    "rewardRate" : -0.021015815436840057
+  },
+  "measuredBatchCount" : 13,
+  "measuredSeconds" : 12.887640916,
+  "measuredStepCount" : 53248,
+  "numEnvs" : 4096,
+  "observationDim" : 244,
+  "policy" : "oak",
+  "rewardSum" : -496.8937499523163,
+  "schemaVersion" : 2,
+  "seed" : 5,
+  "stepsPerSecond" : 4131.710399681654,
+  "stopAfterMeasuredSteps" : 50000,
+  "stopReason" : "measured_steps",
+  "warmupSteps" : 1000
+}

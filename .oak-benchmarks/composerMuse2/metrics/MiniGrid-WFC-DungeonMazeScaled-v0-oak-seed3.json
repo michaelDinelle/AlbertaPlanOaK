@@ -1,0 +1,48 @@
+{
+  "actionDim" : 7,
+  "actionDiscreteCount" : 7,
+  "agentStepMsMean" : 1047.1500802307692,
+  "command" : "benchmark",
+  "discreteAction" : {
+    "histogram" : [
+      1990,
+      1590,
+      11713,
+      6005,
+      3625,
+      23769,
+      4556
+    ],
+    "uniqueCount" : 7
+  },
+  "doneCount" : 68,
+  "envId" : "MiniGrid-WFC-DungeonMazeScaled-v0",
+  "envStepMsMean" : 34.25523384615384,
+  "health" : {
+    "actionDeltaL2Mean" : 1.1050745363291855e-32,
+    "activeRank" : 132.46153846153845,
+    "latentPredictionMSE" : 9.325688696710867e-31,
+    "latentVarianceTrace" : 1.5665688811632678e-33,
+    "nonFiniteRawTotal" : 0,
+    "nonFiniteSanitizedTotal" : 0,
+    "oakOptionReinitCount" : 0,
+    "optionModelPredictionMSE" : 1.1958768649578425e-30,
+    "planningActionChangeL2Mean" : 0,
+    "planningUsedOptionDynamicsMean" : 0,
+    "rewardPredictionMSE" : 5.212283961012294e-34,
+    "rewardRate" : 0.0010133091127499938
+  },
+  "measuredBatchCount" : 13,
+  "measuredSeconds" : 14.058436209,
+  "measuredStepCount" : 53248,
+  "numEnvs" : 4096,
+  "observationDim" : 244,
+  "policy" : "oak",
+  "rewardSum" : 66.8803995847702,
+  "schemaVersion" : 2,
+  "seed" : 3,
+  "stepsPerSecond" : 3787.618993207184,
+  "stopAfterMeasuredSteps" : 50000,
+  "stopReason" : "measured_steps",
+  "warmupSteps" : 1000
+}

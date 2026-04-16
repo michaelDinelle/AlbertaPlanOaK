@@ -1,0 +1,2 @@
+{"actionDim":6,"envId":"HalfCheetah-v4","numEnvs":1024,"observationDim":17,"policy":"random","seed":8,"stopAfterMeasuredSteps":50000,"type":"run_start","warmupSteps":1000}
+{"agentStepMsMean":0.028840061224489795,"doneCount":0,"envStepMsMean":6.23422624489796,"measuredSeconds":0.306943167,"measuredStepCount":50176,"rewardSum":-13671.552779093205,"stepsPerSecond":163470.00159804826,"stopReason":"measured_steps","type":"run_end"}

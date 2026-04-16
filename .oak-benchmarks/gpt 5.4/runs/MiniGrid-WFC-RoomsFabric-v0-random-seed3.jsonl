@@ -1,0 +1,2 @@
+{"actionDim":7,"actionDiscreteCount":7,"envId":"MiniGrid-WFC-RoomsFabric-v0","numEnvs":8192,"observationDim":244,"policy":"random","seed":3,"stopAfterMeasuredSteps":50000,"type":"run_start","warmupSteps":1000}
+{"agentStepMsMean":0.053315714285714286,"doneCount":18,"envStepMsMean":49.74039271428571,"measuredSeconds":0.348603584,"measuredStepCount":57344,"rewardSum":17.82179993391037,"stepsPerSecond":164496.30076092388,"stopReason":"measured_steps","type":"run_end"}

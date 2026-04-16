@@ -1,0 +1,48 @@
+{
+  "actionDim" : 7,
+  "actionDiscreteCount" : 7,
+  "agentStepMsMean" : 751.0045226153845,
+  "command" : "benchmark",
+  "discreteAction" : {
+    "histogram" : [
+      2916,
+      1110,
+      2287,
+      7401,
+      29628,
+      2886,
+      7020
+    ],
+    "uniqueCount" : 7
+  },
+  "doneCount" : 0,
+  "envId" : "MiniGrid-UnlockPickup-v0",
+  "envStepMsMean" : 33.15173738461539,
+  "health" : {
+    "actionDeltaL2Mean" : 8.414985186665222e-32,
+    "activeRank" : 120.38461538461539,
+    "latentPredictionMSE" : 7.085736080715832e-30,
+    "latentVarianceTrace" : 6.418176350899284e-31,
+    "nonFiniteRawTotal" : 0,
+    "nonFiniteSanitizedTotal" : 0,
+    "oakOptionReinitCount" : 0.07692307692307693,
+    "optionModelPredictionMSE" : 6.917647879302326e-19,
+    "planningActionChangeL2Mean" : 0,
+    "planningUsedOptionDynamicsMean" : 0.9978402944711539,
+    "rewardPredictionMSE" : 3.003633349071206e-32,
+    "rewardRate" : 0
+  },
+  "measuredBatchCount" : 13,
+  "measuredSeconds" : 10.194198459,
+  "measuredStepCount" : 53248,
+  "numEnvs" : 4096,
+  "observationDim" : 244,
+  "policy" : "oak",
+  "rewardSum" : 0,
+  "schemaVersion" : 2,
+  "seed" : 9,
+  "stepsPerSecond" : 5223.36309364173,
+  "stopAfterMeasuredSteps" : 50000,
+  "stopReason" : "measured_steps",
+  "warmupSteps" : 1000
+}

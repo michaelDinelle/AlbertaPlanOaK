@@ -1,0 +1,2 @@
+{"actionDim":7,"actionDiscreteCount":7,"envId":"MiniGrid-GoToDoor-5x5-v0","numEnvs":8192,"observationDim":244,"policy":"random","seed":3,"stopAfterMeasuredSteps":50000,"type":"run_start","warmupSteps":1000}
+{"agentStepMsMean":0.04861314285714286,"doneCount":12565,"envStepMsMean":49.09142871428571,"measuredSeconds":0.344023792,"measuredStepCount":57344,"rewardSum":675.4129943847656,"stepsPerSecond":166686.14593958083,"stopReason":"measured_steps","type":"run_end"}

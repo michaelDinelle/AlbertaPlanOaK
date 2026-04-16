@@ -1,0 +1,48 @@
+{
+  "actionDim" : 7,
+  "actionDiscreteCount" : 7,
+  "agentStepMsMean" : 729.7211539230769,
+  "command" : "benchmark",
+  "discreteAction" : {
+    "histogram" : [
+      7234,
+      7470,
+      7271,
+      7101,
+      7104,
+      8980,
+      8088
+    ],
+    "uniqueCount" : 7
+  },
+  "doneCount" : 12,
+  "envId" : "MiniGrid-WFC-RoomsFabric-v0",
+  "envStepMsMean" : 33.267201923076925,
+  "health" : {
+    "actionDeltaL2Mean" : 1.329820329291135e-31,
+    "activeRank" : 99.84615384615384,
+    "latentPredictionMSE" : 5.62753677804925e-30,
+    "latentVarianceTrace" : 4.53765166702859e-31,
+    "nonFiniteRawTotal" : 0,
+    "nonFiniteSanitizedTotal" : 0,
+    "oakOptionReinitCount" : 0.15384615384615385,
+    "optionModelPredictionMSE" : 4.908461734769019e-18,
+    "planningActionChangeL2Mean" : 0,
+    "planningUsedOptionDynamicsMean" : 0.6176945612980769,
+    "rewardPredictionMSE" : 6.445961537784535e-32,
+    "rewardRate" : 0.0001892508298624307
+  },
+  "measuredBatchCount" : 13,
+  "measuredSeconds" : 9.919000041,
+  "measuredStepCount" : 53248,
+  "numEnvs" : 4096,
+  "observationDim" : 244,
+  "policy" : "oak",
+  "rewardSum" : 11.827199935913086,
+  "schemaVersion" : 2,
+  "seed" : 8,
+  "stepsPerSecond" : 5368.283070864038,
+  "stopAfterMeasuredSteps" : 50000,
+  "stopReason" : "measured_steps",
+  "warmupSteps" : 1000
+}

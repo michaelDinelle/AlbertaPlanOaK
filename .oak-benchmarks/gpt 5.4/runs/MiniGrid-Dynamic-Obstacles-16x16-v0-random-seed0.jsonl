@@ -1,0 +1,2 @@
+{"actionDim":3,"actionDiscreteCount":3,"envId":"MiniGrid-Dynamic-Obstacles-16x16-v0","numEnvs":4096,"observationDim":244,"policy":"random","seed":0,"stopAfterMeasuredSteps":50000,"type":"run_start","warmupSteps":1000}
+{"agentStepMsMean":0.02461838461538462,"doneCount":4737,"envStepMsMean":24.57214423076923,"measuredSeconds":0.319802875,"measuredStepCount":53248,"rewardSum":-4737,"stepsPerSecond":166502.56818360373,"stopReason":"measured_steps","type":"run_end"}

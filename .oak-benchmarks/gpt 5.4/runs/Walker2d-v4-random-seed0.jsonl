@@ -1,0 +1,2 @@
+{"actionDim":6,"envId":"Walker2d-v4","numEnvs":1024,"observationDim":17,"policy":"random","seed":0,"stopAfterMeasuredSteps":50000,"type":"run_start","warmupSteps":1000}
+{"agentStepMsMean":0.03227544897959184,"doneCount":1945,"envStepMsMean":5.067057836734692,"measuredSeconds":0.249928875,"measuredStepCount":50176,"rewardSum":6949.011530743826,"stepsPerSecond":200761.11653765498,"stopReason":"measured_steps","type":"run_end"}

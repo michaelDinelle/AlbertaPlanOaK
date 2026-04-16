@@ -1,0 +1,34 @@
+{
+  "actionDim" : 7,
+  "actionDiscreteCount" : 7,
+  "agentStepMsMean" : 0.03356107692307692,
+  "command" : "benchmark",
+  "discreteAction" : {
+    "histogram" : [
+      7554,
+      7590,
+      7572,
+      7502,
+      7655,
+      7642,
+      7733
+    ],
+    "uniqueCount" : 7
+  },
+  "doneCount" : 452,
+  "envId" : "MiniGrid-Fetch-8x8-N3-v0",
+  "envStepMsMean" : 24.256625000000003,
+  "measuredBatchCount" : 13,
+  "measuredSeconds" : 0.315903208,
+  "measuredStepCount" : 53248,
+  "numEnvs" : 4096,
+  "observationDim" : 244,
+  "policy" : "random",
+  "rewardSum" : 155.51531237363815,
+  "schemaVersion" : 2,
+  "seed" : 0,
+  "stepsPerSecond" : 168557.9590568767,
+  "stopAfterMeasuredSteps" : 50000,
+  "stopReason" : "measured_steps",
+  "warmupSteps" : 1000
+}

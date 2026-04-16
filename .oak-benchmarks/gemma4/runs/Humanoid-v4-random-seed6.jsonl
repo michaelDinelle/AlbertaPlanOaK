@@ -1,0 +1,2 @@
+{"actionDim":17,"envId":"Humanoid-v4","numEnvs":2048,"observationDim":376,"policy":"random","seed":6,"stopAfterMeasuredSteps":50000,"type":"run_start","warmupSteps":1000}
+{"agentStepMsMean":0.16733176,"doneCount":1407,"envStepMsMean":34.527694960000005,"measuredSeconds":0.867428625,"measuredStepCount":51200,"rewardSum":249308.81812548637,"stepsPerSecond":59025.029292755935,"stopReason":"measured_steps","type":"run_end"}

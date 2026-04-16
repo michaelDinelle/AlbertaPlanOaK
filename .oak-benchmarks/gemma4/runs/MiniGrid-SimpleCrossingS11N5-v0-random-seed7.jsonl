@@ -1,0 +1,2 @@
+{"actionDim":7,"actionDiscreteCount":7,"envId":"MiniGrid-SimpleCrossingS11N5-v0","numEnvs":8192,"observationDim":244,"policy":"random","seed":7,"stopAfterMeasuredSteps":50000,"type":"run_start","warmupSteps":1000}
+{"agentStepMsMean":0.05018457142857143,"doneCount":0,"envStepMsMean":49.06145242857143,"measuredSeconds":0.343826292,"measuredStepCount":57344,"rewardSum":0,"stepsPerSecond":166781.89345682733,"stopReason":"measured_steps","type":"run_end"}

@@ -1,0 +1,2 @@
+{"actionDim":7,"actionDiscreteCount":7,"envId":"MiniGrid-RedBlueDoors-6x6-v0","numEnvs":8192,"observationDim":244,"policy":"random","seed":5,"stopAfterMeasuredSteps":50000,"type":"run_start","warmupSteps":1000}
+{"agentStepMsMean":0.04837485714285714,"doneCount":113,"envStepMsMean":47.61478571428571,"measuredSeconds":0.333686125,"measuredStepCount":57344,"rewardSum":0,"stepsPerSecond":171850.11813122287,"stopReason":"measured_steps","type":"run_end"}

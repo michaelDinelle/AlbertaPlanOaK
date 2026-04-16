@@ -1,0 +1,2 @@
+{"actionDim":7,"actionDiscreteCount":7,"envId":"MiniGrid-LavaCrossingS9N2-v0","numEnvs":8192,"observationDim":244,"policy":"random","seed":0,"stopAfterMeasuredSteps":50000,"type":"run_start","warmupSteps":1000}
+{"agentStepMsMean":0.05235685714285714,"doneCount":1094,"envStepMsMean":47.289666714285715,"measuredSeconds":0.33144175,"measuredStepCount":57344,"rewardSum":0,"stepsPerSecond":173013.81011897264,"stopReason":"measured_steps","type":"run_end"}

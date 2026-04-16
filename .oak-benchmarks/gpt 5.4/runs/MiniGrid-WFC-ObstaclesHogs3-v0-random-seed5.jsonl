@@ -1,0 +1,2 @@
+{"actionDim":7,"actionDiscreteCount":7,"envId":"MiniGrid-WFC-ObstaclesHogs3-v0","numEnvs":8192,"observationDim":244,"policy":"random","seed":5,"stopAfterMeasuredSteps":50000,"type":"run_start","warmupSteps":1000}
+{"agentStepMsMean":0.055339000000000006,"doneCount":26,"envStepMsMean":54.09808928571429,"measuredSeconds":0.37912125,"measuredStepCount":57344,"rewardSum":25.756999909877777,"stepsPerSecond":151255.0404389097,"stopReason":"measured_steps","type":"run_end"}
