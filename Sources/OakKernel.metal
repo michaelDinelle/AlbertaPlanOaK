@@ -2,6 +2,9 @@
 #include <float.h>
 using namespace metal;
 
+/// Specialized at pipeline creation (must match Swift `MTLFunctionConstantValues` index 0).
+[[function_constant(0)]] constant bool fc_action_is_discrete;
+
 /// Per-term magnitude bound so `termCount` summed squares stay in `float` range: each term ≤ `FLT_MAX/n` ⇒ sum ≤ `FLT_MAX`.
 /// **Not** reward shaping or display scaling (Alberta invariant 7): IEEE overflow hygiene for diagnostic aggregates only;
 /// learning uses unsquared `sanitize` paths elsewhere. `FLT_MAX` from `<float.h>`; `sqrt` from Metal.
@@ -9,6 +12,9 @@ inline float stats_abs_bound_for_sum_squares(uint termCount) {
     float n = float(max(termCount, 1u));
     return sqrt(FLT_MAX / n);
 }
+
+// Future: optional `simdgroup_matrix` GVF paths should gate on Apple GPU Family 9+ with a scalar half/float fallback
+// (same learning semantics). Threadgroup `activeList` tiling stays trace-driven (small activeCount often loses vs device reads).
 
 // Oak / Alberta Plan (12 steps): continual phases every tick (no train/eval). GVF/planning: single Metal path (no duplicate
 // MPS matmul); Swift `structuralMaxGvfHeads` caps future batched GenTD width. Packed `params` + `state` + `uint` arenas
@@ -79,6 +85,19 @@ struct KernelConfig {
     float gammaPhi0;
     float gammaPhi1;
     float gammaPhi2;
+    /// Precomputed in Swift (same formulas as former inline helpers): capacity ridge, structural cap, NLMS scale, telemetry bounds.
+    float capacityRidge;
+    float structuralCap;
+    float nlmsStepScale;
+    float sqrtFltEpsilon;
+    float boundLat;
+    float boundRew;
+    float boundAct;
+    float invBoundLat;
+    float invBoundRew;
+    float invBoundAct;
+    /// Equals `1/sqrt(rank+actDim)` — multiply instead of `plan_merge_lambda` per thread.
+    float rsqrtPlanLambda;
 };
 struct KernelScalars { uint stepCount, rewardCount, activeCount, admissionCursor; float rewardRate; float pEff; };
 struct KernelStats {
@@ -100,21 +119,98 @@ inline float sanitize(float v, thread uint& raw, thread uint& san) {
     return 0.0f;
 }
 
-inline float masked_dot(device const float *w, uint wOff, device const float *v, uint vOff, device const uint *active, uint count, thread uint& r, thread uint& s) {
+/// Float arena weights (e.g. GVF stack); `w` is fp32 storage.
+inline float masked_dot_arena(device const float *w, uint wOff, device const float *v, uint vOff, device const uint *active, uint count, thread uint& r, thread uint& s) {
     float sum = 0.0f;
-    for (uint i = 0; i < count; ++i) {
-        uint idx = active[i];
-        sum += w[wOff + idx] * sanitize(v[vOff + idx], r, s);
+    uint pairs = 0u;
+    int ic = int(count);
+    int ii = 0;
+    for (; ii + 3 < ic; ii += 4) {
+        uint i0 = active[ii];
+        uint i1 = active[ii + 1];
+        uint i2 = active[ii + 2];
+        uint i3 = active[ii + 3];
+        float vx0 = v[vOff + i0];
+        float vx1 = v[vOff + i1];
+        float vx2 = v[vOff + i2];
+        float vx3 = v[vOff + i3];
+        pairs += select(1u, 0u, isfinite(vx0));
+        pairs += select(1u, 0u, isfinite(vx1));
+        pairs += select(1u, 0u, isfinite(vx2));
+        pairs += select(1u, 0u, isfinite(vx3));
+        float vv0 = select(0.0f, vx0, isfinite(vx0));
+        float vv1 = select(0.0f, vx1, isfinite(vx1));
+        float vv2 = select(0.0f, vx2, isfinite(vx2));
+        float vv3 = select(0.0f, vx3, isfinite(vx3));
+        float4 ww = float4(w[wOff + i0], w[wOff + i1], w[wOff + i2], w[wOff + i3]);
+        float4 vv = float4(vv0, vv1, vv2, vv3);
+        sum += dot(ww, vv);
     }
-    return sanitize(sum, r, s);
+    for (; ii < ic; ++ii) {
+        uint idx = active[ii];
+        float vx = v[vOff + idx];
+        pairs += select(1u, 0u, isfinite(vx));
+        float vv = select(0.0f, vx, isfinite(vx));
+        sum = fma(w[wOff + idx], vv, sum);
+    }
+    pairs += select(1u, 0u, isfinite(sum));
+    sum = select(0.0f, sum, isfinite(sum));
+    r += pairs;
+    s += pairs;
+    return sum;
 }
 
-inline float dot_active(device const float *w, uint wOff, device const float *v, uint vOff, device const uint *activeList, uint activeCount, thread uint& raw, thread uint& san) {
-    return masked_dot(w, wOff, v, vOff, activeList, activeCount, raw, san);
+/// Param arena (`params` buffer) stored as **half**; accumulators stay float.
+inline float masked_dot_param(device const half *w, uint wOff, device const float *v, uint vOff, device const uint *active, uint count, thread uint& r, thread uint& s) {
+    float sum = 0.0f;
+    uint pairs = 0u;
+    int ic = int(count);
+    int ii = 0;
+    for (; ii + 3 < ic; ii += 4) {
+        uint i0 = active[ii];
+        uint i1 = active[ii + 1];
+        uint i2 = active[ii + 2];
+        uint i3 = active[ii + 3];
+        float vx0 = v[vOff + i0];
+        float vx1 = v[vOff + i1];
+        float vx2 = v[vOff + i2];
+        float vx3 = v[vOff + i3];
+        pairs += select(1u, 0u, isfinite(vx0));
+        pairs += select(1u, 0u, isfinite(vx1));
+        pairs += select(1u, 0u, isfinite(vx2));
+        pairs += select(1u, 0u, isfinite(vx3));
+        float vv0 = select(0.0f, vx0, isfinite(vx0));
+        float vv1 = select(0.0f, vx1, isfinite(vx1));
+        float vv2 = select(0.0f, vx2, isfinite(vx2));
+        float vv3 = select(0.0f, vx3, isfinite(vx3));
+        float4 ww = float4(float(w[wOff + i0]), float(w[wOff + i1]), float(w[wOff + i2]), float(w[wOff + i3]));
+        float4 vv = float4(vv0, vv1, vv2, vv3);
+        sum += dot(ww, vv);
+    }
+    for (; ii < ic; ++ii) {
+        uint idx = active[ii];
+        float vx = v[vOff + idx];
+        pairs += select(1u, 0u, isfinite(vx));
+        float vv = select(0.0f, vx, isfinite(vx));
+        sum = fma(float(w[wOff + idx]), vv, sum);
+    }
+    pairs += select(1u, 0u, isfinite(sum));
+    sum = select(0.0f, sum, isfinite(sum));
+    r += pairs;
+    s += pairs;
+    return sum;
+}
+
+inline float dot_active_arena(device const float *w, uint wOff, device const float *v, uint vOff, device const uint *activeList, uint activeCount, thread uint& raw, thread uint& san) {
+    return masked_dot_arena(w, wOff, v, vOff, activeList, activeCount, raw, san);
+}
+
+inline float dot_active_param(device const half *w, uint wOff, device const float *v, uint vOff, device const uint *activeList, uint activeCount, thread uint& raw, thread uint& san) {
+    return masked_dot_param(w, wOff, v, vOff, activeList, activeCount, raw, san);
 }
 
 /// Sparse dot `sum_i w[wOff+list[i]] * val[i]` where `val[i]` are **already** sanitized (e.g. prediction scratch).
-inline float dot_sparse_weights_preval(device const float *w, uint wOff, device const float *val, device const uint *list, uint n) {
+inline float dot_sparse_weights_preval(device const half *w, uint wOff, device const float *val, device const uint *list, uint n) {
     float sum = 0.0f;
     uint i = 0u;
     for (; i + 3u < n; i += 4u) {
@@ -122,12 +218,12 @@ inline float dot_sparse_weights_preval(device const float *w, uint wOff, device 
         uint i1 = list[i + 1u];
         uint i2 = list[i + 2u];
         uint i3 = list[i + 3u];
-        float4 ww = float4(w[wOff + i0], w[wOff + i1], w[wOff + i2], w[wOff + i3]);
+        float4 ww = float4(float(w[wOff + i0]), float(w[wOff + i1]), float(w[wOff + i2]), float(w[wOff + i3]));
         float4 vv = float4(val[i], val[i + 1u], val[i + 2u], val[i + 3u]);
         sum += dot(ww, vv);
     }
     for (; i < n; ++i) {
-        sum += w[wOff + list[i]] * val[i];
+        sum = fma(float(w[wOff + list[i]]), val[i], sum);
     }
     return sum;
 }
@@ -155,21 +251,21 @@ inline float nlms_step_scale(uint rank, uint batchSize) {
 }
 
 /// Running max scale from Autostep-style feature second moments (`featureSecondMoment` EMA of batch mean \(x^2\)).
-inline float feature_sigma_max(device const float *featureSecondMoment, uint rank) {
+inline float feature_sigma_max(device const half *featureSecondMoment, uint rank) {
     float m = 0.0f;
-    for (uint i = 0u; i < rank; ++i) m = max(m, featureSecondMoment[i]);
+    for (uint i = 0u; i < rank; ++i) m = max(m, float(featureSecondMoment[i]));
     return sqrt(max(m, FLT_MIN));
 }
 
 /// Structural numerical floor (continual ridge / machine epsilon): replaces ad-hoc `1e-6`/`1e-8` in softmax-style ops.
 /// `p_eff`/`N`/`C` from rank, online step index, and capacity volume (same `cap` family as `capacity_ridge`).
-inline float autostep_eps_cap(uint rank, uint batchSize, device const KernelScalars *scalars, device const float *featureSecondMoment) {
+inline float autostep_eps_cap(uint rank, uint batchSize, device const KernelScalars *scalars, device const half *featureSecondMoment, float sqrtFltEpsilon) {
     float sigma = feature_sigma_max(featureSecondMoment, rank);
     float capVol = float(max(rank * max(batchSize, 1u), 1u));
     float N = float(max(scalars->stepCount, 1u));
     float peff = max(scalars->pEff, 1.0f);
     float ratio = peff / (N + capVol);
-    return sqrt(FLT_EPSILON) * sigma * sqrt(max(ratio, FLT_MIN));
+    return sqrtFltEpsilon * sigma * sqrt(max(ratio, FLT_MIN));
 }
 
 inline float plan_merge_lambda(uint rank, uint actDim) {
@@ -182,26 +278,26 @@ inline device float *arena_ptr(device float *arena, uint base) {
 
 inline uint gvf_bank_size(uint rank) { return rank * rank; }
 
-inline float gvf_weight(device const float *packed, uint g, uint i, uint rank) {
-    return packed[g * rank + i];
+inline float gvf_weight(device const half *packed, uint g, uint i, uint rank) {
+    return float(packed[g * rank + i]);
 }
 
-inline float forward_ws(device const float *packed, uint rank, uint actDim, uint outRow, uint inIdx) {
+inline float forward_ws(device const half *packed, uint rank, uint actDim, uint outRow, uint inIdx) {
     uint base = gvf_bank_size(rank);
-    return packed[base + outRow * (rank + actDim) + inIdx];
+    return float(packed[base + outRow * (rank + actDim) + inIdx]);
 }
 
-inline float forward_wa(device const float *packed, uint rank, uint actDim, uint outRow, uint aIdx) {
+inline float forward_wa(device const half *packed, uint rank, uint actDim, uint outRow, uint aIdx) {
     uint base = gvf_bank_size(rank) + outRow * (rank + actDim) + rank;
-    return packed[base + aIdx];
+    return float(packed[base + aIdx]);
 }
 
 /// Option dynamics block `opt`: `base = primitivePacked + opt * optionForwardStride` (`primitivePacked` = GVF size).
-inline float opt_forward_ws(device const float *packed, uint blockBase, uint rank, uint actDim, uint outRow, uint inIdx) {
-    return packed[blockBase + outRow * (rank + actDim) + inIdx];
+inline float opt_forward_ws(device const half *packed, uint blockBase, uint rank, uint actDim, uint outRow, uint inIdx) {
+    return float(packed[blockBase + outRow * (rank + actDim) + inIdx]);
 }
-inline float opt_forward_wa(device const float *packed, uint blockBase, uint rank, uint actDim, uint outRow, uint aIdx) {
-    return packed[blockBase + outRow * (rank + actDim) + rank + aIdx];
+inline float opt_forward_wa(device const half *packed, uint blockBase, uint rank, uint actDim, uint outRow, uint aIdx) {
+    return float(packed[blockBase + outRow * (rank + actDim) + rank + aIdx]);
 }
 
 /// `stompState` layout: indices `[0, 4*batch)` phase/elapsed per row (4 uints/row); `[4*batch, 5*batch)` batch dynamics option index (STOMP).
@@ -227,15 +323,15 @@ inline uint pick_option_slice(device const uint *stompState, device const float 
 /// Start of the packed **forward** segment: after GVF bank (same layout for primitive and option slices).
 inline uint forward_segment_base(uint rank) { return gvf_bank_size(rank); }
 
-inline float dyn_forward_ws(device const float *packed, uint forwardBase, uint rank, uint actDim, uint outRow, uint inIdx) {
-    return packed[forwardBase + outRow * (rank + actDim) + inIdx];
+inline float dyn_forward_ws(device const half *packed, uint forwardBase, uint rank, uint actDim, uint outRow, uint inIdx) {
+    return float(packed[forwardBase + outRow * (rank + actDim) + inIdx]);
 }
-inline float dyn_forward_wa(device const float *packed, uint forwardBase, uint rank, uint actDim, uint outRow, uint aIdx) {
-    return packed[forwardBase + outRow * (rank + actDim) + rank + aIdx];
+inline float dyn_forward_wa(device const half *packed, uint forwardBase, uint rank, uint actDim, uint outRow, uint aIdx) {
+    return float(packed[forwardBase + outRow * (rank + actDim) + rank + aIdx]);
 }
 
 /// One-step lookahead: primary value + **subtask** value head (`optionValues` row) on predicted features (planning→representation loop).
-inline float lookahead_value_thread(device const float *stateWeights, uint forwardBase, device const float *valueWeights, device const float *optionSubValues,
+inline float lookahead_value_thread(device const half *stateWeights, uint forwardBase, device const half *valueWeights, device const half *optionSubValues,
     uint optIdx, device const float *lat, uint sOff, uint actDim, uint rank, device const uint *activeList, uint activeCount,     thread uint& raw, thread uint& san,
     device const float *actionVec) {
     float vCand = 0.0f;
@@ -251,15 +347,15 @@ inline float lookahead_value_thread(device const float *stateWeights, uint forwa
             pa += dyn_forward_wa(stateWeights, forwardBase, rank, actDim, idx, a) * sanitize(actionVec[a], raw, san);
         }
         float predNext = sanitize(ps + pa, raw, san);
-        float pri = valueWeights[idx] * predNext;
-        float sec = optionSubValues[optIdx * rank + idx] * predNext;
+        float pri = float(valueWeights[idx]) * predNext;
+        float sec = float(optionSubValues[optIdx * rank + idx]) * predNext;
         vCand += pri + sec;
     }
     return vCand;
 }
 
-inline float discrete_lookahead1(device const float *stateWeights, uint forwardBase, device const float *valueWeights,
-    device const float *optionSubValues, uint optIdx,
+inline float discrete_lookahead1(device const half *stateWeights, uint forwardBase, device const half *valueWeights,
+    device const half *optionSubValues, uint optIdx,
     device const float *lat, uint sOff, uint actDim, uint rank, device const uint *activeList, uint activeCount,
     uint cand, thread uint& raw, thread uint& san) {
     float vCand = 0.0f;
@@ -272,15 +368,15 @@ inline float discrete_lookahead1(device const float *stateWeights, uint forwardB
         }
         float pa = dyn_forward_wa(stateWeights, forwardBase, rank, actDim, idx, cand);
         float predNext = sanitize(ps + pa, raw, san);
-        float pri = valueWeights[idx] * predNext;
-        float sec = optionSubValues[optIdx * rank + idx] * predNext;
+        float pri = float(valueWeights[idx]) * predNext;
+        float sec = float(optionSubValues[optIdx * rank + idx]) * predNext;
         vCand += pri + sec;
     }
     return vCand;
 }
 
-inline float kstep_plan_discrete(device const float *stateWeights, uint forwardBase, device const float *valueWeights,
-    device const float *optionSubValues, uint optIdx,
+inline float kstep_plan_discrete(device const half *stateWeights, uint forwardBase, device const half *valueWeights,
+    device const half *optionSubValues, uint optIdx,
     device const KernelScalars *scalars, device const float *lat, uint sOff, uint actDim, uint rank,
     device const uint *activeList, uint activeCount, uint planK, thread uint& raw, thread uint& san,
     device float *scratch, uint maxRank) {
@@ -290,7 +386,7 @@ inline float kstep_plan_discrete(device const float *stateWeights, uint forwardB
     for (uint li = 0u; li < activeCount; ++li) {
         uint i = activeList[li];
         float x = scratch[i];
-        vk += valueWeights[i] * x + optionSubValues[optIdx * rank + i] * x;
+        vk += float(valueWeights[i]) * x + float(optionSubValues[optIdx * rank + i]) * x;
     }
     float acc = 0.0f;
     for (uint step = 0u; step < planK; ++step) {
@@ -307,7 +403,7 @@ inline float kstep_plan_discrete(device const float *stateWeights, uint forwardB
                 }
                 float pa = dyn_forward_wa(stateWeights, forwardBase, rank, actDim, idx, cand);
                 float predNext = sanitize(ps + pa, raw, san);
-                vCand += valueWeights[idx] * predNext + optionSubValues[optIdx * rank + idx] * predNext;
+                vCand += float(valueWeights[idx]) * predNext + float(optionSubValues[optIdx * rank + idx]) * predNext;
             }
             if (cand == 0u || vCand > bestV) {
                 bestV = vCand;
@@ -327,7 +423,7 @@ inline float kstep_plan_discrete(device const float *stateWeights, uint forwardB
         for (uint li = 0u; li < activeCount; ++li) {
             uint i = activeList[li];
             float x = scratch[i];
-            vNext += valueWeights[i] * x + optionSubValues[optIdx * rank + i] * x;
+            vNext += float(valueWeights[i]) * x + float(optionSubValues[optIdx * rank + i]) * x;
         }
         acc += (vNext - vk) - rho;
         vk = vNext;
@@ -347,19 +443,25 @@ struct OakPhaseContext {
     uint actionIsDiscrete;
     float gammaSub, betaLR, ridge, invT;
     float gammaPhi0, gammaPhi1, gammaPhi2;
+    float structuralCap;
+    float nlmsStepScale;
+    float sqrtFltEpsilon;
+    float rsqrtPlanLambda;
+    float boundLat, boundRew, boundAct;
+    float invBoundLat, invBoundRew, invBoundAct;
     uint activeCount;
     uint nGvfHeads;
     device KernelScalars *scalars;
-    device float *encoderWeights;
-    device float *policyWeights;
-    device float *valueWeights;
-    device float *rewardWeights;
-    device float *stateWeights;
-    device float *optionPolicyWeights;
-    device float *optionValues;
-    device float *optionCriticWeights;
-    device float *featureSecondMoment;
-    device float *featureResidual;
+    device half *encoderWeights;
+    device half *policyWeights;
+    device half *valueWeights;
+    device half *rewardWeights;
+    device half *stateWeights;
+    device half *optionPolicyWeights;
+    device half *optionValues;
+    device half *optionCriticWeights;
+    device half *featureSecondMoment;
+    device half *featureResidual;
     device float *observation;
     device float *observationMean;
     device float *previousState;
@@ -399,7 +501,7 @@ struct OakPhaseContext {
 };
 
 inline OakPhaseContext oak_make_phase_context(
-    device float *params,
+    device half *params,
     device float *stateArena,
     device uint *uintArena,
     device KernelScalars *scalars,
@@ -427,7 +529,17 @@ inline OakPhaseContext oak_make_phase_context(
     c.gammaPhi1 = config.gammaPhi1;
     c.gammaPhi2 = config.gammaPhi2;
     c.scalars = scalars;
-    c.ridge = capacity_ridge(rank, batchSize);
+    c.ridge = config.capacityRidge;
+    c.structuralCap = config.structuralCap;
+    c.nlmsStepScale = config.nlmsStepScale;
+    c.sqrtFltEpsilon = config.sqrtFltEpsilon;
+    c.rsqrtPlanLambda = config.rsqrtPlanLambda;
+    c.boundLat = config.boundLat;
+    c.boundRew = config.boundRew;
+    c.boundAct = config.boundAct;
+    c.invBoundLat = config.invBoundLat;
+    c.invBoundRew = config.invBoundRew;
+    c.invBoundAct = config.invBoundAct;
     c.invT = online_inv_time(scalars);
     c.activeCount = scalars->activeCount;
 
@@ -494,9 +606,9 @@ inline void oak_phase_encode_impl(OakPhaseContext ctx, uint gid) {
     uint feat = gid % ctx.rank;
     uint raw = 0u, san = 0u;
     if (row < ctx.batchSize) {
-        float cap = structural_activation_cap(ctx.rank, ctx.batchSize);
+        float cap = ctx.structuralCap;
         float centered = sanitize(ctx.observation[row * ctx.obsDim + feat] - ctx.observationMean[feat], raw, san);
-        float z = sanitize(centered * ctx.encoderWeights[feat], raw, san);
+        float z = sanitize(centered * float(ctx.encoderWeights[feat]), raw, san);
         ctx.state[row * ctx.rank + feat] = clamp(z, -cap, cap);
     }
 }
@@ -504,7 +616,7 @@ inline void oak_phase_encode_impl(OakPhaseContext ctx, uint gid) {
 inline void oak_phase_prediction_impl(OakPhaseContext ctx, uint gid) {
     if (gid >= ctx.batchSize) return;
     uint raw = 0u, san = 0u;
-    float cap = structural_activation_cap(ctx.rank, ctx.batchSize);
+    float cap = ctx.structuralCap;
     uint sOff = gid * ctx.rank;
     device float *dsp = ctx.ds + oak_ds_pred_row(gid, ctx.rank);
     device const uint *activeList = ctx.activeList;
@@ -534,8 +646,8 @@ inline void oak_phase_prediction_impl(OakPhaseContext ctx, uint gid) {
     float prevOptF = ctx.latentPower[gid];
     uint po = uint(floor(prevOptF + 0.5f));
     if (po >= ctx.optionCount) po = ctx.optionCount - 1u;
-    float vSubPrev = dot_active(ctx.optionValues, po * ctx.rank, ctx.previousState, sOff, activeList, activeCount, raw, san);
-    float vSubNext = dot_active(ctx.optionValues, po * ctx.rank, ctx.state, sOff, activeList, activeCount, raw, san);
+    float vSubPrev = dot_active_param(ctx.optionValues, po * ctx.rank, ctx.previousState, sOff, activeList, activeCount, raw, san);
+    float vSubNext = dot_active_param(ctx.optionValues, po * ctx.rank, ctx.state, sOff, activeList, activeCount, raw, san);
     float vSubNextMasked = terminalMask * vSubNext;
     float cNext = (po < ctx.rank) ? sanitize(ctx.state[sOff + po], raw, san) : 0.0f;
     float rhoK = ctx.subtaskRhoArena[po];
@@ -544,13 +656,27 @@ inline void oak_phase_prediction_impl(OakPhaseContext ctx, uint gid) {
     float rhoH = ctx.gvfHordeRho[0];
     uint n = ctx.nGvfHeads;
     for (uint j = 0u; j < n; ++j) {
-        float predj = masked_dot(ctx.gvfStackW, j * ctx.rank, ctx.previousState, sOff, activeList, activeCount, raw, san);
-        float cj = masked_dot(ctx.gvfStackU, j * ctx.rank, ctx.state, sOff, activeList, activeCount, raw, san);
+        float predj = 0.0f;
+        float cj = 0.0f;
+        float vjpAcc = 0.0f;
+        int ac = int(activeCount);
+        for (int ii = 0; ii < ac; ++ii) {
+            uint idx = activeList[ii];
+            float ps = ctx.previousState[sOff + idx];
+            float ss = ctx.state[sOff + idx];
+            uint jOff = j * ctx.rank + idx;
+            predj = fma(ctx.gvfStackW[jOff], sanitize(ps, raw, san), predj);
+            cj = fma(ctx.gvfStackU[jOff], sanitize(ss, raw, san), cj);
+            vjpAcc = fma(ctx.gvfStackW[jOff], sanitize(ss, raw, san), vjpAcc);
+        }
+        predj = sanitize(predj, raw, san);
+        cj = sanitize(cj, raw, san);
+        vjpAcc = sanitize(vjpAcc, raw, san);
         if (j == 0u && n > 1u) {
-            cj += ctx.gammaPhi0 * masked_dot(ctx.gvfStackU, ctx.rank, ctx.state, sOff, activeList, activeCount, raw, san);
+            cj += ctx.gammaPhi0 * masked_dot_arena(ctx.gvfStackU, ctx.rank, ctx.state, sOff, activeList, activeCount, raw, san);
             cj += fma(ctx.gammaPhi1, 0.0f, ctx.gammaPhi2 * ctx.ridge);
         }
-        float vjp = masked_dot(ctx.gvfStackW, j * ctx.rank, ctx.state, sOff, activeList, activeCount, raw, san) * terminalMask;
+        float vjp = vjpAcc * terminalMask;
         float dj = cj - rhoH + ctx.gammaPhi0 * vjp - predj;
         ctx.gvfTdArena[gid * n + j] = clamp(sanitize(dj, raw, san), -cap, cap);
     }
@@ -583,11 +709,15 @@ inline void oak_phase_forward_model_impl(OakPhaseContext ctx, uint gid) {
     float ps = 0.0f;
     for (uint i = 0u; i < ctx.activeCount; ++i) {
         uint idx = ctx.activeList[i];
-        ps += opt_forward_ws(ctx.stateWeights, blockBase, ctx.rank, ctx.actDim, feat, idx) * sanitize(ctx.previousState[sOff + idx], raw, san);
+        float wS = opt_forward_ws(ctx.stateWeights, blockBase, ctx.rank, ctx.actDim, feat, idx);
+        float vS = sanitize(ctx.previousState[sOff + idx], raw, san);
+        ps = fma(wS, vS, ps);
     }
     float pa = 0.0f;
     for (uint a = 0u; a < ctx.actDim; ++a) {
-        pa += opt_forward_wa(ctx.stateWeights, blockBase, ctx.rank, ctx.actDim, feat, a) * sanitize(ctx.previousAction[aOff + a], raw, san);
+        float wA = opt_forward_wa(ctx.stateWeights, blockBase, ctx.rank, ctx.actDim, feat, a);
+        float vA = sanitize(ctx.previousAction[aOff + a], raw, san);
+        pa = fma(wA, vA, pa);
     }
     ctx.rolloutState[row * ctx.rank + feat] = sanitize(ps + pa, raw, san);
 }
@@ -626,7 +756,7 @@ inline void oak_phase_learn_impl(OakPhaseContext ctx, uint gid) {
         float emaAbsG = asBase[feat];
         emaAbsG += (fabs(gFeat) - emaAbsG) * invT;
         asBase[feat] = emaAbsG;
-        float cap = float(max(ctx.rank * max(ctx.batchSize, 1u), 1u));
+        float cap = ctx.structuralCap;
         float kappa = 2.0f * sqrt(cap);
         float stepV = min(1.0f / (emaAbsG + ridge), kappa / (fabs(gFeat) + ridge));
         ctx.valueWeights[feat] += stepV * gFeat;
@@ -648,7 +778,7 @@ inline void oak_phase_learn_impl(OakPhaseContext ctx, uint gid) {
             }
         }
         for (uint i = 0u; i < ctx.rank; ++i) {
-            float step = nlms_step_scale(ctx.rank, ctx.batchSize) / (ctx.featureSecondMoment[i] + ridge);
+            float step = ctx.nlmsStepScale / (ctx.featureSecondMoment[i] + ridge);
             ctx.stateWeights[gvfBase + i] += (gradAcc[i] / float(ctx.batchSize)) * step;
         }
     }
@@ -677,15 +807,15 @@ inline void oak_phase_learn_impl(OakPhaseContext ctx, uint gid) {
                 if (batch_dynamics_opt(ctx.stompState, ctx.batchSize, row) == opt) wMask += 1.0f;
             }
             wMask *= invB;
-            float epsDyn = autostep_eps_cap(ctx.rank, ctx.batchSize, ctx.scalars, ctx.featureSecondMoment);
+            float epsDyn = autostep_eps_cap(ctx.rank, ctx.batchSize, ctx.scalars, ctx.featureSecondMoment, ctx.sqrtFltEpsilon);
             if (wMask < epsDyn) continue;
             uint blockBase = ctx.primitivePacked + opt * ctx.optionForwardStride;
             for (uint i = 0u; i < ctx.rank; ++i) {
-                float step = nlms_step_scale(ctx.rank, ctx.batchSize) / (ctx.featureSecondMoment[i] + ridge);
+                float step = ctx.nlmsStepScale / (ctx.featureSecondMoment[i] + ridge);
                 ctx.stateWeights[blockBase + outRow * (ctx.rank + ctx.actDim) + i] += gradAcc[i] * invB * step * wMask;
             }
             for (uint a = 0u; a < ctx.actDim; ++a) {
-                float stepA = nlms_step_scale(ctx.rank, ctx.batchSize) / (ctx.featureSecondMoment[outRow] + ridge);
+                float stepA = ctx.nlmsStepScale / (ctx.featureSecondMoment[outRow] + ridge);
                 ctx.stateWeights[blockBase + outRow * (ctx.rank + ctx.actDim) + ctx.rank + a] += gradAccA[a] * invB * stepA * wMask;
             }
         }
@@ -694,8 +824,8 @@ inline void oak_phase_learn_impl(OakPhaseContext ctx, uint gid) {
     if (gid >= policyBase && gid < policyBase + ctx.rank) {
         uint feat = gid - policyBase;
         float muF = 1.0f / (ctx.featureSecondMoment[feat] + ridge);
-        float stepPol = nlms_step_scale(ctx.rank, ctx.batchSize) * muF;
-        float lamTr = 1.0f - nlms_step_scale(ctx.rank, ctx.batchSize);
+        float stepPol = ctx.nlmsStepScale * muF;
+        float lamTr = 1.0f - ctx.nlmsStepScale;
         for (uint actIdx = 0u; actIdx < ctx.actDim; ++actIdx) {
             float gradP = 0.0f;
             for (uint row = 0u; row < ctx.batchSize; ++row) {
@@ -747,8 +877,8 @@ inline void oak_phase_learn_impl(OakPhaseContext ctx, uint gid) {
         uint lin = gid - gvfHordeLearnBase;
         uint feat = lin % ctx.rank;
         uint j = lin / ctx.rank;
-        float stepH = nlms_step_scale(ctx.rank, ctx.batchSize) / (ctx.featureSecondMoment[feat] + ridge);
-        float bGen = nlms_step_scale(ctx.rank, ctx.batchSize);
+        float stepH = ctx.nlmsStepScale / (ctx.featureSecondMoment[feat] + ridge);
+        float bGen = ctx.nlmsStepScale;
         if (j == 1u && n > 1u) {
             float gradU1 = 0.0f;
             for (uint row = 0u; row < ctx.batchSize; ++row) {
@@ -803,7 +933,7 @@ inline void oak_phase_meta_policy_impl(OakPhaseContext ctx, device const float *
             uint elapsed = ctx.stompState[row * 4u + 1u];
             uint activeOption = 0u;
             float pickScore = 0.0f;
-            float epsK = autostep_eps_cap(ctx.rank, ctx.batchSize, ctx.scalars, ctx.featureSecondMoment);
+            float epsK = autostep_eps_cap(ctx.rank, ctx.batchSize, ctx.scalars, ctx.featureSecondMoment, ctx.sqrtFltEpsilon);
             if (phase == 1u && elapsed < ctx.rank) {
                 activeOption = poPrev;
                 for (uint i = 0u; i < ctx.activeCount; ++i) {
@@ -864,21 +994,21 @@ inline void oak_phase_meta_policy_impl(OakPhaseContext ctx, device const float *
                     }
                 }
             }
-            float baseLogit = masked_dot(ctx.policyWeights, actIdx * ctx.rank, ctx.state, sOff, ctx.activeList, ctx.activeCount, raw, san);
-            float lamMix = plan_merge_lambda(ctx.rank, ctx.actDim);
+            float baseLogit = masked_dot_param(ctx.policyWeights, actIdx * ctx.rank, ctx.state, sOff, ctx.activeList, ctx.activeCount, raw, san);
+            float lamMix = ctx.rsqrtPlanLambda;
             float optMix = 0.0f;
             if (phase == 1u && elapsed < ctx.rank) {
                 uint k = poPrev;
-                optMix = masked_dot(ctx.optionPolicyWeights, k * ctx.rank * ctx.actDim + actIdx * ctx.rank, ctx.state, sOff, ctx.activeList, ctx.activeCount, raw, san);
+                optMix = masked_dot_param(ctx.optionPolicyWeights, k * ctx.rank * ctx.actDim + actIdx * ctx.rank, ctx.state, sOff, ctx.activeList, ctx.activeCount, raw, san);
             } else {
                 for (uint k = 0u; k < ctx.optionCount; ++k) {
                     float wk = max(ctx.keyboardArena[row * ctx.optionCount + k], epsK);
-                    float lk = masked_dot(ctx.optionPolicyWeights, k * ctx.rank * ctx.actDim + actIdx * ctx.rank, ctx.state, sOff, ctx.activeList, ctx.activeCount, raw, san);
+                    float lk = masked_dot_param(ctx.optionPolicyWeights, k * ctx.rank * ctx.actDim + actIdx * ctx.rank, ctx.state, sOff, ctx.activeList, ctx.activeCount, raw, san);
                     optMix += lamMix * wk * lk;
                 }
             }
             uint aOff = row * ctx.actDim;
-            float lamPlan = plan_merge_lambda(ctx.rank, ctx.actDim);
+            float lamPlan = ctx.rsqrtPlanLambda;
             float planBump = ctx.planDeltaArena[aOff + actIdx];
             float logit = sanitize(baseLogit + optMix + lamPlan * planBump, raw, san);
             float lo = actionBounds[actIdx];
@@ -899,14 +1029,14 @@ inline void oak_phase_planning_impl(OakPhaseContext ctx, device const float *act
             uint po = uint(floor(prevOptF + 0.5f));
             if (po >= ctx.optionCount) po = ctx.optionCount - 1u;
             uint forwardPlanBase = ctx.primitivePacked + po * ctx.optionForwardStride;
-            float vNow = masked_dot(ctx.valueWeights, 0, ctx.state, sOff, ctx.activeList, ctx.activeCount, raw, san);
-            float vSubNow = dot_active(ctx.optionValues, po * ctx.rank, ctx.state, sOff, ctx.activeList, ctx.activeCount, raw, san);
+            float vNow = masked_dot_param(ctx.valueWeights, 0, ctx.state, sOff, ctx.activeList, ctx.activeCount, raw, san);
+            float vSubNow = dot_active_param(ctx.optionValues, po * ctx.rank, ctx.state, sOff, ctx.activeList, ctx.activeCount, raw, san);
             vNow += vSubNow;
 
-            if ((ctx.actionIsDiscrete != 0u)) {
+            if (fc_action_is_discrete) {
                 uint bestA = 0u;
                 float bestV = -FLT_MAX;
-                float lamEta = plan_merge_lambda(ctx.rank, ctx.actDim);
+                float lamEta = ctx.rsqrtPlanLambda;
                 for (uint cand = 0u; cand < ctx.actDim; ++cand) {
                     float vCand = discrete_lookahead1(ctx.stateWeights, forwardPlanBase, ctx.valueWeights, ctx.optionValues, po,
                         ctx.state, sOff, ctx.actDim, ctx.rank, ctx.activeList, ctx.activeCount, cand, raw, san);
@@ -1008,11 +1138,11 @@ inline void oak_phase_bookkeeping_impl(OakPhaseContext ctx, device KernelStats *
         if (ctx.actionIsDiscrete != 0u) {
             uint Kmeta = max(1u, ctx.rank / 64u);
             float doMeta = ((ctx.scalars->stepCount % Kmeta) == 0u) ? 1.0f : 0.0f;
-            float metaStep = nlms_step_scale(ctx.rank, ctx.batchSize);
+            float metaStep = ctx.nlmsStepScale;
             float invB = 1.0f / float(max(ctx.batchSize, 1u));
             float tMeta = float(max(ctx.scalars->stepCount, 1u));
             float beta1 = 1.0f / tMeta;
-            float beta2 = nlms_step_scale(ctx.rank, ctx.batchSize);
+            float beta2 = ctx.nlmsStepScale;
             device float *mEta = ctx.mgscEtaArena + ctx.actDim;
             device float *vEta = mEta + ctx.actDim;
             for (uint cand = 0u; cand < ctx.actDim; ++cand) {
@@ -1063,7 +1193,7 @@ inline void oak_phase_bookkeeping_impl(OakPhaseContext ctx, device KernelStats *
             }
             if (worstRes < mean_u - std_u) {
                 if (worstIdx < ctx.baseObsDim) {
-                    float rjv = capacity_ridge(ctx.rank, ctx.batchSize);
+                    float rjv = ctx.ridge;
                     // `2246822519u` = odd constant in splitmix32-style mixing (not an ad-hoc learning rate).
                     uint h0 = ctx.scalars->stepCount ^ (worstIdx * 2246822519u);
                     uint i0 = 0u;
@@ -1129,7 +1259,7 @@ inline void oak_phase_bookkeeping_impl(OakPhaseContext ctx, device KernelStats *
             bool valueStop = (zStop >= vSub);
             bool betaTerm = (float(elapsed) >= ctx.optionBetaArena[po] * float(max(ctx.rank, 1u)));
             if (horizon || valueStop || betaTerm) {
-                float epsKb = autostep_eps_cap(ctx.rank, ctx.batchSize, ctx.scalars, ctx.featureSecondMoment);
+                float epsKb = autostep_eps_cap(ctx.rank, ctx.batchSize, ctx.scalars, ctx.featureSecondMoment, ctx.sqrtFltEpsilon);
                 float kbSumT = 0.0f;
                 for (uint k = 0u; k < ctx.optionCount; ++k) kbSumT += max(ctx.keyboardArena[row * ctx.optionCount + k], epsKb);
                 float invKbT = 1.0f / kbSumT;
@@ -1158,10 +1288,10 @@ inline void oak_phase_bookkeeping_impl(OakPhaseContext ctx, device KernelStats *
         uint Tpe = max(1000u, ctx.scalars->stepCount / max(ctx.rank / 8u, 1u));
         if (Tpe > 0u && (ctx.scalars->stepCount % Tpe) == 0u) {
             float tr = 0.0f;
-            float mx = ctx.featureSecondMoment[0];
+            float mx = float(ctx.featureSecondMoment[0]);
             for (uint i = 0u; i < ctx.rank; ++i) {
-                tr += ctx.featureSecondMoment[i];
-                mx = max(mx, ctx.featureSecondMoment[i]);
+                tr += float(ctx.featureSecondMoment[i]);
+                mx = max(mx, float(ctx.featureSecondMoment[i]));
             }
             ctx.scalars->pEff = tr / max(mx, FLT_MIN);
         }
@@ -1188,7 +1318,7 @@ inline void oak_phase_bookkeeping_impl(OakPhaseContext ctx, device KernelStats *
         float cHsum = 0.0f;
         for (uint row = 0u; row < ctx.batchSize; ++row) {
             uint sOff2 = row * ctx.rank;
-            cHsum += masked_dot(ctx.gvfStackU, 0, ctx.state, sOff2, ctx.activeList, ac, rawB, sanB);
+            cHsum += masked_dot_arena(ctx.gvfStackU, 0, ctx.state, sOff2, ctx.activeList, ac, rawB, sanB);
         }
         float cHmean = cHsum / float(max(ctx.batchSize, 1u));
         ctx.gvfHordeRho[0] += invLRho * (cHmean - ctx.gvfHordeRho[0]);
@@ -1209,17 +1339,13 @@ inline void oak_phase_bookkeeping_impl(OakPhaseContext ctx, device KernelStats *
         float denom = float(max(ctx.batchSize * ctx.rank, 1u));
         uint stRaw = 0u;
         uint stSan = 0u;
-        const uint nLatTerms = max(ctx.batchSize * ctx.rank, 1u);
-        const uint nRewTerms = max(ctx.batchSize, 1u);
-        const uint nActTerms = max(ctx.batchSize * ctx.actDim, 1u);
-        const float boundLat = stats_abs_bound_for_sum_squares(nLatTerms);
-        const float boundRew = stats_abs_bound_for_sum_squares(nRewTerms);
-        const float boundAct = stats_abs_bound_for_sum_squares(nActTerms);
-        // Scale-invariant telemetry: each squared term is divided by bound² so per-term contribution ∈ [0,1] and reported
-        // means stay O(1) instead of pinning to FLT_MAX-derived ceilings when raw errors are large.
-        const float invBoundLat = 1.0f / boundLat;
-        const float invBoundRew = 1.0f / boundRew;
-        const float invBoundAct = 1.0f / boundAct;
+        // Bounds / invBounds precomputed in Swift (`KernelConfig`), same formulas as `stats_abs_bound_for_sum_squares`.
+        const float boundLat = ctx.boundLat;
+        const float boundRew = ctx.boundRew;
+        const float boundAct = ctx.boundAct;
+        const float invBoundLat = ctx.invBoundLat;
+        const float invBoundRew = ctx.invBoundRew;
+        const float invBoundAct = ctx.invBoundAct;
         // One pass over rows: fused ctx.rank stats + obs sums for online mean (ctx.rank/ctx.obsDim ≤ 384).
         device float *sumObsByF = ctx.ds;
         for (uint f = 0u; f < ctx.obsDim; ++f) { sumObsByF[f] = 0.0f; }
@@ -1230,19 +1356,30 @@ inline void oak_phase_bookkeeping_impl(OakPhaseContext ctx, device KernelStats *
             for (uint k = 0u; k < ctx.rank; ++k) {
                 float pred = ctx.latentError[row * ctx.rank + k];
                 float tgt = ctx.state[row * ctx.rank + k];
-                float ds = sanitize(tgt - pred, stRaw, stSan);
+                float diff = tgt - pred;
+                uint badDiff = select(1u, 0u, isfinite(diff));
+                stRaw += badDiff;
+                stSan += badDiff;
+                float ds = select(0.0f, diff, isfinite(diff));
                 float dc = clamp(ds, -boundLat, boundLat);
                 float nlc = dc * invBoundLat;
                 lmse = fma(nlc, nlc, lmse);
                 maxLat = max(maxLat, fabs(ds));
                 float sv = ctx.state[sOff + k];
-                if (!isfinite(sv)) nLearn++;
-                float sc = sanitize(sv, stRaw, stSan);
+                uint badSv = select(1u, 0u, isfinite(sv));
+                nLearn += badSv;
+                stRaw += badSv;
+                stSan += badSv;
+                float sc = select(0.0f, sv, isfinite(sv));
                 float vc = clamp(sc, -boundLat, boundLat);
                 float nvc = vc * invBoundLat;
                 vtrace = fma(nvc, nvc, vtrace);
             }
-            float rds = sanitize(ctx.reward[row] - ctx.rewardPrediction[row], stRaw, stSan);
+            float rdiff = ctx.reward[row] - ctx.rewardPrediction[row];
+            uint badRew = select(1u, 0u, isfinite(rdiff));
+            stRaw += badRew;
+            stSan += badRew;
+            float rds = select(0.0f, rdiff, isfinite(rdiff));
             float rc = clamp(rds, -boundRew, boundRew);
             float nrc = rc * invBoundRew;
             rmse = fma(nrc, nrc, rmse);
@@ -1252,15 +1389,23 @@ inline void oak_phase_bookkeeping_impl(OakPhaseContext ctx, device KernelStats *
             for (uint a = 0u; a < ctx.actDim; ++a) {
                 float x = ctx.action[aOff + a];
                 float yg = ctx.actionGrad[aOff + a];
-                float ps = sanitize(x - yg, stRaw, stSan);
+                float psRaw = x - yg;
+                uint badPs = select(1u, 0u, isfinite(psRaw));
+                stRaw += badPs;
+                stSan += badPs;
+                float ps = select(0.0f, psRaw, isfinite(psRaw));
                 float pc = clamp(ps, -boundAct, boundAct);
                 float npc = pc * invBoundAct;
                 pa = fma(npc, npc, pa);
                 maxPol = max(maxPol, fabs(x));
-                if (!isfinite(x)) nPlan++;
-                if (!isfinite(yg)) nPlan++;
+                nPlan += select(1u, 0u, isfinite(x));
+                nPlan += select(1u, 0u, isfinite(yg));
                 float py = ctx.previousAction[aOff + a];
-                float pbs = sanitize(x - py, stRaw, stSan);
+                float pbRaw = x - py;
+                uint badPb = select(1u, 0u, isfinite(pbRaw));
+                stRaw += badPb;
+                stSan += badPb;
+                float pbs = select(0.0f, pbRaw, isfinite(pbRaw));
                 float pbc = clamp(pbs, -boundAct, boundAct);
                 float npb = pbc * invBoundAct;
                 pb = fma(npb, npb, pb);
@@ -1269,8 +1414,9 @@ inline void oak_phase_bookkeeping_impl(OakPhaseContext ctx, device KernelStats *
             actDelta += pb;
             for (uint f = 0u; f < ctx.obsDim; ++f) {
                 float o = ctx.observation[row * ctx.obsDim + f];
-                if (!isfinite(o)) nEnc++;
-                sumObsByF[f] += o;
+                uint badO = select(1u, 0u, isfinite(o));
+                nEnc += badO;
+                sumObsByF[f] += select(0.0f, o, isfinite(o));
             }
         }
         nraw = nEnc + nLearn + nPlan + stRaw;
@@ -1288,7 +1434,11 @@ inline void oak_phase_bookkeeping_impl(OakPhaseContext ctx, device KernelStats *
         for (uint row = 0u; row < ctx.batchSize; ++row) {
             uint sOff = row * ctx.rank;
             for (uint k = 0u; k < ctx.rank; ++k) {
-                float ds = sanitize(ctx.state[sOff + k] - ctx.rolloutState[row * ctx.rank + k], stRaw, stSan);
+                float rdx = ctx.state[sOff + k] - ctx.rolloutState[row * ctx.rank + k];
+                uint badRd = select(1u, 0u, isfinite(rdx));
+                stRaw += badRd;
+                stSan += badRd;
+                float ds = select(0.0f, rdx, isfinite(rdx));
                 float dc = clamp(ds, -boundLat, boundLat);
                 float nlc = dc * invBoundLat;
                 optPredAcc = fma(nlc, nlc, optPredAcc);
@@ -1317,7 +1467,11 @@ inline void oak_phase_bookkeeping_impl(OakPhaseContext ctx, device KernelStats *
                 cntRows++;
                 uint sOff = row * ctx.rank;
                 for (uint k = 0u; k < ctx.rank; ++k) {
-                    float ds = sanitize(ctx.state[sOff + k] - ctx.rolloutState[row * ctx.rank + k], stRaw, stSan);
+                    float rdx = ctx.state[sOff + k] - ctx.rolloutState[row * ctx.rank + k];
+                    uint badRd = select(1u, 0u, isfinite(rdx));
+                    stRaw += badRd;
+                    stSan += badRd;
+                    float ds = select(0.0f, rdx, isfinite(rdx));
                     float dc = clamp(ds, -boundLat, boundLat);
                     float nlc = dc * invBoundLat;
                     sumErr = fma(nlc, nlc, sumErr);
@@ -1454,7 +1608,7 @@ inline void oak_phase_bookkeeping_impl(OakPhaseContext ctx, device KernelStats *
 }
 
 #define OAK_KERNEL_SIG \
-    device float *params [[buffer(0)]], \
+    device half *params [[buffer(0)]], \
     device float *stateArena [[buffer(1)]], \
     device uint *uintArena [[buffer(2)]], \
     device KernelScalars *scalars [[buffer(3)]], \

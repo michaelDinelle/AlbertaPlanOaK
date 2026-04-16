@@ -515,6 +515,17 @@ private struct KernelConfig {
     var gammaPhi0: Float = 0
     var gammaPhi1: Float = 0
     var gammaPhi2: Float = 0
+    var capacityRidge: Float = 0
+    var structuralCap: Float = 0
+    var nlmsStepScale: Float = 0
+    var sqrtFltEpsilon: Float = 0
+    var boundLat: Float = 0
+    var boundRew: Float = 0
+    var boundAct: Float = 0
+    var invBoundLat: Float = 0
+    var invBoundRew: Float = 0
+    var invBoundAct: Float = 0
+    var rsqrtPlanLambda: Float = 0
 }
 
 private struct KernelScalars {
@@ -760,6 +771,12 @@ private enum OakMetalLayout {
         let expFiniteCeil = logf(Float.greatestFiniteMagnitude)
         return min(pool, expFiniteCeil)
     }
+
+    /// Matches Metal `stats_abs_bound_for_sum_squares` (IEEE overflow hygiene for telemetry aggregates).
+    static func statsAbsBoundForSumSquares(termCount: Int) -> Float {
+        let n = Float(max(termCount, 1))
+        return sqrtf(Float.greatestFiniteMagnitude / n)
+    }
 }
 
 fileprivate struct KernelStats {
@@ -804,6 +821,7 @@ private final class SharedArray<Element> {
 }
 
 private typealias SharedFloats = SharedArray<Float>
+private typealias SharedParamsHalfs = SharedArray<Float16>
 private typealias SharedUInts = SharedArray<UInt32>
 
 /// Softmax sample + one-hot host view for discrete envs. Continuous runs omit this object entirely.
@@ -871,7 +889,7 @@ final class OakMetalEngine {
     /// Fixed zero offsets for `setBuffers` (params, state, uint, scalars, stats, bounds).
     private let bufferZeroOffsets: [Int]
 
-    private let paramsArena: SharedFloats
+    private let paramsArena: SharedParamsHalfs
     private let stateArena: SharedFloats
     private let uintArena: SharedUInts
     private let paramLayout: OakMetalLayout.ParamArenaLayout
@@ -904,16 +922,23 @@ final class OakMetalEngine {
         "oak_phase_bookkeeping",
     ]
 
-    private static func makePipelines(device: MTLDevice) throws -> [MTLComputePipelineState] {
+    private static func makePipelines(device: MTLDevice, planningIsDiscrete: Bool) throws -> [MTLComputePipelineState] {
         let library = try device.makeLibrary(URL: try kernelURL())
         return try phaseKernelNames.map { name in
+            if name == "oak_phase_planning" {
+                let fc = MTLFunctionConstantValues()
+                var discrete = planningIsDiscrete
+                fc.setConstantValue(&discrete, type: .bool, index: 0)
+                let function = try library.makeFunction(name: name, constantValues: fc)
+                return try device.makeComputePipelineState(function: function)
+            }
             guard let function = library.makeFunction(name: name) else { throw OakError.message("Missing \(name) in OakKernel.metallib.") }
             return try device.makeComputePipelineState(function: function)
         }
     }
 
     static func executionWidth(device: MTLDevice) throws -> Int {
-        let states = try makePipelines(device: device)
+        let states = try makePipelines(device: device, planningIsDiscrete: false)
         var w = 1
         for p in states { w = max(w, p.threadExecutionWidth) }
         return max(w, 1)
@@ -943,7 +968,7 @@ final class OakMetalEngine {
         let cbDesc = MTLCommandBufferDescriptor()
         cbDesc.retainedReferences = false
         commandBufferDescriptor = cbDesc
-        pipelines = try Self.makePipelines(device: device)
+        pipelines = try Self.makePipelines(device: device, planningIsDiscrete: actionIsDiscrete)
         // Discrete: env does not expose box bounds; Metal still needs **finite** clamps so logits cannot diverge on
         // an infinite horizon (continual stability). Host softmax uses these logits; cap keeps float32 exp in range.
         let half = OakMetalLayout.discreteLogitHalfWidth(rank: rank, actDim: actDim)
@@ -960,11 +985,12 @@ final class OakMetalEngine {
         bufferZeroOffsets = [Int](repeating: 0, count: 6)
 
         func floats(_ count: Int) -> SharedFloats { SharedFloats(device: device, count: count, repeating: 0) }
+        func paramsHalf(_ count: Int) -> SharedParamsHalfs { SharedParamsHalfs(device: device, count: count, repeating: Float16(0)) }
         func uints(_ count: Int) -> SharedUInts { SharedUInts(device: device, count: count, repeating: 0) }
         paramLayout = OakMetalLayout.paramArenaLayout(obsDim: obsDim, rank: rank, actDim: actDim, batchSize: batchSize, actionIsDiscrete: actionIsDiscrete)
         stateLayout = OakMetalLayout.stateArenaLayout(obsDim: obsDim, rank: rank, actDim: actDim, batchSize: batchSize)
         uintLayout = OakMetalLayout.uintArenaLayout(rank: rank, batchSize: batchSize)
-        paramsArena = floats(paramLayout.totalFloats)
+        paramsArena = paramsHalf(paramLayout.totalFloats)
         stateArena = floats(stateLayout.totalFloats)
         uintArena = uints(uintLayout.totalUInts)
         let ao = OakMetalLayout.floatArenaOffsets(rank: rank, actDim: actDim, batchSize: batchSize)
@@ -1061,23 +1087,27 @@ final class OakMetalEngine {
         let rng = seed.map { GKMersenneTwisterRandomSource(seed: UInt64(bitPattern: Int64($0))) }
         let encoderScale: Float = 1.0
         let transitionScale = Float(1.0 / sqrt(Double(max(1 + actDim, 1))))
-        func randScale(_ count: Int, _ base: UnsafeMutablePointer<Float>, _ scale: Float) {
-            for index in 0..<count { base[index] = ((rng?.nextUniform() ?? Float.random(in: 0..<1)) * 2 - 1) * scale }
+        func randScaleHalf(_ count: Int, _ base: UnsafeMutablePointer<Float16>, _ scale: Float) {
+            for index in 0..<count {
+                let z = ((rng?.nextUniform() ?? Float.random(in: 0..<1)) * 2 - 1) * scale
+                base[index] = Float16(z)
+            }
         }
-        randScale(obsDim, paramsArena.pointer.advanced(by: paramLayout.encoder), encoderScale)
-        randScale(actDim * rank, paramsArena.pointer.advanced(by: paramLayout.policy), transitionScale)
-        randScale(rank, paramsArena.pointer.advanced(by: paramLayout.value), transitionScale)
+        randScaleHalf(obsDim, paramsArena.pointer.advanced(by: paramLayout.encoder), encoderScale)
+        randScaleHalf(actDim * rank, paramsArena.pointer.advanced(by: paramLayout.policy), transitionScale)
+        randScaleHalf(rank, paramsArena.pointer.advanced(by: paramLayout.value), transitionScale)
         let rwCount = OakMetalLayout.rewardWeightParameterCount(actDim: actDim, rank: rank, actionIsDiscrete: actionIsDiscrete)
-        randScale(rwCount, paramsArena.pointer.advanced(by: paramLayout.reward), transitionScale)
-        randScale(OakMetalLayout.packedStateWeightsSize(rank: rank, actDim: actDim), paramsArena.pointer.advanced(by: paramLayout.stateWeights), transitionScale)
-        randScale(OakMetalLayout.optionPolicyParameterCount(rank: rank, actDim: actDim), paramsArena.pointer.advanced(by: paramLayout.optionPolicy), transitionScale)
-        randScale(OakMetalLayout.optionValueParameterCount(rank: rank, actDim: actDim), paramsArena.pointer.advanced(by: paramLayout.optionValues), transitionScale)
-        randScale(OakMetalLayout.optionCriticBufferSize(rank: rank, actDim: actDim), paramsArena.pointer.advanced(by: paramLayout.optionCritic), transitionScale)
-        randScale(rank, paramsArena.pointer.advanced(by: paramLayout.featureSM), transitionScale)
-        randScale(rank, paramsArena.pointer.advanced(by: paramLayout.featureResidual), transitionScale)
+        randScaleHalf(rwCount, paramsArena.pointer.advanced(by: paramLayout.reward), transitionScale)
+        randScaleHalf(OakMetalLayout.packedStateWeightsSize(rank: rank, actDim: actDim), paramsArena.pointer.advanced(by: paramLayout.stateWeights), transitionScale)
+        randScaleHalf(OakMetalLayout.optionPolicyParameterCount(rank: rank, actDim: actDim), paramsArena.pointer.advanced(by: paramLayout.optionPolicy), transitionScale)
+        randScaleHalf(OakMetalLayout.optionValueParameterCount(rank: rank, actDim: actDim), paramsArena.pointer.advanced(by: paramLayout.optionValues), transitionScale)
+        randScaleHalf(OakMetalLayout.optionCriticBufferSize(rank: rank, actDim: actDim), paramsArena.pointer.advanced(by: paramLayout.optionCritic), transitionScale)
+        randScaleHalf(rank, paramsArena.pointer.advanced(by: paramLayout.featureSM), transitionScale)
+        randScaleHalf(rank, paramsArena.pointer.advanced(by: paramLayout.featureResidual), transitionScale)
         let ov = paramsArena.pointer.advanced(by: paramLayout.optionValues)
         for opt in 0..<ocInit {
-            ov[opt * rank + opt] += 1.0
+            let i = opt * rank + opt
+            ov[i] = Float16(Float(ov[i]) + 1.0)
         }
     }
 
@@ -1144,6 +1174,21 @@ final class OakMetalEngine {
         let gammaPhi0 = Float(gammaSub)
         let gammaPhi1 = Float(1.0 / oneM)
         let gammaPhi2 = Float(log(oneM))
+        let capVolForPre = Double(max(rank * max(batchSize, 1), 1))
+        let capacityRidge = Float(1.0 / (capVolForPre + 1.0))
+        let structuralCap = Float(capVolForPre)
+        let nlmsStepScale = Float(1.0 / capVolForPre)
+        let sqrtFltEpsilon = sqrtf(Float.ulpOfOne)
+        let nLatTerms = max(batchSize * rank, 1)
+        let nRewTerms = max(batchSize, 1)
+        let nActTerms = max(batchSize * actDim, 1)
+        let boundLat = OakMetalLayout.statsAbsBoundForSumSquares(termCount: nLatTerms)
+        let boundRew = OakMetalLayout.statsAbsBoundForSumSquares(termCount: nRewTerms)
+        let boundAct = OakMetalLayout.statsAbsBoundForSumSquares(termCount: nActTerms)
+        let invBoundLat = 1.0 / boundLat
+        let invBoundRew = 1.0 / boundRew
+        let invBoundAct = 1.0 / boundAct
+        let rsqrtPlanLambda = 1.0 / sqrtf(Float(max(rank + actDim, 1)))
         let p = paramLayout
         let s = stateLayout
         let u = uintLayout
@@ -1207,7 +1252,18 @@ final class OakMetalEngine {
             nGvfHeads: UInt32(nGvf),
             gammaPhi0: gammaPhi0,
             gammaPhi1: gammaPhi1,
-            gammaPhi2: gammaPhi2
+            gammaPhi2: gammaPhi2,
+            capacityRidge: capacityRidge,
+            structuralCap: structuralCap,
+            nlmsStepScale: nlmsStepScale,
+            sqrtFltEpsilon: sqrtFltEpsilon,
+            boundLat: boundLat,
+            boundRew: boundRew,
+            boundAct: boundAct,
+            invBoundLat: invBoundLat,
+            invBoundRew: invBoundRew,
+            invBoundAct: invBoundAct,
+            rsqrtPlanLambda: rsqrtPlanLambda
         )
     }
 
@@ -1234,6 +1290,13 @@ final class OakMetalEngine {
         }
     }
 
+    /// Round grid width to a multiple of `max(threadExecutionWidth, 32)`; kernels guard on `gid` / row indices.
+    private func alignedGridWidth(threadCount: Int, pipeline: MTLComputePipelineState) -> Int {
+        let align = max(Int(pipeline.threadExecutionWidth), 32)
+        let n = max(threadCount, 1)
+        return ((n + align - 1) / align) * align
+    }
+
     private func runKernelSingleBuffer() throws {
         guard let commandBuffer = queue.makeCommandBuffer(descriptor: commandBufferDescriptor) else { throw OakError.message("Failed to create Metal command buffer.") }
         let buffers = kernelBuffers()
@@ -1250,7 +1313,7 @@ final class OakMetalEngine {
             computeEncoder.setComputePipelineState(pip)
             if metalDebugSignposts { computeEncoder.insertDebugSignpost(String(describing: phase)) }
             computeEncoder.setBytes(&configCopy, length: MemoryLayout<KernelConfig>.stride, index: OakMetalLayout.kernelConfigBufferIndex)
-            let w = max(threadCount, 1)
+            let w = alignedGridWidth(threadCount: threadCount, pipeline: pip)
             computeEncoder.dispatchThreads(MTLSize(width: w, height: 1, depth: 1), threadsPerThreadgroup: MTLSize(width: min(width, w), height: 1, depth: 1))
         }
         computeEncoder.endEncoding()
@@ -1275,7 +1338,7 @@ final class OakMetalEngine {
             computeEncoder.setBuffers(buffers, offsets: bufferZeroOffsets, range: 0..<6)
             if metalDebugSignposts { computeEncoder.insertDebugSignpost(String(describing: phase)) }
             computeEncoder.setBytes(&configCopy, length: MemoryLayout<KernelConfig>.stride, index: OakMetalLayout.kernelConfigBufferIndex)
-            let w = max(threadCount, 1)
+            let w = alignedGridWidth(threadCount: threadCount, pipeline: pip)
             computeEncoder.dispatchThreads(MTLSize(width: w, height: 1, depth: 1), threadsPerThreadgroup: MTLSize(width: min(width, w), height: 1, depth: 1))
             computeEncoder.endEncoding()
             commandBuffer.commit()
