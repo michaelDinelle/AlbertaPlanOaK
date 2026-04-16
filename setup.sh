@@ -313,6 +313,7 @@ for src in "$SRC_DIR"/envpool/minigrid/impl/*.cc; do case "$(basename "$src")" i
   -Wl,-rpath,@loader_path -Wl,-rpath,"$MUJOCO_DIR" \
   -o "$NATIVE_DIR/liboakenv.dylib"
 
+# Single-source default library (seven `kernel void` entry points). Optional: compile multiple `.metal` files to one `.metallib` if compile time becomes a bottleneck.
 xcrun -sdk macosx metal -c "$ROOT_DIR/Sources/OakKernel.metal" -o "$ROOT_DIR/.build/OakKernel.air"
 xcrun -sdk macosx metallib "$ROOT_DIR/.build/OakKernel.air" -o "$ROOT_DIR/.build/OakKernel.metallib"
 swift build -c release
