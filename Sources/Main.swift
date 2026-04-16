@@ -493,24 +493,28 @@ private struct KernelConfig {
     var floatArenaTdOptionBase: UInt32 = 0
     var floatArenaPlanDeltaBase: UInt32 = 0
     var floatArenaGvfWeightsBase: UInt32 = 0
-    var floatArenaGvfCumulantBase: UInt32 = 0
     var floatArenaGvfTdBase: UInt32 = 0
     var floatArenaGvfRhoBase: UInt32 = 0
+    var floatArenaGvfGenAuxBase: UInt32 = 0
+    var floatArenaPolicyTraceBase: UInt32 = 0
+    var floatArenaMgscEtaBase: UInt32 = 0
     var floatArenaKeyboardBase: UInt32 = 0
     var floatArenaKeyboardPredBase: UInt32 = 0
     var floatArenaUtilityBase: UInt32 = 0
-    var floatArenaFeatureGenBase: UInt32 = 0
     var floatArenaSubtaskRhoBase: UInt32 = 0
     var floatArenaOptionBetaBase: UInt32 = 0
     /// Offset (float index from floatArena start) to device scratch: prediction rows + planning k-step/probe + learn grad slots.
     var floatArenaDeviceScratchBase: UInt32 = 0
-    var genDirectionCount: UInt32 = 0
     var floatArenaOffsetInLatentPower: UInt32 = 0
     var phase: UInt32 = 0
     /// Fixed-point γ for subtask GVF TD and Horde extension (`value / 1_000_000`).
     var gammaSubtaskMilli: UInt32 = 0
     /// Structural β learning rate scale (`value / 1_000_000`).
     var betaLearnRateMilli: UInt32 = 0
+    var nGvfHeads: UInt32 = 0
+    var gammaPhi0: Float = 0
+    var gammaPhi1: Float = 0
+    var gammaPhi2: Float = 0
 }
 
 private struct KernelScalars {
@@ -519,6 +523,8 @@ private struct KernelScalars {
     var activeCount: UInt32 = 0
     var admissionCursor: UInt32 = 0
     var rewardRate: Float = 0
+    /// Effective dimensionality ratio for `autostep_eps_cap` (updated periodically in bookkeeping from second moments).
+    var pEff: Float = 0
 }
 /// Phase ids must match `kPhase*` in `OakKernel.metal`.
 private enum OakKernelPhase: UInt32 {
@@ -571,6 +577,11 @@ private enum OakMetalLayout {
         min(4, max(rank, 1))
     }
 
+    /// GVF stack width cap: `min(4096, 16 * rank)` — single Metal path (no duplicate MPS matmul) until batching expands.
+    static func structuralMaxGvfHeads(rank: Int) -> Int {
+        min(4096, 16 * max(rank, 1))
+    }
+
     static func optionPolicyParameterCount(rank: Int, actDim: Int) -> Int {
         derivedOptionCount(rank: rank, actDim: actDim) * rank * actDim
     }
@@ -605,29 +616,26 @@ private enum OakMetalLayout {
         max(5 * batchSize, 5)
     }
 
-    /// Candidate feature directions (structural; bounded rank budget).
-    static func structuralGenDirectionCount(rank: Int) -> Int {
-        min(32, max(rank, 1))
-    }
-
-    /// Packed `floatArena`: autostep + tdOption + plan + gvf(W,U,Td) + horde ρ + keyboard + … + featureGen + subtask ρ + option β.
+    /// Packed `floatArena`: … + GenTD stack **W,H,U** each `rank × nGvf` (fp32 storage; W may switch to fp16 later) + `gvfTd[B×nGvf]` + …
     static func floatArenaSize(rank: Int, actDim: Int, batchSize: Int) -> Int {
         let oc = derivedOptionCount(rank: rank, actDim: actDim)
-        let m = structuralGenDirectionCount(rank: rank)
-        let autostep = 2 * rank
+        let nGvf = structuralMaxGvfHeads(rank: rank)
+        let autostep = rank
         let tdOpt = batchSize
         let plan = batchSize * actDim
-        let gvfWU = rank + rank
-        let gvfTd = batchSize
+        let gvfStack = 3 * rank * nGvf
+        let gvfTd = batchSize * nGvf
         let gvfRho = 1
+        let gvfGenAux = rank * nGvf
+        let policyTrace = actDim * rank
+        let mgscEta = 3 * actDim
         let kbd = batchSize * oc
         let kbdPred = oc
         let util = 2 * rank + 2 * oc
-        let fgen = m * rank
         let subRho = oc
         let optBeta = oc
         let devScratch = floatArenaDeviceScratchSize(rank: rank, actDim: actDim, batchSize: batchSize)
-        return autostep + tdOpt + plan + gvfWU + gvfTd + gvfRho + kbd + kbdPred + util + fgen + subRho + optBeta + devScratch
+        return autostep + tdOpt + plan + gvfStack + gvfTd + gvfRho + gvfGenAux + policyTrace + mgscEta + kbd + kbdPred + util + subRho + optBeta + devScratch
     }
 
     /// Device scratch: prediction (2·B·R per row), planning k-step (B·R) + probe (B·128), learn GVF/forward/policy bands (non-overlapping slots).
@@ -639,27 +647,28 @@ private enum OakMetalLayout {
 
     /// Offsets (float index) into `floatArena` for kernel config (must match `OakMetalLayout.floatArenaSize` order).
     static func floatArenaOffsets(rank: Int, actDim: Int, batchSize: Int) -> (
-        autostep: Int, tdOption: Int, planDelta: Int, gvfW: Int, gvfU: Int, gvfTd: Int, gvfRho: Int, keyboard: Int, keyboardPred: Int, utility: Int, featureGen: Int, subtaskRho: Int, optionBeta: Int, deviceScratch: Int
+        autostep: Int, tdOption: Int, planDelta: Int, gvfStack: Int, gvfTd: Int, gvfRho: Int, gvfGenAux: Int, policyTrace: Int, mgscEta: Int, keyboard: Int, keyboardPred: Int, utility: Int, subtaskRho: Int, optionBeta: Int, deviceScratch: Int
     ) {
         let oc = derivedOptionCount(rank: rank, actDim: actDim)
-        let m = structuralGenDirectionCount(rank: rank)
+        let nGvf = structuralMaxGvfHeads(rank: rank)
         var o = 0
-        let autostep = o; o += 2 * rank
+        let autostep = o; o += rank
         let tdOption = o; o += batchSize
         let planDelta = o; o += batchSize * actDim
-        let gvfW = o; o += rank
-        let gvfU = o; o += rank
-        let gvfTd = o; o += batchSize
+        let gvfStack = o; o += 3 * rank * nGvf
+        let gvfTd = o; o += batchSize * nGvf
         let gvfRho = o; o += 1
+        let gvfGenAux = o; o += rank * nGvf
+        let policyTrace = o; o += actDim * rank
+        let mgscEta = o; o += 3 * actDim
         let keyboard = o; o += batchSize * oc
         let keyboardPred = o; o += oc
         let utility = o; o += 2 * rank + 2 * oc
-        let featureGen = o; o += m * rank
         let subtaskRho = o; o += oc
         let optionBeta = o; o += oc
         let deviceScratch = o; o += floatArenaDeviceScratchSize(rank: rank, actDim: actDim, batchSize: batchSize)
         _ = o
-        return (autostep, tdOption, planDelta, gvfW, gvfU, gvfTd, gvfRho, keyboard, keyboardPred, utility, featureGen, subtaskRho, optionBeta, deviceScratch)
+        return (autostep, tdOption, planDelta, gvfStack, gvfTd, gvfRho, gvfGenAux, policyTrace, mgscEta, keyboard, keyboardPred, utility, subtaskRho, optionBeta, deviceScratch)
     }
 
     struct ParamArenaLayout {
@@ -738,9 +747,10 @@ private enum OakMetalLayout {
         return UIntArenaLayout(done: d, active: a, stomp: st, counters: c, totalUInts: o)
     }
 
-    /// Matches Metal `kPhaseLearn`: value + GVF bank + fused option forward + policy + Horde head (no separate option-critic band).
+    /// Matches Metal `kPhaseLearn`: value + GVF bank + fused option forward + policy + batched GenTD (`rank × nGvf` horde threads).
     static func learnPhaseThreadCount(rank: Int, actDim: Int) -> Int {
-        max(5 * rank, 1)
+        let nGvf = structuralMaxGvfHeads(rank: rank)
+        return max(4 * rank + rank * nGvf, 1)
     }
 
     /// Finite half-width for discrete policy logits in Metal before host softmax. `√(rank·actDim)` scales the linear
@@ -795,32 +805,6 @@ private final class SharedArray<Element> {
 
 private typealias SharedFloats = SharedArray<Float>
 private typealias SharedUInts = SharedArray<UInt32>
-
-/// Orthonormal rows for `featureGenDirections` (Representation II constructive pool).
-private func fillOrthonormalFeatureGenerator(rank: Int, directionCount: Int, destination: UnsafeMutablePointer<Float>, baseIndex: Int, rng: GKMersenneTwisterRandomSource?) {
-    var rows = [[Float]](repeating: [Float](repeating: 0, count: rank), count: directionCount)
-    for r in 0..<directionCount {
-        for c in 0..<rank {
-            rows[r][c] = (rng?.nextUniform() ?? Float.random(in: 0..<1)) * 2 - 1
-        }
-    }
-    for i in 0..<directionCount {
-        for j in 0..<i {
-            var d: Float = 0
-            for c in 0..<rank { d += rows[i][c] * rows[j][c] }
-            for c in 0..<rank { rows[i][c] -= d * rows[j][c] }
-        }
-        var n: Float = 0
-        for c in 0..<rank { n += rows[i][c] * rows[i][c] }
-        n = sqrt(max(n, 1e-12))
-        for c in 0..<rank { rows[i][c] /= n }
-    }
-    for r in 0..<directionCount {
-        for c in 0..<rank {
-            destination[baseIndex + r * rank + c] = rows[r][c]
-        }
-    }
-}
 
 /// Softmax sample + one-hot host view for discrete envs. Continuous runs omit this object entirely.
 private final class DiscreteSoftmaxBehavior {
@@ -896,7 +880,7 @@ final class OakMetalEngine {
     /// Float index inside the `latentPower` region where packed `floatArena` begins.
     private let arenaBaseInLatent: Int
     private let arenaOffsets: (
-        autostep: Int, tdOption: Int, planDelta: Int, gvfW: Int, gvfU: Int, gvfTd: Int, gvfRho: Int, keyboard: Int, keyboardPred: Int, utility: Int, featureGen: Int, subtaskRho: Int, optionBeta: Int, deviceScratch: Int
+        autostep: Int, tdOption: Int, planDelta: Int, gvfStack: Int, gvfTd: Int, gvfRho: Int, gvfGenAux: Int, policyTrace: Int, mgscEta: Int, keyboard: Int, keyboardPred: Int, utility: Int, subtaskRho: Int, optionBeta: Int, deviceScratch: Int
     )
     /// When `OAK_METAL_SIGNPOSTS=1`, inserts `insertDebugSignpost` between phase dispatches for Instruments / GPU capture (no effect on math).
     private let metalDebugSignposts: Bool
@@ -971,6 +955,7 @@ final class OakMetalEngine {
         scalarsPointer = scalarsBuffer.contents().bindMemory(to: KernelScalars.self, capacity: 1)
         statsPointer = statsBuffer.contents().bindMemory(to: KernelStats.self, capacity: 1)
         scalarsPointer.initialize(to: KernelScalars())
+        scalarsPointer.pointee.pEff = Float(rank)
         statsPointer.initialize(to: KernelStats())
         bufferZeroOffsets = [Int](repeating: 0, count: 6)
 
@@ -989,11 +974,8 @@ final class OakMetalEngine {
         let ocInit = OakMetalLayout.derivedOptionCount(rank: rank, actDim: actDim)
         let latentPowerPtr = stateArena.pointer.advanced(by: stateLayout.latentPower)
         let arenaPtr = latentPowerPtr.advanced(by: ab)
-        let capF = Float(max(rank * max(batchSize, 1), 1))
-        let alpha0 = 1.0 / capF
         for f in 0..<rank {
-            arenaPtr[ao.autostep + 2 * f] = 0
-            arenaPtr[ao.autostep + 2 * f + 1] = alpha0
+            arenaPtr[ao.autostep + f] = 0
         }
         arenaPtr[ao.gvfRho] = 0
         for k in 0..<ocInit {
@@ -1002,19 +984,49 @@ final class OakMetalEngine {
             arenaPtr[ao.optionBeta + k] = beta0
         }
         let rngArena = seed.map { GKMersenneTwisterRandomSource(seed: UInt64(bitPattern: Int64($0))) }
-        let mGen = OakMetalLayout.structuralGenDirectionCount(rank: rank)
-        fillOrthonormalFeatureGenerator(rank: rank, directionCount: mGen, destination: arenaPtr, baseIndex: ao.featureGen, rng: rngArena)
-        var gvfUSq: Float = 0
-        for f in 0..<rank {
-            let z = ((rngArena?.nextUniform() ?? Float.random(in: 0..<1)) * 2 - 1)
-            arenaPtr[ao.gvfU + f] = z
-            gvfUSq += z * z
+        let nGvfInit = OakMetalLayout.structuralMaxGvfHeads(rank: rank)
+        precondition(nGvfInit >= 1)
+        let gvfStride = rank * nGvfInit
+        let stackW = ao.gvfStack
+        let stackH = stackW + gvfStride
+        let stackU = stackH + gvfStride
+        for j in 0..<nGvfInit {
+            let col = stackW + j * rank
+            let colH = stackH + j * rank
+            let colU = stackU + j * rank
+            for f in 0..<rank {
+                arenaPtr[colH + f] = 0
+            }
+            if j == 0 {
+                var uSq: Float = 0
+                for f in 0..<rank {
+                    let z = ((rngArena?.nextUniform() ?? Float.random(in: 0..<1)) * 2 - 1)
+                    arenaPtr[colU + f] = z
+                    uSq += z * z
+                }
+                let invUn = 1.0 / sqrt(max(uSq, Float(1) / Float(max(rank * max(batchSize, 1), 1))))
+                for f in 0..<rank { arenaPtr[colU + f] *= invUn }
+            } else if j == 1 {
+                for f in 0..<rank { arenaPtr[colU + f] = 0 }
+            } else {
+                let gvfScale = Float(1.0 / sqrt(Double(max(rank, 1))))
+                for f in 0..<rank {
+                    arenaPtr[colU + f] = ((rngArena?.nextUniform() ?? Float.random(in: 0..<1)) * 2 - 1) * gvfScale * 0.25
+                }
+            }
+            let gvfScale = Float(1.0 / sqrt(Double(max(rank, 1))))
+            for f in 0..<rank {
+                arenaPtr[col + f] = ((rngArena?.nextUniform() ?? Float.random(in: 0..<1)) * 2 - 1) * gvfScale
+            }
         }
-        let invUn = 1.0 / sqrt(max(gvfUSq, 1e-12))
-        for f in 0..<rank { arenaPtr[ao.gvfU + f] *= invUn }
-        let gvfScale = Float(1.0 / sqrt(Double(max(rank, 1))))
-        for f in 0..<rank {
-            arenaPtr[ao.gvfW + f] = ((rngArena?.nextUniform() ?? Float.random(in: 0..<1)) * 2 - 1) * gvfScale
+        for f in 0..<(rank * nGvfInit) {
+            arenaPtr[ao.gvfGenAux + f] = 0
+        }
+        for f in 0..<(actDim * rank) {
+            arenaPtr[ao.policyTrace + f] = 0
+        }
+        for f in 0..<(3 * actDim) {
+            arenaPtr[ao.mgscEta + f] = 0
         }
         metalDebugSignposts = ProcessInfo.processInfo.environment["OAK_METAL_SIGNPOSTS"] == "1"
         self.diagnosticGpuPhaseTiming = diagnosticGpuPhaseTiming
@@ -1121,10 +1133,17 @@ final class OakMetalEngine {
 
     private func makeKernelConfig(prim: Int, ofs: Int) -> KernelConfig {
         let o = arenaOffsets
-        let m = UInt32(OakMetalLayout.structuralGenDirectionCount(rank: rank))
         let oc = OakMetalLayout.derivedOptionCount(rank: rank, actDim: actDim)
         let gammaMilli = UInt32(min(max((1.0 - 1.0 / Double(max(rank + 25, 26))) * 1_000_000, 0), Double(UInt32.max)))
         let betaMilli = UInt32(min(max((1.0 / Double(max(rank * rank, 1))) * 1_000_000, 0), Double(UInt32.max)))
+        let nGvf = OakMetalLayout.structuralMaxGvfHeads(rank: rank)
+        let gammaSub = Double(gammaMilli) / 1_000_000.0
+        let cap = Double(max(rank * max(batchSize, 1), 1))
+        let epsFloor = 1.0 / (cap + 1.0)
+        let oneM = max(1.0 - gammaSub, epsFloor)
+        let gammaPhi0 = Float(gammaSub)
+        let gammaPhi1 = Float(1.0 / oneM)
+        let gammaPhi2 = Float(log(oneM))
         let p = paramLayout
         let s = stateLayout
         let u = uintLayout
@@ -1169,22 +1188,26 @@ final class OakMetalEngine {
             floatArenaAutostepBase: UInt32(o.autostep),
             floatArenaTdOptionBase: UInt32(o.tdOption),
             floatArenaPlanDeltaBase: UInt32(o.planDelta),
-            floatArenaGvfWeightsBase: UInt32(o.gvfW),
-            floatArenaGvfCumulantBase: UInt32(o.gvfU),
+            floatArenaGvfWeightsBase: UInt32(o.gvfStack),
             floatArenaGvfTdBase: UInt32(o.gvfTd),
             floatArenaGvfRhoBase: UInt32(o.gvfRho),
+            floatArenaGvfGenAuxBase: UInt32(o.gvfGenAux),
+            floatArenaPolicyTraceBase: UInt32(o.policyTrace),
+            floatArenaMgscEtaBase: UInt32(o.mgscEta),
             floatArenaKeyboardBase: UInt32(o.keyboard),
             floatArenaKeyboardPredBase: UInt32(o.keyboardPred),
             floatArenaUtilityBase: UInt32(o.utility),
-            floatArenaFeatureGenBase: UInt32(o.featureGen),
             floatArenaSubtaskRhoBase: UInt32(o.subtaskRho),
             floatArenaOptionBetaBase: UInt32(o.optionBeta),
             floatArenaDeviceScratchBase: UInt32(o.deviceScratch),
-            genDirectionCount: m,
             floatArenaOffsetInLatentPower: UInt32(arenaBaseInLatent),
             phase: 0,
             gammaSubtaskMilli: gammaMilli,
-            betaLearnRateMilli: betaMilli
+            betaLearnRateMilli: betaMilli,
+            nGvfHeads: UInt32(nGvf),
+            gammaPhi0: gammaPhi0,
+            gammaPhi1: gammaPhi1,
+            gammaPhi2: gammaPhi2
         )
     }
 

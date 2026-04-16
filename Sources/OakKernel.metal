@@ -10,10 +10,13 @@ inline float stats_abs_bound_for_sum_squares(uint termCount) {
     return sqrt(FLT_MAX / n);
 }
 
-// Oak / Alberta Plan (12 steps): continual phases every tick (no train/eval). Packed `params` + `state` + `uint` arenas
+// Oak / Alberta Plan (12 steps): continual phases every tick (no train/eval). GVF/planning: single Metal path (no duplicate
+// MPS matmul); Swift `structuralMaxGvfHeads` caps future batched GenTD width. Packed `params` + `state` + `uint` arenas
 // keep per-kernel buffer bindings ≤ 8 (split pipelines share the same layout).
 // Shared latent `state` is read-only within a phase; consumers share one representation (AGENTS.md).
 
+// GenTD batched horde: Xu et al., "GenTD: A Generalized Algorithm for TD Learning" (NeurIPS 2022); scale reference:
+// Martin et al. "The Deep RL Bootcamp: 4000 GVFs" (tutorial) — literature anchors for multi-demon TD in one kernel.
 struct KernelConfig {
     uint obsDim;
     uint rank;
@@ -56,23 +59,28 @@ struct KernelConfig {
     uint floatArenaTdOptionBase;
     uint floatArenaPlanDeltaBase;
     uint floatArenaGvfWeightsBase;
-    uint floatArenaGvfCumulantBase;
     uint floatArenaGvfTdBase;
     uint floatArenaGvfRhoBase;
+    uint floatArenaGvfGenAuxBase;
+    uint floatArenaPolicyTraceBase;
+    uint floatArenaMgscEtaBase;
     uint floatArenaKeyboardBase;
     uint floatArenaKeyboardPredBase;
     uint floatArenaUtilityBase;
-    uint floatArenaFeatureGenBase;
     uint floatArenaSubtaskRhoBase;
     uint floatArenaOptionBetaBase;
     uint floatArenaDeviceScratchBase;
-    uint genDirectionCount;
     uint floatArenaOffsetInLatentPower;
     uint phase;
     uint gammaSubtaskMilli;
     uint betaLearnRateMilli;
+    /// Batched GVF demon count: `min(4096, 16*rank)`; structural (Swift).
+    uint nGvfHeads;
+    float gammaPhi0;
+    float gammaPhi1;
+    float gammaPhi2;
 };
-struct KernelScalars { uint stepCount, rewardCount, activeCount, admissionCursor; float rewardRate; };
+struct KernelScalars { uint stepCount, rewardCount, activeCount, admissionCursor; float rewardRate; float pEff; };
 struct KernelStats {
     float rewardRate, latentPredictionMSE, rewardPredictionMSE, latentStateMeanSquare, activeRank, actionDeltaL2Mean, planningActionChangeL2Mean;
     float rawNonFiniteCount, sanitizedNonFiniteCount, encodeNonFiniteCount, learnNonFiniteCount, planNonFiniteCount;
@@ -105,6 +113,25 @@ inline float dot_active(device const float *w, uint wOff, device const float *v,
     return masked_dot(w, wOff, v, vOff, activeList, activeCount, raw, san);
 }
 
+/// Sparse dot `sum_i w[wOff+list[i]] * val[i]` where `val[i]` are **already** sanitized (e.g. prediction scratch).
+inline float dot_sparse_weights_preval(device const float *w, uint wOff, device const float *val, device const uint *list, uint n) {
+    float sum = 0.0f;
+    uint i = 0u;
+    for (; i + 3u < n; i += 4u) {
+        uint i0 = list[i];
+        uint i1 = list[i + 1u];
+        uint i2 = list[i + 2u];
+        uint i3 = list[i + 3u];
+        float4 ww = float4(w[wOff + i0], w[wOff + i1], w[wOff + i2], w[wOff + i3]);
+        float4 vv = float4(val[i], val[i + 1u], val[i + 2u], val[i + 3u]);
+        sum += dot(ww, vv);
+    }
+    for (; i < n; ++i) {
+        sum += w[wOff + list[i]] * val[i];
+    }
+    return sum;
+}
+
 /// Ridge from representation capacity (rank × batch): avoids free ε floors (NLMS / autostep family).
 inline float capacity_ridge(uint rank, uint batchSize) {
     float cap = float(max(rank * max(batchSize, 1u), 1u));
@@ -122,9 +149,27 @@ inline float online_inv_time(device const KernelScalars *scalars) {
     return 1.0f / float(max(scalars->stepCount + 1u, 1u));
 }
 
-/// Mahmood–Sutton–White Autostep meta-step η (structural; not env-specific).
-inline float autostep_eta(uint rank) {
-    return 1e-2f / float(max(rank, 1u));
+/// NLMS / policy step scale: 1/(rank×batch) capacity inverse (structural; aligns with streaming AC step-size practice, e.g. arXiv:2410.14606, without env-specific tuning).
+inline float nlms_step_scale(uint rank, uint batchSize) {
+    return 1.0f / float(max(rank * max(batchSize, 1u), 1u));
+}
+
+/// Running max scale from Autostep-style feature second moments (`featureSecondMoment` EMA of batch mean \(x^2\)).
+inline float feature_sigma_max(device const float *featureSecondMoment, uint rank) {
+    float m = 0.0f;
+    for (uint i = 0u; i < rank; ++i) m = max(m, featureSecondMoment[i]);
+    return sqrt(max(m, FLT_MIN));
+}
+
+/// Structural numerical floor (continual ridge / machine epsilon): replaces ad-hoc `1e-6`/`1e-8` in softmax-style ops.
+/// `p_eff`/`N`/`C` from rank, online step index, and capacity volume (same `cap` family as `capacity_ridge`).
+inline float autostep_eps_cap(uint rank, uint batchSize, device const KernelScalars *scalars, device const float *featureSecondMoment) {
+    float sigma = feature_sigma_max(featureSecondMoment, rank);
+    float capVol = float(max(rank * max(batchSize, 1u), 1u));
+    float N = float(max(scalars->stepCount, 1u));
+    float peff = max(scalars->pEff, 1.0f);
+    float ratio = peff / (N + capVol);
+    return sqrt(FLT_EPSILON) * sigma * sqrt(max(ratio, FLT_MIN));
 }
 
 inline float plan_merge_lambda(uint rank, uint actDim) {
@@ -250,7 +295,7 @@ inline float kstep_plan_discrete(device const float *stateWeights, uint forwardB
     float acc = 0.0f;
     for (uint step = 0u; step < planK; ++step) {
         uint bestA = 0u;
-        float bestV = -1e10f;
+        float bestV = -FLT_MAX;
         for (uint cand = 0u; cand < actDim; ++cand) {
             float vCand = 0.0f;
             for (uint li = 0u; li < activeCount; ++li) {
@@ -301,7 +346,9 @@ struct OakPhaseContext {
     uint obsDim, rank, actDim, batchSize, optionCount, primitivePacked, optionForwardStride, planK, baseObsDim;
     uint actionIsDiscrete;
     float gammaSub, betaLR, ridge, invT;
+    float gammaPhi0, gammaPhi1, gammaPhi2;
     uint activeCount;
+    uint nGvfHeads;
     device KernelScalars *scalars;
     device float *encoderWeights;
     device float *policyWeights;
@@ -333,8 +380,9 @@ struct OakPhaseContext {
     device uint *counters;
     device float *tdOptionArena;
     device float *gvfTdArena;
-    device float *gvfHordeW;
-    device float *gvfHordeU;
+    device float *gvfStackW;
+    device float *gvfStackH;
+    device float *gvfStackU;
     device float *gvfHordeRho;
     device float *subtaskRhoArena;
     device float *optionBetaArena;
@@ -342,7 +390,9 @@ struct OakPhaseContext {
     device float *keyboardArena;
     device float *keyboardPredArena;
     device float *utilityArena;
-    device float *featureGenArena;
+    device float *policyTraceArena;
+    device float *gvfGenAuxArena;
+    device float *mgscEtaArena;
     device float *arena;
     device float *ds;
     uint floatArenaAutostepBase;
@@ -373,6 +423,9 @@ inline OakPhaseContext oak_make_phase_context(
     c.actionIsDiscrete = config.actionIsDiscrete;
     c.gammaSub = float(config.gammaSubtaskMilli) / 1000000.0f;
     c.betaLR = float(config.betaLearnRateMilli) / 1000000.0f;
+    c.gammaPhi0 = config.gammaPhi0;
+    c.gammaPhi1 = config.gammaPhi1;
+    c.gammaPhi2 = config.gammaPhi2;
     c.scalars = scalars;
     c.ridge = capacity_ridge(rank, batchSize);
     c.invT = online_inv_time(scalars);
@@ -415,8 +468,13 @@ inline OakPhaseContext oak_make_phase_context(
     c.ds = floatArena + config.floatArenaDeviceScratchBase;
     c.tdOptionArena = arena_ptr(floatArena, config.floatArenaTdOptionBase);
     c.gvfTdArena = arena_ptr(floatArena, config.floatArenaGvfTdBase);
-    c.gvfHordeW = arena_ptr(floatArena, config.floatArenaGvfWeightsBase);
-    c.gvfHordeU = arena_ptr(floatArena, config.floatArenaGvfCumulantBase);
+    uint nGvf = max(config.nGvfHeads, 1u);
+    uint gvfStride = nGvf * rank;
+    device float *gvfBase = arena_ptr(floatArena, config.floatArenaGvfWeightsBase);
+    c.nGvfHeads = nGvf;
+    c.gvfStackW = gvfBase;
+    c.gvfStackH = gvfBase + gvfStride;
+    c.gvfStackU = gvfBase + 2u * gvfStride;
     c.gvfHordeRho = arena_ptr(floatArena, config.floatArenaGvfRhoBase);
     c.subtaskRhoArena = arena_ptr(floatArena, config.floatArenaSubtaskRhoBase);
     c.optionBetaArena = arena_ptr(floatArena, config.floatArenaOptionBetaBase);
@@ -424,7 +482,9 @@ inline OakPhaseContext oak_make_phase_context(
     c.keyboardArena = arena_ptr(floatArena, config.floatArenaKeyboardBase);
     c.keyboardPredArena = arena_ptr(floatArena, config.floatArenaKeyboardPredBase);
     c.utilityArena = arena_ptr(floatArena, config.floatArenaUtilityBase);
-    c.featureGenArena = arena_ptr(floatArena, config.floatArenaFeatureGenBase);
+    c.policyTraceArena = arena_ptr(floatArena, config.floatArenaPolicyTraceBase);
+    c.gvfGenAuxArena = arena_ptr(floatArena, config.floatArenaGvfGenAuxBase);
+    c.mgscEtaArena = arena_ptr(floatArena, config.floatArenaMgscEtaBase);
     c.floatArenaAutostepBase = config.floatArenaAutostepBase;
     return c;
 }
@@ -454,22 +514,15 @@ inline void oak_phase_prediction_impl(OakPhaseContext ctx, uint gid) {
         dsp[i] = sanitize(ctx.previousState[sOff + idx], raw, san);
         dsp[ctx.rank + i] = sanitize(ctx.state[sOff + idx], raw, san);
     }
-    float rPred = 0.0f;
-    float vPrev = 0.0f;
-    float vNextBoot = 0.0f;
-    for (uint i = 0u; i < activeCount; ++i) {
-        uint idx = activeList[i];
-        float sp = dsp[i];
-        float ss = dsp[ctx.rank + i];
-        rPred += ctx.rewardWeights[idx] * sp;
-        vPrev += ctx.valueWeights[idx] * sp;
-        vNextBoot += ctx.valueWeights[idx] * ss;
-    }
+    float rPred = dot_sparse_weights_preval(ctx.rewardWeights, 0, dsp, activeList, activeCount);
+    float vPrev = dot_sparse_weights_preval(ctx.valueWeights, 0, dsp, activeList, activeCount);
+    float vNextBoot = dot_sparse_weights_preval(ctx.valueWeights, 0, dsp + ctx.rank, activeList, activeCount);
     ctx.rewardPrediction[gid] = clamp(sanitize(rPred, raw, san), -cap, cap);
     vPrev = clamp(sanitize(vPrev, raw, san), -cap, cap);
     vNextBoot = clamp(sanitize(vNextBoot, raw, san), -cap, cap);
     float terminalMask = ctx.done[gid] ? 0.0f : 1.0f;
     float vNow = terminalMask * vNextBoot;
+    // Differential TD / reward centering (Naik et al.): use r̄ from **previous** step; bookkeeping updates r̄ once per step after this phase.
     float delta = ctx.reward[gid] - ctx.scalars->rewardRate + vNow - vPrev;
     float prevNorm2 = 0.0f;
     for (uint i = 0u; i < activeCount; ++i) {
@@ -488,12 +541,19 @@ inline void oak_phase_prediction_impl(OakPhaseContext ctx, uint gid) {
     float rhoK = ctx.subtaskRhoArena[po];
     float deltaOpt = cNext - rhoK + ctx.gammaSub * vSubNextMasked - vSubPrev;
     ctx.tdOptionArena[gid] = clamp(sanitize(deltaOpt / denom, raw, san), -cap, cap);
-    float predHorde = masked_dot(ctx.gvfHordeW, 0, ctx.previousState, sOff, activeList, activeCount, raw, san);
-    float cNextHorde = masked_dot(ctx.gvfHordeU, 0, ctx.state, sOff, activeList, activeCount, raw, san);
-    float vGnext = masked_dot(ctx.gvfHordeW, 0, ctx.state, sOff, activeList, activeCount, raw, san) * terminalMask;
     float rhoH = ctx.gvfHordeRho[0];
-    float dHorde = cNextHorde - rhoH + ctx.gammaSub * vGnext - predHorde;
-    ctx.gvfTdArena[gid] = clamp(sanitize(dHorde, raw, san), -cap, cap);
+    uint n = ctx.nGvfHeads;
+    for (uint j = 0u; j < n; ++j) {
+        float predj = masked_dot(ctx.gvfStackW, j * ctx.rank, ctx.previousState, sOff, activeList, activeCount, raw, san);
+        float cj = masked_dot(ctx.gvfStackU, j * ctx.rank, ctx.state, sOff, activeList, activeCount, raw, san);
+        if (j == 0u && n > 1u) {
+            cj += ctx.gammaPhi0 * masked_dot(ctx.gvfStackU, ctx.rank, ctx.state, sOff, activeList, activeCount, raw, san);
+            cj += fma(ctx.gammaPhi1, 0.0f, ctx.gammaPhi2 * ctx.ridge);
+        }
+        float vjp = masked_dot(ctx.gvfStackW, j * ctx.rank, ctx.state, sOff, activeList, activeCount, raw, san) * terminalMask;
+        float dj = cj - rhoH + ctx.gammaPhi0 * vjp - predj;
+        ctx.gvfTdArena[gid * n + j] = clamp(sanitize(dj, raw, san), -cap, cap);
+    }
     float rowErrSum = 0.0f;
     for (uint g = 0u; g < ctx.rank; ++g) {
         float acc = 0.0f;
@@ -535,6 +595,7 @@ inline void oak_phase_forward_model_impl(OakPhaseContext ctx, uint gid) {
 inline void oak_phase_learn_impl(OakPhaseContext ctx, uint gid) {
     const uint policyBase = 3u * ctx.rank;
     const uint gvfHordeLearnBase = 4u * ctx.rank;
+    const uint n = ctx.nGvfHeads;
     uint raw = 0u, san = 0u;
     const float invT = ctx.invT;
     const float ridge = ctx.ridge;
@@ -562,16 +623,13 @@ inline void oak_phase_learn_impl(OakPhaseContext ctx, uint gid) {
         float mBatch = smAcc / float(ctx.batchSize);
         float gFeat = weightUpdate / float(ctx.batchSize);
         device float *asBase = arena_ptr(ctx.arena, ctx.floatArenaAutostepBase);
-        float vTr = asBase[feat * 2u];
-        float al = asBase[feat * 2u + 1u];
-        float eta = autostep_eta(ctx.rank);
-        vTr += eta * (gFeat - vTr);
-        float dTilde = gFeat - vTr;
-        al *= exp(eta * gFeat * dTilde);
-        al = clamp(al, 1e-8f, 1e2f);
-        asBase[feat * 2u] = vTr;
-        asBase[feat * 2u + 1u] = al;
-        ctx.valueWeights[feat] += al * gFeat;
+        float emaAbsG = asBase[feat];
+        emaAbsG += (fabs(gFeat) - emaAbsG) * invT;
+        asBase[feat] = emaAbsG;
+        float cap = float(max(ctx.rank * max(ctx.batchSize, 1u), 1u));
+        float kappa = 2.0f * sqrt(cap);
+        float stepV = min(1.0f / (emaAbsG + ridge), kappa / (fabs(gFeat) + ridge));
+        ctx.valueWeights[feat] += stepV * gFeat;
         float uBatch = utility / float(ctx.batchSize);
         float gvfBatch = gvfUtil / float(max(ctx.batchSize * ctx.rank, 1u));
         ctx.featureResidual[feat] += ((uBatch + gvfBatch) - ctx.featureResidual[feat]) * invT;
@@ -590,7 +648,7 @@ inline void oak_phase_learn_impl(OakPhaseContext ctx, uint gid) {
             }
         }
         for (uint i = 0u; i < ctx.rank; ++i) {
-            float step = autostep_eta(ctx.rank) / (ctx.featureSecondMoment[i] + ridge);
+            float step = nlms_step_scale(ctx.rank, ctx.batchSize) / (ctx.featureSecondMoment[i] + ridge);
             ctx.stateWeights[gvfBase + i] += (gradAcc[i] / float(ctx.batchSize)) * step;
         }
     }
@@ -619,14 +677,15 @@ inline void oak_phase_learn_impl(OakPhaseContext ctx, uint gid) {
                 if (batch_dynamics_opt(ctx.stompState, ctx.batchSize, row) == opt) wMask += 1.0f;
             }
             wMask *= invB;
-            if (wMask < 1e-8f) continue;
+            float epsDyn = autostep_eps_cap(ctx.rank, ctx.batchSize, ctx.scalars, ctx.featureSecondMoment);
+            if (wMask < epsDyn) continue;
             uint blockBase = ctx.primitivePacked + opt * ctx.optionForwardStride;
             for (uint i = 0u; i < ctx.rank; ++i) {
-                float step = autostep_eta(ctx.rank) / (ctx.featureSecondMoment[i] + ridge);
+                float step = nlms_step_scale(ctx.rank, ctx.batchSize) / (ctx.featureSecondMoment[i] + ridge);
                 ctx.stateWeights[blockBase + outRow * (ctx.rank + ctx.actDim) + i] += gradAcc[i] * invB * step * wMask;
             }
             for (uint a = 0u; a < ctx.actDim; ++a) {
-                float stepA = autostep_eta(ctx.rank) / (ctx.featureSecondMoment[outRow] + ridge);
+                float stepA = nlms_step_scale(ctx.rank, ctx.batchSize) / (ctx.featureSecondMoment[outRow] + ridge);
                 ctx.stateWeights[blockBase + outRow * (ctx.rank + ctx.actDim) + ctx.rank + a] += gradAccA[a] * invB * stepA * wMask;
             }
         }
@@ -635,14 +694,21 @@ inline void oak_phase_learn_impl(OakPhaseContext ctx, uint gid) {
     if (gid >= policyBase && gid < policyBase + ctx.rank) {
         uint feat = gid - policyBase;
         float muF = 1.0f / (ctx.featureSecondMoment[feat] + ridge);
-        float stepPol = autostep_eta(ctx.rank) * muF;
-        float gradP = 0.0f;
-        for (uint row = 0u; row < ctx.batchSize; ++row) {
-            uint sOff = row * ctx.rank;
-            gradP += ctx.td[row] * sanitize(ctx.previousState[sOff + feat], raw, san);
-        }
-        float dPol = (gradP / float(ctx.batchSize)) * stepPol;
+        float stepPol = nlms_step_scale(ctx.rank, ctx.batchSize) * muF;
+        float lamTr = 1.0f - nlms_step_scale(ctx.rank, ctx.batchSize);
         for (uint actIdx = 0u; actIdx < ctx.actDim; ++actIdx) {
+            float gradP = 0.0f;
+            for (uint row = 0u; row < ctx.batchSize; ++row) {
+                uint sOff = row * ctx.rank;
+                uint aOff = row * ctx.actDim;
+                gradP += ctx.td[row] * sanitize(ctx.previousState[sOff + feat], raw, san) * sanitize(ctx.previousAction[aOff + actIdx], raw, san);
+            }
+            float gInst = gradP / float(ctx.batchSize);
+            uint trOff = actIdx * ctx.rank + feat;
+            float trPrev = ctx.policyTraceArena[trOff];
+            float trNew = lamTr * trPrev + gInst;
+            ctx.policyTraceArena[trOff] = trNew;
+            float dPol = stepPol * trNew;
             ctx.policyWeights[actIdx * ctx.rank + feat] += dPol;
         }
         for (uint row = 0u; row < ctx.batchSize; ++row) {
@@ -677,15 +743,50 @@ inline void oak_phase_learn_impl(OakPhaseContext ctx, uint gid) {
             ctx.rewardWeights[feat] += (gradR / float(ctx.batchSize)) * stepPol;
         }
     }
-    if (gid >= gvfHordeLearnBase && gid < gvfHordeLearnBase + ctx.rank) {
-        uint feat = gid - gvfHordeLearnBase;
-        float gradH = 0.0f;
-        for (uint row = 0u; row < ctx.batchSize; ++row) {
-            uint sOff = row * ctx.rank;
-            gradH += ctx.gvfTdArena[row] * sanitize(ctx.previousState[sOff + feat], raw, san);
+    if (gid >= gvfHordeLearnBase && gid < gvfHordeLearnBase + ctx.rank * n) {
+        uint lin = gid - gvfHordeLearnBase;
+        uint feat = lin % ctx.rank;
+        uint j = lin / ctx.rank;
+        float stepH = nlms_step_scale(ctx.rank, ctx.batchSize) / (ctx.featureSecondMoment[feat] + ridge);
+        float bGen = nlms_step_scale(ctx.rank, ctx.batchSize);
+        if (j == 1u && n > 1u) {
+            float gradU1 = 0.0f;
+            for (uint row = 0u; row < ctx.batchSize; ++row) {
+                uint sOff = row * ctx.rank;
+                gradU1 += ctx.gvfTdArena[row * n + 0u] * sanitize(ctx.state[sOff + feat], raw, san);
+            }
+            ctx.gvfStackU[ctx.rank + feat] += stepH * (gradU1 / float(ctx.batchSize));
+        } else if (j == 0u) {
+            float gradH = 0.0f;
+            for (uint row = 0u; row < ctx.batchSize; ++row) {
+                uint sOff = row * ctx.rank;
+                gradH += ctx.gvfTdArena[row * n + 0u] * sanitize(ctx.previousState[sOff + feat], raw, san);
+            }
+            float gAvg = gradH / float(ctx.batchSize);
+            float rAux = ctx.gvfGenAuxArena[feat];
+            ctx.gvfStackW[feat] += stepH * (gAvg - rAux);
+            rAux += bGen * (gAvg - rAux);
+            ctx.gvfGenAuxArena[feat] = rAux;
+            ctx.gvfStackH[feat] += stepH * gAvg;
+        } else {
+            float gradH = 0.0f;
+            float gradU = 0.0f;
+            for (uint row = 0u; row < ctx.batchSize; ++row) {
+                uint sOff = row * ctx.rank;
+                float ph = sanitize(ctx.previousState[sOff + feat], raw, san);
+                float tdv = ctx.gvfTdArena[row * n + j];
+                gradH += tdv * ph;
+                gradU += tdv * sanitize(ctx.state[sOff + feat], raw, san);
+            }
+            float gAvg = gradH / float(ctx.batchSize);
+            uint auxOff = feat + j * ctx.rank;
+            float rAux = ctx.gvfGenAuxArena[auxOff];
+            ctx.gvfStackW[feat + j * ctx.rank] += stepH * (gAvg - rAux);
+            rAux += bGen * (gAvg - rAux);
+            ctx.gvfGenAuxArena[auxOff] = rAux;
+            ctx.gvfStackH[feat + j * ctx.rank] += stepH * gAvg;
+            ctx.gvfStackU[feat + j * ctx.rank] += stepH * (gradU / float(ctx.batchSize));
         }
-        float stepH = autostep_eta(ctx.rank) / (ctx.featureSecondMoment[feat] + ridge);
-        ctx.gvfHordeW[feat] += (gradH / float(ctx.batchSize)) * stepH;
     }
 }
 
@@ -702,6 +803,7 @@ inline void oak_phase_meta_policy_impl(OakPhaseContext ctx, device const float *
             uint elapsed = ctx.stompState[row * 4u + 1u];
             uint activeOption = 0u;
             float pickScore = 0.0f;
+            float epsK = autostep_eps_cap(ctx.rank, ctx.batchSize, ctx.scalars, ctx.featureSecondMoment);
             if (phase == 1u && elapsed < ctx.rank) {
                 activeOption = poPrev;
                 for (uint i = 0u; i < ctx.activeCount; ++i) {
@@ -709,38 +811,31 @@ inline void oak_phase_meta_policy_impl(OakPhaseContext ctx, device const float *
                     pickScore += ctx.optionValues[activeOption * ctx.rank + idx] * sanitize(ctx.state[sOff + idx], raw, san);
                 }
             } else {
-                // Option keyboard (Alberta Plan): Design B — one subtask/option episode selects a **single** terminal shaping
-                // vector (`ctx.optionValues` row); chords are not a separate blend kernel (bounded `ctx.optionCount` slots).
-                float kbSum = 0.0f;
-                for (uint k = 0u; k < ctx.optionCount; ++k) kbSum += max(ctx.keyboardArena[row * ctx.optionCount + k], 1e-6f);
-                float invKb = 1.0f / kbSum;
-                float bestScore = -1e10f;
+                // Option keyboard — Barreto-style **unnormalized** weights `w_k`; mixture of option-policy logits (no argmax routing).
+                float pickAgg = 0.0f;
                 for (uint opt = 0u; opt < ctx.optionCount; ++opt) {
-                    float score = 0.0f;
+                    float psi = 0.0f;
                     uint off = opt * ctx.rank;
                     for (uint i = 0u; i < ctx.activeCount; ++i) {
                         uint idx = ctx.activeList[i];
                         float sv = sanitize(ctx.state[sOff + idx], raw, san);
-                        score += ctx.optionValues[off + idx] * sv;
+                        psi += ctx.optionValues[off + idx] * sv;
                     }
-                    // STOMP / reward-respecting tie: terminal feature emphasis for subtask `opt` (generic latent index).
                     if (opt < ctx.rank) {
-                        score += sanitize(ctx.state[sOff + opt], raw, san) * (1.0f / float(max(ctx.rank, 1u)));
+                        psi += sanitize(ctx.state[sOff + opt], raw, san) * (1.0f / float(max(ctx.rank, 1u)));
                     }
-                    float w = ctx.keyboardArena[row * ctx.optionCount + opt] * invKb * float(ctx.optionCount);
-                    float weighted = score * w;
-                    if (opt == 0u || weighted > bestScore) {
-                        bestScore = weighted;
-                        activeOption = opt;
-                    }
+                    float wk = max(ctx.keyboardArena[row * ctx.optionCount + opt], epsK);
+                    pickAgg += wk * psi;
                 }
-                pickScore = bestScore;
+                pickScore = pickAgg;
+                activeOption = poPrev;
                 if (actIdx == 0u) {
                     ctx.stompState[row * 4u] = 1u;
                     ctx.stompState[row * 4u + 1u] = 0u;
                     uint ocR = ctx.optionCount * ctx.rank;
                     ctx.optionCriticWeights[ocR + activeOption] += (pickScore - ctx.optionCriticWeights[ocR + activeOption]) * ctx.invT;
                     const uint kbd0 = 2u * ctx.batchSize;
+                    float epsMeta = max(epsK, ctx.ridge);
                     float ssum = 0.0f;
                     for (uint k = 0u; k < ctx.optionCount; ++k) {
                         float sk = 0.0f;
@@ -752,7 +847,7 @@ inline void oak_phase_meta_policy_impl(OakPhaseContext ctx, device const float *
                         if (k < ctx.rank) sk += sanitize(ctx.state[sOff + k], raw, san) * (1.0f / float(max(ctx.rank, 1u)));
                         ssum += max(sk, 0.0f);
                     }
-                    float invSS = 1.0f / (ssum + 1e-5f);
+                    float invSS = 1.0f / (ssum + epsMeta);
                     for (uint k = 0u; k < ctx.optionCount; ++k) {
                         float sk = 0.0f;
                         uint off = k * ctx.rank;
@@ -769,13 +864,23 @@ inline void oak_phase_meta_policy_impl(OakPhaseContext ctx, device const float *
                     }
                 }
             }
-            uint base = activeOption * ctx.rank * ctx.actDim;
             float baseLogit = masked_dot(ctx.policyWeights, actIdx * ctx.rank, ctx.state, sOff, ctx.activeList, ctx.activeCount, raw, san);
-            float optLogit = masked_dot(ctx.optionPolicyWeights, base + actIdx * ctx.rank, ctx.state, sOff, ctx.activeList, ctx.activeCount, raw, san);
+            float lamMix = plan_merge_lambda(ctx.rank, ctx.actDim);
+            float optMix = 0.0f;
+            if (phase == 1u && elapsed < ctx.rank) {
+                uint k = poPrev;
+                optMix = masked_dot(ctx.optionPolicyWeights, k * ctx.rank * ctx.actDim + actIdx * ctx.rank, ctx.state, sOff, ctx.activeList, ctx.activeCount, raw, san);
+            } else {
+                for (uint k = 0u; k < ctx.optionCount; ++k) {
+                    float wk = max(ctx.keyboardArena[row * ctx.optionCount + k], epsK);
+                    float lk = masked_dot(ctx.optionPolicyWeights, k * ctx.rank * ctx.actDim + actIdx * ctx.rank, ctx.state, sOff, ctx.activeList, ctx.activeCount, raw, san);
+                    optMix += lamMix * wk * lk;
+                }
+            }
             uint aOff = row * ctx.actDim;
             float lamPlan = plan_merge_lambda(ctx.rank, ctx.actDim);
             float planBump = ctx.planDeltaArena[aOff + actIdx];
-            float logit = sanitize(baseLogit + optLogit + lamPlan * planBump, raw, san);
+            float logit = sanitize(baseLogit + optMix + lamPlan * planBump, raw, san);
             float lo = actionBounds[actIdx];
             float hi = actionBounds[ctx.actDim + actIdx];
             float bounded = clamp(logit, lo, hi);
@@ -800,10 +905,12 @@ inline void oak_phase_planning_impl(OakPhaseContext ctx, device const float *act
 
             if ((ctx.actionIsDiscrete != 0u)) {
                 uint bestA = 0u;
-                float bestV = -1e10f;
+                float bestV = -FLT_MAX;
+                float lamEta = plan_merge_lambda(ctx.rank, ctx.actDim);
                 for (uint cand = 0u; cand < ctx.actDim; ++cand) {
                     float vCand = discrete_lookahead1(ctx.stateWeights, forwardPlanBase, ctx.valueWeights, ctx.optionValues, po,
                         ctx.state, sOff, ctx.actDim, ctx.rank, ctx.activeList, ctx.activeCount, cand, raw, san);
+                    vCand += ctx.mgscEtaArena[cand] * lamEta;
                     if (cand == 0u || vCand > bestV) {
                         bestV = vCand;
                         bestA = cand;
@@ -870,7 +977,7 @@ inline void oak_phase_planning_impl(OakPhaseContext ctx, device const float *act
         }
         return;
 }
-inline void oak_phase_bookkeeping_impl(OakPhaseContext ctx, device KernelStats *statsOut, constant KernelConfig &config, uint gid) {
+inline void oak_phase_bookkeeping_impl(OakPhaseContext ctx, device KernelStats *statsOut, uint gid) {
     if (gid != 0u) return;
         uint rawB = 0u, sanB = 0u;
         float invTUfeat = online_inv_time(ctx.scalars);
@@ -897,49 +1004,102 @@ inline void oak_phase_bookkeeping_impl(OakPhaseContext ctx, device KernelStats *
         }
         ctx.scalars->activeCount = count;
         const uint ac = max(ctx.scalars->activeCount, 1u);
-        // Oak / FC-STOMP: swap one low-utility active feature for the strongest inactive candidate (single swap, bounded work).
-        if (count > 1u && count < ctx.rank) {
+        // MGSC-style search control (Burega et al.): η with capacity-derived cadence + Autostep-like momentum/variance (no fixed Adam β).
+        if (ctx.actionIsDiscrete != 0u) {
+            uint Kmeta = max(1u, ctx.rank / 64u);
+            float doMeta = ((ctx.scalars->stepCount % Kmeta) == 0u) ? 1.0f : 0.0f;
+            float metaStep = nlms_step_scale(ctx.rank, ctx.batchSize);
+            float invB = 1.0f / float(max(ctx.batchSize, 1u));
+            float tMeta = float(max(ctx.scalars->stepCount, 1u));
+            float beta1 = 1.0f / tMeta;
+            float beta2 = nlms_step_scale(ctx.rank, ctx.batchSize);
+            device float *mEta = ctx.mgscEtaArena + ctx.actDim;
+            device float *vEta = mEta + ctx.actDim;
+            for (uint cand = 0u; cand < ctx.actDim; ++cand) {
+                float gAcc = 0.0f;
+                for (uint row = 0u; row < ctx.batchSize; ++row) {
+                    uint aOff = row * ctx.actDim;
+                    uint bestA = 0u;
+                    float bestD = ctx.planDeltaArena[aOff];
+                    for (uint a = 1u; a < ctx.actDim; ++a) {
+                        float v = ctx.planDeltaArena[aOff + a];
+                        if (v > bestD) {
+                            bestD = v;
+                            bestA = a;
+                        }
+                    }
+                    float mx = ctx.mgscEtaArena[0];
+                    for (uint a = 1u; a < ctx.actDim; ++a) mx = max(mx, ctx.mgscEtaArena[a]);
+                    float sumE = 0.0f;
+                    for (uint a = 0u; a < ctx.actDim; ++a) sumE += exp(ctx.mgscEtaArena[a] - mx);
+                    float p = exp(ctx.mgscEtaArena[cand] - mx) / max(sumE, FLT_MIN);
+                    float y = (bestA == cand) ? 1.0f : 0.0f;
+                    gAcc += (y - p);
+                }
+                float g = gAcc * invB;
+                mEta[cand] = (1.0f - beta1) * mEta[cand] + g;
+                vEta[cand] = (1.0f - beta2) * vEta[cand] + g * g;
+                ctx.mgscEtaArena[cand] += doMeta * metaStep * mEta[cand] / sqrt(vEta[cand] + ctx.ridge);
+            }
+        }
+        // CBP-style plasticity: if lowest active utility is below mean − std (structural band), reinit that latent’s encoder with deterministic jitter (no GPU RNG).
+        if (ac >= 1u) {
+            float mean_u = totalUtility / float(max(ctx.rank, 1u));
+            float var_u = 0.0f;
+            for (uint i = 0u; i < ctx.rank; ++i) {
+                float d = ctx.featureResidual[i] - mean_u;
+                var_u += d * d;
+            }
+            float std_u = sqrt(var_u / float(max(ctx.rank, 1u)));
             uint worstIdx = ctx.activeList[0];
             float worstRes = ctx.featureResidual[worstIdx];
-            for (uint j = 1u; j < count; ++j) {
+            for (uint j = 1u; j < ac; ++j) {
                 uint ix = ctx.activeList[j];
                 float r = ctx.featureResidual[ix];
-                if (r < worstRes) { worstRes = r; worstIdx = ix; }
+                if (r < worstRes) {
+                    worstRes = r;
+                    worstIdx = ix;
+                }
             }
-            uint bestIn = 0u;
-            float bestR = 0.0f;
-            bool found = false;
-            for (uint i = 0u; i < ctx.rank; ++i) {
-                if (ctx.activeMask[i] != 0u) continue;
-                float r = ctx.featureResidual[i];
-                if (!found || r > bestR) { bestR = r; bestIn = i; found = true; }
-            }
-            if (found && bestR > worstRes * 1.01f) {
-                ctx.activeMask[worstIdx] = 0u;
-                ctx.activeMask[bestIn] = 1u;
-                for (uint j = 0u; j < count; ++j) {
-                    if (ctx.activeList[j] == worstIdx) { ctx.activeList[j] = bestIn; break; }
-                }
-                uint gdir = max(config.genDirectionCount, 1u);
-                float bestScore = -1e10f;
-                uint bestM = 0u;
-                for (uint mm = 0u; mm < gdir; ++mm) {
-                    float score = 0.0f;
-                    for (uint j = 0u; j < ctx.rank; ++j) {
-                        score += ctx.utilityArena[j] * ctx.featureGenArena[mm * ctx.rank + j];
+            if (worstRes < mean_u - std_u) {
+                if (worstIdx < ctx.baseObsDim) {
+                    float rjv = capacity_ridge(ctx.rank, ctx.batchSize);
+                    // `2246822519u` = odd constant in splitmix32-style mixing (not an ad-hoc learning rate).
+                    uint h0 = ctx.scalars->stepCount ^ (worstIdx * 2246822519u);
+                    uint i0 = 0u;
+                    uint i1 = 0u;
+                    float f0 = ctx.featureResidual[0];
+                    float f1 = ctx.featureResidual[0];
+                    if (ctx.rank > 1u) {
+                        i1 = 1u;
+                        f1 = ctx.featureResidual[1];
+                        if (f1 > f0) {
+                            i0 = 1u;
+                            i1 = 0u;
+                            float tmpf = f0;
+                            f0 = f1;
+                            f1 = tmpf;
+                        }
+                        for (uint j = 2u; j < ctx.rank; ++j) {
+                            float fj = ctx.featureResidual[j];
+                            if (fj > f0) {
+                                f1 = f0;
+                                i1 = i0;
+                                f0 = fj;
+                                i0 = j;
+                            } else if (fj > f1) {
+                                f1 = fj;
+                                i1 = j;
+                            }
+                        }
                     }
-                    if (mm == 0u || score > bestScore) {
-                        bestScore = score;
-                        bestM = mm;
-                    }
+                    float alpha = float(h0 & 0xffu) / 255.0f;
+                    float z = alpha * ctx.featureResidual[i0] + (1.0f - alpha) * ctx.featureResidual[i1];
+                    float ang = z * rjv * sqrt(float(max(ctx.rank, 1u)));
+                    // Deep Fourier–style feature from mixed parents (2410.20634); deterministic phase, no GPU RNG.
+                    ctx.encoderWeights[worstIdx] = sanitize(sin(ang) + cos(ang), rawB, sanB);
                 }
-                ctx.scalars->admissionCursor = (ctx.scalars->admissionCursor + 1u) % gdir;
-                uint m = bestM;
-                float mix = 0.0f;
-                for (uint j = 0u; j < ctx.rank; ++j) {
-                    mix += ctx.featureGenArena[m * ctx.rank + j] * ctx.encoderWeights[j];
-                }
-                ctx.encoderWeights[worstIdx] = sanitize(mix / float(max(ctx.rank, 1u)), rawB, sanB);
+                ctx.featureResidual[worstIdx] = mean_u;
             }
         }
         // STOMP option rollout: reward-respecting stop (zStop vs subtask value) + horizon cap (average-reward Oak adaptation).
@@ -969,8 +1129,9 @@ inline void oak_phase_bookkeeping_impl(OakPhaseContext ctx, device KernelStats *
             bool valueStop = (zStop >= vSub);
             bool betaTerm = (float(elapsed) >= ctx.optionBetaArena[po] * float(max(ctx.rank, 1u)));
             if (horizon || valueStop || betaTerm) {
+                float epsKb = autostep_eps_cap(ctx.rank, ctx.batchSize, ctx.scalars, ctx.featureSecondMoment);
                 float kbSumT = 0.0f;
-                for (uint k = 0u; k < ctx.optionCount; ++k) kbSumT += max(ctx.keyboardArena[row * ctx.optionCount + k], 1e-6f);
+                for (uint k = 0u; k < ctx.optionCount; ++k) kbSumT += max(ctx.keyboardArena[row * ctx.optionCount + k], epsKb);
                 float invKbT = 1.0f / kbSumT;
                 float ckbd = 0.0f;
                 for (uint k = 0u; k < ctx.optionCount; ++k) {
@@ -992,7 +1153,18 @@ inline void oak_phase_bookkeeping_impl(OakPhaseContext ctx, device KernelStats *
         for (uint i = 0u; i < ctx.batchSize; ++i) batchR += ctx.reward[i];
         float meanR = batchR / float(ctx.batchSize);
         float t = float(max(ctx.scalars->stepCount + 1u, 1u));
+        // Single average-reward estimate writer: prediction reads `rewardRate` from the previous step; this batch EMA updates it once per step (Naik-style centering compatible).
         ctx.scalars->rewardRate += (meanR - ctx.scalars->rewardRate) / t;
+        uint Tpe = max(1000u, ctx.scalars->stepCount / max(ctx.rank / 8u, 1u));
+        if (Tpe > 0u && (ctx.scalars->stepCount % Tpe) == 0u) {
+            float tr = 0.0f;
+            float mx = ctx.featureSecondMoment[0];
+            for (uint i = 0u; i < ctx.rank; ++i) {
+                tr += ctx.featureSecondMoment[i];
+                mx = max(mx, ctx.featureSecondMoment[i]);
+            }
+            ctx.scalars->pEff = tr / max(mx, FLT_MIN);
+        }
         ctx.scalars->stepCount++;
         float invLRho = online_inv_time(ctx.scalars);
         for (uint opt = 0u; opt < ctx.optionCount; ++opt) {
@@ -1016,7 +1188,7 @@ inline void oak_phase_bookkeeping_impl(OakPhaseContext ctx, device KernelStats *
         float cHsum = 0.0f;
         for (uint row = 0u; row < ctx.batchSize; ++row) {
             uint sOff2 = row * ctx.rank;
-            cHsum += masked_dot(ctx.gvfHordeU, 0, ctx.state, sOff2, ctx.activeList, ac, rawB, sanB);
+            cHsum += masked_dot(ctx.gvfStackU, 0, ctx.state, sOff2, ctx.activeList, ac, rawB, sanB);
         }
         float cHmean = cHsum / float(max(ctx.batchSize, 1u));
         ctx.gvfHordeRho[0] += invLRho * (cHmean - ctx.gvfHordeRho[0]);
@@ -1109,7 +1281,6 @@ inline void oak_phase_bookkeeping_impl(OakPhaseContext ctx, device KernelStats *
             float batchMean = sumObsByF[f] * invBatch;
             ctx.observationMean[f] += invStep * (batchMean - ctx.observationMean[f]);
         }
-        float latentPredMean = lmse / denom;
         const uint kbd0bk = 2u * ctx.batchSize;
         const uint ofb0 = kbd0bk + ctx.batchSize * ctx.optionCount;
         // Match latentPredictionMSE: sanitize, clamp to stats_abs_bound, divide by bound² so telemetry stays O(1) and finite.
@@ -1166,13 +1337,22 @@ inline void oak_phase_bookkeeping_impl(OakPhaseContext ctx, device KernelStats *
             ctx.latentPower[pix] = prevP + (planFrac - prevP) * invLife;
             ctx.optionBetaArena[opt] += ctx.betaLR * (meanErr - ctx.optionBetaArena[opt]) * invLife;
         }
+        float meanFeat = totalUtility / float(max(ctx.rank, 1u));
+        float varFeat = 0.0f;
+        for (uint i = 0u; i < ctx.rank; ++i) {
+            float d = ctx.featureResidual[i] - meanFeat;
+            varFeat += d * d;
+        }
+        float stdFeat = sqrt(varFeat / float(max(ctx.rank, 1u)));
         float reinits = 0.0f;
         float invKey = 1.0f / float(max(ctx.optionCount, 1u));
         for (uint opt = 0u; opt < ctx.optionCount; ++opt) {
             float oe = ctx.latentPower[ofb0 + opt];
             float ou = ctx.latentPower[ofb0 + ctx.optionCount + opt];
             float opPick = ctx.latentPower[ofb0 + 2u * ctx.optionCount + opt];
-            if (oe > latentPredMean * 4.0f && ou < 0.05f && opPick < 0.05f) {
+            float errHigh = meanFeat + stdFeat;
+            float massFloor = 1.0f / float(20u * max(ctx.rank, 1u));
+            if (oe > errHigh && ou < massFloor && opPick < massFloor) {
                 uint bb = ctx.primitivePacked + opt * ctx.optionForwardStride;
                 for (uint i = 0u; i < ctx.optionForwardStride; ++i) {
                     ctx.stateWeights[bb + i] = 0.0f;
@@ -1181,9 +1361,11 @@ inline void oak_phase_bookkeeping_impl(OakPhaseContext ctx, device KernelStats *
                 for (uint i = 0u; i < ctx.rank * ctx.actDim; ++i) {
                     ctx.optionPolicyWeights[polBase + i] = 0.0f;
                 }
-                uint mN = ctx.scalars->admissionCursor % max(config.genDirectionCount, 1u);
                 for (uint i = 0u; i < ctx.rank; ++i) {
-                    ctx.optionValues[opt * ctx.rank + i] = ctx.featureGenArena[mN * ctx.rank + i];
+                    ctx.optionValues[opt * ctx.rank + i] = 0.0f;
+                }
+                if (opt < ctx.rank) {
+                    ctx.optionValues[opt * ctx.rank + opt] = 1.0f;
                 }
                 uint ocR = ctx.optionCount * ctx.rank;
                 for (uint i = 0u; i < ctx.rank; ++i) {
@@ -1307,6 +1489,6 @@ kernel void oak_phase_meta_policy(OAK_KERNEL_SIG) {
 }
 kernel void oak_phase_bookkeeping(OAK_KERNEL_SIG) {
     OakPhaseContext ctx = oak_make_phase_context(params, stateArena, uintArena, scalars, config);
-    oak_phase_bookkeeping_impl(ctx, statsOut, config, gid);
+    oak_phase_bookkeeping_impl(ctx, statsOut, gid);
 }
 #undef OAK_KERNEL_SIG

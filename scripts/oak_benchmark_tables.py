@@ -1,27 +1,5 @@
 #!/usr/bin/env python3
-"""
-Emit Tables A/B/C for oak vs random benchmark comparison (fixed layout).
-
-  Table A — μ, σ across env rows + P(Δ>0) (only table with P(Δ>0)).
-  Table B — W, L, T counts.
-  Table C — mean oak, mean random, mean Δ.
-
-Truth runs: benchmark.json with schema oak.benchmark.truth_first.v8 (tasks[].oak|random.reward.sum.mean).
-
-Partial runs: a metrics/ directory of per-seed JSON files; we average rewardSum per (envId, policy),
-  then one row per env where both policies exist.
-
-Usage:
-  ./scripts/oak_benchmark_tables.py
-  ./scripts/oak_benchmark_tables.py --partial .oak-benchmarks/20260416-070404-96998/metrics
-  ./scripts/oak_benchmark_tables.py --gemma .oak-benchmarks/gemma4/benchmark.json --gpt ".oak-benchmarks/gpt 5.4/benchmark.json"
-  ./scripts/oak_benchmark_tables.py --only HalfCheetah-v4,Walker2d-v4 --partial .oak-benchmarks/<run>/metrics
-  ./scripts/oak_benchmark_tables.py --partial .oak-benchmarks/<run>/metrics --no-align-to-partial  # full n in truth JSONs
-
-Run from repo root (or pass absolute paths).
-
-With --partial, gemma/gpt are restricted to the same envIds as paired metrics in that directory (same n) unless --no-align-to-partial.
-"""
+"""Tables A–D: oak vs random reward + SPS. Stdout is pipe tables + headings/bullets (GFM). Inputs: --benchmark-json or --metrics / --metrics-run. Aliases: --truth, --partial*, --no-align-to-partial."""
 
 from __future__ import annotations
 
@@ -32,71 +10,76 @@ from pathlib import Path
 from statistics import mean, pstdev
 
 EPS = 1e-9
+# env, oak, rnd, Δ, W/L/T, sps_oak, sps_rnd
+Row = tuple[str, float, float, float, str, float, float]
 
 
-def classify(delta: float) -> str:
-    if delta > EPS:
+def _tag(d: float) -> str:
+    if d > EPS:
         return "W"
-    if delta < -EPS:
+    if d < -EPS:
         return "L"
     return "T"
 
 
-def rows_from_truth(path: Path) -> list[tuple[str, float, float, float, str]]:
-    with path.open() as f:
-        data = json.load(f)
-    rows: list[tuple[str, float, float, float, str]] = []
+def _sps(pol: dict) -> float:
+    try:
+        return float(pol["speed"]["stepsPerSecond"]["mean"])
+    except (KeyError, TypeError, ValueError):
+        return float("nan")
+
+
+def load_benchmark_json(path: Path) -> list[Row]:
+    data = json.loads(path.read_text())
+    out: list[Row] = []
     for t in data["tasks"]:
-        eid = t["envId"]
         o = t["oak"]["reward"]["sum"]["mean"]
         r = t["random"]["reward"]["sum"]["mean"]
-        dlt = o - r
-        rows.append((eid, o, r, dlt, classify(dlt)))
-    return rows
+        d = o - r
+        out.append((t["envId"], o, r, d, _tag(d), _sps(t["oak"]), _sps(t["random"])))
+    return out
 
 
-def rows_from_metrics(mdir: Path) -> list[tuple[str, float, float, float, str]]:
+def load_metrics_dir(mdir: Path) -> list[Row]:
     agg: dict[str, dict[str, list[float]]] = defaultdict(lambda: {"oak": [], "random": []})
+    sps: dict[str, dict[str, list[float]]] = defaultdict(lambda: {"oak": [], "random": []})
     for fp in sorted(mdir.glob("*.json")):
-        with fp.open() as f:
-            j = json.load(f)
+        j = json.loads(fp.read_text())
         pol = j.get("policy")
         if pol not in ("oak", "random"):
             continue
-        eid = j.get("envId")
-        rs = j.get("rewardSum")
+        eid, rs = j.get("envId"), j.get("rewardSum")
         if eid is None or rs is None:
             continue
         agg[eid][pol].append(rs)
-    rows: list[tuple[str, float, float, float, str]] = []
-    for eid in sorted(agg.keys()):
-        dd = agg[eid]
-        if not dd["oak"] or not dd["random"]:
+        v = j.get("stepsPerSecond")
+        if isinstance(v, (int, float)) and v == v:
+            sps[eid][pol].append(float(v))
+    out: list[Row] = []
+    for eid in sorted(agg):
+        a = agg[eid]
+        if not a["oak"] or not a["random"]:
             continue
-        mo = mean(dd["oak"])
-        mr = mean(dd["random"])
-        dlt = mo - mr
-        rows.append((eid, mo, mr, dlt, classify(dlt)))
-    return rows
+        mo, mr = mean(a["oak"]), mean(a["random"])
+        d = mo - mr
+        so = [x for x in sps.get(eid, {}).get("oak", []) if x == x]
+        sr = [x for x in sps.get(eid, {}).get("random", []) if x == x]
+        mso = mean(so) if so else float("nan")
+        msr = mean(sr) if sr else float("nan")
+        out.append((eid, mo, mr, d, _tag(d), mso, msr))
+    return out
 
 
-def filter_env_rows(
-    rows: list[tuple[str, float, float, float, str]], env_ids: set[str] | None
-) -> list[tuple[str, float, float, float, str]]:
-    if not env_ids:
-        return rows
-    return [x for x in rows if x[0] in env_ids]
+def _pick(rows: list[Row], envs: set[str] | None) -> list[Row]:
+    return rows if not envs else [x for x in rows if x[0] in envs]
 
 
-def stats(rows: list[tuple[str, float, float, float, str]]) -> dict:
+def stats(rows: list[Row]) -> dict:
+    n = len(rows)
     o = [x[1] for x in rows]
     r = [x[2] for x in rows]
     d = [x[3] for x in rows]
-    n = len(rows)
     w = sum(1 for x in rows if x[4] == "W")
-    l = sum(1 for x in rows if x[4] == "L")
-    t = sum(1 for x in rows if x[4] == "T")
-    p_pos = (w / n) if n else float("nan")
     return {
         "n": n,
         "mu_oak": mean(o) if n else float("nan"),
@@ -106,166 +89,151 @@ def stats(rows: list[tuple[str, float, float, float, str]]) -> dict:
         "mu_delta": mean(d) if n else float("nan"),
         "sd_delta": pstdev(d) if n > 1 else 0.0,
         "wins": w,
-        "losses": l,
-        "ties": t,
-        "p_delta_gt_0": p_pos,
+        "losses": sum(1 for x in rows if x[4] == "L"),
+        "ties": sum(1 for x in rows if x[4] == "T"),
+        "p_delta_gt_0": (w / n) if n else float("nan"),
     }
 
 
-def fmt_sc(x: float) -> str:
-    if x != x:  # nan
-        return "—"
-    return f"{x:.3e}"
+def sps_stats(rows: list[Row]) -> dict:
+    n = len(rows)
+    if not n:
+        z = float("nan")
+        return {"n": 0, "mu_oak": z, "sd_oak": z, "mu_rand": z, "sd_rand": z, "mu_delta": z, "sd_delta": z}
+    def moments(xs: list[float]) -> tuple[float, float]:
+        xs = [x for x in xs if x == x]
+        if not xs:
+            return float("nan"), float("nan")
+        m = mean(xs)
+        s = pstdev(xs) if len(xs) > 1 else 0.0
+        return m, s
+    so = [x[5] for x in rows]
+    sr = [x[6] for x in rows]
+    dd = [x[5] - x[6] for x in rows if x[5] == x[5] and x[6] == x[6]]
+    mo, sdo = moments(so)
+    mr, sdr = moments(sr)
+    md, sdd = moments(dd)
+    return {"n": n, "mu_oak": mo, "sd_oak": sdo, "mu_rand": mr, "sd_rand": sdr, "mu_delta": md, "sd_delta": sdd}
 
 
-def fmt_p(x: float) -> str:
+def _f(x: float, p: bool = False) -> str:
     if x != x:
         return "—"
-    return f"{x:.3f}"
+    return f"{x:.3f}" if p else f"{x:.3e}"
 
 
-def print_tables(
-    runs: list[tuple[str, list[tuple[str, float, float, float, str]]]],
-    env_filter_note: str | None = None,
-    partial_comparison_note: str | None = None,
-) -> None:
-    print("DEFINITIONS")
-    if partial_comparison_note:
-        print(f"  {partial_comparison_note}")
-    if env_filter_note:
-        print(f"  Env filter: {env_filter_note}")
-    print("  Row = one env. Δ = mean oak total reward − mean random total reward (means over seeds in partial metrics).")
-    print(f"  W / L / T: count envs with Δ > {EPS:g} / Δ < -{EPS:g} / |Δ| ≤ {EPS:g}.")
-    print("  P(Δ>0) = W/n (reported in Table A only). μ, σ: population std of per-env means across rows.")
+def emit(runs: list[tuple[str, list[Row]]], note: str | None, env_note: str | None) -> None:
+    pre = [(lb, stats(rs), sps_stats(rs)) for lb, rs in runs]
+    print("### Definitions")
+    if note:
+        print(f"- {note}")
+    if env_note:
+        print(f"- Env filter: {env_note}")
+    print(
+        "- Δ = mean oak reward − mean random per env (benchmark.json: aggregated means; metrics/: mean over seeds)."
+    )
+    print("- W / L / T from sign of Δ; P(Δ>0) = W/n; μ, σ over env rows.")
     print()
-
-    print("TABLE A — Summary (mean reward, variance, P(Δ>0))")
+    print("### TABLE A — Summary")
     print("| Run | n | μ_oak | σ_oak | μ_rand | σ_rand | μ_Δ | σ_Δ | P(Δ>0) |")
     print("|-----|---|-------|-------|--------|--------|-----|-----|--------|")
-    for label, rows in runs:
-        s = stats(rows)
+    for lb, s, _ in pre:
         print(
-            f"| {label} | {s['n']} | {fmt_sc(s['mu_oak'])} | {fmt_sc(s['sd_oak'])} | "
-            f"{fmt_sc(s['mu_rand'])} | {fmt_sc(s['sd_rand'])} | {fmt_sc(s['mu_delta'])} | {fmt_sc(s['sd_delta'])} | {fmt_p(s['p_delta_gt_0'])} |"
+            f"| {lb} | {s['n']} | {_f(s['mu_oak'])} | {_f(s['sd_oak'])} | {_f(s['mu_rand'])} | {_f(s['sd_rand'])} | "
+            f"{_f(s['mu_delta'])} | {_f(s['sd_delta'])} | {_f(s['p_delta_gt_0'], True)} |"
         )
-
     print()
-    print("TABLE B — Wins / losses / ties")
+    print("### TABLE B — W/L/T")
     print("| Run | n | W | L | T |")
     print("|-----|---|---|---|---|")
-    for label, rows in runs:
-        s = stats(rows)
-        n = s["n"]
-        if n == 0:
-            print(f"| {label} | 0 | — | — | — |")
-            continue
-        print(f"| {label} | {n} | {s['wins']} | {s['losses']} | {s['ties']} |")
-
+    for lb, s, _ in pre:
+        if s["n"] == 0:
+            print(f"| {lb} | 0 | — | — | — |")
+        else:
+            print(f"| {lb} | {s['n']} | {s['wins']} | {s['losses']} | {s['ties']} |")
     print()
-    print("TABLE C — Mean total reward")
-    print("| Run | n | mean oak reward | mean random reward | mean Δ |")
-    print("|-----|---|-----------------|-------------------|--------|")
-    for label, rows in runs:
-        s = stats(rows)
-        print(
-            f"| {label} | {s['n']} | {fmt_sc(s['mu_oak'])} | {fmt_sc(s['mu_rand'])} | {fmt_sc(s['mu_delta'])} |"
-        )
+    print("### TABLE C — Mean reward")
+    print("| Run | n | oak | random | Δ |")
+    print("|-----|---|-----|--------|---|")
+    for lb, s, _ in pre:
+        print(f"| {lb} | {s['n']} | {_f(s['mu_oak'])} | {_f(s['mu_rand'])} | {_f(s['mu_delta'])} |")
+    print()
+    print("### TABLE D — SPS (mean over env rows)")
+    print("| Run | n | μ_SPS_oak | σ_SPS_oak | μ_SPS_rand | σ_SPS_rand | μ_ΔSPS | σ_ΔSPS |")
+    print("|-----|---|-----------|-----------|------------|------------|--------|--------|")
+    for lb, _, sp in pre:
+        if sp["n"] == 0:
+            print(f"| {lb} | 0 | — | — | — | — | — | — |")
+        else:
+            print(
+                f"| {lb} | {sp['n']} | {_f(sp['mu_oak'])} | {_f(sp['sd_oak'])} | {_f(sp['mu_rand'])} | {_f(sp['sd_rand'])} | "
+                f"{_f(sp['mu_delta'])} | {_f(sp['sd_delta'])} |"
+            )
 
 
 def main() -> None:
-    root = Path(__file__).resolve().parent.parent
-    p = argparse.ArgumentParser(description="Benchmark Tables A/B/C (oak vs random).")
-    p.add_argument(
-        "--gemma",
-        type=Path,
-        default=root / ".oak-benchmarks/gemma4/benchmark.json",
-        help="Path to gemma4 benchmark.json",
-    )
-    p.add_argument(
-        "--gpt",
-        type=Path,
-        default=root / ".oak-benchmarks/gpt 5.4/benchmark.json",
-        help="Path to gpt 5.4 benchmark.json",
-    )
-    p.add_argument(
-        "--partial",
-        type=Path,
-        default=None,
-        metavar="METRICS_DIR",
-        help="Optional metrics/ directory (per-seed JSON) for a partial run.",
-    )
-    p.add_argument(
-        "--partial-label",
-        default=None,
-        help="Label for partial run (default: parent of METRICS_DIR).",
-    )
-    p.add_argument(
-        "--only",
-        default=None,
-        metavar="ENV_IDS",
-        help="Comma-separated envId list (e.g. HalfCheetah-v4,Walker2d-v4). Restricts all inputs to these envs.",
-    )
-    p.add_argument(
-        "--no-align-to-partial",
-        action="store_true",
-        help="With --partial, do not restrict gemma/gpt to partial envIds (truth n may differ from partial). Default is aligned.",
-    )
-    args = p.parse_args()
+    ap = argparse.ArgumentParser(description="Benchmark tables A–D.")
+    ap.add_argument("--benchmark-json", "--truth", nargs=2, action="append", dest="bj", metavar=("L", "PATH"))
+    ap.add_argument("--metrics", "--partial", type=Path, default=None)
+    ap.add_argument("--metrics-run", "--partial-run", nargs=2, action="append", dest="mr", metavar=("L", "DIR"))
+    ap.add_argument("--metrics-label", "--partial-label", dest="ml", default=None)
+    ap.add_argument("--only", default=None)
+    ap.add_argument("--no-align-to-metrics", "--no-align-to-partial", action="store_true", dest="na")
+    a = ap.parse_args()
 
-    env_ids: set[str] | None = None
-    env_note: str | None = None
-    if args.only:
-        env_ids = {s.strip() for s in args.only.split(",") if s.strip()}
-        env_note = ", ".join(sorted(env_ids))
+    only = {x.strip() for x in a.only.split(",") if x.strip()} if a.only else None
+    env_note = ", ".join(sorted(only)) if only else None
 
-    partial_dir_ok = args.partial is not None and args.partial.is_dir()
-    align_to_partial = partial_dir_ok and not args.no_align_to_partial
-
-    partial_comparison_note: str | None = None
-    align_ids: set[str] | None = None
-    if align_to_partial:
-        partial_for_align = filter_env_rows(rows_from_metrics(args.partial), env_ids)
-        align_ids = {r[0] for r in partial_for_align}
-        partial_comparison_note = (
-            "Partial comparison: gemma/gpt rows restricted to envIds with paired oak+random metrics in --partial "
-            f"(n = {len(align_ids)} envs)."
-        )
-    elif partial_dir_ok and args.no_align_to_partial:
-        partial_comparison_note = (
-            "Unaligned (--no-align-to-partial): gemma/gpt use every task in benchmark.json; n can differ from partial."
-        )
-
-    def truth_filter(rows: list[tuple[str, float, float, float, str]]) -> list[tuple[str, float, float, float, str]]:
-        out = filter_env_rows(rows, env_ids)
-        if align_ids is not None:
-            out = filter_env_rows(out, align_ids)
-        return out
-
-    runs: list[tuple[str, list[tuple[str, float, float, float, str]]]] = []
-
-    if args.gemma.is_file():
-        runs.append(("gemma4", truth_filter(rows_from_truth(args.gemma))))
-    else:
-        print(f"(skip) not found: {args.gemma}", flush=True)
-
-    if args.gpt.is_file():
-        runs.append(("gpt 5.4", truth_filter(rows_from_truth(args.gpt))))
-    else:
-        print(f"(skip) not found: {args.gpt}", flush=True)
-
-    if args.partial is not None:
-        mdir = args.partial
-        if mdir.is_dir():
-            label = args.partial_label or f"{mdir.parent.name}/metrics"
-            runs.append((label, filter_env_rows(rows_from_metrics(mdir), env_ids)))
+    dirs: list[tuple[str, Path]] = []
+    if a.metrics is not None:
+        if a.metrics.is_dir():
+            dirs.append((a.ml or f"{a.metrics.parent.name}/metrics", a.metrics))
         else:
-            print(f"(skip) not a directory: {mdir}", flush=True)
+            print(f"(skip) not a directory: {a.metrics}", flush=True)
+    for lb, ps in a.mr or []:
+        p = Path(ps).expanduser()
+        if p.is_dir():
+            dirs.append((lb, p))
+        else:
+            print(f"(skip) {lb} -> {p}", flush=True)
+
+    align = bool(dirs) and not a.na
+    align_ids: set[str] | None = None
+    if align:
+        sets = [{r[0] for r in load_metrics_dir(d)} for _, d in dirs]
+        align_ids = set.intersection(*sets) if sets else set()
+        if only:
+            align_ids &= only
+
+    def filt(rows: list[Row]) -> list[Row]:
+        r = _pick(rows, only)
+        return _pick(r, align_ids) if align_ids is not None else r
+
+    runs: list[tuple[str, list[Row]]] = []
+    for label, path_str in a.bj or []:
+        path = Path(path_str).expanduser()
+        if path.is_file():
+            runs.append((label, filt(load_benchmark_json(path))))
+        else:
+            print(f"(skip) {label} -> {path}", flush=True)
+    for lb, d in dirs:
+        runs.append((lb, filt(load_metrics_dir(d))))
 
     if not runs:
-        print("No inputs found. Provide --gemma/--gpt files and/or --partial METRICS_DIR.", flush=True)
+        print("No inputs. Use --benchmark-json/--truth and/or --metrics/--metrics-run.", flush=True)
         raise SystemExit(1)
 
-    print_tables(runs, env_filter_note=env_note, partial_comparison_note=partial_comparison_note)
+    note = None
+    if align and align_ids is not None:
+        n = len(align_ids)
+        if a.bj:
+            note = f"Aligned: benchmark.json restricted to {n} envs (paired oak+random ∩ across metrics dirs)."
+        elif len(dirs) > 1:
+            note = f"Metrics dirs: intersection of paired envs, n={n}."
+    elif dirs and a.na:
+        note = "Unaligned: benchmark.json uses all tasks; metrics n varies."
+
+    emit(runs, note, env_note)
 
 
 if __name__ == "__main__":
