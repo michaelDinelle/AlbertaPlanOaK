@@ -1427,16 +1427,43 @@ private enum RunSnapshot {
         fputs("\(metricsURL.path)\n", stderr)
     }
 
+    private static func snapshotJsonCount(in metricsDir: URL) -> Int {
+        guard let urls = try? FileManager.default.contentsOfDirectory(at: metricsDir, includingPropertiesForKeys: nil, options: [.skipsHiddenFiles]) else { return 0 }
+        return urls.filter { $0.pathExtension.lowercased() == "json" && !$0.lastPathComponent.contains(".heartbeat-") }.count
+    }
+
+    /// **`OAK_BENCH_DIR`** if set; else **`OAK_METRICS_STORAGE`** parent when that folder is incomplete; else the **most recently modified** incomplete **`.oak-benchmarks/<run-id>`**; else a new run id.
+    private static func resolveBenchmarkWorkingDirectory(root: URL, expectedTasks: Int) -> URL {
+        if let raw = ProcessInfo.processInfo.environment["OAK_BENCH_DIR"]?.trimmingCharacters(in: .whitespacesAndNewlines), !raw.isEmpty {
+            return URL(fileURLWithPath: (raw as NSString).expandingTildeInPath, isDirectory: true)
+        }
+        if let raw = ProcessInfo.processInfo.environment["OAK_METRICS_STORAGE"]?.trimmingCharacters(in: .whitespacesAndNewlines), !raw.isEmpty {
+            let metrics = URL(fileURLWithPath: (raw as NSString).expandingTildeInPath, isDirectory: true)
+            if snapshotJsonCount(in: metrics) < expectedTasks { return metrics.deletingLastPathComponent() }
+            return root.appendingPathComponent(".oak-benchmarks/\(oakBenchmarksRunId())", isDirectory: true)
+        }
+        let fresh = { root.appendingPathComponent(".oak-benchmarks/\(oakBenchmarksRunId())", isDirectory: true) }
+        let box = root.appendingPathComponent(".oak-benchmarks", isDirectory: true)
+        guard let runs = try? FileManager.default.contentsOfDirectory(at: box, includingPropertiesForKeys: nil, options: [.skipsHiddenFiles]) else { return fresh() }
+        var bestDir: URL?
+        var bestDate = Date.distantPast
+        for run in runs {
+            var isDir: ObjCBool = false
+            guard FileManager.default.fileExists(atPath: run.path, isDirectory: &isDir), isDir.boolValue else { continue }
+            let metrics = run.appendingPathComponent("metrics", isDirectory: true)
+            guard FileManager.default.fileExists(atPath: metrics.path), snapshotJsonCount(in: metrics) < expectedTasks else { continue }
+            // Prefer `metrics/` mtime: the run-id folder’s modification time often does not update when new snapshots appear under `metrics/`.
+            let d = (try? metrics.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast
+            if d >= bestDate {
+                bestDate = d
+                bestDir = run
+            }
+        }
+        return bestDir ?? fresh()
+    }
+
     private static func benchmark() throws {
         let root = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
-        let benchDir = URL(fileURLWithPath: ProcessInfo.processInfo.environment["OAK_BENCH_DIR"] ?? root.appendingPathComponent(".oak-benchmarks/\(oakBenchmarksRunId())").path)
-        try FileManager.default.createDirectory(at: benchDir, withIntermediateDirectories: true)
-        let benchMetrics: URL = {
-            if let raw = ProcessInfo.processInfo.environment["OAK_METRICS_STORAGE"]?.trimmingCharacters(in: .whitespacesAndNewlines), !raw.isEmpty {
-                return URL(fileURLWithPath: (raw as NSString).expandingTildeInPath, isDirectory: true)
-            }
-            return benchDir.appendingPathComponent("metrics", isDirectory: true)
-        }()
         let seedStart = ProcessInfo.processInfo.environment["OAK_BENCH_SEED_START"].flatMap(Int.init) ?? 0
         let seedCount = ProcessInfo.processInfo.environment["OAK_BENCH_SEED_COUNT"].flatMap(Int.init) ?? 10
         let warmup = max(ProcessInfo.processInfo.environment["OAK_BENCH_WARMUP_STEPS"].flatMap(Int.init) ?? 1000, 0)
@@ -1445,7 +1472,17 @@ private enum RunSnapshot {
         let device = try metalDevice()
         let forcedNumEnvs = ProcessInfo.processInfo.environment["OAK_BENCH_NUM_ENVS"].flatMap(Int.init) ?? ProcessInfo.processInfo.environment["OAK_NUM_ENVS"].flatMap(Int.init)
         let auxBench = max(ProcessInfo.processInfo.environment["OAK_AUX_DIM"].flatMap(Int.init) ?? 0, 0)
-        for benchmarkEnv in try benchmarkEnvOrder(seed: seedStart) {
+        let envOrder = try benchmarkEnvOrder(seed: seedStart)
+        let expectedTasks = envOrder.count * seedCount * policies.count
+        let benchDir = resolveBenchmarkWorkingDirectory(root: root, expectedTasks: expectedTasks)
+        try FileManager.default.createDirectory(at: benchDir, withIntermediateDirectories: true)
+        let benchMetrics: URL = {
+            if let raw = ProcessInfo.processInfo.environment["OAK_METRICS_STORAGE"]?.trimmingCharacters(in: .whitespacesAndNewlines), !raw.isEmpty {
+                return URL(fileURLWithPath: (raw as NSString).expandingTildeInPath, isDirectory: true)
+            }
+            return benchDir.appendingPathComponent("metrics", isDirectory: true)
+        }()
+        for benchmarkEnv in envOrder {
             let envId = benchmarkEnv.envId
             let defaultNumEnvs = try directNumEnvs(
                 obsDim: benchmarkEnv.schema.observationDim + auxBench,
@@ -1457,6 +1494,10 @@ private enum RunSnapshot {
             for seed in seedStart..<(seedStart + seedCount) {
                 for policy in policies {
                     let stem = RunSnapshot.snapshotStem(envId: envId, policy: policy, seed: seed)
+                    let snapURL = benchMetrics.appendingPathComponent("\(stem).json", isDirectory: false)
+                    if FileManager.default.fileExists(atPath: snapURL.path) {
+                        continue
+                    }
                     let logURL = benchDir.appendingPathComponent("\(stem).log")
                     do {
                         _ = try runSingle(

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Tables A–D: oak vs random reward + SPS. Stdout is pipe tables + headings/bullets (GFM). Inputs: --benchmark-json or --metrics / --metrics-run. Aliases: --truth, --partial*, --no-align-to-partial."""
+"""Tables A–D: oak vs random reward + per-env SPS. Stdout is pipe tables + headings/bullets (GFM). Inputs: --benchmark-json or --metrics / --metrics-run. Aliases: --truth, --partial*, --no-align-to-partial. benchmark.json TABLE D uses numEnvs from task/policy aggregates or measuredEnvSteps/measuredBatchCount."""
 
 from __future__ import annotations
 
@@ -22,11 +22,56 @@ def _tag(d: float) -> str:
     return "T"
 
 
-def _sps(pol: dict) -> float:
+def _num_envs_benchmark(pol: dict) -> int | None:
+    """Same units as metrics JSON: numEnvs ≈ measuredEnvSteps / measuredBatchCount (aggregate steps / batches)."""
+    ne_raw = pol.get("numEnvs")
+    if isinstance(ne_raw, dict) and "mean" in ne_raw:
+        try:
+            v = float(ne_raw["mean"])
+            if v > 0:
+                return int(round(v))
+        except (TypeError, ValueError):
+            pass
+    sp = pol.get("speed") or {}
     try:
-        return float(pol["speed"]["stepsPerSecond"]["mean"])
+        m = float(sp["measuredEnvSteps"]["mean"])
+        b = float(sp["measuredBatchCount"]["mean"])
+    except (KeyError, TypeError, ValueError):
+        return None
+    if m <= 0 or b <= 0:
+        return None
+    r = m / b
+    ri = int(round(r))
+    if ri <= 0:
+        return None
+    if abs(r - float(ri)) > max(1e-9 * max(m, 1.0), 1e-3):
+        return None
+    return ri
+
+
+def _sps_benchmark(pol: dict, task: dict | None = None) -> float:
+    """Aggregate steps/s divided by numEnvs (per parallel env), matching metrics snapshots."""
+    try:
+        sp = float(pol["speed"]["stepsPerSecond"]["mean"])
     except (KeyError, TypeError, ValueError):
         return float("nan")
+    ne: int | None = None
+    if task is not None:
+        tn = task.get("numEnvs")
+        if isinstance(tn, (int, float)) and tn > 0:
+            ne = int(tn)
+        elif isinstance(tn, dict) and "mean" in tn:
+            try:
+                v = float(tn["mean"])
+                if v > 0:
+                    ne = int(round(v))
+            except (TypeError, ValueError):
+                pass
+    if ne is None:
+        ne = _num_envs_benchmark(pol)
+    if ne is None or ne <= 0:
+        return float("nan")
+    return sp / float(ne)
 
 
 def load_benchmark_json(path: Path) -> list[Row]:
@@ -36,7 +81,7 @@ def load_benchmark_json(path: Path) -> list[Row]:
         o = t["oak"]["reward"]["sum"]["mean"]
         r = t["random"]["reward"]["sum"]["mean"]
         d = o - r
-        out.append((t["envId"], o, r, d, _tag(d), _sps(t["oak"]), _sps(t["random"])))
+        out.append((t["envId"], o, r, d, _tag(d), _sps_benchmark(t["oak"], t), _sps_benchmark(t["random"], t)))
     return out
 
 
@@ -53,8 +98,12 @@ def load_metrics_dir(mdir: Path) -> list[Row]:
             continue
         agg[eid][pol].append(rs)
         v = j.get("stepsPerSecond")
+        ne = j.get("numEnvs")
         if isinstance(v, (int, float)) and v == v:
-            sps[eid][pol].append(float(v))
+            if isinstance(ne, (int, float)) and ne > 0:
+                sps[eid][pol].append(float(v) / float(ne))
+            else:
+                sps[eid][pol].append(float("nan"))
     out: list[Row] = []
     for eid in sorted(agg):
         a = agg[eid]
@@ -133,6 +182,11 @@ def emit(runs: list[tuple[str, list[Row]]], note: str | None, env_note: str | No
         "- Δ = mean oak reward − mean random per env (benchmark.json: aggregated means; metrics/: mean over seeds)."
     )
     print("- W / L / T from sign of Δ; P(Δ>0) = W/n; μ, σ over env rows.")
+    print(
+        "- TABLE D: steps/s **per parallel env** (metrics: stepsPerSecond / numEnvs; benchmark.json: aggregate SPS / "
+        "numEnvs from task or policy `numEnvs.mean`, else measuredEnvSteps.mean / measuredBatchCount.mean when that "
+        "ratio is integral within tolerance)."
+    )
     print()
     print("### TABLE A — Summary")
     print("| Run | n | μ_oak | σ_oak | μ_rand | σ_rand | μ_Δ | σ_Δ | P(Δ>0) |")
@@ -158,7 +212,7 @@ def emit(runs: list[tuple[str, list[Row]]], note: str | None, env_note: str | No
     for lb, s, _ in pre:
         print(f"| {lb} | {s['n']} | {_f(s['mu_oak'])} | {_f(s['mu_rand'])} | {_f(s['mu_delta'])} |")
     print()
-    print("### TABLE D — SPS (mean over env rows)")
+    print("### TABLE D — SPS per parallel env (mean over env rows)")
     print("| Run | n | μ_SPS_oak | σ_SPS_oak | μ_SPS_rand | σ_SPS_rand | μ_ΔSPS | σ_ΔSPS |")
     print("|-----|---|-----------|-----------|------------|------------|--------|--------|")
     for lb, _, sp in pre:
