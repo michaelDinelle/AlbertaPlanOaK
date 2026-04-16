@@ -110,4 +110,31 @@ Why?
 - The agent must keep one shared state representation used by perception, reactive policy, value functions, transition models, subtasks, options, and planning.
 - Oak must include reward-respecting subtasks, multiple policies and value functions, and models of options used by planning.
 - Domain knowledge is forbidden. No environment-specific heuristics, no benchmark-specific shaping, and no task-identity-conditioned control logic.
-- Computational cost and response time are first-class. Use external profiling and the full benchmark truth surface to localize bottlenecks; do not grow repo-resident diagnostic frameworks in the hot path.
+- Computational cost and response time are first-class. Do not grow repo-resident diagnostic frameworks in the hot path.
+
+## Performance: Metal trace (GPU truth surface)
+
+Claims about **where time goes inside the Metal kernel** need a **`.trace`** from **Metal System Trace–class** capture plus **release** (`swift build -c release`). CPU-only profilers are insufficient: they mostly show `waitUntilCompleted` / driver glue, not **encode vs learn vs planning** inside `oak_step`.
+
+**Template:** Stock `xctrace --template 'Metal System Trace'` leaves **Shader Timeline off** in the saved session. Use the repo copy **`tools/instruments/ShaderTemplate.tracetemplate`** (Instruments: Metal Application → **Enable Shader Timeline**, **Counter set: None** to avoid “counter profile not supported”). Pass **`--template "$PWD/tools/instruments/ShaderTemplate.tracetemplate"`** (absolute path) so automation never depends on `~/Library/...`.
+
+**Signposts:** Set **`OAK_METAL_SIGNPOSTS=1`** so `insertDebugSignpost` labels phases (`encode`, `learn`, `planning`, …) in `Main.swift`.
+
+**Record** (always **repo root** so `.build/oak-native` resolves):
+
+```bash
+OAK_METAL_SIGNPOSTS=1 xctrace record --no-prompt \
+  --template "$PWD/tools/instruments/ShaderTemplate.tracetemplate" \
+  --time-limit 30s --output /tmp/oak.trace \
+  --launch -- .build/release/OaK diagnose '<env-id>' --steps 50000
+```
+
+**Export:** `xctrace export --input … --toc`; then `--xpath` tables: **`metal-driver-intervals`**, **`metal-application-intervals`**, **`metal-shader-profiler-shader-list`**. Treat **`metal-shader-profiler-intervals`** as best-effort in CLI export (often empty even with Shader Timeline on). Prefer **short `--time-limit`** and **`--launch`** one process (not `--all-processes`) to keep traces small.
+
+**Consistent summary:** After recording, run **`python3 scripts/oak_trace_report.py /path/to/capture.trace`** (add **`--json`** for machine-readable output). It aggregates the same exports; combine with **`OaK diagnose …`** JSON for **agentShare / envShare** (the script does not run diagnose).
+
+**`diagnose` JSON:** includes **`diagnostic.metalPhaseGpuMsMean`** (per-phase mean GPU ms per batch step from `MTLCommandBuffer` timing; **`diagnose` only**, one command buffer per phase on measured steps) plus **`agentShare` / `envShare`**. Use that for bottleneck work; `xctrace export` remains supplementary.
+
+**Supporting only:** `benchmark.json` / run JSONL — throughput and health aggregates; benchmark runs do not emit `metalPhaseGpuMsMean` unless you add a metrics path.
+
+**Do not:** argue dominant kernel phase from **`sample` / Time Profiler alone**; treat tiny **encode** rows in application intervals as the whole step (total work includes GPU execution on driver/GPU tracks).
