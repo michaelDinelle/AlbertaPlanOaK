@@ -1,0 +1,24 @@
+# Primary sources (literature grounding for Alberta Plan / STOMP / Oak)
+
+## What was actually used in prior analysis
+
+Earlier discussion relied on arXiv HTML abstracts, OpenAlex citation metadata, and a
+partial HTML fetch of a bioRxiv abstract — not line-by-line full-text reads of every PDF.
+
+## Files in this directory (curl’d from canonical URLs)
+
+1. Sutton-Bowling-Pilarski-2023-Alberta-Plan-for-AI-Research_arxiv2208.11173v3.pdf
+   Source: https://arxiv.org/pdf/2208.11173v3.pdf
+   Sutton, R. S., Bowling, M., & Pilarski, P. M. The Alberta Plan for AI Research (arXiv:2208.11173).
+
+2. Sutton-et-al-2023-Reward-Respecting-Subtasks-Model-Based-RL_arxiv2202.03466v4.pdf
+   Source: https://arxiv.org/pdf/2202.03466v4.pdf
+   Reward-respecting subtasks; STOMP progression; option models for planning.
+
+## Third paper (OpenAlex listed as citing the Alberta Plan) — not auto-downloaded
+
+3. Masset et al., Multi-timescale reinforcement learning in the brain (bioRxiv)
+   Canonical PDF: https://www.biorxiv.org/content/10.1101/2023.11.12.566754v1.full.pdf
+   Automated curl from this environment returned HTTP 403 (bot protection). Download
+   manually in a browser and save next to this file as:
+   Masset-et-al-Multi-Timescale-RL-in-the-Brain_bioRxiv-2023.11.12.566754v1.pdf
