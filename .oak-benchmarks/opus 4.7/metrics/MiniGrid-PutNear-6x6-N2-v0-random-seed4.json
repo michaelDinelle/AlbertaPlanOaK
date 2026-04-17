@@ -1,0 +1,34 @@
+{
+  "actionDim" : 7,
+  "actionDiscreteCount" : 7,
+  "agentStepMsMean" : 0.017915,
+  "command" : "benchmark",
+  "discreteAction" : {
+    "histogram" : [
+      7265,
+      7416,
+      7447,
+      7315,
+      7404,
+      7208,
+      7145
+    ],
+    "uniqueCount" : 7
+  },
+  "doneCount" : 481,
+  "envId" : "MiniGrid-PutNear-6x6-N2-v0",
+  "envStepMsMean" : 12.41096676,
+  "measuredBatchCount" : 25,
+  "measuredSeconds" : 0.310875042,
+  "measuredStepCount" : 51200,
+  "numEnvs" : 2048,
+  "observationDim" : 244,
+  "policy" : "random",
+  "rewardSum" : 14.360000044107437,
+  "schemaVersion" : 2,
+  "seed" : 4,
+  "stepsPerSecond" : 164696.3991403337,
+  "stopAfterMeasuredSteps" : 50000,
+  "stopReason" : "measured_steps",
+  "warmupSteps" : 1000
+}
