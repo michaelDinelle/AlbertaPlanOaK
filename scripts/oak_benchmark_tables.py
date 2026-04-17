@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
-"""Tables A–D: oak vs random reward + per-env SPS. Stdout is pipe tables + headings/bullets (GFM). Inputs: --benchmark-json or --metrics / --metrics-run (pointed at a run root containing <envId>/<seedN>/ folders). Aliases: --truth, --partial*, --no-align-to-partial. For each stem the loader picks the latest snapshot: final <stem>.json if present, else highest <stem>.heartbeat-NNNNNN.json. benchmark.json TABLE D uses numEnvs from task/policy aggregates or measuredEnvSteps/measuredBatchCount."""
+"""Tables A–D: oak vs random reward + per-env SPS. Stdout is pipe tables + headings/bullets (GFM). Inputs: --benchmark-json or --metrics / --metrics-run (nested run root: <envId>/<seedN>/*.json, or flat: <envId>-{oak,random}-seedN.json). Aliases: --truth, --partial*, --no-align-to-partial. For each stem the loader picks the latest snapshot: final <stem>.json if present, else highest <stem>.heartbeat-NNNNNN.json. benchmark.json TABLE D uses numEnvs from task/policy aggregates or measuredEnvSteps/measuredBatchCount."""
 
 from __future__ import annotations
 
 import argparse
 import json
+import re
 from collections import defaultdict
 from pathlib import Path
 from statistics import mean, pstdev
@@ -112,6 +113,18 @@ def _latest_snapshot_per_stem(seed_dir: Path) -> list[Path]:
     return picks
 
 
+_FLAT_METRIC_NAME = re.compile(r"^(.+)-(oak|random)-seed(\d+)\.json$")
+
+
+def _flat_metrics_snapshots(mdir: Path) -> list[Path]:
+    """Flat layout: one JSON per env×policy×seed, e.g. MiniGrid-Foo-v0-oak-seed0.json."""
+    out: list[Path] = []
+    for fp in sorted(mdir.glob("*.json")):
+        if _FLAT_METRIC_NAME.match(fp.name):
+            out.append(fp)
+    return out
+
+
 def load_metrics_dir(mdir: Path) -> list[Row]:
     agg: dict[str, dict[str, list[float]]] = defaultdict(lambda: {"oak": [], "random": []})
     sps: dict[str, dict[str, list[float]]] = defaultdict(lambda: {"oak": [], "random": []})
@@ -123,6 +136,8 @@ def load_metrics_dir(mdir: Path) -> list[Row]:
             for seed_dir in sorted(env_dir.iterdir()):
                 if seed_dir.is_dir():
                     snapshots.extend(_latest_snapshot_per_stem(seed_dir))
+        if not snapshots:
+            snapshots = _flat_metrics_snapshots(mdir)
     for fp in sorted(snapshots):
         j = json.loads(fp.read_text())
         pol = j.get("policy")
