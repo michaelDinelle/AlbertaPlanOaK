@@ -1,2 +1,0 @@
-{"actionDim":7,"actionDiscreteCount":7,"envId":"MiniGrid-ObstructedMaze-Full-v1","numEnvs":8192,"observationDim":244,"policy":"random","seed":7,"stopAfterMeasuredSteps":50000,"type":"run_start","warmupSteps":1000}
-{"agentStepMsMean":0.05220242857142857,"doneCount":0,"envStepMsMean":49.27844042857142,"measuredSeconds":0.345359125,"measuredStepCount":57344,"rewardSum":0,"stepsPerSecond":166041.65301843407,"stopReason":"measured_steps","type":"run_end"}

@@ -1,2 +1,0 @@
-{"actionDim":7,"actionDiscreteCount":7,"envId":"MiniGrid-KeyCorridorS6R3-v0","numEnvs":8192,"observationDim":244,"policy":"random","seed":8,"stopAfterMeasuredSteps":50000,"type":"run_start","warmupSteps":1000}
-{"agentStepMsMean":0.04914871428571429,"doneCount":0,"envStepMsMean":49.21954185714286,"measuredSeconds":0.344925083,"measuredStepCount":57344,"rewardSum":0,"stepsPerSecond":166250.59419062312,"stopReason":"measured_steps","type":"run_end"}

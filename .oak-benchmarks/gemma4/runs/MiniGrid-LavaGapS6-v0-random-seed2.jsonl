@@ -1,2 +1,0 @@
-{"actionDim":7,"actionDiscreteCount":7,"envId":"MiniGrid-LavaGapS6-v0","numEnvs":8192,"observationDim":244,"policy":"random","seed":2,"stopAfterMeasuredSteps":50000,"type":"run_start","warmupSteps":1000}
-{"agentStepMsMean":0.048268,"doneCount":1455,"envStepMsMean":47.781654714285715,"measuredSeconds":0.334852542,"measuredStepCount":57344,"rewardSum":0,"stepsPerSecond":171251.4997123719,"stopReason":"measured_steps","type":"run_end"}

@@ -1,2 +1,0 @@
-{"actionDim":7,"actionDiscreteCount":7,"envId":"MiniGrid-LockedRoom-v0","numEnvs":8192,"observationDim":244,"policy":"random","seed":7,"stopAfterMeasuredSteps":50000,"type":"run_start","warmupSteps":1000}
-{"agentStepMsMean":0.05036885714285715,"doneCount":0,"envStepMsMean":47.80254771428571,"measuredSeconds":0.335014,"measuredStepCount":57344,"rewardSum":0,"stepsPerSecond":171168.96607305965,"stopReason":"measured_steps","type":"run_end"}

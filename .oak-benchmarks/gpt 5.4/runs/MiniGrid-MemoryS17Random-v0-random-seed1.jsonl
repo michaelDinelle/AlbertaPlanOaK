@@ -1,2 +1,0 @@
-{"actionDim":7,"actionDiscreteCount":7,"envId":"MiniGrid-MemoryS17Random-v0","numEnvs":8192,"observationDim":244,"policy":"random","seed":1,"stopAfterMeasuredSteps":50000,"type":"run_start","warmupSteps":1000}
-{"agentStepMsMean":0.04858328571428572,"doneCount":107,"envStepMsMean":47.262226285714284,"measuredSeconds":0.331219459,"measuredStepCount":57344,"rewardSum":49.8069207072258,"stepsPerSecond":173129.92471254535,"stopReason":"measured_steps","type":"run_end"}

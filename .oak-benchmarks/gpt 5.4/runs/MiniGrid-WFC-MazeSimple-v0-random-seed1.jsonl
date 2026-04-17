@@ -1,2 +1,0 @@
-{"actionDim":7,"actionDiscreteCount":7,"envId":"MiniGrid-WFC-MazeSimple-v0","numEnvs":8192,"observationDim":244,"policy":"random","seed":1,"stopAfterMeasuredSteps":50000,"type":"run_start","warmupSteps":1000}
-{"agentStepMsMean":0.05230942857142857,"doneCount":32,"envStepMsMean":49.718624999999996,"measuredSeconds":0.348443208,"measuredStepCount":57344,"rewardSum":31.755199909210205,"stepsPerSecond":164572.0125501772,"stopReason":"measured_steps","type":"run_end"}

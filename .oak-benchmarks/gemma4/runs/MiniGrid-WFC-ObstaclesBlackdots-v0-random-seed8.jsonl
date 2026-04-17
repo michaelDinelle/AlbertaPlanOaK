@@ -1,2 +1,0 @@
-{"actionDim":7,"actionDiscreteCount":7,"envId":"MiniGrid-WFC-ObstaclesBlackdots-v0","numEnvs":8192,"observationDim":244,"policy":"random","seed":8,"stopAfterMeasuredSteps":50000,"type":"run_start","warmupSteps":1000}
-{"agentStepMsMean":0.058107428571428574,"doneCount":13,"envStepMsMean":47.625589142857145,"measuredSeconds":0.333837708,"measuredStepCount":57344,"rewardSum":12.881199955940247,"stepsPerSecond":171772.0875318255,"stopReason":"measured_steps","type":"run_end"}

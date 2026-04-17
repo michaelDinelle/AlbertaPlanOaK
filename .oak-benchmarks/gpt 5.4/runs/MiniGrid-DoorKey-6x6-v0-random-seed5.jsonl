@@ -1,2 +1,0 @@
-{"actionDim":7,"actionDiscreteCount":7,"envId":"MiniGrid-DoorKey-6x6-v0","numEnvs":8192,"observationDim":244,"policy":"random","seed":5,"stopAfterMeasuredSteps":50000,"type":"run_start","warmupSteps":1000}
-{"agentStepMsMean":0.04833928571428572,"doneCount":0,"envStepMsMean":47.90608942857143,"measuredSeconds":0.335724334,"measuredStepCount":57344,"rewardSum":0,"stepsPerSecond":170806.8024643099,"stopReason":"measured_steps","type":"run_end"}

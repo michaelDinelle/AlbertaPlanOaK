@@ -1,2 +1,0 @@
-{"actionDim":7,"actionDiscreteCount":7,"envId":"MiniGrid-DistShift1-v0","numEnvs":8192,"observationDim":244,"policy":"random","seed":6,"stopAfterMeasuredSteps":50000,"type":"run_start","warmupSteps":1000}
-{"agentStepMsMean":0.04841057142857143,"doneCount":1116,"envStepMsMean":48.03614271428571,"measuredSeconds":0.33663525,"measuredStepCount":57344,"rewardSum":0,"stepsPerSecond":170344.6088904831,"stopReason":"measured_steps","type":"run_end"}

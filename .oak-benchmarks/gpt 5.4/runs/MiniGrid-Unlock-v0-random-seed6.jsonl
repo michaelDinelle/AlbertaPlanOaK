@@ -1,2 +1,0 @@
-{"actionDim":7,"actionDiscreteCount":7,"envId":"MiniGrid-Unlock-v0","numEnvs":8192,"observationDim":244,"policy":"random","seed":6,"stopAfterMeasuredSteps":50000,"type":"run_start","warmupSteps":1000}
-{"agentStepMsMean":0.04883328571428571,"doneCount":0,"envStepMsMean":47.96428557142857,"measuredSeconds":0.336136583,"measuredStepCount":57344,"rewardSum":0,"stepsPerSecond":170597.3193640753,"stopReason":"measured_steps","type":"run_end"}

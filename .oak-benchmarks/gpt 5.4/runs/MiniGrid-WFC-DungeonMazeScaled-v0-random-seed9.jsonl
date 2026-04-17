@@ -1,2 +1,0 @@
-{"actionDim":7,"actionDiscreteCount":7,"envId":"MiniGrid-WFC-DungeonMazeScaled-v0","numEnvs":8192,"observationDim":244,"policy":"random","seed":9,"stopAfterMeasuredSteps":50000,"type":"run_start","warmupSteps":1000}
-{"agentStepMsMean":0.05179757142857143,"doneCount":46,"envStepMsMean":56.29332742857143,"measuredSeconds":0.394462458,"measuredStepCount":57344,"rewardSum":45.58779984712601,"stepsPerSecond":145372.51603294528,"stopReason":"measured_steps","type":"run_end"}
