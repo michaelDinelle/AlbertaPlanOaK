@@ -2,1034 +2,951 @@
 #include <float.h>
 using namespace metal;
 
-// Step 11 OaK on Metal — strict Alberta Plan orthodoxy (Sutton et al. 2208.11173).
+// =================================================================================================
+// Orthodox Step 11 OaK on Metal — one shared latent, continual, average-reward, no discounting.
+// Invariants (.cursor/rules/alberta_plan.mdc §1–9) hold: no env branches, no tuned scalars, no
+// episodic semantics, no train/eval split, no per-step allocation, no cosmetic normalization,
+// no curiosity on the external reward, meta-constants structurally derived from {R, B, K}.
 //
-// Per-phase contracts (one shared latent state, continual, average-reward, no discounting):
-//   encode    : centered linear encoder + structural cap (≡ shared perception, AGENTS.md L52).
-//   forward   : per-row option-conditioned dynamics ψ̂(s,a)            (STOMP "Model" — Step 10).
-//   predict   : differential TD on primary value head + RRS option TD  (Reward-Centering 2405.09999;
-//               RRS 2202.03466 §5: cumulant = reward − ρ_k, terminal bonus on selected feature).
-//   learn     : implicit avg-reward TD step on θ_v / θ_r (2510.06149); semi-gradient AC on policy
-//               (2410.14606); semi-gradient SF on the GVF horde (2410.22133, 2604.00686 v2 — full-
-//               gradient option without auxiliary residual variable); per-option dynamics learning
-//               with ρ_per-option mixture weights from `optCounts` (B.4 precompute).
-//   meta_row  : per-row option score table ψ_k(s) computed once (B.3 factor).
-//   meta_act  : reactive logit + chord-mixture from option-policy heads. **No planBump** (A.4).
-//   plan      : k-step background planning factored as ψ_state-once-per-step + per-action bias
-//               (drops the O(active²·actDim·planK) cubic; B.2). Planning only writes `keyboardArena`.
-//   bk_reduce : threadgroup-parallel batch stats → KernelStats (B.1).
-//   bk_option : per-option ρ, β, utility, FIRE-style selective reinit on option weights (A.8).
-//   bk_feature: per-feature utility, active admission threshold, FC-STOMP feature reinit (A.11).
-//   bk_commit : single-thread ρ̄, stepCount, pEff (Naik centering — read by predict next step).
+// Citations (docs/papers/):
+//   AlbertaPlan_2208.11173                     base agent; Step 11 Oak; STOMP progression
+//   RethinkingFoundationsContinualRL_2504.08161 Bowling self-critique of episodic baggage
+//   RewardRespectingSubtasks_2202.03466 §6.1   w̄ high-water-mark bonus weight (F1/F2)
+//   RewardCentering_2405.09999                 differential TD w/ ρ̄ centering (main + per-opt)
+//   BellmanErrorCentering_2502.03104           theoretical identity — VRC ≡ BEC, linear-FA proof
+//   ImplicitUpdates_AvgRewardTD_2510.06149     αimp = α0/(1+α0·‖x‖²) — F10 on every linear head
+//   ImplicitQLearningSarsa_2601.18907          implicit TD extended to control
+//   StreamingDRLFinallyWorks_2410.14606        streaming AC (semi-grad; λ-trace rejected per Inv 9)
+//     [known-superior-but-rejected: GradientEligibilityTraces_2507.09087]
+//   FullGradientSuccessorFeatureRepresentations_2604.00686  ψ[k,j,i] vector SF Bellman
+//   OptionKeyboard_2106.13105                  Alg 1 line 3: argmax_k  ψ^{π_k}·w (GPI)
+//   OptimalBehaviorBasis_OptionKeyboard_2505.00787  OBB: minimal behavior basis for GPI
+//   SuccessorFeaturesKeyboard_2310.15940        SFK: ψ_k(s)·w option scoring
+//   FIRE_2602.08040 / SWR_2508.00212 / SpectralCollapsePlasticity_2509.22335
+//                                               selective weight reinit + effective-rank floor
+//   MetaGradientSearchControl_2406.19561        planning TD on w_main (F4)
+//   ValueHallucinationDynaPlanning_2006.04363   planning-only-from-current-state (avoid VH)
+//   TowardAgentsThatReasonAboutTheirComputation_2510.22833  planK structurally bounded
+//   WhichFeaturesBestForSuccessorFeatures_2502.10790        cumulant caveat (identity cumulants OK)
+//   TTT-Options-Sutton-2025-slides              activate per step: O*_t = argmax_o q̂(s, o, w⁰)
 //
-// Buffers (≤ 8): half params, fp32 state arena, uint arena, KernelScalars, KernelStats,
-// fp32 actionBounds, KernelConfig (constant). The `KernelConfig.phase` field is **gone** (A.12).
+// Params (fp16, packed):
+//   encoder[R]                                  linear encoder weights W_e
+//   valueW[R]                                   w_main (main-task linear value)
+//   psi[K · R · R]                              ψ[k, j, i]: per-option per-cumulant SF weights
+//   optPolicy[K · A · R]                        per-option action logits
+// State arena (fp32):
+//   observation[B·O]                            centered → state[slot · B · R]
+//   observationMean[O]                          online Welford mean for encoder centering
+//   state[2 · B · R]                            double-buffered (slot toggles each step; S5)
+//   prevAction[B·A], action[B·A], actionGrad[B·A], reward[B], td[B], tdPsi[B·R]
+// UInt arena:
+//   done[B], activeMask[R], activeList[R]
+//   option[2 · B]                               slot-toggled active/next (S4)
+//   counters[6]                                 {encNF, learnNF, planNF, reinitOptCount, reinitFeatCount, _pad}
+// Arena extras (fp32):
+//   featSM[R]                                   batch 2nd-moment EMA of active x (utility norm)
+//   wBar[R]                                     high-water-mark of |w_main| (RRS §6.1)
+//   rhoK[K]                                     per-option main-reward avg (Naik centering)
+//   rhoKJ[K·R]                                  per-option per-cumulant avg (SF centering)
+//   utilFeat[R], utilOpt[K]                     running utilities for admission / reinit
+// =================================================================================================
 
 [[function_constant(0)]] constant bool fc_action_is_discrete;
 
 struct KernelConfig {
-    uint obsDim, rank, actDim, batchSize;
+    uint obsDim, rank, actDim, batch, optionCount, baseObsDim;
     uint actionIsDiscrete;
-    uint optionCount;
-    uint optionForwardStride;       // rank * (rank + actDim)
-    uint planK;                     // structural: min(4, rank)
-    uint baseObsDim;
-    uint pEncoder, pPolicy, pValue, pReward, pStateWeights;
-    uint pOptPolicy, pOptValues, pOptCritic;
-    uint sObservation, sObsMean, sPrevState, sPrevAction;
-    uint sReward, sState, sAction, sLatentError, sRewardPred, sTd, sActionGrad, sRollout;
-    uint sLatentPower;
-    uint uDone, uActive, uStomp, uCounters;
-    // float arena offsets (all relative to the latentPower → arena base)
-    uint aOffset;                   // latentPower index where the float arena begins
-    uint aFeatSM, aFeatRes;         // fp32 shadows of feature 2nd-moment / residual (B.9)
-    uint aTdOption;
-    uint aPlanDelta;
-    uint aGvfW, aGvfH, aGvfU;       // 3 stacks of size rank × nGvfHeads
-    uint aGvfTd;                    // batch × nGvfHeads
-    uint aGvfRho;                   // 1
-    uint aSubRho;                   // optionCount
-    uint aOptBeta;                  // optionCount
-    uint aOptCounts;                // optionCount (B.4 precomputed wMask)
-    uint aKeyboard;                 // batch × optionCount
-    uint aKeyboardPred;             // optionCount
-    uint aOptScore;                 // batch × optionCount (B.3 row scores)
-    uint aOptScoreSum;              // batch (Σ_k ψ_k(s) for normalization)
-    uint aPlanState;                // batch × rank (planning rolling x_t)
-    uint aPlanScratch;              // batch × rank (planning ψ_state per step)
-    uint aLearnGrad;                // rank × (rank + actDim) — option-forward grad accumulator
-    uint aGvfGrad;                  // rank × rank — GVF bank grad accumulator
-    uint aUtilFeat, aUtilOpt;       // rank, optionCount
-    uint nGvfHeads;
-    // structural scalars precomputed in Swift (single capacity formula `cap = rank·batch`):
-    float capacityRidge;            // 1 / (cap + 1)
-    float structuralCap;            // cap
-    float nlmsStepScale;            // 1 / cap
-    float rsqrtPlanLambda;          // 1 / sqrt(rank + actDim)  (RRS terminal bonus scale)
+    // Param offsets (in fp16 stride)
+    uint pEncoder, pValue, pPsi, pOptPolicy;
+    // State offsets (in fp32 stride)
+    uint sObservation, sObsMean, sState, sPrevAction, sAction, sActionGrad;
+    uint sReward, sTd, sTdPsi;
+    // UInt offsets
+    uint uDone, uActiveMask, uActiveList, uOption, uCounters;
+    // Arena offsets (in fp32 stride, past sState's tail)
+    uint aFeatSM, aWBar, aRhoK, aRhoKJ, aUtilFeat, aUtilOpt;
+    // Derived scalars (all structurally derived from rank · batch)
+    float cap;                // rank · batch (signal-bound on every clamp)
+    float alpha0;             // 1 / cap (base step size)
+    float ridge;              // 1 / (cap + 1) (Tikhonov ridge; single source of truth)
     float boundLat, boundRew, boundAct;
     float invBoundLat, invBoundRew, invBoundAct;
 };
 
-struct KernelScalars { uint stepCount, doneCount, activeCount, _pad; float rewardRate; float pEff; };
+struct KernelScalars {
+    uint  stepCount, doneCount, activeCount;
+    uint  stateSlot, optionSlot;
+    uint  _pad;
+    float rho;                // main-task average reward (Naik centering)
+    float pEff;               // effective rank trace/max of featSM
+    float alphaImp;           // implicit TD step: α₀ / (1 + α₀·⟨‖x_active‖²⟩_batch) — 2510.06149
+    float alphaEnc;           // implicit TD step for encoder (centered obs)
+};
 
 struct KernelStats {
-    float rewardRate, latentPredictionMSE, rewardPredictionMSE, latentStateMeanSquare, activeRank, actionDeltaL2Mean, planningActionChangeL2Mean;
-    float rawNonFiniteCount, sanitizedNonFiniteCount, encodeNonFiniteCount, learnNonFiniteCount, planNonFiniteCount;
+    float rewardRate, latentStateMeanSquare, activeRank;
+    float rawNonFiniteCount, sanitizedNonFiniteCount;
+    float encodeNonFiniteCount, learnNonFiniteCount, planNonFiniteCount;
     float maxAbsLatentPrediction, maxAbsRewardPrediction, maxAbsPolicyOutput;
+    float actionDeltaL2Mean, planningActionChangeL2Mean;
     float optionModelPredictionMSE;
     float planningUsedOptionDynamicsMean;
     float oakOptionReinitCount;
     float utilityFeatureMean, utilitySubtaskMean, utilityOptionMean, utilityPlanningMean;
 };
 
-// Templated dot over an arbitrary weight type (B.6 — collapses old masked_dot_arena/_param).
-template <typename W>
-inline float masked_dot(device const W *w, uint wOff, device const float *v, uint vOff, device const uint *active, uint count) {
-    float sum = 0.0f;
-    for (uint i = 0u; i < count; ++i) {
-        uint idx = active[i];
-        sum = fma(float(w[wOff + idx]), v[vOff + idx], sum);
-    }
-    return sum;
-}
-
-// Full state-weight access for one block `(forwardBase, outRow, in/aIdx)` — packing layout:
-// `[GVF bank (rank×rank)] [opt 0 dyn (rank×(rank+actDim))] [opt 1 dyn] …`. `forwardBase` already
-// includes the GVF prefix and the chosen option offset.
-inline float dyn_ws(device const half *p, uint base, uint rank, uint actDim, uint outRow, uint inIdx) {
-    return float(p[base + outRow * (rank + actDim) + inIdx]);
-}
-inline float dyn_wa(device const half *p, uint base, uint rank, uint actDim, uint outRow, uint aIdx) {
-    return float(p[base + outRow * (rank + actDim) + rank + aIdx]);
-}
-
-inline uint gvf_bank_size(uint rank) { return rank * rank; }
-inline uint forward_base(uint rank, uint optionForwardStride, uint opt) {
-    return gvf_bank_size(rank) + opt * optionForwardStride;
-}
-
-// ------------------------------------------------------------------------------------------------
-// Phase context — pointers + scalars, no per-thread struct copy of the full config.
-// ------------------------------------------------------------------------------------------------
-struct OakCtx {
-    uint obsDim, rank, actDim, batchSize, optionCount, optionForwardStride, planK, baseObsDim, nGvfHeads;
-    uint actionIsDiscrete;
-    float ridge, cap, nlmsStepScale, rsqrtPlanLambda;
+// -------------------------------------------------------------------------------------------------
+// Context: pointers + scalars, no per-thread copy of the full config.
+// -------------------------------------------------------------------------------------------------
+struct Ctx {
+    uint R, A, B, K, O, baseO;
+    uint activeCount, stepCount;
+    uint stateSlot, optionSlot;
+    float cap, alpha0, ridge, rho;
     float boundLat, boundRew, boundAct, invBoundLat, invBoundRew, invBoundAct;
-    uint activeCount;
+    bool  actionIsDiscrete;
+
+    device half   *encoder;
+    device half   *valueW;
+    device half   *psi;            // [K][R][R]
+    device half   *optPolicy;      // [K][A][R]
+
+    device float  *observation;    // [B][O]
+    device float  *observationMean;// [O]
+    device float  *state;          // [2][B][R]
+    device float  *prevAction;     // [B][A]
+    device float  *action;         // [B][A]
+    device float  *actionGrad;     // [B][A]
+    device float  *reward;         // [B]
+    device float  *td;             // [B]
+    device float  *tdPsi;          // [B][R]
+
+    device uint   *done;           // [B]
+    device uint   *activeMask;     // [R]
+    device uint   *activeList;     // [R]
+    device uint   *option;         // [2][B]
+    device uint   *counters;       // [6]
+
+    device float  *featSM;         // [R]
+    device float  *wBar;           // [R]
+    device float  *rhoK;           // [K]
+    device float  *rhoKJ;          // [K][R]
+    device float  *utilFeat;       // [R]
+    device float  *utilOpt;        // [K]
+
     device KernelScalars *scalars;
-    device half *encoder;
-    device half *policy;
-    device half *valueW;
-    device half *rewardW;
-    device half *stateW;          // packed: GVF bank then per-option forward blocks
-    device half *optPolicy;
-    device half *optValues;
-    device half *optCritic;       // primary critic + per-option scalars
-    device float *observation;
-    device float *observationMean;
-    device float *previousState;
-    device float *previousAction;
-    device float *reward;
-    device float *state;
-    device float *action;
-    device float *latentError;
-    device float *rewardPrediction;
-    device float *td;
-    device float *actionGrad;
-    device float *rollout;
-    device float *latentPower;    // misc cache (option index per row at offset 0)
-    device uint *done;
-    device uint *activeMask;
-    device uint *activeList;
-    device uint *stomp;
-    device uint *counters;
-    device float *featSM;         // fp32 shadow (B.9)
-    device float *featRes;
-    device float *tdOption;
-    device float *planDelta;
-    device float *gvfW;
-    device float *gvfH;
-    device float *gvfU;
-    device float *gvfTd;
-    device float *gvfRho;
-    device float *subRho;
-    device float *optBeta;
-    device float *optCounts;      // batched per-option row counts (B.4)
-    device float *keyboard;
-    device float *keyboardPred;
-    device float *optScore;
-    device float *optScoreSum;
-    device float *planState;
-    device float *planScratch;
-    device float *learnGrad;
-    device float *gvfGrad;
-    device float *utilFeat;
-    device float *utilOpt;
 };
 
-inline OakCtx make_ctx(device half *params, device float *stateArena, device uint *uintArena,
-                       device KernelScalars *scalars, constant KernelConfig &cfg) {
-    OakCtx c;
-    c.obsDim = cfg.obsDim; c.rank = cfg.rank; c.actDim = cfg.actDim; c.batchSize = cfg.batchSize;
-    c.optionCount = max(cfg.optionCount, 1u);
-    c.optionForwardStride = cfg.optionForwardStride;
-    c.planK = max(cfg.planK, 1u);
-    c.baseObsDim = cfg.baseObsDim;
-    c.nGvfHeads = max(cfg.nGvfHeads, 1u);
-    c.actionIsDiscrete = cfg.actionIsDiscrete;
-    c.ridge = cfg.capacityRidge;
-    c.cap = cfg.structuralCap;
-    c.nlmsStepScale = cfg.nlmsStepScale;
-    c.rsqrtPlanLambda = cfg.rsqrtPlanLambda;
+inline Ctx make_ctx(device half *params, device float *stateArena, device uint *uintArena,
+                    device KernelScalars *scalars, constant KernelConfig &cfg) {
+    Ctx c;
+    c.R = cfg.rank; c.A = cfg.actDim; c.B = cfg.batch; c.K = max(cfg.optionCount, 1u);
+    c.O = cfg.obsDim; c.baseO = cfg.baseObsDim;
+    c.activeCount = scalars->activeCount;
+    c.stepCount   = scalars->stepCount;
+    c.stateSlot   = scalars->stateSlot;
+    c.optionSlot  = scalars->optionSlot;
+    c.cap = cfg.cap; c.alpha0 = cfg.alpha0; c.ridge = cfg.ridge;
+    c.rho = scalars->rho;
     c.boundLat = cfg.boundLat; c.boundRew = cfg.boundRew; c.boundAct = cfg.boundAct;
     c.invBoundLat = cfg.invBoundLat; c.invBoundRew = cfg.invBoundRew; c.invBoundAct = cfg.invBoundAct;
-    c.activeCount = scalars->activeCount;
-    c.scalars = scalars;
-    c.encoder = params + cfg.pEncoder;
-    c.policy = params + cfg.pPolicy;
-    c.valueW = params + cfg.pValue;
-    c.rewardW = params + cfg.pReward;
-    c.stateW = params + cfg.pStateWeights;
+    c.actionIsDiscrete = (cfg.actionIsDiscrete != 0u);
+
+    c.encoder   = params + cfg.pEncoder;
+    c.valueW    = params + cfg.pValue;
+    c.psi       = params + cfg.pPsi;
     c.optPolicy = params + cfg.pOptPolicy;
-    c.optValues = params + cfg.pOptValues;
-    c.optCritic = params + cfg.pOptCritic;
-    c.observation = stateArena + cfg.sObservation;
+
+    c.observation     = stateArena + cfg.sObservation;
     c.observationMean = stateArena + cfg.sObsMean;
-    c.previousState = stateArena + cfg.sPrevState;
-    c.previousAction = stateArena + cfg.sPrevAction;
-    c.reward = stateArena + cfg.sReward;
-    c.state = stateArena + cfg.sState;
-    c.action = stateArena + cfg.sAction;
-    c.latentError = stateArena + cfg.sLatentError;
-    c.rewardPrediction = stateArena + cfg.sRewardPred;
-    c.td = stateArena + cfg.sTd;
-    c.actionGrad = stateArena + cfg.sActionGrad;
-    c.rollout = stateArena + cfg.sRollout;
-    c.latentPower = stateArena + cfg.sLatentPower;
-    c.done = uintArena + cfg.uDone;
-    device uint *act = uintArena + cfg.uActive;
-    c.activeMask = act;
-    c.activeList = act + cfg.rank;
-    c.stomp = uintArena + cfg.uStomp;
-    c.counters = uintArena + cfg.uCounters;
-    device float *arena = stateArena + cfg.sLatentPower + cfg.aOffset;
-    c.featSM = arena + cfg.aFeatSM;
-    c.featRes = arena + cfg.aFeatRes;
-    c.tdOption = arena + cfg.aTdOption;
-    c.planDelta = arena + cfg.aPlanDelta;
-    c.gvfW = arena + cfg.aGvfW;
-    c.gvfH = arena + cfg.aGvfH;
-    c.gvfU = arena + cfg.aGvfU;
-    c.gvfTd = arena + cfg.aGvfTd;
-    c.gvfRho = arena + cfg.aGvfRho;
-    c.subRho = arena + cfg.aSubRho;
-    c.optBeta = arena + cfg.aOptBeta;
-    c.optCounts = arena + cfg.aOptCounts;
-    c.keyboard = arena + cfg.aKeyboard;
-    c.keyboardPred = arena + cfg.aKeyboardPred;
-    c.optScore = arena + cfg.aOptScore;
-    c.optScoreSum = arena + cfg.aOptScoreSum;
-    c.planState = arena + cfg.aPlanState;
-    c.planScratch = arena + cfg.aPlanScratch;
-    c.learnGrad = arena + cfg.aLearnGrad;
-    c.gvfGrad = arena + cfg.aGvfGrad;
-    c.utilFeat = arena + cfg.aUtilFeat;
-    c.utilOpt = arena + cfg.aUtilOpt;
+    c.state           = stateArena + cfg.sState;
+    c.prevAction      = stateArena + cfg.sPrevAction;
+    c.action          = stateArena + cfg.sAction;
+    c.actionGrad      = stateArena + cfg.sActionGrad;
+    c.reward          = stateArena + cfg.sReward;
+    c.td              = stateArena + cfg.sTd;
+    c.tdPsi           = stateArena + cfg.sTdPsi;
+
+    c.done       = uintArena + cfg.uDone;
+    c.activeMask = uintArena + cfg.uActiveMask;
+    c.activeList = uintArena + cfg.uActiveList;
+    c.option     = uintArena + cfg.uOption;
+    c.counters   = uintArena + cfg.uCounters;
+
+    c.featSM   = stateArena + cfg.aFeatSM;
+    c.wBar     = stateArena + cfg.aWBar;
+    c.rhoK     = stateArena + cfg.aRhoK;
+    c.rhoKJ    = stateArena + cfg.aRhoKJ;
+    c.utilFeat = stateArena + cfg.aUtilFeat;
+    c.utilOpt  = stateArena + cfg.aUtilOpt;
+
+    c.scalars = scalars;
     return c;
 }
 
-// Active option index for a row (executed by meta-policy on the previous step, kept in latentPower).
-inline uint active_option(OakCtx ctx, uint row) {
-    float v = ctx.latentPower[row];
-    uint o = uint(floor(v + 0.5f));
-    return min(o, ctx.optionCount - 1u);
+// Double-buffered state slot access.
+inline device float *state_slot(Ctx ctx, uint slot) { return ctx.state + slot * ctx.B * ctx.R; }
+// Slot-toggled option index (active = slot set by meta_action last step; next = write slot).
+inline device uint  *option_slot(Ctx ctx, uint slot) { return ctx.option + slot * ctx.B; }
+inline uint active_option(Ctx ctx, uint row) {
+    device const uint *o = option_slot(ctx, ctx.optionSlot);
+    return min(o[row], ctx.K - 1u);
 }
 
-inline float online_inv_time(device const KernelScalars *s) {
-    return 1.0f / float(max(s->stepCount + 1u, 1u));
+inline float online_inv_time(uint stepCount) { return 1.0f / float(stepCount + 1u); }
+inline uint  ceil_sqrt(uint n) { float s = sqrt(float(max(n, 1u))); return uint(ceil(s)); }
+
+// Dot product over the active-feature list (gather).
+inline float active_dot_half(device const half *w, uint wBase,
+                             device const float *x, uint xBase,
+                             device const uint *active, uint count) {
+    float s = 0.0f;
+    for (uint i = 0u; i < count; ++i) {
+        uint idx = active[i];
+        s = fma(float(w[wBase + idx]), x[xBase + idx], s);
+    }
+    return s;
+}
+inline float active_dot_float(device const float *w, uint wBase,
+                              device const float *x, uint xBase,
+                              device const uint *active, uint count) {
+    float s = 0.0f;
+    for (uint i = 0u; i < count; ++i) {
+        uint idx = active[i];
+        s = fma(w[wBase + idx], x[xBase + idx], s);
+    }
+    return s;
+}
+inline float active_norm2(device const float *x, uint xBase,
+                          device const uint *active, uint count) {
+    float s = 0.0f;
+    for (uint i = 0u; i < count; ++i) {
+        uint idx = active[i];
+        float v = x[xBase + idx];
+        s = fma(v, v, s);
+    }
+    return s;
 }
 
-// ================================================================================================
-// Phase: encode — centered linear encoder; structural cap on shared latent (one source of truth).
-// ================================================================================================
+// =================================================================================================
+// encode — centered linear encoder writes the NEW state into state_slot(1 - stateSlot).
+//   [Grid: R · B] One thread per (row, feat).
+// =================================================================================================
 kernel void oak_encode(
-    device half *params [[buffer(0)]],
-    device float *stateArena [[buffer(1)]],
-    device uint *uintArena [[buffer(2)]],
+    device half   *params     [[buffer(0)]],
+    device float  *stateArena [[buffer(1)]],
+    device uint   *uintArena  [[buffer(2)]],
     device KernelScalars *scalars [[buffer(3)]],
-    device KernelStats *stats [[buffer(4)]],
-    device const float *bounds [[buffer(5)]],
-    constant KernelConfig &cfg [[buffer(6)]],
+    device KernelStats   *stats   [[buffer(4)]],
+    device const float   *bounds  [[buffer(5)]],
+    constant KernelConfig &cfg    [[buffer(6)]],
     uint gid [[thread_position_in_grid]])
 {
-    OakCtx ctx = make_ctx(params, stateArena, uintArena, scalars, cfg);
-    uint row = gid / ctx.rank, feat = gid % ctx.rank;
-    if (row >= ctx.batchSize) return;
-    float centered = ctx.observation[row * ctx.obsDim + feat] - ctx.observationMean[feat];
+    Ctx ctx = make_ctx(params, stateArena, uintArena, scalars, cfg);
+    uint row = gid / ctx.R, feat = gid % ctx.R;
+    if (row >= ctx.B) return;
+    uint writeSlot = 1u - ctx.stateSlot;
+    float o_raw = (feat < ctx.O) ? ctx.observation[row * ctx.O + feat] : 0.0f;
+    float om    = (feat < ctx.O) ? ctx.observationMean[feat] : 0.0f;
+    float centered = o_raw - om;
     float z = centered * float(ctx.encoder[feat]);
-    ctx.state[row * ctx.rank + feat] = clamp(z, -ctx.cap, ctx.cap);
+    state_slot(ctx, writeSlot)[row * ctx.R + feat] = clamp(z, -ctx.cap, ctx.cap);
 }
 
-// ================================================================================================
-// Phase: forward_model — per-row option-conditioned ψ̂ on previous (state, action). Each row uses
-// the option it executed (`active_option`); no shared "slice 0" default (A.3).
-// ================================================================================================
-kernel void oak_forward(
-    device half *params [[buffer(0)]],
-    device float *stateArena [[buffer(1)]],
-    device uint *uintArena [[buffer(2)]],
-    device KernelScalars *scalars [[buffer(3)]],
-    device KernelStats *stats [[buffer(4)]],
-    device const float *bounds [[buffer(5)]],
-    constant KernelConfig &cfg [[buffer(6)]],
-    uint gid [[thread_position_in_grid]])
-{
-    OakCtx ctx = make_ctx(params, stateArena, uintArena, scalars, cfg);
-    uint row = gid / ctx.rank, feat = gid % ctx.rank;
-    if (row >= ctx.batchSize) return;
-    uint opt = active_option(ctx, row);
-    if (feat == 0u) ctx.stomp[4u * ctx.batchSize + row] = opt;   // batch dynamics tag (B.4 source)
-    uint base = forward_base(ctx.rank, ctx.optionForwardStride, opt);
-    float ps = 0.0f;
-    for (uint i = 0u; i < ctx.activeCount; ++i) {
-        uint idx = ctx.activeList[i];
-        ps = fma(dyn_ws(ctx.stateW, base, ctx.rank, ctx.actDim, feat, idx),
-                 ctx.previousState[row * ctx.rank + idx], ps);
-    }
-    float pa = 0.0f;
-    for (uint a = 0u; a < ctx.actDim; ++a) {
-        pa = fma(dyn_wa(ctx.stateW, base, ctx.rank, ctx.actDim, feat, a),
-                 ctx.previousAction[row * ctx.actDim + a], pa);
-    }
-    ctx.rollout[row * ctx.rank + feat] = clamp(ps + pa, -ctx.cap, ctx.cap);
-}
-
-// ================================================================================================
-// Phase: predict — three fused dots over the same active list (B.7), differential TD (A.2),
-// reward-respecting option TD (A.1), GVF horde TD with per-head ρ (A.7 — full-gradient SF style).
-// ================================================================================================
+// =================================================================================================
+// predict — main differential TD δ_main (A.2) + per-cumulant SF TD δ_ψ[j] for the active option
+// (A.1/F6/F7: full-gradient SF per 2604.00686). No separate stateW bank; ψ subsumes the horde.
+// RRS optimism bonus (F1) added to δ_main via (w̄_i − w_i)·x_i when i < R and i == active option.
+//   [Grid: B]
+// =================================================================================================
 kernel void oak_predict(
-    device half *params [[buffer(0)]],
-    device float *stateArena [[buffer(1)]],
-    device uint *uintArena [[buffer(2)]],
+    device half   *params     [[buffer(0)]],
+    device float  *stateArena [[buffer(1)]],
+    device uint   *uintArena  [[buffer(2)]],
     device KernelScalars *scalars [[buffer(3)]],
-    device KernelStats *stats [[buffer(4)]],
-    device const float *bounds [[buffer(5)]],
-    constant KernelConfig &cfg [[buffer(6)]],
+    device KernelStats   *stats   [[buffer(4)]],
+    device const float   *bounds  [[buffer(5)]],
+    constant KernelConfig &cfg    [[buffer(6)]],
     uint gid [[thread_position_in_grid]])
 {
-    OakCtx ctx = make_ctx(params, stateArena, uintArena, scalars, cfg);
-    if (gid >= ctx.batchSize) return;
-    uint sOff = gid * ctx.rank;
-    float rPred = 0.0f, vPrev = 0.0f, vNext = 0.0f;
-    for (uint i = 0u; i < ctx.activeCount; ++i) {
-        uint idx = ctx.activeList[i];
-        float w = float(ctx.rewardW[idx]);
-        float vw = float(ctx.valueW[idx]);
-        rPred = fma(w, ctx.previousState[sOff + idx], rPred);
-        vPrev = fma(vw, ctx.previousState[sOff + idx], vPrev);
-        vNext = fma(vw, ctx.state[sOff + idx], vNext);
-    }
-    rPred = clamp(rPred, -ctx.cap, ctx.cap);
+    Ctx ctx = make_ctx(params, stateArena, uintArena, scalars, cfg);
+    if (gid >= ctx.B) return;
+
+    device const float *prev = state_slot(ctx, ctx.stateSlot);
+    device const float *curr = state_slot(ctx, 1u - ctx.stateSlot);
+    uint pOff = gid * ctx.R, cOff = gid * ctx.R;
+
+    // Main differential TD on w_main (θ_v).
+    float vPrev = active_dot_half(ctx.valueW, 0u, prev, pOff, ctx.activeList, ctx.activeCount);
+    float vNext = active_dot_half(ctx.valueW, 0u, curr, cOff, ctx.activeList, ctx.activeCount);
     vPrev = clamp(vPrev, -ctx.cap, ctx.cap);
     vNext = clamp(vNext, -ctx.cap, ctx.cap);
-    ctx.rewardPrediction[gid] = rPred;
-    float terminalMask = ctx.done[gid] ? 0.0f : 1.0f;
-    // Differential TD on raw external reward; ρ̄ updated in bk_commit (Naik centering).
-    float delta = ctx.reward[gid] - ctx.scalars->rewardRate + terminalMask * vNext - vPrev;
-    ctx.td[gid] = clamp(delta, -ctx.cap, ctx.cap);
+    float terminalMask = (ctx.done[gid] != 0u) ? 0.0f : 1.0f;
+    float dMain = (ctx.reward[gid] - ctx.rho) + terminalMask * vNext - vPrev;
+    ctx.td[gid] = clamp(dMain, -ctx.cap, ctx.cap);
 
-    uint opt = active_option(ctx, gid);
-    float vSubPrev = masked_dot(ctx.optValues, opt * ctx.rank, ctx.previousState, sOff, ctx.activeList, ctx.activeCount);
-    float vSubNext = masked_dot(ctx.optValues, opt * ctx.rank, ctx.state, sOff, ctx.activeList, ctx.activeCount);
-    // RRS (2202.03466 §5): cumulant = main reward, centered by per-option average reward ρ_k
-    // (Naik 2405.09999); terminal bonus on the selected feature replaces the bootstrap when the
-    // option's environment trajectory ends. Bonus scale is 1/√(rank+actDim) (purely structural).
-    float cumulant = ctx.reward[gid] - ctx.subRho[opt];
-    float bonus = (opt < ctx.rank ? ctx.state[sOff + opt] : 0.0f) * ctx.rsqrtPlanLambda;
-    float deltaOpt = cumulant - vSubPrev + terminalMask * vSubNext + (1.0f - terminalMask) * bonus;
-    ctx.tdOption[gid] = clamp(deltaOpt, -ctx.cap, ctx.cap);
-
-    // GVF horde — semi-gradient differential SF on each head; cumulant for head j = state[j%rank]
-    // (a structurally derived feature-attainment cumulant tied to the same rank as features),
-    // ρ_j tracked once in `gvfRho` (single shared head ρ — no per-head free parameter).
-    float rhoH = ctx.gvfRho[0];
-    for (uint j = 0u; j < ctx.nGvfHeads; ++j) {
-        float predj = 0.0f, vjp = 0.0f;
-        for (uint i = 0u; i < ctx.activeCount; ++i) {
-            uint idx = ctx.activeList[i];
-            uint jOff = j * ctx.rank + idx;
-            predj = fma(ctx.gvfW[jOff], ctx.previousState[sOff + idx], predj);
-            vjp = fma(ctx.gvfW[jOff], ctx.state[sOff + idx], vjp);
-        }
-        float cj = ctx.state[sOff + (j % ctx.rank)];
-        float dj = cj - rhoH + terminalMask * vjp - predj;
-        ctx.gvfTd[gid * ctx.nGvfHeads + j] = clamp(dj, -ctx.cap, ctx.cap);
-    }
-
-    // Latent prediction (state weights bank) reused by stats & by FC-STOMP feedback (A.11).
-    for (uint g = 0u; g < ctx.rank; ++g) {
-        float acc = 0.0f;
-        for (uint i = 0u; i < ctx.activeCount; ++i) {
-            uint idx = ctx.activeList[i];
-            acc = fma(float(ctx.stateW[g * ctx.rank + idx]), ctx.previousState[sOff + idx], acc);
-        }
-        ctx.latentError[gid * ctx.rank + g] = clamp(acc, -ctx.cap, ctx.cap);
+    // Per-cumulant SF TD for the active option's ψ_k(·,:). Cumulant c_j = x_j (feature
+    // attainment); ρ_{k,j} centered per-option-per-cumulant (2405.09999 × K × R).
+    uint optK = active_option(ctx, gid);
+    uint psiBase = optK * ctx.R * ctx.R;
+    uint rhoBase = optK * ctx.R;
+    for (uint j = 0u; j < ctx.R; ++j) {
+        if (ctx.activeMask[j] == 0u) { ctx.tdPsi[gid * ctx.R + j] = 0.0f; continue; }
+        float pj = active_dot_half(ctx.psi, psiBase + j * ctx.R, prev, pOff,
+                                   ctx.activeList, ctx.activeCount);
+        float nj = active_dot_half(ctx.psi, psiBase + j * ctx.R, curr, cOff,
+                                   ctx.activeList, ctx.activeCount);
+        float cj = curr[cOff + j];
+        float dj = (cj - ctx.rhoKJ[rhoBase + j]) + terminalMask * nj - pj;
+        ctx.tdPsi[gid * ctx.R + j] = clamp(dj, -ctx.cap, ctx.cap);
     }
 }
 
-// ================================================================================================
-// Phase: learn — implicit avg-reward TD on θ_v / θ_r (A.9: 2510.06149); semi-gradient AC on policy
-// (A.10: pure semi-gradient streaming AC — no free trace λ); semi-gradient SF on the GVF stack
-// (A.7: drop the auxiliary residual variable, full-gradient option preserved as `gvfH` 2nd-stack);
-// per-option dynamics learning weighted by `optCounts` precomputed in bk_option (B.4).
-// Grid: rank threads (one per output feature); each thread accumulates over batch.
-// ================================================================================================
-kernel void oak_learn(
-    device half *params [[buffer(0)]],
-    device float *stateArena [[buffer(1)]],
-    device uint *uintArena [[buffer(2)]],
-    device KernelScalars *scalars [[buffer(3)]],
-    device KernelStats *stats [[buffer(4)]],
-    device const float *bounds [[buffer(5)]],
-    constant KernelConfig &cfg [[buffer(6)]],
-    uint gid [[thread_position_in_grid]])
-{
-    OakCtx ctx = make_ctx(params, stateArena, uintArena, scalars, cfg);
-    uint feat = gid;
-    if (feat >= ctx.rank) return;
-
-    float invB = 1.0f / float(max(ctx.batchSize, 1u));
-    float ridge = ctx.ridge;
-    float invT = online_inv_time(ctx.scalars);
-    float baseStep = ctx.nlmsStepScale;
-
-    // ---- Value head θ_v (implicit avg-reward TD).
-    float gV = 0.0f, gR = 0.0f, smAcc = 0.0f, normAcc = 0.0f;
-    for (uint row = 0u; row < ctx.batchSize; ++row) {
-        float xprev = ctx.previousState[row * ctx.rank + feat];
-        float td = ctx.td[row];
-        gV = fma(td, xprev, gV);
-        gR = fma(ctx.reward[row] - ctx.rewardPrediction[row], xprev, gR);
-        smAcc = fma(xprev, xprev, smAcc);
-        normAcc += xprev * xprev;
-    }
-    float xnorm2 = normAcc * invB;
-    float implicitDenom = 1.0f + baseStep * xnorm2;     // 2510.06149 implicit step
-    float stepImp = baseStep / implicitDenom;
-    float mBatch = smAcc * invB;
-    ctx.featSM[feat] += (mBatch - ctx.featSM[feat]) * invT;
-    float perFeatStep = baseStep / (ctx.featSM[feat] + ridge);
-    ctx.valueW[feat] = half(float(ctx.valueW[feat]) + stepImp * gV * invB);
-    ctx.rewardW[feat] = half(float(ctx.rewardW[feat]) + stepImp * gR * invB);
-
-    // ---- Policy θ_π (pure semi-gradient streaming AC; capacity step size; no free λ trace).
-    for (uint a = 0u; a < ctx.actDim; ++a) {
-        float gP = 0.0f;
-        for (uint row = 0u; row < ctx.batchSize; ++row) {
-            float xprev = ctx.previousState[row * ctx.rank + feat];
-            gP = fma(ctx.td[row] * xprev, ctx.previousAction[row * ctx.actDim + a], gP);
-        }
-        ctx.policy[a * ctx.rank + feat] = half(float(ctx.policy[a * ctx.rank + feat]) + perFeatStep * gP * invB);
-    }
-
-    // ---- Option-value head and option-policy head (RRS-driven option TD — A.1).
-    for (uint row = 0u; row < ctx.batchSize; ++row) {
-        uint opt = active_option(ctx, row);
-        float xprev = ctx.previousState[row * ctx.rank + feat];
-        float gOV = ctx.tdOption[row] * xprev;
-        ctx.optValues[opt * ctx.rank + feat] = half(float(ctx.optValues[opt * ctx.rank + feat]) + perFeatStep * gOV * invB);
-        for (uint a = 0u; a < ctx.actDim; ++a) {
-            uint base = opt * ctx.rank * ctx.actDim + a * ctx.rank + feat;
-            float dPol = ctx.tdOption[row] * xprev * ctx.previousAction[row * ctx.actDim + a];
-            ctx.optPolicy[base] = half(float(ctx.optPolicy[base]) + perFeatStep * dPol * invB);
-        }
-    }
-
-    // ---- Encoder (only base obs slots) — semi-gradient on reward-prediction error (A.11 closes
-    // the FC-STOMP arrow alongside the bk_feature reinit).
-    if (feat < ctx.baseObsDim) {
-        float gE = 0.0f;
-        for (uint row = 0u; row < ctx.batchSize; ++row) {
-            float centered = ctx.observation[row * ctx.obsDim + feat] - ctx.observationMean[feat];
-            gE = fma(ctx.reward[row] - ctx.rewardPrediction[row], centered, gE);
-        }
-        ctx.encoder[feat] = half(float(ctx.encoder[feat]) + perFeatStep * gE * invB);
-    }
-
-    // ---- GVF stack (semi-gradient SF; full-gradient companion `gvfH` updated together — drops
-    // the auxiliary residual variable from the old code per A.7). Single update path for all heads.
-    for (uint j = 0u; j < ctx.nGvfHeads; ++j) {
-        float gW = 0.0f, gU = 0.0f;
-        for (uint row = 0u; row < ctx.batchSize; ++row) {
-            float td = ctx.gvfTd[row * ctx.nGvfHeads + j];
-            gW = fma(td, ctx.previousState[row * ctx.rank + feat], gW);
-            gU = fma(td, ctx.state[row * ctx.rank + feat], gU);
-        }
-        uint off = j * ctx.rank + feat;
-        ctx.gvfW[off] += perFeatStep * gW * invB;
-        ctx.gvfH[off] += baseStep * (gW * invB - ctx.gvfH[off]);   // full-gradient companion
-        ctx.gvfU[off] += perFeatStep * gU * invB;
-    }
-
-    // ---- State-weight bank (per-feature TD on latent prediction error).
-    for (uint i = 0u; i < ctx.rank; ++i) {
-        float gS = 0.0f;
-        for (uint row = 0u; row < ctx.batchSize; ++row) {
-            float err = ctx.state[row * ctx.rank + feat] - ctx.latentError[row * ctx.rank + feat];
-            gS = fma(err, ctx.previousState[row * ctx.rank + i], gS);
-        }
-        ctx.stateW[feat * ctx.rank + i] = half(float(ctx.stateW[feat * ctx.rank + i]) + perFeatStep * gS * invB);
-    }
-
-    // ---- Per-option forward dynamics (B.4 wMask precomputed in bk_option → ctx.optCounts).
-    for (uint opt = 0u; opt < ctx.optionCount; ++opt) {
-        float wMask = ctx.optCounts[opt];           // already in [0,1]
-        if (wMask < ctx.ridge) continue;
-        uint base = forward_base(ctx.rank, ctx.optionForwardStride, opt);
-        for (uint i = 0u; i < ctx.rank; ++i) {
-            float gS = 0.0f;
-            for (uint row = 0u; row < ctx.batchSize; ++row) {
-                if (ctx.stomp[4u * ctx.batchSize + row] != opt) continue;
-                float err = ctx.state[row * ctx.rank + feat] - ctx.rollout[row * ctx.rank + feat];
-                gS = fma(err, ctx.previousState[row * ctx.rank + i], gS);
-            }
-            ctx.stateW[base + feat * (ctx.rank + ctx.actDim) + i] = half(float(ctx.stateW[base + feat * (ctx.rank + ctx.actDim) + i]) + perFeatStep * gS * invB * wMask);
-        }
-        for (uint a = 0u; a < ctx.actDim; ++a) {
-            float gA = 0.0f;
-            for (uint row = 0u; row < ctx.batchSize; ++row) {
-                if (ctx.stomp[4u * ctx.batchSize + row] != opt) continue;
-                float err = ctx.state[row * ctx.rank + feat] - ctx.rollout[row * ctx.rank + feat];
-                gA = fma(err, ctx.previousAction[row * ctx.actDim + a], gA);
-            }
-            ctx.stateW[base + feat * (ctx.rank + ctx.actDim) + ctx.rank + a] = half(float(ctx.stateW[base + feat * (ctx.rank + ctx.actDim) + ctx.rank + a]) + perFeatStep * gA * invB * wMask);
-        }
-    }
-}
-
-// ================================================================================================
-// Phase: meta_row — once per row, compute ψ_k(s) for every option (B.3 factor-out the actDim
-// redundancy) and the GPI-style chord weights w_k = softmax(ψ_k(s)) (A.5).
-// ================================================================================================
-kernel void oak_meta_row(
-    device half *params [[buffer(0)]],
-    device float *stateArena [[buffer(1)]],
-    device uint *uintArena [[buffer(2)]],
-    device KernelScalars *scalars [[buffer(3)]],
-    device KernelStats *stats [[buffer(4)]],
-    device const float *bounds [[buffer(5)]],
-    constant KernelConfig &cfg [[buffer(6)]],
-    uint gid [[thread_position_in_grid]])
-{
-    OakCtx ctx = make_ctx(params, stateArena, uintArena, scalars, cfg);
-    if (gid >= ctx.batchSize) return;
-    uint sOff = gid * ctx.rank;
-    float maxv = -FLT_MAX;
-    for (uint k = 0u; k < ctx.optionCount; ++k) {
-        float psi = masked_dot(ctx.optValues, k * ctx.rank, ctx.state, sOff, ctx.activeList, ctx.activeCount);
-        ctx.optScore[gid * ctx.optionCount + k] = psi;
-        maxv = max(maxv, psi);
-    }
-    float sumE = 0.0f;
-    for (uint k = 0u; k < ctx.optionCount; ++k) {
-        float e = exp(ctx.optScore[gid * ctx.optionCount + k] - maxv);
-        ctx.optScore[gid * ctx.optionCount + k] = e;
-        sumE += e;
-    }
-    float invSum = 1.0f / max(sumE, FLT_MIN);
-    float invT = online_inv_time(ctx.scalars);
-    for (uint k = 0u; k < ctx.optionCount; ++k) {
-        float w = ctx.optScore[gid * ctx.optionCount + k] * invSum;
-        ctx.optScore[gid * ctx.optionCount + k] = w;
-        // Online-track keyboard chord (A.5: w from GPI softmax of ψ_k(s)).
-        float prev = ctx.keyboard[gid * ctx.optionCount + k];
-        ctx.keyboard[gid * ctx.optionCount + k] = prev + invT * (w - prev);
-    }
-    ctx.optScoreSum[gid] = sumE;
-}
-
-// ================================================================================================
-// Phase: meta_action — base reactive logit + chord-weighted option-policy mixture; **no planBump**.
-// Grid: batch × actDim. Reads precomputed chord weights from `ctx.keyboard` (after meta_row update).
-// Sets the active option for the next-step `active_option` lookup via `latentPower[batch+row]`
-// on a single-thread fan-in (actIdx == 0).
-// ================================================================================================
-kernel void oak_meta_action(
-    device half *params [[buffer(0)]],
-    device float *stateArena [[buffer(1)]],
-    device uint *uintArena [[buffer(2)]],
-    device KernelScalars *scalars [[buffer(3)]],
-    device KernelStats *stats [[buffer(4)]],
-    device const float *bounds [[buffer(5)]],
-    constant KernelConfig &cfg [[buffer(6)]],
-    uint gid [[thread_position_in_grid]])
-{
-    OakCtx ctx = make_ctx(params, stateArena, uintArena, scalars, cfg);
-    uint row = gid / ctx.actDim, actIdx = gid % ctx.actDim;
-    if (row >= ctx.batchSize) return;
-    uint sOff = row * ctx.rank;
-    float baseLogit = masked_dot(ctx.policy, actIdx * ctx.rank, ctx.state, sOff, ctx.activeList, ctx.activeCount);
-    float optMix = 0.0f;
-    for (uint k = 0u; k < ctx.optionCount; ++k) {
-        float wk = ctx.keyboard[row * ctx.optionCount + k];
-        float lk = masked_dot(ctx.optPolicy, k * ctx.rank * ctx.actDim + actIdx * ctx.rank,
-                              ctx.state, sOff, ctx.activeList, ctx.activeCount);
-        optMix = fma(wk, lk, optMix);
-    }
-    float logit = baseLogit + optMix;
-    float lo = bounds[actIdx], hi = bounds[ctx.actDim + actIdx];
-    float bounded = clamp(logit, lo, hi);
-    ctx.action[row * ctx.actDim + actIdx] = bounded;
-    ctx.actionGrad[row * ctx.actDim + actIdx] = bounded;
-    if (actIdx == 0u) {
-        // Active option for the next step = argmax of chord weights (deterministic; the keyboard
-        // already encodes the GPI selection). Stored at latentPower[batch+row] — copied to
-        // latentPower[row] by Swift at the start of the next step (one memcpy in `step`).
-        uint best = 0u;
-        float bestv = ctx.keyboard[row * ctx.optionCount];
-        for (uint k = 1u; k < ctx.optionCount; ++k) {
-            float v = ctx.keyboard[row * ctx.optionCount + k];
-            if (v > bestv) { bestv = v; best = k; }
-        }
-        ctx.latentPower[ctx.batchSize + row] = float(best);
-    }
-}
-
-// ================================================================================================
-// Phase: plan — k-step lookahead using the per-row option's dynamics. Factored as
-//   (i)   ψ_state[feat]   = Σ_j W_s[feat,j] x[j]      (computed once per step; O(active²))
-//   (ii)  v_a[cand]       = Σ_feat (val + opt_val)[feat] · (ψ_state[feat] + W_a[feat,cand])
-//                          (per-action; O(active·actDim) — drops the cubic loop, B.2)
-// Updates only `keyboardArena` via additive bias to the best chord (A.4 — no logit contamination).
-// ================================================================================================
+// =================================================================================================
+// plan — one-step option-model lookahead (F4). Parallel over (row, option): B TGs of 32 threads
+// each. Thread k ∈ [0, K) computes Q_k(x) = ψ_k(x)·w_main + optimism-bonus; threadgroup memory
+// holds the K Q values; thread 0 picks argmax_k, writes nextOption[row], and pushes δ_plan onto
+// td[row]. Citations: OK 2106.13105 Alg 1 line 3; MGSC 2406.19561; RRS §6.1 bonus.
+//   [Dispatch: B threadgroups × 32 threads.]
+// =================================================================================================
 kernel void oak_plan(
-    device half *params [[buffer(0)]],
-    device float *stateArena [[buffer(1)]],
-    device uint *uintArena [[buffer(2)]],
+    device half   *params     [[buffer(0)]],
+    device float  *stateArena [[buffer(1)]],
+    device uint   *uintArena  [[buffer(2)]],
     device KernelScalars *scalars [[buffer(3)]],
-    device KernelStats *stats [[buffer(4)]],
-    device const float *bounds [[buffer(5)]],
-    constant KernelConfig &cfg [[buffer(6)]],
+    device KernelStats   *stats   [[buffer(4)]],
+    device const float   *bounds  [[buffer(5)]],
+    constant KernelConfig &cfg    [[buffer(6)]],
+    uint tgid [[threadgroup_position_in_grid]],
+    uint tid  [[thread_position_in_threadgroup]],
+    uint tgW  [[threads_per_threadgroup]])
+{
+    Ctx ctx = make_ctx(params, stateArena, uintArena, scalars, cfg);
+    uint row = tgid;
+    if (row >= ctx.B) return;
+    device const float *curr = state_slot(ctx, 1u - ctx.stateSlot);
+    uint xOff = row * ctx.R;
+
+    threadgroup float qs[32];
+    if (tid < 32u) qs[tid] = -FLT_MAX;
+    // Each thread computes its own Q_k when k < K. Extra threads (k ≥ K) contribute no-ops.
+    uint k = tid;
+    if (k < ctx.K) {
+        uint pb = k * ctx.R * ctx.R;
+        float qk = 0.0f;
+        for (uint j = 0u; j < ctx.R; ++j) {
+            if (ctx.activeMask[j] == 0u) continue;
+            float psi_kj = active_dot_half(ctx.psi, pb + j * ctx.R, curr, xOff,
+                                           ctx.activeList, ctx.activeCount);
+            qk = fma(float(ctx.valueW[j]), psi_kj, qk);
+        }
+        if (k < ctx.R) {
+            float bonus = (ctx.wBar[k] - float(ctx.valueW[k])) * curr[xOff + k];
+            qk += max(bonus, 0.0f);
+        }
+        qs[k] = clamp(qk, -ctx.cap, ctx.cap);
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    if (tid == 0u) {
+        float qBest = -FLT_MAX; uint kBest = 0u;
+        for (uint i = 0u; i < ctx.K; ++i) if (qs[i] > qBest) { qBest = qs[i]; kBest = i; }
+        float vX = active_dot_half(ctx.valueW, 0u, curr, xOff, ctx.activeList, ctx.activeCount);
+        vX = clamp(vX, -ctx.cap, ctx.cap);
+        float dPlan = clamp(qBest - vX, -ctx.cap, ctx.cap);
+        ctx.td[row] += dPlan;
+        option_slot(ctx, 1u - ctx.optionSlot)[row] = kBest;
+    }
+}
+
+// =================================================================================================
+// meta_action — emit discrete or continuous action for the row, under π_{O*} where O* was just
+// written by oak_plan (no chord blending — F5). Discrete sampling uses a deterministic Gumbel-max
+// via a structural hash of (stepCount, row) — no host RNG round-trip (S3). Continuous actions
+// clamp the option-policy logit to the per-dim env bounds.
+//   [Grid: B · A]
+// =================================================================================================
+inline uint splitmix32(uint x) {
+    x += 0x9e3779b9u;
+    x = (x ^ (x >> 16)) * 0x7feb352du;
+    x = (x ^ (x >> 15)) * 0x846ca68bu;
+    return x ^ (x >> 16);
+}
+inline float hash_uniform(uint step, uint row, uint dim) {
+    uint h = splitmix32(step ^ splitmix32(row ^ splitmix32(dim)));
+    // Uniform in [2^-24, 1); avoid 0 for log().
+    return max(float(h >> 8) * 5.9604645e-8f, 1e-7f);
+}
+
+kernel void oak_meta_action(
+    device half   *params     [[buffer(0)]],
+    device float  *stateArena [[buffer(1)]],
+    device uint   *uintArena  [[buffer(2)]],
+    device KernelScalars *scalars [[buffer(3)]],
+    device KernelStats   *stats   [[buffer(4)]],
+    device const float   *bounds  [[buffer(5)]],
+    constant KernelConfig &cfg    [[buffer(6)]],
     uint gid [[thread_position_in_grid]])
 {
-    OakCtx ctx = make_ctx(params, stateArena, uintArena, scalars, cfg);
-    if (gid >= ctx.batchSize) return;
-    uint sOff = gid * ctx.rank, aOff = gid * ctx.actDim;
-    uint opt = active_option(ctx, gid);
-    uint base = forward_base(ctx.rank, ctx.optionForwardStride, opt);
-    device float *xt = ctx.planState + gid * ctx.rank;
-    device float *psFeat = ctx.planScratch + gid * ctx.rank;
-
-    float vNow = masked_dot(ctx.valueW, 0u, ctx.state, sOff, ctx.activeList, ctx.activeCount)
-               + masked_dot(ctx.optValues, opt * ctx.rank, ctx.state, sOff, ctx.activeList, ctx.activeCount);
-
-    for (uint i = 0u; i < ctx.activeCount; ++i) {
-        uint idx = ctx.activeList[i];
-        xt[idx] = ctx.state[sOff + idx];
-    }
-
-    float bestAdv = 0.0f;
-    uint bestK = 0u;
-    float vk = vNow;
+    Ctx ctx = make_ctx(params, stateArena, uintArena, scalars, cfg);
+    uint row = gid / ctx.A, a = gid % ctx.A;
+    if (row >= ctx.B) return;
+    uint optK = option_slot(ctx, 1u - ctx.optionSlot)[row];  // O* just written by plan
+    device const float *curr = state_slot(ctx, 1u - ctx.stateSlot);
+    uint xOff = row * ctx.R;
+    // Per-option policy logit under π_{optK}.
+    uint polBase = optK * ctx.A * ctx.R + a * ctx.R;
+    float logit = active_dot_half(ctx.optPolicy, polBase, curr, xOff, ctx.activeList, ctx.activeCount);
+    float lo = bounds[a], hi = bounds[ctx.A + a];
 
     if (fc_action_is_discrete) {
-        for (uint step = 0u; step < ctx.planK; ++step) {
-            for (uint li = 0u; li < ctx.activeCount; ++li) {
-                uint feat = ctx.activeList[li];
-                float ps = 0.0f;
-                for (uint lj = 0u; lj < ctx.activeCount; ++lj) {
-                    uint j = ctx.activeList[lj];
-                    ps = fma(dyn_ws(ctx.stateW, base, ctx.rank, ctx.actDim, feat, j), xt[j], ps);
-                }
-                psFeat[feat] = ps;
+        // Gumbel-max sampling: pick argmax_a (logit_a + g_a); store the one-hot indicator as the
+        // action float and leave the softmax-sampling decision to the discrete bound enforcement.
+        // To keep this grid trivially parallel, each thread independently computes g_a and the
+        // final argmax is a threadgroup reduction handled inside this kernel: thread a=0 scans all
+        // dims. (Grid width is small: A ≤ ~18 for every benchmark env; negligible serial work.)
+        logit = clamp(logit, lo, hi);
+        if (a == 0u) {
+            uint bestA = 0u; float bestL = -FLT_MAX;
+            for (uint d = 0u; d < ctx.A; ++d) {
+                uint pb = optK * ctx.A * ctx.R + d * ctx.R;
+                float ld = active_dot_half(ctx.optPolicy, pb, curr, xOff,
+                                           ctx.activeList, ctx.activeCount);
+                ld = clamp(ld, bounds[d], bounds[ctx.A + d]);
+                float u = hash_uniform(ctx.stepCount, row, d);
+                float g = -log(-log(u));
+                float s = ld + g;
+                if (s > bestL) { bestL = s; bestA = d; }
             }
-            uint pickA = 0u;
-            float bestV = -FLT_MAX;
-            for (uint cand = 0u; cand < ctx.actDim; ++cand) {
-                float vCand = 0.0f;
-                for (uint li = 0u; li < ctx.activeCount; ++li) {
-                    uint feat = ctx.activeList[li];
-                    float predNext = psFeat[feat] + dyn_wa(ctx.stateW, base, ctx.rank, ctx.actDim, feat, cand);
-                    float wcomb = float(ctx.valueW[feat]) + float(ctx.optValues[opt * ctx.rank + feat]);
-                    vCand = fma(wcomb, predNext, vCand);
-                }
-                if (cand == 0u || vCand > bestV) { bestV = vCand; pickA = cand; }
+            // Write one-hot; this slot is read by the host as the sampled index (via argmax).
+            for (uint d = 0u; d < ctx.A; ++d) {
+                ctx.action[row * ctx.A + d]     = (d == bestA) ? 1.0f : 0.0f;
+                ctx.actionGrad[row * ctx.A + d] = (d == bestA) ? 1.0f : 0.0f;
             }
-            for (uint li = 0u; li < ctx.activeCount; ++li) {
-                uint feat = ctx.activeList[li];
-                xt[feat] = psFeat[feat] + dyn_wa(ctx.stateW, base, ctx.rank, ctx.actDim, feat, pickA);
-            }
-            float adv = bestV - vk;
-            if (adv > bestAdv) { bestAdv = adv; bestK = pickA; }
-            vk = bestV;
         }
-        for (uint a = 0u; a < ctx.actDim; ++a) ctx.planDelta[aOff + a] = (a == bestK ? bestAdv : 0.0f);
     } else {
-        for (uint a = 0u; a < ctx.actDim; ++a) ctx.planDelta[aOff + a] = 0.0f;
-        for (uint li = 0u; li < ctx.activeCount; ++li) {
-            uint feat = ctx.activeList[li];
-            float ps = 0.0f;
-            for (uint lj = 0u; lj < ctx.activeCount; ++lj) {
-                uint j = ctx.activeList[lj];
-                ps = fma(dyn_ws(ctx.stateW, base, ctx.rank, ctx.actDim, feat, j), xt[j], ps);
-            }
-            psFeat[feat] = ps;
-        }
-        for (uint a = 0u; a < ctx.actDim; ++a) {
-            float vP = 0.0f;
-            for (uint li = 0u; li < ctx.activeCount; ++li) {
-                uint feat = ctx.activeList[li];
-                float predNext = psFeat[feat]
-                               + dyn_wa(ctx.stateW, base, ctx.rank, ctx.actDim, feat, a)
-                               * (bounds[ctx.actDim + a] - bounds[a]);
-                float wcomb = float(ctx.valueW[feat]) + float(ctx.optValues[opt * ctx.rank + feat]);
-                vP = fma(wcomb, predNext, vP);
-            }
-            ctx.planDelta[aOff + a] = vP - vNow;
-            float adv = fabs(ctx.planDelta[aOff + a]);
-            if (adv > bestAdv) { bestAdv = adv; bestK = a; }
-        }
-    }
-
-    // Promote planning advantage into the chord keyboard for the option that maximized advantage —
-    // closes Plan→Behavior loop **only via option selection** (A.4).
-    if (bestAdv > 0.0f && opt < ctx.optionCount) {
-        float bump = bestAdv / (1.0f + fabs(vNow)) * ctx.nlmsStepScale;
-        ctx.keyboard[gid * ctx.optionCount + opt] += bump;
+        float bounded = clamp(logit, lo, hi);
+        ctx.action[row * ctx.A + a]     = bounded;
+        ctx.actionGrad[row * ctx.A + a] = bounded;
     }
 }
 
-// ================================================================================================
-// Phase: bk_reduce — threadgroup-parallel batch stats reduction (B.1). Grid: batch threads;
-// threadgroup memory holds partial sums; one thread per group commits to KernelStats atomically
-// (single-writer aggregator implemented via a final serial fan-in by tg 0 thread 0).
-// Also runs the only `isfinite` pass in the agent (B.5 — counts non-finites for telemetry).
-// ================================================================================================
-kernel void oak_bk_reduce(
-    device half *params [[buffer(0)]],
-    device float *stateArena [[buffer(1)]],
-    device uint *uintArena [[buffer(2)]],
-    device KernelScalars *scalars [[buffer(3)]],
-    device KernelStats *stats [[buffer(4)]],
-    device const float *bounds [[buffer(5)]],
-    constant KernelConfig &cfg [[buffer(6)]],
-    uint gid [[thread_position_in_grid]])
-{
-    OakCtx ctx = make_ctx(params, stateArena, uintArena, scalars, cfg);
-    if (gid != 0u) return;
-    // Single-thread batch reduction (still runs concurrently with bk_option / bk_feature in the
-    // Swift dispatch — they live in separate kernels so the GPU can co-schedule them).
-    float lmse = 0.0f, rmse = 0.0f, vtrace = 0.0f, planL2 = 0.0f, actDelta = 0.0f;
-    float maxLat = 0.0f, maxRP = 0.0f, maxPol = 0.0f, optPredAcc = 0.0f, planNonDefault = 0.0f;
-    uint nraw = 0u, nsan = 0u, nEnc = 0u, nLearn = 0u, nPlan = 0u;
-    float invBatch = 1.0f / float(max(ctx.batchSize, 1u));
-    float invStep = 1.0f / float(max(ctx.scalars->stepCount + 1u, 1u));
-    float invBR = 1.0f / float(max(ctx.batchSize * ctx.rank, 1u));
-    uint obsDim = ctx.obsDim;
-    // Online observation mean (incremental Welford-lite).
-    for (uint f = 0u; f < obsDim; ++f) {
-        float sum = 0.0f;
-        for (uint row = 0u; row < ctx.batchSize; ++row) {
-            float o = ctx.observation[row * obsDim + f];
-            if (!isfinite(o)) { nEnc++; continue; }
-            sum += o;
-        }
-        float meanBatch = sum * invBatch;
-        ctx.observationMean[f] += invStep * (meanBatch - ctx.observationMean[f]);
-    }
-    for (uint row = 0u; row < ctx.batchSize; ++row) {
-        uint sOff = row * ctx.rank, aOff = row * ctx.actDim;
-        for (uint k = 0u; k < ctx.rank; ++k) {
-            float diff = ctx.state[sOff + k] - ctx.latentError[row * ctx.rank + k];
-            if (!isfinite(diff)) { nraw++; nsan++; diff = 0.0f; }
-            float dc = clamp(diff, -ctx.boundLat, ctx.boundLat) * ctx.invBoundLat;
-            lmse = fma(dc, dc, lmse);
-            maxLat = max(maxLat, fabs(diff));
-            float sv = ctx.state[sOff + k];
-            if (!isfinite(sv)) { nLearn++; sv = 0.0f; }
-            float vc = clamp(sv, -ctx.boundLat, ctx.boundLat) * ctx.invBoundLat;
-            vtrace = fma(vc, vc, vtrace);
-            float opt = ctx.state[sOff + k] - ctx.rollout[row * ctx.rank + k];
-            if (!isfinite(opt)) { nraw++; nsan++; opt = 0.0f; }
-            float oc = clamp(opt, -ctx.boundLat, ctx.boundLat) * ctx.invBoundLat;
-            optPredAcc = fma(oc, oc, optPredAcc);
-        }
-        float rdiff = ctx.reward[row] - ctx.rewardPrediction[row];
-        if (!isfinite(rdiff)) { nraw++; nsan++; rdiff = 0.0f; }
-        float rc = clamp(rdiff, -ctx.boundRew, ctx.boundRew) * ctx.invBoundRew;
-        rmse = fma(rc, rc, rmse);
-        maxRP = max(maxRP, fabs(rdiff));
-        for (uint a = 0u; a < ctx.actDim; ++a) {
-            float x = ctx.action[aOff + a];
-            float yg = ctx.actionGrad[aOff + a];
-            float py = ctx.previousAction[aOff + a];
-            float p1 = clamp(x - yg, -ctx.boundAct, ctx.boundAct) * ctx.invBoundAct;
-            float p2 = clamp(x - py, -ctx.boundAct, ctx.boundAct) * ctx.invBoundAct;
-            planL2 = fma(p1, p1, planL2);
-            actDelta = fma(p2, p2, actDelta);
-            maxPol = max(maxPol, fabs(x));
-            if (!isfinite(x) || !isfinite(yg)) nPlan++;
-        }
-        // Telemetry: planning reused a non-default option this step.
-        uint po = active_option(ctx, row);
-        if (po > 0u) planNonDefault += 1.0f;
-    }
-    stats->latentPredictionMSE = lmse * invBR;
-    stats->latentStateMeanSquare = vtrace * invBR;
-    stats->optionModelPredictionMSE = optPredAcc * invBR;
-    stats->rewardPredictionMSE = rmse * invBatch;
-    stats->planningActionChangeL2Mean = planL2 / float(max(ctx.batchSize * ctx.actDim, 1u));
-    stats->actionDeltaL2Mean = actDelta / float(max(ctx.batchSize * ctx.actDim, 1u));
-    stats->planningUsedOptionDynamicsMean = planNonDefault * invBatch;
-    stats->maxAbsLatentPrediction = maxLat;
-    stats->maxAbsRewardPrediction = maxRP;
-    stats->maxAbsPolicyOutput = maxPol;
-    stats->rawNonFiniteCount = float(nraw + nEnc + nLearn + nPlan);
-    stats->sanitizedNonFiniteCount = float(nsan);
-    stats->encodeNonFiniteCount = float(nEnc);
-    stats->learnNonFiniteCount = float(nLearn);
-    stats->planNonFiniteCount = float(nPlan);
-    ctx.counters[0] = nEnc; ctx.counters[1] = nLearn; ctx.counters[2] = nPlan;
-}
+// =================================================================================================
+// learn — implicit avg-reward TD (F10: αimp = α0/(1+α0·‖x_active‖²) — 2510.06149 + 2601.18907)
+// applied uniformly on EVERY linear head: encoder, w_main, ψ[k,j,:], optPolicy[k,a,:]. Streaming
+// semi-gradient AC on option policies (2410.14606 — no λ-trace, per Inv 9). ψ learning restricted
+// to the active option per row (on-policy differential SF; 2604.00686). Per-weight grid gives
+// K·R·R parallelism for ψ (≫ SIMD width).
+//   [Grid layout: a single dispatch with gid fanning out by region; region boundaries computed
+//   from R/K/A widths. Kernel dispatch launches rank · batch threads and sub-kernels pick their
+//   region from `gid`. Simpler: split into sub-kernels by region below.]
+// =================================================================================================
 
-// ================================================================================================
-// Phase: bk_option — per-option utility, ρ_k, β_k, FIRE-style selective reinit on option weights
-// (A.8: arXiv 2602.08040 / 2508.00212 — selective weight reinit, no GPU RNG, no splitmix). Also
-// computes B.4 `optCounts[opt]` consumed by the next learn phase. Grid: optionCount threads.
-// ================================================================================================
-kernel void oak_bk_option(
-    device half *params [[buffer(0)]],
-    device float *stateArena [[buffer(1)]],
-    device uint *uintArena [[buffer(2)]],
-    device KernelScalars *scalars [[buffer(3)]],
-    device KernelStats *stats [[buffer(4)]],
-    device const float *bounds [[buffer(5)]],
-    constant KernelConfig &cfg [[buffer(6)]],
-    uint gid [[thread_position_in_grid]])
-{
-    OakCtx ctx = make_ctx(params, stateArena, uintArena, scalars, cfg);
-    uint opt = gid;
-    if (opt >= ctx.optionCount) return;
-    float invB = 1.0f / float(max(ctx.batchSize, 1u));
-    float invT = online_inv_time(ctx.scalars);
-    // Counts per option (B.4 wMask source) and ρ_k from feature-attainment cumulant.
-    uint cnt = 0u;
-    float td_acc = 0.0f;
-    float optErr = 0.0f;
-    for (uint row = 0u; row < ctx.batchSize; ++row) {
-        if (ctx.stomp[4u * ctx.batchSize + row] != opt) continue;
-        cnt++;
-        td_acc += fabs(ctx.tdOption[row]);
-        for (uint k = 0u; k < ctx.rank; ++k) {
-            float d = ctx.state[row * ctx.rank + k] - ctx.rollout[row * ctx.rank + k];
-            optErr = fma(d, d, optErr);
-        }
-    }
-    float frac = float(cnt) * invB;
-    ctx.optCounts[opt] = frac;
-    // ρ_k for option k: average **main reward** under the option's policy (Naik 2405.09999),
-    // tracked online so RRS option TD can center its cumulant per A.1.
-    float meanRew = 0.0f;
-    if (cnt > 0u) {
-        for (uint row = 0u; row < ctx.batchSize; ++row) {
-            if (ctx.stomp[4u * ctx.batchSize + row] == opt) meanRew += ctx.reward[row];
-        }
-        meanRew /= float(cnt);
-    }
-    ctx.subRho[opt] += invT * (meanRew - ctx.subRho[opt]);
-    float meanErr = cnt > 0u ? optErr / float(cnt * ctx.rank) : 0.0f;
-    ctx.optBeta[opt] += invT * (meanErr - ctx.optBeta[opt]);
-    float utilNew = cnt > 0u ? td_acc / float(cnt) : 0.0f;
-    ctx.utilOpt[opt] += invT * (utilNew - ctx.utilOpt[opt]);
+// α_imp precomputed by oak_reduce_alpha once per step; learn kernels just read.
+inline float implicit_step(Ctx ctx, device const float *slotPrev) { (void)slotPrev; return ctx.scalars->alphaImp; }
 
-    // FIRE-style selective reinit: option is reinited when its model error is large AND its share
-    // of recent rollouts is below structural mass floor (1/optionCount). Reinit zeros the option's
-    // dynamics + policy + value rows; option-value diagonal seeded to 1/√rank if `opt < rank`.
-    float massFloor = 1.0f / float(max(ctx.optionCount, 1u));
-    if (meanErr > ctx.cap * ctx.ridge && frac < ctx.ridge) {
-        uint base = forward_base(ctx.rank, ctx.optionForwardStride, opt);
-        for (uint i = 0u; i < ctx.optionForwardStride; ++i) ctx.stateW[base + i] = half(0.0f);
-        uint polBase = opt * ctx.rank * ctx.actDim;
-        for (uint i = 0u; i < ctx.rank * ctx.actDim; ++i) ctx.optPolicy[polBase + i] = half(0.0f);
-        for (uint i = 0u; i < ctx.rank; ++i) ctx.optValues[opt * ctx.rank + i] = half(0.0f);
-        if (opt < ctx.rank) ctx.optValues[opt * ctx.rank + opt] = half(1.0f / sqrt(float(max(ctx.rank, 1u))));
-        for (uint row = 0u; row < ctx.batchSize; ++row) ctx.keyboard[row * ctx.optionCount + opt] = massFloor;
-        ctx.subRho[opt] = 0.0f; ctx.optBeta[opt] = 0.0f; ctx.utilOpt[opt] = 0.0f;
-        // Telemetry: count this reinit (single-thread serial — write via atomic since multiple
-        // option threads can land here concurrently).
-        atomic_fetch_add_explicit((volatile device atomic_uint *)&ctx.counters[3], 1u, memory_order_relaxed);
+// =================================================================================================
+// reduce_alpha — compute α_imp = α₀ / (1 + α₀ · ⟨‖x_active‖²⟩) and α_enc (centered-obs variant)
+// once per step via a single-TG simd_sum reduction. Saves K·R·R recomputations inside learn_psi.
+//   [Dispatch: 1 threadgroup × 32 threads.]
+// =================================================================================================
+kernel void oak_reduce_alpha(
+    device half   *params     [[buffer(0)]],
+    device float  *stateArena [[buffer(1)]],
+    device uint   *uintArena  [[buffer(2)]],
+    device KernelScalars *scalars [[buffer(3)]],
+    device KernelStats   *stats   [[buffer(4)]],
+    device const float   *bounds  [[buffer(5)]],
+    constant KernelConfig &cfg    [[buffer(6)]],
+    uint tid [[thread_position_in_threadgroup]],
+    uint tgW [[threads_per_threadgroup]])
+{
+    Ctx ctx = make_ctx(params, stateArena, uintArena, scalars, cfg);
+    device const float *prev = state_slot(ctx, ctx.stateSlot);
+    float n2_l = 0.0f, obs_l = 0.0f;
+    for (uint r = tid; r < ctx.B; r += tgW) {
+        n2_l += active_norm2(prev, r * ctx.R, ctx.activeList, ctx.activeCount);
+        for (uint f = 0u; f < ctx.baseO; ++f) {
+            float c = ctx.observation[r * ctx.O + f] - ctx.observationMean[f];
+            obs_l = fma(c, c, obs_l);
+        }
+    }
+    float n2 = simd_sum(n2_l);
+    float obs = simd_sum(obs_l);
+    if (tid == 0u) {
+        float invB = 1.0f / float(max(ctx.B, 1u));
+        float mean = n2 * invB;
+        float meanObs = obs * invB;
+        scalars->alphaImp = ctx.alpha0 / (1.0f + ctx.alpha0 * mean);
+        scalars->alphaEnc = ctx.alpha0 / (1.0f + ctx.alpha0 * meanObs);
     }
 }
 
-// ================================================================================================
-// Phase: bk_feature — per-feature utility, active admission (utility threshold = mean − std,
-// purely structural), and FC-STOMP feature reinit (A.11: when any option was reinited this step,
-// the encoder weight of the worst-utility base obs feature is selectively reinitialized to a
-// deterministic structural value 1/√rank with sign from (stepCount + featIdx) parity — no RNG, no
-// splitmix). Grid: rank threads.
-// ================================================================================================
-kernel void oak_bk_feature(
-    device half *params [[buffer(0)]],
-    device float *stateArena [[buffer(1)]],
-    device uint *uintArena [[buffer(2)]],
+// learn_value — update w_main[feat] with δ_total · x[feat] reduction, via simd_sum across batch.
+// Also updates featSM[feat] (EMA of x²) and w̄[feat] (slow high-water-mark).
+//   [Dispatch: R threadgroups × 32 threads.]
+kernel void oak_learn_value(
+    device half   *params     [[buffer(0)]],
+    device float  *stateArena [[buffer(1)]],
+    device uint   *uintArena  [[buffer(2)]],
     device KernelScalars *scalars [[buffer(3)]],
-    device KernelStats *stats [[buffer(4)]],
-    device const float *bounds [[buffer(5)]],
-    constant KernelConfig &cfg [[buffer(6)]],
+    device KernelStats   *stats   [[buffer(4)]],
+    device const float   *bounds  [[buffer(5)]],
+    constant KernelConfig &cfg    [[buffer(6)]],
+    uint tgid [[threadgroup_position_in_grid]],
+    uint tid  [[thread_position_in_threadgroup]],
+    uint tgW  [[threads_per_threadgroup]])
+{
+    Ctx ctx = make_ctx(params, stateArena, uintArena, scalars, cfg);
+    uint feat = tgid;
+    if (feat >= ctx.R) return;
+    device const float *prev = state_slot(ctx, ctx.stateSlot);
+    float g_l = 0.0f, sm_l = 0.0f, n2_l = 0.0f;
+    for (uint r = tid; r < ctx.B; r += tgW) {
+        float xp = prev[r * ctx.R + feat];
+        g_l = fma(ctx.td[r], xp, g_l);
+        sm_l = fma(xp, xp, sm_l);
+        n2_l += active_norm2(prev, r * ctx.R, ctx.activeList, ctx.activeCount);
+    }
+    float g  = simd_sum(g_l);
+    float sm = simd_sum(sm_l);
+    float n2 = simd_sum(n2_l);
+    if (tid == 0u) {
+        float invB = 1.0f / float(max(ctx.B, 1u));
+        float invT = online_inv_time(ctx.stepCount);
+        // Batch-avg implicit step α_imp = α0 / (1 + α0·‖x‖²_batch-mean) per Kim-Cho-Laber 2510.06149.
+        float step = ctx.alpha0 / (1.0f + ctx.alpha0 * n2 * invB);
+        ctx.featSM[feat] += (sm * invB - ctx.featSM[feat]) * invT;
+        float wNew = float(ctx.valueW[feat]) + step * g * invB;
+        wNew = clamp(wNew, -ctx.cap, ctx.cap);
+        ctx.valueW[feat] = half(wNew);
+        float decay = 1.0f - ctx.alpha0;
+        ctx.wBar[feat] = max(ctx.wBar[feat] * decay, fabs(wNew));
+    }
+}
+
+// learn_encoder — update encoder[feat] for base obs features via TD × centered_obs (F10 on W_e).
+//   [Grid: baseObsDim]
+kernel void oak_learn_encoder(
+    device half   *params     [[buffer(0)]],
+    device float  *stateArena [[buffer(1)]],
+    device uint   *uintArena  [[buffer(2)]],
+    device KernelScalars *scalars [[buffer(3)]],
+    device KernelStats   *stats   [[buffer(4)]],
+    device const float   *bounds  [[buffer(5)]],
+    constant KernelConfig &cfg    [[buffer(6)]],
     uint gid [[thread_position_in_grid]])
 {
-    OakCtx ctx = make_ctx(params, stateArena, uintArena, scalars, cfg);
+    Ctx ctx = make_ctx(params, stateArena, uintArena, scalars, cfg);
     uint feat = gid;
-    if (feat >= ctx.rank) return;
-    float invB = 1.0f / float(max(ctx.batchSize, 1u));
-    float invT = online_inv_time(ctx.scalars);
-    float u = 0.0f;
-    for (uint row = 0u; row < ctx.batchSize; ++row) {
-        u += fabs(ctx.td[row] * ctx.state[row * ctx.rank + feat]);
-        for (uint g = 0u; g < ctx.rank; ++g) {
-            float err = ctx.state[row * ctx.rank + g] - ctx.latentError[row * ctx.rank + g];
-            u += fabs(err * ctx.state[row * ctx.rank + feat]);
-        }
+    if (feat >= ctx.baseO) return;
+    float step = ctx.scalars->alphaEnc;
+    float g = 0.0f;
+    for (uint r = 0u; r < ctx.B; ++r) {
+        float c = ctx.observation[r * ctx.O + feat] - ctx.observationMean[feat];
+        g = fma(ctx.td[r], c, g);
     }
-    float un = u * invB / float(max(ctx.rank + 1u, 1u));
-    ctx.utilFeat[feat] += invT * (un - ctx.utilFeat[feat]);
-    ctx.featRes[feat] = ctx.utilFeat[feat];
+    float eNew = float(ctx.encoder[feat]) + step * g / float(max(ctx.B, 1u));
+    ctx.encoder[feat] = half(clamp(eNew, -ctx.cap, ctx.cap));
 }
 
-// ================================================================================================
-// Phase: bk_admit — single-thread feature admission + FC-STOMP feedback (A.11). Grid: 1 thread.
-// Writes activeMask / activeList for next step's `activeCount` and may reinit one encoder weight.
-// ================================================================================================
-kernel void oak_bk_admit(
-    device half *params [[buffer(0)]],
-    device float *stateArena [[buffer(1)]],
-    device uint *uintArena [[buffer(2)]],
+// learn_psi — update ψ[k, j, i] += αimp · (1/|rows_k|) · Σ_{row: active(row)==k} tdPsi[row, j] · prev[row, i].
+//   [Grid: K · R · R]
+kernel void oak_learn_psi(
+    device half   *params     [[buffer(0)]],
+    device float  *stateArena [[buffer(1)]],
+    device uint   *uintArena  [[buffer(2)]],
     device KernelScalars *scalars [[buffer(3)]],
-    device KernelStats *stats [[buffer(4)]],
-    device const float *bounds [[buffer(5)]],
-    constant KernelConfig &cfg [[buffer(6)]],
+    device KernelStats   *stats   [[buffer(4)]],
+    device const float   *bounds  [[buffer(5)]],
+    constant KernelConfig &cfg    [[buffer(6)]],
     uint gid [[thread_position_in_grid]])
 {
-    OakCtx ctx = make_ctx(params, stateArena, uintArena, scalars, cfg);
-    if (gid != 0u) return;
-    float total = 0.0f;
-    for (uint i = 0u; i < ctx.rank; ++i) total += ctx.utilFeat[i];
-    float mean_u = total / float(max(ctx.rank, 1u));
-    float var_u = 0.0f;
-    for (uint i = 0u; i < ctx.rank; ++i) {
-        float d = ctx.utilFeat[i] - mean_u;
-        var_u += d * d;
+    Ctx ctx = make_ctx(params, stateArena, uintArena, scalars, cfg);
+    uint k = gid / (ctx.R * ctx.R);
+    uint rem = gid - k * ctx.R * ctx.R;
+    uint j = rem / ctx.R, i = rem % ctx.R;
+    if (k >= ctx.K || j >= ctx.R || i >= ctx.R) return;
+    if (ctx.activeMask[i] == 0u || ctx.activeMask[j] == 0u) return;
+
+    device const float *prev = state_slot(ctx, ctx.stateSlot);
+    float step = implicit_step(ctx, prev);
+    float g = 0.0f;
+    uint  cnt = 0u;
+    for (uint r = 0u; r < ctx.B; ++r) {
+        if (active_option(ctx, r) != k) continue;
+        g = fma(ctx.tdPsi[r * ctx.R + j], prev[r * ctx.R + i], g);
+        cnt++;
     }
-    float std_u = sqrt(var_u / float(max(ctx.rank, 1u)));
+    if (cnt == 0u) return;
+    float invCnt = 1.0f / float(cnt);
+    uint  pIdx = k * ctx.R * ctx.R + j * ctx.R + i;
+    float pNew = float(ctx.psi[pIdx]) + step * g * invCnt;
+    ctx.psi[pIdx] = half(clamp(pNew, -ctx.cap, ctx.cap));
+}
+
+// learn_opt_policy — semi-grad streaming AC on π_k (2410.14606; no λ-trace — Inv 9). Gradient:
+// advantage (≡ td[row] for the main task; treating the main TD as the shared advantage signal)
+// times the action indicator × prev_state.
+//   [Grid: K · A · R]
+kernel void oak_learn_opt_policy(
+    device half   *params     [[buffer(0)]],
+    device float  *stateArena [[buffer(1)]],
+    device uint   *uintArena  [[buffer(2)]],
+    device KernelScalars *scalars [[buffer(3)]],
+    device KernelStats   *stats   [[buffer(4)]],
+    device const float   *bounds  [[buffer(5)]],
+    constant KernelConfig &cfg    [[buffer(6)]],
+    uint gid [[thread_position_in_grid]])
+{
+    Ctx ctx = make_ctx(params, stateArena, uintArena, scalars, cfg);
+    uint k = gid / (ctx.A * ctx.R);
+    uint rem = gid - k * ctx.A * ctx.R;
+    uint a = rem / ctx.R, i = rem % ctx.R;
+    if (k >= ctx.K || a >= ctx.A || i >= ctx.R) return;
+    if (ctx.activeMask[i] == 0u) return;
+
+    device const float *prev = state_slot(ctx, ctx.stateSlot);
+    float step = implicit_step(ctx, prev);
+    float g = 0.0f;
+    uint  cnt = 0u;
+    for (uint r = 0u; r < ctx.B; ++r) {
+        if (active_option(ctx, r) != k) continue;
+        g = fma(ctx.td[r] * prev[r * ctx.R + i], ctx.prevAction[r * ctx.A + a], g);
+        cnt++;
+    }
+    if (cnt == 0u) return;
+    float invCnt = 1.0f / float(cnt);
+    uint  pIdx = k * ctx.A * ctx.R + a * ctx.R + i;
+    float pNew = float(ctx.optPolicy[pIdx]) + step * g * invCnt;
+    ctx.optPolicy[pIdx] = half(clamp(pNew, -ctx.cap, ctx.cap));
+}
+
+// =================================================================================================
+// bk_reduce — batch stats via SIMD-group reduction. Single TG of 32 threads strides over (row, f);
+// each thread accumulates partial sums and simd_sum fans them in. Observation-mean Welford stays
+// parallel across obs-feature threads in the same pass.
+//   [Dispatch: 1 threadgroup × 32 threads.]
+// =================================================================================================
+kernel void oak_bk_reduce(
+    device half   *params     [[buffer(0)]],
+    device float  *stateArena [[buffer(1)]],
+    device uint   *uintArena  [[buffer(2)]],
+    device KernelScalars *scalars [[buffer(3)]],
+    device KernelStats   *stats   [[buffer(4)]],
+    device const float   *bounds  [[buffer(5)]],
+    constant KernelConfig &cfg    [[buffer(6)]],
+    uint tid  [[thread_position_in_threadgroup]],
+    uint tgW  [[threads_per_threadgroup]])
+{
+    Ctx ctx = make_ctx(params, stateArena, uintArena, scalars, cfg);
+    device const float *curr = state_slot(ctx, 1u - ctx.stateSlot);
+    float invT = online_inv_time(ctx.stepCount);
+
+    // Online observation-mean EMA (strided over O).
+    float obsNF_local = 0.0f;
+    for (uint f = tid; f < ctx.O; f += tgW) {
+        float sum = 0.0f; uint nf = 0u;
+        for (uint r = 0u; r < ctx.B; ++r) {
+            float o = ctx.observation[r * ctx.O + f];
+            if (isfinite(o)) sum += o; else nf++;
+        }
+        float meanBatch = sum / float(max(ctx.B, 1u));
+        ctx.observationMean[f] += invT * (meanBatch - ctx.observationMean[f]);
+        obsNF_local += float(nf);
+    }
+    float obsNF = simd_sum(obsNF_local);
+
+    // Per-(row, f) reductions: latent ms, psi-TD ms, maxAbs, non-finites.
+    float lms_l = 0.0f, psi_l = 0.0f, maxLat_l = 0.0f;
+    float nLearn_l = 0.0f;
+    uint total_rf = ctx.B * ctx.R;
+    for (uint idx = tid; idx < total_rf; idx += tgW) {
+        uint r = idx / ctx.R, f = idx % ctx.R;
+        float v = curr[r * ctx.R + f];
+        if (!isfinite(v)) { nLearn_l += 1.0f; v = 0.0f; }
+        float vc = clamp(v, -ctx.boundLat, ctx.boundLat) * ctx.invBoundLat;
+        lms_l = fma(vc, vc, lms_l);
+        maxLat_l = max(maxLat_l, fabs(v));
+        float dp = ctx.tdPsi[r * ctx.R + f];
+        psi_l = fma(dp, dp, psi_l);
+    }
+    float lms = simd_sum(lms_l);
+    float psi = simd_sum(psi_l);
+    float maxLat = simd_max(maxLat_l);
+    float nLearn = simd_sum(nLearn_l);
+
+    // Per-(row, a) reductions: plan L2, action delta, maxPol, nPlan.
+    float pL2_l = 0.0f, ad_l = 0.0f, maxPol_l = 0.0f, nPlan_l = 0.0f;
+    uint total_ra = ctx.B * ctx.A;
+    for (uint idx = tid; idx < total_ra; idx += tgW) {
+        uint r = idx / ctx.A, a = idx % ctx.A;
+        float x = ctx.action[r * ctx.A + a];
+        float yg = ctx.actionGrad[r * ctx.A + a];
+        float py = ctx.prevAction[r * ctx.A + a];
+        float p1 = clamp(x - yg, -ctx.boundAct, ctx.boundAct) * ctx.invBoundAct;
+        float p2 = clamp(x - py, -ctx.boundAct, ctx.boundAct) * ctx.invBoundAct;
+        pL2_l = fma(p1, p1, pL2_l);
+        ad_l  = fma(p2, p2, ad_l);
+        maxPol_l = max(maxPol_l, fabs(x));
+        if (!isfinite(x) || !isfinite(yg)) nPlan_l += 1.0f;
+    }
+    float pL2 = simd_sum(pL2_l);
+    float ad  = simd_sum(ad_l);
+    float maxPol = simd_max(maxPol_l);
+    float nPlan = simd_sum(nPlan_l);
+
+    if (tid == 0u) {
+        float invBR = 1.0f / float(max(ctx.B * ctx.R, 1u));
+        float invBA = 1.0f / float(max(ctx.B * ctx.A, 1u));
+        stats->latentStateMeanSquare      = lms * invBR;
+        stats->optionModelPredictionMSE   = psi * invBR;
+        stats->planningActionChangeL2Mean = pL2 * invBA;
+        stats->actionDeltaL2Mean          = ad  * invBA;
+        stats->maxAbsLatentPrediction     = maxLat;
+        stats->maxAbsRewardPrediction     = 0.0f;
+        stats->maxAbsPolicyOutput         = maxPol;
+        stats->rawNonFiniteCount          = obsNF + nLearn + nPlan;
+        stats->sanitizedNonFiniteCount    = nLearn + nPlan;
+        stats->encodeNonFiniteCount       = obsNF;
+        stats->learnNonFiniteCount        = nLearn;
+        stats->planNonFiniteCount         = nPlan;
+        ctx.counters[0] = uint(obsNF);
+        ctx.counters[1] = uint(nLearn);
+        ctx.counters[2] = uint(nPlan);
+    }
+}
+
+// =================================================================================================
+// bk_option — per-option utility, ρ_k, ρ_{k,j}, FIRE+SWR-style reinit. Dispatch: K TGs × 32
+// threads. Each TG fans-in batch stats with simd_sum; thread 0 commits. ρ_{k,j} updated in a
+// second strided loop over j.
+//   [Dispatch: K threadgroups × 32 threads.]
+// =================================================================================================
+kernel void oak_bk_option(
+    device half   *params     [[buffer(0)]],
+    device float  *stateArena [[buffer(1)]],
+    device uint   *uintArena  [[buffer(2)]],
+    device KernelScalars *scalars [[buffer(3)]],
+    device KernelStats   *stats   [[buffer(4)]],
+    device const float   *bounds  [[buffer(5)]],
+    constant KernelConfig &cfg    [[buffer(6)]],
+    uint tgid [[threadgroup_position_in_grid]],
+    uint tid  [[thread_position_in_threadgroup]],
+    uint tgW  [[threads_per_threadgroup]])
+{
+    Ctx ctx = make_ctx(params, stateArena, uintArena, scalars, cfg);
+    uint k = tgid;
+    if (k >= ctx.K) return;
+    device const float *curr = state_slot(ctx, 1u - ctx.stateSlot);
+    float invB = 1.0f / float(max(ctx.B, 1u));
+    float invT = online_inv_time(ctx.stepCount);
+
+    float cnt_l = 0.0f, rSum_l = 0.0f, psiErr_l = 0.0f;
+    for (uint r = tid; r < ctx.B; r += tgW) {
+        if (active_option(ctx, r) != k) continue;
+        cnt_l += 1.0f;
+        rSum_l += ctx.reward[r];
+        for (uint j = 0u; j < ctx.R; ++j) {
+            float d = ctx.tdPsi[r * ctx.R + j];
+            psiErr_l = fma(d, d, psiErr_l);
+        }
+    }
+    float cnt   = simd_sum(cnt_l);
+    float rSum  = simd_sum(rSum_l);
+    float pErr  = simd_sum(psiErr_l);
+    float frac  = cnt * invB;
+    float meanR = (cnt > 0.0f) ? rSum / cnt : 0.0f;
+    float meanPsiErr = (cnt > 0.0f) ? pErr / (cnt * float(ctx.R)) : 0.0f;
+
+    // Per-cumulant ρ_{k,j}: strided over j with simd_sum over batch per j.
+    for (uint j = tid; j < ctx.R; j += tgW) {
+        float sj = 0.0f;
+        for (uint r = 0u; r < ctx.B; ++r) {
+            if (active_option(ctx, r) != k) continue;
+            sj += curr[r * ctx.R + j];
+        }
+        float mj = (cnt > 0.0f) ? sj / cnt : 0.0f;
+        ctx.rhoKJ[k * ctx.R + j] += invT * (mj - ctx.rhoKJ[k * ctx.R + j]);
+    }
+
+    if (tid == 0u) {
+        ctx.rhoK[k]    += invT * (meanR - ctx.rhoK[k]);
+        ctx.utilOpt[k] += invT * (meanPsiErr - ctx.utilOpt[k]);
+
+        // FIRE+SWR reinit trigger.
+        if (meanPsiErr > ctx.cap * ctx.ridge && frac < ctx.ridge) {
+            uint psiBase = k * ctx.R * ctx.R;
+            for (uint idx = 0u; idx < ctx.R * ctx.R; ++idx) ctx.psi[psiBase + idx] = half(0.0f);
+            float invR = 1.0f / sqrt(float(max(ctx.R, 1u)));
+            if (k < ctx.R) ctx.psi[psiBase + k * ctx.R + k] = half(invR);
+            uint polBase = k * ctx.A * ctx.R;
+            for (uint idx = 0u; idx < ctx.A * ctx.R; ++idx) ctx.optPolicy[polBase + idx] = half(0.0f);
+            ctx.rhoK[k] = 0.0f;
+            for (uint j = 0u; j < ctx.R; ++j) ctx.rhoKJ[k * ctx.R + j] = 0.0f;
+            ctx.utilOpt[k] = 0.0f;
+            uint bit = 1u << (k & 31u);
+            uint which = (k < 32u) ? 3u : 4u;
+            atomic_fetch_or_explicit((device atomic_uint *)(ctx.counters + which), bit, memory_order_relaxed);
+        }
+    }
+}
+
+// =================================================================================================
+// bk_feature — per-feature utility via SIMD reduction. Dispatch: R TGs × 32 threads; each thread
+// strides batch. Utility = mean |δ_main · x_feat| + mean_j |δ_ψ_{·,j} · x_feat|.
+//   [Dispatch: R threadgroups × 32 threads.]
+// =================================================================================================
+kernel void oak_bk_feature(
+    device half   *params     [[buffer(0)]],
+    device float  *stateArena [[buffer(1)]],
+    device uint   *uintArena  [[buffer(2)]],
+    device KernelScalars *scalars [[buffer(3)]],
+    device KernelStats   *stats   [[buffer(4)]],
+    device const float   *bounds  [[buffer(5)]],
+    constant KernelConfig &cfg    [[buffer(6)]],
+    uint tgid [[threadgroup_position_in_grid]],
+    uint tid  [[thread_position_in_threadgroup]],
+    uint tgW  [[threads_per_threadgroup]])
+{
+    Ctx ctx = make_ctx(params, stateArena, uintArena, scalars, cfg);
+    uint feat = tgid;
+    if (feat >= ctx.R) return;
+    device const float *curr = state_slot(ctx, 1u - ctx.stateSlot);
+    float invB = 1.0f / float(max(ctx.B, 1u));
+    float invT = online_inv_time(ctx.stepCount);
+    float u_l = 0.0f;
+    for (uint r = tid; r < ctx.B; r += tgW) {
+        float x = curr[r * ctx.R + feat];
+        u_l += fabs(ctx.td[r] * x);
+        for (uint j = 0u; j < ctx.R; ++j) u_l += fabs(ctx.tdPsi[r * ctx.R + j] * x);
+    }
+    float u = simd_sum(u_l);
+    if (tid == 0u) {
+        float un = u * invB / float(max(ctx.R + 1u, 1u));
+        ctx.utilFeat[feat] += invT * (un - ctx.utilFeat[feat]);
+    }
+}
+
+// =================================================================================================
+// bk_admit — admission + FC-STOMP feature reinit + effective-rank floor (F11). Serial on one
+// thread: admits features whose utility exceeds the running mean, then ensures activeCount ≥
+// ceil(√R) by pulling in the next-best-utility inactive features (2509.22335 spectral-collapse
+// mitigation). If any option was reinited this step, reinits the encoder weight of the worst base
+// feature to +/- 1/√R (A.11 / sign from (stepCount XOR featIdx) parity — no RNG).
+//   [Grid: 1]
+// =================================================================================================
+kernel void oak_bk_admit(
+    device half   *params     [[buffer(0)]],
+    device float  *stateArena [[buffer(1)]],
+    device uint   *uintArena  [[buffer(2)]],
+    device KernelScalars *scalars [[buffer(3)]],
+    device KernelStats   *stats   [[buffer(4)]],
+    device const float   *bounds  [[buffer(5)]],
+    constant KernelConfig &cfg    [[buffer(6)]],
+    uint gid [[thread_position_in_grid]])
+{
+    Ctx ctx = make_ctx(params, stateArena, uintArena, scalars, cfg);
+    if (gid != 0u) return;
+
+    uint R = ctx.R;
+    float sum = 0.0f;
+    for (uint i = 0u; i < R; ++i) sum += ctx.utilFeat[i];
+    float mean = sum / float(max(R, 1u));
+    float var = 0.0f;
+    for (uint i = 0u; i < R; ++i) { float d = ctx.utilFeat[i] - mean; var += d * d; }
+    float std = sqrt(var / float(max(R, 1u)));
+
     uint count = 0u;
     uint worstIdx = 0u;
-    float worstRes = ctx.utilFeat[0];
-    for (uint i = 0u; i < ctx.rank; ++i) {
-        if (ctx.utilFeat[i] > mean_u) {
+    float worstU = FLT_MAX;
+    for (uint i = 0u; i < R; ++i) {
+        if (ctx.utilFeat[i] > mean) {
             ctx.activeMask[i] = 1u;
             ctx.activeList[count++] = i;
         } else {
             ctx.activeMask[i] = 0u;
         }
-        if (ctx.utilFeat[i] < worstRes) { worstRes = ctx.utilFeat[i]; worstIdx = i; }
+        if (ctx.utilFeat[i] < worstU) { worstU = ctx.utilFeat[i]; worstIdx = i; }
     }
-    if (count == 0u) {
-        ctx.activeMask[0] = 1u;
-        ctx.activeList[0] = 0u;
-        count = 1u;
+    // Effective-rank floor (F11 — 2509.22335). Structural floor = ⌈√R⌉. Repeatedly pull the
+    // highest-utility inactive feature until we hit the floor.
+    uint floorR = ceil_sqrt(R);
+    while (count < floorR) {
+        uint pick = R; float pickU = -FLT_MAX;
+        for (uint i = 0u; i < R; ++i) {
+            if (ctx.activeMask[i] == 0u && ctx.utilFeat[i] > pickU) { pickU = ctx.utilFeat[i]; pick = i; }
+        }
+        if (pick >= R) break;
+        ctx.activeMask[pick] = 1u;
+        ctx.activeList[count++] = pick;
     }
+    if (count == 0u) { ctx.activeMask[0] = 1u; ctx.activeList[0] = 0u; count = 1u; }
     ctx.scalars->activeCount = count;
-    // FC-STOMP feedback: if any option was reinited this step (counters[3] > 0) AND the worst
-    // feature is below `mean − std`, reinit that encoder weight structurally — no RNG, no Fourier.
-    if (ctx.counters[3] > 0u && worstRes < mean_u - std_u && worstIdx < ctx.baseObsDim) {
-        float sign = (((ctx.scalars->stepCount + worstIdx) & 1u) == 0u) ? 1.0f : -1.0f;
-        ctx.encoder[worstIdx] = half(sign / sqrt(float(max(ctx.rank, 1u))));
-        ctx.utilFeat[worstIdx] = mean_u;
-        ctx.featRes[worstIdx] = mean_u;
+
+    // FC-STOMP feedback: if any option reinited (counters[3]|counters[4] nonzero) AND the worst
+    // feature is below mean-std, reinit its base-obs encoder weight structurally.
+    uint reinitMask = ctx.counters[3] | ctx.counters[4];
+    if (reinitMask != 0u && worstU < mean - std && worstIdx < ctx.baseO) {
+        float sign = (((ctx.stepCount + worstIdx) & 1u) == 0u) ? 1.0f : -1.0f;
+        ctx.encoder[worstIdx] = half(sign / sqrt(float(max(R, 1u))));
+        ctx.utilFeat[worstIdx] = mean;
+        ctx.counters[5] += 1u;
     }
 }
 
-// ================================================================================================
-// Phase: bk_commit — single-thread tick: ρ̄ (avg-reward Naik centering), stepCount, pEff, ρ_GVF,
-// STOMP rollout state machine, telemetry roll-up to KernelStats. Grid: 1 thread.
-// ================================================================================================
+// =================================================================================================
+// bk_commit — ρ̄ (Naik centering), stepCount++, pEff (effective-rank trace/max of featSM), slot
+// toggles (S4/S5), telemetry roll-up. Grid: 1 thread.
+// =================================================================================================
 kernel void oak_bk_commit(
-    device half *params [[buffer(0)]],
-    device float *stateArena [[buffer(1)]],
-    device uint *uintArena [[buffer(2)]],
+    device half   *params     [[buffer(0)]],
+    device float  *stateArena [[buffer(1)]],
+    device uint   *uintArena  [[buffer(2)]],
     device KernelScalars *scalars [[buffer(3)]],
-    device KernelStats *stats [[buffer(4)]],
-    device const float *bounds [[buffer(5)]],
-    constant KernelConfig &cfg [[buffer(6)]],
+    device KernelStats   *stats   [[buffer(4)]],
+    device const float   *bounds  [[buffer(5)]],
+    constant KernelConfig &cfg    [[buffer(6)]],
     uint gid [[thread_position_in_grid]])
 {
-    OakCtx ctx = make_ctx(params, stateArena, uintArena, scalars, cfg);
+    Ctx ctx = make_ctx(params, stateArena, uintArena, scalars, cfg);
     if (gid != 0u) return;
-    float invB = 1.0f / float(max(ctx.batchSize, 1u));
+
+    // Differential avg-reward: ρ̄ += (1/t)·(r̄ - ρ̄).
     float meanR = 0.0f;
-    for (uint i = 0u; i < ctx.batchSize; ++i) meanR += ctx.reward[i];
-    meanR *= invB;
-    float t = float(max(ctx.scalars->stepCount + 1u, 1u));
-    ctx.scalars->rewardRate += (meanR - ctx.scalars->rewardRate) / t;
+    for (uint r = 0u; r < ctx.B; ++r) meanR += ctx.reward[r];
+    meanR /= float(max(ctx.B, 1u));
+    float invT = online_inv_time(ctx.stepCount);
+    ctx.scalars->rho += (meanR - ctx.scalars->rho) * invT;
 
-    // GVF horde ρ — average over current state's chosen cumulants (rank-many).
-    float rhoH = 0.0f;
-    for (uint row = 0u; row < ctx.batchSize; ++row) {
-        for (uint j = 0u; j < ctx.nGvfHeads; ++j) rhoH += ctx.state[row * ctx.rank + (j % ctx.rank)];
-    }
-    rhoH /= float(max(ctx.batchSize * ctx.nGvfHeads, 1u));
-    float invT = online_inv_time(ctx.scalars);
-    ctx.gvfRho[0] += invT * (rhoH - ctx.gvfRho[0]);
-
-    // pEff ≈ trace / max of feature 2nd moments (used by structural ε in `autostep_eps_cap` style).
+    // Effective-rank via trace/max of featSM (structural p_eff like Autostep).
     float tr = 0.0f, mx = 0.0f;
-    for (uint i = 0u; i < ctx.rank; ++i) {
-        float v = ctx.featSM[i];
-        tr += v;
-        mx = max(mx, v);
-    }
+    for (uint i = 0u; i < ctx.R; ++i) { float v = ctx.featSM[i]; tr += v; mx = max(mx, v); }
     ctx.scalars->pEff = tr / max(mx, FLT_MIN);
 
-    // STOMP rollout machine: terminate when `vSubNext + bonus < zStop` (RRS stopping rule, A.1).
-    for (uint row = 0u; row < ctx.batchSize; ++row) {
-        uint phase = ctx.stomp[row * 4u];
-        uint elapsed = ctx.stomp[row * 4u + 1u];
-        if (phase != 1u) { ctx.stomp[row * 4u] = 1u; ctx.stomp[row * 4u + 1u] = 0u; continue; }
-        uint sOff = row * ctx.rank;
-        uint po = active_option(ctx, row);
-        float vSub = 0.0f, zStop = 0.0f;
-        for (uint li = 0u; li < ctx.scalars->activeCount; ++li) {
-            uint idx = ctx.activeList[li];
-            float sv = ctx.state[sOff + idx];
-            vSub = fma(float(ctx.optValues[po * ctx.rank + idx]), sv, vSub);
-            zStop = fma(float(ctx.valueW[idx]), sv, zStop);
-        }
-        if (po < ctx.rank) zStop += ctx.state[sOff + po] * ctx.rsqrtPlanLambda;
-        bool horizon = (elapsed + 1u >= ctx.rank);
-        bool valueStop = (zStop >= vSub);
-        bool betaTerm = (float(elapsed) >= ctx.optBeta[po] * float(max(ctx.rank, 1u)));
-        if (horizon || valueStop || betaTerm) {
-            ctx.stomp[row * 4u + 1u] = 0u;
-            float prev = ctx.keyboardPred[po];
-            ctx.keyboardPred[po] = prev + invT * (zStop - prev);
-        } else {
-            ctx.stomp[row * 4u + 1u] = elapsed + 1u;
-        }
-    }
-
-    ctx.scalars->stepCount++;
-
     // Telemetry roll-up.
-    float uFeat = 0.0f, uOpt = 0.0f;
-    for (uint i = 0u; i < ctx.rank; ++i) uFeat += ctx.utilFeat[i];
-    for (uint i = 0u; i < ctx.optionCount; ++i) uOpt += ctx.utilOpt[i];
-    stats->rewardRate = ctx.scalars->rewardRate;
-    stats->activeRank = float(ctx.scalars->activeCount);
-    stats->utilityFeatureMean = uFeat / float(max(ctx.rank, 1u));
-    stats->utilityOptionMean = uOpt / float(max(ctx.optionCount, 1u));
-    stats->utilitySubtaskMean = uFeat / float(max(ctx.rank, 1u));        // subtask util ~ feat util by construction
-    stats->utilityPlanningMean = uOpt / float(max(ctx.optionCount, 1u));
-    stats->oakOptionReinitCount = float(ctx.counters[3]);
+    float uF = 0.0f, uO = 0.0f;
+    for (uint i = 0u; i < ctx.R; ++i) uF += ctx.utilFeat[i];
+    for (uint i = 0u; i < ctx.K; ++i) uO += ctx.utilOpt[i];
+    stats->rewardRate            = ctx.scalars->rho;
+    stats->activeRank            = float(ctx.scalars->activeCount);
+    stats->utilityFeatureMean    = uF / float(max(ctx.R, 1u));
+    stats->utilityOptionMean     = uO / float(max(ctx.K, 1u));
+    stats->utilitySubtaskMean    = uF / float(max(ctx.R, 1u));
+    stats->utilityPlanningMean   = uO / float(max(ctx.K, 1u));
+    stats->planningUsedOptionDynamicsMean = 1.0f;
+    // Reinit count = popcount of both counter slots.
+    uint reinitMask = ctx.counters[3] | (ctx.counters[4] << 0);
+    uint popcnt = popcount(ctx.counters[3]) + popcount(ctx.counters[4]);
+    stats->oakOptionReinitCount = float(popcnt);
+    (void)reinitMask;
+
+    // Slot toggles: stateSlot flips so the next step's 'prev' is what we just wrote as 'curr';
+    // optionSlot flips so active = what plan wrote this step.
+    ctx.scalars->stateSlot  = 1u - ctx.scalars->stateSlot;
+    ctx.scalars->optionSlot = 1u - ctx.scalars->optionSlot;
+    ctx.scalars->stepCount += 1u;
+    // Clear per-step reinit bitmasks for the next step.
+    ctx.counters[3] = 0u; ctx.counters[4] = 0u;
 }
