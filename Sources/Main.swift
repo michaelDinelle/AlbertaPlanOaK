@@ -18,31 +18,19 @@ enum Policy: String, Codable { case oak, random }
 // ------------------------------------------------------------------------------------------------ Run metrics JSON (AGENTS.md: schemaVersion 2).
 struct RunHealth: Codable {
     let rewardRate: Double?
-    let latentPredictionMSE: Double?
-    let rewardPredictionMSE: Double?
     let latentStateMeanSquare: Double?
     let activeRank: Double?
     let actionDeltaL2Mean: Double?
     let planningActionChangeL2Mean: Double?
     let optionModelPredictionMSE: Double?
-    let planningUsedOptionDynamicsMean: Double?
     let oakOptionReinitCount: Double?
     let nonFiniteRawTotal: Int
     let nonFiniteSanitizedTotal: Int
-
-    enum CodingKeys: String, CodingKey {
-        case rewardRate, latentPredictionMSE, rewardPredictionMSE
-        case latentStateMeanSquare = "latentVarianceTrace"
-        case activeRank, actionDeltaL2Mean, planningActionChangeL2Mean
-        case optionModelPredictionMSE, planningUsedOptionDynamicsMean, oakOptionReinitCount
-        case nonFiniteRawTotal, nonFiniteSanitizedTotal
-    }
 }
 
 struct RunDiagnostic: Codable {
     let nonFiniteByPhase: [String: Int]
     let maxAbsLatentPrediction: Double?
-    let maxAbsRewardPrediction: Double?
     let maxAbsPolicyOutput: Double?
     let agentShare: Double?
     let envShare: Double?
@@ -81,6 +69,8 @@ private struct Schema: Hashable, Comparable {
 
 private struct BenchmarkEnv { let envId: String; let schema: Schema }
 
+private let oakDefaultSeed: Int32 = 42
+
 // ------------------------------------------------------------------------------------------------
 // Filesystem helpers.
 // ------------------------------------------------------------------------------------------------
@@ -107,31 +97,30 @@ private func decodeCString(_ buffer: [CChar]) -> String {
 }
 
 // ------------------------------------------------------------------------------------------------
-// Health accumulator — lean fold over KernelStats (S8). Per-field EMA-like means; overflow-safe.
+// Health accumulator — lean fold over KernelStats. Seven slots, one per reported mean.
 // ------------------------------------------------------------------------------------------------
 private struct HealthAccumulator {
     struct Slot { var sum = 0.0; var count = 0 }
-    var slots: [Slot]
+    // Slot order must mirror `values` in `record()` and the field order in `snapshot()`:
+    //   0 latentStateMeanSquare, 1 activeRank, 2 actionDeltaL2Mean,
+    //   3 planningActionChangeL2Mean, 4 optionModelPredictionMSE, 5 oakOptionReinitCount
+    var slots = [Slot](repeating: Slot(), count: 6)
     var steps = 0
     var rawNonFinite = 0, sanitizedNonFinite = 0
     var encodeNF = 0, learnNF = 0, planNF = 0
-    var maxLat = 0.0, maxRew = 0.0, maxPol = 0.0
+    var maxLat = 0.0, maxPol = 0.0
     var lastRho: Double?
-
-    // Order must mirror the slot lookup in `snapshot()`:
-    //   0: latentStateMeanSquare, 1: latentStateMeanSquare, 2: latentStateMeanSquare,
-    //   3: activeRank, 4: actionDeltaL2Mean, 5: planningActionChangeL2Mean,
-    //   6: optionModelPredictionMSE, 7: planningUsedOptionDynamicsMean, 8: oakOptionReinitCount
-
-    init() { slots = Array(repeating: Slot(), count: 9) }
 
     mutating func record(_ stats: KernelStats) {
         steps += 1
         let rr = Double(stats.rewardRate); if rr.isFinite { lastRho = rr }
         let values: [Float] = [
-            stats.latentStateMeanSquare, stats.latentStateMeanSquare, stats.latentStateMeanSquare,
-            stats.activeRank, stats.actionDeltaL2Mean, stats.planningActionChangeL2Mean,
-            stats.optionModelPredictionMSE, stats.planningUsedOptionDynamicsMean, stats.oakOptionReinitCount,
+            stats.latentStateMeanSquare,
+            stats.activeRank,
+            stats.actionDeltaL2Mean,
+            stats.planningActionChangeL2Mean,
+            stats.optionModelPredictionMSE,
+            stats.oakOptionReinitCount,
         ]
         for (i, f) in values.enumerated() {
             let v = Double(f)
@@ -144,7 +133,6 @@ private struct HealthAccumulator {
         learnNF += Int(stats.learnNonFiniteCount)
         planNF += Int(stats.planNonFiniteCount)
         maxLat = max(maxLat, Double(stats.maxAbsLatentPrediction))
-        maxRew = max(maxRew, Double(stats.maxAbsRewardPrediction))
         maxPol = max(maxPol, Double(stats.maxAbsPolicyOutput))
     }
 
@@ -152,21 +140,14 @@ private struct HealthAccumulator {
 
     func snapshot() -> RunHealth? {
         guard steps > 0 else { return nil }
-        // latentPredictionMSE: we no longer keep a separate stateW bank — report the psi model MSE
-        // (optionModelPredictionMSE, slot 6) as the "latentPredictionMSE" backward-compatible field.
-        let latentMSE = mean(6)
-        let rewardMSE = 0.0 // rewardW head deleted; reward model error is implicit in td[row].
         return RunHealth(
             rewardRate: lastRho,
-            latentPredictionMSE: latentMSE,
-            rewardPredictionMSE: rewardMSE,
             latentStateMeanSquare: mean(0),
-            activeRank: mean(3),
-            actionDeltaL2Mean: mean(4),
-            planningActionChangeL2Mean: mean(5),
-            optionModelPredictionMSE: mean(6),
-            planningUsedOptionDynamicsMean: mean(7),
-            oakOptionReinitCount: mean(8),
+            activeRank: mean(1),
+            actionDeltaL2Mean: mean(2),
+            planningActionChangeL2Mean: mean(3),
+            optionModelPredictionMSE: mean(4),
+            oakOptionReinitCount: mean(5),
             nonFiniteRawTotal: rawNonFinite,
             nonFiniteSanitizedTotal: sanitizedNonFinite)
     }
@@ -175,14 +156,14 @@ private struct HealthAccumulator {
         guard steps > 0 else { return nil }
         return RunDiagnostic(
             nonFiniteByPhase: ["encode": encodeNF, "learn": learnNF, "plan": planNF],
-            maxAbsLatentPrediction: maxLat, maxAbsRewardPrediction: maxRew, maxAbsPolicyOutput: maxPol,
+            maxAbsLatentPrediction: maxLat, maxAbsPolicyOutput: maxPol,
             agentShare: nil, envShare: nil, hostShare: nil,
             metalPhaseGpuMsMean: nil, metalPhaseGpuTimingInvalid: nil)
     }
 }
 
 // ------------------------------------------------------------------------------------------------
-// Measured action collector (unchanged behaviour; trimmed).
+// Measured action collector.
 // ------------------------------------------------------------------------------------------------
 private final class MeasuredActionCollector {
     private var discrete: [Int]?
@@ -295,7 +276,7 @@ final class NativeBridge: @unchecked Sendable {
     }
     func open(envId: String, numEnvs: Int, seed: Int?) throws -> UnsafeMutableRawPointer {
         var error = errorBuffer()
-        let actualSeed = Int32(seed ?? 42)
+        let actualSeed = Int32(seed ?? Int(oakDefaultSeed))
         let handle = envId.withCString { e in
             assetBasePath.withCString { b in
                 openFn(e, Int32(numEnvs), actualSeed, b, &error, Int32(error.count))
@@ -388,24 +369,20 @@ final class EnvPoolEnv {
 
 // ================================================================================================
 // Kernel config + scalars + stats — mirrors OakKernel.metal structs byte-for-byte. Keep in lockstep.
+// KernelStats has 16 fields (4 dead fields removed from previous 20).
 // ================================================================================================
 private struct KernelConfig {
     var obsDim: UInt32 = 0, rank: UInt32 = 0, actDim: UInt32 = 0, batch: UInt32 = 0
     var optionCount: UInt32 = 0, baseObsDim: UInt32 = 0
     var actionIsDiscrete: UInt32 = 0
-    // Param offsets (fp16 stride)
     var pEncoder: UInt32 = 0, pValue: UInt32 = 0, pPsi: UInt32 = 0, pOptPolicy: UInt32 = 0
-    // State offsets (fp32 stride)
     var sObservation: UInt32 = 0, sObsMean: UInt32 = 0, sState: UInt32 = 0
     var sPrevAction: UInt32 = 0, sAction: UInt32 = 0, sActionGrad: UInt32 = 0
     var sReward: UInt32 = 0, sTd: UInt32 = 0, sTdPsi: UInt32 = 0
-    // UInt offsets
     var uDone: UInt32 = 0, uActiveMask: UInt32 = 0, uActiveList: UInt32 = 0
     var uOption: UInt32 = 0, uCounters: UInt32 = 0
-    // Arena offsets (fp32 stride, past state tail)
     var aFeatSM: UInt32 = 0, aWBar: UInt32 = 0, aRhoK: UInt32 = 0, aRhoKJ: UInt32 = 0
     var aUtilFeat: UInt32 = 0, aUtilOpt: UInt32 = 0
-    // Derived scalars
     var cap: Float = 0, alpha0: Float = 0, ridge: Float = 0
     var boundLat: Float = 0, boundRew: Float = 0, boundAct: Float = 0
     var invBoundLat: Float = 0, invBoundRew: Float = 0, invBoundAct: Float = 0
@@ -423,13 +400,11 @@ struct KernelStats {
     var rewardRate: Float = 0, latentStateMeanSquare: Float = 0, activeRank: Float = 0
     var rawNonFiniteCount: Float = 0, sanitizedNonFiniteCount: Float = 0
     var encodeNonFiniteCount: Float = 0, learnNonFiniteCount: Float = 0, planNonFiniteCount: Float = 0
-    var maxAbsLatentPrediction: Float = 0, maxAbsRewardPrediction: Float = 0, maxAbsPolicyOutput: Float = 0
+    var maxAbsLatentPrediction: Float = 0, maxAbsPolicyOutput: Float = 0
     var actionDeltaL2Mean: Float = 0, planningActionChangeL2Mean: Float = 0
     var optionModelPredictionMSE: Float = 0
-    var planningUsedOptionDynamicsMean: Float = 0
     var oakOptionReinitCount: Float = 0
-    var utilityFeatureMean: Float = 0, utilitySubtaskMean: Float = 0
-    var utilityOptionMean: Float = 0, utilityPlanningMean: Float = 0
+    var utilityFeatureMean: Float = 0, utilityOptionMean: Float = 0
 }
 
 // ================================================================================================
@@ -437,8 +412,12 @@ struct KernelStats {
 // ================================================================================================
 private enum OakMetalLayout {
     static let kernelConfigBufferIndex = 6
+    // Structural cap: one SIMD group of options per row in oak_plan (hardware-derived, not tuned).
+    static let maxOptionCount = 32
 
-    static func optionCount(rank: Int, actDim: Int) -> Int { max(1, min(rank, actDim)) }
+    static func optionCount(rank: Int, actDim: Int) -> Int {
+        max(1, min(rank, actDim, maxOptionCount))
+    }
     static func psiCount(rank: Int, actDim: Int) -> Int { optionCount(rank: rank, actDim: actDim) * rank * rank }
     static func optPolicyCount(rank: Int, actDim: Int) -> Int {
         optionCount(rank: rank, actDim: actDim) * actDim * rank
@@ -518,9 +497,28 @@ private final class Shared<Element> {
 }
 
 // ================================================================================================
-// Metal engine — orthodox Step 11 OaK. Ten phases, one dispatch per step.
+// Metal engine — orthodox Step 11 OaK. Twelve phases, one dispatch per step.
 // ================================================================================================
 final class OakMetalEngine {
+    // Phase metadata: kernel name + threadgroup size (0 = pipeline-default dispatchThreads).
+    // Reduction kernels use fixed 128-thread TGs (4 SIMD groups × 32) with hierarchical simd_sum;
+    // plan uses 32 (one SIMD group per row, SIMD-shuffle argmax).
+    private struct Phase { let name: String; let tgSize: Int }
+    private static let phases: [Phase] = [
+        Phase(name: "oak_encode",             tgSize: 0),
+        Phase(name: "oak_predict",            tgSize: 0),
+        Phase(name: "oak_plan",               tgSize: 32),
+        Phase(name: "oak_meta_action",        tgSize: 0),
+        Phase(name: "oak_reduce_alpha",       tgSize: 128),
+        Phase(name: "oak_learn_value",        tgSize: 32),
+        Phase(name: "oak_learn_encoder",      tgSize: 0),
+        Phase(name: "oak_learn_psi",          tgSize: 0),
+        Phase(name: "oak_learn_opt_policy",   tgSize: 0),
+        Phase(name: "oak_bk_reduce_feature",  tgSize: 128),
+        Phase(name: "oak_bk_option",          tgSize: 128),
+        Phase(name: "oak_bk_admit_commit",    tgSize: 0),
+    ]
+
     private let obsDim, baseObsDim, actDim, batch, rank: Int
     private let actionIsDiscrete: Bool
     private let queue: MTLCommandQueue
@@ -536,30 +534,14 @@ final class OakMetalEngine {
     private let paramsArena: Shared<Float16>
     private let stateArena: Shared<Float>
     private let uintArena: Shared<UInt32>
-    private let paramLayout: OakMetalLayout.Param
     private let stateLayout: OakMetalLayout.State
     private let uintLayout: OakMetalLayout.UInts
+    private let phaseGridWidths: [Int]
     private let diagnosticGpuPhaseTiming: Bool
     private var phaseGpuTimeSumSeconds: [Double]
     private var phaseGpuInvalidStepCount: [Int]
     private var hostAction: [Float]
     private var hostDiscrete: [Int32]
-
-    private static let phaseKernelNames = [
-        "oak_encode", "oak_predict", "oak_plan", "oak_meta_action",
-        "oak_reduce_alpha",
-        "oak_learn_value", "oak_learn_encoder", "oak_learn_psi", "oak_learn_opt_policy",
-        "oak_bk_reduce", "oak_bk_option", "oak_bk_feature", "oak_bk_admit", "oak_bk_commit",
-    ]
-    // For each phase: the explicit TG size used (0 = use dispatchThreads with pipeline-default TG).
-    // Reduction phases (plan, reduce_alpha, bk_reduce, bk_option, bk_feature) use 32-thread
-    // SIMD-group TGs (simd_sum / simd_max / threadgroup-memory argmax).
-    private static let phaseTGSize: [Int] = [
-        0, 0, 32, 0,   // encode, predict, plan (32-wide per row), meta_action
-        32,            // reduce_alpha
-        0, 0, 0, 0,    // learn_value, learn_encoder, learn_psi, learn_opt_policy
-        32, 32, 32, 0, 0,
-    ]
 
     private static func kernelURL() throws -> URL {
         try requiredBuildPath(".build/OakKernel.metallib",
@@ -568,22 +550,20 @@ final class OakMetalEngine {
 
     private static func makePipelines(device: MTLDevice, planningIsDiscrete: Bool) throws -> [MTLComputePipelineState] {
         let library = try device.makeLibrary(URL: try kernelURL())
-        return try phaseKernelNames.map { name in
+        return try phases.map { phase in
             let fc = MTLFunctionConstantValues()
             var discrete = planningIsDiscrete
             fc.setConstantValue(&discrete, type: .bool, index: 0)
-            guard let fn = try? library.makeFunction(name: name, constantValues: fc) else {
-                throw OakError.message("Missing \(name) in OakKernel.metallib.")
+            guard let fn = try? library.makeFunction(name: phase.name, constantValues: fc) else {
+                throw OakError.message("Missing \(phase.name) in OakKernel.metallib.")
             }
             return try device.makeComputePipelineState(function: fn)
         }
     }
 
-    static func executionWidth(device: MTLDevice) throws -> Int {
-        let ps = try makePipelines(device: device, planningIsDiscrete: false)
-        var w = 1; for p in ps { w = max(w, p.threadExecutionWidth) }
-        return max(w, 1)
-    }
+    // Apple GPUs have a fixed 32-thread SIMD width. Returning this constant avoids compiling all
+    // pipelines just to read `threadExecutionWidth` from one of them.
+    static func executionWidth(device: MTLDevice) throws -> Int { 32 }
 
     init(obsDim: Int, baseObsDim: Int, actDim: Int, batch: Int, rank: Int,
          actionIsDiscrete: Bool, actionLow: [Float], actionHigh: [Float],
@@ -600,7 +580,6 @@ final class OakMetalEngine {
         cbDesc = d
         pipelines = try Self.makePipelines(device: device, planningIsDiscrete: actionIsDiscrete)
 
-        // Bounds: continuous envs use env-provided bounds; discrete envs use structural ±√(R·A) clamp.
         let half = OakMetalLayout.discreteLogitHalfWidth(rank: rank, actDim: actDim)
         let lows  = actionIsDiscrete ? Array(repeating: -half, count: actDim) : actionLow
         let highs = actionIsDiscrete ? Array(repeating:  half, count: actDim) : actionHigh
@@ -618,16 +597,34 @@ final class OakMetalEngine {
         statsPointer.initialize(to: KernelStats())
         configPointer.initialize(to: KernelConfig())
 
-        paramLayout = OakMetalLayout.paramLayout(obsDim: obsDim, rank: rank, actDim: actDim)
+        let paramLayout = OakMetalLayout.paramLayout(obsDim: obsDim, rank: rank, actDim: actDim)
         stateLayout = OakMetalLayout.stateLayout(obsDim: obsDim, rank: rank, actDim: actDim, batch: batch)
         uintLayout  = OakMetalLayout.uintLayout(rank: rank, batch: batch)
         paramsArena = Shared(device: device, count: paramLayout.total, zero: Float16(0))
         stateArena  = Shared(device: device, count: stateLayout.total, zero: Float(0))
         uintArena   = Shared(device: device, count: uintLayout.total,  zero: UInt32(0))
 
+        // Cache per-phase grid width so there's no allocation on the hot path.
+        let K = OakMetalLayout.optionCount(rank: rank, actDim: actDim)
+        let metaActionGrid = actionIsDiscrete ? batch : batch * actDim
+        phaseGridWidths = [
+            batch * rank,                     // oak_encode              [dispatchThreads]
+            batch,                            // oak_predict             [dispatchThreads]
+            batch,                            // oak_plan                [B TGs × 32]
+            metaActionGrid,                   // oak_meta_action         [dispatchThreads]
+            1,                                // oak_reduce_alpha        [1 TG × 128]
+            rank,                             // oak_learn_value         [R TGs × 32]
+            max(baseObsDim, 1),               // oak_learn_encoder       [dispatchThreads]
+            K * rank * rank,                  // oak_learn_psi           [dispatchThreads]
+            K * actDim * rank,                // oak_learn_opt_policy    [dispatchThreads]
+            1,                                // oak_bk_reduce_feature   [1 TG × 128]
+            K,                                // oak_bk_option           [K TGs × 128]
+            1,                                // oak_bk_admit_commit     [dispatchThreads]
+        ]
+
         self.diagnosticGpuPhaseTiming = diagnosticGpuPhaseTiming
-        phaseGpuTimeSumSeconds = Array(repeating: 0, count: Self.phaseKernelNames.count)
-        phaseGpuInvalidStepCount = Array(repeating: 0, count: Self.phaseKernelNames.count)
+        phaseGpuTimeSumSeconds = Array(repeating: 0, count: Self.phases.count)
+        phaseGpuInvalidStepCount = Array(repeating: 0, count: Self.phases.count)
         hostAction = Array(repeating: 0, count: batch * actDim)
         hostDiscrete = Array(repeating: 0, count: batch)
 
@@ -635,7 +632,7 @@ final class OakMetalEngine {
         // hash (splitmix32 of seed ⊕ index) provides small centered probes without a host RNG
         // object allocated on the hot path.
         let invR: Float = 1.0 / sqrt(Float(max(rank, 1)))
-        let seedBase = UInt32(bitPattern: Int32(truncatingIfNeeded: seed ?? 42)) &* 0x9e3779b9
+        let seedBase = UInt32(bitPattern: Int32(truncatingIfNeeded: seed ?? Int(oakDefaultSeed))) &* 0x9e3779b9
         func sample(_ off: Int, _ count: Int, _ scale: Float) {
             let base = paramsArena.pointer.advanced(by: off)
             for i in 0..<count {
@@ -650,32 +647,30 @@ final class OakMetalEngine {
         sample(paramLayout.value, rank, invR)
         sample(paramLayout.psi, OakMetalLayout.psiCount(rank: rank, actDim: actDim), invR)
         sample(paramLayout.optPolicy, OakMetalLayout.optPolicyCount(rank: rank, actDim: actDim), invR)
-        // ψ diagonal: option k seeded with 1/√R on cumulant k's own feature k → non-zero prior that
-        // option k attains feature k (RRS feature-attainment initialisation; A.6).
-        let K = OakMetalLayout.optionCount(rank: rank, actDim: actDim)
+        // ψ diagonal: option k seeded with +1/√R on cumulant k's own feature k (RRS feature-
+        // attainment initialisation; A.6).
         let psiPtr = paramsArena.pointer.advanced(by: paramLayout.psi)
         for k in 0..<K where k < rank {
             let idx = k * rank * rank + k * rank + k
             psiPtr[idx] = Float16(Float(psiPtr[idx]) + invR)
         }
 
-        // --- Active mask: all features admitted on step 0.
+        // All features admitted on step 0.
         scalarsPointer.pointee.activeCount = UInt32(rank)
         let activeMask = uintArena.pointer.advanced(by: uintLayout.activeMask)
         let activeList = uintArena.pointer.advanced(by: uintLayout.activeList)
         for f in 0..<rank { activeMask[f] = 1; activeList[f] = UInt32(f) }
 
-        writeKernelConfig()
+        writeKernelConfig(paramLayout: paramLayout)
     }
 
     func metalPhaseGpuDiagnostics(measuredBatchSteps: Int) -> (meanMs: [String: Double]?, invalidPhases: [String]?) {
         guard diagnosticGpuPhaseTiming, measuredBatchSteps > 0 else { return (nil, nil) }
         var mean: [String: Double] = [:]; var invalid: [String] = []
         let d = Double(measuredBatchSteps)
-        for i in 0..<Self.phaseKernelNames.count {
-            let n = Self.phaseKernelNames[i]
-            mean[n] = phaseGpuTimeSumSeconds[i] / d * 1000
-            if phaseGpuInvalidStepCount[i] > 0 { invalid.append(n) }
+        for (i, phase) in Self.phases.enumerated() {
+            mean[phase.name] = phaseGpuTimeSumSeconds[i] / d * 1000
+            if phaseGpuInvalidStepCount[i] > 0 { invalid.append(phase.name) }
         }
         return (mean, invalid.isEmpty ? nil : invalid)
     }
@@ -685,7 +680,6 @@ final class OakMetalEngine {
               prevDone: [UInt8], accumulatePhaseGpu: Bool) throws -> (ActionBatch, Double, KernelStats) {
         let start = DispatchTime.now().uptimeNanoseconds
 
-        // (a) Stage per-step inputs: observation, prev reward, prev action, prev done.
         precondition(obs.count == batch * obsDim)
         precondition(prevReward.count == batch)
         precondition(prevAction.count == batch * actDim)
@@ -698,16 +692,13 @@ final class OakMetalEngine {
         let donePtr = uintArena.pointer.advanced(by: uintLayout.done)
         for i in 0..<batch { donePtr[i] = UInt32(prevDone[i]) }
 
-        // (b) Zero per-step telemetry counters; stats buffer is refreshed by bk_reduce.
         let ctr = uintArena.pointer.advanced(by: uintLayout.counters)
-        ctr[0] = 0; ctr[1] = 0; ctr[2] = 0  // encode/learn/plan non-finite counters (bk_reduce)
-        // counters[3..4] are reinit bitmasks; cleared by bk_commit at end of step.
+        ctr[0] = 0; ctr[1] = 0; ctr[2] = 0  // encode/learn/plan non-finite counters (bk_reduce_feature)
+        // counters[3..4] are reinit bitmasks; cleared by bk_admit_commit at end of step.
         statsPointer.pointee = KernelStats()
 
-        // (c) Dispatch all phases (one command buffer — or one-per-phase for diagnostic GPU timing).
         try runKernel(accumulatePhaseGpu: accumulatePhaseGpu)
 
-        // (d) Read action back to host.
         memcpy(&hostAction, stateArena.pointer.advanced(by: stateLayout.action),
                batch * actDim * MemoryLayout<Float>.stride)
         if actionIsDiscrete {
@@ -723,29 +714,7 @@ final class OakMetalEngine {
                 statsPointer.pointee)
     }
 
-    // Phase grid widths. For reduction phases (TG > 0) this is the number of *threadgroups*;
-    // the kernel itself uses `threadgroup_position_in_grid` and `thread_position_in_threadgroup`.
-    private func phaseGrid() -> [Int] {
-        let K = OakMetalLayout.optionCount(rank: rank, actDim: actDim)
-        return [
-            batch * rank,                     // encode         [dispatchThreads]
-            batch,                            // predict        [dispatchThreads]
-            batch,                            // plan           [dispatchThreads]
-            batch * actDim,                   // meta_action    [dispatchThreads]
-            1,                                // reduce_alpha   [1 TG × 32]
-            rank,                             // learn_value    [dispatchThreads]
-            max(baseObsDim, 1),               // learn_encoder  [dispatchThreads]
-            K * rank * rank,                  // learn_psi      [dispatchThreads]
-            K * actDim * rank,                // learn_opt_policy [dispatchThreads]
-            1,                                // bk_reduce      [1 TG × 32]
-            K,                                // bk_option      [K TGs × 32]
-            rank,                             // bk_feature     [R TGs × 32]
-            1,                                // bk_admit       [dispatchThreads]
-            1,                                // bk_commit      [dispatchThreads]
-        ]
-    }
-
-    private func writeKernelConfig() {
+    private func writeKernelConfig(paramLayout: OakMetalLayout.Param) {
         let K = OakMetalLayout.optionCount(rank: rank, actDim: actDim)
         let cap = Float(max(rank * max(batch, 1), 1))
         let p = paramLayout, s = stateLayout, u = uintLayout
@@ -779,41 +748,41 @@ final class OakMetalEngine {
         return ((n + align - 1) / align) * align
     }
 
+    private func encodePhase(into cb: MTLCommandBuffer, index: Int,
+                             buffers: [MTLBuffer?], offsets: [Int]) throws {
+        guard let enc = cb.makeComputeCommandEncoder() else {
+            throw OakError.message("Failed to create Metal compute encoder.")
+        }
+        let pip = pipelines[index]
+        enc.setBuffers(buffers, offsets: offsets, range: 0..<6)
+        enc.setBuffer(configBuffer, offset: 0, index: OakMetalLayout.kernelConfigBufferIndex)
+        enc.setComputePipelineState(pip)
+        let tgSize = Self.phases[index].tgSize
+        if tgSize > 0 {
+            // Fixed-TG reduction kernel; one TG per output element.
+            let tgCount = max(phaseGridWidths[index], 1)
+            enc.dispatchThreadgroups(MTLSize(width: tgCount, height: 1, depth: 1),
+                                     threadsPerThreadgroup: MTLSize(width: tgSize, height: 1, depth: 1))
+        } else {
+            let tg = min(max(pip.threadExecutionWidth, 1), pip.maxTotalThreadsPerThreadgroup)
+            let w = alignedGridWidth(threadCount: phaseGridWidths[index], pipeline: pip)
+            enc.dispatchThreads(MTLSize(width: w, height: 1, depth: 1),
+                                threadsPerThreadgroup: MTLSize(width: min(tg, w), height: 1, depth: 1))
+        }
+        enc.endEncoding()
+    }
+
     private func runKernel(accumulatePhaseGpu: Bool) throws {
         let buffers: [MTLBuffer?] = [paramsArena.buffer, stateArena.buffer, uintArena.buffer,
                                      scalarsBuffer, statsBuffer, actionBoundsBuffer]
         let offsets = [Int](repeating: 0, count: 6)
-        let grid = phaseGrid()
         let split = diagnosticGpuPhaseTiming && accumulatePhaseGpu
-
-        func encode(cb: MTLCommandBuffer, index: Int) throws {
-            guard let enc = cb.makeComputeCommandEncoder() else {
-                throw OakError.message("Failed to create Metal compute encoder.")
-            }
-            let pip = pipelines[index]
-            enc.setBuffers(buffers, offsets: offsets, range: 0..<6)
-            enc.setBuffer(configBuffer, offset: 0, index: OakMetalLayout.kernelConfigBufferIndex)
-            enc.setComputePipelineState(pip)
-            let tgSize = Self.phaseTGSize[index]
-            if tgSize > 0 {
-                // Reduction kernel — fixed TG size, one TG per output element.
-                let tgCount = max(grid[index], 1)
-                enc.dispatchThreadgroups(MTLSize(width: tgCount, height: 1, depth: 1),
-                                         threadsPerThreadgroup: MTLSize(width: tgSize, height: 1, depth: 1))
-            } else {
-                let tg = min(max(pip.threadExecutionWidth, 1), pip.maxTotalThreadsPerThreadgroup)
-                let w = alignedGridWidth(threadCount: grid[index], pipeline: pip)
-                enc.dispatchThreads(MTLSize(width: w, height: 1, depth: 1),
-                                    threadsPerThreadgroup: MTLSize(width: min(tg, w), height: 1, depth: 1))
-            }
-            enc.endEncoding()
-        }
 
         if !split {
             guard let cb = queue.makeCommandBuffer(descriptor: cbDesc) else {
                 throw OakError.message("Failed to create Metal command buffer.")
             }
-            for i in 0..<pipelines.count { try encode(cb: cb, index: i) }
+            for i in 0..<pipelines.count { try encodePhase(into: cb, index: i, buffers: buffers, offsets: offsets) }
             cb.commit(); cb.waitUntilCompleted()
             if let e = cb.error { throw OakError.message("Metal command failed: \(e)") }
             return
@@ -822,7 +791,7 @@ final class OakMetalEngine {
             guard let cb = queue.makeCommandBuffer(descriptor: cbDesc) else {
                 throw OakError.message("Failed to create Metal command buffer.")
             }
-            try encode(cb: cb, index: i)
+            try encodePhase(into: cb, index: i, buffers: buffers, offsets: offsets)
             cb.commit(); cb.waitUntilCompleted()
             if let e = cb.error { throw OakError.message("Metal command failed: \(e)") }
             let s = cb.gpuStartTime, end = cb.gpuEndTime
@@ -882,9 +851,6 @@ private func directNumEnvs(obsDim: Int, actDim: Int, actionDiscreteCount: Int?, 
     let width = try OakMetalEngine.executionWidth(device: device)
     let rank = obsDim
     let K = OakMetalLayout.optionCount(rank: rank, actDim: actDim)
-    // Memory per env (fp16 params stay fixed; state + uint arenas scale with batch). Compute the
-    // per-env fp32 + fp16 + uint footprint analytically so there's one source of truth with the
-    // ArenaLayout.
     let perEnvFloats =  // state double buffer, obs, actions, tdPsi, reward, td
         obsDim + 2 * rank + 3 * actDim + rank + 2
     let perEnvUints = 1 + 2  // done + option slots
@@ -897,9 +863,55 @@ private func directNumEnvs(obsDim: Int, actDim: Int, actionDiscreteCount: Int?, 
     let budget = max(Int(ProcessInfo.processInfo.physicalMemory / 16), width * perEnvBytes + fixedBytes)
     let memEnvs = max((budget - fixedBytes) / max(perEnvBytes, 1), width)
     let ceiling = max(ProcessInfo.processInfo.environment["OAK_MAX_PARALLEL_ENVS"].flatMap(Int.init) ?? 4096, width)
-    // Round down to power-of-two for natural SIMD / threadgroup alignment.
     func powerOfTwoLE(_ v: Int) -> Int { var p = 1; while p <= v / 2 { p *= 2 }; return max(p, 1) }
     return min(powerOfTwoLE(min(memEnvs, ceiling)), ceiling)
+}
+
+// ================================================================================================
+// Run context and runner — a single-env/single-policy measurement loop, factored for clarity.
+// ================================================================================================
+private struct RunContext {
+    let envId: String
+    let policy: Policy
+    let seed: Int?
+    let warmup: Int
+    let stopAfter: Int
+    let numEnvs: Int
+    let command: String
+    let includeDiagnostic: Bool
+    let metricsDir: URL
+    let env: EnvPoolEnv
+    let engine: OakMetalEngine?
+}
+
+private final class RunState {
+    var prevReward: [Float]
+    var prevDone: [UInt8]
+    var prevAction: [Float]
+    var randFloats: [Float]
+    var randIdx: [Int32]
+    var randSeed: UInt64
+    var totalSteps = 0
+    var measuredSteps = 0
+    var measuredSeconds = 0.0
+    var measurementStart: UInt64?
+    var rewardSum = 0.0
+    var doneCount = 0
+    var agentMsSum = 0.0
+    var envMsSum = 0.0
+    var pulse = 0
+    var health = HealthAccumulator()
+    let actionCol: MeasuredActionCollector
+
+    init(env: EnvPoolEnv, seed: Int?) {
+        prevReward = Array(repeating: 0, count: env.numEnvs)
+        prevDone = Array(repeating: 0, count: env.numEnvs)
+        prevAction = Array(repeating: 0, count: env.actDim * env.numEnvs)
+        randFloats = Array(repeating: 0, count: env.actDim * env.numEnvs)
+        randIdx = Array(repeating: 0, count: env.numEnvs)
+        randSeed = UInt64(bitPattern: Int64(seed ?? Int(oakDefaultSeed)))
+        actionCol = MeasuredActionCollector(discreteCount: env.actionDiscreteCount, actDim: env.actDim)
+    }
 }
 
 // ================================================================================================
@@ -1149,10 +1161,11 @@ private func directNumEnvs(obsDim: Int, actDim: Int, actionDiscreteCount: Int?, 
         return ActionBatch(floats: floats, indices: nil)
     }
 
-    private static func runSingle(envId: String, policy: Policy, seed: Int?, warmup: Int,
-                                  stopAfter: Int, numEnvs: Int, device: MTLDevice, command: String,
-                                  includeDiagnostic: Bool = false, metricsDir: URL? = nil)
-                                  throws -> (RunMetricsFile, URL) {
+    // --- single-run orchestration (setup → loop → snapshot) --------------------------------
+
+    private static func setupRun(envId: String, policy: Policy, seed: Int?, warmup: Int,
+                                 stopAfter: Int, numEnvs: Int, device: MTLDevice, command: String,
+                                 includeDiagnostic: Bool, metricsDir: URL?) throws -> RunContext {
         let dir = RunSnapshot.resolveMetricsDirectory(explicit: metricsDir)
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         fputs("OaK metrics \(dir.path)\n", stderr); fflush(stderr)
@@ -1164,104 +1177,109 @@ private func directNumEnvs(obsDim: Int, actDim: Int, actionDiscreteCount: Int?, 
             actionLow: env.actionLow, actionHigh: env.actionHigh,
             device: device, seed: seed, diagnosticGpuPhaseTiming: includeDiagnostic) : nil
         try env.reset()
-        var prevReward = Array(repeating: Float(0), count: numEnvs)
-        var prevDone   = Array(repeating: UInt8(0), count: numEnvs)
-        var prevAction = [Float](repeating: 0, count: env.actDim * numEnvs)
-        var randFloats = [Float](repeating: 0, count: env.actDim * numEnvs)
-        var randIdx    = [Int32](repeating: 0, count: numEnvs)
-        var randSeed   = UInt64(bitPattern: Int64(seed ?? 0))
-        var totalSteps = 0, measuredSteps = 0
-        var measuredSeconds = 0.0
-        var measurementStart: UInt64?
-        var rewardSum = 0.0, doneCount = 0
-        var agentMsSum = 0.0, envMsSum = 0.0
-        var health = HealthAccumulator()
-        let actionCol = MeasuredActionCollector(discreteCount: env.actionDiscreteCount, actDim: env.actDim)
-        let defaultHb = command == "diagnose" ? 0 : max((stopAfter / 10 / numEnvs) * numEnvs, numEnvs)
-        let hb = max(ProcessInfo.processInfo.environment["OAK_HEARTBEAT_STEPS"].flatMap(Int.init) ?? defaultHb, 0)
-        var pulse = 0
+        return RunContext(envId: envId, policy: policy, seed: seed, warmup: warmup,
+                          stopAfter: stopAfter, numEnvs: numEnvs, command: command,
+                          includeDiagnostic: includeDiagnostic, metricsDir: dir,
+                          env: env, engine: engine)
+    }
 
-        func snap(_ seq: Int?) -> RunMetricsFile {
-            let u = max(measuredSteps / numEnvs, 1)
-            let a = agentMsSum / 1000, e = envMsSum / 1000
-            let h = max(measuredSeconds - a - e, 0)
-            let merged = health.diagnosticSnapshot().map { b in
-                let (mm, mi) = engine?.metalPhaseGpuDiagnostics(measuredBatchSteps: u) ?? (nil, nil)
-                return RunDiagnostic(
-                    nonFiniteByPhase: b.nonFiniteByPhase,
-                    maxAbsLatentPrediction: b.maxAbsLatentPrediction,
-                    maxAbsRewardPrediction: b.maxAbsRewardPrediction,
-                    maxAbsPolicyOutput: b.maxAbsPolicyOutput,
-                    agentShare: measuredSeconds > 0 ? a / measuredSeconds : nil,
-                    envShare:   measuredSeconds > 0 ? e / measuredSeconds : nil,
-                    hostShare:  measuredSeconds > 0 ? h / measuredSeconds : nil,
-                    metalPhaseGpuMsMean: mm, metalPhaseGpuTimingInvalid: mi)
-            }
-            let diagOut: RunDiagnostic? = ((seq != nil && policy == .oak) || (seq == nil && includeDiagnostic))
-                                           ? merged : nil
-            let (dA, cA) = actionCol.partialMetrics(actDim: env.actDim)
-            let sps = measuredSeconds > 0 ? Double(measuredSteps) / measuredSeconds : nil
-            let reason = seq == nil ? "measured_steps" : "heartbeat"
-            return RunMetricsFile(
-                schemaVersion: 2, command: command, envId: envId, policy: policy, seed: seed,
-                numEnvs: numEnvs, warmupSteps: warmup, stopAfterMeasuredSteps: stopAfter,
-                observationDim: env.obsDim, actionDim: env.actDim,
-                actionDiscreteCount: env.actionDiscreteCount,
-                measuredStepCount: measuredSteps, measuredBatchCount: u,
-                measuredSeconds: measuredSeconds, stepsPerSecond: sps,
-                heartbeatSequence: seq, rewardSum: rewardSum, doneCount: doneCount,
-                stopReason: reason, agentStepMsMean: agentMsSum / Double(u),
-                envStepMsMean: envMsSum / Double(u),
-                discreteAction: dA, continuousAction: cA,
-                health: health.snapshot(), diagnostic: diagOut)
+    private static func emitSnapshot(_ ctx: RunContext, _ state: RunState, seq: Int?) -> RunMetricsFile {
+        let u = max(state.measuredSteps / ctx.numEnvs, 1)
+        let a = state.agentMsSum / 1000, e = state.envMsSum / 1000
+        let h = max(state.measuredSeconds - a - e, 0)
+        let merged = state.health.diagnosticSnapshot().map { b in
+            let (mm, mi) = ctx.engine?.metalPhaseGpuDiagnostics(measuredBatchSteps: u) ?? (nil, nil)
+            return RunDiagnostic(
+                nonFiniteByPhase: b.nonFiniteByPhase,
+                maxAbsLatentPrediction: b.maxAbsLatentPrediction,
+                maxAbsPolicyOutput: b.maxAbsPolicyOutput,
+                agentShare: state.measuredSeconds > 0 ? a / state.measuredSeconds : nil,
+                envShare:   state.measuredSeconds > 0 ? e / state.measuredSeconds : nil,
+                hostShare:  state.measuredSeconds > 0 ? h / state.measuredSeconds : nil,
+                metalPhaseGpuMsMean: mm, metalPhaseGpuTimingInvalid: mi)
         }
+        let diagOut: RunDiagnostic? = ((seq != nil && ctx.policy == .oak) || (seq == nil && ctx.includeDiagnostic))
+                                       ? merged : nil
+        let (dA, cA) = state.actionCol.partialMetrics(actDim: ctx.env.actDim)
+        let sps = state.measuredSeconds > 0 ? Double(state.measuredSteps) / state.measuredSeconds : nil
+        let reason = seq == nil ? "measured_steps" : "heartbeat"
+        return RunMetricsFile(
+            schemaVersion: 2, command: ctx.command, envId: ctx.envId, policy: ctx.policy, seed: ctx.seed,
+            numEnvs: ctx.numEnvs, warmupSteps: ctx.warmup, stopAfterMeasuredSteps: ctx.stopAfter,
+            observationDim: ctx.env.obsDim, actionDim: ctx.env.actDim,
+            actionDiscreteCount: ctx.env.actionDiscreteCount,
+            measuredStepCount: state.measuredSteps, measuredBatchCount: u,
+            measuredSeconds: state.measuredSeconds, stepsPerSecond: sps,
+            heartbeatSequence: seq, rewardSum: state.rewardSum, doneCount: state.doneCount,
+            stopReason: reason, agentStepMsMean: state.agentMsSum / Double(u),
+            envStepMsMean: state.envMsSum / Double(u),
+            discreteAction: dA, continuousAction: cA,
+            health: state.health.snapshot(), diagnostic: diagOut)
+    }
 
-        while measuredSteps < stopAfter {
-            let nextTotal = totalSteps + numEnvs
-            let measured = nextTotal > warmup && totalSteps > 0
-            if measured && measurementStart == nil { measurementStart = DispatchTime.now().uptimeNanoseconds }
+    private static func measurementLoop(_ ctx: RunContext, _ state: RunState) throws {
+        let defaultHb = ctx.command == "diagnose" ? 0 : max((ctx.stopAfter / 10 / ctx.numEnvs) * ctx.numEnvs, ctx.numEnvs)
+        let hb = max(ProcessInfo.processInfo.environment["OAK_HEARTBEAT_STEPS"].flatMap(Int.init) ?? defaultHb, 0)
+        while state.measuredSteps < ctx.stopAfter {
+            let nextTotal = state.totalSteps + ctx.numEnvs
+            let measured = nextTotal > ctx.warmup && state.totalSteps > 0
+            if measured && state.measurementStart == nil {
+                state.measurementStart = DispatchTime.now().uptimeNanoseconds
+            }
             let actionBatch: ActionBatch, agentMs: Double, stats: KernelStats?
-            if let engine {
-                let out = try env.observationScratch.withUnsafeBufferPointer { buf in
-                    try engine.step(obs: buf, prevAction: prevAction, prevReward: prevReward,
-                                    prevDone: prevDone, accumulatePhaseGpu: measured)
+            if let engine = ctx.engine {
+                let out = try ctx.env.observationScratch.withUnsafeBufferPointer { buf in
+                    try engine.step(obs: buf, prevAction: state.prevAction, prevReward: state.prevReward,
+                                    prevDone: state.prevDone, accumulatePhaseGpu: measured)
                 }
                 actionBatch = out.0; agentMs = out.1; stats = out.2
             } else {
                 let t0 = DispatchTime.now().uptimeNanoseconds
-                actionBatch = randomAction(for: env, numEnvs: numEnvs, stepCount: &randSeed,
-                                           floats: &randFloats, indices: &randIdx)
+                actionBatch = randomAction(for: ctx.env, numEnvs: ctx.numEnvs, stepCount: &state.randSeed,
+                                           floats: &state.randFloats, indices: &state.randIdx)
                 agentMs = Double(DispatchTime.now().uptimeNanoseconds - t0) / 1_000_000
                 stats = nil
             }
             let envStart = DispatchTime.now().uptimeNanoseconds
-            try env.step(actionBatch)
+            try ctx.env.step(actionBatch)
             let envMs = Double(DispatchTime.now().uptimeNanoseconds - envStart) / 1_000_000
-            totalSteps = nextTotal
+            state.totalSteps = nextTotal
             if measured {
-                measuredSteps += numEnvs
-                if let s = measurementStart {
-                    measuredSeconds = Double(DispatchTime.now().uptimeNanoseconds - s) / 1_000_000_000
+                state.measuredSteps += ctx.numEnvs
+                if let s = state.measurementStart {
+                    state.measuredSeconds = Double(DispatchTime.now().uptimeNanoseconds - s) / 1_000_000_000
                 }
-                if hb > 0, (measuredSteps - numEnvs) / hb < measuredSteps / hb {
-                    pulse += 1
-                    _ = try RunSnapshot.persist(snap(pulse), metricsDir: dir)
+                if hb > 0, (state.measuredSteps - ctx.numEnvs) / hb < state.measuredSteps / hb {
+                    state.pulse += 1
+                    _ = try RunSnapshot.persist(emitSnapshot(ctx, state, seq: state.pulse), metricsDir: ctx.metricsDir)
                 }
-                doneCount += env.doneScratch.reduce(into: 0) { $0 += Int($1) }
-                for v in env.rewardScratch {
+                state.doneCount += ctx.env.doneScratch.reduce(into: 0) { $0 += Int($1) }
+                for v in ctx.env.rewardScratch {
                     guard v.isFinite else { throw OakError.message("Environment produced a non-finite reward.") }
-                    rewardSum += Double(v)
+                    state.rewardSum += Double(v)
                 }
-                agentMsSum += agentMs; envMsSum += envMs
-                if let s = stats { health.record(s) }
-                actionCol.addMeasured(actionBatch, numEnvs: numEnvs, actDim: env.actDim)
+                state.agentMsSum += agentMs; state.envMsSum += envMs
+                if let s = stats { state.health.record(s) }
+                state.actionCol.addMeasured(actionBatch, numEnvs: ctx.numEnvs, actDim: ctx.env.actDim)
             }
-            memcpy(&prevReward, env.rewardScratch, numEnvs * MemoryLayout<Float>.stride)
-            memcpy(&prevDone,   env.doneScratch,   numEnvs * MemoryLayout<UInt8>.stride)
-            memcpy(&prevAction, actionBatch.floats, actionBatch.floats.count * MemoryLayout<Float>.stride)
+            memcpy(&state.prevReward, ctx.env.rewardScratch, ctx.numEnvs * MemoryLayout<Float>.stride)
+            memcpy(&state.prevDone,   ctx.env.doneScratch,   ctx.numEnvs * MemoryLayout<UInt8>.stride)
+            memcpy(&state.prevAction, actionBatch.floats, actionBatch.floats.count * MemoryLayout<Float>.stride)
         }
-        let file = snap(nil)
-        let url = try RunSnapshot.persist(file, metricsDir: dir)
+    }
+
+    private static func runSingle(envId: String, policy: Policy, seed: Int?, warmup: Int,
+                                  stopAfter: Int, numEnvs: Int, device: MTLDevice, command: String,
+                                  includeDiagnostic: Bool = false, metricsDir: URL? = nil)
+                                  throws -> (RunMetricsFile, URL) {
+        let ctx = try setupRun(envId: envId, policy: policy, seed: seed, warmup: warmup,
+                               stopAfter: stopAfter, numEnvs: numEnvs, device: device,
+                               command: command, includeDiagnostic: includeDiagnostic,
+                               metricsDir: metricsDir)
+        let state = RunState(env: ctx.env, seed: seed)
+        try measurementLoop(ctx, state)
+        let file = emitSnapshot(ctx, state, seq: nil)
+        let url = try RunSnapshot.persist(file, metricsDir: ctx.metricsDir)
         return (file, url)
     }
 
