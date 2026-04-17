@@ -1,0 +1,35 @@
+{
+  "actionDim" : 7,
+  "actionDiscreteCount" : 7,
+  "agentStepMsMean" : 0.005360999999999999,
+  "command" : "benchmark",
+  "discreteAction" : {
+    "histogram" : [
+      1473,
+      1451,
+      1445,
+      1484,
+      1490,
+      1426,
+      1471
+    ],
+    "uniqueCount" : 7
+  },
+  "doneCount" : 2,
+  "envId" : "MiniGrid-WFC-RoomsFabric-v0",
+  "envStepMsMean" : 10.467493166666666,
+  "heartbeatSequence" : 3,
+  "measuredBatchCount" : 6,
+  "measuredSeconds" : 0.076193167,
+  "measuredStepCount" : 12288,
+  "numEnvs" : 2048,
+  "observationDim" : 244,
+  "policy" : "random",
+  "rewardSum" : 1.9891999959945679,
+  "schemaVersion" : 2,
+  "seed" : 6,
+  "stepsPerSecond" : 161274.30429555447,
+  "stopAfterMeasuredSteps" : 50000,
+  "stopReason" : "heartbeat",
+  "warmupSteps" : 1000
+}
