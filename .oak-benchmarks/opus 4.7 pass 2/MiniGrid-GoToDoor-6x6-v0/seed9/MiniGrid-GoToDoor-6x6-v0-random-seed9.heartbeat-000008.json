@@ -1,0 +1,35 @@
+{
+  "actionDim" : 7,
+  "actionDiscreteCount" : 7,
+  "agentStepMsMean" : 0.005726562500000002,
+  "command" : "benchmark",
+  "discreteAction" : {
+    "histogram" : [
+      4431,
+      4303,
+      4381,
+      4392,
+      4487,
+      4354,
+      4372
+    ],
+    "uniqueCount" : 7
+  },
+  "doneCount" : 6749,
+  "envId" : "MiniGrid-GoToDoor-6x6-v0",
+  "envStepMsMean" : 11.1850781875,
+  "heartbeatSequence" : 8,
+  "measuredBatchCount" : 16,
+  "measuredSeconds" : 0.193864833,
+  "measuredStepCount" : 32768,
+  "numEnvs" : 2048,
+  "observationDim" : 244,
+  "policy" : "random",
+  "rewardSum" : 291.7624985575676,
+  "schemaVersion" : 2,
+  "seed" : 9,
+  "stepsPerSecond" : 169024.9824732266,
+  "stopAfterMeasuredSteps" : 50000,
+  "stopReason" : "heartbeat",
+  "warmupSteps" : 1000
+}

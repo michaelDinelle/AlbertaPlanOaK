@@ -1,0 +1,58 @@
+{
+  "actionDim" : 3,
+  "actionDiscreteCount" : 3,
+  "agentStepMsMean" : 14.574621090909092,
+  "command" : "benchmark",
+  "diagnostic" : {
+    "agentShare" : 0.5377279855084671,
+    "envShare" : 0.4091492680783461,
+    "hostShare" : 0.05312274641318684,
+    "maxAbsLatentPrediction" : 0.3943959176540375,
+    "maxAbsPolicyOutput" : 1,
+    "maxAbsRewardPrediction" : 0,
+    "nonFiniteByPhase" : {
+      "encode" : 0,
+      "learn" : 0,
+      "plan" : 0
+    }
+  },
+  "discreteAction" : {
+    "histogram" : [
+      14530,
+      14212,
+      14266
+    ],
+    "uniqueCount" : 3
+  },
+  "doneCount" : 4672,
+  "envId" : "MiniGrid-Dynamic-Obstacles-8x8-v0",
+  "envStepMsMean" : 11.089613545454544,
+  "health" : {
+    "actionDeltaL2Mean" : 8.024429656935771e-36,
+    "activeRank" : 27.61904761904762,
+    "latentPredictionMSE" : 0.04395088678436531,
+    "latentVarianceTrace" : 1.5599027820147715e-36,
+    "nonFiniteRawTotal" : 0,
+    "nonFiniteSanitizedTotal" : 0,
+    "oakOptionReinitCount" : 0,
+    "optionModelPredictionMSE" : 0.04395088678436531,
+    "planningActionChangeL2Mean" : 0,
+    "planningUsedOptionDynamicsMean" : 1,
+    "rewardPredictionMSE" : 0,
+    "rewardRate" : -0.10047496855258942
+  },
+  "heartbeatSequence" : 11,
+  "measuredBatchCount" : 22,
+  "measuredSeconds" : 0.596289709,
+  "measuredStepCount" : 45056,
+  "numEnvs" : 2048,
+  "observationDim" : 244,
+  "policy" : "oak",
+  "rewardSum" : -4672,
+  "schemaVersion" : 2,
+  "seed" : 1,
+  "stepsPerSecond" : 75560.58627199953,
+  "stopAfterMeasuredSteps" : 50000,
+  "stopReason" : "heartbeat",
+  "warmupSteps" : 1000
+}
