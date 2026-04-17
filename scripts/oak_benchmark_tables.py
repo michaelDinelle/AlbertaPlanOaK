@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Tables A–D: oak vs random reward + per-env SPS. Stdout is pipe tables + headings/bullets (GFM). Inputs: --benchmark-json or --metrics / --metrics-run. Aliases: --truth, --partial*, --no-align-to-partial. benchmark.json TABLE D uses numEnvs from task/policy aggregates or measuredEnvSteps/measuredBatchCount."""
+"""Tables A–D: oak vs random reward + per-env SPS. Stdout is pipe tables + headings/bullets (GFM). Inputs: --benchmark-json or --metrics / --metrics-run (pointed at a run root containing <envId>/<seedN>/ folders). Aliases: --truth, --partial*, --no-align-to-partial. For each stem the loader picks the latest snapshot: final <stem>.json if present, else highest <stem>.heartbeat-NNNNNN.json. benchmark.json TABLE D uses numEnvs from task/policy aggregates or measuredEnvSteps/measuredBatchCount."""
 
 from __future__ import annotations
 
@@ -85,10 +85,45 @@ def load_benchmark_json(path: Path) -> list[Row]:
     return out
 
 
+def _latest_snapshot_per_stem(seed_dir: Path) -> list[Path]:
+    """Layout: <env>/<seed>/<stem>.json (final) and <env>/<seed>/<stem>.heartbeat-NNNNNN.json (pulses).
+    For each stem pick the latest snapshot: prefer final, else highest heartbeat index."""
+    final: dict[str, Path] = {}
+    pulses: dict[str, tuple[int, Path]] = {}
+    for fp in seed_dir.glob("*.json"):
+        name = fp.name
+        if ".heartbeat-" in name:
+            stem, _, rest = name.partition(".heartbeat-")
+            try:
+                seq = int(rest.split(".json", 1)[0])
+            except ValueError:
+                continue
+            prev = pulses.get(stem)
+            if prev is None or seq > prev[0]:
+                pulses[stem] = (seq, fp)
+        else:
+            final[name[: -len(".json")]] = fp
+    picks: list[Path] = []
+    for stem, fp in final.items():
+        picks.append(fp)
+    for stem, (_, fp) in pulses.items():
+        if stem not in final:
+            picks.append(fp)
+    return picks
+
+
 def load_metrics_dir(mdir: Path) -> list[Row]:
     agg: dict[str, dict[str, list[float]]] = defaultdict(lambda: {"oak": [], "random": []})
     sps: dict[str, dict[str, list[float]]] = defaultdict(lambda: {"oak": [], "random": []})
-    for fp in sorted(mdir.glob("*.json")):
+    snapshots: list[Path] = []
+    if mdir.is_dir():
+        for env_dir in sorted(mdir.iterdir()):
+            if not env_dir.is_dir():
+                continue
+            for seed_dir in sorted(env_dir.iterdir()):
+                if seed_dir.is_dir():
+                    snapshots.extend(_latest_snapshot_per_stem(seed_dir))
+    for fp in sorted(snapshots):
         j = json.loads(fp.read_text())
         pol = j.get("policy")
         if pol not in ("oak", "random"):

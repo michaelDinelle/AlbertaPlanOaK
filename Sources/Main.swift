@@ -960,26 +960,32 @@ private enum RunSnapshot {
         if let explicit { return explicit }
         if let s = storageFromEnvironment() { return s }
         let root = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
-        return root.appendingPathComponent(".oak-benchmarks/\(Main.oakBenchmarksRunId())/metrics", isDirectory: true)
+        return root.appendingPathComponent(".oak-benchmarks/\(Main.oakBenchmarksRunId())", isDirectory: true)
     }
 
     static func persist(_ file: RunMetricsFile, metricsDir: URL) throws -> URL {
         let stem = snapshotStem(envId: file.envId, policy: file.policy, seed: file.seed)
         let leaf = file.heartbeatSequence.map { "\(stem).heartbeat-\(String(format: "%06d", $0)).json" } ?? "\(stem).json"
-        let url = metricsDir.appendingPathComponent(leaf, isDirectory: false)
+        let seedDir = metricsDir
+            .appendingPathComponent(file.envId, isDirectory: true)
+            .appendingPathComponent(seedFolderName(file.seed), isDirectory: true)
+        let url = seedDir.appendingPathComponent(leaf, isDirectory: false)
         let enc = JSONEncoder()
         enc.outputFormatting = [.prettyPrinted, .sortedKeys]
         let data = try enc.encode(file)
         persistLock.lock(); defer { persistLock.unlock() }
-        try FileManager.default.createDirectory(at: metricsDir, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: seedDir, withIntermediateDirectories: true)
         try data.write(to: url, options: .atomic)
         return url
     }
 
     fileprivate static func snapshotStem(envId: String, policy: Policy, seed: Int?) -> String {
-        let seedPart = seed.map { "seed\($0)" } ?? "seedn"
-        let raw = "\(envId)-\(policy.rawValue)-\(seedPart)"
+        let raw = "\(envId)-\(policy.rawValue)-\(seedFolderName(seed))"
         return raw.replacingOccurrences(of: #"[^A-Za-z0-9]+"#, with: "-", options: .regularExpression)
+    }
+
+    fileprivate static func seedFolderName(_ seed: Int?) -> String {
+        seed.map { "seed\($0)" } ?? "seedn"
     }
 }
 
@@ -1063,8 +1069,21 @@ private enum RunSnapshot {
     }
 
     private static func snapshotJsonCount(in metricsDir: URL) -> Int {
-        guard let urls = try? FileManager.default.contentsOfDirectory(at: metricsDir, includingPropertiesForKeys: nil, options: [.skipsHiddenFiles]) else { return 0 }
-        return urls.filter { $0.pathExtension.lowercased() == "json" && !$0.lastPathComponent.contains(".heartbeat-") }.count
+        let fm = FileManager.default
+        func isSubdirectory(_ url: URL) -> Bool {
+            var isDir: ObjCBool = false
+            return fm.fileExists(atPath: url.path, isDirectory: &isDir) && isDir.boolValue
+        }
+        guard let envs = try? fm.contentsOfDirectory(at: metricsDir, includingPropertiesForKeys: [.isDirectoryKey], options: [.skipsHiddenFiles]) else { return 0 }
+        var count = 0
+        for envDir in envs where isSubdirectory(envDir) {
+            guard let seeds = try? fm.contentsOfDirectory(at: envDir, includingPropertiesForKeys: [.isDirectoryKey], options: [.skipsHiddenFiles]) else { continue }
+            for seedDir in seeds where isSubdirectory(seedDir) {
+                guard let files = try? fm.contentsOfDirectory(at: seedDir, includingPropertiesForKeys: nil, options: [.skipsHiddenFiles]) else { continue }
+                count += files.filter { $0.pathExtension.lowercased() == "json" && !$0.lastPathComponent.contains(".heartbeat-") }.count
+            }
+        }
+        return count
     }
 
     private static func resolveBenchmarkWorkingDirectory(root: URL, expectedTasks: Int) -> URL {
@@ -1072,20 +1091,26 @@ private enum RunSnapshot {
             return URL(fileURLWithPath: (raw as NSString).expandingTildeInPath, isDirectory: true)
         }
         if let raw = ProcessInfo.processInfo.environment["OAK_METRICS_STORAGE"]?.trimmingCharacters(in: .whitespacesAndNewlines), !raw.isEmpty {
-            let metrics = URL(fileURLWithPath: (raw as NSString).expandingTildeInPath, isDirectory: true)
-            if snapshotJsonCount(in: metrics) < expectedTasks { return metrics.deletingLastPathComponent() }
+            let storage = URL(fileURLWithPath: (raw as NSString).expandingTildeInPath, isDirectory: true)
+            if snapshotJsonCount(in: storage) < expectedTasks { return storage }
             return root.appendingPathComponent(".oak-benchmarks/\(oakBenchmarksRunId())", isDirectory: true)
         }
         let fresh = { root.appendingPathComponent(".oak-benchmarks/\(oakBenchmarksRunId())", isDirectory: true) }
         let box = root.appendingPathComponent(".oak-benchmarks", isDirectory: true)
         guard let runs = try? FileManager.default.contentsOfDirectory(at: box, includingPropertiesForKeys: nil, options: [.skipsHiddenFiles]) else { return fresh() }
+        // Only resume folders whose name matches the auto-generated run id shape
+        // (yyyyMMdd-HHmmss-<pid>). User-curated labels like "gpt 5.4" or "composerMuse"
+        // are left alone — start a fresh run instead.
+        let runIdPattern = try? NSRegularExpression(pattern: #"^\d{8}-\d{6}-\d+$"#)
         var bestDir: URL?, bestDate = Date.distantPast
         for run in runs {
             var isDir: ObjCBool = false
             guard FileManager.default.fileExists(atPath: run.path, isDirectory: &isDir), isDir.boolValue else { continue }
-            let metrics = run.appendingPathComponent("metrics", isDirectory: true)
-            guard FileManager.default.fileExists(atPath: metrics.path), snapshotJsonCount(in: metrics) < expectedTasks else { continue }
-            let d = (try? metrics.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast
+            let name = run.lastPathComponent
+            let range = NSRange(name.startIndex..<name.endIndex, in: name)
+            guard runIdPattern?.firstMatch(in: name, options: [], range: range) != nil else { continue }
+            guard snapshotJsonCount(in: run) < expectedTasks else { continue }
+            let d = (try? run.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast
             if d >= bestDate { bestDate = d; bestDir = run }
         }
         return bestDir ?? fresh()
@@ -1104,12 +1129,6 @@ private enum RunSnapshot {
         let expectedTasks = envOrder.count * seedCount * policies.count
         let benchDir = resolveBenchmarkWorkingDirectory(root: root, expectedTasks: expectedTasks)
         try FileManager.default.createDirectory(at: benchDir, withIntermediateDirectories: true)
-        let benchMetrics: URL = {
-            if let raw = ProcessInfo.processInfo.environment["OAK_METRICS_STORAGE"]?.trimmingCharacters(in: .whitespacesAndNewlines), !raw.isEmpty {
-                return URL(fileURLWithPath: (raw as NSString).expandingTildeInPath, isDirectory: true)
-            }
-            return benchDir.appendingPathComponent("metrics", isDirectory: true)
-        }()
         for benchmarkEnv in envOrder {
             let envId = benchmarkEnv.envId
             let defaultNumEnvs = try directNumEnvs(obsDim: benchmarkEnv.schema.observationDim, actDim: benchmarkEnv.schema.actionDim, actionDiscreteCount: benchmarkEnv.schema.actionDiscreteCount, device: device)
@@ -1117,11 +1136,14 @@ private enum RunSnapshot {
             for seed in seedStart..<(seedStart + seedCount) {
                 for policy in policies {
                     let stem = RunSnapshot.snapshotStem(envId: envId, policy: policy, seed: seed)
-                    let snapURL = benchMetrics.appendingPathComponent("\(stem).json", isDirectory: false)
+                    let snapURL = benchDir
+                        .appendingPathComponent(envId, isDirectory: true)
+                        .appendingPathComponent(RunSnapshot.seedFolderName(seed), isDirectory: true)
+                        .appendingPathComponent("\(stem).json", isDirectory: false)
                     if FileManager.default.fileExists(atPath: snapURL.path) { continue }
                     let logURL = benchDir.appendingPathComponent("\(stem).log")
                     do {
-                        _ = try runSingle(envId: envId, policy: policy, seed: seed, warmup: warmup, stopAfter: stopAfter, numEnvs: numEnvs, device: device, command: "benchmark", metricsDir: benchMetrics).0
+                        _ = try runSingle(envId: envId, policy: policy, seed: seed, warmup: warmup, stopAfter: stopAfter, numEnvs: numEnvs, device: device, command: "benchmark", metricsDir: benchDir).0
                     } catch {
                         try "\(error)\n".data(using: .utf8)?.write(to: logURL)
                         throw error
@@ -1202,7 +1224,8 @@ private enum RunSnapshot {
         var agentMsSum = 0.0, envMsSum = 0.0
         var health = HealthAccumulator()
         let actionCol = MeasuredActionCollector(discreteCount: env.actionDiscreteCount, actDim: env.actDim)
-        let hb = max(ProcessInfo.processInfo.environment["OAK_HEARTBEAT_STEPS"].flatMap(Int.init) ?? 0, 0)
+        let defaultHb = command == "diagnose" ? 0 : max((stopAfter / 10 / numEnvs) * numEnvs, numEnvs)
+        let hb = max(ProcessInfo.processInfo.environment["OAK_HEARTBEAT_STEPS"].flatMap(Int.init) ?? defaultHb, 0)
         var pulse = 0
         func snap(_ seq: Int?) -> RunMetricsFile {
             let u = max(measuredSteps / numEnvs, 1), a = agentMsSum / 1000, e = envMsSum / 1000, h = max(measuredSeconds - a - e, 0)
