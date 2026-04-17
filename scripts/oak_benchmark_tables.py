@@ -1,11 +1,18 @@
 #!/usr/bin/env python3
-"""Tables A–D: oak vs random reward + per-env SPS. Stdout is pipe tables + headings/bullets (GFM). Inputs: --benchmark-json or --metrics / --metrics-run (nested run root: <envId>/<seedN>/*.json, or flat: <envId>-{oak,random}-seedN.json). Aliases: --truth, --partial*, --no-align-to-partial. For each stem the loader picks the latest snapshot: final <stem>.json if present, else highest <stem>.heartbeat-NNNNNN.json. benchmark.json TABLE D uses numEnvs from task/policy aggregates or measuredEnvSteps/measuredBatchCount."""
+"""Tables A–D: oak vs random reward + per-env SPS. Stdout is pipe tables + headings/bullets (GFM).
+
+Expects one or more **benchmark run roots** (e.g. `.oak-benchmarks/<run-id>/`): for each env and seed,
+snapshots live at `<run-root>/<envId>/seed<N>/<stem>.json` with optional pulses
+`<stem>.heartbeat-NNNNNN.json`. For each stem the loader picks the latest snapshot: final `<stem>.json`
+if present, else the highest heartbeat index.
+
+Use `--run LABEL DIR` (repeat for multiple runs). Aliases: `--metrics-run`, `--partial-run`.
+"""
 
 from __future__ import annotations
 
 import argparse
 import json
-import re
 from collections import defaultdict
 from pathlib import Path
 from statistics import mean, pstdev
@@ -23,72 +30,8 @@ def _tag(d: float) -> str:
     return "T"
 
 
-def _num_envs_benchmark(pol: dict) -> int | None:
-    """Same units as metrics JSON: numEnvs ≈ measuredEnvSteps / measuredBatchCount (aggregate steps / batches)."""
-    ne_raw = pol.get("numEnvs")
-    if isinstance(ne_raw, dict) and "mean" in ne_raw:
-        try:
-            v = float(ne_raw["mean"])
-            if v > 0:
-                return int(round(v))
-        except (TypeError, ValueError):
-            pass
-    sp = pol.get("speed") or {}
-    try:
-        m = float(sp["measuredEnvSteps"]["mean"])
-        b = float(sp["measuredBatchCount"]["mean"])
-    except (KeyError, TypeError, ValueError):
-        return None
-    if m <= 0 or b <= 0:
-        return None
-    r = m / b
-    ri = int(round(r))
-    if ri <= 0:
-        return None
-    if abs(r - float(ri)) > max(1e-9 * max(m, 1.0), 1e-3):
-        return None
-    return ri
-
-
-def _sps_benchmark(pol: dict, task: dict | None = None) -> float:
-    """Aggregate steps/s divided by numEnvs (per parallel env), matching metrics snapshots."""
-    try:
-        sp = float(pol["speed"]["stepsPerSecond"]["mean"])
-    except (KeyError, TypeError, ValueError):
-        return float("nan")
-    ne: int | None = None
-    if task is not None:
-        tn = task.get("numEnvs")
-        if isinstance(tn, (int, float)) and tn > 0:
-            ne = int(tn)
-        elif isinstance(tn, dict) and "mean" in tn:
-            try:
-                v = float(tn["mean"])
-                if v > 0:
-                    ne = int(round(v))
-            except (TypeError, ValueError):
-                pass
-    if ne is None:
-        ne = _num_envs_benchmark(pol)
-    if ne is None or ne <= 0:
-        return float("nan")
-    return sp / float(ne)
-
-
-def load_benchmark_json(path: Path) -> list[Row]:
-    data = json.loads(path.read_text())
-    out: list[Row] = []
-    for t in data["tasks"]:
-        o = t["oak"]["reward"]["sum"]["mean"]
-        r = t["random"]["reward"]["sum"]["mean"]
-        d = o - r
-        out.append((t["envId"], o, r, d, _tag(d), _sps_benchmark(t["oak"], t), _sps_benchmark(t["random"], t)))
-    return out
-
-
 def _latest_snapshot_per_stem(seed_dir: Path) -> list[Path]:
-    """Layout: <env>/<seed>/<stem>.json (final) and <env>/<seed>/<stem>.heartbeat-NNNNNN.json (pulses).
-    For each stem pick the latest snapshot: prefer final, else highest heartbeat index."""
+    """Prefer final `<stem>.json`, else highest `<stem>.heartbeat-NNNNNN.json`."""
     final: dict[str, Path] = {}
     pulses: dict[str, tuple[int, Path]] = {}
     for fp in seed_dir.glob("*.json"):
@@ -113,31 +56,18 @@ def _latest_snapshot_per_stem(seed_dir: Path) -> list[Path]:
     return picks
 
 
-_FLAT_METRIC_NAME = re.compile(r"^(.+)-(oak|random)-seed(\d+)\.json$")
-
-
-def _flat_metrics_snapshots(mdir: Path) -> list[Path]:
-    """Flat layout: one JSON per env×policy×seed, e.g. MiniGrid-Foo-v0-oak-seed0.json."""
-    out: list[Path] = []
-    for fp in sorted(mdir.glob("*.json")):
-        if _FLAT_METRIC_NAME.match(fp.name):
-            out.append(fp)
-    return out
-
-
-def load_metrics_dir(mdir: Path) -> list[Row]:
+def load_run_root(run_root: Path) -> list[Row]:
+    """Load rows from `<run-root>/<envId>/seed<N>/*.json` metrics snapshots."""
     agg: dict[str, dict[str, list[float]]] = defaultdict(lambda: {"oak": [], "random": []})
     sps: dict[str, dict[str, list[float]]] = defaultdict(lambda: {"oak": [], "random": []})
     snapshots: list[Path] = []
-    if mdir.is_dir():
-        for env_dir in sorted(mdir.iterdir()):
+    if run_root.is_dir():
+        for env_dir in sorted(run_root.iterdir()):
             if not env_dir.is_dir():
                 continue
             for seed_dir in sorted(env_dir.iterdir()):
                 if seed_dir.is_dir():
                     snapshots.extend(_latest_snapshot_per_stem(seed_dir))
-        if not snapshots:
-            snapshots = _flat_metrics_snapshots(mdir)
     for fp in sorted(snapshots):
         j = json.loads(fp.read_text())
         pol = j.get("policy")
@@ -199,6 +129,7 @@ def sps_stats(rows: list[Row]) -> dict:
     if not n:
         z = float("nan")
         return {"n": 0, "mu_oak": z, "sd_oak": z, "mu_rand": z, "sd_rand": z, "mu_delta": z, "sd_delta": z}
+
     def moments(xs: list[float]) -> tuple[float, float]:
         xs = [x for x in xs if x == x]
         if not xs:
@@ -206,6 +137,7 @@ def sps_stats(rows: list[Row]) -> dict:
         m = mean(xs)
         s = pstdev(xs) if len(xs) > 1 else 0.0
         return m, s
+
     so = [x[5] for x in rows]
     sr = [x[6] for x in rows]
     dd = [x[5] - x[6] for x in rows if x[5] == x[5] and x[6] == x[6]]
@@ -228,14 +160,10 @@ def emit(runs: list[tuple[str, list[Row]]], note: str | None, env_note: str | No
         print(f"- {note}")
     if env_note:
         print(f"- Env filter: {env_note}")
-    print(
-        "- Δ = mean oak reward − mean random per env (benchmark.json: aggregated means; metrics/: mean over seeds)."
-    )
+    print("- Δ = mean oak reward − mean random per env (mean over seeds from snapshot JSON in each env folder).")
     print("- W / L / T from sign of Δ; P(Δ>0) = W/n; μ, σ over env rows.")
     print(
-        "- TABLE D: steps/s **per parallel env** (metrics: stepsPerSecond / numEnvs; benchmark.json: aggregate SPS / "
-        "numEnvs from task or policy `numEnvs.mean`, else measuredEnvSteps.mean / measuredBatchCount.mean when that "
-        "ratio is integral within tolerance)."
+        "- TABLE D: steps/s **per parallel env** from each snapshot: `stepsPerSecond / numEnvs` when both are present."
     )
     print()
     print("### TABLE A — Summary")
@@ -276,25 +204,26 @@ def emit(runs: list[tuple[str, list[Row]]], note: str | None, env_note: str | No
 
 
 def main() -> None:
-    ap = argparse.ArgumentParser(description="Benchmark tables A–D.")
-    ap.add_argument("--benchmark-json", "--truth", nargs=2, action="append", dest="bj", metavar=("L", "PATH"))
-    ap.add_argument("--metrics", "--partial", type=Path, default=None)
-    ap.add_argument("--metrics-run", "--partial-run", nargs=2, action="append", dest="mr", metavar=("L", "DIR"))
-    ap.add_argument("--metrics-label", "--partial-label", dest="ml", default=None)
+    ap = argparse.ArgumentParser(description="Benchmark tables A–D from .oak-benchmarks run roots.")
+    ap.add_argument(
+        "--run",
+        "--metrics-run",
+        "--partial-run",
+        nargs=2,
+        action="append",
+        dest="runs",
+        metavar=("LABEL", "DIR"),
+        help="Benchmark run root (e.g. .oak-benchmarks/<run-id>/). Repeat for multiple runs.",
+    )
     ap.add_argument("--only", default=None)
-    ap.add_argument("--no-align-to-metrics", "--no-align-to-partial", action="store_true", dest="na")
+    ap.add_argument("--no-align-to-partial", "--no-align", action="store_true", dest="na")
     a = ap.parse_args()
 
     only = {x.strip() for x in a.only.split(",") if x.strip()} if a.only else None
     env_note = ", ".join(sorted(only)) if only else None
 
     dirs: list[tuple[str, Path]] = []
-    if a.metrics is not None:
-        if a.metrics.is_dir():
-            dirs.append((a.ml or f"{a.metrics.parent.name}/metrics", a.metrics))
-        else:
-            print(f"(skip) not a directory: {a.metrics}", flush=True)
-    for lb, ps in a.mr or []:
+    for lb, ps in a.runs or []:
         p = Path(ps).expanduser()
         if p.is_dir():
             dirs.append((lb, p))
@@ -304,7 +233,7 @@ def main() -> None:
     align = bool(dirs) and not a.na
     align_ids: set[str] | None = None
     if align:
-        sets = [{r[0] for r in load_metrics_dir(d)} for _, d in dirs]
+        sets = [{r[0] for r in load_run_root(d)} for _, d in dirs]
         align_ids = set.intersection(*sets) if sets else set()
         if only:
             align_ids &= only
@@ -313,31 +242,23 @@ def main() -> None:
         r = _pick(rows, only)
         return _pick(r, align_ids) if align_ids is not None else r
 
-    runs: list[tuple[str, list[Row]]] = []
-    for label, path_str in a.bj or []:
-        path = Path(path_str).expanduser()
-        if path.is_file():
-            runs.append((label, filt(load_benchmark_json(path))))
-        else:
-            print(f"(skip) {label} -> {path}", flush=True)
+    runs_out: list[tuple[str, list[Row]]] = []
     for lb, d in dirs:
-        runs.append((lb, filt(load_metrics_dir(d))))
+        runs_out.append((lb, filt(load_run_root(d))))
 
-    if not runs:
-        print("No inputs. Use --benchmark-json/--truth and/or --metrics/--metrics-run.", flush=True)
+    if not runs_out:
+        print("No inputs. Use --run LABEL DIR (repeat). Example: --run myrun .oak-benchmarks/20260417-073830-69143", flush=True)
         raise SystemExit(1)
 
     note = None
     if align and align_ids is not None:
         n = len(align_ids)
-        if a.bj:
-            note = f"Aligned: benchmark.json restricted to {n} envs (paired oak+random ∩ across metrics dirs)."
-        elif len(dirs) > 1:
-            note = f"Metrics dirs: intersection of paired envs, n={n}."
+        if len(dirs) > 1:
+            note = f"Aligned: intersection of paired envs across run roots, n={n}."
     elif dirs and a.na:
-        note = "Unaligned: benchmark.json uses all tasks; metrics n varies."
+        note = "Unaligned: each run uses all envs with paired oak+random; row counts may differ."
 
-    emit(runs, note, env_note)
+    emit(runs_out, note, env_note)
 
 
 if __name__ == "__main__":
