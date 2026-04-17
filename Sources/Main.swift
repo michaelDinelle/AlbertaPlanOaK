@@ -514,7 +514,8 @@ final class OakMetalEngine {
         Phase(name: "oak_learn_encoder",      tgSize: 0),
         Phase(name: "oak_learn_psi",          tgSize: 0),
         Phase(name: "oak_learn_opt_policy",   tgSize: 0),
-        Phase(name: "oak_bk_reduce_feature",  tgSize: 128),
+        Phase(name: "oak_bk_reduce",          tgSize: 128),
+        Phase(name: "oak_bk_feature",         tgSize: 32),
         Phase(name: "oak_bk_option",          tgSize: 128),
         Phase(name: "oak_bk_admit_commit",    tgSize: 0),
     ]
@@ -542,6 +543,11 @@ final class OakMetalEngine {
     private var phaseGpuInvalidStepCount: [Int]
     private var hostAction: [Float]
     private var hostDiscrete: [Int32]
+    // Metal 4 ICB + MTLResidencySet (macOS 26). Pre-encoded 12 dispatches execute in one encoder
+    // on the hot path, eliminating per-phase encoder setup (~50µs × 12 = ~600µs/step host savings).
+    private let indirectCommandBuffer: MTLIndirectCommandBuffer
+    private let residencySet: MTLResidencySet
+    private let resourceList: [MTLBuffer]
 
     private static func kernelURL() throws -> URL {
         try requiredBuildPath(".build/OakKernel.metallib",
@@ -557,7 +563,11 @@ final class OakMetalEngine {
             guard let fn = try? library.makeFunction(name: phase.name, constantValues: fc) else {
                 throw OakError.message("Missing \(phase.name) in OakKernel.metallib.")
             }
-            return try device.makeComputePipelineState(function: fn)
+            // supportIndirectCommandBuffers is required for ICB pre-encoding (Metal 3+).
+            let desc = MTLComputePipelineDescriptor()
+            desc.computeFunction = fn
+            desc.supportIndirectCommandBuffers = true
+            return try device.makeComputePipelineState(descriptor: desc, options: [], reflection: nil)
         }
     }
 
@@ -617,7 +627,8 @@ final class OakMetalEngine {
             max(baseObsDim, 1),               // oak_learn_encoder       [dispatchThreads]
             K * rank * rank,                  // oak_learn_psi           [dispatchThreads]
             K * actDim * rank,                // oak_learn_opt_policy    [dispatchThreads]
-            1,                                // oak_bk_reduce_feature   [1 TG × 128]
+            1,                                // oak_bk_reduce           [1 TG × 128]
+            rank,                             // oak_bk_feature          [R TGs × 32]
             K,                                // oak_bk_option           [K TGs × 128]
             1,                                // oak_bk_admit_commit     [dispatchThreads]
         ]
@@ -627,6 +638,27 @@ final class OakMetalEngine {
         phaseGpuInvalidStepCount = Array(repeating: 0, count: Self.phases.count)
         hostAction = Array(repeating: 0, count: batch * actDim)
         hostDiscrete = Array(repeating: 0, count: batch)
+
+        // --- Metal 4 ICB + MTLResidencySet setup ----------------------------------------------
+        let icbDesc = MTLIndirectCommandBufferDescriptor()
+        icbDesc.commandTypes = [.concurrentDispatch]
+        icbDesc.inheritBuffers = false
+        icbDesc.inheritPipelineState = false
+        icbDesc.maxKernelBufferBindCount = 7
+        guard let icb = device.makeIndirectCommandBuffer(descriptor: icbDesc,
+                                                         maxCommandCount: Self.phases.count,
+                                                         options: [.storageModeShared]) else {
+            throw OakError.message("Failed to create Metal indirect command buffer.")
+        }
+        indirectCommandBuffer = icb
+        let rsDesc = MTLResidencySetDescriptor()
+        rsDesc.initialCapacity = 7
+        residencySet = try device.makeResidencySet(descriptor: rsDesc)
+        resourceList = [paramsArena.buffer, stateArena.buffer, uintArena.buffer,
+                        scalarsBuffer, statsBuffer, actionBoundsBuffer, configBuffer]
+        for buf in resourceList { residencySet.addAllocation(buf) }
+        residencySet.commit()
+        queue.addResidencySet(residencySet)
 
         // --- Parameter init: structural 1/√R scales on every linear head. Deterministic counter
         // hash (splitmix32 of seed ⊕ index) provides small centered probes without a host RNG
@@ -662,7 +694,33 @@ final class OakMetalEngine {
         for f in 0..<rank { activeMask[f] = 1; activeList[f] = UInt32(f) }
 
         writeKernelConfig(paramLayout: paramLayout)
+
+        // Pre-encode the 12-phase dispatch graph into the ICB (grids are fixed for the engine's
+        // lifetime; only KernelScalars/KernelStats/params/state data changes between steps).
+        let buffers = resourceList
+        for i in 0..<Self.phases.count {
+            let cmd = icb.indirectComputeCommandAt(i)
+            cmd.setComputePipelineState(pipelines[i])
+            for j in 0..<6 { cmd.setKernelBuffer(buffers[j], offset: 0, at: j) }
+            cmd.setKernelBuffer(configBuffer, offset: 0, at: OakMetalLayout.kernelConfigBufferIndex)
+            let tgSize = Self.phases[i].tgSize
+            if tgSize > 0 {
+                let tgCount = max(phaseGridWidths[i], 1)
+                cmd.concurrentDispatchThreadgroups(
+                    MTLSize(width: tgCount, height: 1, depth: 1),
+                    threadsPerThreadgroup: MTLSize(width: tgSize, height: 1, depth: 1))
+            } else {
+                let pip = pipelines[i]
+                let tg = min(max(pip.threadExecutionWidth, 1), pip.maxTotalThreadsPerThreadgroup)
+                let w = alignedGridWidth(threadCount: phaseGridWidths[i], pipeline: pip)
+                cmd.concurrentDispatchThreads(
+                    MTLSize(width: w, height: 1, depth: 1),
+                    threadsPerThreadgroup: MTLSize(width: min(tg, w), height: 1, depth: 1))
+            }
+        }
     }
+
+    deinit { queue.removeResidencySet(residencySet) }
 
     func metalPhaseGpuDiagnostics(measuredBatchSteps: Int) -> (meanMs: [String: Double]?, invalidPhases: [String]?) {
         guard diagnosticGpuPhaseTiming, measuredBatchSteps > 0 else { return (nil, nil) }
@@ -693,7 +751,7 @@ final class OakMetalEngine {
         for i in 0..<batch { donePtr[i] = UInt32(prevDone[i]) }
 
         let ctr = uintArena.pointer.advanced(by: uintLayout.counters)
-        ctr[0] = 0; ctr[1] = 0; ctr[2] = 0  // encode/learn/plan non-finite counters (bk_reduce_feature)
+        ctr[0] = 0; ctr[1] = 0; ctr[2] = 0  // encode/learn/plan non-finite counters (bk_reduce)
         // counters[3..4] are reinit bitmasks; cleared by bk_admit_commit at end of step.
         statsPointer.pointee = KernelStats()
 
@@ -773,20 +831,27 @@ final class OakMetalEngine {
     }
 
     private func runKernel(accumulatePhaseGpu: Bool) throws {
-        let buffers: [MTLBuffer?] = [paramsArena.buffer, stateArena.buffer, uintArena.buffer,
-                                     scalarsBuffer, statsBuffer, actionBoundsBuffer]
-        let offsets = [Int](repeating: 0, count: 6)
         let split = diagnosticGpuPhaseTiming && accumulatePhaseGpu
 
+        // Hot path: execute the pre-encoded ICB in one compute encoder. No per-phase encoder
+        // setup, no useResource calls (MTLResidencySet owns residency).
         if !split {
             guard let cb = queue.makeCommandBuffer(descriptor: cbDesc) else {
                 throw OakError.message("Failed to create Metal command buffer.")
             }
-            for i in 0..<pipelines.count { try encodePhase(into: cb, index: i, buffers: buffers, offsets: offsets) }
+            guard let enc = cb.makeComputeCommandEncoder() else {
+                throw OakError.message("Failed to create Metal compute encoder.")
+            }
+            enc.executeCommandsInBuffer(indirectCommandBuffer, range: 0..<pipelines.count)
+            enc.endEncoding()
             cb.commit(); cb.waitUntilCompleted()
             if let e = cb.error { throw OakError.message("Metal command failed: \(e)") }
             return
         }
+        // Diagnostic path: per-phase command buffers to capture gpuStartTime/gpuEndTime.
+        let buffers: [MTLBuffer?] = [paramsArena.buffer, stateArena.buffer, uintArena.buffer,
+                                     scalarsBuffer, statsBuffer, actionBoundsBuffer]
+        let offsets = [Int](repeating: 0, count: 6)
         for i in 0..<pipelines.count {
             guard let cb = queue.makeCommandBuffer(descriptor: cbDesc) else {
                 throw OakError.message("Failed to create Metal command buffer.")

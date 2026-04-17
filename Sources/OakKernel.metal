@@ -7,8 +7,11 @@ using namespace metal;
 // Invariants (.cursor/rules/alberta_plan.mdc §1–9) hold: no env branches, no tuned scalars, no
 // episodic semantics, no train/eval split, no per-step allocation, no cosmetic normalization,
 // no curiosity on the external reward, meta-constants structurally derived from {R, B, K}.
-// Twelve kernels: encode, predict, plan, meta_action, reduce_alpha, learn_value, learn_encoder,
-// learn_psi, learn_opt_policy, bk_reduce_feature, bk_option, bk_admit_commit.
+// Thirteen kernels: encode, predict, plan, meta_action, reduce_alpha, learn_value, learn_encoder,
+// learn_psi, learn_opt_policy, bk_reduce, bk_feature, bk_option, bk_admit_commit. (bk_reduce and
+// bk_feature are kept separate because the per-feature utility pass needs R parallel threadgroups
+// to avoid 32× serialization at large R·B; with MTLIndirectCommandBuffer the extra dispatch has
+// ~zero host cost, so fusion is not profitable here.)
 //
 // Citations (docs/papers/):
 //   AlbertaPlan_2208.11173                      base agent; Step 11 Oak; STOMP progression
@@ -665,17 +668,12 @@ kernel void oak_learn_opt_policy(
 }
 
 // =================================================================================================
-// bk_reduce_feature — FUSED bk_reduce + bk_feature. Shares the (row, feat) outer loop over
-// curr/td/tdPsi to halve bandwidth. Produces both the telemetry stats (bk_reduce) and per-feature
-// utility EMAs (bk_feature). Also handles online observation-mean Welford and per-(row,a) stats.
-//   [Dispatch: 1 threadgroup × 128 threads, plus R separate single-TG bk_feature-style commits.]
-//
-// Structure:
-//  1. Strided obs loop for observationMean EMA + obsNF count (per-feature commit)
-//  2. Strided (row, feat) loop for lms, psi_l, maxLat, nLearn stats, AND per-feature utility
-//  3. Strided (row, a) loop for planL2, actionDelta, maxPol, nPlan stats
+// bk_reduce — global telemetry + obs-mean Welford. One 128-thread TG with hierarchical simd_sum
+// for the batch-wide (row,feat) and (row,a) reductions. Per-feature utility lives in a separate
+// kernel (oak_bk_feature, R TGs × 32) to preserve R-way parallelism at large R·B.
+//   [Dispatch: 1 threadgroup × 128 threads.]
 // =================================================================================================
-kernel void oak_bk_reduce_feature(
+kernel void oak_bk_reduce(
     device half   *params     [[buffer(0)]],
     device float  *stateArena [[buffer(1)]],
     device uint   *uintArena  [[buffer(2)]],
@@ -706,13 +704,7 @@ kernel void oak_bk_reduce_feature(
     threadgroup float sg_obsNF[4];
     float obsNF = tg_sum_128(obsNF_local, sg_obsNF, tid, sgid);
 
-    // (2) Per-(row, feat) reductions + per-feature utility EMA (fused bk_feature).
-    // Strategy: single strided (idx = row·R + feat) loop. For each (row, feat), accumulate:
-    //   lms, psi_l, maxLat, nLearn into threadgroup-wide stats
-    //   util_feat_contrib[feat] via one atomic-free accumulation using a TG-shared [R]-sized
-    //   buffer — then per-feature commit at the end.
-    // For small R (≤ 256) the TG-shared buffer fits; for larger R we fall back to an extra
-    // per-feature strided loop.
+    // (2) Per-(row, feat) reductions: latent mean-square, ψ TD mean-square, max|latent|, nLearn.
     float lms_l = 0.0f, psi_l = 0.0f, maxLat_l = 0.0f, nLearn_l = 0.0f;
     uint total_rf = ctx.B * ctx.R;
     for (uint idx = tid; idx < total_rf; idx += tgW) {
@@ -730,21 +722,6 @@ kernel void oak_bk_reduce_feature(
     float psi    = tg_sum_128(psi_l,    sg_psi,    tid, sgid);
     float maxLat = tg_max_128(maxLat_l, sg_maxLat, tid, sgid);
     float nLearn = tg_sum_128(nLearn_l, sg_nLearn, tid, sgid);
-
-    // (2b) Per-feature utility: strided over R. Each thread reduces B rows for its feat(s).
-    // utilFeat[feat] EMA = invT * (sum_u / B - utilFeat[feat]).
-    // sum_u = Σ_r |td[r]·curr[r,feat]| + Σ_j |tdPsi[r,j]·curr[r,feat]|.
-    float invB = 1.0f / float(max(ctx.B, 1u));
-    for (uint feat = tid; feat < ctx.R; feat += tgW) {
-        float u = 0.0f;
-        for (uint r = 0u; r < ctx.B; ++r) {
-            float x = curr[r * ctx.R + feat];
-            u += fabs(ctx.td[r] * x);
-            for (uint j = 0u; j < ctx.R; ++j) u += fabs(ctx.tdPsi[r * ctx.R + j] * x);
-        }
-        float un = u * invB / float(max(ctx.R + 1u, 1u));
-        ctx.utilFeat[feat] += invT * (un - ctx.utilFeat[feat]);
-    }
 
     // (3) Per-(row, a) reductions: plan L2, action delta, maxPol, nPlan.
     float pL2_l = 0.0f, ad_l = 0.0f, maxPol_l = 0.0f, nPlan_l = 0.0f;
@@ -784,6 +761,44 @@ kernel void oak_bk_reduce_feature(
         ctx.counters[0] = uint(obsNF);
         ctx.counters[1] = uint(nLearn);
         ctx.counters[2] = uint(nPlan);
+    }
+}
+
+// =================================================================================================
+// bk_feature — per-feature utility EMA: util_feat[i] ← track_rate·(mean|δ·x_i| + Σ_j|δψ_j·x_i|).
+// GraMa-aligned gradient-magnitude signal (2505.24061). R threadgroups × 32 threads gives
+// R-way outer parallelism so this scales with R even at large B; each TG uses simd_sum across
+// its 32 lanes to reduce over B·(R+1) inner terms.
+//   [Dispatch: R threadgroups × 32 threads.]
+// =================================================================================================
+kernel void oak_bk_feature(
+    device half   *params     [[buffer(0)]],
+    device float  *stateArena [[buffer(1)]],
+    device uint   *uintArena  [[buffer(2)]],
+    device KernelScalars *scalars [[buffer(3)]],
+    device KernelStats   *stats   [[buffer(4)]],
+    device const float   *bounds  [[buffer(5)]],
+    constant KernelConfig &cfg    [[buffer(6)]],
+    uint tgid [[threadgroup_position_in_grid]],
+    uint tid  [[thread_position_in_threadgroup]],
+    uint tgW  [[threads_per_threadgroup]])
+{
+    Ctx ctx = make_ctx(params, stateArena, uintArena, scalars, cfg);
+    uint feat = tgid;
+    if (feat >= ctx.R) return;
+    device const float *curr = state_slot(ctx, 1u - ctx.stateSlot);
+    float invB = 1.0f / float(max(ctx.B, 1u));
+    float invT = track_rate(ctx.stepCount, ctx.ridge);
+    float u_l = 0.0f;
+    for (uint r = tid; r < ctx.B; r += tgW) {
+        float x = curr[r * ctx.R + feat];
+        u_l += fabs(ctx.td[r] * x);
+        for (uint j = 0u; j < ctx.R; ++j) u_l += fabs(ctx.tdPsi[r * ctx.R + j] * x);
+    }
+    float u = simd_sum(u_l);
+    if (tid == 0u) {
+        float un = u * invB / float(max(ctx.R + 1u, 1u));
+        ctx.utilFeat[feat] += invT * (un - ctx.utilFeat[feat]);
     }
 }
 
