@@ -1,0 +1,35 @@
+{
+  "actionDim" : 7,
+  "actionDiscreteCount" : 7,
+  "agentStepMsMean" : 0.005471208333333335,
+  "command" : "benchmark",
+  "discreteAction" : {
+    "histogram" : [
+      20645,
+      20632,
+      20788,
+      20805,
+      21066,
+      20737,
+      20735
+    ],
+    "uniqueCount" : 7
+  },
+  "doneCount" : 1148,
+  "envId" : "MiniGrid-LavaCrossingS9N1-v0",
+  "envStepMsMean" : 11.727517930555551,
+  "heartbeatSequence" : 3,
+  "measuredBatchCount" : 72,
+  "measuredSeconds" : 0.858762833,
+  "measuredStepCount" : 147456,
+  "numEnvs" : 2048,
+  "observationDim" : 244,
+  "policy" : "random",
+  "rewardSum" : 0.8472222089767456,
+  "schemaVersion" : 2,
+  "seed" : 6,
+  "stepsPerSecond" : 171707.47770356754,
+  "stopAfterMeasuredSteps" : 500000,
+  "stopReason" : "heartbeat",
+  "warmupSteps" : 1000
+}

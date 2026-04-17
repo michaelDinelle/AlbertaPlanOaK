@@ -1,0 +1,35 @@
+{
+  "actionDim" : 7,
+  "actionDiscreteCount" : 7,
+  "agentStepMsMean" : 0.005700777777777779,
+  "command" : "benchmark",
+  "discreteAction" : {
+    "histogram" : [
+      20644,
+      20631,
+      20787,
+      20807,
+      21066,
+      20736,
+      20737
+    ],
+    "uniqueCount" : 7
+  },
+  "doneCount" : 72,
+  "envId" : "MiniGrid-WFC-DungeonMazeScaled-v0",
+  "envStepMsMean" : 16.509246611111116,
+  "heartbeatSequence" : 3,
+  "measuredBatchCount" : 72,
+  "measuredSeconds" : 1.211629375,
+  "measuredStepCount" : 147456,
+  "numEnvs" : 2048,
+  "observationDim" : 244,
+  "policy" : "random",
+  "rewardSum" : 67.68179976940155,
+  "schemaVersion" : 2,
+  "seed" : 1,
+  "stepsPerSecond" : 121700.58191268267,
+  "stopAfterMeasuredSteps" : 500000,
+  "stopReason" : "heartbeat",
+  "warmupSteps" : 1000
+}

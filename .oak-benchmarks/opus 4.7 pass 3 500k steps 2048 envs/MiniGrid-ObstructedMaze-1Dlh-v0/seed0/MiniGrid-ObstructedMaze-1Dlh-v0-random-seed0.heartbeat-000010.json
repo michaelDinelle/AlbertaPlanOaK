@@ -1,0 +1,35 @@
+{
+  "actionDim" : 7,
+  "actionDiscreteCount" : 7,
+  "agentStepMsMean" : 0.005552591666666668,
+  "command" : "benchmark",
+  "discreteAction" : {
+    "histogram" : [
+      69477,
+      70058,
+      69761,
+      70043,
+      70197,
+      70004,
+      69932
+    ],
+    "uniqueCount" : 7
+  },
+  "doneCount" : 5,
+  "envId" : "MiniGrid-ObstructedMaze-1Dlh-v0",
+  "envStepMsMean" : 11.902797925000009,
+  "heartbeatSequence" : 10,
+  "measuredBatchCount" : 240,
+  "measuredSeconds" : 2.877395708,
+  "measuredStepCount" : 491520,
+  "numEnvs" : 2048,
+  "observationDim" : 244,
+  "policy" : "random",
+  "rewardSum" : 2.318750023841858,
+  "schemaVersion" : 2,
+  "seed" : 0,
+  "stepsPerSecond" : 170821.13476204575,
+  "stopAfterMeasuredSteps" : 500000,
+  "stopReason" : "heartbeat",
+  "warmupSteps" : 1000
+}

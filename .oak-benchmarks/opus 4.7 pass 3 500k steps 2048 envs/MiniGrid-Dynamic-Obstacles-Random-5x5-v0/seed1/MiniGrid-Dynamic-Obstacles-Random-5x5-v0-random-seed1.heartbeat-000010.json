@@ -1,0 +1,31 @@
+{
+  "actionDim" : 3,
+  "actionDiscreteCount" : 3,
+  "agentStepMsMean" : 0.004786462499999999,
+  "command" : "benchmark",
+  "discreteAction" : {
+    "histogram" : [
+      163598,
+      163066,
+      162808
+    ],
+    "uniqueCount" : 3
+  },
+  "doneCount" : 81329,
+  "envId" : "MiniGrid-Dynamic-Obstacles-Random-5x5-v0",
+  "envStepMsMean" : 12.087931404166673,
+  "heartbeatSequence" : 10,
+  "measuredBatchCount" : 240,
+  "measuredSeconds" : 2.920824209,
+  "measuredStepCount" : 491520,
+  "numEnvs" : 2048,
+  "observationDim" : 244,
+  "policy" : "random",
+  "rewardSum" : -65047.1770529747,
+  "schemaVersion" : 2,
+  "seed" : 1,
+  "stepsPerSecond" : 168281.26748794693,
+  "stopAfterMeasuredSteps" : 500000,
+  "stopReason" : "heartbeat",
+  "warmupSteps" : 1000
+}

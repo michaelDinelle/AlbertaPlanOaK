@@ -7,6 +7,9 @@ snapshots live at `<run-root>/<envId>/seed<N>/<stem>.json` with optional pulses
 if present, else the highest heartbeat index.
 
 Use `--run LABEL DIR` (repeat for multiple runs). Aliases: `--metrics-run`, `--partial-run`.
+
+Emits a **Snapshot coverage** table: `numEnvs` range/distinct values and `measuredStepCount` stats so cross-run
+comparisons stay honest when parallel width or measured length differ.
 """
 
 from __future__ import annotations
@@ -14,12 +17,26 @@ from __future__ import annotations
 import argparse
 import json
 from collections import defaultdict
+from dataclasses import dataclass
 from pathlib import Path
 from statistics import mean, pstdev
 
 EPS = 1e-9
 # env, oak, rnd, Δ, W/L/T, sps_oak, sps_rnd
 Row = tuple[str, float, float, float, str, float, float]
+
+
+@dataclass(frozen=True)
+class RunSnapshotSummary:
+    """Aggregates over every metrics JSON read under the run root (oak + random, all seeds)."""
+
+    num_envs_min: int | None
+    num_envs_max: int | None
+    num_envs_distinct: tuple[int, ...]
+    measured_step_min: int | None
+    measured_step_max: int | None
+    measured_step_mean: float | None
+    snapshot_count: int
 
 
 def _tag(d: float) -> str:
@@ -56,11 +73,13 @@ def _latest_snapshot_per_stem(seed_dir: Path) -> list[Path]:
     return picks
 
 
-def load_run_root(run_root: Path) -> list[Row]:
+def load_run_root(run_root: Path) -> tuple[list[Row], RunSnapshotSummary]:
     """Load rows from `<run-root>/<envId>/seed<N>/*.json` metrics snapshots."""
     agg: dict[str, dict[str, list[float]]] = defaultdict(lambda: {"oak": [], "random": []})
     sps: dict[str, dict[str, list[float]]] = defaultdict(lambda: {"oak": [], "random": []})
     snapshots: list[Path] = []
+    num_envs_vals: list[int] = []
+    measured_steps_vals: list[int] = []
     if run_root.is_dir():
         for env_dir in sorted(run_root.iterdir()):
             if not env_dir.is_dir():
@@ -70,6 +89,12 @@ def load_run_root(run_root: Path) -> list[Row]:
                     snapshots.extend(_latest_snapshot_per_stem(seed_dir))
     for fp in sorted(snapshots):
         j = json.loads(fp.read_text())
+        ne_raw = j.get("numEnvs")
+        if isinstance(ne_raw, (int, float)) and ne_raw > 0:
+            num_envs_vals.append(int(ne_raw))
+        msc = j.get("measuredStepCount")
+        if isinstance(msc, (int, float)) and msc == msc and msc >= 0:
+            measured_steps_vals.append(int(msc))
         pol = j.get("policy")
         if pol not in ("oak", "random"):
             continue
@@ -96,7 +121,17 @@ def load_run_root(run_root: Path) -> list[Row]:
         mso = mean(so) if so else float("nan")
         msr = mean(sr) if sr else float("nan")
         out.append((eid, mo, mr, d, _tag(d), mso, msr))
-    return out
+    ne_dist = tuple(sorted(set(num_envs_vals)))
+    summary = RunSnapshotSummary(
+        num_envs_min=min(num_envs_vals) if num_envs_vals else None,
+        num_envs_max=max(num_envs_vals) if num_envs_vals else None,
+        num_envs_distinct=ne_dist,
+        measured_step_min=min(measured_steps_vals) if measured_steps_vals else None,
+        measured_step_max=max(measured_steps_vals) if measured_steps_vals else None,
+        measured_step_mean=mean(measured_steps_vals) if measured_steps_vals else None,
+        snapshot_count=len(snapshots),
+    )
+    return out, summary
 
 
 def _pick(rows: list[Row], envs: set[str] | None) -> list[Row]:
@@ -153,18 +188,58 @@ def _f(x: float, p: bool = False) -> str:
     return f"{x:.3f}" if p else f"{x:.3e}"
 
 
-def emit(runs: list[tuple[str, list[Row]]], note: str | None, env_note: str | None) -> None:
+def _fmt_ne_dist(t: tuple[int, ...]) -> str:
+    if not t:
+        return "—"
+    if len(t) == 1:
+        return str(t[0])
+    return ", ".join(str(x) for x in t)
+
+
+def emit(
+    runs: list[tuple[str, list[Row]]],
+    summaries: list[tuple[str, RunSnapshotSummary]],
+    note: str | None,
+    env_note: str | None,
+) -> None:
     pre = [(lb, stats(rs), sps_stats(rs)) for lb, rs in runs]
     print("### Definitions")
     if note:
         print(f"- {note}")
     if env_note:
         print(f"- Env filter: {env_note}")
+    print(
+        "- **Reward (TABLE A–C):** `rewardSum` is the sum of rewards over every measured env-step in the window "
+        "(one reward per parallel env per batch). Totals are comparable across different `numEnvs` when "
+        "`measuredStepCount` matches; if runs used different measured lengths or unfinished heartbeats, compare "
+        "the **Measured steps** row below."
+    )
     print("- Δ = mean oak reward − mean random per env (mean over seeds from snapshot JSON in each env folder).")
     print("- W / L / T from sign of Δ; P(Δ>0) = W/n; μ, σ over env rows.")
     print(
-        "- TABLE D: steps/s **per parallel env** from each snapshot: `stepsPerSecond / numEnvs` when both are present."
+        "- **TABLE D:** steps/s **per parallel env**: `stepsPerSecond / numEnvs` (aggregate throughput divided by "
+        "parallel width, so different `numEnvs` does not double-count width in this row)."
     )
+    print(
+        "- **Snapshot coverage table:** min/max/mean over **all** snapshot JSON files under each run root (not restricted "
+        "to the aligned env subset used in TABLE A–D)."
+    )
+    print()
+    print("### Snapshot coverage (parallel width + measured length)")
+    print(
+        "| Run | JSON files | numEnvs min | numEnvs max | numEnvs (distinct) | measuredStepCount min | max | mean |"
+    )
+    print("|-----|------------|-------------|-------------|--------------------|-------------------------|-----|------|")
+    for lb, s in summaries:
+        mn = "—" if s.num_envs_min is None else str(s.num_envs_min)
+        mx = "—" if s.num_envs_max is None else str(s.num_envs_max)
+        ms_min = "—" if s.measured_step_min is None else str(s.measured_step_min)
+        ms_max = "—" if s.measured_step_max is None else str(s.measured_step_max)
+        ms_mean = "—" if s.measured_step_mean is None else f"{s.measured_step_mean:.1f}"
+        print(
+            f"| {lb} | {s.snapshot_count} | {mn} | {mx} | {_fmt_ne_dist(s.num_envs_distinct)} | "
+            f"{ms_min} | {ms_max} | {ms_mean} |"
+        )
     print()
     print("### TABLE A — Summary")
     print("| Run | n | μ_oak | σ_oak | μ_rand | σ_rand | μ_Δ | σ_Δ | P(Δ>0) |")
@@ -230,10 +305,15 @@ def main() -> None:
         else:
             print(f"(skip) {lb} -> {p}", flush=True)
 
-    align = bool(dirs) and not a.na
+    loaded: list[tuple[str, list[Row], RunSnapshotSummary]] = []
+    for lb, d in dirs:
+        rows, summary = load_run_root(d)
+        loaded.append((lb, rows, summary))
+
+    align = bool(loaded) and not a.na
     align_ids: set[str] | None = None
     if align:
-        sets = [{r[0] for r in load_run_root(d)} for _, d in dirs]
+        sets = [{r[0] for r in rows} for _, rows, _ in loaded]
         align_ids = set.intersection(*sets) if sets else set()
         if only:
             align_ids &= only
@@ -243,8 +323,12 @@ def main() -> None:
         return _pick(r, align_ids) if align_ids is not None else r
 
     runs_out: list[tuple[str, list[Row]]] = []
-    for lb, d in dirs:
-        runs_out.append((lb, filt(load_run_root(d))))
+    summaries_out: list[tuple[str, RunSnapshotSummary]] = []
+    for lb, rows, summary in loaded:
+        fr = filt(rows)
+        runs_out.append((lb, fr))
+        # Summaries reflect the same files as load_run_root; reward rows may be filtered by env alignment.
+        summaries_out.append((lb, summary))
 
     if not runs_out:
         print("No inputs. Use --run LABEL DIR (repeat). Example: --run myrun .oak-benchmarks/20260417-073830-69143", flush=True)
@@ -253,12 +337,12 @@ def main() -> None:
     note = None
     if align and align_ids is not None:
         n = len(align_ids)
-        if len(dirs) > 1:
+        if len(loaded) > 1:
             note = f"Aligned: intersection of paired envs across run roots, n={n}."
-    elif dirs and a.na:
+    elif loaded and a.na:
         note = "Unaligned: each run uses all envs with paired oak+random; row counts may differ."
 
-    emit(runs_out, note, env_note)
+    emit(runs_out, summaries_out, note, env_note)
 
 
 if __name__ == "__main__":

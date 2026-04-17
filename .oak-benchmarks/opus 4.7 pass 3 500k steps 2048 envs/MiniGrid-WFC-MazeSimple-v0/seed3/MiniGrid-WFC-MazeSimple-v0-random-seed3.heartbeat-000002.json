@@ -1,0 +1,35 @@
+{
+  "actionDim" : 7,
+  "actionDiscreteCount" : 7,
+  "agentStepMsMean" : 0.0056250625,
+  "command" : "benchmark",
+  "discreteAction" : {
+    "histogram" : [
+      13717,
+      13474,
+      13746,
+      13811,
+      14085,
+      13635,
+      13788
+    ],
+    "uniqueCount" : 7
+  },
+  "doneCount" : 35,
+  "envId" : "MiniGrid-WFC-MazeSimple-v0",
+  "envStepMsMean" : 12.301811562499998,
+  "heartbeatSequence" : 2,
+  "measuredBatchCount" : 48,
+  "measuredSeconds" : 0.603883666,
+  "measuredStepCount" : 98304,
+  "numEnvs" : 2048,
+  "observationDim" : 244,
+  "policy" : "random",
+  "rewardSum" : 33.63019949197769,
+  "schemaVersion" : 2,
+  "seed" : 3,
+  "stepsPerSecond" : 162786.3205029957,
+  "stopAfterMeasuredSteps" : 500000,
+  "stopReason" : "heartbeat",
+  "warmupSteps" : 1000
+}
