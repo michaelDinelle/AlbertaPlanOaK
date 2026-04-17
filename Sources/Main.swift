@@ -720,7 +720,10 @@ final class OakMetalEngine {
         }
     }
 
-    deinit { queue.removeResidencySet(residencySet) }
+    deinit {
+        queue.removeResidencySet(residencySet)
+        residencySet.removeAllAllocations()
+    }
 
     func metalPhaseGpuDiagnostics(measuredBatchSteps: Int) -> (meanMs: [String: Double]?, invalidPhases: [String]?) {
         guard diagnosticGpuPhaseTiming, measuredBatchSteps > 0 else { return (nil, nil) }
