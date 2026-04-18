@@ -316,6 +316,17 @@ inline float track_rate(uint stepCount, float ridge) {
 
 inline uint ceil_sqrt(uint n) { float s = sqrt(float(max(n, 1u))); return uint(ceil(s)); }
 
+// Pass 13 Tier 1: L2-Effective-Rank regularizer strength. Spectral collapse drives plasticity
+// loss (He et al. 2509.22335 ICLR 2026); when the encoder's effective rank pEff falls below
+// the structural rank R, an L2 weight-decay term tied to the rank gap pushes weights toward
+// zero, re-opening collapsed feature dimensions. When pEff ≈ R the regularizer is near-zero,
+// so it has no effect on healthy, full-rank representations. Inv-9 compliant: derived
+// structurally from {alpha0, R, pEff} — no magic constant, no learnable hyperparameter.
+inline float l2er_decay(float alpha0, uint R, float pEff) {
+    float gap = max(0.0f, (float(R) - pEff) / float(max(R, 1u)));
+    return alpha0 * gap;
+}
+
 // Dot product over the active-feature list (gather).
 inline float active_dot_half(device const half *w, uint wBase,
                              device const float *x, uint xBase,
@@ -809,7 +820,10 @@ kernel void oak_learn_value(
         if (feat < ctx.R) {
             ctx.featSM[feat] += (sm * invB - ctx.featSM[feat]) * invT;
         }
-        float wNew = float(ctx.valueW[feat]) + step * g * invB;
+        // Pass 13 Tier 1: L2-Effective-Rank regularizer (Spectral Collapse 2509.22335 ICLR 2026).
+        // wNew = (1 - λ_L2) · w_old + step · g where λ_L2 grows when pEff < R.
+        float lambda_L2 = l2er_decay(ctx.alpha0, ctx.R, ctx.scalars->pEff);
+        float wNew = float(ctx.valueW[feat]) * (1.0f - lambda_L2) + step * g * invB;
         ctx.valueW[feat] = half(wNew);
         if (feat < ctx.R) {
             float decay = 1.0f - ctx.alpha0;
@@ -840,7 +854,12 @@ kernel void oak_learn_encoder(
         float c = ctx.observation[r * ctx.O + feat] - ctx.observationMean[feat];
         g = fma(ctx.td[r], c, g);
     }
-    float eNew = float(ctx.encoder[feat]) + step * g / float(max(ctx.B, 1u));
+    // Pass 13 Tier 1: L2-Effective-Rank regularizer on the encoder (Spectral Collapse 2509.22335
+    // ICLR 2026). The encoder is the most rank-collapse-vulnerable layer (it directly produces
+    // the latent state whose effective rank we track). Decay scales with the rank gap.
+    float lambda_L2 = l2er_decay(ctx.alpha0, ctx.R, ctx.scalars->pEff);
+    float eNew = float(ctx.encoder[feat]) * (1.0f - lambda_L2)
+               + step * g / float(max(ctx.B, 1u));
     ctx.encoder[feat] = half(eNew);
 }
 
@@ -938,7 +957,11 @@ kernel void oak_learn_psi(
     }
     float invB = 1.0f / float(max(ctx.B, 1u));
     uint  pIdx = k * M + m;
-    ctx.psi[pIdx] = half(float(ctx.psi[pIdx]) + step * g * invB);
+    // Pass 13 Tier 1: L2-Effective-Rank regularizer on ψ (Spectral Collapse 2509.22335 ICLR 2026).
+    // ψ uses the same effective-rank signal — when the latent state collapses, its predictor
+    // weights collapse too; decay them in lockstep.
+    float lambda_L2 = l2er_decay(ctx.alpha0, ctx.R, ctx.scalars->pEff);
+    ctx.psi[pIdx] = half(float(ctx.psi[pIdx]) * (1.0f - lambda_L2) + step * g * invB);
 }
 
 // =================================================================================================
@@ -990,7 +1013,12 @@ kernel void oak_learn_pi(
     float invB = 1.0f / float(max(ctx.B, 1u));
     float alpha_eff = ctx.alpha0 / (1.0f + ctx.alpha0 * n2 * invB);
     uint  pIdx = k * ctx.D * ctx.E + d * ctx.E + i;
-    ctx.optPolicy[pIdx] = half(float(ctx.optPolicy[pIdx]) + alpha_eff * g * invB);
+    // Pass 13 Tier 1: L2-Effective-Rank regularizer on π (Spectral Collapse 2509.22335 ICLR 2026).
+    // Same rank-gap decay as encoder/value/psi; keeps option-policy weights from drifting along
+    // collapsed feature directions.
+    float lambda_L2 = l2er_decay(ctx.alpha0, ctx.R, ctx.scalars->pEff);
+    ctx.optPolicy[pIdx] = half(float(ctx.optPolicy[pIdx]) * (1.0f - lambda_L2)
+                              + alpha_eff * g * invB);
 }
 
 // =================================================================================================
