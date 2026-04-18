@@ -589,6 +589,11 @@ private struct KernelScalars {
     var alphaImp: Float = 0, alphaEnc: Float = 0
     // Pass 11 Tier 4: REINFORCE running-mean TD baseline (Williams 1992 variance reduction).
     var tdBaseline: Float = 0
+    // Pass 12 Tier 4.2/4.3: continual EMA of model-prediction error (= optionModelPredictionMSE).
+    // Used to GATE the planning advantage (don't trust the model when it's wrong; Subagent 4's
+    // diagnosis of why Dynamic-Obstacles loses to random) AND to spike β-termination on surprise
+    // (CPD-Option-Critic 2510.24988 + LPM 2509.25438).
+    var modelErrEMA: Float = 0
 }
 
 struct KernelStats {

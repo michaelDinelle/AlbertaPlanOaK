@@ -155,6 +155,12 @@ struct KernelScalars {
     float alphaImp;           // implicit TD step: α₀ / (1 + α₀·⟨‖x_active‖²⟩_batch) — 2510.06149
     float alphaEnc;           // implicit TD step for encoder (centered obs)
     float tdBaseline;         // Pass 11 Tier 4: REINFORCE running-mean TD baseline (Williams 1992)
+    float modelErrEMA;        // Pass 12 Tier 4.2/4.3: continual EMA of mean ψ TD error squared
+                              // (= optionModelPredictionMSE). Drives planning-advantage gating
+                              // (Tier 4.2: scale qk-vCurr by 1/(1+modelErrEMA) so a wrong model
+                              // can't inject biased td) and β-on-surprise termination
+                              // (Tier 4.3: high model error → terminate option; CPD-Option-Critic
+                              // 2510.24988 + LPM 2509.25438 grounding).
 };
 
 // KernelStats — 16 Float fields. Layout must match Swift KernelStats byte-for-byte.
@@ -486,6 +492,13 @@ kernel void oak_meta_policy(
                                        ctx.activeList, ctx.activeCount);
     for (uint k = 0u; k < ctx.K; ++k)
         beta_logit += float(ctx.betaW[ctx.E + k]) * chordPrev[k];
+    // Pass 12 Tier 4.3: β-on-surprise. Add a structural surprise term to the termination
+    // logit — when the model is uncertain (high modelErrEMA), terminate options sooner so
+    // ω can re-sample a fresh chord based on the now-known surprising state. CPD-Option-
+    // Critic (2510.24988) + LPM (2509.25438) grounding: model surprise IS the right signal
+    // for option boundary detection. Scale is "surprise relative to its own EMA" so it's
+    // unit-free and structurally derived (no magic constant).
+    beta_logit += ctx.scalars->modelErrEMA;
     float beta_prob = 1.0f / (1.0f + exp(-beta_logit));
     ctx.betaProb[row] = beta_prob;
 
@@ -646,7 +659,14 @@ kernel void oak_plan(
     }
     if (tid == 0u) {
         // Reuse w_main · curr from oak_predict (Tier 11 fused dot — saves B · activeCount FMAs).
-        ctx.td[row] += qk - ctx.vCurr[row];  // planning-time advantage on main TD
+        // Pass 12 Tier 4.2: model-error-gated planning advantage. When the model is wrong
+        // (high |δ_ψ|² — see ctx.scalars->modelErrEMA), the GPI argmax bonus qk-vCurr
+        // injects systematic bias into td (Subagent 4 forensics: this is what kills OaK on
+        // Dynamic-Obstacles family, where moving obstacles violate ψ predictions). Gate by
+        // 1/(1 + modelErrEMA) — purely structural (no magic constant), shrinks the bonus to
+        // zero as the model gets worse, restores full bonus when model is good.
+        float gateScale = 1.0f / (1.0f + ctx.scalars->modelErrEMA);
+        ctx.td[row] += gateScale * (qk - ctx.vCurr[row]);
         // Pass 11 Tier 3: option_slot is now telemetry-only (set by oak_meta_policy from
         // argmax_k chord[r][k]). plan no longer writes it — chord drives action sampling.
     }
@@ -1404,6 +1424,18 @@ kernel void oak_bk_admit_commit(
     for (uint r = 0u; r < ctx.B; ++r) meanTd += ctx.td[r];
     meanTd /= float(max(ctx.B, 1u));
     ctx.scalars->tdBaseline += (meanTd - ctx.scalars->tdBaseline) * invT;
+
+    // Pass 12 Tier 4.2: track EMA of mean ψ TD error squared as the global model-uncertainty
+    // signal. ctx.tdPsi[r][k] is the cumulant TD δ_k = c_k + ψ(s', λ_prev) − ψ(s, λ_prev) per
+    // option k per row; large |δ_k|² means ψ is a wrong predictor. Used by oak_plan to gate
+    // the planning advantage (don't trust qk when model is wrong → Dynamic-Obstacles fix) and
+    // by oak_meta_policy to add β-on-surprise (terminate options when world is surprising;
+    // CPD-Option-Critic 2510.24988 + LPM 2509.25438).
+    float meanPsiSq = 0.0f;
+    uint psiCount = ctx.B * ctx.K;
+    for (uint i = 0u; i < psiCount; ++i) meanPsiSq = fma(ctx.tdPsi[i], ctx.tdPsi[i], meanPsiSq);
+    meanPsiSq /= float(max(psiCount, 1u));
+    ctx.scalars->modelErrEMA += (meanPsiSq - ctx.scalars->modelErrEMA) * invT;
 
     // Effective-rank via trace/max of featSM (structural stable-rank proxy; 2603.04580).
     float tr = 0.0f, mx = 0.0f;
