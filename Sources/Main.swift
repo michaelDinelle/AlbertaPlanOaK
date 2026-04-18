@@ -463,7 +463,6 @@ final class EnvPoolEnv {
     private(set) var envActionScratch: [Float]
     private(set) var scoreGradScratch: [Float]
     private var discreteIndexScratch: [Int32]
-    private var clampedBoxScratch: [Float]
     private var rngState: UInt64
 
     init(id: String, numEnvs: Int, seed: Int?) throws {
@@ -487,7 +486,6 @@ final class EnvPoolEnv {
         envActionScratch  = Array(repeating: 0, count: numEnvs * envActionWidth)
         scoreGradScratch  = Array(repeating: 0, count: numEnvs * dPolicy)
         discreteIndexScratch = Array(repeating: 0, count: numEnvs)
-        clampedBoxScratch = Array(repeating: 0, count: numEnvs * actDim)
         rngState = UInt64(bitPattern: Int64(seed ?? Int(oakUnseededSeed))) &* 0x9e3779b97f4a7c15 &+ 1
     }
     deinit { bridge.close(handle) }
@@ -783,8 +781,8 @@ final class OakMetalEngine {
     private var phaseGpuTimeSumSeconds: [Double]
     private var phaseGpuInvalidStepCount: [Int]
     private var hostAction: [Float]
-    // Metal 4 ICB + MTLResidencySet (macOS 26). Pre-encoded 13 dispatches execute in one encoder
-    // on the hot path, eliminating per-phase encoder setup (~50µs × 13 = ~650µs/step host savings).
+    // Metal 4 ICB + MTLResidencySet (macOS 26). Pre-encoded `phases.count` dispatches execute in
+    // one encoder on the hot path, eliminating per-phase encoder setup overhead.
     private let indirectCommandBuffer: MTLIndirectCommandBuffer
     private let residencySet: MTLResidencySet
     private let resourceList: [MTLBuffer]
@@ -972,9 +970,10 @@ final class OakMetalEngine {
 
         writeKernelConfig(paramLayout: paramLayout)
 
-        // Pre-encode the 13-phase dispatch graph into the ICB (grids are fixed for the engine's
-        // lifetime; only KernelScalars/KernelStats/params/state data changes between steps).
-        // resourceList is laid out [0..4 = params, state, uint, scalars, stats; 5 = config].
+        // Pre-encode the phase dispatch graph into the ICB (`phases.count` phases; Pass 11 = 18).
+        // Grids are fixed for the engine's lifetime; only KernelScalars/KernelStats/params/state
+        // data changes between steps. resourceList is laid out
+        // [0..4 = params, state, uint, scalars, stats; 5 = config].
         let buffers = resourceList
         for i in 0..<Self.phases.count {
             let cmd = icb.indirectComputeCommandAt(i)
@@ -1553,23 +1552,6 @@ private final class ProbeEnv {
             // bootstrap. After taskHorizon, the row's task resamples (handled in step()).
             copyPersistentToScratch()
         }
-    }
-
-    // Computes optimal action given current observation row r, returning either an index (discrete)
-    // or a continuous vector via the targetWeights matrix. Used to grade the agent's action.
-    private func optimalDiscreteAction(row r: Int) -> Int {
-        var best = 0; var bestV = -Float.greatestFiniteMagnitude
-        for a in 0..<actDim {
-            var v: Float = 0
-            for o in 0..<obsDim { v += targetWeights[a * obsDim + o] * observationScratch[r * obsDim + o] }
-            if v > bestV { bestV = v; best = a }
-        }
-        return best
-    }
-    private func optimalContinuousAction(row r: Int, dim d: Int) -> Float {
-        var v: Float = 0
-        for o in 0..<obsDim { v += targetWeights[d * obsDim + o] * observationScratch[r * obsDim + o] }
-        return max(-1, min(1, v))
     }
 
     // Wrapper-owned sampling + step: read policyMean[B · dPolicy], sample per-component into
