@@ -3,6 +3,10 @@
 /.swiftpm/
 /Packages/
 
+# Auto-generated bench artifacts (yyyyMMdd-HHmmss-<pid>). Curated runs are tracked
+# under named subdirectories like ".oak-benchmarks/<curated-name>/".
+.oak-benchmarks/[0-9]*-[0-9]*-[0-9]*/
+
 # Xcode and Apple toolchains
 /DerivedData/
 *.xcodeproj/xcuserdata/
