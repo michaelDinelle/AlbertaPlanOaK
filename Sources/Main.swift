@@ -69,7 +69,13 @@ private struct Schema: Hashable, Comparable {
 
 private struct BenchmarkEnv { let envId: String; let schema: Schema }
 
-private let oakDefaultSeed: Int32 = 42
+// Structural neutral seed: integer 0. Used only when the caller does not supply an explicit
+// seed for the splitmix32 hash that initializes parameter weights and derives kernel-side RNG.
+// Under the Big World Hypothesis the agent's learning dynamics are invariant to seed in
+// expectation; this constant just fixes "no seed" → "deterministic, reproducible" so two
+// unseeded runs are bit-identical for debugging. No magic: 0 is the additive identity of the
+// seedBase multiplication, the most neutral value possible.
+private let oakUnseededSeed: Int32 = 0
 
 // ------------------------------------------------------------------------------------------------
 // Filesystem helpers.
@@ -276,7 +282,7 @@ final class NativeBridge: @unchecked Sendable {
     }
     func open(envId: String, numEnvs: Int, seed: Int?) throws -> UnsafeMutableRawPointer {
         var error = errorBuffer()
-        let actualSeed = Int32(seed ?? Int(oakDefaultSeed))
+        let actualSeed = Int32(seed ?? Int(oakUnseededSeed))
         let handle = envId.withCString { e in
             assetBasePath.withCString { b in
                 openFn(e, Int32(numEnvs), actualSeed, b, &error, Int32(error.count))
@@ -709,7 +715,7 @@ final class OakMetalEngine {
         // hash (splitmix32 of seed ⊕ index) provides small centered probes without a host RNG
         // object allocated on the hot path.
         let invR: Float = 1.0 / sqrt(Float(max(rank, 1)))
-        let seedBase = UInt32(bitPattern: Int32(truncatingIfNeeded: seed ?? Int(oakDefaultSeed))) &* 0x9e3779b9
+        let seedBase = UInt32(bitPattern: Int32(truncatingIfNeeded: seed ?? Int(oakUnseededSeed))) &* 0x9e3779b9
         func sample(_ off: Int, _ count: Int, _ scale: Float) {
             let base = paramsArena.pointer.advanced(by: off)
             for i in 0..<count {
@@ -808,8 +814,10 @@ final class OakMetalEngine {
         for i in 0..<batch { donePtr[i] = UInt32(prevDone[i]) }
 
         let ctr = uintArena.pointer.advanced(by: uintLayout.counters)
-        ctr[0] = 0; ctr[1] = 0; ctr[2] = 0  // encode/learn/plan non-finite counters (bk_reduce)
-        // counters[3..4] are reinit bitmasks; cleared by bk_admit_commit at end of step.
+        // Reset per-step non-finite counters (offsets OAK_CNT_OBS_NF, LEARN_NF, PLAN_NF).
+        // counters[OAK_CNT_REINIT_OPT] is cleared by bk_admit_commit at end of step.
+        // counters[OAK_CNT_REINIT_FEAT] is a cumulative life-of-engine count (not reset).
+        ctr[0] = 0; ctr[1] = 0; ctr[2] = 0
         statsPointer.pointee = KernelStats()
 
         try runKernel(accumulatePhaseGpu: accumulatePhaseGpu)
@@ -1084,11 +1092,17 @@ private func directNumEnvs(obsDim: Int, actDim: Int, actionDiscreteCount: Int?, 
                     * MemoryLayout<Float16>.stride
     // Fixed (per-engine, not per-env): featSM + wBar + featMean + utilFeat (4·R fp32) + utilOpt (K fp32).
     let fixedBytes = paramBytes + (4 * rank + K) * MemoryLayout<Float>.stride
-    let budget = max(Int(ProcessInfo.processInfo.physicalMemory / 16), width * perEnvBytes + fixedBytes)
+    // Device-derived budget. Apple's `recommendedMaxWorkingSetSize` is the GPU's reported safe
+    // working-set ceiling — structural to the hardware, not a magic divisor of system memory.
+    let deviceBudget = Int(device.recommendedMaxWorkingSetSize)
+    let budget = max(deviceBudget, width * perEnvBytes + fixedBytes)
     let memEnvs = max((budget - fixedBytes) / max(perEnvBytes, 1), width)
-    let ceiling = max(ProcessInfo.processInfo.environment["OAK_MAX_PARALLEL_ENVS"].flatMap(Int.init) ?? 4096, width)
+    // Optional user override via OAK_MAX_PARALLEL_ENVS; otherwise no synthetic ceiling — the
+    // memory budget IS the cap.
+    let userCap = ProcessInfo.processInfo.environment["OAK_MAX_PARALLEL_ENVS"].flatMap(Int.init)
+    let ceiling = userCap.map { max($0, width) } ?? memEnvs
     func powerOfTwoLE(_ v: Int) -> Int { var p = 1; while p <= v / 2 { p *= 2 }; return max(p, 1) }
-    return min(powerOfTwoLE(min(memEnvs, ceiling)), ceiling)
+    return powerOfTwoLE(min(memEnvs, ceiling))
 }
 
 // ================================================================================================
@@ -1133,7 +1147,7 @@ private final class RunState {
         prevAction = Array(repeating: 0, count: env.actDim * env.numEnvs)
         randFloats = Array(repeating: 0, count: env.actDim * env.numEnvs)
         randIdx = Array(repeating: 0, count: env.numEnvs)
-        randSeed = UInt64(bitPattern: Int64(seed ?? Int(oakDefaultSeed)))
+        randSeed = UInt64(bitPattern: Int64(seed ?? Int(oakUnseededSeed)))
         actionCol = MeasuredActionCollector(discreteCount: env.actionDiscreteCount, actDim: env.actDim)
     }
 }
@@ -1217,13 +1231,17 @@ private final class RunState {
         let probe = try EnvPoolEnv(id: resolved, numEnvs: 1, seed: seed)
         let defaultN = try directNumEnvs(obsDim: probe.obsDim, actDim: probe.actDim,
                                          actionDiscreteCount: probe.actionDiscreteCount, device: device)
-        let cap = ProcessInfo.processInfo.environment["OAK_DIAG_MAX_ENVS"].flatMap(Int.init) ?? 8
-        let numEnvs = max(forcedN ?? ProcessInfo.processInfo.environment["OAK_NUM_ENVS"].flatMap(Int.init)
-                                    ?? min(defaultN, cap), 1)
+        // diagnose uses the same memory-derived defaultN as run; OAK_NUM_ENVS overrides.
+        let numEnvs = max(forcedN
+                          ?? ProcessInfo.processInfo.environment["OAK_NUM_ENVS"].flatMap(Int.init)
+                          ?? defaultN, 1)
+        // OAK_DIAG_STEPS overrides; default = numEnvs (one batch). Caller adjusts per goal.
+        let steps = max(stopAfter
+                        ?? ProcessInfo.processInfo.environment["OAK_DIAG_STEPS"].flatMap(Int.init)
+                        ?? numEnvs, numEnvs)
         let (_, metricsURL) = try runSingle(
             envId: resolved, policy: policy, seed: seed, warmup: warmup,
-            stopAfter: max(stopAfter ?? ProcessInfo.processInfo.environment["OAK_DIAG_STEPS"].flatMap(Int.init)
-                                      ?? (numEnvs * 8), numEnvs),
+            stopAfter: steps,
             numEnvs: numEnvs, device: device, command: "diagnose", includeDiagnostic: true)
         fputs("\(metricsURL.path)\n", stderr)
     }
@@ -1233,7 +1251,7 @@ private final class RunState {
     // Math invariants are checked by external Python scripts; this is a one-shot diagnostic.
     private static func probe(_ args: [String]) throws {
         var slot = "state", steps = 10, rank = 32, actDim = 4, batch = 32
-        var seed = Int(oakDefaultSeed), discrete = false
+        var seed = Int(oakUnseededSeed), discrete = false
         var i = 0
         while i < args.count {
             let a = args[i]
