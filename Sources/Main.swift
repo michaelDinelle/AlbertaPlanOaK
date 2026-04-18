@@ -393,7 +393,7 @@ private struct KernelConfig {
     var pEncoder: UInt32 = 0, pValue: UInt32 = 0, pPsi: UInt32 = 0, pOptPolicy: UInt32 = 0
     var sObservation: UInt32 = 0, sObsMean: UInt32 = 0, sState: UInt32 = 0
     var sPrevAction: UInt32 = 0, sAction: UInt32 = 0, sScoreGrad: UInt32 = 0
-    var sReward: UInt32 = 0, sTd: UInt32 = 0, sTdPsi: UInt32 = 0
+    var sReward: UInt32 = 0, sTd: UInt32 = 0, sTdPsi: UInt32 = 0, sVCurr: UInt32 = 0
     var uDone: UInt32 = 0, uActiveMask: UInt32 = 0, uActiveList: UInt32 = 0
     var uOption: UInt32 = 0, uCounters: UInt32 = 0, uSubtaskFeatureOf: UInt32 = 0
     var aFeatSM: UInt32 = 0, aWBar: UInt32 = 0, aFeatMean: UInt32 = 0
@@ -466,7 +466,7 @@ private enum OakMetalLayout {
 
     struct State {
         let observation, obsMean, state, prevAction, action, scoreGrad: Int
-        let reward, td, tdPsi: Int
+        let reward, td, tdPsi, vCurr: Int
         let featSM, wBar, featMean, utilFeat, utilOpt: Int
         let total: Int
     }
@@ -484,14 +484,15 @@ private enum OakMetalLayout {
         let rew = o; o += batch
         let td  = o; o += batch
         let tdP = o; o += batch * K       // K cumulant TDs per row (Design 2 collapse)
+        let vc  = o; o += batch           // vCurr = w_main · curr_state (cached in predict, read by plan)
         let fs  = o; o += rank
         let wb  = o; o += rank
         let fm  = o; o += rank            // per-feature running mean (cumulant centering ρ_k)
         let uf  = o; o += rank
         let uo  = o; o += K
         return State(observation: obs, obsMean: mean, state: st, prevAction: prA, action: act,
-                     scoreGrad: sg, reward: rew, td: td, tdPsi: tdP, featSM: fs, wBar: wb,
-                     featMean: fm, utilFeat: uf, utilOpt: uo, total: o)
+                     scoreGrad: sg, reward: rew, td: td, tdPsi: tdP, vCurr: vc,
+                     featSM: fs, wBar: wb, featMean: fm, utilFeat: uf, utilOpt: uo, total: o)
     }
 
     struct UInts { let done, activeMask, activeList, option, counters, subtaskFeatureOf, total: Int }
@@ -949,6 +950,7 @@ final class OakMetalEngine {
         c.sState = UInt32(s.state); c.sPrevAction = UInt32(s.prevAction)
         c.sAction = UInt32(s.action); c.sScoreGrad = UInt32(s.scoreGrad)
         c.sReward = UInt32(s.reward); c.sTd = UInt32(s.td); c.sTdPsi = UInt32(s.tdPsi)
+        c.sVCurr = UInt32(s.vCurr)
         c.uDone = UInt32(u.done); c.uActiveMask = UInt32(u.activeMask)
         c.uActiveList = UInt32(u.activeList); c.uOption = UInt32(u.option); c.uCounters = UInt32(u.counters)
         c.uSubtaskFeatureOf = UInt32(u.subtaskFeatureOf)

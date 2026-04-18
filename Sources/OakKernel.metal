@@ -103,9 +103,10 @@ struct KernelConfig {
     uint pEncoder, pValue, pPsi, pOptPolicy;
     // State offsets (in fp32 stride). scoreGrad[B · D_params] holds ∇log π(a|s) for the
     // sampled action — written by oak_meta_action, consumed by oak_learn_pi at the *next*
-    // step (when the action's TD error δ becomes available).
+    // step (when the action's TD error δ becomes available). vCurr[B] caches w_main · curr
+    // computed once in oak_predict and read by oak_plan (Tier 11 fused dot).
     uint sObservation, sObsMean, sState, sPrevAction, sAction, sScoreGrad;
-    uint sReward, sTd, sTdPsi;
+    uint sReward, sTd, sTdPsi, sVCurr;
     // UInt offsets. subtaskFeatureOf[K] = state-feature index that cumulant k tracks
     // (top-K by per-feature utility, re-ranked by oak_bk_admit_commit each step; Tier 7 RED).
     uint uDone, uActiveMask, uActiveList, uOption, uCounters, uSubtaskFeatureOf;
@@ -163,6 +164,7 @@ struct Ctx {
     device float  *reward;         // [B]
     device float  *td;             // [B]
     device float  *tdPsi;          // [B][K]  -- one cumulant TD per row per option
+    device float  *vCurr;          // [B]     -- w_main · curr_state, cached by predict, read by plan
 
     device uint   *done;           // [B]
     device uint   *activeMask;     // [R]
@@ -208,6 +210,7 @@ inline Ctx make_ctx(device half *params, device float *stateArena, device uint *
     c.reward          = stateArena + cfg.sReward;
     c.td              = stateArena + cfg.sTd;
     c.tdPsi           = stateArena + cfg.sTdPsi;
+    c.vCurr           = stateArena + cfg.sVCurr;
 
     c.done       = uintArena + cfg.uDone;
     c.activeMask = uintArena + cfg.uActiveMask;
@@ -351,6 +354,7 @@ kernel void oak_predict(
     // (oak_reduce_alpha) + ρ̄ centering keep δ in fp32 dynamic range; no explicit projection.
     float vPrev = active_dot_half(ctx.valueW, 0u, prev, pOff, ctx.activeList, ctx.activeCount);
     float vNext = active_dot_half(ctx.valueW, 0u, curr, cOff, ctx.activeList, ctx.activeCount);
+    ctx.vCurr[gid] = vNext;  // cached for oak_plan to read instead of recomputing (Tier 11)
     float terminalMask = (ctx.done[gid] != 0u) ? 0.0f : 1.0f;
     float dMain = (ctx.reward[gid] - ctx.rho) + terminalMask * vNext - vPrev;
     ctx.td[gid] = dMain;
@@ -434,8 +438,8 @@ kernel void oak_plan(
         k_lane = wins ? k2 : k_lane;
     }
     if (tid == 0u) {
-        float vX = active_dot_half(ctx.valueW, 0u, curr, xOff, ctx.activeList, ctx.activeCount);
-        ctx.td[row] += qk - vX;  // planning-time advantage on main TD
+        // Reuse w_main · curr from oak_predict (Tier 11 fused dot — saves B · activeCount FMAs).
+        ctx.td[row] += qk - ctx.vCurr[row];  // planning-time advantage on main TD
         option_slot(ctx, 1u - ctx.optionSlot)[row] = k_lane;
     }
 }
