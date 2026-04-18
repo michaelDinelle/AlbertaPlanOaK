@@ -375,9 +375,12 @@ private struct KernelConfig {
     var obsDim: UInt32 = 0, rank: UInt32 = 0, actDim: UInt32 = 0, batch: UInt32 = 0
     var optionCount: UInt32 = 0, baseObsDim: UInt32 = 0
     var actionIsDiscrete: UInt32 = 0
+    // actionParamCount = numActions (discrete one-hot) | 2·actDim (continuous Gaussian [μ, log_σ]).
+    // Determines D in optPolicy[K · D · R] and scoreGrad[B · D]. Set at init from action type.
+    var actionParamCount: UInt32 = 0
     var pEncoder: UInt32 = 0, pValue: UInt32 = 0, pPsi: UInt32 = 0, pOptPolicy: UInt32 = 0
     var sObservation: UInt32 = 0, sObsMean: UInt32 = 0, sState: UInt32 = 0
-    var sPrevAction: UInt32 = 0, sAction: UInt32 = 0, sActionGrad: UInt32 = 0
+    var sPrevAction: UInt32 = 0, sAction: UInt32 = 0, sScoreGrad: UInt32 = 0
     var sReward: UInt32 = 0, sTd: UInt32 = 0, sTdPsi: UInt32 = 0
     var uDone: UInt32 = 0, uActiveMask: UInt32 = 0, uActiveList: UInt32 = 0
     var uOption: UInt32 = 0, uCounters: UInt32 = 0
@@ -426,8 +429,16 @@ private enum OakMetalLayout {
     static func psiCount(rank: Int, actDim: Int) -> Int {
         optionCount(rank: rank, actDim: actDim) * concatDim(rank: rank, actDim: actDim)
     }
-    static func optPolicyCount(rank: Int, actDim: Int) -> Int {
-        optionCount(rank: rank, actDim: actDim) * actDim * rank
+    // D_params: numActions for discrete (one logit per action), 2·actDim for continuous Gaussian
+    // ([μ, log_σ] per action dim). Structural — derived purely from action-type signal.
+    static func actionParamCount(actDim: Int, actionDiscreteCount: Int?) -> Int {
+        if let d = actionDiscreteCount, d > 0 { return d }
+        return 2 * actDim
+    }
+    static func optPolicyCount(rank: Int, actDim: Int, actionDiscreteCount: Int?) -> Int {
+        optionCount(rank: rank, actDim: actDim)
+            * actionParamCount(actDim: actDim, actionDiscreteCount: actionDiscreteCount)
+            * rank
     }
     static func discreteLogitHalfWidth(rank: Int, actDim: Int) -> Float {
         min(sqrtf(Float(max(rank * actDim, 1))), logf(Float.greatestFiniteMagnitude))
@@ -437,30 +448,33 @@ private enum OakMetalLayout {
     }
 
     struct Param { let encoder, value, psi, optPolicy, total: Int }
-    static func paramLayout(obsDim: Int, rank: Int, actDim: Int) -> Param {
+    static func paramLayout(obsDim: Int, rank: Int, actDim: Int, actionDiscreteCount: Int?) -> Param {
         var o = 0
         let enc = o; o += rank
         let val = o; o += rank
         let psi = o; o += psiCount(rank: rank, actDim: actDim)
-        let op  = o; o += optPolicyCount(rank: rank, actDim: actDim)
+        let op  = o; o += optPolicyCount(rank: rank, actDim: actDim,
+                                          actionDiscreteCount: actionDiscreteCount)
         return Param(encoder: enc, value: val, psi: psi, optPolicy: op, total: o)
     }
 
     struct State {
-        let observation, obsMean, state, prevAction, action, actionGrad: Int
+        let observation, obsMean, state, prevAction, action, scoreGrad: Int
         let reward, td, tdPsi: Int
         let featSM, wBar, featMean, utilFeat, utilOpt: Int
         let total: Int
     }
-    static func stateLayout(obsDim: Int, rank: Int, actDim: Int, batch: Int) -> State {
+    static func stateLayout(obsDim: Int, rank: Int, actDim: Int, batch: Int,
+                            actionDiscreteCount: Int?) -> State {
         let K = optionCount(rank: rank, actDim: actDim)
+        let D = actionParamCount(actDim: actDim, actionDiscreteCount: actionDiscreteCount)
         var o = 0
         let obs = o; o += batch * obsDim
         let mean = o; o += obsDim
         let st = o; o += 2 * batch * rank
         let prA = o; o += batch * actDim
         let act = o; o += batch * actDim
-        let ag  = o; o += batch * actDim
+        let sg  = o; o += batch * D       // score function ∇log π(a|s) for the SAMPLED action
         let rew = o; o += batch
         let td  = o; o += batch
         let tdP = o; o += batch * K       // K cumulant TDs per row (Design 2 collapse)
@@ -470,7 +484,7 @@ private enum OakMetalLayout {
         let uf  = o; o += rank
         let uo  = o; o += K
         return State(observation: obs, obsMean: mean, state: st, prevAction: prA, action: act,
-                     actionGrad: ag, reward: rew, td: td, tdPsi: tdP, featSM: fs, wBar: wb,
+                     scoreGrad: sg, reward: rew, td: td, tdPsi: tdP, featSM: fs, wBar: wb,
                      featMean: fm, utilFeat: uf, utilOpt: uo, total: o)
     }
 
@@ -510,16 +524,22 @@ final class OakMetalEngine {
     // Reduction kernels use fixed 128-thread TGs (4 SIMD groups × 32) with hierarchical simd_sum;
     // plan uses 32 (one SIMD group per row, SIMD-shuffle argmax).
     private struct Phase { let name: String; let tgSize: Int }
+    // Phase ordering: meta_action runs LAST among learn-time kernels so that learn_pi reads
+    // the score function written at the *previous* step's meta_action — i.e., the score for
+    // action_{N-1} taken at state_{N-1}, which is the action that produced the transition
+    // whose TD δ_N is being learned from. No prevScoreGrad slot needed; arena holds a single
+    // scoreGrad slot that is read by learn_pi (this step) before being overwritten by
+    // meta_action (this step) for the next step's learning.
     private static let phases: [Phase] = [
         Phase(name: "oak_encode",             tgSize: 0),
         Phase(name: "oak_predict",            tgSize: 0),
         Phase(name: "oak_plan",               tgSize: 32),
-        Phase(name: "oak_meta_action",        tgSize: 0),
         Phase(name: "oak_reduce_alpha",       tgSize: 128),
         Phase(name: "oak_learn_value",        tgSize: 32),
         Phase(name: "oak_learn_encoder",      tgSize: 0),
         Phase(name: "oak_learn_psi",          tgSize: 0),
-        Phase(name: "oak_learn_opt_policy",   tgSize: 0),
+        Phase(name: "oak_learn_pi",           tgSize: 0),
+        Phase(name: "oak_meta_action",        tgSize: 0),
         Phase(name: "oak_bk_reduce",          tgSize: 128),
         Phase(name: "oak_bk_feature",         tgSize: 32),
         Phase(name: "oak_bk_option",          tgSize: 128),
@@ -528,6 +548,7 @@ final class OakMetalEngine {
 
     private let obsDim, baseObsDim, actDim, batch, rank: Int
     private let actionIsDiscrete: Bool
+    private let actionParamCount: Int
     private let queue: MTLCommandQueue
     private let cbDesc: MTLCommandBufferDescriptor
     private let pipelines: [MTLComputePipelineState]
@@ -617,8 +638,15 @@ final class OakMetalEngine {
         statsPointer.initialize(to: KernelStats())
         configPointer.initialize(to: KernelConfig())
 
-        let paramLayout = OakMetalLayout.paramLayout(obsDim: obsDim, rank: rank, actDim: actDim)
-        stateLayout = OakMetalLayout.stateLayout(obsDim: obsDim, rank: rank, actDim: actDim, batch: batch)
+        let actionDiscreteCount = actionIsDiscrete ? actDim : nil
+        let paramLayout = OakMetalLayout.paramLayout(obsDim: obsDim, rank: rank, actDim: actDim,
+                                                     actionDiscreteCount: actionDiscreteCount)
+        stateLayout = OakMetalLayout.stateLayout(obsDim: obsDim, rank: rank, actDim: actDim,
+                                                 batch: batch,
+                                                 actionDiscreteCount: actionDiscreteCount)
+        let actionParamCount = OakMetalLayout.actionParamCount(actDim: actDim,
+                                                                actionDiscreteCount: actionDiscreteCount)
+        self.actionParamCount = actionParamCount
         uintLayout  = OakMetalLayout.uintLayout(rank: rank, batch: batch)
         paramsArena = Shared(device: device, count: paramLayout.total, zero: Float16(0))
         stateArena  = Shared(device: device, count: stateLayout.total, zero: Float(0))
@@ -627,17 +655,18 @@ final class OakMetalEngine {
         // Cache per-phase grid width so there's no allocation on the hot path.
         let K = OakMetalLayout.optionCount(rank: rank, actDim: actDim)
         let M = OakMetalLayout.concatDim(rank: rank, actDim: actDim)
+        // meta_action: discrete = 1 thread/row (samples one index); continuous = 1 thread/(row·dim).
         let metaActionGrid = actionIsDiscrete ? batch : batch * actDim
         phaseGridWidths = [
             batch * rank,                     // oak_encode              [dispatchThreads]
             batch,                            // oak_predict             [dispatchThreads]
             batch,                            // oak_plan                [B TGs × 32]
-            metaActionGrid,                   // oak_meta_action         [dispatchThreads]
             1,                                // oak_reduce_alpha        [1 TG × 128]
             rank,                             // oak_learn_value         [R TGs × 32]
             max(baseObsDim, 1),               // oak_learn_encoder       [dispatchThreads]
             K * M,                            // oak_learn_psi           [dispatchThreads]
-            K * actDim * rank,                // oak_learn_opt_policy    [dispatchThreads]
+            K * actionParamCount * rank,      // oak_learn_pi            [dispatchThreads]
+            metaActionGrid,                   // oak_meta_action         [dispatchThreads]
             1,                                // oak_bk_reduce           [1 TG × 128]
             rank,                             // oak_bk_feature          [R TGs × 32]
             K,                                // oak_bk_option           [K TGs × 128]
@@ -691,7 +720,10 @@ final class OakMetalEngine {
         sample(paramLayout.encoder, rank, invR)
         sample(paramLayout.value, rank, invR)
         sample(paramLayout.psi, OakMetalLayout.psiCount(rank: rank, actDim: actDim), invR)
-        sample(paramLayout.optPolicy, OakMetalLayout.optPolicyCount(rank: rank, actDim: actDim), invR)
+        sample(paramLayout.optPolicy,
+               OakMetalLayout.optPolicyCount(rank: rank, actDim: actDim,
+                                             actionDiscreteCount: actionDiscreteCount),
+               invR)
         // ψ diagonal seed: cumulant k's W_ψ[k] · concat[s, λ] gets a +1/√R coefficient on its own
         // state feature index k (RRS feature-attainment initialization; Alberta Plan A.6 / OBB
         // §2.4). The first R weights of W_ψ[k] are state weights; index [k][k] is "predict
@@ -808,8 +840,11 @@ final class OakMetalEngine {
 
     func probeSlot(_ name: String) throws -> [Float] {
         let s = stateLayout
-        let p = OakMetalLayout.paramLayout(obsDim: obsDim, rank: rank, actDim: actDim)
+        let actionDiscreteCount = actionIsDiscrete ? actDim : nil
+        let p = OakMetalLayout.paramLayout(obsDim: obsDim, rank: rank, actDim: actDim,
+                                           actionDiscreteCount: actionDiscreteCount)
         let K = OakMetalLayout.optionCount(rank: rank, actDim: actDim)
+        let D = actionParamCount
         // bk_admit_commit toggles stateSlot at end of each step; the just-written ("current")
         // state therefore lives at offset stateSlot, the previous slot at 1 - stateSlot.
         let curSlot = Int(scalarsPointer.pointee.stateSlot)
@@ -832,9 +867,11 @@ final class OakMetalEngine {
         case "action":
             return Array(UnsafeBufferPointer(
                 start: stateArena.pointer.advanced(by: s.action), count: batch * actDim))
-        case "actionGrad":
+        case "scoreGrad":
             return Array(UnsafeBufferPointer(
-                start: stateArena.pointer.advanced(by: s.actionGrad), count: batch * actDim))
+                start: stateArena.pointer.advanced(by: s.scoreGrad), count: batch * D))
+        case "actionParamCount":
+            return [Float(D)]
         case "valueW":
             return (0..<rank).map { Float(paramsArena.pointer[p.value + $0]) }
         case "encoderW":
@@ -842,7 +879,8 @@ final class OakMetalEngine {
         case "psi_total_count":
             return [Float(OakMetalLayout.psiCount(rank: rank, actDim: actDim))]
         case "policy_total_count":
-            return [Float(OakMetalLayout.optPolicyCount(rank: rank, actDim: actDim))]
+            return [Float(OakMetalLayout.optPolicyCount(rank: rank, actDim: actDim,
+                                                        actionDiscreteCount: actionDiscreteCount))]
         case "rho":
             return [scalarsPointer.pointee.rho]
         case "activeRank":
@@ -886,11 +924,12 @@ final class OakMetalEngine {
         c.obsDim = UInt32(obsDim); c.rank = UInt32(rank); c.actDim = UInt32(actDim)
         c.batch = UInt32(batch); c.optionCount = UInt32(K); c.baseObsDim = UInt32(baseObsDim)
         c.actionIsDiscrete = actionIsDiscrete ? 1 : 0
+        c.actionParamCount = UInt32(actionParamCount)
         c.pEncoder = UInt32(p.encoder); c.pValue = UInt32(p.value)
         c.pPsi = UInt32(p.psi);         c.pOptPolicy = UInt32(p.optPolicy)
         c.sObservation = UInt32(s.observation); c.sObsMean = UInt32(s.obsMean)
         c.sState = UInt32(s.state); c.sPrevAction = UInt32(s.prevAction)
-        c.sAction = UInt32(s.action); c.sActionGrad = UInt32(s.actionGrad)
+        c.sAction = UInt32(s.action); c.sScoreGrad = UInt32(s.scoreGrad)
         c.sReward = UInt32(s.reward); c.sTd = UInt32(s.td); c.sTdPsi = UInt32(s.tdPsi)
         c.uDone = UInt32(u.done); c.uActiveMask = UInt32(u.activeMask)
         c.uActiveList = UInt32(u.activeList); c.uOption = UInt32(u.option); c.uCounters = UInt32(u.counters)
@@ -1021,12 +1060,15 @@ private func directNumEnvs(obsDim: Int, actDim: Int, actionDiscreteCount: Int?, 
     let width = try OakMetalEngine.executionWidth(device: device)
     let rank = obsDim
     let K = OakMetalLayout.optionCount(rank: rank, actDim: actDim)
-    let perEnvFloats =  // state double buffer, obs, actions (3·A), tdPsi (K), reward, td
-        obsDim + 2 * rank + 3 * actDim + K + 2
+    let D = OakMetalLayout.actionParamCount(actDim: actDim, actionDiscreteCount: actionDiscreteCount)
+    let perEnvFloats =  // state double-buffer (2R), obs (O), action+prevAction (2A), scoreGrad (D),
+                        // tdPsi (K), reward (1), td (1).
+        obsDim + 2 * rank + 2 * actDim + D + K + 2
     let perEnvUints = 1 + 2  // done + option slots
     let perEnvBytes = perEnvFloats * MemoryLayout<Float>.stride
                     + perEnvUints  * MemoryLayout<UInt32>.stride
-    let paramBytes = OakMetalLayout.paramLayout(obsDim: obsDim, rank: rank, actDim: actDim).total
+    let paramBytes = OakMetalLayout.paramLayout(obsDim: obsDim, rank: rank, actDim: actDim,
+                                                 actionDiscreteCount: actionDiscreteCount).total
                     * MemoryLayout<Float16>.stride
     // Fixed (per-engine, not per-env): featSM + wBar + featMean + utilFeat (4·R fp32) + utilOpt (K fp32).
     let fixedBytes = paramBytes + (4 * rank + K) * MemoryLayout<Float>.stride

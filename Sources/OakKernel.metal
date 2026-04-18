@@ -51,12 +51,18 @@ using namespace metal;
 //   valueW[R]                                   w_main (main-task linear value)
 //   psi[K · M]                                  W_ψ[k] · concat[s, λ]: shared chord-conditional
 //                                               SF (Design 2; OBB §2.4 Eq.4). M = R + K.
-//   optPolicy[K · A · R]                        per-option action logits (Tier 6 collapses to A·M)
+//   optPolicy[K · D · R]                        per-option action params; D = numActions
+//                                               (discrete logits) | 2·actDim (continuous Gaussian
+//                                               [μ_d, log_σ_d]). Sampled in oak_meta_action with
+//                                               canonical score function ∇log π in scoreGrad arena.
 // State arena (fp32):
 //   observation[B·O]                            centered → state[slot · B · R]
 //   observationMean[O]                          online Welford mean for encoder centering
 //   state[2 · B · R]                            double-buffered (slot toggles each step; S5)
-//   prevAction[B·A], action[B·A], actionGrad[B·A], reward[B], td[B]
+//   prevAction[B·A]                             previous step's action (sent to env at step N-1)
+//   action[B·A]                                 current step's sampled action (will be sent to env)
+//   scoreGrad[B·D]                              ∇_θ log π(a|s) for the sampled action — REINFORCE
+//   reward[B], td[B]
 //   tdPsi[B · K]                                K cumulant TDs per row (Design 2 collapse)
 // UInt arena:
 //   done[B], activeMask[R], activeList[R]
@@ -78,11 +84,16 @@ constant uint OAK_SIMD = 32u;
 struct KernelConfig {
     uint obsDim, rank, actDim, batch, optionCount, baseObsDim;
     uint actionIsDiscrete;
+    // D_params: numActions for discrete (one logit per action), 2·actDim for continuous Gaussian
+    // ([μ, log_σ] per action dim). Determines optPolicy[K · D · R] and scoreGrad[B · D] shapes.
+    uint actionParamCount;
     // Param offsets (in fp16 stride). ψ is laid out as [K rows × M cols] where M = R + K
     // (Alberta Plan Design 2: shared chord-conditional ψ_k(s, λ) = W_ψ[k] · concat[s, λ]).
     uint pEncoder, pValue, pPsi, pOptPolicy;
-    // State offsets (in fp32 stride)
-    uint sObservation, sObsMean, sState, sPrevAction, sAction, sActionGrad;
+    // State offsets (in fp32 stride). scoreGrad[B · D_params] holds ∇log π(a|s) for the
+    // sampled action — written by oak_meta_action, consumed by oak_learn_pi at the *next*
+    // step (when the action's TD error δ becomes available).
+    uint sObservation, sObsMean, sState, sPrevAction, sAction, sScoreGrad;
     uint sReward, sTd, sTdPsi;
     // UInt offsets
     uint uDone, uActiveMask, uActiveList, uOption, uCounters;
@@ -126,7 +137,7 @@ struct KernelStats {
 // M = R + K is the concat dim for ψ's chord-conditional input.
 // -------------------------------------------------------------------------------------------------
 struct Ctx {
-    uint R, A, B, K, O, baseO, M;
+    uint R, A, B, K, O, baseO, M, D;
     uint activeCount, stepCount;
     uint stateSlot, optionSlot;
     float cap, alpha0, ridge, rho;
@@ -136,14 +147,14 @@ struct Ctx {
     device half   *encoder;
     device half   *valueW;
     device half   *psi;            // [K][M] : W_ψ[k] = (state weights, chord weights)
-    device half   *optPolicy;      // [K][A][R]
+    device half   *optPolicy;      // [K][D][R] : per-option action params (μ_d, log_σ_d, or logit)
 
     device float  *observation;    // [B][O]
     device float  *observationMean;// [O]
     device float  *state;          // [2][B][R]
-    device float  *prevAction;     // [B][A]
-    device float  *action;         // [B][A]
-    device float  *actionGrad;     // [B][A]
+    device float  *prevAction;     // [B][A] : action sent to env on previous step
+    device float  *action;         // [B][A] : action being sent to env this step (sampled)
+    device float  *scoreGrad;      // [B][D] : ∇log π(a|s) score function for sampled action
     device float  *reward;         // [B]
     device float  *td;             // [B]
     device float  *tdPsi;          // [B][K]  -- one cumulant TD per row per option
@@ -169,6 +180,7 @@ inline Ctx make_ctx(device half *params, device float *stateArena, device uint *
     c.R = cfg.rank; c.A = cfg.actDim; c.B = cfg.batch; c.K = max(cfg.optionCount, 1u);
     c.O = cfg.obsDim; c.baseO = cfg.baseObsDim;
     c.M = c.R + c.K;
+    c.D = max(cfg.actionParamCount, 1u);
     c.activeCount = scalars->activeCount;
     c.stepCount   = scalars->stepCount;
     c.stateSlot   = scalars->stateSlot;
@@ -189,7 +201,7 @@ inline Ctx make_ctx(device half *params, device float *stateArena, device uint *
     c.state           = stateArena + cfg.sState;
     c.prevAction      = stateArena + cfg.sPrevAction;
     c.action          = stateArena + cfg.sAction;
-    c.actionGrad      = stateArena + cfg.sActionGrad;
+    c.scoreGrad       = stateArena + cfg.sScoreGrad;
     c.reward          = stateArena + cfg.sReward;
     c.td              = stateArena + cfg.sTd;
     c.tdPsi           = stateArena + cfg.sTdPsi;
@@ -421,13 +433,27 @@ kernel void oak_plan(
 }
 
 // =================================================================================================
-// meta_action — emit discrete or continuous action for the row, under π_{O*} where O* was just
-// written by oak_plan (no chord blending — F5, validated 2602.19634 GPI / 2505.00787 OBB).
-// Discrete sampling uses a deterministic Gumbel-max via a structural hash of (stepCount, row) —
-// no host RNG round-trip (S3). Continuous actions clamp the option-policy logit to env bounds.
+// meta_action — emit action by sampling from the active option's chord-conditional policy AND
+// compute the canonical score function ∇_θ log π(a | s) for that sample. Replaces the broken
+// `actionGrad = clamp(logit)` from pre-pass-9 (which was identically equal to `action` and
+// produced a zero score). REINFORCE policy gradient (Tier 6).
 //
-// Dispatch grid: B threads (one per row) for discrete; B·A threads for continuous. Host picks
-// based on fc_action_is_discrete. Eliminates (A-1)/A wasted threads on the discrete path.
+// Discrete (D = numActions, A action one-hots):
+//   logits[d] = W_π[k*][d] · s_curr,     π_d = softmax(logits)
+//   sample a* via Gumbel-max with splitmix32 hash → action = one-hot(a*)
+//   scoreGrad[d] = 1{d=a*} − π_d         (= ∇_logit_d log π(a*|s))
+//
+// Continuous (D = 2·A, [μ_d, log_σ_d] per dim):
+//   μ_d     = W_π[k*][2d]   · s_curr     (state-conditional mean)
+//   log_σ_d = W_π[k*][2d+1] · s_curr     (state-conditional log-std; σ = exp(log_σ) > 0 always)
+//   z_d ~ N(0, 1) via Box-Muller from splitmix32(step, row, d) (pair of uniforms)
+//   action[d] = μ_d + σ_d · z_d
+//   scoreGrad[2d]   = z_d / σ_d                  (= (a−μ)/σ²; ∇_μ log p)
+//   scoreGrad[2d+1] = (z_d² − 1) / 2             (= ((a−μ)²/σ² − 1)/2; ∇_logσ log p)
+//
+// No clamping anywhere — env clamps action at FFI host boundary; implicit α + reward centering
+// keep the parameter updates bounded under the Big World Hypothesis (Kim 2510.06149).
+//   [Grid: B (discrete) | B · A (continuous)]
 // =================================================================================================
 inline uint splitmix32(uint x) {
     x += 0x9e3779b9u;
@@ -437,7 +463,8 @@ inline uint splitmix32(uint x) {
 }
 inline float hash_uniform(uint step, uint row, uint dim) {
     uint h = splitmix32(step ^ splitmix32(row ^ splitmix32(dim)));
-    return max(float(h >> 8) * 5.9604645e-8f, 1e-7f);
+    // Convert 24-bit mantissa to (0, 1). FLT_MIN floor avoids log(0) in Gumbel-max / Box-Muller.
+    return max(float(h >> 8) * 5.9604645e-8f, FLT_MIN);
 }
 
 kernel void oak_meta_action(
@@ -458,32 +485,68 @@ kernel void oak_meta_action(
         if (row >= ctx.B) return;
         uint optK = option_slot(ctx, 1u - ctx.optionSlot)[row];
         uint xOff = row * ctx.R;
+        uint optBase = optK * ctx.D * ctx.R;
+
+        // Pass 1: logits, max for numerically-stable softmax, Gumbel-max sample.
         uint bestA = 0u;
-        float bestL = -FLT_MAX;
-        for (uint d = 0u; d < ctx.A; ++d) {
-            uint pb = optK * ctx.A * ctx.R + d * ctx.R;
+        float bestG = -FLT_MAX;
+        float maxLogit = -FLT_MAX;
+        // We need logits twice (for Gumbel-max and softmax). Compute on the fly twice — D ≤ 32
+        // for typical actDim, and active_dot is only O(activeCount) reads per d.
+        for (uint d = 0u; d < ctx.D; ++d) {
+            uint pb = optBase + d * ctx.R;
             float ld = active_dot_half(ctx.optPolicy, pb, curr, xOff,
                                        ctx.activeList, ctx.activeCount);
+            maxLogit = max(maxLogit, ld);
             float u = hash_uniform(ctx.stepCount, row, d);
             float g = -log(-log(u));
-            float s = ld + g;
-            if (s > bestL) { bestL = s; bestA = d; }
+            if (ld + g > bestG) { bestG = ld + g; bestA = d; }
         }
-        for (uint d = 0u; d < ctx.A; ++d) {
-            float v = (d == bestA) ? 1.0f : 0.0f;
-            ctx.action[row * ctx.A + d]     = v;
-            ctx.actionGrad[row * ctx.A + d] = v;
+        // Pass 2: softmax denominator and per-d score = 1{d=a*} − π_d. Write action one-hot
+        // and per-logit score.
+        float Z = 0.0f;
+        for (uint d = 0u; d < ctx.D; ++d) {
+            uint pb = optBase + d * ctx.R;
+            float ld = active_dot_half(ctx.optPolicy, pb, curr, xOff,
+                                       ctx.activeList, ctx.activeCount);
+            Z += exp(ld - maxLogit);
+        }
+        float invZ = 1.0f / max(Z, FLT_MIN);
+        for (uint d = 0u; d < ctx.D; ++d) {
+            uint pb = optBase + d * ctx.R;
+            float ld = active_dot_half(ctx.optPolicy, pb, curr, xOff,
+                                       ctx.activeList, ctx.activeCount);
+            float pi_d = exp(ld - maxLogit) * invZ;
+            float chosen = (d == bestA) ? 1.0f : 0.0f;
+            ctx.action[row * ctx.A + d]    = chosen;     // env reads one-hot
+            ctx.scoreGrad[row * ctx.D + d] = chosen - pi_d;
         }
     } else {
+        // Continuous Gaussian: 1 thread per (row, action_dim).
         uint row = gid / ctx.A, a = gid % ctx.A;
         if (row >= ctx.B) return;
         uint optK = option_slot(ctx, 1u - ctx.optionSlot)[row];
         uint xOff = row * ctx.R;
-        uint polBase = optK * ctx.A * ctx.R + a * ctx.R;
-        float logit = active_dot_half(ctx.optPolicy, polBase, curr, xOff,
-                                      ctx.activeList, ctx.activeCount);
-        ctx.action[row * ctx.A + a]     = logit;
-        ctx.actionGrad[row * ctx.A + a] = logit;
+        uint optBase = optK * ctx.D * ctx.R;
+
+        // μ_a, log_σ_a from the (2a, 2a+1) rows of optPolicy[k*].
+        float mu     = active_dot_half(ctx.optPolicy, optBase + (2u * a    ) * ctx.R,
+                                       curr, xOff, ctx.activeList, ctx.activeCount);
+        float log_sg = active_dot_half(ctx.optPolicy, optBase + (2u * a + 1u) * ctx.R,
+                                       curr, xOff, ctx.activeList, ctx.activeCount);
+        float sigma = exp(log_sg);  // > 0 always; no clamp
+
+        // Box-Muller Gaussian sample. Two structural splitmix32 hashes → two uniforms → one z.
+        float u1 = hash_uniform(ctx.stepCount, row, 2u * a);
+        float u2 = hash_uniform(ctx.stepCount, row, 2u * a + 1u);
+        float z  = sqrt(-2.0f * log(u1)) * cos(2.0f * M_PI_F * u2);
+
+        float aSample = mu + sigma * z;
+        ctx.action[row * ctx.A + a] = aSample;
+        // ∇_μ log p     = (a − μ) / σ²       = z / σ
+        // ∇_logσ log p  = ((a−μ)²/σ² − 1)/2  = (z² − 1) / 2
+        ctx.scoreGrad[row * ctx.D + 2u * a    ] = z / max(sigma, FLT_MIN);
+        ctx.scoreGrad[row * ctx.D + 2u * a + 1u] = (z * z - 1.0f) * 0.5f;
     }
 }
 
@@ -641,11 +704,20 @@ kernel void oak_learn_psi(
 }
 
 // =================================================================================================
-// learn_opt_policy — semi-grad streaming AC on π_k (2410.14606; no λ-trace — Inv 9). Gradient:
-// advantage (≡ td[row] with plan boost) × action indicator × prev_state.
-//   [Grid: K · A · R]
+// learn_pi — REAL REINFORCE on the chord-conditional policy. Gradient for parameter (k, d, i):
+//   g[k,d,i] = (1 / |rows_k|) Σ_{r: opt(r)==k} δ_r · scoreGrad[r,d] · prev_state[r,i]
+// where δ_r = td[r] is the main differential TD (with planning advantage from oak_plan), and
+// scoreGrad[r,d] is the canonical ∇_θ_d log π(a_r | s_r) computed by oak_meta_action at the
+// PREVIOUS step (because phase order puts learn_pi BEFORE meta_action in the same step — so
+// scoreGrad in arena is still the score for action_{N-1} at state_{N-1}, which produced the
+// transition whose δ_N is being learned from).
+//
+// Replaces pre-pass-9 `td · prev · prevAction` (the "policy collapse" bug — prevAction was a
+// bounded clamped scalar, not a score function). Implicit α (Kim 2510.06149) provides per-step
+// contraction; reward centering keeps δ bounded; no clamp on the parameter update.
+//   [Grid: K · D · R]
 // =================================================================================================
-kernel void oak_learn_opt_policy(
+kernel void oak_learn_pi(
     device half   *params     [[buffer(0)]],
     device float  *stateArena [[buffer(1)]],
     device uint   *uintArena  [[buffer(2)]],
@@ -656,10 +728,10 @@ kernel void oak_learn_opt_policy(
     uint gid [[thread_position_in_grid]])
 {
     Ctx ctx = make_ctx(params, stateArena, uintArena, scalars, cfg);
-    uint k = gid / (ctx.A * ctx.R);
-    uint rem = gid - k * ctx.A * ctx.R;
-    uint a = rem / ctx.R, i = rem % ctx.R;
-    if (k >= ctx.K || a >= ctx.A || i >= ctx.R) return;
+    uint k = gid / (ctx.D * ctx.R);
+    uint rem = gid - k * ctx.D * ctx.R;
+    uint d = rem / ctx.R, i = rem % ctx.R;
+    if (k >= ctx.K || d >= ctx.D || i >= ctx.R) return;
     if (ctx.activeMask[i] == 0u) return;
 
     device const float *prev = state_slot(ctx, ctx.stateSlot);
@@ -668,14 +740,13 @@ kernel void oak_learn_opt_policy(
     uint  cnt = 0u;
     for (uint r = 0u; r < ctx.B; ++r) {
         if (active_option(ctx, r) != k) continue;
-        g = fma(ctx.td[r] * prev[r * ctx.R + i], ctx.prevAction[r * ctx.A + a], g);
+        g = fma(ctx.td[r] * prev[r * ctx.R + i], ctx.scoreGrad[r * ctx.D + d], g);
         cnt++;
     }
     if (cnt == 0u) return;
     float invCnt = 1.0f / float(cnt);
-    uint  pIdx = k * ctx.A * ctx.R + a * ctx.R + i;
-    float pNew = float(ctx.optPolicy[pIdx]) + step * g * invCnt;
-    ctx.optPolicy[pIdx] = half(pNew);
+    uint  pIdx = k * ctx.D * ctx.R + d * ctx.R + i;
+    ctx.optPolicy[pIdx] = half(float(ctx.optPolicy[pIdx]) + step * g * invCnt);
 }
 
 // =================================================================================================
@@ -748,26 +819,33 @@ kernel void oak_bk_reduce(
     float maxLat = tg_max_128(maxLat_l, sg_maxLat, tid, sgid);
     float nLearn = tg_sum_128(nLearn_l, sg_nLearn, tid, sgid);
 
-    // (3) Per-(row, a) reductions: plan L2, action delta, maxPol, nPlan. Actions are bounded at
-    // FFI host boundary; non-finite guard zeroes overflow contribution before squaring.
-    float pL2_l = 0.0f, ad_l = 0.0f, maxPol_l = 0.0f, nPlan_l = 0.0f;
+    // (3) Per-(row, a) reductions: action variance, action delta vs prev, max|action|, non-finite.
+    // Action delta vs prev (was `actionDeltaL2Mean`) is the actuation change signal. The old
+    // `planningActionChangeL2Mean` used actionGrad which was identically equal to action under
+    // pre-pass-9 — meaningless after the policy-grad refactor and removed.
+    float ad_l = 0.0f, sgL2_l = 0.0f, maxPol_l = 0.0f, nPlan_l = 0.0f;
     uint total_ra = ctx.B * ctx.A;
     for (uint idx = tid; idx < total_ra; idx += tgW) {
         uint r = idx / ctx.A, a = idx % ctx.A;
         float x = ctx.action[r * ctx.A + a];
-        float yg = ctx.actionGrad[r * ctx.A + a];
         float py = ctx.prevAction[r * ctx.A + a];
-        bool nf = !isfinite(x) || !isfinite(yg);
-        if (nf) { nPlan_l += 1.0f; x = 0.0f; yg = 0.0f; }
-        float p1 = x - yg;
+        bool nf = !isfinite(x);
+        if (nf) { nPlan_l += 1.0f; x = 0.0f; }
         float p2 = x - py;
-        pL2_l = fma(p1, p1, pL2_l);
-        ad_l  = fma(p2, p2, ad_l);
+        ad_l = fma(p2, p2, ad_l);
         maxPol_l = max(maxPol_l, fabs(x));
     }
-    threadgroup float sg_pL2[4], sg_ad[4], sg_maxPol[4], sg_nPlan[4];
-    float pL2    = tg_sum_128(pL2_l,    sg_pL2,    tid, sgid);
+    // (3b) scoreGrad L² over B·D — non-zero variance is the probe-side signal that the policy
+    // is producing meaningful score functions (Tier 6 verification).
+    uint total_rd = ctx.B * ctx.D;
+    for (uint idx = tid; idx < total_rd; idx += tgW) {
+        float sg = ctx.scoreGrad[idx];
+        if (!isfinite(sg)) sg = 0.0f;
+        sgL2_l = fma(sg, sg, sgL2_l);
+    }
+    threadgroup float sg_ad[4], sg_sgL2[4], sg_maxPol[4], sg_nPlan[4];
     float ad     = tg_sum_128(ad_l,     sg_ad,     tid, sgid);
+    float sgL2   = tg_sum_128(sgL2_l,   sg_sgL2,   tid, sgid);
     float maxPol = tg_max_128(maxPol_l, sg_maxPol, tid, sgid);
     float nPlan  = tg_sum_128(nPlan_l,  sg_nPlan,  tid, sgid);
 
@@ -775,9 +853,10 @@ kernel void oak_bk_reduce(
         float invBR = 1.0f / float(max(ctx.B * ctx.R, 1u));
         float invBK = 1.0f / float(max(ctx.B * ctx.K, 1u));
         float invBA = 1.0f / float(max(ctx.B * ctx.A, 1u));
+        float invBD = 1.0f / float(max(ctx.B * ctx.D, 1u));
         stats->latentStateMeanSquare      = lms * invBR;
         stats->optionModelPredictionMSE   = psi * invBK;
-        stats->planningActionChangeL2Mean = pL2 * invBA;
+        stats->planningActionChangeL2Mean = sgL2 * invBD;  // repurposed: scoreGrad L² mean
         stats->actionDeltaL2Mean          = ad  * invBA;
         stats->maxAbsLatentPrediction     = maxLat;
         stats->maxAbsPolicyOutput         = maxPol;
@@ -882,8 +961,8 @@ kernel void oak_bk_option(
             float invR = 1.0f / sqrt(float(max(ctx.R, 1u)));
             // Diagonal seed: cumulant k's W_ψ[k][sf[k]] = +1/√R (RRS feature-attainment).
             if (k < ctx.R) ctx.psi[psiBase + k] = half(invR);
-            uint polBase = k * ctx.A * ctx.R;
-            for (uint idx = 0u; idx < ctx.A * ctx.R; ++idx) ctx.optPolicy[polBase + idx] = half(0.0f);
+            uint polBase = k * ctx.D * ctx.R;
+            for (uint idx = 0u; idx < ctx.D * ctx.R; ++idx) ctx.optPolicy[polBase + idx] = half(0.0f);
             ctx.utilOpt[k] = 0.0f;
             uint bit = 1u << (k & 31u);
             uint which = (k < 32u) ? 3u : 4u;
