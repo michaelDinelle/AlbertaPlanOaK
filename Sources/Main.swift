@@ -848,94 +848,6 @@ final class OakMetalEngine {
                 statsPointer.pointee)
     }
 
-    // Probe accessors (Tier 0; removed in Tier 12.3). Reads named arena slot for verification.
-    var probeBatch: Int { batch }
-    var probeRank: Int { rank }
-    var probeActDim: Int { actDim }
-    var probeOptionCount: Int { OakMetalLayout.optionCount(rank: rank, actDim: actDim) }
-
-    func probeSlot(_ name: String) throws -> [Float] {
-        let s = stateLayout
-        let actionDiscreteCount = actionIsDiscrete ? actDim : nil
-        let p = OakMetalLayout.paramLayout(obsDim: obsDim, rank: rank, actDim: actDim,
-                                           actionDiscreteCount: actionDiscreteCount)
-        let K = OakMetalLayout.optionCount(rank: rank, actDim: actDim)
-        let D = actionParamCount
-        // bk_admit_commit toggles stateSlot at end of each step; the just-written ("current")
-        // state therefore lives at offset stateSlot, the previous slot at 1 - stateSlot.
-        let curSlot = Int(scalarsPointer.pointee.stateSlot)
-        let prevSlot = 1 - curSlot
-        switch name {
-        case "state":
-            return Array(UnsafeBufferPointer(
-                start: stateArena.pointer.advanced(by: s.state + curSlot * batch * rank),
-                count: batch * rank))
-        case "state_prev":
-            return Array(UnsafeBufferPointer(
-                start: stateArena.pointer.advanced(by: s.state + prevSlot * batch * rank),
-                count: batch * rank))
-        case "td":
-            return Array(UnsafeBufferPointer(
-                start: stateArena.pointer.advanced(by: s.td), count: batch))
-        case "tdPsi":
-            return Array(UnsafeBufferPointer(
-                start: stateArena.pointer.advanced(by: s.tdPsi), count: batch * K))
-        case "action":
-            return Array(UnsafeBufferPointer(
-                start: stateArena.pointer.advanced(by: s.action), count: batch * actDim))
-        case "scoreGrad":
-            return Array(UnsafeBufferPointer(
-                start: stateArena.pointer.advanced(by: s.scoreGrad), count: batch * D))
-        case "actionParamCount":
-            return [Float(D)]
-        case "valueW":
-            return (0..<rank).map { Float(paramsArena.pointer[p.value + $0]) }
-        case "encoderW":
-            return (0..<rank).map { Float(paramsArena.pointer[p.encoder + $0]) }
-        case "psi_total_count":
-            return [Float(OakMetalLayout.psiCount(rank: rank, actDim: actDim))]
-        case "policy_total_count":
-            return [Float(OakMetalLayout.optPolicyCount(rank: rank, actDim: actDim,
-                                                        actionDiscreteCount: actionDiscreteCount))]
-        case "rho":
-            return [scalarsPointer.pointee.rho]
-        case "activeRank":
-            return [statsPointer.pointee.activeRank]
-        case "rewardRate":
-            return [statsPointer.pointee.rewardRate]
-        case "featMean":
-            return Array(UnsafeBufferPointer(
-                start: stateArena.pointer.advanced(by: s.featMean), count: rank))
-        case "psi_bytes":
-            // Total bytes of the ψ parameter block (fp16).
-            return [Float(OakMetalLayout.psiCount(rank: rank, actDim: actDim) * 2)]
-        case "concat_dim":
-            return [Float(OakMetalLayout.concatDim(rank: rank, actDim: actDim))]
-        case "subtaskFeatureOf":
-            return (0..<K).map {
-                Float(uintArena.pointer[uintLayout.subtaskFeatureOf + $0])
-            }
-        case "chord_slot":
-            // Tier 3: chord = one-hot at active option index. Materialize on demand.
-            let optBase = uintArena.pointer.advanced(by:
-                uintLayout.option + Int(scalarsPointer.pointee.optionSlot) * batch)
-            var out = [Float](repeating: 0, count: batch * K)
-            for r in 0..<batch {
-                let k = Int(min(optBase[r], UInt32(K - 1)))
-                out[r * K + k] = 1
-            }
-            return out
-        case "utilOpt":
-            return Array(UnsafeBufferPointer(
-                start: stateArena.pointer.advanced(by: s.utilOpt), count: K))
-        case "utilFeat":
-            return Array(UnsafeBufferPointer(
-                start: stateArena.pointer.advanced(by: s.utilFeat), count: rank))
-        default:
-            throw OakError.message("Unknown probe slot: \(name)")
-        }
-    }
-
     private func writeKernelConfig(paramLayout: OakMetalLayout.Param) {
         let K = OakMetalLayout.optionCount(rank: rank, actDim: actDim)
         let cap = Float(max(rank * max(batch, 1), 1))
@@ -1158,7 +1070,6 @@ private final class RunState {
             switch args.first {
             case "benchmark": try benchmark()
             case "diagnose":  try diagnose(Array(args.dropFirst()))
-            case "probe":     try probe(Array(args.dropFirst()))
             case "run":       try run(args.dropFirst().first)
             default:          try run(args.first)
             }
@@ -1240,73 +1151,6 @@ private final class RunState {
             stopAfter: steps,
             numEnvs: numEnvs, device: device, command: "diagnose", includeDiagnostic: true)
         fputs("\(metricsURL.path)\n", stderr)
-    }
-
-    // Tier 0 probe (removed in Tier 12.3): runs N steps on a synthetic deterministic env
-    // (uniform fixed obs, constant reward) and dumps a named arena slot as JSON to stdout.
-    // Math invariants are checked by external Python scripts; this is a one-shot diagnostic.
-    private static func probe(_ args: [String]) throws {
-        var slot = "state", steps = 10, rank = 32, actDim = 4, batch = 32
-        var seed = Int(oakUnseededSeed), discrete = false
-        var i = 0
-        while i < args.count {
-            let a = args[i]
-            func eat(_ key: String) throws -> String {
-                if a.hasPrefix(key + "=") { return String(a.dropFirst(key.count + 1)) }
-                i += 1
-                guard i < args.count else { throw OakError.message("Missing value for \(key).") }
-                return args[i]
-            }
-            switch true {
-            case a.hasPrefix("--slot"):     slot = try eat("--slot")
-            case a.hasPrefix("--steps"):    steps = Int(try eat("--steps")) ?? steps
-            case a.hasPrefix("--rank"):     rank = Int(try eat("--rank")) ?? rank
-            case a.hasPrefix("--act-dim"):  actDim = Int(try eat("--act-dim")) ?? actDim
-            case a.hasPrefix("--batch"):    batch = Int(try eat("--batch")) ?? batch
-            case a.hasPrefix("--seed"):     seed = Int(try eat("--seed")) ?? seed
-            case a == "--discrete":         discrete = true
-            default: throw OakError.message("Unknown probe arg '\(a)'.")
-            }
-            i += 1
-        }
-        let device = try metalDevice()
-        let lows  = Array(repeating: Float(-1), count: actDim)
-        let highs = Array(repeating: Float( 1), count: actDim)
-        let engine = try OakMetalEngine(
-            obsDim: rank, baseObsDim: rank, actDim: actDim, batch: batch, rank: rank,
-            actionIsDiscrete: discrete, actionLow: lows, actionHigh: highs,
-            device: device, seed: seed)
-        var obs = [Float](repeating: 0, count: batch * rank)
-        var st = UInt32(bitPattern: Int32(seed)) &* 0x9e3779b9
-        for n in 0..<obs.count {
-            st &+= 0x9e3779b9
-            var x = st; x = (x ^ (x &>> 16)) &* 0x85ebca6b
-            x = (x ^ (x &>> 13)) &* 0xc2b2ae35; x ^= x &>> 16
-            obs[n] = Float(x >> 8) * 5.9604645e-8 - 0.5
-        }
-        let zeroAction = [Float](repeating: 0, count: batch * actDim)
-        let constReward = [Float](repeating: 0.1, count: batch)
-        let zeroDone = [UInt8](repeating: 0, count: batch)
-        var lastAction = zeroAction
-        for _ in 0..<steps {
-            let r = try obs.withUnsafeBufferPointer { p in
-                try engine.step(obs: p, prevAction: lastAction, prevReward: constReward,
-                                prevDone: zeroDone, accumulatePhaseGpu: false)
-            }
-            lastAction = r.0.floats
-        }
-        let values = try engine.probeSlot(slot)
-        struct ProbeOut: Encodable {
-            let slot: String, steps: Int, rank: Int, actDim: Int, batch: Int
-            let optionCount: Int, count: Int, values: [Float]
-        }
-        let out = ProbeOut(slot: slot, steps: steps, rank: rank, actDim: actDim,
-                           batch: batch, optionCount: engine.probeOptionCount,
-                           count: values.count, values: values)
-        let enc = JSONEncoder(); enc.outputFormatting = [.sortedKeys]
-        let data = try enc.encode(out)
-        FileHandle.standardOutput.write(data)
-        FileHandle.standardOutput.write(Data([0x0a]))
     }
 
     private static func snapshotJsonCount(in metricsDir: URL) -> Int {
