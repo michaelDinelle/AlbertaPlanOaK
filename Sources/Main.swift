@@ -576,6 +576,8 @@ private struct KernelScalars {
     var stateSlot: UInt32 = 0, optionSlot: UInt32 = 0
     var rho: Float = 0, pEff: Float = 0
     var alphaImp: Float = 0, alphaEnc: Float = 0
+    // Pass 11 Tier 4: REINFORCE running-mean TD baseline (Williams 1992 variance reduction).
+    var tdBaseline: Float = 0
 }
 
 struct KernelStats {
@@ -1052,6 +1054,7 @@ final class OakMetalEngine {
             return readFloats(stateArena, offset: stateLayout.utilOpt,
                               count: OakMetalLayout.optionCount(rank: rank, actDim: actDim))
         case "rho":         return [scalarsPointer.pointee.rho]
+        case "td_baseline": return [scalarsPointer.pointee.tdBaseline]
         case "chord_slot", "chord":
             let K = OakMetalLayout.optionCount(rank: rank, actDim: actDim)
             return readFloats(stateArena, offset: stateLayout.chordSlot, count: batch * K)
@@ -1064,7 +1067,6 @@ final class OakMetalEngine {
             let p = uintArena.pointer.advanced(by: uintLayout.optionAge)
             return (0..<batch).map { Float(p[$0]) }
         case "actionSpec",
-             "td_baseline",
              "optFracEMA":
             return nil  // populated by later Pass-11 tiers; missing-here is a tier-not-reached signal
         default:

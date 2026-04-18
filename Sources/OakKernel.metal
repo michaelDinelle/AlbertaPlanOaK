@@ -149,6 +149,7 @@ struct KernelScalars {
     float pEff;               // effective rank trace/max of featSM
     float alphaImp;           // implicit TD step: α₀ / (1 + α₀·⟨‖x_active‖²⟩_batch) — 2510.06149
     float alphaEnc;           // implicit TD step for encoder (centered obs)
+    float tdBaseline;         // Pass 11 Tier 4: REINFORCE running-mean TD baseline (Williams 1992)
 };
 
 // KernelStats — 16 Float fields. Layout must match Swift KernelStats byte-for-byte.
@@ -918,13 +919,16 @@ kernel void oak_learn_pi(
     //   μ_p = Σ_k λ_k · (W_π[k][p] · s),
     // the gradient of log π(a|s) w.r.t. W_π[k][p][e] is λ_k(s) · s[e] · scoreGrad[p].
     // Per-option gradient accumulates over all rows weighted by chordPrev[r][k].
+    // Pass 11 Tier 4: subtract running-mean tdBaseline from td for variance reduction.
     device const float *prev = state_slot(ctx, ctx.stateSlot);
+    float baseline = ctx.scalars->tdBaseline;
     float g = 0.0f;
     float n2 = 0.0f;
     for (uint r = 0u; r < ctx.B; ++r) {
         float lambda_k = ctx.chordSlotPrev[r * ctx.K + k];
         float pi_term  = prev[r * ctx.E + i] * ctx.scoreGrad[r * ctx.D + d];
-        g  = fma(ctx.td[r] * lambda_k, pi_term, g);
+        float adv      = ctx.td[r] - baseline;
+        g  = fma(adv * lambda_k, pi_term, g);
         n2 = fma(pi_term, pi_term, n2);
     }
     float invB = 1.0f / float(max(ctx.B, 1u));
@@ -963,12 +967,13 @@ kernel void oak_learn_beta(
     if (m >= mBetaW) return;
 
     device const float *prev = state_slot(ctx, ctx.stateSlot);
+    float baseline = ctx.scalars->tdBaseline;   // Pass 11 Tier 4
     float g = 0.0f, n2 = 0.0f;
     for (uint r = 0u; r < ctx.B; ++r) {
         float beta = ctx.betaProb[r];
         // 1{terminated}: optionAge[r] == 1u means meta_policy resampled at this step.
         float terminated = (ctx.optionAge[r] == 1u) ? 1.0f : 0.0f;
-        float adv = ctx.td[r];
+        float adv = ctx.td[r] - baseline;
         float feat = (m < ctx.E) ? prev[r * ctx.E + m]
                                  : ctx.chordSlotPrev[r * ctx.K + (m - ctx.E)];
         float term = (beta - terminated) * adv * feat;
@@ -1005,13 +1010,14 @@ kernel void oak_learn_omega(
     if (ctx.activeMask[e] == 0u) return;
 
     device const float *prev = state_slot(ctx, ctx.stateSlot);
+    float baseline = ctx.scalars->tdBaseline;   // Pass 11 Tier 4
     float g = 0.0f, n2 = 0.0f;
     for (uint r = 0u; r < ctx.B; ++r) {
         bool terminatedHere = (ctx.optionAge[r] == 1u);
         if (!terminatedHere) continue;  // chord only resampled at termination → grad only on those rows
         float lambda_k = ctx.chordSlot[r * ctx.K + k];
         float chosen = (ctx.option[(1u - ctx.optionSlot) * ctx.B + r] == k) ? 1.0f : 0.0f;
-        float adv = ctx.td[r];
+        float adv = ctx.td[r] - baseline;
         float feat = prev[r * ctx.E + e];
         float term = (chosen - lambda_k) * adv * feat;
         g += term;
@@ -1339,6 +1345,14 @@ kernel void oak_bk_admit_commit(
     meanR /= float(max(ctx.B, 1u));
     float invT = track_rate(ctx.stepCount, ctx.ridge);
     ctx.scalars->rho += (meanR - ctx.scalars->rho) * invT;
+    // Pass 11 Tier 4: REINFORCE running-mean baseline. Tracks mean(td) so policy gradient
+    // updates use (td - tdBaseline) instead of raw td. Pure variance reduction (Williams 1992,
+    // Sutton-Barto Ch.13.3). The baseline is unbiased: E[scoreGrad · b] = 0 for any constant b
+    // since E[scoreGrad] = 0 (it's the gradient of log-probability normalization).
+    float meanTd = 0.0f;
+    for (uint r = 0u; r < ctx.B; ++r) meanTd += ctx.td[r];
+    meanTd /= float(max(ctx.B, 1u));
+    ctx.scalars->tdBaseline += (meanTd - ctx.scalars->tdBaseline) * invT;
 
     // Effective-rank via trace/max of featSM (structural stable-rank proxy; 2603.04580).
     float tr = 0.0f, mx = 0.0f;
