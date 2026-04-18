@@ -383,7 +383,7 @@ private struct KernelConfig {
     var sPrevAction: UInt32 = 0, sAction: UInt32 = 0, sScoreGrad: UInt32 = 0
     var sReward: UInt32 = 0, sTd: UInt32 = 0, sTdPsi: UInt32 = 0
     var uDone: UInt32 = 0, uActiveMask: UInt32 = 0, uActiveList: UInt32 = 0
-    var uOption: UInt32 = 0, uCounters: UInt32 = 0
+    var uOption: UInt32 = 0, uCounters: UInt32 = 0, uSubtaskFeatureOf: UInt32 = 0
     var aFeatSM: UInt32 = 0, aWBar: UInt32 = 0, aFeatMean: UInt32 = 0
     var aUtilFeat: UInt32 = 0, aUtilOpt: UInt32 = 0
     var cap: Float = 0, alpha0: Float = 0, ridge: Float = 0
@@ -488,15 +488,18 @@ private enum OakMetalLayout {
                      featMean: fm, utilFeat: uf, utilOpt: uo, total: o)
     }
 
-    struct UInts { let done, activeMask, activeList, option, counters, total: Int }
-    static func uintLayout(rank: Int, batch: Int) -> UInts {
+    struct UInts { let done, activeMask, activeList, option, counters, subtaskFeatureOf, total: Int }
+    static func uintLayout(rank: Int, actDim: Int, batch: Int) -> UInts {
+        let K = optionCount(rank: rank, actDim: actDim)
         var o = 0
         let d = o; o += batch
         let am = o; o += rank
         let al = o; o += rank
         let op = o; o += 2 * batch
         let c  = o; o += 6
-        return UInts(done: d, activeMask: am, activeList: al, option: op, counters: c, total: o)
+        let sf = o; o += K  // sf[k] = state-feature index that cumulant k tracks (top-K by utility)
+        return UInts(done: d, activeMask: am, activeList: al, option: op, counters: c,
+                     subtaskFeatureOf: sf, total: o)
     }
 }
 
@@ -647,7 +650,7 @@ final class OakMetalEngine {
         let actionParamCount = OakMetalLayout.actionParamCount(actDim: actDim,
                                                                 actionDiscreteCount: actionDiscreteCount)
         self.actionParamCount = actionParamCount
-        uintLayout  = OakMetalLayout.uintLayout(rank: rank, batch: batch)
+        uintLayout  = OakMetalLayout.uintLayout(rank: rank, actDim: actDim, batch: batch)
         paramsArena = Shared(device: device, count: paramLayout.total, zero: Float16(0))
         stateArena  = Shared(device: device, count: stateLayout.total, zero: Float(0))
         uintArena   = Shared(device: device, count: uintLayout.total,  zero: UInt32(0))
@@ -739,6 +742,10 @@ final class OakMetalEngine {
         let activeMask = uintArena.pointer.advanced(by: uintLayout.activeMask)
         let activeList = uintArena.pointer.advanced(by: uintLayout.activeList)
         for f in 0..<rank { activeMask[f] = 1; activeList[f] = UInt32(f) }
+        // Initialize subtaskFeatureOf to identity sf[k] = k. bk_admit_commit re-ranks each step
+        // by per-feature utility (Tier 7 RED dynamic top-K cumulants).
+        let sfPtr = uintArena.pointer.advanced(by: uintLayout.subtaskFeatureOf)
+        for k in 0..<K { sfPtr[k] = UInt32(min(k, rank - 1)) }
 
         writeKernelConfig(paramLayout: paramLayout)
 
@@ -895,6 +902,10 @@ final class OakMetalEngine {
             return [Float(OakMetalLayout.psiCount(rank: rank, actDim: actDim) * 2)]
         case "concat_dim":
             return [Float(OakMetalLayout.concatDim(rank: rank, actDim: actDim))]
+        case "subtaskFeatureOf":
+            return (0..<K).map {
+                Float(uintArena.pointer[uintLayout.subtaskFeatureOf + $0])
+            }
         case "chord_slot":
             // Tier 3: chord = one-hot at active option index. Materialize on demand.
             let optBase = uintArena.pointer.advanced(by:
@@ -933,6 +944,7 @@ final class OakMetalEngine {
         c.sReward = UInt32(s.reward); c.sTd = UInt32(s.td); c.sTdPsi = UInt32(s.tdPsi)
         c.uDone = UInt32(u.done); c.uActiveMask = UInt32(u.activeMask)
         c.uActiveList = UInt32(u.activeList); c.uOption = UInt32(u.option); c.uCounters = UInt32(u.counters)
+        c.uSubtaskFeatureOf = UInt32(u.subtaskFeatureOf)
         c.aFeatSM = UInt32(s.featSM); c.aWBar = UInt32(s.wBar); c.aFeatMean = UInt32(s.featMean)
         c.aUtilFeat = UInt32(s.utilFeat); c.aUtilOpt = UInt32(s.utilOpt)
         c.cap = cap; c.alpha0 = 1.0 / cap; c.ridge = 1.0 / (cap + 1.0)
