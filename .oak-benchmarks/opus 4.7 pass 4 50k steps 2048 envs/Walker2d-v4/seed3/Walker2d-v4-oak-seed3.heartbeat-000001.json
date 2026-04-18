@@ -1,0 +1,65 @@
+{
+  "actionDim" : 6,
+  "agentStepMsMean" : 0.6371455,
+  "command" : "benchmark",
+  "continuousAction" : {
+    "meanL2" : 1.7409587332069216,
+    "meanPerDim" : [
+      0.007172876010244522,
+      0.008008419756194485,
+      -5.676378927432779e-05,
+      -0.006012170759078117,
+      -0.006222390253242338,
+      -0.00047556163139717
+    ],
+    "stdL2" : 0.30015422704888856,
+    "stdPerDim" : [
+      0.7130892102337669,
+      0.7334349267180533,
+      0.7216345106405724,
+      0.7170827845764449,
+      0.7233402764116571,
+      0.7184921267797116
+    ]
+  },
+  "diagnostic" : {
+    "agentShare" : 0.05864932454536903,
+    "envShare" : 0.41516140161415427,
+    "hostShare" : 0.5261892738404768,
+    "maxAbsLatentPrediction" : 2.1667659282684326,
+    "maxAbsPolicyOutput" : 4.244306564331055,
+    "nonFiniteByPhase" : {
+      "encode" : 0,
+      "learn" : 0,
+      "plan" : 0
+    }
+  },
+  "doneCount" : 0,
+  "envId" : "Walker2d-v4",
+  "envStepMsMean" : 4.5101665,
+  "health" : {
+    "actionDeltaL2Mean" : 1.495317816734314,
+    "activeRank" : 5,
+    "latentStateMeanSquare" : 0.16371142864227295,
+    "nonFiniteRawTotal" : 0,
+    "nonFiniteSanitizedTotal" : 0,
+    "oakOptionReinitCount" : 0,
+    "optionModelPredictionMSE" : 0.6463346481323242,
+    "rewardRate" : 0.42177513241767883,
+    "scoreGradL2Mean" : 0.7549402117729187
+  },
+  "heartbeatSequence" : 1,
+  "measuredBatchCount" : 2,
+  "measuredSeconds" : 0.021727292,
+  "measuredStepCount" : 4096,
+  "numEnvs" : 2048,
+  "observationDim" : 17,
+  "policy" : "oak",
+  "rewardSum" : 1137.086256920109,
+  "schemaVersion" : 2,
+  "seed" : 3,
+  "stepsPerSecond" : 188518.66123030888,
+  "stopAfterMeasuredSteps" : 50000,
+  "stopReason" : "heartbeat",
+  "warmupSteps" : 1000
+}
