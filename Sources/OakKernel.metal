@@ -501,7 +501,8 @@ kernel void oak_meta_policy(
 // predict — main differential TD δ_main (A.2) + K per-cumulant SF TDs δ_ψ[k] under the row's
 // active option e_{k*} (Alberta Plan Design 2: shared ψ_k(s, λ) = W_ψ[k] · concat[s, λ]).
 // ψ_k is a SCALAR SF for cumulant k under chord λ — not an R-vector per option. Subtask feature
-// sf[k] = k for Tier 3; Tier 7 makes sf[] dynamic top-K via bk_admit_commit re-rank. Cumulant
+// sf[] is dynamic top-K via bk_admit_commit re-rank (Pass-9 Tier 7); seeded as identity
+// sf[k] = k at engine init. Cumulant
 // centering ρ_k = featMean[sf[k]] tracks the per-feature running mean (2405.09999 differential
 // TD; 2603.27874 stable under FA for any baseline).
 //   [Grid: B]
@@ -626,24 +627,22 @@ kernel void oak_plan(
 }
 
 // =================================================================================================
-// meta_action — emit a real-valued action vector by sampling from the active option's per-dim
-// Gaussian policy and compute the canonical Gaussian score function for the sample. Pass 10
-// unification: ONE code path. The agent has zero a-priori knowledge of action-space type — it
-// always emits actDim continuous values; the env-wrapper layer (EnvPoolEnv.step) interprets
-// (argmax → discrete index | bound-clamp → continuous control). Inv-1: no env-conditioned
-// branches; Bitter Lesson: no human-engineered "discrete vs continuous" taxonomy in the agent.
+// meta_action — Pass 11 Tier 1 + Tier 3: emit ONLY policyMean[B · D]; the env-wrapper layer
+// (EnvPoolEnv.sampleAndStep) samples per-component (Gumbel-max categorical for Discrete-N
+// components; structural-σ-1 Gaussian for Box-A components) and computes the matching score
+// function (Williams 1992; Maddison-Tarlow-Minka 2014; Sutton-Barto Ch.13). The agent has
+// zero a-priori knowledge of action-space type — D is the env-declared D_policy width
+// (Inv-1; Bitter Lesson).
 //
-// Per (row, action-dim a):
-//   μ_a     = W_π[k*][2a]   · s_curr     (state-conditional mean)
-//   log_σ_a = W_π[k*][2a+1] · s_curr     (state-conditional log-std; σ = exp(log_σ) > 0 always)
-//   z_a ~ N(0, 1) via Box-Muller from splitmix32(step, row, a) (pair of uniforms)
-//   action[a] = μ_a + σ_a · z_a
-//   scoreGrad[2a]   = z_a / σ_a                  (= (a−μ)/σ²; ∇_μ log p)
-//   scoreGrad[2a+1] = (z_a² − 1) / 2             (= ((a−μ)²/σ² − 1)/2; ∇_logσ log p)
+// Per (row, policy-param p ∈ [0, D)):
+//   μ_p = Σ_k λ_k · (W_π[k][p] · s_curr)
+// where λ = chordSlot[r] is the persistent soft chord from oak_meta_policy. The chord IS the
+// policy-over-options distribution (OBB 2505.00787; Bacon-Precup 1609.05140), and meta_action's
+// policyMean is the chord-weighted convex combination of K options' policies.
 //
-// No clamping anywhere — env clamps continuous-control action at the FFI boundary; implicit α +
-// reward centering keep the parameter updates bounded under the Big World Hypothesis.
-//   [Grid: B · A — one thread per (row, action-dim).]
+// No clamping anywhere — wrapper clamps Box-component actions at the FFI boundary; implicit α
+// + reward centering keep parameter updates bounded under the Big World Hypothesis.
+//   [Grid: B · D — one thread per (row, policy-param).]
 // =================================================================================================
 kernel void oak_meta_action(
     device half   *params     [[buffer(0)]],
