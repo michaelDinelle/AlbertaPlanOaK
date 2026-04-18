@@ -118,20 +118,21 @@ struct KernelConfig {
     // For single-Discrete-N envs D = N; for single-Box-A envs D = A; multi-component envs sum.
     // The agent has no notion of WHAT the components are — only the integer width.
     uint actionParamCount;
-    // Param offsets (in fp16 stride). ψ is laid out as [K rows × M cols] where M = E + K
-    // (Pass 11 Tier 2: ψ's state weights span the OPSR-extended state). outcomeHead[K · E]
-    // writes K outcome predictions per row recursively from the previous step's full E-dim
-    // state (Vereecken 2604.07016).
-    uint pEncoder, pValue, pPsi, pOptPolicy, pOutcomeHead;
+    // Param offsets (in fp16 stride). Pass 11 Tier 3 adds betaW[E + K] (termination head)
+    // and omegaW[K · E] (chord generator) for temporal abstraction.
+    uint pEncoder, pValue, pPsi, pOptPolicy, pOutcomeHead, pBetaW, pOmegaW;
     // State offsets (in fp32 stride). policyMean[B · D] is written by oak_meta_action and
     // read by the host wrapper for sampling. scoreGrad[B · D] is HOST-written (after wrapper
     // samples per-component) and read by oak_learn_pi at the *next* step. prevPolicyMean[B · D]
     // holds the previous step's μ for actionDelta telemetry. vCurr[B] caches w_main · curr.
+    // Pass 11 Tier 3: chordSlot[B · K], chordSlotPrev[B · K], betaProb[B] for temporal abstraction.
     uint sObservation, sObsMean, sState, sPrevPolicyMean, sPolicyMean, sScoreGrad;
     uint sReward, sTd, sTdPsi, sVCurr;
+    uint sChordSlot, sChordSlotPrev, sBetaProb;
     // UInt offsets. subtaskFeatureOf[K] = state-feature index that cumulant k tracks
     // (top-K by per-feature utility, re-ranked by oak_bk_admit_commit each step; Tier 7 RED).
-    uint uDone, uActiveMask, uActiveList, uOption, uCounters, uSubtaskFeatureOf;
+    // optionAge[B] tracks steps since last termination for each row (Pass 11 Tier 3).
+    uint uDone, uActiveMask, uActiveList, uOption, uCounters, uSubtaskFeatureOf, uOptionAge;
     // Arena offsets (in fp32 stride, past sState's tail). featMean[R] is the running EMA of
     // current-step feature values used as cumulant centering ρ_k = featMean[sf[k]] (RED).
     uint aFeatSM, aWBar, aFeatMean, aUtilFeat, aUtilOpt;
@@ -178,6 +179,8 @@ struct Ctx {
     device half   *psi;            // [K][M] : W_ψ[k] = (state weights, chord weights), M = E + K
     device half   *optPolicy;      // [K][D][E] : per-option policy parameters (D = D_policy)
     device half   *outcomeHead;    // [K][E] : OPSR outcome predictor (Tier 2)
+    device half   *betaW;          // [E + K] : termination head (state weights + chord weights)
+    device half   *omegaW;         // [K][E] : chord-generator (softmax over K from E-dim state)
 
     device float  *observation;    // [B][O]
     device float  *observationMean;// [O]
@@ -189,13 +192,17 @@ struct Ctx {
     device float  *td;             // [B]
     device float  *tdPsi;          // [B][K]  -- one cumulant TD per row per option
     device float  *vCurr;          // [B]     -- w_main · curr_state, cached by predict, read by plan
+    device float  *chordSlot;      // [B][K]  -- current step's persistent soft chord (Tier 3)
+    device float  *chordSlotPrev;  // [B][K]  -- prev step's chord (for learn_psi/_pi attribution)
+    device float  *betaProb;       // [B]     -- β termination probability (telemetry + learn_beta)
 
     device uint   *done;           // [B]
-    device uint   *activeMask;     // [R]
-    device uint   *activeList;     // [R]
+    device uint   *activeMask;     // [E]
+    device uint   *activeList;     // [E]
     device uint   *option;         // [2][B]
     device uint   *counters;       // [6]
     device uint   *sf;             // [K] subtaskFeatureOf — dynamic top-K feature ranking
+    device uint   *optionAge;      // [B] steps since last termination (Tier 3)
 
     device float  *featSM;         // [R]
     device float  *wBar;           // [R]
@@ -226,6 +233,8 @@ inline Ctx make_ctx(device half *params, device float *stateArena, device uint *
     c.psi         = params + cfg.pPsi;
     c.optPolicy   = params + cfg.pOptPolicy;
     c.outcomeHead = params + cfg.pOutcomeHead;
+    c.betaW       = params + cfg.pBetaW;
+    c.omegaW      = params + cfg.pOmegaW;
 
     c.observation     = stateArena + cfg.sObservation;
     c.observationMean = stateArena + cfg.sObsMean;
@@ -237,6 +246,9 @@ inline Ctx make_ctx(device half *params, device float *stateArena, device uint *
     c.td              = stateArena + cfg.sTd;
     c.tdPsi           = stateArena + cfg.sTdPsi;
     c.vCurr           = stateArena + cfg.sVCurr;
+    c.chordSlot       = stateArena + cfg.sChordSlot;
+    c.chordSlotPrev   = stateArena + cfg.sChordSlotPrev;
+    c.betaProb        = stateArena + cfg.sBetaProb;
 
     c.done       = uintArena + cfg.uDone;
     c.activeMask = uintArena + cfg.uActiveMask;
@@ -244,6 +256,7 @@ inline Ctx make_ctx(device half *params, device float *stateArena, device uint *
     c.option     = uintArena + cfg.uOption;
     c.counters   = uintArena + cfg.uCounters;
     c.sf         = uintArena + cfg.uSubtaskFeatureOf;
+    c.optionAge  = uintArena + cfg.uOptionAge;
 
     c.featSM   = stateArena + cfg.aFeatSM;
     c.wBar     = stateArena + cfg.aWBar;
@@ -260,6 +273,20 @@ inline device uint  *option_slot(Ctx ctx, uint slot) { return ctx.option + slot 
 inline uint active_option(Ctx ctx, uint row) {
     device const uint *o = option_slot(ctx, ctx.optionSlot);
     return min(o[row], ctx.K - 1u);
+}
+
+// Deterministic counter-based RNG: splitmix32 of (step, row, dim) → uniform float in (0, 1].
+// FLT_MIN floor avoids log(0) in Box-Muller. Used by oak_meta_policy and any kernel that needs
+// per-thread reproducible randomness without host RNG state (Inv 9).
+inline uint splitmix32(uint x) {
+    x += 0x9e3779b9u;
+    x = (x ^ (x >> 16)) * 0x7feb352du;
+    x = (x ^ (x >> 15)) * 0x846ca68bu;
+    return x ^ (x >> 16);
+}
+inline float hash_uniform(uint step, uint row, uint dim) {
+    uint h = splitmix32(step ^ splitmix32(row ^ splitmix32(dim)));
+    return max(float(h >> 8) * 5.9604645e-8f, FLT_MIN);
 }
 
 // Continual tracking rate. Warmup phase (~1/ridge steps) follows sample mean via 1/(t+1);
@@ -385,6 +412,88 @@ kernel void oak_predict_outcome(
 }
 
 // =================================================================================================
+// meta_policy — Pass 11 Tier 3 temporal abstraction (β termination + ω chord generator). Per
+// Bacon-Precup 1609.05140 (Option-Critic) under Wan-Naik-Sutton 2110.13855 continuing
+// average-reward formulation.
+//
+// Per row r (one thread per row, B threads total):
+//   1. Save the current chord into chordSlotPrev[r] (= the chord that produced action_{N-1}).
+//   2. Compute β(s, λ_prev) = σ(W_β · concat[s_E, λ_prev]). Bernoulli-sample termination
+//      via splitmix32 deterministic hash (no host RNG).
+//   3. If terminate (or optionAge == 0 at start): resample chord from softmax(ω(s_E)) over K
+//      logits. Reset optionAge to 1.
+//   4. Else: keep chord. Increment optionAge.
+//
+// `option_slot` is also written here (= argmax_k chord[r][k]) for telemetry compatibility
+// with the bk_option / learn_psi / learn_pi attribution logic that still uses the discrete
+// dominant-option index. Soft-chord weighting on top of the dominant-option attribution is
+// the principled formulation; we run them BOTH for now (a pure soft refactor is Pass 12).
+//
+//   [Grid: B — one thread per row.]
+// =================================================================================================
+kernel void oak_meta_policy(
+    device half   *params     [[buffer(0)]],
+    device float  *stateArena [[buffer(1)]],
+    device uint   *uintArena  [[buffer(2)]],
+    device KernelScalars *scalars [[buffer(3)]],
+    device KernelStats   *stats   [[buffer(4)]],
+    constant KernelConfig &cfg    [[buffer(5)]],
+    uint gid [[thread_position_in_grid]])
+{
+    Ctx ctx = make_ctx(params, stateArena, uintArena, scalars, cfg);
+    uint row = gid;
+    if (row >= ctx.B) return;
+    device const float *curr = state_slot(ctx, 1u - ctx.stateSlot) + row * ctx.E;
+    device       float *chord     = ctx.chordSlot     + row * ctx.K;
+    device       float *chordPrev = ctx.chordSlotPrev + row * ctx.K;
+
+    // (1) Save current chord into chordPrev. The current chord at meta_policy entry == the
+    // chord that was active for step N-1's meta_action (no kernel between them mutates it).
+    for (uint k = 0u; k < ctx.K; ++k) chordPrev[k] = chord[k];
+
+    // (2) β(s_E, λ_prev) = σ(W_β · [s_E ; λ_prev]).
+    float beta_logit = active_dot_half(ctx.betaW, 0u, curr, 0u,
+                                       ctx.activeList, ctx.activeCount);
+    for (uint k = 0u; k < ctx.K; ++k)
+        beta_logit += float(ctx.betaW[ctx.E + k]) * chordPrev[k];
+    float beta_prob = 1.0f / (1.0f + exp(-beta_logit));
+    ctx.betaProb[row] = beta_prob;
+
+    // (3) Per-row Bernoulli termination via splitmix32(stepCount, row).
+    float u = hash_uniform(ctx.stepCount, row, 0u);
+    bool terminate = (ctx.optionAge[row] == 0u) || (u < beta_prob);
+
+    if (terminate) {
+        // Resample chord ~ softmax(ω(s_E)). K ≤ OAK_SIMD = 32 (host-capped), so on-stack.
+        float maxLogit = -FLT_MAX;
+        float logits[OAK_SIMD];
+        for (uint k = 0u; k < ctx.K; ++k) {
+            float l = active_dot_half(ctx.omegaW, k * ctx.E, curr, 0u,
+                                      ctx.activeList, ctx.activeCount);
+            logits[k] = l;
+            maxLogit = max(maxLogit, l);
+        }
+        float Z = 0.0f;
+        for (uint k = 0u; k < ctx.K; ++k) Z += exp(logits[k] - maxLogit);
+        float invZ = 1.0f / max(Z, FLT_MIN);
+        uint  bestK = 0u; float bestP = 0.0f;
+        for (uint k = 0u; k < ctx.K; ++k) {
+            float p = exp(logits[k] - maxLogit) * invZ;
+            chord[k] = p;
+            if (p > bestP) { bestP = p; bestK = k; }
+        }
+        ctx.optionAge[row] = 1u;
+        // Telemetry-compatible argmax-chord written into option_slot's NEW slot.
+        option_slot(ctx, 1u - ctx.optionSlot)[row] = bestK;
+    } else {
+        ctx.optionAge[row] += 1u;
+        // No chord change; preserve the option_slot dominant-index from prev step's plan.
+        uint prevBest = option_slot(ctx, ctx.optionSlot)[row];
+        option_slot(ctx, 1u - ctx.optionSlot)[row] = prevBest;
+    }
+}
+
+// =================================================================================================
 // predict — main differential TD δ_main (A.2) + K per-cumulant SF TDs δ_ψ[k] under the row's
 // active option e_{k*} (Alberta Plan Design 2: shared ψ_k(s, λ) = W_ψ[k] · concat[s, λ]).
 // ψ_k is a SCALAR SF for cumulant k under chord λ — not an R-vector per option. Subtask feature
@@ -426,11 +535,16 @@ kernel void oak_predict(
     // Both terms are mean-zero by construction (ρ̄ centers reward; featMean centers feature).
     // ρ_k vanishes — no per-cumulant centering needed beyond the per-feature running mean.
     //   δ_k = c_k + terminalMask · ψ_k(s', e_{k*}) − ψ_k(s, e_{k*})
-    uint optK = active_option(ctx, gid);
+    // Pass 11 Tier 3: soft-chord ψ chord-bias. ψ_k(s, λ) = Σ_e W_ψ[k][e]·s[e] + Σ_j W_ψ[k][E+j]·λ_j
+    // where λ = chordSlotPrev[r] (the chord that produced action_{N-1} and drove this transition).
+    device const float *chord_prev = ctx.chordSlotPrev + gid * ctx.K;
     float reward_centered = ctx.reward[gid] - ctx.rho;
     for (uint k = 0u; k < ctx.K; ++k) {
         uint psiBase = k * M;
-        float chord_part = float(ctx.psi[psiBase + ctx.E + optK]);  // chord weights past E state weights
+        float chord_part = 0.0f;
+        for (uint k2 = 0u; k2 < ctx.K; ++k2) {
+            chord_part += float(ctx.psi[psiBase + ctx.E + k2]) * chord_prev[k2];
+        }
         float psi_prev = active_dot_half(ctx.psi, psiBase, prev, pOff,
                                          ctx.activeList, ctx.activeCount) + chord_part;
         float psi_next = active_dot_half(ctx.psi, psiBase, curr, cOff,
@@ -469,6 +583,9 @@ kernel void oak_plan(
     uint xOff = row * ctx.E;
     uint M = ctx.M;
 
+    // Plan still does a per-OPTION GPI argmax (one-hot chord) to compute the planning
+    // advantage td += Q_max − vCurr — i.e., "what if we replaced the current chord with the
+    // single best option". This gives the option-keyboard greedy improvement direction.
     float qk = -FLT_MAX;
     uint  k  = tid;
     if (k < ctx.K) {
@@ -499,7 +616,8 @@ kernel void oak_plan(
     if (tid == 0u) {
         // Reuse w_main · curr from oak_predict (Tier 11 fused dot — saves B · activeCount FMAs).
         ctx.td[row] += qk - ctx.vCurr[row];  // planning-time advantage on main TD
-        option_slot(ctx, 1u - ctx.optionSlot)[row] = k_lane;
+        // Pass 11 Tier 3: option_slot is now telemetry-only (set by oak_meta_policy from
+        // argmax_k chord[r][k]). plan no longer writes it — chord drives action sampling.
     }
 }
 
@@ -523,18 +641,6 @@ kernel void oak_plan(
 // reward centering keep the parameter updates bounded under the Big World Hypothesis.
 //   [Grid: B · A — one thread per (row, action-dim).]
 // =================================================================================================
-inline uint splitmix32(uint x) {
-    x += 0x9e3779b9u;
-    x = (x ^ (x >> 16)) * 0x7feb352du;
-    x = (x ^ (x >> 15)) * 0x846ca68bu;
-    return x ^ (x >> 16);
-}
-inline float hash_uniform(uint step, uint row, uint dim) {
-    uint h = splitmix32(step ^ splitmix32(row ^ splitmix32(dim)));
-    // Convert 24-bit mantissa to (0, 1). FLT_MIN floor avoids log(0) in Box-Muller.
-    return max(float(h >> 8) * 5.9604645e-8f, FLT_MIN);
-}
-
 kernel void oak_meta_action(
     device half   *params     [[buffer(0)]],
     device float  *stateArena [[buffer(1)]],
@@ -544,23 +650,28 @@ kernel void oak_meta_action(
     constant KernelConfig &cfg    [[buffer(5)]],
     uint gid [[thread_position_in_grid]])
 {
-    // Pass 11 Tier 1: agent emits ONLY policyMean[B · D] = W_π[k] · s_active. Sampling and
-    // score-function derivation live in the wrapper layer (EnvPoolEnv.sampleAndStep) so each
-    // env's actual sampling distribution provides its mathematically-correct score function
-    // (Williams 1992; Maddison 2014 Gumbel-max; Sutton-Barto Ch.13). The agent has no notion
-    // of action-space type — D is the env-declared policy-param width (Inv-1).
+    // Pass 11 Tier 1: agent emits ONLY policyMean[B · D] (wrapper samples + scores).
+    // Pass 11 Tier 3: policyMean is the SOFT-CHORD-WEIGHTED sum of K options' policies:
+    //   μ[r, p] = Σ_k λ_k(r) · (W_π[k][p] · s_active(r))
+    // Williams 1992 + OBB 2505.00787 — the chord IS the policy-over-options distribution;
+    // each option contributes proportional to its mass.
     Ctx ctx = make_ctx(params, stateArena, uintArena, scalars, cfg);
     uint row = gid / ctx.D, p = gid % ctx.D;
     if (row >= ctx.B) return;
 
-    device const float *curr = state_slot(ctx, 1u - ctx.stateSlot);
-    uint optK    = option_slot(ctx, 1u - ctx.optionSlot)[row];
-    uint xOff    = row * ctx.E;
-    uint optBase = optK * ctx.D * ctx.E;
+    device const float *curr  = state_slot(ctx, 1u - ctx.stateSlot);
+    device const float *chord = ctx.chordSlot + row * ctx.K;
+    uint xOff = row * ctx.E;
 
-    ctx.policyMean[row * ctx.D + p] =
-        active_dot_half(ctx.optPolicy, optBase + p * ctx.E,
-                        curr, xOff, ctx.activeList, ctx.activeCount);
+    float mu = 0.0f;
+    for (uint k = 0u; k < ctx.K; ++k) {
+        float lambda_k = chord[k];
+        if (lambda_k < FLT_MIN) continue;
+        uint optBase = k * ctx.D * ctx.E;
+        mu += lambda_k * active_dot_half(ctx.optPolicy, optBase + p * ctx.E,
+                                          curr, xOff, ctx.activeList, ctx.activeCount);
+    }
+    ctx.policyMean[row * ctx.D + p] = mu;
 }
 
 // =================================================================================================
@@ -756,11 +867,12 @@ kernel void oak_learn_psi(
             g = fma(ctx.tdPsi[r * ctx.K + k], prev[r * ctx.E + m], g);
         }
     } else {
-        // Chord weight W_ψ[k][E + cidx]: contributes only from rows whose active option == cidx.
+        // Pass 11 Tier 3: chord weight W_ψ[k][E + cidx] gets soft-chord-weighted contribution.
+        // ψ_k uses chordPrev (the chord active during transition); ∂ψ_k/∂W_ψ[k][E+cidx] = λ_prev[cidx].
         uint cidx = m - ctx.E;
         for (uint r = 0u; r < ctx.B; ++r) {
-            if (active_option(ctx, r) != cidx) continue;
-            g += ctx.tdPsi[r * ctx.K + k];
+            float lambda_cidx = ctx.chordSlotPrev[r * ctx.K + cidx];
+            g = fma(ctx.tdPsi[r * ctx.K + k] * lambda_cidx, 1.0f, g);
         }
     }
     float invB = 1.0f / float(max(ctx.B, 1u));
@@ -802,22 +914,114 @@ kernel void oak_learn_pi(
     if (k >= ctx.K || d >= ctx.D || i >= ctx.E) return;
     if (ctx.activeMask[i] == 0u) return;   // outcome dims R..E are always-active by init
 
+    // Pass 11 Tier 3: SOFT-CHORD-WEIGHTED REINFORCE. Since meta_action emitted
+    //   μ_p = Σ_k λ_k · (W_π[k][p] · s),
+    // the gradient of log π(a|s) w.r.t. W_π[k][p][e] is λ_k(s) · s[e] · scoreGrad[p].
+    // Per-option gradient accumulates over all rows weighted by chordPrev[r][k].
     device const float *prev = state_slot(ctx, ctx.stateSlot);
     float g = 0.0f;
-    float n2 = 0.0f;  // ||per-(k,d,i) gradient terms||²; per-update implicit-α denominator
-    uint  cnt = 0u;
+    float n2 = 0.0f;
     for (uint r = 0u; r < ctx.B; ++r) {
-        if (active_option(ctx, r) != k) continue;
-        float pi_term = prev[r * ctx.E + i] * ctx.scoreGrad[r * ctx.D + d];
-        g = fma(ctx.td[r], pi_term, g);
+        float lambda_k = ctx.chordSlotPrev[r * ctx.K + k];
+        float pi_term  = prev[r * ctx.E + i] * ctx.scoreGrad[r * ctx.D + d];
+        g  = fma(ctx.td[r] * lambda_k, pi_term, g);
         n2 = fma(pi_term, pi_term, n2);
-        cnt++;
     }
-    if (cnt == 0u) return;
-    float invCnt = 1.0f / float(cnt);
-    float alpha_eff = ctx.alpha0 / (1.0f + ctx.alpha0 * n2 * invCnt);
+    float invB = 1.0f / float(max(ctx.B, 1u));
+    float alpha_eff = ctx.alpha0 / (1.0f + ctx.alpha0 * n2 * invB);
     uint  pIdx = k * ctx.D * ctx.E + d * ctx.E + i;
-    ctx.optPolicy[pIdx] = half(float(ctx.optPolicy[pIdx]) + alpha_eff * g * invCnt);
+    ctx.optPolicy[pIdx] = half(float(ctx.optPolicy[pIdx]) + alpha_eff * g * invB);
+}
+
+// =================================================================================================
+// learn_beta — Pass 11 Tier 3 termination-gradient update on betaW[E + K]. Per Bacon-Precup
+// 1609.05140 (Option-Critic) under Wan-Naik-Sutton 2110.13855 (continuing avg-reward):
+//   ∇_β J = (β − 1{terminated}) · A(s_prev, λ_prev)
+// where A is the differential-TD advantage td[r] (already includes the planning bonus from
+// oak_plan). Per-weight gradient on betaW[m] (state-or-chord index m ∈ [0, M_β = E + K)):
+//   g[m] = (1/B) Σ_r (β(s_prev, λ_prev) − terminated(r)) · td[r] · concat[s_prev, λ_prev][m]
+// Update: betaW[m] -= alpha_eff · g[m]  (NEGATIVE: descend the loss = β·A increasing β when A < 0,
+// decreasing when A > 0 — i.e., terminate sooner when the option is bad).
+//
+// `terminated(r)` is recovered from the SHIFT of optionAge: optionAge[r] == 1u iff
+// meta_policy resampled the chord at the *current* step (which corresponds to terminating
+// out of the prev step's option).
+//   [Grid: E + K — one thread per betaW weight.]
+// =================================================================================================
+kernel void oak_learn_beta(
+    device half   *params     [[buffer(0)]],
+    device float  *stateArena [[buffer(1)]],
+    device uint   *uintArena  [[buffer(2)]],
+    device KernelScalars *scalars [[buffer(3)]],
+    device KernelStats   *stats   [[buffer(4)]],
+    constant KernelConfig &cfg    [[buffer(5)]],
+    uint gid [[thread_position_in_grid]])
+{
+    Ctx ctx = make_ctx(params, stateArena, uintArena, scalars, cfg);
+    uint mBetaW = ctx.E + ctx.K;
+    uint m = gid;
+    if (m >= mBetaW) return;
+
+    device const float *prev = state_slot(ctx, ctx.stateSlot);
+    float g = 0.0f, n2 = 0.0f;
+    for (uint r = 0u; r < ctx.B; ++r) {
+        float beta = ctx.betaProb[r];
+        // 1{terminated}: optionAge[r] == 1u means meta_policy resampled at this step.
+        float terminated = (ctx.optionAge[r] == 1u) ? 1.0f : 0.0f;
+        float adv = ctx.td[r];
+        float feat = (m < ctx.E) ? prev[r * ctx.E + m]
+                                 : ctx.chordSlotPrev[r * ctx.K + (m - ctx.E)];
+        float term = (beta - terminated) * adv * feat;
+        g  += term;
+        n2 = fma(feat, feat, n2);
+    }
+    float invB = 1.0f / float(max(ctx.B, 1u));
+    float alpha_eff = ctx.alpha0 / (1.0f + ctx.alpha0 * n2 * invB);
+    // Sign: minimize J = β · A → descend g (negative gradient direction).
+    ctx.betaW[m] = half(float(ctx.betaW[m]) - alpha_eff * g * invB);
+}
+
+// =================================================================================================
+// learn_omega — Pass 11 Tier 3 chord-generator update via softmax policy gradient. omegaW
+// produces K logits from E-dim state; chord = softmax(logits). Per-weight gradient:
+//   g[k][e] = (1/B) Σ_r (1{k chosen at r} − chord_prev[r][k]) · td[r] · prev[r][e]
+// where "1{k chosen}" is the chord that was sampled this step IF termination occurred (else 0
+// since no new chord was sampled). For the no-termination rows we still apply a soft attribution
+// via chord weights to encourage useful chord persistence.
+//   [Grid: K · E — one thread per (k, e).]
+// =================================================================================================
+kernel void oak_learn_omega(
+    device half   *params     [[buffer(0)]],
+    device float  *stateArena [[buffer(1)]],
+    device uint   *uintArena  [[buffer(2)]],
+    device KernelScalars *scalars [[buffer(3)]],
+    device KernelStats   *stats   [[buffer(4)]],
+    constant KernelConfig &cfg    [[buffer(5)]],
+    uint gid [[thread_position_in_grid]])
+{
+    Ctx ctx = make_ctx(params, stateArena, uintArena, scalars, cfg);
+    uint k = gid / ctx.E, e = gid % ctx.E;
+    if (k >= ctx.K || e >= ctx.E) return;
+    if (ctx.activeMask[e] == 0u) return;
+
+    device const float *prev = state_slot(ctx, ctx.stateSlot);
+    float g = 0.0f, n2 = 0.0f;
+    for (uint r = 0u; r < ctx.B; ++r) {
+        bool terminatedHere = (ctx.optionAge[r] == 1u);
+        if (!terminatedHere) continue;  // chord only resampled at termination → grad only on those rows
+        float lambda_k = ctx.chordSlot[r * ctx.K + k];
+        float chosen = (ctx.option[(1u - ctx.optionSlot) * ctx.B + r] == k) ? 1.0f : 0.0f;
+        float adv = ctx.td[r];
+        float feat = prev[r * ctx.E + e];
+        float term = (chosen - lambda_k) * adv * feat;
+        g += term;
+        n2 = fma(feat, feat, n2);
+    }
+    float invB = 1.0f / float(max(ctx.B, 1u));
+    float alpha_eff = ctx.alpha0 / (1.0f + ctx.alpha0 * n2 * invB);
+    uint pIdx = k * ctx.E + e;
+    // Sign: ascend J = log π(k|s) · A → +g direction.
+    ctx.omegaW[pIdx] = half(float(ctx.omegaW[pIdx]) + alpha_eff * g * invB);
 }
 
 // =================================================================================================
@@ -1000,13 +1204,15 @@ kernel void oak_bk_option(
     float invB = 1.0f / float(max(ctx.B, 1u));
     float invT = track_rate(ctx.stepCount, ctx.ridge);
 
-    // Per-option counts and squared-cumulant-error (option k's own δ_k summed over its rows).
+    // Per-option counts and squared-cumulant-error. Pass 11 Tier 3: SOFT chord weighting —
+    // option k's "share" of each row's contribution is chordSlotPrev[r][k] (the chord that
+    // was active during the transition that produced tdPsi[r][k]).
     float cnt_l = 0.0f, psiErr_l = 0.0f;
     for (uint r = tid; r < ctx.B; r += tgW) {
-        if (active_option(ctx, r) != k) continue;
-        cnt_l += 1.0f;
+        float lambda_k = ctx.chordSlotPrev[r * ctx.K + k];
+        cnt_l += lambda_k;
         float d = ctx.tdPsi[r * ctx.K + k];
-        psiErr_l = fma(d, d, psiErr_l);
+        psiErr_l = fma(d * d, lambda_k, psiErr_l);
     }
     threadgroup float sg_cnt[4], sg_p[4];
     float cnt  = tg_sum_128(cnt_l,    sg_cnt, tid, sgid);
