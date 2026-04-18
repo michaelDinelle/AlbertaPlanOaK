@@ -371,7 +371,7 @@ private struct KernelConfig {
     var sPrevPolicyMean: UInt32 = 0, sPolicyMean: UInt32 = 0, sScoreGrad: UInt32 = 0
     var sReward: UInt32 = 0, sTd: UInt32 = 0, sTdPsi: UInt32 = 0, sVCurr: UInt32 = 0
     var sChordSlot: UInt32 = 0, sChordSlotPrev: UInt32 = 0, sBetaProb: UInt32 = 0
-    var sSprPred: UInt32 = 0   // Pass 13 Tier 3: SPR-Stream predicted ẑ_N scratch (B · R)
+    // Pass 14 Tier 1: sSprPred removed — oak_spr_fused recomputes ẑ_N inline.
     var uDone: UInt32 = 0, uActiveMask: UInt32 = 0, uActiveList: UInt32 = 0
     var uOption: UInt32 = 0, uCounters: UInt32 = 0, uSubtaskFeatureOf: UInt32 = 0
     var uOptionAge: UInt32 = 0
@@ -486,9 +486,9 @@ private enum OakMetalLayout {
         // alphaImpFeat[E] = exp(beta_i) / (1 + exp(beta_i) · featSM[i]) per-feature implicit step.
         // alphaImpBeta[E] = log-step meta-parameter; alphaImpH[E] = decay trace of past Δw.
         let alphaImpFeat, alphaImpBeta, alphaImpH: Int
-        // Pass 13 Tier 3: SPR-Stream predictor scratch (B · R fp32) — ẑ_N for current step,
-        // shared between oak_predict_next_latent (writer) and oak_learn_encoder_spr (reader).
-        let sprPred: Int
+        // Pass 14 Tier 1: sprPred[B·R] arena slot REMOVED (the fused oak_spr_fused kernel
+        // recomputes ẑ_N inline per (row, feat) and never materializes it — saves ~3 MB at
+        // B=2048, R=376 plus ~6 MB/step write+read traffic).
         let total: Int
     }
     static func stateLayout(obsDim: Int, rank: Int, actDim: Int, batch: Int, dPolicy: Int) -> State {
@@ -519,14 +519,12 @@ private enum OakMetalLayout {
         let aif = o; o += E          // Pass 13 Tier 2: alphaImpFeat[E] (per-feature implicit step)
         let aib = o; o += E          // alphaImpBeta[E] = log meta-parameter, init log(alpha0)
         let aih = o; o += E          // alphaImpH[E] = decay trace of past Δw, init 0
-        let spp = o; o += batch * rank   // Pass 13 Tier 3: sprPred[B · R] — SPR-predicted z_N
         return State(observation: obs, obsMean: mean, state: st, prevPolicyMean: prP, policyMean: pol,
                      scoreGrad: sg, reward: rew, td: td, tdPsi: tdP, vCurr: vc,
                      chordSlot: cs, chordSlotPrev: csP, betaProb: bp,
                      featSM: fs, wBar: wb, featMean: fm, utilFeat: uf, utilOpt: uo,
                      optFracEMA: ofE,
                      alphaImpFeat: aif, alphaImpBeta: aib, alphaImpH: aih,
-                     sprPred: spp,
                      total: o)
     }
 
@@ -589,15 +587,13 @@ final class OakMetalEngine {
         Phase(name: "oak_encode",             tgSize: 0),
         Phase(name: "oak_predict_outcome",    tgSize: 0),
         Phase(name: "oak_meta_policy",        tgSize: 0),
-        Phase(name: "oak_predict_next_latent", tgSize: 0),  // Pass 13 Tier 3 (SPR-Stream)
-        Phase(name: "oak_predict",            tgSize: 0),  // Pass 14 T2: REVERTED to per-thread
-                                                            // dispatchThreads (B-thread fills SIMD)
+        // Pass 14 T1: oak_predict_next_latent + oak_learn_encoder_spr fused into oak_spr_fused.
+        Phase(name: "oak_predict",            tgSize: 0),  // Pass 14 T2: per-thread dispatchThreads
         Phase(name: "oak_plan",               tgSize: 32),
         Phase(name: "oak_reduce_alpha",       tgSize: 128),
         Phase(name: "oak_learn_value",        tgSize: 32),
         Phase(name: "oak_learn_encoder",      tgSize: 0),
-        Phase(name: "oak_learn_encoder_spr",  tgSize: 0),   // Pass 14 T0.4 (REVISED): per-feat
-                                                            // dispatch (true OGP deferred to T1)
+        Phase(name: "oak_spr_fused",          tgSize: 0),   // Pass 14 T1: fused predict + learn
         Phase(name: "oak_learn_outcome",      tgSize: 0),
         Phase(name: "oak_learn_psi",          tgSize: 0),
         Phase(name: "oak_learn_pi",           tgSize: 0),
@@ -726,19 +722,18 @@ final class OakMetalEngine {
         let K = OakMetalLayout.optionCount(rank: rank, actDim: actDim)
         let E = OakMetalLayout.extendedDim(rank: rank, actDim: actDim)
         let M = OakMetalLayout.concatDim(rank: rank, actDim: actDim)
-        // 20-kernel pipeline (Pass 13 Tier 3): added oak_predict_next_latent +
-        // oak_learn_encoder_spr for SPR-Stream auxiliary loss with orthogonal gradient projection.
+        // Pass 14 Tier 1: 19-kernel pipeline (was 20). oak_predict_next_latent +
+        // oak_learn_encoder_spr fused into one oak_spr_fused that recomputes ẑ_N inline.
         phaseGridWidths = [
             batch * rank,                     // oak_encode              [dispatchThreads]
             batch * K,                        // oak_predict_outcome     [dispatchThreads]
             batch,                            // oak_meta_policy         [dispatchThreads]
-            batch * rank,                     // oak_predict_next_latent [dispatchThreads]  (SPR T3)
             batch,                            // oak_predict             [dispatchThreads]
             batch,                            // oak_plan                [B TGs × 32]
             1,                                // oak_reduce_alpha        [1 TG × 128]
             E,                                // oak_learn_value         [E TGs × 32]
             max(baseObsDim, 1),               // oak_learn_encoder       [dispatchThreads]
-            max(baseObsDim, 1),               // oak_learn_encoder_spr   [dispatchThreads baseO]
+            max(baseObsDim, 1),               // oak_spr_fused           [dispatchThreads baseO]
             K * E,                            // oak_learn_outcome       [dispatchThreads]
             K * M,                            // oak_learn_psi           [dispatchThreads]
             K * dPolicy * E,                  // oak_learn_pi            [dispatchThreads]
@@ -1065,7 +1060,7 @@ final class OakMetalEngine {
         c.sVCurr = UInt32(s.vCurr)
         c.sChordSlot = UInt32(s.chordSlot); c.sChordSlotPrev = UInt32(s.chordSlotPrev)
         c.sBetaProb = UInt32(s.betaProb)
-        c.sSprPred = UInt32(s.sprPred)
+        // Pass 14 Tier 1: sSprPred removed (oak_spr_fused inlines ẑ_N).
         c.uDone = UInt32(u.done); c.uActiveMask = UInt32(u.activeMask)
         c.uActiveList = UInt32(u.activeList); c.uOption = UInt32(u.option); c.uCounters = UInt32(u.counters)
         c.uSubtaskFeatureOf = UInt32(u.subtaskFeatureOf); c.uOptionAge = UInt32(u.optionAge)

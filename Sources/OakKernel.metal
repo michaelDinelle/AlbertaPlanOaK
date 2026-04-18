@@ -135,9 +135,7 @@ struct KernelConfig {
     uint sObservation, sObsMean, sState, sPrevPolicyMean, sPolicyMean, sScoreGrad;
     uint sReward, sTd, sTdPsi, sVCurr;
     uint sChordSlot, sChordSlotPrev, sBetaProb;
-    // Pass 13 Tier 3: SPR-Stream predicted ẑ_N scratch (B · R fp32). Written by
-    // oak_predict_next_latent, read by oak_learn_encoder_spr.
-    uint sSprPred;
+    // Pass 14 Tier 1: sSprPred removed (oak_spr_fused recomputes ẑ_N inline; saves ~3 MB).
     // UInt offsets. subtaskFeatureOf[K] = state-feature index that cumulant k tracks
     // (top-K by per-feature utility, re-ranked by oak_bk_admit_commit each step; Tier 7 RED).
     // optionAge[B] tracks steps since last termination for each row (Pass 11 Tier 3).
@@ -221,7 +219,7 @@ struct Ctx {
     device float  *chordSlot;      // [B][K]  -- current step's persistent soft chord (Tier 3)
     device float  *chordSlotPrev;  // [B][K]  -- prev step's chord (for learn_psi/_pi attribution)
     device float  *betaProb;       // [B]     -- β termination probability (telemetry + learn_beta)
-    device float  *sprPred;        // [B][R]  -- Pass 13 Tier 3 SPR predicted next latent ẑ_N
+    // Pass 14 Tier 1: sprPred[B][R] device pointer removed (oak_spr_fused inlines).
 
     device uint   *done;           // [B]
     device uint   *activeMask;     // [E]
@@ -282,7 +280,7 @@ inline Ctx make_ctx(device half *params, device float *stateArena, device uint *
     c.chordSlot       = stateArena + cfg.sChordSlot;
     c.chordSlotPrev   = stateArena + cfg.sChordSlotPrev;
     c.betaProb        = stateArena + cfg.sBetaProb;
-    c.sprPred         = stateArena + cfg.sSprPred;
+    // Pass 14 Tier 1: c.sprPred removed.
 
     c.done       = uintArena + cfg.uDone;
     c.activeMask = uintArena + cfg.uActiveMask;
@@ -635,42 +633,12 @@ kernel void oak_meta_policy(
 }
 
 // =================================================================================================
-// predict_next_latent — Pass 13 Tier 3: SPR-Stream chord-conditioned next-state predictor
-// (Nilaksh et al. 2602.09396 ICML 2026, "Squeezing More from the Stream"). Writes the predicted
-// next-step latent state ẑ_N[r][e] = (Σ_k chordPrev[r][k] · sprDecoder[k][e]) · z_{N-1}[r][e]
-// for e ∈ [0, R). Diagonal autoregressive — chord modulates the per-feature gain on z_{N-1}.
-// chordPrev is the chord that drove action_{N-1} (the action that produced this transition);
-// it's saved by oak_meta_policy at step N before resampling, so it's safe to read here.
-//
-// L_SPR = ‖z_N − ẑ_N‖² is the auxiliary self-predictive loss. The encoder gradient comes via
-// chain rule through z_N = encoder[e] · centered_obs[r][e] in oak_learn_encoder_spr (after
-// oak_learn_encoder applies the RL gradient, so the orthogonal projection has it available).
-// Inv-9 compliant: K · R fp16 params (~4 KB at K=32, R=64); no learnable hyperparameter.
-//   [Grid: B · R — one thread per (row, encoder feature).]
+// (Pass 13 Tier 3 oak_predict_next_latent fused into oak_spr_fused at Tier 1 — see below.)
+// The standalone predictor kernel was removed because the per-(row, e) predictions are now
+// recomputed on-the-fly inside the fused per-feat encoder/decoder update. Saves: 1 ICB
+// dispatch + 1 barrier + 1 device-memory write/read of sprPred[B·R] (~3 MB at B=2048, R=376).
+// Pipeline 20 → 19 kernels.
 // =================================================================================================
-kernel void oak_predict_next_latent(
-    device half   *params     [[buffer(0)]],
-    device float  *stateArena [[buffer(1)]],
-    device uint   *uintArena  [[buffer(2)]],
-    device KernelScalars *scalars [[buffer(3)]],
-    device KernelStats   *stats   [[buffer(4)]],
-    constant KernelConfig &cfg    [[buffer(5)]],
-    uint gid [[thread_position_in_grid]])
-{
-    Ctx ctx = make_ctx(params, stateArena, uintArena, scalars, cfg);
-    uint row = gid / ctx.R, e = gid % ctx.R;
-    if (row >= ctx.B) return;
-    device const float *prevState = state_slot(ctx, ctx.stateSlot);
-    device const float *chordPrev = ctx.chordSlotPrev + row * ctx.K;
-    // Chord-weighted decoder gain. sprDecoder[k][e] gives the per-option, per-feature predictor
-    // weight; mixing by the soft chord recovers the option-keyboard composition.
-    float gain = 0.0f;
-    for (uint k = 0u; k < ctx.K; ++k) {
-        gain += chordPrev[k] * float(ctx.sprDecoder[k * ctx.R + e]);
-    }
-    float z_prev = prevState[row * ctx.E + e];
-    ctx.sprPred[row * ctx.R + e] = gain * z_prev;
-}
 
 // =================================================================================================
 // predict — main differential TD δ_main (A.2) + K per-cumulant SF TDs δ_ψ[k] under the row's
@@ -1027,29 +995,35 @@ kernel void oak_learn_encoder(
 }
 
 // =================================================================================================
-// learn_encoder_spr — Pass 13 Tier 3: SPR-Stream auxiliary loss on the encoder with ORTHOGONAL
-// gradient projection (Nilaksh et al. 2602.09396 ICML 2026, Inv-8 satisfied verbatim).
+// spr_fused — Pass 14 Tier 1: FUSED predict + learn for SPR-Stream (Nilaksh 2602.09396 ICML
+// 2026). Replaces the Pass-13 split [oak_predict_next_latent + oak_learn_encoder_spr] with a
+// single per-feat dispatch that recomputes ẑ_N on-the-fly per (row, feat) instead of writing
+// it to a B·R sprPred arena slot.
 //
-// L_SPR = (1/B·R) Σ_r Σ_{e<R} (z_N[r][e] − ẑ_N[r][e])²
-//   z_N[r][e] = encoder[e] · (obs[r][e] − obsMean[e])              (oak_encode output for e<R)
-//   ẑ_N[r][e] = sprPred[r][e]                                     (oak_predict_next_latent output)
+// Math (per encoder feature feat ∈ [0, baseO ∩ R)):
+//   per-row prediction: ẑ_N[r][feat] = (Σ_k chordPrev[r][k] · sprDecoder[k][feat]) · z_{N-1}[r][feat]
+//   prediction error:   δ_r        = z_N[r][feat] − ẑ_N[r][feat]
+//   encoder gradient:   g_SPR[feat] = (-2/B) Σ_r centered_obs[r][feat] · δ_r
+//   RL gradient:        g_RL[feat]  = (1/B)  Σ_r ctx.td[r] · centered_obs[r][feat]
+//   per-coord damping:  g_SPR_damped[feat] = g_SPR · ridge / (g_RL² + ridge)
+//                                          = g_SPR − (g_RL·g_SPR / (g_RL²+ridge)) · g_RL
+//   encoder update:     encoder[feat] += alphaEnc · g_SPR_damped
+//   decoder gradient:   ∂L/∂D[k][feat] = (-2/B) Σ_r chordPrev[r][k] · z_{N-1}[r][feat] · δ_r
+//   decoder update:     sprDecoder[k][feat] += alphaImp · -2/B · Σ_r ...
 //
-// The auxiliary encoder gradient is:
-//   g_SPR[feat] = (-2/B) Σ_r centered_obs[r][feat] · (z_N[r][feat] − ẑ_N[r][feat])
-// To prevent SPR from corrupting the main TD signal (Inv-8: no off-task interference), project
-// it ORTHOGONAL to the just-applied RL gradient g_RL:
-//   g_SPR_orth = g_SPR − (⟨g_RL, g_SPR⟩ / max(‖g_RL‖², ridge)) · g_RL
-// Then encoder[feat] += alphaEnc · g_SPR_orth[feat].
+// Wins from fusion: -1 ICB dispatch + -1 barrier (~50 µs/step), -B·R fp32 arena slot
+// (sprPred[B·R] eliminated; ~3 MB at B=2048, R=376 — also saves ~6 MB/step traffic).
 //
-// Also updates sprDecoder[k][e] via SGD on D[k][e]:
-//   ∂L/∂D[k][e] = (-2/B) Σ_r chordPrev[r][k] · z_{N-1}[r][e] · (z_N[r][e] − ẑ_N[r][e])
-//
-// Single-pass: each thread (one per base obs feature) computes its g_SPR and g_RL contributions,
-// shared TG memory holds the inner products for orthogonalization. sprDecoder updates run as
-// a serial loop in thread 0 (only K · R weights, ~2 KB at K=32 R=64 — negligible).
-//   [Dispatch: max(baseObsDim, 1) threadgroups × default tgSize (auto-aligned).]
+// Note on Inv-8: the per-coordinate damping g_SPR · ridge/(g_RL²+ridge) is ADAPTIVE damping
+// along each diagonal direction, NOT global vector OGP. True vector OGP requires a global
+// ⟨g_RL, g_SPR⟩/‖g_RL‖² reduction over baseO; at per-feat dispatch that needs device atomics
+// or a 1-TG reduction (which empirically costs ~3 ms agent_ms). The per-coord damping is
+// Inv-8-spirit (SPR suppressed where RL has signal) but not Inv-8-strict. True vector OGP
+// is deferred to Pass 15 where a 2-kernel split (compute-grads → apply-OGP) can preserve
+// parallelism without atomics.
+//   [Grid: max(baseObsDim, 1) — one thread per encoder feature.]
 // =================================================================================================
-kernel void oak_learn_encoder_spr(
+kernel void oak_spr_fused(
     device half   *params     [[buffer(0)]],
     device float  *stateArena [[buffer(1)]],
     device uint   *uintArena  [[buffer(2)]],
@@ -1058,22 +1032,6 @@ kernel void oak_learn_encoder_spr(
     constant KernelConfig &cfg    [[buffer(5)]],
     uint gid [[thread_position_in_grid]])
 {
-    // Pass 14 Tier 0.4 (REVISED): per-feat dispatch with PER-COORDINATE adaptive damping.
-    // The Pass-14 first attempt (1 TG × 128 threads + simdgroup reductions for true vector
-    // OGP) was Inv-8-perfect math but ate ~3 ms agent_ms because 1 TG = only 4 SIMD groups
-    // doing ALL the work. The Pass-13 per-feat dispatch had 376/32 ≈ 12 SIMD groups in
-    // parallel — much faster.
-    //
-    // True OGP requires a global ⟨g_RL, g_SPR⟩ / ‖g_RL‖² reduction over baseObsDim. At
-    // per-feat dispatch this needs device-memory atomics (also slow). The CLEAN fix lives
-    // in Tier 1 SPR fusion, where the kernel is rewritten anyway and a 2-kernel split
-    // (compute-grads + apply-OGP) can preserve parallelism. For Tier 0 we restore the
-    // Pass-13 per-coord scaling with HONEST documentation: it is ADAPTIVE DAMPING along
-    // each diagonal direction, not vector orthogonalization. The damping coefficient is
-    // ⟨g_RL[i], g_SPR[i]⟩ / (g_RL[i]² + ridge) — a per-coordinate Mahalanobis-style
-    // suppression that empirically prevented SPR from corrupting RL on the 4 Pass-13
-    // regression envs (the actual root cause was the w_tilde stack-spill, fixed by T0.5).
-    //   [Grid: max(baseObsDim, 1) — one thread per encoder feature.]
     Ctx ctx = make_ctx(params, stateArena, uintArena, scalars, cfg);
     uint feat = gid;
     if (feat >= ctx.baseO || feat >= ctx.R) return;
@@ -1082,26 +1040,38 @@ kernel void oak_learn_encoder_spr(
     device const float *prevState = state_slot(ctx, ctx.stateSlot);
     float invB = 1.0f / float(max(ctx.B, 1u));
 
-    // Per-feature g_RL and g_SPR.
+    // Per-row inline ẑ_N recomputation. We accumulate g_RL, g_SPR, and per-k decoder gradient
+    // all in one pass over rows. Decoder grads stored in a static-indexed register array (K
+    // ≤ OAK_SIMD = 32 — register-resident, no spill).
     float g_RL = 0.0f, g_SPR = 0.0f;
+    float gD[OAK_SIMD];
+    for (uint k = 0u; k < ctx.K; ++k) gD[k] = 0.0f;
+
     for (uint r = 0u; r < ctx.B; ++r) {
-        float c    = ctx.observation[r * ctx.O + feat] - ctx.observationMean[feat];
-        float z    = currState[r * ctx.E + feat];
-        float zhat = ctx.sprPred[r * ctx.R + feat];
+        float c     = ctx.observation[r * ctx.O + feat] - ctx.observationMean[feat];
+        float z     = currState[r * ctx.E + feat];
+        float zPrev = prevState[r * ctx.E + feat];
+
+        // Inline ẑ_N = (Σ_k chordPrev[r][k] · sprDecoder[k][feat]) · zPrev.
+        float gain = 0.0f;
+        for (uint k = 0u; k < ctx.K; ++k) {
+            float chord_k = ctx.chordSlotPrev[r * ctx.K + k];
+            gain = fma(chord_k, float(ctx.sprDecoder[k * ctx.R + feat]), gain);
+        }
+        float zhat = gain * zPrev;
+        float delta = z - zhat;
+
         g_RL  = fma(ctx.td[r], c, g_RL);
-        // L_SPR = (z − ẑ)² → ∂L/∂encoder[feat] = 2(z − ẑ)·c. Descent direction = −∂L.
-        g_SPR = fma(-2.0f * (z - zhat), c, g_SPR);
+        g_SPR = fma(-2.0f * delta, c, g_SPR);
+        for (uint k = 0u; k < ctx.K; ++k) {
+            float chord_k = ctx.chordSlotPrev[r * ctx.K + k];
+            gD[k] = fma(chord_k * zPrev, delta, gD[k]);
+        }
     }
     g_RL  *= invB;
     g_SPR *= invB;
 
-    // Per-coordinate adaptive damping (Pass-13 native, honestly documented).
-    // damped_g_SPR[feat] = g_SPR[feat] − (g_RL[feat] · g_SPR[feat] / (g_RL[feat]² + ridge))
-    //                    · g_RL[feat]
-    // Algebraically this equals: g_SPR · ridge / (g_RL² + ridge) = SPR signal multiplied by
-    // a per-feature suppression factor in [0, 1]. When the RL gradient on this feature is
-    // strong, SPR is suppressed; when RL is silent, SPR is preserved. Inv-8 motivation
-    // satisfied (SPR doesn't fight RL where RL has signal).
+    // Per-coordinate adaptive damping (g_SPR projected away from g_RL along the feat axis).
     float denom = g_RL * g_RL + ctx.ridge;
     float coef  = (g_RL * g_SPR) / denom;
     float g_SPR_damped = g_SPR - coef * g_RL;
@@ -1109,17 +1079,9 @@ kernel void oak_learn_encoder_spr(
     float step = ctx.scalars->alphaEnc;
     ctx.encoder[feat] = half(float(ctx.encoder[feat]) + step * g_SPR_damped);
 
-    // sprDecoder update (per-feat thread owns column feat across all chord rows k).
+    // Decoder update: ∂L/∂D[k][feat] = (-2/B) · gD[k]; descend the loss.
     for (uint k = 0u; k < ctx.K; ++k) {
-        float gD = 0.0f;
-        for (uint r = 0u; r < ctx.B; ++r) {
-            float z    = currState[r * ctx.E + feat];
-            float zhat = ctx.sprPred[r * ctx.R + feat];
-            float zPrev = prevState[r * ctx.E + feat];
-            float chord_k = ctx.chordSlotPrev[r * ctx.K + k];
-            gD = fma(chord_k * zPrev, (z - zhat), gD);
-        }
-        float dDecoder = -2.0f * gD * invB;
+        float dDecoder = -2.0f * gD[k] * invB;
         uint dIdx = k * ctx.R + feat;
         ctx.sprDecoder[dIdx] = half(float(ctx.sprDecoder[dIdx])
                                   + ctx.scalars->alphaImp * dDecoder);
