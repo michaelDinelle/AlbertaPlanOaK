@@ -141,6 +141,8 @@ struct KernelConfig {
     // current-step feature values used as cumulant centering ρ_k = featMean[sf[k]] (RED).
     // Pass 11 Tier 5: optFracEMA[K] tracks soft-chord per-option mass for the dormancy gate.
     uint aFeatSM, aWBar, aFeatMean, aUtilFeat, aUtilOpt, aOptFracEMA;
+    // Pass 13 Tier 2: per-feature TIDBD α (SwiftSarsa 2507.19539 + MetaOptimize 2402.02342).
+    uint aAlphaImpFeat, aAlphaImpBeta, aAlphaImpH;
     // Derived scalars (all structurally derived from rank · batch).
     float cap;                // rank · batch (capacity volume; ridge / α₀ derived from it)
     float alpha0;             // 1 / cap (base step size)
@@ -225,6 +227,10 @@ struct Ctx {
     device float  *utilFeat;       // [R]
     device float  *utilOpt;        // [K]
     device float  *optFracEMA;     // [K]  -- soft-chord per-option mass EMA (Tier 5 reinit gate)
+    // Pass 13 Tier 2: per-feature TIDBD α — meta-learned per-feature implicit step-sizes.
+    device float  *alphaImpFeat;   // [E]  -- α_i = exp(β_i) / (1 + exp(β_i) · featSM[i])
+    device float  *alphaImpBeta;   // [E]  -- β_i meta-parameter (log-step), init log(α₀)
+    device float  *alphaImpH;      // [E]  -- decay trace of past Δw per feature, init 0
 
     device KernelScalars *scalars;
 };
@@ -280,6 +286,9 @@ inline Ctx make_ctx(device half *params, device float *stateArena, device uint *
     c.utilFeat   = stateArena + cfg.aUtilFeat;
     c.utilOpt    = stateArena + cfg.aUtilOpt;
     c.optFracEMA = stateArena + cfg.aOptFracEMA;
+    c.alphaImpFeat = stateArena + cfg.aAlphaImpFeat;
+    c.alphaImpBeta = stateArena + cfg.aAlphaImpBeta;
+    c.alphaImpH    = stateArena + cfg.aAlphaImpH;
 
     c.scalars = scalars;
     return c;
@@ -749,6 +758,14 @@ kernel void oak_meta_action(
 // reduce_alpha — compute α_imp = α₀ / (1 + α₀ · ⟨‖x_active‖²⟩) and α_enc (centered-obs variant)
 // once per step. 128-thread TG with hierarchical simd_sum. Saves K·R·R recomputations in
 // learn_psi and R recomputations in learn_value.
+//
+// Pass 13 Tier 2: also REFRESHES per-feature TIDBD α_i = exp(β_i) / (1 + exp(β_i) · featSM[i])
+// for i ∈ [0, E). Encoder features (i < R) use featSM[i] as the second-moment proxy; outcome
+// dims (i ≥ R) fall back to the global α (no per-feature SM available — they're predictions,
+// not directly-driven activations). β_i meta-update lives in oak_learn_value (the only place
+// with per-feature δ aggregated across the batch). SwiftSarsa 2507.19539 + MetaOptimize
+// 2402.02342: per-feature implicit step shrinks high-noise features and grows informative
+// ones — the BWH-orthodox version of an Adam-style per-parameter step-size.
 //   [Dispatch: 1 threadgroup × 128 threads.]
 // =================================================================================================
 kernel void oak_reduce_alpha(
@@ -779,6 +796,20 @@ kernel void oak_reduce_alpha(
         float invB = 1.0f / float(max(ctx.B, 1u));
         scalars->alphaImp = ctx.alpha0 / (1.0f + ctx.alpha0 * n2 * invB);
         scalars->alphaEnc = ctx.alpha0 / (1.0f + ctx.alpha0 * obs * invB);
+    }
+    // Pass 13 Tier 2: refresh per-feature α_i in parallel across the threadgroup. Each thread
+    // handles a strided subset of [0, E). Encoder dims use featSM (2nd-moment EMA); outcome
+    // dims have no SM tracker, so use the global ⟨n²⟩/B as a uniform fallback (recovers the
+    // global α behavior for outcome dims — they get no per-feature meta-learning credit).
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    float n2_mean = n2 / float(max(ctx.B, 1u));
+    for (uint i = tid; i < ctx.E; i += tgW) {
+        float beta_i = ctx.alphaImpBeta[i];
+        float exp_beta = exp(beta_i);
+        float sm_i = (i < ctx.R) ? ctx.featSM[i] : n2_mean;
+        // Implicit-α form: α_i = exp(β_i) / (1 + exp(β_i) · sm_i). Bounded above by min(exp(β_i),
+        // 1/sm_i), so β_i runaway can't blow up α_i (Kim 2510.06149 generalized to per-feature).
+        ctx.alphaImpFeat[i] = exp_beta / (1.0f + exp_beta * sm_i);
     }
 }
 
@@ -814,7 +845,14 @@ kernel void oak_learn_value(
     if (tid == 0u) {
         float invB = 1.0f / float(max(ctx.B, 1u));
         float invT = track_rate(ctx.stepCount, ctx.ridge);
-        float step = ctx.scalars->alphaImp;
+        // Pass 13 Tier 2: per-feature TIDBD α (SwiftSarsa 2507.19539 + MetaOptimize 2402.02342).
+        // Use the per-feature implicit step refreshed in oak_reduce_alpha. After applying it,
+        // meta-update β_i (the log-step) using the standard TIDBD form `β_i ← β_i + α₀·g·h_i`,
+        // and roll the decay trace `h_i ← h_i · max(0, 1 - α_i · sm_i) + α_i · g`. h_i is the
+        // running cross-product of past Δw and current ∂L/∂w — when these align, β_i grows;
+        // when they oppose, β_i shrinks. Inv-9 compliant: meta-rate = α₀ structurally derived,
+        // no extra hyperparameter.
+        float step = ctx.alphaImpFeat[feat];
         // featSM/wBar are encoder-only stats (cumulant ranking + plan optimism). Outcome dims
         // R..E participate in value updates but don't track these utility moments.
         if (feat < ctx.R) {
@@ -823,12 +861,18 @@ kernel void oak_learn_value(
         // Pass 13 Tier 1: L2-Effective-Rank regularizer (Spectral Collapse 2509.22335 ICLR 2026).
         // wNew = (1 - λ_L2) · w_old + step · g where λ_L2 grows when pEff < R.
         float lambda_L2 = l2er_decay(ctx.alpha0, ctx.R, ctx.scalars->pEff);
-        float wNew = float(ctx.valueW[feat]) * (1.0f - lambda_L2) + step * g * invB;
+        float gMean = g * invB;
+        float wNew = float(ctx.valueW[feat]) * (1.0f - lambda_L2) + step * gMean;
         ctx.valueW[feat] = half(wNew);
         if (feat < ctx.R) {
             float decay = 1.0f - ctx.alpha0;
             ctx.wBar[feat] = max(ctx.wBar[feat] * decay, fabs(wNew));
         }
+        // β_i meta-update + h_i trace roll. sm_i = featSM (encoder dim) or sm·invB (outcome).
+        float sm_i = (feat < ctx.R) ? ctx.featSM[feat] : (sm * invB);
+        float h_old = ctx.alphaImpH[feat];
+        ctx.alphaImpBeta[feat] = ctx.alphaImpBeta[feat] + ctx.alpha0 * gMean * h_old;
+        ctx.alphaImpH[feat] = h_old * max(0.0f, 1.0f - step * sm_i) + step * gMean;
     }
 }
 
@@ -939,7 +983,10 @@ kernel void oak_learn_psi(
     if (m < ctx.E && ctx.activeMask[m] == 0u) return;
 
     device const float *prev = state_slot(ctx, ctx.stateSlot);
-    float step = ctx.scalars->alphaImp;
+    // Pass 13 Tier 2: state weights use per-feature TIDBD α[m]; chord weights (m ≥ E) fall back
+    // to the global scalar α (no per-chord SM tracker — chord weights are dense and uniform-
+    // scale by simplex constraint).
+    float step = (m < ctx.E) ? ctx.alphaImpFeat[m] : ctx.scalars->alphaImp;
     float g = 0.0f;
     if (m < ctx.E) {
         // State weight: every row contributes via its own δ_k.
