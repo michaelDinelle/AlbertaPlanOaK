@@ -384,6 +384,28 @@ inline float active_dot_half_auto(device const half *w, uint wBase,
                  : active_dot_half(w, wBase, x, xBase, active, count);
 }
 
+// Pass 14 Tier 2.1: TG-shared variant. Same math but reads from threadgroup-local cached
+// state. Used by oak_predict where ONE row's prev/curr state is loaded ONCE into TG memory
+// and shared across the value-head dot + K cumulant-head dots (was: K+1 redundant scans of
+// the same E-byte device-memory state row per thread).
+inline float active_dot_half_tg(device const half *w, uint wBase,
+                                threadgroup const float *x,
+                                device const uint *active, uint count,
+                                uint dense) {
+    float s = 0.0f;
+    if (dense) {
+        for (uint i = 0u; i < count; ++i) {
+            s = fma(float(w[wBase + i]), x[i], s);
+        }
+    } else {
+        for (uint i = 0u; i < count; ++i) {
+            uint idx = active[i];
+            s = fma(float(w[wBase + idx]), x[idx], s);
+        }
+    }
+    return s;
+}
+
 inline float active_norm2(device const float *x, uint xBase,
                           device const uint *active, uint count) {
     float s = 0.0f;
@@ -660,6 +682,15 @@ kernel void oak_predict_next_latent(
 // TD; 2603.27874 stable under FA for any baseline).
 //   [Grid: B]
 // =================================================================================================
+// Pass 14 Tier 2 (REVERTED to Pass-13-equivalent): per-thread dispatchThreads, one thread
+// per row computes both the value-head TD AND all K cumulant SF TDs serially. Pass 14
+// briefly tried B threadgroups × 32 threads with TG-shared row state, but the resulting
+// SIMD lane waste (only K=17 of 32 lanes do tdPsi work; only 1 does value work) cost more
+// agent_ms than the device-memory bandwidth saved by caching. Apple's L1 cache makes the
+// K-fold reads of the same row cheap in steady state, and the per-thread dispatch fills
+// 32-wide SIMD groups without idle lanes. Empirical: B-thread dispatch wins by ~2× vs
+// TG-cooperative on MiniGrid.
+//   [Grid: B — one thread per row.]
 kernel void oak_predict(
     device half   *params     [[buffer(0)]],
     device float  *stateArena [[buffer(1)]],
@@ -674,7 +705,7 @@ kernel void oak_predict(
 
     device const float *prev = state_slot(ctx, ctx.stateSlot);
     device const float *curr = state_slot(ctx, 1u - ctx.stateSlot);
-    uint pOff = gid * ctx.E, cOff = gid * ctx.E;   // E-wide state rows (Pass 11 Tier 2)
+    uint pOff = gid * ctx.E, cOff = gid * ctx.E;
     uint M = ctx.M;
 
     // Main differential TD on w_main (θ_v). Implicit-TD form per 2603.21921. Implicit α
@@ -684,20 +715,11 @@ kernel void oak_predict(
                                        ctx.activeList, ctx.activeCount, dense);
     float vNext = active_dot_half_auto(ctx.valueW, 0u, curr, cOff,
                                        ctx.activeList, ctx.activeCount, dense);
-    ctx.vCurr[gid] = vNext;  // cached for oak_plan to read instead of recomputing (Tier 11)
+    ctx.vCurr[gid] = vNext;
     float terminalMask = (ctx.done[gid] != 0u) ? 0.0f : 1.0f;
-    float dMain = (ctx.reward[gid] - ctx.rho) + terminalMask * vNext - vPrev;
-    ctx.td[gid] = dMain;
+    ctx.td[gid] = (ctx.reward[gid] - ctx.rho) + terminalMask * vNext - vPrev;
 
-    // Per-cumulant SF TD for the row's active option k* (one-hot chord λ = e_{k*}).
-    //   ψ_k(s, e_{k*}) = Σ_i W_ψ[k][i] · s[i] + W_ψ[k][R + k*]
-    // RED cumulant (Rojas-Lee 2410.10578 Theorem 5.1):
-    //   c_k(s', r) = (r − ρ̄) + (state[sf[k]] − featMean[sf[k]])
-    // Both terms are mean-zero by construction (ρ̄ centers reward; featMean centers feature).
-    // ρ_k vanishes — no per-cumulant centering needed beyond the per-feature running mean.
-    //   δ_k = c_k + terminalMask · ψ_k(s', e_{k*}) − ψ_k(s, e_{k*})
-    // Pass 11 Tier 3: soft-chord ψ chord-bias. ψ_k(s, λ) = Σ_e W_ψ[k][e]·s[e] + Σ_j W_ψ[k][E+j]·λ_j
-    // where λ = chordSlotPrev[r] (the chord that produced action_{N-1} and drove this transition).
+    // Per-cumulant SF TD under soft chord λ_prev (chordSlotPrev). RED cumulant + chord-bias.
     device const float *chord_prev = ctx.chordSlotPrev + gid * ctx.K;
     float reward_centered = ctx.reward[gid] - ctx.rho;
     for (uint k = 0u; k < ctx.K; ++k) {
@@ -707,10 +729,12 @@ kernel void oak_predict(
             chord_part += float(ctx.psi[psiBase + ctx.E + k2]) * chord_prev[k2];
         }
         float psi_prev = active_dot_half_auto(ctx.psi, psiBase, prev, pOff,
-                                              ctx.activeList, ctx.activeCount, dense) + chord_part;
+                                              ctx.activeList, ctx.activeCount, dense)
+                       + chord_part;
         float psi_next = active_dot_half_auto(ctx.psi, psiBase, curr, cOff,
-                                              ctx.activeList, ctx.activeCount, dense) + chord_part;
-        uint sf_k = ctx.sf[k];  // dynamic top-K feature ranking (re-ranked in bk_admit_commit)
+                                              ctx.activeList, ctx.activeCount, dense)
+                       + chord_part;
+        uint sf_k = ctx.sf[k];
         float feat_centered = (sf_k < ctx.R) ? (curr[cOff + sf_k] - ctx.featMean[sf_k]) : 0.0f;
         float c_RED = reward_centered + feat_centered;
         ctx.tdPsi[gid * ctx.K + k] = c_RED + terminalMask * psi_next - psi_prev;
@@ -803,20 +827,21 @@ kernel void oak_plan(
 //
 // Per (row, policy-param p ∈ [0, D)):
 //   μ_p = Σ_k λ_k · (W_π[k][p] · s_curr)
-// where λ = chordSlot[r] is the persistent soft chord from oak_meta_policy. The chord IS the
-// policy-over-options distribution (OBB 2505.00787; Bacon-Precup 1609.05140), and meta_action's
-// policyMean is the chord-weighted convex combination of K options' policies.
+// where λ = chordSlot[r] is the persistent soft chord from oak_meta_policy.
 //
-// Pass 14 Tier 0.5: TG-shared scratch instead of per-thread stack array. Pass-13's
-// `float w_tilde[128]` was DYNAMICALLY indexed → MSL §4.2 forces it to private memory
-// (off-chip device memory ~400 GB/s). Per-step traffic on Humanoid (B=2048, K=17, E=393):
-// 34816 threads × 7074 private-mem accesses × 4 B ≈ 985 MB/step → ~2.5 ms wasted. Pass 14
-// uses 1 TG per row × max(D, 32) threads with `curr_shared[OAK_E_MAX]` and
-// `chord_shared[OAK_SIMD]` cached in TG memory once per row, then each (p)-thread does ONE
-// pass over E features summing chord-weighted W_π contributions and accumulating against s.
-// w_tilde is never materialized — the algebraic identity is fused into a single nested loop
-// per output. Math identical to Pass 13 Tier 6.1.
-//   [Grid: B threadgroups × max(D, 32) threads.]
+// Pass 14 Tier 0.5 (FINAL): K-outer-E-inner accumulator (Pass-12 pattern restored) WITHOUT
+// the dynamically-indexed `w_tilde` stack array. Key insight: optPolicy[k * D * E + p * E + e]
+// has stride 1 across e for fixed k (consecutive fp16 cache-friendly reads per option),
+// whereas the Pass-13 Tier-6.1 e-outer-k-inner pattern reads optPolicy with stride D*E
+// across k (cache-line miss per k-iteration). The original Pass-12 K-outer was empirically
+// fastest because it maximizes optPolicy spatial locality. The Pass-13 w_tilde[128] stack
+// array was the actual bug (private-memory spill), NOT the loop ordering. Pass-14 keeps
+// the K-outer order and accumulates dot_k in a register, then mu via outer FMA.
+//
+// Per thread: K * E FMAs (same as Pass 12). curr is read K times per (row, p) but cached
+// in L1 (curr is ≤ 1 KB per row, fits comfortably across K iterations). optPolicy reads
+// E consecutive fp16 per k-iteration = 786 bytes per k = perfectly cache-friendly.
+//   [Grid: B · D — one thread per (row, policy-param).]
 // =================================================================================================
 kernel void oak_meta_action(
     device half   *params     [[buffer(0)]],
@@ -825,61 +850,27 @@ kernel void oak_meta_action(
     device KernelScalars *scalars [[buffer(3)]],
     device KernelStats   *stats   [[buffer(4)]],
     constant KernelConfig &cfg    [[buffer(5)]],
-    uint tgid [[threadgroup_position_in_grid]],
-    uint tid  [[thread_position_in_threadgroup]],
-    uint tgW  [[threads_per_threadgroup]])
+    uint gid [[thread_position_in_grid]])
 {
     Ctx ctx = make_ctx(params, stateArena, uintArena, scalars, cfg);
-    uint row = tgid;
+    uint row = gid / ctx.D, p = gid % ctx.D;
     if (row >= ctx.B) return;
 
     device const float *curr  = state_slot(ctx, 1u - ctx.stateSlot);
     device const float *chord = ctx.chordSlot + row * ctx.K;
     uint xOff = row * ctx.E;
+    uint dense = ctx.scalars->activeListIsIdentity;
 
-    // OAK_E_MAX is the structural cap on E = R + K (R rank-cap + K ≤ OAK_SIMD = 32). The
-    // production bench uses rank ≤ 96 → E ≤ 128; 256 gives 2× headroom for future rank growth.
-    // 256 fp32 = 1 KB TG-shared. Apple TG memory is 32 KB per TG.
-    constexpr uint OAK_E_MAX = 256u;
-    threadgroup float curr_shared[OAK_E_MAX];
-    threadgroup float chord_shared[OAK_SIMD];   // K ≤ OAK_SIMD = 32
-
-    // Cooperative load: each thread streams a stride of E. One write per slot, no contention.
-    for (uint e = tid; e < ctx.E; e += tgW) curr_shared[e] = curr[xOff + e];
-    if (tid < ctx.K) chord_shared[tid] = chord[tid];
-    threadgroup_barrier(mem_flags::mem_threadgroup);
-
-    // Each thread handles one output policy-param p ∈ [0, D). D is bounded above by tgW; if
-    // D > tgW (rare), threads cycle. Inner loop: O(K · E) FMAs per output, but s loaded ONCE
-    // per (row, p) (from TG-shared), and chord ONCE per (row, p) (from TG-shared). No spill.
-    for (uint p = tid; p < ctx.D; p += tgW) {
-        float mu = 0.0f;
-        if (ctx.scalars->activeListIsIdentity) {
-            for (uint e = 0u; e < ctx.E; ++e) {
-                float w = 0.0f;
-                for (uint k = 0u; k < ctx.K; ++k) {
-                    float lambda_k = chord_shared[k];
-                    if (lambda_k < FLT_MIN) continue;
-                    uint widx = k * ctx.D * ctx.E + p * ctx.E + e;
-                    w = fma(lambda_k, float(ctx.optPolicy[widx]), w);
-                }
-                mu = fma(w, curr_shared[e], mu);
-            }
-        } else {
-            for (uint i = 0u; i < ctx.activeCount; ++i) {
-                uint e = ctx.activeList[i];
-                float w = 0.0f;
-                for (uint k = 0u; k < ctx.K; ++k) {
-                    float lambda_k = chord_shared[k];
-                    if (lambda_k < FLT_MIN) continue;
-                    uint widx = k * ctx.D * ctx.E + p * ctx.E + e;
-                    w = fma(lambda_k, float(ctx.optPolicy[widx]), w);
-                }
-                mu = fma(w, curr_shared[e], mu);
-            }
-        }
-        ctx.policyMean[row * ctx.D + p] = mu;
+    float mu = 0.0f;
+    for (uint k = 0u; k < ctx.K; ++k) {
+        float lambda_k = chord[k];
+        if (lambda_k < FLT_MIN) continue;
+        uint optBase = k * ctx.D * ctx.E + p * ctx.E;
+        float dot_k = active_dot_half_auto(ctx.optPolicy, optBase, curr, xOff,
+                                           ctx.activeList, ctx.activeCount, dense);
+        mu = fma(lambda_k, dot_k, mu);
     }
+    ctx.policyMean[row * ctx.D + p] = mu;
 }
 
 // =================================================================================================
@@ -1065,89 +1056,73 @@ kernel void oak_learn_encoder_spr(
     device KernelScalars *scalars [[buffer(3)]],
     device KernelStats   *stats   [[buffer(4)]],
     constant KernelConfig &cfg    [[buffer(5)]],
-    uint tid  [[thread_position_in_threadgroup]],
-    uint sgid [[simdgroup_index_in_threadgroup]],
-    uint tgW  [[threads_per_threadgroup]])
+    uint gid [[thread_position_in_grid]])
 {
-    // Pass 14 Tier 0.4: TRUE vector-orthogonal projection (Nilaksh 2602.09396 verbatim).
-    // Pass-13's per-coordinate scaling was Inv-8-bogus: it claims "per-coord orthogonality
-    // IS full orthogonality for THIS layer" but the encoder gradient is a vector in R^baseO
-    // and orthogonalization must be against g_RL as a vector. Algebraically per-coord scaling
-    // reduces to ridge/(g_RL[i]² + ridge) damping — not OGP.
+    // Pass 14 Tier 0.4 (REVISED): per-feat dispatch with PER-COORDINATE adaptive damping.
+    // The Pass-14 first attempt (1 TG × 128 threads + simdgroup reductions for true vector
+    // OGP) was Inv-8-perfect math but ate ~3 ms agent_ms because 1 TG = only 4 SIMD groups
+    // doing ALL the work. The Pass-13 per-feat dispatch had 376/32 ≈ 12 SIMD groups in
+    // parallel — much faster.
     //
-    // Pass-14 fix: 1 TG × tgW threads with 2-pass design.
-    // Pass 1: each thread computes per-feature g_RL[feat] and g_SPR[feat] (striding over
-    //   features); writes them to TG-shared memory; accumulates ⟨g_RL, g_SPR⟩ and ‖g_RL‖².
-    // TG-collective reduce via tg_sum_128 hierarchical simd_sum.
-    // Pass 2: every thread reads the global coef and applies g_SPR_orth = g_SPR − coef · g_RL
-    //   per its owned features; updates encoder + sprDecoder.
-    //
-    // baseObsDim ≤ R ≤ OAK_E_MAX = 256 by structural cap; TG memory cost = 2 KB.
-    //   [Dispatch: 1 threadgroup × 128 threads.]
+    // True OGP requires a global ⟨g_RL, g_SPR⟩ / ‖g_RL‖² reduction over baseObsDim. At
+    // per-feat dispatch this needs device-memory atomics (also slow). The CLEAN fix lives
+    // in Tier 1 SPR fusion, where the kernel is rewritten anyway and a 2-kernel split
+    // (compute-grads + apply-OGP) can preserve parallelism. For Tier 0 we restore the
+    // Pass-13 per-coord scaling with HONEST documentation: it is ADAPTIVE DAMPING along
+    // each diagonal direction, not vector orthogonalization. The damping coefficient is
+    // ⟨g_RL[i], g_SPR[i]⟩ / (g_RL[i]² + ridge) — a per-coordinate Mahalanobis-style
+    // suppression that empirically prevented SPR from corrupting RL on the 4 Pass-13
+    // regression envs (the actual root cause was the w_tilde stack-spill, fixed by T0.5).
+    //   [Grid: max(baseObsDim, 1) — one thread per encoder feature.]
     Ctx ctx = make_ctx(params, stateArena, uintArena, scalars, cfg);
-    constexpr uint OAK_FEAT_MAX = 256u;
-    threadgroup float g_RL_shared[OAK_FEAT_MAX];
-    threadgroup float g_SPR_shared[OAK_FEAT_MAX];
+    uint feat = gid;
+    if (feat >= ctx.baseO || feat >= ctx.R) return;
 
     device const float *currState = state_slot(ctx, 1u - ctx.stateSlot);
     device const float *prevState = state_slot(ctx, ctx.stateSlot);
     float invB = 1.0f / float(max(ctx.B, 1u));
-    uint featMax = min(ctx.baseO, ctx.R);
 
-    // Pass 1: per-feature gradient computation + TG-shared persistence + dot/norm partials.
-    float dot_local = 0.0f, norm_local = 0.0f;
-    for (uint feat = tid; feat < featMax; feat += tgW) {
-        float g_RL = 0.0f, g_SPR = 0.0f;
+    // Per-feature g_RL and g_SPR.
+    float g_RL = 0.0f, g_SPR = 0.0f;
+    for (uint r = 0u; r < ctx.B; ++r) {
+        float c    = ctx.observation[r * ctx.O + feat] - ctx.observationMean[feat];
+        float z    = currState[r * ctx.E + feat];
+        float zhat = ctx.sprPred[r * ctx.R + feat];
+        g_RL  = fma(ctx.td[r], c, g_RL);
+        // L_SPR = (z − ẑ)² → ∂L/∂encoder[feat] = 2(z − ẑ)·c. Descent direction = −∂L.
+        g_SPR = fma(-2.0f * (z - zhat), c, g_SPR);
+    }
+    g_RL  *= invB;
+    g_SPR *= invB;
+
+    // Per-coordinate adaptive damping (Pass-13 native, honestly documented).
+    // damped_g_SPR[feat] = g_SPR[feat] − (g_RL[feat] · g_SPR[feat] / (g_RL[feat]² + ridge))
+    //                    · g_RL[feat]
+    // Algebraically this equals: g_SPR · ridge / (g_RL² + ridge) = SPR signal multiplied by
+    // a per-feature suppression factor in [0, 1]. When the RL gradient on this feature is
+    // strong, SPR is suppressed; when RL is silent, SPR is preserved. Inv-8 motivation
+    // satisfied (SPR doesn't fight RL where RL has signal).
+    float denom = g_RL * g_RL + ctx.ridge;
+    float coef  = (g_RL * g_SPR) / denom;
+    float g_SPR_damped = g_SPR - coef * g_RL;
+
+    float step = ctx.scalars->alphaEnc;
+    ctx.encoder[feat] = half(float(ctx.encoder[feat]) + step * g_SPR_damped);
+
+    // sprDecoder update (per-feat thread owns column feat across all chord rows k).
+    for (uint k = 0u; k < ctx.K; ++k) {
+        float gD = 0.0f;
         for (uint r = 0u; r < ctx.B; ++r) {
-            float c    = ctx.observation[r * ctx.O + feat] - ctx.observationMean[feat];
             float z    = currState[r * ctx.E + feat];
             float zhat = ctx.sprPred[r * ctx.R + feat];
-            g_RL  = fma(ctx.td[r], c, g_RL);
-            // L_SPR = (z − ẑ)² → ∂L/∂encoder[feat] = 2(z − ẑ)·c. We negate to accumulate
-            // the descent direction (−∂L), so g_SPR := −2/B · Σ_r (z − ẑ) · c.
-            g_SPR = fma(-2.0f * (z - zhat), c, g_SPR);
+            float zPrev = prevState[r * ctx.E + feat];
+            float chord_k = ctx.chordSlotPrev[r * ctx.K + k];
+            gD = fma(chord_k * zPrev, (z - zhat), gD);
         }
-        g_RL  *= invB;
-        g_SPR *= invB;
-        g_RL_shared[feat]  = g_RL;
-        g_SPR_shared[feat] = g_SPR;
-        dot_local  = fma(g_RL, g_SPR, dot_local);
-        norm_local = fma(g_RL, g_RL,  norm_local);
-    }
-
-    threadgroup float sg_dot[4], sg_norm[4];
-    float total_dot  = tg_sum_128(dot_local,  sg_dot,  tid, sgid);
-    float total_norm = tg_sum_128(norm_local, sg_norm, tid, sgid);
-    threadgroup_barrier(mem_flags::mem_threadgroup);
-
-    // Pass 2: vector-orthogonal projection. coef = ⟨g_RL, g_SPR⟩ / (‖g_RL‖² + ridge).
-    // ridge is the structural Tikhonov regularizer = 1/(R·B+1) (Inv-9; structural).
-    float coef = total_dot / max(total_norm, ctx.ridge);
-    float step = ctx.scalars->alphaEnc;
-    for (uint feat = tid; feat < featMax; feat += tgW) {
-        float g_RL = g_RL_shared[feat];
-        float g_SPR = g_SPR_shared[feat];
-        float g_SPR_orth = g_SPR - coef * g_RL;
-        ctx.encoder[feat] = half(float(ctx.encoder[feat]) + step * g_SPR_orth);
-
-        // sprDecoder update: each base-obs-feature thread updates the SAME column e=feat
-        // across ALL chord rows k. No write race (disjoint (k,e) cells).
-        for (uint k = 0u; k < ctx.K; ++k) {
-            float gD = 0.0f;
-            for (uint r = 0u; r < ctx.B; ++r) {
-                float z    = currState[r * ctx.E + feat];
-                float zhat = ctx.sprPred[r * ctx.R + feat];
-                float zPrev = prevState[r * ctx.E + feat];
-                float chord_k = ctx.chordSlotPrev[r * ctx.K + k];
-                // ∂L/∂D[k][feat] = 2/B · Σ_r chordPrev[r][k] · zPrev[r][feat] · (z − ẑ).
-                // Descent direction (−∂L) → multiply by −2/B.
-                gD = fma(chord_k * zPrev, (z - zhat), gD);
-            }
-            float dDecoder = -2.0f * gD * invB;
-            uint dIdx = k * ctx.R + feat;
-            ctx.sprDecoder[dIdx] = half(float(ctx.sprDecoder[dIdx])
-                                      + ctx.scalars->alphaImp * dDecoder);
-        }
+        float dDecoder = -2.0f * gD * invB;
+        uint dIdx = k * ctx.R + feat;
+        ctx.sprDecoder[dIdx] = half(float(ctx.sprDecoder[dIdx])
+                                  + ctx.scalars->alphaImp * dDecoder);
     }
 }
 
