@@ -439,7 +439,18 @@ kernel void oak_encode(
     float o_raw = (feat < ctx.O) ? ctx.observation[row * ctx.O + feat] : 0.0f;
     float om    = (feat < ctx.O) ? ctx.observationMean[feat] : 0.0f;
     float centered = o_raw - om;
-    float z = centered * float(ctx.encoder[feat]);
+    float z_instant = centered * float(ctx.encoder[feat]);
+    // Pass 13 Tier 4: per-feature belief-state recurrence (Belief-State RWKV 2604.09671 Apr 2026).
+    // Per-feature retention gate α_i ∈ [0, 1] is structurally derived from the TIDBD per-feature
+    // implicit step (Tier 2): α_i = min(1, α_i_TIDBD · cap). High-utility / low-variance features
+    // → α_i → 1 → instantaneous (Pass-12 behavior recovered). Noisy / unstable features → α_i → 0
+    // → strong recurrence (history dominates). At step 0 alphaImpFeat = α₀ = 1/cap so α = 1 across
+    // the board — engine boots in instantaneous mode and gradually accumulates POMDP belief state
+    // only for features that the meta-learning has identified as worth retaining. NO additional
+    // learnable parameters; tied directly to existing meta-machinery — Inv-9 compliant.
+    float alpha = min(1.0f, ctx.alphaImpFeat[feat] * ctx.cap);
+    float prev_belief = state_slot(ctx, ctx.stateSlot)[row * ctx.E + feat];
+    float z = alpha * z_instant + (1.0f - alpha) * prev_belief;
     // Row stride is E (encoder writes [:R] of the E-wide state row; outcome head writes [R:E]).
     state_slot(ctx, writeSlot)[row * ctx.E + feat] = z;
 }
