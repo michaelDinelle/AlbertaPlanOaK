@@ -171,6 +171,9 @@ struct KernelScalars {
                               // Used to RESCALE planning gate and β-termination so a wrong-but-
                               // improving model still gets credit (fixes Pass-12 absolute-scale
                               // regression on Dynamic-Obstacles family).
+    uint  activeListIsIdentity; // Pass 13 Tier 6.2: 1 iff activeCount == E AND activeList[i] == i
+                                // for all i in [0, E). Set by oak_bk_admit_commit; consumed by
+                                // active_dot_half_auto to take the dense fast-path.
 };
 
 // KernelStats — 16 Float fields. Layout must match Swift KernelStats byte-for-byte.
@@ -357,6 +360,30 @@ inline float active_dot_half(device const half *w, uint wBase,
     return s;
 }
 
+// Pass 13 Tier 6.2: dense fast-path for `active_dot_half` when activeCount == E and the
+// activeList is the identity ordering. Skips the indirection through activeList[i] — the
+// fp16-fp32 fused dot becomes a tight contiguous loop the compiler can vectorize tightly.
+// Caller checks `activeListIsIdentity` flag (cached in KernelScalars by oak_bk_admit_commit).
+inline float active_dot_dense(device const half *w, uint wBase,
+                              device const float *x, uint xBase, uint count) {
+    float s = 0.0f;
+    for (uint i = 0u; i < count; ++i) {
+        s = fma(float(w[wBase + i]), x[xBase + i], s);
+    }
+    return s;
+}
+
+// Pass 13 Tier 6.2: dispatch helper — uses the dense path when activeListIsIdentity is set,
+// otherwise falls back to gather. Keeps the call sites readable. The flag is computed once
+// per step in oak_bk_admit_commit (negligible cost) so all callers within the step agree.
+inline float active_dot_half_auto(device const half *w, uint wBase,
+                                  device const float *x, uint xBase,
+                                  device const uint *active, uint count,
+                                  uint dense) {
+    return dense ? active_dot_dense(w, wBase, x, xBase, count)
+                 : active_dot_half(w, wBase, x, xBase, active, count);
+}
+
 inline float active_norm2(device const float *x, uint xBase,
                           device const uint *active, uint count) {
     float s = 0.0f;
@@ -485,8 +512,9 @@ kernel void oak_predict_outcome(
     device       float *curr = state_slot(ctx, 1u - ctx.stateSlot) + row * ctx.E;
     // Active-feature dot: outcome head sees only encoder-admitted features + outcome dims (which
     // are always-active by construction). active_dot_half iterates activeList[0..activeCount).
-    float v = active_dot_half(ctx.outcomeHead, k * ctx.E, prev, 0u,
-                              ctx.activeList, ctx.activeCount);
+    float v = active_dot_half_auto(ctx.outcomeHead, k * ctx.E, prev, 0u,
+                                   ctx.activeList, ctx.activeCount,
+                                   ctx.scalars->activeListIsIdentity);
     curr[ctx.R + k] = v;
 }
 
@@ -651,8 +679,11 @@ kernel void oak_predict(
 
     // Main differential TD on w_main (θ_v). Implicit-TD form per 2603.21921. Implicit α
     // (oak_reduce_alpha) + ρ̄ centering keep δ in fp32 dynamic range; no explicit projection.
-    float vPrev = active_dot_half(ctx.valueW, 0u, prev, pOff, ctx.activeList, ctx.activeCount);
-    float vNext = active_dot_half(ctx.valueW, 0u, curr, cOff, ctx.activeList, ctx.activeCount);
+    uint dense = ctx.scalars->activeListIsIdentity;
+    float vPrev = active_dot_half_auto(ctx.valueW, 0u, prev, pOff,
+                                       ctx.activeList, ctx.activeCount, dense);
+    float vNext = active_dot_half_auto(ctx.valueW, 0u, curr, cOff,
+                                       ctx.activeList, ctx.activeCount, dense);
     ctx.vCurr[gid] = vNext;  // cached for oak_plan to read instead of recomputing (Tier 11)
     float terminalMask = (ctx.done[gid] != 0u) ? 0.0f : 1.0f;
     float dMain = (ctx.reward[gid] - ctx.rho) + terminalMask * vNext - vPrev;
@@ -675,10 +706,10 @@ kernel void oak_predict(
         for (uint k2 = 0u; k2 < ctx.K; ++k2) {
             chord_part += float(ctx.psi[psiBase + ctx.E + k2]) * chord_prev[k2];
         }
-        float psi_prev = active_dot_half(ctx.psi, psiBase, prev, pOff,
-                                         ctx.activeList, ctx.activeCount) + chord_part;
-        float psi_next = active_dot_half(ctx.psi, psiBase, curr, cOff,
-                                         ctx.activeList, ctx.activeCount) + chord_part;
+        float psi_prev = active_dot_half_auto(ctx.psi, psiBase, prev, pOff,
+                                              ctx.activeList, ctx.activeCount, dense) + chord_part;
+        float psi_next = active_dot_half_auto(ctx.psi, psiBase, curr, cOff,
+                                              ctx.activeList, ctx.activeCount, dense) + chord_part;
         uint sf_k = ctx.sf[k];  // dynamic top-K feature ranking (re-ranked in bk_admit_commit)
         float feat_centered = (sf_k < ctx.R) ? (curr[cOff + sf_k] - ctx.featMean[sf_k]) : 0.0f;
         float c_RED = reward_centered + feat_centered;
@@ -721,8 +752,9 @@ kernel void oak_plan(
     if (k < ctx.K) {
         uint psiBase = k * M;
         // ψ_k(s, e_k) under one-hot chord at index k.
-        float psi_k = active_dot_half(ctx.psi, psiBase, curr, xOff,
-                                      ctx.activeList, ctx.activeCount)
+        float psi_k = active_dot_half_auto(ctx.psi, psiBase, curr, xOff,
+                                           ctx.activeList, ctx.activeCount,
+                                           ctx.scalars->activeListIsIdentity)
                     + float(ctx.psi[psiBase + ctx.E + k]);
         uint sf_k = ctx.sf[k];  // dynamic feature ranking (Tier 7)
         float wk  = (sf_k < ctx.R) ? float(ctx.valueW[sf_k]) : 0.0f;
@@ -801,13 +833,39 @@ kernel void oak_meta_action(
     device const float *chord = ctx.chordSlot + row * ctx.K;
     uint xOff = row * ctx.E;
 
+    // Pass 13 Tier 6.1: linear-combination refactor. Algebraically:
+    //   μ_p = Σ_k λ_k · Σ_e W_π[k][p][e] · s[e]   (commute sums)
+    //       = Σ_e (Σ_k λ_k · W_π[k][p][e]) · s[e]
+    //       = Σ_e w̃[e] · s[e]
+    // Build w̃[e] once on-stack (E ≤ R + K = R + 32), then ONE active-dot against s.
+    // FMA count is unchanged (K·E + activeCount ≈ K·E + E vs K·activeCount), but s is loaded
+    // ONCE per (row, p) instead of K times — eliminating K-1 redundant reads of the row's
+    // state vector. Subagent 4 estimate: 0.3-0.8 ms/step at K=32, E=408. The active-dot
+    // dispatch picks the dense fast-path when activeListIsIdentity is set (Tier 6.2).
+    float w_tilde[OAK_SIMD + 96];   // E ≤ R + K; OAK_SIMD = 32 caps K, R cap is 96 in current
+                                    // bench (rank-cap from OakMetalLayout). 128 fp32 = 512 B / thread.
+    for (uint e = 0u; e < ctx.E; ++e) {
+        float w = 0.0f;
+        for (uint k = 0u; k < ctx.K; ++k) {
+            float lambda_k = chord[k];
+            if (lambda_k < FLT_MIN) continue;
+            uint widx = k * ctx.D * ctx.E + p * ctx.E + e;
+            w = fma(lambda_k, float(ctx.optPolicy[widx]), w);
+        }
+        w_tilde[e] = w;
+    }
+    // Final dot: active path or dense fast-path. Cast w_tilde to a fake `device half *` —
+    // can't, so inline the dot here.
     float mu = 0.0f;
-    for (uint k = 0u; k < ctx.K; ++k) {
-        float lambda_k = chord[k];
-        if (lambda_k < FLT_MIN) continue;
-        uint optBase = k * ctx.D * ctx.E;
-        mu += lambda_k * active_dot_half(ctx.optPolicy, optBase + p * ctx.E,
-                                          curr, xOff, ctx.activeList, ctx.activeCount);
+    if (ctx.scalars->activeListIsIdentity) {
+        for (uint i = 0u; i < ctx.E; ++i) {
+            mu = fma(w_tilde[i], curr[xOff + i], mu);
+        }
+    } else {
+        for (uint i = 0u; i < ctx.activeCount; ++i) {
+            uint idx = ctx.activeList[i];
+            mu = fma(w_tilde[idx], curr[xOff + idx], mu);
+        }
     }
     ctx.policyMean[row * ctx.D + p] = mu;
 }
@@ -1617,6 +1675,18 @@ kernel void oak_bk_admit_commit(
         ctx.activeList[count++] = ctx.R + k;
     }
     ctx.scalars->activeCount = count;
+
+    // Pass 13 Tier 6.2: dense-fast-path flag. Set when activeCount == E (full-rank, all
+    // encoder features admitted plus all K outcome dims) AND activeList is the identity
+    // ordering 0, 1, ..., E-1. In steady state after warmup this is the common case and lets
+    // active_dot_half_auto skip the gather indirection.
+    bool isIdentity = (count == ctx.E);
+    if (isIdentity) {
+        for (uint i = 0u; i < ctx.E; ++i) {
+            if (ctx.activeList[i] != i) { isIdentity = false; break; }
+        }
+    }
+    ctx.scalars->activeListIsIdentity = isIdentity ? 1u : 0u;
 
     // Tier 7: dynamic top-K subtask-feature ranking. Cumulant k tracks the feature with the
     // k-th highest utilFeat. BWH-orthodox structural meta-learning: the agent picks its own
