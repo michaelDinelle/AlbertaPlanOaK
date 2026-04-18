@@ -543,6 +543,10 @@ final class OakMetalEngine {
     private var phaseGpuInvalidStepCount: [Int]
     private var hostAction: [Float]
     private var hostDiscrete: [Int32]
+    // Per-action-dim env bounds. Continuous actions clamped here at FFI boundary so kernel can
+    // emit raw policy logits without internal range projection (Tier 2.2 / 6.2).
+    private let envActionLow: [Float]
+    private let envActionHigh: [Float]
     // Metal 4 ICB + MTLResidencySet (macOS 26). Pre-encoded 12 dispatches execute in one encoder
     // on the hot path, eliminating per-phase encoder setup (~50µs × 12 = ~600µs/step host savings).
     private let indirectCommandBuffer: MTLIndirectCommandBuffer
@@ -638,6 +642,8 @@ final class OakMetalEngine {
         phaseGpuInvalidStepCount = Array(repeating: 0, count: Self.phases.count)
         hostAction = Array(repeating: 0, count: batch * actDim)
         hostDiscrete = Array(repeating: 0, count: batch)
+        envActionLow = lows
+        envActionHigh = highs
 
         // --- Metal 4 ICB + MTLResidencySet setup ----------------------------------------------
         let icbDesc = MTLIndirectCommandBufferDescriptor()
@@ -769,6 +775,16 @@ final class OakMetalEngine {
                 for d in 0..<actDim { let v = hostAction[b + d]; if v > bestV { bestV = v; best = d } }
                 hostDiscrete[row] = Int32(best)
             }
+        } else {
+            for row in 0..<batch {
+                let b = row * actDim
+                for d in 0..<actDim {
+                    let v = hostAction[b + d]
+                    if !v.isFinite { hostAction[b + d] = 0 }
+                    else if v < envActionLow[d] { hostAction[b + d] = envActionLow[d] }
+                    else if v > envActionHigh[d] { hostAction[b + d] = envActionHigh[d] }
+                }
+            }
         }
         return (ActionBatch(floats: hostAction, indices: actionIsDiscrete ? hostDiscrete : nil),
                 Double(DispatchTime.now().uptimeNanoseconds - start) / 1_000_000,
@@ -785,8 +801,10 @@ final class OakMetalEngine {
         let s = stateLayout
         let p = OakMetalLayout.paramLayout(obsDim: obsDim, rank: rank, actDim: actDim)
         let K = OakMetalLayout.optionCount(rank: rank, actDim: actDim)
-        let slotIdx = Int(scalarsPointer.pointee.stateSlot)
-        let curSlot = 1 - slotIdx
+        // bk_admit_commit toggles stateSlot at end of each step; the just-written ("current")
+        // state therefore lives at offset stateSlot, the previous slot at 1 - stateSlot.
+        let curSlot = Int(scalarsPointer.pointee.stateSlot)
+        let prevSlot = 1 - curSlot
         switch name {
         case "state":
             return Array(UnsafeBufferPointer(
@@ -794,7 +812,7 @@ final class OakMetalEngine {
                 count: batch * rank))
         case "state_prev":
             return Array(UnsafeBufferPointer(
-                start: stateArena.pointer.advanced(by: s.state + slotIdx * batch * rank),
+                start: stateArena.pointer.advanced(by: s.state + prevSlot * batch * rank),
                 count: batch * rank))
         case "td":
             return Array(UnsafeBufferPointer(
