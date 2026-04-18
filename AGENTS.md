@@ -134,7 +134,9 @@ Each **`run`**, **`diagnose`**, and **`benchmark`** writes one **pretty-printed*
 
 **Env vs agent (serial MDP):** Each iteration runs **Metal `oak_step` then native `env.step`**. Without an async batched env API, throughput is bounded by this split (see **`diagnostic`** shares). Native env code is built by **`setup.sh`** into **`.build/oak-native/liboakenv.dylib`**.
 
-**Discrete control:** the vector sent to **`env.step`** uses **indices sampled from softmax(logits)** produced in the meta-policy phase (not deterministic argmax), and the host **`floats`** are set to the matching **one-hot** so **`previousAction`** matches what was executed. Logits are **clamped** to **`±min(√(rank·actDim), log(max finite float32))`** (`OakMetalLayout.discreteLogitHalfWidth`) so Metal’s `clamp` is not a no-op on ±`greatestFiniteMagnitude` and host **`exp`** stays in range.
+**Discrete control:** the vector sent to **`env.step`** uses **indices sampled from Gumbel-max softmax(logits)** produced in `oak_meta_action`, and the host **`floats`** are set to the matching **one-hot** so **`previousAction`** matches what was executed. The Gumbel-max sample uses a structural splitmix32 hash of `(stepCount, row, dim)` — no host RNG round-trip. The score function `1{a=d} − π_d` is written to `scoreGrad[B·D]` for `oak_learn_pi` to consume next step.
+
+**Continuous control:** `oak_meta_action` extracts `μ_d, log_σ_d` per action dim from `optPolicy[k*][2d, 2d+1] · curr_state`, samples `z ~ N(0,1)` via Box-Muller from splitmix32, and emits `action[d] = μ + σ·z` with `σ = exp(log_σ)` — keeps σ > 0 without clamp. Score function `(z/σ, (z²−1)/2)` written to `scoreGrad`. Action is clamped to `[actionLow, actionHigh]` ONLY at the FFI boundary in `OakMetalEngine.step` — that is the env's constraint, not agent shaping. The agent's internal action representation is unbounded.
 
 ### Long runs (depth + width at high SPS)
 
@@ -156,7 +158,12 @@ Default **`benchmark`** sweeps all native env ids with modest **`OAK_BENCH_STEPS
 
 **Baseline:** **`OAK_BASELINE_RANDOM_STEPS`** > 0 with **`OAK_POLICY=oak`** prepends a matching **`random`** snapshot (**`*-random-*.json`**) into the same **`<envId>/seed<N>/`** folder.
 
-**Continual signal scale:** encoder output, GVF **`latentError`**, reward prediction, and **TD** are **clamped** in the Metal kernel to **`±(rank × batchSize)`** — the same capacity volume term used in **`capacity_ridge`** (`structural_activation_cap` in `OakKernel.metal`) — so forward quantities cannot diverge toward float overflow on an infinite horizon.
+**Continual signal scale (BWH-orthodox stability):** zero clamps anywhere. Per-step boundedness comes from two compounding mechanisms, both of which TRACK the world's actual statistics rather than imposing a fixed prior:
+
+- **Implicit-α step (Kim 2510.06149):** `α_imp = α₀ / (1 + α₀·⟨‖x_active‖²⟩_batch)` computed once per step in `oak_reduce_alpha`. As input magnitude grows, the step size shrinks proportionally; the per-step weight update `Δw = α_imp · δ · x` cannot blow up the parameter regardless of input scale.
+- **Differential ρ̄ centering (Naik / 2603.27874):** `δ = (r − ρ̄) + V(s') − V(s)` with ρ̄ tracked via `track_rate(stepCount, ridge)`. Keeps the TD error in a bounded range over the long run regardless of reward magnitude.
+
+Forward outputs (encoder, value, ψ, π logits, σ) are FREE to grow as the world demands — Big World requires that magnitudes carry information about the agent's encountered slice of reality. Layer normalization is rejected as an anti-BWH stationary scale prior. Telemetry uses non-finite guards (zero out NaN/Inf, count occurrences) instead of saturating clamps.
 
 ## Performance: Metal trace (GPU truth surface)
 
@@ -180,3 +187,27 @@ OAK_METAL_SIGNPOSTS=1 xctrace record --no-prompt \
 **Consistent summary:** After recording, run **`python3 scripts/oak_trace_report.py /path/to/capture.trace`** (add **`--json`** for machine-readable output). Cross-check **agent / env** splits against **`diagnose`** JSON (**`diagnostic.agentShare`**, **`envShare`**, **`metalPhaseGpuMsMean`**) with the same env configuration. `xctrace export` remains supplementary.
 
 **Do not:** argue dominant kernel phase from **`sample` / Time Profiler alone**; treat tiny **encode** rows in application intervals as the whole step (total work includes GPU execution on driver/GPU tracks).
+
+## OaK kernel checklist (Step 11 architecture)
+
+13 kernels in `OakKernel.metal`, executed in order via Metal 4 Indirect Command Buffer. Each step: encode → predict → plan → reduce_alpha → learn_value → learn_encoder → learn_psi → learn_pi → meta_action → bk_reduce → bk_feature → bk_option → bk_admit_commit. `meta_action` runs LAST among learn-time phases so `learn_pi` reads `scoreGrad` from the previous step (= score function for the action that produced the current TD).
+
+Notation: `R` = rank, `B` = batch, `K` = optionCount (≤ 32 = Apple SIMD width), `M` = `R + K` (concat dim for chord-conditional ψ), `D` = `actionParamCount` (= numActions discrete | 2·actDim continuous), `A` = actDim.
+
+| Kernel | Math | Invariant | Param shapes touched |
+|---|---|---|---|
+| `oak_encode` | `s'_i = (obs_i − obsMean_i) · W_enc[i]` per (row, feat) | New state slot is overwritten; only `W_enc[0..baseO)` are non-identity | reads `encoder[R]`, `obs[B·O]`, `obsMean[O]`; writes `state[1−slot][B·R]` |
+| `oak_predict` | `δ_main = (r − ρ̄) + V(s') − V(s)`; for k ∈ [0, K): `δ_k = c_k + V_k(s', e_{k*}) − V_k(s, e_{k*})` with RED cumulant `c_k = (r − ρ̄) + (state[sf[k]] − featMean[sf[k]])` | `td[B]` and `tdPsi[B·K]` finite; ρ̄ centering ensures mean-zero δ over time | reads `valueW[R]`, `psi[K·M]`, `featMean[R]`, `sf[K]`, `state` slots, `reward[B]`, `done[B]`; writes `td[B]`, `tdPsi[B·K]`, `vCurr[B]` |
+| `oak_plan` | `Q_k(s) = w_main[sf[k]] · ψ_k(s, e_k) + max(0, (w̄[sf[k]] − w_main[sf[k]]) · s[sf[k]])`; SIMD argmax over K lanes; `td[r] += Q_{k*} − vCurr[r]` | One TG per row × OAK_SIMD threads; `option_slot[1−slot]` updated to k*; planning advantage added to main TD | reads `psi`, `valueW`, `wBar[R]`, `sf[K]`, `vCurr[B]`; writes `option_slot`, `td` |
+| `oak_reduce_alpha` | `α_imp = α₀/(1 + α₀ · ⟨‖x‖²⟩_batch)`; `α_enc = α₀/(1 + α₀ · ⟨‖obs−obsMean‖²⟩_batch)` | Single TG × 128 threads; `scalars->alphaImp/alphaEnc` are positive and finite | reads `state`, `obs`, `obsMean`; writes `scalars->alphaImp/alphaEnc` |
+| `oak_learn_value` | `w_main[i] += α_imp · ⟨δ · prev[i]⟩_batch` (active features only); update `featSM[i]` (EMA of x²) and `wBar[i]` (decayed high-water-mark) | R TGs × OAK_SIMD threads; SIMD-sum reduction over B per feature | reads/writes `valueW[R]`, `featSM[R]`, `wBar[R]` |
+| `oak_learn_encoder` | `W_enc[f] += α_enc · ⟨δ · (obs[f] − obsMean[f])⟩_batch` for f ∈ [0, baseO) | One thread per base-obs feat; learns per-feature scaling tied to main TD | reads/writes `encoder[baseO]` |
+| `oak_learn_psi` | For each (k, m) ∈ K × M: `W_ψ[k][m] += α_imp · ⟨δ_k · concat[s, λ][m]⟩_batch`; chord-part contribution gated on row's active option | Grid K · M; every row contributes to every cumulant via its own δ_k | reads/writes `psi[K·M]` |
+| `oak_learn_pi` | For each (k, d, i) ∈ K × D × R, gated on opt(r) == k: `W_π[k][d][i] += α_imp · ⟨δ · prev[i] · scoreGrad[d]⟩_{rows: opt==k}` | REAL REINFORCE on parameter space — replaces broken `td · prev · prevAction` heuristic | reads/writes `optPolicy[K·D·R]` |
+| `oak_meta_action` | Discrete: softmax(W_π[k*] · curr) → Gumbel-max sample → score `1{a=d} − π_d`. Continuous: μ, log_σ from W_π[k*] · curr → Box-Muller `z ~ N(0,1)` → `a = μ + σ·z`; score `(z/σ, (z²−1)/2)` | scoreGrad has nonzero variance across rows (verified via Tier 6 probe) | reads `optPolicy`; writes `action[B·A]`, `scoreGrad[B·D]` |
+| `oak_bk_reduce` | One 128-thread TG: Welford EMA of `obsMean[O]` and `featMean[R]`; mean-square / max telemetry over B·R latent and B·A action; `scoreGradL2Mean` over B·D | Updates `featMean` (= ρ_k for cumulant centering); accumulates non-finite counters | reads everything; writes `obsMean`, `featMean`, `stats`, `counters[OBS_NF, LEARN_NF, PLAN_NF]` |
+| `oak_bk_feature` | Per feature i: `utilFeat[i] += track_rate · (mean_{rows} \|δ · x[i]\| + Σ_k \|δ_k · x[i]\| − utilFeat[i])` (GraMa gradient-magnitude utility, divisor `1 + K`) | R TGs × OAK_SIMD threads; per-feature utility for top-K rerank in admit_commit | reads `td`, `tdPsi`, `state`; writes `utilFeat[R]` |
+| `oak_bk_option` | Per option k (TG of 128): `utilOpt[k] += track_rate · (mean_{r: opt==k}\|δ_k\|² − utilOpt[k])`; FIRE+SWR reinit triggers on conjunctive (high stale TD ∧ dormant fraction) — clears `psi[k][:M]` and `optPolicy[k][:D·R]`, sets `OAK_CNT_REINIT_OPT` bitmask | utilOpt evolves over time; reinit bitmask atomic-OR'd race-free | reads `tdPsi`, `option_slot`; writes `utilOpt[K]`, `psi`, `optPolicy`, `counters[REINIT_OPT]` |
+| `oak_bk_admit_commit` | One thread: refresh `activeMask/activeList/activeCount` (admit features above mean utility, floor at ⌈√R⌉); rerank `sf[K]` by top-K utilFeat (RED dynamic feature ranking); ρ̄ Naik update; pEff stable-rank proxy from featSM; FC-STOMP encoder reinit on worst feature when option reinited; toggle slots, increment stepCount | sf[] is permutation of distinct feature indices; activeCount ≥ ⌈√R⌉ unless R = 0; ρ̄ tracks batch-mean reward via track_rate | reads everything; writes `activeMask/List`, `sf[K]`, `scalars->{rho, pEff, slots, stepCount}`, `counters[REINIT_OPT]` cleared |
+
+All kernels share a single 7-buffer signature (params, stateArena, uintArena, scalars, stats, bounds, config) for ICB pre-encoding even though some kernels don't read every buffer. Probe slots (Tier 0 harness, removed in Tier 12.3): `state, td, tdPsi, action, scoreGrad, valueW, encoderW, featMean, subtaskFeatureOf, psi_total_count, psi_bytes, concat_dim, actionParamCount, chord_slot, rho, activeRank, rewardRate, utilFeat, utilOpt`.
