@@ -95,7 +95,6 @@ constant uint OAK_CNT_REINIT_FEAT   = 4u;  // bk_admit_commit: encoder-feature r
 
 struct KernelConfig {
     uint obsDim, rank, actDim, batch, optionCount, baseObsDim;
-    uint actionIsDiscrete;
     // D_params: numActions for discrete (one logit per action), 2·actDim for continuous Gaussian
     // ([μ, log_σ] per action dim). Determines optPolicy[K · D · R] and scoreGrad[B · D] shapes.
     uint actionParamCount;
@@ -111,35 +110,30 @@ struct KernelConfig {
     // (top-K by per-feature utility, re-ranked by oak_bk_admit_commit each step; Tier 7 RED).
     uint uDone, uActiveMask, uActiveList, uOption, uCounters, uSubtaskFeatureOf;
     // Arena offsets (in fp32 stride, past sState's tail). featMean[R] is the running EMA of
-    // current-step feature values used as cumulant centering ρ_k = featMean[sf[k]] (Tier 3:
-    // sf[k] = k; Tier 7 makes sf[] dynamic).
+    // current-step feature values used as cumulant centering ρ_k = featMean[sf[k]] (RED).
     uint aFeatSM, aWBar, aFeatMean, aUtilFeat, aUtilOpt;
-    // Derived scalars (all structurally derived from rank · batch)
+    // Derived scalars (all structurally derived from rank · batch).
     float cap;                // rank · batch (capacity volume; ridge / α₀ derived from it)
     float alpha0;             // 1 / cap (base step size)
     float ridge;              // 1 / (cap + 1) (Tikhonov ridge; tracking EMA floor)
-    float boundLat, boundRew, boundAct;
-    float invBoundLat, invBoundRew, invBoundAct;
 };
 
 struct KernelScalars {
-    uint  stepCount, doneCount, activeCount;
+    uint  stepCount, activeCount;
     uint  stateSlot, optionSlot;
-    uint  _pad;
     float rho;                // main-task average reward (Naik centering)
     float pEff;               // effective rank trace/max of featSM
     float alphaImp;           // implicit TD step: α₀ / (1 + α₀·⟨‖x_active‖²⟩_batch) — 2510.06149
     float alphaEnc;           // implicit TD step for encoder (centered obs)
 };
 
-// KernelStats — 15 fields (dead legacy slots removed: maxAbsRewardPrediction,
-// planningUsedOptionDynamicsMean, utilitySubtaskMean, utilityPlanningMean).
+// KernelStats — 16 Float fields. Layout must match Swift KernelStats byte-for-byte.
 struct KernelStats {
     float rewardRate, latentStateMeanSquare, activeRank;
     float rawNonFiniteCount, sanitizedNonFiniteCount;
     float encodeNonFiniteCount, learnNonFiniteCount, planNonFiniteCount;
     float maxAbsLatentPrediction, maxAbsPolicyOutput;
-    float actionDeltaL2Mean, planningActionChangeL2Mean;
+    float actionDeltaL2Mean, scoreGradL2Mean;
     float optionModelPredictionMSE;
     float oakOptionReinitCount;
     float utilityFeatureMean, utilityOptionMean;
@@ -154,8 +148,6 @@ struct Ctx {
     uint activeCount, stepCount;
     uint stateSlot, optionSlot;
     float cap, alpha0, ridge, rho;
-    float boundLat, boundRew, boundAct, invBoundLat, invBoundRew, invBoundAct;
-    bool  actionIsDiscrete;
 
     device half   *encoder;
     device half   *valueW;
@@ -201,9 +193,6 @@ inline Ctx make_ctx(device half *params, device float *stateArena, device uint *
     c.optionSlot  = scalars->optionSlot;
     c.cap = cfg.cap; c.alpha0 = cfg.alpha0; c.ridge = cfg.ridge;
     c.rho = scalars->rho;
-    c.boundLat = cfg.boundLat; c.boundRew = cfg.boundRew; c.boundAct = cfg.boundAct;
-    c.invBoundLat = cfg.invBoundLat; c.invBoundRew = cfg.invBoundRew; c.invBoundAct = cfg.invBoundAct;
-    c.actionIsDiscrete = (cfg.actionIsDiscrete != 0u);
 
     c.encoder   = params + cfg.pEncoder;
     c.valueW    = params + cfg.pValue;
@@ -875,7 +864,7 @@ kernel void oak_bk_reduce(
         float invBD = 1.0f / float(max(ctx.B * ctx.D, 1u));
         stats->latentStateMeanSquare      = lms * invBR;
         stats->optionModelPredictionMSE   = psi * invBK;
-        stats->planningActionChangeL2Mean = sgL2 * invBD;  // repurposed: scoreGrad L² mean
+        stats->scoreGradL2Mean            = sgL2 * invBD;  // mean ‖∇log π‖² across rows × params
         stats->actionDeltaL2Mean          = ad  * invBA;
         stats->maxAbsLatentPrediction     = maxLat;
         stats->maxAbsPolicyOutput         = maxPol;
