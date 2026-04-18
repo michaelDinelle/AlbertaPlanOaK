@@ -360,6 +360,28 @@ inline float tg_max_128(float v_local, threadgroup float *sg_buf, uint tid, uint
 }
 
 // =================================================================================================
+// noop — Pass-12 ablation stub. Hot-swap target for the per-kernel ablation harness:
+// OakMetalEngine.init accepts an `ablatedKernels: Set<String>`; for each phase whose name
+// is in that set, the ICB encodes oak_noop's pipeline state instead of the real kernel.
+// The arena slots that the ablated kernel would have written stay at their previous step's
+// values (stale data) — this is the cleanest way to simulate "what if this kernel didn't run"
+// without disturbing the layout. Same buffer signature as every other kernel so the ICB
+// can swap pipelines without touching buffer bindings.
+// =================================================================================================
+kernel void oak_noop(
+    device half   *params     [[buffer(0)]],
+    device float  *stateArena [[buffer(1)]],
+    device uint   *uintArena  [[buffer(2)]],
+    device KernelScalars *scalars [[buffer(3)]],
+    device KernelStats   *stats   [[buffer(4)]],
+    constant KernelConfig &cfg    [[buffer(5)]],
+    uint gid [[thread_position_in_grid]])
+{
+    (void)params; (void)stateArena; (void)uintArena;
+    (void)scalars; (void)stats; (void)cfg; (void)gid;
+}
+
+// =================================================================================================
 // encode — centered linear encoder writes the NEW state into state_slot(1 - stateSlot).
 //   [Grid: R · B] One thread per (row, feat).
 // =================================================================================================

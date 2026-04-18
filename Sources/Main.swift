@@ -180,6 +180,17 @@ private struct BenchmarkEnv { let envId: String; let schema: Schema }
 // seedBase multiplication, the most neutral value possible.
 private let oakUnseededSeed: Int32 = 0
 
+// Pass 12 Tier 1: env-var-driven kernel ablation. OAK_ABLATE_KERNEL=name1,name2 replaces the
+// named kernel(s) with oak_noop in the ICB. Used by run/benchmark; probe also accepts
+// --ablate-kernel=NAME on the CLI. Empty / unset = no ablation (baseline).
+private func ablatedKernelsFromEnv() -> Set<String> {
+    guard let raw = ProcessInfo.processInfo.environment["OAK_ABLATE_KERNEL"]?
+                            .trimmingCharacters(in: .whitespacesAndNewlines), !raw.isEmpty
+    else { return [] }
+    return Set(raw.split(separator: ",").map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+                                           .filter { !$0.isEmpty })
+}
+
 // ------------------------------------------------------------------------------------------------
 // Filesystem helpers.
 // ------------------------------------------------------------------------------------------------
@@ -765,6 +776,8 @@ final class OakMetalEngine {
     private let queue: MTLCommandQueue
     private let cbDesc: MTLCommandBufferDescriptor
     private let pipelines: [MTLComputePipelineState]
+    private let noopPipeline: MTLComputePipelineState   // Pass 12 Tier 1: ablation hot-swap target
+    private let ablatedPhaseIndices: Set<Int>           // phase indices replaced with noop in the ICB
     private let scalarsBuffer: MTLBuffer
     private let statsBuffer: MTLBuffer
     private let configBuffer: MTLBuffer
@@ -792,19 +805,21 @@ final class OakMetalEngine {
                               description: "non-empty .build/OakKernel.metallib", nonEmpty: true)
     }
 
-    private static func makePipelines(device: MTLDevice) throws -> [MTLComputePipelineState] {
+    private static func makePipelines(device: MTLDevice) throws -> (real: [MTLComputePipelineState], noop: MTLComputePipelineState) {
         let library = try device.makeLibrary(URL: try kernelURL())
-        return try phases.map { phase in
-            // No function constants. Pass 10 unification: single pipeline set, no env-type variants.
-            guard let fn = library.makeFunction(name: phase.name) else {
-                throw OakError.message("Missing \(phase.name) in OakKernel.metallib.")
+        func make(_ name: String) throws -> MTLComputePipelineState {
+            guard let fn = library.makeFunction(name: name) else {
+                throw OakError.message("Missing \(name) in OakKernel.metallib.")
             }
-            // supportIndirectCommandBuffers is required for ICB pre-encoding (Metal 3+).
             let desc = MTLComputePipelineDescriptor()
             desc.computeFunction = fn
             desc.supportIndirectCommandBuffers = true
             return try device.makeComputePipelineState(descriptor: desc, options: [], reflection: nil)
         }
+        let real = try phases.map { try make($0.name) }
+        // Pass 12 Tier 1: oak_noop hot-swap target for per-kernel ablation.
+        let noop = try make("oak_noop")
+        return (real, noop)
     }
 
     // Apple GPUs have a fixed 32-thread SIMD width. Returning this constant avoids compiling all
@@ -816,7 +831,8 @@ final class OakMetalEngine {
     // param widths from the env's ActionSpec). The agent has no notion of WHAT the components
     // are — only the integer width. Inv-1 + Bitter Lesson.
     init(obsDim: Int, baseObsDim: Int, actDim: Int, batch: Int, rank: Int, dPolicy: Int,
-         device: MTLDevice, seed: Int?, diagnosticGpuPhaseTiming: Bool = false) throws {
+         device: MTLDevice, seed: Int?, diagnosticGpuPhaseTiming: Bool = false,
+         ablatedKernels: Set<String> = []) throws {
         precondition(obsDim == rank, "obsDim must equal rank (interface-derived latent width).")
         precondition(baseObsDim <= obsDim && baseObsDim >= 1, "baseObsDim must be positive and ≤ obsDim.")
         precondition(dPolicy >= 1, "dPolicy must be positive (env's action-spec param-count sum).")
@@ -828,7 +844,23 @@ final class OakMetalEngine {
         self.queue = queue
         let d = MTLCommandBufferDescriptor(); d.retainedReferences = false
         cbDesc = d
-        pipelines = try Self.makePipelines(device: device)
+        let built = try Self.makePipelines(device: device)
+        pipelines = built.real
+        noopPipeline = built.noop
+        // Pass 12 Tier 1: resolve ablated kernel names to phase indices. Unknown names are warned
+        // about (so a typo doesn't silently produce a baseline run). Per the multi-signal Pareto
+        // gate, removing an "ablated" kernel from the ICB simulates "what if this kernel didn't run"
+        // — the arena slot it would have written stays at its previous-step value.
+        let phaseNames = Set(Self.phases.map { $0.name })
+        for k in ablatedKernels where !phaseNames.contains(k) {
+            fputs("OaK: warning — ablate-kernel '\(k)' is not a known phase; ignored.\n", stderr)
+        }
+        ablatedPhaseIndices = Set(Self.phases.enumerated()
+            .filter { ablatedKernels.contains($0.element.name) }.map { $0.offset })
+        if !ablatedPhaseIndices.isEmpty {
+            let names = ablatedPhaseIndices.sorted().map { Self.phases[$0].name }.joined(separator: ", ")
+            fputs("OaK: ablating kernels [\(names)] — replaced with oak_noop in the ICB.\n", stderr)
+        }
 
         scalarsBuffer = device.makeBuffer(length: MemoryLayout<KernelScalars>.stride, options: [.storageModeShared])!
         statsBuffer   = device.makeBuffer(length: MemoryLayout<KernelStats>.stride,   options: [.storageModeShared])!
@@ -977,7 +1009,13 @@ final class OakMetalEngine {
         let buffers = resourceList
         for i in 0..<Self.phases.count {
             let cmd = icb.indirectComputeCommandAt(i)
-            cmd.setComputePipelineState(pipelines[i])
+            // Pass 12 Tier 1: hot-swap the noop pipeline for ablated phases. Same buffer
+            // bindings + same dispatch geometry — the kernel just returns immediately, so
+            // the arena slot the ablated kernel would have written stays at its previous
+            // step's value (which is what "what if this kernel didn't run" means).
+            let isAblated = ablatedPhaseIndices.contains(i)
+            let pip = isAblated ? noopPipeline : pipelines[i]
+            cmd.setComputePipelineState(pip)
             for j in 0..<buffers.count { cmd.setKernelBuffer(buffers[j], offset: 0, at: j) }
             let tgSize = Self.phases[i].tgSize
             if tgSize > 0 {
@@ -986,7 +1024,6 @@ final class OakMetalEngine {
                     MTLSize(width: tgCount, height: 1, depth: 1),
                     threadsPerThreadgroup: MTLSize(width: tgSize, height: 1, depth: 1))
             } else {
-                let pip = pipelines[i]
                 let tg = min(max(pip.threadExecutionWidth, 1), pip.maxTotalThreadsPerThreadgroup)
                 let w = alignedGridWidth(threadCount: phaseGridWidths[i], pipeline: pip)
                 cmd.concurrentDispatchThreads(
@@ -1806,6 +1843,7 @@ private func ranks(_ a: [Double]) -> [Double] {
         var slot: String?
         var assertMonotonic = false
         var seed: Int? = nil
+        var probeAblateKernel: Set<String> = []
         var probeNumEnvs = 64
         var i = 0
         while i < args.count {
@@ -1847,6 +1885,11 @@ private func ranks(_ a: [Double]) -> [Double] {
                 guard let v = Int(s.dropFirst("--num-envs=".count)), v > 0 else {
                     throw OakError.message("Invalid value for --num-envs.")
                 }; probeNumEnvs = v
+            case "--ablate-kernel":
+                i += 1; guard i < args.count else { throw OakError.message("Missing value for --ablate-kernel.") }
+                probeAblateKernel.formUnion(args[i].split(separator: ",").map(String.init))
+            case let s where s.hasPrefix("--ablate-kernel="):
+                probeAblateKernel.formUnion(s.dropFirst("--ablate-kernel=".count).split(separator: ",").map(String.init))
             default:
                 throw OakError.message("Unrecognized probe arg '\(a)'.")
             }
@@ -1858,7 +1901,8 @@ private func ranks(_ a: [Double]) -> [Double] {
         let engine = try OakMetalEngine(
             obsDim: env.obsDim, baseObsDim: env.obsDim, actDim: env.actDim,
             batch: probeNumEnvs, rank: env.obsDim, dPolicy: env.dPolicy,
-            device: device, seed: seed, diagnosticGpuPhaseTiming: false)
+            device: device, seed: seed, diagnosticGpuPhaseTiming: false,
+            ablatedKernels: ablatedKernelsFromEnv().union(probeAblateKernel))
         env.reset()
 
         // Window count K = ⌈√N⌉ heartbeat windows of ⌊N/K⌋ steps each (structural — √N is the
@@ -2110,7 +2154,8 @@ private func ranks(_ a: [Double]) -> [Double] {
         let engine: OakMetalEngine? = policy == .oak ? try OakMetalEngine(
             obsDim: env.obsDim, baseObsDim: env.obsDim, actDim: env.actDim,
             batch: numEnvs, rank: env.obsDim, dPolicy: env.dPolicy,
-            device: device, seed: seed, diagnosticGpuPhaseTiming: includeDiagnostic) : nil
+            device: device, seed: seed, diagnosticGpuPhaseTiming: includeDiagnostic,
+            ablatedKernels: ablatedKernelsFromEnv()) : nil
         try env.reset()
         return RunContext(envId: envId, policy: policy, seed: seed, warmup: warmup,
                           stopAfter: stopAfter, numEnvs: numEnvs, command: command,
