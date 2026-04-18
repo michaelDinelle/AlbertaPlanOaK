@@ -372,6 +372,8 @@ private struct KernelConfig {
     var aUtilFeat: UInt32 = 0, aUtilOpt: UInt32 = 0
     // Pass 11 Tier 5: optFracEMA[K] for the structural-1/K dormancy reinit gate.
     var aOptFracEMA: UInt32 = 0
+    // Pass 13 Tier 2: per-feature TIDBD α (SwiftSarsa 2507.19539 + MetaOptimize 2402.02342).
+    var aAlphaImpFeat: UInt32 = 0, aAlphaImpBeta: UInt32 = 0, aAlphaImpH: UInt32 = 0
     var cap: Float = 0, alpha0: Float = 0, ridge: Float = 0
 }
 
@@ -463,6 +465,10 @@ private enum OakMetalLayout {
         let reward, td, tdPsi, vCurr: Int
         let chordSlot, chordSlotPrev, betaProb: Int
         let featSM, wBar, featMean, utilFeat, utilOpt, optFracEMA: Int
+        // Pass 13 Tier 2: per-feature TIDBD α (SwiftSarsa 2507.19539 + MetaOptimize 2402.02342).
+        // alphaImpFeat[E] = exp(beta_i) / (1 + exp(beta_i) · featSM[i]) per-feature implicit step.
+        // alphaImpBeta[E] = log-step meta-parameter; alphaImpH[E] = decay trace of past Δw.
+        let alphaImpFeat, alphaImpBeta, alphaImpH: Int
         let total: Int
     }
     static func stateLayout(obsDim: Int, rank: Int, actDim: Int, batch: Int, dPolicy: Int) -> State {
@@ -490,11 +496,16 @@ private enum OakMetalLayout {
         let uf  = o; o += rank
         let uo  = o; o += K
         let ofE = o; o += K          // Pass 11 Tier 5: soft-chord per-option mass EMA
+        let aif = o; o += E          // Pass 13 Tier 2: alphaImpFeat[E] (per-feature implicit step)
+        let aib = o; o += E          // alphaImpBeta[E] = log meta-parameter, init log(alpha0)
+        let aih = o; o += E          // alphaImpH[E] = decay trace of past Δw, init 0
         return State(observation: obs, obsMean: mean, state: st, prevPolicyMean: prP, policyMean: pol,
                      scoreGrad: sg, reward: rew, td: td, tdPsi: tdP, vCurr: vc,
                      chordSlot: cs, chordSlotPrev: csP, betaProb: bp,
                      featSM: fs, wBar: wb, featMean: fm, utilFeat: uf, utilOpt: uo,
-                     optFracEMA: ofE, total: o)
+                     optFracEMA: ofE,
+                     alphaImpFeat: aif, alphaImpBeta: aib, alphaImpH: aih,
+                     total: o)
     }
 
     struct UInts { let done, activeMask, activeList, option, counters, subtaskFeatureOf, optionAge, total: Int }
@@ -794,6 +805,21 @@ final class OakMetalEngine {
         // drops below 0.5/K, so this initial value is well above threshold.
         let optFrac = stateArena.pointer.advanced(by: stateLayout.optFracEMA)
         for k in 0..<K { optFrac[k] = invK }
+        // Pass 13 Tier 2: per-feature TIDBD α (SwiftSarsa 2507.19539 + MetaOptimize 2402.02342).
+        // Init β_i = log(α₀) so exp(β_i) = α₀ at step 0 — recovers Pass-12 global-α behavior
+        // before the meta-update has had any data to act on. h_i = 0 (no history yet).
+        // alphaImpFeat[i] = α₀ initially (overwritten by oak_reduce_alpha on step 1).
+        let extDim = rank + K   // E = R + K (OPSR-extended state)
+        let initAlpha0: Float = 1.0 / Float(max(rank * max(batch, 1), 1))
+        let logAlpha0 = Float(log(Double(initAlpha0)))
+        let aifPtr = stateArena.pointer.advanced(by: stateLayout.alphaImpFeat)
+        let aibPtr = stateArena.pointer.advanced(by: stateLayout.alphaImpBeta)
+        let aihPtr = stateArena.pointer.advanced(by: stateLayout.alphaImpH)
+        for i in 0..<extDim {
+            aifPtr[i] = initAlpha0
+            aibPtr[i] = logAlpha0
+            aihPtr[i] = 0
+        }
         // optionAge starts at 0 (force termination); chordSlotPrev/betaProb start at 0.
         // Initialize subtaskFeatureOf to identity sf[k] = k. bk_admit_commit re-ranks each step
         // by per-feature utility (Tier 7 RED dynamic top-K cumulants).
@@ -1004,6 +1030,7 @@ final class OakMetalEngine {
         c.uActiveList = UInt32(u.activeList); c.uOption = UInt32(u.option); c.uCounters = UInt32(u.counters)
         c.uSubtaskFeatureOf = UInt32(u.subtaskFeatureOf); c.uOptionAge = UInt32(u.optionAge)
         c.aFeatSM = UInt32(s.featSM); c.aWBar = UInt32(s.wBar); c.aFeatMean = UInt32(s.featMean)
+        c.aAlphaImpFeat = UInt32(s.alphaImpFeat); c.aAlphaImpBeta = UInt32(s.alphaImpBeta); c.aAlphaImpH = UInt32(s.alphaImpH)
         c.aUtilFeat = UInt32(s.utilFeat); c.aUtilOpt = UInt32(s.utilOpt)
         c.aOptFracEMA = UInt32(s.optFracEMA)
         c.cap = cap; c.alpha0 = 1.0 / cap; c.ridge = 1.0 / (cap + 1.0)
