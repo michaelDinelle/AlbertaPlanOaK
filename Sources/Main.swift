@@ -722,7 +722,11 @@ private final class Shared<Element> {
 }
 
 // ================================================================================================
-// Metal engine — orthodox Step 11 OaK. Twelve phases, one dispatch per step.
+// Metal engine — orthodox Step 11 OaK. Pass 11: 18 phases per step, dispatched as one ICB.
+//   encode → predict_outcome → meta_policy → predict → plan → reduce_alpha
+//   → learn_value → learn_encoder → learn_outcome → learn_psi → learn_pi
+//   → learn_beta → learn_omega → meta_action
+//   → bk_reduce → bk_feature → bk_option → bk_admit_commit
 // ================================================================================================
 final class OakMetalEngine {
     // Phase metadata: kernel name + threadgroup size (0 = pipeline-default dispatchThreads).
