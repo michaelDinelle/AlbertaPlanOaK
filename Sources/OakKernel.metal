@@ -7,17 +7,21 @@ using namespace metal;
 // Invariants (.cursor/rules/alberta_plan.mdc §1–9) hold: no env branches, no tuned scalars, no
 // episodic semantics, no train/eval split, no per-step allocation, no cosmetic normalization,
 // no curiosity on the external reward, meta-constants structurally derived from {R, B, K}.
-// Fifteen kernels: encode, predict_outcome, predict, plan, meta_action, reduce_alpha,
-// learn_value, learn_encoder, learn_outcome, learn_psi, learn_pi, bk_reduce, bk_feature,
-// bk_option, bk_admit_commit. Pass 11 Tier 2 added oak_predict_outcome and oak_learn_outcome
-// for OPSR full state augmentation (Vereecken 2604.07016): E = R + K extended state. The
-// outcome head H[K · E] writes K next-step cumulant predictions per row recursively from
-// the previous step's full E-dim state, giving the agent partial recurrence (a memory channel
-// without an LSTM). All linear heads grow to E-dim; cumulant ranking and admission still
-// operate on the first R encoder features only. (bk_reduce and
-// bk_feature are kept separate because the per-feature utility pass needs R parallel threadgroups
-// to avoid 32× serialization at large R·B; with MTLIndirectCommandBuffer the extra dispatch has
-// ~zero host cost, so fusion is not profitable here.)
+// Eighteen kernels (Pass 11 Tier 3): encode, predict_outcome, meta_policy, predict, plan,
+// reduce_alpha, learn_value, learn_encoder, learn_outcome, learn_psi, learn_pi, learn_beta,
+// learn_omega, meta_action, bk_reduce, bk_feature, bk_option, bk_admit_commit.
+//   Pass 11 Tier 2 added oak_predict_outcome + oak_learn_outcome for OPSR full state
+//   augmentation (Vereecken 2604.07016): E = R + K extended state. The outcome head H[K · E]
+//   writes K next-step cumulant predictions per row recursively from the previous step's
+//   full E-dim state, giving the agent partial recurrence without an LSTM.
+//   Pass 11 Tier 3 added oak_meta_policy + oak_learn_beta + oak_learn_omega for temporal
+//   abstraction (Bacon-Precup 1609.05140 + Wan-Naik-Sutton 2110.13855): persistent soft
+//   chord, β termination, ω chord generator. All linear heads consume the OPSR-extended
+//   E-dim state; cumulant ranking and admission still operate on the first R encoder
+//   features only. (bk_reduce and bk_feature are kept separate because the per-feature
+//   utility pass needs R parallel threadgroups to avoid 32× serialization at large R·B;
+//   with MTLIndirectCommandBuffer the extra dispatch has ~zero host cost, so fusion is
+//   not profitable here.)
 //
 // Citations (docs/papers/):
 //   AlbertaPlan_2208.11173                      base agent; Step 11 Oak; STOMP progression
@@ -837,12 +841,13 @@ kernel void oak_learn_outcome(
 
 // =================================================================================================
 // learn_psi — update shared ψ[k, m] for m ∈ [0, M = E + K). Cumulant k's gradient w.r.t.
-// weight m:  ∂L/∂W_ψ[k][m] = − (1/B) Σ_r δ_k[r] · concat[s_r, λ_r][m]
-// where concat[r][m] = prev[r][m] for m < E, else (m == E + active_option(r) ? 1 : 0).
+// weight m:  ∂L/∂W_ψ[k][m] = − (1/B) Σ_r δ_k[r] · concat[s_r, λ_prev_r][m]
+// where concat[r][m] = prev_state[r][m] for m < E, else λ_prev[r][m - E] (Pass 11 Tier 3:
+// SOFT chord weighting via chordSlotPrev — replaces the pre-Tier-3 one-hot indicator).
 // Every row contributes to every cumulant's parameters via its own δ_k[r] (chord-conditional
 // formulation; OBB §2.4). Implicit α from oak_reduce_alpha provides per-step contraction
 // independent of input scale (Kim 2510.06149); no clamp needed.
-//   [Grid: K · M]
+//   [Grid: K · M = K · (E + K)]
 // =================================================================================================
 kernel void oak_learn_psi(
     device half   *params     [[buffer(0)]],
@@ -884,22 +889,18 @@ kernel void oak_learn_psi(
 }
 
 // =================================================================================================
-// learn_pi — REAL REINFORCE on the per-dim Gaussian policy. Gradient for parameter (k, d, i):
-//   g[k,d,i] = (1 / |rows_k|) Σ_{r: opt(r)==k} δ_r · scoreGrad[r,d] · prev_state[r,i]
-// where δ_r = td[r] is the main differential TD (with planning advantage from oak_plan), and
-// scoreGrad[r,d] is the canonical Gaussian ∇_θ_d log π(a_r | s_r) computed by oak_meta_action
-// at the PREVIOUS step.
+// learn_pi — REAL REINFORCE on the per-option policy. Pass 11 Tier 3 chord-weighted gradient:
+//   g[k,d,e] = Σ_r λ_prev[r,k] · (td[r] − tdBaseline) · scoreGrad[r,d] · prev_state[r,e]
+// since meta_action emits μ_d = Σ_k λ_k · (W_π[k][d] · s) (chord-weighted soft mixture), the
+// per-option contribution scales by chord_prev[r,k]. scoreGrad[r,d] is wrapper-written
+// (Tier 1: Gumbel-max categorical for Discrete components, Gaussian-σ=1 for Box components).
 //
-// Per-update implicit step (Kim 2510.06149 generalized): the global `α_imp` from oak_reduce_alpha
-// adapts only to feature norm, NOT to scoreGrad. With unbounded log_σ the score `(z²−1)/2` can
-// reach O(z² ≈ 100), accumulating into log_σ updates of O(α₀ · 100 · prev) per step that drive
-// log_σ → ∞ in tens of steps and overflow exp(). The fix is structural: compute the local
-// gradient norm `||g_local||²` from the actual (prev[i] · scoreGrad[d])² products this thread
-// is summing, then use `α_eff = α₀ / (1 + α₀ · ||g_local||²/cnt)`. When scoreGrad blows up,
-// `α_eff` shrinks proportionally; the per-step parameter delta stays bounded regardless of σ
-// dynamics. This is the SAME tracking-vs-imposing-priors discipline as oak_reduce_alpha — no
-// clamp, no entropy regularizer, no σ floor. BWH-orthodox.
-//   [Grid: K · D · R]
+// Per-update implicit step (Kim 2510.06149 generalized): `α_eff = α₀ / (1 + α₀ · ‖g_local‖²/B)`
+// where ‖g_local‖² is the sum of (prev[e] · scoreGrad[d])² over the batch — so per-(k,d,e) step
+// adapts to the actual gradient-term magnitude this thread is summing, not just feature norm.
+// Stays bounded regardless of scoreGrad magnitude. BWH-orthodox: no clamp, no entropy
+// regularizer, no σ floor; the tracking-vs-imposing-priors discipline of oak_reduce_alpha.
+//   [Grid: K · D · E — K options × D_policy params × E extended-state features]
 // =================================================================================================
 kernel void oak_learn_pi(
     device half   *params     [[buffer(0)]],
@@ -991,10 +992,11 @@ kernel void oak_learn_beta(
 // =================================================================================================
 // learn_omega — Pass 11 Tier 3 chord-generator update via softmax policy gradient. omegaW
 // produces K logits from E-dim state; chord = softmax(logits). Per-weight gradient:
-//   g[k][e] = (1/B) Σ_r (1{k chosen at r} − chord_prev[r][k]) · td[r] · prev[r][e]
-// where "1{k chosen}" is the chord that was sampled this step IF termination occurred (else 0
-// since no new chord was sampled). For the no-termination rows we still apply a soft attribution
-// via chord weights to encourage useful chord persistence.
+//   g[k][e] = (1/B) Σ_{r: terminated this step} (1{k chosen at r} − chord_prev[r][k]) · adv[r] · prev[r][e]
+// Only TERMINATION rows contribute (the standard option-critic formulation per Bacon-Precup
+// 1609.05140): on rows where chord persists across the step, ω did not produce a sample so
+// its gradient signal is zero. Pass 12 Tier 0.2: comment fixed to match code semantics
+// (prior version claimed soft attribution on non-term rows; code never did that).
 //   [Grid: K · E — one thread per (k, e).]
 // =================================================================================================
 kernel void oak_learn_omega(
@@ -1081,11 +1083,13 @@ kernel void oak_bk_reduce(
 
     // (2) Latent telemetry: mean-square + max|latent| + non-finite count over the FULL
     // E-wide state (B · E cells; runaway outcomeHead would show up here).
+    // Pass 12 Tier 0.1: state stride is ctx.E (was ctx.R — bug since Pass-11 Tier 2
+    // when state grew from R to E cols). Telemetry was reading wrong cells for r >= 1.
     float lms_l = 0.0f, maxLat_l = 0.0f, nLearn_l = 0.0f;
     uint total_rf = ctx.B * ctx.E;
     for (uint idx = tid; idx < total_rf; idx += tgW) {
         uint r = idx / ctx.E, f = idx % ctx.E;
-        float v = curr[r * ctx.R + f];
+        float v = curr[r * ctx.E + f];
         if (!isfinite(v)) { nLearn_l += 1.0f; v = 0.0f; }
         lms_l = fma(v, v, lms_l);
         maxLat_l = max(maxLat_l, fabs(v));
