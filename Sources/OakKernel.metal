@@ -95,8 +95,9 @@ struct KernelConfig {
     // step (when the action's TD error δ becomes available).
     uint sObservation, sObsMean, sState, sPrevAction, sAction, sScoreGrad;
     uint sReward, sTd, sTdPsi;
-    // UInt offsets
-    uint uDone, uActiveMask, uActiveList, uOption, uCounters;
+    // UInt offsets. subtaskFeatureOf[K] = state-feature index that cumulant k tracks
+    // (top-K by per-feature utility, re-ranked by oak_bk_admit_commit each step; Tier 7 RED).
+    uint uDone, uActiveMask, uActiveList, uOption, uCounters, uSubtaskFeatureOf;
     // Arena offsets (in fp32 stride, past sState's tail). featMean[R] is the running EMA of
     // current-step feature values used as cumulant centering ρ_k = featMean[sf[k]] (Tier 3:
     // sf[k] = k; Tier 7 makes sf[] dynamic).
@@ -164,6 +165,7 @@ struct Ctx {
     device uint   *activeList;     // [R]
     device uint   *option;         // [2][B]
     device uint   *counters;       // [6]
+    device uint   *sf;             // [K] subtaskFeatureOf — dynamic top-K feature ranking
 
     device float  *featSM;         // [R]
     device float  *wBar;           // [R]
@@ -211,6 +213,7 @@ inline Ctx make_ctx(device half *params, device float *stateArena, device uint *
     c.activeList = uintArena + cfg.uActiveList;
     c.option     = uintArena + cfg.uOption;
     c.counters   = uintArena + cfg.uCounters;
+    c.sf         = uintArena + cfg.uSubtaskFeatureOf;
 
     c.featSM   = stateArena + cfg.aFeatSM;
     c.wBar     = stateArena + cfg.aWBar;
@@ -353,9 +356,13 @@ kernel void oak_predict(
 
     // Per-cumulant SF TD for the row's active option k* (one-hot chord λ = e_{k*}).
     //   ψ_k(s, e_{k*}) = Σ_i W_ψ[k][i] · s[i] + W_ψ[k][R + k*]
-    //   c_k(s') = state[sf[k]]  (sf[k] = k for Tier 3)
-    //   δ_k = (c_k(s') − ρ_k) + terminalMask · ψ_k(s', e_{k*}) − ψ_k(s, e_{k*})
+    // RED cumulant (Rojas-Lee 2410.10578 Theorem 5.1):
+    //   c_k(s', r) = (r − ρ̄) + (state[sf[k]] − featMean[sf[k]])
+    // Both terms are mean-zero by construction (ρ̄ centers reward; featMean centers feature).
+    // ρ_k vanishes — no per-cumulant centering needed beyond the per-feature running mean.
+    //   δ_k = c_k + terminalMask · ψ_k(s', e_{k*}) − ψ_k(s, e_{k*})
     uint optK = active_option(ctx, gid);
+    float reward_centered = ctx.reward[gid] - ctx.rho;
     for (uint k = 0u; k < ctx.K; ++k) {
         uint psiBase = k * M;
         float chord_part = float(ctx.psi[psiBase + ctx.R + optK]);
@@ -363,10 +370,10 @@ kernel void oak_predict(
                                          ctx.activeList, ctx.activeCount) + chord_part;
         float psi_next = active_dot_half(ctx.psi, psiBase, curr, cOff,
                                          ctx.activeList, ctx.activeCount) + chord_part;
-        uint sf_k = k;  // Tier 3 identity sf[k] = k
-        float ck = (sf_k < ctx.R) ? curr[cOff + sf_k] : 0.0f;
-        float rho_k = (sf_k < ctx.R) ? ctx.featMean[sf_k] : 0.0f;
-        ctx.tdPsi[gid * ctx.K + k] = (ck - rho_k) + terminalMask * psi_next - psi_prev;
+        uint sf_k = ctx.sf[k];  // dynamic top-K feature ranking (re-ranked in bk_admit_commit)
+        float feat_centered = (sf_k < ctx.R) ? (curr[cOff + sf_k] - ctx.featMean[sf_k]) : 0.0f;
+        float c_RED = reward_centered + feat_centered;
+        ctx.tdPsi[gid * ctx.K + k] = c_RED + terminalMask * psi_next - psi_prev;
     }
 }
 
@@ -406,7 +413,7 @@ kernel void oak_plan(
         float psi_k = active_dot_half(ctx.psi, psiBase, curr, xOff,
                                       ctx.activeList, ctx.activeCount)
                     + float(ctx.psi[psiBase + ctx.R + k]);
-        uint sf_k = k;  // Tier 3 identity sf[k] = k
+        uint sf_k = ctx.sf[k];  // dynamic feature ranking (Tier 7)
         float wk  = (sf_k < ctx.R) ? float(ctx.valueW[sf_k]) : 0.0f;
         float val = wk * psi_k;
         if (sf_k < ctx.R) {
@@ -1027,6 +1034,21 @@ kernel void oak_bk_admit_commit(
     }
     if (count == 0u) { ctx.activeMask[0] = 1u; ctx.activeList[0] = 0u; count = 1u; }
     ctx.scalars->activeCount = count;
+
+    // Tier 7: dynamic top-K subtask-feature ranking. Cumulant k tracks the feature with the
+    // k-th highest utilFeat. BWH-orthodox structural meta-learning: the agent picks its own
+    // most-informative cumulants, no prior knowledge of which features matter.
+    // O(K · R) selection-sort top-K (K is hardware-capped at 32, so this is small).
+    for (uint k = 0u; k < ctx.K; ++k) {
+        uint best = R; float bestU = -FLT_MAX;
+        for (uint i = 0u; i < R; ++i) {
+            bool taken = false;
+            for (uint k2 = 0u; k2 < k; ++k2) if (ctx.sf[k2] == i) { taken = true; break; }
+            if (taken) continue;
+            if (ctx.utilFeat[i] > bestU) { bestU = ctx.utilFeat[i]; best = i; }
+        }
+        ctx.sf[k] = (best < R) ? best : min(k, R - 1u);
+    }
 
     // FC-STOMP feedback: if any option reinited (counters[3]|counters[4] != 0) AND worst
     // feature < mean - std, reinit its base-obs encoder weight structurally.
