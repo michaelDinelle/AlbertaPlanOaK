@@ -135,7 +135,8 @@ struct KernelConfig {
     uint uDone, uActiveMask, uActiveList, uOption, uCounters, uSubtaskFeatureOf, uOptionAge;
     // Arena offsets (in fp32 stride, past sState's tail). featMean[R] is the running EMA of
     // current-step feature values used as cumulant centering ρ_k = featMean[sf[k]] (RED).
-    uint aFeatSM, aWBar, aFeatMean, aUtilFeat, aUtilOpt;
+    // Pass 11 Tier 5: optFracEMA[K] tracks soft-chord per-option mass for the dormancy gate.
+    uint aFeatSM, aWBar, aFeatMean, aUtilFeat, aUtilOpt, aOptFracEMA;
     // Derived scalars (all structurally derived from rank · batch).
     float cap;                // rank · batch (capacity volume; ridge / α₀ derived from it)
     float alpha0;             // 1 / cap (base step size)
@@ -210,6 +211,7 @@ struct Ctx {
     device float  *featMean;       // [R]  -- per-feature running mean (cumulant centering ρ_k)
     device float  *utilFeat;       // [R]
     device float  *utilOpt;        // [K]
+    device float  *optFracEMA;     // [K]  -- soft-chord per-option mass EMA (Tier 5 reinit gate)
 
     device KernelScalars *scalars;
 };
@@ -259,11 +261,12 @@ inline Ctx make_ctx(device half *params, device float *stateArena, device uint *
     c.sf         = uintArena + cfg.uSubtaskFeatureOf;
     c.optionAge  = uintArena + cfg.uOptionAge;
 
-    c.featSM   = stateArena + cfg.aFeatSM;
-    c.wBar     = stateArena + cfg.aWBar;
-    c.featMean = stateArena + cfg.aFeatMean;
-    c.utilFeat = stateArena + cfg.aUtilFeat;
-    c.utilOpt  = stateArena + cfg.aUtilOpt;
+    c.featSM     = stateArena + cfg.aFeatSM;
+    c.wBar       = stateArena + cfg.aWBar;
+    c.featMean   = stateArena + cfg.aFeatMean;
+    c.utilFeat   = stateArena + cfg.aUtilFeat;
+    c.utilOpt    = stateArena + cfg.aUtilOpt;
+    c.optFracEMA = stateArena + cfg.aOptFracEMA;
 
     c.scalars = scalars;
     return c;
@@ -1228,21 +1231,44 @@ kernel void oak_bk_option(
 
     if (tid == 0u) {
         ctx.utilOpt[k] += invT * (meanPsiErr - ctx.utilOpt[k]);
+        // Pass 11 Tier 5: track soft-chord per-option mass EMA. Drives the dormancy gate.
+        ctx.optFracEMA[k] += invT * (frac - ctx.optFracEMA[k]);
 
-        // FIRE+SWR reinit trigger.
-        if (meanPsiErr > ctx.cap * ctx.ridge && frac < ctx.ridge) {
+        // Pass 11 Tier 5: replace the algebraically-vacuous (frac<ridge ∧ meanPsiErr>cap·ridge)
+        // gate with structural 1/K dormancy + cross-option util-stale outlier (mean+std).
+        // Both predicates are dimensionless and structurally derived (K and cross-option stats);
+        // no magic scalars. The 0.5 factor is "half the structural uniform-share" — pure math.
+        float meanU = 0.0f;
+        for (uint k2 = 0u; k2 < ctx.K; ++k2) meanU += ctx.utilOpt[k2];
+        meanU /= float(max(ctx.K, 1u));
+        float varU = 0.0f;
+        for (uint k2 = 0u; k2 < ctx.K; ++k2) {
+            float d = ctx.utilOpt[k2] - meanU;
+            varU += d * d;
+        }
+        float stdU = sqrt(varU / float(max(ctx.K, 1u)));
+        bool dormant = ctx.optFracEMA[k] < 0.5f / float(max(ctx.K, 1u));
+        bool stale   = ctx.utilOpt[k] > meanU + stdU;   // positive outlier → option is doing badly
+        if (dormant && stale) {
+            // Targeted column reinit: zero the chord-bias W_ψ[k][E + k] (so plan stops picking
+            // this option for its specific ψ chord-weight contribution) AND the cumulant column
+            // W_ψ[k][sf[k]] (the feature this cumulant tracks). Preserves cross-option transfer
+            // (other state weights stay). Aligned with ReinitWeightsVsUnits 2508.00212.
             uint psiBase = k * ctx.M;
-            for (uint m = 0u; m < ctx.M; ++m) ctx.psi[psiBase + m] = half(0.0f);
-            float invR = 1.0f / sqrt(float(max(ctx.R, 1u)));
-            // Diagonal seed: cumulant k's W_ψ[k][sf[k]] = +1/√R (RRS feature-attainment).
-            if (k < ctx.R) ctx.psi[psiBase + k] = half(invR);
+            ctx.psi[psiBase + ctx.E + k] = half(0.0f);
+            uint sf_k = ctx.sf[k];
+            if (sf_k < ctx.R) ctx.psi[psiBase + sf_k] = half(1.0f / sqrt(float(max(ctx.R, 1u))));
+            // Reset the option's policy + outcome head: with stale stats they're all noise.
             uint polBase = k * ctx.D * ctx.E;
             for (uint idx = 0u; idx < ctx.D * ctx.E; ++idx) ctx.optPolicy[polBase + idx] = half(0.0f);
-            // Reinit the option's outcome head row too — its predictions become noise after the
-            // policy resets, so we re-randomize H[k] on next learn_outcome step from zero.
             uint outBase = k * ctx.E;
             for (uint e = 0u; e < ctx.E; ++e) ctx.outcomeHead[outBase + e] = half(0.0f);
-            ctx.utilOpt[k] = 0.0f;
+            // Reinit option k's chord-generator row + termination chord-weight so meta_policy
+            // doesn't keep re-selecting this just-reinited option immediately.
+            for (uint e = 0u; e < ctx.E; ++e) ctx.omegaW[k * ctx.E + e] = half(0.0f);
+            ctx.betaW[ctx.E + k] = half(0.0f);
+            ctx.utilOpt[k] = meanU;       // reset to neutral so the gate doesn't fire repeatedly
+            ctx.optFracEMA[k] = 1.0f / float(max(ctx.K, 1u));   // reset to uniform-share
             // K ≤ OAK_SIMD by host-side cap (OakMetalLayout.optionCount), so one uint
             // bitmask covers all options. Atomic OR for race-free per-option signaling
             // when multiple TGs trigger reinit in the same step.

@@ -568,6 +568,8 @@ private struct KernelConfig {
     var uOptionAge: UInt32 = 0
     var aFeatSM: UInt32 = 0, aWBar: UInt32 = 0, aFeatMean: UInt32 = 0
     var aUtilFeat: UInt32 = 0, aUtilOpt: UInt32 = 0
+    // Pass 11 Tier 5: optFracEMA[K] for the structural-1/K dormancy reinit gate.
+    var aOptFracEMA: UInt32 = 0
     var cap: Float = 0, alpha0: Float = 0, ridge: Float = 0
 }
 
@@ -651,7 +653,7 @@ private enum OakMetalLayout {
         let observation, obsMean, state, prevPolicyMean, policyMean, scoreGrad: Int
         let reward, td, tdPsi, vCurr: Int
         let chordSlot, chordSlotPrev, betaProb: Int
-        let featSM, wBar, featMean, utilFeat, utilOpt: Int
+        let featSM, wBar, featMean, utilFeat, utilOpt, optFracEMA: Int
         let total: Int
     }
     static func stateLayout(obsDim: Int, rank: Int, actDim: Int, batch: Int, dPolicy: Int) -> State {
@@ -678,10 +680,12 @@ private enum OakMetalLayout {
         let fm  = o; o += rank
         let uf  = o; o += rank
         let uo  = o; o += K
+        let ofE = o; o += K          // Pass 11 Tier 5: soft-chord per-option mass EMA
         return State(observation: obs, obsMean: mean, state: st, prevPolicyMean: prP, policyMean: pol,
                      scoreGrad: sg, reward: rew, td: td, tdPsi: tdP, vCurr: vc,
                      chordSlot: cs, chordSlotPrev: csP, betaProb: bp,
-                     featSM: fs, wBar: wb, featMean: fm, utilFeat: uf, utilOpt: uo, total: o)
+                     featSM: fs, wBar: wb, featMean: fm, utilFeat: uf, utilOpt: uo,
+                     optFracEMA: ofE, total: o)
     }
 
     struct UInts { let done, activeMask, activeList, option, counters, subtaskFeatureOf, optionAge, total: Int }
@@ -951,6 +955,11 @@ final class OakMetalEngine {
         for r in 0..<batch {
             for k in 0..<K { chordSlot[r * K + k] = invK }
         }
+        // Pass 11 Tier 5: seed optFracEMA = 1/K per option (the structural uniform-share, same
+        // as the dormancy threshold's reference value). The gate fires when an option's mass
+        // drops below 0.5/K, so this initial value is well above threshold.
+        let optFrac = stateArena.pointer.advanced(by: stateLayout.optFracEMA)
+        for k in 0..<K { optFrac[k] = invK }
         // optionAge starts at 0 (force termination); chordSlotPrev/betaProb start at 0.
         // Initialize subtaskFeatureOf to identity sf[k] = k. bk_admit_commit re-ranks each step
         // by per-feature utility (Tier 7 RED dynamic top-K cumulants).
@@ -1053,6 +1062,9 @@ final class OakMetalEngine {
         case "utilOpt":
             return readFloats(stateArena, offset: stateLayout.utilOpt,
                               count: OakMetalLayout.optionCount(rank: rank, actDim: actDim))
+        case "optFracEMA":
+            return readFloats(stateArena, offset: stateLayout.optFracEMA,
+                              count: OakMetalLayout.optionCount(rank: rank, actDim: actDim))
         case "rho":         return [scalarsPointer.pointee.rho]
         case "td_baseline": return [scalarsPointer.pointee.tdBaseline]
         case "chord_slot", "chord":
@@ -1066,8 +1078,7 @@ final class OakMetalEngine {
         case "optionAge":
             let p = uintArena.pointer.advanced(by: uintLayout.optionAge)
             return (0..<batch).map { Float(p[$0]) }
-        case "actionSpec",
-             "optFracEMA":
+        case "actionSpec":
             return nil  // populated by later Pass-11 tiers; missing-here is a tier-not-reached signal
         default:
             return nil
@@ -1154,6 +1165,7 @@ final class OakMetalEngine {
         c.uSubtaskFeatureOf = UInt32(u.subtaskFeatureOf); c.uOptionAge = UInt32(u.optionAge)
         c.aFeatSM = UInt32(s.featSM); c.aWBar = UInt32(s.wBar); c.aFeatMean = UInt32(s.featMean)
         c.aUtilFeat = UInt32(s.utilFeat); c.aUtilOpt = UInt32(s.utilOpt)
+        c.aOptFracEMA = UInt32(s.optFracEMA)
         c.cap = cap; c.alpha0 = 1.0 / cap; c.ridge = 1.0 / (cap + 1.0)
         configPointer.pointee = c
     }
@@ -1286,8 +1298,9 @@ private func directNumEnvs(obsDim: Int, actDim: Int, dPolicy: Int, device: MTLDe
     let paramBytes = OakMetalLayout.paramLayout(obsDim: obsDim, rank: rank, actDim: actDim,
                                                  dPolicy: dPolicy).total
                     * MemoryLayout<Float16>.stride
-    // Fixed (per-engine, not per-env): featSM + wBar + featMean + utilFeat (4·R fp32) + utilOpt (K fp32).
-    let fixedBytes = paramBytes + (4 * rank + K) * MemoryLayout<Float>.stride
+    // Fixed (per-engine, not per-env): featSM + wBar + featMean + utilFeat (4·R fp32) +
+    // utilOpt + optFracEMA (2K fp32, Pass 11 Tier 5).
+    let fixedBytes = paramBytes + (4 * rank + 2 * K) * MemoryLayout<Float>.stride
     // Memory ceiling from the GPU's reported safe working-set size (Apple Metal). Structural
     // to the hardware. This is the *upper bound* on what the agent could ever allocate.
     let memEnvs = max(
