@@ -590,20 +590,22 @@ final class OakMetalEngine {
         Phase(name: "oak_predict_outcome",    tgSize: 0),
         Phase(name: "oak_meta_policy",        tgSize: 0),
         Phase(name: "oak_predict_next_latent", tgSize: 0),  // Pass 13 Tier 3 (SPR-Stream)
-        Phase(name: "oak_predict",            tgSize: 0),
+        Phase(name: "oak_predict",            tgSize: 0),  // Pass 14 T2: REVERTED to per-thread
+                                                            // dispatchThreads (B-thread fills SIMD)
         Phase(name: "oak_plan",               tgSize: 32),
         Phase(name: "oak_reduce_alpha",       tgSize: 128),
         Phase(name: "oak_learn_value",        tgSize: 32),
         Phase(name: "oak_learn_encoder",      tgSize: 0),
-        Phase(name: "oak_learn_encoder_spr",  tgSize: 128), // Pass 14 T0.4: 1 TG x 128 threads
-                                                            // for vector-orthogonal projection
+        Phase(name: "oak_learn_encoder_spr",  tgSize: 0),   // Pass 14 T0.4 (REVISED): per-feat
+                                                            // dispatch (true OGP deferred to T1)
         Phase(name: "oak_learn_outcome",      tgSize: 0),
         Phase(name: "oak_learn_psi",          tgSize: 0),
         Phase(name: "oak_learn_pi",           tgSize: 0),
         Phase(name: "oak_learn_beta",         tgSize: 0),
         Phase(name: "oak_learn_omega",        tgSize: 0),
-        Phase(name: "oak_meta_action",        tgSize: 32), // Pass 14 T0.5: B TGs x 32 threads
-                                                            // (TG-shared scratch; no stack spill)
+        Phase(name: "oak_meta_action",        tgSize: 0),  // Pass 14 T0.5+T2 (REVISED): B*D
+                                                            // dispatchThreads (no stack array,
+                                                            // no lane waste, e-outer-k-inner)
         Phase(name: "oak_bk_reduce",          tgSize: 128),
         Phase(name: "oak_bk_feature",         tgSize: 32),
         Phase(name: "oak_bk_option",          tgSize: 128),
@@ -736,13 +738,13 @@ final class OakMetalEngine {
             1,                                // oak_reduce_alpha        [1 TG × 128]
             E,                                // oak_learn_value         [E TGs × 32]
             max(baseObsDim, 1),               // oak_learn_encoder       [dispatchThreads]
-            1,                                // oak_learn_encoder_spr   [1 TG × 128] Pass 14 T0.4
+            max(baseObsDim, 1),               // oak_learn_encoder_spr   [dispatchThreads baseO]
             K * E,                            // oak_learn_outcome       [dispatchThreads]
             K * M,                            // oak_learn_psi           [dispatchThreads]
             K * dPolicy * E,                  // oak_learn_pi            [dispatchThreads]
             E + K,                            // oak_learn_beta          [dispatchThreads]
             K * E,                            // oak_learn_omega         [dispatchThreads]
-            batch,                            // oak_meta_action         [B TGs × 32] Pass 14 T0.5
+            batch * dPolicy,                  // oak_meta_action         [dispatchThreads B*D]
             1,                                // oak_bk_reduce           [1 TG × 128]
             rank,                             // oak_bk_feature          [R TGs × 32]
             K,                                // oak_bk_option           [K TGs × 128]
