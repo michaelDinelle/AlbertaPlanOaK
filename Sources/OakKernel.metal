@@ -79,6 +79,18 @@ using namespace metal;
 // via OakMetalLayout.optionCount) and the TG-size unit used by all reduction kernels.
 constant uint OAK_SIMD = 32u;
 
+// Named offsets into counters[6]. Self-documenting replacement for hardcoded indices 0..5.
+// All telemetry counters live here; layout is fixed in OakMetalLayout.uintLayout.
+constant uint OAK_CNT_OBS_NF        = 0u;  // bk_reduce: non-finite obs count
+constant uint OAK_CNT_LEARN_NF      = 1u;  // bk_reduce: non-finite latent / TD-target count
+constant uint OAK_CNT_PLAN_NF       = 2u;  // bk_reduce: non-finite action / scoreGrad count
+constant uint OAK_CNT_REINIT_OPT    = 3u;  // bk_option: bitmask of options reinited this step
+                                            //   (K ≤ OAK_SIMD = 32, so one uint suffices)
+constant uint OAK_CNT_REINIT_FEAT   = 4u;  // bk_admit_commit: encoder-feature reinit count
+                                            //   (single counter, atomic increment)
+// Index 5 is reserved (was second half of option-reinit bitmask for K > 32; dead under
+// the K ≤ OAK_SIMD constraint).
+
 [[function_constant(0)]] constant bool fc_action_is_discrete;
 
 struct KernelConfig {
@@ -872,9 +884,9 @@ kernel void oak_bk_reduce(
         stats->encodeNonFiniteCount       = obsNF;
         stats->learnNonFiniteCount        = nLearn;
         stats->planNonFiniteCount         = nPlan;
-        ctx.counters[0] = uint(obsNF);
-        ctx.counters[1] = uint(nLearn);
-        ctx.counters[2] = uint(nPlan);
+        ctx.counters[OAK_CNT_OBS_NF]   = uint(obsNF);
+        ctx.counters[OAK_CNT_LEARN_NF] = uint(nLearn);
+        ctx.counters[OAK_CNT_PLAN_NF]  = uint(nPlan);
     }
 }
 
@@ -971,10 +983,11 @@ kernel void oak_bk_option(
             uint polBase = k * ctx.D * ctx.R;
             for (uint idx = 0u; idx < ctx.D * ctx.R; ++idx) ctx.optPolicy[polBase + idx] = half(0.0f);
             ctx.utilOpt[k] = 0.0f;
-            uint bit = 1u << (k & 31u);
-            uint which = (k < 32u) ? 3u : 4u;
-            atomic_fetch_or_explicit((device atomic_uint *)(ctx.counters + which),
-                                     bit, memory_order_relaxed);
+            // K ≤ OAK_SIMD by host-side cap (OakMetalLayout.optionCount), so one uint
+            // bitmask covers all options. Atomic OR for race-free per-option signaling
+            // when multiple TGs trigger reinit in the same step.
+            atomic_fetch_or_explicit((device atomic_uint *)(ctx.counters + OAK_CNT_REINIT_OPT),
+                                     1u << k, memory_order_relaxed);
         }
     }
 }
@@ -1050,14 +1063,14 @@ kernel void oak_bk_admit_commit(
         ctx.sf[k] = (best < R) ? best : min(k, R - 1u);
     }
 
-    // FC-STOMP feedback: if any option reinited (counters[3]|counters[4] != 0) AND worst
-    // feature < mean - std, reinit its base-obs encoder weight structurally.
-    uint anyReinit = ctx.counters[3] | ctx.counters[4];
-    if (anyReinit != 0u && worstU < mean - std && worstIdx < ctx.baseO) {
+    // FC-STOMP feedback: if any option reinited this step (set by oak_bk_option) AND the
+    // worst feature is more than 1σ below mean utility, reinit its base-obs encoder weight
+    // with a structural ±1/√R unit (OCP hypothesis 2603.21173 conjunctive-gate validation).
+    if (ctx.counters[OAK_CNT_REINIT_OPT] != 0u && worstU < mean - std && worstIdx < ctx.baseO) {
         float sign = (((ctx.stepCount + worstIdx) & 1u) == 0u) ? 1.0f : -1.0f;
         ctx.encoder[worstIdx] = half(sign / sqrt(float(max(R, 1u))));
         ctx.utilFeat[worstIdx] = mean;
-        ctx.counters[5] += 1u;
+        ctx.counters[OAK_CNT_REINIT_FEAT] += 1u;
     }
 
     // --- commit phase ---
@@ -1082,11 +1095,11 @@ kernel void oak_bk_admit_commit(
     stats->activeRank         = float(ctx.scalars->activeCount);
     stats->utilityFeatureMean = uF / float(max(R, 1u));
     stats->utilityOptionMean  = uO / float(max(ctx.K, 1u));
-    stats->oakOptionReinitCount = float(popcount(ctx.counters[3]) + popcount(ctx.counters[4]));
+    stats->oakOptionReinitCount = float(popcount(ctx.counters[OAK_CNT_REINIT_OPT]));
 
-    // Slot toggles + step + clear reinit bitmasks.
+    // Slot toggles + step + clear option-reinit bitmask for next step.
     ctx.scalars->stateSlot  = 1u - ctx.scalars->stateSlot;
     ctx.scalars->optionSlot = 1u - ctx.scalars->optionSlot;
     ctx.scalars->stepCount += 1u;
-    ctx.counters[3] = 0u; ctx.counters[4] = 0u;
+    ctx.counters[OAK_CNT_REINIT_OPT] = 0u;
 }
