@@ -21,7 +21,7 @@ struct RunHealth: Codable {
     let latentStateMeanSquare: Double?
     let activeRank: Double?
     let actionDeltaL2Mean: Double?
-    let planningActionChangeL2Mean: Double?
+    let scoreGradL2Mean: Double?      // mean ‖∇log π(a|s)‖² across rows × params (REINFORCE)
     let optionModelPredictionMSE: Double?
     let oakOptionReinitCount: Double?
     let nonFiniteRawTotal: Int
@@ -109,7 +109,7 @@ private struct HealthAccumulator {
     struct Slot { var sum = 0.0; var count = 0 }
     // Slot order must mirror `values` in `record()` and the field order in `snapshot()`:
     //   0 latentStateMeanSquare, 1 activeRank, 2 actionDeltaL2Mean,
-    //   3 planningActionChangeL2Mean, 4 optionModelPredictionMSE, 5 oakOptionReinitCount
+    //   3 scoreGradL2Mean, 4 optionModelPredictionMSE, 5 oakOptionReinitCount
     var slots = [Slot](repeating: Slot(), count: 6)
     var steps = 0
     var rawNonFinite = 0, sanitizedNonFinite = 0
@@ -124,7 +124,7 @@ private struct HealthAccumulator {
             stats.latentStateMeanSquare,
             stats.activeRank,
             stats.actionDeltaL2Mean,
-            stats.planningActionChangeL2Mean,
+            stats.scoreGradL2Mean,
             stats.optionModelPredictionMSE,
             stats.oakOptionReinitCount,
         ]
@@ -151,7 +151,7 @@ private struct HealthAccumulator {
             latentStateMeanSquare: mean(0),
             activeRank: mean(1),
             actionDeltaL2Mean: mean(2),
-            planningActionChangeL2Mean: mean(3),
+            scoreGradL2Mean: mean(3),
             optionModelPredictionMSE: mean(4),
             oakOptionReinitCount: mean(5),
             nonFiniteRawTotal: rawNonFinite,
@@ -375,12 +375,18 @@ final class EnvPoolEnv {
 
 // ================================================================================================
 // Kernel config + scalars + stats — mirrors OakKernel.metal structs byte-for-byte. Keep in lockstep.
-// KernelStats has 16 fields (4 dead fields removed from previous 20).
+// Tier 9 dead-code purge:
+//   KernelConfig: dropped actionIsDiscrete (fc_action_is_discrete carries this at pipeline-create
+//     time via function constant), dropped boundLat/Rew/Act + invBoundLat/Rew/Act (Tier 2 deleted
+//     all clamps; implicit α + ρ̄ centering replaced them).
+//   KernelScalars: dropped doneCount + _pad (host-side state.doneCount tracks it).
+//   KernelStats: renamed planningActionChangeL2Mean -> scoreGradL2Mean (the field now reports
+//     scoreGrad L² mean; the old name was tied to actionGrad which was deleted in Tier 6).
+// KernelStats currently has 16 Float fields.
 // ================================================================================================
 private struct KernelConfig {
     var obsDim: UInt32 = 0, rank: UInt32 = 0, actDim: UInt32 = 0, batch: UInt32 = 0
     var optionCount: UInt32 = 0, baseObsDim: UInt32 = 0
-    var actionIsDiscrete: UInt32 = 0
     // actionParamCount = numActions (discrete one-hot) | 2·actDim (continuous Gaussian [μ, log_σ]).
     // Determines D in optPolicy[K · D · R] and scoreGrad[B · D]. Set at init from action type.
     var actionParamCount: UInt32 = 0
@@ -393,14 +399,11 @@ private struct KernelConfig {
     var aFeatSM: UInt32 = 0, aWBar: UInt32 = 0, aFeatMean: UInt32 = 0
     var aUtilFeat: UInt32 = 0, aUtilOpt: UInt32 = 0
     var cap: Float = 0, alpha0: Float = 0, ridge: Float = 0
-    var boundLat: Float = 0, boundRew: Float = 0, boundAct: Float = 0
-    var invBoundLat: Float = 0, invBoundRew: Float = 0, invBoundAct: Float = 0
 }
 
 private struct KernelScalars {
-    var stepCount: UInt32 = 0, doneCount: UInt32 = 0, activeCount: UInt32 = 0
+    var stepCount: UInt32 = 0, activeCount: UInt32 = 0
     var stateSlot: UInt32 = 0, optionSlot: UInt32 = 0
-    var _pad: UInt32 = 0
     var rho: Float = 0, pEff: Float = 0
     var alphaImp: Float = 0, alphaEnc: Float = 0
 }
@@ -410,7 +413,7 @@ struct KernelStats {
     var rawNonFiniteCount: Float = 0, sanitizedNonFiniteCount: Float = 0
     var encodeNonFiniteCount: Float = 0, learnNonFiniteCount: Float = 0, planNonFiniteCount: Float = 0
     var maxAbsLatentPrediction: Float = 0, maxAbsPolicyOutput: Float = 0
-    var actionDeltaL2Mean: Float = 0, planningActionChangeL2Mean: Float = 0
+    var actionDeltaL2Mean: Float = 0, scoreGradL2Mean: Float = 0
     var optionModelPredictionMSE: Float = 0
     var oakOptionReinitCount: Float = 0
     var utilityFeatureMean: Float = 0, utilityOptionMean: Float = 0
@@ -448,9 +451,6 @@ private enum OakMetalLayout {
     }
     static func discreteLogitHalfWidth(rank: Int, actDim: Int) -> Float {
         min(sqrtf(Float(max(rank * actDim, 1))), logf(Float.greatestFiniteMagnitude))
-    }
-    static func statsAbsBoundForSumSquares(termCount: Int) -> Float {
-        sqrtf(Float.greatestFiniteMagnitude / Float(max(termCount, 1)))
     }
 
     struct Param { let encoder, value, psi, optPolicy, total: Int }
@@ -942,7 +942,6 @@ final class OakMetalEngine {
         var c = KernelConfig()
         c.obsDim = UInt32(obsDim); c.rank = UInt32(rank); c.actDim = UInt32(actDim)
         c.batch = UInt32(batch); c.optionCount = UInt32(K); c.baseObsDim = UInt32(baseObsDim)
-        c.actionIsDiscrete = actionIsDiscrete ? 1 : 0
         c.actionParamCount = UInt32(actionParamCount)
         c.pEncoder = UInt32(p.encoder); c.pValue = UInt32(p.value)
         c.pPsi = UInt32(p.psi);         c.pOptPolicy = UInt32(p.optPolicy)
@@ -956,11 +955,6 @@ final class OakMetalEngine {
         c.aFeatSM = UInt32(s.featSM); c.aWBar = UInt32(s.wBar); c.aFeatMean = UInt32(s.featMean)
         c.aUtilFeat = UInt32(s.utilFeat); c.aUtilOpt = UInt32(s.utilOpt)
         c.cap = cap; c.alpha0 = 1.0 / cap; c.ridge = 1.0 / (cap + 1.0)
-        let nLat = max(batch * rank, 1), nRew = max(batch, 1), nAct = max(batch * actDim, 1)
-        c.boundLat = OakMetalLayout.statsAbsBoundForSumSquares(termCount: nLat)
-        c.boundRew = OakMetalLayout.statsAbsBoundForSumSquares(termCount: nRew)
-        c.boundAct = OakMetalLayout.statsAbsBoundForSumSquares(termCount: nAct)
-        c.invBoundLat = 1.0 / c.boundLat; c.invBoundRew = 1.0 / c.boundRew; c.invBoundAct = 1.0 / c.boundAct
         configPointer.pointee = c
     }
 
