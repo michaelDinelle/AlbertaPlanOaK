@@ -361,10 +361,13 @@ private struct KernelConfig {
     // Wan-Naik-Sutton 2110.13855).
     var pEncoder: UInt32 = 0, pValue: UInt32 = 0, pPsi: UInt32 = 0, pOptPolicy: UInt32 = 0
     var pOutcomeHead: UInt32 = 0, pBetaW: UInt32 = 0, pOmegaW: UInt32 = 0
+    // Pass 13 Tier 3: SPR-Stream chord-conditioned diagonal next-state predictor.
+    var pSprDecoder: UInt32 = 0
     var sObservation: UInt32 = 0, sObsMean: UInt32 = 0, sState: UInt32 = 0
     var sPrevPolicyMean: UInt32 = 0, sPolicyMean: UInt32 = 0, sScoreGrad: UInt32 = 0
     var sReward: UInt32 = 0, sTd: UInt32 = 0, sTdPsi: UInt32 = 0, sVCurr: UInt32 = 0
     var sChordSlot: UInt32 = 0, sChordSlotPrev: UInt32 = 0, sBetaProb: UInt32 = 0
+    var sSprPred: UInt32 = 0   // Pass 13 Tier 3: SPR-Stream predicted ẑ_N scratch (B · R)
     var uDone: UInt32 = 0, uActiveMask: UInt32 = 0, uActiveList: UInt32 = 0
     var uOption: UInt32 = 0, uCounters: UInt32 = 0, uSubtaskFeatureOf: UInt32 = 0
     var uOptionAge: UInt32 = 0
@@ -444,8 +447,14 @@ private enum OakMetalLayout {
     static func omegaWCount(rank: Int, actDim: Int) -> Int {
         optionCount(rank: rank, actDim: actDim) * extendedDim(rank: rank, actDim: actDim)
     }
+    // Pass 13 Tier 3: SPR-Stream chord-conditioned diagonal next-state predictor (Nilaksh
+    // et al. 2602.09396 ICML 2026). sprDecoder[k][e] models the per-option transition gain
+    // applied to z_{N-1}[e] to predict z_N[e]. K · R fp16 ≈ 2 KB at K=32, R=64.
+    static func sprDecoderCount(rank: Int, actDim: Int) -> Int {
+        optionCount(rank: rank, actDim: actDim) * rank
+    }
 
-    struct Param { let encoder, value, psi, optPolicy, outcomeHead, betaW, omegaW, total: Int }
+    struct Param { let encoder, value, psi, optPolicy, outcomeHead, betaW, omegaW, sprDecoder, total: Int }
     static func paramLayout(obsDim: Int, rank: Int, actDim: Int, dPolicy: Int) -> Param {
         let E = extendedDim(rank: rank, actDim: actDim)
         var o = 0
@@ -456,8 +465,9 @@ private enum OakMetalLayout {
         let oh  = o; o += outcomeHeadCount(rank: rank, actDim: actDim)
         let bw  = o; o += betaWCount(rank: rank, actDim: actDim)
         let ow  = o; o += omegaWCount(rank: rank, actDim: actDim)
+        let sd  = o; o += sprDecoderCount(rank: rank, actDim: actDim)
         return Param(encoder: enc, value: val, psi: psi, optPolicy: op, outcomeHead: oh,
-                     betaW: bw, omegaW: ow, total: o)
+                     betaW: bw, omegaW: ow, sprDecoder: sd, total: o)
     }
 
     struct State {
@@ -469,6 +479,9 @@ private enum OakMetalLayout {
         // alphaImpFeat[E] = exp(beta_i) / (1 + exp(beta_i) · featSM[i]) per-feature implicit step.
         // alphaImpBeta[E] = log-step meta-parameter; alphaImpH[E] = decay trace of past Δw.
         let alphaImpFeat, alphaImpBeta, alphaImpH: Int
+        // Pass 13 Tier 3: SPR-Stream predictor scratch (B · R fp32) — ẑ_N for current step,
+        // shared between oak_predict_next_latent (writer) and oak_learn_encoder_spr (reader).
+        let sprPred: Int
         let total: Int
     }
     static func stateLayout(obsDim: Int, rank: Int, actDim: Int, batch: Int, dPolicy: Int) -> State {
@@ -499,12 +512,14 @@ private enum OakMetalLayout {
         let aif = o; o += E          // Pass 13 Tier 2: alphaImpFeat[E] (per-feature implicit step)
         let aib = o; o += E          // alphaImpBeta[E] = log meta-parameter, init log(alpha0)
         let aih = o; o += E          // alphaImpH[E] = decay trace of past Δw, init 0
+        let spp = o; o += batch * rank   // Pass 13 Tier 3: sprPred[B · R] — SPR-predicted z_N
         return State(observation: obs, obsMean: mean, state: st, prevPolicyMean: prP, policyMean: pol,
                      scoreGrad: sg, reward: rew, td: td, tdPsi: tdP, vCurr: vc,
                      chordSlot: cs, chordSlotPrev: csP, betaProb: bp,
                      featSM: fs, wBar: wb, featMean: fm, utilFeat: uf, utilOpt: uo,
                      optFracEMA: ofE,
                      alphaImpFeat: aif, alphaImpBeta: aib, alphaImpH: aih,
+                     sprPred: spp,
                      total: o)
     }
 
@@ -559,18 +574,21 @@ final class OakMetalEngine {
     // whose TD δ_N is being learned from. No prevScoreGrad slot needed; arena holds a single
     // scoreGrad slot that is read by learn_pi (this step) before being overwritten by
     // meta_action (this step) for the next step's learning.
-    // Pass 11 Tier 3: 18-kernel pipeline. meta_policy inserted after predict_outcome (sees
-    // full E-dim state including outcomes); learn_beta + learn_omega after learn_pi (read the
-    // same td); meta_action runs LAST so the action sampling sees the just-updated chord.
+    // Pass 13 Tier 3: 20-kernel pipeline. SPR-Stream adds oak_predict_next_latent (after
+    // meta_policy so it can read chordPrev = chord_{N-1} that drove the just-completed
+    // transition) and oak_learn_encoder_spr (after oak_learn_encoder so the orthogonal
+    // projection has the just-applied RL gradient available for de-correlation).
     private static let phases: [Phase] = [
         Phase(name: "oak_encode",             tgSize: 0),
         Phase(name: "oak_predict_outcome",    tgSize: 0),
         Phase(name: "oak_meta_policy",        tgSize: 0),
+        Phase(name: "oak_predict_next_latent", tgSize: 0),  // Pass 13 Tier 3 (SPR-Stream)
         Phase(name: "oak_predict",            tgSize: 0),
         Phase(name: "oak_plan",               tgSize: 32),
         Phase(name: "oak_reduce_alpha",       tgSize: 128),
         Phase(name: "oak_learn_value",        tgSize: 32),
         Phase(name: "oak_learn_encoder",      tgSize: 0),
+        Phase(name: "oak_learn_encoder_spr",  tgSize: 0),   // Pass 13 Tier 3 (SPR-Stream)
         Phase(name: "oak_learn_outcome",      tgSize: 0),
         Phase(name: "oak_learn_psi",          tgSize: 0),
         Phase(name: "oak_learn_pi",           tgSize: 0),
@@ -697,16 +715,19 @@ final class OakMetalEngine {
         let K = OakMetalLayout.optionCount(rank: rank, actDim: actDim)
         let E = OakMetalLayout.extendedDim(rank: rank, actDim: actDim)
         let M = OakMetalLayout.concatDim(rank: rank, actDim: actDim)
-        // 18-kernel pipeline (Pass 11 Tier 3): added meta_policy, learn_beta, learn_omega.
+        // 20-kernel pipeline (Pass 13 Tier 3): added oak_predict_next_latent +
+        // oak_learn_encoder_spr for SPR-Stream auxiliary loss with orthogonal gradient projection.
         phaseGridWidths = [
             batch * rank,                     // oak_encode              [dispatchThreads]
             batch * K,                        // oak_predict_outcome     [dispatchThreads]
             batch,                            // oak_meta_policy         [dispatchThreads]
+            batch * rank,                     // oak_predict_next_latent [dispatchThreads]  (SPR T3)
             batch,                            // oak_predict             [dispatchThreads]
             batch,                            // oak_plan                [B TGs × 32]
             1,                                // oak_reduce_alpha        [1 TG × 128]
             E,                                // oak_learn_value         [E TGs × 32]
             max(baseObsDim, 1),               // oak_learn_encoder       [dispatchThreads]
+            max(baseObsDim, 1),               // oak_learn_encoder_spr   [dispatchThreads]  (SPR T3)
             K * E,                            // oak_learn_outcome       [dispatchThreads]
             K * M,                            // oak_learn_psi           [dispatchThreads]
             K * dPolicy * E,                  // oak_learn_pi            [dispatchThreads]
@@ -774,6 +795,12 @@ final class OakMetalEngine {
                OakMetalLayout.betaWCount(rank: rank, actDim: actDim), invR)
         sample(paramLayout.omegaW,
                OakMetalLayout.omegaWCount(rank: rank, actDim: actDim), invR)
+        // Pass 13 Tier 3: SPR-Stream decoder. Init at the unit-gain identity (every chord
+        // predicts ẑ_N = z_{N-1}). The chord-conditioned linear predictor learns the actual
+        // transition gains from the prediction errors.
+        let sprDecoderCount = OakMetalLayout.sprDecoderCount(rank: rank, actDim: actDim)
+        let sprBase = paramsArena.pointer.advanced(by: paramLayout.sprDecoder)
+        for i in 0..<sprDecoderCount { sprBase[i] = Float16(1) }
         // ψ diagonal seed: cumulant k's W_ψ[k] · concat[s, λ] gets a +1/√R coefficient on its own
         // state feature index k (RRS feature-attainment initialization; Alberta Plan A.6 / OBB
         // §2.4). The first E weights of W_ψ[k] are state weights; index [k][k] is "predict
@@ -1019,6 +1046,7 @@ final class OakMetalEngine {
         c.pPsi = UInt32(p.psi);         c.pOptPolicy = UInt32(p.optPolicy)
         c.pOutcomeHead = UInt32(p.outcomeHead)
         c.pBetaW = UInt32(p.betaW); c.pOmegaW = UInt32(p.omegaW)
+        c.pSprDecoder = UInt32(p.sprDecoder)
         c.sObservation = UInt32(s.observation); c.sObsMean = UInt32(s.obsMean)
         c.sState = UInt32(s.state); c.sPrevPolicyMean = UInt32(s.prevPolicyMean)
         c.sPolicyMean = UInt32(s.policyMean); c.sScoreGrad = UInt32(s.scoreGrad)
@@ -1026,6 +1054,7 @@ final class OakMetalEngine {
         c.sVCurr = UInt32(s.vCurr)
         c.sChordSlot = UInt32(s.chordSlot); c.sChordSlotPrev = UInt32(s.chordSlotPrev)
         c.sBetaProb = UInt32(s.betaProb)
+        c.sSprPred = UInt32(s.sprPred)
         c.uDone = UInt32(u.done); c.uActiveMask = UInt32(u.activeMask)
         c.uActiveList = UInt32(u.activeList); c.uOption = UInt32(u.option); c.uCounters = UInt32(u.counters)
         c.uSubtaskFeatureOf = UInt32(u.subtaskFeatureOf); c.uOptionAge = UInt32(u.optionAge)
