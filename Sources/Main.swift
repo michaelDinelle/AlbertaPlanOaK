@@ -394,6 +394,9 @@ private struct KernelScalars {
     // absolute-scale gate which over-shrunk the planning bonus on stochastic envs.
     var modelErrEMA: Float = 0
     var modelErrEMAPrev: Float = 0
+    // Pass 13 Tier 6.2: dense-fast-path flag (1 iff activeCount == E and activeList[i] == i for all i).
+    // Set by oak_bk_admit_commit; consumed by active_dot_half_auto in the next step's kernels.
+    var activeListIsIdentity: UInt32 = 0
 }
 
 struct KernelStats {
