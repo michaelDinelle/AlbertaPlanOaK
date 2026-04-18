@@ -67,25 +67,37 @@ final class NativeBridge: @unchecked Sendable {
 
     deinit { dlclose(dylib) }
 
-    private func errorBuffer() -> [CChar] { Array(repeating: 0, count: 4096) }
+    // Pass 14 Tier 0.8: instance-owned reusable error buffer (was per-call alloc; called every
+    // env step on the FFI hot path → 4096 bytes/step heap traffic). Single-threaded by Inv-1
+    // (NativeBridge is shared; FFI calls are serialized by the engine main thread).
+    private var sharedErrorBuffer: [CChar] = Array(repeating: 0, count: 4096)
     private func checked(_ body: (UnsafeMutablePointer<CChar>?, Int32) -> Int32) throws {
-        var error = errorBuffer()
-        guard body(&error, Int32(error.count)) == 1 else { throw OakError.message(decodeCString(error)) }
+        for i in 0..<sharedErrorBuffer.count where sharedErrorBuffer[i] != 0 { sharedErrorBuffer[i] = 0 }
+        let cap = Int32(sharedErrorBuffer.count)
+        let ok = sharedErrorBuffer.withUnsafeMutableBufferPointer { buf in body(buf.baseAddress, cap) }
+        guard ok == 1 else { throw OakError.message(decodeCString(sharedErrorBuffer)) }
     }
 
     func takeWarning() -> String? {
-        var error = errorBuffer()
-        return takeWarningFn(&error, Int32(error.count)) == 1 ? decodeCString(error) : nil
+        for i in 0..<sharedErrorBuffer.count where sharedErrorBuffer[i] != 0 { sharedErrorBuffer[i] = 0 }
+        let cap = Int32(sharedErrorBuffer.count)
+        let hit = sharedErrorBuffer.withUnsafeMutableBufferPointer { buf in
+            takeWarningFn(buf.baseAddress, cap)
+        }
+        return hit == 1 ? decodeCString(sharedErrorBuffer) : nil
     }
     func open(envId: String, numEnvs: Int, seed: Int?) throws -> UnsafeMutableRawPointer {
-        var error = errorBuffer()
+        for i in 0..<sharedErrorBuffer.count where sharedErrorBuffer[i] != 0 { sharedErrorBuffer[i] = 0 }
+        let cap = Int32(sharedErrorBuffer.count)
         let actualSeed = Int32(seed ?? Int(oakUnseededSeed))
         let handle = envId.withCString { e in
             assetBasePath.withCString { b in
-                openFn(e, Int32(numEnvs), actualSeed, b, &error, Int32(error.count))
+                sharedErrorBuffer.withUnsafeMutableBufferPointer { buf in
+                    openFn(e, Int32(numEnvs), actualSeed, b, buf.baseAddress, cap)
+                }
             }
         }
-        guard let handle else { throw OakError.message(decodeCString(error)) }
+        guard let handle else { throw OakError.message(decodeCString(sharedErrorBuffer)) }
         return handle
     }
     func close(_ h: UnsafeMutableRawPointer) { closeFn(h) }

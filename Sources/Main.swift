@@ -154,7 +154,11 @@ func sampleAndScoreActions(spec: [ActionComponent], numEnvs: Int, dPolicy: Int,
                     let raw = mu + z   // structural σ = 1
                     let clamped = max(low[d], min(high[d], raw.isFinite ? raw : 0))
                     envAction[aBase + aIdx + d] = clamped
-                    scoreGrad[mBase + pIdx + d] = z
+                    // Pass 14 Tier 0.7: REINFORCE score for Gaussian policy with σ=1 is
+                    // ∂log π(a|s) / ∂μ = (a - μ) / σ² = (a - μ). When the env clamps `raw`
+                    // to [low, high], the ACTUAL action is `clamped`, not μ+z. Using `z`
+                    // (= raw - μ) was biased on Box envs that hit bounds (Pass 13 bug).
+                    scoreGrad[mBase + pIdx + d] = clamped - mu
                 }
                 pIdx += a; aIdx += a
             }
@@ -224,7 +228,7 @@ func decodeCString(_ buffer: [CChar]) -> String {
 }
 
 // ------------------------------------------------------------------------------------------------
-// Health accumulator — lean fold over KernelStats. Seven slots, one per reported mean.
+// Health accumulator — lean fold over KernelStats. Six slots, one per reported mean.
 // ------------------------------------------------------------------------------------------------
 private struct HealthAccumulator {
     struct Slot { var sum = 0.0; var count = 0 }
@@ -560,7 +564,7 @@ private final class Shared<Element> {
 }
 
 // ================================================================================================
-// Metal engine — orthodox Step 11 OaK. Pass 11: 18 phases per step, dispatched as one ICB.
+// Metal engine — orthodox Step 11 OaK. Pass 14: 20 phases per step, dispatched as one ICB.
 //   encode → predict_outcome → meta_policy → predict → plan → reduce_alpha
 //   → learn_value → learn_encoder → learn_outcome → learn_psi → learn_pi
 //   → learn_beta → learn_omega → meta_action
@@ -591,13 +595,15 @@ final class OakMetalEngine {
         Phase(name: "oak_reduce_alpha",       tgSize: 128),
         Phase(name: "oak_learn_value",        tgSize: 32),
         Phase(name: "oak_learn_encoder",      tgSize: 0),
-        Phase(name: "oak_learn_encoder_spr",  tgSize: 0),   // Pass 13 Tier 3 (SPR-Stream)
+        Phase(name: "oak_learn_encoder_spr",  tgSize: 128), // Pass 14 T0.4: 1 TG x 128 threads
+                                                            // for vector-orthogonal projection
         Phase(name: "oak_learn_outcome",      tgSize: 0),
         Phase(name: "oak_learn_psi",          tgSize: 0),
         Phase(name: "oak_learn_pi",           tgSize: 0),
         Phase(name: "oak_learn_beta",         tgSize: 0),
         Phase(name: "oak_learn_omega",        tgSize: 0),
-        Phase(name: "oak_meta_action",        tgSize: 0),
+        Phase(name: "oak_meta_action",        tgSize: 32), // Pass 14 T0.5: B TGs x 32 threads
+                                                            // (TG-shared scratch; no stack spill)
         Phase(name: "oak_bk_reduce",          tgSize: 128),
         Phase(name: "oak_bk_feature",         tgSize: 32),
         Phase(name: "oak_bk_option",          tgSize: 128),
@@ -730,13 +736,13 @@ final class OakMetalEngine {
             1,                                // oak_reduce_alpha        [1 TG × 128]
             E,                                // oak_learn_value         [E TGs × 32]
             max(baseObsDim, 1),               // oak_learn_encoder       [dispatchThreads]
-            max(baseObsDim, 1),               // oak_learn_encoder_spr   [dispatchThreads]  (SPR T3)
+            1,                                // oak_learn_encoder_spr   [1 TG × 128] Pass 14 T0.4
             K * E,                            // oak_learn_outcome       [dispatchThreads]
             K * M,                            // oak_learn_psi           [dispatchThreads]
             K * dPolicy * E,                  // oak_learn_pi            [dispatchThreads]
             E + K,                            // oak_learn_beta          [dispatchThreads]
             K * E,                            // oak_learn_omega         [dispatchThreads]
-            batch * dPolicy,                  // oak_meta_action         [dispatchThreads]
+            batch,                            // oak_meta_action         [B TGs × 32] Pass 14 T0.5
             1,                                // oak_bk_reduce           [1 TG × 128]
             rank,                             // oak_bk_feature          [R TGs × 32]
             K,                                // oak_bk_option           [K TGs × 128]
@@ -858,7 +864,7 @@ final class OakMetalEngine {
 
         writeKernelConfig(paramLayout: paramLayout)
 
-        // Pre-encode the phase dispatch graph into the ICB (`phases.count` phases; Pass 11 = 18).
+        // Pre-encode the phase dispatch graph into the ICB (`phases.count` phases; Pass 14 = 20).
         // Grids are fixed for the engine's lifetime; only KernelScalars/KernelStats/params/state
         // data changes between steps. resourceList is laid out
         // [0..4 = params, state, uint, scalars, stats; 5 = config].
@@ -1186,20 +1192,27 @@ private enum RunSnapshot {
 private func directNumEnvs(obsDim: Int, actDim: Int, dPolicy: Int, device: MTLDevice) throws -> Int {
     let width = try OakMetalEngine.executionWidth(device: device)
     let rank = obsDim
-    let K = OakMetalLayout.optionCount(rank: rank, actDim: actDim)
-    let E = OakMetalLayout.extendedDim(rank: rank, actDim: actDim)
-    let perEnvFloats =  // state double-buffer (2E), obs (O), prevPolicyMean+policyMean+scoreGrad (3D),
-                        // tdPsi (K), reward + td + vCurr + betaProb (4), chordSlot+chordSlotPrev (2K).
-        obsDim + 2 * E + 3 * dPolicy + K + 4 + 2 * K
-    let perEnvUints = 1 + 2 + 1  // done + option slots + optionAge
+    // Pass 14 Tier 0.6: derive per-env and fixed memory from OakMetalLayout PROGRAMMATICALLY.
+    // The hand-rolled formulae below were off by sprPred (B·R from Pass 13 Tier 3) and by
+    // alphaImpFeat / Beta / H (3·E from Pass 13 Tier 2) which silently risked GPU memory
+    // over-subscription on large envs. Now we compute total bytes from the canonical layout
+    // so any new arena slot is automatically counted.
+    let probeStateLayout = OakMetalLayout.stateLayout(obsDim: obsDim, rank: rank,
+                                                       actDim: actDim, batch: 1, dPolicy: dPolicy)
+    let probeFixedStateLayout = OakMetalLayout.stateLayout(obsDim: obsDim, rank: rank,
+                                                            actDim: actDim, batch: 0, dPolicy: dPolicy)
+    let perEnvFloats = max(probeStateLayout.total - probeFixedStateLayout.total, 0)
+    // perEnvUints from uintLayout(batch=1) - uintLayout(batch=0).
+    let probeUintLayout = OakMetalLayout.uintLayout(rank: rank, actDim: actDim, batch: 1)
+    let probeFixedUintLayout = OakMetalLayout.uintLayout(rank: rank, actDim: actDim, batch: 0)
+    let perEnvUints = max(probeUintLayout.total - probeFixedUintLayout.total, 0)
     let perEnvBytes = perEnvFloats * MemoryLayout<Float>.stride
                     + perEnvUints  * MemoryLayout<UInt32>.stride
     let paramBytes = OakMetalLayout.paramLayout(obsDim: obsDim, rank: rank, actDim: actDim,
                                                  dPolicy: dPolicy).total
                     * MemoryLayout<Float16>.stride
-    // Fixed (per-engine, not per-env): featSM + wBar + featMean + utilFeat (4·R fp32) +
-    // utilOpt + optFracEMA (2K fp32, Pass 11 Tier 5).
-    let fixedBytes = paramBytes + (4 * rank + 2 * K) * MemoryLayout<Float>.stride
+    let fixedBytes = paramBytes + probeFixedStateLayout.total * MemoryLayout<Float>.stride
+                                + probeFixedUintLayout.total  * MemoryLayout<UInt32>.stride
     // Memory ceiling from the GPU's reported safe working-set size (Apple Metal). Structural
     // to the hardware. This is the *upper bound* on what the agent could ever allocate.
     let memEnvs = max(
