@@ -1,0 +1,42 @@
+{
+  "actionDim" : 6,
+  "agentStepMsMean" : 0.010719,
+  "command" : "benchmark",
+  "continuousAction" : {
+    "meanL2" : 1.8343951409204056,
+    "meanPerDim" : [
+      -0.010785586023606205,
+      -0.011665695919570377,
+      0.010311097690722212,
+      -0.003965138434978144,
+      -0.012750488366388405,
+      -0.0035604378863354214
+    ],
+    "stdL2" : 0.28370276058618005,
+    "stdPerDim" : [
+      0.7611526112311922,
+      0.7613711032581615,
+      0.7572591954925725,
+      0.7527344710056459,
+      0.7535204052141443,
+      0.7603026705244691
+    ]
+  },
+  "doneCount" : 0,
+  "envId" : "Walker2d-v4",
+  "envStepMsMean" : 7.800364500000001,
+  "heartbeatSequence" : 2,
+  "measuredBatchCount" : 4,
+  "measuredSeconds" : 0.042911584,
+  "measuredStepCount" : 8192,
+  "numEnvs" : 2048,
+  "observationDim" : 17,
+  "policy" : "random",
+  "rewardSum" : 2069.983515220447,
+  "schemaVersion" : 2,
+  "seed" : 0,
+  "stepsPerSecond" : 190904.16238188735,
+  "stopAfterMeasuredSteps" : 51200,
+  "stopReason" : "heartbeat",
+  "warmupSteps" : 1000
+}

@@ -1,0 +1,35 @@
+{
+  "actionDim" : 7,
+  "actionDiscreteCount" : 7,
+  "agentStepMsMean" : 0.0166431875,
+  "command" : "benchmark",
+  "discreteAction" : {
+    "histogram" : [
+      4348,
+      4435,
+      4416,
+      4401,
+      4478,
+      4260,
+      4382
+    ],
+    "uniqueCount" : 7
+  },
+  "doneCount" : 5,
+  "envId" : "MiniGrid-WFC-ObstaclesBlackdots-v0",
+  "envStepMsMean" : 11.2904975625,
+  "heartbeatSequence" : 8,
+  "measuredBatchCount" : 16,
+  "measuredSeconds" : 0.196220958,
+  "measuredStepCount" : 32768,
+  "numEnvs" : 2048,
+  "observationDim" : 244,
+  "policy" : "random",
+  "rewardSum" : 4.882999956607819,
+  "schemaVersion" : 2,
+  "seed" : 1,
+  "stepsPerSecond" : 166995.41340533053,
+  "stopAfterMeasuredSteps" : 51200,
+  "stopReason" : "heartbeat",
+  "warmupSteps" : 1000
+}

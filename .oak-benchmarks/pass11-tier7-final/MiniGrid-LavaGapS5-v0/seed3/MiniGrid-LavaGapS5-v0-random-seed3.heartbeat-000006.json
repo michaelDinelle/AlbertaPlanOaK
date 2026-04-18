@@ -1,0 +1,35 @@
+{
+  "actionDim" : 7,
+  "actionDiscreteCount" : 7,
+  "agentStepMsMean" : 0.015524166666666667,
+  "command" : "benchmark",
+  "discreteAction" : {
+    "histogram" : [
+      3230,
+      3174,
+      3263,
+      3196,
+      3265,
+      3196,
+      3204
+    ],
+    "uniqueCount" : 7
+  },
+  "doneCount" : 728,
+  "envId" : "MiniGrid-LavaGapS5-v0",
+  "envStepMsMean" : 10.739124916666666,
+  "heartbeatSequence" : 6,
+  "measuredBatchCount" : 12,
+  "measuredSeconds" : 0.143636958,
+  "measuredStepCount" : 24576,
+  "numEnvs" : 2048,
+  "observationDim" : 244,
+  "policy" : "random",
+  "rewardSum" : 1.8020000457763672,
+  "schemaVersion" : 2,
+  "seed" : 3,
+  "stepsPerSecond" : 171098.02617791446,
+  "stopAfterMeasuredSteps" : 51200,
+  "stopReason" : "heartbeat",
+  "warmupSteps" : 1000
+}

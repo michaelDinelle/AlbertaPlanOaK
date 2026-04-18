@@ -1,0 +1,65 @@
+{
+  "actionDim" : 6,
+  "agentStepMsMean" : 0.5997361666666666,
+  "command" : "benchmark",
+  "continuousAction" : {
+    "meanL2" : 1.7455558027793026,
+    "meanPerDim" : [
+      0.0068828477529677915,
+      -0.009573265736344183,
+      -0.004590640489186626,
+      -0.014880609974534309,
+      -0.009086629223020282,
+      0.006124299420116585
+    ],
+    "stdL2" : 0.29261571203109643,
+    "stdPerDim" : [
+      0.720908462375786,
+      0.7266415145588865,
+      0.7198200069961137,
+      0.7225987650161061,
+      0.7160793734324705,
+      0.7289108488635674
+    ]
+  },
+  "diagnostic" : {
+    "agentShare" : 0.16767433570588164,
+    "envShare" : 0.6518508905793133,
+    "hostShare" : 0.18047477371480503,
+    "maxAbsLatentPrediction" : 4.525810241699219,
+    "maxAbsPolicyOutput" : 0.6563645601272583,
+    "nonFiniteByPhase" : {
+      "encode" : 0,
+      "learn" : 0,
+      "plan" : 0
+    }
+  },
+  "doneCount" : 0,
+  "envId" : "HalfCheetah-v4",
+  "envStepMsMean" : 2.331534833333333,
+  "health" : {
+    "actionDeltaL2Mean" : 0.033024589606793595,
+    "activeRank" : 11.4,
+    "latentStateMeanSquare" : 0.2315978467464447,
+    "nonFiniteRawTotal" : 0,
+    "nonFiniteSanitizedTotal" : 0,
+    "oakOptionReinitCount" : 0,
+    "optionModelPredictionMSE" : 1.0979238986968993,
+    "rewardRate" : -0.2253008335828781,
+    "scoreGradL2Mean" : 1.0129971265792848
+  },
+  "heartbeatSequence" : 2,
+  "measuredBatchCount" : 6,
+  "measuredSeconds" : 0.02146075,
+  "measuredStepCount" : 3072,
+  "numEnvs" : 512,
+  "observationDim" : 17,
+  "policy" : "oak",
+  "rewardSum" : -707.7365484714392,
+  "schemaVersion" : 2,
+  "seed" : 0,
+  "stepsPerSecond" : 143145.04385913818,
+  "stopAfterMeasuredSteps" : 20000,
+  "stopReason" : "heartbeat",
+  "warmupSteps" : 1000
+}
