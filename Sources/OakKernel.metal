@@ -155,12 +155,15 @@ struct KernelScalars {
     float alphaImp;           // implicit TD step: α₀ / (1 + α₀·⟨‖x_active‖²⟩_batch) — 2510.06149
     float alphaEnc;           // implicit TD step for encoder (centered obs)
     float tdBaseline;         // Pass 11 Tier 4: REINFORCE running-mean TD baseline (Williams 1992)
-    float modelErrEMA;        // Pass 12 Tier 4.2/4.3: continual EMA of mean ψ TD error squared
-                              // (= optionModelPredictionMSE). Drives planning-advantage gating
-                              // (Tier 4.2: scale qk-vCurr by 1/(1+modelErrEMA) so a wrong model
-                              // can't inject biased td) and β-on-surprise termination
-                              // (Tier 4.3: high model error → terminate option; CPD-Option-Critic
-                              // 2510.24988 + LPM 2509.25438 grounding).
+    float modelErrEMA;        // Continual EMA of mean ψ TD error squared
+                              // (= optionModelPredictionMSE). The agent's *current* model error.
+    float modelErrEMAPrev;    // Pass 13 Tier 0: snapshot of modelErrEMA from N steps ago (slow EMA).
+                              // lpmRate = max(0, modelErrEMAPrev - modelErrEMA) is the
+                              // INFORMATION-GAIN proxy (Hou-An-Du 2509.25438 ICLR 2026 LPM).
+                              // Positive when the model is improving; zero when stagnant.
+                              // Used to RESCALE planning gate and β-termination so a wrong-but-
+                              // improving model still gets credit (fixes Pass-12 absolute-scale
+                              // regression on Dynamic-Obstacles family).
 };
 
 // KernelStats — 16 Float fields. Layout must match Swift KernelStats byte-for-byte.
@@ -492,13 +495,18 @@ kernel void oak_meta_policy(
                                        ctx.activeList, ctx.activeCount);
     for (uint k = 0u; k < ctx.K; ++k)
         beta_logit += float(ctx.betaW[ctx.E + k]) * chordPrev[k];
-    // Pass 12 Tier 4.3: β-on-surprise. Add a structural surprise term to the termination
-    // logit — when the model is uncertain (high modelErrEMA), terminate options sooner so
-    // ω can re-sample a fresh chord based on the now-known surprising state. CPD-Option-
-    // Critic (2510.24988) + LPM (2509.25438) grounding: model surprise IS the right signal
-    // for option boundary detection. Scale is "surprise relative to its own EMA" so it's
-    // unit-free and structurally derived (no magic constant).
-    beta_logit += ctx.scalars->modelErrEMA;
+    // Pass 13 Tier 0: β-on-surprise-MINUS-IG. CPD-Option-Critic (2510.24988) + LPM
+    // (Hou-An-Du 2509.25438 ICLR 2026). Pass-12 added `+modelErrEMA` raw, which on noisy
+    // envs (Dynamic-Obstacles family, modelErrEMA persistently O(1+)) saturated β→1
+    // → terminated on every step → ω never gets a stable option. Pass-13 fix: subtract
+    // lpmRate (Information-Gain proxy). Net term is positive when surprise is high AND
+    // model NOT improving (terminate, ω re-plans), zero when wrong-but-improving (keep
+    // option — improvement is the BWH-orthodox signal that this option is doing learning
+    // work), negative when model is improving faster than its absolute error (option is
+    // succeeding — keep it longer).
+    float lpmRate_meta = max(0.0f,
+                             ctx.scalars->modelErrEMAPrev - ctx.scalars->modelErrEMA);
+    beta_logit += (ctx.scalars->modelErrEMA - lpmRate_meta);
     float beta_prob = 1.0f / (1.0f + exp(-beta_logit));
     ctx.betaProb[row] = beta_prob;
 
@@ -658,14 +666,17 @@ kernel void oak_plan(
         k_lane = wins ? k2 : k_lane;
     }
     if (tid == 0u) {
-        // Reuse w_main · curr from oak_predict (Tier 11 fused dot — saves B · activeCount FMAs).
-        // Pass 12 Tier 4.2: model-error-gated planning advantage. When the model is wrong
-        // (high |δ_ψ|² — see ctx.scalars->modelErrEMA), the GPI argmax bonus qk-vCurr
-        // injects systematic bias into td (Subagent 4 forensics: this is what kills OaK on
-        // Dynamic-Obstacles family, where moving obstacles violate ψ predictions). Gate by
-        // 1/(1 + modelErrEMA) — purely structural (no magic constant), shrinks the bonus to
-        // zero as the model gets worse, restores full bonus when model is good.
-        float gateScale = 1.0f / (1.0f + ctx.scalars->modelErrEMA);
+        // Pass 13 Tier 0: LPM second-derivative planning gate (Hou-An-Du 2509.25438 ICLR 2026).
+        // Replaces Pass-12's absolute-scale `1/(1+modelErrEMA)` which over-shrunk the planning
+        // bonus on stochastic envs (modelErrEMA is unbounded; on Dynamic-Obstacles it stays at
+        // O(1+) persistently → gate ≈ 0 forever → no planning improvement).
+        // Pass-13 fix: rescale by lpmRate (= max(0, modelErrEMAPrev - modelErrEMA)). When the
+        // model is IMPROVING (lpmRate > 0), the planning bonus is restored — we trust the
+        // model's IG-monotone improvement direction even at high absolute error. When stagnant
+        // (lpmRate ≈ 0), behavior matches Pass-12 (still gated by 1/(1+modelErrEMA)).
+        float lpmRate = max(0.0f,
+                            ctx.scalars->modelErrEMAPrev - ctx.scalars->modelErrEMA);
+        float gateScale = (1.0f + lpmRate) / (1.0f + ctx.scalars->modelErrEMA);
         ctx.td[row] += gateScale * (qk - ctx.vCurr[row]);
         // Pass 11 Tier 3: option_slot is now telemetry-only (set by oak_meta_policy from
         // argmax_k chord[r][k]). plan no longer writes it — chord drives action sampling.
@@ -1425,17 +1436,24 @@ kernel void oak_bk_admit_commit(
     meanTd /= float(max(ctx.B, 1u));
     ctx.scalars->tdBaseline += (meanTd - ctx.scalars->tdBaseline) * invT;
 
-    // Pass 12 Tier 4.2: track EMA of mean ψ TD error squared as the global model-uncertainty
-    // signal. ctx.tdPsi[r][k] is the cumulant TD δ_k = c_k + ψ(s', λ_prev) − ψ(s, λ_prev) per
-    // option k per row; large |δ_k|² means ψ is a wrong predictor. Used by oak_plan to gate
-    // the planning advantage (don't trust qk when model is wrong → Dynamic-Obstacles fix) and
-    // by oak_meta_policy to add β-on-surprise (terminate options when world is surprising;
-    // CPD-Option-Critic 2510.24988 + LPM 2509.25438).
+    // Pass 12 Tier 4.2 + Pass 13 Tier 0: track BOTH a fast EMA of mean ψ TD error squared
+    // (modelErrEMA) AND a slow lagged snapshot (modelErrEMAPrev). The slow snapshot updates
+    // at half the fast rate so lpmRate = max(0, modelErrEMAPrev - modelErrEMA) is positive
+    // when the model is IMPROVING. This is Hou-An-Du 2509.25438 (LPM, ICLR 2026): the
+    // monotone indicator of Information Gain. Used by oak_plan to UNGATE the planning bonus
+    // when the model improves (fixes Pass-12 Dynamic-Obstacles regression caused by absolute
+    // gating) and by oak_meta_policy as `β += modelErrEMA - lpmRate` (terminate when wrong
+    // AND not improving; keep when wrong but improving).
     float meanPsiSq = 0.0f;
     uint psiCount = ctx.B * ctx.K;
     for (uint i = 0u; i < psiCount; ++i) meanPsiSq = fma(ctx.tdPsi[i], ctx.tdPsi[i], meanPsiSq);
     meanPsiSq /= float(max(psiCount, 1u));
     ctx.scalars->modelErrEMA += (meanPsiSq - ctx.scalars->modelErrEMA) * invT;
+    // Slow EMA tracks at HALF the rate (invT * 0.5) so it lags by ~2/invT steps. The 0.5 is
+    // structural — it's "half of the fast rate" so the slow signal averages over twice as
+    // many steps. Pure math; no magic constant. As stepCount → ∞ both rates floor at ridge,
+    // so the lag-ratio asymptotes at 2× — preserving the monotone-IG property.
+    ctx.scalars->modelErrEMAPrev += (ctx.scalars->modelErrEMA - ctx.scalars->modelErrEMAPrev) * (invT * 0.5f);
 
     // Effective-rank via trace/max of featSM (structural stable-rank proxy; 2603.04580).
     float tr = 0.0f, mx = 0.0f;
