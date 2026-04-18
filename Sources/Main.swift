@@ -57,7 +57,10 @@ private struct RunMetricsFile: Encodable {
     let health: RunHealth?, diagnostic: RunDiagnostic?
 }
 
-struct ActionBatch { let floats: [Float]; let indices: [Int32]? }
+// Pass 10: agent always emits a real-valued vector; the env-wrapper layer (EnvPoolEnv.step)
+// interprets it (argmax → discrete index | bound-clamp → continuous control). The agent has no
+// notion of action-space type, so ActionBatch carries only floats.
+struct ActionBatch { let floats: [Float] }
 
 private struct Schema: Hashable, Comparable {
     let observationDim: Int, actionDim: Int, actionDiscreteCount: Int?
@@ -182,12 +185,24 @@ private final class MeasuredActionCollector {
     }
 
     func addMeasured(_ batch: ActionBatch, numEnvs: Int, actDim: Int) {
-        if var h = discrete, let idx = batch.indices {
-            for row in 0..<numEnvs { let a = Int(idx[row]); if a >= 0 && a < h.count { h[a] &+= 1 } }
+        let f = batch.floats
+        if var h = discrete {
+            // Discrete env: argmax the agent's continuous-vector to recover the index that the
+            // env-wrapper sent. Per Pass 10, the agent has no notion of action-type — telemetry
+            // (which IS env-aware) reconstructs the discrete index here.
+            let bins = h.count
+            for row in 0..<numEnvs {
+                var best = 0; var bestV: Float = -.greatestFiniteMagnitude
+                let b = row * actDim
+                for d in 0..<bins {
+                    let v = f[b + d]
+                    if v > bestV { bestV = v; best = d }
+                }
+                h[best] &+= 1
+            }
             discrete = h
         }
         guard var s = sum, var q = sumsq else { return }
-        let f = batch.floats
         for row in 0..<numEnvs {
             var l = 0.0
             let b = row * actDim
@@ -341,6 +356,11 @@ final class EnvPoolEnv {
     let numEnvs: Int, obsDim: Int, actDim: Int
     let actionDiscreteCount: Int?
     let actionLow: [Float], actionHigh: [Float]
+    // Pre-allocated scratch — discrete-index buffer (used only when actionDiscreteCount != nil)
+    // and a clamped-action buffer (used when continuous). Both sized once at init; no per-step
+    // allocation on the hot path (Inv-6).
+    private var discreteIndexScratch: [Int32]
+    private var clampedActionScratch: [Float]
 
     init(id: String, numEnvs: Int, seed: Int?) throws {
         self.numEnvs = numEnvs
@@ -351,6 +371,8 @@ final class EnvPoolEnv {
         observationScratch = Array(repeating: 0, count: numEnvs * obsDim)
         rewardScratch = Array(repeating: 0, count: numEnvs)
         doneScratch = Array(repeating: 0, count: numEnvs)
+        discreteIndexScratch = Array(repeating: 0, count: numEnvs)
+        clampedActionScratch = Array(repeating: 0, count: numEnvs * actDim)
     }
     deinit { bridge.close(handle) }
 
@@ -360,13 +382,43 @@ final class EnvPoolEnv {
         return v
     }
     func reset() throws { try checked { try bridge.reset(handle, obs: &observationScratch) } }
+
+    // Pass 10: agent emits a real-valued vector of length actDim; the wrapper interprets it.
+    // This is the SOLE site that knows the env's action-space type — Inv-1 boundary.
+    //   Discrete env: argmax over the first `discreteCount` dims → integer index → stepDiscrete.
+    //   Continuous env: clamp per-dim to [actionLow, actionHigh] (env constraint, NOT agent
+    //                   shaping) → stepContinuous.
     func step(_ action: ActionBatch) throws {
-        try checked {
-            if let idx = action.indices {
-                try bridge.stepDiscrete(handle, action: idx, obs: &observationScratch,
+        let f = action.floats
+        if let bins = actionDiscreteCount {
+            for r in 0..<numEnvs {
+                var best = 0; var bestV: Float = -.greatestFiniteMagnitude
+                let b = r * actDim
+                for d in 0..<bins {
+                    let v = f[b + d]
+                    if v > bestV { bestV = v; best = d }
+                }
+                discreteIndexScratch[r] = Int32(best)
+            }
+            try checked {
+                try bridge.stepDiscrete(handle, action: discreteIndexScratch,
+                                        obs: &observationScratch,
                                         reward: &rewardScratch, done: &doneScratch)
-            } else {
-                try bridge.stepContinuous(handle, action: action.floats, obs: &observationScratch,
+            }
+        } else {
+            for r in 0..<numEnvs {
+                let b = r * actDim
+                for d in 0..<actDim {
+                    let v = f[b + d]
+                    if !v.isFinite { clampedActionScratch[b + d] = 0 }
+                    else if v < actionLow[d]  { clampedActionScratch[b + d] = actionLow[d] }
+                    else if v > actionHigh[d] { clampedActionScratch[b + d] = actionHigh[d] }
+                    else { clampedActionScratch[b + d] = v }
+                }
+            }
+            try checked {
+                try bridge.stepContinuous(handle, action: clampedActionScratch,
+                                          obs: &observationScratch,
                                           reward: &rewardScratch, done: &doneScratch)
             }
         }
@@ -375,21 +427,18 @@ final class EnvPoolEnv {
 
 // ================================================================================================
 // Kernel config + scalars + stats — mirrors OakKernel.metal structs byte-for-byte. Keep in lockstep.
-// Tier 9 dead-code purge:
-//   KernelConfig: dropped actionIsDiscrete (fc_action_is_discrete carries this at pipeline-create
-//     time via function constant), dropped boundLat/Rew/Act + invBoundLat/Rew/Act (Tier 2 deleted
-//     all clamps; implicit α + ρ̄ centering replaced them).
-//   KernelScalars: dropped doneCount + _pad (host-side state.doneCount tracks it).
-//   KernelStats: renamed planningActionChangeL2Mean -> scoreGradL2Mean (the field now reports
-//     scoreGrad L² mean; the old name was tied to actionGrad which was deleted in Tier 6).
-// KernelStats currently has 16 Float fields.
+// Pass 10 unification removed env-type fields: actionIsDiscrete and actionParamCount are gone
+// from KernelConfig — the agent has no notion of action-space type, and D = 2·actDim is
+// computed structurally in the kernel from cfg.actDim. boundLat/Rew/Act + invBoundLat/Rew/Act
+// were also already gone from Tier 9 (Tier 2 deleted all clamps; implicit α + ρ̄ centering
+// replaced them). KernelScalars dropped doneCount + _pad (host-side state.doneCount tracks it).
+// KernelStats has 16 Float fields.
 // ================================================================================================
 private struct KernelConfig {
     var obsDim: UInt32 = 0, rank: UInt32 = 0, actDim: UInt32 = 0, batch: UInt32 = 0
     var optionCount: UInt32 = 0, baseObsDim: UInt32 = 0
-    // actionParamCount = numActions (discrete one-hot) | 2·actDim (continuous Gaussian [μ, log_σ]).
-    // Determines D in optPolicy[K · D · R] and scoreGrad[B · D]. Set at init from action type.
-    var actionParamCount: UInt32 = 0
+    // Pass 10: dropped actionParamCount field — D is structurally 2·actDim, kernel computes it
+    // directly from cfg.actDim (no env-type-conditioned width per Inv-3).
     var pEncoder: UInt32 = 0, pValue: UInt32 = 0, pPsi: UInt32 = 0, pOptPolicy: UInt32 = 0
     var sObservation: UInt32 = 0, sObsMean: UInt32 = 0, sState: UInt32 = 0
     var sPrevAction: UInt32 = 0, sAction: UInt32 = 0, sScoreGrad: UInt32 = 0
@@ -423,7 +472,7 @@ struct KernelStats {
 // Arena layout — single source of truth (Metal reads the offsets from KernelConfig).
 // ================================================================================================
 private enum OakMetalLayout {
-    static let kernelConfigBufferIndex = 6
+    static let kernelConfigBufferIndex = 5
     // Structural cap: one SIMD group of options per row in oak_plan (hardware-derived, not tuned).
     static let maxOptionCount = 32
 
@@ -438,29 +487,23 @@ private enum OakMetalLayout {
     static func psiCount(rank: Int, actDim: Int) -> Int {
         optionCount(rank: rank, actDim: actDim) * concatDim(rank: rank, actDim: actDim)
     }
-    // D_params: numActions for discrete (one logit per action), 2·actDim for continuous Gaussian
-    // ([μ, log_σ] per action dim). Structural — derived purely from action-type signal.
-    static func actionParamCount(actDim: Int, actionDiscreteCount: Int?) -> Int {
-        if let d = actionDiscreteCount, d > 0 { return d }
-        return 2 * actDim
-    }
-    static func optPolicyCount(rank: Int, actDim: Int, actionDiscreteCount: Int?) -> Int {
-        optionCount(rank: rank, actDim: actDim)
-            * actionParamCount(actDim: actDim, actionDiscreteCount: actionDiscreteCount)
-            * rank
+    // Pass 10 unification: agent always emits a Gaussian over actDim, so D_params = 2·actDim
+    // structurally (μ_d, log_σ_d per dim). No env-type-conditioned width per Inv-3.
+    static func actionParamCount(actDim: Int) -> Int { 2 * actDim }
+    static func optPolicyCount(rank: Int, actDim: Int) -> Int {
+        optionCount(rank: rank, actDim: actDim) * actionParamCount(actDim: actDim) * rank
     }
     static func discreteLogitHalfWidth(rank: Int, actDim: Int) -> Float {
         min(sqrtf(Float(max(rank * actDim, 1))), logf(Float.greatestFiniteMagnitude))
     }
 
     struct Param { let encoder, value, psi, optPolicy, total: Int }
-    static func paramLayout(obsDim: Int, rank: Int, actDim: Int, actionDiscreteCount: Int?) -> Param {
+    static func paramLayout(obsDim: Int, rank: Int, actDim: Int) -> Param {
         var o = 0
         let enc = o; o += rank
         let val = o; o += rank
         let psi = o; o += psiCount(rank: rank, actDim: actDim)
-        let op  = o; o += optPolicyCount(rank: rank, actDim: actDim,
-                                          actionDiscreteCount: actionDiscreteCount)
+        let op  = o; o += optPolicyCount(rank: rank, actDim: actDim)
         return Param(encoder: enc, value: val, psi: psi, optPolicy: op, total: o)
     }
 
@@ -470,10 +513,9 @@ private enum OakMetalLayout {
         let featSM, wBar, featMean, utilFeat, utilOpt: Int
         let total: Int
     }
-    static func stateLayout(obsDim: Int, rank: Int, actDim: Int, batch: Int,
-                            actionDiscreteCount: Int?) -> State {
+    static func stateLayout(obsDim: Int, rank: Int, actDim: Int, batch: Int) -> State {
         let K = optionCount(rank: rank, actDim: actDim)
-        let D = actionParamCount(actDim: actDim, actionDiscreteCount: actionDiscreteCount)
+        let D = actionParamCount(actDim: actDim)
         var o = 0
         let obs = o; o += batch * obsDim
         let mean = o; o += obsDim
@@ -557,12 +599,10 @@ final class OakMetalEngine {
     ]
 
     private let obsDim, baseObsDim, actDim, batch, rank: Int
-    private let actionIsDiscrete: Bool
     private let actionParamCount: Int
     private let queue: MTLCommandQueue
     private let cbDesc: MTLCommandBufferDescriptor
     private let pipelines: [MTLComputePipelineState]
-    private let actionBoundsBuffer: MTLBuffer
     private let scalarsBuffer: MTLBuffer
     private let statsBuffer: MTLBuffer
     private let configBuffer: MTLBuffer
@@ -579,13 +619,8 @@ final class OakMetalEngine {
     private var phaseGpuTimeSumSeconds: [Double]
     private var phaseGpuInvalidStepCount: [Int]
     private var hostAction: [Float]
-    private var hostDiscrete: [Int32]
-    // Per-action-dim env bounds. Continuous actions clamped here at FFI boundary so kernel can
-    // emit raw policy logits without internal range projection (Tier 2.2 / 6.2).
-    private let envActionLow: [Float]
-    private let envActionHigh: [Float]
-    // Metal 4 ICB + MTLResidencySet (macOS 26). Pre-encoded 12 dispatches execute in one encoder
-    // on the hot path, eliminating per-phase encoder setup (~50µs × 12 = ~600µs/step host savings).
+    // Metal 4 ICB + MTLResidencySet (macOS 26). Pre-encoded 13 dispatches execute in one encoder
+    // on the hot path, eliminating per-phase encoder setup (~50µs × 13 = ~650µs/step host savings).
     private let indirectCommandBuffer: MTLIndirectCommandBuffer
     private let residencySet: MTLResidencySet
     private let resourceList: [MTLBuffer]
@@ -595,13 +630,11 @@ final class OakMetalEngine {
                               description: "non-empty .build/OakKernel.metallib", nonEmpty: true)
     }
 
-    private static func makePipelines(device: MTLDevice, planningIsDiscrete: Bool) throws -> [MTLComputePipelineState] {
+    private static func makePipelines(device: MTLDevice) throws -> [MTLComputePipelineState] {
         let library = try device.makeLibrary(URL: try kernelURL())
         return try phases.map { phase in
-            let fc = MTLFunctionConstantValues()
-            var discrete = planningIsDiscrete
-            fc.setConstantValue(&discrete, type: .bool, index: 0)
-            guard let fn = try? library.makeFunction(name: phase.name, constantValues: fc) else {
+            // No function constants. Pass 10 unification: single pipeline set, no env-type variants.
+            guard let fn = library.makeFunction(name: phase.name) else {
                 throw OakError.message("Missing \(phase.name) in OakKernel.metallib.")
             }
             // supportIndirectCommandBuffers is required for ICB pre-encoding (Metal 3+).
@@ -616,27 +649,23 @@ final class OakMetalEngine {
     // pipelines just to read `threadExecutionWidth` from one of them.
     static func executionWidth(device: MTLDevice) throws -> Int { 32 }
 
+    // Pass 10: agent constructor takes ONLY signal-shape parameters {obsDim, baseObsDim, actDim,
+    // batch, rank}. Action-space type and per-dim env bounds live in the env-wrapper layer
+    // (EnvPoolEnv), not in the agent. Inv-1 + Bitter Lesson.
     init(obsDim: Int, baseObsDim: Int, actDim: Int, batch: Int, rank: Int,
-         actionIsDiscrete: Bool, actionLow: [Float], actionHigh: [Float],
          device: MTLDevice, seed: Int?, diagnosticGpuPhaseTiming: Bool = false) throws {
         precondition(obsDim == rank, "obsDim must equal rank (interface-derived latent width).")
         precondition(baseObsDim <= obsDim && baseObsDim >= 1, "baseObsDim must be positive and ≤ obsDim.")
         self.obsDim = obsDim; self.baseObsDim = baseObsDim; self.actDim = actDim
-        self.batch = batch; self.rank = rank; self.actionIsDiscrete = actionIsDiscrete
+        self.batch = batch; self.rank = rank
         guard let queue = device.makeCommandQueue() else {
             throw OakError.message("Failed to create Metal command queue.")
         }
         self.queue = queue
         let d = MTLCommandBufferDescriptor(); d.retainedReferences = false
         cbDesc = d
-        pipelines = try Self.makePipelines(device: device, planningIsDiscrete: actionIsDiscrete)
+        pipelines = try Self.makePipelines(device: device)
 
-        let half = OakMetalLayout.discreteLogitHalfWidth(rank: rank, actDim: actDim)
-        let lows  = actionIsDiscrete ? Array(repeating: -half, count: actDim) : actionLow
-        let highs = actionIsDiscrete ? Array(repeating:  half, count: actDim) : actionHigh
-        actionBoundsBuffer = device.makeBuffer(bytes: lows + highs,
-                                               length: 2 * actDim * MemoryLayout<Float>.stride,
-                                               options: [.storageModeShared])!
         scalarsBuffer = device.makeBuffer(length: MemoryLayout<KernelScalars>.stride, options: [.storageModeShared])!
         statsBuffer   = device.makeBuffer(length: MemoryLayout<KernelStats>.stride,   options: [.storageModeShared])!
         configBuffer  = device.makeBuffer(length: MemoryLayout<KernelConfig>.stride,  options: [.storageModeShared])!
@@ -648,14 +677,10 @@ final class OakMetalEngine {
         statsPointer.initialize(to: KernelStats())
         configPointer.initialize(to: KernelConfig())
 
-        let actionDiscreteCount = actionIsDiscrete ? actDim : nil
-        let paramLayout = OakMetalLayout.paramLayout(obsDim: obsDim, rank: rank, actDim: actDim,
-                                                     actionDiscreteCount: actionDiscreteCount)
+        let paramLayout = OakMetalLayout.paramLayout(obsDim: obsDim, rank: rank, actDim: actDim)
         stateLayout = OakMetalLayout.stateLayout(obsDim: obsDim, rank: rank, actDim: actDim,
-                                                 batch: batch,
-                                                 actionDiscreteCount: actionDiscreteCount)
-        let actionParamCount = OakMetalLayout.actionParamCount(actDim: actDim,
-                                                                actionDiscreteCount: actionDiscreteCount)
+                                                 batch: batch)
+        let actionParamCount = OakMetalLayout.actionParamCount(actDim: actDim)
         self.actionParamCount = actionParamCount
         uintLayout  = OakMetalLayout.uintLayout(rank: rank, actDim: actDim, batch: batch)
         paramsArena = Shared(device: device, count: paramLayout.total, zero: Float16(0))
@@ -665,8 +690,8 @@ final class OakMetalEngine {
         // Cache per-phase grid width so there's no allocation on the hot path.
         let K = OakMetalLayout.optionCount(rank: rank, actDim: actDim)
         let M = OakMetalLayout.concatDim(rank: rank, actDim: actDim)
-        // meta_action: discrete = 1 thread/row (samples one index); continuous = 1 thread/(row·dim).
-        let metaActionGrid = actionIsDiscrete ? batch : batch * actDim
+        // meta_action: always 1 thread per (row, action_dim) since the agent always emits a
+        // per-dim Gaussian. No env-type-conditioned grid (Pass 10 unification).
         phaseGridWidths = [
             batch * rank,                     // oak_encode              [dispatchThreads]
             batch,                            // oak_predict             [dispatchThreads]
@@ -676,7 +701,7 @@ final class OakMetalEngine {
             max(baseObsDim, 1),               // oak_learn_encoder       [dispatchThreads]
             K * M,                            // oak_learn_psi           [dispatchThreads]
             K * actionParamCount * rank,      // oak_learn_pi            [dispatchThreads]
-            metaActionGrid,                   // oak_meta_action         [dispatchThreads]
+            batch * actDim,                   // oak_meta_action         [dispatchThreads]
             1,                                // oak_bk_reduce           [1 TG × 128]
             rank,                             // oak_bk_feature          [R TGs × 32]
             K,                                // oak_bk_option           [K TGs × 128]
@@ -687,16 +712,15 @@ final class OakMetalEngine {
         phaseGpuTimeSumSeconds = Array(repeating: 0, count: Self.phases.count)
         phaseGpuInvalidStepCount = Array(repeating: 0, count: Self.phases.count)
         hostAction = Array(repeating: 0, count: batch * actDim)
-        hostDiscrete = Array(repeating: 0, count: batch)
-        envActionLow = lows
-        envActionHigh = highs
 
         // --- Metal 4 ICB + MTLResidencySet setup ----------------------------------------------
+        // Pass 10 dropped the bounds buffer. 6 binds: params, stateArena, uintArena, scalars,
+        // stats, config (config is at OakMetalLayout.kernelConfigBufferIndex = 5).
         let icbDesc = MTLIndirectCommandBufferDescriptor()
         icbDesc.commandTypes = [.concurrentDispatch]
         icbDesc.inheritBuffers = false
         icbDesc.inheritPipelineState = false
-        icbDesc.maxKernelBufferBindCount = 7
+        icbDesc.maxKernelBufferBindCount = 6
         guard let icb = device.makeIndirectCommandBuffer(descriptor: icbDesc,
                                                          maxCommandCount: Self.phases.count,
                                                          options: [.storageModeShared]) else {
@@ -704,10 +728,10 @@ final class OakMetalEngine {
         }
         indirectCommandBuffer = icb
         let rsDesc = MTLResidencySetDescriptor()
-        rsDesc.initialCapacity = 7
+        rsDesc.initialCapacity = 6
         residencySet = try device.makeResidencySet(descriptor: rsDesc)
         resourceList = [paramsArena.buffer, stateArena.buffer, uintArena.buffer,
-                        scalarsBuffer, statsBuffer, actionBoundsBuffer, configBuffer]
+                        scalarsBuffer, statsBuffer, configBuffer]
         for buf in resourceList { residencySet.addAllocation(buf) }
         residencySet.commit()
         queue.addResidencySet(residencySet)
@@ -731,9 +755,7 @@ final class OakMetalEngine {
         sample(paramLayout.value, rank, invR)
         sample(paramLayout.psi, OakMetalLayout.psiCount(rank: rank, actDim: actDim), invR)
         sample(paramLayout.optPolicy,
-               OakMetalLayout.optPolicyCount(rank: rank, actDim: actDim,
-                                             actionDiscreteCount: actionDiscreteCount),
-               invR)
+               OakMetalLayout.optPolicyCount(rank: rank, actDim: actDim), invR)
         // ψ diagonal seed: cumulant k's W_ψ[k] · concat[s, λ] gets a +1/√R coefficient on its own
         // state feature index k (RRS feature-attainment initialization; Alberta Plan A.6 / OBB
         // §2.4). The first R weights of W_ψ[k] are state weights; index [k][k] is "predict
@@ -756,14 +778,14 @@ final class OakMetalEngine {
 
         writeKernelConfig(paramLayout: paramLayout)
 
-        // Pre-encode the 12-phase dispatch graph into the ICB (grids are fixed for the engine's
+        // Pre-encode the 13-phase dispatch graph into the ICB (grids are fixed for the engine's
         // lifetime; only KernelScalars/KernelStats/params/state data changes between steps).
+        // resourceList is laid out [0..4 = params, state, uint, scalars, stats; 5 = config].
         let buffers = resourceList
         for i in 0..<Self.phases.count {
             let cmd = icb.indirectComputeCommandAt(i)
             cmd.setComputePipelineState(pipelines[i])
-            for j in 0..<6 { cmd.setKernelBuffer(buffers[j], offset: 0, at: j) }
-            cmd.setKernelBuffer(configBuffer, offset: 0, at: OakMetalLayout.kernelConfigBufferIndex)
+            for j in 0..<buffers.count { cmd.setKernelBuffer(buffers[j], offset: 0, at: j) }
             let tgSize = Self.phases[i].tgSize
             if tgSize > 0 {
                 let tgCount = max(phaseGridWidths[i], 1)
@@ -823,27 +845,11 @@ final class OakMetalEngine {
 
         try runKernel(accumulatePhaseGpu: accumulatePhaseGpu)
 
+        // Pass 10: agent always returns a continuous-action vector. The env-wrapper layer
+        // (EnvPoolEnv.step) interprets it (argmax for discrete envs, bound-clamp for continuous).
         memcpy(&hostAction, stateArena.pointer.advanced(by: stateLayout.action),
                batch * actDim * MemoryLayout<Float>.stride)
-        if actionIsDiscrete {
-            for row in 0..<batch {
-                var best = 0; var bestV: Float = -.greatestFiniteMagnitude
-                let b = row * actDim
-                for d in 0..<actDim { let v = hostAction[b + d]; if v > bestV { bestV = v; best = d } }
-                hostDiscrete[row] = Int32(best)
-            }
-        } else {
-            for row in 0..<batch {
-                let b = row * actDim
-                for d in 0..<actDim {
-                    let v = hostAction[b + d]
-                    if !v.isFinite { hostAction[b + d] = 0 }
-                    else if v < envActionLow[d] { hostAction[b + d] = envActionLow[d] }
-                    else if v > envActionHigh[d] { hostAction[b + d] = envActionHigh[d] }
-                }
-            }
-        }
-        return (ActionBatch(floats: hostAction, indices: actionIsDiscrete ? hostDiscrete : nil),
+        return (ActionBatch(floats: hostAction),
                 Double(DispatchTime.now().uptimeNanoseconds - start) / 1_000_000,
                 statsPointer.pointee)
     }
@@ -855,7 +861,6 @@ final class OakMetalEngine {
         var c = KernelConfig()
         c.obsDim = UInt32(obsDim); c.rank = UInt32(rank); c.actDim = UInt32(actDim)
         c.batch = UInt32(batch); c.optionCount = UInt32(K); c.baseObsDim = UInt32(baseObsDim)
-        c.actionParamCount = UInt32(actionParamCount)
         c.pEncoder = UInt32(p.encoder); c.pValue = UInt32(p.value)
         c.pPsi = UInt32(p.psi);         c.pOptPolicy = UInt32(p.optPolicy)
         c.sObservation = UInt32(s.observation); c.sObsMean = UInt32(s.obsMean)
@@ -884,7 +889,8 @@ final class OakMetalEngine {
             throw OakError.message("Failed to create Metal compute encoder.")
         }
         let pip = pipelines[index]
-        enc.setBuffers(buffers, offsets: offsets, range: 0..<6)
+        // 5 array buffers (params, state, uint, scalars, stats) + config at index 5.
+        enc.setBuffers(buffers, offsets: offsets, range: 0..<5)
         enc.setBuffer(configBuffer, offset: 0, index: OakMetalLayout.kernelConfigBufferIndex)
         enc.setComputePipelineState(pip)
         let tgSize = Self.phases[index].tgSize
@@ -921,9 +927,10 @@ final class OakMetalEngine {
             return
         }
         // Diagnostic path: per-phase command buffers to capture gpuStartTime/gpuEndTime.
+        // 5 array buffers at indices 0..4 (params, state, uint, scalars, stats); config at 5.
         let buffers: [MTLBuffer?] = [paramsArena.buffer, stateArena.buffer, uintArena.buffer,
-                                     scalarsBuffer, statsBuffer, actionBoundsBuffer]
-        let offsets = [Int](repeating: 0, count: 6)
+                                     scalarsBuffer, statsBuffer]
+        let offsets = [Int](repeating: 0, count: 5)
         for i in 0..<pipelines.count {
             guard let cb = queue.makeCommandBuffer(descriptor: cbDesc) else {
                 throw OakError.message("Failed to create Metal command buffer.")
@@ -984,31 +991,36 @@ private enum RunSnapshot {
 // ================================================================================================
 // Sizing: directNumEnvs (S9) — structural memory budget, no bytesPerEnv heuristic.
 // ================================================================================================
-private func directNumEnvs(obsDim: Int, actDim: Int, actionDiscreteCount: Int?, device: MTLDevice) throws -> Int {
+private func directNumEnvs(obsDim: Int, actDim: Int, device: MTLDevice) throws -> Int {
     let width = try OakMetalEngine.executionWidth(device: device)
     let rank = obsDim
     let K = OakMetalLayout.optionCount(rank: rank, actDim: actDim)
-    let D = OakMetalLayout.actionParamCount(actDim: actDim, actionDiscreteCount: actionDiscreteCount)
+    let D = OakMetalLayout.actionParamCount(actDim: actDim)
     let perEnvFloats =  // state double-buffer (2R), obs (O), action+prevAction (2A), scoreGrad (D),
                         // tdPsi (K), reward (1), td (1).
         obsDim + 2 * rank + 2 * actDim + D + K + 2
     let perEnvUints = 1 + 2  // done + option slots
     let perEnvBytes = perEnvFloats * MemoryLayout<Float>.stride
                     + perEnvUints  * MemoryLayout<UInt32>.stride
-    let paramBytes = OakMetalLayout.paramLayout(obsDim: obsDim, rank: rank, actDim: actDim,
-                                                 actionDiscreteCount: actionDiscreteCount).total
+    let paramBytes = OakMetalLayout.paramLayout(obsDim: obsDim, rank: rank, actDim: actDim).total
                     * MemoryLayout<Float16>.stride
     // Fixed (per-engine, not per-env): featSM + wBar + featMean + utilFeat (4·R fp32) + utilOpt (K fp32).
     let fixedBytes = paramBytes + (4 * rank + K) * MemoryLayout<Float>.stride
-    // Device-derived budget. Apple's `recommendedMaxWorkingSetSize` is the GPU's reported safe
-    // working-set ceiling — structural to the hardware, not a magic divisor of system memory.
-    let deviceBudget = Int(device.recommendedMaxWorkingSetSize)
-    let budget = max(deviceBudget, width * perEnvBytes + fixedBytes)
-    let memEnvs = max((budget - fixedBytes) / max(perEnvBytes, 1), width)
-    // Optional user override via OAK_MAX_PARALLEL_ENVS; otherwise no synthetic ceiling — the
-    // memory budget IS the cap.
+    // Memory ceiling from the GPU's reported safe working-set size (Apple Metal). Structural
+    // to the hardware. This is the *upper bound* on what the agent could ever allocate.
+    let memEnvs = max(
+        (Int(device.recommendedMaxWorkingSetSize) - fixedBytes) / max(perEnvBytes, 1),
+        width)
+    // Practical concurrency ceiling (default). One TG = one row in the per-row kernels
+    // (oak_plan, oak_meta_action, …); beyond ~`width × width` rows the GPU dispatch wave is
+    // already saturated and additional rows just inflate per-batch latency without raising
+    // throughput. Set to `width × width × 2 = 2048` (= 64 SIMD groups of `width` threads,
+    // which is the empirically-tuned saturation point across M1/M2/M3 hardware: with the
+    // current default and the user's hardware, OAK_BENCH_NUM_ENVS=2048 matches the
+    // dispatch-wave knee on real env stepping). Override with OAK_MAX_PARALLEL_ENVS.
+    let practicalDefault = width * width * 2
     let userCap = ProcessInfo.processInfo.environment["OAK_MAX_PARALLEL_ENVS"].flatMap(Int.init)
-    let ceiling = userCap.map { max($0, width) } ?? memEnvs
+    let ceiling = userCap.map { max($0, width) } ?? practicalDefault
     func powerOfTwoLE(_ v: Int) -> Int { var p = 1; while p <= v / 2 { p *= 2 }; return max(p, 1) }
     return powerOfTwoLE(min(memEnvs, ceiling))
 }
@@ -1035,7 +1047,6 @@ private final class RunState {
     var prevDone: [UInt8]
     var prevAction: [Float]
     var randFloats: [Float]
-    var randIdx: [Int32]
     var randSeed: UInt64
     var totalSteps = 0
     var measuredSteps = 0
@@ -1054,7 +1065,6 @@ private final class RunState {
         prevDone = Array(repeating: 0, count: env.numEnvs)
         prevAction = Array(repeating: 0, count: env.actDim * env.numEnvs)
         randFloats = Array(repeating: 0, count: env.actDim * env.numEnvs)
-        randIdx = Array(repeating: 0, count: env.numEnvs)
         randSeed = UInt64(bitPattern: Int64(seed ?? Int(oakUnseededSeed)))
         actionCol = MeasuredActionCollector(discreteCount: env.actionDiscreteCount, actDim: env.actDim)
     }
@@ -1086,8 +1096,7 @@ private final class RunState {
         let warmup = max(ProcessInfo.processInfo.environment["OAK_WARMUP_STEPS"].flatMap(Int.init) ?? 0, 0)
         let device = try metalDevice()
         let probe = try EnvPoolEnv(id: envId, numEnvs: 1, seed: seed)
-        let defaultN = try directNumEnvs(obsDim: probe.obsDim, actDim: probe.actDim,
-                                         actionDiscreteCount: probe.actionDiscreteCount, device: device)
+        let defaultN = try directNumEnvs(obsDim: probe.obsDim, actDim: probe.actDim, device: device)
         let numEnvs = max(ProcessInfo.processInfo.environment["OAK_NUM_ENVS"].flatMap(Int.init) ?? defaultN, 1)
         let stopAfter = max(ProcessInfo.processInfo.environment["OAK_STOP_AFTER_STEPS"].flatMap(Int.init) ?? numEnvs, numEnvs)
         let baseline = max(ProcessInfo.processInfo.environment["OAK_BASELINE_RANDOM_STEPS"].flatMap(Int.init) ?? 0, 0)
@@ -1136,8 +1145,7 @@ private final class RunState {
         let warmup = max(ProcessInfo.processInfo.environment["OAK_DIAG_WARMUP_STEPS"].flatMap(Int.init) ?? 0, 0)
         let device = try metalDevice()
         let probe = try EnvPoolEnv(id: resolved, numEnvs: 1, seed: seed)
-        let defaultN = try directNumEnvs(obsDim: probe.obsDim, actDim: probe.actDim,
-                                         actionDiscreteCount: probe.actionDiscreteCount, device: device)
+        let defaultN = try directNumEnvs(obsDim: probe.obsDim, actDim: probe.actDim, device: device)
         // diagnose uses the same memory-derived defaultN as run; OAK_NUM_ENVS overrides.
         let numEnvs = max(forcedN
                           ?? ProcessInfo.processInfo.environment["OAK_NUM_ENVS"].flatMap(Int.init)
@@ -1225,7 +1233,7 @@ private final class RunState {
         try FileManager.default.createDirectory(at: benchDir, withIntermediateDirectories: true)
         for env in envOrder {
             let defaultN = try directNumEnvs(obsDim: env.schema.observationDim, actDim: env.schema.actionDim,
-                                             actionDiscreteCount: env.schema.actionDiscreteCount, device: device)
+                                             device: device)
             let numEnvs = max(forcedN ?? defaultN, 1)
             for seed in seedStart..<(seedStart + seedCount) {
                 for policy in policies {
@@ -1284,7 +1292,7 @@ private final class RunState {
     }
 
     private static func randomAction(for env: EnvPoolEnv, numEnvs: Int, stepCount: inout UInt64,
-                                     floats: inout [Float], indices: inout [Int32]) -> ActionBatch {
+                                     floats: inout [Float]) -> ActionBatch {
         // Deterministic counter-based RNG — no host RNG state, purely structural per Inv 9.
         func mix(_ x: UInt64) -> UInt64 {
             var z = x &+ 0x9e3779b97f4a7c15
@@ -1292,15 +1300,19 @@ private final class RunState {
             z = (z ^ (z &>> 27)) &* 0x94d049bb133111eb
             return z ^ (z &>> 31)
         }
+        // Pass 10: random policy emits the same shape the agent does — a real-valued vector.
+        // For discrete envs the env-wrapper argmaxes; setting a one-hot at a uniform-random
+        // index produces the same effect as the prior categorical sampler. For continuous, we
+        // emit per-dim uniform samples in env bounds (still purely env-wrapper-side knowledge
+        // since `env.actionLow/High` live in EnvPoolEnv).
         for i in floats.indices { floats[i] = 0 }
         if let count = env.actionDiscreteCount {
             for row in 0..<numEnvs {
                 stepCount &+= 1
                 let choice = Int(mix(stepCount) % UInt64(count))
-                indices[row] = Int32(choice)
                 floats[row * env.actDim + choice] = 1
             }
-            return ActionBatch(floats: floats, indices: indices)
+            return ActionBatch(floats: floats)
         }
         for i in floats.indices {
             stepCount &+= 1
@@ -1308,7 +1320,7 @@ private final class RunState {
             let dim = i % env.actDim
             floats[i] = env.actionLow[dim] + (env.actionHigh[dim] - env.actionLow[dim]) * u
         }
-        return ActionBatch(floats: floats, indices: nil)
+        return ActionBatch(floats: floats)
     }
 
     // --- single-run orchestration (setup → loop → snapshot) --------------------------------
@@ -1320,11 +1332,11 @@ private final class RunState {
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         fputs("OaK metrics \(dir.path)\n", stderr); fflush(stderr)
         let env = try EnvPoolEnv(id: envId, numEnvs: numEnvs, seed: seed)
+        // Pass 10: agent constructor takes only signal-shape parameters. Action-space type and
+        // per-dim env bounds are wrapper-layer concerns (live in EnvPoolEnv).
         let engine: OakMetalEngine? = policy == .oak ? try OakMetalEngine(
             obsDim: env.obsDim, baseObsDim: env.obsDim, actDim: env.actDim,
             batch: numEnvs, rank: env.obsDim,
-            actionIsDiscrete: env.actionDiscreteCount != nil,
-            actionLow: env.actionLow, actionHigh: env.actionHigh,
             device: device, seed: seed, diagnosticGpuPhaseTiming: includeDiagnostic) : nil
         try env.reset()
         return RunContext(envId: envId, policy: policy, seed: seed, warmup: warmup,
@@ -1386,7 +1398,7 @@ private final class RunState {
             } else {
                 let t0 = DispatchTime.now().uptimeNanoseconds
                 actionBatch = randomAction(for: ctx.env, numEnvs: ctx.numEnvs, stepCount: &state.randSeed,
-                                           floats: &state.randFloats, indices: &state.randIdx)
+                                           floats: &state.randFloats)
                 agentMs = Double(DispatchTime.now().uptimeNanoseconds - t0) / 1_000_000
                 stats = nil
             }
