@@ -808,6 +808,48 @@ final class OakMetalEngine {
         residencySet.removeAllAllocations()
     }
 
+    // ---- Probe-only accessor (Tier-0 verification harness; deleted in Tier 7) ----------------
+    // Exposes a named arena slot as a Float array. The Pass-11 plan defines a fixed slot-name
+    // vocabulary; slots that don't exist in the current tier return nil so probe failures point
+    // at the missing-tier rather than at a mistyped name. This bypasses the agent contract — it
+    // is OK ONLY because the probe binary is removed at the end of Pass 11 along with this method.
+    func probeSlot(_ name: String) -> [Float]? {
+        switch name {
+        case "policyMean", "action":
+            return readFloats(stateArena, offset: stateLayout.action, count: batch * actDim)
+        case "scoreGrad":
+            return readFloats(stateArena, offset: stateLayout.scoreGrad, count: batch * actionParamCount)
+        case "state":
+            return readFloats(stateArena, offset: stateLayout.state, count: 2 * batch * rank)
+        case "td":          return readFloats(stateArena, offset: stateLayout.td,      count: batch)
+        case "tdPsi":       return readFloats(stateArena, offset: stateLayout.tdPsi,   count: batch * OakMetalLayout.optionCount(rank: rank, actDim: actDim))
+        case "vCurr":       return readFloats(stateArena, offset: stateLayout.vCurr,   count: batch)
+        case "reward":      return readFloats(stateArena, offset: stateLayout.reward,  count: batch)
+        case "obsMean":     return readFloats(stateArena, offset: stateLayout.obsMean, count: obsDim)
+        case "featMean":    return readFloats(stateArena, offset: stateLayout.featMean, count: rank)
+        case "featSM":      return readFloats(stateArena, offset: stateLayout.featSM,   count: rank)
+        case "wBar":        return readFloats(stateArena, offset: stateLayout.wBar,     count: rank)
+        case "utilFeat":    return readFloats(stateArena, offset: stateLayout.utilFeat, count: rank)
+        case "utilOpt":
+            return readFloats(stateArena, offset: stateLayout.utilOpt,
+                              count: OakMetalLayout.optionCount(rank: rank, actDim: actDim))
+        case "rho":         return [scalarsPointer.pointee.rho]
+        case "actionSpec",
+             "outcome", "outcomeError",
+             "td_baseline",
+             "chord_slot", "optionAge", "betaProb",
+             "optFracEMA":
+            return nil  // populated by later Pass-11 tiers; missing-here is a tier-not-reached signal
+        default:
+            return nil
+        }
+    }
+
+    private func readFloats(_ shared: Shared<Float>, offset: Int, count: Int) -> [Float] {
+        let p = shared.pointer.advanced(by: offset)
+        return Array(UnsafeBufferPointer(start: p, count: count))
+    }
+
     func metalPhaseGpuDiagnostics(measuredBatchSteps: Int) -> (meanMs: [String: Double]?, invalidPhases: [String]?) {
         guard diagnosticGpuPhaseTiming, measuredBatchSteps > 0 else { return (nil, nil) }
         var mean: [String: Double] = [:]; var invalid: [String] = []
@@ -1071,6 +1113,282 @@ private final class RunState {
 }
 
 // ================================================================================================
+// Probe harness (Pass-11 Tier-0; deleted at end of Pass 11). Six closed-form synthetic envs
+// where the optimal policy exists analytically, so monotonic learning is achievable. Each env
+// implements the same minimal contract used by the engine step loop: write
+// `observationScratch[B·O]`, `rewardScratch[B]`, `doneScratch[B]` per step from an action vector
+// of shape `[B·A]` with optional `actionDiscreteCount` (argmax) interpretation.
+//
+// These envs are deliberately TINY (B small, O small, A small) so that learning is fast and the
+// monotonic-reward assertion is informative within ≤10K steps. They are NOT bench envs.
+// ================================================================================================
+private enum ProbeEnvKind: String {
+    case discrete            // 4-action gridworld; r = 1{a == argmax(w·s)}
+    case continuous          // 2-dim continuous; r = -‖a − w·s‖²
+    case sparse              // 8-step chain MDP; r = 1 only on terminal step (Tier 3 chord required)
+    case partialObservable   // target shown for 1 step then hidden; reach after 5 steps (Tier 2 OPSR required)
+    case plasticityStress    // discrete with target swap mid-run (Tier 5 reinit required)
+    case highVariance        // continuous + Bernoulli ±1 reward jitter (Tier 4 baseline required)
+
+    static func parse(_ s: String) throws -> ProbeEnvKind {
+        switch s {
+        case "discrete": return .discrete
+        case "continuous": return .continuous
+        case "sparse", "sparse-reward": return .sparse
+        case "partial-observable", "partial-observability": return .partialObservable
+        case "plasticity-stress": return .plasticityStress
+        case "high-variance": return .highVariance
+        default: throw OakError.message("Unknown probe env '\(s)'.")
+        }
+    }
+}
+
+private final class ProbeEnv {
+    let kind: ProbeEnvKind
+    let numEnvs: Int, obsDim: Int, actDim: Int
+    let actionDiscreteCount: Int?
+    let actionLow: [Float], actionHigh: [Float]
+    private(set) var observationScratch: [Float]
+    private(set) var rewardScratch: [Float]
+    private(set) var doneScratch: [UInt8]
+    private var rngState: UInt64
+    private var stepIndex: Int = 0
+    private var swapped: Bool = false
+
+    // Closed-form target signal w[O]. For discrete envs the optimal action is argmax(w·s);
+    // for continuous, the optimal action is w·s. The synthetic env generates s ~ N(0,1) per step
+    // and assigns reward by comparing the agent's action to the closed-form-optimal action.
+    // For non-stationary plasticity-stress, w flips sign mid-run.
+    private var targetWeights: [Float]
+    private let swapStep: Int  // for plasticityStress: at this step targetWeights flips sign
+
+    // Sparse-chain state: position in [0, 8); reward=1 only when reaching terminal.
+    private var chainPos: [Int]
+    // Partial-observability state: per-row target identity in [0, A); shown at step 0 only.
+    private var poTarget: [Int]
+    private var poStepsSinceTarget: [Int]
+    private let poHorizon: Int = 5
+
+    init(kind: ProbeEnvKind, numEnvs: Int, seed: Int?) {
+        self.kind = kind; self.numEnvs = numEnvs
+        // Structural sizing per env kind. obsDim must equal rank, so we keep them small.
+        switch kind {
+        case .discrete, .plasticityStress:
+            self.obsDim = 8; self.actDim = 4; self.actionDiscreteCount = 4
+        case .continuous, .highVariance:
+            self.obsDim = 8; self.actDim = 2; self.actionDiscreteCount = nil
+        case .sparse:
+            self.obsDim = 8; self.actDim = 4; self.actionDiscreteCount = 4
+        case .partialObservable:
+            self.obsDim = 8; self.actDim = 4; self.actionDiscreteCount = 4
+        }
+        self.actionLow  = Array(repeating: -1, count: actDim)
+        self.actionHigh = Array(repeating:  1, count: actDim)
+        self.observationScratch = Array(repeating: 0, count: numEnvs * obsDim)
+        self.rewardScratch = Array(repeating: 0, count: numEnvs)
+        self.doneScratch = Array(repeating: 0, count: numEnvs)
+        self.rngState = UInt64(bitPattern: Int64(seed ?? 1)) &* 0x9e3779b97f4a7c15 &+ 1
+        self.targetWeights = Array(repeating: 0, count: actDim * obsDim)
+        self.swapStep = 5000
+        self.chainPos = Array(repeating: 0, count: numEnvs)
+        self.poTarget = Array(repeating: 0, count: numEnvs)
+        self.poStepsSinceTarget = Array(repeating: 0, count: numEnvs)
+        // Initialize w[a, o] = ±1 with deterministic structural pattern, scaled by 1/√O so
+        // ‖w·s‖ is O(1). For discrete envs each action a has its own weight vector w[a].
+        let invO = 1.0 / sqrt(Float(obsDim))
+        for i in 0..<targetWeights.count {
+            targetWeights[i] = (i % 2 == 0 ? 1 : -1) * invO * Float(((i / 7) % 3) - 1)
+        }
+        // Ensure non-degenerate w: at least one non-zero entry per action row.
+        for a in 0..<actDim where targetWeights[a*obsDim..<(a+1)*obsDim].allSatisfy({ $0 == 0 }) {
+            targetWeights[a * obsDim] = invO
+        }
+        sampleObservation()
+    }
+
+    func reset() { sampleObservation() }
+
+    private func nextU01() -> Float {
+        rngState &+= 0x9e3779b97f4a7c15
+        var z = rngState
+        z = (z ^ (z &>> 30)) &* 0xbf58476d1ce4e5b9
+        z = (z ^ (z &>> 27)) &* 0x94d049bb133111eb
+        z ^= z &>> 31
+        return Float(z >> 40) * (1.0 / Float(1 << 24))
+    }
+
+    private func nextNormal() -> Float {
+        // Box-Muller from two uniforms; returns one standard normal sample.
+        let u1 = max(nextU01(), 1e-7)
+        let u2 = nextU01()
+        return sqrt(-2 * log(u1)) * cos(2 * Float.pi * u2)
+    }
+
+    private func sampleObservation() {
+        for i in 0..<observationScratch.count { observationScratch[i] = nextNormal() }
+        // Partial-observable env: encode target identity in obs[0] at step 0, then mask to 0.
+        if kind == .partialObservable {
+            for r in 0..<numEnvs {
+                if poStepsSinceTarget[r] == 0 {
+                    observationScratch[r * obsDim + 0] = Float(poTarget[r]) - Float(actDim - 1) / 2
+                } else {
+                    observationScratch[r * obsDim + 0] = 0  // hidden
+                }
+            }
+        }
+        // Sparse-chain env: encode position in obs[0], rest 0.
+        if kind == .sparse {
+            for r in 0..<numEnvs {
+                for o in 0..<obsDim { observationScratch[r * obsDim + o] = 0 }
+                observationScratch[r * obsDim + 0] = Float(chainPos[r]) / 7.0 - 0.5
+            }
+        }
+    }
+
+    // Computes optimal action given current observation row r, returning either an index (discrete)
+    // or a continuous vector via the targetWeights matrix. Used to grade the agent's action.
+    private func optimalDiscreteAction(row r: Int) -> Int {
+        var best = 0; var bestV = -Float.greatestFiniteMagnitude
+        for a in 0..<actDim {
+            var v: Float = 0
+            for o in 0..<obsDim { v += targetWeights[a * obsDim + o] * observationScratch[r * obsDim + o] }
+            if v > bestV { bestV = v; best = a }
+        }
+        return best
+    }
+    private func optimalContinuousAction(row r: Int, dim d: Int) -> Float {
+        var v: Float = 0
+        for o in 0..<obsDim { v += targetWeights[d * obsDim + o] * observationScratch[r * obsDim + o] }
+        return max(-1, min(1, v))
+    }
+
+    // Step the env. Reads `action[B·A]` from `actionFloats`, computes per-row reward and writes
+    // it to `rewardScratch`; updates internal state; samples next observation.
+    func step(actionFloats: [Float]) {
+        stepIndex += 1
+        // Plasticity-stress: at swapStep flip target weights (forces relearning).
+        if kind == .plasticityStress, !swapped, stepIndex >= swapStep {
+            for i in 0..<targetWeights.count { targetWeights[i] = -targetWeights[i] }
+            swapped = true
+        }
+        switch kind {
+        case .discrete, .plasticityStress:
+            for r in 0..<numEnvs {
+                var bestIdx = 0; var bestV = -Float.greatestFiniteMagnitude
+                let b = r * actDim
+                for a in 0..<actDim {
+                    let v = actionFloats[b + a]
+                    if v > bestV { bestV = v; bestIdx = a }
+                }
+                rewardScratch[r] = bestIdx == optimalDiscreteAction(row: r) ? 1 : 0
+                doneScratch[r] = 0
+            }
+        case .continuous:
+            for r in 0..<numEnvs {
+                var sse: Float = 0
+                let b = r * actDim
+                for d in 0..<actDim {
+                    let opt = optimalContinuousAction(row: r, dim: d)
+                    let diff = actionFloats[b + d] - opt
+                    sse += diff * diff
+                }
+                rewardScratch[r] = -sse
+                doneScratch[r] = 0
+            }
+        case .highVariance:
+            for r in 0..<numEnvs {
+                var sse: Float = 0
+                let b = r * actDim
+                for d in 0..<actDim {
+                    let opt = optimalContinuousAction(row: r, dim: d)
+                    let diff = actionFloats[b + d] - opt
+                    sse += diff * diff
+                }
+                let jitter: Float = nextU01() < 0.5 ? -1 : 1  // ±1 Bernoulli noise on top of structural signal
+                rewardScratch[r] = -sse + jitter
+                doneScratch[r] = 0
+            }
+        case .sparse:
+            for r in 0..<numEnvs {
+                var bestIdx = 0; var bestV = -Float.greatestFiniteMagnitude
+                let b = r * actDim
+                for a in 0..<actDim {
+                    let v = actionFloats[b + a]
+                    if v > bestV { bestV = v; bestIdx = a }
+                }
+                // Action 0 advances along the chain; other actions stall.
+                if bestIdx == 0 { chainPos[r] = min(chainPos[r] + 1, 7) }
+                if chainPos[r] == 7 {
+                    rewardScratch[r] = 1
+                    doneScratch[r] = 1
+                    chainPos[r] = 0
+                } else {
+                    rewardScratch[r] = 0
+                    doneScratch[r] = 0
+                }
+            }
+        case .partialObservable:
+            for r in 0..<numEnvs {
+                var bestIdx = 0; var bestV = -Float.greatestFiniteMagnitude
+                let b = r * actDim
+                for a in 0..<actDim {
+                    let v = actionFloats[b + a]
+                    if v > bestV { bestV = v; bestIdx = a }
+                }
+                poStepsSinceTarget[r] += 1
+                if poStepsSinceTarget[r] >= poHorizon {
+                    rewardScratch[r] = bestIdx == poTarget[r] ? 1 : 0
+                    doneScratch[r] = 1
+                    poStepsSinceTarget[r] = 0
+                    poTarget[r] = Int(nextU01() * Float(actDim)) % actDim
+                } else {
+                    rewardScratch[r] = 0
+                    doneScratch[r] = 0
+                }
+            }
+        }
+        sampleObservation()
+    }
+}
+
+// ----- Spearman rank correlation + one-tailed p-value via z-statistic -----------------------------
+private func spearmanRho(_ y: [Double]) -> (rho: Double, p: Double) {
+    let n = y.count
+    if n < 3 { return (0, 1) }
+    // Spearman: rank-correlation between (0..<n) and rank(y). Since x ranks ARE 0..<n already,
+    // we just need Pearson between i and rank(y[i]).
+    let yRanks = ranks(y)
+    var sxy = 0.0, sx = 0.0, sy = 0.0, sxx = 0.0, syy = 0.0
+    for i in 0..<n {
+        let xi = Double(i), yi = yRanks[i]
+        sxy += xi * yi; sx += xi; sy += yi; sxx += xi * xi; syy += yi * yi
+    }
+    let nd = Double(n)
+    let num = sxy - sx * sy / nd
+    let den = sqrt(max((sxx - sx * sx / nd) * (syy - sy * sy / nd), 1e-30))
+    let rho = num / den
+    // Approximate one-tailed p via Fisher z (good for n ≥ 10; conservative for smaller n).
+    let z = atanh(max(-0.999999, min(0.999999, rho))) * sqrt(Double(max(n - 3, 1)))
+    let p = 0.5 * erfc(z / sqrt(2))
+    return (rho, p)
+}
+
+private func ranks(_ a: [Double]) -> [Double] {
+    let n = a.count
+    let order = (0..<n).sorted { a[$0] < a[$1] }
+    var r = [Double](repeating: 0, count: n)
+    var i = 0
+    while i < n {
+        var j = i
+        while j + 1 < n && a[order[j + 1]] == a[order[i]] { j += 1 }
+        let avg = Double(i + j) / 2 + 1  // ranks 1..n with average-tie correction
+        for k in i...j { r[order[k]] = avg }
+        i = j + 1
+    }
+    return r
+}
+
+// ================================================================================================
 // CLI main.
 // ================================================================================================
 @main struct Main {
@@ -1080,6 +1398,7 @@ private final class RunState {
             switch args.first {
             case "benchmark": try benchmark()
             case "diagnose":  try diagnose(Array(args.dropFirst()))
+            case "probe":     try probe(Array(args.dropFirst()))
             case "run":       try run(args.dropFirst().first)
             default:          try run(args.first)
             }
@@ -1159,6 +1478,154 @@ private final class RunState {
             stopAfter: steps,
             numEnvs: numEnvs, device: device, command: "diagnose", includeDiagnostic: true)
         fputs("\(metricsURL.path)\n", stderr)
+    }
+
+    // ---- Probe subcommand (Pass-11 Tier-0 verification harness; deleted at end of Pass 11) ----
+    // Synopsis:
+    //   OaK probe --steps=N --env=<kind> [--slot=NAME] [--assert-monotonic-reward] [--seed=N]
+    // Drives the agent through one of six closed-form synthetic envs (see ProbeEnvKind). Two
+    // exit modes:
+    //   1. --assert-monotonic-reward : computes √N-windowed mean rewardRate, runs Spearman ρ
+    //      against window index, exits 0 iff the trajectory is statistically monotonic
+    //      (ρ > 0 at p < 0.05) OR all windows are within structural noise of each other (no
+    //      strict-decrease detected). Prints per-window means and the test statistic.
+    //   2. --slot=NAME : runs the same loop, then dumps the named arena slot as JSON to stdout.
+    //      Slots not yet wired in the current tier return a tier-not-reached error.
+    private static func probe(_ args: [String]) throws {
+        var envKind = ProbeEnvKind.discrete
+        var steps = 10000
+        var slot: String?
+        var assertMonotonic = false
+        var seed: Int? = nil
+        var probeNumEnvs = 64
+        var i = 0
+        while i < args.count {
+            let a = args[i]
+            switch a {
+            case "--env":
+                i += 1; guard i < args.count else { throw OakError.message("Missing value for --env.") }
+                envKind = try ProbeEnvKind.parse(args[i])
+            case let s where s.hasPrefix("--env="):
+                envKind = try ProbeEnvKind.parse(String(s.dropFirst("--env=".count)))
+            case "--steps":
+                i += 1; guard i < args.count, let v = Int(args[i]), v > 0 else {
+                    throw OakError.message("Invalid value for --steps.")
+                }; steps = v
+            case let s where s.hasPrefix("--steps="):
+                guard let v = Int(s.dropFirst("--steps=".count)), v > 0 else {
+                    throw OakError.message("Invalid value for --steps.")
+                }; steps = v
+            case "--slot":
+                i += 1; guard i < args.count else { throw OakError.message("Missing value for --slot.") }
+                slot = args[i]
+            case let s where s.hasPrefix("--slot="):
+                slot = String(s.dropFirst("--slot=".count))
+            case "--assert-monotonic-reward":
+                assertMonotonic = true
+            case "--seed":
+                i += 1; guard i < args.count, let v = Int(args[i]) else {
+                    throw OakError.message("Invalid value for --seed.")
+                }; seed = v
+            case let s where s.hasPrefix("--seed="):
+                guard let v = Int(s.dropFirst("--seed=".count)) else {
+                    throw OakError.message("Invalid value for --seed.")
+                }; seed = v
+            case "--num-envs":
+                i += 1; guard i < args.count, let v = Int(args[i]), v > 0 else {
+                    throw OakError.message("Invalid value for --num-envs.")
+                }; probeNumEnvs = v
+            case let s where s.hasPrefix("--num-envs="):
+                guard let v = Int(s.dropFirst("--num-envs=".count)), v > 0 else {
+                    throw OakError.message("Invalid value for --num-envs.")
+                }; probeNumEnvs = v
+            default:
+                throw OakError.message("Unrecognized probe arg '\(a)'.")
+            }
+            i += 1
+        }
+
+        let device = try metalDevice()
+        let env = ProbeEnv(kind: envKind, numEnvs: probeNumEnvs, seed: seed)
+        let engine = try OakMetalEngine(
+            obsDim: env.obsDim, baseObsDim: env.obsDim, actDim: env.actDim,
+            batch: probeNumEnvs, rank: env.obsDim, device: device, seed: seed,
+            diagnosticGpuPhaseTiming: false)
+        env.reset()
+
+        // Window count K = ⌈√N⌉ heartbeat windows of ⌊N/K⌋ steps each (structural — √N is the
+        // bias-variance optimal window count for a Gaussian-noise mean estimator). Per-window
+        // mean reward is averaged across all (numEnvs × stepsInWindow) reward samples.
+        let stepsPerBatch = probeNumEnvs
+        let totalBatches = max(steps / stepsPerBatch, 1)
+        let windowCount = max(Int((Double(totalBatches)).squareRoot().rounded(.up)), 2)
+        let batchesPerWindow = max(totalBatches / windowCount, 1)
+        var windowSums = [Double](repeating: 0, count: windowCount)
+        var windowCounts = [Int](repeating: 0, count: windowCount)
+
+        var prevAction = [Float](repeating: 0, count: probeNumEnvs * env.actDim)
+        var prevReward = [Float](repeating: 0, count: probeNumEnvs)
+        var prevDone   = [UInt8](repeating: 0, count: probeNumEnvs)
+        for batchIdx in 0..<totalBatches {
+            let actionBatch = try env.observationScratch.withUnsafeBufferPointer { buf in
+                try engine.step(obs: buf, prevAction: prevAction, prevReward: prevReward,
+                                prevDone: prevDone, accumulatePhaseGpu: false).0
+            }
+            env.step(actionFloats: actionBatch.floats)
+            let w = min(batchIdx / batchesPerWindow, windowCount - 1)
+            for v in env.rewardScratch { windowSums[w] += Double(v); windowCounts[w] += 1 }
+            memcpy(&prevReward, env.rewardScratch, probeNumEnvs * MemoryLayout<Float>.stride)
+            memcpy(&prevDone,   env.doneScratch,   probeNumEnvs * MemoryLayout<UInt8>.stride)
+            memcpy(&prevAction, actionBatch.floats, actionBatch.floats.count * MemoryLayout<Float>.stride)
+        }
+
+        var means = [Double](repeating: 0, count: windowCount)
+        for w in 0..<windowCount {
+            means[w] = windowCounts[w] > 0 ? windowSums[w] / Double(windowCounts[w]) : 0
+        }
+
+        if assertMonotonic {
+            let (rho, p) = spearmanRho(means)
+            // Decision rule: pass if Spearman ρ > 0 at one-tailed p < 0.05, OR if the trajectory
+            // shows no strict decrease (max(r̄_{w+1} - r̄_w) ≥ -ε, ε structural from sample SE).
+            // The latter handles convergence-at-plateau (post-learning is acceptable).
+            let firstHalf = Array(means.prefix(windowCount / 2))
+            let secondHalf = Array(means.suffix(windowCount - windowCount / 2))
+            let firstMean = firstHalf.reduce(0, +) / Double(firstHalf.count)
+            let secondMean = secondHalf.reduce(0, +) / Double(secondHalf.count)
+            let isMonotonic = (rho > 0 && p < 0.05) || (secondMean >= firstMean)
+            // Emit machine-readable + human-readable summary so a CI script can grep.
+            print("probe env=\(envKind.rawValue) steps=\(steps) batches=\(totalBatches) windows=\(windowCount)")
+            for (w, m) in means.enumerated() { print(String(format: "  window[%d] mean_reward=%.6f", w, m)) }
+            print(String(format: "spearman_rho=%.4f p=%.4g first_half_mean=%.4f second_half_mean=%.4f",
+                         rho, p, firstMean, secondMean))
+            print("monotonic=\(isMonotonic ? "PASS" : "FAIL")")
+            if !isMonotonic {
+                fputs("probe FAILED: rewardRate not statistically monotonic on env=\(envKind.rawValue)\n", stderr)
+                Foundation.exit(1)
+            }
+            return
+        }
+
+        guard let slotName = slot else {
+            // No slot requested + no monotonic assert: emit a JSON window-trajectory blob to stdout.
+            let enc = JSONEncoder(); enc.outputFormatting = [.prettyPrinted, .sortedKeys]
+            struct Out: Encodable { let env: String; let windows: Int; let means: [Double] }
+            let out = Out(env: envKind.rawValue, windows: windowCount, means: means)
+            let data = try enc.encode(out)
+            FileHandle.standardOutput.write(data)
+            FileHandle.standardOutput.write("\n".data(using: .utf8)!)
+            return
+        }
+
+        guard let values = engine.probeSlot(slotName) else {
+            throw OakError.message("Slot '\(slotName)' not available in current tier (or unknown).")
+        }
+        let enc = JSONEncoder(); enc.outputFormatting = [.prettyPrinted, .sortedKeys]
+        struct SlotOut: Encodable { let env: String; let slot: String; let count: Int; let values: [Float] }
+        let payload = SlotOut(env: envKind.rawValue, slot: slotName, count: values.count, values: values)
+        let data = try enc.encode(payload)
+        FileHandle.standardOutput.write(data)
+        FileHandle.standardOutput.write("\n".data(using: .utf8)!)
     }
 
     private static func snapshotJsonCount(in metricsDir: URL) -> Int {
