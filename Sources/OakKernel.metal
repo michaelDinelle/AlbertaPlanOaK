@@ -297,7 +297,7 @@ kernel void oak_encode(
     float om    = (feat < ctx.O) ? ctx.observationMean[feat] : 0.0f;
     float centered = o_raw - om;
     float z = centered * float(ctx.encoder[feat]);
-    state_slot(ctx, writeSlot)[row * ctx.R + feat] = clamp(z, -ctx.cap, ctx.cap);
+    state_slot(ctx, writeSlot)[row * ctx.R + feat] = z;
 }
 
 // =================================================================================================
@@ -324,14 +324,13 @@ kernel void oak_predict(
     device const float *curr = state_slot(ctx, 1u - ctx.stateSlot);
     uint pOff = gid * ctx.R, cOff = gid * ctx.R;
 
-    // Main differential TD on w_main (θ_v). Implicit-TD form per 2603.21921.
+    // Main differential TD on w_main (θ_v). Implicit-TD form per 2603.21921. Bounds: ‖ŝ‖ ≤ √R
+    // by layer norm; |w·ŝ| ≤ √R · ‖w‖. Implicit α + tracking ρ̄ keep δ in fp32 dynamic range.
     float vPrev = active_dot_half(ctx.valueW, 0u, prev, pOff, ctx.activeList, ctx.activeCount);
     float vNext = active_dot_half(ctx.valueW, 0u, curr, cOff, ctx.activeList, ctx.activeCount);
-    vPrev = clamp(vPrev, -ctx.cap, ctx.cap);
-    vNext = clamp(vNext, -ctx.cap, ctx.cap);
     float terminalMask = (ctx.done[gid] != 0u) ? 0.0f : 1.0f;
     float dMain = (ctx.reward[gid] - ctx.rho) + terminalMask * vNext - vPrev;
-    ctx.td[gid] = clamp(dMain, -ctx.cap, ctx.cap);
+    ctx.td[gid] = dMain;
 
     // Per-cumulant SF TD for the active option's ψ_k(·,:). Cumulant c_j = x_j (identity;
     // 2502.10790 caveat passes). ρ_{k,j} centered per-option-per-cumulant (2405.09999).
@@ -346,7 +345,7 @@ kernel void oak_predict(
                                    ctx.activeList, ctx.activeCount);
         float cj = curr[cOff + j];
         float dj = (cj - ctx.rhoKJ[rhoBase + j]) + terminalMask * nj - pj;
-        ctx.tdPsi[gid * ctx.R + j] = clamp(dj, -ctx.cap, ctx.cap);
+        ctx.tdPsi[gid * ctx.R + j] = dj;
     }
 }
 
@@ -393,7 +392,7 @@ kernel void oak_plan(
             float bonus = (ctx.wBar[k] - float(ctx.valueW[k])) * curr[xOff + k];
             val += max(bonus, 0.0f);
         }
-        qk = clamp(val, -ctx.cap, ctx.cap);
+        qk = val;
     }
 
     // SIMD tournament argmax in 5 shuffle rounds (log2 32). No threadgroup memory needed.
@@ -407,9 +406,7 @@ kernel void oak_plan(
     }
     if (tid == 0u) {
         float vX = active_dot_half(ctx.valueW, 0u, curr, xOff, ctx.activeList, ctx.activeCount);
-        vX = clamp(vX, -ctx.cap, ctx.cap);
-        float dPlan = clamp(qk - vX, -ctx.cap, ctx.cap);
-        ctx.td[row] += dPlan;
+        ctx.td[row] += qk - vX;
         option_slot(ctx, 1u - ctx.optionSlot)[row] = k_lane;
     }
 }
@@ -458,7 +455,6 @@ kernel void oak_meta_action(
             uint pb = optK * ctx.A * ctx.R + d * ctx.R;
             float ld = active_dot_half(ctx.optPolicy, pb, curr, xOff,
                                        ctx.activeList, ctx.activeCount);
-            ld = clamp(ld, bounds[d], bounds[ctx.A + d]);
             float u = hash_uniform(ctx.stepCount, row, d);
             float g = -log(-log(u));
             float s = ld + g;
@@ -477,9 +473,8 @@ kernel void oak_meta_action(
         uint polBase = optK * ctx.A * ctx.R + a * ctx.R;
         float logit = active_dot_half(ctx.optPolicy, polBase, curr, xOff,
                                       ctx.activeList, ctx.activeCount);
-        float bounded = clamp(logit, bounds[a], bounds[ctx.A + a]);
-        ctx.action[row * ctx.A + a]     = bounded;
-        ctx.actionGrad[row * ctx.A + a] = bounded;
+        ctx.action[row * ctx.A + a]     = logit;
+        ctx.actionGrad[row * ctx.A + a] = logit;
     }
 }
 
@@ -557,7 +552,6 @@ kernel void oak_learn_value(
         float step = ctx.scalars->alphaImp;
         ctx.featSM[feat] += (sm * invB - ctx.featSM[feat]) * invT;
         float wNew = float(ctx.valueW[feat]) + step * g * invB;
-        wNew = clamp(wNew, -ctx.cap, ctx.cap);
         ctx.valueW[feat] = half(wNew);
         float decay = 1.0f - ctx.alpha0;
         ctx.wBar[feat] = max(ctx.wBar[feat] * decay, fabs(wNew));
@@ -588,7 +582,7 @@ kernel void oak_learn_encoder(
         g = fma(ctx.td[r], c, g);
     }
     float eNew = float(ctx.encoder[feat]) + step * g / float(max(ctx.B, 1u));
-    ctx.encoder[feat] = half(clamp(eNew, -ctx.cap, ctx.cap));
+    ctx.encoder[feat] = half(eNew);
 }
 
 // =================================================================================================
@@ -626,7 +620,7 @@ kernel void oak_learn_psi(
     float invCnt = 1.0f / float(cnt);
     uint  pIdx = k * ctx.R * ctx.R + j * ctx.R + i;
     float pNew = float(ctx.psi[pIdx]) + step * g * invCnt;
-    ctx.psi[pIdx] = half(clamp(pNew, -ctx.cap, ctx.cap));
+    ctx.psi[pIdx] = half(pNew);
 }
 
 // =================================================================================================
@@ -664,7 +658,7 @@ kernel void oak_learn_opt_policy(
     float invCnt = 1.0f / float(cnt);
     uint  pIdx = k * ctx.A * ctx.R + a * ctx.R + i;
     float pNew = float(ctx.optPolicy[pIdx]) + step * g * invCnt;
-    ctx.optPolicy[pIdx] = half(clamp(pNew, -ctx.cap, ctx.cap));
+    ctx.optPolicy[pIdx] = half(pNew);
 }
 
 // =================================================================================================
@@ -705,14 +699,14 @@ kernel void oak_bk_reduce(
     float obsNF = tg_sum_128(obsNF_local, sg_obsNF, tid, sgid);
 
     // (2) Per-(row, feat) reductions: latent mean-square, ψ TD mean-square, max|latent|, nLearn.
+    // Layer norm bounds |s| ≤ √R structurally; v² accumulated B·R times stays well within fp32.
     float lms_l = 0.0f, psi_l = 0.0f, maxLat_l = 0.0f, nLearn_l = 0.0f;
     uint total_rf = ctx.B * ctx.R;
     for (uint idx = tid; idx < total_rf; idx += tgW) {
         uint r = idx / ctx.R, f = idx % ctx.R;
         float v = curr[r * ctx.R + f];
         if (!isfinite(v)) { nLearn_l += 1.0f; v = 0.0f; }
-        float vc = clamp(v, -ctx.boundLat, ctx.boundLat) * ctx.invBoundLat;
-        lms_l = fma(vc, vc, lms_l);
+        lms_l = fma(v, v, lms_l);
         maxLat_l = max(maxLat_l, fabs(v));
         float dp = ctx.tdPsi[r * ctx.R + f];
         psi_l = fma(dp, dp, psi_l);
@@ -723,7 +717,8 @@ kernel void oak_bk_reduce(
     float maxLat = tg_max_128(maxLat_l, sg_maxLat, tid, sgid);
     float nLearn = tg_sum_128(nLearn_l, sg_nLearn, tid, sgid);
 
-    // (3) Per-(row, a) reductions: plan L2, action delta, maxPol, nPlan.
+    // (3) Per-(row, a) reductions: plan L2, action delta, maxPol, nPlan. Actions are bounded at
+    // FFI host boundary; non-finite guard zeroes overflow contribution before squaring.
     float pL2_l = 0.0f, ad_l = 0.0f, maxPol_l = 0.0f, nPlan_l = 0.0f;
     uint total_ra = ctx.B * ctx.A;
     for (uint idx = tid; idx < total_ra; idx += tgW) {
@@ -731,12 +726,13 @@ kernel void oak_bk_reduce(
         float x = ctx.action[r * ctx.A + a];
         float yg = ctx.actionGrad[r * ctx.A + a];
         float py = ctx.prevAction[r * ctx.A + a];
-        float p1 = clamp(x - yg, -ctx.boundAct, ctx.boundAct) * ctx.invBoundAct;
-        float p2 = clamp(x - py, -ctx.boundAct, ctx.boundAct) * ctx.invBoundAct;
+        bool nf = !isfinite(x) || !isfinite(yg);
+        if (nf) { nPlan_l += 1.0f; x = 0.0f; yg = 0.0f; }
+        float p1 = x - yg;
+        float p2 = x - py;
         pL2_l = fma(p1, p1, pL2_l);
         ad_l  = fma(p2, p2, ad_l);
         maxPol_l = max(maxPol_l, fabs(x));
-        if (!isfinite(x) || !isfinite(yg)) nPlan_l += 1.0f;
     }
     threadgroup float sg_pL2[4], sg_ad[4], sg_maxPol[4], sg_nPlan[4];
     float pL2    = tg_sum_128(pL2_l,    sg_pL2,    tid, sgid);
