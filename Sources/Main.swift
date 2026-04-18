@@ -553,7 +553,9 @@ private struct KernelConfig {
     // env's action spec (Discrete-N → N; Box-A → A). The agent has no notion of WHAT the
     // components are — only the integer width.
     var actionParamCount: UInt32 = 0
+    // Pass 11 Tier 2: outcomeHead[K · E] for OPSR state augmentation (Vereecken 2604.07016).
     var pEncoder: UInt32 = 0, pValue: UInt32 = 0, pPsi: UInt32 = 0, pOptPolicy: UInt32 = 0
+    var pOutcomeHead: UInt32 = 0
     var sObservation: UInt32 = 0, sObsMean: UInt32 = 0, sState: UInt32 = 0
     var sPrevPolicyMean: UInt32 = 0, sPolicyMean: UInt32 = 0, sScoreGrad: UInt32 = 0
     var sReward: UInt32 = 0, sTd: UInt32 = 0, sTdPsi: UInt32 = 0, sVCurr: UInt32 = 0
@@ -593,29 +595,38 @@ private enum OakMetalLayout {
     static func optionCount(rank: Int, actDim: Int) -> Int {
         max(1, min(rank, actDim, maxOptionCount))
     }
-    // Concat dim M = R + K: shared chord-conditional ψ(s, λ) = W_ψ · concat[s, λ] (Alberta Plan
-    // Design 2; OBB 2505.00787 §2.4 Eq.4). Replaces K independent K·R·R per-option SF matrices.
-    static func concatDim(rank: Int, actDim: Int) -> Int {
+    // Pass 11 Tier 2: extended-state width E = R + K (encoder output + OPSR outcome dims).
+    // All linear heads (value, ψ, π, outcomeHead) span the full E-dim state.
+    static func extendedDim(rank: Int, actDim: Int) -> Int {
         rank + optionCount(rank: rank, actDim: actDim)
+    }
+    // Concat dim M = E + K: shared chord-conditional ψ(s, λ) = W_ψ · concat[s_E, λ] (Alberta
+    // Plan Design 2; OBB 2505.00787 §2.4 Eq.4). State weights span the OPSR-extended E.
+    static func concatDim(rank: Int, actDim: Int) -> Int {
+        extendedDim(rank: rank, actDim: actDim) + optionCount(rank: rank, actDim: actDim)
     }
     static func psiCount(rank: Int, actDim: Int) -> Int {
         optionCount(rank: rank, actDim: actDim) * concatDim(rank: rank, actDim: actDim)
     }
-    // Pass 11 Tier 1: D_policy is env-declared (sum of per-component policy-param widths).
-    // Single-Discrete-N envs → D = N; single-Box-A envs → D = A; multi-component envs sum.
-    // Computed by the host wrapper from the env's ActionSpec, passed to engine init.
+    // Pass 11 Tier 1: D_policy is env-declared. Pass 11 Tier 2: optPolicy spans E (not R).
     static func optPolicyCount(rank: Int, actDim: Int, dPolicy: Int) -> Int {
-        optionCount(rank: rank, actDim: actDim) * dPolicy * rank
+        optionCount(rank: rank, actDim: actDim) * dPolicy * extendedDim(rank: rank, actDim: actDim)
+    }
+    // Pass 11 Tier 2: outcomeHead[K · E] — one E-dim row per outcome dimension (Vereecken 2604.07016).
+    static func outcomeHeadCount(rank: Int, actDim: Int) -> Int {
+        optionCount(rank: rank, actDim: actDim) * extendedDim(rank: rank, actDim: actDim)
     }
 
-    struct Param { let encoder, value, psi, optPolicy, total: Int }
+    struct Param { let encoder, value, psi, optPolicy, outcomeHead, total: Int }
     static func paramLayout(obsDim: Int, rank: Int, actDim: Int, dPolicy: Int) -> Param {
+        let E = extendedDim(rank: rank, actDim: actDim)
         var o = 0
-        let enc = o; o += rank
-        let val = o; o += rank
+        let enc = o; o += rank                    // encoder: R weights (obs → state[:R])
+        let val = o; o += E                       // valueW: E weights (over OPSR-extended state)
         let psi = o; o += psiCount(rank: rank, actDim: actDim)
         let op  = o; o += optPolicyCount(rank: rank, actDim: actDim, dPolicy: dPolicy)
-        return Param(encoder: enc, value: val, psi: psi, optPolicy: op, total: o)
+        let oh  = o; o += outcomeHeadCount(rank: rank, actDim: actDim)
+        return Param(encoder: enc, value: val, psi: psi, optPolicy: op, outcomeHead: oh, total: o)
     }
 
     struct State {
@@ -626,10 +637,11 @@ private enum OakMetalLayout {
     }
     static func stateLayout(obsDim: Int, rank: Int, actDim: Int, batch: Int, dPolicy: Int) -> State {
         let K = optionCount(rank: rank, actDim: actDim)
+        let E = extendedDim(rank: rank, actDim: actDim)
         var o = 0
         let obs = o; o += batch * obsDim
         let mean = o; o += obsDim
-        let st = o; o += 2 * batch * rank
+        let st = o; o += 2 * batch * E      // OPSR-extended state (E = R + K)
         let prP = o; o += batch * dPolicy   // prev step's policyMean (host-written, telemetry)
         let pol = o; o += batch * dPolicy   // current step's policyMean (kernel-written)
         let sg  = o; o += batch * dPolicy   // host-written ∇log π for the wrapper-sampled action
@@ -637,9 +649,10 @@ private enum OakMetalLayout {
         let td  = o; o += batch
         let tdP = o; o += batch * K         // K cumulant TDs per row (Design 2 collapse)
         let vc  = o; o += batch             // vCurr = w_main · curr_state (cached in predict, read by plan)
+        // featSM/wBar/featMean/utilFeat are encoder-only stats (cumulant ranking + plan optimism).
         let fs  = o; o += rank
         let wb  = o; o += rank
-        let fm  = o; o += rank              // per-feature running mean (cumulant centering ρ_k)
+        let fm  = o; o += rank
         let uf  = o; o += rank
         let uo  = o; o += K
         return State(observation: obs, obsMean: mean, state: st, prevPolicyMean: prP, policyMean: pol,
@@ -650,13 +663,14 @@ private enum OakMetalLayout {
     struct UInts { let done, activeMask, activeList, option, counters, subtaskFeatureOf, total: Int }
     static func uintLayout(rank: Int, actDim: Int, batch: Int) -> UInts {
         let K = optionCount(rank: rank, actDim: actDim)
+        let E = extendedDim(rank: rank, actDim: actDim)
         var o = 0
         let d = o; o += batch
-        let am = o; o += rank
-        let al = o; o += rank
+        let am = o; o += E      // active mask spans E (outcome dims R..E always-active)
+        let al = o; o += E      // active list also sized E
         let op = o; o += 2 * batch
         let c  = o; o += 6
-        let sf = o; o += K  // sf[k] = state-feature index that cumulant k tracks (top-K by utility)
+        let sf = o; o += K
         return UInts(done: d, activeMask: am, activeList: al, option: op, counters: c,
                      subtaskFeatureOf: sf, total: o)
     }
@@ -692,13 +706,20 @@ final class OakMetalEngine {
     // whose TD δ_N is being learned from. No prevScoreGrad slot needed; arena holds a single
     // scoreGrad slot that is read by learn_pi (this step) before being overwritten by
     // meta_action (this step) for the next step's learning.
+    // Pass 11 Tier 2: 15-kernel pipeline. Inserted oak_predict_outcome immediately after
+    // oak_encode (so the outcome dims R..E of state[1-slot] are populated before any consumer
+    // reads them) and oak_learn_outcome immediately after oak_learn_encoder (separate from ψ
+    // since the outcome head is a distinct weight matrix, and the per-update implicit α
+    // gradient norm is computed independently per kernel).
     private static let phases: [Phase] = [
         Phase(name: "oak_encode",             tgSize: 0),
+        Phase(name: "oak_predict_outcome",    tgSize: 0),
         Phase(name: "oak_predict",            tgSize: 0),
         Phase(name: "oak_plan",               tgSize: 32),
         Phase(name: "oak_reduce_alpha",       tgSize: 128),
         Phase(name: "oak_learn_value",        tgSize: 32),
         Phase(name: "oak_learn_encoder",      tgSize: 0),
+        Phase(name: "oak_learn_outcome",      tgSize: 0),
         Phase(name: "oak_learn_psi",          tgSize: 0),
         Phase(name: "oak_learn_pi",           tgSize: 0),
         Phase(name: "oak_meta_action",        tgSize: 0),
@@ -799,17 +820,20 @@ final class OakMetalEngine {
 
         // Cache per-phase grid width so there's no allocation on the hot path.
         let K = OakMetalLayout.optionCount(rank: rank, actDim: actDim)
+        let E = OakMetalLayout.extendedDim(rank: rank, actDim: actDim)
         let M = OakMetalLayout.concatDim(rank: rank, actDim: actDim)
-        // meta_action: 1 thread per (row, p) for p ∈ [0, dPolicy). dPolicy is env-declared.
+        // 15-kernel pipeline (Pass 11 Tier 2): predict_outcome and learn_outcome inserted.
         phaseGridWidths = [
             batch * rank,                     // oak_encode              [dispatchThreads]
+            batch * K,                        // oak_predict_outcome     [dispatchThreads]
             batch,                            // oak_predict             [dispatchThreads]
             batch,                            // oak_plan                [B TGs × 32]
             1,                                // oak_reduce_alpha        [1 TG × 128]
-            rank,                             // oak_learn_value         [R TGs × 32]
+            E,                                // oak_learn_value         [E TGs × 32]
             max(baseObsDim, 1),               // oak_learn_encoder       [dispatchThreads]
+            K * E,                            // oak_learn_outcome       [dispatchThreads]
             K * M,                            // oak_learn_psi           [dispatchThreads]
-            K * dPolicy * rank,               // oak_learn_pi            [dispatchThreads]
+            K * dPolicy * E,                  // oak_learn_pi            [dispatchThreads]
             batch * dPolicy,                  // oak_meta_action         [dispatchThreads]
             1,                                // oak_bk_reduce           [1 TG × 128]
             rank,                             // oak_bk_feature          [R TGs × 32]
@@ -861,13 +885,16 @@ final class OakMetalEngine {
             }
         }
         sample(paramLayout.encoder, rank, invR)
-        sample(paramLayout.value, rank, invR)
+        // Pass 11 Tier 2: valueW has E weights (was R) — extends over the OPSR-augmented state.
+        sample(paramLayout.value, OakMetalLayout.extendedDim(rank: rank, actDim: actDim), invR)
         sample(paramLayout.psi, OakMetalLayout.psiCount(rank: rank, actDim: actDim), invR)
         sample(paramLayout.optPolicy,
                OakMetalLayout.optPolicyCount(rank: rank, actDim: actDim, dPolicy: dPolicy), invR)
+        sample(paramLayout.outcomeHead,
+               OakMetalLayout.outcomeHeadCount(rank: rank, actDim: actDim), invR)
         // ψ diagonal seed: cumulant k's W_ψ[k] · concat[s, λ] gets a +1/√R coefficient on its own
         // state feature index k (RRS feature-attainment initialization; Alberta Plan A.6 / OBB
-        // §2.4). The first R weights of W_ψ[k] are state weights; index [k][k] is "predict
+        // §2.4). The first E weights of W_ψ[k] are state weights; index [k][k] is "predict
         // cumulant k mostly from feature k". No magic — invR is the structural per-feature scale.
         let psiPtr = paramsArena.pointer.advanced(by: paramLayout.psi)
         for k in 0..<K where k < rank {
@@ -875,11 +902,14 @@ final class OakMetalEngine {
             psiPtr[idx] = Float16(Float(psiPtr[idx]) + invR)
         }
 
-        // All features admitted on step 0.
-        scalarsPointer.pointee.activeCount = UInt32(rank)
+        // Pass 11 Tier 2: all encoder features (0..R) admitted on step 0; outcome dims R..E
+        // are ALWAYS-ACTIVE by construction (they're agent-internal predictions, not env
+        // features that need utility-ranked admission). bk_admit_commit only re-ranks [0, R).
+        scalarsPointer.pointee.activeCount = UInt32(E)
         let activeMask = uintArena.pointer.advanced(by: uintLayout.activeMask)
         let activeList = uintArena.pointer.advanced(by: uintLayout.activeList)
         for f in 0..<rank { activeMask[f] = 1; activeList[f] = UInt32(f) }
+        for k in 0..<K { activeMask[rank + k] = 1; activeList[rank + k] = UInt32(rank + k) }
         // Initialize subtaskFeatureOf to identity sf[k] = k. bk_admit_commit re-ranks each step
         // by per-feature utility (Tier 7 RED dynamic top-K cumulants).
         let sfPtr = uintArena.pointer.advanced(by: uintLayout.subtaskFeatureOf)
@@ -931,7 +961,44 @@ final class OakMetalEngine {
         case "scoreGrad":
             return readFloats(stateArena, offset: stateLayout.scoreGrad, count: batch * dPolicy)
         case "state":
-            return readFloats(stateArena, offset: stateLayout.state, count: 2 * batch * rank)
+            let E = OakMetalLayout.extendedDim(rank: rank, actDim: actDim)
+            return readFloats(stateArena, offset: stateLayout.state, count: 2 * batch * E)
+        case "outcome":
+            // The K outcome predictions per row, read from the just-written slot (curr).
+            // We dump both slots' outcome regions concatenated for trace inspection.
+            let E = OakMetalLayout.extendedDim(rank: rank, actDim: actDim)
+            let K = OakMetalLayout.optionCount(rank: rank, actDim: actDim)
+            var out = [Float](repeating: 0, count: 2 * batch * K)
+            let basePtr = stateArena.pointer.advanced(by: stateLayout.state)
+            for slot in 0..<2 {
+                for r in 0..<batch {
+                    for k in 0..<K {
+                        out[slot * batch * K + r * K + k] =
+                            basePtr[slot * batch * E + r * E + rank + k]
+                    }
+                }
+            }
+            return out
+        case "outcomeError":
+            // |target_k − pred_k|² where target_k = state_curr[r][sf[k]] and pred_k is the
+            // outcome dim. Surfaces the OPSR head's prediction error per (row, k).
+            let E = OakMetalLayout.extendedDim(rank: rank, actDim: actDim)
+            let K = OakMetalLayout.optionCount(rank: rank, actDim: actDim)
+            let stateSlot = Int(scalarsPointer.pointee.stateSlot)
+            let currSlot = 1 - stateSlot
+            let basePtr = stateArena.pointer.advanced(by: stateLayout.state)
+            let sfPtr = uintArena.pointer.advanced(by: uintLayout.subtaskFeatureOf)
+            var out = [Float](repeating: 0, count: batch * K)
+            for r in 0..<batch {
+                for k in 0..<K {
+                    let sf = Int(sfPtr[k])
+                    let target = sf < rank ? basePtr[currSlot * batch * E + r * E + sf] : 0
+                    let pred = basePtr[currSlot * batch * E + r * E + rank + k]
+                    let d = target - pred
+                    out[r * K + k] = d * d
+                }
+            }
+            return out
         case "td":          return readFloats(stateArena, offset: stateLayout.td,      count: batch)
         case "tdPsi":       return readFloats(stateArena, offset: stateLayout.tdPsi,   count: batch * OakMetalLayout.optionCount(rank: rank, actDim: actDim))
         case "vCurr":       return readFloats(stateArena, offset: stateLayout.vCurr,   count: batch)
@@ -946,7 +1013,6 @@ final class OakMetalEngine {
                               count: OakMetalLayout.optionCount(rank: rank, actDim: actDim))
         case "rho":         return [scalarsPointer.pointee.rho]
         case "actionSpec",
-             "outcome", "outcomeError",
              "td_baseline",
              "chord_slot", "optionAge", "betaProb",
              "optFracEMA":
@@ -1022,6 +1088,7 @@ final class OakMetalEngine {
         c.actionParamCount = UInt32(dPolicy)
         c.pEncoder = UInt32(p.encoder); c.pValue = UInt32(p.value)
         c.pPsi = UInt32(p.psi);         c.pOptPolicy = UInt32(p.optPolicy)
+        c.pOutcomeHead = UInt32(p.outcomeHead)
         c.sObservation = UInt32(s.observation); c.sObsMean = UInt32(s.obsMean)
         c.sState = UInt32(s.state); c.sPrevPolicyMean = UInt32(s.prevPolicyMean)
         c.sPolicyMean = UInt32(s.policyMean); c.sScoreGrad = UInt32(s.scoreGrad)
@@ -1154,9 +1221,10 @@ private func directNumEnvs(obsDim: Int, actDim: Int, dPolicy: Int, device: MTLDe
     let width = try OakMetalEngine.executionWidth(device: device)
     let rank = obsDim
     let K = OakMetalLayout.optionCount(rank: rank, actDim: actDim)
-    let perEnvFloats =  // state double-buffer (2R), obs (O), prevPolicyMean+policyMean+scoreGrad (3D),
+    let E = OakMetalLayout.extendedDim(rank: rank, actDim: actDim)
+    let perEnvFloats =  // state double-buffer (2E), obs (O), prevPolicyMean+policyMean+scoreGrad (3D),
                         // tdPsi (K), reward + td (2).
-        obsDim + 2 * rank + 3 * dPolicy + K + 2
+        obsDim + 2 * E + 3 * dPolicy + K + 2
     let perEnvUints = 1 + 2  // done + option slots
     let perEnvBytes = perEnvFloats * MemoryLayout<Float>.stride
                     + perEnvUints  * MemoryLayout<UInt32>.stride

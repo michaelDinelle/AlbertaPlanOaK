@@ -7,8 +7,14 @@ using namespace metal;
 // Invariants (.cursor/rules/alberta_plan.mdc §1–9) hold: no env branches, no tuned scalars, no
 // episodic semantics, no train/eval split, no per-step allocation, no cosmetic normalization,
 // no curiosity on the external reward, meta-constants structurally derived from {R, B, K}.
-// Thirteen kernels: encode, predict, plan, meta_action, reduce_alpha, learn_value, learn_encoder,
-// learn_psi, learn_pi, bk_reduce, bk_feature, bk_option, bk_admit_commit. (bk_reduce and
+// Fifteen kernels: encode, predict_outcome, predict, plan, meta_action, reduce_alpha,
+// learn_value, learn_encoder, learn_outcome, learn_psi, learn_pi, bk_reduce, bk_feature,
+// bk_option, bk_admit_commit. Pass 11 Tier 2 added oak_predict_outcome and oak_learn_outcome
+// for OPSR full state augmentation (Vereecken 2604.07016): E = R + K extended state. The
+// outcome head H[K · E] writes K next-step cumulant predictions per row recursively from
+// the previous step's full E-dim state, giving the agent partial recurrence (a memory channel
+// without an LSTM). All linear heads grow to E-dim; cumulant ranking and admission still
+// operate on the first R encoder features only. (bk_reduce and
 // bk_feature are kept separate because the per-feature utility pass needs R parallel threadgroups
 // to avoid 32× serialization at large R·B; with MTLIndirectCommandBuffer the extra dispatch has
 // ~zero host cost, so fusion is not profitable here.)
@@ -50,28 +56,31 @@ using namespace metal;
 //   encoder[R]                                  linear encoder weights W_e (diagonal)
 //   valueW[R]                                   w_main (main-task linear value)
 //   psi[K · M]                                  W_ψ[k] · concat[s, λ]: shared chord-conditional
-//                                               SF (Design 2; OBB §2.4 Eq.4). M = R + K.
-//   optPolicy[K · D · R]                        per-option policy parameters. D = D_policy is the
-//                                               env-declared action-spec parameter count
-//                                               (sum over per-component param widths: N for each
-//                                               Discrete-N component, A for each Box-A component).
-//                                               oak_meta_action emits ONLY policyMean[B · D]; the
-//                                               wrapper layer (EnvPoolEnv) samples per-component
-//                                               and writes the matching scoreGrad — Inv-1.
+//                                               SF (Design 2; OBB §2.4 Eq.4). M = E + K (Pass 11
+//                                               Tier 2: ψ's state weights span the full E-dim
+//                                               extended state including outcome augmentations).
+//   optPolicy[K · D · E]                        per-option policy parameters over E-dim extended
+//                                               state. D = D_policy is the env-declared
+//                                               action-spec parameter count.
+//   outcomeHead[K · E]                          OPSR outcome head: K outcome predictors (one per
+//                                               option-keyboard slot), each a linear projection
+//                                               from the previous E-dim state. Writes
+//                                               state[1-slot][r][R + k] = H[k] · state[slot][r].
 // State arena (fp32):
-//   observation[B·O]                            centered → state[slot · B · R]
+//   observation[B·O]                            centered → state[slot · B · E][:R]
 //   observationMean[O]                          online Welford mean for encoder centering
-//   state[2 · B · R]                            double-buffered (slot toggles each step; S5)
+//   state[2 · B · E]                            extended state: [:R] = encoder output;
+//                                               [R:E] = K outcome predictions (recursive from
+//                                               previous step's E-dim state via outcomeHead).
+//                                               Double-buffered (slot toggles each step; S5).
 //   prevPolicyMean[B·D]                         previous step's policyMean (for actionDelta telemetry)
 //   policyMean[B·D]                             current step's policy mean — written by oak_meta_action;
 //                                               read by host wrapper which samples + computes scoreGrad
-//   scoreGrad[B · D]                            host-written ∇log π(a|s) for the wrapper-sampled
-//                                               action. Per-component categorical score for Discrete
-//                                               (1{a=d} − π_d), Gaussian z for Box.
+//   scoreGrad[B · D]                            host-written ∇log π(a|s) for the wrapper-sampled action
 //   reward[B], td[B]
 //   tdPsi[B · K]                                K cumulant TDs per row (Design 2 collapse)
 // UInt arena:
-//   done[B], activeMask[R], activeList[R]
+//   done[B], activeMask[E], activeList[E]                (E = R + K; outcome dims R..E always-active)
 //   option[2 · B]                               slot-toggled active/next option index (S4)
 //   counters[6]                                 {encNF, learnNF, planNF, reinitOptCount, reinitFeatCount, _pad}
 // Arena extras (fp32):
@@ -109,9 +118,11 @@ struct KernelConfig {
     // For single-Discrete-N envs D = N; for single-Box-A envs D = A; multi-component envs sum.
     // The agent has no notion of WHAT the components are — only the integer width.
     uint actionParamCount;
-    // Param offsets (in fp16 stride). ψ is laid out as [K rows × M cols] where M = R + K
-    // (Alberta Plan Design 2: shared chord-conditional ψ_k(s, λ) = W_ψ[k] · concat[s, λ]).
-    uint pEncoder, pValue, pPsi, pOptPolicy;
+    // Param offsets (in fp16 stride). ψ is laid out as [K rows × M cols] where M = E + K
+    // (Pass 11 Tier 2: ψ's state weights span the OPSR-extended state). outcomeHead[K · E]
+    // writes K outcome predictions per row recursively from the previous step's full E-dim
+    // state (Vereecken 2604.07016).
+    uint pEncoder, pValue, pPsi, pOptPolicy, pOutcomeHead;
     // State offsets (in fp32 stride). policyMean[B · D] is written by oak_meta_action and
     // read by the host wrapper for sampling. scoreGrad[B · D] is HOST-written (after wrapper
     // samples per-component) and read by oak_learn_pi at the *next* step. prevPolicyMean[B · D]
@@ -153,18 +164,20 @@ struct KernelStats {
 
 // -------------------------------------------------------------------------------------------------
 // Context: pointers + scalars, no per-thread copy of the full config.
-// M = R + K is the concat dim for ψ's chord-conditional input.
+// E = R + K is the OPSR-extended state width (Pass 11 Tier 2: encoder output + outcome head).
+// M = E + K is the concat dim for ψ's chord-conditional input ([state | one-hot chord]).
 // -------------------------------------------------------------------------------------------------
 struct Ctx {
-    uint R, A, B, K, O, baseO, M, D;
+    uint R, A, B, K, O, baseO, M, D, E;
     uint activeCount, stepCount;
     uint stateSlot, optionSlot;
     float cap, alpha0, ridge, rho;
 
     device half   *encoder;
-    device half   *valueW;
-    device half   *psi;            // [K][M] : W_ψ[k] = (state weights, chord weights)
-    device half   *optPolicy;      // [K][D][R] : per-option policy parameters (D = D_policy)
+    device half   *valueW;         // [E] : value head over the OPSR-extended state
+    device half   *psi;            // [K][M] : W_ψ[k] = (state weights, chord weights), M = E + K
+    device half   *optPolicy;      // [K][D][E] : per-option policy parameters (D = D_policy)
+    device half   *outcomeHead;    // [K][E] : OPSR outcome predictor (Tier 2)
 
     device float  *observation;    // [B][O]
     device float  *observationMean;// [O]
@@ -198,8 +211,9 @@ inline Ctx make_ctx(device half *params, device float *stateArena, device uint *
     Ctx c;
     c.R = cfg.rank; c.A = cfg.actDim; c.B = cfg.batch; c.K = max(cfg.optionCount, 1u);
     c.O = cfg.obsDim; c.baseO = cfg.baseObsDim;
-    c.M = c.R + c.K;
-    c.D = max(cfg.actionParamCount, 1u);  // env-declared D_policy (Pass 11 Tier 1)
+    c.E = c.R + c.K;                       // OPSR extended-state width (Pass 11 Tier 2)
+    c.M = c.E + c.K;                       // ψ concat dim: [extended state | one-hot chord]
+    c.D = max(cfg.actionParamCount, 1u);   // env-declared D_policy (Pass 11 Tier 1)
     c.activeCount = scalars->activeCount;
     c.stepCount   = scalars->stepCount;
     c.stateSlot   = scalars->stateSlot;
@@ -207,10 +221,11 @@ inline Ctx make_ctx(device half *params, device float *stateArena, device uint *
     c.cap = cfg.cap; c.alpha0 = cfg.alpha0; c.ridge = cfg.ridge;
     c.rho = scalars->rho;
 
-    c.encoder   = params + cfg.pEncoder;
-    c.valueW    = params + cfg.pValue;
-    c.psi       = params + cfg.pPsi;
-    c.optPolicy = params + cfg.pOptPolicy;
+    c.encoder     = params + cfg.pEncoder;
+    c.valueW      = params + cfg.pValue;
+    c.psi         = params + cfg.pPsi;
+    c.optPolicy   = params + cfg.pOptPolicy;
+    c.outcomeHead = params + cfg.pOutcomeHead;
 
     c.observation     = stateArena + cfg.sObservation;
     c.observationMean = stateArena + cfg.sObsMean;
@@ -240,7 +255,7 @@ inline Ctx make_ctx(device half *params, device float *stateArena, device uint *
     return c;
 }
 
-inline device float *state_slot(Ctx ctx, uint slot) { return ctx.state + slot * ctx.B * ctx.R; }
+inline device float *state_slot(Ctx ctx, uint slot) { return ctx.state + slot * ctx.B * ctx.E; }
 inline device uint  *option_slot(Ctx ctx, uint slot) { return ctx.option + slot * ctx.B; }
 inline uint active_option(Ctx ctx, uint row) {
     device const uint *o = option_slot(ctx, ctx.optionSlot);
@@ -330,7 +345,43 @@ kernel void oak_encode(
     float om    = (feat < ctx.O) ? ctx.observationMean[feat] : 0.0f;
     float centered = o_raw - om;
     float z = centered * float(ctx.encoder[feat]);
-    state_slot(ctx, writeSlot)[row * ctx.R + feat] = z;
+    // Row stride is E (encoder writes [:R] of the E-wide state row; outcome head writes [R:E]).
+    state_slot(ctx, writeSlot)[row * ctx.E + feat] = z;
+}
+
+// =================================================================================================
+// predict_outcome — OPSR augmentation (Vereecken 2604.07016). Writes K outcome predictions per
+// row recursively from the previous step's full E-dim state:
+//   outcome[r, k] = H[k, :] · state_prev[r, :E]
+// The OPSR head provides agent-side memory: the outcome dims at state[1-slot][r][R:E] mix the
+// previous-step's encoder output AND previous outcome predictions, giving the linear heads
+// (value, ψ, π) access to a 1-step-back compressed history.
+//
+// Recursive: depends on state_slot(ctx.stateSlot) which holds step N-1's writes (encoded
+// observations + outcome predictions), so this kernel must run BEFORE any kernel that reads
+// state[1-slot] (i.e., before predict / plan / meta_action / learn_*). Inserted immediately
+// after oak_encode in the phase order.
+//   [Grid: B · K — one thread per (row, outcome dim).]
+// =================================================================================================
+kernel void oak_predict_outcome(
+    device half   *params     [[buffer(0)]],
+    device float  *stateArena [[buffer(1)]],
+    device uint   *uintArena  [[buffer(2)]],
+    device KernelScalars *scalars [[buffer(3)]],
+    device KernelStats   *stats   [[buffer(4)]],
+    constant KernelConfig &cfg    [[buffer(5)]],
+    uint gid [[thread_position_in_grid]])
+{
+    Ctx ctx = make_ctx(params, stateArena, uintArena, scalars, cfg);
+    uint row = gid / ctx.K, k = gid % ctx.K;
+    if (row >= ctx.B) return;
+    device const float *prev = state_slot(ctx, ctx.stateSlot) + row * ctx.E;
+    device       float *curr = state_slot(ctx, 1u - ctx.stateSlot) + row * ctx.E;
+    // Active-feature dot: outcome head sees only encoder-admitted features + outcome dims (which
+    // are always-active by construction). active_dot_half iterates activeList[0..activeCount).
+    float v = active_dot_half(ctx.outcomeHead, k * ctx.E, prev, 0u,
+                              ctx.activeList, ctx.activeCount);
+    curr[ctx.R + k] = v;
 }
 
 // =================================================================================================
@@ -356,7 +407,7 @@ kernel void oak_predict(
 
     device const float *prev = state_slot(ctx, ctx.stateSlot);
     device const float *curr = state_slot(ctx, 1u - ctx.stateSlot);
-    uint pOff = gid * ctx.R, cOff = gid * ctx.R;
+    uint pOff = gid * ctx.E, cOff = gid * ctx.E;   // E-wide state rows (Pass 11 Tier 2)
     uint M = ctx.M;
 
     // Main differential TD on w_main (θ_v). Implicit-TD form per 2603.21921. Implicit α
@@ -379,7 +430,7 @@ kernel void oak_predict(
     float reward_centered = ctx.reward[gid] - ctx.rho;
     for (uint k = 0u; k < ctx.K; ++k) {
         uint psiBase = k * M;
-        float chord_part = float(ctx.psi[psiBase + ctx.R + optK]);
+        float chord_part = float(ctx.psi[psiBase + ctx.E + optK]);  // chord weights past E state weights
         float psi_prev = active_dot_half(ctx.psi, psiBase, prev, pOff,
                                          ctx.activeList, ctx.activeCount) + chord_part;
         float psi_next = active_dot_half(ctx.psi, psiBase, curr, cOff,
@@ -415,7 +466,7 @@ kernel void oak_plan(
     uint row = tgid;
     if (row >= ctx.B) return;
     device const float *curr = state_slot(ctx, 1u - ctx.stateSlot);
-    uint xOff = row * ctx.R;
+    uint xOff = row * ctx.E;
     uint M = ctx.M;
 
     float qk = -FLT_MAX;
@@ -425,7 +476,7 @@ kernel void oak_plan(
         // ψ_k(s, e_k) under one-hot chord at index k.
         float psi_k = active_dot_half(ctx.psi, psiBase, curr, xOff,
                                       ctx.activeList, ctx.activeCount)
-                    + float(ctx.psi[psiBase + ctx.R + k]);
+                    + float(ctx.psi[psiBase + ctx.E + k]);
         uint sf_k = ctx.sf[k];  // dynamic feature ranking (Tier 7)
         float wk  = (sf_k < ctx.R) ? float(ctx.valueW[sf_k]) : 0.0f;
         float val = wk * psi_k;
@@ -504,11 +555,11 @@ kernel void oak_meta_action(
 
     device const float *curr = state_slot(ctx, 1u - ctx.stateSlot);
     uint optK    = option_slot(ctx, 1u - ctx.optionSlot)[row];
-    uint xOff    = row * ctx.R;
-    uint optBase = optK * ctx.D * ctx.R;
+    uint xOff    = row * ctx.E;
+    uint optBase = optK * ctx.D * ctx.E;
 
     ctx.policyMean[row * ctx.D + p] =
-        active_dot_half(ctx.optPolicy, optBase + p * ctx.R,
+        active_dot_half(ctx.optPolicy, optBase + p * ctx.E,
                         curr, xOff, ctx.activeList, ctx.activeCount);
 }
 
@@ -533,7 +584,7 @@ kernel void oak_reduce_alpha(
     device const float *prev = state_slot(ctx, ctx.stateSlot);
     float n2_l = 0.0f, obs_l = 0.0f;
     for (uint r = tid; r < ctx.B; r += tgW) {
-        n2_l += active_norm2(prev, r * ctx.R, ctx.activeList, ctx.activeCount);
+        n2_l += active_norm2(prev, r * ctx.E, ctx.activeList, ctx.activeCount);
         for (uint f = 0u; f < ctx.baseO; ++f) {
             float c = ctx.observation[r * ctx.O + f] - ctx.observationMean[f];
             obs_l = fma(c, c, obs_l);
@@ -568,11 +619,11 @@ kernel void oak_learn_value(
 {
     Ctx ctx = make_ctx(params, stateArena, uintArena, scalars, cfg);
     uint feat = tgid;
-    if (feat >= ctx.R) return;
+    if (feat >= ctx.E) return;     // valueW spans the OPSR-extended state (Pass 11 Tier 2)
     device const float *prev = state_slot(ctx, ctx.stateSlot);
     float g_l = 0.0f, sm_l = 0.0f;
     for (uint r = tid; r < ctx.B; r += tgW) {
-        float xp = prev[r * ctx.R + feat];
+        float xp = prev[r * ctx.E + feat];
         g_l  = fma(ctx.td[r], xp, g_l);
         sm_l = fma(xp, xp, sm_l);
     }
@@ -582,11 +633,17 @@ kernel void oak_learn_value(
         float invB = 1.0f / float(max(ctx.B, 1u));
         float invT = track_rate(ctx.stepCount, ctx.ridge);
         float step = ctx.scalars->alphaImp;
-        ctx.featSM[feat] += (sm * invB - ctx.featSM[feat]) * invT;
+        // featSM/wBar are encoder-only stats (cumulant ranking + plan optimism). Outcome dims
+        // R..E participate in value updates but don't track these utility moments.
+        if (feat < ctx.R) {
+            ctx.featSM[feat] += (sm * invB - ctx.featSM[feat]) * invT;
+        }
         float wNew = float(ctx.valueW[feat]) + step * g * invB;
         ctx.valueW[feat] = half(wNew);
-        float decay = 1.0f - ctx.alpha0;
-        ctx.wBar[feat] = max(ctx.wBar[feat] * decay, fabs(wNew));
+        if (feat < ctx.R) {
+            float decay = 1.0f - ctx.alpha0;
+            ctx.wBar[feat] = max(ctx.wBar[feat] * decay, fabs(wNew));
+        }
     }
 }
 
@@ -617,9 +674,57 @@ kernel void oak_learn_encoder(
 }
 
 // =================================================================================================
-// learn_psi — update shared ψ[k, m] for m ∈ [0, M=R+K). Cumulant k's gradient w.r.t. weight m:
-//   ∂L/∂W_ψ[k][m] = − (1/B) Σ_r δ_k[r] · concat[s_r, λ_r][m]
-// where concat[r][m] = prev[r][m] for m < R, else (m == R + active_option(r) ? 1 : 0).
+// learn_outcome — OPSR head update (Pass 11 Tier 2; Vereecken 2604.07016). Each outcome
+// dimension k predicts the next-step value of the cumulant feature sf[k] (the same feature
+// the chord-conditional ψ_k tracks for option k). Squared-error TD on the ROLLED-FORWARD
+// state[curr][r][R + k]:
+//   target_k(r)  = state_curr[r][sf[k]]                                  // 1-step lookahead
+//   pred_k(r)    = state_curr[r][R + k] = H[k] · state_prev[r][:E]        // outcome head
+//   δ_outcome    = target_k − pred_k
+//   ∇_{H[k][e]} L = − Σ_r δ_outcome · state_prev[r][e]
+// Update: H[k][e] += step · Σ_r δ_outcome[r] · state_prev[r][e] / B (positive sign to descend).
+// Per-update implicit α stabilizes against state-norm spikes (Kim 2510.06149).
+//   [Grid: K · E]
+// =================================================================================================
+kernel void oak_learn_outcome(
+    device half   *params     [[buffer(0)]],
+    device float  *stateArena [[buffer(1)]],
+    device uint   *uintArena  [[buffer(2)]],
+    device KernelScalars *scalars [[buffer(3)]],
+    device KernelStats   *stats   [[buffer(4)]],
+    constant KernelConfig &cfg    [[buffer(5)]],
+    uint gid [[thread_position_in_grid]])
+{
+    Ctx ctx = make_ctx(params, stateArena, uintArena, scalars, cfg);
+    uint k = gid / ctx.E, e = gid % ctx.E;
+    if (k >= ctx.K || e >= ctx.E) return;
+    if (ctx.activeMask[e] == 0u) return;
+
+    device const float *prev = state_slot(ctx, ctx.stateSlot);
+    device const float *curr = state_slot(ctx, 1u - ctx.stateSlot);
+    uint sf_k = ctx.sf[k];
+    if (sf_k >= ctx.R) return;   // outcomes track encoder features only (sf[] ranges over [0, R))
+
+    float g = 0.0f, n2 = 0.0f;
+    for (uint r = 0u; r < ctx.B; ++r) {
+        float target = curr[r * ctx.E + sf_k];
+        float pred   = curr[r * ctx.E + ctx.R + k];
+        float delta  = target - pred;
+        float xPrev  = prev[r * ctx.E + e];
+        float term   = delta * xPrev;
+        g  = fma(1.0f, term, g);
+        n2 = fma(xPrev, xPrev, n2);
+    }
+    float invB = 1.0f / float(max(ctx.B, 1u));
+    float alpha_eff = ctx.alpha0 / (1.0f + ctx.alpha0 * n2 * invB);
+    uint pIdx = k * ctx.E + e;
+    ctx.outcomeHead[pIdx] = half(float(ctx.outcomeHead[pIdx]) + alpha_eff * g * invB);
+}
+
+// =================================================================================================
+// learn_psi — update shared ψ[k, m] for m ∈ [0, M = E + K). Cumulant k's gradient w.r.t.
+// weight m:  ∂L/∂W_ψ[k][m] = − (1/B) Σ_r δ_k[r] · concat[s_r, λ_r][m]
+// where concat[r][m] = prev[r][m] for m < E, else (m == E + active_option(r) ? 1 : 0).
 // Every row contributes to every cumulant's parameters via its own δ_k[r] (chord-conditional
 // formulation; OBB §2.4). Implicit α from oak_reduce_alpha provides per-step contraction
 // independent of input scale (Kim 2510.06149); no clamp needed.
@@ -638,19 +743,21 @@ kernel void oak_learn_psi(
     uint M = ctx.M;
     uint k = gid / M, m = gid % M;
     if (k >= ctx.K) return;
-    if (m < ctx.R && ctx.activeMask[m] == 0u) return;  // skip inactive state weights
+    // M = E + K. State weights are at [0, E); chord weights at [E, M). State-weight gating
+    // uses activeMask[m] (outcome dims R..E are always-active by init).
+    if (m < ctx.E && ctx.activeMask[m] == 0u) return;
 
     device const float *prev = state_slot(ctx, ctx.stateSlot);
     float step = ctx.scalars->alphaImp;
     float g = 0.0f;
-    if (m < ctx.R) {
+    if (m < ctx.E) {
         // State weight: every row contributes via its own δ_k.
         for (uint r = 0u; r < ctx.B; ++r) {
-            g = fma(ctx.tdPsi[r * ctx.K + k], prev[r * ctx.R + m], g);
+            g = fma(ctx.tdPsi[r * ctx.K + k], prev[r * ctx.E + m], g);
         }
     } else {
-        // Chord weight W_ψ[k][R + cidx]: contributes only from rows whose active option == cidx.
-        uint cidx = m - ctx.R;
+        // Chord weight W_ψ[k][E + cidx]: contributes only from rows whose active option == cidx.
+        uint cidx = m - ctx.E;
         for (uint r = 0u; r < ctx.B; ++r) {
             if (active_option(ctx, r) != cidx) continue;
             g += ctx.tdPsi[r * ctx.K + k];
@@ -689,11 +796,11 @@ kernel void oak_learn_pi(
     uint gid [[thread_position_in_grid]])
 {
     Ctx ctx = make_ctx(params, stateArena, uintArena, scalars, cfg);
-    uint k = gid / (ctx.D * ctx.R);
-    uint rem = gid - k * ctx.D * ctx.R;
-    uint d = rem / ctx.R, i = rem % ctx.R;
-    if (k >= ctx.K || d >= ctx.D || i >= ctx.R) return;
-    if (ctx.activeMask[i] == 0u) return;
+    uint k = gid / (ctx.D * ctx.E);
+    uint rem = gid - k * ctx.D * ctx.E;
+    uint d = rem / ctx.E, i = rem % ctx.E;
+    if (k >= ctx.K || d >= ctx.D || i >= ctx.E) return;
+    if (ctx.activeMask[i] == 0u) return;   // outcome dims R..E are always-active by init
 
     device const float *prev = state_slot(ctx, ctx.stateSlot);
     float g = 0.0f;
@@ -701,7 +808,7 @@ kernel void oak_learn_pi(
     uint  cnt = 0u;
     for (uint r = 0u; r < ctx.B; ++r) {
         if (active_option(ctx, r) != k) continue;
-        float pi_term = prev[r * ctx.R + i] * ctx.scoreGrad[r * ctx.D + d];
+        float pi_term = prev[r * ctx.E + i] * ctx.scoreGrad[r * ctx.D + d];
         g = fma(ctx.td[r], pi_term, g);
         n2 = fma(pi_term, pi_term, n2);
         cnt++;
@@ -709,7 +816,7 @@ kernel void oak_learn_pi(
     if (cnt == 0u) return;
     float invCnt = 1.0f / float(cnt);
     float alpha_eff = ctx.alpha0 / (1.0f + ctx.alpha0 * n2 * invCnt);
-    uint  pIdx = k * ctx.D * ctx.R + d * ctx.R + i;
+    uint  pIdx = k * ctx.D * ctx.E + d * ctx.E + i;
     ctx.optPolicy[pIdx] = half(float(ctx.optPolicy[pIdx]) + alpha_eff * g * invCnt);
 }
 
@@ -750,20 +857,22 @@ kernel void oak_bk_reduce(
     threadgroup float sg_obsNF[4];
     float obsNF = tg_sum_128(obsNF_local, sg_obsNF, tid, sgid);
 
-    // (1b) Per-feature mean EMA on the encoded state (running ρ_k tracking for cumulant
-    // centering in oak_predict; replaces per-option-per-cumulant rhoKJ).
+    // (1b) Per-feature mean EMA on encoder features only (running ρ_k tracking for cumulant
+    // centering in oak_predict). Outcome dims R..E are predictions; their "centering" is
+    // implicit in the prediction target.
     for (uint f = tid; f < ctx.R; f += tgW) {
         float sum = 0.0f;
-        for (uint r = 0u; r < ctx.B; ++r) sum += curr[r * ctx.R + f];
+        for (uint r = 0u; r < ctx.B; ++r) sum += curr[r * ctx.E + f];
         float meanBatch = sum / float(max(ctx.B, 1u));
         ctx.featMean[f] += invT * (meanBatch - ctx.featMean[f]);
     }
 
-    // (2) Latent telemetry: mean-square + max|latent| + non-finite count (B·R cells).
+    // (2) Latent telemetry: mean-square + max|latent| + non-finite count over the FULL
+    // E-wide state (B · E cells; runaway outcomeHead would show up here).
     float lms_l = 0.0f, maxLat_l = 0.0f, nLearn_l = 0.0f;
-    uint total_rf = ctx.B * ctx.R;
+    uint total_rf = ctx.B * ctx.E;
     for (uint idx = tid; idx < total_rf; idx += tgW) {
-        uint r = idx / ctx.R, f = idx % ctx.R;
+        uint r = idx / ctx.E, f = idx % ctx.E;
         float v = curr[r * ctx.R + f];
         if (!isfinite(v)) { nLearn_l += 1.0f; v = 0.0f; }
         lms_l = fma(v, v, lms_l);
@@ -807,10 +916,10 @@ kernel void oak_bk_reduce(
     float nPlan  = tg_sum_128(nPlan_l,  sg_nPlan,  tid, sgid);
 
     if (tid == 0u) {
-        float invBR = 1.0f / float(max(ctx.B * ctx.R, 1u));
+        float invBE = 1.0f / float(max(ctx.B * ctx.E, 1u));   // OPSR-extended state width
         float invBK = 1.0f / float(max(ctx.B * ctx.K, 1u));
         float invBD = 1.0f / float(max(ctx.B * ctx.D, 1u));
-        stats->latentStateMeanSquare      = lms * invBR;
+        stats->latentStateMeanSquare      = lms * invBE;
         stats->optionModelPredictionMSE   = psi * invBK;
         stats->scoreGradL2Mean            = sgL2 * invBD;  // mean ‖∇log π‖² across rows × params
         stats->actionDeltaL2Mean          = ad  * invBD;   // μ-churn over D policy params
@@ -847,7 +956,7 @@ kernel void oak_bk_feature(
 {
     Ctx ctx = make_ctx(params, stateArena, uintArena, scalars, cfg);
     uint feat = tgid;
-    if (feat >= ctx.R) return;
+    if (feat >= ctx.R) return;   // utility ranking on encoder features only (sf[] picks here)
     device const float *curr = state_slot(ctx, 1u - ctx.stateSlot);
     float invB = 1.0f / float(max(ctx.B, 1u));
     float invT = track_rate(ctx.stepCount, ctx.ridge);
@@ -855,7 +964,7 @@ kernel void oak_bk_feature(
     // row. K cumulants now (was R features) under Design 2 — divisor is structural 1+K.
     float u_l = 0.0f;
     for (uint r = tid; r < ctx.B; r += tgW) {
-        float x = curr[r * ctx.R + feat];
+        float x = curr[r * ctx.E + feat];   // E-stride state row (Pass 11 Tier 2)
         u_l += fabs(ctx.td[r] * x);
         for (uint k = 0u; k < ctx.K; ++k) u_l += fabs(ctx.tdPsi[r * ctx.K + k] * x);
     }
@@ -915,8 +1024,12 @@ kernel void oak_bk_option(
             float invR = 1.0f / sqrt(float(max(ctx.R, 1u)));
             // Diagonal seed: cumulant k's W_ψ[k][sf[k]] = +1/√R (RRS feature-attainment).
             if (k < ctx.R) ctx.psi[psiBase + k] = half(invR);
-            uint polBase = k * ctx.D * ctx.R;
-            for (uint idx = 0u; idx < ctx.D * ctx.R; ++idx) ctx.optPolicy[polBase + idx] = half(0.0f);
+            uint polBase = k * ctx.D * ctx.E;
+            for (uint idx = 0u; idx < ctx.D * ctx.E; ++idx) ctx.optPolicy[polBase + idx] = half(0.0f);
+            // Reinit the option's outcome head row too — its predictions become noise after the
+            // policy resets, so we re-randomize H[k] on next learn_outcome step from zero.
+            uint outBase = k * ctx.E;
+            for (uint e = 0u; e < ctx.E; ++e) ctx.outcomeHead[outBase + e] = half(0.0f);
             ctx.utilOpt[k] = 0.0f;
             // K ≤ OAK_SIMD by host-side cap (OakMetalLayout.optionCount), so one uint
             // bitmask covers all options. Atomic OR for race-free per-option signaling
@@ -980,6 +1093,11 @@ kernel void oak_bk_admit_commit(
         ctx.activeList[count++] = pick;
     }
     if (count == 0u) { ctx.activeMask[0] = 1u; ctx.activeList[0] = 0u; count = 1u; }
+    // Pass 11 Tier 2: append the K OPSR outcome dims (R..E) — always-active by construction.
+    for (uint k = 0u; k < ctx.K; ++k) {
+        ctx.activeMask[ctx.R + k] = 1u;
+        ctx.activeList[count++] = ctx.R + k;
+    }
     ctx.scalars->activeCount = count;
 
     // Tier 7: dynamic top-K subtask-feature ranking. Cumulant k tracks the feature with the
