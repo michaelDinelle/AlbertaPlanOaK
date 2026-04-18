@@ -8,7 +8,7 @@ using namespace metal;
 // episodic semantics, no train/eval split, no per-step allocation, no cosmetic normalization,
 // no curiosity on the external reward, meta-constants structurally derived from {R, B, K}.
 // Thirteen kernels: encode, predict, plan, meta_action, reduce_alpha, learn_value, learn_encoder,
-// learn_psi, learn_opt_policy, bk_reduce, bk_feature, bk_option, bk_admit_commit. (bk_reduce and
+// learn_psi, learn_pi, bk_reduce, bk_feature, bk_option, bk_admit_commit. (bk_reduce and
 // bk_feature are kept separate because the per-feature utility pass needs R parallel threadgroups
 // to avoid 32× serialization at large R·B; with MTLIndirectCommandBuffer the extra dispatch has
 // ~zero host cost, so fusion is not profitable here.)
@@ -51,18 +51,23 @@ using namespace metal;
 //   valueW[R]                                   w_main (main-task linear value)
 //   psi[K · M]                                  W_ψ[k] · concat[s, λ]: shared chord-conditional
 //                                               SF (Design 2; OBB §2.4 Eq.4). M = R + K.
-//   optPolicy[K · 2·A · R]                      per-option Gaussian action params [μ_d, log_σ_d]
-//                                               for d ∈ [0, A). Sampled in oak_meta_action with
-//                                               canonical Gaussian score function ∇log π written
-//                                               to scoreGrad. Pass 10: ALWAYS Gaussian — no
-//                                               discrete branch in agent (env-wrapper interprets).
+//   optPolicy[K · D · R]                        per-option policy parameters. D = D_policy is the
+//                                               env-declared action-spec parameter count
+//                                               (sum over per-component param widths: N for each
+//                                               Discrete-N component, A for each Box-A component).
+//                                               oak_meta_action emits ONLY policyMean[B · D]; the
+//                                               wrapper layer (EnvPoolEnv) samples per-component
+//                                               and writes the matching scoreGrad — Inv-1.
 // State arena (fp32):
 //   observation[B·O]                            centered → state[slot · B · R]
 //   observationMean[O]                          online Welford mean for encoder centering
 //   state[2 · B · R]                            double-buffered (slot toggles each step; S5)
-//   prevAction[B·A]                             previous step's action (sent to env at step N-1)
-//   action[B·A]                                 current step's sampled real-valued action vector
-//   scoreGrad[B · 2·A]                          Gaussian score [(z/σ)_d, ((z²−1)/2)_d] for each d
+//   prevPolicyMean[B·D]                         previous step's policyMean (for actionDelta telemetry)
+//   policyMean[B·D]                             current step's policy mean — written by oak_meta_action;
+//                                               read by host wrapper which samples + computes scoreGrad
+//   scoreGrad[B · D]                            host-written ∇log π(a|s) for the wrapper-sampled
+//                                               action. Per-component categorical score for Discrete
+//                                               (1{a=d} − π_d), Gaussian z for Box.
 //   reward[B], td[B]
 //   tdPsi[B · K]                                K cumulant TDs per row (Design 2 collapse)
 // UInt arena:
@@ -100,14 +105,18 @@ constant uint OAK_CNT_REINIT_FEAT   = 4u;  // bk_admit_commit: encoder-feature r
 
 struct KernelConfig {
     uint obsDim, rank, actDim, batch, optionCount, baseObsDim;
+    // D_policy = env-declared sum of per-component policy-param widths (Pass 11 Tier 1).
+    // For single-Discrete-N envs D = N; for single-Box-A envs D = A; multi-component envs sum.
+    // The agent has no notion of WHAT the components are — only the integer width.
+    uint actionParamCount;
     // Param offsets (in fp16 stride). ψ is laid out as [K rows × M cols] where M = R + K
     // (Alberta Plan Design 2: shared chord-conditional ψ_k(s, λ) = W_ψ[k] · concat[s, λ]).
     uint pEncoder, pValue, pPsi, pOptPolicy;
-    // State offsets (in fp32 stride). scoreGrad[B · D_params] holds ∇log π(a|s) for the
-    // sampled action — written by oak_meta_action, consumed by oak_learn_pi at the *next*
-    // step (when the action's TD error δ becomes available). vCurr[B] caches w_main · curr
-    // computed once in oak_predict and read by oak_plan (Tier 11 fused dot).
-    uint sObservation, sObsMean, sState, sPrevAction, sAction, sScoreGrad;
+    // State offsets (in fp32 stride). policyMean[B · D] is written by oak_meta_action and
+    // read by the host wrapper for sampling. scoreGrad[B · D] is HOST-written (after wrapper
+    // samples per-component) and read by oak_learn_pi at the *next* step. prevPolicyMean[B · D]
+    // holds the previous step's μ for actionDelta telemetry. vCurr[B] caches w_main · curr.
+    uint sObservation, sObsMean, sState, sPrevPolicyMean, sPolicyMean, sScoreGrad;
     uint sReward, sTd, sTdPsi, sVCurr;
     // UInt offsets. subtaskFeatureOf[K] = state-feature index that cumulant k tracks
     // (top-K by per-feature utility, re-ranked by oak_bk_admit_commit each step; Tier 7 RED).
@@ -155,14 +164,14 @@ struct Ctx {
     device half   *encoder;
     device half   *valueW;
     device half   *psi;            // [K][M] : W_ψ[k] = (state weights, chord weights)
-    device half   *optPolicy;      // [K][D][R] : per-option action params (μ_d, log_σ_d, or logit)
+    device half   *optPolicy;      // [K][D][R] : per-option policy parameters (D = D_policy)
 
     device float  *observation;    // [B][O]
     device float  *observationMean;// [O]
     device float  *state;          // [2][B][R]
-    device float  *prevAction;     // [B][A] : action sent to env on previous step
-    device float  *action;         // [B][A] : action being sent to env this step (sampled)
-    device float  *scoreGrad;      // [B][D] : ∇log π(a|s) score function for sampled action
+    device float  *prevPolicyMean; // [B][D] : prev step's policyMean (host-written for telemetry)
+    device float  *policyMean;     // [B][D] : current step's policy mean (kernel-written)
+    device float  *scoreGrad;      // [B][D] : ∇log π(a|s) for wrapper-sampled action (host-written)
     device float  *reward;         // [B]
     device float  *td;             // [B]
     device float  *tdPsi;          // [B][K]  -- one cumulant TD per row per option
@@ -190,7 +199,7 @@ inline Ctx make_ctx(device half *params, device float *stateArena, device uint *
     c.R = cfg.rank; c.A = cfg.actDim; c.B = cfg.batch; c.K = max(cfg.optionCount, 1u);
     c.O = cfg.obsDim; c.baseO = cfg.baseObsDim;
     c.M = c.R + c.K;
-    c.D = 2u * c.A;  // structural: Gaussian μ + log_σ per action dim (Pass 10 unification)
+    c.D = max(cfg.actionParamCount, 1u);  // env-declared D_policy (Pass 11 Tier 1)
     c.activeCount = scalars->activeCount;
     c.stepCount   = scalars->stepCount;
     c.stateSlot   = scalars->stateSlot;
@@ -206,8 +215,8 @@ inline Ctx make_ctx(device half *params, device float *stateArena, device uint *
     c.observation     = stateArena + cfg.sObservation;
     c.observationMean = stateArena + cfg.sObsMean;
     c.state           = stateArena + cfg.sState;
-    c.prevAction      = stateArena + cfg.sPrevAction;
-    c.action          = stateArena + cfg.sAction;
+    c.prevPolicyMean  = stateArena + cfg.sPrevPolicyMean;
+    c.policyMean      = stateArena + cfg.sPolicyMean;
     c.scoreGrad       = stateArena + cfg.sScoreGrad;
     c.reward          = stateArena + cfg.sReward;
     c.td              = stateArena + cfg.sTd;
@@ -484,8 +493,13 @@ kernel void oak_meta_action(
     constant KernelConfig &cfg    [[buffer(5)]],
     uint gid [[thread_position_in_grid]])
 {
+    // Pass 11 Tier 1: agent emits ONLY policyMean[B · D] = W_π[k] · s_active. Sampling and
+    // score-function derivation live in the wrapper layer (EnvPoolEnv.sampleAndStep) so each
+    // env's actual sampling distribution provides its mathematically-correct score function
+    // (Williams 1992; Maddison 2014 Gumbel-max; Sutton-Barto Ch.13). The agent has no notion
+    // of action-space type — D is the env-declared policy-param width (Inv-1).
     Ctx ctx = make_ctx(params, stateArena, uintArena, scalars, cfg);
-    uint row = gid / ctx.A, a = gid % ctx.A;
+    uint row = gid / ctx.D, p = gid % ctx.D;
     if (row >= ctx.B) return;
 
     device const float *curr = state_slot(ctx, 1u - ctx.stateSlot);
@@ -493,24 +507,9 @@ kernel void oak_meta_action(
     uint xOff    = row * ctx.R;
     uint optBase = optK * ctx.D * ctx.R;
 
-    // Per-dim Gaussian parameters from the (2a, 2a+1) rows of optPolicy[k*].
-    float mu     = active_dot_half(ctx.optPolicy, optBase + (2u * a     ) * ctx.R,
-                                   curr, xOff, ctx.activeList, ctx.activeCount);
-    float log_sg = active_dot_half(ctx.optPolicy, optBase + (2u * a + 1u) * ctx.R,
-                                   curr, xOff, ctx.activeList, ctx.activeCount);
-    float sigma = exp(log_sg);  // strictly positive without clamp
-
-    // Box-Muller standard-normal sample. Two structural splitmix32 hashes → two uniforms → one z.
-    float u1 = hash_uniform(ctx.stepCount, row, 2u * a);
-    float u2 = hash_uniform(ctx.stepCount, row, 2u * a + 1u);
-    float z  = sqrt(-2.0f * log(u1)) * cos(2.0f * M_PI_F * u2);
-
-    ctx.action[row * ctx.A + a] = mu + sigma * z;
-    // Canonical Gaussian score function:
-    //   ∇_μ     log p(a | μ, σ) = (a − μ) / σ²       = z / σ
-    //   ∇_logσ  log p(a | μ, σ) = ((a−μ)²/σ² − 1)/2  = (z² − 1) / 2
-    ctx.scoreGrad[row * ctx.D + 2u * a     ] = z / max(sigma, FLT_MIN);
-    ctx.scoreGrad[row * ctx.D + 2u * a + 1u] = (z * z - 1.0f) * 0.5f;
+    ctx.policyMean[row * ctx.D + p] =
+        active_dot_half(ctx.optPolicy, optBase + p * ctx.R,
+                        curr, xOff, ctx.activeList, ctx.activeCount);
 }
 
 // =================================================================================================
@@ -783,26 +782,20 @@ kernel void oak_bk_reduce(
     float maxLat = tg_max_128(maxLat_l, sg_maxLat, tid, sgid);
     float nLearn = tg_sum_128(nLearn_l, sg_nLearn, tid, sgid);
 
-    // (3) Per-(row, a) reductions: action variance, action delta vs prev, max|action|, non-finite.
-    // Action delta vs prev (was `actionDeltaL2Mean`) is the actuation change signal. The old
-    // `planningActionChangeL2Mean` used actionGrad which was identically equal to action under
-    // pre-pass-9 — meaningless after the policy-grad refactor and removed.
+    // (3) Per-(row, p) reductions on policyMean[B·D]: actuation change vs prev step,
+    // max|μ|, non-finite. With Pass-11 wrapper-side sampling, prevPolicyMean and policyMean
+    // both sit in arena (host-written for prev, kernel-written for this step), so the delta
+    // measures POLICY churn (μ_t − μ_{t-1}), independent of wrapper-side noise.
     float ad_l = 0.0f, sgL2_l = 0.0f, maxPol_l = 0.0f, nPlan_l = 0.0f;
-    uint total_ra = ctx.B * ctx.A;
-    for (uint idx = tid; idx < total_ra; idx += tgW) {
-        uint r = idx / ctx.A, a = idx % ctx.A;
-        float x = ctx.action[r * ctx.A + a];
-        float py = ctx.prevAction[r * ctx.A + a];
+    uint total_rd = ctx.B * ctx.D;
+    for (uint idx = tid; idx < total_rd; idx += tgW) {
+        float x  = ctx.policyMean[idx];
+        float py = ctx.prevPolicyMean[idx];
         bool nf = !isfinite(x);
         if (nf) { nPlan_l += 1.0f; x = 0.0f; }
         float p2 = x - py;
         ad_l = fma(p2, p2, ad_l);
         maxPol_l = max(maxPol_l, fabs(x));
-    }
-    // (3b) scoreGrad L² over B·D — non-zero variance is the probe-side signal that the policy
-    // is producing meaningful score functions (Tier 6 verification).
-    uint total_rd = ctx.B * ctx.D;
-    for (uint idx = tid; idx < total_rd; idx += tgW) {
         float sg = ctx.scoreGrad[idx];
         if (!isfinite(sg)) sg = 0.0f;
         sgL2_l = fma(sg, sg, sgL2_l);
@@ -816,12 +809,11 @@ kernel void oak_bk_reduce(
     if (tid == 0u) {
         float invBR = 1.0f / float(max(ctx.B * ctx.R, 1u));
         float invBK = 1.0f / float(max(ctx.B * ctx.K, 1u));
-        float invBA = 1.0f / float(max(ctx.B * ctx.A, 1u));
         float invBD = 1.0f / float(max(ctx.B * ctx.D, 1u));
         stats->latentStateMeanSquare      = lms * invBR;
         stats->optionModelPredictionMSE   = psi * invBK;
         stats->scoreGradL2Mean            = sgL2 * invBD;  // mean ‖∇log π‖² across rows × params
-        stats->actionDeltaL2Mean          = ad  * invBA;
+        stats->actionDeltaL2Mean          = ad  * invBD;   // μ-churn over D policy params
         stats->maxAbsLatentPrediction     = maxLat;
         stats->maxAbsPolicyOutput         = maxPol;
         stats->rawNonFiniteCount          = obsNF + nLearn + nPlan;

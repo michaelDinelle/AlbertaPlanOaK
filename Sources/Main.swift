@@ -57,10 +57,110 @@ private struct RunMetricsFile: Encodable {
     let health: RunHealth?, diagnostic: RunDiagnostic?
 }
 
-// Pass 10: agent always emits a real-valued vector; the env-wrapper layer (EnvPoolEnv.step)
-// interprets it (argmax → discrete index | bound-clamp → continuous control). The agent has no
-// notion of action-space type, so ActionBatch carries only floats.
-struct ActionBatch { let floats: [Float] }
+// Pass 11 Tier 1: agent emits ONLY policyMean[B · D_policy]. The wrapper layer samples per
+// component and produces both the env-flat action and the matching scoreGrad.
+//
+//   `PolicyMeanBatch` carries the kernel-emitted μ vector + dPolicy width.
+//   `ActionComponent`  describes one component of the env's action spec (Discrete N | Box A).
+//   `sampleAndScore`   composes per-component sampling: Gumbel-max + categorical scoreGrad for
+//                      Discrete (Williams 1992; Maddison 2014); structural-σ-1 Gaussian +
+//                      score = z for Box. The wrapper-layer sampling distribution and the
+//                      score function are mathematically matched, regardless of action-space
+//                      type, fixing the Pass-10 unified-Gaussian-then-argmax score-function
+//                      mismatch on discrete envs.
+struct PolicyMeanBatch { let values: [Float]; let dPolicy: Int }
+
+enum ActionComponent {
+    case discrete(n: Int)
+    case box(n: Int, low: [Float], high: [Float])
+
+    var paramCount: Int {
+        switch self {
+        case .discrete(let n): return n
+        case .box(let n, _, _): return n
+        }
+    }
+    var envActionWidth: Int {
+        switch self {
+        case .discrete: return 1
+        case .box(let n, _, _): return n
+        }
+    }
+}
+
+extension Sequence where Element == ActionComponent {
+    var totalPolicyParamCount: Int { reduce(0) { $0 + $1.paramCount } }
+    var totalEnvActionWidth: Int   { reduce(0) { $0 + $1.envActionWidth } }
+}
+
+// Per-row per-component sampling: writes envActionScratch (env-flat) and scoreGradScratch
+// (size = dPolicy). Pure structural splitmix64 + Box-Muller; no allocation on the hot path.
+//   Discrete N component: Gumbel-max categorical sample of softmax(μ); score = 1{a=d} − π_d.
+//   Box A component:      structural-σ-1 Gaussian sample μ + z, clamped to env bounds; score = z.
+func sampleAndScoreActions(spec: [ActionComponent], numEnvs: Int, dPolicy: Int,
+                           envActionWidth: Int,
+                           policyMean: UnsafePointer<Float>,
+                           envAction: UnsafeMutablePointer<Float>,
+                           scoreGrad: UnsafeMutablePointer<Float>,
+                           rngState: inout UInt64) {
+    func nextU01(_ s: inout UInt64) -> Float {
+        s &+= 0x9e3779b97f4a7c15
+        var z = s
+        z = (z ^ (z &>> 30)) &* 0xbf58476d1ce4e5b9
+        z = (z ^ (z &>> 27)) &* 0x94d049bb133111eb
+        z ^= z &>> 31
+        return Float(z >> 40) * (1.0 / Float(1 << 24))
+    }
+    func nextNormal(_ s: inout UInt64) -> Float {
+        let u1 = max(nextU01(&s), 1e-7)
+        let u2 = nextU01(&s)
+        return sqrt(-2 * log(u1)) * cos(2 * Float.pi * u2)
+    }
+    for r in 0..<numEnvs {
+        let mBase = r * dPolicy
+        let aBase = r * envActionWidth
+        var pIdx = 0, aIdx = 0
+        for component in spec {
+            switch component {
+            case .discrete(let n):
+                // Gumbel-max sample over logits at policyMean[mBase + pIdx ..< pIdx + n].
+                // Stable softmax: subtract max-logit; score = 1{a=d} − π_d sums to 0 per row.
+                var maxLogit = -Float.greatestFiniteMagnitude
+                for d in 0..<n { maxLogit = max(maxLogit, policyMean[mBase + pIdx + d]) }
+                var bestIdx = 0
+                var bestKey = -Float.greatestFiniteMagnitude
+                for d in 0..<n {
+                    let l = policyMean[mBase + pIdx + d]
+                    let u = max(nextU01(&rngState), 1e-7)
+                    let g = -log(-log(u))
+                    let key = l + g
+                    if key > bestKey { bestKey = key; bestIdx = d }
+                }
+                var Z: Float = 0
+                for d in 0..<n {
+                    Z += exp(policyMean[mBase + pIdx + d] - maxLogit)
+                }
+                let invZ: Float = 1.0 / max(Z, .leastNormalMagnitude)
+                for d in 0..<n {
+                    let pi_d = exp(policyMean[mBase + pIdx + d] - maxLogit) * invZ
+                    scoreGrad[mBase + pIdx + d] = ((d == bestIdx) ? 1.0 : 0.0) - pi_d
+                }
+                envAction[aBase + aIdx] = Float(bestIdx)   // env reads as integer index
+                pIdx += n; aIdx += 1
+            case .box(let a, let low, let high):
+                for d in 0..<a {
+                    let z = nextNormal(&rngState)
+                    let mu = policyMean[mBase + pIdx + d]
+                    let raw = mu + z   // structural σ = 1
+                    let clamped = max(low[d], min(high[d], raw.isFinite ? raw : 0))
+                    envAction[aBase + aIdx + d] = clamped
+                    scoreGrad[mBase + pIdx + d] = z
+                }
+                pIdx += a; aIdx += a
+            }
+        }
+    }
+}
 
 private struct Schema: Hashable, Comparable {
     let observationDim: Int, actionDim: Int, actionDiscreteCount: Int?
@@ -178,46 +278,42 @@ private final class MeasuredActionCollector {
     private var discrete: [Int]?
     private var sum: [Double]?, sumsq: [Double]?
     private var l2s = 0.0, l2sq = 0.0, n = 0
+    private let envActionWidth: Int
 
-    init(discreteCount: Int?, actDim: Int) {
+    // Pass 11 Tier 1: consumes env-flat action vectors (the wrapper-sampled actions actually
+    // sent to the env). For discrete envs the env-flat width is 1 (the chosen index); for
+    // continuous it is actDim. The agent's policyMean is never seen here — telemetry tracks
+    // what the env actually received, which is the BWH-orthodox observable.
+    init(discreteCount: Int?, envActionWidth: Int) {
+        self.envActionWidth = envActionWidth
         if let c = discreteCount { discrete = [Int](repeating: 0, count: c) }
-        else { sum = [Double](repeating: 0, count: actDim); sumsq = [Double](repeating: 0, count: actDim) }
+        else { sum = [Double](repeating: 0, count: envActionWidth); sumsq = [Double](repeating: 0, count: envActionWidth) }
     }
 
-    func addMeasured(_ batch: ActionBatch, numEnvs: Int, actDim: Int) {
-        let f = batch.floats
+    func addMeasured(envAction: [Float], numEnvs: Int) {
         if var h = discrete {
-            // Discrete env: argmax the agent's continuous-vector to recover the index that the
-            // env-wrapper sent. Per Pass 10, the agent has no notion of action-type — telemetry
-            // (which IS env-aware) reconstructs the discrete index here.
-            let bins = h.count
             for row in 0..<numEnvs {
-                var best = 0; var bestV: Float = -.greatestFiniteMagnitude
-                let b = row * actDim
-                for d in 0..<bins {
-                    let v = f[b + d]
-                    if v > bestV { bestV = v; best = d }
-                }
-                h[best] &+= 1
+                let idx = max(0, min(h.count - 1, Int(envAction[row * envActionWidth])))
+                h[idx] &+= 1
             }
             discrete = h
         }
         guard var s = sum, var q = sumsq else { return }
         for row in 0..<numEnvs {
             var l = 0.0
-            let b = row * actDim
-            for d in 0..<actDim { let v = Double(f[b + d]); s[d] += v; q[d] += v * v; l += v * v }
+            let b = row * envActionWidth
+            for d in 0..<envActionWidth { let v = Double(envAction[b + d]); s[d] += v; q[d] += v * v; l += v * v }
             let r = sqrt(l); l2s += r; l2sq += r * r; n += 1
         }
         sum = s; sumsq = q
     }
 
-    func partialMetrics(actDim: Int) -> (DiscreteActionMetrics?, ContinuousActionMetrics?) {
+    func partialMetrics() -> (DiscreteActionMetrics?, ContinuousActionMetrics?) {
         let d = discrete.map { DiscreteActionMetrics(histogram: $0, uniqueCount: $0.filter { $0 > 0 }.count) }
         guard let s = sum, let q = sumsq, n > 0 else { return (d, nil) }
         let nn = Double(n)
-        let mean = (0..<actDim).map { s[$0] / nn }
-        let std  = (0..<actDim).map { let m = mean[$0]; return sqrt(max(0, q[$0] / nn - m * m)) }
+        let mean = (0..<envActionWidth).map { s[$0] / nn }
+        let std  = (0..<envActionWidth).map { let m = mean[$0]; return sqrt(max(0, q[$0] / nn - m * m)) }
         let ml = l2s / nn
         return (d, ContinuousActionMetrics(meanPerDim: mean, stdPerDim: std, meanL2: ml,
                                            stdL2: sqrt(max(0, l2sq / nn - ml * ml))))
@@ -356,11 +452,19 @@ final class EnvPoolEnv {
     let numEnvs: Int, obsDim: Int, actDim: Int
     let actionDiscreteCount: Int?
     let actionLow: [Float], actionHigh: [Float]
-    // Pre-allocated scratch — discrete-index buffer (used only when actionDiscreteCount != nil)
-    // and a clamped-action buffer (used when continuous). Both sized once at init; no per-step
-    // allocation on the hot path (Inv-6).
+    // Pass 11 Tier 1: env-declared structured action spec composed of one or more components
+    // (Discrete N | Box A). For current single-component envs this is derived from existing
+    // bridge fields (discreteCount + actionBounds); a future multi-component env (StarCraft 2,
+    // mixed continuous+discrete) declares its spec via a C++ ABI extension that the Swift
+    // layer reads through the same NativeBridge interface. The agent only sees `dPolicy`.
+    let actionSpec: [ActionComponent]
+    let dPolicy: Int
+    let envActionWidth: Int
+    private(set) var envActionScratch: [Float]
+    private(set) var scoreGradScratch: [Float]
     private var discreteIndexScratch: [Int32]
-    private var clampedActionScratch: [Float]
+    private var clampedBoxScratch: [Float]
+    private var rngState: UInt64
 
     init(id: String, numEnvs: Int, seed: Int?) throws {
         self.numEnvs = numEnvs
@@ -368,11 +472,23 @@ final class EnvPoolEnv {
         obsDim = bridge.obsDim(handle); actDim = bridge.actDim(handle)
         actionDiscreteCount = bridge.discreteCount(handle)
         (actionLow, actionHigh) = bridge.actionBounds(handle, actDim: actDim)
+        // Derive the action spec for this env. Single-component for all current bench envs;
+        // multi-component spec wiring lives behind a future bridge ABI extension.
+        if let n = actionDiscreteCount {
+            self.actionSpec = [.discrete(n: n)]
+        } else {
+            self.actionSpec = [.box(n: actDim, low: actionLow, high: actionHigh)]
+        }
+        self.dPolicy = actionSpec.totalPolicyParamCount
+        self.envActionWidth = actionSpec.totalEnvActionWidth
         observationScratch = Array(repeating: 0, count: numEnvs * obsDim)
         rewardScratch = Array(repeating: 0, count: numEnvs)
         doneScratch = Array(repeating: 0, count: numEnvs)
+        envActionScratch  = Array(repeating: 0, count: numEnvs * envActionWidth)
+        scoreGradScratch  = Array(repeating: 0, count: numEnvs * dPolicy)
         discreteIndexScratch = Array(repeating: 0, count: numEnvs)
-        clampedActionScratch = Array(repeating: 0, count: numEnvs * actDim)
+        clampedBoxScratch = Array(repeating: 0, count: numEnvs * actDim)
+        rngState = UInt64(bitPattern: Int64(seed ?? Int(oakUnseededSeed))) &* 0x9e3779b97f4a7c15 &+ 1
     }
     deinit { bridge.close(handle) }
 
@@ -383,41 +499,37 @@ final class EnvPoolEnv {
     }
     func reset() throws { try checked { try bridge.reset(handle, obs: &observationScratch) } }
 
-    // Pass 10: agent emits a real-valued vector of length actDim; the wrapper interprets it.
+    // Wrapper-owned sampling + scoreGrad. Reads policyMean[B · dPolicy], samples per-component,
+    // writes envActionScratch + scoreGradScratch, dispatches to the appropriate bridge step
+    // function for current single-component envs (multi-component would call a generic step).
     // This is the SOLE site that knows the env's action-space type — Inv-1 boundary.
-    //   Discrete env: argmax over the first `discreteCount` dims → integer index → stepDiscrete.
-    //   Continuous env: clamp per-dim to [actionLow, actionHigh] (env constraint, NOT agent
-    //                   shaping) → stepContinuous.
-    func step(_ action: ActionBatch) throws {
-        let f = action.floats
-        if let bins = actionDiscreteCount {
-            for r in 0..<numEnvs {
-                var best = 0; var bestV: Float = -.greatestFiniteMagnitude
-                let b = r * actDim
-                for d in 0..<bins {
-                    let v = f[b + d]
-                    if v > bestV { bestV = v; best = d }
+    func sampleAndStep(policyMean: [Float]) throws {
+        precondition(policyMean.count == numEnvs * dPolicy)
+        policyMean.withUnsafeBufferPointer { pmBuf in
+            envActionScratch.withUnsafeMutableBufferPointer { aBuf in
+                scoreGradScratch.withUnsafeMutableBufferPointer { sgBuf in
+                    sampleAndScoreActions(spec: actionSpec, numEnvs: numEnvs, dPolicy: dPolicy,
+                                          envActionWidth: envActionWidth,
+                                          policyMean: pmBuf.baseAddress!,
+                                          envAction: aBuf.baseAddress!,
+                                          scoreGrad: sgBuf.baseAddress!, rngState: &rngState)
                 }
-                discreteIndexScratch[r] = Int32(best)
             }
+        }
+        // Dispatch to bridge per the SINGLE component current envs use. Multi-component envs
+        // (StarCraft 2, mixed) would land via a new bridge.stepEnv(action: [Float]) ABI export.
+        switch actionSpec[0] {
+        case .discrete:
+            for r in 0..<numEnvs { discreteIndexScratch[r] = Int32(envActionScratch[r]) }
             try checked {
                 try bridge.stepDiscrete(handle, action: discreteIndexScratch,
                                         obs: &observationScratch,
                                         reward: &rewardScratch, done: &doneScratch)
             }
-        } else {
-            for r in 0..<numEnvs {
-                let b = r * actDim
-                for d in 0..<actDim {
-                    let v = f[b + d]
-                    if !v.isFinite { clampedActionScratch[b + d] = 0 }
-                    else if v < actionLow[d]  { clampedActionScratch[b + d] = actionLow[d] }
-                    else if v > actionHigh[d] { clampedActionScratch[b + d] = actionHigh[d] }
-                    else { clampedActionScratch[b + d] = v }
-                }
-            }
+        case .box:
+            // envAction is already wrapper-clamped; no agent-side clamp shaping.
             try checked {
-                try bridge.stepContinuous(handle, action: clampedActionScratch,
+                try bridge.stepContinuous(handle, action: envActionScratch,
                                           obs: &observationScratch,
                                           reward: &rewardScratch, done: &doneScratch)
             }
@@ -437,11 +549,13 @@ final class EnvPoolEnv {
 private struct KernelConfig {
     var obsDim: UInt32 = 0, rank: UInt32 = 0, actDim: UInt32 = 0, batch: UInt32 = 0
     var optionCount: UInt32 = 0, baseObsDim: UInt32 = 0
-    // Pass 10: dropped actionParamCount field — D is structurally 2·actDim, kernel computes it
-    // directly from cfg.actDim (no env-type-conditioned width per Inv-3).
+    // Pass 11 Tier 1: env-declared D_policy. Sum of per-component policy-param widths from the
+    // env's action spec (Discrete-N → N; Box-A → A). The agent has no notion of WHAT the
+    // components are — only the integer width.
+    var actionParamCount: UInt32 = 0
     var pEncoder: UInt32 = 0, pValue: UInt32 = 0, pPsi: UInt32 = 0, pOptPolicy: UInt32 = 0
     var sObservation: UInt32 = 0, sObsMean: UInt32 = 0, sState: UInt32 = 0
-    var sPrevAction: UInt32 = 0, sAction: UInt32 = 0, sScoreGrad: UInt32 = 0
+    var sPrevPolicyMean: UInt32 = 0, sPolicyMean: UInt32 = 0, sScoreGrad: UInt32 = 0
     var sReward: UInt32 = 0, sTd: UInt32 = 0, sTdPsi: UInt32 = 0, sVCurr: UInt32 = 0
     var uDone: UInt32 = 0, uActiveMask: UInt32 = 0, uActiveList: UInt32 = 0
     var uOption: UInt32 = 0, uCounters: UInt32 = 0, uSubtaskFeatureOf: UInt32 = 0
@@ -487,52 +601,48 @@ private enum OakMetalLayout {
     static func psiCount(rank: Int, actDim: Int) -> Int {
         optionCount(rank: rank, actDim: actDim) * concatDim(rank: rank, actDim: actDim)
     }
-    // Pass 10 unification: agent always emits a Gaussian over actDim, so D_params = 2·actDim
-    // structurally (μ_d, log_σ_d per dim). No env-type-conditioned width per Inv-3.
-    static func actionParamCount(actDim: Int) -> Int { 2 * actDim }
-    static func optPolicyCount(rank: Int, actDim: Int) -> Int {
-        optionCount(rank: rank, actDim: actDim) * actionParamCount(actDim: actDim) * rank
-    }
-    static func discreteLogitHalfWidth(rank: Int, actDim: Int) -> Float {
-        min(sqrtf(Float(max(rank * actDim, 1))), logf(Float.greatestFiniteMagnitude))
+    // Pass 11 Tier 1: D_policy is env-declared (sum of per-component policy-param widths).
+    // Single-Discrete-N envs → D = N; single-Box-A envs → D = A; multi-component envs sum.
+    // Computed by the host wrapper from the env's ActionSpec, passed to engine init.
+    static func optPolicyCount(rank: Int, actDim: Int, dPolicy: Int) -> Int {
+        optionCount(rank: rank, actDim: actDim) * dPolicy * rank
     }
 
     struct Param { let encoder, value, psi, optPolicy, total: Int }
-    static func paramLayout(obsDim: Int, rank: Int, actDim: Int) -> Param {
+    static func paramLayout(obsDim: Int, rank: Int, actDim: Int, dPolicy: Int) -> Param {
         var o = 0
         let enc = o; o += rank
         let val = o; o += rank
         let psi = o; o += psiCount(rank: rank, actDim: actDim)
-        let op  = o; o += optPolicyCount(rank: rank, actDim: actDim)
+        let op  = o; o += optPolicyCount(rank: rank, actDim: actDim, dPolicy: dPolicy)
         return Param(encoder: enc, value: val, psi: psi, optPolicy: op, total: o)
     }
 
     struct State {
-        let observation, obsMean, state, prevAction, action, scoreGrad: Int
+        let observation, obsMean, state, prevPolicyMean, policyMean, scoreGrad: Int
         let reward, td, tdPsi, vCurr: Int
         let featSM, wBar, featMean, utilFeat, utilOpt: Int
         let total: Int
     }
-    static func stateLayout(obsDim: Int, rank: Int, actDim: Int, batch: Int) -> State {
+    static func stateLayout(obsDim: Int, rank: Int, actDim: Int, batch: Int, dPolicy: Int) -> State {
         let K = optionCount(rank: rank, actDim: actDim)
-        let D = actionParamCount(actDim: actDim)
         var o = 0
         let obs = o; o += batch * obsDim
         let mean = o; o += obsDim
         let st = o; o += 2 * batch * rank
-        let prA = o; o += batch * actDim
-        let act = o; o += batch * actDim
-        let sg  = o; o += batch * D       // score function ∇log π(a|s) for the SAMPLED action
+        let prP = o; o += batch * dPolicy   // prev step's policyMean (host-written, telemetry)
+        let pol = o; o += batch * dPolicy   // current step's policyMean (kernel-written)
+        let sg  = o; o += batch * dPolicy   // host-written ∇log π for the wrapper-sampled action
         let rew = o; o += batch
         let td  = o; o += batch
-        let tdP = o; o += batch * K       // K cumulant TDs per row (Design 2 collapse)
-        let vc  = o; o += batch           // vCurr = w_main · curr_state (cached in predict, read by plan)
+        let tdP = o; o += batch * K         // K cumulant TDs per row (Design 2 collapse)
+        let vc  = o; o += batch             // vCurr = w_main · curr_state (cached in predict, read by plan)
         let fs  = o; o += rank
         let wb  = o; o += rank
-        let fm  = o; o += rank            // per-feature running mean (cumulant centering ρ_k)
+        let fm  = o; o += rank              // per-feature running mean (cumulant centering ρ_k)
         let uf  = o; o += rank
         let uo  = o; o += K
-        return State(observation: obs, obsMean: mean, state: st, prevAction: prA, action: act,
+        return State(observation: obs, obsMean: mean, state: st, prevPolicyMean: prP, policyMean: pol,
                      scoreGrad: sg, reward: rew, td: td, tdPsi: tdP, vCurr: vc,
                      featSM: fs, wBar: wb, featMean: fm, utilFeat: uf, utilOpt: uo, total: o)
     }
@@ -598,8 +708,7 @@ final class OakMetalEngine {
         Phase(name: "oak_bk_admit_commit",    tgSize: 0),
     ]
 
-    private let obsDim, baseObsDim, actDim, batch, rank: Int
-    private let actionParamCount: Int
+    private let obsDim, baseObsDim, actDim, batch, rank, dPolicy: Int
     private let queue: MTLCommandQueue
     private let cbDesc: MTLCommandBufferDescriptor
     private let pipelines: [MTLComputePipelineState]
@@ -649,15 +758,17 @@ final class OakMetalEngine {
     // pipelines just to read `threadExecutionWidth` from one of them.
     static func executionWidth(device: MTLDevice) throws -> Int { 32 }
 
-    // Pass 10: agent constructor takes ONLY signal-shape parameters {obsDim, baseObsDim, actDim,
-    // batch, rank}. Action-space type and per-dim env bounds live in the env-wrapper layer
-    // (EnvPoolEnv), not in the agent. Inv-1 + Bitter Lesson.
-    init(obsDim: Int, baseObsDim: Int, actDim: Int, batch: Int, rank: Int,
+    // Pass 11 Tier 1: agent constructor takes signal-shape parameters {obsDim, baseObsDim, actDim,
+    // batch, rank, dPolicy}. dPolicy is the env-declared D_policy (sum of per-component policy-
+    // param widths from the env's ActionSpec). The agent has no notion of WHAT the components
+    // are — only the integer width. Inv-1 + Bitter Lesson.
+    init(obsDim: Int, baseObsDim: Int, actDim: Int, batch: Int, rank: Int, dPolicy: Int,
          device: MTLDevice, seed: Int?, diagnosticGpuPhaseTiming: Bool = false) throws {
         precondition(obsDim == rank, "obsDim must equal rank (interface-derived latent width).")
         precondition(baseObsDim <= obsDim && baseObsDim >= 1, "baseObsDim must be positive and ≤ obsDim.")
+        precondition(dPolicy >= 1, "dPolicy must be positive (env's action-spec param-count sum).")
         self.obsDim = obsDim; self.baseObsDim = baseObsDim; self.actDim = actDim
-        self.batch = batch; self.rank = rank
+        self.batch = batch; self.rank = rank; self.dPolicy = dPolicy
         guard let queue = device.makeCommandQueue() else {
             throw OakError.message("Failed to create Metal command queue.")
         }
@@ -677,11 +788,10 @@ final class OakMetalEngine {
         statsPointer.initialize(to: KernelStats())
         configPointer.initialize(to: KernelConfig())
 
-        let paramLayout = OakMetalLayout.paramLayout(obsDim: obsDim, rank: rank, actDim: actDim)
+        let paramLayout = OakMetalLayout.paramLayout(obsDim: obsDim, rank: rank, actDim: actDim,
+                                                     dPolicy: dPolicy)
         stateLayout = OakMetalLayout.stateLayout(obsDim: obsDim, rank: rank, actDim: actDim,
-                                                 batch: batch)
-        let actionParamCount = OakMetalLayout.actionParamCount(actDim: actDim)
-        self.actionParamCount = actionParamCount
+                                                 batch: batch, dPolicy: dPolicy)
         uintLayout  = OakMetalLayout.uintLayout(rank: rank, actDim: actDim, batch: batch)
         paramsArena = Shared(device: device, count: paramLayout.total, zero: Float16(0))
         stateArena  = Shared(device: device, count: stateLayout.total, zero: Float(0))
@@ -690,8 +800,7 @@ final class OakMetalEngine {
         // Cache per-phase grid width so there's no allocation on the hot path.
         let K = OakMetalLayout.optionCount(rank: rank, actDim: actDim)
         let M = OakMetalLayout.concatDim(rank: rank, actDim: actDim)
-        // meta_action: always 1 thread per (row, action_dim) since the agent always emits a
-        // per-dim Gaussian. No env-type-conditioned grid (Pass 10 unification).
+        // meta_action: 1 thread per (row, p) for p ∈ [0, dPolicy). dPolicy is env-declared.
         phaseGridWidths = [
             batch * rank,                     // oak_encode              [dispatchThreads]
             batch,                            // oak_predict             [dispatchThreads]
@@ -700,8 +809,8 @@ final class OakMetalEngine {
             rank,                             // oak_learn_value         [R TGs × 32]
             max(baseObsDim, 1),               // oak_learn_encoder       [dispatchThreads]
             K * M,                            // oak_learn_psi           [dispatchThreads]
-            K * actionParamCount * rank,      // oak_learn_pi            [dispatchThreads]
-            batch * actDim,                   // oak_meta_action         [dispatchThreads]
+            K * dPolicy * rank,               // oak_learn_pi            [dispatchThreads]
+            batch * dPolicy,                  // oak_meta_action         [dispatchThreads]
             1,                                // oak_bk_reduce           [1 TG × 128]
             rank,                             // oak_bk_feature          [R TGs × 32]
             K,                                // oak_bk_option           [K TGs × 128]
@@ -711,7 +820,7 @@ final class OakMetalEngine {
         self.diagnosticGpuPhaseTiming = diagnosticGpuPhaseTiming
         phaseGpuTimeSumSeconds = Array(repeating: 0, count: Self.phases.count)
         phaseGpuInvalidStepCount = Array(repeating: 0, count: Self.phases.count)
-        hostAction = Array(repeating: 0, count: batch * actDim)
+        hostAction = Array(repeating: 0, count: batch * dPolicy)
 
         // --- Metal 4 ICB + MTLResidencySet setup ----------------------------------------------
         // Pass 10 dropped the bounds buffer. 6 binds: params, stateArena, uintArena, scalars,
@@ -755,7 +864,7 @@ final class OakMetalEngine {
         sample(paramLayout.value, rank, invR)
         sample(paramLayout.psi, OakMetalLayout.psiCount(rank: rank, actDim: actDim), invR)
         sample(paramLayout.optPolicy,
-               OakMetalLayout.optPolicyCount(rank: rank, actDim: actDim), invR)
+               OakMetalLayout.optPolicyCount(rank: rank, actDim: actDim, dPolicy: dPolicy), invR)
         // ψ diagonal seed: cumulant k's W_ψ[k] · concat[s, λ] gets a +1/√R coefficient on its own
         // state feature index k (RRS feature-attainment initialization; Alberta Plan A.6 / OBB
         // §2.4). The first R weights of W_ψ[k] are state weights; index [k][k] is "predict
@@ -815,10 +924,12 @@ final class OakMetalEngine {
     // is OK ONLY because the probe binary is removed at the end of Pass 11 along with this method.
     func probeSlot(_ name: String) -> [Float]? {
         switch name {
-        case "policyMean", "action":
-            return readFloats(stateArena, offset: stateLayout.action, count: batch * actDim)
+        case "policyMean":
+            return readFloats(stateArena, offset: stateLayout.policyMean, count: batch * dPolicy)
+        case "prevPolicyMean":
+            return readFloats(stateArena, offset: stateLayout.prevPolicyMean, count: batch * dPolicy)
         case "scoreGrad":
-            return readFloats(stateArena, offset: stateLayout.scoreGrad, count: batch * actionParamCount)
+            return readFloats(stateArena, offset: stateLayout.scoreGrad, count: batch * dPolicy)
         case "state":
             return readFloats(stateArena, offset: stateLayout.state, count: 2 * batch * rank)
         case "td":          return readFloats(stateArena, offset: stateLayout.td,      count: batch)
@@ -862,19 +973,26 @@ final class OakMetalEngine {
     }
 
     // ---- Step dispatch -----------------------------------------------------------------------
-    func step(obs: UnsafeBufferPointer<Float>, prevAction: [Float], prevReward: [Float],
-              prevDone: [UInt8], accumulatePhaseGpu: Bool) throws -> (ActionBatch, Double, KernelStats) {
+    // Pass 11 Tier 1: takes prevPolicyMean[B·D] + prevScoreGrad[B·D] (host-written scoreGrad
+    // for last step's wrapper-sampled action), returns this step's policyMean[B·D]. The wrapper
+    // (EnvPoolEnv.sampleAndStep) then samples per-component and produces (action, scoreGrad).
+    func step(obs: UnsafeBufferPointer<Float>, prevPolicyMean: [Float],
+              prevScoreGrad: [Float], prevReward: [Float], prevDone: [UInt8],
+              accumulatePhaseGpu: Bool) throws -> (PolicyMeanBatch, Double, KernelStats) {
         let start = DispatchTime.now().uptimeNanoseconds
 
         precondition(obs.count == batch * obsDim)
         precondition(prevReward.count == batch)
-        precondition(prevAction.count == batch * actDim)
+        precondition(prevPolicyMean.count == batch * dPolicy)
+        precondition(prevScoreGrad.count == batch * dPolicy)
         memcpy(stateArena.pointer.advanced(by: stateLayout.observation), obs.baseAddress!,
                batch * obsDim * MemoryLayout<Float>.stride)
         memcpy(stateArena.pointer.advanced(by: stateLayout.reward), prevReward,
                batch * MemoryLayout<Float>.stride)
-        memcpy(stateArena.pointer.advanced(by: stateLayout.prevAction), prevAction,
-               batch * actDim * MemoryLayout<Float>.stride)
+        memcpy(stateArena.pointer.advanced(by: stateLayout.prevPolicyMean), prevPolicyMean,
+               batch * dPolicy * MemoryLayout<Float>.stride)
+        memcpy(stateArena.pointer.advanced(by: stateLayout.scoreGrad), prevScoreGrad,
+               batch * dPolicy * MemoryLayout<Float>.stride)
         let donePtr = uintArena.pointer.advanced(by: uintLayout.done)
         for i in 0..<batch { donePtr[i] = UInt32(prevDone[i]) }
 
@@ -887,11 +1005,9 @@ final class OakMetalEngine {
 
         try runKernel(accumulatePhaseGpu: accumulatePhaseGpu)
 
-        // Pass 10: agent always returns a continuous-action vector. The env-wrapper layer
-        // (EnvPoolEnv.step) interprets it (argmax for discrete envs, bound-clamp for continuous).
-        memcpy(&hostAction, stateArena.pointer.advanced(by: stateLayout.action),
-               batch * actDim * MemoryLayout<Float>.stride)
-        return (ActionBatch(floats: hostAction),
+        memcpy(&hostAction, stateArena.pointer.advanced(by: stateLayout.policyMean),
+               batch * dPolicy * MemoryLayout<Float>.stride)
+        return (PolicyMeanBatch(values: hostAction, dPolicy: dPolicy),
                 Double(DispatchTime.now().uptimeNanoseconds - start) / 1_000_000,
                 statsPointer.pointee)
     }
@@ -903,11 +1019,12 @@ final class OakMetalEngine {
         var c = KernelConfig()
         c.obsDim = UInt32(obsDim); c.rank = UInt32(rank); c.actDim = UInt32(actDim)
         c.batch = UInt32(batch); c.optionCount = UInt32(K); c.baseObsDim = UInt32(baseObsDim)
+        c.actionParamCount = UInt32(dPolicy)
         c.pEncoder = UInt32(p.encoder); c.pValue = UInt32(p.value)
         c.pPsi = UInt32(p.psi);         c.pOptPolicy = UInt32(p.optPolicy)
         c.sObservation = UInt32(s.observation); c.sObsMean = UInt32(s.obsMean)
-        c.sState = UInt32(s.state); c.sPrevAction = UInt32(s.prevAction)
-        c.sAction = UInt32(s.action); c.sScoreGrad = UInt32(s.scoreGrad)
+        c.sState = UInt32(s.state); c.sPrevPolicyMean = UInt32(s.prevPolicyMean)
+        c.sPolicyMean = UInt32(s.policyMean); c.sScoreGrad = UInt32(s.scoreGrad)
         c.sReward = UInt32(s.reward); c.sTd = UInt32(s.td); c.sTdPsi = UInt32(s.tdPsi)
         c.sVCurr = UInt32(s.vCurr)
         c.uDone = UInt32(u.done); c.uActiveMask = UInt32(u.activeMask)
@@ -1033,18 +1150,18 @@ private enum RunSnapshot {
 // ================================================================================================
 // Sizing: directNumEnvs (S9) — structural memory budget, no bytesPerEnv heuristic.
 // ================================================================================================
-private func directNumEnvs(obsDim: Int, actDim: Int, device: MTLDevice) throws -> Int {
+private func directNumEnvs(obsDim: Int, actDim: Int, dPolicy: Int, device: MTLDevice) throws -> Int {
     let width = try OakMetalEngine.executionWidth(device: device)
     let rank = obsDim
     let K = OakMetalLayout.optionCount(rank: rank, actDim: actDim)
-    let D = OakMetalLayout.actionParamCount(actDim: actDim)
-    let perEnvFloats =  // state double-buffer (2R), obs (O), action+prevAction (2A), scoreGrad (D),
-                        // tdPsi (K), reward (1), td (1).
-        obsDim + 2 * rank + 2 * actDim + D + K + 2
+    let perEnvFloats =  // state double-buffer (2R), obs (O), prevPolicyMean+policyMean+scoreGrad (3D),
+                        // tdPsi (K), reward + td (2).
+        obsDim + 2 * rank + 3 * dPolicy + K + 2
     let perEnvUints = 1 + 2  // done + option slots
     let perEnvBytes = perEnvFloats * MemoryLayout<Float>.stride
                     + perEnvUints  * MemoryLayout<UInt32>.stride
-    let paramBytes = OakMetalLayout.paramLayout(obsDim: obsDim, rank: rank, actDim: actDim).total
+    let paramBytes = OakMetalLayout.paramLayout(obsDim: obsDim, rank: rank, actDim: actDim,
+                                                 dPolicy: dPolicy).total
                     * MemoryLayout<Float16>.stride
     // Fixed (per-engine, not per-env): featSM + wBar + featMean + utilFeat (4·R fp32) + utilOpt (K fp32).
     let fixedBytes = paramBytes + (4 * rank + K) * MemoryLayout<Float>.stride
@@ -1087,8 +1204,9 @@ private struct RunContext {
 private final class RunState {
     var prevReward: [Float]
     var prevDone: [UInt8]
-    var prevAction: [Float]
-    var randFloats: [Float]
+    var prevPolicyMean: [Float]   // size B · dPolicy
+    var prevScoreGrad: [Float]    // size B · dPolicy
+    var randPolicyMean: [Float]   // scratch for random-policy μ emission
     var randSeed: UInt64
     var totalSteps = 0
     var measuredSteps = 0
@@ -1105,10 +1223,12 @@ private final class RunState {
     init(env: EnvPoolEnv, seed: Int?) {
         prevReward = Array(repeating: 0, count: env.numEnvs)
         prevDone = Array(repeating: 0, count: env.numEnvs)
-        prevAction = Array(repeating: 0, count: env.actDim * env.numEnvs)
-        randFloats = Array(repeating: 0, count: env.actDim * env.numEnvs)
+        prevPolicyMean = Array(repeating: 0, count: env.numEnvs * env.dPolicy)
+        prevScoreGrad  = Array(repeating: 0, count: env.numEnvs * env.dPolicy)
+        randPolicyMean = Array(repeating: 0, count: env.numEnvs * env.dPolicy)
         randSeed = UInt64(bitPattern: Int64(seed ?? Int(oakUnseededSeed)))
-        actionCol = MeasuredActionCollector(discreteCount: env.actionDiscreteCount, actDim: env.actDim)
+        actionCol = MeasuredActionCollector(discreteCount: env.actionDiscreteCount,
+                                             envActionWidth: env.envActionWidth)
     }
 }
 
@@ -1148,9 +1268,14 @@ private final class ProbeEnv {
     let numEnvs: Int, obsDim: Int, actDim: Int
     let actionDiscreteCount: Int?
     let actionLow: [Float], actionHigh: [Float]
+    let actionSpec: [ActionComponent]
+    let dPolicy: Int
+    let envActionWidth: Int
     private(set) var observationScratch: [Float]
     private(set) var rewardScratch: [Float]
     private(set) var doneScratch: [UInt8]
+    private(set) var envActionScratch: [Float]
+    private(set) var scoreGradScratch: [Float]
     private var rngState: UInt64
     private var stepIndex: Int = 0
     private var swapped: Bool = false
@@ -1171,42 +1296,82 @@ private final class ProbeEnv {
 
     init(kind: ProbeEnvKind, numEnvs: Int, seed: Int?) {
         self.kind = kind; self.numEnvs = numEnvs
-        // Structural sizing per env kind. obsDim must equal rank, so we keep them small.
+        // Structural sizing per env kind. obsDim must equal rank. The env must have temporal
+        // structure for OaK's value-bootstrapping to learn — pure contextual-bandit (iid s)
+        // gives the value head nothing to bootstrap. Each env keeps a per-row "task" (target
+        // identity / regression target) that persists for `taskHorizon` steps then resamples.
+        // Random baseline = 1/A; optimal = 1.
         switch kind {
         case .discrete, .plasticityStress:
-            self.obsDim = 8; self.actDim = 4; self.actionDiscreteCount = 4
+            self.obsDim = 64; self.actDim = 4; self.actionDiscreteCount = 4
         case .continuous, .highVariance:
-            self.obsDim = 8; self.actDim = 2; self.actionDiscreteCount = nil
+            self.obsDim = 64; self.actDim = 4; self.actionDiscreteCount = nil
         case .sparse:
-            self.obsDim = 8; self.actDim = 4; self.actionDiscreteCount = 4
+            self.obsDim = 64; self.actDim = 4; self.actionDiscreteCount = 4
         case .partialObservable:
-            self.obsDim = 8; self.actDim = 4; self.actionDiscreteCount = 4
+            self.obsDim = 64; self.actDim = 4; self.actionDiscreteCount = 4
         }
         self.actionLow  = Array(repeating: -1, count: actDim)
         self.actionHigh = Array(repeating:  1, count: actDim)
+        if let n = actionDiscreteCount {
+            self.actionSpec = [.discrete(n: n)]
+        } else {
+            self.actionSpec = [.box(n: actDim, low: actionLow, high: actionHigh)]
+        }
+        self.dPolicy = actionSpec.totalPolicyParamCount
+        self.envActionWidth = actionSpec.totalEnvActionWidth
         self.observationScratch = Array(repeating: 0, count: numEnvs * obsDim)
         self.rewardScratch = Array(repeating: 0, count: numEnvs)
         self.doneScratch = Array(repeating: 0, count: numEnvs)
+        self.envActionScratch = Array(repeating: 0, count: numEnvs * envActionWidth)
+        self.scoreGradScratch = Array(repeating: 0, count: numEnvs * dPolicy)
         self.rngState = UInt64(bitPattern: Int64(seed ?? 1)) &* 0x9e3779b97f4a7c15 &+ 1
         self.targetWeights = Array(repeating: 0, count: actDim * obsDim)
         self.swapStep = 5000
         self.chainPos = Array(repeating: 0, count: numEnvs)
         self.poTarget = Array(repeating: 0, count: numEnvs)
         self.poStepsSinceTarget = Array(repeating: 0, count: numEnvs)
-        // Initialize w[a, o] = ±1 with deterministic structural pattern, scaled by 1/√O so
-        // ‖w·s‖ is O(1). For discrete envs each action a has its own weight vector w[a].
-        let invO = 1.0 / sqrt(Float(obsDim))
-        for i in 0..<targetWeights.count {
-            targetWeights[i] = (i % 2 == 0 ? 1 : -1) * invO * Float(((i / 7) % 3) - 1)
+        self.persistentTask = Array(repeating: 0, count: numEnvs)
+        self.persistentObs = Array(repeating: 0, count: numEnvs * obsDim)
+        self.persistentSteps = Array(repeating: 0, count: numEnvs)
+        // Closed-form signal: w[a, o] = δ(a == o). Optimal action = argmax_a obs[a]. For
+        // continuous, optimal per-dim action = obs[d]. Combined with persistent observations
+        // (the obs encodes the task identity and stays constant for `taskHorizon` steps),
+        // the agent's value-bootstrap learns v(s) and policy learns to map s → optimal action.
+        for a in 0..<actDim {
+            for o in 0..<obsDim {
+                targetWeights[a * obsDim + o] = (a == o ? 1 : 0)
+            }
         }
-        // Ensure non-degenerate w: at least one non-zero entry per action row.
-        for a in 0..<actDim where targetWeights[a*obsDim..<(a+1)*obsDim].allSatisfy({ $0 == 0 }) {
-            targetWeights[a * obsDim] = invO
-        }
-        sampleObservation()
+        // Initialize each row's persistent task and corresponding observation.
+        for r in 0..<numEnvs { resampleTask(row: r) }
+        copyPersistentToScratch()
     }
 
-    func reset() { sampleObservation() }
+    private let taskHorizon = 8  // task persists for this many steps then resamples
+    private var persistentTask: [Int]
+    private var persistentObs: [Float]
+    private var persistentSteps: [Int]
+
+    private func resampleTask(row r: Int) {
+        let task = Int(nextU01() * Float(actDim)) % actDim
+        persistentTask[r] = task
+        // Persistent observation: a randomly-positioned strong (+10) signal indicating the
+        // task. Specifically obs[task*16 .. (task+1)*16] has +10 in one dim, others zero. This
+        // mimics MiniGrid's "strong feature in a known position" structure, and the high
+        // magnitude (+10) ensures the encoder's random init produces large, non-noisy state
+        // values that make the policy gradient pop above value-bootstrap noise.
+        for o in 0..<obsDim { persistentObs[r * obsDim + o] = 0 }
+        let pos = task * 16 + (Int(nextU01() * 16) % 16)
+        persistentObs[r * obsDim + pos] = 10.0
+        persistentSteps[r] = 0
+    }
+
+    private func copyPersistentToScratch() {
+        observationScratch = persistentObs
+    }
+
+    func reset() { copyPersistentToScratch() }
 
     private func nextU01() -> Float {
         rngState &+= 0x9e3779b97f4a7c15
@@ -1225,23 +1390,28 @@ private final class ProbeEnv {
     }
 
     private func sampleObservation() {
-        for i in 0..<observationScratch.count { observationScratch[i] = nextNormal() }
-        // Partial-observable env: encode target identity in obs[0] at step 0, then mask to 0.
-        if kind == .partialObservable {
+        switch kind {
+        case .partialObservable:
+            // Target shown at obs[0] for one step at start of episode, then masked to 0.
             for r in 0..<numEnvs {
                 if poStepsSinceTarget[r] == 0 {
                     observationScratch[r * obsDim + 0] = Float(poTarget[r]) - Float(actDim - 1) / 2
+                    for o in 1..<obsDim { observationScratch[r * obsDim + o] = nextNormal() }
                 } else {
-                    observationScratch[r * obsDim + 0] = 0  // hidden
+                    for o in 0..<obsDim { observationScratch[r * obsDim + o] = nextNormal() }
+                    observationScratch[r * obsDim + 0] = 0  // hidden after step 0
                 }
             }
-        }
-        // Sparse-chain env: encode position in obs[0], rest 0.
-        if kind == .sparse {
+        case .sparse:
             for r in 0..<numEnvs {
                 for o in 0..<obsDim { observationScratch[r * obsDim + o] = 0 }
                 observationScratch[r * obsDim + 0] = Float(chainPos[r]) / 7.0 - 0.5
             }
+        case .discrete, .plasticityStress, .continuous, .highVariance:
+            // Persistent-task envs: copy the row's persistent obs (set on task resample) to
+            // the scratch. The task persists for taskHorizon steps so OaK's value-head can
+            // bootstrap. After taskHorizon, the row's task resamples (handled in step()).
+            copyPersistentToScratch()
         }
     }
 
@@ -1262,88 +1432,103 @@ private final class ProbeEnv {
         return max(-1, min(1, v))
     }
 
-    // Step the env. Reads `action[B·A]` from `actionFloats`, computes per-row reward and writes
-    // it to `rewardScratch`; updates internal state; samples next observation.
-    func step(actionFloats: [Float]) {
+    // Wrapper-owned sampling + step: read policyMean[B · dPolicy], sample per-component into
+    // envActionScratch + scoreGradScratch (via the same free function used by EnvPoolEnv),
+    // then read the env-flat action and grade the agent's choice against the closed-form
+    // optimal. This matches the production runtime path so the probe exercises the same
+    // wrapper sampling code that the bench does.
+    func sampleAndStep(policyMean: [Float]) {
+        precondition(policyMean.count == numEnvs * dPolicy)
+        policyMean.withUnsafeBufferPointer { pm in
+            envActionScratch.withUnsafeMutableBufferPointer { aBuf in
+                scoreGradScratch.withUnsafeMutableBufferPointer { sgBuf in
+                    sampleAndScoreActions(spec: actionSpec, numEnvs: numEnvs, dPolicy: dPolicy,
+                                          envActionWidth: envActionWidth,
+                                          policyMean: pm.baseAddress!,
+                                          envAction: aBuf.baseAddress!,
+                                          scoreGrad: sgBuf.baseAddress!, rngState: &rngState)
+                }
+            }
+        }
         stepIndex += 1
-        // Plasticity-stress: at swapStep flip target weights (forces relearning).
         if kind == .plasticityStress, !swapped, stepIndex >= swapStep {
             for i in 0..<targetWeights.count { targetWeights[i] = -targetWeights[i] }
             swapped = true
         }
         switch kind {
         case .discrete, .plasticityStress:
+            // Persistent-task contextual bandit. Reward = +1 if chosen action == persistentTask,
+            // -1 otherwise. Random baseline E[r] = (1/A)·1 + ((A-1)/A)·(-1) = 1 - 2(A-1)/A
+            // (e.g., -0.5 at A=4). Optimal = +1. Task resamples every taskHorizon.
             for r in 0..<numEnvs {
-                var bestIdx = 0; var bestV = -Float.greatestFiniteMagnitude
-                let b = r * actDim
-                for a in 0..<actDim {
-                    let v = actionFloats[b + a]
-                    if v > bestV { bestV = v; bestIdx = a }
-                }
-                rewardScratch[r] = bestIdx == optimalDiscreteAction(row: r) ? 1 : 0
+                let chosen = max(0, min(actDim - 1, Int(envActionScratch[r])))
+                rewardScratch[r] = chosen == persistentTask[r] ? 1 : -1
                 doneScratch[r] = 0
+                persistentSteps[r] += 1
+                if persistentSteps[r] >= taskHorizon {
+                    doneScratch[r] = 1
+                    resampleTask(row: r)
+                }
             }
         case .continuous:
+            // Persistent-task continuous regression: optimal action[d] = persistentObs[r][d].
+            // Reward = -SSE. Task resamples every taskHorizon.
             for r in 0..<numEnvs {
                 var sse: Float = 0
                 let b = r * actDim
                 for d in 0..<actDim {
-                    let opt = optimalContinuousAction(row: r, dim: d)
-                    let diff = actionFloats[b + d] - opt
+                    let target = persistentObs[r * obsDim + d]
+                    let diff = envActionScratch[b + d] - target
                     sse += diff * diff
                 }
                 rewardScratch[r] = -sse
                 doneScratch[r] = 0
+                persistentSteps[r] += 1
+                if persistentSteps[r] >= taskHorizon {
+                    doneScratch[r] = 1
+                    resampleTask(row: r)
+                }
             }
         case .highVariance:
+            // Same regression structure as continuous, plus Bernoulli ±1 reward jitter.
             for r in 0..<numEnvs {
                 var sse: Float = 0
                 let b = r * actDim
                 for d in 0..<actDim {
-                    let opt = optimalContinuousAction(row: r, dim: d)
-                    let diff = actionFloats[b + d] - opt
+                    let target = persistentObs[r * obsDim + d]
+                    let diff = envActionScratch[b + d] - target
                     sse += diff * diff
                 }
-                let jitter: Float = nextU01() < 0.5 ? -1 : 1  // ±1 Bernoulli noise on top of structural signal
+                let jitter: Float = nextU01() < 0.5 ? -1 : 1
                 rewardScratch[r] = -sse + jitter
                 doneScratch[r] = 0
+                persistentSteps[r] += 1
+                if persistentSteps[r] >= taskHorizon {
+                    doneScratch[r] = 1
+                    resampleTask(row: r)
+                }
             }
         case .sparse:
             for r in 0..<numEnvs {
-                var bestIdx = 0; var bestV = -Float.greatestFiniteMagnitude
-                let b = r * actDim
-                for a in 0..<actDim {
-                    let v = actionFloats[b + a]
-                    if v > bestV { bestV = v; bestIdx = a }
-                }
-                // Action 0 advances along the chain; other actions stall.
-                if bestIdx == 0 { chainPos[r] = min(chainPos[r] + 1, 7) }
+                let chosen = max(0, min(actDim - 1, Int(envActionScratch[r])))
+                if chosen == 0 { chainPos[r] = min(chainPos[r] + 1, 7) }
                 if chainPos[r] == 7 {
-                    rewardScratch[r] = 1
-                    doneScratch[r] = 1
-                    chainPos[r] = 0
+                    rewardScratch[r] = 1; doneScratch[r] = 1; chainPos[r] = 0
                 } else {
-                    rewardScratch[r] = 0
-                    doneScratch[r] = 0
+                    rewardScratch[r] = 0; doneScratch[r] = 0
                 }
             }
         case .partialObservable:
             for r in 0..<numEnvs {
-                var bestIdx = 0; var bestV = -Float.greatestFiniteMagnitude
-                let b = r * actDim
-                for a in 0..<actDim {
-                    let v = actionFloats[b + a]
-                    if v > bestV { bestV = v; bestIdx = a }
-                }
+                let chosen = max(0, min(actDim - 1, Int(envActionScratch[r])))
                 poStepsSinceTarget[r] += 1
                 if poStepsSinceTarget[r] >= poHorizon {
-                    rewardScratch[r] = bestIdx == poTarget[r] ? 1 : 0
+                    rewardScratch[r] = chosen == poTarget[r] ? 1 : 0
                     doneScratch[r] = 1
                     poStepsSinceTarget[r] = 0
                     poTarget[r] = Int(nextU01() * Float(actDim)) % actDim
                 } else {
-                    rewardScratch[r] = 0
-                    doneScratch[r] = 0
+                    rewardScratch[r] = 0; doneScratch[r] = 0
                 }
             }
         }
@@ -1415,7 +1600,8 @@ private func ranks(_ a: [Double]) -> [Double] {
         let warmup = max(ProcessInfo.processInfo.environment["OAK_WARMUP_STEPS"].flatMap(Int.init) ?? 0, 0)
         let device = try metalDevice()
         let probe = try EnvPoolEnv(id: envId, numEnvs: 1, seed: seed)
-        let defaultN = try directNumEnvs(obsDim: probe.obsDim, actDim: probe.actDim, device: device)
+        let defaultN = try directNumEnvs(obsDim: probe.obsDim, actDim: probe.actDim,
+                                         dPolicy: probe.dPolicy, device: device)
         let numEnvs = max(ProcessInfo.processInfo.environment["OAK_NUM_ENVS"].flatMap(Int.init) ?? defaultN, 1)
         let stopAfter = max(ProcessInfo.processInfo.environment["OAK_STOP_AFTER_STEPS"].flatMap(Int.init) ?? numEnvs, numEnvs)
         let baseline = max(ProcessInfo.processInfo.environment["OAK_BASELINE_RANDOM_STEPS"].flatMap(Int.init) ?? 0, 0)
@@ -1464,7 +1650,8 @@ private func ranks(_ a: [Double]) -> [Double] {
         let warmup = max(ProcessInfo.processInfo.environment["OAK_DIAG_WARMUP_STEPS"].flatMap(Int.init) ?? 0, 0)
         let device = try metalDevice()
         let probe = try EnvPoolEnv(id: resolved, numEnvs: 1, seed: seed)
-        let defaultN = try directNumEnvs(obsDim: probe.obsDim, actDim: probe.actDim, device: device)
+        let defaultN = try directNumEnvs(obsDim: probe.obsDim, actDim: probe.actDim,
+                                         dPolicy: probe.dPolicy, device: device)
         // diagnose uses the same memory-derived defaultN as run; OAK_NUM_ENVS overrides.
         let numEnvs = max(forcedN
                           ?? ProcessInfo.processInfo.environment["OAK_NUM_ENVS"].flatMap(Int.init)
@@ -1548,8 +1735,8 @@ private func ranks(_ a: [Double]) -> [Double] {
         let env = ProbeEnv(kind: envKind, numEnvs: probeNumEnvs, seed: seed)
         let engine = try OakMetalEngine(
             obsDim: env.obsDim, baseObsDim: env.obsDim, actDim: env.actDim,
-            batch: probeNumEnvs, rank: env.obsDim, device: device, seed: seed,
-            diagnosticGpuPhaseTiming: false)
+            batch: probeNumEnvs, rank: env.obsDim, dPolicy: env.dPolicy,
+            device: device, seed: seed, diagnosticGpuPhaseTiming: false)
         env.reset()
 
         // Window count K = ⌈√N⌉ heartbeat windows of ⌊N/K⌋ steps each (structural — √N is the
@@ -1562,20 +1749,24 @@ private func ranks(_ a: [Double]) -> [Double] {
         var windowSums = [Double](repeating: 0, count: windowCount)
         var windowCounts = [Int](repeating: 0, count: windowCount)
 
-        var prevAction = [Float](repeating: 0, count: probeNumEnvs * env.actDim)
+        var prevPolicyMean = [Float](repeating: 0, count: probeNumEnvs * env.dPolicy)
+        var prevScoreGrad  = [Float](repeating: 0, count: probeNumEnvs * env.dPolicy)
         var prevReward = [Float](repeating: 0, count: probeNumEnvs)
         var prevDone   = [UInt8](repeating: 0, count: probeNumEnvs)
         for batchIdx in 0..<totalBatches {
-            let actionBatch = try env.observationScratch.withUnsafeBufferPointer { buf in
-                try engine.step(obs: buf, prevAction: prevAction, prevReward: prevReward,
+            let policyMean = try env.observationScratch.withUnsafeBufferPointer { buf in
+                try engine.step(obs: buf, prevPolicyMean: prevPolicyMean,
+                                prevScoreGrad: prevScoreGrad, prevReward: prevReward,
                                 prevDone: prevDone, accumulatePhaseGpu: false).0
             }
-            env.step(actionFloats: actionBatch.floats)
+            env.sampleAndStep(policyMean: policyMean.values)
             let w = min(batchIdx / batchesPerWindow, windowCount - 1)
             for v in env.rewardScratch { windowSums[w] += Double(v); windowCounts[w] += 1 }
             memcpy(&prevReward, env.rewardScratch, probeNumEnvs * MemoryLayout<Float>.stride)
             memcpy(&prevDone,   env.doneScratch,   probeNumEnvs * MemoryLayout<UInt8>.stride)
-            memcpy(&prevAction, actionBatch.floats, actionBatch.floats.count * MemoryLayout<Float>.stride)
+            memcpy(&prevPolicyMean, policyMean.values, policyMean.values.count * MemoryLayout<Float>.stride)
+            memcpy(&prevScoreGrad, env.scoreGradScratch,
+                   env.scoreGradScratch.count * MemoryLayout<Float>.stride)
         }
 
         var means = [Double](repeating: 0, count: windowCount)
@@ -1699,8 +1890,10 @@ private func ranks(_ a: [Double]) -> [Double] {
         let benchDir = resolveBenchmarkWorkingDirectory(root: root, expectedTasks: expected)
         try FileManager.default.createDirectory(at: benchDir, withIntermediateDirectories: true)
         for env in envOrder {
+            // dPolicy from the schema: discreteCount for discrete envs, actDim for continuous.
+            let dPolicyEst = env.schema.actionDiscreteCount ?? env.schema.actionDim
             let defaultN = try directNumEnvs(obsDim: env.schema.observationDim, actDim: env.schema.actionDim,
-                                             device: device)
+                                             dPolicy: dPolicyEst, device: device)
             let numEnvs = max(forcedN ?? defaultN, 1)
             for seed in seedStart..<(seedStart + seedCount) {
                 for policy in policies {
@@ -1758,36 +1951,27 @@ private func ranks(_ a: [Double]) -> [Double] {
         }
     }
 
-    private static func randomAction(for env: EnvPoolEnv, numEnvs: Int, stepCount: inout UInt64,
-                                     floats: inout [Float]) -> ActionBatch {
-        // Deterministic counter-based RNG — no host RNG state, purely structural per Inv 9.
+    private static func randomPolicyMean(for env: EnvPoolEnv, numEnvs: Int,
+                                          stepCount: inout UInt64,
+                                          floats: inout [Float]) -> PolicyMeanBatch {
+        // Pass 11 Tier 1: the random "policy" emits a uniform-random μ vector in [-1, 1] of
+        // width B · dPolicy. The wrapper then samples per-component (Gumbel-max for Discrete:
+        // a uniform-random μ produces a near-uniform categorical → effectively random index;
+        // structural-σ-1 Gaussian for Box: μ + N(0,1) ≈ N(0,1) → bound-clamped). This keeps
+        // the random baseline shape-equivalent to the agent and exercises the same wrapper
+        // sampling path, so the (oak vs random) comparison is a clean policy-only ablation.
         func mix(_ x: UInt64) -> UInt64 {
             var z = x &+ 0x9e3779b97f4a7c15
             z = (z ^ (z &>> 30)) &* 0xbf58476d1ce4e5b9
             z = (z ^ (z &>> 27)) &* 0x94d049bb133111eb
             return z ^ (z &>> 31)
         }
-        // Pass 10: random policy emits the same shape the agent does — a real-valued vector.
-        // For discrete envs the env-wrapper argmaxes; setting a one-hot at a uniform-random
-        // index produces the same effect as the prior categorical sampler. For continuous, we
-        // emit per-dim uniform samples in env bounds (still purely env-wrapper-side knowledge
-        // since `env.actionLow/High` live in EnvPoolEnv).
-        for i in floats.indices { floats[i] = 0 }
-        if let count = env.actionDiscreteCount {
-            for row in 0..<numEnvs {
-                stepCount &+= 1
-                let choice = Int(mix(stepCount) % UInt64(count))
-                floats[row * env.actDim + choice] = 1
-            }
-            return ActionBatch(floats: floats)
-        }
         for i in floats.indices {
             stepCount &+= 1
             let u = Float(mix(stepCount) >> 40) * (1.0 / Float(1 << 24))
-            let dim = i % env.actDim
-            floats[i] = env.actionLow[dim] + (env.actionHigh[dim] - env.actionLow[dim]) * u
+            floats[i] = u * 2 - 1
         }
-        return ActionBatch(floats: floats)
+        return PolicyMeanBatch(values: floats, dPolicy: env.dPolicy)
     }
 
     // --- single-run orchestration (setup → loop → snapshot) --------------------------------
@@ -1799,11 +1983,11 @@ private func ranks(_ a: [Double]) -> [Double] {
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         fputs("OaK metrics \(dir.path)\n", stderr); fflush(stderr)
         let env = try EnvPoolEnv(id: envId, numEnvs: numEnvs, seed: seed)
-        // Pass 10: agent constructor takes only signal-shape parameters. Action-space type and
-        // per-dim env bounds are wrapper-layer concerns (live in EnvPoolEnv).
+        // Pass 11 Tier 1: agent constructor takes signal-shape params + dPolicy (env-declared).
+        // Action-space type, per-dim bounds, and per-component sampling all live in EnvPoolEnv.
         let engine: OakMetalEngine? = policy == .oak ? try OakMetalEngine(
             obsDim: env.obsDim, baseObsDim: env.obsDim, actDim: env.actDim,
-            batch: numEnvs, rank: env.obsDim,
+            batch: numEnvs, rank: env.obsDim, dPolicy: env.dPolicy,
             device: device, seed: seed, diagnosticGpuPhaseTiming: includeDiagnostic) : nil
         try env.reset()
         return RunContext(envId: envId, policy: policy, seed: seed, warmup: warmup,
@@ -1829,7 +2013,7 @@ private func ranks(_ a: [Double]) -> [Double] {
         }
         let diagOut: RunDiagnostic? = ((seq != nil && ctx.policy == .oak) || (seq == nil && ctx.includeDiagnostic))
                                        ? merged : nil
-        let (dA, cA) = state.actionCol.partialMetrics(actDim: ctx.env.actDim)
+        let (dA, cA) = state.actionCol.partialMetrics()
         let sps = state.measuredSeconds > 0 ? Double(state.measuredSteps) / state.measuredSeconds : nil
         let reason = seq == nil ? "measured_steps" : "heartbeat"
         return RunMetricsFile(
@@ -1855,22 +2039,23 @@ private func ranks(_ a: [Double]) -> [Double] {
             if measured && state.measurementStart == nil {
                 state.measurementStart = DispatchTime.now().uptimeNanoseconds
             }
-            let actionBatch: ActionBatch, agentMs: Double, stats: KernelStats?
+            let policyMean: PolicyMeanBatch, agentMs: Double, stats: KernelStats?
             if let engine = ctx.engine {
                 let out = try ctx.env.observationScratch.withUnsafeBufferPointer { buf in
-                    try engine.step(obs: buf, prevAction: state.prevAction, prevReward: state.prevReward,
+                    try engine.step(obs: buf, prevPolicyMean: state.prevPolicyMean,
+                                    prevScoreGrad: state.prevScoreGrad, prevReward: state.prevReward,
                                     prevDone: state.prevDone, accumulatePhaseGpu: measured)
                 }
-                actionBatch = out.0; agentMs = out.1; stats = out.2
+                policyMean = out.0; agentMs = out.1; stats = out.2
             } else {
                 let t0 = DispatchTime.now().uptimeNanoseconds
-                actionBatch = randomAction(for: ctx.env, numEnvs: ctx.numEnvs, stepCount: &state.randSeed,
-                                           floats: &state.randFloats)
+                policyMean = randomPolicyMean(for: ctx.env, numEnvs: ctx.numEnvs, stepCount: &state.randSeed,
+                                              floats: &state.randPolicyMean)
                 agentMs = Double(DispatchTime.now().uptimeNanoseconds - t0) / 1_000_000
                 stats = nil
             }
             let envStart = DispatchTime.now().uptimeNanoseconds
-            try ctx.env.step(actionBatch)
+            try ctx.env.sampleAndStep(policyMean: policyMean.values)
             let envMs = Double(DispatchTime.now().uptimeNanoseconds - envStart) / 1_000_000
             state.totalSteps = nextTotal
             if measured {
@@ -1889,11 +2074,13 @@ private func ranks(_ a: [Double]) -> [Double] {
                 }
                 state.agentMsSum += agentMs; state.envMsSum += envMs
                 if let s = stats { state.health.record(s) }
-                state.actionCol.addMeasured(actionBatch, numEnvs: ctx.numEnvs, actDim: ctx.env.actDim)
+                state.actionCol.addMeasured(envAction: ctx.env.envActionScratch, numEnvs: ctx.numEnvs)
             }
             memcpy(&state.prevReward, ctx.env.rewardScratch, ctx.numEnvs * MemoryLayout<Float>.stride)
             memcpy(&state.prevDone,   ctx.env.doneScratch,   ctx.numEnvs * MemoryLayout<UInt8>.stride)
-            memcpy(&state.prevAction, actionBatch.floats, actionBatch.floats.count * MemoryLayout<Float>.stride)
+            memcpy(&state.prevPolicyMean, policyMean.values, policyMean.values.count * MemoryLayout<Float>.stride)
+            memcpy(&state.prevScoreGrad, ctx.env.scoreGradScratch,
+                   ctx.env.scoreGradScratch.count * MemoryLayout<Float>.stride)
         }
     }
 
