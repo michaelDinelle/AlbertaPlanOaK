@@ -51,17 +51,18 @@ using namespace metal;
 //   valueW[R]                                   w_main (main-task linear value)
 //   psi[K · M]                                  W_ψ[k] · concat[s, λ]: shared chord-conditional
 //                                               SF (Design 2; OBB §2.4 Eq.4). M = R + K.
-//   optPolicy[K · D · R]                        per-option action params; D = numActions
-//                                               (discrete logits) | 2·actDim (continuous Gaussian
-//                                               [μ_d, log_σ_d]). Sampled in oak_meta_action with
-//                                               canonical score function ∇log π in scoreGrad arena.
+//   optPolicy[K · 2·A · R]                      per-option Gaussian action params [μ_d, log_σ_d]
+//                                               for d ∈ [0, A). Sampled in oak_meta_action with
+//                                               canonical Gaussian score function ∇log π written
+//                                               to scoreGrad. Pass 10: ALWAYS Gaussian — no
+//                                               discrete branch in agent (env-wrapper interprets).
 // State arena (fp32):
 //   observation[B·O]                            centered → state[slot · B · R]
 //   observationMean[O]                          online Welford mean for encoder centering
 //   state[2 · B · R]                            double-buffered (slot toggles each step; S5)
 //   prevAction[B·A]                             previous step's action (sent to env at step N-1)
-//   action[B·A]                                 current step's sampled action (will be sent to env)
-//   scoreGrad[B·D]                              ∇_θ log π(a|s) for the sampled action — REINFORCE
+//   action[B·A]                                 current step's sampled real-valued action vector
+//   scoreGrad[B · 2·A]                          Gaussian score [(z/σ)_d, ((z²−1)/2)_d] for each d
 //   reward[B], td[B]
 //   tdPsi[B · K]                                K cumulant TDs per row (Design 2 collapse)
 // UInt arena:
@@ -91,13 +92,14 @@ constant uint OAK_CNT_REINIT_FEAT   = 4u;  // bk_admit_commit: encoder-feature r
 // Index 5 is reserved (was second half of option-reinit bitmask for K > 32; dead under
 // the K ≤ OAK_SIMD constraint).
 
-[[function_constant(0)]] constant bool fc_action_is_discrete;
+// No function constants. Pass 10 unification: the agent has zero a-priori knowledge of action-
+// space type. optPolicy is always K · 2·A · R (Gaussian μ_d, log_σ_d per action dim); the env-
+// wrapper layer (EnvPoolEnv.step in Main.swift) is the SOLE site that interprets the agent's
+// continuous-vector output (argmax for discrete envs, bound-clamp for continuous envs).
+// Inv-1: no env-conditioned branches in agent; Inv-3: no env-type-conditioned widths.
 
 struct KernelConfig {
     uint obsDim, rank, actDim, batch, optionCount, baseObsDim;
-    // D_params: numActions for discrete (one logit per action), 2·actDim for continuous Gaussian
-    // ([μ, log_σ] per action dim). Determines optPolicy[K · D · R] and scoreGrad[B · D] shapes.
-    uint actionParamCount;
     // Param offsets (in fp16 stride). ψ is laid out as [K rows × M cols] where M = R + K
     // (Alberta Plan Design 2: shared chord-conditional ψ_k(s, λ) = W_ψ[k] · concat[s, λ]).
     uint pEncoder, pValue, pPsi, pOptPolicy;
@@ -188,7 +190,7 @@ inline Ctx make_ctx(device half *params, device float *stateArena, device uint *
     c.R = cfg.rank; c.A = cfg.actDim; c.B = cfg.batch; c.K = max(cfg.optionCount, 1u);
     c.O = cfg.obsDim; c.baseO = cfg.baseObsDim;
     c.M = c.R + c.K;
-    c.D = max(cfg.actionParamCount, 1u);
+    c.D = 2u * c.A;  // structural: Gaussian μ + log_σ per action dim (Pass 10 unification)
     c.activeCount = scalars->activeCount;
     c.stepCount   = scalars->stepCount;
     c.stateSlot   = scalars->stateSlot;
@@ -308,8 +310,7 @@ kernel void oak_encode(
     device uint   *uintArena  [[buffer(2)]],
     device KernelScalars *scalars [[buffer(3)]],
     device KernelStats   *stats   [[buffer(4)]],
-    device const float   *bounds  [[buffer(5)]],
-    constant KernelConfig &cfg    [[buffer(6)]],
+    constant KernelConfig &cfg    [[buffer(5)]],
     uint gid [[thread_position_in_grid]])
 {
     Ctx ctx = make_ctx(params, stateArena, uintArena, scalars, cfg);
@@ -338,8 +339,7 @@ kernel void oak_predict(
     device uint   *uintArena  [[buffer(2)]],
     device KernelScalars *scalars [[buffer(3)]],
     device KernelStats   *stats   [[buffer(4)]],
-    device const float   *bounds  [[buffer(5)]],
-    constant KernelConfig &cfg    [[buffer(6)]],
+    constant KernelConfig &cfg    [[buffer(5)]],
     uint gid [[thread_position_in_grid]])
 {
     Ctx ctx = make_ctx(params, stateArena, uintArena, scalars, cfg);
@@ -398,8 +398,7 @@ kernel void oak_plan(
     device uint   *uintArena  [[buffer(2)]],
     device KernelScalars *scalars [[buffer(3)]],
     device KernelStats   *stats   [[buffer(4)]],
-    device const float   *bounds  [[buffer(5)]],
-    constant KernelConfig &cfg    [[buffer(6)]],
+    constant KernelConfig &cfg    [[buffer(5)]],
     uint tgid [[threadgroup_position_in_grid]],
     uint tid  [[thread_position_in_threadgroup]])
 {
@@ -445,27 +444,24 @@ kernel void oak_plan(
 }
 
 // =================================================================================================
-// meta_action — emit action by sampling from the active option's chord-conditional policy AND
-// compute the canonical score function ∇_θ log π(a | s) for that sample. Replaces the broken
-// `actionGrad = clamp(logit)` from pre-pass-9 (which was identically equal to `action` and
-// produced a zero score). REINFORCE policy gradient (Tier 6).
+// meta_action — emit a real-valued action vector by sampling from the active option's per-dim
+// Gaussian policy and compute the canonical Gaussian score function for the sample. Pass 10
+// unification: ONE code path. The agent has zero a-priori knowledge of action-space type — it
+// always emits actDim continuous values; the env-wrapper layer (EnvPoolEnv.step) interprets
+// (argmax → discrete index | bound-clamp → continuous control). Inv-1: no env-conditioned
+// branches; Bitter Lesson: no human-engineered "discrete vs continuous" taxonomy in the agent.
 //
-// Discrete (D = numActions, A action one-hots):
-//   logits[d] = W_π[k*][d] · s_curr,     π_d = softmax(logits)
-//   sample a* via Gumbel-max with splitmix32 hash → action = one-hot(a*)
-//   scoreGrad[d] = 1{d=a*} − π_d         (= ∇_logit_d log π(a*|s))
+// Per (row, action-dim a):
+//   μ_a     = W_π[k*][2a]   · s_curr     (state-conditional mean)
+//   log_σ_a = W_π[k*][2a+1] · s_curr     (state-conditional log-std; σ = exp(log_σ) > 0 always)
+//   z_a ~ N(0, 1) via Box-Muller from splitmix32(step, row, a) (pair of uniforms)
+//   action[a] = μ_a + σ_a · z_a
+//   scoreGrad[2a]   = z_a / σ_a                  (= (a−μ)/σ²; ∇_μ log p)
+//   scoreGrad[2a+1] = (z_a² − 1) / 2             (= ((a−μ)²/σ² − 1)/2; ∇_logσ log p)
 //
-// Continuous (D = 2·A, [μ_d, log_σ_d] per dim):
-//   μ_d     = W_π[k*][2d]   · s_curr     (state-conditional mean)
-//   log_σ_d = W_π[k*][2d+1] · s_curr     (state-conditional log-std; σ = exp(log_σ) > 0 always)
-//   z_d ~ N(0, 1) via Box-Muller from splitmix32(step, row, d) (pair of uniforms)
-//   action[d] = μ_d + σ_d · z_d
-//   scoreGrad[2d]   = z_d / σ_d                  (= (a−μ)/σ²; ∇_μ log p)
-//   scoreGrad[2d+1] = (z_d² − 1) / 2             (= ((a−μ)²/σ² − 1)/2; ∇_logσ log p)
-//
-// No clamping anywhere — env clamps action at FFI host boundary; implicit α + reward centering
-// keep the parameter updates bounded under the Big World Hypothesis (Kim 2510.06149).
-//   [Grid: B (discrete) | B · A (continuous)]
+// No clamping anywhere — env clamps continuous-control action at the FFI boundary; implicit α +
+// reward centering keep the parameter updates bounded under the Big World Hypothesis.
+//   [Grid: B · A — one thread per (row, action-dim).]
 // =================================================================================================
 inline uint splitmix32(uint x) {
     x += 0x9e3779b9u;
@@ -475,7 +471,7 @@ inline uint splitmix32(uint x) {
 }
 inline float hash_uniform(uint step, uint row, uint dim) {
     uint h = splitmix32(step ^ splitmix32(row ^ splitmix32(dim)));
-    // Convert 24-bit mantissa to (0, 1). FLT_MIN floor avoids log(0) in Gumbel-max / Box-Muller.
+    // Convert 24-bit mantissa to (0, 1). FLT_MIN floor avoids log(0) in Box-Muller.
     return max(float(h >> 8) * 5.9604645e-8f, FLT_MIN);
 }
 
@@ -485,81 +481,36 @@ kernel void oak_meta_action(
     device uint   *uintArena  [[buffer(2)]],
     device KernelScalars *scalars [[buffer(3)]],
     device KernelStats   *stats   [[buffer(4)]],
-    device const float   *bounds  [[buffer(5)]],
-    constant KernelConfig &cfg    [[buffer(6)]],
+    constant KernelConfig &cfg    [[buffer(5)]],
     uint gid [[thread_position_in_grid]])
 {
     Ctx ctx = make_ctx(params, stateArena, uintArena, scalars, cfg);
+    uint row = gid / ctx.A, a = gid % ctx.A;
+    if (row >= ctx.B) return;
+
     device const float *curr = state_slot(ctx, 1u - ctx.stateSlot);
+    uint optK    = option_slot(ctx, 1u - ctx.optionSlot)[row];
+    uint xOff    = row * ctx.R;
+    uint optBase = optK * ctx.D * ctx.R;
 
-    if (fc_action_is_discrete) {
-        uint row = gid;
-        if (row >= ctx.B) return;
-        uint optK = option_slot(ctx, 1u - ctx.optionSlot)[row];
-        uint xOff = row * ctx.R;
-        uint optBase = optK * ctx.D * ctx.R;
+    // Per-dim Gaussian parameters from the (2a, 2a+1) rows of optPolicy[k*].
+    float mu     = active_dot_half(ctx.optPolicy, optBase + (2u * a     ) * ctx.R,
+                                   curr, xOff, ctx.activeList, ctx.activeCount);
+    float log_sg = active_dot_half(ctx.optPolicy, optBase + (2u * a + 1u) * ctx.R,
+                                   curr, xOff, ctx.activeList, ctx.activeCount);
+    float sigma = exp(log_sg);  // strictly positive without clamp
 
-        // Pass 1: logits, max for numerically-stable softmax, Gumbel-max sample.
-        uint bestA = 0u;
-        float bestG = -FLT_MAX;
-        float maxLogit = -FLT_MAX;
-        // We need logits twice (for Gumbel-max and softmax). Compute on the fly twice — D ≤ 32
-        // for typical actDim, and active_dot is only O(activeCount) reads per d.
-        for (uint d = 0u; d < ctx.D; ++d) {
-            uint pb = optBase + d * ctx.R;
-            float ld = active_dot_half(ctx.optPolicy, pb, curr, xOff,
-                                       ctx.activeList, ctx.activeCount);
-            maxLogit = max(maxLogit, ld);
-            float u = hash_uniform(ctx.stepCount, row, d);
-            float g = -log(-log(u));
-            if (ld + g > bestG) { bestG = ld + g; bestA = d; }
-        }
-        // Pass 2: softmax denominator and per-d score = 1{d=a*} − π_d. Write action one-hot
-        // and per-logit score.
-        float Z = 0.0f;
-        for (uint d = 0u; d < ctx.D; ++d) {
-            uint pb = optBase + d * ctx.R;
-            float ld = active_dot_half(ctx.optPolicy, pb, curr, xOff,
-                                       ctx.activeList, ctx.activeCount);
-            Z += exp(ld - maxLogit);
-        }
-        float invZ = 1.0f / max(Z, FLT_MIN);
-        for (uint d = 0u; d < ctx.D; ++d) {
-            uint pb = optBase + d * ctx.R;
-            float ld = active_dot_half(ctx.optPolicy, pb, curr, xOff,
-                                       ctx.activeList, ctx.activeCount);
-            float pi_d = exp(ld - maxLogit) * invZ;
-            float chosen = (d == bestA) ? 1.0f : 0.0f;
-            ctx.action[row * ctx.A + d]    = chosen;     // env reads one-hot
-            ctx.scoreGrad[row * ctx.D + d] = chosen - pi_d;
-        }
-    } else {
-        // Continuous Gaussian: 1 thread per (row, action_dim).
-        uint row = gid / ctx.A, a = gid % ctx.A;
-        if (row >= ctx.B) return;
-        uint optK = option_slot(ctx, 1u - ctx.optionSlot)[row];
-        uint xOff = row * ctx.R;
-        uint optBase = optK * ctx.D * ctx.R;
+    // Box-Muller standard-normal sample. Two structural splitmix32 hashes → two uniforms → one z.
+    float u1 = hash_uniform(ctx.stepCount, row, 2u * a);
+    float u2 = hash_uniform(ctx.stepCount, row, 2u * a + 1u);
+    float z  = sqrt(-2.0f * log(u1)) * cos(2.0f * M_PI_F * u2);
 
-        // μ_a, log_σ_a from the (2a, 2a+1) rows of optPolicy[k*].
-        float mu     = active_dot_half(ctx.optPolicy, optBase + (2u * a    ) * ctx.R,
-                                       curr, xOff, ctx.activeList, ctx.activeCount);
-        float log_sg = active_dot_half(ctx.optPolicy, optBase + (2u * a + 1u) * ctx.R,
-                                       curr, xOff, ctx.activeList, ctx.activeCount);
-        float sigma = exp(log_sg);  // > 0 always; no clamp
-
-        // Box-Muller Gaussian sample. Two structural splitmix32 hashes → two uniforms → one z.
-        float u1 = hash_uniform(ctx.stepCount, row, 2u * a);
-        float u2 = hash_uniform(ctx.stepCount, row, 2u * a + 1u);
-        float z  = sqrt(-2.0f * log(u1)) * cos(2.0f * M_PI_F * u2);
-
-        float aSample = mu + sigma * z;
-        ctx.action[row * ctx.A + a] = aSample;
-        // ∇_μ log p     = (a − μ) / σ²       = z / σ
-        // ∇_logσ log p  = ((a−μ)²/σ² − 1)/2  = (z² − 1) / 2
-        ctx.scoreGrad[row * ctx.D + 2u * a    ] = z / max(sigma, FLT_MIN);
-        ctx.scoreGrad[row * ctx.D + 2u * a + 1u] = (z * z - 1.0f) * 0.5f;
-    }
+    ctx.action[row * ctx.A + a] = mu + sigma * z;
+    // Canonical Gaussian score function:
+    //   ∇_μ     log p(a | μ, σ) = (a − μ) / σ²       = z / σ
+    //   ∇_logσ  log p(a | μ, σ) = ((a−μ)²/σ² − 1)/2  = (z² − 1) / 2
+    ctx.scoreGrad[row * ctx.D + 2u * a     ] = z / max(sigma, FLT_MIN);
+    ctx.scoreGrad[row * ctx.D + 2u * a + 1u] = (z * z - 1.0f) * 0.5f;
 }
 
 // =================================================================================================
@@ -574,8 +525,7 @@ kernel void oak_reduce_alpha(
     device uint   *uintArena  [[buffer(2)]],
     device KernelScalars *scalars [[buffer(3)]],
     device KernelStats   *stats   [[buffer(4)]],
-    device const float   *bounds  [[buffer(5)]],
-    constant KernelConfig &cfg    [[buffer(6)]],
+    constant KernelConfig &cfg    [[buffer(5)]],
     uint tid  [[thread_position_in_threadgroup]],
     uint sgid [[simdgroup_index_in_threadgroup]],
     uint tgW  [[threads_per_threadgroup]])
@@ -612,8 +562,7 @@ kernel void oak_learn_value(
     device uint   *uintArena  [[buffer(2)]],
     device KernelScalars *scalars [[buffer(3)]],
     device KernelStats   *stats   [[buffer(4)]],
-    device const float   *bounds  [[buffer(5)]],
-    constant KernelConfig &cfg    [[buffer(6)]],
+    constant KernelConfig &cfg    [[buffer(5)]],
     uint tgid [[threadgroup_position_in_grid]],
     uint tid  [[thread_position_in_threadgroup]],
     uint tgW  [[threads_per_threadgroup]])
@@ -652,8 +601,7 @@ kernel void oak_learn_encoder(
     device uint   *uintArena  [[buffer(2)]],
     device KernelScalars *scalars [[buffer(3)]],
     device KernelStats   *stats   [[buffer(4)]],
-    device const float   *bounds  [[buffer(5)]],
-    constant KernelConfig &cfg    [[buffer(6)]],
+    constant KernelConfig &cfg    [[buffer(5)]],
     uint gid [[thread_position_in_grid]])
 {
     Ctx ctx = make_ctx(params, stateArena, uintArena, scalars, cfg);
@@ -684,8 +632,7 @@ kernel void oak_learn_psi(
     device uint   *uintArena  [[buffer(2)]],
     device KernelScalars *scalars [[buffer(3)]],
     device KernelStats   *stats   [[buffer(4)]],
-    device const float   *bounds  [[buffer(5)]],
-    constant KernelConfig &cfg    [[buffer(6)]],
+    constant KernelConfig &cfg    [[buffer(5)]],
     uint gid [[thread_position_in_grid]])
 {
     Ctx ctx = make_ctx(params, stateArena, uintArena, scalars, cfg);
@@ -716,17 +663,21 @@ kernel void oak_learn_psi(
 }
 
 // =================================================================================================
-// learn_pi — REAL REINFORCE on the chord-conditional policy. Gradient for parameter (k, d, i):
+// learn_pi — REAL REINFORCE on the per-dim Gaussian policy. Gradient for parameter (k, d, i):
 //   g[k,d,i] = (1 / |rows_k|) Σ_{r: opt(r)==k} δ_r · scoreGrad[r,d] · prev_state[r,i]
 // where δ_r = td[r] is the main differential TD (with planning advantage from oak_plan), and
-// scoreGrad[r,d] is the canonical ∇_θ_d log π(a_r | s_r) computed by oak_meta_action at the
-// PREVIOUS step (because phase order puts learn_pi BEFORE meta_action in the same step — so
-// scoreGrad in arena is still the score for action_{N-1} at state_{N-1}, which produced the
-// transition whose δ_N is being learned from).
+// scoreGrad[r,d] is the canonical Gaussian ∇_θ_d log π(a_r | s_r) computed by oak_meta_action
+// at the PREVIOUS step.
 //
-// Replaces pre-pass-9 `td · prev · prevAction` (the "policy collapse" bug — prevAction was a
-// bounded clamped scalar, not a score function). Implicit α (Kim 2510.06149) provides per-step
-// contraction; reward centering keeps δ bounded; no clamp on the parameter update.
+// Per-update implicit step (Kim 2510.06149 generalized): the global `α_imp` from oak_reduce_alpha
+// adapts only to feature norm, NOT to scoreGrad. With unbounded log_σ the score `(z²−1)/2` can
+// reach O(z² ≈ 100), accumulating into log_σ updates of O(α₀ · 100 · prev) per step that drive
+// log_σ → ∞ in tens of steps and overflow exp(). The fix is structural: compute the local
+// gradient norm `||g_local||²` from the actual (prev[i] · scoreGrad[d])² products this thread
+// is summing, then use `α_eff = α₀ / (1 + α₀ · ||g_local||²/cnt)`. When scoreGrad blows up,
+// `α_eff` shrinks proportionally; the per-step parameter delta stays bounded regardless of σ
+// dynamics. This is the SAME tracking-vs-imposing-priors discipline as oak_reduce_alpha — no
+// clamp, no entropy regularizer, no σ floor. BWH-orthodox.
 //   [Grid: K · D · R]
 // =================================================================================================
 kernel void oak_learn_pi(
@@ -735,8 +686,7 @@ kernel void oak_learn_pi(
     device uint   *uintArena  [[buffer(2)]],
     device KernelScalars *scalars [[buffer(3)]],
     device KernelStats   *stats   [[buffer(4)]],
-    device const float   *bounds  [[buffer(5)]],
-    constant KernelConfig &cfg    [[buffer(6)]],
+    constant KernelConfig &cfg    [[buffer(5)]],
     uint gid [[thread_position_in_grid]])
 {
     Ctx ctx = make_ctx(params, stateArena, uintArena, scalars, cfg);
@@ -747,18 +697,21 @@ kernel void oak_learn_pi(
     if (ctx.activeMask[i] == 0u) return;
 
     device const float *prev = state_slot(ctx, ctx.stateSlot);
-    float step = ctx.scalars->alphaImp;
     float g = 0.0f;
+    float n2 = 0.0f;  // ||per-(k,d,i) gradient terms||²; per-update implicit-α denominator
     uint  cnt = 0u;
     for (uint r = 0u; r < ctx.B; ++r) {
         if (active_option(ctx, r) != k) continue;
-        g = fma(ctx.td[r] * prev[r * ctx.R + i], ctx.scoreGrad[r * ctx.D + d], g);
+        float pi_term = prev[r * ctx.R + i] * ctx.scoreGrad[r * ctx.D + d];
+        g = fma(ctx.td[r], pi_term, g);
+        n2 = fma(pi_term, pi_term, n2);
         cnt++;
     }
     if (cnt == 0u) return;
     float invCnt = 1.0f / float(cnt);
+    float alpha_eff = ctx.alpha0 / (1.0f + ctx.alpha0 * n2 * invCnt);
     uint  pIdx = k * ctx.D * ctx.R + d * ctx.R + i;
-    ctx.optPolicy[pIdx] = half(float(ctx.optPolicy[pIdx]) + step * g * invCnt);
+    ctx.optPolicy[pIdx] = half(float(ctx.optPolicy[pIdx]) + alpha_eff * g * invCnt);
 }
 
 // =================================================================================================
@@ -773,8 +726,7 @@ kernel void oak_bk_reduce(
     device uint   *uintArena  [[buffer(2)]],
     device KernelScalars *scalars [[buffer(3)]],
     device KernelStats   *stats   [[buffer(4)]],
-    device const float   *bounds  [[buffer(5)]],
-    constant KernelConfig &cfg    [[buffer(6)]],
+    constant KernelConfig &cfg    [[buffer(5)]],
     uint tid  [[thread_position_in_threadgroup]],
     uint sgid [[simdgroup_index_in_threadgroup]],
     uint tgW  [[threads_per_threadgroup]])
@@ -896,8 +848,7 @@ kernel void oak_bk_feature(
     device uint   *uintArena  [[buffer(2)]],
     device KernelScalars *scalars [[buffer(3)]],
     device KernelStats   *stats   [[buffer(4)]],
-    device const float   *bounds  [[buffer(5)]],
-    constant KernelConfig &cfg    [[buffer(6)]],
+    constant KernelConfig &cfg    [[buffer(5)]],
     uint tgid [[threadgroup_position_in_grid]],
     uint tid  [[thread_position_in_threadgroup]],
     uint tgW  [[threads_per_threadgroup]])
@@ -936,8 +887,7 @@ kernel void oak_bk_option(
     device uint   *uintArena  [[buffer(2)]],
     device KernelScalars *scalars [[buffer(3)]],
     device KernelStats   *stats   [[buffer(4)]],
-    device const float   *bounds  [[buffer(5)]],
-    constant KernelConfig &cfg    [[buffer(6)]],
+    constant KernelConfig &cfg    [[buffer(5)]],
     uint tgid [[threadgroup_position_in_grid]],
     uint tid  [[thread_position_in_threadgroup]],
     uint sgid [[simdgroup_index_in_threadgroup]],
@@ -999,8 +949,7 @@ kernel void oak_bk_admit_commit(
     device uint   *uintArena  [[buffer(2)]],
     device KernelScalars *scalars [[buffer(3)]],
     device KernelStats   *stats   [[buffer(4)]],
-    device const float   *bounds  [[buffer(5)]],
-    constant KernelConfig &cfg    [[buffer(6)]],
+    constant KernelConfig &cfg    [[buffer(5)]],
     uint gid [[thread_position_in_grid]])
 {
     Ctx ctx = make_ctx(params, stateArena, uintArena, scalars, cfg);
