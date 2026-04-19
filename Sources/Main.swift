@@ -44,6 +44,7 @@ struct RunHealth: Codable {
     let utilityFeatureMean: Double?, utilityOptionMean: Double?
     let modelErrEMA: Double?, modelErrEMAPrev: Double?
     let tdBaseline: Double?, alphaImp: Double?, alphaEnc: Double?, alphaPi: Double?
+    let rhoBaseline: Double?         // Pass 15 Tier 2: ϖ-RTD centering baseline (cumulative reward mean)
     let oakFeatureReinitCountFinal: Int?
     let encoderMax: Double?, valueWMax: Double?, psiMax: Double?, optPolicyMax: Double?
     let outcomeHeadMax: Double?, betaWMax: Double?, omegaWMax: Double?, sprDecoderMax: Double?
@@ -270,7 +271,7 @@ private struct HealthAccumulator {
     //  12  alphaImp                (T1.3)
     //  13  alphaEnc                (T1.3)
     //  14  alphaPi                 (T1.3 — Pass 15 T0.3 ‖scoreGrad‖² implicit step)
-    //  15  RESERVED for future scalar surfacing (Tier 2 rhoBaseline, etc.)
+    //  15  rhoBaseline             (T2  — ϖ-RTD baseline; Sakha-Kamalapurkar-Meyn 2603.27874v2)
     var slots = [Slot](repeating: Slot(), count: 16)
     var steps = 0
     var rawNonFinite = 0, sanitizedNonFinite = 0
@@ -309,7 +310,7 @@ private struct HealthAccumulator {
             stats.alphaImpStat,
             stats.alphaEncStat,
             stats.alphaPiStat,
-            0,
+            stats.rhoBaselineStat,
         ]
         for (i, f) in values.enumerated() {
             let v = Double(f)
@@ -362,6 +363,7 @@ private struct HealthAccumulator {
             alphaImp: mean(12),
             alphaEnc: mean(13),
             alphaPi: mean(14),
+            rhoBaseline: mean(15),
             oakFeatureReinitCountFinal: oakFeatureReinitFinal,
             encoderMax: encoderMax > 0 ? encoderMax : nil,
             valueWMax: valueWMax > 0 ? valueWMax : nil,
@@ -471,6 +473,8 @@ private struct KernelConfig {
     var aOptFracEMA: UInt32 = 0
     // Pass 13 Tier 2: per-feature TIDBD α (SwiftSarsa 2507.19539 + MetaOptimize 2402.02342).
     var aAlphaImpFeat: UInt32 = 0, aAlphaImpBeta: UInt32 = 0, aAlphaImpH: UInt32 = 0
+    // Pass 15 Tier 2: per-cumulant ϖ-RTD ψ-centering baseline (Sakha 2603.27874v2 §1).
+    var aPsiMeanBaseline: UInt32 = 0
     var cap: Float = 0, alpha0: Float = 0, ridge: Float = 0
 }
 
@@ -496,6 +500,15 @@ private struct KernelScalars {
     // Pass 13 Tier 6.2: dense-fast-path flag (1 iff activeCount == E and activeList[i] == i for all i).
     // Set by oak_bk_admit_commit; consumed by active_dot_half_auto in the next step's kernels.
     var activeListIsIdentity: UInt32 = 0
+    // Pass 15 Tier 2: ϖ-RTD baseline (cumulative Welford mean of reward; no floor) +
+    // <valueW, featMean> baseline (the expected V(s) under empirical state distribution).
+    // Sakha-Kamalapurkar-Meyn 2603.27874v2 Theorem 2.4(ii) — first published linear-FA
+    // stability proof for relative-TD. The full Theorem requires BOTH terms in the TD
+    // centering (per research-report §11); the rhoBaseline-only form is insufficient
+    // (encoder · obs grows unbounded → V(s) grows unbounded → weights saturate). Both
+    // are computed in oak_bk_admit_commit and consumed by oak_predict.
+    var rhoBaseline: Float = 0
+    var vMeanBaseline: Float = 0
 }
 
 struct KernelStats {
@@ -517,6 +530,7 @@ struct KernelStats {
     var modelErrEMA: Float = 0, modelErrEMAPrev: Float = 0
     var tdBaselineStat: Float = 0
     var alphaImpStat: Float = 0, alphaEncStat: Float = 0, alphaPiStat: Float = 0
+    var rhoBaselineStat: Float = 0
     var oakFeatureReinitCount: Float = 0
     var encoderMax: Float = 0, valueWMax: Float = 0, psiMax: Float = 0, optPolicyMax: Float = 0
     var outcomeHeadMax: Float = 0, betaWMax: Float = 0, omegaWMax: Float = 0, sprDecoderMax: Float = 0
@@ -595,8 +609,10 @@ private enum OakMetalLayout {
         // alphaImpBeta[E] = log-step meta-parameter; alphaImpH[E] = decay trace of past Δw.
         let alphaImpFeat, alphaImpBeta, alphaImpH: Int
         // Pass 14 Tier 1: sprPred[B·R] arena slot REMOVED (the fused oak_spr_fused kernel
-        // recomputes ẑ_N inline per (row, feat) and never materializes it — saves ~3 MB at
-        // B=2048, R=376 plus ~6 MB/step write+read traffic).
+        // recomputes ẑ_N inline per (row, feat) and never materializes it).
+        // Pass 15 Tier 2: psiMeanBaseline[K] = <ψ_k, featMean> per cumulant — the ϖ-RTD
+        // centering baseline read by oak_predict; updated in oak_bk_admit_commit.
+        let psiMeanBaseline: Int
         let total: Int
     }
     static func stateLayout(obsDim: Int, rank: Int, actDim: Int, batch: Int, dPolicy: Int) -> State {
@@ -627,12 +643,14 @@ private enum OakMetalLayout {
         let aif = o; o += E          // Pass 13 Tier 2: alphaImpFeat[E] (per-feature implicit step)
         let aib = o; o += E          // alphaImpBeta[E] = log meta-parameter, init log(alpha0)
         let aih = o; o += E          // alphaImpH[E] = decay trace of past Δw, init 0
+        let pmb = o; o += K          // Pass 15 Tier 2: psiMeanBaseline[K] = <ψ_k, featMean>
         return State(observation: obs, obsMean: mean, state: st, prevPolicyMean: prP, policyMean: pol,
                      scoreGrad: sg, reward: rew, td: td, tdPsi: tdP, vCurr: vc,
                      chordSlot: cs, chordSlotPrev: csP, betaProb: bp,
                      featSM: fs, wBar: wb, featMean: fm, utilFeat: uf, utilOpt: uo,
                      optFracEMA: ofE,
                      alphaImpFeat: aif, alphaImpBeta: aib, alphaImpH: aih,
+                     psiMeanBaseline: pmb,
                      total: o)
     }
 
@@ -1183,6 +1201,7 @@ final class OakMetalEngine {
         c.uSubtaskFeatureOf = UInt32(u.subtaskFeatureOf); c.uOptionAge = UInt32(u.optionAge)
         c.aFeatSM = UInt32(s.featSM); c.aWBar = UInt32(s.wBar); c.aFeatMean = UInt32(s.featMean)
         c.aAlphaImpFeat = UInt32(s.alphaImpFeat); c.aAlphaImpBeta = UInt32(s.alphaImpBeta); c.aAlphaImpH = UInt32(s.alphaImpH)
+        c.aPsiMeanBaseline = UInt32(s.psiMeanBaseline)
         c.aUtilFeat = UInt32(s.utilFeat); c.aUtilOpt = UInt32(s.utilOpt)
         c.aOptFracEMA = UInt32(s.optFracEMA)
         c.cap = cap; c.alpha0 = 1.0 / cap; c.ridge = 1.0 / (cap + 1.0)
