@@ -48,7 +48,7 @@ private struct ContinuousActionMetrics: Encodable {
 private struct RunMetricsFile: Encodable {
     let schemaVersion: Int, command: String, envId: String, policy: Policy
     let seed: Int?
-    let numEnvs: Int, warmupSteps: Int, stopAfterMeasuredSteps: Int
+    let numEnvs: Int, stopAfterMeasuredSteps: Int
     let observationDim: Int, actionDim: Int, actionDiscreteCount: Int?
     let measuredStepCount: Int, measuredBatchCount: Int, measuredSeconds: Double
     let workerDepth: Int                // = measuredStepCount (single-stream).
@@ -323,7 +323,7 @@ private struct KernelConfig {
     var sObservation: UInt32 = 0, sObsMean: UInt32 = 0, sObsSM: UInt32 = 0
     var sState: UInt32 = 0
     var sPolicyMean: UInt32 = 0, sScoreGrad: UInt32 = 0
-    var sReward: UInt32 = 0, sTd: UInt32 = 0, sTdPsi: UInt32 = 0, sVCurr: UInt32 = 0
+    var sReward: UInt32 = 0, sTd: UInt32 = 0, sTdPsi: UInt32 = 0
     var sChord: UInt32 = 0, sChordPrev: UInt32 = 0
     var sUtilFeat: UInt32 = 0, sUtilOpt: UInt32 = 0
     var sPlanAdv: UInt32 = 0
@@ -379,7 +379,7 @@ private enum OakMetalLayout {
     struct State {
         let observation, obsMean, obsSM, state: Int
         let policyMean, scoreGrad: Int
-        let reward, td, tdPsi, vCurr: Int
+        let reward, td, tdPsi: Int
         let chord, chordPrev: Int
         let utilFeat, utilOpt: Int
         let planAdv: Int
@@ -397,7 +397,6 @@ private enum OakMetalLayout {
         let rew = o; o += 1
         let td  = o; o += 1
         let tdP = o; o += K
-        let vc  = o; o += 1
         let cs  = o; o += K
         let csP = o; o += K
         let uf  = o; o += rank
@@ -405,7 +404,7 @@ private enum OakMetalLayout {
         let pa  = o; o += 1
         return State(observation: obs, obsMean: mean, obsSM: osm, state: st,
                      policyMean: pol, scoreGrad: sg,
-                     reward: rew, td: td, tdPsi: tdP, vCurr: vc,
+                     reward: rew, td: td, tdPsi: tdP,
                      chord: cs, chordPrev: csP,
                      utilFeat: uf, utilOpt: uo,
                      planAdv: pa, total: o)
@@ -450,7 +449,6 @@ final class OakMetalEngine {
         Phase(name: "oak_meta_policy",     tgSize: 0),
         Phase(name: "oak_predict",         tgSize: 0),
         Phase(name: "oak_plan",            tgSize: 0),
-        Phase(name: "oak_reduce_alpha",    tgSize: 128),
         Phase(name: "oak_learn_heads",     tgSize: 0),
         Phase(name: "oak_meta_action",     tgSize: 0),
         Phase(name: "oak_bk_utility",      tgSize: 0),
@@ -547,10 +545,9 @@ final class OakMetalEngine {
         phaseGridWidths = [
             1,                  // bk_obs            [1 TG x 32]
             rank,               // encode            [R threads]
-            1,                  // meta_policy       [1 thread]
+            1,                  // meta_policy       [1 thread; also computes alphaPi + rho EMA]
             1,                  // predict           [1 thread]
             1,                  // plan              [1 thread]
-            1,                  // reduce_alpha      [1 TG x 128]
             learnTotal,         // learn_heads       [N threads]
             dPolicy,            // meta_action       [D threads]
             rank + K,           // bk_utility        [(R + K) threads]
@@ -701,7 +698,6 @@ final class OakMetalEngine {
         c.sState = UInt32(s.state)
         c.sPolicyMean = UInt32(s.policyMean); c.sScoreGrad = UInt32(s.scoreGrad)
         c.sReward = UInt32(s.reward); c.sTd = UInt32(s.td); c.sTdPsi = UInt32(s.tdPsi)
-        c.sVCurr = UInt32(s.vCurr)
         c.sChord = UInt32(s.chord); c.sChordPrev = UInt32(s.chordPrev)
         c.sUtilFeat = UInt32(s.utilFeat); c.sUtilOpt = UInt32(s.utilOpt)
         c.sPlanAdv = UInt32(s.planAdv)
@@ -805,7 +801,6 @@ private struct RunContext {
     let envId: String
     let policy: Policy
     let seed: Int?
-    let warmup: Int
     let stopAfter: Int
     let command: String
     let includeDiagnostic: Bool
@@ -867,7 +862,6 @@ private final class RunState {
         }
         let policy = try parsePolicy(ProcessInfo.processInfo.environment["OAK_POLICY"] ?? Policy.oak.rawValue)
         let seed = ProcessInfo.processInfo.environment["OAK_SEED"].flatMap(Int.init)
-        let warmup = max(ProcessInfo.processInfo.environment["OAK_WARMUP_STEPS"].flatMap(Int.init) ?? 0, 0)
         let device = try metalDevice()
         let stopAfter = max(ProcessInfo.processInfo.environment["OAK_STOP_AFTER_STEPS"].flatMap(Int.init) ?? 1, 1)
         let baseline = max(ProcessInfo.processInfo.environment["OAK_BASELINE_RANDOM_STEPS"].flatMap(Int.init) ?? 0, 0)
@@ -879,7 +873,7 @@ private final class RunState {
             ? [(.random, baseline), (policy, stopAfter)] : [(policy, stopAfter)]
         var metricsURL: URL!
         for (p, steps) in phases {
-            (_, metricsURL) = try runSingle(envId: envId, policy: p, seed: seed, warmup: warmup,
+            (_, metricsURL) = try runSingle(envId: envId, policy: p, seed: seed,
                                              stopAfter: steps, device: device,
                                              command: "run", metricsDir: dir)
         }
@@ -909,13 +903,12 @@ private final class RunState {
             throw OakError.message("Use `OaK diagnose <env-id>`.")
         }
         let seed = ProcessInfo.processInfo.environment["OAK_SEED"].flatMap(Int.init)
-        let warmup = max(ProcessInfo.processInfo.environment["OAK_DIAG_WARMUP_STEPS"].flatMap(Int.init) ?? 0, 0)
         let device = try metalDevice()
         let steps = max(stopAfter
                         ?? ProcessInfo.processInfo.environment["OAK_DIAG_STEPS"].flatMap(Int.init)
                         ?? 1, 1)
         let (_, metricsURL) = try runSingle(
-            envId: resolved, policy: policy, seed: seed, warmup: warmup,
+            envId: resolved, policy: policy, seed: seed,
             stopAfter: steps, device: device, command: "diagnose", includeDiagnostic: true)
         fputs("\(metricsURL.path)\n", stderr)
     }
@@ -979,7 +972,6 @@ private final class RunState {
         let root = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
         let seedStart = ProcessInfo.processInfo.environment["OAK_BENCH_SEED_START"].flatMap(Int.init) ?? 0
         let seedCount = ProcessInfo.processInfo.environment["OAK_BENCH_SEED_COUNT"].flatMap(Int.init) ?? 5
-        let warmup = max(ProcessInfo.processInfo.environment["OAK_BENCH_WARMUP_STEPS"].flatMap(Int.init) ?? 1000, 0)
         let stopAfter = max(ProcessInfo.processInfo.environment["OAK_BENCH_STEPS"].flatMap(Int.init) ?? 500000, 1)
         let policies = try (ProcessInfo.processInfo.environment["OAK_BENCH_POLICIES"] ?? "oak,random")
             .split(separator: ",").map { try parsePolicy(String($0)) }
@@ -1023,7 +1015,7 @@ private final class RunState {
             queue.addOperation {
                 do {
                     _ = try runSingle(envId: item.env.envId, policy: item.policy, seed: item.seed,
-                                      warmup: warmup, stopAfter: stopAfter,
+                                      stopAfter: stopAfter,
                                       device: device, command: "benchmark", metricsDir: benchDir).0
                     state.lock.lock()
                     state.completed += 1
@@ -1092,7 +1084,7 @@ private final class RunState {
 
     // -- single-run orchestration (setup -> loop -> snapshot) --------------------------------
 
-    private static func setupRun(envId: String, policy: Policy, seed: Int?, warmup: Int,
+    private static func setupRun(envId: String, policy: Policy, seed: Int?,
                                  stopAfter: Int, device: MTLDevice, command: String,
                                  includeDiagnostic: Bool, metricsDir: URL?) throws -> RunContext {
         let dir = RunSnapshot.resolveMetricsDirectory(explicit: metricsDir)
@@ -1104,7 +1096,7 @@ private final class RunState {
             rank: env.obsDim, dPolicy: env.dPolicy,
             device: device, seed: seed, diagnosticGpuPhaseTiming: includeDiagnostic) : nil
         try env.reset()
-        return RunContext(envId: envId, policy: policy, seed: seed, warmup: warmup,
+        return RunContext(envId: envId, policy: policy, seed: seed,
                           stopAfter: stopAfter, command: command,
                           includeDiagnostic: includeDiagnostic, metricsDir: dir,
                           env: env, engine: engine)
@@ -1129,7 +1121,7 @@ private final class RunState {
         let reason = seq == nil ? "measured_steps" : "heartbeat"
         return RunMetricsFile(
             schemaVersion: 3, command: ctx.command, envId: ctx.envId, policy: ctx.policy, seed: ctx.seed,
-            numEnvs: 1, warmupSteps: ctx.warmup, stopAfterMeasuredSteps: ctx.stopAfter,
+            numEnvs: 1, stopAfterMeasuredSteps: ctx.stopAfter,
             observationDim: ctx.env.obsDim, actionDim: ctx.env.actDim,
             actionDiscreteCount: ctx.env.actionDiscreteCount,
             measuredStepCount: state.measuredSteps, measuredBatchCount: measured,
@@ -1146,11 +1138,11 @@ private final class RunState {
     private static func measurementLoop(_ ctx: RunContext, _ state: RunState) throws {
         let defaultHb = ctx.command == "diagnose" ? 0 : max(ctx.stopAfter / 10, 1)
         let hb = max(ProcessInfo.processInfo.environment["OAK_HEARTBEAT_STEPS"].flatMap(Int.init) ?? defaultHb, 0)
+        // Continual: every step is a measured step, no warmup. Plan Inv-5: no special training
+        // phases. Step 0 timer is established on the first iteration.
+        if state.measurementStart == nil { state.measurementStart = DispatchTime.now().uptimeNanoseconds }
         while state.measuredSteps < ctx.stopAfter {
-            let measured = state.totalSteps + 1 > ctx.warmup && state.totalSteps > 0
-            if measured && state.measurementStart == nil {
-                state.measurementStart = DispatchTime.now().uptimeNanoseconds
-            }
+            let measured = true
             let policyMean: PolicyMeanBatch, agentMs: Double, stats: KernelStats?
             if let engine = ctx.engine {
                 let out = try ctx.env.observationScratch.withUnsafeBufferPointer { buf in
@@ -1203,11 +1195,11 @@ private final class RunState {
         }
     }
 
-    private static func runSingle(envId: String, policy: Policy, seed: Int?, warmup: Int,
+    private static func runSingle(envId: String, policy: Policy, seed: Int?,
                                   stopAfter: Int, device: MTLDevice, command: String,
                                   includeDiagnostic: Bool = false, metricsDir: URL? = nil)
                                   throws -> (RunMetricsFile, URL) {
-        let ctx = try setupRun(envId: envId, policy: policy, seed: seed, warmup: warmup,
+        let ctx = try setupRun(envId: envId, policy: policy, seed: seed,
                                stopAfter: stopAfter, device: device, command: command,
                                includeDiagnostic: includeDiagnostic, metricsDir: metricsDir)
         let state = RunState(env: ctx.env, seed: seed)

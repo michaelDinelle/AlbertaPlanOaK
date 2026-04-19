@@ -63,8 +63,7 @@ These are the non-negotiables. Every kernel and every line of host code must res
 6. **Inv-8: strict objective isolation.** No intrinsic curiosity, no learning-progress bonus added to the main reward stream.
 7. **Inv-9: parameter-free meta-learning.** Every constant is structurally derived from agent capacity (cap = R, α₀ = 1/cap, ridge = 1/(cap+1), K ≤ 32 = SIMD width). No tunable knobs. **If you have a number to tweak, the underlying mechanism probably isn't Plan-orthodox** — strip the mechanism, not the number.
 8. **No magnitude caps on weights.** `safe_w(old, new) = isfinite(new) ? new : old` preserves on non-finite; weights grow as the agent's slice of reality demands. No `bounded_soft`, no `safe_half`, no fp16-derived `M = 256`.
-9. **Forward outputs use `unit_soft = tanh`.** State, μ, planAdv are bounded in (-1, 1) — natural sigmoid range, not a tunable cap.
-10. **Single-stream (B = 1).** One observation → one action → one reward per step. Multi-env benchmarking is N independent agent instances over N envs (OperationQueue), never one batched agent.
+9. **Single-stream (B = 1).** One observation → one action → one reward per step. Multi-env benchmarking is N independent agent instances over N envs (OperationQueue), never one batched agent.
 
 ## Architecture
 
