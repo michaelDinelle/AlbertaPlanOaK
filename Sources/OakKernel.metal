@@ -47,7 +47,7 @@ struct KernelConfig {
     uint sObservation, sObsMean, sObsSM;
     uint sState;                // 2 * R floats (slot toggle).
     uint sPolicyMean, sScoreGrad;
-    uint sReward, sTd, sTdPsi, sVCurr;
+    uint sReward, sTd, sTdPsi;
     uint sChord, sChordPrev;
     uint sUtilFeat, sUtilOpt;
     uint sPlanAdv;
@@ -75,12 +75,13 @@ struct KernelStats {
     float oakOptionReinitCount, oakFeatureReinitCount;
 };
 
-// Numerical safety - parameter-free.
+// Numerical safety - one helper, parameter-free.
 //   safe_w(old, new): NF-guarded weight write (preserves prev value on non-finite; no zero-clamp,
 //                     no magnitude cap; weights grow as the agent's slice of reality demands).
-//   unit_soft(x):     structural sigmoid in (-1, 1) for forward outputs (state, mu, planAdv).
+// Forward outputs (state, mu, planAdv) are NOT artificially bounded - BWH says magnitudes carry
+// information. State is naturally O(1) via standardized obs through the 1/sqrt(O) random
+// projection; planAdv self-bounds via x/(1+|x|); mu is clamped to env bounds by the wrapper.
 inline float safe_w(float old_w, float new_w) { return isfinite(new_w) ? new_w : old_w; }
-inline float unit_soft(float x) { return isfinite(x) ? tanh(x) : 0.0f; }
 
 // Tracking-rate EMA (Sutton-Barto §2.6) with ridge floor for early steps.
 inline float track_rate(uint step, float ridge) {
@@ -111,7 +112,7 @@ struct Ctx {
     device float *observation, *observationMean, *obsSM;
     device float *state;
     device float *policyMean, *scoreGrad;
-    device float *reward, *td, *tdPsi, *vCurr;
+    device float *reward, *td, *tdPsi;
     device float *chord, *chordPrev;
     device float *utilFeat, *utilOpt;
     device float *planAdv;
@@ -146,7 +147,6 @@ inline Ctx make_ctx(device float *params, device float *stateArena, device uint 
     c.reward          = stateArena + cfg.sReward;
     c.td              = stateArena + cfg.sTd;
     c.tdPsi           = stateArena + cfg.sTdPsi;
-    c.vCurr           = stateArena + cfg.sVCurr;
     c.chord           = stateArena + cfg.sChord;
     c.chordPrev       = stateArena + cfg.sChordPrev;
     c.utilFeat        = stateArena + cfg.sUtilFeat;
@@ -159,19 +159,6 @@ inline Ctx make_ctx(device float *params, device float *stateArena, device uint 
 }
 
 inline device float *state_at(Ctx ctx, uint slot) { return ctx.state + slot * ctx.R; }
-
-inline float tg_sum_128(threadgroup float *buf, uint tid, uint sgid, float v) {
-    v = simd_sum(v);
-    if (simd_is_first()) buf[sgid] = v;
-    threadgroup_barrier(mem_flags::mem_threadgroup);
-    if (sgid == 0u) {
-        float s = (tid < 4u) ? buf[tid] : 0.0f;
-        s = simd_sum(s);
-        if (tid == 0u) buf[0] = s;
-    }
-    threadgroup_barrier(mem_flags::mem_threadgroup);
-    return buf[0];
-}
 
 // =================================================================================================
 // 1. oak_bk_obs - per-feature observation Welford EMA. First so encode reads current stats.
@@ -200,8 +187,9 @@ kernel void oak_bk_obs(
 }
 
 // =================================================================================================
-// 2. oak_encode - perception. state[r] = unit_soft(W_enc[r] . standardized_obs). Encoder is a
-//    FIXED random projection at init; evolves only via generate-and-test in bk_admit_commit.
+// 2. oak_encode - perception. state[r] = W_enc[r] . standardized_obs. Encoder is a FIXED
+//    random projection at init (1/sqrt(O) scale), so state magnitude is naturally O(1) without
+//    artificial bounding (BWH). Evolves only via generate-and-test in bk_admit_commit.
 // =================================================================================================
 kernel void oak_encode(
     device float         *params      [[buffer(0)]],
@@ -221,11 +209,14 @@ kernel void oak_encode(
                                    ctx.obsSM[o], ctx.ridge);
         z = fma(ctx.encoder[encRow + o], c, z);
     }
-    state_at(ctx, 1u - ctx.stateSlot)[feat] = unit_soft(z);
+    state_at(ctx, 1u - ctx.stateSlot)[feat] = isfinite(z) ? z : 0.0f;
 }
 
 // =================================================================================================
 // 3. oak_meta_policy - parameter-free option keyboard. chord[k] = softmax(psi_k(s')).
+//    Also computes alphaPi (implicit alpha for the policy head; Kim arXiv:2510.06149) and
+//    updates rho-bar (Reward Centering arXiv:2405.09999) - both are scalar reductions over
+//    R + D ops, cheap to do single-threaded here instead of in a separate reduction kernel.
 // =================================================================================================
 kernel void oak_meta_policy(
     device float         *params      [[buffer(0)]],
@@ -242,6 +233,7 @@ kernel void oak_meta_policy(
 
     for (uint k = 0u; k < ctx.K; ++k) ctx.chordPrev[k] = ctx.chord[k];
 
+    // Chord = softmax over psi_k(s').
     float maxL = -FLT_MAX;
     float logits[OAK_SIMD];
     for (uint k = 0u; k < ctx.K; ++k) {
@@ -254,6 +246,16 @@ kernel void oak_meta_policy(
     for (uint k = 0u; k < ctx.K; ++k) Z += exp(logits[k] - maxL);
     float invZ = 1.0f / max(Z, FLT_MIN);
     for (uint k = 0u; k < ctx.K; ++k) ctx.chord[k] = exp(logits[k] - maxL) * invZ;
+
+    // alphaPi = alpha_0 / (1 + alpha_0 * ||state||^2 * ||scoreGrad||^2).
+    float ss = 0.0f, gg = 0.0f;
+    for (uint i = 0u; i < ctx.R; ++i) ss = fma(curr[i], curr[i], ss);
+    for (uint p = 0u; p < ctx.D; ++p) gg = fma(ctx.scoreGrad[p], ctx.scoreGrad[p], gg);
+    ctx.scalars->alphaPi = ctx.alpha0 / (1.0f + ctx.alpha0 * ss * gg);
+
+    // rho-bar EMA (Reward Centering). One step of lag from predict's reading is negligible.
+    float invT = track_rate(ctx.stepCount, ctx.ridge);
+    ctx.scalars->rho += invT * (ctx.reward[0] - ctx.rho);
 }
 
 // =================================================================================================
@@ -282,7 +284,6 @@ kernel void oak_predict(
         vPrev = fma(ctx.valueW[i], prev[i], vPrev);
         vNext = fma(ctx.valueW[i], curr[i], vNext);
     }
-    ctx.vCurr[0] = vNext;
     float reward_c = ctx.reward[0] - ctx.rho;
     float delta = reward_c + vNext - vPrev;
     if (!isfinite(delta)) { ctx.counters[OAK_CNT_LEARN_NF] += 1u; delta = 0.0f; }
@@ -320,7 +321,8 @@ kernel void oak_plan(
     if (tid != 0u) return;
     Ctx ctx = make_ctx(params, stateArena, uintArena, scalars, stats, cfg);
     device const float *curr = state_at(ctx, 1u - ctx.stateSlot);
-    float vCurr = ctx.vCurr[0];
+    float vCurr = 0.0f;
+    for (uint i = 0u; i < ctx.R; ++i) vCurr = fma(ctx.valueW[i], curr[i], vCurr);
 
     float bestQ = -FLT_MAX;
     uint nfPlan = 0u;
@@ -346,41 +348,7 @@ kernel void oak_plan(
 }
 
 // =================================================================================================
-// 6. oak_reduce_alpha - implicit alpha for the policy head (Kim arXiv:2510.06149) and rho-bar
-//    update (Reward Centering). Single TG x 128 threads.
-// =================================================================================================
-kernel void oak_reduce_alpha(
-    device float         *params      [[buffer(0)]],
-    device float         *stateArena  [[buffer(1)]],
-    device uint          *uintArena   [[buffer(2)]],
-    device KernelScalars *scalars     [[buffer(3)]],
-    device KernelStats   *stats       [[buffer(4)]],
-    constant KernelConfig &cfg        [[buffer(5)]],
-    uint tid  [[thread_position_in_threadgroup]],
-    uint sgid [[simdgroup_index_in_threadgroup]],
-    uint tgW  [[threads_per_threadgroup]])
-{
-    Ctx ctx = make_ctx(params, stateArena, uintArena, scalars, stats, cfg);
-    threadgroup float buf[4];
-    device const float *curr = state_at(ctx, 1u - ctx.stateSlot);
-
-    float s2 = 0.0f;
-    for (uint i = tid; i < ctx.R; i += tgW) s2 = fma(curr[i], curr[i], s2);
-    float ss = tg_sum_128(buf, tid, sgid, s2);
-
-    float g2 = 0.0f;
-    for (uint p = tid; p < ctx.D; p += tgW) g2 = fma(ctx.scoreGrad[p], ctx.scoreGrad[p], g2);
-    float gg = tg_sum_128(buf, tid, sgid, g2);
-
-    if (tid == 0u) {
-        ctx.scalars->alphaPi = ctx.alpha0 / (1.0f + ctx.alpha0 * ss * gg);
-        float invT = track_rate(ctx.stepCount, ctx.ridge);
-        ctx.scalars->rho += invT * (ctx.reward[0] - ctx.rho);
-    }
-}
-
-// =================================================================================================
-// 7. oak_learn_heads - 1-step TD updates on 5 learnable heads.
+// 6. oak_learn_heads - 1-step TD updates on 5 learnable heads.
 //      0: valueW[R]            -> alpha_0 * (td + planAdv) * prev[i]   (planAdv added HERE ONLY)
 //      1: psi[K*R]             -> alpha_0 * tdPsi[k] * prev[i]
 //      2: optPolicy[K*D*R]     -> alphaPi * td * scoreGrad[d] * prev[i] * chordPrev[k]
@@ -482,7 +450,7 @@ kernel void oak_meta_action(
             dot = fma(ctx.optPolicy[(k * ctx.D + p) * ctx.R + i], curr[i], dot);
         mu = fma(ctx.chord[k], dot, mu);
     }
-    ctx.policyMean[p] = unit_soft(mu);
+    ctx.policyMean[p] = isfinite(mu) ? mu : 0.0f;
 }
 
 // =================================================================================================
