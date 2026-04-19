@@ -27,7 +27,6 @@ struct RunHealth: Codable {
     let rewardRate: Double?
     let actionDeltaL2Mean: Double?
     let scoreGradL2Mean: Double?
-    let maxAbsPolicyOutput: Double?
     // Kernel-side (only present for oak):
     let oakOptionReinitCountFinal: Int?, oakFeatureReinitCountFinal: Int?
     let nonFiniteByPhase: [String: Int]?
@@ -203,30 +202,20 @@ func decodeCString(_ buffer: [CChar]) -> String {
 }
 
 // =================================================================================================
-// HealthAccumulator - fixed-size struct fold. Inv-6 (no per-step heap allocation).
+// HealthAccumulator - fixed-size struct fold (Inv-6: no per-step heap allocation).
 //
-// Two input channels:
-//   recordEnvSignals(reward, prevPolicyMean, currPolicyMean, scoreGrad)
-//     - host-computable from the env-wrapper layer; populated for ANY policy (oak OR random)
-//     - rewardRate (Reward Centering rho-bar tracked via incremental EMA), actionDeltaL2Mean,
-//       scoreGradL2Mean, maxAbsPolicyOutput
-//   recordKernelStats(stats)
-//     - kernel-only telemetry; populated only when the OakMetalEngine is running
-//     - latentStateMeanSquare, optionModelPredictionMSE, utility*, weight maxes, NF counts, etc.
-// snapshot() returns a RunHealth with both channels merged; kernel-only fields are nil for random.
+// recordEnvSignals: host-computable from env-wrapper signals; populated for ANY policy.
+//   Tracks rho-bar (Reward Centering 2405.09999, incremental EMA), action delta L2, score grad L2.
+// recordKernelStats: kernel-internal counters; only OakMetalEngine populates these.
+//   Per-phase non-finite counts + cumulative reinit counts (Plan Step 11 evidence).
 // =================================================================================================
 private struct HealthAccumulator {
-    // Host-computable accumulators (work for ANY policy):
-    private var envSteps = 0
-    private var rhoBar = 0.0                   // Reward Centering rho-bar tracked host-side.
+    private var envSteps = 0, kernelSteps = 0
+    private var rhoBar = 0.0
     private var actDeltaSum = 0.0, scoreGradSum = 0.0
-    private var maxPol = 0.0
-    private let ridge: Double
-
-    // Kernel-only accumulators (only populated when OakMetalEngine is the policy):
-    private var kernelSteps = 0
     private var encodeNF = 0, learnNF = 0, planNF = 0, tdPsiNF = 0
     private var oakOptionReinitFinal = 0, oakFeatureReinitFinal = 0
+    private let ridge: Double
 
     init(rank: Int) { ridge = 1.0 / Double(max(rank, 1) + 1) }
 
@@ -240,10 +229,8 @@ private struct HealthAccumulator {
             let invT = max(1.0 / Double(envSteps), ridge)
             rhoBar += invT * (r - rhoBar)
         }
-        var dl = 0.0, sg = 0.0, mPol = 0.0
+        var dl = 0.0, sg = 0.0
         for d in 0..<currPolicyMean.count {
-            let v = currPolicyMean[d]
-            if v.isFinite { mPol = max(mPol, abs(Double(v))) }
             let delta = currPolicyMean[d] - prevPolicyMean[d]
             dl += Double(delta) * Double(delta)
         }
@@ -252,7 +239,6 @@ private struct HealthAccumulator {
         }
         actDeltaSum  += dl / Double(max(currPolicyMean.count, 1))
         scoreGradSum += sg / Double(max(scoreGrad.count, 1))
-        maxPol = max(maxPol, mPol)
     }
 
     mutating func recordKernelStats(_ stats: KernelStats) {
@@ -265,6 +251,8 @@ private struct HealthAccumulator {
         oakFeatureReinitFinal = Int(stats.oakFeatureReinitCount)
     }
 
+    var hasMeasuredSteps: Bool { envSteps > 0 }
+
     func snapshot() -> RunHealth? {
         guard envSteps > 0 else { return nil }
         let n = Double(envSteps)
@@ -275,17 +263,9 @@ private struct HealthAccumulator {
             rewardRate: rhoBar,
             actionDeltaL2Mean: actDeltaSum / n,
             scoreGradL2Mean: scoreGradSum / n,
-            maxAbsPolicyOutput: maxPol > 0 ? maxPol : nil,
             oakOptionReinitCountFinal: kernelSteps > 0 ? oakOptionReinitFinal : nil,
             oakFeatureReinitCountFinal: kernelSteps > 0 ? oakFeatureReinitFinal : nil,
             nonFiniteByPhase: nf)
-    }
-
-    func diagnosticSnapshot() -> RunDiagnostic? {
-        guard envSteps > 0 else { return nil }
-        return RunDiagnostic(
-            agentShare: nil, envShare: nil, hostShare: nil,
-            metalPhaseGpuMsMean: nil, metalPhaseGpuTimingInvalid: nil)
     }
 }
 
@@ -433,9 +413,9 @@ private enum OakMetalLayout {
 
     struct UInts { let counters, total: Int }
     static func uintLayout() -> UInts {
-        var o = 0
-        let c = o; o += 8
-        return UInts(counters: c, total: o)
+        // 6 counters: OBS_NF, LEARN_NF, PLAN_NF, REINIT_OPT, REINIT_FEAT, TDPSI_NF.
+        // (Indices match the constants at the top of OakKernel.metal.)
+        UInts(counters: 0, total: 6)
     }
 }
 
@@ -1134,14 +1114,14 @@ private final class RunState {
         let measured = max(state.measuredSteps, 1)
         let a = state.agentMsSum / 1000, e = state.envMsSum / 1000
         let h = max(state.measuredSeconds - a - e, 0)
-        let merged = state.health.diagnosticSnapshot().map { _ -> RunDiagnostic in
+        let merged: RunDiagnostic? = state.health.hasMeasuredSteps ? {
             let (mm, mi) = ctx.engine?.metalPhaseGpuDiagnostics(measuredSteps: measured) ?? (nil, nil)
             return RunDiagnostic(
                 agentShare: state.measuredSeconds > 0 ? a / state.measuredSeconds : nil,
                 envShare:   state.measuredSeconds > 0 ? e / state.measuredSeconds : nil,
                 hostShare:  state.measuredSeconds > 0 ? h / state.measuredSeconds : nil,
                 metalPhaseGpuMsMean: mm, metalPhaseGpuTimingInvalid: mi)
-        }
+        }() : nil
         let diagOut: RunDiagnostic? = ((seq != nil && ctx.policy == .oak) || (seq == nil && ctx.includeDiagnostic))
                                        ? merged : nil
         let (dA, cA) = state.actionCol.partialMetrics()
