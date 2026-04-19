@@ -86,7 +86,9 @@ using namespace metal;
 // UInt arena:
 //   done[B], activeMask[E], activeList[E]                (E = R + K; outcome dims R..E always-active)
 //   option[2 · B]                               slot-toggled active/next option index (S4)
-//   counters[6]                                 {encNF, learnNF, planNF, reinitOptCount, reinitFeatCount, _pad}
+//   counters[8]                                 {encNF, learnNF, planNF, reinitOptCount,
+//                                                reinitFeatCount, halfSaturation (cumulative),
+//                                                tdPsiNonFinite (per-step), reserved}
 // Arena extras (fp32):
 //   featSM[R]                                   batch 2nd-moment EMA of active x (utility norm)
 //   wBar[R]                                     high-water-mark of |w_main| (RRS §6.1)
@@ -98,17 +100,26 @@ using namespace metal;
 // via OakMetalLayout.optionCount) and the TG-size unit used by all reduction kernels.
 constant uint OAK_SIMD = 32u;
 
-// Named offsets into counters[6]. Self-documenting replacement for hardcoded indices 0..5.
+// Named offsets into counters[8]. Self-documenting replacement for hardcoded indices 0..7.
 // All telemetry counters live here; layout is fixed in OakMetalLayout.uintLayout.
-constant uint OAK_CNT_OBS_NF        = 0u;  // bk_reduce: non-finite obs count
-constant uint OAK_CNT_LEARN_NF      = 1u;  // bk_reduce: non-finite latent / TD-target count
-constant uint OAK_CNT_PLAN_NF       = 2u;  // bk_reduce: non-finite action / scoreGrad count
+constant uint OAK_CNT_OBS_NF        = 0u;  // bk_reduce: non-finite obs count (per-step)
+constant uint OAK_CNT_LEARN_NF      = 1u;  // bk_reduce: non-finite latent / TD-target count (per-step)
+constant uint OAK_CNT_PLAN_NF       = 2u;  // bk_reduce: non-finite action / scoreGrad count (per-step)
 constant uint OAK_CNT_REINIT_OPT    = 3u;  // bk_option: bitmask of options reinited this step
                                             //   (K ≤ OAK_SIMD = 32, so one uint suffices)
-constant uint OAK_CNT_REINIT_FEAT   = 4u;  // bk_admit_commit: encoder-feature reinit count
-                                            //   (single counter, atomic increment)
-// Index 5 is reserved (was second half of option-reinit bitmask for K > 32; dead under
-// the K ≤ OAK_SIMD constraint).
+constant uint OAK_CNT_REINIT_FEAT   = 4u;  // bk_admit_commit: encoder-feature reinit count (cumulative)
+// Pass 15 Tier 0: numerical-safety counters.
+constant uint OAK_CNT_HALF_SAT      = 5u;  // safe_half: non-finite-write count (cumulative life-of-engine)
+                                            //   Increments each time a learn_* kernel attempts to
+                                            //   write a non-finite to a half weight (substituted
+                                            //   with half(0) per BWH-orthodox zero-bias replacement,
+                                            //   Inv-4). Surfaced into stats.halfSaturationCount by
+                                            //   bk_admit_commit. Per-engine cumulative — never reset.
+constant uint OAK_CNT_TDPSI_NF      = 6u;  // bk_reduce: tdPsi non-finite count (per-step). Was
+                                            //   silently passing through to optionModelPredictionMSE
+                                            //   in Pass 14, contaminating telemetry. Now scanned +
+                                            //   sanitized to zero before MSE roll-up.
+// Index 7 is reserved.
 
 // No function constants. Pass 10 unification: the agent has zero a-priori knowledge of action-
 // space type. optPolicy is always K · 2·A · R (Gaussian μ_d, log_σ_d per action dim); the env-
@@ -159,6 +170,17 @@ struct KernelScalars {
     float pEff;               // effective rank trace/max of featSM
     float alphaImp;           // implicit TD step: α₀ / (1 + α₀·⟨‖x_active‖²⟩_batch) — 2510.06149
     float alphaEnc;           // implicit TD step for encoder (centered obs)
+    // Pass 15 Tier 0.3: REINFORCE policy implicit step. The per-row gradient is
+    // δ · prev[i] · scoreGrad[d] (an outer product), so the BWH-orthodox implicit
+    // denominator must include BOTH ‖prev‖² AND ‖scoreGrad‖² (Cauchy-Schwarz upper
+    // bound on the per-parameter gradient norm; Kim 2510.06149 + Stream-X 2410.14606
+    // ObGD §A4 generalized to outer-product features). Pass 14's per-thread n2 was
+    // missing the cross-row scoreGrad norm-square aggregation, allowing 100×
+    // scoreGrad blow-ups (mean 394 → unbounded) to drive 200M optionModelPredictionMSE
+    // when scoreGrad was momentarily large but the implicit step did not compensate.
+    //   alphaPi = α₀ / (1 + α₀ · ⟨‖x_active‖²⟩_batch · ⟨‖scoreGrad‖²⟩_batch)
+    // Computed once in oak_reduce_alpha, consumed by oak_learn_pi.
+    float alphaPi;
     float tdBaseline;         // Pass 11 Tier 4: REINFORCE running-mean TD baseline (Williams 1992)
     float modelErrEMA;        // Continual EMA of mean ψ TD error squared
                               // (= optionModelPredictionMSE). The agent's *current* model error.
@@ -174,7 +196,9 @@ struct KernelScalars {
                                 // active_dot_half_auto to take the dense fast-path.
 };
 
-// KernelStats — 16 Float fields. Layout must match Swift KernelStats byte-for-byte.
+// KernelStats — 18 Float fields. Layout must match Swift KernelStats byte-for-byte.
+// Pass 15 Tier 0: tdPsiNonFiniteCount + halfSaturationCount surface the new numerical-
+// safety counters. Both are populated by bk_reduce / bk_admit_commit from counters[].
 struct KernelStats {
     float rewardRate, latentStateMeanSquare, activeRank;
     float rawNonFiniteCount, sanitizedNonFiniteCount;
@@ -184,6 +208,8 @@ struct KernelStats {
     float optionModelPredictionMSE;
     float oakOptionReinitCount;
     float utilityFeatureMean, utilityOptionMean;
+    float tdPsiNonFiniteCount;     // Pass 15 T0.4: per-step NF in tdPsi (was untracked, contaminated MSE)
+    float halfSaturationCount;     // Pass 15 T0.2: cumulative half-write non-finite substitutions
 };
 
 // -------------------------------------------------------------------------------------------------
@@ -334,6 +360,39 @@ inline float track_rate(uint stepCount, float ridge) {
 }
 
 inline uint ceil_sqrt(uint n) { float s = sqrt(float(max(n, 1u))); return uint(ceil(s)); }
+
+// Pass 15 Tier 0.2: provably-safe fp32 → fp16 weight write. The bare `half(x)` cast in Pass
+// 14 silently produced fp16 +Inf when |x| > 65504 (the fp16 range maximum) AND silently
+// passed through NaN. Both poisoned subsequent reads with cascading non-finite values, and
+// because the .metallib was compiled with default fast-math (Pass 15 T0.1 fixed via
+// -fno-fast-math in setup.sh) the downstream `isfinite()` checks were elided at -O.
+//
+// safe_half() rule (structural, no magic constants):
+//   1. Perform the IEEE-754 narrowing `half(x)`. By the float→half rounding rules, any
+//      finite x outside the representable fp16 range rounds to ±Inf, and any non-finite
+//      x produces a non-finite half.
+//   2. If the resulting half is finite → return it (safe).
+//      Otherwise → return half(0.0f) AND atomic-increment OAK_CNT_HALF_SAT.
+//      (BWH-orthodox zero-bias replacement per Inv-4: never clamp, never bias the
+//      iterate toward any non-zero value; a non-finite update is recorded as a missed
+//      update — the previous weight value is preserved by the caller's load-modify-store.)
+//
+// This covers BOTH failure modes (NaN/Inf input AND out-of-fp16-range finite input)
+// without an explicit magic-number bound — the fp16 representable set is the structural
+// boundary, evaluated by the IEEE-754 conversion itself.
+//
+// Telemetry contract: a healthy run produces OAK_CNT_HALF_SAT == 0 over its full lifetime.
+// Pass 15 Tier 0 acceptance gate: nonFiniteRawTotal == 0 over the Humanoid 500K bench
+// (was 182M with the unsafe path).
+inline half safe_half(float x, device uint *counters) {
+    half h = half(x);
+    if (!isfinite(h)) {
+        atomic_fetch_add_explicit((device atomic_uint *)(counters + OAK_CNT_HALF_SAT),
+                                  1u, memory_order_relaxed);
+        return half(0.0f);
+    }
+    return h;
+}
 
 // Pass 13 Tier 1: L2-Effective-Rank regularizer strength. Spectral collapse drives plasticity
 // loss (He et al. 2509.22335 ICLR 2026); when the encoder's effective rank pEff falls below
@@ -838,6 +897,19 @@ kernel void oak_meta_action(
                                            ctx.activeList, ctx.activeCount, dense);
         mu = fma(lambda_k, dot_k, mu);
     }
+    // Pass 15 Tier 0.6: structurally-bounded policy mean (Iwaki 2502.03854 MDAC bounded
+    // advantage). Smooth saturating transform with zero bias at the origin:
+    //   tanh(mu / M) * M  =  mu  +  O(mu³ / M²)   for |mu| ≪ M
+    //                    →  ±M                    for |mu| → ∞
+    // The bound M = √HALF_MAX is structural, not a tuned scalar: any quantity bounded
+    // by ±M can be safely squared (M² = HALF_MAX) without fp16 overflow downstream
+    // (where mu enters value/policy gradients via mu² and mu·scoreGrad terms). For
+    // typical |mu| ≤ 10 (continuous-action regime) the transform is essentially identity
+    // (relative error < 10⁻⁴), preserving learning fidelity. Replaces unconditional fp16
+    // saturation when β-on-surprise drives mu beyond fp16 range. Inv-9 compliant: M is
+    // a hardware-derived constant of the storage type, not a tuned hyperparameter.
+    float mu_bound = sqrt((float)HALF_MAX);
+    mu = mu_bound * tanh(mu / mu_bound);
     ctx.policyMean[row * ctx.D + p] = mu;
 }
 
@@ -868,21 +940,39 @@ kernel void oak_reduce_alpha(
 {
     Ctx ctx = make_ctx(params, stateArena, uintArena, scalars, cfg);
     device const float *prev = state_slot(ctx, ctx.stateSlot);
-    float n2_l = 0.0f, obs_l = 0.0f;
+    float n2_l = 0.0f, obs_l = 0.0f, sg2_l = 0.0f;
     for (uint r = tid; r < ctx.B; r += tgW) {
         n2_l += active_norm2(prev, r * ctx.E, ctx.activeList, ctx.activeCount);
         for (uint f = 0u; f < ctx.baseO; ++f) {
             float c = ctx.observation[r * ctx.O + f] - ctx.observationMean[f];
             obs_l = fma(c, c, obs_l);
         }
+        // Pass 15 Tier 0.3: per-row ‖scoreGrad‖² aggregated for alpha_pi (REINFORCE
+        // implicit step). Forensics show oak_learn_pi's per-thread n2 missed the
+        // cross-(d,e) score-gradient norm-square, allowing 100× scoreGrad blow-ups
+        // (mean 394 → unbounded) to drive 200M optionModelPredictionMSE. The per-row
+        // ‖scoreGrad‖² aggregated over the batch is the structurally-correct shared
+        // denominator (Cauchy-Schwarz upper bound on the outer-product gradient norm).
+        for (uint d = 0u; d < ctx.D; ++d) {
+            float sg = ctx.scoreGrad[r * ctx.D + d];
+            sg2_l = fma(sg, sg, sg2_l);
+        }
     }
-    threadgroup float sg_n2[4], sg_obs[4];
+    threadgroup float sg_n2[4], sg_obs[4], sg_sg2[4];
     float n2  = tg_sum_128(n2_l,  sg_n2,  tid, sgid);
     float obs = tg_sum_128(obs_l, sg_obs, tid, sgid);
+    float sg2 = tg_sum_128(sg2_l, sg_sg2, tid, sgid);
     if (tid == 0u) {
         float invB = 1.0f / float(max(ctx.B, 1u));
         scalars->alphaImp = ctx.alpha0 / (1.0f + ctx.alpha0 * n2 * invB);
         scalars->alphaEnc = ctx.alpha0 / (1.0f + ctx.alpha0 * obs * invB);
+        // Pass 15 Tier 0.3: alphaPi denominator includes ⟨‖x‖²⟩·⟨‖scoreGrad‖²⟩ — the
+        // Cauchy-Schwarz upper bound on the per-parameter outer-product gradient norm.
+        // When scoreGrad is large, alpha_pi shrinks proportionally — provably bounded
+        // step (Kim 2510.06149 generalized; Stream-X 2410.14606 ObGD §A4 outer-product
+        // case). Zero-bias at the origin (sg2 → 0 ⇒ alpha_pi → α₀ recovering vanilla SGD).
+        scalars->alphaPi = ctx.alpha0
+                         / (1.0f + ctx.alpha0 * (n2 * invB) * (sg2 * invB));
     }
     // Pass 13 Tier 2: refresh per-feature α_i in parallel across the threadgroup. Each thread
     // handles a strided subset of [0, E). Encoder dims use featSM (2nd-moment EMA); outcome
@@ -892,11 +982,16 @@ kernel void oak_reduce_alpha(
     float n2_mean = n2 / float(max(ctx.B, 1u));
     for (uint i = tid; i < ctx.E; i += tgW) {
         float beta_i = ctx.alphaImpBeta[i];
-        float exp_beta = exp(beta_i);
         float sm_i = (i < ctx.R) ? ctx.featSM[i] : n2_mean;
-        // Implicit-α form: α_i = exp(β_i) / (1 + exp(β_i) · sm_i). Bounded above by min(exp(β_i),
-        // 1/sm_i), so β_i runaway can't blow up α_i (Kim 2510.06149 generalized to per-feature).
-        ctx.alphaImpFeat[i] = exp_beta / (1.0f + exp_beta * sm_i);
+        // Pass 15 Tier 0.5: log-space TIDBD step (Kim 2510.06149 generalized to per-feature).
+        // Mathematical identity: α_i = exp(β_i) / (1 + exp(β_i) · sm_i)
+        //                            = 1 / (exp(-β_i) + sm_i)            [equivalent reformulation]
+        // The right-hand form is overflow-safe: exp(-β_i) underflows to 0 for large β_i
+        // (giving α_i = 1/sm_i, the natural step bound), and saturates to +Inf for very
+        // negative β_i (giving α_i = 0 cleanly via IEEE-754 1/Inf = 0). The original
+        // exp(β_i) form would overflow to +Inf for β_i > ~88, poisoning every α_i value.
+        // Bounded above by min(exp(β_i), 1/sm_i) — same theoretical bound, no overflow.
+        ctx.alphaImpFeat[i] = 1.0f / (exp(-beta_i) + sm_i);
     }
 }
 
@@ -950,7 +1045,7 @@ kernel void oak_learn_value(
         float lambda_L2 = l2er_decay(ctx.alpha0, ctx.R, ctx.scalars->pEff);
         float gMean = g * invB;
         float wNew = float(ctx.valueW[feat]) * (1.0f - lambda_L2) + step * gMean;
-        ctx.valueW[feat] = half(wNew);
+        ctx.valueW[feat] = safe_half(wNew, ctx.counters);
         if (feat < ctx.R) {
             float decay = 1.0f - ctx.alpha0;
             ctx.wBar[feat] = max(ctx.wBar[feat] * decay, fabs(wNew));
@@ -991,7 +1086,7 @@ kernel void oak_learn_encoder(
     float lambda_L2 = l2er_decay(ctx.alpha0, ctx.R, ctx.scalars->pEff);
     float eNew = float(ctx.encoder[feat]) * (1.0f - lambda_L2)
                + step * g / float(max(ctx.B, 1u));
-    ctx.encoder[feat] = half(eNew);
+    ctx.encoder[feat] = safe_half(eNew, ctx.counters);
 }
 
 // =================================================================================================
@@ -1077,14 +1172,14 @@ kernel void oak_spr_fused(
     float g_SPR_damped = g_SPR - coef * g_RL;
 
     float step = ctx.scalars->alphaEnc;
-    ctx.encoder[feat] = half(float(ctx.encoder[feat]) + step * g_SPR_damped);
+    ctx.encoder[feat] = safe_half(float(ctx.encoder[feat]) + step * g_SPR_damped, ctx.counters);
 
     // Decoder update: ∂L/∂D[k][feat] = (-2/B) · gD[k]; descend the loss.
     for (uint k = 0u; k < ctx.K; ++k) {
         float dDecoder = -2.0f * gD[k] * invB;
         uint dIdx = k * ctx.R + feat;
-        ctx.sprDecoder[dIdx] = half(float(ctx.sprDecoder[dIdx])
-                                  + ctx.scalars->alphaImp * dDecoder);
+        ctx.sprDecoder[dIdx] = safe_half(float(ctx.sprDecoder[dIdx])
+                                       + ctx.scalars->alphaImp * dDecoder, ctx.counters);
     }
 }
 
@@ -1133,7 +1228,8 @@ kernel void oak_learn_outcome(
     float invB = 1.0f / float(max(ctx.B, 1u));
     float alpha_eff = ctx.alpha0 / (1.0f + ctx.alpha0 * n2 * invB);
     uint pIdx = k * ctx.E + e;
-    ctx.outcomeHead[pIdx] = half(float(ctx.outcomeHead[pIdx]) + alpha_eff * g * invB);
+    ctx.outcomeHead[pIdx] = safe_half(float(ctx.outcomeHead[pIdx]) + alpha_eff * g * invB,
+                                      ctx.counters);
 }
 
 // =================================================================================================
@@ -1189,7 +1285,8 @@ kernel void oak_learn_psi(
     // ψ uses the same effective-rank signal — when the latent state collapses, its predictor
     // weights collapse too; decay them in lockstep.
     float lambda_L2 = l2er_decay(ctx.alpha0, ctx.R, ctx.scalars->pEff);
-    ctx.psi[pIdx] = half(float(ctx.psi[pIdx]) * (1.0f - lambda_L2) + step * g * invB);
+    ctx.psi[pIdx] = safe_half(float(ctx.psi[pIdx]) * (1.0f - lambda_L2) + step * g * invB,
+                              ctx.counters);
 }
 
 // =================================================================================================
@@ -1199,11 +1296,12 @@ kernel void oak_learn_psi(
 // per-option contribution scales by chord_prev[r,k]. scoreGrad[r,d] is wrapper-written
 // (Tier 1: Gumbel-max categorical for Discrete components, Gaussian-σ=1 for Box components).
 //
-// Per-update implicit step (Kim 2510.06149 generalized): `α_eff = α₀ / (1 + α₀ · ‖g_local‖²/B)`
-// where ‖g_local‖² is the sum of (prev[e] · scoreGrad[d])² over the batch — so per-(k,d,e) step
-// adapts to the actual gradient-term magnitude this thread is summing, not just feature norm.
-// Stays bounded regardless of scoreGrad magnitude. BWH-orthodox: no clamp, no entropy
-// regularizer, no σ floor; the tracking-vs-imposing-priors discipline of oak_reduce_alpha.
+// Pass 15 Tier 0.3: implicit step uses scalars->alphaPi (computed once in oak_reduce_alpha).
+// alphaPi = α₀ / (1 + α₀ · ⟨‖x‖²⟩_batch · ⟨‖scoreGrad‖²⟩_batch) — the Cauchy-Schwarz upper
+// bound on the per-parameter outer-product gradient norm. Pass 14's per-thread n2 missed the
+// cross-row scoreGrad norm-square aggregation (proximate cause of 200M MSE blowup per Pass 15
+// stability research §11). The shared alphaPi denominator is the structurally-correct fix and
+// also removes the per-thread n2 reduction (saves O(B) FMA per thread × K·D·E threads).
 //   [Grid: K · D · E — K options × D_policy params × E extended-state features]
 // =================================================================================================
 kernel void oak_learn_pi(
@@ -1230,23 +1328,21 @@ kernel void oak_learn_pi(
     device const float *prev = state_slot(ctx, ctx.stateSlot);
     float baseline = ctx.scalars->tdBaseline;
     float g = 0.0f;
-    float n2 = 0.0f;
     for (uint r = 0u; r < ctx.B; ++r) {
         float lambda_k = ctx.chordSlotPrev[r * ctx.K + k];
         float pi_term  = prev[r * ctx.E + i] * ctx.scoreGrad[r * ctx.D + d];
         float adv      = ctx.td[r] - baseline;
         g  = fma(adv * lambda_k, pi_term, g);
-        n2 = fma(pi_term, pi_term, n2);
     }
     float invB = 1.0f / float(max(ctx.B, 1u));
-    float alpha_eff = ctx.alpha0 / (1.0f + ctx.alpha0 * n2 * invB);
+    float alpha_pi = ctx.scalars->alphaPi;       // Pass 15 T0.3: shared denominator includes ‖scoreGrad‖²
     uint  pIdx = k * ctx.D * ctx.E + d * ctx.E + i;
     // Pass 13 Tier 1: L2-Effective-Rank regularizer on π (Spectral Collapse 2509.22335 ICLR 2026).
     // Same rank-gap decay as encoder/value/psi; keeps option-policy weights from drifting along
     // collapsed feature directions.
     float lambda_L2 = l2er_decay(ctx.alpha0, ctx.R, ctx.scalars->pEff);
-    ctx.optPolicy[pIdx] = half(float(ctx.optPolicy[pIdx]) * (1.0f - lambda_L2)
-                              + alpha_eff * g * invB);
+    ctx.optPolicy[pIdx] = safe_half(float(ctx.optPolicy[pIdx]) * (1.0f - lambda_L2)
+                                  + alpha_pi * g * invB, ctx.counters);
 }
 
 // =================================================================================================
@@ -1295,7 +1391,7 @@ kernel void oak_learn_beta(
     float invB = 1.0f / float(max(ctx.B, 1u));
     float alpha_eff = ctx.alpha0 / (1.0f + ctx.alpha0 * n2 * invB);
     // Sign: minimize J = β · A → descend g (negative gradient direction).
-    ctx.betaW[m] = half(float(ctx.betaW[m]) - alpha_eff * g * invB);
+    ctx.betaW[m] = safe_half(float(ctx.betaW[m]) - alpha_eff * g * invB, ctx.counters);
 }
 
 // =================================================================================================
@@ -1340,7 +1436,7 @@ kernel void oak_learn_omega(
     float alpha_eff = ctx.alpha0 / (1.0f + ctx.alpha0 * n2 * invB);
     uint pIdx = k * ctx.E + e;
     // Sign: ascend J = log π(k|s) · A → +g direction.
-    ctx.omegaW[pIdx] = half(float(ctx.omegaW[pIdx]) + alpha_eff * g * invB);
+    ctx.omegaW[pIdx] = safe_half(float(ctx.omegaW[pIdx]) + alpha_eff * g * invB, ctx.counters);
 }
 
 // =================================================================================================
@@ -1404,17 +1500,26 @@ kernel void oak_bk_reduce(
         maxLat_l = max(maxLat_l, fabs(v));
     }
     // (2b) ψ TD telemetry over B·K cells (Design 2: K cumulants per row, not R).
-    float psi_l = 0.0f;
+    // Pass 15 Tier 0.4: NF scan + zero-replacement on tdPsi BEFORE the MSE roll-up.
+    // Pass 14 silently passed non-finite tdPsi values into optionModelPredictionMSE,
+    // contaminating the canonical learning-progress signal at deep workerDepth (200M
+    // MSE traced to NaN poisoning, not real model error). Zero-bias replacement per
+    // Inv-4: a non-finite tdPsi means the prediction failed entirely, equivalent to
+    // a missed update; treating it as zero in the MSE accumulator gives the unbiased
+    // mean-square over only the well-defined predictions.
+    float psi_l = 0.0f, tdPsiNF_l = 0.0f;
     uint total_rk = ctx.B * ctx.K;
     for (uint idx = tid; idx < total_rk; idx += tgW) {
         float dp = ctx.tdPsi[idx];
+        if (!isfinite(dp)) { tdPsiNF_l += 1.0f; dp = 0.0f; ctx.tdPsi[idx] = 0.0f; }
         psi_l = fma(dp, dp, psi_l);
     }
-    threadgroup float sg_lms[4], sg_psi[4], sg_maxLat[4], sg_nLearn[4];
-    float lms    = tg_sum_128(lms_l,    sg_lms,    tid, sgid);
-    float psi    = tg_sum_128(psi_l,    sg_psi,    tid, sgid);
-    float maxLat = tg_max_128(maxLat_l, sg_maxLat, tid, sgid);
-    float nLearn = tg_sum_128(nLearn_l, sg_nLearn, tid, sgid);
+    threadgroup float sg_lms[4], sg_psi[4], sg_maxLat[4], sg_nLearn[4], sg_tdPsiNF[4];
+    float lms      = tg_sum_128(lms_l,      sg_lms,      tid, sgid);
+    float psi      = tg_sum_128(psi_l,      sg_psi,      tid, sgid);
+    float maxLat   = tg_max_128(maxLat_l,   sg_maxLat,   tid, sgid);
+    float nLearn   = tg_sum_128(nLearn_l,   sg_nLearn,   tid, sgid);
+    float tdPsiNF  = tg_sum_128(tdPsiNF_l,  sg_tdPsiNF,  tid, sgid);
 
     // (3) Per-(row, p) reductions on policyMean[B·D]: actuation change vs prev step,
     // max|μ|, non-finite. With Pass-11 wrapper-side sampling, prevPolicyMean and policyMean
@@ -1450,14 +1555,18 @@ kernel void oak_bk_reduce(
         stats->actionDeltaL2Mean          = ad  * invBD;   // μ-churn over D policy params
         stats->maxAbsLatentPrediction     = maxLat;
         stats->maxAbsPolicyOutput         = maxPol;
-        stats->rawNonFiniteCount          = obsNF + nLearn + nPlan;
-        stats->sanitizedNonFiniteCount    = nLearn + nPlan;
+        // Pass 15 Tier 0.4: tdPsiNonFiniteCount surfaces the previously-silent NF
+        // poisoning into rawNonFiniteCount, so the (B) numerical-safety gate sees it.
+        stats->tdPsiNonFiniteCount        = tdPsiNF;
+        stats->rawNonFiniteCount          = obsNF + nLearn + nPlan + tdPsiNF;
+        stats->sanitizedNonFiniteCount    = nLearn + nPlan + tdPsiNF;
         stats->encodeNonFiniteCount       = obsNF;
         stats->learnNonFiniteCount        = nLearn;
         stats->planNonFiniteCount         = nPlan;
-        ctx.counters[OAK_CNT_OBS_NF]   = uint(obsNF);
-        ctx.counters[OAK_CNT_LEARN_NF] = uint(nLearn);
-        ctx.counters[OAK_CNT_PLAN_NF]  = uint(nPlan);
+        ctx.counters[OAK_CNT_OBS_NF]    = uint(obsNF);
+        ctx.counters[OAK_CNT_LEARN_NF]  = uint(nLearn);
+        ctx.counters[OAK_CNT_PLAN_NF]   = uint(nPlan);
+        ctx.counters[OAK_CNT_TDPSI_NF]  = uint(tdPsiNF);
     }
 }
 
@@ -1737,6 +1846,11 @@ kernel void oak_bk_admit_commit(
     stats->utilityFeatureMean = uF / float(max(R, 1u));
     stats->utilityOptionMean  = uO / float(max(ctx.K, 1u));
     stats->oakOptionReinitCount = float(popcount(ctx.counters[OAK_CNT_REINIT_OPT]));
+    // Pass 15 Tier 0.2: surface cumulative half-conversion saturation count. A healthy
+    // run with provable numerical safety produces stats->halfSaturationCount == 0 over
+    // its entire lifetime — any non-zero value indicates a learn_* kernel attempted to
+    // write a non-finite to an fp16 weight (substituted with half(0) per Inv-4).
+    stats->halfSaturationCount = float(ctx.counters[OAK_CNT_HALF_SAT]);
 
     // Slot toggles + step + clear option-reinit bitmask for next step.
     ctx.scalars->stateSlot  = 1u - ctx.scalars->stateSlot;
