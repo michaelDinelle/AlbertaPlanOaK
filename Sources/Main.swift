@@ -209,38 +209,83 @@ func decodeCString(_ buffer: [CChar]) -> String {
 }
 
 // =================================================================================================
-// HealthAccumulator - fixed-size struct fold over KernelStats. NO per-step heap allocation
-// (Inv-6). Runs only on measured steps; no work otherwise.
+// HealthAccumulator - fixed-size struct fold. Inv-6 (no per-step heap allocation).
+//
+// Two input channels:
+//   recordEnvSignals(reward, prevPolicyMean, currPolicyMean, scoreGrad)
+//     - host-computable from the env-wrapper layer; populated for ANY policy (oak OR random)
+//     - rewardRate (Reward Centering rho-bar tracked via incremental EMA), actionDeltaL2Mean,
+//       scoreGradL2Mean, maxAbsPolicyOutput
+//   recordKernelStats(stats)
+//     - kernel-only telemetry; populated only when the OakMetalEngine is running
+//     - latentStateMeanSquare, optionModelPredictionMSE, utility*, weight maxes, NF counts, etc.
+// snapshot() returns a RunHealth with both channels merged; kernel-only fields are nil for random.
 // =================================================================================================
 private struct HealthAccumulator {
     private struct Slot { var sum = 0.0; var count = 0 }
+    // Slot order matches snapshot() bindings.
+    //   0 latentStateMeanSquare  (kernel)        4 utilityFeatureMean   (kernel)
+    //   1 actionDeltaL2Mean      (host)          5 utilityOptionMean    (kernel)
+    //   2 scoreGradL2Mean        (host)          6 alphaPi              (kernel)
+    //   3 optionModelPredictionMSE (kernel)
     private var slots = [Slot](repeating: Slot(), count: 7)
-    private var steps = 0
+    private var envSteps = 0, kernelSteps = 0
+    private var rhoBar = 0.0                  // host-tracked rho-bar (Reward Centering 2405.09999).
     private var rawNonFinite = 0
     private var encodeNF = 0, learnNF = 0, planNF = 0
     private var maxLat = 0.0, maxPol = 0.0
-    private var lastRho: Double?
     private var tdPsiNF = 0
     private var oakOptionReinitFinal = 0, oakFeatureReinitFinal = 0
     private var valueWMax = 0.0, psiMax = 0.0, optPolicyMax = 0.0
     private var optRewardMax = 0.0, optTransitionMax = 0.0
+    private let ridge: Double
 
-    private mutating func acc(_ i: Int, _ v: Float) {
-        let d = Double(v)
-        if d.isFinite { slots[i].sum += d; slots[i].count += 1 }
-        else { rawNonFinite += 1 }
+    init(rank: Int) {
+        // ridge = 1/(rank+1) per the kernel's structural choice (Sutton-Barto §2.6 floor for
+        // the tracking-rate EMA in early steps).
+        ridge = 1.0 / Double(max(rank, 1) + 1)
     }
 
-    mutating func record(_ stats: KernelStats) {
-        steps += 1
-        let rr = Double(stats.rewardRate); if rr.isFinite { lastRho = rr }
-        acc(0, stats.latentStateMeanSquare)
-        acc(1, stats.actionDeltaL2Mean)
-        acc(2, stats.scoreGradL2Mean)
-        acc(3, stats.optionModelPredictionMSE)
-        acc(4, stats.utilityFeatureMean)
-        acc(5, stats.utilityOptionMean)
-        acc(6, stats.alphaPiStat)
+    private mutating func acc(_ i: Int, _ v: Double) {
+        if v.isFinite { slots[i].sum += v; slots[i].count += 1 } else { rawNonFinite += 1 }
+    }
+
+    // Host-computable fields. Called every measured step regardless of policy.
+    mutating func recordEnvSignals(reward: Float,
+                                   prevPolicyMean: UnsafeBufferPointer<Float>,
+                                   currPolicyMean: UnsafeBufferPointer<Float>,
+                                   scoreGrad: UnsafeBufferPointer<Float>) {
+        envSteps += 1
+        // rho-bar incremental EMA: rho += invT * (reward - rho).
+        let r = Double(reward)
+        if r.isFinite {
+            let invT = max(1.0 / Double(envSteps), ridge)
+            rhoBar += invT * (r - rhoBar)
+        }
+        var dl = 0.0, sg = 0.0, mPol = 0.0
+        for d in 0..<currPolicyMean.count {
+            let v = currPolicyMean[d]
+            if v.isFinite { mPol = max(mPol, abs(Double(v))) }
+            let delta = currPolicyMean[d] - prevPolicyMean[d]
+            dl += Double(delta) * Double(delta)
+        }
+        for d in 0..<scoreGrad.count {
+            let g = scoreGrad[d]
+            sg += Double(g) * Double(g)
+        }
+        acc(1, dl / Double(max(currPolicyMean.count, 1)))
+        acc(2, sg / Double(max(scoreGrad.count, 1)))
+        maxPol = max(maxPol, mPol)
+    }
+
+    // Kernel-only fields. Called only when the OakMetalEngine is the policy.
+    mutating func recordKernelStats(_ stats: KernelStats) {
+        kernelSteps += 1
+        acc(0, Double(stats.latentStateMeanSquare))
+        acc(3, Double(stats.optionModelPredictionMSE))
+        acc(4, Double(stats.utilityFeatureMean))
+        acc(5, Double(stats.utilityOptionMean))
+        acc(6, Double(stats.alphaPiStat))
         rawNonFinite += Int(stats.rawNonFiniteCount)
         encodeNF += Int(stats.encodeNonFiniteCount)
         learnNF  += Int(stats.learnNonFiniteCount)
@@ -249,7 +294,6 @@ private struct HealthAccumulator {
         oakOptionReinitFinal  = Int(stats.oakOptionReinitCount)
         oakFeatureReinitFinal = Int(stats.oakFeatureReinitCount)
         maxLat = max(maxLat, Double(stats.maxAbsLatentPrediction))
-        maxPol = max(maxPol, Double(stats.maxAbsPolicyOutput))
         valueWMax        = max(valueWMax,        Double(stats.valueWMax))
         psiMax           = max(psiMax,           Double(stats.psiMax))
         optPolicyMax     = max(optPolicyMax,     Double(stats.optPolicyMax))
@@ -262,17 +306,18 @@ private struct HealthAccumulator {
     }
 
     func snapshot() -> RunHealth? {
-        guard steps > 0 else { return nil }
+        guard envSteps > 0 else { return nil }
         return RunHealth(
-            rewardRate: lastRho,
+            rewardRate: envSteps > 0 ? rhoBar : nil,
             latentStateMeanSquare: mean(0),
             actionDeltaL2Mean: mean(1), scoreGradL2Mean: mean(2),
             optionModelPredictionMSE: mean(3),
             utilityFeatureMean: mean(4), utilityOptionMean: mean(5),
-            oakOptionReinitCountFinal: oakOptionReinitFinal,
-            oakFeatureReinitCountFinal: oakFeatureReinitFinal,
+            oakOptionReinitCountFinal: kernelSteps > 0 ? oakOptionReinitFinal : nil,
+            oakFeatureReinitCountFinal: kernelSteps > 0 ? oakFeatureReinitFinal : nil,
             alphaPi: mean(6),
-            nonFiniteRawTotal: rawNonFinite, tdPsiNonFiniteTotal: tdPsiNF,
+            nonFiniteRawTotal: rawNonFinite,
+            tdPsiNonFiniteTotal: kernelSteps > 0 ? tdPsiNF : nil,
             valueWMax:    valueWMax    > 0 ? valueWMax    : nil,
             psiMax:       psiMax       > 0 ? psiMax       : nil,
             optPolicyMax: optPolicyMax > 0 ? optPolicyMax : nil,
@@ -281,10 +326,11 @@ private struct HealthAccumulator {
     }
 
     func diagnosticSnapshot() -> RunDiagnostic? {
-        guard steps > 0 else { return nil }
+        guard envSteps > 0 else { return nil }
         return RunDiagnostic(
             nonFiniteByPhase: ["encode": encodeNF, "learn": learnNF, "plan": planNF],
-            maxAbsLatentPrediction: maxLat, maxAbsPolicyOutput: maxPol,
+            maxAbsLatentPrediction: kernelSteps > 0 ? maxLat : nil,
+            maxAbsPolicyOutput: maxPol,
             agentShare: nil, envShare: nil, hostShare: nil,
             metalPhaseGpuMsMean: nil, metalPhaseGpuTimingInvalid: nil)
     }
@@ -872,7 +918,7 @@ private final class RunState {
     var agentMsSum = 0.0
     var envMsSum = 0.0
     var pulse = 0
-    var health = HealthAccumulator()
+    var health: HealthAccumulator
     let actionCol: MeasuredActionCollector
 
     init(env: EnvPoolEnv, seed: Int?) {
@@ -880,6 +926,8 @@ private final class RunState {
         prevScoreGrad  = Array(repeating: 0, count: env.dPolicy)
         randPolicyMean = Array(repeating: 0, count: env.dPolicy)
         randSeed = UInt64(bitPattern: Int64(seed ?? Int(oakUnseededSeed)))
+        // rank = obsDim per the agent's structural choice (see OakMetalEngine init precondition).
+        health = HealthAccumulator(rank: env.obsDim)
         actionCol = MeasuredActionCollector(discreteCount: env.actionDiscreteCount,
                                              envActionWidth: env.envActionWidth)
     }
@@ -1229,7 +1277,16 @@ private final class RunState {
                 guard v.isFinite else { throw OakError.message("Environment produced a non-finite reward.") }
                 state.rewardSum += Double(v)
                 state.agentMsSum += agentMs; state.envMsSum += envMs
-                if let s = stats { state.health.record(s) }
+                // Host-computable health (works for ANY policy, including random).
+                state.prevPolicyMean.withUnsafeBufferPointer { prev in
+                    policyMean.values.withUnsafeBufferPointer { curr in
+                        ctx.env.scoreGradScratch.withUnsafeBufferPointer { sg in
+                            state.health.recordEnvSignals(reward: v, prevPolicyMean: prev,
+                                                          currPolicyMean: curr, scoreGrad: sg)
+                        }
+                    }
+                }
+                if let s = stats { state.health.recordKernelStats(s) }
                 state.actionCol.addMeasured(envAction: ctx.env.envActionScratch)
             }
             state.prevReward = ctx.env.rewardScratch[0]
