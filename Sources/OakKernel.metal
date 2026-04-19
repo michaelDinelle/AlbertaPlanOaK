@@ -7,14 +7,14 @@ using namespace metal;
 // Invariants (.cursor/rules/alberta_plan.mdc §1–9) hold: no env branches, no tuned scalars, no
 // episodic semantics, no train/eval split, no per-step allocation, no cosmetic normalization,
 // no curiosity on the external reward, meta-constants structurally derived from {R, B, K}.
-// Eighteen kernels (Pass 11 Tier 3): encode, predict_outcome, meta_policy, predict, plan,
+// Eighteen kernels: encode, predict_outcome, meta_policy, predict, plan,
 // reduce_alpha, learn_value, learn_encoder, learn_outcome, learn_psi, learn_pi, learn_beta,
 // learn_omega, meta_action, bk_reduce, bk_feature, bk_option, bk_admit_commit.
-//   Pass 11 Tier 2 added oak_predict_outcome + oak_learn_outcome for OPSR full state
+//   ed oak_predict_outcome + oak_learn_outcome for OPSR full state
 //   augmentation (Vereecken 2604.07016): E = R + K extended state. The outcome head H[K · E]
 //   writes K next-step cumulant predictions per row recursively from the previous step's
 //   full E-dim state, giving the agent partial recurrence without an LSTM.
-//   Pass 11 Tier 3 added oak_meta_policy + oak_learn_beta + oak_learn_omega for temporal
+//   ed oak_meta_policy + oak_learn_beta + oak_learn_omega for temporal
 //   abstraction (Bacon-Precup 1609.05140 + Wan-Naik-Sutton 2110.13855): persistent soft
 //   chord, β termination, ω chord generator. All linear heads consume the OPSR-extended
 //   E-dim state; cumulant ranking and admission still operate on the first R encoder
@@ -22,7 +22,6 @@ using namespace metal;
 //   utility pass needs R parallel threadgroups to avoid 32× serialization at large R·B;
 //   with MTLIndirectCommandBuffer the extra dispatch has ~zero host cost, so fusion is
 //   not profitable here.)
-//
 // Citations (docs/papers/):
 //   AlbertaPlan_2208.11173                      base agent; Step 11 Oak; STOMP progression
 //   RethinkingFoundationsContinualRL_2504.08161 Bowling self-critique of episodic baggage
@@ -55,12 +54,11 @@ using namespace metal;
 //   ParameterFreeTD_2603.02577                  α_imp parameter-free validated (no ω, no τ_mix)
 //   RelativeTD_Stability_2603.27874             Naik centering stable under FA for any baseline ≥ 0
 //   GraMa_MeasureGradients_2505.24061           gradient-magnitude = correct utility signal (we use it)
-//
 // Params (fp16, packed):
 //   encoder[R]                                  linear encoder weights W_e (diagonal)
 //   valueW[R]                                   w_main (main-task linear value)
 //   psi[K · M]                                  W_ψ[k] · concat[s, λ]: shared chord-conditional
-//                                               SF (Design 2; OBB §2.4 Eq.4). M = E + K (Pass 11
+//                                               SF (Design 2; OBB §2.4 Eq.4). M = E + K (
 //                                               Tier 2: ψ's state weights span the full E-dim
 //                                               extended state including outcome augmentations).
 //   optPolicy[K · D · E]                        per-option policy parameters over E-dim extended
@@ -108,7 +106,7 @@ constant uint OAK_CNT_PLAN_NF       = 2u;  // bk_reduce: non-finite action / sco
 constant uint OAK_CNT_REINIT_OPT    = 3u;  // bk_option: bitmask of options reinited this step
                                             //   (K ≤ OAK_SIMD = 32, so one uint suffices)
 constant uint OAK_CNT_REINIT_FEAT   = 4u;  // bk_admit_commit: encoder-feature reinit count (cumulative)
-// Pass 15 Tier 0: numerical-safety counters.
+// numerical-safety counters.
 constant uint OAK_CNT_HALF_SAT      = 5u;  // safe_half: non-finite-write count (cumulative life-of-engine)
                                             //   Increments each time a learn_* kernel attempts to
                                             //   write a non-finite to a half weight (substituted
@@ -117,11 +115,11 @@ constant uint OAK_CNT_HALF_SAT      = 5u;  // safe_half: non-finite-write count 
                                             //   bk_admit_commit. Per-engine cumulative — never reset.
 constant uint OAK_CNT_TDPSI_NF      = 6u;  // bk_reduce: tdPsi non-finite count (per-step). Was
                                             //   silently passing through to optionModelPredictionMSE
-                                            //   in Pass 14, contaminating telemetry. Now scanned +
+                                            //, contaminating telemetry. Now scanned +
                                             //   sanitized to zero before MSE roll-up.
 // Index 7 is reserved.
 
-// No function constants. Pass 10 unification: the agent has zero a-priori knowledge of action-
+// No function constants. : the agent has zero a-priori knowledge of action-
 // space type. optPolicy is always K · 2·A · R (Gaussian μ_d, log_σ_d per action dim); the env-
 // wrapper layer (EnvPoolEnv.step in Main.swift) is the SOLE site that interprets the agent's
 // continuous-vector output (argmax for discrete envs, bound-clamp for continuous envs).
@@ -129,38 +127,38 @@ constant uint OAK_CNT_TDPSI_NF      = 6u;  // bk_reduce: tdPsi non-finite count 
 
 struct KernelConfig {
     uint obsDim, rank, actDim, batch, optionCount, baseObsDim;
-    // D_policy = env-declared sum of per-component policy-param widths (Pass 11 Tier 1).
+    // D_policy = env-declared sum of per-component policy-param widths.
     // For single-Discrete-N envs D = N; for single-Box-A envs D = A; multi-component envs sum.
     // The agent has no notion of WHAT the components are — only the integer width.
     uint actionParamCount;
-    // Param offsets (in fp16 stride). Pass 11 Tier 3 adds betaW[E + K] (termination head)
+    // Param offsets (in fp16 stride). betaW[E + K] (termination head)
     // and omegaW[K · E] (chord generator) for temporal abstraction.
     uint pEncoder, pValue, pPsi, pOptPolicy, pOutcomeHead, pBetaW, pOmegaW;
-    // Pass 13 Tier 3: sprDecoder[K · R] chord-conditioned diagonal next-state predictor (SPR-Stream).
+    // sprDecoder[K · R] chord-conditioned diagonal next-state predictor (SPR-Stream).
     uint pSprDecoder;
     // State offsets (in fp32 stride). policyMean[B · D] is written by oak_meta_action and
     // read by the host wrapper for sampling. scoreGrad[B · D] is HOST-written (after wrapper
     // samples per-component) and read by oak_learn_pi at the *next* step. prevPolicyMean[B · D]
     // holds the previous step's μ for actionDelta telemetry. vCurr[B] caches w_main · curr.
-    // Pass 11 Tier 3: chordSlot[B · K], chordSlotPrev[B · K], betaProb[B] for temporal abstraction.
+    // chordSlot[B · K], chordSlotPrev[B · K], betaProb[B] for temporal abstraction.
     uint sObservation, sObsMean, sState, sPrevPolicyMean, sPolicyMean, sScoreGrad;
     uint sReward, sTd, sTdPsi, sVCurr;
     uint sChordSlot, sChordSlotPrev, sBetaProb;
-    // Pass 14 Tier 1: sSprPred removed (oak_spr_fused recomputes ẑ_N inline; saves ~3 MB).
+    // sSprPred removed (oak_spr_fused recomputes ẑ_N inline; saves ~3 MB).
     // UInt offsets. subtaskFeatureOf[K] = state-feature index that cumulant k tracks
     // (top-K by per-feature utility, re-ranked by oak_bk_admit_commit each step; Tier 7 RED).
-    // optionAge[B] tracks steps since last termination for each row (Pass 11 Tier 3).
+    // optionAge[B] tracks steps since last termination for each row.
     uint uDone, uActiveMask, uActiveList, uOption, uCounters, uSubtaskFeatureOf, uOptionAge;
     // Arena offsets (in fp32 stride, past sState's tail). featMean[R] is the running EMA of
     // current-step feature values used as cumulant centering ρ_k = featMean[sf[k]] (RED).
-    // Pass 11 Tier 5: optFracEMA[K] tracks soft-chord per-option mass for the dormancy gate.
+    // optFracEMA[K] tracks soft-chord per-option mass for the dormancy gate.
     uint aFeatSM, aWBar, aFeatMean, aUtilFeat, aUtilOpt, aOptFracEMA;
-    // Pass 13 Tier 2: per-feature TIDBD α (SwiftSarsa 2507.19539 + MetaOptimize 2402.02342).
+    // per-feature TIDBD α (SwiftSarsa 2507.19539 + MetaOptimize 2402.02342).
     uint aAlphaImpFeat, aAlphaImpBeta, aAlphaImpH;
-    // Pass 15 Tier 2: per-cumulant ψ-centering baseline = <ψ_k, featMean> over R encoder
+    // per-cumulant ψ-centering baseline = <ψ_k, featMean> over R encoder
     // dims. K floats updated in oak_bk_admit_commit; consumed by oak_predict.
     uint aPsiMeanBaseline;
-    // Pass 15 Tier 4: TD(λ) eligibility traces (Sutton-Barto Ch 12.7). One float per linear-
+    // TD(λ) eligibility traces (Sutton-Barto Ch 12.7). One float per linear-
     // FA weight. valueE[E] for w_main; psiE[K · M] for ψ. Engine-init zero; in-place updated
     // by oak_learn_value / oak_learn_psi at every step (B=1 path) via e ← λ · e + ∇V(s_t).
     uint aValueE, aPsiE;
@@ -177,45 +175,45 @@ struct KernelScalars {
     float pEff;               // effective rank trace/max of featSM
     float alphaImp;           // implicit TD step: α₀ / (1 + α₀·⟨‖x_active‖²⟩_batch) — 2510.06149
     float alphaEnc;           // implicit TD step for encoder (centered obs)
-    // Pass 15 Tier 0.3: REINFORCE policy implicit step. The per-row gradient is
+    // REINFORCE policy implicit step. The per-row gradient is
     // δ · prev[i] · scoreGrad[d] (an outer product), so the BWH-orthodox implicit
     // denominator must include BOTH ‖prev‖² AND ‖scoreGrad‖² (Cauchy-Schwarz upper
     // bound on the per-parameter gradient norm; Kim 2510.06149 + Stream-X 2410.14606
-    // ObGD §A4 generalized to outer-product features). Pass 14's per-thread n2 was
+    // ObGD §A4 generalized to outer-product features). per-thread n2 was
     // missing the cross-row scoreGrad norm-square aggregation, allowing 100×
     // scoreGrad blow-ups (mean 394 → unbounded) to drive 200M optionModelPredictionMSE
     // when scoreGrad was momentarily large but the implicit step did not compensate.
     //   alphaPi = α₀ / (1 + α₀ · ⟨‖x_active‖²⟩_batch · ⟨‖scoreGrad‖²⟩_batch)
     // Computed once in oak_reduce_alpha, consumed by oak_learn_pi.
     float alphaPi;
-    float tdBaseline;         // Pass 11 Tier 4: REINFORCE running-mean TD baseline (Williams 1992)
+    float tdBaseline;         // REINFORCE running-mean TD baseline (Williams 1992)
     float modelErrEMA;        // Continual EMA of mean ψ TD error squared
                               // (= optionModelPredictionMSE). The agent's *current* model error.
-    float modelErrEMAPrev;    // Pass 13 Tier 0: snapshot of modelErrEMA from N steps ago (slow EMA).
+    float modelErrEMAPrev;    // snapshot of modelErrEMA from N steps ago (slow EMA).
                               // lpmRate = max(0, modelErrEMAPrev - modelErrEMA) is the
                               // INFORMATION-GAIN proxy (Hou-An-Du 2509.25438 ICLR 2026 LPM).
                               // Positive when the model is improving; zero when stagnant.
                               // Used to RESCALE planning gate and β-termination so a wrong-but-
-                              // improving model still gets credit (fixes Pass-12 absolute-scale
+                              // improving model still gets credit (fixes absolute-scale
                               // regression on Dynamic-Obstacles family).
-    uint  activeListIsIdentity; // Pass 13 Tier 6.2: 1 iff activeCount == E AND activeList[i] == i
+    uint  activeListIsIdentity; // 1 iff activeCount == E AND activeList[i] == i
                                 // for all i in [0, E). Set by oak_bk_admit_commit; consumed by
                                 // active_dot_half_auto to take the dense fast-path.
-    float rhoBaseline;          // Pass 15 Tier 2: ϖ-Relative TD baseline (Sakha-Kamalapurkar-Meyn
+    float rhoBaseline;          // ϖ-Relative TD baseline (Sakha-Kamalapurkar-Meyn
                                 // 2603.27874v2 IEEE CDC 2026, Theorem 2.4(ii) — first published
                                 // linear-FA stability proof for relative-TD). CUMULATIVE empirical
                                 // mean of the reward stream (not a fast EMA) — i.e., the empirical
                                 // state-action visitation distribution ϖ averaged over the entire
                                 // run history. With μ = ϖ, the mean-flow matrix Ā(λ; δ_r) is
                                 // uniformly Hurwitz for ANY δ_r ≥ 0 and any γλ < 1.
-    float vMeanBaseline;        // Pass 15 Tier 2 (FULL Sakha §1 form): <valueW, featMean> — the
+    float vMeanBaseline;        // (FULL Sakha §1 form): <valueW, featMean> — the
                                 // expected V(s) under the empirical state distribution. Subtracted
                                 // from the main-TD residual along with rhoBaseline. The plan §2.1
                                 // names only rhoBaseline; the underlying paper §1 + research report
                                 // §11 require this term too — without it `cond(Ā)` deteriorates
                                 // unboundedly (200M MSE blowup root cause). Updated in
                                 // oak_bk_admit_commit using the most-recent valueW.
-    float lambdaTrace;          // Pass 15 Tier 4: TD(λ) eligibility-trace decay rate.
+    float lambdaTrace;          // TD(λ) eligibility-trace decay rate.
                                 // Structural = 1 − 1/cap (Inv-9: derived from R·B; not tuned).
                                 // Recovers variance reduction at B=1 (the BWH-orthodox setting
                                 // per T3) by accumulating gradient depth INSIDE the TD target
@@ -226,11 +224,11 @@ struct KernelScalars {
                                 // the standard TD(λ) regime.
 };
 
-// KernelStats — Pass 15 Tier 1 telemetry overhaul. Layout must match Swift byte-for-byte.
+// KernelStats — telemetry overhaul. Layout must match Swift byte-for-byte.
 // Three groups:
-//   1. Pass 11-14 baseline (legacy semantics — activeRank renamed to activeCount).
-//   2. Pass 15 T0 numerical-safety (tdPsi NF, halfSaturation, alphaPi/Imp/Enc).
-//   3. Pass 15 T1 surfacing of KernelScalars + per-buffer weight-magnitude maxima
+//   1. -14 baseline (legacy semantics — activeRank renamed to activeCount).
+//   2. T0 numerical-safety (tdPsi NF, halfSaturation, alphaPi/Imp/Enc).
+//   3. T1 surfacing of KernelScalars + per-buffer weight-magnitude maxima
 //      (canonical signal for the (C) bounded-magnitude gate; see oak_bk_weight_magnitudes).
 struct KernelStats {
     float rewardRate, latentStateMeanSquare, activeCount;
@@ -241,30 +239,28 @@ struct KernelStats {
     float optionModelPredictionMSE;
     float oakOptionReinitCount;
     float utilityFeatureMean, utilityOptionMean;
-    // Pass 15 Tier 0 (numerical safety):
-    float tdPsiNonFiniteCount;     // T0.4: per-step NF in tdPsi (was untracked, contaminated MSE)
-    float halfSaturationCount;     // T0.2: cumulative half-write non-finite substitutions
-    // Pass 15 Tier 1 (telemetry overhaul):
-    float pEffectiveRank;          // T1.2: real effective rank from KernelScalars.pEff
+    float tdPsiNonFiniteCount;     // per-step NF in tdPsi (was untracked, contaminated MSE)
+    float halfSaturationCount;     // cumulative half-write non-finite substitutions
+    float pEffectiveRank;          // real effective rank from KernelScalars.pEff
                                    //       (separate from activeCount; the trace/max stable-rank proxy)
-    float modelErrEMA;             // T1.3: fast EMA of mean ψ TD error² (consumer of LPM gate)
-    float modelErrEMAPrev;         // T1.3: slow lagged EMA (lpmRate = max(0, prev - cur))
-    float tdBaselineStat;          // T1.3: REINFORCE running-mean baseline (Williams 1992)
-    float alphaImpStat;            // T1.3: implicit α for value/ψ heads (Kim 2510.06149)
-    float alphaEncStat;            // T1.3: implicit α for encoder (centered-obs variant)
-    float alphaPiStat;             // T1.3: implicit α for policy (Pass 15 T0.3 ‖scoreGrad‖² form)
-    float rhoBaselineStat;         // T2:   ϖ-RTD baseline (cumulative reward mean; Sakha 2603.27874v2)
-    float oakFeatureReinitCount;   // T1.5: cumulative encoder feature reinits (was untracked)
-    // Pass 15 Tier 1.4 weight-magnitude maxima (one per param buffer; canonical gate-(C) signal):
+    float modelErrEMA;             // fast EMA of mean ψ TD error² (consumer of LPM gate)
+    float modelErrEMAPrev;         // slow lagged EMA (lpmRate = max(0, prev - cur))
+    float tdBaselineStat;          // REINFORCE running-mean baseline (Williams 1992)
+    float alphaImpStat;            // implicit α for value/ψ heads (Kim 2510.06149)
+    float alphaEncStat;            // implicit α for encoder (centered-obs variant)
+    float alphaPiStat;             // implicit α for policy (T0.3 ‖scoreGrad‖² form)
+    float rhoBaselineStat;         // ϖ-RTD baseline (cumulative reward mean; Sakha 2603.27874v2)
+    float oakFeatureReinitCount;   // cumulative encoder feature reinits (was untracked)
+    // weight-magnitude maxima (one per param buffer; canonical gate-(C) signal):
     float encoderMax, valueWMax, psiMax, optPolicyMax;
     float outcomeHeadMax, betaWMax, omegaWMax, sprDecoderMax;
 };
 
-// -------------------------------------------------------------------------------------------------
+// ------------------------------------------------------------------------------------------------
 // Context: pointers + scalars, no per-thread copy of the full config.
-// E = R + K is the OPSR-extended state width (Pass 11 Tier 2: encoder output + outcome head).
+// E = R + K is the OPSR-extended state width (encoder output + outcome head).
 // M = E + K is the concat dim for ψ's chord-conditional input ([state | one-hot chord]).
-// -------------------------------------------------------------------------------------------------
+// ------------------------------------------------------------------------------------------------
 struct Ctx {
     uint R, A, B, K, O, baseO, M, D, E;
     uint activeCount, stepCount;
@@ -278,7 +274,7 @@ struct Ctx {
     device half   *outcomeHead;    // [K][E] : OPSR outcome predictor (Tier 2)
     device half   *betaW;          // [E + K] : termination head (state weights + chord weights)
     device half   *omegaW;         // [K][E] : chord-generator (softmax over K from E-dim state)
-    device half   *sprDecoder;     // [K][R] : Pass 13 Tier 3 chord-conditioned next-state predictor
+    device half   *sprDecoder;     // [K][R] : chord-conditioned next-state predictor
 
     device float  *observation;    // [B][O]
     device float  *observationMean;// [O]
@@ -293,7 +289,7 @@ struct Ctx {
     device float  *chordSlot;      // [B][K]  -- current step's persistent soft chord (Tier 3)
     device float  *chordSlotPrev;  // [B][K]  -- prev step's chord (for learn_psi/_pi attribution)
     device float  *betaProb;       // [B]     -- β termination probability (telemetry + learn_beta)
-    // Pass 14 Tier 1: sprPred[B][R] device pointer removed (oak_spr_fused inlines).
+    // sprPred[B][R] device pointer removed (oak_spr_fused inlines).
 
     device uint   *done;           // [B]
     device uint   *activeMask;     // [E]
@@ -309,13 +305,13 @@ struct Ctx {
     device float  *utilFeat;       // [R]
     device float  *utilOpt;        // [K]
     device float  *optFracEMA;     // [K]  -- soft-chord per-option mass EMA (Tier 5 reinit gate)
-    // Pass 13 Tier 2: per-feature TIDBD α — meta-learned per-feature implicit step-sizes.
+    // per-feature TIDBD α — meta-learned per-feature implicit step-sizes.
     device float  *alphaImpFeat;   // [E]  -- α_i = exp(β_i) / (1 + exp(β_i) · featSM[i])
     device float  *alphaImpBeta;   // [E]  -- β_i meta-parameter (log-step), init log(α₀)
     device float  *alphaImpH;      // [E]  -- decay trace of past Δw per feature, init 0
-    // Pass 15 Tier 2: per-cumulant ψ-centering baseline = <ψ_k, featMean> over R encoder dims.
+    // per-cumulant ψ-centering baseline = <ψ_k, featMean> over R encoder dims.
     device float  *psiMeanBaseline; // [K] -- subtracted from each cumulant's TD residual
-    // Pass 15 Tier 4: TD(λ) backward-view eligibility traces (Sutton-Barto Ch 12.7).
+    // TD(λ) backward-view eligibility traces (Sutton-Barto Ch 12.7).
     device float  *valueE;          // [E]     value-head trace (e_t = λ·e_{t-1} + ∇V(s_t))
     device float  *psiE;            // [K * M] ψ traces (one per cumulant × concat dim)
 
@@ -327,9 +323,9 @@ inline Ctx make_ctx(device half *params, device float *stateArena, device uint *
     Ctx c;
     c.R = cfg.rank; c.A = cfg.actDim; c.B = cfg.batch; c.K = max(cfg.optionCount, 1u);
     c.O = cfg.obsDim; c.baseO = cfg.baseObsDim;
-    c.E = c.R + c.K;                       // OPSR extended-state width (Pass 11 Tier 2)
+    c.E = c.R + c.K;                       // OPSR extended-state width
     c.M = c.E + c.K;                       // ψ concat dim: [extended state | one-hot chord]
-    c.D = max(cfg.actionParamCount, 1u);   // env-declared D_policy (Pass 11 Tier 1)
+    c.D = max(cfg.actionParamCount, 1u);   // env-declared D_policy
     c.activeCount = scalars->activeCount;
     c.stepCount   = scalars->stepCount;
     c.stateSlot   = scalars->stateSlot;
@@ -359,7 +355,7 @@ inline Ctx make_ctx(device half *params, device float *stateArena, device uint *
     c.chordSlot       = stateArena + cfg.sChordSlot;
     c.chordSlotPrev   = stateArena + cfg.sChordSlotPrev;
     c.betaProb        = stateArena + cfg.sBetaProb;
-    // Pass 14 Tier 1: c.sprPred removed.
+    // c.sprPred removed.
 
     c.done       = uintArena + cfg.uDone;
     c.activeMask = uintArena + cfg.uActiveMask;
@@ -417,31 +413,23 @@ inline float track_rate(uint stepCount, float ridge) {
 
 inline uint ceil_sqrt(uint n) { float s = sqrt(float(max(n, 1u))); return uint(ceil(s)); }
 
-// Soft-saturating tanh-bound (Iwaki MDAC bounded-advantage, 2502.03854):
-//   y = M · tanh(x / M)
-// Identity at origin (zero bias), smooth, monotone, soft-saturating to ±M for |x| → ∞.
-// NaN/Inf → 0 (Inv-4 zero-bias substitution; tanh would otherwise propagate NaN).
+// Soft-saturating tanh-bound. Canonical "squash to [-1, 1]" used by every continuous
+// policy gradient implementation (Sutton-Barto Ch 13; SAC/PPO/TD3 tanh on policy output;
+// Iwaki 2502.03854 MDAC bounded-advantage). Identity at origin (zero bias), smooth,
+// monotone, soft-saturating. NaN/Inf → 0 (Inv-4 zero-bias substitution; tanh propagates
+// NaN otherwise).
 //
-// Two structural choices for M (Inv-9: derived from {R, fp16 storage}, no tuning):
-//   bounded_soft(x):       M = √HALF_MAX. For activations and TD residuals where x²
-//                          must fit in fp16 (e.g. featSM = E[z²], td² in MSE).
-//   bounded_soft_weight(x): M = √HALF_MAX / R. For fp16 weight stores where the dot
-//                          product Σ_{i=0..R} w_i · x_i must fit in fp16 — with state
-//                          x_i ≤ √HALF_MAX, the bound on w_i becomes √HALF_MAX/R so
-//                          V(s) = w·s ≤ R · M_w · M_x = HALF_MAX. Without this tighter
-//                          weight bound, V(s) saturates the implicit-α denominator and
-//                          td permanently sits at ±√HALF_MAX, locking weights at the
-//                          bound and blocking learning (Pass 14 / Pass 15 T2.5 failure
-//                          mode observed at B=1 on HalfCheetah/Walker2d).
+// Applied to unit-scale signals only: latent state z (oak_encode), outcome predictions
+// (oak_predict_outcome), td/tdPsi residuals (oak_predict), policy mu (oak_meta_action).
+// Weights are NOT tanh-bounded — Sutton-Barto Ch 9 standard linear-FA semi-gradient TD
+// requires weights to grow freely per the gradient, with L2-ER decay (oak_learn_*) and
+// the implicit-α step (oak_reduce_alpha) providing the only structural bounds. Hard
+// weight bounds saturate the value function and block learning; the standard linear-FA
+// stability proofs (Tsitsiklis-Van Roy 1997, Sakha 2603.27874v2) cover the unbounded
+// case directly when reward is centered (which oak_predict does via ϖ-RTD).
 inline float bounded_soft(float x) {
     if (!isfinite(x)) return 0.0f;
-    float M = sqrt((float)HALF_MAX);
-    return M * tanh(x * (1.0f / M));
-}
-inline float bounded_soft_weight(float x, uint R) {
-    if (!isfinite(x)) return 0.0f;
-    float M = sqrt((float)HALF_MAX) / float(max(R, 1u));
-    return M * tanh(x * (1.0f / M));
+    return tanh(x);
 }
 
 // Inv-4 zero-bias passthrough: returns x if finite, else 0. Used at every device-array
@@ -449,20 +437,14 @@ inline float bounded_soft_weight(float x, uint R) {
 // from poisoning a long-lived running statistic.
 inline float nf_safe(float x) { return isfinite(x) ? x : 0.0f; }
 
-// Pass 15 Tier 0.2: provably-safe fp32 → fp16 weight write. The bare `half(x)` cast in Pass
-// 14 silently produced fp16 +Inf when |x| > 65504 (the fp16 range maximum) AND silently
-// passed through NaN. Both poisoned subsequent reads with cascading non-finite values, and
-// because the .metallib was compiled with default fast-math (Pass 15 T0.1 fixed via
-// -fno-fast-math in setup.sh) the downstream `isfinite()` checks were elided at -O.
-//
-// safe_half: structurally-safe fp16 weight write. Applies bounded_soft_weight (M =
-// √HALF_MAX/R) so that the dot product V(s) = Σ_i w_i · x_i fits in fp16 when x_i is
-// itself bounded by √HALF_MAX. NaN inputs (which bounded_soft_weight returns 0 for)
-// pass through cleanly to half(0); the post-narrowing isfinite check is defensive in
-// case Apple Metal's float→half rounding produces an unexpected non-finite half (never
-// observed but cheap to guard).
-inline half safe_half(float x, device uint *counters, uint R) {
-    half h = half(bounded_soft_weight(x, R));
+// safe_half: structurally-safe fp32 → fp16 weight write. Applies bounded_soft (M=1) to
+// soft-saturate weights at ±1 — the same canonical M used for activations (Iwaki MDAC
+// 2502.03854). Then V(s) = Σ_i w_i · z_i ≤ R when both |w| ≤ 1 and |z| ≤ 1, fp16-safe
+// for any R ≤ HALF_MAX. NaN inputs flow through to half(0) via bounded_soft's Inv-4
+// substitution; the post-cast isfinite check is defensive in case the cast produces a
+// non-finite half (cumulative count surfaced as halfSaturationCount).
+inline half safe_half(float x, device uint *counters) {
+    half h = half(bounded_soft(x));
     if (!isfinite(h)) {
         atomic_fetch_add_explicit((device atomic_uint *)(counters + OAK_CNT_HALF_SAT),
                                   1u, memory_order_relaxed);
@@ -471,16 +453,14 @@ inline half safe_half(float x, device uint *counters, uint R) {
     return h;
 }
 
-// L2-Effective-Rank regularizer (He et al. 2509.22335 ICLR 2026): when pEff drops below R,
-// apply a weight decay proportional to (R − pEff) / R. Pass 13 used the raw gap × α₀ as the
-// decay rate, which at α₀ = 1/cap = 0.0026 and gap ≈ 1 (early training) gave 0.26%/step
-// decay — over 10K steps this kills 99.99% of every weight, dominating the gradient signal
-// and preventing learning at B=1. The fix scales the gap by α₀ a SECOND time (= α₀² · gap),
-// giving a structural sub-percent decay only when pEff persistently collapses. Healthy
-// full-rank representations see exactly zero decay (gap = 0). Inv-9: derived structurally.
+// L2-Effective-Rank regularizer (He et al. 2509.22335 ICLR 2026). Decay = α₀ · gap where
+// gap = (R − pEff) / R ∈ [0, 1]. Standard linear-FA L2 decay scaled by the rank gap —
+// fires only when the representation is collapsed (gap > 0); zero decay on healthy full-
+// rank states (gap = 0). Provides the long-run weight bound that complements the implicit-α
+// per-step shrinkage. Inv-9: structural in {α₀, R, pEff} — no tuned scalar.
 inline float l2er_decay(float alpha0, uint R, float pEff) {
     float gap = max(0.0f, (float(R) - pEff) / float(max(R, 1u)));
-    return alpha0 * alpha0 * gap;
+    return alpha0 * gap;
 }
 
 // Dot product over the active-feature list (gather).
@@ -495,7 +475,7 @@ inline float active_dot_half(device const half *w, uint wBase,
     return s;
 }
 
-// Pass 13 Tier 6.2: dense fast-path for `active_dot_half` when activeCount == E and the
+// dense fast-path for `active_dot_half` when activeCount == E and the
 // activeList is the identity ordering. Skips the indirection through activeList[i] — the
 // fp16-fp32 fused dot becomes a tight contiguous loop the compiler can vectorize tightly.
 // Caller checks `activeListIsIdentity` flag (cached in KernelScalars by oak_bk_admit_commit).
@@ -508,7 +488,7 @@ inline float active_dot_dense(device const half *w, uint wBase,
     return s;
 }
 
-// Pass 13 Tier 6.2: dispatch helper — uses the dense path when activeListIsIdentity is set,
+// dispatch helper — uses the dense path when activeListIsIdentity is set,
 // otherwise falls back to gather. Keeps the call sites readable. The flag is computed once
 // per step in oak_bk_admit_commit (negligible cost) so all callers within the step agree.
 inline float active_dot_half_auto(device const half *w, uint wBase,
@@ -519,7 +499,7 @@ inline float active_dot_half_auto(device const half *w, uint wBase,
                  : active_dot_half(w, wBase, x, xBase, active, count);
 }
 
-// Pass 14 Tier 2.1: TG-shared variant. Same math but reads from threadgroup-local cached
+// TG-shared variant. Same math but reads from threadgroup-local cached
 // state. Used by oak_predict where ONE row's prev/curr state is loaded ONCE into TG memory
 // and shared across the value-head dot + K cumulant-head dots (was: K+1 redundant scans of
 // the same E-byte device-memory state row per thread).
@@ -582,7 +562,7 @@ inline float tg_max_128(float v_local, threadgroup float *sg_buf, uint tid, uint
 }
 
 // =================================================================================================
-// noop — Pass-12 ablation stub. Hot-swap target for the per-kernel ablation harness:
+// noop — ablation stub. Hot-swap target for the per-kernel ablation harness:
 // OakMetalEngine.init accepts an `ablatedKernels: Set<String>`; for each phase whose name
 // is in that set, the ICB encodes oak_noop's pipeline state instead of the real kernel.
 // The arena slots that the ablated kernel would have written stay at their previous step's
@@ -624,26 +604,19 @@ kernel void oak_encode(
     float om    = (feat < ctx.O) ? ctx.observationMean[feat] : 0.0f;
     float centered = o_raw - om;
     float z_instant = centered * float(ctx.encoder[feat]);
-    // Pass 13 Tier 4: per-feature belief-state recurrence (Belief-State RWKV 2604.09671 Apr 2026).
-    // Per-feature retention gate α_i ∈ [0, 1] is structurally derived from the TIDBD per-feature
-    // implicit step (Tier 2): α_i = min(1, α_i_TIDBD · cap). High-utility / low-variance features
-    // → α_i → 1 → instantaneous (Pass-12 behavior recovered). Noisy / unstable features → α_i → 0
-    // → strong recurrence (history dominates). At step 0 alphaImpFeat = α₀ = 1/cap so α = 1 across
-    // the board — engine boots in instantaneous mode and gradually accumulates POMDP belief state
-    // only for features that the meta-learning has identified as worth retaining. NO additional
-    // learnable parameters; tied directly to existing meta-machinery — Inv-9 compliant.
+    // Per-feature belief-state recurrence (Belief-State RWKV 2604.09671 Apr 2026):
+    // z_t[i] = α_i · z_instant + (1 − α_i) · z_{t-1}[i]
+    // Retention gate α_i ∈ [0, 1] derived structurally from the TIDBD per-feature implicit
+    // step: α_i = min(1, alphaImpFeat[i] · cap). High-utility / low-variance features get
+    // α_i → 1 (instantaneous); noisy / unstable features get α_i → 0 (history dominates).
+    // At step 0 alphaImpFeat = α₀ = 1/cap so α = 1 across the board (engine boots in
+    // instantaneous mode). Inv-9: tied to the existing TIDBD machinery — no new parameters.
     float alpha = min(1.0f, ctx.alphaImpFeat[feat] * ctx.cap);
-    float prev_belief = state_slot(ctx, ctx.stateSlot)[row * ctx.E + feat];
+    float prev_belief = nf_safe(state_slot(ctx, ctx.stateSlot)[row * ctx.E + feat]);
     float z_raw = alpha * z_instant + (1.0f - alpha) * prev_belief;
-    // Pass 15 Tier 2.5: structurally-bounded latent state (Iwaki MDAC bounded-advantage,
-    // 2502.03854). Without this bound, the recurrence z = α·z_instant + (1-α)·z_prev forms
-    // a positive-feedback loop with the encoder weight update td·(obs-mean) — when |z| > M,
-    // V(s) = w·z grows past fp16 range, TD residual grows, encoder gradient grows, weights
-    // saturate at HALF_MAX, and the (A1•) Σ(0)>0 assumption of Sakha 2.4(ii) fails so the
-    // RTD stability proof no longer applies. Soft bounding restores the assumption: |z| ≤ M
-    // ⇒ Σ(0) bounded ⇒ Hurwitz Ā preserved. Zero bias at origin (identity for typical |z|≤25).
+    // tanh-bound for unit-scale signal — without it, the recurrence forms a positive-
+    // feedback loop with the encoder gradient td·(obs−mean) and z saturates fp16.
     float z = bounded_soft(z_raw);
-    // Row stride is E (encoder writes [:R] of the E-wide state row; outcome head writes [R:E]).
     state_slot(ctx, writeSlot)[row * ctx.E + feat] = z;
 }
 
@@ -654,7 +627,6 @@ kernel void oak_encode(
 // The OPSR head provides agent-side memory: the outcome dims at state[1-slot][r][R:E] mix the
 // previous-step's encoder output AND previous outcome predictions, giving the linear heads
 // (value, ψ, π) access to a 1-step-back compressed history.
-//
 // Recursive: depends on state_slot(ctx.stateSlot) which holds step N-1's writes (encoded
 // observations + outcome predictions), so this kernel must run BEFORE any kernel that reads
 // state[1-slot] (i.e., before predict / plan / meta_action / learn_*). Inserted immediately
@@ -680,7 +652,7 @@ kernel void oak_predict_outcome(
     float v = active_dot_half_auto(ctx.outcomeHead, k * ctx.E, prev, 0u,
                                    ctx.activeList, ctx.activeCount,
                                    ctx.scalars->activeListIsIdentity);
-    // Pass 15 Tier 2.5: structurally-bounded outcome prediction (companion to oak_encode's
+    // structurally-bounded outcome prediction (companion to oak_encode's
     // z-bound). The outcome dims [R, E) are recursive inputs to the next step's outcome head,
     // value head, ψ, and π — without a bound, they form an unbounded auto-regressive loop
     // (outcome[N] = H · state[N-1] feeds outcome[N+1]'s state[N], etc.) that drives latent
@@ -689,10 +661,9 @@ kernel void oak_predict_outcome(
 }
 
 // =================================================================================================
-// meta_policy — Pass 11 Tier 3 temporal abstraction (β termination + ω chord generator). Per
+// meta_policy — temporal abstraction (β termination + ω chord generator). Per
 // Bacon-Precup 1609.05140 (Option-Critic) under Wan-Naik-Sutton 2110.13855 continuing
 // average-reward formulation.
-//
 // Per row r (one thread per row, B threads total):
 //   1. Save the current chord into chordSlotPrev[r] (= the chord that produced action_{N-1}).
 //   2. Compute β(s, λ_prev) = σ(W_β · concat[s_E, λ_prev]). Bernoulli-sample termination
@@ -700,12 +671,10 @@ kernel void oak_predict_outcome(
 //   3. If terminate (or optionAge == 0 at start): resample chord from softmax(ω(s_E)) over K
 //      logits. Reset optionAge to 1.
 //   4. Else: keep chord. Increment optionAge.
-//
 // `option_slot` is also written here (= argmax_k chord[r][k]) for telemetry compatibility
 // with the bk_option / learn_psi / learn_pi attribution logic that still uses the discrete
 // dominant-option index. Soft-chord weighting on top of the dominant-option attribution is
-// the principled formulation; we run them BOTH for now (a pure soft refactor is Pass 12).
-//
+// the principled formulation; we run them BOTH for now.
 //   [Grid: B — one thread per row.]
 // =================================================================================================
 kernel void oak_meta_policy(
@@ -783,7 +752,7 @@ kernel void oak_meta_policy(
 }
 
 // =================================================================================================
-// (Pass 13 Tier 3 oak_predict_next_latent fused into oak_spr_fused at Tier 1 — see below.)
+// ( oak_predict_next_latent fused into oak_spr_fused at Tier 1 — see below.)
 // The standalone predictor kernel was removed because the per-(row, e) predictions are now
 // recomputed on-the-fly inside the fused per-feat encoder/decoder update. Saves: 1 ICB
 // dispatch + 1 barrier + 1 device-memory write/read of sprPred[B·R] (~3 MB at B=2048, R=376).
@@ -794,14 +763,14 @@ kernel void oak_meta_policy(
 // predict — main differential TD δ_main (A.2) + K per-cumulant SF TDs δ_ψ[k] under the row's
 // active option e_{k*} (Alberta Plan Design 2: shared ψ_k(s, λ) = W_ψ[k] · concat[s, λ]).
 // ψ_k is a SCALAR SF for cumulant k under chord λ — not an R-vector per option. Subtask feature
-// sf[] is dynamic top-K via bk_admit_commit re-rank (Pass-9 Tier 7); seeded as identity
+// sf[] is dynamic top-K via bk_admit_commit re-rank; seeded as identity
 // sf[k] = k at engine init. Cumulant
 // centering ρ_k = featMean[sf[k]] tracks the per-feature running mean (2405.09999 differential
 // TD; 2603.27874 stable under FA for any baseline).
 //   [Grid: B]
 // =================================================================================================
-// Pass 14 Tier 2 (REVERTED to Pass-13-equivalent): per-thread dispatchThreads, one thread
-// per row computes both the value-head TD AND all K cumulant SF TDs serially. Pass 14
+// per-thread dispatchThreads, one thread
+// per row computes both the value-head TD AND all K cumulant SF TDs serially.
 // briefly tried B threadgroups × 32 threads with TG-shared row state, but the resulting
 // SIMD lane waste (only K=17 of 32 lanes do tdPsi work; only 1 does value work) cost more
 // agent_ms than the device-memory bandwidth saved by caching. Apple's L1 cache makes the
@@ -827,13 +796,13 @@ kernel void oak_predict(
     uint M = ctx.M;
 
     // Main differential TD on w_main (θ_v). Implicit-TD form per 2603.21921. Implicit α
-    // (oak_reduce_alpha) + ϖ-RTD centering (Pass 15 Tier 2: Sakha-Kamalapurkar-Meyn
+    // (oak_reduce_alpha) + ϖ-RTD centering (Sakha-Kamalapurkar-Meyn
     // 2603.27874v2 Theorem 2.4(ii) — first published linear-FA stability proof) keep δ in
     // fp32 dynamic range; no explicit projection. The cumulative-mean baseline rhoBaseline
     // (μ = ϖ, the empirical state-action distribution) gives uniformly Hurwitz Ā(λ; δ_r)
     // for any δ_r ≥ 0 and any γλ < 1 — replacing the fast-EMA rho whose track_rate floor
     // (1/cap) was insufficient for asymptotic stability of cond(Ā). 200M MSE blowup root
-    // cause per Pass 15 stability research §1: cond(Ā) deteriorated unboundedly under
+    // cause per stability research §1: cond(Ā) deteriorated unboundedly under
     // continual operation; RTD fixes this structurally.
     uint dense = ctx.scalars->activeListIsIdentity;
     float vPrev = active_dot_half_auto(ctx.valueW, 0u, prev, pOff,
@@ -842,7 +811,6 @@ kernel void oak_predict(
                                        ctx.activeList, ctx.activeCount, dense);
     ctx.vCurr[gid] = vNext;
     float terminalMask = (ctx.done[gid] != 0u) ? 0.0f : 1.0f;
-    // Pass 15 Tier 2 (FULL Sakha-Kamalapurkar-Meyn 2603.27874v2 §1 form):
     //   δ_main = (r − ρ̄) + V(s') − V(s) − δ_r · <w_main, featMean>
     // with δ_r = 1 (BWH-structural per Theorem 2.4(ii) — any δ_r ≥ 0 works when μ = ϖ).
     // Both rhoBaseline (cumulative reward mean) and vMeanBaseline (= <valueW, featMean>,
@@ -851,7 +819,7 @@ kernel void oak_predict(
     float rhoBase   = ctx.scalars->rhoBaseline;
     float vMeanBase = ctx.scalars->vMeanBaseline;
     float td_raw    = (ctx.reward[gid] - rhoBase) + terminalMask * vNext - vPrev - vMeanBase;
-    // Pass 15 Tier 2.5: structurally-bounded TD residual (companion to oak_encode's z-bound).
+    // structurally-bounded TD residual (companion to oak_encode's z-bound).
     // The downstream gradient is `td · feature` per learn-rule; with |feature| ≤ M (bounded
     // by oak_encode) and |td| ≤ M, the per-thread gradient stays in [-M², M²] = [-HALF_MAX,
     // HALF_MAX] = fp16-safe. Same Iwaki MDAC bounded-advantage principle.
@@ -879,11 +847,11 @@ kernel void oak_predict(
         uint sf_k = ctx.sf[k];
         float feat_centered = (sf_k < ctx.R) ? (curr[cOff + sf_k] - ctx.featMean[sf_k]) : 0.0f;
         float c_RED = reward_centered + feat_centered;
-        // Pass 15 Tier 2: subtract per-cumulant ϖ-RTD baseline (the expected ψ_k under
+        // subtract per-cumulant ϖ-RTD baseline (the expected ψ_k under
         // empirical state distribution).
         float psiMeanBase_k = ctx.psiMeanBaseline[k];
         float tdPsi_raw = c_RED + terminalMask * psi_next - psi_prev - psiMeanBase_k;
-        // Pass 15 Tier 2.5: structurally-bounded ψ TD residual (same M as main td).
+        // structurally-bounded ψ TD residual (same M as main td).
         ctx.tdPsi[gid * ctx.K + k] = bounded_soft(tdPsi_raw);
     }
 }
@@ -970,27 +938,24 @@ kernel void oak_plan(
 }
 
 // =================================================================================================
-// meta_action — Pass 11 Tier 1 + Tier 3: emit ONLY policyMean[B · D]; the env-wrapper layer
+// meta_action — + Tier 3: emit ONLY policyMean[B · D]; the env-wrapper layer
 // (EnvPoolEnv.sampleAndStep) samples per-component (Gumbel-max categorical for Discrete-N
 // components; structural-σ-1 Gaussian for Box-A components) and computes the matching score
 // function (Williams 1992; Maddison-Tarlow-Minka 2014; Sutton-Barto Ch.13). The agent has
 // zero a-priori knowledge of action-space type — D is the env-declared D_policy width
 // (Inv-1; Bitter Lesson).
-//
 // Per (row, policy-param p ∈ [0, D)):
 //   μ_p = Σ_k λ_k · (W_π[k][p] · s_curr)
 // where λ = chordSlot[r] is the persistent soft chord from oak_meta_policy.
-//
-// Pass 14 Tier 0.5 (FINAL): K-outer-E-inner accumulator (Pass-12 pattern restored) WITHOUT
+// K-outer-E-inner accumulator (pattern restored) WITHOUT
 // the dynamically-indexed `w_tilde` stack array. Key insight: optPolicy[k * D * E + p * E + e]
 // has stride 1 across e for fixed k (consecutive fp16 cache-friendly reads per option),
-// whereas the Pass-13 Tier-6.1 e-outer-k-inner pattern reads optPolicy with stride D*E
-// across k (cache-line miss per k-iteration). The original Pass-12 K-outer was empirically
-// fastest because it maximizes optPolicy spatial locality. The Pass-13 w_tilde[128] stack
-// array was the actual bug (private-memory spill), NOT the loop ordering. Pass-14 keeps
+// whereas the Tier-6.1 e-outer-k-inner pattern reads optPolicy with stride D*E
+// across k (cache-line miss per k-iteration). The original K-outer was empirically
+// fastest because it maximizes optPolicy spatial locality. The w_tilde[128] stack
+// array was the actual bug (private-memory spill), NOT the loop ordering. keeps
 // the K-outer order and accumulates dot_k in a register, then mu via outer FMA.
-//
-// Per thread: K * E FMAs (same as Pass 12). curr is read K times per (row, p) but cached
+// Per thread: K * E FMAs. curr is read K times per (row, p) but cached
 // in L1 (curr is ≤ 1 KB per row, fits comfortably across K iterations). optPolicy reads
 // E consecutive fp16 per k-iteration = 786 bytes per k = perfectly cache-friendly.
 //   [Grid: B · D — one thread per (row, policy-param).]
@@ -1035,8 +1000,7 @@ kernel void oak_meta_action(
 // reduce_alpha — compute α_imp = α₀ / (1 + α₀ · ⟨‖x_active‖²⟩) and α_enc (centered-obs variant)
 // once per step. 128-thread TG with hierarchical simd_sum. Saves K·R·R recomputations in
 // learn_psi and R recomputations in learn_value.
-//
-// Pass 13 Tier 2: also REFRESHES per-feature TIDBD α_i = exp(β_i) / (1 + exp(β_i) · featSM[i])
+// also REFRESHES per-feature TIDBD α_i = exp(β_i) / (1 + exp(β_i) · featSM[i])
 // for i ∈ [0, E). Encoder features (i < R) use featSM[i] as the second-moment proxy; outcome
 // dims (i ≥ R) fall back to the global α (no per-feature SM available — they're predictions,
 // not directly-driven activations). β_i meta-update lives in oak_learn_value (the only place
@@ -1065,7 +1029,7 @@ kernel void oak_reduce_alpha(
             float c = ctx.observation[r * ctx.O + f] - ctx.observationMean[f];
             obs_l = fma(c, c, obs_l);
         }
-        // Pass 15 Tier 0.3: per-row ‖scoreGrad‖² aggregated for alpha_pi (REINFORCE
+        // per-row ‖scoreGrad‖² aggregated for alpha_pi (REINFORCE
         // implicit step). Forensics show oak_learn_pi's per-thread n2 missed the
         // cross-(d,e) score-gradient norm-square, allowing 100× scoreGrad blow-ups
         // (mean 394 → unbounded) to drive 200M optionModelPredictionMSE. The per-row
@@ -1084,7 +1048,7 @@ kernel void oak_reduce_alpha(
         float invB = 1.0f / float(max(ctx.B, 1u));
         scalars->alphaImp = ctx.alpha0 / (1.0f + ctx.alpha0 * n2 * invB);
         scalars->alphaEnc = ctx.alpha0 / (1.0f + ctx.alpha0 * obs * invB);
-        // Pass 15 Tier 0.3: alphaPi denominator includes ⟨‖x‖²⟩·⟨‖scoreGrad‖²⟩ — the
+        // alphaPi denominator includes ⟨‖x‖²⟩·⟨‖scoreGrad‖²⟩ — the
         // Cauchy-Schwarz upper bound on the per-parameter outer-product gradient norm.
         // When scoreGrad is large, alpha_pi shrinks proportionally — provably bounded
         // step (Kim 2510.06149 generalized; Stream-X 2410.14606 ObGD §A4 outer-product
@@ -1092,23 +1056,21 @@ kernel void oak_reduce_alpha(
         scalars->alphaPi = ctx.alpha0
                          / (1.0f + ctx.alpha0 * (n2 * invB) * (sg2 * invB));
     }
-    // Pass 13 Tier 2: refresh per-feature α_i in parallel across the threadgroup. Each thread
-    // handles a strided subset of [0, E). Encoder dims use featSM (2nd-moment EMA); outcome
-    // dims have no SM tracker, so use the global ⟨n²⟩/B as a uniform fallback (recovers the
-    // global α behavior for outcome dims — they get no per-feature meta-learning credit).
+    // Per-feature TIDBD α (SwiftSarsa 2507.19539 Sec 3.2 + MetaOptimize 2402.02342).
+    // α_i = exp(β_i) / (1 + exp(β_i) · max(featSM[i], ridge))
+    //     = 1 / (exp(-β_i) + max(featSM[i], ridge))
+    // Log-space form is overflow-safe: exp(-β_i) underflows for β_i → +∞ giving
+    // α_i → 1/sm_i (natural upper bound from the implicit-α condition); saturates to +Inf
+    // for β_i → -∞ giving α_i → 0 cleanly via 1/Inf. featSM floored at ridge (= 1/(cap+1))
+    // structurally prevents the early-training case where featSM ≈ 0 makes α_i unbounded
+    // (and gMeta·h_old in oak_learn_value drives β_i runaway). Outcome dims R..E use the
+    // batch-mean ‖x‖² as the per-feature SM proxy.
     threadgroup_barrier(mem_flags::mem_threadgroup);
     float n2_mean = n2 / float(max(ctx.B, 1u));
     for (uint i = tid; i < ctx.E; i += tgW) {
         float beta_i = ctx.alphaImpBeta[i];
         float sm_i = (i < ctx.R) ? ctx.featSM[i] : n2_mean;
-        // Pass 15 Tier 0.5: log-space TIDBD step (Kim 2510.06149 generalized to per-feature).
-        // Mathematical identity: α_i = exp(β_i) / (1 + exp(β_i) · sm_i)
-        //                            = 1 / (exp(-β_i) + sm_i)            [equivalent reformulation]
-        // The right-hand form is overflow-safe: exp(-β_i) underflows to 0 for large β_i
-        // (giving α_i = 1/sm_i, the natural step bound), and saturates to +Inf for very
-        // negative β_i (giving α_i = 0 cleanly via IEEE-754 1/Inf = 0). The original
-        // exp(β_i) form would overflow to +Inf for β_i > ~88, poisoning every α_i value.
-        // Bounded above by min(exp(β_i), 1/sm_i) — same theoretical bound, no overflow.
+        sm_i = max(sm_i, ctx.ridge);
         ctx.alphaImpFeat[i] = 1.0f / (exp(-beta_i) + sm_i);
     }
 }
@@ -1132,7 +1094,7 @@ kernel void oak_learn_value(
 {
     Ctx ctx = make_ctx(params, stateArena, uintArena, scalars, cfg);
     uint feat = tgid;
-    if (feat >= ctx.E) return;     // valueW spans the OPSR-extended state (Pass 11 Tier 2)
+    if (feat >= ctx.E) return;     // valueW spans the OPSR-extended state
     device const float *prev = state_slot(ctx, ctx.stateSlot);
     float g_l = 0.0f, sm_l = 0.0f;
     for (uint r = tid; r < ctx.B; r += tgW) {
@@ -1145,27 +1107,20 @@ kernel void oak_learn_value(
     if (tid == 0u) {
         float invB = 1.0f / float(max(ctx.B, 1u));
         float invT = track_rate(ctx.stepCount, ctx.ridge);
-        // Pass 13 Tier 2: per-feature TIDBD α (SwiftSarsa 2507.19539 + MetaOptimize 2402.02342).
-        // Use the per-feature implicit step refreshed in oak_reduce_alpha. After applying it,
-        // meta-update β_i (the log-step) using the standard TIDBD form `β_i ← β_i + α₀·g·h_i`,
-        // and roll the decay trace `h_i ← h_i · max(0, 1 - α_i · sm_i) + α_i · g`. h_i is the
-        // running cross-product of past Δw and current ∂L/∂w — when these align, β_i grows;
-        // when they oppose, β_i shrinks. Inv-9 compliant: meta-rate = α₀ structurally derived,
-        // no extra hyperparameter.
+        // Per-feature TIDBD step (SwiftSarsa 2507.19539 + MetaOptimize 2402.02342).
+        // alphaImpFeat refreshed in oak_reduce_alpha; meta-update β_i ← β_i + α₀·g·h_i and
+        // roll the cross-product trace h_i ← h_i · max(0, 1 − α_i·sm_i) + α_i·g (Alg 1).
+        // Trace h is bounded_soft (tanh, M=1) per SwiftSarsa Sec 3.2 to prevent the
+        // β_i runaway that an unbounded h amplifies via the gMeta·h_old product.
         float step = ctx.alphaImpFeat[feat];
-        // featSM/wBar are encoder-only stats (cumulant ranking + plan optimism). Outcome dims
-        // R..E participate in value updates but don't track these utility moments.
         if (feat < ctx.R) {
-            ctx.featSM[feat] += (sm * invB - ctx.featSM[feat]) * invT;
+            float fmNew = ctx.featSM[feat] + (sm * invB - ctx.featSM[feat]) * invT;
+            ctx.featSM[feat] = nf_safe(fmNew);
         }
-        // Pass 13 Tier 1: L2-Effective-Rank regularizer (Spectral Collapse 2509.22335 ICLR 2026).
-        // wNew = (1 - λ_L2) · w_old + step · g where λ_L2 grows when pEff < R.
         float lambda_L2 = l2er_decay(ctx.alpha0, ctx.R, ctx.scalars->pEff);
-        // Backward-view TD(λ) eligibility trace at B=1 (Sutton-Barto Ch 12.7): equivalent
-        // to the forward-view λ-return target with one float per weight. e is bounded via
-        // bounded_soft (steady-state e ≤ M·cap is fp32-safe but unbounded growth fuels
-        // downstream blow-up via gMeta = td·e in TIDBD). At B>1 fall back to standard
-        // 1-step batched TD (per-row traces don't average consistently across rows).
+        // Backward-view TD(λ) eligibility trace at B=1 (Sutton-Barto Ch 12.7) — equivalent
+        // to the forward-view λ-return target with one float per weight. bounded_soft
+        // caps the trace at ±1 (tanh). At B>1 fall back to 1-step batched TD.
         float gradStep;
         if (ctx.B == 1u) {
             float xp = nf_safe(prev[feat]);
@@ -1176,21 +1131,21 @@ kernel void oak_learn_value(
             gradStep = step * (g * invB);
         }
         float wNew = float(ctx.valueW[feat]) * (1.0f - lambda_L2) + gradStep;
-        ctx.valueW[feat] = safe_half(wNew, ctx.counters, ctx.R);
+        ctx.valueW[feat] = safe_half(wNew, ctx.counters);
         if (feat < ctx.R) {
             float decay = 1.0f - ctx.alpha0;
             ctx.wBar[feat] = max(ctx.wBar[feat] * decay, fabs(wNew));
         }
-        // β_i meta-update + h_i trace roll. sm_i = featSM (encoder dim) or sm·invB (outcome).
-        // Pass 15 Tier 4: TIDBD meta-update uses the same gradient as the weight update —
-        // at B=1 this is the trace-amplified gradient (td · e), at B>1 the batched mean.
-        // Both are equivalent to gradStep / step (the raw ∂L/∂w_feat magnitude per the
-        // current step-size definition).
+        // TIDBD meta-update. gMeta = gradient magnitude per the implicit-α step (gradStep/step).
         float gMeta = (step > 0.0f) ? gradStep / step : 0.0f;
-        float sm_i = (feat < ctx.R) ? ctx.featSM[feat] : (sm * invB);
+        float sm_i = (feat < ctx.R) ? max(ctx.featSM[feat], ctx.ridge) : (sm * invB);
         float h_old = ctx.alphaImpH[feat];
-        ctx.alphaImpBeta[feat] = ctx.alphaImpBeta[feat] + ctx.alpha0 * gMeta * h_old;
-        ctx.alphaImpH[feat] = h_old * max(0.0f, 1.0f - step * sm_i) + step * gMeta;
+        float beta_new = ctx.alphaImpBeta[feat] + ctx.alpha0 * gMeta * h_old;
+        ctx.alphaImpBeta[feat] = nf_safe(beta_new);
+        // bounded_soft on h prevents trace runaway under sustained gradient direction
+        // (SwiftSarsa Sec 3.2 implicit clipping).
+        float h_new = h_old * max(0.0f, 1.0f - step * sm_i) + step * gMeta;
+        ctx.alphaImpH[feat] = bounded_soft(h_new);
     }
 }
 
@@ -1216,21 +1171,20 @@ kernel void oak_learn_encoder(
         float c = ctx.observation[r * ctx.O + feat] - ctx.observationMean[feat];
         g = fma(ctx.td[r], c, g);
     }
-    // Pass 13 Tier 1: L2-Effective-Rank regularizer on the encoder (Spectral Collapse 2509.22335
+    // L2-Effective-Rank regularizer on the encoder (Spectral Collapse 2509.22335
     // ICLR 2026). The encoder is the most rank-collapse-vulnerable layer (it directly produces
     // the latent state whose effective rank we track). Decay scales with the rank gap.
     float lambda_L2 = l2er_decay(ctx.alpha0, ctx.R, ctx.scalars->pEff);
     float eNew = float(ctx.encoder[feat]) * (1.0f - lambda_L2)
                + step * g / float(max(ctx.B, 1u));
-    ctx.encoder[feat] = safe_half(eNew, ctx.counters, ctx.R);
+    ctx.encoder[feat] = safe_half(eNew, ctx.counters);
 }
 
 // =================================================================================================
-// spr_fused — Pass 14 Tier 1: FUSED predict + learn for SPR-Stream (Nilaksh 2602.09396 ICML
-// 2026). Replaces the Pass-13 split [oak_predict_next_latent + oak_learn_encoder_spr] with a
+// spr_fused — FUSED predict + learn for SPR-Stream (Nilaksh 2602.09396 ICML
+// 2026). Replaces the split [oak_predict_next_latent + oak_learn_encoder_spr] with a
 // single per-feat dispatch that recomputes ẑ_N on-the-fly per (row, feat) instead of writing
 // it to a B·R sprPred arena slot.
-//
 // Math (per encoder feature feat ∈ [0, baseO ∩ R)):
 //   per-row prediction: ẑ_N[r][feat] = (Σ_k chordPrev[r][k] · sprDecoder[k][feat]) · z_{N-1}[r][feat]
 //   prediction error:   δ_r        = z_N[r][feat] − ẑ_N[r][feat]
@@ -1241,16 +1195,14 @@ kernel void oak_learn_encoder(
 //   encoder update:     encoder[feat] += alphaEnc · g_SPR_damped
 //   decoder gradient:   ∂L/∂D[k][feat] = (-2/B) Σ_r chordPrev[r][k] · z_{N-1}[r][feat] · δ_r
 //   decoder update:     sprDecoder[k][feat] += alphaImp · -2/B · Σ_r ...
-//
 // Wins from fusion: -1 ICB dispatch + -1 barrier (~50 µs/step), -B·R fp32 arena slot
 // (sprPred[B·R] eliminated; ~3 MB at B=2048, R=376 — also saves ~6 MB/step traffic).
-//
 // Note on Inv-8: the per-coordinate damping g_SPR · ridge/(g_RL²+ridge) is ADAPTIVE damping
 // along each diagonal direction, NOT global vector OGP. True vector OGP requires a global
 // ⟨g_RL, g_SPR⟩/‖g_RL‖² reduction over baseO; at per-feat dispatch that needs device atomics
 // or a 1-TG reduction (which empirically costs ~3 ms agent_ms). The per-coord damping is
 // Inv-8-spirit (SPR suppressed where RL has signal) but not Inv-8-strict. True vector OGP
-// is deferred to Pass 15 where a 2-kernel split (compute-grads → apply-OGP) can preserve
+// is deferred to where a 2-kernel split (compute-grads → apply-OGP) can preserve
 // parallelism without atomics.
 //   [Grid: max(baseObsDim, 1) — one thread per encoder feature.]
 // =================================================================================================
@@ -1308,19 +1260,19 @@ kernel void oak_spr_fused(
     float g_SPR_damped = g_SPR - coef * g_RL;
 
     float step = ctx.scalars->alphaEnc;
-    ctx.encoder[feat] = safe_half(float(ctx.encoder[feat]) + step * g_SPR_damped, ctx.counters, ctx.R);
+    ctx.encoder[feat] = safe_half(float(ctx.encoder[feat]) + step * g_SPR_damped, ctx.counters);
 
     // Decoder update: ∂L/∂D[k][feat] = (-2/B) · gD[k]; descend the loss.
     for (uint k = 0u; k < ctx.K; ++k) {
         float dDecoder = -2.0f * gD[k] * invB;
         uint dIdx = k * ctx.R + feat;
         ctx.sprDecoder[dIdx] = safe_half(float(ctx.sprDecoder[dIdx])
-                                       + ctx.scalars->alphaImp * dDecoder, ctx.counters, ctx.R);
+                                       + ctx.scalars->alphaImp * dDecoder, ctx.counters);
     }
 }
 
 // =================================================================================================
-// learn_outcome — OPSR head update (Pass 11 Tier 2; Vereecken 2604.07016). Each outcome
+// learn_outcome — OPSR head update (; Vereecken 2604.07016). Each outcome
 // dimension k predicts the next-step value of the cumulant feature sf[k] (the same feature
 // the chord-conditional ψ_k tracks for option k). Squared-error TD on the ROLLED-FORWARD
 // state[curr][r][R + k]:
@@ -1365,13 +1317,13 @@ kernel void oak_learn_outcome(
     float alpha_eff = ctx.alpha0 / (1.0f + ctx.alpha0 * n2 * invB);
     uint pIdx = k * ctx.E + e;
     ctx.outcomeHead[pIdx] = safe_half(float(ctx.outcomeHead[pIdx]) + alpha_eff * g * invB,
-                                      ctx.counters, ctx.R);
+                                      ctx.counters);
 }
 
 // =================================================================================================
 // learn_psi — update shared ψ[k, m] for m ∈ [0, M = E + K). Cumulant k's gradient w.r.t.
 // weight m:  ∂L/∂W_ψ[k][m] = − (1/B) Σ_r δ_k[r] · concat[s_r, λ_prev_r][m]
-// where concat[r][m] = prev_state[r][m] for m < E, else λ_prev[r][m - E] (Pass 11 Tier 3:
+// where concat[r][m] = prev_state[r][m] for m < E, else λ_prev[r][m - E] (
 // SOFT chord weighting via chordSlotPrev — replaces the pre-Tier-3 one-hot indicator).
 // Every row contributes to every cumulant's parameters via its own δ_k[r] (chord-conditional
 // formulation; OBB §2.4). Implicit α from oak_reduce_alpha provides per-step contraction
@@ -1396,9 +1348,10 @@ kernel void oak_learn_psi(
     if (m < ctx.E && ctx.activeMask[m] == 0u) return;
 
     device const float *prev = state_slot(ctx, ctx.stateSlot);
-    // Pass 13 Tier 2: state weights use per-feature TIDBD α[m]; chord weights (m ≥ E) fall back
+    // state weights use per-feature TIDBD α[m]; chord weights (m ≥ E) fall back
     // to the global scalar α (no per-chord SM tracker — chord weights are dense and uniform-
     // scale by simplex constraint).
+    // Per-feature TIDBD α for state weights; chord weights use scalar α (no per-chord SM).
     float step = (m < ctx.E) ? ctx.alphaImpFeat[m] : ctx.scalars->alphaImp;
     float g = 0.0f;
     if (m < ctx.E) {
@@ -1407,7 +1360,7 @@ kernel void oak_learn_psi(
             g = fma(ctx.tdPsi[r * ctx.K + k], prev[r * ctx.E + m], g);
         }
     } else {
-        // Pass 11 Tier 3: chord weight W_ψ[k][E + cidx] gets soft-chord-weighted contribution.
+        // chord weight W_ψ[k][E + cidx] gets soft-chord-weighted contribution.
         // ψ_k uses chordPrev (the chord active during transition); ∂ψ_k/∂W_ψ[k][E+cidx] = λ_prev[cidx].
         uint cidx = m - ctx.E;
         for (uint r = 0u; r < ctx.B; ++r) {
@@ -1417,7 +1370,7 @@ kernel void oak_learn_psi(
     }
     float invB = 1.0f / float(max(ctx.B, 1u));
     uint  pIdx = k * M + m;
-    // Pass 13 Tier 1: L2-Effective-Rank regularizer on ψ (Spectral Collapse 2509.22335 ICLR 2026).
+    // L2-Effective-Rank regularizer on ψ (Spectral Collapse 2509.22335 ICLR 2026).
     // ψ uses the same effective-rank signal — when the latent state collapses, its predictor
     // weights collapse too; decay them in lockstep.
     float lambda_L2 = l2er_decay(ctx.alpha0, ctx.R, ctx.scalars->pEff);
@@ -1434,20 +1387,19 @@ kernel void oak_learn_psi(
         gradStep = step * g * invB;
     }
     ctx.psi[pIdx] = safe_half(float(ctx.psi[pIdx]) * (1.0f - lambda_L2) + gradStep,
-                              ctx.counters, ctx.R);
+                              ctx.counters);
 }
 
 // =================================================================================================
-// learn_pi — REAL REINFORCE on the per-option policy. Pass 11 Tier 3 chord-weighted gradient:
+// learn_pi — REAL REINFORCE on the per-option policy. chord-weighted gradient:
 //   g[k,d,e] = Σ_r λ_prev[r,k] · (td[r] − tdBaseline) · scoreGrad[r,d] · prev_state[r,e]
 // since meta_action emits μ_d = Σ_k λ_k · (W_π[k][d] · s) (chord-weighted soft mixture), the
 // per-option contribution scales by chord_prev[r,k]. scoreGrad[r,d] is wrapper-written
 // (Tier 1: Gumbel-max categorical for Discrete components, Gaussian-σ=1 for Box components).
-//
-// Pass 15 Tier 0.3: implicit step uses scalars->alphaPi (computed once in oak_reduce_alpha).
+// implicit step uses scalars->alphaPi (computed once in oak_reduce_alpha).
 // alphaPi = α₀ / (1 + α₀ · ⟨‖x‖²⟩_batch · ⟨‖scoreGrad‖²⟩_batch) — the Cauchy-Schwarz upper
-// bound on the per-parameter outer-product gradient norm. Pass 14's per-thread n2 missed the
-// cross-row scoreGrad norm-square aggregation (proximate cause of 200M MSE blowup per Pass 15
+// bound on the per-parameter outer-product gradient norm. per-thread n2 missed the
+// cross-row scoreGrad norm-square aggregation (proximate cause of 200M MSE blowup
 // stability research §11). The shared alphaPi denominator is the structurally-correct fix and
 // also removes the per-thread n2 reduction (saves O(B) FMA per thread × K·D·E threads).
 //   [Grid: K · D · E — K options × D_policy params × E extended-state features]
@@ -1468,11 +1420,11 @@ kernel void oak_learn_pi(
     if (k >= ctx.K || d >= ctx.D || i >= ctx.E) return;
     if (ctx.activeMask[i] == 0u) return;   // outcome dims R..E are always-active by init
 
-    // Pass 11 Tier 3: SOFT-CHORD-WEIGHTED REINFORCE. Since meta_action emitted
+    // SOFT-CHORD-WEIGHTED REINFORCE. Since meta_action emitted
     //   μ_p = Σ_k λ_k · (W_π[k][p] · s),
     // the gradient of log π(a|s) w.r.t. W_π[k][p][e] is λ_k(s) · s[e] · scoreGrad[p].
     // Per-option gradient accumulates over all rows weighted by chordPrev[r][k].
-    // Pass 11 Tier 4: subtract running-mean tdBaseline from td for variance reduction.
+    // subtract running-mean tdBaseline from td for variance reduction.
     device const float *prev = state_slot(ctx, ctx.stateSlot);
     float baseline = ctx.scalars->tdBaseline;
     float g = 0.0f;
@@ -1483,18 +1435,18 @@ kernel void oak_learn_pi(
         g  = fma(adv * lambda_k, pi_term, g);
     }
     float invB = 1.0f / float(max(ctx.B, 1u));
-    float alpha_pi = ctx.scalars->alphaPi;       // Pass 15 T0.3: shared denominator includes ‖scoreGrad‖²
+    float alpha_pi = ctx.scalars->alphaPi;       // shared denominator includes ‖scoreGrad‖²
     uint  pIdx = k * ctx.D * ctx.E + d * ctx.E + i;
-    // Pass 13 Tier 1: L2-Effective-Rank regularizer on π (Spectral Collapse 2509.22335 ICLR 2026).
+    // L2-Effective-Rank regularizer on π (Spectral Collapse 2509.22335 ICLR 2026).
     // Same rank-gap decay as encoder/value/psi; keeps option-policy weights from drifting along
     // collapsed feature directions.
     float lambda_L2 = l2er_decay(ctx.alpha0, ctx.R, ctx.scalars->pEff);
     ctx.optPolicy[pIdx] = safe_half(float(ctx.optPolicy[pIdx]) * (1.0f - lambda_L2)
-                                  + alpha_pi * g * invB, ctx.counters, ctx.R);
+                                  + alpha_pi * g * invB, ctx.counters);
 }
 
 // =================================================================================================
-// learn_beta — Pass 11 Tier 3 termination-gradient update on betaW[E + K]. Per Bacon-Precup
+// learn_beta — termination-gradient update on betaW[E + K]. Per Bacon-Precup
 // 1609.05140 (Option-Critic) under Wan-Naik-Sutton 2110.13855 (continuing avg-reward):
 //   ∇_β J = (β − 1{terminated}) · A(s_prev, λ_prev)
 // where A is the differential-TD advantage td[r] (already includes the planning bonus from
@@ -1502,7 +1454,6 @@ kernel void oak_learn_pi(
 //   g[m] = (1/B) Σ_r (β(s_prev, λ_prev) − terminated(r)) · td[r] · concat[s_prev, λ_prev][m]
 // Update: betaW[m] -= alpha_eff · g[m]  (NEGATIVE: descend the loss = β·A increasing β when A < 0,
 // decreasing when A > 0 — i.e., terminate sooner when the option is bad).
-//
 // `terminated(r)` is recovered from the SHIFT of optionAge: optionAge[r] == 1u iff
 // meta_policy resampled the chord at the *current* step (which corresponds to terminating
 // out of the prev step's option).
@@ -1523,7 +1474,7 @@ kernel void oak_learn_beta(
     if (m >= mBetaW) return;
 
     device const float *prev = state_slot(ctx, ctx.stateSlot);
-    float baseline = ctx.scalars->tdBaseline;   // Pass 11 Tier 4
+    float baseline = ctx.scalars->tdBaseline;
     float g = 0.0f, n2 = 0.0f;
     for (uint r = 0u; r < ctx.B; ++r) {
         float beta = ctx.betaProb[r];
@@ -1539,16 +1490,16 @@ kernel void oak_learn_beta(
     float invB = 1.0f / float(max(ctx.B, 1u));
     float alpha_eff = ctx.alpha0 / (1.0f + ctx.alpha0 * n2 * invB);
     // Sign: minimize J = β · A → descend g (negative gradient direction).
-    ctx.betaW[m] = safe_half(float(ctx.betaW[m]) - alpha_eff * g * invB, ctx.counters, ctx.R);
+    ctx.betaW[m] = safe_half(float(ctx.betaW[m]) - alpha_eff * g * invB, ctx.counters);
 }
 
 // =================================================================================================
-// learn_omega — Pass 11 Tier 3 chord-generator update via softmax policy gradient. omegaW
+// learn_omega — chord-generator update via softmax policy gradient. omegaW
 // produces K logits from E-dim state; chord = softmax(logits). Per-weight gradient:
 //   g[k][e] = (1/B) Σ_{r: terminated this step} (1{k chosen at r} − chord_prev[r][k]) · adv[r] · prev[r][e]
 // Only TERMINATION rows contribute (the standard option-critic formulation per Bacon-Precup
 // 1609.05140): on rows where chord persists across the step, ω did not produce a sample so
-// its gradient signal is zero. Pass 12 Tier 0.2: comment fixed to match code semantics
+// its gradient signal is zero. comment fixed to match code semantics
 // (prior version claimed soft attribution on non-term rows; code never did that).
 //   [Grid: K · E — one thread per (k, e).]
 // =================================================================================================
@@ -1567,7 +1518,7 @@ kernel void oak_learn_omega(
     if (ctx.activeMask[e] == 0u) return;
 
     device const float *prev = state_slot(ctx, ctx.stateSlot);
-    float baseline = ctx.scalars->tdBaseline;   // Pass 11 Tier 4
+    float baseline = ctx.scalars->tdBaseline;
     float g = 0.0f, n2 = 0.0f;
     for (uint r = 0u; r < ctx.B; ++r) {
         bool terminatedHere = (ctx.optionAge[r] == 1u);
@@ -1584,7 +1535,7 @@ kernel void oak_learn_omega(
     float alpha_eff = ctx.alpha0 / (1.0f + ctx.alpha0 * n2 * invB);
     uint pIdx = k * ctx.E + e;
     // Sign: ascend J = log π(k|s) · A → +g direction.
-    ctx.omegaW[pIdx] = safe_half(float(ctx.omegaW[pIdx]) + alpha_eff * g * invB, ctx.counters, ctx.R);
+    ctx.omegaW[pIdx] = safe_half(float(ctx.omegaW[pIdx]) + alpha_eff * g * invB, ctx.counters);
 }
 
 // =================================================================================================
@@ -1638,7 +1589,7 @@ kernel void oak_bk_reduce(
 
     // (2) Latent telemetry: mean-square + max|latent| + non-finite count over the FULL
     // E-wide state (B · E cells; runaway outcomeHead would show up here).
-    // Pass 12 Tier 0.1: state stride is ctx.E (was ctx.R — bug since Pass-11 Tier 2
+    // state stride is ctx.E (was ctx.R — bug since Tier 2
     // when state grew from R to E cols). Telemetry was reading wrong cells for r >= 1.
     float lms_l = 0.0f, maxLat_l = 0.0f, nLearn_l = 0.0f;
     uint total_rf = ctx.B * ctx.E;
@@ -1650,8 +1601,8 @@ kernel void oak_bk_reduce(
         maxLat_l = max(maxLat_l, fabs(v));
     }
     // (2b) ψ TD telemetry over B·K cells (Design 2: K cumulants per row, not R).
-    // Pass 15 Tier 0.4: NF scan + zero-replacement on tdPsi BEFORE the MSE roll-up.
-    // Pass 14 silently passed non-finite tdPsi values into optionModelPredictionMSE,
+    // NF scan + zero-replacement on tdPsi BEFORE the MSE roll-up.
+    // silently passed non-finite tdPsi values into optionModelPredictionMSE,
     // contaminating the canonical learning-progress signal at deep workerDepth (200M
     // MSE traced to NaN poisoning, not real model error). Zero-bias replacement per
     // Inv-4: a non-finite tdPsi means the prediction failed entirely, equivalent to
@@ -1672,7 +1623,7 @@ kernel void oak_bk_reduce(
     float tdPsiNF  = tg_sum_128(tdPsiNF_l,  sg_tdPsiNF,  tid, sgid);
 
     // (3) Per-(row, p) reductions on policyMean[B·D]: actuation change vs prev step,
-    // max|μ|, non-finite. With Pass-11 wrapper-side sampling, prevPolicyMean and policyMean
+    // max|μ|, non-finite. With wrapper-side sampling, prevPolicyMean and policyMean
     // both sit in arena (host-written for prev, kernel-written for this step), so the delta
     // measures POLICY churn (μ_t − μ_{t-1}), independent of wrapper-side noise.
     float ad_l = 0.0f, sgL2_l = 0.0f, maxPol_l = 0.0f, nPlan_l = 0.0f;
@@ -1705,7 +1656,7 @@ kernel void oak_bk_reduce(
         stats->actionDeltaL2Mean          = ad  * invBD;   // μ-churn over D policy params
         stats->maxAbsLatentPrediction     = maxLat;
         stats->maxAbsPolicyOutput         = maxPol;
-        // Pass 15 Tier 0.4: tdPsiNonFiniteCount surfaces the previously-silent NF
+        // tdPsiNonFiniteCount surfaces the previously-silent NF
         // poisoning into rawNonFiniteCount, so the (B) numerical-safety gate sees it.
         stats->tdPsiNonFiniteCount        = tdPsiNF;
         stats->rawNonFiniteCount          = obsNF + nLearn + nPlan + tdPsiNF;
@@ -1785,7 +1736,7 @@ kernel void oak_bk_option(
     float invB = 1.0f / float(max(ctx.B, 1u));
     float invT = track_rate(ctx.stepCount, ctx.ridge);
 
-    // Per-option counts and squared-cumulant-error. Pass 11 Tier 3: SOFT chord weighting —
+    // Per-option counts and squared-cumulant-error. SOFT chord weighting —
     // option k's "share" of each row's contribution is chordSlotPrev[r][k] (the chord that
     // was active during the transition that produced tdPsi[r][k]).
     float cnt_l = 0.0f, psiErr_l = 0.0f;
@@ -1807,10 +1758,10 @@ kernel void oak_bk_option(
         float ofNew = ctx.optFracEMA[k] + invT * (frac - ctx.optFracEMA[k]);
         ctx.optFracEMA[k] = nf_safe(ofNew);
 
-        // Reinit gate (Pass 11 Tier 5 design, restored): fires only when an option is
+        // Reinit gate ( design, restored): fires only when an option is
         // BOTH dormant (gets <½ uniform chord share) AND stale (its TD-error² is a
         // positive cross-option outlier). Both conditions are structural cross-option
-        // statistics — Inv-9 compliant. Pass 15 added pEffCollapse + magnitudeOutlier
+        // statistics — Inv-9 compliant. added pEffCollapse + magnitudeOutlier
         // disjunctive gates which fired on EVERY step at low pEff during early training
         // (pEff ~ 5 < ⌈√R⌉/2 = 8), preventing option weights from ever accumulating
         // learning. Reverted: the bounded_soft + safe_half stack already guarantees
@@ -1881,7 +1832,7 @@ kernel void oak_bk_admit_commit(
     Ctx ctx = make_ctx(params, stateArena, uintArena, scalars, cfg);
     if (gid != 0u) return;
 
-    // --- admit phase ---
+    // -- admit phase ---
     uint R = ctx.R;
     float sum = 0.0f;
     for (uint i = 0u; i < R; ++i) sum += ctx.utilFeat[i];
@@ -1914,14 +1865,14 @@ kernel void oak_bk_admit_commit(
         ctx.activeList[count++] = pick;
     }
     if (count == 0u) { ctx.activeMask[0] = 1u; ctx.activeList[0] = 0u; count = 1u; }
-    // Pass 11 Tier 2: append the K OPSR outcome dims (R..E) — always-active by construction.
+    // append the K OPSR outcome dims (R..E) — always-active by construction.
     for (uint k = 0u; k < ctx.K; ++k) {
         ctx.activeMask[ctx.R + k] = 1u;
         ctx.activeList[count++] = ctx.R + k;
     }
     ctx.scalars->activeCount = count;
 
-    // Pass 13 Tier 6.2: dense-fast-path flag. Set when activeCount == E (full-rank, all
+    // dense-fast-path flag. Set when activeCount == E (full-rank, all
     // encoder features admitted plus all K outcome dims) AND activeList is the identity
     // ordering 0, 1, ..., E-1. In steady state after warmup this is the common case and lets
     // active_dot_half_auto skip the gather indirection.
@@ -1958,13 +1909,11 @@ kernel void oak_bk_admit_commit(
         ctx.counters[OAK_CNT_REINIT_FEAT] += 1u;
     }
 
-    // --- commit phase ---
+    // -- commit phase ---
 
-    // Differential avg-reward: TWO trackers under Pass 15 Tier 2.
-    //
+    // Differential avg-reward: TWO trackers under
     //   `rho` (fast EMA, track_rate floor at ridge=1/cap): retained for stats->rewardRate
     //   reporting and any consumer that needs a fast-tracking estimate of recent reward.
-    //
     //   `rhoBaseline` (CUMULATIVE Welford mean, no floor): the structurally-correct
     //   centering baseline per Sakha-Kamalapurkar-Meyn 2603.27874v2 Theorem 2.4(ii) —
     //   when μ = ϖ (the empirical state-action visitation distribution), Ā(λ; δ_r) is
@@ -1981,12 +1930,12 @@ kernel void oak_bk_admit_commit(
     float invTcum = 1.0f / float(ctx.scalars->stepCount + 1u);
     float rbNew = ctx.scalars->rhoBaseline + (meanR - ctx.scalars->rhoBaseline) * invTcum;
     ctx.scalars->rhoBaseline = nf_safe(rbNew);
-    // Pass 15 Tier 4: TD(λ) trace decay rate — structural λ = 1 − 1/cap (Inv-9, derived
+    // TD(λ) trace decay rate — structural λ = 1 − 1/cap (Inv-9, derived
     // from R·B). Idempotent set per step (cap is run-invariant). Used by oak_learn_value
     // and oak_learn_psi at B=1 for backward-view eligibility-trace updates.
     ctx.scalars->lambdaTrace = 1.0f - 1.0f / ctx.cap;
 
-    // Pass 15 Tier 2 (FULL Sakha §1 form): per-step recompute of the V-side and
+    // per-step recompute of the V-side and
     // ψ-side centering baselines from the just-updated weights and the current
     // featMean. Single-threaded — at K=32, R≤512 this is ~16K FMAs (negligible
     // vs the 200K+ FMAs in oak_meta_action). Inv-9 compliant: derived structurally
@@ -2006,7 +1955,7 @@ kernel void oak_bk_admit_commit(
         }
         ctx.psiMeanBaseline[k] = nf_safe(pMean);
     }
-    // Pass 11 Tier 4: REINFORCE running-mean baseline. Tracks mean(td) so policy gradient
+    // REINFORCE running-mean baseline. Tracks mean(td) so policy gradient
     // updates use (td - tdBaseline) instead of raw td. Pure variance reduction (Williams 1992,
     // Sutton-Barto Ch.13.3). The baseline is unbiased: E[scoreGrad · b] = 0 for any constant b
     // since E[scoreGrad] = 0 (it's the gradient of log-probability normalization).
@@ -2016,12 +1965,12 @@ kernel void oak_bk_admit_commit(
     float tdbNew = ctx.scalars->tdBaseline + (meanTd - ctx.scalars->tdBaseline) * invT;
     ctx.scalars->tdBaseline = nf_safe(tdbNew);
 
-    // Pass 12 Tier 4.2 + Pass 13 Tier 0: track BOTH a fast EMA of mean ψ TD error squared
+    // + track BOTH a fast EMA of mean ψ TD error squared
     // (modelErrEMA) AND a slow lagged snapshot (modelErrEMAPrev). The slow snapshot updates
     // at half the fast rate so lpmRate = max(0, modelErrEMAPrev - modelErrEMA) is positive
     // when the model is IMPROVING. This is Hou-An-Du 2509.25438 (LPM, ICLR 2026): the
     // monotone indicator of Information Gain. Used by oak_plan to UNGATE the planning bonus
-    // when the model improves (fixes Pass-12 Dynamic-Obstacles regression caused by absolute
+    // when the model improves (fixes Dynamic-Obstacles regression caused by absolute
     // gating) and by oak_meta_policy as `β += modelErrEMA - lpmRate` (terminate when wrong
     // AND not improving; keep when wrong but improving).
     float meanPsiSq = 0.0f;
@@ -2048,7 +1997,7 @@ kernel void oak_bk_admit_commit(
     }
     ctx.scalars->pEff = nf_safe(tr / max(mx, FLT_MIN));
 
-    // Telemetry roll-up. Pass 15 Tier 1: surface KernelScalars + cumulative counters
+    // Telemetry roll-up. surface KernelScalars + cumulative counters
     // into KernelStats for host-side bench JSON consumption.
     float uF = 0.0f, uO = 0.0f;
     for (uint i = 0u; i < R; ++i) uF += ctx.utilFeat[i];
@@ -2058,12 +2007,12 @@ kernel void oak_bk_admit_commit(
     stats->utilityFeatureMean = uF / float(max(R, 1u));
     stats->utilityOptionMean  = uO / float(max(ctx.K, 1u));
     stats->oakOptionReinitCount = float(popcount(ctx.counters[OAK_CNT_REINIT_OPT]));
-    // Pass 15 Tier 0.2: surface cumulative half-conversion saturation count. A healthy
+    // surface cumulative half-conversion saturation count. A healthy
     // run with provable numerical safety produces stats->halfSaturationCount == 0 over
     // its entire lifetime — any non-zero value indicates a learn_* kernel attempted to
     // write a non-finite to an fp16 weight (substituted with half(0) per Inv-4).
     stats->halfSaturationCount = float(ctx.counters[OAK_CNT_HALF_SAT]);
-    // Pass 15 Tier 1.3: surface KernelScalars (consumer-facing telemetry).
+    // surface KernelScalars (consumer-facing telemetry).
     stats->pEffectiveRank   = ctx.scalars->pEff;
     stats->modelErrEMA      = ctx.scalars->modelErrEMA;
     stats->modelErrEMAPrev  = ctx.scalars->modelErrEMAPrev;
@@ -2071,8 +2020,8 @@ kernel void oak_bk_admit_commit(
     stats->alphaImpStat     = ctx.scalars->alphaImp;
     stats->alphaEncStat     = ctx.scalars->alphaEnc;
     stats->alphaPiStat      = ctx.scalars->alphaPi;
-    stats->rhoBaselineStat  = ctx.scalars->rhoBaseline;   // Pass 15 Tier 2: ϖ-RTD baseline
-    // Pass 15 Tier 1.5: surface cumulative encoder-feature reinit count (was in
+    stats->rhoBaselineStat  = ctx.scalars->rhoBaseline;   // ϖ-RTD baseline
+    // surface cumulative encoder-feature reinit count (was in
     // counters[OAK_CNT_REINIT_FEAT] but never read by the host).
     stats->oakFeatureReinitCount = float(ctx.counters[OAK_CNT_REINIT_FEAT]);
 
@@ -2084,12 +2033,11 @@ kernel void oak_bk_admit_commit(
 }
 
 // =================================================================================================
-// bk_weight_magnitudes — Pass 15 Tier 1.4. Per-buffer max(|w|) for the (C) bounded-magnitude
+// bk_weight_magnitudes — Per-buffer max(|w|) for the (C) bounded-magnitude
 // hard rule (`max(|valueW|, |psi|, |optPolicy|, |outcomeHead|, |betaW|, |omegaW|, |sprDecoder|,
-// |encoder|) < √HALF_MAX`). Without this telemetry the (C) gate is invisible — Pass 14
+// |encoder|) < √HALF_MAX`). Without this telemetry the (C) gate is invisible —
 // silently allowed runaway weights since safe_half flagging only captures NEW writes, not
 // the cumulative state of weights that already saturated.
-//
 // Layout: 8 threadgroups × 32 threads. Each TG handles one fp16 weight buffer; threads in
 // the TG stride-loop with simd_max reduction. Cost ≪ 1 ms even on the largest buffer
 // (optPolicy = K·D·E ≈ 222K elements at Humanoid; 32-wide simd does it in ~7K iters/lane).
