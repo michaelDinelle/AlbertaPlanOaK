@@ -160,6 +160,10 @@ struct KernelConfig {
     // Pass 15 Tier 2: per-cumulant ψ-centering baseline = <ψ_k, featMean> over R encoder
     // dims. K floats updated in oak_bk_admit_commit; consumed by oak_predict.
     uint aPsiMeanBaseline;
+    // Pass 15 Tier 4: TD(λ) eligibility traces (Sutton-Barto Ch 12.7). One float per linear-
+    // FA weight. valueE[E] for w_main; psiE[K · M] for ψ. Engine-init zero; in-place updated
+    // by oak_learn_value / oak_learn_psi at every step (B=1 path) via e ← λ · e + ∇V(s_t).
+    uint aValueE, aPsiE;
     // Derived scalars (all structurally derived from rank · batch).
     float cap;                // rank · batch (capacity volume; ridge / α₀ derived from it)
     float alpha0;             // 1 / cap (base step size)
@@ -211,6 +215,15 @@ struct KernelScalars {
                                 // §11 require this term too — without it `cond(Ā)` deteriorates
                                 // unboundedly (200M MSE blowup root cause). Updated in
                                 // oak_bk_admit_commit using the most-recent valueW.
+    float lambdaTrace;          // Pass 15 Tier 4: TD(λ) eligibility-trace decay rate.
+                                // Structural = 1 − 1/cap (Inv-9: derived from R·B; not tuned).
+                                // Recovers variance reduction at B=1 (the BWH-orthodox setting
+                                // per T3) by accumulating gradient depth INSIDE the TD target
+                                // via Sutton-Barto Ch 12.7 backward-view eligibility traces.
+                                // λ → 1−1/cap as cap → ∞ approaches the every-visit Monte-Carlo
+                                // limit; λ → 0 recovers 1-step TD. The structural form gives
+                                // λ ∈ [0.94, 0.999] for typical OaK runs (cap ≥ 17), well in
+                                // the standard TD(λ) regime.
 };
 
 // KernelStats — Pass 15 Tier 1 telemetry overhaul. Layout must match Swift byte-for-byte.
@@ -302,6 +315,9 @@ struct Ctx {
     device float  *alphaImpH;      // [E]  -- decay trace of past Δw per feature, init 0
     // Pass 15 Tier 2: per-cumulant ψ-centering baseline = <ψ_k, featMean> over R encoder dims.
     device float  *psiMeanBaseline; // [K] -- subtracted from each cumulant's TD residual
+    // Pass 15 Tier 4: TD(λ) backward-view eligibility traces (Sutton-Barto Ch 12.7).
+    device float  *valueE;          // [E]     value-head trace (e_t = λ·e_{t-1} + ∇V(s_t))
+    device float  *psiE;            // [K * M] ψ traces (one per cumulant × concat dim)
 
     device KernelScalars *scalars;
 };
@@ -363,6 +379,8 @@ inline Ctx make_ctx(device half *params, device float *stateArena, device uint *
     c.alphaImpBeta = stateArena + cfg.aAlphaImpBeta;
     c.alphaImpH    = stateArena + cfg.aAlphaImpH;
     c.psiMeanBaseline = stateArena + cfg.aPsiMeanBaseline;
+    c.valueE       = stateArena + cfg.aValueE;
+    c.psiE         = stateArena + cfg.aPsiE;
 
     c.scalars = scalars;
     return c;
@@ -1142,18 +1160,38 @@ kernel void oak_learn_value(
         // Pass 13 Tier 1: L2-Effective-Rank regularizer (Spectral Collapse 2509.22335 ICLR 2026).
         // wNew = (1 - λ_L2) · w_old + step · g where λ_L2 grows when pEff < R.
         float lambda_L2 = l2er_decay(ctx.alpha0, ctx.R, ctx.scalars->pEff);
-        float gMean = g * invB;
-        float wNew = float(ctx.valueW[feat]) * (1.0f - lambda_L2) + step * gMean;
+        // Pass 15 Tier 4: backward-view TD(λ) eligibility trace at B=1 (Sutton-Barto Ch 12.7).
+        // For continuing average-reward (γ=1 with reward centering):
+        //   e_t[i] ← λ · e_{t-1}[i] + ∇V(s_t)[i] = λ · e_{t-1}[i] + prev_state[i]
+        //   Δw[i] = α_i · δ_t · e_t[i]
+        // Equivalent to the forward-view λ-return target G_t^λ; backward-view needs ONE
+        // float per weight (the trace) instead of an N-step transition buffer. At B>1
+        // (Pass 14 batched protocol), fall back to standard 1-step batched TD since the
+        // per-row trace cannot be averaged consistently across rows. λ structural = 1−1/cap.
+        float gradStep;
+        if (ctx.B == 1u) {
+            float xp = prev[feat];
+            ctx.valueE[feat] = ctx.scalars->lambdaTrace * ctx.valueE[feat] + xp;
+            gradStep = step * ctx.td[0] * ctx.valueE[feat];
+        } else {
+            gradStep = step * (g * invB);
+        }
+        float wNew = float(ctx.valueW[feat]) * (1.0f - lambda_L2) + gradStep;
         ctx.valueW[feat] = safe_half(wNew, ctx.counters);
         if (feat < ctx.R) {
             float decay = 1.0f - ctx.alpha0;
             ctx.wBar[feat] = max(ctx.wBar[feat] * decay, fabs(wNew));
         }
         // β_i meta-update + h_i trace roll. sm_i = featSM (encoder dim) or sm·invB (outcome).
+        // Pass 15 Tier 4: TIDBD meta-update uses the same gradient as the weight update —
+        // at B=1 this is the trace-amplified gradient (td · e), at B>1 the batched mean.
+        // Both are equivalent to gradStep / step (the raw ∂L/∂w_feat magnitude per the
+        // current step-size definition).
+        float gMeta = (step > 0.0f) ? gradStep / step : 0.0f;
         float sm_i = (feat < ctx.R) ? ctx.featSM[feat] : (sm * invB);
         float h_old = ctx.alphaImpH[feat];
-        ctx.alphaImpBeta[feat] = ctx.alphaImpBeta[feat] + ctx.alpha0 * gMean * h_old;
-        ctx.alphaImpH[feat] = h_old * max(0.0f, 1.0f - step * sm_i) + step * gMean;
+        ctx.alphaImpBeta[feat] = ctx.alphaImpBeta[feat] + ctx.alpha0 * gMeta * h_old;
+        ctx.alphaImpH[feat] = h_old * max(0.0f, 1.0f - step * sm_i) + step * gMeta;
     }
 }
 
@@ -1384,7 +1422,19 @@ kernel void oak_learn_psi(
     // ψ uses the same effective-rank signal — when the latent state collapses, its predictor
     // weights collapse too; decay them in lockstep.
     float lambda_L2 = l2er_decay(ctx.alpha0, ctx.R, ctx.scalars->pEff);
-    ctx.psi[pIdx] = safe_half(float(ctx.psi[pIdx]) * (1.0f - lambda_L2) + step * g * invB,
+    // Pass 15 Tier 4: backward-view TD(λ) eligibility trace at B=1 (one trace per ψ weight).
+    // Identical to oak_learn_value's trace mechanism. Per-cumulant: e[k][m] = λ·e[k][m] + ∇ψ_k(s_t)[m]
+    // where ∇ψ_k(s_t)[m] is `prev[m]` for state weights or `chordPrev[m-E]` for chord weights.
+    // At B>1 fall back to standard 1-step batched ψ-TD (Pass 14 protocol).
+    float gradStep;
+    if (ctx.B == 1u) {
+        float gradV = (m < ctx.E) ? prev[m] : ctx.chordSlotPrev[m - ctx.E];
+        ctx.psiE[pIdx] = ctx.scalars->lambdaTrace * ctx.psiE[pIdx] + gradV;
+        gradStep = step * ctx.tdPsi[k] * ctx.psiE[pIdx];
+    } else {
+        gradStep = step * g * invB;
+    }
+    ctx.psi[pIdx] = safe_half(float(ctx.psi[pIdx]) * (1.0f - lambda_L2) + gradStep,
                               ctx.counters);
 }
 
@@ -1930,6 +1980,10 @@ kernel void oak_bk_admit_commit(
     ctx.scalars->rho += (meanR - ctx.scalars->rho) * invT;
     float invTcum = 1.0f / float(ctx.scalars->stepCount + 1u);
     ctx.scalars->rhoBaseline += (meanR - ctx.scalars->rhoBaseline) * invTcum;
+    // Pass 15 Tier 4: TD(λ) trace decay rate — structural λ = 1 − 1/cap (Inv-9, derived
+    // from R·B). Idempotent set per step (cap is run-invariant). Used by oak_learn_value
+    // and oak_learn_psi at B=1 for backward-view eligibility-trace updates.
+    ctx.scalars->lambdaTrace = 1.0f - 1.0f / ctx.cap;
 
     // Pass 15 Tier 2 (FULL Sakha §1 form): per-step recompute of the V-side and
     // ψ-side centering baselines from the just-updated weights and the current
