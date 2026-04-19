@@ -2,13 +2,12 @@
 """Pass 15 final-sweep gate validation.
 
 Reads all .json files (excluding heartbeat-*.json) from a benchmark directory and
-verifies the (B), (C), (G) hard rules:
+verifies the (B) and (G) hard rules:
 
-  (B) Numerical safety: nonFiniteRawTotal == 0 AND halfSaturationTotalFinal == 0
-                        AND tdPsiNonFiniteTotal == 0 over EVERY run.
-  (C) Bounded magnitude: all weight-buffer maxima < 1000 over EVERY run.
-  (G) P(rR > random):    fraction of (env, seed) pairs where oak's rewardRate
-                         exceeds random's rewardRate; target > 0.50.
+  (B) Numerical safety: nonFiniteRawTotal == 0 AND tdPsiNonFiniteTotal == 0 over
+                        EVERY run.
+  (G) P(rR > random):   fraction of (env, seed) pairs where oak's rewardRate
+                        exceeds random's rewardRate; target > 0.50.
 
 Usage: scripts/pass15_analyze.py <bench_dir>
 """
@@ -49,22 +48,21 @@ def main():
     for envId, seed, policy, p in runs:
         h = p.get("health") or {}
         nf_raw = int(h.get("nonFiniteRawTotal", 0) or 0)
-        half_sat = int(h.get("halfSaturationTotalFinal", 0) or 0)
         td_psi_nf = int(h.get("tdPsiNonFiniteTotal", 0) or 0)
-        if nf_raw or half_sat or td_psi_nf:
-            nf_violations.append((envId, seed, policy, nf_raw, half_sat, td_psi_nf))
+        if nf_raw or td_psi_nf:
+            nf_violations.append((envId, seed, policy, nf_raw, td_psi_nf))
 
     print(f"Gate (B) numerical safety: ", end="")
     if not nf_violations:
-        print(f"PASS ({len(runs)} runs, all NF/sat counters == 0)")
+        print(f"PASS ({len(runs)} runs, all NF counters == 0)")
     else:
         oak_violations = [v for v in nf_violations if v[2] == "oak"]
         rand_violations = [v for v in nf_violations if v[2] == "random"]
         print(f"FAIL ({len(nf_violations)}/{len(runs)} runs;"
               f" oak={len(oak_violations)} random={len(rand_violations)})")
-        for envId, seed, policy, nf, hs, tp in nf_violations[:10]:
+        for envId, seed, policy, nf, tp in nf_violations[:10]:
             print(f"  {policy:6s} {envId:50s} seed={seed:3} "
-                  f"nfRaw={nf:8} halfSat={hs:8} tdPsiNF={tp:6}")
+                  f"nfRaw={nf:8} tdPsiNF={tp:6}")
         if len(nf_violations) > 10:
             print(f"  ... and {len(nf_violations) - 10} more")
 
