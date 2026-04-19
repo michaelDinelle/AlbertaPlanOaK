@@ -263,10 +263,13 @@ kernel void oak_meta_policy(
 
 // =================================================================================================
 // 4. oak_predict - Horde-style multi-GVF update.
-//      Main TD:    delta = (r - rho_bar) + V(s') - V(s)
-//      Subtask k:  delta_k = (r - rho_bar) + alpha_0 * curr[k] + (1 - alpha_0) * psi_k(s') - psi_k(s)
-//        (cumulant = reward; stopping value = feature attainment curr[k]; structural beta = alpha_0;
-//         sf[k] = k identity).
+//      Main TD:    delta   = (r - rho_bar) + V(s') - V(s)        (differential TD, ρ̄ centered)
+//      Subtask k:  delta_k = (r - rho_bar) + curr[k] - psi_k(s)  (β=1, 1-step myopic regression
+//                                                                  of next reward + anchor feature
+//                                                                  attainment onto state).
+//    sf[k] = k identity. β=1 drops the psi(s') bootstrap term: ψ_k becomes a 1-step prediction.
+//    The Plan doesn't prescribe a specific β; β=1 is the simplest GVF and matches the 1-step
+//    horizon of our option models.
 // =================================================================================================
 kernel void oak_predict(
     device float         *params      [[buffer(0)]],
@@ -292,16 +295,13 @@ kernel void oak_predict(
     if (!isfinite(delta)) { ctx.counters[OAK_CNT_LEARN_NF] += 1u; delta = 0.0f; }
     ctx.td[0] = delta;
 
-    // K = min(R, OAK_SIMD), so k < K implies k < R: anchor is always valid.
-    float bp = ctx.alpha0;
+    // K = min(R, OAK_SIMD), so k < K implies k < R: anchor curr[k] is always valid.
     uint nfPsi = 0u;
     for (uint k = 0u; k < ctx.K; ++k) {
-        float psiPrev = 0.0f, psiNext = 0.0f;
-        for (uint i = 0u; i < ctx.R; ++i) {
+        float psiPrev = 0.0f;
+        for (uint i = 0u; i < ctx.R; ++i)
             psiPrev = fma(ctx.psi[k * ctx.R + i], prev[i], psiPrev);
-            psiNext = fma(ctx.psi[k * ctx.R + i], curr[i], psiNext);
-        }
-        float dk = reward_c + bp * curr[k] + (1.0f - bp) * psiNext - psiPrev;
+        float dk = reward_c + curr[k] - psiPrev;
         if (!isfinite(dk)) { dk = 0.0f; nfPsi++; }
         ctx.tdPsi[k] = dk;
     }
