@@ -1,0 +1,43 @@
+{
+  "actionDim" : 6,
+  "agentStepMsMean" : 2.5938735384668465e-05,
+  "command" : "run",
+  "continuousAction" : {
+    "meanL2" : 1.8355604442421722,
+    "meanPerDim" : [
+      -0.0005057192223958854,
+      -0.0011180300134992062,
+      0.0001504502418661431,
+      0.0018918589563346633,
+      -0.00010914753979774546,
+      -9.92007032071799e-05
+    ],
+    "stdL2" : 0.28184961906539935,
+    "stdPerDim" : [
+      0.758042979053459,
+      0.7580791163001498,
+      0.7584291578477561,
+      0.7581416960643355,
+      0.7575210744244378,
+      0.7586641690016652
+    ]
+  },
+  "doneCount" : 0,
+  "envId" : "HalfCheetah-v4",
+  "envStepMsMean" : 0.03555447794307735,
+  "heartbeatSequence" : 13,
+  "measuredBatchCount" : 650000,
+  "measuredSeconds" : 23.505422292,
+  "measuredStepCount" : 650000,
+  "numEnvs" : 1,
+  "observationDim" : 17,
+  "policy" : "random",
+  "rewardSum" : -267540.5399999687,
+  "schemaVersion" : 3,
+  "seed" : 1,
+  "stepsPerSecond" : 27653.193885447683,
+  "stopAfterMeasuredSteps" : 1000000,
+  "stopReason" : "heartbeat",
+  "warmupSteps" : 0,
+  "workerDepth" : 650000
+}
