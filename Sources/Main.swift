@@ -19,7 +19,13 @@ enum Policy: String, Codable { case oak, random }
 struct RunHealth: Codable {
     let rewardRate: Double?
     let latentStateMeanSquare: Double?
-    let activeRank: Double?
+    // Pass 15 Tier 1.2: `activeRank` retained (= activeCount value) for backwards
+    // compatibility with Pass 12-14 reports. New canonical names (`activeCount`,
+    // `pEffectiveRank`) carry the semantically correct quantities and should be used
+    // by all new analysis scripts.
+    let activeRank: Double?            // legacy alias for activeCount (count of admitted features)
+    let activeCount: Double?           // Pass 15 T1.2: explicit count of admitted features
+    let pEffectiveRank: Double?        // Pass 15 T1.2: real effective rank (trace/max of featSM)
     let actionDeltaL2Mean: Double?
     let scoreGradL2Mean: Double?      // mean ‖∇log π(a|s)‖² across rows × params (REINFORCE)
     let optionModelPredictionMSE: Double?
@@ -31,6 +37,16 @@ struct RunHealth: Codable {
     // full bench. Both default to 0 for older schemas (Codable optionality + default).
     let tdPsiNonFiniteTotal: Int?
     let halfSaturationTotalFinal: Int?
+    // Pass 15 Tier 1: surfaced KernelScalars + per-buffer weight-magnitude maxima. The (C)
+    // bounded-magnitude hard rule consumes `*Max` fields. The KernelScalars surfacing
+    // (modelErrEMA, tdBaseline, alphaImp, etc.) lets analysis scripts inspect the agent's
+    // internal stability state without re-running with diagnostic flags.
+    let utilityFeatureMean: Double?, utilityOptionMean: Double?
+    let modelErrEMA: Double?, modelErrEMAPrev: Double?
+    let tdBaseline: Double?, alphaImp: Double?, alphaEnc: Double?, alphaPi: Double?
+    let oakFeatureReinitCountFinal: Int?
+    let encoderMax: Double?, valueWMax: Double?, psiMax: Double?, optPolicyMax: Double?
+    let outcomeHeadMax: Double?, betaWMax: Double?, omegaWMax: Double?, sprDecoderMax: Double?
 }
 
 struct RunDiagnostic: Codable {
@@ -237,10 +253,25 @@ func decodeCString(_ buffer: [CChar]) -> String {
 // ------------------------------------------------------------------------------------------------
 private struct HealthAccumulator {
     struct Slot { var sum = 0.0; var count = 0 }
-    // Slot order must mirror `values` in `record()` and the field order in `snapshot()`:
-    //   0 latentStateMeanSquare, 1 activeRank, 2 actionDeltaL2Mean,
-    //   3 scoreGradL2Mean, 4 optionModelPredictionMSE, 5 oakOptionReinitCount
-    var slots = [Slot](repeating: Slot(), count: 6)
+    // Slot order must mirror `values` in `record()` and the field order in `snapshot()`.
+    // Pass 15 Tier 1: extended to 16 slots covering all surfaced telemetry channels.
+    //   0  latentStateMeanSquare
+    //   1  activeCount             (formerly activeRank — the same quantity, semantically renamed)
+    //   2  actionDeltaL2Mean
+    //   3  scoreGradL2Mean
+    //   4  optionModelPredictionMSE
+    //   5  oakOptionReinitCount
+    //   6  utilityFeatureMean      (T1.1: was written by GPU but never consumed by host)
+    //   7  utilityOptionMean       (T1.1: same)
+    //   8  pEffectiveRank          (T1.2: real effective rank from KernelScalars.pEff)
+    //   9  modelErrEMA             (T1.3: surfaced from KernelScalars)
+    //  10  modelErrEMAPrev         (T1.3)
+    //  11  tdBaseline              (T1.3)
+    //  12  alphaImp                (T1.3)
+    //  13  alphaEnc                (T1.3)
+    //  14  alphaPi                 (T1.3 — Pass 15 T0.3 ‖scoreGrad‖² implicit step)
+    //  15  RESERVED for future scalar surfacing (Tier 2 rhoBaseline, etc.)
+    var slots = [Slot](repeating: Slot(), count: 16)
     var steps = 0
     var rawNonFinite = 0, sanitizedNonFinite = 0
     var encodeNF = 0, learnNF = 0, planNF = 0
@@ -252,17 +283,33 @@ private struct HealthAccumulator {
     // delta over the bench window equals the final value (counter starts at 0 per init).
     var tdPsiNF = 0
     var halfSaturationFinal = 0
+    var oakFeatureReinitFinal = 0
+    // Pass 15 Tier 1.4: per-buffer weight-magnitude max over the bench window. Each is
+    // the max-of-maxima across all recorded steps — a monotone signal for the (C)
+    // bounded-magnitude gate. `*Max` reflects the worst-case at any point during the bench.
+    var encoderMax = 0.0, valueWMax = 0.0, psiMax = 0.0, optPolicyMax = 0.0
+    var outcomeHeadMax = 0.0, betaWMax = 0.0, omegaWMax = 0.0, sprDecoderMax = 0.0
 
     mutating func record(_ stats: KernelStats) {
         steps += 1
         let rr = Double(stats.rewardRate); if rr.isFinite { lastRho = rr }
         let values: [Float] = [
             stats.latentStateMeanSquare,
-            stats.activeRank,
+            stats.activeCount,
             stats.actionDeltaL2Mean,
             stats.scoreGradL2Mean,
             stats.optionModelPredictionMSE,
             stats.oakOptionReinitCount,
+            stats.utilityFeatureMean,
+            stats.utilityOptionMean,
+            stats.pEffectiveRank,
+            stats.modelErrEMA,
+            stats.modelErrEMAPrev,
+            stats.tdBaselineStat,
+            stats.alphaImpStat,
+            stats.alphaEncStat,
+            stats.alphaPiStat,
+            0,
         ]
         for (i, f) in values.enumerated() {
             let v = Double(f)
@@ -276,8 +323,17 @@ private struct HealthAccumulator {
         planNF += Int(stats.planNonFiniteCount)
         tdPsiNF += Int(stats.tdPsiNonFiniteCount)
         halfSaturationFinal = Int(stats.halfSaturationCount)
+        oakFeatureReinitFinal = Int(stats.oakFeatureReinitCount)
         maxLat = max(maxLat, Double(stats.maxAbsLatentPrediction))
         maxPol = max(maxPol, Double(stats.maxAbsPolicyOutput))
+        encoderMax     = max(encoderMax,     Double(stats.encoderMax))
+        valueWMax      = max(valueWMax,      Double(stats.valueWMax))
+        psiMax         = max(psiMax,         Double(stats.psiMax))
+        optPolicyMax   = max(optPolicyMax,   Double(stats.optPolicyMax))
+        outcomeHeadMax = max(outcomeHeadMax, Double(stats.outcomeHeadMax))
+        betaWMax       = max(betaWMax,       Double(stats.betaWMax))
+        omegaWMax      = max(omegaWMax,      Double(stats.omegaWMax))
+        sprDecoderMax  = max(sprDecoderMax,  Double(stats.sprDecoderMax))
     }
 
     private func mean(_ i: Int) -> Double? { slots[i].count > 0 ? slots[i].sum / Double(slots[i].count) : nil }
@@ -288,6 +344,8 @@ private struct HealthAccumulator {
             rewardRate: lastRho,
             latentStateMeanSquare: mean(0),
             activeRank: mean(1),
+            activeCount: mean(1),
+            pEffectiveRank: mean(8),
             actionDeltaL2Mean: mean(2),
             scoreGradL2Mean: mean(3),
             optionModelPredictionMSE: mean(4),
@@ -295,7 +353,24 @@ private struct HealthAccumulator {
             nonFiniteRawTotal: rawNonFinite,
             nonFiniteSanitizedTotal: sanitizedNonFinite,
             tdPsiNonFiniteTotal: tdPsiNF,
-            halfSaturationTotalFinal: halfSaturationFinal)
+            halfSaturationTotalFinal: halfSaturationFinal,
+            utilityFeatureMean: mean(6),
+            utilityOptionMean: mean(7),
+            modelErrEMA: mean(9),
+            modelErrEMAPrev: mean(10),
+            tdBaseline: mean(11),
+            alphaImp: mean(12),
+            alphaEnc: mean(13),
+            alphaPi: mean(14),
+            oakFeatureReinitCountFinal: oakFeatureReinitFinal,
+            encoderMax: encoderMax > 0 ? encoderMax : nil,
+            valueWMax: valueWMax > 0 ? valueWMax : nil,
+            psiMax: psiMax > 0 ? psiMax : nil,
+            optPolicyMax: optPolicyMax > 0 ? optPolicyMax : nil,
+            outcomeHeadMax: outcomeHeadMax > 0 ? outcomeHeadMax : nil,
+            betaWMax: betaWMax > 0 ? betaWMax : nil,
+            omegaWMax: omegaWMax > 0 ? omegaWMax : nil,
+            sprDecoderMax: sprDecoderMax > 0 ? sprDecoderMax : nil)
     }
 
     func diagnosticSnapshot() -> RunDiagnostic? {
@@ -424,7 +499,7 @@ private struct KernelScalars {
 }
 
 struct KernelStats {
-    var rewardRate: Float = 0, latentStateMeanSquare: Float = 0, activeRank: Float = 0
+    var rewardRate: Float = 0, latentStateMeanSquare: Float = 0, activeCount: Float = 0
     var rawNonFiniteCount: Float = 0, sanitizedNonFiniteCount: Float = 0
     var encodeNonFiniteCount: Float = 0, learnNonFiniteCount: Float = 0, planNonFiniteCount: Float = 0
     var maxAbsLatentPrediction: Float = 0, maxAbsPolicyOutput: Float = 0
@@ -436,6 +511,15 @@ struct KernelStats {
     //   tdPsiNonFiniteCount  per-step NF in tdPsi (was untracked, contaminated MSE)
     //   halfSaturationCount  cumulative life-of-engine count of safe_half(NaN/Inf) substitutions
     var tdPsiNonFiniteCount: Float = 0, halfSaturationCount: Float = 0
+    // Pass 15 Tier 1: telemetry overhaul. Surfaced KernelScalars + cumulative counters
+    // + per-buffer weight-magnitude maxima. Layout MIRRORS OakKernel.metal struct exactly.
+    var pEffectiveRank: Float = 0
+    var modelErrEMA: Float = 0, modelErrEMAPrev: Float = 0
+    var tdBaselineStat: Float = 0
+    var alphaImpStat: Float = 0, alphaEncStat: Float = 0, alphaPiStat: Float = 0
+    var oakFeatureReinitCount: Float = 0
+    var encoderMax: Float = 0, valueWMax: Float = 0, psiMax: Float = 0, optPolicyMax: Float = 0
+    var outcomeHeadMax: Float = 0, betaWMax: Float = 0, omegaWMax: Float = 0, sprDecoderMax: Float = 0
 }
 
 // ================================================================================================
@@ -589,11 +673,12 @@ private final class Shared<Element> {
 }
 
 // ================================================================================================
-// Metal engine — orthodox Step 11 OaK. Pass 14: 20 phases per step, dispatched as one ICB.
+// Metal engine — orthodox Step 11 OaK. Pass 15 Tier 1: 20 phases per step, dispatched as
+// one ICB.
 //   encode → predict_outcome → meta_policy → predict → plan → reduce_alpha
-//   → learn_value → learn_encoder → learn_outcome → learn_psi → learn_pi
+//   → learn_value → learn_encoder → spr_fused → learn_outcome → learn_psi → learn_pi
 //   → learn_beta → learn_omega → meta_action
-//   → bk_reduce → bk_feature → bk_option → bk_admit_commit
+//   → bk_reduce → bk_feature → bk_option → bk_admit_commit → bk_weight_magnitudes
 // ================================================================================================
 final class OakMetalEngine {
     // Phase metadata: kernel name + threadgroup size (0 = pipeline-default dispatchThreads).
@@ -633,6 +718,9 @@ final class OakMetalEngine {
         Phase(name: "oak_bk_feature",         tgSize: 32),
         Phase(name: "oak_bk_option",          tgSize: 128),
         Phase(name: "oak_bk_admit_commit",    tgSize: 0),
+        // Pass 15 Tier 1.4: per-buffer max(|w|) for the (C) bounded-magnitude gate.
+        // 8 TGs × 32 threads (one TG per fp16 weight buffer; simd_max reduction).
+        Phase(name: "oak_bk_weight_magnitudes", tgSize: 32),
     ]
 
     private let obsDim, baseObsDim, actDim, batch, rank, dPolicy: Int
@@ -749,8 +837,8 @@ final class OakMetalEngine {
         let K = OakMetalLayout.optionCount(rank: rank, actDim: actDim)
         let E = OakMetalLayout.extendedDim(rank: rank, actDim: actDim)
         let M = OakMetalLayout.concatDim(rank: rank, actDim: actDim)
-        // Pass 14 Tier 1: 19-kernel pipeline (was 20). oak_predict_next_latent +
-        // oak_learn_encoder_spr fused into one oak_spr_fused that recomputes ẑ_N inline.
+        // Pass 15 Tier 1.4: 20-kernel pipeline (was 19 at Pass 14 T1).
+        // oak_bk_weight_magnitudes appended for the (C) bounded-magnitude gate.
         phaseGridWidths = [
             batch * rank,                     // oak_encode              [dispatchThreads]
             batch * K,                        // oak_predict_outcome     [dispatchThreads]
@@ -771,6 +859,7 @@ final class OakMetalEngine {
             rank,                             // oak_bk_feature          [R TGs × 32]
             K,                                // oak_bk_option           [K TGs × 128]
             1,                                // oak_bk_admit_commit     [dispatchThreads]
+            8,                                // oak_bk_weight_magnitudes [8 TGs × 32]
         ]
 
         self.diagnosticGpuPhaseTiming = diagnosticGpuPhaseTiming

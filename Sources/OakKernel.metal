@@ -196,11 +196,14 @@ struct KernelScalars {
                                 // active_dot_half_auto to take the dense fast-path.
 };
 
-// KernelStats — 18 Float fields. Layout must match Swift KernelStats byte-for-byte.
-// Pass 15 Tier 0: tdPsiNonFiniteCount + halfSaturationCount surface the new numerical-
-// safety counters. Both are populated by bk_reduce / bk_admit_commit from counters[].
+// KernelStats — Pass 15 Tier 1 telemetry overhaul. Layout must match Swift byte-for-byte.
+// Three groups:
+//   1. Pass 11-14 baseline (legacy semantics — activeRank renamed to activeCount).
+//   2. Pass 15 T0 numerical-safety (tdPsi NF, halfSaturation, alphaPi/Imp/Enc).
+//   3. Pass 15 T1 surfacing of KernelScalars + per-buffer weight-magnitude maxima
+//      (canonical signal for the (C) bounded-magnitude gate; see oak_bk_weight_magnitudes).
 struct KernelStats {
-    float rewardRate, latentStateMeanSquare, activeRank;
+    float rewardRate, latentStateMeanSquare, activeCount;
     float rawNonFiniteCount, sanitizedNonFiniteCount;
     float encodeNonFiniteCount, learnNonFiniteCount, planNonFiniteCount;
     float maxAbsLatentPrediction, maxAbsPolicyOutput;
@@ -208,8 +211,22 @@ struct KernelStats {
     float optionModelPredictionMSE;
     float oakOptionReinitCount;
     float utilityFeatureMean, utilityOptionMean;
-    float tdPsiNonFiniteCount;     // Pass 15 T0.4: per-step NF in tdPsi (was untracked, contaminated MSE)
-    float halfSaturationCount;     // Pass 15 T0.2: cumulative half-write non-finite substitutions
+    // Pass 15 Tier 0 (numerical safety):
+    float tdPsiNonFiniteCount;     // T0.4: per-step NF in tdPsi (was untracked, contaminated MSE)
+    float halfSaturationCount;     // T0.2: cumulative half-write non-finite substitutions
+    // Pass 15 Tier 1 (telemetry overhaul):
+    float pEffectiveRank;          // T1.2: real effective rank from KernelScalars.pEff
+                                   //       (separate from activeCount; the trace/max stable-rank proxy)
+    float modelErrEMA;             // T1.3: fast EMA of mean ψ TD error² (consumer of LPM gate)
+    float modelErrEMAPrev;         // T1.3: slow lagged EMA (lpmRate = max(0, prev - cur))
+    float tdBaselineStat;          // T1.3: REINFORCE running-mean baseline (Williams 1992)
+    float alphaImpStat;            // T1.3: implicit α for value/ψ heads (Kim 2510.06149)
+    float alphaEncStat;            // T1.3: implicit α for encoder (centered-obs variant)
+    float alphaPiStat;             // T1.3: implicit α for policy (Pass 15 T0.3 ‖scoreGrad‖² form)
+    float oakFeatureReinitCount;   // T1.5: cumulative encoder feature reinits (was untracked)
+    // Pass 15 Tier 1.4 weight-magnitude maxima (one per param buffer; canonical gate-(C) signal):
+    float encoderMax, valueWMax, psiMax, optPolicyMax;
+    float outcomeHeadMax, betaWMax, omegaWMax, sprDecoderMax;
 };
 
 // -------------------------------------------------------------------------------------------------
@@ -1644,9 +1661,19 @@ kernel void oak_bk_option(
         float d = ctx.tdPsi[r * ctx.K + k];
         psiErr_l = fma(d * d, lambda_k, psiErr_l);
     }
-    threadgroup float sg_cnt[4], sg_p[4];
-    float cnt  = tg_sum_128(cnt_l,    sg_cnt, tid, sgid);
-    float pErr = tg_sum_128(psiErr_l, sg_p,   tid, sgid);
+    // Pass 15 Tier 1.6: per-option weight magnitude max for the magnitudeOutlier reinit
+    // signal. Stride-loop over optPolicy[k][:] across the 128-thread TG (D·E elements
+    // per option; ~7K at Humanoid). Free piggyback on the existing reduction barrier.
+    float pol_max_l = 0.0f;
+    uint polCount = ctx.D * ctx.E;
+    uint polBaseK = k * polCount;
+    for (uint idx = tid; idx < polCount; idx += tgW) {
+        pol_max_l = max(pol_max_l, fabs(float(ctx.optPolicy[polBaseK + idx])));
+    }
+    threadgroup float sg_cnt[4], sg_p[4], sg_polmax[4];
+    float cnt    = tg_sum_128(cnt_l,    sg_cnt,    tid, sgid);
+    float pErr   = tg_sum_128(psiErr_l, sg_p,      tid, sgid);
+    float pol_max= tg_max_128(pol_max_l, sg_polmax, tid, sgid);
     float frac       = cnt * invB;
     float meanPsiErr = (cnt > 0.0f) ? pErr / cnt : 0.0f;
 
@@ -1655,22 +1682,26 @@ kernel void oak_bk_option(
         // Pass 11 Tier 5: track soft-chord per-option mass EMA. Drives the dormancy gate.
         ctx.optFracEMA[k] += invT * (frac - ctx.optFracEMA[k]);
 
-        // Pass 11 Tier 5: replace the algebraically-vacuous (frac<ridge ∧ meanPsiErr>cap·ridge)
-        // gate with structural 1/K dormancy + cross-option util-stale outlier (mean+std).
-        // Both predicates are dimensionless and structurally derived (K and cross-option stats);
-        // no magic scalars. The 0.5 factor is "half the structural uniform-share" — pure math.
+        // Pass 15 Tier 1.6: structurally-derived OR reinit gate. Replaces Pass-14's
+        // (dormant && stale) conjunction, which silently produced reinitCount=0 under
+        // symmetric runaway (all options had similar high error → nobody was an
+        // outlier → conjunction never fired). The new gate fires on ANY of three
+        // independent pathology signals — each one is sufficient evidence:
+        //   • dormant_k: option k contributes < ½ uniform share to the chord (Pass-11 T5)
+        //   • pEffCollapse: GLOBAL effective rank fell below ⌈√R⌉/2 — severe spectral
+        //     collapse (He et al. Spectral Collapse 2509.22335 ICLR 2026 Theorem 1)
+        //   • magnitudeOutlier_k: option's optPolicy weights exceed √HALF_MAX, the
+        //     fp16-safety boundary — same structural threshold safe_half / oak_meta_action
+        //     use; weights past this point cause downstream fp16 saturation when squared.
+        // Inv-9 compliant: all three thresholds derived structurally (K, R, fp16 storage),
+        // no tuned scalars.
         float meanU = 0.0f;
         for (uint k2 = 0u; k2 < ctx.K; ++k2) meanU += ctx.utilOpt[k2];
         meanU /= float(max(ctx.K, 1u));
-        float varU = 0.0f;
-        for (uint k2 = 0u; k2 < ctx.K; ++k2) {
-            float d = ctx.utilOpt[k2] - meanU;
-            varU += d * d;
-        }
-        float stdU = sqrt(varU / float(max(ctx.K, 1u)));
-        bool dormant = ctx.optFracEMA[k] < 0.5f / float(max(ctx.K, 1u));
-        bool stale   = ctx.utilOpt[k] > meanU + stdU;   // positive outlier → option is doing badly
-        if (dormant && stale) {
+        bool dormant      = ctx.optFracEMA[k] < 0.5f / float(max(ctx.K, 1u));
+        bool pEffCollapse = ctx.scalars->pEff < float(ceil_sqrt(ctx.R)) * 0.5f;
+        bool magnitudeOutlier = pol_max > sqrt((float)HALF_MAX);
+        if (dormant || pEffCollapse || magnitudeOutlier) {
             // Targeted column reinit: zero the chord-bias W_ψ[k][E + k] (so plan stops picking
             // this option for its specific ψ chord-weight contribution) AND the cumulant column
             // W_ψ[k][sf[k]] (the feature this cumulant tracks). Preserves cross-option transfer
@@ -1837,12 +1868,13 @@ kernel void oak_bk_admit_commit(
     for (uint i = 0u; i < R; ++i) { float v = ctx.featSM[i]; tr += v; mx = max(mx, v); }
     ctx.scalars->pEff = tr / max(mx, FLT_MIN);
 
-    // Telemetry roll-up.
+    // Telemetry roll-up. Pass 15 Tier 1: surface KernelScalars + cumulative counters
+    // into KernelStats for host-side bench JSON consumption.
     float uF = 0.0f, uO = 0.0f;
     for (uint i = 0u; i < R; ++i) uF += ctx.utilFeat[i];
     for (uint i = 0u; i < ctx.K; ++i) uO += ctx.utilOpt[i];
     stats->rewardRate         = ctx.scalars->rho;
-    stats->activeRank         = float(ctx.scalars->activeCount);
+    stats->activeCount        = float(ctx.scalars->activeCount);
     stats->utilityFeatureMean = uF / float(max(R, 1u));
     stats->utilityOptionMean  = uO / float(max(ctx.K, 1u));
     stats->oakOptionReinitCount = float(popcount(ctx.counters[OAK_CNT_REINIT_OPT]));
@@ -1851,10 +1883,77 @@ kernel void oak_bk_admit_commit(
     // its entire lifetime — any non-zero value indicates a learn_* kernel attempted to
     // write a non-finite to an fp16 weight (substituted with half(0) per Inv-4).
     stats->halfSaturationCount = float(ctx.counters[OAK_CNT_HALF_SAT]);
+    // Pass 15 Tier 1.3: surface KernelScalars (consumer-facing telemetry).
+    stats->pEffectiveRank   = ctx.scalars->pEff;
+    stats->modelErrEMA      = ctx.scalars->modelErrEMA;
+    stats->modelErrEMAPrev  = ctx.scalars->modelErrEMAPrev;
+    stats->tdBaselineStat   = ctx.scalars->tdBaseline;
+    stats->alphaImpStat     = ctx.scalars->alphaImp;
+    stats->alphaEncStat     = ctx.scalars->alphaEnc;
+    stats->alphaPiStat      = ctx.scalars->alphaPi;
+    // Pass 15 Tier 1.5: surface cumulative encoder-feature reinit count (was in
+    // counters[OAK_CNT_REINIT_FEAT] but never read by the host).
+    stats->oakFeatureReinitCount = float(ctx.counters[OAK_CNT_REINIT_FEAT]);
 
     // Slot toggles + step + clear option-reinit bitmask for next step.
     ctx.scalars->stateSlot  = 1u - ctx.scalars->stateSlot;
     ctx.scalars->optionSlot = 1u - ctx.scalars->optionSlot;
     ctx.scalars->stepCount += 1u;
     ctx.counters[OAK_CNT_REINIT_OPT] = 0u;
+}
+
+// =================================================================================================
+// bk_weight_magnitudes — Pass 15 Tier 1.4. Per-buffer max(|w|) for the (C) bounded-magnitude
+// hard rule (`max(|valueW|, |psi|, |optPolicy|, |outcomeHead|, |betaW|, |omegaW|, |sprDecoder|,
+// |encoder|) < √HALF_MAX`). Without this telemetry the (C) gate is invisible — Pass 14
+// silently allowed runaway weights since safe_half flagging only captures NEW writes, not
+// the cumulative state of weights that already saturated.
+//
+// Layout: 8 threadgroups × 32 threads. Each TG handles one fp16 weight buffer; threads in
+// the TG stride-loop with simd_max reduction. Cost ≪ 1 ms even on the largest buffer
+// (optPolicy = K·D·E ≈ 222K elements at Humanoid; 32-wide simd does it in ~7K iters/lane).
+//   [Dispatch: 8 threadgroups × 32 threads.]
+// =================================================================================================
+kernel void oak_bk_weight_magnitudes(
+    device half   *params     [[buffer(0)]],
+    device float  *stateArena [[buffer(1)]],
+    device uint   *uintArena  [[buffer(2)]],
+    device KernelScalars *scalars [[buffer(3)]],
+    device KernelStats   *stats   [[buffer(4)]],
+    constant KernelConfig &cfg    [[buffer(5)]],
+    uint tgid [[threadgroup_position_in_grid]],
+    uint tid  [[thread_position_in_threadgroup]],
+    uint tgW  [[threads_per_threadgroup]])
+{
+    Ctx ctx = make_ctx(params, stateArena, uintArena, scalars, cfg);
+    device const half *base;
+    uint count;
+    switch (tgid) {
+        case 0u: base = ctx.encoder;     count = ctx.R;                  break;
+        case 1u: base = ctx.valueW;      count = ctx.E;                  break;
+        case 2u: base = ctx.psi;         count = ctx.K * ctx.M;          break;
+        case 3u: base = ctx.optPolicy;   count = ctx.K * ctx.D * ctx.E;  break;
+        case 4u: base = ctx.outcomeHead; count = ctx.K * ctx.E;          break;
+        case 5u: base = ctx.betaW;       count = ctx.E + ctx.K;          break;
+        case 6u: base = ctx.omegaW;      count = ctx.K * ctx.E;          break;
+        case 7u: base = ctx.sprDecoder;  count = ctx.K * ctx.R;          break;
+        default: return;
+    }
+    float m_l = 0.0f;
+    for (uint i = tid; i < count; i += tgW) {
+        m_l = max(m_l, fabs(float(base[i])));
+    }
+    float m = simd_max(m_l);
+    if (tid == 0u) {
+        switch (tgid) {
+            case 0u: stats->encoderMax     = m; break;
+            case 1u: stats->valueWMax      = m; break;
+            case 2u: stats->psiMax         = m; break;
+            case 3u: stats->optPolicyMax   = m; break;
+            case 4u: stats->outcomeHeadMax = m; break;
+            case 5u: stats->betaWMax       = m; break;
+            case 6u: stats->omegaWMax      = m; break;
+            case 7u: stats->sprDecoderMax  = m; break;
+        }
+    }
 }
