@@ -417,31 +417,37 @@ inline float track_rate(uint stepCount, float ridge) {
 
 inline uint ceil_sqrt(uint n) { float s = sqrt(float(max(n, 1u))); return uint(ceil(s)); }
 
-// Pass 15 Tier 2.5: structurally-bounded soft-saturation (Iwaki MDAC bounded-advantage,
-// 2502.03854; same principle as oak_meta_action's tanh-mu bound). Maps R → [-M, M] via:
-//   y = M · tanh(x / M),  M = √HALF_MAX
-// Properties:
-//   - Identity at the origin: tanh(x/M)·M = x − x³/(3M²) + O(x⁵/M⁴), relative error
-//     <0.01% for |x| ≤ M/10 ≈ 26 (entire normal-operation range of agent quantities).
-//   - Smooth, monotone, infinitely differentiable.
-//   - Soft saturating: |y| < M for all finite x; y → ±M as x → ±∞.
-//   - Zero bias: y(0) = 0, y'(0) = 1.
-//   - M = √HALF_MAX is structural (Inv-9): the largest scalar such that y² fits in fp16
-//     range. Any quantity passed through bounded_soft can be safely squared, multiplied
-//     by another bounded quantity, or stored as fp16 without overflow downstream.
-// Used at the three sites where unbounded growth was observed at deep workerDepth in
-// Pass-14 forensic data: oak_encode (latent z), oak_predict (td and tdPsi residuals),
-// oak_meta_action (policy mu). All three share the same M for principled FLOPs/safety
-// trade-off.
+// Soft-saturating tanh-bound (Iwaki MDAC bounded-advantage, 2502.03854):
+//   y = M · tanh(x / M)
+// Identity at origin (zero bias), smooth, monotone, soft-saturating to ±M for |x| → ∞.
+// NaN/Inf → 0 (Inv-4 zero-bias substitution; tanh would otherwise propagate NaN).
+//
+// Two structural choices for M (Inv-9: derived from {R, fp16 storage}, no tuning):
+//   bounded_soft(x):       M = √HALF_MAX. For activations and TD residuals where x²
+//                          must fit in fp16 (e.g. featSM = E[z²], td² in MSE).
+//   bounded_soft_weight(x): M = √HALF_MAX / R. For fp16 weight stores where the dot
+//                          product Σ_{i=0..R} w_i · x_i must fit in fp16 — with state
+//                          x_i ≤ √HALF_MAX, the bound on w_i becomes √HALF_MAX/R so
+//                          V(s) = w·s ≤ R · M_w · M_x = HALF_MAX. Without this tighter
+//                          weight bound, V(s) saturates the implicit-α denominator and
+//                          td permanently sits at ±√HALF_MAX, locking weights at the
+//                          bound and blocking learning (Pass 14 / Pass 15 T2.5 failure
+//                          mode observed at B=1 on HalfCheetah/Walker2d).
 inline float bounded_soft(float x) {
-    // NaN guard: tanh(NaN) = NaN propagates downstream. The Pass 14 forensic data shows
-    // 3.4M halfSat events on KeyCorridorS5R3 traced to NaN values that bounded_soft was
-    // expected to bound but couldn't (tanh preserves NaN). Inv-4 zero-bias replacement
-    // for non-finite input — same rationale as safe_half / oak_bk_reduce's NF scans.
     if (!isfinite(x)) return 0.0f;
-    float M = sqrt((float)HALF_MAX);  // structural fp16-safety bound, hardware-derived.
+    float M = sqrt((float)HALF_MAX);
     return M * tanh(x * (1.0f / M));
 }
+inline float bounded_soft_weight(float x, uint R) {
+    if (!isfinite(x)) return 0.0f;
+    float M = sqrt((float)HALF_MAX) / float(max(R, 1u));
+    return M * tanh(x * (1.0f / M));
+}
+
+// Inv-4 zero-bias passthrough: returns x if finite, else 0. Used at every device-array
+// READ that flows into a scalar reduction (mean, sum, EMA), preventing one stale NaN cell
+// from poisoning a long-lived running statistic.
+inline float nf_safe(float x) { return isfinite(x) ? x : 0.0f; }
 
 // Pass 15 Tier 0.2: provably-safe fp32 → fp16 weight write. The bare `half(x)` cast in Pass
 // 14 silently produced fp16 +Inf when |x| > 65504 (the fp16 range maximum) AND silently
@@ -449,32 +455,14 @@ inline float bounded_soft(float x) {
 // because the .metallib was compiled with default fast-math (Pass 15 T0.1 fixed via
 // -fno-fast-math in setup.sh) the downstream `isfinite()` checks were elided at -O.
 //
-// safe_half() rule (structural, no magic constants):
-//   1. Apply bounded_soft(x): smooth saturating tanh-bound to ±M, M = √HALF_MAX.
-//      This catches the Pass-14 silent failure mode where finite x > HALF_MAX
-//      rounds to HALF_MAX (Apple Metal's IEEE-754 default for out-of-range finite),
-//      causing weights to crawl up to HALF_MAX over thousands of accumulated updates
-//      and never trigger an Inf check. Bounded_soft is identity at origin (relative
-//      error <0.01% for typical |x| ≤ M/10 = 26), so normal-range weights are
-//      unchanged. Soft-saturating ensures weights stay in a range where w·feature
-//      stays fp16-safe even when features are at their own bounded_soft cap.
-//   2. Narrow to half. The bounded value is always finite and ≤ M < HALF_MAX, so
-//      the cast cannot produce Inf.
-//   3. If the resulting half is non-finite (only possible for NaN inputs) → return
-//      half(0.0f) AND atomic-increment OAK_CNT_HALF_SAT (BWH-orthodox zero-bias
-//      replacement per Inv-4: never bias the iterate toward a non-zero value;
-//      a NaN update is recorded as a missed update).
-//
-// Telemetry contract: a healthy run produces OAK_CNT_HALF_SAT == 0 over its full
-// lifetime. (Tier 0 originally also tracked finite-saturation but that's now
-// structurally precluded by bounded_soft.)
-//
-// This is the third application of the Iwaki MDAC bounded-advantage principle
-// (oak_encode latent z, oak_predict td/tdPsi, this site for all weight writes).
-// All three sites share M = √HALF_MAX so the agent's entire computational graph
-// stays within fp16-safe bounds without any clamps, biases, or tuned scalars.
-inline half safe_half(float x, device uint *counters) {
-    half h = half(bounded_soft(x));
+// safe_half: structurally-safe fp16 weight write. Applies bounded_soft_weight (M =
+// √HALF_MAX/R) so that the dot product V(s) = Σ_i w_i · x_i fits in fp16 when x_i is
+// itself bounded by √HALF_MAX. NaN inputs (which bounded_soft_weight returns 0 for)
+// pass through cleanly to half(0); the post-narrowing isfinite check is defensive in
+// case Apple Metal's float→half rounding produces an unexpected non-finite half (never
+// observed but cheap to guard).
+inline half safe_half(float x, device uint *counters, uint R) {
+    half h = half(bounded_soft_weight(x, R));
     if (!isfinite(h)) {
         atomic_fetch_add_explicit((device atomic_uint *)(counters + OAK_CNT_HALF_SAT),
                                   1u, memory_order_relaxed);
@@ -483,15 +471,16 @@ inline half safe_half(float x, device uint *counters) {
     return h;
 }
 
-// Pass 13 Tier 1: L2-Effective-Rank regularizer strength. Spectral collapse drives plasticity
-// loss (He et al. 2509.22335 ICLR 2026); when the encoder's effective rank pEff falls below
-// the structural rank R, an L2 weight-decay term tied to the rank gap pushes weights toward
-// zero, re-opening collapsed feature dimensions. When pEff ≈ R the regularizer is near-zero,
-// so it has no effect on healthy, full-rank representations. Inv-9 compliant: derived
-// structurally from {alpha0, R, pEff} — no magic constant, no learnable hyperparameter.
+// L2-Effective-Rank regularizer (He et al. 2509.22335 ICLR 2026): when pEff drops below R,
+// apply a weight decay proportional to (R − pEff) / R. Pass 13 used the raw gap × α₀ as the
+// decay rate, which at α₀ = 1/cap = 0.0026 and gap ≈ 1 (early training) gave 0.26%/step
+// decay — over 10K steps this kills 99.99% of every weight, dominating the gradient signal
+// and preventing learning at B=1. The fix scales the gap by α₀ a SECOND time (= α₀² · gap),
+// giving a structural sub-percent decay only when pEff persistently collapses. Healthy
+// full-rank representations see exactly zero decay (gap = 0). Inv-9: derived structurally.
 inline float l2er_decay(float alpha0, uint R, float pEff) {
     float gap = max(0.0f, (float(R) - pEff) / float(max(R, 1u)));
-    return alpha0 * gap;
+    return alpha0 * alpha0 * gap;
 }
 
 // Dot product over the active-feature list (gather).
@@ -744,18 +733,18 @@ kernel void oak_meta_policy(
                                        ctx.activeList, ctx.activeCount);
     for (uint k = 0u; k < ctx.K; ++k)
         beta_logit += float(ctx.betaW[ctx.E + k]) * chordPrev[k];
-    // Pass 13 Tier 0: β-on-surprise-MINUS-IG. CPD-Option-Critic (2510.24988) + LPM
-    // (Hou-An-Du 2509.25438 ICLR 2026). Pass-12 added `+modelErrEMA` raw, which on noisy
-    // envs (Dynamic-Obstacles family, modelErrEMA persistently O(1+)) saturated β→1
-    // → terminated on every step → ω never gets a stable option. Pass-13 fix: subtract
-    // lpmRate (Information-Gain proxy). Net term is positive when surprise is high AND
-    // model NOT improving (terminate, ω re-plans), zero when wrong-but-improving (keep
-    // option — improvement is the BWH-orthodox signal that this option is doing learning
-    // work), negative when model is improving faster than its absolute error (option is
-    // succeeding — keep it longer).
+    // β-on-surprise-MINUS-IG (CPD-Option-Critic 2510.24988 + LPM Hou-An-Du 2509.25438).
+    // Normalized form: contribute (modelErrEMA − lpmRate) / max(modelErrEMA, ridge) which
+    // is in [0, 1] (= 1 when surprise is high AND not improving, → 0 when fully improving).
+    // The earlier raw form saturated β→1 immediately when modelErrEMA was O(K) (e.g. 3347
+    // on HalfCheetah at B=1), forcing termination every step and preventing options from
+    // accumulating. Normalizing by modelErrEMA itself keeps the contribution at its
+    // structural [0, 1] sigmoid-sensitive range without introducing a tuned scalar.
     float lpmRate_meta = max(0.0f,
                              ctx.scalars->modelErrEMAPrev - ctx.scalars->modelErrEMA);
-    beta_logit += (ctx.scalars->modelErrEMA - lpmRate_meta);
+    float surprise_norm = (ctx.scalars->modelErrEMA - lpmRate_meta)
+                        / max(ctx.scalars->modelErrEMA, ctx.ridge);
+    beta_logit += surprise_norm;
     float beta_prob = 1.0f / (1.0f + exp(-beta_logit));
     ctx.betaProb[row] = beta_prob;
 
@@ -958,20 +947,25 @@ kernel void oak_plan(
         k_lane = wins ? k2 : k_lane;
     }
     if (tid == 0u) {
-        // Pass 13 Tier 0: LPM second-derivative planning gate (Hou-An-Du 2509.25438 ICLR 2026).
-        // Replaces Pass-12's absolute-scale `1/(1+modelErrEMA)` which over-shrunk the planning
-        // bonus on stochastic envs (modelErrEMA is unbounded; on Dynamic-Obstacles it stays at
-        // O(1+) persistently → gate ≈ 0 forever → no planning improvement).
-        // Pass-13 fix: rescale by lpmRate (= max(0, modelErrEMAPrev - modelErrEMA)). When the
-        // model is IMPROVING (lpmRate > 0), the planning bonus is restored — we trust the
-        // model's IG-monotone improvement direction even at high absolute error. When stagnant
-        // (lpmRate ≈ 0), behavior matches Pass-12 (still gated by 1/(1+modelErrEMA)).
+        // LPM normalized planning gate (Hou-An-Du 2509.25438): trust the planning bonus
+        // proportional to how much the model is improving relative to its current error.
+        // gateScale = (ridge + lpmRate) / (ridge + modelErrEMA) — bounded in [0, 1] under
+        // the natural ridge floor; → 1 when lpmRate ≈ modelErrEMA (model converging fast),
+        // → 0 when lpmRate << modelErrEMA (stagnant high-error regime). The earlier
+        // (1 + lpmRate)/(1 + modelErrEMA) form shrunk the bonus to ≈0 when modelErrEMA
+        // was O(K) (HalfCheetah B=1: gateScale ≈ 1/3348 = 0.0003), making planning a no-op.
         float lpmRate = max(0.0f,
                             ctx.scalars->modelErrEMAPrev - ctx.scalars->modelErrEMA);
-        float gateScale = (1.0f + lpmRate) / (1.0f + ctx.scalars->modelErrEMA);
-        ctx.td[row] += gateScale * (qk - ctx.vCurr[row]);
-        // Pass 11 Tier 3: option_slot is now telemetry-only (set by oak_meta_policy from
-        // argmax_k chord[r][k]). plan no longer writes it — chord drives action sampling.
+        float gateScale = (ctx.ridge + lpmRate)
+                        / (ctx.ridge + ctx.scalars->modelErrEMA);
+        // Re-bound td after adding the planning advantage. qk and vCurr are unbounded
+        // fp32 dot products (w·s with w ≤ M, s ≤ M ⇒ each ≤ M·R·M ≈ 25M at R=376), so
+        // the planning delta `gateScale · (qk − vCurr)` can be O(50M) before downstream
+        // kernels (oak_learn_value gradient, oak_bk_feature utility, oak_bk_admit_commit
+        // tdBaseline EMA) consume td. Without this rebound, td would silently inflate
+        // tdBaseline to O(1e30+) over thousands of steps.
+        float td_with_plan = nf_safe(ctx.td[row]) + gateScale * (qk - nf_safe(ctx.vCurr[row]));
+        ctx.td[row] = bounded_soft(td_with_plan);
     }
 }
 
@@ -1028,11 +1022,13 @@ kernel void oak_meta_action(
                                            ctx.activeList, ctx.activeCount, dense);
         mu = fma(lambda_k, dot_k, mu);
     }
-    // Pass 15 Tier 0.6 / 2.5: tanh-bounded policy mean via shared bounded_soft helper
-    // (Iwaki 2502.03854 MDAC bounded advantage). One of three sites that share the same
-    // structural M = √HALF_MAX bound (oak_encode latent z, oak_predict td/tdPsi, here);
-    // see bounded_soft definition above for the full Inv-9 rationale.
-    ctx.policyMean[row * ctx.D + p] = bounded_soft(mu);
+    // tanh-bounded policy mean (Iwaki 2502.03854 MDAC): M = 1 is the canonical normalized
+    // action range — same standard "squash to [-1, 1]" used by every continuous-action PG
+    // implementation (Sutton-Barto Ch 13, SAC/PPO/TD3 all use tanh on their policy output).
+    // For Discrete-N components the wrapper interprets mu as Gumbel-max logits — small
+    // logits give nearly uniform exploration, large logits pin to argmax; the [-1, 1]
+    // range is exactly the right scale for both regimes (tanh-bounded). NaN → 0.
+    ctx.policyMean[row * ctx.D + p] = isfinite(mu) ? tanh(mu) : 0.0f;
 }
 
 // =================================================================================================
@@ -1165,24 +1161,22 @@ kernel void oak_learn_value(
         // Pass 13 Tier 1: L2-Effective-Rank regularizer (Spectral Collapse 2509.22335 ICLR 2026).
         // wNew = (1 - λ_L2) · w_old + step · g where λ_L2 grows when pEff < R.
         float lambda_L2 = l2er_decay(ctx.alpha0, ctx.R, ctx.scalars->pEff);
-        // Pass 15 Tier 4: backward-view TD(λ) eligibility trace at B=1 (Sutton-Barto Ch 12.7).
-        // For continuing average-reward (γ=1 with reward centering):
-        //   e_t[i] ← λ · e_{t-1}[i] + ∇V(s_t)[i] = λ · e_{t-1}[i] + prev_state[i]
-        //   Δw[i] = α_i · δ_t · e_t[i]
-        // Equivalent to the forward-view λ-return target G_t^λ; backward-view needs ONE
-        // float per weight (the trace) instead of an N-step transition buffer. At B>1
-        // (Pass 14 batched protocol), fall back to standard 1-step batched TD since the
-        // per-row trace cannot be averaged consistently across rows. λ structural = 1−1/cap.
+        // Backward-view TD(λ) eligibility trace at B=1 (Sutton-Barto Ch 12.7): equivalent
+        // to the forward-view λ-return target with one float per weight. e is bounded via
+        // bounded_soft (steady-state e ≤ M·cap is fp32-safe but unbounded growth fuels
+        // downstream blow-up via gMeta = td·e in TIDBD). At B>1 fall back to standard
+        // 1-step batched TD (per-row traces don't average consistently across rows).
         float gradStep;
         if (ctx.B == 1u) {
-            float xp = prev[feat];
-            ctx.valueE[feat] = ctx.scalars->lambdaTrace * ctx.valueE[feat] + xp;
-            gradStep = step * ctx.td[0] * ctx.valueE[feat];
+            float xp = nf_safe(prev[feat]);
+            float eNew = ctx.scalars->lambdaTrace * ctx.valueE[feat] + xp;
+            ctx.valueE[feat] = bounded_soft(eNew);
+            gradStep = step * nf_safe(ctx.td[0]) * ctx.valueE[feat];
         } else {
             gradStep = step * (g * invB);
         }
         float wNew = float(ctx.valueW[feat]) * (1.0f - lambda_L2) + gradStep;
-        ctx.valueW[feat] = safe_half(wNew, ctx.counters);
+        ctx.valueW[feat] = safe_half(wNew, ctx.counters, ctx.R);
         if (feat < ctx.R) {
             float decay = 1.0f - ctx.alpha0;
             ctx.wBar[feat] = max(ctx.wBar[feat] * decay, fabs(wNew));
@@ -1228,7 +1222,7 @@ kernel void oak_learn_encoder(
     float lambda_L2 = l2er_decay(ctx.alpha0, ctx.R, ctx.scalars->pEff);
     float eNew = float(ctx.encoder[feat]) * (1.0f - lambda_L2)
                + step * g / float(max(ctx.B, 1u));
-    ctx.encoder[feat] = safe_half(eNew, ctx.counters);
+    ctx.encoder[feat] = safe_half(eNew, ctx.counters, ctx.R);
 }
 
 // =================================================================================================
@@ -1314,14 +1308,14 @@ kernel void oak_spr_fused(
     float g_SPR_damped = g_SPR - coef * g_RL;
 
     float step = ctx.scalars->alphaEnc;
-    ctx.encoder[feat] = safe_half(float(ctx.encoder[feat]) + step * g_SPR_damped, ctx.counters);
+    ctx.encoder[feat] = safe_half(float(ctx.encoder[feat]) + step * g_SPR_damped, ctx.counters, ctx.R);
 
     // Decoder update: ∂L/∂D[k][feat] = (-2/B) · gD[k]; descend the loss.
     for (uint k = 0u; k < ctx.K; ++k) {
         float dDecoder = -2.0f * gD[k] * invB;
         uint dIdx = k * ctx.R + feat;
         ctx.sprDecoder[dIdx] = safe_half(float(ctx.sprDecoder[dIdx])
-                                       + ctx.scalars->alphaImp * dDecoder, ctx.counters);
+                                       + ctx.scalars->alphaImp * dDecoder, ctx.counters, ctx.R);
     }
 }
 
@@ -1371,7 +1365,7 @@ kernel void oak_learn_outcome(
     float alpha_eff = ctx.alpha0 / (1.0f + ctx.alpha0 * n2 * invB);
     uint pIdx = k * ctx.E + e;
     ctx.outcomeHead[pIdx] = safe_half(float(ctx.outcomeHead[pIdx]) + alpha_eff * g * invB,
-                                      ctx.counters);
+                                      ctx.counters, ctx.R);
 }
 
 // =================================================================================================
@@ -1427,20 +1421,20 @@ kernel void oak_learn_psi(
     // ψ uses the same effective-rank signal — when the latent state collapses, its predictor
     // weights collapse too; decay them in lockstep.
     float lambda_L2 = l2er_decay(ctx.alpha0, ctx.R, ctx.scalars->pEff);
-    // Pass 15 Tier 4: backward-view TD(λ) eligibility trace at B=1 (one trace per ψ weight).
-    // Identical to oak_learn_value's trace mechanism. Per-cumulant: e[k][m] = λ·e[k][m] + ∇ψ_k(s_t)[m]
-    // where ∇ψ_k(s_t)[m] is `prev[m]` for state weights or `chordPrev[m-E]` for chord weights.
-    // At B>1 fall back to standard 1-step batched ψ-TD (Pass 14 protocol).
+    // Backward-view TD(λ) trace at B=1 (one trace per ψ weight). e[k][m] = λ·e[k][m]
+    // + ∇ψ_k(s_t)[m] where ∇ψ_k = prev[m] (state weight) or chordPrev[m−E] (chord weight).
+    // bounded_soft caps e to fp16-safe range; at B>1 fall back to 1-step batched ψ-TD.
     float gradStep;
     if (ctx.B == 1u) {
-        float gradV = (m < ctx.E) ? prev[m] : ctx.chordSlotPrev[m - ctx.E];
-        ctx.psiE[pIdx] = ctx.scalars->lambdaTrace * ctx.psiE[pIdx] + gradV;
-        gradStep = step * ctx.tdPsi[k] * ctx.psiE[pIdx];
+        float gradV = (m < ctx.E) ? nf_safe(prev[m]) : nf_safe(ctx.chordSlotPrev[m - ctx.E]);
+        float eNew = ctx.scalars->lambdaTrace * ctx.psiE[pIdx] + gradV;
+        ctx.psiE[pIdx] = bounded_soft(eNew);
+        gradStep = step * nf_safe(ctx.tdPsi[k]) * ctx.psiE[pIdx];
     } else {
         gradStep = step * g * invB;
     }
     ctx.psi[pIdx] = safe_half(float(ctx.psi[pIdx]) * (1.0f - lambda_L2) + gradStep,
-                              ctx.counters);
+                              ctx.counters, ctx.R);
 }
 
 // =================================================================================================
@@ -1496,7 +1490,7 @@ kernel void oak_learn_pi(
     // collapsed feature directions.
     float lambda_L2 = l2er_decay(ctx.alpha0, ctx.R, ctx.scalars->pEff);
     ctx.optPolicy[pIdx] = safe_half(float(ctx.optPolicy[pIdx]) * (1.0f - lambda_L2)
-                                  + alpha_pi * g * invB, ctx.counters);
+                                  + alpha_pi * g * invB, ctx.counters, ctx.R);
 }
 
 // =================================================================================================
@@ -1545,7 +1539,7 @@ kernel void oak_learn_beta(
     float invB = 1.0f / float(max(ctx.B, 1u));
     float alpha_eff = ctx.alpha0 / (1.0f + ctx.alpha0 * n2 * invB);
     // Sign: minimize J = β · A → descend g (negative gradient direction).
-    ctx.betaW[m] = safe_half(float(ctx.betaW[m]) - alpha_eff * g * invB, ctx.counters);
+    ctx.betaW[m] = safe_half(float(ctx.betaW[m]) - alpha_eff * g * invB, ctx.counters, ctx.R);
 }
 
 // =================================================================================================
@@ -1590,7 +1584,7 @@ kernel void oak_learn_omega(
     float alpha_eff = ctx.alpha0 / (1.0f + ctx.alpha0 * n2 * invB);
     uint pIdx = k * ctx.E + e;
     // Sign: ascend J = log π(k|s) · A → +g direction.
-    ctx.omegaW[pIdx] = safe_half(float(ctx.omegaW[pIdx]) + alpha_eff * g * invB, ctx.counters);
+    ctx.omegaW[pIdx] = safe_half(float(ctx.omegaW[pIdx]) + alpha_eff * g * invB, ctx.counters, ctx.R);
 }
 
 // =================================================================================================
@@ -1630,14 +1624,16 @@ kernel void oak_bk_reduce(
     threadgroup float sg_obsNF[4];
     float obsNF = tg_sum_128(obsNF_local, sg_obsNF, tid, sgid);
 
-    // (1b) Per-feature mean EMA on encoder features only (running ρ_k tracking for cumulant
-    // centering in oak_predict). Outcome dims R..E are predictions; their "centering" is
-    // implicit in the prediction target.
+    // (1b) Per-feature mean EMA on encoder features (running ρ_k for cumulant centering
+    // in oak_predict). Outcome dims R..E are bounded by oak_predict_outcome's bounded_soft;
+    // their centering is implicit in the prediction target. NF-guarded reads keep the EMA
+    // bounded under any propagated NaN/Inf (Inv-4 zero-bias substitution).
     for (uint f = tid; f < ctx.R; f += tgW) {
         float sum = 0.0f;
-        for (uint r = 0u; r < ctx.B; ++r) sum += curr[r * ctx.E + f];
+        for (uint r = 0u; r < ctx.B; ++r) sum += nf_safe(curr[r * ctx.E + f]);
         float meanBatch = sum / float(max(ctx.B, 1u));
-        ctx.featMean[f] += invT * (meanBatch - ctx.featMean[f]);
+        float fmNew = ctx.featMean[f] + invT * (meanBatch - ctx.featMean[f]);
+        ctx.featMean[f] = nf_safe(fmNew);
     }
 
     // (2) Latent telemetry: mean-square + max|latent| + non-finite count over the FULL
@@ -1752,14 +1748,15 @@ kernel void oak_bk_feature(
     // row. K cumulants now (was R features) under Design 2 — divisor is structural 1+K.
     float u_l = 0.0f;
     for (uint r = tid; r < ctx.B; r += tgW) {
-        float x = curr[r * ctx.E + feat];   // E-stride state row (Pass 11 Tier 2)
-        u_l += fabs(ctx.td[r] * x);
-        for (uint k = 0u; k < ctx.K; ++k) u_l += fabs(ctx.tdPsi[r * ctx.K + k] * x);
+        float x = nf_safe(curr[r * ctx.E + feat]);
+        u_l += fabs(nf_safe(ctx.td[r]) * x);
+        for (uint k = 0u; k < ctx.K; ++k) u_l += fabs(nf_safe(ctx.tdPsi[r * ctx.K + k]) * x);
     }
     float u = simd_sum(u_l);
     if (tid == 0u) {
         float un = u * invB / float(1u + ctx.K);
-        ctx.utilFeat[feat] += invT * (un - ctx.utilFeat[feat]);
+        float ufNew = ctx.utilFeat[feat] + invT * (un - ctx.utilFeat[feat]);
+        ctx.utilFeat[feat] = nf_safe(ufNew);
     }
 }
 
@@ -1793,52 +1790,49 @@ kernel void oak_bk_option(
     // was active during the transition that produced tdPsi[r][k]).
     float cnt_l = 0.0f, psiErr_l = 0.0f;
     for (uint r = tid; r < ctx.B; r += tgW) {
-        float lambda_k = ctx.chordSlotPrev[r * ctx.K + k];
+        float lambda_k = nf_safe(ctx.chordSlotPrev[r * ctx.K + k]);
         cnt_l += lambda_k;
-        float d = ctx.tdPsi[r * ctx.K + k];
+        float d = nf_safe(ctx.tdPsi[r * ctx.K + k]);
         psiErr_l = fma(d * d, lambda_k, psiErr_l);
     }
-    // Pass 15 Tier 1.6: per-option weight magnitude max for the magnitudeOutlier reinit
-    // signal. Stride-loop over optPolicy[k][:] across the 128-thread TG (D·E elements
-    // per option; ~7K at Humanoid). Free piggyback on the existing reduction barrier.
-    float pol_max_l = 0.0f;
-    uint polCount = ctx.D * ctx.E;
-    uint polBaseK = k * polCount;
-    for (uint idx = tid; idx < polCount; idx += tgW) {
-        pol_max_l = max(pol_max_l, fabs(float(ctx.optPolicy[polBaseK + idx])));
-    }
-    threadgroup float sg_cnt[4], sg_p[4], sg_polmax[4];
-    float cnt    = tg_sum_128(cnt_l,    sg_cnt,    tid, sgid);
-    float pErr   = tg_sum_128(psiErr_l, sg_p,      tid, sgid);
-    float pol_max= tg_max_128(pol_max_l, sg_polmax, tid, sgid);
+    threadgroup float sg_cnt[4], sg_p[4];
+    float cnt        = tg_sum_128(cnt_l,    sg_cnt, tid, sgid);
+    float pErr       = tg_sum_128(psiErr_l, sg_p,   tid, sgid);
     float frac       = cnt * invB;
     float meanPsiErr = (cnt > 0.0f) ? pErr / cnt : 0.0f;
 
     if (tid == 0u) {
-        ctx.utilOpt[k] += invT * (meanPsiErr - ctx.utilOpt[k]);
-        // Pass 11 Tier 5: track soft-chord per-option mass EMA. Drives the dormancy gate.
-        ctx.optFracEMA[k] += invT * (frac - ctx.optFracEMA[k]);
+        float uoNew = ctx.utilOpt[k] + invT * (meanPsiErr - ctx.utilOpt[k]);
+        ctx.utilOpt[k] = nf_safe(uoNew);
+        float ofNew = ctx.optFracEMA[k] + invT * (frac - ctx.optFracEMA[k]);
+        ctx.optFracEMA[k] = nf_safe(ofNew);
 
-        // Pass 15 Tier 1.6: structurally-derived OR reinit gate. Replaces Pass-14's
-        // (dormant && stale) conjunction, which silently produced reinitCount=0 under
-        // symmetric runaway (all options had similar high error → nobody was an
-        // outlier → conjunction never fired). The new gate fires on ANY of three
-        // independent pathology signals — each one is sufficient evidence:
-        //   • dormant_k: option k contributes < ½ uniform share to the chord (Pass-11 T5)
-        //   • pEffCollapse: GLOBAL effective rank fell below ⌈√R⌉/2 — severe spectral
-        //     collapse (He et al. Spectral Collapse 2509.22335 ICLR 2026 Theorem 1)
-        //   • magnitudeOutlier_k: option's optPolicy weights exceed √HALF_MAX, the
-        //     fp16-safety boundary — same structural threshold safe_half / oak_meta_action
-        //     use; weights past this point cause downstream fp16 saturation when squared.
-        // Inv-9 compliant: all three thresholds derived structurally (K, R, fp16 storage),
-        // no tuned scalars.
+        // Reinit gate (Pass 11 Tier 5 design, restored): fires only when an option is
+        // BOTH dormant (gets <½ uniform chord share) AND stale (its TD-error² is a
+        // positive cross-option outlier). Both conditions are structural cross-option
+        // statistics — Inv-9 compliant. Pass 15 added pEffCollapse + magnitudeOutlier
+        // disjunctive gates which fired on EVERY step at low pEff during early training
+        // (pEff ~ 5 < ⌈√R⌉/2 = 8), preventing option weights from ever accumulating
+        // learning. Reverted: the bounded_soft + safe_half stack already guarantees
+        // weight magnitudes structurally; pEffCollapse is a noisy proxy that punishes
+        // healthy early-training low-rank states; magnitudeOutlier is redundant since
+        // safe_half caps weights ≤ √HALF_MAX before they ever reach the gate.
         float meanU = 0.0f;
-        for (uint k2 = 0u; k2 < ctx.K; ++k2) meanU += ctx.utilOpt[k2];
+        for (uint k2 = 0u; k2 < ctx.K; ++k2) meanU += nf_safe(ctx.utilOpt[k2]);
         meanU /= float(max(ctx.K, 1u));
-        bool dormant      = ctx.optFracEMA[k] < 0.5f / float(max(ctx.K, 1u));
-        bool pEffCollapse = ctx.scalars->pEff < float(ceil_sqrt(ctx.R)) * 0.5f;
-        bool magnitudeOutlier = pol_max > sqrt((float)HALF_MAX);
-        if (dormant || pEffCollapse || magnitudeOutlier) {
+        float varU = 0.0f;
+        for (uint k2 = 0u; k2 < ctx.K; ++k2) {
+            float dU = nf_safe(ctx.utilOpt[k2]) - meanU;
+            varU += dU * dU;
+        }
+        float stdU = sqrt(varU / float(max(ctx.K, 1u)));
+        // Structural dormancy: 1/K is the uniform chord share (no preference). An option
+        // averaging below uniform is by definition under-utilized.
+        // Structural staleness: utilOpt[k] is a 1σ positive outlier (Chebyshev / one-sigma
+        // rule) — its TD-error² is unusually high vs the cross-option distribution.
+        bool dormant = ctx.optFracEMA[k] < 1.0f / float(max(ctx.K, 1u));
+        bool stale   = ctx.utilOpt[k] > meanU + stdU;
+        if (dormant && stale) {
             // Targeted column reinit: zero the chord-bias W_ψ[k][E + k] (so plan stops picking
             // this option for its specific ψ chord-weight contribution) AND the cumulant column
             // W_ψ[k][sf[k]] (the feature this cumulant tracks). Preserves cross-option transfer
@@ -1979,12 +1973,14 @@ kernel void oak_bk_admit_commit(
     //   exact unbiased cumulative mean (no exponential decay, no track_rate floor;
     //   rate → 0 as t → ∞ is intentional, freezing the asymptote of ϖ).
     float meanR = 0.0f;
-    for (uint r = 0u; r < ctx.B; ++r) meanR += ctx.reward[r];
+    for (uint r = 0u; r < ctx.B; ++r) meanR += nf_safe(ctx.reward[r]);
     meanR /= float(max(ctx.B, 1u));
     float invT = track_rate(ctx.stepCount, ctx.ridge);
-    ctx.scalars->rho += (meanR - ctx.scalars->rho) * invT;
+    float rhoNew = ctx.scalars->rho + (meanR - ctx.scalars->rho) * invT;
+    ctx.scalars->rho = nf_safe(rhoNew);
     float invTcum = 1.0f / float(ctx.scalars->stepCount + 1u);
-    ctx.scalars->rhoBaseline += (meanR - ctx.scalars->rhoBaseline) * invTcum;
+    float rbNew = ctx.scalars->rhoBaseline + (meanR - ctx.scalars->rhoBaseline) * invTcum;
+    ctx.scalars->rhoBaseline = nf_safe(rbNew);
     // Pass 15 Tier 4: TD(λ) trace decay rate — structural λ = 1 − 1/cap (Inv-9, derived
     // from R·B). Idempotent set per step (cap is run-invariant). Used by oak_learn_value
     // and oak_learn_psi at B=1 for backward-view eligibility-trace updates.
@@ -1998,26 +1994,27 @@ kernel void oak_bk_admit_commit(
     // no tuned scalar.
     float vMean = 0.0f;
     for (uint i = 0u; i < R; ++i) {
-        vMean = fma(float(ctx.valueW[i]), ctx.featMean[i], vMean);
+        vMean = fma(float(ctx.valueW[i]), nf_safe(ctx.featMean[i]), vMean);
     }
-    ctx.scalars->vMeanBaseline = vMean;
+    ctx.scalars->vMeanBaseline = nf_safe(vMean);
     uint M = ctx.M;
     for (uint k = 0u; k < ctx.K; ++k) {
         float pMean = 0.0f;
         uint psiBase = k * M;
         for (uint i = 0u; i < R; ++i) {
-            pMean = fma(float(ctx.psi[psiBase + i]), ctx.featMean[i], pMean);
+            pMean = fma(float(ctx.psi[psiBase + i]), nf_safe(ctx.featMean[i]), pMean);
         }
-        ctx.psiMeanBaseline[k] = pMean;
+        ctx.psiMeanBaseline[k] = nf_safe(pMean);
     }
     // Pass 11 Tier 4: REINFORCE running-mean baseline. Tracks mean(td) so policy gradient
     // updates use (td - tdBaseline) instead of raw td. Pure variance reduction (Williams 1992,
     // Sutton-Barto Ch.13.3). The baseline is unbiased: E[scoreGrad · b] = 0 for any constant b
     // since E[scoreGrad] = 0 (it's the gradient of log-probability normalization).
     float meanTd = 0.0f;
-    for (uint r = 0u; r < ctx.B; ++r) meanTd += ctx.td[r];
+    for (uint r = 0u; r < ctx.B; ++r) meanTd += nf_safe(ctx.td[r]);
     meanTd /= float(max(ctx.B, 1u));
-    ctx.scalars->tdBaseline += (meanTd - ctx.scalars->tdBaseline) * invT;
+    float tdbNew = ctx.scalars->tdBaseline + (meanTd - ctx.scalars->tdBaseline) * invT;
+    ctx.scalars->tdBaseline = nf_safe(tdbNew);
 
     // Pass 12 Tier 4.2 + Pass 13 Tier 0: track BOTH a fast EMA of mean ψ TD error squared
     // (modelErrEMA) AND a slow lagged snapshot (modelErrEMAPrev). The slow snapshot updates
@@ -2029,19 +2026,27 @@ kernel void oak_bk_admit_commit(
     // AND not improving; keep when wrong but improving).
     float meanPsiSq = 0.0f;
     uint psiCount = ctx.B * ctx.K;
-    for (uint i = 0u; i < psiCount; ++i) meanPsiSq = fma(ctx.tdPsi[i], ctx.tdPsi[i], meanPsiSq);
+    for (uint i = 0u; i < psiCount; ++i) {
+        float dp = nf_safe(ctx.tdPsi[i]);
+        meanPsiSq = fma(dp, dp, meanPsiSq);
+    }
     meanPsiSq /= float(max(psiCount, 1u));
-    ctx.scalars->modelErrEMA += (meanPsiSq - ctx.scalars->modelErrEMA) * invT;
-    // Slow EMA tracks at HALF the rate (invT * 0.5) so it lags by ~2/invT steps. The 0.5 is
-    // structural — it's "half of the fast rate" so the slow signal averages over twice as
-    // many steps. Pure math; no magic constant. As stepCount → ∞ both rates floor at ridge,
-    // so the lag-ratio asymptotes at 2× — preserving the monotone-IG property.
-    ctx.scalars->modelErrEMAPrev += (ctx.scalars->modelErrEMA - ctx.scalars->modelErrEMAPrev) * (invT * 0.5f);
+    float meNew = ctx.scalars->modelErrEMA + (meanPsiSq - ctx.scalars->modelErrEMA) * invT;
+    ctx.scalars->modelErrEMA = nf_safe(meNew);
+    // Slow EMA tracks at half the rate so lpmRate = max(0, prev − cur) is positive when the
+    // model is improving (Hou-An-Du 2509.25438 Information-Gain proxy).
+    float mePrevNew = ctx.scalars->modelErrEMAPrev
+                    + (ctx.scalars->modelErrEMA - ctx.scalars->modelErrEMAPrev) * (invT * 0.5f);
+    ctx.scalars->modelErrEMAPrev = nf_safe(mePrevNew);
 
-    // Effective-rank via trace/max of featSM (structural stable-rank proxy; 2603.04580).
+    // Effective-rank via trace/max of featSM (stable-rank proxy; He et al. 2509.22335).
     float tr = 0.0f, mx = 0.0f;
-    for (uint i = 0u; i < R; ++i) { float v = ctx.featSM[i]; tr += v; mx = max(mx, v); }
-    ctx.scalars->pEff = tr / max(mx, FLT_MIN);
+    for (uint i = 0u; i < R; ++i) {
+        float v = nf_safe(ctx.featSM[i]);
+        tr += v;
+        mx = max(mx, v);
+    }
+    ctx.scalars->pEff = nf_safe(tr / max(mx, FLT_MIN));
 
     // Telemetry roll-up. Pass 15 Tier 1: surface KernelScalars + cumulative counters
     // into KernelStats for host-side bench JSON consumption.
