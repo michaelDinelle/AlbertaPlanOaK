@@ -475,6 +475,8 @@ private struct KernelConfig {
     var aAlphaImpFeat: UInt32 = 0, aAlphaImpBeta: UInt32 = 0, aAlphaImpH: UInt32 = 0
     // Pass 15 Tier 2: per-cumulant ϖ-RTD ψ-centering baseline (Sakha 2603.27874v2 §1).
     var aPsiMeanBaseline: UInt32 = 0
+    // Pass 15 Tier 4: TD(λ) eligibility traces for value head + ψ.
+    var aValueE: UInt32 = 0, aPsiE: UInt32 = 0
     var cap: Float = 0, alpha0: Float = 0, ridge: Float = 0
 }
 
@@ -509,6 +511,10 @@ private struct KernelScalars {
     // are computed in oak_bk_admit_commit and consumed by oak_predict.
     var rhoBaseline: Float = 0
     var vMeanBaseline: Float = 0
+    // Pass 15 Tier 4: TD(λ) eligibility-trace decay rate (Sutton-Barto Ch 12.7). Set in
+    // oak_bk_admit_commit each step from λ = 1 − 1/cap (structural, Inv-9). Recovers
+    // variance reduction at B=1 by accumulating gradient depth INSIDE the TD target.
+    var lambdaTrace: Float = 0
 }
 
 struct KernelStats {
@@ -613,6 +619,9 @@ private enum OakMetalLayout {
         // Pass 15 Tier 2: psiMeanBaseline[K] = <ψ_k, featMean> per cumulant — the ϖ-RTD
         // centering baseline read by oak_predict; updated in oak_bk_admit_commit.
         let psiMeanBaseline: Int
+        // Pass 15 Tier 4: TD(λ) eligibility traces. valueE[E] for w_main; psiE[K · M] for ψ.
+        // Engine-init zero; in-place updated by oak_learn_value / oak_learn_psi at B=1.
+        let valueE, psiE: Int
         let total: Int
     }
     static func stateLayout(obsDim: Int, rank: Int, actDim: Int, batch: Int, dPolicy: Int) -> State {
@@ -644,6 +653,8 @@ private enum OakMetalLayout {
         let aib = o; o += E          // alphaImpBeta[E] = log meta-parameter, init log(alpha0)
         let aih = o; o += E          // alphaImpH[E] = decay trace of past Δw, init 0
         let pmb = o; o += K          // Pass 15 Tier 2: psiMeanBaseline[K] = <ψ_k, featMean>
+        let vE  = o; o += E          // Pass 15 Tier 4: valueE[E] eligibility trace for w_main
+        let pE  = o; o += K * (E + K)// Pass 15 Tier 4: psiE[K * M] eligibility traces for ψ (M = E + K)
         return State(observation: obs, obsMean: mean, state: st, prevPolicyMean: prP, policyMean: pol,
                      scoreGrad: sg, reward: rew, td: td, tdPsi: tdP, vCurr: vc,
                      chordSlot: cs, chordSlotPrev: csP, betaProb: bp,
@@ -651,6 +662,7 @@ private enum OakMetalLayout {
                      optFracEMA: ofE,
                      alphaImpFeat: aif, alphaImpBeta: aib, alphaImpH: aih,
                      psiMeanBaseline: pmb,
+                     valueE: vE, psiE: pE,
                      total: o)
     }
 
@@ -1202,6 +1214,7 @@ final class OakMetalEngine {
         c.aFeatSM = UInt32(s.featSM); c.aWBar = UInt32(s.wBar); c.aFeatMean = UInt32(s.featMean)
         c.aAlphaImpFeat = UInt32(s.alphaImpFeat); c.aAlphaImpBeta = UInt32(s.alphaImpBeta); c.aAlphaImpH = UInt32(s.alphaImpH)
         c.aPsiMeanBaseline = UInt32(s.psiMeanBaseline)
+        c.aValueE = UInt32(s.valueE); c.aPsiE = UInt32(s.psiE)
         c.aUtilFeat = UInt32(s.utilFeat); c.aUtilOpt = UInt32(s.utilOpt)
         c.aOptFracEMA = UInt32(s.optFracEMA)
         c.cap = cap; c.alpha0 = 1.0 / cap; c.ridge = 1.0 / (cap + 1.0)
