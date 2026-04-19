@@ -434,6 +434,11 @@ inline uint ceil_sqrt(uint n) { float s = sqrt(float(max(n, 1u))); return uint(c
 // oak_meta_action (policy mu). All three share the same M for principled FLOPs/safety
 // trade-off.
 inline float bounded_soft(float x) {
+    // NaN guard: tanh(NaN) = NaN propagates downstream. The Pass 14 forensic data shows
+    // 3.4M halfSat events on KeyCorridorS5R3 traced to NaN values that bounded_soft was
+    // expected to bound but couldn't (tanh preserves NaN). Inv-4 zero-bias replacement
+    // for non-finite input — same rationale as safe_half / oak_bk_reduce's NF scans.
+    if (!isfinite(x)) return 0.0f;
     float M = sqrt((float)HALF_MAX);  // structural fp16-safety bound, hardware-derived.
     return M * tanh(x * (1.0f / M));
 }
