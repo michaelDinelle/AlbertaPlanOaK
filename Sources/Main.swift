@@ -446,12 +446,11 @@ final class OakMetalEngine {
     private static let phases: [Phase] = [
         Phase(name: "oak_bk_obs",          tgSize: 32),
         Phase(name: "oak_encode",          tgSize: 0),
-        Phase(name: "oak_meta_policy",     tgSize: 0),
+        Phase(name: "oak_meta",            tgSize: 0),
         Phase(name: "oak_predict",         tgSize: 0),
         Phase(name: "oak_plan",            tgSize: 0),
         Phase(name: "oak_learn_heads",     tgSize: 0),
-        Phase(name: "oak_meta_action",     tgSize: 0),
-        Phase(name: "oak_bk_utility",      tgSize: 0),
+        Phase(name: "oak_post_learn",      tgSize: 0),
         Phase(name: "oak_bk_admit_commit", tgSize: 0),
     ]
 
@@ -545,12 +544,11 @@ final class OakMetalEngine {
         phaseGridWidths = [
             1,                  // bk_obs            [1 TG x 32]
             rank,               // encode            [R threads]
-            1,                  // meta_policy       [1 thread; also computes alphaPi + rho EMA]
+            1,                  // meta              [1 thread; chord + alphaPi + rho EMA]
             1,                  // predict           [1 thread]
             1,                  // plan              [1 thread]
             learnTotal,         // learn_heads       [N threads]
-            dPolicy,            // meta_action       [D threads]
-            rank + K,           // bk_utility        [(R + K) threads]
+            rank + K + dPolicy, // post_learn        [util_feat | util_opt | meta_action]
             1,                  // bk_admit_commit   [1 thread]
         ]
 
