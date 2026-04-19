@@ -3,9 +3,13 @@ import Metal
 import Darwin
 
 // =================================================================================================
-// Orthodox Step 11 OaK — host-side dispatcher. See Sources/OakKernel.metal for the full citation
-// block and the nine-invariant Alberta-Plan contract. This file owns: arena sizing, Metal engine,
-// env pool FFI, CLI commands (run/diagnose/benchmark), and run-metrics JSON emission.
+// Orthodox Step 11 Oak - host-side dispatcher. See Sources/OakKernel.metal for the architectural
+// citation block. This file owns: arena sizing, Metal engine, env-pool FFI, CLI commands
+// (run/diagnose/benchmark), and run-metrics JSON emission.
+//
+// Single-stream commitment: ONE agent instance owns ONE env (numEnvs=1) and processes ONE
+// observation per step. Concurrent benchmarking is achieved by running N independent agent
+// instances in parallel via OperationQueue, never by batching B>1 into one engine.
 // =================================================================================================
 
 enum OakError: Error, CustomStringConvertible {
@@ -15,36 +19,29 @@ enum OakError: Error, CustomStringConvertible {
 
 enum Policy: String, Codable { case oak, random }
 
-// ----------------------------------------------------------------------------------------------- Run metrics JSON (AGENTS.md: schemaVersion 2).
+// =================================================================================================
+// Run metrics JSON (schemaVersion 3).
+// =================================================================================================
 struct RunHealth: Codable {
     let rewardRate: Double?
     let latentStateMeanSquare: Double?
-    // Tier 1.2: `activeRank` retained (= activeCount value) for backwards
-    // compatibility with-14 reports. New canonical names (`activeCount`,
-    // `pEffectiveRank`) carry the semantically correct quantities and should be used
-    // by all new analysis scripts.
-    let activeRank: Double?            // legacy alias for activeCount (count of admitted features)
-    let activeCount: Double?           // T1.2: explicit count of admitted features
-    let pEffectiveRank: Double?        // T1.2: real effective rank (trace/max of featSM)
+    let activeRank: Double?            // legacy alias for activeCount
+    let activeCount: Double?
+    let pEffectiveRank: Double?
     let actionDeltaL2Mean: Double?
-    let scoreGradL2Mean: Double?      // mean ‖∇log π(a|s)‖² across rows × params (REINFORCE)
+    let scoreGradL2Mean: Double?
     let optionModelPredictionMSE: Double?
     let oakOptionReinitCount: Double?
     let nonFiniteRawTotal: Int
     let nonFiniteSanitizedTotal: Int
-    // Numerical-safety telemetry surfaced into the bench JSON. The (B) hard rule is
-    // `tdPsiNonFiniteTotal == 0` over the full bench.
     let tdPsiNonFiniteTotal: Int?
-    // Tier 1: surfaced KernelScalars + per-buffer weight-magnitude maxima. The (C)
-    // bounded-magnitude hard rule consumes `*Max` fields. The KernelScalars surfacing
-    // (modelErrEMA, tdBaseline, alphaImp, etc.) lets analysis scripts inspect the agent's
-    // internal stability state without re-running with diagnostic flags.
     let utilityFeatureMean: Double?, utilityOptionMean: Double?
     let modelErrEMA: Double?, modelErrEMAPrev: Double?
     let tdBaseline: Double?, alphaImp: Double?, alphaEnc: Double?, alphaPi: Double?
     let oakFeatureReinitCountFinal: Int?
     let encoderMax: Double?, valueWMax: Double?, psiMax: Double?, optPolicyMax: Double?
-    let outcomeHeadMax: Double?, betaWMax: Double?, omegaWMax: Double?, sprDecoderMax: Double?
+    let betaWMax: Double?, omegaWMax: Double?
+    let optRewardMax: Double?, optTransitionMax: Double?
 }
 
 struct RunDiagnostic: Codable {
@@ -69,14 +66,7 @@ private struct RunMetricsFile: Encodable {
     let numEnvs: Int, warmupSteps: Int, stopAfterMeasuredSteps: Int
     let observationDim: Int, actionDim: Int, actionDiscreteCount: Int?
     let measuredStepCount: Int, measuredBatchCount: Int, measuredSeconds: Double
-    // Tier 5: workerDepth = measuredStepCount / numEnvs (per-env trajectory length).
-    // The canonical depth metric for the BWH-orthodox bench protocol — at B=1 (
-    // default), workerDepth = measuredStepCount; at B=2048
-    // workerDepth = measuredStepCount / 2048, exposing the depth-vs-width trade-off that
-    // forensic data showed was masked by the prior `measuredStepCount` field
-    // (50K total steps gave only 24 worker-steps per env at B=2048; explained the broken
-    // strict-gate verdicts at B>1).
-    let workerDepth: Int
+    let workerDepth: Int                // = measuredStepCount (single-stream).
     let stepsPerSecond: Double?, heartbeatSequence: Int?
     let rewardSum: Double, doneCount: Int, stopReason: String
     let agentStepMsMean: Double, envStepMsMean: Double
@@ -84,16 +74,10 @@ private struct RunMetricsFile: Encodable {
     let health: RunHealth?, diagnostic: RunDiagnostic?
 }
 
-// Tier 1: agent emits ONLY policyMean[B · D_policy]. The wrapper layer samples per
-// component and produces both the env-flat action and the matching scoreGrad.
-//   `PolicyMeanBatch` carries the kernel-emitted μ vector + dPolicy width.
-//   `ActionComponent`  describes one component of the env's action spec (Discrete N | Box A).
-//   `sampleAndScore`   composes per-component sampling: Gumbel-max + categorical scoreGrad for
-//                      Discrete (Williams 1992; Maddison 2014); structural-σ-1 Gaussian +
-//                      score = z for Box. The wrapper-layer sampling distribution and the
-//                      score function are mathematically matched, regardless of action-space
-//                      type, fixing the unified-Gaussian-then-argmax score-function
-//                      mismatch on discrete envs.
+// =================================================================================================
+// Action sampling - the SOLE site that knows action-space type (Inv-1 boundary). Agent emits
+// policyMean[D]; wrapper composes per-component sampling and matching score function.
+// =================================================================================================
 struct PolicyMeanBatch { let values: [Float]; let dPolicy: Int }
 
 enum ActionComponent {
@@ -119,10 +103,11 @@ extension Sequence where Element == ActionComponent {
     var totalEnvActionWidth: Int   { reduce(0) { $0 + $1.envActionWidth } }
 }
 
-// Per-row per-component sampling: writes envActionScratch (env-flat) and scoreGradScratch
-// (size = dPolicy). Pure structural splitmix64 + Box-Muller; no allocation on the hot path.
-//   Discrete N component: Gumbel-max categorical sample of softmax(μ); score = 1{a=d} − π_d.
-//   Box A component:      structural-σ-1 Gaussian sample μ + z, clamped to env bounds; score = z.
+// Per-row per-component sampling. Discrete N: Gumbel-max categorical, scoreGrad = 1{a=d} - pi_d.
+// Box A: structural-sigma=1 Gaussian, scoreGrad = z (Williams 1992 REINFORCE; the *pre-clamp*
+// z is the literal score function for the sampled `raw = mu + z`, regardless of any subsequent
+// env-side clamp - the clamp affects only the env's view of the action, not the agent's
+// gradient signal).
 func sampleAndScoreActions(spec: [ActionComponent], numEnvs: Int, dPolicy: Int,
                            envActionWidth: Int,
                            policyMean: UnsafePointer<Float>,
@@ -149,8 +134,6 @@ func sampleAndScoreActions(spec: [ActionComponent], numEnvs: Int, dPolicy: Int,
         for component in spec {
             switch component {
             case .discrete(let n):
-                // Gumbel-max sample over logits at policyMean[mBase + pIdx ..< pIdx + n].
-                // Stable softmax: subtract max-logit; score = 1{a=d} − π_d sums to 0 per row.
                 var maxLogit = -Float.greatestFiniteMagnitude
                 for d in 0..<n { maxLogit = max(maxLogit, policyMean[mBase + pIdx + d]) }
                 var bestIdx = 0
@@ -163,28 +146,25 @@ func sampleAndScoreActions(spec: [ActionComponent], numEnvs: Int, dPolicy: Int,
                     if key > bestKey { bestKey = key; bestIdx = d }
                 }
                 var Z: Float = 0
-                for d in 0..<n {
-                    Z += exp(policyMean[mBase + pIdx + d] - maxLogit)
-                }
+                for d in 0..<n { Z += exp(policyMean[mBase + pIdx + d] - maxLogit) }
                 let invZ: Float = 1.0 / max(Z, .leastNormalMagnitude)
                 for d in 0..<n {
                     let pi_d = exp(policyMean[mBase + pIdx + d] - maxLogit) * invZ
                     scoreGrad[mBase + pIdx + d] = ((d == bestIdx) ? 1.0 : 0.0) - pi_d
                 }
-                envAction[aBase + aIdx] = Float(bestIdx)   // env reads as integer index
+                envAction[aBase + aIdx] = Float(bestIdx)
                 pIdx += n; aIdx += 1
             case .box(let a, let low, let high):
                 for d in 0..<a {
                     let z = nextNormal(&rngState)
                     let mu = policyMean[mBase + pIdx + d]
-                    let raw = mu + z   // structural σ = 1
+                    let raw = mu + z
                     let clamped = max(low[d], min(high[d], raw.isFinite ? raw : 0))
                     envAction[aBase + aIdx + d] = clamped
-                    // Tier 0.7: REINFORCE score for Gaussian policy with σ=1 is
-                    // ∂log π(a|s) / ∂μ = (a - μ) / σ² = (a - μ). When the env clamps `raw`
-                    // to [low, high], the ACTUAL action is `clamped`, not μ+z. Using `z`
-                    // (= raw - μ) was biased on Box envs that hit bounds.
-                    scoreGrad[mBase + pIdx + d] = clamped - mu
+                    // Pre-clamp z is the literal Williams 1992 REINFORCE score for sigma=1
+                    // Gaussian: d log pi(a|s) / d mu = (raw - mu) = z. Env-side clamp does
+                    // not change the score function the agent's policy parameterized.
+                    scoreGrad[mBase + pIdx + d] = z
                 }
                 pIdx += a; aIdx += a
             }
@@ -202,17 +182,8 @@ private struct Schema: Hashable, Comparable {
 
 private struct BenchmarkEnv { let envId: String; let schema: Schema }
 
-// Structural neutral seed: integer 0. Used only when the caller does not supply an explicit
-// seed for the splitmix32 hash that initializes parameter weights and derives kernel-side RNG.
-// Under the Big World Hypothesis the agent's learning dynamics are invariant to seed in
-// expectation; this constant just fixes "no seed" → "deterministic, reproducible" so two
-// unseeded runs are bit-identical for debugging. No magic: 0 is the additive identity of the
-// seedBase multiplication, the most neutral value possible.
 let oakUnseededSeed: Int32 = 0
 
-// Tier 1: env-var-driven kernel ablation. OAK_ABLATE_KERNEL=name1,name2 replaces the
-// named kernel(s) with oak_noop in the ICB. Used by run/benchmark; probe also accepts
-// -ablate-kernel=NAME on the CLI. Empty / unset = no ablation (baseline).
 func metalDevice() throws -> MTLDevice {
     guard let d = MTLCreateSystemDefaultDevice() else {
         throw OakError.message("Metal device unavailable.")
@@ -220,17 +191,9 @@ func metalDevice() throws -> MTLDevice {
     return d
 }
 
-func ablatedKernelsFromEnv() -> Set<String> {
-    guard let raw = ProcessInfo.processInfo.environment["OAK_ABLATE_KERNEL"]?
-                            .trimmingCharacters(in: .whitespacesAndNewlines), !raw.isEmpty
-    else { return [] }
-    return Set(raw.split(separator: ",").map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
-                                           .filter { !$0.isEmpty })
-}
-
-// -----------------------------------------------------------------------------------------------
+// =================================================================================================
 // Filesystem helpers.
-// -----------------------------------------------------------------------------------------------
+// =================================================================================================
 private func oakRoots() -> [URL] {
     let fm = FileManager.default
     let exe = URL(fileURLWithPath: CommandLine.arguments[0],
@@ -253,69 +216,49 @@ func decodeCString(_ buffer: [CChar]) -> String {
     String(decoding: buffer.prefix { $0 != 0 }.map { UInt8(bitPattern: $0) }, as: UTF8.self)
 }
 
-// -----------------------------------------------------------------------------------------------
-// Health accumulator — lean fold over KernelStats. Six slots, one per reported mean.
-// -----------------------------------------------------------------------------------------------
+// =================================================================================================
+// HealthAccumulator - fixed-size struct fold over KernelStats. NO per-step heap allocation
+// (Inv-6). Runs only on measured steps; no work otherwise.
+// =================================================================================================
 private struct HealthAccumulator {
-    struct Slot { var sum = 0.0; var count = 0 }
-    // Slot order must mirror `values` in `record()` and the field order in `snapshot()`.
-    // Tier 1: extended to 16 slots covering all surfaced telemetry channels.
-    //   0  latentStateMeanSquare
-    //   1  activeCount             (formerly activeRank — the same quantity, semantically renamed)
-    //   2  actionDeltaL2Mean
-    //   3  scoreGradL2Mean
-    //   4  optionModelPredictionMSE
-    //   5  oakOptionReinitCount
-    //   6  utilityFeatureMean      (T1.1: was written by GPU but never consumed by host)
-    //   7  utilityOptionMean       (T1.1: same)
-    //   8  pEffectiveRank          (T1.2: real effective rank from KernelScalars.pEff)
-    //   9  modelErrEMA             (T1.3: surfaced from KernelScalars)
-    //  10  modelErrEMAPrev         (T1.3)
-    //  11  tdBaseline              (T1.3)
-    //  12  alphaImp                (T1.3)
-    //  13  alphaEnc                (T1.3)
-    //  14  alphaPi
-    var slots = [Slot](repeating: Slot(), count: 15)
-    var steps = 0
-    var rawNonFinite = 0, sanitizedNonFinite = 0
-    var encodeNF = 0, learnNF = 0, planNF = 0
-    var maxLat = 0.0, maxPol = 0.0
-    var lastRho: Double?
-    // Numerical-safety telemetry. tdPsiNF accumulates per-step counts (unbiased total
-    // over the run).
-    var tdPsiNF = 0
-    var oakFeatureReinitFinal = 0
-    // Tier 1.4: per-buffer weight-magnitude max over the bench window. Each is
-    // the max-of-maxima across all recorded steps — a monotone signal for the (C)
-    // bounded-magnitude gate. `*Max` reflects the worst-case at any point during the bench.
-    var encoderMax = 0.0, valueWMax = 0.0, psiMax = 0.0, optPolicyMax = 0.0
-    var outcomeHeadMax = 0.0, betaWMax = 0.0, omegaWMax = 0.0, sprDecoderMax = 0.0
+    private struct Slot { var sum = 0.0; var count = 0 }
+    private var slots = [Slot](repeating: Slot(), count: 15)
+    private var steps = 0
+    private var rawNonFinite = 0, sanitizedNonFinite = 0
+    private var encodeNF = 0, learnNF = 0, planNF = 0
+    private var maxLat = 0.0, maxPol = 0.0
+    private var lastRho: Double?
+    private var tdPsiNF = 0
+    private var oakFeatureReinitFinal = 0
+    private var encoderMax = 0.0, valueWMax = 0.0, psiMax = 0.0, optPolicyMax = 0.0
+    private var betaWMax = 0.0, omegaWMax = 0.0
+    private var optRewardMax = 0.0, optTransitionMax = 0.0
+
+    private mutating func acc(_ i: Int, _ v: Float) {
+        let d = Double(v)
+        if d.isFinite { slots[i].sum += d; slots[i].count += 1 }
+        else { rawNonFinite += 1; sanitizedNonFinite += 1 }
+    }
 
     mutating func record(_ stats: KernelStats) {
         steps += 1
         let rr = Double(stats.rewardRate); if rr.isFinite { lastRho = rr }
-        let values: [Float] = [
-            stats.latentStateMeanSquare,
-            stats.activeCount,
-            stats.actionDeltaL2Mean,
-            stats.scoreGradL2Mean,
-            stats.optionModelPredictionMSE,
-            stats.oakOptionReinitCount,
-            stats.utilityFeatureMean,
-            stats.utilityOptionMean,
-            stats.pEffectiveRank,
-            stats.modelErrEMA,
-            stats.modelErrEMAPrev,
-            stats.tdBaselineStat,
-            stats.alphaImpStat,
-            stats.alphaEncStat,
-            stats.alphaPiStat,
-        ]
-        for (i, f) in values.enumerated() {
-            let v = Double(f)
-            if v.isFinite { slots[i].sum += v; slots[i].count += 1 }
-            else { rawNonFinite += 1; sanitizedNonFinite += 1 }
-        }
+        // Slot order matches snapshot() field bindings below.
+        acc(0,  stats.latentStateMeanSquare)
+        acc(1,  stats.activeCount)
+        acc(2,  stats.actionDeltaL2Mean)
+        acc(3,  stats.scoreGradL2Mean)
+        acc(4,  stats.optionModelPredictionMSE)
+        acc(5,  stats.oakOptionReinitCount)
+        acc(6,  stats.utilityFeatureMean)
+        acc(7,  stats.utilityOptionMean)
+        acc(8,  stats.pEffectiveRank)
+        acc(9,  stats.modelErrEMA)
+        acc(10, stats.modelErrEMAPrev)
+        acc(11, stats.tdBaselineStat)
+        acc(12, stats.alphaImpStat)
+        acc(13, stats.alphaEncStat)
+        acc(14, stats.alphaPiStat)
         rawNonFinite += Int(stats.rawNonFiniteCount)
         sanitizedNonFinite += Int(stats.sanitizedNonFiniteCount)
         encodeNF += Int(stats.encodeNonFiniteCount)
@@ -325,50 +268,46 @@ private struct HealthAccumulator {
         oakFeatureReinitFinal = Int(stats.oakFeatureReinitCount)
         maxLat = max(maxLat, Double(stats.maxAbsLatentPrediction))
         maxPol = max(maxPol, Double(stats.maxAbsPolicyOutput))
-        encoderMax     = max(encoderMax,     Double(stats.encoderMax))
-        valueWMax      = max(valueWMax,      Double(stats.valueWMax))
-        psiMax         = max(psiMax,         Double(stats.psiMax))
-        optPolicyMax   = max(optPolicyMax,   Double(stats.optPolicyMax))
-        outcomeHeadMax = max(outcomeHeadMax, Double(stats.outcomeHeadMax))
-        betaWMax       = max(betaWMax,       Double(stats.betaWMax))
-        omegaWMax      = max(omegaWMax,      Double(stats.omegaWMax))
-        sprDecoderMax  = max(sprDecoderMax,  Double(stats.sprDecoderMax))
+        encoderMax       = max(encoderMax,       Double(stats.encoderMax))
+        valueWMax        = max(valueWMax,        Double(stats.valueWMax))
+        psiMax           = max(psiMax,           Double(stats.psiMax))
+        optPolicyMax     = max(optPolicyMax,     Double(stats.optPolicyMax))
+        betaWMax         = max(betaWMax,         Double(stats.betaWMax))
+        omegaWMax        = max(omegaWMax,        Double(stats.omegaWMax))
+        optRewardMax     = max(optRewardMax,     Double(stats.optRewardMax))
+        optTransitionMax = max(optTransitionMax, Double(stats.optTransitionMax))
     }
 
-    private func mean(_ i: Int) -> Double? { slots[i].count > 0 ? slots[i].sum / Double(slots[i].count) : nil }
+    private func mean(_ i: Int) -> Double? {
+        slots[i].count > 0 ? slots[i].sum / Double(slots[i].count) : nil
+    }
 
     func snapshot() -> RunHealth? {
         guard steps > 0 else { return nil }
         return RunHealth(
             rewardRate: lastRho,
             latentStateMeanSquare: mean(0),
-            activeRank: mean(1),
-            activeCount: mean(1),
+            activeRank: mean(1), activeCount: mean(1),
             pEffectiveRank: mean(8),
-            actionDeltaL2Mean: mean(2),
-            scoreGradL2Mean: mean(3),
+            actionDeltaL2Mean: mean(2), scoreGradL2Mean: mean(3),
             optionModelPredictionMSE: mean(4),
             oakOptionReinitCount: mean(5),
             nonFiniteRawTotal: rawNonFinite,
             nonFiniteSanitizedTotal: sanitizedNonFinite,
             tdPsiNonFiniteTotal: tdPsiNF,
-            utilityFeatureMean: mean(6),
-            utilityOptionMean: mean(7),
-            modelErrEMA: mean(9),
-            modelErrEMAPrev: mean(10),
+            utilityFeatureMean: mean(6), utilityOptionMean: mean(7),
+            modelErrEMA: mean(9), modelErrEMAPrev: mean(10),
             tdBaseline: mean(11),
-            alphaImp: mean(12),
-            alphaEnc: mean(13),
-            alphaPi: mean(14),
+            alphaImp: mean(12), alphaEnc: mean(13), alphaPi: mean(14),
             oakFeatureReinitCountFinal: oakFeatureReinitFinal,
-            encoderMax: encoderMax > 0 ? encoderMax : nil,
-            valueWMax: valueWMax > 0 ? valueWMax : nil,
-            psiMax: psiMax > 0 ? psiMax : nil,
+            encoderMax:   encoderMax   > 0 ? encoderMax   : nil,
+            valueWMax:    valueWMax    > 0 ? valueWMax    : nil,
+            psiMax:       psiMax       > 0 ? psiMax       : nil,
             optPolicyMax: optPolicyMax > 0 ? optPolicyMax : nil,
-            outcomeHeadMax: outcomeHeadMax > 0 ? outcomeHeadMax : nil,
-            betaWMax: betaWMax > 0 ? betaWMax : nil,
-            omegaWMax: omegaWMax > 0 ? omegaWMax : nil,
-            sprDecoderMax: sprDecoderMax > 0 ? sprDecoderMax : nil)
+            betaWMax:     betaWMax     > 0 ? betaWMax     : nil,
+            omegaWMax:    omegaWMax    > 0 ? omegaWMax    : nil,
+            optRewardMax: optRewardMax > 0 ? optRewardMax : nil,
+            optTransitionMax: optTransitionMax > 0 ? optTransitionMax : nil)
     }
 
     func diagnosticSnapshot() -> RunDiagnostic? {
@@ -381,40 +320,33 @@ private struct HealthAccumulator {
     }
 }
 
-// -----------------------------------------------------------------------------------------------
-// Measured action collector.
-// -----------------------------------------------------------------------------------------------
+// =================================================================================================
+// Measured action collector (single-stream).
+// =================================================================================================
 private final class MeasuredActionCollector {
     private var discrete: [Int]?
     private var sum: [Double]?, sumsq: [Double]?
     private var l2s = 0.0, l2sq = 0.0, n = 0
     private let envActionWidth: Int
 
-    // Tier 1: consumes env-flat action vectors (the wrapper-sampled actions actually
-    // sent to the env). For discrete envs the env-flat width is 1 (the chosen index); for
-    // continuous it is actDim. The agent's policyMean is never seen here — telemetry tracks
-    // what the env actually received, which is the BWH-orthodox observable.
     init(discreteCount: Int?, envActionWidth: Int) {
         self.envActionWidth = envActionWidth
         if let c = discreteCount { discrete = [Int](repeating: 0, count: c) }
-        else { sum = [Double](repeating: 0, count: envActionWidth); sumsq = [Double](repeating: 0, count: envActionWidth) }
+        else { sum = [Double](repeating: 0, count: envActionWidth)
+               sumsq = [Double](repeating: 0, count: envActionWidth) }
     }
 
-    func addMeasured(envAction: [Float], numEnvs: Int) {
+    func addMeasured(envAction: [Float]) {
         if var h = discrete {
-            for row in 0..<numEnvs {
-                let idx = max(0, min(h.count - 1, Int(envAction[row * envActionWidth])))
-                h[idx] &+= 1
-            }
+            let idx = max(0, min(h.count - 1, Int(envAction[0])))
+            h[idx] &+= 1
             discrete = h
+            return
         }
         guard var s = sum, var q = sumsq else { return }
-        for row in 0..<numEnvs {
-            var l = 0.0
-            let b = row * envActionWidth
-            for d in 0..<envActionWidth { let v = Double(envAction[b + d]); s[d] += v; q[d] += v * v; l += v * v }
-            let r = sqrt(l); l2s += r; l2sq += r * r; n += 1
-        }
+        var l = 0.0
+        for d in 0..<envActionWidth { let v = Double(envAction[d]); s[d] += v; q[d] += v * v; l += v * v }
+        let r = sqrt(l); l2s += r; l2sq += r * r; n += 1
         sum = s; sumsq = q
     }
 
@@ -430,87 +362,42 @@ private final class MeasuredActionCollector {
     }
 }
 
-
-// ================================================================================================
-// Kernel config + scalars + stats — mirrors OakKernel.metal structs byte-for-byte. Keep in lockstep.
-// unification removed env-type fields: actionIsDiscrete and actionParamCount are gone
-// from KernelConfig — the agent has no notion of action-space type, and D = 2·actDim is
-// computed structurally in the kernel from cfg.actDim. boundLat/Rew/Act + invBoundLat/Rew/Act
-// were also already gone from Tier 9 (Tier 2 deleted all clamps; implicit α + ρ̄ centering
-// replaced them). KernelScalars dropped doneCount + _pad (host-side state.doneCount tracks it).
-// KernelStats has 16 Float fields.
-// ================================================================================================
+// =================================================================================================
+// Kernel structs - mirror OakKernel.metal byte-for-byte. Keep in lockstep when editing either.
+// =================================================================================================
 private struct KernelConfig {
-    var obsDim: UInt32 = 0, rank: UInt32 = 0, actDim: UInt32 = 0, batch: UInt32 = 0
+    var obsDim: UInt32 = 0, rank: UInt32 = 0, actDim: UInt32 = 0
     var optionCount: UInt32 = 0, baseObsDim: UInt32 = 0
-    // Tier 1: env-declared D_policy. Sum of per-component policy-param widths from the
-    // env's action spec (Discrete-N → N; Box-A → A). The agent has no notion of WHAT the
-    // components are — only the integer width.
     var actionParamCount: UInt32 = 0
-    // Tier 2: outcomeHead[K · E] for OPSR state augmentation (Vereecken 2604.07016).
-    // Tier 3: betaW[E + K] termination head, omegaW[K · E] chord generator,
-    // chord/optionAge/betaProb arena slots for temporal abstraction (Bacon-Precup 1609.05140;
-    // Wan-Naik-Sutton 2110.13855).
-    var pEncoder: UInt32 = 0, pValue: UInt32 = 0, pPsi: UInt32 = 0, pOptPolicy: UInt32 = 0
-    var pOutcomeHead: UInt32 = 0, pBetaW: UInt32 = 0, pOmegaW: UInt32 = 0
-    // Tier 3: SPR-Stream chord-conditioned diagonal next-state predictor.
-    var pSprDecoder: UInt32 = 0
-    var sObservation: UInt32 = 0, sObsMean: UInt32 = 0, sState: UInt32 = 0
+    var pEncoder: UInt32 = 0, pValue: UInt32 = 0, pPsi: UInt32 = 0
+    var pOptPolicy: UInt32 = 0, pBetaW: UInt32 = 0, pOmegaW: UInt32 = 0
+    var pOptReward: UInt32 = 0, pOptTransition: UInt32 = 0
+    var sObservation: UInt32 = 0, sObsMean: UInt32 = 0, sObsSM: UInt32 = 0
+    var sState: UInt32 = 0
     var sPrevPolicyMean: UInt32 = 0, sPolicyMean: UInt32 = 0, sScoreGrad: UInt32 = 0
     var sReward: UInt32 = 0, sTd: UInt32 = 0, sTdPsi: UInt32 = 0, sVCurr: UInt32 = 0
-    var sChordSlot: UInt32 = 0, sChordSlotPrev: UInt32 = 0, sBetaProb: UInt32 = 0
-    // Tier 1: sSprPred removed — oak_spr_fused recomputes ẑ_N inline.
+    var sChord: UInt32 = 0, sChordPrev: UInt32 = 0, sBetaProb: UInt32 = 0
+    var sFeatSM: UInt32 = 0, sWBar: UInt32 = 0, sFeatMean: UInt32 = 0
+    var sUtilFeat: UInt32 = 0, sUtilOpt: UInt32 = 0, sUtilPlan: UInt32 = 0, sOptFracEMA: UInt32 = 0
+    var sAlphaImpFeat: UInt32 = 0, sAlphaImpBeta: UInt32 = 0, sAlphaImpH: UInt32 = 0
+    var sPsiMeanBaseline: UInt32 = 0
+    var sValueE: UInt32 = 0, sPsiE: UInt32 = 0, sPiE: UInt32 = 0
+    var sOptRewardE: UInt32 = 0, sOptTransitionE: UInt32 = 0
+    var sPlanAdv: UInt32 = 0
     var uDone: UInt32 = 0, uActiveMask: UInt32 = 0, uActiveList: UInt32 = 0
     var uOption: UInt32 = 0, uCounters: UInt32 = 0, uSubtaskFeatureOf: UInt32 = 0
-    var uOptionAge: UInt32 = 0
-    var aFeatSM: UInt32 = 0, aWBar: UInt32 = 0, aFeatMean: UInt32 = 0
-    // Per-observation 2nd-moment EMA E[obs²] (paired with obsMean) for Welford-variance
-    // input standardization. Updated by oak_bk_obs at the START of each step so encode
-    // sees correctly-scaled inputs from step 0 (Sutton-Barto §9.5.4).
-    var aObsSM: UInt32 = 0
-    var aUtilFeat: UInt32 = 0, aUtilOpt: UInt32 = 0
-    // Tier 5: optFracEMA[K] for the structural-1/K dormancy reinit gate.
-    var aOptFracEMA: UInt32 = 0
-    // Tier 2: per-feature TIDBD α (SwiftSarsa 2507.19539 + MetaOptimize 2402.02342).
-    var aAlphaImpFeat: UInt32 = 0, aAlphaImpBeta: UInt32 = 0, aAlphaImpH: UInt32 = 0
-    // Tier 2: per-cumulant ϖ-RTD ψ-centering baseline (Sakha 2603.27874v2 §1).
-    var aPsiMeanBaseline: UInt32 = 0
-    // Tier 4: TD(λ) eligibility traces for value head + ψ.
-    var aValueE: UInt32 = 0, aPsiE: UInt32 = 0, aPiE: UInt32 = 0
+    var uOptionAge: UInt32 = 0, uPlanArgmax: UInt32 = 0
     var cap: Float = 0, alpha0: Float = 0, ridge: Float = 0
 }
 
 private struct KernelScalars {
     var stepCount: UInt32 = 0, activeCount: UInt32 = 0
     var stateSlot: UInt32 = 0, optionSlot: UInt32 = 0
-    var rho: Float = 0, pEff: Float = 0
-    var alphaImp: Float = 0, alphaEnc: Float = 0
-    // Tier 0.3: REINFORCE policy implicit step. α₀ / (1 + α₀ · ⟨‖x‖²⟩·⟨‖scoreGrad‖²⟩).
-    // Computed in oak_reduce_alpha; consumed by oak_learn_pi as the shared denominator that
-    // includes the full outer-product gradient norm (Cauchy-Schwarz upper bound). Fixes the
-    // 200M MSE blowup root cause (per-thread n2 missed cross-row scoreGrad²).
-    var alphaPi: Float = 0
-    // Tier 4: REINFORCE running-mean TD baseline (Williams 1992 variance reduction).
-    var tdBaseline: Float = 0
-    // Tier 4.2/4.3 + Tier 0: continual EMA of model-prediction error
-    // (= optionModelPredictionMSE) plus a SLOW snapshot lagged by ~N steps. The
-    // gate uses lpmRate = max(0, modelErrEMAPrev - modelErrEMA) as the information-gain
-    // proxy (Hou-An-Du 2509.25438 ICLR 2026 LPM second-derivative). Replaces's
-    // absolute-scale gate which over-shrunk the planning bonus on stochastic envs.
-    var modelErrEMA: Float = 0
-    var modelErrEMAPrev: Float = 0
-    // Tier 6.2: dense-fast-path flag (1 iff activeCount == E and activeList[i] == i for all i).
-    // Set by oak_bk_admit_commit; consumed by active_dot_half_auto in the next step's kernels.
     var activeListIsIdentity: UInt32 = 0
-    // ϖ-RTD vMeanBaseline = <valueW, featMean> per Sakha-Kamalapurkar-Meyn 2603.27874v2
-    // §1 form. Subtracted from the main TD residual along with `rho` (the single tracking
-    // EMA of mean reward — same scalar serves as the ϖ centering baseline AND as the
-    // stats->rewardRate report). Recomputed each step in oak_bk_admit_commit from the
-    // current weights and the featMean tracking EMA.
-    var vMeanBaseline: Float = 0
-    // Tier 4: TD(λ) eligibility-trace decay rate (Sutton-Barto Ch 12.7). Set in
-    // oak_bk_admit_commit each step from λ = 1 − 1/cap (structural, Inv-9). Recovers
-    // variance reduction at B=1 by accumulating gradient depth INSIDE the TD target.
+    var rho: Float = 0, vMeanBaseline: Float = 0
+    var pEff: Float = 0
+    var alphaImp: Float = 0, alphaEnc: Float = 0, alphaPi: Float = 0
+    var modelErrEMA: Float = 0, modelErrEMAPrev: Float = 0
     var lambdaTrace: Float = 0
 }
 
@@ -523,190 +410,139 @@ struct KernelStats {
     var optionModelPredictionMSE: Float = 0
     var oakOptionReinitCount: Float = 0
     var utilityFeatureMean: Float = 0, utilityOptionMean: Float = 0
-    // Numerical-safety telemetry.
-    //   tdPsiNonFiniteCount  per-step NF in tdPsi (sanitized to 0 for MSE roll-up)
     var tdPsiNonFiniteCount: Float = 0
-    // Tier 1: telemetry overhaul. Surfaced KernelScalars + cumulative counters
-    // + per-buffer weight-magnitude maxima. Layout MIRRORS OakKernel.metal struct exactly.
     var pEffectiveRank: Float = 0
     var modelErrEMA: Float = 0, modelErrEMAPrev: Float = 0
     var tdBaselineStat: Float = 0
     var alphaImpStat: Float = 0, alphaEncStat: Float = 0, alphaPiStat: Float = 0
     var oakFeatureReinitCount: Float = 0
     var encoderMax: Float = 0, valueWMax: Float = 0, psiMax: Float = 0, optPolicyMax: Float = 0
-    var outcomeHeadMax: Float = 0, betaWMax: Float = 0, omegaWMax: Float = 0, sprDecoderMax: Float = 0
+    var betaWMax: Float = 0, omegaWMax: Float = 0
+    var optRewardMax: Float = 0, optTransitionMax: Float = 0
 }
 
-// ================================================================================================
-// Arena layout — single source of truth (Metal reads the offsets from KernelConfig).
-// ================================================================================================
+// =================================================================================================
+// Arena layout - single source of truth for offsets. Single-stream: no `batch` parameter.
+// =================================================================================================
 private enum OakMetalLayout {
     static let kernelConfigBufferIndex = 5
-    // Structural cap: one SIMD group of options per row in oak_plan (hardware-derived, not tuned).
     static let maxOptionCount = 32
 
-    // K (options/subtasks) is independent of actDim per Sutton-Bowling OaK §2 — each option
-    // is a learned subtask with its own cumulant ψ_k, β_k termination, and chord-policy
-    // contribution; coupling K to actDim would make the agent's representation depth a
-    // function of the action interface, anti-BWH. K is bounded above only by the SIMD-group
-    // hardware cap and below by rank (each option needs at least one feature dim to learn).
-    static func optionCount(rank: Int, actDim: Int) -> Int {
-        max(1, min(rank, maxOptionCount))
+    static func optionCount(rank: Int) -> Int { max(1, min(rank, maxOptionCount)) }
+    static func concatDim(rank: Int) -> Int { rank + optionCount(rank: rank) }
+    static func psiCount(rank: Int) -> Int { optionCount(rank: rank) * concatDim(rank: rank) }
+    static func optPolicyCount(rank: Int, dPolicy: Int) -> Int {
+        optionCount(rank: rank) * dPolicy * rank
     }
-    // Tier 2: extended-state width E = R + K (encoder output + OPSR outcome dims).
-    // All linear heads (value, ψ, π, outcomeHead) span the full E-dim state.
-    static func extendedDim(rank: Int, actDim: Int) -> Int {
-        rank + optionCount(rank: rank, actDim: actDim)
-    }
-    // Concat dim M = E + K: shared chord-conditional ψ(s, λ) = W_ψ · concat[s_E, λ] (Alberta
-    // Plan Design 2; OBB 2505.00787 §2.4 Eq.4). State weights span the OPSR-extended E.
-    static func concatDim(rank: Int, actDim: Int) -> Int {
-        extendedDim(rank: rank, actDim: actDim) + optionCount(rank: rank, actDim: actDim)
-    }
-    static func psiCount(rank: Int, actDim: Int) -> Int {
-        optionCount(rank: rank, actDim: actDim) * concatDim(rank: rank, actDim: actDim)
-    }
-    // Tier 1: D_policy is env-declared. Tier 2: optPolicy spans E (not R).
-    static func optPolicyCount(rank: Int, actDim: Int, dPolicy: Int) -> Int {
-        optionCount(rank: rank, actDim: actDim) * dPolicy * extendedDim(rank: rank, actDim: actDim)
-    }
-    // Tier 2: outcomeHead[K · E] — one E-dim row per outcome dimension (Vereecken 2604.07016).
-    static func outcomeHeadCount(rank: Int, actDim: Int) -> Int {
-        optionCount(rank: rank, actDim: actDim) * extendedDim(rank: rank, actDim: actDim)
-    }
-    // Tier 3: termination head betaW[E + K] (state weights + chord weights);
-    // chord generator omegaW[K · E] (one row per option's chord-logit producer).
-    static func betaWCount(rank: Int, actDim: Int) -> Int {
-        extendedDim(rank: rank, actDim: actDim) + optionCount(rank: rank, actDim: actDim)
-    }
-    static func omegaWCount(rank: Int, actDim: Int) -> Int {
-        optionCount(rank: rank, actDim: actDim) * extendedDim(rank: rank, actDim: actDim)
-    }
-    // Tier 3: SPR-Stream chord-conditioned diagonal next-state predictor (Nilaksh
-    // et al. 2602.09396 ICML 2026). sprDecoder[k][e] models the per-option transition gain
-    // applied to z_{N-1}[e] to predict z_N[e]. K · R fp16 ≈ 2 KB at K=32, R=64.
-    static func sprDecoderCount(rank: Int, actDim: Int) -> Int {
-        optionCount(rank: rank, actDim: actDim) * rank
-    }
-
-    // Full R×O encoder matrix (Sutton-Barto Ch 9 linear FA over learned features). Each
-    // latent z[i] = tanh(Σ_o encoder[i, o] · standardized_obs[o]); decouples representation
-    // rank R from observation dim O so the agent can learn cross-dim mixtures (joint angles
-    // × velocities, etc.) that diagonal scaling cannot. Stabilized by the strict ϖ-RTD form
-    // (Sakha-Kamalapurkar-Meyn 2603.27874v2 Eq. 24, Theorem 2.4(ii)) in oak_learn_value /
-    // oak_learn_psi — without that strict form, the diverse matrix-encoder features amplify
-    // bootstrap V'-V variance and valueW diverges. With it, the Hurwitz proof guarantees
-    // mean-flow stability for any δ_r ≥ 0 and the matrix encoder is safe.
+    static func betaWCount(rank: Int) -> Int { rank + optionCount(rank: rank) }
+    static func omegaWCount(rank: Int) -> Int { optionCount(rank: rank) * rank }
+    static func optRewardCount(rank: Int) -> Int { optionCount(rank: rank) * rank }
+    static func optTransitionCount(rank: Int) -> Int { optionCount(rank: rank) * rank * rank }
     static func encoderCount(obsDim: Int, rank: Int) -> Int { rank * max(obsDim, 1) }
 
-    struct Param { let encoder, value, psi, optPolicy, outcomeHead, betaW, omegaW, sprDecoder, total: Int }
-    static func paramLayout(obsDim: Int, rank: Int, actDim: Int, dPolicy: Int) -> Param {
-        let E = extendedDim(rank: rank, actDim: actDim)
+    struct Param {
+        let encoder, value, psi, optPolicy, betaW, omegaW, optReward, optTransition, total: Int
+    }
+    static func paramLayout(obsDim: Int, rank: Int, dPolicy: Int) -> Param {
         var o = 0
-        let enc = o; o += encoderCount(obsDim: obsDim, rank: rank) // encoder: R · O matrix
-        let val = o; o += E                       // valueW: E weights (over OPSR-extended state)
-        let psi = o; o += psiCount(rank: rank, actDim: actDim)
-        let op  = o; o += optPolicyCount(rank: rank, actDim: actDim, dPolicy: dPolicy)
-        let oh  = o; o += outcomeHeadCount(rank: rank, actDim: actDim)
-        let bw  = o; o += betaWCount(rank: rank, actDim: actDim)
-        let ow  = o; o += omegaWCount(rank: rank, actDim: actDim)
-        let sd  = o; o += sprDecoderCount(rank: rank, actDim: actDim)
-        return Param(encoder: enc, value: val, psi: psi, optPolicy: op, outcomeHead: oh,
-                     betaW: bw, omegaW: ow, sprDecoder: sd, total: o)
+        let enc = o; o += encoderCount(obsDim: obsDim, rank: rank)
+        let val = o; o += rank
+        let psi = o; o += psiCount(rank: rank)
+        let op  = o; o += optPolicyCount(rank: rank, dPolicy: dPolicy)
+        let bw  = o; o += betaWCount(rank: rank)
+        let ow  = o; o += omegaWCount(rank: rank)
+        let or_ = o; o += optRewardCount(rank: rank)
+        let ot  = o; o += optTransitionCount(rank: rank)
+        return Param(encoder: enc, value: val, psi: psi, optPolicy: op, betaW: bw,
+                     omegaW: ow, optReward: or_, optTransition: ot, total: o)
     }
 
     struct State {
-        let observation, obsMean, state, prevPolicyMean, policyMean, scoreGrad: Int
+        let observation, obsMean, obsSM, state: Int
+        let prevPolicyMean, policyMean, scoreGrad: Int
         let reward, td, tdPsi, vCurr: Int
-        let chordSlot, chordSlotPrev, betaProb: Int
-        let featSM, wBar, featMean, utilFeat, utilOpt, optFracEMA: Int
-        // Tier 2: per-feature TIDBD α (SwiftSarsa 2507.19539 + MetaOptimize 2402.02342).
-        // alphaImpFeat[E] = exp(beta_i) / (1 + exp(beta_i) · featSM[i]) per-feature implicit step.
-        // alphaImpBeta[E] = log-step meta-parameter; alphaImpH[E] = decay trace of past Δw.
+        let chord, chordPrev, betaProb: Int
+        let featSM, wBar, featMean: Int
+        let utilFeat, utilOpt, utilPlan, optFracEMA: Int
         let alphaImpFeat, alphaImpBeta, alphaImpH: Int
-        // Tier 1: sprPred[B·R] arena slot REMOVED (the fused oak_spr_fused kernel
-        // recomputes ẑ_N inline per (row, feat) and never materializes it).
-        // Tier 2: psiMeanBaseline[K] = <ψ_k, featMean> per cumulant — the ϖ-RTD
-        // centering baseline read by oak_predict; updated in oak_bk_admit_commit.
         let psiMeanBaseline: Int
-        // Tier 4: TD(λ) eligibility traces. valueE[E] for w_main; psiE[K · M] for ψ.
-        // Engine-init zero; in-place updated by oak_learn_value / oak_learn_psi at B=1.
-        let valueE, psiE: Int
-        // Sutton-Barto §13.5 actor-critic-with-traces: backward-view eligibility trace
-        // piE[K · D · E] for the policy parameters.
-        let piE: Int
-        let obsSM: Int                    // E[obs²] Welford EMA, paired with obsMean
+        let valueE, psiE, piE: Int
+        let optRewardE, optTransitionE: Int
+        let planAdv: Int
         let total: Int
     }
-    static func stateLayout(obsDim: Int, rank: Int, actDim: Int, batch: Int, dPolicy: Int) -> State {
-        let K = optionCount(rank: rank, actDim: actDim)
-        let E = extendedDim(rank: rank, actDim: actDim)
+    static func stateLayout(obsDim: Int, rank: Int, dPolicy: Int) -> State {
+        let K = optionCount(rank: rank)
+        let M = concatDim(rank: rank)
         var o = 0
-        let obs = o; o += batch * obsDim
+        let obs = o; o += obsDim
         let mean = o; o += obsDim
-        let st = o; o += 2 * batch * E      // OPSR-extended state (E = R + K)
-        let prP = o; o += batch * dPolicy   // prev step's policyMean (host-written, telemetry)
-        let pol = o; o += batch * dPolicy   // current step's policyMean (kernel-written)
-        let sg  = o; o += batch * dPolicy   // host-written ∇log π for the wrapper-sampled action
-        let rew = o; o += batch
-        let td  = o; o += batch
-        let tdP = o; o += batch * K         // K cumulant TDs per row (Design 2 collapse)
-        let vc  = o; o += batch             // vCurr = w_main · curr_state (cached in predict, read by plan)
-        // Tier 3: temporal abstraction state — persistent soft chord per row.
-        let cs  = o; o += batch * K         // current step's chord (∈ Δ^K simplex per row)
-        let csP = o; o += batch * K         // prev step's chord (for learn_psi/_pi attribution)
-        let bp  = o; o += batch             // β output per row (termination probability telemetry)
-        // featSM/wBar/featMean/utilFeat are encoder-only stats (cumulant ranking + plan optimism).
+        let osm  = o; o += obsDim
+        let st = o; o += 2 * rank
+        let prP = o; o += dPolicy
+        let pol = o; o += dPolicy
+        let sg  = o; o += dPolicy
+        let rew = o; o += 1
+        let td  = o; o += 1
+        let tdP = o; o += K
+        let vc  = o; o += 1
+        let cs  = o; o += K
+        let csP = o; o += K
+        let bp  = o; o += 1
         let fs  = o; o += rank
         let wb  = o; o += rank
         let fm  = o; o += rank
         let uf  = o; o += rank
         let uo  = o; o += K
-        let ofE = o; o += K          // Tier 5: soft-chord per-option mass EMA
-        let aif = o; o += E          // Tier 2: alphaImpFeat[E] (per-feature implicit step)
-        let aib = o; o += E          // alphaImpBeta[E] = log meta-parameter, init log(alpha0)
-        let aih = o; o += E          // alphaImpH[E] = decay trace of past Δw, init 0
-        let pmb = o; o += K          // Tier 2: psiMeanBaseline[K] = <ψ_k, featMean>
-        let vE  = o; o += E          // Tier 4: valueE[E] eligibility trace for w_main
-        let pE  = o; o += K * (E + K)// Tier 4: psiE[K * M] eligibility traces for ψ (M = E + K)
-        let piE = o; o += K * dPolicy * E // Sutton-Barto §13.5 policy eligibility trace
-        let osm = o; o += obsDim     // obsSM[O] = E[obs²] Welford EMA (paired with obsMean)
-        return State(observation: obs, obsMean: mean, state: st, prevPolicyMean: prP, policyMean: pol,
-                     scoreGrad: sg, reward: rew, td: td, tdPsi: tdP, vCurr: vc,
-                     chordSlot: cs, chordSlotPrev: csP, betaProb: bp,
-                     featSM: fs, wBar: wb, featMean: fm, utilFeat: uf, utilOpt: uo,
-                     optFracEMA: ofE,
+        let up  = o; o += rank
+        let ofE = o; o += K
+        let aif = o; o += rank
+        let aib = o; o += rank
+        let aih = o; o += rank
+        let pmb = o; o += K
+        let vE  = o; o += rank
+        let pE  = o; o += K * M
+        let piE = o; o += K * dPolicy * rank
+        let orE = o; o += K * rank
+        let otE = o; o += K * rank * rank
+        let pa  = o; o += 1
+        return State(observation: obs, obsMean: mean, obsSM: osm, state: st,
+                     prevPolicyMean: prP, policyMean: pol, scoreGrad: sg,
+                     reward: rew, td: td, tdPsi: tdP, vCurr: vc,
+                     chord: cs, chordPrev: csP, betaProb: bp,
+                     featSM: fs, wBar: wb, featMean: fm,
+                     utilFeat: uf, utilOpt: uo, utilPlan: up, optFracEMA: ofE,
                      alphaImpFeat: aif, alphaImpBeta: aib, alphaImpH: aih,
                      psiMeanBaseline: pmb,
-                     valueE: vE, psiE: pE,
-                     piE: piE,
-                     obsSM: osm,
-                     total: o)
+                     valueE: vE, psiE: pE, piE: piE,
+                     optRewardE: orE, optTransitionE: otE,
+                     planAdv: pa, total: o)
     }
 
-    struct UInts { let done, activeMask, activeList, option, counters, subtaskFeatureOf, optionAge, total: Int }
-    static func uintLayout(rank: Int, actDim: Int, batch: Int) -> UInts {
-        let K = optionCount(rank: rank, actDim: actDim)
-        let E = extendedDim(rank: rank, actDim: actDim)
+    struct UInts {
+        let done, activeMask, activeList, option, counters, subtaskFeatureOf, optionAge,
+            planArgmax, total: Int
+    }
+    static func uintLayout(rank: Int) -> UInts {
+        let K = optionCount(rank: rank)
         var o = 0
-        let d = o; o += batch
-        let am = o; o += E      // active mask spans E (outcome dims R..E always-active)
-        let al = o; o += E      // active list also sized E
-        let op = o; o += 2 * batch     // legacy option_slot — argmax of chord, telemetry-only in Tier 3
-        // Tier 0: counters[8] expanded from counters[6] to host two new
-        // numerical-safety counters (OAK_CNT_TDPSI_NF
-        // per-step). Layout matches OakKernel.metal OAK_CNT_* constants 0..7.
+        let d = o; o += 1
+        let am = o; o += rank
+        let al = o; o += rank
+        let op = o; o += 2
         let c  = o; o += 8
         let sf = o; o += K
-        let oa = o; o += batch  // Tier 3: optionAge[r] — steps since last termination
-        return UInts(done: d, activeMask: am, activeList: al, option: op, counters: c,
-                     subtaskFeatureOf: sf, optionAge: oa, total: o)
+        let oa = o; o += 1
+        let pa = o; o += 1
+        return UInts(done: d, activeMask: am, activeList: al, option: op,
+                     counters: c, subtaskFeatureOf: sf, optionAge: oa,
+                     planArgmax: pa, total: o)
     }
 }
 
-// ================================================================================================
-// Shared-storage helpers.
-// ================================================================================================
+// =================================================================================================
+// Shared-storage helper.
+// =================================================================================================
 private final class Shared<Element> {
     let buffer: MTLBuffer
     let pointer: UnsafeMutablePointer<Element>
@@ -720,77 +556,39 @@ private final class Shared<Element> {
     }
 }
 
-// ================================================================================================
-// Metal engine — orthodox Step 11 OaK. Tier 1: 20 phases per step, dispatched as
-// one ICB.
-//   encode → predict_outcome → meta_policy → predict → plan → reduce_alpha
-//   → learn_value → learn_encoder → spr_fused → learn_outcome → learn_psi → learn_pi
-//   → learn_beta → learn_omega → meta_action
-//   → bk_reduce → bk_feature → bk_option → bk_admit_commit → bk_weight_magnitudes
-// ================================================================================================
+// =================================================================================================
+// Metal engine - orthodox Step 11 Oak. 12 phases per step, dispatched as one ICB.
+//   bk_obs -> encode -> meta_policy -> predict -> plan -> reduce_alpha -> learn_heads
+//   -> meta_action -> bk_reduce -> bk_utility -> bk_admit_commit
+// (11 phases listed; meta_action runs LAST among learn-time kernels so learn_heads reads the
+// score function written at the previous step's meta_action.)
+// =================================================================================================
 final class OakMetalEngine {
-    // Phase metadata: kernel name + threadgroup size (0 = pipeline-default dispatchThreads).
-    // Reduction kernels use fixed 128-thread TGs (4 SIMD groups × 32) with hierarchical simd_sum;
-    // plan uses 32 (one SIMD group per row, SIMD-shuffle argmax).
     private struct Phase { let name: String; let tgSize: Int }
-    // Phase ordering: meta_action runs LAST among learn-time kernels so that learn_pi reads
-    // the score function written at the *previous* step's meta_action — i.e., the score for
-    // action_{N-1} taken at state_{N-1}, which is the action that produced the transition
-    // whose TD δ_N is being learned from. No prevScoreGrad slot needed; arena holds a single
-    // scoreGrad slot that is read by learn_pi (this step) before being overwritten by
-    // meta_action (this step) for the next step's learning.
-    // 21-kernel pipeline. oak_bk_obs runs FIRST so per-feature obs Welford EMAs (mean
-    // + 2nd moment) are updated before encode reads them — eliminates the step-0 tanh
-    // saturation transient when env obs scale ≫ 1 (Mujoco joint velocities ~±50).
-    // SPR-Stream adds oak_predict_next_latent (after meta_policy so it can read
-    // chordPrev = chord_{N-1} that drove the just-completed transition) and
-    // oak_learn_encoder_spr (after oak_learn_encoder so the orthogonal projection has
-    // the just-applied RL gradient available for de-correlation).
     private static let phases: [Phase] = [
-        Phase(name: "oak_bk_obs",             tgSize: 32),
-        Phase(name: "oak_encode",             tgSize: 0),
-        Phase(name: "oak_predict_outcome",    tgSize: 0),
-        Phase(name: "oak_meta_policy",        tgSize: 0),
-        // T1: oak_predict_next_latent + oak_learn_encoder_spr fused into oak_spr_fused.
-        Phase(name: "oak_predict",            tgSize: 0),  // T2: per-thread dispatchThreads
-        Phase(name: "oak_plan",               tgSize: 32),
-        Phase(name: "oak_reduce_alpha",       tgSize: 128),
-        Phase(name: "oak_learn_value",        tgSize: 32),
-        Phase(name: "oak_learn_encoder",      tgSize: 0),
-        Phase(name: "oak_spr_fused",          tgSize: 0),   // T1: fused predict + learn
-        Phase(name: "oak_learn_outcome",      tgSize: 0),
-        Phase(name: "oak_learn_psi",          tgSize: 0),
-        Phase(name: "oak_learn_pi",           tgSize: 0),
-        Phase(name: "oak_learn_beta",         tgSize: 0),
-        Phase(name: "oak_learn_omega",        tgSize: 0),
-        Phase(name: "oak_meta_action",        tgSize: 0),  // T0.5+T2 (REVISED): B*D
-                                                            // dispatchThreads (no stack array,
-                                                            // no lane waste, e-outer-k-inner)
-        Phase(name: "oak_bk_reduce",          tgSize: 128),
-        Phase(name: "oak_bk_feature",         tgSize: 32),
-        Phase(name: "oak_bk_option",          tgSize: 128),
-        Phase(name: "oak_bk_admit_commit",    tgSize: 0),
-        // Tier 1.4: per-buffer max(|w|) for the (C) bounded-magnitude gate.
-        // 8 TGs × 32 threads (one TG per fp16 weight buffer; simd_max reduction).
-        Phase(name: "oak_bk_weight_magnitudes", tgSize: 32),
+        Phase(name: "oak_bk_obs",          tgSize: 32),
+        Phase(name: "oak_encode",          tgSize: 0),
+        Phase(name: "oak_meta_policy",     tgSize: 0),
+        Phase(name: "oak_predict",         tgSize: 0),
+        Phase(name: "oak_plan",            tgSize: 0),
+        Phase(name: "oak_reduce_alpha",    tgSize: 128),
+        Phase(name: "oak_learn_heads",     tgSize: 0),
+        Phase(name: "oak_meta_action",     tgSize: 0),
+        Phase(name: "oak_bk_reduce",       tgSize: 128),
+        Phase(name: "oak_bk_utility",      tgSize: 0),
+        Phase(name: "oak_bk_admit_commit", tgSize: 0),
     ]
 
-    private let obsDim, baseObsDim, actDim, batch, rank, dPolicy: Int
+    private let obsDim, baseObsDim, actDim, rank, dPolicy: Int
     private let queue: MTLCommandQueue
     private let cbDesc: MTLCommandBufferDescriptor
     private let pipelines: [MTLComputePipelineState]
-    private let noopPipeline: MTLComputePipelineState   // Tier 1: ablation hot-swap target
-    private let ablatedPhaseIndices: Set<Int>           // phase indices replaced with noop in the ICB
     private let scalarsBuffer: MTLBuffer
     private let statsBuffer: MTLBuffer
     private let configBuffer: MTLBuffer
     private let scalarsPointer: UnsafeMutablePointer<KernelScalars>
     private let statsPointer: UnsafeMutablePointer<KernelStats>
     private let configPointer: UnsafeMutablePointer<KernelConfig>
-    // BWH-orthodox: weights stored as fp32 so magnitudes can grow per the agent's
-    // encountered slice of reality (no arbitrary HALF_MAX = 65504 scale prior). Per-step
-    // bound from implicit α (Kim 2510.06149) + ϖ-RTD centering (Sakha 2603.27874v2);
-    // long-run bound only via L2-ER when pEff collapses (anti-collapse, NOT scale prior).
     private let paramsArena: Shared<Float>
     private let stateArena: Shared<Float>
     private let uintArena: Shared<UInt32>
@@ -801,8 +599,6 @@ final class OakMetalEngine {
     private var phaseGpuTimeSumSeconds: [Double]
     private var phaseGpuInvalidStepCount: [Int]
     private var hostAction: [Float]
-    // Metal 4 ICB + MTLResidencySet (macOS 26). Pre-encoded `phases.count` dispatches execute in
-    // one encoder on the hot path, eliminating per-phase encoder setup overhead.
     private let indirectCommandBuffer: MTLIndirectCommandBuffer
     private let residencySet: MTLResidencySet
     private let resourceList: [MTLBuffer]
@@ -812,122 +608,89 @@ final class OakMetalEngine {
                               description: "non-empty .build/OakKernel.metallib", nonEmpty: true)
     }
 
-    private static func makePipelines(device: MTLDevice) throws -> (real: [MTLComputePipelineState], noop: MTLComputePipelineState) {
+    private static func makePipelines(device: MTLDevice) throws -> [MTLComputePipelineState] {
         let library = try device.makeLibrary(URL: try kernelURL())
-        func make(_ name: String) throws -> MTLComputePipelineState {
-            guard let fn = library.makeFunction(name: name) else {
-                throw OakError.message("Missing \(name) in OakKernel.metallib.")
+        return try phases.map { phase in
+            guard let fn = library.makeFunction(name: phase.name) else {
+                throw OakError.message("Missing \(phase.name) in OakKernel.metallib.")
             }
             let desc = MTLComputePipelineDescriptor()
             desc.computeFunction = fn
             desc.supportIndirectCommandBuffers = true
             return try device.makeComputePipelineState(descriptor: desc, options: [], reflection: nil)
         }
-        let real = try phases.map { try make($0.name) }
-        // Tier 1: oak_noop hot-swap target for per-kernel ablation.
-        let noop = try make("oak_noop")
-        return (real, noop)
     }
 
-    // Apple GPUs have a fixed 32-thread SIMD width. Returning this constant avoids compiling all
-    // pipelines just to read `threadExecutionWidth` from one of them.
     static func executionWidth(device: MTLDevice) throws -> Int { 32 }
 
-    // Tier 1: agent constructor takes signal-shape parameters {obsDim, baseObsDim, actDim,
-    // batch, rank, dPolicy}. dPolicy is the env-declared D_policy (sum of per-component policy-
-    // param widths from the env's ActionSpec). The agent has no notion of WHAT the components
-    // are — only the integer width. Inv-1 + Bitter Lesson.
-    init(obsDim: Int, baseObsDim: Int, actDim: Int, batch: Int, rank: Int, dPolicy: Int,
-         device: MTLDevice, seed: Int?, diagnosticGpuPhaseTiming: Bool = false,
-         ablatedKernels: Set<String> = []) throws {
+    init(obsDim: Int, baseObsDim: Int, actDim: Int, rank: Int, dPolicy: Int,
+         device: MTLDevice, seed: Int?, diagnosticGpuPhaseTiming: Bool = false) throws {
         precondition(obsDim == rank, "obsDim must equal rank (interface-derived latent width).")
-        precondition(baseObsDim <= obsDim && baseObsDim >= 1, "baseObsDim must be positive and ≤ obsDim.")
-        precondition(dPolicy >= 1, "dPolicy must be positive (env's action-spec param-count sum).")
+        precondition(baseObsDim <= obsDim && baseObsDim >= 1, "baseObsDim must be positive and <= obsDim.")
+        precondition(dPolicy >= 1, "dPolicy must be positive.")
         self.obsDim = obsDim; self.baseObsDim = baseObsDim; self.actDim = actDim
-        self.batch = batch; self.rank = rank; self.dPolicy = dPolicy
+        self.rank = rank; self.dPolicy = dPolicy
         guard let queue = device.makeCommandQueue() else {
             throw OakError.message("Failed to create Metal command queue.")
         }
         self.queue = queue
         let d = MTLCommandBufferDescriptor(); d.retainedReferences = false
         cbDesc = d
-        let built = try Self.makePipelines(device: device)
-        pipelines = built.real
-        noopPipeline = built.noop
-        // Tier 1: resolve ablated kernel names to phase indices. Unknown names are warned
-        // about (so a typo doesn't silently produce a baseline run). Per the multi-signal Pareto
-        // gate, removing an "ablated" kernel from the ICB simulates "what if this kernel didn't run"
-        // the arena slot it would have written stays at its previous-step value.
-        let phaseNames = Set(Self.phases.map { $0.name })
-        for k in ablatedKernels where !phaseNames.contains(k) {
-            fputs("OaK: warning — ablate-kernel '\(k)' is not a known phase; ignored.\n", stderr)
-        }
-        ablatedPhaseIndices = Set(Self.phases.enumerated()
-            .filter { ablatedKernels.contains($0.element.name) }.map { $0.offset })
-        if !ablatedPhaseIndices.isEmpty {
-            let names = ablatedPhaseIndices.sorted().map { Self.phases[$0].name }.joined(separator: ", ")
-            fputs("OaK: ablating kernels [\(names)] — replaced with oak_noop in the ICB.\n", stderr)
-        }
+        pipelines = try Self.makePipelines(device: device)
 
-        scalarsBuffer = device.makeBuffer(length: MemoryLayout<KernelScalars>.stride, options: [.storageModeShared])!
-        statsBuffer   = device.makeBuffer(length: MemoryLayout<KernelStats>.stride,   options: [.storageModeShared])!
-        configBuffer  = device.makeBuffer(length: MemoryLayout<KernelConfig>.stride,  options: [.storageModeShared])!
+        scalarsBuffer = device.makeBuffer(length: MemoryLayout<KernelScalars>.stride,
+                                          options: [.storageModeShared])!
+        statsBuffer   = device.makeBuffer(length: MemoryLayout<KernelStats>.stride,
+                                          options: [.storageModeShared])!
+        configBuffer  = device.makeBuffer(length: MemoryLayout<KernelConfig>.stride,
+                                          options: [.storageModeShared])!
         scalarsPointer = scalarsBuffer.contents().bindMemory(to: KernelScalars.self, capacity: 1)
         statsPointer   = statsBuffer.contents().bindMemory(to: KernelStats.self, capacity: 1)
         configPointer  = configBuffer.contents().bindMemory(to: KernelConfig.self, capacity: 1)
         scalarsPointer.initialize(to: KernelScalars())
         scalarsPointer.pointee.pEff = Float(rank)
+        scalarsPointer.pointee.lambdaTrace = max(0, 1.0 - 1.0 / Float(max(rank, 1)))
         statsPointer.initialize(to: KernelStats())
         configPointer.initialize(to: KernelConfig())
 
-        let paramLayout = OakMetalLayout.paramLayout(obsDim: obsDim, rank: rank, actDim: actDim,
-                                                     dPolicy: dPolicy)
-        stateLayout = OakMetalLayout.stateLayout(obsDim: obsDim, rank: rank, actDim: actDim,
-                                                 batch: batch, dPolicy: dPolicy)
-        uintLayout  = OakMetalLayout.uintLayout(rank: rank, actDim: actDim, batch: batch)
+        let paramLayout = OakMetalLayout.paramLayout(obsDim: obsDim, rank: rank, dPolicy: dPolicy)
+        stateLayout = OakMetalLayout.stateLayout(obsDim: obsDim, rank: rank, dPolicy: dPolicy)
+        uintLayout  = OakMetalLayout.uintLayout(rank: rank)
         paramsArena = Shared(device: device, count: paramLayout.total, zero: Float(0))
         stateArena  = Shared(device: device, count: stateLayout.total, zero: Float(0))
         uintArena   = Shared(device: device, count: uintLayout.total,  zero: UInt32(0))
 
-        // Cache per-phase grid width so there's no allocation on the hot path.
-        let K = OakMetalLayout.optionCount(rank: rank, actDim: actDim)
-        let E = OakMetalLayout.extendedDim(rank: rank, actDim: actDim)
-        let M = OakMetalLayout.concatDim(rank: rank, actDim: actDim)
-        // 21-kernel pipeline. Index 0 is oak_bk_obs (1 TG × 32 threads, strides over O);
-        // it must run BEFORE oak_encode so per-feature obs Welford EMAs reflect the
-        // current observation when encode standardizes its input.
+        let K = OakMetalLayout.optionCount(rank: rank)
+        let M = OakMetalLayout.concatDim(rank: rank)
+        // Grid widths sized for one row (single-stream).
+        let learnTotal = OakMetalLayout.encoderCount(obsDim: obsDim, rank: rank)
+                       + rank
+                       + OakMetalLayout.psiCount(rank: rank)
+                       + OakMetalLayout.optPolicyCount(rank: rank, dPolicy: dPolicy)
+                       + OakMetalLayout.betaWCount(rank: rank)
+                       + OakMetalLayout.omegaWCount(rank: rank)
+                       + OakMetalLayout.optRewardCount(rank: rank)
+                       + OakMetalLayout.optTransitionCount(rank: rank)
         phaseGridWidths = [
-            1,                                // oak_bk_obs              [1 TG × 32]
-            batch * rank,                     // oak_encode              [dispatchThreads]
-            batch * K,                        // oak_predict_outcome     [dispatchThreads]
-            batch,                            // oak_meta_policy         [dispatchThreads]
-            batch,                            // oak_predict             [dispatchThreads]
-            batch,                            // oak_plan                [B TGs × 32]
-            1,                                // oak_reduce_alpha        [1 TG × 128]
-            E,                                // oak_learn_value         [E TGs × 32]
-            rank * max(baseObsDim, 1),        // oak_learn_encoder       [R · baseO threads]
-            rank * max(baseObsDim, 1),        // oak_spr_fused           [R · baseO threads]
-            K * E,                            // oak_learn_outcome       [dispatchThreads]
-            K * M,                            // oak_learn_psi           [dispatchThreads]
-            K * dPolicy * E,                  // oak_learn_pi            [dispatchThreads]
-            E + K,                            // oak_learn_beta          [dispatchThreads]
-            K * E,                            // oak_learn_omega         [dispatchThreads]
-            batch * dPolicy,                  // oak_meta_action         [dispatchThreads B*D]
-            1,                                // oak_bk_reduce           [1 TG × 128]
-            rank,                             // oak_bk_feature          [R TGs × 32]
-            K,                                // oak_bk_option           [K TGs × 128]
-            1,                                // oak_bk_admit_commit     [dispatchThreads]
-            8,                                // oak_bk_weight_magnitudes [8 TGs × 32]
+            1,                  // bk_obs            [1 TG x 32]
+            rank,               // encode            [R threads]
+            1,                  // meta_policy       [1 thread]
+            1,                  // predict           [1 thread]
+            1,                  // plan              [1 thread]
+            1,                  // reduce_alpha      [1 TG x 128]
+            learnTotal,         // learn_heads       [N threads]
+            dPolicy,            // meta_action       [D threads]
+            1,                  // bk_reduce         [1 TG x 128]
+            rank + K + 8,       // bk_utility        [(R + K + 8) threads]
+            1,                  // bk_admit_commit   [1 thread]
         ]
 
         self.diagnosticGpuPhaseTiming = diagnosticGpuPhaseTiming
         phaseGpuTimeSumSeconds = Array(repeating: 0, count: Self.phases.count)
         phaseGpuInvalidStepCount = Array(repeating: 0, count: Self.phases.count)
-        hostAction = Array(repeating: 0, count: batch * dPolicy)
+        hostAction = Array(repeating: 0, count: dPolicy)
 
-        // -- Metal 4 ICB + MTLResidencySet setup ----------------------------------------------
-        // dropped the bounds buffer. 6 binds: params, stateArena, uintArena, scalars,
-        // stats, config (config is at OakMetalLayout.kernelConfigBufferIndex = 5).
+        // Metal 4 ICB + MTLResidencySet setup. 6 binds: params, state, uint, scalars, stats, config.
         let icbDesc = MTLIndirectCommandBufferDescriptor()
         icbDesc.commandTypes = [.concurrentDispatch]
         icbDesc.inheritBuffers = false
@@ -948,11 +711,11 @@ final class OakMetalEngine {
         residencySet.commit()
         queue.addResidencySet(residencySet)
 
-        // -- Parameter init: structural 1/√R scales on every linear head. Deterministic counter
-        // hash (splitmix32 of seed ⊕ index) provides small centered probes without a host RNG
-        // object allocated on the hot path.
+        // Parameter init: structural 1/sqrt(R) scales on every linear head.
         let invR: Float = 1.0 / sqrt(Float(max(rank, 1)))
-        let seedBase = UInt32(bitPattern: Int32(truncatingIfNeeded: seed ?? Int(oakUnseededSeed))) &* 0x9e3779b9
+        let invO: Float = 1.0 / sqrt(Float(max(obsDim, 1)))
+        let seedBase = UInt32(bitPattern: Int32(truncatingIfNeeded: seed ?? Int(oakUnseededSeed)))
+                       &* 0x9e3779b9
         func sample(_ off: Int, _ count: Int, _ scale: Float) {
             let base = paramsArena.pointer.advanced(by: off)
             for i in 0..<count {
@@ -963,95 +726,60 @@ final class OakMetalEngine {
                 base[i] = u * scale
             }
         }
-        // Encoder gets Xavier-like 1/√O so initial E[(Σ encoder[i,o]·obs[o])²] ≈ 1
-        // (assuming standardized obs E[obs²]≈1). Lands z_raw in tanh's linear region from
-        // step 0; structural scale, no env-specific tuning.
-        let invO: Float = 1.0 / sqrt(Float(max(obsDim, 1)))
         sample(paramLayout.encoder, OakMetalLayout.encoderCount(obsDim: obsDim, rank: rank), invO)
-        // Tier 2: valueW has E weights (was R) — extends over the OPSR-augmented state.
-        sample(paramLayout.value, OakMetalLayout.extendedDim(rank: rank, actDim: actDim), invR)
-        sample(paramLayout.psi, OakMetalLayout.psiCount(rank: rank, actDim: actDim), invR)
+        sample(paramLayout.value, rank, invR)
+        sample(paramLayout.psi, OakMetalLayout.psiCount(rank: rank), invR)
         sample(paramLayout.optPolicy,
-               OakMetalLayout.optPolicyCount(rank: rank, actDim: actDim, dPolicy: dPolicy), invR)
-        sample(paramLayout.outcomeHead,
-               OakMetalLayout.outcomeHeadCount(rank: rank, actDim: actDim), invR)
-        sample(paramLayout.betaW,
-               OakMetalLayout.betaWCount(rank: rank, actDim: actDim), invR)
-        sample(paramLayout.omegaW,
-               OakMetalLayout.omegaWCount(rank: rank, actDim: actDim), invR)
-        // Tier 3: SPR-Stream decoder. Init at the unit-gain identity (every chord
-        // predicts ẑ_N = z_{N-1}). The chord-conditioned linear predictor learns the actual
-        // transition gains from the prediction errors.
-        let sprDecoderCount = OakMetalLayout.sprDecoderCount(rank: rank, actDim: actDim)
-        let sprBase = paramsArena.pointer.advanced(by: paramLayout.sprDecoder)
-        for i in 0..<sprDecoderCount { sprBase[i] = 1 }
-        // ψ diagonal seed: cumulant k's W_ψ[k] · concat[s, λ] gets a +1/√R coefficient on its own
-        // state feature index k (RRS feature-attainment initialization; Alberta Plan A.6 / OBB
-        // §2.4). The first E weights of W_ψ[k] are state weights; index [k][k] is "predict
-        // cumulant k mostly from feature k". No magic — invR is the structural per-feature scale.
+               OakMetalLayout.optPolicyCount(rank: rank, dPolicy: dPolicy), invR)
+        sample(paramLayout.betaW, OakMetalLayout.betaWCount(rank: rank), invR)
+        sample(paramLayout.omegaW, OakMetalLayout.omegaWCount(rank: rank), invR)
+        sample(paramLayout.optReward, OakMetalLayout.optRewardCount(rank: rank), invR)
+        sample(paramLayout.optTransition, OakMetalLayout.optTransitionCount(rank: rank), invR)
+        // psi feature-attainment seed: cumulant k gets a +1/sqrt(R) coefficient on its anchor.
         let psiPtr = paramsArena.pointer.advanced(by: paramLayout.psi)
         for k in 0..<K where k < rank {
             let idx = k * M + k
             psiPtr[idx] = psiPtr[idx] + invR
         }
 
-        // Tier 2: all encoder features (0..R) admitted on step 0; outcome dims R..E
-        // are ALWAYS-ACTIVE by construction (they're agent-internal predictions, not env
-        // features that need utility-ranked admission). bk_admit_commit only re-ranks [0, R).
-        scalarsPointer.pointee.activeCount = UInt32(E)
+        // Active-feature seed: all admitted from step 0.
+        scalarsPointer.pointee.activeCount = UInt32(rank)
+        scalarsPointer.pointee.activeListIsIdentity = 1
         let activeMask = uintArena.pointer.advanced(by: uintLayout.activeMask)
         let activeList = uintArena.pointer.advanced(by: uintLayout.activeList)
         for f in 0..<rank { activeMask[f] = 1; activeList[f] = UInt32(f) }
-        for k in 0..<K { activeMask[rank + k] = 1; activeList[rank + k] = UInt32(rank + k) }
 
-        // Tier 3: seed chord uniformly = 1/K per option (the maximum-entropy prior).
-        // optionAge = 0 forces meta_policy to resample on step 1 (so chord moves off uniform).
-        let chordSlot = stateArena.pointer.advanced(by: stateLayout.chordSlot)
+        // Chord seed: uniform 1/K (max-entropy prior). optionAge = 0 forces meta_policy to
+        // resample the chord on step 1.
+        let chordSlot = stateArena.pointer.advanced(by: stateLayout.chord)
         let invK: Float = 1.0 / Float(max(K, 1))
-        for r in 0..<batch {
-            for k in 0..<K { chordSlot[r * K + k] = invK }
-        }
-        // seed optFracEMA = 1/K per option (the structural uniform-share, same as the
-        // dormancy threshold's reference value).
+        for k in 0..<K { chordSlot[k] = invK }
         let optFrac = stateArena.pointer.advanced(by: stateLayout.optFracEMA)
         for k in 0..<K { optFrac[k] = invK }
-        // Tier 2: per-feature TIDBD α (SwiftSarsa 2507.19539 + MetaOptimize 2402.02342).
-        // Init β_i = log(α₀) so exp(β_i) = α₀ at step 0 — recovers global-α behavior
-        // before the meta-update has had any data to act on. h_i = 0 (no history yet).
-        // alphaImpFeat[i] = α₀ initially (overwritten by oak_reduce_alpha on step 1).
-        let extDim = rank + K   // E = R + K (OPSR-extended state)
-        let initAlpha0: Float = 1.0 / Float(max(rank * max(batch, 1), 1))
+
+        // Per-feature TIDBD seed: alpha_i = alpha_0 (recovers global-alpha behavior on step 0).
+        let initAlpha0: Float = 1.0 / Float(max(rank, 1))
         let logAlpha0 = Float(log(Double(initAlpha0)))
         let aifPtr = stateArena.pointer.advanced(by: stateLayout.alphaImpFeat)
         let aibPtr = stateArena.pointer.advanced(by: stateLayout.alphaImpBeta)
         let aihPtr = stateArena.pointer.advanced(by: stateLayout.alphaImpH)
-        for i in 0..<extDim {
+        for i in 0..<rank {
             aifPtr[i] = initAlpha0
             aibPtr[i] = logAlpha0
             aihPtr[i] = 0
         }
-        // optionAge starts at 0 (force termination); chordSlotPrev/betaProb start at 0.
-        // Initialize subtaskFeatureOf to identity sf[k] = k. bk_admit_commit re-ranks each step
-        // by per-feature utility (Tier 7 RED dynamic top-K cumulants).
+
+        // sf seed: identity (k -> k). bk_admit_commit reranks each step.
         let sfPtr = uintArena.pointer.advanced(by: uintLayout.subtaskFeatureOf)
         for k in 0..<K { sfPtr[k] = UInt32(min(k, rank - 1)) }
 
         writeKernelConfig(paramLayout: paramLayout)
 
-        // Pre-encode the phase dispatch graph into the ICB.
-        // Grids are fixed for the engine's lifetime; only KernelScalars/KernelStats/params/state
-        // data changes between steps. resourceList is laid out
-        // [0..4 = params, state, uint, scalars, stats; 5 = config].
+        // Pre-encode all 11 phases into the ICB. Grids are fixed for the engine's lifetime.
         let buffers = resourceList
         for i in 0..<Self.phases.count {
             let cmd = icb.indirectComputeCommandAt(i)
-            // Tier 1: hot-swap the noop pipeline for ablated phases. Same buffer
-            // bindings + same dispatch geometry — the kernel just returns immediately, so
-            // the arena slot the ablated kernel would have written stays at its previous
-            // step's value (which is what "what if this kernel didn't run" means).
-            let isAblated = ablatedPhaseIndices.contains(i)
-            let pip = isAblated ? noopPipeline : pipelines[i]
-            cmd.setComputePipelineState(pip)
+            cmd.setComputePipelineState(pipelines[i])
             for j in 0..<buffers.count { cmd.setKernelBuffer(buffers[j], offset: 0, at: j) }
             let tgSize = Self.phases[i].tgSize
             if tgSize > 0 {
@@ -1060,8 +788,9 @@ final class OakMetalEngine {
                     MTLSize(width: tgCount, height: 1, depth: 1),
                     threadsPerThreadgroup: MTLSize(width: tgSize, height: 1, depth: 1))
             } else {
-                let tg = min(max(pip.threadExecutionWidth, 1), pip.maxTotalThreadsPerThreadgroup)
-                let w = alignedGridWidth(threadCount: phaseGridWidths[i], pipeline: pip)
+                let tg = min(max(pipelines[i].threadExecutionWidth, 1),
+                             pipelines[i].maxTotalThreadsPerThreadgroup)
+                let w = alignedGridWidth(threadCount: phaseGridWidths[i], pipeline: pipelines[i])
                 cmd.concurrentDispatchThreads(
                     MTLSize(width: w, height: 1, depth: 1),
                     threadsPerThreadgroup: MTLSize(width: min(tg, w), height: 1, depth: 1))
@@ -1074,96 +803,80 @@ final class OakMetalEngine {
         residencySet.removeAllAllocations()
     }
 
-    // --- Probe-only accessor (Tier-0 verification harness; deleted in Tier 7) ----------------
-    // Tier 5: probeSlot deleted (~85 LOC). Probe harness was used for kernel-
-    // correctness validation-13; that role is now covered by the (B) numerical-
-    // safety hard gate (nonFiniteRawTotal == 0 over the
-    // full bench window) and the (C) bounded-magnitude hard gate (per-buffer max(|w|) <
-    // √HALF_MAX), both surfaced into RunHealth and verifiable from any bench JSON.
-
-    func metalPhaseGpuDiagnostics(measuredBatchSteps: Int) -> (meanMs: [String: Double]?, invalidPhases: [String]?) {
-        guard diagnosticGpuPhaseTiming, measuredBatchSteps > 0 else { return (nil, nil) }
+    func metalPhaseGpuDiagnostics(measuredSteps: Int) -> (meanMs: [String: Double]?, invalidPhases: [String]?) {
+        guard diagnosticGpuPhaseTiming, measuredSteps > 0 else { return (nil, nil) }
         var mean: [String: Double] = [:]; var invalid: [String] = []
-        let d = Double(measuredBatchSteps)
+        let n = Double(measuredSteps)
         for (i, phase) in Self.phases.enumerated() {
-            mean[phase.name] = phaseGpuTimeSumSeconds[i] / d * 1000
+            mean[phase.name] = phaseGpuTimeSumSeconds[i] / n * 1000
             if phaseGpuInvalidStepCount[i] > 0 { invalid.append(phase.name) }
         }
         return (mean, invalid.isEmpty ? nil : invalid)
     }
 
-    // --- Step dispatch -----------------------------------------------------------------------
-    // Tier 1: takes prevPolicyMean[B·D] + prevScoreGrad[B·D] (host-written scoreGrad
-    // for last step's wrapper-sampled action), returns this step's policyMean[B·D]. The wrapper
-    // (EnvPoolEnv.sampleAndStep) then samples per-component and produces (action, scoreGrad).
+    // Single-stream step. Inputs are scalar per-step values + dPolicy-wide vectors.
     func step(obs: UnsafeBufferPointer<Float>, prevPolicyMean: [Float],
-              prevScoreGrad: [Float], prevReward: [Float], prevDone: [UInt8],
+              prevScoreGrad: [Float], prevReward: Float, prevDone: UInt8,
               accumulatePhaseGpu: Bool) throws -> (PolicyMeanBatch, Double, KernelStats) {
         let start = DispatchTime.now().uptimeNanoseconds
-
-        precondition(obs.count == batch * obsDim)
-        precondition(prevReward.count == batch)
-        precondition(prevPolicyMean.count == batch * dPolicy)
-        precondition(prevScoreGrad.count == batch * dPolicy)
+        precondition(obs.count == obsDim)
+        precondition(prevPolicyMean.count == dPolicy)
+        precondition(prevScoreGrad.count == dPolicy)
         memcpy(stateArena.pointer.advanced(by: stateLayout.observation), obs.baseAddress!,
-               batch * obsDim * MemoryLayout<Float>.stride)
-        memcpy(stateArena.pointer.advanced(by: stateLayout.reward), prevReward,
-               batch * MemoryLayout<Float>.stride)
+               obsDim * MemoryLayout<Float>.stride)
+        stateArena.pointer.advanced(by: stateLayout.reward).pointee = prevReward
         memcpy(stateArena.pointer.advanced(by: stateLayout.prevPolicyMean), prevPolicyMean,
-               batch * dPolicy * MemoryLayout<Float>.stride)
+               dPolicy * MemoryLayout<Float>.stride)
         memcpy(stateArena.pointer.advanced(by: stateLayout.scoreGrad), prevScoreGrad,
-               batch * dPolicy * MemoryLayout<Float>.stride)
-        let donePtr = uintArena.pointer.advanced(by: uintLayout.done)
-        for i in 0..<batch { donePtr[i] = UInt32(prevDone[i]) }
+               dPolicy * MemoryLayout<Float>.stride)
+        uintArena.pointer.advanced(by: uintLayout.done).pointee = UInt32(prevDone)
 
+        // Reset per-step non-finite counters; bk_admit_commit clears REINIT_OPT life-counter
+        // additions are appended (cumulative).
         let ctr = uintArena.pointer.advanced(by: uintLayout.counters)
-        // Reset per-step non-finite counters (offsets OAK_CNT_OBS_NF=0, LEARN_NF=1,
-        // PLAN_NF=2, TDPSI_NF=6). counters[OAK_CNT_REINIT_OPT=3] is cleared by
-        // bk_admit_commit at end of step. counters[OAK_CNT_REINIT_FEAT=4] is a
-        // cumulative life-of-engine count.
-        ctr[0] = 0; ctr[1] = 0; ctr[2] = 0; ctr[6] = 0
+        ctr[0] = 0; ctr[1] = 0; ctr[2] = 0; ctr[5] = 0
         statsPointer.pointee = KernelStats()
 
         try runKernel(accumulatePhaseGpu: accumulatePhaseGpu)
 
         memcpy(&hostAction, stateArena.pointer.advanced(by: stateLayout.policyMean),
-               batch * dPolicy * MemoryLayout<Float>.stride)
+               dPolicy * MemoryLayout<Float>.stride)
         return (PolicyMeanBatch(values: hostAction, dPolicy: dPolicy),
                 Double(DispatchTime.now().uptimeNanoseconds - start) / 1_000_000,
                 statsPointer.pointee)
     }
 
     private func writeKernelConfig(paramLayout: OakMetalLayout.Param) {
-        let K = OakMetalLayout.optionCount(rank: rank, actDim: actDim)
-        let cap = Float(max(rank * max(batch, 1), 1))
+        let K = OakMetalLayout.optionCount(rank: rank)
+        let cap = Float(max(rank, 1))
         let p = paramLayout, s = stateLayout, u = uintLayout
         var c = KernelConfig()
         c.obsDim = UInt32(obsDim); c.rank = UInt32(rank); c.actDim = UInt32(actDim)
-        c.batch = UInt32(batch); c.optionCount = UInt32(K); c.baseObsDim = UInt32(baseObsDim)
+        c.optionCount = UInt32(K); c.baseObsDim = UInt32(baseObsDim)
         c.actionParamCount = UInt32(dPolicy)
-        c.pEncoder = UInt32(p.encoder); c.pValue = UInt32(p.value)
-        c.pPsi = UInt32(p.psi);         c.pOptPolicy = UInt32(p.optPolicy)
-        c.pOutcomeHead = UInt32(p.outcomeHead)
-        c.pBetaW = UInt32(p.betaW); c.pOmegaW = UInt32(p.omegaW)
-        c.pSprDecoder = UInt32(p.sprDecoder)
-        c.sObservation = UInt32(s.observation); c.sObsMean = UInt32(s.obsMean)
-        c.sState = UInt32(s.state); c.sPrevPolicyMean = UInt32(s.prevPolicyMean)
-        c.sPolicyMean = UInt32(s.policyMean); c.sScoreGrad = UInt32(s.scoreGrad)
+        c.pEncoder = UInt32(p.encoder); c.pValue = UInt32(p.value); c.pPsi = UInt32(p.psi)
+        c.pOptPolicy = UInt32(p.optPolicy); c.pBetaW = UInt32(p.betaW); c.pOmegaW = UInt32(p.omegaW)
+        c.pOptReward = UInt32(p.optReward); c.pOptTransition = UInt32(p.optTransition)
+        c.sObservation = UInt32(s.observation); c.sObsMean = UInt32(s.obsMean); c.sObsSM = UInt32(s.obsSM)
+        c.sState = UInt32(s.state)
+        c.sPrevPolicyMean = UInt32(s.prevPolicyMean); c.sPolicyMean = UInt32(s.policyMean)
+        c.sScoreGrad = UInt32(s.scoreGrad)
         c.sReward = UInt32(s.reward); c.sTd = UInt32(s.td); c.sTdPsi = UInt32(s.tdPsi)
         c.sVCurr = UInt32(s.vCurr)
-        c.sChordSlot = UInt32(s.chordSlot); c.sChordSlotPrev = UInt32(s.chordSlotPrev)
-        c.sBetaProb = UInt32(s.betaProb)
-        // Tier 1: sSprPred removed (oak_spr_fused inlines ẑ_N).
+        c.sChord = UInt32(s.chord); c.sChordPrev = UInt32(s.chordPrev); c.sBetaProb = UInt32(s.betaProb)
+        c.sFeatSM = UInt32(s.featSM); c.sWBar = UInt32(s.wBar); c.sFeatMean = UInt32(s.featMean)
+        c.sUtilFeat = UInt32(s.utilFeat); c.sUtilOpt = UInt32(s.utilOpt)
+        c.sUtilPlan = UInt32(s.utilPlan); c.sOptFracEMA = UInt32(s.optFracEMA)
+        c.sAlphaImpFeat = UInt32(s.alphaImpFeat); c.sAlphaImpBeta = UInt32(s.alphaImpBeta)
+        c.sAlphaImpH = UInt32(s.alphaImpH)
+        c.sPsiMeanBaseline = UInt32(s.psiMeanBaseline)
+        c.sValueE = UInt32(s.valueE); c.sPsiE = UInt32(s.psiE); c.sPiE = UInt32(s.piE)
+        c.sOptRewardE = UInt32(s.optRewardE); c.sOptTransitionE = UInt32(s.optTransitionE)
+        c.sPlanAdv = UInt32(s.planAdv)
         c.uDone = UInt32(u.done); c.uActiveMask = UInt32(u.activeMask)
-        c.uActiveList = UInt32(u.activeList); c.uOption = UInt32(u.option); c.uCounters = UInt32(u.counters)
-        c.uSubtaskFeatureOf = UInt32(u.subtaskFeatureOf); c.uOptionAge = UInt32(u.optionAge)
-        c.aFeatSM = UInt32(s.featSM); c.aWBar = UInt32(s.wBar); c.aFeatMean = UInt32(s.featMean)
-        c.aAlphaImpFeat = UInt32(s.alphaImpFeat); c.aAlphaImpBeta = UInt32(s.alphaImpBeta); c.aAlphaImpH = UInt32(s.alphaImpH)
-        c.aPsiMeanBaseline = UInt32(s.psiMeanBaseline)
-        c.aValueE = UInt32(s.valueE); c.aPsiE = UInt32(s.psiE); c.aPiE = UInt32(s.piE)
-        c.aObsSM = UInt32(s.obsSM)
-        c.aUtilFeat = UInt32(s.utilFeat); c.aUtilOpt = UInt32(s.utilOpt)
-        c.aOptFracEMA = UInt32(s.optFracEMA)
+        c.uActiveList = UInt32(u.activeList); c.uOption = UInt32(u.option)
+        c.uCounters = UInt32(u.counters); c.uSubtaskFeatureOf = UInt32(u.subtaskFeatureOf)
+        c.uOptionAge = UInt32(u.optionAge); c.uPlanArgmax = UInt32(u.planArgmax)
         c.cap = cap; c.alpha0 = 1.0 / cap; c.ridge = 1.0 / (cap + 1.0)
         configPointer.pointee = c
     }
@@ -1174,59 +887,36 @@ final class OakMetalEngine {
         return ((n + align - 1) / align) * align
     }
 
-    private func encodePhase(into cb: MTLCommandBuffer, index: Int,
-                             buffers: [MTLBuffer?], offsets: [Int]) throws {
-        guard let enc = cb.makeComputeCommandEncoder() else {
-            throw OakError.message("Failed to create Metal compute encoder.")
-        }
-        let pip = pipelines[index]
-        // 5 array buffers (params, state, uint, scalars, stats) + config at index 5.
-        enc.setBuffers(buffers, offsets: offsets, range: 0..<5)
-        enc.setBuffer(configBuffer, offset: 0, index: OakMetalLayout.kernelConfigBufferIndex)
-        enc.setComputePipelineState(pip)
-        let tgSize = Self.phases[index].tgSize
-        if tgSize > 0 {
-            // Fixed-TG reduction kernel; one TG per output element.
-            let tgCount = max(phaseGridWidths[index], 1)
-            enc.dispatchThreadgroups(MTLSize(width: tgCount, height: 1, depth: 1),
-                                     threadsPerThreadgroup: MTLSize(width: tgSize, height: 1, depth: 1))
-        } else {
-            let tg = min(max(pip.threadExecutionWidth, 1), pip.maxTotalThreadsPerThreadgroup)
-            let w = alignedGridWidth(threadCount: phaseGridWidths[index], pipeline: pip)
-            enc.dispatchThreads(MTLSize(width: w, height: 1, depth: 1),
-                                threadsPerThreadgroup: MTLSize(width: min(tg, w), height: 1, depth: 1))
-        }
-        enc.endEncoding()
-    }
-
     private func runKernel(accumulatePhaseGpu: Bool) throws {
         let split = diagnosticGpuPhaseTiming && accumulatePhaseGpu
-
-        // Hot path: execute the pre-encoded ICB in one compute encoder. No per-phase encoder
-        // setup, no useResource calls (MTLResidencySet owns residency).
         if !split {
+            // Hot path: one command buffer, one encoder, one ICB execution per phase with a
+            // memory barrier between phases (required for RAW/WAW correctness on shared buffers).
             guard let cb = queue.makeCommandBuffer(descriptor: cbDesc) else {
                 throw OakError.message("Failed to create Metal command buffer.")
             }
             guard let enc = cb.makeComputeCommandEncoder() else {
                 throw OakError.message("Failed to create Metal compute encoder.")
             }
-            enc.executeCommandsInBuffer(indirectCommandBuffer, range: 0..<pipelines.count)
+            for i in 0..<pipelines.count {
+                enc.executeCommandsInBuffer(indirectCommandBuffer, range: i..<(i + 1))
+                if i + 1 < pipelines.count { enc.memoryBarrier(scope: [.buffers]) }
+            }
             enc.endEncoding()
             cb.commit(); cb.waitUntilCompleted()
             if let e = cb.error { throw OakError.message("Metal command failed: \(e)") }
             return
         }
         // Diagnostic path: per-phase command buffers to capture gpuStartTime/gpuEndTime.
-        // 5 array buffers at indices 0..4 (params, state, uint, scalars, stats); config at 5.
-        let buffers: [MTLBuffer?] = [paramsArena.buffer, stateArena.buffer, uintArena.buffer,
-                                     scalarsBuffer, statsBuffer]
-        let offsets = [Int](repeating: 0, count: 5)
         for i in 0..<pipelines.count {
             guard let cb = queue.makeCommandBuffer(descriptor: cbDesc) else {
                 throw OakError.message("Failed to create Metal command buffer.")
             }
-            try encodePhase(into: cb, index: i, buffers: buffers, offsets: offsets)
+            guard let enc = cb.makeComputeCommandEncoder() else {
+                throw OakError.message("Failed to create Metal compute encoder.")
+            }
+            enc.executeCommandsInBuffer(indirectCommandBuffer, range: i..<(i + 1))
+            enc.endEncoding()
             cb.commit(); cb.waitUntilCompleted()
             if let e = cb.error { throw OakError.message("Metal command failed: \(e)") }
             let s = cb.gpuStartTime, end = cb.gpuEndTime
@@ -1236,9 +926,9 @@ final class OakMetalEngine {
     }
 }
 
-// ================================================================================================
+// =================================================================================================
 // Run-metrics persistence.
-// ================================================================================================
+// =================================================================================================
 private enum RunSnapshot {
     private static let persistLock = NSLock()
 
@@ -1279,62 +969,15 @@ private enum RunSnapshot {
     fileprivate static func seedFolderName(_ seed: Int?) -> String { seed.map { "seed\($0)" } ?? "seedn" }
 }
 
-// ================================================================================================
-// Sizing: directNumEnvs (S9) — structural memory budget, no bytesPerEnv heuristic.
-// ================================================================================================
-private func directNumEnvs(obsDim: Int, actDim: Int, dPolicy: Int, device: MTLDevice) throws -> Int {
-    let width = try OakMetalEngine.executionWidth(device: device)
-    let rank = obsDim
-    // Tier 0.6: derive per-env and fixed memory from OakMetalLayout PROGRAMMATICALLY.
-    // The hand-rolled formulae below were off by sprPred and by
-    // alphaImpFeat / Beta / H which silently risked GPU memory
-    // over-subscription on large envs. Now we compute total bytes from the canonical layout
-    // so any new arena slot is automatically counted.
-    let probeStateLayout = OakMetalLayout.stateLayout(obsDim: obsDim, rank: rank,
-                                                       actDim: actDim, batch: 1, dPolicy: dPolicy)
-    let probeFixedStateLayout = OakMetalLayout.stateLayout(obsDim: obsDim, rank: rank,
-                                                            actDim: actDim, batch: 0, dPolicy: dPolicy)
-    let perEnvFloats = max(probeStateLayout.total - probeFixedStateLayout.total, 0)
-    // perEnvUints from uintLayout(batch=1) - uintLayout(batch=0).
-    let probeUintLayout = OakMetalLayout.uintLayout(rank: rank, actDim: actDim, batch: 1)
-    let probeFixedUintLayout = OakMetalLayout.uintLayout(rank: rank, actDim: actDim, batch: 0)
-    let perEnvUints = max(probeUintLayout.total - probeFixedUintLayout.total, 0)
-    let perEnvBytes = perEnvFloats * MemoryLayout<Float>.stride
-                    + perEnvUints  * MemoryLayout<UInt32>.stride
-    let paramBytes = OakMetalLayout.paramLayout(obsDim: obsDim, rank: rank, actDim: actDim,
-                                                 dPolicy: dPolicy).total
-                    * MemoryLayout<Float>.stride
-    let fixedBytes = paramBytes + probeFixedStateLayout.total * MemoryLayout<Float>.stride
-                                + probeFixedUintLayout.total  * MemoryLayout<UInt32>.stride
-    // Memory ceiling from the GPU's reported safe working-set size (Apple Metal). Structural
-    // to the hardware. This is the *upper bound* on what the agent could ever allocate.
-    let memEnvs = max(
-        (Int(device.recommendedMaxWorkingSetSize) - fixedBytes) / max(perEnvBytes, 1),
-        width)
-    // Practical concurrency ceiling (default). One TG = one row in the per-row kernels
-    // (oak_plan, oak_meta_action, …); beyond ~`width × width` rows the GPU dispatch wave is
-    // already saturated and additional rows just inflate per-batch latency without raising
-    // throughput. Set to `width × width × 2 = 2048` (= 64 SIMD groups of `width` threads,
-    // which is the empirically-tuned saturation point across M1/M2/M3 hardware: with the
-    // current default and the user's hardware, OAK_BENCH_NUM_ENVS=2048 matches the
-    // dispatch-wave knee on real env stepping). Override with OAK_MAX_PARALLEL_ENVS.
-    let practicalDefault = width * width * 2
-    let userCap = ProcessInfo.processInfo.environment["OAK_MAX_PARALLEL_ENVS"].flatMap(Int.init)
-    let ceiling = userCap.map { max($0, width) } ?? practicalDefault
-    func powerOfTwoLE(_ v: Int) -> Int { var p = 1; while p <= v / 2 { p *= 2 }; return max(p, 1) }
-    return powerOfTwoLE(min(memEnvs, ceiling))
-}
-
-// ================================================================================================
-// Run context and runner — a single-env/single-policy measurement loop, factored for clarity.
-// ================================================================================================
+// =================================================================================================
+// Run context and runner.
+// =================================================================================================
 private struct RunContext {
     let envId: String
     let policy: Policy
     let seed: Int?
     let warmup: Int
     let stopAfter: Int
-    let numEnvs: Int
     let command: String
     let includeDiagnostic: Bool
     let metricsDir: URL
@@ -1343,11 +986,11 @@ private struct RunContext {
 }
 
 private final class RunState {
-    var prevReward: [Float]
-    var prevDone: [UInt8]
-    var prevPolicyMean: [Float]   // size B · dPolicy
-    var prevScoreGrad: [Float]    // size B · dPolicy
-    var randPolicyMean: [Float]   // scratch for random-policy μ emission
+    var prevReward: Float = 0
+    var prevDone: UInt8 = 0
+    var prevPolicyMean: [Float]
+    var prevScoreGrad: [Float]
+    var randPolicyMean: [Float]
     var randSeed: UInt64
     var totalSteps = 0
     var measuredSteps = 0
@@ -1362,21 +1005,18 @@ private final class RunState {
     let actionCol: MeasuredActionCollector
 
     init(env: EnvPoolEnv, seed: Int?) {
-        prevReward = Array(repeating: 0, count: env.numEnvs)
-        prevDone = Array(repeating: 0, count: env.numEnvs)
-        prevPolicyMean = Array(repeating: 0, count: env.numEnvs * env.dPolicy)
-        prevScoreGrad  = Array(repeating: 0, count: env.numEnvs * env.dPolicy)
-        randPolicyMean = Array(repeating: 0, count: env.numEnvs * env.dPolicy)
+        prevPolicyMean = Array(repeating: 0, count: env.dPolicy)
+        prevScoreGrad  = Array(repeating: 0, count: env.dPolicy)
+        randPolicyMean = Array(repeating: 0, count: env.dPolicy)
         randSeed = UInt64(bitPattern: Int64(seed ?? Int(oakUnseededSeed)))
         actionCol = MeasuredActionCollector(discreteCount: env.actionDiscreteCount,
                                              envActionWidth: env.envActionWidth)
     }
 }
 
-
-// ================================================================================================
+// =================================================================================================
 // CLI main.
-// ================================================================================================
+// =================================================================================================
 @main struct Main {
     static func main() {
         do {
@@ -1386,10 +1026,6 @@ private final class RunState {
             case "diagnose":  try diagnose(Array(args.dropFirst()))
             case "run":       try run(args.dropFirst().first)
             default:          try run(args.first)
-            // Tier 5: `probe` subcommand removed. Probe harness (Probe.swift) was
-            // a kernel-correctness validation tool-13 deferred slots; its
-            // role is now covered by the (B) numerical-safety + (C) bounded-magnitude
-            // hard gates surfaced into bench JSON via RunHealth (see emitSnapshot).
             }
         } catch { fputs("\(error)\n", stderr); Foundation.exit(1) }
     }
@@ -1403,14 +1039,10 @@ private final class RunState {
         let seed = ProcessInfo.processInfo.environment["OAK_SEED"].flatMap(Int.init)
         let warmup = max(ProcessInfo.processInfo.environment["OAK_WARMUP_STEPS"].flatMap(Int.init) ?? 0, 0)
         let device = try metalDevice()
-        let probe = try EnvPoolEnv(id: envId, numEnvs: 1, seed: seed)
-        let defaultN = try directNumEnvs(obsDim: probe.obsDim, actDim: probe.actDim,
-                                         dPolicy: probe.dPolicy, device: device)
-        let numEnvs = max(ProcessInfo.processInfo.environment["OAK_NUM_ENVS"].flatMap(Int.init) ?? defaultN, 1)
-        let stopAfter = max(ProcessInfo.processInfo.environment["OAK_STOP_AFTER_STEPS"].flatMap(Int.init) ?? numEnvs, numEnvs)
+        let stopAfter = max(ProcessInfo.processInfo.environment["OAK_STOP_AFTER_STEPS"].flatMap(Int.init) ?? 1, 1)
         let baseline = max(ProcessInfo.processInfo.environment["OAK_BASELINE_RANDOM_STEPS"].flatMap(Int.init) ?? 0, 0)
         if policy == .oak, ProcessInfo.processInfo.environment["OAK_STOP_AFTER_STEPS"] == nil {
-            fputs("OaK: OAK_STOP_AFTER_STEPS unset (short run). See AGENTS.md (Long runs).\n", stderr)
+            fputs("OaK: OAK_STOP_AFTER_STEPS unset (short run). See AGENTS.md.\n", stderr)
         }
         let dir = RunSnapshot.resolveMetricsDirectory(explicit: nil)
         let phases: [(Policy, Int)] = policy == .oak && baseline > 0
@@ -1418,14 +1050,14 @@ private final class RunState {
         var metricsURL: URL!
         for (p, steps) in phases {
             (_, metricsURL) = try runSingle(envId: envId, policy: p, seed: seed, warmup: warmup,
-                                             stopAfter: steps, numEnvs: numEnvs, device: device,
+                                             stopAfter: steps, device: device,
                                              command: "run", metricsDir: dir)
         }
         fputs("\(metricsURL.path)\n", stderr)
     }
 
     private static func diagnose(_ args: [String]) throws {
-        var envId: String?, policy = Policy.oak, stopAfter: Int?, forcedN: Int?
+        var envId: String?, policy = Policy.oak, stopAfter: Int?
         var i = 0
         while i < args.count {
             switch args[i] {
@@ -1436,10 +1068,6 @@ private final class RunState {
                 i += 1; guard i < args.count, let v = Int(args[i]), v > 0 else {
                     throw OakError.message("Invalid value for --steps.")
                 }; stopAfter = v
-            case "--num-envs":
-                i += 1; guard i < args.count, let v = Int(args[i]), v > 0 else {
-                    throw OakError.message("Invalid value for --num-envs.")
-                }; forcedN = v
             default:
                 guard envId == nil else { throw OakError.message("Unexpected argument '\(args[i])'.") }
                 envId = args[i]
@@ -1453,24 +1081,14 @@ private final class RunState {
         let seed = ProcessInfo.processInfo.environment["OAK_SEED"].flatMap(Int.init)
         let warmup = max(ProcessInfo.processInfo.environment["OAK_DIAG_WARMUP_STEPS"].flatMap(Int.init) ?? 0, 0)
         let device = try metalDevice()
-        let probe = try EnvPoolEnv(id: resolved, numEnvs: 1, seed: seed)
-        let defaultN = try directNumEnvs(obsDim: probe.obsDim, actDim: probe.actDim,
-                                         dPolicy: probe.dPolicy, device: device)
-        // diagnose uses the same memory-derived defaultN as run; OAK_NUM_ENVS overrides.
-        let numEnvs = max(forcedN
-                          ?? ProcessInfo.processInfo.environment["OAK_NUM_ENVS"].flatMap(Int.init)
-                          ?? defaultN, 1)
-        // OAK_DIAG_STEPS overrides; default = numEnvs (one batch). Caller adjusts per goal.
         let steps = max(stopAfter
                         ?? ProcessInfo.processInfo.environment["OAK_DIAG_STEPS"].flatMap(Int.init)
-                        ?? numEnvs, numEnvs)
+                        ?? 1, 1)
         let (_, metricsURL) = try runSingle(
             envId: resolved, policy: policy, seed: seed, warmup: warmup,
-            stopAfter: steps,
-            numEnvs: numEnvs, device: device, command: "diagnose", includeDiagnostic: true)
+            stopAfter: steps, device: device, command: "diagnose", includeDiagnostic: true)
         fputs("\(metricsURL.path)\n", stderr)
     }
-
 
     private static func snapshotJsonCount(in metricsDir: URL) -> Int {
         let fm = FileManager.default
@@ -1530,27 +1148,12 @@ private final class RunState {
     private static func benchmark() throws {
         let root = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
         let seedStart = ProcessInfo.processInfo.environment["OAK_BENCH_SEED_START"].flatMap(Int.init) ?? 0
-        // Tier 3: default seedCount lowered 10 → 5 (per plan §9.1; concurrent
-        // execution makes more seeds cheap if needed but 5 is the canonical scope).
         let seedCount = ProcessInfo.processInfo.environment["OAK_BENCH_SEED_COUNT"].flatMap(Int.init) ?? 5
         let warmup = max(ProcessInfo.processInfo.environment["OAK_BENCH_WARMUP_STEPS"].flatMap(Int.init) ?? 1000, 0)
-        // Tier 3: default stopAfter raised 50K → 500K (per plan §9.1 — the new canonical
-        // workerDepth at B=1 is 500K = the full env-step count in a single continuing trajectory,
-        // not 50K/2048 = 24 effective steps per env that-14 batched bench produced).
         let stopAfter = max(ProcessInfo.processInfo.environment["OAK_BENCH_STEPS"].flatMap(Int.init) ?? 500000, 1)
         let policies = try (ProcessInfo.processInfo.environment["OAK_BENCH_POLICIES"] ?? "oak,random")
             .split(separator: ",").map { try parsePolicy(String($0)) }
         let device = try metalDevice()
-        // Tier 3: B=1 single-stream per env (BWH-orthodox per Sutton continuing-task
-        // formulation). Each agent owns one continuous trajectory per env. OAK_BENCH_NUM_ENVS
-        // override retained for back-compat with batched bench (set to 64 etc. to
-        // re-run pre-protocol for direct comparison).
-        let numEnvs = max(ProcessInfo.processInfo.environment["OAK_BENCH_NUM_ENVS"].flatMap(Int.init)
-                       ?? ProcessInfo.processInfo.environment["OAK_NUM_ENVS"].flatMap(Int.init) ?? 1, 1)
-        // Tier 3: ConcurrentBenchHarness — N work-items run in parallel via
-        // OperationQueue (one MTLCommandQueue per OakMetalEngine instance; Apple's Metal
-        // driver schedules them across the GPU's ~4096 ALUs). N=8 default (per plan §3.3);
-        // OAK_BENCH_CONCURRENCY=1 forces serial execution for debugging.
         let concurrency = max(ProcessInfo.processInfo.environment["OAK_BENCH_CONCURRENCY"].flatMap(Int.init) ?? 8, 1)
         let envOrder = try benchmarkEnvOrder(seed: seedStart)
         let expected = envOrder.count * seedCount * policies.count
@@ -1573,11 +1176,9 @@ private final class RunState {
             }
         }
         let totalWork = work.count
-        fputs("OaK benchmark: \(totalWork) work items, B=\(numEnvs), N=\(concurrency) concurrent (steps=\(stopAfter), seeds=\(seedCount))\n", stderr)
+        fputs("OaK benchmark: \(totalWork) work items, single-stream B=1, N=\(concurrency) concurrent (steps=\(stopAfter), seeds=\(seedCount))\n", stderr)
         fflush(stderr)
 
-        // Shared progress + first-error tracker. Reference type so the @Sendable closure
-        // captures the wrapper, not the mutable value (Swift 6 strict concurrency).
         final class SyncState: @unchecked Sendable {
             var completed = 0
             var firstError: Error?
@@ -1592,7 +1193,7 @@ private final class RunState {
             queue.addOperation {
                 do {
                     _ = try runSingle(envId: item.env.envId, policy: item.policy, seed: item.seed,
-                                      warmup: warmup, stopAfter: stopAfter, numEnvs: numEnvs,
+                                      warmup: warmup, stopAfter: stopAfter,
                                       device: device, command: "benchmark", metricsDir: benchDir).0
                     state.lock.lock()
                     state.completed += 1
@@ -1623,7 +1224,6 @@ private final class RunState {
         return p
     }
 
-
     private static func benchmarkEnvOrder(seed: Int) throws -> [BenchmarkEnv] {
         var buckets = [Schema: [BenchmarkEnv]]()
         for id in NativeBridge.shared.benchmarkEnvIds() {
@@ -1644,15 +1244,8 @@ private final class RunState {
         }
     }
 
-    private static func randomPolicyMean(for env: EnvPoolEnv, numEnvs: Int,
-                                          stepCount: inout UInt64,
+    private static func randomPolicyMean(env: EnvPoolEnv, stepCount: inout UInt64,
                                           floats: inout [Float]) -> PolicyMeanBatch {
-        // Tier 1: the random "policy" emits a uniform-random μ vector in [-1, 1] of
-        // width B · dPolicy. The wrapper then samples per-component (Gumbel-max for Discrete:
-        // a uniform-random μ produces a near-uniform categorical → effectively random index;
-        // structural-σ-1 Gaussian for Box: μ + N(0,1) ≈ N(0,1) → bound-clamped). This keeps
-        // the random baseline shape-equivalent to the agent and exercises the same wrapper
-        // sampling path, so the (oak vs random) comparison is a clean policy-only ablation.
         func mix(_ x: UInt64) -> UInt64 {
             var z = x &+ 0x9e3779b97f4a7c15
             z = (z ^ (z &>> 30)) &* 0xbf58476d1ce4e5b9
@@ -1667,35 +1260,32 @@ private final class RunState {
         return PolicyMeanBatch(values: floats, dPolicy: env.dPolicy)
     }
 
-    // -- single-run orchestration (setup → loop → snapshot) --------------------------------
+    // -- single-run orchestration (setup -> loop -> snapshot) --------------------------------
 
     private static func setupRun(envId: String, policy: Policy, seed: Int?, warmup: Int,
-                                 stopAfter: Int, numEnvs: Int, device: MTLDevice, command: String,
+                                 stopAfter: Int, device: MTLDevice, command: String,
                                  includeDiagnostic: Bool, metricsDir: URL?) throws -> RunContext {
         let dir = RunSnapshot.resolveMetricsDirectory(explicit: metricsDir)
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         fputs("OaK metrics \(dir.path)\n", stderr); fflush(stderr)
-        let env = try EnvPoolEnv(id: envId, numEnvs: numEnvs, seed: seed)
-        // Tier 1: agent constructor takes signal-shape params + dPolicy (env-declared).
-        // Action-space type, per-dim bounds, and per-component sampling all live in EnvPoolEnv.
+        let env = try EnvPoolEnv(id: envId, numEnvs: 1, seed: seed)
         let engine: OakMetalEngine? = policy == .oak ? try OakMetalEngine(
             obsDim: env.obsDim, baseObsDim: env.obsDim, actDim: env.actDim,
-            batch: numEnvs, rank: env.obsDim, dPolicy: env.dPolicy,
-            device: device, seed: seed, diagnosticGpuPhaseTiming: includeDiagnostic,
-            ablatedKernels: ablatedKernelsFromEnv()) : nil
+            rank: env.obsDim, dPolicy: env.dPolicy,
+            device: device, seed: seed, diagnosticGpuPhaseTiming: includeDiagnostic) : nil
         try env.reset()
         return RunContext(envId: envId, policy: policy, seed: seed, warmup: warmup,
-                          stopAfter: stopAfter, numEnvs: numEnvs, command: command,
+                          stopAfter: stopAfter, command: command,
                           includeDiagnostic: includeDiagnostic, metricsDir: dir,
                           env: env, engine: engine)
     }
 
     private static func emitSnapshot(_ ctx: RunContext, _ state: RunState, seq: Int?) -> RunMetricsFile {
-        let u = max(state.measuredSteps / ctx.numEnvs, 1)
+        let measured = max(state.measuredSteps, 1)
         let a = state.agentMsSum / 1000, e = state.envMsSum / 1000
         let h = max(state.measuredSeconds - a - e, 0)
         let merged = state.health.diagnosticSnapshot().map { b in
-            let (mm, mi) = ctx.engine?.metalPhaseGpuDiagnostics(measuredBatchSteps: u) ?? (nil, nil)
+            let (mm, mi) = ctx.engine?.metalPhaseGpuDiagnostics(measuredSteps: measured) ?? (nil, nil)
             return RunDiagnostic(
                 nonFiniteByPhase: b.nonFiniteByPhase,
                 maxAbsLatentPrediction: b.maxAbsLatentPrediction,
@@ -1712,26 +1302,25 @@ private final class RunState {
         let reason = seq == nil ? "measured_steps" : "heartbeat"
         return RunMetricsFile(
             schemaVersion: 3, command: ctx.command, envId: ctx.envId, policy: ctx.policy, seed: ctx.seed,
-            numEnvs: ctx.numEnvs, warmupSteps: ctx.warmup, stopAfterMeasuredSteps: ctx.stopAfter,
+            numEnvs: 1, warmupSteps: ctx.warmup, stopAfterMeasuredSteps: ctx.stopAfter,
             observationDim: ctx.env.obsDim, actionDim: ctx.env.actDim,
             actionDiscreteCount: ctx.env.actionDiscreteCount,
-            measuredStepCount: state.measuredSteps, measuredBatchCount: u,
+            measuredStepCount: state.measuredSteps, measuredBatchCount: measured,
             measuredSeconds: state.measuredSeconds,
-            workerDepth: state.measuredSteps / max(ctx.numEnvs, 1),
+            workerDepth: state.measuredSteps,
             stepsPerSecond: sps,
             heartbeatSequence: seq, rewardSum: state.rewardSum, doneCount: state.doneCount,
-            stopReason: reason, agentStepMsMean: state.agentMsSum / Double(u),
-            envStepMsMean: state.envMsSum / Double(u),
+            stopReason: reason, agentStepMsMean: state.agentMsSum / Double(measured),
+            envStepMsMean: state.envMsSum / Double(measured),
             discreteAction: dA, continuousAction: cA,
             health: state.health.snapshot(), diagnostic: diagOut)
     }
 
     private static func measurementLoop(_ ctx: RunContext, _ state: RunState) throws {
-        let defaultHb = ctx.command == "diagnose" ? 0 : max((ctx.stopAfter / 10 / ctx.numEnvs) * ctx.numEnvs, ctx.numEnvs)
+        let defaultHb = ctx.command == "diagnose" ? 0 : max(ctx.stopAfter / 10, 1)
         let hb = max(ProcessInfo.processInfo.environment["OAK_HEARTBEAT_STEPS"].flatMap(Int.init) ?? defaultHb, 0)
         while state.measuredSteps < ctx.stopAfter {
-            let nextTotal = state.totalSteps + ctx.numEnvs
-            let measured = nextTotal > ctx.warmup && state.totalSteps > 0
+            let measured = state.totalSteps + 1 > ctx.warmup && state.totalSteps > 0
             if measured && state.measurementStart == nil {
                 state.measurementStart = DispatchTime.now().uptimeNanoseconds
             }
@@ -1739,13 +1328,14 @@ private final class RunState {
             if let engine = ctx.engine {
                 let out = try ctx.env.observationScratch.withUnsafeBufferPointer { buf in
                     try engine.step(obs: buf, prevPolicyMean: state.prevPolicyMean,
-                                    prevScoreGrad: state.prevScoreGrad, prevReward: state.prevReward,
-                                    prevDone: state.prevDone, accumulatePhaseGpu: measured)
+                                    prevScoreGrad: state.prevScoreGrad,
+                                    prevReward: state.prevReward, prevDone: state.prevDone,
+                                    accumulatePhaseGpu: measured)
                 }
                 policyMean = out.0; agentMs = out.1; stats = out.2
             } else {
                 let t0 = DispatchTime.now().uptimeNanoseconds
-                policyMean = randomPolicyMean(for: ctx.env, numEnvs: ctx.numEnvs, stepCount: &state.randSeed,
+                policyMean = randomPolicyMean(env: ctx.env, stepCount: &state.randSeed,
                                               floats: &state.randPolicyMean)
                 agentMs = Double(DispatchTime.now().uptimeNanoseconds - t0) / 1_000_000
                 stats = nil
@@ -1753,27 +1343,26 @@ private final class RunState {
             let envStart = DispatchTime.now().uptimeNanoseconds
             try ctx.env.sampleAndStep(policyMean: policyMean.values)
             let envMs = Double(DispatchTime.now().uptimeNanoseconds - envStart) / 1_000_000
-            state.totalSteps = nextTotal
+            state.totalSteps += 1
             if measured {
-                state.measuredSteps += ctx.numEnvs
+                state.measuredSteps += 1
                 if let s = state.measurementStart {
                     state.measuredSeconds = Double(DispatchTime.now().uptimeNanoseconds - s) / 1_000_000_000
                 }
-                if hb > 0, (state.measuredSteps - ctx.numEnvs) / hb < state.measuredSteps / hb {
+                if hb > 0, (state.measuredSteps - 1) / hb < state.measuredSteps / hb {
                     state.pulse += 1
                     _ = try RunSnapshot.persist(emitSnapshot(ctx, state, seq: state.pulse), metricsDir: ctx.metricsDir)
                 }
-                state.doneCount += ctx.env.doneScratch.reduce(into: 0) { $0 += Int($1) }
-                for v in ctx.env.rewardScratch {
-                    guard v.isFinite else { throw OakError.message("Environment produced a non-finite reward.") }
-                    state.rewardSum += Double(v)
-                }
+                state.doneCount += Int(ctx.env.doneScratch[0])
+                let v = ctx.env.rewardScratch[0]
+                guard v.isFinite else { throw OakError.message("Environment produced a non-finite reward.") }
+                state.rewardSum += Double(v)
                 state.agentMsSum += agentMs; state.envMsSum += envMs
                 if let s = stats { state.health.record(s) }
-                state.actionCol.addMeasured(envAction: ctx.env.envActionScratch, numEnvs: ctx.numEnvs)
+                state.actionCol.addMeasured(envAction: ctx.env.envActionScratch)
             }
-            memcpy(&state.prevReward, ctx.env.rewardScratch, ctx.numEnvs * MemoryLayout<Float>.stride)
-            memcpy(&state.prevDone,   ctx.env.doneScratch,   ctx.numEnvs * MemoryLayout<UInt8>.stride)
+            state.prevReward = ctx.env.rewardScratch[0]
+            state.prevDone   = ctx.env.doneScratch[0]
             memcpy(&state.prevPolicyMean, policyMean.values, policyMean.values.count * MemoryLayout<Float>.stride)
             memcpy(&state.prevScoreGrad, ctx.env.scoreGradScratch,
                    ctx.env.scoreGradScratch.count * MemoryLayout<Float>.stride)
@@ -1781,13 +1370,12 @@ private final class RunState {
     }
 
     private static func runSingle(envId: String, policy: Policy, seed: Int?, warmup: Int,
-                                  stopAfter: Int, numEnvs: Int, device: MTLDevice, command: String,
+                                  stopAfter: Int, device: MTLDevice, command: String,
                                   includeDiagnostic: Bool = false, metricsDir: URL? = nil)
                                   throws -> (RunMetricsFile, URL) {
         let ctx = try setupRun(envId: envId, policy: policy, seed: seed, warmup: warmup,
-                               stopAfter: stopAfter, numEnvs: numEnvs, device: device,
-                               command: command, includeDiagnostic: includeDiagnostic,
-                               metricsDir: metricsDir)
+                               stopAfter: stopAfter, device: device, command: command,
+                               includeDiagnostic: includeDiagnostic, metricsDir: metricsDir)
         let state = RunState(env: ctx.env, seed: seed)
         try measurementLoop(ctx, state)
         let file = emitSnapshot(ctx, state, seq: nil)
