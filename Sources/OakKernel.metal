@@ -209,7 +209,10 @@ kernel void oak_encode(
                                    ctx.obsSM[o], ctx.ridge);
         z = fma(ctx.encoder[encRow + o], c, z);
     }
-    state_at(ctx, 1u - ctx.stateSlot)[feat] = isfinite(z) ? z : 0.0f;
+    // safe_w-style preservation: on non-finite, keep the previous slot's value for this feature
+    // (no zero-clamp; BWH-orthodox).
+    float prev = state_at(ctx, ctx.stateSlot)[feat];
+    state_at(ctx, 1u - ctx.stateSlot)[feat] = isfinite(z) ? z : prev;
 }
 
 // =================================================================================================
@@ -341,10 +344,14 @@ kernel void oak_plan(
         if (!isfinite(Q)) { nfPlan++; continue; }
         if (Q > bestQ) bestQ = Q;
     }
+    // RR-Subtasks eq. 19 bracket term: planAdv = max_k Q^k - V(s). Raw, no scale prior.
+    // If the option model diverges, planAdv becomes huge and learn_heads' valueW update will
+    // notice (via safe_w preservation on overflow). The Plan doesn't bound the bracket; the
+    // natural scale comes from V's own magnitude.
     float adv = (bestQ > -FLT_MAX) ? (bestQ - vCurr) : 0.0f;
-    if (!isfinite(adv)) { adv = 0.0f; nfPlan++; }
-    ctx.planAdv[0] = adv / (1.0f + fabs(adv));   // self-bound to (-1, 1).
-    if (nfPlan > 0u) ctx.counters[OAK_CNT_PLAN_NF] += nfPlan;
+    if (!isfinite(adv)) { ctx.counters[OAK_CNT_PLAN_NF] += 1u; }
+    else if (nfPlan > 0u)             { ctx.counters[OAK_CNT_PLAN_NF] += nfPlan; }
+    ctx.planAdv[0] = isfinite(adv) ? adv : ctx.planAdv[0];   // safe_w-style preserve on NF.
 }
 
 // =================================================================================================
@@ -450,7 +457,10 @@ kernel void oak_meta_action(
             dot = fma(ctx.optPolicy[(k * ctx.D + p) * ctx.R + i], curr[i], dot);
         mu = fma(ctx.chord[k], dot, mu);
     }
-    ctx.policyMean[p] = isfinite(mu) ? mu : 0.0f;
+    // safe_w-style preservation: on non-finite, keep last-step's policyMean (host's
+    // prevPolicyMean has it; the buffer slot is just left unchanged).
+    float prev = ctx.policyMean[p];
+    ctx.policyMean[p] = isfinite(mu) ? mu : prev;
 }
 
 // =================================================================================================
