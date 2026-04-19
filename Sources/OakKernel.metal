@@ -157,6 +157,9 @@ struct KernelConfig {
     uint aFeatSM, aWBar, aFeatMean, aUtilFeat, aUtilOpt, aOptFracEMA;
     // Pass 13 Tier 2: per-feature TIDBD α (SwiftSarsa 2507.19539 + MetaOptimize 2402.02342).
     uint aAlphaImpFeat, aAlphaImpBeta, aAlphaImpH;
+    // Pass 15 Tier 2: per-cumulant ψ-centering baseline = <ψ_k, featMean> over R encoder
+    // dims. K floats updated in oak_bk_admit_commit; consumed by oak_predict.
+    uint aPsiMeanBaseline;
     // Derived scalars (all structurally derived from rank · batch).
     float cap;                // rank · batch (capacity volume; ridge / α₀ derived from it)
     float alpha0;             // 1 / cap (base step size)
@@ -194,6 +197,20 @@ struct KernelScalars {
     uint  activeListIsIdentity; // Pass 13 Tier 6.2: 1 iff activeCount == E AND activeList[i] == i
                                 // for all i in [0, E). Set by oak_bk_admit_commit; consumed by
                                 // active_dot_half_auto to take the dense fast-path.
+    float rhoBaseline;          // Pass 15 Tier 2: ϖ-Relative TD baseline (Sakha-Kamalapurkar-Meyn
+                                // 2603.27874v2 IEEE CDC 2026, Theorem 2.4(ii) — first published
+                                // linear-FA stability proof for relative-TD). CUMULATIVE empirical
+                                // mean of the reward stream (not a fast EMA) — i.e., the empirical
+                                // state-action visitation distribution ϖ averaged over the entire
+                                // run history. With μ = ϖ, the mean-flow matrix Ā(λ; δ_r) is
+                                // uniformly Hurwitz for ANY δ_r ≥ 0 and any γλ < 1.
+    float vMeanBaseline;        // Pass 15 Tier 2 (FULL Sakha §1 form): <valueW, featMean> — the
+                                // expected V(s) under the empirical state distribution. Subtracted
+                                // from the main-TD residual along with rhoBaseline. The plan §2.1
+                                // names only rhoBaseline; the underlying paper §1 + research report
+                                // §11 require this term too — without it `cond(Ā)` deteriorates
+                                // unboundedly (200M MSE blowup root cause). Updated in
+                                // oak_bk_admit_commit using the most-recent valueW.
 };
 
 // KernelStats — Pass 15 Tier 1 telemetry overhaul. Layout must match Swift byte-for-byte.
@@ -223,6 +240,7 @@ struct KernelStats {
     float alphaImpStat;            // T1.3: implicit α for value/ψ heads (Kim 2510.06149)
     float alphaEncStat;            // T1.3: implicit α for encoder (centered-obs variant)
     float alphaPiStat;             // T1.3: implicit α for policy (Pass 15 T0.3 ‖scoreGrad‖² form)
+    float rhoBaselineStat;         // T2:   ϖ-RTD baseline (cumulative reward mean; Sakha 2603.27874v2)
     float oakFeatureReinitCount;   // T1.5: cumulative encoder feature reinits (was untracked)
     // Pass 15 Tier 1.4 weight-magnitude maxima (one per param buffer; canonical gate-(C) signal):
     float encoderMax, valueWMax, psiMax, optPolicyMax;
@@ -282,6 +300,8 @@ struct Ctx {
     device float  *alphaImpFeat;   // [E]  -- α_i = exp(β_i) / (1 + exp(β_i) · featSM[i])
     device float  *alphaImpBeta;   // [E]  -- β_i meta-parameter (log-step), init log(α₀)
     device float  *alphaImpH;      // [E]  -- decay trace of past Δw per feature, init 0
+    // Pass 15 Tier 2: per-cumulant ψ-centering baseline = <ψ_k, featMean> over R encoder dims.
+    device float  *psiMeanBaseline; // [K] -- subtracted from each cumulant's TD residual
 
     device KernelScalars *scalars;
 };
@@ -342,6 +362,7 @@ inline Ctx make_ctx(device half *params, device float *stateArena, device uint *
     c.alphaImpFeat = stateArena + cfg.aAlphaImpFeat;
     c.alphaImpBeta = stateArena + cfg.aAlphaImpBeta;
     c.alphaImpH    = stateArena + cfg.aAlphaImpH;
+    c.psiMeanBaseline = stateArena + cfg.aPsiMeanBaseline;
 
     c.scalars = scalars;
     return c;
@@ -753,7 +774,14 @@ kernel void oak_predict(
     uint M = ctx.M;
 
     // Main differential TD on w_main (θ_v). Implicit-TD form per 2603.21921. Implicit α
-    // (oak_reduce_alpha) + ρ̄ centering keep δ in fp32 dynamic range; no explicit projection.
+    // (oak_reduce_alpha) + ϖ-RTD centering (Pass 15 Tier 2: Sakha-Kamalapurkar-Meyn
+    // 2603.27874v2 Theorem 2.4(ii) — first published linear-FA stability proof) keep δ in
+    // fp32 dynamic range; no explicit projection. The cumulative-mean baseline rhoBaseline
+    // (μ = ϖ, the empirical state-action distribution) gives uniformly Hurwitz Ā(λ; δ_r)
+    // for any δ_r ≥ 0 and any γλ < 1 — replacing the fast-EMA rho whose track_rate floor
+    // (1/cap) was insufficient for asymptotic stability of cond(Ā). 200M MSE blowup root
+    // cause per Pass 15 stability research §1: cond(Ā) deteriorated unboundedly under
+    // continual operation; RTD fixes this structurally.
     uint dense = ctx.scalars->activeListIsIdentity;
     float vPrev = active_dot_half_auto(ctx.valueW, 0u, prev, pOff,
                                        ctx.activeList, ctx.activeCount, dense);
@@ -761,11 +789,23 @@ kernel void oak_predict(
                                        ctx.activeList, ctx.activeCount, dense);
     ctx.vCurr[gid] = vNext;
     float terminalMask = (ctx.done[gid] != 0u) ? 0.0f : 1.0f;
-    ctx.td[gid] = (ctx.reward[gid] - ctx.rho) + terminalMask * vNext - vPrev;
+    // Pass 15 Tier 2 (FULL Sakha-Kamalapurkar-Meyn 2603.27874v2 §1 form):
+    //   δ_main = (r − ρ̄) + V(s') − V(s) − δ_r · <w_main, featMean>
+    // with δ_r = 1 (BWH-structural per Theorem 2.4(ii) — any δ_r ≥ 0 works when μ = ϖ).
+    // Both rhoBaseline (cumulative reward mean) and vMeanBaseline (= <valueW, featMean>,
+    // the expected V(s) under the empirical state distribution) are precomputed in
+    // oak_bk_admit_commit and read here as scalars/arena.
+    float rhoBase   = ctx.scalars->rhoBaseline;
+    float vMeanBase = ctx.scalars->vMeanBaseline;
+    ctx.td[gid] = (ctx.reward[gid] - rhoBase) + terminalMask * vNext - vPrev - vMeanBase;
 
     // Per-cumulant SF TD under soft chord λ_prev (chordSlotPrev). RED cumulant + chord-bias.
+    // Tier 2: ψ-cumulant centering also uses rhoBaseline + per-cumulant psiMeanBaseline[k]
+    // (= <ψ_k, featMean>). Same Hurwitz argument applies to each cumulant's linear-FA
+    // TD instance — they are K parallel relative-TD problems sharing the centering
+    // baseline ϖ on the state distribution.
     device const float *chord_prev = ctx.chordSlotPrev + gid * ctx.K;
-    float reward_centered = ctx.reward[gid] - ctx.rho;
+    float reward_centered = ctx.reward[gid] - rhoBase;
     for (uint k = 0u; k < ctx.K; ++k) {
         uint psiBase = k * M;
         float chord_part = 0.0f;
@@ -781,7 +821,10 @@ kernel void oak_predict(
         uint sf_k = ctx.sf[k];
         float feat_centered = (sf_k < ctx.R) ? (curr[cOff + sf_k] - ctx.featMean[sf_k]) : 0.0f;
         float c_RED = reward_centered + feat_centered;
-        ctx.tdPsi[gid * ctx.K + k] = c_RED + terminalMask * psi_next - psi_prev;
+        // Pass 15 Tier 2: subtract per-cumulant ϖ-RTD baseline (the expected ψ_k under
+        // empirical state distribution).
+        float psiMeanBase_k = ctx.psiMeanBaseline[k];
+        ctx.tdPsi[gid * ctx.K + k] = c_RED + terminalMask * psi_next - psi_prev - psiMeanBase_k;
     }
 }
 
@@ -1829,12 +1872,46 @@ kernel void oak_bk_admit_commit(
 
     // --- commit phase ---
 
-    // Differential avg-reward: ρ̄ += track_rate(r̄ - ρ̄). Relative-TD stable under FA (2603.27874).
+    // Differential avg-reward: TWO trackers under Pass 15 Tier 2.
+    //
+    //   `rho` (fast EMA, track_rate floor at ridge=1/cap): retained for stats->rewardRate
+    //   reporting and any consumer that needs a fast-tracking estimate of recent reward.
+    //
+    //   `rhoBaseline` (CUMULATIVE Welford mean, no floor): the structurally-correct
+    //   centering baseline per Sakha-Kamalapurkar-Meyn 2603.27874v2 Theorem 2.4(ii) —
+    //   when μ = ϖ (the empirical state-action visitation distribution), Ā(λ; δ_r) is
+    //   uniformly Hurwitz for any δ_r ≥ 0, and the asymptotic covariance is uniformly
+    //   bounded. Used by oak_predict's TD centering. Update is `1/(stepCount + 1)` —
+    //   exact unbiased cumulative mean (no exponential decay, no track_rate floor;
+    //   rate → 0 as t → ∞ is intentional, freezing the asymptote of ϖ).
     float meanR = 0.0f;
     for (uint r = 0u; r < ctx.B; ++r) meanR += ctx.reward[r];
     meanR /= float(max(ctx.B, 1u));
     float invT = track_rate(ctx.stepCount, ctx.ridge);
     ctx.scalars->rho += (meanR - ctx.scalars->rho) * invT;
+    float invTcum = 1.0f / float(ctx.scalars->stepCount + 1u);
+    ctx.scalars->rhoBaseline += (meanR - ctx.scalars->rhoBaseline) * invTcum;
+
+    // Pass 15 Tier 2 (FULL Sakha §1 form): per-step recompute of the V-side and
+    // ψ-side centering baselines from the just-updated weights and the current
+    // featMean. Single-threaded — at K=32, R≤512 this is ~16K FMAs (negligible
+    // vs the 200K+ FMAs in oak_meta_action). Inv-9 compliant: derived structurally
+    // from the existing featMean Welford EMA + the just-updated linear-head weights;
+    // no tuned scalar.
+    float vMean = 0.0f;
+    for (uint i = 0u; i < R; ++i) {
+        vMean = fma(float(ctx.valueW[i]), ctx.featMean[i], vMean);
+    }
+    ctx.scalars->vMeanBaseline = vMean;
+    uint M = ctx.M;
+    for (uint k = 0u; k < ctx.K; ++k) {
+        float pMean = 0.0f;
+        uint psiBase = k * M;
+        for (uint i = 0u; i < R; ++i) {
+            pMean = fma(float(ctx.psi[psiBase + i]), ctx.featMean[i], pMean);
+        }
+        ctx.psiMeanBaseline[k] = pMean;
+    }
     // Pass 11 Tier 4: REINFORCE running-mean baseline. Tracks mean(td) so policy gradient
     // updates use (td - tdBaseline) instead of raw td. Pure variance reduction (Williams 1992,
     // Sutton-Barto Ch.13.3). The baseline is unbiased: E[scoreGrad · b] = 0 for any constant b
@@ -1891,6 +1968,7 @@ kernel void oak_bk_admit_commit(
     stats->alphaImpStat     = ctx.scalars->alphaImp;
     stats->alphaEncStat     = ctx.scalars->alphaEnc;
     stats->alphaPiStat      = ctx.scalars->alphaPi;
+    stats->rhoBaselineStat  = ctx.scalars->rhoBaseline;   // Pass 15 Tier 2: ϖ-RTD baseline
     // Pass 15 Tier 1.5: surface cumulative encoder-feature reinit count (was in
     // counters[OAK_CNT_REINIT_FEAT] but never read by the host).
     stats->oakFeatureReinitCount = float(ctx.counters[OAK_CNT_REINIT_FEAT]);
