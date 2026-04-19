@@ -37,10 +37,9 @@ struct RunHealth: Codable {
     let tdPsiNonFiniteTotal: Int?
     let utilityFeatureMean: Double?, utilityOptionMean: Double?
     let modelErrEMA: Double?, modelErrEMAPrev: Double?
-    let tdBaseline: Double?, alphaImp: Double?, alphaEnc: Double?, alphaPi: Double?
+    let alphaPi: Double?
     let oakFeatureReinitCountFinal: Int?
-    let encoderMax: Double?, valueWMax: Double?, psiMax: Double?, optPolicyMax: Double?
-    let betaWMax: Double?, omegaWMax: Double?
+    let valueWMax: Double?, psiMax: Double?, optPolicyMax: Double?
     let optRewardMax: Double?, optTransitionMax: Double?
 }
 
@@ -222,7 +221,7 @@ func decodeCString(_ buffer: [CChar]) -> String {
 // =================================================================================================
 private struct HealthAccumulator {
     private struct Slot { var sum = 0.0; var count = 0 }
-    private var slots = [Slot](repeating: Slot(), count: 15)
+    private var slots = [Slot](repeating: Slot(), count: 11)
     private var steps = 0
     private var rawNonFinite = 0, sanitizedNonFinite = 0
     private var encodeNF = 0, learnNF = 0, planNF = 0
@@ -230,8 +229,7 @@ private struct HealthAccumulator {
     private var lastRho: Double?
     private var tdPsiNF = 0
     private var oakFeatureReinitFinal = 0
-    private var encoderMax = 0.0, valueWMax = 0.0, psiMax = 0.0, optPolicyMax = 0.0
-    private var betaWMax = 0.0, omegaWMax = 0.0
+    private var valueWMax = 0.0, psiMax = 0.0, optPolicyMax = 0.0
     private var optRewardMax = 0.0, optTransitionMax = 0.0
 
     private mutating func acc(_ i: Int, _ v: Float) {
@@ -243,7 +241,6 @@ private struct HealthAccumulator {
     mutating func record(_ stats: KernelStats) {
         steps += 1
         let rr = Double(stats.rewardRate); if rr.isFinite { lastRho = rr }
-        // Slot order matches snapshot() field bindings below.
         acc(0,  stats.latentStateMeanSquare)
         acc(1,  stats.activeCount)
         acc(2,  stats.actionDeltaL2Mean)
@@ -254,11 +251,7 @@ private struct HealthAccumulator {
         acc(7,  stats.utilityOptionMean)
         acc(8,  stats.pEffectiveRank)
         acc(9,  stats.modelErrEMA)
-        acc(10, stats.modelErrEMAPrev)
-        acc(11, stats.tdBaselineStat)
-        acc(12, stats.alphaImpStat)
-        acc(13, stats.alphaEncStat)
-        acc(14, stats.alphaPiStat)
+        acc(10, stats.alphaPiStat)
         rawNonFinite += Int(stats.rawNonFiniteCount)
         sanitizedNonFinite += Int(stats.sanitizedNonFiniteCount)
         encodeNF += Int(stats.encodeNonFiniteCount)
@@ -268,12 +261,9 @@ private struct HealthAccumulator {
         oakFeatureReinitFinal = Int(stats.oakFeatureReinitCount)
         maxLat = max(maxLat, Double(stats.maxAbsLatentPrediction))
         maxPol = max(maxPol, Double(stats.maxAbsPolicyOutput))
-        encoderMax       = max(encoderMax,       Double(stats.encoderMax))
         valueWMax        = max(valueWMax,        Double(stats.valueWMax))
         psiMax           = max(psiMax,           Double(stats.psiMax))
         optPolicyMax     = max(optPolicyMax,     Double(stats.optPolicyMax))
-        betaWMax         = max(betaWMax,         Double(stats.betaWMax))
-        omegaWMax        = max(omegaWMax,        Double(stats.omegaWMax))
         optRewardMax     = max(optRewardMax,     Double(stats.optRewardMax))
         optTransitionMax = max(optTransitionMax, Double(stats.optTransitionMax))
     }
@@ -296,16 +286,12 @@ private struct HealthAccumulator {
             nonFiniteSanitizedTotal: sanitizedNonFinite,
             tdPsiNonFiniteTotal: tdPsiNF,
             utilityFeatureMean: mean(6), utilityOptionMean: mean(7),
-            modelErrEMA: mean(9), modelErrEMAPrev: mean(10),
-            tdBaseline: mean(11),
-            alphaImp: mean(12), alphaEnc: mean(13), alphaPi: mean(14),
+            modelErrEMA: mean(9), modelErrEMAPrev: nil,
+            alphaPi: mean(10),
             oakFeatureReinitCountFinal: oakFeatureReinitFinal,
-            encoderMax:   encoderMax   > 0 ? encoderMax   : nil,
             valueWMax:    valueWMax    > 0 ? valueWMax    : nil,
             psiMax:       psiMax       > 0 ? psiMax       : nil,
             optPolicyMax: optPolicyMax > 0 ? optPolicyMax : nil,
-            betaWMax:     betaWMax     > 0 ? betaWMax     : nil,
-            omegaWMax:    omegaWMax    > 0 ? omegaWMax    : nil,
             optRewardMax: optRewardMax > 0 ? optRewardMax : nil,
             optTransitionMax: optTransitionMax > 0 ? optTransitionMax : nil)
     }
@@ -370,7 +356,7 @@ private struct KernelConfig {
     var optionCount: UInt32 = 0, baseObsDim: UInt32 = 0
     var actionParamCount: UInt32 = 0
     var pEncoder: UInt32 = 0, pValue: UInt32 = 0, pPsi: UInt32 = 0
-    var pOptPolicy: UInt32 = 0, pBetaW: UInt32 = 0, pOmegaW: UInt32 = 0
+    var pOptPolicy: UInt32 = 0
     var pOptReward: UInt32 = 0, pOptTransition: UInt32 = 0
     var sObservation: UInt32 = 0, sObsMean: UInt32 = 0, sObsSM: UInt32 = 0
     var sState: UInt32 = 0
@@ -379,10 +365,7 @@ private struct KernelConfig {
     var sChord: UInt32 = 0, sChordPrev: UInt32 = 0, sBetaProb: UInt32 = 0
     var sFeatSM: UInt32 = 0, sWBar: UInt32 = 0, sFeatMean: UInt32 = 0
     var sUtilFeat: UInt32 = 0, sUtilOpt: UInt32 = 0, sUtilPlan: UInt32 = 0, sOptFracEMA: UInt32 = 0
-    var sAlphaImpFeat: UInt32 = 0, sAlphaImpBeta: UInt32 = 0, sAlphaImpH: UInt32 = 0
-    var sPsiMeanBaseline: UInt32 = 0
-    var sValueE: UInt32 = 0, sPsiE: UInt32 = 0, sPiE: UInt32 = 0
-    var sOptRewardE: UInt32 = 0, sOptTransitionE: UInt32 = 0
+    var sAlphaImpFeat: UInt32 = 0
     var sPlanAdv: UInt32 = 0
     var uDone: UInt32 = 0, uActiveMask: UInt32 = 0, uActiveList: UInt32 = 0
     var uOption: UInt32 = 0, uCounters: UInt32 = 0, uSubtaskFeatureOf: UInt32 = 0
@@ -394,11 +377,10 @@ private struct KernelScalars {
     var stepCount: UInt32 = 0, activeCount: UInt32 = 0
     var stateSlot: UInt32 = 0, optionSlot: UInt32 = 0
     var activeListIsIdentity: UInt32 = 0
-    var rho: Float = 0, vMeanBaseline: Float = 0
+    var rho: Float = 0
     var pEff: Float = 0
-    var alphaImp: Float = 0, alphaEnc: Float = 0, alphaPi: Float = 0
+    var alphaPi: Float = 0
     var modelErrEMA: Float = 0, modelErrEMAPrev: Float = 0
-    var lambdaTrace: Float = 0
 }
 
 struct KernelStats {
@@ -413,11 +395,9 @@ struct KernelStats {
     var tdPsiNonFiniteCount: Float = 0
     var pEffectiveRank: Float = 0
     var modelErrEMA: Float = 0, modelErrEMAPrev: Float = 0
-    var tdBaselineStat: Float = 0
-    var alphaImpStat: Float = 0, alphaEncStat: Float = 0, alphaPiStat: Float = 0
+    var alphaPiStat: Float = 0
     var oakFeatureReinitCount: Float = 0
-    var encoderMax: Float = 0, valueWMax: Float = 0, psiMax: Float = 0, optPolicyMax: Float = 0
-    var betaWMax: Float = 0, omegaWMax: Float = 0
+    var valueWMax: Float = 0, psiMax: Float = 0, optPolicyMax: Float = 0
     var optRewardMax: Float = 0, optTransitionMax: Float = 0
 }
 
@@ -434,14 +414,12 @@ private enum OakMetalLayout {
     static func optPolicyCount(rank: Int, dPolicy: Int) -> Int {
         optionCount(rank: rank) * dPolicy * rank
     }
-    static func betaWCount(rank: Int) -> Int { rank + optionCount(rank: rank) }
-    static func omegaWCount(rank: Int) -> Int { optionCount(rank: rank) * rank }
     static func optRewardCount(rank: Int) -> Int { optionCount(rank: rank) * rank }
     static func optTransitionCount(rank: Int) -> Int { optionCount(rank: rank) * rank * rank }
     static func encoderCount(obsDim: Int, rank: Int) -> Int { rank * max(obsDim, 1) }
 
     struct Param {
-        let encoder, value, psi, optPolicy, betaW, omegaW, optReward, optTransition, total: Int
+        let encoder, value, psi, optPolicy, optReward, optTransition, total: Int
     }
     static func paramLayout(obsDim: Int, rank: Int, dPolicy: Int) -> Param {
         var o = 0
@@ -449,12 +427,10 @@ private enum OakMetalLayout {
         let val = o; o += rank
         let psi = o; o += psiCount(rank: rank)
         let op  = o; o += optPolicyCount(rank: rank, dPolicy: dPolicy)
-        let bw  = o; o += betaWCount(rank: rank)
-        let ow  = o; o += omegaWCount(rank: rank)
         let or_ = o; o += optRewardCount(rank: rank)
         let ot  = o; o += optTransitionCount(rank: rank)
-        return Param(encoder: enc, value: val, psi: psi, optPolicy: op, betaW: bw,
-                     omegaW: ow, optReward: or_, optTransition: ot, total: o)
+        return Param(encoder: enc, value: val, psi: psi, optPolicy: op,
+                     optReward: or_, optTransition: ot, total: o)
     }
 
     struct State {
@@ -464,16 +440,12 @@ private enum OakMetalLayout {
         let chord, chordPrev, betaProb: Int
         let featSM, wBar, featMean: Int
         let utilFeat, utilOpt, utilPlan, optFracEMA: Int
-        let alphaImpFeat, alphaImpBeta, alphaImpH: Int
-        let psiMeanBaseline: Int
-        let valueE, psiE, piE: Int
-        let optRewardE, optTransitionE: Int
+        let alphaImpFeat: Int
         let planAdv: Int
         let total: Int
     }
     static func stateLayout(obsDim: Int, rank: Int, dPolicy: Int) -> State {
         let K = optionCount(rank: rank)
-        let M = concatDim(rank: rank)
         var o = 0
         let obs = o; o += obsDim
         let mean = o; o += obsDim
@@ -497,14 +469,6 @@ private enum OakMetalLayout {
         let up  = o; o += rank
         let ofE = o; o += K
         let aif = o; o += rank
-        let aib = o; o += rank
-        let aih = o; o += rank
-        let pmb = o; o += K
-        let vE  = o; o += rank
-        let pE  = o; o += K * M
-        let piE = o; o += K * dPolicy * rank
-        let orE = o; o += K * rank
-        let otE = o; o += K * rank * rank
         let pa  = o; o += 1
         return State(observation: obs, obsMean: mean, obsSM: osm, state: st,
                      prevPolicyMean: prP, policyMean: pol, scoreGrad: sg,
@@ -512,10 +476,7 @@ private enum OakMetalLayout {
                      chord: cs, chordPrev: csP, betaProb: bp,
                      featSM: fs, wBar: wb, featMean: fm,
                      utilFeat: uf, utilOpt: uo, utilPlan: up, optFracEMA: ofE,
-                     alphaImpFeat: aif, alphaImpBeta: aib, alphaImpH: aih,
-                     psiMeanBaseline: pmb,
-                     valueE: vE, psiE: pE, piE: piE,
-                     optRewardE: orE, optTransitionE: otE,
+                     alphaImpFeat: aif,
                      planAdv: pa, total: o)
     }
 
@@ -649,7 +610,6 @@ final class OakMetalEngine {
         configPointer  = configBuffer.contents().bindMemory(to: KernelConfig.self, capacity: 1)
         scalarsPointer.initialize(to: KernelScalars())
         scalarsPointer.pointee.pEff = Float(rank)
-        scalarsPointer.pointee.lambdaTrace = max(0, 1.0 - 1.0 / Float(max(rank, 1)))
         statsPointer.initialize(to: KernelStats())
         configPointer.initialize(to: KernelConfig())
 
@@ -667,8 +627,6 @@ final class OakMetalEngine {
                        + rank
                        + OakMetalLayout.psiCount(rank: rank)
                        + OakMetalLayout.optPolicyCount(rank: rank, dPolicy: dPolicy)
-                       + OakMetalLayout.betaWCount(rank: rank)
-                       + OakMetalLayout.omegaWCount(rank: rank)
                        + OakMetalLayout.optRewardCount(rank: rank)
                        + OakMetalLayout.optTransitionCount(rank: rank)
         phaseGridWidths = [
@@ -681,7 +639,7 @@ final class OakMetalEngine {
             learnTotal,         // learn_heads       [N threads]
             dPolicy,            // meta_action       [D threads]
             1,                  // bk_reduce         [1 TG x 128]
-            rank + K + 8,       // bk_utility        [(R + K + 8) threads]
+            rank + K + 5,       // bk_utility        [(R + K + 5) threads, 5 learned heads]
             1,                  // bk_admit_commit   [1 thread]
         ]
 
@@ -731,8 +689,6 @@ final class OakMetalEngine {
         sample(paramLayout.psi, OakMetalLayout.psiCount(rank: rank), invR)
         sample(paramLayout.optPolicy,
                OakMetalLayout.optPolicyCount(rank: rank, dPolicy: dPolicy), invR)
-        sample(paramLayout.betaW, OakMetalLayout.betaWCount(rank: rank), invR)
-        sample(paramLayout.omegaW, OakMetalLayout.omegaWCount(rank: rank), invR)
         sample(paramLayout.optReward, OakMetalLayout.optRewardCount(rank: rank), invR)
         sample(paramLayout.optTransition, OakMetalLayout.optTransitionCount(rank: rank), invR)
         // psi feature-attainment seed: cumulant k gets a +1/sqrt(R) coefficient on its anchor.
@@ -757,17 +713,11 @@ final class OakMetalEngine {
         let optFrac = stateArena.pointer.advanced(by: stateLayout.optFracEMA)
         for k in 0..<K { optFrac[k] = invK }
 
-        // Per-feature TIDBD seed: alpha_i = alpha_0 (recovers global-alpha behavior on step 0).
+        // Per-feature implicit alpha seed: alpha_i = alpha_0 (= 1/cap). bk_admit_commit
+        // recomputes from featSM each step (parameter-free; MetaOptimize 2402.02342).
         let initAlpha0: Float = 1.0 / Float(max(rank, 1))
-        let logAlpha0 = Float(log(Double(initAlpha0)))
         let aifPtr = stateArena.pointer.advanced(by: stateLayout.alphaImpFeat)
-        let aibPtr = stateArena.pointer.advanced(by: stateLayout.alphaImpBeta)
-        let aihPtr = stateArena.pointer.advanced(by: stateLayout.alphaImpH)
-        for i in 0..<rank {
-            aifPtr[i] = initAlpha0
-            aibPtr[i] = logAlpha0
-            aihPtr[i] = 0
-        }
+        for i in 0..<rank { aifPtr[i] = initAlpha0 }
 
         // sf seed: identity (k -> k). bk_admit_commit reranks each step.
         let sfPtr = uintArena.pointer.advanced(by: uintLayout.subtaskFeatureOf)
@@ -855,7 +805,7 @@ final class OakMetalEngine {
         c.optionCount = UInt32(K); c.baseObsDim = UInt32(baseObsDim)
         c.actionParamCount = UInt32(dPolicy)
         c.pEncoder = UInt32(p.encoder); c.pValue = UInt32(p.value); c.pPsi = UInt32(p.psi)
-        c.pOptPolicy = UInt32(p.optPolicy); c.pBetaW = UInt32(p.betaW); c.pOmegaW = UInt32(p.omegaW)
+        c.pOptPolicy = UInt32(p.optPolicy)
         c.pOptReward = UInt32(p.optReward); c.pOptTransition = UInt32(p.optTransition)
         c.sObservation = UInt32(s.observation); c.sObsMean = UInt32(s.obsMean); c.sObsSM = UInt32(s.obsSM)
         c.sState = UInt32(s.state)
@@ -867,11 +817,7 @@ final class OakMetalEngine {
         c.sFeatSM = UInt32(s.featSM); c.sWBar = UInt32(s.wBar); c.sFeatMean = UInt32(s.featMean)
         c.sUtilFeat = UInt32(s.utilFeat); c.sUtilOpt = UInt32(s.utilOpt)
         c.sUtilPlan = UInt32(s.utilPlan); c.sOptFracEMA = UInt32(s.optFracEMA)
-        c.sAlphaImpFeat = UInt32(s.alphaImpFeat); c.sAlphaImpBeta = UInt32(s.alphaImpBeta)
-        c.sAlphaImpH = UInt32(s.alphaImpH)
-        c.sPsiMeanBaseline = UInt32(s.psiMeanBaseline)
-        c.sValueE = UInt32(s.valueE); c.sPsiE = UInt32(s.psiE); c.sPiE = UInt32(s.piE)
-        c.sOptRewardE = UInt32(s.optRewardE); c.sOptTransitionE = UInt32(s.optTransitionE)
+        c.sAlphaImpFeat = UInt32(s.alphaImpFeat)
         c.sPlanAdv = UInt32(s.planAdv)
         c.uDone = UInt32(u.done); c.uActiveMask = UInt32(u.activeMask)
         c.uActiveList = UInt32(u.activeList); c.uOption = UInt32(u.option)

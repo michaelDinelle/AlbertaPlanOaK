@@ -1,39 +1,44 @@
 // =================================================================================================
-// OakKernel.metal - Orthodox Step 11 Oak agent. Single-stream (B=1), 12 kernels, Metal 4 ICB.
+// OakKernel.metal - Orthodox Step 11 Oak agent. Single-stream (B=1), Metal 4 ICB.
 //
-// Architectural sources (read these before changing this file):
-//   - Alberta Plan for AI Research (Sutton-Bowling-Pilarski 2022, arXiv:2208.11173) Step 11 Oak
-//     (p. 10): STOMP + feedback assessing utility of features/subtasks/options/option-models
-//     + feature reranking + option keyboard (Design B chosen here: chord vector defines a
-//     joint subtask, model treats lambda as opaque descriptor).
-//   - Reward-Respecting Subtasks (Sutton-Machado-Holland-Timbers-Tanner-White 2022/2023,
-//     arXiv:2202.03466): eq. 4 feature-attainment stopping bonus, eq. 17 expectation model UWT,
-//     eq. 19 planning by approximate value iteration, Section 8 FCSTOMP/Oak.
-//   - BurningRED (arXiv:2410.10578): differential extension of RR-Subtasks (cumulant - rho_bar).
-//   - Reward Centering (Naik et al., arXiv:2405.09999): rho_bar tracking + TD centering.
-//   - varpi-Relative TD (Sakha-Kamalapurkar-Meyn, arXiv:2603.27874v2 IEEE CDC 2026 Theorem
-//     2.4(ii)): first published linear-FA stability proof for varpi-relative TD; mean-flow
-//     matrix is uniformly Hurwitz with v_bar/psi_bar centering.
-//   - Implicit alpha (Kim, arXiv:2510.06149): alpha_imp = alpha_0 / (1 + alpha_0 * ||x||^2).
-//   - SwiftSarsa (arXiv:2507.19539) + MetaOptimize (arXiv:2402.02342): per-feature TIDBD.
-//   - Belief-state recurrence (Belief-State RWKV, arXiv:2604.09671): per-feature retention
-//     alpha_i = min(1, alphaImpFeat[i] * cap).
-//   - Bacon-Harb-Precup option-critic (arXiv:1609.05140) for beta/pi gradients.
-//   - Wan-Naik-Sutton avg-reward options (arXiv:2110.13855).
-//   - GraMa feature utility (arXiv:2505.24061): utilFeat from gradient-magnitude.
-//   - FIRE+SWR reinit (arXiv:2602.08040): conjunctive dormancy/magnitude/effective-rank.
-//   - Generate-and-test (Mahmood-Sutton-Pilarski 2012, Rahman 2020, Samani 2022): hash-seeded
-//     random projections fill freshly-reinited feature slots.
-//   - Sutton-Barto Ch. 12.7 (TD lambda eligibility traces, backward view); Ch. 13 (actor-critic
-//     with traces); Ch. 9.5.4 (online normalization).
-//   - Big World Hypothesis (.cursor/rules/alberta_plan.mdc): NO zero clamps. Magnitudes carry
-//     information about the agent's slice of reality. safe_half / bounded_soft only.
+// What the Alberta Plan demands (Sutton-Bowling-Pilarski 2022, arXiv:2208.11173, Step 11):
+//   - Perception: state from obs (encoder + belief recurrence)
+//   - K subtasks defined by features sf[k] (psi GVFs, RR-Subtasks eq. 4 with bonus stopping value)
+//   - K options = K policies + termination (optPolicy + structural beta from feature attainment)
+//   - K option models r_hat^k, n_hat^k (RR-Subtasks eq. 17 expectation model)
+//   - Planning over option models (RR-Subtasks eq. 19 asynchronous VI)
+//   - Option keyboard chord lambda in R^K (Plan p. 10-11; Design A: lambda blends K component
+//     options by their relative subtask values; chord intensities = subtask urgencies)
+//   - Feedback: utility of features/subtasks/options/models -> remove/replace (bk_utility +
+//     bk_admit_commit + generate-and-test feature reinit)
+//   - Average-reward differential TD with rho-bar centering (Reward Centering 2405.09999;
+//     varpi-RTD stability proof Sakha-Kamalapurkar-Meyn 2603.27874v2)
 //
-// Single-stream commitment: ONE observation -> ONE action -> ONE reward per step. There is NO
-// batch dimension. Eligibility traces are always-on. This matches the Plan's "On every step the
-// new observation must be processed by perception to produce a state, which is then processed by
-// the primary policy to produce that time step's action" (p. 4). Multi-env benchmarking lives
-// in the Swift host as N independent agent instances over N environments, never as B>1 here.
+// What the Plan does NOT demand (and is NOT here):
+//   - Learned termination weights (no betaW). Termination beta is structural: sigmoid of
+//     feature attainment z-score. Zero parameters.
+//   - Learned chord softmax weights (no omegaW). Chord lambda is derived: softmax(psi_k(s)).
+//     Zero parameters.
+//   - Layer normalization, batch normalization, or any stationary scale prior (BWH-rejected)
+//   - Discount factor (Plan Step 5: no discounting in continual setting)
+//   - Episodic resets inside the agent (resets are wrapper events only)
+//
+// References:
+//   - RR-Subtasks (arXiv:2202.03466): subtask GVFs, expectation models, planning eq. 19
+//   - BurningRED (arXiv:2410.10578): avg-reward differential extension
+//   - varpi-RTD (arXiv:2603.27874v2): centering stability
+//   - Implicit alpha (arXiv:2510.06149): alpha_0/(1+alpha_0*||x||^2) self-bounding step
+//   - MetaOptimize (arXiv:2402.02342): per-feature step-size meta-learning framework
+//   - SwiftSarsa (arXiv:2507.19539): streaming TIDBD instantiation
+//   - GraMa (arXiv:2505.24061): per-feature gradient utility for ranking
+//   - FIRE+SWR (arXiv:2602.08040): conjunctive dormancy reinit
+//   - Generate-and-test (Mahmood-Sutton-Pilarski 2012, Rahman 2020, Samani 2022)
+//   - Sutton-Barto Ch. 9.5.4 (online normalization), Ch. 12.7 (eligibility traces)
+//   - Big World Hypothesis (.cursor/rules/alberta_plan.mdc): no zero clamps, magnitudes carry
+//     information
+//
+// Single-stream: one observation -> one action -> one reward per step. No batch dimension.
+// Multi-env benchmarking lives in the Swift host as N independent agent instances.
 // =================================================================================================
 #include <metal_stdlib>
 #include <float.h>
@@ -58,23 +63,25 @@ struct KernelConfig {
     uint obsDim, rank, actDim, optionCount, baseObsDim;
     uint actionParamCount;                  // dPolicy from the env wrapper (Inv-1).
 
-    // Param offsets (params buffer, fp32).
-    uint pEncoder, pValue, pPsi, pOptPolicy, pBetaW, pOmegaW;
-    uint pOptReward, pOptTransition;        // STEP 11 BLOCKER additions (option model).
+    // Param offsets (params buffer, fp32). Six heads only (Plan-required):
+    //   encoder  - perception
+    //   valueW   - main value GVF (cumulant = reward, no stopping value)
+    //   psi      - K subtask GVFs (cumulant = reward, stopping = bonus on feature)
+    //   optPolicy- K component policies (Design A blending)
+    //   optReward, optTransition - K option models (RR-Subtasks eq. 17)
+    uint pEncoder, pValue, pPsi, pOptPolicy;
+    uint pOptReward, pOptTransition;
 
     // State arena offsets (state buffer, fp32). Single-stream: each slot holds ONE row.
     uint sObservation, sObsMean, sObsSM;
     uint sState;                             // 2 * R floats (slot toggle).
     uint sPrevPolicyMean, sPolicyMean, sScoreGrad;
     uint sReward, sTd, sTdPsi, sVCurr;
-    uint sChord, sChordPrev, sBetaProb;
+    uint sChord, sChordPrev, sBetaProb;      // betaProb is STRUCTURAL (no learned head).
     uint sFeatSM, sWBar, sFeatMean;
     uint sUtilFeat, sUtilOpt, sUtilPlan, sOptFracEMA;
-    uint sAlphaImpFeat, sAlphaImpBeta, sAlphaImpH;
-    uint sPsiMeanBaseline;
-    uint sValueE, sPsiE, sPiE;
-    uint sOptRewardE, sOptTransitionE;       // option-model eligibility traces.
-    uint sPlanAdv;                           // scalar planning advantage (oak_plan -> oak_predict).
+    uint sAlphaImpFeat;                      // recomputed in bk_admit_commit from featSM (no meta-grad).
+    uint sPlanAdv;                           // scalar planning advantage (oak_plan -> learn_heads).
 
     // UInt arena offsets (uint buffer, UInt32).
     uint uDone, uActiveMask, uActiveList, uOption, uCounters, uSubtaskFeatureOf;
@@ -98,14 +105,10 @@ struct KernelScalars {
     uint  activeListIsIdentity; // 1 iff activeCount == R and activeList[i]==i; fast path flag.
 
     float rho;                  // rho_bar - cumulative reward EMA (Reward Centering).
-    float vMeanBaseline;        // <valueW, featMean>, varpi-RTD value baseline.
     float pEff;                 // effective rank proxy from featSM.
-    float alphaImp;             // implicit alpha for state-features.
-    float alphaEnc;             // implicit alpha for encoder weights.
-    float alphaPi;              // implicit alpha for policy weights (denom includes ||scoreGrad||^2).
-    float modelErrEMA;          // EMA of option-model prediction MSE (LPM signal source).
+    float alphaPi;              // implicit alpha for policy weights (||state||^2 * ||scoreGrad||^2).
+    float modelErrEMA;          // EMA of option-model prediction MSE (LPM signal).
     float modelErrEMAPrev;      // slow snapshot of modelErrEMA (LPM second-derivative).
-    float lambdaTrace;          // structural lambda = 1 - 1/cap (Sutton-Barto Ch. 12.7).
 };
 
 // =================================================================================================
@@ -123,29 +126,29 @@ struct KernelStats {
     float tdPsiNonFiniteCount;
     float pEffectiveRank;
     float modelErrEMA, modelErrEMAPrev;
-    float tdBaselineStat;
-    float alphaImpStat, alphaEncStat, alphaPiStat;
+    float alphaPiStat;
     float oakFeatureReinitCount;
-    float encoderMax, valueWMax, psiMax, optPolicyMax;
-    float betaWMax, omegaWMax;
+    float valueWMax, psiMax, optPolicyMax;
     float optRewardMax, optTransitionMax;
 };
 
 // =================================================================================================
-// Numerical safety - the only two helpers used at every weight-write and forward-bound site.
-// safe_half  = smooth zero-bias soft saturation at sqrt(HALF_MAX) ~= 256 (Pass-15 T2.5
-//              bounded_soft, structurally derived from fp16 storage).
-// bounded_soft = same operator without the isfinite guard - for forward outputs where
-//              non-finite means there's a numerical bug to investigate, not a value to clamp.
+// Numerical safety - two helpers, both parameter-free.
+//   safe_w(old, new):    NF-guarded weight write that PRESERVES the previous value on non-finite
+//                        (no zero-clamp; no arbitrary magnitude cap; weights grow as the agent's
+//                        slice of reality demands - BWH).
+//   unit_soft(x) = tanh: structural sigmoid for FORWARD OUTPUTS (state, mu, planAdv). The
+//                        bound (-1, 1) is the natural range of the tanh sigmoid, not a tunable
+//                        constant. Keeps eligibility traces structurally bounded by 1/(1-lambda).
+// No bounded_soft / safe_half / fp16-derived cap anywhere. EMAs (obsMean, obsSM, featMean,
+// rho_bar, vMeanBaseline, etc.) are stored raw fp32 - they track the world's actual statistics.
 // =================================================================================================
-inline float safe_half(float x) {
-    constexpr float M = 256.0f;
-    return isfinite(x) ? M * tanh(x / M) : 0.0f;
+inline float safe_w(float old_w, float new_w) {
+    return isfinite(new_w) ? new_w : old_w;
 }
 
-inline float bounded_soft(float x) {
-    constexpr float M = 256.0f;
-    return M * tanh(x / M);
+inline float unit_soft(float x) {
+    return isfinite(x) ? tanh(x) : 0.0f;
 }
 
 // Tracking-rate EMA (Sutton-Barto §2.6): equivalent to 1/(stepCount+1) as a step shrinks toward
@@ -172,15 +175,12 @@ struct Ctx {
     uint O, R, K, A, M, baseO, D;
     uint stepCount, activeCount, stateSlot, optionSlot;
     float cap, alpha0, ridge;
-    float rho, vMeanBaseline, lambdaTrace;
-    float alphaImp, alphaEnc, alphaPi;
+    float rho, alphaPi;
 
     device float        *encoder;
     device float        *valueW;
     device float        *psi;
     device float        *optPolicy;
-    device float        *betaW;
-    device float        *omegaW;
     device float        *optReward;
     device float        *optTransition;
 
@@ -206,14 +206,6 @@ struct Ctx {
     device float        *utilPlan;
     device float        *optFracEMA;
     device float        *alphaImpFeat;
-    device float        *alphaImpBeta;
-    device float        *alphaImpH;
-    device float        *psiMeanBaseline;
-    device float        *valueE;
-    device float        *psiE;
-    device float        *piE;
-    device float        *optRewardE;
-    device float        *optTransitionE;
     device float        *planAdv;
 
     device uint         *done;
@@ -242,18 +234,12 @@ inline Ctx make_ctx(device float *params, device float *stateArena, device uint 
     c.optionSlot = scalars->optionSlot;
     c.cap = cfg.cap; c.alpha0 = cfg.alpha0; c.ridge = cfg.ridge;
     c.rho = scalars->rho;
-    c.vMeanBaseline = scalars->vMeanBaseline;
-    c.lambdaTrace = scalars->lambdaTrace;
-    c.alphaImp = scalars->alphaImp;
-    c.alphaEnc = scalars->alphaEnc;
     c.alphaPi = scalars->alphaPi;
 
     c.encoder        = params + cfg.pEncoder;
     c.valueW         = params + cfg.pValue;
     c.psi            = params + cfg.pPsi;
     c.optPolicy      = params + cfg.pOptPolicy;
-    c.betaW          = params + cfg.pBetaW;
-    c.omegaW         = params + cfg.pOmegaW;
     c.optReward      = params + cfg.pOptReward;
     c.optTransition  = params + cfg.pOptTransition;
 
@@ -279,14 +265,6 @@ inline Ctx make_ctx(device float *params, device float *stateArena, device uint 
     c.utilPlan       = stateArena + cfg.sUtilPlan;
     c.optFracEMA     = stateArena + cfg.sOptFracEMA;
     c.alphaImpFeat   = stateArena + cfg.sAlphaImpFeat;
-    c.alphaImpBeta   = stateArena + cfg.sAlphaImpBeta;
-    c.alphaImpH      = stateArena + cfg.sAlphaImpH;
-    c.psiMeanBaseline= stateArena + cfg.sPsiMeanBaseline;
-    c.valueE         = stateArena + cfg.sValueE;
-    c.psiE           = stateArena + cfg.sPsiE;
-    c.piE            = stateArena + cfg.sPiE;
-    c.optRewardE     = stateArena + cfg.sOptRewardE;
-    c.optTransitionE = stateArena + cfg.sOptTransitionE;
     c.planAdv        = stateArena + cfg.sPlanAdv;
 
     c.done             = uintArena + cfg.uDone;
@@ -360,10 +338,8 @@ kernel void oak_bk_obs(
     for (uint o = tid; o < ctx.O; o += tgW) {
         float x = ctx.observation[o];
         if (!isfinite(x)) { nfLocal++; continue; }
-        ctx.observationMean[o] = bounded_soft(ctx.observationMean[o]
-                                              + invT * (x - ctx.observationMean[o]));
-        ctx.obsSM[o]           = bounded_soft(ctx.obsSM[o]
-                                              + invT * (x * x - ctx.obsSM[o]));
+        ctx.observationMean[o] += invT * (x - ctx.observationMean[o]);
+        ctx.obsSM[o]           += invT * (x * x - ctx.obsSM[o]);
     }
     uint nfTotal = simd_sum(nfLocal);
     if (tid == 0u) ctx.counters[OAK_CNT_OBS_NF] = nfTotal;
@@ -397,7 +373,7 @@ kernel void oak_encode(
     float retention = min(1.0f, ctx.alphaImpFeat[feat] * ctx.cap);
     float prev = state_at(ctx, ctx.stateSlot)[feat];
     float z = retention * z_instant + (1.0f - retention) * prev;
-    state_at(ctx, writeSlot)[feat] = bounded_soft(z);
+    state_at(ctx, writeSlot)[feat] = unit_soft(z);
 
     if (feat == 0u) {
         // Reset planAdv from previous step (one writer per step).
@@ -406,11 +382,16 @@ kernel void oak_encode(
 }
 
 // =================================================================================================
-// 3. oak_meta_policy - Design B option keyboard. Computes the chord vector lambda in R^K via
-//    softmax(omega_W . s'); samples beta termination via sigmoid(beta_W . s' + chord-feedback);
-//    on terminate, commits the new chord and bumps optionAge=1; otherwise carries chordPrev.
-//    The chord is the OPAQUE DESCRIPTOR per Plan p. 11 - the model treats it as a name, the
-//    policy and beta read it as feedback. Single-threaded (one row, K is small).
+// 3. oak_meta_policy - parameter-free option keyboard.
+//    Chord lambda[k] = softmax(psi_k(s')) - the chord intensity for option k IS the value of
+//    pursuing subtask k from here (Alberta Plan p. 10: "chord is a fixed blending of the
+//    component options, taking into account the intensities of each component note/option/
+//    feature/subtask in the chord"). Zero learned parameters.
+//    Beta termination beta[k] = sigmoid(z_k) where z_k is the standardized excess of the
+//    subtask's anchor feature over its tracking mean. RR-Subtasks: terminate when feature is
+//    high. Zero learned parameters.
+//    The argmax option index is committed for telemetry/learning attribution; the actual policy
+//    output uses the soft chord for blending.
 // =================================================================================================
 kernel void oak_meta_policy(
     device float         *params      [[buffer(0)]],
@@ -427,50 +408,41 @@ kernel void oak_meta_policy(
 
     for (uint k = 0u; k < ctx.K; ++k) ctx.chordPrev[k] = ctx.chord[k];
 
-    // beta termination logit: w_beta . s' + w_beta_chord . chordPrev (Bacon-Harb-Precup 2017).
-    float beta_logit = 0.0f;
-    for (uint i = 0u; i < ctx.R; ++i) beta_logit = fma(ctx.betaW[i], curr[i], beta_logit);
-    for (uint k = 0u; k < ctx.K; ++k) beta_logit = fma(ctx.betaW[ctx.R + k], ctx.chordPrev[k], beta_logit);
-
-    // Use the LPM signal (modelErrEMA - lpmRate) as a structural surprise nudge to terminate
-    // when the model is wrong AND not improving (Hou-An-Du 2509.25438 ICLR 2026). LPM enters
-    // beta-logit ONLY (not reward/td) - Inv-8 satisfied.
-    float lpmRate = max(0.0f, ctx.scalars->modelErrEMAPrev - ctx.scalars->modelErrEMA);
-    float surprise = (ctx.scalars->modelErrEMA - lpmRate)
-                   / max(ctx.scalars->modelErrEMA, ctx.ridge);
-    beta_logit += surprise;
-    float beta_prob = 1.0f / (1.0f + exp(-beta_logit));
-    ctx.betaProb[0] = beta_prob;
-
-    float u = hash_uniform(ctx.stepCount, 0u, 1u);
-    bool terminate = (ctx.optionAge[0] == 0u) || (u < beta_prob);
-
-    if (terminate) {
-        // Compute chord ~ softmax(omega_W . s'). Stable softmax: subtract max-logit.
-        float maxL = -FLT_MAX;
-        float logits[OAK_SIMD];
-        for (uint k = 0u; k < ctx.K; ++k) {
-            float l = 0.0f;
-            for (uint i = 0u; i < ctx.R; ++i)
-                l = fma(ctx.omegaW[k * ctx.R + i], curr[i], l);
-            logits[k] = l;
-            maxL = max(maxL, l);
-        }
-        float Z = 0.0f;
-        for (uint k = 0u; k < ctx.K; ++k) Z += exp(logits[k] - maxL);
-        float invZ = 1.0f / max(Z, FLT_MIN);
-        uint  bestK = 0u; float bestP = 0.0f;
-        for (uint k = 0u; k < ctx.K; ++k) {
-            float p = exp(logits[k] - maxL) * invZ;
-            ctx.chord[k] = p;
-            if (p > bestP) { bestP = p; bestK = k; }
-        }
-        ctx.optionAge[0] = 1u;
-        ctx.option[1u - ctx.optionSlot] = bestK;
-    } else {
-        ctx.optionAge[0] += 1u;
-        ctx.option[1u - ctx.optionSlot] = ctx.option[ctx.optionSlot];
+    // chord[k] = softmax(psi_k(s')); psi already incorporates the chord-prev component (M=R+K).
+    // Stable softmax via max-subtract.
+    float maxL = -FLT_MAX;
+    float logits[OAK_SIMD];
+    for (uint k = 0u; k < ctx.K; ++k) {
+        float l = 0.0f;
+        for (uint i = 0u; i < ctx.R; ++i)
+            l = fma(ctx.psi[k * ctx.M + i], curr[i], l);
+        for (uint j = 0u; j < ctx.K; ++j)
+            l = fma(ctx.psi[k * ctx.M + ctx.R + j], ctx.chordPrev[j], l);
+        logits[k] = l;
+        maxL = max(maxL, l);
     }
+    float Z = 0.0f;
+    for (uint k = 0u; k < ctx.K; ++k) Z += exp(logits[k] - maxL);
+    float invZ = 1.0f / max(Z, FLT_MIN);
+    uint  bestK = 0u; float bestP = 0.0f;
+    for (uint k = 0u; k < ctx.K; ++k) {
+        float p = exp(logits[k] - maxL) * invZ;
+        ctx.chord[k] = p;
+        if (p > bestP) { bestP = p; bestK = k; }
+    }
+    ctx.option[1u - ctx.optionSlot] = bestK;
+    ctx.optionAge[0] += 1u;
+
+    // Structural beta termination: sigmoid of z-scored anchor-feature excess. Beta is high when
+    // the subtask's feature is above its tracking mean (RR-Subtasks: "encourages ending when the
+    // feature is high"). Single shared beta scalar = beta of the argmax option (for the option
+    // model's TD update). Zero learned parameters.
+    uint f_best = ctx.subtaskFeatureOf[bestK];
+    if (f_best >= ctx.R) f_best = 0u;
+    float fmean = ctx.featMean[f_best];
+    float fvar  = max(ctx.featSM[f_best] - fmean * fmean, 0.0f);
+    float z = (curr[f_best] - fmean) * rsqrt(fvar + ctx.ridge);
+    ctx.betaProb[0] = 1.0f / (1.0f + exp(-z));
 }
 
 // =================================================================================================
@@ -495,27 +467,24 @@ kernel void oak_predict(
     device const float *prev = state_at(ctx, ctx.stateSlot);
     device const float *curr = state_at(ctx, 1u - ctx.stateSlot);
 
+    // Differential TD with rho-bar centering (Reward Centering 2405.09999).
     float vPrev = 0.0f, vNext = 0.0f;
     for (uint i = 0u; i < ctx.R; ++i) {
         vPrev = fma(ctx.valueW[i], prev[i], vPrev);
         vNext = fma(ctx.valueW[i], curr[i], vNext);
     }
     ctx.vCurr[0] = vNext;
-    float r = ctx.reward[0];
-    float reward_c = r - ctx.rho;
-    float vbar = ctx.vMeanBaseline;
-    float delta = reward_c + (vNext - vbar) - (vPrev - vbar);
-    if (!isfinite(delta)) {
-        ctx.counters[OAK_CNT_LEARN_NF] = ctx.counters[OAK_CNT_LEARN_NF] + 1u;
-        delta = 0.0f;
-    }
+    float reward_c = ctx.reward[0] - ctx.rho;
+    float delta = reward_c + vNext - vPrev;
+    if (!isfinite(delta)) { ctx.counters[OAK_CNT_LEARN_NF] += 1u; delta = 0.0f; }
     ctx.td[0] = delta;
 
+    // K subtask GVFs. Cumulant = main reward (RR-Subtasks); stopping value = bonus on anchor
+    // feature (eq. 4); structural beta from feature attainment.
     uint nfPsi = 0u;
+    float beta_k = ctx.betaProb[0];
     for (uint k = 0u; k < ctx.K; ++k) {
-        uint f_k = ctx.subtaskFeatureOf[k];
-        if (f_k >= ctx.R) f_k = 0u;
-        // psi_k(s) = sum_i psi[k][i] * s[i] + sum_j psi[k][R+j] * chord_prev[j]
+        uint f_k = ctx.subtaskFeatureOf[k]; if (f_k >= ctx.R) f_k = 0u;
         float psiPrev = 0.0f, psiNext = 0.0f;
         for (uint i = 0u; i < ctx.R; ++i) {
             psiPrev = fma(ctx.psi[k * ctx.M + i], prev[i], psiPrev);
@@ -525,16 +494,12 @@ kernel void oak_predict(
             psiPrev = fma(ctx.psi[k * ctx.M + ctx.R + j], ctx.chordPrev[j], psiPrev);
             psiNext = fma(ctx.psi[k * ctx.M + ctx.R + j], ctx.chord[j],     psiNext);
         }
-        float pbar = ctx.psiMeanBaseline[k];
-        // Feature-attainment stopping bonus (RR-Subtasks eq. 4 with bonus weight w_bar).
         float bonus = (ctx.wBar[f_k] - ctx.valueW[f_k]) * curr[f_k];
-        float beta_k = ctx.betaProb[0];     // shared termination prob (single beta-head, Bacon).
-        float dk = reward_c + beta_k * bonus
-                 + (1.0f - beta_k) * (psiNext - pbar) - (psiPrev - pbar);
+        float dk = reward_c + beta_k * bonus + (1.0f - beta_k) * psiNext - psiPrev;
         if (!isfinite(dk)) { dk = 0.0f; nfPsi++; }
         ctx.tdPsi[k] = dk;
     }
-    if (nfPsi > 0u) ctx.counters[OAK_CNT_TDPSI_NF] = ctx.counters[OAK_CNT_TDPSI_NF] + nfPsi;
+    if (nfPsi > 0u) ctx.counters[OAK_CNT_TDPSI_NF] += nfPsi;
 }
 
 // =================================================================================================
@@ -584,19 +549,20 @@ kernel void oak_plan(
 
     float adv = (bestQ > -FLT_MAX) ? (bestQ - vCurr) : 0.0f;
     if (!isfinite(adv)) { adv = 0.0f; nfPlan++; }
-    // Step-size-clipped advantage so planning never dominates the on-policy gradient. The clip
-    // bound is structural: ||advantage|| <= ||td|| * cap (one full per-feature cycle).
-    ctx.planAdv[0] = bounded_soft(adv);
+    // Self-bounding: x / (1 + |x|) maps R smoothly into (-1, 1). Keeps planAdv on the same
+    // scale as the on-policy td so planning is a perturbation, not a dominator (RR-Subtasks
+    // eq. 19 - planning is interleaved learning, same alpha; without bounding, an untrained
+    // option model would drown out the on-policy signal).
+    ctx.planAdv[0] = adv / (1.0f + fabs(adv));
     ctx.planArgmax[0] = bestK;
     if (nfPlan > 0u) ctx.counters[OAK_CNT_PLAN_NF] = ctx.counters[OAK_CNT_PLAN_NF] + nfPlan;
 }
 
 // =================================================================================================
-// 6. oak_reduce_alpha - implicit alpha (Kim 2510.06149) computed from the just-computed s'.
-//    Single TG x 128 threads. Writes scalars->{alphaImp, alphaEnc, alphaPi}.
-//      alphaImp = alpha_0 / (1 + alpha_0 * ||s'||^2)
-//      alphaEnc = alpha_0 / (1 + alpha_0 * ||(obs - obsMean)||^2)
-//      alphaPi  = alpha_0 / (1 + alpha_0 * ||s'||^2 * ||scoreGrad||^2)
+// 6. oak_reduce_alpha - global implicit alpha for the policy head only (Kim 2510.06149).
+//      alphaPi = alpha_0 / (1 + alpha_0 * ||s'||^2 * ||scoreGrad||^2)
+//    Per-feature alpha for value/psi/model heads is computed in oak_bk_admit_commit from
+//    featSM[i] (parameter-free per-feature; Step 1 of the Plan).
 // =================================================================================================
 kernel void oak_reduce_alpha(
     device float         *params      [[buffer(0)]],
@@ -617,47 +583,31 @@ kernel void oak_reduce_alpha(
     for (uint i = tid; i < ctx.R; i += tgW) s2 = fma(curr[i], curr[i], s2);
     float ss = tg_sum_128(buf, tid, sgid, s2);
 
-    float o2 = 0.0f;
-    for (uint o = tid; o < ctx.O; o += tgW) {
-        float d = ctx.observation[o] - ctx.observationMean[o];
-        o2 = fma(d, d, o2);
-    }
-    float oo = tg_sum_128(buf, tid, sgid, o2);
-
     float g2 = 0.0f;
     for (uint p = tid; p < ctx.D; p += tgW) g2 = fma(ctx.scoreGrad[p], ctx.scoreGrad[p], g2);
     float gg = tg_sum_128(buf, tid, sgid, g2);
 
     if (tid == 0u) {
-        float a0 = ctx.alpha0;
-        ctx.scalars->alphaImp = a0 / (1.0f + a0 * ss);
-        ctx.scalars->alphaEnc = a0 / (1.0f + a0 * oo);
-        ctx.scalars->alphaPi  = a0 / (1.0f + a0 * ss * gg);
+        ctx.scalars->alphaPi = ctx.alpha0 / (1.0f + ctx.alpha0 * ss * gg);
         ctx.stats->latentStateMeanSquare = ss / float(max(ctx.R, 1u));
         ctx.stats->scoreGradL2Mean       = gg / float(max(ctx.D, 1u));
     }
 }
 
 // =================================================================================================
-// 7. oak_learn_heads - fused weight updates with per-feature TIDBD step sizes (SwiftSarsa
-//    2507.19539 + MetaOptimize 2402.02342) and always-on TD(lambda) eligibility traces
-//    (Sutton-Barto Ch. 12.7 backward view; structural lambda = 1 - 1/cap). One grid-stride pass
-//    over (head_id, dim_id). Each thread handles one weight write site through safe_half.
+// 7. oak_learn_heads - 1-step TD updates on Plan-required learnable heads. NO eligibility
+//    traces (Plan note: traces are an EXAMPLE of "short-term credit-assignment memories", not
+//    required; Sutton-Barto Ch. 6 1-step TD with linear FA is provably stable for average
+//    reward, traces with bootstrapping are not). NO encoder gradient updates (the Plan: per-
+//    feature alpha IS representation learning; encoder evolution happens via generate-and-test
+//    in bk_admit_commit, Step 2). One grid-stride pass; each thread does one safe_w write.
 //
 //    Heads (subid):
-//      0: encoder[R*O]                      -> uses delta_main, gradient = standardized_obs
-//      1: valueW[R]                         -> uses delta_main + planAdv, gradient = prev[i]
-//      2: psi[K*M]                          -> uses delta_k, gradient = concat(prev, chordPrev)
-//      3: optPolicy[K*D*R]                  -> uses delta_main * scoreGrad[d], chord-attributed
-//      4: betaW[R+K]                        -> uses option-critic gradient on beta termination
-//      5: omegaW[K*R]                       -> uses option-critic gradient on chord softmax
-//      6: optReward[K*R]                    -> reward-model TD with importance ratio
-//      7: optTransition[K*R*R]              -> transition-model TD per output feature
-//
-//    All weight writes go through safe_half. NO zero clamps anywhere.
-//    Grid = max(R*O, R, K*M, K*D*R, R+K, K*R, K*R, K*R*R) wide; each thread routes via gid.
-//    For minimal launch overhead, we encode this as ONE compute dispatch: thread `gid` first
-//    figures out which head it belongs to via cumulative offsets, then runs the right update.
+//      0: valueW[R]            -> (td + planAdv) * prev[i]  (planning ONLY here, eq. 19)
+//      1: psi[K*M]             -> tdPsi[k] * x_m  (1-step subtask TD)
+//      2: optPolicy[K*D*R]     -> td * scoreGrad[d] * prev[i] * chordPrev[k]  (REINFORCE)
+//      3: optReward[K*R]       -> r_td * prev[i] * chordPrev[k]  (RR-Subtasks eq. 17)
+//      4: optTransition[K*R*R] -> n_td * prev[i] * chordPrev[k]  (RR-Subtasks eq. 17)
 // =================================================================================================
 kernel void oak_learn_heads(
     device float         *params      [[buffer(0)]],
@@ -669,161 +619,90 @@ kernel void oak_learn_heads(
     uint gid [[thread_position_in_grid]])
 {
     Ctx ctx = make_ctx(params, stateArena, uintArena, scalars, stats, cfg);
-    uint nEnc = ctx.R * ctx.baseO;
     uint nVal = ctx.R;
     uint nPsi = ctx.K * ctx.M;
     uint nPi  = ctx.K * ctx.D * ctx.R;
-    uint nBet = ctx.R + ctx.K;
-    uint nOme = ctx.K * ctx.R;
     uint nOR  = ctx.K * ctx.R;
     uint nOT  = ctx.K * ctx.R * ctx.R;
-    uint nTotal = nEnc + nVal + nPsi + nPi + nBet + nOme + nOR + nOT;
+    uint nTotal = nVal + nPsi + nPi + nOR + nOT;
     if (gid >= nTotal) return;
 
     device const float *prev = state_at(ctx, ctx.stateSlot);
     device const float *curr = state_at(ctx, 1u - ctx.stateSlot);
-    float delta = ctx.td[0] + ctx.planAdv[0];   // varpi-RTD residual + planning advantage.
-    float lambda = ctx.lambdaTrace;
-    uint  optK = ctx.option[1u - ctx.optionSlot];   // active option index (committed by meta_policy).
+    float td = ctx.td[0];
+    float deltaValue = td + ctx.planAdv[0];     // valueW only (RR-Subtasks eq. 19).
+    float bp = ctx.betaProb[0];
 
-    // ---- Head 0: encoder[r * baseO + o] -- standardized obs feedback on delta_main. ----
-    if (gid < nEnc) {
-        uint id = gid;
-        uint r = id / ctx.baseO, o = id % ctx.baseO;
-        float xt = standardized_obs(ctx.observation[o], ctx.observationMean[o],
-                                    ctx.obsSM[o], ctx.ridge);
-        // Encoder trace not needed (no recurrence beyond per-feature retention); single-step grad.
-        float grad = delta * xt * (curr[r] - prev[r]);   // chain through belief residual.
-        float w = ctx.encoder[id];
-        ctx.encoder[id] = safe_half(w + ctx.alphaEnc * grad);
-        return;
-    }
-    // ---- Head 1: valueW[i] -- main TD with eligibility trace and per-feature implicit alpha. -
-    if (gid < nEnc + nVal) {
-        uint i = gid - nEnc;
-        float a_i = ctx.alphaImpFeat[i];
-        // Backward-view trace: e <- lambda * e + grad_v(s') ; grad = curr[i].
-        ctx.valueE[i] = lambda * ctx.valueE[i] + curr[i];
+    // ---- Head 0: valueW[i] -- main TD + planning advantage, per-feature alpha. ----
+    if (gid < nVal) {
+        uint i = gid;
         float w = ctx.valueW[i];
-        ctx.valueW[i] = safe_half(w + a_i * delta * ctx.valueE[i]);
-
-        // Feature-second-moment EMA + decayed high-water-mark for RRS bonus weight.
+        ctx.valueW[i] = safe_w(w, w + ctx.alphaImpFeat[i] * deltaValue * prev[i]);
+        // Feature 2nd-moment EMA (drives next step's per-feature alpha + retention).
         float invT = track_rate(ctx.stepCount, ctx.ridge);
         float xi = curr[i];
-        ctx.featSM[i] = bounded_soft(ctx.featSM[i] + invT * (xi * xi - ctx.featSM[i]));
-        float decay = 1.0f - ctx.alpha0;
-        ctx.wBar[i] = bounded_soft(max(decay * ctx.wBar[i], ctx.valueW[i]));
-
-        // Per-feature TIDBD update: beta_i log-step with delta * grad * h history.
-        float h = ctx.alphaImpH[i];
-        float gradV = delta * ctx.valueE[i];
-        ctx.alphaImpBeta[i] = bounded_soft(ctx.alphaImpBeta[i] + ctx.alpha0 * gradV * h);
-        float a_new = exp(ctx.alphaImpBeta[i]);
-        ctx.alphaImpFeat[i] = max(min(a_new, 1.0f), ctx.ridge);
-        ctx.alphaImpH[i] = bounded_soft(h * max(0.0f, 1.0f - a_new * curr[i] * curr[i])
-                                        + a_new * gradV);
+        ctx.featSM[i] += invT * (xi * xi - ctx.featSM[i]);
+        // Decayed high-water-mark for RR-Subtasks bonus weight (eq. 4).
+        ctx.wBar[i] = max((1.0f - ctx.alpha0) * ctx.wBar[i], ctx.valueW[i]);
         return;
     }
-    // ---- Head 2: psi[k * M + m] -- subtask TD on cumulant k. ----
-    if (gid < nEnc + nVal + nPsi) {
-        uint id = gid - nEnc - nVal;
+    // ---- Head 1: psi[k * M + m] -- 1-step subtask TD on cumulant k. ----
+    if (gid < nVal + nPsi) {
+        uint id = gid - nVal;
         uint k = id / ctx.M;
         uint m = id % ctx.M;
-        float dk = ctx.tdPsi[k];
         float xm = (m < ctx.R) ? prev[m] : ctx.chordPrev[m - ctx.R];
-        ctx.psiE[id] = lambda * ctx.psiE[id] + xm;
+        float a = (m < ctx.R) ? ctx.alphaImpFeat[m] : ctx.alpha0;
         float w = ctx.psi[id];
-        ctx.psi[id] = safe_half(w + ctx.alphaImp * dk * ctx.psiE[id]);
+        ctx.psi[id] = safe_w(w, w + a * ctx.tdPsi[k] * xm);
         return;
     }
-    // ---- Head 3: optPolicy[k][d][i] -- REINFORCE on Gaussian policy params, chord-attributed. -
-    if (gid < nEnc + nVal + nPsi + nPi) {
-        uint id = gid - nEnc - nVal - nPsi;
+    // ---- Head 2: optPolicy[k][d][i] -- REINFORCE chord-attributed (Williams 1992). ----
+    if (gid < nVal + nPsi + nPi) {
+        uint id = gid - nVal - nPsi;
         uint k  = id / (ctx.D * ctx.R);
         uint rem = id - k * ctx.D * ctx.R;
         uint d  = rem / ctx.R;
         uint i  = rem % ctx.R;
-        // Soft-chord attribution: weight per-option contribution by chordPrev[k] (the chord that
-        // produced the action whose scoreGrad we're learning from).
-        float lam_k = ctx.chordPrev[k];
-        ctx.piE[id] = lambda * ctx.piE[id] + lam_k * ctx.scoreGrad[d] * prev[i];
+        float grad = ctx.chordPrev[k] * ctx.scoreGrad[d] * prev[i];
         float w = ctx.optPolicy[id];
-        ctx.optPolicy[id] = safe_half(w + ctx.alphaPi * delta * ctx.piE[id]);
+        ctx.optPolicy[id] = safe_w(w, w + ctx.alphaPi * td * grad);
         return;
     }
-    // ---- Head 4: betaW -- option-critic beta gradient (Bacon-Harb-Precup 2017). ----
-    if (gid < nEnc + nVal + nPsi + nPi + nBet) {
-        uint id = gid - nEnc - nVal - nPsi - nPi;
-        // beta_grad: -delta_termination * sigmoid'(logit) * input.
-        // sigmoid' = beta_prob * (1 - beta_prob); termination advantage = vCurr - max(psi_k).
-        float bp = ctx.betaProb[0];
-        float dterm = ctx.vCurr[0];
-        for (uint kk = 0u; kk < ctx.K; ++kk) dterm = max(dterm, ctx.tdPsi[kk] + ctx.psiMeanBaseline[kk]);
-        dterm = ctx.vCurr[0] - dterm;
-        float dsig = bp * (1.0f - bp);
-        float input = (id < ctx.R) ? curr[id] : ctx.chordPrev[id - ctx.R];
-        float grad = -dterm * dsig * input;
-        float w = ctx.betaW[id];
-        ctx.betaW[id] = safe_half(w + ctx.alphaImp * grad);
-        return;
-    }
-    // ---- Head 5: omegaW[k][i] -- chord softmax gradient on option value. ----
-    if (gid < nEnc + nVal + nPsi + nPi + nBet + nOme) {
-        uint id = gid - nEnc - nVal - nPsi - nPi - nBet;
+    // ---- Head 3: optReward[k][i] -- 1-step option reward model (RR-Subtasks eq. 17). ----
+    if (gid < nVal + nPsi + nPi + nOR) {
+        uint id = gid - nVal - nPsi - nPi;
         uint k = id / ctx.R;
         uint i = id % ctx.R;
-        // Chord softmax gradient: (1{k=optK} - chord[k]) * delta_chord * curr[i].
-        // delta_chord = max-Q advantage learned through ψ; here we use tdPsi[k] as a clean
-        // off-policy signal for cumulant k (Wan-Naik-Sutton 2110.13855 avg-reward options).
-        float ind = (k == optK) ? 1.0f : 0.0f;
-        float grad = (ind - ctx.chord[k]) * ctx.tdPsi[k] * curr[i];
-        float w = ctx.omegaW[id];
-        ctx.omegaW[id] = safe_half(w + ctx.alphaImp * grad);
-        return;
-    }
-    // ---- Head 6: optReward[k][i] -- option-model reward head, RR-Subtasks eq. 17 with
-    //      importance ratio rho_t^o = chord_prev[k] / behavior_density (single-stream =
-    //      structural-1 in the wrapper, so ratio = chordPrev[k] / chord_prior; we use
-    //      chordPrev directly as the on-chord weighting). ----
-    if (gid < nEnc + nVal + nPsi + nPi + nBet + nOme + nOR) {
-        uint id = gid - nEnc - nVal - nPsi - nPi - nBet - nOme;
-        uint k = id / ctx.R;
-        uint i = id % ctx.R;
-        float rho_o = ctx.chordPrev[k];
         float predPrev = 0.0f;
         for (uint j = 0u; j < ctx.R; ++j)
             predPrev = fma(ctx.optReward[k * ctx.R + j], prev[j], predPrev);
         float predNext = 0.0f;
         for (uint j = 0u; j < ctx.R; ++j)
             predNext = fma(ctx.optReward[k * ctx.R + j], curr[j], predNext);
-        // Reward-model TD with beta termination: target = r + (1 - beta) * predNext.
-        float bp = ctx.betaProb[0];
         float r_td = ctx.reward[0] + (1.0f - bp) * predNext - predPrev;
-        ctx.optRewardE[id] = lambda * ctx.optRewardE[id] + rho_o * prev[i];
+        float grad = ctx.chordPrev[k] * prev[i];
         float w = ctx.optReward[id];
-        ctx.optReward[id] = safe_half(w + ctx.alphaImp * r_td * ctx.optRewardE[id]);
+        ctx.optReward[id] = safe_w(w, w + ctx.alphaImpFeat[i] * r_td * grad);
         return;
     }
-    // ---- Head 7: optTransition[k][j][i] -- per-feature transition model n_hat_j^k. ----
+    // ---- Head 4: optTransition[k][j][i] -- 1-step transition model. ----
     {
-        uint id = gid - nEnc - nVal - nPsi - nPi - nBet - nOme - nOR;
+        uint id = gid - nVal - nPsi - nPi - nOR;
         uint k  = id / (ctx.R * ctx.R);
         uint rem = id - k * ctx.R * ctx.R;
         uint j  = rem / ctx.R;
         uint i  = rem % ctx.R;
-        float rho_o = ctx.chordPrev[k];
-        // n_hat_j^k(s) = w_{k,j} . s ; target = curr[j] (next-state feature j).
         float predPrev = 0.0f;
         for (uint ii = 0u; ii < ctx.R; ++ii)
             predPrev = fma(ctx.optTransition[(k * ctx.R + j) * ctx.R + ii], prev[ii], predPrev);
         float predNext = 0.0f;
         for (uint ii = 0u; ii < ctx.R; ++ii)
             predNext = fma(ctx.optTransition[(k * ctx.R + j) * ctx.R + ii], curr[ii], predNext);
-        float bp = ctx.betaProb[0];
         float n_td = curr[j] + (1.0f - bp) * predNext - predPrev;
-        ctx.optTransitionE[id] = lambda * ctx.optTransitionE[id] + rho_o * prev[i];
+        float grad = ctx.chordPrev[k] * prev[i];
         float w = ctx.optTransition[id];
-        ctx.optTransition[id] = safe_half(w + ctx.alphaImp * n_td * ctx.optTransitionE[id]);
+        ctx.optTransition[id] = safe_w(w, w + ctx.alphaImpFeat[i] * n_td * grad);
     }
 }
 
@@ -854,7 +733,7 @@ kernel void oak_meta_action(
             dot = fma(ctx.optPolicy[(k * ctx.D + p) * ctx.R + i], curr[i], dot);
         mu = fma(lam, dot, mu);
     }
-    ctx.policyMean[p] = bounded_soft(mu);
+    ctx.policyMean[p] = unit_soft(mu);
 }
 
 // =================================================================================================
@@ -874,28 +753,19 @@ kernel void oak_bk_reduce(
     device const float *curr = state_at(ctx, 1u - ctx.stateSlot);
     float invT = track_rate(ctx.stepCount, ctx.ridge);
     for (uint i = tid; i < ctx.R; i += tgW) {
-        ctx.featMean[i] = bounded_soft(ctx.featMean[i]
-                                       + invT * (curr[i] - ctx.featMean[i]));
+        ctx.featMean[i] += invT * (curr[i] - ctx.featMean[i]);
     }
     if (tid == 0u) {
-        // rho_bar tracking: EMA of reward (Reward Centering 2405.09999).
         float r = ctx.reward[0];
-        ctx.scalars->rho = bounded_soft(ctx.rho + invT * (r - ctx.rho));
+        ctx.scalars->rho += invT * (r - ctx.rho);                  // Reward Centering.
         ctx.stats->rewardRate = ctx.scalars->rho;
-
-        // Option-model prediction MSE for LPM (consumed by meta_policy next step).
-        // Use the just-computed planAdv-to-realized error: |planAdv|^2 is a clean per-step proxy.
         float pa = ctx.planAdv[0];
         float mse = pa * pa;
         ctx.scalars->modelErrEMAPrev = ctx.scalars->modelErrEMA;
-        ctx.scalars->modelErrEMA = bounded_soft(ctx.scalars->modelErrEMA
-                                                + invT * (mse - ctx.scalars->modelErrEMA));
+        ctx.scalars->modelErrEMA += invT * (mse - ctx.scalars->modelErrEMA);
         ctx.stats->optionModelPredictionMSE = mse;
         ctx.stats->modelErrEMA       = ctx.scalars->modelErrEMA;
         ctx.stats->modelErrEMAPrev   = ctx.scalars->modelErrEMAPrev;
-        ctx.stats->tdBaselineStat    = ctx.scalars->vMeanBaseline;
-        ctx.stats->alphaImpStat      = ctx.scalars->alphaImp;
-        ctx.stats->alphaEncStat      = ctx.scalars->alphaEnc;
         ctx.stats->alphaPiStat       = ctx.scalars->alphaPi;
     }
 }
@@ -921,55 +791,45 @@ kernel void oak_bk_utility(
 
     if (gid < ctx.R) {
         uint i = gid;
-        // GraMa: utility = EMA(|delta * x_i| + sum_k |delta_k * x_i|), normalized by 1+K.
+        // GraMa per-feature utility: EMA(|delta * x_i| + sum_k |delta_k * x_i|).
         float xi = prev[i];
-        float gMain = fabs(ctx.td[0] * xi);
-        float gSum = gMain;
+        float gSum = fabs(ctx.td[0] * xi);
         for (uint k = 0u; k < ctx.K; ++k) gSum += fabs(ctx.tdPsi[k] * xi);
         float perI = gSum / float(1u + ctx.K);
-        ctx.utilFeat[i] = bounded_soft(ctx.utilFeat[i] + invT * (perI - ctx.utilFeat[i]));
-
-        // Planning utility: 1 iff feature i is the subtask anchor of the bestK option.
+        ctx.utilFeat[i] += invT * (perI - ctx.utilFeat[i]);
+        // Planning utility: 1 iff feature i anchors the bestK option (FCSTOMP feedback).
         uint bestK = ctx.planArgmax[0];
         uint anchor = ctx.subtaskFeatureOf[bestK];
         float planContrib = (anchor == i) ? 1.0f : 0.0f;
-        ctx.utilPlan[i] = bounded_soft(ctx.utilPlan[i] + invT * (planContrib - ctx.utilPlan[i]));
+        ctx.utilPlan[i] += invT * (planContrib - ctx.utilPlan[i]);
         return;
     }
     uint k = gid - ctx.R;
     if (k < ctx.K) {
         float dk = ctx.tdPsi[k];
-        float perK = dk * dk;
-        ctx.utilOpt[k] = bounded_soft(ctx.utilOpt[k] + invT * (perK - ctx.utilOpt[k]));
-        // Soft-chord per-option mass EMA (dormancy floor).
-        ctx.optFracEMA[k] = bounded_soft(ctx.optFracEMA[k]
-                                         + invT * (ctx.chord[k] - ctx.optFracEMA[k]));
+        ctx.utilOpt[k] += invT * (dk * dk - ctx.utilOpt[k]);
+        ctx.optFracEMA[k] += invT * (ctx.chord[k] - ctx.optFracEMA[k]);
         return;
     }
-    // Last 8 threads: per-buffer max(|w|) (structural; one thread strides over each).
+    // Last 5 threads: per-buffer max(|w|) (one per LEARNED head; encoder is fixed random
+    // projection so its magnitude is structural at init time).
     uint b = gid - ctx.R - ctx.K;
-    if (b >= 8u) return;
+    if (b >= 5u) return;
     device const float *base; uint count;
     switch (b) {
-        case 0u: base = ctx.encoder;       count = ctx.R * ctx.baseO; break;
-        case 1u: base = ctx.valueW;        count = ctx.R; break;
-        case 2u: base = ctx.psi;           count = ctx.K * ctx.M; break;
-        case 3u: base = ctx.optPolicy;     count = ctx.K * ctx.D * ctx.R; break;
-        case 4u: base = ctx.betaW;         count = ctx.R + ctx.K; break;
-        case 5u: base = ctx.omegaW;        count = ctx.K * ctx.R; break;
-        case 6u: base = ctx.optReward;     count = ctx.K * ctx.R; break;
+        case 0u: base = ctx.valueW;        count = ctx.R; break;
+        case 1u: base = ctx.psi;           count = ctx.K * ctx.M; break;
+        case 2u: base = ctx.optPolicy;     count = ctx.K * ctx.D * ctx.R; break;
+        case 3u: base = ctx.optReward;     count = ctx.K * ctx.R; break;
         default: base = ctx.optTransition; count = ctx.K * ctx.R * ctx.R; break;
     }
     float m = 0.0f;
     for (uint i = 0u; i < count; ++i) m = max(m, fabs(base[i]));
     switch (b) {
-        case 0u: ctx.stats->encoderMax       = m; break;
-        case 1u: ctx.stats->valueWMax        = m; break;
-        case 2u: ctx.stats->psiMax           = m; break;
-        case 3u: ctx.stats->optPolicyMax     = m; break;
-        case 4u: ctx.stats->betaWMax         = m; break;
-        case 5u: ctx.stats->omegaWMax        = m; break;
-        case 6u: ctx.stats->optRewardMax     = m; break;
+        case 0u: ctx.stats->valueWMax        = m; break;
+        case 1u: ctx.stats->psiMax           = m; break;
+        case 2u: ctx.stats->optPolicyMax     = m; break;
+        case 3u: ctx.stats->optRewardMax     = m; break;
         default: ctx.stats->optTransitionMax = m; break;
     }
 }
@@ -1005,13 +865,14 @@ kernel void oak_bk_admit_commit(
         ctx.activeMask[i] = admit ? 1u : 0u;
         if (admit) { ctx.activeList[act++] = i; }
     }
-    while (act < floor) {                      // pad up to floor.
-        uint slot = act % ctx.R;
-        if (ctx.activeMask[slot] == 0u) {
-            ctx.activeMask[slot] = 1u;
-            ctx.activeList[act++] = slot;
-        } else {
-            slot = (slot + 1u) % ctx.R;
+    {                                          // pad up to floor (linear scan over R, terminates).
+        uint scan = 0u;
+        while (act < floor && scan < ctx.R) {
+            if (ctx.activeMask[scan] == 0u) {
+                ctx.activeMask[scan] = 1u;
+                ctx.activeList[act++] = scan;
+            }
+            scan++;
         }
     }
     ctx.scalars->activeCount = act;
@@ -1040,47 +901,46 @@ kernel void oak_bk_admit_commit(
         ctx.subtaskFeatureOf[k] = bestI;
     }
 
-    // ---- FIRE+SWR option reinit: dormant_k (chord mass below 1/(2K)) AND magnitude outlier
-    //      (utilOpt[k] < 0.1 * utilOpt_max). Conjunctive AND (2602.08040). ----
-    float utilOptMax = 0.0f;
-    for (uint k = 0u; k < ctx.K; ++k) utilOptMax = max(utilOptMax, ctx.utilOpt[k]);
-    float dormThresh = 0.5f / float(max(ctx.K, 1u));      // half of uniform mass.
-    uint reinitedOpt = 0u, reinitedFeat = 0u;
-    for (uint k = 0u; k < ctx.K; ++k) {
-        bool dormant = ctx.optFracEMA[k] < dormThresh;
-        bool weak = ctx.utilOpt[k] < 0.1f * utilOptMax;
-        if (dormant && weak) {
-            // Re-seed psi[k][:M] and optPolicy[k][:D*R] to small hash-based projections (no zero-init).
-            for (uint m = 0u; m < ctx.M; ++m) {
-                float u = hash_uniform(ctx.stepCount, k, m) * 2.0f - 1.0f;
-                ctx.psi[k * ctx.M + m] = u * ctx.alpha0;
-            }
-            for (uint pi = 0u; pi < ctx.D * ctx.R; ++pi) {
-                float u = hash_uniform(ctx.stepCount, k, ctx.M + pi) * 2.0f - 1.0f;
-                ctx.optPolicy[k * ctx.D * ctx.R + pi] = u * ctx.alpha0;
-            }
-            for (uint i = 0u; i < ctx.R; ++i) {
-                float ur = hash_uniform(ctx.stepCount, k, ctx.M + ctx.D * ctx.R + i) * 2.0f - 1.0f;
-                ctx.optReward[k * ctx.R + i] = ur * ctx.alpha0;
-                for (uint j = 0u; j < ctx.R; ++j) {
-                    float un = hash_uniform(ctx.stepCount, (k * ctx.R + j) ^ 0xa3c59ac3u, i) * 2.0f - 1.0f;
-                    ctx.optTransition[(k * ctx.R + j) * ctx.R + i] = un * ctx.alpha0;
-                }
-            }
-            ctx.utilOpt[k] = 0.0f;
-            ctx.optFracEMA[k] = 1.0f / float(max(ctx.K, 1u));
-            reinitedOpt++;
-        }
+    // ---- Per-feature implicit alpha (parameter-free; MetaOptimize 2402.02342 simplest form).
+    //      alpha_i = alpha_0 / (1 + alpha_0 * featSM[i]). High-variance features get smaller
+    //      steps; low-variance features get larger steps. NO meta-gradient, NO theta. ----
+    for (uint i = 0u; i < ctx.R; ++i) {
+        ctx.alphaImpFeat[i] = ctx.alpha0 / (1.0f + ctx.alpha0 * ctx.featSM[i]);
     }
 
-    // ---- Generate-and-test feature reinit: when an option is reinited, reset its anchor
-    //      feature to a fresh hash-based random projection (Mahmood-Sutton-Pilarski 2012).
-    //      Worst feature = lowest utilFeat + utilPlan. ----
-    if (reinitedOpt > 0u) {
-        uint worstI = 0u; float worstU = FLT_MAX;
+    // ---- Single-worst-option reinit, gated on dormancy below uniform-mass baseline (1/K).
+    //      Parameter-free: at most one option reinited per step; no thresholds to tune. ----
+    uint worstK = 0u; float worstU = FLT_MAX;
+    for (uint k = 0u; k < ctx.K; ++k) {
+        if (ctx.utilOpt[k] < worstU) { worstU = ctx.utilOpt[k]; worstK = k; }
+    }
+    uint reinitedOpt = 0u, reinitedFeat = 0u;
+    if (ctx.optFracEMA[worstK] < 1.0f / float(max(ctx.K, 1u))) {
+        uint k = worstK;
+        for (uint m = 0u; m < ctx.M; ++m) {
+            ctx.psi[k * ctx.M + m] = (hash_uniform(ctx.stepCount, k, m) * 2.0f - 1.0f) * ctx.alpha0;
+        }
+        for (uint pi = 0u; pi < ctx.D * ctx.R; ++pi) {
+            ctx.optPolicy[k * ctx.D * ctx.R + pi] =
+                (hash_uniform(ctx.stepCount, k, ctx.M + pi) * 2.0f - 1.0f) * ctx.alpha0;
+        }
+        for (uint i = 0u; i < ctx.R; ++i) {
+            ctx.optReward[k * ctx.R + i] =
+                (hash_uniform(ctx.stepCount, k, ctx.M + ctx.D * ctx.R + i) * 2.0f - 1.0f) * ctx.alpha0;
+            for (uint j = 0u; j < ctx.R; ++j) {
+                ctx.optTransition[(k * ctx.R + j) * ctx.R + i] =
+                    (hash_uniform(ctx.stepCount, (k * ctx.R + j) ^ 0xa3c59ac3u, i) * 2.0f - 1.0f) * ctx.alpha0;
+            }
+        }
+        ctx.utilOpt[k] = 0.0f;
+        ctx.optFracEMA[k] = 1.0f / float(max(ctx.K, 1u));
+        reinitedOpt = 1u;
+
+        // Generate-and-test feature reinit on the worst feature (Mahmood-Sutton-Pilarski 2012).
+        uint worstI = 0u; float worstFU = FLT_MAX;
         for (uint i = 0u; i < ctx.R; ++i) {
             float u = ctx.utilFeat[i] + ctx.utilPlan[i];
-            if (u < worstU) { worstU = u; worstI = i; }
+            if (u < worstFU) { worstFU = u; worstI = i; }
         }
         for (uint o = 0u; o < ctx.baseO; ++o) {
             float u = hash_uniform(ctx.stepCount, worstI, o) * 2.0f - 1.0f;
@@ -1091,27 +951,12 @@ kernel void oak_bk_admit_commit(
         ctx.featSM[worstI] = 0.0f;
         ctx.wBar[worstI] = 0.0f;
         ctx.featMean[worstI] = 0.0f;
-        ctx.alphaImpFeat[worstI] = ctx.alpha0;
-        ctx.alphaImpBeta[worstI] = log(ctx.alpha0);
-        ctx.alphaImpH[worstI] = 0.0f;
-        ctx.valueE[worstI] = 0.0f;
         reinitedFeat = 1u;
-        ctx.counters[OAK_CNT_REINIT_OPT] = ctx.counters[OAK_CNT_REINIT_OPT] + reinitedOpt;
-        ctx.counters[OAK_CNT_REINIT_FEAT] = ctx.counters[OAK_CNT_REINIT_FEAT] + reinitedFeat;
+        ctx.counters[OAK_CNT_REINIT_OPT] += 1u;
+        ctx.counters[OAK_CNT_REINIT_FEAT] += 1u;
     }
     ctx.stats->oakOptionReinitCount  = float(reinitedOpt);
     ctx.stats->oakFeatureReinitCount = float(ctx.counters[OAK_CNT_REINIT_FEAT]);
-
-    // ---- varpi-RTD baselines: vMeanBaseline = <valueW, featMean>, psiMeanBaseline[k] = <psi_k, featMean>. ----
-    float vMean = 0.0f;
-    for (uint i = 0u; i < ctx.R; ++i) vMean = fma(ctx.valueW[i], ctx.featMean[i], vMean);
-    ctx.scalars->vMeanBaseline = bounded_soft(vMean);
-    for (uint k = 0u; k < ctx.K; ++k) {
-        float pMean = 0.0f;
-        for (uint i = 0u; i < ctx.R; ++i)
-            pMean = fma(ctx.psi[k * ctx.M + i], ctx.featMean[i], pMean);
-        ctx.psiMeanBaseline[k] = bounded_soft(pMean);
-    }
 
     // ---- pEff stable-rank proxy: tr(featSM) / max(featSM). ----
     float trSM = 0.0f, maxSM = 0.0f;
@@ -1150,9 +995,7 @@ kernel void oak_bk_admit_commit(
     }
     ctx.stats->actionDeltaL2Mean = dl / float(max(ctx.D, 1u));
 
-    // ---- Toggle slots, structural lambda, bump stepCount. ----
     ctx.scalars->stateSlot  = 1u - ctx.stateSlot;
     ctx.scalars->optionSlot = 1u - ctx.optionSlot;
-    ctx.scalars->lambdaTrace = max(0.0f, 1.0f - 1.0f / ctx.cap);
     ctx.scalars->stepCount = ctx.stepCount + 1u;
 }
