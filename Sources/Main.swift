@@ -32,11 +32,9 @@ struct RunHealth: Codable {
     let oakOptionReinitCount: Double?
     let nonFiniteRawTotal: Int
     let nonFiniteSanitizedTotal: Int
-    // Tier 0: numerical-safety telemetry surfaced into the bench JSON. The (B)
-    // hard rule is `tdPsiNonFiniteTotal == 0 && halfSaturationTotalFinal == 0` over the
-    // full bench. Both default to 0 for older schemas (Codable optionality + default).
+    // Numerical-safety telemetry surfaced into the bench JSON. The (B) hard rule is
+    // `tdPsiNonFiniteTotal == 0` over the full bench.
     let tdPsiNonFiniteTotal: Int?
-    let halfSaturationTotalFinal: Int?
     // Tier 1: surfaced KernelScalars + per-buffer weight-magnitude maxima. The (C)
     // bounded-magnitude hard rule consumes `*Max` fields. The KernelScalars surfacing
     // (modelErrEMA, tdBaseline, alphaImp, etc.) lets analysis scripts inspect the agent's
@@ -44,7 +42,6 @@ struct RunHealth: Codable {
     let utilityFeatureMean: Double?, utilityOptionMean: Double?
     let modelErrEMA: Double?, modelErrEMAPrev: Double?
     let tdBaseline: Double?, alphaImp: Double?, alphaEnc: Double?, alphaPi: Double?
-    let rhoBaseline: Double?         // Tier 2: ϖ-RTD centering baseline (cumulative reward mean)
     let oakFeatureReinitCountFinal: Int?
     let encoderMax: Double?, valueWMax: Double?, psiMax: Double?, optPolicyMax: Double?
     let outcomeHeadMax: Double?, betaWMax: Double?, omegaWMax: Double?, sprDecoderMax: Double?
@@ -278,19 +275,15 @@ private struct HealthAccumulator {
     //  12  alphaImp                (T1.3)
     //  13  alphaEnc                (T1.3)
     //  14  alphaPi
-    //  15  rhoBaseline             (T2  — ϖ-RTD baseline; Sakha-Kamalapurkar-Meyn 2603.27874v2)
-    var slots = [Slot](repeating: Slot(), count: 16)
+    var slots = [Slot](repeating: Slot(), count: 15)
     var steps = 0
     var rawNonFinite = 0, sanitizedNonFinite = 0
     var encodeNF = 0, learnNF = 0, planNF = 0
     var maxLat = 0.0, maxPol = 0.0
     var lastRho: Double?
-    // Tier 0: numerical-safety telemetry. tdPsiNF accumulates per-step counts
-    // (an unbiased total over the run); halfSaturationCountFinal is read from the LAST
-    // step's stats since the underlying counter is cumulative life-of-engine and the
-    // delta over the bench window equals the final value (counter starts at 0 per init).
+    // Numerical-safety telemetry. tdPsiNF accumulates per-step counts (unbiased total
+    // over the run).
     var tdPsiNF = 0
-    var halfSaturationFinal = 0
     var oakFeatureReinitFinal = 0
     // Tier 1.4: per-buffer weight-magnitude max over the bench window. Each is
     // the max-of-maxima across all recorded steps — a monotone signal for the (C)
@@ -317,7 +310,6 @@ private struct HealthAccumulator {
             stats.alphaImpStat,
             stats.alphaEncStat,
             stats.alphaPiStat,
-            stats.rhoBaselineStat,
         ]
         for (i, f) in values.enumerated() {
             let v = Double(f)
@@ -330,7 +322,6 @@ private struct HealthAccumulator {
         learnNF += Int(stats.learnNonFiniteCount)
         planNF += Int(stats.planNonFiniteCount)
         tdPsiNF += Int(stats.tdPsiNonFiniteCount)
-        halfSaturationFinal = Int(stats.halfSaturationCount)
         oakFeatureReinitFinal = Int(stats.oakFeatureReinitCount)
         maxLat = max(maxLat, Double(stats.maxAbsLatentPrediction))
         maxPol = max(maxPol, Double(stats.maxAbsPolicyOutput))
@@ -361,7 +352,6 @@ private struct HealthAccumulator {
             nonFiniteRawTotal: rawNonFinite,
             nonFiniteSanitizedTotal: sanitizedNonFinite,
             tdPsiNonFiniteTotal: tdPsiNF,
-            halfSaturationTotalFinal: halfSaturationFinal,
             utilityFeatureMean: mean(6),
             utilityOptionMean: mean(7),
             modelErrEMA: mean(9),
@@ -370,7 +360,6 @@ private struct HealthAccumulator {
             alphaImp: mean(12),
             alphaEnc: mean(13),
             alphaPi: mean(14),
-            rhoBaseline: mean(15),
             oakFeatureReinitCountFinal: oakFeatureReinitFinal,
             encoderMax: encoderMax > 0 ? encoderMax : nil,
             valueWMax: valueWMax > 0 ? valueWMax : nil,
@@ -475,6 +464,10 @@ private struct KernelConfig {
     var uOption: UInt32 = 0, uCounters: UInt32 = 0, uSubtaskFeatureOf: UInt32 = 0
     var uOptionAge: UInt32 = 0
     var aFeatSM: UInt32 = 0, aWBar: UInt32 = 0, aFeatMean: UInt32 = 0
+    // Per-observation 2nd-moment EMA E[obs²] (paired with obsMean) for Welford-variance
+    // input standardization. Updated by oak_bk_obs at the START of each step so encode
+    // sees correctly-scaled inputs from step 0 (Sutton-Barto §9.5.4).
+    var aObsSM: UInt32 = 0
     var aUtilFeat: UInt32 = 0, aUtilOpt: UInt32 = 0
     // Tier 5: optFracEMA[K] for the structural-1/K dormancy reinit gate.
     var aOptFracEMA: UInt32 = 0
@@ -483,7 +476,7 @@ private struct KernelConfig {
     // Tier 2: per-cumulant ϖ-RTD ψ-centering baseline (Sakha 2603.27874v2 §1).
     var aPsiMeanBaseline: UInt32 = 0
     // Tier 4: TD(λ) eligibility traces for value head + ψ.
-    var aValueE: UInt32 = 0, aPsiE: UInt32 = 0
+    var aValueE: UInt32 = 0, aPsiE: UInt32 = 0, aPiE: UInt32 = 0
     var cap: Float = 0, alpha0: Float = 0, ridge: Float = 0
 }
 
@@ -509,14 +502,11 @@ private struct KernelScalars {
     // Tier 6.2: dense-fast-path flag (1 iff activeCount == E and activeList[i] == i for all i).
     // Set by oak_bk_admit_commit; consumed by active_dot_half_auto in the next step's kernels.
     var activeListIsIdentity: UInt32 = 0
-    // Tier 2: ϖ-RTD baseline (cumulative Welford mean of reward; no floor) +
-    // <valueW, featMean> baseline (the expected V(s) under empirical state distribution).
-    // Sakha-Kamalapurkar-Meyn 2603.27874v2 Theorem 2.4(ii) — first published linear-FA
-    // stability proof for relative-TD. The full Theorem requires BOTH terms in the TD
-    // centering (per research-report §11); the rhoBaseline-only form is insufficient
-    // (encoder · obs grows unbounded → V(s) grows unbounded → weights saturate). Both
-    // are computed in oak_bk_admit_commit and consumed by oak_predict.
-    var rhoBaseline: Float = 0
+    // ϖ-RTD vMeanBaseline = <valueW, featMean> per Sakha-Kamalapurkar-Meyn 2603.27874v2
+    // §1 form. Subtracted from the main TD residual along with `rho` (the single tracking
+    // EMA of mean reward — same scalar serves as the ϖ centering baseline AND as the
+    // stats->rewardRate report). Recomputed each step in oak_bk_admit_commit from the
+    // current weights and the featMean tracking EMA.
     var vMeanBaseline: Float = 0
     // Tier 4: TD(λ) eligibility-trace decay rate (Sutton-Barto Ch 12.7). Set in
     // oak_bk_admit_commit each step from λ = 1 − 1/cap (structural, Inv-9). Recovers
@@ -533,17 +523,15 @@ struct KernelStats {
     var optionModelPredictionMSE: Float = 0
     var oakOptionReinitCount: Float = 0
     var utilityFeatureMean: Float = 0, utilityOptionMean: Float = 0
-    // Tier 0: numerical-safety telemetry.
-    //   tdPsiNonFiniteCount  per-step NF in tdPsi (was untracked, contaminated MSE)
-    //   halfSaturationCount  cumulative life-of-engine count of safe_half(NaN/Inf) substitutions
-    var tdPsiNonFiniteCount: Float = 0, halfSaturationCount: Float = 0
+    // Numerical-safety telemetry.
+    //   tdPsiNonFiniteCount  per-step NF in tdPsi (sanitized to 0 for MSE roll-up)
+    var tdPsiNonFiniteCount: Float = 0
     // Tier 1: telemetry overhaul. Surfaced KernelScalars + cumulative counters
     // + per-buffer weight-magnitude maxima. Layout MIRRORS OakKernel.metal struct exactly.
     var pEffectiveRank: Float = 0
     var modelErrEMA: Float = 0, modelErrEMAPrev: Float = 0
     var tdBaselineStat: Float = 0
     var alphaImpStat: Float = 0, alphaEncStat: Float = 0, alphaPiStat: Float = 0
-    var rhoBaselineStat: Float = 0
     var oakFeatureReinitCount: Float = 0
     var encoderMax: Float = 0, valueWMax: Float = 0, psiMax: Float = 0, optPolicyMax: Float = 0
     var outcomeHeadMax: Float = 0, betaWMax: Float = 0, omegaWMax: Float = 0, sprDecoderMax: Float = 0
@@ -557,8 +545,13 @@ private enum OakMetalLayout {
     // Structural cap: one SIMD group of options per row in oak_plan (hardware-derived, not tuned).
     static let maxOptionCount = 32
 
+    // K (options/subtasks) is independent of actDim per Sutton-Bowling OaK §2 — each option
+    // is a learned subtask with its own cumulant ψ_k, β_k termination, and chord-policy
+    // contribution; coupling K to actDim would make the agent's representation depth a
+    // function of the action interface, anti-BWH. K is bounded above only by the SIMD-group
+    // hardware cap and below by rank (each option needs at least one feature dim to learn).
     static func optionCount(rank: Int, actDim: Int) -> Int {
-        max(1, min(rank, actDim, maxOptionCount))
+        max(1, min(rank, maxOptionCount))
     }
     // Tier 2: extended-state width E = R + K (encoder output + OPSR outcome dims).
     // All linear heads (value, ψ, π, outcomeHead) span the full E-dim state.
@@ -596,11 +589,21 @@ private enum OakMetalLayout {
         optionCount(rank: rank, actDim: actDim) * rank
     }
 
+    // Full R×O encoder matrix (Sutton-Barto Ch 9 linear FA over learned features). Each
+    // latent z[i] = tanh(Σ_o encoder[i, o] · standardized_obs[o]); decouples representation
+    // rank R from observation dim O so the agent can learn cross-dim mixtures (joint angles
+    // × velocities, etc.) that diagonal scaling cannot. Stabilized by the strict ϖ-RTD form
+    // (Sakha-Kamalapurkar-Meyn 2603.27874v2 Eq. 24, Theorem 2.4(ii)) in oak_learn_value /
+    // oak_learn_psi — without that strict form, the diverse matrix-encoder features amplify
+    // bootstrap V'-V variance and valueW diverges. With it, the Hurwitz proof guarantees
+    // mean-flow stability for any δ_r ≥ 0 and the matrix encoder is safe.
+    static func encoderCount(obsDim: Int, rank: Int) -> Int { rank * max(obsDim, 1) }
+
     struct Param { let encoder, value, psi, optPolicy, outcomeHead, betaW, omegaW, sprDecoder, total: Int }
     static func paramLayout(obsDim: Int, rank: Int, actDim: Int, dPolicy: Int) -> Param {
         let E = extendedDim(rank: rank, actDim: actDim)
         var o = 0
-        let enc = o; o += rank                    // encoder: R weights (obs → state[:R])
+        let enc = o; o += encoderCount(obsDim: obsDim, rank: rank) // encoder: R · O matrix
         let val = o; o += E                       // valueW: E weights (over OPSR-extended state)
         let psi = o; o += psiCount(rank: rank, actDim: actDim)
         let op  = o; o += optPolicyCount(rank: rank, actDim: actDim, dPolicy: dPolicy)
@@ -629,6 +632,10 @@ private enum OakMetalLayout {
         // Tier 4: TD(λ) eligibility traces. valueE[E] for w_main; psiE[K · M] for ψ.
         // Engine-init zero; in-place updated by oak_learn_value / oak_learn_psi at B=1.
         let valueE, psiE: Int
+        // Sutton-Barto §13.5 actor-critic-with-traces: backward-view eligibility trace
+        // piE[K · D · E] for the policy parameters.
+        let piE: Int
+        let obsSM: Int                    // E[obs²] Welford EMA, paired with obsMean
         let total: Int
     }
     static func stateLayout(obsDim: Int, rank: Int, actDim: Int, batch: Int, dPolicy: Int) -> State {
@@ -662,6 +669,8 @@ private enum OakMetalLayout {
         let pmb = o; o += K          // Tier 2: psiMeanBaseline[K] = <ψ_k, featMean>
         let vE  = o; o += E          // Tier 4: valueE[E] eligibility trace for w_main
         let pE  = o; o += K * (E + K)// Tier 4: psiE[K * M] eligibility traces for ψ (M = E + K)
+        let piE = o; o += K * dPolicy * E // Sutton-Barto §13.5 policy eligibility trace
+        let osm = o; o += obsDim     // obsSM[O] = E[obs²] Welford EMA (paired with obsMean)
         return State(observation: obs, obsMean: mean, state: st, prevPolicyMean: prP, policyMean: pol,
                      scoreGrad: sg, reward: rew, td: td, tdPsi: tdP, vCurr: vc,
                      chordSlot: cs, chordSlotPrev: csP, betaProb: bp,
@@ -670,6 +679,8 @@ private enum OakMetalLayout {
                      alphaImpFeat: aif, alphaImpBeta: aib, alphaImpH: aih,
                      psiMeanBaseline: pmb,
                      valueE: vE, psiE: pE,
+                     piE: piE,
+                     obsSM: osm,
                      total: o)
     }
 
@@ -683,7 +694,7 @@ private enum OakMetalLayout {
         let al = o; o += E      // active list also sized E
         let op = o; o += 2 * batch     // legacy option_slot — argmax of chord, telemetry-only in Tier 3
         // Tier 0: counters[8] expanded from counters[6] to host two new
-        // numerical-safety counters (OAK_CNT_HALF_SAT cumulative + OAK_CNT_TDPSI_NF
+        // numerical-safety counters (OAK_CNT_TDPSI_NF
         // per-step). Layout matches OakKernel.metal OAK_CNT_* constants 0..7.
         let c  = o; o += 8
         let sf = o; o += K
@@ -728,11 +739,15 @@ final class OakMetalEngine {
     // whose TD δ_N is being learned from. No prevScoreGrad slot needed; arena holds a single
     // scoreGrad slot that is read by learn_pi (this step) before being overwritten by
     // meta_action (this step) for the next step's learning.
-    // Tier 3: 20-kernel pipeline. SPR-Stream adds oak_predict_next_latent (after
-    // meta_policy so it can read chordPrev = chord_{N-1} that drove the just-completed
-    // transition) and oak_learn_encoder_spr (after oak_learn_encoder so the orthogonal
-    // projection has the just-applied RL gradient available for de-correlation).
+    // 21-kernel pipeline. oak_bk_obs runs FIRST so per-feature obs Welford EMAs (mean
+    // + 2nd moment) are updated before encode reads them — eliminates the step-0 tanh
+    // saturation transient when env obs scale ≫ 1 (Mujoco joint velocities ~±50).
+    // SPR-Stream adds oak_predict_next_latent (after meta_policy so it can read
+    // chordPrev = chord_{N-1} that drove the just-completed transition) and
+    // oak_learn_encoder_spr (after oak_learn_encoder so the orthogonal projection has
+    // the just-applied RL gradient available for de-correlation).
     private static let phases: [Phase] = [
+        Phase(name: "oak_bk_obs",             tgSize: 32),
         Phase(name: "oak_encode",             tgSize: 0),
         Phase(name: "oak_predict_outcome",    tgSize: 0),
         Phase(name: "oak_meta_policy",        tgSize: 0),
@@ -772,7 +787,11 @@ final class OakMetalEngine {
     private let scalarsPointer: UnsafeMutablePointer<KernelScalars>
     private let statsPointer: UnsafeMutablePointer<KernelStats>
     private let configPointer: UnsafeMutablePointer<KernelConfig>
-    private let paramsArena: Shared<Float16>
+    // BWH-orthodox: weights stored as fp32 so magnitudes can grow per the agent's
+    // encountered slice of reality (no arbitrary HALF_MAX = 65504 scale prior). Per-step
+    // bound from implicit α (Kim 2510.06149) + ϖ-RTD centering (Sakha 2603.27874v2);
+    // long-run bound only via L2-ER when pEff collapses (anti-collapse, NOT scale prior).
+    private let paramsArena: Shared<Float>
     private let stateArena: Shared<Float>
     private let uintArena: Shared<UInt32>
     private let stateLayout: OakMetalLayout.State
@@ -866,7 +885,7 @@ final class OakMetalEngine {
         stateLayout = OakMetalLayout.stateLayout(obsDim: obsDim, rank: rank, actDim: actDim,
                                                  batch: batch, dPolicy: dPolicy)
         uintLayout  = OakMetalLayout.uintLayout(rank: rank, actDim: actDim, batch: batch)
-        paramsArena = Shared(device: device, count: paramLayout.total, zero: Float16(0))
+        paramsArena = Shared(device: device, count: paramLayout.total, zero: Float(0))
         stateArena  = Shared(device: device, count: stateLayout.total, zero: Float(0))
         uintArena   = Shared(device: device, count: uintLayout.total,  zero: UInt32(0))
 
@@ -874,9 +893,11 @@ final class OakMetalEngine {
         let K = OakMetalLayout.optionCount(rank: rank, actDim: actDim)
         let E = OakMetalLayout.extendedDim(rank: rank, actDim: actDim)
         let M = OakMetalLayout.concatDim(rank: rank, actDim: actDim)
-        // Tier 1.4: 20-kernel pipeline.
-        // oak_bk_weight_magnitudes appended for the (C) bounded-magnitude gate.
+        // 21-kernel pipeline. Index 0 is oak_bk_obs (1 TG × 32 threads, strides over O);
+        // it must run BEFORE oak_encode so per-feature obs Welford EMAs reflect the
+        // current observation when encode standardizes its input.
         phaseGridWidths = [
+            1,                                // oak_bk_obs              [1 TG × 32]
             batch * rank,                     // oak_encode              [dispatchThreads]
             batch * K,                        // oak_predict_outcome     [dispatchThreads]
             batch,                            // oak_meta_policy         [dispatchThreads]
@@ -884,8 +905,8 @@ final class OakMetalEngine {
             batch,                            // oak_plan                [B TGs × 32]
             1,                                // oak_reduce_alpha        [1 TG × 128]
             E,                                // oak_learn_value         [E TGs × 32]
-            max(baseObsDim, 1),               // oak_learn_encoder       [dispatchThreads]
-            max(baseObsDim, 1),               // oak_spr_fused           [dispatchThreads baseO]
+            rank * max(baseObsDim, 1),        // oak_learn_encoder       [R · baseO threads]
+            rank * max(baseObsDim, 1),        // oak_spr_fused           [R · baseO threads]
             K * E,                            // oak_learn_outcome       [dispatchThreads]
             K * M,                            // oak_learn_psi           [dispatchThreads]
             K * dPolicy * E,                  // oak_learn_pi            [dispatchThreads]
@@ -939,10 +960,14 @@ final class OakMetalEngine {
                 x = (x ^ (x &>> 16)) &* 0x846ca68b
                 x ^= x &>> 16
                 let u = Float(x >> 8) * 5.9604645e-8 * 2 - 1
-                base[i] = Float16(u * scale)
+                base[i] = u * scale
             }
         }
-        sample(paramLayout.encoder, rank, invR)
+        // Encoder gets Xavier-like 1/√O so initial E[(Σ encoder[i,o]·obs[o])²] ≈ 1
+        // (assuming standardized obs E[obs²]≈1). Lands z_raw in tanh's linear region from
+        // step 0; structural scale, no env-specific tuning.
+        let invO: Float = 1.0 / sqrt(Float(max(obsDim, 1)))
+        sample(paramLayout.encoder, OakMetalLayout.encoderCount(obsDim: obsDim, rank: rank), invO)
         // Tier 2: valueW has E weights (was R) — extends over the OPSR-augmented state.
         sample(paramLayout.value, OakMetalLayout.extendedDim(rank: rank, actDim: actDim), invR)
         sample(paramLayout.psi, OakMetalLayout.psiCount(rank: rank, actDim: actDim), invR)
@@ -959,7 +984,7 @@ final class OakMetalEngine {
         // transition gains from the prediction errors.
         let sprDecoderCount = OakMetalLayout.sprDecoderCount(rank: rank, actDim: actDim)
         let sprBase = paramsArena.pointer.advanced(by: paramLayout.sprDecoder)
-        for i in 0..<sprDecoderCount { sprBase[i] = Float16(1) }
+        for i in 0..<sprDecoderCount { sprBase[i] = 1 }
         // ψ diagonal seed: cumulant k's W_ψ[k] · concat[s, λ] gets a +1/√R coefficient on its own
         // state feature index k (RRS feature-attainment initialization; Alberta Plan A.6 / OBB
         // §2.4). The first E weights of W_ψ[k] are state weights; index [k][k] is "predict
@@ -967,7 +992,7 @@ final class OakMetalEngine {
         let psiPtr = paramsArena.pointer.advanced(by: paramLayout.psi)
         for k in 0..<K where k < rank {
             let idx = k * M + k
-            psiPtr[idx] = Float16(Float(psiPtr[idx]) + invR)
+            psiPtr[idx] = psiPtr[idx] + invR
         }
 
         // Tier 2: all encoder features (0..R) admitted on step 0; outcome dims R..E
@@ -986,9 +1011,8 @@ final class OakMetalEngine {
         for r in 0..<batch {
             for k in 0..<K { chordSlot[r * K + k] = invK }
         }
-        // Tier 5: seed optFracEMA = 1/K per option (the structural uniform-share, same
-        // as the dormancy threshold's reference value). The gate fires when an option's mass
-        // drops below 0.5/K, so this initial value is well above threshold.
+        // seed optFracEMA = 1/K per option (the structural uniform-share, same as the
+        // dormancy threshold's reference value).
         let optFrac = stateArena.pointer.advanced(by: stateLayout.optFracEMA)
         for k in 0..<K { optFrac[k] = invK }
         // Tier 2: per-feature TIDBD α (SwiftSarsa 2507.19539 + MetaOptimize 2402.02342).
@@ -1053,7 +1077,7 @@ final class OakMetalEngine {
     // --- Probe-only accessor (Tier-0 verification harness; deleted in Tier 7) ----------------
     // Tier 5: probeSlot deleted (~85 LOC). Probe harness was used for kernel-
     // correctness validation-13; that role is now covered by the (B) numerical-
-    // safety hard gate (nonFiniteRawTotal == 0 + halfSaturationTotalFinal == 0 over the
+    // safety hard gate (nonFiniteRawTotal == 0 over the
     // full bench window) and the (C) bounded-magnitude hard gate (per-buffer max(|w|) <
     // √HALF_MAX), both surfaced into RunHealth and verifiable from any bench JSON.
 
@@ -1095,8 +1119,8 @@ final class OakMetalEngine {
         let ctr = uintArena.pointer.advanced(by: uintLayout.counters)
         // Reset per-step non-finite counters (offsets OAK_CNT_OBS_NF=0, LEARN_NF=1,
         // PLAN_NF=2, TDPSI_NF=6). counters[OAK_CNT_REINIT_OPT=3] is cleared by
-        // bk_admit_commit at end of step. counters[OAK_CNT_REINIT_FEAT=4] and
-        // counters[OAK_CNT_HALF_SAT=5] are cumulative life-of-engine counts.
+        // bk_admit_commit at end of step. counters[OAK_CNT_REINIT_FEAT=4] is a
+        // cumulative life-of-engine count.
         ctr[0] = 0; ctr[1] = 0; ctr[2] = 0; ctr[6] = 0
         statsPointer.pointee = KernelStats()
 
@@ -1136,7 +1160,8 @@ final class OakMetalEngine {
         c.aFeatSM = UInt32(s.featSM); c.aWBar = UInt32(s.wBar); c.aFeatMean = UInt32(s.featMean)
         c.aAlphaImpFeat = UInt32(s.alphaImpFeat); c.aAlphaImpBeta = UInt32(s.alphaImpBeta); c.aAlphaImpH = UInt32(s.alphaImpH)
         c.aPsiMeanBaseline = UInt32(s.psiMeanBaseline)
-        c.aValueE = UInt32(s.valueE); c.aPsiE = UInt32(s.psiE)
+        c.aValueE = UInt32(s.valueE); c.aPsiE = UInt32(s.psiE); c.aPiE = UInt32(s.piE)
+        c.aObsSM = UInt32(s.obsSM)
         c.aUtilFeat = UInt32(s.utilFeat); c.aUtilOpt = UInt32(s.utilOpt)
         c.aOptFracEMA = UInt32(s.optFracEMA)
         c.cap = cap; c.alpha0 = 1.0 / cap; c.ridge = 1.0 / (cap + 1.0)
@@ -1278,7 +1303,7 @@ private func directNumEnvs(obsDim: Int, actDim: Int, dPolicy: Int, device: MTLDe
                     + perEnvUints  * MemoryLayout<UInt32>.stride
     let paramBytes = OakMetalLayout.paramLayout(obsDim: obsDim, rank: rank, actDim: actDim,
                                                  dPolicy: dPolicy).total
-                    * MemoryLayout<Float16>.stride
+                    * MemoryLayout<Float>.stride
     let fixedBytes = paramBytes + probeFixedStateLayout.total * MemoryLayout<Float>.stride
                                 + probeFixedUintLayout.total  * MemoryLayout<UInt32>.stride
     // Memory ceiling from the GPU's reported safe working-set size (Apple Metal). Structural
