@@ -1567,24 +1567,36 @@ private final class RunState {
     private static func benchmark() throws {
         let root = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
         let seedStart = ProcessInfo.processInfo.environment["OAK_BENCH_SEED_START"].flatMap(Int.init) ?? 0
-        let seedCount = ProcessInfo.processInfo.environment["OAK_BENCH_SEED_COUNT"].flatMap(Int.init) ?? 10
+        // Pass 15 Tier 3: default seedCount lowered 10 → 5 (per plan §9.1; concurrent
+        // execution makes more seeds cheap if needed but 5 is the canonical Pass-15 scope).
+        let seedCount = ProcessInfo.processInfo.environment["OAK_BENCH_SEED_COUNT"].flatMap(Int.init) ?? 5
         let warmup = max(ProcessInfo.processInfo.environment["OAK_BENCH_WARMUP_STEPS"].flatMap(Int.init) ?? 1000, 0)
-        let stopAfter = max(ProcessInfo.processInfo.environment["OAK_BENCH_STEPS"].flatMap(Int.init) ?? 50000, 1)
+        // Pass 15 Tier 3: default stopAfter raised 50K → 500K (per plan §9.1 — the new canonical
+        // workerDepth at B=1 is 500K = the full env-step count in a single continuing trajectory,
+        // not 50K/2048 = 24 effective steps per env that Pass 12-14 batched bench produced).
+        let stopAfter = max(ProcessInfo.processInfo.environment["OAK_BENCH_STEPS"].flatMap(Int.init) ?? 500000, 1)
         let policies = try (ProcessInfo.processInfo.environment["OAK_BENCH_POLICIES"] ?? "oak,random")
             .split(separator: ",").map { try parsePolicy(String($0)) }
         let device = try metalDevice()
-        let forcedN = ProcessInfo.processInfo.environment["OAK_BENCH_NUM_ENVS"].flatMap(Int.init)
-                   ?? ProcessInfo.processInfo.environment["OAK_NUM_ENVS"].flatMap(Int.init)
+        // Pass 15 Tier 3: B=1 single-stream per env (BWH-orthodox per Sutton continuing-task
+        // formulation). Each agent owns one continuous trajectory per env. OAK_BENCH_NUM_ENVS
+        // override retained for back-compat with batched Pass-14 bench (set to 64 etc. to
+        // re-run pre-Pass-15 protocol for direct comparison).
+        let numEnvs = max(ProcessInfo.processInfo.environment["OAK_BENCH_NUM_ENVS"].flatMap(Int.init)
+                       ?? ProcessInfo.processInfo.environment["OAK_NUM_ENVS"].flatMap(Int.init) ?? 1, 1)
+        // Pass 15 Tier 3: ConcurrentBenchHarness — N work-items run in parallel via
+        // OperationQueue (one MTLCommandQueue per OakMetalEngine instance; Apple's Metal
+        // driver schedules them across the GPU's ~4096 ALUs). N=8 default (per plan §3.3);
+        // OAK_BENCH_CONCURRENCY=1 forces serial execution for debugging.
+        let concurrency = max(ProcessInfo.processInfo.environment["OAK_BENCH_CONCURRENCY"].flatMap(Int.init) ?? 8, 1)
         let envOrder = try benchmarkEnvOrder(seed: seedStart)
         let expected = envOrder.count * seedCount * policies.count
         let benchDir = resolveBenchmarkWorkingDirectory(root: root, expectedTasks: expected)
         try FileManager.default.createDirectory(at: benchDir, withIntermediateDirectories: true)
+
+        struct WorkItem { let env: BenchmarkEnv; let seed: Int; let policy: Policy }
+        var work: [WorkItem] = []
         for env in envOrder {
-            // dPolicy from the schema: discreteCount for discrete envs, actDim for continuous.
-            let dPolicyEst = env.schema.actionDiscreteCount ?? env.schema.actionDim
-            let defaultN = try directNumEnvs(obsDim: env.schema.observationDim, actDim: env.schema.actionDim,
-                                             dPolicy: dPolicyEst, device: device)
-            let numEnvs = max(forcedN ?? defaultN, 1)
             for seed in seedStart..<(seedStart + seedCount) {
                 for policy in policies {
                     let stem = RunSnapshot.snapshotStem(envId: env.envId, policy: policy, seed: seed)
@@ -1593,18 +1605,52 @@ private final class RunState {
                         .appendingPathComponent(RunSnapshot.seedFolderName(seed), isDirectory: true)
                         .appendingPathComponent("\(stem).json", isDirectory: false)
                     if FileManager.default.fileExists(atPath: snapURL.path) { continue }
-                    let logURL = benchDir.appendingPathComponent("\(stem).log")
-                    do {
-                        _ = try runSingle(envId: env.envId, policy: policy, seed: seed, warmup: warmup,
-                                           stopAfter: stopAfter, numEnvs: numEnvs, device: device,
-                                           command: "benchmark", metricsDir: benchDir).0
-                    } catch {
-                        try "\(error)\n".data(using: .utf8)?.write(to: logURL)
-                        throw error
-                    }
+                    work.append(WorkItem(env: env, seed: seed, policy: policy))
                 }
             }
         }
+        let totalWork = work.count
+        fputs("OaK benchmark: \(totalWork) work items, B=\(numEnvs), N=\(concurrency) concurrent (steps=\(stopAfter), seeds=\(seedCount))\n", stderr)
+        fflush(stderr)
+
+        // Shared progress + first-error tracker. Reference type so the @Sendable closure
+        // captures the wrapper, not the mutable value (Swift 6 strict concurrency).
+        final class SyncState: @unchecked Sendable {
+            var completed = 0
+            var firstError: Error?
+            let lock = NSLock()
+        }
+        let state = SyncState()
+        let progressEvery = max(1, totalWork / 20)
+        let queue = OperationQueue()
+        queue.maxConcurrentOperationCount = concurrency
+
+        for item in work {
+            queue.addOperation {
+                do {
+                    _ = try runSingle(envId: item.env.envId, policy: item.policy, seed: item.seed,
+                                      warmup: warmup, stopAfter: stopAfter, numEnvs: numEnvs,
+                                      device: device, command: "benchmark", metricsDir: benchDir).0
+                    state.lock.lock()
+                    state.completed += 1
+                    let n = state.completed
+                    state.lock.unlock()
+                    if n % progressEvery == 0 || n == totalWork {
+                        fputs("OaK benchmark progress: \(n)/\(totalWork)\n", stderr)
+                        fflush(stderr)
+                    }
+                } catch {
+                    let stem = RunSnapshot.snapshotStem(envId: item.env.envId, policy: item.policy, seed: item.seed)
+                    let logURL = benchDir.appendingPathComponent("\(stem).log")
+                    try? "\(error)\n".data(using: .utf8)?.write(to: logURL)
+                    state.lock.lock()
+                    if state.firstError == nil { state.firstError = error }
+                    state.lock.unlock()
+                }
+            }
+        }
+        queue.waitUntilAllOperationsAreFinished()
+        if let e = state.firstError { throw e }
     }
 
     private static func parsePolicy(_ raw: String) throws -> Policy {

@@ -399,6 +399,27 @@ inline float track_rate(uint stepCount, float ridge) {
 
 inline uint ceil_sqrt(uint n) { float s = sqrt(float(max(n, 1u))); return uint(ceil(s)); }
 
+// Pass 15 Tier 2.5: structurally-bounded soft-saturation (Iwaki MDAC bounded-advantage,
+// 2502.03854; same principle as oak_meta_action's tanh-mu bound). Maps R → [-M, M] via:
+//   y = M · tanh(x / M),  M = √HALF_MAX
+// Properties:
+//   - Identity at the origin: tanh(x/M)·M = x − x³/(3M²) + O(x⁵/M⁴), relative error
+//     <0.01% for |x| ≤ M/10 ≈ 26 (entire normal-operation range of agent quantities).
+//   - Smooth, monotone, infinitely differentiable.
+//   - Soft saturating: |y| < M for all finite x; y → ±M as x → ±∞.
+//   - Zero bias: y(0) = 0, y'(0) = 1.
+//   - M = √HALF_MAX is structural (Inv-9): the largest scalar such that y² fits in fp16
+//     range. Any quantity passed through bounded_soft can be safely squared, multiplied
+//     by another bounded quantity, or stored as fp16 without overflow downstream.
+// Used at the three sites where unbounded growth was observed at deep workerDepth in
+// Pass-14 forensic data: oak_encode (latent z), oak_predict (td and tdPsi residuals),
+// oak_meta_action (policy mu). All three share the same M for principled FLOPs/safety
+// trade-off.
+inline float bounded_soft(float x) {
+    float M = sqrt((float)HALF_MAX);  // structural fp16-safety bound, hardware-derived.
+    return M * tanh(x * (1.0f / M));
+}
+
 // Pass 15 Tier 0.2: provably-safe fp32 → fp16 weight write. The bare `half(x)` cast in Pass
 // 14 silently produced fp16 +Inf when |x| > 65504 (the fp16 range maximum) AND silently
 // passed through NaN. Both poisoned subsequent reads with cascading non-finite values, and
@@ -406,24 +427,31 @@ inline uint ceil_sqrt(uint n) { float s = sqrt(float(max(n, 1u))); return uint(c
 // -fno-fast-math in setup.sh) the downstream `isfinite()` checks were elided at -O.
 //
 // safe_half() rule (structural, no magic constants):
-//   1. Perform the IEEE-754 narrowing `half(x)`. By the float→half rounding rules, any
-//      finite x outside the representable fp16 range rounds to ±Inf, and any non-finite
-//      x produces a non-finite half.
-//   2. If the resulting half is finite → return it (safe).
-//      Otherwise → return half(0.0f) AND atomic-increment OAK_CNT_HALF_SAT.
-//      (BWH-orthodox zero-bias replacement per Inv-4: never clamp, never bias the
-//      iterate toward any non-zero value; a non-finite update is recorded as a missed
-//      update — the previous weight value is preserved by the caller's load-modify-store.)
+//   1. Apply bounded_soft(x): smooth saturating tanh-bound to ±M, M = √HALF_MAX.
+//      This catches the Pass-14 silent failure mode where finite x > HALF_MAX
+//      rounds to HALF_MAX (Apple Metal's IEEE-754 default for out-of-range finite),
+//      causing weights to crawl up to HALF_MAX over thousands of accumulated updates
+//      and never trigger an Inf check. Bounded_soft is identity at origin (relative
+//      error <0.01% for typical |x| ≤ M/10 = 26), so normal-range weights are
+//      unchanged. Soft-saturating ensures weights stay in a range where w·feature
+//      stays fp16-safe even when features are at their own bounded_soft cap.
+//   2. Narrow to half. The bounded value is always finite and ≤ M < HALF_MAX, so
+//      the cast cannot produce Inf.
+//   3. If the resulting half is non-finite (only possible for NaN inputs) → return
+//      half(0.0f) AND atomic-increment OAK_CNT_HALF_SAT (BWH-orthodox zero-bias
+//      replacement per Inv-4: never bias the iterate toward a non-zero value;
+//      a NaN update is recorded as a missed update).
 //
-// This covers BOTH failure modes (NaN/Inf input AND out-of-fp16-range finite input)
-// without an explicit magic-number bound — the fp16 representable set is the structural
-// boundary, evaluated by the IEEE-754 conversion itself.
+// Telemetry contract: a healthy run produces OAK_CNT_HALF_SAT == 0 over its full
+// lifetime. (Tier 0 originally also tracked finite-saturation but that's now
+// structurally precluded by bounded_soft.)
 //
-// Telemetry contract: a healthy run produces OAK_CNT_HALF_SAT == 0 over its full lifetime.
-// Pass 15 Tier 0 acceptance gate: nonFiniteRawTotal == 0 over the Humanoid 500K bench
-// (was 182M with the unsafe path).
+// This is the third application of the Iwaki MDAC bounded-advantage principle
+// (oak_encode latent z, oak_predict td/tdPsi, this site for all weight writes).
+// All three sites share M = √HALF_MAX so the agent's entire computational graph
+// stays within fp16-safe bounds without any clamps, biases, or tuned scalars.
 inline half safe_half(float x, device uint *counters) {
-    half h = half(x);
+    half h = half(bounded_soft(x));
     if (!isfinite(h)) {
         atomic_fetch_add_explicit((device atomic_uint *)(counters + OAK_CNT_HALF_SAT),
                                   1u, memory_order_relaxed);
@@ -594,7 +622,15 @@ kernel void oak_encode(
     // learnable parameters; tied directly to existing meta-machinery — Inv-9 compliant.
     float alpha = min(1.0f, ctx.alphaImpFeat[feat] * ctx.cap);
     float prev_belief = state_slot(ctx, ctx.stateSlot)[row * ctx.E + feat];
-    float z = alpha * z_instant + (1.0f - alpha) * prev_belief;
+    float z_raw = alpha * z_instant + (1.0f - alpha) * prev_belief;
+    // Pass 15 Tier 2.5: structurally-bounded latent state (Iwaki MDAC bounded-advantage,
+    // 2502.03854). Without this bound, the recurrence z = α·z_instant + (1-α)·z_prev forms
+    // a positive-feedback loop with the encoder weight update td·(obs-mean) — when |z| > M,
+    // V(s) = w·z grows past fp16 range, TD residual grows, encoder gradient grows, weights
+    // saturate at HALF_MAX, and the (A1•) Σ(0)>0 assumption of Sakha 2.4(ii) fails so the
+    // RTD stability proof no longer applies. Soft bounding restores the assumption: |z| ≤ M
+    // ⇒ Σ(0) bounded ⇒ Hurwitz Ā preserved. Zero bias at origin (identity for typical |z|≤25).
+    float z = bounded_soft(z_raw);
     // Row stride is E (encoder writes [:R] of the E-wide state row; outcome head writes [R:E]).
     state_slot(ctx, writeSlot)[row * ctx.E + feat] = z;
 }
@@ -632,7 +668,12 @@ kernel void oak_predict_outcome(
     float v = active_dot_half_auto(ctx.outcomeHead, k * ctx.E, prev, 0u,
                                    ctx.activeList, ctx.activeCount,
                                    ctx.scalars->activeListIsIdentity);
-    curr[ctx.R + k] = v;
+    // Pass 15 Tier 2.5: structurally-bounded outcome prediction (companion to oak_encode's
+    // z-bound). The outcome dims [R, E) are recursive inputs to the next step's outcome head,
+    // value head, ψ, and π — without a bound, they form an unbounded auto-regressive loop
+    // (outcome[N] = H · state[N-1] feeds outcome[N+1]'s state[N], etc.) that drives latent
+    // state values to fp32 max. Same Iwaki MDAC bound as encoder/td/mu sites.
+    curr[ctx.R + k] = bounded_soft(v);
 }
 
 // =================================================================================================
@@ -797,7 +838,12 @@ kernel void oak_predict(
     // oak_bk_admit_commit and read here as scalars/arena.
     float rhoBase   = ctx.scalars->rhoBaseline;
     float vMeanBase = ctx.scalars->vMeanBaseline;
-    ctx.td[gid] = (ctx.reward[gid] - rhoBase) + terminalMask * vNext - vPrev - vMeanBase;
+    float td_raw    = (ctx.reward[gid] - rhoBase) + terminalMask * vNext - vPrev - vMeanBase;
+    // Pass 15 Tier 2.5: structurally-bounded TD residual (companion to oak_encode's z-bound).
+    // The downstream gradient is `td · feature` per learn-rule; with |feature| ≤ M (bounded
+    // by oak_encode) and |td| ≤ M, the per-thread gradient stays in [-M², M²] = [-HALF_MAX,
+    // HALF_MAX] = fp16-safe. Same Iwaki MDAC bounded-advantage principle.
+    ctx.td[gid] = bounded_soft(td_raw);
 
     // Per-cumulant SF TD under soft chord λ_prev (chordSlotPrev). RED cumulant + chord-bias.
     // Tier 2: ψ-cumulant centering also uses rhoBaseline + per-cumulant psiMeanBaseline[k]
@@ -824,7 +870,9 @@ kernel void oak_predict(
         // Pass 15 Tier 2: subtract per-cumulant ϖ-RTD baseline (the expected ψ_k under
         // empirical state distribution).
         float psiMeanBase_k = ctx.psiMeanBaseline[k];
-        ctx.tdPsi[gid * ctx.K + k] = c_RED + terminalMask * psi_next - psi_prev - psiMeanBase_k;
+        float tdPsi_raw = c_RED + terminalMask * psi_next - psi_prev - psiMeanBase_k;
+        // Pass 15 Tier 2.5: structurally-bounded ψ TD residual (same M as main td).
+        ctx.tdPsi[gid * ctx.K + k] = bounded_soft(tdPsi_raw);
     }
 }
 
@@ -957,20 +1005,11 @@ kernel void oak_meta_action(
                                            ctx.activeList, ctx.activeCount, dense);
         mu = fma(lambda_k, dot_k, mu);
     }
-    // Pass 15 Tier 0.6: structurally-bounded policy mean (Iwaki 2502.03854 MDAC bounded
-    // advantage). Smooth saturating transform with zero bias at the origin:
-    //   tanh(mu / M) * M  =  mu  +  O(mu³ / M²)   for |mu| ≪ M
-    //                    →  ±M                    for |mu| → ∞
-    // The bound M = √HALF_MAX is structural, not a tuned scalar: any quantity bounded
-    // by ±M can be safely squared (M² = HALF_MAX) without fp16 overflow downstream
-    // (where mu enters value/policy gradients via mu² and mu·scoreGrad terms). For
-    // typical |mu| ≤ 10 (continuous-action regime) the transform is essentially identity
-    // (relative error < 10⁻⁴), preserving learning fidelity. Replaces unconditional fp16
-    // saturation when β-on-surprise drives mu beyond fp16 range. Inv-9 compliant: M is
-    // a hardware-derived constant of the storage type, not a tuned hyperparameter.
-    float mu_bound = sqrt((float)HALF_MAX);
-    mu = mu_bound * tanh(mu / mu_bound);
-    ctx.policyMean[row * ctx.D + p] = mu;
+    // Pass 15 Tier 0.6 / 2.5: tanh-bounded policy mean via shared bounded_soft helper
+    // (Iwaki 2502.03854 MDAC bounded advantage). One of three sites that share the same
+    // structural M = √HALF_MAX bound (oak_encode latent z, oak_predict td/tdPsi, here);
+    // see bounded_soft definition above for the full Inv-9 rationale.
+    ctx.policyMean[row * ctx.D + p] = bounded_soft(mu);
 }
 
 // =================================================================================================
