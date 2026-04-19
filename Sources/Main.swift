@@ -26,6 +26,11 @@ struct RunHealth: Codable {
     let oakOptionReinitCount: Double?
     let nonFiniteRawTotal: Int
     let nonFiniteSanitizedTotal: Int
+    // Pass 15 Tier 0: numerical-safety telemetry surfaced into the bench JSON. The (B)
+    // hard rule is `tdPsiNonFiniteTotal == 0 && halfSaturationTotalFinal == 0` over the
+    // full bench. Both default to 0 for older schemas (Codable optionality + default).
+    let tdPsiNonFiniteTotal: Int?
+    let halfSaturationTotalFinal: Int?
 }
 
 struct RunDiagnostic: Codable {
@@ -241,6 +246,12 @@ private struct HealthAccumulator {
     var encodeNF = 0, learnNF = 0, planNF = 0
     var maxLat = 0.0, maxPol = 0.0
     var lastRho: Double?
+    // Pass 15 Tier 0: numerical-safety telemetry. tdPsiNF accumulates per-step counts
+    // (an unbiased total over the run); halfSaturationCountFinal is read from the LAST
+    // step's stats since the underlying counter is cumulative life-of-engine and the
+    // delta over the bench window equals the final value (counter starts at 0 per init).
+    var tdPsiNF = 0
+    var halfSaturationFinal = 0
 
     mutating func record(_ stats: KernelStats) {
         steps += 1
@@ -263,6 +274,8 @@ private struct HealthAccumulator {
         encodeNF += Int(stats.encodeNonFiniteCount)
         learnNF += Int(stats.learnNonFiniteCount)
         planNF += Int(stats.planNonFiniteCount)
+        tdPsiNF += Int(stats.tdPsiNonFiniteCount)
+        halfSaturationFinal = Int(stats.halfSaturationCount)
         maxLat = max(maxLat, Double(stats.maxAbsLatentPrediction))
         maxPol = max(maxPol, Double(stats.maxAbsPolicyOutput))
     }
@@ -280,7 +293,9 @@ private struct HealthAccumulator {
             optionModelPredictionMSE: mean(4),
             oakOptionReinitCount: mean(5),
             nonFiniteRawTotal: rawNonFinite,
-            nonFiniteSanitizedTotal: sanitizedNonFinite)
+            nonFiniteSanitizedTotal: sanitizedNonFinite,
+            tdPsiNonFiniteTotal: tdPsiNF,
+            halfSaturationTotalFinal: halfSaturationFinal)
     }
 
     func diagnosticSnapshot() -> RunDiagnostic? {
@@ -389,6 +404,11 @@ private struct KernelScalars {
     var stateSlot: UInt32 = 0, optionSlot: UInt32 = 0
     var rho: Float = 0, pEff: Float = 0
     var alphaImp: Float = 0, alphaEnc: Float = 0
+    // Pass 15 Tier 0.3: REINFORCE policy implicit step. α₀ / (1 + α₀ · ⟨‖x‖²⟩·⟨‖scoreGrad‖²⟩).
+    // Computed in oak_reduce_alpha; consumed by oak_learn_pi as the shared denominator that
+    // includes the full outer-product gradient norm (Cauchy-Schwarz upper bound). Fixes the
+    // Pass-14 200M MSE blowup root cause (per-thread n2 missed cross-row scoreGrad²).
+    var alphaPi: Float = 0
     // Pass 11 Tier 4: REINFORCE running-mean TD baseline (Williams 1992 variance reduction).
     var tdBaseline: Float = 0
     // Pass 12 Tier 4.2/4.3 + Pass 13 Tier 0: continual EMA of model-prediction error
@@ -412,6 +432,10 @@ struct KernelStats {
     var optionModelPredictionMSE: Float = 0
     var oakOptionReinitCount: Float = 0
     var utilityFeatureMean: Float = 0, utilityOptionMean: Float = 0
+    // Pass 15 Tier 0: numerical-safety telemetry.
+    //   tdPsiNonFiniteCount  per-step NF in tdPsi (was untracked, contaminated MSE)
+    //   halfSaturationCount  cumulative life-of-engine count of safe_half(NaN/Inf) substitutions
+    var tdPsiNonFiniteCount: Float = 0, halfSaturationCount: Float = 0
 }
 
 // ================================================================================================
@@ -537,7 +561,10 @@ private enum OakMetalLayout {
         let am = o; o += E      // active mask spans E (outcome dims R..E always-active)
         let al = o; o += E      // active list also sized E
         let op = o; o += 2 * batch     // legacy option_slot — argmax of chord, telemetry-only in Tier 3
-        let c  = o; o += 6
+        // Pass 15 Tier 0: counters[8] expanded from counters[6] to host two new
+        // numerical-safety counters (OAK_CNT_HALF_SAT cumulative + OAK_CNT_TDPSI_NF
+        // per-step). Layout matches OakKernel.metal OAK_CNT_* constants 0..7.
+        let c  = o; o += 8
         let sf = o; o += K
         let oa = o; o += batch  // Pass 11 Tier 3: optionAge[r] — steps since last termination
         return UInts(done: d, activeMask: am, activeList: al, option: op, counters: c,
@@ -1025,10 +1052,11 @@ final class OakMetalEngine {
         for i in 0..<batch { donePtr[i] = UInt32(prevDone[i]) }
 
         let ctr = uintArena.pointer.advanced(by: uintLayout.counters)
-        // Reset per-step non-finite counters (offsets OAK_CNT_OBS_NF, LEARN_NF, PLAN_NF).
-        // counters[OAK_CNT_REINIT_OPT] is cleared by bk_admit_commit at end of step.
-        // counters[OAK_CNT_REINIT_FEAT] is a cumulative life-of-engine count (not reset).
-        ctr[0] = 0; ctr[1] = 0; ctr[2] = 0
+        // Reset per-step non-finite counters (offsets OAK_CNT_OBS_NF=0, LEARN_NF=1,
+        // PLAN_NF=2, TDPSI_NF=6). counters[OAK_CNT_REINIT_OPT=3] is cleared by
+        // bk_admit_commit at end of step. counters[OAK_CNT_REINIT_FEAT=4] and
+        // counters[OAK_CNT_HALF_SAT=5] are cumulative life-of-engine counts.
+        ctr[0] = 0; ctr[1] = 0; ctr[2] = 0; ctr[6] = 0
         statsPointer.pointee = KernelStats()
 
         try runKernel(accumulatePhaseGpu: accumulatePhaseGpu)

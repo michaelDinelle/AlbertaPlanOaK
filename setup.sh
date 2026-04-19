@@ -313,8 +313,12 @@ for src in "$SRC_DIR"/envpool/minigrid/impl/*.cc; do case "$(basename "$src")" i
   -Wl,-rpath,@loader_path -Wl,-rpath,"$MUJOCO_DIR" \
   -o "$NATIVE_DIR/liboakenv.dylib"
 
-# Single-source default library (seven `kernel void` entry points). Optional: compile multiple `.metal` files to one `.metallib` if compile time becomes a bottleneck.
-xcrun -sdk macosx metal -c "$ROOT_DIR/Sources/OakKernel.metal" -o "$ROOT_DIR/.build/OakKernel.air"
+# Single-source default library. Pass 15 Tier 0: -fno-fast-math forces the Metal compiler
+# to preserve isfinite() / isnan() / isinf() checks at -O. Per IREE issue #23914 (March 2026),
+# the default fast-math mode silently elides these checks, making 182M+ NaN/Inf events at
+# deep workerDepth invisible to the runtime telemetry.  We pay <5% throughput for provable
+# numerical-safety on infinite-horizon runs (BWH-orthodox, no clamps, no bias).
+xcrun -sdk macosx metal -fno-fast-math -c "$ROOT_DIR/Sources/OakKernel.metal" -o "$ROOT_DIR/.build/OakKernel.air"
 xcrun -sdk macosx metallib "$ROOT_DIR/.build/OakKernel.air" -o "$ROOT_DIR/.build/OakKernel.metallib"
 swift build -c release
 
