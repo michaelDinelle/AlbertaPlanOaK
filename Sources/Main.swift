@@ -15,36 +15,36 @@ enum OakError: Error, CustomStringConvertible {
 
 enum Policy: String, Codable { case oak, random }
 
-// ------------------------------------------------------------------------------------------------ Run metrics JSON (AGENTS.md: schemaVersion 2).
+// ----------------------------------------------------------------------------------------------- Run metrics JSON (AGENTS.md: schemaVersion 2).
 struct RunHealth: Codable {
     let rewardRate: Double?
     let latentStateMeanSquare: Double?
-    // Pass 15 Tier 1.2: `activeRank` retained (= activeCount value) for backwards
-    // compatibility with Pass 12-14 reports. New canonical names (`activeCount`,
+    // Tier 1.2: `activeRank` retained (= activeCount value) for backwards
+    // compatibility with-14 reports. New canonical names (`activeCount`,
     // `pEffectiveRank`) carry the semantically correct quantities and should be used
     // by all new analysis scripts.
     let activeRank: Double?            // legacy alias for activeCount (count of admitted features)
-    let activeCount: Double?           // Pass 15 T1.2: explicit count of admitted features
-    let pEffectiveRank: Double?        // Pass 15 T1.2: real effective rank (trace/max of featSM)
+    let activeCount: Double?           // T1.2: explicit count of admitted features
+    let pEffectiveRank: Double?        // T1.2: real effective rank (trace/max of featSM)
     let actionDeltaL2Mean: Double?
     let scoreGradL2Mean: Double?      // mean ‖∇log π(a|s)‖² across rows × params (REINFORCE)
     let optionModelPredictionMSE: Double?
     let oakOptionReinitCount: Double?
     let nonFiniteRawTotal: Int
     let nonFiniteSanitizedTotal: Int
-    // Pass 15 Tier 0: numerical-safety telemetry surfaced into the bench JSON. The (B)
+    // Tier 0: numerical-safety telemetry surfaced into the bench JSON. The (B)
     // hard rule is `tdPsiNonFiniteTotal == 0 && halfSaturationTotalFinal == 0` over the
     // full bench. Both default to 0 for older schemas (Codable optionality + default).
     let tdPsiNonFiniteTotal: Int?
     let halfSaturationTotalFinal: Int?
-    // Pass 15 Tier 1: surfaced KernelScalars + per-buffer weight-magnitude maxima. The (C)
+    // Tier 1: surfaced KernelScalars + per-buffer weight-magnitude maxima. The (C)
     // bounded-magnitude hard rule consumes `*Max` fields. The KernelScalars surfacing
     // (modelErrEMA, tdBaseline, alphaImp, etc.) lets analysis scripts inspect the agent's
     // internal stability state without re-running with diagnostic flags.
     let utilityFeatureMean: Double?, utilityOptionMean: Double?
     let modelErrEMA: Double?, modelErrEMAPrev: Double?
     let tdBaseline: Double?, alphaImp: Double?, alphaEnc: Double?, alphaPi: Double?
-    let rhoBaseline: Double?         // Pass 15 Tier 2: ϖ-RTD centering baseline (cumulative reward mean)
+    let rhoBaseline: Double?         // Tier 2: ϖ-RTD centering baseline (cumulative reward mean)
     let oakFeatureReinitCountFinal: Int?
     let encoderMax: Double?, valueWMax: Double?, psiMax: Double?, optPolicyMax: Double?
     let outcomeHeadMax: Double?, betaWMax: Double?, omegaWMax: Double?, sprDecoderMax: Double?
@@ -72,11 +72,11 @@ private struct RunMetricsFile: Encodable {
     let numEnvs: Int, warmupSteps: Int, stopAfterMeasuredSteps: Int
     let observationDim: Int, actionDim: Int, actionDiscreteCount: Int?
     let measuredStepCount: Int, measuredBatchCount: Int, measuredSeconds: Double
-    // Pass 15 Tier 5: workerDepth = measuredStepCount / numEnvs (per-env trajectory length).
-    // The canonical depth metric for the BWH-orthodox bench protocol — at B=1 (Pass 15
-    // default), workerDepth = measuredStepCount; at B=2048 (Pass 14 batched protocol)
+    // Tier 5: workerDepth = measuredStepCount / numEnvs (per-env trajectory length).
+    // The canonical depth metric for the BWH-orthodox bench protocol — at B=1 (
+    // default), workerDepth = measuredStepCount; at B=2048
     // workerDepth = measuredStepCount / 2048, exposing the depth-vs-width trade-off that
-    // Pass 14 forensic data showed was masked by the prior `measuredStepCount` field
+    // forensic data showed was masked by the prior `measuredStepCount` field
     // (50K total steps gave only 24 worker-steps per env at B=2048; explained the broken
     // strict-gate verdicts at B>1).
     let workerDepth: Int
@@ -87,16 +87,15 @@ private struct RunMetricsFile: Encodable {
     let health: RunHealth?, diagnostic: RunDiagnostic?
 }
 
-// Pass 11 Tier 1: agent emits ONLY policyMean[B · D_policy]. The wrapper layer samples per
+// Tier 1: agent emits ONLY policyMean[B · D_policy]. The wrapper layer samples per
 // component and produces both the env-flat action and the matching scoreGrad.
-//
 //   `PolicyMeanBatch` carries the kernel-emitted μ vector + dPolicy width.
 //   `ActionComponent`  describes one component of the env's action spec (Discrete N | Box A).
 //   `sampleAndScore`   composes per-component sampling: Gumbel-max + categorical scoreGrad for
 //                      Discrete (Williams 1992; Maddison 2014); structural-σ-1 Gaussian +
 //                      score = z for Box. The wrapper-layer sampling distribution and the
 //                      score function are mathematically matched, regardless of action-space
-//                      type, fixing the Pass-10 unified-Gaussian-then-argmax score-function
+//                      type, fixing the unified-Gaussian-then-argmax score-function
 //                      mismatch on discrete envs.
 struct PolicyMeanBatch { let values: [Float]; let dPolicy: Int }
 
@@ -184,10 +183,10 @@ func sampleAndScoreActions(spec: [ActionComponent], numEnvs: Int, dPolicy: Int,
                     let raw = mu + z   // structural σ = 1
                     let clamped = max(low[d], min(high[d], raw.isFinite ? raw : 0))
                     envAction[aBase + aIdx + d] = clamped
-                    // Pass 14 Tier 0.7: REINFORCE score for Gaussian policy with σ=1 is
+                    // Tier 0.7: REINFORCE score for Gaussian policy with σ=1 is
                     // ∂log π(a|s) / ∂μ = (a - μ) / σ² = (a - μ). When the env clamps `raw`
                     // to [low, high], the ACTUAL action is `clamped`, not μ+z. Using `z`
-                    // (= raw - μ) was biased on Box envs that hit bounds (Pass 13 bug).
+                    // (= raw - μ) was biased on Box envs that hit bounds.
                     scoreGrad[mBase + pIdx + d] = clamped - mu
                 }
                 pIdx += a; aIdx += a
@@ -214,9 +213,9 @@ private struct BenchmarkEnv { let envId: String; let schema: Schema }
 // seedBase multiplication, the most neutral value possible.
 let oakUnseededSeed: Int32 = 0
 
-// Pass 12 Tier 1: env-var-driven kernel ablation. OAK_ABLATE_KERNEL=name1,name2 replaces the
+// Tier 1: env-var-driven kernel ablation. OAK_ABLATE_KERNEL=name1,name2 replaces the
 // named kernel(s) with oak_noop in the ICB. Used by run/benchmark; probe also accepts
-// --ablate-kernel=NAME on the CLI. Empty / unset = no ablation (baseline).
+// -ablate-kernel=NAME on the CLI. Empty / unset = no ablation (baseline).
 func metalDevice() throws -> MTLDevice {
     guard let d = MTLCreateSystemDefaultDevice() else {
         throw OakError.message("Metal device unavailable.")
@@ -232,9 +231,9 @@ func ablatedKernelsFromEnv() -> Set<String> {
                                            .filter { !$0.isEmpty })
 }
 
-// ------------------------------------------------------------------------------------------------
+// -----------------------------------------------------------------------------------------------
 // Filesystem helpers.
-// ------------------------------------------------------------------------------------------------
+// -----------------------------------------------------------------------------------------------
 private func oakRoots() -> [URL] {
     let fm = FileManager.default
     let exe = URL(fileURLWithPath: CommandLine.arguments[0],
@@ -257,13 +256,13 @@ func decodeCString(_ buffer: [CChar]) -> String {
     String(decoding: buffer.prefix { $0 != 0 }.map { UInt8(bitPattern: $0) }, as: UTF8.self)
 }
 
-// ------------------------------------------------------------------------------------------------
+// -----------------------------------------------------------------------------------------------
 // Health accumulator — lean fold over KernelStats. Six slots, one per reported mean.
-// ------------------------------------------------------------------------------------------------
+// -----------------------------------------------------------------------------------------------
 private struct HealthAccumulator {
     struct Slot { var sum = 0.0; var count = 0 }
     // Slot order must mirror `values` in `record()` and the field order in `snapshot()`.
-    // Pass 15 Tier 1: extended to 16 slots covering all surfaced telemetry channels.
+    // Tier 1: extended to 16 slots covering all surfaced telemetry channels.
     //   0  latentStateMeanSquare
     //   1  activeCount             (formerly activeRank — the same quantity, semantically renamed)
     //   2  actionDeltaL2Mean
@@ -278,7 +277,7 @@ private struct HealthAccumulator {
     //  11  tdBaseline              (T1.3)
     //  12  alphaImp                (T1.3)
     //  13  alphaEnc                (T1.3)
-    //  14  alphaPi                 (T1.3 — Pass 15 T0.3 ‖scoreGrad‖² implicit step)
+    //  14  alphaPi
     //  15  rhoBaseline             (T2  — ϖ-RTD baseline; Sakha-Kamalapurkar-Meyn 2603.27874v2)
     var slots = [Slot](repeating: Slot(), count: 16)
     var steps = 0
@@ -286,14 +285,14 @@ private struct HealthAccumulator {
     var encodeNF = 0, learnNF = 0, planNF = 0
     var maxLat = 0.0, maxPol = 0.0
     var lastRho: Double?
-    // Pass 15 Tier 0: numerical-safety telemetry. tdPsiNF accumulates per-step counts
+    // Tier 0: numerical-safety telemetry. tdPsiNF accumulates per-step counts
     // (an unbiased total over the run); halfSaturationCountFinal is read from the LAST
     // step's stats since the underlying counter is cumulative life-of-engine and the
     // delta over the bench window equals the final value (counter starts at 0 per init).
     var tdPsiNF = 0
     var halfSaturationFinal = 0
     var oakFeatureReinitFinal = 0
-    // Pass 15 Tier 1.4: per-buffer weight-magnitude max over the bench window. Each is
+    // Tier 1.4: per-buffer weight-magnitude max over the bench window. Each is
     // the max-of-maxima across all recorded steps — a monotone signal for the (C)
     // bounded-magnitude gate. `*Max` reflects the worst-case at any point during the bench.
     var encoderMax = 0.0, valueWMax = 0.0, psiMax = 0.0, optPolicyMax = 0.0
@@ -393,16 +392,16 @@ private struct HealthAccumulator {
     }
 }
 
-// ------------------------------------------------------------------------------------------------
+// -----------------------------------------------------------------------------------------------
 // Measured action collector.
-// ------------------------------------------------------------------------------------------------
+// -----------------------------------------------------------------------------------------------
 private final class MeasuredActionCollector {
     private var discrete: [Int]?
     private var sum: [Double]?, sumsq: [Double]?
     private var l2s = 0.0, l2sq = 0.0, n = 0
     private let envActionWidth: Int
 
-    // Pass 11 Tier 1: consumes env-flat action vectors (the wrapper-sampled actions actually
+    // Tier 1: consumes env-flat action vectors (the wrapper-sampled actions actually
     // sent to the env). For discrete envs the env-flat width is 1 (the chosen index); for
     // continuous it is actDim. The agent's policyMean is never seen here — telemetry tracks
     // what the env actually received, which is the BWH-orthodox observable.
@@ -445,7 +444,7 @@ private final class MeasuredActionCollector {
 
 // ================================================================================================
 // Kernel config + scalars + stats — mirrors OakKernel.metal structs byte-for-byte. Keep in lockstep.
-// Pass 10 unification removed env-type fields: actionIsDiscrete and actionParamCount are gone
+// unification removed env-type fields: actionIsDiscrete and actionParamCount are gone
 // from KernelConfig — the agent has no notion of action-space type, and D = 2·actDim is
 // computed structurally in the kernel from cfg.actDim. boundLat/Rew/Act + invBoundLat/Rew/Act
 // were also already gone from Tier 9 (Tier 2 deleted all clamps; implicit α + ρ̄ centering
@@ -455,35 +454,35 @@ private final class MeasuredActionCollector {
 private struct KernelConfig {
     var obsDim: UInt32 = 0, rank: UInt32 = 0, actDim: UInt32 = 0, batch: UInt32 = 0
     var optionCount: UInt32 = 0, baseObsDim: UInt32 = 0
-    // Pass 11 Tier 1: env-declared D_policy. Sum of per-component policy-param widths from the
+    // Tier 1: env-declared D_policy. Sum of per-component policy-param widths from the
     // env's action spec (Discrete-N → N; Box-A → A). The agent has no notion of WHAT the
     // components are — only the integer width.
     var actionParamCount: UInt32 = 0
-    // Pass 11 Tier 2: outcomeHead[K · E] for OPSR state augmentation (Vereecken 2604.07016).
-    // Pass 11 Tier 3: betaW[E + K] termination head, omegaW[K · E] chord generator,
+    // Tier 2: outcomeHead[K · E] for OPSR state augmentation (Vereecken 2604.07016).
+    // Tier 3: betaW[E + K] termination head, omegaW[K · E] chord generator,
     // chord/optionAge/betaProb arena slots for temporal abstraction (Bacon-Precup 1609.05140;
     // Wan-Naik-Sutton 2110.13855).
     var pEncoder: UInt32 = 0, pValue: UInt32 = 0, pPsi: UInt32 = 0, pOptPolicy: UInt32 = 0
     var pOutcomeHead: UInt32 = 0, pBetaW: UInt32 = 0, pOmegaW: UInt32 = 0
-    // Pass 13 Tier 3: SPR-Stream chord-conditioned diagonal next-state predictor.
+    // Tier 3: SPR-Stream chord-conditioned diagonal next-state predictor.
     var pSprDecoder: UInt32 = 0
     var sObservation: UInt32 = 0, sObsMean: UInt32 = 0, sState: UInt32 = 0
     var sPrevPolicyMean: UInt32 = 0, sPolicyMean: UInt32 = 0, sScoreGrad: UInt32 = 0
     var sReward: UInt32 = 0, sTd: UInt32 = 0, sTdPsi: UInt32 = 0, sVCurr: UInt32 = 0
     var sChordSlot: UInt32 = 0, sChordSlotPrev: UInt32 = 0, sBetaProb: UInt32 = 0
-    // Pass 14 Tier 1: sSprPred removed — oak_spr_fused recomputes ẑ_N inline.
+    // Tier 1: sSprPred removed — oak_spr_fused recomputes ẑ_N inline.
     var uDone: UInt32 = 0, uActiveMask: UInt32 = 0, uActiveList: UInt32 = 0
     var uOption: UInt32 = 0, uCounters: UInt32 = 0, uSubtaskFeatureOf: UInt32 = 0
     var uOptionAge: UInt32 = 0
     var aFeatSM: UInt32 = 0, aWBar: UInt32 = 0, aFeatMean: UInt32 = 0
     var aUtilFeat: UInt32 = 0, aUtilOpt: UInt32 = 0
-    // Pass 11 Tier 5: optFracEMA[K] for the structural-1/K dormancy reinit gate.
+    // Tier 5: optFracEMA[K] for the structural-1/K dormancy reinit gate.
     var aOptFracEMA: UInt32 = 0
-    // Pass 13 Tier 2: per-feature TIDBD α (SwiftSarsa 2507.19539 + MetaOptimize 2402.02342).
+    // Tier 2: per-feature TIDBD α (SwiftSarsa 2507.19539 + MetaOptimize 2402.02342).
     var aAlphaImpFeat: UInt32 = 0, aAlphaImpBeta: UInt32 = 0, aAlphaImpH: UInt32 = 0
-    // Pass 15 Tier 2: per-cumulant ϖ-RTD ψ-centering baseline (Sakha 2603.27874v2 §1).
+    // Tier 2: per-cumulant ϖ-RTD ψ-centering baseline (Sakha 2603.27874v2 §1).
     var aPsiMeanBaseline: UInt32 = 0
-    // Pass 15 Tier 4: TD(λ) eligibility traces for value head + ψ.
+    // Tier 4: TD(λ) eligibility traces for value head + ψ.
     var aValueE: UInt32 = 0, aPsiE: UInt32 = 0
     var cap: Float = 0, alpha0: Float = 0, ridge: Float = 0
 }
@@ -493,24 +492,24 @@ private struct KernelScalars {
     var stateSlot: UInt32 = 0, optionSlot: UInt32 = 0
     var rho: Float = 0, pEff: Float = 0
     var alphaImp: Float = 0, alphaEnc: Float = 0
-    // Pass 15 Tier 0.3: REINFORCE policy implicit step. α₀ / (1 + α₀ · ⟨‖x‖²⟩·⟨‖scoreGrad‖²⟩).
+    // Tier 0.3: REINFORCE policy implicit step. α₀ / (1 + α₀ · ⟨‖x‖²⟩·⟨‖scoreGrad‖²⟩).
     // Computed in oak_reduce_alpha; consumed by oak_learn_pi as the shared denominator that
     // includes the full outer-product gradient norm (Cauchy-Schwarz upper bound). Fixes the
-    // Pass-14 200M MSE blowup root cause (per-thread n2 missed cross-row scoreGrad²).
+    // 200M MSE blowup root cause (per-thread n2 missed cross-row scoreGrad²).
     var alphaPi: Float = 0
-    // Pass 11 Tier 4: REINFORCE running-mean TD baseline (Williams 1992 variance reduction).
+    // Tier 4: REINFORCE running-mean TD baseline (Williams 1992 variance reduction).
     var tdBaseline: Float = 0
-    // Pass 12 Tier 4.2/4.3 + Pass 13 Tier 0: continual EMA of model-prediction error
-    // (= optionModelPredictionMSE) plus a SLOW snapshot lagged by ~N steps. The Pass-13
+    // Tier 4.2/4.3 + Tier 0: continual EMA of model-prediction error
+    // (= optionModelPredictionMSE) plus a SLOW snapshot lagged by ~N steps. The
     // gate uses lpmRate = max(0, modelErrEMAPrev - modelErrEMA) as the information-gain
-    // proxy (Hou-An-Du 2509.25438 ICLR 2026 LPM second-derivative). Replaces Pass-12's
+    // proxy (Hou-An-Du 2509.25438 ICLR 2026 LPM second-derivative). Replaces's
     // absolute-scale gate which over-shrunk the planning bonus on stochastic envs.
     var modelErrEMA: Float = 0
     var modelErrEMAPrev: Float = 0
-    // Pass 13 Tier 6.2: dense-fast-path flag (1 iff activeCount == E and activeList[i] == i for all i).
+    // Tier 6.2: dense-fast-path flag (1 iff activeCount == E and activeList[i] == i for all i).
     // Set by oak_bk_admit_commit; consumed by active_dot_half_auto in the next step's kernels.
     var activeListIsIdentity: UInt32 = 0
-    // Pass 15 Tier 2: ϖ-RTD baseline (cumulative Welford mean of reward; no floor) +
+    // Tier 2: ϖ-RTD baseline (cumulative Welford mean of reward; no floor) +
     // <valueW, featMean> baseline (the expected V(s) under empirical state distribution).
     // Sakha-Kamalapurkar-Meyn 2603.27874v2 Theorem 2.4(ii) — first published linear-FA
     // stability proof for relative-TD. The full Theorem requires BOTH terms in the TD
@@ -519,7 +518,7 @@ private struct KernelScalars {
     // are computed in oak_bk_admit_commit and consumed by oak_predict.
     var rhoBaseline: Float = 0
     var vMeanBaseline: Float = 0
-    // Pass 15 Tier 4: TD(λ) eligibility-trace decay rate (Sutton-Barto Ch 12.7). Set in
+    // Tier 4: TD(λ) eligibility-trace decay rate (Sutton-Barto Ch 12.7). Set in
     // oak_bk_admit_commit each step from λ = 1 − 1/cap (structural, Inv-9). Recovers
     // variance reduction at B=1 by accumulating gradient depth INSIDE the TD target.
     var lambdaTrace: Float = 0
@@ -534,11 +533,11 @@ struct KernelStats {
     var optionModelPredictionMSE: Float = 0
     var oakOptionReinitCount: Float = 0
     var utilityFeatureMean: Float = 0, utilityOptionMean: Float = 0
-    // Pass 15 Tier 0: numerical-safety telemetry.
+    // Tier 0: numerical-safety telemetry.
     //   tdPsiNonFiniteCount  per-step NF in tdPsi (was untracked, contaminated MSE)
     //   halfSaturationCount  cumulative life-of-engine count of safe_half(NaN/Inf) substitutions
     var tdPsiNonFiniteCount: Float = 0, halfSaturationCount: Float = 0
-    // Pass 15 Tier 1: telemetry overhaul. Surfaced KernelScalars + cumulative counters
+    // Tier 1: telemetry overhaul. Surfaced KernelScalars + cumulative counters
     // + per-buffer weight-magnitude maxima. Layout MIRRORS OakKernel.metal struct exactly.
     var pEffectiveRank: Float = 0
     var modelErrEMA: Float = 0, modelErrEMAPrev: Float = 0
@@ -561,7 +560,7 @@ private enum OakMetalLayout {
     static func optionCount(rank: Int, actDim: Int) -> Int {
         max(1, min(rank, actDim, maxOptionCount))
     }
-    // Pass 11 Tier 2: extended-state width E = R + K (encoder output + OPSR outcome dims).
+    // Tier 2: extended-state width E = R + K (encoder output + OPSR outcome dims).
     // All linear heads (value, ψ, π, outcomeHead) span the full E-dim state.
     static func extendedDim(rank: Int, actDim: Int) -> Int {
         rank + optionCount(rank: rank, actDim: actDim)
@@ -574,15 +573,15 @@ private enum OakMetalLayout {
     static func psiCount(rank: Int, actDim: Int) -> Int {
         optionCount(rank: rank, actDim: actDim) * concatDim(rank: rank, actDim: actDim)
     }
-    // Pass 11 Tier 1: D_policy is env-declared. Pass 11 Tier 2: optPolicy spans E (not R).
+    // Tier 1: D_policy is env-declared. Tier 2: optPolicy spans E (not R).
     static func optPolicyCount(rank: Int, actDim: Int, dPolicy: Int) -> Int {
         optionCount(rank: rank, actDim: actDim) * dPolicy * extendedDim(rank: rank, actDim: actDim)
     }
-    // Pass 11 Tier 2: outcomeHead[K · E] — one E-dim row per outcome dimension (Vereecken 2604.07016).
+    // Tier 2: outcomeHead[K · E] — one E-dim row per outcome dimension (Vereecken 2604.07016).
     static func outcomeHeadCount(rank: Int, actDim: Int) -> Int {
         optionCount(rank: rank, actDim: actDim) * extendedDim(rank: rank, actDim: actDim)
     }
-    // Pass 11 Tier 3: termination head betaW[E + K] (state weights + chord weights);
+    // Tier 3: termination head betaW[E + K] (state weights + chord weights);
     // chord generator omegaW[K · E] (one row per option's chord-logit producer).
     static func betaWCount(rank: Int, actDim: Int) -> Int {
         extendedDim(rank: rank, actDim: actDim) + optionCount(rank: rank, actDim: actDim)
@@ -590,7 +589,7 @@ private enum OakMetalLayout {
     static func omegaWCount(rank: Int, actDim: Int) -> Int {
         optionCount(rank: rank, actDim: actDim) * extendedDim(rank: rank, actDim: actDim)
     }
-    // Pass 13 Tier 3: SPR-Stream chord-conditioned diagonal next-state predictor (Nilaksh
+    // Tier 3: SPR-Stream chord-conditioned diagonal next-state predictor (Nilaksh
     // et al. 2602.09396 ICML 2026). sprDecoder[k][e] models the per-option transition gain
     // applied to z_{N-1}[e] to predict z_N[e]. K · R fp16 ≈ 2 KB at K=32, R=64.
     static func sprDecoderCount(rank: Int, actDim: Int) -> Int {
@@ -618,16 +617,16 @@ private enum OakMetalLayout {
         let reward, td, tdPsi, vCurr: Int
         let chordSlot, chordSlotPrev, betaProb: Int
         let featSM, wBar, featMean, utilFeat, utilOpt, optFracEMA: Int
-        // Pass 13 Tier 2: per-feature TIDBD α (SwiftSarsa 2507.19539 + MetaOptimize 2402.02342).
+        // Tier 2: per-feature TIDBD α (SwiftSarsa 2507.19539 + MetaOptimize 2402.02342).
         // alphaImpFeat[E] = exp(beta_i) / (1 + exp(beta_i) · featSM[i]) per-feature implicit step.
         // alphaImpBeta[E] = log-step meta-parameter; alphaImpH[E] = decay trace of past Δw.
         let alphaImpFeat, alphaImpBeta, alphaImpH: Int
-        // Pass 14 Tier 1: sprPred[B·R] arena slot REMOVED (the fused oak_spr_fused kernel
+        // Tier 1: sprPred[B·R] arena slot REMOVED (the fused oak_spr_fused kernel
         // recomputes ẑ_N inline per (row, feat) and never materializes it).
-        // Pass 15 Tier 2: psiMeanBaseline[K] = <ψ_k, featMean> per cumulant — the ϖ-RTD
+        // Tier 2: psiMeanBaseline[K] = <ψ_k, featMean> per cumulant — the ϖ-RTD
         // centering baseline read by oak_predict; updated in oak_bk_admit_commit.
         let psiMeanBaseline: Int
-        // Pass 15 Tier 4: TD(λ) eligibility traces. valueE[E] for w_main; psiE[K · M] for ψ.
+        // Tier 4: TD(λ) eligibility traces. valueE[E] for w_main; psiE[K · M] for ψ.
         // Engine-init zero; in-place updated by oak_learn_value / oak_learn_psi at B=1.
         let valueE, psiE: Int
         let total: Int
@@ -646,7 +645,7 @@ private enum OakMetalLayout {
         let td  = o; o += batch
         let tdP = o; o += batch * K         // K cumulant TDs per row (Design 2 collapse)
         let vc  = o; o += batch             // vCurr = w_main · curr_state (cached in predict, read by plan)
-        // Pass 11 Tier 3: temporal abstraction state — persistent soft chord per row.
+        // Tier 3: temporal abstraction state — persistent soft chord per row.
         let cs  = o; o += batch * K         // current step's chord (∈ Δ^K simplex per row)
         let csP = o; o += batch * K         // prev step's chord (for learn_psi/_pi attribution)
         let bp  = o; o += batch             // β output per row (termination probability telemetry)
@@ -656,13 +655,13 @@ private enum OakMetalLayout {
         let fm  = o; o += rank
         let uf  = o; o += rank
         let uo  = o; o += K
-        let ofE = o; o += K          // Pass 11 Tier 5: soft-chord per-option mass EMA
-        let aif = o; o += E          // Pass 13 Tier 2: alphaImpFeat[E] (per-feature implicit step)
+        let ofE = o; o += K          // Tier 5: soft-chord per-option mass EMA
+        let aif = o; o += E          // Tier 2: alphaImpFeat[E] (per-feature implicit step)
         let aib = o; o += E          // alphaImpBeta[E] = log meta-parameter, init log(alpha0)
         let aih = o; o += E          // alphaImpH[E] = decay trace of past Δw, init 0
-        let pmb = o; o += K          // Pass 15 Tier 2: psiMeanBaseline[K] = <ψ_k, featMean>
-        let vE  = o; o += E          // Pass 15 Tier 4: valueE[E] eligibility trace for w_main
-        let pE  = o; o += K * (E + K)// Pass 15 Tier 4: psiE[K * M] eligibility traces for ψ (M = E + K)
+        let pmb = o; o += K          // Tier 2: psiMeanBaseline[K] = <ψ_k, featMean>
+        let vE  = o; o += E          // Tier 4: valueE[E] eligibility trace for w_main
+        let pE  = o; o += K * (E + K)// Tier 4: psiE[K * M] eligibility traces for ψ (M = E + K)
         return State(observation: obs, obsMean: mean, state: st, prevPolicyMean: prP, policyMean: pol,
                      scoreGrad: sg, reward: rew, td: td, tdPsi: tdP, vCurr: vc,
                      chordSlot: cs, chordSlotPrev: csP, betaProb: bp,
@@ -683,12 +682,12 @@ private enum OakMetalLayout {
         let am = o; o += E      // active mask spans E (outcome dims R..E always-active)
         let al = o; o += E      // active list also sized E
         let op = o; o += 2 * batch     // legacy option_slot — argmax of chord, telemetry-only in Tier 3
-        // Pass 15 Tier 0: counters[8] expanded from counters[6] to host two new
+        // Tier 0: counters[8] expanded from counters[6] to host two new
         // numerical-safety counters (OAK_CNT_HALF_SAT cumulative + OAK_CNT_TDPSI_NF
         // per-step). Layout matches OakKernel.metal OAK_CNT_* constants 0..7.
         let c  = o; o += 8
         let sf = o; o += K
-        let oa = o; o += batch  // Pass 11 Tier 3: optionAge[r] — steps since last termination
+        let oa = o; o += batch  // Tier 3: optionAge[r] — steps since last termination
         return UInts(done: d, activeMask: am, activeList: al, option: op, counters: c,
                      subtaskFeatureOf: sf, optionAge: oa, total: o)
     }
@@ -711,7 +710,7 @@ private final class Shared<Element> {
 }
 
 // ================================================================================================
-// Metal engine — orthodox Step 11 OaK. Pass 15 Tier 1: 20 phases per step, dispatched as
+// Metal engine — orthodox Step 11 OaK. Tier 1: 20 phases per step, dispatched as
 // one ICB.
 //   encode → predict_outcome → meta_policy → predict → plan → reduce_alpha
 //   → learn_value → learn_encoder → spr_fused → learn_outcome → learn_psi → learn_pi
@@ -729,7 +728,7 @@ final class OakMetalEngine {
     // whose TD δ_N is being learned from. No prevScoreGrad slot needed; arena holds a single
     // scoreGrad slot that is read by learn_pi (this step) before being overwritten by
     // meta_action (this step) for the next step's learning.
-    // Pass 13 Tier 3: 20-kernel pipeline. SPR-Stream adds oak_predict_next_latent (after
+    // Tier 3: 20-kernel pipeline. SPR-Stream adds oak_predict_next_latent (after
     // meta_policy so it can read chordPrev = chord_{N-1} that drove the just-completed
     // transition) and oak_learn_encoder_spr (after oak_learn_encoder so the orthogonal
     // projection has the just-applied RL gradient available for de-correlation).
@@ -737,26 +736,26 @@ final class OakMetalEngine {
         Phase(name: "oak_encode",             tgSize: 0),
         Phase(name: "oak_predict_outcome",    tgSize: 0),
         Phase(name: "oak_meta_policy",        tgSize: 0),
-        // Pass 14 T1: oak_predict_next_latent + oak_learn_encoder_spr fused into oak_spr_fused.
-        Phase(name: "oak_predict",            tgSize: 0),  // Pass 14 T2: per-thread dispatchThreads
+        // T1: oak_predict_next_latent + oak_learn_encoder_spr fused into oak_spr_fused.
+        Phase(name: "oak_predict",            tgSize: 0),  // T2: per-thread dispatchThreads
         Phase(name: "oak_plan",               tgSize: 32),
         Phase(name: "oak_reduce_alpha",       tgSize: 128),
         Phase(name: "oak_learn_value",        tgSize: 32),
         Phase(name: "oak_learn_encoder",      tgSize: 0),
-        Phase(name: "oak_spr_fused",          tgSize: 0),   // Pass 14 T1: fused predict + learn
+        Phase(name: "oak_spr_fused",          tgSize: 0),   // T1: fused predict + learn
         Phase(name: "oak_learn_outcome",      tgSize: 0),
         Phase(name: "oak_learn_psi",          tgSize: 0),
         Phase(name: "oak_learn_pi",           tgSize: 0),
         Phase(name: "oak_learn_beta",         tgSize: 0),
         Phase(name: "oak_learn_omega",        tgSize: 0),
-        Phase(name: "oak_meta_action",        tgSize: 0),  // Pass 14 T0.5+T2 (REVISED): B*D
+        Phase(name: "oak_meta_action",        tgSize: 0),  // T0.5+T2 (REVISED): B*D
                                                             // dispatchThreads (no stack array,
                                                             // no lane waste, e-outer-k-inner)
         Phase(name: "oak_bk_reduce",          tgSize: 128),
         Phase(name: "oak_bk_feature",         tgSize: 32),
         Phase(name: "oak_bk_option",          tgSize: 128),
         Phase(name: "oak_bk_admit_commit",    tgSize: 0),
-        // Pass 15 Tier 1.4: per-buffer max(|w|) for the (C) bounded-magnitude gate.
+        // Tier 1.4: per-buffer max(|w|) for the (C) bounded-magnitude gate.
         // 8 TGs × 32 threads (one TG per fp16 weight buffer; simd_max reduction).
         Phase(name: "oak_bk_weight_magnitudes", tgSize: 32),
     ]
@@ -765,7 +764,7 @@ final class OakMetalEngine {
     private let queue: MTLCommandQueue
     private let cbDesc: MTLCommandBufferDescriptor
     private let pipelines: [MTLComputePipelineState]
-    private let noopPipeline: MTLComputePipelineState   // Pass 12 Tier 1: ablation hot-swap target
+    private let noopPipeline: MTLComputePipelineState   // Tier 1: ablation hot-swap target
     private let ablatedPhaseIndices: Set<Int>           // phase indices replaced with noop in the ICB
     private let scalarsBuffer: MTLBuffer
     private let statsBuffer: MTLBuffer
@@ -806,7 +805,7 @@ final class OakMetalEngine {
             return try device.makeComputePipelineState(descriptor: desc, options: [], reflection: nil)
         }
         let real = try phases.map { try make($0.name) }
-        // Pass 12 Tier 1: oak_noop hot-swap target for per-kernel ablation.
+        // Tier 1: oak_noop hot-swap target for per-kernel ablation.
         let noop = try make("oak_noop")
         return (real, noop)
     }
@@ -815,7 +814,7 @@ final class OakMetalEngine {
     // pipelines just to read `threadExecutionWidth` from one of them.
     static func executionWidth(device: MTLDevice) throws -> Int { 32 }
 
-    // Pass 11 Tier 1: agent constructor takes signal-shape parameters {obsDim, baseObsDim, actDim,
+    // Tier 1: agent constructor takes signal-shape parameters {obsDim, baseObsDim, actDim,
     // batch, rank, dPolicy}. dPolicy is the env-declared D_policy (sum of per-component policy-
     // param widths from the env's ActionSpec). The agent has no notion of WHAT the components
     // are — only the integer width. Inv-1 + Bitter Lesson.
@@ -836,10 +835,10 @@ final class OakMetalEngine {
         let built = try Self.makePipelines(device: device)
         pipelines = built.real
         noopPipeline = built.noop
-        // Pass 12 Tier 1: resolve ablated kernel names to phase indices. Unknown names are warned
+        // Tier 1: resolve ablated kernel names to phase indices. Unknown names are warned
         // about (so a typo doesn't silently produce a baseline run). Per the multi-signal Pareto
         // gate, removing an "ablated" kernel from the ICB simulates "what if this kernel didn't run"
-        // — the arena slot it would have written stays at its previous-step value.
+        // the arena slot it would have written stays at its previous-step value.
         let phaseNames = Set(Self.phases.map { $0.name })
         for k in ablatedKernels where !phaseNames.contains(k) {
             fputs("OaK: warning — ablate-kernel '\(k)' is not a known phase; ignored.\n", stderr)
@@ -875,7 +874,7 @@ final class OakMetalEngine {
         let K = OakMetalLayout.optionCount(rank: rank, actDim: actDim)
         let E = OakMetalLayout.extendedDim(rank: rank, actDim: actDim)
         let M = OakMetalLayout.concatDim(rank: rank, actDim: actDim)
-        // Pass 15 Tier 1.4: 20-kernel pipeline (was 19 at Pass 14 T1).
+        // Tier 1.4: 20-kernel pipeline.
         // oak_bk_weight_magnitudes appended for the (C) bounded-magnitude gate.
         phaseGridWidths = [
             batch * rank,                     // oak_encode              [dispatchThreads]
@@ -905,8 +904,8 @@ final class OakMetalEngine {
         phaseGpuInvalidStepCount = Array(repeating: 0, count: Self.phases.count)
         hostAction = Array(repeating: 0, count: batch * dPolicy)
 
-        // --- Metal 4 ICB + MTLResidencySet setup ----------------------------------------------
-        // Pass 10 dropped the bounds buffer. 6 binds: params, stateArena, uintArena, scalars,
+        // -- Metal 4 ICB + MTLResidencySet setup ----------------------------------------------
+        // dropped the bounds buffer. 6 binds: params, stateArena, uintArena, scalars,
         // stats, config (config is at OakMetalLayout.kernelConfigBufferIndex = 5).
         let icbDesc = MTLIndirectCommandBufferDescriptor()
         icbDesc.commandTypes = [.concurrentDispatch]
@@ -928,7 +927,7 @@ final class OakMetalEngine {
         residencySet.commit()
         queue.addResidencySet(residencySet)
 
-        // --- Parameter init: structural 1/√R scales on every linear head. Deterministic counter
+        // -- Parameter init: structural 1/√R scales on every linear head. Deterministic counter
         // hash (splitmix32 of seed ⊕ index) provides small centered probes without a host RNG
         // object allocated on the hot path.
         let invR: Float = 1.0 / sqrt(Float(max(rank, 1)))
@@ -944,7 +943,7 @@ final class OakMetalEngine {
             }
         }
         sample(paramLayout.encoder, rank, invR)
-        // Pass 11 Tier 2: valueW has E weights (was R) — extends over the OPSR-augmented state.
+        // Tier 2: valueW has E weights (was R) — extends over the OPSR-augmented state.
         sample(paramLayout.value, OakMetalLayout.extendedDim(rank: rank, actDim: actDim), invR)
         sample(paramLayout.psi, OakMetalLayout.psiCount(rank: rank, actDim: actDim), invR)
         sample(paramLayout.optPolicy,
@@ -955,7 +954,7 @@ final class OakMetalEngine {
                OakMetalLayout.betaWCount(rank: rank, actDim: actDim), invR)
         sample(paramLayout.omegaW,
                OakMetalLayout.omegaWCount(rank: rank, actDim: actDim), invR)
-        // Pass 13 Tier 3: SPR-Stream decoder. Init at the unit-gain identity (every chord
+        // Tier 3: SPR-Stream decoder. Init at the unit-gain identity (every chord
         // predicts ẑ_N = z_{N-1}). The chord-conditioned linear predictor learns the actual
         // transition gains from the prediction errors.
         let sprDecoderCount = OakMetalLayout.sprDecoderCount(rank: rank, actDim: actDim)
@@ -971,7 +970,7 @@ final class OakMetalEngine {
             psiPtr[idx] = Float16(Float(psiPtr[idx]) + invR)
         }
 
-        // Pass 11 Tier 2: all encoder features (0..R) admitted on step 0; outcome dims R..E
+        // Tier 2: all encoder features (0..R) admitted on step 0; outcome dims R..E
         // are ALWAYS-ACTIVE by construction (they're agent-internal predictions, not env
         // features that need utility-ranked admission). bk_admit_commit only re-ranks [0, R).
         scalarsPointer.pointee.activeCount = UInt32(E)
@@ -980,20 +979,20 @@ final class OakMetalEngine {
         for f in 0..<rank { activeMask[f] = 1; activeList[f] = UInt32(f) }
         for k in 0..<K { activeMask[rank + k] = 1; activeList[rank + k] = UInt32(rank + k) }
 
-        // Pass 11 Tier 3: seed chord uniformly = 1/K per option (the maximum-entropy prior).
+        // Tier 3: seed chord uniformly = 1/K per option (the maximum-entropy prior).
         // optionAge = 0 forces meta_policy to resample on step 1 (so chord moves off uniform).
         let chordSlot = stateArena.pointer.advanced(by: stateLayout.chordSlot)
         let invK: Float = 1.0 / Float(max(K, 1))
         for r in 0..<batch {
             for k in 0..<K { chordSlot[r * K + k] = invK }
         }
-        // Pass 11 Tier 5: seed optFracEMA = 1/K per option (the structural uniform-share, same
+        // Tier 5: seed optFracEMA = 1/K per option (the structural uniform-share, same
         // as the dormancy threshold's reference value). The gate fires when an option's mass
         // drops below 0.5/K, so this initial value is well above threshold.
         let optFrac = stateArena.pointer.advanced(by: stateLayout.optFracEMA)
         for k in 0..<K { optFrac[k] = invK }
-        // Pass 13 Tier 2: per-feature TIDBD α (SwiftSarsa 2507.19539 + MetaOptimize 2402.02342).
-        // Init β_i = log(α₀) so exp(β_i) = α₀ at step 0 — recovers Pass-12 global-α behavior
+        // Tier 2: per-feature TIDBD α (SwiftSarsa 2507.19539 + MetaOptimize 2402.02342).
+        // Init β_i = log(α₀) so exp(β_i) = α₀ at step 0 — recovers global-α behavior
         // before the meta-update has had any data to act on. h_i = 0 (no history yet).
         // alphaImpFeat[i] = α₀ initially (overwritten by oak_reduce_alpha on step 1).
         let extDim = rank + K   // E = R + K (OPSR-extended state)
@@ -1015,14 +1014,14 @@ final class OakMetalEngine {
 
         writeKernelConfig(paramLayout: paramLayout)
 
-        // Pre-encode the phase dispatch graph into the ICB (`phases.count` phases; Pass 14 = 20).
+        // Pre-encode the phase dispatch graph into the ICB.
         // Grids are fixed for the engine's lifetime; only KernelScalars/KernelStats/params/state
         // data changes between steps. resourceList is laid out
         // [0..4 = params, state, uint, scalars, stats; 5 = config].
         let buffers = resourceList
         for i in 0..<Self.phases.count {
             let cmd = icb.indirectComputeCommandAt(i)
-            // Pass 12 Tier 1: hot-swap the noop pipeline for ablated phases. Same buffer
+            // Tier 1: hot-swap the noop pipeline for ablated phases. Same buffer
             // bindings + same dispatch geometry — the kernel just returns immediately, so
             // the arena slot the ablated kernel would have written stays at its previous
             // step's value (which is what "what if this kernel didn't run" means).
@@ -1051,9 +1050,9 @@ final class OakMetalEngine {
         residencySet.removeAllAllocations()
     }
 
-    // ---- Probe-only accessor (Tier-0 verification harness; deleted in Tier 7) ----------------
-    // Pass 15 Tier 5: probeSlot deleted (~85 LOC). Probe harness was used for kernel-
-    // correctness validation in Pass 11-13; that role is now covered by the (B) numerical-
+    // --- Probe-only accessor (Tier-0 verification harness; deleted in Tier 7) ----------------
+    // Tier 5: probeSlot deleted (~85 LOC). Probe harness was used for kernel-
+    // correctness validation-13; that role is now covered by the (B) numerical-
     // safety hard gate (nonFiniteRawTotal == 0 + halfSaturationTotalFinal == 0 over the
     // full bench window) and the (C) bounded-magnitude hard gate (per-buffer max(|w|) <
     // √HALF_MAX), both surfaced into RunHealth and verifiable from any bench JSON.
@@ -1069,8 +1068,8 @@ final class OakMetalEngine {
         return (mean, invalid.isEmpty ? nil : invalid)
     }
 
-    // ---- Step dispatch -----------------------------------------------------------------------
-    // Pass 11 Tier 1: takes prevPolicyMean[B·D] + prevScoreGrad[B·D] (host-written scoreGrad
+    // --- Step dispatch -----------------------------------------------------------------------
+    // Tier 1: takes prevPolicyMean[B·D] + prevScoreGrad[B·D] (host-written scoreGrad
     // for last step's wrapper-sampled action), returns this step's policyMean[B·D]. The wrapper
     // (EnvPoolEnv.sampleAndStep) then samples per-component and produces (action, scoreGrad).
     func step(obs: UnsafeBufferPointer<Float>, prevPolicyMean: [Float],
@@ -1130,7 +1129,7 @@ final class OakMetalEngine {
         c.sVCurr = UInt32(s.vCurr)
         c.sChordSlot = UInt32(s.chordSlot); c.sChordSlotPrev = UInt32(s.chordSlotPrev)
         c.sBetaProb = UInt32(s.betaProb)
-        // Pass 14 Tier 1: sSprPred removed (oak_spr_fused inlines ẑ_N).
+        // Tier 1: sSprPred removed (oak_spr_fused inlines ẑ_N).
         c.uDone = UInt32(u.done); c.uActiveMask = UInt32(u.activeMask)
         c.uActiveList = UInt32(u.activeList); c.uOption = UInt32(u.option); c.uCounters = UInt32(u.counters)
         c.uSubtaskFeatureOf = UInt32(u.subtaskFeatureOf); c.uOptionAge = UInt32(u.optionAge)
@@ -1261,9 +1260,9 @@ private enum RunSnapshot {
 private func directNumEnvs(obsDim: Int, actDim: Int, dPolicy: Int, device: MTLDevice) throws -> Int {
     let width = try OakMetalEngine.executionWidth(device: device)
     let rank = obsDim
-    // Pass 14 Tier 0.6: derive per-env and fixed memory from OakMetalLayout PROGRAMMATICALLY.
-    // The hand-rolled formulae below were off by sprPred (B·R from Pass 13 Tier 3) and by
-    // alphaImpFeat / Beta / H (3·E from Pass 13 Tier 2) which silently risked GPU memory
+    // Tier 0.6: derive per-env and fixed memory from OakMetalLayout PROGRAMMATICALLY.
+    // The hand-rolled formulae below were off by sprPred and by
+    // alphaImpFeat / Beta / H which silently risked GPU memory
     // over-subscription on large envs. Now we compute total bytes from the canonical layout
     // so any new arena slot is automatically counted.
     let probeStateLayout = OakMetalLayout.stateLayout(obsDim: obsDim, rank: rank,
@@ -1362,8 +1361,8 @@ private final class RunState {
             case "diagnose":  try diagnose(Array(args.dropFirst()))
             case "run":       try run(args.dropFirst().first)
             default:          try run(args.first)
-            // Pass 15 Tier 5: `probe` subcommand removed. Probe harness (Probe.swift) was
-            // a kernel-correctness validation tool for Pass 11-13 deferred slots; its
+            // Tier 5: `probe` subcommand removed. Probe harness (Probe.swift) was
+            // a kernel-correctness validation tool-13 deferred slots; its
             // role is now covered by the (B) numerical-safety + (C) bounded-magnitude
             // hard gates surfaced into bench JSON via RunHealth (see emitSnapshot).
             }
@@ -1506,24 +1505,24 @@ private final class RunState {
     private static func benchmark() throws {
         let root = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
         let seedStart = ProcessInfo.processInfo.environment["OAK_BENCH_SEED_START"].flatMap(Int.init) ?? 0
-        // Pass 15 Tier 3: default seedCount lowered 10 → 5 (per plan §9.1; concurrent
-        // execution makes more seeds cheap if needed but 5 is the canonical Pass-15 scope).
+        // Tier 3: default seedCount lowered 10 → 5 (per plan §9.1; concurrent
+        // execution makes more seeds cheap if needed but 5 is the canonical scope).
         let seedCount = ProcessInfo.processInfo.environment["OAK_BENCH_SEED_COUNT"].flatMap(Int.init) ?? 5
         let warmup = max(ProcessInfo.processInfo.environment["OAK_BENCH_WARMUP_STEPS"].flatMap(Int.init) ?? 1000, 0)
-        // Pass 15 Tier 3: default stopAfter raised 50K → 500K (per plan §9.1 — the new canonical
+        // Tier 3: default stopAfter raised 50K → 500K (per plan §9.1 — the new canonical
         // workerDepth at B=1 is 500K = the full env-step count in a single continuing trajectory,
-        // not 50K/2048 = 24 effective steps per env that Pass 12-14 batched bench produced).
+        // not 50K/2048 = 24 effective steps per env that-14 batched bench produced).
         let stopAfter = max(ProcessInfo.processInfo.environment["OAK_BENCH_STEPS"].flatMap(Int.init) ?? 500000, 1)
         let policies = try (ProcessInfo.processInfo.environment["OAK_BENCH_POLICIES"] ?? "oak,random")
             .split(separator: ",").map { try parsePolicy(String($0)) }
         let device = try metalDevice()
-        // Pass 15 Tier 3: B=1 single-stream per env (BWH-orthodox per Sutton continuing-task
+        // Tier 3: B=1 single-stream per env (BWH-orthodox per Sutton continuing-task
         // formulation). Each agent owns one continuous trajectory per env. OAK_BENCH_NUM_ENVS
-        // override retained for back-compat with batched Pass-14 bench (set to 64 etc. to
-        // re-run pre-Pass-15 protocol for direct comparison).
+        // override retained for back-compat with batched bench (set to 64 etc. to
+        // re-run pre-protocol for direct comparison).
         let numEnvs = max(ProcessInfo.processInfo.environment["OAK_BENCH_NUM_ENVS"].flatMap(Int.init)
                        ?? ProcessInfo.processInfo.environment["OAK_NUM_ENVS"].flatMap(Int.init) ?? 1, 1)
-        // Pass 15 Tier 3: ConcurrentBenchHarness — N work-items run in parallel via
+        // Tier 3: ConcurrentBenchHarness — N work-items run in parallel via
         // OperationQueue (one MTLCommandQueue per OakMetalEngine instance; Apple's Metal
         // driver schedules them across the GPU's ~4096 ALUs). N=8 default (per plan §3.3);
         // OAK_BENCH_CONCURRENCY=1 forces serial execution for debugging.
@@ -1623,7 +1622,7 @@ private final class RunState {
     private static func randomPolicyMean(for env: EnvPoolEnv, numEnvs: Int,
                                           stepCount: inout UInt64,
                                           floats: inout [Float]) -> PolicyMeanBatch {
-        // Pass 11 Tier 1: the random "policy" emits a uniform-random μ vector in [-1, 1] of
+        // Tier 1: the random "policy" emits a uniform-random μ vector in [-1, 1] of
         // width B · dPolicy. The wrapper then samples per-component (Gumbel-max for Discrete:
         // a uniform-random μ produces a near-uniform categorical → effectively random index;
         // structural-σ-1 Gaussian for Box: μ + N(0,1) ≈ N(0,1) → bound-clamped). This keeps
@@ -1643,7 +1642,7 @@ private final class RunState {
         return PolicyMeanBatch(values: floats, dPolicy: env.dPolicy)
     }
 
-    // --- single-run orchestration (setup → loop → snapshot) --------------------------------
+    // -- single-run orchestration (setup → loop → snapshot) --------------------------------
 
     private static func setupRun(envId: String, policy: Policy, seed: Int?, warmup: Int,
                                  stopAfter: Int, numEnvs: Int, device: MTLDevice, command: String,
@@ -1652,7 +1651,7 @@ private final class RunState {
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         fputs("OaK metrics \(dir.path)\n", stderr); fflush(stderr)
         let env = try EnvPoolEnv(id: envId, numEnvs: numEnvs, seed: seed)
-        // Pass 11 Tier 1: agent constructor takes signal-shape params + dPolicy (env-declared).
+        // Tier 1: agent constructor takes signal-shape params + dPolicy (env-declared).
         // Action-space type, per-dim bounds, and per-component sampling all live in EnvPoolEnv.
         let engine: OakMetalEngine? = policy == .oak ? try OakMetalEngine(
             obsDim: env.obsDim, baseObsDim: env.obsDim, actDim: env.actDim,
