@@ -288,6 +288,7 @@ kernel void oak_predict(
     if (!isfinite(delta)) { ctx.counters[OAK_CNT_LEARN_NF] += 1u; delta = 0.0f; }
     ctx.td[0] = delta;
 
+    // K = min(R, OAK_SIMD), so k < K implies k < R: anchor is always valid.
     float bp = ctx.alpha0;
     uint nfPsi = 0u;
     for (uint k = 0u; k < ctx.K; ++k) {
@@ -296,8 +297,7 @@ kernel void oak_predict(
             psiPrev = fma(ctx.psi[k * ctx.R + i], prev[i], psiPrev);
             psiNext = fma(ctx.psi[k * ctx.R + i], curr[i], psiNext);
         }
-        float anchor = (k < ctx.R) ? curr[k] : 0.0f;
-        float dk = reward_c + bp * anchor + (1.0f - bp) * psiNext - psiPrev;
+        float dk = reward_c + bp * curr[k] + (1.0f - bp) * psiNext - psiPrev;
         if (!isfinite(dk)) { dk = 0.0f; nfPsi++; }
         ctx.tdPsi[k] = dk;
     }
