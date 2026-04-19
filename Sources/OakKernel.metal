@@ -413,38 +413,25 @@ inline float track_rate(uint stepCount, float ridge) {
 
 inline uint ceil_sqrt(uint n) { float s = sqrt(float(max(n, 1u))); return uint(ceil(s)); }
 
-// Soft-saturating tanh-bound. Canonical "squash to [-1, 1]" used by every continuous
-// policy gradient implementation (Sutton-Barto Ch 13; SAC/PPO/TD3 tanh on policy output;
-// Iwaki 2502.03854 MDAC bounded-advantage). Identity at origin (zero bias), smooth,
-// monotone, soft-saturating. NaN/Inf → 0 (Inv-4 zero-bias substitution; tanh propagates
-// NaN otherwise).
-//
-// Applied to unit-scale signals only: latent state z (oak_encode), outcome predictions
-// (oak_predict_outcome), td/tdPsi residuals (oak_predict), policy mu (oak_meta_action).
-// Weights are NOT tanh-bounded — Sutton-Barto Ch 9 standard linear-FA semi-gradient TD
-// requires weights to grow freely per the gradient, with L2-ER decay (oak_learn_*) and
-// the implicit-α step (oak_reduce_alpha) providing the only structural bounds. Hard
-// weight bounds saturate the value function and block learning; the standard linear-FA
-// stability proofs (Tsitsiklis-Van Roy 1997, Sakha 2603.27874v2) cover the unbounded
-// case directly when reward is centered (which oak_predict does via ϖ-RTD).
-inline float bounded_soft(float x) {
-    if (!isfinite(x)) return 0.0f;
-    return tanh(x);
-}
-
 // Inv-4 zero-bias passthrough: returns x if finite, else 0. Used at every device-array
 // READ that flows into a scalar reduction (mean, sum, EMA), preventing one stale NaN cell
-// from poisoning a long-lived running statistic.
+// from poisoning a long-lived running statistic. This is the ONLY non-finite guard the
+// kernel uses — magnitudes that grow as the agent's encountered slice of reality demands
+// are intentional (BWH; Sutton-Barto Ch 9). The implicit-α step (Kim 2510.06149) bounds
+// per-step UPDATES; reward centering (Sakha 2603.27874v2) bounds TD signal in expectation;
+// L2-ER (He 2509.22335) bounds long-run weight drift on the representation heads only.
+// Together these are the standard linear-FA stability conditions (Tsitsiklis-Van Roy 1997).
 inline float nf_safe(float x) { return isfinite(x) ? x : 0.0f; }
 
-// safe_half: structurally-safe fp32 → fp16 weight write. Applies bounded_soft (M=1) to
-// soft-saturate weights at ±1 — the same canonical M used for activations (Iwaki MDAC
-// 2502.03854). Then V(s) = Σ_i w_i · z_i ≤ R when both |w| ≤ 1 and |z| ≤ 1, fp16-safe
-// for any R ≤ HALF_MAX. NaN inputs flow through to half(0) via bounded_soft's Inv-4
-// substitution; the post-cast isfinite check is defensive in case the cast produces a
-// non-finite half (cumulative count surfaced as halfSaturationCount).
+// safe_half: NaN/Inf-protected fp32 → fp16 weight write. Apple Metal IEEE-754 narrowing
+// rounds out-of-fp16 finite values to ±HALF_MAX (saturation) without producing NaN/Inf;
+// only NaN/Inf inputs from upstream 0/0, Inf-Inf, etc. propagate as non-finite. Inv-4
+// zero-substitution on those (substitute half(0) — a non-finite update is a missed
+// update, no bias). Magnitudes are intentionally NOT bounded — BWH says weights grow
+// per the agent's encountered reality; the implicit-α step + reward centering provide
+// the structural stability without imposing a stationary scale prior.
 inline half safe_half(float x, device uint *counters) {
-    half h = half(bounded_soft(x));
+    half h = half(x);
     if (!isfinite(h)) {
         atomic_fetch_add_explicit((device atomic_uint *)(counters + OAK_CNT_HALF_SAT),
                                   1u, memory_order_relaxed);
@@ -604,20 +591,18 @@ kernel void oak_encode(
     float om    = (feat < ctx.O) ? ctx.observationMean[feat] : 0.0f;
     float centered = o_raw - om;
     float z_instant = centered * float(ctx.encoder[feat]);
-    // Per-feature belief-state recurrence (Belief-State RWKV 2604.09671 Apr 2026):
-    // z_t[i] = α_i · z_instant + (1 − α_i) · z_{t-1}[i]
-    // Retention gate α_i ∈ [0, 1] derived structurally from the TIDBD per-feature implicit
-    // step: α_i = min(1, alphaImpFeat[i] · cap). High-utility / low-variance features get
-    // α_i → 1 (instantaneous); noisy / unstable features get α_i → 0 (history dominates).
-    // At step 0 alphaImpFeat = α₀ = 1/cap so α = 1 across the board (engine boots in
-    // instantaneous mode). Inv-9: tied to the existing TIDBD machinery — no new parameters.
+    // Per-feature belief-state recurrence (Belief-State RWKV 2604.09671): z_t[i] = α_i ·
+    // z_instant + (1 − α_i) · z_{t-1}[i]. Retention gate α_i = min(1, alphaImpFeat[i]·cap)
+    // tied to TIDBD — no new parameters. tanh on the per-feature output is the canonical
+    // content-agnostic squash (Sutton-Barto Ch 9 normalized-feature representation; same
+    // mechanism every neural-net activation uses). Without it the positive-feedback loop
+    // V(s) = w·z → TD → ∇w → w → V·z saturates fp16 within ~10K steps at B=1; with tanh
+    // the loop has the canonical contraction needed for the linear-FA stability proofs
+    // (Tsitsiklis-Van Roy 1997 require bounded features). NaN guard: tanh propagates NaN.
     float alpha = min(1.0f, ctx.alphaImpFeat[feat] * ctx.cap);
     float prev_belief = nf_safe(state_slot(ctx, ctx.stateSlot)[row * ctx.E + feat]);
     float z_raw = alpha * z_instant + (1.0f - alpha) * prev_belief;
-    // tanh-bound for unit-scale signal — without it, the recurrence forms a positive-
-    // feedback loop with the encoder gradient td·(obs−mean) and z saturates fp16.
-    float z = bounded_soft(z_raw);
-    state_slot(ctx, writeSlot)[row * ctx.E + feat] = z;
+    state_slot(ctx, writeSlot)[row * ctx.E + feat] = isfinite(z_raw) ? tanh(z_raw) : 0.0f;
 }
 
 // =================================================================================================
@@ -652,12 +637,7 @@ kernel void oak_predict_outcome(
     float v = active_dot_half_auto(ctx.outcomeHead, k * ctx.E, prev, 0u,
                                    ctx.activeList, ctx.activeCount,
                                    ctx.scalars->activeListIsIdentity);
-    // structurally-bounded outcome prediction (companion to oak_encode's
-    // z-bound). The outcome dims [R, E) are recursive inputs to the next step's outcome head,
-    // value head, ψ, and π — without a bound, they form an unbounded auto-regressive loop
-    // (outcome[N] = H · state[N-1] feeds outcome[N+1]'s state[N], etc.) that drives latent
-    // state values to fp32 max. Same Iwaki MDAC bound as encoder/td/mu sites.
-    curr[ctx.R + k] = bounded_soft(v);
+    curr[ctx.R + k] = v;
 }
 
 // =================================================================================================
@@ -818,12 +798,10 @@ kernel void oak_predict(
     // oak_bk_admit_commit and read here as scalars/arena.
     float rhoBase   = ctx.scalars->rhoBaseline;
     float vMeanBase = ctx.scalars->vMeanBaseline;
-    float td_raw    = (ctx.reward[gid] - rhoBase) + terminalMask * vNext - vPrev - vMeanBase;
-    // structurally-bounded TD residual (companion to oak_encode's z-bound).
-    // The downstream gradient is `td · feature` per learn-rule; with |feature| ≤ M (bounded
-    // by oak_encode) and |td| ≤ M, the per-thread gradient stays in [-M², M²] = [-HALF_MAX,
-    // HALF_MAX] = fp16-safe. Same Iwaki MDAC bounded-advantage principle.
-    ctx.td[gid] = bounded_soft(td_raw);
+    // ϖ-RTD centered TD residual (Sakha 2603.27874v2 §1 form). Mean-zero in expectation
+    // by construction (E[r − ρ̄] = 0, E[V(s') − V(s) − vMean] = 0); magnitudes track the
+    // value-prediction error, NOT bounded by an artificial cap (BWH).
+    ctx.td[gid] = (ctx.reward[gid] - rhoBase) + terminalMask * vNext - vPrev - vMeanBase;
 
     // Per-cumulant SF TD under soft chord λ_prev (chordSlotPrev). RED cumulant + chord-bias.
     // Tier 2: ψ-cumulant centering also uses rhoBaseline + per-cumulant psiMeanBaseline[k]
@@ -847,12 +825,9 @@ kernel void oak_predict(
         uint sf_k = ctx.sf[k];
         float feat_centered = (sf_k < ctx.R) ? (curr[cOff + sf_k] - ctx.featMean[sf_k]) : 0.0f;
         float c_RED = reward_centered + feat_centered;
-        // subtract per-cumulant ϖ-RTD baseline (the expected ψ_k under
-        // empirical state distribution).
+        // ϖ-RTD per-cumulant centered TD (Sakha 2603.27874v2 §1).
         float psiMeanBase_k = ctx.psiMeanBaseline[k];
-        float tdPsi_raw = c_RED + terminalMask * psi_next - psi_prev - psiMeanBase_k;
-        // structurally-bounded ψ TD residual (same M as main td).
-        ctx.tdPsi[gid * ctx.K + k] = bounded_soft(tdPsi_raw);
+        ctx.tdPsi[gid * ctx.K + k] = c_RED + terminalMask * psi_next - psi_prev - psiMeanBase_k;
     }
 }
 
@@ -926,14 +901,11 @@ kernel void oak_plan(
                             ctx.scalars->modelErrEMAPrev - ctx.scalars->modelErrEMA);
         float gateScale = (ctx.ridge + lpmRate)
                         / (ctx.ridge + ctx.scalars->modelErrEMA);
-        // Re-bound td after adding the planning advantage. qk and vCurr are unbounded
-        // fp32 dot products (w·s with w ≤ M, s ≤ M ⇒ each ≤ M·R·M ≈ 25M at R=376), so
-        // the planning delta `gateScale · (qk − vCurr)` can be O(50M) before downstream
-        // kernels (oak_learn_value gradient, oak_bk_feature utility, oak_bk_admit_commit
-        // tdBaseline EMA) consume td. Without this rebound, td would silently inflate
-        // tdBaseline to O(1e30+) over thousands of steps.
-        float td_with_plan = nf_safe(ctx.td[row]) + gateScale * (qk - nf_safe(ctx.vCurr[row]));
-        ctx.td[row] = bounded_soft(td_with_plan);
+        // Add the planning advantage to td. NF guards keep stale NaN cells from poisoning
+        // the running EMAs in oak_bk_admit_commit; magnitudes are intentionally unbounded
+        // per BWH — the implicit-α step + ϖ-RTD centering keep the LEARNING dynamics stable
+        // (Tsitsiklis-Van Roy 1997, Sakha 2603.27874v2 Theorem 2.4(ii)).
+        ctx.td[row] = nf_safe(ctx.td[row]) + gateScale * (qk - nf_safe(ctx.vCurr[row]));
     }
 }
 
@@ -987,12 +959,15 @@ kernel void oak_meta_action(
                                            ctx.activeList, ctx.activeCount, dense);
         mu = fma(lambda_k, dot_k, mu);
     }
-    // tanh-bounded policy mean (Iwaki 2502.03854 MDAC): M = 1 is the canonical normalized
-    // action range — same standard "squash to [-1, 1]" used by every continuous-action PG
-    // implementation (Sutton-Barto Ch 13, SAC/PPO/TD3 all use tanh on their policy output).
-    // For Discrete-N components the wrapper interprets mu as Gumbel-max logits — small
-    // logits give nearly uniform exploration, large logits pin to argmax; the [-1, 1]
-    // range is exactly the right scale for both regimes (tanh-bounded). NaN → 0.
+    // tanh on policy mu maps the action emitter to the natural unit env-action range
+    // (Sutton-Barto §13.7 + every continuous PG impl: SAC/PPO/TD3/DDPG/MPO all tanh
+    // the policy mean before sampling). For Box envs this matches the wrapper's
+    // bound-clamping behavior so the REINFORCE score `(clamped − μ)` stays in O(1)
+    // — without tanh, μ is `Σ_k λ_k · W_π[k]·z` which is unbounded, the wrapper clamp
+    // makes scoreGrad = ±1 − 1e9 huge, the implicit-α denominator (αpi includes
+    // ‖scoreGrad‖²) shrinks αpi toward 0, and the policy gradient FREEZES. For Discrete
+    // envs the wrapper interprets μ as Gumbel-max logits — tanh keeps them in [-1,1]
+    // which is moderate selectivity (not too uniform, not too argmax). NaN → 0.
     ctx.policyMean[row * ctx.D + p] = isfinite(mu) ? tanh(mu) : 0.0f;
 }
 
@@ -1107,25 +1082,24 @@ kernel void oak_learn_value(
     if (tid == 0u) {
         float invB = 1.0f / float(max(ctx.B, 1u));
         float invT = track_rate(ctx.stepCount, ctx.ridge);
-        // Per-feature TIDBD step (SwiftSarsa 2507.19539 + MetaOptimize 2402.02342).
-        // alphaImpFeat refreshed in oak_reduce_alpha; meta-update β_i ← β_i + α₀·g·h_i and
-        // roll the cross-product trace h_i ← h_i · max(0, 1 − α_i·sm_i) + α_i·g (Alg 1).
-        // Trace h is bounded_soft (tanh, M=1) per SwiftSarsa Sec 3.2 to prevent the
-        // β_i runaway that an unbounded h amplifies via the gMeta·h_old product.
+        // Per-feature TIDBD step (SwiftSarsa 2507.19539 Alg 1 + MetaOptimize 2402.02342).
+        // alphaImpFeat refreshed in oak_reduce_alpha; meta-update β_i ← β_i + α₀·g·h_i;
+        // h trace decays via max(0, 1 − α·sm_i) which IMPLICITLY self-bounds when α·sm
+        // exceeds 1 (the SwiftSarsa Sec 3.2 self-clipping mechanism — no explicit clamp).
         float step = ctx.alphaImpFeat[feat];
         if (feat < ctx.R) {
             float fmNew = ctx.featSM[feat] + (sm * invB - ctx.featSM[feat]) * invT;
             ctx.featSM[feat] = nf_safe(fmNew);
         }
         float lambda_L2 = l2er_decay(ctx.alpha0, ctx.R, ctx.scalars->pEff);
-        // Backward-view TD(λ) eligibility trace at B=1 (Sutton-Barto Ch 12.7) — equivalent
-        // to the forward-view λ-return target with one float per weight. bounded_soft
-        // caps the trace at ±1 (tanh). At B>1 fall back to 1-step batched TD.
+        // Backward-view TD(λ) eligibility trace at B=1 (Sutton-Barto Ch 12.7): unbounded
+        // recurrence e ← λ·e + ϕ(s_t). Steady-state e = ϕ/(1−λ) tracks the feature's
+        // long-run influence; per-step weight update is bounded by the implicit-α step
+        // (Kim 2510.06149) regardless of trace magnitude. At B>1 fall back to 1-step TD.
         float gradStep;
         if (ctx.B == 1u) {
             float xp = nf_safe(prev[feat]);
-            float eNew = ctx.scalars->lambdaTrace * ctx.valueE[feat] + xp;
-            ctx.valueE[feat] = bounded_soft(eNew);
+            ctx.valueE[feat] = nf_safe(ctx.scalars->lambdaTrace * ctx.valueE[feat] + xp);
             gradStep = step * nf_safe(ctx.td[0]) * ctx.valueE[feat];
         } else {
             gradStep = step * (g * invB);
@@ -1136,16 +1110,12 @@ kernel void oak_learn_value(
             float decay = 1.0f - ctx.alpha0;
             ctx.wBar[feat] = max(ctx.wBar[feat] * decay, fabs(wNew));
         }
-        // TIDBD meta-update. gMeta = gradient magnitude per the implicit-α step (gradStep/step).
+        // TIDBD β + h update (SwiftSarsa Alg 1 lines 9,11). h self-clips via max(0,...).
         float gMeta = (step > 0.0f) ? gradStep / step : 0.0f;
         float sm_i = (feat < ctx.R) ? max(ctx.featSM[feat], ctx.ridge) : (sm * invB);
         float h_old = ctx.alphaImpH[feat];
-        float beta_new = ctx.alphaImpBeta[feat] + ctx.alpha0 * gMeta * h_old;
-        ctx.alphaImpBeta[feat] = nf_safe(beta_new);
-        // bounded_soft on h prevents trace runaway under sustained gradient direction
-        // (SwiftSarsa Sec 3.2 implicit clipping).
-        float h_new = h_old * max(0.0f, 1.0f - step * sm_i) + step * gMeta;
-        ctx.alphaImpH[feat] = bounded_soft(h_new);
+        ctx.alphaImpBeta[feat] = nf_safe(ctx.alphaImpBeta[feat] + ctx.alpha0 * gMeta * h_old);
+        ctx.alphaImpH[feat]    = nf_safe(h_old * max(0.0f, 1.0f - step * sm_i) + step * gMeta);
     }
 }
 
@@ -1380,8 +1350,7 @@ kernel void oak_learn_psi(
     float gradStep;
     if (ctx.B == 1u) {
         float gradV = (m < ctx.E) ? nf_safe(prev[m]) : nf_safe(ctx.chordSlotPrev[m - ctx.E]);
-        float eNew = ctx.scalars->lambdaTrace * ctx.psiE[pIdx] + gradV;
-        ctx.psiE[pIdx] = bounded_soft(eNew);
+        ctx.psiE[pIdx] = nf_safe(ctx.scalars->lambdaTrace * ctx.psiE[pIdx] + gradV);
         gradStep = step * nf_safe(ctx.tdPsi[k]) * ctx.psiE[pIdx];
     } else {
         gradStep = step * g * invB;
@@ -1437,12 +1406,13 @@ kernel void oak_learn_pi(
     float invB = 1.0f / float(max(ctx.B, 1u));
     float alpha_pi = ctx.scalars->alphaPi;       // shared denominator includes ‖scoreGrad‖²
     uint  pIdx = k * ctx.D * ctx.E + d * ctx.E + i;
-    // L2-Effective-Rank regularizer on π (Spectral Collapse 2509.22335 ICLR 2026).
-    // Same rank-gap decay as encoder/value/psi; keeps option-policy weights from drifting along
-    // collapsed feature directions.
-    float lambda_L2 = l2er_decay(ctx.alpha0, ctx.R, ctx.scalars->pEff);
-    ctx.optPolicy[pIdx] = safe_half(float(ctx.optPolicy[pIdx]) * (1.0f - lambda_L2)
-                                  + alpha_pi * g * invB, ctx.counters);
+    // Vanilla REINFORCE update (Sutton-Barto Ch 13.3): w ← w + α · adv · ∇log π. NO L2 decay
+    // — the policy head is an action emitter, not a value-prediction representation; its
+    // magnitude IS the action distribution's signal-to-noise ratio. L2 here would impose a
+    // stationary unit-policy prior that prevents the policy from learning expressive actions.
+    // Boundedness comes from the implicit-α step (αpi shrinks proportionally to ‖x‖²·‖sg‖²).
+    ctx.optPolicy[pIdx] = safe_half(float(ctx.optPolicy[pIdx]) + alpha_pi * g * invB,
+                                    ctx.counters);
 }
 
 // =================================================================================================
