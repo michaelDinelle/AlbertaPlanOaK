@@ -216,12 +216,11 @@ kernel void oak_encode(
 }
 
 // =================================================================================================
-// 3. oak_meta_policy - parameter-free option keyboard. chord[k] = softmax(psi_k(s')).
-//    Also computes alphaPi (implicit alpha for the policy head; Kim arXiv:2510.06149) and
-//    updates rho-bar (Reward Centering arXiv:2405.09999) - both are scalar reductions over
-//    R + D ops, cheap to do single-threaded here instead of in a separate reduction kernel.
+// 3. oak_meta - chord softmax (Plan option keyboard, Design A) + alphaPi (Kim arXiv:2510.06149)
+//    + rho-bar EMA (Reward Centering arXiv:2405.09999). Three scalar reductions, one kernel,
+//    single-threaded. Runs BEFORE oak_predict so the new chord drives this step's psi TD.
 // =================================================================================================
-kernel void oak_meta_policy(
+kernel void oak_meta(
     device float         *params      [[buffer(0)]],
     device float         *stateArena  [[buffer(1)]],
     device uint          *uintArena   [[buffer(2)]],
@@ -236,7 +235,7 @@ kernel void oak_meta_policy(
 
     for (uint k = 0u; k < ctx.K; ++k) ctx.chordPrev[k] = ctx.chord[k];
 
-    // Chord = softmax over psi_k(s').
+    // chord = softmax(psi_k(s')).
     float maxL = -FLT_MAX;
     float logits[OAK_SIMD];
     for (uint k = 0u; k < ctx.K; ++k) {
@@ -436,38 +435,13 @@ kernel void oak_learn_heads(
 }
 
 // =================================================================================================
-// 8. oak_meta_action - soft-chord blended linear policy. mu_p = sum_k chord[k] * (W_pi[k][p] . s).
+// 8. oak_post_learn - three concurrent passes after learn_heads writes the new weights:
+//      gid in [0, R)        -> per-feature GraMa utility EMA (arXiv:2505.24061)
+//      gid in [R, R+K)      -> per-option |tdPsi|^2 utility EMA
+//      gid in [R+K, R+K+D)  -> action mu_p = sum_k chord[k] * (W_pi[k][p] . s')  (meta_action)
+//    All three are single-output-per-thread; folding them into one kernel saves a launch.
 // =================================================================================================
-kernel void oak_meta_action(
-    device float         *params      [[buffer(0)]],
-    device float         *stateArena  [[buffer(1)]],
-    device uint          *uintArena   [[buffer(2)]],
-    device KernelScalars *scalars     [[buffer(3)]],
-    device KernelStats   *stats       [[buffer(4)]],
-    constant KernelConfig &cfg        [[buffer(5)]],
-    uint p [[thread_position_in_grid]])
-{
-    if (p >= cfg.actionParamCount) return;
-    Ctx ctx = make_ctx(params, stateArena, uintArena, scalars, stats, cfg);
-    device const float *curr = state_at(ctx, 1u - ctx.stateSlot);
-    float mu = 0.0f;
-    for (uint k = 0u; k < ctx.K; ++k) {
-        float dot = 0.0f;
-        for (uint i = 0u; i < ctx.R; ++i)
-            dot = fma(ctx.optPolicy[(k * ctx.D + p) * ctx.R + i], curr[i], dot);
-        mu = fma(ctx.chord[k], dot, mu);
-    }
-    // safe_w-style preservation: on non-finite, keep last-step's policyMean (host's
-    // prevPolicyMean has it; the buffer slot is just left unchanged).
-    float prev = ctx.policyMean[p];
-    ctx.policyMean[p] = isfinite(mu) ? mu : prev;
-}
-
-// =================================================================================================
-// 9. oak_bk_utility - per-feature GraMa utility (arXiv:2505.24061), per-option |tdPsi|^2 utility.
-//    Grid = R + K threads.
-// =================================================================================================
-kernel void oak_bk_utility(
+kernel void oak_post_learn(
     device float         *params      [[buffer(0)]],
     device float         *stateArena  [[buffer(1)]],
     device uint          *uintArena   [[buffer(2)]],
@@ -477,21 +451,37 @@ kernel void oak_bk_utility(
     uint gid [[thread_position_in_grid]])
 {
     Ctx ctx = make_ctx(params, stateArena, uintArena, scalars, stats, cfg);
-    if (gid >= ctx.R + ctx.K) return;
-    float invT = track_rate(ctx.stepCount, ctx.ridge);
+    if (gid >= ctx.R + ctx.K + ctx.D) return;
     device const float *prev = state_at(ctx, ctx.stateSlot);
+    device const float *curr = state_at(ctx, 1u - ctx.stateSlot);
 
     if (gid < ctx.R) {
         uint i = gid;
         float xi = prev[i];
         float gSum = fabs(ctx.td[0] * xi);
         for (uint k = 0u; k < ctx.K; ++k) gSum += fabs(ctx.tdPsi[k] * xi);
+        float invT = track_rate(ctx.stepCount, ctx.ridge);
         ctx.utilFeat[i] += invT * (gSum / float(1u + ctx.K) - ctx.utilFeat[i]);
-    } else {
+        return;
+    }
+    if (gid < ctx.R + ctx.K) {
         uint k = gid - ctx.R;
         float dk = ctx.tdPsi[k];
+        float invT = track_rate(ctx.stepCount, ctx.ridge);
         ctx.utilOpt[k] += invT * (dk * dk - ctx.utilOpt[k]);
+        return;
     }
+    // Action head: mu_p = sum_k chord[k] * (W_pi[k][p] . s').
+    uint p = gid - ctx.R - ctx.K;
+    float mu = 0.0f;
+    for (uint k = 0u; k < ctx.K; ++k) {
+        float dot = 0.0f;
+        for (uint i = 0u; i < ctx.R; ++i)
+            dot = fma(ctx.optPolicy[(k * ctx.D + p) * ctx.R + i], curr[i], dot);
+        mu = fma(ctx.chord[k], dot, mu);
+    }
+    float prevMu = ctx.policyMean[p];
+    ctx.policyMean[p] = isfinite(mu) ? mu : prevMu;
 }
 
 // =================================================================================================
