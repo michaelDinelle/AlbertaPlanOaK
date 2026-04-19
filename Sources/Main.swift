@@ -72,6 +72,14 @@ private struct RunMetricsFile: Encodable {
     let numEnvs: Int, warmupSteps: Int, stopAfterMeasuredSteps: Int
     let observationDim: Int, actionDim: Int, actionDiscreteCount: Int?
     let measuredStepCount: Int, measuredBatchCount: Int, measuredSeconds: Double
+    // Pass 15 Tier 5: workerDepth = measuredStepCount / numEnvs (per-env trajectory length).
+    // The canonical depth metric for the BWH-orthodox bench protocol — at B=1 (Pass 15
+    // default), workerDepth = measuredStepCount; at B=2048 (Pass 14 batched protocol)
+    // workerDepth = measuredStepCount / 2048, exposing the depth-vs-width trade-off that
+    // Pass 14 forensic data showed was masked by the prior `measuredStepCount` field
+    // (50K total steps gave only 24 worker-steps per env at B=2048; explained the broken
+    // strict-gate verdicts at B>1).
+    let workerDepth: Int
     let stepsPerSecond: Double?, heartbeatSequence: Int?
     let rewardSum: Double, doneCount: Int, stopReason: String
     let agentStepMsMean: Double, envStepMsMean: Double
@@ -1044,96 +1052,11 @@ final class OakMetalEngine {
     }
 
     // ---- Probe-only accessor (Tier-0 verification harness; deleted in Tier 7) ----------------
-    // Exposes a named arena slot as a Float array. The Pass-11 plan defines a fixed slot-name
-    // vocabulary; slots that don't exist in the current tier return nil so probe failures point
-    // at the missing-tier rather than at a mistyped name. This bypasses the agent contract — it
-    // is OK ONLY because the probe binary is removed at the end of Pass 11 along with this method.
-    func probeSlot(_ name: String) -> [Float]? {
-        switch name {
-        case "policyMean":
-            return readFloats(stateArena, offset: stateLayout.policyMean, count: batch * dPolicy)
-        case "prevPolicyMean":
-            return readFloats(stateArena, offset: stateLayout.prevPolicyMean, count: batch * dPolicy)
-        case "scoreGrad":
-            return readFloats(stateArena, offset: stateLayout.scoreGrad, count: batch * dPolicy)
-        case "state":
-            let E = OakMetalLayout.extendedDim(rank: rank, actDim: actDim)
-            return readFloats(stateArena, offset: stateLayout.state, count: 2 * batch * E)
-        case "outcome":
-            // The K outcome predictions per row, read from the just-written slot (curr).
-            // We dump both slots' outcome regions concatenated for trace inspection.
-            let E = OakMetalLayout.extendedDim(rank: rank, actDim: actDim)
-            let K = OakMetalLayout.optionCount(rank: rank, actDim: actDim)
-            var out = [Float](repeating: 0, count: 2 * batch * K)
-            let basePtr = stateArena.pointer.advanced(by: stateLayout.state)
-            for slot in 0..<2 {
-                for r in 0..<batch {
-                    for k in 0..<K {
-                        out[slot * batch * K + r * K + k] =
-                            basePtr[slot * batch * E + r * E + rank + k]
-                    }
-                }
-            }
-            return out
-        case "outcomeError":
-            // |target_k − pred_k|² where target_k = state_curr[r][sf[k]] and pred_k is the
-            // outcome dim. Surfaces the OPSR head's prediction error per (row, k).
-            let E = OakMetalLayout.extendedDim(rank: rank, actDim: actDim)
-            let K = OakMetalLayout.optionCount(rank: rank, actDim: actDim)
-            let stateSlot = Int(scalarsPointer.pointee.stateSlot)
-            let currSlot = 1 - stateSlot
-            let basePtr = stateArena.pointer.advanced(by: stateLayout.state)
-            let sfPtr = uintArena.pointer.advanced(by: uintLayout.subtaskFeatureOf)
-            var out = [Float](repeating: 0, count: batch * K)
-            for r in 0..<batch {
-                for k in 0..<K {
-                    let sf = Int(sfPtr[k])
-                    let target = sf < rank ? basePtr[currSlot * batch * E + r * E + sf] : 0
-                    let pred = basePtr[currSlot * batch * E + r * E + rank + k]
-                    let d = target - pred
-                    out[r * K + k] = d * d
-                }
-            }
-            return out
-        case "td":          return readFloats(stateArena, offset: stateLayout.td,      count: batch)
-        case "tdPsi":       return readFloats(stateArena, offset: stateLayout.tdPsi,   count: batch * OakMetalLayout.optionCount(rank: rank, actDim: actDim))
-        case "vCurr":       return readFloats(stateArena, offset: stateLayout.vCurr,   count: batch)
-        case "reward":      return readFloats(stateArena, offset: stateLayout.reward,  count: batch)
-        case "obsMean":     return readFloats(stateArena, offset: stateLayout.obsMean, count: obsDim)
-        case "featMean":    return readFloats(stateArena, offset: stateLayout.featMean, count: rank)
-        case "featSM":      return readFloats(stateArena, offset: stateLayout.featSM,   count: rank)
-        case "wBar":        return readFloats(stateArena, offset: stateLayout.wBar,     count: rank)
-        case "utilFeat":    return readFloats(stateArena, offset: stateLayout.utilFeat, count: rank)
-        case "utilOpt":
-            return readFloats(stateArena, offset: stateLayout.utilOpt,
-                              count: OakMetalLayout.optionCount(rank: rank, actDim: actDim))
-        case "optFracEMA":
-            return readFloats(stateArena, offset: stateLayout.optFracEMA,
-                              count: OakMetalLayout.optionCount(rank: rank, actDim: actDim))
-        case "rho":         return [scalarsPointer.pointee.rho]
-        case "td_baseline": return [scalarsPointer.pointee.tdBaseline]
-        case "chord_slot", "chord":
-            let K = OakMetalLayout.optionCount(rank: rank, actDim: actDim)
-            return readFloats(stateArena, offset: stateLayout.chordSlot, count: batch * K)
-        case "chord_slot_prev":
-            let K = OakMetalLayout.optionCount(rank: rank, actDim: actDim)
-            return readFloats(stateArena, offset: stateLayout.chordSlotPrev, count: batch * K)
-        case "betaProb":
-            return readFloats(stateArena, offset: stateLayout.betaProb, count: batch)
-        case "optionAge":
-            let p = uintArena.pointer.advanced(by: uintLayout.optionAge)
-            return (0..<batch).map { Float(p[$0]) }
-        case "actionSpec":
-            return nil  // populated by later Pass-11 tiers; missing-here is a tier-not-reached signal
-        default:
-            return nil
-        }
-    }
-
-    private func readFloats(_ shared: Shared<Float>, offset: Int, count: Int) -> [Float] {
-        let p = shared.pointer.advanced(by: offset)
-        return Array(UnsafeBufferPointer(start: p, count: count))
-    }
+    // Pass 15 Tier 5: probeSlot deleted (~85 LOC). Probe harness was used for kernel-
+    // correctness validation in Pass 11-13; that role is now covered by the (B) numerical-
+    // safety hard gate (nonFiniteRawTotal == 0 + halfSaturationTotalFinal == 0 over the
+    // full bench window) and the (C) bounded-magnitude hard gate (per-buffer max(|w|) <
+    // √HALF_MAX), both surfaced into RunHealth and verifiable from any bench JSON.
 
     func metalPhaseGpuDiagnostics(measuredBatchSteps: Int) -> (meanMs: [String: Double]?, invalidPhases: [String]?) {
         guard diagnosticGpuPhaseTiming, measuredBatchSteps > 0 else { return (nil, nil) }
@@ -1437,9 +1360,12 @@ private final class RunState {
             switch args.first {
             case "benchmark": try benchmark()
             case "diagnose":  try diagnose(Array(args.dropFirst()))
-            case "probe":     try runProbeCLI(Array(args.dropFirst()))
             case "run":       try run(args.dropFirst().first)
             default:          try run(args.first)
+            // Pass 15 Tier 5: `probe` subcommand removed. Probe harness (Probe.swift) was
+            // a kernel-correctness validation tool for Pass 11-13 deferred slots; its
+            // role is now covered by the (B) numerical-safety + (C) bounded-magnitude
+            // hard gates surfaced into bench JSON via RunHealth (see emitSnapshot).
             }
         } catch { fputs("\(error)\n", stderr); Foundation.exit(1) }
     }
@@ -1761,12 +1687,14 @@ private final class RunState {
         let sps = state.measuredSeconds > 0 ? Double(state.measuredSteps) / state.measuredSeconds : nil
         let reason = seq == nil ? "measured_steps" : "heartbeat"
         return RunMetricsFile(
-            schemaVersion: 2, command: ctx.command, envId: ctx.envId, policy: ctx.policy, seed: ctx.seed,
+            schemaVersion: 3, command: ctx.command, envId: ctx.envId, policy: ctx.policy, seed: ctx.seed,
             numEnvs: ctx.numEnvs, warmupSteps: ctx.warmup, stopAfterMeasuredSteps: ctx.stopAfter,
             observationDim: ctx.env.obsDim, actionDim: ctx.env.actDim,
             actionDiscreteCount: ctx.env.actionDiscreteCount,
             measuredStepCount: state.measuredSteps, measuredBatchCount: u,
-            measuredSeconds: state.measuredSeconds, stepsPerSecond: sps,
+            measuredSeconds: state.measuredSeconds,
+            workerDepth: state.measuredSteps / max(ctx.numEnvs, 1),
+            stepsPerSecond: sps,
             heartbeatSequence: seq, rewardSum: state.rewardSum, doneCount: state.doneCount,
             stopReason: reason, agentStepMsMean: state.agentMsSum / Double(u),
             envStepMsMean: state.envMsSum / Double(u),
