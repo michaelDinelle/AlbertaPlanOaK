@@ -515,10 +515,18 @@ kernel void oak_post_learn(
         float invR   = 1.0f / float(max(ctx.R, 1u));
         float gamma  = 1.0f - invR;
         float eta    = invR / float(max(ctx.baseO, 1u));
-        float betaCap = -log(float(max(ctx.baseO, 1u)));   // α-cap = 1/baseO ⇔ β-cap = −log baseO.
+        // α-cap = 1/baseO (safe-update ceiling) ⇔ β-cap = −log baseO.
+        // α-floor = 1/(R·baseO) (always-learning guarantee: BWH/temporal-uniformity says
+        // OaK never stops adapting any feature; even after a streak of inconsistent gradients
+        // the per-feature step floors at 1/(R·baseO) so the soft mechanism keeps tracking
+        // alongside the hard G&T mechanism). At the floor, summed across R features the
+        // total per-step learning rate equals the original global a = 1/baseO; at the cap,
+        // it can amplify up to R · 1/baseO when every feature is fully informative.
+        float betaCap   = -log(float(max(ctx.baseO, 1u)));
+        float betaFloor = -log(float(max(ctx.R * ctx.baseO, 1u)));
         float newBeta = ctx.beta[i] + eta * td * xi * hOld;
         if (!isfinite(newBeta)) newBeta = ctx.beta[i];
-        newBeta = min(newBeta, betaCap);
+        newBeta = clamp(newBeta, betaFloor, betaCap);
         ctx.hMeta[i] = gamma * hOld + dw;
         ctx.beta[i]  = newBeta;
         ctx.alpha[i] = exp(newBeta);
