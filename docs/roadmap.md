@@ -8,7 +8,74 @@ oak-vs-random benchmark protocol.
 
 The pacing principle (validated empirically since Tier A): one Plan-orthodox
 structural change per PR, smoke (NF zero) → 1.5M paired bench (sanity) → deeper
-characterize, decide next move from data, never skip multiple steps.
+characterize → **optimization phase (zero-intelligence-hit kernel speedups)** →
+decide next move from data, never skip multiple steps.
+
+### The optimization phase (formalized as of `ef18e1637`)
+
+After every roadmap step that lands a green algorithmic change, we run an
+optimization phase before moving to the next step. Two reasons: (1) faster
+agent-step time means future bench cycles iterate faster — a productivity
+multiplier that compounds over the roadmap; (2) the algorithmic baseline of
+"step N" is what every subsequent step is validated against, so locking in a
+fast version of "step N" makes all downstream regression checks cheaper.
+
+**The contract for any kernel optimization PR:**
+
+- **Bit-identical preferred, FP-reorder allowed only with per-seed proof.** Any
+  optimization that changes the floating-point order of accumulations
+  (e.g., `simd_sum` instead of a sequential loop) must be validated against
+  the prior commit on a 10×1.5M paired bench AND a per-seed lift table —
+  *every* seed within ±3 % of the prior commit's per-seed lift. Aggregate
+  parity is necessary but not sufficient; per-seed reshuffling that averages
+  to zero is still considered an intelligence hit unless it's strictly
+  improvement-distributed.
+- **Bit-identical optimizations are unconditional.** Kernel splits, per-thread
+  parallelism without cross-thread reductions, pre-computed constants moved
+  into `KernelConfig` / `KernelScalars`, threadgroup-memory layout
+  improvements — none of these change the agent's computed floats, so they
+  ship with smoke + a single sanity bench.
+- **Smoke gates every change.** `nonFiniteByPhase` all zero, agent step time
+  comparable or better, action stats sane.
+- **Per-phase profile required.** PR description includes the per-phase
+  `metalPhaseGpuMsMean` table before/after. The aim is a balanced budget where
+  no single phase dominates.
+
+**Current optimization frontier:**
+
+| phase | µs | parallelization | bit-id vs original Tier B? |
+|---|---:|---|---|
+| `oak_post_learn` | 138 | R+K+D grid-stride; per-thread MetaOpt transcendentals | ✓ — no cross-thread reductions |
+| `oak_plan` | 18 | K TGs × R threads, lane-0 sequential `fma` reduction | ✓ — same fma sequence as the Tier B single-thread loop |
+| `oak_bk_admit_commit` | 17 | single TG of 256, find-worsts on lane 0 then parallel reseed | ✓ — same hash inputs, same writes |
+| `oak_meta` | 15 | K threads; `simd_max` + lane-0 `simd_shuffle` sequential sum | ✓ — `for k: Z += expL[k]` order preserved |
+| `oak_predict` | 15 | K threads (each thread owns one option's TD; no reduction) | ✓ |
+| `oak_learn_heads` | 12 | grid-stride 1-step TD per weight (no reduction) | ✓ |
+| `oak_plan_reduce` | 10 | K threads, `simd_max` over qOption | ✓ — max is associative |
+| `oak_encode` | 8 | R threads | ✓ |
+| `oak_bk_obs` | 6 | 1 TG × 32 threads | ✓ |
+
+### Lessons learned from the C2 → perf → bit-id sequence
+
+1. **`simd_sum` over floats is not free.** The `ef18e1637` PR introduced
+   `simd_sum` reductions in `oak_meta` and `oak_plan` for parallel speedup. The
+   1.5M paired bench showed aggregate parity vs the pre-PR baseline, but a
+   careful per-seed eye on `actionDeltaL2Mean` saw the std *double* (0.020 →
+   0.041) — a real per-seed redistribution from the FP-reorder. The next PR
+   reverted the `simd_sum` reductions to lane-0 sequential reductions
+   (`simd_shuffle` for ≤32 lanes, `threadgroup memory + barrier` for >32),
+   restoring bit-identical FP order to the original Tier B kernel at the cost
+   of ~4 µs per `oak_plan`. Net: SPS went 1615 → 1556 (-3.7 %), chatter
+   actually improved 0.189 → 0.185, aggregate lift +0.08 % vs `ef18e1637`.
+2. **`simd_max` and `simd_min` are bit-identical** for max / min reductions
+   (the operations are associative + commutative for floats, no rounding).
+   These can be used freely without per-seed validation.
+3. **Bit-identical means the same fma sequence in the same order.** A
+   parallelized kernel can preserve bit-identical FP by storing per-thread
+   intermediate values into threadgroup memory and having lane 0 do the
+   sequential reduction — losing some throughput vs `simd_sum` but recovering
+   the original kernel's exact float bit pattern. Worth it for any
+   reduction whose result feeds back into the agent's state (chord, V, ψ).
 
 ## State of the agent on Plan Steps 1-11
 
