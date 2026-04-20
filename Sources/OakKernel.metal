@@ -1,36 +1,35 @@
 // =================================================================================================
-// OakKernel.metal - Orthodox Step 11 Oak agent. Single-stream (B=1), Metal 4 ICB.
+// OakKernel.metal — Orthodox Step 11 Oak agent. Single-stream (B=1), Metal 4 ICB.
 //
 // What the Plan demands (Sutton-Bowling-Pilarski 2022 arXiv:2208.11173, Step 11):
-//   - Perception                         -> encoder (fixed random projection; generate-and-test)
-//   - Value function (one per policy)    -> valueW (main GVF, differential, rho-bar centered)
-//   - K subtask GVFs (RR-Subtasks)       -> psi (cumulant=reward, stopping=feature attainment)
-//   - K option policies                  -> optPolicy (Design A: K policies blended by chord)
-//   - K option models r_hat^k, n_hat^k   -> optReward, optTransition (RR-Subtasks eq. 17)
-//   - Planning over option models        -> oak_plan (RR-Subtasks eq. 19, asynchronous VI)
-//   - Option keyboard chord lambda       -> oak_meta_policy (lambda = softmax(psi); zero params)
-//   - Feedback / utility / remove+replace-> oak_bk_utility + oak_bk_admit_commit + generate-and-test
-//   - Average-reward (no discount)       -> rho-bar (Reward Centering 2405.09999)
-//   - Per-feature step sizes (Step 1)    -> alpha_0 globally; per-feature differentiation comes
-//                                            via generate-and-test reseeding the worst-utility
-//                                            feature each step (Plan: "relevant features can be
-//                                            given large step-size parameters" - achieved by
-//                                            KEEPING relevant features alive, REPLACING the rest)
+//   Perception                       → oak_encode (deep Fourier features over std_obs)
+//   Value function                   → valueW (main GVF, differential, ρ̄-centered)
+//   K subtask GVFs (RR-Subtasks)     → psi (cumulant=reward, stopping=feature attainment)
+//   K option policies                → optPolicy (Design A keyboard, blended by chord)
+//   K option reward + transition     → optReward, optTransition (RR-Subtasks eq. 17, dense)
+//   Planning over option models      → oak_plan + oak_plan_reduce (eq. 19, async VI)
+//   Option keyboard chord            → oak_meta (chord = softmax_k(ψ(s')))
+//   Feedback / utility / remove-replace → oak_post_learn (utility EMAs) + oak_bk_admit_commit (G&T)
+//   Average-reward (no discount)     → ρ̄ EMA (Reward Centering 2405.09999)
+//   Per-feature step sizes (Step 1)  → MetaOptimize L-approximation in oak_post_learn
+//                                       (Sharifnassab-Salehkaleybar-Sutton 2024 arXiv:2402.02342)
 //
-// Kernel-side telemetry kept to the bare minimum: only fields the host literally cannot observe
-// (per-phase non-finite counters and cumulative reinit counts). The host's HealthAccumulator
-// computes everything else (rewardRate, action delta, scoreGrad L2) directly from env signals.
+// Pipeline (9 kernels per step, Metal 4 ICB, fixed grid widths for the engine's lifetime):
+//   bk_obs → encode → meta → predict → plan → plan_reduce → learn_heads → post_learn → bk_admit_commit
 //
-// References: see commit 6d532226a "orthodox step-11 oak" for full citation block.
+// Telemetry kept to the bare minimum the host can't observe: per-phase non-finite counters and
+// cumulative reinit counts. Everything else (rewardRate, chatter, scoreGrad L2) is host-derived
+// from env signals.
+//
+// Optimization phase contract (see docs/roadmap.md): bit-identical kernel changes (kernel splits,
+// per-thread parallelism without cross-thread reductions, pre-computed constants in KernelConfig)
+// ship freely; FP-reorder optimizations (simd_sum, threadgroup reductions where input order
+// changes) require per-seed parity proof on the 10×1.5M paired bench. simd_max is associative
+// and is bit-identical for max-reductions; simd_sum is not.
 // =================================================================================================
 #include <metal_stdlib>
 #include <float.h>
 using namespace metal;
-
-// Apple GPU SIMD width is 32 — referenced in comments and host-side option-count cap.
-// Hardware structural; no longer needed as a Metal constant since the parallelized
-// oak_meta / oak_predict / oak_plan / oak_bk_admit_commit kernels use simd_max / simd_sum
-// reductions that auto-size to the simdgroup width rather than indexing fixed arrays.
 
 // Counters: per-step (cleared by host) and cumulative.
 constant uint OAK_CNT_OBS_NF      = 0u;
@@ -257,9 +256,16 @@ kernel void oak_encode(
 //    + ρ̄ EMA (Reward Centering arXiv:2405.09999). Runs BEFORE oak_predict so the new chord
 //    drives this step's ψ TD.
 //
-//    K threads (one per option, fits one Apple SIMD group, simd_max + simd_sum reductions —
-//    same pattern as oak_plan). Per-thread k cost: R FMA (ψ·curr inner product) + simd_max
-//    + simd_sum + softmax. Lane 0 also does the scalar alphaPi (R + D ops) and ρ̄ EMA.
+//    K threads (one per option, fits one Apple SIMD group). Per-thread k cost: R FMA
+//    (ψ·curr inner product) — fully parallel across K. Reductions are bit-identical to
+//    the prior sequential `for k in K` kernel:
+//      * `simd_max` for the softmax max (max is associative + commutative → bit-identical).
+//      * `Z = Σ_k expL_k` summed sequentially on lane 0 via `simd_shuffle`, so the reduction
+//        order matches the original `for (uint k = 0; k < ctx.K; ++k) Z += expL[k]` exactly.
+//        Lane 0 broadcasts `Z` via `simd_broadcast`. Optimization-phase contract Inv-10:
+//        FP-reorder kernel changes (the previous `simd_sum`) shifted per-seed chatter in
+//        the validation bench — pinning reduction order restores zero-intelligence-hit.
+//    Lane 0 also does the scalar alphaPi (R + D ops) and ρ̄ EMA.
 // =================================================================================================
 kernel void oak_meta(
     device float         *params      [[buffer(0)]],
@@ -283,27 +289,32 @@ kernel void oak_meta(
             zPsi = fma(ctx.psi[basePsi + i], curr[i], zPsi);
     }
 
-    // chord[k] = softmax_k(ψ(curr)) via simd_max + simd_sum across the K-thread simdgroup.
-    // Inactive lanes (k ≥ K, only happens if K < SIMD width 32) carry −∞ logit so they
-    // don't pollute the max or contribute exp ≈ 0 to the sum.
+    // softmax max — `simd_max` is associative for float max; bit-identical to sequential.
     float lForMax = active ? zPsi : -FLT_MAX;
     float maxL    = simd_max(lForMax);
     float expL    = active ? exp(zPsi - maxL) : 0.0f;
-    float Zexp    = simd_sum(expL);
-    float invZ    = 1.0f / max(Zexp, FLT_MIN);
+
+    // softmax denominator — lane 0 accumulates in original `for k=0..K-1` order via
+    // simd_shuffle, then broadcasts. ALL lanes must call the shuffle (Metal spec: shuffle
+    // result is undefined unless both source and destination lanes are active in the same
+    // control flow path), so the loop runs uniformly and only the accumulator is gated.
+    float Zexp = 0.0f;
+    for (uint kk = 0u; kk < ctx.K; ++kk) {
+        float v = simd_shuffle(expL, kk);
+        if (k == 0u) Zexp += v;
+    }
+    Zexp = simd_broadcast(Zexp, 0u);
+    float invZ = 1.0f / max(Zexp, FLT_MIN);
     if (active) ctx.chord[k] = expL * invZ;
 
     // Scalar updates (single-threaded; small) — αPi and ρ̄. Done by lane 0 after the
-    // chord write since the simd reductions above must complete first.
+    // softmax broadcast so the work doesn't interleave with the reduction.
     if (k == 0u) {
-        // alphaPi = 1 / (baseO + ||state||^2 * ||scoreGrad||^2). Kim implicit-step,
-        // self-bounded at large signals, capped at 1/baseO at small.
         float ss = 0.0f, gg = 0.0f;
         for (uint i = 0u; i < ctx.R; ++i) ss = fma(curr[i], curr[i], ss);
         for (uint p = 0u; p < ctx.D; ++p) gg = fma(ctx.scoreGrad[p], ctx.scoreGrad[p], gg);
         ctx.scalars->alphaPi = 1.0f / (float(max(ctx.baseO, 1u)) + ss * gg);
 
-        // ρ̄ EMA (Reward Centering). One step of lag from predict's reading is negligible.
         float invT = track_rate(ctx.stepCount, ctx.baseO);
         ctx.scalars->rho += invT * (ctx.reward[0] - ctx.rho);
     }
@@ -374,17 +385,21 @@ kernel void oak_predict(
 //    K·R-thread parallel: K threadgroups, R threads each (one TG per option k, one thread
 //    per output dim j). Each (k, j) thread computes one row of the dense option transition,
 //    fuses the curr and prev passes into a single R-load over `optTransition[k][j][:R]`,
-//    and writes nTdMat[k·R + j] = curr[j] − n̂^k_j(prev) directly. Cross-thread reduction
-//    within each TG (simd_sum + threadgroup memory + barrier) yields V(n̂^k(curr)). Lane 0
-//    of each TG also computes r̂^k = optReward[k] · curr in parallel and emits Q^k = r̂^k +
-//    V(n̂^k(curr)) into the qOption[K] cache.
+//    and writes nTdMat[k·R + j] = curr[j] − n̂^k_j(prev) directly. Each thread stores its
+//    `nHatCurr` into threadgroup memory; lane 0 sums vHat = Σ_j valueW[j]·nHatCurr_j via
+//    `fma` in strict index order j=0..R-1, exactly matching the Tier B single-thread loop's
+//    `vHat = fma(valueW[j], nHatCurr, vHat)` sequence — bit-identical FP, no `simd_sum`.
+//    Lane 0 also computes r̂^k = optReward[k] · curr (R FMA) and emits Q^k = r̂^k + V(n̂^k)
+//    into the qOption[K] cache.
 //
 //    The cross-K reduction (bestQ = max_k Q^k → planAdv soft-bound + valueW residual)
-//    runs as a tiny follow-up kernel `oak_plan_reduce` (K threads, single simdgroup).
+//    runs as a tiny follow-up kernel `oak_plan_reduce` (K threads, single simdgroup,
+//    simd_max — bit-identical for max).
 //
 //    Compute budget at K=32 R=64: 32 simdgroups in flight per kernel (≈ 32× the previous
 //    K-thread design which used a single simdgroup). Per-thread inner cost: 2R FMA = 128
-//    FMA + simd_sum + 1 threadgroup_barrier — well-saturated on Apple Silicon.
+//    FMA + 1 threadgroup_barrier; per-TG lane-0 reduction adds R fma's. Bit-identical
+//    intelligence, parallel throughput.
 // =================================================================================================
 kernel void oak_plan(
     device float         *params      [[buffer(0)]],
@@ -404,36 +419,36 @@ kernel void oak_plan(
 
     bool active = (j < ctx.R);
 
-    // Per-thread dense-transition row. Same R-load fuses curr and prev passes.
-    float contrib = 0.0f;
+    // Per-thread dense-transition row. Same R-load fuses curr and prev passes; each thread
+    // also writes its own slot in nTdMat (no contention). Stores nHatCurr (not the fma'd
+    // contribution) into threadgroup memory so the reduction below keeps the original
+    // single-thread kernel's exact `vHat = fma(valueW[j], nHatCurr, vHat)` sequence —
+    // separate multiply-then-add would lose the fma's single-rounding and drift.
+    float nHatCurrLocal = 0.0f;
     if (active) {
-        float nHatCurr = 0.0f, nHatPrev = 0.0f;
+        float nHatPrev = 0.0f;
         uint  base = k * ctx.R * ctx.R + j * ctx.R;
         for (uint i = 0u; i < ctx.R; ++i) {
             float w = ctx.optTransition[base + i];
-            nHatCurr = fma(w, curr[i], nHatCurr);
-            nHatPrev = fma(w, prev[i], nHatPrev);
+            nHatCurrLocal = fma(w, curr[i], nHatCurrLocal);
+            nHatPrev      = fma(w, prev[i], nHatPrev);
         }
-        contrib = ctx.valueW[j] * nHatCurr;          // for vHat reduction below.
         ctx.nTdMat[k * ctx.R + j] = curr[j] - nHatPrev;
     }
 
-    // Cross-thread reduction inside the TG to get vHat^k = Σ_j contrib_j. R is host-rounded
-    // to even; for R=64 we have 2 simdgroups (32 lanes each). simd_sum gives the per-simd
-    // partial sum; one threadgroup-memory slot per simdgroup carries the partial up to
-    // lane 0 for the final sum + Q^k emission.
-    threadgroup float tg_partial[2];
-    if (j < 2u) tg_partial[j] = 0.0f;
-    threadgroup_barrier(mem_flags::mem_threadgroup);
-
-    float simd_partial = simd_sum(active ? contrib : 0.0f);
-    uint  simd_id   = j / 32u;
-    uint  simd_lane = j % 32u;
-    if (simd_lane == 0u && simd_id < 2u) tg_partial[simd_id] = simd_partial;
+    // Cross-thread reduction: vHat^k = Σ_j valueW[j]·nHatCurr_j, accumulated via fma in
+    // strict index order j=0..R-1, exactly matching the original single-thread loop.
+    // tg_nHatCurr is sized for OAK_MAX_RANK = 256 (1 KB of threadgroup memory) — the
+    // host-rounded `rank` is capped well below this for current envs (HC-v4: R = 64).
+    constexpr uint OAK_MAX_RANK = 256u;
+    threadgroup float tg_nHatCurr[OAK_MAX_RANK];
+    tg_nHatCurr[j] = active ? nHatCurrLocal : 0.0f;
     threadgroup_barrier(mem_flags::mem_threadgroup);
 
     if (j == 0u) {
-        float vHat = tg_partial[0] + tg_partial[1];
+        float vHat = 0.0f;
+        for (uint jj = 0u; jj < ctx.R; ++jj)
+            vHat = fma(ctx.valueW[jj], tg_nHatCurr[jj], vHat);
         float rHat = 0.0f;
         for (uint i = 0u; i < ctx.R; ++i)
             rHat = fma(ctx.optReward[k * ctx.R + i], curr[i], rHat);
@@ -613,12 +628,6 @@ kernel void oak_post_learn(
         // Order matches Algorithm 1: meta-update uses CURRENT h (not h_{t+1}); h is then
         // updated to γ·h + Δw where Δw = α·δ·prev[i] is the base update applied this step
         // by oak_learn_heads to the value head.
-        float aOld   = ctx.alpha[i];
-        float hOld   = ctx.hMeta[i];
-        float dw     = aOld * td * xi;
-        float invR   = 1.0f / float(max(ctx.R, 1u));
-        float gamma  = 1.0f - invR;
-        float eta    = invR / float(max(ctx.baseO, 1u));
         // α-cap = 1/baseO (safe-update ceiling) ⇔ β-cap = −log baseO.
         // α-floor = 1/(R·baseO) (always-learning guarantee: BWH/temporal-uniformity says
         // OaK never stops adapting any feature; even after a streak of inconsistent gradients
@@ -626,6 +635,12 @@ kernel void oak_post_learn(
         // alongside the hard G&T mechanism). At the floor, summed across R features the
         // total per-step learning rate equals the original global a = 1/baseO; at the cap,
         // it can amplify up to R · 1/baseO when every feature is fully informative.
+        float aOld   = ctx.alpha[i];
+        float hOld   = ctx.hMeta[i];
+        float dw     = aOld * td * xi;
+        float invR   = 1.0f / float(max(ctx.R, 1u));
+        float gamma  = 1.0f - invR;
+        float eta    = invR / float(max(ctx.baseO, 1u));
         float betaCap   = -log(float(max(ctx.baseO, 1u)));
         float betaFloor = -log(float(max(ctx.R * ctx.baseO, 1u)));
         float newBeta = ctx.beta[i] + eta * td * xi * hOld;
