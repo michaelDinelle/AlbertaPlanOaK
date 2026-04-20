@@ -330,6 +330,9 @@ private struct KernelConfig {
     var sAlpha: UInt32 = 0, sBeta: UInt32 = 0, sH: UInt32 = 0
     var sNTdMat: UInt32 = 0
     var sQOption: UInt32 = 0     // Per-option Q^k cache (K floats), oak_plan → oak_plan_reduce.
+    var sObsTrace: UInt32 = 0    // Tier C1: per-obs-dim low-pass trace of std_obs (O floats),
+                                  // updated by oak_bk_obs at rate 1/baseO; consumed by oak_encode
+                                  // as the second half of every Fourier pre-activation's input.
     var uCounters: UInt32 = 0
 }
 
@@ -369,9 +372,13 @@ private enum OakMetalLayout {
     // Deep Fourier features (Lewandowski-Schuurmans-Machado 2024, arXiv:2410.20634): R/2
     // pre-activations, each producing a paired (cos, sin) channel into the R-wide state.
     // Encoder rows match the pre-activation count; phase is one scalar per pre-activation.
+    // Tier C1 (Plan Step 3 explicit): each pre-activation reads BOTH the standardized
+    // observation `std_obs[o]` (instantaneous) AND the per-obs-dim low-pass trace
+    // `obsTrace[o]` (integrated, decay 1/baseO). Encoder row width is therefore 2·O —
+    // the first O cols multiply std_obs, the next O cols multiply obsTrace.
     static func fourierPreActCount(rank: Int) -> Int { rank / 2 }
     static func encoderCount(obsDim: Int, rank: Int) -> Int {
-        fourierPreActCount(rank: rank) * max(obsDim, 1)
+        fourierPreActCount(rank: rank) * 2 * max(obsDim, 1)
     }
     static func phaseCount(rank: Int) -> Int { fourierPreActCount(rank: rank) }
 
@@ -401,6 +408,7 @@ private enum OakMetalLayout {
         let alpha, beta, h: Int       // MetaOptimize L-approximation buffers (R floats each).
         let nTdMat: Int               // Dense option-transition TD targets, K*R floats, written by oak_plan.
         let qOption: Int              // Per-option Q^k cache, K floats, oak_plan → oak_plan_reduce.
+        let obsTrace: Int             // Tier C1: per-obs-dim low-pass trace of std_obs, O floats.
         let total: Int
     }
     static func stateLayout(obsDim: Int, rank: Int, dPolicy: Int) -> State {
@@ -425,6 +433,7 @@ private enum OakMetalLayout {
         let h   = o; o += rank
         let ntd = o; o += K * rank
         let qo  = o; o += K
+        let otr = o; o += obsDim
         return State(observation: obs, obsMean: mean, obsSM: osm, state: st,
                      policyMean: pol, scoreGrad: sg,
                      reward: rew, td: td, tdPsi: tdP,
@@ -432,7 +441,7 @@ private enum OakMetalLayout {
                      utilFeat: uf, utilOpt: uo,
                      planAdv: pa,
                      alpha: al, beta: be, h: h,
-                     nTdMat: ntd, qOption: qo, total: o)
+                     nTdMat: ntd, qOption: qo, obsTrace: otr, total: o)
     }
 
     struct UInts { let counters, total: Int }
@@ -788,6 +797,7 @@ final class OakMetalEngine {
         c.sPlanAdv = UInt32(s.planAdv)
         c.sAlpha = UInt32(s.alpha); c.sBeta = UInt32(s.beta); c.sH = UInt32(s.h)
         c.sNTdMat = UInt32(s.nTdMat); c.sQOption = UInt32(s.qOption)
+        c.sObsTrace = UInt32(s.obsTrace)
         c.uCounters = UInt32(u.counters)
         configPointer.pointee = c
     }

@@ -180,18 +180,47 @@ Net agent step time **~1.35 ms → ~1.0 ms** at the Tier B baseline algorithm
 (measured ~970 sps in 10× concurrent 1.5M bench), so the post-rollback baseline
 is *strictly faster* than the original Tier B baseline at no algorithmic cost.
 
-### C1. Temporal aggregation in encoder (Plan Step 3 explicit)
+### C1. Temporal aggregation in encoder (Plan Step 3 explicit, IN FLIGHT)
 *"include not just nonlinear combinations, but also incorporation of older
 signals and traces"*
 
-Add a structural decayed-obs trace `t_o = (1 − 1/baseO)·t_o + (1/baseO)·obs_o`
-(one float per obs dim, baseO floats total). Encoder concatenates `[std_obs; t]`
-so each Fourier pre-activation sees instantaneous + integrated obs.
+**What landed in this PR:**
 
-- Plan-orthodox: trace-rate is `1/baseO` (already the established structural
-  choice), no new tunable
-- Targets POMDP coverage (gait phase, joint acceleration that obs doesn't expose)
-- Blast radius: small (~30 lines kernel + host)
+- New state slot `obsTrace[O]`. Updated by `oak_bk_obs` each step as
+  `obsTrace[o] ← (1 − 1/baseO)·obsTrace[o] + (1/baseO)·std_obs[o]` — a
+  fixed-rate EMA over the *standardized* observation (so trace and std_obs
+  share the same scale; RFF-1 init still puts the trace half of the encoder
+  in the strongly-nonlinear regime).
+- `encoder` shape doubles: `(R/2)·O` → `(R/2)·2·O`. Each pre-activation row is
+  `[W_std_obs ‖ W_trace]`; `oak_encode`'s inner loop now does `2·baseO` FMA
+  per pre-activation instead of `baseO`.
+- `oak_bk_admit_commit`'s G&T reseed of the worst-utility feature now reseeds
+  both halves of the encoder row (2·baseO weights at RFF-1 scale).
+
+**Plan-orthodoxy:** the trace decay rate `1/baseO` is structural — it's the
+same constant `track_rate` floors at, the same constant MetaOptimize uses for
+α-floor / α-cap. No per-env tunable. The trace-over-std_obs choice (rather
+than trace-over-raw-obs) is a hygiene decision: it preserves RFF-1's variance
+prior over the trace half of the encoder. Inv-1 / Inv-3 / Inv-9 all clean.
+
+**Why a low-pass over std_obs and not raw obs:** raw-obs trace would converge
+to `obsMean` in steady state (since `obsMean` updates at the same rate after
+warmup) and add nothing. A low-pass *of std_obs* captures the slow-frequency
+structure *after* removing the running mean — i.e., genuine temporal dynamics
+the encoder can't see from instantaneous std_obs alone (gait phase, joint
+acceleration, sustained drift).
+
+**Cost estimate:** `oak_bk_obs` adds 1 EMA + 1 standardize per obs-dim
+(~+2 µs); `oak_encode` doubles the inner loop (~+4 µs); `oak_bk_admit_commit`
+reseeds 2·baseO weights instead of baseO (~+0.5 µs). Total: agent step
+327 µs → ~334 µs estimated. Per-step memory: +baseO floats (HC: +68 B).
+
+**Bit-identical-vs-prior:** all changes are structural extensions (new state
+slot, longer encoder rows, more reseed writes); no cross-thread reductions
+added. The kernel paths that existed before are unchanged. From the prior
+commit `b01b1812a`'s perspective this is a NEW algorithm (different state
+arena, different encoder math), so a paired bench against `b01b1812a` is the
+acceptance test (per-seed lift / chatter / NF), not a bit-equality check.
 
 ### C3. Multi-layer Fourier features (Plan Step 2 deep version)
 *"creating and introducing new features made by combining existing features"*
