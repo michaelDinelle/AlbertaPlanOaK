@@ -215,9 +215,9 @@ private struct HealthAccumulator {
     private var actDeltaSum = 0.0, scoreGradSum = 0.0
     private var encodeNF = 0, learnNF = 0, planNF = 0, tdPsiNF = 0
     private var oakOptionReinitFinal = 0, oakFeatureReinitFinal = 0
-    private let ridge: Double
+    private let trackFloor: Double
 
-    init(rank: Int) { ridge = 1.0 / Double(max(rank, 1) + 1) }
+    init(obsDim: Int) { trackFloor = 1.0 / Double(max(obsDim, 1)) }
 
     mutating func recordEnvSignals(reward: Float,
                                    prevPolicyMean: UnsafeBufferPointer<Float>,
@@ -226,7 +226,7 @@ private struct HealthAccumulator {
         envSteps += 1
         let r = Double(reward)
         if r.isFinite {
-            let invT = max(1.0 / Double(envSteps), ridge)
+            let invT = max(1.0 / Double(envSteps), trackFloor)
             rhoBar += invT * (r - rhoBar)
         }
         var dl = 0.0, sg = 0.0
@@ -328,7 +328,6 @@ private struct KernelConfig {
     var sUtilFeat: UInt32 = 0, sUtilOpt: UInt32 = 0
     var sPlanAdv: UInt32 = 0
     var uCounters: UInt32 = 0
-    var cap: Float = 0, alpha0: Float = 0, ridge: Float = 0
 }
 
 private struct KernelScalars {
@@ -683,7 +682,6 @@ final class OakMetalEngine {
 
     private func writeKernelConfig(paramLayout: OakMetalLayout.Param) {
         let K = OakMetalLayout.optionCount(rank: rank)
-        let cap = Float(max(rank, 1))
         let p = paramLayout, s = stateLayout, u = uintLayout
         var c = KernelConfig()
         c.obsDim = UInt32(obsDim); c.rank = UInt32(rank)
@@ -700,7 +698,6 @@ final class OakMetalEngine {
         c.sUtilFeat = UInt32(s.utilFeat); c.sUtilOpt = UInt32(s.utilOpt)
         c.sPlanAdv = UInt32(s.planAdv)
         c.uCounters = UInt32(u.counters)
-        c.cap = cap; c.alpha0 = 1.0 / cap; c.ridge = 1.0 / (cap + 1.0)
         configPointer.pointee = c
     }
 
@@ -831,7 +828,7 @@ private final class RunState {
         randPolicyMean = Array(repeating: 0, count: env.dPolicy)
         randSeed = UInt64(bitPattern: Int64(seed ?? Int(oakUnseededSeed)))
         // rank = obsDim per the agent's structural choice (see OakMetalEngine init precondition).
-        health = HealthAccumulator(rank: env.obsDim)
+        health = HealthAccumulator(obsDim: env.obsDim)
         actionCol = MeasuredActionCollector(discreteCount: env.actionDiscreteCount,
                                              envActionWidth: env.envActionWidth)
     }
