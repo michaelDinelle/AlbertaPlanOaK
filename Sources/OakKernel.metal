@@ -59,6 +59,10 @@ struct KernelConfig {
     // optTransition heads (and relevance-weighted into optPolicy). All structurally
     // derived: α₀ = 1/baseO, η = 1/(R·baseO), γ = 1 − 1/R, α-cap = 1/baseO.
     uint sAlpha, sBeta, sH;
+    // Dense option-transition TD targets (RR-Subtasks eq. 17). Written by oak_plan
+    // (each thread k writes its slice nTdMat[k*R, (k+1)*R) — no contention),
+    // consumed by oak_learn_heads to update the K*R^2 transition weights.
+    uint sNTdMat;
 
     // UInt arena offsets.
     uint uCounters;
@@ -126,6 +130,7 @@ struct Ctx {
     device float *utilFeat, *utilOpt;
     device float *planAdv;
     device float *alpha, *beta, *hMeta;        // MetaOptimize L-approximation per-feature buffers.
+    device float *nTdMat;                      // Dense optTransition TD targets, K*R floats.
     device uint  *counters;
     device KernelScalars *scalars;
     device KernelStats   *stats;
@@ -165,6 +170,7 @@ inline Ctx make_ctx(device float *params, device float *stateArena, device uint 
     c.alpha           = stateArena + cfg.sAlpha;
     c.beta            = stateArena + cfg.sBeta;
     c.hMeta           = stateArena + cfg.sH;
+    c.nTdMat          = stateArena + cfg.sNTdMat;
 
     c.counters = uintArena + cfg.uCounters;
     c.scalars = scalars; c.stats = stats;
@@ -319,15 +325,30 @@ kernel void oak_predict(
     if (!isfinite(delta)) { ctx.counters[OAK_CNT_LEARN_NF] += 1u; delta = 0.0f; }
     ctx.td[0] = delta;
 
-    // Subtask TDs: dk = (r - rho) + curr[k] - psi(s). Centering keeps tdPsi mean-zero so the
-    // psi-weight gradient (tdPsi * prev[i]) doesn't accumulate a state-correlated bias.
-    // K = min(R, OAK_SIMD) so curr[k] is always valid.
+    // Subtask TDs (RR-Subtasks ψ-GVF with PER-OPTION ADAPTIVE β_k):
+    //   β_k = β_cap · α₀ / (α₀ + utilOpt[k])    where β_cap = 1 − 1/R, α₀ = 1/baseO.
+    // utilOpt[k] is the EMA of |tdPsi[k]|² maintained in oak_post_learn (Kim implicit-step
+    // family; arXiv:2510.06149-style self-bound on the bootstrap). Behavior:
+    //   * |δ_k|² small (option's ψ well-tracked)        → β_k → β_cap (long-horizon bootstrap)
+    //   * |δ_k|² large (divergence threat / mis-tracking) → β_k → 0 (auto-revert to myopic)
+    // utilOpt[k] is initialized to R (capacity-volume prior) at host startup so β_k starts
+    // at β_cap·α₀/(α₀+R) ≈ 0 — fully myopic and safe at random init. This is the negative
+    // feedback loop missing from the constant β = 1 − 1/R attempt that diverged 6/10 seeds:
+    // any sustained spike in |δ_k|² shrinks β_k automatically, choking the bootstrap.
+    // ρ̄ centering keeps tdPsi mean-zero so the psi-weight gradient (tdPsi * prev[i]) doesn't
+    // accumulate a state-correlated bias. K = min(R, OAK_SIMD) so curr[k] is always valid.
+    float beta_cap = 1.0f - 1.0f / float(max(ctx.R, 1u));
+    float a0       = 1.0f / float(max(ctx.baseO, 1u));
     uint nfPsi = 0u;
     for (uint k = 0u; k < ctx.K; ++k) {
-        float psiPrev = 0.0f;
-        for (uint i = 0u; i < ctx.R; ++i)
-            psiPrev = fma(ctx.psi[k * ctx.R + i], prev[i], psiPrev);
-        float dk = reward_c + curr[k] - psiPrev;
+        float beta_k = beta_cap * a0 / (a0 + ctx.utilOpt[k]);
+        float psiPrev = 0.0f, psiNext = 0.0f;
+        for (uint i = 0u; i < ctx.R; ++i) {
+            float w = ctx.psi[k * ctx.R + i];
+            psiPrev = fma(w, prev[i], psiPrev);
+            psiNext = fma(w, curr[i], psiNext);
+        }
+        float dk = reward_c + (1.0f - beta_k) * curr[k] + beta_k * psiNext - psiPrev;
         if (!isfinite(dk)) { dk = 0.0f; nfPsi++; }
         ctx.tdPsi[k] = dk;
     }
@@ -335,8 +356,14 @@ kernel void oak_predict(
 }
 
 // =================================================================================================
-// 5. oak_plan - asynchronous VI over option models (RR-Subtasks eq. 19).
-//   Q^k(s) = r_hat^k(s) + V(n_hat^k(s));  planAdv = max_k Q^k - V(s) (self-bounded).
+// 5. oak_plan - parallel asynchronous VI over DENSE option models (RR-Subtasks eq. 17 + 19).
+//   Per-thread k:
+//     Q^k(s) = r_hat^k(s) + V(n_hat^k(s)) where n_hat^k_j(s) = sum_i w^k_{j,i} * s[i] (dense)
+//     nTdMat[k*R+j] = curr[j] - n_hat^k_j(prev)  (precomputed for oak_learn_heads)
+//   Across-option reduction (K = 32 ≤ Apple SIMD width = 1 simdgroup):
+//     bestQ = simd_max(Q);  planAdv = bestQ - V(s) (raw, no scale prior).
+//   Single thread (k=0) writes planAdv. simd_or aggregates the per-thread non-finite flag so
+//   the counter increment is contention-free without atomics.
 // =================================================================================================
 kernel void oak_plan(
     device float         *params      [[buffer(0)]],
@@ -345,48 +372,71 @@ kernel void oak_plan(
     device KernelScalars *scalars     [[buffer(3)]],
     device KernelStats   *stats       [[buffer(4)]],
     constant KernelConfig &cfg        [[buffer(5)]],
-    uint tid [[thread_position_in_grid]])
+    uint k [[thread_position_in_grid]])
 {
-    if (tid != 0u) return;
     Ctx ctx = make_ctx(params, stateArena, uintArena, scalars, stats, cfg);
+    bool active = (k < ctx.K);
+    device const float *prev = state_at(ctx, ctx.stateSlot);
     device const float *curr = state_at(ctx, 1u - ctx.stateSlot);
+
+    // V(s) — every thread recomputes; redundant but cheap (R FMAs).
     float vCurr = 0.0f;
     for (uint i = 0u; i < ctx.R; ++i) vCurr = fma(ctx.valueW[i], curr[i], vCurr);
 
-    float bestQ = -FLT_MAX;
-    uint nfPlan = 0u;
-    for (uint k = 0u; k < ctx.K; ++k) {
+    float Q = -FLT_MAX;
+    bool nfQ = false;
+    if (active) {
         // r_hat^k(s) = sum_i optReward[k][i] * curr[i].
         float rHat = 0.0f;
         for (uint i = 0u; i < ctx.R; ++i)
             rHat = fma(ctx.optReward[k * ctx.R + i], curr[i], rHat);
-        // Diagonal transition: n_hat^k_j(s) = optTransition[k][j] * curr[j]. Then
-        // V(n_hat^k(s)) = sum_j valueW[j] * optTransition[k][j] * curr[j]. K*R cost vs K*R^2.
+        // Dense transition: V(n_hat^k(s)) = sum_j valueW[j] * (sum_i w^k_{j,i} * curr[i]).
+        // Same inner loop also computes nTdMat[k*R+j] = curr[j] - n_hat^k_j(prev) for
+        // oak_learn_heads, so we read each weight twice (once with curr, once with prev) but
+        // touch the dense matrix only once per oak_plan call.
         float vHat = 0.0f;
-        for (uint j = 0u; j < ctx.R; ++j)
-            vHat = fma(ctx.valueW[j] * ctx.optTransition[k * ctx.R + j], curr[j], vHat);
-        float Q = rHat + vHat;
-        if (!isfinite(Q)) { nfPlan++; continue; }
-        if (Q > bestQ) bestQ = Q;
+        uint base = k * ctx.R * ctx.R;
+        for (uint j = 0u; j < ctx.R; ++j) {
+            float nHatCurr = 0.0f, nHatPrev = 0.0f;
+            for (uint i = 0u; i < ctx.R; ++i) {
+                float w = ctx.optTransition[base + j * ctx.R + i];
+                nHatCurr = fma(w, curr[i], nHatCurr);
+                nHatPrev = fma(w, prev[i], nHatPrev);
+            }
+            vHat = fma(ctx.valueW[j], nHatCurr, vHat);
+            ctx.nTdMat[k * ctx.R + j] = curr[j] - nHatPrev;
+        }
+        Q = rHat + vHat;
+        if (!isfinite(Q)) { nfQ = true; Q = -FLT_MAX; }
     }
-    // RR-Subtasks eq. 19 bracket term: planAdv = max_k Q^k - V(s). Raw, no scale prior.
-    // If the option model diverges, planAdv becomes huge and learn_heads' valueW update will
-    // notice (via safe_w preservation on overflow). The Plan doesn't bound the bracket; the
-    // natural scale comes from V's own magnitude.
-    float adv = (bestQ > -FLT_MAX) ? (bestQ - vCurr) : 0.0f;
-    if (!isfinite(adv)) { ctx.counters[OAK_CNT_PLAN_NF] += 1u; }
-    else if (nfPlan > 0u)             { ctx.counters[OAK_CNT_PLAN_NF] += nfPlan; }
-    ctx.planAdv[0] = isfinite(adv) ? adv : ctx.planAdv[0];   // safe_w-style preserve on NF.
+
+    // simd-wide reduction across the K threads (K = 32 fits one simdgroup).
+    // simd_or expects an integral type, so route the bool through uint.
+    float bestQ = simd_max(Q);
+    uint  nfBits = simd_or(nfQ ? 1u : 0u);
+
+    if (k == 0u) {
+        float advRaw = (bestQ > -FLT_MAX) ? (bestQ - vCurr) : 0.0f;
+        // Self-bound by x/(1+|x|): the standard rational soft-clamp from Sutton's gradient-TD
+        // line of work. Image is (-1, 1), continuous and monotone in advRaw, no tunable scale.
+        // Plan-orthodox: it's the negative-feedback brake the dense optTransition (B1) feedback
+        // loop needed — when an option model briefly diverges, the planAdv contribution to
+        // valueW updates can't run away (was the cause of the 3/10 seeds NF-blowup at 10M).
+        float adv = advRaw / (1.0f + fabs(advRaw));
+        if (nfBits != 0u) ctx.counters[OAK_CNT_PLAN_NF] += 1u;
+        ctx.planAdv[0] = isfinite(adv) ? adv : ctx.planAdv[0];   // safe_w-style preserve on NF.
+    }
 }
 
 // =================================================================================================
 // 6. oak_learn_heads - 1-step TD updates on 5 learnable heads.
-//      0: valueW[R]            -> alpha * (td + planAdv) * prev[i]   (planAdv added HERE ONLY)
-//      1: psi[K*R]             -> alpha * tdPsi[k] * prev[i]
-//      2: optPolicy[K*D*R]     -> alphaPi * td * scoreGrad[d] * prev[i] * chordPrev[k]
-//      3: optReward[K*R]       -> alpha * (reward - r_hat^k(prev)) * prev[i] * chordPrev[k]
-//      4: optTransition[K*R]   -> alpha * (curr[j] - w_n^{k,j}*prev[j]) * prev[j] * chordPrev[k]
-//                                 (DIAGONAL transition: n_hat^k_j(s) = w_n^{k,j} * s[j])
+//      0: valueW[R]              -> alpha[i] * (td + planAdv) * prev[i]   (planAdv added HERE ONLY)
+//      1: psi[K*R]               -> alpha[i] * tdPsi[k] * prev[i]
+//      2: optPolicy[K*D*R]       -> alphaPi * relevance(i) * td * scoreGrad[d] * prev[i] * chordPrev[k]
+//      3: optReward[K*R]         -> alpha[i] * (reward - r_hat^k(prev)) * prev[i] * chordPrev[k]
+//      4: optTransition[K*R*R]   -> alpha[i] * nTdMat[k*R+j] * prev[i] * chordPrev[k]
+//                                   (DENSE: n_hat^k_j(s) = sum_i w^k_{j,i} * s[i], RR-Subtasks eq. 17;
+//                                    n_td precomputed by oak_plan into nTdMat[k*R+j] = curr[j] - n_hat^k_j(prev))
 // =================================================================================================
 kernel void oak_learn_heads(
     device float         *params      [[buffer(0)]],
@@ -402,11 +452,13 @@ kernel void oak_learn_heads(
     uint nPsi = ctx.K * ctx.R;
     uint nPi  = ctx.K * ctx.D * ctx.R;
     uint nOR  = ctx.K * ctx.R;
-    uint nOT  = ctx.K * ctx.R;       // diagonal: K*R, was K*R^2.
+    uint nOT  = ctx.K * ctx.R * ctx.R;   // dense: K*R^2 (RR-Subtasks eq. 17 full form).
     if (gid >= nVal + nPsi + nPi + nOR + nOT) return;
 
+    // Head 4 (dense optTransition) reads its TD targets from ctx.nTdMat (precomputed in
+    // oak_plan), so we no longer need `curr` in this kernel. `prev` still drives the gradient
+    // direction for value/psi/optReward/optTransition heads (and the policy relevance gate).
     device const float *prev = state_at(ctx, ctx.stateSlot);
-    device const float *curr = state_at(ctx, 1u - ctx.stateSlot);
     float td = ctx.td[0];
     float deltaValue = td + ctx.planAdv[0];
     // Per-feature step size α[i] from MetaOptimize L-approximation
@@ -452,17 +504,21 @@ kernel void oak_learn_heads(
         ctx.optReward[id] = safe_w(w, w + ctx.alpha[i] * r_td * grad);
         return;
     }
-    {                                                          // Head 4: diagonal optTransition
-        // Diagonal: w_n^{k,j} updates with TD on its own feature only.
-        //   n_hat^k_j(prev) = w * prev[j];  target = curr[j];  grad w.r.t. w = prev[j].
-        // chordPrev[k] is the on-chord weight (importance ratio, RR-Subtasks eq. 17).
-        // α[j] (not α[i]) because the gradient w.r.t. this weight involves prev[j].
-        uint id = gid - nVal - nPsi - nPi - nOR;
-        uint k = id / ctx.R, j = id % ctx.R;
-        float w = ctx.optTransition[id];
-        float n_td = curr[j] - w * prev[j];
-        float grad = ctx.chordPrev[k] * prev[j];
-        ctx.optTransition[id] = safe_w(w, w + ctx.alpha[j] * n_td * grad);
+    {   // Head 4: dense optTransition (RR-Subtasks eq. 17). Per-weight gradient:
+        //   ∂ ½(curr[j] − n_hat^k_j(prev))² / ∂ w^k_{j,i} = -(curr[j] − n_hat^k_j(prev)) · prev[i]
+        // n_td precomputed into ctx.nTdMat[k*R + j] by oak_plan (one shared inner sum per (k, j)
+        // serves R weights along the i axis). chordPrev[k] is the on-chord weight (importance
+        // ratio per RR-Subtasks eq. 17). α[i] (not α[j]) because the gradient direction involves
+        // prev[i] — the i axis is the input dimension whose per-feature relevance gates the update.
+        uint id  = gid - nVal - nPsi - nPi - nOR;
+        uint k   = id / (ctx.R * ctx.R);
+        uint rem = id - k * ctx.R * ctx.R;
+        uint j   = rem / ctx.R;
+        uint i   = rem % ctx.R;
+        float n_td = ctx.nTdMat[k * ctx.R + j];
+        float grad = ctx.chordPrev[k] * prev[i];
+        float w    = ctx.optTransition[id];
+        ctx.optTransition[id] = safe_w(w, w + ctx.alpha[i] * n_td * grad);
     }
 }
 
@@ -581,12 +637,16 @@ kernel void oak_bk_admit_commit(
                 (hash_uniform(ctx.stepCount, k, i) * 2.0f - 1.0f) * invSqrtR;
             ctx.optReward[k * ctx.R + i] =
                 (hash_uniform(ctx.stepCount, k, ctx.R + i) * 2.0f - 1.0f) * invSqrtR;
-            ctx.optTransition[k * ctx.R + i] =
-                (hash_uniform(ctx.stepCount, k, 2u * ctx.R + i) * 2.0f - 1.0f) * invSqrtR;
         }
         for (uint pi = 0u; pi < ctx.D * ctx.R; ++pi) {
             ctx.optPolicy[k * ctx.D * ctx.R + pi] =
                 (hash_uniform(ctx.stepCount, k, 3u * ctx.R + pi) * 2.0f - 1.0f) * invSqrtR;
+        }
+        // Dense optTransition (RR-Subtasks eq. 17): reseed all K*R^2 weights of option k's
+        // transition slice with the same Xavier 1/sqrt(R) scale.
+        for (uint pi = 0u; pi < ctx.R * ctx.R; ++pi) {
+            ctx.optTransition[k * ctx.R * ctx.R + pi] =
+                (hash_uniform(ctx.stepCount, k, 4u * ctx.R + pi) * 2.0f - 1.0f) * invSqrtR;
         }
         ctx.utilOpt[k] = 0.0f;
         ctx.counters[OAK_CNT_REINIT_OPT] += 1u;

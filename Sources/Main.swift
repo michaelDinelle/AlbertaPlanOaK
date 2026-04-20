@@ -328,6 +328,7 @@ private struct KernelConfig {
     var sUtilFeat: UInt32 = 0, sUtilOpt: UInt32 = 0
     var sPlanAdv: UInt32 = 0
     var sAlpha: UInt32 = 0, sBeta: UInt32 = 0, sH: UInt32 = 0
+    var sNTdMat: UInt32 = 0
     var uCounters: UInt32 = 0
 }
 
@@ -358,10 +359,12 @@ private enum OakMetalLayout {
         optionCount(rank: rank) * dPolicy * rank
     }
     static func optRewardCount(rank: Int) -> Int { optionCount(rank: rank) * rank }
-    // DIAGONAL transition: one weight per (option, feature) pair, not one per (k, j_out, i_in).
-    // Reduces K*R^2 -> K*R weights and the K*R^3 cost in learn_heads to K*R; keeps Plan-orthodox
-    // async DP planning intact (V(n_hat^k(s)) = sum_j valueW[j] * w_n^{k,j} * s[j]).
-    static func optTransitionCount(rank: Int) -> Int { optionCount(rank: rank) * rank }
+    // DENSE transition (RR-Subtasks Sutton-Machado-Holland-Timbers-Tanner-White 2022 eq. 17):
+    // one weight per (option, j_out, i_in). n_hat^k_j(s) = sum_i w^k_{j,i} * s[i] gives options
+    // real cross-feature dynamics for planning (V(n_hat^k(s)) = sum_j valueW[j] * sum_i w^k_{j,i} * s[i]).
+    // K*R*R weights; the K*R^2 inner loop in oak_plan is absorbed by K-thread parallel + simd_max
+    // reduction (K = 32 fits one Apple SIMD width simdgroup, lockstep execution).
+    static func optTransitionCount(rank: Int) -> Int { optionCount(rank: rank) * rank * rank }
     // Deep Fourier features (Lewandowski-Schuurmans-Machado 2024, arXiv:2410.20634): R/2
     // pre-activations, each producing a paired (cos, sin) channel into the R-wide state.
     // Encoder rows match the pre-activation count; phase is one scalar per pre-activation.
@@ -394,7 +397,8 @@ private enum OakMetalLayout {
         let chord, chordPrev: Int
         let utilFeat, utilOpt: Int
         let planAdv: Int
-        let alpha, beta, h: Int     // MetaOptimize L-approximation buffers (R floats each).
+        let alpha, beta, h: Int       // MetaOptimize L-approximation buffers (R floats each).
+        let nTdMat: Int               // Dense option-transition TD targets, K*R floats, written by oak_plan.
         let total: Int
     }
     static func stateLayout(obsDim: Int, rank: Int, dPolicy: Int) -> State {
@@ -417,13 +421,15 @@ private enum OakMetalLayout {
         let al  = o; o += rank
         let be  = o; o += rank
         let h   = o; o += rank
+        let ntd = o; o += K * rank
         return State(observation: obs, obsMean: mean, obsSM: osm, state: st,
                      policyMean: pol, scoreGrad: sg,
                      reward: rew, td: td, tdPsi: tdP,
                      chord: cs, chordPrev: csP,
                      utilFeat: uf, utilOpt: uo,
                      planAdv: pa,
-                     alpha: al, beta: be, h: h, total: o)
+                     alpha: al, beta: be, h: h,
+                     nTdMat: ntd, total: o)
     }
 
     struct UInts { let counters, total: Int }
@@ -568,8 +574,8 @@ final class OakMetalEngine {
             rank,               // encode            [R threads]
             1,                  // meta              [1 thread; chord + alphaPi + rho EMA]
             1,                  // predict           [1 thread]
-            1,                  // plan              [1 thread]
-            learnTotal,         // learn_heads       [N threads]
+            K,                  // plan              [K threads, one per option, simd_max reduction]
+            learnTotal,         // learn_heads       [N threads, dense optTransition adds K*R^2]
             rank + K + dPolicy, // post_learn        [util_feat | util_opt | meta_action]
             1,                  // bk_admit_commit   [1 thread]
         ]
@@ -652,6 +658,15 @@ final class OakMetalEngine {
         let chordSlot = stateArena.pointer.advanced(by: stateLayout.chord)
         let invK: Float = 1.0 / Float(max(K, 1))
         for k in 0..<K { chordSlot[k] = invK }
+
+        // Per-option utility prior: utilOpt[k] = R (capacity-volume). The adaptive ψ-bootstrap
+        // β_k = (1 − 1/R) · α₀ / (α₀ + utilOpt[k]) in oak_predict reads this every step; with
+        // utilOpt[k] = R at init, β_k(t=0) ≈ α₀/R = 1/(R·baseO) ~ 0 (fully myopic, safe).
+        // The EMA in oak_post_learn (track rate 1/baseO) decays utilOpt toward true |δ_k|²,
+        // so β grows back toward the cap once each option's ψ stabilizes.
+        let utilOptSlot = stateArena.pointer.advanced(by: stateLayout.utilOpt)
+        let utilOptPrior: Float = Float(rank)
+        for k in 0..<K { utilOptSlot[k] = utilOptPrior }
 
         // MetaOptimize L-approximation seed (Sharifnassab-Salehkaleybar-Sutton 2024
         // arXiv:2402.02342). α[i] = 1/baseO is the prior step size, β[i] = log α[i] is
@@ -757,6 +772,7 @@ final class OakMetalEngine {
         c.sUtilFeat = UInt32(s.utilFeat); c.sUtilOpt = UInt32(s.utilOpt)
         c.sPlanAdv = UInt32(s.planAdv)
         c.sAlpha = UInt32(s.alpha); c.sBeta = UInt32(s.beta); c.sH = UInt32(s.h)
+        c.sNTdMat = UInt32(s.nTdMat)
         c.uCounters = UInt32(u.counters)
         configPointer.pointee = c
     }
