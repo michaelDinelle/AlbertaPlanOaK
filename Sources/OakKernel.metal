@@ -68,6 +68,11 @@ struct KernelConfig {
     // Per-option Q^k cache, K floats. Written by oak_plan (lane 0 of TG k), consumed by
     // oak_plan_reduce for the simd_max + planAdv soft-bound.
     uint sQOption;
+    // Tier C1 (Plan Step 3 explicit): per-obs-dim low-pass trace of std_obs, O floats.
+    // Updated by oak_bk_obs each step as `t_o ← (1 − 1/baseO)·t_o + (1/baseO)·std_obs[o]`;
+    // consumed by oak_encode as the second half of every Fourier pre-activation's input
+    // (encoder row width is 2·baseO — first baseO multiplies std_obs, second multiplies trace).
+    uint sObsTrace;
 
     // UInt arena offsets.
     uint uCounters;
@@ -137,6 +142,7 @@ struct Ctx {
     device float *alpha, *beta, *hMeta;        // MetaOptimize L-approximation per-feature buffers.
     device float *nTdMat;                      // Dense optTransition TD targets, K*R floats.
     device float *qOption;                     // Per-option Q^k cache, K floats.
+    device float *obsTrace;                    // Tier C1: per-obs-dim trace of std_obs, O floats.
     device uint  *counters;
     device KernelScalars *scalars;
     device KernelStats   *stats;
@@ -178,6 +184,7 @@ inline Ctx make_ctx(device float *params, device float *stateArena, device uint 
     c.hMeta           = stateArena + cfg.sH;
     c.nTdMat          = stateArena + cfg.sNTdMat;
     c.qOption         = stateArena + cfg.sQOption;
+    c.obsTrace        = stateArena + cfg.sObsTrace;
 
     c.counters = uintArena + cfg.uCounters;
     c.scalars = scalars; c.stats = stats;
@@ -187,7 +194,12 @@ inline Ctx make_ctx(device float *params, device float *stateArena, device uint 
 inline device float *state_at(Ctx ctx, uint slot) { return ctx.state + slot * ctx.R; }
 
 // =================================================================================================
-// 1. oak_bk_obs - per-feature observation Welford EMA. First so encode reads current stats.
+// 1. oak_bk_obs - per-feature observation Welford EMA + Tier C1 obsTrace EMA. First so
+//    encode reads current stats. Per-thread, no cross-thread reduction over data — bit-id
+//    against per-thread compute order. The trace EMA fires at a FIXED rate 1/baseO (not the
+//    `track_rate(t, baseO)` warmup-aware rate used for obsMean/obsSM): the trace is meant
+//    as a memory of the last ~baseO standardized observations, so it should not be biased
+//    by an exact-mean warmup phase.
 // =================================================================================================
 kernel void oak_bk_obs(
     device float         *params      [[buffer(0)]],
@@ -200,13 +212,19 @@ kernel void oak_bk_obs(
     uint tgW [[threads_per_threadgroup]])
 {
     Ctx ctx = make_ctx(params, stateArena, uintArena, scalars, stats, cfg);
-    float invT = track_rate(ctx.stepCount, ctx.baseO);
+    float invT     = track_rate(ctx.stepCount, ctx.baseO);
+    float traceRate = 1.0f / float(max(ctx.baseO, 1u));   // Tier C1: fixed structural decay.
     uint nfLocal = 0u;
     for (uint o = tid; o < ctx.O; o += tgW) {
         float x = ctx.observation[o];
         if (!isfinite(x)) { nfLocal++; continue; }
         ctx.observationMean[o] += invT * (x - ctx.observationMean[o]);
         ctx.obsSM[o]           += invT * (x * x - ctx.obsSM[o]);
+        // Trace EMA over *standardized* obs using the just-updated stats. The trace is the
+        // second half of every Fourier pre-activation's input in oak_encode, so it must
+        // share std_obs's scale (RFF-1 init then puts the trace half in the same regime).
+        float s = standardized_obs(x, ctx.observationMean[o], ctx.obsSM[o], ctx.baseO);
+        ctx.obsTrace[o] += traceRate * (s - ctx.obsTrace[o]);
     }
     uint nfTotal = simd_sum(nfLocal);
     if (tid == 0u) ctx.counters[OAK_CNT_OBS_NF] = nfTotal;
@@ -214,17 +232,20 @@ kernel void oak_bk_obs(
 
 // =================================================================================================
 // 2. oak_encode - perception. Deep Fourier features (Lewandowski-Schuurmans-Machado 2024,
-//    arXiv:2410.20634): R/2 pre-activations, each producing a paired (cos, sin) channel. The
-//    paper proves linear function approximation does not lose plasticity and shows that
-//    Fourier features inherit this property by approximating linearity dynamically while
-//    remaining nonlinear in representation. cos/sin are bounded in [-1, 1] (structural scale
-//    prior on the BASIS), but the linear weights on top still grow without cap (BWH).
+//    arXiv:2410.20634): R/2 pre-activations, each producing a paired (cos, sin) channel.
+//    Each pre-activation reads BOTH the standardized obs (instantaneous) AND the obsTrace
+//    (Tier C1, Plan Step 3 explicit: low-pass of std_obs at decay 1/baseO, capturing the
+//    last ~baseO steps of dynamics so POMDP signals like gait phase / joint accel become
+//    encode-able). Encoder row width is therefore 2·baseO — first baseO multiplies std_obs,
+//    next baseO multiplies obsTrace.
 //
-//      state[feat in [0, R/2)] = cos(W_enc[feat] . std_obs + phase[feat])
-//      state[feat in [R/2, R)] = sin(W_enc[feat-R/2] . std_obs + phase[feat-R/2])
+//      state[feat in [0, R/2)] = cos( phase[feat]  +  Σ_o W_enc[feat][o]·std_obs[o]
+//                                                 +  Σ_o W_enc[feat][baseO+o]·obsTrace[o] )
+//      state[feat in [R/2, R)] = sin( ... same as above with the paired pre-activation ... )
 //
-//    Encoder + phase evolve only via generate-and-test in bk_admit_commit (Plan Step 2,
-//    "smart generation of promising features and then smart testing to rank and replace").
+//    cos/sin are bounded in [−1, 1] (structural scale prior on the BASIS); linear weights
+//    on top still grow without cap (BWH). Encoder + phase evolve only via generate-and-test
+//    in bk_admit_commit (Plan Step 2 generate-and-test).
 // =================================================================================================
 kernel void oak_encode(
     device float         *params      [[buffer(0)]],
@@ -239,11 +260,16 @@ kernel void oak_encode(
     Ctx ctx = make_ctx(params, stateArena, uintArena, scalars, stats, cfg);
     uint halfR = ctx.R >> 1u;                  // ctx.R is even (host-enforced).
     uint pre   = (feat < halfR) ? feat : feat - halfR;
-    uint encRow = pre * ctx.baseO;
+    uint encRow = pre * 2u * ctx.baseO;        // 2·baseO weights per pre-activation (Tier C1).
     float z = ctx.phase[pre];
+    // First half: std_obs (instantaneous).
     for (uint o = 0u; o < ctx.baseO; ++o) {
         float c = standardized_obs(ctx.observation[o], ctx.observationMean[o], ctx.obsSM[o], ctx.baseO);
         z = fma(ctx.encoder[encRow + o], c, z);
+    }
+    // Second half: obsTrace (low-pass of std_obs, integrated over ~baseO steps).
+    for (uint o = 0u; o < ctx.baseO; ++o) {
+        z = fma(ctx.encoder[encRow + ctx.baseO + o], ctx.obsTrace[o], z);
     }
     float v = (feat < halfR) ? cos(z) : sin(z);
     // safe_w-style preservation: on non-finite, keep the previous slot's value for this feature.
@@ -740,7 +766,7 @@ kernel void oak_bk_admit_commit(
     uint nOR  = ctx.R;
     uint nPi  = ctx.D * ctx.R;
     uint nOT  = ctx.R * ctx.R;
-    uint nEnc = ctx.baseO;
+    uint nEnc = 2u * ctx.baseO;        // Tier C1: encoder rows are 2·baseO (std_obs ‖ trace).
     uint o0   = 0u;
     uint o1   = o0 + nPsi;
     uint o2   = o1 + nOR;
@@ -765,10 +791,10 @@ kernel void oak_bk_admit_commit(
             uint pi = id - o3;
             ctx.optTransition[worstK * ctx.R * ctx.R + pi] =
                 (hash_uniform(stepC, worstK, 4u * ctx.R + pi) * 2.0f - 1.0f) * invSqrtR;
-        } else {                                                     // encoder[pre][:baseO]
+        } else {                                                     // encoder[pre][:2·baseO]
             uint o = id - o4;
             float u = hash_uniform(stepC, pre, o + 0xdeadbeefu) * 2.0f - 1.0f;
-            ctx.encoder[pre * ctx.baseO + o] = u;                    // RFF bandwidth-1.
+            ctx.encoder[pre * 2u * ctx.baseO + o] = u;               // RFF bandwidth-1, both halves.
         }
     }
     threadgroup_barrier(mem_flags::mem_threadgroup);
