@@ -69,18 +69,19 @@ These are the non-negotiables. Every kernel and every line of host code must res
 
 The agent is a 10-kernel single-stream Step-11 Oak instance. Every learnable head and every state slot is Plan-required.
 
-### Learnable parameters (6 buffers)
+### Learnable parameters (7 buffers)
 
 | Head | Shape | Role |
 |---|---|---|
-| `encoder` | R · O | Perception. **Fixed random projection at init**; evolves via generate-and-test reseeding (Plan Step 2). Per-feature alpha is achieved by KEEPING relevant features alive and REPLACING irrelevant ones. |
+| `encoder` | (R/2) · O | Perception (Fourier features W). **Fixed random projection at init**; evolves via generate-and-test reseeding (Plan Step 2). |
+| `phase` | R/2 | Per-pre-activation Fourier offset (uniform on [0, 2π) at init). Reseeded alongside its `encoder` row in generate-and-test. Together with `encoder`, parameterizes the deep Fourier features basis (Lewandowski-Schuurmans-Machado 2024, [arXiv:2410.20634](docs/papers/PlasticLearningDeepFourierFeatures_2410.20634.pdf)). |
 | `valueW` | R | Main value GVF (cumulant = reward, differential, ρ̄-centered). |
 | `psi` | K · R | K subtask GVFs (cumulant = reward, stopping value = feature attainment per RR-Subtasks eq. 4). |
 | `optPolicy` | K · D · R | K component policies, blended by chord (Design A keyboard). |
 | `optReward` | K · R | K option reward models r̂^k (RR-Subtasks eq. 17). |
-| `optTransition` | K · R · R | K · R option transition models n̂_j^k (RR-Subtasks eq. 17). |
+| `optTransition` | K · R | K · R diagonal option transition models n̂_j^k (RR-Subtasks eq. 17). |
 
-Total Plan-required GVFs: **1 + 2K + KR** (1 main + K subtasks + K option-reward + KR option-transition), all learned in parallel from the single experience stream. Cap K ≤ 32 is the Apple SIMD width (structural, hardware-derived).
+Per-feature alpha is currently achieved structurally by KEEPING relevant features alive and REPLACING irrelevant ones via `oak_bk_admit_commit`. R is rounded up to the nearest even value at host init because each Fourier pre-activation produces a paired `(cos, sin)` channel into the R-wide state. Total Plan-required GVFs: **1 + 2K + KR** (1 main + K subtasks + K option-reward + KR option-transition), all learned in parallel from the single experience stream. Cap K ≤ 32 is the Apple SIMD width (structural, hardware-derived).
 
 ### Pipeline (10 kernels per step, Metal 4 ICB)
 
@@ -92,14 +93,14 @@ bk_obs → encode → meta_policy → predict → plan → reduce_alpha
 | Kernel | What it does |
 |---|---|
 | `oak_bk_obs` | Per-feature observation Welford EMA (Sutton-Barto §9.5.4). Updated FIRST so encode reads current stats. |
-| `oak_encode` | `state[r] = unit_soft(W_enc[r] · standardized_obs)`. One thread per latent dim. |
+| `oak_encode` | Deep Fourier features (Lewandowski et al. 2024 [arXiv:2410.20634](docs/papers/PlasticLearningDeepFourierFeatures_2410.20634.pdf)). For `pre = feat % (R/2)`, `z = phase[pre] + W_enc[pre] · standardized_obs`; `state[feat]` = `cos(z)` for `feat ∈ [0, R/2)` and `sin(z)` for `feat ∈ [R/2, R)`. One thread per state slot. NF-preserve from previous slot. |
 | `oak_meta_policy` | `chord[k] = softmax(ψ_k(s'))`. Zero learned parameters; the chord IS the relative subtask value. |
 | `oak_predict` | Main TD `δ = (r − ρ̄) + V(s') − V(s)` (Reward Centering [arXiv:2405.09999](https://arxiv.org/abs/2405.09999)) plus K subtask TDs `δ_k = (r − ρ̄) + α₀·curr[k] + (1−α₀)·ψ_k(s') − ψ_k(s)` (cumulant = reward, stopping = feature attainment, structural β = α₀ = 1/cap). |
 | `oak_plan` | RR-Subtasks eq. 19 asynchronous VI: `Q^k(s) = r̂^k(s) + V(n̂^k(s))`; `planAdv = max_k Q^k − V(s)` self-bounded by `x/(1+|x|)`. |
 | `oak_reduce_alpha` | Implicit α for the policy head: `α_π = α₀/(1 + α₀·‖s'‖²·‖∇log π‖²)` (Kim [arXiv:2510.06149](https://arxiv.org/abs/2510.06149)). Updates ρ̄. |
 | `oak_learn_heads` | One grid-stride pass updating all 5 weight buffers via 1-step TD. PlanAdv added ONLY to the value head (RR-Subtasks eq. 19 scope). All writes through `safe_w`. |
 | `oak_meta_action` | Soft-chord linear policy: `μ_p = Σ_k chord[k] · (W_π[k][p] · s)`. Wrapper does the structural-σ=1 Gaussian draw with pre-clamp `z` as scoreGrad (Williams 1992 REINFORCE). |
-| `oak_bk_utility` | GraMa per-feature gradient utility ([arXiv:2505.24061](https://arxiv.org/abs/2505.24061)); per-option `|tdPsi|²` utility. Drives Step-11 remove-replace. |
+| `oak_post_learn` | Per-feature: GraMa gradient utility EMA ([arXiv:2505.24061](https://arxiv.org/abs/2505.24061)) **and** MetaOptimize L-approximation per-feature step-size update (Sharifnassab-Salehkaleybar-Sutton 2024, [arXiv:2402.02342](docs/papers/MetaOptimize_StepSizes_2402.02342.pdf), Algorithm 3, SGD base + SGD meta, Hessian-free). Constants structurally derived: γ = 1 − 1/R, η = 1/(R · baseO), α-cap = 1/baseO. Per-option: `|tdPsi|²` utility EMA. Action: μ_p = Σ_k chord[k]·(W_π[k][p]·s′). |
 | `oak_bk_admit_commit` | Generate-and-test (Mahmood-Sutton-Pilarski 2012, Rahman 2020, Samani 2022): reseed worst-utility option AND worst-utility feature each step. Slot toggle, stepCount bump. |
 
 ### Action interface (Inv-1)
@@ -153,6 +154,8 @@ Use Instruments → Metal System Trace with `tools/instruments/ShaderTemplate.tr
 - Implicit α: [2510.06149](docs/papers/ImplicitUpdates_AvgRewardTD_2510.06149.pdf)
 - GraMa feature utility: [2505.24061](docs/papers/GraMa_MeasureGradients_2505.24061.pdf)
 - Generate-and-test: Mahmood-Sutton-Pilarski 2012 ([03-mahmood-sutton-autostep](docs/papers/03-mahmood-sutton-autostep-ICML-2012.pdf)), Rahman 2020 thesis, Samani 2022 thesis
+- Deep Fourier features: Lewandowski-Schuurmans-Machado 2024 ([2410.20634](docs/papers/PlasticLearningDeepFourierFeatures_2410.20634.pdf))
+- MetaOptimize per-feature step sizes: Sharifnassab-Salehkaleybar-Sutton 2024 ([2402.02342](docs/papers/MetaOptimize_StepSizes_2402.02342.pdf))
 - Big World Hypothesis: [2512.23419](docs/papers/WorldIsBigger_ComputationallyEmbeddedBWH_2512.23419.pdf)
 - Three Dogmas of RL: [2407.10583](docs/papers/ThreeDogmasRL_2407.10583.pdf)
 - Sutton-Barto 2nd ed: §2.6 (tracking-rate EMA), §6 (1-step TD stability), §9.5.4 (online normalization)

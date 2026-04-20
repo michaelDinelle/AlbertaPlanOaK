@@ -40,8 +40,11 @@ constant uint OAK_CNT_TDPSI_NF    = 5u;
 struct KernelConfig {
     uint obsDim, rank, optionCount, baseObsDim, actionParamCount;
 
-    // Param offsets: 6 heads, all Plan-required.
-    uint pEncoder, pValue, pPsi, pOptPolicy, pOptReward, pOptTransition;
+    // Param offsets: 7 heads, all Plan-required. `phase` is the cos/sin offset for the
+    // deep Fourier features encoder (Lewandowski-Schuurmans-Machado 2024,
+    // arXiv:2410.20634). Encoder rows now span R/2 pre-activations, each producing a
+    // (cos, sin) pair into state[0..R).
+    uint pEncoder, pPhase, pValue, pPsi, pOptPolicy, pOptReward, pOptTransition;
 
     // State arena offsets.
     uint sObservation, sObsMean, sObsSM;
@@ -51,6 +54,11 @@ struct KernelConfig {
     uint sChord, sChordPrev;
     uint sUtilFeat, sUtilOpt;
     uint sPlanAdv;
+    // MetaOptimize L-approximation (Sharifnassab-Salehkaleybar-Sutton 2024,
+    // arXiv:2402.02342). Per-feature step sizes shared across value/psi/optReward/
+    // optTransition heads (and relevance-weighted into optPolicy). All structurally
+    // derived: α₀ = 1/baseO, η = 1/(R·baseO), γ = 1 − 1/R, α-cap = 1/baseO.
+    uint sAlpha, sBeta, sH;
 
     // UInt arena offsets.
     uint uCounters;
@@ -109,7 +117,7 @@ struct Ctx {
     uint stepCount, stateSlot;
     float rho, alphaPi;
 
-    device float *encoder, *valueW, *psi, *optPolicy, *optReward, *optTransition;
+    device float *encoder, *phase, *valueW, *psi, *optPolicy, *optReward, *optTransition;
     device float *observation, *observationMean, *obsSM;
     device float *state;
     device float *policyMean, *scoreGrad;
@@ -117,6 +125,7 @@ struct Ctx {
     device float *chord, *chordPrev;
     device float *utilFeat, *utilOpt;
     device float *planAdv;
+    device float *alpha, *beta, *hMeta;        // MetaOptimize L-approximation per-feature buffers.
     device uint  *counters;
     device KernelScalars *scalars;
     device KernelStats   *stats;
@@ -132,6 +141,7 @@ inline Ctx make_ctx(device float *params, device float *stateArena, device uint 
     c.rho = scalars->rho; c.alphaPi = scalars->alphaPi;
 
     c.encoder       = params + cfg.pEncoder;
+    c.phase         = params + cfg.pPhase;
     c.valueW        = params + cfg.pValue;
     c.psi           = params + cfg.pPsi;
     c.optPolicy     = params + cfg.pOptPolicy;
@@ -152,6 +162,9 @@ inline Ctx make_ctx(device float *params, device float *stateArena, device uint 
     c.utilFeat        = stateArena + cfg.sUtilFeat;
     c.utilOpt         = stateArena + cfg.sUtilOpt;
     c.planAdv         = stateArena + cfg.sPlanAdv;
+    c.alpha           = stateArena + cfg.sAlpha;
+    c.beta            = stateArena + cfg.sBeta;
+    c.hMeta           = stateArena + cfg.sH;
 
     c.counters = uintArena + cfg.uCounters;
     c.scalars = scalars; c.stats = stats;
@@ -187,9 +200,18 @@ kernel void oak_bk_obs(
 }
 
 // =================================================================================================
-// 2. oak_encode - perception. state[r] = W_enc[r] . standardized_obs. Encoder is a FIXED
-//    random projection at init (1/sqrt(O) scale), so state magnitude is naturally O(1) without
-//    artificial bounding (BWH). Evolves only via generate-and-test in bk_admit_commit.
+// 2. oak_encode - perception. Deep Fourier features (Lewandowski-Schuurmans-Machado 2024,
+//    arXiv:2410.20634): R/2 pre-activations, each producing a paired (cos, sin) channel. The
+//    paper proves linear function approximation does not lose plasticity and shows that
+//    Fourier features inherit this property by approximating linearity dynamically while
+//    remaining nonlinear in representation. cos/sin are bounded in [-1, 1] (structural scale
+//    prior on the BASIS), but the linear weights on top still grow without cap (BWH).
+//
+//      state[feat in [0, R/2)] = cos(W_enc[feat] . std_obs + phase[feat])
+//      state[feat in [R/2, R)] = sin(W_enc[feat-R/2] . std_obs + phase[feat-R/2])
+//
+//    Encoder + phase evolve only via generate-and-test in bk_admit_commit (Plan Step 2,
+//    "smart generation of promising features and then smart testing to rank and replace").
 // =================================================================================================
 kernel void oak_encode(
     device float         *params      [[buffer(0)]],
@@ -202,16 +224,18 @@ kernel void oak_encode(
 {
     if (feat >= cfg.rank) return;
     Ctx ctx = make_ctx(params, stateArena, uintArena, scalars, stats, cfg);
-    uint encRow = feat * ctx.baseO;
-    float z = 0.0f;
+    uint halfR = ctx.R >> 1u;                  // ctx.R is even (host-enforced).
+    uint pre   = (feat < halfR) ? feat : feat - halfR;
+    uint encRow = pre * ctx.baseO;
+    float z = ctx.phase[pre];
     for (uint o = 0u; o < ctx.baseO; ++o) {
         float c = standardized_obs(ctx.observation[o], ctx.observationMean[o], ctx.obsSM[o], ctx.baseO);
         z = fma(ctx.encoder[encRow + o], c, z);
     }
-    // safe_w-style preservation: on non-finite, keep the previous slot's value for this feature
-    // (no zero-clamp; BWH-orthodox).
+    float v = (feat < halfR) ? cos(z) : sin(z);
+    // safe_w-style preservation: on non-finite, keep the previous slot's value for this feature.
     float prev = state_at(ctx, ctx.stateSlot)[feat];
-    state_at(ctx, 1u - ctx.stateSlot)[feat] = isfinite(z) ? z : prev;
+    state_at(ctx, 1u - ctx.stateSlot)[feat] = isfinite(v) ? v : prev;
 }
 
 // =================================================================================================
@@ -385,22 +409,24 @@ kernel void oak_learn_heads(
     device const float *curr = state_at(ctx, 1u - ctx.stateSlot);
     float td = ctx.td[0];
     float deltaValue = td + ctx.planAdv[0];
-    // Per-feature step size 1/baseO: structurally derived from env input dim, the only
-    // env-given quantity. R features each contribute 1/baseO of the gradient → total step
-    // bounded by (R/baseO) per parameter. Same value used for value/psi/optModel heads.
-    float a = 1.0f / float(max(ctx.baseO, 1u));
+    // Per-feature step size α[i] from MetaOptimize L-approximation
+    // (Sharifnassab-Salehkaleybar-Sutton 2024, arXiv:2402.02342). Initialized at 1/baseO,
+    // capped from above at 1/baseO, adapted by the value-TD credit signal in oak_post_learn.
+    // Replaces the previous global `a = 1/baseO`. The optPolicy head keeps Kim's implicit
+    // alphaPi but is relevance-weighted by α[i]·baseO ∈ [0, 1] so noisy-feature columns
+    // stop pulling on the policy gradient (kills the action chatter we saw with global α).
 
     if (gid < nVal) {                                          // Head 0: valueW
         uint i = gid;
         float w = ctx.valueW[i];
-        ctx.valueW[i] = safe_w(w, w + a * deltaValue * prev[i]);
+        ctx.valueW[i] = safe_w(w, w + ctx.alpha[i] * deltaValue * prev[i]);
         return;
     }
     if (gid < nVal + nPsi) {                                   // Head 1: psi
         uint id = gid - nVal;
         uint k = id / ctx.R, i = id % ctx.R;
         float w = ctx.psi[id];
-        ctx.psi[id] = safe_w(w, w + a * ctx.tdPsi[k] * prev[i]);
+        ctx.psi[id] = safe_w(w, w + ctx.alpha[i] * ctx.tdPsi[k] * prev[i]);
         return;
     }
     if (gid < nVal + nPsi + nPi) {                             // Head 2: optPolicy (REINFORCE)
@@ -408,9 +434,10 @@ kernel void oak_learn_heads(
         uint k = id / (ctx.D * ctx.R);
         uint rem = id - k * ctx.D * ctx.R;
         uint d = rem / ctx.R, i = rem % ctx.R;
+        float relevance = ctx.alpha[i] * float(max(ctx.baseO, 1u));   // ∈ [0, 1].
         float grad = ctx.chordPrev[k] * ctx.scoreGrad[d] * prev[i];
         float w = ctx.optPolicy[id];
-        ctx.optPolicy[id] = safe_w(w, w + ctx.alphaPi * td * grad);
+        ctx.optPolicy[id] = safe_w(w, w + ctx.alphaPi * relevance * td * grad);
         return;
     }
     if (gid < nVal + nPsi + nPi + nOR) {                       // Head 3: optReward (eq. 17, beta=1)
@@ -422,19 +449,20 @@ kernel void oak_learn_heads(
         float r_td = ctx.reward[0] - predPrev;
         float grad = ctx.chordPrev[k] * prev[i];
         float w = ctx.optReward[id];
-        ctx.optReward[id] = safe_w(w, w + a * r_td * grad);
+        ctx.optReward[id] = safe_w(w, w + ctx.alpha[i] * r_td * grad);
         return;
     }
     {                                                          // Head 4: diagonal optTransition
         // Diagonal: w_n^{k,j} updates with TD on its own feature only.
         //   n_hat^k_j(prev) = w * prev[j];  target = curr[j];  grad w.r.t. w = prev[j].
         // chordPrev[k] is the on-chord weight (importance ratio, RR-Subtasks eq. 17).
+        // α[j] (not α[i]) because the gradient w.r.t. this weight involves prev[j].
         uint id = gid - nVal - nPsi - nPi - nOR;
         uint k = id / ctx.R, j = id % ctx.R;
         float w = ctx.optTransition[id];
         float n_td = curr[j] - w * prev[j];
         float grad = ctx.chordPrev[k] * prev[j];
-        ctx.optTransition[id] = safe_w(w, w + a * n_td * grad);
+        ctx.optTransition[id] = safe_w(w, w + ctx.alpha[j] * n_td * grad);
     }
 }
 
@@ -463,11 +491,37 @@ kernel void oak_post_learn(
     if (gid < ctx.R) {
         uint i = gid;
         float xi = prev[i];
+        float td = ctx.td[0];
         // GraMa per-feature gradient utility (arXiv:2505.24061). Sum, no normalization:
         // ranking is scale-invariant so dividing by (1+K) is purely cosmetic.
-        float gSum = fabs(ctx.td[0] * xi);
+        float gSum = fabs(td * xi);
         for (uint k = 0u; k < ctx.K; ++k) gSum += fabs(ctx.tdPsi[k] * xi);
         ctx.utilFeat[i] += invT * (gSum - ctx.utilFeat[i]);
+
+        // MetaOptimize L-approximation (Sharifnassab-Salehkaleybar-Sutton 2024,
+        // arXiv:2402.02342, Algorithm 3, Hessian-free SGD-base + SGD-meta, no momentum, no
+        // weight decay). Per-feature step size driven by the value-TD credit signal δ.
+        // Plan-orthodox structural constants:
+        //   γ = 1 − 1/R         (capacity-volume non-stationarity discount)
+        //   η = 1/(R · baseO)   (capacity-relative meta-step per input dim)
+        //   α-cap = 1/baseO     (preserves the prior safe-update ceiling)
+        //
+        // Order matches Algorithm 1: meta-update uses CURRENT h (not h_{t+1}); h is then
+        // updated to γ·h + Δw where Δw = α·δ·prev[i] is the base update applied this step
+        // by oak_learn_heads to the value head.
+        float aOld   = ctx.alpha[i];
+        float hOld   = ctx.hMeta[i];
+        float dw     = aOld * td * xi;
+        float invR   = 1.0f / float(max(ctx.R, 1u));
+        float gamma  = 1.0f - invR;
+        float eta    = invR / float(max(ctx.baseO, 1u));
+        float betaCap = -log(float(max(ctx.baseO, 1u)));   // α-cap = 1/baseO ⇔ β-cap = −log baseO.
+        float newBeta = ctx.beta[i] + eta * td * xi * hOld;
+        if (!isfinite(newBeta)) newBeta = ctx.beta[i];
+        newBeta = min(newBeta, betaCap);
+        ctx.hMeta[i] = gamma * hOld + dw;
+        ctx.beta[i]  = newBeta;
+        ctx.alpha[i] = exp(newBeta);
         return;
     }
     if (gid < ctx.R + ctx.K) {
@@ -530,17 +584,37 @@ kernel void oak_bk_admit_commit(
         ctx.counters[OAK_CNT_REINIT_OPT] += 1u;
     }
 
-    // Worst feature: lowest utilFeat. Reseed encoder column with random projection.
+    // Worst feature: lowest utilFeat → reseed the corresponding Fourier pre-activation.
+    // Each pre-activation `pre` produces a paired (cos, sin) into state[pre] and state[pre + R/2],
+    // so reseeding pre touches both features in the pair. Reseed the encoder row at the RFF
+    // bandwidth-1 scale (W ~ U[-1, 1], matching Rahimi-Recht 2007 §3 for unit-variance inputs)
+    // AND the phase scalar (uniform on [0, 2π)) — both structurally derived from the basis,
+    // no learnable scale on either; head weights live on top via safe_w.
+    uint halfR = ctx.R >> 1u;
     uint worstI = 0u; float worstUF = FLT_MAX;
     for (uint i = 0u; i < ctx.R; ++i)
         if (ctx.utilFeat[i] < worstUF) { worstUF = ctx.utilFeat[i]; worstI = i; }
     {
-        uint i = worstI;
+        uint pre = (worstI < halfR) ? worstI : worstI - halfR;
         for (uint o = 0u; o < ctx.baseO; ++o) {
-            float u = hash_uniform(ctx.stepCount, i, o + 0xdeadbeefu) * 2.0f - 1.0f;
-            ctx.encoder[i * ctx.baseO + o] = u * rsqrt(float(max(ctx.baseO, 1u)));
+            float u = hash_uniform(ctx.stepCount, pre, o + 0xdeadbeefu) * 2.0f - 1.0f;
+            ctx.encoder[pre * ctx.baseO + o] = u;        // RFF bandwidth-1: W ~ U[-1, 1].
         }
-        ctx.utilFeat[i] = 0.0f;
+        float u = hash_uniform(ctx.stepCount, pre, 0xfeedf00du);
+        ctx.phase[pre] = u * 6.283185307179586f;         // 2π, structural (no tunable).
+        ctx.utilFeat[pre]         = 0.0f;
+        ctx.utilFeat[pre + halfR] = 0.0f;
+        // MetaOptimize state reset: both pair members restart at α = 1/baseO with no
+        // accumulated meta-gradient history (the encoder row + phase have changed, so any
+        // h or β earned by the prior basis no longer applies).
+        float betaInit = -log(float(max(ctx.baseO, 1u)));
+        float aInit    = exp(betaInit);
+        ctx.beta[pre]          = betaInit;
+        ctx.beta[pre + halfR]  = betaInit;
+        ctx.alpha[pre]         = aInit;
+        ctx.alpha[pre + halfR] = aInit;
+        ctx.hMeta[pre]         = 0.0f;
+        ctx.hMeta[pre + halfR] = 0.0f;
         ctx.counters[OAK_CNT_REINIT_FEAT] += 1u;
     }
 

@@ -318,7 +318,7 @@ private struct KernelConfig {
     var obsDim: UInt32 = 0, rank: UInt32 = 0
     var optionCount: UInt32 = 0, baseObsDim: UInt32 = 0
     var actionParamCount: UInt32 = 0
-    var pEncoder: UInt32 = 0, pValue: UInt32 = 0, pPsi: UInt32 = 0
+    var pEncoder: UInt32 = 0, pPhase: UInt32 = 0, pValue: UInt32 = 0, pPsi: UInt32 = 0
     var pOptPolicy: UInt32 = 0, pOptReward: UInt32 = 0, pOptTransition: UInt32 = 0
     var sObservation: UInt32 = 0, sObsMean: UInt32 = 0, sObsSM: UInt32 = 0
     var sState: UInt32 = 0
@@ -327,6 +327,7 @@ private struct KernelConfig {
     var sChord: UInt32 = 0, sChordPrev: UInt32 = 0
     var sUtilFeat: UInt32 = 0, sUtilOpt: UInt32 = 0
     var sPlanAdv: UInt32 = 0
+    var sAlpha: UInt32 = 0, sBeta: UInt32 = 0, sH: UInt32 = 0
     var uCounters: UInt32 = 0
 }
 
@@ -361,20 +362,28 @@ private enum OakMetalLayout {
     // Reduces K*R^2 -> K*R weights and the K*R^3 cost in learn_heads to K*R; keeps Plan-orthodox
     // async DP planning intact (V(n_hat^k(s)) = sum_j valueW[j] * w_n^{k,j} * s[j]).
     static func optTransitionCount(rank: Int) -> Int { optionCount(rank: rank) * rank }
-    static func encoderCount(obsDim: Int, rank: Int) -> Int { rank * max(obsDim, 1) }
+    // Deep Fourier features (Lewandowski-Schuurmans-Machado 2024, arXiv:2410.20634): R/2
+    // pre-activations, each producing a paired (cos, sin) channel into the R-wide state.
+    // Encoder rows match the pre-activation count; phase is one scalar per pre-activation.
+    static func fourierPreActCount(rank: Int) -> Int { rank / 2 }
+    static func encoderCount(obsDim: Int, rank: Int) -> Int {
+        fourierPreActCount(rank: rank) * max(obsDim, 1)
+    }
+    static func phaseCount(rank: Int) -> Int { fourierPreActCount(rank: rank) }
 
     struct Param {
-        let encoder, value, psi, optPolicy, optReward, optTransition, total: Int
+        let encoder, phase, value, psi, optPolicy, optReward, optTransition, total: Int
     }
     static func paramLayout(obsDim: Int, rank: Int, dPolicy: Int) -> Param {
         var o = 0
         let enc = o; o += encoderCount(obsDim: obsDim, rank: rank)
+        let ph  = o; o += phaseCount(rank: rank)
         let val = o; o += rank
         let psi = o; o += psiCount(rank: rank)
         let op  = o; o += optPolicyCount(rank: rank, dPolicy: dPolicy)
         let or_ = o; o += optRewardCount(rank: rank)
         let ot  = o; o += optTransitionCount(rank: rank)
-        return Param(encoder: enc, value: val, psi: psi, optPolicy: op,
+        return Param(encoder: enc, phase: ph, value: val, psi: psi, optPolicy: op,
                      optReward: or_, optTransition: ot, total: o)
     }
 
@@ -385,6 +394,7 @@ private enum OakMetalLayout {
         let chord, chordPrev: Int
         let utilFeat, utilOpt: Int
         let planAdv: Int
+        let alpha, beta, h: Int     // MetaOptimize L-approximation buffers (R floats each).
         let total: Int
     }
     static func stateLayout(obsDim: Int, rank: Int, dPolicy: Int) -> State {
@@ -404,12 +414,16 @@ private enum OakMetalLayout {
         let uf  = o; o += rank
         let uo  = o; o += K
         let pa  = o; o += 1
+        let al  = o; o += rank
+        let be  = o; o += rank
+        let h   = o; o += rank
         return State(observation: obs, obsMean: mean, obsSM: osm, state: st,
                      policyMean: pol, scoreGrad: sg,
                      reward: rew, td: td, tdPsi: tdP,
                      chord: cs, chordPrev: csP,
                      utilFeat: uf, utilOpt: uo,
-                     planAdv: pa, total: o)
+                     planAdv: pa,
+                     alpha: al, beta: be, h: h, total: o)
     }
 
     struct UInts { let counters, total: Int }
@@ -504,8 +518,10 @@ final class OakMetalEngine {
          device: MTLDevice, seed: Int?, diagnosticGpuPhaseTiming: Bool = false) throws {
         // R (rank) is a COMPUTE BUDGET (Plan Step 2: "performance depends on the resource
         // budget — how many features can be considered in parallel"), independent of the env's
-        // input dim. baseObsDim is the only env-given quantity.
-        precondition(rank >= 1, "rank must be positive (compute budget).")
+        // input dim. baseObsDim is the only env-given quantity. R must be even because each
+        // Fourier pre-activation produces a paired (cos, sin) into the R-wide state.
+        precondition(rank >= 2, "rank must be >= 2 (compute budget; Fourier pair).")
+        precondition(rank % 2 == 0, "rank must be even (Fourier pair encoding); host must round up.")
         precondition(baseObsDim >= 1, "baseObsDim must be positive (env input dim).")
         precondition(obsDim >= baseObsDim, "obsDim must be >= baseObsDim.")
         precondition(dPolicy >= 1, "dPolicy must be positive.")
@@ -584,9 +600,15 @@ final class OakMetalEngine {
         residencySet.commit()
         queue.addResidencySet(residencySet)
 
-        // Parameter init: structural 1/sqrt(R) scales on every linear head.
+        // Parameter init: structural 1/sqrt(R) scales on every linear head. The encoder uses
+        // a Random-Fourier-Features bandwidth-1 init (Rahimi-Recht 2007 §3): with standardized
+        // unit-variance inputs, sampling `W_enc ~ U[-1, 1]` gives Var(z) = baseO/3, putting |z|
+        // squarely in the strongly-nonlinear cos/sin regime and collapsing the cos DC bias
+        // E[cos(z)] = exp(-σ_z²/2) so the basis is effectively zero-centered. Plan-orthodox:
+        // bandwidth=1 is structurally derived from "the basis spans its nonlinearity over the
+        // input's natural scale"; no tunable, no per-env constant.
         let invR: Float = 1.0 / sqrt(Float(max(rank, 1)))
-        let invO: Float = 1.0 / sqrt(Float(max(obsDim, 1)))
+        let encScale: Float = 1.0
         let seedBase = UInt32(bitPattern: Int32(truncatingIfNeeded: seed ?? Int(oakUnseededSeed)))
                        &* 0x9e3779b9
         func sample(_ off: Int, _ count: Int, _ scale: Float) {
@@ -599,7 +621,21 @@ final class OakMetalEngine {
                 base[i] = u * scale
             }
         }
-        sample(paramLayout.encoder, OakMetalLayout.encoderCount(obsDim: obsDim, rank: rank), invO)
+        sample(paramLayout.encoder, OakMetalLayout.encoderCount(obsDim: obsDim, rank: rank), encScale)
+        // Fourier phase: uniform on [0, 2π) — structural, no tunable. Reuses the same
+        // splitmix-style hash as `sample` but rescales (u + 1) ∈ [0, 2) → [0, 2π).
+        do {
+            let base = paramsArena.pointer.advanced(by: paramLayout.phase)
+            let count = OakMetalLayout.phaseCount(rank: rank)
+            let twoPi: Float = 6.283185307179586
+            for i in 0..<count {
+                var x = seedBase &+ UInt32(paramLayout.phase &+ i) &* 0x7feb352d
+                x = (x ^ (x &>> 16)) &* 0x846ca68b
+                x ^= x &>> 16
+                let u01 = Float(x >> 8) * 5.9604645e-8           // u01 ∈ [0, 1).
+                base[i] = u01 * twoPi
+            }
+        }
         sample(paramLayout.value, rank, invR)
         sample(paramLayout.psi, OakMetalLayout.psiCount(rank: rank), invR)
         sample(paramLayout.optPolicy,
@@ -616,6 +652,21 @@ final class OakMetalEngine {
         let chordSlot = stateArena.pointer.advanced(by: stateLayout.chord)
         let invK: Float = 1.0 / Float(max(K, 1))
         for k in 0..<K { chordSlot[k] = invK }
+
+        // MetaOptimize L-approximation seed (Sharifnassab-Salehkaleybar-Sutton 2024
+        // arXiv:2402.02342). α[i] = 1/baseO is the prior step size, β[i] = log α[i] is
+        // its log so the meta-update is multiplicative, h[i] = 0 is the initial accumulator
+        // (no meta-gradient history at t=0).
+        let alphaInit: Float = 1.0 / Float(max(baseObsDim, 1))
+        let betaInit: Float  = log(alphaInit)
+        let alphaSlot = stateArena.pointer.advanced(by: stateLayout.alpha)
+        let betaSlot  = stateArena.pointer.advanced(by: stateLayout.beta)
+        let hSlot     = stateArena.pointer.advanced(by: stateLayout.h)
+        for i in 0..<rank {
+            alphaSlot[i] = alphaInit
+            betaSlot[i]  = betaInit
+            hSlot[i]     = 0
+        }
 
         writeKernelConfig(paramLayout: paramLayout)
 
@@ -694,7 +745,8 @@ final class OakMetalEngine {
         c.obsDim = UInt32(obsDim); c.rank = UInt32(rank)
         c.optionCount = UInt32(K); c.baseObsDim = UInt32(baseObsDim)
         c.actionParamCount = UInt32(dPolicy)
-        c.pEncoder = UInt32(p.encoder); c.pValue = UInt32(p.value); c.pPsi = UInt32(p.psi)
+        c.pEncoder = UInt32(p.encoder); c.pPhase = UInt32(p.phase)
+        c.pValue = UInt32(p.value); c.pPsi = UInt32(p.psi)
         c.pOptPolicy = UInt32(p.optPolicy)
         c.pOptReward = UInt32(p.optReward); c.pOptTransition = UInt32(p.optTransition)
         c.sObservation = UInt32(s.observation); c.sObsMean = UInt32(s.obsMean); c.sObsSM = UInt32(s.obsSM)
@@ -704,6 +756,7 @@ final class OakMetalEngine {
         c.sChord = UInt32(s.chord); c.sChordPrev = UInt32(s.chordPrev)
         c.sUtilFeat = UInt32(s.utilFeat); c.sUtilOpt = UInt32(s.utilOpt)
         c.sPlanAdv = UInt32(s.planAdv)
+        c.sAlpha = UInt32(s.alpha); c.sBeta = UInt32(s.beta); c.sH = UInt32(s.h)
         c.uCounters = UInt32(u.counters)
         configPointer.pointee = c
     }
@@ -1095,9 +1148,12 @@ private final class RunState {
         let env = try EnvPoolEnv(id: envId, numEnvs: 1, seed: seed)
         // Plan Step 2: rank R is a COMPUTE BUDGET, independent of env input dim. OAK_RANK
         // overrides; default scales R = max(env.obsDim, 64) so small envs still get a
-        // meaningful feature budget while large envs get at least their input dim.
-        let rank = max(ProcessInfo.processInfo.environment["OAK_RANK"].flatMap(Int.init)
-                       ?? max(env.obsDim, 64), 1)
+        // meaningful feature budget while large envs get at least their input dim. Rounded
+        // up to the nearest even value because the deep Fourier features encoder
+        // (Lewandowski-Schuurmans-Machado 2024) emits a paired (cos, sin) per pre-activation.
+        let rawRank = max(ProcessInfo.processInfo.environment["OAK_RANK"].flatMap(Int.init)
+                          ?? max(env.obsDim, 64), 2)
+        let rank = (rawRank + 1) & ~1   // round up to even.
         let engine: OakMetalEngine? = policy == .oak ? try OakMetalEngine(
             obsDim: env.obsDim, baseObsDim: env.obsDim, actDim: env.actDim,
             rank: rank, dPolicy: env.dPolicy,
