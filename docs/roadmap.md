@@ -222,6 +222,47 @@ commit `b01b1812a`'s perspective this is a NEW algorithm (different state
 arena, different encoder math), so a paired bench against `b01b1812a` is the
 acceptance test (per-seed lift / chatter / NF), not a bit-equality check.
 
+**Result on 10×1.5M paired bench (`.oak-benchmarks/halfcheetah-c1-15m/`):**
+
+- 10/10 oak wins, mean rewSum lift **+111,103/seed** (+1.14% vs the
+  `b01b1812a` bit-id baseline +109,850).
+- 0/10 NF divergences.
+- Median chatter 0.210 (vs bi 0.185 — modest +13%, within window).
+- **6 seeds reach `rewardRate > 0` transiently** (vs 3 in bit-id, vs 3 in
+  Tier B at 3M); peak across seeds **+0.127** (seed 2).
+
+Doubling the seed-count reaching peak walking at the same step budget was the
+strongest signal yet that POMDP coverage was a real bottleneck.
+
+**Result on 10×10M paired bench (`.oak-benchmarks/halfcheetah-c1-10m/`):**
+
+| metric | C1 1.5M | C1 10M | Tier B 3M |
+|---|---:|---:|---:|
+| oak wins | 10/10 | 10/10 | 10/10 |
+| mean rewSum lift | +111k/seed | **+668k/seed** | +212k |
+| 0/10 NF div | ✓ | ✓ | ✓ |
+| median chatter | 0.210 | **0.170** (settles) | 0.17 |
+| seeds with `RR > 0` transient | 6 | 5 | 3 |
+| max peak rewardRate | +0.127 | **+0.310** (seed 5 @ HB37) | +0.221 |
+| longest contiguous `RR > 0` | (n/a) | **1 HB** (200k steps) | 1 HB |
+| median rewardRate (final) | -0.328 | -0.31 | (n/a) |
+
+**Reading.** Cumulative lift scales nearly linearly with steps (+668k at 10M
+≈ Tier B's +212k @ 3M scaled to 10M = +707k); per-300k window lift is
+*flat-to-slightly-decelerating* (+15k @ HB10 → +12k @ HB50). Chatter settles
+to 0.17 — the agent's policy variance converges to a stable equilibrium, not
+random oscillation. **The plateau holds.** Walking peaks are louder (max
++0.310 > Tier B's +0.221) but still single-HB events; no seed sustains
+`rewardRate > 0` for more than 200k contiguous steps.
+
+**Verdict.** C1 closed some POMDP coverage (peak touches up, max peak up,
+chatter settles to a lower equilibrium) but did not break the plateau.
+Per the decision graph this points at **C3 (multi-layer Fourier — compositional
+depth)** next. The encoder is now temporally rich (instantaneous + integrated)
+but still single-layer compositionally; a walking gait needs cross-feature
+interactions (joint angle × velocity × phase) that single-layer RFF cannot
+express in one composition.
+
 ### C3. Multi-layer Fourier features (Plan Step 2 deep version)
 *"creating and introducing new features made by combining existing features"*
 
@@ -307,8 +348,9 @@ flowchart TD
     B --> C2att[C2 attempt: termW + closed-form Q^k + hold-or-refresh chord]
     C2att --> C2check{1.5M paired bench}
     C2check -->|5/10 wins, +3.5k/seed → REGRESSION| C2roll[C2 algorithm rolled back; kernel parallelizations kept]
-    C2roll --> C1[Tier C1 next: temporal aggregation in encoder]
-    C1 --> C3[Tier C3: multi-layer Fourier]
+    C2roll --> C1[C1 done: temporal aggregation in encoder]
+    C1 --> C1deep[C1 10M: +668k/seed, 5 seeds peak walking max +0.310, plateau holds]
+    C1deep --> C3[Tier C3 next: multi-layer Fourier - compositional depth]
     C3 --> C2re[C2 retry: revisit termination once representation lifts]
     C2re --> D1[Tier D1: Dyna multi-step planning]
     D1 --> D2[Tier D2: prioritized sweeping]
@@ -317,10 +359,11 @@ flowchart TD
     E1 --> E2[Tier E2: R from compute]
 ```
 
-**Where we landed (post-rollback):** Tier B is the canonical baseline,
-strictly faster than the original Tier B run (~970 sps vs ~700) thanks to the
-parallelization wins kept from the C2 PR. C2's algorithmic changes (termW,
-closed-form Q^k, hold-or-refresh chord, option-critic gradient) are removed
-but documented above for the eventual retry — the principled order is
-**representation first** (C1 then C3) so that when termination comes back, ψ
-and the policy have non-trivial per-option signal to grow lifetimes from.
+**Where we landed (post-C1 10M, commit `e8d87f03e`):** OaK is consistently
+~30% better than random across 10M steps (cumulative +668k/seed lift) but the
+plateau holds — median rewardRate flat ~−0.30, walking peaks loud (max +0.310)
+but transient (single-HB events). Per-step lift is flat-to-decelerating
+(+15k/300k → +12k/300k by 10M), suggesting the representation has saturated
+what it can extract from temporal traces alone. C3 (multi-layer Fourier) is
+the next move per the decision graph — give the agent compositional depth so
+it can express the cross-feature interactions a walking gait actually needs.
