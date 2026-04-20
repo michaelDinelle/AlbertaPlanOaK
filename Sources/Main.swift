@@ -357,7 +357,10 @@ private enum OakMetalLayout {
         optionCount(rank: rank) * dPolicy * rank
     }
     static func optRewardCount(rank: Int) -> Int { optionCount(rank: rank) * rank }
-    static func optTransitionCount(rank: Int) -> Int { optionCount(rank: rank) * rank * rank }
+    // DIAGONAL transition: one weight per (option, feature) pair, not one per (k, j_out, i_in).
+    // Reduces K*R^2 -> K*R weights and the K*R^3 cost in learn_heads to K*R; keeps Plan-orthodox
+    // async DP planning intact (V(n_hat^k(s)) = sum_j valueW[j] * w_n^{k,j} * s[j]).
+    static func optTransitionCount(rank: Int) -> Int { optionCount(rank: rank) * rank }
     static func encoderCount(obsDim: Int, rank: Int) -> Int { rank * max(obsDim, 1) }
 
     struct Param {
@@ -499,8 +502,12 @@ final class OakMetalEngine {
 
     init(obsDim: Int, baseObsDim: Int, actDim: Int, rank: Int, dPolicy: Int,
          device: MTLDevice, seed: Int?, diagnosticGpuPhaseTiming: Bool = false) throws {
-        precondition(obsDim == rank, "obsDim must equal rank (interface-derived latent width).")
-        precondition(baseObsDim <= obsDim && baseObsDim >= 1, "baseObsDim must be positive and <= obsDim.")
+        // R (rank) is a COMPUTE BUDGET (Plan Step 2: "performance depends on the resource
+        // budget — how many features can be considered in parallel"), independent of the env's
+        // input dim. baseObsDim is the only env-given quantity.
+        precondition(rank >= 1, "rank must be positive (compute budget).")
+        precondition(baseObsDim >= 1, "baseObsDim must be positive (env input dim).")
+        precondition(obsDim >= baseObsDim, "obsDim must be >= baseObsDim.")
         precondition(dPolicy >= 1, "dPolicy must be positive.")
         self.obsDim = obsDim; self.baseObsDim = baseObsDim; self.actDim = actDim
         self.rank = rank; self.dPolicy = dPolicy
@@ -1086,9 +1093,14 @@ private final class RunState {
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         fputs("OaK metrics \(dir.path)\n", stderr); fflush(stderr)
         let env = try EnvPoolEnv(id: envId, numEnvs: 1, seed: seed)
+        // Plan Step 2: rank R is a COMPUTE BUDGET, independent of env input dim. OAK_RANK
+        // overrides; default scales R = max(env.obsDim, 64) so small envs still get a
+        // meaningful feature budget while large envs get at least their input dim.
+        let rank = max(ProcessInfo.processInfo.environment["OAK_RANK"].flatMap(Int.init)
+                       ?? max(env.obsDim, 64), 1)
         let engine: OakMetalEngine? = policy == .oak ? try OakMetalEngine(
             obsDim: env.obsDim, baseObsDim: env.obsDim, actDim: env.actDim,
-            rank: env.obsDim, dPolicy: env.dPolicy,
+            rank: rank, dPolicy: env.dPolicy,
             device: device, seed: seed, diagnosticGpuPhaseTiming: includeDiagnostic) : nil
         try env.reset()
         return RunContext(envId: envId, policy: policy, seed: seed,

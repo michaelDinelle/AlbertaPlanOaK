@@ -332,16 +332,15 @@ kernel void oak_plan(
     float bestQ = -FLT_MAX;
     uint nfPlan = 0u;
     for (uint k = 0u; k < ctx.K; ++k) {
+        // r_hat^k(s) = sum_i optReward[k][i] * curr[i].
         float rHat = 0.0f;
         for (uint i = 0u; i < ctx.R; ++i)
             rHat = fma(ctx.optReward[k * ctx.R + i], curr[i], rHat);
+        // Diagonal transition: n_hat^k_j(s) = optTransition[k][j] * curr[j]. Then
+        // V(n_hat^k(s)) = sum_j valueW[j] * optTransition[k][j] * curr[j]. K*R cost vs K*R^2.
         float vHat = 0.0f;
-        for (uint j = 0u; j < ctx.R; ++j) {
-            float nj = 0.0f;
-            for (uint i = 0u; i < ctx.R; ++i)
-                nj = fma(ctx.optTransition[(k * ctx.R + j) * ctx.R + i], curr[i], nj);
-            vHat = fma(ctx.valueW[j], nj, vHat);
-        }
+        for (uint j = 0u; j < ctx.R; ++j)
+            vHat = fma(ctx.valueW[j] * ctx.optTransition[k * ctx.R + j], curr[j], vHat);
         float Q = rHat + vHat;
         if (!isfinite(Q)) { nfPlan++; continue; }
         if (Q > bestQ) bestQ = Q;
@@ -358,11 +357,12 @@ kernel void oak_plan(
 
 // =================================================================================================
 // 6. oak_learn_heads - 1-step TD updates on 5 learnable heads.
-//      0: valueW[R]            -> alpha_0 * (td + planAdv) * prev[i]   (planAdv added HERE ONLY)
-//      1: psi[K*R]             -> alpha_0 * tdPsi[k] * prev[i]
+//      0: valueW[R]            -> alpha * (td + planAdv) * prev[i]   (planAdv added HERE ONLY)
+//      1: psi[K*R]             -> alpha * tdPsi[k] * prev[i]
 //      2: optPolicy[K*D*R]     -> alphaPi * td * scoreGrad[d] * prev[i] * chordPrev[k]
-//      3: optReward[K*R]       -> alpha_0 * (reward - r_hat^k(prev)) * prev[i] * chordPrev[k]
-//      4: optTransition[K*R*R] -> alpha_0 * (curr[j] - n_hat_j^k(prev)) * prev[i] * chordPrev[k]
+//      3: optReward[K*R]       -> alpha * (reward - r_hat^k(prev)) * prev[i] * chordPrev[k]
+//      4: optTransition[K*R]   -> alpha * (curr[j] - w_n^{k,j}*prev[j]) * prev[j] * chordPrev[k]
+//                                 (DIAGONAL transition: n_hat^k_j(s) = w_n^{k,j} * s[j])
 // =================================================================================================
 kernel void oak_learn_heads(
     device float         *params      [[buffer(0)]],
@@ -378,7 +378,7 @@ kernel void oak_learn_heads(
     uint nPsi = ctx.K * ctx.R;
     uint nPi  = ctx.K * ctx.D * ctx.R;
     uint nOR  = ctx.K * ctx.R;
-    uint nOT  = ctx.K * ctx.R * ctx.R;
+    uint nOT  = ctx.K * ctx.R;       // diagonal: K*R, was K*R^2.
     if (gid >= nVal + nPsi + nPi + nOR + nOT) return;
 
     device const float *prev = state_at(ctx, ctx.stateSlot);
@@ -425,17 +425,15 @@ kernel void oak_learn_heads(
         ctx.optReward[id] = safe_w(w, w + a * r_td * grad);
         return;
     }
-    {                                                          // Head 4: optTransition
+    {                                                          // Head 4: diagonal optTransition
+        // Diagonal: w_n^{k,j} updates with TD on its own feature only.
+        //   n_hat^k_j(prev) = w * prev[j];  target = curr[j];  grad w.r.t. w = prev[j].
+        // chordPrev[k] is the on-chord weight (importance ratio, RR-Subtasks eq. 17).
         uint id = gid - nVal - nPsi - nPi - nOR;
-        uint k = id / (ctx.R * ctx.R);
-        uint rem = id - k * ctx.R * ctx.R;
-        uint j = rem / ctx.R, i = rem % ctx.R;
-        float predPrev = 0.0f;
-        for (uint ii = 0u; ii < ctx.R; ++ii)
-            predPrev = fma(ctx.optTransition[(k * ctx.R + j) * ctx.R + ii], prev[ii], predPrev);
-        float n_td = curr[j] - predPrev;
-        float grad = ctx.chordPrev[k] * prev[i];
+        uint k = id / ctx.R, j = id % ctx.R;
         float w = ctx.optTransition[id];
+        float n_td = curr[j] - w * prev[j];
+        float grad = ctx.chordPrev[k] * prev[j];
         ctx.optTransition[id] = safe_w(w, w + a * n_td * grad);
     }
 }
@@ -509,8 +507,7 @@ kernel void oak_bk_admit_commit(
     Ctx ctx = make_ctx(params, stateArena, uintArena, scalars, stats, cfg);
 
     // Worst option: lowest utilOpt. Reseed psi[k][:R], optPolicy[k][:D*R], optReward[k][:R],
-    // optTransition[k][:R*R] with hash-based Xavier-scaled small projections (1/sqrt(R) is the
-    // Glorot scale for a linear unit with R inputs - structurally derived from input dim).
+    // optTransition[k][:R] (DIAGONAL) with hash-based Xavier-scaled small projections.
     float invSqrtR = rsqrt(float(max(ctx.R, 1u)));
     uint worstK = 0u; float worstUO = FLT_MAX;
     for (uint k = 0u; k < ctx.K; ++k)
@@ -522,15 +519,12 @@ kernel void oak_bk_admit_commit(
                 (hash_uniform(ctx.stepCount, k, i) * 2.0f - 1.0f) * invSqrtR;
             ctx.optReward[k * ctx.R + i] =
                 (hash_uniform(ctx.stepCount, k, ctx.R + i) * 2.0f - 1.0f) * invSqrtR;
-            for (uint j = 0u; j < ctx.R; ++j) {
-                ctx.optTransition[(k * ctx.R + j) * ctx.R + i] =
-                    (hash_uniform(ctx.stepCount, (k * ctx.R + j) ^ 0xa3c59ac3u, i)
-                     * 2.0f - 1.0f) * invSqrtR;
-            }
+            ctx.optTransition[k * ctx.R + i] =
+                (hash_uniform(ctx.stepCount, k, 2u * ctx.R + i) * 2.0f - 1.0f) * invSqrtR;
         }
         for (uint pi = 0u; pi < ctx.D * ctx.R; ++pi) {
             ctx.optPolicy[k * ctx.D * ctx.R + pi] =
-                (hash_uniform(ctx.stepCount, k, 2u * ctx.R + pi) * 2.0f - 1.0f) * invSqrtR;
+                (hash_uniform(ctx.stepCount, k, 3u * ctx.R + pi) * 2.0f - 1.0f) * invSqrtR;
         }
         ctx.utilOpt[k] = 0.0f;
         ctx.counters[OAK_CNT_REINIT_OPT] += 1u;
