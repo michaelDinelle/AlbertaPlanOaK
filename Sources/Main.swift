@@ -329,6 +329,7 @@ private struct KernelConfig {
     var sPlanAdv: UInt32 = 0
     var sAlpha: UInt32 = 0, sBeta: UInt32 = 0, sH: UInt32 = 0
     var sNTdMat: UInt32 = 0
+    var sQOption: UInt32 = 0     // Per-option Q^k cache (K floats), oak_plan → oak_plan_reduce.
     var uCounters: UInt32 = 0
 }
 
@@ -399,6 +400,7 @@ private enum OakMetalLayout {
         let planAdv: Int
         let alpha, beta, h: Int       // MetaOptimize L-approximation buffers (R floats each).
         let nTdMat: Int               // Dense option-transition TD targets, K*R floats, written by oak_plan.
+        let qOption: Int              // Per-option Q^k cache, K floats, oak_plan → oak_plan_reduce.
         let total: Int
     }
     static func stateLayout(obsDim: Int, rank: Int, dPolicy: Int) -> State {
@@ -422,6 +424,7 @@ private enum OakMetalLayout {
         let be  = o; o += rank
         let h   = o; o += rank
         let ntd = o; o += K * rank
+        let qo  = o; o += K
         return State(observation: obs, obsMean: mean, obsSM: osm, state: st,
                      policyMean: pol, scoreGrad: sg,
                      reward: rew, td: td, tdPsi: tdP,
@@ -429,7 +432,7 @@ private enum OakMetalLayout {
                      utilFeat: uf, utilOpt: uo,
                      planAdv: pa,
                      alpha: al, beta: be, h: h,
-                     nTdMat: ntd, total: o)
+                     nTdMat: ntd, qOption: qo, total: o)
     }
 
     struct UInts { let counters, total: Int }
@@ -470,10 +473,18 @@ final class OakMetalEngine {
         Phase(name: "oak_encode",          tgSize: 0),
         Phase(name: "oak_meta",            tgSize: 0),
         Phase(name: "oak_predict",         tgSize: 0),
-        Phase(name: "oak_plan",            tgSize: 0),
+        // K threadgroups × R threads each (one TG per option). Each thread (j) computes
+        // one row of the dense option transition; per-TG simd_sum + threadgroup_barrier
+        // reduces to vHat^k; lane 0 emits Q^k = r̂^k + vHat^k into qOption[K].
+        Phase(name: "oak_plan",            tgSize: -1),     // -1 → host fills with rank
+        // K-thread cross-option reduction: simd_max(qOption) + planAdv soft-bound.
+        Phase(name: "oak_plan_reduce",     tgSize: 0),
         Phase(name: "oak_learn_heads",     tgSize: 0),
         Phase(name: "oak_post_learn",      tgSize: 0),
-        Phase(name: "oak_bk_admit_commit", tgSize: 0),
+        // Single TG of 256 threads — lane 0 finds worsts, threadgroup barrier, then all
+        // 256 lanes cooperate on the parallel reseed (psi/optReward/optPolicy/optTransition/
+        // encoder slices, ~4.6k writes total → ~18 writes/lane).
+        Phase(name: "oak_bk_admit_commit", tgSize: 256),
     ]
 
     private let obsDim, baseObsDim, actDim, rank, dPolicy: Int
@@ -572,12 +583,13 @@ final class OakMetalEngine {
         phaseGridWidths = [
             1,                  // bk_obs            [1 TG x 32]
             rank,               // encode            [R threads]
-            1,                  // meta              [1 thread; chord + alphaPi + rho EMA]
-            1,                  // predict           [1 thread]
-            K,                  // plan              [K threads, one per option, simd_max reduction]
+            K,                  // meta              [K threads, one per option, simd_max + simd_sum reductions]
+            K,                  // predict           [K threads, one per option, simd_sum NF aggregation]
+            K,                  // plan              [K TGs (one per option) x R threads (one per output dim)]
+            K,                  // plan_reduce       [K threads, simd_max(qOption) + planAdv soft-bound]
             learnTotal,         // learn_heads       [N threads, dense optTransition adds K*R^2]
             rank + K + dPolicy, // post_learn        [util_feat | util_opt | meta_action]
-            1,                  // bk_admit_commit   [1 thread]
+            1,                  // bk_admit_commit   [1 TG x 256 threads, threadgroup_barrier between find-worst and parallel reseed]
         ]
 
         self.diagnosticGpuPhaseTiming = diagnosticGpuPhaseTiming
@@ -691,12 +703,15 @@ final class OakMetalEngine {
             let cmd = icb.indirectComputeCommandAt(i)
             cmd.setComputePipelineState(pipelines[i])
             for j in 0..<buffers.count { cmd.setKernelBuffer(buffers[j], offset: 0, at: j) }
-            let tgSize = Self.phases[i].tgSize
-            if tgSize > 0 {
+            // tgSize sentinel: -1 means "use runtime rank as TG size" (oak_plan needs R
+            // threads per option-TG; rank is the only Plan-orthodox knob that maps onto a
+            // GPU SIMD width, so all R-sized TGs key off it directly).
+            let phaseTgSize = Self.phases[i].tgSize == -1 ? rank : Self.phases[i].tgSize
+            if phaseTgSize > 0 {
                 let tgCount = max(phaseGridWidths[i], 1)
                 cmd.concurrentDispatchThreadgroups(
                     MTLSize(width: tgCount, height: 1, depth: 1),
-                    threadsPerThreadgroup: MTLSize(width: tgSize, height: 1, depth: 1))
+                    threadsPerThreadgroup: MTLSize(width: phaseTgSize, height: 1, depth: 1))
             } else {
                 let tg = min(max(pipelines[i].threadExecutionWidth, 1),
                              pipelines[i].maxTotalThreadsPerThreadgroup)
@@ -772,7 +787,7 @@ final class OakMetalEngine {
         c.sUtilFeat = UInt32(s.utilFeat); c.sUtilOpt = UInt32(s.utilOpt)
         c.sPlanAdv = UInt32(s.planAdv)
         c.sAlpha = UInt32(s.alpha); c.sBeta = UInt32(s.beta); c.sH = UInt32(s.h)
-        c.sNTdMat = UInt32(s.nTdMat)
+        c.sNTdMat = UInt32(s.nTdMat); c.sQOption = UInt32(s.qOption)
         c.uCounters = UInt32(u.counters)
         configPointer.pointee = c
     }

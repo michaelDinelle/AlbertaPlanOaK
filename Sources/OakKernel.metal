@@ -27,7 +27,10 @@
 #include <float.h>
 using namespace metal;
 
-constant uint OAK_SIMD = 32u;       // Apple GPU SIMD width (structural).
+// Apple GPU SIMD width is 32 — referenced in comments and host-side option-count cap.
+// Hardware structural; no longer needed as a Metal constant since the parallelized
+// oak_meta / oak_predict / oak_plan / oak_bk_admit_commit kernels use simd_max / simd_sum
+// reductions that auto-size to the simdgroup width rather than indexing fixed arrays.
 
 // Counters: per-step (cleared by host) and cumulative.
 constant uint OAK_CNT_OBS_NF      = 0u;
@@ -63,6 +66,9 @@ struct KernelConfig {
     // (each thread k writes its slice nTdMat[k*R, (k+1)*R) — no contention),
     // consumed by oak_learn_heads to update the K*R^2 transition weights.
     uint sNTdMat;
+    // Per-option Q^k cache, K floats. Written by oak_plan (lane 0 of TG k), consumed by
+    // oak_plan_reduce for the simd_max + planAdv soft-bound.
+    uint sQOption;
 
     // UInt arena offsets.
     uint uCounters;
@@ -131,6 +137,7 @@ struct Ctx {
     device float *planAdv;
     device float *alpha, *beta, *hMeta;        // MetaOptimize L-approximation per-feature buffers.
     device float *nTdMat;                      // Dense optTransition TD targets, K*R floats.
+    device float *qOption;                     // Per-option Q^k cache, K floats.
     device uint  *counters;
     device KernelScalars *scalars;
     device KernelStats   *stats;
@@ -171,6 +178,7 @@ inline Ctx make_ctx(device float *params, device float *stateArena, device uint 
     c.beta            = stateArena + cfg.sBeta;
     c.hMeta           = stateArena + cfg.sH;
     c.nTdMat          = stateArena + cfg.sNTdMat;
+    c.qOption         = stateArena + cfg.sQOption;
 
     c.counters = uintArena + cfg.uCounters;
     c.scalars = scalars; c.stats = stats;
@@ -246,8 +254,12 @@ kernel void oak_encode(
 
 // =================================================================================================
 // 3. oak_meta - chord softmax (Plan option keyboard, Design A) + alphaPi (Kim arXiv:2510.06149)
-//    + rho-bar EMA (Reward Centering arXiv:2405.09999). Three scalar reductions, one kernel,
-//    single-threaded. Runs BEFORE oak_predict so the new chord drives this step's psi TD.
+//    + ρ̄ EMA (Reward Centering arXiv:2405.09999). Runs BEFORE oak_predict so the new chord
+//    drives this step's ψ TD.
+//
+//    K threads (one per option, fits one Apple SIMD group, simd_max + simd_sum reductions —
+//    same pattern as oak_plan). Per-thread k cost: R FMA (ψ·curr inner product) + simd_max
+//    + simd_sum + softmax. Lane 0 also does the scalar alphaPi (R + D ops) and ρ̄ EMA.
 // =================================================================================================
 kernel void oak_meta(
     device float         *params      [[buffer(0)]],
@@ -256,116 +268,59 @@ kernel void oak_meta(
     device KernelScalars *scalars     [[buffer(3)]],
     device KernelStats   *stats       [[buffer(4)]],
     constant KernelConfig &cfg        [[buffer(5)]],
-    uint tid [[thread_position_in_grid]])
+    uint k [[thread_position_in_grid]])
 {
-    if (tid != 0u) return;
     Ctx ctx = make_ctx(params, stateArena, uintArena, scalars, stats, cfg);
+    bool active = (k < ctx.K);
     device const float *curr = state_at(ctx, 1u - ctx.stateSlot);
 
-    for (uint k = 0u; k < ctx.K; ++k) ctx.chordPrev[k] = ctx.chord[k];
-
-    // chord = softmax(psi_k(s')).
-    float maxL = -FLT_MAX;
-    float logits[OAK_SIMD];
-    for (uint k = 0u; k < ctx.K; ++k) {
-        float l = 0.0f;
-        for (uint i = 0u; i < ctx.R; ++i) l = fma(ctx.psi[k * ctx.R + i], curr[i], l);
-        logits[k] = l;
-        maxL = max(maxL, l);
+    // Save chordPrev and compute the per-option ψ logit in one R-wide pass over curr.
+    float zPsi = 0.0f;
+    if (active) {
+        ctx.chordPrev[k] = ctx.chord[k];
+        uint basePsi = k * ctx.R;
+        for (uint i = 0u; i < ctx.R; ++i)
+            zPsi = fma(ctx.psi[basePsi + i], curr[i], zPsi);
     }
-    float Z = 0.0f;
-    for (uint k = 0u; k < ctx.K; ++k) Z += exp(logits[k] - maxL);
-    float invZ = 1.0f / max(Z, FLT_MIN);
-    for (uint k = 0u; k < ctx.K; ++k) ctx.chord[k] = exp(logits[k] - maxL) * invZ;
 
-    // alphaPi = 1 / (baseO + ||state||^2 * ||scoreGrad||^2). The baseO floor (env input dim) gives
-    // an upper bound 1/baseO at small inputs; Kim's denominator self-bounds at large signals.
-    float ss = 0.0f, gg = 0.0f;
-    for (uint i = 0u; i < ctx.R; ++i) ss = fma(curr[i], curr[i], ss);
-    for (uint p = 0u; p < ctx.D; ++p) gg = fma(ctx.scoreGrad[p], ctx.scoreGrad[p], gg);
-    ctx.scalars->alphaPi = 1.0f / (float(max(ctx.baseO, 1u)) + ss * gg);
+    // chord[k] = softmax_k(ψ(curr)) via simd_max + simd_sum across the K-thread simdgroup.
+    // Inactive lanes (k ≥ K, only happens if K < SIMD width 32) carry −∞ logit so they
+    // don't pollute the max or contribute exp ≈ 0 to the sum.
+    float lForMax = active ? zPsi : -FLT_MAX;
+    float maxL    = simd_max(lForMax);
+    float expL    = active ? exp(zPsi - maxL) : 0.0f;
+    float Zexp    = simd_sum(expL);
+    float invZ    = 1.0f / max(Zexp, FLT_MIN);
+    if (active) ctx.chord[k] = expL * invZ;
 
-    // rho-bar EMA (Reward Centering). One step of lag from predict's reading is negligible.
-    float invT = track_rate(ctx.stepCount, ctx.baseO);
-    ctx.scalars->rho += invT * (ctx.reward[0] - ctx.rho);
+    // Scalar updates (single-threaded; small) — αPi and ρ̄. Done by lane 0 after the
+    // chord write since the simd reductions above must complete first.
+    if (k == 0u) {
+        // alphaPi = 1 / (baseO + ||state||^2 * ||scoreGrad||^2). Kim implicit-step,
+        // self-bounded at large signals, capped at 1/baseO at small.
+        float ss = 0.0f, gg = 0.0f;
+        for (uint i = 0u; i < ctx.R; ++i) ss = fma(curr[i], curr[i], ss);
+        for (uint p = 0u; p < ctx.D; ++p) gg = fma(ctx.scoreGrad[p], ctx.scoreGrad[p], gg);
+        ctx.scalars->alphaPi = 1.0f / (float(max(ctx.baseO, 1u)) + ss * gg);
+
+        // ρ̄ EMA (Reward Centering). One step of lag from predict's reading is negligible.
+        float invT = track_rate(ctx.stepCount, ctx.baseO);
+        ctx.scalars->rho += invT * (ctx.reward[0] - ctx.rho);
+    }
 }
 
 // =================================================================================================
-// 4. oak_predict - Horde-style multi-GVF update.
-//      Main TD:    delta   = (r - rho_bar) + V(s') - V(s)        (differential TD, ρ̄ centered)
-//      Subtask k:  delta_k = (r - rho_bar) + curr[k] - psi_k(s)  (β=1, 1-step myopic regression
-//                                                                  of next reward + anchor feature
-//                                                                  attainment onto state).
-//    sf[k] = k identity. β=1 drops the psi(s') bootstrap term: ψ_k becomes a 1-step prediction.
-//    The Plan doesn't prescribe a specific β; β=1 is the simplest GVF and matches the 1-step
-//    horizon of our option models.
+// 4. oak_predict - Horde-style multi-GVF update (K threads, fits one Apple SIMD group).
+//      Main TD (lane 0):    delta   = (r - ρ̄) + V(s') - V(s)        (differential TD, ρ̄ centered)
+//      Subtask TD (lane k): delta_k = (r - ρ̄) + (1−β_k)·curr[k] + β_k·ψ_k(s') − ψ_k(s)
+//                           with adaptive β_k = (1 − 1/R)·α₀/(α₀ + utilOpt[k]),  α₀ = 1/baseO.
+//    utilOpt[k] (EMA of |tdPsi[k]|² from oak_post_learn) is the negative-feedback brake that
+//    replaced the constant β = 1 − 1/R attempt that diverged 6/10 seeds. Initialized at
+//    utilOpt[k] = R so β_k starts ≈ 0 (myopic); it grows toward the cap as ψ stabilizes.
+//    NF counter aggregated via `simd_sum` so a single bad lane updates the counter without
+//    atomics. Per-thread cost: 2R FMA on ψ (lane 0 also does 2R FMA on valueW).
 // =================================================================================================
 kernel void oak_predict(
-    device float         *params      [[buffer(0)]],
-    device float         *stateArena  [[buffer(1)]],
-    device uint          *uintArena   [[buffer(2)]],
-    device KernelScalars *scalars     [[buffer(3)]],
-    device KernelStats   *stats       [[buffer(4)]],
-    constant KernelConfig &cfg        [[buffer(5)]],
-    uint tid [[thread_position_in_grid]])
-{
-    if (tid != 0u) return;
-    Ctx ctx = make_ctx(params, stateArena, uintArena, scalars, stats, cfg);
-    device const float *prev = state_at(ctx, ctx.stateSlot);
-    device const float *curr = state_at(ctx, 1u - ctx.stateSlot);
-
-    float vPrev = 0.0f, vNext = 0.0f;
-    for (uint i = 0u; i < ctx.R; ++i) {
-        vPrev = fma(ctx.valueW[i], prev[i], vPrev);
-        vNext = fma(ctx.valueW[i], curr[i], vNext);
-    }
-    // Main TD: differential, rho-bar centered (Reward Centering arXiv:2405.09999).
-    float reward_c = ctx.reward[0] - ctx.rho;
-    float delta = reward_c + vNext - vPrev;
-    if (!isfinite(delta)) { ctx.counters[OAK_CNT_LEARN_NF] += 1u; delta = 0.0f; }
-    ctx.td[0] = delta;
-
-    // Subtask TDs (RR-Subtasks ψ-GVF with PER-OPTION ADAPTIVE β_k):
-    //   β_k = β_cap · α₀ / (α₀ + utilOpt[k])    where β_cap = 1 − 1/R, α₀ = 1/baseO.
-    // utilOpt[k] is the EMA of |tdPsi[k]|² maintained in oak_post_learn (Kim implicit-step
-    // family; arXiv:2510.06149-style self-bound on the bootstrap). Behavior:
-    //   * |δ_k|² small (option's ψ well-tracked)        → β_k → β_cap (long-horizon bootstrap)
-    //   * |δ_k|² large (divergence threat / mis-tracking) → β_k → 0 (auto-revert to myopic)
-    // utilOpt[k] is initialized to R (capacity-volume prior) at host startup so β_k starts
-    // at β_cap·α₀/(α₀+R) ≈ 0 — fully myopic and safe at random init. This is the negative
-    // feedback loop missing from the constant β = 1 − 1/R attempt that diverged 6/10 seeds:
-    // any sustained spike in |δ_k|² shrinks β_k automatically, choking the bootstrap.
-    // ρ̄ centering keeps tdPsi mean-zero so the psi-weight gradient (tdPsi * prev[i]) doesn't
-    // accumulate a state-correlated bias. K = min(R, OAK_SIMD) so curr[k] is always valid.
-    float beta_cap = 1.0f - 1.0f / float(max(ctx.R, 1u));
-    float a0       = 1.0f / float(max(ctx.baseO, 1u));
-    uint nfPsi = 0u;
-    for (uint k = 0u; k < ctx.K; ++k) {
-        float beta_k = beta_cap * a0 / (a0 + ctx.utilOpt[k]);
-        float psiPrev = 0.0f, psiNext = 0.0f;
-        for (uint i = 0u; i < ctx.R; ++i) {
-            float w = ctx.psi[k * ctx.R + i];
-            psiPrev = fma(w, prev[i], psiPrev);
-            psiNext = fma(w, curr[i], psiNext);
-        }
-        float dk = reward_c + (1.0f - beta_k) * curr[k] + beta_k * psiNext - psiPrev;
-        if (!isfinite(dk)) { dk = 0.0f; nfPsi++; }
-        ctx.tdPsi[k] = dk;
-    }
-    if (nfPsi > 0u) ctx.counters[OAK_CNT_TDPSI_NF] += nfPsi;
-}
-
-// =================================================================================================
-// 5. oak_plan - parallel asynchronous VI over DENSE option models (RR-Subtasks eq. 17 + 19).
-//   Per-thread k:
-//     Q^k(s) = r_hat^k(s) + V(n_hat^k(s)) where n_hat^k_j(s) = sum_i w^k_{j,i} * s[i] (dense)
-//     nTdMat[k*R+j] = curr[j] - n_hat^k_j(prev)  (precomputed for oak_learn_heads)
-//   Across-option reduction (K = 32 ≤ Apple SIMD width = 1 simdgroup):
-//     bestQ = simd_max(Q);  planAdv = bestQ - V(s) (raw, no scale prior).
-//   Single thread (k=0) writes planAdv. simd_or aggregates the per-thread non-finite flag so
-//   the counter increment is contention-free without atomics.
-// =================================================================================================
-kernel void oak_plan(
     device float         *params      [[buffer(0)]],
     device float         *stateArena  [[buffer(1)]],
     device uint          *uintArena   [[buffer(2)]],
@@ -378,52 +333,145 @@ kernel void oak_plan(
     bool active = (k < ctx.K);
     device const float *prev = state_at(ctx, ctx.stateSlot);
     device const float *curr = state_at(ctx, 1u - ctx.stateSlot);
+    float reward_c = ctx.reward[0] - ctx.rho;
 
-    // V(s) — every thread recomputes; redundant but cheap (R FMAs).
-    float vCurr = 0.0f;
-    for (uint i = 0u; i < ctx.R; ++i) vCurr = fma(ctx.valueW[i], curr[i], vCurr);
+    // Main TD on lane 0. Cheap (2R FMA on the value head, single output).
+    if (k == 0u) {
+        float vPrev = 0.0f, vNext = 0.0f;
+        for (uint i = 0u; i < ctx.R; ++i) {
+            vPrev = fma(ctx.valueW[i], prev[i], vPrev);
+            vNext = fma(ctx.valueW[i], curr[i], vNext);
+        }
+        float delta = reward_c + vNext - vPrev;
+        if (!isfinite(delta)) { ctx.counters[OAK_CNT_LEARN_NF] += 1u; delta = 0.0f; }
+        ctx.td[0] = delta;
+    }
 
-    float Q = -FLT_MAX;
-    bool nfQ = false;
+    // Per-option subtask TD on lane k. Inactive lanes contribute 0 to the NF reduction.
+    uint nfLane = 0u;
     if (active) {
-        // r_hat^k(s) = sum_i optReward[k][i] * curr[i].
+        float beta_cap = 1.0f - 1.0f / float(max(ctx.R, 1u));
+        float a0       = 1.0f / float(max(ctx.baseO, 1u));
+        float beta_k   = beta_cap * a0 / (a0 + ctx.utilOpt[k]);
+        uint  basePsi  = k * ctx.R;
+        float psiPrev = 0.0f, psiNext = 0.0f;
+        for (uint i = 0u; i < ctx.R; ++i) {
+            float w = ctx.psi[basePsi + i];
+            psiPrev = fma(w, prev[i], psiPrev);
+            psiNext = fma(w, curr[i], psiNext);
+        }
+        float dk = reward_c + (1.0f - beta_k) * curr[k] + beta_k * psiNext - psiPrev;
+        if (!isfinite(dk)) { dk = 0.0f; nfLane = 1u; }
+        ctx.tdPsi[k] = dk;
+    }
+    uint nfTotal = simd_sum(nfLane);
+    if (k == 0u && nfTotal > 0u) ctx.counters[OAK_CNT_TDPSI_NF] += nfTotal;
+}
+
+// =================================================================================================
+// 5. oak_plan - parallel asynchronous VI over DENSE option models (RR-Subtasks eq. 17 + 19).
+//
+//    K·R-thread parallel: K threadgroups, R threads each (one TG per option k, one thread
+//    per output dim j). Each (k, j) thread computes one row of the dense option transition,
+//    fuses the curr and prev passes into a single R-load over `optTransition[k][j][:R]`,
+//    and writes nTdMat[k·R + j] = curr[j] − n̂^k_j(prev) directly. Cross-thread reduction
+//    within each TG (simd_sum + threadgroup memory + barrier) yields V(n̂^k(curr)). Lane 0
+//    of each TG also computes r̂^k = optReward[k] · curr in parallel and emits Q^k = r̂^k +
+//    V(n̂^k(curr)) into the qOption[K] cache.
+//
+//    The cross-K reduction (bestQ = max_k Q^k → planAdv soft-bound + valueW residual)
+//    runs as a tiny follow-up kernel `oak_plan_reduce` (K threads, single simdgroup).
+//
+//    Compute budget at K=32 R=64: 32 simdgroups in flight per kernel (≈ 32× the previous
+//    K-thread design which used a single simdgroup). Per-thread inner cost: 2R FMA = 128
+//    FMA + simd_sum + 1 threadgroup_barrier — well-saturated on Apple Silicon.
+// =================================================================================================
+kernel void oak_plan(
+    device float         *params      [[buffer(0)]],
+    device float         *stateArena  [[buffer(1)]],
+    device uint          *uintArena   [[buffer(2)]],
+    device KernelScalars *scalars     [[buffer(3)]],
+    device KernelStats   *stats       [[buffer(4)]],
+    constant KernelConfig &cfg        [[buffer(5)]],
+    uint  j     [[thread_position_in_threadgroup]],
+    uint  k     [[threadgroup_position_in_grid]],
+    uint  tgW   [[threads_per_threadgroup]])
+{
+    Ctx ctx = make_ctx(params, stateArena, uintArena, scalars, stats, cfg);
+    if (k >= ctx.K) return;
+    device const float *prev = state_at(ctx, ctx.stateSlot);
+    device const float *curr = state_at(ctx, 1u - ctx.stateSlot);
+
+    bool active = (j < ctx.R);
+
+    // Per-thread dense-transition row. Same R-load fuses curr and prev passes.
+    float contrib = 0.0f;
+    if (active) {
+        float nHatCurr = 0.0f, nHatPrev = 0.0f;
+        uint  base = k * ctx.R * ctx.R + j * ctx.R;
+        for (uint i = 0u; i < ctx.R; ++i) {
+            float w = ctx.optTransition[base + i];
+            nHatCurr = fma(w, curr[i], nHatCurr);
+            nHatPrev = fma(w, prev[i], nHatPrev);
+        }
+        contrib = ctx.valueW[j] * nHatCurr;          // for vHat reduction below.
+        ctx.nTdMat[k * ctx.R + j] = curr[j] - nHatPrev;
+    }
+
+    // Cross-thread reduction inside the TG to get vHat^k = Σ_j contrib_j. R is host-rounded
+    // to even; for R=64 we have 2 simdgroups (32 lanes each). simd_sum gives the per-simd
+    // partial sum; one threadgroup-memory slot per simdgroup carries the partial up to
+    // lane 0 for the final sum + Q^k emission.
+    threadgroup float tg_partial[2];
+    if (j < 2u) tg_partial[j] = 0.0f;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    float simd_partial = simd_sum(active ? contrib : 0.0f);
+    uint  simd_id   = j / 32u;
+    uint  simd_lane = j % 32u;
+    if (simd_lane == 0u && simd_id < 2u) tg_partial[simd_id] = simd_partial;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    if (j == 0u) {
+        float vHat = tg_partial[0] + tg_partial[1];
         float rHat = 0.0f;
         for (uint i = 0u; i < ctx.R; ++i)
             rHat = fma(ctx.optReward[k * ctx.R + i], curr[i], rHat);
-        // Dense transition: V(n_hat^k(s)) = sum_j valueW[j] * (sum_i w^k_{j,i} * curr[i]).
-        // Same inner loop also computes nTdMat[k*R+j] = curr[j] - n_hat^k_j(prev) for
-        // oak_learn_heads, so we read each weight twice (once with curr, once with prev) but
-        // touch the dense matrix only once per oak_plan call.
-        float vHat = 0.0f;
-        uint base = k * ctx.R * ctx.R;
-        for (uint j = 0u; j < ctx.R; ++j) {
-            float nHatCurr = 0.0f, nHatPrev = 0.0f;
-            for (uint i = 0u; i < ctx.R; ++i) {
-                float w = ctx.optTransition[base + j * ctx.R + i];
-                nHatCurr = fma(w, curr[i], nHatCurr);
-                nHatPrev = fma(w, prev[i], nHatPrev);
-            }
-            vHat = fma(ctx.valueW[j], nHatCurr, vHat);
-            ctx.nTdMat[k * ctx.R + j] = curr[j] - nHatPrev;
-        }
-        Q = rHat + vHat;
-        if (!isfinite(Q)) { nfQ = true; Q = -FLT_MAX; }
+        float Q = rHat + vHat;
+        bool finite = isfinite(Q);
+        ctx.qOption[k] = finite ? Q : -FLT_MAX;
+        if (!finite) ctx.counters[OAK_CNT_PLAN_NF] += 1u;
     }
+}
 
-    // simd-wide reduction across the K threads (K = 32 fits one simdgroup).
-    // simd_or expects an integral type, so route the bool through uint.
+// =================================================================================================
+// 5b. oak_plan_reduce - cross-option max over qOption[K], then the planAdv soft-bound
+//    `(bestQ − V(s)) / (1 + |bestQ − V(s)|)`. K threads = single simdgroup, simd_max for
+//    the reduction. Lane 0 also computes V(curr) and writes planAdv (safe_w-preserve on NF).
+// =================================================================================================
+kernel void oak_plan_reduce(
+    device float         *params      [[buffer(0)]],
+    device float         *stateArena  [[buffer(1)]],
+    device uint          *uintArena   [[buffer(2)]],
+    device KernelScalars *scalars     [[buffer(3)]],
+    device KernelStats   *stats       [[buffer(4)]],
+    constant KernelConfig &cfg        [[buffer(5)]],
+    uint k [[thread_position_in_grid]])
+{
+    Ctx ctx = make_ctx(params, stateArena, uintArena, scalars, stats, cfg);
+    bool active = (k < ctx.K);
+    float Q = active ? ctx.qOption[k] : -FLT_MAX;
+    if (!isfinite(Q)) Q = -FLT_MAX;
     float bestQ = simd_max(Q);
-    uint  nfBits = simd_or(nfQ ? 1u : 0u);
 
     if (k == 0u) {
+        device const float *curr = state_at(ctx, 1u - ctx.stateSlot);
+        float vCurr = 0.0f;
+        for (uint i = 0u; i < ctx.R; ++i) vCurr = fma(ctx.valueW[i], curr[i], vCurr);
         float advRaw = (bestQ > -FLT_MAX) ? (bestQ - vCurr) : 0.0f;
-        // Self-bound by x/(1+|x|): the standard rational soft-clamp from Sutton's gradient-TD
-        // line of work. Image is (-1, 1), continuous and monotone in advRaw, no tunable scale.
-        // Plan-orthodox: it's the negative-feedback brake the dense optTransition (B1) feedback
-        // loop needed — when an option model briefly diverges, the planAdv contribution to
-        // valueW updates can't run away (was the cause of the 3/10 seeds NF-blowup at 10M).
+        // x/(1+|x|) self-bound — the standard rational soft-clamp from Sutton's gradient-TD
+        // line of work. Image is (-1, 1), continuous + monotone, no tunable scale.
         float adv = advRaw / (1.0f + fabs(advRaw));
-        if (nfBits != 0u) ctx.counters[OAK_CNT_PLAN_NF] += 1u;
         ctx.planAdv[0] = isfinite(adv) ? adv : ctx.planAdv[0];   // safe_w-style preserve on NF.
     }
 }
@@ -610,7 +658,22 @@ kernel void oak_post_learn(
 // =================================================================================================
 // 10. oak_bk_admit_commit - Oak feedback: generate-and-test reinit of worst-utility option AND
 //     worst-utility feature each step (Plan Step 11 remove-replace + Step 2 generate-and-test).
-//     Single-threaded.
+//
+//     Single threadgroup, multi-thread:
+//       Phase 1 (lane 0):  find worstK + worstI via linear scan; bump cumulative counters.
+//                          Writes worstK, worstI into threadgroup memory.
+//       Barrier            (mem_threadgroup)
+//       Phase 2 (all lanes): cooperative parallel reseed of the worstK weight slices
+//                          (psi, optReward, optPolicy, optTransition) plus the worstI
+//                          Fourier encoder row, distributed by `tid`.
+//       Barrier
+//       Phase 3 (lane 0):  scalar resets (utilOpt, utilFeat, phase, MetaOptimize) +
+//                          slot toggle + stepCount increment + stats surface.
+//
+//     Lane 0 captures `stepCount` BEFORE the increment so all reseed hashes match the
+//     prior single-threaded kernel byte-for-byte (deterministic seed equivalence).
+//     One TG of 256 threads keeps occupancy modest; the dominant K·R²=4096-write
+//     optTransition slice gets ≥16 writes/lane = ~1 µs.
 // =================================================================================================
 kernel void oak_bk_admit_commit(
     device float         *params      [[buffer(0)]],
@@ -619,57 +682,88 @@ kernel void oak_bk_admit_commit(
     device KernelScalars *scalars     [[buffer(3)]],
     device KernelStats   *stats       [[buffer(4)]],
     constant KernelConfig &cfg        [[buffer(5)]],
-    uint tid [[thread_position_in_grid]])
+    uint tid [[thread_position_in_threadgroup]],
+    uint tgW [[threads_per_threadgroup]])
 {
-    if (tid != 0u) return;
     Ctx ctx = make_ctx(params, stateArena, uintArena, scalars, stats, cfg);
 
-    // Worst option: lowest utilOpt. Reseed psi[k][:R], optPolicy[k][:D*R], optReward[k][:R],
-    // optTransition[k][:R] (DIAGONAL) with hash-based Xavier-scaled small projections.
-    float invSqrtR = rsqrt(float(max(ctx.R, 1u)));
-    uint worstK = 0u; float worstUO = FLT_MAX;
-    for (uint k = 0u; k < ctx.K; ++k)
-        if (ctx.utilOpt[k] < worstUO) { worstUO = ctx.utilOpt[k]; worstK = k; }
-    {
-        uint k = worstK;
-        for (uint i = 0u; i < ctx.R; ++i) {
-            ctx.psi[k * ctx.R + i] =
-                (hash_uniform(ctx.stepCount, k, i) * 2.0f - 1.0f) * invSqrtR;
-            ctx.optReward[k * ctx.R + i] =
-                (hash_uniform(ctx.stepCount, k, ctx.R + i) * 2.0f - 1.0f) * invSqrtR;
-        }
-        for (uint pi = 0u; pi < ctx.D * ctx.R; ++pi) {
-            ctx.optPolicy[k * ctx.D * ctx.R + pi] =
-                (hash_uniform(ctx.stepCount, k, 3u * ctx.R + pi) * 2.0f - 1.0f) * invSqrtR;
-        }
-        // Dense optTransition (RR-Subtasks eq. 17): reseed all K*R^2 weights of option k's
-        // transition slice with the same Xavier 1/sqrt(R) scale.
-        for (uint pi = 0u; pi < ctx.R * ctx.R; ++pi) {
-            ctx.optTransition[k * ctx.R * ctx.R + pi] =
-                (hash_uniform(ctx.stepCount, k, 4u * ctx.R + pi) * 2.0f - 1.0f) * invSqrtR;
-        }
-        ctx.utilOpt[k] = 0.0f;
-        ctx.counters[OAK_CNT_REINIT_OPT] += 1u;
-    }
+    // Default-initialized so the compiler's per-lane flow analysis is satisfied; lane 0
+    // unconditionally overwrites all three before the barrier so the defaults never leak.
+    threadgroup uint  worstK_tg    = 0u;
+    threadgroup uint  worstI_tg    = 0u;
+    threadgroup uint  stepCount_tg = 0u;
 
-    // Worst feature: lowest utilFeat → reseed the corresponding Fourier pre-activation.
-    // Each pre-activation `pre` produces a paired (cos, sin) into state[pre] and state[pre + R/2],
-    // so reseeding pre touches both features in the pair. Reseed the encoder row at the RFF
-    // bandwidth-1 scale (W ~ U[-1, 1], matching Rahimi-Recht 2007 §3 for unit-variance inputs)
-    // AND the phase scalar (uniform on [0, 2π)) — both structurally derived from the basis,
-    // no learnable scale on either; head weights live on top via safe_w.
-    uint halfR = ctx.R >> 1u;
-    uint worstI = 0u; float worstUF = FLT_MAX;
-    for (uint i = 0u; i < ctx.R; ++i)
-        if (ctx.utilFeat[i] < worstUF) { worstUF = ctx.utilFeat[i]; worstI = i; }
-    {
-        uint pre = (worstI < halfR) ? worstI : worstI - halfR;
-        for (uint o = 0u; o < ctx.baseO; ++o) {
-            float u = hash_uniform(ctx.stepCount, pre, o + 0xdeadbeefu) * 2.0f - 1.0f;
-            ctx.encoder[pre * ctx.baseO + o] = u;        // RFF bandwidth-1: W ~ U[-1, 1].
+    // Phase 1: lane 0 picks worsts and bumps cumulative counters. Capture stepCount BEFORE
+    // the post-step increment so the parallel reseed below uses the same hash key as the
+    // prior single-threaded kernel.
+    if (tid == 0u) {
+        uint wK = 0u; float wUO = FLT_MAX;
+        for (uint k = 0u; k < ctx.K; ++k)
+            if (ctx.utilOpt[k] < wUO) { wUO = ctx.utilOpt[k]; wK = k; }
+        worstK_tg = wK;
+        uint wI = 0u; float wUF = FLT_MAX;
+        for (uint i = 0u; i < ctx.R; ++i)
+            if (ctx.utilFeat[i] < wUF) { wUF = ctx.utilFeat[i]; wI = i; }
+        worstI_tg = wI;
+        stepCount_tg = ctx.stepCount;
+        ctx.counters[OAK_CNT_REINIT_OPT]  += 1u;
+        ctx.counters[OAK_CNT_REINIT_FEAT] += 1u;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    uint worstK = worstK_tg;
+    uint worstI = worstI_tg;
+    uint stepC  = stepCount_tg;
+    uint halfR  = ctx.R >> 1u;
+    uint pre    = (worstI < halfR) ? worstI : worstI - halfR;
+    float invSqrtR = rsqrt(float(max(ctx.R, 1u)));
+
+    // Phase 2: cooperative parallel reseed. Sub-grids stacked end-to-end into one virtual
+    // index space; each lane strides through `total` writes. Branch-per-region is cheap
+    // because all lanes in a simdgroup almost always hit the same region (consecutive id).
+    uint nPsi = ctx.R;
+    uint nOR  = ctx.R;
+    uint nPi  = ctx.D * ctx.R;
+    uint nOT  = ctx.R * ctx.R;
+    uint nEnc = ctx.baseO;
+    uint o0   = 0u;
+    uint o1   = o0 + nPsi;
+    uint o2   = o1 + nOR;
+    uint o3   = o2 + nPi;
+    uint o4   = o3 + nOT;
+    uint total = o4 + nEnc;
+
+    for (uint id = tid; id < total; id += tgW) {
+        if (id < o1) {                                              // psi[worstK][i]
+            uint i = id - o0;
+            ctx.psi[worstK * ctx.R + i] =
+                (hash_uniform(stepC, worstK, i) * 2.0f - 1.0f) * invSqrtR;
+        } else if (id < o2) {                                       // optReward[worstK][i]
+            uint i = id - o1;
+            ctx.optReward[worstK * ctx.R + i] =
+                (hash_uniform(stepC, worstK, ctx.R + i) * 2.0f - 1.0f) * invSqrtR;
+        } else if (id < o3) {                                       // optPolicy[worstK][:D*R]
+            uint pi = id - o2;
+            ctx.optPolicy[worstK * ctx.D * ctx.R + pi] =
+                (hash_uniform(stepC, worstK, 3u * ctx.R + pi) * 2.0f - 1.0f) * invSqrtR;
+        } else if (id < o4) {                                       // optTransition[worstK][:R*R]
+            uint pi = id - o3;
+            ctx.optTransition[worstK * ctx.R * ctx.R + pi] =
+                (hash_uniform(stepC, worstK, 4u * ctx.R + pi) * 2.0f - 1.0f) * invSqrtR;
+        } else {                                                     // encoder[pre][:baseO]
+            uint o = id - o4;
+            float u = hash_uniform(stepC, pre, o + 0xdeadbeefu) * 2.0f - 1.0f;
+            ctx.encoder[pre * ctx.baseO + o] = u;                    // RFF bandwidth-1.
         }
-        float u = hash_uniform(ctx.stepCount, pre, 0xfeedf00du);
-        ctx.phase[pre] = u * 6.283185307179586f;         // 2π, structural (no tunable).
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    // Phase 3: lane 0 does the small scalar resets + slot toggle + stepCount increment +
+    // surface stats. Done here (post-reseed) so the increment doesn't race the hash reads.
+    if (tid == 0u) {
+        ctx.utilOpt[worstK] = 0.0f;
+        float u = hash_uniform(stepC, pre, 0xfeedf00du);
+        ctx.phase[pre] = u * 6.283185307179586f;                     // 2π, structural.
         ctx.utilFeat[pre]         = 0.0f;
         ctx.utilFeat[pre + halfR] = 0.0f;
         // MetaOptimize state reset: both pair members restart at α = 1/baseO with no
@@ -683,17 +777,16 @@ kernel void oak_bk_admit_commit(
         ctx.alpha[pre + halfR] = aInit;
         ctx.hMeta[pre]         = 0.0f;
         ctx.hMeta[pre + halfR] = 0.0f;
-        ctx.counters[OAK_CNT_REINIT_FEAT] += 1u;
+
+        // Surface the only telemetry the host literally cannot derive from env signals.
+        ctx.stats->encodeNonFiniteCount    = float(ctx.counters[OAK_CNT_OBS_NF]);
+        ctx.stats->learnNonFiniteCount     = float(ctx.counters[OAK_CNT_LEARN_NF]);
+        ctx.stats->planNonFiniteCount      = float(ctx.counters[OAK_CNT_PLAN_NF]);
+        ctx.stats->tdPsiNonFiniteCount     = float(ctx.counters[OAK_CNT_TDPSI_NF]);
+        ctx.stats->oakOptionReinitCount    = float(ctx.counters[OAK_CNT_REINIT_OPT]);
+        ctx.stats->oakFeatureReinitCount   = float(ctx.counters[OAK_CNT_REINIT_FEAT]);
+
+        ctx.scalars->stateSlot = 1u - ctx.stateSlot;
+        ctx.scalars->stepCount = stepC + 1u;
     }
-
-    // Surface the only telemetry the host literally cannot derive from env signals.
-    ctx.stats->encodeNonFiniteCount    = float(ctx.counters[OAK_CNT_OBS_NF]);
-    ctx.stats->learnNonFiniteCount     = float(ctx.counters[OAK_CNT_LEARN_NF]);
-    ctx.stats->planNonFiniteCount      = float(ctx.counters[OAK_CNT_PLAN_NF]);
-    ctx.stats->tdPsiNonFiniteCount     = float(ctx.counters[OAK_CNT_TDPSI_NF]);
-    ctx.stats->oakOptionReinitCount    = float(ctx.counters[OAK_CNT_REINIT_OPT]);
-    ctx.stats->oakFeatureReinitCount   = float(ctx.counters[OAK_CNT_REINIT_FEAT]);
-
-    ctx.scalars->stateSlot = 1u - ctx.stateSlot;
-    ctx.scalars->stepCount = ctx.stepCount + 1u;
 }
