@@ -611,7 +611,11 @@ kernel void oak_plan_reduce(
 // =================================================================================================
 // 6. oak_learn_heads - 1-step TD updates on 5 learnable heads.
 //      0: valueW[R]              -> alpha[i] * (td + planAdv) * prev[i]   (planAdv added HERE ONLY)
-//      1: psi[K*R]               -> alpha[i] * tdPsi[k] * prev[i]
+//      1: psi[K*R]               -> alpha[i] * tdPsi[k] * prev[i] * max(chordPrev[k], 1/K)
+//                                   Tier D3 (Plan Step 10 "conditional on the option, off-policy"):
+//                                   chord-weighted attribution lets option k's psi specialize to
+//                                   its own activation instead of converging to the chord mean.
+//                                   1/K floor prevents self-reinforcing starvation when chord[k]→0.
 //      2: optPolicy[K*D*R]       -> alphaPi * relevance(i) * td * scoreGrad[d] * prev[i] * chordPrev[k]
 //      3: optReward[K*R]         -> alpha[i] * (reward - r_hat^k(prev)) * prev[i] * chordPrev[k]
 //      4: optTransition[K*R*R]   -> alpha[i] * nTdMat[k*R+j] * prev[i] * chordPrev[k]
@@ -655,10 +659,19 @@ kernel void oak_learn_heads(
         return;
     }
     if (gid < nVal + nPsi) {                                   // Head 1: psi
+        // Tier D3 (Plan Step 10 off-policy attribution): weight the gradient by the
+        // chord mass option k carried at the experience source state (prev). Before D3,
+        // every psi_k received full-rate updates from every step, so all K GVFs converged
+        // toward the chord-level value — options had no identity. With chord-weighted
+        // updates, option k's psi specializes to what happens when k is actually active.
+        // The 1/K floor is a structural minimum that prevents self-reinforcing starvation
+        // (chord[k]→0 → no updates → stale psi → chord stays 0). K is the Plan-defined
+        // option count (host-capped at simdgroup width 32), so 1/K is not a tunable.
         uint id = gid - nVal;
         uint k = id / ctx.R, i = id % ctx.R;
+        float chordW = max(ctx.chordPrev[k], 1.0f / float(max(ctx.K, 1u)));
         float w = ctx.psi[id];
-        ctx.psi[id] = safe_w(w, w + ctx.alpha[i] * ctx.tdPsi[k] * prev[i]);
+        ctx.psi[id] = safe_w(w, w + ctx.alpha[i] * ctx.tdPsi[k] * prev[i] * chordW);
         return;
     }
     if (gid < nVal + nPsi + nPi) {                             // Head 2: optPolicy (REINFORCE)
