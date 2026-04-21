@@ -239,6 +239,14 @@ kernel void oak_bk_obs(
 //    encode-able). Encoder row width is therefore 2·baseO — first baseO multiplies std_obs,
 //    next baseO multiplies obsTrace.
 //
+//    Tier C3 (recurrent self-feedback in the encoder) was attempted in two forms — RFF-1
+//    across all three regions (v1) and variance-balanced W_state at sqrt(baseO/R) (v2) —
+//    and both regressed by ~52% on the 10×1.5M paired bench. Diagnosis: recurrent dynamics
+//    create double non-stationarity for the TD bootstrap (state distribution shifts both
+//    from policy change AND from recurrent evolution). ESN/LSM works because the readout
+//    is supervised against a stationary target; OaK's TD heads can't track both. C3 was
+//    rolled back; encoder remains C1 shape.
+//
 //      state[feat in [0, R/2)] = cos( phase[feat]  +  Σ_o W_enc[feat][o]·std_obs[o]
 //                                                 +  Σ_o W_enc[feat][baseO+o]·obsTrace[o] )
 //      state[feat in [R/2, R)] = sin( ... same as above with the paired pre-activation ... )
