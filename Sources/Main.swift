@@ -853,36 +853,50 @@ final class OakMetalEngine {
         if !split {
             // Hot path: one command buffer, one encoder, one ICB execution per phase with a
             // memory barrier between phases (required for RAW/WAW correctness on shared buffers).
-            guard let cb = queue.makeCommandBuffer(descriptor: cbDesc) else {
-                throw OakError.message("Failed to create Metal command buffer.")
+            //
+            // The MTLCommandBuffer + MTLComputeCommandEncoder are NSObject subclasses (Metal's
+            // Objective-C interop). In a tight long-running CLI loop with no run loop, Swift's
+            // ARC cannot drain autoreleased Obj-C objects on its own — each CB keeps GPU-side
+            // command storage alive until the pool drains. Wrapping the per-step allocation in
+            // an explicit `autoreleasepool` bounds the allocation lifetime to one step and
+            // eliminates the slow resident-set growth observed in Activity Monitor over 10M+
+            // step runs.
+            try autoreleasepool {
+                guard let cb = queue.makeCommandBuffer(descriptor: cbDesc) else {
+                    throw OakError.message("Failed to create Metal command buffer.")
+                }
+                guard let enc = cb.makeComputeCommandEncoder() else {
+                    throw OakError.message("Failed to create Metal compute encoder.")
+                }
+                for i in 0..<pipelines.count {
+                    enc.executeCommandsInBuffer(indirectCommandBuffer, range: i..<(i + 1))
+                    if i + 1 < pipelines.count { enc.memoryBarrier(scope: [.buffers]) }
+                }
+                enc.endEncoding()
+                cb.commit(); cb.waitUntilCompleted()
+                if let e = cb.error { throw OakError.message("Metal command failed: \(e)") }
             }
-            guard let enc = cb.makeComputeCommandEncoder() else {
-                throw OakError.message("Failed to create Metal compute encoder.")
-            }
-            for i in 0..<pipelines.count {
-                enc.executeCommandsInBuffer(indirectCommandBuffer, range: i..<(i + 1))
-                if i + 1 < pipelines.count { enc.memoryBarrier(scope: [.buffers]) }
-            }
-            enc.endEncoding()
-            cb.commit(); cb.waitUntilCompleted()
-            if let e = cb.error { throw OakError.message("Metal command failed: \(e)") }
             return
         }
         // Diagnostic path: per-phase command buffers to capture gpuStartTime/gpuEndTime.
+        // Each CB gets its own autoreleasepool so 9 per-phase CBs drain per step, not 10M
+        // accumulated across a diagnostic run.
         for i in 0..<pipelines.count {
-            guard let cb = queue.makeCommandBuffer(descriptor: cbDesc) else {
-                throw OakError.message("Failed to create Metal command buffer.")
+            try autoreleasepool {
+                guard let cb = queue.makeCommandBuffer(descriptor: cbDesc) else {
+                    throw OakError.message("Failed to create Metal command buffer.")
+                }
+                guard let enc = cb.makeComputeCommandEncoder() else {
+                    throw OakError.message("Failed to create Metal compute encoder.")
+                }
+                enc.executeCommandsInBuffer(indirectCommandBuffer, range: i..<(i + 1))
+                enc.endEncoding()
+                cb.commit(); cb.waitUntilCompleted()
+                if let e = cb.error { throw OakError.message("Metal command failed: \(e)") }
+                let s = cb.gpuStartTime, end = cb.gpuEndTime
+                if s > 0, end >= s { phaseGpuTimeSumSeconds[i] += end - s }
+                else { phaseGpuInvalidStepCount[i] += 1 }
             }
-            guard let enc = cb.makeComputeCommandEncoder() else {
-                throw OakError.message("Failed to create Metal compute encoder.")
-            }
-            enc.executeCommandsInBuffer(indirectCommandBuffer, range: i..<(i + 1))
-            enc.endEncoding()
-            cb.commit(); cb.waitUntilCompleted()
-            if let e = cb.error { throw OakError.message("Metal command failed: \(e)") }
-            let s = cb.gpuStartTime, end = cb.gpuEndTime
-            if s > 0, end >= s { phaseGpuTimeSumSeconds[i] += end - s }
-            else { phaseGpuInvalidStepCount[i] += 1 }
         }
     }
 }
