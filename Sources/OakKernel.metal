@@ -700,10 +700,27 @@ kernel void oak_learn_heads(
 
 // =================================================================================================
 // 8. oak_post_learn - three concurrent passes after learn_heads writes the new weights:
-//      gid in [0, R)        -> per-feature GraMa utility EMA (arXiv:2505.24061)
-//      gid in [R, R+K)      -> per-option |tdPsi|^2 utility EMA
-//      gid in [R+K, R+K+D)  -> action mu_p = sum_k chord[k] * (W_pi[k][p] . s')  (meta_action)
-//    All three are single-output-per-thread; folding them into one kernel saves a launch.
+//      gid in [0, R)              -> per-feature GraMa utility EMA + MetaOptimize L-approx
+//      gid in [R, R+K)            -> per-option |tdPsi|² utility EMA
+//      gid in [R+K, R+K+D·K)      -> action mu_p = sum_k chord[k] · (W_pi[k][p] · s')
+//    Folding all three into one kernel saves a launch.
+//
+//    PERF NOTE on region 3 (action). Old: 6 threads (one per action dim) each doing K·R =
+//    2048 sequential fma in 1 simdgroup with 26 IDLE lanes — ~110 µs/step, 55% of total GPU.
+//    New: D·K threads, dispatch grid = R + K + D·K, tgSize = 32 (= simdgroup width = K).
+//    Each `p` lands in exactly ONE simdgroup of K=32 lanes. Lane k of TG p computes its own
+//    `dot_k = Σ_i optPolicy[(k·D+p)·R+i] · curr[i]` in parallel. Lane 0 then reads each
+//    lane's dot via `simd_shuffle(dot, kk)` and accumulates `mu = fma(chord[kk], d, mu)`
+//    in the SAME `kk = 0..K-1` order as the prior single-thread code — bit-identical FP
+//    (Inv-10 zero-intelligence-hit preserved by construction). If a future env ever pushes
+//    K below 32, lanes K..31 stay inactive (their `dot` is not read by the kk=0..K-1
+//    reduction), so functional correctness holds.
+//
+//    Region 1 still computes `-log(baseO)` and `-log(R·baseO)` per thread per step. Tried
+//    moving these to host-precomputed scalars but CPU `log()` and GPU `log()` are NOT
+//    bit-identical for the same input (different transcendental approximations) — broke
+//    Inv-10 (chatter shifted +2.8% in single-process diagnostic). The 2 GPU log() per
+//    thread are ~10 cycles in 2 simdgroups in parallel = negligible (~0.01 µs/step).
 // =================================================================================================
 kernel void oak_post_learn(
     device float         *params      [[buffer(0)]],
@@ -712,10 +729,13 @@ kernel void oak_post_learn(
     device KernelScalars *scalars     [[buffer(3)]],
     device KernelStats   *stats       [[buffer(4)]],
     constant KernelConfig &cfg        [[buffer(5)]],
-    uint gid [[thread_position_in_grid]])
+    uint gid [[thread_position_in_grid]],
+    uint lid [[thread_position_in_threadgroup]])
 {
     Ctx ctx = make_ctx(params, stateArena, uintArena, scalars, stats, cfg);
-    if (gid >= ctx.R + ctx.K + ctx.D) return;
+    uint actBase   = ctx.R + ctx.K;
+    uint actCount  = ctx.D * ctx.K;
+    if (gid >= actBase + actCount) return;
     device const float *prev = state_at(ctx, ctx.stateSlot);
     device const float *curr = state_at(ctx, 1u - ctx.stateSlot);
 
@@ -764,23 +784,39 @@ kernel void oak_post_learn(
         ctx.alpha[i] = exp(newBeta);
         return;
     }
-    if (gid < ctx.R + ctx.K) {
+    if (gid < actBase) {
         uint k = gid - ctx.R;
         float dk = ctx.tdPsi[k];
         ctx.utilOpt[k] += invT * (dk * dk - ctx.utilOpt[k]);
         return;
     }
-    // Action head: mu_p = sum_k chord[k] * (W_pi[k][p] . s').
-    uint p = gid - ctx.R - ctx.K;
+
+    // Action region (D·K threads, organized as D simdgroups of K=32 lanes each).
+    // gid layout: (gid - actBase) = p · K + k  →  p = block index, k = lane within block.
+    // With tgSize = 32 = simdgroup width = K, lid IS k and the threadgroup IS one simdgroup
+    // dedicated to one p — perfect for simd_shuffle reduction with no threadgroup memory.
+    uint actId = gid - actBase;
+    uint p     = actId / ctx.K;
+    uint k     = lid;                      // = actId % K (since tgSize == K).
+
+    // Each lane computes its own dot product in parallel (R fma).
+    float dot = 0.0f;
+    for (uint i = 0u; i < ctx.R; ++i)
+        dot = fma(ctx.optPolicy[(k * ctx.D + p) * ctx.R + i], curr[i], dot);
+
+    // Lane 0 reads each lane's dot via simd_shuffle and applies chord with fma in the
+    // ORIGINAL kk=0..K-1 sequence — bit-identical to the prior single-thread loop's
+    // `mu = fma(chord[kk], dot, mu)`. ALL lanes must execute the shuffle (Metal spec:
+    // shuffle is undefined unless source and destination are both in active control flow).
     float mu = 0.0f;
-    for (uint k = 0u; k < ctx.K; ++k) {
-        float dot = 0.0f;
-        for (uint i = 0u; i < ctx.R; ++i)
-            dot = fma(ctx.optPolicy[(k * ctx.D + p) * ctx.R + i], curr[i], dot);
-        mu = fma(ctx.chord[k], dot, mu);
+    for (uint kk = 0u; kk < ctx.K; ++kk) {
+        float d = simd_shuffle(dot, kk);
+        if (k == 0u) mu = fma(ctx.chord[kk], d, mu);
     }
-    float prevMu = ctx.policyMean[p];
-    ctx.policyMean[p] = isfinite(mu) ? mu : prevMu;
+    if (k == 0u) {
+        float prevMu = ctx.policyMean[p];
+        ctx.policyMean[p] = isfinite(mu) ? mu : prevMu;
+    }
 }
 
 // =================================================================================================

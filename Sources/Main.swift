@@ -512,7 +512,15 @@ final class OakMetalEngine {
         // K-thread cross-option reduction: simd_max(qOption) + planAdv soft-bound.
         Phase(name: "oak_plan_reduce",     tgSize: 0),
         Phase(name: "oak_learn_heads",     tgSize: 0),
-        Phase(name: "oak_post_learn",      tgSize: 0),
+        // Performance pass on top of D2: oak_post_learn's action region used to be 6 threads
+        // (one per action dim) each doing K·R = 2048 sequential fma → 1 simdgroup with 26
+        // idle lanes serializing the entire kernel (138.7 µs / 244 µs total = 55.6% of GPU
+        // time). Now parallel: each (p, k) is its own thread, K=32 lanes per p, organized
+        // so each p lands in exactly one simdgroup. Lane 0 of each p-simdgroup reads the
+        // K dot products via simd_shuffle and applies chord with fma in the same kk=0..K-1
+        // order as the original sequential code — bit-id preserved per Inv-10. Explicit
+        // tgSize = 32 (= simdgroup width = K) locks the simdgroup-aligned layout.
+        Phase(name: "oak_post_learn",      tgSize: 32),
         // Single TG of 256 threads — lane 0 finds worsts, threadgroup barrier, then all
         // 256 lanes cooperate on the parallel reseed (psi/optReward/optPolicy/optTransition/
         // encoder slices, ~4.6k writes total → ~18 writes/lane).
@@ -620,7 +628,7 @@ final class OakMetalEngine {
             K,                  // plan              [K TGs (one per option) x R threads (one per output dim)]
             K,                  // plan_reduce       [K threads, simd_max(qOption) + planAdv soft-bound]
             learnTotal,         // learn_heads       [N threads, dense optTransition adds K*R^2]
-            rank + K + dPolicy, // post_learn        [util_feat | util_opt | meta_action]
+            rank + K + dPolicy * K, // post_learn    [util_feat (R) | util_opt (K) | action (D·K, K lanes/p simdgroup)]
             1,                  // bk_admit_commit   [1 TG x 256 threads, threadgroup_barrier between find-worst and parallel reseed]
         ]
 
