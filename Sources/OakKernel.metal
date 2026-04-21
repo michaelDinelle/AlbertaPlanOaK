@@ -422,6 +422,16 @@ kernel void oak_meta_predict(
     }
 
     // Per-option subtask TD on lane k. Inactive lanes contribute 0 to the NF reduction.
+    // Adaptive β_k = (1 − 1/R)·α₀/(α₀ + utilOpt[k]), α₀ = 1/baseO. utilOpt[k] is the EMA
+    // of |tdPsi[k]|² from oak_post_learn (Kim implicit-step self-bound). Initialized
+    // at utilOpt[k] = R so β_k starts ≈ 0 (myopic, safe at random init); grows toward
+    // the cap (1 − 1/R) as ψ stabilizes. If |tdPsi|² spikes (divergence threat), β
+    // automatically chokes. This is a STABILITY-adaptive β, not a Plan Step 10 STOMP
+    // termination β — Tier C4 attempted structural termination β = (1+curr[k])/2 but
+    // regressed -30% aggregate lift at 1.5M (options went myopic without bootstrap,
+    // chatter collapsed to 0.02). See docs/roadmap.md Tier C4 for the negative-result
+    // writeup. Plan Step 10 STOMP termination is structurally incompatible with the
+    // current ψ-TD formulation at these scales; β stays stability-adaptive.
     uint nfLane = 0u;
     if (active) {
         float beta_cap = 1.0f - 1.0f / float(max(ctx.R, 1u));
