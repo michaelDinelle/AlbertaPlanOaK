@@ -73,6 +73,13 @@ struct KernelConfig {
     // consumed by oak_encode as the second half of every Fourier pre-activation's input
     // (encoder row width is 2·baseO — first baseO multiplies std_obs, second multiplies trace).
     uint sObsTrace;
+    // Tier D2 (Plan Step 9, prioritized sweeping; Moore-Atkeson 1993, Plan footnote 13):
+    // per-option priority signal, K floats. prio[k] = chord[k] · ||model TD error_k||_L2.
+    // Written by oak_plan lane 0 (in-line via fused tg_ntdSq write, zero added barriers);
+    // consumed by oak_plan_reduce (mean → KernelScalars.meanPrio) and by oak_learn_heads
+    // Head 4 gate (`prioOpt[k] >= meanPrio` → update; below → skip the K·R² optTransition
+    // gradient for that option this step).
+    uint sPrioOpt;
 
     // UInt arena offsets.
     uint uCounters;
@@ -86,6 +93,12 @@ struct KernelScalars {
     uint  stateSlot;
     float rho;                  // rho-bar (Reward Centering).
     float alphaPi;              // implicit alpha for policy weights.
+    // Tier D2 (Plan Step 9): mean(prioOpt[K]), the threshold for Moore-Atkeson 1993
+    // prioritized sweeping in oak_learn_heads Head 4. Computed once per step in
+    // oak_plan_reduce via simd_sum across K=32 lanes (single simdgroup, ~5 cycles), then
+    // broadcast-cached for every Head 4 thread to read (avoids 131k Head 4 threads each
+    // computing the same K-element reduction = 4.2M wasted fma per step).
+    float meanPrio;
 };
 
 // Telemetry the host literally cannot derive from env signals: per-phase non-finite counters
@@ -129,7 +142,7 @@ inline float standardized_obs(float x, float mean, float sm, uint baseO) {
 struct Ctx {
     uint O, R, K, baseO, D;
     uint stepCount, stateSlot;
-    float rho, alphaPi;
+    float rho, alphaPi, meanPrio;              // meanPrio: Tier D2 broadcast scalar, see KernelScalars.
 
     device float *encoder, *phase, *valueW, *psi, *optPolicy, *optReward, *optTransition;
     device float *observation, *observationMean, *obsSM;
@@ -143,6 +156,7 @@ struct Ctx {
     device float *nTdMat;                      // Dense optTransition TD targets, K*R floats.
     device float *qOption;                     // Per-option Q^k cache, K floats.
     device float *obsTrace;                    // Tier C1: per-obs-dim trace of std_obs, O floats.
+    device float *prioOpt;                     // Tier D2: per-option priority, K floats.
     device uint  *counters;
     device KernelScalars *scalars;
     device KernelStats   *stats;
@@ -155,7 +169,7 @@ inline Ctx make_ctx(device float *params, device float *stateArena, device uint 
     c.O = cfg.obsDim; c.R = cfg.rank; c.K = cfg.optionCount;
     c.baseO = cfg.baseObsDim; c.D = cfg.actionParamCount;
     c.stepCount = scalars->stepCount; c.stateSlot = scalars->stateSlot;
-    c.rho = scalars->rho; c.alphaPi = scalars->alphaPi;
+    c.rho = scalars->rho; c.alphaPi = scalars->alphaPi; c.meanPrio = scalars->meanPrio;
 
     c.encoder       = params + cfg.pEncoder;
     c.phase         = params + cfg.pPhase;
@@ -185,6 +199,7 @@ inline Ctx make_ctx(device float *params, device float *stateArena, device uint 
     c.nTdMat          = stateArena + cfg.sNTdMat;
     c.qOption         = stateArena + cfg.sQOption;
     c.obsTrace        = stateArena + cfg.sObsTrace;
+    c.prioOpt         = stateArena + cfg.sPrioOpt;
 
     c.counters = uintArena + cfg.uCounters;
     c.scalars = scalars; c.stats = stats;
@@ -414,26 +429,41 @@ kernel void oak_predict(
 }
 
 // =================================================================================================
-// 5. oak_plan - parallel asynchronous VI over DENSE option models (RR-Subtasks eq. 17 + 19).
+// 5. oak_plan - parallel asynchronous VI over DENSE option models (RR-Subtasks eq. 17 + 19)
+//    + Tier D2 (Plan Step 9, prioritized sweeping; Moore-Atkeson 1993, Plan footnote 13)
+//    in-line per-option priority computation.
 //
 //    K·R-thread parallel: K threadgroups, R threads each (one TG per option k, one thread
 //    per output dim j). Each (k, j) thread computes one row of the dense option transition,
 //    fuses the curr and prev passes into a single R-load over `optTransition[k][j][:R]`,
 //    and writes nTdMat[k·R + j] = curr[j] − n̂^k_j(prev) directly. Each thread stores its
-//    `nHatCurr` into threadgroup memory; lane 0 sums vHat = Σ_j valueW[j]·nHatCurr_j via
-//    `fma` in strict index order j=0..R-1, exactly matching the Tier B single-thread loop's
-//    `vHat = fma(valueW[j], nHatCurr, vHat)` sequence — bit-identical FP, no `simd_sum`.
-//    Lane 0 also computes r̂^k = optReward[k] · curr (R FMA) and emits Q^k = r̂^k + V(n̂^k)
-//    into the qOption[K] cache.
+//    `nHatCurr` into threadgroup memory AND its `n_td_sq = n_td · n_td` into a parallel
+//    threadgroup array — both writes go BEFORE the same single barrier, zero added barriers.
 //
-//    The cross-K reduction (bestQ = max_k Q^k → planAdv soft-bound + valueW residual)
-//    runs as a tiny follow-up kernel `oak_plan_reduce` (K threads, single simdgroup,
-//    simd_max — bit-identical for max).
+//    Lane 0 of each TG runs a single R-loop that interleaves three accumulators:
+//      vHat^k     = Σ_j valueW[j] · nHatCurr_j      (strict j=0..R-1 fma order, bit-identical)
+//      ntdSqSum^k = Σ_j n_td_j^2                    (Tier D2 priority L2² of model TD error)
+//      rHat^k     = Σ_i optReward[k][i] · curr[i]   (separate i-loop, R fma)
+//    The two j-loop accumulators are independent fma chains → Apple GPU's ILP scheduler runs
+//    them in parallel, so the prio addition adds ~0 latency (lane 0's R fma chain cycle count
+//    stays ~R cycles instead of 2R).
 //
-//    Compute budget at K=32 R=64: 32 simdgroups in flight per kernel (≈ 32× the previous
-//    K-thread design which used a single simdgroup). Per-thread inner cost: 2R FMA = 128
-//    FMA + 1 threadgroup_barrier; per-TG lane-0 reduction adds R fma's. Bit-identical
-//    intelligence, parallel throughput.
+//    Lane 0 then writes:
+//      qOption[k]  = isfinite(Q) ? Q : -FLT_MAX,                      (existing)
+//      prioOpt[k]  = (isfinite(ntdSqSum) && ntdSqSum > 0)              (Tier D2 NEW)
+//                    ? chord[k] · sqrt(ntdSqSum)
+//                    : 0.0f                                            (NF-clamp: dirty option
+//                                                                       becomes lowest-priority,
+//                                                                       gets skipped, others learn).
+//
+//    The cross-K mean (meanPrio = mean_k prioOpt[k]) and Q^k max (bestQ = max_k Q^k) both
+//    run in the follow-up `oak_plan_reduce` kernel (K threads, single simdgroup, simd_sum +
+//    simd_max — both are associative/bit-id-safe for their respective ops).
+//
+//    Compute budget at K=32 R=64: 32 simdgroups in flight per kernel. Per-thread inner cost:
+//    2R FMA + 1 squaring = 129 ops + 1 threadgroup_barrier; per-TG lane-0 reduction is ~R
+//    cycles (vHat + ntdSqSum interleaved) + R cycles (rHat). Bit-identical intelligence on
+//    the existing reductions, in-line priority cost is < 1% of step.
 // =================================================================================================
 kernel void oak_plan(
     device float         *params      [[buffer(0)]],
@@ -457,8 +487,10 @@ kernel void oak_plan(
     // also writes its own slot in nTdMat (no contention). Stores nHatCurr (not the fma'd
     // contribution) into threadgroup memory so the reduction below keeps the original
     // single-thread kernel's exact `vHat = fma(valueW[j], nHatCurr, vHat)` sequence —
-    // separate multiply-then-add would lose the fma's single-rounding and drift.
+    // separate multiply-then-add would lose the fma's single-rounding and drift. Tier D2:
+    // also squares the local n_td (still in register) so the per-thread cost is +1 mul.
     float nHatCurrLocal = 0.0f;
+    float nTdSqLocal    = 0.0f;
     if (active) {
         float nHatPrev = 0.0f;
         uint  base = k * ctx.R * ctx.R + j * ctx.R;
@@ -467,22 +499,32 @@ kernel void oak_plan(
             nHatCurrLocal = fma(w, curr[i], nHatCurrLocal);
             nHatPrev      = fma(w, prev[i], nHatPrev);
         }
-        ctx.nTdMat[k * ctx.R + j] = curr[j] - nHatPrev;
+        float n_td = curr[j] - nHatPrev;
+        ctx.nTdMat[k * ctx.R + j] = n_td;
+        nTdSqLocal = n_td * n_td;     // Tier D2: in-register, free with ILP.
     }
 
-    // Cross-thread reduction: vHat^k = Σ_j valueW[j]·nHatCurr_j, accumulated via fma in
-    // strict index order j=0..R-1, exactly matching the original single-thread loop.
-    // tg_nHatCurr is sized for OAK_MAX_RANK = 256 (1 KB of threadgroup memory) — the
-    // host-rounded `rank` is capped well below this for current envs (HC-v4: R = 64).
+    // Cross-thread reduction stage. Both arrays are written before a SINGLE barrier — adding
+    // tg_ntdSq does not introduce a second barrier (Inv-10 zero-intelligence-hit on existing
+    // kernel timings). OAK_MAX_RANK = 256 (1 KB per array = 2 KB total per TG of TG memory).
     constexpr uint OAK_MAX_RANK = 256u;
     threadgroup float tg_nHatCurr[OAK_MAX_RANK];
+    threadgroup float tg_ntdSq[OAK_MAX_RANK];
     tg_nHatCurr[j] = active ? nHatCurrLocal : 0.0f;
+    tg_ntdSq[j]    = active ? nTdSqLocal    : 0.0f;
     threadgroup_barrier(mem_flags::mem_threadgroup);
 
     if (j == 0u) {
-        float vHat = 0.0f;
-        for (uint jj = 0u; jj < ctx.R; ++jj)
-            vHat = fma(ctx.valueW[jj], tg_nHatCurr[jj], vHat);
+        // Two independent fma chains in the SAME R-loop body: Apple GPU's ILP scheduler can
+        // dual-issue them, so ntdSqSum costs ~0 added latency on top of vHat. vHat's fma
+        // sequence is preserved bit-identical to the prior kernel; ntdSqSum is a new
+        // reduction (no prior bit-id baseline applies).
+        float vHat     = 0.0f;
+        float ntdSqSum = 0.0f;
+        for (uint jj = 0u; jj < ctx.R; ++jj) {
+            vHat     = fma(ctx.valueW[jj], tg_nHatCurr[jj], vHat);
+            ntdSqSum = ntdSqSum + tg_ntdSq[jj];
+        }
         float rHat = 0.0f;
         for (uint i = 0u; i < ctx.R; ++i)
             rHat = fma(ctx.optReward[k * ctx.R + i], curr[i], rHat);
@@ -490,13 +532,25 @@ kernel void oak_plan(
         bool finite = isfinite(Q);
         ctx.qOption[k] = finite ? Q : -FLT_MAX;
         if (!finite) ctx.counters[OAK_CNT_PLAN_NF] += 1u;
+
+        // Tier D2 priority write: chord-weighted L2 of model TD error. NF-clamp at write so
+        // a dirty option becomes lowest-priority (skipped by the Head 4 gate) — failure
+        // isolation, the rest of the K options learn normally. Plan-orthodox: prio depends
+        // only on agent-internal signals (chord, nTdMat) — no env-knowledge, no tunable.
+        bool prioFinite = isfinite(ntdSqSum) && (ntdSqSum > 0.0f);
+        ctx.prioOpt[k]  = prioFinite ? (ctx.chord[k] * sqrt(ntdSqSum)) : 0.0f;
     }
 }
 
 // =================================================================================================
-// 5b. oak_plan_reduce - cross-option max over qOption[K], then the planAdv soft-bound
-//    `(bestQ − V(s)) / (1 + |bestQ − V(s)|)`. K threads = single simdgroup, simd_max for
-//    the reduction. Lane 0 also computes V(curr) and writes planAdv (safe_w-preserve on NF).
+// 5b. oak_plan_reduce - cross-option max over qOption[K] + Tier D2 (Plan Step 9) cross-option
+//    mean over prioOpt[K], then the planAdv soft-bound `(bestQ − V(s)) / (1 + |bestQ − V(s)|)`.
+//    K threads = single simdgroup. Both reductions are simdgroup-wide:
+//      bestQ    = simd_max(Q)         — bit-identical (max is associative + commutative)
+//      meanPrio = simd_sum(prio) / K  — new reduction, no prior bit-id baseline applies
+//    Lane 0 computes V(curr), planAdv, AND writes meanPrio to scalars (broadcast-cached for
+//    every oak_learn_heads Head 4 thread to read in one cycle — vs the alternative of
+//    making 131k Head 4 threads each compute the same K-element reduction).
 // =================================================================================================
 kernel void oak_plan_reduce(
     device float         *params      [[buffer(0)]],
@@ -513,6 +567,14 @@ kernel void oak_plan_reduce(
     if (!isfinite(Q)) Q = -FLT_MAX;
     float bestQ = simd_max(Q);
 
+    // Tier D2 (Plan Step 9): cross-option mean of priority. simd_sum across K=32 lanes is a
+    // single butterfly-add (~5 cycles on Apple GPU). All lanes participate (Metal spec); only
+    // lane 0 writes the broadcast scalar. Inactive lanes contribute 0 → mean denominator is
+    // K (the host's optionCount), not the active count.
+    float prio    = active ? ctx.prioOpt[k] : 0.0f;
+    if (!isfinite(prio)) prio = 0.0f;
+    float prioSum = simd_sum(prio);
+
     if (k == 0u) {
         device const float *curr = state_at(ctx, 1u - ctx.stateSlot);
         float vCurr = 0.0f;
@@ -522,6 +584,13 @@ kernel void oak_plan_reduce(
         // line of work. Image is (-1, 1), continuous + monotone, no tunable scale.
         float adv = advRaw / (1.0f + fabs(advRaw));
         ctx.planAdv[0] = isfinite(adv) ? adv : ctx.planAdv[0];   // safe_w-style preserve on NF.
+
+        // Tier D2: write meanPrio to the broadcast scalar. NF-clamp at write so the Head 4
+        // gate has a well-defined comparison. Edge case (K = 0 should never happen but defend):
+        // divide by max(K, 1).
+        float invK = 1.0f / float(max(ctx.K, 1u));
+        float meanPrio = prioSum * invK;
+        ctx.scalars->meanPrio = isfinite(meanPrio) ? meanPrio : 0.0f;
     }
 }
 
@@ -607,8 +676,18 @@ kernel void oak_learn_heads(
         // serves R weights along the i axis). chordPrev[k] is the on-chord weight (importance
         // ratio per RR-Subtasks eq. 17). α[i] (not α[j]) because the gradient direction involves
         // prev[i] — the i axis is the input dimension whose per-feature relevance gates the update.
+        //
+        // Tier D2 (Plan Step 9, Moore-Atkeson 1993 prioritized sweeping; Plan footnote 13):
+        // gate the update by `prioOpt[k] >= meanPrio` so only above-mean-priority options
+        // refresh their dense transition models this step. Below-mean options inherit their
+        // existing weights via the implicit no-op (no safe_w call → no write → preserve).
+        // Inv-SIMD: thread layout `(k, j, i)` with `R*R = 4096 ≫ 32` → all 32 simdgroup lanes
+        // share the same `k` → uniform gate, zero divergence cost.
+        // Fail-safe: if meanPrio is non-finite (shouldn't happen — oak_plan_reduce NF-clamps
+        // at write), the gate falls through to "do the update" rather than starving Head 4.
         uint id  = gid - nVal - nPsi - nPi - nOR;
         uint k   = id / (ctx.R * ctx.R);
+        if (isfinite(ctx.meanPrio) && ctx.prioOpt[k] < ctx.meanPrio) return;
         uint rem = id - k * ctx.R * ctx.R;
         uint j   = rem / ctx.R;
         uint i   = rem % ctx.R;

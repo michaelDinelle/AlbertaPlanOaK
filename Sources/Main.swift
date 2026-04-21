@@ -333,6 +333,11 @@ private struct KernelConfig {
     var sObsTrace: UInt32 = 0    // Tier C1: per-obs-dim low-pass trace of std_obs (O floats),
                                   // updated by oak_bk_obs at rate 1/baseO; consumed by oak_encode
                                   // as the second half of every Fourier pre-activation's input.
+    var sPrioOpt: UInt32 = 0     // Tier D2 (Plan Step 9, prioritized sweeping): per-option priority
+                                  // signal (K floats). prio[k] = chord[k] · ||model TD error_k||_L2.
+                                  // Written by oak_plan lane 0; consumed by oak_plan_reduce
+                                  // (mean) and oak_learn_heads (Head 4 gate). Moore-Atkeson 1993,
+                                  // Plan footnote 13.
     var uCounters: UInt32 = 0
 }
 
@@ -341,6 +346,10 @@ private struct KernelScalars {
     var stateSlot: UInt32 = 0
     var rho: Float = 0
     var alphaPi: Float = 0
+    // Tier D2 (Plan Step 9, prioritized sweeping): mean of prioOpt[K], computed once per step
+    // in oak_plan_reduce via simd_sum and broadcast-cached for every oak_learn_heads Head 4
+    // thread to read (avoids 131k Head 4 threads each computing the same K-element reduction).
+    var meanPrio: Float = 0
 }
 
 struct KernelStats {
@@ -417,6 +426,10 @@ private enum OakMetalLayout {
         let nTdMat: Int               // Dense option-transition TD targets, K*R floats, written by oak_plan.
         let qOption: Int              // Per-option Q^k cache, K floats, oak_plan → oak_plan_reduce.
         let obsTrace: Int             // Tier C1: per-obs-dim low-pass trace of std_obs, O floats.
+        let prioOpt: Int              // Tier D2: per-option Moore-Atkeson 1993 priority signal,
+                                       // K floats. prio[k] = chord[k] · ||nTdMat^k||_L2. Written
+                                       // by oak_plan lane 0; consumed by oak_plan_reduce (mean
+                                       // → KernelScalars.meanPrio) and oak_learn_heads Head 4 gate.
         let total: Int
     }
     static func stateLayout(obsDim: Int, rank: Int, dPolicy: Int) -> State {
@@ -442,6 +455,7 @@ private enum OakMetalLayout {
         let ntd = o; o += K * rank
         let qo  = o; o += K
         let otr = o; o += obsDim
+        let prio = o; o += K
         return State(observation: obs, obsMean: mean, obsSM: osm, state: st,
                      policyMean: pol, scoreGrad: sg,
                      reward: rew, td: td, tdPsi: tdP,
@@ -449,7 +463,8 @@ private enum OakMetalLayout {
                      utilFeat: uf, utilOpt: uo,
                      planAdv: pa,
                      alpha: al, beta: be, h: h,
-                     nTdMat: ntd, qOption: qo, obsTrace: otr, total: o)
+                     nTdMat: ntd, qOption: qo, obsTrace: otr,
+                     prioOpt: prio, total: o)
     }
 
     struct UInts { let counters, total: Int }
@@ -806,6 +821,7 @@ final class OakMetalEngine {
         c.sAlpha = UInt32(s.alpha); c.sBeta = UInt32(s.beta); c.sH = UInt32(s.h)
         c.sNTdMat = UInt32(s.nTdMat); c.sQOption = UInt32(s.qOption)
         c.sObsTrace = UInt32(s.obsTrace)
+        c.sPrioOpt = UInt32(s.prioOpt)
         c.uCounters = UInt32(u.counters)
         configPointer.pointee = c
     }
