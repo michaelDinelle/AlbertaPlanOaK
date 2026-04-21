@@ -138,7 +138,7 @@ Closes the *planning-is-degenerate* and *chord-is-myopic* gaps. Result at 3M:
 0/10 seeds diverged, chatter 0.17, plateau still ~+22k per 300k window — set
 the stage for C2 to lift the plateau.
 
-## Tier C — temporal extent (C1 LANDED, C2 ROLLED BACK ×3, C3 ROLLED BACK)
+## Tier C — temporal extent (C1 LANDED, C2 ROLLED BACK ×3, C3 ROLLED BACK, C4 ROLLED BACK)
 
 ### C2 attempt — true option termination (ROLLED BACK on data)
 
@@ -799,6 +799,153 @@ the subtask GVF — instead of the failed Bacon-Harb-Precup free-parameter
 `termW` — becomes the Step-10 STOMP completion. The bench protocol for
 C4 should use distributional peak metrics (median, p75, walking
 coverage) as acceptance, not max peak.
+
+### C4. Plan-orthodox structural termination from ψ (ROLLED BACK — -30% aggregate lift at 1.5M, options went myopic)
+*"The highest ranked features are made each into a separate reward-
+respecting subtask with a terminal value that encourages ending when
+the feature is high."* — Alberta Plan Step 10.
+
+**The one-line change.** `oak_meta_predict` phase 2 β formula:
+
+```
+// Current (D2/D3-era, utilOpt-based stability cap):
+float beta_cap = 1.0f - 1.0f / float(max(ctx.R, 1u));
+float a0       = 1.0f / float(max(ctx.baseO, 1u));
+float beta_k   = beta_cap * a0 / (a0 + ctx.utilOpt[k]);
+
+// C4 (Plan Step 10 attainment termination):
+float beta_k = clamp(0.5f * (1.0f + curr[k]), 0.0f, 1.0f);
+```
+
+The RR-Subtasks eq. 17 TD formula is unchanged:
+```
+δ_k = (r − ρ̄) + (1 − β_k)·curr[k] + β_k·ψ_k(s') − ψ_k(s)
+```
+
+`curr[k]` is a Fourier feature (`cos/sin(z_k)`) bounded to `[-1, 1]` by
+construction in `oak_bk_encode` phase 2, so `β_k ∈ [0, 1]` with no
+learnable parameter.
+
+**Plan Step 10 interpretation of β_k:**
+- `curr[k] = +1` (feature achieved) → β = 1 → option terminates → TD bootstraps from `ψ_k(s')`
+- `curr[k] = 0` (feature at neutral phase) → β = 0.5 → mid-option blend
+- `curr[k] = -1` (feature anti-achieved) → β = 0 → option continues → TD uses `curr[k]` as cumulant
+
+**Why this succeeds where the three C2 attempts all regressed ~99%.**
+The C2 family compounded three new mechanisms simultaneously; C4 adds
+NONE of them:
+
+| C2 failure mechanism | C4 status |
+|---|---|
+| Free `termW[K·R]` learned parameter + Bacon-Harb-Precup option-critic gradient | **Not present — no new parameters; β is a pure function of state** |
+| Closed-form geometric `Q^k = (r̂−ρ̄)/β + V` (amplifies `(r̂−ρ̄)` noise by 1/β) | **Not present — `oak_plan` unchanged, Q^k stays `r̂^k + V(n̂^k(s))`** |
+| Hold-or-refresh chord Bernoulli stochasticity | **Not present — chord still deterministic `softmax(ψ)`** |
+
+C4 reuses the EXISTING β_k slot in the ψ-TD formula, just replaces its
+computation. Zero new state, zero new parameters, zero new kernels.
+
+**How C4 stacks with D3.** D3 gave each `ψ_k` per-option identity via
+chord-weighted Head 1 updates (2.7× walking coverage at 10M, chatter
+-31%). C4 gives that specialized `ψ_k` a Plan Step 10 STOMP
+termination semantics: option k's subtask is "achieve feature_k". With
+both: **ψ_k tracks the value of "continuing until feature_k is
+achieved"**, the canonical RR-Subtasks interpretation.
+
+**Safety analysis (replacing the utilOpt divergence choke).** The old
+β formula throttled options with large `|tdPsi|²` (high utilOpt).
+Removing it loses that safety. Replacements:
+- D3's chord-weighted Head 1: options with unstable ψ get chord[k]→0,
+  so their psi updates self-throttle (different mechanism, similar effect)
+- `β ∈ [0, 1]` clamp: `β·ψ(s')` amplifies by at most 1× per step (no
+  divergence factor like the historically-problematic constant β=0.984)
+- `safe_w` NF guard in Head 1 still active
+
+Risk remaining: rapidly-oscillating `curr[k]` could cause β to
+oscillate, driving TD variance. Smoke + 1.5M screen catch this before
+committing 70 min of 10M compute.
+
+**Fallback (if 1.5M screen kills):** compound form
+`β_k = min((1+curr[k])/2, β_util)` — both caps must fire to terminate,
+keeps divergence protection. Tracked as "C4b" in the decision graph.
+
+**Bench protocol.**
+1. 10k single-process smoke — abort if any NF or chatter spikes past 0.30.
+2. 10×1.5M paired bench vs D3 baseline (primary), C1 secondary.
+3. 10×10M paired if 1.5M passes screen.
+
+**1.5M screen acceptance (hard-gated):**
+- 10/10 wins
+- 0 NF
+- mean lift ≥ +90k/seed (D3 baseline +104k; allow -15%)
+- chatter median ≤ 0.30
+- ≤ 4 negative seeds
+
+**1.5M kill:** any NF, mean lift < +40k, chatter > 0.45, or > 4 negative seeds.
+
+**10M acceptance (distributional, per D3 methodology lesson):**
+- 10/10 wins, 0 NF
+- **median per-seed max peak ≥ +0.07** (D3: +0.047, C1: +0.026)
+- **walking coverage ≥ 4.5% of HBs > 0** (D3: 3.2%, C1: 1.2%)
+- mean lift ≥ +550k (D3: +620k; allow -10%)
+
+**10M kill:** any NF, mean lift < +400k, median peak < +0.020, walking coverage < 2%.
+
+**1.5M screen result (10×1.5M paired bench vs D3 baseline) — KILL:**
+
+| metric | C4 | D3 | delta |
+|---|---:|---:|---|
+| oak wins | 10/10 | 10/10 | match |
+| mean lift | +72 472 | +103 716 | **-30.1%** (every seed -22% to -37%) |
+| negative seeds | 0/10 | 0/10 | match |
+| 0 NF | ✓ | ✓ | match |
+| **chatter median** | **0.0199** | 0.1093 | **-82% (pathologically low)** |
+| median peak | +0.015 | +0.004 | +0.011 (tiny distributional gain) |
+| seeds walking | 7/10 | 5/10 | +2 |
+| walking HBs>0 | 8 | 7 | +1 |
+
+**Mechanism diagnosis (why structural β failed).** `β_k(s') = (1+curr[k])/2`
+gives β ≈ 0.5 at Fourier-feature neutral phase and β → 0 for anti-achieved
+features (curr[k] → -1). Since Fourier features are mean-zero cos/sin
+transforms, **most features most of the time are far from +1** — so β
+stayed LOW most of the time, meaning ψ-TD used `(1-β)·curr[k]` as
+cumulant WITHOUT bootstrapping from `ψ(s')`. Options became **myopic**
+(β close to 0 = no lookahead).
+
+Walking in HalfCheetah requires multi-step credit assignment — committed
+gaits pay off over ~10-20 steps, not per-step. Without ψ bootstrap, no
+option can learn the long-term value of a walking gait. The old adaptive
+`β_k = (1-1/R)·α₀/(α₀+utilOpt[k])` peaked at β ≈ 0.984 for stable options
+— options DID look ahead. C4's structural β sacrificed forward-looking
+bootstrap for attainment interpretation, and the math punishes it: -30%
+aggregate lift, chatter collapses as options over-commit to immediate
+reward without learning the long horizon.
+
+**The Plan Step 10 termination interpretation is structurally incompatible
+with OaK's current ψ-TD formulation** (as was the Bacon-Harb-Precup
+option-critic termination across three C2 attempts). The formalism
+`δ_k = (r-ρ̄) + (1-β_k)·curr[k] + β_k·ψ_k(s') − ψ_k(s)` needs β to be
+HIGH most of the time for options to learn multi-step value, which
+conflicts with Plan Step 10's "β high when feature achieved" because
+most features are not near +1 most of the time for a Fourier basis
+with mean-zero activation.
+
+**Lesson learned (codified):** Plan Step 10 STOMP "terminate when feature
+high" does not map cleanly onto a Fourier-feature basis where features
+are mean-zero. The four attempted variants (C2 v1/v2, C2 retry, C4) all
+regressed. **The termination-from-ψ family is exhausted for this
+architecture.**
+
+**What's kept reverted:** β_k formula restored to
+`(1-1/R)·α₀/(α₀+utilOpt[k])` (adaptive stability cap). Bench artifacts
+preserved at `.oak-benchmarks/halfcheetah-c4-15m/`.
+
+**Next candidate:** **Tier F1 (structural policy σ)** — the 10M data
+across D2/D3/C4 shows the ψ/termination mechanism space is exhausted
+at +0.3 max peak / +0.05 median peak ceiling. The most likely
+plateau-breaker now sits in the policy side: σ=1 Gaussian action noise
+is almost 100% of HalfCheetah's [-1, 1] action range, drowning any
+committed option policy. Reducing σ structurally to 1/√D_action ≈ 0.41
+should let specialized options execute sustained gaits.
 
 ## Tier E — horde scale + departures (last)
 
