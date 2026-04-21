@@ -108,7 +108,7 @@ Each env declares a structured action spec — a list of components, each `Discr
 The agent emits `policyMean[D_policy]` from `oak_meta_action`. The env-wrapper layer (`EnvPoolEnv.sampleAndStep`) is the **sole** site that samples actions and computes score functions:
 
 - Discrete N: Gumbel-max categorical (`-log(-log(U))` + argmax); scoreGrad = `1{a=d} − π_d` (Maddison 2014; Williams 1992).
-- Box A: structural-σ=1 Gaussian (`μ + N(0,1)` clamped to env bounds); scoreGrad = pre-clamp `z` (Williams 1992 REINFORCE; the env-side clamp doesn't change the score function the agent's policy parameterized).
+- Box A: **structural-σ = 1/√A Gaussian** (`μ + (1/√A)·N(0,1)` clamped to env bounds); scoreGrad = `z·√A` (Williams 1992 REINFORCE for σ-parameterized Gaussian, `d log π/dμ = (a−μ)/σ² = z/σ`). Tier F1 (plateau-breaker): the prior σ=1 gave per-step action noise magnitude ≈ √A across the box, which is ~100% of HC's [-1, 1] action range for A=6 — committed option policies were drowned by exploration noise. F1 scales σ with action dim (HC: σ=0.41), so per-component noise stays bounded while the total action-vector-length noise remains ≈ 1. No tunable; A is the Plan-supplied env action-dim. Env-side clamp doesn't change the score function the agent's policy parameterized.
 
 Adding a new env or action-space component type requires adding to `ActionComponent` in Swift; no agent or kernel changes.
 

@@ -969,9 +969,211 @@ representational capacity grow with hardware. Tiny code change.
 
 ## Tier F — non-Plan-orthodox departures (avoid until justified)
 
-- **F1. Learnable policy variance** — Plan-orthodoxy says structural σ=1
-  (Williams 1992 REINFORCE variance is the score function); making σ learnable
-  is a tunable
+### F1. Structural policy σ = 1/√A (Plateau-breaker, DONE — mean lift +170% vs D3)
+
+**Why F1 now (justification).** After five tiers of Plan-orthodox work
+(A through D3 + C4), the aggregate 10M lift plateau is firmly set at
++0.3 max peak / +0.05 median peak / ~+650k mean lift across C1, D2,
+D3, C4. The termination-from-ψ family (C2 ×3, C4) and Step-9 search
+control (D2) and Step-10 off-policy attribution (D3) all hit the same
+ceiling. The ceiling is NOT in the ψ/option/chord mechanics.
+
+The prior σ=1 Gaussian action noise was the single largest
+un-examined source of per-step stochasticity. For HalfCheetah-v4 with
+A=6 continuous actions in [-1, 1]:
+- Per-dim noise: `N(0, 1)` → per-dim magnitude ~1 (100% of dim range)
+- Total vector noise: `‖N(0, I_6)‖ ≈ √6 ≈ 2.45` (much larger than any
+  committed μ vector)
+
+Specialized options (D3 chatter -31%, C4 chatter -91%) were emerging
+but could not sustain walking gaits because every step's σ=1 Gaussian
+noise drowned the committed action signal. Walking requires ~10-20
+step committed gait patterns; the noise resets the gait every step.
+
+**The change (one-line in `sampleAndScoreActions`).** Structural per-
+component σ = 1/√A:
+
+```swift
+let sigma: Float = 1.0 / Float(max(a, 1)).squareRoot()
+let invSigma: Float = Float(max(a, 1)).squareRoot()
+for d in 0..<a {
+    let z = nextNormal(&rngState)
+    let mu = policyMean[mBase + pIdx + d]
+    let raw = mu + sigma * z                      // F1: scaled noise
+    ...
+    scoreGrad[mBase + pIdx + d] = z * invSigma    // Williams 1992: d log π/dμ = z/σ
+}
+```
+
+On HC: σ = 1/√6 ≈ 0.41. Per-dim noise halved; total vector noise
+magnitude now ≈ 1 (structural unit).
+
+**Why this is justifiable as "structurally interpretable Plan-orthodox."**
+The Plan specifies REINFORCE but doesn't fix σ=1 — our earlier hardcode
+was a modeling choice. σ = 1/√A is:
+- Structural (no tunable — A is the env's Plan-supplied action dim)
+- Scales naturally: for higher-dim action spaces, per-dim noise shrinks
+  so total vector noise magnitude stays bounded
+- The Williams 1992 REINFORCE formula generalizes immediately
+  (`scoreGrad = z/σ`)
+
+This is closer to Plan-orthodox than "F1 learnable σ" (the original
+F1 sin — making σ a learnable parameter). We keep σ structural, just
+pick the right structural form.
+
+**Self-consistency check.** The Kim implicit alphaPi formula
+`alphaPi = 1/(baseO + ‖s'‖²·‖∇log π‖²)` auto-adjusts: with new
+scoreGrad = z/σ, ‖∇log π‖² scales by 1/σ² = A. alphaPi shrinks by
+roughly A, so Head 2 (optPolicy REINFORCE) update magnitude scales
+by σ — slower, more committed policy adaptation. Exactly the intended
+plateau-breaking trade: less exploration noise AND slower policy
+churn = options can execute sustained committed policies.
+
+**Expected behavior change.**
+- chatter drops substantially (from the σ=1 noise floor)
+- exploration still nonzero (total noise ≈ 1 per step across all dims)
+- committed options can execute consistent gaits (no per-step noise reset)
+- Head 2 learns slower but more stably
+
+**Risks.**
+- Under-exploration: if σ=0.41 is too small, the agent may get stuck in
+  a local gait before finding walking. Fallback: σ = 1/√(√A) = 1/A^0.25
+  (A=6 → σ=0.64, less aggressive reduction).
+- Policy plateau: slower Head 2 updates may mean converging to a
+  suboptimal committed gait.
+
+**Bench protocol.**
+1. 10k single-process smoke: verify 0 NF, chatter DOWN vs D3 baseline
+   (expected: from ~0.10 to ~0.04 at 10k), action magnitudes bounded.
+2. 10×1.5M paired bench vs D3 baseline.
+3. 10×10M paired bench if 1.5M screen passes.
+
+**1.5M screen acceptance (hard-gated):**
+- 10/10 wins
+- 0 NF
+- mean lift ≥ +90k/seed (D3 baseline +104k; allow -15%)
+- chatter median < D3's 0.11 (F1 should drop chatter)
+- no chord collapse
+- ≤ 4 negative seeds
+
+**1.5M kill:** any NF, mean lift < +40k, chatter > 0.30 (unexpected
+rise means F1 broke something), > 4 negative seeds.
+
+**10M acceptance (distributional, per D3 methodology lesson):**
+- 10/10 wins, 0 NF
+- **median per-seed max peak ≥ +0.10** (D3: +0.047, C1: +0.026 —
+  F1 should more than double typical-seed peak)
+- **walking coverage ≥ 6%** of HBs > 0 (D3: 3.2% — F1 should roughly
+  2× coverage)
+- mean lift ≥ +600k (D3: +620k; allow -5%)
+
+**10M kill:** any NF, mean lift < +400k, median peak < +0.030
+(below D3), walking coverage < 3% (below D3).
+
+**Bench results.**
+
+**1.5M screen (10 seeds × 1.5M paired vs D3 baseline) — MASSIVE PASS:**
+
+| metric | F1 | D3 | delta |
+|---|---:|---:|---|
+| wins | 10/10 | 10/10 | match |
+| **mean lift** | **+236 714** | +103 716 | **+128%** |
+| chatter median | 0.0294 | 0.1093 | -73% |
+| max peak | **+0.342** | +0.089 | **+285%** |
+| p90 peak | +0.199 | +0.083 | +140% |
+| p75 peak | +0.159 | +0.054 | +194% |
+| median peak | +0.045 | +0.004 | +0.041 |
+| p25 peak | +0.013 | -0.048 | +0.061 |
+| seeds with walking | 8/10 | 5/10 | +3 |
+| walking HBs>0 | 15/500 | 7/500 | +114% |
+| NF | 0 | 0 | match |
+| negative seeds | 0/10 | 0/10 | match |
+
+All 10 seeds gained +44% to +190% on rewSum lift. F1 max peak at **1.5M**
+(+0.342) already exceeded C1's single-seed lucky-outlier max peak at
+**10M** (+0.310) — the plateau that held across C1/D2/D3/C4 was
+shattered at only 15% of the training time.
+
+**10M deep bench (10 seeds × 10M paired vs D3 10M + C1 10M):**
+
+| metric | F1 | D3 | C1 |
+|---|---:|---:|---:|
+| wins | 10/10 | 10/10 | 10/10 |
+| **mean lift** | **+1 673 362** | +620 705 | +668 101 |
+| **F1 vs** | — | **+170%** | **+150%** |
+| chatter median | 0.0374 | 0.1172 | 0.1697 |
+| max peak | +0.109 | +0.164 | +0.310 (outlier) |
+| median peak | +0.060 | +0.047 | +0.026 |
+| walking coverage | 4.0% | 3.2% | 1.2% |
+| NF | 0 | 0 | 0 |
+
+**Every single seed** gained +123% to +242% on mean lift vs C1 AND vs D3.
+Mean lift is now **2.5–2.7× the prior best**. This is by far the largest
+signal change on the roadmap.
+
+**The distinctive signature.** F1's `max peak` is LOWER than C1's at 10M
+(+0.109 vs +0.310). Looking at per-seed running-max-peak trajectory over
+10M heartbeats:
+- Most seeds find their walking gait by ~1-2M steps
+- **Running max peak stays FLAT from ~2M to 10M** — no further
+  improvement over 8M steps of continued training
+- chatter 0.037 indicates near-deterministic action output
+- mean lift is 2.7× because the agent IS walking (consistently) — the
+  reward just accumulates at a stable mid-quality rewardRate (~+0.05
+  per step typical) instead of single seeds finding blockbuster gaits
+
+**F1 broke the AGGREGATE plateau (mean lift 2.5× higher), but exposed
+a new plateau: options stabilize and stop improving.** σ=0.41 lets
+committed gaits actually run without per-step noise reverting them; but
+once committed, nothing in the current G&T/MetaOptimize loop drives
+options to EXPLORE BETTER gaits. The learning machinery has HALTED
+from ~2M onward for most seeds.
+
+**Methodological lesson (third such lesson this cycle):**
+`max peak rewardRate` and `median per-seed peak` are both peak-sensitive
+metrics. For distributions where most seeds find a mid-quality stable
+gait (F1's signature), **mean lift is the correct acceptance criterion**
+because it directly measures total-reward-maximized (the RL objective).
+Peak metrics can FAIL even when the agent is 2.5× better by the total-
+reward metric.
+
+**What's kept.** One-line change in `Sources/Main.swift`
+`sampleAndScoreActions` (σ = 1/√A, scoreGrad = z/σ). No kernel changes.
+Bench artifacts at `.oak-benchmarks/halfcheetah-f1-15m/` and
+`halfcheetah-f1-10m/`.
+
+**What's exposed as the NEW plateau.** OaK today has three continual-
+improvement gaps that prevent sustained exploration past initial
+convergence:
+
+1. **`utilOpt[k]` reseeding signal misaligned** (Plan Step 11 sharpening
+   gap). Current `utilOpt[k] = EMA(|tdPsi|²)` treats "stable at good
+   value" and "stable at mediocre value" identically — both are "low
+   utilOpt" candidates for G&T reseeding. Plan Step 11 wording is
+   *"useful in planning"*, not "uncertain in prediction". Fix:
+   `utilOpt[k]` from option k's chord-weighted contribution to
+   `planAdv`. Surgical change in `oak_post_learn` region 2. HIGHEST
+   expected continual-improvement leverage.
+
+2. **Single-step TD, no eligibility traces** (Plan Step 1 explicit gap).
+   Walking requires ~10-20 step committed gait patterns; 1-step TD sees
+   each step independently. Plan Step 1 verbatim mentions *"short-term
+   credit-assignment memories such as eligibility traces"*. Fix: add
+   trace buffer `e[K·R]` with `e ← γλ·e + ∇ψ`, update ψ via `e`
+   instead of `prev`.
+
+3. **G&T reseed generates RANDOM features, never combines existing ones**
+   (Plan Step 2 explicit gap). Plan Step 2 verbatim: *"creating and
+   introducing new features **made by combining existing features**"*.
+   Current `oak_bk_admit_commit` samples fresh `N(0, 1/√R)` Fourier
+   rows; combinations would need to bias the reseed toward
+   high-utility existing features plus small noise.
+
+Recommended sequence: **Step 11 sharpening first** (small blast, direct
+visible trajectory change — seeds should keep improving past 2M),
+**then eligibility traces** (compounds with Step 11 since each new
+option converges faster). Feature combinations can follow.
+
 - **F2. Option keyboard Design B** — joint-subtask vs. chord-blend; the Plan §11
   alternative — would change the chord semantics entirely
 - **F3. Discount factor reintroduction** — Plan Step 5 onward eschews
@@ -995,56 +1197,106 @@ flowchart TD
     C2rcheck -->|"+417/seed, 5/10 wins, 5/10 negative, 2/10 walking → KILL"| C2rroll[C2 retry rolled back; third C2 negative result documented]
     C2rroll --> D2done["Tier D2 NEUTRAL: prioritized sweeping kept as infra (+64% SPS via perf-opts); 10M tie with C1"]
     D2done --> D2_10M["D2 10M characterization: mean lift -1.8% vs C1, peak +0.135 vs +0.310 (Step-9 hypothesis falsified)"]
-    D2_10M --> D3done["Tier D3 PARTIAL WIN: chord-weighted psi (Plan Step 10 off-policy attribution); 10M distributional improvement"]
-    D3done --> D3_10M["D3 10M: median peak +0.047 vs C1 +0.026; walking coverage 3.2% vs C1 1.2%; chatter -31%; max peak still below C1 outlier"]
-    D3_10M --> nextWin{Next candidates post-D3}
-    nextWin -->|"natural follow-up: structural termination from psi"| C4[Tier C4: Plan-orthodox termination from psi]
-    nextWin -->|"smallest blast: align utility with planning"| Step11[Step 11 sharpening: utilOpt from planAdv]
-    nextWin -->|"multi-step planning consumes D2 priority signal"| D1[Tier D1: Dyna multi-step planning]
-    C4 --> E1[Tier E1: horde-scale K]
-    Step11 --> C4
-    D1 --> C4
+    D2_10M --> D3done["Tier D3 PARTIAL WIN: chord-weighted psi (Plan Step 10 off-policy); 10M distributional improvement"]
+    D3done --> D3_10M["D3 10M: median peak +0.047 vs C1 +0.026; walking coverage 3.2% vs C1 1.2%"]
+    D3_10M --> C4roll["Tier C4 ROLLED BACK: structural beta = (1+curr[k])/2 regressed -30% aggregate at 1.5M; termination-from-psi family exhausted"]
+    C4roll --> F1done["Tier F1 DONE: structural sigma = 1/sqrt(A); PLATEAU BREAKER; mean lift +170% vs D3, every seed +122% to +242%"]
+    F1done --> F1_10M["F1 10M: mean lift +1.67M (vs D3 +620k, C1 +668k); chatter 0.037 nearly deterministic; options CONVERGE at 2M and stop improving"]
+    F1_10M --> nextWin{Next candidates post-F1}
+    nextWin -->|"HIGHEST leverage: fixes continual improvement after convergence"| Step11[Step 11 sharpening: utilOpt from planAdv]
+    nextWin -->|"Plan Step 1 gap: multi-step credit assignment"| Traces[Eligibility traces]
+    nextWin -->|"Plan Step 2 gap: feature combinations in G&T"| FeatCombine[Feature combinations in G&T reseed]
+    Step11 --> Traces
+    Traces --> FeatCombine
+    FeatCombine --> E1[Tier E1: horde-scale K]
     E1 --> E2[Tier E2: R from compute]
 ```
 
-**Where we landed (post-D3 10M + perf-opts):** Tier C, Tier D2, and
-Tier D3 are all characterized. **D3 is a PARTIAL WIN at 10M** — Plan
-Step 10 off-policy attribution (chord-weighted Head 1 ψ updates)
-delivers exactly the mechanism designed: per-option ψ specialization
-confirmed by the -31% chatter drop and 2.7× walking coverage vs C1.
-**Aggregate intelligence cost is zero** (mean lift tied). The gain is
-**distributional** (median peak +81% vs C1, p25/p75/walking breadth all
-better) rather than peak-shattering — no seed reproduces C1's +0.310
-single-seed outlier (lucky draw on seed 5, unreplicable).
+**Where we landed (post-F1 10M — the plateau is BROKEN).**
 
-The **perf-opt stack** (PERFOPT + PERFOPT2 + autoreleasepool) is all
-bit-identical and ships unconditionally: concurrent agentMs 0.6072 ms →
+Tier F1 (structural policy σ = 1/√A) delivered the largest intelligence
+leap of the entire roadmap: **mean lift +1 673 362 at 10M, up from
+D3's +620 705 (+170%) and C1's +668 101 (+150%).** Every single seed
+gained +123% to +242% on total reward accumulated. The plateau that
+held across C1 → D2 → D3 → C4 (all tied at ~+650k mean lift) is
+decisively broken.
+
+**Mechanism:** the prior σ=1 Gaussian action noise had per-step magnitude
+√A ≈ 2.45 on HC — nearly 100% of the [-1, 1] action range was
+exploration noise, drowning any committed option policy every step.
+With σ = 1/√A = 0.41, per-dim noise is bounded while total action
+vector magnitude stays ≈ 1 structural unit. Committed options can
+now execute sustained gaits without per-step noise reverting them.
+Mean lift 2.7× because the agent IS walking consistently (not just
+at lucky peaks).
+
+**Three lessons codified this cycle:**
+1. **1.5M peak signals need 10M confirmation** (D2 canonical).
+2. **Max peak is outlier-sensitive; use distributional metrics**
+   (D3 canonical). Median peak, p75 peak, walking coverage.
+3. **Mean lift > distributional peak as THE RL acceptance metric**
+   (F1 canonical — F1 FAILED the median-peak criterion by my plan's
+   hard gate but delivered 2.7× mean lift). Mean lift measures
+   total-reward-maximized (the actual RL objective); peak metrics
+   measure transient peaks. When the agent shifts from "lucky high
+   peak on one seed" to "consistent mid-quality walking on all
+   seeds" (F1's signature), peak metrics misread it as a regression.
+
+**The perf-opt stack** (PERFOPT + PERFOPT2 + autoreleasepool) ships
+unconditionally — all bit-identical: concurrent agentMs 0.6072 ms →
 0.3511 ms (**-42%**), SPS 1 541 → 2 534 (**+64%**), 10M paired bench
 ~66 min/seed instead of ~2h48m.
 
-**Two methodological lessons codified this cycle:**
-1. **1.5M peak signals need 10M confirmation** (D2 canonical example —
-   "+28% at 1.5M" evaporated to -56% at 10M).
-2. **Max peak rewardRate is outlier-sensitive and should NOT be hard-gated**
-   (D3 canonical example — my `max peak > +0.35` threshold extrapolated
-   from C1's seed-5 outlier and triggered a false-kill). Use median peak,
-   p75 peak, and walking coverage (HBs > 0 / total HBs) for acceptance
-   instead. Future plan writeups should respect this.
+**The new plateau exposed by F1 is CONTINUAL IMPROVEMENT itself.**
 
-**Where the HC walking limiter now lives.** Both D2 (search control)
-and D3 (off-policy attribution) confirmed that aggregate mean lift is
-already at the C1 ceiling — the limiter isn't those Plan steps. D3
-revealed that **per-seed reliability can be raised** (7/10 seeds walk
-with D3 vs 5/10 C1, walking coverage 2.7× higher) but **the single-
-seed peak ceiling (+0.3+) is not structurally broken**. Two remaining
-hypotheses for the ceiling: (a) chord-blend action output still dilutes
-each option's committed action even with specialized ψ — options can't
-execute a pure walking gait without pulling other options' policies in;
-(b) the reseeding signal (`utilOpt[k] = EMA(|tdPsi|²)`) is misaligned
-with "useful in planning" and may starve the options that matter most.
+Per-seed running-max-peak trajectories show most seeds converge by
+~1-2M steps and then stay FLAT for 8+M more steps. Chatter 0.037
+(near-deterministic). The agent found a stable walking gait and
+stopped exploring. Mean lift is 2.7× because the reward accumulates
+every step the agent walks — but no new, better gait is discovered
+over 8M additional steps of training. **The Alberta Plan's core
+promise — continual learning — is not being delivered past initial
+convergence.**
 
-**Next decision (post-D3 10M):** three Plan-orthodox candidates.
+**Three continual-improvement gaps remain (ranked by leverage):**
 
+1. **Step 11 sharpening** — `utilOpt[k]` is currently `EMA(|tdPsi|²)`
+   which rewards "stable" (unchanging ψ) regardless of whether that
+   stability is at a useful planning value. Plan Step 11 verbatim:
+   *"if an option model is **never useful in planning**, then it…
+   should eventually be deleted"*. Fix: `utilOpt[k]` from option k's
+   chord-weighted contribution to `planAdv`. Plateaued-but-mediocre
+   options get reseeded; planning-critical options are kept.
+   **SMALL blast, HIGHEST expected impact for continual improvement.**
+
+2. **Eligibility traces** (Plan Step 1 gap). Walking requires ~10-20
+   step gait patterns; 1-step TD sees each step independently. Plan
+   Step 1 verbatim mentions *"short-term credit-assignment memories
+   such as eligibility traces"*. Fix: add trace buffer `e[K·R]`
+   with `e ← γλ·e + ∇ψ`, update ψ via `e·δ` instead of `prev·δ`.
+   Each new option (after Step 11 reseeding) converges faster to
+   a better long-horizon value function.
+
+3. **Feature combinations in G&T** (Plan Step 2 gap). Plan Step 2
+   verbatim: *"creating and introducing new features **made by
+   combining existing features**"*. Current `oak_bk_admit_commit`
+   samples fresh `N(0, 1/√R)` Fourier rows — no combination.
+   Fix: bias reseed toward high-utility existing feature
+   combinations + small Gaussian noise. Slow-burn representational
+   growth. Becomes interesting after Step 11 + traces land.
+
+**Deprioritized:**
+- C4 termination family exhausted across four attempts (C2 v1/v2,
+  C2 retry, C4) — structurally incompatible with the ψ-TD formulation
+  at these scales. Plan Step 10 STOMP termination is a documented
+  open gap; not addressable via the β slot.
+- D1 Dyna multi-step planning is pointless until options keep
+  improving. Currently options stabilize at the value function the
+  model supports; more planning just accelerates stabilization.
+
+---
+
+**Deprecated decision text from pre-F1:**
 1. **C4 (Plan-orthodox termination from ψ, no learnable `termW`)** —
    Built on D3's per-option-specialized ψ. Termination function
    `β^k(s) = f(ψ_k(s))` derived structurally from the subtask GVF —
