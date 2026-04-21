@@ -89,10 +89,25 @@ extension Sequence where Element == ActionComponent {
 }
 
 // Per-row per-component sampling. Discrete N: Gumbel-max categorical, scoreGrad = 1{a=d} - pi_d.
-// Box A: structural-sigma=1 Gaussian, scoreGrad = z (Williams 1992 REINFORCE; the *pre-clamp*
-// z is the literal score function for the sampled `raw = mu + z`, regardless of any subsequent
-// env-side clamp - the clamp affects only the env's view of the action, not the agent's
-// gradient signal).
+//
+// Box A (Tier F1 structural σ): Gaussian with STRUCTURAL per-component σ = 1/√A, where A is
+// the box component's action dimensionality. Williams 1992 REINFORCE for σ-parameterized
+// Gaussian: d log π(a|s)/dμ = (a − μ)/σ² = σ·z/σ² = z/σ (where z ~ N(0,1) is the pre-clamp
+// noise). The clamp affects only the env's view, not the agent's gradient.
+//
+// Motivation: prior to F1 we used σ=1 (hardcoded). On HalfCheetah-v4 (A=6, action bounds
+// [-1, 1]), unit Gaussian noise has per-step magnitude sqrt(A) ≈ 2.45 — nearly 100% of
+// the action range is exploration, drowning any committed option policy. Every D2/D3/C4
+// experiment showed specialized options emerging (D3 chatter -31%, C4 chatter -91%) but
+// could not sustain a walking gait because σ=1 noise reverted the gait every step. F1's
+// structural σ = 1/√A scales per-dim noise to 0.41 on HC — exploration still nonzero but
+// committed policies can now dominate the action signal over 10-20 step walking gaits.
+//
+// No tunable: A is the Plan-supplied action dim for each box component, identical to the
+// env spec. The score-function rescaling `z/σ = z·√A` is the direct Williams 1992 formula;
+// Kim implicit alphaPi auto-adjusts (∥∇log π∥² scales by A, so alphaPi shrinks by ~A,
+// net Head 2 update magnitude scales by σ — slower/more-committed policy adaptation,
+// exactly the intended plateau-breaking trade).
 func sampleAndScoreActions(spec: [ActionComponent], numEnvs: Int, dPolicy: Int,
                            envActionWidth: Int,
                            policyMean: UnsafePointer<Float>,
@@ -140,16 +155,19 @@ func sampleAndScoreActions(spec: [ActionComponent], numEnvs: Int, dPolicy: Int,
                 envAction[aBase + aIdx] = Float(bestIdx)
                 pIdx += n; aIdx += 1
             case .box(let a, let low, let high):
+                // Tier F1: structural σ = 1/√A, matching the action-dim scaling that keeps
+                // the total action vector magnitude ≈ 1 regardless of A. Williams 1992
+                // REINFORCE score for N(μ, σ²): d log π(a|s)/dμ = (a − μ)/σ² = σ·z/σ² = z/σ.
+                let sigma: Float = 1.0 / Float(max(a, 1)).squareRoot()
+                let invSigma: Float = Float(max(a, 1)).squareRoot()   // = 1/σ
                 for d in 0..<a {
                     let z = nextNormal(&rngState)
                     let mu = policyMean[mBase + pIdx + d]
-                    let raw = mu + z
+                    let raw = mu + sigma * z
                     let clamped = max(low[d], min(high[d], raw.isFinite ? raw : 0))
                     envAction[aBase + aIdx + d] = clamped
-                    // Pre-clamp z is the literal Williams 1992 REINFORCE score for sigma=1
-                    // Gaussian: d log pi(a|s) / d mu = (raw - mu) = z. Env-side clamp does
-                    // not change the score function the agent's policy parameterized.
-                    scoreGrad[mBase + pIdx + d] = z
+                    // Env-side clamp affects the env's view only, not the agent's score.
+                    scoreGrad[mBase + pIdx + d] = z * invSigma
                 }
                 pIdx += a; aIdx += a
             }
