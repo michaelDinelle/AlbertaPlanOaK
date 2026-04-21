@@ -209,14 +209,37 @@ inline Ctx make_ctx(device float *params, device float *stateArena, device uint 
 inline device float *state_at(Ctx ctx, uint slot) { return ctx.state + slot * ctx.R; }
 
 // =================================================================================================
-// 1. oak_bk_obs - per-feature observation Welford EMA + Tier C1 obsTrace EMA. First so
-//    encode reads current stats. Per-thread, no cross-thread reduction over data — bit-id
-//    against per-thread compute order. The trace EMA fires at a FIXED rate 1/baseO (not the
-//    `track_rate(t, baseO)` warmup-aware rate used for obsMean/obsSM): the trace is meant
-//    as a memory of the last ~baseO standardized observations, so it should not be biased
-//    by an exact-mean warmup phase.
+// 1+2. oak_bk_encode - FUSED kernel combining oak_bk_obs (per-feature observation Welford +
+//      obsTrace EMAs, Tier C1) and oak_encode (perception / deep Fourier features,
+//      Lewandowski-Schuurmans-Machado 2024, arXiv:2410.20634). Dispatched as 1 TG of R=rank
+//      threads. Phase 1 uses threads with tid < O to update obsMean/obsSM/obsTrace; phase 2
+//      uses all R threads to compute one Fourier feature per thread. A single threadgroup_
+//      barrier(mem_flags::mem_device) between the phases replaces the prior host-level
+//      memoryBarrier between two separate kernel dispatches — saves 1 dispatch + 1 host
+//      barrier per step (~25-40 µs on concurrent bench).
+//
+//      The trace EMA fires at a FIXED rate 1/baseO (not the `track_rate(t, baseO)` warmup-
+//      aware rate used for obsMean/obsSM): the trace is meant as a memory of the last ~baseO
+//      standardized observations, so it should not be biased by an exact-mean warmup phase.
+//
+//      Encoder row width is 2·baseO (Tier C1) — first baseO multiplies std_obs, next baseO
+//      multiplies obsTrace:
+//        state[feat in [0, R/2)] = cos( phase[pre] + Σ_o W[pre, o]·std_obs[o]
+//                                                 + Σ_o W[pre, baseO+o]·obsTrace[o] )
+//        state[feat in [R/2, R)] = sin( ... same pre-activation index as its cos partner ... )
+//      cos/sin are bounded in [−1, 1]; linear weights on top grow without cap (BWH).
+//      Encoder + phase evolve only via generate-and-test in oak_bk_admit_commit.
+//
+//      Tier C3 (recurrent self-feedback) was attempted in two forms and both regressed by
+//      ~52% on the 10×1.5M paired bench (TD double non-stationarity); encoder remains C1
+//      shape.
+//
+//      Inv-10 (bit-identical FP) preserved: same fma sequences in both phases; the NF
+//      counter aggregation uses a per-simdgroup `simd_sum` + threadgroup-memory cross-
+//      simdgroup sum (mathematically equivalent to the pre-fusion single-simdgroup
+//      simd_sum in the original oak_bk_obs since total NF count is associative).
 // =================================================================================================
-kernel void oak_bk_obs(
+kernel void oak_bk_encode(
     device float         *params      [[buffer(0)]],
     device float         *stateArena  [[buffer(1)]],
     device uint          *uintArena   [[buffer(2)]],
@@ -227,7 +250,9 @@ kernel void oak_bk_obs(
     uint tgW [[threads_per_threadgroup]])
 {
     Ctx ctx = make_ctx(params, stateArena, uintArena, scalars, stats, cfg);
-    float invT     = track_rate(ctx.stepCount, ctx.baseO);
+
+    // ================= PHASE 1: oak_bk_obs =================
+    float invT      = track_rate(ctx.stepCount, ctx.baseO);
     float traceRate = 1.0f / float(max(ctx.baseO, 1u));   // Tier C1: fixed structural decay.
     uint nfLocal = 0u;
     for (uint o = tid; o < ctx.O; o += tgW) {
@@ -235,54 +260,40 @@ kernel void oak_bk_obs(
         if (!isfinite(x)) { nfLocal++; continue; }
         ctx.observationMean[o] += invT * (x - ctx.observationMean[o]);
         ctx.obsSM[o]           += invT * (x * x - ctx.obsSM[o]);
-        // Trace EMA over *standardized* obs using the just-updated stats. The trace is the
-        // second half of every Fourier pre-activation's input in oak_encode, so it must
-        // share std_obs's scale (RFF-1 init then puts the trace half in the same regime).
+        // Trace EMA over *standardized* obs using the just-updated stats. Shares std_obs's
+        // scale (RFF-1 init then puts the trace half in the same regime).
         float s = standardized_obs(x, ctx.observationMean[o], ctx.obsSM[o], ctx.baseO);
         ctx.obsTrace[o] += traceRate * (s - ctx.obsTrace[o]);
     }
-    uint nfTotal = simd_sum(nfLocal);
-    if (tid == 0u) ctx.counters[OAK_CNT_OBS_NF] = nfTotal;
-}
 
-// =================================================================================================
-// 2. oak_encode - perception. Deep Fourier features (Lewandowski-Schuurmans-Machado 2024,
-//    arXiv:2410.20634): R/2 pre-activations, each producing a paired (cos, sin) channel.
-//    Each pre-activation reads BOTH the standardized obs (instantaneous) AND the obsTrace
-//    (Tier C1, Plan Step 3 explicit: low-pass of std_obs at decay 1/baseO, capturing the
-//    last ~baseO steps of dynamics so POMDP signals like gait phase / joint accel become
-//    encode-able). Encoder row width is therefore 2·baseO — first baseO multiplies std_obs,
-//    next baseO multiplies obsTrace.
-//
-//    Tier C3 (recurrent self-feedback in the encoder) was attempted in two forms — RFF-1
-//    across all three regions (v1) and variance-balanced W_state at sqrt(baseO/R) (v2) —
-//    and both regressed by ~52% on the 10×1.5M paired bench. Diagnosis: recurrent dynamics
-//    create double non-stationarity for the TD bootstrap (state distribution shifts both
-//    from policy change AND from recurrent evolution). ESN/LSM works because the readout
-//    is supervised against a stationary target; OaK's TD heads can't track both. C3 was
-//    rolled back; encoder remains C1 shape.
-//
-//      state[feat in [0, R/2)] = cos( phase[feat]  +  Σ_o W_enc[feat][o]·std_obs[o]
-//                                                 +  Σ_o W_enc[feat][baseO+o]·obsTrace[o] )
-//      state[feat in [R/2, R)] = sin( ... same as above with the paired pre-activation ... )
-//
-//    cos/sin are bounded in [−1, 1] (structural scale prior on the BASIS); linear weights
-//    on top still grow without cap (BWH). Encoder + phase evolve only via generate-and-test
-//    in bk_admit_commit (Plan Step 2 generate-and-test).
-// =================================================================================================
-kernel void oak_encode(
-    device float         *params      [[buffer(0)]],
-    device float         *stateArena  [[buffer(1)]],
-    device uint          *uintArena   [[buffer(2)]],
-    device KernelScalars *scalars     [[buffer(3)]],
-    device KernelStats   *stats       [[buffer(4)]],
-    constant KernelConfig &cfg        [[buffer(5)]],
-    uint feat [[thread_position_in_grid]])
-{
-    if (feat >= cfg.rank) return;
-    Ctx ctx = make_ctx(params, stateArena, uintArena, scalars, stats, cfg);
-    uint halfR = ctx.R >> 1u;                  // ctx.R is even (host-enforced).
-    uint pre   = (feat < halfR) ? feat : feat - halfR;
+    // NF count aggregation across simdgroups: per-simdgroup simd_sum, then cross-simdgroup
+    // sum in threadgroup memory. tg_nf is sized for up to 8 simdgroups (256-thread TG),
+    // which covers the current R ∈ {32, 64, 128} range used by real envs.
+    constexpr uint OAK_MAX_TG_SIMDGROUPS = 8u;
+    threadgroup uint tg_nf[OAK_MAX_TG_SIMDGROUPS];
+    uint sgSum = simd_sum(nfLocal);
+    uint sgId  = tid / 32u;
+    if (tid % 32u == 0u && sgId < OAK_MAX_TG_SIMDGROUPS) tg_nf[sgId] = sgSum;
+
+    // ================= BARRIER (phase 1 → phase 2, device memory fence) =================
+    // Phase 2 reads obsMean, obsSM, obsTrace from device memory. Need threadgroup_barrier
+    // with mem_device scope so all writes from phase 1 are visible across all lanes of
+    // both simdgroups before any phase 2 read. (simdgroup_barrier would only fence within
+    // one simdgroup; we have 2 simdgroups in the R=64 TG on HC.)
+    threadgroup_barrier(mem_flags::mem_device);
+
+    if (tid == 0u) {
+        uint nfTotal = 0u;
+        uint nSgs = (tgW + 31u) / 32u;
+        for (uint s = 0u; s < nSgs && s < OAK_MAX_TG_SIMDGROUPS; ++s) nfTotal += tg_nf[s];
+        ctx.counters[OAK_CNT_OBS_NF] = nfTotal;
+    }
+
+    // ================= PHASE 2: oak_encode =================
+    uint feat = tid;
+    if (feat >= ctx.R) return;
+    uint halfR  = ctx.R >> 1u;                 // ctx.R is even (host-enforced).
+    uint pre    = (feat < halfR) ? feat : feat - halfR;
     uint encRow = pre * 2u * ctx.baseO;        // 2·baseO weights per pre-activation (Tier C1).
     float z = ctx.phase[pre];
     // First half: std_obs (instantaneous).
@@ -301,22 +312,36 @@ kernel void oak_encode(
 }
 
 // =================================================================================================
-// 3. oak_meta - chord softmax (Plan option keyboard, Design A) + alphaPi (Kim arXiv:2510.06149)
-//    + ρ̄ EMA (Reward Centering arXiv:2405.09999). Runs BEFORE oak_predict so the new chord
-//    drives this step's ψ TD.
+// 3+4. oak_meta_predict - FUSED kernel combining oak_meta (chord keyboard) and oak_predict
+//      (multi-GVF TD). Both kernels are K-thread single-simdgroup with a clear dependency
+//      chain: predict reads ρ̄ (which meta updates). Fusing eliminates 1 kernel dispatch
+//      and 1 host-level memoryBarrier per step (~25-40 µs/step on concurrent bench), at
+//      the cost of one intra-kernel simdgroup_barrier (which is essentially free on Apple
+//      GPU where lanes execute in lockstep).
 //
-//    K threads (one per option, fits one Apple SIMD group). Per-thread k cost: R FMA
-//    (ψ·curr inner product) — fully parallel across K. Reductions are bit-identical to
-//    the prior sequential `for k in K` kernel:
-//      * `simd_max` for the softmax max (max is associative + commutative → bit-identical).
-//      * `Z = Σ_k expL_k` summed sequentially on lane 0 via `simd_shuffle`, so the reduction
-//        order matches the original `for (uint k = 0; k < ctx.K; ++k) Z += expL[k]` exactly.
-//        Lane 0 broadcasts `Z` via `simd_broadcast`. Optimization-phase contract Inv-10:
-//        FP-reorder kernel changes (the previous `simd_sum`) shifted per-seed chatter in
-//        the validation bench — pinning reduction order restores zero-intelligence-hit.
-//    Lane 0 also does the scalar alphaPi (R + D ops) and ρ̄ EMA.
+//      Phase 1 (oak_meta):
+//        * chord softmax (Plan option keyboard, Design A): chord[k] ← softmax_k(ψ(s'))
+//        * alphaPi = 1/(baseO + ‖s'‖²·‖∇log π‖²)   (Kim arXiv:2510.06149)
+//        * ρ̄ EMA                                  (Reward Centering arXiv:2405.09999)
+//
+//      Phase 2 (oak_predict):
+//        * Main TD on lane 0: δ = (r − ρ̄) + V(s') − V(s)   (ρ̄ uses the POST-meta value)
+//        * Per-option ψ-TD on lane k: δ_k = (r − ρ̄) + (1−β_k)·curr[k] + β_k·ψ_k(s') − ψ_k(s)
+//          with adaptive β_k = (1 − 1/R)·α₀/(α₀ + utilOpt[k]), α₀ = 1/baseO.
+//
+//      Dependency carried across the barrier: phase 1 lane 0 updates `ctx.scalars->rho`;
+//      phase 2 reads the updated ρ̄ by dereferencing `ctx.scalars->rho` (NOT the cached
+//      `ctx.rho`, which was snapshotted pre-phase-1 in make_ctx). The
+//      `simdgroup_barrier(mem_flags::mem_device)` fence guarantees lane 0's device-memory
+//      write is visible to all other lanes after the barrier.
+//
+//      Inv-10 (bit-identical FP) preserved: the fma sequences in both phases are identical
+//      to the pre-fusion kernels, and the only difference is that predict reads the just-
+//      updated ρ̄ from scalars directly instead of from a kernel-start Ctx snapshot.
+//      Both kernels previously executed as separate launches with a host memoryBarrier in
+//      between, which produces the same program order (phase 1 writes → phase 2 reads).
 // =================================================================================================
-kernel void oak_meta(
+kernel void oak_meta_predict(
     device float         *params      [[buffer(0)]],
     device float         *stateArena  [[buffer(1)]],
     device uint          *uintArena   [[buffer(2)]],
@@ -327,7 +352,10 @@ kernel void oak_meta(
 {
     Ctx ctx = make_ctx(params, stateArena, uintArena, scalars, stats, cfg);
     bool active = (k < ctx.K);
+    device const float *prev = state_at(ctx, ctx.stateSlot);
     device const float *curr = state_at(ctx, 1u - ctx.stateSlot);
+
+    // ================= PHASE 1: oak_meta =================
 
     // Save chordPrev and compute the per-option ψ logit in one R-wide pass over curr.
     float zPsi = 0.0f;
@@ -367,33 +395,19 @@ kernel void oak_meta(
         float invT = track_rate(ctx.stepCount, ctx.baseO);
         ctx.scalars->rho += invT * (ctx.reward[0] - ctx.rho);
     }
-}
 
-// =================================================================================================
-// 4. oak_predict - Horde-style multi-GVF update (K threads, fits one Apple SIMD group).
-//      Main TD (lane 0):    delta   = (r - ρ̄) + V(s') - V(s)        (differential TD, ρ̄ centered)
-//      Subtask TD (lane k): delta_k = (r - ρ̄) + (1−β_k)·curr[k] + β_k·ψ_k(s') − ψ_k(s)
-//                           with adaptive β_k = (1 − 1/R)·α₀/(α₀ + utilOpt[k]),  α₀ = 1/baseO.
-//    utilOpt[k] (EMA of |tdPsi[k]|² from oak_post_learn) is the negative-feedback brake that
-//    replaced the constant β = 1 − 1/R attempt that diverged 6/10 seeds. Initialized at
-//    utilOpt[k] = R so β_k starts ≈ 0 (myopic); it grows toward the cap as ψ stabilizes.
-//    NF counter aggregated via `simd_sum` so a single bad lane updates the counter without
-//    atomics. Per-thread cost: 2R FMA on ψ (lane 0 also does 2R FMA on valueW).
-// =================================================================================================
-kernel void oak_predict(
-    device float         *params      [[buffer(0)]],
-    device float         *stateArena  [[buffer(1)]],
-    device uint          *uintArena   [[buffer(2)]],
-    device KernelScalars *scalars     [[buffer(3)]],
-    device KernelStats   *stats       [[buffer(4)]],
-    constant KernelConfig &cfg        [[buffer(5)]],
-    uint k [[thread_position_in_grid]])
-{
-    Ctx ctx = make_ctx(params, stateArena, uintArena, scalars, stats, cfg);
-    bool active = (k < ctx.K);
-    device const float *prev = state_at(ctx, ctx.stateSlot);
-    device const float *curr = state_at(ctx, 1u - ctx.stateSlot);
-    float reward_c = ctx.reward[0] - ctx.rho;
+    // ================= BARRIER (device memory fence) =================
+    // Lane 0's write to scalars->rho must be visible to all other lanes before phase 2
+    // reads it. simdgroup_barrier with mem_device scope is the minimal fence for this;
+    // within a single simdgroup (K=32 lanes) it's essentially free on Apple GPU (lanes
+    // are already in lockstep execution), with only the memory-visibility cost.
+    simdgroup_barrier(mem_flags::mem_device);
+
+    // ================= PHASE 2: oak_predict =================
+    // Re-read ρ̄ from the scalars buffer (lane 0 just updated it in phase 1). Using
+    // ctx.rho here would read the kernel-start snapshot, NOT the meta-updated value,
+    // and would break bit-id with the pre-fusion two-kernel order.
+    float reward_c = ctx.reward[0] - ctx.scalars->rho;
 
     // Main TD on lane 0. Cheap (2R FMA on the value head, single output).
     if (k == 0u) {

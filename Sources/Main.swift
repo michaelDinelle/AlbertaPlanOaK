@@ -501,10 +501,20 @@ private final class Shared<Element> {
 final class OakMetalEngine {
     private struct Phase { let name: String; let tgSize: Int }
     private static let phases: [Phase] = [
-        Phase(name: "oak_bk_obs",          tgSize: 32),
-        Phase(name: "oak_encode",          tgSize: 0),
-        Phase(name: "oak_meta",            tgSize: 0),
-        Phase(name: "oak_predict",         tgSize: 0),
+        // FUSED oak_bk_obs + oak_encode: per-feature Welford EMA + obsTrace EMA (bk_obs
+        // phase, threads with tid < O), threadgroup_barrier(mem_device), Fourier features
+        // (encode phase, all R=rank threads compute one feat each). Single TG of R threads.
+        // Saves 1 dispatch + 1 host memoryBarrier per step (~25-40 µs on concurrent bench).
+        // Inv-10 bit-identical: same per-o op sequence in phase 1, same per-feat fma chain
+        // in phase 2; NF counter aggregated via per-simdgroup simd_sum + cross-simdgroup
+        // sum in threadgroup memory (total NF count is associative).
+        Phase(name: "oak_bk_encode",       tgSize: -1),     // -1 → host fills with rank (1 TG of R threads).
+        // FUSED oak_meta + oak_predict: chord softmax + alphaPi + ρ̄ EMA (meta phase),
+        // simdgroup_barrier(mem_device), main TD + K subtask TDs (predict phase). K threads
+        // = 1 simdgroup. Saves 1 dispatch + 1 host memoryBarrier per step (~25-40 µs on
+        // concurrent bench). Inv-10 bit-identical: same fma sequences, same program order
+        // (phase 1 writes ρ̄ → phase 2 reads ρ̄ via scalars direct deref, not Ctx snapshot).
+        Phase(name: "oak_meta_predict",    tgSize: 0),
         // K threadgroups × R threads each (one TG per option). Each thread (j) computes
         // one row of the dense option transition; per-TG simd_sum + threadgroup_barrier
         // reduces to vHat^k; lane 0 emits Q^k = r̂^k + vHat^k into qOption[K].
@@ -621,10 +631,8 @@ final class OakMetalEngine {
                        + OakMetalLayout.optRewardCount(rank: rank)
                        + OakMetalLayout.optTransitionCount(rank: rank)
         phaseGridWidths = [
-            1,                  // bk_obs            [1 TG x 32]
-            rank,               // encode            [R threads]
-            K,                  // meta              [K threads, one per option, simd_max + simd_sum reductions]
-            K,                  // predict           [K threads, one per option, simd_sum NF aggregation]
+            1,                  // bk_encode         [FUSED: 1 TG of R threads, bk_obs phase (tid<O) + threadgroup_barrier + encode phase (all R)]
+            K,                  // meta_predict      [FUSED: K threads, meta (chord+alphaPi+rho) + simdgroup_barrier + predict (main TD + K psi TDs)]
             K,                  // plan              [K TGs (one per option) x R threads (one per output dim)]
             K,                  // plan_reduce       [K threads, simd_max(qOption) + planAdv soft-bound]
             learnTotal,         // learn_heads       [N threads, dense optTransition adds K*R^2]
