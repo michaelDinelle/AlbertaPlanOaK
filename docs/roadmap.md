@@ -427,7 +427,7 @@ derived from per-step compute budget (e.g., `M = baseO`).
 - Trade env wall-clock for planning depth
 - Blast radius: small (loop in `oak_plan`)
 
-### D2. Search control / prioritized sweeping (Plan Step 9, DONE)
+### D2. Search control / prioritized sweeping (Plan Step 9, NEUTRAL — kept as infra for future D3/C4)
 *"The order chosen [for state updates] greatly affects planning efficiency.
 With function approximation the effect is even greater. Early efforts to
 control the planning process include prioritized sweeping and small backups."*
@@ -517,22 +517,128 @@ Head 4 uniform-simdgroup gate), `AGENTS.md` (citations + pipeline rows),
 `docs/roadmap.md` (this writeup), `scripts/halfcheetah_d2_15m.sh` (paired
 bench script). Bench artifacts at `.oak-benchmarks/halfcheetah-d2-15m/`.
 
-**Interpretation of the result.** Tier D2 demonstrates that gating ~half of
-Head 4's K·R² FMA per step by Moore-Atkeson 1993 chord-weighted model TD
-error has **zero net intelligence cost** at 1.5M while delivering a small
-SPS gain. The +28% higher max peak (D2 +0.162 vs C1 +0.127) suggests the
-planner is locking in transient walks better, but the lower seeds-touching
-count (4 vs 6) means breadth has decreased proportionally. **A 10M overnight
-run is needed** to determine whether the lock-in advantage compounds (a
-True Step-9 win would manifest as: max peak grows faster than the C1 trend
-+0.127→+0.310 at 10M, i.e. > +0.5 by 10M).
+**Interpretation of the 1.5M result (pre-10M).** Tier D2 demonstrates that
+gating ~half of Head 4's K·R² FMA per step by Moore-Atkeson 1993 chord-
+weighted model TD error has **zero net intelligence cost** at 1.5M while
+delivering a small SPS gain. The +28% higher max peak (D2 +0.162 vs C1
++0.127) at 1.5M *suggested* the planner might be locking in transient
+walks better, but the lower seeds-touching count (4 vs 6) meant breadth
+had dropped proportionally. A 10M characterization was needed to tell
+whether the peak signal compounds.
 
-**Open hypothesis (deferred).** If a 10M characterization shows D2 plateaus
-similarly to C1, the natural follow-up is **multi-pass Head 4 dispatch** —
-2 passes per step, each updating only above-mean-priority options, so high-
-priority options get α doubled while low-priority get α=0. Stays compute-
-neutral (2 × K/2 = K updates per step) but concentrates learning. We do
-NOT pursue this without evidence the simple gate is plateau-bound.
+**10M characterization result: Step-9 hypothesis FALSIFIED. D2 is NEUTRAL.**
+
+Running the same 10×10M paired bench with `.oak-benchmarks/halfcheetah-d2-10m/`
+(PERFOPT2 stack, ~66 min/seed wall-clock at 2 534 SPS):
+
+| metric | D2 10M | C1 10M | delta | |
+|---|---:|---:|---|---|
+| oak wins | 10/10 | 10/10 | match | |
+| mean rewSum lift | +655 958 / seed | +668 101 / seed | **-1.82%** | statistical tie (env noise) |
+| chatter median | 0.1818 | 0.1697 | +7% | slightly noisier |
+| median rewardRate | -0.313 | -0.271 | -0.042 | slightly worse avg |
+| **max peak rewardRate** | **+0.135** | **+0.310** | **-56%** | **C1 wins peak-height 2.3×** |
+| seeds with walking (HBs > 0) | **6/10** | 5/10 | **+1** | D2 wider coverage |
+| total heartbeats > 0 | **11** | 6 | **+83%** | D2 more walking touches |
+| 0 NF div | ✓ | ✓ | match | |
+| agentMs (concurrent) | 0.3511 ms | 0.6060 ms | -42% | perf-opts working (bit-id) |
+
+**The 1.5M +28% peak signal did NOT compound.** D2 max peak at 10M actually
+DROPPED vs its own 1.5M value (+0.135 at 10M vs +0.162 at 1.5M), while C1's
+jumped from +0.127 → +0.310 at the same scale. The lone +0.162 seed at 1.5M
+was a lucky early draw, not evidence of structural lock-in advantage.
+
+**Trade-off character (the real signal):** D2 gating trades **peak depth
+for walking breadth**. Over longer training the half-options-skip-per-step
+noise averages the learning signal — more seeds find walking regions (11
+heartbeats>0 vs 6) but nobody reaches C1's best peak (+0.310 at seed 5 is
+unmatched by any D2 seed). Aggregate lift is net-zero.
+
+**Per-seed peak deltas (D2 vs C1 max rewardRate):**
+- 4 seeds gained: seed 4 (+0.156), seed 8 (+0.105), seed 7 (+0.004), seed 1 (close tie -0.016)
+- 6 seeds lost:  seed 5 (-0.191 — C1's big winner), seed 6 (-0.203), seed 3 (-0.090), seed 2 (-0.055), seed 9 (-0.065), seed 0 (-0.014)
+
+No consistent direction; envpool seed-to-seed variance dominates.
+
+**Lesson learned for future Plan-Step revisits (codify in the methodology):**
+- **1.5M bench signals need 10M confirmation for peak-compounding claims.**
+  A lucky-draw lift at 1.5M can evaporate or invert at 10M. Mean lift
+  statistical ties are reliable; individual seed peaks are not, unless
+  they replicate across multiple seeds and scales.
+- **The "uniform sweep vs prioritized sweep" question is resolved on HC:**
+  for RR-Subtasks with K-option chord + MetaOptimize per-feature α, the
+  uniform K-option dense backup is as good or better than Moore-Atkeson
+  chord-weighted |model TD error| prioritization. This does NOT generalize
+  to other envs or to Dyna-style multi-step planning (D1) where the priority
+  signal may direct compute more usefully.
+
+**What we do with D2 (Option 3 chosen):**
+- **Keep D2 algorithmically** — it adds complexity (`prioOpt[K]` state,
+  `meanPrio` scalar, Head 4 gate) but has **zero intelligence cost** and
+  produces a useful **priority signal as free infrastructure** that future
+  D3 (off-policy ψ + chord-weighted attribution) and Tier D1 (multi-step
+  Dyna) can directly consume for search control.
+- **Keep all perf-opts unconditionally** — PERFOPT (oak_post_learn action
+  region parallelization) and PERFOPT2 (oak_bk_obs+encode / oak_meta+predict
+  kernel fusions) are bit-identical to the algorithm so they ship regardless
+  of D2's status. Total concurrent agentMs dropped from C1's 0.6072 ms to
+  0.3511 ms = **-42%, +64% SPS**.
+- **Update D2's status to NEUTRAL** in this roadmap (kept as infra, not
+  a win). Decision graph reflects this — D2 is a "transit node" to
+  Tier D3/D1/C4, not a destination.
+
+**Open hypothesis (deferred, UNLIKELY to help given 10M result):**
+multi-pass Head 4 dispatch (2 passes, each updating only above-mean-priority
+options, so high-priority options get α doubled, low-priority α=0). Was
+the natural follow-up if the simple gate was plateau-bound; but the 10M
+data shows the gate is NOT plateau-bound — it's aggregate-equivalent to
+uniform sweep. Amplifying the gate would likely accentuate the breadth-vs-
+depth trade, making peaks even lower. NOT pursued.
+
+### Performance optimizations applied across D2 (commit bbde13a7d) — bit-id
+
+Three separate performance passes landed on top of D2, each bit-identical
+to the algorithm (verified via 10k single-process diagnostic:
+`chatter / rewardRate / rewardSum / scoreGradL2` diff = 0.0e+00):
+
+1. **PERFOPT (commit a69c71610): `oak_post_learn` action region parallel.**
+   Was 6 threads × K·R = 2 048 sequential FMA in 1 simdgroup with 26 IDLE
+   lanes (~110 µs/step, 55% of total GPU). Now D·K threads organized as D
+   simdgroups of K=32 lanes each; lane k of TG p computes its own
+   `dot_k = Σ_i W_π[k][p][i]·s′[i]` in parallel; lane 0 reads each lane's
+   dot via `simd_shuffle` and accumulates `μ = fma(chord[kk], d, μ)` in
+   the original kk=0..K-1 order (Inv-10 preserved). Saves 123.95 µs/step
+   on GPU = -89.4% on that kernel, -50.7% on total step GPU compute.
+
+2. **PERFOPT2 kernel fusion (commit bbde13a7d): oak_bk_obs + oak_encode
+   → oak_bk_encode; oak_meta + oak_predict → oak_meta_predict.** Each
+   fusion saves 1 kernel dispatch + 1 host memoryBarrier per step (~25-40 µs
+   on concurrent bench). Both are bit-identical: phase 1 / phase 2 structure
+   with an intra-kernel `threadgroup_barrier(mem_device)` or
+   `simdgroup_barrier(mem_device)` replaces the host barrier; fma sequences
+   in each phase unchanged. Kernel dispatches 9 → 7, host barriers 8 → 6.
+
+3. **Autoreleasepool memory fix (commit 56b05e3fa): `runKernel` wraps
+   per-step `MTLCommandBuffer` + `MTLComputeCommandEncoder` allocation in
+   `try autoreleasepool { ... }`.** `MTLCommandBuffer` is an Obj-C
+   `NSObject` subclass; in a Swift CLI with no Cocoa run loop, the
+   process-wide autorelease pool never drains and each CB holds GPU-side
+   command storage alive indefinitely. At 2 500+ SPS this manifests as
+   slow resident-set growth in Activity Monitor (user-reported). Fix:
+   explicit `autoreleasepool` bounds the allocation lifetime to one
+   step. Verified: RSS flat at 19-20 MB over a 1M step single-process
+   run (7 samples over 210s).
+
+**Cumulative performance gain from C1 baseline (concurrent 20-proc bench):**
+
+| | C1 baseline | PERFOPT2 | delta |
+|---|---:|---:|---|
+| agentMs median | 0.6072 ms | 0.3511 ms | **-42.2%** |
+| SPS median | 1 541 | 2 534 | **+64.4%** |
+| Total GPU compute (single-proc diag) | 244 µs | 109 µs | **-55%** |
+| Kernel dispatches per step | 9 | 7 | **-22%** |
+| Host memoryBarriers per step | 8 | 6 | **-25%** |
+| 10M paired bench wall-clock | ~2h48m | **~66 min** | **-61%** |
 
 ### D3. Off-policy ψ + option-model learning (Plan Step 3 advanced)
 *"Ideally this would be taken all the way to off-policy learning"*
@@ -589,43 +695,65 @@ flowchart TD
     C3roll --> C2retry[C2 retry: option termination on C1 substrate]
     C2retry --> C2rcheck{1.5M paired bench, HARD-GATED}
     C2rcheck -->|"+417/seed, 5/10 wins, 5/10 negative, 2/10 walking → KILL"| C2rroll[C2 retry rolled back; third C2 negative result documented]
-    C2rroll --> D2done["Tier D2 DONE: prioritized sweeping, +110k/seed, 10/10 wins, 0.9% faster, max peak +0.162"]
-    D2done --> nextWin{Next}
-    nextWin -->|"10M overnight to confirm peak compounds"| D2_10M[D2 10M characterization]
-    nextWin -->|"move on, simple gate validated"| D1[Tier D1: Dyna multi-step planning, enabled by D2 compute headroom]
-    nextWin -->|"sharpen Step 11 utility"| Step11[Step 11 sharpening: utilOpt from planAdv]
-    nextWin -->|"cross-option attribution"| D3[Tier D3: off-policy ψ + chord-weighted option models]
-    D1 --> D3
+    C2rroll --> D2done["Tier D2 NEUTRAL: prioritized sweeping kept as infra (+64% SPS via perf-opts); 10M tie with C1"]
+    D2done --> D2_10M["D2 10M characterization: mean lift -1.8% vs C1, peak +0.135 vs +0.310 (Step-9 hypothesis falsified)"]
+    D2_10M --> nextWin{Next — four Plan-orthodox candidates}
+    nextWin -->|"cross-option attribution, Plan Step 10 explicit"| D3[Tier D3: off-policy ψ + chord-weighted option models]
+    nextWin -->|"sharpen Step 11 utility metric"| Step11[Step 11 sharpening: utilOpt from planAdv]
+    nextWin -->|"multi-step planning, consumes D2 priority signal"| D1[Tier D1: Dyna multi-step planning]
+    nextWin -->|"termination from ψ, no learnable termW"| C4[Tier C4: Plan-orthodox termination from ψ]
+    D3 --> C4
     Step11 --> D3
-    D3 --> C4[Tier C4: Plan-orthodox termination from ψ, no learnable termW]
+    D1 --> D3
     C4 --> E1[Tier E1: horde-scale K]
     E1 --> E2[Tier E2: R from compute]
 ```
 
-**Where we landed (post-D2):** Tier C fully explored, **Tier D2 landed
-clean**. The Moore-Atkeson 1993 chord-weighted model TD error gating skips
-~half of `oak_learn_heads` Head 4's K·R² FMA per step; intelligence is
-within statistical noise of C1 (-0.55% mean lift, 10/10 wins, 0/10
-negative seeds), the planner shows a +28% higher max peak rewardRate at
-1.5M (D2 +0.162 vs C1 +0.127) suggesting better lock-in of transient
-walking cells, and SPS is 0.9% faster on every seed in apples-to-apples
-concurrent bench. Plan Step 9 is now structurally addressed.
+**Where we landed (post-D2 10M + perf-opts):** Tier C and Tier D2 are now
+fully characterized. **D2 is NEUTRAL at 10M** — statistical tie with C1 on
+aggregate lift (-1.82%), but trades peak depth (max peak +0.135 vs C1's
++0.310) for walking breadth (11 heartbeats above 0 vs 6). The 1.5M +28%
+peak signal was a lucky seed draw, not a lock-in advantage. D2's `prioOpt`
+state + gate machinery is **kept as infra** for D3/D1 to consume, not as
+a win.
 
-**Next decision (post-D2):** four Plan-orthodox candidates, each with a
-different cost/benefit profile:
+The **perf-opt stack** (PERFOPT + PERFOPT2 + autoreleasepool) is all
+bit-identical and ships unconditionally: concurrent agentMs 0.6072 ms →
+0.3511 ms (**-42%**), SPS 1 541 → 2 534 (**+64%**), Total GPU compute
+244 → 109 µs (**-55%**), and the per-step memory-growth bug from missing
+autoreleasepool is resolved (RSS flat across 1M+ step runs). 10M paired
+bench is now ~66 min/seed instead of ~2h48m.
 
-1. **D2 10M characterization** — confirms whether the +28% peak gain
-   compounds (a true Step-9 win would push max peak from +0.127→+0.310
-   trajectory at C1 to >+0.5 at 10M). Cheapest follow-up; data-only.
-2. **D1 (Dyna multi-step planning, Plan Step 7 + 8)** — uses D2's compute
-   headroom to run multiple planning sweeps per env step. Now Plan-orthodox
-   because we have prioritized sweeping to direct the extra compute at the
-   options that matter.
-3. **Step 11 sharpening** — `utilOpt[k]` from planAdv contribution rather
+**Key methodological lesson added:** 1.5M peak signals need 10M
+confirmation before being called a lock-in win. Aggregate mean lift
+statistical ties are reliable signal; individual-seed peaks are not,
+unless they replicate across seeds and scales. D2's falsified 1.5M
+signal is the canonical example going forward.
+
+**Next decision (post-D2 10M):** three Plan-orthodox candidates. D2's
+10M "wider but shallower walking" signature argues that the limiter is
+**not** planning order (D2 addressed that) but **option-level learning
+efficiency** — options that DO find walking cells can't lock them in
+deeply. The natural follow-ups that address that limiter directly:
+
+1. **D3 (off-policy ψ + chord-weighted attribution, Plan Step 10
+   explicit)** — *"The learning processes are conditional on the option,
+   and so will need to be done off-policy."* Off-policy ψ learning lets
+   options consolidate their walking experience across the chord-weighted
+   stream instead of being limited to on-chord samples. Directly addresses
+   "depth" (peak height). Sets up C4. **Highest expected lift.**
+2. **Step 11 sharpening** — `utilOpt[k]` from planAdv contribution rather
    than `|tdPsi|²` (Plan Step 11 wording: *"useful in planning"* rather
    than "uncertain in prediction"). Smallest blast radius, surgical change
-   in `oak_post_learn`.
-4. **D3 (off-policy ψ + chord-weighted attribution, Plan Step 10
-   explicit)** — *"The learning processes are conditional on the option,
-   and so will need to be done off-policy."* Sets up Plan-orthodox C4
-   (termination derived from ψ rather than a free `termW` network).
+   in `oak_post_learn`; could change which options get reseeded by G&T,
+   indirectly affecting which options get the chance to lock in peaks.
+3. **C4 (Plan-orthodox termination from ψ, no learnable `termW`)** —
+   Builds on D3 once off-policy attribution is in place. Termination
+   derived structurally from subtask attainment instead of the failed
+   Bacon-Harb-Precup `termW` gradient. Step 10 completion.
+
+D1 (Dyna multi-step planning) is still Plan-orthodox but deprioritized:
+the 10M data says "more planning of the same kind" is NOT the limiter
+— the planner sweeps uniformly are already converging fine in aggregate.
+D1 may help only once D3 provides better per-option value estimates for
+the deeper planning to target.
