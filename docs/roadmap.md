@@ -263,21 +263,85 @@ but still single-layer compositionally; a walking gait needs cross-feature
 interactions (joint angle × velocity × phase) that single-layer RFF cannot
 express in one composition.
 
-### C3. Multi-layer Fourier features (Plan Step 2 deep version)
+### C3. Recurrent encoder — ROLLED BACK (negative result, both v1 and v2 regressed ~52%)
 *"creating and introducing new features made by combining existing features"*
 
-Current single Fourier layer over `std_obs` only. Stack a second layer over
-`state` to get higher-order combinations:
-`state2[r] = cos(W2[r] · state + φ2[r])`. Downstream heads read `state2`.
+**Why we attempted recurrent instead of stacked.** The originally-documented
+C3 ("stack 2 Fourier layers") buried a per-env tunable `N` in the
+architecture: N=2 helps HC, N=12 might help humanoid, N=1 might help small
+envs. That violates Inv-9 (no per-env hyperparams). The Plan-orthodox
+alternative was **depth via time**: read your own previous output, every
+step adds one composition layer (depth = lifetime steps, no `N` to tune).
+ESN / LSM precedent (Jaeger 2001, Maass-Natschläger-Markram 2002): fixed
+random recurrent projection + readout learns.
 
-Per Lewandowski-Schuurmans-Machado 2024 §3
-([`docs/papers/PlasticLearningDeepFourierFeatures_2410.20634.pdf`](papers/PlasticLearningDeepFourierFeatures_2410.20634.pdf))
-deep Fourier features approximately embed deep linear networks → plasticity
-preserved.
+**Mechanism (both v1 and v2).** The encoder pre-activation became:
 
-- Doubles encoder param count, doesn't change SIMD-bound K
-- Plan-orthodox: same RFF-1 init, generate-and-test on (W2, φ2), no new tunables
-- Blast radius: medium (new layer in encoder + state buffer doubles)
+```
+z = phase[pre]
+  + Σ_o W_enc[pre, o]           · std_obs[o]      (Tier A, instantaneous)
+  + Σ_o W_enc[pre, baseO + o]   · obsTrace[o]     (Tier C1, input-side trace)
+  + Σ_i W_enc[pre, 2·baseO + i] · state[t-1][i]   (Tier C3, recurrent feedback)
+state[feat] = cos(z) for feat ∈ [0, R/2), sin(z) for feat ∈ [R/2, R)
+```
+
+`state[t-1]` was read from `state_at(ctx, ctx.stateSlot)` — the slot that
+`oak_bk_admit_commit` is about to retire. No extra arena slot required.
+
+**Two attempts, both regressed by ~52 %.**
+
+| metric | C1 baseline | **C3 v1** (RFF-1) | **C3 v2** (W_state · sqrt(baseO/R)) |
+|---|---:|---:|---:|
+| oak wins | 10/10 | 10/10 | 10/10 |
+| mean rewSum lift | +111k/seed | +52k (−53%) | +54k (−51%) |
+| median chatter | 0.210 | 0.026 (collapse) | 0.080 (recovered) |
+| seeds touching `RR > 0` | 6/10 | 1/10 | 4/10 |
+| total HBs above 0 | 9 | 1 | 4 |
+| max peak | +0.127 | +0.104 | +0.061 |
+| NF div | 0/10 | 0/10 | 0/10 |
+| per-seed lift std | ~15k | ~1.5k (collapse) | ~5k (still homogeneous) |
+
+**v1 (RFF-1 across all three regions)** dominated z's variance with the
+state region (62 % for HC R=64, baseO=17 — the encoder became a Fourier
+basis of state with obs as a small perturbation), collapsing chatter
+0.21 → 0.026 and homogenizing every seed's behavior to a single recurrent
+attractor.
+
+**v2 (variance-balanced W_state at sqrt(baseO/R))** fixed the chatter
+collapse — chatter recovered to 0.080, walking touches up from 1 to 4
+seeds — but mean lift stayed at exactly the same regression level
+(+54k vs v1's +52k, both half of C1's +111k). Per-seed lifts also stayed
+homogeneous (range +47k to +65k, std ~5k vs C1's std ~15k). Two completely
+different inits landing at the same regression magnitude is strong
+evidence the regression is **structural to recurrent feedback in OaK**,
+not an init choice.
+
+**Diagnosis: TD double non-stationarity.** ESN / LSM works because the
+readout is *supervised* against a stationary target — the recurrent
+dynamics provide a rich projection, the readout learns the right weighting.
+OaK's heads use **TD learning with a moving target** (V(s'), ψ(s'),
+bootstrapped); the state distribution is *already* non-stationary because
+the policy is changing and the value function is bootstrapping. Adding
+recurrent dynamics to the encoder creates **double non-stationarity**: the
+state distribution moves both from policy change AND from recurrent
+dynamics evolution. The TD bootstrap can't track both simultaneously, so
+the heads under-fit and per-step lift halves regardless of init scale.
+
+**Lesson learned (codify going forward):** input-side enrichment (e.g.,
+`obsTrace` in C1) is the right kind of memory for OaK — it changes what the
+state *contains* without changing the state's structural dependence on
+obs. State-side recurrence (anything that puts a chaotic random projection
+between the policy and what TD heads bootstrap against) is the wrong kind
+of memory for a TD-bootstrapped fixed-random-feature system. Future
+"depth" work should target input-side or feature-construction depth (e.g.,
+hierarchical generate-and-test, off-policy ψ-attribution) rather than
+state-side recurrence.
+
+**Files reverted (commit-time):** `Sources/Main.swift` `encoderCount` back
+to `(R/2)·2·O`; `oak_encode` inner loop back to two regions; `oak_bk_admit_commit`
+encoder reseed back to `2·baseO` writes per worst feature. Bench artifacts
+preserved for reference: `.oak-benchmarks/halfcheetah-c3-15m/` (v1) and
+`.oak-benchmarks/halfcheetah-c3v2-15m/` (v2).
 
 ## Tier D — planning + horde (after Tier C lands)
 
@@ -350,20 +414,29 @@ flowchart TD
     C2check -->|5/10 wins, +3.5k/seed → REGRESSION| C2roll[C2 algorithm rolled back; kernel parallelizations kept]
     C2roll --> C1[C1 done: temporal aggregation in encoder]
     C1 --> C1deep[C1 10M: +668k/seed, 5 seeds peak walking max +0.310, plateau holds]
-    C1deep --> C3[Tier C3 next: multi-layer Fourier - compositional depth]
-    C3 --> C2re[C2 retry: revisit termination once representation lifts]
-    C2re --> D1[Tier D1: Dyna multi-step planning]
-    D1 --> D2[Tier D2: prioritized sweeping]
-    D2 --> D3[Tier D3: off-policy]
+    C1deep --> C3att[C3 attempt: recurrent encoder, depth via time]
+    C3att --> C3check{1.5M paired bench, both v1 and v2}
+    C3check -->|−52% mean lift, homogeneous seeds, TD double non-stationarity → REGRESSION| C3roll[C3 rolled back; encoder back to C1 shape]
+    C3roll --> nextDecision{Next move - decide together}
+    nextDecision -->|search control| D2[Tier D2: prioritized sweeping]
+    nextDecision -->|more planning| D1[Tier D1: Dyna multi-step planning]
+    nextDecision -->|revisit termination| C2re[C2 retry: termW with C1 substrate]
+    nextDecision -->|cross-option attribution| D3[Tier D3: off-policy ψ + option-model]
+    D2 --> D1
+    D1 --> D3
     D3 --> E1[Tier E1: horde-scale K]
     E1 --> E2[Tier E2: R from compute]
 ```
 
-**Where we landed (post-C1 10M, commit `e8d87f03e`):** OaK is consistently
-~30% better than random across 10M steps (cumulative +668k/seed lift) but the
-plateau holds — median rewardRate flat ~−0.30, walking peaks loud (max +0.310)
-but transient (single-HB events). Per-step lift is flat-to-decelerating
-(+15k/300k → +12k/300k by 10M), suggesting the representation has saturated
-what it can extract from temporal traces alone. C3 (multi-layer Fourier) is
-the next move per the decision graph — give the agent compositional depth so
-it can express the cross-feature interactions a walking gait actually needs.
+**Where we landed (post-C3 rollback):** Tier C is fully explored. C1
+(input-side temporal aggregation) is the canonical baseline — `+111k/seed
+at 1.5M` and `+668k/seed at 10M`, 6/10 seeds touch peak walking, max peak
+`+0.310`. C2 (true option termination) and C3 (recurrent encoder) both
+regressed and were rolled back, with full negative-result writeups above
+that codify the relevant lessons (TD double non-stationarity from
+state-side recurrence; chord re-mix vs hold-or-refresh under non-stationary
+TD). Next move is from Tier D and to be decided from the decision graph
+above based on which limiter we want to attack: search control (D2),
+planning depth (D1), cross-option attribution (D3), or a C2 retry now that
+C1's POMDP coverage gives the option-critic gradient a richer state to
+ground on.

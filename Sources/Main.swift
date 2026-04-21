@@ -376,6 +376,14 @@ private enum OakMetalLayout {
     // observation `std_obs[o]` (instantaneous) AND the per-obs-dim low-pass trace
     // `obsTrace[o]` (integrated, decay 1/baseO). Encoder row width is therefore 2·O —
     // the first O cols multiply std_obs, the next O cols multiply obsTrace.
+    //
+    // Tier C3 (recurrent self-feedback in the encoder) was attempted in two forms — RFF-1
+    // across all three regions (v1) and variance-balanced W_state at sqrt(baseO/R) (v2) —
+    // and both regressed by ~52% on the 10×1.5M paired bench. Diagnosis: recurrent dynamics
+    // create double non-stationarity for the TD bootstrap (state distribution shifts both
+    // from policy change AND from recurrent evolution). ESN/LSM works because the readout
+    // is supervised against a stationary target; OaK's TD heads can't track both. C3 was
+    // rolled back; encoder remains C1 shape.
     static func fourierPreActCount(rank: Int) -> Int { rank / 2 }
     static func encoderCount(obsDim: Int, rank: Int) -> Int {
         fourierPreActCount(rank: rank) * 2 * max(obsDim, 1)
