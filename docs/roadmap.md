@@ -138,7 +138,7 @@ Closes the *planning-is-degenerate* and *chord-is-myopic* gaps. Result at 3M:
 0/10 seeds diverged, chatter 0.17, plateau still ~+22k per 300k window — set
 the stage for C2 to lift the plateau.
 
-## Tier C — temporal extent (C1 NEXT, C2 ROLLED BACK, C3 pending)
+## Tier C — temporal extent (C1 LANDED, C2 ROLLED BACK ×3, C3 ROLLED BACK)
 
 ### C2 attempt — true option termination (ROLLED BACK on data)
 
@@ -262,6 +262,78 @@ depth)** next. The encoder is now temporally rich (instantaneous + integrated)
 but still single-layer compositionally; a walking gait needs cross-feature
 interactions (joint angle × velocity × phase) that single-layer RFF cannot
 express in one composition.
+
+### C2 retry — option termination on the C1 substrate (ROLLED BACK, third C2 negative result)
+
+The original Tier C2 was attempted three times in total against three
+different baselines, with the same algorithmic core
+(termW + closed-form geometric Q^k + hold-or-refresh chord +
+Bacon-Harb-Precup option-critic gradient + β-floor `1/R`). All three
+regressed by ~99–100% mean lift vs the relevant baseline:
+
+| attempt | baseline | β₀ choice | mean lift | 10/10 wins? | seeds peak walking | max peak |
+|---|---|---|---:|---:|---:|---:|
+| C2 v1 | pre-C1 (Tier B) | `1/R` (chord froze) | +728 | 5/10 | 1 | +0.134 |
+| C2 v2 | pre-C1 (Tier B) | `0.5` | +3 465 | 5/10 | 3 | +0.332 |
+| **C2 retry** | **C1 substrate** | `0.5` | **+417** | **5/10** | **2** | **+0.043** |
+
+**Hypothesis (FALSIFIED):** the original C2 v2 hypothesis was that β₀ = 0.5
+was the correct fix for v1's chord-freeze. v2 still regressed because the
+pre-C1 state was POMDP-blind, giving `termW^k · s` nothing meaningful to
+condition on. With C1's `obsTrace` in place, the state now carries
+gait-phase / joint-accel / sustained-drift signal — surely the option-critic
+gradient could now find useful per-option lifetimes. **It cannot.** The C2
+retry on the C1 substrate produces the same regression magnitude (-99.6%
+mean lift, 5/10 wins, 5/10 seeds with negative lift, 2/10 walking touches
+vs C1's 6/10) — substrate richness does not rescue the failure mode.
+
+**What's structurally incompatible.** Option-termination on top of OaK's
+existing TD-bootstrapped K-option chord introduces three failure-amplifying
+mechanisms simultaneously:
+
+1. **Hold-or-refresh chord stochasticity.** Even at β₀ = 0.5 with proper
+   Bernoulli sampling, ~half the options hold their chord weight from the
+   previous step regardless of what the new state says. The chord becomes a
+   high-variance random walk over the simplex; chatter median jumps to
+   ~0.35–0.40 (vs C1's 0.21).
+2. **Closed-form Q^k variance.** `Q^k = (r̂^k − ρ̄)/β^k + V(n̂^k(s))`
+   amplifies any noise in `(r̂^k − ρ̄)` by `1/β^k ∈ [1, R]`. Even with the
+   `planAdv` soft-bound, the value bootstrap inherits a noisy advantage
+   estimate.
+3. **Option-critic gradient on `termW`.** The gradient
+   `-(r̂^k − ρ̄)·(1−β^k)/β^k · curr[i]` *itself* depends on the noisy
+   `r̂^k` estimate; in a non-stationary average-reward setting where ρ̄ is
+   simultaneously being tracked, sign of `(r̂^k − ρ̄)` flips frequently early
+   in training, yielding `termW` updates that whipsaw between "hold this
+   option" and "terminate this option" before any option's policy has had a
+   chance to specialize.
+
+The combination drives 5/10 seeds to NEGATIVE per-seed lift — they're
+actively worse than random — even though the kernel is numerically clean
+(0/10 NF). The C1 substrate gives `β^k(s)` more to condition on, but the
+above three mechanisms wash that signal out.
+
+**Lesson learned (codify going forward):** option-termination machinery in
+the Sutton-Precup-Singh / Bacon-Harb-Precup option-critic family appears
+**structurally incompatible** with OaK's `(K-option chord, TD-bootstrapped
+ψ-GVFs, MetaOptimize per-feature α, RFF-1 fixed-random encoder)` setup at
+the bench scales we test (1.5M, 3M, 10M steps on HC). The peak-walking-up
+signal C2 v2 produced (max +0.332 at one seed) is **not** evidence the
+mechanism works — it's evidence the increased stochasticity occasionally
+explores into a high-reward region that the policy cannot lock in. Future
+"temporal abstraction" attempts in OaK should not re-use the
+hold-or-refresh chord + closed-form Q^k pattern; the natural alternative
+direction is **off-policy ψ + option-model attribution (Tier D3)** where
+options learn from any chord-weighted experience without changing the
+chord update itself.
+
+**Files reverted (commit-time):** all C2-retry changes to
+`Sources/Main.swift` (`pTermW`, `sBetaTerm`, `sRHatCurr`, `optTermWCount`,
+`Param.termW`, `State.betaTerm`/`rHatCurr`, `learnTotal`, termW init) and
+`Sources/OakKernel.metal` (oak_meta termW dot + β^k + hold-or-refresh,
+oak_plan closed-form Q^k + rHatCurr cache, oak_learn_heads Head 5,
+oak_bk_admit_commit termW reseed slot). Bench artifacts preserved for
+reference: `.oak-benchmarks/halfcheetah-c2retry-15m/`.
 
 ### C3. Recurrent encoder — ROLLED BACK (negative result, both v1 and v2 regressed ~52%)
 *"creating and introducing new features made by combining existing features"*
@@ -417,26 +489,31 @@ flowchart TD
     C1deep --> C3att[C3 attempt: recurrent encoder, depth via time]
     C3att --> C3check{1.5M paired bench, both v1 and v2}
     C3check -->|−52% mean lift, homogeneous seeds, TD double non-stationarity → REGRESSION| C3roll[C3 rolled back; encoder back to C1 shape]
-    C3roll --> nextDecision{Next move - decide together}
-    nextDecision -->|search control| D2[Tier D2: prioritized sweeping]
-    nextDecision -->|more planning| D1[Tier D1: Dyna multi-step planning]
-    nextDecision -->|revisit termination| C2re[C2 retry: termW with C1 substrate]
-    nextDecision -->|cross-option attribution| D3[Tier D3: off-policy ψ + option-model]
-    D2 --> D1
-    D1 --> D3
+    C3roll --> C2retry[C2 retry: option termination on C1 substrate]
+    C2retry --> C2rcheck{1.5M paired bench, HARD-GATED}
+    C2rcheck -->|"+417/seed, 5/10 wins, 5/10 negative, 2/10 walking → KILL"| C2rroll[C2 retry rolled back; third C2 negative result documented]
+    C2rroll --> D[Tier D: temporal extent fully explored, move on]
+    D --> D1[Tier D1: Dyna multi-step planning]
+    D --> D2[Tier D2: prioritized sweeping]
+    D --> D3[Tier D3: off-policy with chord-weighted attribution]
+    D1 --> D2
+    D2 --> D3
     D3 --> E1[Tier E1: horde-scale K]
     E1 --> E2[Tier E2: R from compute]
 ```
 
-**Where we landed (post-C3 rollback):** Tier C is fully explored. C1
-(input-side temporal aggregation) is the canonical baseline — `+111k/seed
-at 1.5M` and `+668k/seed at 10M`, 6/10 seeds touch peak walking, max peak
-`+0.310`. C2 (true option termination) and C3 (recurrent encoder) both
-regressed and were rolled back, with full negative-result writeups above
-that codify the relevant lessons (TD double non-stationarity from
-state-side recurrence; chord re-mix vs hold-or-refresh under non-stationary
-TD). Next move is from Tier D and to be decided from the decision graph
-above based on which limiter we want to attack: search control (D2),
-planning depth (D1), cross-option attribution (D3), or a C2 retry now that
-C1's POMDP coverage gives the option-critic gradient a richer state to
-ground on.
+**Where we landed (post-C2-retry rollback):** Tier C is fully explored,
+**three times for C2** (v1: chord froze with β₀=1/R; v2: β₀=0.5 fixed the
+freeze but POMDP-blind state had nothing to learn from; retry-on-C1: C1's
+richer state did NOT rescue the failure mode — same -99.6% regression
+magnitude). C1 (input-side temporal aggregation) is the canonical baseline:
+`+111k/seed at 1.5M` and `+668k/seed at 10M`, 6/10 seeds touch peak walking,
+max peak `+0.310`. The option-termination machinery in the
+Sutton-Precup-Singh / Bacon-Harb-Precup family is **structurally
+incompatible** with OaK's TD-bootstrapped fixed-random-feature setup at
+the bench scales we test, regardless of substrate richness — see the
+"C2 retry" entry above for the full mechanism breakdown. **Next move is
+Tier D.** Cross-option attribution (D3, off-policy ψ + chord-weighted
+option models) is the natural successor to C2, since it adds temporal
+abstraction *without* changing the chord update or introducing a
+hold-or-refresh stochastic mixer.
