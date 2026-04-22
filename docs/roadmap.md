@@ -79,25 +79,97 @@ fast version of "step N" makes all downstream regression checks cheaper.
 
 ## State of the agent on Plan Steps 1-11
 
+Last refreshed: post-F1 10M, G1 (eligibility traces) in flight.
+
 | Plan Step | What we have | Quality |
 |---|---|---|
-| 1. Representation I (per-feature α) | MetaOptimize L-approx + β-floor (commits `fccaed018`, `15a4632e5`) | Strong |
-| 2. Representation II (feature finding) | Single-layer deep Fourier features + G&T reseed of worst pre-activation | Partial — single layer only, not compositional |
-| 3. Prediction I (continual GVF) | K=32 ψ-GVFs + adaptive β bootstrap (`β_k = (1−1/R)·α₀/(α₀+utilOpt[k])`, Tier B) | Partial — no recurrent traces, no off-policy, K capped at SIMD width |
-| 4. Control I (actor-critic) | Chord-blended REINFORCE + α[i] relevance gate | Strong |
-| 5. Prediction II (avg-reward) | ρ̄ centering (Reward Centering 2405.09999) | Strong |
-| 6. Control II (continuing) | Continual env wrappers, Inv-4 enforced | Strong |
-| 7. Planning I (avg-reward planning) | `oak_plan` parallel async VI w/ ρ̄, dense option models (Tier B) | Partial — 1 planning sweep per env step, no Dyna iterations |
-| 8. Prototype-AI I (one-step MBRL) | All four base components present, model-feature feedback closed | Partial — no search control / prioritized sweeping |
-| 9. Planning II (search control + exploration) | Chord softmax over ψ selects "where to focus" | Weak — uniform option visitation, no priority queue |
-| 10. Prototype-AI II (STOMP) | Subtasks → Options → Models → Planning all exist | **Degenerate** — chord recomputes every step → effectively 1-step "options". C2 attempt to add true termination regressed vs Tier B (5/10 vs 10/10 wins) and was rolled back; revisit after C1 lifts the representational ceiling. |
-| 11. Oak (feedback / remove-replace) | Per-feature + per-option utility, G&T reseed | Strong — but only Design A keyboard; no Design B joint-subtask interpretation |
+| 1. Representation I (per-feature α + normalization + traces) | MetaOptimize L-approx per-feature α (Tier A); Welford obs standardization in `oak_bk_encode` | Strong on per-feature α + normalization. **Eligibility traces gap remains** — Tier G1 ROLLED BACK (normalized + true-online both unstable on correlated Fourier features, see exhausted families). Requires Plan Step 2 feature decorrelation before traces can be added. |
+| 2. Representation II (feature finding) | Single-layer deep Fourier features (Lewandowski-Schuurmans-Machado 2024); G&T reseed of worst-utility pre-activation row with fresh `N(0, 1/√R)` | **Partial** — reseed is fresh-random, not compositional. Plan text: *"new features **made by combining existing features**"* — open gap. Multi-layer / recurrent variants exhausted (Tier C3 rolled back) |
+| 3. Prediction I (continual GVF) | K=32 ψ-GVFs; Tier D3 chord-weighted off-policy ψ attribution (Plan Step 10 "conditional on the option, off-policy"); Tier C1 obsTrace for minimal POMDP coverage | Strong. Eligibility traces also apply to ψ (Plan base-agent text) — same G1 rollback; blocked on feature decorrelation. "recurrent networks that do a limited amount of processing per observation" remains minimal (obsTrace EMA; full recurrent encoder failed as C3) |
+| 4. Control I (actor-critic) | Chord-blended REINFORCE across K option policies; Kim implicit α_π (`1/(baseO + ‖s'‖²·‖∇log π‖²)`); Gumbel-max / Gaussian score gradients; **Tier F1 structural σ = 1/√A** (plateau-breaker, +170% mean lift vs D3 at 10M) | Strong |
+| 5. Prediction II (avg-reward) | ρ̄ centering (Reward Centering 2405.09999); `δ = (r − ρ̄) + V(s') − V(s)`; no discounting | Strong |
+| 6. Control II (continuing) | EnvPool continuing wrappers; Inv-4 (no episodic semantics inside agent); Inv-5 (same updates every step) | Strong |
+| 7. Planning I (avg-reward planning) | `oak_plan` parallel async VI (K TGs × R threads); ρ̄-centered differential Q^k | Partial — 1 planning sweep per env step (Tier D1 Dyna deprioritized until per-step learning velocity is higher; see post-F1 analysis) |
+| 8. Prototype-AI I (one-step MBRL) | All four base-agent components + D2 search control + GraMa utility feedback cycle | Strong |
+| 9. Planning II (search control + exploration) | Tier D2 prioritized sweeping (Moore-Atkeson 1993, Plan footnote 13): `prio[k] = chord[k]·‖n̂^k TD‖_L2`, gates dense optTransition updates by `prio ≥ meanPrio`; F1 structural σ controls exploration noise | **Partial** — Plan: *"take into account the **uncertainty** of various parts of the model"*; no explicit model-variance signal yet |
+| 10. Prototype-AI II (STOMP) | Subtasks → Options → Option models → Planning all present; Tier D3 off-policy ψ specialization; dense K·R² transition models (RR-Subtasks 2202.03466 eq. 17); **Tier H1 IN-FLIGHT**: chord hysteresis with β^k = 1/(1+‖n_td^k‖²) derived from optTransition confidence — options now persist when the option's own world model predicts well, terminate when surprised | **PARTIAL (gap closing)** with H1 — chord hysteresis breaks 1-step degeneracy. Termination-from-ψ family exhausted (5 prior attempts); H1 uses optTransition-confidence (forward-model-error) signal class, sidestepping the exhausted family. Validation pending 10k smoke + 1.5M screen + 10M acceptance. |
+| 11. Oak (feedback / remove-replace) | Per-feature utility (GraMa 2505.24061); per-option utility (EMA `|tdPsi|²`); G&T reseed worst option + worst feature-pair each step; option keyboard Design A (chord blending) | **Partial** — Step-11-sharpening `planUtil` argmin failed at 10M (−16% lift, r=−0.62 anti-informative). No feature registry (*"new feature that has not yet been the basis for a subtask"* not tracked); Design B (joint-subtask) not implemented |
+| 12. Prototype-IA | — | Out of scope for current iteration |
 
-**The big honest gaps remaining** (post-rollback): Step 10 still has 1-step
-"options" (the C2 attempt regressed; we'll come back to it after representation
-lifts), Step 9 has no search control, Step 3 has no temporal traces in
-features, Step 2 is single-layer, Step 7 still does 1 planning sweep per env
-step.
+### Base-agent (Plan Figure 2) coverage
+
+All four components present and continual, each on every step:
+
+- **Perception → state** — `oak_bk_encode` (Welford obs standardization + Deep Fourier Features + Tier C1 obsTrace)
+- **Reactive policies** — chord-blended `optPolicy` (K × D × R); primary policy only (Plan allows additional reactive policies; not implemented)
+- **Value functions** — `valueW[R]` main + K `ψ` GVFs per subtask
+- **Transition model** — dense K × R² `optTransition` (RR-Subtasks eq. 17)
+
+**Base-agent literal text NOT yet covered** (Plan Step 1 half-gap): *"all four components are updated by learning processes operating in the foreground using the most recent events together with short-term credit-assignment memories such as eligibility traces"*. Tier G1 attempted TD(λ) traces on valueW + ψ (both normalized and true-online forms) and rolled back — correlated Fourier features make stability impossible at Plan-orthodox α. Traces remain an open Plan orthodoxy gap, conditional on Plan Step 2 feature decorrelation.
+
+## Plan-orthodox gaps (ranked by leverage)
+
+**A. Plan Step 2 completion — feature combinations** (highest remaining leverage)
+- Plan text: *"creating and introducing new features **made by combining existing features**"*
+- Current: `oak_bk_admit_commit` reseeds fresh `N(0, 1/√R)` Fourier rows
+- Orthodox fix: bias the reseeded encoder row toward products/sums of top-k high-utility existing features (by utilFeat rank) + small Gaussian noise
+- Compounds with G1 (new combination features learn their λ-return faster). Dependencies: none beyond G1
+
+**B. Plan Step 10 — multi-step options via a NEW (non-ψ) mechanism** (structural deadlock, very high leverage if solved)
+- Plan text: *"options = policy + termination condition"*
+- Exhausted: **termination-from-ψ family** (5 attempts below). Do not revisit via β derived from ψ
+- Open candidates (unattempted, each sidesteps the ψ-β coupling):
+  1. **Chord hysteresis** — `chord ← λ_c · chordPrev + (1−λ_c) · softmax(...)` with structural λ_c (e.g. 1−1/baseO); chord smooths rather than resets
+  2. **Argmax chord with momentum gating** — option stays until logit-gain to switch exceeds ε (structural, e.g. ε = 1/K)
+  3. **Termination as its own GVF** — β^k learned as an independent GVF with its own subtask (not `(1+curr[k])/2`, not `α₀/(α₀+utilOpt)`, not `planAdv`)
+- None of these couple β to ψ or utilOpt — the specific family that broke
+
+**C. Plan Step 9 — uncertainty-aware search control** (medium leverage)
+- Plan text: *"take into account the **uncertainty** of various parts of the model"*
+- Current: priority on TD-error magnitude (D2)
+- Orthodox fix: per-model-entry variance EMA (`Var(TD) = EMA(TD²) − EMA(TD)²`); priority = `chord · √Var(TD)` instead of `chord · ‖TD‖`
+- Compounds with D2 (refines existing priority signal, no new state buffer if we reuse utilOpt machinery)
+
+**D. Plan Step 11 — feature registry / "never-used-as-subtask-basis"** (low-medium leverage)
+- Plan text: *"replaced with those for a new feature that has not yet been the basis for a subtask"*
+- Current: `oak_bk_admit_commit` uses pure randomness; no tracking
+- Depends on: Plan Step 2 fix (A) first — compositional feature candidates give the registry something to select from
+- Orthodox fix: flag each feature with the option(s) it has ever served; G&T prefers never-flagged features
+
+**E. Plan Step 11 — option keyboard Design B** (low leverage)
+- Plan Design B: keyboard vector defines a joint subtask, model treats chord as opaque subtask descriptor
+- Currently: Design A only; empirically sufficient
+- Kept as a noted alternative; not a priority
+
+### Exhausted families (do not revisit without architectural change)
+
+These mechanisms are structurally incompatible with the current TD-bootstrap + fixed-random-feature + chord-softmax substrate at any Plan-orthodox parameterization.
+
+| # | Attempt | Tier | Signature of failure |
+|---|---|---|---|
+| 1 | Option termination via `termW` + closed-form geometric Q^k + hold-or-refresh chord, β₀=1/R | C2 v1 | −99% mean lift |
+| 2 | Same, β₀=0.5 (Bacon-Harb-Precup standard) | C2 v2 | −99% mean lift |
+| 3 | C2 retry on C1 substrate | C2 retry | +417/seed, 5/10 negative seeds, 2/10 walking |
+| 4 | Structural `β_k = (1+curr[k])/2` | C4 | −30% mean lift at 1.5M, options myopic, chatter collapse to 0.02 |
+| 5 | argmin `planUtil = EMA(Q^k − V)` replacing argmin `utilOpt` for G&T | Step-11 sharpening | 1.5M tied, **10M −16%**, r=−0.62 anti-informative correlation, chatter 4× F1 |
+| 6 | Recurrent encoder (state[t−1] as third region in Fourier input), both v1 RFF-1 and v2 variance-balanced | C3 v1/v2 | −52% mean lift, TD double non-stationarity |
+| 7 | TD(λ) eligibility traces on valueW + ψ, normalized form with λ = 1 − 1/baseO | G1-norm | 9/10 stable + 8/10 beat F1, but **seed 6 catastrophic divergence** (chatter 10^40 within 50k steps) due to R correlated features compounding same-sign |
+| 8 | True-Online TD(λ) (Dutch trace + correction) on valueW, various α (1/baseO, 2/R) | G1-TO | diverges on seed 0 at any Plan-structural α; stability requires α·λ·‖x‖² ≤ 1 which correlated Fourier features violate |
+
+**Two distinct common lessons across these failures:**
+
+1. **Options 1-5 (termination family)**: the termination / option-identity / G&T-reseed functions must not be derived from ψ or from backward value signals (`utilOpt`, `planAdv`, `Q^k − V`, or `(1 + curr[k])/2`). These signals couple option identity to the bootstrap target and create self-referential divergence.
+2. **Options 7-8 (traces family)**: multi-step TD(λ) requires the feature space to be approximately orthogonal. Our cos/sin Fourier pairs at bandwidth 1 correlate enough that the Sutton-Barto §12.2 stability condition `α·(1+λ)/(1−λ)·E[‖x‖²] ≤ 2` cannot be satisfied at any Plan-orthodox α (structural choices like 1/baseO or 2/R). Eligibility traces are thus **conditionally-applicable**: they require Plan Step 2 feature-decorrelation first.
+
+Mechanisms that remain untried and satisfy both constraints: chord hysteresis, argmax+momentum gating, independent β-GVF (all sidestep constraint 1); compositional / decorrelated feature reseeding (addresses constraint 2).
+
+### Non-Plan departures we've accepted
+
+These are not Plan-mandated but aren't Plan-forbidden either. Transparent list:
+
+- **Tier F1 structural σ = 1/√A** — justified by Bitter Lesson (structural priors from the env action-dim spec). Largest empirical intelligence leap on HC. Keep.
+- **Adaptive β_k from utilOpt** — stability mechanism, NOT Plan Step 10 termination. Plan Step 10 termination remains an open gap (see B above).
+- **Perf-opt phase after each tier** — Plan-compatible (computational-cost cognizance; reactive action prioritization) but not Plan-mandated. Infrastructure, not algorithm.
 
 ## Empirical baseline
 
@@ -1174,6 +1246,91 @@ visible trajectory change — seeds should keep improving past 2M),
 **then eligibility traces** (compounds with Step 11 since each new
 option converges faster). Feature combinations can follow.
 
+### Step 11 sharpening — G&T reseeds by planning usefulness, not ψ-stability (ROLLED BACK)
+
+**Verdict: the "argmin planUtil" operationalization of Plan Step 11
+("if an option model is never useful in planning… should eventually
+be deleted") is anti-informative on HalfCheetah-v4 and was fully
+reverted.** The original `utilOpt` argmin heuristic is retained.
+
+**What was implemented and rolled back:**
+- State: `planUtil[K]` floats (K=32)
+- `oak_plan_reduce`: per-lane EMA `planUtil[k] += invT · ((Q^k − V) − planUtil[k])` with `invT = track_rate(stepCount, baseO)`; `simd_broadcast` of `vCurr` added to serve all K lanes
+- `oak_bk_admit_commit`: argmin over `planUtil` (replacing argmin over `utilOpt`); `planUtil[worstK] = 0` reset on reseed
+- Diagnostic surface: `planUtilMeanAbs = mean_k |planUtil[k]|` in heartbeat `health.*`
+
+**10×1.5M screen — PASS.** 10/10 wins, 0 NF, mean lift +229k
+(F1 +237k, −3% tie), chatter median 0.068, 0 negative seeds.
+`planUtilMeanAbs` 0.24–0.58 across seeds — the EMA was populating
+correctly and the argmin was consuming real signal. Screen did not
+catch the failure because 1.5M is pre-convergence; the regression
+mechanism requires options to have matured.
+
+**10×10M — KILL (every dimension):**
+
+| signal | Step 11 | F1 baseline | diff |
+|---|---|---|---|
+| mean lift | +1.40M | +1.67M | **−16%** |
+| seeds beating F1 counterpart | **0/10** | — | −168k to −596k per seed |
+| chatter median @10M | 0.140 | 0.037 | **+278%** |
+| chatter max @10M | 0.246 | 0.056 | **+339%** |
+| post-2M seeds growing | 5/10 | 6/10 | tied/slightly worse |
+| Pearson(`planUtilMeanAbs`, lift) | **−0.615** | n/a | **anti-informative** |
+
+**Mechanism of failure (diagnosed from the trajectory):**
+
+The planUtil EMA is too fast. `invT = track_rate(stepCount, baseO)`
+floors at `1/baseO = 1/17` → time constant ~17 steps. Plan Step 11
+says "**never** useful in planning… **eventually** be deleted";
+17-step EMA is not "never" and 1/step reseed is not "eventually".
+
+Cascade:
+1. Option reseed → `planUtil[k] = 0`, fresh random `ψ/rHat/...` →
+   `Q^k ≈ 0` (random products of fresh weights)
+2. Within ~17 steps, `planUtil[k]` pulls toward `Q^k − V`, often
+   negative (V is learned and nonzero, Q^k is fresh-random)
+3. Fresh option becomes argmin target → **churn trap**
+4. Chatter climbs monotonically: 0.012 @ 0.2M → 0.14 @ 3M → 0.14 @
+   10M (stays elevated). F1's chatter stays flat at 0.03–0.04 entire run.
+5. Options never stabilize → policy never stabilizes → cumulative lift
+   deficit accumulates linearly: −13k @1M → −39k @2M → −135k @5M → **−276k @10M**.
+
+**Why `utilOpt = EMA(|tdPsi|²)` is actually clever** (in retrospect):
+converged options have small `|tdPsi|²` → converged options are the
+argmin → converged options get replaced. Still-learning options have
+large `|tdPsi|²` → protected from G&T. This is the correct semantics:
+"this option has finished learning, it's ready for replacement". Not
+what Plan Step 11 literally says, but empirically the right behavior.
+
+**Why the plateau-past-2M hypothesis was wrong.** Pre-Step-11 analysis
+used peak `rewardRate` as the "does learning continue past 2M?" signal.
+Peak `rewardRate` is noisy (200k-step windows can fluctuate). The real
+signal is *cumulative lift* (integrates reward vs random over the
+whole window). Cumulative lift shows F1 learns steadily at ~170k
+lift/200k-steps from 1M through 10M — **not plateauing at all**,
+just accumulating slowly. The actual bottleneck is per-step learning
+velocity, not G&T targeting.
+
+**Lesson for future Plan-literal implementations.** "Never" in Plan
+text implies a long-run signal (τ ≫ 17 steps). "Eventually" implies
+gated reseed, not 1/step unconditional. "Replaced with those for a
+new feature that has not yet been the basis for a subtask" implies
+a feature registry + filtering — infrastructure we don't have yet.
+Any future attempt at Plan Step 11 literal must address all three,
+not just swap the argmin signal.
+
+**Historical record:**
+- C2 v1/v2/retry (termination via `termW` + geometric Q^k): ROLLED BACK (-99%)
+- C3 v1/v2 (recurrent encoder): ROLLED BACK (TD double non-stationarity)
+- C4 (structural `β_k = (1+curr[k])/2`): ROLLED BACK (myopic options, −30%)
+- Step 11 sharpening (argmin planUtil): ROLLED BACK (−16% + 4× chatter + r=−0.62)
+
+**Verdict:** the termination/option-replacement family of mechanisms
+(Plan Step 10 STOMP completion + Plan Step 11 literal) is exhausted
+for this substrate. Focus shifts to mechanisms that increase per-step
+learning velocity (eligibility traces) or representation expressiveness
+(feature combinations in G&T).
+
 - **F2. Option keyboard Design B** — joint-subtask vs. chord-blend; the Plan §11
   alternative — would change the chord semantics entirely
 - **F3. Discount factor reintroduction** — Plan Step 5 onward eschews
@@ -1202,13 +1359,20 @@ flowchart TD
     D3_10M --> C4roll["Tier C4 ROLLED BACK: structural beta = (1+curr[k])/2 regressed -30% aggregate at 1.5M; termination-from-psi family exhausted"]
     C4roll --> F1done["Tier F1 DONE: structural sigma = 1/sqrt(A); PLATEAU BREAKER; mean lift +170% vs D3, every seed +122% to +242%"]
     F1done --> F1_10M["F1 10M: mean lift +1.67M (vs D3 +620k, C1 +668k); chatter 0.037 nearly deterministic; options CONVERGE at 2M and stop improving"]
-    F1_10M --> nextWin{Next candidates post-F1}
-    nextWin -->|"HIGHEST leverage: fixes continual improvement after convergence"| Step11[Step 11 sharpening: utilOpt from planAdv]
-    nextWin -->|"Plan Step 1 gap: multi-step credit assignment"| Traces[Eligibility traces]
-    nextWin -->|"Plan Step 2 gap: feature combinations in G&T"| FeatCombine[Feature combinations in G&T reseed]
-    Step11 --> Traces
-    Traces --> FeatCombine
-    FeatCombine --> E1[Tier E1: horde-scale K]
+    F1_10M --> Step11att["Step 11 sharpening ATTEMPT: argmin planUtil = EMA(Q^k-V)"]
+    Step11att --> Step11check{10×1.5M screen + 10×10M acceptance}
+    Step11check -->|"1.5M PASS (+229k tied); 10M FAIL: -16% lift, 0/10 beat F1, 4× chatter, r=-0.62 anti-informative"| Step11roll[Step 11 sharpening ROLLED BACK; termination/replacement family exhausted]
+    Step11roll --> G1att["Tier G1 ATTEMPT: eligibility traces (TD(lambda) normalized + true-online, lambda = 1 - 1/baseO)"]
+    G1att --> G1check{10x1.5M screen + smoke}
+    G1check -->|"9/10 seeds stable but seed 6 catastrophic; true-online diverges even seed 0 due to correlated Fourier features"| G1roll[Tier G1 ROLLED BACK; traces require Plan Step 2 decorrelation first]
+    G1roll --> H1att["Tier H1 IN-FLIGHT: chord hysteresis with beta_k = 1/(1+ntdSqSum) from optTransition confidence (Plan Step 10 STOMP, forward-model-error signal class — outside exhausted termination family)"]
+    H1att --> H1check{10k smoke + 10x1.5M + 10x10M}
+    H1check -->|"Pending validation"| H1pending[Pending smoke + screen + acceptance]
+    H1check --> nextWin{Next Plan-orthodox gap}
+    nextWin -->|"Plan Step 2: feature decorrelation"| FeatCombine[Feature combinations in G&T reseed]
+    nextWin -->|"Tier H2: H1 beta in psi-TD target (full Plan Step 10 literal)"| H2[Tier H2: learned beta in psi TD]
+    FeatCombine --> Traces2[Tier G2: retry eligibility traces on decorrelated features]
+    Traces2 --> E1[Tier E1: horde-scale K]
     E1 --> E2[Tier E2: R from compute]
 ```
 
@@ -1247,51 +1411,160 @@ unconditionally — all bit-identical: concurrent agentMs 0.6072 ms →
 0.3511 ms (**-42%**), SPS 1 541 → 2 534 (**+64%**), 10M paired bench
 ~66 min/seed instead of ~2h48m.
 
-**The new plateau exposed by F1 is CONTINUAL IMPROVEMENT itself.**
+**The post-F1 plateau is per-step learning VELOCITY, not peak discovery.**
 
-Per-seed running-max-peak trajectories show most seeds converge by
-~1-2M steps and then stay FLAT for 8+M more steps. Chatter 0.037
-(near-deterministic). The agent found a stable walking gait and
-stopped exploring. Mean lift is 2.7× because the reward accumulates
-every step the agent walks — but no new, better gait is discovered
-over 8M additional steps of training. **The Alberta Plan's core
-promise — continual learning — is not being delivered past initial
-convergence.**
+Revised understanding after Step-11 10M diagnostic (earlier "F1 plateaus
+past 2M" claim was based on noisy peak-rewardRate; *cumulative* lift —
+the real RL objective — grows at a stable ~170k lift/200k-steps from
+1M through 10M on F1). F1 is NOT plateauing; it's learning at a
+steady rate. The question is: can we raise that per-step rate?
 
-**Three continual-improvement gaps remain (ranked by leverage):**
+**Step 11 sharpening (ROLLED BACK):** argmin over `EMA(Q^k − V)`
+instead of argmin over `EMA(|tdPsi|²)` — hypothesized to fix
+"G&T reseeds stable-good options alongside stable-bad". 1.5M
+screen passed (+229k tied); 10M KILLED (−16% mean lift, r=−0.62
+anti-informative correlation, chatter 4× higher). Mechanism of
+failure: `invT = 1/baseO` makes the EMA τ≈17 steps, too fast for
+"never useful in planning" semantics; fresh-reseeded options have
+Q^k≈0 by construction, immediately become argmin targets → churn
+trap; chatter climbs monotonically. **Termination / option-replacement
+family is exhausted** (C2 v1/v2/retry, C4, Step 11 all rolled back).
 
-1. **Step 11 sharpening** — `utilOpt[k]` is currently `EMA(|tdPsi|²)`
-   which rewards "stable" (unchanging ψ) regardless of whether that
-   stability is at a useful planning value. Plan Step 11 verbatim:
-   *"if an option model is **never useful in planning**, then it…
-   should eventually be deleted"*. Fix: `utilOpt[k]` from option k's
-   chord-weighted contribution to `planAdv`. Plateaued-but-mediocre
-   options get reseeded; planning-critical options are kept.
-   **SMALL blast, HIGHEST expected impact for continual improvement.**
+**Open Plan-orthodox gaps after G1 rollback** (ranked by Plan-orthodoxy priority, not just leverage):
 
-2. **Eligibility traces** (Plan Step 1 gap). Walking requires ~10-20
-   step gait patterns; 1-step TD sees each step independently. Plan
-   Step 1 verbatim mentions *"short-term credit-assignment memories
-   such as eligibility traces"*. Fix: add trace buffer `e[K·R]`
-   with `e ← γλ·e + ∇ψ`, update ψ via `e·δ` instead of `prev·δ`.
-   Each new option (after Step 11 reseeding) converges faster to
-   a better long-horizon value function.
+1. **Plan Step 10 STOMP — multi-step options** (the LARGEST remaining
+   structural gap; options are 1-step today because chord recomputes
+   every step). See gap B in the Plan-orthodox gaps section above.
+   **No orthogonality prerequisite** — can be attempted immediately
+   on F1 substrate.
 
-3. **Feature combinations in G&T** (Plan Step 2 gap). Plan Step 2
-   verbatim: *"creating and introducing new features **made by
-   combining existing features**"*. Current `oak_bk_admit_commit`
-   samples fresh `N(0, 1/√R)` Fourier rows — no combination.
-   Fix: bias reseed toward high-utility existing feature
-   combinations + small Gaussian noise. Slow-burn representational
-   growth. Becomes interesting after Step 11 + traces land.
+2. **Plan Step 2 — feature combinations / decorrelation** (unlocks
+   traces as a byproduct; also improves representation expressiveness).
+   See gap A.
+
+3. **Plan Step 1 — eligibility traces** (Tier G1 rolled back;
+   conditional on Plan Step 2 decorrelation landing first).
+
+### Tier H1. Chord hysteresis via model-confidence β (Plan Step 10 STOMP multi-step options, IN-FLIGHT)
+
+**Closes the largest remaining Plan-orthodoxy gap.** Plan Step 10 STOMP defines options as *"policy + termination condition"* but until H1 OaK's chord recomputed every step via `softmax(ψ·s')`, making options effectively 1-step (state-of-agent table flagged "STRUCTURALLY DEGENERATE"). Five prior attempts in the termination-from-ψ family (C2 v1/v2/retry, C4 structural `β=(1+curr)/2`, Step-11 sharpening) all regressed catastrophically because they coupled β/termination to ψ or backward value signals. H1 uses a **forward-model-prediction-error** signal class instead — a fundamentally different signal.
+
+**Mechanism.**
+
+Per-option continuation probability:
+```
+β^k = 1 / (1 + ‖n_td^k‖²)
+```
+where `‖n_td^k‖² = ntdSqSum[k]` is already computed in `oak_plan` (Tier D2 prioritized sweeping). Zero new weights; `1/(1+x)` is OaK's standard rational soft-clamp (same as `planAdv`). β ∈ (0, 1] by construction. High β ⇔ model confident ⇔ option continues. Low β ⇔ model surprised ⇔ option terminates.
+
+Chord update in `oak_meta_predict` phase 1 replaces `chord[k] = softmax_k(ψ·s')` with:
+```
+chord_k_raw = β^k · chordPrev[k] + (1 − β^k) · softmax_k(ψ·s')
+chord[k]    = chord_k_raw / Σ_j chord_j_raw          [renormalize via simd_sum]
+```
+
+**Init + G&T dynamics (safety property).** At init, optTransition is random ⇒ `ntdSqSum` is large ⇒ β ≈ 0 ⇒ `chord = softmax` (identical to pre-H1 1-step behavior). G&T reseeds an option ⇒ fresh random optTransition ⇒ large `ntdSqSum` ⇒ β ≈ 0 for that option until its model re-learns ⇒ automatic safe fallback. Options accumulate persistence **exactly as their transition models converge**.
+
+**Timing.** `oak_meta_predict` needs β from PREVIOUS step's `oak_plan` output. New state buffer `prevBeta[K]` (K floats, 128 bytes on HC) — written by `oak_plan` lane 0 at end of step alongside `prioOpt`; read by next step's `oak_meta_predict` phase 1. One-step lag is intentional (β tracks slow-moving optTransition quality).
+
+**Diagnostic.** `KernelStats.chordPersistenceMeanAbs = Σ_k chord[k]·chordPrev[k]` surfaced in heartbeat JSON. Interpretation:
+- Near `1/K ≈ 0.03`: no persistence, chord reshuffles each step (β ≈ 0 everywhere, mechanism not activating)
+- `0.3-0.9`: target range, genuine multi-step options
+- Near `1`: over-sticky chord (β ≈ 1 everywhere; options never terminate)
+
+**Plan-orthodoxy.** Inv-1 (β pure agent-internal), Inv-3 (no tunables — `1/(1+x)` is existing OaK form), Inv-4 (continuing), Inv-8 (no weight caps), Inv-9 (single stream), Inv-10 N/A (algorithmic). Not in exhausted family (β from forward-model error, not ψ/backward-value).
+
+**Acceptance / kill criteria.** See plan file `.cursor/plans/tier_h1_chord_hysteresis_model-beta_*.plan.md`.
+
+### Tier G1. Eligibility traces (Plan Step 1 completion, ROLLED BACK — mechanism structurally incompatible with correlated-feature substrate at any Plan-orthodox λ/α)
+
+
+
+Plan Step 1 base-agent description verbatim: *"all four components
+are updated by learning processes operating in the foreground using
+the most recent events together with **short-term credit-assignment
+memories such as eligibility traces**"*. OaK ran λ=0 implicitly
+through F1 (all TD updates 1-step). HalfCheetah gait cycles are
+~20–50 steps; 1-step TD cannot learn temporal structure beyond
+adjacent transitions.
+
+**Verdict: TD(λ) eligibility traces are structurally incompatible
+with OaK's correlated-Fourier-feature substrate at any Plan-orthodox
+λ / α choice.** Plan Step 1 stays satisfied by MetaOptimize
+(per-feature α) + Welford obs standardization; the base-agent's
+literal *"short-term credit-assignment memories such as eligibility
+traces"* clause remains an open orthodoxy gap, but one that cannot
+be closed without either violating the BWH (hardcoding λ) or
+architectural changes to the feature space (Plan Step 2 decorrelation
+first).
+
+**Two sub-phases attempted, both rolled back:**
+
+**G1-norm** — normalized form `e ← λ·e + (1−λ)·x` for both `valueW`
+and ψ. λ = 1 − 1/baseO (structural), α[i] = MetaOptimize-adapted.
+- **10k smoke:** 0 NF, chatter 0.015, traceValueMeanAbs 0.17 stable
+- **10×1.5M paired bench:** 9/10 seeds stable AND 8/10 beat F1
+  counterpart (median lift +246k vs F1 +235k) — **but seed 6
+  catastrophically diverged within the first 50k steps** (chatter
+  10^40, lift −557k). Mean lift +159k vs F1 +237k due to seed 6.
+
+**G1-TO** — switched valueW to canonical True-Online TD(λ)
+(van Seijen-Sutton 2014 / Sutton-Barto §12.5):
+```
+e_V[i] ← λ·e_V[i] + (1 − α·λ·(e·x))·x[i]     [Dutch trace]
+Δw[i]  = α·(δ + V − V_old)·e_V[i] − α·(V − V_old)·x[i]
+```
+Stored `V_old` as scalar in KernelScalars across steps; `e·x`
+dot product computed once in `oak_meta_predict` phase 2 lane 0.
+- **Smoke tests (various α):** diverged for α=1/baseO, α=2/R (the
+  Sutton-Barto §12.2 stability bound), even at the start (20-25k
+  NF by 10k steps on seed 0 — which G1-norm handled fine).
+
+**Root cause diagnosed: R correlated features compound same-sign.**
+
+Sutton-Barto §12.2 eq 12.6: TD(λ) stability requires
+`α·(1+λ)/(1−λ)·E[‖x‖²] ≤ 2`. For our Fourier (cos,sin) pairs
+||x||² ≤ R/2. At λ = 1−1/baseO the multiplier `(1+λ)/(1−λ) ≈ 2·baseO`,
+so stability demands **α ≤ 1/(baseO·R)** — dramatically smaller
+than MetaOptimize's α-cap of 1/baseO. Any α large enough to learn
+is too large to remain stable.
+
+In the normalized form, 9/10 seeds happen to have feature correlations
+that stay below threshold; seed 6 hit the corner. In True-Online,
+the Dutch factor `(1 − α·λ·(e·x))` goes NEGATIVE when `e·x > 1/(αλ)`,
+which actively destabilizes (observed traceValueMeanAbs 1.5 with
+factor flipping sign each step).
+
+**Why we can't fix it within Plan orthodoxy:**
+- Reducing λ below 1 − 1/baseO → hardcoding (violates BWH — no
+  env-independent structural reason to pick a smaller λ)
+- Reducing α below 1/baseO → either hardcoded (violates BWH) or
+  requires MetaOptimize to allow per-feature α[i] much smaller than
+  the cap, which breaks MetaOptimize's own scaling (η = 1/(R·baseO))
+- Using Dutch / true-online with any Plan-structural α → still
+  requires `α·λ·||x||² ≤ 1`, which the correlated Fourier features
+  exceed in practice
+
+**Conclusion.** The Plan's mention of eligibility traces is
+**conditional on the feature representation being sufficiently
+orthogonal**. Our correlated Fourier features don't meet this
+condition. To unlock eligibility traces in a future pass, the
+feature space needs orthogonalization first — which is Plan Step 2
+(feature finding / combinations) territory, not Plan Step 1.
+
+**Next step:** Plan Step 10 (multi-step options). The structurally
+degenerate "1-step options via chord-recomputes-every-step" is the
+largest remaining Plan-orthodoxy gap and shouldn't wait for the
+feature-decorrelation work that eligibility traces depend on.
 
 **Deprioritized:**
-- C4 termination family exhausted across four attempts (C2 v1/v2,
-  C2 retry, C4) — structurally incompatible with the ψ-TD formulation
-  at these scales. Plan Step 10 STOMP termination is a documented
-  open gap; not addressable via the β slot.
-- D1 Dyna multi-step planning is pointless until options keep
-  improving. Currently options stabilize at the value function the
+- Termination/option-replacement family (C2, C4, Step 11 sharpening)
+  across 5 attempts — structurally incompatible with the ψ-TD
+  formulation at current scales. Plan Step 10 STOMP termination and
+  Plan Step 11 literal replacement are open gaps; not addressable
+  via the current β / G&T-signal slots.
+- D1 Dyna multi-step planning is pointless until learning velocity
+  improves. Currently options stabilize at the value function the
   model supports; more planning just accelerates stabilization.
 
 ---
