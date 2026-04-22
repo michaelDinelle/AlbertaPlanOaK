@@ -155,13 +155,16 @@ These mechanisms are structurally incompatible with the current TD-bootstrap + f
 | 6 | Recurrent encoder (state[t−1] as third region in Fourier input), both v1 RFF-1 and v2 variance-balanced | C3 v1/v2 | −52% mean lift, TD double non-stationarity |
 | 7 | TD(λ) eligibility traces on valueW + ψ, normalized form with λ = 1 − 1/baseO | G1-norm | 9/10 stable + 8/10 beat F1, but **seed 6 catastrophic divergence** (chatter 10^40 within 50k steps) due to R correlated features compounding same-sign |
 | 8 | True-Online TD(λ) (Dutch trace + correction) on valueW, various α (1/baseO, 2/R) | G1-TO | diverges on seed 0 at any Plan-structural α; stability requires α·λ·‖x‖² ≤ 1 which correlated Fourier features violate |
+| 9 | G&T mean-utility gate (`worst < mean`; strict `<`) for reseed cadence | J1 v1 | 10k smoke: fires 100% of steps (reinit count == stepCount). Argmin < mean ALWAYS true for non-uniform K-sample distributions ⇒ gate is mathematically equivalent to "always fire". No rate-limiting achieved. |
+| 10 | G&T σ-gate (`worst < mean − σ`; standard-deviation threshold from state) | J1 v2 | 10k smoke: fires 100% of steps. For K=32 samples, expected argmin is ~2σ below mean by extreme-value concentration ⇒ 1σ threshold fires almost always. Same mechanism-family failure as J1 v1. |
 
-**Two distinct common lessons across these failures:**
+**Three distinct common lessons across these failures:**
 
 1. **Options 1-5 (termination family)**: the termination / option-identity / G&T-reseed functions must not be derived from ψ or from backward value signals (`utilOpt`, `planAdv`, `Q^k − V`, or `(1 + curr[k])/2`). These signals couple option identity to the bootstrap target and create self-referential divergence.
 2. **Options 7-8 (traces family)**: multi-step TD(λ) requires the feature space to be approximately orthogonal. Our cos/sin Fourier pairs at bandwidth 1 correlate enough that the Sutton-Barto §12.2 stability condition `α·(1+λ)/(1−λ)·E[‖x‖²] ≤ 2` cannot be satisfied at any Plan-orthodox α (structural choices like 1/baseO or 2/R). Eligibility traces are thus **conditionally-applicable**: they require Plan Step 2 feature-decorrelation first.
+3. **Options 9-10 (central-tendency G&T gate family)**: any gate of the form `worst < mean − k·σ` for bounded structural `k` fails to rate-limit reseeds because **the minimum of K samples is mathematically an extreme-value statistic** — always far below the distribution center. To rate-limit G&T cadence, the mechanism must not compare the argmin to a central statistic: either use time-based / probabilistic cadence (clock-adjacent, mildly Inv-7), age-weighted utility (extra state per feature/option), or change WHAT gets reseeded (Plan Step 2 compositional features) rather than WHEN.
 
-Mechanisms that remain untried and satisfy both constraints: chord hysteresis, argmax+momentum gating, independent β-GVF (all sidestep constraint 1); compositional / decorrelated feature reseeding (addresses constraint 2).
+Mechanisms that remain untried and satisfy all three constraints: chord hysteresis, argmax+momentum gating, independent β-GVF (all sidestep constraint 1); compositional / decorrelated feature reseeding (addresses constraints 2 and 3 simultaneously — Plan Step 2 feature combinations replace fresh-random reseeds with mixtures of high-utility features, bypassing the cadence problem by making REPLACEMENTS more informative rather than gating their frequency).
 
 ### Non-Plan departures we've accepted
 
@@ -1548,6 +1551,35 @@ stimulus-code (Sutton-Barto §13, §17) inspiration.
 | Inv-10 bit-id | N/A — encoder input dims change (algorithmic, not perf-opt) |
 
 **Acceptance / kill criteria**: see plan file `.cursor/plans/tier_i_staged_plan_step_3_recurrent_features_*.plan.md`.
+
+**I1 10M result (NEUTRAL — ACCEPTED as Plan-Step-3 architectural installation):**
+- 10/10 wins, 0 NF
+- mean lift +1.60M vs F1 +1.67M (−4.6%) — within kill tolerance (>−10%), 3/10 seeds beat F1
+- chatter median 0.029 (BEST of all tiers; −23% vs F1 0.037, −27% vs H1 0.039 — richer temporal features smooth the policy)
+- **chordEffectiveK median 31.4 / K=32** — chord still uniform throughout 10M run
+- **Key empirical finding**: richer temporal features DID NOT unlock chord concentration. Same uniform-chord failure mode as H1. Empirically falsifies "feature expressiveness is the plateau bottleneck"; points directly at G&T cadence as the root cause → motivates Tier J1.
+- Integrated as Plan-Step-3 structural orthodoxy installation (kernel path now incorporates older signals and traces per Plan); chatter improvement is real. Mechanism may compound once Tier J1 stops G&T from churning useful options.
+
+### Tier J1. G&T mean-utility gate (Plan Step 11 "eventually" literal, ROLLED BACK — mechanism mathematically equivalent to no gate for K~32 samples)
+
+**Motivation.** Plan Step 11 verbatim: *"if an option model is **never useful in planning**, then it and the corresponding option and subtask should **eventually** be deleted and replaced"*. "Never" and "eventually" demand a long-horizon, data-driven cadence — not every-step unconditional reseed.
+
+**Empirical trigger** (diagnosed from H1 + I1 10M data): chordEffectiveK stuck at ~31/32 across both tiers (uniform chord). Feature additions didn't fix it ⇒ hypothesized that G&T cadence IS the bottleneck (options keep getting reseeded before differentiating).
+
+**Attempt 1 — strict `< mean` gate**: In `oak_bk_admit_commit` Phase 1, extend the argmin scans to also compute mean, then gate each reseed by `worst < mean` (strict `<`; ties don't reseed). 10k smoke: **fires 100% of steps** (reinit count == stepCount). Post-hoc math: for any non-uniform distribution of K utility values, argmin IS ALWAYS strictly below mean — the gate is mathematically equivalent to "always fire unless all values are exactly identical".
+
+**Attempt 2 — σ-gate (`worst < mean − σ`)**: Tighter structural threshold; compute σ in the same scan via sum-of-squares. 10k smoke: **also fires 100% of steps**. Post-hoc math: for K=32 samples (any distribution shape), expected argmin is ≥2σ below mean by concentration-of-extrema arguments; so `worst < mean − σ` fires whenever any argmin is "more extreme than 1σ below mean" — ALMOST ALWAYS true for K≥8.
+
+**Lesson (mechanism-family exhausted).** Any gate of the form `worst < mean − k·σ` for small structural `k` will fire every step, because **the minimum of K samples is mathematically an extreme-value statistic — always far below the central tendency**. To rate-limit reseed cadence, the mechanism family must be fundamentally different:
+- **Time/clock based**: rate-limit to once per T structural steps (e.g., T=K, T=baseO). Violates Inv-7 spirit ("the same algorithm runs every step uniformly"), though the decision evaluation runs every step.
+- **Probability based**: reseed with probability 1/T. Introduces stochasticity orthogonal to utility.
+- **Age-weighted utility**: give new features/options a grace period where utility is inflated. Requires extra per-option/per-feature age state.
+- **Compare to spread, not central tendency**: e.g., `worst < max − Δ` for structural Δ. Same problem: max-min is always multiple σ's for K samples.
+- **Change what gets reseeded, not when**: fresh-random replacement IS the problem (new options start un-differentiated). Plan Step 2 feature combinations would mix utility features rather than generating fresh random ones.
+
+**Plan Step 11 "eventually" semantic remains open.** The cleanest orthodoxy-path is probably Plan Step 2 (feature combinations) — replace "worst-utility fresh-random" with "combinations of high-utility existing features". This side-steps the cadence problem (keep reseeding every step, but the REPLACEMENTS are more informative) and addresses the same uniform-chord failure.
+
+**Outcome**: kernel reverted to I1 substrate (2 blocks of conditional writes removed; counters unconditional again). Diagnostics (`oakOptionReinitCountFinal`, `oakFeatureReinitCountFinal`) remain trivially == stepCount until a different cadence mechanism is installed. Plan files (`.cursor/plans/tier_j1_g&t_mean-utility_gate_*.plan.md`) and bench scripts retained as historical record of the attempt.
 
 ### Tier G1. Eligibility traces (Plan Step 1 completion, ROLLED BACK — mechanism structurally incompatible with correlated-feature substrate at any Plan-orthodox λ/α)
 
