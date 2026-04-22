@@ -30,6 +30,9 @@ struct RunHealth: Codable {
     // Kernel-side (only present for oak):
     let oakOptionReinitCountFinal: Int?, oakFeatureReinitCountFinal: Int?
     let nonFiniteByPhase: [String: Int]?
+    // Tier H1 diagnostic: latest chord effective-K = 1/Σ chord². Range [1, K]; K means
+    // chord is uniform (mechanism inactive or chord stays flat); 1 means one-hot chord.
+    let chordEffectiveK: Double?
 }
 
 struct RunDiagnostic: Codable {
@@ -233,6 +236,7 @@ private struct HealthAccumulator {
     private var actDeltaSum = 0.0, scoreGradSum = 0.0
     private var encodeNF = 0, learnNF = 0, planNF = 0, tdPsiNF = 0
     private var oakOptionReinitFinal = 0, oakFeatureReinitFinal = 0
+    private var chordEffectiveKLatest: Double = 0
     private let trackFloor: Double
 
     init(obsDim: Int) { trackFloor = 1.0 / Double(max(obsDim, 1)) }
@@ -267,6 +271,7 @@ private struct HealthAccumulator {
         tdPsiNF  += Int(stats.tdPsiNonFiniteCount)
         oakOptionReinitFinal  = Int(stats.oakOptionReinitCount)
         oakFeatureReinitFinal = Int(stats.oakFeatureReinitCount)
+        chordEffectiveKLatest = Double(stats.chordEffectiveK)
     }
 
     var hasMeasuredSteps: Bool { envSteps > 0 }
@@ -283,7 +288,8 @@ private struct HealthAccumulator {
             scoreGradL2Mean: scoreGradSum / n,
             oakOptionReinitCountFinal: kernelSteps > 0 ? oakOptionReinitFinal : nil,
             oakFeatureReinitCountFinal: kernelSteps > 0 ? oakFeatureReinitFinal : nil,
-            nonFiniteByPhase: nf)
+            nonFiniteByPhase: nf,
+            chordEffectiveK: kernelSteps > 0 ? chordEffectiveKLatest : nil)
     }
 }
 
@@ -356,6 +362,17 @@ private struct KernelConfig {
                                   // Written by oak_plan lane 0; consumed by oak_plan_reduce
                                   // (mean) and oak_learn_heads (Head 4 gate). Moore-Atkeson 1993,
                                   // Plan footnote 13.
+    var sPrevBeta: UInt32 = 0    // Tier H1 (Plan Step 10 STOMP multi-step options): per-option
+                                  // continuation probability β^k ∈ [0, 1] carried from previous
+                                  // step's oak_plan. β^k = 1/(1 + ntdSqSum[k]) — soft-clamp of
+                                  // optTransition's squared-L2 model error. High β ⇔ model
+                                  // confident ⇔ option continues; low β ⇔ model surprised ⇔ option
+                                  // terminates. Read by oak_meta_predict phase 1 for chord
+                                  // hysteresis: chord_k ← β^k·chordPrev + (1−β^k)·softmax_k(ψ·s'),
+                                  // renormalized via simd_sum. Written by oak_plan lane 0 alongside
+                                  // the existing prioOpt write — same lane, same scope, no added
+                                  // barriers. Fresh random optTransition → large ntdSqSum → β ≈ 0
+                                  // → 1-step behavior (safe fallback at init and post-G&T reseed).
     var uCounters: UInt32 = 0
 }
 
@@ -368,6 +385,17 @@ private struct KernelScalars {
     // in oak_plan_reduce via simd_sum and broadcast-cached for every oak_learn_heads Head 4
     // thread to read (avoids 131k Head 4 threads each computing the same K-element reduction).
     var meanPrio: Float = 0
+    // Tier G1-TO (True-Online TD(λ), van Seijen-Sutton 2014 / Sutton-Barto §12.5):
+    // persistent scalar `vPrevOld` = V(s_t, w_{t−1}) = the prediction at the CURRENT state
+    // using the PREVIOUS STEP's weights. Initialized 0; each step's oak_meta_predict phase 2
+    // reads it (for the true-online δ), then overwrites it with this step's V_curr
+    // (= w_{t−1} · x(s_{t+1})) so it's in place for the next step.
+    var vPrevOld: Float = 0
+    // Per-step transient scalars populated by oak_meta_predict phase 2 lane 0 and consumed
+    // by oak_learn_heads Head 0. All three are NF-clamp-at-write (preserve last good value).
+    var tdTrueOnline: Float = 0     // δ_TO = (r − ρ̄) + V(s_{t+1}, w_{t−1}) − V(s_t, w_{t−1}·prev−1 step) = (r − ρ̄) + vCurr − vPrevOld
+    var vDiffTrueOnline: Float = 0  // ΔV = V(s_t, w_{t−1}) − V(s_t, w_{t−2}) = vPrev − vPrevOld
+    var eValDotPrev: Float = 0      // Σ_i e_V[i] · prev[i] for the canonical Dutch trace factor
 }
 
 struct KernelStats {
@@ -375,6 +403,11 @@ struct KernelStats {
     var encodeNonFiniteCount: Float = 0, learnNonFiniteCount: Float = 0
     var planNonFiniteCount: Float = 0, tdPsiNonFiniteCount: Float = 0
     var oakOptionReinitCount: Float = 0, oakFeatureReinitCount: Float = 0
+    // Tier H1 diagnostic: chord effective-K = 1 / Σ_k chord[k]². Range [1, K].
+    // K = uniform chord (mechanism inactive OR chord stays flat); 1 = one-hot chord
+    // (single option fully dominant); intermediate = moderate concentration. With K=32
+    // on HC: 32 = no concentration, ~10 = moderate (3-4 dominant options), 1-3 = sharp.
+    var chordEffectiveK: Float = 0
 }
 
 // =================================================================================================
@@ -448,6 +481,11 @@ private enum OakMetalLayout {
                                        // K floats. prio[k] = chord[k] · ||nTdMat^k||_L2. Written
                                        // by oak_plan lane 0; consumed by oak_plan_reduce (mean
                                        // → KernelScalars.meanPrio) and oak_learn_heads Head 4 gate.
+        let prevBeta: Int             // Tier H1: per-option continuation probability β^k ∈ [0,1],
+                                       // K floats. Written by oak_plan lane 0 as β = 1/(1+ntdSqSum);
+                                       // read by NEXT step's oak_meta_predict phase 1 for chord
+                                       // hysteresis. One-step lag is intentional and semantically
+                                       // fine (β tracks slow-moving optTransition quality).
         let total: Int
     }
     static func stateLayout(obsDim: Int, rank: Int, dPolicy: Int) -> State {
@@ -474,6 +512,7 @@ private enum OakMetalLayout {
         let qo  = o; o += K
         let otr = o; o += obsDim
         let prio = o; o += K
+        let pb  = o; o += K
         return State(observation: obs, obsMean: mean, obsSM: osm, state: st,
                      policyMean: pol, scoreGrad: sg,
                      reward: rew, td: td, tdPsi: tdP,
@@ -482,7 +521,7 @@ private enum OakMetalLayout {
                      planAdv: pa,
                      alpha: al, beta: be, h: h,
                      nTdMat: ntd, qOption: qo, obsTrace: otr,
-                     prioOpt: prio, total: o)
+                     prioOpt: prio, prevBeta: pb, total: o)
     }
 
     struct UInts { let counters, total: Int }
@@ -856,6 +895,7 @@ final class OakMetalEngine {
         c.sNTdMat = UInt32(s.nTdMat); c.sQOption = UInt32(s.qOption)
         c.sObsTrace = UInt32(s.obsTrace)
         c.sPrioOpt = UInt32(s.prioOpt)
+        c.sPrevBeta = UInt32(s.prevBeta)
         c.uCounters = UInt32(u.counters)
         configPointer.pointee = c
     }

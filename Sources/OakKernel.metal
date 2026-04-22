@@ -80,6 +80,15 @@ struct KernelConfig {
     // Head 4 gate (`prioOpt[k] >= meanPrio` → update; below → skip the K·R² optTransition
     // gradient for that option this step).
     uint sPrioOpt;
+    // Tier H1 (Plan Step 10 STOMP multi-step options): per-option continuation probability
+    // β^k = 1/(1 + ntdSqSum[k]) ∈ (0, 1], K floats. Written by oak_plan lane 0 at the end
+    // of step t (piggybacks on the same lane-0 scope that writes prioOpt — zero added
+    // barriers). Read by step t+1's oak_meta_predict phase 1 for chord hysteresis:
+    //   chord_k ← β^k · chordPrev[k] + (1 − β^k) · softmax_k(ψ·s')     (renormalized)
+    // High β (confident transition model) → option persists; low β (model surprised)
+    // → option terminates and chord follows the fresh softmax. One-step β lag is
+    // intentional (β tracks slow-moving optTransition quality).
+    uint sPrevBeta;
 
     // UInt arena offsets.
     uint uCounters;
@@ -106,6 +115,10 @@ struct KernelScalars {
 struct KernelStats {
     float encodeNonFiniteCount, learnNonFiniteCount, planNonFiniteCount, tdPsiNonFiniteCount;
     float oakOptionReinitCount, oakFeatureReinitCount;
+    // Tier H1 diagnostic: chord effective-K = 1 / Σ_k chord[k]² ∈ [1, K]. Independent of
+    // chord step-to-step persistence; pure concentration measure. K = uniform chord;
+    // 1 = one-hot. Written by oak_meta_predict lane 0 after chord renormalization.
+    float chordEffectiveK;
 };
 
 // safe_w: NF-guarded weight write. Preserves prev value on non-finite — no zero-clamp, no
@@ -157,6 +170,7 @@ struct Ctx {
     device float *qOption;                     // Per-option Q^k cache, K floats.
     device float *obsTrace;                    // Tier C1: per-obs-dim trace of std_obs, O floats.
     device float *prioOpt;                     // Tier D2: per-option priority, K floats.
+    device float *prevBeta;                    // Tier H1: per-option continuation β, K floats.
     device uint  *counters;
     device KernelScalars *scalars;
     device KernelStats   *stats;
@@ -200,6 +214,7 @@ inline Ctx make_ctx(device float *params, device float *stateArena, device uint 
     c.qOption         = stateArena + cfg.sQOption;
     c.obsTrace        = stateArena + cfg.sObsTrace;
     c.prioOpt         = stateArena + cfg.sPrioOpt;
+    c.prevBeta        = stateArena + cfg.sPrevBeta;
 
     c.counters = uintArena + cfg.uCounters;
     c.scalars = scalars; c.stats = stats;
@@ -382,7 +397,55 @@ kernel void oak_meta_predict(
     }
     Zexp = simd_broadcast(Zexp, 0u);
     float invZ = 1.0f / max(Zexp, FLT_MIN);
-    if (active) ctx.chord[k] = expL * invZ;
+    float softK = expL * invZ;       // fresh softmax "intent" for option k this step.
+
+    // Tier H1 (Plan Step 10 STOMP multi-step options) — chord hysteresis.
+    // β^k = prevBeta[k] ∈ [0, 1] is last step's optTransition confidence (written by
+    // oak_plan at end of step t-1). Per-option lerp between the just-saved chordPrev
+    // and the fresh softmax "intent":
+    //   chord_k_raw = β^k · chordPrev[k] + (1 − β^k) · softK
+    // Fresh random optTransition → β ≈ 0 → chord = softK (1-step behavior, safe fallback).
+    // Converged optTransition → β → 1 → chord ≈ chordPrev (multi-step persistence).
+    // NF-safe: β clamped to [0,1] at read; output clamped at write via safe_w-style preserve.
+    //
+    // Renormalize via simd_sum across K lanes so Σ chord = 1 (required for downstream
+    // heads that treat chord as a probability distribution over options). This is a NEW
+    // reduction (no prior bit-id baseline applies per Inv-10; Tier H1 is algorithmic, not
+    // perf-opt, so FP-reorder is allowed without per-seed validation).
+    float betaK = active ? ctx.prevBeta[k] : 0.0f;
+    betaK = clamp(betaK, 0.0f, 1.0f);
+    float chordPrevK = active ? ctx.chordPrev[k] : 0.0f;
+    float chordRaw = active ? (betaK * chordPrevK + (1.0f - betaK) * softK) : 0.0f;
+    if (!isfinite(chordRaw)) chordRaw = 0.0f;
+    float chordSum = simd_sum(chordRaw);
+    float chordK = chordRaw / max(chordSum, FLT_MIN);
+    if (active) {
+        float oldChord = ctx.chord[k];
+        ctx.chord[k] = isfinite(chordK) ? chordK : oldChord;
+    }
+
+    // Tier H1 diagnostic: chord effective-K = 1 / Σ_k chord[k]² (chord concentration).
+    // Range [1, K]: K = uniform chord (all K options equally weighted, mechanism inactive
+    // or chord-flat); 1 = one-hot chord (single option fully dominant); intermediate =
+    // moderate concentration. With K=32 on HC: 32 = no concentration, ~10 = moderate
+    // (3-4 dominant options), 1-3 = sharp concentration.
+    //
+    // Replaces an earlier diagnostic Σ chord·chordPrev which was confounded by chord
+    // magnitude (uniform chord always returned 1/K regardless of whether β-hysteresis
+    // was active or not). chordEffectiveK is a pure concentration measure independent
+    // of step-to-step persistence; combined with the standard chatter signal it lets us
+    // distinguish "mechanism inactive (β=0)" from "mechanism active but chord uniform".
+    //
+    // Computed in the same simd_sum framework: chord_sq = chord[k]² summed across K lanes.
+    // chord_sq uses the POST-renormalization chord[k] = chordRaw[k]/chordSum, so we use
+    // (chordRaw/chordSum)². Lane 0 inverts and writes (NF-safe clamp-at-write).
+    float chordK_norm = chordRaw / max(chordSum, FLT_MIN);
+    float chordSqSum  = simd_sum(chordK_norm * chordK_norm);
+    if (k == 0u) {
+        float effK = 1.0f / max(chordSqSum, FLT_MIN);
+        ctx.stats->chordEffectiveK =
+            isfinite(effK) ? effK : ctx.stats->chordEffectiveK;
+    }
 
     // Scalar updates (single-threaded; small) — αPi and ρ̄. Done by lane 0 after the
     // softmax broadcast so the work doesn't interleave with the reduction.
@@ -563,6 +626,18 @@ kernel void oak_plan(
         // only on agent-internal signals (chord, nTdMat) — no env-knowledge, no tunable.
         bool prioFinite = isfinite(ntdSqSum) && (ntdSqSum > 0.0f);
         ctx.prioOpt[k]  = prioFinite ? (ctx.chord[k] * sqrt(ntdSqSum)) : 0.0f;
+
+        // Tier H1: per-option continuation probability β^k = 1/(1 + MSE^k) ∈ (0, 1] where
+        // MSE^k = ntdSqSum[k] / R is the PER-DIMENSION model-TD-error (not raw L2). The /R
+        // scaling is structural (R = representation size, already used in MetaOptimize's
+        // η = 1/(R·baseO)) — it matches the natural scale of ntdSqSum across the learning
+        // trajectory: random features give Var(n_td_j)~1 so MSE~1, β~0.5; well-learned
+        // give MSE→0, β→1. Without /R, β is stuck near 1/K = no persistence (verified
+        // empirically in 10×1.5M paired bench: persistence stayed at 1/K throughout).
+        // NF-safe: non-finite ntdSqSum → β = 0 (option terminates, safe default).
+        float invR    = 1.0f / float(max(ctx.R, 1u));
+        float betaNew = isfinite(ntdSqSum) ? (1.0f / (1.0f + ntdSqSum * invR)) : 0.0f;
+        ctx.prevBeta[k] = isfinite(betaNew) ? betaNew : 0.0f;
     }
 }
 
