@@ -342,6 +342,12 @@ private struct KernelConfig {
     var obsDim: UInt32 = 0, rank: UInt32 = 0
     var optionCount: UInt32 = 0, baseObsDim: UInt32 = 0
     var actionParamCount: UInt32 = 0
+    // Tier I1 (Plan Step 3 partial — "incorporation of older signals and traces"):
+    // count of NON-INSTANTANEOUS obsTrace levels = M − 1 where M = floor(log2(baseO)) + 1.
+    // The instantaneous level (τ=1) IS std_obs itself (no separate state), so we only
+    // store the (M−1) levels at τ_m = 2^m for m = 1..M−1. HC baseO=17 → M=5 → 4 levels
+    // at τ ∈ {2, 4, 8, 16}. Encoder input width per pre-activation = M·baseO.
+    var baseObsTraceLevels: UInt32 = 0
     var pEncoder: UInt32 = 0, pPhase: UInt32 = 0, pValue: UInt32 = 0, pPsi: UInt32 = 0
     var pOptPolicy: UInt32 = 0, pOptReward: UInt32 = 0, pOptTransition: UInt32 = 0
     var sObservation: UInt32 = 0, sObsMean: UInt32 = 0, sObsSM: UInt32 = 0
@@ -354,9 +360,14 @@ private struct KernelConfig {
     var sAlpha: UInt32 = 0, sBeta: UInt32 = 0, sH: UInt32 = 0
     var sNTdMat: UInt32 = 0
     var sQOption: UInt32 = 0     // Per-option Q^k cache (K floats), oak_plan → oak_plan_reduce.
-    var sObsTrace: UInt32 = 0    // Tier C1: per-obs-dim low-pass trace of std_obs (O floats),
-                                  // updated by oak_bk_obs at rate 1/baseO; consumed by oak_encode
-                                  // as the second half of every Fourier pre-activation's input.
+    var sObsTraceMulti: UInt32 = 0  // Tier I1 (Plan Step 3): per-obs-dim multi-timescale traces.
+                                     // (M−1)·O floats laid out as `obsTraceMulti[m·baseO + o]`
+                                     // for m=1..M−1 (m=0 is std_obs, no separate storage).
+                                     // Updated each step in oak_bk_encode Phase 1 with M−1
+                                     // parallel EMAs at rates 1/τ_m where τ_m = 2^m. Consumed
+                                     // by Phase 2 Fourier projection alongside std_obs.
+                                     // Replaces Tier C1's single `obsTrace` (which was one
+                                     // EMA at rate 1/baseO).
     var sPrioOpt: UInt32 = 0     // Tier D2 (Plan Step 9, prioritized sweeping): per-option priority
                                   // signal (K floats). prio[k] = chord[k] · ||model TD error_k||_L2.
                                   // Written by oak_plan lane 0; consumed by oak_plan_reduce
@@ -432,30 +443,45 @@ private enum OakMetalLayout {
     // Deep Fourier features (Lewandowski-Schuurmans-Machado 2024, arXiv:2410.20634): R/2
     // pre-activations, each producing a paired (cos, sin) channel into the R-wide state.
     // Encoder rows match the pre-activation count; phase is one scalar per pre-activation.
-    // Tier C1 (Plan Step 3 explicit): each pre-activation reads BOTH the standardized
-    // observation `std_obs[o]` (instantaneous) AND the per-obs-dim low-pass trace
-    // `obsTrace[o]` (integrated, decay 1/baseO). Encoder row width is therefore 2·O —
-    // the first O cols multiply std_obs, the next O cols multiply obsTrace.
+    //
+    // Tier I1 (Plan Step 3 partial — "incorporation of older signals and traces"): each
+    // pre-activation reads M concatenated input regions:
+    //   region m=0: `std_obs[o]` (instantaneous, baseO dims)
+    //   region m=1..M−1: `obsTraceMulti[m·baseO + o]` at decay 1/τ_m, τ_m = 2^m
+    // Total encoder row width = M·baseO. M = floor(log2(baseO)) + 1 (structural; τ_max ≈
+    // baseO). HC baseO=17 → M=5 → row width 85 (was 34 under Tier C1). Replaces Tier C1's
+    // 2·baseO row (std_obs + single obsTrace at decay 1/baseO).
     //
     // Tier C3 (recurrent self-feedback in the encoder) was attempted in two forms — RFF-1
     // across all three regions (v1) and variance-balanced W_state at sqrt(baseO/R) (v2) —
     // and both regressed by ~52% on the 10×1.5M paired bench. Diagnosis: recurrent dynamics
     // create double non-stationarity for the TD bootstrap (state distribution shifts both
     // from policy change AND from recurrent evolution). ESN/LSM works because the readout
-    // is supervised against a stationary target; OaK's TD heads can't track both. C3 was
-    // rolled back; encoder remains C1 shape.
+    // is supervised against a stationary target; OaK's TD heads can't track both. Future
+    // Tier I2 reservoir layer sidesteps this by FIXING the recurrent weights (no gradient
+    // flow through r); encoder still trains via G&T as currently.
     static func fourierPreActCount(rank: Int) -> Int { rank / 2 }
-    static func encoderCount(obsDim: Int, rank: Int) -> Int {
-        fourierPreActCount(rank: rank) * 2 * max(obsDim, 1)
+    // Tier I1: M = floor(log2(baseO)) + 1, M ≥ 1. Number of trace levels including the
+    // instantaneous std_obs at τ=1. (M−1) is the count of NON-INSTANTANEOUS levels stored
+    // in obsTraceMulti.
+    static func obsTraceLevelCount(baseObsDim: Int) -> Int {
+        let b = max(baseObsDim, 1)
+        var m = 0
+        var v = b
+        while v > 1 { v >>= 1; m += 1 }     // floor(log2(b))
+        return m + 1                         // +1 for the instantaneous level
+    }
+    static func encoderCount(obsDim: Int, baseObsDim: Int, rank: Int) -> Int {
+        fourierPreActCount(rank: rank) * obsTraceLevelCount(baseObsDim: baseObsDim) * max(baseObsDim, 1)
     }
     static func phaseCount(rank: Int) -> Int { fourierPreActCount(rank: rank) }
 
     struct Param {
         let encoder, phase, value, psi, optPolicy, optReward, optTransition, total: Int
     }
-    static func paramLayout(obsDim: Int, rank: Int, dPolicy: Int) -> Param {
+    static func paramLayout(obsDim: Int, baseObsDim: Int, rank: Int, dPolicy: Int) -> Param {
         var o = 0
-        let enc = o; o += encoderCount(obsDim: obsDim, rank: rank)
+        let enc = o; o += encoderCount(obsDim: obsDim, baseObsDim: baseObsDim, rank: rank)
         let ph  = o; o += phaseCount(rank: rank)
         let val = o; o += rank
         let psi = o; o += psiCount(rank: rank)
@@ -476,7 +502,9 @@ private enum OakMetalLayout {
         let alpha, beta, h: Int       // MetaOptimize L-approximation buffers (R floats each).
         let nTdMat: Int               // Dense option-transition TD targets, K*R floats, written by oak_plan.
         let qOption: Int              // Per-option Q^k cache, K floats, oak_plan → oak_plan_reduce.
-        let obsTrace: Int             // Tier C1: per-obs-dim low-pass trace of std_obs, O floats.
+        let obsTraceMulti: Int        // Tier I1 (Plan Step 3): per-obs-dim multi-timescale traces,
+                                       // (M−1)·baseO floats laid out as `obsTraceMulti[m·baseO + o]`
+                                       // for m=1..M−1. Replaces Tier C1's single obsTrace.
         let prioOpt: Int              // Tier D2: per-option Moore-Atkeson 1993 priority signal,
                                        // K floats. prio[k] = chord[k] · ||nTdMat^k||_L2. Written
                                        // by oak_plan lane 0; consumed by oak_plan_reduce (mean
@@ -488,8 +516,9 @@ private enum OakMetalLayout {
                                        // fine (β tracks slow-moving optTransition quality).
         let total: Int
     }
-    static func stateLayout(obsDim: Int, rank: Int, dPolicy: Int) -> State {
+    static func stateLayout(obsDim: Int, baseObsDim: Int, rank: Int, dPolicy: Int) -> State {
         let K = optionCount(rank: rank)
+        let M = obsTraceLevelCount(baseObsDim: baseObsDim)
         var o = 0
         let obs = o; o += obsDim
         let mean = o; o += obsDim
@@ -510,7 +539,9 @@ private enum OakMetalLayout {
         let h   = o; o += rank
         let ntd = o; o += K * rank
         let qo  = o; o += K
-        let otr = o; o += obsDim
+        // Tier I1: (M−1)·baseO floats for non-instantaneous trace levels (τ_m = 2^m for
+        // m=1..M−1). Layout: `obsTraceMulti[m·baseObsDim + o]` for m=1..M−1.
+        let otr = o; o += max(M - 1, 0) * max(baseObsDim, 1)
         let prio = o; o += K
         let pb  = o; o += K
         return State(observation: obs, obsMean: mean, obsSM: osm, state: st,
@@ -520,7 +551,7 @@ private enum OakMetalLayout {
                      utilFeat: uf, utilOpt: uo,
                      planAdv: pa,
                      alpha: al, beta: be, h: h,
-                     nTdMat: ntd, qOption: qo, obsTrace: otr,
+                     nTdMat: ntd, qOption: qo, obsTraceMulti: otr,
                      prioOpt: prio, prevBeta: pb, total: o)
     }
 
@@ -672,8 +703,8 @@ final class OakMetalEngine {
         statsPointer.initialize(to: KernelStats())
         configPointer.initialize(to: KernelConfig())
 
-        let paramLayout = OakMetalLayout.paramLayout(obsDim: obsDim, rank: rank, dPolicy: dPolicy)
-        stateLayout = OakMetalLayout.stateLayout(obsDim: obsDim, rank: rank, dPolicy: dPolicy)
+        let paramLayout = OakMetalLayout.paramLayout(obsDim: obsDim, baseObsDim: baseObsDim, rank: rank, dPolicy: dPolicy)
+        stateLayout = OakMetalLayout.stateLayout(obsDim: obsDim, baseObsDim: baseObsDim, rank: rank, dPolicy: dPolicy)
         uintLayout  = OakMetalLayout.uintLayout()
         paramsArena = Shared(device: device, count: paramLayout.total, zero: Float(0))
         stateArena  = Shared(device: device, count: stateLayout.total, zero: Float(0))
@@ -681,7 +712,7 @@ final class OakMetalEngine {
 
         let K = OakMetalLayout.optionCount(rank: rank)
         // Grid widths sized for one row (single-stream).
-        let learnTotal = OakMetalLayout.encoderCount(obsDim: obsDim, rank: rank)
+        let learnTotal = OakMetalLayout.encoderCount(obsDim: obsDim, baseObsDim: baseObsDim, rank: rank)
                        + rank
                        + OakMetalLayout.psiCount(rank: rank)
                        + OakMetalLayout.optPolicyCount(rank: rank, dPolicy: dPolicy)
@@ -744,7 +775,7 @@ final class OakMetalEngine {
                 base[i] = u * scale
             }
         }
-        sample(paramLayout.encoder, OakMetalLayout.encoderCount(obsDim: obsDim, rank: rank), encScale)
+        sample(paramLayout.encoder, OakMetalLayout.encoderCount(obsDim: obsDim, baseObsDim: baseObsDim, rank: rank), encScale)
         // Fourier phase: uniform on [0, 2π) — structural, no tunable. Reuses the same
         // splitmix-style hash as `sample` but rescales (u + 1) ∈ [0, 2) → [0, 2π).
         do {
@@ -880,6 +911,8 @@ final class OakMetalEngine {
         c.obsDim = UInt32(obsDim); c.rank = UInt32(rank)
         c.optionCount = UInt32(K); c.baseObsDim = UInt32(baseObsDim)
         c.actionParamCount = UInt32(dPolicy)
+        // Tier I1: M = floor(log2(baseO)) + 1; baseObsTraceLevels = M − 1.
+        c.baseObsTraceLevels = UInt32(max(OakMetalLayout.obsTraceLevelCount(baseObsDim: baseObsDim) - 1, 0))
         c.pEncoder = UInt32(p.encoder); c.pPhase = UInt32(p.phase)
         c.pValue = UInt32(p.value); c.pPsi = UInt32(p.psi)
         c.pOptPolicy = UInt32(p.optPolicy)
@@ -893,7 +926,7 @@ final class OakMetalEngine {
         c.sPlanAdv = UInt32(s.planAdv)
         c.sAlpha = UInt32(s.alpha); c.sBeta = UInt32(s.beta); c.sH = UInt32(s.h)
         c.sNTdMat = UInt32(s.nTdMat); c.sQOption = UInt32(s.qOption)
-        c.sObsTrace = UInt32(s.obsTrace)
+        c.sObsTraceMulti = UInt32(s.obsTraceMulti)
         c.sPrioOpt = UInt32(s.prioOpt)
         c.sPrevBeta = UInt32(s.prevBeta)
         c.uCounters = UInt32(u.counters)

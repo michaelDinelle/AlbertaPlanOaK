@@ -41,6 +41,11 @@ constant uint OAK_CNT_TDPSI_NF    = 5u;
 
 struct KernelConfig {
     uint obsDim, rank, optionCount, baseObsDim, actionParamCount;
+    // Tier I1 (Plan Step 3 partial): count of NON-INSTANTANEOUS obsTrace levels =
+    // M − 1, where M = floor(log2(baseObsDim)) + 1. Layout: encoder row reads M·baseO
+    // input columns (col 0..baseO-1 = std_obs; col m·baseO..(m+1)·baseO-1 = trace level m
+    // for m=1..M-1). HC baseObsDim=17 → M=5 → baseObsTraceLevels=4.
+    uint baseObsTraceLevels;
 
     // Param offsets: 7 heads, all Plan-required. `phase` is the cos/sin offset for the
     // deep Fourier features encoder (Lewandowski-Schuurmans-Machado 2024,
@@ -68,11 +73,14 @@ struct KernelConfig {
     // Per-option Q^k cache, K floats. Written by oak_plan (lane 0 of TG k), consumed by
     // oak_plan_reduce for the simd_max + planAdv soft-bound.
     uint sQOption;
-    // Tier C1 (Plan Step 3 explicit): per-obs-dim low-pass trace of std_obs, O floats.
-    // Updated by oak_bk_obs each step as `t_o ← (1 − 1/baseO)·t_o + (1/baseO)·std_obs[o]`;
-    // consumed by oak_encode as the second half of every Fourier pre-activation's input
-    // (encoder row width is 2·baseO — first baseO multiplies std_obs, second multiplies trace).
-    uint sObsTrace;
+    // Tier I1 (Plan Step 3 partial): per-obs-dim multi-timescale traces, (M−1)·baseO floats.
+    // Layout: `obsTraceMulti[m·baseO + o]` for m=1..M−1, o=0..baseO-1. Updated by
+    // oak_bk_encode Phase 1 with M−1 parallel EMAs at rates 1/τ_m where τ_m = 2^m
+    // (so trace level m gets `(1 − 1/2^m)·t + (1/2^m)·std_obs[o]`). Consumed by Phase 2
+    // Fourier projection alongside std_obs (encoder row width is M·baseO total — col 0..baseO-1
+    // multiplies std_obs, col m·baseO..(m+1)·baseO-1 multiplies trace level m).
+    // Replaces Tier C1's single obsTrace at fixed rate 1/baseO.
+    uint sObsTraceMulti;
     // Tier D2 (Plan Step 9, prioritized sweeping; Moore-Atkeson 1993, Plan footnote 13):
     // per-option priority signal, K floats. prio[k] = chord[k] · ||model TD error_k||_L2.
     // Written by oak_plan lane 0 (in-line via fused tg_ntdSq write, zero added barriers);
@@ -154,6 +162,7 @@ inline float standardized_obs(float x, float mean, float sm, uint baseO) {
 
 struct Ctx {
     uint O, R, K, baseO, D;
+    uint baseObsTraceLevels;                   // Tier I1: M − 1 (count of stored trace levels).
     uint stepCount, stateSlot;
     float rho, alphaPi, meanPrio;              // meanPrio: Tier D2 broadcast scalar, see KernelScalars.
 
@@ -168,7 +177,9 @@ struct Ctx {
     device float *alpha, *beta, *hMeta;        // MetaOptimize L-approximation per-feature buffers.
     device float *nTdMat;                      // Dense optTransition TD targets, K*R floats.
     device float *qOption;                     // Per-option Q^k cache, K floats.
-    device float *obsTrace;                    // Tier C1: per-obs-dim trace of std_obs, O floats.
+    device float *obsTraceMulti;               // Tier I1: per-obs-dim multi-timescale traces,
+                                                // (M−1)·baseO floats. Layout: trace_m[o] at offset
+                                                // m·baseO + o for m=1..M−1.
     device float *prioOpt;                     // Tier D2: per-option priority, K floats.
     device float *prevBeta;                    // Tier H1: per-option continuation β, K floats.
     device uint  *counters;
@@ -182,6 +193,7 @@ inline Ctx make_ctx(device float *params, device float *stateArena, device uint 
     Ctx c;
     c.O = cfg.obsDim; c.R = cfg.rank; c.K = cfg.optionCount;
     c.baseO = cfg.baseObsDim; c.D = cfg.actionParamCount;
+    c.baseObsTraceLevels = cfg.baseObsTraceLevels;
     c.stepCount = scalars->stepCount; c.stateSlot = scalars->stateSlot;
     c.rho = scalars->rho; c.alphaPi = scalars->alphaPi; c.meanPrio = scalars->meanPrio;
 
@@ -212,7 +224,7 @@ inline Ctx make_ctx(device float *params, device float *stateArena, device uint 
     c.hMeta           = stateArena + cfg.sH;
     c.nTdMat          = stateArena + cfg.sNTdMat;
     c.qOption         = stateArena + cfg.sQOption;
-    c.obsTrace        = stateArena + cfg.sObsTrace;
+    c.obsTraceMulti   = stateArena + cfg.sObsTraceMulti;
     c.prioOpt         = stateArena + cfg.sPrioOpt;
     c.prevBeta        = stateArena + cfg.sPrevBeta;
 
@@ -267,18 +279,26 @@ kernel void oak_bk_encode(
     Ctx ctx = make_ctx(params, stateArena, uintArena, scalars, stats, cfg);
 
     // ================= PHASE 1: oak_bk_obs =================
-    float invT      = track_rate(ctx.stepCount, ctx.baseO);
-    float traceRate = 1.0f / float(max(ctx.baseO, 1u));   // Tier C1: fixed structural decay.
+    float invT = track_rate(ctx.stepCount, ctx.baseO);
     uint nfLocal = 0u;
+    // Tier I1 (Plan Step 3 partial): M − 1 multi-timescale traces at structural rates
+    // 1/τ_m where τ_m = 2^m for m=1..M−1. Each obs-thread owns its `o` and updates all
+    // (M−1) trace levels for that obs dim per step. Cost: (M−1) reads + (M−1) writes per
+    // obs-thread per step (HC: 4 EMAs per o per step, ~20 fmas total — negligible).
     for (uint o = tid; o < ctx.O; o += tgW) {
         float x = ctx.observation[o];
         if (!isfinite(x)) { nfLocal++; continue; }
         ctx.observationMean[o] += invT * (x - ctx.observationMean[o]);
         ctx.obsSM[o]           += invT * (x * x - ctx.obsSM[o]);
-        // Trace EMA over *standardized* obs using the just-updated stats. Shares std_obs's
-        // scale (RFF-1 init then puts the trace half in the same regime).
+        // EMAs are over *standardized* obs using the just-updated stats. Shares std_obs's
+        // scale (RFF-1 init then puts the trace levels in the same regime).
         float s = standardized_obs(x, ctx.observationMean[o], ctx.obsSM[o], ctx.baseO);
-        ctx.obsTrace[o] += traceRate * (s - ctx.obsTrace[o]);
+        // Update each non-instantaneous trace level. τ_m = 2^m → rate 1/2^m via shift.
+        for (uint m = 1u; m <= ctx.baseObsTraceLevels; ++m) {
+            uint slot = (m - 1u) * ctx.baseO + o;   // obsTraceMulti layout: m−1 stored slots
+            float rate = 1.0f / float(1u << m);     // 1/2^m structural; m=1 → 1/2, m=2 → 1/4, etc.
+            ctx.obsTraceMulti[slot] += rate * (s - ctx.obsTraceMulti[slot]);
+        }
     }
 
     // NF count aggregation across simdgroups: per-simdgroup simd_sum, then cross-simdgroup
@@ -309,16 +329,25 @@ kernel void oak_bk_encode(
     if (feat >= ctx.R) return;
     uint halfR  = ctx.R >> 1u;                 // ctx.R is even (host-enforced).
     uint pre    = (feat < halfR) ? feat : feat - halfR;
-    uint encRow = pre * 2u * ctx.baseO;        // 2·baseO weights per pre-activation (Tier C1).
+    // Tier I1: encoder row width is M·baseO where M = baseObsTraceLevels + 1 (1 instantaneous
+    // region + (M−1) trace regions). Layout per pre-activation:
+    //   col 0..baseO-1:                std_obs[o]
+    //   col m·baseO..(m+1)·baseO-1:    obsTraceMulti[(m−1)·baseO + o] for m=1..M−1
+    uint M_levels = ctx.baseObsTraceLevels + 1u;
+    uint encRow = pre * M_levels * ctx.baseO;
     float z = ctx.phase[pre];
-    // First half: std_obs (instantaneous).
+    // Region m=0: std_obs (instantaneous; compute on the fly).
     for (uint o = 0u; o < ctx.baseO; ++o) {
         float c = standardized_obs(ctx.observation[o], ctx.observationMean[o], ctx.obsSM[o], ctx.baseO);
         z = fma(ctx.encoder[encRow + o], c, z);
     }
-    // Second half: obsTrace (low-pass of std_obs, integrated over ~baseO steps).
-    for (uint o = 0u; o < ctx.baseO; ++o) {
-        z = fma(ctx.encoder[encRow + ctx.baseO + o], ctx.obsTrace[o], z);
+    // Regions m=1..M−1: trace levels at decay 1/2^m. Storage slot is (m−1)·baseO + o.
+    for (uint m = 1u; m < M_levels; ++m) {
+        uint storeBase = (m - 1u) * ctx.baseO;     // obsTraceMulti slot for level m, dim 0
+        uint encBase   = m * ctx.baseO;            // encoder col offset for region m
+        for (uint o = 0u; o < ctx.baseO; ++o) {
+            z = fma(ctx.encoder[encRow + encBase + o], ctx.obsTraceMulti[storeBase + o], z);
+        }
     }
     float v = (feat < halfR) ? cos(z) : sin(z);
     // safe_w-style preservation: on non-finite, keep the previous slot's value for this feature.
@@ -1001,7 +1030,8 @@ kernel void oak_bk_admit_commit(
     uint nOR  = ctx.R;
     uint nPi  = ctx.D * ctx.R;
     uint nOT  = ctx.R * ctx.R;
-    uint nEnc = 2u * ctx.baseO;        // Tier C1: encoder rows are 2·baseO (std_obs ‖ trace).
+    // Tier I1: encoder rows are M·baseO (std_obs ‖ M−1 trace levels). M = baseObsTraceLevels + 1.
+    uint nEnc = (ctx.baseObsTraceLevels + 1u) * ctx.baseO;
     uint o0   = 0u;
     uint o1   = o0 + nPsi;
     uint o2   = o1 + nOR;
@@ -1026,10 +1056,13 @@ kernel void oak_bk_admit_commit(
             uint pi = id - o3;
             ctx.optTransition[worstK * ctx.R * ctx.R + pi] =
                 (hash_uniform(stepC, worstK, 4u * ctx.R + pi) * 2.0f - 1.0f) * invSqrtR;
-        } else {                                                     // encoder[pre][:2·baseO]
+        } else {                                                     // encoder[pre][:M·baseO]
+            // Tier I1: row stride is M·baseO; reseeds all M regions (std_obs + M−1 traces)
+            // for the worstI feature pair with fresh RFF bandwidth-1 random uniforms.
             uint o = id - o4;
             float u = hash_uniform(stepC, pre, o + 0xdeadbeefu) * 2.0f - 1.0f;
-            ctx.encoder[pre * 2u * ctx.baseO + o] = u;               // RFF bandwidth-1, both halves.
+            uint rowStride = (ctx.baseObsTraceLevels + 1u) * ctx.baseO;
+            ctx.encoder[pre * rowStride + o] = u;                    // RFF bandwidth-1.
         }
     }
     threadgroup_barrier(mem_flags::mem_threadgroup);

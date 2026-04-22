@@ -1039,6 +1039,25 @@ Currently `R = max(env.obsDim, 64)`. Replace with
 `R = floor(M1 GPU memory budget / ε)`. Removes the env-input-dim coupling, lets
 representational capacity grow with hardware. Tiny code change.
 
+**Inv-3 latent debts** (flagged from structural audit; not active limiters on HC
+with baseO=17 → R=64, but real BWH/orthodoxy debts for arbitrary-complexity envs):
+
+- `rawRank = max(env.obsDim, 64)` floor in [Sources/Main.swift](Sources/Main.swift)
+  (~line 1307). The `64` is a fixed compute prior not derived from `baseO` — Plan-
+  orthodoxy says R should follow compute capacity, not be floored by a magic number.
+  Replace with `R = round_to_simd(compute_budget / ε)` per E2 above.
+- Metal `OAK_MAX_RANK = 256` cap in [Sources/OakKernel.metal](Sources/OakKernel.metal)
+  (~line 596) for `oak_plan` threadgroup buffers. Hard compiled ceiling: R > 256
+  cannot fit current TG layout. For "any-arbitrary-complexity" envs we'd need either
+  per-R kernel specialization or runtime-allocated TG memory (Metal restriction).
+- `OAK_MAX_TG_SIMDGROUPS = 8` assumption in `oak_bk_encode` NF aggregation
+  (~line 287). Telemetry skew (NF subtotals beyond 8 simdgroups silently lost) for
+  R > 256, not a learning bug. Address alongside OAK_MAX_RANK.
+
+These three are deferred until envs / compute budgets push past R=64. They don't
+block Plan Step 1-11 work on HC; flagged here so future scaling work has a clear
+todo list.
+
 ## Tier F — non-Plan-orthodox departures (avoid until justified)
 
 ### F1. Structural policy σ = 1/√A (Plateau-breaker, DONE — mean lift +170% vs D3)
@@ -1475,6 +1494,60 @@ chord[k]    = chord_k_raw / Σ_j chord_j_raw          [renormalize via simd_sum]
 **Plan-orthodoxy.** Inv-1 (β pure agent-internal), Inv-3 (no tunables — `1/(1+x)` is existing OaK form), Inv-4 (continuing), Inv-8 (no weight caps), Inv-9 (single stream), Inv-10 N/A (algorithmic). Not in exhausted family (β from forward-model error, not ψ/backward-value).
 
 **Acceptance / kill criteria.** See plan file `.cursor/plans/tier_h1_chord_hysteresis_model-beta_*.plan.md`.
+
+**10M result (DONE — H1 ACCEPTED as Plan-Step-10 architectural completion, empirically inert):**
+- 10/10 wins, 0 NF, mean lift +1.66M vs F1 +1.67M (-0.7% statistical TIE)
+- chordEffectiveK = 30.97 / 32 throughout entire 10M run — chord stays uniform
+- Mechanism wired correctly (verified at smoke; β=1/(1+ntdSqSum/R) computed each step) but
+  inert in practice: chord is already uniform on HC because ψ logits are small/similar across
+  options, so lerp of uniform vectors = uniform vector. β-hysteresis is a no-op on uniform chord.
+- **Plan-orthodoxy preserved**: Step 10 STOMP β-term now in code path; may activate when
+  Tier I1/I2 enrich features enough that ψ values differentiate (sharper softmax → concentrated
+  chord → H1 hysteresis bites). Kept in code as architectural installation; secondary signal
+  to track in I2 acceptance: does chordEffectiveK drop below 30 once features richen?
+
+### Tier I — Plan Step 3 perception recursion (staged: I1 traces → I2 reservoir, IN FLIGHT)
+
+**Motivation.** Three Plan passages converge on "one-layer rich recurrent perception":
+
+- **Step 3 (Pred I)** verbatim: *"The new features will include not just nonlinear combinations,
+  but also incorporation of older signals and traces... Ideally this would be in a real-time
+  setting with recurrent networks that do a limited amount of processing per observation."*
+- **Step 8 (Prototype-AI I)** verbatim: *"a recursive state-update (perception) process..."*
+- **BWH compatibility**: "limited processing per observation" matches BWH; arbitrary depth does
+  not (different worlds would need different depths, which is a tunable).
+
+**C3 failure mode** (recurrent encoder rolled back ~52% regression) was caused by *learned*
+recurrent weights creating double non-stationarity. Tier I2 sidesteps by fixing the recurrent
+weights at init (Reservoir / Echo State convention; no gradient flow through r). I1 is even
+safer (zero recurrence; just multi-rate EMAs).
+
+#### Tier I1. Multi-timescale obsTrace spectrum (Plan Step 3 partial, IN FLIGHT)
+
+Replaces Tier C1's single obsTrace (one EMA at rate `1/baseO`) with **M structural trace
+levels**: M = `floor(log2(baseO)) + 1`, τ_m = 2^m for m=0..M-1. m=0 (τ=1) IS std_obs (no
+separate state). Stored in `obsTraceMulti[(M-1)·baseO]`. HC baseO=17 → M=5 → 4 stored levels
+at τ ∈ {2, 4, 8, 16}.
+
+Encoder input concatenation: `[std_obs ‖ trace_{τ=2} ‖ trace_{τ=4} ‖ trace_{τ=8} ‖ trace_{τ=16}]` —
+M·baseO = 85 input dims per pre-activation on HC (was 2·baseO = 34). Encoder weight matrix
+grows from `(R/2)·(2·baseO) = 1088` to `(R/2)·(M·baseO) = 2720` weights on HC.
+
+**Captures**: gait-cycle scale (τ=2-8), balance / contact dynamics (τ=4-16), slow drift
+(τ=16) — all temporal frequencies represented structurally. Classical-conditioning conjunctive-
+stimulus-code (Sutton-Barto §13, §17) inspiration.
+
+**Plan-orthodoxy invariants:**
+
+| invariant | status |
+|---|---|
+| Inv-1 no env-knowledge | traces are pure EMAs of std_obs |
+| Inv-3 no tunables | M = floor(log2(baseO)) + 1 structural; τ_m = 2^m structural |
+| Inv-4 no episodic | traces continue across step boundaries |
+| Inv-9 single stream | traces update from the single experience stream |
+| Inv-10 bit-id | N/A — encoder input dims change (algorithmic, not perf-opt) |
+
+**Acceptance / kill criteria**: see plan file `.cursor/plans/tier_i_staged_plan_step_3_recurrent_features_*.plan.md`.
 
 ### Tier G1. Eligibility traces (Plan Step 1 completion, ROLLED BACK — mechanism structurally incompatible with correlated-feature substrate at any Plan-orthodox λ/α)
 
