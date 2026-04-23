@@ -79,12 +79,12 @@ fast version of "step N" makes all downstream regression checks cheaper.
 
 ## State of the agent on Plan Steps 1-11
 
-Last refreshed: post-F1 10M, G1 (eligibility traces) in flight.
+Last refreshed: post-K2 10M artifact reconciliation.
 
 | Plan Step | What we have | Quality |
 |---|---|---|
 | 1. Representation I (per-feature α + normalization + traces) | MetaOptimize L-approx per-feature α (Tier A); Welford obs standardization in `oak_bk_encode` | Strong on per-feature α + normalization. **Eligibility traces gap remains** — Tier G1 ROLLED BACK (normalized + true-online both unstable on correlated Fourier features, see exhausted families). Requires Plan Step 2 feature decorrelation before traces can be added. |
-| 2. Representation II (feature finding) | Single-layer deep Fourier features (Lewandowski-Schuurmans-Machado 2024); G&T reseed of worst-utility pre-activation row with fresh `N(0, 1/√R)` | **Partial** — reseed is fresh-random, not compositional. Plan text: *"new features **made by combining existing features**"* — open gap. Multi-layer / recurrent variants exhausted (Tier C3 rolled back). **Tier K1 top-2 compositional reseed (`(row_A+row_B)/√2`) rolled back** — 1.5M clean but 10M collapsed to −43%: combining from the same greedy top-2 every step collapses feature diversity, kills long-horizon exploration. Simple top-k compositional family now exhausted alongside fresh-random-only — Plan Step 2 literal requires a richer mechanism (e.g., stochastic mixture over utility-weighted distribution, or feature registry + filtering per Plan Step 11). |
+| 2. Representation II (feature finding) | Single-layer deep Fourier features (Lewandowski-Schuurmans-Machado 2024); Tier K2 stochastic compositional reseed in `oak_bk_admit_commit` | **Partial** — Plan Step 2 literal is now in the code path, but the current raw 10M K2 artifacts are only neutral: mean lift `+1.600M` vs F1 `+1.673M`, `3/10` seeds beat F1, `chordEffectiveK` stays uniform at `31.48`. **Tier K1 top-2 compositional reseed (`(row_A+row_B)/√2`)** is also below F1 on the current raw dirs (`+1.585M`, `3/10` beat F1, `effK 31.51`). Step 2 is installed, but not yet a benchmark win. |
 | 3. Prediction I (continual GVF) | K=32 ψ-GVFs; Tier D3 chord-weighted off-policy ψ attribution (Plan Step 10 "conditional on the option, off-policy"); Tier C1 obsTrace for minimal POMDP coverage | Strong. Eligibility traces also apply to ψ (Plan base-agent text) — same G1 rollback; blocked on feature decorrelation. "recurrent networks that do a limited amount of processing per observation" remains minimal (obsTrace EMA; full recurrent encoder failed as C3) |
 | 4. Control I (actor-critic) | Chord-blended REINFORCE across K option policies; Kim implicit α_π (`1/(baseO + ‖s'‖²·‖∇log π‖²)`); Gumbel-max / Gaussian score gradients; **Tier F1 structural σ = 1/√A** (plateau-breaker, +170% mean lift vs D3 at 10M) | Strong |
 | 5. Prediction II (avg-reward) | ρ̄ centering (Reward Centering 2405.09999); `δ = (r − ρ̄) + V(s') − V(s)`; no discounting | Strong |
@@ -92,7 +92,7 @@ Last refreshed: post-F1 10M, G1 (eligibility traces) in flight.
 | 7. Planning I (avg-reward planning) | `oak_plan` parallel async VI (K TGs × R threads); ρ̄-centered differential Q^k | Partial — 1 planning sweep per env step (Tier D1 Dyna deprioritized until per-step learning velocity is higher; see post-F1 analysis) |
 | 8. Prototype-AI I (one-step MBRL) | All four base-agent components + D2 search control + GraMa utility feedback cycle | Strong |
 | 9. Planning II (search control + exploration) | Tier D2 prioritized sweeping (Moore-Atkeson 1993, Plan footnote 13): `prio[k] = chord[k]·‖n̂^k TD‖_L2`, gates dense optTransition updates by `prio ≥ meanPrio`; F1 structural σ controls exploration noise | **Partial** — Plan: *"take into account the **uncertainty** of various parts of the model"*; no explicit model-variance signal yet |
-| 10. Prototype-AI II (STOMP) | Subtasks → Options → Option models → Planning all present; Tier D3 off-policy ψ specialization; dense K·R² transition models (RR-Subtasks 2202.03466 eq. 17); **Tier H1 IN-FLIGHT**: chord hysteresis with β^k = 1/(1+‖n_td^k‖²) derived from optTransition confidence — options now persist when the option's own world model predicts well, terminate when surprised | **PARTIAL (gap closing)** with H1 — chord hysteresis breaks 1-step degeneracy. Termination-from-ψ family exhausted (5 prior attempts); H1 uses optTransition-confidence (forward-model-error) signal class, sidestepping the exhausted family. Validation pending 10k smoke + 1.5M screen + 10M acceptance. |
+| 10. Prototype-AI II (STOMP) | Subtasks → Options → Option models → Planning all present; Tier D3 off-policy ψ specialization; dense K·R² transition models (RR-Subtasks 2202.03466 eq. 17); **Tier H1 chord hysteresis** with β^k = 1/(1+‖n_td^k‖²) derived from optTransition confidence — options persist when the option's own world model predicts well, terminate when surprised | **Partial** — H1 completed the Plan-Step-10 architectural install and is safe, but empirically inert on HC: `+1.661M` mean lift vs F1 `+1.673M`, `2/10` seeds beat F1, `chordEffectiveK 30.86`. Termination-from-ψ family remains exhausted; H1's forward-model-error signal class is kept as the least-bad Step-10 installation. |
 | 11. Oak (feedback / remove-replace) | Per-feature utility (GraMa 2505.24061); per-option utility (EMA `|tdPsi|²`); G&T reseed worst option + worst feature-pair each step; option keyboard Design A (chord blending) | **Partial** — Step-11-sharpening `planUtil` argmin failed at 10M (−16% lift, r=−0.62 anti-informative). No feature registry (*"new feature that has not yet been the basis for a subtask"* not tracked); Design B (joint-subtask) not implemented |
 | 12. Prototype-IA | — | Out of scope for current iteration |
 
@@ -157,14 +157,14 @@ These mechanisms are structurally incompatible with the current TD-bootstrap + f
 | 8 | True-Online TD(λ) (Dutch trace + correction) on valueW, various α (1/baseO, 2/R) | G1-TO | diverges on seed 0 at any Plan-structural α; stability requires α·λ·‖x‖² ≤ 1 which correlated Fourier features violate |
 | 9 | G&T mean-utility gate (`worst < mean`; strict `<`) for reseed cadence | J1 v1 | 10k smoke: fires 100% of steps (reinit count == stepCount). Argmin < mean ALWAYS true for non-uniform K-sample distributions ⇒ gate is mathematically equivalent to "always fire". No rate-limiting achieved. |
 | 10 | G&T σ-gate (`worst < mean − σ`; standard-deviation threshold from state) | J1 v2 | 10k smoke: fires 100% of steps. For K=32 samples, expected argmin is ~2σ below mean by extreme-value concentration ⇒ 1σ threshold fires almost always. Same mechanism-family failure as J1 v1. |
-| 11 | Greedy top-2 row-sum compositional reseed (`(row_preA + row_preB) · 1/√2` where preA,preB = argmax-2 of paired utility) | K1 | 1.5M: 10/10 wins, +449k (+7.3% vs I1). 10M: **−43% vs F1 (+952k vs +1.67M)**, 2/10 seeds catastrophic (−228k, −776k), 3/10 beat F1, effK still 31.5 (chord uniform), peak max 0.000 all seeds (no walking). Early-convergence-without-continual-improvement signature. Greedy inheritance from current top-2 EVERY step collapses feature diversity over cascading reseeds — new features become derivatives of momentarily-best two, killing feature-space coverage that fresh-random RFF was maintaining. |
+| 11 | Greedy top-2 row-sum compositional reseed (`(row_preA + row_preB) · 1/√2` where preA,preB = argmax-2 of paired utility) | K1 | Current raw dirs show a milder but still non-winning result: 1.5M `+240k` mean lift, 10/10 wins, chatter `0.0215`. 10M: **+1.585M vs F1 +1.673M** (`−5.3%`), `3/10` seeds beat F1, `effK 31.51` stays uniform, chatter `0.0272`. Safe and low-chatter, but greedy parent selection still fails to unlock a Step-2 win or activate H1. |
 
 **Four distinct common lessons across these failures:**
 
 1. **Options 1-5 (termination family)**: the termination / option-identity / G&T-reseed functions must not be derived from ψ or from backward value signals (`utilOpt`, `planAdv`, `Q^k − V`, or `(1 + curr[k])/2`). These signals couple option identity to the bootstrap target and create self-referential divergence.
 2. **Options 7-8 (traces family)**: multi-step TD(λ) requires the feature space to be approximately orthogonal. Our cos/sin Fourier pairs at bandwidth 1 correlate enough that the Sutton-Barto §12.2 stability condition `α·(1+λ)/(1−λ)·E[‖x‖²] ≤ 2` cannot be satisfied at any Plan-orthodox α (structural choices like 1/baseO or 2/R). Eligibility traces are thus **conditionally-applicable**: they require Plan Step 2 feature-decorrelation first.
 3. **Options 9-10 (central-tendency G&T gate family)**: any gate of the form `worst < mean − k·σ` for bounded structural `k` fails to rate-limit reseeds because **the minimum of K samples is mathematically an extreme-value statistic** — always far below the distribution center. To rate-limit G&T cadence, the mechanism must not compare the argmin to a central statistic: either use time-based / probabilistic cadence (clock-adjacent, mildly Inv-7), age-weighted utility (extra state per feature/option), or change WHAT gets reseeded (Plan Step 2 compositional features) rather than WHEN.
-4. **Option 11 (greedy compositional reseed family)**: deterministic argmax-based feature combination over cascading reseeds collapses feature-space coverage. Fresh-random reseed injects NOVELTY every step; greedy combination inherits from the same few top-utility features, converging the feature pool to a small neighborhood. This manifests as a 1.5M-strong / 10M-weak trajectory (early convergence, no continual improvement — the exact failure mode the Plan's "continual learning" principle is meant to avoid). Plan Step 2 "combinations" literal is NOT satisfied by pure argmax selection — needs a mechanism that preserves coverage, e.g., (a) stochastic mixture sampling `∝ utilFeat` not argmax, (b) diversity-regularized selection (preB = argmax of utility minus similarity-to-preA), (c) feature registry per Plan Step 11 ("new feature not yet basis") tracking already-tried compound features, or (d) randomized pair selection non-greedy.
+4. **Option 11 (greedy compositional reseed family)**: deterministic argmax-based feature combination still does not deliver a Step-2 win on the current raw dirs. Fresh-random reseed injects novelty every step; greedy combination inherits from the same few top-utility features and may narrow coverage, but the present artifact-backed conclusion should stay modest: K1 is safe and low-chatter, yet remains below F1/H1 with `effK` still uniform. Plan Step 2 "combinations" literal is therefore NOT satisfied by pure argmax selection in a winning sense — we still need a mechanism that preserves coverage, e.g. (a) stochastic mixture sampling `∝ utilFeat` not argmax, (b) diversity-regularized selection (preB = argmax of utility minus similarity-to-preA), (c) feature registry per Plan Step 11 ("new feature not yet basis") tracking already-tried compound features, or (d) randomized pair selection non-greedy.
 
 Mechanisms that remain untried and satisfy all four constraints: chord hysteresis, argmax+momentum gating, independent β-GVF (sidestep constraint 1); stochastic-mixture or diversity-regularized feature combination (satisfies 2, 3, and 4); feature registry filtering (satisfies 4 by construction); age-weighted G&T cadence (addresses 3 without compromising 4).
 
@@ -1385,12 +1385,12 @@ flowchart TD
     F1done --> F1_10M["F1 10M: mean lift +1.67M (vs D3 +620k, C1 +668k); chatter 0.037 nearly deterministic; options CONVERGE at 2M and stop improving"]
     F1_10M --> Step11att["Step 11 sharpening ATTEMPT: argmin planUtil = EMA(Q^k-V)"]
     Step11att --> Step11check{10×1.5M screen + 10×10M acceptance}
-    Step11check -->|"1.5M PASS (+229k tied); 10M FAIL: -16% lift, 0/10 beat F1, 4× chatter, r=-0.62 anti-informative"| Step11roll[Step 11 sharpening ROLLED BACK; termination/replacement family exhausted]
+    Step11check -->|"1.5M PASS (+229k tied); 10M FAIL: -16% lift, 1/10 beat F1, 4× chatter, r=-0.62 anti-informative"| Step11roll[Step 11 sharpening ROLLED BACK; termination/replacement family exhausted]
     Step11roll --> G1att["Tier G1 ATTEMPT: eligibility traces (TD(lambda) normalized + true-online, lambda = 1 - 1/baseO)"]
     G1att --> G1check{10x1.5M screen + smoke}
     G1check -->|"9/10 seeds stable but seed 6 catastrophic; true-online diverges even seed 0 due to correlated Fourier features"| G1roll[Tier G1 ROLLED BACK; traces require Plan Step 2 decorrelation first]
     G1roll --> H1att["Tier H1 IN-FLIGHT: chord hysteresis with beta_k = 1/(1+ntdSqSum) from optTransition confidence (Plan Step 10 STOMP, forward-model-error signal class — outside exhausted termination family)"]
-    H1att --> H1done["Tier H1 DONE (neutral-accepted): chord hysteresis installed; -0.7% tie with F1 at 10M; chord uniform (effK 30.9) — hysteresis architecturally present but empirically inert"]
+    H1att --> H1done["Tier H1 DONE (neutral-accepted): chord hysteresis installed; -0.7% tie with F1 at 10M, 2/10 seeds beat F1; chord uniform (effK 30.9) — hysteresis architecturally present but empirically inert"]
     H1done --> I1att["Tier I1 IN-FLIGHT: multi-timescale obsTrace spectrum (Plan Step 3 partial, tau_m = 2^m for m=1..M-1)"]
     I1att --> I1done["Tier I1 DONE (neutral-accepted): -4.6% mean lift at 10M within kill tolerance; chatter -23%; chord still uniform (effK 31.4) — feature expressiveness NOT the bottleneck"]
     I1done --> J1att["Tier J1 ATTEMPT: G&T mean-utility gate (strict-< mean and mean-sigma variants)"]
@@ -1398,9 +1398,9 @@ flowchart TD
     J1check -->|"BOTH fire 100% of steps — argmin is extreme-value statistic, always multiple sigma below mean for K~32 samples"| J1roll[Tier J1 ROLLED BACK; central-tendency G&T gate family exhausted — cannot rate-limit by comparing argmin to central statistic]
     J1roll --> K1att["Tier K1 ATTEMPT: Plan Step 2 greedy top-2 compositional reseed — row_preA + row_preB / sqrt 2"]
     K1att --> K1check{10k smoke + 10x1.5M + 10x10M}
-    K1check -->|"1.5M PASS +449k; 10M KILL -43% vs F1, 2/10 catastrophic, effK still 31.5, peak 0.000 all seeds — greedy inheritance collapses feature diversity"| K1roll[Tier K1 ROLLED BACK; greedy compositional reseed family exhausted — need coverage-preserving compositional mechanism]
+    K1check -->|"Current raw dirs: 1.5M +240k; 10M -5.3% vs F1, 3/10 beat F1, effK still 31.5 — greedy composition stays safe but non-winning"| K1roll[Tier K1 ROLLED BACK; greedy compositional reseed failed to beat F1 or activate H1]
     K1roll --> nextWin{Next Plan-orthodox gap}
-    nextWin -->|"Tier K2: stochastic-mixture compositional reseed, sample preA preB from utility distribution not argmax"| K2[Tier K2: stochastic compositional reseed]
+    nextWin -->|"Tier K2 DONE: stochastic-mixture compositional reseed sampled from utility mass"| K2[Tier K2: +1.600M at 10M, -4.4% vs F1, 3/10 beat F1, effK 31.48 — neutral, not a new baseline]
     nextWin -->|"Tier I2: reservoir for perception recursion (Plan Step 3 completion)"| I2[Tier I2: reservoir encoder]
     nextWin -->|"Tier H2: H1 beta in psi-TD target (full Plan Step 10 literal)"| H2[Tier H2: learned beta in psi TD]
     nextWin -->|"Age-weighted G&T cadence"| ageG[Age-weighted G&T utility]
@@ -1478,7 +1478,7 @@ family is exhausted** (C2 v1/v2/retry, C4, Step 11 all rolled back).
 3. **Plan Step 1 — eligibility traces** (Tier G1 rolled back;
    conditional on Plan Step 2 decorrelation landing first).
 
-### Tier H1. Chord hysteresis via model-confidence β (Plan Step 10 STOMP multi-step options, IN-FLIGHT)
+### Tier H1. Chord hysteresis via model-confidence β (Plan Step 10 STOMP multi-step options, DONE — neutral-accepted)
 
 **Closes the largest remaining Plan-orthodoxy gap.** Plan Step 10 STOMP defines options as *"policy + termination condition"* but until H1 OaK's chord recomputed every step via `softmax(ψ·s')`, making options effectively 1-step (state-of-agent table flagged "STRUCTURALLY DEGENERATE"). Five prior attempts in the termination-from-ψ family (C2 v1/v2/retry, C4 structural `β=(1+curr)/2`, Step-11 sharpening) all regressed catastrophically because they coupled β/termination to ψ or backward value signals. H1 uses a **forward-model-prediction-error** signal class instead — a fundamentally different signal.
 
@@ -1510,8 +1510,8 @@ chord[k]    = chord_k_raw / Σ_j chord_j_raw          [renormalize via simd_sum]
 **Acceptance / kill criteria.** See plan file `.cursor/plans/tier_h1_chord_hysteresis_model-beta_*.plan.md`.
 
 **10M result (DONE — H1 ACCEPTED as Plan-Step-10 architectural completion, empirically inert):**
-- 10/10 wins, 0 NF, mean lift +1.66M vs F1 +1.67M (-0.7% statistical TIE)
-- chordEffectiveK = 30.97 / 32 throughout entire 10M run — chord stays uniform
+- 10/10 wins, 0 NF, mean lift `+1.660952M` vs F1 `+1.673362M` (`-12.4k`, `-0.74%`)
+- `2/10` seeds beat F1, but `chordEffectiveK` still sits at `30.86 / 32` — chord remains effectively uniform
 - Mechanism wired correctly (verified at smoke; β=1/(1+ntdSqSum/R) computed each step) but
   inert in practice: chord is already uniform on HC because ψ logits are small/similar across
   options, so lerp of uniform vectors = uniform vector. β-hysteresis is a no-op on uniform chord.
@@ -1571,46 +1571,75 @@ stimulus-code (Sutton-Barto §13, §17) inspiration.
 - **Key empirical finding**: richer temporal features DID NOT unlock chord concentration. Same uniform-chord failure mode as H1. Empirically falsifies "feature expressiveness is the plateau bottleneck"; points directly at G&T cadence as the root cause → motivates Tier J1.
 - Integrated as Plan-Step-3 structural orthodoxy installation (kernel path now incorporates older signals and traces per Plan); chatter improvement is real. Mechanism may compound once Tier J1 stops G&T from churning useful options.
 
-### Tier K1. Plan-Step-2 feature combinations (Fourier conjunction via row-sum reseed, ROLLED BACK — greedy-top-2 compositional reseed collapses feature diversity)
+### Tier K1. Plan-Step-2 feature combinations (Fourier conjunction via row-sum reseed, ROLLED BACK — greedy-top-2 compositional reseed stayed non-competitive on the current raw dirs)
 
 **Motivation.** Plan Step 2 verbatim: *"...the simplest combinations are conjunctions (products) or linear combinations of existing features; these enable representations of arbitrary complexity to be built up over time."* J1 exhausted-families lesson 3 pointed at compositional reseed as the remaining Plan-orthodox path for the uniform-chord failure.
 
 **Mechanism.** In `oak_bk_admit_commit`: extend Phase 1 lane-0 scan with a top-2 pass over `halfR` pre-activations ranked by `pairUtil[p] = utilFeat[p] + utilFeat[p+halfR]` excluding `preTarget = worstI % halfR`. Phase 2 encoder branch replaced fresh-random RFF with `(encoder[preA] + encoder[preB]) · (1/√2)`. Phase 3 phase reseed kept fresh-random 2π. Zero host changes, zero new state buffers.
 
-**1.5M screen: PASS.** 10/10 wins, 0 NF, mean lift **+449k** (vs I1 +419k, +7.3%), chatter 0.022, actL2 bounded at 1.03 (bandwidth stationary under 1/√2). All 6 gates passed.
+**1.5M screen (artifact-backed current raw dirs): PASS.** 10/10 wins, 0 NF, mean lift **+240.2k** (F1 `+236.7k`, I1 `+241.5k`), chatter `0.0215`, `chordEffectiveK 31.63`. Clean screen, but not a standout early win.
 
-**10M acceptance: KILL.**
+**10M acceptance: FAIL.**
 
 | metric | F1 baseline | H1 | I1 | **K1 10M** | gate |
 |---|---|---|---|---|---|
-| mean lift | +1.67M | +1.66M | +1.60M | **+952k** | ≥F1 parity: FAIL (−43%) |
-| median lift | — | — | — | +982k | — |
-| wins vs paired-random | — | — | — | **8/10** | ≥9/10: FAIL |
+| mean lift | +1.673M | +1.661M | +1.596M | **+1.585M** | ≥F1 parity: FAIL (`−5.3%`) |
+| median lift | — | — | — | +1.584M | — |
+| wins vs paired-random | — | — | — | **10/10** | PASS |
 | seeds beating F1 | — | — | — | **3/10** | ≥5/10: FAIL |
-| chordEffectiveK median | uniform | 30.9 | 31.4 | **31.5** | <30: FAIL (uniform) |
-| chatter median | 0.037 | 0.039 | 0.029 | 0.027 | ≤0.08: PASS |
-| actL2 max | ~1.0 | ~1.0 | ~1.0 | 1.14 | <1.5: PASS |
-| NF | 0 | 0 | 0 | **0** | 0: PASS |
-| peak max (walking) | some | some | some | **0.000 all seeds** | — |
+| chordEffectiveK median | uniform | 30.86 | 31.42 | **31.51** | <30: FAIL |
+| chatter median | 0.0374 | 0.0391 | 0.0288 | **0.0272** | ≤0.08: PASS |
+| peak max rewardRate | +0.109 | +0.101 | +0.085 | **+0.126** | — |
+| peak median rewardRate | +0.060 | +0.027 | −0.013 | **−0.008** | — |
+| NF | 0 | 0 | 0 | **0** | PASS |
 
-**Two seeds went catastrophically negative**: seed 0 (−228k) and seed 8 (−776k). No seed achieved positive peak reward (no walking). Kill trigger: mean lift < F1 −10% (+952k < +1 506k).
+**Diagnosis.** On the current raw artifact set, K1 is **not** a catastrophic collapse; it is a mild regression clustered with I1 and K2. It trails F1 by `88.0k` mean lift at 10M, trails K2 by `15.2k`, and leaves `chordEffectiveK` essentially uniform. The safe conclusion that still survives is narrower than the older writeup: **greedy parent selection does not unlock a Step-2 win.** It stays stable and low-chatter, but it neither concentrates the chord nor surpasses the F1/H1 frontier.
 
-**Diagnosis — feature-diversity collapse.**
+**Outcome.** K1 remains rolled back as a non-winning variant. The current workspace raw dirs support a "safe but non-competitive" verdict, not the stronger earlier catastrophic narrative.
 
-K1's 1.5M → 10M trajectory vs F1:
+### Tier K2. Plan-Step-2 feature combinations via stochastic utility sampling (DONE — neutral, not a new baseline)
 
-- F1 at 1.5M: +237k → F1 at 10M: +1 673k  (×7.0 growth — continual improvement through 10M)
-- K1 at 1.5M: +449k → K1 at 10M: +952k   (×2.1 growth — converges early, stops improving)
+**Motivation.** K1 falsified the greedy-parent family as a **winning** Step-2 mechanism on the current raw dirs: deterministic inheritance from the same top-2 pre-activations stayed safe, but still finished below F1/H1 with `effK` essentially uniform. The Plan Step 2 literal still points at composition: *"creating and introducing new features (made by combining existing features)"*. K2 preserves that literal while changing only the parent-selection rule.
 
-K1 starts STRONGER at 1.5M (+89% above F1 at 1.5M) but falls behind by 10M. The pattern is early-convergence-without-continual-improvement — classical greedy-selection failure in G&T.
+**Mechanism.** In `oak_bk_admit_commit` Phase 1 lane 0:
+- keep the existing `worstK` and `worstI` scans unchanged;
+- compute `preTarget = worstI % halfR`;
+- define `pairUtil[p] = utilFeat[p] + utilFeat[p + halfR]` over pre-activation pairs, excluding `preTarget`;
+- sample `preA` from the raw positive `pairUtil` mass using `uA = hash_uniform(stepC, preTarget, 0x6b325541u) * totalPairUtil`;
+- sample `preB` without replacement from the remaining positive mass using `uB = hash_uniform(stepC, preTarget, 0x2f8c7a19u) * remainingPairUtil`.
 
-Mechanism: every step the reseed inherits from the SAME top-2 pre-activations by current utility. Over many reseeds, this creates a cascade where new features are all derivative of the momentarily-best two, collapsing the feature pool to a small neighborhood of utility-space. Fresh-random RFF, though less "informative" per reseed, maintains feature-space COVERAGE through novelty injection. K1's greedy inheritance kills that novelty channel.
+If fewer than two non-target parents have strictly positive `pairUtil`, or the remaining mass after selecting `preA` is zero/non-finite, K2 falls back to the pre-existing fresh-random encoder-row reseed for that step. Option G&T, phase reseed, and MetaOptimize reset remain unchanged.
 
-effK staying at 31.5 confirms: combinations did not produce task-relevant compound structure. They produced locally-useful-now structure — which is a distinct and worse thing.
+In Phase 2 the encoder branch becomes:
+- **compose** when both sampled parents exist: `encoder[pre, o] = (encoder[preA, o] + encoder[preB, o]) * (1/√2)`;
+- **fallback** otherwise: preserve the current fresh-random bandwidth-1 RFF write.
 
-**Lesson for exhausted-families table.** Any G&T replacement that draws deterministically from the current top-k utility distribution will collapse feature diversity over cascading reseeds. The Plan Step 2 "combinations" literal is NOT satisfied by greedy argmax selection — it needs a mechanism that maintains feature-space coverage while inheriting structure. Candidates that might work: (a) stochastic mixture sampling with probability ∝ utilFeat (not argmax); (b) feature registry per Plan Step 11 ("new feature not yet basis") tracking which compound features have already been tried; (c) diversity-regularized selection (e.g., pick preA as argmax and preB as argmax-minus-similarity-to-preA); (d) randomized pair selection (non-greedy).
+The `1/√2` factor is unchanged from K1 and remains structural: two-parent Gaussian-sum bandwidth preservation. K2 does **not** add fresh noise, diversity penalties, feature registry, cadence changes, new state buffers, or host-side sampling.
 
-**Outcome.** Kernel reverted to I1 substrate (zero diff in `Sources/OakKernel.metal`). Plan file + bench scripts retained as historical record. Added to exhausted-families table as entry 11 (K1 greedy-top-2 row-sum).
+**Why this is the narrow next test.** The raw `utilFeat` mass is already a nonnegative GraMa EMA, so stochastic sampling can use the existing signal without new normalization or metadata. This makes K2 a single-kernel, single-mechanism follow-up to K1: same Step-2 composition target, same every-step cadence, same rollback surface, different parent-selection rule.
+
+**Acceptance shape.**
+- **10k smoke:** 0 NF, chatter <= 0.05, action L2 bounded/stationary.
+- **10×1.5M screen:** 10/10 wins, 0 NF, mean lift >= +220k, chatter median <= 0.08, <= 1 negative seed. Screen only; not acceptance.
+- **10×10M acceptance:** 10/10 wins, 0 NF, mean lift >= F1 parity (+1.67M), chatter median <= 0.08, >= 5 seeds beat F1. `chordEffectiveK < 30` is secondary: it upgrades the result from neutral accept to full "K2 likely activated H1", but is not a hard gate.
+
+**Current artifact-backed result:**
+- **1.5M screen:** 10/10 wins, 0 NF, mean lift `+237.7k`, chatter `0.0204`. This clears the screen, but lands in the same early-performance cluster as F1/H1/I1/K1 rather than standing out.
+- **10M:** 10/10 wins, 0 NF, mean lift `+1.600528M` vs F1 `+1.673362M` (`-72.8k`, `-4.4%`), median lift `+1.604264M`, `3/10` seeds beat F1, chatter median `0.0273`, `chordEffectiveK 31.48`.
+- **Relative read:** K2 modestly improves on the current raw K1 dirs (`+15.2k` mean lift at 10M, slightly lower effK), but it remains below H1 and F1 and does not activate the `<30` effK bonus signal.
+
+**Artifact-backed post-F1 sequence (tiers with top-level bench dirs present in the current workspace):**
+
+| tier | 1.5M mean lift | 10M mean lift | Δ vs F1 @10M | seeds > F1 @10M | chatter @10M | effK @10M | read |
+|---|---|---|---|---|---|---|---|
+| F1 | +236.7k | +1.673M | baseline | — | 0.0374 | — | benchmark leader |
+| Step 11 | +229.2k | +1.397M | −276.0k | 1/10 | 0.1404 | — | rollback |
+| H1 | +243.0k | +1.661M | −12.4k | 2/10 | 0.0391 | 30.86 | neutral-accepted |
+| I1 | +241.5k | +1.596M | −77.4k | 3/10 | 0.0288 | 31.42 | neutral-accepted |
+| K1 | +240.2k | +1.585M | −88.0k | 3/10 | 0.0272 | 31.51 | rollback |
+| K2 | +237.7k | +1.601M | −72.8k | 3/10 | 0.0273 | 31.48 | neutral, not baseline |
+
+**Verdict.** K2 is the best of the current Step-2 variants on disk, but it still fails the acceptance conditions that matter: no F1 parity, only `3/10` seeds beat F1, and `effK` remains effectively uniform. The right read is **neutral Plan-Step-2 installation, not a new performance baseline**.
 
 ### Tier J1. G&T mean-utility gate (Plan Step 11 "eventually" literal, ROLLED BACK — mechanism mathematically equivalent to no gate for K~32 samples)
 
