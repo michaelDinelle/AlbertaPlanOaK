@@ -965,12 +965,16 @@ kernel void oak_post_learn(
 //     worst-utility feature each step (Plan Step 11 remove-replace + Step 2 generate-and-test).
 //
 //     Single threadgroup, multi-thread:
-//       Phase 1 (lane 0):  find worstK + worstI via linear scan; bump cumulative counters.
-//                          Writes worstK, worstI into threadgroup memory.
+//       Phase 1 (lane 0):  find worstK + worstI via linear scan; sample two parent
+//                          pre-activations from paired utility mass (Tier K2); bump
+//                          cumulative counters. Writes worstK, worstI, preA/preB, and the
+//                          compose/fallback flag into threadgroup memory.
 //       Barrier            (mem_threadgroup)
 //       Phase 2 (all lanes): cooperative parallel reseed of the worstK weight slices
 //                          (psi, optReward, optPolicy, optTransition) plus the worstI
-//                          Fourier encoder row, distributed by `tid`.
+//                          Fourier encoder row, distributed by `tid`. Encoder row is either
+//                          a stochastic composition of two sampled parents or the prior
+//                          fresh-random fallback when utility mass is insufficient.
 //       Barrier
 //       Phase 3 (lane 0):  scalar resets (utilOpt, utilFeat, phase, MetaOptimize) +
 //                          slot toggle + stepCount increment + stats surface.
@@ -993,14 +997,17 @@ kernel void oak_bk_admit_commit(
     Ctx ctx = make_ctx(params, stateArena, uintArena, scalars, stats, cfg);
 
     // Default-initialized so the compiler's per-lane flow analysis is satisfied; lane 0
-    // unconditionally overwrites all three before the barrier so the defaults never leak.
+    // unconditionally overwrites all six before the barrier so the defaults never leak.
     threadgroup uint  worstK_tg    = 0u;
     threadgroup uint  worstI_tg    = 0u;
     threadgroup uint  stepCount_tg = 0u;
+    threadgroup uint  preA_tg      = 0u;
+    threadgroup uint  preB_tg      = 0u;
+    threadgroup uint  compose_tg   = 0u;
 
-    // Phase 1: lane 0 picks worsts and bumps cumulative counters. Capture stepCount BEFORE
-    // the post-step increment so the parallel reseed below uses the same hash key as the
-    // prior single-threaded kernel.
+    // Phase 1: lane 0 picks worsts, samples K2 parent rows, and bumps cumulative counters.
+    // Capture stepCount BEFORE the post-step increment so the parallel reseed below uses the
+    // same hash key as the prior single-threaded kernel.
     if (tid == 0u) {
         uint wK = 0u; float wUO = FLT_MAX;
         for (uint k = 0u; k < ctx.K; ++k)
@@ -1010,7 +1017,65 @@ kernel void oak_bk_admit_commit(
         for (uint i = 0u; i < ctx.R; ++i)
             if (ctx.utilFeat[i] < wUF) { wUF = ctx.utilFeat[i]; wI = i; }
         worstI_tg = wI;
-        stepCount_tg = ctx.stepCount;
+        uint stepC = ctx.stepCount;
+        stepCount_tg = stepC;
+
+        uint halfR = ctx.R >> 1u;
+        uint preTarget = (wI < halfR) ? wI : wI - halfR;
+        uint preA = 0u;
+        uint preB = 0u;
+        uint compose = 0u;
+        float totalPairUtil = 0.0f;
+        uint positiveParents = 0u;
+
+        for (uint p = 0u; p < halfR; ++p) {
+            if (p == preTarget) continue;
+            float paired = ctx.utilFeat[p] + ctx.utilFeat[p + halfR];
+            if (isfinite(paired) && paired > 0.0f) {
+                totalPairUtil += paired;
+                positiveParents += 1u;
+            }
+        }
+
+        if (positiveParents >= 2u && isfinite(totalPairUtil) && totalPairUtil > 0.0f) {
+            float uA = hash_uniform(stepC, preTarget, 0x6b325541u) * totalPairUtil;
+            uint haveA = 0u;
+            float pairUtilA = 0.0f;
+            float runningA = 0.0f;
+            for (uint p = 0u; p < halfR; ++p) {
+                if (p == preTarget) continue;
+                float paired = ctx.utilFeat[p] + ctx.utilFeat[p + halfR];
+                if (!(isfinite(paired) && paired > 0.0f)) continue;
+                runningA += paired;
+                if (runningA > uA) {
+                    preA = p;
+                    pairUtilA = paired;
+                    haveA = 1u;
+                    break;
+                }
+            }
+
+            float remainingPairUtil = totalPairUtil - pairUtilA;
+            if (haveA != 0u && isfinite(remainingPairUtil) && remainingPairUtil > 0.0f) {
+                float uB = hash_uniform(stepC, preTarget, 0x2f8c7a19u) * remainingPairUtil;
+                float runningB = 0.0f;
+                for (uint p = 0u; p < halfR; ++p) {
+                    if (p == preTarget || p == preA) continue;
+                    float paired = ctx.utilFeat[p] + ctx.utilFeat[p + halfR];
+                    if (!(isfinite(paired) && paired > 0.0f)) continue;
+                    runningB += paired;
+                    if (runningB > uB) {
+                        preB = p;
+                        compose = 1u;
+                        break;
+                    }
+                }
+            }
+        }
+
+        preA_tg = preA;
+        preB_tg = preB;
+        compose_tg = compose;
         ctx.counters[OAK_CNT_REINIT_OPT]  += 1u;
         ctx.counters[OAK_CNT_REINIT_FEAT] += 1u;
     }
@@ -1019,6 +1084,9 @@ kernel void oak_bk_admit_commit(
     uint worstK = worstK_tg;
     uint worstI = worstI_tg;
     uint stepC  = stepCount_tg;
+    uint preA   = preA_tg;
+    uint preB   = preB_tg;
+    uint compose = compose_tg;
     uint halfR  = ctx.R >> 1u;
     uint pre    = (worstI < halfR) ? worstI : worstI - halfR;
     float invSqrtR = rsqrt(float(max(ctx.R, 1u)));
@@ -1057,12 +1125,20 @@ kernel void oak_bk_admit_commit(
             ctx.optTransition[worstK * ctx.R * ctx.R + pi] =
                 (hash_uniform(stepC, worstK, 4u * ctx.R + pi) * 2.0f - 1.0f) * invSqrtR;
         } else {                                                     // encoder[pre][:M·baseO]
-            // Tier I1: row stride is M·baseO; reseeds all M regions (std_obs + M−1 traces)
-            // for the worstI feature pair with fresh RFF bandwidth-1 random uniforms.
+            // Tier K2: compose the replacement row from two sampled parent pre-activations
+            // without replacement, weighted by paired utility mass. Fallback stays the prior
+            // fresh-random bandwidth-1 reseed when there are fewer than two positive parents.
             uint o = id - o4;
-            float u = hash_uniform(stepC, pre, o + 0xdeadbeefu) * 2.0f - 1.0f;
             uint rowStride = (ctx.baseObsTraceLevels + 1u) * ctx.baseO;
-            ctx.encoder[pre * rowStride + o] = u;                    // RFF bandwidth-1.
+            if (compose != 0u) {
+                float rA = ctx.encoder[preA * rowStride + o];
+                float rB = ctx.encoder[preB * rowStride + o];
+                ctx.encoder[pre * rowStride + o] =
+                    (rA + rB) * 0.7071067811865475f;                 // 1 / sqrt(2), structural.
+            } else {
+                float u = hash_uniform(stepC, pre, o + 0xdeadbeefu) * 2.0f - 1.0f;
+                ctx.encoder[pre * rowStride + o] = u;                // RFF bandwidth-1.
+            }
         }
     }
     threadgroup_barrier(mem_flags::mem_threadgroup);
