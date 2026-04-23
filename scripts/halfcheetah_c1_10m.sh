@@ -17,7 +17,6 @@ fi
 
 export OAK_ENV="HalfCheetah-v4"
 export OAK_NUM_ENVS=1
-export OAK_WARMUP_STEPS=1000
 export OAK_HEARTBEAT_STEPS=200000   # 50 heartbeats over 10M (4× sparser than 1.5M run)
 
 RUN_DIR="$ROOT/.oak-benchmarks/halfcheetah-c1-10m"
