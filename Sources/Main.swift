@@ -359,6 +359,7 @@ private struct KernelConfig {
     var sPlanAdv: UInt32 = 0
     var sAlpha: UInt32 = 0, sBeta: UInt32 = 0, sH: UInt32 = 0
     var sNTdMat: UInt32 = 0
+    var sOptRewardTd: UInt32 = 0
     var sQOption: UInt32 = 0     // Per-option Q^k cache (K floats), oak_plan → oak_plan_reduce.
     var sObsTraceMulti: UInt32 = 0  // Tier I1 (Plan Step 3): per-obs-dim multi-timescale traces.
                                      // (M−1)·O floats laid out as `obsTraceMulti[m·baseO + o]`
@@ -394,19 +395,8 @@ private struct KernelScalars {
     var alphaPi: Float = 0
     // Tier D2 (Plan Step 9, prioritized sweeping): mean of prioOpt[K], computed once per step
     // in oak_plan_reduce via simd_sum and broadcast-cached for every oak_learn_heads Head 4
-    // thread to read (avoids 131k Head 4 threads each computing the same K-element reduction).
+    // thread to read (avoids every Head 4 thread computing the same K-element reduction).
     var meanPrio: Float = 0
-    // Tier G1-TO (True-Online TD(λ), van Seijen-Sutton 2014 / Sutton-Barto §12.5):
-    // persistent scalar `vPrevOld` = V(s_t, w_{t−1}) = the prediction at the CURRENT state
-    // using the PREVIOUS STEP's weights. Initialized 0; each step's oak_meta_predict phase 2
-    // reads it (for the true-online δ), then overwrites it with this step's V_curr
-    // (= w_{t−1} · x(s_{t+1})) so it's in place for the next step.
-    var vPrevOld: Float = 0
-    // Per-step transient scalars populated by oak_meta_predict phase 2 lane 0 and consumed
-    // by oak_learn_heads Head 0. All three are NF-clamp-at-write (preserve last good value).
-    var tdTrueOnline: Float = 0     // δ_TO = (r − ρ̄) + V(s_{t+1}, w_{t−1}) − V(s_t, w_{t−1}·prev−1 step) = (r − ρ̄) + vCurr − vPrevOld
-    var vDiffTrueOnline: Float = 0  // ΔV = V(s_t, w_{t−1}) − V(s_t, w_{t−2}) = vPrev − vPrevOld
-    var eValDotPrev: Float = 0      // Σ_i e_V[i] · prev[i] for the canonical Dutch trace factor
 }
 
 struct KernelStats {
@@ -416,8 +406,7 @@ struct KernelStats {
     var oakOptionReinitCount: Float = 0, oakFeatureReinitCount: Float = 0
     // Tier H1 diagnostic: chord effective-K = 1 / Σ_k chord[k]². Range [1, K].
     // K = uniform chord (mechanism inactive OR chord stays flat); 1 = one-hot chord
-    // (single option fully dominant); intermediate = moderate concentration. With K=32
-    // on HC: 32 = no concentration, ~10 = moderate (3-4 dominant options), 1-3 = sharp.
+    // (single option fully dominant); intermediate = moderate concentration.
     var chordEffectiveK: Float = 0
 }
 
@@ -437,9 +426,14 @@ private enum OakMetalLayout {
     // DENSE transition (RR-Subtasks Sutton-Machado-Holland-Timbers-Tanner-White 2022 eq. 17):
     // one weight per (option, j_out, i_in). n_hat^k_j(s) = sum_i w^k_{j,i} * s[i] gives options
     // real cross-feature dynamics for planning (V(n_hat^k(s)) = sum_j valueW[j] * sum_i w^k_{j,i} * s[i]).
-    // K*R*R weights; the K*R^2 inner loop in oak_plan is absorbed by K-thread parallel + simd_max
-    // reduction (K = 32 fits one Apple SIMD width simdgroup, lockstep execution).
+    // K*R*R weights; the K*R^2 inner loop in oak_plan is absorbed by K-thread parallel +
+    // simd_max reduction. Metal caps K to the hardware SIMD width.
     static func optTransitionCount(rank: Int) -> Int { optionCount(rank: rank) * rank * rank }
+    static func postLearnThreadCount(rank: Int, dPolicy: Int) -> Int {
+        let K = optionCount(rank: rank)
+        let actBase = ((rank + K + 31) / 32) * 32
+        return actBase + dPolicy * maxOptionCount
+    }
     // Deep Fourier features (Lewandowski-Schuurmans-Machado 2024, arXiv:2410.20634): R/2
     // pre-activations, each producing a paired (cos, sin) channel into the R-wide state.
     // Encoder rows match the pre-activation count; phase is one scalar per pre-activation.
@@ -501,6 +495,7 @@ private enum OakMetalLayout {
         let planAdv: Int
         let alpha, beta, h: Int       // MetaOptimize L-approximation buffers (R floats each).
         let nTdMat: Int               // Dense option-transition TD targets, K*R floats, written by oak_plan.
+        let optRewardTd: Int          // Option reward-model TD targets, K floats, written once by oak_plan.
         let qOption: Int              // Per-option Q^k cache, K floats, oak_plan → oak_plan_reduce.
         let obsTraceMulti: Int        // Tier I1 (Plan Step 3): per-obs-dim multi-timescale traces,
                                        // (M−1)·baseO floats laid out as `obsTraceMulti[m·baseO + o]`
@@ -538,6 +533,7 @@ private enum OakMetalLayout {
         let be  = o; o += rank
         let h   = o; o += rank
         let ntd = o; o += K * rank
+        let ortd = o; o += K
         let qo  = o; o += K
         // Tier I1: (M−1)·baseO floats for non-instantaneous trace levels (τ_m = 2^m for
         // m=1..M−1). Layout: `obsTraceMulti[m·baseObsDim + o]` for m=1..M−1.
@@ -551,7 +547,7 @@ private enum OakMetalLayout {
                      utilFeat: uf, utilOpt: uo,
                      planAdv: pa,
                      alpha: al, beta: be, h: h,
-                     nTdMat: ntd, qOption: qo, obsTraceMulti: otr,
+                     nTdMat: ntd, optRewardTd: ortd, qOption: qo, obsTraceMulti: otr,
                      prioOpt: prio, prevBeta: pb, total: o)
     }
 
@@ -580,29 +576,17 @@ private final class Shared<Element> {
 }
 
 // =================================================================================================
-// Metal engine - orthodox Step 11 Oak. 12 phases per step, dispatched as one ICB.
-//   bk_obs -> encode -> meta_policy -> predict -> plan -> reduce_alpha -> learn_heads
-//   -> meta_action -> bk_reduce -> bk_utility -> bk_admit_commit
-// (11 phases listed; meta_action runs LAST among learn-time kernels so learn_heads reads the
-// score function written at the previous step's meta_action.)
+// Metal engine - orthodox Step 11 Oak. Five fused GPU phases per step, dispatched as one ICB:
+//   bk_encode(+meta_predict) -> plan -> plan_reduce -> learn_heads -> post_learn(+G&T commit)
 // =================================================================================================
 final class OakMetalEngine {
     private struct Phase { let name: String; let tgSize: Int }
     private static let phases: [Phase] = [
         // FUSED oak_bk_obs + oak_encode: per-feature Welford EMA + obsTrace EMA (bk_obs
         // phase, threads with tid < O), threadgroup_barrier(mem_device), Fourier features
-        // (encode phase, all R=rank threads compute one feat each). Single TG of R threads.
-        // Saves 1 dispatch + 1 host memoryBarrier per step (~25-40 µs on concurrent bench).
-        // Inv-10 bit-identical: same per-o op sequence in phase 1, same per-feat fma chain
-        // in phase 2; NF counter aggregated via per-simdgroup simd_sum + cross-simdgroup
-        // sum in threadgroup memory (total NF count is associative).
+        // (encode phase, all R=rank threads compute one feat each), then meta_predict in
+        // the first hardware simdgroup. Single TG of R threads.
         Phase(name: "oak_bk_encode",       tgSize: -1),     // -1 → host fills with rank (1 TG of R threads).
-        // FUSED oak_meta + oak_predict: chord softmax + alphaPi + ρ̄ EMA (meta phase),
-        // simdgroup_barrier(mem_device), main TD + K subtask TDs (predict phase). K threads
-        // = 1 simdgroup. Saves 1 dispatch + 1 host memoryBarrier per step (~25-40 µs on
-        // concurrent bench). Inv-10 bit-identical: same fma sequences, same program order
-        // (phase 1 writes ρ̄ → phase 2 reads ρ̄ via scalars direct deref, not Ctx snapshot).
-        Phase(name: "oak_meta_predict",    tgSize: 0),
         // K threadgroups × R threads each (one TG per option). Each thread (j) computes
         // one row of the dense option transition; per-TG simd_sum + threadgroup_barrier
         // reduces to vHat^k; lane 0 emits Q^k = r̂^k + vHat^k into qOption[K].
@@ -610,24 +594,23 @@ final class OakMetalEngine {
         // K-thread cross-option reduction: simd_max(qOption) + planAdv soft-bound.
         Phase(name: "oak_plan_reduce",     tgSize: 0),
         Phase(name: "oak_learn_heads",     tgSize: 0),
-        // Performance pass on top of D2: oak_post_learn's action region used to be 6 threads
-        // (one per action dim) each doing K·R = 2048 sequential fma → 1 simdgroup with 26
-        // idle lanes serializing the entire kernel (138.7 µs / 244 µs total = 55.6% of GPU
-        // time). Now parallel: each (p, k) is its own thread, K=32 lanes per p, organized
-        // so each p lands in exactly one simdgroup. Lane 0 of each p-simdgroup reads the
+        // FUSED post_learn + admit_commit. A single TG keeps utility updates, action μ, and
+        // G&T replacement in one dispatch; the action region is padded to a simdgroup boundary
+        // so each action dim starts at lane 0 even when K is below the hardware lane width.
+        //
+        // Performance pass on top of D2: oak_post_learn's action region used one thread
+        // per action dim, each doing K·R sequential fma and leaving most hardware lanes idle.
+        // Now parallel: each active (p, k) is its own lane, with one hardware-width group per
+        // action dim. Lane 0 of each p-simdgroup reads the
         // K dot products via simd_shuffle and applies chord with fma in the same kk=0..K-1
         // order as the original sequential code — bit-id preserved per Inv-10. Explicit
-        // tgSize = 32 (= simdgroup width = K) locks the simdgroup-aligned layout.
-        Phase(name: "oak_post_learn",      tgSize: 32),
-        // Single TG of 256 threads — lane 0 finds worsts, threadgroup barrier, then all
-        // 256 lanes cooperate on the parallel reseed (psi/optReward/optPolicy/optTransition/
-        // encoder slices, ~4.6k writes total → ~18 writes/lane).
-        Phase(name: "oak_bk_admit_commit", tgSize: 256),
+        // tgSize = postLearnThreadCount locks the simdgroup-aligned layout and gives the
+        // in-kernel admit/commit phase enough lanes to reseed cooperatively.
+        Phase(name: "oak_post_learn",      tgSize: -2),      // -2 → host fills with padded postLearnThreadCount.
     ]
 
     private let obsDim, baseObsDim, actDim, rank, dPolicy: Int
     private let queue: MTLCommandQueue
-    private let cbDesc: MTLCommandBufferDescriptor
     private let pipelines: [MTLComputePipelineState]
     private let scalarsBuffer: MTLBuffer
     private let statsBuffer: MTLBuffer
@@ -641,6 +624,7 @@ final class OakMetalEngine {
     private let stateLayout: OakMetalLayout.State
     private let uintLayout: OakMetalLayout.UInts
     private let phaseGridWidths: [Int]
+    private let phaseThreadgroupSizes: [Int]
     private let diagnosticGpuPhaseTiming: Bool
     private var phaseGpuTimeSumSeconds: [Double]
     private var phaseGpuInvalidStepCount: [Int]
@@ -677,6 +661,7 @@ final class OakMetalEngine {
         // Fourier pre-activation produces a paired (cos, sin) into the R-wide state.
         precondition(rank >= 2, "rank must be >= 2 (compute budget; Fourier pair).")
         precondition(rank % 2 == 0, "rank must be even (Fourier pair encoding); host must round up.")
+        precondition(rank <= 256, "rank must be <= 256 (oak_plan threadgroup storage cap).")
         precondition(baseObsDim >= 1, "baseObsDim must be positive (env input dim).")
         precondition(obsDim >= baseObsDim, "obsDim must be >= baseObsDim.")
         precondition(dPolicy >= 1, "dPolicy must be positive.")
@@ -686,8 +671,6 @@ final class OakMetalEngine {
             throw OakError.message("Failed to create Metal command queue.")
         }
         self.queue = queue
-        let d = MTLCommandBufferDescriptor(); d.retainedReferences = false
-        cbDesc = d
         pipelines = try Self.makePipelines(device: device)
 
         scalarsBuffer = device.makeBuffer(length: MemoryLayout<KernelScalars>.stride,
@@ -712,21 +695,30 @@ final class OakMetalEngine {
 
         let K = OakMetalLayout.optionCount(rank: rank)
         // Grid widths sized for one row (single-stream).
-        let learnTotal = OakMetalLayout.encoderCount(obsDim: obsDim, baseObsDim: baseObsDim, rank: rank)
-                       + rank
+        let learnTotal = rank
                        + OakMetalLayout.psiCount(rank: rank)
                        + OakMetalLayout.optPolicyCount(rank: rank, dPolicy: dPolicy)
                        + OakMetalLayout.optRewardCount(rank: rank)
                        + OakMetalLayout.optTransitionCount(rank: rank)
-        phaseGridWidths = [
+        let postLearnTotal = OakMetalLayout.postLearnThreadCount(rank: rank, dPolicy: dPolicy)
+        if let postIndex = Self.phases.firstIndex(where: { $0.name == "oak_post_learn" }) {
+            precondition(postLearnTotal <= pipelines[postIndex].maxTotalThreadsPerThreadgroup,
+                         "post_learn fused TG exceeds Metal threadgroup cap; reduce OAK_RANK/action dim or redesign post_learn.")
+        }
+        let grids = [
             1,                  // bk_encode         [FUSED: 1 TG of R threads, bk_obs phase (tid<O) + threadgroup_barrier + encode phase (all R)]
-            K,                  // meta_predict      [FUSED: K threads, meta (chord+alphaPi+rho) + simdgroup_barrier + predict (main TD + K psi TDs)]
             K,                  // plan              [K TGs (one per option) x R threads (one per output dim)]
             K,                  // plan_reduce       [K threads, simd_max(qOption) + planAdv soft-bound]
             learnTotal,         // learn_heads       [N threads, dense optTransition adds K*R^2]
-            rank + K + dPolicy * K, // post_learn    [util_feat (R) | util_opt (K) | action (D·K, K lanes/p simdgroup)]
-            1,                  // bk_admit_commit   [1 TG x 256 threads, threadgroup_barrier between find-worst and parallel reseed]
+            1,                  // post_learn        [1 TG: util/metaopt | util_opt | padded action | admit_commit]
         ]
+        phaseGridWidths = grids
+
+        phaseThreadgroupSizes = Self.phases.map { phase in
+            if phase.tgSize == -1 { return rank }
+            if phase.tgSize == -2 { return postLearnTotal }
+            return phase.tgSize
+        }
 
         self.diagnosticGpuPhaseTiming = diagnosticGpuPhaseTiming
         phaseGpuTimeSumSeconds = Array(repeating: 0, count: Self.phases.count)
@@ -833,7 +825,7 @@ final class OakMetalEngine {
 
         writeKernelConfig(paramLayout: paramLayout)
 
-        // Pre-encode all 11 phases into the ICB. Grids are fixed for the engine's lifetime.
+        // Pre-encode all fixed phases into the ICB. Grids are fixed for the engine's lifetime.
         let buffers = resourceList
         for i in 0..<Self.phases.count {
             let cmd = icb.indirectComputeCommandAt(i)
@@ -842,7 +834,7 @@ final class OakMetalEngine {
             // tgSize sentinel: -1 means "use runtime rank as TG size" (oak_plan needs R
             // threads per option-TG; rank is the only Plan-orthodox knob that maps onto a
             // GPU SIMD width, so all R-sized TGs key off it directly).
-            let phaseTgSize = Self.phases[i].tgSize == -1 ? rank : Self.phases[i].tgSize
+            let phaseTgSize = phaseThreadgroupSizes[i]
             if phaseTgSize > 0 {
                 let tgCount = max(phaseGridWidths[i], 1)
                 cmd.concurrentDispatchThreadgroups(
@@ -893,7 +885,6 @@ final class OakMetalEngine {
         // Reset per-step non-finite counters (cumulative reinit counters at indices 3, 4 stay).
         let ctr = uintArena.pointer.advanced(by: uintLayout.counters)
         ctr[0] = 0; ctr[1] = 0; ctr[2] = 0; ctr[5] = 0
-        statsPointer.pointee = KernelStats()
 
         try runKernel(accumulatePhaseGpu: accumulatePhaseGpu)
 
@@ -925,7 +916,9 @@ final class OakMetalEngine {
         c.sUtilFeat = UInt32(s.utilFeat); c.sUtilOpt = UInt32(s.utilOpt)
         c.sPlanAdv = UInt32(s.planAdv)
         c.sAlpha = UInt32(s.alpha); c.sBeta = UInt32(s.beta); c.sH = UInt32(s.h)
-        c.sNTdMat = UInt32(s.nTdMat); c.sQOption = UInt32(s.qOption)
+        c.sNTdMat = UInt32(s.nTdMat)
+        c.sOptRewardTd = UInt32(s.optRewardTd)
+        c.sQOption = UInt32(s.qOption)
         c.sObsTraceMulti = UInt32(s.obsTraceMulti)
         c.sPrioOpt = UInt32(s.prioOpt)
         c.sPrevBeta = UInt32(s.prevBeta)
@@ -953,7 +946,7 @@ final class OakMetalEngine {
             // eliminates the slow resident-set growth observed in Activity Monitor over 10M+
             // step runs.
             try autoreleasepool {
-                guard let cb = queue.makeCommandBuffer(descriptor: cbDesc) else {
+                guard let cb = queue.makeCommandBufferWithUnretainedReferences() else {
                     throw OakError.message("Failed to create Metal command buffer.")
                 }
                 guard let enc = cb.makeComputeCommandEncoder() else {
@@ -974,7 +967,7 @@ final class OakMetalEngine {
         // accumulated across a diagnostic run.
         for i in 0..<pipelines.count {
             try autoreleasepool {
-                guard let cb = queue.makeCommandBuffer(descriptor: cbDesc) else {
+                guard let cb = queue.makeCommandBufferWithUnretainedReferences() else {
                     throw OakError.message("Failed to create Metal command buffer.")
                 }
                 guard let enc = cb.makeComputeCommandEncoder() else {
@@ -1150,7 +1143,8 @@ private final class RunState {
                         ?? 1, 1)
         let (_, metricsURL) = try runSingle(
             envId: resolved, policy: policy, seed: seed,
-            stopAfter: steps, device: device, command: "diagnose", includeDiagnostic: true)
+            stopAfter: steps, device: device,
+            command: "diagnose", includeDiagnostic: true)
         fputs("\(metricsURL.path)\n", stderr)
     }
 
@@ -1257,7 +1251,8 @@ private final class RunState {
                 do {
                     _ = try runSingle(envId: item.env.envId, policy: item.policy, seed: item.seed,
                                       stopAfter: stopAfter,
-                                      device: device, command: "benchmark", metricsDir: benchDir).0
+                                      device: device,
+                                      command: "benchmark", metricsDir: benchDir).0
                     state.lock.lock()
                     state.completed += 1
                     let n = state.completed
@@ -1326,7 +1321,8 @@ private final class RunState {
     // -- single-run orchestration (setup -> loop -> snapshot) --------------------------------
 
     private static func setupRun(envId: String, policy: Policy, seed: Int?,
-                                 stopAfter: Int, device: MTLDevice, command: String,
+                                 stopAfter: Int, device: MTLDevice,
+                                 command: String,
                                  includeDiagnostic: Bool, metricsDir: URL?) throws -> RunContext {
         let dir = RunSnapshot.resolveMetricsDirectory(explicit: metricsDir)
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
@@ -1340,10 +1336,15 @@ private final class RunState {
         let rawRank = max(ProcessInfo.processInfo.environment["OAK_RANK"].flatMap(Int.init)
                           ?? max(env.obsDim, 64), 2)
         let rank = (rawRank + 1) & ~1   // round up to even.
-        let engine: OakMetalEngine? = policy == .oak ? try OakMetalEngine(
-            obsDim: env.obsDim, baseObsDim: env.obsDim, actDim: env.actDim,
-            rank: rank, dPolicy: env.dPolicy,
-            device: device, seed: seed, diagnosticGpuPhaseTiming: includeDiagnostic) : nil
+        guard rank <= 256 else {
+            throw OakError.message("OAK rank \(rank) exceeds oak_plan's 256-threadgroup-storage cap. Set OAK_RANK<=256 or redesign oak_plan storage.")
+        }
+        let engine = policy == .oak
+            ? try OakMetalEngine(obsDim: env.obsDim, baseObsDim: env.obsDim,
+                                 actDim: env.actDim, rank: rank, dPolicy: env.dPolicy,
+                                 device: device, seed: seed,
+                                 diagnosticGpuPhaseTiming: includeDiagnostic)
+            : nil
         try env.reset()
         return RunContext(envId: envId, policy: policy, seed: seed,
                           stopAfter: stopAfter, command: command,
@@ -1438,18 +1439,24 @@ private final class RunState {
                 state.actionCol.addMeasured(envAction: ctx.env.envActionScratch)
             }
             state.prevReward = ctx.env.rewardScratch[0]
-            memcpy(&state.prevPolicyMean, policyMean.values, policyMean.values.count * MemoryLayout<Float>.stride)
-            memcpy(&state.prevScoreGrad, ctx.env.scoreGradScratch,
-                   ctx.env.scoreGradScratch.count * MemoryLayout<Float>.stride)
+            _ = state.prevPolicyMean.withUnsafeMutableBufferPointer { dst in
+                memcpy(dst.baseAddress!, policyMean.values, policyMean.values.count * MemoryLayout<Float>.stride)
+            }
+            _ = state.prevScoreGrad.withUnsafeMutableBufferPointer { dst in
+                memcpy(dst.baseAddress!, ctx.env.scoreGradScratch,
+                       ctx.env.scoreGradScratch.count * MemoryLayout<Float>.stride)
+            }
         }
     }
 
     private static func runSingle(envId: String, policy: Policy, seed: Int?,
-                                  stopAfter: Int, device: MTLDevice, command: String,
+                                  stopAfter: Int, device: MTLDevice,
+                                  command: String,
                                   includeDiagnostic: Bool = false, metricsDir: URL? = nil)
                                   throws -> (RunMetricsFile, URL) {
         let ctx = try setupRun(envId: envId, policy: policy, seed: seed,
-                               stopAfter: stopAfter, device: device, command: command,
+                               stopAfter: stopAfter, device: device,
+                               command: command,
                                includeDiagnostic: includeDiagnostic, metricsDir: metricsDir)
         let state = RunState(env: ctx.env, seed: seed)
         try measurementLoop(ctx, state)
