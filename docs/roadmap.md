@@ -50,7 +50,9 @@ they describe why L3-L7 was needed. For the current code, these items are no
 longer "not implemented":
 
 - L3: `oak_bk_encode` trains psi with the RR stopping value
-  `V(s') - valueW[i]·x_i(s') + bonusW[i]·x_i(s')`.
+  `V(s') - valueW[i]·x_i(s') + bonusW[i]·x_i(s')`. Each ψ GVF now
+  has its own chord-responsibility reward-rate trace instead of sharing only
+  the behavior-policy `rho`.
 - L4/L5: `oak_plan` learns reward, transition, and duration models using
   stopping-aware recurrences. Duration TD uses the raw duration estimate from
   the Bellman recurrence; the structural one-step lower bound is applied only

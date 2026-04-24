@@ -380,16 +380,10 @@ private struct KernelConfig {
     var sDurationTd: UInt32 = 0
     var sDurationHat: UInt32 = 0
     var sQOption: UInt32 = 0     // Per-option Q^k cache (K floats), oak_plan → oak_plan_reduce.
-    var sObsTraceMulti: UInt32 = 0  // Tier I1 (Plan Step 3): per-obs-dim multi-timescale traces.
-                                     // (M−1)·O floats laid out as `obsTraceMulti[m·baseO + o]`
-                                     // for m=1..M−1 (m=0 is std_obs, no separate storage).
-                                     // Updated each step in oak_bk_encode Phase 1 with M−1
-                                     // parallel EMAs at rates 1/τ_m where τ_m = 2^m. Consumed
-                                     // by Phase 2 Fourier projection alongside std_obs.
-                                     // Replaces Tier C1's single `obsTrace` (which was one
-                                     // EMA at rate 1/baseO).
+    var sObsTraceMulti: UInt32 = 0  // Tier I1: (M−1)·baseO multi-timescale obs traces.
     var sPrioOpt: UInt32 = 0
     var sContinuation: UInt32 = 0 // RR-derived per-option continuation indicator/probability.
+    var sRhoOpt: UInt32 = 0
     var sReplacementAgeMean: UInt32 = 0
     var uCounters: UInt32 = 0
     var uOptFeature: UInt32 = 0
@@ -517,14 +511,10 @@ private enum OakMetalLayout {
         let optRewardTd: Int          // Option reward-model TD targets, K floats, written once by oak_plan.
         let durationTd, durationHat: Int
         let qOption: Int              // Per-option Q^k cache, K floats, oak_plan → oak_plan_reduce.
-        let obsTraceMulti: Int        // Tier I1 (Plan Step 3): per-obs-dim multi-timescale traces,
-                                       // (M−1)·baseO floats laid out as `obsTraceMulti[m·baseO + o]`
-                                       // for m=1..M−1. Replaces Tier C1's single obsTrace.
-        let prioOpt: Int              // Tier D2: per-option Moore-Atkeson 1993 priority signal,
-                                       // K floats. prio[k] = chord[k] · ||nTdMat^k||_L2. Written
-                                       // by oak_plan lane 0; consumed by oak_plan_reduce (mean
-                                       // → KernelScalars.meanPrio) and oak_learn_heads Head 4 gate.
+        let obsTraceMulti: Int        // Tier I1: (M−1)·baseO multi-timescale obs traces.
+        let prioOpt: Int              // Tier D2: per-option priority for plan_reduce / Head 4.
         let continuation: Int          // RR-derived continuation, K floats.
+        let rhoOpt: Int
         let replacementAgeMean: Int
         let total: Int
     }
@@ -556,11 +546,11 @@ private enum OakMetalLayout {
         let dtd = o; o += K
         let dhat = o; o += K
         let qo  = o; o += K
-        // Tier I1: (M−1)·baseO floats for non-instantaneous trace levels (τ_m = 2^m for
-        // m=1..M−1). Layout: `obsTraceMulti[m·baseObsDim + o]` for m=1..M−1.
+        // Tier I1: (M−1)·baseO non-instantaneous trace levels, τ_m = 2^m.
         let otr = o; o += max(M - 1, 0) * max(baseObsDim, 1)
         let prio = o; o += K
         let cont = o; o += K
+        let rhoOpt = o; o += K
         let ram = o; o += 1
         return State(observation: obs, obsMean: mean, obsSM: osm, state: st,
                      policyMean: pol, actionSignal: act, scoreGrad: sg,
@@ -571,7 +561,8 @@ private enum OakMetalLayout {
                      alpha: al, beta: be, h: h,
                      nTdMat: ntd, optRewardTd: ortd, durationTd: dtd, durationHat: dhat,
                      qOption: qo, obsTraceMulti: otr,
-                     prioOpt: prio, continuation: cont, replacementAgeMean: ram, total: o)
+                     prioOpt: prio, continuation: cont, rhoOpt: rhoOpt,
+                     replacementAgeMean: ram, total: o)
     }
 
     struct UInts { let counters, optFeature, featureAge, optAge, featureEverUsed, total: Int }
@@ -976,6 +967,7 @@ final class OakMetalEngine {
         c.sObsTraceMulti = UInt32(s.obsTraceMulti)
         c.sPrioOpt = UInt32(s.prioOpt)
         c.sContinuation = UInt32(s.continuation)
+        c.sRhoOpt = UInt32(s.rhoOpt)
         c.sReplacementAgeMean = UInt32(s.replacementAgeMean)
         c.uCounters = UInt32(u.counters)
         c.uOptFeature = UInt32(u.optFeature)
