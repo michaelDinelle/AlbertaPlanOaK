@@ -643,7 +643,7 @@ kernel void oak_plan_reduce(
 //                                   chord-weighted attribution lets option k's psi specialize to
 //                                   its own activation instead of converging to the chord mean.
 //                                   1/K floor prevents self-reinforcing starvation when chord[k]→0.
-//      2: optPolicy[K*D*R]       -> alphaPi * relevance(i) * td * scoreGrad[d] * prev[i] * chordPrev[k]
+//      2: optPolicy[K*D*R]       -> alphaPi * relevance(i) * tdPsi[k] * scoreGrad[d] * prev[i] * chordPrev[k]
 //      3: optReward[K*R]         -> alpha[i] * optRewardTd[k] * prev[i] * max(chordPrev[k], 1/K)
 //      4: optTransition[K*R*R]   -> alpha[i] * nTdMat[k*R+j] * prev[i] * max(chordPrev[k], 1/K)
 //                                   (DENSE: n_hat^k_j(s) = sum_i w^k_{j,i} * s[i], RR-Subtasks eq. 17;
