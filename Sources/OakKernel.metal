@@ -50,7 +50,7 @@ struct KernelConfig {
     // deep Fourier features encoder (Lewandowski-Schuurmans-Machado 2024,
     // arXiv:2410.20634). Encoder rows now span R/2 pre-activations, each producing a
     // (cos, sin) pair into state[0..R).
-    uint pEncoder, pPhase, pValue, pPsi, pOptPolicy, pOptReward, pOptTransition;
+    uint pEncoder, pPhase, pValue, pPsi, pOptPolicy, pOptReward, pOptTransition, pOptDuration;
 
     // State arena offsets.
     uint sObservation, sObsMean, sObsSM;
@@ -59,6 +59,7 @@ struct KernelConfig {
     uint sReward, sTd, sTdPsi;
     uint sChord, sChordPrev;
     uint sUtilFeat, sUtilOpt;
+    uint sBonusW;
     uint sPlanAdv;
     // MetaOptimize L-approximation (Sharifnassab-Salehkaleybar-Sutton 2024,
     // arXiv:2402.02342). Per-feature step sizes shared across value/psi/optReward/
@@ -73,6 +74,7 @@ struct KernelConfig {
     // as reward - optReward[k]·prev, consumed by oak_learn_heads Head 3 for every
     // optReward[k,i] weight. Avoids K*R duplicate dot products in learn_heads.
     uint sOptRewardTd;
+    uint sDurationTd, sDurationHat;
     // Per-option Q^k cache, K floats. Written by oak_plan (lane 0 of TG k), consumed by
     // oak_plan_reduce for the simd_max + planAdv soft-bound.
     uint sQOption;
@@ -84,24 +86,12 @@ struct KernelConfig {
     // multiplies std_obs, col m·baseO..(m+1)·baseO-1 multiplies trace level m).
     // Replaces Tier C1's single obsTrace at fixed rate 1/baseO.
     uint sObsTraceMulti;
-    // Tier D2 (Plan Step 9, prioritized sweeping; Moore-Atkeson 1993, Plan footnote 13):
-    // per-option priority signal, K floats. prio[k] = chord[k] · ||model TD error_k||_L2.
-    // Written by oak_plan lane 0 (in-line via fused tg_ntdSq write, zero added barriers);
-    // consumed by oak_plan_reduce (mean → KernelScalars.meanPrio) and by oak_learn_heads
-    // Head 4 gate (`prioOpt[k] >= meanPrio` → update; below → skip the K·R² optTransition
-    // gradient for that option this step).
+    // Per-option planning/update priority, K floats.
     uint sPrioOpt;
-    // Tier H1 (Plan Step 10 STOMP multi-step options): per-option continuation probability
-    // β^k = 1/(1 + ntdSqSum[k]) ∈ (0, 1], K floats. Written by oak_plan lane 0 at the end
-    // of step t (piggybacks on the same lane-0 scope that writes prioOpt — zero added
-    // barriers). Read by step t+1's oak_meta_predict phase 1 for chord hysteresis:
-    //   chord_k ← β^k · chordPrev[k] + (1 − β^k) · softmax_k(ψ·s')     (renormalized)
-    // High β (confident transition model) → option persists; low β (model surprised)
-    // → option terminates and chord follows the fresh softmax. One-step β lag is
-    // intentional (β tracks slow-moving optTransition quality).
-    uint sPrevBeta;
+    uint sContinuation;
+    uint sReplacementAgeMean;
     // UInt arena offsets.
-    uint uCounters;
+    uint uCounters, uOptFeature, uFeatureAge, uOptAge, uFeatureEverUsed;
 
     // No tunable scalars. alpha is implicit (Kim arXiv:2510.06149) per-head from instantaneous
     // signal magnitudes; ridges are unit-Bayesian (var + 1, not var + tunable_epsilon).
@@ -124,10 +114,12 @@ struct KernelScalars {
 struct KernelStats {
     float encodeNonFiniteCount, learnNonFiniteCount, planNonFiniteCount, tdPsiNonFiniteCount;
     float oakOptionReinitCount, oakFeatureReinitCount;
-    // Tier H1 diagnostic: chord effective-K = 1 / Σ_k chord[k]² ∈ [1, K]. Independent of
-    // chord step-to-step persistence; pure concentration measure. K = uniform chord;
-    // 1 = one-hot. Written by oak_meta_predict lane 0 after chord renormalization.
+    // Chord effective-K = 1 / Σ_k chord[k]² ∈ [1, K]. Independent of
+    // continuation; pure concentration measure. K = uniform chord; 1 = one-hot.
+    // Written by fused meta/predict lane 0 after chord renormalization.
     float chordEffectiveK;
+    float rrBonusMean, psiStopGapMean, terminationRate, optionDurationMean;
+    float neverUsedFeatureCount, replacementAgeMean, stateEffectiveRank;
 };
 
 // safe_w: NF-guarded weight write. Preserves prev value on non-finite — no zero-clamp, no
@@ -167,24 +159,28 @@ struct Ctx {
     uint stepCount, stateSlot;
     float rho, alphaPi, meanPrio;              // meanPrio: Tier D2 broadcast scalar, see KernelScalars.
 
-    device float *encoder, *phase, *valueW, *psi, *optPolicy, *optReward, *optTransition;
+    device float *encoder, *phase, *valueW, *psi, *optPolicy, *optReward, *optTransition, *optDuration;
     device float *observation, *observationMean, *obsSM;
     device float *state;
     device float *policyMean, *scoreGrad;
     device float *reward, *td, *tdPsi;
     device float *chord, *chordPrev;
     device float *utilFeat, *utilOpt;
+    device float *bonusW;
     device float *planAdv;
     device float *alpha, *beta, *hMeta;        // MetaOptimize L-approximation per-feature buffers.
     device float *nTdMat;                      // Dense optTransition TD targets, K*R floats.
     device float *optRewardTd;                 // Option reward-model TD targets, K floats.
+    device float *durationTd, *durationHat;     // Average-reward option duration targets/preds, K floats each.
     device float *qOption;                     // Per-option Q^k cache, K floats.
     device float *obsTraceMulti;               // Tier I1: per-obs-dim multi-timescale traces,
                                                 // (M−1)·baseO floats. Layout: trace_m[o] at offset
                                                 // m·baseO + o for m=1..M−1.
     device float *prioOpt;                     // Tier D2: per-option priority, K floats.
-    device float *prevBeta;                    // Tier H1: per-option continuation β, K floats.
+    device float *continuation;                 // RR-derived per-option continuation indicator/probability, K floats.
+    device float *replacementAgeMean;           // EMA of age at replacement, one float.
     device uint  *counters;
+    device uint  *optFeature, *featureAge, *optAge, *featureEverUsed;
     device KernelScalars *scalars;
     device KernelStats   *stats;
 };
@@ -206,6 +202,7 @@ inline Ctx make_ctx(device float *params, device float *stateArena, device uint 
     c.optPolicy     = params + cfg.pOptPolicy;
     c.optReward     = params + cfg.pOptReward;
     c.optTransition = params + cfg.pOptTransition;
+    c.optDuration   = params + cfg.pOptDuration;
 
     c.observation     = stateArena + cfg.sObservation;
     c.observationMean = stateArena + cfg.sObsMean;
@@ -220,23 +217,32 @@ inline Ctx make_ctx(device float *params, device float *stateArena, device uint 
     c.chordPrev       = stateArena + cfg.sChordPrev;
     c.utilFeat        = stateArena + cfg.sUtilFeat;
     c.utilOpt         = stateArena + cfg.sUtilOpt;
+    c.bonusW          = stateArena + cfg.sBonusW;
     c.planAdv         = stateArena + cfg.sPlanAdv;
     c.alpha           = stateArena + cfg.sAlpha;
     c.beta            = stateArena + cfg.sBeta;
     c.hMeta           = stateArena + cfg.sH;
     c.nTdMat          = stateArena + cfg.sNTdMat;
     c.optRewardTd     = stateArena + cfg.sOptRewardTd;
+    c.durationTd      = stateArena + cfg.sDurationTd;
+    c.durationHat     = stateArena + cfg.sDurationHat;
     c.qOption         = stateArena + cfg.sQOption;
     c.obsTraceMulti   = stateArena + cfg.sObsTraceMulti;
     c.prioOpt         = stateArena + cfg.sPrioOpt;
-    c.prevBeta        = stateArena + cfg.sPrevBeta;
+    c.continuation    = stateArena + cfg.sContinuation;
+    c.replacementAgeMean = stateArena + cfg.sReplacementAgeMean;
 
     c.counters = uintArena + cfg.uCounters;
+    c.optFeature = uintArena + cfg.uOptFeature;
+    c.featureAge = uintArena + cfg.uFeatureAge;
+    c.optAge = uintArena + cfg.uOptAge;
+    c.featureEverUsed = uintArena + cfg.uFeatureEverUsed;
     c.scalars = scalars; c.stats = stats;
     return c;
 }
 
 inline device float *state_at(Ctx ctx, uint slot) { return ctx.state + slot * ctx.R; }
+inline float decode_duration(float raw) { return isfinite(raw) ? max(1.0f, raw) : 1.0f; }
 
 // =================================================================================================
 // 1+2. oak_bk_encode - FUSED kernel combining oak_bk_obs (per-feature observation Welford +
@@ -246,7 +252,7 @@ inline device float *state_at(Ctx ctx, uint slot) { return ctx.state + slot * ct
 //      uses all R threads to compute one Fourier feature per thread. A single threadgroup_
 //      barrier(mem_flags::mem_device) between the phases replaces the prior host-level
 //      memoryBarrier between two separate kernel dispatches — saves 1 dispatch + 1 host
-//      barrier per step (~25-40 µs on concurrent bench).
+//      barrier per step.
 //
 //      Trace EMAs fire at structural rates 1/2^m for m=1..M-1, so the representation carries
 //      instantaneous observation plus short-to-slow traces without a host warmup or phase gate.
@@ -257,10 +263,6 @@ inline device float *state_at(Ctx ctx, uint slot) { return ctx.state + slot * ct
 //        state[feat in [R/2, R)] = sin( ... same pre-activation index as its cos partner ... )
 //      cos/sin are bounded in [−1, 1]; linear weights on top grow without cap (BWH).
 //      Encoder + phase evolve only via generate-and-test in oak_bk_admit_commit.
-//
-//      Tier C3 (recurrent self-feedback) was attempted in two forms and both regressed by
-//      ~52% on the 10×1.5M paired bench (TD double non-stationarity); encoder remains C1
-//      shape.
 //
 //      Inv-10 (bit-identical FP) preserved: same fma sequences in both phases; the NF
 //      counter aggregation uses a per-simdgroup `simd_sum` + threadgroup-memory cross-
@@ -370,7 +372,7 @@ kernel void oak_bk_encode(
     tg_currState[feat] = currFeat;
     threadgroup_barrier(mem_flags::mem_threadgroup);
 
-    // ================= PHASE 3+4: oak_meta_predict =================
+    // ================= PHASE 3+4: fused meta/predict =================
     // Meta/predict fits inside the first hardware simdgroup of this same R-thread
     // encode TG. Keeping it here removes a dispatch + host memoryBarrier while preserving
     // the same program order: encode writes curr state, then meta writes chord/rho, then
@@ -390,9 +392,22 @@ kernel void oak_bk_encode(
                 zPsi = fma(ctx.psi[basePsi + i], curr[i], zPsi);
         }
 
-        float lForMax = active ? zPsi : -FLT_MAX;
+        float vCurr0 = 0.0f;
+        if (k == 0u) for (uint i = 0u; i < ctx.R; ++i) vCurr0 = fma(ctx.valueW[i], curr[i], vCurr0);
+        float vCurr = simd_broadcast(vCurr0, 0u);
+
+        uint featIdx = active ? (ctx.optFeature[k] % ctx.R) : 0u;
+        float zStop = active
+            ? (vCurr + (ctx.bonusW[featIdx] - ctx.valueW[featIdx]) * curr[featIdx])
+            : 0.0f;
+        float cont = (active && isfinite(zPsi) && isfinite(zStop) && zPsi > zStop) ? 1.0f : 0.0f;
+        float stopGap = active && isfinite(zPsi - zStop) ? (zPsi - zStop) : 0.0f;
+        if (active) ctx.continuation[k] = cont;
+
+        float qLogit = active && isfinite(ctx.qOption[k]) ? ctx.qOption[k] : zPsi;
+        float lForMax = active ? qLogit : -FLT_MAX;
         float maxL    = simd_max(lForMax);
-        float expL    = active ? exp(zPsi - maxL) : 0.0f;
+        float expL    = active ? exp(qLogit - maxL) : 0.0f;
 
         float Zexp = 0.0f;
         for (uint kk = 0u; kk < ctx.K; ++kk) {
@@ -403,10 +418,9 @@ kernel void oak_bk_encode(
         float invZ = 1.0f / max(Zexp, FLT_MIN);
         float softK = expL * invZ;
 
-        float betaK = active ? ctx.prevBeta[k] : 0.0f;
-        betaK = clamp(betaK, 0.0f, 1.0f);
         float chordPrevK = active ? ctx.chordPrev[k] : 0.0f;
-        float chordRaw = active ? (betaK * chordPrevK + (1.0f - betaK) * softK) : 0.0f;
+        float terminatedMass = simd_sum(active ? ((1.0f - cont) * chordPrevK) : 0.0f);
+        float chordRaw = active ? (cont * chordPrevK + terminatedMass * softK) : 0.0f;
         if (!isfinite(chordRaw)) chordRaw = 0.0f;
         float chordSum = simd_sum(chordRaw);
         float chordK = chordRaw / max(chordSum, FLT_MIN);
@@ -417,17 +431,24 @@ kernel void oak_bk_encode(
 
         float chordK_norm = chordRaw / max(chordSum, FLT_MIN);
         float chordSqSum  = simd_sum(chordK_norm * chordK_norm);
+        float stopGapSum  = simd_sum(stopGap);
+        float termSum     = simd_sum(active ? (1.0f - cont) : 0.0f);
         if (k == 0u) {
             float effK = 1.0f / max(chordSqSum, FLT_MIN);
             ctx.stats->chordEffectiveK =
                 isfinite(effK) ? effK : ctx.stats->chordEffectiveK;
+            float invK = 1.0f / float(max(ctx.K, 1u));
+            float gapMean = stopGapSum * invK;
+            float termRate = termSum * invK;
+            ctx.stats->psiStopGapMean = isfinite(gapMean) ? gapMean : ctx.stats->psiStopGapMean;
+            ctx.stats->terminationRate = isfinite(termRate) ? termRate : ctx.stats->terminationRate;
         }
 
         if (k == 0u) {
             float ss = 0.0f, gg = 0.0f;
             for (uint i = 0u; i < ctx.R; ++i) ss = fma(curr[i], curr[i], ss);
             for (uint p = 0u; p < ctx.D; ++p) gg = fma(ctx.scoreGrad[p], ctx.scoreGrad[p], gg);
-            ctx.scalars->alphaPi = 1.0f / (float(max(ctx.baseO, 1u)) + ss * gg);
+            ctx.scalars->alphaPi = 1.0f / (float(max(ctx.baseO, 1u)) + ss * gg * chordSqSum);
 
             float invT2 = track_rate(ctx.stepCount, ctx.baseO);
             ctx.scalars->rho += invT2 * (ctx.reward[0] - ctx.rho);
@@ -437,21 +458,15 @@ kernel void oak_bk_encode(
 
         float reward_c = ctx.reward[0] - ctx.scalars->rho;
         if (k == 0u) {
-            float vPrev = 0.0f, vNext = 0.0f;
-            for (uint i = 0u; i < ctx.R; ++i) {
-                vPrev = fma(ctx.valueW[i], prev[i], vPrev);
-                vNext = fma(ctx.valueW[i], curr[i], vNext);
-            }
-            float delta = reward_c + vNext - vPrev;
+            float vPrev = 0.0f;
+            for (uint i = 0u; i < ctx.R; ++i) vPrev = fma(ctx.valueW[i], prev[i], vPrev);
+            float delta = reward_c + vCurr - vPrev;
             if (!isfinite(delta)) { ctx.counters[OAK_CNT_LEARN_NF] += 1u; delta = 0.0f; }
             ctx.td[0] = delta;
         }
 
         uint nfLane = 0u;
         if (active) {
-            float beta_cap = 1.0f - 1.0f / float(max(ctx.R, 1u));
-            float a0       = 1.0f / float(max(ctx.baseO, 1u));
-            float beta_k   = beta_cap * a0 / (a0 + ctx.utilOpt[k]);
             uint  basePsi  = k * ctx.R;
             float psiPrev = 0.0f;
             float psiNext = zPsi;
@@ -459,201 +474,13 @@ kernel void oak_bk_encode(
                 float w = ctx.psi[basePsi + i];
                 psiPrev = fma(w, prev[i], psiPrev);
             }
-            float dk = reward_c + (1.0f - beta_k) * curr[k] + beta_k * psiNext - psiPrev;
+            float dk = reward_c + cont * psiNext + (1.0f - cont) * zStop - psiPrev;
             if (!isfinite(dk)) { dk = 0.0f; nfLane = 1u; }
             ctx.tdPsi[k] = dk;
         }
         uint nfTotal = simd_sum(nfLane);
         if (k == 0u && nfTotal > 0u) ctx.counters[OAK_CNT_TDPSI_NF] += nfTotal;
     }
-}
-
-// =================================================================================================
-// 3+4. oak_meta_predict - FUSED kernel combining oak_meta (chord keyboard) and oak_predict
-//      (multi-GVF TD). Both kernels are K-thread single-simdgroup with a clear dependency
-//      chain: predict reads ρ̄ (which meta updates). Fusing eliminates 1 kernel dispatch
-//      and 1 host-level memoryBarrier per step (~25-40 µs/step on concurrent bench), at
-//      the cost of one intra-kernel simdgroup_barrier (which is essentially free on Apple
-//      GPU where lanes execute in lockstep).
-//
-//      Phase 1 (oak_meta):
-//        * chord softmax (Plan option keyboard, Design A): chord[k] ← softmax_k(ψ(s'))
-//        * alphaPi = 1/(baseO + ‖s'‖²·‖∇log π‖²)   (Kim arXiv:2510.06149)
-//        * ρ̄ EMA                                  (Reward Centering arXiv:2405.09999)
-//
-//      Phase 2 (oak_predict):
-//        * Main TD on lane 0: δ = (r − ρ̄) + V(s') − V(s)   (ρ̄ uses the POST-meta value)
-//        * Per-option ψ-TD on lane k: δ_k = (r − ρ̄) + (1−β_k)·curr[k] + β_k·ψ_k(s') − ψ_k(s)
-//          with adaptive β_k = (1 − 1/R)·α₀/(α₀ + utilOpt[k]), α₀ = 1/baseO.
-//
-//      Dependency carried across the barrier: phase 1 lane 0 updates `ctx.scalars->rho`;
-//      phase 2 reads the updated ρ̄ by dereferencing `ctx.scalars->rho` (NOT the cached
-//      `ctx.rho`, which was snapshotted pre-phase-1 in make_ctx). The
-//      `simdgroup_barrier(mem_flags::mem_device)` fence guarantees lane 0's device-memory
-//      write is visible to all other lanes after the barrier.
-//
-//      Inv-10 (bit-identical FP) preserved: the fma sequences in both phases are identical
-//      to the pre-fusion kernels, and the only difference is that predict reads the just-
-//      updated ρ̄ from scalars directly instead of from a kernel-start Ctx snapshot.
-//      Both kernels previously executed as separate launches with a host memoryBarrier in
-//      between, which produces the same program order (phase 1 writes → phase 2 reads).
-// =================================================================================================
-kernel void oak_meta_predict(
-    device float         *params      [[buffer(0)]],
-    device float         *stateArena  [[buffer(1)]],
-    device uint          *uintArena   [[buffer(2)]],
-    device KernelScalars *scalars     [[buffer(3)]],
-    device KernelStats   *stats       [[buffer(4)]],
-    constant KernelConfig &cfg        [[buffer(5)]],
-    uint k [[thread_position_in_grid]])
-{
-    Ctx ctx = make_ctx(params, stateArena, uintArena, scalars, stats, cfg);
-    bool active = (k < ctx.K);
-    device const float *prev = state_at(ctx, ctx.stateSlot);
-    device const float *curr = state_at(ctx, 1u - ctx.stateSlot);
-
-    // ================= PHASE 1: oak_meta =================
-
-    // Save chordPrev and compute the per-option ψ logit in one R-wide pass over curr.
-    float zPsi = 0.0f;
-    if (active) {
-        ctx.chordPrev[k] = ctx.chord[k];
-        uint basePsi = k * ctx.R;
-        for (uint i = 0u; i < ctx.R; ++i)
-            zPsi = fma(ctx.psi[basePsi + i], curr[i], zPsi);
-    }
-
-    // softmax max — `simd_max` is associative for float max; bit-identical to sequential.
-    float lForMax = active ? zPsi : -FLT_MAX;
-    float maxL    = simd_max(lForMax);
-    float expL    = active ? exp(zPsi - maxL) : 0.0f;
-
-    // softmax denominator — lane 0 accumulates in original `for k=0..K-1` order via
-    // simd_shuffle, then broadcasts. ALL lanes must call the shuffle (Metal spec: shuffle
-    // result is undefined unless both source and destination lanes are active in the same
-    // control flow path), so the loop runs uniformly and only the accumulator is gated.
-    float Zexp = 0.0f;
-    for (uint kk = 0u; kk < ctx.K; ++kk) {
-        float v = simd_shuffle(expL, kk);
-        if (k == 0u) Zexp += v;
-    }
-    Zexp = simd_broadcast(Zexp, 0u);
-    float invZ = 1.0f / max(Zexp, FLT_MIN);
-    float softK = expL * invZ;       // fresh softmax "intent" for option k this step.
-
-    // Tier H1 (Plan Step 10 STOMP multi-step options) — chord hysteresis.
-    // β^k = prevBeta[k] ∈ [0, 1] is last step's optTransition confidence (written by
-    // oak_plan at end of step t-1). Per-option lerp between the just-saved chordPrev
-    // and the fresh softmax "intent":
-    //   chord_k_raw = β^k · chordPrev[k] + (1 − β^k) · softK
-    // Fresh random optTransition → β ≈ 0 → chord = softK (1-step behavior, safe fallback).
-    // Converged optTransition → β → 1 → chord ≈ chordPrev (multi-step persistence).
-    // NF-safe: β clamped to [0,1] at read; output clamped at write via safe_w-style preserve.
-    //
-    // Renormalize via simd_sum across K lanes so Σ chord = 1 (required for downstream
-    // heads that treat chord as a probability distribution over options). This is a NEW
-    // reduction (no prior bit-id baseline applies per Inv-10; Tier H1 is algorithmic, not
-    // perf-opt, so FP-reorder is allowed without per-seed validation).
-    float betaK = active ? ctx.prevBeta[k] : 0.0f;
-    betaK = clamp(betaK, 0.0f, 1.0f);
-    float chordPrevK = active ? ctx.chordPrev[k] : 0.0f;
-    float chordRaw = active ? (betaK * chordPrevK + (1.0f - betaK) * softK) : 0.0f;
-    if (!isfinite(chordRaw)) chordRaw = 0.0f;
-    float chordSum = simd_sum(chordRaw);
-    float chordK = chordRaw / max(chordSum, FLT_MIN);
-    if (active) {
-        float oldChord = ctx.chord[k];
-        ctx.chord[k] = isfinite(chordK) ? chordK : oldChord;
-    }
-
-    // Tier H1 diagnostic: chord effective-K = 1 / Σ_k chord[k]² (chord concentration).
-    // Range [1, K]: K = uniform chord (all K options equally weighted, mechanism inactive
-    // or chord-flat); 1 = one-hot chord (single option fully dominant); intermediate =
-    // moderate concentration. Values near K indicate no concentration; values near 1
-    // indicate a single dominant option.
-    //
-    // Replaces an earlier diagnostic Σ chord·chordPrev which was confounded by chord
-    // magnitude (uniform chord always returned 1/K regardless of whether β-hysteresis
-    // was active or not). chordEffectiveK is a pure concentration measure independent
-    // of step-to-step persistence; combined with the standard chatter signal it lets us
-    // distinguish "mechanism inactive (β=0)" from "mechanism active but chord uniform".
-    //
-    // Computed in the same simd_sum framework: chord_sq = chord[k]² summed across K lanes.
-    // chord_sq uses the POST-renormalization chord[k] = chordRaw[k]/chordSum, so we use
-    // (chordRaw/chordSum)². Lane 0 inverts and writes (NF-safe clamp-at-write).
-    float chordK_norm = chordRaw / max(chordSum, FLT_MIN);
-    float chordSqSum  = simd_sum(chordK_norm * chordK_norm);
-    if (k == 0u) {
-        float effK = 1.0f / max(chordSqSum, FLT_MIN);
-        ctx.stats->chordEffectiveK =
-            isfinite(effK) ? effK : ctx.stats->chordEffectiveK;
-    }
-
-    // Scalar updates (single-threaded; small) — αPi and ρ̄. Done by lane 0 after the
-    // softmax broadcast so the work doesn't interleave with the reduction.
-    if (k == 0u) {
-        float ss = 0.0f, gg = 0.0f;
-        for (uint i = 0u; i < ctx.R; ++i) ss = fma(curr[i], curr[i], ss);
-        for (uint p = 0u; p < ctx.D; ++p) gg = fma(ctx.scoreGrad[p], ctx.scoreGrad[p], gg);
-        ctx.scalars->alphaPi = 1.0f / (float(max(ctx.baseO, 1u)) + ss * gg);
-
-        float invT = track_rate(ctx.stepCount, ctx.baseO);
-        ctx.scalars->rho += invT * (ctx.reward[0] - ctx.rho);
-    }
-
-    // ================= BARRIER (device memory fence) =================
-    // Lane 0's write to scalars->rho must be visible to all other lanes before phase 2
-    // reads it. simdgroup_barrier with mem_device scope is the minimal fence for this;
-    // within a single hardware simdgroup it is cheap because lanes execute lockstep.
-    simdgroup_barrier(mem_flags::mem_device);
-
-    // ================= PHASE 2: oak_predict =================
-    // Re-read ρ̄ from the scalars buffer (lane 0 just updated it in phase 1). Using
-    // ctx.rho here would read the kernel-start snapshot, NOT the meta-updated value,
-    // and would break bit-id with the pre-fusion two-kernel order.
-    float reward_c = ctx.reward[0] - ctx.scalars->rho;
-
-    // Main TD on lane 0. Cheap (2R FMA on the value head, single output).
-    if (k == 0u) {
-        float vPrev = 0.0f, vNext = 0.0f;
-        for (uint i = 0u; i < ctx.R; ++i) {
-            vPrev = fma(ctx.valueW[i], prev[i], vPrev);
-            vNext = fma(ctx.valueW[i], curr[i], vNext);
-        }
-        float delta = reward_c + vNext - vPrev;
-        if (!isfinite(delta)) { ctx.counters[OAK_CNT_LEARN_NF] += 1u; delta = 0.0f; }
-        ctx.td[0] = delta;
-    }
-
-    // Per-option subtask TD on lane k. Inactive lanes contribute 0 to the NF reduction.
-    // Adaptive β_k = (1 − 1/R)·α₀/(α₀ + utilOpt[k]), α₀ = 1/baseO. utilOpt[k] is the EMA
-    // of |tdPsi[k]|² from oak_post_learn (Kim implicit-step self-bound). Initialized
-    // at utilOpt[k] = R so β_k starts ≈ 0 (myopic, safe at random init); grows toward
-    // the cap (1 − 1/R) as ψ stabilizes. If |tdPsi|² spikes (divergence threat), β
-    // automatically chokes. This is a STABILITY-adaptive β, not a Plan Step 10 STOMP
-    // termination β — Tier C4 attempted structural termination β = (1+curr[k])/2 but
-    // regressed -30% aggregate lift at 1.5M (options went myopic without bootstrap,
-    // chatter collapsed to 0.02). See docs/roadmap.md Tier C4 for the negative-result
-    // writeup. Plan Step 10 STOMP termination is structurally incompatible with the
-    // current ψ-TD formulation at these scales; β stays stability-adaptive.
-    uint nfLane = 0u;
-    if (active) {
-        float beta_cap = 1.0f - 1.0f / float(max(ctx.R, 1u));
-        float a0       = 1.0f / float(max(ctx.baseO, 1u));
-        float beta_k   = beta_cap * a0 / (a0 + ctx.utilOpt[k]);
-        uint  basePsi  = k * ctx.R;
-        float psiPrev = 0.0f;
-        float psiNext = zPsi;
-        for (uint i = 0u; i < ctx.R; ++i) {
-            float w = ctx.psi[basePsi + i];
-            psiPrev = fma(w, prev[i], psiPrev);
-        }
-        float dk = reward_c + (1.0f - beta_k) * curr[k] + beta_k * psiNext - psiPrev;
-        if (!isfinite(dk)) { dk = 0.0f; nfLane = 1u; }
-        ctx.tdPsi[k] = dk;
-    }
-    uint nfTotal = simd_sum(nfLane);
-    if (k == 0u && nfTotal > 0u) ctx.counters[OAK_CNT_TDPSI_NF] += nfTotal;
 }
 
 // =================================================================================================
@@ -664,7 +491,7 @@ kernel void oak_meta_predict(
 //    K·R-thread parallel: K threadgroups, R threads each (one TG per option k, one thread
 //    per output dim j). Each (k, j) thread computes one row of the dense option transition,
 //    fuses the curr and prev passes into a single R-load over `optTransition[k][j][:R]`,
-//    and writes nTdMat[k·R + j] = curr[j] − n̂^k_j(prev) directly. Each thread stores its
+//    and writes nTdMat[k·R + j] = target_j − n̂^k_j(prev) directly. Each thread stores its
 //    `nHatCurr` into threadgroup memory AND its `n_td_sq = n_td · n_td` into a parallel
 //    threadgroup array — both writes go BEFORE the same single barrier, zero added barriers.
 //
@@ -672,10 +499,6 @@ kernel void oak_meta_predict(
 //      vHat^k     = Σ_j valueW[j] · nHatCurr_j      (strict j=0..R-1 fma order, bit-identical)
 //      ntdSqSum^k = Σ_j n_td_j^2                    (Tier D2 priority L2² of model TD error)
 //      rHat^k     = Σ_i optReward[k][i] · curr[i]   (separate i-loop, R fma)
-//    The two j-loop accumulators are independent fma chains → Apple GPU's ILP scheduler runs
-//    them in parallel, so the prio addition adds ~0 latency (lane 0's R fma chain cycle count
-//    stays ~R cycles instead of 2R).
-//
 //    Lane 0 then writes:
 //      qOption[k]  = isfinite(Q) ? Q : -FLT_MAX,                      (existing)
 //      prioOpt[k]  = (isfinite(ntdSqSum) && ntdSqSum > 0)              (Tier D2 NEW)
@@ -708,6 +531,7 @@ kernel void oak_plan(
     device const float *curr = state_at(ctx, 1u - ctx.stateSlot);
 
     bool active = (j < ctx.R);
+    float contK = clamp(ctx.continuation[k], 0.0f, 1.0f);
 
     // Per-thread dense-transition row. Same R-load fuses curr and prev passes; each thread
     // also writes its own slot in nTdMat (no contention). Stores nHatCurr (not the fma'd
@@ -725,7 +549,8 @@ kernel void oak_plan(
             nHatCurrLocal = fma(w, curr[i], nHatCurrLocal);
             nHatPrev      = fma(w, prev[i], nHatPrev);
         }
-        float n_td = curr[j] - nHatPrev;
+        float target = (1.0f - contK) * curr[j] + contK * nHatCurrLocal;
+        float n_td = target - nHatPrev;
         ctx.nTdMat[k * ctx.R + j] = n_td;
         nTdSqLocal = n_td * n_td;     // Tier D2: in-register, free with ILP.
     }
@@ -753,13 +578,28 @@ kernel void oak_plan(
         }
         float rHat = 0.0f;
         float rHatPrev = 0.0f;
+        float lHatRaw = 0.0f;
+        float lHatPrevRaw = 0.0f;
         for (uint i = 0u; i < ctx.R; ++i) {
-            float w = ctx.optReward[k * ctx.R + i];
-            rHat = fma(w, curr[i], rHat);
+            uint idx = k * ctx.R + i;
+            float w = ctx.optReward[idx];
+            rHat     = fma(w, curr[i], rHat);
             rHatPrev = fma(w, prev[i], rHatPrev);
+            float dw = ctx.optDuration[idx];
+            lHatRaw     = fma(dw, curr[i], lHatRaw);
+            lHatPrevRaw = fma(dw, prev[i], lHatPrevRaw);
         }
-        ctx.optRewardTd[k] = ctx.reward[0] - rHatPrev;
-        float Q = rHat + vHat;
+        float lHat = decode_duration(lHatRaw);
+        float lHatPrev = decode_duration(lHatPrevRaw);
+        float rTd = ctx.reward[0] + contK * rHat - rHatPrev;
+        float dTd = 1.0f + contK * lHat - lHatPrev;
+        float rTdSafe = isfinite(rTd) ? rTd : 0.0f;
+        float dTdSafe = isfinite(dTd) ? dTd : 0.0f;
+        ctx.optRewardTd[k] = rTdSafe;
+        ctx.durationTd[k] = dTdSafe;
+        ctx.durationHat[k] = lHat;
+
+        float Q = rHat - ctx.scalars->rho * lHat + vHat;
         bool finite = isfinite(Q);
         ctx.qOption[k] = finite ? Q : -FLT_MAX;
         if (!finite) ctx.counters[OAK_CNT_PLAN_NF] += 1u;
@@ -768,20 +608,9 @@ kernel void oak_plan(
         // a dirty option becomes lowest-priority (skipped by the Head 4 gate) — failure
         // isolation, the rest of the K options learn normally. Plan-orthodox: prio depends
         // only on agent-internal signals (chord, nTdMat) — no env-knowledge, no tunable.
-        bool prioFinite = isfinite(ntdSqSum) && (ntdSqSum > 0.0f);
-        ctx.prioOpt[k]  = prioFinite ? (ctx.chord[k] * sqrt(ntdSqSum)) : 0.0f;
-
-        // Tier H1: per-option continuation probability β^k = 1/(1 + MSE^k) ∈ (0, 1] where
-        // MSE^k = ntdSqSum[k] / R is the PER-DIMENSION model-TD-error (not raw L2). The /R
-        // scaling is structural (R = representation size, already used in MetaOptimize's
-        // η = 1/(R·baseO)) — it matches the natural scale of ntdSqSum across the learning
-        // trajectory: random features give Var(n_td_j)~1 so MSE~1, β~0.5; well-learned
-        // give MSE→0, β→1. Without /R, β is stuck near 1/K = no persistence (verified
-        // empirically in 10×1.5M paired bench: persistence stayed at 1/K throughout).
-        // NF-safe: non-finite ntdSqSum → β = 0 (option terminates, safe default).
-        float invR    = 1.0f / float(max(ctx.R, 1u));
-        float betaNew = isfinite(ntdSqSum) ? (1.0f / (1.0f + ntdSqSum * invR)) : 0.0f;
-        ctx.prevBeta[k] = isfinite(betaNew) ? betaNew : 0.0f;
+        float modelErr = ntdSqSum + rTdSafe * rTdSafe + dTdSafe * dTdSafe;
+        bool prioFinite = isfinite(modelErr) && (modelErr > 0.0f);
+        ctx.prioOpt[k]  = prioFinite ? (ctx.chord[k] * sqrt(modelErr)) : 0.0f;
     }
 }
 
@@ -817,6 +646,9 @@ kernel void oak_plan_reduce(
     float prio    = active ? ctx.prioOpt[k] : 0.0f;
     if (!isfinite(prio)) prio = 0.0f;
     float prioSum = simd_sum(prio);
+    float dur = active ? ctx.durationHat[k] : 0.0f;
+    if (!isfinite(dur)) dur = 0.0f;
+    float durSum = simd_sum(dur);
 
     if (k == 0u) {
         device const float *curr = state_at(ctx, 1u - ctx.stateSlot);
@@ -834,10 +666,12 @@ kernel void oak_plan_reduce(
         float invK = 1.0f / float(max(ctx.K, 1u));
         float meanPrio = prioSum * invK;
         ctx.scalars->meanPrio = isfinite(meanPrio) ? meanPrio : 0.0f;
+        float durMean = durSum * invK;
+        ctx.stats->optionDurationMean = isfinite(durMean) ? durMean : ctx.stats->optionDurationMean;
     }
 }
 
-// 6. oak_learn_heads - 1-step TD updates on 5 trainable linear heads.
+// 6. oak_learn_heads - 1-step TD updates on 6 trainable linear heads.
 //      0: valueW[R]              -> alpha[i] * (td + planAdv) * prev[i]   (planAdv added HERE ONLY)
 //      1: psi[K*R]               -> alpha[i] * tdPsi[k] * prev[i] * max(chordPrev[k], 1/K)
 //                                   Tier D3 (Plan Step 10 "conditional on the option, off-policy"):
@@ -845,10 +679,11 @@ kernel void oak_plan_reduce(
 //                                   its own activation instead of converging to the chord mean.
 //                                   1/K floor prevents self-reinforcing starvation when chord[k]→0.
 //      2: optPolicy[K*D*R]       -> alphaPi * relevance(i) * td * scoreGrad[d] * prev[i] * chordPrev[k]
-//      3: optReward[K*R]         -> alpha[i] * (reward - r_hat^k(prev)) * prev[i] * chordPrev[k]
+//      3: optReward[K*R]         -> alpha[i] * optRewardTd[k] * prev[i] * chordPrev[k]
 //      4: optTransition[K*R*R]   -> alpha[i] * nTdMat[k*R+j] * prev[i] * chordPrev[k]
 //                                   (DENSE: n_hat^k_j(s) = sum_i w^k_{j,i} * s[i], RR-Subtasks eq. 17;
-//                                    n_td precomputed by oak_plan into nTdMat[k*R+j] = curr[j] - n_hat^k_j(prev))
+//                                    n_td uses the RR stopping-aware recursive target from oak_plan)
+//      5: optDuration[K*R]       -> alpha[i] * durationTd[k] * prev[i] * chordPrev[k]
 // =================================================================================================
 kernel void oak_learn_heads(
     device float         *params      [[buffer(0)]],
@@ -865,7 +700,8 @@ kernel void oak_learn_heads(
     uint nPi  = ctx.K * ctx.D * ctx.R;
     uint nOR  = ctx.K * ctx.R;
     uint nOT  = ctx.K * ctx.R * ctx.R;   // dense: K*R^2 (RR-Subtasks eq. 17 full form).
-    if (gid >= nVal + nPsi + nPi + nOR + nOT) return;
+    uint nOD  = ctx.K * ctx.R;
+    if (gid >= nVal + nPsi + nPi + nOR + nOT + nOD) return;
 
     // Head 4 (dense optTransition) reads its TD targets from ctx.nTdMat (precomputed in
     // oak_plan), so we no longer need `curr` in this kernel. `prev` still drives the gradient
@@ -913,7 +749,7 @@ kernel void oak_learn_heads(
         ctx.optPolicy[id] = safe_w(w, w + ctx.alphaPi * relevance * td * grad);
         return;
     }
-    if (gid < nVal + nPsi + nPi + nOR) {                       // Head 3: optReward (eq. 17, beta=1)
+    if (gid < nVal + nPsi + nPi + nOR) {                       // Head 3: option reward model
         uint id = gid - nVal - nPsi - nPi;
         uint k = id / ctx.R, i = id % ctx.R;
         float r_td = ctx.optRewardTd[k];
@@ -924,7 +760,7 @@ kernel void oak_learn_heads(
     }
     if (gid < nVal + nPsi + nPi + nOR + nOT) {                 // Head 4: dense optTransition
         // (RR-Subtasks eq. 17). Per-weight gradient:
-        //   ∂ ½(curr[j] − n_hat^k_j(prev))² / ∂ w^k_{j,i} = -(curr[j] − n_hat^k_j(prev)) · prev[i]
+        //   ∂ ½(target_j − n_hat^k_j(prev))² / ∂ w^k_{j,i} = -n_td_j · prev[i]
         // n_td precomputed into ctx.nTdMat[k*R + j] by oak_plan (one shared inner sum per (k, j)
         // serves R weights along the i axis). chordPrev[k] is the on-chord weight (importance
         // ratio per RR-Subtasks eq. 17). α[i] (not α[j]) because the gradient direction involves
@@ -950,6 +786,14 @@ kernel void oak_learn_heads(
         ctx.optTransition[id] = safe_w(w, w + ctx.alpha[i] * n_td * grad);
         return;
     }
+    if (gid < nVal + nPsi + nPi + nOR + nOT + nOD) {          // Head 5: optDuration
+        uint id = gid - nVal - nPsi - nPi - nOR - nOT;
+        uint k = id / ctx.R, i = id % ctx.R;
+        float grad = ctx.chordPrev[k] * prev[i];
+        float w = ctx.optDuration[id];
+        ctx.optDuration[id] = safe_w(w, w + ctx.alpha[i] * ctx.durationTd[k] * grad);
+        return;
+    }
 }
 
 inline void oak_bk_admit_commit_body(
@@ -966,7 +810,10 @@ inline void oak_bk_admit_commit_body(
     threadgroup uint &stepCount_tg,
     threadgroup uint &preA_tg,
     threadgroup uint &preB_tg,
-    threadgroup uint &compose_tg);
+    threadgroup uint &compose_tg,
+    threadgroup uint &candidateI_tg,
+    threadgroup uint &replaceOpt_tg,
+    threadgroup uint &replaceFeat_tg);
 
 // =================================================================================================
 // 8. oak_post_learn - three concurrent passes after learn_heads writes the new weights:
@@ -1050,6 +897,8 @@ kernel void oak_post_learn(
         ctx.hMeta[i] = gamma * hOld + dw;
         ctx.beta[i]  = newBeta;
         ctx.alpha[i] = exp(newBeta);
+        float vw = ctx.valueW[i];
+        if (isfinite(vw) && vw > ctx.bonusW[i]) ctx.bonusW[i] = vw;
     } else if (tid >= ctx.R && tid < ctx.R + ctx.K) {
         uint k = tid - ctx.R;
         float dk = ctx.tdPsi[k];
@@ -1085,19 +934,7 @@ kernel void oak_post_learn(
         }
     }
 
-    // Surface post-learn diagnostics before the in-kernel G&T tail runs. The tail still runs
-    // every step before the next encode, so this kernel reports the counters as they will be
-    // after this step's tail.
     threadgroup_barrier(mem_flags::mem_device | mem_flags::mem_threadgroup);
-
-    if (tid == 0u) {
-        ctx.stats->encodeNonFiniteCount    = float(ctx.counters[OAK_CNT_OBS_NF]);
-        ctx.stats->learnNonFiniteCount     = float(ctx.counters[OAK_CNT_LEARN_NF]);
-        ctx.stats->planNonFiniteCount      = float(ctx.counters[OAK_CNT_PLAN_NF]);
-        ctx.stats->tdPsiNonFiniteCount     = float(ctx.counters[OAK_CNT_TDPSI_NF]);
-        ctx.stats->oakOptionReinitCount    = float(ctx.counters[OAK_CNT_REINIT_OPT] + 1u);
-        ctx.stats->oakFeatureReinitCount   = float(ctx.counters[OAK_CNT_REINIT_FEAT] + 1u);
-    }
 
     threadgroup uint  worstK_tg    = 0u;
     threadgroup uint  worstI_tg    = 0u;
@@ -1105,14 +942,17 @@ kernel void oak_post_learn(
     threadgroup uint  preA_tg      = 0u;
     threadgroup uint  preB_tg      = 0u;
     threadgroup uint  compose_tg   = 0u;
+    threadgroup uint  candidateI_tg = 0u;
+    threadgroup uint  replaceOpt_tg = 0u;
+    threadgroup uint  replaceFeat_tg = 0u;
     oak_bk_admit_commit_body(params, stateArena, uintArena, scalars, stats, cfg, tid, tgW,
                              worstK_tg, worstI_tg, stepCount_tg, preA_tg, preB_tg,
-                             compose_tg);
+                             compose_tg, candidateI_tg, replaceOpt_tg, replaceFeat_tg);
 }
 
 // =================================================================================================
-// 10. oak_bk_admit_commit - Oak feedback: generate-and-test reinit of worst-utility option AND
-//     worst-utility feature each step (Plan Step 11 remove-replace + Step 2 generate-and-test).
+// 10. oak_bk_admit_commit - Oak feedback: every-step assessment plus age-gated remove/replace
+//     for option bundles and unused feature candidates (Plan Step 11 + Step 2 generate-and-test).
 //
 //     Single threadgroup, multi-thread:
 //       Phase 1 (lane 0):  find worstK + worstI via linear scan; sample two parent
@@ -1148,26 +988,97 @@ inline void oak_bk_admit_commit_body(
     threadgroup uint &stepCount_tg,
     threadgroup uint &preA_tg,
     threadgroup uint &preB_tg,
-    threadgroup uint &compose_tg)
+    threadgroup uint &compose_tg,
+    threadgroup uint &candidateI_tg,
+    threadgroup uint &replaceOpt_tg,
+    threadgroup uint &replaceFeat_tg)
 {
     Ctx ctx = make_ctx(params, stateArena, uintArena, scalars, stats, cfg);
 
-    // Phase 1: lane 0 picks worsts, samples K2 parent rows, and bumps cumulative counters.
-    // Capture stepCount BEFORE the post-step increment so the parallel reseed below uses the
-    // same hash key as the prior single-threaded kernel.
+    // Phase 1: lane 0 ages the registries, chooses eligible replacements, and samples
+    // K2 parent rows only if a feature row is actually being replaced.
     if (tid == 0u) {
-        uint wK = 0u; float wUO = FLT_MAX;
-        for (uint k = 0u; k < ctx.K; ++k)
-            if (ctx.utilOpt[k] < wUO) { wUO = ctx.utilOpt[k]; wK = k; }
-        worstK_tg = wK;
-        uint wI = 0u; float wUF = FLT_MAX;
-        for (uint i = 0u; i < ctx.R; ++i)
-            if (ctx.utilFeat[i] < wUF) { wUF = ctx.utilFeat[i]; wI = i; }
-        worstI_tg = wI;
         uint stepC = ctx.stepCount;
         stepCount_tg = stepC;
-
         uint halfR = ctx.R >> 1u;
+
+        for (uint i = 0u; i < ctx.R; ++i) if (ctx.featureAge[i] < 0xffffffffu) ctx.featureAge[i] += 1u;
+        for (uint k = 0u; k < ctx.K; ++k) if (ctx.optAge[k] < 0xffffffffu) ctx.optAge[k] += 1u;
+
+        float admitRate = 1.0f / float(max(ctx.R, 1u));
+        uint tryOpt = (hash_uniform(stepC, ctx.R, 0x51f15eedu) < admitRate) ? 1u : 0u;
+        uint tryFeat = (hash_uniform(stepC, ctx.R, 0xa17c9e3du) < admitRate) ? 1u : 0u;
+
+        uint wK = 0u, replaceOpt = 0u;
+        float worstOptScore = FLT_MAX;
+        if (tryOpt != 0u) {
+            for (uint k = 0u; k < ctx.K; ++k) {
+                if (ctx.optAge[k] < ctx.R) continue;
+                float s = ctx.utilOpt[k] + ctx.prioOpt[k];
+                if (!isfinite(s)) s = -FLT_MAX;
+                if (s < worstOptScore) { worstOptScore = s; wK = k; replaceOpt = 1u; }
+            }
+        }
+
+        uint candidateI = replaceOpt ? (ctx.optFeature[wK] % ctx.R) : 0u;
+        if (replaceOpt != 0u) {
+            float bestFresh = -FLT_MAX;
+            uint haveFresh = 0u;
+            for (uint i = 0u; i < ctx.R; ++i) {
+                bool assigned = false;
+                for (uint k = 0u; k < ctx.K; ++k) assigned = assigned || ((ctx.optFeature[k] % ctx.R) == i);
+                if (assigned || ctx.featureAge[i] < ctx.R || ctx.featureEverUsed[i] != 0u) continue;
+                float u = ctx.utilFeat[i];
+                if (isfinite(u) && u > bestFresh) { bestFresh = u; candidateI = i; haveFresh = 1u; }
+            }
+            if (haveFresh == 0u) {
+                for (uint i = 0u; i < ctx.R; ++i) {
+                    bool assigned = false;
+                    for (uint k = 0u; k < ctx.K; ++k) assigned = assigned || ((ctx.optFeature[k] % ctx.R) == i);
+                    if (assigned || ctx.featureAge[i] < ctx.R) continue;
+                    float u = ctx.utilFeat[i];
+                    if (isfinite(u) && u > bestFresh) { bestFresh = u; candidateI = i; }
+                }
+            }
+        }
+
+        uint wI = 0u, replaceFeat = 0u;
+        float worstPair = FLT_MAX;
+        if (tryFeat != 0u) {
+            for (uint p = 0u; p < halfR; ++p) {
+                bool pairAssigned = false;
+                for (uint k = 0u; k < ctx.K; ++k) {
+                    uint of = ctx.optFeature[k] % ctx.R;
+                    pairAssigned = pairAssigned || (of == p) || (of == p + halfR);
+                }
+                uint candPre = (candidateI < halfR) ? candidateI : candidateI - halfR;
+                if (pairAssigned || (replaceOpt != 0u && p == candPre)) continue;
+                if (ctx.featureAge[p] < ctx.R && ctx.featureAge[p + halfR] < ctx.R) continue;
+                float pairU = ctx.utilFeat[p] + ctx.utilFeat[p + halfR];
+                if (!isfinite(pairU)) pairU = -FLT_MAX;
+                if (pairU < worstPair) {
+                    worstPair = pairU;
+                    wI = (ctx.utilFeat[p] <= ctx.utilFeat[p + halfR]) ? p : p + halfR;
+                    replaceFeat = 1u;
+                }
+            }
+        }
+
+        float ageSum = 0.0f;
+        float ageN = 0.0f;
+        if (replaceOpt != 0u) { ageSum += float(ctx.optAge[wK]); ageN += 1.0f; }
+        if (replaceFeat != 0u) { ageSum += float(ctx.featureAge[wI]); ageN += 1.0f; }
+        if (ageN > 0.0f) {
+            float r = track_rate(stepC, ctx.R);
+            ctx.replacementAgeMean[0] += r * ((ageSum / ageN) - ctx.replacementAgeMean[0]);
+        }
+
+        worstK_tg = wK;
+        worstI_tg = wI;
+        candidateI_tg = candidateI;
+        replaceOpt_tg = replaceOpt;
+        replaceFeat_tg = replaceFeat;
+
         uint preTarget = (wI < halfR) ? wI : wI - halfR;
         uint preA = 0u;
         uint preB = 0u;
@@ -1175,46 +1086,48 @@ inline void oak_bk_admit_commit_body(
         float totalPairUtil = 0.0f;
         uint positiveParents = 0u;
 
-        for (uint p = 0u; p < halfR; ++p) {
-            if (p == preTarget) continue;
-            float paired = ctx.utilFeat[p] + ctx.utilFeat[p + halfR];
-            if (isfinite(paired) && paired > 0.0f) {
-                totalPairUtil += paired;
-                positiveParents += 1u;
-            }
-        }
-
-        if (positiveParents >= 2u && isfinite(totalPairUtil) && totalPairUtil > 0.0f) {
-            float uA = hash_uniform(stepC, preTarget, 0x6b325541u) * totalPairUtil;
-            uint haveA = 0u;
-            float pairUtilA = 0.0f;
-            float runningA = 0.0f;
+        if (replaceFeat != 0u) {
             for (uint p = 0u; p < halfR; ++p) {
                 if (p == preTarget) continue;
                 float paired = ctx.utilFeat[p] + ctx.utilFeat[p + halfR];
-                if (!(isfinite(paired) && paired > 0.0f)) continue;
-                runningA += paired;
-                if (runningA > uA) {
-                    preA = p;
-                    pairUtilA = paired;
-                    haveA = 1u;
-                    break;
+                if (isfinite(paired) && paired > 0.0f) {
+                    totalPairUtil += paired;
+                    positiveParents += 1u;
                 }
             }
 
-            float remainingPairUtil = totalPairUtil - pairUtilA;
-            if (haveA != 0u && isfinite(remainingPairUtil) && remainingPairUtil > 0.0f) {
-                float uB = hash_uniform(stepC, preTarget, 0x2f8c7a19u) * remainingPairUtil;
-                float runningB = 0.0f;
+            if (positiveParents >= 2u && isfinite(totalPairUtil) && totalPairUtil > 0.0f) {
+                float uA = hash_uniform(stepC, preTarget, 0x6b325541u) * totalPairUtil;
+                uint haveA = 0u;
+                float pairUtilA = 0.0f;
+                float runningA = 0.0f;
                 for (uint p = 0u; p < halfR; ++p) {
-                    if (p == preTarget || p == preA) continue;
+                    if (p == preTarget) continue;
                     float paired = ctx.utilFeat[p] + ctx.utilFeat[p + halfR];
                     if (!(isfinite(paired) && paired > 0.0f)) continue;
-                    runningB += paired;
-                    if (runningB > uB) {
-                        preB = p;
-                        compose = 1u;
+                    runningA += paired;
+                    if (runningA > uA) {
+                        preA = p;
+                        pairUtilA = paired;
+                        haveA = 1u;
                         break;
+                    }
+                }
+
+                float remainingPairUtil = totalPairUtil - pairUtilA;
+                if (haveA != 0u && isfinite(remainingPairUtil) && remainingPairUtil > 0.0f) {
+                    float uB = hash_uniform(stepC, preTarget, 0x2f8c7a19u) * remainingPairUtil;
+                    float runningB = 0.0f;
+                    for (uint p = 0u; p < halfR; ++p) {
+                        if (p == preTarget || p == preA) continue;
+                        float paired = ctx.utilFeat[p] + ctx.utilFeat[p + halfR];
+                        if (!(isfinite(paired) && paired > 0.0f)) continue;
+                        runningB += paired;
+                        if (runningB > uB) {
+                            preB = p;
+                            compose = 1u;
+                            break;
+                        }
                     }
                 }
             }
@@ -1223,8 +1136,8 @@ inline void oak_bk_admit_commit_body(
         preA_tg = preA;
         preB_tg = preB;
         compose_tg = compose;
-        ctx.counters[OAK_CNT_REINIT_OPT]  += 1u;
-        ctx.counters[OAK_CNT_REINIT_FEAT] += 1u;
+        if (replaceOpt != 0u) ctx.counters[OAK_CNT_REINIT_OPT]  += 1u;
+        if (replaceFeat != 0u) ctx.counters[OAK_CNT_REINIT_FEAT] += 1u;
     }
     threadgroup_barrier(mem_flags::mem_threadgroup);
 
@@ -1234,6 +1147,9 @@ inline void oak_bk_admit_commit_body(
     uint preA   = preA_tg;
     uint preB   = preB_tg;
     uint compose = compose_tg;
+    uint candidateI = candidateI_tg;
+    uint replaceOpt = replaceOpt_tg;
+    uint replaceFeat = replaceFeat_tg;
     uint halfR  = ctx.R >> 1u;
     uint pre    = (worstI < halfR) ? worstI : worstI - halfR;
     float invSqrtR = rsqrt(float(max(ctx.R, 1u)));
@@ -1245,6 +1161,7 @@ inline void oak_bk_admit_commit_body(
     uint nOR  = ctx.R;
     uint nPi  = ctx.D * ctx.R;
     uint nOT  = ctx.R * ctx.R;
+    uint nOD  = ctx.R;
     // Tier I1: encoder rows are M·baseO (std_obs ‖ M−1 trace levels). M = baseObsTraceLevels + 1.
     uint nEnc = (ctx.baseObsTraceLevels + 1u) * ctx.baseO;
     uint o0   = 0u;
@@ -1252,30 +1169,35 @@ inline void oak_bk_admit_commit_body(
     uint o2   = o1 + nOR;
     uint o3   = o2 + nPi;
     uint o4   = o3 + nOT;
-    uint total = o4 + nEnc;
+    uint o5   = o4 + nOD;
+    uint optTotal = (replaceOpt != 0u) ? o5 : 0u;
+    uint total = optTotal + ((replaceFeat != 0u) ? nEnc : 0u);
 
     for (uint id = tid; id < total; id += tgW) {
-        if (id < o1) {                                              // psi[worstK][i]
+        if (id < optTotal && id < o1) {                             // psi[worstK][i]
             uint i = id - o0;
             ctx.psi[worstK * ctx.R + i] =
                 (hash_uniform(stepC, worstK, i) * 2.0f - 1.0f) * invSqrtR;
-        } else if (id < o2) {                                       // optReward[worstK][i]
+        } else if (id < optTotal && id < o2) {                      // optReward[worstK][i]
             uint i = id - o1;
             ctx.optReward[worstK * ctx.R + i] =
                 (hash_uniform(stepC, worstK, ctx.R + i) * 2.0f - 1.0f) * invSqrtR;
-        } else if (id < o3) {                                       // optPolicy[worstK][:D*R]
+        } else if (id < optTotal && id < o3) {                      // optPolicy[worstK][:D*R]
             uint pi = id - o2;
             ctx.optPolicy[worstK * ctx.D * ctx.R + pi] =
                 (hash_uniform(stepC, worstK, 3u * ctx.R + pi) * 2.0f - 1.0f) * invSqrtR;
-        } else if (id < o4) {                                       // optTransition[worstK][:R*R]
+        } else if (id < optTotal && id < o4) {                      // optTransition[worstK][:R*R]
             uint pi = id - o3;
             ctx.optTransition[worstK * ctx.R * ctx.R + pi] =
                 (hash_uniform(stepC, worstK, 4u * ctx.R + pi) * 2.0f - 1.0f) * invSqrtR;
+        } else if (id < optTotal && id < o5) {                      // optDuration[worstK][i]
+            uint i = id - o4;
+            ctx.optDuration[worstK * ctx.R + i] = 0.0f;
         } else {                                                     // encoder[pre][:M·baseO]
             // Tier K2: compose the replacement row from two sampled parent pre-activations
             // without replacement, weighted by paired utility mass. Fallback stays the prior
             // fresh-random bandwidth-1 reseed when there are fewer than two positive parents.
-            uint o = id - o4;
+            uint o = id - optTotal;
             uint rowStride = (ctx.baseObsTraceLevels + 1u) * ctx.baseO;
             if (compose != 0u) {
                 float rA = ctx.encoder[preA * rowStride + o];
@@ -1293,45 +1215,65 @@ inline void oak_bk_admit_commit_body(
     // Phase 3: lane 0 does the small scalar resets + slot toggle + stepCount increment +
     // surface stats. Done here (post-reseed) so the increment doesn't race the hash reads.
     if (tid == 0u) {
-        ctx.utilOpt[worstK] = 0.0f;
-        float u = hash_uniform(stepC, pre, 0xfeedf00du);
-        ctx.phase[pre] = u * 6.283185307179586f;                     // 2π, structural.
-        ctx.utilFeat[pre]         = 0.0f;
-        ctx.utilFeat[pre + halfR] = 0.0f;
-        // MetaOptimize state reset: both pair members restart at α = 1/baseO with no
-        // accumulated meta-gradient history (the encoder row + phase have changed, so any
-        // h or β earned by the prior basis no longer applies).
         float betaInit = -log(float(max(ctx.baseO, 1u)));
         float aInit    = exp(betaInit);
-        ctx.beta[pre]          = betaInit;
-        ctx.beta[pre + halfR]  = betaInit;
-        ctx.alpha[pre]         = aInit;
-        ctx.alpha[pre + halfR] = aInit;
-        ctx.hMeta[pre]         = 0.0f;
-        ctx.hMeta[pre + halfR] = 0.0f;
+        if (replaceOpt != 0u) {
+            ctx.utilOpt[worstK] = 0.0f;
+            ctx.optAge[worstK] = 0u;
+            ctx.optFeature[worstK] = candidateI;
+            ctx.featureEverUsed[candidateI] = 1u;
+            ctx.continuation[worstK] = 0.0f;
+            ctx.durationTd[worstK] = 0.0f;
+            ctx.durationHat[worstK] = 1.0f;
+            ctx.psi[worstK * ctx.R + candidateI] =
+                safe_w(ctx.psi[worstK * ctx.R + candidateI],
+                       ctx.psi[worstK * ctx.R + candidateI] + invSqrtR);
+        }
+
+        if (replaceFeat != 0u) {
+            float u = hash_uniform(stepC, pre, 0xfeedf00du);
+            ctx.phase[pre] = u * 6.283185307179586f;                 // 2π, structural.
+            ctx.utilFeat[pre]         = 0.0f;
+            ctx.utilFeat[pre + halfR] = 0.0f;
+            ctx.featureAge[pre] = 0u;
+            ctx.featureAge[pre + halfR] = 0u;
+            ctx.featureEverUsed[pre] = 0u;
+            ctx.featureEverUsed[pre + halfR] = 0u;
+            ctx.bonusW[pre] = ctx.valueW[pre];
+            ctx.bonusW[pre + halfR] = ctx.valueW[pre + halfR];
+            ctx.beta[pre]          = betaInit;
+            ctx.beta[pre + halfR]  = betaInit;
+            ctx.alpha[pre]         = aInit;
+            ctx.alpha[pre + halfR] = aInit;
+            ctx.hMeta[pre]         = 0.0f;
+            ctx.hMeta[pre + halfR] = 0.0f;
+        }
+
+        device const float *curr = state_at(ctx, 1u - ctx.stateSlot);
+        float bonusGap = 0.0f, sum2 = 0.0f, sum4 = 0.0f;
+        uint never = 0u;
+        for (uint i = 0u; i < ctx.R; ++i) {
+            bonusGap += fabs(ctx.bonusW[i] - ctx.valueW[i]);
+            if (ctx.featureEverUsed[i] == 0u) never += 1u;
+            float x = curr[i];
+            float x2 = x * x;
+            sum2 += x2;
+            sum4 += x2 * x2;
+        }
+        float invR = 1.0f / float(max(ctx.R, 1u));
+        ctx.stats->rrBonusMean = isfinite(bonusGap) ? bonusGap * invR : ctx.stats->rrBonusMean;
+        ctx.stats->neverUsedFeatureCount = float(never);
+        float effRank = (sum4 > 0.0f) ? ((sum2 * sum2) / sum4) : 0.0f;
+        ctx.stats->stateEffectiveRank = isfinite(effRank) ? effRank : ctx.stats->stateEffectiveRank;
+        ctx.stats->replacementAgeMean = ctx.replacementAgeMean[0];
+        ctx.stats->encodeNonFiniteCount    = float(ctx.counters[OAK_CNT_OBS_NF]);
+        ctx.stats->learnNonFiniteCount     = float(ctx.counters[OAK_CNT_LEARN_NF]);
+        ctx.stats->planNonFiniteCount      = float(ctx.counters[OAK_CNT_PLAN_NF]);
+        ctx.stats->tdPsiNonFiniteCount     = float(ctx.counters[OAK_CNT_TDPSI_NF]);
+        ctx.stats->oakOptionReinitCount    = float(ctx.counters[OAK_CNT_REINIT_OPT]);
+        ctx.stats->oakFeatureReinitCount   = float(ctx.counters[OAK_CNT_REINIT_FEAT]);
 
         ctx.scalars->stateSlot = 1u - ctx.stateSlot;
         ctx.scalars->stepCount = stepC + 1u;
     }
-}
-
-kernel void oak_bk_admit_commit(
-    device float         *params      [[buffer(0)]],
-    device float         *stateArena  [[buffer(1)]],
-    device uint          *uintArena   [[buffer(2)]],
-    device KernelScalars *scalars     [[buffer(3)]],
-    device KernelStats   *stats       [[buffer(4)]],
-    constant KernelConfig &cfg        [[buffer(5)]],
-    uint tid [[thread_position_in_threadgroup]],
-    uint tgW [[threads_per_threadgroup]])
-{
-    threadgroup uint  worstK_tg    = 0u;
-    threadgroup uint  worstI_tg    = 0u;
-    threadgroup uint  stepCount_tg = 0u;
-    threadgroup uint  preA_tg      = 0u;
-    threadgroup uint  preB_tg      = 0u;
-    threadgroup uint  compose_tg   = 0u;
-    oak_bk_admit_commit_body(params, stateArena, uintArena, scalars, stats, cfg, tid, tgW,
-                             worstK_tg, worstI_tg, stepCount_tg, preA_tg, preB_tg,
-                             compose_tg);
 }
