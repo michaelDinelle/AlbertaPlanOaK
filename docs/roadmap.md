@@ -5,9 +5,11 @@ The live branch has moved past the L3-L7 scaffold: default perception is now
 normalized linear anchors plus constructed feature slots, K=R options/subtasks,
 exact wrapper-side one-step importance ratios, RR Eq. 4 continuation, an
 average-reward intra-option value head, Design-A keyboard cross-psi, raw reward
-plus duration option models, a one-step model in shadow mode, bounded model
-search control, and age/capacity-gated Oak replacement. Promotion is still
-gated by paired smoke, 1.5M screen, and 10M acceptance evidence.
+plus duration option models, compact average-reward auxiliary GVFs, dense
+internal lambda with cached Design-A GPE scores, a one-step model in shadow
+mode, bounded model search control, and age/capacity-gated Oak replacement.
+Promotion is still gated by paired smoke, 1.5M screen, and 10M acceptance
+evidence.
 
 This roadmap is the control document for moving OaK toward the Alberta Plan's
 Step-11 Oak architecture. It is deliberately stricter than the old tier log:
@@ -57,13 +59,15 @@ that terminal value with a plain feature bonus is rejected by the primary paper.
 |---|---|---|
 | `K <= 32` as invariant | Accepted drift | Removed as an invariant. K now equals R; 32 is only the SIMD page width. HalfCheetah default R is stream-derived (`max(obsDim, 2*D_policy)`, R=24), with `OAK_RANK` as explicit compute-budget override. |
 | B=1 as sacred law | Accepted drift | Reworded as current single-agent stream semantics. Future batched kernels are allowed only for N independent agents with no cross-stream reductions. |
-| Deep Fourier default | Accepted | Default encoder/phase layout is zero-length. State is normalized anchor projections plus constructed feature slots. |
+| Deep Fourier default | Accepted | `encoder`/`phase` have been removed from the live default layout. State is normalized anchor projections plus constructed feature slots. |
 | Feature finding | Partial live | Constructed features use signed product, signed sum, and parent-gated residual forms with parent utility/decorrelation diagnostics. Replacement is still young and needs long-run evidence. |
 | Off-policy floors | Accepted | `max(chord,1/K)` floors are removed from live learning. Wrapper emits exact one-step ratios from behavior-option sampling; ratio diagnostics are live. |
 | Average-reward option values | Accepted | `optValue[K*R]` is live. Using `optValueTd` directly in the actor was tested in `rebuild-smoke-10k-policytd` and rejected: policy deltas became infinite before 10k. |
-| True keyboard | Partial live | `psiCross[K*K*R]` is live. Hot behavior uses a sparse internal intent key for compute; dense keyboard/chord descriptors remain a future promotion target. |
+| Explicit average-reward GVFs | Partial live | `gvfRate` and `gvfValue` are live for a compact anchor-sized auxiliary bank. They are diagnostics only until paired evidence promotes them into replacement utility. |
+| True keyboard | Partial live | `psiCross[K*K*R]` is live with dense internal λ and cached/pagewise GPE scores. Behavior still executes one selected option for exact one-step importance ratios; chord-descriptor option models remain future work. |
 | One-step model | Shadow live | `oneReward` and `oneTransition` learn shadow predictions and report value-weighted diagnostics, but do not drive planning or replacement. |
-| Search control | Partial live | Planning updates one scheduled option page and tracks high-priority/stale model pages. Full priority queue/search-control promotion remains open. |
+| Search control | Partial live | If K fits one SIMD page, planning covers the full bank. Larger banks use named high-priority, stalest, and diagnostic/coverage slots. Full state-search remains open. |
+| Continuing testbeds | Deferred by scope | A temporary toy-env attempt was removed because it introduced hand-coded dynamics constants. Add real research-backed continuing wrappers only as separate env-layer work, never inside OaK. |
 | Step 12 / IA | Deferred | Out of scope until Step 11 earns promotion. |
 
 Initial smoke evidence: `rebuild-smoke-10k-default` (seed 0, paired random)
@@ -86,6 +90,70 @@ Rejected rebuild follow-ups:
   10k reward sum to `-79.915` and reward-rate to `-0.03053`. Keep the current
   age/capacity-gated replacement while the broader feature-finding design is
   reviewed.
+- `nextwave-toy-continuing-envs`: a first attempt to add Drift/RiverSwim/
+  Access/Jellybean toy wrappers was removed before testing because it embedded
+  arbitrary dynamics constants. The Plan wants continuing tasks, but not
+  hand-tuned tasklets smuggled into the benchmark layer.
+
+Next-wave evidence so far:
+
+- `nextwave-smoke-1k-v3`: seed-0 paired HalfCheetah, NF zero, Oak `-8.431`
+  versus random `-277.377`, `importanceEss=0.994`, dense λ effective rank
+  `18.35`, compact `gvfCount=12`, and `2196` SPS.
+- `nextwave-smoke-10k-v3`: seed-0 paired HalfCheetah, NF zero and sane GVFs
+  (`gvfTdMean=0.552`), but cumulative reward `-69.838` trails the current
+  keeper's 10k `-64.998`. Do not promote on 10k evidence alone.
+- `nextwave-smoke-50k`: seed-0 paired HalfCheetah, NF zero, Oak `-303.337`
+  versus random `-13177.211`, slightly better than the keeper's 50k `-305.32`.
+  Reward-rate remains negative (`-0.009296`), so this is architecture evidence,
+  not promotion evidence.
+
+Current keeper evidence after the ψ stability repair:
+
+- `psi-gap-split-50k` showed that huge `psiStopGapMean` values were ψ
+  divergence, not RR Eq. 4 stop-value explosion: final `psiAbsMean` was about
+  `8.35e8`, while `rrStopAbsMean` was only about `1.84` and `valueAbsMean`
+  about `0.11`. The diagnostic split (`psiStopGapAbsMean`, `psiAbsMean`,
+  `rrStopAbsMean`, `valueAbsMean`) stays live.
+- `psi-implicit-only-10k` applied an implicit one-step denominator only to the
+  RR ψ head. It improved seed-0 reward from `-62.028` to `-44.610`, kept NF
+  zero, and kept ψ/stop magnitudes bounded (`psiAbsMean=0.54`,
+  `rrStopAbsMean=0.56`). The same denominator on both ψ and `psiCross` had
+  already failed, so the cross-GVF head remains explicit.
+- `psi-implicit-only-50k` is the first mission-critical positive cumulative
+  HalfCheetah datapoint: seed 0 reached `+117.037` cumulative reward versus
+  random `-13177.211`, with a positive reward-rate pulse from about 25k to
+  45k, NF zero, `terminationRate=0.708`, `optionDurationMean=1.043`,
+  `importanceEss=0.812`, `lambdaEffectiveRank=12.47`, and complete queue
+  coverage near the first positive crossing.
+- `psi-implicit-only-50k-10seed` beat random `10/10` with NF zero `10/10`, but
+  only seed 0 had positive cumulative reward by 50k. Three seeds ended with
+  positive final reward-rate and eight seeds had at least one positive
+  heartbeat reward-rate. This is a real signal, not promotion evidence.
+- `psi-implicit-only-300k-seed0` did not sustain the 50k breakthrough:
+  cumulative reward fell from `+116.81` at 50k to `-8144.016` by 300k. The
+  collapse signature was importance ESS falling to the one-option floor
+  (`~0.0417`), rising action/score gradients, bounded but noisier ψ/stop
+  magnitudes, and continued replacement churn (`3368` option reinitializations).
+  The next orthodox target is therefore the actor/keyboard/replacement/search
+  interaction that preserves broad option support after early reward learning.
+
+Rejected post-repair variants:
+
+- Target-option score gradients were more exact in isolation but regressed the
+  positive seed-0 50k run to `-576.639` and collapsed action movement. Do not
+  re-add target-score actor credit without a fuller actor-critic redesign.
+- ESS-scaled actor learning regressed seed-0 50k to `-525.604`; it suppressed
+  the breakthrough instead of preserving it.
+- Selected-only actor updates regressed seed-0 50k to `-309.030`; stable but
+  too inert for early motor learning.
+- Raw keyboard-score/lambda replacement protection regressed seed-0 50k to
+  `-1522.678` and drove ESS to the floor. Replacement utility must not simply
+  protect currently high-scoring keyboard rows.
+- Option-only replacement for permanent-anchor options regressed seed-0 50k to
+  `-533.364` with excessive option churn (`2083` reinitializations). The
+  option-bundle renewal gap is real, but blunt anchor-option resets are not the
+  repair.
 
 ## Historical L3-L7 Note
 

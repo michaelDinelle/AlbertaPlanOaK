@@ -225,34 +225,32 @@ final class EnvPoolEnv {
                                 optionLogProbScratch.withUnsafeMutableBufferPointer { optLogBuf in
                                     if let optionValues = policy.optionValues {
                                         optionValues.withUnsafeBufferPointer { optBuf in
-                                            sampleAndScoreActions(spec: actionSpec, numEnvs: numEnvs,
-                                                                  dPolicy: dPolicy,
-                                                                  envActionWidth: envActionWidth,
-                                                                  policyMean: pmBuf.baseAddress!,
-                                                                  optionPolicyMean: optBuf.baseAddress,
-                                                                  optionCount: optionCount,
-                                                                  envAction: aBuf.baseAddress!,
-                                                                  actionSignal: actBuf.baseAddress!,
-                                                                  scoreGrad: sgBuf.baseAddress!,
-                                                                  importance: impBuf.baseAddress,
-                                                                  importanceLog: impLogBuf.baseAddress,
-                                                                  optionLogProbScratch: optLogBuf.baseAddress,
-                                                                  rngState: &rngState)
+                                            ActionTransducer.sampleAndScore(
+                                                spec: actionSpec, numEnvs: numEnvs,
+                                                dPolicy: dPolicy, envActionWidth: envActionWidth,
+                                                policyMean: pmBuf.baseAddress!,
+                                                optionPolicyMean: optBuf.baseAddress,
+                                                optionCount: optionCount,
+                                                envAction: aBuf.baseAddress!,
+                                                actionSignal: actBuf.baseAddress!,
+                                                scoreGrad: sgBuf.baseAddress!,
+                                                importance: impBuf.baseAddress,
+                                                importanceLog: impLogBuf.baseAddress,
+                                                optionLogProbScratch: optLogBuf.baseAddress,
+                                                rngState: &rngState)
                                         }
                                     } else {
-                                        sampleAndScoreActions(spec: actionSpec, numEnvs: numEnvs,
-                                                              dPolicy: dPolicy,
-                                                              envActionWidth: envActionWidth,
-                                                              policyMean: pmBuf.baseAddress!,
-                                                              optionPolicyMean: nil,
-                                                              optionCount: 0,
-                                                              envAction: aBuf.baseAddress!,
-                                                              actionSignal: actBuf.baseAddress!,
-                                                              scoreGrad: sgBuf.baseAddress!,
-                                                              importance: nil,
-                                                              importanceLog: nil,
-                                                              optionLogProbScratch: nil,
-                                                              rngState: &rngState)
+                                        ActionTransducer.sampleAndScore(
+                                            spec: actionSpec, numEnvs: numEnvs,
+                                            dPolicy: dPolicy, envActionWidth: envActionWidth,
+                                            policyMean: pmBuf.baseAddress!,
+                                            optionPolicyMean: nil, optionCount: 0,
+                                            envAction: aBuf.baseAddress!,
+                                            actionSignal: actBuf.baseAddress!,
+                                            scoreGrad: sgBuf.baseAddress!,
+                                            importance: nil, importanceLog: nil,
+                                            optionLogProbScratch: nil,
+                                            rngState: &rngState)
                                     }
                                 }
                             }
