@@ -80,7 +80,7 @@ The agent is a 5-dispatch single-stream Oak prototype over 9 logical Plan phases
 | `encoder` | (R/2) · (M·O + D_policy + 1) | Perception (Fourier features W). Each pre-activation row reads standardized observation, multi-timescale observation traces, previous action descriptor, and previous reward. **Fixed random projection at init** (RFF bandwidth-1 over all input regions); evolves via generate-and-test reseeding (Plan Step 2). |
 | `phase` | R/2 | Per-pre-activation Fourier offset (uniform on [0, 2π) at init). Reseeded alongside its `encoder` row in generate-and-test. Together with `encoder`, parameterizes the deep Fourier features basis (Lewandowski-Schuurmans-Machado 2024, [arXiv:2410.20634](docs/papers/PlasticLearningDeepFourierFeatures_2410.20634.pdf)). |
 | `valueW` | R | Main value GVF (cumulant = reward, differential, ρ̄-centered). |
-| `psi` | K · R | K feature-indexed RR subtask GVFs. Cumulant is centered reward; stopping value uses `V(s') - valueW[i]·x_i(s') + bonusW[i]·x_i(s')` for the option's registered feature. |
+| `psi` | K · R | K feature-indexed RR subtask GVFs. Cumulant is reward centered by a per-option chord-responsibility reward-rate trace; stopping value uses `V(s') - valueW[i]·x_i(s') + bonusW[i]·x_i(s')` for the option's registered feature. |
 | `optPolicy` | K · D · R | K component policies, blended by chord (Design A keyboard). |
 | `optReward` | K · R | K stopping-aware option reward models r̂^k. |
 | `optTransition` | K · R · R | K dense stopping-aware transition models `n̂^k_j(s) = Σ_i w^k_{j,i}·s[i]`. |

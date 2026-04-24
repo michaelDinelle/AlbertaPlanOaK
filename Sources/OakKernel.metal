@@ -77,11 +77,12 @@ struct KernelConfig {
     // Per-option Q^k cache, K floats. Written by oak_plan (lane 0 of TG k), consumed by
     // oak_plan_reduce for the simd_max + planAdv soft-bound.
     uint sQOption;
-    // Tier I1 (Plan Step 3 partial): per-obs-dim multi-timescale traces, (M−1)·baseO floats.
+    // Tier I1: (M−1)·baseO multi-timescale obs traces.
     uint sObsTraceMulti;
     // Per-option planning/update priority, K floats.
     uint sPrioOpt;
     uint sContinuation;
+    uint sRhoOpt;
     uint sReplacementAgeMean;
     // UInt arena offsets.
     uint uCounters, uOptFeature, uFeatureAge, uOptAge, uFeatureEverUsed;
@@ -166,11 +167,10 @@ struct Ctx {
     device float *optRewardTd;                 // Option reward-model TD targets, K floats.
     device float *durationTd, *durationHat;     // Average-reward option duration targets/preds, K floats each.
     device float *qOption;                     // Per-option Q^k cache, K floats.
-    device float *obsTraceMulti;               // Tier I1: per-obs-dim multi-timescale traces,
-                                                // (M−1)·baseO floats. Layout: trace_m[o] at offset
-                                                // m·baseO + o for m=1..M−1.
+    device float *obsTraceMulti;               // Tier I1: (M−1)·baseO multi-timescale obs traces.
     device float *prioOpt;                     // Tier D2: per-option priority, K floats.
     device float *continuation;                 // RR-derived per-option continuation indicator/probability, K floats.
+    device float *rhoOpt;                       // Per-option reward-rate traces for average-reward ψ GVFs, K floats.
     device float *replacementAgeMean;           // EMA of age at replacement, one float.
     device uint  *counters;
     device uint  *optFeature, *featureAge, *optAge, *featureEverUsed;
@@ -224,6 +224,7 @@ inline Ctx make_ctx(device float *params, device float *stateArena, device uint 
     c.obsTraceMulti   = stateArena + cfg.sObsTraceMulti;
     c.prioOpt         = stateArena + cfg.sPrioOpt;
     c.continuation    = stateArena + cfg.sContinuation;
+    c.rhoOpt          = stateArena + cfg.sRhoOpt;
     c.replacementAgeMean = stateArena + cfg.sReplacementAgeMean;
 
     c.counters = uintArena + cfg.uCounters;
@@ -452,7 +453,12 @@ kernel void oak_bk_encode(
                 float w = ctx.psi[basePsi + i];
                 psiPrev = fma(w, prev[i], psiPrev);
             }
-            float dk = reward_c + cont * psiNext + (1.0f - cont) * zStop - psiPrev;
+            float optRate = track_rate(ctx.stepCount, ctx.baseO)
+                * max(ctx.chordPrev[k], 1.0f / float(max(ctx.K, 1u)));
+            float rhoK = ctx.rhoOpt[k] + optRate * (ctx.reward[0] - ctx.rhoOpt[k]);
+            ctx.rhoOpt[k] = isfinite(rhoK) ? rhoK : ctx.rhoOpt[k];
+            float reward_k = ctx.reward[0] - ctx.rhoOpt[k];
+            float dk = reward_k + cont * psiNext + (1.0f - cont) * zStop - psiPrev;
             if (!isfinite(dk)) { dk = 0.0f; nfLane = 1u; }
             ctx.tdPsi[k] = dk;
         }
@@ -1239,6 +1245,7 @@ inline void oak_bk_admit_commit_body(
             ctx.optFeature[worstK] = candidateI;
             ctx.featureEverUsed[candidateI] = 1u;
             ctx.continuation[worstK] = 0.0f;
+            ctx.rhoOpt[worstK] = ctx.scalars->rho;
             ctx.durationTd[worstK] = 0.0f;
             ctx.durationHat[worstK] = 1.0f;
             ctx.psi[worstK * ctx.R + candidateI] =
