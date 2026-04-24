@@ -243,31 +243,13 @@ inline Ctx make_ctx(device float *params, device float *stateArena, device uint 
 
 inline device float *state_at(Ctx ctx, uint slot) { return ctx.state + slot * ctx.R; }
 inline float decode_duration(float raw) { return isfinite(raw) ? max(1.0f, raw) : 1.0f; }
+inline uint encoder_input_width(Ctx ctx) {
+    return (ctx.baseObsTraceLevels + 1u) * ctx.baseO + ctx.D + 1u;
+}
 
 // =================================================================================================
-// 1+2. oak_bk_encode - FUSED kernel combining oak_bk_obs (per-feature observation Welford +
-//      multi-timescale obsTrace EMAs, Tier I1) and oak_encode (perception / deep Fourier features,
-//      Lewandowski-Schuurmans-Machado 2024, arXiv:2410.20634). Dispatched as 1 TG of R=rank
-//      threads. Phase 1 uses threads with tid < O to update obsMean/obsSM/obsTrace; phase 2
-//      uses all R threads to compute one Fourier feature per thread. A single threadgroup_
-//      barrier(mem_flags::mem_device) between the phases replaces the prior host-level
-//      memoryBarrier between two separate kernel dispatches — saves 1 dispatch + 1 host
-//      barrier per step.
-//
-//      Trace EMAs fire at structural rates 1/2^m for m=1..M-1, so the representation carries
-//      instantaneous observation plus short-to-slow traces without a host warmup or phase gate.
-//
-//      Encoder row width is M·baseO — first baseO multiplies std_obs, each later baseO block
-//      multiplies one trace level:
-//        state[feat in [0, R/2)] = cos( phase[pre] + Σ_m Σ_o W[pre, m·baseO+o]·input_m[o] )
-//        state[feat in [R/2, R)] = sin( ... same pre-activation index as its cos partner ... )
-//      cos/sin are bounded in [−1, 1]; linear weights on top grow without cap (BWH).
-//      Encoder + phase evolve only via generate-and-test in oak_bk_admit_commit.
-//
-//      Inv-10 (bit-identical FP) preserved: same fma sequences in both phases; the NF
-//      counter aggregation uses a per-simdgroup `simd_sum` + threadgroup-memory cross-
-//      simdgroup sum (mathematically equivalent to the pre-fusion single-simdgroup
-//      simd_sum in the original oak_bk_obs since total NF count is associative).
+// 1+2. oak_bk_encode - fused obs normalization/traces + deep Fourier features.
+//      Encoder row width is M·baseO + D + 1: observation traces plus previous action/reward.
 // =================================================================================================
 kernel void oak_bk_encode(
     device float         *params      [[buffer(0)]],
@@ -338,15 +320,12 @@ kernel void oak_bk_encode(
     if (feat >= ctx.R) return;
     uint halfR  = ctx.R >> 1u;                 // ctx.R is even (host-enforced).
     uint pre    = (feat < halfR) ? feat : feat - halfR;
-    // Tier I1: encoder row width is M·baseO where M = baseObsTraceLevels + 1 (1 instantaneous
-    // region + (M−1) trace regions). Layout per pre-activation:
-    //   col 0..baseO-1:                std_obs[o]
-    //   col m·baseO..(m+1)·baseO-1:    obsTraceMulti[(m−1)·baseO + o] for m=1..M−1
+    // Layout: M observation blocks followed by previous action/reward.
     uint M_levels = ctx.baseObsTraceLevels + 1u;
-    uint encRow = pre * M_levels * ctx.baseO;
+    uint obsWidth = M_levels * ctx.baseO;
+    uint encRow = pre * encoder_input_width(ctx);
     float z = ctx.phase[pre];
-    // Region m=0: std_obs (instantaneous). Phase 1 computed the standardized value once
-    // per observation and cached it in threadgroup memory; all R feature lanes reuse it.
+    // Region m=0: std_obs, cached once in Phase 1.
     for (uint o = 0u; o < ctx.baseO; ++o) {
         float c = (o < OAK_MAX_OBS_CACHE)
                 ? tg_stdObs[o]
@@ -361,6 +340,11 @@ kernel void oak_bk_encode(
             z = fma(ctx.encoder[encRow + encBase + o], ctx.obsTraceMulti[storeBase + o], z);
         }
     }
+    // Experience-oriented Plan input: previous action descriptor and reward.
+    uint arBase = obsWidth;
+    for (uint p = 0u; p < ctx.D; ++p)
+        z = fma(ctx.encoder[encRow + arBase + p], ctx.policyMean[p], z);
+    z = fma(ctx.encoder[encRow + arBase + ctx.D], ctx.reward[0], z);
     float v = (feat < halfR) ? cos(z) : sin(z);
     device const float *prevState = state_at(ctx, ctx.stateSlot);
     device float *currState = state_at(ctx, 1u - ctx.stateSlot);
@@ -1163,7 +1147,7 @@ inline void oak_bk_admit_commit_body(
     uint nOT  = ctx.R * ctx.R;
     uint nOD  = ctx.R;
     // Tier I1: encoder rows are M·baseO (std_obs ‖ M−1 trace levels). M = baseObsTraceLevels + 1.
-    uint nEnc = (ctx.baseObsTraceLevels + 1u) * ctx.baseO;
+    uint nEnc = encoder_input_width(ctx);
     uint o0   = 0u;
     uint o1   = o0 + nPsi;
     uint o2   = o1 + nOR;
@@ -1198,7 +1182,7 @@ inline void oak_bk_admit_commit_body(
             // without replacement, weighted by paired utility mass. Fallback stays the prior
             // fresh-random bandwidth-1 reseed when there are fewer than two positive parents.
             uint o = id - optTotal;
-            uint rowStride = (ctx.baseObsTraceLevels + 1u) * ctx.baseO;
+            uint rowStride = encoder_input_width(ctx);
             if (compose != 0u) {
                 float rA = ctx.encoder[preA * rowStride + o];
                 float rB = ctx.encoder[preB * rowStride + o];
