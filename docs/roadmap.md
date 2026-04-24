@@ -162,6 +162,24 @@ Collapse-repair smoke evidence:
   `{oak,random}`, all under HalfCheetah. Future multi-seed screens should use
   `OaK benchmark` with this filter instead of sequential shell loops or
   accidental all-env sweeps.
+- `current-keeper-hc-10seed-1m`: HalfCheetah-only 10 seeds x `{oak,random}` at
+  1M steps on commit `baa0e9282`, rebuilt Metal and Swift first. Oak beat random
+  `10/10` by paired cumulative lift, NF was zero `10/10`, but Oak final
+  cumulative reward was negative `10/10`: mean Oak `-74449.6`, mean random
+  `-264260.4`, mean lift `+189810.8`, median Oak `-73531.5`, and final
+  reward-rate positive `0/10`. The final support signature was broad collapse:
+  mean `importanceEss=0.042`, mean `actorSupportEntropy=0.001`, and mean option
+  reinitializations `4963`. Heartbeat aggregates show the short-window signal
+  dies out: at 50k mean reward was `-835.2` with `1/10` positive cumulative
+  seeds and `5/10` positive reward-rate seeds; by 300k mean reward was
+  `-11737.1` with `0/10` positive cumulative seeds and `1/10` positive
+  reward-rate seed; by 1M mean reward was `-74449.4` with no positive final
+  reward-rates. This confirms that the collapse is systematic, not only seed 0.
+  Performance note: per-agent Oak SPS averaged `1398` under `N=8` benchmark
+  contention; seeds that ran after random/earlier Oak jobs completed reached
+  about `2046` SPS, so future speed analysis must separate single-stream kernel
+  efficiency from multi-process GPU contention and use Instruments/diagnostic
+  phase timing rather than concurrency guesswork.
 
 Current keeper evidence after the ψ stability repair:
 
