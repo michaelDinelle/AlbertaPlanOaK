@@ -22,6 +22,7 @@ Primary sources:
 - Reward-respecting subtasks / STOMP: `docs/papers/RewardRespectingSubtasks_ModelBasedRL_2202.03466.pdf`
 - Average-reward options: `docs/papers/WanNaikSutton_AvgRewardOptions_2110.13855.pdf`
 - Option keyboard: `docs/papers/OptionKeyboard_CombiningSkills_2106.13105.pdf`
+- Option Keyboard Basis: `docs/papers/OptionKeyboardBasis_2505.00787.pdf`
 - Supporting current mechanisms: Reward Centering, MetaOptimize, GraMa,
   Deep Fourier Features, generate-and-test, and prioritized sweeping papers in
   `docs/papers/`.
@@ -154,6 +155,22 @@ Rejected post-repair variants:
   `-533.364` with excessive option churn (`2083` reinitializations). The
   option-bundle renewal gap is real, but blunt anchor-option resets are not the
   repair.
+- Review-response next-wave integrated rebuilds were tested and reverted rather
+  than promoted. `review-response-50k-natural-133322` used exact target-option
+  Gaussian score gradients and regressed to `-497.755`, with late
+  `scoreGradL2Mean` above `200`. `review-response-50k-fisher-133540` applied
+  Fisher-preconditioned target scores and kept score gradients near `1`, but
+  still regressed to `-461.998`. `review-response-50k-rewardlambda-133841`
+  corrected the keyboard vector from differential `valueW` to the learned
+  reward-cumulant descriptor (`oneReward`) and matched the 10k rebuild smoke,
+  but collapsed by 50k to `-697.886`. The structural replacement gate variants
+  reduced churn (`94` 10k reinitializations and `583` 50k reinitializations in
+  `review-response-50k-gated-rhoopt-134244`) but suppressed the positive window
+  harder (`-1047.078`). Keep the primary-source insight: Option Keyboard
+  weights are cumulant/reward-feature weights, not differential value weights.
+  Do not revive target-option actor gradients, combined-stop Design-B behavior,
+  per-option ψ reward-rate centering, or aggressive lexicographic replacement
+  as isolated swaps; they need a fuller actor/GVF/search-control derivation.
 
 ## Historical L3-L7 Note
 
