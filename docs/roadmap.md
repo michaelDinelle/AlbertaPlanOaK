@@ -1,10 +1,11 @@
 # OaK roadmap - Plan-orthodox continual improvement
 
-Last audited: 2026-04-24, during the L3-L7 integrated repair branch. L1 remains
-rolled back. The live branch now includes RR stopping-value subtasks,
-RR-derived continuation, average-reward option duration, age-gated Step-11
-replacement, and feature-candidate diagnostics; promotion is still gated by
-paired smoke, 1.5M screen, and 10M acceptance evidence.
+Last audited: 2026-04-24, during the research-first L3-L7 regroup. L1 remains
+rolled back. The live branch includes RR stopping-value subtasks, RR-derived
+continuation, raw option reward plus average-reward option duration,
+age-gated Step-11 replacement, every-step replacement assessment, and
+feature/search-control diagnostics; promotion is still gated by paired smoke,
+1.5M screen, and 10M acceptance evidence.
 
 This roadmap is the control document for moving OaK toward the Alberta Plan's
 Step-11 Oak architecture. It is deliberately stricter than the old tier log:
@@ -53,20 +54,30 @@ longer "not implemented":
   `V(s') - valueW[i]·x_i(s') + bonusW[i]·x_i(s')`. Each ψ GVF now
   has its own chord-responsibility reward-rate trace instead of sharing only
   the behavior-policy `rho`.
-- L4/L5: `oak_plan` learns reward, transition, and duration models using
+- L4/L5: `oak_plan` learns raw reward, transition, and duration models using
   stopping-aware recurrences. Duration TD uses the raw duration estimate from
   the Bellman recurrence; the structural one-step lower bound is applied only
-  when decoding duration for planning. Planning uses
-  `Q(s,o) = rHat(s,o) - rho*lHat(s,o) + V(nHat(s,o))`.
-- L6: `oak_post_learn` runs age-gated option/feature replacement with
-  `optFeature`, feature age, option age, and feature-ever-used metadata.
+  when decoding duration for planning. Planning uses the coherent
+  average-reward option backup
+  `Q(s,o) = rHat(s,o) - rho*lHat(s,o) + V(nHat(s,o))`. A coherent
+  differential reward-model alternative
+  `rDiff <- (reward-rho)+continue*rDiffNext-rDiffPrev`, `Q=rDiff+V(nHat)`
+  was tested in `l3-l7-diffreward-paired-10k-225607` and rejected: NF zero and
+  10/10 random wins, but mean reward-rate `-0.003614`, only `2/10` positive
+  seeds, and no last-5k monotonic acceleration.
+- L6: `oak_post_learn` runs every-step replacement assessment and age-gated
+  option/feature commits with `optFeature`, feature age, option age, and
+  feature-ever-used metadata.
 - L7-lite: health includes `rrBonusMean`, `psiStopGapMean`,
   `terminationRate`, `optionDurationMean`, `neverUsedFeatureCount`,
-  `replacementAgeMean`, and `stateEffectiveRank`.
+  `replacementAgeMean`, `stateEffectiveRank`, `eligibleOptionCount`,
+  `eligibleFeatureCount`, `replacementCommitRate`, `modelUpdateRate`,
+  `modelPriorityEntropy`, and `optionDiffTdMean`.
 
-Current empirical read: short paired HalfCheetah tests are finite and now beat
-random comfortably, but the reward-rate still hovers near zero and does not yet
-meet the sustained positive-acceleration bar.
+Current empirical read: `l3-l7-regroup-paired-10k-225703` is finite and beats
+random `10/10`, with non-degenerate duration/search diagnostics, but mean
+reward-rate is still `-0.003616` and does not meet the sustained
+positive-acceleration bar.
 
 ## Alberta Plan Commitments
 
@@ -184,10 +195,10 @@ more interesting; the Plan order matters.
 | 1 | L1 one-step expectation model | **Rolled back** | The model learned finite predictions but reduced K1 reward on `8/10` seeds and did not create a usable planning signal. | Do not run 10M; any Step-8 retry must be materially different and isolated from feature-utility/reward-path damage. |
 | 2 | L2 state-feature ring + asynchronous one-step planning | **Blocked** | L2 depends on a one-step model worth spending through search. L1 failed that screen. | Do not start from rolled-back L1. |
 | 3 | L3 exact reward-respecting stopping value for psi | **Live, screening** | The RR stopping-value target is implemented in `oak_bk_encode`. | Keep only if paired screens show finite health and improving reward-rate. |
-| 4 | L4 average-reward option duration + differential option backup | **Live, screening** | `optDuration` and `rHat - rho*lHat + V(nHat)` are implemented. | Duration must remain non-degenerate without suppressing reward improvement. |
+| 4 | L4 average-reward option duration + raw reward backup | **Live, screening** | `optDuration` and `rHat - rho*lHat + V(nHat)` are implemented; the direct differential reward-model branch was rejected at 10k. | Duration must remain non-degenerate without suppressing reward improvement. |
 | 5 | L5 true option termination | **Live, screening** | Continuation is derived from the RR stopping comparison. | Reject variants that revert to H1-style confidence persistence. |
-| 6 | L6 Step-11 registry and age-aware replacement | **Live, screening** | `optFeature`, ages, and feature-ever-used metadata are implemented. | Replacement counts must stay structural and no longer equal measured steps. |
-| 7 | L7 feature diagnostics/candidate pool | **Partial live** | Unused active features serve as candidates; cheap state participation rank is reported. | Add richer decorrelation only if it is needed by the next failing diagnostic. |
+| 6 | L6 Step-11 registry and age-aware replacement | **Live, screening** | `optFeature`, ages, feature-ever-used metadata, every-step eligible-candidate assessment, and age/capacity-gated commits are implemented. | Replacement counts must stay structural and no longer equal measured steps. |
+| 7 | L7 feature/search diagnostics | **Partial live** | Unused active features serve as candidates; cheap state participation rank, eligible counts, commit rate, search-control entropy, model update rate, and option differential TD are reported. | Add richer decorrelation/uncertainty only if these diagnostics identify starvation or rank collapse. |
 | 8 | L8 eligibility traces retry | Blocked on L7 evidence | Prior trace attempts failed from correlated Fourier features. | Retry only after effective-rank/stability diagnostics justify it. |
 | 9 | L9 option keyboard descriptor model / Design B | Last | Descriptor models are only meaningful after true options exist. | Compare Design A/B after L5. |
 
@@ -273,24 +284,21 @@ Acceptance:
   incremental lift >= F1 last-2M. If mean lift ties but last-2M improves across
   at least 7/10 seeds, keep as a velocity win.
 
-### 2. Make reward-respecting subtasks exact before more option tricks
+### 2. Reward-respecting subtasks are live; promote only with reward evidence
 
-Current gap:
+Current status:
 
-- `tdPsi[k] = reward_c + (1-beta_k)*curr[k] + beta_k*psiNext - psiPrev`.
-- That is a useful feature-attainment surrogate, but it is not the RR subtask
-  stopping-value definition.
+- `oak_bk_encode` now computes RR stopping values for each option's registered
+  feature:
+  `z_i(s') = V(s') - valueW[i]*x_i(s') + bonusW[i]*x_i(s')`.
+- Continuation is derived from the RR comparison, and psi cumulants use
+  per-option chord-responsibility reward centering.
 
 Next orthodox mechanism:
 
-- Track a structurally derived optimistic bonus weight per selected feature.
-  It must come from the main value head's own history/utility, not from an
-  external knob.
-- Define stopping value for feature `i` as the main value estimate with the
-  selected feature's weight replaced by its bonus weight, matching the
-  reward-respecting feature-attainment construction.
-- Learn psi toward that stopping value while preserving average-reward
-  centering and continual updates.
+- Do not add another nearby stopping surrogate. The next move is diagnostic:
+  determine whether feature utility, stopping gap, or chord concentration is
+  failing before changing the subtask definition again.
 
 Diagnostics required:
 
@@ -305,24 +313,24 @@ Acceptance:
   uniformity, higher option identity specialization, or stronger correlation
   between selected feature utility and planning advantage.
 
-### 3. Add true termination and average-reward option models
+### 3. True termination and average-reward option models are live
 
-Current gap:
+Current status:
 
-- H1 smooths or persists the chord, but does not define an option termination
-  condition.
-- Current models predict next state/reward under one-step responsibility, not
-  cumulative reward and state at option termination.
-- Average-reward option models need duration; OaK has no `optDuration` head.
+- `continuation[k]` is derived from the RR stopping comparison, not H1
+  confidence persistence.
+- `optReward`, `optTransition`, and `optDuration` use stopping-aware recursive
+  TD targets. The live average-reward backup is
+  `Q(s,o) = r_hat(s,o) - rho_bar*l_hat(s,o) + V(n_hat(s,o))`.
+- The coherent differential-reward-model alternative was tested and rejected
+  at 10k; raw reward plus duration remains the keeper formulation because it
+  is both literature-valid and empirically better on the paired gate.
 
 Next orthodox mechanism:
 
-- Add an explicit continuation/termination variable per option derived from
-  the exact subtask stopping comparison, not from the exhausted psi/backward
-  value shortcut family.
-- Add `optDuration[K*R]` or an equivalent capacity-derived duration model.
-- Plan with differential option backup:
-  `Q(s,o) = r_hat(s,o) - rho_bar * l_hat(s,o) + V(n_hat(s,o))`.
+- Use `optionDiffTdMean`, `optionDurationMean`, `terminationRate`,
+  `modelUpdateRate`, and `modelPriorityEntropy` to decide whether the next
+  change belongs in search control, utility assessment, or representation.
 
 Diagnostics required:
 
@@ -337,30 +345,29 @@ Acceptance:
 - If duration is non-degenerate but lift is neutral, keep only if last-2M
   learning velocity improves over H1.
 
-### 4. Repair Step 11 feedback: "eventually" is not "every step"
+### 4. Step 11 feedback: assess every step, commit by capacity
 
-Current gap:
+Current status:
 
-- `oak_bk_admit_commit` always replaces the minimum-utility option and feature
-  every step.
-- J1 mean/sigma gates failed because the minimum of K utilities is an
-  extreme-value statistic.
-- There is no feature registry and no downstream accounting of which feature
-  has been used as a subtask basis.
+- `oak_bk_admit_commit` now assesses worst eligible option and feature
+  candidates every step.
+- Actual replacement remains structural and capacity/age gated; reinit counts
+  no longer equal measured steps.
+- The feature registry and downstream subtask accounting are live via
+  `optFeature`, `featureAge`, `optAge`, and `featureEverUsed`.
 
 Next orthodox mechanism:
 
-- Add age/tenure and "ever used as subtask basis" metadata for features and
-  options.
-- Replacement priority must combine utility, age, and novelty without a
-  tunable phase schedule.
-- Prefer replacing what has had enough continual opportunity to prove useful.
-  This is still temporally uniform if the assessment runs every step.
+- Improve utility only from diagnostics that show a real failure. The current
+  open question is not "does replacement run?", but whether low utility,
+  search priority, and never-used feature status are the right replacement
+  sufficient statistics.
 
 Diagnostics required:
 
 - replacement age distribution, never-used feature count, repeated-feature
-  reuse rate, utility-at-replacement percentile, and option survival curves.
+  reuse rate, utility-at-replacement percentile, option survival curves,
+  eligible option/feature counts, and replacement commit rate.
 
 Acceptance:
 
@@ -403,6 +410,9 @@ Acceptance:
 Current gap:
 
 - D2 priority is model TD magnitude weighted by chord.
+- OaK now reports `modelPriorityEntropy`, `modelUpdateRate`, and
+  `optionDiffTdMean`, but it does not yet learn uncertainty or use
+  meta-gradient search control.
 - The Plan explicitly points at search control that accounts for model
   uncertainty.
 
@@ -431,11 +441,11 @@ longer in the sequence.
 
 | Order | Tier | Mechanism | Status | Promotion gate |
 |---:|---|---|---|---|
-| 1 | L3 | Exact RR stopping value for psi subtasks | Next STOMP repair. | STOMP diagnostics improve without >10% 10M regression. |
-| 2 | L4 | Average-reward option duration head and differential option backup | Blocked on L3. | H1 parity and non-degenerate duration diagnostics. |
-| 3 | L5 | True option termination from stopping comparison | Blocked on L3/L4. | >= F1 mean lift or >= H1 lift plus improved last-2M velocity. |
-| 4 | L6 | Step-11 feature/option registry and age-aware utility replacement | Blocked on better utility semantics. | Churn falls, utility rises, no 10M regression. |
-| 5 | L7 | Feature decorrelation + candidate feature pool | Enabling substrate. | Effective-rank gain and F1 parity. |
+| 1 | L3 | Exact RR stopping value for psi subtasks | Live, screening. | STOMP diagnostics improve without >10% 10M regression. |
+| 2 | L4 | Average-reward option duration with raw reward backup | Live, screening. Differential reward-model branch rejected at 10k. | H1 parity and non-degenerate duration diagnostics. |
+| 3 | L5 | True option termination from stopping comparison | Live, screening. | >= F1 mean lift or >= H1 lift plus improved last-2M velocity. |
+| 4 | L6 | Step-11 feature/option registry and every-step assessment | Live, screening. | Churn falls, utility rises, no 10M regression. |
+| 5 | L7 | Feature/search diagnostics and candidate feature pool | Partial live. | Diagnose rank/search starvation before adding heavier covariance or uncertainty heads. |
 | 6 | L8 | Reattempt eligibility traces on decorrelated features | Blocked on L7 diagnostics. | 10 seeds stable, no trace blow-up, 10M lift/velocity win. |
 | 7 | L9 | Option keyboard descriptor model / Design B comparison | Last. | Beat Design A or produce cleaner planning diagnostics. |
 | parked | Step-8 retry | Action-conditioned one-step model, redesigned | Rolled back until a materially different design exists. | Must beat K1 at 1.5M before any 10M run. |
@@ -466,6 +476,18 @@ L1 paired evidence
 ## Exhausted Families
 
 Do not revive these without a materially different mechanism.
+
+### Rejected By Paired Evidence
+
+These are recent L3-L7 regroup variants that should not be rediscovered by
+future audits as "obvious" fixes.
+
+| Variant family | Evidence | Decision |
+|---|---|---|
+| Differential option reward model | `l3-l7-diffreward-paired-10k-225607`: NF zero and Oak beat random `10/10`, but mean reward-rate `-0.003614`, only `2/10` positive reward-rate seeds, no monotonic last-5k acceleration, and worse cumulative reward than the raw-reward keeper (`-23.381` vs `-15.588`). | Rejected; keep raw reward plus duration backup. |
+| All-option model updates / raw plan advantage / current-Q keyboard / direct TD actor / meta-psi credit | 2026-04-23 rapid screens all failed 10k or 50k paired gates despite NF health; signatures were lower reward sum, fewer positive reward-rate seeds, or chatter/action damage. | Do not revive without a new literature-backed search-control or actor-critic mechanism. |
+| Wrapper score/action scaling variants | Gaussian-score standardization, per-coordinate actor alpha, per-coordinate standard score, and behavior-policy birth variants regressed 10k/50k paired screens. | Keep the current wrapper score interface unless paired evidence says otherwise. |
+| Tracking-rate substitutions | `rho`, global-rho, and utility-timescale variants tied to `R` did not improve early reward-rate or 50k reward evidence. | `track_rate(t, baseO)` remains the current structural tracker, not a research invariant. |
 
 | Family | Attempts | Failure signature |
 |---|---|---|

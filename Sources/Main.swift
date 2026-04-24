@@ -7,9 +7,9 @@ import Darwin
 // citation block. This file owns: arena sizing, Metal engine, env-pool FFI, CLI commands
 // (run/diagnose/benchmark), and run-metrics JSON emission.
 //
-// Single-stream commitment: ONE agent instance owns ONE env (numEnvs=1) and processes ONE
-// observation per step. Concurrent benchmarking is achieved by running N independent agent
-// instances in parallel via OperationQueue, never by batching B>1 into one engine.
+// Current stream semantics: ONE agent instance owns ONE env (numEnvs=1) and processes ONE
+// observation per step. Concurrent benchmarking runs N independent agent instances in
+// parallel via OperationQueue; future batched kernels must preserve disjoint per-agent state.
 // =================================================================================================
 
 enum OakError: Error, CustomStringConvertible {
@@ -40,6 +40,12 @@ struct RunHealth: Codable {
     let neverUsedFeatureCount: Double?
     let replacementAgeMean: Double?
     let stateEffectiveRank: Double?
+    let eligibleOptionCount: Double?
+    let eligibleFeatureCount: Double?
+    let replacementCommitRate: Double?
+    let modelUpdateRate: Double?
+    let modelPriorityEntropy: Double?
+    let optionDiffTdMean: Double?
 }
 
 struct RunDiagnostic: Codable {
@@ -241,6 +247,10 @@ private struct HealthAccumulator {
     private var terminationRateLatest = 0.0, optionDurationMeanLatest = 0.0
     private var neverUsedFeatureCountLatest = 0.0, replacementAgeMeanLatest = 0.0
     private var stateEffectiveRankLatest = 0.0
+    private var eligibleOptionCountLatest = 0.0, eligibleFeatureCountLatest = 0.0
+    private var replacementCommitRateLatest = 0.0
+    private var modelUpdateRateLatest = 0.0, modelPriorityEntropyLatest = 0.0
+    private var optionDiffTdMeanLatest = 0.0
     private let trackFloor: Double
 
     init(obsDim: Int) { trackFloor = 1.0 / Double(max(obsDim, 1)) }
@@ -283,6 +293,12 @@ private struct HealthAccumulator {
         neverUsedFeatureCountLatest = Double(stats.neverUsedFeatureCount)
         replacementAgeMeanLatest = Double(stats.replacementAgeMean)
         stateEffectiveRankLatest = Double(stats.stateEffectiveRank)
+        eligibleOptionCountLatest = Double(stats.eligibleOptionCount)
+        eligibleFeatureCountLatest = Double(stats.eligibleFeatureCount)
+        replacementCommitRateLatest = Double(stats.replacementCommitRate)
+        modelUpdateRateLatest = Double(stats.modelUpdateRate)
+        modelPriorityEntropyLatest = Double(stats.modelPriorityEntropy)
+        optionDiffTdMeanLatest = Double(stats.optionDiffTdMean)
     }
 
     var hasMeasuredSteps: Bool { envSteps > 0 }
@@ -307,7 +323,13 @@ private struct HealthAccumulator {
             optionDurationMean: kernelSteps > 0 ? optionDurationMeanLatest : nil,
             neverUsedFeatureCount: kernelSteps > 0 ? neverUsedFeatureCountLatest : nil,
             replacementAgeMean: kernelSteps > 0 ? replacementAgeMeanLatest : nil,
-            stateEffectiveRank: kernelSteps > 0 ? stateEffectiveRankLatest : nil)
+            stateEffectiveRank: kernelSteps > 0 ? stateEffectiveRankLatest : nil,
+            eligibleOptionCount: kernelSteps > 0 ? eligibleOptionCountLatest : nil,
+            eligibleFeatureCount: kernelSteps > 0 ? eligibleFeatureCountLatest : nil,
+            replacementCommitRate: kernelSteps > 0 ? replacementCommitRateLatest : nil,
+            modelUpdateRate: kernelSteps > 0 ? modelUpdateRateLatest : nil,
+            modelPriorityEntropy: kernelSteps > 0 ? modelPriorityEntropyLatest : nil,
+            optionDiffTdMean: kernelSteps > 0 ? optionDiffTdMeanLatest : nil)
     }
 }
 
@@ -377,6 +399,7 @@ private struct KernelConfig {
     var sAlpha: UInt32 = 0, sBeta: UInt32 = 0, sH: UInt32 = 0
     var sNTdMat: UInt32 = 0
     var sOptRewardTd: UInt32 = 0
+    var sOptionDiffTd: UInt32 = 0
     var sDurationTd: UInt32 = 0
     var sDurationHat: UInt32 = 0
     var sQOption: UInt32 = 0     // Per-option Q^k cache (K floats), oak_plan → oak_plan_reduce.
@@ -415,6 +438,10 @@ struct KernelStats {
     var terminationRate: Float = 0, optionDurationMean: Float = 0
     var neverUsedFeatureCount: Float = 0, replacementAgeMean: Float = 0
     var stateEffectiveRank: Float = 0
+    var eligibleOptionCount: Float = 0, eligibleFeatureCount: Float = 0
+    var replacementCommitRate: Float = 0
+    var modelUpdateRate: Float = 0, modelPriorityEntropy: Float = 0
+    var optionDiffTdMean: Float = 0
 }
 
 // =================================================================================================
@@ -509,6 +536,7 @@ private enum OakMetalLayout {
         let alpha, beta, h: Int       // MetaOptimize L-approximation buffers (R floats each).
         let nTdMat: Int               // Dense option-transition TD targets, K*R floats, written by oak_plan.
         let optRewardTd: Int          // Option reward-model TD targets, K floats, written once by oak_plan.
+        let optionDiffTd: Int
         let durationTd, durationHat: Int
         let qOption: Int              // Per-option Q^k cache, K floats, oak_plan → oak_plan_reduce.
         let obsTraceMulti: Int        // Tier I1: (M−1)·baseO multi-timescale obs traces.
@@ -543,6 +571,7 @@ private enum OakMetalLayout {
         let h   = o; o += rank
         let ntd = o; o += K * rank
         let ortd = o; o += K
+        let odiff = o; o += K
         let dtd = o; o += K
         let dhat = o; o += K
         let qo  = o; o += K
@@ -559,7 +588,8 @@ private enum OakMetalLayout {
                      utilFeat: uf, utilOpt: uo, bonusW: bw,
                      planAdv: pa,
                      alpha: al, beta: be, h: h,
-                     nTdMat: ntd, optRewardTd: ortd, durationTd: dtd, durationHat: dhat,
+                     nTdMat: ntd, optRewardTd: ortd, optionDiffTd: odiff,
+                     durationTd: dtd, durationHat: dhat,
                      qOption: qo, obsTraceMulti: otr,
                      prioOpt: prio, continuation: cont, rhoOpt: rhoOpt,
                      replacementAgeMean: ram, total: o)
@@ -961,6 +991,7 @@ final class OakMetalEngine {
         c.sAlpha = UInt32(s.alpha); c.sBeta = UInt32(s.beta); c.sH = UInt32(s.h)
         c.sNTdMat = UInt32(s.nTdMat)
         c.sOptRewardTd = UInt32(s.optRewardTd)
+        c.sOptionDiffTd = UInt32(s.optionDiffTd)
         c.sDurationTd = UInt32(s.durationTd)
         c.sDurationHat = UInt32(s.durationHat)
         c.sQOption = UInt32(s.qOption)

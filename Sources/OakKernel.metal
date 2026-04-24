@@ -1,30 +1,17 @@
 // =================================================================================================
-// OakKernel.metal — Orthodox Step 11 Oak agent. Single-stream (B=1), Metal 4 ICB.
+// OakKernel.metal — Orthodox Step 11 Oak agent. One continuing stream per agent, Metal 4 ICB.
 //
-// What the Plan demands (Sutton-Bowling-Pilarski 2022 arXiv:2208.11173, Step 11):
-//   Perception                       → oak_encode (deep Fourier features over std_obs)
-//   Value function                   → valueW (main GVF, differential, ρ̄-centered)
-//   K subtask GVFs (RR-Subtasks)     → psi (cumulant=reward, stopping=feature attainment)
-//   K option policies                → optPolicy (Design A keyboard, blended by chord)
-//   K option reward + transition     → optReward, optTransition (RR-Subtasks eq. 17, dense)
-//   Planning over option models      → oak_plan + oak_plan_reduce (eq. 19, async VI)
-//   Option keyboard chord            → oak_meta (chord = softmax_k(ψ(s')))
-//   Feedback / utility / remove-replace → oak_post_learn (utility EMAs) + oak_bk_admit_commit (G&T)
-//   Average-reward (no discount)     → ρ̄ EMA (Reward Centering 2405.09999)
-//   Per-feature step sizes (Step 1)  → MetaOptimize L-approximation in oak_post_learn
-//                                       (Sharifnassab-Salehkaleybar-Sutton 2024 arXiv:2402.02342)
+// Step 11 pieces: perception, differential value, RR subtask GVFs, option policies,
+// stopping-aware option models, average-reward planning, keyboard chord, utility feedback,
+// generate-and-test replacement, reward centering, and per-feature MetaOptimize step sizes.
 //
 // Pipeline (5 fused kernels per step, Metal 4 ICB, fixed grid widths for the engine's lifetime):
 //   bk_encode(+meta_predict) → plan → plan_reduce → learn_heads → post_learn(+G&T commit)
 //
-// Telemetry kept to what the host can't observe: per-phase non-finite counters and cumulative
-// reinit counts. RewardRate, chatter, and scoreGrad L2 are host-derived from env signals.
+// Telemetry here is kernel-only health; rewardRate, chatter, and scoreGrad L2 are host-derived.
 //
-// Optimization phase contract (see docs/roadmap.md): bit-identical kernel changes (kernel splits,
-// per-thread parallelism without cross-thread reductions, pre-computed constants in KernelConfig)
-// ship freely; FP-reorder optimizations (simd_sum, threadgroup reductions where input order
-// changes) require per-seed parity proof on the 10×1.5M paired bench. simd_max is associative
-// and is bit-identical for max-reductions; simd_sum is not.
+// Optimization contract lives in docs/roadmap.md. Reductions feeding agent state must preserve
+// intelligence unless a paired parity bench proves otherwise.
 // =================================================================================================
 #include <metal_stdlib>
 #include <float.h>
@@ -72,7 +59,7 @@ struct KernelConfig {
     // Per-option reward-model TD targets, K floats. Written once by oak_plan lane 0
     // as reward - optReward[k]·prev, consumed by oak_learn_heads Head 3 for every
     // optReward[k,i] weight. Avoids K*R duplicate dot products in learn_heads.
-    uint sOptRewardTd;
+    uint sOptRewardTd, sOptionDiffTd;
     uint sDurationTd, sDurationHat;
     // Per-option Q^k cache, K floats. Written by oak_plan (lane 0 of TG k), consumed by
     // oak_plan_reduce for the simd_max + planAdv soft-bound.
@@ -114,6 +101,8 @@ struct KernelStats {
     float chordEffectiveK;
     float rrBonusMean, psiStopGapMean, terminationRate, optionDurationMean;
     float neverUsedFeatureCount, replacementAgeMean, stateEffectiveRank;
+    float eligibleOptionCount, eligibleFeatureCount, replacementCommitRate;
+    float modelUpdateRate, modelPriorityEntropy, optionDiffTdMean;
 };
 
 // safe_w: NF-guarded weight write. Preserves prev value on non-finite — no zero-clamp, no
@@ -165,6 +154,7 @@ struct Ctx {
     device float *alpha, *beta, *hMeta;        // MetaOptimize L-approximation per-feature buffers.
     device float *nTdMat;                      // Dense optTransition TD targets, K*R floats.
     device float *optRewardTd;                 // Option reward-model TD targets, K floats.
+    device float *optionDiffTd;                 // Planning-relevant differential reward TD, K floats.
     device float *durationTd, *durationHat;     // Average-reward option duration targets/preds, K floats each.
     device float *qOption;                     // Per-option Q^k cache, K floats.
     device float *obsTraceMulti;               // Tier I1: (M−1)·baseO multi-timescale obs traces.
@@ -218,6 +208,7 @@ inline Ctx make_ctx(device float *params, device float *stateArena, device uint 
     c.hMeta           = stateArena + cfg.sH;
     c.nTdMat          = stateArena + cfg.sNTdMat;
     c.optRewardTd     = stateArena + cfg.sOptRewardTd;
+    c.optionDiffTd    = stateArena + cfg.sOptionDiffTd;
     c.durationTd      = stateArena + cfg.sDurationTd;
     c.durationHat     = stateArena + cfg.sDurationHat;
     c.qOption         = stateArena + cfg.sQOption;
@@ -468,32 +459,9 @@ kernel void oak_bk_encode(
 }
 
 // =================================================================================================
-// 5. oak_plan - parallel asynchronous VI over DENSE option models (RR-Subtasks eq. 17 + 19)
-//    + Tier D2 (Plan Step 9, prioritized sweeping; Moore-Atkeson 1993, Plan footnote 13)
-//    in-line per-option priority computation.
-//
-//    K·R-thread parallel: K threadgroups, R threads each (one TG per option k, one thread
-//    per output dim j). Each (k, j) thread computes one row of the dense option transition,
-//    fuses the curr and prev passes into a single R-load over `optTransition[k][j][:R]`,
-//    and writes nTdMat[k·R + j] = target_j − n̂^k_j(prev) directly. Each thread stores its
-//    `nHatCurr` into threadgroup memory AND a value-relevant transition TD contribution
-//    into a parallel threadgroup array — both writes go BEFORE the same single barrier.
-//
-//    Lane 0 of each TG runs a single R-loop that interleaves three accumulators:
-//      vHat^k     = Σ_j valueW[j] · nHatCurr_j      (strict j=0..R-1 fma order, bit-identical)
-//      ntdSqSum^k = Σ_j valueW[j]^2 · n_td_j^2      (value-relevant transition error)
-//      rHat^k     = Σ_i optReward[k][i] · curr[i]   (separate i-loop, R fma)
-//    Lane 0 then writes:
-//      qOption[k]  = isfinite(Q) ? Q : -FLT_MAX,                      (existing)
-//      prioOpt[k]  = chord[k] · sqrt(value-relevant transition error
-//                    + reward-TD² + (rho · duration-TD)²), NF-clamped.
-//
-//    The cross-K mean (meanPrio = mean_k prioOpt[k]) and Q^k max (bestQ = max_k Q^k) both
-//    run in the follow-up `oak_plan_reduce` kernel (K threads, single simdgroup, simd_sum +
-//    simd_max — both are associative/bit-id-safe for their respective ops).
-//
-//    Compute budget is parametric in K and R. Per-thread inner cost is 2R FMA plus local
-//    priority work; per-TG lane-0 reductions are R-wide and preserve the documented fma order.
+// 5. oak_plan - K x R dense option-model backup. Each option threadgroup computes
+//    stopping-aware transition TDs, raw reward TD, duration TD, and
+//    Q(s,o)=rHat-rho*lHat+V(nHat). Priority is chord-weighted value-relevant model error.
 // =================================================================================================
 kernel void oak_plan(
     device float         *params      [[buffer(0)]],
@@ -577,6 +545,8 @@ kernel void oak_plan(
         float rTdSafe = isfinite(rTd) ? rTd : 0.0f;
         float dTdSafe = isfinite(dTd) ? dTd : 0.0f;
         ctx.optRewardTd[k] = rTdSafe;
+        float dErr = ctx.scalars->rho * dTdSafe;
+        ctx.optionDiffTd[k] = rTdSafe - dErr;
         ctx.durationTd[k] = dTdSafe;
         ctx.durationHat[k] = lHat;
 
@@ -588,7 +558,6 @@ kernel void oak_plan(
         // Tier D2 priority write: chord-weighted model TD error in value units. Duration
         // matters to planning only through `rho * lHat`, so its priority component uses the
         // same differential scale. NF-clamp makes dirty options lowest-priority.
-        float dErr = ctx.scalars->rho * dTdSafe;
         float modelErr = ntdSqSum + rTdSafe * rTdSafe + dErr * dErr;
         bool prioFinite = isfinite(modelErr) && (modelErr > 0.0f);
         ctx.prioOpt[k]  = prioFinite ? (ctx.chord[k] * sqrt(modelErr)) : 0.0f;
@@ -596,14 +565,8 @@ kernel void oak_plan(
 }
 
 // =================================================================================================
-// 5b. oak_plan_reduce - cross-option max over qOption[K] + Tier D2 (Plan Step 9) cross-option
-//    mean over prioOpt[K], then the planAdv soft-bound `(bestQ − V(s)) / (1 + |bestQ − V(s)|)`.
-//    K threads = single simdgroup. Both reductions are simdgroup-wide:
-//      bestQ    = simd_max(Q)         — bit-identical (max is associative + commutative)
-//      meanPrio = simd_sum(prio) / K  — new reduction, no prior bit-id baseline applies
-//    Lane 0 computes V(curr), planAdv, AND writes meanPrio to scalars (broadcast-cached for
-//    every oak_learn_heads Head 4 thread to read in one cycle — vs the alternative of
-//    making every Head 4 thread compute the same K-element reduction).
+// 5b. oak_plan_reduce - cross-option best Q, mean priority, plan advantage, and compact
+//     search-control/duration diagnostics.
 // =================================================================================================
 kernel void oak_plan_reduce(
     device float         *params      [[buffer(0)]],
@@ -627,6 +590,9 @@ kernel void oak_plan_reduce(
     float prio    = active ? ctx.prioOpt[k] : 0.0f;
     if (!isfinite(prio)) prio = 0.0f;
     float prioSum = simd_sum(prio);
+    float diffTd = active ? fabs(ctx.optionDiffTd[k]) : 0.0f;
+    if (!isfinite(diffTd)) diffTd = 0.0f;
+    float diffTdSum = simd_sum(diffTd);
     float dur = active ? ctx.durationHat[k] : 0.0f;
     if (!isfinite(dur)) dur = 0.0f;
     float durSum = simd_sum(dur);
@@ -649,6 +615,24 @@ kernel void oak_plan_reduce(
         ctx.scalars->meanPrio = isfinite(meanPrio) ? meanPrio : 0.0f;
         float durMean = durSum * invK;
         ctx.stats->optionDurationMean = isfinite(durMean) ? durMean : ctx.stats->optionDurationMean;
+        float diffMean = diffTdSum * invK;
+        ctx.stats->optionDiffTdMean = isfinite(diffMean) ? diffMean : ctx.stats->optionDiffTdMean;
+
+        float updateCount = 0.0f;
+        float entropy = 0.0f;
+        for (uint kk = 0u; kk < ctx.K; ++kk) {
+            float pk = ctx.prioOpt[kk];
+            if (!isfinite(pk)) pk = 0.0f;
+            if (isfinite(meanPrio) && !(pk < meanPrio)) updateCount += 1.0f;
+            if (prioSum > 0.0f && pk > 0.0f) {
+                float p = pk / prioSum;
+                entropy -= p * log(p);
+            }
+        }
+        float updateRate = updateCount * invK;
+        ctx.stats->modelUpdateRate = isfinite(updateRate) ? updateRate : ctx.stats->modelUpdateRate;
+        float normEntropy = (ctx.K > 1u) ? (entropy / log(float(ctx.K))) : 0.0f;
+        ctx.stats->modelPriorityEntropy = isfinite(normEntropy) ? normEntropy : ctx.stats->modelPriorityEntropy;
     }
 }
 
@@ -936,28 +920,8 @@ kernel void oak_post_learn(
 }
 
 // =================================================================================================
-// 10. oak_bk_admit_commit - Oak feedback: every-step assessment plus age-gated remove/replace
-//     for option bundles and unused feature candidates (Plan Step 11 + Step 2 generate-and-test).
-//
-//     Single threadgroup, multi-thread:
-//       Phase 1 (lane 0):  find worstK + worstI via linear scan; sample two parent
-//                          pre-activations from paired utility mass (Tier K2); bump
-//                          cumulative counters. Writes worstK, worstI, preA/preB, and the
-//                          compose/fallback flag into threadgroup memory.
-//       Barrier            (mem_threadgroup)
-//       Phase 2 (all lanes): cooperative parallel reseed of the worstK weight slices
-//                          (psi, optReward, optPolicy, optTransition) plus the worstI
-//                          Fourier encoder row, distributed by `tid`. Encoder row is either
-//                          a stochastic composition of two sampled parents or the prior
-//                          fresh-random fallback when utility mass is insufficient.
-//       Barrier
-//       Phase 3 (lane 0):  scalar resets (utilOpt, utilFeat, phase, MetaOptimize) +
-//                          slot toggle + stepCount increment + stats surface.
-//
-//     Lane 0 captures `stepCount` BEFORE the increment so all reseed hashes match the
-//     prior single-threaded kernel byte-for-byte (deterministic seed equivalence).
-//     One Metal threadgroup keeps occupancy modest; the dominant optTransition slice is
-//     K·R² writes, distributed cooperatively across active lanes.
+// 10. oak_bk_admit_commit - every-step Step-11 assessment with structural age/capacity-gated
+//     commits. Lane 0 chooses candidates and all lanes cooperatively reseed affected bundles.
 // =================================================================================================
 inline void oak_bk_admit_commit_body(
     device float         *params,
@@ -994,16 +958,16 @@ inline void oak_bk_admit_commit_body(
         uint tryOpt = (hash_uniform(stepC, ctx.R, 0x51f15eedu) < admitRate) ? 1u : 0u;
         uint tryFeat = (hash_uniform(stepC, ctx.R, 0xa17c9e3du) < admitRate) ? 1u : 0u;
 
-        uint wK = 0u, replaceOpt = 0u;
+        uint wK = 0u, replaceOpt = 0u, eligibleOpt = 0u;
         float worstOptScore = FLT_MAX;
-        if (tryOpt != 0u) {
-            for (uint k = 0u; k < ctx.K; ++k) {
-                if (ctx.optAge[k] < ctx.R) continue;
-                float s = ctx.utilOpt[k] + ctx.prioOpt[k];
-                if (!isfinite(s)) s = -FLT_MAX;
-                if (s < worstOptScore) { worstOptScore = s; wK = k; replaceOpt = 1u; }
-            }
+        for (uint k = 0u; k < ctx.K; ++k) {
+            if (ctx.optAge[k] < ctx.R) continue;
+            eligibleOpt += 1u;
+            float s = ctx.utilOpt[k] + ctx.prioOpt[k];
+            if (!isfinite(s)) s = -FLT_MAX;
+            if (s < worstOptScore) { worstOptScore = s; wK = k; }
         }
+        replaceOpt = (tryOpt != 0u && eligibleOpt > 0u) ? 1u : 0u;
 
         uint candidateI = replaceOpt ? (ctx.optFeature[wK] % ctx.R) : 0u;
         if (replaceOpt != 0u) {
@@ -1027,27 +991,26 @@ inline void oak_bk_admit_commit_body(
             }
         }
 
-        uint wI = 0u, replaceFeat = 0u;
+        uint wI = 0u, replaceFeat = 0u, eligibleFeat = 0u;
         float worstPair = FLT_MAX;
-        if (tryFeat != 0u) {
-            for (uint p = 0u; p < halfR; ++p) {
-                bool pairAssigned = false;
-                for (uint k = 0u; k < ctx.K; ++k) {
-                    uint of = ctx.optFeature[k] % ctx.R;
-                    pairAssigned = pairAssigned || (of == p) || (of == p + halfR);
-                }
-                uint candPre = (candidateI < halfR) ? candidateI : candidateI - halfR;
-                if (pairAssigned || (replaceOpt != 0u && p == candPre)) continue;
-                if (ctx.featureAge[p] < ctx.R && ctx.featureAge[p + halfR] < ctx.R) continue;
-                float pairU = ctx.utilFeat[p] + ctx.utilFeat[p + halfR];
-                if (!isfinite(pairU)) pairU = -FLT_MAX;
-                if (pairU < worstPair) {
-                    worstPair = pairU;
-                    wI = (ctx.utilFeat[p] <= ctx.utilFeat[p + halfR]) ? p : p + halfR;
-                    replaceFeat = 1u;
-                }
+        for (uint p = 0u; p < halfR; ++p) {
+            bool pairAssigned = false;
+            for (uint k = 0u; k < ctx.K; ++k) {
+                uint of = ctx.optFeature[k] % ctx.R;
+                pairAssigned = pairAssigned || (of == p) || (of == p + halfR);
+            }
+            uint candPre = (candidateI < halfR) ? candidateI : candidateI - halfR;
+            if (pairAssigned || (replaceOpt != 0u && p == candPre)) continue;
+            if (ctx.featureAge[p] < ctx.R && ctx.featureAge[p + halfR] < ctx.R) continue;
+            eligibleFeat += 1u;
+            float pairU = ctx.utilFeat[p] + ctx.utilFeat[p + halfR];
+            if (!isfinite(pairU)) pairU = -FLT_MAX;
+            if (pairU < worstPair) {
+                worstPair = pairU;
+                wI = (ctx.utilFeat[p] <= ctx.utilFeat[p + halfR]) ? p : p + halfR;
             }
         }
+        replaceFeat = (tryFeat != 0u && eligibleFeat > 0u) ? 1u : 0u;
 
         float ageSum = 0.0f;
         float ageN = 0.0f;
@@ -1063,6 +1026,8 @@ inline void oak_bk_admit_commit_body(
         candidateI_tg = candidateI;
         replaceOpt_tg = replaceOpt;
         replaceFeat_tg = replaceFeat;
+        ctx.stats->eligibleOptionCount = float(eligibleOpt);
+        ctx.stats->eligibleFeatureCount = float(eligibleFeat);
 
         uint preTarget = (wI < halfR) ? wI : wI - halfR;
         uint preA = 0u;
@@ -1295,6 +1260,9 @@ inline void oak_bk_admit_commit_body(
         ctx.stats->tdPsiNonFiniteCount     = float(ctx.counters[OAK_CNT_TDPSI_NF]);
         ctx.stats->oakOptionReinitCount    = float(ctx.counters[OAK_CNT_REINIT_OPT]);
         ctx.stats->oakFeatureReinitCount   = float(ctx.counters[OAK_CNT_REINIT_FEAT]);
+        float commitDenom = 2.0f * float(max(stepC + 1u, 1u));
+        float commitRate = float(ctx.counters[OAK_CNT_REINIT_OPT] + ctx.counters[OAK_CNT_REINIT_FEAT]) / commitDenom;
+        ctx.stats->replacementCommitRate = isfinite(commitRate) ? commitRate : ctx.stats->replacementCommitRate;
 
         ctx.scalars->stateSlot = 1u - ctx.stateSlot;
         ctx.scalars->stepCount = stepC + 1u;
