@@ -39,12 +39,12 @@ Planning runs continually over the transition model. Eligibility traces are ment
 
 Strict current-status audit lives in `docs/roadmap.md`. The literature target is:
 
-- Subtasks defined by features (cumulant = reward, stopping value = feature attainment per Reward-Respecting Subtasks [arXiv:2202.03466](https://arxiv.org/abs/2202.03466) eq. 4). **Current L3-L7 OaK has the RR stopping-value branch live; benchmark promotion is still open.**
-- Options = policies + termination. **Current L3-L7 continuation is derived from the RR stopping comparison, not H1 model-confidence hysteresis.**
+- Subtasks defined by features (cumulant = reward, stopping value = feature attainment per Reward-Respecting Subtasks [arXiv:2202.03466](https://arxiv.org/abs/2202.03466) eq. 4). **Current rebuild OaK has the RR stopping-value branch live; benchmark promotion is still open.**
+- Options = policies + termination. **Current rebuild continuation is derived from the RR stopping comparison, not H1 model-confidence hysteresis.**
 - Option models r̂(s,o), n̂(s,o), and for average-reward options duration l̂(s,o), used for planning. **Current L3-L7 keeps the orthodox raw option-reward-plus-duration form: `Q = rHat - rho*lHat + V(nHat)`. A coherent differential option-reward alternative was tested and rejected by the 10k paired gate, so do not revive it without materially new evidence.**
 - Planning over option models (RR-Subtasks eq. 19 / average-reward option backup).
 - **Option keyboard** = real-valued vector λ ∈ R^K, one component per subtask. Design A: chord blends K component options; model treats chord as opaque descriptor. Design B: chord defines a joint subtask. **Current OaK blends policies but does not yet learn a chord-descriptor model.**
-- **Feedback / utility / remove-replace.** Continually assess utility of features, subtasks, options, and option models. Replace what isn't pulling weight (Plan Step 11 + RR-Subtasks §8 FCSTOMP). **Current L3-L7 has age-gated option/feature replacement, `optFeature`, feature age, option age, and feature-ever-used metadata; richer utility remains an active research frontier.**
+- **Feedback / utility / remove-replace.** Continually assess utility of features, subtasks, options, and option models. Replace what isn't pulling weight (Plan Step 11 + RR-Subtasks §8 FCSTOMP). **Current rebuild has age-gated feature/option-bundle replacement, `optFeature`, feature age, option age, and feature-ever-used metadata; richer utility remains an active research frontier.**
 
 ### What the Plan eschews
 
@@ -77,34 +77,32 @@ The agent is a focused-kernel single-stream Oak prototype over the Plan steps. K
 
 | Head | Shape | Role |
 |---|---|---|
-| `encoder`, `phase` | 0 in the default rebuild | Deep Fourier features are no longer the default path. They remain reserved layout names only until the greenfield cleanup removes them entirely. |
 | `valueW` | R | Main value GVF (cumulant = reward, differential, ρ̄-centered). |
 | `psi` | K · R | K=R feature-indexed RR subtask GVFs. Cumulant is shared average-reward-centered reward; stopping value is RR Eq. 4: `V(s') - valueW[i]·x_i(s') + bonusW[i]·x_i(s')`. |
-| `psiCross` | K · K · R | Design-A option-keyboard cross-subtask evaluation. Hot behavior uses the current highest-need internal key; the full cross head remains learned pagewise. |
+| `psiCross` | K · K · R | Design-A option-keyboard cross-subtask evaluation. Dense internal λ is evaluated through cached/pagewise GPE scores. |
 | `optValue` | K · R | Average-reward intra-option differential value head for Wan-Naik-Sutton-style option TD diagnostics and future policy coupling. |
 | `optPolicy` | K · D · R | K component policies. The wrapper samples the selected behavior option and returns exact one-step importance ratios for the active bank. |
 | `optReward` | K · R | K stopping-aware option reward models r̂^k. |
 | `optTransition` | K · R · R | K dense stopping-aware transition models `n̂^k_j(s) = Σ_i w^k_{j,i}·s[i]`. |
 | `optDuration` | K · R | K average-reward option-duration models l̂^k with a structural one-step lower bound at decode. |
 | `oneReward`, `oneTransition` | `(R + D)`, `R · (R + D)` | Step-8 one-step shadow model over `(state, actionSignal)`. It reports value-relevance diagnostics and does not yet drive planning. |
+| `gvfRate`, `gvfValue` | anchors, anchors · R | Compact average-reward GVF bank over experience signals with explicit cumulant-rate and differential-value separation. It is diagnostic until stability evidence promotes it into replacement utility. |
 
 State representation is normalized linear anchors plus constructed feature slots. Anchors are deterministic projections over normalized observation traces, previous action descriptor, and previous reward; constructed slots are replaceable signed products/sums/residuals of useful parents. Per-feature alpha is achieved structurally by MetaOptimize-style step sizes plus age/utility replacement.
 
-### Pipeline (focused Metal dispatches per step, Metal 4 ICB)
+### Pipeline (5 Metal dispatches per step, direct command encoding)
 
 ```
-oak_encode → oak_keyboard_predict → oak_plan → oak_plan_reduce → oak_learn_heads → oak_action_emit → oak_replace
+oak_encode(+keyboard_predict) → oak_plan → oak_plan_reduce → oak_learn_heads → oak_replace(+action_emit)
 ```
 
 | Kernel | What it does |
 |---|---|
-| `oak_encode` | Updates observation/traces and builds normalized anchor/constructed state features. |
-| `oak_keyboard_predict` | Updates value TD, RR subtask TD, option-value TD, RR continuation, and Design-A GPI behavior selection. |
-| `oak_plan` | Updates the scheduled option page's stopping-aware model TDs, duration TDs, raw-reward option model, and one-step shadow diagnostics. |
-| `oak_plan_reduce` | Reduces model Q/priority and selects high-priority/stale model pages for fair search control. |
-| `oak_learn_heads` | Updates value, option value, psi, psiCross, option policy, option reward/transition/duration, and one-step shadow heads using exact one-step ratios. |
-| `oak_action_emit` | Emits all option policy means and the selected behavior option mean for the wrapper. |
-| `oak_replace` | Runs utility/meta-learning diagnostics every step and commits age/capacity-gated feature/option replacements. |
+| `oak_encode` | Updates observation/traces, builds normalized anchor/constructed state features, then runs keyboard/prediction: value TD, average-reward GVF TDs, RR subtask TD, option-value TD, RR continuation, dense λ, and Design-A GPI behavior selection. |
+| `oak_plan` | Updates the scheduled option page/slots' stopping-aware model TDs, duration TDs, raw-reward option model, and one-step shadow diagnostics. |
+| `oak_plan_reduce` | Reduces model Q/priority and selects high-priority/stale model pages for fair search control. When K fits one SIMD page, the whole option bank is planned. |
+| `oak_learn_heads` | Updates value, average-reward GVFs, option value, psi, psiCross, option policy, option reward/transition/duration, and one-step shadow heads using exact one-step ratios. |
+| `oak_replace` | Emits all option policy means and the selected behavior option mean, runs utility/meta-learning diagnostics every step, and commits age/capacity-gated feature/option-bundle replacements. |
 
 ### Action interface (Inv-1)
 
@@ -116,6 +114,7 @@ The agent emits `policyMean[D_policy]` from `oak_meta_action`. The env-wrapper l
 - Box A: exposes `2A` policy coordinates, `[μ_0...μ_A, logσ_0...logσ_A]`. The wrapper samples `μ + σ·N(0,1)` and clamps only the env-facing action. `σ` starts at one policy-coordinate unit, `1/D_policy`, then the actor can adapt it. The mean score uses the compatible/natural variance-scaled form `z·σ`; the scale score is `z²−1`. This replaces the old `1/√A` rule, which is empirical history, not an invariant.
 
 Adding a new env or action-space component type requires adding to `ActionComponent` in Swift; no agent or kernel changes.
+`doneCount` is a wrapper random-restart metric, not an episode signal to OaK; the engine state is never reset on `done`.
 
 ## Run metrics JSON
 
@@ -128,12 +127,14 @@ Each `run`, `diagnose`, and `benchmark` writes one pretty-printed JSON file with
 - `rewardRate` — host-tracked ρ̄ via incremental EMA (Reward Centering).
 - `actionDeltaL2Mean` — mean L2 of consecutive `policyMean` deltas.
 - `scoreGradL2Mean` — mean L2 of `scoreGrad`.
+- `continuingRestartCount` — mirror of wrapper `doneCount`, named to make clear that terminal events are random restarts outside the agent.
 
 Kernel-side fields are populated only for `oak`:
 
 - `oakOptionReinitCountFinal`, `oakFeatureReinitCountFinal` — cumulative age-gated generate-and-test replacement counts.
 - `nonFiniteByPhase` = `{"encode": N, "learn": N, "plan": N, "tdPsi": N}` — per-phase NF counts. **Healthy = all zeros across the run.**
 - Search/replacement diagnostics: `eligibleOptionCount`, `eligibleFeatureCount`, `replacementCommitRate`, `modelUpdateRate`, `modelPriorityEntropy`, `optionDiffTdMean`.
+- GVF/keyboard diagnostics: `gvfCount`, `gvfRateMean`, `gvfTdMean`, `gvfDifferentialValueMean`, `gvfUtilityMean`, `lambdaEffectiveRank`, `lambdaPlanMass`, `lambdaRrMass`, `lambdaUtilityMass`, `keyboardCacheCoverage`, `keyboardScoreStaleness`.
 
 **Storage.** Default directory `.oak-benchmarks/<run-id>/`, with `<run-root>/<envId>/seed<N>/<stem>.json` for finals and `<stem>.heartbeat-NNNNNN.json` for pulses. Override the run root with `OAK_METRICS_STORAGE`.
 

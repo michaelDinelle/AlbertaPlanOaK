@@ -27,6 +27,7 @@ struct RunHealth: Codable {
     let rewardRate: Double?
     let actionDeltaL2Mean: Double?
     let scoreGradL2Mean: Double?
+    let continuingRestartCount: Double?
     // Kernel-side (only present for oak):
     let oakOptionReinitCountFinal: Int?, oakFeatureReinitCountFinal: Int?
     let nonFiniteByPhase: [String: Int]?
@@ -35,6 +36,10 @@ struct RunHealth: Codable {
     let chordEffectiveK: Double?
     let rrBonusMean: Double?
     let psiStopGapMean: Double?
+    let psiStopGapAbsMean: Double?
+    let psiAbsMean: Double?
+    let rrStopAbsMean: Double?
+    let valueAbsMean: Double?
     let terminationRate: Double?
     let optionDurationMean: Double?
     let neverUsedFeatureCount: Double?
@@ -71,6 +76,17 @@ struct RunHealth: Codable {
     let modelQueueCoverage: Double?
     let modelUncertaintyMean: Double?
     let stalePageAgeMean: Double?
+    let gvfCount: Double?
+    let gvfRateMean: Double?
+    let gvfTdMean: Double?
+    let gvfDifferentialValueMean: Double?
+    let gvfUtilityMean: Double?
+    let lambdaEffectiveRank: Double?
+    let lambdaPlanMass: Double?
+    let lambdaRrMass: Double?
+    let lambdaUtilityMass: Double?
+    let keyboardCacheCoverage: Double?
+    let keyboardScoreStaleness: Double?
 }
 
 struct RunDiagnostic: Codable {
@@ -98,169 +114,6 @@ private struct RunMetricsFile: Encodable {
     let agentStepMsMean: Double, envStepMsMean: Double
     let discreteAction: DiscreteActionMetrics?, continuousAction: ContinuousActionMetrics?
     let health: RunHealth?, diagnostic: RunDiagnostic?
-}
-
-// =================================================================================================
-// Action sampling - the SOLE site that knows action-space type (Inv-1 boundary). Agent emits
-// policyMean[D]; wrapper composes per-component sampling and matching score function.
-// =================================================================================================
-struct PolicyMeanBatch {
-    let values: [Float]
-    let dPolicy: Int
-    let optionValues: [Float]?
-    let selectedOption: Int?
-}
-
-enum ActionComponent {
-    case discrete(n: Int)
-    case box(n: Int, low: [Float], high: [Float])
-
-    var paramCount: Int {
-        switch self {
-        case .discrete(let n): return n
-        case .box(let n, _, _): return 2 * n
-        }
-    }
-    var envActionWidth: Int {
-        switch self {
-        case .discrete: return 1
-        case .box(let n, _, _): return n
-        }
-    }
-}
-
-extension Sequence where Element == ActionComponent {
-    var totalPolicyParamCount: Int { reduce(0) { $0 + $1.paramCount } }
-    var totalEnvActionWidth: Int   { reduce(0) { $0 + $1.envActionWidth } }
-}
-
-// Wrapper-side action sampling. Discrete: Gumbel-max with score 1{a=d}-π_d.
-// Box: Gaussian with μ and log-σ policy coordinates; mean score uses Williams variance scaling.
-// The wrapper also emits the sampled action in D_policy coordinates for the agent's experience stream.
-func sampleAndScoreActions(spec: [ActionComponent], numEnvs: Int, dPolicy: Int,
-                           envActionWidth: Int,
-                           policyMean: UnsafePointer<Float>,
-                           optionPolicyMean: UnsafePointer<Float>?,
-                           optionCount: Int,
-                           envAction: UnsafeMutablePointer<Float>,
-                           actionSignal: UnsafeMutablePointer<Float>,
-                           scoreGrad: UnsafeMutablePointer<Float>,
-                           importance: UnsafeMutablePointer<Float>?,
-                           importanceLog: UnsafeMutablePointer<Float>?,
-                           optionLogProbScratch: UnsafeMutablePointer<Float>?,
-                           rngState: inout UInt64) {
-    func nextU01(_ s: inout UInt64) -> Float {
-        s &+= 0x9e3779b97f4a7c15
-        var z = s
-        z = (z ^ (z &>> 30)) &* 0xbf58476d1ce4e5b9
-        z = (z ^ (z &>> 27)) &* 0x94d049bb133111eb
-        z ^= z &>> 31
-        return Float(z >> 40) * (1.0 / Float(1 << 24))
-    }
-    func nextNormal(_ s: inout UInt64) -> Float {
-        let u1 = max(nextU01(&s), 1e-7)
-        let u2 = nextU01(&s)
-        return sqrt(-2 * log(u1)) * cos(2 * Float.pi * u2)
-    }
-    for r in 0..<numEnvs {
-        let mBase = r * dPolicy
-        let aBase = r * envActionWidth
-        var pIdx = 0, aIdx = 0
-        for k in 0..<max(optionCount, 0) {
-            importance?[r * optionCount + k] = 0
-            importanceLog?[r * optionCount + k] = 0
-            optionLogProbScratch?[r * optionCount + k] = 0
-        }
-        var behaviorLogProb: Float = 0
-        for component in spec {
-            switch component {
-            case .discrete(let n):
-                var maxLogit = -Float.greatestFiniteMagnitude
-                for d in 0..<n { maxLogit = max(maxLogit, policyMean[mBase + pIdx + d]) }
-                var bestIdx = 0
-                var bestKey = -Float.greatestFiniteMagnitude
-                for d in 0..<n {
-                    let l = policyMean[mBase + pIdx + d]
-                    let u = max(nextU01(&rngState), 1e-7)
-                    let g = -log(-log(u))
-                    let key = l + g
-                    if key > bestKey { bestKey = key; bestIdx = d }
-                }
-                var Z: Float = 0
-                for d in 0..<n { Z += exp(policyMean[mBase + pIdx + d] - maxLogit) }
-                let invZ: Float = 1.0 / max(Z, .leastNormalMagnitude)
-                for d in 0..<n {
-                    let pi_d = exp(policyMean[mBase + pIdx + d] - maxLogit) * invZ
-                    scoreGrad[mBase + pIdx + d] = ((d == bestIdx) ? 1.0 : 0.0) - pi_d
-                    actionSignal[mBase + pIdx + d] = (d == bestIdx) ? 1.0 : 0.0
-                }
-                behaviorLogProb += log(max(exp(policyMean[mBase + pIdx + bestIdx] - maxLogit) * invZ,
-                                           .leastNormalMagnitude))
-                if let opt = optionPolicyMean {
-                    for k in 0..<optionCount {
-                        let base = (r * optionCount + k) * dPolicy + pIdx
-                        var optMax = -Float.greatestFiniteMagnitude
-                        for d in 0..<n { optMax = max(optMax, opt[base + d]) }
-                        var optZ: Float = 0
-                        for d in 0..<n { optZ += exp(opt[base + d] - optMax) }
-                        let p = exp(opt[base + bestIdx] - optMax) / max(optZ, .leastNormalMagnitude)
-                        optionLogProbScratch?[r * optionCount + k] += log(max(p, .leastNormalMagnitude))
-                    }
-                }
-                envAction[aBase + aIdx] = Float(bestIdx)
-                pIdx += n; aIdx += 1
-            case .box(let a, let low, let high):
-                // Continuous actor-critic policy (Williams 1992; Degris-Pilarski-Sutton 2012):
-                // μ and log-σ are separate policy outputs. σ starts at one policy-coordinate
-                // unit, 1/D_policy, then the actor can adapt it.
-                let sigmaBase: Float = 1.0 / Float(max(dPolicy, 1))
-                let scaleBase = pIdx + a
-                for d in 0..<a {
-                    let z = nextNormal(&rngState)
-                    let mu = policyMean[mBase + pIdx + d]
-                    let rawLogSigma = policyMean[mBase + scaleBase + d]
-                    let logSigma = rawLogSigma.isFinite ? rawLogSigma : 0
-                    let sigmaRaw = sigmaBase * exp(logSigma)
-                    let sigma = (sigmaRaw.isFinite && sigmaRaw > 0) ? sigmaRaw : sigmaBase
-                    let raw = mu + sigma * z
-                    let clamped = max(low[d], min(high[d], raw.isFinite ? raw : 0))
-                    envAction[aBase + aIdx + d] = clamped
-                    actionSignal[mBase + pIdx + d] = clamped
-                    actionSignal[mBase + scaleBase + d] = 0
-                    // Env-side clamp affects the env's view only. Williams/Degris AC-S scales
-                    // the Gaussian mean score by σ², so (z/σ)·σ² = z·σ.
-                    scoreGrad[mBase + pIdx + d] = z * sigma
-                    scoreGrad[mBase + scaleBase + d] = z * z - 1.0
-                    behaviorLogProb += -log(max(sigma, .leastNormalMagnitude)) - 0.5 * z * z
-                    if let opt = optionPolicyMean {
-                        for k in 0..<optionCount {
-                            let base = (r * optionCount + k) * dPolicy
-                            let optMu = opt[base + pIdx + d]
-                            let optRawLogSigma = opt[base + scaleBase + d]
-                            let optLogSigma = optRawLogSigma.isFinite ? optRawLogSigma : 0
-                            let optSigmaRaw = sigmaBase * exp(optLogSigma)
-                            let optSigma = (optSigmaRaw.isFinite && optSigmaRaw > 0) ? optSigmaRaw : sigmaBase
-                            let oz = (raw - optMu) / max(optSigma, .leastNormalMagnitude)
-                            optionLogProbScratch?[r * optionCount + k] +=
-                                -log(max(optSigma, .leastNormalMagnitude)) - 0.5 * oz * oz
-                        }
-                    }
-                }
-                pIdx += 2 * a; aIdx += a
-            }
-        }
-        if optionCount > 0 {
-            for k in 0..<optionCount {
-                let lp = optionPolicyMean == nil
-                    ? behaviorLogProb
-                    : (optionLogProbScratch?[r * optionCount + k] ?? behaviorLogProb)
-                let logRho = lp - behaviorLogProb
-                let rho = exp(logRho)
-                importance?[r * optionCount + k] = rho.isFinite ? rho : 0
-                importanceLog?[r * optionCount + k] = logRho.isFinite ? logRho : 0
-            }
-        }
-    }
 }
 
 private struct Schema: Hashable, Comparable {
@@ -323,6 +176,8 @@ private struct HealthAccumulator {
     private var oakOptionReinitFinal = 0, oakFeatureReinitFinal = 0
     private var chordEffectiveKLatest: Double = 0
     private var rrBonusMeanLatest = 0.0, psiStopGapMeanLatest = 0.0
+    private var psiStopGapAbsMeanLatest = 0.0, psiAbsMeanLatest = 0.0
+    private var rrStopAbsMeanLatest = 0.0, valueAbsMeanLatest = 0.0
     private var terminationRateLatest = 0.0, optionDurationMeanLatest = 0.0
     private var neverUsedFeatureCountLatest = 0.0, replacementAgeMeanLatest = 0.0
     private var stateEffectiveRankLatest = 0.0
@@ -344,6 +199,11 @@ private struct HealthAccumulator {
     private var oneStepValueWeightedErrorLatest = 0.0
     private var modelQueueCoverageLatest = 0.0, modelUncertaintyMeanLatest = 0.0
     private var stalePageAgeMeanLatest = 0.0
+    private var gvfCountLatest = 0.0, gvfRateMeanLatest = 0.0, gvfTdMeanLatest = 0.0
+    private var gvfDifferentialValueMeanLatest = 0.0, gvfUtilityMeanLatest = 0.0
+    private var lambdaEffectiveRankLatest = 0.0, lambdaPlanMassLatest = 0.0
+    private var lambdaRrMassLatest = 0.0, lambdaUtilityMassLatest = 0.0
+    private var keyboardCacheCoverageLatest = 0.0, keyboardScoreStalenessLatest = 0.0
     private let trackFloor: Double
 
     init(obsDim: Int) { trackFloor = 1.0 / Double(max(obsDim, 1)) }
@@ -385,6 +245,10 @@ private struct HealthAccumulator {
         chordEffectiveKLatest = Double(stats.chordEffectiveK)
         rrBonusMeanLatest = Double(stats.rrBonusMean)
         psiStopGapMeanLatest = Double(stats.psiStopGapMean)
+        psiStopGapAbsMeanLatest = finite(stats.psiStopGapAbsMean)
+        psiAbsMeanLatest = finite(stats.psiAbsMean)
+        rrStopAbsMeanLatest = finite(stats.rrStopAbsMean)
+        valueAbsMeanLatest = finite(stats.valueAbsMean)
         terminationRateLatest = Double(stats.terminationRate)
         optionDurationMeanLatest = Double(stats.optionDurationMean)
         neverUsedFeatureCountLatest = Double(stats.neverUsedFeatureCount)
@@ -421,11 +285,22 @@ private struct HealthAccumulator {
         modelQueueCoverageLatest = finite(stats.modelQueueCoverage)
         modelUncertaintyMeanLatest = finite(stats.modelUncertaintyMean)
         stalePageAgeMeanLatest = finite(stats.stalePageAgeMean)
+        gvfCountLatest = finite(stats.gvfCount)
+        gvfRateMeanLatest = finite(stats.gvfRateMean)
+        gvfTdMeanLatest = finite(stats.gvfTdMean)
+        gvfDifferentialValueMeanLatest = finite(stats.gvfDifferentialValueMean)
+        gvfUtilityMeanLatest = finite(stats.gvfUtilityMean)
+        lambdaEffectiveRankLatest = finite(stats.lambdaEffectiveRank)
+        lambdaPlanMassLatest = finite(stats.lambdaPlanMass)
+        lambdaRrMassLatest = finite(stats.lambdaRrMass)
+        lambdaUtilityMassLatest = finite(stats.lambdaUtilityMass)
+        keyboardCacheCoverageLatest = finite(stats.keyboardCacheCoverage)
+        keyboardScoreStalenessLatest = finite(stats.keyboardScoreStaleness)
     }
 
     var hasMeasuredSteps: Bool { envSteps > 0 }
 
-    func snapshot() -> RunHealth? {
+    func snapshot(continuingRestartCount: Int = 0) -> RunHealth? {
         guard envSteps > 0 else { return nil }
         let n = Double(envSteps)
         let nf: [String: Int]? = kernelSteps > 0
@@ -435,12 +310,17 @@ private struct HealthAccumulator {
             rewardRate: rhoBar,
             actionDeltaL2Mean: actDeltaSum / n,
             scoreGradL2Mean: scoreGradSum / n,
+            continuingRestartCount: Double(continuingRestartCount),
             oakOptionReinitCountFinal: kernelSteps > 0 ? oakOptionReinitFinal : nil,
             oakFeatureReinitCountFinal: kernelSteps > 0 ? oakFeatureReinitFinal : nil,
             nonFiniteByPhase: nf,
             chordEffectiveK: kernelSteps > 0 ? chordEffectiveKLatest : nil,
             rrBonusMean: kernelSteps > 0 ? rrBonusMeanLatest : nil,
             psiStopGapMean: kernelSteps > 0 ? psiStopGapMeanLatest : nil,
+            psiStopGapAbsMean: kernelSteps > 0 ? psiStopGapAbsMeanLatest : nil,
+            psiAbsMean: kernelSteps > 0 ? psiAbsMeanLatest : nil,
+            rrStopAbsMean: kernelSteps > 0 ? rrStopAbsMeanLatest : nil,
+            valueAbsMean: kernelSteps > 0 ? valueAbsMeanLatest : nil,
             terminationRate: kernelSteps > 0 ? terminationRateLatest : nil,
             optionDurationMean: kernelSteps > 0 ? optionDurationMeanLatest : nil,
             neverUsedFeatureCount: kernelSteps > 0 ? neverUsedFeatureCountLatest : nil,
@@ -476,7 +356,18 @@ private struct HealthAccumulator {
             oneStepValueWeightedError: kernelSteps > 0 ? oneStepValueWeightedErrorLatest : nil,
             modelQueueCoverage: kernelSteps > 0 ? modelQueueCoverageLatest : nil,
             modelUncertaintyMean: kernelSteps > 0 ? modelUncertaintyMeanLatest : nil,
-            stalePageAgeMean: kernelSteps > 0 ? stalePageAgeMeanLatest : nil)
+            stalePageAgeMean: kernelSteps > 0 ? stalePageAgeMeanLatest : nil,
+            gvfCount: kernelSteps > 0 ? gvfCountLatest : nil,
+            gvfRateMean: kernelSteps > 0 ? gvfRateMeanLatest : nil,
+            gvfTdMean: kernelSteps > 0 ? gvfTdMeanLatest : nil,
+            gvfDifferentialValueMean: kernelSteps > 0 ? gvfDifferentialValueMeanLatest : nil,
+            gvfUtilityMean: kernelSteps > 0 ? gvfUtilityMeanLatest : nil,
+            lambdaEffectiveRank: kernelSteps > 0 ? lambdaEffectiveRankLatest : nil,
+            lambdaPlanMass: kernelSteps > 0 ? lambdaPlanMassLatest : nil,
+            lambdaRrMass: kernelSteps > 0 ? lambdaRrMassLatest : nil,
+            lambdaUtilityMass: kernelSteps > 0 ? lambdaUtilityMassLatest : nil,
+            keyboardCacheCoverage: kernelSteps > 0 ? keyboardCacheCoverageLatest : nil,
+            keyboardScoreStaleness: kernelSteps > 0 ? keyboardScoreStalenessLatest : nil)
     }
 }
 
@@ -532,11 +423,15 @@ private struct KernelConfig {
     var baseObsTraceLevels: UInt32 = 0
     var linearAnchorCount: UInt32 = 0
     var optionPageWidth: UInt32 = 0
-    var pEncoder: UInt32 = 0, pPhase: UInt32 = 0, pValue: UInt32 = 0, pPsi: UInt32 = 0
+    var invRank: Float = 0, invOptionCount: Float = 0
+    var invOneInputWidth: Float = 0, metaEta: Float = 0
+    var betaCap: Float = 0, betaFloor: Float = 0
+    var pValue: UInt32 = 0, pPsi: UInt32 = 0
     var pOptPolicy: UInt32 = 0, pOptReward: UInt32 = 0, pOptTransition: UInt32 = 0
     var pOptDuration: UInt32 = 0
     var pOptValue: UInt32 = 0, pPsiCross: UInt32 = 0
     var pOneReward: UInt32 = 0, pOneTransition: UInt32 = 0
+    var pGvfRate: UInt32 = 0, pGvfValue: UInt32 = 0
     var sObservation: UInt32 = 0, sObsMean: UInt32 = 0, sObsSM: UInt32 = 0
     var sState: UInt32 = 0
     var sPolicyMean: UInt32 = 0, sActionSignal: UInt32 = 0, sScoreGrad: UInt32 = 0
@@ -552,8 +447,10 @@ private struct KernelConfig {
     var sNTdMat: UInt32 = 0
     var sOptRewardTd: UInt32 = 0
     var sOptionDiffTd: UInt32 = 0
-    var sOptValueTd: UInt32 = 0, sOneTransitionTd: UInt32 = 0
-    var sOneRewardTd: UInt32 = 0, sOneStateTd: UInt32 = 0, sOneValueWeightedError: UInt32 = 0
+    var sOptValueTd: UInt32 = 0, sOptValueDenom: UInt32 = 0, sCrossTd: UInt32 = 0
+    var sOneTransitionTd: UInt32 = 0
+    var sOneRewardTd: UInt32 = 0, sOneStateTd: UInt32 = 0
+    var sOneValueWeightedError: UInt32 = 0, sOneStepDenom: UInt32 = 0
     var sDurationTd: UInt32 = 0
     var sDurationHat: UInt32 = 0
     var sQOption: UInt32 = 0     // Per-option Q^k cache (K floats), oak_plan → oak_plan_reduce.
@@ -561,6 +458,8 @@ private struct KernelConfig {
     var sPrioOpt: UInt32 = 0
     var sContinuation: UInt32 = 0 // RR-derived per-option continuation indicator/probability.
     var sRhoOpt: UInt32 = 0
+    var sLambda: UInt32 = 0, sKeyboardScore: UInt32 = 0, sBestModelNext: UInt32 = 0
+    var sGvfTd: UInt32 = 0, sGvfUtility: UInt32 = 0, sFeatureTraceDenom: UInt32 = 0
     var sReplacementAgeMean: UInt32 = 0
     var uCounters: UInt32 = 0
     var uOptFeature: UInt32 = 0
@@ -570,6 +469,7 @@ private struct KernelConfig {
     var uFeatureParentA: UInt32 = 0, uFeatureParentB: UInt32 = 0, uFeatureKind: UInt32 = 0
     var uFeatureBirthCount: UInt32 = 0, uParentUseCount: UInt32 = 0
     var uSelectedOption: UInt32 = 0, uHighModelOption: UInt32 = 0, uStaleModelOption: UInt32 = 0
+    var uKeyboardAge: UInt32 = 0
     var uModelAge: UInt32 = 0
 }
 
@@ -593,6 +493,8 @@ struct KernelStats {
     // 1 = one-hot; intermediate = moderate concentration.
     var chordEffectiveK: Float = 0
     var rrBonusMean: Float = 0, psiStopGapMean: Float = 0
+    var psiStopGapAbsMean: Float = 0, psiAbsMean: Float = 0
+    var rrStopAbsMean: Float = 0, valueAbsMean: Float = 0
     var terminationRate: Float = 0, optionDurationMean: Float = 0
     var neverUsedFeatureCount: Float = 0, replacementAgeMean: Float = 0
     var stateEffectiveRank: Float = 0
@@ -610,6 +512,11 @@ struct KernelStats {
     var oneStepRewardTdMean: Float = 0, oneStepStateTdMean: Float = 0
     var oneStepValueWeightedError: Float = 0
     var modelQueueCoverage: Float = 0, modelUncertaintyMean: Float = 0, stalePageAgeMean: Float = 0
+    var gvfCount: Float = 0, gvfRateMean: Float = 0, gvfTdMean: Float = 0
+    var gvfDifferentialValueMean: Float = 0, gvfUtilityMean: Float = 0
+    var lambdaEffectiveRank: Float = 0, lambdaPlanMass: Float = 0
+    var lambdaRrMass: Float = 0, lambdaUtilityMass: Float = 0
+    var keyboardCacheCoverage: Float = 0, keyboardScoreStaleness: Float = 0
 }
 
 // =================================================================================================
@@ -618,6 +525,7 @@ struct KernelStats {
 private enum OakMetalLayout {
     static let kernelConfigBufferIndex = 5
     static let optionPageWidth = 32
+    static let searchControlSlotCount = 3  // high-priority, stalest, diagnostic/coverage
 
     static func optionCount(rank: Int) -> Int { max(1, rank) }
     static func optionPageCount(rank: Int) -> Int {
@@ -643,6 +551,12 @@ private enum OakMetalLayout {
     static func oneTransitionCount(rank: Int, dPolicy: Int) -> Int {
         rank * oneInputWidth(rank: rank, dPolicy: dPolicy)
     }
+    static func gvfCount(baseObsDim: Int, rank: Int, dPolicy: Int) -> Int {
+        linearAnchorCount(baseObsDim: baseObsDim, rank: rank, dPolicy: dPolicy)
+    }
+    static func gvfValueCount(baseObsDim: Int, rank: Int, dPolicy: Int) -> Int {
+        gvfCount(baseObsDim: baseObsDim, rank: rank, dPolicy: dPolicy) * rank
+    }
     static func postLearnThreadCount(rank: Int, dPolicy: Int) -> Int { max(rank, optionCount(rank: rank)) }
 
     static func obsTraceLevelCount(baseObsDim: Int) -> Int {
@@ -658,17 +572,12 @@ private enum OakMetalLayout {
     static func linearAnchorCount(baseObsDim: Int, rank: Int, dPolicy: Int) -> Int {
         min(rank, max(rank / 2, 1))
     }
-    static func encoderCount(obsDim: Int, baseObsDim: Int, rank: Int, dPolicy: Int) -> Int { 0 }
-    static func phaseCount(rank: Int) -> Int { 0 }
-
     struct Param {
-        let encoder, phase, value, psi, optPolicy, optReward, optTransition, optDuration: Int
-        let optValue, psiCross, oneReward, oneTransition, total: Int
+        let value, psi, optPolicy, optReward, optTransition, optDuration: Int
+        let optValue, psiCross, oneReward, oneTransition, gvfRate, gvfValue, total: Int
     }
     static func paramLayout(obsDim: Int, baseObsDim: Int, rank: Int, dPolicy: Int) -> Param {
         var o = 0
-        let enc = o; o += encoderCount(obsDim: obsDim, baseObsDim: baseObsDim, rank: rank, dPolicy: dPolicy)
-        let ph  = o; o += phaseCount(rank: rank)
         let val = o; o += rank
         let psi = o; o += psiCount(rank: rank)
         let op  = o; o += optPolicyCount(rank: rank, dPolicy: dPolicy)
@@ -679,9 +588,12 @@ private enum OakMetalLayout {
         let pc  = o; o += psiCrossCount(rank: rank)
         let oneR = o; o += oneRewardCount(rank: rank, dPolicy: dPolicy)
         let oneT = o; o += oneTransitionCount(rank: rank, dPolicy: dPolicy)
-        return Param(encoder: enc, phase: ph, value: val, psi: psi, optPolicy: op,
-                     optReward: or_, optTransition: ot, optDuration: od,
+        let gr = o; o += gvfCount(baseObsDim: baseObsDim, rank: rank, dPolicy: dPolicy)
+        let gv = o; o += gvfValueCount(baseObsDim: baseObsDim, rank: rank, dPolicy: dPolicy)
+        return Param(value: val, psi: psi, optPolicy: op, optReward: or_,
+                     optTransition: ot, optDuration: od,
                      optValue: ov, psiCross: pc, oneReward: oneR, oneTransition: oneT,
+                     gvfRate: gr, gvfValue: gv,
                      total: o)
     }
 
@@ -697,20 +609,23 @@ private enum OakMetalLayout {
         let alpha, beta, h: Int       // MetaOptimize L-approximation buffers (R floats each).
         let nTdMat: Int               // Dense option-transition TD targets, K*R floats, written by oak_plan.
         let optRewardTd: Int          // Option reward-model TD targets, K floats, written once by oak_plan.
-        let optionDiffTd, optValueTd, oneTransitionTd: Int
-        let oneRewardTd, oneStateTd, oneValueWeightedError: Int
+        let optionDiffTd, optValueTd, optValueDenom, crossTd, oneTransitionTd: Int
+        let oneRewardTd, oneStateTd, oneValueWeightedError, oneStepDenom: Int
         let durationTd, durationHat: Int
         let qOption: Int              // Per-option Q^k cache, K floats, oak_plan → oak_plan_reduce.
         let obsTraceMulti: Int        // Tier I1: (M−1)·baseO multi-timescale obs traces.
         let prioOpt: Int              // Tier D2: per-option priority for plan_reduce / Head 4.
         let continuation: Int          // RR-derived continuation, K floats.
         let rhoOpt: Int
+        let lambda, keyboardScore, bestModelNext: Int
+        let gvfTd, gvfUtility, featureTraceDenom: Int
         let replacementAgeMean: Int
         let total: Int
     }
     static func stateLayout(obsDim: Int, baseObsDim: Int, rank: Int, dPolicy: Int) -> State {
         let K = optionCount(rank: rank)
         let M = obsTraceLevelCount(baseObsDim: baseObsDim)
+        let G = gvfCount(baseObsDim: baseObsDim, rank: rank, dPolicy: dPolicy)
         var o = 0
         let obs = o; o += obsDim
         let mean = o; o += obsDim
@@ -740,10 +655,13 @@ private enum OakMetalLayout {
         let ortd = o; o += K
         let odiff = o; o += K
         let ovtd = o; o += K
+        let ovden = o; o += K
+        let ctd = o; o += K
         let onetd = o; o += rank
         let onertd = o; o += 1
         let onestd = o; o += 1
         let onevwe = o; o += 1
+        let oneden = o; o += 1
         let dtd = o; o += K
         let dhat = o; o += K
         let qo  = o; o += K
@@ -752,6 +670,12 @@ private enum OakMetalLayout {
         let prio = o; o += K
         let cont = o; o += K
         let rhoOpt = o; o += K
+        let lambda = o; o += K
+        let kscore = o; o += K
+        let bestNext = o; o += rank
+        let gvftd = o; o += G
+        let gvfu = o; o += G
+        let ftd = o; o += 1
         let ram = o; o += 1
         return State(observation: obs, obsMean: mean, obsSM: osm, state: st,
                      policyMean: pol, actionSignal: act, scoreGrad: sg,
@@ -762,18 +686,21 @@ private enum OakMetalLayout {
                      planAdv: pa,
                      alpha: al, beta: be, h: h,
                      nTdMat: ntd, optRewardTd: ortd, optionDiffTd: odiff,
-                     optValueTd: ovtd, oneTransitionTd: onetd,
-                     oneRewardTd: onertd, oneStateTd: onestd, oneValueWeightedError: onevwe,
+                     optValueTd: ovtd, optValueDenom: ovden, crossTd: ctd, oneTransitionTd: onetd,
+                     oneRewardTd: onertd, oneStateTd: onestd,
+                     oneValueWeightedError: onevwe, oneStepDenom: oneden,
                      durationTd: dtd, durationHat: dhat,
                      qOption: qo, obsTraceMulti: otr,
                      prioOpt: prio, continuation: cont, rhoOpt: rhoOpt,
+                     lambda: lambda, keyboardScore: kscore, bestModelNext: bestNext,
+                     gvfTd: gvftd, gvfUtility: gvfu, featureTraceDenom: ftd,
                      replacementAgeMean: ram, total: o)
     }
 
     struct UInts {
         let counters, optFeature, featureAge, optAge, featureEverUsed: Int
         let featureParentA, featureParentB, featureKind, featureBirthCount, parentUseCount: Int
-        let selectedOption, highModelOption, staleModelOption, modelAge, total: Int
+        let selectedOption, highModelOption, staleModelOption, keyboardAge, modelAge, total: Int
     }
     static func uintLayout(rank: Int) -> UInts {
         let K = optionCount(rank: rank)
@@ -791,11 +718,13 @@ private enum OakMetalLayout {
         let sel = o; o += 1
         let high = o; o += 1
         let stale = o; o += 1
+        let ka = o; o += K
         let ma = o; o += K
         return UInts(counters: ctr, optFeature: of, featureAge: fa, optAge: oa,
                      featureEverUsed: feu, featureParentA: fpa, featureParentB: fpb,
                      featureKind: fkind, featureBirthCount: fbc, parentUseCount: puc,
                      selectedOption: sel, highModelOption: high, staleModelOption: stale,
+                     keyboardAge: ka,
                      modelAge: ma, total: o)
     }
 }
@@ -824,11 +753,9 @@ final class OakMetalEngine {
     private struct Phase { let name: String; let tgSize: Int }
     private static let phases: [Phase] = [
         Phase(name: "oak_encode",           tgSize: -1),
-        Phase(name: "oak_keyboard_predict", tgSize: -1),
         Phase(name: "oak_plan",             tgSize: -1),
-        Phase(name: "oak_plan_reduce",      tgSize: -1),
+        Phase(name: "oak_plan_reduce",      tgSize: 1),
         Phase(name: "oak_learn_heads",      tgSize: 0),
-        Phase(name: "oak_action_emit",      tgSize: 0),
         Phase(name: "oak_replace",          tgSize: -1),
     ]
 
@@ -853,8 +780,6 @@ final class OakMetalEngine {
     private var phaseGpuInvalidStepCount: [Int]
     private var hostAction: [Float]
     private var hostOptionAction: [Float]
-    private let indirectCommandBuffer: MTLIndirectCommandBuffer
-    private let residencySet: MTLResidencySet
     private let resourceList: [MTLBuffer]
 
     private static func kernelURL() throws -> URL {
@@ -870,7 +795,6 @@ final class OakMetalEngine {
             }
             let desc = MTLComputePipelineDescriptor()
             desc.computeFunction = fn
-            desc.supportIndirectCommandBuffers = true
             return try device.makeComputePipelineState(descriptor: desc, options: [], reflection: nil)
         }
     }
@@ -927,19 +851,19 @@ final class OakMetalEngine {
                        + OakMetalLayout.optDurationCount(rank: rank)
                        + OakMetalLayout.oneRewardCount(rank: rank, dPolicy: dPolicy)
                        + OakMetalLayout.oneTransitionCount(rank: rank, dPolicy: dPolicy)
+                       + OakMetalLayout.gvfCount(baseObsDim: baseObsDim, rank: rank, dPolicy: dPolicy)
+                       + OakMetalLayout.gvfValueCount(baseObsDim: baseObsDim, rank: rank, dPolicy: dPolicy)
         let grids = [
-            1,                  // encode
-            1,                  // keyboard_predict
-            min(K, OakMetalLayout.optionPageWidth), // plan: one scheduled option page
+            1,                  // encode + keyboard_predict
+            K <= OakMetalLayout.optionPageWidth ? K : OakMetalLayout.searchControlSlotCount,
             1,                  // plan_reduce
             learnTotal,         // learn_heads
-            K * dPolicy,        // action_emit
             1,                  // replace
         ]
         phaseGridWidths = grids
 
         phaseThreadgroupSizes = Self.phases.map { phase in
-            if phase.tgSize == -1 { return rank }
+            if phase.tgSize == -1 { return max(rank, OakMetalLayout.optionPageWidth) }
             return phase.tgSize
         }
 
@@ -949,26 +873,8 @@ final class OakMetalEngine {
         hostAction = Array(repeating: 0, count: dPolicy)
         hostOptionAction = Array(repeating: 0, count: K * dPolicy)
 
-        // Metal 4 ICB + MTLResidencySet setup. 6 binds: params, state, uint, scalars, stats, config.
-        let icbDesc = MTLIndirectCommandBufferDescriptor()
-        icbDesc.commandTypes = [.concurrentDispatch]
-        icbDesc.inheritBuffers = false
-        icbDesc.inheritPipelineState = false
-        icbDesc.maxKernelBufferBindCount = 6
-        guard let icb = device.makeIndirectCommandBuffer(descriptor: icbDesc,
-                                                         maxCommandCount: Self.phases.count,
-                                                         options: [.storageModeShared]) else {
-            throw OakError.message("Failed to create Metal indirect command buffer.")
-        }
-        indirectCommandBuffer = icb
-        let rsDesc = MTLResidencySetDescriptor()
-        rsDesc.initialCapacity = 6
-        residencySet = try device.makeResidencySet(descriptor: rsDesc)
         resourceList = [paramsArena.buffer, stateArena.buffer, uintArena.buffer,
                         scalarsBuffer, statsBuffer, configBuffer]
-        for buf in resourceList { residencySet.addAllocation(buf) }
-        residencySet.commit()
-        queue.addResidencySet(residencySet)
 
         let invR: Float = 1.0 / sqrt(Float(max(rank, 1)))
         let seedBase = UInt32(bitPattern: Int32(truncatingIfNeeded: seed ?? Int(oakUnseededSeed)))
@@ -993,6 +899,9 @@ final class OakMetalEngine {
         sample(paramLayout.psiCross, OakMetalLayout.psiCrossCount(rank: rank), invR)
         sample(paramLayout.oneReward, OakMetalLayout.oneRewardCount(rank: rank, dPolicy: dPolicy), invR)
         sample(paramLayout.oneTransition, OakMetalLayout.oneTransitionCount(rank: rank, dPolicy: dPolicy), invR)
+        sample(paramLayout.gvfValue,
+               OakMetalLayout.gvfValueCount(baseObsDim: baseObsDim, rank: rank, dPolicy: dPolicy),
+               invR)
         // Duration defaults to the structural one-step lower bound.
         let durationPtr = paramsArena.pointer.advanced(by: paramLayout.optDuration)
         for i in 0..<OakMetalLayout.optDurationCount(rank: rank) { durationPtr[i] = 0 }
@@ -1009,10 +918,16 @@ final class OakMetalEngine {
         let valuePtr = paramsArena.pointer.advanced(by: paramLayout.value)
         for i in 0..<rank { bonusSlot[i] = valuePtr[i] }
 
-        // Chord seed: uniform 1/K (max-entropy prior). meta_policy recomputes each step.
+        // Chord/lambda seed: uniform 1/K (max-entropy prior). Keyboard recomputes each step.
         let chordSlot = stateArena.pointer.advanced(by: stateLayout.chord)
+        let lambdaSlot = stateArena.pointer.advanced(by: stateLayout.lambda)
+        let scoreSlot = stateArena.pointer.advanced(by: stateLayout.keyboardScore)
         let invK: Float = 1.0 / Float(max(K, 1))
-        for k in 0..<K { chordSlot[k] = invK }
+        for k in 0..<K {
+            chordSlot[k] = invK
+            lambdaSlot[k] = invK
+            scoreSlot[k] = 0
+        }
         let importanceSlot = stateArena.pointer.advanced(by: stateLayout.importance)
         for k in 0..<K { importanceSlot[k] = 1 }
 
@@ -1057,35 +972,6 @@ final class OakMetalEngine {
 
         writeKernelConfig(paramLayout: paramLayout)
 
-        // Pre-encode all fixed phases into the ICB. Grids are fixed for the engine's lifetime.
-        let buffers = resourceList
-        for i in 0..<Self.phases.count {
-            let cmd = icb.indirectComputeCommandAt(i)
-            cmd.setComputePipelineState(pipelines[i])
-            for j in 0..<buffers.count { cmd.setKernelBuffer(buffers[j], offset: 0, at: j) }
-            // tgSize sentinel: -1 means "use runtime rank as TG size" (oak_plan needs R
-            // threads per option-TG; rank is the only Plan-orthodox knob that maps onto a
-            // GPU SIMD width, so all R-sized TGs key off it directly).
-            let phaseTgSize = phaseThreadgroupSizes[i]
-            if phaseTgSize > 0 {
-                let tgCount = max(phaseGridWidths[i], 1)
-                cmd.concurrentDispatchThreadgroups(
-                    MTLSize(width: tgCount, height: 1, depth: 1),
-                    threadsPerThreadgroup: MTLSize(width: phaseTgSize, height: 1, depth: 1))
-            } else {
-                let tg = min(max(pipelines[i].threadExecutionWidth, 1),
-                             pipelines[i].maxTotalThreadsPerThreadgroup)
-                let w = alignedGridWidth(threadCount: phaseGridWidths[i], pipeline: pipelines[i])
-                cmd.concurrentDispatchThreads(
-                    MTLSize(width: w, height: 1, depth: 1),
-                    threadsPerThreadgroup: MTLSize(width: min(tg, w), height: 1, depth: 1))
-            }
-        }
-    }
-
-    deinit {
-        queue.removeResidencySet(residencySet)
-        residencySet.removeAllAllocations()
     }
 
     func metalPhaseGpuDiagnostics(measuredSteps: Int) -> (meanMs: [String: Double]?, invalidPhases: [String]?) {
@@ -1157,7 +1043,12 @@ final class OakMetalEngine {
                                                                        rank: rank,
                                                                        dPolicy: dPolicy))
         c.optionPageWidth = UInt32(OakMetalLayout.optionPageWidth)
-        c.pEncoder = UInt32(p.encoder); c.pPhase = UInt32(p.phase)
+        c.invRank = 1.0 / Float(max(rank, 1))
+        c.invOptionCount = 1.0 / Float(max(K, 1))
+        c.invOneInputWidth = 1.0 / Float(max(rank + dPolicy, 1))
+        c.metaEta = c.invRank / Float(max(rank + dPolicy, 1))
+        c.betaCap = -log(Float(max(rank, 1)))
+        c.betaFloor = -log(Float(max(rank * max(rank, 1), 1)))
         c.pValue = UInt32(p.value); c.pPsi = UInt32(p.psi)
         c.pOptPolicy = UInt32(p.optPolicy)
         c.pOptReward = UInt32(p.optReward); c.pOptTransition = UInt32(p.optTransition)
@@ -1166,6 +1057,8 @@ final class OakMetalEngine {
         c.pPsiCross = UInt32(p.psiCross)
         c.pOneReward = UInt32(p.oneReward)
         c.pOneTransition = UInt32(p.oneTransition)
+        c.pGvfRate = UInt32(p.gvfRate)
+        c.pGvfValue = UInt32(p.gvfValue)
         c.sObservation = UInt32(s.observation); c.sObsMean = UInt32(s.obsMean); c.sObsSM = UInt32(s.obsSM)
         c.sState = UInt32(s.state)
         c.sPolicyMean = UInt32(s.policyMean)
@@ -1186,10 +1079,13 @@ final class OakMetalEngine {
         c.sOptRewardTd = UInt32(s.optRewardTd)
         c.sOptionDiffTd = UInt32(s.optionDiffTd)
         c.sOptValueTd = UInt32(s.optValueTd)
+        c.sOptValueDenom = UInt32(s.optValueDenom)
+        c.sCrossTd = UInt32(s.crossTd)
         c.sOneTransitionTd = UInt32(s.oneTransitionTd)
         c.sOneRewardTd = UInt32(s.oneRewardTd)
         c.sOneStateTd = UInt32(s.oneStateTd)
         c.sOneValueWeightedError = UInt32(s.oneValueWeightedError)
+        c.sOneStepDenom = UInt32(s.oneStepDenom)
         c.sDurationTd = UInt32(s.durationTd)
         c.sDurationHat = UInt32(s.durationHat)
         c.sQOption = UInt32(s.qOption)
@@ -1197,6 +1093,12 @@ final class OakMetalEngine {
         c.sPrioOpt = UInt32(s.prioOpt)
         c.sContinuation = UInt32(s.continuation)
         c.sRhoOpt = UInt32(s.rhoOpt)
+        c.sLambda = UInt32(s.lambda)
+        c.sKeyboardScore = UInt32(s.keyboardScore)
+        c.sBestModelNext = UInt32(s.bestModelNext)
+        c.sGvfTd = UInt32(s.gvfTd)
+        c.sGvfUtility = UInt32(s.gvfUtility)
+        c.sFeatureTraceDenom = UInt32(s.featureTraceDenom)
         c.sReplacementAgeMean = UInt32(s.replacementAgeMean)
         c.uCounters = UInt32(u.counters)
         c.uOptFeature = UInt32(u.optFeature)
@@ -1211,6 +1113,7 @@ final class OakMetalEngine {
         c.uSelectedOption = UInt32(u.selectedOption)
         c.uHighModelOption = UInt32(u.highModelOption)
         c.uStaleModelOption = UInt32(u.staleModelOption)
+        c.uKeyboardAge = UInt32(u.keyboardAge)
         c.uModelAge = UInt32(u.modelAge)
         configPointer.pointee = c
     }
@@ -1221,11 +1124,28 @@ final class OakMetalEngine {
         return ((n + align - 1) / align) * align
     }
 
+    private func dispatchPhase(_ i: Int, on enc: MTLComputeCommandEncoder) {
+        enc.setComputePipelineState(pipelines[i])
+        for j in 0..<resourceList.count { enc.setBuffer(resourceList[j], offset: 0, index: j) }
+        let phaseTgSize = phaseThreadgroupSizes[i]
+        if phaseTgSize > 0 {
+            enc.dispatchThreadgroups(
+                MTLSize(width: max(phaseGridWidths[i], 1), height: 1, depth: 1),
+                threadsPerThreadgroup: MTLSize(width: phaseTgSize, height: 1, depth: 1))
+        } else {
+            let tg = min(max(pipelines[i].threadExecutionWidth, 1),
+                         pipelines[i].maxTotalThreadsPerThreadgroup)
+            let w = alignedGridWidth(threadCount: phaseGridWidths[i], pipeline: pipelines[i])
+            enc.dispatchThreads(MTLSize(width: w, height: 1, depth: 1),
+                                threadsPerThreadgroup: MTLSize(width: min(tg, w), height: 1, depth: 1))
+        }
+    }
+
     private func runKernel(accumulatePhaseGpu: Bool) throws {
         let split = diagnosticGpuPhaseTiming && accumulatePhaseGpu
         if !split {
-            // Hot path: one command buffer, one encoder, one ICB execution per phase with a
-            // memory barrier between phases (required for RAW/WAW correctness on shared buffers).
+            // Hot path: one command buffer, one encoder, one dispatch per phase with a memory
+            // barrier between phases (required for RAW/WAW correctness on shared buffers).
             //
             // The MTLCommandBuffer + MTLComputeCommandEncoder are NSObject subclasses (Metal's
             // Objective-C interop). In a tight long-running CLI loop with no run loop, Swift's
@@ -1242,7 +1162,7 @@ final class OakMetalEngine {
                     throw OakError.message("Failed to create Metal compute encoder.")
                 }
                 for i in 0..<pipelines.count {
-                    enc.executeCommandsInBuffer(indirectCommandBuffer, range: i..<(i + 1))
+                    dispatchPhase(i, on: enc)
                     if i + 1 < pipelines.count { enc.memoryBarrier(scope: [.buffers]) }
                 }
                 enc.endEncoding()
@@ -1262,7 +1182,7 @@ final class OakMetalEngine {
                 guard let enc = cb.makeComputeCommandEncoder() else {
                     throw OakError.message("Failed to create Metal compute encoder.")
                 }
-                enc.executeCommandsInBuffer(indirectCommandBuffer, range: i..<(i + 1))
+                dispatchPhase(i, on: enc)
                 enc.endEncoding()
                 cb.commit(); cb.waitUntilCompleted()
                 if let e = cb.error { throw OakError.message("Metal command failed: \(e)") }
@@ -1676,7 +1596,8 @@ private final class RunState {
             stopReason: reason, agentStepMsMean: state.agentMsSum / Double(measured),
             envStepMsMean: state.envMsSum / Double(measured),
             discreteAction: dA, continuousAction: cA,
-            health: state.health.snapshot(), diagnostic: diagOut)
+            health: state.health.snapshot(continuingRestartCount: state.doneCount),
+            diagnostic: diagOut)
     }
 
     private static func measurementLoop(_ ctx: RunContext, _ state: RunState) throws {
