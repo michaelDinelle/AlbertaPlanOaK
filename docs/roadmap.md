@@ -74,10 +74,12 @@ longer "not implemented":
   `eligibleFeatureCount`, `replacementCommitRate`, `modelUpdateRate`,
   `modelPriorityEntropy`, and `optionDiffTdMean`.
 
-Current empirical read: `l3-l7-regroup-paired-10k-225703` is finite and beats
-random `10/10`, with non-degenerate duration/search diagnostics, but mean
-reward-rate is still `-0.003616` and does not meet the sustained
-positive-acceleration bar.
+Current empirical read: `l3-l7-feature-slowclock-paired-300k-232452` is finite,
+beats random `10/10`, and improves the 300k mean reward sum from the rebuilt
+keeper's `-711.154` to `-489.611` while cutting feature reinitializations from
+`4717.7` to `149.5`. It is not promoted: final reward-rate is still near zero
+(`-0.001257` mean, `5/10` positive seeds) and late heartbeats still show
+negative drift rather than sustained acceleration.
 
 ## Alberta Plan Commitments
 
@@ -488,6 +490,12 @@ future audits as "obvious" fixes.
 | All-option model updates / raw plan advantage / current-Q keyboard / direct TD actor / meta-psi credit | 2026-04-23 rapid screens all failed 10k or 50k paired gates despite NF health; signatures were lower reward sum, fewer positive reward-rate seeds, or chatter/action damage. | Do not revive without a new literature-backed search-control or actor-critic mechanism. |
 | Wrapper score/action scaling variants | Gaussian-score standardization, per-coordinate actor alpha, per-coordinate standard score, and behavior-policy birth variants regressed 10k/50k paired screens. | Keep the current wrapper score interface unless paired evidence says otherwise. |
 | Tracking-rate substitutions | `rho`, global-rho, and utility-timescale variants tied to `R` did not improve early reward-rate or 50k reward evidence. | `track_rate(t, baseO)` remains the current structural tracker, not a research invariant. |
+| Raw observation passthrough | `l3-l7-rawobs-paired-10k-230923`: NF zero but worse cumulative reward (`-20.933`) and only `1/10` positive reward-rate seeds. | Rejected; keep standardized observation input to the Fourier encoder. |
+| Chord-consistent value backup | `l3-l7-chordmodel-plan-paired-10k-231520`: replacing best-option planning advantage with chord-weighted Q regressed reward sum to `-29.654`. | Rejected; Design A policy blending does not imply chord-weighted value backup here. |
+| Current-state planAdv gradient | `l3-l7-curr-planadv-paired-10k-231730`: NF zero but reward sum `-23.689`, `0/10` positive reward-rate seeds, and SPS collapse. | Rejected; keep value update on the source-state gradient. |
+| Tracking RR bonus | `l3-l7-tracking-rrbonus-paired-50k-232052`: 10k was superficially close, but 50k regressed to reward sum `-247.071` and duration collapse. | Rejected; keep RR bonus as the high-water value weight from the feature's current identity. |
+| Full option/feature capacity clock | `l3-l7-capacityclock-replace-paired-10k-232222`: feature and option replacement both slowed to full capacity, but termination fell to zero and reward regressed. | Rejected; feature reseeding is the destructive clock to slow, not option replacement wholesale. |
+| Unused-only option replacement / candidate-pressure option clock | `l3-l7-unusedonly-replace-paired-10k-233410` and `l3-l7-candidatepressure-replace-paired-10k-233538`: both reduced option churn but drove termination near zero and worsened 10k reward. | Rejected; the next utility repair needs richer planning usefulness, not a harder candidate gate. |
 
 | Family | Attempts | Failure signature |
 |---|---|---|

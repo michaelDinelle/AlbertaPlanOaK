@@ -955,8 +955,9 @@ inline void oak_bk_admit_commit_body(
         for (uint k = 0u; k < ctx.K; ++k) if (ctx.optAge[k] < 0xffffffffu) ctx.optAge[k] += 1u;
 
         float admitRate = 1.0f / float(max(ctx.R, 1u));
+        float featAdmitRate = 1.0f / float(max(ctx.R * halfR, 1u));
         uint tryOpt = (hash_uniform(stepC, ctx.R, 0x51f15eedu) < admitRate) ? 1u : 0u;
-        uint tryFeat = (hash_uniform(stepC, ctx.R, 0xa17c9e3du) < admitRate) ? 1u : 0u;
+        uint tryFeat = (hash_uniform(stepC, ctx.R, 0xa17c9e3du) < featAdmitRate) ? 1u : 0u;
 
         uint wK = 0u, replaceOpt = 0u, eligibleOpt = 0u;
         float worstOptScore = FLT_MAX;
