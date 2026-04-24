@@ -566,9 +566,8 @@ kernel void oak_plan(
             lHatPrevRaw = fma(dw, prev[i], lHatPrevRaw);
         }
         float lHat = decode_duration(lHatRaw);
-        float lHatPrev = decode_duration(lHatPrevRaw);
         float rTd = ctx.reward[0] + contK * rHat - rHatPrev;
-        float dTd = 1.0f + contK * lHat - lHatPrev;
+        float dTd = 1.0f + contK * lHatRaw - lHatPrevRaw;
         float rTdSafe = isfinite(rTd) ? rTd : 0.0f;
         float dTdSafe = isfinite(dTd) ? dTd : 0.0f;
         ctx.optRewardTd[k] = rTdSafe;

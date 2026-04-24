@@ -52,7 +52,9 @@ longer "not implemented":
 - L3: `oak_bk_encode` trains psi with the RR stopping value
   `V(s') - valueW[i]·x_i(s') + bonusW[i]·x_i(s')`.
 - L4/L5: `oak_plan` learns reward, transition, and duration models using
-  stopping-aware recurrences; planning uses
+  stopping-aware recurrences. Duration TD uses the raw duration estimate from
+  the Bellman recurrence; the structural one-step lower bound is applied only
+  when decoding duration for planning. Planning uses
   `Q(s,o) = rHat(s,o) - rho*lHat(s,o) + V(nHat(s,o))`.
 - L6: `oak_post_learn` runs age-gated option/feature replacement with
   `optFeature`, feature age, option age, and feature-ever-used metadata.
@@ -206,16 +208,17 @@ more interesting; the Plan order matters.
 
 ## Overclaims Removed
 
-The following old claims must not reappear without implementation changes.
+The following pre-L3-L7 claims were removed. They remain here only as a guard
+against resurrecting stale descriptions.
 
 | Old claim | Corrected statement |
 |---|---|
 | "Prototype-AI I is strong." | False. L1 showed that the naive action-conditioned one-step model learns finite predictions but harms reward; live code does not currently have a promoted Step-8 model. |
-| "STOMP is present." | Only a scaffold is present. Exact reward-respecting subtasks, termination, and option-to-termination models are missing. |
+| "STOMP is present." | Pre-L3-L7 this was only a scaffold. Current L3-L7 has exact RR stopping, RR-derived continuation, and stopping-aware option models, but it is not promoted until reward-rate evidence clears the gates. |
 | "H1 closes Step 10." | False. H1 is a chord-persistence mechanism. It may be useful, but it is not an option termination condition as defined in the options/STOMP literature. |
-| "psi implements RR Eq. 4." | False as written. Current psi TD uses `curr[k]` as a simplified stopping/attainment signal and a stability beta. RR Eq. 4 uses a stopping value based on the main value estimate with an optimistic feature bonus. |
-| "optReward/optTransition are full RR option models." | Only for degenerate one-step options. True option models predict cumulative reward and state at termination; average-reward options also need duration. |
-| "Step 11 feedback is implemented." | Only utility measurement plus unconditional replacement is implemented. The Plan's "eventually" and "new feature not yet basis" semantics are absent. |
+| "psi implements RR Eq. 4." | Pre-L3-L7 this was false. Current L3-L7 uses the RR stopping value with an optimistic per-feature bonus; the remaining question is empirical promotion. |
+| "optReward/optTransition are full RR option models." | Pre-L3-L7 they were one-step surrogates. Current L3-L7 learns stopping-aware reward, transition, and duration heads; richer uncertainty/search-control is still open. |
+| "Step 11 feedback is implemented." | Pre-L3-L7 replacement was unconditional churn. Current L3-L7 is age-gated with registry metadata; richer utility assessment remains open. |
 | "K2 is in flight." | K2 has completed 10M characterization: neutral, not a new baseline. |
 
 ## Orthodoxy Gaps Ranked By Leverage
