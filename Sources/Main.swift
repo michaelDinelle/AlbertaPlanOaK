@@ -30,9 +30,16 @@ struct RunHealth: Codable {
     // Kernel-side (only present for oak):
     let oakOptionReinitCountFinal: Int?, oakFeatureReinitCountFinal: Int?
     let nonFiniteByPhase: [String: Int]?
-    // Tier H1 diagnostic: latest chord effective-K = 1/Σ chord². Range [1, K]; K means
-    // chord is uniform (mechanism inactive or chord stays flat); 1 means one-hot chord.
+    // Latest chord effective-K = 1/Σ chord². Range [1, K]; K means chord is uniform,
+    // 1 means one option carries the chord.
     let chordEffectiveK: Double?
+    let rrBonusMean: Double?
+    let psiStopGapMean: Double?
+    let terminationRate: Double?
+    let optionDurationMean: Double?
+    let neverUsedFeatureCount: Double?
+    let replacementAgeMean: Double?
+    let stateEffectiveRank: Double?
 }
 
 struct RunDiagnostic: Codable {
@@ -93,24 +100,15 @@ extension Sequence where Element == ActionComponent {
 
 // Per-row per-component sampling. Discrete N: Gumbel-max categorical, scoreGrad = 1{a=d} - pi_d.
 //
-// Box A (Tier F1 structural σ): Gaussian with STRUCTURAL per-component σ = 1/√A, where A is
+// Box A (low-noise structural σ): Gaussian with per-component σ = 1/A^3, where A is
 // the box component's action dimensionality. Williams 1992 REINFORCE for σ-parameterized
 // Gaussian: d log π(a|s)/dμ = (a − μ)/σ² = σ·z/σ² = z/σ (where z ~ N(0,1) is the pre-clamp
 // noise). The clamp affects only the env's view, not the agent's gradient.
 //
-// Motivation: prior to F1 we used σ=1 (hardcoded). On HalfCheetah-v4 (A=6, action bounds
-// [-1, 1]), unit Gaussian noise has per-step magnitude sqrt(A) ≈ 2.45 — nearly 100% of
-// the action range is exploration, drowning any committed option policy. Every D2/D3/C4
-// experiment showed specialized options emerging (D3 chatter -31%, C4 chatter -91%) but
-// could not sustain a walking gait because σ=1 noise reverted the gait every step. F1's
-// structural σ = 1/√A scales per-dim noise to 0.41 on HC — exploration still nonzero but
-// committed policies can now dominate the action signal over 10-20 step walking gaits.
-//
-// No tunable: A is the Plan-supplied action dim for each box component, identical to the
-// env spec. The score-function rescaling `z/σ = z·√A` is the direct Williams 1992 formula;
-// Kim implicit alphaPi auto-adjusts (∥∇log π∥² scales by A, so alphaPi shrinks by ~A,
-// net Head 2 update magnitude scales by σ — slower/more-committed policy adaptation,
-// exactly the intended plateau-breaking trade).
+// Motivation: F1's σ=1/√A fixed the 10M plateau but still left early HalfCheetah reward
+// negative. The L3-L7 low-noise screen found σ=1/A^3 moves paired 50k reward rate
+// monotonically toward zero while preserving finite score-function gradients. A is supplied
+// by the action spec, not by env identity.
 func sampleAndScoreActions(spec: [ActionComponent], numEnvs: Int, dPolicy: Int,
                            envActionWidth: Int,
                            policyMean: UnsafePointer<Float>,
@@ -161,8 +159,10 @@ func sampleAndScoreActions(spec: [ActionComponent], numEnvs: Int, dPolicy: Int,
                 // Tier F1: structural σ = 1/√A, matching the action-dim scaling that keeps
                 // the total action vector magnitude ≈ 1 regardless of A. Williams 1992
                 // REINFORCE score for N(μ, σ²): d log π(a|s)/dμ = (a − μ)/σ² = σ·z/σ² = z/σ.
-                let sigma: Float = 1.0 / Float(max(a, 1)).squareRoot()
-                let invSigma: Float = Float(max(a, 1)).squareRoot()   // = 1/σ
+                let aDim = max(a, 1)
+                let aa = Float(aDim * aDim * aDim)
+                let sigma: Float = 1.0 / aa
+                let invSigma: Float = aa   // = 1/σ
                 for d in 0..<a {
                     let z = nextNormal(&rngState)
                     let mu = policyMean[mBase + pIdx + d]
@@ -237,6 +237,10 @@ private struct HealthAccumulator {
     private var encodeNF = 0, learnNF = 0, planNF = 0, tdPsiNF = 0
     private var oakOptionReinitFinal = 0, oakFeatureReinitFinal = 0
     private var chordEffectiveKLatest: Double = 0
+    private var rrBonusMeanLatest = 0.0, psiStopGapMeanLatest = 0.0
+    private var terminationRateLatest = 0.0, optionDurationMeanLatest = 0.0
+    private var neverUsedFeatureCountLatest = 0.0, replacementAgeMeanLatest = 0.0
+    private var stateEffectiveRankLatest = 0.0
     private let trackFloor: Double
 
     init(obsDim: Int) { trackFloor = 1.0 / Double(max(obsDim, 1)) }
@@ -272,6 +276,13 @@ private struct HealthAccumulator {
         oakOptionReinitFinal  = Int(stats.oakOptionReinitCount)
         oakFeatureReinitFinal = Int(stats.oakFeatureReinitCount)
         chordEffectiveKLatest = Double(stats.chordEffectiveK)
+        rrBonusMeanLatest = Double(stats.rrBonusMean)
+        psiStopGapMeanLatest = Double(stats.psiStopGapMean)
+        terminationRateLatest = Double(stats.terminationRate)
+        optionDurationMeanLatest = Double(stats.optionDurationMean)
+        neverUsedFeatureCountLatest = Double(stats.neverUsedFeatureCount)
+        replacementAgeMeanLatest = Double(stats.replacementAgeMean)
+        stateEffectiveRankLatest = Double(stats.stateEffectiveRank)
     }
 
     var hasMeasuredSteps: Bool { envSteps > 0 }
@@ -289,7 +300,14 @@ private struct HealthAccumulator {
             oakOptionReinitCountFinal: kernelSteps > 0 ? oakOptionReinitFinal : nil,
             oakFeatureReinitCountFinal: kernelSteps > 0 ? oakFeatureReinitFinal : nil,
             nonFiniteByPhase: nf,
-            chordEffectiveK: kernelSteps > 0 ? chordEffectiveKLatest : nil)
+            chordEffectiveK: kernelSteps > 0 ? chordEffectiveKLatest : nil,
+            rrBonusMean: kernelSteps > 0 ? rrBonusMeanLatest : nil,
+            psiStopGapMean: kernelSteps > 0 ? psiStopGapMeanLatest : nil,
+            terminationRate: kernelSteps > 0 ? terminationRateLatest : nil,
+            optionDurationMean: kernelSteps > 0 ? optionDurationMeanLatest : nil,
+            neverUsedFeatureCount: kernelSteps > 0 ? neverUsedFeatureCountLatest : nil,
+            replacementAgeMean: kernelSteps > 0 ? replacementAgeMeanLatest : nil,
+            stateEffectiveRank: kernelSteps > 0 ? stateEffectiveRankLatest : nil)
     }
 }
 
@@ -350,16 +368,20 @@ private struct KernelConfig {
     var baseObsTraceLevels: UInt32 = 0
     var pEncoder: UInt32 = 0, pPhase: UInt32 = 0, pValue: UInt32 = 0, pPsi: UInt32 = 0
     var pOptPolicy: UInt32 = 0, pOptReward: UInt32 = 0, pOptTransition: UInt32 = 0
+    var pOptDuration: UInt32 = 0
     var sObservation: UInt32 = 0, sObsMean: UInt32 = 0, sObsSM: UInt32 = 0
     var sState: UInt32 = 0
     var sPolicyMean: UInt32 = 0, sScoreGrad: UInt32 = 0
     var sReward: UInt32 = 0, sTd: UInt32 = 0, sTdPsi: UInt32 = 0
     var sChord: UInt32 = 0, sChordPrev: UInt32 = 0
     var sUtilFeat: UInt32 = 0, sUtilOpt: UInt32 = 0
+    var sBonusW: UInt32 = 0
     var sPlanAdv: UInt32 = 0
     var sAlpha: UInt32 = 0, sBeta: UInt32 = 0, sH: UInt32 = 0
     var sNTdMat: UInt32 = 0
     var sOptRewardTd: UInt32 = 0
+    var sDurationTd: UInt32 = 0
+    var sDurationHat: UInt32 = 0
     var sQOption: UInt32 = 0     // Per-option Q^k cache (K floats), oak_plan → oak_plan_reduce.
     var sObsTraceMulti: UInt32 = 0  // Tier I1 (Plan Step 3): per-obs-dim multi-timescale traces.
                                      // (M−1)·O floats laid out as `obsTraceMulti[m·baseO + o]`
@@ -369,23 +391,14 @@ private struct KernelConfig {
                                      // by Phase 2 Fourier projection alongside std_obs.
                                      // Replaces Tier C1's single `obsTrace` (which was one
                                      // EMA at rate 1/baseO).
-    var sPrioOpt: UInt32 = 0     // Tier D2 (Plan Step 9, prioritized sweeping): per-option priority
-                                  // signal (K floats). prio[k] = chord[k] · ||model TD error_k||_L2.
-                                  // Written by oak_plan lane 0; consumed by oak_plan_reduce
-                                  // (mean) and oak_learn_heads (Head 4 gate). Moore-Atkeson 1993,
-                                  // Plan footnote 13.
-    var sPrevBeta: UInt32 = 0    // Tier H1 (Plan Step 10 STOMP multi-step options): per-option
-                                  // continuation probability β^k ∈ [0, 1] carried from previous
-                                  // step's oak_plan. β^k = 1/(1 + ntdSqSum[k]) — soft-clamp of
-                                  // optTransition's squared-L2 model error. High β ⇔ model
-                                  // confident ⇔ option continues; low β ⇔ model surprised ⇔ option
-                                  // terminates. Read by oak_meta_predict phase 1 for chord
-                                  // hysteresis: chord_k ← β^k·chordPrev + (1−β^k)·softmax_k(ψ·s'),
-                                  // renormalized via simd_sum. Written by oak_plan lane 0 alongside
-                                  // the existing prioOpt write — same lane, same scope, no added
-                                  // barriers. Fresh random optTransition → large ntdSqSum → β ≈ 0
-                                  // → 1-step behavior (safe fallback at init and post-G&T reseed).
+    var sPrioOpt: UInt32 = 0
+    var sContinuation: UInt32 = 0 // RR-derived per-option continuation indicator/probability.
+    var sReplacementAgeMean: UInt32 = 0
     var uCounters: UInt32 = 0
+    var uOptFeature: UInt32 = 0
+    var uFeatureAge: UInt32 = 0
+    var uOptAge: UInt32 = 0
+    var uFeatureEverUsed: UInt32 = 0
 }
 
 private struct KernelScalars {
@@ -404,10 +417,13 @@ struct KernelStats {
     var encodeNonFiniteCount: Float = 0, learnNonFiniteCount: Float = 0
     var planNonFiniteCount: Float = 0, tdPsiNonFiniteCount: Float = 0
     var oakOptionReinitCount: Float = 0, oakFeatureReinitCount: Float = 0
-    // Tier H1 diagnostic: chord effective-K = 1 / Σ_k chord[k]². Range [1, K].
-    // K = uniform chord (mechanism inactive OR chord stays flat); 1 = one-hot chord
-    // (single option fully dominant); intermediate = moderate concentration.
+    // Chord effective-K = 1 / Σ_k chord[k]². Range [1, K]. K = uniform chord;
+    // 1 = one-hot; intermediate = moderate concentration.
     var chordEffectiveK: Float = 0
+    var rrBonusMean: Float = 0, psiStopGapMean: Float = 0
+    var terminationRate: Float = 0, optionDurationMean: Float = 0
+    var neverUsedFeatureCount: Float = 0, replacementAgeMean: Float = 0
+    var stateEffectiveRank: Float = 0
 }
 
 // =================================================================================================
@@ -423,6 +439,7 @@ private enum OakMetalLayout {
         optionCount(rank: rank) * dPolicy * rank
     }
     static func optRewardCount(rank: Int) -> Int { optionCount(rank: rank) * rank }
+    static func optDurationCount(rank: Int) -> Int { optionCount(rank: rank) * rank }
     // DENSE transition (RR-Subtasks Sutton-Machado-Holland-Timbers-Tanner-White 2022 eq. 17):
     // one weight per (option, j_out, i_in). n_hat^k_j(s) = sum_i w^k_{j,i} * s[i] gives options
     // real cross-feature dynamics for planning (V(n_hat^k(s)) = sum_j valueW[j] * sum_i w^k_{j,i} * s[i]).
@@ -471,7 +488,7 @@ private enum OakMetalLayout {
     static func phaseCount(rank: Int) -> Int { fourierPreActCount(rank: rank) }
 
     struct Param {
-        let encoder, phase, value, psi, optPolicy, optReward, optTransition, total: Int
+        let encoder, phase, value, psi, optPolicy, optReward, optTransition, optDuration, total: Int
     }
     static func paramLayout(obsDim: Int, baseObsDim: Int, rank: Int, dPolicy: Int) -> Param {
         var o = 0
@@ -482,8 +499,9 @@ private enum OakMetalLayout {
         let op  = o; o += optPolicyCount(rank: rank, dPolicy: dPolicy)
         let or_ = o; o += optRewardCount(rank: rank)
         let ot  = o; o += optTransitionCount(rank: rank)
+        let od  = o; o += optDurationCount(rank: rank)
         return Param(encoder: enc, phase: ph, value: val, psi: psi, optPolicy: op,
-                     optReward: or_, optTransition: ot, total: o)
+                     optReward: or_, optTransition: ot, optDuration: od, total: o)
     }
 
     struct State {
@@ -492,10 +510,12 @@ private enum OakMetalLayout {
         let reward, td, tdPsi: Int
         let chord, chordPrev: Int
         let utilFeat, utilOpt: Int
+        let bonusW: Int
         let planAdv: Int
         let alpha, beta, h: Int       // MetaOptimize L-approximation buffers (R floats each).
         let nTdMat: Int               // Dense option-transition TD targets, K*R floats, written by oak_plan.
         let optRewardTd: Int          // Option reward-model TD targets, K floats, written once by oak_plan.
+        let durationTd, durationHat: Int
         let qOption: Int              // Per-option Q^k cache, K floats, oak_plan → oak_plan_reduce.
         let obsTraceMulti: Int        // Tier I1 (Plan Step 3): per-obs-dim multi-timescale traces,
                                        // (M−1)·baseO floats laid out as `obsTraceMulti[m·baseO + o]`
@@ -504,11 +524,8 @@ private enum OakMetalLayout {
                                        // K floats. prio[k] = chord[k] · ||nTdMat^k||_L2. Written
                                        // by oak_plan lane 0; consumed by oak_plan_reduce (mean
                                        // → KernelScalars.meanPrio) and oak_learn_heads Head 4 gate.
-        let prevBeta: Int             // Tier H1: per-option continuation probability β^k ∈ [0,1],
-                                       // K floats. Written by oak_plan lane 0 as β = 1/(1+ntdSqSum);
-                                       // read by NEXT step's oak_meta_predict phase 1 for chord
-                                       // hysteresis. One-step lag is intentional and semantically
-                                       // fine (β tracks slow-moving optTransition quality).
+        let continuation: Int          // RR-derived continuation, K floats.
+        let replacementAgeMean: Int
         let total: Int
     }
     static func stateLayout(obsDim: Int, baseObsDim: Int, rank: Int, dPolicy: Int) -> State {
@@ -528,34 +545,47 @@ private enum OakMetalLayout {
         let csP = o; o += K
         let uf  = o; o += rank
         let uo  = o; o += K
+        let bw  = o; o += rank
         let pa  = o; o += 1
         let al  = o; o += rank
         let be  = o; o += rank
         let h   = o; o += rank
         let ntd = o; o += K * rank
         let ortd = o; o += K
+        let dtd = o; o += K
+        let dhat = o; o += K
         let qo  = o; o += K
         // Tier I1: (M−1)·baseO floats for non-instantaneous trace levels (τ_m = 2^m for
         // m=1..M−1). Layout: `obsTraceMulti[m·baseObsDim + o]` for m=1..M−1.
         let otr = o; o += max(M - 1, 0) * max(baseObsDim, 1)
         let prio = o; o += K
-        let pb  = o; o += K
+        let cont = o; o += K
+        let ram = o; o += 1
         return State(observation: obs, obsMean: mean, obsSM: osm, state: st,
                      policyMean: pol, scoreGrad: sg,
                      reward: rew, td: td, tdPsi: tdP,
                      chord: cs, chordPrev: csP,
-                     utilFeat: uf, utilOpt: uo,
+                     utilFeat: uf, utilOpt: uo, bonusW: bw,
                      planAdv: pa,
                      alpha: al, beta: be, h: h,
-                     nTdMat: ntd, optRewardTd: ortd, qOption: qo, obsTraceMulti: otr,
-                     prioOpt: prio, prevBeta: pb, total: o)
+                     nTdMat: ntd, optRewardTd: ortd, durationTd: dtd, durationHat: dhat,
+                     qOption: qo, obsTraceMulti: otr,
+                     prioOpt: prio, continuation: cont, replacementAgeMean: ram, total: o)
     }
 
-    struct UInts { let counters, total: Int }
-    static func uintLayout() -> UInts {
+    struct UInts { let counters, optFeature, featureAge, optAge, featureEverUsed, total: Int }
+    static func uintLayout(rank: Int) -> UInts {
         // 6 counters: OBS_NF, LEARN_NF, PLAN_NF, REINIT_OPT, REINIT_FEAT, TDPSI_NF.
         // (Indices match the constants at the top of OakKernel.metal.)
-        UInts(counters: 0, total: 6)
+        let K = optionCount(rank: rank)
+        var o = 0
+        let ctr = o; o += 6
+        let of = o; o += K
+        let fa = o; o += rank
+        let oa = o; o += K
+        let feu = o; o += rank
+        return UInts(counters: ctr, optFeature: of, featureAge: fa, optAge: oa,
+                     featureEverUsed: feu, total: o)
     }
 }
 
@@ -589,7 +619,7 @@ final class OakMetalEngine {
         Phase(name: "oak_bk_encode",       tgSize: -1),     // -1 → host fills with rank (1 TG of R threads).
         // K threadgroups × R threads each (one TG per option). Each thread (j) computes
         // one row of the dense option transition; per-TG simd_sum + threadgroup_barrier
-        // reduces to vHat^k; lane 0 emits Q^k = r̂^k + vHat^k into qOption[K].
+        // reduces to vHat^k; lane 0 emits Q^k = r̂^k − ρ·l̂^k + vHat^k into qOption[K].
         Phase(name: "oak_plan",            tgSize: -1),     // -1 → host fills with rank
         // K-thread cross-option reduction: simd_max(qOption) + planAdv soft-bound.
         Phase(name: "oak_plan_reduce",     tgSize: 0),
@@ -688,7 +718,7 @@ final class OakMetalEngine {
 
         let paramLayout = OakMetalLayout.paramLayout(obsDim: obsDim, baseObsDim: baseObsDim, rank: rank, dPolicy: dPolicy)
         stateLayout = OakMetalLayout.stateLayout(obsDim: obsDim, baseObsDim: baseObsDim, rank: rank, dPolicy: dPolicy)
-        uintLayout  = OakMetalLayout.uintLayout()
+        uintLayout  = OakMetalLayout.uintLayout(rank: rank)
         paramsArena = Shared(device: device, count: paramLayout.total, zero: Float(0))
         stateArena  = Shared(device: device, count: stateLayout.total, zero: Float(0))
         uintArena   = Shared(device: device, count: uintLayout.total,  zero: UInt32(0))
@@ -700,6 +730,7 @@ final class OakMetalEngine {
                        + OakMetalLayout.optPolicyCount(rank: rank, dPolicy: dPolicy)
                        + OakMetalLayout.optRewardCount(rank: rank)
                        + OakMetalLayout.optTransitionCount(rank: rank)
+                       + OakMetalLayout.optDurationCount(rank: rank)
         let postLearnTotal = OakMetalLayout.postLearnThreadCount(rank: rank, dPolicy: dPolicy)
         if let postIndex = Self.phases.firstIndex(where: { $0.name == "oak_post_learn" }) {
             precondition(postLearnTotal <= pipelines[postIndex].maxTotalThreadsPerThreadgroup,
@@ -788,25 +819,35 @@ final class OakMetalEngine {
                OakMetalLayout.optPolicyCount(rank: rank, dPolicy: dPolicy), invR)
         sample(paramLayout.optReward, OakMetalLayout.optRewardCount(rank: rank), invR)
         sample(paramLayout.optTransition, OakMetalLayout.optTransitionCount(rank: rank), invR)
+        // Duration defaults to the structural one-step lower bound.
+        let durationPtr = paramsArena.pointer.advanced(by: paramLayout.optDuration)
+        for i in 0..<OakMetalLayout.optDurationCount(rank: rank) { durationPtr[i] = 0 }
         // psi feature-attainment seed: cumulant k gets +invR on its anchor feature index k.
         let psiPtr = paramsArena.pointer.advanced(by: paramLayout.psi)
         for k in 0..<K where k < rank {
             psiPtr[k * rank + k] += invR
         }
+        let bonusSlot = stateArena.pointer.advanced(by: stateLayout.bonusW)
+        let valuePtr = paramsArena.pointer.advanced(by: paramLayout.value)
+        for i in 0..<rank { bonusSlot[i] = valuePtr[i] }
 
         // Chord seed: uniform 1/K (max-entropy prior). meta_policy recomputes each step.
         let chordSlot = stateArena.pointer.advanced(by: stateLayout.chord)
         let invK: Float = 1.0 / Float(max(K, 1))
         for k in 0..<K { chordSlot[k] = invK }
 
-        // Per-option utility prior: utilOpt[k] = R (capacity-volume). The adaptive ψ-bootstrap
-        // β_k = (1 − 1/R) · α₀ / (α₀ + utilOpt[k]) in oak_predict reads this every step; with
-        // utilOpt[k] = R at init, β_k(t=0) ≈ α₀/R = 1/(R·baseO) ~ 0 (fully myopic, safe).
-        // The EMA in oak_post_learn (track rate 1/baseO) decays utilOpt toward true |δ_k|²,
-        // so β grows back toward the cap once each option's ψ stabilizes.
+        // Per-option utility prior: utilOpt[k] = R (capacity-volume). The EMA in
+        // oak_post_learn decays this toward true |δ_k|², making low-utility old options
+        // eligible for Step-11 remove/replace without any tunable warmup gate.
         let utilOptSlot = stateArena.pointer.advanced(by: stateLayout.utilOpt)
         let utilOptPrior: Float = Float(rank)
         for k in 0..<K { utilOptSlot[k] = utilOptPrior }
+        let optFeatureSlot = uintArena.pointer.advanced(by: uintLayout.optFeature)
+        let featureEverUsedSlot = uintArena.pointer.advanced(by: uintLayout.featureEverUsed)
+        for k in 0..<K {
+            optFeatureSlot[k] = UInt32(k % rank)
+            featureEverUsedSlot[k % rank] = 1
+        }
 
         // MetaOptimize L-approximation seed (Sharifnassab-Salehkaleybar-Sutton 2024
         // arXiv:2402.02342). α[i] = 1/baseO is the prior step size, β[i] = log α[i] is
@@ -908,21 +949,30 @@ final class OakMetalEngine {
         c.pValue = UInt32(p.value); c.pPsi = UInt32(p.psi)
         c.pOptPolicy = UInt32(p.optPolicy)
         c.pOptReward = UInt32(p.optReward); c.pOptTransition = UInt32(p.optTransition)
+        c.pOptDuration = UInt32(p.optDuration)
         c.sObservation = UInt32(s.observation); c.sObsMean = UInt32(s.obsMean); c.sObsSM = UInt32(s.obsSM)
         c.sState = UInt32(s.state)
         c.sPolicyMean = UInt32(s.policyMean); c.sScoreGrad = UInt32(s.scoreGrad)
         c.sReward = UInt32(s.reward); c.sTd = UInt32(s.td); c.sTdPsi = UInt32(s.tdPsi)
         c.sChord = UInt32(s.chord); c.sChordPrev = UInt32(s.chordPrev)
         c.sUtilFeat = UInt32(s.utilFeat); c.sUtilOpt = UInt32(s.utilOpt)
+        c.sBonusW = UInt32(s.bonusW)
         c.sPlanAdv = UInt32(s.planAdv)
         c.sAlpha = UInt32(s.alpha); c.sBeta = UInt32(s.beta); c.sH = UInt32(s.h)
         c.sNTdMat = UInt32(s.nTdMat)
         c.sOptRewardTd = UInt32(s.optRewardTd)
+        c.sDurationTd = UInt32(s.durationTd)
+        c.sDurationHat = UInt32(s.durationHat)
         c.sQOption = UInt32(s.qOption)
         c.sObsTraceMulti = UInt32(s.obsTraceMulti)
         c.sPrioOpt = UInt32(s.prioOpt)
-        c.sPrevBeta = UInt32(s.prevBeta)
+        c.sContinuation = UInt32(s.continuation)
+        c.sReplacementAgeMean = UInt32(s.replacementAgeMean)
         c.uCounters = UInt32(u.counters)
+        c.uOptFeature = UInt32(u.optFeature)
+        c.uFeatureAge = UInt32(u.featureAge)
+        c.uOptAge = UInt32(u.optAge)
+        c.uFeatureEverUsed = UInt32(u.featureEverUsed)
         configPointer.pointee = c
     }
 
