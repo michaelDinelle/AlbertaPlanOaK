@@ -1,11 +1,11 @@
 # OaK roadmap - Plan-orthodox continual improvement
 
-Last audited: 2026-04-24, during the research-first L3-L7 regroup. L1 remains
-rolled back. The live branch includes RR stopping-value subtasks, RR-derived
-continuation, raw option reward plus average-reward option duration,
-age-gated Step-11 replacement, every-step replacement assessment, and
-feature/search-control diagnostics; promotion is still gated by paired smoke,
-1.5M screen, and 10M acceptance evidence.
+Last audited: 2026-04-24, during the research-first L3-L7 regroup and the
+Plan-step zoom-out audit. L1 remains rolled back. The live branch includes RR
+stopping-value subtasks, RR-derived continuation, raw option reward plus
+average-reward option duration, age-gated Step-11 replacement, every-step
+replacement assessment, and feature/search-control diagnostics; promotion is
+still gated by paired smoke, 1.5M screen, and 10M acceptance evidence.
 
 This roadmap is the control document for moving OaK toward the Alberta Plan's
 Step-11 Oak architecture. It is deliberately stricter than the old tier log:
@@ -80,6 +80,29 @@ keeper's `-711.154` to `-489.611` while cutting feature reinitializations from
 `4717.7` to `149.5`. It is not promoted: final reward-rate is still near zero
 (`-0.001257` mean, `5/10` positive seeds) and late heartbeats still show
 negative drift rather than sustained acceleration.
+
+## Zoom-Out Architecture Diagnosis
+
+The 2026-04-24 step-by-step audit changes the next-work stance. The live
+L3-L7 branch is no longer missing the obvious RR stopping/duration/registry
+pieces, so more nearby edits to termination thresholds, utility sums, reward
+centering order, or action scaling are likely to be trinkets. The remaining
+load-bearing gaps are earlier and larger.
+
+| Plan area | Large missing piece | Evidence that this is not a local tweak |
+|---|---|---|
+| Step 2 feature finding | Smart feature construction/ranking across tasks, including diversity/decorrelation and downstream model/planning utility, not just random Fourier reseeding or one-row composition. | K1/K2 and utility variants were safe or neutral, but never differentiated the keyboard or improved 10M learning slope. Trace attempts blew up on correlated features. |
+| Step 4 actor-critic | A clean continuing actor-critic credit path tied to the main control objective while preserving option specialization. | Direct main-TD actor, primary actor, primary option, sampled option execution, and actor traces all regressed badly; the live ψ actor is stable but not yet enough for expert learning. |
+| Step 8 Prototype-AI I | A reward-useful one-step expectation/sample model with feature-ranking feedback, isolated until it proves value relevance. | L1 learned finite one-step predictions but harmed paired reward by 1.5M, so a Step-8 retry must be materially different from re-adding the same heads. |
+| Step 9 search control | A state/update queue with uncertainty-aware or meta-gradient search control under a fixed per-step planning budget. | Current priority is only chord-weighted model TD magnitude. All-model updates, scalar Bellman priority, trusted-only planning, and state-ring AVI each failed without richer search control. |
+| Step 10 subtask GVF planning | Planning should eventually improve subtask GVFs as well as the main value, but only with stable off-policy/GTD-style control. | Raw ψ model-planning briefly made reward-rate positive at 10k then collapsed by 50k; bounded ψ planning was stable but too weak. |
+| Step 11 option keyboard | A true cumulant-space keyboard: cross-cumulant option values / GPE-GPI or a chord-descriptor model, not only behavior-policy blending. | The Option Keyboard paper combines intentions in cumulant space. Current OaK blends policies and uses scalar model Qs; L2-normalized, deterministic GPI-like, RR-activation, and RR-model keyboard surrogates all regressed. |
+
+Decision: do not spend more runs on single-line variants unless they implement
+one of these architecture chunks or falsify a specific diagnostic. The next
+implementation wave should be a coherent Plan-order repair, with new state or
+heads admitted only when they are tied to Step 2/8/9/11 semantics and have
+paired random-baseline gates.
 
 ## Alberta Plan Commitments
 
@@ -194,15 +217,13 @@ more interesting; the Plan order matters.
 | Priority | Item | Status now | Why it comes here | Next decision |
 |---:|---|---|---|---|
 | 0 | Measurement hygiene | Active rule | A stale Metal library can completely corrupt health metrics. | Rebuild Metal after every kernel edit; never interpret a run whose metallib predates `Sources/OakKernel.metal`. |
-| 1 | L1 one-step expectation model | **Rolled back** | The model learned finite predictions but reduced K1 reward on `8/10` seeds and did not create a usable planning signal. | Do not run 10M; any Step-8 retry must be materially different and isolated from feature-utility/reward-path damage. |
-| 2 | L2 state-feature ring + asynchronous one-step planning | **Blocked** | L2 depends on a one-step model worth spending through search. L1 failed that screen. | Do not start from rolled-back L1. |
-| 3 | L3 exact reward-respecting stopping value for psi | **Live, screening** | The RR stopping-value target is implemented in `oak_bk_encode`. | Keep only if paired screens show finite health and improving reward-rate. |
-| 4 | L4 average-reward option duration + raw reward backup | **Live, screening** | `optDuration` and `rHat - rho*lHat + V(nHat)` are implemented; the direct differential reward-model branch was rejected at 10k. | Duration must remain non-degenerate without suppressing reward improvement. |
-| 5 | L5 true option termination | **Live, screening** | Continuation is derived from the RR stopping comparison. | Reject variants that revert to H1-style confidence persistence. |
-| 6 | L6 Step-11 registry and age-aware replacement | **Live, screening** | `optFeature`, ages, feature-ever-used metadata, every-step eligible-candidate assessment, and age/capacity-gated commits are implemented. | Replacement counts must stay structural and no longer equal measured steps. |
-| 7 | L7 feature/search diagnostics | **Partial live** | Unused active features serve as candidates; cheap state participation rank, eligible counts, commit rate, search-control entropy, model update rate, and option differential TD are reported. | Add richer decorrelation/uncertainty only if these diagnostics identify starvation or rank collapse. |
-| 8 | L8 eligibility traces retry | Blocked on L7 evidence | Prior trace attempts failed from correlated Fourier features; the 2026-04-24 implicit value/ψ retry improved 10k cumulative reward but failed 50k through duration/score-scale blow-up, and value-only traces failed 10k. | Retry only with a materially different true-online/off-policy trace formulation and a trace stability diagnostic. |
-| 9 | L9 option keyboard descriptor model / Design B | Last | Descriptor models are only meaningful after true options exist. | Compare Design A/B after L5. |
+| 1 | Step 2 feature resource audit | **Open architecture gap** | Feature discovery precedes stable traces, models, and option selection in the Plan. | Add diversity/decorrelation and utility-transfer diagnostics before adding more feature churn. |
+| 2 | Step 8 one-step model retry | **Rolled back, redesign required** | The model learned finite predictions but reduced K1 reward on `8/10` seeds and did not create a usable planning signal. | Retry only as an isolated value-relevance/search-control substrate, not as the old L1 heads coupled directly into utility and planning. |
+| 3 | Step 9 search control | **Partial** | Current priority is a scalar TD-magnitude gate; the Plan calls out state update ordering and model uncertainty. | Implement uncertainty/state-queue diagnostics before letting a redesigned model drive value. |
+| 4 | L3-L6 STOMP core | **Live, screening** | RR stopping, continuation, option reward/transition/duration, and registry are present. | Keep as the keeper substrate unless paired evidence says a large architecture repair needs a different integration. |
+| 5 | L7 feature/search diagnostics | **Partial live** | Cheap state rank, eligible counts, commit rate, priority entropy, model update rate, and option differential TD are reported. | Extend only toward the Step 2/8/9 diagnostics above. |
+| 6 | L8 eligibility traces retry | **Blocked** | Prior trace attempts failed from correlated Fourier features and unstable actor/model credit. | Retry only after feature diversity and a trace-stability diagnostic improve. |
+| 7 | Step 11 option keyboard descriptor / GPE-GPI | **Open architecture gap** | The live keyboard blends behavior; the paper combines options in cumulant space. | Design after the cross-cumulant value requirement is explicit, then test against Design A behavior blending. |
 
 ## Strict Status Against Plan Steps
 
