@@ -576,6 +576,7 @@ private struct KernelConfig {
     var uModelAge: UInt32 = 0
     var uGvfAge: UInt32 = 0, uBadFeatureAge: UInt32 = 0
     var uAuxGvfAge: UInt32 = 0
+    var deepDiagnostics: UInt32 = 0
 }
 
 private struct KernelScalars {
@@ -908,7 +909,7 @@ final class OakMetalEngine {
     private static let phases: [Phase] = [
         Phase(name: "oak_encode",           tgSize: -1),
         Phase(name: "oak_plan",             tgSize: -1),
-        Phase(name: "oak_plan_reduce",      tgSize: 1),
+        Phase(name: "oak_plan_reduce",      tgSize: -1),
         Phase(name: "oak_learn_heads",      tgSize: 0),
         Phase(name: "oak_replace",          tgSize: -1),
     ]
@@ -930,6 +931,7 @@ final class OakMetalEngine {
     private let phaseGridWidths: [Int]
     private let phaseThreadgroupSizes: [Int]
     private let diagnosticGpuPhaseTiming: Bool
+    private let deepDiagnostics: Bool
     private var phaseGpuTimeSumSeconds: [Double]
     private var phaseGpuInvalidStepCount: [Int]
     private var hostAction: [Float]
@@ -956,7 +958,8 @@ final class OakMetalEngine {
     static func executionWidth(device: MTLDevice) throws -> Int { 32 }
 
     init(obsDim: Int, baseObsDim: Int, actDim: Int, rank: Int, dPolicy: Int,
-         device: MTLDevice, seed: Int?, diagnosticGpuPhaseTiming: Bool = false) throws {
+         device: MTLDevice, seed: Int?, diagnosticGpuPhaseTiming: Bool = false,
+         deepDiagnostics: Bool = false) throws {
         // R (rank) is a compute budget and the active feature/subtask/option count. It is no
         // longer capped to one SIMD group; 32 is only the scheduling page width.
         precondition(rank >= 2, "rank must be >= 2 (feature/subtask/option budget).")
@@ -995,6 +998,10 @@ final class OakMetalEngine {
         let K = OakMetalLayout.optionCount(rank: rank)
         // Grid widths sized for one row (single-stream).
         let crossPageCount = K * rank
+        let deepGvfWork = deepDiagnostics
+            ? OakMetalLayout.auxGvfUpdateCount(rank: rank)
+                + OakMetalLayout.auxGvfValueUpdateCount(rank: rank)
+            : 0
         let learnTotal = rank
                        + OakMetalLayout.optValueCount(rank: rank)
                        + OakMetalLayout.psiCount(rank: rank)
@@ -1003,18 +1010,18 @@ final class OakMetalEngine {
                        + OakMetalLayout.optRewardCount(rank: rank)
                        + OakMetalLayout.optTransitionCount(rank: rank)
                        + OakMetalLayout.optDurationCount(rank: rank)
-                       + OakMetalLayout.oneRewardCount(rank: rank, dPolicy: dPolicy)
-                       + OakMetalLayout.oneTransitionCount(rank: rank, dPolicy: dPolicy)
+                       + (deepDiagnostics ? OakMetalLayout.oneRewardCount(rank: rank, dPolicy: dPolicy) : 0)
+                       + (deepDiagnostics ? OakMetalLayout.oneTransitionCount(rank: rank, dPolicy: dPolicy) : 0)
                        + OakMetalLayout.gvfUpdateCount(baseObsDim: baseObsDim, rank: rank, dPolicy: dPolicy)
                        + OakMetalLayout.gvfValueUpdateCount(baseObsDim: baseObsDim, rank: rank, dPolicy: dPolicy)
-                       + OakMetalLayout.auxGvfUpdateCount(rank: rank)
-                       + OakMetalLayout.auxGvfValueUpdateCount(rank: rank)
+                       + deepGvfWork
+        let replaceGroups = max(1, (K * dPolicy + OakMetalLayout.optionPageWidth - 1) / OakMetalLayout.optionPageWidth)
         let grids = [
             1,                  // encode + keyboard_predict
             K <= OakMetalLayout.optionPageWidth ? K : OakMetalLayout.optionPageWidth,
             1,                  // plan_reduce
             learnTotal,         // learn_heads
-            1,                  // replace
+            replaceGroups,      // replace + action emission
         ]
         phaseGridWidths = grids
 
@@ -1024,6 +1031,7 @@ final class OakMetalEngine {
         }
 
         self.diagnosticGpuPhaseTiming = diagnosticGpuPhaseTiming
+        self.deepDiagnostics = deepDiagnostics
         phaseGpuTimeSumSeconds = Array(repeating: 0, count: Self.phases.count)
         phaseGpuInvalidStepCount = Array(repeating: 0, count: Self.phases.count)
         hostAction = Array(repeating: 0, count: dPolicy)
@@ -1284,6 +1292,7 @@ final class OakMetalEngine {
         c.uGvfAge = UInt32(u.gvfAge)
         c.uBadFeatureAge = UInt32(u.badFeatureAge)
         c.uAuxGvfAge = UInt32(u.auxGvfAge)
+        c.deepDiagnostics = deepDiagnostics ? 1 : 0
         configPointer.pointee = c
     }
 
@@ -1315,14 +1324,6 @@ final class OakMetalEngine {
         if !split {
             // Hot path: one command buffer, one encoder, one dispatch per phase with a memory
             // barrier between phases (required for RAW/WAW correctness on shared buffers).
-            //
-            // The MTLCommandBuffer + MTLComputeCommandEncoder are NSObject subclasses (Metal's
-            // Objective-C interop). In a tight long-running CLI loop with no run loop, Swift's
-            // ARC cannot drain autoreleased Obj-C objects on its own — each CB keeps GPU-side
-            // command storage alive until the pool drains. Wrapping the per-step allocation in
-            // an explicit `autoreleasepool` bounds the allocation lifetime to one step and
-            // eliminates the slow resident-set growth observed in Activity Monitor over 10M+
-            // step runs.
             try autoreleasepool {
                 guard let cb = queue.makeCommandBufferWithUnretainedReferences() else {
                     throw OakError.message("Failed to create Metal command buffer.")
@@ -1739,11 +1740,14 @@ private final class RunState {
         guard rank <= 256 else {
             throw OakError.message("OAK rank \(rank) exceeds oak_plan's 256-threadgroup-storage cap. Set OAK_RANK<=256 or redesign oak_plan storage.")
         }
+        let deepDiagnostics = ProcessInfo.processInfo.environment["OAK_DEEP_DIAGNOSTICS"]
+            .map { ["1", "true", "yes", "on"].contains($0.lowercased()) } ?? false
         let engine = policy == .oak
             ? try OakMetalEngine(obsDim: env.obsDim, baseObsDim: env.obsDim,
                                  actDim: env.actDim, rank: rank, dPolicy: env.dPolicy,
                                  device: device, seed: seed,
-                                 diagnosticGpuPhaseTiming: includeDiagnostic)
+                                 diagnosticGpuPhaseTiming: includeDiagnostic,
+                                 deepDiagnostics: deepDiagnostics)
             : nil
         try env.reset()
         return RunContext(envId: envId, policy: policy, seed: seed,
