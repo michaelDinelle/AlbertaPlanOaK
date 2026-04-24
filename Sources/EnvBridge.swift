@@ -160,6 +160,9 @@ final class EnvPoolEnv {
     private(set) var envActionScratch: [Float]
     private(set) var actionSignalScratch: [Float]
     private(set) var scoreGradScratch: [Float]
+    private(set) var importanceScratch: [Float]
+    private(set) var importanceLogScratch: [Float]
+    private var optionLogProbScratch: [Float]
     private var discreteIndexScratch: [Int32]
     private var rngState: UInt64
 
@@ -182,6 +185,9 @@ final class EnvPoolEnv {
         envActionScratch  = Array(repeating: 0, count: numEnvs * envActionWidth)
         actionSignalScratch = Array(repeating: 0, count: numEnvs * dPolicy)
         scoreGradScratch  = Array(repeating: 0, count: numEnvs * dPolicy)
+        importanceScratch = []
+        importanceLogScratch = []
+        optionLogProbScratch = []
         discreteIndexScratch = Array(repeating: 0, count: numEnvs)
         rngState = UInt64(bitPattern: Int64(seed ?? Int(oakUnseededSeed))) &* 0x9e3779b97f4a7c15 &+ 1
     }
@@ -194,21 +200,63 @@ final class EnvPoolEnv {
     }
     func reset() throws { try checked { try bridge.reset(handle, obs: &observationScratch) } }
 
+    private func ensureOptionScratch(optionCount: Int) {
+        let n = max(0, optionCount) * numEnvs
+        guard importanceScratch.count != n else { return }
+        importanceScratch = Array(repeating: 0, count: n)
+        importanceLogScratch = Array(repeating: 0, count: n)
+        optionLogProbScratch = Array(repeating: 0, count: n)
+    }
+
     // Wrapper-owned sampling + scoreGrad. Reads policyMean[B · dPolicy], samples per-component,
     // writes envActionScratch + actionSignalScratch + scoreGradScratch, dispatches to the appropriate bridge step
     // function. This is the SOLE site that knows the env's action-space type — Inv-1 boundary.
-    func sampleAndStep(policyMean: [Float]) throws {
+    func sampleAndStep(policy: PolicyMeanBatch) throws {
+        let policyMean = policy.values
         precondition(policyMean.count == numEnvs * dPolicy)
+        let optionCount = policy.optionValues.map { $0.count / max(dPolicy, 1) } ?? 0
+        ensureOptionScratch(optionCount: optionCount)
         policyMean.withUnsafeBufferPointer { pmBuf in
             envActionScratch.withUnsafeMutableBufferPointer { aBuf in
                 actionSignalScratch.withUnsafeMutableBufferPointer { actBuf in
                     scoreGradScratch.withUnsafeMutableBufferPointer { sgBuf in
-                        sampleAndScoreActions(spec: actionSpec, numEnvs: numEnvs, dPolicy: dPolicy,
-                                              envActionWidth: envActionWidth,
-                                              policyMean: pmBuf.baseAddress!,
-                                              envAction: aBuf.baseAddress!,
-                                              actionSignal: actBuf.baseAddress!,
-                                              scoreGrad: sgBuf.baseAddress!, rngState: &rngState)
+                        importanceScratch.withUnsafeMutableBufferPointer { impBuf in
+                            importanceLogScratch.withUnsafeMutableBufferPointer { impLogBuf in
+                                optionLogProbScratch.withUnsafeMutableBufferPointer { optLogBuf in
+                                    if let optionValues = policy.optionValues {
+                                        optionValues.withUnsafeBufferPointer { optBuf in
+                                            sampleAndScoreActions(spec: actionSpec, numEnvs: numEnvs,
+                                                                  dPolicy: dPolicy,
+                                                                  envActionWidth: envActionWidth,
+                                                                  policyMean: pmBuf.baseAddress!,
+                                                                  optionPolicyMean: optBuf.baseAddress,
+                                                                  optionCount: optionCount,
+                                                                  envAction: aBuf.baseAddress!,
+                                                                  actionSignal: actBuf.baseAddress!,
+                                                                  scoreGrad: sgBuf.baseAddress!,
+                                                                  importance: impBuf.baseAddress,
+                                                                  importanceLog: impLogBuf.baseAddress,
+                                                                  optionLogProbScratch: optLogBuf.baseAddress,
+                                                                  rngState: &rngState)
+                                        }
+                                    } else {
+                                        sampleAndScoreActions(spec: actionSpec, numEnvs: numEnvs,
+                                                              dPolicy: dPolicy,
+                                                              envActionWidth: envActionWidth,
+                                                              policyMean: pmBuf.baseAddress!,
+                                                              optionPolicyMean: nil,
+                                                              optionCount: 0,
+                                                              envAction: aBuf.baseAddress!,
+                                                              actionSignal: actBuf.baseAddress!,
+                                                              scoreGrad: sgBuf.baseAddress!,
+                                                              importance: nil,
+                                                              importanceLog: nil,
+                                                              optionLogProbScratch: nil,
+                                                              rngState: &rngState)
+                                    }
+                                }
+                            }
+                        }
                     }
                 }
             }

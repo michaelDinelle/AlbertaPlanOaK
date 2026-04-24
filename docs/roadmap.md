@@ -1,11 +1,13 @@
 # OaK roadmap - Plan-orthodox continual improvement
 
-Last audited: 2026-04-24, during the research-first L3-L7 regroup and the
-Plan-step zoom-out audit. L1 remains rolled back. The live branch includes RR
-stopping-value subtasks, RR-derived continuation, raw option reward plus
-average-reward option duration, age-gated Step-11 replacement, every-step
-replacement assessment, and feature/search-control diagnostics; promotion is
-still gated by paired smoke, 1.5M screen, and 10M acceptance evidence.
+Last audited: 2026-04-24, during the Step 1-11 rebuild. L1 remains rolled back.
+The live branch has moved past the L3-L7 scaffold: default perception is now
+normalized linear anchors plus constructed feature slots, K=R options/subtasks,
+exact wrapper-side one-step importance ratios, RR Eq. 4 continuation, an
+average-reward intra-option value head, Design-A keyboard cross-psi, raw reward
+plus duration option models, a one-step model in shadow mode, bounded model
+search control, and age/capacity-gated Oak replacement. Promotion is still
+gated by paired smoke, 1.5M screen, and 10M acceptance evidence.
 
 This roadmap is the control document for moving OaK toward the Alberta Plan's
 Step-11 Oak architecture. It is deliberately stricter than the old tier log:
@@ -44,7 +46,48 @@ Terms used below:
 - **Rollback**: mechanism should not be revived without a materially different
   formulation.
 
-## Active L3-L7 Note
+## Step 1-11 Rebuild Status
+
+The 2026-04-24 audit was accepted as controlling guidance, with one correction:
+Reward-Respecting Subtasks Eq. 4 stays exactly
+`z_i(s)=V(s)-valueW[i]x_i(s)+bonusW[i]x_i(s)`. The report suggestion to replace
+that terminal value with a plain feature bonus is rejected by the primary paper.
+
+| Audit item | Status | Live response / evidence |
+|---|---|---|
+| `K <= 32` as invariant | Accepted drift | Removed as an invariant. K now equals R; 32 is only the SIMD page width. HalfCheetah default R is stream-derived (`max(obsDim, 2*D_policy)`, R=24), with `OAK_RANK` as explicit compute-budget override. |
+| B=1 as sacred law | Accepted drift | Reworded as current single-agent stream semantics. Future batched kernels are allowed only for N independent agents with no cross-stream reductions. |
+| Deep Fourier default | Accepted | Default encoder/phase layout is zero-length. State is normalized anchor projections plus constructed feature slots. |
+| Feature finding | Partial live | Constructed features use signed product, signed sum, and parent-gated residual forms with parent utility/decorrelation diagnostics. Replacement is still young and needs long-run evidence. |
+| Off-policy floors | Accepted | `max(chord,1/K)` floors are removed from live learning. Wrapper emits exact one-step ratios from behavior-option sampling; ratio diagnostics are live. |
+| Average-reward option values | Accepted | `optValue[K*R]` is live. Using `optValueTd` directly in the actor was tested in `rebuild-smoke-10k-policytd` and rejected: policy deltas became infinite before 10k. |
+| True keyboard | Partial live | `psiCross[K*K*R]` is live. Hot behavior uses a sparse internal intent key for compute; dense keyboard/chord descriptors remain a future promotion target. |
+| One-step model | Shadow live | `oneReward` and `oneTransition` learn shadow predictions and report value-weighted diagnostics, but do not drive planning or replacement. |
+| Search control | Partial live | Planning updates one scheduled option page and tracks high-priority/stale model pages. Full priority queue/search-control promotion remains open. |
+| Step 12 / IA | Deferred | Out of scope until Step 11 earns promotion. |
+
+Initial smoke evidence: `rebuild-smoke-10k-default` (seed 0, paired random)
+rebuilt Metal and Swift cleanly, ran NF zero, beat random reward sum
+`-64.998` vs `-2587.504`, kept `importanceEss=0.805`, and restored hot-path SPS
+to `2897`. It is not promoted because reward-rate was still negative
+(`-0.02475`) and the heartbeat curve was not sustained positive. Performance
+regression note: the first K=R R=64 attempt was only about `760` SPS at 1k; the
+stream-derived default R=24 plus sparse intent-key GPE restored the old speed
+target without removing the Plan-required heads.
+
+Rejected rebuild follow-ups:
+
+- `rebuild-smoke-10k-policytd`: adding `optValueTd` directly to the option
+  actor TD caused infinite policy deltas before 10k. Keep `optValue` as a
+  learned average-reward diagnostic/planning value until a principled actor
+  coupling is audited.
+- `rebuild-smoke-10k-replacegate`: committing replacements only when the
+  utility-minus-redundancy score was negative cut reinitializations but worsened
+  10k reward sum to `-79.915` and reward-rate to `-0.03053`. Keep the current
+  age/capacity-gated replacement while the broader feature-finding design is
+  reviewed.
+
+## Historical L3-L7 Note
 
 The previous roadmap sections below are retained as historical audit text where
 they describe why L3-L7 was needed. For the current code, these items are no
