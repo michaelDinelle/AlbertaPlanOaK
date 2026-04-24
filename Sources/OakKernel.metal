@@ -42,8 +42,7 @@ struct KernelConfig {
     uint obsDim, rank, optionCount, baseObsDim, actionParamCount;
     // Tier I1 (Plan Step 3 partial): count of NON-INSTANTANEOUS obsTrace levels =
     // M − 1, where M = floor(log2(baseObsDim)) + 1. Layout: encoder row reads M·baseO
-    // input columns (col 0..baseO-1 = std_obs; col m·baseO..(m+1)·baseO-1 = trace level m
-    // for m=1..M-1). HC baseObsDim=17 → M=5 → baseObsTraceLevels=4.
+    // observation columns plus previous action/reward.
     uint baseObsTraceLevels;
 
     // Param offsets: 7 parameter blocks. `phase` is the cos/sin offset for the
@@ -55,7 +54,7 @@ struct KernelConfig {
     // State arena offsets.
     uint sObservation, sObsMean, sObsSM;
     uint sState;                // 2 * R floats (slot toggle).
-    uint sPolicyMean, sScoreGrad;
+    uint sPolicyMean, sActionSignal, sScoreGrad;
     uint sReward, sTd, sTdPsi;
     uint sChord, sChordPrev;
     uint sUtilFeat, sUtilOpt;
@@ -79,12 +78,6 @@ struct KernelConfig {
     // oak_plan_reduce for the simd_max + planAdv soft-bound.
     uint sQOption;
     // Tier I1 (Plan Step 3 partial): per-obs-dim multi-timescale traces, (M−1)·baseO floats.
-    // Layout: `obsTraceMulti[m·baseO + o]` for m=1..M−1, o=0..baseO-1. Updated by
-    // oak_bk_encode Phase 1 with M−1 parallel EMAs at rates 1/τ_m where τ_m = 2^m
-    // (so trace level m gets `(1 − 1/2^m)·t + (1/2^m)·std_obs[o]`). Consumed by Phase 2
-    // Fourier projection alongside std_obs (encoder row width is M·baseO total — col 0..baseO-1
-    // multiplies std_obs, col m·baseO..(m+1)·baseO-1 multiplies trace level m).
-    // Replaces Tier C1's single obsTrace at fixed rate 1/baseO.
     uint sObsTraceMulti;
     // Per-option planning/update priority, K floats.
     uint sPrioOpt;
@@ -162,7 +155,7 @@ struct Ctx {
     device float *encoder, *phase, *valueW, *psi, *optPolicy, *optReward, *optTransition, *optDuration;
     device float *observation, *observationMean, *obsSM;
     device float *state;
-    device float *policyMean, *scoreGrad;
+    device float *policyMean, *actionSignal, *scoreGrad;
     device float *reward, *td, *tdPsi;
     device float *chord, *chordPrev;
     device float *utilFeat, *utilOpt;
@@ -209,6 +202,7 @@ inline Ctx make_ctx(device float *params, device float *stateArena, device uint 
     c.obsSM           = stateArena + cfg.sObsSM;
     c.state           = stateArena + cfg.sState;
     c.policyMean      = stateArena + cfg.sPolicyMean;
+    c.actionSignal    = stateArena + cfg.sActionSignal;
     c.scoreGrad       = stateArena + cfg.sScoreGrad;
     c.reward          = stateArena + cfg.sReward;
     c.td              = stateArena + cfg.sTd;
@@ -343,7 +337,7 @@ kernel void oak_bk_encode(
     // Experience-oriented Plan input: previous action descriptor and reward.
     uint arBase = obsWidth;
     for (uint p = 0u; p < ctx.D; ++p)
-        z = fma(ctx.encoder[encRow + arBase + p], ctx.policyMean[p], z);
+        z = fma(ctx.encoder[encRow + arBase + p], ctx.actionSignal[p], z);
     z = fma(ctx.encoder[encRow + arBase + ctx.D], ctx.reward[0], z);
     float v = (feat < halfR) ? cos(z) : sin(z);
     device const float *prevState = state_at(ctx, ctx.stateSlot);
@@ -914,7 +908,8 @@ kernel void oak_post_learn(
         }
         if (k == 0u) {
             float prevMu = ctx.policyMean[p];
-            ctx.policyMean[p] = isfinite(mu) ? mu : prevMu;
+            float tracedMu = 0.5f * (prevMu + mu);
+            ctx.policyMean[p] = isfinite(tracedMu) ? tracedMu : prevMu;
         }
     }
 
@@ -1146,7 +1141,7 @@ inline void oak_bk_admit_commit_body(
     uint nPi  = ctx.D * ctx.R;
     uint nOT  = ctx.R * ctx.R;
     uint nOD  = ctx.R;
-    // Tier I1: encoder rows are M·baseO (std_obs ‖ M−1 trace levels). M = baseObsTraceLevels + 1.
+    // Tier I1: encoder rows are M·baseO plus action/reward. M = baseObsTraceLevels + 1.
     uint nEnc = encoder_input_width(ctx);
     uint o0   = 0u;
     uint o1   = o0 + nPsi;
@@ -1177,7 +1172,7 @@ inline void oak_bk_admit_commit_body(
         } else if (id < optTotal && id < o5) {                      // optDuration[worstK][i]
             uint i = id - o4;
             ctx.optDuration[worstK * ctx.R + i] = 0.0f;
-        } else {                                                     // encoder[pre][:M·baseO]
+        } else {                                                     // encoder[pre][:encoder_input_width]
             // Tier K2: compose the replacement row from two sampled parent pre-activations
             // without replacement, weighted by paired utility mass. Fallback stays the prior
             // fresh-random bandwidth-1 reseed when there are fewer than two positive parents.

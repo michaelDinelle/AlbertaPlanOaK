@@ -363,7 +363,7 @@ private struct KernelConfig {
     var pOptDuration: UInt32 = 0
     var sObservation: UInt32 = 0, sObsMean: UInt32 = 0, sObsSM: UInt32 = 0
     var sState: UInt32 = 0
-    var sPolicyMean: UInt32 = 0, sScoreGrad: UInt32 = 0
+    var sPolicyMean: UInt32 = 0, sActionSignal: UInt32 = 0, sScoreGrad: UInt32 = 0
     var sReward: UInt32 = 0, sTd: UInt32 = 0, sTdPsi: UInt32 = 0
     var sChord: UInt32 = 0, sChordPrev: UInt32 = 0
     var sUtilFeat: UInt32 = 0, sUtilOpt: UInt32 = 0
@@ -451,9 +451,9 @@ private enum OakMetalLayout {
     // pre-activation reads M concatenated input regions:
     //   region m=0: `std_obs[o]` (instantaneous, baseO dims)
     //   region m=1..M−1: `obsTraceMulti[m·baseO + o]` at decay 1/τ_m, τ_m = 2^m
-    // Total encoder row width = M·baseO. M = floor(log2(baseO)) + 1 (structural; τ_max ≈
-    // baseO). HC baseO=17 → M=5 → row width 85 (was 34 under Tier C1). Replaces Tier C1's
-    // 2·baseO row (std_obs + single obsTrace at decay 1/baseO).
+    // Total encoder row width = M·baseO + D_policy + 1. M = floor(log2(baseO)) + 1
+    // (structural; τ_max ≈ baseO). The extra D+1 signals are previous action descriptor
+    // and previous reward.
     //
     // Tier C3 (recurrent self-feedback in the encoder) was attempted in two forms — RFF-1
     // across all three regions (v1) and variance-balanced W_state at sqrt(baseO/R) (v2) —
@@ -501,7 +501,7 @@ private enum OakMetalLayout {
 
     struct State {
         let observation, obsMean, obsSM, state: Int
-        let policyMean, scoreGrad: Int
+        let policyMean, actionSignal, scoreGrad: Int
         let reward, td, tdPsi: Int
         let chord, chordPrev: Int
         let utilFeat, utilOpt: Int
@@ -532,6 +532,7 @@ private enum OakMetalLayout {
         let osm  = o; o += obsDim
         let st = o; o += 2 * rank
         let pol = o; o += dPolicy
+        let act = o; o += dPolicy
         let sg  = o; o += dPolicy
         let rew = o; o += 1
         let td  = o; o += 1
@@ -557,7 +558,7 @@ private enum OakMetalLayout {
         let cont = o; o += K
         let ram = o; o += 1
         return State(observation: obs, obsMean: mean, obsSM: osm, state: st,
-                     policyMean: pol, scoreGrad: sg,
+                     policyMean: pol, actionSignal: act, scoreGrad: sg,
                      reward: rew, td: td, tdPsi: tdP,
                      chord: cs, chordPrev: csP,
                      utilFeat: uf, utilOpt: uo, bonusW: bw,
@@ -914,11 +915,12 @@ final class OakMetalEngine {
               accumulatePhaseGpu: Bool) throws -> (PolicyMeanBatch, Double, KernelStats) {
         let start = DispatchTime.now().uptimeNanoseconds
         precondition(obs.count == obsDim)
+        precondition(prevActionSignal.count == dPolicy)
         precondition(prevScoreGrad.count == dPolicy)
         memcpy(stateArena.pointer.advanced(by: stateLayout.observation), obs.baseAddress!,
                obsDim * MemoryLayout<Float>.stride)
         stateArena.pointer.advanced(by: stateLayout.reward).pointee = prevReward
-        memcpy(stateArena.pointer.advanced(by: stateLayout.policyMean), prevActionSignal,
+        memcpy(stateArena.pointer.advanced(by: stateLayout.actionSignal), prevActionSignal,
                dPolicy * MemoryLayout<Float>.stride)
         memcpy(stateArena.pointer.advanced(by: stateLayout.scoreGrad), prevScoreGrad,
                dPolicy * MemoryLayout<Float>.stride)
@@ -952,7 +954,9 @@ final class OakMetalEngine {
         c.pOptDuration = UInt32(p.optDuration)
         c.sObservation = UInt32(s.observation); c.sObsMean = UInt32(s.obsMean); c.sObsSM = UInt32(s.obsSM)
         c.sState = UInt32(s.state)
-        c.sPolicyMean = UInt32(s.policyMean); c.sScoreGrad = UInt32(s.scoreGrad)
+        c.sPolicyMean = UInt32(s.policyMean)
+        c.sActionSignal = UInt32(s.actionSignal)
+        c.sScoreGrad = UInt32(s.scoreGrad)
         c.sReward = UInt32(s.reward); c.sTd = UInt32(s.td); c.sTdPsi = UInt32(s.tdPsi)
         c.sChord = UInt32(s.chord); c.sChordPrev = UInt32(s.chordPrev)
         c.sUtilFeat = UInt32(s.utilFeat); c.sUtilOpt = UInt32(s.utilOpt)
