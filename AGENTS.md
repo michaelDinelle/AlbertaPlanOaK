@@ -64,43 +64,47 @@ These are the non-negotiables. Every kernel and every line of host code must res
 5. **Inv-6: no per-step heap allocation on the hot path.** Pre-allocated arenas only.
 6. **Inv-7: temporal uniformity** (Plan research-vision pillar #2; verbatim: *"all times are the same with respect to the algorithms running on the agent. There are no special training periods when training information is available or when rewards are counted more or less than others. If training information is provided... it is provided on every time step. If the agent learns or plans, then it learns or plans on every time step. If the agent constructs its own representations or subtasks, then the meta-algorithms for constructing them operate on every time step."*). Every Plan mechanism in OaK runs every step: perception (encode), prediction (meta_predict), planning (plan + plan_reduce), learning (learn_heads), meta-learning (post_learn MetaOptimize), and every-step G&T assessment with capacity/age-gated commits. Reward is centered (ρ̄) the same way every step. `track_rate(t, baseO) = max(1/(t+1), 1/baseO)` is the current structural tracking choice, not slide law; replace it if paired evidence or primary research shows a more faithful parameter-free tracker. Subsumes Inv-4 + Inv-5 in their consolidated Plan-citing form. **Forbidden constructs**: warmup-gated branches (`if stepCount > N`), epoch counters, train/eval splits, frozen weights post-N steps, special "exploration" vs "exploitation" phases. `OAK_WARMUP_STEPS` is host-side bench metric collection only — the agent's per-step computation is identical regardless.
 7. **Inv-8: strict objective isolation.** No intrinsic curiosity, no learning-progress bonus added to the main reward stream.
-8. **Inv-9: parameter-free meta-learning.** Every constant is structurally derived from agent capacity (cap = R, α₀ = 1/cap, ridge = 1/(cap+1), K ≤ 32 = SIMD width). No tunable knobs. **If you have a number to tweak, the underlying mechanism probably isn't Plan-orthodox** — strip the mechanism, not the number.
+8. **Inv-9: parameter-free meta-learning.** Every constant is structurally derived from agent capacity or stream shape (cap = R, K = R, page width = hardware SIMD width, α₀ = 1/cap, ridge = 1/(age+1)). No tunable knobs. **If you have a number to tweak, the underlying mechanism probably isn't Plan-orthodox** — strip the mechanism, not the number.
 9. **No magnitude caps on weights.** `safe_w(old, new) = isfinite(new) ? new : old` preserves on non-finite; weights grow as the agent's slice of reality demands. No `bounded_soft`, no `safe_half`, no fp16-derived `M = 256`.
 10. **Current single-agent stream semantics.** The live engine is one observation → one action → one reward per agent step (`B = 1`) because the Alberta Plan describes an agent's experience as a single time series. This is an implementation stance, not a sacred batch-size law: future batched kernels are allowed only if they are semantically N independent agents with disjoint state, no cross-stream reductions, and identical per-agent updates. Current multi-env benchmarking remains N independent agent instances via OperationQueue.
 11. **Inv-10: zero-intelligence-hit optimization rule.** Kernel optimizations split into two classes. **Bit-identical** (kernel splits, per-thread parallelism without cross-thread reductions, pre-computed constants moved into `KernelConfig`/`KernelScalars`, `simd_max` / `simd_min` reductions, lane-0 sequential reductions via `simd_shuffle` or threadgroup memory that preserve the original `fma` sequence in original index order): ship with smoke + 1.5M paired bench. **FP-reorder** (`simd_sum`, threadgroup reductions where the input order changes from sequential, `fma` decomposed into separate multiply + add): ship only after a 10-seed paired bench shows **per-seed parity within ±3 % of the prior commit's per-seed lift** — aggregate parity is necessary but insufficient; per-seed reshuffling that averages to zero is still considered an intelligence hit. The first attempt at C2-perf used `simd_sum` for `oak_meta`/`oak_plan` and showed aggregate parity but per-seed chatter std doubled (0.020 → 0.041); the follow-up restored bit-identical with lane-0 sequential reductions for ~4 µs cost.
 
 ## Architecture
 
-The agent is a 5-dispatch single-stream Oak prototype over 9 logical Plan phases. Every learnable head and every state slot must be justified against the Plan; strict completion status is in `docs/roadmap.md`.
+The agent is a focused-kernel single-stream Oak prototype over the Plan steps. K is the active option/subtask count and now equals R; 32 is only the SIMD option-page width for bounded compute. Every learnable head and every state slot must be justified against the Plan; strict completion status is in `docs/roadmap.md`.
 
-### Learnable parameters (8 buffers)
+### Learnable parameters
 
 | Head | Shape | Role |
 |---|---|---|
-| `encoder` | (R/2) · (M·O + D_policy + 1) | Perception (Fourier features W). Each pre-activation row reads standardized observation, multi-timescale observation traces, previous action descriptor, and previous reward. **Fixed random projection at init** (RFF bandwidth-1 over all input regions); evolves via generate-and-test reseeding (Plan Step 2). |
-| `phase` | R/2 | Per-pre-activation Fourier offset (uniform on [0, 2π) at init). Reseeded alongside its `encoder` row in generate-and-test. Together with `encoder`, parameterizes the deep Fourier features basis (Lewandowski-Schuurmans-Machado 2024, [arXiv:2410.20634](docs/papers/PlasticLearningDeepFourierFeatures_2410.20634.pdf)). |
+| `encoder`, `phase` | 0 in the default rebuild | Deep Fourier features are no longer the default path. They remain reserved layout names only until the greenfield cleanup removes them entirely. |
 | `valueW` | R | Main value GVF (cumulant = reward, differential, ρ̄-centered). |
-| `psi` | K · R | K feature-indexed RR subtask GVFs. Cumulant is reward centered by a per-option chord-responsibility reward-rate trace; stopping value uses `V(s') - valueW[i]·x_i(s') + bonusW[i]·x_i(s')` for the option's registered feature. |
-| `optPolicy` | K · D · R | K component policies, blended by chord (Design A keyboard). |
+| `psi` | K · R | K=R feature-indexed RR subtask GVFs. Cumulant is shared average-reward-centered reward; stopping value is RR Eq. 4: `V(s') - valueW[i]·x_i(s') + bonusW[i]·x_i(s')`. |
+| `psiCross` | K · K · R | Design-A option-keyboard cross-subtask evaluation. Hot behavior uses the current highest-need internal key; the full cross head remains learned pagewise. |
+| `optValue` | K · R | Average-reward intra-option differential value head for Wan-Naik-Sutton-style option TD diagnostics and future policy coupling. |
+| `optPolicy` | K · D · R | K component policies. The wrapper samples the selected behavior option and returns exact one-step importance ratios for the active bank. |
 | `optReward` | K · R | K stopping-aware option reward models r̂^k. |
 | `optTransition` | K · R · R | K dense stopping-aware transition models `n̂^k_j(s) = Σ_i w^k_{j,i}·s[i]`. |
 | `optDuration` | K · R | K average-reward option-duration models l̂^k with a structural one-step lower bound at decode. |
+| `oneReward`, `oneTransition` | `(R + D)`, `R · (R + D)` | Step-8 one-step shadow model over `(state, actionSignal)`. It reports value-relevance diagnostics and does not yet drive planning. |
 
-Per-feature alpha is achieved structurally by MetaOptimize step sizes plus KEEPING relevant features alive and REPLACING irrelevant ones via `oak_post_learn`'s fused admit/commit phase. R is rounded up to the nearest even value at host init because each Fourier pre-activation produces a paired `(cos, sin)` channel into the R-wide state. Cap K ≤ 32 is the Apple SIMD width (structural, hardware-derived) and is what lets cross-option reductions fit in one simdgroup. **Tier C2 (option termination via `termW` + closed-form geometric Q^k + hold-or-refresh chord) was attempted three times and regressed every time**; do not revive that family.
+State representation is normalized linear anchors plus constructed feature slots. Anchors are deterministic projections over normalized observation traces, previous action descriptor, and previous reward; constructed slots are replaceable signed products/sums/residuals of useful parents. Per-feature alpha is achieved structurally by MetaOptimize-style step sizes plus age/utility replacement.
 
-### Pipeline (5 Metal dispatches per step, 9 logical phases, Metal 4 ICB)
+### Pipeline (focused Metal dispatches per step, Metal 4 ICB)
 
 ```
-bk_encode(+meta_predict) → plan → plan_reduce → learn_heads → post_learn(+bk_admit_commit)
+oak_encode → oak_keyboard_predict → oak_plan → oak_plan_reduce → oak_learn_heads → oak_action_emit → oak_replace
 ```
 
 | Kernel | What it does |
 |---|---|
-| `oak_bk_encode` | Fuses observation normalization/traces, Fourier feature construction, chord update, reward centering, value TD, and RR subtask TD. Chord continuation comes from `psi(s') > z_i(s')`, where `z_i` is the reward-respecting stopping value for the option's registered feature. |
-| `oak_plan` | K threadgroups x R threads. Computes stopping-aware option transition TDs, raw reward TDs, duration TDs, differential option Q `rHat - rho*lHat + V(nHat)`, and a value-relevant priority signal. |
-| `oak_plan_reduce` | K-thread cross-option reduction. Writes soft-bounded `planAdv`, `meanPrio`, and compact search-control/duration diagnostics. |
-| `oak_learn_heads` | Updates value, psi, option policy, option reward, option transition, and option duration heads. Psi/reward/transition/duration use structural `1/K` off-policy floors; policy remains on-chord because it is the actual gradient of the blended action. |
-| `oak_post_learn` | Fuses feature/option utility, MetaOptimize alpha updates, chord-blended action emission, and age-gated Step-11 admit/commit replacement. Feature replacement is a clean birth that clears downstream weights tied to the replaced Fourier pair. |
+| `oak_encode` | Updates observation/traces and builds normalized anchor/constructed state features. |
+| `oak_keyboard_predict` | Updates value TD, RR subtask TD, option-value TD, RR continuation, and Design-A GPI behavior selection. |
+| `oak_plan` | Updates the scheduled option page's stopping-aware model TDs, duration TDs, raw-reward option model, and one-step shadow diagnostics. |
+| `oak_plan_reduce` | Reduces model Q/priority and selects high-priority/stale model pages for fair search control. |
+| `oak_learn_heads` | Updates value, option value, psi, psiCross, option policy, option reward/transition/duration, and one-step shadow heads using exact one-step ratios. |
+| `oak_action_emit` | Emits all option policy means and the selected behavior option mean for the wrapper. |
+| `oak_replace` | Runs utility/meta-learning diagnostics every step and commits age/capacity-gated feature/option replacements. |
 
 ### Action interface (Inv-1)
 
