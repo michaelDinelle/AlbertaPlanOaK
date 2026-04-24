@@ -109,6 +109,60 @@ Next-wave evidence so far:
   Reward-rate remains negative (`-0.009296`), so this is architecture evidence,
   not promotion evidence.
 
+Collapse-repair baseline truth table:
+
+| Review claim / subsystem | Current keeper truth | Next action |
+|---|---|---|
+| Actor update scope | The keeper already updates every option policy every step in `oak_learn_heads`: `optPolicy += alphaPi * alphaRelevance * importance[k] * tdPsi[k] * scoreGrad[d] * prev[i]`. It is not a selected-only actor. | Do not revive selected-only actor or target-option score gradients as the next actor path. Add actor support/update diagnostics first. |
+| Target-option actor gradients | Raw target-option scores and Fisher/natural target scores were tested and reverted (`review-response-50k-natural-133322`, `review-response-50k-fisher-133540`). | Rejected until a fuller actor-critic derivation changes more than the score source. |
+| Global `rho` | Global average reward remains the live control/model-planning rate: `Q = rHat - rho*lHat + V(nHat)`. | Keep live; compare against shadow per-option control rates before any behavior change. |
+| `rhoOpt` status | The old arena slot is now used as shadow `rhoQ[k]` for per-option control-rate diagnostics only. It does not drive `optValue`, `psi`, actor, or model planning. | Promote only if 50k/300k shadow agreement shows global `rho` is the collapse cause. |
+| λ formula | Live behavior still uses the keeper's dense nonnegative plan/RR/utility λ and holds the current component option while RR continuation says continue. | Formal signed `lambdaReward` and `lambdaTask` are shadow GPE/GPI diagnostics only. Utility stays out of the formal keyboard. |
+| GVF coverage | The compact keeper GVF head remains live because replacement had learned around its cumulants. A separate expanded shadow GVF bank now reports `G=R+K+3` state/reward/action/termination/model-residual cumulants with explicit rate/value separation. | Use expanded GVFs for diagnostics and future replacement evidence only; do not alter live replacement until parity and 300k support evidence exist. |
+| Replacement behavior | Live age/capacity-gated replacement is unchanged. New persistent `badFeatureAge` and `replacementWouldCommitRate` are shadows. | Test a live commit gate only after 50k preservation and better 300k support diagnostics. |
+| Search control behavior | When `K <= pageWidth`, HalfCheetah still plans the full option bank. For larger `K`, the model page path now selects a fair prioritized-sweeping page by expected model improvement with structural stale-page coverage. | Promote page scheduler by evidence on larger `K`; HalfCheetah behavior is unchanged. |
+
+Collapse-repair smoke evidence:
+
+- `collapse-repair-auxgvf-10k-oak-v2`: seed-0 HalfCheetah, NF zero,
+  reward exactly matches the keeper sanity trajectory (`-44.609847`), random
+  baseline remains `-2587.504`, `importanceEss=0.694`, `actorSupportEntropy=0.924`,
+  `gvfCount=51`, and SPS `2039`. This is diagnostic/shadow parity, not a reward
+  promotion. The first expanded-GVF attempt reused the compact live GVF head and
+  regressed 10k reward (`-99.198`); it was corrected by separating the expanded
+  GVFs into a shadow bank while preserving compact live GVF semantics.
+- `collapse-repair-auxgvf-50k-oak`: seed-0 HalfCheetah preserved and improved
+  the positive window, reaching `+172.773` cumulative reward versus random
+  `-13177.211`, NF zero, `importanceEss=0.120`, `actorSupportEntropy=0.456`,
+  `rewardRate=0.0429`, and about `2024` SPS. This confirms the shadow
+  per-option-rate, formal-keyboard, actor-support, replacement, and expanded-GVF
+  diagnostics did not suppress the keeper's early breakthrough.
+- `collapse-repair-auxgvf-300k-oak`: seed-0 was stopped after the collapse
+  signature reappeared. The run was still positive at 50k (`+172.283`) but had
+  fallen to `-379.308` by 75k and about `-1036.906` by 125k; ESS was already
+  near the one-option floor by 50k. Therefore the diagnostics are neutral, not a
+  long-horizon repair.
+- `collapse-repair-auxgvf-hc-10seed-50k`: HalfCheetah-only 10 seeds x
+  `{oak,random}`. Oak beat random `10/10` with NF zero `10/10`, mean cumulative
+  reward `-835.117` versus random `-13213.478`, mean lift `+12378.361`, final
+  reward-rate positive `6/10`, but positive cumulative reward only `1/10`.
+  Final ESS/entropy did not correlate strongly with reward across seeds, so the
+  next architecture decision must use all-seed cumulative reward and late-window
+  slope, not only seed-0 support collapse.
+- `collapse-repair-badgate-10k-oak`: a live persistent bad-feature replacement
+  gate drove 10k reward to `-118.271`, ESS to the one-option floor, and reinit
+  count to `0`. Rejected: early replacement is doing useful work even though
+  late replacement churn remains a collapse symptom.
+- `collapse-repair-actorscale-50k-oak`: a live actor implicit-denominator scale
+  preserved support (`importanceEss=0.517`, `actorSupportEntropy=0.892`) but
+  destroyed the positive window (`-489.917` at 50k). Rejected: support repair
+  alone is not intelligence if cumulative reward and reward-rate degrade.
+- `filter-smoke-hc-2seed-1k`: `OAK_BENCH_ENVS=HalfCheetah-v4` verified the
+  concurrent benchmark env filter: exactly 4 work items for 2 seeds x
+  `{oak,random}`, all under HalfCheetah. Future multi-seed screens should use
+  `OaK benchmark` with this filter instead of sequential shell loops or
+  accidental all-env sweeps.
+
 Current keeper evidence after the ψ stability repair:
 
 - `psi-gap-split-50k` showed that huge `psiStopGapMean` values were ψ
@@ -746,6 +800,14 @@ Secondary acceptance metrics:
 Avoid using max peak reward-rate as a promotion criterion. It is useful for
 storytelling and failure analysis, but it has repeatedly misread the main
 learning signal.
+
+Concurrent seed sweeps:
+
+- Use `OaK benchmark` with `OAK_BENCH_ENVS=HalfCheetah-v4` for HalfCheetah-only
+  seed sweeps. This preserves the OperationQueue concurrency limit while
+  avoiding accidental all-env benchmark fan-out.
+- Do not fall back to sequential seed loops for ordinary multi-seed evidence
+  unless a profiler or crash investigation requires serialized isolation.
 
 Kernel build hygiene:
 
