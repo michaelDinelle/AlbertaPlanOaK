@@ -98,21 +98,14 @@ extension Sequence where Element == ActionComponent {
     var totalEnvActionWidth: Int   { reduce(0) { $0 + $1.envActionWidth } }
 }
 
-// Per-row per-component sampling. Discrete N: Gumbel-max categorical, scoreGrad = 1{a=d} - pi_d.
-//
-// Box A (low-noise structural σ): Gaussian with per-component σ = 1/A^3, where A is
-// the box component's action dimensionality. Williams 1992 REINFORCE for σ-parameterized
-// Gaussian: d log π(a|s)/dμ = (a − μ)/σ² = σ·z/σ² = z/σ (where z ~ N(0,1) is the pre-clamp
-// noise). The clamp affects only the env's view, not the agent's gradient.
-//
-// Motivation: F1's σ=1/√A fixed the 10M plateau but still left early HalfCheetah reward
-// negative. The L3-L7 low-noise screen found σ=1/A^3 moves paired 50k reward rate
-// monotonically toward zero while preserving finite score-function gradients. A is supplied
-// by the action spec, not by env identity.
+// Wrapper-side action sampling. Discrete: Gumbel-max with score 1{a=d}-π_d.
+// Box: low-noise structural σ=1/A^3; scoreGrad = z/σ. The wrapper also emits
+// the sampled action in D_policy coordinates for the agent's experience stream.
 func sampleAndScoreActions(spec: [ActionComponent], numEnvs: Int, dPolicy: Int,
                            envActionWidth: Int,
                            policyMean: UnsafePointer<Float>,
                            envAction: UnsafeMutablePointer<Float>,
+                           actionSignal: UnsafeMutablePointer<Float>,
                            scoreGrad: UnsafeMutablePointer<Float>,
                            rngState: inout UInt64) {
     func nextU01(_ s: inout UInt64) -> Float {
@@ -152,6 +145,7 @@ func sampleAndScoreActions(spec: [ActionComponent], numEnvs: Int, dPolicy: Int,
                 for d in 0..<n {
                     let pi_d = exp(policyMean[mBase + pIdx + d] - maxLogit) * invZ
                     scoreGrad[mBase + pIdx + d] = ((d == bestIdx) ? 1.0 : 0.0) - pi_d
+                    actionSignal[mBase + pIdx + d] = (d == bestIdx) ? 1.0 : 0.0
                 }
                 envAction[aBase + aIdx] = Float(bestIdx)
                 pIdx += n; aIdx += 1
@@ -169,6 +163,7 @@ func sampleAndScoreActions(spec: [ActionComponent], numEnvs: Int, dPolicy: Int,
                     let raw = mu + sigma * z
                     let clamped = max(low[d], min(high[d], raw.isFinite ? raw : 0))
                     envAction[aBase + aIdx + d] = clamped
+                    actionSignal[mBase + pIdx + d] = clamped
                     // Env-side clamp affects the env's view only, not the agent's score.
                     scoreGrad[mBase + pIdx + d] = z * invSigma
                 }
@@ -360,11 +355,8 @@ private struct KernelConfig {
     var obsDim: UInt32 = 0, rank: UInt32 = 0
     var optionCount: UInt32 = 0, baseObsDim: UInt32 = 0
     var actionParamCount: UInt32 = 0
-    // Tier I1 (Plan Step 3 partial — "incorporation of older signals and traces"):
-    // count of NON-INSTANTANEOUS obsTrace levels = M − 1 where M = floor(log2(baseO)) + 1.
-    // The instantaneous level (τ=1) IS std_obs itself (no separate state), so we only
-    // store the (M−1) levels at τ_m = 2^m for m = 1..M−1. HC baseO=17 → M=5 → 4 levels
-    // at τ ∈ {2, 4, 8, 16}. Encoder input width per pre-activation = M·baseO.
+    // Non-instantaneous trace count M−1 where M=floor(log2(baseO))+1.
+    // Encoder width = M·baseO + D_policy + 1 for obs traces plus action/reward.
     var baseObsTraceLevels: UInt32 = 0
     var pEncoder: UInt32 = 0, pPhase: UInt32 = 0, pValue: UInt32 = 0, pPsi: UInt32 = 0
     var pOptPolicy: UInt32 = 0, pOptReward: UInt32 = 0, pOptTransition: UInt32 = 0
@@ -482,8 +474,11 @@ private enum OakMetalLayout {
         while v > 1 { v >>= 1; m += 1 }     // floor(log2(b))
         return m + 1                         // +1 for the instantaneous level
     }
-    static func encoderCount(obsDim: Int, baseObsDim: Int, rank: Int) -> Int {
-        fourierPreActCount(rank: rank) * obsTraceLevelCount(baseObsDim: baseObsDim) * max(baseObsDim, 1)
+    static func encoderInputWidth(baseObsDim: Int, dPolicy: Int) -> Int {
+        obsTraceLevelCount(baseObsDim: baseObsDim) * max(baseObsDim, 1) + max(dPolicy, 0) + 1
+    }
+    static func encoderCount(obsDim: Int, baseObsDim: Int, rank: Int, dPolicy: Int) -> Int {
+        fourierPreActCount(rank: rank) * encoderInputWidth(baseObsDim: baseObsDim, dPolicy: dPolicy)
     }
     static func phaseCount(rank: Int) -> Int { fourierPreActCount(rank: rank) }
 
@@ -492,7 +487,7 @@ private enum OakMetalLayout {
     }
     static func paramLayout(obsDim: Int, baseObsDim: Int, rank: Int, dPolicy: Int) -> Param {
         var o = 0
-        let enc = o; o += encoderCount(obsDim: obsDim, baseObsDim: baseObsDim, rank: rank)
+        let enc = o; o += encoderCount(obsDim: obsDim, baseObsDim: baseObsDim, rank: rank, dPolicy: dPolicy)
         let ph  = o; o += phaseCount(rank: rank)
         let val = o; o += rank
         let psi = o; o += psiCount(rank: rank)
@@ -798,7 +793,10 @@ final class OakMetalEngine {
                 base[i] = u * scale
             }
         }
-        sample(paramLayout.encoder, OakMetalLayout.encoderCount(obsDim: obsDim, baseObsDim: baseObsDim, rank: rank), encScale)
+        sample(paramLayout.encoder,
+               OakMetalLayout.encoderCount(obsDim: obsDim, baseObsDim: baseObsDim,
+                                            rank: rank, dPolicy: dPolicy),
+               encScale)
         // Fourier phase: uniform on [0, 2π) — structural, no tunable. Reuses the same
         // splitmix-style hash as `sample` but rescales (u + 1) ∈ [0, 2) → [0, 2π).
         do {
@@ -912,7 +910,7 @@ final class OakMetalEngine {
     // prevDone is intentionally NOT plumbed through: the agent is continual (Inv-4); env resets
     // are wrapper events.
     func step(obs: UnsafeBufferPointer<Float>,
-              prevScoreGrad: [Float], prevReward: Float,
+              prevActionSignal: [Float], prevScoreGrad: [Float], prevReward: Float,
               accumulatePhaseGpu: Bool) throws -> (PolicyMeanBatch, Double, KernelStats) {
         let start = DispatchTime.now().uptimeNanoseconds
         precondition(obs.count == obsDim)
@@ -920,6 +918,8 @@ final class OakMetalEngine {
         memcpy(stateArena.pointer.advanced(by: stateLayout.observation), obs.baseAddress!,
                obsDim * MemoryLayout<Float>.stride)
         stateArena.pointer.advanced(by: stateLayout.reward).pointee = prevReward
+        memcpy(stateArena.pointer.advanced(by: stateLayout.policyMean), prevActionSignal,
+               dPolicy * MemoryLayout<Float>.stride)
         memcpy(stateArena.pointer.advanced(by: stateLayout.scoreGrad), prevScoreGrad,
                dPolicy * MemoryLayout<Float>.stride)
 
@@ -1096,6 +1096,7 @@ private struct RunContext {
 private final class RunState {
     var prevReward: Float = 0
     var prevPolicyMean: [Float]
+    var prevActionSignal: [Float]
     var prevScoreGrad: [Float]
     var randPolicyMean: [Float]
     var randSeed: UInt64
@@ -1113,6 +1114,7 @@ private final class RunState {
 
     init(env: EnvPoolEnv, seed: Int?) {
         prevPolicyMean = Array(repeating: 0, count: env.dPolicy)
+        prevActionSignal = Array(repeating: 0, count: env.dPolicy)
         prevScoreGrad  = Array(repeating: 0, count: env.dPolicy)
         randPolicyMean = Array(repeating: 0, count: env.dPolicy)
         randSeed = UInt64(bitPattern: Int64(seed ?? Int(oakUnseededSeed)))
@@ -1446,7 +1448,8 @@ private final class RunState {
             let policyMean: PolicyMeanBatch, agentMs: Double, stats: KernelStats?
             if let engine = ctx.engine {
                 let out = try ctx.env.observationScratch.withUnsafeBufferPointer { buf in
-                    try engine.step(obs: buf, prevScoreGrad: state.prevScoreGrad,
+                    try engine.step(obs: buf, prevActionSignal: state.prevActionSignal,
+                                    prevScoreGrad: state.prevScoreGrad,
                                     prevReward: state.prevReward,
                                     accumulatePhaseGpu: measured)
                 }
@@ -1495,6 +1498,10 @@ private final class RunState {
             _ = state.prevScoreGrad.withUnsafeMutableBufferPointer { dst in
                 memcpy(dst.baseAddress!, ctx.env.scoreGradScratch,
                        ctx.env.scoreGradScratch.count * MemoryLayout<Float>.stride)
+            }
+            _ = state.prevActionSignal.withUnsafeMutableBufferPointer { dst in
+                memcpy(dst.baseAddress!, ctx.env.actionSignalScratch,
+                       ctx.env.actionSignalScratch.count * MemoryLayout<Float>.stride)
             }
         }
     }

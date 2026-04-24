@@ -158,6 +158,7 @@ final class EnvPoolEnv {
     let dPolicy: Int
     let envActionWidth: Int
     private(set) var envActionScratch: [Float]
+    private(set) var actionSignalScratch: [Float]
     private(set) var scoreGradScratch: [Float]
     private var discreteIndexScratch: [Int32]
     private var rngState: UInt64
@@ -179,6 +180,7 @@ final class EnvPoolEnv {
         rewardScratch = Array(repeating: 0, count: numEnvs)
         doneScratch = Array(repeating: 0, count: numEnvs)
         envActionScratch  = Array(repeating: 0, count: numEnvs * envActionWidth)
+        actionSignalScratch = Array(repeating: 0, count: numEnvs * dPolicy)
         scoreGradScratch  = Array(repeating: 0, count: numEnvs * dPolicy)
         discreteIndexScratch = Array(repeating: 0, count: numEnvs)
         rngState = UInt64(bitPattern: Int64(seed ?? Int(oakUnseededSeed))) &* 0x9e3779b97f4a7c15 &+ 1
@@ -193,18 +195,21 @@ final class EnvPoolEnv {
     func reset() throws { try checked { try bridge.reset(handle, obs: &observationScratch) } }
 
     // Wrapper-owned sampling + scoreGrad. Reads policyMean[B · dPolicy], samples per-component,
-    // writes envActionScratch + scoreGradScratch, dispatches to the appropriate bridge step
+    // writes envActionScratch + actionSignalScratch + scoreGradScratch, dispatches to the appropriate bridge step
     // function. This is the SOLE site that knows the env's action-space type — Inv-1 boundary.
     func sampleAndStep(policyMean: [Float]) throws {
         precondition(policyMean.count == numEnvs * dPolicy)
         policyMean.withUnsafeBufferPointer { pmBuf in
             envActionScratch.withUnsafeMutableBufferPointer { aBuf in
-                scoreGradScratch.withUnsafeMutableBufferPointer { sgBuf in
-                    sampleAndScoreActions(spec: actionSpec, numEnvs: numEnvs, dPolicy: dPolicy,
-                                          envActionWidth: envActionWidth,
-                                          policyMean: pmBuf.baseAddress!,
-                                          envAction: aBuf.baseAddress!,
-                                          scoreGrad: sgBuf.baseAddress!, rngState: &rngState)
+                actionSignalScratch.withUnsafeMutableBufferPointer { actBuf in
+                    scoreGradScratch.withUnsafeMutableBufferPointer { sgBuf in
+                        sampleAndScoreActions(spec: actionSpec, numEnvs: numEnvs, dPolicy: dPolicy,
+                                              envActionWidth: envActionWidth,
+                                              policyMean: pmBuf.baseAddress!,
+                                              envAction: aBuf.baseAddress!,
+                                              actionSignal: actBuf.baseAddress!,
+                                              scoreGrad: sgBuf.baseAddress!, rngState: &rngState)
+                    }
                 }
             }
         }
