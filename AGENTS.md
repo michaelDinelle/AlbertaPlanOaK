@@ -85,7 +85,7 @@ The agent is a focused-kernel single-stream Oak prototype over the Plan steps. K
 | `optReward` | K · R | K stopping-aware option reward models r̂^k. |
 | `optTransition` | K · R · R | K dense stopping-aware transition models `n̂^k_j(s) = Σ_i w^k_{j,i}·s[i]`. |
 | `optDuration` | K · R | K average-reward option-duration models l̂^k with a structural one-step lower bound at decode. |
-| `oneReward`, `oneTransition` | `(R + D)`, `R · (R + D)` | Step-8 one-step shadow model over `(state, actionSignal)`. It reports value-relevance diagnostics and does not yet drive planning. |
+| `oneReward`, `oneTransition` | `(R + D)`, `R · (R + D)` | Step-8 one-step shadow model over `(state, actionSignal)`. It is off on the default speed path and enabled by `OAK_DEEP_DIAGNOSTICS=1`; it does not drive planning. |
 | `gvfRate`, `gvfValue` | anchors, anchors · R | Compact average-reward GVF bank over experience signals with explicit cumulant-rate and differential-value separation. It is diagnostic until stability evidence promotes it into replacement utility. |
 
 State representation is normalized linear anchors plus constructed feature slots. Anchors are deterministic projections over normalized observation traces, previous action descriptor, and previous reward; constructed slots are replaceable signed products/sums/residuals of useful parents. Per-feature alpha is achieved structurally by MetaOptimize-style step sizes plus age/utility replacement.
@@ -99,10 +99,10 @@ oak_encode(+keyboard_predict) → oak_plan → oak_plan_reduce → oak_learn_hea
 | Kernel | What it does |
 |---|---|
 | `oak_encode` | Updates observation/traces, builds normalized anchor/constructed state features, then runs keyboard/prediction: value TD, average-reward GVF TDs, RR subtask TD, option-value TD, RR continuation, dense λ, and Design-A GPI behavior selection. |
-| `oak_plan` | Updates the scheduled option page/slots' stopping-aware model TDs, duration TDs, raw-reward option model, and one-step shadow diagnostics. |
+| `oak_plan` | Updates the scheduled option page/slots' stopping-aware model TDs, duration TDs, and raw-reward option model. Deep one-step shadow diagnostics run only with `OAK_DEEP_DIAGNOSTICS=1`. |
 | `oak_plan_reduce` | Reduces model Q/priority and selects high-priority/stale model pages for fair search control. When K fits one SIMD page, the whole option bank is planned. |
-| `oak_learn_heads` | Updates value, average-reward GVFs, option value, psi, psiCross, option policy, option reward/transition/duration, and one-step shadow heads using exact one-step ratios. |
-| `oak_replace` | Emits all option policy means and the selected behavior option mean, runs utility/meta-learning diagnostics every step, and commits age/capacity-gated feature/option-bundle replacements. |
+| `oak_learn_heads` | Updates value, compact average-reward GVFs, option value, psi, psiCross, option policy, and option reward/transition/duration using exact one-step ratios. Deep one-step and expanded GVF shadow heads run only with `OAK_DEEP_DIAGNOSTICS=1`. |
+| `oak_replace` | Emits all option policy means across multiple action-emission threadgroups while threadgroup 0 runs utility/meta-learning diagnostics and commits age/capacity-gated feature/option-bundle replacements. |
 
 ### Action interface (Inv-1)
 
@@ -134,7 +134,7 @@ Kernel-side fields are populated only for `oak`:
 - `oakOptionReinitCountFinal`, `oakFeatureReinitCountFinal` — cumulative age-gated generate-and-test replacement counts.
 - `nonFiniteByPhase` = `{"encode": N, "learn": N, "plan": N, "tdPsi": N}` — per-phase NF counts. **Healthy = all zeros across the run.**
 - Search/replacement diagnostics: `eligibleOptionCount`, `eligibleFeatureCount`, `replacementCommitRate`, `modelUpdateRate`, `modelPriorityEntropy`, `optionDiffTdMean`, `modelPageCoverage`, `modelPageMaxAge`, `modelPriorityMax`, `modelExpectedImprovementMean`, `replacementWouldCommitRate`, `badFeatureAgeMean`, `badFeatureAgeMax`, `replacementSurvivalMean`.
-- GVF/keyboard diagnostics: `gvfCount`, `gvfRateMean`, `gvfRateVar`, `gvfTdMean`, `gvfDifferentialValueMean`, `gvfUtilityMean`, `gvfPageCoverage`, `gvfRewardTdMean`, `gvfTerminationTdMean`, `gvfUtilityRankMean`, `lambdaEffectiveRank`, `lambdaPlanMass`, `lambdaRrMass`, `lambdaUtilityMass`, `keyboardCacheCoverage`, `keyboardScoreStaleness`, `shadowRewardAgreement`, `shadowTaskAgreement`, `shadowRewardGpiMargin`, `shadowTaskGpiMargin`.
+- GVF/keyboard diagnostics: `gvfCount`, `gvfRateMean`, `gvfRateVar`, `gvfTdMean`, `gvfDifferentialValueMean`, `gvfUtilityMean`, `gvfPageCoverage`, `gvfRewardTdMean`, `gvfTerminationTdMean`, `gvfUtilityRankMean`, `lambdaEffectiveRank`, `lambdaPlanMass`, `lambdaRrMass`, `lambdaUtilityMass`, `keyboardCacheCoverage`, `keyboardScoreStaleness`, `shadowRewardAgreement`, `shadowTaskAgreement`, `shadowRewardGpiMargin`, `shadowTaskGpiMargin`. The expanded shadow GVF/keyboard fields are populated on the deep diagnostic path; default runs keep the compact live GVF bank and set deep-only shadows to neutral values.
 - Average-reward/actor support shadows: `optionControlRateMean`, `optionControlRateVar`, `optionControlRateTdMean`, `optionControlRateAgreement`, `actorUpdateNormMean`, `actorUpdateNormVar`, `actorTdMean`, `actorImportanceWeightedTdMean`, `actorSupportEntropy`.
 
 **Storage.** Default directory `.oak-benchmarks/<run-id>/`, with `<run-root>/<envId>/seed<N>/<stem>.json` for finals and `<stem>.heartbeat-NNNNNN.json` for pulses. Override the run root with `OAK_METRICS_STORAGE`.
@@ -146,6 +146,8 @@ Kernel-side fields are populated only for `oak`:
 | `OaK run <env-id>` | Long single-env run with heartbeats. `OAK_STOP_AFTER_STEPS` controls measured-window length. |
 | `OaK diagnose <env-id> [--policy oak\|random] [--steps N]` | Short timed run with `diagnostic` block (per-phase GPU timings). |
 | `OaK benchmark` | Concurrent multi-env multi-seed sweep. `OAK_BENCH_STEPS`, `OAK_BENCH_SEED_COUNT`, `OAK_BENCH_POLICIES`, `OAK_BENCH_CONCURRENCY` (default 8), `OAK_BENCH_ENVS` / `OAK_BENCH_ENV` (comma-separated env filter). |
+
+Set `OAK_DEEP_DIAGNOSTICS=1` only for audit runs that need one-step shadow-model, expanded GVF, shadow-keyboard, and bad-feature-age diagnostics. The default path keeps live OaK mechanisms every step and omits those shadow-only heads for speed.
 
 ## Performance: Metal trace
 

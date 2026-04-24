@@ -180,6 +180,24 @@ Collapse-repair smoke evidence:
   about `2046` SPS, so future speed analysis must separate single-stream kernel
   efficiency from multi-process GPU contention and use Instruments/diagnostic
   phase timing rather than concurrency guesswork.
+- `perf-final-run-10k` / `perf-final-diagnose-10k`: performance repair after
+  the 1M report kept seed-0 10k reward bit-for-bit at `-44.609847`, NF zero,
+  and lifted single-stream HalfCheetah Oak to `3038` SPS. The profiling-backed
+  changes were: default-gate shadow-only deep diagnostics behind
+  `OAK_DEEP_DIAGNOSTICS=1`, parallelize independent `oak_plan`/`oak_plan_reduce`
+  row decodes without changing scalar reduction order, widen action emission
+  inside the existing `oak_replace` dispatch, and delete the unused standalone
+  `oak_action_emit` path. Xcode Instruments trace artifact:
+  `.build/perf-final-shader-1k.trace`; diagnostic phase means were
+  `encode=0.106ms`, `plan=0.014ms`, `plan_reduce=0.016ms`,
+  `learn_heads=0.008ms`, `replace=0.057ms`.
+- `perf-replacewide-run-50k-nohb` / `perf-random-run-50k-nohb`: seed-0 50k
+  preservation check kept Oak positive at `+172.773` versus random
+  `-13177.211`, with Oak at `3029` SPS and NF zero. A small concurrent paired
+  check, `perf-final-concurrent-2seed-10k` (`N=4`), reported Oak finals at
+  about `3454` SPS per agent for seeds 0 and 1 while beating paired random
+  baselines, confirming that the single-stream 3k repair also behaves well
+  under independent-agent concurrency.
 
 Current keeper evidence after the ψ stability repair:
 
