@@ -1,8 +1,10 @@
 # OaK roadmap - Plan-orthodox continual improvement
 
-Last audited: 2026-04-23, after the L1 1.5M screen was compared against K1
-heartbeats and the L1 algorithmic path was rolled back. Non-algorithmic SPS
-improvements from the L1 branch are retained.
+Last audited: 2026-04-24, during the L3-L7 integrated repair branch. L1 remains
+rolled back. The live branch now includes RR stopping-value subtasks,
+RR-derived continuation, average-reward option duration, age-gated Step-11
+replacement, and feature-candidate diagnostics; promotion is still gated by
+paired smoke, 1.5M screen, and 10M acceptance evidence.
 
 This roadmap is the control document for moving OaK toward the Alberta Plan's
 Step-11 Oak architecture. It is deliberately stricter than the old tier log:
@@ -40,6 +42,27 @@ Terms used below:
 - **Neutral**: empirically safe but not a benchmark improvement.
 - **Rollback**: mechanism should not be revived without a materially different
   formulation.
+
+## Active L3-L7 Note
+
+The previous roadmap sections below are retained as historical audit text where
+they describe why L3-L7 was needed. For the current code, these items are no
+longer "not implemented":
+
+- L3: `oak_bk_encode` trains psi with the RR stopping value
+  `V(s') - valueW[i]·x_i(s') + bonusW[i]·x_i(s')`.
+- L4/L5: `oak_plan` learns reward, transition, and duration models using
+  stopping-aware recurrences; planning uses
+  `Q(s,o) = rHat(s,o) - rho*lHat(s,o) + V(nHat(s,o))`.
+- L6: `oak_post_learn` runs age-gated option/feature replacement with
+  `optFeature`, feature age, option age, and feature-ever-used metadata.
+- L7-lite: health includes `rrBonusMean`, `psiStopGapMean`,
+  `terminationRate`, `optionDurationMean`, `neverUsedFeatureCount`,
+  `replacementAgeMean`, and `stateEffectiveRank`.
+
+Current empirical read: short paired HalfCheetah tests are finite and now beat
+random comfortably, but the reward-rate still hovers near zero and does not yet
+meet the sustained positive-acceleration bar.
 
 ## Alberta Plan Commitments
 
@@ -156,12 +179,12 @@ more interesting; the Plan order matters.
 | 0 | Measurement hygiene | Active rule | A stale Metal library can completely corrupt health metrics. | Rebuild Metal after every kernel edit; never interpret a run whose metallib predates `Sources/OakKernel.metal`. |
 | 1 | L1 one-step expectation model | **Rolled back** | The model learned finite predictions but reduced K1 reward on `8/10` seeds and did not create a usable planning signal. | Do not run 10M; any Step-8 retry must be materially different and isolated from feature-utility/reward-path damage. |
 | 2 | L2 state-feature ring + asynchronous one-step planning | **Blocked** | L2 depends on a one-step model worth spending through search. L1 failed that screen. | Do not start from rolled-back L1. |
-| 3 | L3 exact reward-respecting stopping value for psi | Next STOMP repair | Current psi is a useful feature-attainment surrogate, not RR Eq. 4. | Implement before any new termination trick. |
-| 4 | L4 average-reward option duration + differential option backup | Blocked on exact subtasks | True continuing options need duration in the differential backup. | Add only after L3 gives non-degenerate subtask identity. |
-| 5 | L5 true option termination | Blocked on L3/L4 | H1 is persistence, not termination. Prior termination-from-psi families are exhausted. | Use stopping-comparison-derived continuation, not backward-value shortcuts. |
-| 6 | L6 Step-11 registry and age-aware replacement | Blocked on better subtask signals | "Eventually remove/replace" is not "replace argmin every step." | Add tenure/ever-used metadata after L3 can say what utility means. |
-| 7 | L7 feature decorrelation + candidate pool | Enabling substrate | Traces and richer subtasks need less correlated features. | Use diagnostics first; do not jump straight to TD(lambda). |
-| 8 | L8 eligibility traces retry | Blocked on L7 | Prior trace attempts failed from correlated Fourier features. | Retry only after effective-rank/stability diagnostics improve. |
+| 3 | L3 exact reward-respecting stopping value for psi | **Live, screening** | The RR stopping-value target is implemented in `oak_bk_encode`. | Keep only if paired screens show finite health and improving reward-rate. |
+| 4 | L4 average-reward option duration + differential option backup | **Live, screening** | `optDuration` and `rHat - rho*lHat + V(nHat)` are implemented. | Duration must remain non-degenerate without suppressing reward improvement. |
+| 5 | L5 true option termination | **Live, screening** | Continuation is derived from the RR stopping comparison. | Reject variants that revert to H1-style confidence persistence. |
+| 6 | L6 Step-11 registry and age-aware replacement | **Live, screening** | `optFeature`, ages, and feature-ever-used metadata are implemented. | Replacement counts must stay structural and no longer equal measured steps. |
+| 7 | L7 feature diagnostics/candidate pool | **Partial live** | Unused active features serve as candidates; cheap state participation rank is reported. | Add richer decorrelation only if it is needed by the next failing diagnostic. |
+| 8 | L8 eligibility traces retry | Blocked on L7 evidence | Prior trace attempts failed from correlated Fourier features. | Retry only after effective-rank/stability diagnostics justify it. |
 | 9 | L9 option keyboard descriptor model / Design B | Last | Descriptor models are only meaningful after true options exist. | Compare Design A/B after L5. |
 
 ## Strict Status Against Plan Steps
@@ -171,14 +194,14 @@ more interesting; the Plan order matters.
 | 1. Representation I | **Partial/strong substrate** | Welford observation normalization, per-feature alpha via MetaOptimize, GraMa utility, continual updates. | The core Step-1 pieces are real. The base-agent text also mentions short-term credit-assignment memories; TD(lambda) attempts diverged on current correlated Fourier features, so traces are an open gap, not a completed item. |
 | 2. Representation II | **Partial** | Deep Fourier features plus G&T reseeding; K2 composes a replacement row from two utility-sampled parent rows. | Step 2 is not just random projection replacement. It asks for smart construction, testing, ranking, and replacement of new features made from existing features in a multi-task setting. K2 installs a narrow composition surrogate but is empirically neutral. |
 | 3. Prediction I | **Partial** | Main value plus K psi GVFs; multi-timescale obs traces in perception. | Continual GVF learning exists. Off-policy, stable multi-step prediction with learned feature finding and richer recurrent perception is incomplete. |
-| 4. Control I | **Strong, with one caveat** | Continual actor-critic via REINFORCE score gradients and chord-blended option policies; structural sigma in wrapper for continuous actions. | The actor-critic loop is useful and stable. The caveat is that F1's sigma is an action-interface design, not a Plan step; keep it because it is structural and empirical, but do not treat it as literature completion. |
-| 5. Prediction II | **Partial** | Average reward centering for main TD and psi TD. | Differential value learning is present. Average-reward option learning requires duration-aware option models once options last more than one step; OaK has no duration head. |
+| 4. Control I | **Strong, with one caveat** | Continual actor-critic via compatible score gradients and chord-blended option policies; Box actions expose mean/log-sigma policy coordinates in the wrapper. | The actor-critic loop is useful and stable. The caveat is that action parameterization is wrapper-side research machinery, not a Plan step; keep only variants that survive paired baselines. |
+| 5. Prediction II | **Partial/active** | Average reward centering for main TD and psi TD; L3-L7 adds average-reward option duration. | Differential value learning is present. Duration is live but still under reward-rate screening. |
 | 6. Control II | **Strong** | Continuing wrappers; `done` is not plumbed into the engine; no episodic agent semantics. | This matches the Plan discipline. Benchmark resets are wrapper events only. |
-| 7. Planning I | **Partial** | `oak_plan` computes a one-step approximate backup over K learned model heads for the current state. | The Plan asks for incremental average-reward planning, typically asynchronous and ongoing. OaK plans every step, but only over the current state-feature vector and without duration in the option setting. |
+| 7. Planning I | **Partial/active** | `oak_plan` computes differential average-reward backups over K stopping-aware option models for the current state. | OaK plans every step, but still lacks a state/update queue and model uncertainty. |
 | 8. Prototype-AI I | **Not implemented as a reward-useful model** | L1's action-conditioned one-step model was implemented and then rolled back after the 1.5M screen. Live code has the base option-model scaffolds, not an explicit `[state, action] -> next state/reward` Step-8 model. | Step 8 remains a real gap. The failed L1 formulation learned finite predictions but pushed reward farther from K1, so the next attempt must not simply re-add the same heads/utility coupling. |
 | 9. Planning II | **Partial** | Priority signal from chord-weighted option-model TD magnitude; dense transition update gate. | Prioritized sweeping lineage is present. The Plan also calls for uncertainty-aware control of planning order; OaK still has no model-uncertainty estimate and no state/update queue. |
-| 10. STOMP | **Incomplete** | Feature-indexed psi heads, option policies, reward/transition heads, planning over K heads, H1 chord hysteresis. | This is the largest overclaim in the old roadmap. Current psi targets are simplified feature-attainment surrogates, not exact RR Eq. 4 stopping values. H1 is persistence, not a true option termination condition. Reward/transition heads learn one-step responsibility-weighted predictions, not option models to termination. |
-| 11. Oak | **Incomplete** | Utility estimates and unconditional every-step G&T replacement; chord-blended policy keyboard. | Step 11 says utility feedback should determine what is eventually removed and replaced. OaK currently churns one option and one feature every step. There is no feature registry for "not yet basis for a subtask." The keyboard is a policy blend, not a full option-keyboard model over chord descriptors. |
+| 10. STOMP | **Active, not promoted** | Feature-indexed RR psi heads, option policies, stopping-aware reward/transition/duration heads, planning over K heads, RR-derived continuation. | The STOMP pieces are live; the open question is whether they now produce sustained positive reward-rate. |
+| 11. Oak | **Active, incomplete** | Utility estimates, age-gated option/feature replacement, feature registry metadata, and chord-blended policy keyboard. | Step 11 feedback is no longer unconditional churn, but richer utility assessment and full chord-descriptor option-keyboard modeling remain open. |
 | 12. IA | Out of scope | None. | Keep out of this roadmap until Step 11 is credible. |
 
 ## Overclaims Removed

@@ -82,7 +82,7 @@ enum ActionComponent {
     var paramCount: Int {
         switch self {
         case .discrete(let n): return n
-        case .box(let n, _, _): return n
+        case .box(let n, _, _): return 2 * n
         }
     }
     var envActionWidth: Int {
@@ -99,8 +99,8 @@ extension Sequence where Element == ActionComponent {
 }
 
 // Wrapper-side action sampling. Discrete: Gumbel-max with score 1{a=d}-π_d.
-// Box: low-noise structural σ=1/A^3; scoreGrad = z/σ. The wrapper also emits
-// the sampled action in D_policy coordinates for the agent's experience stream.
+// Box: Gaussian with μ and log-σ policy coordinates; mean score uses Williams variance scaling.
+// The wrapper also emits the sampled action in D_policy coordinates for the agent's experience stream.
 func sampleAndScoreActions(spec: [ActionComponent], numEnvs: Int, dPolicy: Int,
                            envActionWidth: Int,
                            policyMean: UnsafePointer<Float>,
@@ -150,24 +150,29 @@ func sampleAndScoreActions(spec: [ActionComponent], numEnvs: Int, dPolicy: Int,
                 envAction[aBase + aIdx] = Float(bestIdx)
                 pIdx += n; aIdx += 1
             case .box(let a, let low, let high):
-                // Tier F1: structural σ = 1/√A, matching the action-dim scaling that keeps
-                // the total action vector magnitude ≈ 1 regardless of A. Williams 1992
-                // REINFORCE score for N(μ, σ²): d log π(a|s)/dμ = (a − μ)/σ² = σ·z/σ² = z/σ.
-                let aDim = max(a, 1)
-                let aa = Float(aDim * aDim * aDim)
-                let sigma: Float = 1.0 / aa
-                let invSigma: Float = aa   // = 1/σ
+                // Continuous actor-critic policy (Williams 1992; Degris-Pilarski-Sutton 2012):
+                // μ and log-σ are separate policy outputs. σ starts at one policy-coordinate
+                // unit, 1/D_policy, then the actor can adapt it.
+                let sigmaBase: Float = 1.0 / Float(max(dPolicy, 1))
+                let scaleBase = pIdx + a
                 for d in 0..<a {
                     let z = nextNormal(&rngState)
                     let mu = policyMean[mBase + pIdx + d]
+                    let rawLogSigma = policyMean[mBase + scaleBase + d]
+                    let logSigma = rawLogSigma.isFinite ? rawLogSigma : 0
+                    let sigmaRaw = sigmaBase * exp(logSigma)
+                    let sigma = (sigmaRaw.isFinite && sigmaRaw > 0) ? sigmaRaw : sigmaBase
                     let raw = mu + sigma * z
                     let clamped = max(low[d], min(high[d], raw.isFinite ? raw : 0))
                     envAction[aBase + aIdx + d] = clamped
                     actionSignal[mBase + pIdx + d] = clamped
-                    // Env-side clamp affects the env's view only, not the agent's score.
-                    scoreGrad[mBase + pIdx + d] = z * invSigma
+                    actionSignal[mBase + scaleBase + d] = 0
+                    // Env-side clamp affects the env's view only. Williams/Degris AC-S scales
+                    // the Gaussian mean score by σ², so (z/σ)·σ² = z·σ.
+                    scoreGrad[mBase + pIdx + d] = z * sigma
+                    scoreGrad[mBase + scaleBase + d] = z * z - 1.0
                 }
-                pIdx += a; aIdx += a
+                pIdx += 2 * a; aIdx += a
             }
         }
     }
@@ -814,8 +819,8 @@ final class OakMetalEngine {
         }
         sample(paramLayout.value, rank, invR)
         sample(paramLayout.psi, OakMetalLayout.psiCount(rank: rank), invR)
-        sample(paramLayout.optPolicy,
-               OakMetalLayout.optPolicyCount(rank: rank, dPolicy: dPolicy), invR)
+        let policyPtr = paramsArena.pointer.advanced(by: paramLayout.optPolicy)
+        for i in 0..<OakMetalLayout.optPolicyCount(rank: rank, dPolicy: dPolicy) { policyPtr[i] = 0 }
         sample(paramLayout.optReward, OakMetalLayout.optRewardCount(rank: rank), invR)
         sample(paramLayout.optTransition, OakMetalLayout.optTransitionCount(rank: rank), invR)
         // Duration defaults to the structural one-step lower bound.

@@ -470,20 +470,17 @@ kernel void oak_bk_encode(
 //    per output dim j). Each (k, j) thread computes one row of the dense option transition,
 //    fuses the curr and prev passes into a single R-load over `optTransition[k][j][:R]`,
 //    and writes nTdMat[k·R + j] = target_j − n̂^k_j(prev) directly. Each thread stores its
-//    `nHatCurr` into threadgroup memory AND its `n_td_sq = n_td · n_td` into a parallel
-//    threadgroup array — both writes go BEFORE the same single barrier, zero added barriers.
+//    `nHatCurr` into threadgroup memory AND a value-relevant transition TD contribution
+//    into a parallel threadgroup array — both writes go BEFORE the same single barrier.
 //
 //    Lane 0 of each TG runs a single R-loop that interleaves three accumulators:
 //      vHat^k     = Σ_j valueW[j] · nHatCurr_j      (strict j=0..R-1 fma order, bit-identical)
-//      ntdSqSum^k = Σ_j n_td_j^2                    (Tier D2 priority L2² of model TD error)
+//      ntdSqSum^k = Σ_j valueW[j]^2 · n_td_j^2      (value-relevant transition error)
 //      rHat^k     = Σ_i optReward[k][i] · curr[i]   (separate i-loop, R fma)
 //    Lane 0 then writes:
 //      qOption[k]  = isfinite(Q) ? Q : -FLT_MAX,                      (existing)
-//      prioOpt[k]  = (isfinite(ntdSqSum) && ntdSqSum > 0)              (Tier D2 NEW)
-//                    ? chord[k] · sqrt(ntdSqSum)
-//                    : 0.0f                                            (NF-clamp: dirty option
-//                                                                       becomes lowest-priority,
-//                                                                       gets skipped, others learn).
+//      prioOpt[k]  = chord[k] · sqrt(value-relevant transition error
+//                    + reward-TD² + (rho · duration-TD)²), NF-clamped.
 //
 //    The cross-K mean (meanPrio = mean_k prioOpt[k]) and Q^k max (bestQ = max_k Q^k) both
 //    run in the follow-up `oak_plan_reduce` kernel (K threads, single simdgroup, simd_sum +
@@ -514,9 +511,9 @@ kernel void oak_plan(
     // Per-thread dense-transition row. Same R-load fuses curr and prev passes; each thread
     // also writes its own slot in nTdMat (no contention). Stores nHatCurr (not the fma'd
     // contribution) into threadgroup memory so the reduction below keeps the original
-    // single-thread kernel's exact `vHat = fma(valueW[j], nHatCurr, vHat)` sequence —
-    // separate multiply-then-add would lose the fma's single-rounding and drift. Tier D2:
-    // also squares the local n_td (still in register) so the per-thread cost is +1 mul.
+    // single-thread kernel's exact `vHat = fma(valueW[j], nHatCurr, vHat)` sequence.
+    // Priority uses value-relevant transition error: state dimensions with no learned value
+    // consequence should not dominate search control.
     float nHatCurrLocal = 0.0f;
     float nTdSqLocal    = 0.0f;
     if (active) {
@@ -530,7 +527,8 @@ kernel void oak_plan(
         float target = (1.0f - contK) * curr[j] + contK * nHatCurrLocal;
         float n_td = target - nHatPrev;
         ctx.nTdMat[k * ctx.R + j] = n_td;
-        nTdSqLocal = n_td * n_td;     // Tier D2: in-register, free with ILP.
+        float vRel = ctx.valueW[j];
+        nTdSqLocal = (isfinite(vRel) ? (vRel * vRel) : 0.0f) * n_td * n_td;
     }
 
     // Cross-thread reduction stage. Both arrays are written before a SINGLE barrier — adding
@@ -582,11 +580,11 @@ kernel void oak_plan(
         ctx.qOption[k] = finite ? Q : -FLT_MAX;
         if (!finite) ctx.counters[OAK_CNT_PLAN_NF] += 1u;
 
-        // Tier D2 priority write: chord-weighted L2 of model TD error. NF-clamp at write so
-        // a dirty option becomes lowest-priority (skipped by the Head 4 gate) — failure
-        // isolation, the rest of the K options learn normally. Plan-orthodox: prio depends
-        // only on agent-internal signals (chord, nTdMat) — no env-knowledge, no tunable.
-        float modelErr = ntdSqSum + rTdSafe * rTdSafe + dTdSafe * dTdSafe;
+        // Tier D2 priority write: chord-weighted model TD error in value units. Duration
+        // matters to planning only through `rho * lHat`, so its priority component uses the
+        // same differential scale. NF-clamp makes dirty options lowest-priority.
+        float dErr = ctx.scalars->rho * dTdSafe;
+        float modelErr = ntdSqSum + rTdSafe * rTdSafe + dErr * dErr;
         bool prioFinite = isfinite(modelErr) && (modelErr > 0.0f);
         ctx.prioOpt[k]  = prioFinite ? (ctx.chord[k] * sqrt(modelErr)) : 0.0f;
     }
@@ -657,11 +655,11 @@ kernel void oak_plan_reduce(
 //                                   its own activation instead of converging to the chord mean.
 //                                   1/K floor prevents self-reinforcing starvation when chord[k]→0.
 //      2: optPolicy[K*D*R]       -> alphaPi * relevance(i) * td * scoreGrad[d] * prev[i] * chordPrev[k]
-//      3: optReward[K*R]         -> alpha[i] * optRewardTd[k] * prev[i] * chordPrev[k]
-//      4: optTransition[K*R*R]   -> alpha[i] * nTdMat[k*R+j] * prev[i] * chordPrev[k]
+//      3: optReward[K*R]         -> alpha[i] * optRewardTd[k] * prev[i] * max(chordPrev[k], 1/K)
+//      4: optTransition[K*R*R]   -> alpha[i] * nTdMat[k*R+j] * prev[i] * max(chordPrev[k], 1/K)
 //                                   (DENSE: n_hat^k_j(s) = sum_i w^k_{j,i} * s[i], RR-Subtasks eq. 17;
 //                                    n_td uses the RR stopping-aware recursive target from oak_plan)
-//      5: optDuration[K*R]       -> alpha[i] * durationTd[k] * prev[i] * chordPrev[k]
+//      5: optDuration[K*R]       -> alpha[i] * durationTd[k] * prev[i] * max(chordPrev[k], 1/K)
 // =================================================================================================
 kernel void oak_learn_heads(
     device float         *params      [[buffer(0)]],
@@ -724,14 +722,15 @@ kernel void oak_learn_heads(
         float relevance = ctx.alpha[i] * float(max(ctx.baseO, 1u));   // ∈ [0, 1].
         float grad = ctx.chordPrev[k] * ctx.scoreGrad[d] * prev[i];
         float w = ctx.optPolicy[id];
-        ctx.optPolicy[id] = safe_w(w, w + ctx.alphaPi * relevance * td * grad);
+        ctx.optPolicy[id] = safe_w(w, w + ctx.alphaPi * relevance * ctx.tdPsi[k] * grad);
         return;
     }
     if (gid < nVal + nPsi + nPi + nOR) {                       // Head 3: option reward model
         uint id = gid - nVal - nPsi - nPi;
         uint k = id / ctx.R, i = id % ctx.R;
         float r_td = ctx.optRewardTd[k];
-        float grad = ctx.chordPrev[k] * prev[i];
+        float modelW = max(ctx.chordPrev[k], 1.0f / float(max(ctx.K, 1u)));
+        float grad = modelW * prev[i];
         float w = ctx.optReward[id];
         ctx.optReward[id] = safe_w(w, w + ctx.alpha[i] * r_td * grad);
         return;
@@ -740,9 +739,9 @@ kernel void oak_learn_heads(
         // (RR-Subtasks eq. 17). Per-weight gradient:
         //   ∂ ½(target_j − n_hat^k_j(prev))² / ∂ w^k_{j,i} = -n_td_j · prev[i]
         // n_td precomputed into ctx.nTdMat[k*R + j] by oak_plan (one shared inner sum per (k, j)
-        // serves R weights along the i axis). chordPrev[k] is the on-chord weight (importance
-        // ratio per RR-Subtasks eq. 17). α[i] (not α[j]) because the gradient direction involves
-        // prev[i] — the i axis is the input dimension whose per-feature relevance gates the update.
+        // serves R weights along the i axis). Model heads keep a structural 1/K off-policy floor
+        // so inactive option models do not become untestable. α[i] (not α[j]) because the gradient
+        // direction involves prev[i] — the i axis is the input dimension whose relevance gates it.
         //
         // Tier D2 (Plan Step 9, Moore-Atkeson 1993 prioritized sweeping; Plan footnote 13):
         // gate the update by `prioOpt[k] >= meanPrio` so only above-mean-priority options
@@ -759,7 +758,8 @@ kernel void oak_learn_heads(
         uint j   = rem / ctx.R;
         uint i   = rem % ctx.R;
         float n_td = ctx.nTdMat[k * ctx.R + j];
-        float grad = ctx.chordPrev[k] * prev[i];
+        float modelW = max(ctx.chordPrev[k], 1.0f / float(max(ctx.K, 1u)));
+        float grad = modelW * prev[i];
         float w    = ctx.optTransition[id];
         ctx.optTransition[id] = safe_w(w, w + ctx.alpha[i] * n_td * grad);
         return;
@@ -767,7 +767,8 @@ kernel void oak_learn_heads(
     if (gid < nVal + nPsi + nPi + nOR + nOT + nOD) {          // Head 5: optDuration
         uint id = gid - nVal - nPsi - nPi - nOR - nOT;
         uint k = id / ctx.R, i = id % ctx.R;
-        float grad = ctx.chordPrev[k] * prev[i];
+        float modelW = max(ctx.chordPrev[k], 1.0f / float(max(ctx.K, 1u)));
+        float grad = modelW * prev[i];
         float w = ctx.optDuration[id];
         ctx.optDuration[id] = safe_w(w, w + ctx.alpha[i] * ctx.durationTd[k] * grad);
         return;
@@ -1163,8 +1164,7 @@ inline void oak_bk_admit_commit_body(
                 (hash_uniform(stepC, worstK, ctx.R + i) * 2.0f - 1.0f) * invSqrtR;
         } else if (id < optTotal && id < o3) {                      // optPolicy[worstK][:D*R]
             uint pi = id - o2;
-            ctx.optPolicy[worstK * ctx.D * ctx.R + pi] =
-                (hash_uniform(stepC, worstK, 3u * ctx.R + pi) * 2.0f - 1.0f) * invSqrtR;
+            ctx.optPolicy[worstK * ctx.D * ctx.R + pi] = 0.0f;
         } else if (id < optTotal && id < o4) {                      // optTransition[worstK][:R*R]
             uint pi = id - o3;
             ctx.optTransition[worstK * ctx.R * ctx.R + pi] =
@@ -1186,6 +1186,44 @@ inline void oak_bk_admit_commit_body(
             } else {
                 float u = hash_uniform(stepC, pre, o + 0xdeadbeefu) * 2.0f - 1.0f;
                 ctx.encoder[pre * rowStride + o] = u;                // RFF bandwidth-1.
+            }
+        }
+    }
+    if (replaceFeat != 0u) {
+        // Feature replacement is a clean birth: erase downstream semantics tied to both
+        // Fourier pair channels so the new feature is assessed on its own experience.
+        uint fPair[2] = { pre, pre + halfR };
+        uint r0 = 2u;
+        uint r1 = r0 + ctx.K * 2u;
+        uint r2 = r1 + ctx.K * 2u;
+        uint r3 = r2 + ctx.K * ctx.D * 2u;
+        uint r4 = r3 + ctx.K * 2u;
+        uint r5 = r4 + ctx.K * 2u * ctx.R;
+        uint r6 = r5 + ctx.K * ctx.R * 2u;
+        for (uint id = tid; id < r6; id += tgW) {
+            if (id < r0) {
+                ctx.valueW[fPair[id]] = 0.0f;
+            } else if (id < r1) {
+                uint t = id - r0, k = t >> 1u, f = fPair[t & 1u];
+                ctx.psi[k * ctx.R + f] = 0.0f;
+            } else if (id < r2) {
+                uint t = id - r1, k = t >> 1u, f = fPair[t & 1u];
+                ctx.optReward[k * ctx.R + f] = 0.0f;
+            } else if (id < r3) {
+                uint t = id - r2, k = t / (ctx.D * 2u), rem = t - k * ctx.D * 2u;
+                uint d = rem >> 1u, f = fPair[rem & 1u];
+                ctx.optPolicy[(k * ctx.D + d) * ctx.R + f] = 0.0f;
+            } else if (id < r4) {
+                uint t = id - r3, k = t >> 1u, f = fPair[t & 1u];
+                ctx.optDuration[k * ctx.R + f] = 0.0f;
+            } else if (id < r5) {
+                uint t = id - r4, k = t / (2u * ctx.R), rem = t - k * 2u * ctx.R;
+                uint f = fPair[rem / ctx.R], i = rem % ctx.R;
+                ctx.optTransition[k * ctx.R * ctx.R + f * ctx.R + i] = 0.0f;
+            } else {
+                uint t = id - r5, k = t / (ctx.R * 2u), rem = t - k * ctx.R * 2u;
+                uint j = rem >> 1u, f = fPair[rem & 1u];
+                ctx.optTransition[k * ctx.R * ctx.R + j * ctx.R + f] = 0.0f;
             }
         }
     }
