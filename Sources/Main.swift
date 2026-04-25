@@ -66,9 +66,6 @@ struct RunHealth: Codable {
     let keyboardGpiMargin: Double?
     let keyboardSelectedOption: Double?
     let oneStepRewardTdMean: Double?
-    let modelQueueCoverage: Double?
-    let modelUncertaintyMean: Double?
-    let stalePageAgeMean: Double?
     let gvfCount: Double?
     let gvfRateMean: Double?
     let gvfTdMean: Double?
@@ -218,8 +215,6 @@ private struct HealthAccumulator {
     private var rhoValueTdMeanLatest = 0.0
     private var keyboardGpiMarginLatest = 0.0, keyboardSelectedOptionLatest = 0.0
     private var oneStepRewardTdMeanLatest = 0.0
-    private var modelQueueCoverageLatest = 0.0, modelUncertaintyMeanLatest = 0.0
-    private var stalePageAgeMeanLatest = 0.0
     private var gvfCountLatest = 0.0, gvfRateMeanLatest = 0.0, gvfTdMeanLatest = 0.0
     private var gvfDifferentialValueMeanLatest = 0.0
     private var lambdaEffectiveRankLatest = 0.0
@@ -320,9 +315,6 @@ private struct HealthAccumulator {
         keyboardGpiMarginLatest = finite(stats.keyboardGpiMargin)
         keyboardSelectedOptionLatest = finite(stats.keyboardSelectedOption)
         oneStepRewardTdMeanLatest = finite(stats.oneStepRewardTdMean)
-        modelQueueCoverageLatest = finite(stats.modelQueueCoverage)
-        modelUncertaintyMeanLatest = finite(stats.modelUncertaintyMean)
-        stalePageAgeMeanLatest = finite(stats.stalePageAgeMean)
         gvfCountLatest = finite(stats.gvfCount)
         gvfRateMeanLatest = finite(stats.gvfRateMean)
         gvfTdMeanLatest = finite(stats.gvfTdMean)
@@ -417,9 +409,6 @@ private struct HealthAccumulator {
             keyboardGpiMargin: kernelSteps > 0 ? keyboardGpiMarginLatest : nil,
             keyboardSelectedOption: kernelSteps > 0 ? keyboardSelectedOptionLatest : nil,
             oneStepRewardTdMean: kernelSteps > 0 ? oneStepRewardTdMeanLatest : nil,
-            modelQueueCoverage: kernelSteps > 0 ? modelQueueCoverageLatest : nil,
-            modelUncertaintyMean: kernelSteps > 0 ? modelUncertaintyMeanLatest : nil,
-            stalePageAgeMean: kernelSteps > 0 ? stalePageAgeMeanLatest : nil,
             gvfCount: kernelSteps > 0 ? gvfCountLatest : nil,
             gvfRateMean: kernelSteps > 0 ? gvfRateMeanLatest : nil,
             gvfTdMean: kernelSteps > 0 ? gvfTdMeanLatest : nil,
@@ -566,7 +555,7 @@ private struct KernelConfig {
     var uFeatureEverUsed: UInt32 = 0
     var uFeatureParentA: UInt32 = 0, uFeatureParentB: UInt32 = 0, uFeatureKind: UInt32 = 0
     var uFeatureBirthCount: UInt32 = 0, uParentUseCount: UInt32 = 0
-    var uSelectedOption: UInt32 = 0, uHighModelOption: UInt32 = 0, uStaleModelOption: UInt32 = 0
+    var uSelectedOption: UInt32 = 0, uHighModelOption: UInt32 = 0
     var uKeyboardAge: UInt32 = 0
     var uModelAge: UInt32 = 0
     var uGvfAge: UInt32 = 0, uBadFeatureAge: UInt32 = 0
@@ -607,7 +596,6 @@ struct KernelStats {
     var rhoValueTdMean: Float = 0
     var keyboardGpiMargin: Float = 0, keyboardSelectedOption: Float = 0
     var oneStepRewardTdMean: Float = 0
-    var modelQueueCoverage: Float = 0, modelUncertaintyMean: Float = 0, stalePageAgeMean: Float = 0
     var gvfCount: Float = 0, gvfRateMean: Float = 0, gvfTdMean: Float = 0
     var gvfDifferentialValueMean: Float = 0
     var lambdaEffectiveRank: Float = 0
@@ -842,7 +830,7 @@ private enum OakMetalLayout {
     struct UInts {
         let counters, optFeature, featureAge, optAge, featureEverUsed: Int
         let featureParentA, featureParentB, featureKind, featureBirthCount, parentUseCount: Int
-        let selectedOption, highModelOption, staleModelOption, keyboardAge, modelAge: Int
+        let selectedOption, highModelOption, keyboardAge, modelAge: Int
         let gvfAge, badFeatureAge: Int
         let planningStateAge, selectedPlanState: Int
         let primitiveChannel: Int
@@ -864,7 +852,6 @@ private enum OakMetalLayout {
         let puc = o; o += rank
         let sel = o; o += 1
         let high = o; o += 1
-        let stale = o; o += 1
         let ka = o; o += K
         let ma = o; o += K
         let ga = o; o += G
@@ -875,7 +862,7 @@ private enum OakMetalLayout {
         return UInts(counters: ctr, optFeature: of, featureAge: fa, optAge: oa,
                      featureEverUsed: feu, featureParentA: fpa, featureParentB: fpb,
                      featureKind: fkind, featureBirthCount: fbc, parentUseCount: puc,
-                     selectedOption: sel, highModelOption: high, staleModelOption: stale,
+                     selectedOption: sel, highModelOption: high,
                      keyboardAge: ka,
                      modelAge: ma, gvfAge: ga, badFeatureAge: bfa,
                      planningStateAge: psa, selectedPlanState: sps,
@@ -1306,7 +1293,6 @@ final class OakMetalEngine {
         c.uParentUseCount = UInt32(u.parentUseCount)
         c.uSelectedOption = UInt32(u.selectedOption)
         c.uHighModelOption = UInt32(u.highModelOption)
-        c.uStaleModelOption = UInt32(u.staleModelOption)
         c.uKeyboardAge = UInt32(u.keyboardAge)
         c.uModelAge = UInt32(u.modelAge)
         c.uGvfAge = UInt32(u.gvfAge)
