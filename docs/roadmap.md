@@ -1,17 +1,30 @@
 # OaK roadmap - Plan-orthodox continual improvement
 
-Last audited: 2026-04-25, after the unearned-scale cleanup.
+Last audited: 2026-04-25, after promoting the new baseline.
 The live branch has moved past the L3-L7 scaffold: default perception is now
 direct normalized experience channels plus constructed feature slots, K=R
 options/subtasks, exact wrapper-side one-step importance ratios, RR Eq. 4
 continuation with a differential-value gauge, signed cumulant-space Design-A
 keyboard GPE/GPI, raw reward plus duration option models, average-reward GVFs
 over `G=R+K+2` experience cumulants, bounded prioritized-sweeping search
-control, and age/capacity-gated Oak replacement. `optValue`, `rhoOpt`,
-`oneTransition`, shadow keyboards, model-residual GVF utility, and deep
+control, and age/capacity-gated Oak replacement. Box actions keep the `2A`
+wrapper interface for capacity stability, but the scale half is now
+wrapper-reserved/inert and sampling uses structural fixed `sigma = 1/D_policy`
+with natural-gradient-style mean credit (`raw - mu`). `optValue`, `rhoOpt`,
+`oneTransition`, shadow keyboards, model-residual GVF utility, learned Box
+log-scale, and deep
 diagnostic ownership were removed from the live path because they were finite
-scale paths without earned control value. Promotion is still gated by paired
-100k, 300k, and 1M evidence across seeds, not by random-beating alone.
+scale paths without earned control value. The promoted 1.5M benchmark artifact
+is `.oak-benchmarks/baseline-15m`: 10 HalfCheetah seeds x `{oak,random}`, Oak NF
+zero on every seed, Oak beats random `10/10`, mean Oak reward `-8802.706`,
+median `-8787.175`, and seed 1 no longer collapses (`-8763.615` versus the
+failed rebuild seed-1 `-339826.775`).
+
+Baseline action-interface evidence note: the exact fixed-sigma-score seed-1
+gate failed by 100k, with actor support collapsed to zero and psi magnitudes
+exploding despite the scale half being inert. Do not promote exact off-policy
+Box mean scores without a different actor geometry. The promoted baseline keeps
+scale inert but uses natural-gradient-style mean credit.
 
 This roadmap is the control document for moving OaK toward the Alberta Plan's
 Step-11 Oak architecture. It is deliberately stricter than the old tier log:
@@ -624,7 +637,7 @@ more interesting; the Plan order matters.
 | 1. Representation I | **Partial/strong substrate** | Welford observation normalization, per-feature alpha via MetaOptimize, GraMa utility, continual updates. | The core Step-1 pieces are real. The base-agent text also mentions short-term credit-assignment memories; TD(lambda)/implicit-trace attempts diverged on current correlated Fourier features, so traces are an open gap, not a completed item. |
 | 2. Representation II | **Partial** | Deep Fourier features plus G&T reseeding; K2 composes a replacement row from two utility-sampled parent rows. | Step 2 is not just random projection replacement. It asks for smart construction, testing, ranking, and replacement of new features made from existing features in a multi-task setting. K2 installs a narrow composition surrogate but is empirically neutral. |
 | 3. Prediction I | **Partial** | Main value plus K psi GVFs; multi-timescale obs traces in perception. | Continual GVF learning exists. Off-policy, stable multi-step prediction with learned feature finding and richer recurrent perception is incomplete. |
-| 4. Control I | **Strong, with one caveat** | Continual actor-critic via wrapper score gradients and chord-blended option policies; Box actions currently expose mean/log-scale policy coordinates in the wrapper. | The actor-critic loop is useful and stable. The caveat is that action parameterization is wrapper-side research machinery, not a Plan step; learned log-scale remains a cleanup target, but the first mean-only deletion was finite and fast while regressing 10k reward too far to promote. |
+| 4. Control I | **Strong, with one caveat** | Continual actor-critic via wrapper score gradients and chord-blended option policies; Box actions keep a `2A` wrapper interface but only the mean half is live. | The actor-critic loop is useful and stable. The caveat is that action parameterization is wrapper-side research machinery, not a Plan step; learned log-scale is now reserved/inert, Box mean credit is natural-gradient style, and full `D_policy=A` mean-only deletion remains a later evidence-gated cleanup. |
 | 5. Prediction II | **Partial/active** | Average reward centering for main TD and psi TD; L3-L7 adds average-reward option duration. | Differential value learning is present. Duration is live but still under reward-rate screening. |
 | 6. Control II | **Strong** | Continuing wrappers; `done` is not plumbed into the engine; no episodic agent semantics. | This matches the Plan discipline. Benchmark resets are wrapper events only. |
 | 7. Planning I | **Partial/active** | `oak_plan` computes differential average-reward backups over K stopping-aware option models for the current state. | OaK plans every step, but still lacks a state/update queue and model uncertainty. |
@@ -920,7 +933,7 @@ future audits as "obvious" fixes.
 | Pre-update reward-rate TD centering | `l3-l7-preupdate-rho-td-paired-10k-045035`: using the previous `rho`/`rhoOpt` in the same step's value/psi TD errors was research-clean and NF-clean, but regressed reward sum to `-21.363`, left only `2/10` final positive-rate seeds, and inflated option duration to `72.8`. | Rejected; keep the current update-first centering until a fuller value-based reward-centering mechanism wins paired gates. |
 | Global reward-rate centering for ψ subtasks | `l3-l7-global-psi-rho-paired-10k-090745`: using the main global `rho` instead of per-option `rhoOpt` in RR ψ TDs was NF-clean but regressed reward to `-26.224`, left only `1/10` positive-rate seed, and inflated duration to `115.2`. | Rejected; per-option reward-rate traces remain useful subtask specialization in the current average-reward RR implementation. |
 | Value-based per-option ψ reward-rate traces | `l3-l7-valuebased-rhoopt-paired-10k-093442`: updating `rhoOpt[k]` from the ψ TD error instead of reward EMA was NF-clean but regressed reward to `-79.801`, drove all-stop one-step behavior (`terminationRate 0.847`, duration `1.32`), and increased action energy without sustained positive reward-rate. | Rejected; keep per-option reward EMA centering for the current RR ψ heads unless a fuller off-policy GVF reward-rate estimator is added. |
-| Fixed-sigma continuous policy on old L3-L7 | `l3-l7-fixed-sigma-paired-10k-045540`: freezing the old two-coordinate Gaussian scale path removed score-gradient spikes (`3.46e-3`) but starved the actor, regressing reward sum to `-115.259` with only `1/10` positive-rate seeds. | Still rejected. A later uncommitted mean-only deletion was finite and fast but regressed 10k reward to about `-289`; learned scale remains a real risk, but deleting it without a stronger actor/control replacement is not promotable. |
+| Fixed-sigma continuous policy on old L3-L7 | `l3-l7-fixed-sigma-paired-10k-045540`: freezing the old two-coordinate Gaussian scale path removed score-gradient spikes (`3.46e-3`) but starved the actor, regressing reward sum to `-115.259` with only `1/10` positive-rate seeds. | Historical rejection, not the live branch. The baseline Box action interface keeps `D_policy=2A` for capacity stability, makes the scale half inert, and uses natural-gradient-style mean credit. Seed-1 and 10-seed 1.5M gates passed. |
 | Source-chord option-model priority | `l3-l7-source-priority-paired-10k-045727`: weighting model priority by `chordPrev` instead of the current chord was NF-clean but regressed reward sum to `-25.159`, left only `1/10` positive-rate seeds, and inflated duration to `128.8`. | Rejected; keep current-chord priority until uncertainty/meta-gradient search control replaces the simple TD-priority gate. |
 | Tanh-squashed Box policy | `l3-l7-tanh-box-paired-10k-045950`: mapping continuous Gaussian samples smoothly into Box bounds was wrapper-clean and NF-clean, but regressed reward sum to `-25.538`, inflated duration to `86.0`, and reduced the random baseline's action energy without improving Oak acceleration. | Rejected; keep the current clamp wrapper until a complete bounded-policy score formulation wins paired gates. |
 | Exact censored-Gaussian Box score | `l3-l7-censored-box-score-paired-10k-092013`: using the mathematically correct point-mass score for clipped Box samples was wrapper-clean and NF-clean, but regressed reward to `-20.175`, left `0/10` positive reward-rate seeds, and inflated duration to `127.7`. | Rejected; the long-run scale issue is real, but changing the Box score alone removes useful early credit. |
@@ -950,7 +963,7 @@ future audits as "obvious" fixes.
 | Naive intra-option Q keyboard | `l3-l7-optvalue-keyboard-paired-10k-050453`: adding an average-reward `Q(s,o)` head and using it directly as the keyboard logit was NF-clean but made the chord too uniform, exploded score gradients in one seed, regressed reward sum to `-389.147`, and lost to random in `1/10` seeds. | Rejected; an option-value head remains a Plan gap, but it must not replace model-backed keyboard logits before it has a stable integration path. |
 | Pure RR-activation keyboard on current keeper | `l3-l7-activation-keyboard-current-paired-10k-050638`: re-testing `zPsi` as the keyboard logit after slow feature reseeding was NF-clean but regressed reward sum to `-48.532`, left `0/10` positive-rate seeds, and inflated duration to `221.8`. | Rejected; keep model-backed keyboard logits in the current L3-L7 keeper. |
 | Model-backed RR subtask keyboard logits | `l3-l7-rr-model-keyboard-paired-10k-092922`: separating main-reward planning Q from RR-subtask keyboard Q was more faithful to STOMP, but regressed reward to `-67.518`, lowered chord effective-K to `6.97`, and increased action energy without reward-rate acceleration. | Rejected; do not drive the keyboard from RR model logits until option models/cross-cumulant values are reliable enough. |
-| Wrapper score/action scaling variants | Gaussian-score standardization, per-coordinate actor alpha, per-coordinate standard score, and behavior-policy birth variants regressed 10k/50k paired screens. | Keep the current wrapper score interface unless paired evidence says otherwise. |
+| Wrapper score/action scaling variants | Gaussian-score standardization, per-coordinate actor alpha, per-coordinate standard score, and behavior-policy birth variants regressed 10k/50k paired screens. | Do not add score normalizers or actor-gain knobs. The baseline action change deletes learned scale; it is not a new tuning layer. |
 | Tracking-rate substitutions | `rho`, global-rho, and utility-timescale variants tied to `R` did not improve early reward-rate or 50k reward evidence. | `track_rate(t, obsDim)` remains the current structural tracker, not a research invariant. |
 | Raw observation passthrough | `l3-l7-rawobs-paired-10k-230923`: NF zero but worse cumulative reward (`-20.933`) and only `1/10` positive reward-rate seeds. | Rejected; keep standardized observation input to the Fourier encoder. |
 | Chord-consistent value backup | `l3-l7-chordmodel-plan-paired-10k-231520`: replacing best-option planning advantage with chord-weighted Q regressed reward sum to `-29.654`. | Rejected; Design A policy blending does not imply chord-weighted value backup here. |
@@ -968,7 +981,7 @@ future audits as "obvious" fixes.
 | Duration-scaled planning advantage | `l3-l7-duration-scaled-planadv-paired-10k-054503`: dividing best-option planning advantage by the selected option duration was average-reward motivated, but regressed reward to `-27.136`, left only `1/10` positive-rate seeds, and kept duration inflated around `101`. | Rejected; duration scaling cannot be applied only at the value-head pressure point in the current planner. |
 | Stratified initial option-feature registry | `l3-l7-stratified-registry-birth-paired-10k-005737`: spreading initial anchors across `R` worsened reward sum to `-23.227` and `0/10` positive-rate seeds. | Rejected; keep the current `optFeature[k] = k` birth rule. |
 | Implicit TD denominator plus raw planning advantage | `l3-l7-implicit-raw-planadv-paired-10k-005940`: replacing the soft planning advantage with raw advantage and an implicit value update regressed to `-44.286` and score-gradient mean `2.737e1`. | Rejected; raw planning pressure remains damaging even with implicit shrinkage. |
-| Fixed current Gaussian sigma | `l3-l7-fixed-current-sigma-paired-10k-010112`: freezing scale coordinates at the then-current structural sigma collapsed reward to `-115.259` and removed useful score signal. | Rejected. The current code keeps the mean/log-scale wrapper while treating that scale path as an unresolved cleanup target, not as Plan law. |
+| Fixed current Gaussian sigma | `l3-l7-fixed-current-sigma-paired-10k-010112`: freezing scale coordinates at the then-current structural sigma collapsed reward to `-115.259` and removed useful score signal. | Historical rejection. The baseline differs by keeping capacity shape, zeroing reserved scale scores, and using natural-gradient-style mean credit; the promoted paired artifact is `.oak-benchmarks/baseline-15m`. |
 | Saturation-aware Gaussian score | `l3-l7-saturation-aware-score-paired-300k-011021`: ignoring score gradients for clamped continuous samples fixed the long-horizon score spike, but 300k reward regressed to `-526.692` versus the keeper's `-489.611`. | Rejected; the score spike needs a repair that does not reduce reward learning. |
 | Value-aware transition update weighting | `l3-l7-valueaware-transition-update-paired-10k-010253`: weighting transition TD by `|valueW[j]|` caused action magnitude growth and reward collapse to `-1054.454`. | Rejected; keep value-aware priority, not value-weighted transition updates. |
 | Registry-state fast feature clock | `l3-l7-unused-fast-feature-clock-paired-50k-010430`: fast feature testing while any never-used feature exists improved 10k to `-15.606`, but 50k regressed to `-113.198` and feature churn rose to `699.6`. | Rejected; early feature churn helps short screens but destroys the 50k gate. |
@@ -1047,11 +1060,14 @@ but speed is infrastructure. It cannot promote a non-orthodox mechanism.
 
 Baseline for the next algorithmic change:
 
-- **F1/H1 substrate**, not K2.
-- F1 remains the reward-lift leader.
-- H1 is close enough and architecturally useful as a persistence diagnostic,
-  but it must not be described as true Step-10 termination.
-- K2 is neutral evidence for Step-2 composition, not a baseline.
+- **Baseline**: `.oak-benchmarks/baseline-15m`.
+- HalfCheetah 1.5M, 10 seeds x `{oak,random}`: Oak beats random `10/10`,
+  Oak NF zero `10/10`, mean Oak reward `-8802.706`, median `-8787.175`,
+  reward SD `47.437`, and seed 1 `-8763.615`.
+- This supersedes `halfcheetah-rebuild-15m` as the operational baseline
+  because rebuild seed 1 collapsed (`-339826.775`, NF total `216`).
+- K1 remains a comparison artifact, not a baseline
+  (`halfcheetah-k1-15m` mean Oak `-212785.114`).
 
 The roadmap objective is now sharper: repair the missing Plan-order pieces
 that prevent continuously improving learning, especially exact subtask/option

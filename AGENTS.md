@@ -110,7 +110,7 @@ Each env declares a structured action spec — a list of components, each `Discr
 The agent emits `policyMean[D_policy]` from `oak_meta_action`. The env-wrapper layer (`EnvPoolEnv.sampleAndStep`) is the **sole** site that samples actions and computes score functions:
 
 - Discrete N: Gumbel-max categorical (`-log(-log(U))` + argmax); scoreGrad = `1{a=d} − π_d` (Maddison 2014; Williams 1992).
-- Box A: exposes `2A` policy coordinates, `[μ_0...μ_A, logσ_0...logσ_A]`. The wrapper samples `μ + σ·N(0,1)` and clamps only the env-facing action. The current scale path remains a live cleanup target because one uncommitted mean-only deletion was finite but regressed 10k reward; do not promote another action-parameterization change without long multi-seed evidence.
+- Box A: currently exposes `2A` policy coordinates to keep `D_policy`, default rank, and K stable. The first A coordinates are means; the second A coordinates are wrapper-reserved/inert. The wrapper samples with structural fixed `σ = 1/D_policy`, emits natural-gradient-style mean credit (`raw − μ`) for Box mean slots, writes zero score/action-signal entries for reserved scale slots, and clamps only the env-facing action. Full `D_policy = A` mean-only deletion remains a separate evidence-gated cleanup.
 
 Adding a new env or action-space component type requires adding to `ActionComponent` in Swift; no agent or kernel changes.
 `doneCount` is a wrapper random-restart metric, not an episode signal to OaK; the engine state is never reset on `done`.
