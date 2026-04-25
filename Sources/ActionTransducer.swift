@@ -40,6 +40,7 @@ enum ActionTransducer {
                                envAction: UnsafeMutablePointer<Float>,
                                actionSignal: UnsafeMutablePointer<Float>,
                                scoreGrad: UnsafeMutablePointer<Float>,
+                               optionScoreGrad: UnsafeMutablePointer<Float>?,
                                importance: UnsafeMutablePointer<Float>?,
                                importanceLog: UnsafeMutablePointer<Float>?,
                                optionLogProbScratch: UnsafeMutablePointer<Float>?,
@@ -100,8 +101,15 @@ enum ActionTransducer {
                             for d in 0..<n { optMax = max(optMax, opt[base + d]) }
                             var optZ: Float = 0
                             for d in 0..<n { optZ += exp(opt[base + d] - optMax) }
-                            let p = exp(opt[base + bestIdx] - optMax) / max(optZ, .leastNormalMagnitude)
+                            let invOptZ = 1.0 / max(optZ, .leastNormalMagnitude)
+                            let p = exp(opt[base + bestIdx] - optMax) * invOptZ
                             optionLogProbScratch?[r * optionCount + k] += log(max(p, .leastNormalMagnitude))
+                            if let osg = optionScoreGrad {
+                                for d in 0..<n {
+                                    let pi = exp(opt[base + d] - optMax) * invOptZ
+                                    osg[base + d] = ((d == bestIdx) ? 1.0 : 0.0) - pi
+                                }
+                            }
                         }
                     }
                     envAction[aBase + aIdx] = Float(bestIdx)
@@ -137,6 +145,10 @@ enum ActionTransducer {
                                 let oz = (raw - optMu) / max(optSigma, .leastNormalMagnitude)
                                 optionLogProbScratch?[r * optionCount + k] +=
                                     -log(max(optSigma, .leastNormalMagnitude)) - 0.5 * oz * oz
+                                if let osg = optionScoreGrad {
+                                    osg[base + pIdx + d] = oz * optSigma
+                                    osg[base + scaleBase + d] = oz * oz - 1.0
+                                }
                             }
                         }
                     }

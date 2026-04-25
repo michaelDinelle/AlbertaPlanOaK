@@ -43,7 +43,7 @@ Strict current-status audit lives in `docs/roadmap.md`. The literature target is
 - Options = policies + termination. **Current rebuild continuation is derived from the RR stopping comparison, not H1 model-confidence hysteresis.**
 - Option models r̂(s,o), n̂(s,o), and for average-reward options duration l̂(s,o), used for planning. **Current L3-L7 keeps the orthodox raw option-reward-plus-duration form: `Q = rHat - rho*lHat + V(nHat)`. A coherent differential option-reward alternative was tested and rejected by the 10k paired gate, so do not revive it without materially new evidence.**
 - Planning over option models (RR-Subtasks eq. 19 / average-reward option backup).
-- **Option keyboard** = real-valued vector λ ∈ R^K, one component per subtask. Design A: chord blends K component options; model treats chord as opaque descriptor. Design B: chord defines a joint subtask. **Current OaK blends policies but does not yet learn a chord-descriptor model.**
+- **Option keyboard** = real-valued vector λ ∈ R^K, one component per subtask. Design A: chord blends K component options; model treats chord as opaque descriptor. Design B: chord defines a joint subtask. **Current OaK uses formal signed cumulant-space Design-A GPE/GPI to choose one behavior option so exact one-step off-policy ratios remain valid; it does not yet learn a chord-descriptor model.**
 - **Feedback / utility / remove-replace.** Continually assess utility of features, subtasks, options, and option models. Replace what isn't pulling weight (Plan Step 11 + RR-Subtasks §8 FCSTOMP). **Current rebuild has age-gated feature/option-bundle replacement, `optFeature`, feature age, option age, and feature-ever-used metadata; richer utility remains an active research frontier.**
 
 ### What the Plan eschews
@@ -85,8 +85,8 @@ The agent is a focused-kernel single-stream Oak prototype over the Plan steps. K
 | `optReward` | K · R | K stopping-aware option reward models r̂^k. |
 | `optTransition` | K · R · R | K dense stopping-aware transition models `n̂^k_j(s) = Σ_i w^k_{j,i}·s[i]`. |
 | `optDuration` | K · R | K average-reward option-duration models l̂^k with a structural one-step lower bound at decode. |
-| `oneReward`, `oneTransition` | `(R + D)`, `R · (R + D)` | Step-8 one-step shadow model over `(state, actionSignal)`. It is off on the default speed path and enabled by `OAK_DEEP_DIAGNOSTICS=1`; it does not drive planning. |
-| `gvfRate`, `gvfValue` | anchors, anchors · R | Compact average-reward GVF bank over experience signals with explicit cumulant-rate and differential-value separation. It is diagnostic until stability evidence promotes it into replacement utility. |
+| `oneReward`, `oneTransition` | `(R + D)`, `R · (R + D)` | `oneReward[0:R]` is the live reward-cumulant descriptor used by the signed Option Keyboard λ and is updated every step. `oneTransition` remains deep-diagnostic shadow state and does not drive planning. |
+| `gvfRate`, `gvfValue` | `(R + K + 3)`, `(R + K + 3) · R` | Expanded average-reward GVF bank over state-feature, centered-reward, action-energy, termination, and model-residual cumulants with explicit cumulant-rate and differential-value separation. GVF utility is live in replacement/basis diagnostics, not in reward or primitive actor shortcuts. |
 
 State representation is normalized linear anchors plus constructed feature slots. Anchors are deterministic projections over normalized observation traces, previous action descriptor, and previous reward; constructed slots are replaceable signed products/sums/residuals of useful parents. Per-feature alpha is achieved structurally by MetaOptimize-style step sizes plus age/utility replacement.
 
@@ -98,10 +98,10 @@ oak_encode(+keyboard_predict) → oak_plan → oak_plan_reduce → oak_learn_hea
 
 | Kernel | What it does |
 |---|---|
-| `oak_encode` | Updates observation/traces, builds normalized anchor/constructed state features, then runs keyboard/prediction: value TD, average-reward GVF TDs, RR subtask TD, option-value TD, RR continuation, dense λ, and Design-A GPI behavior selection. |
+| `oak_encode` | Updates observation/traces, builds normalized anchor/constructed state features, then runs keyboard/prediction: value TD, expanded average-reward GVF TDs, RR subtask TD, option-value TD with live `rhoOpt`, RR continuation, signed cumulant-space λ, and Design-A GPI behavior selection. |
 | `oak_plan` | Updates the scheduled option page/slots' stopping-aware model TDs, duration TDs, and raw-reward option model. Deep one-step shadow diagnostics run only with `OAK_DEEP_DIAGNOSTICS=1`. |
 | `oak_plan_reduce` | Reduces model Q/priority and selects high-priority/stale model pages for fair search control. When K fits one SIMD page, the whole option bank is planned. |
-| `oak_learn_heads` | Updates value, compact average-reward GVFs, option value, psi, psiCross, option policy, and option reward/transition/duration using exact one-step ratios. Deep one-step and expanded GVF shadow heads run only with `OAK_DEEP_DIAGNOSTICS=1`. |
+| `oak_learn_heads` | Updates value, expanded average-reward GVFs, option value, psi, psiCross, option policy, option reward/transition/duration, and the one-step reward shadow head using exact one-step ratios and wrapper-provided target-option score gradients. |
 | `oak_replace` | Emits all option policy means across multiple action-emission threadgroups while threadgroup 0 runs utility/meta-learning diagnostics and commits age/capacity-gated feature/option-bundle replacements. |
 
 ### Action interface (Inv-1)
@@ -134,7 +134,7 @@ Kernel-side fields are populated only for `oak`:
 - `oakOptionReinitCountFinal`, `oakFeatureReinitCountFinal` — cumulative age-gated generate-and-test replacement counts.
 - `nonFiniteByPhase` = `{"encode": N, "learn": N, "plan": N, "tdPsi": N}` — per-phase NF counts. **Healthy = all zeros across the run.**
 - Search/replacement diagnostics: `eligibleOptionCount`, `eligibleFeatureCount`, `replacementCommitRate`, `modelUpdateRate`, `modelPriorityEntropy`, `optionDiffTdMean`, `modelPageCoverage`, `modelPageMaxAge`, `modelPriorityMax`, `modelExpectedImprovementMean`, `replacementWouldCommitRate`, `badFeatureAgeMean`, `badFeatureAgeMax`, `replacementSurvivalMean`.
-- GVF/keyboard diagnostics: `gvfCount`, `gvfRateMean`, `gvfRateVar`, `gvfTdMean`, `gvfDifferentialValueMean`, `gvfUtilityMean`, `gvfPageCoverage`, `gvfRewardTdMean`, `gvfTerminationTdMean`, `gvfUtilityRankMean`, `lambdaEffectiveRank`, `lambdaPlanMass`, `lambdaRrMass`, `lambdaUtilityMass`, `keyboardCacheCoverage`, `keyboardScoreStaleness`, `shadowRewardAgreement`, `shadowTaskAgreement`, `shadowRewardGpiMargin`, `shadowTaskGpiMargin`. The expanded shadow GVF/keyboard fields are populated on the deep diagnostic path; default runs keep the compact live GVF bank and set deep-only shadows to neutral values.
+- GVF/keyboard diagnostics: `gvfCount`, `gvfRateMean`, `gvfRateVar`, `gvfTdMean`, `gvfDifferentialValueMean`, `gvfUtilityMean`, `gvfPageCoverage`, `gvfRewardTdMean`, `gvfTerminationTdMean`, `gvfUtilityRankMean`, `lambdaEffectiveRank`, `lambdaPlanMass`, `lambdaRrMass`, `lambdaUtilityMass`, `keyboardCacheCoverage`, `keyboardScoreStaleness`, `shadowRewardAgreement`, `shadowTaskAgreement`, `shadowRewardGpiMargin`, `shadowTaskGpiMargin`. The expanded GVF bank is live by default; expensive shadow keyboard comparisons remain neutral unless `OAK_DEEP_DIAGNOSTICS=1`.
 - Average-reward/actor support shadows: `optionControlRateMean`, `optionControlRateVar`, `optionControlRateTdMean`, `optionControlRateAgreement`, `actorUpdateNormMean`, `actorUpdateNormVar`, `actorTdMean`, `actorImportanceWeightedTdMean`, `actorSupportEntropy`.
 
 **Storage.** Default directory `.oak-benchmarks/<run-id>/`, with `<run-root>/<envId>/seed<N>/<stem>.json` for finals and `<stem>.heartbeat-NNNNNN.json` for pulses. Override the run root with `OAK_METRICS_STORAGE`.
@@ -147,7 +147,7 @@ Kernel-side fields are populated only for `oak`:
 | `OaK diagnose <env-id> [--policy oak\|random] [--steps N]` | Short timed run with `diagnostic` block (per-phase GPU timings). |
 | `OaK benchmark` | Concurrent multi-env multi-seed sweep. `OAK_BENCH_STEPS`, `OAK_BENCH_SEED_COUNT`, `OAK_BENCH_POLICIES`, `OAK_BENCH_CONCURRENCY` (default 8), `OAK_BENCH_ENVS` / `OAK_BENCH_ENV` (comma-separated env filter). |
 
-Set `OAK_DEEP_DIAGNOSTICS=1` only for audit runs that need one-step shadow-model, expanded GVF, shadow-keyboard, and bad-feature-age diagnostics. The default path keeps live OaK mechanisms every step and omits those shadow-only heads for speed.
+Set `OAK_DEEP_DIAGNOSTICS=1` only for audit runs that need one-step transition shadow-model and shadow-keyboard comparisons. The default path keeps live OaK mechanisms every step and omits those shadow-only heads for speed.
 
 ## Performance: Metal trace
 
@@ -163,7 +163,7 @@ Use Instruments → Metal System Trace with `tools/instruments/ShaderTemplate.tr
 - GraMa feature utility: [2505.24061](docs/papers/GraMa_MeasureGradients_2505.24061.pdf)
 - Generate-and-test: Mahmood-Sutton-Pilarski 2012 ([03-mahmood-sutton-autostep](docs/papers/03-mahmood-sutton-autostep-ICML-2012.pdf)), Rahman 2020 thesis, Samani 2022 thesis
 - Deep Fourier features: Lewandowski-Schuurmans-Machado 2024 ([2410.20634](docs/papers/PlasticLearningDeepFourierFeatures_2410.20634.pdf))
-- MetaOptimize per-feature step sizes: Sharifnassab-Salehkaleybar-Sutton 2024 ([2402.02342](docs/papers/MetaOptimize_StepSizes_2402.02342.pdf))
+- MetaOptimize per-feature step sizes: Sharifnassab-Salehkaleybar-Sutton 2024 ([2402.02342](docs/papers/MetaOptimize_StepSizes_2402.02342.pdf)). Treat this as the controlling source for `alpha/beta/h/gradEnergy`; IDBD/Autostep are historical special cases, not the implementation target.
 - Big World Hypothesis: [2512.23419](docs/papers/WorldIsBigger_ComputationallyEmbeddedBWH_2512.23419.pdf)
 - Three Dogmas of RL: [2407.10583](docs/papers/ThreeDogmasRL_2407.10583.pdf)
 - Prioritized sweeping (Plan Step 9, Plan footnote 13): Moore-Atkeson 1993 (*Machine Learning* 13(1):103–130), Peng-Williams 1993 (*Adaptive Behavior* 1(4):437–454), Sutton-Szepesvári-Geramifard-Bowling 2008 (UAI). Tier D2 uses chord-weighted L2 of model TD error as the per-option priority signal.
