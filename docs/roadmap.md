@@ -64,10 +64,10 @@ that terminal value with a plain feature bonus is rejected by the primary paper.
 | Feature finding | Partial live | Constructed features use signed product, signed sum, and parent-gated residual forms with parent utility/decorrelation diagnostics. Replacement is still young and needs long-run evidence. |
 | Off-policy floors | Accepted | `max(chord,1/K)` floors are removed from live learning. Wrapper emits exact one-step ratios from behavior-option sampling; ratio diagnostics are live. |
 | Average-reward option values | Accepted | `optValue[K*R]` is live. Using `optValueTd` directly in the actor was tested in `rebuild-smoke-10k-policytd` and rejected: policy deltas became infinite before 10k. |
-| Explicit average-reward GVFs | Partial live | `gvfRate` and `gvfValue` are live for a compact anchor-sized auxiliary bank. They are diagnostics only until paired evidence promotes them into replacement utility. |
+| Explicit average-reward GVFs | Live, screening | `gvfRate` and `gvfValue` now cover `G=R+K+3` state, reward, action-energy, termination, and model-residual cumulants with explicit rate/value separation. GVF utility is live in replacement/basis diagnostics, but not in reward or primitive actor shortcuts. |
 | True keyboard | Partial live | `psiCross[K*K*R]` is live with dense internal λ and cached/pagewise GPE scores. Behavior still executes one selected option for exact one-step importance ratios; chord-descriptor option models remain future work. |
-| One-step model | Shadow live | `oneReward` and `oneTransition` learn shadow predictions and report value-weighted diagnostics, but do not drive planning or replacement. |
-| Search control | Partial live | If K fits one SIMD page, planning covers the full bank. Larger banks use named high-priority, stalest, and diagnostic/coverage slots. Full state-search remains open. |
+| One-step model | Partial live | `oneReward[0:R]` is the live reward-cumulant descriptor for the signed keyboard. `oneTransition` remains deep-diagnostic shadow state and does not drive planning or replacement. |
+| Search control | Partial live | If K fits one SIMD page, planning covers the full bank. Larger banks use a fair prioritized-sweeping page path by expected model improvement plus stale-page coverage. Full state-search remains open. |
 | Continuing testbeds | Deferred by scope | A temporary toy-env attempt was removed because it introduced hand-coded dynamics constants. Add real research-backed continuing wrappers only as separate env-layer work, never inside OaK. |
 | Step 12 / IA | Deferred | Out of scope until Step 11 earns promotion. |
 
@@ -109,16 +109,93 @@ Next-wave evidence so far:
   Reward-rate remains negative (`-0.009296`), so this is architecture evidence,
   not promotion evidence.
 
+Research-correct collapse-repair evidence (live branch after the April 2026
+review):
+
+- MetaOptimize is the controlling source for per-feature step sizes, not raw
+  IDBD. The live `alpha/beta/h/gradEnergy` path should be understood as a
+  low-complexity MetaOptimize L/Hessian-free approximation over feature blocks:
+  the base update is the ordinary linear TD step, `h` tracks the causal
+  sensitivity trace, and `gradEnergy` provides a structural RMS-style meta
+  normalization. IDBD is only a special case/approximation inside
+  MetaOptimize, per arXiv:2402.02342v6.
+- `research-correct-stats-sparse-10k-hb`: seed-0 HalfCheetah, rebuilt Metal and
+  Swift, NF zero, `3022` SPS with normal heartbeats, reward `-90.424`,
+  `actorUpdateEss=0.621`, `actorSupportEntropy=0.999`, calm score/action
+  (`scoreGradL2Mean=1.003`, `actionDeltaL2Mean=0.0249`). Stats are now sampled
+  on heartbeat/final only; OaK learning still runs every step.
+- `research-correct-stats-sparse-10seed-100k`: 10 paired seeds, Oak beats random
+  `10/10`, NF zero `10/10`, mean Oak `-767.19` versus random `-26423.56`, final
+  reward-rate positive `5/10`, but final-10k reward slope positive `0/10`.
+  Support is stable (`actorUpdateEss` mean `0.573`, option-support entropy mean
+  `0.987`), score/action stay calm, and replacement remains zero.
+- `research-correct-stats-sparse-10seed-300k`: 10 paired seeds, Oak beats random
+  `10/10`, NF zero `10/10`, mean Oak `-2358.92` versus random `-79297.35`.
+  The old collapse signature is largely repaired: no score/action runaway,
+  no replacement churn, no systematic one-option floor (`actorUpdateEss` mean
+  `0.560`, entropy mean `0.974`). It is not promotion evidence because final
+  reward-rate is positive only `1/10` and final-50k slope is positive `0/10`.
+- `research-correct-current-10seed-100k`: rebuilt current source after fixing
+  `rhoOpt` to use the current-step implicit denominator. Oak beats random
+  `10/10`, NF zero, mean Oak `-764.73` versus random `-26423.56`, positive
+  final reward-rate `5/10`, but final-10k slope `0/10`. Full heartbeat metrics
+  show calm score/action and zero replacement, but RR/psi magnitudes remain very
+  large and actor updates are conservative.
+- `research-correct-current-10seed-300k`: current source, 10 paired seeds. Oak
+  beats random `10/10`, NF zero, mean Oak `-2517.45` versus random
+  `-79297.35`, positive final reward-rate `1/10`, final-10k and final-50k slope
+  `0/10`. This is not promotion evidence: seed 1 reaches the one-option support
+  floor by 300k (`actorUpdateEss≈0.042`, entropy≈0.010), basis use collapses on
+  two seeds, and RR/psi/keyboard margins remain too large despite calm
+  primitive action statistics.
+- `research-correct-rhoopt-rate-10seed-100k` and
+  `research-correct-rhoopt-rate-10seed-300k`: removing the extra implicit
+  denominator from the live `rhoOpt` rate update was more literal to the latest
+  plan text and reduced RR/psi scale. It improved over the denominator-order
+  branch at 100k/300k (`-738.66` mean at 100k; `-2401.29` mean at 300k) but did
+  not beat the best stabilized pre-denominator evidence (`-2358.92` mean at
+  300k), and seed support still touched the floor. Do not promote it as keeper
+  until it beats the best known long-horizon reward/support evidence.
+- `research-correct-cowfix-speed-50k`: host hot-path COW fix for importance
+  arrays restored the single-stream speed guard without changing seed-0
+  trajectory (`-403.083914` reward, NF zero, `3015` SPS versus `2964` before the
+  fix). This is a zero-intelligence-hit efficiency fix.
+- `research-correct-metaopt-hdecay-50k`: rejected as an isolated per-feature
+  MetaOptimize 2x2/diagonal-curvature experiment. It was NF-clean and slightly
+  improved seed-0 reward (`-393.51`), but it missed the speed guard (`2968` SPS)
+  and increased RR/psi scale (`rrBonusMean≈27779`, `psiAbsMean≈8610`). The next
+  MetaOptimize repair should use the paper's lower-complexity framework more
+  carefully, not revive this diagonal-curvature trace unchanged. This does not
+  demote MetaOptimize: the live per-feature step-size path remains part of the
+  architecture and should be strengthened from MetaOptimize, not replaced by raw
+  IDBD/Autostep or removed.
+- `research-correct-restored-speed-50k`: final current source restored to the
+  best-known long-horizon `rhoOpt` behavior while keeping the host COW speed fix,
+  rebuilt Metal/Swift. Seed-0 HalfCheetah is over the speed guard (`3011` SPS),
+  NF zero, and matches the stabilized reward trajectory (`-404.064262` at 50k).
+  The long-horizon comparison for this math remains
+  `research-correct-stats-sparse-10seed-100k` / `300k`; the COW fix is a
+  hot-path copy change and does not alter learning.
+- `research-correct-actornorm-10k`: rejected immediately. The square-root actor
+  normalization produced NF zero but one-option floor from heartbeat 1, enormous
+  score/action magnitudes, reward `-5997`, and `2877` SPS.
+- `research-correct-valueimplicit-10k`: rejected immediately. Adding an
+  implicit denominator to the main value update fixed RR/psi magnitudes
+  (`rrBonusMean=10.85`, `psiAbsMean=10.25`) but collapsed option support
+  (`actorUpdateEss=0.0417`, entropy `0.0021`) and fell below the 3k guard.
+  Keep the live value path unchanged until a broader RR-bonus/meta-learning
+  repair is available.
+
 Collapse-repair baseline truth table:
 
 | Review claim / subsystem | Current keeper truth | Next action |
 |---|---|---|
-| Actor update scope | The keeper already updates every option policy every step in `oak_learn_heads`: `optPolicy += alphaPi * alphaRelevance * importance[k] * tdPsi[k] * scoreGrad[d] * prev[i]`. It is not a selected-only actor. | Do not revive selected-only actor or target-option score gradients as the next actor path. Add actor support/update diagnostics first. |
-| Target-option actor gradients | Raw target-option scores and Fisher/natural target scores were tested and reverted (`review-response-50k-natural-133322`, `review-response-50k-fisher-133540`). | Rejected until a fuller actor-critic derivation changes more than the score source. |
+| Actor update scope | The keeper and current branch update every option policy every step in `oak_learn_heads`; it is not a selected-only actor. The current branch uses exact wrapper target-option score gradients plus structural per-option actor-energy normalization. | Do not revive selected-only actor, ESS throttles, or direct main-TD primitive actor shortcuts. |
+| Target-option actor gradients | Raw target-option scores and Fisher/natural target scores failed in isolation (`review-response-50k-natural-133322`, `review-response-50k-fisher-133540`). Exact wrapper target gradients became live only after adding structural actor-energy normalization; this preserved 300k support but made the actor conservative. | Keep the integrated version for long-horizon diagnosis; next actor work should address conservative negative slope without returning to runaway updates. |
 | Global `rho` | Global average reward remains the live control/model-planning rate: `Q = rHat - rho*lHat + V(nHat)`. | Keep live; compare against shadow per-option control rates before any behavior change. |
-| `rhoOpt` status | The old arena slot is now used as shadow `rhoQ[k]` for per-option control-rate diagnostics only. It does not drive `optValue`, `psi`, actor, or model planning. | Promote only if 50k/300k shadow agreement shows global `rho` is the collapse cause. |
-| λ formula | Live behavior still uses the keeper's dense nonnegative plan/RR/utility λ and holds the current component option while RR continuation says continue. | Formal signed `lambdaReward` and `lambdaTask` are shadow GPE/GPI diagnostics only. Utility stays out of the formal keyboard. |
-| GVF coverage | The compact keeper GVF head remains live because replacement had learned around its cumulants. A separate expanded shadow GVF bank now reports `G=R+K+3` state/reward/action/termination/model-residual cumulants with explicit rate/value separation. | Use expanded GVFs for diagnostics and future replacement evidence only; do not alter live replacement until parity and 300k support evidence exist. |
+| `rhoOpt` status | `rhoOpt[k]` is live for option-value centering (`reward-rhoOpt[k]`) and resets with the option identity. Global `rho` still drives main value, RR `psi`, and model backup. | Do not put per-option rates into model backup or RR `psi` until option-value evidence is positive at 300k. |
+| λ formula | Live behavior uses formal signed cumulant-space Design-A GPE/GPI: `lambda=signed_L1(oneReward[0:R])`, fallback `signed_L1(valueW)`, then uniform. Utility is not in lambda. | Chord-descriptor option models and Design B remain deferred. |
+| GVF coverage | Expanded `G=R+K+3` state/reward/action/termination/model-residual GVFs are live by default with explicit rate/value separation. GVF utility feeds replacement/basis diagnostics, not reward or primitive actor shortcuts. | Keep the expanded bank live; the next evidence question is whether GVF utility can improve feature replacement without suppressing the positive window. |
 | Replacement behavior | Live age/capacity-gated replacement is unchanged. New persistent `badFeatureAge` and `replacementWouldCommitRate` are shadows. | Test a live commit gate only after 50k preservation and better 300k support diagnostics. |
 | Search control behavior | When `K <= pageWidth`, HalfCheetah still plans the full option bank. For larger `K`, the model page path now selects a fair prioritized-sweeping page by expected model improvement with structural stale-page coverage. | Promote page scheduler by evidence on larger `K`; HalfCheetah behavior is unchanged. |
 
