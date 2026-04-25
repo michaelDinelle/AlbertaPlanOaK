@@ -122,10 +122,8 @@ enum ActionTransducer {
                     for d in 0..<a {
                         let z = nextNormal(&rngState)
                         let mu = policyMean[mBase + pIdx + d]
-                        let rawLogSigma = policyMean[mBase + scaleBase + d]
-                        let logSigma = rawLogSigma.isFinite ? rawLogSigma : 0
-                        let sigmaRaw = sigmaBase * exp(logSigma)
-                        let sigma = (sigmaRaw.isFinite && sigmaRaw > 0) ? sigmaRaw : sigmaBase
+                        let logSigma = policyMean[mBase + scaleBase + d]
+                        let sigma = sigmaBase * exp(logSigma)
                         let raw = mu + sigma * z
                         let clamped = max(low[d], min(high[d], raw.isFinite ? raw : 0))
                         envAction[aBase + aIdx + d] = clamped
@@ -133,19 +131,19 @@ enum ActionTransducer {
                         actionSignal[mBase + scaleBase + d] = 0
                         scoreGrad[mBase + pIdx + d] = z * sigma
                         scoreGrad[mBase + scaleBase + d] = z * z - 1.0
-                        behaviorLogProb += -log(max(sigma, .leastNormalMagnitude)) - 0.5 * z * z
+                        behaviorLogProb += (sigma.isFinite && sigma > 0)
+                            ? (-log(sigma) - 0.5 * z * z)
+                            : Float.nan
                         if let opt = optionPolicyMean {
                             for k in 0..<optionCount {
                                 let base = (r * optionCount + k) * dPolicy
                                 let optMu = opt[base + pIdx + d]
-                                let optRawLogSigma = opt[base + scaleBase + d]
-                                let optLogSigma = optRawLogSigma.isFinite ? optRawLogSigma : 0
-                                let optSigmaRaw = sigmaBase * exp(optLogSigma)
-                                let optSigma = (optSigmaRaw.isFinite && optSigmaRaw > 0)
-                                    ? optSigmaRaw : sigmaBase
-                                let oz = (raw - optMu) / max(optSigma, .leastNormalMagnitude)
-                                optionLogProbScratch?[r * optionCount + k] +=
-                                    -log(max(optSigma, .leastNormalMagnitude)) - 0.5 * oz * oz
+                                let optLogSigma = opt[base + scaleBase + d]
+                                let optSigma = sigmaBase * exp(optLogSigma)
+                                let oz = (optSigma.isFinite && optSigma > 0) ? ((raw - optMu) / optSigma) : Float.nan
+                                optionLogProbScratch?[r * optionCount + k] += (optSigma.isFinite && optSigma > 0)
+                                    ? (-log(optSigma) - 0.5 * oz * oz)
+                                    : Float.nan
                                 if let osg = optionScoreGrad {
                                     osg[base + pIdx + d] = oz * optSigma
                                     osg[base + scaleBase + d] = oz * oz - 1.0
@@ -163,8 +161,8 @@ enum ActionTransducer {
                         : (optionLogProbScratch?[r * optionCount + k] ?? behaviorLogProb)
                     let logRho = lp - behaviorLogProb
                     let rho = exp(logRho)
-                    importance?[r * optionCount + k] = rho.isFinite ? rho : 0
-                    importanceLog?[r * optionCount + k] = logRho.isFinite ? logRho : 0
+                    importance?[r * optionCount + k] = rho
+                    importanceLog?[r * optionCount + k] = logRho
                 }
             }
         }
