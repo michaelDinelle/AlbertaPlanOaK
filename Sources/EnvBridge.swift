@@ -136,7 +136,6 @@ final class EnvPoolEnv {
     let envActionWidth: Int
     private(set) var envActionScratch: [Float]
     private(set) var actionSignalScratch: [Float]
-    private(set) var scoreGradScratch: [Float]
     private(set) var optionScoreGradScratch: [Float]
     private(set) var importanceScratch: [Float]
     private var optionLogProbScratch: [Float]
@@ -162,7 +161,6 @@ final class EnvPoolEnv {
         doneScratch = Array(repeating: 0, count: 1)
         envActionScratch  = Array(repeating: 0, count: envActionWidth)
         actionSignalScratch = Array(repeating: 0, count: dPolicy)
-        scoreGradScratch  = Array(repeating: 0, count: dPolicy)
         optionScoreGradScratch = []
         importanceScratch = []
         optionLogProbScratch = []
@@ -197,8 +195,8 @@ final class EnvPoolEnv {
         }
     }
 
-    // Wrapper-owned sampling + scoreGrad. Reads policyMean[B · dPolicy], samples per-component,
-    // writes envActionScratch + actionSignalScratch + scoreGradScratch, dispatches to the appropriate bridge step
+    // Wrapper-owned sampling and option score functions. Reads policyMean[B · dPolicy],
+    // writes envActionScratch + actionSignalScratch, dispatches to the appropriate bridge step
     // function. This is the SOLE site that knows the env's action-space type — Inv-1 boundary.
     func sampleAndStep(policy: PolicyMeanBatch) throws {
         let policyMean = policy.values
@@ -208,38 +206,34 @@ final class EnvPoolEnv {
         policyMean.withUnsafeBufferPointer { pmBuf in
             envActionScratch.withUnsafeMutableBufferPointer { aBuf in
                 actionSignalScratch.withUnsafeMutableBufferPointer { actBuf in
-                    scoreGradScratch.withUnsafeMutableBufferPointer { sgBuf in
-                        optionScoreGradScratch.withUnsafeMutableBufferPointer { osgBuf in
-                            importanceScratch.withUnsafeMutableBufferPointer { impBuf in
-                                optionLogProbScratch.withUnsafeMutableBufferPointer { optLogBuf in
-                                    if let optionValues = policy.optionValues {
-                                        optionValues.withUnsafeBufferPointer { optBuf in
-                                            ActionTransducer.sampleAndScore(
-                                                spec: actionSpec, dPolicy: dPolicy, envActionWidth: envActionWidth,
-                                                policyMean: pmBuf.baseAddress!,
-                                                optionPolicyMean: optBuf.baseAddress,
-                                                optionCount: optionCount,
-                                                envAction: aBuf.baseAddress!,
-                                                actionSignal: actBuf.baseAddress!,
-                                                scoreGrad: sgBuf.baseAddress!,
-                                                optionScoreGrad: osgBuf.baseAddress,
-                                                importance: impBuf.baseAddress,
-                                                optionLogProbScratch: optLogBuf.baseAddress,
-                                                rngState: &rngState)
-                                        }
-                                    } else {
+                    optionScoreGradScratch.withUnsafeMutableBufferPointer { osgBuf in
+                        importanceScratch.withUnsafeMutableBufferPointer { impBuf in
+                            optionLogProbScratch.withUnsafeMutableBufferPointer { optLogBuf in
+                                if let optionValues = policy.optionValues {
+                                    optionValues.withUnsafeBufferPointer { optBuf in
                                         ActionTransducer.sampleAndScore(
                                             spec: actionSpec, dPolicy: dPolicy, envActionWidth: envActionWidth,
                                             policyMean: pmBuf.baseAddress!,
-                                            optionPolicyMean: nil, optionCount: 0,
+                                            optionPolicyMean: optBuf.baseAddress,
+                                            optionCount: optionCount,
                                             envAction: aBuf.baseAddress!,
                                             actionSignal: actBuf.baseAddress!,
-                                            scoreGrad: sgBuf.baseAddress!,
-                                            optionScoreGrad: nil,
-                                            importance: nil,
-                                            optionLogProbScratch: nil,
+                                            optionScoreGrad: osgBuf.baseAddress,
+                                            importance: impBuf.baseAddress,
+                                            optionLogProbScratch: optLogBuf.baseAddress,
                                             rngState: &rngState)
                                     }
+                                } else {
+                                    ActionTransducer.sampleAndScore(
+                                        spec: actionSpec, dPolicy: dPolicy, envActionWidth: envActionWidth,
+                                        policyMean: pmBuf.baseAddress!,
+                                        optionPolicyMean: nil, optionCount: 0,
+                                        envAction: aBuf.baseAddress!,
+                                        actionSignal: actBuf.baseAddress!,
+                                        optionScoreGrad: nil,
+                                        importance: nil,
+                                        optionLogProbScratch: nil,
+                                        rngState: &rngState)
                                 }
                             }
                         }

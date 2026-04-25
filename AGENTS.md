@@ -85,23 +85,22 @@ The agent is a focused-kernel single-stream Oak prototype over the Plan steps. K
 | `optTransition` | K · R · R | K dense stopping-aware transition models `n̂^k_j(s) = Σ_i w^k_{j,i}·s[i]`. |
 | `optDuration` | K · R | K average-reward option-duration models l̂^k with a structural one-step lower bound at decode. |
 | `oneReward` | R | Live reward-cumulant descriptor used by the signed Option Keyboard λ and updated every step. |
-| `gvfRate`, `gvfValue` | `(R + K + 2)`, `(R + K + 2) · R` | Average-reward GVF bank over state-feature, centered-reward, action-energy, and termination cumulants with explicit cumulant-rate and differential-value separation. GVFs are predictive diagnostics only until their scale earns replacement/control use. |
 
 State representation is a finite adaptive predictive state, not a full reconstruction of the world: direct normalized experience channels (observation coordinates, multi-timescale observation traces, previous abstract action descriptor, previous reward, and an affine channel) plus constructed feature slots. Deep Fourier, random Fourier, and random-projection encoders are optional experimental modes, not Alberta Plan law. Constructed slots remain replaceable signed products/sums/residuals of useful parents. Plasticity is driven by MetaOptimize-style `alpha/beta/h/gradEnergy` families plus age/utility replacement; raw IDBD/Autostep are historical relatives, not the implementation target.
 
-### Pipeline (5 Metal dispatches per step, direct command encoding)
+### Pipeline (6 Metal dispatches per step, direct command encoding)
 
 ```
-oak_encode(+keyboard_predict) → oak_plan → oak_plan_reduce → oak_learn_heads → oak_replace(+action_emit)
+oak_encode(+keyboard_predict) → oak_plan → oak_plan_reduce → oak_learn_heads → oak_replace → oak_action_emit
 ```
 
 | Kernel | What it does |
 |---|---|
-| `oak_encode` | Updates observation/traces, builds normalized anchor/constructed state features, then runs keyboard/prediction: value TD, average-reward GVF TDs, RR subtask TD, RR continuation, signed cumulant-space λ, and Design-A GPI behavior selection. |
+| `oak_encode` | Updates observation/traces, builds normalized anchor/constructed state features, then runs keyboard/prediction: value TD, RR subtask TD, RR continuation, signed cumulant-space λ, and Design-A GPI behavior selection. |
 | `oak_plan` | Updates the scheduled option page/slots' stopping-aware model TDs, duration TDs, raw-reward option model, and the one-step reward descriptor TD. |
 | `oak_plan_reduce` | Reduces model Q/priority and selects high-priority/stale model pages for fair search control. When K fits one SIMD page, the whole option bank is planned. |
-| `oak_learn_heads` | Updates value, average-reward GVFs, psi, psiCross, option policy, option reward/transition/duration, and the one-step reward descriptor using exact one-step ratios and wrapper-provided target-option score gradients. |
-| `oak_replace` | Emits all option policy means across multiple action-emission threadgroups while threadgroup 0 runs utility/meta-learning diagnostics and commits age/capacity-gated feature/option-bundle replacements. |
+| `oak_learn_heads` | Updates value, psi, psiCross, option policy, option reward/transition/duration, and the one-step reward descriptor using exact one-step ratios and wrapper-provided target-option score gradients. |
+| `oak_replace` → `oak_action_emit` | Commits utility/meta-learning diagnostics and age/capacity-gated replacements, then emits all option policy means after a dispatch boundary so action emission cannot race replacement writes. |
 
 ### Action interface (Inv-1)
 
@@ -109,15 +108,15 @@ Each env declares a structured action spec — a list of components, each `Discr
 
 The agent emits `policyMean[D_policy]` from `oak_meta_action`. The env-wrapper layer (`EnvPoolEnv.sampleAndStep`) is the **sole** site that samples actions and computes score functions:
 
-- Discrete N: Gumbel-max categorical (`-log(-log(U))` + argmax); scoreGrad = `1{a=d} − π_d` (Maddison 2014; Williams 1992).
-- Box A: currently exposes `2A` policy coordinates to keep `D_policy`, default rank, and K stable. The first A coordinates are means; the second A coordinates are wrapper-reserved/inert. The wrapper samples with structural fixed `σ = 1/D_policy`, emits natural-gradient-style mean credit (`raw − μ`) for Box mean slots, writes zero score/action-signal entries for reserved scale slots, and clamps only the env-facing action. Full `D_policy = A` mean-only deletion remains a separate evidence-gated cleanup.
+- Discrete N: Gumbel-max categorical (`-log(-log(U))` + argmax); target-option actor scores use `1{a=d} − π_d` (Maddison 2014; Williams 1992).
+- Box A: currently exposes `2A` policy coordinates to keep `D_policy`, default rank, and K stable. The first A coordinates are means; the second A coordinates are wrapper-reserved/inert. The wrapper samples with structural fixed `σ = 1/D_policy`, emits residual-style mean credit (`raw − μ`) for Box mean slots, writes zero score/action-signal entries for reserved scale slots, and clamps only the env-facing action. Full `D_policy = A` mean-only deletion failed the 1M gate and remains rejected unless a different actor geometry earns fresh evidence.
 
 Adding a new env or action-space component type requires adding to `ActionComponent` in Swift; no agent or kernel changes.
 `doneCount` is a wrapper random-restart metric, not an episode signal to OaK; the engine state is never reset on `done`.
 
 ## Run metrics JSON
 
-Each `run`, `diagnose`, and `benchmark` writes one pretty-printed JSON file with stable alphabetical key order (`schemaVersion: 3`).
+Each `run`, `diagnose`, and `benchmark` writes one pretty-printed JSON file with stable alphabetical key order (`schemaVersion: 4`).
 
 **Top-level keys:** `command`, `envId`, `policy`, `seed`, `numEnvs` (always 1 — single-stream), `stopAfterMeasuredSteps`, `observationDim`, `actionDim`, `actionDiscreteCount` (when discrete), `measuredStepCount`, `measuredSeconds`, `stepsPerSecond`, `rewardSum`, `doneCount`, `stopReason`, `health`, `diagnostic` (only with `--diag` or for heartbeats).
 
@@ -125,7 +124,6 @@ Each `run`, `diagnose`, and `benchmark` writes one pretty-printed JSON file with
 
 - `rewardRate` — host-tracked ρ̄ via incremental EMA (Reward Centering).
 - `actionDeltaL2Mean` — mean L2 of consecutive `policyMean` deltas.
-- `scoreGradL2Mean` — mean L2 of `scoreGrad`.
 - `continuingRestartCount` — mirror of wrapper `doneCount`, named to make clear that terminal events are random restarts outside the agent.
 
 Kernel-side fields are populated only for `oak`:
@@ -133,7 +131,7 @@ Kernel-side fields are populated only for `oak`:
 - `oakOptionReinitCountFinal`, `oakFeatureReinitCountFinal` — cumulative age-gated generate-and-test replacement counts.
 - `nonFiniteByPhase` = `{"encode": N, "learn": N, "plan": N, "tdPsi": N}` — per-phase NF counts. **Healthy = all zeros across the run.**
 - Search/replacement diagnostics: `modelPriorityMax`.
-- GVF/keyboard diagnostics: `gvfTdMean`, `lambdaEffectiveRank`.
+- Keyboard diagnostics: `lambdaEffectiveRank`.
 - Actor/support diagnostics: `actorUpdateNormMean`, `actorTdMean`, `actorSupportEntropy`.
 
 **Storage.** Default directory `.oak-benchmarks/<run-id>/`, with `<run-root>/<envId>/seed<N>/<stem>.json` for finals and `<stem>.heartbeat-NNNNNN.json` for pulses. Override the run root with `OAK_METRICS_STORAGE`.
@@ -144,7 +142,7 @@ Kernel-side fields are populated only for `oak`:
 |---|---|
 | `OaK run <env-id>` | Long single-env run with heartbeats. `OAK_STOP_AFTER_STEPS` controls measured-window length. |
 | `OaK diagnose <env-id> [--policy oak\|random] [--steps N]` | Short timed run with `diagnostic` block (per-phase GPU timings). |
-| `OaK benchmark` | Concurrent single-env multi-seed sweep. Each item runs in its own worker process so native env/global state cannot leak across independent streams. `OAK_BENCH_ENV` selects the env (default `HalfCheetah-v4`); `OAK_BENCH_STEPS`, `OAK_BENCH_SEED_COUNT`, `OAK_BENCH_POLICIES`, `OAK_BENCH_CONCURRENCY` (default 8). |
+| `OaK benchmark` | Concurrent single-env multi-seed sweep. Each item runs in its own worker process so native env/global state cannot leak across independent streams. `OAK_BENCH_ENV` selects the env (default `HalfCheetah-v4`); `OAK_BENCH_STEPS`, `OAK_BENCH_SEED_COUNT`, `OAK_BENCH_POLICIES`, `OAK_BENCH_CONCURRENCY` (default/max = all logical cores; accepts `auto`/`max`). One benchmark launcher owns the workspace at a time; nonempty requested roots get a fresh suffixed output dir, and finished worker slots are refilled deterministically from the canonical work list. |
 
 There is no deep-diagnostics shadow path in the live engine. Add audit heads only when they earn a Plan role and pass the same speed/learning gates as behavior code.
 
