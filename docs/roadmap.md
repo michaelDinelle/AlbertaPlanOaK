@@ -259,7 +259,7 @@ Collapse-repair baseline truth table:
 | `rhoOpt` status | Removed from the live keeper with `optValue`; global `rho` drives main value, RR `psi`, and model backup. | Reintroduce only with a separately justified option-value branch that passes 300k/1M support gates. |
 | λ formula | Live behavior uses formal signed cumulant-space Design-A GPE/GPI: `lambda=signed_L1(oneReward[0:R])`, fallback `signed_L1(valueW)`, then uniform. Utility is not in lambda. | Chord-descriptor option models and Design B remain deferred. |
 | GVF coverage | `G=R+K+2` state/reward/action/termination GVFs are live with explicit rate/value separation. GVF utility was deleted from replacement/basis diagnostics after it produced finite but meaningless scale spikes. | Keep GVFs predictive-only until their scale is stable and useful enough to earn a live Step-11 feedback role. |
-| Replacement behavior | Live age/capacity-gated replacement is unchanged. New persistent `badFeatureAge` and `replacementWouldCommitRate` are shadows. | Test a live commit gate only after 50k preservation and better 300k support diagnostics. |
+| Replacement behavior | Live age/capacity-gated replacement remains, but shadow replacement metrics and pseudo-basis usage caches were removed from the public/current surface. `badFeatureAge` is internal replacement state, not a reported shadow head. | Next replacement work must simplify or replace the actual generate-and-test rule, not add more audit-only counters. |
 | Search control behavior | When `K <= pageWidth`, HalfCheetah still plans the full option bank. For larger `K`, the model page path now selects a fair prioritized-sweeping page by expected model improvement with structural stale-page coverage. | Promote page scheduler by evidence on larger `K`; HalfCheetah behavior is unchanged. |
 
 Unearned-scale cleanup evidence:
@@ -274,9 +274,14 @@ Unearned-scale cleanup evidence:
   `3321.865` SPS, reward `-5764.547`, ESS `0.998883`, actor support entropy
   `0.999827`, no feature replacements, and `gvfTdMean=1.88e-8`. This improves
   the previous cleanup 1M seed-0 reward (`-5869.005`) while preserving the
-  3k+ SPS guard. Remaining cleanup target: duration/model scale growth
-  (`optionDurationMean=302657.875`, `planningBackupTdMean=5179.794`) without
-  actor/support collapse.
+  3k+ SPS guard.
+- `deslop-planningring-bulk-10seed-100k`: removed stale keyboard/replacement/
+  basis audit metrics, the pseudo-basis usage cache, and the recent-state
+  planning backup/q-cache surface. HalfCheetah 10 seeds x `{oak,random}` stayed
+  NF-zero, beat random `10/10`, improved mean Oak reward slightly to `-585.032`,
+  kept min ESS/support high (`0.995978` / `0.999357`), and raised concurrent SPS
+  to `2898.541`. This confirms the deleted planner backup surface was not a
+  live intelligence path.
 
 Collapse-repair smoke evidence:
 

@@ -56,23 +56,16 @@ struct RunHealth: Codable {
     let featureCorrMean: Double?
     let featureMaxCorr: Double?
     let featureEffectiveRank: Double?
-    let candidateSurvivalMean: Double?
-    let parentReuseEntropy: Double?
-    let utilityTransferMean: Double?
     let importanceLogMean: Double?
     let importanceLogVar: Double?
     let importanceEss: Double?
     let rhoValueTdMean: Double?
-    let keyboardGpiMargin: Double?
-    let keyboardSelectedOption: Double?
     let oneStepRewardTdMean: Double?
     let gvfCount: Double?
     let gvfRateMean: Double?
     let gvfTdMean: Double?
     let gvfDifferentialValueMean: Double?
     let lambdaEffectiveRank: Double?
-    let keyboardCacheCoverage: Double?
-    let keyboardScoreStaleness: Double?
     let actorUpdateNormMean: Double?
     let actorUpdateNormVar: Double?
     let actorTdMean: Double?
@@ -86,28 +79,6 @@ struct RunHealth: Codable {
     let modelPageMaxAge: Double?
     let modelPriorityMax: Double?
     let modelExpectedImprovementMean: Double?
-    let replacementWouldCommitRate: Double?
-    let badFeatureAgeMean: Double?
-    let badFeatureAgeMax: Double?
-    let replacementSurvivalMean: Double?
-    let actorUpdateEss: Double?
-    let basisEffectiveRank: Double?
-    let basisResidualCoverage: Double?
-    let basisUseEntropy: Double?
-    let planningStateQueueCoverage: Double?
-    let planningStateMaxAge: Double?
-    let planningBackupTdMean: Double?
-    let optionPlanningUseEntropy: Double?
-    let optionModelTerminalError: Double?
-    let durationNondegenerateRate: Double?
-    let encoderDirectCoverage: Double?
-    let primitiveReassignmentCount: Double?
-    let metaAlphaValueMean: Double?
-    let metaAlphaPsiMean: Double?
-    let metaGradientUtilityMean: Double?
-    let valueGaugeMean: Double?
-    let rrBonusGaugeMean: Double?
-    let rrBonusLeakCount: Double?
 }
 
 struct RunDiagnostic: Codable {
@@ -208,17 +179,14 @@ private struct HealthAccumulator {
     private var optionCountLatest = 0.0, optionPageCountLatest = 0.0
     private var linearAnchorCountLatest = 0.0, constructedFeatureCountLatest = 0.0
     private var featureCorrMeanLatest = 0.0, featureMaxCorrLatest = 0.0
-    private var featureEffectiveRankLatest = 0.0, candidateSurvivalMeanLatest = 0.0
-    private var parentReuseEntropyLatest = 0.0, utilityTransferMeanLatest = 0.0
+    private var featureEffectiveRankLatest = 0.0
     private var importanceLogMeanLatest = 0.0, importanceLogVarLatest = 0.0
     private var importanceEssLatest = 0.0
     private var rhoValueTdMeanLatest = 0.0
-    private var keyboardGpiMarginLatest = 0.0, keyboardSelectedOptionLatest = 0.0
     private var oneStepRewardTdMeanLatest = 0.0
     private var gvfCountLatest = 0.0, gvfRateMeanLatest = 0.0, gvfTdMeanLatest = 0.0
     private var gvfDifferentialValueMeanLatest = 0.0
     private var lambdaEffectiveRankLatest = 0.0
-    private var keyboardCacheCoverageLatest = 0.0, keyboardScoreStalenessLatest = 0.0
     private var actorUpdateNormMeanLatest = 0.0, actorUpdateNormVarLatest = 0.0
     private var actorTdMeanLatest = 0.0, actorImportanceWeightedTdMeanLatest = 0.0
     private var actorSupportEntropyLatest = 0.0
@@ -226,18 +194,6 @@ private struct HealthAccumulator {
     private var gvfTerminationTdMeanLatest = 0.0, gvfRewardTdMeanLatest = 0.0
     private var modelPageCoverageLatest = 0.0, modelPageMaxAgeLatest = 0.0
     private var modelPriorityMaxLatest = 0.0, modelExpectedImprovementMeanLatest = 0.0
-    private var replacementWouldCommitRateLatest = 0.0, badFeatureAgeMeanLatest = 0.0
-    private var badFeatureAgeMaxLatest = 0.0, replacementSurvivalMeanLatest = 0.0
-    private var actorUpdateEssLatest = 0.0
-    private var basisEffectiveRankLatest = 0.0, basisResidualCoverageLatest = 0.0, basisUseEntropyLatest = 0.0
-    private var planningStateQueueCoverageLatest = 0.0, planningStateMaxAgeLatest = 0.0
-    private var planningBackupTdMeanLatest = 0.0
-    private var optionPlanningUseEntropyLatest = 0.0, optionModelTerminalErrorLatest = 0.0
-    private var durationNondegenerateRateLatest = 0.0
-    private var encoderDirectCoverageLatest = 0.0, primitiveReassignmentCountLatest = 0.0
-    private var metaAlphaValueMeanLatest = 0.0, metaAlphaPsiMeanLatest = 0.0
-    private var metaGradientUtilityMeanLatest = 0.0
-    private var valueGaugeMeanLatest = 0.0, rrBonusGaugeMeanLatest = 0.0, rrBonusLeakCountLatest = 0.0
     private let trackFloor: Double
 
     init(obsDim: Int) { trackFloor = 1.0 / Double(max(obsDim, 1)) }
@@ -305,23 +261,16 @@ private struct HealthAccumulator {
         featureCorrMeanLatest = finite(stats.featureCorrMean)
         featureMaxCorrLatest = finite(stats.featureMaxCorr)
         featureEffectiveRankLatest = finite(stats.featureEffectiveRank)
-        candidateSurvivalMeanLatest = finite(stats.candidateSurvivalMean)
-        parentReuseEntropyLatest = finite(stats.parentReuseEntropy)
-        utilityTransferMeanLatest = finite(stats.utilityTransferMean)
         importanceLogMeanLatest = finite(stats.importanceLogMean)
         importanceLogVarLatest = finite(stats.importanceLogVar)
         importanceEssLatest = finite(stats.importanceEss)
         rhoValueTdMeanLatest = finite(stats.rhoValueTdMean)
-        keyboardGpiMarginLatest = finite(stats.keyboardGpiMargin)
-        keyboardSelectedOptionLatest = finite(stats.keyboardSelectedOption)
         oneStepRewardTdMeanLatest = finite(stats.oneStepRewardTdMean)
         gvfCountLatest = finite(stats.gvfCount)
         gvfRateMeanLatest = finite(stats.gvfRateMean)
         gvfTdMeanLatest = finite(stats.gvfTdMean)
         gvfDifferentialValueMeanLatest = finite(stats.gvfDifferentialValueMean)
         lambdaEffectiveRankLatest = finite(stats.lambdaEffectiveRank)
-        keyboardCacheCoverageLatest = finite(stats.keyboardCacheCoverage)
-        keyboardScoreStalenessLatest = finite(stats.keyboardScoreStaleness)
         actorUpdateNormMeanLatest = finite(stats.actorUpdateNormMean)
         actorUpdateNormVarLatest = finite(stats.actorUpdateNormVar)
         actorTdMeanLatest = finite(stats.actorTdMean)
@@ -335,28 +284,6 @@ private struct HealthAccumulator {
         modelPageMaxAgeLatest = finite(stats.modelPageMaxAge)
         modelPriorityMaxLatest = finite(stats.modelPriorityMax)
         modelExpectedImprovementMeanLatest = finite(stats.modelExpectedImprovementMean)
-        replacementWouldCommitRateLatest = finite(stats.replacementWouldCommitRate)
-        badFeatureAgeMeanLatest = finite(stats.badFeatureAgeMean)
-        badFeatureAgeMaxLatest = finite(stats.badFeatureAgeMax)
-        replacementSurvivalMeanLatest = finite(stats.replacementSurvivalMean)
-        actorUpdateEssLatest = finite(stats.actorUpdateEss)
-        basisEffectiveRankLatest = finite(stats.basisEffectiveRank)
-        basisResidualCoverageLatest = finite(stats.basisResidualCoverage)
-        basisUseEntropyLatest = finite(stats.basisUseEntropy)
-        planningStateQueueCoverageLatest = finite(stats.planningStateQueueCoverage)
-        planningStateMaxAgeLatest = finite(stats.planningStateMaxAge)
-        planningBackupTdMeanLatest = finite(stats.planningBackupTdMean)
-        optionPlanningUseEntropyLatest = finite(stats.optionPlanningUseEntropy)
-        optionModelTerminalErrorLatest = finite(stats.optionModelTerminalError)
-        durationNondegenerateRateLatest = finite(stats.durationNondegenerateRate)
-        encoderDirectCoverageLatest = finite(stats.encoderDirectCoverage)
-        primitiveReassignmentCountLatest = finite(stats.primitiveReassignmentCount)
-        metaAlphaValueMeanLatest = finite(stats.metaAlphaValueMean)
-        metaAlphaPsiMeanLatest = finite(stats.metaAlphaPsiMean)
-        metaGradientUtilityMeanLatest = finite(stats.metaGradientUtilityMean)
-        valueGaugeMeanLatest = finite(stats.valueGaugeMean)
-        rrBonusGaugeMeanLatest = finite(stats.rrBonusGaugeMean)
-        rrBonusLeakCountLatest = finite(stats.rrBonusLeakCount)
     }
 
     var hasMeasuredSteps: Bool { envSteps > 0 }
@@ -399,23 +326,16 @@ private struct HealthAccumulator {
             featureCorrMean: kernelSteps > 0 ? featureCorrMeanLatest : nil,
             featureMaxCorr: kernelSteps > 0 ? featureMaxCorrLatest : nil,
             featureEffectiveRank: kernelSteps > 0 ? featureEffectiveRankLatest : nil,
-            candidateSurvivalMean: kernelSteps > 0 ? candidateSurvivalMeanLatest : nil,
-            parentReuseEntropy: kernelSteps > 0 ? parentReuseEntropyLatest : nil,
-            utilityTransferMean: kernelSteps > 0 ? utilityTransferMeanLatest : nil,
             importanceLogMean: kernelSteps > 0 ? importanceLogMeanLatest : nil,
             importanceLogVar: kernelSteps > 0 ? importanceLogVarLatest : nil,
             importanceEss: kernelSteps > 0 ? importanceEssLatest : nil,
             rhoValueTdMean: kernelSteps > 0 ? rhoValueTdMeanLatest : nil,
-            keyboardGpiMargin: kernelSteps > 0 ? keyboardGpiMarginLatest : nil,
-            keyboardSelectedOption: kernelSteps > 0 ? keyboardSelectedOptionLatest : nil,
             oneStepRewardTdMean: kernelSteps > 0 ? oneStepRewardTdMeanLatest : nil,
             gvfCount: kernelSteps > 0 ? gvfCountLatest : nil,
             gvfRateMean: kernelSteps > 0 ? gvfRateMeanLatest : nil,
             gvfTdMean: kernelSteps > 0 ? gvfTdMeanLatest : nil,
             gvfDifferentialValueMean: kernelSteps > 0 ? gvfDifferentialValueMeanLatest : nil,
             lambdaEffectiveRank: kernelSteps > 0 ? lambdaEffectiveRankLatest : nil,
-            keyboardCacheCoverage: kernelSteps > 0 ? keyboardCacheCoverageLatest : nil,
-            keyboardScoreStaleness: kernelSteps > 0 ? keyboardScoreStalenessLatest : nil,
             actorUpdateNormMean: kernelSteps > 0 ? actorUpdateNormMeanLatest : nil,
             actorUpdateNormVar: kernelSteps > 0 ? actorUpdateNormVarLatest : nil,
             actorTdMean: kernelSteps > 0 ? actorTdMeanLatest : nil,
@@ -428,29 +348,7 @@ private struct HealthAccumulator {
             modelPageCoverage: kernelSteps > 0 ? modelPageCoverageLatest : nil,
             modelPageMaxAge: kernelSteps > 0 ? modelPageMaxAgeLatest : nil,
             modelPriorityMax: kernelSteps > 0 ? modelPriorityMaxLatest : nil,
-            modelExpectedImprovementMean: kernelSteps > 0 ? modelExpectedImprovementMeanLatest : nil,
-            replacementWouldCommitRate: kernelSteps > 0 ? replacementWouldCommitRateLatest : nil,
-            badFeatureAgeMean: kernelSteps > 0 ? badFeatureAgeMeanLatest : nil,
-            badFeatureAgeMax: kernelSteps > 0 ? badFeatureAgeMaxLatest : nil,
-            replacementSurvivalMean: kernelSteps > 0 ? replacementSurvivalMeanLatest : nil,
-            actorUpdateEss: kernelSteps > 0 ? actorUpdateEssLatest : nil,
-            basisEffectiveRank: kernelSteps > 0 ? basisEffectiveRankLatest : nil,
-            basisResidualCoverage: kernelSteps > 0 ? basisResidualCoverageLatest : nil,
-            basisUseEntropy: kernelSteps > 0 ? basisUseEntropyLatest : nil,
-            planningStateQueueCoverage: kernelSteps > 0 ? planningStateQueueCoverageLatest : nil,
-            planningStateMaxAge: kernelSteps > 0 ? planningStateMaxAgeLatest : nil,
-            planningBackupTdMean: kernelSteps > 0 ? planningBackupTdMeanLatest : nil,
-            optionPlanningUseEntropy: kernelSteps > 0 ? optionPlanningUseEntropyLatest : nil,
-            optionModelTerminalError: kernelSteps > 0 ? optionModelTerminalErrorLatest : nil,
-            durationNondegenerateRate: kernelSteps > 0 ? durationNondegenerateRateLatest : nil,
-            encoderDirectCoverage: kernelSteps > 0 ? encoderDirectCoverageLatest : nil,
-            primitiveReassignmentCount: kernelSteps > 0 ? primitiveReassignmentCountLatest : nil,
-            metaAlphaValueMean: kernelSteps > 0 ? metaAlphaValueMeanLatest : nil,
-            metaAlphaPsiMean: kernelSteps > 0 ? metaAlphaPsiMeanLatest : nil,
-            metaGradientUtilityMean: kernelSteps > 0 ? metaGradientUtilityMeanLatest : nil,
-            valueGaugeMean: kernelSteps > 0 ? valueGaugeMeanLatest : nil,
-            rrBonusGaugeMean: kernelSteps > 0 ? rrBonusGaugeMeanLatest : nil,
-            rrBonusLeakCount: kernelSteps > 0 ? rrBonusLeakCountLatest : nil)
+            modelExpectedImprovementMean: kernelSteps > 0 ? modelExpectedImprovementMeanLatest : nil)
     }
 }
 
@@ -537,29 +435,25 @@ private struct KernelConfig {
     var sOneRewardTd: UInt32 = 0, sOneStepDenom: UInt32 = 0
     var sDurationTd: UInt32 = 0
     var sDurationHat: UInt32 = 0
-    var sQOption: UInt32 = 0     // Per-option Q^k cache (K floats), oak_plan → oak_plan_reduce.
     var sObsTraceMulti: UInt32 = 0  // Tier I1: (M−1)·baseO multi-timescale obs traces.
     var sPrioOpt: UInt32 = 0
     var sContinuation: UInt32 = 0 // RR-derived per-option continuation indicator/probability.
     var sLambda: UInt32 = 0, sKeyboardScore: UInt32 = 0
     var sGvfTd: UInt32 = 0, sFeatureTraceDenom: UInt32 = 0
     var sModelExpectedImprovement: UInt32 = 0, sModelDenom: UInt32 = 0
-    var sOptionPlanningUse: UInt32 = 0, sOptionModelError: UInt32 = 0, sOptionBasisUse: UInt32 = 0
-    var sPlanningStateRing: UInt32 = 0, sPlanningStatePriority: UInt32 = 0, sPlanningBackupTd: UInt32 = 0
-    var sReplacementAgeMean: UInt32 = 0, sReplacementWouldCommitRate: UInt32 = 0
-    var sValueGauge: UInt32 = 0, sPrimitiveReassignmentCount: UInt32 = 0
+    var sOptionPlanningUse: UInt32 = 0, sOptionModelError: UInt32 = 0
+    var sReplacementAgeMean: UInt32 = 0
+    var sValueGauge: UInt32 = 0
     var uCounters: UInt32 = 0
     var uOptFeature: UInt32 = 0
     var uFeatureAge: UInt32 = 0
     var uOptAge: UInt32 = 0
     var uFeatureEverUsed: UInt32 = 0
     var uFeatureParentA: UInt32 = 0, uFeatureParentB: UInt32 = 0, uFeatureKind: UInt32 = 0
-    var uFeatureBirthCount: UInt32 = 0, uParentUseCount: UInt32 = 0
+    var uFeatureBirthCount: UInt32 = 0
     var uSelectedOption: UInt32 = 0, uHighModelOption: UInt32 = 0
-    var uKeyboardAge: UInt32 = 0
     var uModelAge: UInt32 = 0
     var uGvfAge: UInt32 = 0, uBadFeatureAge: UInt32 = 0
-    var uPlanningStateAge: UInt32 = 0, uSelectedPlanState: UInt32 = 0
     var uPrimitiveChannel: UInt32 = 0
 }
 
@@ -591,15 +485,12 @@ struct KernelStats {
     var optionCount: Float = 0, optionPageCount: Float = 0
     var linearAnchorCount: Float = 0, constructedFeatureCount: Float = 0
     var featureCorrMean: Float = 0, featureMaxCorr: Float = 0, featureEffectiveRank: Float = 0
-    var candidateSurvivalMean: Float = 0, parentReuseEntropy: Float = 0, utilityTransferMean: Float = 0
     var importanceLogMean: Float = 0, importanceLogVar: Float = 0, importanceEss: Float = 0
     var rhoValueTdMean: Float = 0
-    var keyboardGpiMargin: Float = 0, keyboardSelectedOption: Float = 0
     var oneStepRewardTdMean: Float = 0
     var gvfCount: Float = 0, gvfRateMean: Float = 0, gvfTdMean: Float = 0
     var gvfDifferentialValueMean: Float = 0
     var lambdaEffectiveRank: Float = 0
-    var keyboardCacheCoverage: Float = 0, keyboardScoreStaleness: Float = 0
     var actorUpdateNormMean: Float = 0, actorUpdateNormVar: Float = 0
     var actorTdMean: Float = 0, actorImportanceWeightedTdMean: Float = 0
     var actorSupportEntropy: Float = 0
@@ -607,18 +498,6 @@ struct KernelStats {
     var gvfTerminationTdMean: Float = 0, gvfRewardTdMean: Float = 0
     var modelPageCoverage: Float = 0, modelPageMaxAge: Float = 0
     var modelPriorityMax: Float = 0, modelExpectedImprovementMean: Float = 0
-    var replacementWouldCommitRate: Float = 0, badFeatureAgeMean: Float = 0
-    var badFeatureAgeMax: Float = 0, replacementSurvivalMean: Float = 0
-    var actorUpdateEss: Float = 0
-    var basisEffectiveRank: Float = 0, basisResidualCoverage: Float = 0, basisUseEntropy: Float = 0
-    var planningStateQueueCoverage: Float = 0, planningStateMaxAge: Float = 0
-    var planningBackupTdMean: Float = 0
-    var optionPlanningUseEntropy: Float = 0, optionModelTerminalError: Float = 0
-    var durationNondegenerateRate: Float = 0
-    var encoderDirectCoverage: Float = 0, primitiveReassignmentCount: Float = 0
-    var metaAlphaValueMean: Float = 0, metaAlphaPsiMean: Float = 0
-    var metaGradientUtilityMean: Float = 0
-    var valueGaugeMean: Float = 0, rrBonusGaugeMean: Float = 0, rrBonusLeakCount: Float = 0
 }
 
 // =================================================================================================
@@ -717,17 +596,15 @@ private enum OakMetalLayout {
         let optionDiffTd, headDenom, crossTd: Int
         let oneRewardTd, oneStepDenom: Int
         let durationTd, durationHat: Int
-        let qOption: Int              // Per-option Q^k cache, K floats, oak_plan → oak_plan_reduce.
         let obsTraceMulti: Int        // Tier I1: (M−1)·baseO multi-timescale obs traces.
         let prioOpt: Int              // Tier D2: per-option priority for plan_reduce / Head 4.
         let continuation: Int          // RR-derived continuation, K floats.
         let lambda, keyboardScore: Int
         let gvfTd, featureTraceDenom: Int
         let modelExpectedImprovement, modelDenom: Int
-        let optionPlanningUse, optionModelError, optionBasisUse: Int
-        let planningStateRing, planningStatePriority, planningBackupTd: Int
-        let replacementAgeMean, replacementWouldCommitRate: Int
-        let valueGauge, primitiveReassignmentCount: Int
+        let optionPlanningUse, optionModelError: Int
+        let replacementAgeMean: Int
+        let valueGauge: Int
         let total: Int
     }
     static func stateLayout(obsDim: Int, baseObsDim: Int, rank: Int, dPolicy: Int) -> State {
@@ -780,7 +657,6 @@ private enum OakMetalLayout {
         let oneden = o; o += 1
         let dtd = o; o += K
         let dhat = o; o += K
-        let qo  = o; o += K
         // Tier I1: (M−1)·baseO non-instantaneous trace levels, τ_m = 2^m.
         let otr = o; o += max(M - 1, 0) * max(baseObsDim, 1)
         let prio = o; o += K
@@ -793,14 +669,8 @@ private enum OakMetalLayout {
         let modelDenom = o; o += K
         let planUse = o; o += K
         let modelErr = o; o += K
-        let basisUse = o; o += K
-        let stateRing = o; o += rank * rank
-        let statePrio = o; o += rank
-        let backupTd = o; o += 1
         let ram = o; o += 1
-        let rwcr = o; o += 1
         let vg = o; o += 1
-        let prc = o; o += 1
         return State(observation: obs, obsMean: mean, obsSM: osm, state: st,
                      policyMean: pol, actionSignal: act, scoreGrad: sg, optionScoreGrad: osg,
                      optionPolicyMean: opm, importance: imp, importanceLog: impl,
@@ -816,23 +686,20 @@ private enum OakMetalLayout {
                      headDenom: hden, crossTd: ctd,
                      oneRewardTd: onertd, oneStepDenom: oneden,
                      durationTd: dtd, durationHat: dhat,
-                     qOption: qo, obsTraceMulti: otr,
+                     obsTraceMulti: otr,
                      prioOpt: prio, continuation: cont,
                      lambda: lambda, keyboardScore: kscore,
                      gvfTd: gvftd, featureTraceDenom: ftd,
                      modelExpectedImprovement: modelExp, modelDenom: modelDenom,
-                     optionPlanningUse: planUse, optionModelError: modelErr, optionBasisUse: basisUse,
-                     planningStateRing: stateRing, planningStatePriority: statePrio, planningBackupTd: backupTd,
-                     replacementAgeMean: ram, replacementWouldCommitRate: rwcr,
-                     valueGauge: vg, primitiveReassignmentCount: prc, total: o)
+                     optionPlanningUse: planUse, optionModelError: modelErr,
+                     replacementAgeMean: ram, valueGauge: vg, total: o)
     }
 
     struct UInts {
         let counters, optFeature, featureAge, optAge, featureEverUsed: Int
-        let featureParentA, featureParentB, featureKind, featureBirthCount, parentUseCount: Int
-        let selectedOption, highModelOption, keyboardAge, modelAge: Int
+        let featureParentA, featureParentB, featureKind, featureBirthCount: Int
+        let selectedOption, highModelOption, modelAge: Int
         let gvfAge, badFeatureAge: Int
-        let planningStateAge, selectedPlanState: Int
         let primitiveChannel: Int
         let total: Int
     }
@@ -849,23 +716,17 @@ private enum OakMetalLayout {
         let fpb = o; o += rank
         let fkind = o; o += rank
         let fbc = o; o += rank
-        let puc = o; o += rank
         let sel = o; o += 1
         let high = o; o += 1
-        let ka = o; o += K
         let ma = o; o += K
         let ga = o; o += G
         let bfa = o; o += rank
-        let psa = o; o += rank
-        let sps = o; o += 1
         let pc = o; o += rank
         return UInts(counters: ctr, optFeature: of, featureAge: fa, optAge: oa,
                      featureEverUsed: feu, featureParentA: fpa, featureParentB: fpb,
-                     featureKind: fkind, featureBirthCount: fbc, parentUseCount: puc,
+                     featureKind: fkind, featureBirthCount: fbc,
                      selectedOption: sel, highModelOption: high,
-                     keyboardAge: ka,
                      modelAge: ma, gvfAge: ga, badFeatureAge: bfa,
-                     planningStateAge: psa, selectedPlanState: sps,
                      primitiveChannel: pc, total: o)
     }
 }
@@ -1261,7 +1122,6 @@ final class OakMetalEngine {
         c.sOneStepDenom = UInt32(s.oneStepDenom)
         c.sDurationTd = UInt32(s.durationTd)
         c.sDurationHat = UInt32(s.durationHat)
-        c.sQOption = UInt32(s.qOption)
         c.sObsTraceMulti = UInt32(s.obsTraceMulti)
         c.sPrioOpt = UInt32(s.prioOpt)
         c.sContinuation = UInt32(s.continuation)
@@ -1273,14 +1133,8 @@ final class OakMetalEngine {
         c.sModelDenom = UInt32(s.modelDenom)
         c.sOptionPlanningUse = UInt32(s.optionPlanningUse)
         c.sOptionModelError = UInt32(s.optionModelError)
-        c.sOptionBasisUse = UInt32(s.optionBasisUse)
-        c.sPlanningStateRing = UInt32(s.planningStateRing)
-        c.sPlanningStatePriority = UInt32(s.planningStatePriority)
-        c.sPlanningBackupTd = UInt32(s.planningBackupTd)
         c.sReplacementAgeMean = UInt32(s.replacementAgeMean)
-        c.sReplacementWouldCommitRate = UInt32(s.replacementWouldCommitRate)
         c.sValueGauge = UInt32(s.valueGauge)
-        c.sPrimitiveReassignmentCount = UInt32(s.primitiveReassignmentCount)
         c.uCounters = UInt32(u.counters)
         c.uOptFeature = UInt32(u.optFeature)
         c.uFeatureAge = UInt32(u.featureAge)
@@ -1290,15 +1144,11 @@ final class OakMetalEngine {
         c.uFeatureParentB = UInt32(u.featureParentB)
         c.uFeatureKind = UInt32(u.featureKind)
         c.uFeatureBirthCount = UInt32(u.featureBirthCount)
-        c.uParentUseCount = UInt32(u.parentUseCount)
         c.uSelectedOption = UInt32(u.selectedOption)
         c.uHighModelOption = UInt32(u.highModelOption)
-        c.uKeyboardAge = UInt32(u.keyboardAge)
         c.uModelAge = UInt32(u.modelAge)
         c.uGvfAge = UInt32(u.gvfAge)
         c.uBadFeatureAge = UInt32(u.badFeatureAge)
-        c.uPlanningStateAge = UInt32(u.planningStateAge)
-        c.uSelectedPlanState = UInt32(u.selectedPlanState)
         c.uPrimitiveChannel = UInt32(u.primitiveChannel)
         configPointer.pointee = c
     }
