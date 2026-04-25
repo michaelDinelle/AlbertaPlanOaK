@@ -16,7 +16,6 @@ struct KernelConfig {
     uint obsDim, rank, optionCount, actionParamCount;
     uint obsTraceLevels;
     uint linearAnchorCount;
-    uint optionPageWidth;
     float invRank, invOptionCount;
     float metaEta;
 };
@@ -44,7 +43,7 @@ inline float track_rate(uint step, uint cap) {
 }
 
 struct Ctx {
-    uint O, R, K, D, traceLevels, anchorCount, pageWidth;
+    uint O, R, K, D, traceLevels, anchorCount;
     uint stepCount, stateSlot;
     float rho;
     float invR, invK, metaEta;
@@ -66,7 +65,7 @@ struct Ctx {
     device float *valueGauge;
     device uint *counters, *optFeature, *featureAge, *optAge;
     device uint *featureParentA, *featureParentB, *featureKind, *featureBirthCount;
-    device uint *selectedOption, *highModelOption, *modelAge;
+    device uint *selectedOption;
     device uint *badFeatureAge;
     device KernelScalars *scalars;
     device KernelStats *stats;
@@ -78,7 +77,7 @@ inline Ctx make_ctx(device float *params, device float *stateArena, device uint 
     Ctx c;
     c.O = cfg.obsDim; c.R = cfg.rank; c.K = cfg.optionCount;
     c.D = cfg.actionParamCount; c.traceLevels = cfg.obsTraceLevels;
-    c.anchorCount = cfg.linearAnchorCount; c.pageWidth = cfg.optionPageWidth;
+    c.anchorCount = cfg.linearAnchorCount;
     c.stepCount = scalars->stepCount; c.stateSlot = scalars->stateSlot;
     c.rho = scalars->rho;
     c.invR = cfg.invRank; c.invK = cfg.invOptionCount; c.metaEta = cfg.metaEta;
@@ -142,8 +141,6 @@ inline Ctx make_ctx(device float *params, device float *stateArena, device uint 
     c.featureKind = uintArena + u; u += c.R;
     c.featureBirthCount = uintArena + u; u += c.R;
     c.selectedOption = uintArena + u; u += 1u;
-    c.highModelOption = uintArena + u; u += 1u;
-    c.modelAge = uintArena + u; u += c.K;
     c.badFeatureAge = uintArena + u;
     c.scalars = scalars; c.stats = stats;
     return c;
@@ -414,13 +411,6 @@ kernel void oak_plan(device float *params [[buffer(0)]],
                      uint j [[thread_position_in_threadgroup]],
 	                     uint k [[threadgroup_position_in_grid]]) {
     Ctx ctx = make_ctx(params, stateArena, uintArena, scalars, stats, cfg);
-    uint slot = k;
-    if (ctx.K <= ctx.pageWidth) {
-        k = slot;
-    } else {
-        uint pageBase = (ctx.highModelOption[0] / max(ctx.pageWidth, 1u)) * ctx.pageWidth;
-        k = pageBase + slot;
-    }
     if (k >= ctx.K) return;
     device const float *prev = state_at(ctx, ctx.stateSlot);
     device const float *curr = state_at(ctx, 1u - ctx.stateSlot);
@@ -471,59 +461,6 @@ kernel void oak_plan(device float *params [[buffer(0)]],
         ctx.durationHat[k] = decode_duration(lRaw);
         float modelErr = nErr + rTd * rTd + (ctx.scalars->rho * dTd) * (ctx.scalars->rho * dTd);
         ctx.prioOpt[k] = isfinite(modelErr) ? sqrt(max(modelErr, 0.0f)) : 0.0f;
-    }
-}
-
-kernel void oak_plan_reduce(device float *params [[buffer(0)]],
-                            device float *stateArena [[buffer(1)]],
-                            device uint *uintArena [[buffer(2)]],
-                            device KernelScalars *scalars [[buffer(3)]],
-                            device KernelStats *stats [[buffer(4)]],
-                            constant KernelConfig &cfg [[buffer(5)]],
-                            uint tid [[thread_position_in_threadgroup]]) {
-    Ctx ctx = make_ctx(params, stateArena, uintArena, scalars, stats, cfg);
-    threadgroup float tgPrio[OAK_MAX_RANK];
-    threadgroup float tgDur[OAK_MAX_RANK];
-    threadgroup uint tgModelAge[OAK_MAX_RANK];
-    if (tid < ctx.K) {
-        float p = ctx.prioOpt[tid];
-        tgPrio[tid] = isfinite(p) ? p : 0.0f;
-        tgDur[tid] = ctx.durationHat[tid];
-        tgModelAge[tid] = ctx.modelAge[tid];
-    }
-    threadgroup_barrier(mem_flags::mem_threadgroup);
-    if (tid == 0u) {
-        float invK = ctx.invK;
-        float durSum = 0.0f;
-        float maxPrio = -FLT_MAX;
-        uint high = 0u;
-        for (uint k = 0u; k < ctx.K; ++k) {
-            float p = tgPrio[k];
-            if (p > maxPrio) { maxPrio = p; high = k; }
-            durSum += tgDur[k];
-        }
-        uint pageCount = (ctx.K + ctx.pageWidth - 1u) / max(ctx.pageWidth, 1u);
-        uint selectedPage = 0u, stalePage = 0u, stalePageAge = 0u;
-        if (ctx.K > ctx.pageWidth) {
-            uint highPage = 0u;
-            float highPagePriority = -FLT_MAX;
-            for (uint p = 0u; p < pageCount; ++p) {
-                float pp = -FLT_MAX;
-                uint pa = 0u;
-                uint start = p * ctx.pageWidth;
-                uint end = min(start + ctx.pageWidth, ctx.K);
-                for (uint k = start; k < end; ++k) {
-                    pp = max(pp, tgPrio[k]);
-                    pa = max(pa, tgModelAge[k]);
-                }
-                if (pp > highPagePriority) { highPagePriority = pp; highPage = p; }
-                if (pa >= stalePageAge) { stalePageAge = pa; stalePage = p; }
-            }
-            selectedPage = (stalePageAge > pageCount) ? stalePage : highPage;
-        }
-        ctx.highModelOption[0] = (ctx.K <= ctx.pageWidth) ? high : min(selectedPage * ctx.pageWidth, ctx.K - 1u);
-        ctx.stats->optionDurationMean = durSum * invK;
-        ctx.stats->modelPriorityMax = maxPrio > -FLT_MAX ? maxPrio : 0.0f;
     }
 }
 
@@ -596,8 +533,6 @@ kernel void oak_learn_heads(device float *params [[buffer(0)]],
         uint k = gid / (ctx.R * ctx.R);
         uint rem = gid - k * ctx.R * ctx.R;
         uint j = rem / ctx.R, i = rem % ctx.R;
-        uint selectedPage = ctx.highModelOption[0] / max(ctx.pageWidth, 1u);
-        if (!(ctx.K <= ctx.pageWidth || (k / max(ctx.pageWidth, 1u)) == selectedPage)) return;
         float rho = ctx.importance[k]; if (!isfinite(rho) || rho < 0.0f) rho = 0.0f;
         float denom = ctx.modelDenom[k];
         float scale = (isfinite(denom) && denom > 0.0f) ? (1.0f / denom) : 0.0f;
@@ -695,6 +630,18 @@ kernel void oak_replace(device float *params [[buffer(0)]],
 				        actorUpdateSum += u;
 				    }
 				    ctx.stats->actorUpdateNormMean = actorUpdateSum * invK;
+    float durSum = 0.0f;
+    float maxPrio = 0.0f;
+    for (uint k = 0u; k < ctx.K; ++k) {
+        float d = ctx.durationHat[k];
+        float p = ctx.prioOpt[k];
+        if (!isfinite(d)) d = 0.0f;
+        if (!isfinite(p)) p = 0.0f;
+        durSum += d;
+        maxPrio = max(maxPrio, p);
+    }
+    ctx.stats->optionDurationMean = durSum * invK;
+    ctx.stats->modelPriorityMax = maxPrio;
 
     uint candidateStart = ctx.anchorCount;
     uint eligible = 0u, worst = candidateStart;
@@ -728,13 +675,7 @@ kernel void oak_replace(device float *params [[buffer(0)]],
             }
         }
     }
-	    uint selectedPage = ctx.highModelOption[0] / max(ctx.pageWidth, 1u);
 	    for (uint k = 0u; k < ctx.K; ++k) {
-	        if (ctx.modelAge[k] < 0xffffffffu) ctx.modelAge[k] += 1u;
-	        bool planned = (ctx.K <= ctx.pageWidth)
-	            ? true
-	            : ((k / max(ctx.pageWidth, 1u)) == selectedPage);
-	        if (planned) ctx.modelAge[k] = 0u;
 	        if (ctx.optAge[k] < 0xffffffffu) ctx.optAge[k] += 1u;
 	    }
 	    for (uint i = 0u; i < ctx.R; ++i) if (ctx.featureAge[i] < 0xffffffffu) ctx.featureAge[i] += 1u;

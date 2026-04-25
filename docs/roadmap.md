@@ -1,13 +1,13 @@
 # OaK roadmap - Plan-orthodox continual improvement
 
-Last audited: 2026-04-25, after promoting the aggressive simplification pass
-to `.oak-benchmarks/baseline-1m`.
+Last audited: 2026-04-25, after promoting the full-bank planning cleanup to
+`.oak-benchmarks/baseline-1m`.
 The live branch has moved past the L3-L7 scaffold: default perception is now
 direct normalized experience channels plus constructed feature slots, K=R
 options/subtasks, exact wrapper-side one-step importance ratios, RR Eq. 4
 continuation with a differential-value gauge, direct RR option selection,
 raw reward plus duration option models, bounded
-prioritized-sweeping search control, and age/capacity-gated Oak replacement.
+full-bank option-model planning, and age/capacity-gated Oak replacement.
 Box actions keep the `2A`
 wrapper interface for capacity stability, but the scale half is now
 wrapper-reserved/inert and sampling uses structural fixed `sigma = 1/D_policy`
@@ -32,6 +32,13 @@ wrapping, `oneReward`, and `psiCross`. Gate:
 zero `10/10`, Oak beats random `10/10`, mean Oak reward is `-5869.101`, median
 Oak reward is `-5860.469`, mean paired lift is `256759.957`, min ESS is
 `0.999221`, min support entropy is `0.999878`, and replacement churn is zero.
+
+Full-bank planning cleanup: `oak_plan_reduce`, `highModelOption`,
+`modelAge`, and the option-page scheduler were deleted after the 1M paired gate
+showed bit-identical per-seed Oak reward, Oak NF zero `10/10`, Oak beats random
+`10/10`, and Oak mean SPS improved from `3654.563` to `3771.714` (`+3.21%`).
+This is an optimization/orthodoxy cleanup only: it does not complete the Option
+Keyboard or FC-STOMP feedback cycle.
 
 Baseline action-interface evidence note: the exact fixed-sigma-score seed-1
 gate failed by 100k, with actor support collapsed to zero and psi magnitudes
@@ -90,16 +97,16 @@ that terminal value with a plain feature bonus is rejected by the primary paper.
 
 | Audit item | Status | Live response / evidence |
 |---|---|---|
-| `K <= 32` as invariant | Accepted drift | Removed as an invariant. K now equals R; 32 is only the SIMD page width. HalfCheetah default R is stream-derived (`max(obsDim, 2*D_policy)`, R=24 for the current Box mean/reserved-scale wrapper), with `OAK_RANK` as explicit compute-budget override. |
+| `K <= 32` as invariant | Accepted drift | Removed as an invariant. K now equals R; the old 32-wide option page scheduler is deleted. Threadgroup width is derived from Metal pipeline execution width for hardware occupancy. HalfCheetah default R is stream-derived (`max(obsDim, 2*D_policy)`, R=24 for the current Box mean/reserved-scale wrapper), with `OAK_RANK` as explicit compute-budget override. |
 | B=1 as sacred law | Accepted drift | Reworded as current single-agent stream semantics. Future batched kernels are allowed only for N independent agents with no cross-stream reductions. |
 | Deep Fourier / random-projection default | Accepted | Default state construction is now direct normalized experience channels plus constructed feature slots. Fourier, deep Fourier, and random projection remain experimental modes only; they are not Alberta Plan law. |
 | Feature finding | Partial live | Constructed features use signed product, signed sum, and parent-gated residual forms with parent utility/decorrelation diagnostics. Replacement is still young and needs long-run evidence. |
 | Off-policy floors | Accepted | `max(chord,1/K)` floors are removed from live learning. Wrapper emits exact one-step ratios from behavior-option sampling; ratio diagnostics are live. |
 | Average-reward option values | Accepted, removed from keeper | `optValue[K*R]` and `rhoOpt` were removed from the live keeper after they became behavior-relevant scale paths without earned 300k/1M value. Do not revive them until the option-value role is derived and gated independently. |
 | Predictive-only GVF bank | Removed | `gvfRate`, `gvfValue`, `gvfTd`, `gvfAge`, GVF step-size/meta buffers, and `gvfTdMean` were deleted because the bank remained diagnostic-only and never earned a behavior, replacement, or health-gate role. Main value and RR `psi` GVFs remain live. |
-| True keyboard | Removed from keeper | `psiCross[K*K*R]`, dense λ, and cached/pagewise GPE scores are deleted as unproven behavior complexity. Behavior still executes one selected option for exact one-step importance ratios, now chosen by RR continuation plus direct `psiNext`. Chord-descriptor option models remain future work. |
+| True keyboard / FC-STOMP cycle | Open architecture gap | `psiCross[K*K*R]`, dense λ, and cached/pagewise GPE scores are deleted as unproven behavior complexity. Behavior still executes one selected option for exact one-step importance ratios, now chosen by RR continuation plus direct `psiNext`. This is an option bank, not a fully operational Option Keyboard; chord-descriptor models and coherent feature/subtask/option/model feedback remain future work. |
 | One-step model | Removed from keeper | `oneReward` and `oneTransition` are both removed from default layout because they were shadow/descriptor paths without earned control value. |
-| Search control | Partial live | If K fits one SIMD page, planning covers the full bank. Larger banks use a fair prioritized-sweeping page path by expected model improvement plus stale-page coverage. Full state-search remains open. |
+| Search control | Partial live | Planning now covers the full option bank every step; the stale option-page scheduler is deleted after a bit-identical 1M promotion with +3.2% Oak SPS. Full state-search and uncertainty-aware backup selection remain open. |
 | Continuing testbeds | Deferred by scope | A temporary toy-env attempt was removed because it introduced hand-coded dynamics constants. Add real research-backed continuing wrappers only as separate env-layer work, never inside OaK. |
 | Step 12 / IA | Deferred | Out of scope until Step 11 earns promotion. |
 
@@ -303,7 +310,7 @@ Collapse-repair baseline truth table:
 | λ formula | Removed from keeper. Live behavior no longer computes signed keyboard λ; selection is RR-direct: continue the current option while RR continuation is positive, otherwise choose the finite option with max direct `psiNext`. | Reintroduce keyboard/chord machinery only with new evidence that it earns reward or stability after the simpler direct rule. |
 | GVF coverage | The predictive-only `G=R+K+2` GVF bank is removed. Main value and K RR `psi` GVFs remain the live prediction heads. | Do not re-add diagnostic prediction banks until they have a direct Plan role and pass the same benchmark gate as behavior code. |
 | Replacement behavior | Live age/capacity-gated replacement remains, with `badFeatureAge` retained as anti-churn state after immediate replacement caused 100k support collapse. Shadow replacement metrics, pseudo-basis usage caches, `optionPlanningUse`, and stored primitive-channel tables are removed. | Next replacement work must simplify or replace the actual generate-and-test rule, not add more audit-only counters. |
-| Search control behavior | When `K <= pageWidth`, HalfCheetah still plans the full option bank. For larger `K`, the model page path now selects a fair prioritized-sweeping page by expected model improvement with structural stale-page coverage. | Promote page scheduler by evidence on larger `K`; HalfCheetah behavior is unchanged. |
+| Search control behavior | `oak_plan` updates the full option bank every step. The page reducer, stale-page age state, and `highModelOption` scheduler are deleted; model priority remains a health/search diagnostic. | Next search-control work must add a real state/update queue or model uncertainty, not revive page fairness scaffolding. |
 
 Unearned-scale cleanup evidence:
 
@@ -652,9 +659,9 @@ more interesting; the Plan order matters.
 | 6. Control II | **Strong** | Continuing wrappers; `done` is not plumbed into the engine; no episodic agent semantics. | This matches the Plan discipline. Benchmark resets are wrapper events only. |
 | 7. Planning I | **Partial/active** | `oak_plan` computes differential average-reward backups over K stopping-aware option models for the current state. | OaK plans every step, but still lacks a state/update queue and model uncertainty. |
 | 8. Prototype-AI I | **Not implemented as a reward-useful model** | L1's action-conditioned one-step model was implemented and then rolled back after the 1.5M screen. Live code has the base option-model scaffolds, not an explicit `[state, action] -> next state/reward` Step-8 model. | Step 8 remains a real gap. The failed L1 formulation learned finite predictions but pushed reward farther from K1, so the next attempt must not simply re-add the same heads/utility coupling. |
-| 9. Planning II | **Partial** | Priority signal from chord-weighted option-model TD magnitude; dense transition update gate. | Prioritized sweeping lineage is present. The Plan also calls for uncertainty-aware control of planning order; OaK still has no model-uncertainty estimate and no state/update queue. |
-| 10. STOMP | **Active, not promoted** | Feature-indexed RR psi heads, option policies, stopping-aware reward/transition/duration heads, planning over K heads, RR-derived continuation. | The STOMP pieces are live; the open question is whether they now produce sustained positive reward-rate. |
-| 11. Oak | **Active, incomplete** | Utility estimates, age-gated option/feature replacement, feature registry metadata, and direct RR option selection. | Step 11 feedback is no longer unconditional churn, but richer utility assessment and full chord-descriptor option-keyboard modeling remain open. |
+| 9. Planning II | **Partial** | Priority signal from option-model TD magnitude; dense transition updates now cover the full option bank every step. | Prioritized-sweeping lineage is present only as a scalar priority diagnostic. The Plan also calls for uncertainty-aware control of planning order; OaK still has no model-uncertainty estimate and no state/update queue. |
+| 10. STOMP | **Active scaffold, incomplete** | Feature-indexed RR psi heads, option policies, stopping-aware reward/transition/duration heads, full-bank option planning, RR-derived continuation. | These are STOMP pieces, not a complete FC-STOMP cycle. A true keyboard/chord objective and coherent feedback over features, subtasks, options, and option models remain open. |
+| 11. Oak | **Active, incomplete** | Utility estimates, age-gated option/feature replacement, feature registry metadata, and direct RR option selection. | Step 11 feedback is no longer unconditional churn, but richer utility assessment and full chord-descriptor Option Keyboard/FC-STOMP modeling remain open. |
 | 12. IA | Out of scope | None. | Keep out of this roadmap until Step 11 is credible. |
 
 ## Overclaims Removed
@@ -847,10 +854,9 @@ Acceptance:
 
 Current gap:
 
-- D2 priority is model TD magnitude weighted by chord.
-- OaK now reports option/model improvement and page-coverage signals, but it
-  does not yet learn uncertainty or use
-  meta-gradient search control.
+- D2 priority is model TD magnitude over the live option bank.
+- OaK now reports option/model priority signals, but it does not yet learn
+  uncertainty or use meta-gradient search control.
 - The Plan explicitly points at search control that accounts for model
   uncertainty.
 
