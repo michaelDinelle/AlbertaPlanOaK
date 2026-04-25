@@ -1,15 +1,17 @@
 # OaK roadmap - Plan-orthodox continual improvement
 
-Last audited: 2026-04-25, during the predictive-capacity architectural leap.
+Last audited: 2026-04-25, after the unearned-scale cleanup.
 The live branch has moved past the L3-L7 scaffold: default perception is now
 direct normalized experience channels plus constructed feature slots, K=R
 options/subtasks, exact wrapper-side one-step importance ratios, RR Eq. 4
-continuation with a differential-value gauge, an average-reward intra-option
-value head, signed cumulant-space Design-A keyboard GPE/GPI, raw reward plus
-duration option models, expanded average-reward GVFs over `G=R+K+3`
-experience cumulants, bounded prioritized-sweeping search control, and
-age/capacity-gated Oak replacement. Promotion is still gated by paired 100k,
-300k, and 1M evidence across seeds, not by random-beating alone.
+continuation with a differential-value gauge, signed cumulant-space Design-A
+keyboard GPE/GPI, raw reward plus duration option models, average-reward GVFs
+over `G=R+K+2` experience cumulants, bounded prioritized-sweeping search
+control, and age/capacity-gated Oak replacement. `optValue`, `rhoOpt`,
+`oneTransition`, shadow keyboards, model-residual GVF utility, and deep
+diagnostic ownership were removed from the live path because they were finite
+scale paths without earned control value. Promotion is still gated by paired
+100k, 300k, and 1M evidence across seeds, not by random-beating alone.
 
 This roadmap is the control document for moving OaK toward the Alberta Plan's
 Step-11 Oak architecture. It is deliberately stricter than the old tier log:
@@ -64,10 +66,10 @@ that terminal value with a plain feature bonus is rejected by the primary paper.
 | Deep Fourier / random-projection default | Accepted | Default state construction is now direct normalized experience channels plus constructed feature slots. Fourier, deep Fourier, and random projection remain experimental modes only; they are not Alberta Plan law. |
 | Feature finding | Partial live | Constructed features use signed product, signed sum, and parent-gated residual forms with parent utility/decorrelation diagnostics. Replacement is still young and needs long-run evidence. |
 | Off-policy floors | Accepted | `max(chord,1/K)` floors are removed from live learning. Wrapper emits exact one-step ratios from behavior-option sampling; ratio diagnostics are live. |
-| Average-reward option values | Accepted | `optValue[K*R]` is live. Using `optValueTd` directly in the actor was tested in `rebuild-smoke-10k-policytd` and rejected: policy deltas became infinite before 10k. |
-| Explicit average-reward GVFs | Live, screening | `gvfRate` and `gvfValue` now cover `G=R+K+3` state, reward, action-energy, termination, and model-residual cumulants with explicit rate/value separation. GVF utility is live in replacement/basis diagnostics, but not in reward or primitive actor shortcuts. |
+| Average-reward option values | Accepted, removed from keeper | `optValue[K*R]` and `rhoOpt` were removed from the live keeper after they became behavior-relevant scale paths without earned 300k/1M value. Do not revive them until the option-value role is derived and gated independently. |
+| Explicit average-reward GVFs | Live, diagnostic | `gvfRate` and `gvfValue` now cover `G=R+K+2` state, centered-reward, action-energy, and termination cumulants with explicit rate/value separation. GVF utility no longer feeds replacement/basis utility after a 100k seed showed finite `~7.9e35` GVF utility with no control value. |
 | True keyboard | Partial live | `psiCross[K*K*R]` is live with dense internal λ and cached/pagewise GPE scores. Behavior still executes one selected option for exact one-step importance ratios; chord-descriptor option models remain future work. |
-| One-step model | Partial live | `oneReward[0:R]` is the live reward-cumulant descriptor for the signed keyboard. `oneTransition` remains deep-diagnostic shadow state and does not drive planning or replacement. |
+| One-step model | Partial live | `oneReward[0:R]` is the live reward-cumulant descriptor for the signed keyboard. `oneTransition` was removed from default layout because it was shadow-only. |
 | Search control | Partial live | If K fits one SIMD page, planning covers the full bank. Larger banks use a fair prioritized-sweeping page path by expected model improvement plus stale-page coverage. Full state-search remains open. |
 | Continuing testbeds | Deferred by scope | A temporary toy-env attempt was removed because it introduced hand-coded dynamics constants. Add real research-backed continuing wrappers only as separate env-layer work, never inside OaK. |
 | Step 12 / IA | Deferred | Out of scope until Step 11 earns promotion. |
@@ -251,14 +253,30 @@ Collapse-repair baseline truth table:
 
 | Review claim / subsystem | Current keeper truth | Next action |
 |---|---|---|
-| Actor update scope | The keeper and current branch update every option policy every step in `oak_learn_heads`; it is not a selected-only actor. The current branch uses exact wrapper target-option score gradients plus structural per-option actor-energy normalization. | Do not revive selected-only actor, ESS throttles, or direct main-TD primitive actor shortcuts. |
-| Target-option actor gradients | Raw target-option scores and Fisher/natural target scores failed in isolation (`review-response-50k-natural-133322`, `review-response-50k-fisher-133540`). Exact wrapper target gradients became live only after adding structural actor-energy normalization; this preserved 300k support but made the actor conservative. | Keep the integrated version for long-horizon diagnosis; next actor work should address conservative negative slope without returning to runaway updates. |
+| Actor update scope | The keeper updates every option policy every step in `oak_learn_heads`; it is not a selected-only actor. The current cleanup removed the invented actor MetaOptimize/exponential scale path and uses the structural capacity actor step. | Do not revive selected-only actor, ESS throttles, direct main-TD primitive actor shortcuts, or unearned actor-scale amplifiers. |
+| Target-option actor gradients | Raw target-option scores and Fisher/natural target scores failed in isolation (`review-response-50k-natural-133322`, `review-response-50k-fisher-133540`). Exact wrapper target gradients are still supplied by the action transducer; actor scale remains structural rather than a learned gain. | Keep ratio/score-gradient health visible; next actor work must be derived, not damped. |
 | Global `rho` | Global average reward remains the live control/model-planning rate: `Q = rHat - rho*lHat + V(nHat)`. | Keep live; compare against shadow per-option control rates before any behavior change. |
-| `rhoOpt` status | `rhoOpt[k]` is live for option-value centering (`reward-rhoOpt[k]`) and resets with the option identity. Global `rho` still drives main value, RR `psi`, and model backup. | Do not put per-option rates into model backup or RR `psi` until option-value evidence is positive at 300k. |
+| `rhoOpt` status | Removed from the live keeper with `optValue`; global `rho` drives main value, RR `psi`, and model backup. | Reintroduce only with a separately justified option-value branch that passes 300k/1M support gates. |
 | λ formula | Live behavior uses formal signed cumulant-space Design-A GPE/GPI: `lambda=signed_L1(oneReward[0:R])`, fallback `signed_L1(valueW)`, then uniform. Utility is not in lambda. | Chord-descriptor option models and Design B remain deferred. |
-| GVF coverage | Expanded `G=R+K+3` state/reward/action/termination/model-residual GVFs are live by default with explicit rate/value separation. GVF utility feeds replacement/basis diagnostics, not reward or primitive actor shortcuts. | Keep the expanded bank live; the next evidence question is whether GVF utility can improve feature replacement without suppressing the positive window. |
+| GVF coverage | `G=R+K+2` state/reward/action/termination GVFs are live with explicit rate/value separation. GVF utility was deleted from replacement/basis diagnostics after it produced finite but meaningless scale spikes. | Keep GVFs predictive-only until their scale is stable and useful enough to earn a live Step-11 feedback role. |
 | Replacement behavior | Live age/capacity-gated replacement is unchanged. New persistent `badFeatureAge` and `replacementWouldCommitRate` are shadows. | Test a live commit gate only after 50k preservation and better 300k support diagnostics. |
 | Search control behavior | When `K <= pageWidth`, HalfCheetah still plans the full option bank. For larger `K`, the model page path now selects a fair prioritized-sweeping page by expected model improvement with structural stale-page coverage. | Promote page scheduler by evidence on larger `K`; HalfCheetah behavior is unchanged. |
+
+Unearned-scale cleanup evidence:
+
+- `deslop-gvf-utility-delete-10seed-100k`: HalfCheetah 10 seeds x
+  `{oak,random}`, Oak beat random `10/10`, NF zero, mean reward
+  `-585.127` versus random `-26423.561`, mean ESS `0.999326`, min actor
+  support entropy `0.999397`, and no feature replacement. Removing GVF utility
+  did not regress the 100k learning/support trajectory and removed the prior
+  finite `~7.9e35` GVF utility spike from reported health.
+- `deslop-gvf-utility-delete-seed0-1m`: serial seed-0 HalfCheetah, NF zero,
+  `3321.865` SPS, reward `-5764.547`, ESS `0.998883`, actor support entropy
+  `0.999827`, no feature replacements, and `gvfTdMean=1.88e-8`. This improves
+  the previous cleanup 1M seed-0 reward (`-5869.005`) while preserving the
+  3k+ SPS guard. Remaining cleanup target: duration/model scale growth
+  (`optionDurationMean=302657.875`, `planningBackupTdMean=5179.794`) without
+  actor/support collapse.
 
 Collapse-repair smoke evidence:
 
