@@ -27,8 +27,6 @@ final class NativeBridge: @unchecked Sendable {
                                            UnsafeMutablePointer<UInt8>?, UnsafeMutablePointer<CChar>?,
                                            Int32) -> Int32
     typealias TakeWarningFn = @convention(c) (UnsafeMutablePointer<CChar>?, Int32) -> Int32
-    typealias BenchmarkCountFn = @convention(c) () -> Int32
-    typealias BenchmarkIdFn = @convention(c) (Int32) -> UnsafePointer<CChar>?
 
     static let shared: NativeBridge = { do { return try NativeBridge() } catch { fatalError("\(error)") } }()
 
@@ -39,7 +37,6 @@ final class NativeBridge: @unchecked Sendable {
     private let boundsFn: BoundsFn; private let resetFn: ResetFn
     private let stepContFn: StepContFn; private let stepDiscFn: StepDiscFn
     private let takeWarningFn: TakeWarningFn
-    private let benchmarkCountFn: BenchmarkCountFn; private let benchmarkIdFn: BenchmarkIdFn
 
     private init() throws {
         assetBasePath = try requiredBuildPath(".build/oak-native/env-assets", description: "native env assets").path
@@ -61,31 +58,10 @@ final class NativeBridge: @unchecked Sendable {
         boundsFn = try load("oak_env_action_bounds"); resetFn = try load("oak_env_reset")
         stepContFn = try load("oak_env_step_continuous"); stepDiscFn = try load("oak_env_step_discrete")
         takeWarningFn = try load("oak_env_take_warning")
-        benchmarkCountFn = try load("oak_benchmark_env_count")
-        benchmarkIdFn = try load("oak_benchmark_env_id")
     }
 
     deinit { dlclose(dylib) }
 
-    // Pass 15 Tier 3: per-call error buffer for thread-safe concurrent benchmark execution.
-    // Pass 14 Tier 0.8 used an instance-owned reusable buffer to avoid 4 KB/step heap traffic,
-    // but that assumed single-threaded FFI access. With ConcurrentBenchHarness fanning out N=8
-    // streams over the same NativeBridge.shared singleton, a shared buffer races on writes.
-    // Per-call alloc costs ~4 KB/step ≈ 1 MB/sec heap traffic at typical 250 steps/sec —
-    // negligible vs the 8× wall-clock speedup from concurrent execution.
-    private func checked(_ body: (UnsafeMutablePointer<CChar>?, Int32) -> Int32) throws {
-        var buf = [CChar](repeating: 0, count: 4096)
-        let cap = Int32(buf.count)
-        let ok = buf.withUnsafeMutableBufferPointer { body($0.baseAddress, cap) }
-        guard ok == 1 else { throw OakError.message(decodeCString(buf)) }
-    }
-
-    func takeWarning() -> String? {
-        var buf = [CChar](repeating: 0, count: 4096)
-        let cap = Int32(buf.count)
-        let hit = buf.withUnsafeMutableBufferPointer { takeWarningFn($0.baseAddress, cap) }
-        return hit == 1 ? decodeCString(buf) : nil
-    }
     func open(envId: String, numEnvs: Int, seed: Int?) throws -> UnsafeMutableRawPointer {
         var buf = [CChar](repeating: 0, count: 4096)
         let cap = Int32(buf.count)
@@ -111,33 +87,34 @@ final class NativeBridge: @unchecked Sendable {
         var hi = Array(repeating: Float(0), count: actDim)
         let c = Int(boundsFn(h, &lo, &hi)); return c > 0 ? (lo, hi) : ([], [])
     }
-    func reset(_ h: UnsafeMutableRawPointer, obs: inout [Float]) throws {
-        try checked { e, cap in obs.withUnsafeMutableBufferPointer { resetFn(h, $0.baseAddress, e, cap) } }
+    func reset(_ h: UnsafeMutableRawPointer, obs: inout [Float],
+               error: UnsafeMutablePointer<CChar>?, cap: Int32) -> Int32 {
+        obs.withUnsafeMutableBufferPointer { resetFn(h, $0.baseAddress, error, cap) }
     }
     func stepContinuous(_ h: UnsafeMutableRawPointer, action: [Float],
-                        obs: inout [Float], reward: inout [Float], done: inout [UInt8]) throws {
-        try checked { e, cap in
-            action.withUnsafeBufferPointer { ab in
-                obs.withUnsafeMutableBufferPointer { ob in
-                    reward.withUnsafeMutableBufferPointer { rb in
-                        done.withUnsafeMutableBufferPointer { db in
-                            stepContFn(h, ab.baseAddress, ob.baseAddress, rb.baseAddress,
-                                       db.baseAddress, e, cap)
-                        }}}}}
+                        obs: inout [Float], reward: inout [Float], done: inout [UInt8],
+                        error: UnsafeMutablePointer<CChar>?, cap: Int32) -> Int32 {
+        action.withUnsafeBufferPointer { ab in
+            obs.withUnsafeMutableBufferPointer { ob in
+                reward.withUnsafeMutableBufferPointer { rb in
+                    done.withUnsafeMutableBufferPointer { db in
+                        stepContFn(h, ab.baseAddress, ob.baseAddress, rb.baseAddress,
+                                   db.baseAddress, error, cap)
+                    }}}}
     }
     func stepDiscrete(_ h: UnsafeMutableRawPointer, action: [Int32],
-                      obs: inout [Float], reward: inout [Float], done: inout [UInt8]) throws {
-        try checked { e, cap in
-            action.withUnsafeBufferPointer { ab in
-                obs.withUnsafeMutableBufferPointer { ob in
-                    reward.withUnsafeMutableBufferPointer { rb in
-                        done.withUnsafeMutableBufferPointer { db in
-                            stepDiscFn(h, ab.baseAddress, ob.baseAddress, rb.baseAddress,
-                                       db.baseAddress, e, cap)
-                        }}}}}
+                      obs: inout [Float], reward: inout [Float], done: inout [UInt8],
+                      error: UnsafeMutablePointer<CChar>?, cap: Int32) -> Int32 {
+        action.withUnsafeBufferPointer { ab in
+            obs.withUnsafeMutableBufferPointer { ob in
+                reward.withUnsafeMutableBufferPointer { rb in
+                    done.withUnsafeMutableBufferPointer { db in
+                        stepDiscFn(h, ab.baseAddress, ob.baseAddress, rb.baseAddress,
+                                   db.baseAddress, error, cap)
+                    }}}}
     }
-    func benchmarkEnvIds() -> [String] {
-        (0..<Int(benchmarkCountFn())).compactMap { i in benchmarkIdFn(Int32(i)).map { String(cString: $0) } }
+    func takeWarning(error: UnsafeMutablePointer<CChar>?, cap: Int32) -> Int32 {
+        takeWarningFn(error, cap)
     }
 }
 
@@ -147,7 +124,7 @@ final class EnvPoolEnv {
     private(set) var observationScratch: [Float]
     private(set) var rewardScratch: [Float]
     private(set) var doneScratch: [UInt8]
-    let numEnvs: Int, obsDim: Int, actDim: Int
+    let obsDim: Int, actDim: Int
     let actionDiscreteCount: Int?
     let actionLow: [Float], actionHigh: [Float]
     // Pass 11 Tier 1: env-declared structured action spec composed of one or more components
@@ -162,13 +139,13 @@ final class EnvPoolEnv {
     private(set) var scoreGradScratch: [Float]
     private(set) var optionScoreGradScratch: [Float]
     private(set) var importanceScratch: [Float]
-    private(set) var importanceLogScratch: [Float]
     private var optionLogProbScratch: [Float]
     private var discreteIndexScratch: [Int32]
+    private var ffiMessageScratch: [CChar]
     private var rngState: UInt64
 
     init(id: String, numEnvs: Int, seed: Int?) throws {
-        self.numEnvs = numEnvs
+        precondition(numEnvs == 1, "OaK runs one stream per agent; benchmark concurrency uses independent processes.")
         handle = try bridge.open(envId: id, numEnvs: numEnvs, seed: seed)
         obsDim = bridge.obsDim(handle); actDim = bridge.actDim(handle)
         actionDiscreteCount = bridge.discreteCount(handle)
@@ -180,33 +157,38 @@ final class EnvPoolEnv {
         }
         self.dPolicy = actionSpec.totalPolicyParamCount
         self.envActionWidth = actionSpec.totalEnvActionWidth
-        observationScratch = Array(repeating: 0, count: numEnvs * obsDim)
-        rewardScratch = Array(repeating: 0, count: numEnvs)
-        doneScratch = Array(repeating: 0, count: numEnvs)
-        envActionScratch  = Array(repeating: 0, count: numEnvs * envActionWidth)
-        actionSignalScratch = Array(repeating: 0, count: numEnvs * dPolicy)
-        scoreGradScratch  = Array(repeating: 0, count: numEnvs * dPolicy)
+        observationScratch = Array(repeating: 0, count: obsDim)
+        rewardScratch = Array(repeating: 0, count: 1)
+        doneScratch = Array(repeating: 0, count: 1)
+        envActionScratch  = Array(repeating: 0, count: envActionWidth)
+        actionSignalScratch = Array(repeating: 0, count: dPolicy)
+        scoreGradScratch  = Array(repeating: 0, count: dPolicy)
         optionScoreGradScratch = []
         importanceScratch = []
-        importanceLogScratch = []
         optionLogProbScratch = []
-        discreteIndexScratch = Array(repeating: 0, count: numEnvs)
+        discreteIndexScratch = Array(repeating: 0, count: 1)
+        ffiMessageScratch = Array(repeating: 0, count: 4096)
         rngState = UInt64(bitPattern: Int64(seed ?? Int(oakUnseededSeed))) &* 0x9e3779b97f4a7c15 &+ 1
     }
     deinit { bridge.close(handle) }
 
-    private func checked<T>(_ body: () throws -> T) throws -> T {
-        let v = try body()
-        if let w = bridge.takeWarning() { throw OakError.message("MuJoCo warning: \(w)") }
-        return v
+    private func checked(_ body: (UnsafeMutablePointer<CChar>?, Int32) -> Int32) throws {
+        let cap = Int32(ffiMessageScratch.count)
+        let ok = ffiMessageScratch.withUnsafeMutableBufferPointer { body($0.baseAddress, cap) }
+        guard ok == 1 else { throw OakError.message(decodeCString(ffiMessageScratch)) }
+        let warning = ffiMessageScratch.withUnsafeMutableBufferPointer {
+            bridge.takeWarning(error: $0.baseAddress, cap: cap)
+        }
+        if warning == 1 { throw OakError.message("MuJoCo warning: \(decodeCString(ffiMessageScratch))") }
     }
-    func reset() throws { try checked { try bridge.reset(handle, obs: &observationScratch) } }
+    func reset() throws {
+        try checked { e, cap in bridge.reset(handle, obs: &observationScratch, error: e, cap: cap) }
+    }
 
     private func ensureOptionScratch(optionCount: Int) {
-        let n = max(0, optionCount) * numEnvs
+        let n = max(0, optionCount)
         if importanceScratch.count != n {
             importanceScratch = Array(repeating: 0, count: n)
-            importanceLogScratch = Array(repeating: 0, count: n)
             optionLogProbScratch = Array(repeating: 0, count: n)
         }
         let ng = n * dPolicy
@@ -220,7 +202,7 @@ final class EnvPoolEnv {
     // function. This is the SOLE site that knows the env's action-space type — Inv-1 boundary.
     func sampleAndStep(policy: PolicyMeanBatch) throws {
         let policyMean = policy.values
-        precondition(policyMean.count == numEnvs * dPolicy)
+        precondition(policyMean.count == dPolicy)
         let optionCount = policy.optionValues.map { $0.count / max(dPolicy, 1) } ?? 0
         ensureOptionScratch(optionCount: optionCount)
         policyMean.withUnsafeBufferPointer { pmBuf in
@@ -229,39 +211,34 @@ final class EnvPoolEnv {
                     scoreGradScratch.withUnsafeMutableBufferPointer { sgBuf in
                         optionScoreGradScratch.withUnsafeMutableBufferPointer { osgBuf in
                             importanceScratch.withUnsafeMutableBufferPointer { impBuf in
-                                importanceLogScratch.withUnsafeMutableBufferPointer { impLogBuf in
-                                    optionLogProbScratch.withUnsafeMutableBufferPointer { optLogBuf in
-                                        if let optionValues = policy.optionValues {
-                                            optionValues.withUnsafeBufferPointer { optBuf in
-                                                ActionTransducer.sampleAndScore(
-                                                    spec: actionSpec, numEnvs: numEnvs,
-                                                    dPolicy: dPolicy, envActionWidth: envActionWidth,
-                                                    policyMean: pmBuf.baseAddress!,
-                                                    optionPolicyMean: optBuf.baseAddress,
-                                                    optionCount: optionCount,
-                                                    envAction: aBuf.baseAddress!,
-                                                    actionSignal: actBuf.baseAddress!,
-                                                    scoreGrad: sgBuf.baseAddress!,
-                                                    optionScoreGrad: osgBuf.baseAddress,
-                                                    importance: impBuf.baseAddress,
-                                                    importanceLog: impLogBuf.baseAddress,
-                                                    optionLogProbScratch: optLogBuf.baseAddress,
-                                                    rngState: &rngState)
-                                            }
-                                        } else {
+                                optionLogProbScratch.withUnsafeMutableBufferPointer { optLogBuf in
+                                    if let optionValues = policy.optionValues {
+                                        optionValues.withUnsafeBufferPointer { optBuf in
                                             ActionTransducer.sampleAndScore(
-                                                spec: actionSpec, numEnvs: numEnvs,
-                                                dPolicy: dPolicy, envActionWidth: envActionWidth,
+                                                spec: actionSpec, dPolicy: dPolicy, envActionWidth: envActionWidth,
                                                 policyMean: pmBuf.baseAddress!,
-                                                optionPolicyMean: nil, optionCount: 0,
+                                                optionPolicyMean: optBuf.baseAddress,
+                                                optionCount: optionCount,
                                                 envAction: aBuf.baseAddress!,
                                                 actionSignal: actBuf.baseAddress!,
                                                 scoreGrad: sgBuf.baseAddress!,
-                                                optionScoreGrad: nil,
-                                                importance: nil, importanceLog: nil,
-                                                optionLogProbScratch: nil,
+                                                optionScoreGrad: osgBuf.baseAddress,
+                                                importance: impBuf.baseAddress,
+                                                optionLogProbScratch: optLogBuf.baseAddress,
                                                 rngState: &rngState)
                                         }
+                                    } else {
+                                        ActionTransducer.sampleAndScore(
+                                            spec: actionSpec, dPolicy: dPolicy, envActionWidth: envActionWidth,
+                                            policyMean: pmBuf.baseAddress!,
+                                            optionPolicyMean: nil, optionCount: 0,
+                                            envAction: aBuf.baseAddress!,
+                                            actionSignal: actBuf.baseAddress!,
+                                            scoreGrad: sgBuf.baseAddress!,
+                                            optionScoreGrad: nil,
+                                            importance: nil,
+                                            optionLogProbScratch: nil,
+                                            rngState: &rngState)
                                     }
                                 }
                             }
@@ -272,17 +249,19 @@ final class EnvPoolEnv {
         }
         switch actionSpec[0] {
         case .discrete:
-            for r in 0..<numEnvs { discreteIndexScratch[r] = Int32(envActionScratch[r]) }
-            try checked {
-                try bridge.stepDiscrete(handle, action: discreteIndexScratch,
-                                        obs: &observationScratch,
-                                        reward: &rewardScratch, done: &doneScratch)
+            discreteIndexScratch[0] = Int32(envActionScratch[0])
+            try checked { e, cap in
+                bridge.stepDiscrete(handle, action: discreteIndexScratch,
+                                    obs: &observationScratch,
+                                    reward: &rewardScratch, done: &doneScratch,
+                                    error: e, cap: cap)
             }
         case .box:
-            try checked {
-                try bridge.stepContinuous(handle, action: envActionScratch,
-                                          obs: &observationScratch,
-                                          reward: &rewardScratch, done: &doneScratch)
+            try checked { e, cap in
+                bridge.stepContinuous(handle, action: envActionScratch,
+                                      obs: &observationScratch,
+                                      reward: &rewardScratch, done: &doneScratch,
+                                      error: e, cap: cap)
             }
         }
     }
