@@ -217,7 +217,7 @@ private struct KernelConfig {
     var pGvfRate: UInt32 = 0, pGvfValue: UInt32 = 0
     var sObservation: UInt32 = 0, sObsMean: UInt32 = 0, sObsSM: UInt32 = 0
     var sState: UInt32 = 0
-    var sPolicyMean: UInt32 = 0, sActionSignal: UInt32 = 0, sScoreGrad: UInt32 = 0
+    var sPolicyMean: UInt32 = 0, sActionSignal: UInt32 = 0
     var sOptionScoreGrad: UInt32 = 0
     var sOptionPolicyMean: UInt32 = 0
     var sImportance: UInt32 = 0
@@ -304,8 +304,7 @@ private enum OakMetalLayout {
     static func optRewardCount(rank: Int) -> Int { optionCount(rank: rank) * rank }
     static func optDurationCount(rank: Int) -> Int { optionCount(rank: rank) * rank }
     static func optTransitionCount(rank: Int) -> Int { optionCount(rank: rank) * rank * rank }
-    static func oneInputWidth(rank: Int, dPolicy: Int) -> Int { rank + dPolicy }
-    static func oneRewardCount(rank: Int, dPolicy: Int) -> Int { oneInputWidth(rank: rank, dPolicy: dPolicy) }
+    static func oneRewardCount(rank: Int) -> Int { rank }
     static func gvfCount(rank: Int) -> Int {
         rank + optionCount(rank: rank) + 2
     }
@@ -345,7 +344,7 @@ private enum OakMetalLayout {
         let ot  = o; o += optTransitionCount(rank: rank)
         let od  = o; o += optDurationCount(rank: rank)
         let pc  = o; o += psiCrossCount(rank: rank)
-        let oneR = o; o += oneRewardCount(rank: rank, dPolicy: dPolicy)
+        let oneR = o; o += oneRewardCount(rank: rank)
         let gr = o; o += gvfCount(rank: rank)
         let gv = o; o += gvfValueCount(rank: rank)
         return Param(value: val, psi: psi, optPolicy: op, optReward: or_,
@@ -356,7 +355,7 @@ private enum OakMetalLayout {
 
     struct State {
         let observation, obsMean, obsSM, state: Int
-        let policyMean, actionSignal, scoreGrad, optionScoreGrad: Int
+        let policyMean, actionSignal, optionScoreGrad: Int
         let optionPolicyMean, importance: Int
         let reward, td, tdPsi: Int
         let utilFeat, utilOpt: Int
@@ -393,7 +392,6 @@ private enum OakMetalLayout {
         let st = o; o += 2 * rank
         let pol = o; o += dPolicy
         let act = o; o += dPolicy
-        let sg  = o; o += dPolicy
         let osg = o; o += K * dPolicy
         let opm = o; o += K * dPolicy
         let imp = o; o += K
@@ -441,7 +439,7 @@ private enum OakMetalLayout {
         let planUse = o; o += K
         let vg = o; o += 1
         return State(observation: obs, obsMean: mean, obsSM: osm, state: st,
-                     policyMean: pol, actionSignal: act, scoreGrad: sg, optionScoreGrad: osg,
+                     policyMean: pol, actionSignal: act, optionScoreGrad: osg,
                      optionPolicyMean: opm, importance: imp,
                      reward: rew, td: td, tdPsi: tdP,
                      utilFeat: uf, utilOpt: uo, bonusW: bw, featureMean: fm, featureSM: fsm,
@@ -664,7 +662,7 @@ final class OakMetalEngine {
         let psiCrossPtr = paramsArena.pointer.advanced(by: paramLayout.psiCross)
         for i in 0..<OakMetalLayout.psiCrossCount(rank: rank) { psiCrossPtr[i] = 0 }
         let oneRewardPtr = paramsArena.pointer.advanced(by: paramLayout.oneReward)
-        for i in 0..<OakMetalLayout.oneRewardCount(rank: rank, dPolicy: dPolicy) { oneRewardPtr[i] = 0 }
+        for i in 0..<OakMetalLayout.oneRewardCount(rank: rank) { oneRewardPtr[i] = 0 }
         sample(paramLayout.gvfValue,
                OakMetalLayout.gvfValueCount(rank: rank),
                invR)
@@ -776,7 +774,7 @@ final class OakMetalEngine {
     // prevDone is intentionally NOT plumbed through: the agent is continual (Inv-4); env resets
     // are wrapper events.
     func step(obs: UnsafeBufferPointer<Float>,
-              prevActionSignal: [Float], prevScoreGrad: [Float],
+              prevActionSignal: [Float],
               prevOptionScoreGrad: [Float],
               prevImportance: [Float],
               prevReward: Float,
@@ -784,15 +782,12 @@ final class OakMetalEngine {
               captureStats: Bool) throws -> (PolicyMeanBatch, KernelStats?) {
         precondition(obs.count == obsDim)
         precondition(prevActionSignal.count == dPolicy)
-        precondition(prevScoreGrad.count == dPolicy)
         let K = OakMetalLayout.optionCount(rank: rank)
         precondition(prevOptionScoreGrad.count == K * dPolicy)
         memcpy(stateArena.pointer.advanced(by: stateLayout.observation), obs.baseAddress!,
                obsDim * MemoryLayout<Float>.stride)
         stateArena.pointer.advanced(by: stateLayout.reward).pointee = prevReward
         memcpy(stateArena.pointer.advanced(by: stateLayout.actionSignal), prevActionSignal,
-               dPolicy * MemoryLayout<Float>.stride)
-        memcpy(stateArena.pointer.advanced(by: stateLayout.scoreGrad), prevScoreGrad,
                dPolicy * MemoryLayout<Float>.stride)
         memcpy(stateArena.pointer.advanced(by: stateLayout.optionScoreGrad), prevOptionScoreGrad,
                K * dPolicy * MemoryLayout<Float>.stride)
@@ -840,7 +835,6 @@ final class OakMetalEngine {
         c.sState = UInt32(s.state)
         c.sPolicyMean = UInt32(s.policyMean)
         c.sActionSignal = UInt32(s.actionSignal)
-        c.sScoreGrad = UInt32(s.scoreGrad)
         c.sOptionScoreGrad = UInt32(s.optionScoreGrad)
         c.sOptionPolicyMean = UInt32(s.optionPolicyMean)
         c.sImportance = UInt32(s.importance)
@@ -1030,7 +1024,6 @@ private final class RunState {
     var prevReward: Float = 0
     var prevPolicyMean: [Float]
     var prevActionSignal: [Float]
-    var prevScoreGrad: [Float]
     var prevOptionScoreGrad: [Float]
     var prevImportance: [Float]
     var randPolicyMean: [Float]
@@ -1046,7 +1039,6 @@ private final class RunState {
     init(env: EnvPoolEnv, seed: Int?, optionCount: Int) {
         prevPolicyMean = Array(repeating: 0, count: env.dPolicy)
         prevActionSignal = Array(repeating: 0, count: env.dPolicy)
-        prevScoreGrad  = Array(repeating: 0, count: env.dPolicy)
         prevOptionScoreGrad = Array(repeating: 0, count: max(optionCount, 0) * env.dPolicy)
         prevImportance = Array(repeating: 0, count: max(optionCount, 0))
         randPolicyMean = Array(repeating: 0, count: env.dPolicy)
@@ -1370,7 +1362,6 @@ private final class RunState {
             if let engine = ctx.engine {
                 let out = try ctx.env.observationScratch.withUnsafeBufferPointer { buf in
                     try engine.step(obs: buf, prevActionSignal: state.prevActionSignal,
-                                    prevScoreGrad: state.prevScoreGrad,
                                     prevOptionScoreGrad: state.prevOptionScoreGrad,
                                     prevImportance: state.prevImportance,
                                     prevReward: state.prevReward,
@@ -1409,10 +1400,6 @@ private final class RunState {
             state.prevReward = ctx.env.rewardScratch[0]
             _ = state.prevPolicyMean.withUnsafeMutableBufferPointer { dst in
                 memcpy(dst.baseAddress!, policyMean.values, policyMean.values.count * MemoryLayout<Float>.stride)
-            }
-            _ = state.prevScoreGrad.withUnsafeMutableBufferPointer { dst in
-                memcpy(dst.baseAddress!, ctx.env.scoreGradScratch,
-                       ctx.env.scoreGradScratch.count * MemoryLayout<Float>.stride)
             }
             if ctx.env.optionScoreGradScratch.count == state.prevOptionScoreGrad.count {
                 _ = state.prevOptionScoreGrad.withUnsafeMutableBufferPointer { dst in

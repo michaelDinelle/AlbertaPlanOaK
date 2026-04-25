@@ -20,6 +20,12 @@ zero on every seed, Oak beats random `10/10`, mean Oak reward `-8802.706`,
 median `-8787.175`, and seed 1 no longer collapses (`-8763.615` versus the
 failed rebuild seed-1 `-339826.775`).
 
+Dead-code rule after baseline promotion: GPU `scoreGrad` plumbing was removed
+because the only kernel consumer wrote an unread threadgroup scalar; host
+`scoreGradL2Mean` telemetry remains. `oneReward` is now exactly `R` weights;
+the previously allocated action tail was never read by the keyboard or reward
+model and is deleted.
+
 Baseline action-interface evidence note: the exact fixed-sigma-score seed-1
 gate failed by 100k, with actor support collapsed to zero and psi magnitudes
 exploding despite the scale half being inert. Do not promote exact off-policy
