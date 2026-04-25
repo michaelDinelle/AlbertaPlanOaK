@@ -1,7 +1,6 @@
 # OaK roadmap - Plan-orthodox continual improvement
 
-Last audited: 2026-04-25, after promoting `.oak-benchmarks/baseline-1m`
-against `.oak-benchmarks/baseline-15m`.
+Last audited: 2026-04-25, after promoting `.oak-benchmarks/baseline-1m`.
 The live branch has moved past the L3-L7 scaffold: default perception is now
 direct normalized experience channels plus constructed feature slots, K=R
 options/subtasks, exact wrapper-side one-step importance ratios, RR Eq. 4
@@ -15,21 +14,19 @@ with natural-gradient-style mean credit (`raw - mu`). `optValue`, `rhoOpt`,
 `oneTransition`, shadow keyboards, model-residual GVF utility, learned Box
 log-scale, and deep
 diagnostic ownership were removed from the live path because they were finite
-scale paths without earned control value. The promoted 1.5M benchmark artifact
-is `.oak-benchmarks/baseline-15m`: 10 HalfCheetah seeds x `{oak,random}`, Oak NF
-zero on every seed, Oak beats random `10/10`, mean Oak reward `-8802.706`,
-median `-8787.175`, and seed 1 no longer collapses (`-8763.615` versus the
-failed rebuild seed-1 `-339826.775`).
+scale paths without earned control value. The current benchmark artifact is
+`.oak-benchmarks/baseline-1m`: 10 HalfCheetah seeds x `{oak,random}`, Oak NF
+zero on every seed, Oak beats random `10/10`, mean Oak reward `-5872.287`,
+median `-5873.539`, and mean paired lift `256756.771`.
 
 Dead-code rule after baseline promotion: GPU `scoreGrad` plumbing was removed
 because the only kernel consumer wrote an unread threadgroup scalar; host
 `scoreGradL2Mean` telemetry remains. `oneReward` is now exactly `R` weights;
 the previously allocated action tail was never read by the keyboard or reward
-model and is deleted. Promotion gate: `.oak-benchmarks/baseline-1m` versus
-`.oak-benchmarks/baseline-15m` at the 1M heartbeat, 10 paired HalfCheetah
-seeds. Oak NF stayed zero `10/10`; mean Oak reward moved from `-5873.887` to
-`-5872.287` (`+1.600`), median moved from `-5873.550` to `-5873.539`, and mean
-paired lift moved from `256755.171` to `256756.771`.
+model and is deleted. Promotion gate: `.oak-benchmarks/baseline-1m`, 10 paired
+HalfCheetah seeds at 1M. Oak NF stayed zero `10/10`, Oak beats random `10/10`,
+mean Oak reward is `-5872.287`, median Oak reward is `-5873.539`, and mean
+paired lift is `256756.771`.
 
 Baseline action-interface evidence note: the exact fixed-sigma-score seed-1
 gate failed by 100k, with actor support collapsed to zero and psi magnitudes
@@ -992,7 +989,7 @@ future audits as "obvious" fixes.
 | Duration-scaled planning advantage | `l3-l7-duration-scaled-planadv-paired-10k-054503`: dividing best-option planning advantage by the selected option duration was average-reward motivated, but regressed reward to `-27.136`, left only `1/10` positive-rate seeds, and kept duration inflated around `101`. | Rejected; duration scaling cannot be applied only at the value-head pressure point in the current planner. |
 | Stratified initial option-feature registry | `l3-l7-stratified-registry-birth-paired-10k-005737`: spreading initial anchors across `R` worsened reward sum to `-23.227` and `0/10` positive-rate seeds. | Rejected; keep the current `optFeature[k] = k` birth rule. |
 | Implicit TD denominator plus raw planning advantage | `l3-l7-implicit-raw-planadv-paired-10k-005940`: replacing the soft planning advantage with raw advantage and an implicit value update regressed to `-44.286` and score-gradient mean `2.737e1`. | Rejected; raw planning pressure remains damaging even with implicit shrinkage. |
-| Fixed current Gaussian sigma | `l3-l7-fixed-current-sigma-paired-10k-010112`: freezing scale coordinates at the then-current structural sigma collapsed reward to `-115.259` and removed useful score signal. | Historical rejection. The baseline differs by keeping capacity shape, zeroing reserved scale scores, and using natural-gradient-style mean credit; the promoted paired artifact is `.oak-benchmarks/baseline-15m`. |
+| Fixed current Gaussian sigma | `l3-l7-fixed-current-sigma-paired-10k-010112`: freezing scale coordinates at the then-current structural sigma collapsed reward to `-115.259` and removed useful score signal. | Historical rejection. The baseline differs by keeping capacity shape, zeroing reserved scale scores, and using natural-gradient-style mean credit; the promoted paired artifact is `.oak-benchmarks/baseline-1m`. |
 | Saturation-aware Gaussian score | `l3-l7-saturation-aware-score-paired-300k-011021`: ignoring score gradients for clamped continuous samples fixed the long-horizon score spike, but 300k reward regressed to `-526.692` versus the keeper's `-489.611`. | Rejected; the score spike needs a repair that does not reduce reward learning. |
 | Value-aware transition update weighting | `l3-l7-valueaware-transition-update-paired-10k-010253`: weighting transition TD by `|valueW[j]|` caused action magnitude growth and reward collapse to `-1054.454`. | Rejected; keep value-aware priority, not value-weighted transition updates. |
 | Registry-state fast feature clock | `l3-l7-unused-fast-feature-clock-paired-50k-010430`: fast feature testing while any never-used feature exists improved 10k to `-15.606`, but 50k regressed to `-113.198` and feature churn rose to `699.6`. | Rejected; early feature churn helps short screens but destroys the 50k gate. |
@@ -1072,17 +1069,11 @@ but speed is infrastructure. It cannot promote a non-orthodox mechanism.
 Baseline for the next algorithmic change:
 
 - **Current baseline**: `.oak-benchmarks/baseline-1m`.
-- **1.5M comparison baseline**: `.oak-benchmarks/baseline-15m`.
-- HalfCheetah 1.5M, 10 seeds x `{oak,random}`: Oak beats random `10/10`,
-  Oak NF zero `10/10`, mean Oak reward `-8802.706`, median `-8787.175`,
-  reward SD `47.437`, and seed 1 `-8763.615`.
-- This supersedes `halfcheetah-rebuild-15m` as the operational baseline
-  because rebuild seed 1 collapsed (`-339826.775`, NF total `216`).
-- K1 remains a comparison artifact, not a baseline
-  (`halfcheetah-k1-15m` mean Oak `-212785.114`).
-- Current source includes the promoted dead-code cleanup validated by
-  `.oak-benchmarks/baseline-1m` against the 1M trajectory from
-  `.oak-benchmarks/baseline-15m`.
+- HalfCheetah 1M, 10 seeds x `{oak,random}`: Oak beats random `10/10`,
+  Oak NF zero `10/10`, mean Oak reward `-5872.287`, median `-5873.539`,
+  reward SD `31.928`, and mean paired lift `256756.771`.
+- K1 and rebuild-era runs remain historical comparison artifacts, not
+  baselines.
 
 The roadmap objective is now sharper: repair the missing Plan-order pieces
 that prevent continuously improving learning, especially exact subtask/option
