@@ -34,7 +34,7 @@ struct KernelConfig {
     uint pGvfRate, pGvfValue;
     uint sObservation, sObsMean, sObsSM;
     uint sState;
-    uint sPolicyMean, sActionSignal, sScoreGrad;
+    uint sPolicyMean, sActionSignal;
     uint sOptionScoreGrad;
     uint sOptionPolicyMean;
     uint sImportance;
@@ -117,7 +117,7 @@ struct Ctx {
     device float *gvfRate, *gvfValue;
     device float *observation, *observationMean, *obsSM;
     device float *state;
-    device float *policyMean, *actionSignal, *scoreGrad, *optionScoreGrad, *optionPolicyMean;
+    device float *policyMean, *actionSignal, *optionScoreGrad, *optionPolicyMean;
     device float *importance;
     device float *reward, *td, *tdPsi;
     device float *utilFeat, *utilOpt, *bonusW, *featureMean, *featureSM;
@@ -164,7 +164,6 @@ inline Ctx make_ctx(device float *params, device float *stateArena, device uint 
     c.observation = stateArena + cfg.sObservation; c.observationMean = stateArena + cfg.sObsMean;
     c.obsSM = stateArena + cfg.sObsSM; c.state = stateArena + cfg.sState;
     c.policyMean = stateArena + cfg.sPolicyMean; c.actionSignal = stateArena + cfg.sActionSignal;
-    c.scoreGrad = stateArena + cfg.sScoreGrad;
     c.optionScoreGrad = stateArena + cfg.sOptionScoreGrad;
     c.optionPolicyMean = stateArena + cfg.sOptionPolicyMean;
     c.importance = stateArena + cfg.sImportance;
@@ -237,11 +236,6 @@ inline float linear_input(Ctx ctx, uint idx) {
     if (tail < ctx.D) return ctx.actionSignal[tail];
     if (tail == ctx.D) return ctx.reward[0];
     return 1.0f;
-}
-
-inline float one_input(Ctx ctx, device const float *prev, uint idx) {
-    if (idx < ctx.R) return prev[idx];
-    return ctx.actionSignal[idx - ctx.R];
 }
 
 inline float gvf_cumulant(Ctx ctx, device const float *curr, uint g) {
@@ -385,12 +379,6 @@ inline void oak_keyboard_predict_body(Ctx ctx, uint tid,
         }
         float oneDenom = oneTraceNorm + 1.0f;
         ctx.oneStepDenom[0] = (isfinite(oneDenom) && oneDenom > 0.0f) ? oneDenom : 0.0f;
-        float scoreNorm = 0.0f;
-        for (uint d = 0u; d < ctx.D; ++d) {
-            float g = ctx.scoreGrad[d];
-            if (isfinite(g)) scoreNorm = fma(g, g, scoreNorm);
-        }
-        tgScalars[9] = scoreNorm;
     }
     threadgroup_barrier(mem_flags::mem_threadgroup);
 
@@ -924,8 +912,8 @@ kernel void oak_learn_heads(device float *params [[buffer(0)]],
     gid -= nOD;
     if (gid < nOneR) {
         uint i = gid;
-        float x = one_input(ctx, prev, i);
-        float a = (i < ctx.R) ? ctx.alphaModel[i] : ctx.invOneInputWidth;
+        float x = prev[i];
+        float a = ctx.alphaModel[i];
         float w = ctx.oneReward[i];
         float denom = ctx.oneStepDenom[0];
         float scale = (isfinite(denom) && denom > 0.0f) ? (1.0f / denom) : 0.0f;

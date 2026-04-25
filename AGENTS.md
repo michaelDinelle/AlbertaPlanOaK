@@ -84,7 +84,7 @@ The agent is a focused-kernel single-stream Oak prototype over the Plan steps. K
 | `optReward` | K · R | K stopping-aware option reward models r̂^k. |
 | `optTransition` | K · R · R | K dense stopping-aware transition models `n̂^k_j(s) = Σ_i w^k_{j,i}·s[i]`. |
 | `optDuration` | K · R | K average-reward option-duration models l̂^k with a structural one-step lower bound at decode. |
-| `oneReward` | R + D | Live reward-cumulant descriptor used by the signed Option Keyboard λ and updated every step. |
+| `oneReward` | R | Live reward-cumulant descriptor used by the signed Option Keyboard λ and updated every step. |
 | `gvfRate`, `gvfValue` | `(R + K + 2)`, `(R + K + 2) · R` | Average-reward GVF bank over state-feature, centered-reward, action-energy, and termination cumulants with explicit cumulant-rate and differential-value separation. GVFs are predictive diagnostics only until their scale earns replacement/control use. |
 
 State representation is a finite adaptive predictive state, not a full reconstruction of the world: direct normalized experience channels (observation coordinates, multi-timescale observation traces, previous abstract action descriptor, previous reward, and an affine channel) plus constructed feature slots. Deep Fourier, random Fourier, and random-projection encoders are optional experimental modes, not Alberta Plan law. Constructed slots remain replaceable signed products/sums/residuals of useful parents. Plasticity is driven by MetaOptimize-style `alpha/beta/h/gradEnergy` families plus age/utility replacement; raw IDBD/Autostep are historical relatives, not the implementation target.
