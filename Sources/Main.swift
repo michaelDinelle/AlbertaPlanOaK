@@ -756,17 +756,13 @@ private final class RunState {
             let args = Array(CommandLine.arguments.dropFirst())
             switch args.first {
             case "benchmark": try benchmark()
-            case "benchmark-worker": try benchmarkWorker(args.dropFirst().first)
+            case "benchmark-worker": try benchmarkWorker()
             default: throw OakError.message("Use `OaK benchmark`.")
             }
         } catch { fputs("\(error)\n", stderr); Foundation.exit(1) }
     }
 
     private static func resolveBenchmarkWorkingDirectory(root: URL) -> URL {
-        if let raw = ProcessInfo.processInfo.environment["OAK_BENCH_DIR"]?
-            .trimmingCharacters(in: .whitespacesAndNewlines), !raw.isEmpty {
-            return URL(fileURLWithPath: (raw as NSString).expandingTildeInPath, isDirectory: true)
-        }
         if let raw = ProcessInfo.processInfo.environment["OAK_METRICS_STORAGE"]?
             .trimmingCharacters(in: .whitespacesAndNewlines), !raw.isEmpty {
             return URL(fileURLWithPath: (raw as NSString).expandingTildeInPath, isDirectory: true)
@@ -777,7 +773,7 @@ private final class RunState {
     private static func benchmark() throws {
         let root = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
         let env = ProcessInfo.processInfo.environment
-        let envId = env["OAK_BENCH_ENV"] ?? env["OAK_ENV"] ?? "HalfCheetah-v4"
+        let envId = env["OAK_BENCH_ENV"] ?? "HalfCheetah-v4"
         guard !envId.contains(",") else {
             throw OakError.message("OAK_BENCH_ENV is single-env by design; run separate benchmarks for multiple envs.")
         }
@@ -787,9 +783,7 @@ private final class RunState {
         let policies = try (ProcessInfo.processInfo.environment["OAK_BENCH_POLICIES"] ?? "oak,random")
             .split(separator: ",").map { try parsePolicy(String($0)) }
         let hw = max(ProcessInfo.processInfo.processorCount, 1)
-        let rawN = ProcessInfo.processInfo.environment["OAK_BENCH_CONCURRENCY"]?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-        let concurrency = rawN == nil || rawN == "auto" || rawN == "max" ? hw : max(Int(rawN ?? "") ?? 0, 0)
-        guard concurrency > 0 else { throw OakError.message("OAK_BENCH_CONCURRENCY must be positive, auto, or max.") }
+        let concurrency = hw
         var benchDir = resolveBenchmarkWorkingDirectory(root: root)
         let lockDir = root.appendingPathComponent(".oak-benchmarks", isDirectory: true)
         try FileManager.default.createDirectory(at: lockDir, withIntermediateDirectories: true)
@@ -847,16 +841,18 @@ private final class RunState {
         }
     }
 
-    private static func benchmarkWorker(_ envArg: String?) throws {
+    private static func benchmarkWorker() throws {
         let env = ProcessInfo.processInfo.environment
-        let envId = env["OAK_ENV"] ?? envArg ?? ""
+        let envId = env["OAK_ENV"] ?? ""
         guard !envId.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             throw OakError.message("Missing benchmark-worker environment id.")
         }
-        let policy = try parsePolicy(env["OAK_POLICY"] ?? Policy.oak.rawValue)
-        let seed = env["OAK_SEED"].flatMap(Int.init)
-        let stopAfter = max(env["OAK_STOP_AFTER_STEPS"].flatMap(Int.init)
-                            ?? env["OAK_BENCH_STEPS"].flatMap(Int.init) ?? 1, 1)
+        guard let policyRaw = env["OAK_POLICY"],
+              let seed = env["OAK_SEED"].flatMap(Int.init),
+              let steps = env["OAK_STOP_AFTER_STEPS"].flatMap(Int.init)
+        else { throw OakError.message("Incomplete benchmark-worker environment.") }
+        let policy = try parsePolicy(policyRaw)
+        let stopAfter = max(steps, 1)
         let device = try metalDevice()
         let dir = RunSnapshot.resolveMetricsDirectory(explicit: nil)
         _ = try runSingle(envId: envId, policy: policy, seed: seed,
@@ -887,7 +883,7 @@ private final class RunState {
 
         let p = Process()
         p.executableURL = try currentExecutableURL()
-        p.arguments = ["benchmark-worker", envId]
+        p.arguments = ["benchmark-worker"]
         p.environment = env
         try p.run()
         return p
@@ -924,14 +920,9 @@ private final class RunState {
         let dir = RunSnapshot.resolveMetricsDirectory(explicit: metricsDir)
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         let env = try EnvPoolEnv(id: envId, numEnvs: 1, seed: seed)
-        // Plan Step 2: rank R is the active feature/subtask/option budget, independent of
-        // env input dim. K = R; the 32-wide page is only the hardware scheduling width.
-        let defaultRank = max(env.obsDim, env.dPolicy * 2)
-        let rawRank = max(ProcessInfo.processInfo.environment["OAK_RANK"].flatMap(Int.init)
-                          ?? defaultRank, 2)
-        let rank = rawRank
+        let rank = max(env.obsDim, env.dPolicy * 2, 2)
         guard rank <= 256 else {
-            throw OakError.message("OAK rank \(rank) exceeds oak_plan's 256-threadgroup-storage cap. Set OAK_RANK<=256 or redesign oak_plan storage.")
+            throw OakError.message("OAK structural rank \(rank) exceeds oak_plan's 256-threadgroup-storage cap; redesign oak_plan storage.")
         }
         let engine = policy == .oak
             ? try OakMetalEngine(obsDim: env.obsDim, rank: rank, dPolicy: env.dPolicy,
@@ -962,14 +953,13 @@ private final class RunState {
     }
 
     private static func measurementLoop(_ ctx: RunContext, _ state: RunState) throws {
-        let defaultHb = max(ctx.stopAfter / 10, 1)
-        let hb = max(ProcessInfo.processInfo.environment["OAK_HEARTBEAT_STEPS"].flatMap(Int.init) ?? defaultHb, 0)
+        let heartbeatEvery = max(ctx.stopAfter / 10, 1)
         // Continual: every step is a measured step, no warmup. Plan Inv-5: no special training
         // phases. Step 0 timer is established on the first iteration.
         if state.measurementStart == nil { state.measurementStart = DispatchTime.now().uptimeNanoseconds }
         while state.measuredSteps < ctx.stopAfter {
             let nextMeasuredStep = state.measuredSteps + 1
-            let willHeartbeat = hb > 0 && state.measuredSteps / hb < nextMeasuredStep / hb
+            let willHeartbeat = state.measuredSteps / heartbeatEvery < nextMeasuredStep / heartbeatEvery
             let willFinish = nextMeasuredStep == ctx.stopAfter
             let captureKernelStats = ctx.policy == .oak && (willHeartbeat || willFinish)
             let policyMean: PolicyMeanBatch, stats: KernelStats?
