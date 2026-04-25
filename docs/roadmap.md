@@ -1,38 +1,43 @@
 # OaK roadmap - Plan-orthodox continual improvement
 
-Last audited: 2026-04-25, after promoting `.oak-benchmarks/baseline-1m`.
+Last audited: 2026-04-25, after promoting the aggressive dead-weight deletion
+pass to `.oak-benchmarks/baseline-1m`.
 The live branch has moved past the L3-L7 scaffold: default perception is now
 direct normalized experience channels plus constructed feature slots, K=R
 options/subtasks, exact wrapper-side one-step importance ratios, RR Eq. 4
 continuation with a differential-value gauge, signed cumulant-space Design-A
-keyboard GPE/GPI, raw reward plus duration option models, average-reward GVFs
-over `G=R+K+2` experience cumulants, bounded prioritized-sweeping search
-control, and age/capacity-gated Oak replacement. Box actions keep the `2A`
+keyboard GPE/GPI, raw reward plus duration option models, bounded
+prioritized-sweeping search control, and age/capacity-gated Oak replacement.
+Box actions keep the `2A`
 wrapper interface for capacity stability, but the scale half is now
 wrapper-reserved/inert and sampling uses structural fixed `sigma = 1/D_policy`
-with natural-gradient-style mean credit (`raw - mu`). `optValue`, `rhoOpt`,
-`oneTransition`, shadow keyboards, model-residual GVF utility, learned Box
-log-scale, and deep
-diagnostic ownership were removed from the live path because they were finite
-scale paths without earned control value. The current benchmark artifact is
+with residual-style mean credit (`raw - mu`). `optValue`, `rhoOpt`,
+`oneTransition`, shadow keyboards, predictive-only GVF banks, model-residual
+GVF utility, learned Box log-scale, `optionPlanningUse`, stored primitive-channel
+tables, and deep diagnostic ownership were removed from the live path because
+they were finite scale paths or shadow bookkeeping without earned control value.
+The current benchmark artifact is
 `.oak-benchmarks/baseline-1m`: 10 HalfCheetah seeds x `{oak,random}`, Oak NF
-zero on every seed, Oak beats random `10/10`, mean Oak reward `-5872.287`,
-median `-5873.539`, and mean paired lift `256756.771`.
+zero on every seed, Oak beats random `10/10`, mean Oak reward `-5872.286`,
+median `-5873.518`, and mean paired lift `256756.772`.
 
 Dead-code rule after baseline promotion: GPU `scoreGrad` plumbing was removed
-because the only kernel consumer wrote an unread threadgroup scalar; host
-`scoreGradL2Mean` telemetry remains. `oneReward` is now exactly `R` weights;
-the previously allocated action tail was never read by the keyboard or reward
-model and is deleted. Promotion gate: `.oak-benchmarks/baseline-1m`, 10 paired
-HalfCheetah seeds at 1M. Oak NF stayed zero `10/10`, Oak beats random `10/10`,
-mean Oak reward is `-5872.287`, median Oak reward is `-5873.539`, and mean
-paired lift is `256756.771`.
+because the only kernel consumer wrote an unread threadgroup scalar; behavior
+score-gradient telemetry is now also removed from host metrics. `oneReward` is
+now exactly `R` weights; the previously allocated action tail was never read by
+the keyboard or reward model and is deleted. Promotion gate:
+`.oak-benchmarks/baseline-1m`, 10 paired HalfCheetah seeds at 1M. Oak NF stayed
+zero `10/10`, Oak beats random `10/10`, mean Oak reward is `-5872.286`, median
+Oak reward is `-5873.518`, and mean paired lift is `256756.772`.
 
 Baseline action-interface evidence note: the exact fixed-sigma-score seed-1
 gate failed by 100k, with actor support collapsed to zero and psi magnitudes
-exploding despite the scale half being inert. Do not promote exact off-policy
-Box mean scores without a different actor geometry. The promoted baseline keeps
-scale inert but uses natural-gradient-style mean credit.
+exploding despite the scale half being inert. The later full `D_policy=A`
+mean-only deletion failed the 1M gate: Oak lost to random `0/10`, NF total was
+`70`, final support entropy collapsed to `0`, and action deltas reached
+`2.67e70`. Do not promote exact off-policy Box mean scores or mean-only Box
+capacity shrinkage without a different actor geometry. The promoted baseline
+keeps scale inert but uses residual-style mean credit.
 
 This roadmap is the control document for moving OaK toward the Alberta Plan's
 Step-11 Oak architecture. It is deliberately stricter than the old tier log:
@@ -82,13 +87,13 @@ that terminal value with a plain feature bonus is rejected by the primary paper.
 
 | Audit item | Status | Live response / evidence |
 |---|---|---|
-| `K <= 32` as invariant | Accepted drift | Removed as an invariant. K now equals R; 32 is only the SIMD page width. HalfCheetah default R is stream-derived (`max(obsDim, 2*D_policy)`, R=24 for the current Box mean/log-scale wrapper), with `OAK_RANK` as explicit compute-budget override. |
+| `K <= 32` as invariant | Accepted drift | Removed as an invariant. K now equals R; 32 is only the SIMD page width. HalfCheetah default R is stream-derived (`max(obsDim, 2*D_policy)`, R=24 for the current Box mean/reserved-scale wrapper), with `OAK_RANK` as explicit compute-budget override. |
 | B=1 as sacred law | Accepted drift | Reworded as current single-agent stream semantics. Future batched kernels are allowed only for N independent agents with no cross-stream reductions. |
 | Deep Fourier / random-projection default | Accepted | Default state construction is now direct normalized experience channels plus constructed feature slots. Fourier, deep Fourier, and random projection remain experimental modes only; they are not Alberta Plan law. |
 | Feature finding | Partial live | Constructed features use signed product, signed sum, and parent-gated residual forms with parent utility/decorrelation diagnostics. Replacement is still young and needs long-run evidence. |
 | Off-policy floors | Accepted | `max(chord,1/K)` floors are removed from live learning. Wrapper emits exact one-step ratios from behavior-option sampling; ratio diagnostics are live. |
 | Average-reward option values | Accepted, removed from keeper | `optValue[K*R]` and `rhoOpt` were removed from the live keeper after they became behavior-relevant scale paths without earned 300k/1M value. Do not revive them until the option-value role is derived and gated independently. |
-| Explicit average-reward GVFs | Live, diagnostic | `gvfRate` and `gvfValue` now cover `G=R+K+2` state, centered-reward, action-energy, and termination cumulants with explicit rate/value separation. GVF utility no longer feeds replacement/basis utility after a 100k seed showed finite `~7.9e35` GVF utility with no control value. |
+| Predictive-only GVF bank | Removed | `gvfRate`, `gvfValue`, `gvfTd`, `gvfAge`, GVF step-size/meta buffers, and `gvfTdMean` were deleted because the bank remained diagnostic-only and never earned a behavior, replacement, or health-gate role. Main value and RR `psi` GVFs remain live. |
 | True keyboard | Partial live | `psiCross[K*K*R]` is live with dense internal λ and cached/pagewise GPE scores. Behavior still executes one selected option for exact one-step importance ratios; chord-descriptor option models remain future work. |
 | One-step model | Partial live | `oneReward[0:R]` is the live reward-cumulant descriptor for the signed keyboard. `oneTransition` was removed from default layout because it was shadow-only. |
 | Search control | Partial live | If K fits one SIMD page, planning covers the full bank. Larger banks use a fair prioritized-sweeping page path by expected model improvement plus stale-page coverage. Full state-search remains open. |
@@ -146,7 +151,7 @@ review):
 - `research-correct-stats-sparse-10k-hb`: seed-0 HalfCheetah, rebuilt Metal and
   Swift, NF zero, `3022` SPS with normal heartbeats, reward `-90.424`,
   `actorUpdateEss=0.621`, `actorSupportEntropy=0.999`, calm score/action
-  (`scoreGradL2Mean=1.003`, `actionDeltaL2Mean=0.0249`). Stats are now sampled
+  telemetry (`actionDeltaL2Mean=0.0249`). Stats are now sampled
   on heartbeat/final only; OaK learning still runs every step.
 - `research-correct-stats-sparse-10seed-100k`: 10 paired seeds, Oak beats random
   `10/10`, NF zero `10/10`, mean Oak `-767.19` versus random `-26423.56`, final
@@ -243,8 +248,8 @@ review):
   `+232936`, mean ESS improved from `0.0417` to `0.530`, entropy from `0.0009`
   to `0.557`, and concurrent SPS from `1398` to `2028`. NF remained zero.
   However several seeds still collapse to the one-option floor or huge
-  action/score movement (`actionDeltaL2Mean` up to `4.49e301`,
-  `scoreGradL2Mean` up to `1.39e69`), planning/model diagnostics still show
+  action/score movement (`actionDeltaL2Mean` up to `4.49e301` and former
+  behavior-score telemetry up to `1.39e69`), planning/model diagnostics still show
   finite hallucination-scale residuals (`planningBackupTdMean` up to
   `3.38e38`, mixed model-improvement scalars up to `8.10e15`), and option
   duration can drift to `2.00e22`. This is a better research checkpoint, not a
@@ -260,8 +265,8 @@ review):
   random `-264296.39`, mean lift `+258435.23`, and mean SPS was `3087.77`
   (`2912.72` min under worker contention). Support did not repeat the prior
   floor collapse: final `importanceEss` min `0.9842`, actor-support entropy min
-  `0.9968`, no feature/option reinitialization, calm action/score
-  (`actionDeltaL2Mean` max `3.95e-4`, `scoreGradL2Mean` max `1.0041`). This is
+  `0.9968`, no feature/option reinitialization, calm action telemetry
+  (`actionDeltaL2Mean` max `3.95e-4`). This is
   a cleaner keeper floor, not a solved agent: option termination is still zero
   and duration remains too large, so the next cleanup should simplify the
   termination/duration substrate rather than add audit heads.
@@ -293,8 +298,8 @@ Collapse-repair baseline truth table:
 | Global `rho` | Global average reward remains the live control/model-planning rate: `Q = rHat - rho*lHat + V(nHat)`. | Keep live; compare against shadow per-option control rates before any behavior change. |
 | `rhoOpt` status | Removed from the live keeper with `optValue`; global `rho` drives main value, RR `psi`, and model backup. | Reintroduce only with a separately justified option-value branch that passes 300k/1M support gates. |
 | λ formula | Live behavior uses formal signed cumulant-space Design-A GPE/GPI: `lambda=signed_L1(oneReward[0:R])`, fallback `signed_L1(valueW)`, then uniform. Utility is not in lambda. | Chord-descriptor option models and Design B remain deferred. |
-| GVF coverage | `G=R+K+2` state/reward/action/termination GVFs are live with explicit rate/value separation. GVF utility was deleted from replacement/basis diagnostics after it produced finite but meaningless scale spikes. | Keep GVFs predictive-only until their scale is stable and useful enough to earn a live Step-11 feedback role. |
-| Replacement behavior | Live age/capacity-gated replacement remains, but shadow replacement metrics and pseudo-basis usage caches were removed from the public/current surface. `badFeatureAge` is internal replacement state, not a reported shadow head. | Next replacement work must simplify or replace the actual generate-and-test rule, not add more audit-only counters. |
+| GVF coverage | The predictive-only `G=R+K+2` GVF bank is removed. Main value and K RR `psi` GVFs remain the live prediction heads. | Do not re-add diagnostic prediction banks until they have a direct Plan role and pass the same benchmark gate as behavior code. |
+| Replacement behavior | Live age/capacity-gated replacement remains, with `badFeatureAge` retained as anti-churn state after immediate replacement caused 100k support collapse. Shadow replacement metrics, pseudo-basis usage caches, `optionPlanningUse`, and stored primitive-channel tables are removed. | Next replacement work must simplify or replace the actual generate-and-test rule, not add more audit-only counters. |
 | Search control behavior | When `K <= pageWidth`, HalfCheetah still plans the full option bank. For larger `K`, the model page path now selects a fair prioritized-sweeping page by expected model improvement with structural stale-page coverage. | Promote page scheduler by evidence on larger `K`; HalfCheetah behavior is unchanged. |
 
 Unearned-scale cleanup evidence:
@@ -380,13 +385,9 @@ Collapse-repair smoke evidence:
   the 1M report kept seed-0 10k reward bit-for-bit at `-44.609847`, NF zero,
   and lifted single-stream HalfCheetah Oak to `3038` SPS. The profiling-backed
   changes were: default-gate shadow-only deep diagnostics behind
-  `OAK_DEEP_DIAGNOSTICS=1`, parallelize independent `oak_plan`/`oak_plan_reduce`
-  row decodes without changing scalar reduction order, widen action emission
-  inside the existing `oak_replace` dispatch, and delete the unused standalone
-  `oak_action_emit` path. Xcode Instruments trace artifact:
-  `.build/perf-final-shader-1k.trace`; diagnostic phase means were
-  `encode=0.106ms`, `plan=0.014ms`, `plan_reduce=0.016ms`,
-  `learn_heads=0.008ms`, `replace=0.057ms`.
+  `OAK_DEEP_DIAGNOSTICS=1`, parallelize independent planning row decodes, and
+  widen action emission. Xcode Instruments trace artifact:
+  `.build/perf-final-shader-1k.trace`.
 - `perf-replacewide-run-50k-nohb` / `perf-random-run-50k-nohb`: seed-0 50k
   preservation check kept Oak positive at `+172.773` versus random
   `-13177.211`, with Oak at `3029` SPS and NF zero. A small concurrent paired
@@ -443,8 +444,8 @@ Rejected post-repair variants:
   repair.
 - Review-response next-wave integrated rebuilds were tested and reverted rather
   than promoted. `review-response-50k-natural-133322` used exact target-option
-  Gaussian score gradients and regressed to `-497.755`, with late
-  `scoreGradL2Mean` above `200`. `review-response-50k-fisher-133540` applied
+  Gaussian score gradients and regressed to `-497.755`, with late behavior-score
+  telemetry above `200`. `review-response-50k-fisher-133540` applied
   Fisher-preconditioned target scores and kept score gradients near `1`, but
   still regressed to `-461.998`. `review-response-50k-rewardlambda-133841`
   corrected the keyboard vector from differential `valueW` to the learned
@@ -576,8 +577,7 @@ options.
 L1 rollback evidence:
 
 The L1 action-conditioned one-step model was compared heartbeat-by-heartbeat
-against `.oak-benchmarks/halfcheetah-k1-15m`, 10 paired oak seeds, 30 heartbeats
-per seed, 50k steps per heartbeat. Higher reward is less negative.
+against the historical K1 artifact. Higher reward is less negative.
 
 | Metric | K1 | L1 | L1 - K1 |
 |---|---:|---:|---:|
@@ -586,7 +586,6 @@ per seed, 50k steps per heartbeat. Higher reward is less negative.
 | Seeds L1 beats K1 | n/a | `2/10` | n/a |
 | Final rewardRate mean | `-0.1050` | `-0.1157` | `-0.0107` |
 | Final actionDeltaL2Mean | `0.02119` | `0.02111` | `-0.00008` |
-| Final scoreGradL2Mean | `5.99777` | `5.99777` | `0.00000` |
 | Final chordEffectiveK mean | `31.621` | `31.618` | `-0.003` |
 | Final SPS mean | `2366.6` | `2515.3` | `+148.8` |
 | Final agentStepMsMean | `0.3777` | `0.3515` | `-0.0262` |
@@ -645,7 +644,7 @@ more interesting; the Plan order matters.
 | 1. Representation I | **Partial/strong substrate** | Welford observation normalization, per-feature alpha via MetaOptimize, GraMa utility, continual updates. | The core Step-1 pieces are real. The base-agent text also mentions short-term credit-assignment memories; TD(lambda)/implicit-trace attempts diverged on current correlated Fourier features, so traces are an open gap, not a completed item. |
 | 2. Representation II | **Partial** | Deep Fourier features plus G&T reseeding; K2 composes a replacement row from two utility-sampled parent rows. | Step 2 is not just random projection replacement. It asks for smart construction, testing, ranking, and replacement of new features made from existing features in a multi-task setting. K2 installs a narrow composition surrogate but is empirically neutral. |
 | 3. Prediction I | **Partial** | Main value plus K psi GVFs; multi-timescale obs traces in perception. | Continual GVF learning exists. Off-policy, stable multi-step prediction with learned feature finding and richer recurrent perception is incomplete. |
-| 4. Control I | **Strong, with one caveat** | Continual actor-critic via wrapper score gradients and chord-blended option policies; Box actions keep a `2A` wrapper interface but only the mean half is live. | The actor-critic loop is useful and stable. The caveat is that action parameterization is wrapper-side research machinery, not a Plan step; learned log-scale is now reserved/inert, Box mean credit is natural-gradient style, and full `D_policy=A` mean-only deletion remains a later evidence-gated cleanup. |
+| 4. Control I | **Strong, with one caveat** | Continual actor-critic via wrapper score gradients and chord-blended option policies; Box actions keep a `2A` wrapper interface but only the mean half is live. | The actor-critic loop is useful and stable. The caveat is that action parameterization is wrapper-side research machinery, not a Plan step; learned log-scale is now reserved/inert, Box mean credit is residual-style, and full `D_policy=A` mean-only deletion failed the 1M gate. |
 | 5. Prediction II | **Partial/active** | Average reward centering for main TD and psi TD; L3-L7 adds average-reward option duration. | Differential value learning is present. Duration is live but still under reward-rate screening. |
 | 6. Control II | **Strong** | Continuing wrappers; `done` is not plumbed into the engine; no episodic agent semantics. | This matches the Plan discipline. Benchmark resets are wrapper events only. |
 | 7. Planning I | **Partial/active** | `oak_plan` computes differential average-reward backups over K stopping-aware option models for the current state. | OaK plans every step, but still lacks a state/update queue and model uncertainty. |
@@ -941,7 +940,7 @@ future audits as "obvious" fixes.
 | Pre-update reward-rate TD centering | `l3-l7-preupdate-rho-td-paired-10k-045035`: using the previous `rho`/`rhoOpt` in the same step's value/psi TD errors was research-clean and NF-clean, but regressed reward sum to `-21.363`, left only `2/10` final positive-rate seeds, and inflated option duration to `72.8`. | Rejected; keep the current update-first centering until a fuller value-based reward-centering mechanism wins paired gates. |
 | Global reward-rate centering for ψ subtasks | `l3-l7-global-psi-rho-paired-10k-090745`: using the main global `rho` instead of per-option `rhoOpt` in RR ψ TDs was NF-clean but regressed reward to `-26.224`, left only `1/10` positive-rate seed, and inflated duration to `115.2`. | Rejected; per-option reward-rate traces remain useful subtask specialization in the current average-reward RR implementation. |
 | Value-based per-option ψ reward-rate traces | `l3-l7-valuebased-rhoopt-paired-10k-093442`: updating `rhoOpt[k]` from the ψ TD error instead of reward EMA was NF-clean but regressed reward to `-79.801`, drove all-stop one-step behavior (`terminationRate 0.847`, duration `1.32`), and increased action energy without sustained positive reward-rate. | Rejected; keep per-option reward EMA centering for the current RR ψ heads unless a fuller off-policy GVF reward-rate estimator is added. |
-| Fixed-sigma continuous policy on old L3-L7 | `l3-l7-fixed-sigma-paired-10k-045540`: freezing the old two-coordinate Gaussian scale path removed score-gradient spikes (`3.46e-3`) but starved the actor, regressing reward sum to `-115.259` with only `1/10` positive-rate seeds. | Historical rejection, not the live branch. The baseline Box action interface keeps `D_policy=2A` for capacity stability, makes the scale half inert, and uses natural-gradient-style mean credit. Seed-1 and 10-seed 1.5M gates passed. |
+| Fixed-sigma continuous policy on old L3-L7 | `l3-l7-fixed-sigma-paired-10k-045540`: freezing the old two-coordinate Gaussian scale path removed score-gradient spikes (`3.46e-3`) but starved the actor, regressing reward sum to `-115.259` with only `1/10` positive-rate seeds. | Historical rejection, not the live branch. The baseline Box action interface keeps `D_policy=2A` for capacity stability, makes the scale half inert, and uses residual-style mean credit. |
 | Source-chord option-model priority | `l3-l7-source-priority-paired-10k-045727`: weighting model priority by `chordPrev` instead of the current chord was NF-clean but regressed reward sum to `-25.159`, left only `1/10` positive-rate seeds, and inflated duration to `128.8`. | Rejected; keep current-chord priority until uncertainty/meta-gradient search control replaces the simple TD-priority gate. |
 | Tanh-squashed Box policy | `l3-l7-tanh-box-paired-10k-045950`: mapping continuous Gaussian samples smoothly into Box bounds was wrapper-clean and NF-clean, but regressed reward sum to `-25.538`, inflated duration to `86.0`, and reduced the random baseline's action energy without improving Oak acceleration. | Rejected; keep the current clamp wrapper until a complete bounded-policy score formulation wins paired gates. |
 | Exact censored-Gaussian Box score | `l3-l7-censored-box-score-paired-10k-092013`: using the mathematically correct point-mass score for clipped Box samples was wrapper-clean and NF-clean, but regressed reward to `-20.175`, left `0/10` positive reward-rate seeds, and inflated duration to `127.7`. | Rejected; the long-run scale issue is real, but changing the Box score alone removes useful early credit. |
@@ -989,7 +988,7 @@ future audits as "obvious" fixes.
 | Duration-scaled planning advantage | `l3-l7-duration-scaled-planadv-paired-10k-054503`: dividing best-option planning advantage by the selected option duration was average-reward motivated, but regressed reward to `-27.136`, left only `1/10` positive-rate seeds, and kept duration inflated around `101`. | Rejected; duration scaling cannot be applied only at the value-head pressure point in the current planner. |
 | Stratified initial option-feature registry | `l3-l7-stratified-registry-birth-paired-10k-005737`: spreading initial anchors across `R` worsened reward sum to `-23.227` and `0/10` positive-rate seeds. | Rejected; keep the current `optFeature[k] = k` birth rule. |
 | Implicit TD denominator plus raw planning advantage | `l3-l7-implicit-raw-planadv-paired-10k-005940`: replacing the soft planning advantage with raw advantage and an implicit value update regressed to `-44.286` and score-gradient mean `2.737e1`. | Rejected; raw planning pressure remains damaging even with implicit shrinkage. |
-| Fixed current Gaussian sigma | `l3-l7-fixed-current-sigma-paired-10k-010112`: freezing scale coordinates at the then-current structural sigma collapsed reward to `-115.259` and removed useful score signal. | Historical rejection. The baseline differs by keeping capacity shape, zeroing reserved scale scores, and using natural-gradient-style mean credit; the promoted paired artifact is `.oak-benchmarks/baseline-1m`. |
+| Fixed current Gaussian sigma | `l3-l7-fixed-current-sigma-paired-10k-010112`: freezing scale coordinates at the then-current structural sigma collapsed reward to `-115.259` and removed useful score signal. | Historical rejection. The baseline differs by keeping capacity shape, zeroing reserved scale scores, and using residual-style mean credit; the promoted paired artifact is `.oak-benchmarks/baseline-1m`. |
 | Saturation-aware Gaussian score | `l3-l7-saturation-aware-score-paired-300k-011021`: ignoring score gradients for clamped continuous samples fixed the long-horizon score spike, but 300k reward regressed to `-526.692` versus the keeper's `-489.611`. | Rejected; the score spike needs a repair that does not reduce reward learning. |
 | Value-aware transition update weighting | `l3-l7-valueaware-transition-update-paired-10k-010253`: weighting transition TD by `|valueW[j]|` caused action magnitude growth and reward collapse to `-1054.454`. | Rejected; keep value-aware priority, not value-weighted transition updates. |
 | Registry-state fast feature clock | `l3-l7-unused-fast-feature-clock-paired-50k-010430`: fast feature testing while any never-used feature exists improved 10k to `-15.606`, but 50k regressed to `-113.198` and feature churn rose to `699.6`. | Rejected; early feature churn helps short screens but destroys the 50k gate. |
@@ -1035,8 +1034,9 @@ learning signal.
 Concurrent seed sweeps:
 
 - Use `OaK benchmark` with `OAK_BENCH_ENV=HalfCheetah-v4` for HalfCheetah-only
-  seed sweeps. This preserves the OperationQueue concurrency limit while
-  avoiding accidental all-env benchmark fan-out.
+  seed sweeps. The parent owns a workspace lock, launches independent worker
+  processes up to `OAK_BENCH_CONCURRENCY`, and deterministically refills
+  finished slots from the canonical seed/policy work list.
 - Do not fall back to sequential seed loops for ordinary multi-seed evidence
   unless a profiler or crash investigation requires serialized isolation.
 
@@ -1070,8 +1070,8 @@ Baseline for the next algorithmic change:
 
 - **Current baseline**: `.oak-benchmarks/baseline-1m`.
 - HalfCheetah 1M, 10 seeds x `{oak,random}`: Oak beats random `10/10`,
-  Oak NF zero `10/10`, mean Oak reward `-5872.287`, median `-5873.539`,
-  reward SD `31.928`, and mean paired lift `256756.771`.
+  Oak NF zero `10/10`, mean Oak reward `-5872.286`, median `-5873.518`,
+  reward SD `31.911`, and mean paired lift `256756.772`.
 - K1 and rebuild-era runs remain historical comparison artifacts, not
   baselines.
 

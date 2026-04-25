@@ -1,11 +1,3 @@
-// OakKernel.metal - Step 1-11 OaK rebuild.
-//
-// This kernel file follows the Plan order rather than the old L3-L7 fused scaffold:
-// normalized fixed anchors -> constructed features -> GVFs -> actor-critic ->
-// average reward -> option models/planning -> search control -> STOMP/Oak feedback.
-//
-// The agent still receives only the continuing (observation, previous action descriptor,
-// previous reward) stream. The wrapper remains the only action-space-aware code.
 #include <metal_stdlib>
 #include <float.h>
 using namespace metal;
@@ -31,7 +23,6 @@ struct KernelConfig {
     uint pOptPolicy, pOptReward, pOptTransition, pOptDuration;
     uint pPsiCross;
     uint pOneReward;
-    uint pGvfRate, pGvfValue;
     uint sObservation, sObsMean, sObsSM;
     uint sState;
     uint sPolicyMean, sActionSignal;
@@ -46,7 +37,6 @@ struct KernelConfig {
     uint sGradEnergy;
     uint sAlphaPsi, sBetaPsi, sHPsi, sGradEnergyPsi;
     uint sAlphaModel, sBetaModel, sHModel, sGradEnergyModel;
-    uint sAlphaGvf, sBetaGvf, sHGvf, sGradEnergyGvf;
     uint sActorAdv;
     uint sNTdMat;
     uint sOptRewardTd;
@@ -57,9 +47,7 @@ struct KernelConfig {
     uint sPrioOpt;
     uint sContinuation;
     uint sLambda, sKeyboardScore;
-    uint sGvfTd, sFeatureTraceDenom;
     uint sModelDenom;
-    uint sOptionPlanningUse;
     uint sValueGauge;
     uint uCounters;
     uint uOptFeature;
@@ -69,8 +57,7 @@ struct KernelConfig {
     uint uFeatureBirthCount;
     uint uSelectedOption, uHighModelOption;
     uint uModelAge;
-    uint uGvfAge, uBadFeatureAge;
-    uint uPrimitiveChannel;
+    uint uBadFeatureAge;
 };
 
 struct KernelScalars {
@@ -86,7 +73,6 @@ struct KernelStats {
     float rrStopAbsMean, valueAbsMean, terminationRate, optionDurationMean;
     float stateEffectiveRank;
     float importanceEss;
-    float gvfTdMean;
     float lambdaEffectiveRank;
     float actorUpdateNormMean, actorTdMean;
     float actorSupportEntropy;
@@ -99,14 +85,6 @@ inline float track_rate(uint step, uint cap) {
     return max(1.0f / (float(step) + 1.0f), 1.0f / float(max(cap, 1u)));
 }
 
-inline float hash_uniform(uint a, uint b, uint c) {
-    uint z = a ^ (b * 0x7feb352du) ^ (c * 0x846ca68bu);
-    z = (z ^ (z >> 16)) * 0x9e3779b9u;
-    z = (z ^ (z >> 13)) * 0xc2b2ae35u;
-    z ^= z >> 16;
-    return float(z >> 8) * 5.9604645e-8f;
-}
-
 struct Ctx {
     uint O, R, K, D, traceLevels, anchorCount, pageWidth;
     uint stepCount, stateSlot;
@@ -114,7 +92,6 @@ struct Ctx {
     float invR, invK, invOneInputWidth, metaEta;
     device float *valueW, *psi, *optPolicy, *optReward, *optTransition, *optDuration;
     device float *psiCross, *oneReward;
-    device float *gvfRate, *gvfValue;
     device float *observation, *observationMean, *obsSM;
     device float *state;
     device float *policyMean, *actionSignal, *optionScoreGrad, *optionPolicyMean;
@@ -125,21 +102,17 @@ struct Ctx {
     device float *gradEnergy;
     device float *alphaPsi, *betaPsi, *hPsi, *gradEnergyPsi;
     device float *alphaModel, *betaModel, *hModel, *gradEnergyModel;
-    device float *alphaGvf, *betaGvf, *hGvf, *gradEnergyGvf;
     device float *actorAdv;
     device float *nTdMat, *optRewardTd, *headDenom, *crossTd;
     device float *oneRewardTd, *oneStepDenom;
     device float *durationTd, *durationHat, *obsTraceMulti, *prioOpt, *continuation;
     device float *lambda, *keyboardScore;
-    device float *gvfTd, *featureTraceDenom;
     device float *modelDenom;
-    device float *optionPlanningUse;
     device float *valueGauge;
     device uint *counters, *optFeature, *featureAge, *optAge;
     device uint *featureParentA, *featureParentB, *featureKind, *featureBirthCount;
     device uint *selectedOption, *highModelOption, *modelAge;
-    device uint *gvfAge, *badFeatureAge;
-    device uint *primitiveChannel;
+    device uint *badFeatureAge;
     device KernelScalars *scalars;
     device KernelStats *stats;
 };
@@ -160,7 +133,6 @@ inline Ctx make_ctx(device float *params, device float *stateArena, device uint 
     c.optTransition = params + cfg.pOptTransition; c.optDuration = params + cfg.pOptDuration;
     c.psiCross = params + cfg.pPsiCross;
     c.oneReward = params + cfg.pOneReward;
-    c.gvfRate = params + cfg.pGvfRate; c.gvfValue = params + cfg.pGvfValue;
     c.observation = stateArena + cfg.sObservation; c.observationMean = stateArena + cfg.sObsMean;
     c.obsSM = stateArena + cfg.sObsSM; c.state = stateArena + cfg.sState;
     c.policyMean = stateArena + cfg.sPolicyMean; c.actionSignal = stateArena + cfg.sActionSignal;
@@ -177,8 +149,6 @@ inline Ctx make_ctx(device float *params, device float *stateArena, device uint 
     c.hPsi = stateArena + cfg.sHPsi; c.gradEnergyPsi = stateArena + cfg.sGradEnergyPsi;
     c.alphaModel = stateArena + cfg.sAlphaModel; c.betaModel = stateArena + cfg.sBetaModel;
     c.hModel = stateArena + cfg.sHModel; c.gradEnergyModel = stateArena + cfg.sGradEnergyModel;
-    c.alphaGvf = stateArena + cfg.sAlphaGvf; c.betaGvf = stateArena + cfg.sBetaGvf;
-    c.hGvf = stateArena + cfg.sHGvf; c.gradEnergyGvf = stateArena + cfg.sGradEnergyGvf;
     c.actorAdv = stateArena + cfg.sActorAdv;
     c.nTdMat = stateArena + cfg.sNTdMat; c.optRewardTd = stateArena + cfg.sOptRewardTd;
     c.headDenom = stateArena + cfg.sHeadDenom; c.crossTd = stateArena + cfg.sCrossTd;
@@ -189,10 +159,7 @@ inline Ctx make_ctx(device float *params, device float *stateArena, device uint 
     c.prioOpt = stateArena + cfg.sPrioOpt; c.continuation = stateArena + cfg.sContinuation;
     c.lambda = stateArena + cfg.sLambda;
     c.keyboardScore = stateArena + cfg.sKeyboardScore;
-    c.gvfTd = stateArena + cfg.sGvfTd;
-    c.featureTraceDenom = stateArena + cfg.sFeatureTraceDenom;
     c.modelDenom = stateArena + cfg.sModelDenom;
-    c.optionPlanningUse = stateArena + cfg.sOptionPlanningUse;
     c.valueGauge = stateArena + cfg.sValueGauge;
     c.counters = uintArena + cfg.uCounters; c.optFeature = uintArena + cfg.uOptFeature;
     c.featureAge = uintArena + cfg.uFeatureAge; c.optAge = uintArena + cfg.uOptAge;
@@ -201,8 +168,7 @@ inline Ctx make_ctx(device float *params, device float *stateArena, device uint 
     c.selectedOption = uintArena + cfg.uSelectedOption;
     c.highModelOption = uintArena + cfg.uHighModelOption;
     c.modelAge = uintArena + cfg.uModelAge;
-    c.gvfAge = uintArena + cfg.uGvfAge; c.badFeatureAge = uintArena + cfg.uBadFeatureAge;
-    c.primitiveChannel = uintArena + cfg.uPrimitiveChannel;
+    c.badFeatureAge = uintArena + cfg.uBadFeatureAge;
     c.scalars = scalars; c.stats = stats;
     return c;
 }
@@ -210,13 +176,6 @@ inline Ctx make_ctx(device float *params, device float *stateArena, device uint 
 inline device float *state_at(Ctx ctx, uint slot) { return ctx.state + slot * ctx.R; }
 inline float decode_duration(float raw) { return isfinite(raw) ? max(1.0f, raw) : 1.0f; }
 inline uint linear_input_width(Ctx ctx) { return (ctx.traceLevels + 1u) * ctx.O + ctx.D + 2u; }
-inline uint gvf_count(Ctx ctx) { return ctx.R + ctx.K + 2u; }
-inline uint gvf_page_count(Ctx ctx) {
-    return (gvf_count(ctx) + ctx.pageWidth - 1u) / max(ctx.pageWidth, 1u);
-}
-inline uint gvf_page_base(Ctx ctx) {
-    return (ctx.stepCount % max(gvf_page_count(ctx), 1u)) * ctx.pageWidth;
-}
 
 inline float standardized_obs(Ctx ctx, uint o) {
     float mean = ctx.observationMean[o];
@@ -236,54 +195,6 @@ inline float linear_input(Ctx ctx, uint idx) {
     if (tail < ctx.D) return ctx.actionSignal[tail];
     if (tail == ctx.D) return ctx.reward[0];
     return 1.0f;
-}
-
-inline float gvf_cumulant(Ctx ctx, device const float *curr, uint g) {
-    if (gvf_count(ctx) <= ctx.anchorCount) {
-        uint kind = g % 4u;
-        if (kind == 0u) return curr[g % ctx.R];
-        if (kind == 1u) {
-            if (ctx.D == 0u) return 0.0f;
-            return ctx.actionSignal[g % ctx.D];
-        }
-        if (kind == 2u) return ctx.reward[0] - ctx.scalars->rho;
-        return 0.0f;
-    }
-    if (g < ctx.R) return curr[g];
-    uint r = g - ctx.R;
-    if (r == 0u) return ctx.reward[0] - ctx.scalars->rho;
-    if (r == 1u) {
-        float e = 0.0f;
-        for (uint d = 0u; d < ctx.D; ++d) e = fma(ctx.actionSignal[d], ctx.actionSignal[d], e);
-        return e / float(max(ctx.D, 1u));
-    }
-    r -= 2u;
-    if (r < ctx.K) return 1.0f - ctx.continuation[r];
-    return 0.0f;
-}
-
-inline float gvf_cumulant_tg(Ctx ctx, threadgroup const float *curr, uint g) {
-    if (gvf_count(ctx) <= ctx.anchorCount) {
-        uint kind = g % 4u;
-        if (kind == 0u) return curr[g % ctx.R];
-        if (kind == 1u) {
-            if (ctx.D == 0u) return 0.0f;
-            return ctx.actionSignal[g % ctx.D];
-        }
-        if (kind == 2u) return ctx.reward[0] - ctx.scalars->rho;
-        return 0.0f;
-    }
-    if (g < ctx.R) return curr[g];
-    uint r = g - ctx.R;
-    if (r == 0u) return ctx.reward[0] - ctx.scalars->rho;
-    if (r == 1u) {
-        float e = 0.0f;
-        for (uint d = 0u; d < ctx.D; ++d) e = fma(ctx.actionSignal[d], ctx.actionSignal[d], e);
-        return e / float(max(ctx.D, 1u));
-    }
-    r -= 2u;
-    if (r < ctx.K) return 1.0f - ctx.continuation[r];
-    return 0.0f;
 }
 
 inline void metaopt_update_slot(device float *alpha,
@@ -356,21 +267,17 @@ inline void oak_keyboard_predict_body(Ctx ctx, uint tid,
     if (tid == 0u) {
         float alphaTraceNorm = 0.0f;
         float modelTraceNorm = 0.0f;
-        float gvfTraceNorm = 0.0f;
         for (uint i = 0u; i < ctx.R; ++i) {
             float x = tgPrev[i];
             if (!isfinite(x)) continue;
             float xx = x * x;
             float av = ctx.alpha[i];
             float am = ctx.alphaModel[i];
-            float ag = ctx.alphaGvf[i];
             if (isfinite(av) && av > 0.0f) alphaTraceNorm = fma(av, xx, alphaTraceNorm);
             if (isfinite(am) && am > 0.0f) modelTraceNorm = fma(am, xx, modelTraceNorm);
-            if (isfinite(ag) && ag > 0.0f) gvfTraceNorm = fma(ag, xx, gvfTraceNorm);
         }
         tgScalars[7] = (isfinite(alphaTraceNorm) && alphaTraceNorm > 0.0f) ? alphaTraceNorm : 0.0f;
         tgScalars[10] = (isfinite(modelTraceNorm) && modelTraceNorm > 0.0f) ? modelTraceNorm : 0.0f;
-        ctx.featureTraceDenom[0] = ((isfinite(gvfTraceNorm) && gvfTraceNorm > 0.0f) ? gvfTraceNorm : 0.0f) + 1.0f;
         float oneTraceNorm = tgScalars[10];
         float actionAlpha = ctx.invOneInputWidth;
         for (uint d = 0u; d < ctx.D; ++d) {
@@ -433,24 +340,6 @@ inline void oak_keyboard_predict_body(Ctx ctx, uint tid,
         float td = (ctx.reward[0] - ctx.scalars->rho) + (1.0f - beta) * crossNext + beta * z - crossPrev;
         ctx.crossTd[tid] = isfinite(td) ? td : 0.0f;
     }
-    if (tid < ctx.pageWidth) {
-        uint g = gvf_page_base(ctx) + tid;
-        if (g < gvf_count(ctx)) {
-            float hPrev = 0.0f, hNext = 0.0f;
-            for (uint i = 0u; i < ctx.R; ++i) {
-                float w = ctx.gvfValue[g * ctx.R + i];
-                hPrev = fma(w, tgPrev[i], hPrev);
-                hNext = fma(w, tgCurr[i], hNext);
-            }
-            float d = gvf_cumulant_tg(ctx, tgCurr, g) - ctx.gvfRate[g] + hNext - hPrev;
-            ctx.gvfTd[g] = isfinite(d) ? d : 0.0f;
-            if (ctx.R > 0u && isfinite(hNext)) {
-                float w0 = ctx.gvfValue[g * ctx.R];
-                ctx.gvfValue[g * ctx.R] = safe_w(w0, w0 - hNext);
-            }
-        }
-    }
-    threadgroup_barrier(mem_flags::mem_threadgroup);
     if (tid == 0u) {
         float gapAbsSum = 0.0f, psiAbsSum = 0.0f, zAbsSum = 0.0f;
         for (uint k = 0u; k < ctx.K; ++k) {
@@ -597,7 +486,9 @@ kernel void oak_encode(device float *params [[buffer(0)]],
         bool directBias = false;
         if (i < ctx.anchorCount) {
             uint width = max(linear_input_width(ctx), 1u);
-            uint channel = ctx.primitiveChannel[i] % width;
+            uint channel = (i == 0u)
+                ? width - 1u
+                : ((i * max(width - 1u, 1u)) / max(ctx.anchorCount, 1u)) % max(width - 1u, 1u);
             raw = linear_input(ctx, channel);
             directBias = (channel + 1u == width);
         } else {
@@ -702,9 +593,6 @@ kernel void oak_plan(device float *params [[buffer(0)]],
         ctx.durationHat[k] = decode_duration(lRaw);
         float modelErr = nErr + rTd * rTd + (ctx.scalars->rho * dTd) * (ctx.scalars->rho * dTd);
         ctx.prioOpt[k] = isfinite(modelErr) ? sqrt(max(modelErr, 0.0f)) : 0.0f;
-        float useNew = ctx.optionPlanningUse[k] + ctx.invR * (ctx.prioOpt[k] - ctx.optionPlanningUse[k]);
-        ctx.optionPlanningUse[k] = safe_w(ctx.optionPlanningUse[k], useNew);
-
         if (k == 0u) {
             float rPred = 0.0f;
             for (uint i = 0u; i < ctx.R; ++i) rPred = fma(ctx.oneReward[i], prev[i], rPred);
@@ -776,12 +664,7 @@ kernel void oak_learn_heads(device float *params [[buffer(0)]],
                             uint gid [[thread_position_in_grid]]) {
     Ctx ctx = make_ctx(params, stateArena, uintArena, scalars, stats, cfg);
     device const float *prev = state_at(ctx, ctx.stateSlot);
-    device const float *curr = state_at(ctx, 1u - ctx.stateSlot);
     uint nVal = ctx.R;
-    uint G = gvf_count(ctx);
-    uint gvfBase = gvf_page_base(ctx);
-    uint nGRate = min(ctx.pageWidth, G);
-    uint nGValue = nGRate * ctx.R;
     uint nPsi = ctx.K * ctx.R;
     uint nCross = ctx.K * ctx.R;
     uint nPi = ctx.K * ctx.D * ctx.R;
@@ -789,8 +672,7 @@ kernel void oak_learn_heads(device float *params [[buffer(0)]],
     uint nOT = ctx.K * ctx.R * ctx.R;
     uint nOD = ctx.K * ctx.R;
     uint nOneR = ctx.R;
-    uint total = nVal + nGRate + nGValue + nPsi + nCross + nPi + nOR + nOT
-               + nOD + nOneR;
+    uint total = nVal + nPsi + nCross + nPi + nOR + nOT + nOD + nOneR;
     if (gid >= total) return;
 
     if (gid < nVal) {
@@ -801,36 +683,6 @@ kernel void oak_learn_heads(device float *params [[buffer(0)]],
         return;
     }
     gid -= nVal;
-    if (gid < nGRate) {
-        uint g = gvfBase + gid;
-        if (g >= G) return;
-        float d = ctx.gvfTd[g];
-        if (!isfinite(d)) d = 0.0f;
-        uint last = min(ctx.gvfAge[g], ctx.stepCount);
-        uint age = ctx.stepCount - last;
-        float alphaRate = 1.0f / float(max(age + 1u, ctx.R));
-        float c = gvf_cumulant(ctx, curr, g);
-        if (!isfinite(c)) c = 0.0f;
-        float rateErr = c - ctx.gvfRate[g];
-        if (!isfinite(rateErr)) rateErr = 0.0f;
-        float rate = ctx.gvfRate[g] + alphaRate * rateErr;
-        ctx.gvfRate[g] = safe_w(ctx.gvfRate[g], rate);
-        ctx.gvfAge[g] = ctx.stepCount;
-        return;
-    }
-    gid -= nGRate;
-    if (gid < nGValue) {
-        uint g = gvfBase + gid / ctx.R, i = gid % ctx.R;
-        if (g >= G) return;
-        float d = ctx.gvfTd[g];
-        if (!isfinite(d)) d = 0.0f;
-        float w = ctx.gvfValue[g * ctx.R + i];
-        float denom = ctx.featureTraceDenom[0];
-        float scale = (isfinite(denom) && denom > 0.0f) ? (1.0f / denom) : 0.0f;
-        ctx.gvfValue[g * ctx.R + i] = safe_w(w, w + ctx.alphaGvf[i] * d * prev[i] * scale);
-        return;
-    }
-    gid -= nGValue;
     if (gid < nPsi) {
         uint k = gid / ctx.R, i = gid % ctx.R;
         float rho = ctx.importance[k];
@@ -942,7 +794,6 @@ kernel void oak_replace(device float *params [[buffer(0)]],
                         device KernelScalars *scalars [[buffer(3)]],
                         device KernelStats *stats [[buffer(4)]],
                         constant KernelConfig &cfg [[buffer(5)]],
-                        uint group [[threadgroup_position_in_grid]],
                         uint tid [[thread_position_in_threadgroup]],
                         uint tgW [[threads_per_threadgroup]]) {
     Ctx ctx = make_ctx(params, stateArena, uintArena, scalars, stats, cfg);
@@ -951,8 +802,6 @@ kernel void oak_replace(device float *params [[buffer(0)]],
     threadgroup float tgCurrState[OAK_MAX_RANK];
     for (uint i = tid; i < ctx.R; i += tgW) tgCurrState[i] = curr[i];
     threadgroup_barrier(mem_flags::mem_threadgroup);
-    emit_action_grid(ctx, tgCurrState, group, tid, tgW);
-    if (group != 0u) return;
     float invT = track_rate(ctx.stepCount, ctx.R);
     for (uint i = tid; i < ctx.R; i += tgW) {
         float psiSignal = (i < ctx.K) ? ctx.tdPsi[i] : 0.0f;
@@ -1032,9 +881,7 @@ kernel void oak_replace(device float *params [[buffer(0)]],
             if (!isfinite(util)) util = 0.0f;
 	            float red = fabs(tgCurrState[i] * tgCurrState[pa]);
             if (!isfinite(red)) red = 0.0f;
-	            float modelUse = (i < ctx.K)
-	                ? (ctx.utilOpt[i] + ctx.prioOpt[i] + ctx.optionPlanningUse[i])
-	                : 0.0f;
+		            float modelUse = (i < ctx.K) ? (ctx.utilOpt[i] + ctx.prioOpt[i]) : 0.0f;
 	            if (!isfinite(modelUse)) modelUse = 0.0f;
 	            float downstreamUse = modelUse + fabs(ctx.valueW[i]);
             if (!isfinite(downstreamUse)) downstreamUse = 0.0f;
@@ -1052,17 +899,6 @@ kernel void oak_replace(device float *params [[buffer(0)]],
             }
         }
     }
-		    float gvfTdAbs = 0.0f;
-		    uint G = max(gvf_count(ctx), 1u);
-		    uint gBaseStats = gvf_page_base(ctx);
-		    uint gEndStats = min(gBaseStats + ctx.pageWidth, G);
-		    float gStatsN = float(max(gEndStats - gBaseStats, 1u));
-		    for (uint g = gBaseStats; g < gEndStats; ++g) {
-		        gvfTdAbs += fabs(ctx.gvfTd[g]);
-		    }
-		    float invG = 1.0f / gStatsN;
-			    ctx.stats->gvfTdMean = gvfTdAbs * invG;
-
 	    uint selectedPage = ctx.highModelOption[0] / max(ctx.pageWidth, 1u);
 	    for (uint k = 0u; k < ctx.K; ++k) {
 	        if (ctx.modelAge[k] < 0xffffffffu) ctx.modelAge[k] += 1u;
@@ -1083,31 +919,14 @@ kernel void oak_replace(device float *params [[buffer(0)]],
     bool lowDownstreamUse = worstDownstream < meanEligibleDownstream;
 	    bool structurallyReplaceable = (eligible > 1u) &&
 	        (lowUtility && highRedundancy && lowDownstreamUse);
-		    uint wouldCommit = 0u;
-		    for (uint i = candidateStart; i < ctx.R; ++i) {
-		            bool bad = false;
-		            if (ctx.featureAge[i] >= ctx.R && eligible > 1u) {
-		                uint pa = ctx.featureParentA[i] % ctx.R;
-		                float util = ctx.utilFeat[i];
-		                if (!isfinite(util)) util = 0.0f;
-		                float red = fabs(tgCurrState[i] * tgCurrState[pa]);
-		                if (!isfinite(red)) red = 0.0f;
-			                float modelUse = (i < ctx.K)
-		                    ? (ctx.utilOpt[i] + ctx.prioOpt[i] + ctx.optionPlanningUse[i])
-				                    : 0.0f;
-			                if (!isfinite(modelUse)) modelUse = 0.0f;
-			                float downstreamUse = modelUse + fabs(ctx.valueW[i]);
-		                if (!isfinite(downstreamUse)) downstreamUse = 0.0f;
-		                bad = (util < meanEligibleUtil) && (red > meanEligibleRed) && (downstreamUse < meanEligibleDownstream);
-		            }
-		            if (bad) {
-		                if (ctx.badFeatureAge[i] < 0xffffffffu) ctx.badFeatureAge[i] += 1u;
-		            } else {
-		                ctx.badFeatureAge[i] = 0u;
-		            }
-		    }
-		    if (worst < ctx.R && ctx.badFeatureAge[worst] >= ctx.R) wouldCommit = 1u;
-	    bool doReplace = structurallyReplaceable && (wouldCommit != 0u);
+    for (uint i = candidateStart; i < ctx.R; ++i) {
+        if (structurallyReplaceable && i == worst) {
+            if (ctx.badFeatureAge[i] < 0xffffffffu) ctx.badFeatureAge[i] += 1u;
+        } else {
+            ctx.badFeatureAge[i] = 0u;
+        }
+    }
+	    bool doReplace = structurallyReplaceable && worst < ctx.R && ctx.badFeatureAge[worst] >= ctx.R;
     if (doReplace && worst < ctx.R) {
         uint pa = 0u, pb = (ctx.R > 1u) ? 1u : 0u;
         float bestA = -FLT_MAX, bestB = -FLT_MAX;
@@ -1128,46 +947,31 @@ kernel void oak_replace(device float *params [[buffer(0)]],
         ctx.featureBirthCount[worst] = birth;
         ctx.featureParentA[worst] = pa;
         ctx.featureParentB[worst] = pb;
-        ctx.featureKind[worst] = birth % 3u;
-	        ctx.featureAge[worst] = 0u;
+	        ctx.featureKind[worst] = birth % 3u;
+		        ctx.featureAge[worst] = 0u;
 	        ctx.badFeatureAge[worst] = 0u;
 	        ctx.featureMean[worst] = 0.0f; ctx.featureSM[worst] = 0.0f;
 	        ctx.utilFeat[worst] = 0.0f; ctx.valueW[worst] = 0.0f; ctx.bonusW[worst] = 0.0f;
-	        uint GAll = gvf_count(ctx);
-	        if (worst < GAll) {
-	            ctx.gvfRate[worst] = 0.0f; ctx.gvfTd[worst] = 0.0f;
-	            ctx.gvfAge[worst] = 0u;
-	        }
 	        ctx.alpha[worst] = ctx.invR;
 	        ctx.beta[worst] = log(ctx.alpha[worst]); ctx.hMeta[worst] = 0.0f; ctx.gradEnergy[worst] = 0.0f;
 	        ctx.alphaPsi[worst] = ctx.invR;
 	        ctx.betaPsi[worst] = log(ctx.alphaPsi[worst]); ctx.hPsi[worst] = 0.0f; ctx.gradEnergyPsi[worst] = 0.0f;
 		        ctx.alphaModel[worst] = ctx.invR;
 	        ctx.betaModel[worst] = log(ctx.alphaModel[worst]); ctx.hModel[worst] = 0.0f; ctx.gradEnergyModel[worst] = 0.0f;
-	        ctx.alphaGvf[worst] = ctx.invR;
-	        ctx.betaGvf[worst] = log(ctx.alphaGvf[worst]); ctx.hGvf[worst] = 0.0f; ctx.gradEnergyGvf[worst] = 0.0f;
 	        uint k = 0u;
 	        float worstBasis = FLT_MAX;
 	        for (uint ok = 0u; ok < ctx.K; ++ok) {
-	            float use = ctx.optionPlanningUse[ok] + ctx.utilOpt[ok];
+		            float use = ctx.utilOpt[ok] + ctx.prioOpt[ok];
 	            if (!isfinite(use)) use = FLT_MAX;
 	            if (ctx.optFeature[ok] == worst) { k = ok; worstBasis = -FLT_MAX; break; }
 	            if (use < worstBasis) { worstBasis = use; k = ok; }
 	        }
 		        ctx.optAge[k] = 0u; ctx.optFeature[k] = worst; ctx.utilOpt[k] = float(ctx.R);
 	        ctx.actorAdv[k] = 0.0f;
-        ctx.optionPlanningUse[k] = 0.0f;
-	        uint termG = ctx.R + 2u + k;
-	        if (termG < GAll) {
-	            ctx.gvfRate[termG] = 0.0f; ctx.gvfTd[termG] = 0.0f;
-	            ctx.gvfAge[termG] = 0u;
-	        }
 		        for (uint i = 0u; i < ctx.R; ++i) {
 		            ctx.psi[k * ctx.R + i] = 0.0f;
 		            ctx.optReward[k * ctx.R + i] = 0.0f;
 	            ctx.optDuration[k * ctx.R + i] = 0.0f;
-	            if (worst < GAll) ctx.gvfValue[worst * ctx.R + i] = 0.0f;
-	            if (termG < GAll) ctx.gvfValue[termG * ctx.R + i] = 0.0f;
 	            for (uint d = 0u; d < ctx.D; ++d) ctx.optPolicy[(k * ctx.D + d) * ctx.R + i] = 0.0f;
 	            for (uint j = 0u; j < ctx.R; ++j) ctx.optTransition[k * ctx.R * ctx.R + j * ctx.R + i] = 0.0f;
 	            for (uint ci = 0u; ci < ctx.K; ++ci) {
@@ -1175,7 +979,6 @@ kernel void oak_replace(device float *params [[buffer(0)]],
 	                ctx.psiCross[(ci * ctx.K + k) * ctx.R + i] = 0.0f;
 	            }
         }
-	        for (uint g = 0u; g < GAll; ++g) ctx.gvfValue[g * ctx.R + worst] = 0.0f;
 	        float invSqrtR = rsqrt(float(max(ctx.R, 1u)));
 	        ctx.psi[k * ctx.R + worst] = invSqrtR;
 	        ctx.psiCross[(k * ctx.K + worst) * ctx.R + worst] = invSqrtR;
@@ -1194,4 +997,13 @@ kernel void oak_replace(device float *params [[buffer(0)]],
     ctx.stats->oakFeatureReinitCount = float(ctx.counters[OAK_CNT_REINIT_FEAT]);
     ctx.scalars->stateSlot = 1u - ctx.stateSlot;
     ctx.scalars->stepCount = ctx.stepCount + 1u;
+}
+
+kernel void oak_action_emit(device float *params [[buffer(0)]], device float *stateArena [[buffer(1)]], device uint *uintArena [[buffer(2)]], device KernelScalars *scalars [[buffer(3)]], device KernelStats *stats [[buffer(4)]], constant KernelConfig &cfg [[buffer(5)]], uint group [[threadgroup_position_in_grid]], uint tid [[thread_position_in_threadgroup]], uint tgW [[threads_per_threadgroup]]) {
+    Ctx ctx = make_ctx(params, stateArena, uintArena, scalars, stats, cfg);
+    device const float *curr = state_at(ctx, ctx.stateSlot);
+    threadgroup float tgCurrState[OAK_MAX_RANK];
+    for (uint i = tid; i < ctx.R; i += tgW) tgCurrState[i] = curr[i];
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    emit_action_grid(ctx, tgCurrState, group, tid, tgW);
 }

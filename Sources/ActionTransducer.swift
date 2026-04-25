@@ -37,7 +37,6 @@ enum ActionTransducer {
                                optionCount: Int,
                                envAction: UnsafeMutablePointer<Float>,
                                actionSignal: UnsafeMutablePointer<Float>,
-                               scoreGrad: UnsafeMutablePointer<Float>,
                                optionScoreGrad: UnsafeMutablePointer<Float>?,
                                importance: UnsafeMutablePointer<Float>?,
                                optionLogProbScratch: UnsafeMutablePointer<Float>?,
@@ -80,8 +79,6 @@ enum ActionTransducer {
                 for d in 0..<n { z += exp(policyMean[pIdx + d] - maxLogit) }
                 let invZ: Float = 1.0 / max(z, .leastNormalMagnitude)
                 for d in 0..<n {
-                    let pi = exp(policyMean[pIdx + d] - maxLogit) * invZ
-                    scoreGrad[pIdx + d] = ((d == bestIdx) ? 1.0 : 0.0) - pi
                     actionSignal[pIdx + d] = (d == bestIdx) ? 1.0 : 0.0
                 }
                 behaviorLogProb += log(max(exp(policyMean[pIdx + bestIdx] - maxLogit) * invZ,
@@ -119,8 +116,6 @@ enum ActionTransducer {
                     envAction[aIdx + d] = clamped
                     actionSignal[pIdx + d] = clamped
                     actionSignal[scaleBase + d] = 0
-                    scoreGrad[pIdx + d] = z * sigma
-                    scoreGrad[scaleBase + d] = 0
                     behaviorLogProb += -log(sigma) - 0.5 * z * z
                     if let opt = optionPolicyMean {
                         for k in 0..<optionCount {
