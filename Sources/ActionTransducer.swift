@@ -113,31 +113,24 @@ enum ActionTransducer {
                 for d in 0..<a {
                     let z = nextNormal(&rngState)
                     let mu = policyMean[pIdx + d]
-                    let logSigma = policyMean[scaleBase + d]
-                    let sigma = sigmaBase * exp(logSigma)
+                    let sigma = sigmaBase
                     let raw = mu + sigma * z
                     let clamped = max(low[d], min(high[d], raw.isFinite ? raw : 0))
                     envAction[aIdx + d] = clamped
                     actionSignal[pIdx + d] = clamped
                     actionSignal[scaleBase + d] = 0
                     scoreGrad[pIdx + d] = z * sigma
-                    scoreGrad[scaleBase + d] = z * z - 1.0
-                    behaviorLogProb += (sigma.isFinite && sigma > 0)
-                        ? (-log(sigma) - 0.5 * z * z)
-                        : Float.nan
+                    scoreGrad[scaleBase + d] = 0
+                    behaviorLogProb += -log(sigma) - 0.5 * z * z
                     if let opt = optionPolicyMean {
                         for k in 0..<optionCount {
                             let base = k * dPolicy
                             let optMu = opt[base + pIdx + d]
-                            let optLogSigma = opt[base + scaleBase + d]
-                            let optSigma = sigmaBase * exp(optLogSigma)
-                            let oz = (optSigma.isFinite && optSigma > 0) ? ((raw - optMu) / optSigma) : Float.nan
-                            optionLogProbScratch?[k] += (optSigma.isFinite && optSigma > 0)
-                                ? (-log(optSigma) - 0.5 * oz * oz)
-                                : Float.nan
+                            let oz = (raw - optMu) / sigma
+                            optionLogProbScratch?[k] += -log(sigma) - 0.5 * oz * oz
                             if let osg = optionScoreGrad {
-                                osg[base + pIdx + d] = oz * optSigma
-                                osg[base + scaleBase + d] = oz * oz - 1.0
+                                osg[base + pIdx + d] = oz * sigma
+                                osg[base + scaleBase + d] = 0
                             }
                         }
                     }
