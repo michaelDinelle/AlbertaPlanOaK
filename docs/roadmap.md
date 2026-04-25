@@ -97,7 +97,7 @@ that terminal value with a plain feature bonus is rejected by the primary paper.
 
 | Audit item | Status | Live response / evidence |
 |---|---|---|
-| `K <= 32` as invariant | Accepted drift | Removed as an invariant. K now equals R; the old 32-wide option page scheduler is deleted. Threadgroup width is derived from Metal pipeline execution width for hardware occupancy. HalfCheetah default R is stream-derived (`max(obsDim, 2*D_policy)`, R=24 for the current Box mean/reserved-scale wrapper), with `OAK_RANK` as explicit compute-budget override. |
+| `K <= 32` as invariant | Accepted drift | Removed as an invariant. K now equals R; the old 32-wide option page scheduler is deleted. Threadgroup width is derived from Metal pipeline execution width for hardware occupancy. R is stream-derived (`max(obsDim, 2*D_policy)`, R=24 for the current HalfCheetah Box mean/reserved-scale wrapper); the rank override knob was deleted as a structural fork. |
 | B=1 as sacred law | Accepted drift | Reworded as current single-agent stream semantics. Future batched kernels are allowed only for N independent agents with no cross-stream reductions. |
 | Deep Fourier / random-projection default | Accepted | Default state construction is now direct normalized experience channels plus constructed feature slots. Fourier, deep Fourier, and random projection remain experimental modes only; they are not Alberta Plan law. |
 | Feature finding | Partial live | Constructed features use signed product, signed sum, and parent-gated residual forms with parent utility/decorrelation diagnostics. Replacement is still young and needs long-run evidence. |
@@ -1044,8 +1044,9 @@ Concurrent seed sweeps:
 
 - Use `OaK benchmark` with `OAK_BENCH_ENV=HalfCheetah-v4` for HalfCheetah-only
   seed sweeps. The parent owns a workspace lock, launches independent worker
-  processes up to `OAK_BENCH_CONCURRENCY`, and deterministically refills
-  finished slots from the canonical seed/policy work list.
+  processes at structural max concurrency (all logical cores), and
+  deterministically refills finished slots from the canonical seed/policy work
+  list.
 - Do not fall back to sequential seed loops for ordinary multi-seed evidence
   unless a profiler or crash investigation requires serialized isolation.
 

@@ -136,7 +136,7 @@ Kernel-side fields are populated only for `oak`:
 
 | Command | Use |
 |---|---|
-| `OaK benchmark` | Concurrent single-env multi-seed sweep. Each item runs in its own worker process so native env/global state cannot leak across independent streams. `OAK_BENCH_ENV` selects the env (default `HalfCheetah-v4`); `OAK_BENCH_STEPS`, `OAK_BENCH_SEED_COUNT`, `OAK_BENCH_POLICIES`, `OAK_BENCH_CONCURRENCY` (default/max = all logical cores; accepts `auto`/`max`). One benchmark launcher owns the workspace at a time; nonempty requested roots get a fresh suffixed output dir, and finished worker slots are refilled deterministically from the canonical work list. |
+| `OaK benchmark` | Concurrent single-env multi-seed sweep. Each item runs in its own worker process so native env/global state cannot leak across independent streams. `OAK_BENCH_ENV` selects the env (default `HalfCheetah-v4`); `OAK_BENCH_STEPS`, `OAK_BENCH_SEED_COUNT`, and `OAK_BENCH_POLICIES` define the workload. Concurrency is structural max: all logical cores, with deterministic refill from the canonical work list. One benchmark launcher owns the workspace at a time; nonempty requested roots get a fresh suffixed output dir. |
 
 There is no deep-diagnostics shadow path in the live engine. Add audit heads only when they earn a Plan role and pass the same speed/learning gates as behavior code.
 
