@@ -1,6 +1,7 @@
 # OaK roadmap - Plan-orthodox continual improvement
 
-Last audited: 2026-04-25, after promoting the new baseline.
+Last audited: 2026-04-25, after promoting the dead-code cleanup against the
+new baseline.
 The live branch has moved past the L3-L7 scaffold: default perception is now
 direct normalized experience channels plus constructed feature slots, K=R
 options/subtasks, exact wrapper-side one-step importance ratios, RR Eq. 4
@@ -24,7 +25,11 @@ Dead-code rule after baseline promotion: GPU `scoreGrad` plumbing was removed
 because the only kernel consumer wrote an unread threadgroup scalar; host
 `scoreGradL2Mean` telemetry remains. `oneReward` is now exactly `R` weights;
 the previously allocated action tail was never read by the keyboard or reward
-model and is deleted.
+model and is deleted. Promotion gate: `.oak-benchmarks/deadcode-nuke-1m`
+versus `.oak-benchmarks/baseline-15m` at the 1M heartbeat, 10 paired
+HalfCheetah seeds. Oak NF stayed zero `10/10`; mean Oak reward moved from
+`-5873.887` to `-5872.287` (`+1.600`), median moved from `-5873.550` to
+`-5873.539`, and mean paired lift moved from `256755.171` to `256756.771`.
 
 Baseline action-interface evidence note: the exact fixed-sigma-score seed-1
 gate failed by 100k, with actor support collapsed to zero and psi magnitudes
@@ -1074,6 +1079,8 @@ Baseline for the next algorithmic change:
   because rebuild seed 1 collapsed (`-339826.775`, NF total `216`).
 - K1 remains a comparison artifact, not a baseline
   (`halfcheetah-k1-15m` mean Oak `-212785.114`).
+- Current source includes the promoted dead-code cleanup validated by
+  `.oak-benchmarks/deadcode-nuke-1m` against the baseline's 1M trajectory.
 
 The roadmap objective is now sharper: repair the missing Plan-order pieces
 that prevent continuously improving learning, especially exact subtask/option
