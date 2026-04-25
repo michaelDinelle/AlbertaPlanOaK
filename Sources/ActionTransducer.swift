@@ -45,6 +45,7 @@ enum ActionTransducer {
                                importanceLog: UnsafeMutablePointer<Float>?,
                                optionLogProbScratch: UnsafeMutablePointer<Float>?,
                                rngState: inout UInt64) {
+        let uniformLatticeMin = 1.0 / Float(1 << 24)
         func nextU01(_ s: inout UInt64) -> Float {
             s &+= 0x9e3779b97f4a7c15
             var z = s
@@ -55,7 +56,7 @@ enum ActionTransducer {
         }
 
         func nextNormal(_ s: inout UInt64) -> Float {
-            let u1 = max(nextU01(&s), 1e-7)
+            let u1 = max(nextU01(&s), uniformLatticeMin)
             let u2 = nextU01(&s)
             return sqrt(-2 * log(u1)) * cos(2 * Float.pi * u2)
         }
@@ -79,7 +80,7 @@ enum ActionTransducer {
                     var bestKey = -Float.greatestFiniteMagnitude
                     for d in 0..<n {
                         let l = policyMean[mBase + pIdx + d]
-                        let u = max(nextU01(&rngState), 1e-7)
+                        let u = max(nextU01(&rngState), uniformLatticeMin)
                         let g = -log(-log(u))
                         let key = l + g
                         if key > bestKey { bestKey = key; bestIdx = d }

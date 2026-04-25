@@ -1,15 +1,15 @@
 # OaK roadmap - Plan-orthodox continual improvement
 
-Last audited: 2026-04-24, during the Step 1-11 rebuild. L1 remains rolled back.
+Last audited: 2026-04-25, during the predictive-capacity architectural leap.
 The live branch has moved past the L3-L7 scaffold: default perception is now
-normalized linear anchors plus constructed feature slots, K=R options/subtasks,
-exact wrapper-side one-step importance ratios, RR Eq. 4 continuation, an
-average-reward intra-option value head, Design-A keyboard cross-psi, raw reward
-plus duration option models, compact average-reward auxiliary GVFs, dense
-internal lambda with cached Design-A GPE scores, a one-step model in shadow
-mode, bounded model search control, and age/capacity-gated Oak replacement.
-Promotion is still gated by paired smoke, 1.5M screen, and 10M acceptance
-evidence.
+direct normalized experience channels plus constructed feature slots, K=R
+options/subtasks, exact wrapper-side one-step importance ratios, RR Eq. 4
+continuation with a differential-value gauge, an average-reward intra-option
+value head, signed cumulant-space Design-A keyboard GPE/GPI, raw reward plus
+duration option models, expanded average-reward GVFs over `G=R+K+3`
+experience cumulants, bounded prioritized-sweeping search control, and
+age/capacity-gated Oak replacement. Promotion is still gated by paired 100k,
+300k, and 1M evidence across seeds, not by random-beating alone.
 
 This roadmap is the control document for moving OaK toward the Alberta Plan's
 Step-11 Oak architecture. It is deliberately stricter than the old tier log:
@@ -24,8 +24,9 @@ Primary sources:
 - Option keyboard: `docs/papers/OptionKeyboard_CombiningSkills_2106.13105.pdf`
 - Option Keyboard Basis: `docs/papers/OptionKeyboardBasis_2505.00787.pdf`
 - Supporting current mechanisms: Reward Centering, MetaOptimize, GraMa,
-  Deep Fourier Features, generate-and-test, and prioritized sweeping papers in
-  `docs/papers/`.
+  generate-and-test, prioritized sweeping, and plasticity papers in
+  `docs/papers/`. Deep Fourier/random-projection encoders are experimental
+  references only, not the orthodox default.
 
 ## Audit Rules
 
@@ -60,7 +61,7 @@ that terminal value with a plain feature bonus is rejected by the primary paper.
 |---|---|---|
 | `K <= 32` as invariant | Accepted drift | Removed as an invariant. K now equals R; 32 is only the SIMD page width. HalfCheetah default R is stream-derived (`max(obsDim, 2*D_policy)`, R=24), with `OAK_RANK` as explicit compute-budget override. |
 | B=1 as sacred law | Accepted drift | Reworded as current single-agent stream semantics. Future batched kernels are allowed only for N independent agents with no cross-stream reductions. |
-| Deep Fourier default | Accepted | `encoder`/`phase` have been removed from the live default layout. State is normalized anchor projections plus constructed feature slots. |
+| Deep Fourier / random-projection default | Accepted | Default state construction is now direct normalized experience channels plus constructed feature slots. Fourier, deep Fourier, and random projection remain experimental modes only; they are not Alberta Plan law. |
 | Feature finding | Partial live | Constructed features use signed product, signed sum, and parent-gated residual forms with parent utility/decorrelation diagnostics. Replacement is still young and needs long-run evidence. |
 | Off-policy floors | Accepted | `max(chord,1/K)` floors are removed from live learning. Wrapper emits exact one-step ratios from behavior-option sampling; ratio diagnostics are live. |
 | Average-reward option values | Accepted | `optValue[K*R]` is live. Using `optValueTd` directly in the actor was tested in `rebuild-smoke-10k-policytd` and rejected: policy deltas became infinite before 10k. |
@@ -176,6 +177,66 @@ review):
   The long-horizon comparison for this math remains
   `research-correct-stats-sparse-10seed-100k` / `300k`; the COW fix is a
   hot-path copy change and does not alter learning.
+- `architectural-leap-normal50k-sampled-meta-stats`: default encoder no longer
+  uses hashed/random projections. It uses direct experience-channel anchors,
+  constructed features, a gauged RR stopping value, centered actor advantage,
+  live `rhoOpt`, signed cumulant-space keyboard, expanded GVFs, and
+  MetaOptimize family state with the squared-error curvature trace term from
+  the low-complexity MetaOptimize/IDBD special case. Seed-0 HalfCheetah is
+  NF-zero and improves 50k reward over the restored keeper (`-303.34` versus
+  `-404.06`), with high support (`importanceEss=0.995`, entropy `0.999`) and
+  calm score/action statistics. It is not yet a promoted keeper: SPS is
+  `2973`, just under the 3k guard, and the 10-seed 100k/long-horizon evidence
+  must decide whether the direct predictive-state architecture improves across
+  seeds.
+- `architectural-leap-seed0-100k-cross-denom`: seed 0 exposed the actual
+  collapse trigger. Before repair, heartbeats were calm through 60k but
+  `keyboardGpiMargin` grew to trillions, then `psiCross`/keyboard selection
+  fell into one-option support and action magnitudes overflowed. Applying the
+  same implicit one-step denominator used by `psi`/option values to `psiCross`
+  kept the formal GPE/GPI keyboard finite: seed 0 finished 100k NF-zero with
+  reward `-605.33`, `importanceEss=0.984`, entropy `0.997`, calm score/action,
+  and `keyboardGpiMargin=7.99`.
+- `architectural-leap-10seed-100k-cross-denom`: 10 paired seeds, rebuilt
+  Metal/Swift. Oak beats random `10/10`, NF zero `10/10`, mean Oak reward
+  `-602.20` versus random `-26423.56`, improving over the previous stabilized
+  100k mean (`-767.19`). Mean support is healthy (`importanceEss=0.953`,
+  entropy `0.993`) and score/action remain calm. Positive final reward-rate is
+  `4/10`, so this is a real architecture improvement but not a promotion to
+  sustained positive learning. 300k and 1M evidence remain required.
+- `architectural-leap-seed0-300k-cross-denom`: seed-0 long-horizon screen
+  passed the previous collapse signature. Reward is `-1809.68`, NF zero,
+  `importanceEss=0.997`, option-support entropy `0.9996`, calm action/score,
+  zero replacement churn, and `keyboardGpiMargin=14.0`. The run does not show
+  continuous positive reward-rate (`rewardRate=-0.0197`), but it avoids the
+  earlier seed-0 failure mode where the branch fell into one-option support and
+  huge action movement after a short positive window. 10-seed 300k is the next
+  required judge.
+- `bigworld-audit-current-1m`: current architectural-leap checkpoint after the
+  Big World stability audit, rebuilt Metal/Swift, process-isolated concurrent
+  10 seeds x `{oak,random}` at 1M. Oak is materially better than the previous
+  `current-keeper-hc-10seed-1m` failure but is not solved: mean Oak reward
+  improved from `-74449.58` to `-31360.39`, mean lift over random is about
+  `+232936`, mean ESS improved from `0.0417` to `0.530`, entropy from `0.0009`
+  to `0.557`, and concurrent SPS from `1398` to `2028`. NF remained zero.
+  However several seeds still collapse to the one-option floor or huge
+  action/score movement (`actionDeltaL2Mean` up to `4.49e301`,
+  `scoreGradL2Mean` up to `1.39e69`), planning/model diagnostics still show
+  finite hallucination-scale residuals (`planningBackupTdMean` up to
+  `3.38e38`, `modelExpectedImprovementMean` up to `8.10e15`), and option
+  duration can drift to `2.00e22`. This is a better research checkpoint, not a
+  keeper promotion; next cleanup must remove remaining Big World violations and
+  replace live model-value coupling with a projected/GTD-style model-planning
+  path before another promotion attempt.
+- `architectural-leap` rejected integration attempts: raw actor MetaOptimize
+  without centered subtask advantage collapsed ESS/action support before 10k;
+  full-rank non-value MetaOptimize plus primitive-anchor candidate scans
+  suppressed speed; basis Gram diagnostics doubled `oak_replace`. These were
+  repaired by centering actor advantage across options, adding the curvature
+  term to the MetaOptimize sensitivity trace, servicing non-value family
+  MetaOptimize on a structural feature slot each step, and moving expensive
+  diagnostics out of the hot path. RR bonus remains stopping-value machinery
+  only (`rrBonusLeakCount=0`).
 - `research-correct-actornorm-10k`: rejected immediately. The square-root actor
   normalization produced NF zero but one-option floor from heartbeat 1, enormous
   score/action magnitudes, reward `-5997`, and `2877` SPS.
