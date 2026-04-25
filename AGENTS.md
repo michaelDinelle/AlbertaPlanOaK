@@ -43,7 +43,7 @@ Strict current-status audit lives in `docs/roadmap.md`. The literature target is
 - Options = policies + termination. **Current rebuild continuation is derived from the RR stopping comparison, not H1 model-confidence hysteresis.**
 - Option models r̂(s,o), n̂(s,o), and for average-reward options duration l̂(s,o), used for planning. **Current L3-L7 keeps the orthodox raw option-reward-plus-duration form: `Q = rHat - rho*lHat + V(nHat)`. A coherent differential option-reward alternative was tested and rejected by the 10k paired gate, so do not revive it without materially new evidence.**
 - Planning over option models (RR-Subtasks eq. 19 / average-reward option backup).
-- **Option keyboard** = real-valued vector λ ∈ R^K, one component per subtask. Design A: chord blends K component options; model treats chord as opaque descriptor. Design B: chord defines a joint subtask. **Current OaK uses formal signed cumulant-space Design-A GPE/GPI to choose one behavior option so exact one-step off-policy ratios remain valid; it does not yet learn a chord-descriptor model.**
+- **Option keyboard** = real-valued vector λ ∈ R^K, one component per subtask. Design A: chord blends K component options; model treats chord as opaque descriptor. Design B: chord defines a joint subtask. **Current OaK has deleted the unproven signed-λ/`psiCross` keeper path and chooses one behavior option by RR continuation plus direct `psiNext`, preserving exact one-step off-policy ratios while a true chord-descriptor model remains open.**
 - **Feedback / utility / remove-replace.** Continually assess utility of features, subtasks, options, and option models. Replace what isn't pulling weight (Plan Step 11 + RR-Subtasks §8 FCSTOMP). **Current rebuild has age-gated feature/option-bundle replacement, `optFeature`, feature age, option age, and feature-ever-used metadata; richer utility remains an active research frontier.**
 
 ### What the Plan eschews
@@ -79,46 +79,44 @@ The agent is a focused-kernel single-stream Oak prototype over the Plan steps. K
 |---|---|---|
 | `valueW` | R | Main value GVF (cumulant = reward, differential, ρ̄-centered). |
 | `psi` | K · R | K=R feature-indexed RR subtask GVFs. Cumulant is shared average-reward-centered reward; stopping value is RR Eq. 4: `V(s') - valueW[i]·x_i(s') + bonusW[i]·x_i(s')`. |
-| `psiCross` | K · K · R | Design-A option-keyboard cross-subtask evaluation. Dense internal λ is evaluated through cached/pagewise GPE scores. |
 | `optPolicy` | K · D · R | K component policies. The wrapper samples the selected behavior option and returns exact one-step importance ratios for the active bank. |
 | `optReward` | K · R | K stopping-aware option reward models r̂^k. |
 | `optTransition` | K · R · R | K dense stopping-aware transition models `n̂^k_j(s) = Σ_i w^k_{j,i}·s[i]`. |
 | `optDuration` | K · R | K average-reward option-duration models l̂^k with a structural one-step lower bound at decode. |
-| `oneReward` | R | Live reward-cumulant descriptor used by the signed Option Keyboard λ and updated every step. |
 
 State representation is a finite adaptive predictive state, not a full reconstruction of the world: direct normalized experience channels (observation coordinates, multi-timescale observation traces, previous abstract action descriptor, previous reward, and an affine channel) plus constructed feature slots. Deep Fourier, random Fourier, and random-projection encoders are optional experimental modes, not Alberta Plan law. Constructed slots remain replaceable signed products/sums/residuals of useful parents. Plasticity is driven by MetaOptimize-style `alpha/beta/h/gradEnergy` families plus age/utility replacement; raw IDBD/Autostep are historical relatives, not the implementation target.
 
 ### Pipeline (6 Metal dispatches per step, direct command encoding)
 
 ```
-oak_encode(+keyboard_predict) → oak_plan → oak_plan_reduce → oak_learn_heads → oak_replace → oak_action_emit
+oak_encode → oak_plan → oak_plan_reduce → oak_learn_heads → oak_replace → oak_action_emit
 ```
 
 | Kernel | What it does |
 |---|---|
-| `oak_encode` | Updates observation/traces, builds normalized anchor/constructed state features, then runs keyboard/prediction: value TD, RR subtask TD, RR continuation, signed cumulant-space λ, and Design-A GPI behavior selection. |
-| `oak_plan` | Updates the scheduled option page/slots' stopping-aware model TDs, duration TDs, raw-reward option model, and the one-step reward descriptor TD. |
+| `oak_encode` | Updates observation/traces, builds normalized anchor/constructed state features, then runs prediction/control: value TD, RR subtask TD, RR continuation, and direct RR option selection. |
+| `oak_plan` | Updates the scheduled option page/slots' stopping-aware model TDs, duration TDs, and raw-reward option model. |
 | `oak_plan_reduce` | Reduces model Q/priority and selects high-priority/stale model pages for fair search control. When K fits one SIMD page, the whole option bank is planned. |
-| `oak_learn_heads` | Updates value, psi, psiCross, option policy, option reward/transition/duration, and the one-step reward descriptor using exact one-step ratios and wrapper-provided target-option score gradients. |
+| `oak_learn_heads` | Updates value, psi, option policy, and option reward/transition/duration using exact one-step ratios and wrapper-provided target-option score gradients. |
 | `oak_replace` → `oak_action_emit` | Commits utility/meta-learning diagnostics and age/capacity-gated replacements, then emits all option policy means after a dispatch boundary so action emission cannot race replacement writes. |
 
 ### Action interface (Inv-1)
 
-Each env declares a structured action spec — a list of components, each `Discrete N` (categorical) or `Box A` (continuous with `[low, high]` bounds). The integer `D_policy = Σ_components(component_param_count)` is the agent's only window into the env's action structure.
+Each env declares one structured action spec: `Discrete N` (categorical) or `Box A` (continuous with `[low, high]` bounds). The integer `D_policy = component_param_count` is the agent's only window into the env's action structure.
 
 The agent emits `policyMean[D_policy]` from `oak_meta_action`. The env-wrapper layer (`EnvPoolEnv.sampleAndStep`) is the **sole** site that samples actions and computes score functions:
 
 - Discrete N: Gumbel-max categorical (`-log(-log(U))` + argmax); target-option actor scores use `1{a=d} − π_d` (Maddison 2014; Williams 1992).
 - Box A: currently exposes `2A` policy coordinates to keep `D_policy`, default rank, and K stable. The first A coordinates are means; the second A coordinates are wrapper-reserved/inert. The wrapper samples with structural fixed `σ = 1/D_policy`, emits residual-style mean credit (`raw − μ`) for Box mean slots, writes zero score/action-signal entries for reserved scale slots, and clamps only the env-facing action. Full `D_policy = A` mean-only deletion failed the 1M gate and remains rejected unless a different actor geometry earns fresh evidence.
 
-Adding a new env or action-space component type requires adding to `ActionComponent` in Swift; no agent or kernel changes.
+Adding a new env or action-space shape requires adding to `ActionSpec` in Swift; no agent or kernel changes.
 `doneCount` is a wrapper random-restart metric, not an episode signal to OaK; the engine state is never reset on `done`.
 
 ## Run metrics JSON
 
-Each `run`, `diagnose`, and `benchmark` writes one pretty-printed JSON file with stable alphabetical key order (`schemaVersion: 4`).
+Each benchmark worker writes one pretty-printed JSON file with stable alphabetical key order (`schemaVersion: 5`).
 
-**Top-level keys:** `command`, `envId`, `policy`, `seed`, `numEnvs` (always 1 — single-stream), `stopAfterMeasuredSteps`, `observationDim`, `actionDim`, `actionDiscreteCount` (when discrete), `measuredStepCount`, `measuredSeconds`, `stepsPerSecond`, `rewardSum`, `doneCount`, `stopReason`, `health`, `diagnostic` (only with `--diag` or for heartbeats).
+**Top-level keys:** `command`, `envId`, `policy`, `seed`, `numEnvs` (always 1 — single-stream), `stopAfterMeasuredSteps`, `observationDim`, `actionDim`, `actionDiscreteCount` (when discrete), `measuredStepCount`, `measuredSeconds`, `stepsPerSecond`, `rewardSum`, `doneCount`, `stopReason`, `heartbeatSequence`, and `health`.
 
 **`health` block.** Symmetric across policies. Host-computable fields are populated for ANY policy (oak or random):
 
@@ -130,9 +128,8 @@ Kernel-side fields are populated only for `oak`:
 
 - `oakOptionReinitCountFinal`, `oakFeatureReinitCountFinal` — cumulative age-gated generate-and-test replacement counts.
 - `nonFiniteByPhase` = `{"encode": N, "learn": N, "plan": N, "tdPsi": N}` — per-phase NF counts. **Healthy = all zeros across the run.**
-- Search/replacement diagnostics: `modelPriorityMax`.
-- Keyboard diagnostics: `lambdaEffectiveRank`.
-- Actor/support diagnostics: `actorUpdateNormMean`, `actorTdMean`, `actorSupportEntropy`.
+- Search/model diagnostics: `modelPriorityMax`, `optionDurationMean`, `terminationRate`.
+- Actor/support diagnostics: `importanceEss`, `actorUpdateNormMean`, `actorSupportEntropy`.
 
 **Storage.** Default directory `.oak-benchmarks/<run-id>/`, with `<run-root>/<envId>/seed<N>/<stem>.json` for finals and `<stem>.heartbeat-NNNNNN.json` for pulses. Override the run root with `OAK_METRICS_STORAGE`.
 
@@ -140,15 +137,13 @@ Kernel-side fields are populated only for `oak`:
 
 | Command | Use |
 |---|---|
-| `OaK run <env-id>` | Long single-env run with heartbeats. `OAK_STOP_AFTER_STEPS` controls measured-window length. |
-| `OaK diagnose <env-id> [--policy oak\|random] [--steps N]` | Short timed run with `diagnostic` block (per-phase GPU timings). |
 | `OaK benchmark` | Concurrent single-env multi-seed sweep. Each item runs in its own worker process so native env/global state cannot leak across independent streams. `OAK_BENCH_ENV` selects the env (default `HalfCheetah-v4`); `OAK_BENCH_STEPS`, `OAK_BENCH_SEED_COUNT`, `OAK_BENCH_POLICIES`, `OAK_BENCH_CONCURRENCY` (default/max = all logical cores; accepts `auto`/`max`). One benchmark launcher owns the workspace at a time; nonempty requested roots get a fresh suffixed output dir, and finished worker slots are refilled deterministically from the canonical work list. |
 
 There is no deep-diagnostics shadow path in the live engine. Add audit heads only when they earn a Plan role and pass the same speed/learning gates as behavior code.
 
 ## Performance: Metal trace
 
-Use Instruments → Metal System Trace with `tools/instruments/ShaderTemplate.tracetemplate` (Shader Timeline ON, no counters). Cross-check phase shares against `diagnostic.metalPhaseGpuMsMean` from a `--diag` JSON.
+Use Instruments → Metal System Trace with `tools/instruments/ShaderTemplate.tracetemplate` (Shader Timeline ON, no counters). The live CLI no longer has per-phase diagnostic JSON; use Instruments for phase shares.
 
 ## Citations (all primary papers in `docs/papers/`)
 

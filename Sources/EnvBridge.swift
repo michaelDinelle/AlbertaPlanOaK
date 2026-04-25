@@ -2,12 +2,8 @@ import Foundation
 import Darwin
 
 // =================================================================================================
-// Native env bridge (envpool FFI) — wrapper-side action sampling lives here too. This is the SOLE
-// boundary where env-type knowledge is allowed (Inv-1; AGENTS.md hard rule). The agent is told
-// only an integer dPolicy and never knows whether the env is discrete, continuous, or mixed.
-//
-// Pass-13 Tier 0.2: extracted from Main.swift (LOC reduction; same target — internal access stays
-// the same as before).
+// Native env bridge (envpool FFI). This is the only boundary where env-type knowledge is allowed;
+// the agent receives only obsDim and dPolicy.
 // =================================================================================================
 final class NativeBridge: @unchecked Sendable {
     typealias OpenFn = @convention(c) (UnsafePointer<CChar>, Int32, Int32, UnsafePointer<CChar>,
@@ -127,11 +123,7 @@ final class EnvPoolEnv {
     let obsDim: Int, actDim: Int
     let actionDiscreteCount: Int?
     let actionLow: [Float], actionHigh: [Float]
-    // Pass 11 Tier 1: env-declared structured action spec composed of one or more components
-    // (Discrete N | Box A). Single-component envs derive the spec from existing bridge fields
-    // (discreteCount + actionBounds); future multi-component envs (StarCraft 2, mixed) declare
-    // their spec via a C++ ABI extension. The agent only sees `dPolicy`.
-    let actionSpec: [ActionComponent]
+    let actionSpec: ActionSpec
     let dPolicy: Int
     let envActionWidth: Int
     private(set) var envActionScratch: [Float]
@@ -150,12 +142,12 @@ final class EnvPoolEnv {
         actionDiscreteCount = bridge.discreteCount(handle)
         (actionLow, actionHigh) = bridge.actionBounds(handle, actDim: actDim)
         if let n = actionDiscreteCount {
-            self.actionSpec = [.discrete(n: n)]
+            self.actionSpec = .discrete(n: n)
         } else {
-            self.actionSpec = [.box(n: actDim, low: actionLow, high: actionHigh)]
+            self.actionSpec = .box(n: actDim, low: actionLow, high: actionHigh)
         }
-        self.dPolicy = actionSpec.totalPolicyParamCount
-        self.envActionWidth = actionSpec.totalEnvActionWidth
+        self.dPolicy = actionSpec.paramCount
+        self.envActionWidth = actionSpec.envActionWidth
         observationScratch = Array(repeating: 0, count: obsDim)
         rewardScratch = Array(repeating: 0, count: 1)
         doneScratch = Array(repeating: 0, count: 1)
@@ -195,9 +187,6 @@ final class EnvPoolEnv {
         }
     }
 
-    // Wrapper-owned sampling and option score functions. Reads policyMean[B · dPolicy],
-    // writes envActionScratch + actionSignalScratch, dispatches to the appropriate bridge step
-    // function. This is the SOLE site that knows the env's action-space type — Inv-1 boundary.
     func sampleAndStep(policy: PolicyMeanBatch) throws {
         let policyMean = policy.values
         precondition(policyMean.count == dPolicy)
@@ -212,7 +201,7 @@ final class EnvPoolEnv {
                                 if let optionValues = policy.optionValues {
                                     optionValues.withUnsafeBufferPointer { optBuf in
                                         ActionTransducer.sampleAndScore(
-                                            spec: actionSpec, dPolicy: dPolicy, envActionWidth: envActionWidth,
+                                            spec: actionSpec, dPolicy: dPolicy,
                                             policyMean: pmBuf.baseAddress!,
                                             optionPolicyMean: optBuf.baseAddress,
                                             optionCount: optionCount,
@@ -225,7 +214,7 @@ final class EnvPoolEnv {
                                     }
                                 } else {
                                     ActionTransducer.sampleAndScore(
-                                        spec: actionSpec, dPolicy: dPolicy, envActionWidth: envActionWidth,
+                                        spec: actionSpec, dPolicy: dPolicy,
                                         policyMean: pmBuf.baseAddress!,
                                         optionPolicyMean: nil, optionCount: 0,
                                         envAction: aBuf.baseAddress!,
@@ -241,7 +230,7 @@ final class EnvPoolEnv {
                 }
             }
         }
-        switch actionSpec[0] {
+        switch actionSpec {
         case .discrete:
             discreteIndexScratch[0] = Int32(envActionScratch[0])
             try checked { e, cap in

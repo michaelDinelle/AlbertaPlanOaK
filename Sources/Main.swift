@@ -4,8 +4,8 @@ import Darwin
 
 // =================================================================================================
 // Orthodox Step 11 Oak - host-side dispatcher. See Sources/OakKernel.metal for the architectural
-// citation block. This file owns: arena sizing, Metal engine, env-pool FFI, CLI commands
-// (run/diagnose/benchmark), and run-metrics JSON emission.
+// citation block. This file owns: arena sizing, Metal engine, benchmark execution, and run-metrics
+// JSON emission.
 //
 // Current stream semantics: ONE agent instance owns ONE env (numEnvs=1) and processes ONE
 // observation per step. Concurrent benchmarking runs N independent worker processes by default
@@ -21,36 +21,20 @@ enum OakError: Error, CustomStringConvertible {
 enum Policy: String, Codable { case oak, random }
 
 // =================================================================================================
-// Run metrics JSON (schemaVersion 4).
+// Run metrics JSON (schemaVersion 5).
 // =================================================================================================
 struct RunHealth: Codable {
-    // Host-computed (works for ANY policy, including random):
     let rewardRate: Double?
     let actionDeltaL2Mean: Double?
     let continuingRestartCount: Double?
-    // Kernel-side (only present for oak):
     let oakOptionReinitCountFinal: Int?, oakFeatureReinitCountFinal: Int?
     let nonFiniteByPhase: [String: Int]?
-    let rrBonusMean: Double?
-    let psiStopGapMean: Double?
-    let psiStopGapAbsMean: Double?
-    let psiAbsMean: Double?
-    let rrStopAbsMean: Double?
-    let valueAbsMean: Double?
     let terminationRate: Double?
     let optionDurationMean: Double?
-    let stateEffectiveRank: Double?
     let importanceEss: Double?
-    let lambdaEffectiveRank: Double?
     let actorUpdateNormMean: Double?
-    let actorTdMean: Double?
     let actorSupportEntropy: Double?
     let modelPriorityMax: Double?
-}
-
-struct RunDiagnostic: Codable {
-    let metalPhaseGpuMsMean: [String: Double]?
-    let metalPhaseGpuTimingInvalid: [String]?
 }
 
 private struct RunMetricsFile: Encodable {
@@ -61,7 +45,7 @@ private struct RunMetricsFile: Encodable {
     let measuredStepCount: Int, measuredSeconds: Double
     let stepsPerSecond: Double?, heartbeatSequence: Int?
     let rewardSum: Double, doneCount: Int, stopReason: String
-    let health: RunHealth?, diagnostic: RunDiagnostic?
+    let health: RunHealth?
 }
 
 let oakUnseededSeed: Int32 = 0
@@ -100,12 +84,7 @@ func decodeCString(_ buffer: [CChar]) -> String {
 }
 
 // =================================================================================================
-// HealthAccumulator - fixed-size struct fold (Inv-6: no per-step heap allocation).
-//
-// recordEnvSignals: host-computable from env-wrapper signals; populated for ANY policy.
-//   Tracks rho-bar (Reward Centering 2405.09999, incremental EMA) and action delta L2.
-// recordKernelStats: kernel-internal counters; only OakMetalEngine populates these.
-//   Per-phase non-finite counts + cumulative reinit counts (Plan Step 11 evidence).
+// HealthAccumulator - fixed-size fold for benchmark promotion gates.
 // =================================================================================================
 private struct HealthAccumulator {
     private var envSteps = 0, kernelSteps = 0
@@ -169,19 +148,10 @@ private struct HealthAccumulator {
             oakOptionReinitCountFinal: kernelSteps > 0 ? oakOptionReinitFinal : nil,
             oakFeatureReinitCountFinal: kernelSteps > 0 ? oakFeatureReinitFinal : nil,
             nonFiniteByPhase: nf,
-            rrBonusMean: stat(\.rrBonusMean),
-            psiStopGapMean: stat(\.psiStopGapMean),
-            psiStopGapAbsMean: stat(\.psiStopGapAbsMean),
-            psiAbsMean: stat(\.psiAbsMean),
-            rrStopAbsMean: stat(\.rrStopAbsMean),
-            valueAbsMean: stat(\.valueAbsMean),
             terminationRate: stat(\.terminationRate),
             optionDurationMean: stat(\.optionDurationMean),
-            stateEffectiveRank: stat(\.stateEffectiveRank),
             importanceEss: stat(\.importanceEss),
-            lambdaEffectiveRank: stat(\.lambdaEffectiveRank),
             actorUpdateNormMean: stat(\.actorUpdateNormMean),
-            actorTdMean: stat(\.actorTdMean),
             actorSupportEntropy: stat(\.actorSupportEntropy),
             modelPriorityMax: stat(\.modelPriorityMax))
     }
@@ -198,48 +168,7 @@ private struct KernelConfig {
     var linearAnchorCount: UInt32 = 0
     var optionPageWidth: UInt32 = 0
     var invRank: Float = 0, invOptionCount: Float = 0
-    var invOneInputWidth: Float = 0, metaEta: Float = 0
-    var pValue: UInt32 = 0, pPsi: UInt32 = 0
-    var pOptPolicy: UInt32 = 0, pOptReward: UInt32 = 0, pOptTransition: UInt32 = 0
-    var pOptDuration: UInt32 = 0
-    var pPsiCross: UInt32 = 0
-    var pOneReward: UInt32 = 0
-    var sObservation: UInt32 = 0, sObsMean: UInt32 = 0, sObsSM: UInt32 = 0
-    var sState: UInt32 = 0
-    var sPolicyMean: UInt32 = 0, sActionSignal: UInt32 = 0
-    var sOptionScoreGrad: UInt32 = 0
-    var sOptionPolicyMean: UInt32 = 0
-    var sImportance: UInt32 = 0
-    var sReward: UInt32 = 0, sTd: UInt32 = 0, sTdPsi: UInt32 = 0
-    var sUtilFeat: UInt32 = 0, sUtilOpt: UInt32 = 0
-    var sBonusW: UInt32 = 0
-    var sFeatureMean: UInt32 = 0, sFeatureSM: UInt32 = 0
-    var sAlpha: UInt32 = 0, sBeta: UInt32 = 0, sH: UInt32 = 0
-    var sGradEnergy: UInt32 = 0
-    var sAlphaPsi: UInt32 = 0, sBetaPsi: UInt32 = 0, sHPsi: UInt32 = 0, sGradEnergyPsi: UInt32 = 0
-    var sAlphaModel: UInt32 = 0, sBetaModel: UInt32 = 0, sHModel: UInt32 = 0, sGradEnergyModel: UInt32 = 0
-    var sActorAdv: UInt32 = 0
-    var sNTdMat: UInt32 = 0
-    var sOptRewardTd: UInt32 = 0
-    var sHeadDenom: UInt32 = 0, sCrossTd: UInt32 = 0
-    var sOneRewardTd: UInt32 = 0, sOneStepDenom: UInt32 = 0
-    var sDurationTd: UInt32 = 0
-    var sDurationHat: UInt32 = 0
-    var sObsTraceMulti: UInt32 = 0
-    var sPrioOpt: UInt32 = 0
-    var sContinuation: UInt32 = 0 // RR-derived per-option continuation indicator/probability.
-    var sLambda: UInt32 = 0, sKeyboardScore: UInt32 = 0
-    var sModelDenom: UInt32 = 0
-    var sValueGauge: UInt32 = 0
-    var uCounters: UInt32 = 0
-    var uOptFeature: UInt32 = 0
-    var uFeatureAge: UInt32 = 0
-    var uOptAge: UInt32 = 0
-    var uFeatureParentA: UInt32 = 0, uFeatureParentB: UInt32 = 0, uFeatureKind: UInt32 = 0
-    var uFeatureBirthCount: UInt32 = 0
-    var uSelectedOption: UInt32 = 0, uHighModelOption: UInt32 = 0
-    var uModelAge: UInt32 = 0
-    var uBadFeatureAge: UInt32 = 0
+    var metaEta: Float = 0
 }
 
 private struct KernelScalars {
@@ -249,19 +178,12 @@ private struct KernelScalars {
 }
 
 struct KernelStats {
-    // Only telemetry the host literally cannot derive from env signals.
     var encodeNonFiniteCount: Float = 0, learnNonFiniteCount: Float = 0
     var planNonFiniteCount: Float = 0, tdPsiNonFiniteCount: Float = 0
     var oakOptionReinitCount: Float = 0, oakFeatureReinitCount: Float = 0
-    var rrBonusMean: Float = 0, psiStopGapMean: Float = 0
-    var psiStopGapAbsMean: Float = 0, psiAbsMean: Float = 0
-    var rrStopAbsMean: Float = 0, valueAbsMean: Float = 0
     var terminationRate: Float = 0, optionDurationMean: Float = 0
-    var stateEffectiveRank: Float = 0
     var importanceEss: Float = 0
-    var lambdaEffectiveRank: Float = 0
     var actorUpdateNormMean: Float = 0
-    var actorTdMean: Float = 0
     var actorSupportEntropy: Float = 0
     var modelPriorityMax: Float = 0
 }
@@ -275,10 +197,6 @@ private enum OakMetalLayout {
 
     static func optionCount(rank: Int) -> Int { max(1, rank) }
     static func psiCount(rank: Int) -> Int { optionCount(rank: rank) * rank }
-    static func psiCrossCount(rank: Int) -> Int {
-        let K = optionCount(rank: rank)
-        return K * K * rank
-    }
     static func optPolicyCount(rank: Int, dPolicy: Int) -> Int {
         optionCount(rank: rank) * dPolicy * rank
     }
@@ -288,7 +206,6 @@ private enum OakMetalLayout {
     static func optRewardCount(rank: Int) -> Int { optionCount(rank: rank) * rank }
     static func optDurationCount(rank: Int) -> Int { optionCount(rank: rank) * rank }
     static func optTransitionCount(rank: Int) -> Int { optionCount(rank: rank) * rank * rank }
-    static func oneRewardCount(rank: Int) -> Int { rank }
     static func obsTraceLevelCount(obsDim: Int) -> Int {
         let b = max(obsDim, 1)
         var m = 0
@@ -304,7 +221,6 @@ private enum OakMetalLayout {
     }
     struct Param {
         let value, psi, optPolicy, optReward, optTransition, optDuration: Int
-        let psiCross, oneReward: Int
         let total: Int
     }
     static func paramLayout(rank: Int, dPolicy: Int) -> Param {
@@ -315,11 +231,8 @@ private enum OakMetalLayout {
         let or_ = o; o += optRewardCount(rank: rank)
         let ot  = o; o += optTransitionCount(rank: rank)
         let od  = o; o += optDurationCount(rank: rank)
-        let pc  = o; o += psiCrossCount(rank: rank)
-        let oneR = o; o += oneRewardCount(rank: rank)
         return Param(value: val, psi: psi, optPolicy: op, optReward: or_,
-                     optTransition: ot, optDuration: od,
-                     psiCross: pc, oneReward: oneR, total: o)
+                     optTransition: ot, optDuration: od, total: o)
     }
 
     struct State {
@@ -336,13 +249,11 @@ private enum OakMetalLayout {
         let actorAdv: Int
         let nTdMat: Int               // Dense option-transition TD targets, K*R floats, written by oak_plan.
         let optRewardTd: Int          // Option reward-model TD targets, K floats, written once by oak_plan.
-        let headDenom, crossTd: Int
-        let oneRewardTd, oneStepDenom: Int
+        let headDenom: Int
         let durationTd, durationHat: Int
         let obsTraceMulti: Int
         let prioOpt: Int              // Tier D2: per-option priority for plan_reduce / Head 4.
         let continuation: Int          // RR-derived continuation, K floats.
-        let lambda, keyboardScore: Int
         let modelDenom: Int
         let valueGauge: Int
         let total: Int
@@ -384,16 +295,11 @@ private enum OakMetalLayout {
         let ntd = o; o += K * rank
         let ortd = o; o += K
         let hden = o; o += K
-        let ctd = o; o += K
-        let onertd = o; o += 1
-        let oneden = o; o += 1
         let dtd = o; o += K
         let dhat = o; o += K
         let otr = o; o += max(M - 1, 0) * max(obsDim, 1)
         let prio = o; o += K
         let cont = o; o += K
-        let lambda = o; o += K
-        let kscore = o; o += K
         let modelDenom = o; o += K
         let vg = o; o += 1
         return State(observation: obs, obsMean: mean, obsSM: osm, state: st,
@@ -406,12 +312,10 @@ private enum OakMetalLayout {
                      alphaPsi: aps, betaPsi: bps, hPsi: hps, gradEnergyPsi: gps,
                      alphaModel: apm, betaModel: bpm, hModel: hpm, gradEnergyModel: gpm,
                      actorAdv: aadv,
-                     nTdMat: ntd, optRewardTd: ortd, headDenom: hden, crossTd: ctd,
-                     oneRewardTd: onertd, oneStepDenom: oneden,
+                     nTdMat: ntd, optRewardTd: ortd, headDenom: hden,
                      durationTd: dtd, durationHat: dhat,
                      obsTraceMulti: otr,
                      prioOpt: prio, continuation: cont,
-                     lambda: lambda, keyboardScore: kscore,
                      modelDenom: modelDenom, valueGauge: vg, total: o)
     }
 
@@ -492,9 +396,6 @@ final class OakMetalEngine {
     private let uintLayout: OakMetalLayout.UInts
     private let phaseGridWidths: [Int]
     private let phaseThreadgroupSizes: [Int]
-    private let diagnosticGpuPhaseTiming: Bool
-    private var phaseGpuTimeSumSeconds: [Double]
-    private var phaseGpuInvalidStepCount: [Int]
     private var hostAction: [Float]
     private var hostOptionAction: [Float]
     private let resourceList: [MTLBuffer]
@@ -519,7 +420,7 @@ final class OakMetalEngine {
     static func executionWidth(device: MTLDevice) throws -> Int { 32 }
 
     init(obsDim: Int, rank: Int, dPolicy: Int,
-         device: MTLDevice, seed: Int?, diagnosticGpuPhaseTiming: Bool = false) throws {
+         device: MTLDevice, seed: Int?) throws {
         // R (rank) is a compute budget and the active feature/subtask/option count. It is no
         // longer capped to one SIMD group; 32 is only the scheduling page width.
         precondition(rank >= 2, "rank must be >= 2 (feature/subtask/option budget).")
@@ -556,15 +457,12 @@ final class OakMetalEngine {
 
         let K = OakMetalLayout.optionCount(rank: rank)
         // Grid widths sized for one row (single-stream).
-        let crossPageCount = K * rank
         let learnTotal = rank
                        + OakMetalLayout.psiCount(rank: rank)
-                       + crossPageCount
                        + OakMetalLayout.optPolicyCount(rank: rank, dPolicy: dPolicy)
                        + OakMetalLayout.optRewardCount(rank: rank)
                        + OakMetalLayout.optTransitionCount(rank: rank)
                        + OakMetalLayout.optDurationCount(rank: rank)
-                       + rank
         let replaceGroups = max(1, (K * dPolicy + OakMetalLayout.optionPageWidth - 1) / OakMetalLayout.optionPageWidth)
         let grids = [
             1,                  // encode + keyboard_predict
@@ -581,9 +479,6 @@ final class OakMetalEngine {
             return phase.tgSize
         }
 
-        self.diagnosticGpuPhaseTiming = diagnosticGpuPhaseTiming
-        phaseGpuTimeSumSeconds = Array(repeating: 0, count: Self.phases.count)
-        phaseGpuInvalidStepCount = Array(repeating: 0, count: Self.phases.count)
         hostAction = Array(repeating: 0, count: dPolicy)
         hostOptionAction = Array(repeating: 0, count: K * dPolicy)
 
@@ -609,10 +504,6 @@ final class OakMetalEngine {
         for i in 0..<OakMetalLayout.optPolicyCount(rank: rank, dPolicy: dPolicy) { policyPtr[i] = 0 }
         sample(paramLayout.optReward, OakMetalLayout.optRewardCount(rank: rank), invR)
         sample(paramLayout.optTransition, OakMetalLayout.optTransitionCount(rank: rank), invR)
-        let psiCrossPtr = paramsArena.pointer.advanced(by: paramLayout.psiCross)
-        for i in 0..<OakMetalLayout.psiCrossCount(rank: rank) { psiCrossPtr[i] = 0 }
-        let oneRewardPtr = paramsArena.pointer.advanced(by: paramLayout.oneReward)
-        for i in 0..<OakMetalLayout.oneRewardCount(rank: rank) { oneRewardPtr[i] = 0 }
         // Duration defaults to the structural one-step lower bound.
         let durationPtr = paramsArena.pointer.advanced(by: paramLayout.optDuration)
         for i in 0..<OakMetalLayout.optDurationCount(rank: rank) { durationPtr[i] = 0 }
@@ -621,21 +512,9 @@ final class OakMetalEngine {
         for k in 0..<K where k < rank {
             psiPtr[k * rank + k] += invR
         }
-        for k in 0..<K where k < rank {
-            psiCrossPtr[(k * K + k) * rank + k] += invR
-        }
         let bonusSlot = stateArena.pointer.advanced(by: stateLayout.bonusW)
         let valuePtr = paramsArena.pointer.advanced(by: paramLayout.value)
         for i in 0..<rank { bonusSlot[i] = valuePtr[i] }
-
-        // Lambda seed: uniform 1/K (max-entropy prior). Keyboard recomputes each step.
-        let lambdaSlot = stateArena.pointer.advanced(by: stateLayout.lambda)
-        let scoreSlot = stateArena.pointer.advanced(by: stateLayout.keyboardScore)
-        let invK: Float = 1.0 / Float(max(K, 1))
-        for k in 0..<K {
-            lambdaSlot[k] = invK
-            scoreSlot[k] = 0
-        }
         let importanceSlot = stateArena.pointer.advanced(by: stateLayout.importance)
         for k in 0..<K { importanceSlot[k] = 1 }
 
@@ -687,21 +566,9 @@ final class OakMetalEngine {
             betaModelSlot[i] = betaInit
             hModelSlot[i] = 0
         }
-        writeKernelConfig(paramLayout: paramLayout)
+        writeKernelConfig()
 
     }
-
-    func metalPhaseGpuDiagnostics(measuredSteps: Int) -> (meanMs: [String: Double]?, invalidPhases: [String]?) {
-        guard diagnosticGpuPhaseTiming, measuredSteps > 0 else { return (nil, nil) }
-        var mean: [String: Double] = [:]; var invalid: [String] = []
-        let n = Double(measuredSteps)
-        for (i, phase) in Self.phases.enumerated() {
-            mean[phase.name] = phaseGpuTimeSumSeconds[i] / n * 1000
-            if phaseGpuInvalidStepCount[i] > 0 { invalid.append(phase.name) }
-        }
-        return (mean, invalid.isEmpty ? nil : invalid)
-    }
-
     // Single-stream step. Inputs are scalar per-step values + dPolicy-wide vectors.
     // prevDone is intentionally NOT plumbed through: the agent is continual (Inv-4); env resets
     // are wrapper events.
@@ -710,7 +577,6 @@ final class OakMetalEngine {
               prevOptionScoreGrad: [Float],
               prevImportance: [Float],
               prevReward: Float,
-              accumulatePhaseGpu: Bool,
               captureStats: Bool) throws -> (PolicyMeanBatch, KernelStats?) {
         precondition(obs.count == obsDim)
         precondition(prevActionSignal.count == dPolicy)
@@ -731,7 +597,7 @@ final class OakMetalEngine {
         let ctr = uintArena.pointer.advanced(by: uintLayout.counters)
         ctr[0] = 0; ctr[1] = 0; ctr[2] = 0; ctr[5] = 0; ctr[6] = 0
 
-        try runKernel(accumulatePhaseGpu: accumulatePhaseGpu)
+        try runKernel()
 
         memcpy(&hostAction, stateArena.pointer.advanced(by: stateLayout.policyMean),
                dPolicy * MemoryLayout<Float>.stride)
@@ -741,9 +607,8 @@ final class OakMetalEngine {
                 captureStats ? statsPointer.pointee : nil)
     }
 
-    private func writeKernelConfig(paramLayout: OakMetalLayout.Param) {
+    private func writeKernelConfig() {
         let K = OakMetalLayout.optionCount(rank: rank)
-        let p = paramLayout, s = stateLayout, u = uintLayout
         var c = KernelConfig()
         c.obsDim = UInt32(obsDim); c.rank = UInt32(rank)
         c.optionCount = UInt32(K)
@@ -753,64 +618,7 @@ final class OakMetalEngine {
         c.optionPageWidth = UInt32(OakMetalLayout.optionPageWidth)
         c.invRank = 1.0 / Float(max(rank, 1))
         c.invOptionCount = 1.0 / Float(max(K, 1))
-        c.invOneInputWidth = 1.0 / Float(max(rank + dPolicy, 1))
         c.metaEta = c.invRank / Float(max(rank + dPolicy, 1))
-        c.pValue = UInt32(p.value); c.pPsi = UInt32(p.psi)
-        c.pOptPolicy = UInt32(p.optPolicy)
-        c.pOptReward = UInt32(p.optReward); c.pOptTransition = UInt32(p.optTransition)
-        c.pOptDuration = UInt32(p.optDuration)
-        c.pPsiCross = UInt32(p.psiCross)
-        c.pOneReward = UInt32(p.oneReward)
-        c.sObservation = UInt32(s.observation); c.sObsMean = UInt32(s.obsMean); c.sObsSM = UInt32(s.obsSM)
-        c.sState = UInt32(s.state)
-        c.sPolicyMean = UInt32(s.policyMean)
-        c.sActionSignal = UInt32(s.actionSignal)
-        c.sOptionScoreGrad = UInt32(s.optionScoreGrad)
-        c.sOptionPolicyMean = UInt32(s.optionPolicyMean)
-        c.sImportance = UInt32(s.importance)
-        c.sReward = UInt32(s.reward); c.sTd = UInt32(s.td); c.sTdPsi = UInt32(s.tdPsi)
-        c.sUtilFeat = UInt32(s.utilFeat); c.sUtilOpt = UInt32(s.utilOpt)
-        c.sBonusW = UInt32(s.bonusW)
-        c.sFeatureMean = UInt32(s.featureMean)
-        c.sFeatureSM = UInt32(s.featureSM)
-        c.sAlpha = UInt32(s.alpha); c.sBeta = UInt32(s.beta); c.sH = UInt32(s.h)
-        c.sGradEnergy = UInt32(s.gradEnergy)
-        c.sAlphaPsi = UInt32(s.alphaPsi)
-        c.sBetaPsi = UInt32(s.betaPsi)
-        c.sHPsi = UInt32(s.hPsi)
-        c.sGradEnergyPsi = UInt32(s.gradEnergyPsi)
-        c.sAlphaModel = UInt32(s.alphaModel)
-        c.sBetaModel = UInt32(s.betaModel)
-        c.sHModel = UInt32(s.hModel)
-        c.sGradEnergyModel = UInt32(s.gradEnergyModel)
-        c.sActorAdv = UInt32(s.actorAdv)
-        c.sNTdMat = UInt32(s.nTdMat)
-        c.sOptRewardTd = UInt32(s.optRewardTd)
-        c.sHeadDenom = UInt32(s.headDenom)
-        c.sCrossTd = UInt32(s.crossTd)
-        c.sOneRewardTd = UInt32(s.oneRewardTd)
-        c.sOneStepDenom = UInt32(s.oneStepDenom)
-        c.sDurationTd = UInt32(s.durationTd)
-        c.sDurationHat = UInt32(s.durationHat)
-        c.sObsTraceMulti = UInt32(s.obsTraceMulti)
-        c.sPrioOpt = UInt32(s.prioOpt)
-        c.sContinuation = UInt32(s.continuation)
-        c.sLambda = UInt32(s.lambda)
-        c.sKeyboardScore = UInt32(s.keyboardScore)
-        c.sModelDenom = UInt32(s.modelDenom)
-        c.sValueGauge = UInt32(s.valueGauge)
-        c.uCounters = UInt32(u.counters)
-        c.uOptFeature = UInt32(u.optFeature)
-        c.uFeatureAge = UInt32(u.featureAge)
-        c.uOptAge = UInt32(u.optAge)
-        c.uFeatureParentA = UInt32(u.featureParentA)
-        c.uFeatureParentB = UInt32(u.featureParentB)
-        c.uFeatureKind = UInt32(u.featureKind)
-        c.uFeatureBirthCount = UInt32(u.featureBirthCount)
-        c.uSelectedOption = UInt32(u.selectedOption)
-        c.uHighModelOption = UInt32(u.highModelOption)
-        c.uModelAge = UInt32(u.modelAge)
-        c.uBadFeatureAge = UInt32(u.badFeatureAge)
         configPointer.pointee = c
     }
 
@@ -837,47 +645,21 @@ final class OakMetalEngine {
         }
     }
 
-    private func runKernel(accumulatePhaseGpu: Bool) throws {
-        let split = diagnosticGpuPhaseTiming && accumulatePhaseGpu
-        if !split {
-            // Hot path: one command buffer, one encoder, one dispatch per phase with a memory
-            // barrier between phases (required for RAW/WAW correctness on shared buffers).
-            try autoreleasepool {
-                guard let cb = queue.makeCommandBufferWithUnretainedReferences() else {
-                    throw OakError.message("Failed to create Metal command buffer.")
-                }
-                guard let enc = cb.makeComputeCommandEncoder() else {
-                    throw OakError.message("Failed to create Metal compute encoder.")
-                }
-                for i in 0..<pipelines.count {
-                    dispatchPhase(i, on: enc)
-                    if i + 1 < pipelines.count { enc.memoryBarrier(scope: [.buffers]) }
-                }
-                enc.endEncoding()
-                cb.commit(); cb.waitUntilCompleted()
-                if let e = cb.error { throw OakError.message("Metal command failed: \(e)") }
+    private func runKernel() throws {
+        try autoreleasepool {
+            guard let cb = queue.makeCommandBufferWithUnretainedReferences() else {
+                throw OakError.message("Failed to create Metal command buffer.")
             }
-            return
-        }
-        // Diagnostic path: per-phase command buffers to capture gpuStartTime/gpuEndTime.
-        // Each CB gets its own autoreleasepool so 9 per-phase CBs drain per step, not 10M
-        // accumulated across a diagnostic run.
-        for i in 0..<pipelines.count {
-            try autoreleasepool {
-                guard let cb = queue.makeCommandBufferWithUnretainedReferences() else {
-                    throw OakError.message("Failed to create Metal command buffer.")
-                }
-                guard let enc = cb.makeComputeCommandEncoder() else {
-                    throw OakError.message("Failed to create Metal compute encoder.")
-                }
+            guard let enc = cb.makeComputeCommandEncoder() else {
+                throw OakError.message("Failed to create Metal compute encoder.")
+            }
+            for i in 0..<pipelines.count {
                 dispatchPhase(i, on: enc)
-                enc.endEncoding()
-                cb.commit(); cb.waitUntilCompleted()
-                if let e = cb.error { throw OakError.message("Metal command failed: \(e)") }
-                let s = cb.gpuStartTime, end = cb.gpuEndTime
-                if s > 0, end >= s { phaseGpuTimeSumSeconds[i] += end - s }
-                else { phaseGpuInvalidStepCount[i] += 1 }
+                if i + 1 < pipelines.count { enc.memoryBarrier(scope: [.buffers]) }
             }
+            enc.endEncoding()
+            cb.commit(); cb.waitUntilCompleted()
+            if let e = cb.error { throw OakError.message("Metal command failed: \(e)") }
         }
     }
 }
@@ -934,8 +716,6 @@ private struct RunContext {
     let seed: Int?
     let stopAfter: Int
     let optionCount: Int
-    let command: String
-    let includeDiagnostic: Bool
     let metricsDir: URL
     let env: EnvPoolEnv
     let engine: OakMetalEngine?
@@ -985,64 +765,9 @@ private final class RunState {
             switch args.first {
             case "benchmark": try benchmark()
             case "benchmark-worker": try benchmarkWorker(args.dropFirst().first)
-            case "diagnose":  try diagnose(Array(args.dropFirst()))
-            case "run":       try run(args.dropFirst().first)
-            default:          try run(args.first)
+            default: throw OakError.message("Use `OaK benchmark`.")
             }
         } catch { fputs("\(error)\n", stderr); Foundation.exit(1) }
-    }
-
-    private static func run(_ envArg: String?) throws {
-        let envId = ProcessInfo.processInfo.environment["OAK_ENV"] ?? envArg ?? ""
-        guard !envId.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
-            throw OakError.message("Missing environment id. Use `OaK run <env-id>` or set OAK_ENV.")
-        }
-        let policy = try parsePolicy(ProcessInfo.processInfo.environment["OAK_POLICY"] ?? Policy.oak.rawValue)
-        let seed = ProcessInfo.processInfo.environment["OAK_SEED"].flatMap(Int.init)
-        let device = try metalDevice()
-        let stopAfter = max(ProcessInfo.processInfo.environment["OAK_STOP_AFTER_STEPS"].flatMap(Int.init) ?? 1, 1)
-        if policy == .oak, ProcessInfo.processInfo.environment["OAK_STOP_AFTER_STEPS"] == nil {
-            fputs("OaK: OAK_STOP_AFTER_STEPS unset (short run). See AGENTS.md.\n", stderr)
-        }
-        let dir = RunSnapshot.resolveMetricsDirectory(explicit: nil)
-        let (_, metricsURL) = try runSingle(envId: envId, policy: policy, seed: seed,
-                                            stopAfter: stopAfter, device: device,
-                                            command: "run", metricsDir: dir)
-        fputs("\(metricsURL.path)\n", stderr)
-    }
-
-    private static func diagnose(_ args: [String]) throws {
-        var envId: String?, policy = Policy.oak, stopAfter: Int?
-        var i = 0
-        while i < args.count {
-            switch args[i] {
-            case "--policy":
-                i += 1; guard i < args.count else { throw OakError.message("Missing value for --policy.") }
-                policy = try parsePolicy(args[i])
-            case "--steps":
-                i += 1; guard i < args.count, let v = Int(args[i]), v > 0 else {
-                    throw OakError.message("Invalid value for --steps.")
-                }; stopAfter = v
-            default:
-                guard envId == nil else { throw OakError.message("Unexpected argument '\(args[i])'.") }
-                envId = args[i]
-            }
-            i += 1
-        }
-        let resolved = ProcessInfo.processInfo.environment["OAK_ENV"] ?? envId ?? ""
-        guard !resolved.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
-            throw OakError.message("Use `OaK diagnose <env-id>`.")
-        }
-        let seed = ProcessInfo.processInfo.environment["OAK_SEED"].flatMap(Int.init)
-        let device = try metalDevice()
-        let steps = max(stopAfter
-                        ?? ProcessInfo.processInfo.environment["OAK_DIAG_STEPS"].flatMap(Int.init)
-                        ?? 1, 1)
-        let (_, metricsURL) = try runSingle(
-            envId: resolved, policy: policy, seed: seed,
-            stopAfter: steps, device: device,
-            command: "diagnose", includeDiagnostic: true)
-        fputs("\(metricsURL.path)\n", stderr)
     }
 
     private static func resolveBenchmarkWorkingDirectory(root: URL) -> URL {
@@ -1144,7 +869,7 @@ private final class RunState {
         let dir = RunSnapshot.resolveMetricsDirectory(explicit: nil)
         _ = try runSingle(envId: envId, policy: policy, seed: seed,
                           stopAfter: stopAfter, device: device,
-                          command: "benchmark", metricsDir: dir).0
+                          metricsDir: dir).0
     }
 
     private static func currentExecutableURL() throws -> URL {
@@ -1203,8 +928,7 @@ private final class RunState {
 
     private static func setupRun(envId: String, policy: Policy, seed: Int?,
                                  stopAfter: Int, device: MTLDevice,
-                                 command: String,
-                                 includeDiagnostic: Bool, metricsDir: URL?) throws -> RunContext {
+                                 metricsDir: URL?) throws -> RunContext {
         let dir = RunSnapshot.resolveMetricsDirectory(explicit: metricsDir)
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         let env = try EnvPoolEnv(id: envId, numEnvs: 1, seed: seed)
@@ -1219,31 +943,21 @@ private final class RunState {
         }
         let engine = policy == .oak
             ? try OakMetalEngine(obsDim: env.obsDim, rank: rank, dPolicy: env.dPolicy,
-                                 device: device, seed: seed,
-                                 diagnosticGpuPhaseTiming: includeDiagnostic)
+                                 device: device, seed: seed)
             : nil
         try env.reset()
         return RunContext(envId: envId, policy: policy, seed: seed,
                           stopAfter: stopAfter,
                           optionCount: policy == .oak ? OakMetalLayout.optionCount(rank: rank) : 0,
-                          command: command,
-                          includeDiagnostic: includeDiagnostic, metricsDir: dir,
+                          metricsDir: dir,
                           env: env, engine: engine)
     }
 
     private static func emitSnapshot(_ ctx: RunContext, _ state: RunState, seq: Int?) -> RunMetricsFile {
-        let measured = max(state.measuredSteps, 1)
-        let merged: RunDiagnostic? = state.health.hasMeasuredSteps ? {
-            let (mm, mi) = ctx.engine?.metalPhaseGpuDiagnostics(measuredSteps: measured) ?? (nil, nil)
-            return RunDiagnostic(
-                metalPhaseGpuMsMean: mm, metalPhaseGpuTimingInvalid: mi)
-        }() : nil
-        let diagOut: RunDiagnostic? = ((seq != nil && ctx.policy == .oak) || (seq == nil && ctx.includeDiagnostic))
-                                       ? merged : nil
         let sps = state.measuredSeconds > 0 ? Double(state.measuredSteps) / state.measuredSeconds : nil
         let reason = seq == nil ? "measured_steps" : "heartbeat"
         return RunMetricsFile(
-            schemaVersion: 4, command: ctx.command, envId: ctx.envId, policy: ctx.policy, seed: ctx.seed,
+            schemaVersion: 5, command: "benchmark", envId: ctx.envId, policy: ctx.policy, seed: ctx.seed,
             numEnvs: 1, stopAfterMeasuredSteps: ctx.stopAfter,
             observationDim: ctx.env.obsDim, actionDim: ctx.env.actDim,
             actionDiscreteCount: ctx.env.actionDiscreteCount,
@@ -1252,12 +966,11 @@ private final class RunState {
             stepsPerSecond: sps,
             heartbeatSequence: seq, rewardSum: state.rewardSum, doneCount: state.doneCount,
             stopReason: reason,
-            health: state.health.snapshot(continuingRestartCount: state.doneCount),
-            diagnostic: diagOut)
+            health: state.health.snapshot(continuingRestartCount: state.doneCount))
     }
 
     private static func measurementLoop(_ ctx: RunContext, _ state: RunState) throws {
-        let defaultHb = ctx.command == "diagnose" ? 0 : max(ctx.stopAfter / 10, 1)
+        let defaultHb = max(ctx.stopAfter / 10, 1)
         let hb = max(ProcessInfo.processInfo.environment["OAK_HEARTBEAT_STEPS"].flatMap(Int.init) ?? defaultHb, 0)
         // Continual: every step is a measured step, no warmup. Plan Inv-5: no special training
         // phases. Step 0 timer is established on the first iteration.
@@ -1274,7 +987,6 @@ private final class RunState {
                                     prevOptionScoreGrad: state.prevOptionScoreGrad,
                                     prevImportance: state.prevImportance,
                                     prevReward: state.prevReward,
-                                    accumulatePhaseGpu: true,
                                     captureStats: captureKernelStats)
                 }
                 policyMean = out.0; stats = out.1
@@ -1329,13 +1041,11 @@ private final class RunState {
 
     private static func runSingle(envId: String, policy: Policy, seed: Int?,
                                   stopAfter: Int, device: MTLDevice,
-                                  command: String,
-                                  includeDiagnostic: Bool = false, metricsDir: URL? = nil)
+                                  metricsDir: URL? = nil)
                                   throws -> (RunMetricsFile, URL) {
         let ctx = try setupRun(envId: envId, policy: policy, seed: seed,
                                stopAfter: stopAfter, device: device,
-                               command: command,
-                               includeDiagnostic: includeDiagnostic, metricsDir: metricsDir)
+                               metricsDir: metricsDir)
         let state = RunState(env: ctx.env, seed: seed, optionCount: ctx.optionCount)
         try measurementLoop(ctx, state)
         let file = emitSnapshot(ctx, state, seq: nil)
