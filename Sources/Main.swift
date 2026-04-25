@@ -32,8 +32,6 @@ struct RunHealth: Codable {
     // Kernel-side (only present for oak):
     let oakOptionReinitCountFinal: Int?, oakFeatureReinitCountFinal: Int?
     let nonFiniteByPhase: [String: Int]?
-    // Compatibility alias for lambda effective-K = 1/Σ lambda².
-    let chordEffectiveK: Double?
     let rrBonusMean: Double?
     let psiStopGapMean: Double?
     let psiStopGapAbsMean: Double?
@@ -65,13 +63,9 @@ struct RunHealth: Codable {
     let importanceLogVar: Double?
     let importanceEss: Double?
     let rhoValueTdMean: Double?
-    let crossPsiDiagRatio: Double?
     let keyboardGpiMargin: Double?
     let keyboardSelectedOption: Double?
-    let keyboardDesign: String?
     let oneStepRewardTdMean: Double?
-    let oneStepStateTdMean: Double?
-    let oneStepValueWeightedError: Double?
     let modelQueueCoverage: Double?
     let modelUncertaintyMean: Double?
     let stalePageAgeMean: Double?
@@ -79,11 +73,7 @@ struct RunHealth: Codable {
     let gvfRateMean: Double?
     let gvfTdMean: Double?
     let gvfDifferentialValueMean: Double?
-    let gvfUtilityMean: Double?
     let lambdaEffectiveRank: Double?
-    let lambdaPlanMass: Double?
-    let lambdaRrMass: Double?
-    let lambdaUtilityMass: Double?
     let keyboardCacheCoverage: Double?
     let keyboardScoreStaleness: Double?
     let actorUpdateNormMean: Double?
@@ -91,17 +81,10 @@ struct RunHealth: Codable {
     let actorTdMean: Double?
     let actorImportanceWeightedTdMean: Double?
     let actorSupportEntropy: Double?
-    let shadowRewardSelectedOption: Double?
-    let shadowTaskSelectedOption: Double?
-    let shadowRewardAgreement: Double?
-    let shadowTaskAgreement: Double?
-    let shadowRewardGpiMargin: Double?
-    let shadowTaskGpiMargin: Double?
     let gvfPageCoverage: Double?
     let gvfRateVar: Double?
     let gvfTerminationTdMean: Double?
     let gvfRewardTdMean: Double?
-    let gvfUtilityRankMean: Double?
     let modelPageCoverage: Double?
     let modelPageMaxAge: Double?
     let modelPriorityMax: Double?
@@ -114,9 +97,6 @@ struct RunHealth: Codable {
     let basisEffectiveRank: Double?
     let basisResidualCoverage: Double?
     let basisUseEntropy: Double?
-    let gvfExpandedCount: Double?
-    let gvfReplacementUseMean: Double?
-    let gvfTerminationUtilityMean: Double?
     let planningStateQueueCoverage: Double?
     let planningStateMaxAge: Double?
     let planningBackupTdMean: Double?
@@ -131,15 +111,6 @@ struct RunHealth: Codable {
     let valueGaugeMean: Double?
     let rrBonusGaugeMean: Double?
     let rrBonusLeakCount: Double?
-    let gvfPredictiveUtilityMean: Double?
-    let gvfChurnMean: Double?
-    let gvfCoverage: Double?
-    let planningStateCoverage: Double?
-    let planningPriorityMax: Double?
-    let optionModelUseEntropy: Double?
-    let optionModelExpectedImprovementMean: Double?
-    let actorGradientUtilityMean: Double?
-    let optionPolicyUpdateEss: Double?
 }
 
 struct RunDiagnostic: Codable {
@@ -227,7 +198,6 @@ private struct HealthAccumulator {
     private var actDeltaSum = 0.0, scoreGradSum = 0.0
     private var encodeNF = 0, learnNF = 0, planNF = 0, tdPsiNF = 0
     private var oakOptionReinitFinal = 0, oakFeatureReinitFinal = 0
-    private var chordEffectiveKLatest: Double = 0
     private var rrBonusMeanLatest = 0.0, psiStopGapMeanLatest = 0.0
     private var psiStopGapAbsMeanLatest = 0.0, psiAbsMeanLatest = 0.0
     private var rrStopAbsMeanLatest = 0.0, valueAbsMeanLatest = 0.0
@@ -246,34 +216,25 @@ private struct HealthAccumulator {
     private var importanceLogMeanLatest = 0.0, importanceLogVarLatest = 0.0
     private var importanceEssLatest = 0.0
     private var rhoValueTdMeanLatest = 0.0
-    private var crossPsiDiagRatioLatest = 0.0, keyboardGpiMarginLatest = 0.0
-    private var keyboardSelectedOptionLatest = 0.0, keyboardDesignLatest = 0.0
-    private var oneStepRewardTdMeanLatest = 0.0, oneStepStateTdMeanLatest = 0.0
-    private var oneStepValueWeightedErrorLatest = 0.0
+    private var keyboardGpiMarginLatest = 0.0, keyboardSelectedOptionLatest = 0.0
+    private var oneStepRewardTdMeanLatest = 0.0
     private var modelQueueCoverageLatest = 0.0, modelUncertaintyMeanLatest = 0.0
     private var stalePageAgeMeanLatest = 0.0
     private var gvfCountLatest = 0.0, gvfRateMeanLatest = 0.0, gvfTdMeanLatest = 0.0
-    private var gvfDifferentialValueMeanLatest = 0.0, gvfUtilityMeanLatest = 0.0
-    private var lambdaEffectiveRankLatest = 0.0, lambdaPlanMassLatest = 0.0
-    private var lambdaRrMassLatest = 0.0, lambdaUtilityMassLatest = 0.0
+    private var gvfDifferentialValueMeanLatest = 0.0
+    private var lambdaEffectiveRankLatest = 0.0
     private var keyboardCacheCoverageLatest = 0.0, keyboardScoreStalenessLatest = 0.0
     private var actorUpdateNormMeanLatest = 0.0, actorUpdateNormVarLatest = 0.0
     private var actorTdMeanLatest = 0.0, actorImportanceWeightedTdMeanLatest = 0.0
     private var actorSupportEntropyLatest = 0.0
-    private var shadowRewardSelectedOptionLatest = 0.0, shadowTaskSelectedOptionLatest = 0.0
-    private var shadowRewardAgreementLatest = 0.0, shadowTaskAgreementLatest = 0.0
-    private var shadowRewardGpiMarginLatest = 0.0, shadowTaskGpiMarginLatest = 0.0
     private var gvfPageCoverageLatest = 0.0, gvfRateVarLatest = 0.0
     private var gvfTerminationTdMeanLatest = 0.0, gvfRewardTdMeanLatest = 0.0
-    private var gvfUtilityRankMeanLatest = 0.0
     private var modelPageCoverageLatest = 0.0, modelPageMaxAgeLatest = 0.0
     private var modelPriorityMaxLatest = 0.0, modelExpectedImprovementMeanLatest = 0.0
     private var replacementWouldCommitRateLatest = 0.0, badFeatureAgeMeanLatest = 0.0
     private var badFeatureAgeMaxLatest = 0.0, replacementSurvivalMeanLatest = 0.0
     private var actorUpdateEssLatest = 0.0
     private var basisEffectiveRankLatest = 0.0, basisResidualCoverageLatest = 0.0, basisUseEntropyLatest = 0.0
-    private var gvfExpandedCountLatest = 0.0, gvfReplacementUseMeanLatest = 0.0
-    private var gvfTerminationUtilityMeanLatest = 0.0
     private var planningStateQueueCoverageLatest = 0.0, planningStateMaxAgeLatest = 0.0
     private var planningBackupTdMeanLatest = 0.0
     private var optionPlanningUseEntropyLatest = 0.0, optionModelTerminalErrorLatest = 0.0
@@ -282,11 +243,6 @@ private struct HealthAccumulator {
     private var metaAlphaValueMeanLatest = 0.0, metaAlphaPsiMeanLatest = 0.0
     private var metaGradientUtilityMeanLatest = 0.0
     private var valueGaugeMeanLatest = 0.0, rrBonusGaugeMeanLatest = 0.0, rrBonusLeakCountLatest = 0.0
-    private var gvfPredictiveUtilityMeanLatest = 0.0, gvfChurnMeanLatest = 0.0, gvfCoverageLatest = 0.0
-    private var planningStateCoverageLatest = 0.0, planningPriorityMaxLatest = 0.0
-    private var optionModelUseEntropyLatest = 0.0, optionModelExpectedImprovementMeanLatest = 0.0
-    private var actorGradientUtilityMeanLatest = 0.0
-    private var optionPolicyUpdateEssLatest = 0.0
     private let trackFloor: Double
 
     init(obsDim: Int) { trackFloor = 1.0 / Double(max(obsDim, 1)) }
@@ -330,7 +286,6 @@ private struct HealthAccumulator {
         tdPsiNF  += Int(stats.tdPsiNonFiniteCount)
         oakOptionReinitFinal  = Int(stats.oakOptionReinitCount)
         oakFeatureReinitFinal = Int(stats.oakFeatureReinitCount)
-        chordEffectiveKLatest = finite(stats.chordEffectiveK)
         rrBonusMeanLatest = finite(stats.rrBonusMean)
         psiStopGapMeanLatest = finite(stats.psiStopGapMean)
         psiStopGapAbsMeanLatest = finite(stats.psiStopGapAbsMean)
@@ -362,13 +317,9 @@ private struct HealthAccumulator {
         importanceLogVarLatest = finite(stats.importanceLogVar)
         importanceEssLatest = finite(stats.importanceEss)
         rhoValueTdMeanLatest = finite(stats.rhoValueTdMean)
-        crossPsiDiagRatioLatest = finite(stats.crossPsiDiagRatio)
         keyboardGpiMarginLatest = finite(stats.keyboardGpiMargin)
         keyboardSelectedOptionLatest = finite(stats.keyboardSelectedOption)
-        keyboardDesignLatest = finite(stats.keyboardDesign)
         oneStepRewardTdMeanLatest = finite(stats.oneStepRewardTdMean)
-        oneStepStateTdMeanLatest = finite(stats.oneStepStateTdMean)
-        oneStepValueWeightedErrorLatest = finite(stats.oneStepValueWeightedError)
         modelQueueCoverageLatest = finite(stats.modelQueueCoverage)
         modelUncertaintyMeanLatest = finite(stats.modelUncertaintyMean)
         stalePageAgeMeanLatest = finite(stats.stalePageAgeMean)
@@ -376,11 +327,7 @@ private struct HealthAccumulator {
         gvfRateMeanLatest = finite(stats.gvfRateMean)
         gvfTdMeanLatest = finite(stats.gvfTdMean)
         gvfDifferentialValueMeanLatest = finite(stats.gvfDifferentialValueMean)
-        gvfUtilityMeanLatest = finite(stats.gvfUtilityMean)
         lambdaEffectiveRankLatest = finite(stats.lambdaEffectiveRank)
-        lambdaPlanMassLatest = finite(stats.lambdaPlanMass)
-        lambdaRrMassLatest = finite(stats.lambdaRrMass)
-        lambdaUtilityMassLatest = finite(stats.lambdaUtilityMass)
         keyboardCacheCoverageLatest = finite(stats.keyboardCacheCoverage)
         keyboardScoreStalenessLatest = finite(stats.keyboardScoreStaleness)
         actorUpdateNormMeanLatest = finite(stats.actorUpdateNormMean)
@@ -388,17 +335,10 @@ private struct HealthAccumulator {
         actorTdMeanLatest = finite(stats.actorTdMean)
         actorImportanceWeightedTdMeanLatest = finite(stats.actorImportanceWeightedTdMean)
         actorSupportEntropyLatest = finite(stats.actorSupportEntropy)
-        shadowRewardSelectedOptionLatest = finite(stats.shadowRewardSelectedOption)
-        shadowTaskSelectedOptionLatest = finite(stats.shadowTaskSelectedOption)
-        shadowRewardAgreementLatest = finite(stats.shadowRewardAgreement)
-        shadowTaskAgreementLatest = finite(stats.shadowTaskAgreement)
-        shadowRewardGpiMarginLatest = finite(stats.shadowRewardGpiMargin)
-        shadowTaskGpiMarginLatest = finite(stats.shadowTaskGpiMargin)
         gvfPageCoverageLatest = finite(stats.gvfPageCoverage)
         gvfRateVarLatest = finite(stats.gvfRateVar)
         gvfTerminationTdMeanLatest = finite(stats.gvfTerminationTdMean)
         gvfRewardTdMeanLatest = finite(stats.gvfRewardTdMean)
-        gvfUtilityRankMeanLatest = finite(stats.gvfUtilityRankMean)
         modelPageCoverageLatest = finite(stats.modelPageCoverage)
         modelPageMaxAgeLatest = finite(stats.modelPageMaxAge)
         modelPriorityMaxLatest = finite(stats.modelPriorityMax)
@@ -411,9 +351,6 @@ private struct HealthAccumulator {
         basisEffectiveRankLatest = finite(stats.basisEffectiveRank)
         basisResidualCoverageLatest = finite(stats.basisResidualCoverage)
         basisUseEntropyLatest = finite(stats.basisUseEntropy)
-        gvfExpandedCountLatest = finite(stats.gvfExpandedCount)
-        gvfReplacementUseMeanLatest = finite(stats.gvfReplacementUseMean)
-        gvfTerminationUtilityMeanLatest = finite(stats.gvfTerminationUtilityMean)
         planningStateQueueCoverageLatest = finite(stats.planningStateQueueCoverage)
         planningStateMaxAgeLatest = finite(stats.planningStateMaxAge)
         planningBackupTdMeanLatest = finite(stats.planningBackupTdMean)
@@ -428,15 +365,6 @@ private struct HealthAccumulator {
         valueGaugeMeanLatest = finite(stats.valueGaugeMean)
         rrBonusGaugeMeanLatest = finite(stats.rrBonusGaugeMean)
         rrBonusLeakCountLatest = finite(stats.rrBonusLeakCount)
-        gvfPredictiveUtilityMeanLatest = finite(stats.gvfPredictiveUtilityMean)
-        gvfChurnMeanLatest = finite(stats.gvfChurnMean)
-        gvfCoverageLatest = finite(stats.gvfCoverage)
-        planningStateCoverageLatest = finite(stats.planningStateCoverage)
-        planningPriorityMaxLatest = finite(stats.planningPriorityMax)
-        optionModelUseEntropyLatest = finite(stats.optionModelUseEntropy)
-        optionModelExpectedImprovementMeanLatest = finite(stats.optionModelExpectedImprovementMean)
-        actorGradientUtilityMeanLatest = finite(stats.actorGradientUtilityMean)
-        optionPolicyUpdateEssLatest = finite(stats.optionPolicyUpdateEss)
     }
 
     var hasMeasuredSteps: Bool { envSteps > 0 }
@@ -455,7 +383,6 @@ private struct HealthAccumulator {
             oakOptionReinitCountFinal: kernelSteps > 0 ? oakOptionReinitFinal : nil,
             oakFeatureReinitCountFinal: kernelSteps > 0 ? oakFeatureReinitFinal : nil,
             nonFiniteByPhase: nf,
-            chordEffectiveK: kernelSteps > 0 ? chordEffectiveKLatest : nil,
             rrBonusMean: kernelSteps > 0 ? rrBonusMeanLatest : nil,
             psiStopGapMean: kernelSteps > 0 ? psiStopGapMeanLatest : nil,
             psiStopGapAbsMean: kernelSteps > 0 ? psiStopGapAbsMeanLatest : nil,
@@ -487,13 +414,9 @@ private struct HealthAccumulator {
             importanceLogVar: kernelSteps > 0 ? importanceLogVarLatest : nil,
             importanceEss: kernelSteps > 0 ? importanceEssLatest : nil,
             rhoValueTdMean: kernelSteps > 0 ? rhoValueTdMeanLatest : nil,
-            crossPsiDiagRatio: kernelSteps > 0 ? crossPsiDiagRatioLatest : nil,
             keyboardGpiMargin: kernelSteps > 0 ? keyboardGpiMarginLatest : nil,
             keyboardSelectedOption: kernelSteps > 0 ? keyboardSelectedOptionLatest : nil,
-            keyboardDesign: kernelSteps > 0 ? (keyboardDesignLatest == 0 ? "A" : "B") : nil,
             oneStepRewardTdMean: kernelSteps > 0 ? oneStepRewardTdMeanLatest : nil,
-            oneStepStateTdMean: kernelSteps > 0 ? oneStepStateTdMeanLatest : nil,
-            oneStepValueWeightedError: kernelSteps > 0 ? oneStepValueWeightedErrorLatest : nil,
             modelQueueCoverage: kernelSteps > 0 ? modelQueueCoverageLatest : nil,
             modelUncertaintyMean: kernelSteps > 0 ? modelUncertaintyMeanLatest : nil,
             stalePageAgeMean: kernelSteps > 0 ? stalePageAgeMeanLatest : nil,
@@ -501,11 +424,7 @@ private struct HealthAccumulator {
             gvfRateMean: kernelSteps > 0 ? gvfRateMeanLatest : nil,
             gvfTdMean: kernelSteps > 0 ? gvfTdMeanLatest : nil,
             gvfDifferentialValueMean: kernelSteps > 0 ? gvfDifferentialValueMeanLatest : nil,
-            gvfUtilityMean: kernelSteps > 0 ? gvfUtilityMeanLatest : nil,
             lambdaEffectiveRank: kernelSteps > 0 ? lambdaEffectiveRankLatest : nil,
-            lambdaPlanMass: kernelSteps > 0 ? lambdaPlanMassLatest : nil,
-            lambdaRrMass: kernelSteps > 0 ? lambdaRrMassLatest : nil,
-            lambdaUtilityMass: kernelSteps > 0 ? lambdaUtilityMassLatest : nil,
             keyboardCacheCoverage: kernelSteps > 0 ? keyboardCacheCoverageLatest : nil,
             keyboardScoreStaleness: kernelSteps > 0 ? keyboardScoreStalenessLatest : nil,
             actorUpdateNormMean: kernelSteps > 0 ? actorUpdateNormMeanLatest : nil,
@@ -513,17 +432,10 @@ private struct HealthAccumulator {
             actorTdMean: kernelSteps > 0 ? actorTdMeanLatest : nil,
             actorImportanceWeightedTdMean: kernelSteps > 0 ? actorImportanceWeightedTdMeanLatest : nil,
             actorSupportEntropy: kernelSteps > 0 ? actorSupportEntropyLatest : nil,
-            shadowRewardSelectedOption: kernelSteps > 0 ? shadowRewardSelectedOptionLatest : nil,
-            shadowTaskSelectedOption: kernelSteps > 0 ? shadowTaskSelectedOptionLatest : nil,
-            shadowRewardAgreement: kernelSteps > 0 ? shadowRewardAgreementLatest : nil,
-            shadowTaskAgreement: kernelSteps > 0 ? shadowTaskAgreementLatest : nil,
-            shadowRewardGpiMargin: kernelSteps > 0 ? shadowRewardGpiMarginLatest : nil,
-            shadowTaskGpiMargin: kernelSteps > 0 ? shadowTaskGpiMarginLatest : nil,
             gvfPageCoverage: kernelSteps > 0 ? gvfPageCoverageLatest : nil,
             gvfRateVar: kernelSteps > 0 ? gvfRateVarLatest : nil,
             gvfTerminationTdMean: kernelSteps > 0 ? gvfTerminationTdMeanLatest : nil,
             gvfRewardTdMean: kernelSteps > 0 ? gvfRewardTdMeanLatest : nil,
-            gvfUtilityRankMean: kernelSteps > 0 ? gvfUtilityRankMeanLatest : nil,
             modelPageCoverage: kernelSteps > 0 ? modelPageCoverageLatest : nil,
             modelPageMaxAge: kernelSteps > 0 ? modelPageMaxAgeLatest : nil,
             modelPriorityMax: kernelSteps > 0 ? modelPriorityMaxLatest : nil,
@@ -536,9 +448,6 @@ private struct HealthAccumulator {
             basisEffectiveRank: kernelSteps > 0 ? basisEffectiveRankLatest : nil,
             basisResidualCoverage: kernelSteps > 0 ? basisResidualCoverageLatest : nil,
             basisUseEntropy: kernelSteps > 0 ? basisUseEntropyLatest : nil,
-            gvfExpandedCount: kernelSteps > 0 ? gvfExpandedCountLatest : nil,
-            gvfReplacementUseMean: kernelSteps > 0 ? gvfReplacementUseMeanLatest : nil,
-            gvfTerminationUtilityMean: kernelSteps > 0 ? gvfTerminationUtilityMeanLatest : nil,
             planningStateQueueCoverage: kernelSteps > 0 ? planningStateQueueCoverageLatest : nil,
             planningStateMaxAge: kernelSteps > 0 ? planningStateMaxAgeLatest : nil,
             planningBackupTdMean: kernelSteps > 0 ? planningBackupTdMeanLatest : nil,
@@ -552,16 +461,7 @@ private struct HealthAccumulator {
             metaGradientUtilityMean: kernelSteps > 0 ? metaGradientUtilityMeanLatest : nil,
             valueGaugeMean: kernelSteps > 0 ? valueGaugeMeanLatest : nil,
             rrBonusGaugeMean: kernelSteps > 0 ? rrBonusGaugeMeanLatest : nil,
-            rrBonusLeakCount: kernelSteps > 0 ? rrBonusLeakCountLatest : nil,
-            gvfPredictiveUtilityMean: kernelSteps > 0 ? gvfPredictiveUtilityMeanLatest : nil,
-            gvfChurnMean: kernelSteps > 0 ? gvfChurnMeanLatest : nil,
-            gvfCoverage: kernelSteps > 0 ? gvfCoverageLatest : nil,
-            planningStateCoverage: kernelSteps > 0 ? planningStateCoverageLatest : nil,
-            planningPriorityMax: kernelSteps > 0 ? planningPriorityMaxLatest : nil,
-            optionModelUseEntropy: kernelSteps > 0 ? optionModelUseEntropyLatest : nil,
-            optionModelExpectedImprovementMean: kernelSteps > 0 ? optionModelExpectedImprovementMeanLatest : nil,
-            actorGradientUtilityMean: kernelSteps > 0 ? actorGradientUtilityMeanLatest : nil,
-            optionPolicyUpdateEss: kernelSteps > 0 ? optionPolicyUpdateEssLatest : nil)
+            rrBonusLeakCount: kernelSteps > 0 ? rrBonusLeakCountLatest : nil)
     }
 }
 
@@ -653,8 +553,7 @@ private struct KernelConfig {
     var sPrioOpt: UInt32 = 0
     var sContinuation: UInt32 = 0 // RR-derived per-option continuation indicator/probability.
     var sLambda: UInt32 = 0, sKeyboardScore: UInt32 = 0
-    var sShadowRewardScore: UInt32 = 0, sShadowTaskScore: UInt32 = 0
-    var sGvfTd: UInt32 = 0, sGvfUtility: UInt32 = 0, sFeatureTraceDenom: UInt32 = 0
+    var sGvfTd: UInt32 = 0, sFeatureTraceDenom: UInt32 = 0
     var sModelExpectedImprovement: UInt32 = 0, sModelDenom: UInt32 = 0
     var sOptionPlanningUse: UInt32 = 0, sOptionModelError: UInt32 = 0, sOptionBasisUse: UInt32 = 0
     var sPlanningStateRing: UInt32 = 0, sPlanningStatePriority: UInt32 = 0, sPlanningBackupTd: UInt32 = 0
@@ -673,7 +572,6 @@ private struct KernelConfig {
     var uGvfAge: UInt32 = 0, uBadFeatureAge: UInt32 = 0
     var uPlanningStateAge: UInt32 = 0, uSelectedPlanState: UInt32 = 0
     var uPrimitiveChannel: UInt32 = 0
-    var deepDiagnostics: UInt32 = 0
 }
 
 private struct KernelScalars {
@@ -691,8 +589,6 @@ struct KernelStats {
     var encodeNonFiniteCount: Float = 0, learnNonFiniteCount: Float = 0
     var planNonFiniteCount: Float = 0, tdPsiNonFiniteCount: Float = 0
     var oakOptionReinitCount: Float = 0, oakFeatureReinitCount: Float = 0
-    // Compatibility alias for lambda effective-K = 1 / Σ_k lambda[k]².
-    var chordEffectiveK: Float = 0
     var rrBonusMean: Float = 0, psiStopGapMean: Float = 0
     var psiStopGapAbsMean: Float = 0, psiAbsMean: Float = 0
     var rrStopAbsMean: Float = 0, valueAbsMean: Float = 0
@@ -708,32 +604,25 @@ struct KernelStats {
     var featureCorrMean: Float = 0, featureMaxCorr: Float = 0, featureEffectiveRank: Float = 0
     var candidateSurvivalMean: Float = 0, parentReuseEntropy: Float = 0, utilityTransferMean: Float = 0
     var importanceLogMean: Float = 0, importanceLogVar: Float = 0, importanceEss: Float = 0
-    var rhoValueTdMean: Float = 0, crossPsiDiagRatio: Float = 0
-    var keyboardGpiMargin: Float = 0, keyboardSelectedOption: Float = 0, keyboardDesign: Float = 0
-    var oneStepRewardTdMean: Float = 0, oneStepStateTdMean: Float = 0
-    var oneStepValueWeightedError: Float = 0
+    var rhoValueTdMean: Float = 0
+    var keyboardGpiMargin: Float = 0, keyboardSelectedOption: Float = 0
+    var oneStepRewardTdMean: Float = 0
     var modelQueueCoverage: Float = 0, modelUncertaintyMean: Float = 0, stalePageAgeMean: Float = 0
     var gvfCount: Float = 0, gvfRateMean: Float = 0, gvfTdMean: Float = 0
-    var gvfDifferentialValueMean: Float = 0, gvfUtilityMean: Float = 0
-    var lambdaEffectiveRank: Float = 0, lambdaPlanMass: Float = 0
-    var lambdaRrMass: Float = 0, lambdaUtilityMass: Float = 0
+    var gvfDifferentialValueMean: Float = 0
+    var lambdaEffectiveRank: Float = 0
     var keyboardCacheCoverage: Float = 0, keyboardScoreStaleness: Float = 0
     var actorUpdateNormMean: Float = 0, actorUpdateNormVar: Float = 0
     var actorTdMean: Float = 0, actorImportanceWeightedTdMean: Float = 0
     var actorSupportEntropy: Float = 0
-    var shadowRewardSelectedOption: Float = 0, shadowTaskSelectedOption: Float = 0
-    var shadowRewardAgreement: Float = 0, shadowTaskAgreement: Float = 0
-    var shadowRewardGpiMargin: Float = 0, shadowTaskGpiMargin: Float = 0
     var gvfPageCoverage: Float = 0, gvfRateVar: Float = 0
     var gvfTerminationTdMean: Float = 0, gvfRewardTdMean: Float = 0
-    var gvfUtilityRankMean: Float = 0
     var modelPageCoverage: Float = 0, modelPageMaxAge: Float = 0
     var modelPriorityMax: Float = 0, modelExpectedImprovementMean: Float = 0
     var replacementWouldCommitRate: Float = 0, badFeatureAgeMean: Float = 0
     var badFeatureAgeMax: Float = 0, replacementSurvivalMean: Float = 0
     var actorUpdateEss: Float = 0
     var basisEffectiveRank: Float = 0, basisResidualCoverage: Float = 0, basisUseEntropy: Float = 0
-    var gvfExpandedCount: Float = 0, gvfReplacementUseMean: Float = 0, gvfTerminationUtilityMean: Float = 0
     var planningStateQueueCoverage: Float = 0, planningStateMaxAge: Float = 0
     var planningBackupTdMean: Float = 0
     var optionPlanningUseEntropy: Float = 0, optionModelTerminalError: Float = 0
@@ -742,11 +631,6 @@ struct KernelStats {
     var metaAlphaValueMean: Float = 0, metaAlphaPsiMean: Float = 0
     var metaGradientUtilityMean: Float = 0
     var valueGaugeMean: Float = 0, rrBonusGaugeMean: Float = 0, rrBonusLeakCount: Float = 0
-    var gvfPredictiveUtilityMean: Float = 0, gvfChurnMean: Float = 0, gvfCoverage: Float = 0
-    var planningStateCoverage: Float = 0, planningPriorityMax: Float = 0
-    var optionModelUseEntropy: Float = 0, optionModelExpectedImprovementMean: Float = 0
-    var actorGradientUtilityMean: Float = 0
-    var optionPolicyUpdateEss: Float = 0
 }
 
 // =================================================================================================
@@ -850,8 +734,7 @@ private enum OakMetalLayout {
         let prioOpt: Int              // Tier D2: per-option priority for plan_reduce / Head 4.
         let continuation: Int          // RR-derived continuation, K floats.
         let lambda, keyboardScore: Int
-        let shadowRewardScore, shadowTaskScore: Int
-        let gvfTd, gvfUtility, featureTraceDenom: Int
+        let gvfTd, featureTraceDenom: Int
         let modelExpectedImprovement, modelDenom: Int
         let optionPlanningUse, optionModelError, optionBasisUse: Int
         let planningStateRing, planningStatePriority, planningBackupTd: Int
@@ -916,10 +799,7 @@ private enum OakMetalLayout {
         let cont = o; o += K
         let lambda = o; o += K
         let kscore = o; o += K
-        let shadowR = o; o += K
-        let shadowT = o; o += K
         let gvftd = o; o += G
-        let gvfu = o; o += G
         let ftd = o; o += 1
         let modelExp = o; o += K
         let modelDenom = o; o += K
@@ -951,8 +831,7 @@ private enum OakMetalLayout {
                      qOption: qo, obsTraceMulti: otr,
                      prioOpt: prio, continuation: cont,
                      lambda: lambda, keyboardScore: kscore,
-                     shadowRewardScore: shadowR, shadowTaskScore: shadowT,
-                     gvfTd: gvftd, gvfUtility: gvfu, featureTraceDenom: ftd,
+                     gvfTd: gvftd, featureTraceDenom: ftd,
                      modelExpectedImprovement: modelExp, modelDenom: modelDenom,
                      optionPlanningUse: planUse, optionModelError: modelErr, optionBasisUse: basisUse,
                      planningStateRing: stateRing, planningStatePriority: statePrio, planningBackupTd: backupTd,
@@ -1051,7 +930,6 @@ final class OakMetalEngine {
     private let phaseGridWidths: [Int]
     private let phaseThreadgroupSizes: [Int]
     private let diagnosticGpuPhaseTiming: Bool
-    private let deepDiagnostics: Bool
     private var phaseGpuTimeSumSeconds: [Double]
     private var phaseGpuInvalidStepCount: [Int]
     private var hostAction: [Float]
@@ -1078,8 +956,7 @@ final class OakMetalEngine {
     static func executionWidth(device: MTLDevice) throws -> Int { 32 }
 
     init(obsDim: Int, baseObsDim: Int, actDim: Int, rank: Int, dPolicy: Int,
-         device: MTLDevice, seed: Int?, diagnosticGpuPhaseTiming: Bool = false,
-         deepDiagnostics: Bool = false) throws {
+         device: MTLDevice, seed: Int?, diagnosticGpuPhaseTiming: Bool = false) throws {
         // R (rank) is a compute budget and the active feature/subtask/option count. It is no
         // longer capped to one SIMD group; 32 is only the scheduling page width.
         precondition(rank >= 2, "rank must be >= 2 (feature/subtask/option budget).")
@@ -1144,7 +1021,6 @@ final class OakMetalEngine {
         }
 
         self.diagnosticGpuPhaseTiming = diagnosticGpuPhaseTiming
-        self.deepDiagnostics = deepDiagnostics
         phaseGpuTimeSumSeconds = Array(repeating: 0, count: Self.phases.count)
         phaseGpuInvalidStepCount = Array(repeating: 0, count: Self.phases.count)
         hostAction = Array(repeating: 0, count: dPolicy)
@@ -1404,10 +1280,7 @@ final class OakMetalEngine {
         c.sContinuation = UInt32(s.continuation)
         c.sLambda = UInt32(s.lambda)
         c.sKeyboardScore = UInt32(s.keyboardScore)
-        c.sShadowRewardScore = UInt32(s.shadowRewardScore)
-        c.sShadowTaskScore = UInt32(s.shadowTaskScore)
         c.sGvfTd = UInt32(s.gvfTd)
-        c.sGvfUtility = UInt32(s.gvfUtility)
         c.sFeatureTraceDenom = UInt32(s.featureTraceDenom)
         c.sModelExpectedImprovement = UInt32(s.modelExpectedImprovement)
         c.sModelDenom = UInt32(s.modelDenom)
@@ -1441,7 +1314,6 @@ final class OakMetalEngine {
         c.uPlanningStateAge = UInt32(u.planningStateAge)
         c.uSelectedPlanState = UInt32(u.selectedPlanState)
         c.uPrimitiveChannel = UInt32(u.primitiveChannel)
-        c.deepDiagnostics = deepDiagnostics ? 1 : 0
         configPointer.pointee = c
     }
 
@@ -1968,14 +1840,11 @@ private final class RunState {
         guard rank <= 256 else {
             throw OakError.message("OAK rank \(rank) exceeds oak_plan's 256-threadgroup-storage cap. Set OAK_RANK<=256 or redesign oak_plan storage.")
         }
-        let deepDiagnostics = ProcessInfo.processInfo.environment["OAK_DEEP_DIAGNOSTICS"]
-            .map { ["1", "true", "yes", "on"].contains($0.lowercased()) } ?? false
         let engine = policy == .oak
             ? try OakMetalEngine(obsDim: env.obsDim, baseObsDim: env.obsDim,
                                  actDim: env.actDim, rank: rank, dPolicy: env.dPolicy,
                                  device: device, seed: seed,
-                                 diagnosticGpuPhaseTiming: includeDiagnostic,
-                                 deepDiagnostics: deepDiagnostics)
+                                 diagnosticGpuPhaseTiming: includeDiagnostic)
             : nil
         try env.reset()
         return RunContext(envId: envId, policy: policy, seed: seed,
