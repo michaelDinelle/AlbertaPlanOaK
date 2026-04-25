@@ -132,10 +132,9 @@ Kernel-side fields are populated only for `oak`:
 
 - `oakOptionReinitCountFinal`, `oakFeatureReinitCountFinal` — cumulative age-gated generate-and-test replacement counts.
 - `nonFiniteByPhase` = `{"encode": N, "learn": N, "plan": N, "tdPsi": N}` — per-phase NF counts. **Healthy = all zeros across the run.**
-- Search/replacement diagnostics: `eligibleOptionCount`, `eligibleFeatureCount`, `replacementCommitRate`, `modelUpdateRate`, `modelPriorityEntropy`, `optionDiffTdMean`, `modelPageCoverage`, `modelPageMaxAge`, `modelPriorityMax`, `modelExpectedImprovementMean`, `replacementWouldCommitRate`, `badFeatureAgeMean`, `badFeatureAgeMax`, `replacementSurvivalMean`.
-- GVF/keyboard diagnostics: `gvfCount`, `gvfRateMean`, `gvfRateVar`, `gvfTdMean`, `gvfDifferentialValueMean`, `gvfPageCoverage`, `gvfRewardTdMean`, `gvfTerminationTdMean`, `lambdaEffectiveRank`, `keyboardCacheCoverage`, `keyboardScoreStaleness`.
-- Actor/support diagnostics: `actorUpdateNormMean`, `actorUpdateNormVar`, `actorTdMean`, `actorImportanceWeightedTdMean`, `actorSupportEntropy`, `actorUpdateEss`.
-- Architecture diagnostics: `encoderDirectCoverage`, `primitiveReassignmentCount`, `metaAlphaValueMean`, `metaAlphaPsiMean`, `metaGradientUtilityMean`, `valueGaugeMean`, `rrBonusGaugeMean`, `rrBonusLeakCount`, `basisEffectiveRank`, `basisResidualCoverage`, `basisUseEntropy`, `planningStateQueueCoverage`, `planningStateMaxAge`, `planningBackupTdMean`, `optionPlanningUseEntropy`, `optionModelTerminalError`, `durationNondegenerateRate`.
+- Search/replacement diagnostics: `eligibleOptionCount`, `eligibleFeatureCount`, `replacementCommitRate`, `modelUpdateRate`, `modelPriorityEntropy`, `optionDiffTdMean`, `modelPageCoverage`, `modelPageMaxAge`, `modelPriorityMax`, `modelExpectedImprovementMean`.
+- GVF/keyboard diagnostics: `gvfCount`, `gvfRateMean`, `gvfRateVar`, `gvfTdMean`, `gvfDifferentialValueMean`, `gvfPageCoverage`, `gvfRewardTdMean`, `gvfTerminationTdMean`, `lambdaEffectiveRank`.
+- Actor/support diagnostics: `actorUpdateNormMean`, `actorUpdateNormVar`, `actorTdMean`, `actorImportanceWeightedTdMean`, `actorSupportEntropy`.
 
 **Storage.** Default directory `.oak-benchmarks/<run-id>/`, with `<run-root>/<envId>/seed<N>/<stem>.json` for finals and `<stem>.heartbeat-NNNNNN.json` for pulses. Override the run root with `OAK_METRICS_STORAGE`.
 
