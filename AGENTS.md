@@ -88,7 +88,7 @@ The agent is a focused-kernel single-stream Oak prototype over the Plan steps. K
 | `oneReward`, `oneTransition` | `(R + D)`, `R · (R + D)` | `oneReward[0:R]` is the live reward-cumulant descriptor used by the signed Option Keyboard λ and is updated every step. `oneTransition` remains deep-diagnostic shadow state and does not drive planning. |
 | `gvfRate`, `gvfValue` | `(R + K + 3)`, `(R + K + 3) · R` | Expanded average-reward GVF bank over state-feature, centered-reward, action-energy, termination, and model-residual cumulants with explicit cumulant-rate and differential-value separation. GVF utility is live in replacement/basis diagnostics, not in reward or primitive actor shortcuts. |
 
-State representation is normalized linear anchors plus constructed feature slots. Anchors are deterministic projections over normalized observation traces, previous action descriptor, and previous reward; constructed slots are replaceable signed products/sums/residuals of useful parents. Per-feature alpha is achieved structurally by MetaOptimize-style step sizes plus age/utility replacement.
+State representation is a finite adaptive predictive state, not a full reconstruction of the world: direct normalized experience channels (observation coordinates, multi-timescale observation traces, previous abstract action descriptor, previous reward, and an affine channel) plus constructed feature slots. Deep Fourier, random Fourier, and random-projection encoders are optional experimental modes, not Alberta Plan law. Constructed slots remain replaceable signed products/sums/residuals of useful parents. Plasticity is driven by MetaOptimize-style `alpha/beta/h/gradEnergy` families plus age/utility replacement; raw IDBD/Autostep are historical relatives, not the implementation target.
 
 ### Pipeline (5 Metal dispatches per step, direct command encoding)
 
@@ -136,6 +136,7 @@ Kernel-side fields are populated only for `oak`:
 - Search/replacement diagnostics: `eligibleOptionCount`, `eligibleFeatureCount`, `replacementCommitRate`, `modelUpdateRate`, `modelPriorityEntropy`, `optionDiffTdMean`, `modelPageCoverage`, `modelPageMaxAge`, `modelPriorityMax`, `modelExpectedImprovementMean`, `replacementWouldCommitRate`, `badFeatureAgeMean`, `badFeatureAgeMax`, `replacementSurvivalMean`.
 - GVF/keyboard diagnostics: `gvfCount`, `gvfRateMean`, `gvfRateVar`, `gvfTdMean`, `gvfDifferentialValueMean`, `gvfUtilityMean`, `gvfPageCoverage`, `gvfRewardTdMean`, `gvfTerminationTdMean`, `gvfUtilityRankMean`, `lambdaEffectiveRank`, `lambdaPlanMass`, `lambdaRrMass`, `lambdaUtilityMass`, `keyboardCacheCoverage`, `keyboardScoreStaleness`, `shadowRewardAgreement`, `shadowTaskAgreement`, `shadowRewardGpiMargin`, `shadowTaskGpiMargin`. The expanded GVF bank is live by default; expensive shadow keyboard comparisons remain neutral unless `OAK_DEEP_DIAGNOSTICS=1`.
 - Average-reward/actor support shadows: `optionControlRateMean`, `optionControlRateVar`, `optionControlRateTdMean`, `optionControlRateAgreement`, `actorUpdateNormMean`, `actorUpdateNormVar`, `actorTdMean`, `actorImportanceWeightedTdMean`, `actorSupportEntropy`.
+- Architectural-leap diagnostics: `encoderDirectCoverage`, `primitiveReassignmentCount`, `metaAlphaValueMean`, `metaAlphaPsiMean`, `metaAlphaActorMean`, `metaGradientUtilityMean`, `valueGaugeMean`, `rrBonusGaugeMean`, `rrBonusLeakCount`, `basisEffectiveRank`, `basisResidualCoverage`, `basisUseEntropy`, `gvfPredictiveUtilityMean`, `gvfChurnMean`, `gvfCoverage`, `planningStateCoverage`, `planningPriorityMax`, `optionModelUseEntropy`, `optionModelExpectedImprovementMean`, `actorChurnMean`, `actorGradientUtilityMean`, `optionPolicyUpdateEss`.
 
 **Storage.** Default directory `.oak-benchmarks/<run-id>/`, with `<run-root>/<envId>/seed<N>/<stem>.json` for finals and `<stem>.heartbeat-NNNNNN.json` for pulses. Override the run root with `OAK_METRICS_STORAGE`.
 
@@ -145,7 +146,7 @@ Kernel-side fields are populated only for `oak`:
 |---|---|
 | `OaK run <env-id>` | Long single-env run with heartbeats. `OAK_STOP_AFTER_STEPS` controls measured-window length. |
 | `OaK diagnose <env-id> [--policy oak\|random] [--steps N]` | Short timed run with `diagnostic` block (per-phase GPU timings). |
-| `OaK benchmark` | Concurrent multi-env multi-seed sweep. `OAK_BENCH_STEPS`, `OAK_BENCH_SEED_COUNT`, `OAK_BENCH_POLICIES`, `OAK_BENCH_CONCURRENCY` (default 8), `OAK_BENCH_ENVS` / `OAK_BENCH_ENV` (comma-separated env filter). |
+| `OaK benchmark` | Concurrent multi-env multi-seed sweep. Default isolation is one worker process per run so native env/global state cannot leak across independent streams. `OAK_BENCH_ISOLATION=inprocess` is diagnostic-only. `OAK_BENCH_STEPS`, `OAK_BENCH_SEED_COUNT`, `OAK_BENCH_POLICIES`, `OAK_BENCH_CONCURRENCY` (default 8), `OAK_BENCH_ENVS` / `OAK_BENCH_ENV` (comma-separated env filter). |
 
 Set `OAK_DEEP_DIAGNOSTICS=1` only for audit runs that need one-step transition shadow-model and shadow-keyboard comparisons. The default path keeps live OaK mechanisms every step and omits those shadow-only heads for speed.
 
