@@ -166,7 +166,6 @@ private struct KernelConfig {
     var actionParamCount: UInt32 = 0
     var obsTraceLevels: UInt32 = 0
     var linearAnchorCount: UInt32 = 0
-    var optionPageWidth: UInt32 = 0
     var invRank: Float = 0, invOptionCount: Float = 0
     var metaEta: Float = 0
 }
@@ -193,7 +192,6 @@ struct KernelStats {
 // =================================================================================================
 private enum OakMetalLayout {
     static let kernelConfigBufferIndex = 5
-    static let optionPageWidth = 32
 
     static func optionCount(rank: Int) -> Int { max(1, rank) }
     static func psiCount(rank: Int) -> Int { optionCount(rank: rank) * rank }
@@ -252,7 +250,7 @@ private enum OakMetalLayout {
         let headDenom: Int
         let durationTd, durationHat: Int
         let obsTraceMulti: Int
-        let prioOpt: Int              // Tier D2: per-option priority for plan_reduce / Head 4.
+        let prioOpt: Int              // Per-option model priority for search-control diagnostics.
         let continuation: Int          // RR-derived continuation, K floats.
         let modelDenom: Int
         let valueGauge: Int
@@ -322,7 +320,7 @@ private enum OakMetalLayout {
     struct UInts {
         let counters, optFeature, featureAge, optAge: Int
         let featureParentA, featureParentB, featureKind, featureBirthCount: Int
-        let selectedOption, highModelOption, modelAge: Int
+        let selectedOption: Int
         let badFeatureAge: Int
         let total: Int
     }
@@ -338,14 +336,11 @@ private enum OakMetalLayout {
         let fkind = o; o += rank
         let fbc = o; o += rank
         let sel = o; o += 1
-        let high = o; o += 1
-        let ma = o; o += K
         let bfa = o; o += rank
         return UInts(counters: ctr, optFeature: of, featureAge: fa, optAge: oa,
                      featureParentA: fpa, featureParentB: fpb,
                      featureKind: fkind, featureBirthCount: fbc,
-                     selectedOption: sel, highModelOption: high,
-                     modelAge: ma, badFeatureAge: bfa, total: o)
+                     selectedOption: sel, badFeatureAge: bfa, total: o)
     }
 }
 
@@ -374,7 +369,6 @@ final class OakMetalEngine {
     private static let phases: [Phase] = [
         Phase(name: "oak_encode",           tgSize: -1),
         Phase(name: "oak_plan",             tgSize: -1),
-        Phase(name: "oak_plan_reduce",      tgSize: -1),
         Phase(name: "oak_learn_heads",      tgSize: 0),
         Phase(name: "oak_replace",          tgSize: -1),
         Phase(name: "oak_action_emit",      tgSize: -1),
@@ -421,8 +415,7 @@ final class OakMetalEngine {
 
     init(obsDim: Int, rank: Int, dPolicy: Int,
          device: MTLDevice, seed: Int?) throws {
-        // R (rank) is a compute budget and the active feature/subtask/option count. It is no
-        // longer capped to one SIMD group; 32 is only the scheduling page width.
+        // R (rank) is a compute budget and the active feature/subtask/option count.
         precondition(rank >= 2, "rank must be >= 2 (feature/subtask/option budget).")
         precondition(rank <= 256, "rank must be <= 256 (oak_plan threadgroup storage cap).")
         precondition(obsDim >= 1, "obsDim must be positive.")
@@ -463,19 +456,19 @@ final class OakMetalEngine {
                        + OakMetalLayout.optRewardCount(rank: rank)
                        + OakMetalLayout.optTransitionCount(rank: rank)
                        + OakMetalLayout.optDurationCount(rank: rank)
-        let replaceGroups = max(1, (K * dPolicy + OakMetalLayout.optionPageWidth - 1) / OakMetalLayout.optionPageWidth)
+        let kernelThreadgroupWidth = max(rank, pipelines.map { Int($0.threadExecutionWidth) }.max() ?? 1)
+        let actionEmitGroups = max(1, (K * dPolicy + kernelThreadgroupWidth - 1) / kernelThreadgroupWidth)
         let grids = [
             1,                  // encode + keyboard_predict
-            K <= OakMetalLayout.optionPageWidth ? K : OakMetalLayout.optionPageWidth,
-            1,                  // plan_reduce
+            K,                  // full-bank option-model planning
             learnTotal,         // learn_heads
             1,                  // replace + stats/meta/reinit
-            replaceGroups,      // action emission
+            actionEmitGroups,   // action emission
         ]
         phaseGridWidths = grids
 
         phaseThreadgroupSizes = Self.phases.map { phase in
-            if phase.tgSize == -1 { return max(rank, OakMetalLayout.optionPageWidth) }
+            if phase.tgSize == -1 { return kernelThreadgroupWidth }
             return phase.tgSize
         }
 
@@ -615,7 +608,6 @@ final class OakMetalEngine {
         c.actionParamCount = UInt32(dPolicy)
         c.obsTraceLevels = UInt32(max(OakMetalLayout.obsTraceLevelCount(obsDim: obsDim) - 1, 0))
         c.linearAnchorCount = UInt32(OakMetalLayout.linearAnchorCount(rank: rank))
-        c.optionPageWidth = UInt32(OakMetalLayout.optionPageWidth)
         c.invRank = 1.0 / Float(max(rank, 1))
         c.invOptionCount = 1.0 / Float(max(K, 1))
         c.metaEta = c.invRank / Float(max(rank + dPolicy, 1))
