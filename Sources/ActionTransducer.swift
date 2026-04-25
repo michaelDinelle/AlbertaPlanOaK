@@ -2,9 +2,7 @@ import Foundation
 
 struct PolicyMeanBatch {
     let values: [Float]
-    let dPolicy: Int
     let optionValues: [Float]?
-    let selectedOption: Int?
 }
 
 enum ActionComponent {
@@ -32,7 +30,7 @@ extension Sequence where Element == ActionComponent {
 }
 
 enum ActionTransducer {
-    static func sampleAndScore(spec: [ActionComponent], numEnvs: Int, dPolicy: Int,
+    static func sampleAndScore(spec: [ActionComponent], dPolicy: Int,
                                envActionWidth: Int,
                                policyMean: UnsafePointer<Float>,
                                optionPolicyMean: UnsafePointer<Float>?,
@@ -42,7 +40,6 @@ enum ActionTransducer {
                                scoreGrad: UnsafeMutablePointer<Float>,
                                optionScoreGrad: UnsafeMutablePointer<Float>?,
                                importance: UnsafeMutablePointer<Float>?,
-                               importanceLog: UnsafeMutablePointer<Float>?,
                                optionLogProbScratch: UnsafeMutablePointer<Float>?,
                                rngState: inout UInt64) {
         let uniformLatticeMin = 1.0 / Float(1 << 24)
@@ -61,110 +58,96 @@ enum ActionTransducer {
             return sqrt(-2 * log(u1)) * cos(2 * Float.pi * u2)
         }
 
-        for r in 0..<numEnvs {
-            let mBase = r * dPolicy
-            let aBase = r * envActionWidth
-            var pIdx = 0, aIdx = 0
-            for k in 0..<max(optionCount, 0) {
-                importance?[r * optionCount + k] = 0
-                importanceLog?[r * optionCount + k] = 0
-                optionLogProbScratch?[r * optionCount + k] = 0
-            }
-            var behaviorLogProb: Float = 0
-            for component in spec {
-                switch component {
-                case .discrete(let n):
-                    var maxLogit = -Float.greatestFiniteMagnitude
-                    for d in 0..<n { maxLogit = max(maxLogit, policyMean[mBase + pIdx + d]) }
-                    var bestIdx = 0
-                    var bestKey = -Float.greatestFiniteMagnitude
-                    for d in 0..<n {
-                        let l = policyMean[mBase + pIdx + d]
-                        let u = max(nextU01(&rngState), uniformLatticeMin)
-                        let g = -log(-log(u))
-                        let key = l + g
-                        if key > bestKey { bestKey = key; bestIdx = d }
+        var pIdx = 0, aIdx = 0
+        for k in 0..<max(optionCount, 0) {
+            importance?[k] = 0
+            optionLogProbScratch?[k] = 0
+        }
+        var behaviorLogProb: Float = 0
+        for component in spec {
+            switch component {
+            case .discrete(let n):
+                var maxLogit = -Float.greatestFiniteMagnitude
+                for d in 0..<n { maxLogit = max(maxLogit, policyMean[pIdx + d]) }
+                var bestIdx = 0
+                var bestKey = -Float.greatestFiniteMagnitude
+                for d in 0..<n {
+                    let u = max(nextU01(&rngState), uniformLatticeMin)
+                    let key = policyMean[pIdx + d] - log(-log(u))
+                    if key > bestKey { bestKey = key; bestIdx = d }
+                }
+                var z: Float = 0
+                for d in 0..<n { z += exp(policyMean[pIdx + d] - maxLogit) }
+                let invZ: Float = 1.0 / max(z, .leastNormalMagnitude)
+                for d in 0..<n {
+                    let pi = exp(policyMean[pIdx + d] - maxLogit) * invZ
+                    scoreGrad[pIdx + d] = ((d == bestIdx) ? 1.0 : 0.0) - pi
+                    actionSignal[pIdx + d] = (d == bestIdx) ? 1.0 : 0.0
+                }
+                behaviorLogProb += log(max(exp(policyMean[pIdx + bestIdx] - maxLogit) * invZ,
+                                           .leastNormalMagnitude))
+                if let opt = optionPolicyMean {
+                    for k in 0..<optionCount {
+                        let base = k * dPolicy + pIdx
+                        var optMax = -Float.greatestFiniteMagnitude
+                        for d in 0..<n { optMax = max(optMax, opt[base + d]) }
+                        var optZ: Float = 0
+                        for d in 0..<n { optZ += exp(opt[base + d] - optMax) }
+                        let invOptZ = 1.0 / max(optZ, .leastNormalMagnitude)
+                        let p = exp(opt[base + bestIdx] - optMax) * invOptZ
+                        optionLogProbScratch?[k] += log(max(p, .leastNormalMagnitude))
+                        if let osg = optionScoreGrad {
+                            for d in 0..<n {
+                                let pi = exp(opt[base + d] - optMax) * invOptZ
+                                osg[base + d] = ((d == bestIdx) ? 1.0 : 0.0) - pi
+                            }
+                        }
                     }
-                    var z: Float = 0
-                    for d in 0..<n { z += exp(policyMean[mBase + pIdx + d] - maxLogit) }
-                    let invZ: Float = 1.0 / max(z, .leastNormalMagnitude)
-                    for d in 0..<n {
-                        let pi = exp(policyMean[mBase + pIdx + d] - maxLogit) * invZ
-                        scoreGrad[mBase + pIdx + d] = ((d == bestIdx) ? 1.0 : 0.0) - pi
-                        actionSignal[mBase + pIdx + d] = (d == bestIdx) ? 1.0 : 0.0
-                    }
-                    behaviorLogProb += log(max(exp(policyMean[mBase + pIdx + bestIdx] - maxLogit) * invZ,
-                                               .leastNormalMagnitude))
+                }
+                envAction[aIdx] = Float(bestIdx)
+                pIdx += n; aIdx += 1
+
+            case .box(let a, let low, let high):
+                let sigmaBase: Float = 1.0 / Float(max(dPolicy, 1))
+                let scaleBase = pIdx + a
+                for d in 0..<a {
+                    let z = nextNormal(&rngState)
+                    let mu = policyMean[pIdx + d]
+                    let logSigma = policyMean[scaleBase + d]
+                    let sigma = sigmaBase * exp(logSigma)
+                    let raw = mu + sigma * z
+                    let clamped = max(low[d], min(high[d], raw.isFinite ? raw : 0))
+                    envAction[aIdx + d] = clamped
+                    actionSignal[pIdx + d] = clamped
+                    actionSignal[scaleBase + d] = 0
+                    scoreGrad[pIdx + d] = z * sigma
+                    scoreGrad[scaleBase + d] = z * z - 1.0
+                    behaviorLogProb += (sigma.isFinite && sigma > 0)
+                        ? (-log(sigma) - 0.5 * z * z)
+                        : Float.nan
                     if let opt = optionPolicyMean {
                         for k in 0..<optionCount {
-                            let base = (r * optionCount + k) * dPolicy + pIdx
-                            var optMax = -Float.greatestFiniteMagnitude
-                            for d in 0..<n { optMax = max(optMax, opt[base + d]) }
-                            var optZ: Float = 0
-                            for d in 0..<n { optZ += exp(opt[base + d] - optMax) }
-                            let invOptZ = 1.0 / max(optZ, .leastNormalMagnitude)
-                            let p = exp(opt[base + bestIdx] - optMax) * invOptZ
-                            optionLogProbScratch?[r * optionCount + k] += log(max(p, .leastNormalMagnitude))
+                            let base = k * dPolicy
+                            let optMu = opt[base + pIdx + d]
+                            let optLogSigma = opt[base + scaleBase + d]
+                            let optSigma = sigmaBase * exp(optLogSigma)
+                            let oz = (optSigma.isFinite && optSigma > 0) ? ((raw - optMu) / optSigma) : Float.nan
+                            optionLogProbScratch?[k] += (optSigma.isFinite && optSigma > 0)
+                                ? (-log(optSigma) - 0.5 * oz * oz)
+                                : Float.nan
                             if let osg = optionScoreGrad {
-                                for d in 0..<n {
-                                    let pi = exp(opt[base + d] - optMax) * invOptZ
-                                    osg[base + d] = ((d == bestIdx) ? 1.0 : 0.0) - pi
-                                }
+                                osg[base + pIdx + d] = oz * optSigma
+                                osg[base + scaleBase + d] = oz * oz - 1.0
                             }
                         }
                     }
-                    envAction[aBase + aIdx] = Float(bestIdx)
-                    pIdx += n; aIdx += 1
-
-                case .box(let a, let low, let high):
-                    let sigmaBase: Float = 1.0 / Float(max(dPolicy, 1))
-                    let scaleBase = pIdx + a
-                    for d in 0..<a {
-                        let z = nextNormal(&rngState)
-                        let mu = policyMean[mBase + pIdx + d]
-                        let logSigma = policyMean[mBase + scaleBase + d]
-                        let sigma = sigmaBase * exp(logSigma)
-                        let raw = mu + sigma * z
-                        let clamped = max(low[d], min(high[d], raw.isFinite ? raw : 0))
-                        envAction[aBase + aIdx + d] = clamped
-                        actionSignal[mBase + pIdx + d] = clamped
-                        actionSignal[mBase + scaleBase + d] = 0
-                        scoreGrad[mBase + pIdx + d] = z * sigma
-                        scoreGrad[mBase + scaleBase + d] = z * z - 1.0
-                        behaviorLogProb += (sigma.isFinite && sigma > 0)
-                            ? (-log(sigma) - 0.5 * z * z)
-                            : Float.nan
-                        if let opt = optionPolicyMean {
-                            for k in 0..<optionCount {
-                                let base = (r * optionCount + k) * dPolicy
-                                let optMu = opt[base + pIdx + d]
-                                let optLogSigma = opt[base + scaleBase + d]
-                                let optSigma = sigmaBase * exp(optLogSigma)
-                                let oz = (optSigma.isFinite && optSigma > 0) ? ((raw - optMu) / optSigma) : Float.nan
-                                optionLogProbScratch?[r * optionCount + k] += (optSigma.isFinite && optSigma > 0)
-                                    ? (-log(optSigma) - 0.5 * oz * oz)
-                                    : Float.nan
-                                if let osg = optionScoreGrad {
-                                    osg[base + pIdx + d] = oz * optSigma
-                                    osg[base + scaleBase + d] = oz * oz - 1.0
-                                }
-                            }
-                        }
-                    }
-                    pIdx += 2 * a; aIdx += a
                 }
+                pIdx += 2 * a; aIdx += a
             }
-            if optionCount > 0 {
-                for k in 0..<optionCount {
-                    let lp = optionPolicyMean == nil
-                        ? behaviorLogProb
-                        : (optionLogProbScratch?[r * optionCount + k] ?? behaviorLogProb)
-                    let logRho = lp - behaviorLogProb
-                    let rho = exp(logRho)
-                    importance?[r * optionCount + k] = rho
-                    importanceLog?[r * optionCount + k] = logRho
-                }
-            }
+        }
+        for k in 0..<optionCount {
+            let lp = optionPolicyMean == nil ? behaviorLogProb : (optionLogProbScratch?[k] ?? behaviorLogProb)
+            importance?[k] = exp(lp - behaviorLogProb)
         }
     }
 }
