@@ -72,7 +72,7 @@ struct KernelConfig {
     uint uFeatureEverUsed;
     uint uFeatureParentA, uFeatureParentB, uFeatureKind;
     uint uFeatureBirthCount, uParentUseCount;
-    uint uSelectedOption, uHighModelOption, uStaleModelOption;
+    uint uSelectedOption, uHighModelOption;
     uint uKeyboardAge;
     uint uModelAge;
     uint uGvfAge, uBadFeatureAge;
@@ -103,7 +103,6 @@ struct KernelStats {
     float rhoValueTdMean;
     float keyboardGpiMargin, keyboardSelectedOption;
     float oneStepRewardTdMean;
-    float modelQueueCoverage, modelUncertaintyMean, stalePageAgeMean;
     float gvfCount, gvfRateMean, gvfTdMean;
     float gvfDifferentialValueMean;
     float lambdaEffectiveRank;
@@ -168,7 +167,7 @@ struct Ctx {
     device float *valueGauge, *primitiveReassignmentCount;
     device uint *counters, *optFeature, *featureAge, *optAge, *featureEverUsed;
     device uint *featureParentA, *featureParentB, *featureKind, *featureBirthCount, *parentUseCount;
-    device uint *selectedOption, *highModelOption, *staleModelOption, *keyboardAge, *modelAge;
+    device uint *selectedOption, *highModelOption, *keyboardAge, *modelAge;
     device uint *gvfAge, *badFeatureAge;
     device uint *planningStateAge, *selectedPlanState;
     device uint *primitiveChannel;
@@ -243,7 +242,7 @@ inline Ctx make_ctx(device float *params, device float *stateArena, device uint 
     c.featureParentA = uintArena + cfg.uFeatureParentA; c.featureParentB = uintArena + cfg.uFeatureParentB;
     c.featureKind = uintArena + cfg.uFeatureKind; c.featureBirthCount = uintArena + cfg.uFeatureBirthCount;
     c.parentUseCount = uintArena + cfg.uParentUseCount; c.selectedOption = uintArena + cfg.uSelectedOption;
-    c.highModelOption = uintArena + cfg.uHighModelOption; c.staleModelOption = uintArena + cfg.uStaleModelOption;
+    c.highModelOption = uintArena + cfg.uHighModelOption;
     c.keyboardAge = uintArena + cfg.uKeyboardAge; c.modelAge = uintArena + cfg.uModelAge;
     c.gvfAge = uintArena + cfg.uGvfAge; c.badFeatureAge = uintArena + cfg.uBadFeatureAge;
     c.planningStateAge = uintArena + cfg.uPlanningStateAge;
@@ -910,7 +909,6 @@ kernel void oak_plan_reduce(device float *params [[buffer(0)]],
         if (stateMaxAge > ctx.R) nextState = staleState;
         ctx.selectedPlanState[0] = nextState;
         ctx.highModelOption[0] = (ctx.K <= ctx.pageWidth) ? high : min(selectedPage * ctx.pageWidth, ctx.K - 1u);
-        ctx.staleModelOption[0] = (ctx.K <= ctx.pageWidth) ? stale : min(stalePage * ctx.pageWidth, ctx.K - 1u);
         ctx.scalars->meanPrio = prioSum * invK;
         ctx.stats->optionDurationMean = durSum * invK;
         ctx.stats->optionDiffTdMean = diffSum * invK;
@@ -924,8 +922,6 @@ kernel void oak_plan_reduce(device float *params [[buffer(0)]],
         ctx.stats->modelPriorityEntropy = (ctx.K > 1u) ? entropy / log(float(ctx.K)) : 0.0f;
         ctx.stats->modelUpdateRate = (ctx.K <= ctx.pageWidth)
             ? 1.0f : min(1.0f, float(ctx.pageWidth) * invK);
-        ctx.stats->stalePageAgeMean = float(maxAge);
-        ctx.stats->modelQueueCoverage = (maxAge <= ctx.K) ? 1.0f : (float(ctx.K) / float(maxAge));
         ctx.stats->modelPageCoverage = (ctx.K <= ctx.pageWidth)
             ? 1.0f
             : ((stalePageAge <= pageCount) ? 1.0f : (float(pageCount) / float(stalePageAge)));
@@ -1322,9 +1318,6 @@ kernel void oak_replace(device float *params [[buffer(0)]],
 	        if (ctx.optAge[k] < 0xffffffffu) ctx.optAge[k] += 1u;
 	    }
 	    for (uint i = 0u; i < ctx.R; ++i) if (ctx.featureAge[i] < 0xffffffffu) ctx.featureAge[i] += 1u;
-    ctx.stats->modelUncertaintyMean = prioSum * invK;
-    ctx.stats->stalePageAgeMean = ageModelSum * invK;
-    ctx.stats->modelQueueCoverage = (maxAge <= ctx.K) ? 1.0f : float(ctx.K) / float(maxAge);
     float planUseSum = 0.0f, planUseSq = 0.0f, basisUseSum = 0.0f, basisUseSq = 0.0f, modelErrSum = 0.0f;
     float durationLive = 0.0f;
     for (uint k = 0u; k < ctx.K; ++k) {
