@@ -381,12 +381,12 @@ inline void oak_keyboard_predict_body(Ctx ctx, uint tid,
         bool broadTermination = termSum * termSum > float(ctx.K);
         bool activeShortKeyboard = negativeRate && surprising && broadTermination
             && prevMag < float(ctx.K) && prevDur < float(ctx.K);
-        bool refreshKeyboard = !continuing || prevMag <= 0.0f || deadCreditRefresh
-            || (continuing && activeShortKeyboard);
         uint origin = ctx.keyboardOrigin[0] % 3u;
         bool lowMassKeyboard = prevMag < float(ctx.K);
         bool hasKeyboardCommitment = prevMag > 0.0f;
         bool quietRescue = lowMassKeyboard && maxScorePrio > float(ctx.K * ctx.K) && termSum <= 1.0f;
+        bool refreshKeyboard = !continuing || prevMag <= 0.0f || deadCreditRefresh
+            || (continuing && activeShortKeyboard);
         bool rawEligible = refreshKeyboard && hasKeyboardCommitment
             && (activeShortKeyboard || (origin == 1u && !lowMassKeyboard));
         bool relativeEligible = refreshKeyboard && !rawEligible
@@ -394,29 +394,38 @@ inline void oak_keyboard_predict_body(Ctx ctx, uint tid,
         float bankEffort = 0.0f;
         float rawMean = 0.0f, relativeMean = 0.0f;
         float rawAbs = 0.0f, relativeAbs = 0.0f;
-        for (uint k = 0u; k < ctx.K; ++k) {
-            float effort = tgEffort[k];
-            if (isfinite(effort)) bankEffort += effort;
+        if (rawEligible) {
+            for (uint k = 0u; k < ctx.K; ++k) {
+                float effort = isfinite(tgEffort[k]) ? tgEffort[k] : 0.0f;
+                float rawScore = tgDir[k] / max(effort + ctx.invR, ctx.invR);
+                rawMean += isfinite(rawScore) ? rawScore : 0.0f;
+            }
+            rawMean *= ctx.invK;
+            for (uint k = 0u; k < ctx.K; ++k) {
+                float effort = isfinite(tgEffort[k]) ? tgEffort[k] : 0.0f;
+                float rawScore = tgDir[k] / max(effort + ctx.invR, ctx.invR);
+                rawAbs += isfinite(rawScore) ? fabs(rawScore - rawMean) : 0.0f;
+            }
+            rawAbs *= ctx.invK;
+        } else if (relativeEligible) {
+            for (uint k = 0u; k < ctx.K; ++k) {
+                float effort = tgEffort[k];
+                if (isfinite(effort)) bankEffort += effort;
+            }
+            bankEffort *= ctx.invK;
+            for (uint k = 0u; k < ctx.K; ++k) {
+                float effort = isfinite(tgEffort[k]) ? tgEffort[k] : 0.0f;
+                float relScore = tgDir[k] / max(bankEffort + effort + ctx.invR, ctx.invR);
+                relativeMean += isfinite(relScore) ? relScore : 0.0f;
+            }
+            relativeMean *= ctx.invK;
+            for (uint k = 0u; k < ctx.K; ++k) {
+                float effort = isfinite(tgEffort[k]) ? tgEffort[k] : 0.0f;
+                float relScore = tgDir[k] / max(bankEffort + effort + ctx.invR, ctx.invR);
+                relativeAbs += isfinite(relScore) ? fabs(relScore - relativeMean) : 0.0f;
+            }
+            relativeAbs *= ctx.invK;
         }
-        bankEffort *= ctx.invK;
-        for (uint k = 0u; k < ctx.K; ++k) {
-            float effort = isfinite(tgEffort[k]) ? tgEffort[k] : 0.0f;
-            float rawScore = tgDir[k] / max(effort + ctx.invR, ctx.invR);
-            float relScore = tgDir[k] / max(bankEffort + effort + ctx.invR, ctx.invR);
-            rawMean += isfinite(rawScore) ? rawScore : 0.0f;
-            relativeMean += isfinite(relScore) ? relScore : 0.0f;
-        }
-        rawMean *= ctx.invK;
-        relativeMean *= ctx.invK;
-        for (uint k = 0u; k < ctx.K; ++k) {
-            float effort = isfinite(tgEffort[k]) ? tgEffort[k] : 0.0f;
-            float rawScore = tgDir[k] / max(effort + ctx.invR, ctx.invR);
-            float relScore = tgDir[k] / max(bankEffort + effort + ctx.invR, ctx.invR);
-            rawAbs += isfinite(rawScore) ? fabs(rawScore - rawMean) : 0.0f;
-            relativeAbs += isfinite(relScore) ? fabs(relScore - relativeMean) : 0.0f;
-        }
-        rawAbs *= ctx.invK;
-        relativeAbs *= ctx.invK;
         bool useRaw = rawEligible && rawAbs > ctx.invR;
         bool useRelative = relativeEligible && relativeAbs > ctx.invR;
         float mag = 0.0f;

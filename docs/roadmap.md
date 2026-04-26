@@ -407,6 +407,22 @@ relative-arbiter path. The next target is a separate quiet-rescue discriminator
 that can recover the relative seed-1/2 mode without changing seed 3 or stealing
 the strengthened seed-8 trajectory.
 
+The next truthfulness/performance audit is also live. `Sources/Main.swift` no
+longer clears non-finite counters every agent step, so `nonFiniteByPhase` is
+now cumulative over the run rather than only the most recent captured heartbeat
+step. `Sources/OakKernel.metal` also skips the serial direction/effort score
+passes unless raw or relative keyboard arbitration is actually eligible.
+`.oak-benchmarks/cumulative-nf-arbgate-oak300k-20260426-165800` is
+reward/velocity-identical to `.oak-benchmarks/provenance-agefree-oak300k-20260426`
+for all ten seeds, with mean reward still `+11616.800`, positive return `3/10`,
+and positive velocity `8/10`, while mean Oak SPS improves from `2029.6` to
+`2068.0`. The diagnostic consequence is severe: the old seed-1 `NF=3` was a
+sampling artifact. The same run shows seed 1 has `871,952` cumulative
+non-finite events by 300k (`learn=274,413`, `plan=323,126`,
+`tdPsi=274,413`), while all other seeds are NF-clean. Future gates must compare
+against cumulative-NF roots; seed 1 is an invalid-arithmetic/search-control
+failure, not merely a quiet weak walker.
+
 Host health note: long runs exposed resident-memory drift in the benchmark
 worker. `Sources/Main.swift` now wraps each measured worker step in an
 `autoreleasepool`; the behavior-identical seed-3 300k check
