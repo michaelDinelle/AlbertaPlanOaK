@@ -111,18 +111,21 @@ namespace oak_native { class LogStream { public: template<class T> LogStream& op
   class HCEnv final {
     mujoco_gym::HalfCheetahEnvPool pool_;
     int act_dim_, d_policy_, option_count_ = 0, steps_ = 0, done_ = 0;
-    float reward_ = 0.0f, delta_sum_ = 0.0f;
+    float reward_ = 0.0f; double delta_sum_ = 0.0;
     Array env_ids_, player_ids_, action_;
+    std::vector<const char*> info_names_;
+    std::vector<double> info_values_;
     std::vector<float> low_, high_, obs_, env_action_, action_signal_, option_credit_, importance_, logp_, last_policy_, descriptor_;
     std::mt19937 rng_;
     std::normal_distribution<float> normal_{0.0f, 1.0f};
     std::uniform_real_distribution<float> uniform_{0.0f, 1.0f};
     void copy_obs(const std::vector<Array>& recv) { auto src = TArray<mjtNum>(recv[8]); for (int i = 0; i < obs_dim(); ++i) obs_[i] = static_cast<float>(src(0, i)); }
     void copy_reward_done(const std::vector<Array>& recv) { auto r = TArray<float>(recv[4]); auto d = TArray<bool>(recv[3]); reward_ = r[0]; done_ = d[0] ? 1 : 0; }
-    void send() { auto* dst = static_cast<mjtNum*>(action_.Data()); for (int i = 0; i < act_dim_; ++i) dst[i] = static_cast<mjtNum>(env_action_[i]); pool_.Send(std::vector<Array>{env_ids_, player_ids_, action_}); auto recv = pool_.Recv(); copy_obs(recv); copy_reward_done(recv); }
-    void delta(const std::vector<float>& x) { float d = 0.0f; for (int i = 0; i < d_policy_; ++i) { float v = x[i] - last_policy_[i]; d += v * v; last_policy_[i] = x[i]; } delta_sum_ += d / std::max(d_policy_, 1); }
+    void copy_info(const std::vector<Array>& recv) { auto run = TArray<mjtNum>(recv[9]); auto ctrl = TArray<mjtNum>(recv[10]); auto pos = TArray<mjtNum>(recv[11]); auto vel = TArray<mjtNum>(recv[12]); info_values_[0] = run[0]; info_values_[1] = ctrl[0]; info_values_[2] = pos[0]; info_values_[3] = vel[0]; }
+    void send() { auto* dst = static_cast<mjtNum*>(action_.Data()); for (int i = 0; i < act_dim_; ++i) dst[i] = static_cast<mjtNum>(env_action_[i]); pool_.Send(std::vector<Array>{env_ids_, player_ids_, action_}); auto recv = pool_.Recv(); copy_obs(recv); copy_reward_done(recv); copy_info(recv); }
+    void delta(const std::vector<float>& x) { double d = 0.0; for (int i = 0; i < d_policy_; ++i) { double v = double(x[i]) - double(last_policy_[i]); d += v * v; last_policy_[i] = x[i]; } delta_sum_ += d / double(std::max(d_policy_, 1)); }
    public:
-    HCEnv(int seed, const std::string& base) : pool_(Spec(seed, base)), act_dim_(pool_.spec.action_spec["action"_].shape.back()), d_policy_(2 * act_dim_), env_ids_(A<int>(1)), player_ids_(A<int>(1)), action_(A<mjtNum>(1, act_dim_)), obs_(obs_dim()), env_action_(act_dim_), action_signal_(d_policy_), last_policy_(d_policy_), descriptor_(d_policy_), rng_(static_cast<uint32_t>(seed)) {
+    HCEnv(int seed, const std::string& base) : pool_(Spec(seed, base)), act_dim_(pool_.spec.action_spec["action"_].shape.back()), d_policy_(2 * act_dim_), env_ids_(A<int>(1)), player_ids_(A<int>(1)), action_(A<mjtNum>(1, act_dim_)), info_names_{"info:reward_run", "info:reward_ctrl", "info:x_position", "info:x_velocity"}, info_values_(info_names_.size()), obs_(obs_dim()), env_action_(act_dim_), action_signal_(d_policy_), last_policy_(d_policy_), descriptor_(d_policy_), rng_(static_cast<uint32_t>(seed)) {
       static_cast<int*>(env_ids_.Data())[0] = 0; static_cast<int*>(player_ids_.Data())[0] = 0;
       auto b = pool_.spec.action_spec["action"_].bounds; low_.assign(act_dim_, static_cast<float>(std::get<0>(b))); high_.assign(act_dim_, static_cast<float>(std::get<1>(b)));
     }
@@ -133,11 +136,15 @@ namespace oak_native { class LogStream { public: template<class T> LogStream& op
     const float* action_signal() const { return action_signal_.data(); }
     const float* option_credit() const { return option_credit_.data(); }
     const float* importance() const { return importance_.data(); }
+    int info_count() const { return static_cast<int>(info_names_.size()); }
+    const char* const* info_names() const { return info_names_.data(); }
+    const double* info_values() const { return info_values_.data(); }
     float reward() const { return reward_; }
     int done() const { return done_; }
-    float action_delta_mean() const { return steps_ > 0 ? delta_sum_ / steps_ : 0.0f; }
+    double action_delta_mean() const { return steps_ > 0 ? delta_sum_ / steps_ : 0.0; }
     void prepare(int k) { option_count_ = std::max(k, 0); option_credit_.assign(option_count_ * d_policy_, 0.0f); importance_.assign(option_count_, 1.0f); logp_.assign(option_count_, 0.0f); }
-    void reset() { pool_.Reset(env_ids_); copy_obs(pool_.Recv()); reward_ = 0.0f; done_ = 0; steps_ = 0; delta_sum_ = 0.0f; std::fill(last_policy_.begin(), last_policy_.end(), 0.0f); std::fill(action_signal_.begin(), action_signal_.end(), 0.0f); std::fill(option_credit_.begin(), option_credit_.end(), 0.0f); std::fill(importance_.begin(), importance_.end(), 1.0f); }
+    void reset() { pool_.Reset(env_ids_); auto recv = pool_.Recv(); copy_obs(recv); copy_info(recv); reward_ = 0.0f; done_ = 0; steps_ = 0; delta_sum_ = 0.0f; std::fill(last_policy_.begin(), last_policy_.end(), 0.0f); std::fill(action_signal_.begin(), action_signal_.end(), 0.0f); std::fill(option_credit_.begin(), option_credit_.end(), 0.0f); std::fill(importance_.begin(), importance_.end(), 1.0f); }
+    void step_zero() { std::fill(env_action_.begin(), env_action_.end(), 0.0f); std::fill(action_signal_.begin(), action_signal_.end(), 0.0f); std::fill(descriptor_.begin(), descriptor_.end(), 0.0f); delta(descriptor_); ++steps_; send(); }
     void step_random() { for (int d = 0; d < act_dim_; ++d) { float x = low_[d] + (high_[d] - low_[d]) * uniform_(rng_); env_action_[d] = x; action_signal_[d] = x; action_signal_[act_dim_ + d] = 0.0f; descriptor_[d] = x; descriptor_[act_dim_ + d] = 0.0f; } delta(descriptor_); ++steps_; send(); }
     void step_oak(const float* policy, const float* options, int k) {
       if (k != option_count_) prepare(k);
@@ -146,7 +153,7 @@ namespace oak_native { class LogStream { public: template<class T> LogStream& op
       for (int i = 0; i < d_policy_; ++i) descriptor_[i] = safe(policy ? policy[i] : 0.0f);
       for (int d = 0; d < act_dim_; ++d) {
         float mu = descriptor_[d], z = normal_(rng_), sample = safe(mu + sd * z);
-        env_action_[d] = std::max(low_[d], std::min(high_[d], sample)); action_signal_[d] = sample - mu; action_signal_[act_dim_ + d] = 0.0f; behavior += log_sigma - 0.5f * z * z;
+        env_action_[d] = std::max(low_[d], std::min(high_[d], sample)); action_signal_[d] = env_action_[d]; action_signal_[act_dim_ + d] = 0.0f; behavior += log_sigma - 0.5f * z * z;
         for (int o = 0; o < option_count_; ++o) { int off = o * d_policy_; float om = safe(options ? options[off + d] : 0.0f), oz = (sample - om) / sd; logp_[o] += log_sigma - 0.5f * oz * oz; option_credit_[off + d] = sample - om; option_credit_[off + act_dim_ + d] = 0.0f; }
       }
       for (int o = 0; o < option_count_; ++o) importance_[o] = std::exp(logp_[o] - behavior);
@@ -154,28 +161,19 @@ namespace oak_native { class LogStream { public: template<class T> LogStream& op
     }
   };
   struct Handle { std::unique_ptr<HCEnv> env; std::string error; };
-  struct View { int obs_dim, act_dim, d_policy, done; float reward, action_delta_mean; const float *obs, *action_signal, *option_credit, *importance; };
+  struct View { int obs_dim, act_dim, d_policy, done; float reward; double action_delta_mean; int info_count; const char* const* info_names; const double* info_values; const float *obs, *action_signal, *option_credit, *importance; };
   template <class F> int call(void* raw, F f) { auto* h = static_cast<Handle*>(raw); try { h->error.clear(); f(*h->env); if (!Warnings().empty()) { h->error = Warnings(); Warnings().clear(); return 0; } return 1; } catch (const std::exception& e) { h->error = e.what(); return 0; } }
   }
   extern "C" {
   void* oak_env_open(int seed, const char* env_id, const char* base) { try { if (!env_id || std::string(env_id) != "HalfCheetah-v4") throw std::runtime_error("unsupported env id"); if (!base) throw std::runtime_error("base_path is required"); mju_user_warning = OakWarn; auto* h = new Handle(); h->env = std::make_unique<HCEnv>(seed, base); return h; } catch (const std::exception& e) { GlobalError() = e.what(); return nullptr; } }
   void oak_env_close(void* raw) { delete static_cast<Handle*>(raw); }
   const char* oak_env_error(void* raw) { return raw ? static_cast<Handle*>(raw)->error.c_str() : GlobalError().c_str(); }
-  int oak_env_obs_dim(void* raw) { return static_cast<Handle*>(raw)->env->obs_dim(); }
-  int oak_env_act_dim(void* raw) { return static_cast<Handle*>(raw)->env->act_dim(); }
-  int oak_env_d_policy(void* raw) { return static_cast<Handle*>(raw)->env->d_policy(); }
   int oak_env_prepare(void* raw, int k) { return call(raw, [k](HCEnv& e){ e.prepare(k); }); }
   int oak_env_reset(void* raw) { return call(raw, [](HCEnv& e){ e.reset(); }); }
   int oak_env_step_random(void* raw) { return call(raw, [](HCEnv& e){ e.step_random(); }); }
+  int oak_env_step_zero(void* raw) { return call(raw, [](HCEnv& e){ e.step_zero(); }); }
   int oak_env_step_oak(void* raw, const float* p, const float* o, int k) { return call(raw, [p,o,k](HCEnv& e){ e.step_oak(p, o, k); }); }
-  int oak_env_view(void* raw, View* v) { if (!raw || !v) return 0; auto& e = *static_cast<Handle*>(raw)->env; *v = View{e.obs_dim(), e.act_dim(), e.d_policy(), e.done(), e.reward(), e.action_delta_mean(), e.obs(), e.action_signal(), e.option_credit(), e.importance()}; return 1; }
-  const float* oak_env_obs(void* raw) { return static_cast<Handle*>(raw)->env->obs(); }
-  const float* oak_env_action_signal(void* raw) { return static_cast<Handle*>(raw)->env->action_signal(); }
-  const float* oak_env_option_credit(void* raw) { return static_cast<Handle*>(raw)->env->option_credit(); }
-  const float* oak_env_importance(void* raw) { return static_cast<Handle*>(raw)->env->importance(); }
-  float oak_env_reward(void* raw) { return static_cast<Handle*>(raw)->env->reward(); }
-  int oak_env_done(void* raw) { return static_cast<Handle*>(raw)->env->done(); }
-  float oak_env_action_delta_mean(void* raw) { return static_cast<Handle*>(raw)->env->action_delta_mean(); }
+  int oak_env_view(void* raw, View* v) { if (!raw || !v) return 0; auto& e = *static_cast<Handle*>(raw)->env; *v = View{e.obs_dim(), e.act_dim(), e.d_policy(), e.done(), e.reward(), e.action_delta_mean(), e.info_count(), e.info_names(), e.info_values(), e.obs(), e.action_signal(), e.option_credit(), e.importance()}; return 1; }
   }
   ''').strip() + "\n")
 PY
