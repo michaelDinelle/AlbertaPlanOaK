@@ -48,6 +48,22 @@ were all rejected because they either killed the strong walking seed or failed
 the 300k coverage gate. Future changes must preserve the high-return seed while
 improving seed coverage and non-finite health.
 
+Post-walking loop audit, also rejected as standalone keepers:
+Plan-clean Swift arena alignment (`fcstomp-arena-align-*`) exposed that the live
+walking checkpoint depends on an accidental delayed-plasticity/layout coupling;
+directly correcting the layout made the run NF-clean but killed the strong gait
+(`50k` mean `-398.017`, max `+796.612`). Q-per-duration behavior selection with
+the aligned layout gave a real architectural clue but failed promotion:
+`fcstomp-aligned-qperdur-300k` produced one strong forward seed (`+60705.313`,
+mean velocity `+0.221417`) while another seed snowballed backward (`-88300.394`,
+mean velocity `-0.159385`), for mean reward `-7422.100`, positive velocity
+`5/10`, and NF total `12`. Q-per-duration interruption, decoded-duration TD,
+TD-corrected scores, selected-option execution/model credit, chord-basis model
+credit, signed replacement utility, neutral utility birth, and diagnostic
+`alpha=1` all regressed 10k/50k gates. The next accepted fix must replace the
+accidental snowball with a Plan-honest FC-STOMP feedback/search-control
+mechanism; do not revive these probes by name without materially new evidence.
+
 Host simplification gate: the Swift host and native bridge were collapsed to a
 HalfCheetah-only benchmark path, `ActionTransducer.swift` and `EnvBridge.swift`
 were deleted, and the benchmark parent now launches workers with direct

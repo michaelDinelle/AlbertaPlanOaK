@@ -290,10 +290,10 @@ final class Run {
     for (name, value) in env.envInfo { envInfo[name, default: InfoStat()].note(value) }
     if let s = stats {
       last = s
-      nfE += Int(s.encodeNonFiniteCount)
-      nfL += Int(s.learnNonFiniteCount)
-      nfP += Int(s.planNonFiniteCount)
-      nfT += Int(s.tdPsiNonFiniteCount)
+      nfE = Int(s.encodeNonFiniteCount)
+      nfL = Int(s.learnNonFiniteCount)
+      nfP = Int(s.planNonFiniteCount)
+      nfT = Int(s.tdPsiNonFiniteCount)
       optR = Int(s.oakOptionReinitCount)
       featR = Int(s.oakFeatureReinitCount)
     }
