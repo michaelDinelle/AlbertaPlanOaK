@@ -65,7 +65,7 @@ struct Ctx {
     device float *valueGauge;
     device uint *counters, *optFeature, *featureAge, *optAge;
     device uint *featureParentA, *featureParentB, *featureKind, *featureBirthCount;
-    device uint *selectedOption;
+    device uint *selectedOption, *keyboardOrigin, *keyboardOriginAge;
     device uint *badFeatureAge;
     device KernelScalars *scalars;
     device KernelStats *stats;
@@ -143,6 +143,8 @@ inline Ctx make_ctx(device float *params, device float *stateArena, device uint 
     c.featureKind = uintArena + u; u += c.R;
     c.featureBirthCount = uintArena + u; u += c.R;
     c.selectedOption = uintArena + u; u += 1u;
+    c.keyboardOrigin = uintArena + u; u += 1u;
+    c.keyboardOriginAge = uintArena + u; u += 1u;
     c.badFeatureAge = uintArena + u;
     c.scalars = scalars; c.stats = stats;
     return c;
@@ -211,6 +213,8 @@ inline void oak_keyboard_predict_body(Ctx ctx, uint tid,
                                       threadgroup float *tgCont,
                                       threadgroup float *tgTerm,
                                       threadgroup float *tgTdPsi,
+                                      threadgroup float *tgDir,
+                                      threadgroup float *tgEffort,
                                       threadgroup float *tgScalars) {
     float vPrev = 0.0f, vCurr = 0.0f;
     if (tid == 0u) {
@@ -289,7 +293,7 @@ inline void oak_keyboard_predict_body(Ctx ctx, uint tid,
         ctx.modelDenom[tid] = (isfinite(modelDenom) && modelDenom > 0.0f) ? modelDenom : 0.0f;
         tgCont[tid] = cont;
         tgTerm[tid] = beta;
-        float rHat = 0.0f, lRaw = 0.0f, vModel = 0.0f;
+        float rHat = 0.0f, lRaw = 0.0f, vModel = 0.0f, direction = 0.0f;
         for (uint j = 0u; j < ctx.R; ++j) {
             uint idx = tid * ctx.R + j;
             rHat = fma(ctx.optReward[idx], tgCurr[j], rHat);
@@ -298,12 +302,20 @@ inline void oak_keyboard_predict_body(Ctx ctx, uint tid,
             uint nBase = tid * ctx.R * ctx.R + j * ctx.R;
             for (uint i = 0u; i < ctx.R; ++i) nHat = fma(ctx.optTransition[nBase + i], tgCurr[i], nHat);
             vModel = fma(ctx.valueW[j], nHat, vModel);
+            direction = fma(nHat - tgCurr[j], tgCurr[j] - tgPrev[j], direction);
         }
         float dur = decode_duration(lRaw);
         float q = rHat - tgScalars[11] * dur + vModel;
         float qAdv = q - vCurr;
         ctx.durationHat[tid] = dur;
         tgG[tid] = isfinite(qAdv) ? qAdv : 0.0f;
+        tgDir[tid] = isfinite(direction) ? direction : 0.0f;
+        float effort = 0.0f;
+        for (uint d = 0u; d < ctx.D; ++d) {
+            float mu = ctx.optionPolicyMean[tid * ctx.D + d];
+            if (isfinite(mu)) effort = fma(mu, mu, effort);
+        }
+        tgEffort[tid] = effort * (1.0f / float(max(ctx.D, 1u)));
     }
     threadgroup_barrier(mem_flags::mem_threadgroup);
     if (tid == 0u) {
@@ -372,6 +384,42 @@ inline void oak_keyboard_predict_body(Ctx ctx, uint tid,
             && prevMag < float(ctx.K) && prevDur < float(ctx.K);
         bool refreshKeyboard = !continuing || prevMag <= 0.0f || deadCreditRefresh
             || (continuing && activeShortKeyboard);
+        uint origin = ctx.keyboardOrigin[0] % 3u;
+        bool lowMassKeyboard = prevMag < float(ctx.K);
+        bool hasKeyboardCommitment = prevMag > 0.0f;
+        bool quietRescue = lowMassKeyboard && maxScorePrio > float(ctx.K * ctx.K) && termSum <= 1.0f;
+        bool rawEligible = refreshKeyboard && hasKeyboardCommitment
+            && (activeShortKeyboard || (origin == 1u && !lowMassKeyboard));
+        bool relativeEligible = refreshKeyboard && !rawEligible
+            && hasKeyboardCommitment && (quietRescue || origin == 2u);
+        float bankEffort = 0.0f;
+        float rawMean = 0.0f, relativeMean = 0.0f;
+        float rawAbs = 0.0f, relativeAbs = 0.0f;
+        for (uint k = 0u; k < ctx.K; ++k) {
+            float effort = tgEffort[k];
+            if (isfinite(effort)) bankEffort += effort;
+        }
+        bankEffort *= ctx.invK;
+        for (uint k = 0u; k < ctx.K; ++k) {
+            float effort = isfinite(tgEffort[k]) ? tgEffort[k] : 0.0f;
+            float rawScore = tgDir[k] / max(effort + ctx.invR, ctx.invR);
+            float relScore = tgDir[k] / max(bankEffort + effort + ctx.invR, ctx.invR);
+            rawMean += isfinite(rawScore) ? rawScore : 0.0f;
+            relativeMean += isfinite(relScore) ? relScore : 0.0f;
+        }
+        rawMean *= ctx.invK;
+        relativeMean *= ctx.invK;
+        for (uint k = 0u; k < ctx.K; ++k) {
+            float effort = isfinite(tgEffort[k]) ? tgEffort[k] : 0.0f;
+            float rawScore = tgDir[k] / max(effort + ctx.invR, ctx.invR);
+            float relScore = tgDir[k] / max(bankEffort + effort + ctx.invR, ctx.invR);
+            rawAbs += isfinite(rawScore) ? fabs(rawScore - rawMean) : 0.0f;
+            relativeAbs += isfinite(relScore) ? fabs(relScore - relativeMean) : 0.0f;
+        }
+        rawAbs *= ctx.invK;
+        relativeAbs *= ctx.invK;
+        bool useRaw = rawEligible && rawAbs > ctx.invR;
+        bool useRelative = relativeEligible && relativeAbs > ctx.invR;
         float mag = 0.0f;
         for (uint k = 0u; k < ctx.K; ++k) {
             float qAdv = tgG[k];
@@ -380,9 +428,25 @@ inline void oak_keyboard_predict_body(Ctx ctx, uint tid,
             float dur = ctx.durationHat[k];
             if (!isfinite(dur) || dur <= 0.0f) dur = 1.0f;
             float lam = isfinite(modelErr) ? ((qAdv - modelErr) / dur - meanQ) : 0.0f;
+            if (useRaw || useRelative) {
+                float effort = isfinite(tgEffort[k]) ? tgEffort[k] : 0.0f;
+                float denom = useRaw ? max(effort + ctx.invR, ctx.invR)
+                                     : max(bankEffort + effort + ctx.invR, ctx.invR);
+                float dScore = tgDir[k] / denom;
+                if (!isfinite(dScore)) dScore = 0.0f;
+                lam = useRaw ? (dScore - rawMean) : ((dScore - relativeMean) / relativeAbs);
+            }
             if (!isfinite(lam)) lam = 0.0f;
             if (refreshKeyboard) ctx.keyboard[k] = lam;
             mag += fabs(lam);
+        }
+        if (refreshKeyboard) {
+            uint nextOrigin = useRaw ? 1u : (useRelative ? 2u : 0u);
+            ctx.keyboardOriginAge[0] = (nextOrigin == origin && ctx.keyboardOriginAge[0] < 0xffffffffu)
+                ? (ctx.keyboardOriginAge[0] + 1u) : 0u;
+            ctx.keyboardOrigin[0] = nextOrigin;
+        } else if (ctx.keyboardOriginAge[0] < 0xffffffffu) {
+            ctx.keyboardOriginAge[0] += 1u;
         }
         uint probe = ctx.stepCount % max(ctx.K, 1u);
         float floor = ctx.invK;
@@ -391,6 +455,8 @@ inline void oak_keyboard_predict_body(Ctx ctx, uint tid,
                 float probeSign = (k == probe) ? 1.0f : -ctx.invK;
                 ctx.keyboard[k] = probeSign * floor;
             }
+            ctx.keyboardOrigin[0] = 0u;
+            ctx.keyboardOriginAge[0] = 0u;
         }
         float planNum = 0.0f, planNorm = 0.0f;
         for (uint k = 0u; k < ctx.K; ++k) {
@@ -438,6 +504,8 @@ kernel void oak_encode(device float *params [[buffer(0)]],
                        threadgroup float *tgScalars [[threadgroup(4)]],
                        threadgroup float *tgPrevState [[threadgroup(5)]],
                        threadgroup float *tgCurrState [[threadgroup(6)]],
+                       threadgroup float *tgDir [[threadgroup(7)]],
+                       threadgroup float *tgEffort [[threadgroup(8)]],
                        uint tid [[thread_position_in_threadgroup]],
                        uint tgW [[threads_per_threadgroup]]) {
     Ctx ctx = make_ctx(params, stateArena, uintArena, scalars, stats, cfg);
@@ -504,7 +572,7 @@ kernel void oak_encode(device float *params [[buffer(0)]],
     }
     threadgroup_barrier(mem_flags::mem_threadgroup);
     oak_keyboard_predict_body(ctx, tid, tgPrevState, tgCurrState, tgG, tgCont, tgTerm,
-                              tgTdPsi, tgScalars);
+                              tgTdPsi, tgDir, tgEffort, tgScalars);
 }
 
 kernel void oak_plan(device float *params [[buffer(0)]],
