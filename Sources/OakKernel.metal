@@ -10,8 +10,6 @@ constant uint OAK_CNT_REINIT_FEAT   = 4u;
 constant uint OAK_CNT_TDPSI_NF      = 5u;
 constant uint OAK_CNT_IMPORTANCE_NF = 6u;
 
-constant uint OAK_MAX_RANK = 256u;
-
 struct KernelConfig {
     uint obsDim, rank, optionCount, actionParamCount;
     uint obsTraceLevels;
@@ -50,7 +48,7 @@ struct Ctx {
     device float *valueW, *psi, *optPolicy, *optReward, *optTransition, *optDuration;
     device float *observation, *observationMean, *obsSM;
     device float *state;
-    device float *policyMean, *actionSignal, *optionScoreGrad, *optionPolicyMean;
+    device float *policyMean, *actionSignal, *optionActorCredit, *optionPolicyMean;
     device float *importance;
     device float *reward, *td, *tdPsi;
     device float *utilFeat, *utilOpt, *bonusW, *featureMean, *featureSM;
@@ -96,7 +94,7 @@ inline Ctx make_ctx(device float *params, device float *stateArena, device uint 
     c.state = stateArena + s; s += 2u * c.R;
     c.policyMean = stateArena + s; s += c.D;
     c.actionSignal = stateArena + s; s += c.D;
-    c.optionScoreGrad = stateArena + s; s += c.K * c.D;
+    c.optionActorCredit = stateArena + s; s += c.K * c.D;
     c.optionPolicyMean = stateArena + s; s += c.K * c.D;
     c.importance = stateArena + s; s += c.K;
     c.reward = stateArena + s; s += 1u;
@@ -326,16 +324,16 @@ kernel void oak_encode(device float *params [[buffer(0)]],
                        device KernelScalars *scalars [[buffer(3)]],
                        device KernelStats *stats [[buffer(4)]],
                        constant KernelConfig &cfg [[buffer(5)]],
+                       threadgroup float *tgG [[threadgroup(0)]],
+                       threadgroup float *tgCont [[threadgroup(1)]],
+                       threadgroup float *tgTerm [[threadgroup(2)]],
+                       threadgroup float *tgTdPsi [[threadgroup(3)]],
+                       threadgroup float *tgScalars [[threadgroup(4)]],
+                       threadgroup float *tgPrevState [[threadgroup(5)]],
+                       threadgroup float *tgCurrState [[threadgroup(6)]],
                        uint tid [[thread_position_in_threadgroup]],
                        uint tgW [[threads_per_threadgroup]]) {
     Ctx ctx = make_ctx(params, stateArena, uintArena, scalars, stats, cfg);
-    threadgroup float tgG[OAK_MAX_RANK];
-    threadgroup float tgCont[OAK_MAX_RANK];
-    threadgroup float tgTerm[OAK_MAX_RANK];
-    threadgroup float tgTdPsi[OAK_MAX_RANK];
-    threadgroup float tgScalars[16];
-    threadgroup float tgPrevState[OAK_MAX_RANK];
-    threadgroup float tgCurrState[OAK_MAX_RANK];
 
     uint nf = 0u;
     float obsRate = track_rate(ctx.stepCount, ctx.O);
@@ -408,16 +406,15 @@ kernel void oak_plan(device float *params [[buffer(0)]],
                      device KernelScalars *scalars [[buffer(3)]],
                      device KernelStats *stats [[buffer(4)]],
                      constant KernelConfig &cfg [[buffer(5)]],
+                     threadgroup float *tgModelErr [[threadgroup(0)]],
                      uint j [[thread_position_in_threadgroup]],
-	                     uint k [[threadgroup_position_in_grid]]) {
+		                     uint k [[threadgroup_position_in_grid]]) {
     Ctx ctx = make_ctx(params, stateArena, uintArena, scalars, stats, cfg);
     if (k >= ctx.K) return;
     device const float *prev = state_at(ctx, ctx.stateSlot);
     device const float *curr = state_at(ctx, 1u - ctx.stateSlot);
     bool active = j < ctx.R;
     float cont = ctx.continuation[k];
-
-    threadgroup float tgModelErr[OAK_MAX_RANK];
 
     float nHat = 0.0f, nTd = 0.0f;
     if (active) {
@@ -508,7 +505,7 @@ kernel void oak_learn_heads(device float *params [[buffer(0)]],
         float rho = ctx.importance[k];
         if (!isfinite(rho)) rho = 0.0f;
         float w = ctx.optPolicy[(k * ctx.D + d) * ctx.R + i];
-        float targetGrad = ctx.optionScoreGrad[k * ctx.D + d];
+        float targetGrad = ctx.optionActorCredit[k * ctx.D + d];
         if (!isfinite(targetGrad)) targetGrad = 0.0f;
         float grad = rho * targetGrad * prev[i];
         float denom = ctx.headDenom[k];
@@ -572,12 +569,12 @@ kernel void oak_replace(device float *params [[buffer(0)]],
                         device KernelScalars *scalars [[buffer(3)]],
                         device KernelStats *stats [[buffer(4)]],
                         constant KernelConfig &cfg [[buffer(5)]],
+                        threadgroup float *tgCurrState [[threadgroup(0)]],
                         uint tid [[thread_position_in_threadgroup]],
                         uint tgW [[threads_per_threadgroup]]) {
     Ctx ctx = make_ctx(params, stateArena, uintArena, scalars, stats, cfg);
     device const float *curr = state_at(ctx, 1u - ctx.stateSlot);
     device const float *prev = state_at(ctx, ctx.stateSlot);
-    threadgroup float tgCurrState[OAK_MAX_RANK];
     for (uint i = tid; i < ctx.R; i += tgW) tgCurrState[i] = curr[i];
     threadgroup_barrier(mem_flags::mem_threadgroup);
     float invT = track_rate(ctx.stepCount, ctx.R);
@@ -736,13 +733,18 @@ kernel void oak_replace(device float *params [[buffer(0)]],
 	            if (ctx.optFeature[ok] == worst) { k = ok; worstBasis = -FLT_MAX; break; }
 	            if (use < worstBasis) { worstBasis = use; k = ok; }
 	        }
+		        uint policySource = ctx.selectedOption[0] % ctx.K;
+		        if (policySource == k && ctx.K > 1u) policySource = (k + 1u) % ctx.K;
 		        ctx.optAge[k] = 0u; ctx.optFeature[k] = worst; ctx.utilOpt[k] = float(ctx.R);
 	        ctx.actorAdv[k] = 0.0f;
 		        for (uint i = 0u; i < ctx.R; ++i) {
 		            ctx.psi[k * ctx.R + i] = 0.0f;
 		            ctx.optReward[k * ctx.R + i] = 0.0f;
 	            ctx.optDuration[k * ctx.R + i] = 0.0f;
-	            for (uint d = 0u; d < ctx.D; ++d) ctx.optPolicy[(k * ctx.D + d) * ctx.R + i] = 0.0f;
+	            for (uint d = 0u; d < ctx.D; ++d) {
+	                float p = ctx.optPolicy[(policySource * ctx.D + d) * ctx.R + i];
+	                ctx.optPolicy[(k * ctx.D + d) * ctx.R + i] = isfinite(p) ? p : 0.0f;
+	            }
 	            for (uint j = 0u; j < ctx.R; ++j) ctx.optTransition[k * ctx.R * ctx.R + j * ctx.R + i] = 0.0f;
         }
 	        float invSqrtR = rsqrt(float(max(ctx.R, 1u)));
@@ -761,10 +763,9 @@ kernel void oak_replace(device float *params [[buffer(0)]],
     ctx.scalars->stepCount = ctx.stepCount + 1u;
 }
 
-kernel void oak_action_emit(device float *params [[buffer(0)]], device float *stateArena [[buffer(1)]], device uint *uintArena [[buffer(2)]], device KernelScalars *scalars [[buffer(3)]], device KernelStats *stats [[buffer(4)]], constant KernelConfig &cfg [[buffer(5)]], uint group [[threadgroup_position_in_grid]], uint tid [[thread_position_in_threadgroup]], uint tgW [[threads_per_threadgroup]]) {
+kernel void oak_action_emit(device float *params [[buffer(0)]], device float *stateArena [[buffer(1)]], device uint *uintArena [[buffer(2)]], device KernelScalars *scalars [[buffer(3)]], device KernelStats *stats [[buffer(4)]], constant KernelConfig &cfg [[buffer(5)]], threadgroup float *tgCurrState [[threadgroup(0)]], uint group [[threadgroup_position_in_grid]], uint tid [[thread_position_in_threadgroup]], uint tgW [[threads_per_threadgroup]]) {
     Ctx ctx = make_ctx(params, stateArena, uintArena, scalars, stats, cfg);
     device const float *curr = state_at(ctx, ctx.stateSlot);
-    threadgroup float tgCurrState[OAK_MAX_RANK];
     for (uint i = tid; i < ctx.R; i += tgW) tgCurrState[i] = curr[i];
     threadgroup_barrier(mem_flags::mem_threadgroup);
     emit_action_grid(ctx, tgCurrState, group, tid, tgW);

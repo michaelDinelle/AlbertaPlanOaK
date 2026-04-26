@@ -22,6 +22,17 @@ seeds x `{oak,random}`, Oak NF zero on every seed, Oak beats random `10/10`,
 mean Oak reward `-5869.101`, median `-5860.469`, and mean paired lift
 `256759.957`.
 
+Host simplification gate: the Swift host and native bridge were collapsed to a
+HalfCheetah-only benchmark path, `ActionTransducer.swift` and `EnvBridge.swift`
+were deleted, and the benchmark parent now launches workers with direct
+`posix_spawn`/`waitpid`. The attempted Box `D_policy=A` deletion repeatedly
+collapsed support by 120k-450k steps, so the live simplified host keeps the
+`2A` wrapper code width, inert scale half, and `R=max(obsDim,2*D_policy,2)`
+rank relationship. Gate artifacts:
+`.oak-benchmarks/codex-host-rewrite-rank2d-600k` and
+`.oak-benchmarks/codex-host-rewrite-rank2d-1.5m`; Oak NF stayed zero `10/10`
+and actor support stayed near uniform at the 1.5M gate.
+
 Dead-code rule after baseline promotion: GPU `scoreGrad` plumbing was removed
 because the only kernel consumer wrote an unread threadgroup scalar; behavior
 score-gradient telemetry is now also removed from host metrics. The promoted

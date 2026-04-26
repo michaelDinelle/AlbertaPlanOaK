@@ -2,1049 +2,314 @@ import Foundation
 import Metal
 import Darwin
 
-// =================================================================================================
-// Orthodox Step 11 Oak - host-side dispatcher. See Sources/OakKernel.metal for the architectural
-// citation block. This file owns: arena sizing, Metal engine, benchmark execution, and run-metrics
-// JSON emission.
-//
-// Current stream semantics: ONE agent instance owns ONE env (numEnvs=1) and processes ONE
-// observation per step. Concurrent benchmarking runs N independent worker processes by default
-// so native env/global state cannot leak across streams; future batched kernels must preserve
-// disjoint per-agent state.
-// =================================================================================================
-
-enum OakError: Error, CustomStringConvertible {
-    case message(String)
-    var description: String { if case let .message(m) = self { return m }; return "" }
-}
-
+enum OakError: Error, CustomStringConvertible { case message(String); var description: String { if case let .message(m) = self { return m }; return "" } }
 enum Policy: String, Codable { case oak, random }
+let oakEnvId = "HalfCheetah-v4", oakLock = ".oak-benchmark.lock"
 
-// =================================================================================================
-// Run metrics JSON (schemaVersion 5).
-// =================================================================================================
 struct RunHealth: Codable {
-    let rewardRate: Double?
-    let actionDeltaL2Mean: Double?
-    let continuingRestartCount: Double?
-    let oakOptionReinitCountFinal: Int?, oakFeatureReinitCountFinal: Int?
-    let nonFiniteByPhase: [String: Int]?
-    let terminationRate: Double?
-    let optionDurationMean: Double?
-    let importanceEss: Double?
-    let actorUpdateNormMean: Double?
-    let actorSupportEntropy: Double?
-    let modelPriorityMax: Double?
+    let rewardRate: Double?, actionDeltaL2Mean: Double?, continuingRestartCount: Double?
+    let oakOptionReinitCountFinal: Int?, oakFeatureReinitCountFinal: Int?, nonFiniteByPhase: [String: Int]?
+    let terminationRate: Double?, optionDurationMean: Double?, importanceEss: Double?
+    let actorUpdateNormMean: Double?, actorSupportEntropy: Double?, modelPriorityMax: Double?
 }
-
 private struct RunMetricsFile: Encodable {
-    let schemaVersion: Int, command: String, envId: String, policy: Policy
-    let seed: Int?
-    let numEnvs: Int, stopAfterMeasuredSteps: Int
-    let observationDim: Int, actionDim: Int, actionDiscreteCount: Int?
-    let measuredStepCount: Int, measuredSeconds: Double
-    let stepsPerSecond: Double?, heartbeatSequence: Int?
-    let rewardSum: Double, doneCount: Int, stopReason: String
-    let health: RunHealth?
+    let schemaVersion: Int, command: String, envId: String, policy: Policy, seed: Int?
+    let numEnvs: Int, stopAfterMeasuredSteps: Int, observationDim: Int, actionDim: Int, actionDiscreteCount: Int?
+    let measuredStepCount: Int, measuredSeconds: Double, stepsPerSecond: Double?, heartbeatSequence: Int?
+    let rewardSum: Double, doneCount: Int, stopReason: String, health: RunHealth?
+}
+struct KernelConfig { var obsDim, rank, optionCount, actionParamCount, obsTraceLevels, linearAnchorCount: UInt32; var invRank, invOptionCount, metaEta: Float }
+struct KernelScalars { var stepCount: UInt32 = 0, stateSlot: UInt32 = 0; var rho: Float = 0 }
+struct KernelStats {
+    var encodeNonFiniteCount, learnNonFiniteCount, planNonFiniteCount, tdPsiNonFiniteCount: Float
+    var oakOptionReinitCount, oakFeatureReinitCount, terminationRate, optionDurationMean: Float
+    var importanceEss, actorUpdateNormMean, actorSupportEntropy, modelPriorityMax: Float
 }
 
-let oakUnseededSeed: Int32 = 0
-let oakBenchmarkLockFile = ".oak-benchmark.lock"
-
-func metalDevice() throws -> MTLDevice {
-    guard let d = MTLCreateSystemDefaultDevice() else {
-        throw OakError.message("Metal device unavailable.")
-    }
-    return d
-}
-
-// =================================================================================================
-// Filesystem helpers.
-// =================================================================================================
-private func oakRoots() -> [URL] {
+func decodeCString(_ b: [CChar]) -> String { String(decoding: b.prefix { $0 != 0 }.map { UInt8(bitPattern: $0) }, as: UTF8.self) }
+func roots() -> [URL] {
     let fm = FileManager.default
     let exe = URL(fileURLWithPath: CommandLine.arguments[0],
                   relativeTo: URL(fileURLWithPath: fm.currentDirectoryPath)).standardizedFileURL
-    return [
-        fm.currentDirectoryPath,
-        exe.deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent().path,
-    ].map { URL(fileURLWithPath: $0).standardizedFileURL }
+    return [fm.currentDirectoryPath, exe.deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent().path].map { URL(fileURLWithPath: $0).standardizedFileURL }
+}
+func buildPath(_ p: String, _ what: String, nonEmpty: Bool = false) throws -> URL {
+    guard let u = roots().map({ $0.appendingPathComponent(p) }).first(where: {
+        FileManager.default.fileExists(atPath: $0.path) && (!nonEmpty || (((try? $0.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0) > 0))
+    }) else { throw OakError.message("Missing \(what). Run ./setup.sh first.") }
+    return u
 }
 
-func requiredBuildPath(_ path: String, description: String, nonEmpty: Bool = false) throws -> URL {
-    guard let url = oakRoots().map({ $0.appendingPathComponent(path) }).first(where: {
-        guard FileManager.default.fileExists(atPath: $0.path) else { return false }
-        return !nonEmpty || ((try? $0.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0) > 0
-    }) else { throw OakError.message("Missing \(description). Run ./setup.sh first.") }
-    return url
+func copyFloats(from src: UnsafePointer<Float>, to dst: inout [Float], count: Int) {
+    _ = dst.withUnsafeMutableBufferPointer { memcpy($0.baseAddress!, src, count * MemoryLayout<Float>.stride) }
 }
 
-func decodeCString(_ buffer: [CChar]) -> String {
-    String(decoding: buffer.prefix { $0 != 0 }.map { UInt8(bitPattern: $0) }, as: UTF8.self)
-}
-
-// =================================================================================================
-// HealthAccumulator - fixed-size fold for benchmark promotion gates.
-// =================================================================================================
-private struct HealthAccumulator {
-    private var envSteps = 0, kernelSteps = 0
-    private var rhoBar = 0.0
-    private var actDeltaSum = 0.0
-    private var encodeNF = 0, learnNF = 0, planNF = 0, tdPsiNF = 0
-    private var oakOptionReinitFinal = 0, oakFeatureReinitFinal = 0
-    private var lastKernelStats: KernelStats?
-    private let trackFloor: Double
-
-    init(obsDim: Int) { trackFloor = 1.0 / Double(max(obsDim, 1)) }
-
-    mutating func recordEnvSignals(reward: Float,
-                                   prevPolicyMean: UnsafeBufferPointer<Float>,
-                                   currPolicyMean: UnsafeBufferPointer<Float>) {
-        envSteps += 1
-        let r = Double(reward)
-        if r.isFinite {
-            let invT = max(1.0 / Double(envSteps), trackFloor)
-            rhoBar += invT * (r - rhoBar)
-        }
-        var dl = 0.0
-        for d in 0..<currPolicyMean.count {
-            let delta = currPolicyMean[d] - prevPolicyMean[d]
-            dl += Double(delta) * Double(delta)
-        }
-        let dlMean = dl / Double(max(currPolicyMean.count, 1))
-        let metricMax = Double.greatestFiniteMagnitude / 4
-        let dlSafe = dlMean.isFinite ? min(dlMean, metricMax) : metricMax
-        actDeltaSum = min(metricMax, actDeltaSum + dlSafe)
+private final class NativeBridge: @unchecked Sendable {
+    typealias OpenFn = @convention(c) (Int32, UnsafePointer<CChar>, UnsafeMutablePointer<CChar>?, Int32) -> UnsafeMutableRawPointer?
+    typealias CloseFn = @convention(c) (UnsafeMutableRawPointer?) -> Void
+    typealias IntFn = @convention(c) (UnsafeMutableRawPointer?) -> Int32
+    typealias BoundsFn = @convention(c) (UnsafeMutableRawPointer?, UnsafeMutablePointer<Float>?, UnsafeMutablePointer<Float>?) -> Int32
+    typealias ResetFn = @convention(c) (UnsafeMutableRawPointer?, UnsafeMutablePointer<Float>?, UnsafeMutablePointer<CChar>?, Int32) -> Int32
+    typealias StepFn = @convention(c) (UnsafeMutableRawPointer?, UnsafePointer<Float>?, UnsafeMutablePointer<Float>?, UnsafeMutablePointer<Float>?, UnsafeMutablePointer<UInt8>?, UnsafeMutablePointer<CChar>?, Int32) -> Int32
+    typealias WarnFn = @convention(c) (UnsafeMutablePointer<CChar>?, Int32) -> Int32
+    static let shared = { do { return try NativeBridge() } catch { fatalError("\(error)") } }()
+    private let dylib: UnsafeMutableRawPointer, assets: String
+    let openFn: OpenFn; let closeFn: CloseFn; let obsFn, actFn: IntFn; let boundsFn: BoundsFn; let resetFn: ResetFn; let stepFn: StepFn; let warnFn: WarnFn
+    private init() throws {
+        assets = try buildPath(".build/oak-native/env-assets", "native env assets").path
+        let url = try buildPath(".build/oak-native/liboakenv.dylib", "native env bridge")
+        guard let h = dlopen(url.path, RTLD_NOW | RTLD_LOCAL) else { throw OakError.message(String(cString: dlerror())) }
+        dylib = h
+        func load<T>(_ n: String) throws -> T { guard let r = dlsym(h, n) else { throw OakError.message("Missing symbol \(n).") }; return unsafeBitCast(r, to: T.self) }
+        openFn = try load("oak_env_open"); closeFn = try load("oak_env_close"); obsFn = try load("oak_env_obs_dim"); actFn = try load("oak_env_act_dim")
+        boundsFn = try load("oak_env_action_bounds"); resetFn = try load("oak_env_reset"); stepFn = try load("oak_env_step"); warnFn = try load("oak_env_take_warning")
     }
-
-    mutating func recordKernelStats(_ stats: KernelStats) {
-        kernelSteps += 1
-        lastKernelStats = stats
-        encodeNF += Int(stats.encodeNonFiniteCount)
-        learnNF  += Int(stats.learnNonFiniteCount)
-        planNF   += Int(stats.planNonFiniteCount)
-        tdPsiNF  += Int(stats.tdPsiNonFiniteCount)
-        oakOptionReinitFinal  = Int(stats.oakOptionReinitCount)
-        oakFeatureReinitFinal = Int(stats.oakFeatureReinitCount)
+    deinit { dlclose(dylib) }
+    func open(seed: Int, error: inout [CChar]) -> UnsafeMutableRawPointer? {
+        let cap = Int32(error.count)
+        return assets.withCString { a in error.withUnsafeMutableBufferPointer { openFn(Int32(seed), a, $0.baseAddress, cap) } }
     }
+}
 
-    var hasMeasuredSteps: Bool { envSteps > 0 }
+final class HalfCheetahEnv {
+    private let bridge = NativeBridge.shared
+    let handle: UnsafeMutableRawPointer, obsDim: Int, actDim: Int, dPolicy: Int
+    var obs, reward, low, high, envAction, actionSignal, optionActorCredit, importance, optionLog: [Float]
+    var done: [UInt8] = [0], msg = [CChar](repeating: 0, count: 4096), rng: UInt64
+    var actionDiscreteCount: Int? { nil }
+    init(seed: Int) throws {
+        rng = UInt64(bitPattern: Int64(seed)) &* 0x9e3779b97f4a7c15 &+ 1
+        guard let h = bridge.open(seed: seed, error: &msg) else { throw OakError.message(decodeCString(msg)) }
+        handle = h; obsDim = Int(bridge.obsFn(h)); actDim = Int(bridge.actFn(h)); dPolicy = 2 * actDim
+        obs = Array(repeating: 0, count: obsDim); reward = [0]; low = Array(repeating: 0, count: actDim); high = low
+        envAction = low; actionSignal = Array(repeating: 0, count: dPolicy); optionActorCredit = []; importance = []; optionLog = []
+        low.withUnsafeMutableBufferPointer { l in high.withUnsafeMutableBufferPointer { _ = bridge.boundsFn(h, l.baseAddress, $0.baseAddress) } }
+        envAction = low
+    }
+    deinit { bridge.closeFn(handle) }
+    func prepare(optionCount: Int) {
+        optionActorCredit = Array(repeating: 0, count: optionCount * dPolicy); importance = Array(repeating: 1, count: optionCount); optionLog = Array(repeating: 0, count: optionCount)
+    }
+    func checked(_ body: (UnsafeMutablePointer<CChar>?, Int32) -> Int32) throws {
+        let ok = msg.withUnsafeMutableBufferPointer { body($0.baseAddress, Int32(msg.count)) }
+        guard ok == 1 else { throw OakError.message(decodeCString(msg)) }
+        let w = msg.withUnsafeMutableBufferPointer { bridge.warnFn($0.baseAddress, Int32(msg.count)) }
+        if w == 1 { throw OakError.message("MuJoCo warning: \(decodeCString(msg))") }
+    }
+    func reset() throws { try checked { e, c in obs.withUnsafeMutableBufferPointer { bridge.resetFn(handle, $0.baseAddress, e, c) } } }
+    private func u01() -> Float {
+        rng &+= 0x9e3779b97f4a7c15; var z = rng
+        z = (z ^ (z &>> 30)) &* 0xbf58476d1ce4e5b9; z = (z ^ (z &>> 27)) &* 0x94d049bb133111eb; z ^= z &>> 31
+        let bits = Float.significandBitCount
+        return Float(z >> (UInt64.bitWidth - bits)) / Float(UInt64(1) << bits)
+    }
+    private func normal() -> Float { sqrt(-2 * log(max(u01(), 1 / Float(UInt64(1) << Float.significandBitCount)))) * cos(2 * Float.pi * u01()) }
+    func step(policy: UnsafePointer<Float>, options: UnsafePointer<Float>?, optionCount: Int) throws {
+        let sd = 1 / Float(max(dPolicy, 1)), logSigma = -log(sd)
+        for k in 0..<optionCount { optionLog[k] = 0; importance[k] = 0 }
+        var behaviorLog: Float = 0
+        for d in 0..<actDim {
+            let mu = policy[d].isFinite ? policy[d] : 0
+            let z = normal(), raw = mu + sd * z, sample = raw.isFinite ? raw : 0
+            envAction[d] = max(low[d], min(high[d], sample)); actionSignal[d] = sample - mu; actionSignal[actDim+d] = 0; behaviorLog += logSigma - 0.5 * z * z
+            if let opt = options {
+                for k in 0..<optionCount {
+                    let off = k * dPolicy, om = opt[off+d].isFinite ? opt[off+d] : 0, oz = (sample - om) / sd
+                    optionLog[k] += logSigma - 0.5 * oz * oz
+                    optionActorCredit[off+d] = sample - om
+                    optionActorCredit[off+actDim+d] = 0
+                }
+            }
+        }
+        for k in 0..<optionCount { importance[k] = exp(optionLog[k] - behaviorLog) }
+        try checked { e, c in
+            envAction.withUnsafeBufferPointer { ab in obs.withUnsafeMutableBufferPointer { ob in reward.withUnsafeMutableBufferPointer { rb in done.withUnsafeMutableBufferPointer { db in
+                bridge.stepFn(handle, ab.baseAddress, ob.baseAddress, rb.baseAddress, db.baseAddress, e, c)
+            }}}}
+        }
+    }
+}
 
-    func snapshot(continuingRestartCount: Int = 0) -> RunHealth? {
+private struct Health {
+    var envSteps = 0, kernelSteps = 0, rho = 0.0, actDelta = 0.0, nfE = 0, nfL = 0, nfP = 0, nfT = 0, optR = 0, featR = 0
+    var last: KernelStats?, floor: Double
+    init(obsDim: Int) { floor = 1 / Double(max(obsDim, 1)) }
+    mutating func env(reward r0: Float, prev: UnsafeBufferPointer<Float>, curr: UnsafeBufferPointer<Float>) {
+        envSteps += 1; let r = Double(r0); if r.isFinite { let a = max(1 / Double(envSteps), floor); rho += a * (r - rho) }
+        var d = 0.0; for i in 0..<curr.count { let x = Double(curr[i] - prev[i]); d += x * x }
+        let m = Double.greatestFiniteMagnitude / 4; actDelta = min(m, actDelta + (d.isFinite ? min(d / Double(max(curr.count, 1)), m) : m))
+    }
+    mutating func kernel(_ s: KernelStats) {
+        kernelSteps += 1; last = s; nfE += Int(s.encodeNonFiniteCount); nfL += Int(s.learnNonFiniteCount); nfP += Int(s.planNonFiniteCount); nfT += Int(s.tdPsiNonFiniteCount)
+        optR = Int(s.oakOptionReinitCount); featR = Int(s.oakFeatureReinitCount)
+    }
+    func snapshot(done: Int) -> RunHealth? {
         guard envSteps > 0 else { return nil }
-        let n = Double(envSteps)
-        let nf: [String: Int]? = kernelSteps > 0
-            ? ["encode": encodeNF, "learn": learnNF, "plan": planNF, "tdPsi": tdPsiNF]
-            : nil
-        func stat(_ keyPath: KeyPath<KernelStats, Float>) -> Double? {
-            guard kernelSteps > 0, let stats = lastKernelStats else { return nil }
-            let v = Double(stats[keyPath: keyPath])
-            return v.isFinite ? v : 0.0
-        }
-        return RunHealth(
-            rewardRate: rhoBar,
-            actionDeltaL2Mean: actDeltaSum / n,
-            continuingRestartCount: Double(continuingRestartCount),
-            oakOptionReinitCountFinal: kernelSteps > 0 ? oakOptionReinitFinal : nil,
-            oakFeatureReinitCountFinal: kernelSteps > 0 ? oakFeatureReinitFinal : nil,
-            nonFiniteByPhase: nf,
-            terminationRate: stat(\.terminationRate),
-            optionDurationMean: stat(\.optionDurationMean),
-            importanceEss: stat(\.importanceEss),
-            actorUpdateNormMean: stat(\.actorUpdateNormMean),
-            actorSupportEntropy: stat(\.actorSupportEntropy),
-            modelPriorityMax: stat(\.modelPriorityMax))
+        func stat(_ f: (KernelStats) -> Float) -> Double? { guard let s = last, kernelSteps > 0 else { return nil }; let v = Double(f(s)); return v.isFinite ? v : 0 }
+        return RunHealth(rewardRate: rho, actionDeltaL2Mean: actDelta / Double(envSteps), continuingRestartCount: Double(done),
+                         oakOptionReinitCountFinal: kernelSteps > 0 ? optR : nil, oakFeatureReinitCountFinal: kernelSteps > 0 ? featR : nil,
+                         nonFiniteByPhase: kernelSteps > 0 ? ["encode": nfE, "learn": nfL, "plan": nfP, "tdPsi": nfT] : nil,
+                         terminationRate: stat { $0.terminationRate }, optionDurationMean: stat { $0.optionDurationMean }, importanceEss: stat { $0.importanceEss },
+                         actorUpdateNormMean: stat { $0.actorUpdateNormMean }, actorSupportEntropy: stat { $0.actorSupportEntropy }, modelPriorityMax: stat { $0.modelPriorityMax })
     }
 }
 
-// =================================================================================================
-// Kernel structs - mirror OakKernel.metal byte-for-byte. Keep in lockstep when editing either.
-// =================================================================================================
-private struct KernelConfig {
-    var obsDim: UInt32 = 0, rank: UInt32 = 0
-    var optionCount: UInt32 = 0
-    var actionParamCount: UInt32 = 0
-    var obsTraceLevels: UInt32 = 0
-    var linearAnchorCount: UInt32 = 0
-    var invRank: Float = 0, invOptionCount: Float = 0
-    var metaEta: Float = 0
+private enum Layout {
+    struct P { let value, psi, optPolicy, optReward, optTransition, optDuration, total: Int }
+    struct S { let observation, obsMean, obsSM, state, policyMean, actionSignal, optionActorCredit, optionPolicyMean, importance, reward, td, tdPsi, utilFeat, utilOpt, bonusW, featureMean, featureSM, alpha, beta, h, gradEnergy, alphaPsi, betaPsi, hPsi, gradEnergyPsi, alphaModel, betaModel, hModel, gradEnergyModel, actorAdv, nTdMat, optRewardTd, headDenom, durationTd, durationHat, obsTraceMulti, prioOpt, continuation, modelDenom, valueGauge, total: Int }
+    struct U { let counters, optFeature, featureAge, optAge, featureParentA, featureParentB, featureKind, featureBirthCount, selectedOption, badFeatureAge, total: Int }
+    static func traces(_ o: Int) -> Int { var v = max(o, 1), m = 0; while v > 1 { v >>= 1; m += 1 }; return m + 1 }
+    static func input(_ obs: Int, _ d: Int) -> Int { traces(obs) * max(obs, 1) + max(d, 0) + 2 }
+    static func anchors(_ r: Int, _ obs: Int, _ d: Int) -> Int { min(r, input(obs, d)) }
+    static func p(_ r: Int, _ d: Int) -> P { let k = r; var o = 0; func take(_ n: Int) -> Int { let x = o; o += n; return x }; return P(value: take(r), psi: take(k*r), optPolicy: take(k*d*r), optReward: take(k*r), optTransition: take(k*r*r), optDuration: take(k*r), total: o) }
+    static func s(_ obs: Int, _ r: Int, _ d: Int) -> S {
+        let k = r, m = traces(obs); var o = 0; func take(_ n: Int) -> Int { let x = o; o += n; return x }
+        return S(observation: take(obs), obsMean: take(obs), obsSM: take(obs), state: take(2*r), policyMean: take(d), actionSignal: take(d),
+                 optionActorCredit: take(k*d), optionPolicyMean: take(k*d), importance: take(k), reward: take(1), td: take(1), tdPsi: take(k),
+                 utilFeat: take(r), utilOpt: take(k), bonusW: take(r), featureMean: take(r), featureSM: take(r), alpha: take(r), beta: take(r),
+                 h: take(r), gradEnergy: take(r), alphaPsi: take(r), betaPsi: take(r), hPsi: take(r), gradEnergyPsi: take(r), alphaModel: take(r),
+                 betaModel: take(r), hModel: take(r), gradEnergyModel: take(r), actorAdv: take(k), nTdMat: take(k*r), optRewardTd: take(k),
+                 headDenom: take(k), durationTd: take(k), durationHat: take(k), obsTraceMulti: take(max(m-1,0)*max(obs,1)), prioOpt: take(k),
+                 continuation: take(k), modelDenom: take(k), valueGauge: take(1), total: o)
+    }
+    static func u(_ r: Int) -> U { var o = 0; func t(_ n: Int) -> Int { let x=o; o += n; return x }; return U(counters: t(7), optFeature: t(r), featureAge: t(r), optAge: t(r), featureParentA: t(r), featureParentB: t(r), featureKind: t(r), featureBirthCount: t(r), selectedOption: t(1), badFeatureAge: t(r), total: o) }
 }
 
-private struct KernelScalars {
-    var stepCount: UInt32 = 0
-    var stateSlot: UInt32 = 0
-    var rho: Float = 0
+private final class Shared<T> {
+    let buffer: MTLBuffer; let ptr: UnsafeMutablePointer<T>
+    init(_ dev: MTLDevice, _ n: Int, _ z: T) { buffer = dev.makeBuffer(length: max(n,1) * MemoryLayout<T>.stride, options: [.storageModeShared])!; ptr = buffer.contents().bindMemory(to: T.self, capacity: max(n,1)); ptr.initialize(repeating: z, count: max(n,1)) }
 }
 
-struct KernelStats {
-    var encodeNonFiniteCount: Float = 0, learnNonFiniteCount: Float = 0
-    var planNonFiniteCount: Float = 0, tdPsiNonFiniteCount: Float = 0
-    var oakOptionReinitCount: Float = 0, oakFeatureReinitCount: Float = 0
-    var terminationRate: Float = 0, optionDurationMean: Float = 0
-    var importanceEss: Float = 0
-    var actorUpdateNormMean: Float = 0
-    var actorSupportEntropy: Float = 0
-    var modelPriorityMax: Float = 0
-}
-
-// =================================================================================================
-// Arena layout - single source of truth for offsets. Single-stream: no `batch` parameter.
-// =================================================================================================
-private enum OakMetalLayout {
-    static let kernelConfigBufferIndex = 5
-
-    static func optionCount(rank: Int) -> Int { max(1, rank) }
-    static func psiCount(rank: Int) -> Int { optionCount(rank: rank) * rank }
-    static func optPolicyCount(rank: Int, dPolicy: Int) -> Int {
-        optionCount(rank: rank) * dPolicy * rank
-    }
-    static func optionPolicyMeanCount(rank: Int, dPolicy: Int) -> Int {
-        optionCount(rank: rank) * dPolicy
-    }
-    static func optRewardCount(rank: Int) -> Int { optionCount(rank: rank) * rank }
-    static func optDurationCount(rank: Int) -> Int { optionCount(rank: rank) * rank }
-    static func optTransitionCount(rank: Int) -> Int { optionCount(rank: rank) * rank * rank }
-    static func obsTraceLevelCount(obsDim: Int) -> Int {
-        let b = max(obsDim, 1)
-        var m = 0
-        var v = b
-        while v > 1 { v >>= 1; m += 1 }     // floor(log2(b))
-        return m + 1                         // +1 for the instantaneous level
-    }
-    static func linearInputWidth(obsDim: Int, dPolicy: Int) -> Int {
-        obsTraceLevelCount(obsDim: obsDim) * max(obsDim, 1) + max(dPolicy, 0) + 2
-    }
-    static func linearAnchorCount(rank: Int) -> Int {
-        min(rank, max(rank / 2, 1))
-    }
-    struct Param {
-        let value, psi, optPolicy, optReward, optTransition, optDuration: Int
-        let total: Int
-    }
-    static func paramLayout(rank: Int, dPolicy: Int) -> Param {
-        var o = 0
-        let val = o; o += rank
-        let psi = o; o += psiCount(rank: rank)
-        let op  = o; o += optPolicyCount(rank: rank, dPolicy: dPolicy)
-        let or_ = o; o += optRewardCount(rank: rank)
-        let ot  = o; o += optTransitionCount(rank: rank)
-        let od  = o; o += optDurationCount(rank: rank)
-        return Param(value: val, psi: psi, optPolicy: op, optReward: or_,
-                     optTransition: ot, optDuration: od, total: o)
-    }
-
-    struct State {
-        let observation, obsMean, obsSM, state: Int
-        let policyMean, actionSignal, optionScoreGrad: Int
-        let optionPolicyMean, importance: Int
-        let reward, td, tdPsi: Int
-        let utilFeat, utilOpt: Int
-        let bonusW, featureMean, featureSM: Int
-        let alpha, beta, h: Int       // MetaOptimize L/Hessian-free approximation buffers (R floats each).
-        let gradEnergy: Int
-        let alphaPsi, betaPsi, hPsi, gradEnergyPsi: Int
-        let alphaModel, betaModel, hModel, gradEnergyModel: Int
-        let actorAdv: Int
-        let nTdMat: Int               // Dense option-transition TD targets, K*R floats, written by oak_plan.
-        let optRewardTd: Int          // Option reward-model TD targets, K floats, written once by oak_plan.
-        let headDenom: Int
-        let durationTd, durationHat: Int
-        let obsTraceMulti: Int
-        let prioOpt: Int              // Per-option model priority for search-control diagnostics.
-        let continuation: Int          // RR-derived continuation, K floats.
-        let modelDenom: Int
-        let valueGauge: Int
-        let total: Int
-    }
-    static func stateLayout(obsDim: Int, rank: Int, dPolicy: Int) -> State {
-        let K = optionCount(rank: rank)
-        let M = obsTraceLevelCount(obsDim: obsDim)
-        var o = 0
-        let obs = o; o += obsDim
-        let mean = o; o += obsDim
-        let osm  = o; o += obsDim
-        let st = o; o += 2 * rank
-        let pol = o; o += dPolicy
-        let act = o; o += dPolicy
-        let osg = o; o += K * dPolicy
-        let opm = o; o += K * dPolicy
-        let imp = o; o += K
-        let rew = o; o += 1
-        let td  = o; o += 1
-        let tdP = o; o += K
-        let uf  = o; o += rank
-        let uo  = o; o += K
-        let bw  = o; o += rank
-        let fm  = o; o += rank
-        let fsm = o; o += rank
-        let al  = o; o += rank
-        let be  = o; o += rank
-        let h   = o; o += rank
-        let ge  = o; o += rank
-        let aps = o; o += rank
-        let bps = o; o += rank
-        let hps = o; o += rank
-        let gps = o; o += rank
-        let apm = o; o += rank
-        let bpm = o; o += rank
-        let hpm = o; o += rank
-        let gpm = o; o += rank
-        let aadv = o; o += K
-        let ntd = o; o += K * rank
-        let ortd = o; o += K
-        let hden = o; o += K
-        let dtd = o; o += K
-        let dhat = o; o += K
-        let otr = o; o += max(M - 1, 0) * max(obsDim, 1)
-        let prio = o; o += K
-        let cont = o; o += K
-        let modelDenom = o; o += K
-        let vg = o; o += 1
-        return State(observation: obs, obsMean: mean, obsSM: osm, state: st,
-                     policyMean: pol, actionSignal: act, optionScoreGrad: osg,
-                     optionPolicyMean: opm, importance: imp,
-                     reward: rew, td: td, tdPsi: tdP,
-                     utilFeat: uf, utilOpt: uo, bonusW: bw, featureMean: fm, featureSM: fsm,
-                     alpha: al, beta: be, h: h,
-                     gradEnergy: ge,
-                     alphaPsi: aps, betaPsi: bps, hPsi: hps, gradEnergyPsi: gps,
-                     alphaModel: apm, betaModel: bpm, hModel: hpm, gradEnergyModel: gpm,
-                     actorAdv: aadv,
-                     nTdMat: ntd, optRewardTd: ortd, headDenom: hden,
-                     durationTd: dtd, durationHat: dhat,
-                     obsTraceMulti: otr,
-                     prioOpt: prio, continuation: cont,
-                     modelDenom: modelDenom, valueGauge: vg, total: o)
-    }
-
-    struct UInts {
-        let counters, optFeature, featureAge, optAge: Int
-        let featureParentA, featureParentB, featureKind, featureBirthCount: Int
-        let selectedOption: Int
-        let badFeatureAge: Int
-        let total: Int
-    }
-    static func uintLayout(rank: Int) -> UInts {
-        let K = optionCount(rank: rank)
-        var o = 0
-        let ctr = o; o += 7
-        let of = o; o += K
-        let fa = o; o += rank
-        let oa = o; o += K
-        let fpa = o; o += rank
-        let fpb = o; o += rank
-        let fkind = o; o += rank
-        let fbc = o; o += rank
-        let sel = o; o += 1
-        let bfa = o; o += rank
-        return UInts(counters: ctr, optFeature: of, featureAge: fa, optAge: oa,
-                     featureParentA: fpa, featureParentB: fpb,
-                     featureKind: fkind, featureBirthCount: fbc,
-                     selectedOption: sel, badFeatureAge: bfa, total: o)
-    }
-}
-
-// =================================================================================================
-// Shared-storage helper.
-// =================================================================================================
-private final class Shared<Element> {
-    let buffer: MTLBuffer
-    let pointer: UnsafeMutablePointer<Element>
-    let count: Int
-    init(device: MTLDevice, count: Int, zero: Element) {
-        self.count = count
-        buffer = device.makeBuffer(length: max(count, 1) * MemoryLayout<Element>.stride,
-                                   options: [.storageModeShared])!
-        pointer = buffer.contents().bindMemory(to: Element.self, capacity: max(count, 1))
-        pointer.initialize(repeating: zero, count: max(count, 1))
-    }
-}
-
-// =================================================================================================
-// Metal engine - Step 1-11 Oak rebuild. Focused every-step phases keep the Plan mechanisms
-// visible while preserving one command-buffer ICB dispatch ordering.
-// =================================================================================================
 final class OakMetalEngine {
-    private struct Phase { let name: String; let tgSize: Int }
-    private static let phases: [Phase] = [
-        Phase(name: "oak_encode",           tgSize: -1),
-        Phase(name: "oak_plan",             tgSize: -1),
-        Phase(name: "oak_learn_heads",      tgSize: 0),
-        Phase(name: "oak_replace",          tgSize: -1),
-        Phase(name: "oak_action_emit",      tgSize: -1),
-    ]
-
-    private let obsDim, rank, dPolicy: Int
-    private let queue: MTLCommandQueue
-    private let pipelines: [MTLComputePipelineState]
-    private let scalarsBuffer: MTLBuffer
-    private let statsBuffer: MTLBuffer
-    private let configBuffer: MTLBuffer
-    private let scalarsPointer: UnsafeMutablePointer<KernelScalars>
-    private let statsPointer: UnsafeMutablePointer<KernelStats>
-    private let configPointer: UnsafeMutablePointer<KernelConfig>
-    private let paramsArena: Shared<Float>
-    private let stateArena: Shared<Float>
-    private let uintArena: Shared<UInt32>
-    private let stateLayout: OakMetalLayout.State
-    private let uintLayout: OakMetalLayout.UInts
-    private let phaseGridWidths: [Int]
-    private let phaseThreadgroupSizes: [Int]
-    private var hostAction: [Float]
-    private var hostOptionAction: [Float]
-    private let resourceList: [MTLBuffer]
-
-    private static func kernelURL() throws -> URL {
-        try requiredBuildPath(".build/OakKernel.metallib",
-                              description: "non-empty .build/OakKernel.metallib", nonEmpty: true)
+    let obsDim, rank, dPolicy, K, tg, learnTotal, actionGroups: Int
+    private let q: MTLCommandQueue, pipes: [MTLComputePipelineState], scalarsB, statsB, configB: MTLBuffer
+    private let scalars: UnsafeMutablePointer<KernelScalars>, stats: UnsafeMutablePointer<KernelStats>, config: UnsafeMutablePointer<KernelConfig>
+    private let params: Shared<Float>, state: Shared<Float>, uints: Shared<UInt32>, sl: Layout.S, ul: Layout.U, resources: [MTLBuffer], tgBytes: Int
+    var policyPointer: UnsafePointer<Float> { UnsafePointer(state.ptr.advanced(by: sl.policyMean)) }
+    var optionPointer: UnsafePointer<Float> { UnsafePointer(state.ptr.advanced(by: sl.optionPolicyMean)) }
+    init(obsDim: Int, rank: Int, dPolicy: Int, device: MTLDevice, seed: Int) throws {
+        self.obsDim = obsDim; self.rank = rank; self.dPolicy = dPolicy; K = rank
+        guard let q = device.makeCommandQueue() else { throw OakError.message("Failed to create Metal command queue.") }; self.q = q
+        let lib = try device.makeLibrary(URL: try buildPath(".build/OakKernel.metallib", "non-empty Metal library", nonEmpty: true))
+        pipes = try ["oak_encode","oak_plan","oak_learn_heads","oak_replace","oak_action_emit"].map { n in guard let f = lib.makeFunction(name: n) else { throw OakError.message("Missing \(n).") }; return try device.makeComputePipelineState(function: f) }
+        let maxTG = pipes.map { $0.maxTotalThreadsPerThreadgroup }.min() ?? rank; guard rank <= maxTG else { throw OakError.message("Rank \(rank) exceeds device threadgroup capacity \(maxTG).") }
+        tg = min(max(rank, pipes.map { Int($0.threadExecutionWidth) }.max() ?? 1), maxTG); tgBytes = tg * MemoryLayout<Float>.stride
+        let pl = Layout.p(rank, dPolicy); sl = Layout.s(obsDim, rank, dPolicy); ul = Layout.u(rank)
+        learnTotal = rank + rank*rank + rank*dPolicy*rank + rank*rank + rank*rank*rank + rank*rank; actionGroups = max(1, (rank*dPolicy + tg - 1) / tg)
+        scalarsB = device.makeBuffer(length: MemoryLayout<KernelScalars>.stride, options: [.storageModeShared])!; statsB = device.makeBuffer(length: MemoryLayout<KernelStats>.stride, options: [.storageModeShared])!; configB = device.makeBuffer(length: MemoryLayout<KernelConfig>.stride, options: [.storageModeShared])!
+        scalars = scalarsB.contents().bindMemory(to: KernelScalars.self, capacity: 1); stats = statsB.contents().bindMemory(to: KernelStats.self, capacity: 1); config = configB.contents().bindMemory(to: KernelConfig.self, capacity: 1)
+        scalars.initialize(to: KernelScalars()); stats.initialize(to: KernelStats(encodeNonFiniteCount: 0, learnNonFiniteCount: 0, planNonFiniteCount: 0, tdPsiNonFiniteCount: 0, oakOptionReinitCount: 0, oakFeatureReinitCount: 0, terminationRate: 0, optionDurationMean: 0, importanceEss: 0, actorUpdateNormMean: 0, actorSupportEntropy: 0, modelPriorityMax: 0))
+        params = Shared(device, pl.total, Float(0)); state = Shared(device, sl.total, Float(0)); uints = Shared(device, ul.total, UInt32(0)); resources = [params.buffer, state.buffer, uints.buffer, scalarsB, statsB, configB]
+        let inv = 1 / sqrt(Float(max(rank,1))), seedBase = UInt32(bitPattern: Int32(seed)) &* 0x9e3779b9
+        func sample(_ off: Int, _ n: Int, _ scale: Float) { for i in 0..<n { var x = seedBase &+ UInt32(off+i) &* 0x7feb352d; x = (x ^ (x &>> 16)) &* 0x846ca68b; x ^= x &>> 16; params.ptr[off+i] = (Float(x >> 8) / Float(UInt32(1) << 24) * 2 - 1) * scale } }
+        sample(pl.value, rank, inv); sample(pl.psi, rank*rank, inv); sample(pl.optReward, rank*rank, inv); sample(pl.optTransition, rank*rank*rank, inv)
+        for k in 0..<rank { params.ptr[pl.psi + k*rank + k] += inv; uints.ptr[ul.optFeature+k] = UInt32(k); state.ptr[sl.importance+k] = 1; state.ptr[sl.utilOpt+k] = Float(rank) }
+        let anchors = Layout.anchors(rank, obsDim, dPolicy)
+        for i in 0..<rank { uints.ptr[ul.featureParentA+i] = UInt32(i % max(anchors,1)); uints.ptr[ul.featureParentB+i] = UInt32((i &* 7 &+ 3) % max(anchors,1)); uints.ptr[ul.featureKind+i] = UInt32(i % 3); let alpha = 1 / Float(max(obsDim,1)); [sl.alpha,sl.alphaPsi,sl.alphaModel].forEach { state.ptr[$0+i] = alpha }; [sl.beta,sl.betaPsi,sl.betaModel].forEach { state.ptr[$0+i] = log(alpha) }; state.ptr[sl.bonusW+i] = params.ptr[pl.value+i] }
+        config.initialize(to: KernelConfig(obsDim: UInt32(obsDim), rank: UInt32(rank), optionCount: UInt32(rank), actionParamCount: UInt32(dPolicy), obsTraceLevels: UInt32(max(Layout.traces(obsDim)-1,0)), linearAnchorCount: UInt32(anchors), invRank: 1/Float(rank), invOptionCount: 1/Float(rank), metaEta: 1/Float(rank) / Float(max(rank+dPolicy,1))))
     }
-
-    private static func makePipelines(device: MTLDevice) throws -> [MTLComputePipelineState] {
-        let library = try device.makeLibrary(URL: try kernelURL())
-        return try phases.map { phase in
-            guard let fn = library.makeFunction(name: phase.name) else {
-                throw OakError.message("Missing \(phase.name) in OakKernel.metallib.")
-            }
-            let desc = MTLComputePipelineDescriptor()
-            desc.computeFunction = fn
-            return try device.makeComputePipelineState(descriptor: desc, options: [], reflection: nil)
-        }
+    func step(env: HalfCheetahEnv, prevAction: [Float], prevCredit: [Float], prevImp: [Float], prevReward: Float, capture: Bool) throws -> KernelStats? {
+        _ = env.obs.withUnsafeBufferPointer { memcpy(state.ptr.advanced(by: sl.observation), $0.baseAddress!, obsDim * MemoryLayout<Float>.stride) }
+        state.ptr[sl.reward] = prevReward
+        _ = prevAction.withUnsafeBufferPointer { memcpy(state.ptr.advanced(by: sl.actionSignal), $0.baseAddress!, dPolicy * MemoryLayout<Float>.stride) }
+        _ = prevCredit.withUnsafeBufferPointer { memcpy(state.ptr.advanced(by: sl.optionActorCredit), $0.baseAddress!, K*dPolicy * MemoryLayout<Float>.stride) }
+        _ = prevImp.withUnsafeBufferPointer { memcpy(state.ptr.advanced(by: sl.importance), $0.baseAddress!, K * MemoryLayout<Float>.stride) }
+        let c = uints.ptr.advanced(by: ul.counters); c[0]=0; c[1]=0; c[2]=0; c[5]=0; c[6]=0
+        guard let cb = q.makeCommandBufferWithUnretainedReferences(), let enc = cb.makeComputeCommandEncoder() else { throw OakError.message("Failed to encode Metal command.") }
+        func bind(_ i: Int) { enc.setComputePipelineState(pipes[i]); for j in 0..<resources.count { enc.setBuffer(resources[j], offset: 0, index: j) } }
+        bind(0); for i in 0..<7 { enc.setThreadgroupMemoryLength(tgBytes, index: i) }; enc.dispatchThreadgroups(MTLSize(width: 1, height: 1, depth: 1), threadsPerThreadgroup: MTLSize(width: tg, height: 1, depth: 1)); enc.memoryBarrier(scope: [.buffers])
+        bind(1); enc.setThreadgroupMemoryLength(tgBytes, index: 0); enc.dispatchThreadgroups(MTLSize(width: K, height: 1, depth: 1), threadsPerThreadgroup: MTLSize(width: tg, height: 1, depth: 1)); enc.memoryBarrier(scope: [.buffers])
+        bind(2); let ltg = min(max(Int(pipes[2].threadExecutionWidth),1), pipes[2].maxTotalThreadsPerThreadgroup); enc.dispatchThreads(MTLSize(width: learnTotal, height: 1, depth: 1), threadsPerThreadgroup: MTLSize(width: ltg, height: 1, depth: 1)); enc.memoryBarrier(scope: [.buffers])
+        bind(3); enc.setThreadgroupMemoryLength(tgBytes, index: 0); enc.dispatchThreadgroups(MTLSize(width: 1, height: 1, depth: 1), threadsPerThreadgroup: MTLSize(width: tg, height: 1, depth: 1)); enc.memoryBarrier(scope: [.buffers])
+        bind(4); enc.setThreadgroupMemoryLength(tgBytes, index: 0); enc.dispatchThreadgroups(MTLSize(width: actionGroups, height: 1, depth: 1), threadsPerThreadgroup: MTLSize(width: tg, height: 1, depth: 1))
+        enc.endEncoding(); cb.commit(); cb.waitUntilCompleted(); if let e = cb.error { throw OakError.message("Metal command failed: \(e)") }
+        return capture ? stats.pointee : nil
     }
-
-    static func executionWidth(device: MTLDevice) throws -> Int { 32 }
-
-    init(obsDim: Int, rank: Int, dPolicy: Int,
-         device: MTLDevice, seed: Int?) throws {
-        // R (rank) is a compute budget and the active feature/subtask/option count.
-        precondition(rank >= 2, "rank must be >= 2 (feature/subtask/option budget).")
-        precondition(rank <= 256, "rank must be <= 256 (oak_plan threadgroup storage cap).")
-        precondition(obsDim >= 1, "obsDim must be positive.")
-        precondition(dPolicy >= 1, "dPolicy must be positive.")
-        self.obsDim = obsDim
-        self.rank = rank; self.dPolicy = dPolicy
-        guard let queue = device.makeCommandQueue() else {
-            throw OakError.message("Failed to create Metal command queue.")
-        }
-        self.queue = queue
-        pipelines = try Self.makePipelines(device: device)
-
-        scalarsBuffer = device.makeBuffer(length: MemoryLayout<KernelScalars>.stride,
-                                          options: [.storageModeShared])!
-        statsBuffer   = device.makeBuffer(length: MemoryLayout<KernelStats>.stride,
-                                          options: [.storageModeShared])!
-        configBuffer  = device.makeBuffer(length: MemoryLayout<KernelConfig>.stride,
-                                          options: [.storageModeShared])!
-        scalarsPointer = scalarsBuffer.contents().bindMemory(to: KernelScalars.self, capacity: 1)
-        statsPointer   = statsBuffer.contents().bindMemory(to: KernelStats.self, capacity: 1)
-        configPointer  = configBuffer.contents().bindMemory(to: KernelConfig.self, capacity: 1)
-        scalarsPointer.initialize(to: KernelScalars())
-        statsPointer.initialize(to: KernelStats())
-        configPointer.initialize(to: KernelConfig())
-
-        let paramLayout = OakMetalLayout.paramLayout(rank: rank, dPolicy: dPolicy)
-        stateLayout = OakMetalLayout.stateLayout(obsDim: obsDim, rank: rank, dPolicy: dPolicy)
-        uintLayout  = OakMetalLayout.uintLayout(rank: rank)
-        paramsArena = Shared(device: device, count: paramLayout.total, zero: Float(0))
-        stateArena  = Shared(device: device, count: stateLayout.total, zero: Float(0))
-        uintArena   = Shared(device: device, count: uintLayout.total,  zero: UInt32(0))
-
-        let K = OakMetalLayout.optionCount(rank: rank)
-        // Grid widths sized for one row (single-stream).
-        let learnTotal = rank
-                       + OakMetalLayout.psiCount(rank: rank)
-                       + OakMetalLayout.optPolicyCount(rank: rank, dPolicy: dPolicy)
-                       + OakMetalLayout.optRewardCount(rank: rank)
-                       + OakMetalLayout.optTransitionCount(rank: rank)
-                       + OakMetalLayout.optDurationCount(rank: rank)
-        let kernelThreadgroupWidth = max(rank, pipelines.map { Int($0.threadExecutionWidth) }.max() ?? 1)
-        let actionEmitGroups = max(1, (K * dPolicy + kernelThreadgroupWidth - 1) / kernelThreadgroupWidth)
-        let grids = [
-            1,                  // encode + keyboard_predict
-            K,                  // full-bank option-model planning
-            learnTotal,         // learn_heads
-            1,                  // replace + stats/meta/reinit
-            actionEmitGroups,   // action emission
-        ]
-        phaseGridWidths = grids
-
-        phaseThreadgroupSizes = Self.phases.map { phase in
-            if phase.tgSize == -1 { return kernelThreadgroupWidth }
-            return phase.tgSize
-        }
-
-        hostAction = Array(repeating: 0, count: dPolicy)
-        hostOptionAction = Array(repeating: 0, count: K * dPolicy)
-
-        resourceList = [paramsArena.buffer, stateArena.buffer, uintArena.buffer,
-                        scalarsBuffer, statsBuffer, configBuffer]
-
-        let invR: Float = 1.0 / sqrt(Float(max(rank, 1)))
-        let seedBase = UInt32(bitPattern: Int32(truncatingIfNeeded: seed ?? Int(oakUnseededSeed)))
-                       &* 0x9e3779b9
-        func sample(_ off: Int, _ count: Int, _ scale: Float) {
-            let base = paramsArena.pointer.advanced(by: off)
-            for i in 0..<count {
-                var x = seedBase &+ UInt32(off &+ i) &* 0x7feb352d
-                x = (x ^ (x &>> 16)) &* 0x846ca68b
-                x ^= x &>> 16
-                let u = Float(x >> 8) * 5.9604645e-8 * 2 - 1
-                base[i] = u * scale
-            }
-        }
-        sample(paramLayout.value, rank, invR)
-        sample(paramLayout.psi, OakMetalLayout.psiCount(rank: rank), invR)
-        let policyPtr = paramsArena.pointer.advanced(by: paramLayout.optPolicy)
-        for i in 0..<OakMetalLayout.optPolicyCount(rank: rank, dPolicy: dPolicy) { policyPtr[i] = 0 }
-        sample(paramLayout.optReward, OakMetalLayout.optRewardCount(rank: rank), invR)
-        sample(paramLayout.optTransition, OakMetalLayout.optTransitionCount(rank: rank), invR)
-        // Duration defaults to the structural one-step lower bound.
-        let durationPtr = paramsArena.pointer.advanced(by: paramLayout.optDuration)
-        for i in 0..<OakMetalLayout.optDurationCount(rank: rank) { durationPtr[i] = 0 }
-        // psi feature-attainment seed: cumulant k gets +invR on its anchor feature index k.
-        let psiPtr = paramsArena.pointer.advanced(by: paramLayout.psi)
-        for k in 0..<K where k < rank {
-            psiPtr[k * rank + k] += invR
-        }
-        let bonusSlot = stateArena.pointer.advanced(by: stateLayout.bonusW)
-        let valuePtr = paramsArena.pointer.advanced(by: paramLayout.value)
-        for i in 0..<rank { bonusSlot[i] = valuePtr[i] }
-        let importanceSlot = stateArena.pointer.advanced(by: stateLayout.importance)
-        for k in 0..<K { importanceSlot[k] = 1 }
-
-        // Per-option utility prior: utilOpt[k] = R (capacity-volume). The EMA in
-        // oak_post_learn decays this toward true |δ_k|², making low-utility old options
-        // eligible for Step-11 remove/replace without any tunable warmup gate.
-        let utilOptSlot = stateArena.pointer.advanced(by: stateLayout.utilOpt)
-        let utilOptPrior: Float = Float(rank)
-        for k in 0..<K { utilOptSlot[k] = utilOptPrior }
-        let optFeatureSlot = uintArena.pointer.advanced(by: uintLayout.optFeature)
-        let parentA = uintArena.pointer.advanced(by: uintLayout.featureParentA)
-        let parentB = uintArena.pointer.advanced(by: uintLayout.featureParentB)
-        let kind = uintArena.pointer.advanced(by: uintLayout.featureKind)
-        let anchorCount = OakMetalLayout.linearAnchorCount(rank: rank)
-        for k in 0..<K {
-            optFeatureSlot[k] = UInt32(k)
-        }
-        for i in 0..<rank {
-            let pa = max(0, min(anchorCount - 1, i % max(anchorCount, 1)))
-            let pb = max(0, min(anchorCount - 1, (i &* 7 &+ 3) % max(anchorCount, 1)))
-            parentA[i] = UInt32(pa)
-            parentB[i] = UInt32(pb)
-            kind[i] = UInt32(i % 3)
-        }
-
-        // MetaOptimize L-approximation seed (Sharifnassab-Salehkaleybar-Sutton 2024
-        // arXiv:2402.02342). α[i] = 1/obsDim is the prior step size, β[i] = log α[i] is
-        // its log so the meta-update is multiplicative, h[i] = 0 is the initial accumulator
-        // (no meta-gradient history at t=0).
-        let alphaInit: Float = 1.0 / Float(max(obsDim, 1))
-        let betaInit: Float  = log(alphaInit)
-        let alphaSlot = stateArena.pointer.advanced(by: stateLayout.alpha)
-        let betaSlot  = stateArena.pointer.advanced(by: stateLayout.beta)
-        let hSlot     = stateArena.pointer.advanced(by: stateLayout.h)
-        let alphaPsiSlot = stateArena.pointer.advanced(by: stateLayout.alphaPsi)
-        let betaPsiSlot  = stateArena.pointer.advanced(by: stateLayout.betaPsi)
-        let hPsiSlot     = stateArena.pointer.advanced(by: stateLayout.hPsi)
-        let alphaModelSlot = stateArena.pointer.advanced(by: stateLayout.alphaModel)
-        let betaModelSlot  = stateArena.pointer.advanced(by: stateLayout.betaModel)
-        let hModelSlot     = stateArena.pointer.advanced(by: stateLayout.hModel)
-        for i in 0..<rank {
-            alphaSlot[i] = alphaInit
-            betaSlot[i]  = betaInit
-            hSlot[i]     = 0
-            alphaPsiSlot[i] = alphaInit
-            betaPsiSlot[i] = betaInit
-            hPsiSlot[i] = 0
-            alphaModelSlot[i] = alphaInit
-            betaModelSlot[i] = betaInit
-            hModelSlot[i] = 0
-        }
-        writeKernelConfig()
-
-    }
-    // Single-stream step. Inputs are scalar per-step values + dPolicy-wide vectors.
-    // prevDone is intentionally NOT plumbed through: the agent is continual (Inv-4); env resets
-    // are wrapper events.
-    func step(obs: UnsafeBufferPointer<Float>,
-              prevActionSignal: [Float],
-              prevOptionScoreGrad: [Float],
-              prevImportance: [Float],
-              prevReward: Float,
-              captureStats: Bool) throws -> (PolicyMeanBatch, KernelStats?) {
-        precondition(obs.count == obsDim)
-        precondition(prevActionSignal.count == dPolicy)
-        let K = OakMetalLayout.optionCount(rank: rank)
-        precondition(prevOptionScoreGrad.count == K * dPolicy)
-        memcpy(stateArena.pointer.advanced(by: stateLayout.observation), obs.baseAddress!,
-               obsDim * MemoryLayout<Float>.stride)
-        stateArena.pointer.advanced(by: stateLayout.reward).pointee = prevReward
-        memcpy(stateArena.pointer.advanced(by: stateLayout.actionSignal), prevActionSignal,
-               dPolicy * MemoryLayout<Float>.stride)
-        memcpy(stateArena.pointer.advanced(by: stateLayout.optionScoreGrad), prevOptionScoreGrad,
-               K * dPolicy * MemoryLayout<Float>.stride)
-        if prevImportance.count == K {
-            memcpy(stateArena.pointer.advanced(by: stateLayout.importance), prevImportance,
-                   K * MemoryLayout<Float>.stride)
-        }
-        // Reset per-step non-finite counters (cumulative reinit counters at indices 3, 4 stay).
-        let ctr = uintArena.pointer.advanced(by: uintLayout.counters)
-        ctr[0] = 0; ctr[1] = 0; ctr[2] = 0; ctr[5] = 0; ctr[6] = 0
-
-        try runKernel()
-
-        memcpy(&hostAction, stateArena.pointer.advanced(by: stateLayout.policyMean),
-               dPolicy * MemoryLayout<Float>.stride)
-        memcpy(&hostOptionAction, stateArena.pointer.advanced(by: stateLayout.optionPolicyMean),
-               hostOptionAction.count * MemoryLayout<Float>.stride)
-        return (PolicyMeanBatch(values: hostAction, optionValues: hostOptionAction),
-                captureStats ? statsPointer.pointee : nil)
-    }
-
-    private func writeKernelConfig() {
-        let K = OakMetalLayout.optionCount(rank: rank)
-        var c = KernelConfig()
-        c.obsDim = UInt32(obsDim); c.rank = UInt32(rank)
-        c.optionCount = UInt32(K)
-        c.actionParamCount = UInt32(dPolicy)
-        c.obsTraceLevels = UInt32(max(OakMetalLayout.obsTraceLevelCount(obsDim: obsDim) - 1, 0))
-        c.linearAnchorCount = UInt32(OakMetalLayout.linearAnchorCount(rank: rank))
-        c.invRank = 1.0 / Float(max(rank, 1))
-        c.invOptionCount = 1.0 / Float(max(K, 1))
-        c.metaEta = c.invRank / Float(max(rank + dPolicy, 1))
-        configPointer.pointee = c
-    }
-
-    private func alignedGridWidth(threadCount: Int, pipeline: MTLComputePipelineState) -> Int {
-        let align = max(Int(pipeline.threadExecutionWidth), 32)
-        let n = max(threadCount, 1)
-        return ((n + align - 1) / align) * align
-    }
-
-    private func dispatchPhase(_ i: Int, on enc: MTLComputeCommandEncoder) {
-        enc.setComputePipelineState(pipelines[i])
-        for j in 0..<resourceList.count { enc.setBuffer(resourceList[j], offset: 0, index: j) }
-        let phaseTgSize = phaseThreadgroupSizes[i]
-        if phaseTgSize > 0 {
-            enc.dispatchThreadgroups(
-                MTLSize(width: max(phaseGridWidths[i], 1), height: 1, depth: 1),
-                threadsPerThreadgroup: MTLSize(width: phaseTgSize, height: 1, depth: 1))
-        } else {
-            let tg = min(max(pipelines[i].threadExecutionWidth, 1),
-                         pipelines[i].maxTotalThreadsPerThreadgroup)
-            let w = alignedGridWidth(threadCount: phaseGridWidths[i], pipeline: pipelines[i])
-            enc.dispatchThreads(MTLSize(width: w, height: 1, depth: 1),
-                                threadsPerThreadgroup: MTLSize(width: min(tg, w), height: 1, depth: 1))
-        }
-    }
-
-    private func runKernel() throws {
-        try autoreleasepool {
-            guard let cb = queue.makeCommandBufferWithUnretainedReferences() else {
-                throw OakError.message("Failed to create Metal command buffer.")
-            }
-            guard let enc = cb.makeComputeCommandEncoder() else {
-                throw OakError.message("Failed to create Metal compute encoder.")
-            }
-            for i in 0..<pipelines.count {
-                dispatchPhase(i, on: enc)
-                if i + 1 < pipelines.count { enc.memoryBarrier(scope: [.buffers]) }
-            }
-            enc.endEncoding()
-            cb.commit(); cb.waitUntilCompleted()
-            if let e = cb.error { throw OakError.message("Metal command failed: \(e)") }
-        }
-    }
-}
-
-// =================================================================================================
-// Run-metrics persistence.
-// =================================================================================================
-private enum RunSnapshot {
-    private static let persistLock = NSLock()
-
-    private static func storageFromEnvironment() -> URL? {
-        guard let raw = ProcessInfo.processInfo.environment["OAK_METRICS_STORAGE"]?
-                            .trimmingCharacters(in: .whitespacesAndNewlines), !raw.isEmpty
-        else { return nil }
-        return URL(fileURLWithPath: (raw as NSString).expandingTildeInPath, isDirectory: true)
-    }
-
-    fileprivate static func resolveMetricsDirectory(explicit: URL?) -> URL {
-        if let e = explicit { return e }
-        if let s = storageFromEnvironment() { return s }
-        let root = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
-        return root.appendingPathComponent(".oak-benchmarks/\(Main.oakBenchmarksRunId())", isDirectory: true)
-    }
-
-    static func persist(_ file: RunMetricsFile, metricsDir: URL) throws -> URL {
-        let stem = snapshotStem(envId: file.envId, policy: file.policy, seed: file.seed)
-        let leaf = file.heartbeatSequence.map { "\(stem).heartbeat-\(String(format: "%06d", $0)).json" }
-                    ?? "\(stem).json"
-        let seedDir = metricsDir
-            .appendingPathComponent(file.envId, isDirectory: true)
-            .appendingPathComponent(seedFolderName(file.seed), isDirectory: true)
-        let url = seedDir.appendingPathComponent(leaf, isDirectory: false)
-        let enc = JSONEncoder(); enc.outputFormatting = [.prettyPrinted, .sortedKeys]
-        let data = try enc.encode(file)
-        persistLock.lock(); defer { persistLock.unlock() }
-        try FileManager.default.createDirectory(at: seedDir, withIntermediateDirectories: true)
-        try data.write(to: url, options: .atomic)
-        return url
-    }
-
-    fileprivate static func snapshotStem(envId: String, policy: Policy, seed: Int?) -> String {
-        let raw = "\(envId)-\(policy.rawValue)-\(seedFolderName(seed))"
-        return raw.replacingOccurrences(of: #"[^A-Za-z0-9]+"#, with: "-", options: .regularExpression)
-    }
-    fileprivate static func seedFolderName(_ seed: Int?) -> String { seed.map { "seed\($0)" } ?? "seedn" }
-}
-
-// =================================================================================================
-// Run context and runner.
-// =================================================================================================
-private struct RunContext {
-    let envId: String
-    let policy: Policy
-    let seed: Int?
-    let stopAfter: Int
-    let optionCount: Int
-    let metricsDir: URL
-    let env: EnvPoolEnv
-    let engine: OakMetalEngine?
 }
 
 private final class RunState {
-    var prevReward: Float = 0
-    var prevPolicyMean: [Float]
-    var prevActionSignal: [Float]
-    var prevOptionScoreGrad: [Float]
-    var prevImportance: [Float]
-    var randPolicyMean: [Float]
-    var randSeed: UInt64
-    var measuredSteps = 0
-    var measuredSeconds = 0.0
-    var measurementStart: UInt64?
-    var rewardSum = 0.0
-    var doneCount = 0
-    var pulse = 0
-    var health: HealthAccumulator
-
-    init(env: EnvPoolEnv, seed: Int?, optionCount: Int) {
-        prevPolicyMean = Array(repeating: 0, count: env.dPolicy)
-        prevActionSignal = Array(repeating: 0, count: env.dPolicy)
-        prevOptionScoreGrad = Array(repeating: 0, count: max(optionCount, 0) * env.dPolicy)
-        prevImportance = Array(repeating: 0, count: max(optionCount, 0))
-        randPolicyMean = Array(repeating: 0, count: env.dPolicy)
-        randSeed = UInt64(bitPattern: Int64(seed ?? Int(oakUnseededSeed)))
-        // rank = obsDim per the agent's structural choice (see OakMetalEngine init precondition).
-        health = HealthAccumulator(obsDim: env.obsDim)
-    }
+    var prevReward: Float = 0, prevPolicy, prevAction, prevCredit, prevImp, randomMean: [Float], rng: UInt64, steps = 0, seconds = 0.0, start: UInt64?, rewardSum = 0.0, doneCount = 0, pulse = 0, health: Health
+    init(env: HalfCheetahEnv, seed: Int, optionCount: Int) { prevPolicy = Array(repeating: 0, count: env.dPolicy); prevAction = prevPolicy; prevCredit = Array(repeating: 0, count: optionCount * env.dPolicy); prevImp = Array(repeating: 1, count: optionCount); randomMean = prevPolicy; rng = UInt64(bitPattern: Int64(seed)); health = Health(obsDim: env.obsDim) }
 }
 
-// =================================================================================================
-// CLI main.
-// =================================================================================================
+private enum Snapshot {
+    static func dir(_ explicit: URL?) -> URL { if let e = explicit { return e }; if let r = ProcessInfo.processInfo.environment["OAK_METRICS_STORAGE"], !r.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { return URL(fileURLWithPath: (r as NSString).expandingTildeInPath, isDirectory: true) }; return URL(fileURLWithPath: FileManager.default.currentDirectoryPath).appendingPathComponent(".oak-benchmarks/\(Main.runId())", isDirectory: true) }
+    static func seed(_ s: Int?) -> String { s.map { "seed\($0)" } ?? "seedn" }
+    static func stem(_ env: String, _ p: Policy, _ s: Int?) -> String { "\(env)-\(p.rawValue)-\(seed(s))".replacingOccurrences(of: #"[^A-Za-z0-9]+"#, with: "-", options: .regularExpression) }
+    static func write(_ f: RunMetricsFile, to root: URL) throws { let leaf = f.heartbeatSequence.map { "\(stem(f.envId, f.policy, f.seed)).heartbeat-\(String(format: "%06d", $0)).json" } ?? "\(stem(f.envId, f.policy, f.seed)).json"; let d = root.appendingPathComponent(f.envId, isDirectory: true).appendingPathComponent(seed(f.seed), isDirectory: true); let e = JSONEncoder(); e.outputFormatting = [.prettyPrinted, .sortedKeys]; try FileManager.default.createDirectory(at: d, withIntermediateDirectories: true); try e.encode(f).write(to: d.appendingPathComponent(leaf), options: .atomic) }
+}
+
 @main struct Main {
-    @discardableResult
-    private static func configureHotPathQoS() -> Int32 {
-        pthread_set_qos_class_self_np(QOS_CLASS_USER_INTERACTIVE, 0)
+    static let fmt: DateFormatter = { let f = DateFormatter(); f.calendar = Calendar(identifier: .iso8601); f.locale = Locale(identifier: "en_US_POSIX"); f.timeZone = TimeZone(secondsFromGMT: 0); f.dateFormat = "yyyyMMdd-HHmmss"; return f }()
+    static func runId() -> String { fmt.string(from: Date()) + "-\(ProcessInfo.processInfo.processIdentifier)" }
+    static func main() { _ = pthread_set_qos_class_self_np(QOS_CLASS_USER_INTERACTIVE, 0); do { switch CommandLine.arguments.dropFirst().first { case "benchmark": try benchmark(); case "benchmark-worker": try worker(); default: throw OakError.message("Use `OaK benchmark`.") } } catch { fputs("\(error)\n", stderr); Foundation.exit(1) } }
+    private static func policy(_ raw: String) throws -> Policy { guard let p = Policy(rawValue: raw.lowercased()) else { throw OakError.message("Unknown policy '\(raw)'.") }; return p }
+    private static func random(_ s: inout UInt64, _ xs: inout [Float]) { for i in xs.indices { s &+= 1; var z = s &+ 0x9e3779b97f4a7c15; z = (z ^ (z &>> 30)) &* 0xbf58476d1ce4e5b9; z = (z ^ (z &>> 27)) &* 0x94d049bb133111eb; z ^= z &>> 31; xs[i] = Float(z >> (UInt64.bitWidth - Float.significandBitCount)) / Float(UInt64(1) << Float.significandBitCount) * 2 - 1 } }
+    private static func metric(_ env: HalfCheetahEnv, _ p: Policy, _ seed: Int, _ stop: Int, _ s: RunState, _ seq: Int?) -> RunMetricsFile {
+        RunMetricsFile(schemaVersion: 5, command: "benchmark", envId: oakEnvId, policy: p, seed: seed, numEnvs: 1, stopAfterMeasuredSteps: stop, observationDim: env.obsDim, actionDim: env.actDim, actionDiscreteCount: nil, measuredStepCount: s.steps, measuredSeconds: s.seconds, stepsPerSecond: s.seconds > 0 ? Double(s.steps)/s.seconds : nil, heartbeatSequence: seq, rewardSum: s.rewardSum, doneCount: s.doneCount, stopReason: seq == nil ? "measured_steps" : "heartbeat", health: s.health.snapshot(done: s.doneCount))
     }
-
-    static func main() {
-        _ = configureHotPathQoS()
-        do {
-            let args = Array(CommandLine.arguments.dropFirst())
-            switch args.first {
-            case "benchmark": try benchmark()
-            case "benchmark-worker": try benchmarkWorker()
-            default: throw OakError.message("Use `OaK benchmark`.")
+    private static func run(policy p: Policy, seed: Int, steps: Int, dir: URL) throws {
+        guard let dev = MTLCreateSystemDefaultDevice() else { throw OakError.message("Metal device unavailable.") }
+        let env = try HalfCheetahEnv(seed: seed), rank = max(env.obsDim, env.dPolicy * 2, 2)
+        let engine = p == .oak ? try OakMetalEngine(obsDim: env.obsDim, rank: rank, dPolicy: env.dPolicy, device: dev, seed: seed) : nil
+        env.prepare(optionCount: engine?.K ?? 0); try env.reset(); let st = RunState(env: env, seed: seed, optionCount: engine?.K ?? 0)
+        let hb = max(steps / 10, 1); st.start = DispatchTime.now().uptimeNanoseconds
+        while st.steps < steps {
+            let next = st.steps + 1, willHB = st.steps / hb < next / hb, willEnd = next == steps
+            func finish(_ pol: UnsafePointer<Float>, _ stats: KernelStats?) throws {
+                st.steps = next; st.seconds = Double(DispatchTime.now().uptimeNanoseconds - st.start!) / 1_000_000_000; st.doneCount += Int(env.done[0])
+                let r = env.reward[0]; guard r.isFinite else { throw OakError.message("Environment produced a non-finite reward.") }; st.rewardSum += Double(r)
+                st.prevPolicy.withUnsafeBufferPointer { st.health.env(reward: r, prev: $0, curr: UnsafeBufferPointer(start: pol, count: env.dPolicy)) }
+                if let x = stats { st.health.kernel(x) }; if willHB { st.pulse += 1; try Snapshot.write(metric(env, p, seed, steps, st, st.pulse), to: dir) }
+                copyFloats(from: pol, to: &st.prevPolicy, count: env.dPolicy); st.prevReward = r
+                env.actionSignal.withUnsafeBufferPointer { src in if let p = src.baseAddress { copyFloats(from: p, to: &st.prevAction, count: env.dPolicy) } }
+                env.optionActorCredit.withUnsafeBufferPointer { src in if let p = src.baseAddress, !src.isEmpty { copyFloats(from: p, to: &st.prevCredit, count: src.count) } }
+                env.importance.withUnsafeBufferPointer { src in if let p = src.baseAddress, !src.isEmpty { copyFloats(from: p, to: &st.prevImp, count: src.count) } }
             }
-        } catch { fputs("\(error)\n", stderr); Foundation.exit(1) }
-    }
-
-    private static func resolveBenchmarkWorkingDirectory(root: URL) -> URL {
-        if let raw = ProcessInfo.processInfo.environment["OAK_METRICS_STORAGE"]?
-            .trimmingCharacters(in: .whitespacesAndNewlines), !raw.isEmpty {
-            return URL(fileURLWithPath: (raw as NSString).expandingTildeInPath, isDirectory: true)
+            if let e = engine { let stats = try e.step(env: env, prevAction: st.prevAction, prevCredit: st.prevCredit, prevImp: st.prevImp, prevReward: st.prevReward, capture: willHB || willEnd); try env.step(policy: e.policyPointer, options: e.optionPointer, optionCount: e.K); try finish(e.policyPointer, stats) }
+            else { random(&st.rng, &st.randomMean); try st.randomMean.withUnsafeBufferPointer { try env.step(policy: $0.baseAddress!, options: nil, optionCount: 0); try finish($0.baseAddress!, nil) } }
         }
-        return root.appendingPathComponent(".oak-benchmarks/\(oakBenchmarksRunId())", isDirectory: true)
+        try Snapshot.write(metric(env, p, seed, steps, st, nil), to: dir)
     }
-
+    private static func worker() throws {
+        let e = ProcessInfo.processInfo.environment
+        guard let pr = e["OAK_POLICY"], let seed = e["OAK_SEED"].flatMap(Int.init), let stop = e["OAK_STOP_AFTER_STEPS"].flatMap(Int.init) else { throw OakError.message("Incomplete benchmark-worker environment.") }
+        try run(policy: try policy(pr), seed: seed, steps: max(stop, 1), dir: Snapshot.dir(nil))
+    }
+    private static func exePath() throws -> String {
+        let r = CommandLine.arguments[0]
+        let u = r.hasPrefix("/") ? URL(fileURLWithPath: r) : URL(fileURLWithPath: FileManager.default.currentDirectoryPath).appendingPathComponent(r)
+        guard FileManager.default.isExecutableFile(atPath: u.path) else { throw OakError.message("Cannot locate worker executable.") }
+        return u.path
+    }
+    private static func start(_ item: (Int, Policy), _ steps: Int, _ dir: URL) throws -> pid_t {
+        var e = ProcessInfo.processInfo.environment; e["OAK_POLICY"] = item.1.rawValue; e["OAK_SEED"] = "\(item.0)"; e["OAK_STOP_AFTER_STEPS"] = "\(steps)"; e["OAK_METRICS_STORAGE"] = dir.path
+        let path = try exePath()
+        var pid = pid_t()
+        var argv = [strdup(path), strdup("benchmark-worker"), nil]
+        var envp = e.map { strdup("\($0.key)=\($0.value)") }
+        envp.append(nil)
+        defer {
+            for ptr in argv { if let ptr { free(ptr) } }
+            for ptr in envp { if let ptr { free(ptr) } }
+        }
+        let rc = path.withCString { cpath in argv.withUnsafeMutableBufferPointer { av in envp.withUnsafeMutableBufferPointer { ep in posix_spawn(&pid, cpath, nil, nil, av.baseAddress, ep.baseAddress) } } }
+        guard rc == 0 else { throw OakError.message("posix_spawn failed for worker: \(String(cString: strerror(rc)))") }
+        return pid
+    }
     private static func benchmark() throws {
-        let root = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
-        let env = ProcessInfo.processInfo.environment
-        let envId = env["OAK_BENCH_ENV"] ?? "HalfCheetah-v4"
-        guard !envId.contains(",") else {
-            throw OakError.message("OAK_BENCH_ENV is single-env by design; run separate benchmarks for multiple envs.")
-        }
-        let seedStart = ProcessInfo.processInfo.environment["OAK_BENCH_SEED_START"].flatMap(Int.init) ?? 0
-        let seedCount = ProcessInfo.processInfo.environment["OAK_BENCH_SEED_COUNT"].flatMap(Int.init) ?? 5
-        let stopAfter = max(ProcessInfo.processInfo.environment["OAK_BENCH_STEPS"].flatMap(Int.init) ?? 500000, 1)
-        let policies = try (ProcessInfo.processInfo.environment["OAK_BENCH_POLICIES"] ?? "oak,random")
-            .split(separator: ",").map { try parsePolicy(String($0)) }
-        let hw = max(ProcessInfo.processInfo.processorCount, 1)
-        let concurrency = hw
-        var benchDir = resolveBenchmarkWorkingDirectory(root: root)
-        let lockDir = root.appendingPathComponent(".oak-benchmarks", isDirectory: true)
-        try FileManager.default.createDirectory(at: lockDir, withIntermediateDirectories: true)
-        let lockFd = open(lockDir.appendingPathComponent(oakBenchmarkLockFile).path, O_CREAT | O_RDWR, S_IRUSR | S_IWUSR)
-        guard lockFd >= 0 else { throw OakError.message("Cannot lock benchmark workspace: \(lockDir.path).") }
-        guard flock(lockFd, LOCK_EX) == 0 else { _ = close(lockFd); throw OakError.message("Cannot lock benchmark workspace: \(lockDir.path).") }
-        defer { _ = flock(lockFd, LOCK_UN); _ = close(lockFd) }
-        if FileManager.default.fileExists(atPath: benchDir.path),
-           !(try FileManager.default.contentsOfDirectory(atPath: benchDir.path).filter { $0 != ".DS_Store" }).isEmpty {
-            benchDir = URL(fileURLWithPath: "\(benchDir.path)-\(oakBenchmarksRunId())", isDirectory: true)
-        }
-        try FileManager.default.createDirectory(at: benchDir, withIntermediateDirectories: true)
-        let metricsDir = benchDir
-
-        struct WorkItem { let seed: Int; let policy: Policy }
-        var work: [WorkItem] = []
-        for seed in seedStart..<(seedStart + seedCount) {
-            for policy in policies {
-                work.append(WorkItem(seed: seed, policy: policy))
-            }
-        }
-        let totalWork = work.count
-        fputs("OaK benchmark: \(totalWork) \(envId) work items, single-stream B=1, N=\(concurrency) worker processes (steps=\(stopAfter), seeds=\(seedCount), dir=\(metricsDir.path))\n", stderr)
-        fflush(stderr)
-
-        let progressEvery = max(1, totalWork / 20)
-        var completed = 0
-        var next = 0
-        var running: [(WorkItem, Process)] = []
-        while completed < totalWork {
-            while next < totalWork && running.count < concurrency {
-                let item = work[next]
-                running.append((item, try startBenchmarkWorkerProcess(envId: envId, policy: item.policy,
-                                                                      seed: item.seed, stopAfter: stopAfter,
-                                                                      metricsDir: metricsDir)))
-                next += 1
-            }
-            var finished: Int?
-            while finished == nil {
-                for i in running.indices where !running[i].1.isRunning {
-                    finished = i
-                    break
-                }
-                if finished == nil { usleep(50_000) }
-            }
-            let (item, process) = running.remove(at: finished!)
-            guard process.terminationStatus == 0 else {
-                throw OakError.message("Benchmark worker failed for \(envId) seed \(item.seed) policy \(item.policy.rawValue) (status \(process.terminationStatus)).")
-            }
-            completed += 1
-            if completed % progressEvery == 0 || completed == totalWork {
-                fputs("OaK benchmark progress: \(completed)/\(totalWork)\n", stderr)
-                fflush(stderr)
-            }
-        }
-    }
-
-    private static func benchmarkWorker() throws {
-        let env = ProcessInfo.processInfo.environment
-        let envId = env["OAK_ENV"] ?? ""
-        guard !envId.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
-            throw OakError.message("Missing benchmark-worker environment id.")
-        }
-        guard let policyRaw = env["OAK_POLICY"],
-              let seed = env["OAK_SEED"].flatMap(Int.init),
-              let steps = env["OAK_STOP_AFTER_STEPS"].flatMap(Int.init)
-        else { throw OakError.message("Incomplete benchmark-worker environment.") }
-        let policy = try parsePolicy(policyRaw)
-        let stopAfter = max(steps, 1)
-        let device = try metalDevice()
-        let dir = RunSnapshot.resolveMetricsDirectory(explicit: nil)
-        _ = try runSingle(envId: envId, policy: policy, seed: seed,
-                          stopAfter: stopAfter, device: device,
-                          metricsDir: dir).0
-    }
-
-    private static func currentExecutableURL() throws -> URL {
-        let raw = CommandLine.arguments[0]
-        let url = raw.hasPrefix("/")
-            ? URL(fileURLWithPath: raw)
-            : URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
-                .appendingPathComponent(raw)
-        guard FileManager.default.isExecutableFile(atPath: url.path) else {
-            throw OakError.message("Cannot locate benchmark worker executable at \(url.path)")
-        }
-        return url
-    }
-
-    private static func startBenchmarkWorkerProcess(envId: String, policy: Policy, seed: Int,
-                                                    stopAfter: Int, metricsDir: URL) throws -> Process {
-        var env = ProcessInfo.processInfo.environment
-        env["OAK_ENV"] = envId
-        env["OAK_POLICY"] = policy.rawValue
-        env["OAK_SEED"] = "\(seed)"
-        env["OAK_STOP_AFTER_STEPS"] = "\(stopAfter)"
-        env["OAK_METRICS_STORAGE"] = metricsDir.path
-
-        let p = Process()
-        p.executableURL = try currentExecutableURL()
-        p.arguments = ["benchmark-worker"]
-        p.environment = env
-        try p.run()
-        return p
-    }
-
-    private static func parsePolicy(_ raw: String) throws -> Policy {
-        guard let p = Policy(rawValue: raw.lowercased()) else {
-            throw OakError.message("Unknown policy '\(raw)'.")
-        }
-        return p
-    }
-
-    private static func randomPolicyMean(env: EnvPoolEnv, stepCount: inout UInt64,
-                                          floats: inout [Float]) -> PolicyMeanBatch {
-        func mix(_ x: UInt64) -> UInt64 {
-            var z = x &+ 0x9e3779b97f4a7c15
-            z = (z ^ (z &>> 30)) &* 0xbf58476d1ce4e5b9
-            z = (z ^ (z &>> 27)) &* 0x94d049bb133111eb
-            return z ^ (z &>> 31)
-        }
-        for i in floats.indices {
-            stepCount &+= 1
-            let u = Float(mix(stepCount) >> 40) * (1.0 / Float(1 << 24))
-            floats[i] = u * 2 - 1
-        }
-        return PolicyMeanBatch(values: floats, optionValues: nil)
-    }
-
-    // -- single-run orchestration (setup -> loop -> snapshot) --------------------------------
-
-    private static func setupRun(envId: String, policy: Policy, seed: Int?,
-                                 stopAfter: Int, device: MTLDevice,
-                                 metricsDir: URL?) throws -> RunContext {
-        let dir = RunSnapshot.resolveMetricsDirectory(explicit: metricsDir)
+        let env = ProcessInfo.processInfo.environment, root = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+        let seed0 = env["OAK_BENCH_SEED_START"].flatMap(Int.init) ?? 0, seeds = env["OAK_BENCH_SEED_COUNT"].flatMap(Int.init) ?? 5, steps = max(env["OAK_BENCH_STEPS"].flatMap(Int.init) ?? 500000, 1)
+        let policies = try (env["OAK_BENCH_POLICIES"] ?? "oak,random").split(separator: ",").map { try policy(String($0)) }
+        var dir = Snapshot.dir(nil); let lockDir = root.appendingPathComponent(".oak-benchmarks", isDirectory: true); try FileManager.default.createDirectory(at: lockDir, withIntermediateDirectories: true)
+        let fd = open(lockDir.appendingPathComponent(oakLock).path, O_CREAT | O_RDWR, S_IRUSR | S_IWUSR); guard fd >= 0, flock(fd, LOCK_EX) == 0 else { throw OakError.message("Cannot lock benchmark workspace.") }; defer { _ = flock(fd, LOCK_UN); _ = close(fd) }
+        if FileManager.default.fileExists(atPath: dir.path), !(try FileManager.default.contentsOfDirectory(atPath: dir.path).filter { $0 != ".DS_Store" }).isEmpty { dir = URL(fileURLWithPath: "\(dir.path)-\(runId())", isDirectory: true) }
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-        let env = try EnvPoolEnv(id: envId, numEnvs: 1, seed: seed)
-        let rank = max(env.obsDim, env.dPolicy * 2, 2)
-        guard rank <= 256 else {
-            throw OakError.message("OAK structural rank \(rank) exceeds oak_plan's 256-threadgroup-storage cap; redesign oak_plan storage.")
-        }
-        let engine = policy == .oak
-            ? try OakMetalEngine(obsDim: env.obsDim, rank: rank, dPolicy: env.dPolicy,
-                                 device: device, seed: seed)
-            : nil
-        try env.reset()
-        return RunContext(envId: envId, policy: policy, seed: seed,
-                          stopAfter: stopAfter,
-                          optionCount: policy == .oak ? OakMetalLayout.optionCount(rank: rank) : 0,
-                          metricsDir: dir,
-                          env: env, engine: engine)
-    }
-
-    private static func emitSnapshot(_ ctx: RunContext, _ state: RunState, seq: Int?) -> RunMetricsFile {
-        let sps = state.measuredSeconds > 0 ? Double(state.measuredSteps) / state.measuredSeconds : nil
-        let reason = seq == nil ? "measured_steps" : "heartbeat"
-        return RunMetricsFile(
-            schemaVersion: 5, command: "benchmark", envId: ctx.envId, policy: ctx.policy, seed: ctx.seed,
-            numEnvs: 1, stopAfterMeasuredSteps: ctx.stopAfter,
-            observationDim: ctx.env.obsDim, actionDim: ctx.env.actDim,
-            actionDiscreteCount: ctx.env.actionDiscreteCount,
-            measuredStepCount: state.measuredSteps,
-            measuredSeconds: state.measuredSeconds,
-            stepsPerSecond: sps,
-            heartbeatSequence: seq, rewardSum: state.rewardSum, doneCount: state.doneCount,
-            stopReason: reason,
-            health: state.health.snapshot(continuingRestartCount: state.doneCount))
-    }
-
-    private static func measurementLoop(_ ctx: RunContext, _ state: RunState) throws {
-        let heartbeatEvery = max(ctx.stopAfter / 10, 1)
-        // Continual: every step is a measured step, no warmup. Plan Inv-5: no special training
-        // phases. Step 0 timer is established on the first iteration.
-        if state.measurementStart == nil { state.measurementStart = DispatchTime.now().uptimeNanoseconds }
-        while state.measuredSteps < ctx.stopAfter {
-            let nextMeasuredStep = state.measuredSteps + 1
-            let willHeartbeat = state.measuredSteps / heartbeatEvery < nextMeasuredStep / heartbeatEvery
-            let willFinish = nextMeasuredStep == ctx.stopAfter
-            let captureKernelStats = ctx.policy == .oak && (willHeartbeat || willFinish)
-            let policyMean: PolicyMeanBatch, stats: KernelStats?
-            if let engine = ctx.engine {
-                let out = try ctx.env.observationScratch.withUnsafeBufferPointer { buf in
-                    try engine.step(obs: buf, prevActionSignal: state.prevActionSignal,
-                                    prevOptionScoreGrad: state.prevOptionScoreGrad,
-                                    prevImportance: state.prevImportance,
-                                    prevReward: state.prevReward,
-                                    captureStats: captureKernelStats)
-                }
-                policyMean = out.0; stats = out.1
-            } else {
-                policyMean = randomPolicyMean(env: ctx.env, stepCount: &state.randSeed,
-                                              floats: &state.randPolicyMean)
-                stats = nil
-            }
-            try ctx.env.sampleAndStep(policy: policyMean)
-            state.measuredSteps += 1
-            if let s = state.measurementStart {
-                state.measuredSeconds = Double(DispatchTime.now().uptimeNanoseconds - s) / 1_000_000_000
-            }
-            state.doneCount += Int(ctx.env.doneScratch[0])
-            let v = ctx.env.rewardScratch[0]
-            guard v.isFinite else { throw OakError.message("Environment produced a non-finite reward.") }
-            state.rewardSum += Double(v)
-            // Host-computable health (works for ANY policy, including random).
-            state.prevPolicyMean.withUnsafeBufferPointer { prev in
-                policyMean.values.withUnsafeBufferPointer { curr in
-                    state.health.recordEnvSignals(reward: v, prevPolicyMean: prev,
-                                                  currPolicyMean: curr)
-                }
-            }
-            if let s = stats { state.health.recordKernelStats(s) }
-            if willHeartbeat {
-                state.pulse += 1
-                _ = try RunSnapshot.persist(emitSnapshot(ctx, state, seq: state.pulse), metricsDir: ctx.metricsDir)
-            }
-            state.prevReward = ctx.env.rewardScratch[0]
-            _ = state.prevPolicyMean.withUnsafeMutableBufferPointer { dst in
-                memcpy(dst.baseAddress!, policyMean.values, policyMean.values.count * MemoryLayout<Float>.stride)
-            }
-            if ctx.env.optionScoreGradScratch.count == state.prevOptionScoreGrad.count {
-                _ = state.prevOptionScoreGrad.withUnsafeMutableBufferPointer { dst in
-                    memcpy(dst.baseAddress!, ctx.env.optionScoreGradScratch,
-                           ctx.env.optionScoreGradScratch.count * MemoryLayout<Float>.stride)
-                }
-            }
-            _ = state.prevActionSignal.withUnsafeMutableBufferPointer { dst in
-                memcpy(dst.baseAddress!, ctx.env.actionSignalScratch,
-                       ctx.env.actionSignalScratch.count * MemoryLayout<Float>.stride)
-            }
-            if ctx.env.importanceScratch.count == state.prevImportance.count {
-                _ = state.prevImportance.withUnsafeMutableBufferPointer { dst in
-                    memcpy(dst.baseAddress!, ctx.env.importanceScratch,
-                           ctx.env.importanceScratch.count * MemoryLayout<Float>.stride)
-                }
-            }
-        }
-    }
-
-    private static func runSingle(envId: String, policy: Policy, seed: Int?,
-                                  stopAfter: Int, device: MTLDevice,
-                                  metricsDir: URL? = nil)
-                                  throws -> (RunMetricsFile, URL) {
-        let ctx = try setupRun(envId: envId, policy: policy, seed: seed,
-                               stopAfter: stopAfter, device: device,
-                               metricsDir: metricsDir)
-        let state = RunState(env: ctx.env, seed: seed, optionCount: ctx.optionCount)
-        try measurementLoop(ctx, state)
-        let file = emitSnapshot(ctx, state, seq: nil)
-        let url = try RunSnapshot.persist(file, metricsDir: ctx.metricsDir)
-        return (file, url)
-    }
-
-    private static let runIdFormatter: DateFormatter = {
-        let f = DateFormatter()
-        f.calendar = Calendar(identifier: .iso8601)
-        f.locale = Locale(identifier: "en_US_POSIX")
-        f.timeZone = TimeZone(secondsFromGMT: 0)
-        f.dateFormat = "yyyyMMdd-HHmmss"
-        return f
-    }()
-
-    fileprivate static func oakBenchmarksRunId() -> String {
-        runIdFormatter.string(from: Date()) + "-\(ProcessInfo.processInfo.processIdentifier)"
+        let work = (seed0..<(seed0+seeds)).flatMap { s in policies.map { (s, $0) } }, total = work.count, concurrency = max(ProcessInfo.processInfo.processorCount, 1)
+        fputs("OaK benchmark: \(total) \(oakEnvId) work items, single-stream B=1, N=\(concurrency) worker processes (steps=\(steps), seeds=\(seeds), dir=\(dir.path))\n", stderr)
+        var next = 0, done = 0, running: [pid_t:(Int,Policy)] = [:]
+        func fill() throws { while next < total && running.count < concurrency { let item = work[next], pid = try start(item, steps, dir); running[pid] = item; next += 1 } }
+        try fill(); let progress = max(1, total / 20)
+        while done < total { var st: Int32 = 0; let pid = waitpid(-1, &st, 0); guard pid > 0, let item = running.removeValue(forKey: pid) else { continue }; guard st == 0 else { throw OakError.message("Benchmark worker failed for \(oakEnvId) seed \(item.0) policy \(item.1.rawValue) (status \(st)).") }; done += 1; if done % progress == 0 || done == total { fputs("OaK benchmark progress: \(done)/\(total)\n", stderr) }; try fill() }
     }
 }
