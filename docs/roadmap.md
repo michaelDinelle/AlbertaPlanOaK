@@ -7,12 +7,13 @@ active-backward refresh screen.
 
 The live branch has moved from "negative but beats random" into a new factual
 regime: OaK can produce real HalfCheetah locomotion through the bridge, but the
-walking mode is not yet stable across seeds. The current Oak-only 300k keeper
-evidence is `.oak-benchmarks/short-broad-surprise-oak-300k-20260426`: 10
-HalfCheetah seeds. Oak mean reward is `+9988.566`, max seed reward is
-`+109689.456`, mean `info:x_velocity` is `+0.050853`, positive velocity is
-`8/10`, positive return is `3/10`, and Oak NF total is `3`. The strongest seed
-is not marginal:
+walking mode is not yet stable across seeds. The current 300k keeper
+evidence is `.oak-benchmarks/short-broad-surprise-full-300k-20260426`: 10
+HalfCheetah seeds x `{oak,zero,random}`. Oak mean reward is `+9988.566`, max
+seed reward is `+109689.456`, mean `info:x_velocity` is `+0.050932`, positive
+velocity is `8/10`, positive return and zero-beating seeds are `3/10`, and Oak
+NF total is `3`. Random mean is `-78032.282`; zero mean is `+0.010`. The
+strongest seed is not marginal:
 seed 3 reaches reward `+109689.456`, run reward `+119046.372`, and mean
 velocity `+0.396821` by 300k. Seed 8, the prior large backward attractor, is
 now forward (`+6837.419`, mean velocity `+0.035593`). The same gate still fails
@@ -341,6 +342,26 @@ evidence in `.oak-benchmarks/short-broad-surprise-oak-300k-20260426` preserves
 `+0.035593`, and raises the 10-seed mean reward to `+9988.566`. It is still not
 stable promotion: positive return is only `3/10`, seed 1 still has three
 non-finites, and several forward seeds remain weak.
+The full bridge gate
+`.oak-benchmarks/short-broad-surprise-full-300k-20260426` reproduces the same
+Oak profile against `{zero,random}`: random mean `-78032.282`, zero mean
+`+0.010`, Oak beats zero in `3/10` seeds, and Oak has positive velocity in
+`8/10` seeds.
+
+The first quiet-seed follow-ups after that keeper were rejected. Quiet-invalid
+selected-option rebirth
+`.oak-benchmarks/quiet-invalid-rebirth-target300k-20260426` changes seed 1's
+internal option replacement count (`75 -> 1497`) and selected age (`273737 ->
+137`) without changing reward or velocity; rebirth after actor credit is dead is
+not sufficient. RR/psi implicit TD-energy normalization
+`.oak-benchmarks/psi-implicit-target10k-20260426` immediately regresses seeds
+0/1/8, so seed 1's early RR energy is not disposable noise. Preserving last
+finite RR continuation
+`.oak-benchmarks/rr-preserve-cont-target50k-20260426` keeps seed 3 intact but
+wakes seed 1 into a control-cost sink (`reward_ctrl=-14506.989`). Invalid-RR
+main-TD fallback
+`.oak-benchmarks/rr-invalid-maintd-target50k-20260426` is behavior-identical and
+does not couple into emitted actor credit.
 
 Host health note: long runs exposed resident-memory drift in the benchmark
 worker. `Sources/Main.swift` now wraps each measured worker step in an
@@ -839,11 +860,12 @@ catastrophe.
   keeper improvement. Mean reward `+5575.338`, positive velocity `7/10`, NF
   total `3`; seed 3 is bit-identical to the first walking checkpoint and seed
   0 improves from `-2553.895` to `-456.618`.
-- `.oak-benchmarks/short-broad-surprise-oak-300k-20260426`: Oak-only 10-seed
-  current keeper. Mean reward `+9988.566`, positive velocity `8/10`, positive
-  return `3/10`, NF total `3`; seed 8 flips from the large backward attractor
-  to forward positive return while seeds 0/1/2/3/4/5/6/7/9 match grounded
-  dead-credit bit-for-bit.
+- `.oak-benchmarks/short-broad-surprise-full-300k-20260426`: 10 seeds x
+  `{oak,zero,random}` current keeper gate. Oak mean reward `+9988.566`,
+  positive velocity `8/10`, positive return and zero-beating seeds `3/10`, NF
+  total `3`; random mean `-78032.282`, zero mean `+0.010`. Seed 8 flips from the
+  large backward attractor to forward positive return while seeds
+  0/1/2/3/4/5/6/7/9 match grounded dead-credit bit-for-bit.
 - Bridge oracle witness: `.venv/bin/python tools/bridge_oracle_cem.py
   --cem-iters 0 --eval-horizon 5000 --seed-count 5` returns mean reward
   `+4428.300`, mean run reward `+4914.978`, mean control cost `-486.678`, and
@@ -1536,11 +1558,11 @@ Baseline for the next algorithmic change:
 
 - **Current behavioral baseline**: short/broad/surprising active-backward
   refresh in the live working tree, artifact
-  `.oak-benchmarks/short-broad-surprise-oak-300k-20260426`.
+  `.oak-benchmarks/short-broad-surprise-full-300k-20260426`.
 - HalfCheetah 300k, 10 Oak seeds: mean reward `+9988.566`, max
-  `+109689.456`, positive velocity `8/10`, positive return `3/10`, and Oak
-  non-finite total `3`. This is an improved walking checkpoint, not a stable
-  promotion.
+  `+109689.456`, positive velocity `8/10`, positive return and zero-beating
+  seeds `3/10`, and Oak non-finite total `3`. This is an improved walking
+  checkpoint, not a stable promotion.
 - **Historical negative floor**: `.oak-benchmarks/baseline-1m` remains useful
   for host/performance comparison only. It is no longer the behavioral target.
 - K1 and rebuild-era runs remain historical comparison artifacts, not baselines.
