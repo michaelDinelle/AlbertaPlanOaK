@@ -61,6 +61,7 @@ def main() -> int:
     parser.add_argument("--rocket-min-ratio", type=float, default=0.97)
     parser.add_argument("--backward-seeds", default="8")
     parser.add_argument("--focus-seeds", default="0,1,3,8")
+    parser.add_argument("--focus-max-drop-ratio", type=float, default=0.03)
     parser.add_argument("--at-step", type=int)
     parser.add_argument("--allow-nf-regression", action="store_true")
     args = parser.parse_args()
@@ -92,6 +93,10 @@ def main() -> int:
             if cr < floor:
                 verdict = "rocket-loss"
                 failures.append(f"seed {seed} rocket reward {fmt(cr)} < {fmt(floor)}")
+        reward_floor = br - max(1.0, abs(br) * args.focus_max_drop_ratio)
+        if cr < reward_floor:
+            verdict = "focus-regression" if verdict == "ok" else f"{verdict}+focus"
+            failures.append(f"seed {seed} reward {fmt(cr)} < focus floor {fmt(reward_floor)}")
         if seed in backward and (cr < br or cx < bx):
             verdict = "backward-regression" if verdict == "ok" else f"{verdict}+backward"
             failures.append(
