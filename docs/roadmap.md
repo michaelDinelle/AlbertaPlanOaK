@@ -1,26 +1,52 @@
 # OaK roadmap - Plan-orthodox continual improvement
 
-Last audited: 2026-04-25, after promoting the full-bank planning cleanup to
-`.oak-benchmarks/baseline-1m`.
-The live branch has moved past the L3-L7 scaffold: default perception is now
-direct normalized experience channels plus constructed feature slots, K=R
-options/subtasks, exact wrapper-side one-step importance ratios, RR Eq. 4
-continuation with a differential-value gauge, direct RR option selection,
-raw reward plus duration option models, bounded
-full-bank option-model planning, and age/capacity-gated Oak replacement.
-Box actions keep the `2A`
-wrapper interface for capacity stability, but the scale half is now
-wrapper-reserved/inert and sampling uses structural fixed `sigma = 1/D_policy`
-with residual-style mean credit (`raw - mu`). `optValue`, `rhoOpt`,
-`oneTransition`, shadow keyboards, predictive-only GVF banks, model-residual
-GVF utility, learned Box log-scale, `optionPlanningUse`, stored primitive-channel
+Last audited: 2026-04-26, after commit
+`b2d25f9fa` (`Synchronize encode option selection`) and the first
+bridge-verified high-return walking gates.
+
+The live branch has moved from "negative but beats random" into a new factual
+regime: OaK can produce real HalfCheetah locomotion through the bridge, but the
+walking mode is not yet stable across seeds. The current 300k evidence is
+`.oak-benchmarks/fcstomp-encode-sync-clean-300k`: 10 HalfCheetah seeds x
+`{oak,zero,random}`. Oak mean reward is `+5365.610`, max seed reward is
+`+109689.456`, mean `info:x_velocity` is `+0.037900`, positive velocity is
+`6/10`, and positive return is `2/10`. The strongest seed is not marginal:
+seed 3 reaches reward `+109689.456`, run reward `+119046.372`, and mean
+velocity `+0.396821` by 300k. The same gate still fails stability: seed 8 is
+strongly backward (`-37294.861`, mean velocity `-0.086680`), total non-finite
+health counts are `34`, and the promotion standard remains unmet.
+
+A bridge oracle now exists as a non-agent witness, not doctrine:
+`.venv/bin/python tools/bridge_oracle_cem.py --cem-iters 0 --eval-horizon 5000
+--seed-count 5` runs a fixed open-loop sinusoid through the same C bridge and
+returns mean reward `+4428.300`, mean `info:reward_run=+4914.978`, mean
+`info:reward_ctrl=-486.678`, and mean `info:x_velocity=+0.982996`. This proves
+the bridge can carry positive locomotion and gives a scale target; none of its
+parameters or behavior enter OaK.
+
+The live architecture at this audit: default perception is direct normalized
+experience channels plus constructed feature slots, K=R options/subtasks,
+wrapper-side one-step importance ratios, RR Eq. 4 continuation with a
+differential-value gauge, model-backed average-reward option scoring,
+scalar chord refresh/blended policy emission, raw reward plus duration option
+models, full-bank option-model planning, and age/capacity-gated Oak
+replacement. Box actions keep the `2A` wrapper interface for capacity stability,
+but the scale half is wrapper-reserved/inert and sampling uses structural fixed
+`sigma = 1/D_policy` with residual-style mean credit (`raw - mu`). `optValue`,
+`rhoOpt`, `oneTransition`, predictive-only GVF banks, model-residual GVF
+utility, learned Box log-scale, `optionPlanningUse`, stored primitive-channel
 tables, `oneReward`, `psiCross`, signed-keyboard lambda machinery, cached
-keyboard scores, and deep diagnostic ownership were removed from the live path because
-they were finite scale paths or shadow bookkeeping without earned control value.
-The current benchmark artifact is `.oak-benchmarks/baseline-1m`: 10 HalfCheetah
-seeds x `{oak,random}`, Oak NF zero on every seed, Oak beats random `10/10`,
-mean Oak reward `-5869.101`, median `-5860.469`, and mean paired lift
-`256759.957`.
+keyboard scores, and deep diagnostic ownership remain deleted because they were
+finite scale paths or shadow bookkeeping without earned control value.
+
+Operational lesson from the first walking loop: changes that reduce commitment
+or "calm" the controller can look cleaner at 10k while deleting the high-return
+gait by 50k/300k. Pure-Q behavior selection, score-based interruption,
+negative-TD chord refresh, chord-weighted actor baseline, decoded duration TD,
+positive-only keyboard output, option-only G&T, and reward-aligned actor probes
+were all rejected because they either killed the strong walking seed or failed
+the 300k coverage gate. Future changes must preserve the high-return seed while
+improving seed coverage and non-finite health.
 
 Host simplification gate: the Swift host and native bridge were collapsed to a
 HalfCheetah-only benchmark path, `ActionTransducer.swift` and `EnvBridge.swift`
@@ -115,9 +141,9 @@ that terminal value with a plain feature bonus is rejected by the primary paper.
 | Off-policy floors | Accepted | `max(chord,1/K)` floors are removed from live learning. Wrapper emits exact one-step ratios from behavior-option sampling; ratio diagnostics are live. |
 | Average-reward option values | Accepted, removed from keeper | `optValue[K*R]` and `rhoOpt` were removed from the live keeper after they became behavior-relevant scale paths without earned 300k/1M value. Do not revive them until the option-value role is derived and gated independently. |
 | Predictive-only GVF bank | Removed | `gvfRate`, `gvfValue`, `gvfTd`, `gvfAge`, GVF step-size/meta buffers, and `gvfTdMean` were deleted because the bank remained diagnostic-only and never earned a behavior, replacement, or health-gate role. Main value and RR `psi` GVFs remain live. |
-| True keyboard / FC-STOMP cycle | Open architecture gap | `psiCross[K*K*R]`, dense λ, and cached/pagewise GPE scores are deleted as unproven behavior complexity. Behavior still executes one selected option for exact one-step importance ratios, now chosen by RR continuation plus direct `psiNext`. This is an option bank, not a fully operational Option Keyboard; chord-descriptor models and coherent feature/subtask/option/model feedback remain future work. |
+| True keyboard / FC-STOMP cycle | Open architecture gap with live scalar chord | `psiCross[K*K*R]`, dense λ, and cached/pagewise GPE scores are deleted as unproven behavior complexity. Live code computes model-backed average-reward option scores, refreshes a scalar chord when RR continuation breaks, and emits a chord-blended policy with selected-option fallback. This has now produced real walking in some seeds, but it is still not the paper's full cumulant-space Option Keyboard: chord-descriptor models and coherent feature/subtask/option/model feedback remain future work. |
 | One-step model | Removed from keeper | `oneReward` and `oneTransition` are both removed from default layout because they were shadow/descriptor paths without earned control value. |
-| Search control | Partial live | Planning now covers the full option bank every step; the stale option-page scheduler is deleted after a bit-identical 1M promotion with +3.2% Oak SPS. Full state-search and uncertainty-aware backup selection remain open. |
+| Search control | Partial live | Planning covers the full option bank every step, and model-backed option scoring is behavior-relevant. The stale option-page scheduler is deleted after a bit-identical 1M promotion with +3.2% Oak SPS. Full state-search and uncertainty-aware backup selection remain open, and the 2026-04-26 walking loop showed that simply subtracting priority/error differently or deleting the model-backed score kills the high gait. |
 | Continuing testbeds | Deferred by scope | A temporary toy-env attempt was removed because it introduced hand-coded dynamics constants. Add real research-backed continuing wrappers only as separate env-layer work, never inside OaK. |
 | Step 12 / IA | Deferred | Out of scope until Step 11 earns promotion. |
 
@@ -315,10 +341,10 @@ Collapse-repair baseline truth table:
 | Review claim / subsystem | Current keeper truth | Next action |
 |---|---|---|
 | Actor update scope | The keeper updates every option policy every step in `oak_learn_heads`; it is not a selected-only actor. The current cleanup removed the invented actor MetaOptimize/exponential scale path and uses the structural capacity actor step. | Do not revive selected-only actor, ESS throttles, direct main-TD primitive actor shortcuts, or unearned actor-scale amplifiers. |
-| Target-option actor gradients | Raw target-option scores and Fisher/natural target scores failed in isolation (`review-response-50k-natural-133322`, `review-response-50k-fisher-133540`). Exact wrapper target gradients are still supplied by the action transducer; actor scale remains structural rather than a learned gain. | Keep ratio/score-gradient health visible; next actor work must be derived, not damped. |
+| Target-option actor gradients | Raw target-option scores and Fisher/natural target scores failed in isolation (`review-response-50k-natural-133322`, `review-response-50k-fisher-133540`). Exact wrapper target gradients are still supplied by the native bridge; actor scale remains structural rather than a learned gain. | Keep ratio/support/action health visible; next actor work must be derived, not damped. |
 | Global `rho` | Global average reward remains the live control/model-planning rate: `Q = rHat - rho*lHat + V(nHat)`. | Keep live; compare against shadow per-option control rates before any behavior change. |
 | `rhoOpt` status | Removed from the live keeper with `optValue`; global `rho` drives main value, RR `psi`, and model backup. | Reintroduce only with a separately justified option-value branch that passes 300k/1M support gates. |
-| λ formula | Removed from keeper. Live behavior no longer computes signed keyboard λ; selection is RR-direct: continue the current option while RR continuation is positive, otherwise choose the finite option with max direct `psiNext`. | Reintroduce keyboard/chord machinery only with new evidence that it earns reward or stability after the simpler direct rule. |
+| λ formula | Full signed/GPE λ is removed from keeper. Live behavior computes a scalar model-backed chord from average-reward option scores and preserves the current option while RR continuation is positive. | Do not revive `psiCross`/GPE-GPI or alternate chord formulas as isolated swaps. Any keyboard repair must preserve the current high-return gait and add explicit cumulant-space/chord-descriptor semantics. |
 | GVF coverage | The predictive-only `G=R+K+2` GVF bank is removed. Main value and K RR `psi` GVFs remain the live prediction heads. | Do not re-add diagnostic prediction banks until they have a direct Plan role and pass the same benchmark gate as behavior code. |
 | Replacement behavior | Live age/capacity-gated replacement remains, with `badFeatureAge` retained as anti-churn state after immediate replacement caused 100k support collapse. Shadow replacement metrics, pseudo-basis usage caches, `optionPlanningUse`, and stored primitive-channel tables are removed. | Next replacement work must simplify or replace the actual generate-and-test rule, not add more audit-only counters. |
 | Search control behavior | `oak_plan` updates the full option bank every step. The page reducer, stale-page age state, and `highModelOption` scheduler are deleted; model priority remains a health/search diagnostic. | Next search-control work must add a real state/update queue or model uncertainty, not revive page fairness scaffolding. |
@@ -480,6 +506,54 @@ Rejected post-repair variants:
   per-option ψ reward-rate centering, or aggressive lexicographic replacement
   as isolated swaps; they need a fuller actor/GVF/search-control derivation.
 
+## Walking Checkpoint Evidence
+
+The April 26 walking checkpoint changes the interpretation of all future gates.
+Before this point, most evidence was about avoiding collapse while staying less
+negative than random. After `.oak-benchmarks/fcstomp-encode-sync-clean-300k`,
+the system has demonstrated bridge-measured locomotion with large positive
+return in at least one seed. Promotion now asks whether the architecture can
+make that mode reliable, not whether it can beat the random control-cost
+catastrophe.
+
+- `bc8cade80` (`Checkpoint bridge-verified FC-STOMP walking`) established the
+  first walking checkpoint. `36d10e8ea` stabilized option duration updates.
+  `b2d25f9fa` synchronized encode-time option selection by publishing the
+  current reward-rate into threadgroup memory and adding the missing
+  threadgroup barrier before lane-0 selection.
+- `.oak-benchmarks/fcstomp-threadgroup-rho-50k`: 5 seeds x
+  `{oak,zero,random}`. Oak mean reward `+2194.392`, max `+12351.967`,
+  positive reward `2/5`, positive velocity `3/5`, mean velocity `+0.054737`.
+  Seed 3 already shows a real gait by 50k: reward `+12351.967`, run reward
+  `+13293.422`, mean velocity `+0.265868`.
+- `.oak-benchmarks/fcstomp-encode-sync-clean-300k`: 10 seeds x
+  `{oak,zero,random}`. Oak mean reward `+5365.610`, max `+109689.456`,
+  positive reward `2/10`, positive velocity `6/10`, mean velocity
+  `+0.037900`. Seed 3 reaches reward `+109689.456`, run reward
+  `+119046.372`, and mean velocity `+0.396821`; seed 8 is the main collapse
+  counterexample at `-37294.861`, run reward `-26004.084`, and mean velocity
+  `-0.086680`.
+- Bridge oracle witness: `.venv/bin/python tools/bridge_oracle_cem.py
+  --cem-iters 0 --eval-horizon 5000 --seed-count 5` returns mean reward
+  `+4428.300`, mean run reward `+4914.978`, mean control cost `-486.678`, and
+  mean velocity `+0.982996` through the same C bridge. The oracle is a witness
+  and scale target only; it is not agent knowledge and must not enter the
+  reward stream or action policy.
+- Rejected after walking because they killed the gait or failed the 300k gate:
+  pure average-reward Q selection (`fcstomp-pureq-50k`), score-based soft
+  interruption (`fcstomp-softinterrupt-50k`), negative-TD chord refresh
+  (`fcstomp-negtd-refresh-50k`), chord-weighted actor baseline
+  (`fcstomp-chordbaseline-50k`), equality-triggered flat-bad replacement
+  (`fcstomp-flatbad-300k`, exact checkpoint profile), decoded duration TD,
+  positive-only keyboard output, option-only G&T, reward-aligned actor, local
+  pre-update rho, and non-finite termination/key-zero patches.
+
+Current strategic read: the high-return gait depends on sustained commitment
+and model-backed chord pressure. The bad seeds are not merely "do nothing";
+some commit to low-motion or backward modes. The next FC-STOMP work should
+improve feedback/search/utility so more seeds find the same high-return
+commitment, while preserving the seed-3 walking mode as a hard gate.
+
 ## Historical L3-L7 Note
 
 The previous roadmap sections below are retained as historical audit text where
@@ -531,7 +605,7 @@ load-bearing gaps are earlier and larger.
 | Step 8 Prototype-AI I | A reward-useful one-step expectation/sample model with feature-ranking feedback, isolated until it proves value relevance. | L1 learned finite one-step predictions but harmed paired reward by 1.5M, so a Step-8 retry must be materially different from re-adding the same heads. |
 | Step 9 search control | A state/update queue with uncertainty-aware or meta-gradient search control under a fixed per-step planning budget. | Current priority is only chord-weighted model TD magnitude. All-model updates, scalar Bellman priority, trusted-only planning, and state-ring AVI each failed without richer search control. |
 | Step 10 subtask GVF planning | Planning should eventually improve subtask GVFs as well as the main value, but only with stable off-policy/GTD-style control. | Raw ψ model-planning briefly made reward-rate positive at 10k then collapsed by 50k; bounded ψ planning was stable but too weak. |
-| Step 11 option keyboard | A true cumulant-space keyboard: cross-cumulant option values / GPE-GPI or a chord-descriptor model, not only direct RR option selection. | The Option Keyboard paper combines intentions in cumulant space. The deleted keeper used scalar surrogates; L2-normalized, deterministic GPI-like, RR-activation, and RR-model keyboard variants all regressed. |
+| Step 11 option keyboard | A true cumulant-space keyboard: cross-cumulant option values / GPE-GPI or a chord-descriptor model, not only scalar model-backed option/chord selection. | The Option Keyboard paper combines intentions in cumulant space. The live scalar chord can walk in some seeds, but deleted GPE-GPI/surrogate variants regressed or destabilized. Future keyboard work must be explicit and benchmarked against the walking checkpoint. |
 
 Decision: do not spend more runs on single-line variants unless they implement
 one of these architecture chunks or falsify a specific diagnostic. The next
@@ -650,29 +724,30 @@ more interesting; the Plan order matters.
 | Priority | Item | Status now | Why it comes here | Next decision |
 |---:|---|---|---|---|
 | 0 | Measurement hygiene | Active rule | A stale Metal library can completely corrupt health metrics. | Rebuild Metal after every kernel edit; never interpret a run whose metallib predates `Sources/OakKernel.metal`. |
-| 1 | Step 2 feature resource audit | **Open architecture gap** | Feature discovery precedes stable traces, models, and option selection in the Plan. | Add diversity/decorrelation and utility-transfer diagnostics before adding more feature churn. |
-| 2 | Step 8 one-step model retry | **Rolled back, redesign required** | The model learned finite predictions but reduced K1 reward on `8/10` seeds and did not create a usable planning signal. | Retry only as an isolated value-relevance/search-control substrate, not as the old L1 heads coupled directly into utility and planning. |
-| 3 | Step 9 search control | **Partial** | Current priority is a scalar TD-magnitude gate; the Plan calls out state update ordering and model uncertainty. | Implement uncertainty/state-queue diagnostics before letting a redesigned model drive value. |
-| 4 | L3-L6 STOMP core | **Live, screening** | RR stopping, continuation, option reward/transition/duration, and registry are present. | Keep as the keeper substrate unless paired evidence says a large architecture repair needs a different integration. |
-| 5 | L7 feature/search diagnostics | **Reduced live** | Diagnostic-only state rank, keyboard gauges, and option differential TD were deleted; promotion health keeps only support/action/model gates. | Extend only toward the Step 2/8/9 diagnostics above. |
-| 6 | L8 eligibility traces retry | **Blocked** | Prior trace attempts failed from correlated Fourier features and unstable actor/model credit. | Retry only after feature diversity and a trace-stability diagnostic improve. |
-| 7 | Step 11 option keyboard descriptor / GPE-GPI | **Open architecture gap** | The unproven live keyboard keeper was deleted; the paper combines options in cumulant space. | Reintroduce only after the cross-cumulant value requirement is explicit and benchmark-gated against the direct RR selector. |
+| 1 | Walking-stability contract | **Active hard gate** | OaK now has a real high-return walking mode. The next risk is accidentally deleting it while chasing calmer diagnostics. | Any candidate must preserve the seed-3-scale high gait at 50k/300k and improve positive-velocity/positive-return seed coverage. "Less negative than random" is no longer enough. |
+| 2 | Step 2 feature resource audit | **Open architecture gap** | Feature discovery precedes stable traces, models, and option selection in the Plan. | Add diversity/decorrelation and utility-transfer diagnostics before adding more feature churn. |
+| 3 | Step 8 one-step model retry | **Rolled back, redesign required** | The model learned finite predictions but reduced K1 reward on `8/10` seeds and did not create a usable planning signal. | Retry only as an isolated value-relevance/search-control substrate, not as the old L1 heads coupled directly into utility and planning. |
+| 4 | Step 9 search control | **Partial** | Current priority is a scalar TD-magnitude gate; the Plan calls out state update ordering and model uncertainty. | Implement uncertainty/state-queue diagnostics before letting a redesigned model drive value. |
+| 5 | L3-L6 STOMP core | **Live, walking but unstable** | RR stopping, continuation, option reward/transition/duration, registry, and scalar chord behavior are present and have produced real walking. | Keep as the keeper substrate unless paired evidence says a large architecture repair improves 300k coverage without killing the high gait. |
+| 6 | L7 feature/search diagnostics | **Reduced live** | Diagnostic-only state rank, keyboard gauges, and option differential TD were deleted; promotion health keeps only support/action/model gates. | Extend only toward the Step 2/8/9 diagnostics above. |
+| 7 | L8 eligibility traces retry | **Blocked** | Prior trace attempts failed from correlated Fourier features and unstable actor/model credit. | Retry only after feature diversity and a trace-stability diagnostic improve. |
+| 8 | Step 11 option keyboard descriptor / GPE-GPI | **Open architecture gap** | The live scalar chord is useful but not the full cumulant-space Option Keyboard. | Reintroduce cross-cumulant/chord-descriptor machinery only with explicit value semantics and a benchmark gate against the current walking substrate. |
 
 ## Strict Status Against Plan Steps
 
 | Plan step | Status | Current implementation | Strict audit |
 |---|---|---|---|
 | 1. Representation I | **Partial/strong substrate** | Welford observation normalization, per-feature alpha via MetaOptimize, GraMa utility, continual updates. | The core Step-1 pieces are real. The base-agent text also mentions short-term credit-assignment memories; TD(lambda)/implicit-trace attempts diverged on current correlated Fourier features, so traces are an open gap, not a completed item. |
-| 2. Representation II | **Partial** | Deep Fourier features plus G&T reseeding; K2 composes a replacement row from two utility-sampled parent rows. | Step 2 is not just random projection replacement. It asks for smart construction, testing, ranking, and replacement of new features made from existing features in a multi-task setting. K2 installs a narrow composition surrogate but is empirically neutral. |
+| 2. Representation II | **Partial** | Direct experience anchors plus replaceable constructed feature slots; G&T composes a replacement row from two utility/decorrelation-selected parents using signed products, signed sums, or residual forms. | Step 2 is not just local feature churn. It asks for smart construction, testing, ranking, and replacement of new features made from existing features in a multi-task setting. The current substrate is live but not yet a stable walking-coverage solution. |
 | 3. Prediction I | **Partial** | Main value plus K psi GVFs; multi-timescale obs traces in perception. | Continual GVF learning exists. Off-policy, stable multi-step prediction with learned feature finding and richer recurrent perception is incomplete. |
-| 4. Control I | **Strong, with one caveat** | Continual actor-critic via wrapper score gradients and one selected option policy; Box actions keep a `2A` wrapper interface but only the mean half is live. | The actor-critic loop is useful and stable. The caveat is that action parameterization is wrapper-side research machinery, not a Plan step; learned log-scale is now reserved/inert, Box mean credit is residual-style, and full `D_policy=A` mean-only deletion failed the 1M gate. |
+| 4. Control I | **Strong, unstable across seeds** | Continual actor-critic via wrapper score gradients, model-backed option/chord selection, and chord-blended behavior policy; Box actions keep a `2A` wrapper interface but only the mean half is live. | The actor-critic loop is now behaviorally real: it can produce high-return walking. The caveat is stability, not existence. Action parameterization remains wrapper-side research machinery; learned log-scale is reserved/inert, Box mean credit is residual-style, and full `D_policy=A` mean-only deletion failed the 1M gate. |
 | 5. Prediction II | **Partial/active** | Average reward centering for main TD and psi TD; L3-L7 adds average-reward option duration. | Differential value learning is present. Duration is live but still under reward-rate screening. |
 | 6. Control II | **Strong** | Continuing wrappers; `done` is not plumbed into the engine; no episodic agent semantics. | This matches the Plan discipline. Benchmark resets are wrapper events only. |
-| 7. Planning I | **Partial/active** | `oak_plan` computes differential average-reward backups over K stopping-aware option models for the current state. | OaK plans every step, but still lacks a state/update queue and model uncertainty. |
+| 7. Planning I | **Partial/active** | `oak_plan` computes differential average-reward backups over K stopping-aware option models for the current state; the resulting model-backed score is behavior-relevant through chord/option selection. | OaK plans every step and this pathway has now produced walking, but still lacks a state/update queue and model uncertainty. |
 | 8. Prototype-AI I | **Not implemented as a reward-useful model** | L1's action-conditioned one-step model was implemented and then rolled back after the 1.5M screen. Live code has the base option-model scaffolds, not an explicit `[state, action] -> next state/reward` Step-8 model. | Step 8 remains a real gap. The failed L1 formulation learned finite predictions but pushed reward farther from K1, so the next attempt must not simply re-add the same heads/utility coupling. |
 | 9. Planning II | **Partial** | Priority signal from option-model TD magnitude; dense transition updates now cover the full option bank every step. | Prioritized-sweeping lineage is present only as a scalar priority diagnostic. The Plan also calls for uncertainty-aware control of planning order; OaK still has no model-uncertainty estimate and no state/update queue. |
-| 10. STOMP | **Active scaffold, incomplete** | Feature-indexed RR psi heads, option policies, stopping-aware reward/transition/duration heads, full-bank option planning, RR-derived continuation. | These are STOMP pieces, not a complete FC-STOMP cycle. A true keyboard/chord objective and coherent feedback over features, subtasks, options, and option models remain open. |
-| 11. Oak | **Active, incomplete** | Utility estimates, age-gated option/feature replacement, feature registry metadata, and direct RR option selection. | Step 11 feedback is no longer unconditional churn, but richer utility assessment and full chord-descriptor Option Keyboard/FC-STOMP modeling remain open. |
+| 10. STOMP | **Active, walking, incomplete** | Feature-indexed RR psi heads, option policies, stopping-aware reward/transition/duration heads, full-bank option planning, RR-derived continuation, and scalar chord blending. | These pieces are sufficient to produce real walking in some seeds, so the substrate is no longer merely speculative. It is still not a complete FC-STOMP cycle: a true keyboard/chord objective and coherent feedback over features, subtasks, options, and option models remain open. |
+| 11. Oak | **Active, incomplete** | Utility estimates, age-gated option/feature replacement, feature registry metadata, model-backed scalar chord selection, and bridge-verified walking in some seeds. | Step 11 feedback is no longer unconditional churn, but richer utility assessment and full chord-descriptor Option Keyboard/FC-STOMP modeling remain open. Stable 10/10 walking is the live promotion target. |
 | 12. IA | Out of scope | None. | Keep out of this roadmap until Step 11 is credible. |
 
 ## Overclaims Removed
@@ -1089,15 +1164,19 @@ but speed is infrastructure. It cannot promote a non-orthodox mechanism.
 
 Baseline for the next algorithmic change:
 
-- **Current baseline**: `.oak-benchmarks/baseline-1m`.
-- HalfCheetah 1M, 10 seeds x `{oak,random}`: Oak beats random `10/10`,
-  Oak NF zero `10/10`, mean Oak reward `-5872.286`, median `-5873.518`,
-  reward SD `31.911`, and mean paired lift `256756.772`.
-- K1 and rebuild-era runs remain historical comparison artifacts, not
-  baselines.
+- **Current behavioral baseline**: commit `b2d25f9fa`, artifact
+  `.oak-benchmarks/fcstomp-encode-sync-clean-300k`.
+- HalfCheetah 300k, 10 seeds x `{oak,zero,random}`: Oak mean reward
+  `+5365.610`, max `+109689.456`, positive velocity `6/10`, positive return
+  `2/10`, and total Oak non-finite counts `34`. This is the walking checkpoint,
+  not a stable promotion.
+- **Historical negative floor**: `.oak-benchmarks/baseline-1m` remains useful
+  for host/performance comparison only. It is no longer the behavioral target.
+- K1 and rebuild-era runs remain historical comparison artifacts, not baselines.
 
-The roadmap objective is now sharper: repair the missing Plan-order pieces
-that prevent continuously improving learning, especially exact subtask/option
-machinery and any future Step-8 model design that can prove reward relevance
-before it is allowed into planning. More feature churn without those repairs is
-unlikely to break the current post-F1 slope.
+The roadmap objective is now sharper: stabilize and generalize the bridge-seen
+walking mode while repairing the missing Plan-order pieces, especially
+feature/resource feedback, search control, exact subtask/option machinery, and
+any future Step-8 model design that can prove reward relevance before it is
+allowed into planning. More feature churn or calmer actor scaling without those
+repairs is unlikely to turn a 2/10 positive-return gait into 10/10 walking.
