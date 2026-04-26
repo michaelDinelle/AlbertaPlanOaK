@@ -547,6 +547,13 @@ catastrophe.
   (`fcstomp-flatbad-300k`, exact checkpoint profile), decoded duration TD,
   positive-only keyboard output, option-only G&T, reward-aligned actor, local
   pre-update rho, and non-finite termination/key-zero patches.
+- Rejected after this audit: model-score actor fallback only when RR actor
+  advantages are exactly flat (`fcstomp-model-fallback-300k`). It preserved the
+  seed-3 gait and slightly raised mean reward (`+5406.925` versus
+  `+5365.610`) while reducing NF total (`20` versus `34`), but it did not
+  improve coverage (`6/10` positive velocity, `2/10` positive return) and made
+  support/model diagnostics worse (`actorSupportEntropy` mean `0.064`,
+  `modelPriorityMax` mean `7.37e15`). Not a stability repair.
 
 Current strategic read: the high-return gait depends on sustained commitment
 and model-backed chord pressure. The bad seeds are not merely "do nothing";
