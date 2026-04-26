@@ -188,7 +188,7 @@ final class Engine {
     actionGroups = max(1, (rank * d + tg - 1) / tg)
     params = Shared(dev, paramTotal, 0)
     state = Shared(dev, a.total, 0)
-    uints = Shared(dev, 10 + 8 * rank, 0)
+    uints = Shared(dev, 9 + 8 * rank, 0)
     scalarsB = dev.makeBuffer(
       length: MemoryLayout<KernelScalars>.stride, options: [.storageModeShared])!
     statsB = dev.makeBuffer(
