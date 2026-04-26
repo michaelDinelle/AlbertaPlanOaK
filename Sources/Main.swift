@@ -4,7 +4,7 @@ import Metal
 
 struct OakError: Error, CustomStringConvertible { let description: String }
 func err(_ s: String) -> OakError { OakError(description: s) }
-enum Policy: String { case oak, random }
+enum Policy: String { case oak, zero, random }
 let defaultEnv = "HalfCheetah-v4"
 let lockName = ".oak-benchmark.lock"
 typealias Raw = UnsafeMutableRawPointer
@@ -17,6 +17,7 @@ typealias Raw = UnsafeMutableRawPointer
 @_silgen_name("oak_env_prepare") func oakPrepare(_: Raw?, _: Int32) -> Int32
 @_silgen_name("oak_env_reset") func oakReset(_: Raw?) -> Int32
 @_silgen_name("oak_env_step_random") func oakStepRandom(_: Raw?) -> Int32
+@_silgen_name("oak_env_step_zero") func oakStepZero(_: Raw?) -> Int32
 @_silgen_name("oak_env_step_oak") func oakStepOak(
   _: Raw?, _: UnsafePointer<Float>?, _: UnsafePointer<Float>?, _: Int32
 ) -> Int32
@@ -54,14 +55,18 @@ func mtlSize(_ width: Int) -> MTLSize {
 }
 struct EnvView {
   var obsDim, actDim, dPolicy, done: Int32
-  var reward, actionDeltaMean: Float
+  var reward: Float
+  var actionDeltaMean: Double
+  var infoCount: Int32
+  var infoNames: UnsafePointer<UnsafePointer<CChar>?>?
+  var infoValues: UnsafePointer<Double>?
   var obs, action, credit, imp: UnsafePointer<Float>?
 }
 final class Env {
   let raw: Raw, envId: String
   var v = EnvView(
-    obsDim: 0, actDim: 0, dPolicy: 0, done: 0, reward: 0, actionDeltaMean: 0, obs: nil, action: nil,
-    credit: nil, imp: nil)
+    obsDim: 0, actDim: 0, dPolicy: 0, done: 0, reward: 0, actionDeltaMean: 0,
+    infoCount: 0, infoNames: nil, infoValues: nil, obs: nil, action: nil, credit: nil, imp: nil)
   init(_ id: String, seed: Int) throws {
     let assets = try require(".build/oak-native/env-assets", "native env assets").path
     raw = try id.withCString { eid in
@@ -82,6 +87,12 @@ final class Env {
   var reward: Float { v.reward }
   var done: Int { Int(v.done) }
   var actionDeltaMean: Double { Double(v.actionDeltaMean) }
+  var envInfo: [(String, Double)] {
+    guard let names = v.infoNames, let values = v.infoValues else { return [] }
+    return (0..<Int(max(v.infoCount, 0))).compactMap { i in
+      names[i].map { (String(cString: $0), values[i]) }
+    }
+  }
   func ok(_ x: Int32) throws { if x != 1 { throw err(envError(raw)) } }
   func refresh() throws { try ok(oakView(raw, &v)) }
   func update(_ x: Int32) throws {
@@ -100,6 +111,9 @@ final class Env {
   func stepRandom() throws {
     try update(oakStepRandom(raw))
   }
+  func stepZero() throws {
+    try update(oakStepZero(raw))
+  }
 }
 
 struct Arena {
@@ -110,6 +124,7 @@ struct Arena {
   }
   static func input(_ o: Int, _ d: Int) -> Int { traces(o) * max(o, 1) + max(d, 0) + 2 }
   init(_ o: Int, _ r: Int, _ d: Int) {
+    let traceExtra = max(Self.traces(o) - 1, 0)
     obs = 0
     policy = 3 * o + 2 * r
     action = policy + d
@@ -117,7 +132,7 @@ struct Arena {
     options = credit + r * d
     imp = options + r * d
     reward = imp + r
-    utilOpt = reward + 2 + 2 * r
+    utilOpt = reward + 3 + 2 * r
     bonus = utilOpt + r
     alpha = bonus + 3 * r
     beta = alpha + r
@@ -125,7 +140,7 @@ struct Arena {
     betaPsi = alpha + 5 * r
     alphaModel = alpha + 8 * r
     betaModel = alpha + 9 * r
-    total = alpha + r * r + 20 * r + max(Self.traces(o) - 1, 0) * max(o, 1) + 1
+    total = alpha + r * r + 21 * r + traceExtra * max(o, 1) + 1
   }
 }
 final class Shared<T> {
@@ -185,8 +200,9 @@ final class Engine {
     scalars.initialize(to: KernelScalars())
     memset(stats, 0, MemoryLayout<KernelStats>.stride)
     let psi = rank
+    let optPolicy = psi + rank * rank
     let inv = 1 / sqrt(Float(rank))
-    let anchors = min(rank, Arena.input(env.obsDim, d))
+    let anchors = min(rank, max(env.obsDim, d, 1))
     let alpha = 1 / Float(max(env.obsDim, 1))
     for i in 0..<rank {
       params.p[psi + i * rank + i] = inv
@@ -197,6 +213,12 @@ final class Engine {
       state.p[a.utilOpt + i] = Float(rank)
       [a.alpha, a.alphaPsi, a.alphaModel].forEach { state.p[$0 + i] = alpha }
       [a.beta, a.betaPsi, a.betaModel].forEach { state.p[$0 + i] = log(alpha) }
+    }
+    let basis = 1 / Float(max(d, 1))
+    for k in 0..<rank {
+      let slot = k % max(d, 1)
+      let sign: Float = ((k / max(d, 1)) % 2 == 0) ? 1 : -1
+      params.p[optPolicy + (k * d + slot) * rank] = sign * basis
     }
     configB.contents().bindMemory(to: KernelConfig.self, capacity: 1).initialize(
       to: KernelConfig(
@@ -252,6 +274,7 @@ final class Run {
     featR = 0
   var seconds = 0.0, rewardSum = 0.0, rho = 0.0, floor: Double,
     start = DispatchTime.now().uptimeNanoseconds
+  var envInfo: [String: InfoStat] = [:]
   var last: KernelStats?
   init(obsDim: Int) { floor = 1 / Double(max(obsDim, 1)) }
   func note(_ env: Env, _ stats: KernelStats?) throws {
@@ -264,6 +287,7 @@ final class Run {
     }
     rewardSum += r
     rho += max(1 / Double(steps), floor) * (r - rho)
+    for (name, value) in env.envInfo { envInfo[name, default: InfoStat()].note(value) }
     if let s = stats {
       last = s
       nfE += Int(s.encodeNonFiniteCount)
@@ -276,21 +300,49 @@ final class Run {
   }
   func health(_ env: Env) -> [String: Any] {
     var h: [String: Any] = [
-      "rewardRate": rho, "actionDeltaL2Mean": env.actionDeltaMean,
+      "rewardRate": rho.isFinite ? rho : NSNull(), "actionDeltaL2Mean": env.actionDeltaMean.isFinite ? env.actionDeltaMean : NSNull(),
       "continuingRestartCount": Double(done),
     ]
     if let s = last {
       h["oakOptionReinitCountFinal"] = optR
       h["oakFeatureReinitCountFinal"] = featR
       h["nonFiniteByPhase"] = ["encode": nfE, "learn": nfL, "plan": nfP, "tdPsi": nfT]
-      h["terminationRate"] = Double(s.terminationRate)
-      h["optionDurationMean"] = Double(s.optionDurationMean)
-      h["importanceEss"] = Double(s.importanceEss)
-      h["actorUpdateNormMean"] = Double(s.actorUpdateNormMean)
-      h["actorSupportEntropy"] = Double(s.actorSupportEntropy)
-      h["modelPriorityMax"] = Double(s.modelPriorityMax)
+      h["terminationRate"] = s.terminationRate.isFinite ? Double(s.terminationRate) : NSNull()
+      h["optionDurationMean"] = s.optionDurationMean.isFinite ? Double(s.optionDurationMean) : NSNull()
+      h["importanceEss"] = s.importanceEss.isFinite ? Double(s.importanceEss) : NSNull()
+      h["actorUpdateNormMean"] = s.actorUpdateNormMean.isFinite ? Double(s.actorUpdateNormMean) : NSNull()
+      h["actorSupportEntropy"] = s.actorSupportEntropy.isFinite ? Double(s.actorSupportEntropy) : NSNull()
+      h["modelPriorityMax"] = s.modelPriorityMax.isFinite ? Double(s.modelPriorityMax) : NSNull()
+    }
+    if !envInfo.isEmpty {
+      h["envInfo"] = Dictionary(uniqueKeysWithValues: envInfo.sorted { $0.key < $1.key }.map {
+        ($0.key, $0.value.json)
+      })
     }
     return h
+  }
+}
+struct InfoStat {
+  var count = 0, finiteCount = 0, nonFiniteCount = 0
+  var sum = 0.0
+  var first: Double?
+  var last: Double?
+  mutating func note(_ x: Double) {
+    count += 1
+    guard x.isFinite else { nonFiniteCount += 1; return }
+    if first == nil { first = x }
+    last = x
+    sum += x
+    finiteCount += 1
+  }
+  var json: [String: Any] {
+    [
+      "count": count, "finiteCount": finiteCount, "nonFiniteCount": nonFiniteCount,
+      "sum": finiteCount > 0 ? sum : NSNull() as Any,
+      "mean": finiteCount > 0 ? sum / Double(finiteCount) : NSNull() as Any,
+      "last": last.map { $0 as Any } ?? NSNull(),
+      "delta": first.flatMap { a in last.map { ($0 - a) as Any } } ?? NSNull(),
+    ]
   }
 }
 func stem(_ env: String, _ p: Policy, _ seed: Int) -> String {
@@ -300,7 +352,7 @@ func writeMetric(
   _ env: Env, _ p: Policy, _ seed: Int, _ stop: Int, _ r: Run, _ seq: Int?, _ root: URL
 ) throws {
   var m: [String: Any] = [
-    "schemaVersion": 5, "command": "benchmark", "envId": env.envId, "policy": p.rawValue,
+    "schemaVersion": 6, "command": "benchmark", "envId": env.envId, "policy": p.rawValue,
     "seed": seed, "numEnvs": 1, "stopAfterMeasuredSteps": stop, "observationDim": env.obsDim,
     "actionDim": env.actDim, "measuredStepCount": r.steps, "measuredSeconds": r.seconds,
     "rewardSum": r.rewardSum, "doneCount": r.done,
@@ -363,7 +415,9 @@ func metricsRoot() -> URL {
       let end = next == steps
       let s = try engine?.step(env, capture: heartbeat || end)
       if let e = engine {
-        try env.stepOak(e.policy, e.options, e.rank)
+          try env.stepOak(e.policy, e.options, e.rank)
+      } else if p == .zero {
+        try env.stepZero()
       } else {
         try env.stepRandom()
       }
@@ -418,7 +472,7 @@ func metricsRoot() -> URL {
     let seed0 = env["OAK_BENCH_SEED_START"].flatMap(Int.init) ?? 0
     let seeds = env["OAK_BENCH_SEED_COUNT"].flatMap(Int.init) ?? 10
     let steps = max(env["OAK_BENCH_STEPS"].flatMap(Int.init) ?? 500_000, 1)
-    let policies = try (env["OAK_BENCH_POLICIES"] ?? "oak,random").split(separator: ",").map {
+    let policies = try (env["OAK_BENCH_POLICIES"] ?? "oak,zero,random").split(separator: ",").map {
       try pol(String($0))
     }
     var dir = metricsRoot()

@@ -113,15 +113,16 @@ Adding a new env or action-space shape requires adding to `ActionSpec` in Swift;
 
 ## Run metrics JSON
 
-Each benchmark worker writes one pretty-printed JSON file with stable alphabetical key order (`schemaVersion: 5`).
+Each benchmark worker writes one pretty-printed JSON file with stable alphabetical key order (`schemaVersion: 6`).
 
 **Top-level keys:** `command`, `envId`, `policy`, `seed`, `numEnvs` (always 1 — single-stream), `stopAfterMeasuredSteps`, `observationDim`, `actionDim`, `actionDiscreteCount` (when discrete), `measuredStepCount`, `measuredSeconds`, `stepsPerSecond`, `rewardSum`, `doneCount`, `stopReason`, `heartbeatSequence`, and `health`.
 
-**`health` block.** Symmetric across policies. Host-computable fields are populated for ANY policy (oak or random):
+**`health` block.** Symmetric across policies. Host-computable fields are populated for ANY policy (`oak`, `zero`, or `random`):
 
 - `rewardRate` — host-tracked ρ̄ via incremental EMA (Reward Centering).
 - `actionDeltaL2Mean` — mean L2 of consecutive `policyMean` deltas.
 - `continuingRestartCount` — mirror of wrapper `doneCount`, named to make clear that terminal events are random restarts outside the agent.
+- `envInfo` — generic wrapper audit telemetry keyed by raw env-provided `info:*` signal names, each with `count`, `finiteCount`, `nonFiniteCount`, `sum`, `mean`, `last`, and `delta`. These diagnostics are never agent inputs and must not be promoted into env-semantic benchmark contract fields such as "forward reward".
 
 Kernel-side fields are populated only for `oak`:
 
