@@ -56,6 +56,8 @@ OaK is no longer only a negative-return random-beating control. The bridge has n
 
 Operational consequence: every stabilization change must preserve the high-return walking mode while improving seed coverage. Changes that merely calm actions, reduce commitment, refresh chords more often, or delete model-backed selection have repeatedly killed the strong seed and are not progress.
 
+Post-walking audit consequence: the current walking checkpoint appears to rely on an accidental delayed-plasticity/layout coupling in the Swift arena. Directly aligning the host arena with the kernel is not a keeper yet: it is more correct mechanically, but it kills the strong gait unless paired with a better FC-STOMP feedback/search-control mechanism. Q-per-duration aligned selection proved the system can still snowball a strong gait, but it can also snowball backward; do not promote it, selected-option execution/model credit, chord-basis model credit, signed utility, decoded duration TD, or reward-TD actor/score patches without fresh paired evidence.
+
 ### What the Plan eschews
 
 - Nothing about the human world (vision, space, objects, language, geometry, other agents).
