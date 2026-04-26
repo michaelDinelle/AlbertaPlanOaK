@@ -234,12 +234,6 @@ final class Engine {
     memcpy(state.p + a.action, env.v.action!, d * MemoryLayout<Float>.stride)
     memcpy(state.p + a.credit, env.v.credit!, rank * d * MemoryLayout<Float>.stride)
     memcpy(state.p + a.imp, env.v.imp!, rank * MemoryLayout<Float>.stride)
-    let c = uints.p
-    c[0] = 0
-    c[1] = 0
-    c[2] = 0
-    c[5] = 0
-    c[6] = 0
     guard let cb = q.makeCommandBufferWithUnretainedReferences(),
       let e = cb.makeComputeCommandEncoder()
     else { throw err("Failed to encode Metal command.") }
