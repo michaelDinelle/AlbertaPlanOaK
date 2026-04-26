@@ -362,6 +362,20 @@ wakes seed 1 into a control-cost sink (`reward_ctrl=-14506.989`). Invalid-RR
 main-TD fallback
 `.oak-benchmarks/rr-invalid-maintd-target50k-20260426` is behavior-identical and
 does not couple into emitted actor credit.
+Heavy-losing selected fallback
+`.oak-benchmarks/heavy-losing-fallback-target50k-20260426` preserves seed 3 but
+collapses seed 1 to `-7244.571` and seed 8 to `-7579.476`; direct
+selected-option execution remains too blunt. Query-valid and invalid-duration
+keyboard probes
+(`.oak-benchmarks/queryvalid-cont-target50k-20260426`,
+`.oak-benchmarks/invalid-quiet-refresh-fixed-target50k-20260426`,
+`.oak-benchmarks/invalid-duration-probe-target50k-20260426`) preserve seed 3 and
+seed 8 but wake seed 1 into a huge control-cost sink. Heavy-long reward-TD actor
+arbitration `.oak-benchmarks/heavy-long-tdactor-only-target50k-20260426` is the
+safest version of that family: seed 3 and seed 8 are bit-identical and seed 1
+stays NF-clean, but seed 1 regresses to `-467.506` with negative velocity. This
+narrows the next target: the high-mass/long-duration negative-rate discriminator
+is useful, but it still lacks a direction/effort arbiter.
 
 Host health note: long runs exposed resident-memory drift in the benchmark
 worker. `Sources/Main.swift` now wraps each measured worker step in an
