@@ -80,6 +80,7 @@ Mature-selected-option search-failure actor pressure is also rejected. At 300k i
 The first slow-arbiter rescue actor was rejected (`slowarb-tdactor-target50k-20260426`): the tiny slow reward trace still stole too much from seed 3 and missed seed 1. Arbitration likely needs a richer state than a scalar reward trace.
 Origin-lock rescue actor was rejected (`originlock-tdactor-target50k-20260426`): the intervention itself pushed seed 3 into the origin-locked quiet path. Origin-lock is a diagnostic symptom, not a safe trigger for actor rescue.
 Grounded dead-credit keyboard refresh is the current keeper substrate improvement. It refreshes the keyboard under all-continue/zero-actor-credit only when option durations are still grounded by lived stream length. It improves seed 0 at 300k, reduces NF, and preserves the seed-3 rocket bit-identically; it does not solve seed 8 or 10/10 stability.
+Search-use closure arbitration was tested and rejected in signed-utility and behavior-only forms (`closure-arbiter-target50k-20260426`, `closure-arbiter-noutil-target50k-20260426`). Both improved seed 8 but stole the seed-3 snowball by 50k, proving that scalar closure/use traces are still too blunt. Future arbiters must preserve the incumbent keyboard identity through the early rocket window while using richer active-backward and quiet-lock discriminators.
 
 ### What the Plan eschews
 
@@ -170,12 +171,25 @@ Kernel-side fields are populated only for `oak`:
 `OAK_BENCH_HEARTBEAT_STEPS=N` lowers or raises the host-only pulse stride for diagnostics; this does not change agent computation.
 Use `python3 tools/bench_watch.py <run-root>` to continuously summarize heartbeat/final JSON into per-seed reward, velocity, control, non-finite, model, actor, and replacement columns.
 `OAK_BENCH_SEEDS=0,1,3,8` overrides the contiguous seed range for targeted paired screens. Use `python3 tools/bench_compare.py <keeper-root> <candidate-root> --heartbeats` to locate first divergence before spending a full 10-seed gate.
+Use `python3 tools/bench_gate.py <keeper-root> <candidate-root>` as the default targeted gate. Add `--at-step 10000` or `--at-step 20000` when comparing a short candidate run against heartbeat records in a longer keeper root. It encodes the current empirical law: preserve the rocket seed, do not regress the backward attractor seed, and do not hide new non-finites behind a better mean.
+
+## Streamlined research workflow
+
+The working goal is stable 10/10 HalfCheetah walking without bloating the policy or violating FC-STOMP. The loop is architecture-first, evidence-fast:
+
+1. State the FC-STOMP organ being changed before editing: feedback/search control, option keyboard/chord descriptor, option model, utility/remove-replace, or actor emission. A candidate that cannot name the organ is patch-and-pray.
+2. Keep each behavior patch paired with a keeper-root comparison. Default target screen: `OAK_BENCH_POLICIES=oak`, `OAK_BENCH_SEEDS=0,1,3,8`, 10k with frequent heartbeats, then 50k if not obviously dead. Seed 3 is the rocket-preservation sentinel; seed 8 is the active-backward sentinel; seeds 0/1 are quiet-lock sentinels.
+3. Promote only after the target screen passes `tools/bench_gate.py`, then run Oak-only 300k x 10 seeds. Run `{oak,zero,random}` only for keeper/promotion evidence, bridge audits, and claims about beating baselines.
+4. Reject early if seed 3 loses the high-return path by 50k, seed 8 becomes more backward, or non-finite counts increase, unless the candidate produces broad 10/10 evidence in the same run. Do not average away per-seed collapse.
+5. Name run roots by hypothesis and scale, for example `.oak-benchmarks/closure-arbiter-target50k-YYYYMMDD`, and inspect live runs with `tools/bench_watch.py` rather than waiting for final JSON.
+6. Use subagents when the work can truly run in parallel: a Metrics Archaeologist mines benchmark roots, a Plan/Invariant Reviewer checks Alberta/FC-STOMP fit, a Mechanism Designer proposes closed-loop organs, a Benchmark Steward watches gates, and a Metal Auditor handles speed/FP-order risk. The main thread integrates; subagents do not define project doctrine.
+7. Archive rejected mechanisms in `docs/roadmap.md`/`AGENTS.md` when they teach a reusable lesson. Keep the live code lean; diagnostics earn their place only when they shorten the next decision.
 
 ## CLI
 
 | Command | Use |
 |---|---|
-| `OaK benchmark` | Concurrent single-env multi-seed sweep. Each item runs in its own worker process so native env/global state cannot leak across independent streams. `OAK_BENCH_ENV` selects the env (default `HalfCheetah-v4`); `OAK_BENCH_STEPS`, `OAK_BENCH_SEED_COUNT`, and `OAK_BENCH_POLICIES` define the workload. Concurrency is structural max: all logical cores, with deterministic refill from the canonical work list. One benchmark launcher owns the workspace at a time; nonempty requested roots get a fresh suffixed output dir. |
+| `OaK benchmark` | Concurrent single-env multi-seed sweep. Each item runs in its own worker process so native env/global state cannot leak across independent streams. `OAK_BENCH_ENV` selects the env (default `HalfCheetah-v4`); `OAK_BENCH_STEPS`, `OAK_BENCH_SEED_COUNT`/`OAK_BENCH_SEEDS`, and `OAK_BENCH_POLICIES` define the workload. `OAK_BENCH_CONCURRENCY` caps worker count; otherwise concurrency is all logical cores, with deterministic refill from the canonical work list. One benchmark launcher owns the workspace at a time; nonempty requested roots get a fresh suffixed output dir. |
 
 There is no deep-diagnostics shadow path in the live engine. Add audit heads only when they earn a Plan role and pass the same speed/learning gates as behavior code.
 

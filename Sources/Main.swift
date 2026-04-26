@@ -518,7 +518,8 @@ func metricsRoot() -> URL {
     try fm.createDirectory(at: dir, withIntermediateDirectories: true)
     let work = seedValues.flatMap { s in policies.map { (s, $0) } }
     let total = work.count
-    let conc = max(ProcessInfo.processInfo.processorCount, 1)
+    let conc = max(
+      env["OAK_BENCH_CONCURRENCY"].flatMap(Int.init) ?? ProcessInfo.processInfo.processorCount, 1)
     fputs(
       "OaK benchmark: \(total) \(envId) work items, single-stream B=1, N=\(conc) worker processes (steps=\(steps), seeds=\(seedValues.count), dir=\(dir.path))\n",
       stderr)
