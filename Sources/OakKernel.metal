@@ -622,6 +622,8 @@ kernel void oak_learn_heads(device float *params [[buffer(0)]],
         uint k = gid / ctx.R, i = gid % ctx.R;
         float rho = ctx.importance[k]; if (!isfinite(rho) || rho < 0.0f) rho = 0.0f;
         float denom = ctx.modelDenom[k];
+        float dEnergy = ctx.durationTd[k] * ctx.durationTd[k];
+        if (isfinite(dEnergy)) denom += ctx.invR * dEnergy;
         float scale = (isfinite(denom) && denom > 0.0f) ? (1.0f / denom) : 0.0f;
         float w = ctx.optDuration[k * ctx.R + i];
         ctx.optDuration[k * ctx.R + i] = safe_w(w, w + ctx.alphaModel[i] * rho * ctx.durationTd[k] * prev[i] * scale);
