@@ -328,7 +328,7 @@ inline void oak_keyboard_predict_body(Ctx ctx, uint tid,
     if (tid == 0u) {
         uint best = 0u;
         float bestScore = -FLT_MAX, bestQ = 0.0f;
-        float meanQ = 0.0f;
+        float meanQ = 0.0f, maxScorePrio = 0.0f;
         float termSum = 0.0f;
         for (uint k = 0u; k < ctx.K; ++k) {
             termSum += tgTerm[k];
@@ -340,6 +340,7 @@ inline void oak_keyboard_predict_body(Ctx ctx, uint tid,
             if (!isfinite(dur) || dur <= 0.0f) dur = 1.0f;
             float score = usableModel ? ((qAdv - modelErr) / dur) : -FLT_MAX;
             meanQ += (usableModel && isfinite(score)) ? score : 0.0f;
+            if (usableModel) maxScorePrio = max(maxScorePrio, modelErr);
             if (score > bestScore) { bestScore = score; bestQ = qAdv; best = k; }
         }
         uint selected = best;
@@ -362,7 +363,15 @@ inline void oak_keyboard_predict_body(Ctx ctx, uint tid,
         }
         bool durationGrounded = maxDur <= float(ctx.stepCount + 1u);
         bool deadCreditRefresh = termSum <= 0.0f && actorMass <= 0.0f && durationGrounded;
-        bool refreshKeyboard = !continuing || prevMag <= 0.0f || deadCreditRefresh;
+        float prevDur = ctx.durationHat[prevSel];
+        if (!isfinite(prevDur) || prevDur <= 0.0f) prevDur = 1.0f;
+        bool negativeRate = ctx.scalars->rho < -ctx.invR;
+        bool surprising = maxScorePrio > float(ctx.K * ctx.K);
+        bool broadTermination = termSum * termSum > float(ctx.K);
+        bool activeShortKeyboard = negativeRate && surprising && broadTermination
+            && prevMag < float(ctx.K) && prevDur < float(ctx.K);
+        bool refreshKeyboard = !continuing || prevMag <= 0.0f || deadCreditRefresh
+            || (continuing && activeShortKeyboard);
         float mag = 0.0f;
         for (uint k = 0u; k < ctx.K; ++k) {
             float qAdv = tgG[k];

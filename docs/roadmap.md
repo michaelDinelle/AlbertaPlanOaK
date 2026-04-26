@@ -1,21 +1,22 @@
 # OaK roadmap - Plan-orthodox continual improvement
 
-Last audited: 2026-04-26, after commit `f44a27bf3` (`Record 1M walking
-microscope`), the corrected 300k walking gate, the first 10M seed-3
-microscope, 1M coverage microscopes, the 10k-pulse live diagnosis pass, and
-the grounded dead-credit refresh screen.
+Last audited: 2026-04-26, after the corrected 300k walking gate, the first 10M
+seed-3 microscope, 1M coverage microscopes, the 10k-pulse live diagnosis pass,
+the grounded dead-credit refresh screen, and the short/broad/surprising
+active-backward refresh screen.
 
 The live branch has moved from "negative but beats random" into a new factual
 regime: OaK can produce real HalfCheetah locomotion through the bridge, but the
 walking mode is not yet stable across seeds. The current Oak-only 300k keeper
-evidence is `.oak-benchmarks/grounded-deadrefresh-oak-300k-20260426`: 10
-HalfCheetah seeds. Oak mean reward is `+5575.338`, max seed reward is
-`+109689.456`, mean `info:x_velocity` is `+0.038705`, positive velocity is
-`7/10`, positive return is `2/10`, and Oak NF total is `3`. The strongest seed
+evidence is `.oak-benchmarks/short-broad-surprise-oak-300k-20260426`: 10
+HalfCheetah seeds. Oak mean reward is `+9988.566`, max seed reward is
+`+109689.456`, mean `info:x_velocity` is `+0.050853`, positive velocity is
+`8/10`, positive return is `3/10`, and Oak NF total is `3`. The strongest seed
 is not marginal:
 seed 3 reaches reward `+109689.456`, run reward `+119046.372`, and mean
-velocity `+0.396821` by 300k. The same gate still fails stability: seed 8 is
-strongly backward (`-37294.861`, mean velocity `-0.086680`), seed 1 still has
+velocity `+0.396821` by 300k. Seed 8, the prior large backward attractor, is
+now forward (`+6837.419`, mean velocity `+0.035593`). The same gate still fails
+stability: multiple seeds remain negative-return weak walkers, seed 1 still has
 non-finite health counts, and the promotion standard remains unmet.
 
 The first deep microscope is
@@ -315,10 +316,10 @@ locks as origin-lock failures under the keeper, but using that symptom as an
 actor trigger pushed seed 3 into the same quiet origin-lock basin. Origin-lock
 is a diagnostic, not yet a behavior-safe control signal.
 
-The keeper from this loop is grounded dead-credit keyboard refresh. It refreshes
-the keyboard only when every RR option continues, actor credit is exactly dead,
-and all decoded option durations remain no larger than the agent's lived stream
-length. The ungrounded version
+The previous substrate keeper from this loop was grounded dead-credit keyboard
+refresh. It refreshes the keyboard only when every RR option continues, actor
+credit is exactly dead, and all decoded option durations remain no larger than
+the agent's lived stream length. The ungrounded version
 `.oak-benchmarks/deadcredit-refresh-target50k-20260426` preserved seed 3 and
 helped seed 0, but blew up seed 1's control cost. Adding the duration-grounding
 check avoided that failure. Full 300k Oak-only evidence:
@@ -328,6 +329,18 @@ NF total from `8` to `3`, while preserving seed 3 bit-identically at
 `+109689.456`. This is a keeper substrate improvement, not the solution: seed 8
 is still the large backward attractor and only `2/10` seeds have positive total
 return.
+
+The current behavioral keeper adds a structurally gated active-backward
+keyboard refresh on top of that substrate. Earlier active-short variants either
+stole seed 3's rocket or worsened quiet seeds, but
+`.oak-benchmarks/short-broad-surprise-target50k-20260426` preserved seeds 0/1/3
+bit-identically and improved seed 8's velocity sign at 50k. Full 300k Oak-only
+evidence in `.oak-benchmarks/short-broad-surprise-oak-300k-20260426` preserves
+9/10 seeds bit-identically versus grounded dead-credit, repairs seed 8 from
+`-37294.861` and mean velocity `-0.086680` to `+6837.419` and mean velocity
+`+0.035593`, and raises the 10-seed mean reward to `+9988.566`. It is still not
+stable promotion: positive return is only `3/10`, seed 1 still has three
+non-finites, and several forward seeds remain weak.
 
 Host health note: long runs exposed resident-memory drift in the benchmark
 worker. `Sources/Main.swift` now wraps each measured worker step in an
@@ -826,6 +839,11 @@ catastrophe.
   keeper improvement. Mean reward `+5575.338`, positive velocity `7/10`, NF
   total `3`; seed 3 is bit-identical to the first walking checkpoint and seed
   0 improves from `-2553.895` to `-456.618`.
+- `.oak-benchmarks/short-broad-surprise-oak-300k-20260426`: Oak-only 10-seed
+  current keeper. Mean reward `+9988.566`, positive velocity `8/10`, positive
+  return `3/10`, NF total `3`; seed 8 flips from the large backward attractor
+  to forward positive return while seeds 0/1/2/3/4/5/6/7/9 match grounded
+  dead-credit bit-for-bit.
 - Bridge oracle witness: `.venv/bin/python tools/bridge_oracle_cem.py
   --cem-iters 0 --eval-horizon 5000 --seed-count 5` returns mean reward
   `+4428.300`, mean run reward `+4914.978`, mean control cost `-486.678`, and
@@ -1516,10 +1534,11 @@ but speed is infrastructure. It cannot promote a non-orthodox mechanism.
 
 Baseline for the next algorithmic change:
 
-- **Current behavioral baseline**: grounded dead-credit refresh in the live
-  working tree, artifact `.oak-benchmarks/grounded-deadrefresh-oak-300k-20260426`.
-- HalfCheetah 300k, 10 Oak seeds: mean reward `+5575.338`, max
-  `+109689.456`, positive velocity `7/10`, positive return `2/10`, and Oak
+- **Current behavioral baseline**: short/broad/surprising active-backward
+  refresh in the live working tree, artifact
+  `.oak-benchmarks/short-broad-surprise-oak-300k-20260426`.
+- HalfCheetah 300k, 10 Oak seeds: mean reward `+9988.566`, max
+  `+109689.456`, positive velocity `8/10`, positive return `3/10`, and Oak
   non-finite total `3`. This is an improved walking checkpoint, not a stable
   promotion.
 - **Historical negative floor**: `.oak-benchmarks/baseline-1m` remains useful
