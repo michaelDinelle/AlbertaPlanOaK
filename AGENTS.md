@@ -39,12 +39,22 @@ Planning runs continually over the transition model. Eligibility traces are ment
 
 Strict current-status audit lives in `docs/roadmap.md`. The literature target is:
 
-- Subtasks defined by features (cumulant = reward, stopping value = feature attainment per Reward-Respecting Subtasks [arXiv:2202.03466](https://arxiv.org/abs/2202.03466) eq. 4). **Current rebuild OaK has the RR stopping-value branch live; benchmark promotion is still open.**
+- Subtasks defined by features (cumulant = reward, stopping value = feature attainment per Reward-Respecting Subtasks [arXiv:2202.03466](https://arxiv.org/abs/2202.03466) eq. 4). **Current rebuild OaK has the RR stopping-value branch live and has produced bridge-measured positive walking in some seeds; stable promotion is still open.**
 - Options = policies + termination. **Current rebuild continuation is derived from the RR stopping comparison, not H1 model-confidence hysteresis.**
 - Option models r̂(s,o), n̂(s,o), and for average-reward options duration l̂(s,o), used for planning. **Current L3-L7 keeps the orthodox raw option-reward-plus-duration form: `Q = rHat - rho*lHat + V(nHat)`. A coherent differential option-reward alternative was tested and rejected by the 10k paired gate, so do not revive it without materially new evidence.**
 - Planning over option models (RR-Subtasks eq. 19 / average-reward option backup).
-- **Option keyboard** = real-valued vector λ ∈ R^K, one component per subtask. Design A: chord blends K component options; model treats chord as opaque descriptor. Design B: chord defines a joint subtask. **Current OaK does not have a live Option Keyboard.** The unproven signed-λ/`psiCross` surrogate was deleted; behavior chooses one option by RR continuation plus direct `psiNext` to preserve exact one-step off-policy ratios. A fully operational FC-STOMP keyboard/chord-descriptor cycle is an open architecture gap, not a hidden live feature.
+- **Option keyboard** = real-valued vector λ ∈ R^K, one component per subtask. Design A: chord blends K component options; model treats chord as opaque descriptor. Design B: chord defines a joint subtask. **Current OaK has a live scalar chord vector used to blend option policies, but it is not a fully operational Option Keyboard.** The unproven `psiCross`/GPE-GPI surrogate was deleted; current behavior is selected by RR continuation plus model-backed average-reward option scores, and emitted action means are a chord blend with selected-option fallback. A fully operational FC-STOMP keyboard/chord-descriptor cycle is an open architecture gap, not a hidden live feature.
 - **Feedback / utility / remove-replace.** Continually assess utility of features, subtasks, options, and option models. Replace what isn't pulling weight (Plan Step 11 + RR-Subtasks §8 FCSTOMP). **Current rebuild has age-gated feature/option-bundle replacement, `optFeature`, feature age, option age, and feature-ever-used metadata; richer utility remains an active research frontier.**
+
+### Current empirical status (2026-04-26)
+
+OaK is no longer only a negative-return random-beating control. The bridge has now shown real HalfCheetah walking:
+
+- `tools/bridge_oracle_cem.py` through the same C bridge, fixed open-loop sinusoid, 5 seeds x 5k steps: mean return `+4428.30`, mean `info:x_velocity=+0.983`.
+- `.oak-benchmarks/fcstomp-encode-sync-clean-300k`, 10 seeds x `{oak,zero,random}` at 300k: Oak mean return `+5365.61`, max seed `+109689.46`, mean `info:x_velocity=+0.0379`, positive velocity `6/10`, positive return `2/10`.
+- The same gate still fails stability: one seed is strongly backward (`-37294.86`, `info:x_velocity=-0.0867`), non-finite counts are not yet zero across all seeds (`34` total), and Oak is not 10/10 better than `zero` by the promotion standard.
+
+Operational consequence: every stabilization change must preserve the high-return walking mode while improving seed coverage. Changes that merely calm actions, reduce commitment, refresh chords more often, or delete model-backed selection have repeatedly killed the strong seed and are not progress.
 
 ### What the Plan eschews
 
@@ -79,7 +89,7 @@ The agent is a focused-kernel single-stream Oak prototype over the Plan steps. K
 |---|---|---|
 | `valueW` | R | Main value GVF (cumulant = reward, differential, ρ̄-centered). |
 | `psi` | K · R | K=R feature-indexed RR subtask GVFs. Cumulant is shared average-reward-centered reward; stopping value is RR Eq. 4: `V(s') - valueW[i]·x_i(s') + bonusW[i]·x_i(s')`. |
-| `optPolicy` | K · D · R | K component policies. The wrapper samples the selected behavior option and returns exact one-step importance ratios for the active bank. |
+| `optPolicy` | K · D · R | K component policies. The wrapper samples from the emitted behavior descriptor and returns exact one-step importance ratios for each target option policy in the active bank. |
 | `optReward` | K · R | K stopping-aware option reward models r̂^k. |
 | `optTransition` | K · R · R | K dense stopping-aware transition models `n̂^k_j(s) = Σ_i w^k_{j,i}·s[i]`. |
 | `optDuration` | K · R | K average-reward option-duration models l̂^k with a structural one-step lower bound at decode. |
@@ -94,7 +104,7 @@ oak_encode → oak_plan → oak_learn_heads → oak_replace → oak_action_emit
 
 | Kernel | What it does |
 |---|---|
-| `oak_encode` | Updates observation/traces, builds normalized anchor/constructed state features, then runs prediction/control: value TD, RR subtask TD, RR continuation, and direct RR option selection. |
+| `oak_encode` | Updates observation/traces, builds normalized anchor/constructed state features, then runs prediction/control: value TD, RR subtask TD, RR continuation, model-backed option scoring, and chord refresh. |
 | `oak_plan` | Updates the full option bank's stopping-aware model TDs, duration TDs, raw-reward option model, and model-priority statistics every step. |
 | `oak_learn_heads` | Updates value, psi, option policy, and option reward/transition/duration using exact one-step ratios and wrapper-provided target-option score gradients. |
 | `oak_replace` → `oak_action_emit` | Commits utility/meta-learning diagnostics and age/capacity-gated replacements, then emits all option policy means after a dispatch boundary so action emission cannot race replacement writes. |
@@ -103,7 +113,7 @@ oak_encode → oak_plan → oak_learn_heads → oak_replace → oak_action_emit
 
 Each env declares one structured action spec: `Discrete N` (categorical) or `Box A` (continuous with `[low, high]` bounds). The integer `D_policy = component_param_count` is the agent's only window into the env's action structure.
 
-The agent emits `policyMean[D_policy]` from `oak_meta_action`. The env-wrapper layer (`EnvPoolEnv.sampleAndStep`) is the **sole** site that samples actions and computes score functions:
+The agent emits `policyMean[D_policy]` from `oak_action_emit`. The env-wrapper layer (`HCEnv::step_oak` in the native bridge) is the **sole** site that samples actions and computes score functions:
 
 - Discrete N: Gumbel-max categorical (`-log(-log(U))` + argmax); target-option actor scores use `1{a=d} − π_d` (Maddison 2014; Williams 1992).
 - Box A: currently exposes `2A` policy coordinates to keep `D_policy`, default rank, and K stable. The first A coordinates are means; the second A coordinates are wrapper-reserved/inert. The wrapper samples with structural fixed `σ = 1/D_policy`, emits residual-style mean credit (`raw − μ`) for Box mean slots, writes zero score/action-signal entries for reserved scale slots, and clamps only the env-facing action. Full `D_policy = A` mean-only deletion failed the 1M gate and remains rejected unless a different actor geometry earns fresh evidence.
