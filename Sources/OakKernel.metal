@@ -65,7 +65,7 @@ struct Ctx {
     device float *valueGauge;
     device uint *counters, *optFeature, *featureAge, *optAge;
     device uint *featureParentA, *featureParentB, *featureKind, *featureBirthCount;
-    device uint *selectedOption, *keyboardOrigin, *keyboardOriginAge;
+    device uint *selectedOption, *keyboardOrigin;
     device uint *badFeatureAge;
     device KernelScalars *scalars;
     device KernelStats *stats;
@@ -144,7 +144,6 @@ inline Ctx make_ctx(device float *params, device float *stateArena, device uint 
     c.featureBirthCount = uintArena + u; u += c.R;
     c.selectedOption = uintArena + u; u += 1u;
     c.keyboardOrigin = uintArena + u; u += 1u;
-    c.keyboardOriginAge = uintArena + u; u += 1u;
     c.badFeatureAge = uintArena + u;
     c.scalars = scalars; c.stats = stats;
     return c;
@@ -442,11 +441,7 @@ inline void oak_keyboard_predict_body(Ctx ctx, uint tid,
         }
         if (refreshKeyboard) {
             uint nextOrigin = useRaw ? 1u : (useRelative ? 2u : 0u);
-            ctx.keyboardOriginAge[0] = (nextOrigin == origin && ctx.keyboardOriginAge[0] < 0xffffffffu)
-                ? (ctx.keyboardOriginAge[0] + 1u) : 0u;
             ctx.keyboardOrigin[0] = nextOrigin;
-        } else if (ctx.keyboardOriginAge[0] < 0xffffffffu) {
-            ctx.keyboardOriginAge[0] += 1u;
         }
         uint probe = ctx.stepCount % max(ctx.K, 1u);
         float floor = ctx.invK;
@@ -456,7 +451,6 @@ inline void oak_keyboard_predict_body(Ctx ctx, uint tid,
                 ctx.keyboard[k] = probeSign * floor;
             }
             ctx.keyboardOrigin[0] = 0u;
-            ctx.keyboardOriginAge[0] = 0u;
         }
         float planNum = 0.0f, planNorm = 0.0f;
         for (uint k = 0u; k < ctx.K; ++k) {
