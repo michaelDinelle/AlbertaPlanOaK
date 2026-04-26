@@ -2,13 +2,8 @@ import Darwin
 import Foundation
 import Metal
 
-enum OakError: Error, CustomStringConvertible {
-  case message(String)
-  var description: String {
-    if case .message(let m) = self { return m }
-    return ""
-  }
-}
+struct OakError: Error, CustomStringConvertible { let description: String }
+func err(_ s: String) -> OakError { OakError(description: s) }
 enum Policy: String { case oak, random }
 let defaultEnv = "HalfCheetah-v4"
 let lockName = ".oak-benchmark.lock"
@@ -47,12 +42,15 @@ func root(_ p: String) -> URL {
 func require(_ p: String, _ what: String) throws -> URL {
   let u = root(p)
   guard FileManager.default.fileExists(atPath: u.path) else {
-    throw OakError.message("Missing \(what). Run ./setup.sh first.")
+    throw err("Missing \(what). Run ./setup.sh first.")
   }
   return u
 }
 func envError(_ raw: Raw?) -> String {
   oakError(raw).map { String(cString: $0) } ?? "native env error"
+}
+func mtlSize(_ width: Int) -> MTLSize {
+  MTLSize(width: width, height: 1, depth: 1)
 }
 struct EnvView {
   var obsDim, actDim, dPolicy, done: Int32
@@ -69,7 +67,7 @@ final class Env {
     raw = try id.withCString { eid in
       try assets.withCString { base in
         guard let r = oakOpen(Int32(seed), eid, base) else {
-          throw OakError.message(envError(nil))
+          throw err(envError(nil))
         }
         return r
       }
@@ -84,23 +82,23 @@ final class Env {
   var reward: Float { v.reward }
   var done: Int { Int(v.done) }
   var actionDeltaMean: Double { Double(v.actionDeltaMean) }
-  func ok(_ x: Int32) throws { if x != 1 { throw OakError.message(envError(raw)) } }
+  func ok(_ x: Int32) throws { if x != 1 { throw err(envError(raw)) } }
   func refresh() throws { try ok(oakView(raw, &v)) }
-  func prepare(_ k: Int) throws {
-    try ok(oakPrepare(raw, Int32(k)))
+  func update(_ x: Int32) throws {
+    try ok(x)
     try refresh()
+  }
+  func prepare(_ k: Int) throws {
+    try update(oakPrepare(raw, Int32(k)))
   }
   func reset() throws {
-    try ok(oakReset(raw))
-    try refresh()
+    try update(oakReset(raw))
   }
   func stepOak(_ p: UnsafePointer<Float>, _ o: UnsafePointer<Float>, _ k: Int) throws {
-    try ok(oakStepOak(raw, p, o, Int32(k)))
-    try refresh()
+    try update(oakStepOak(raw, p, o, Int32(k)))
   }
   func stepRandom() throws {
-    try ok(oakStepRandom(raw))
-    try refresh()
+    try update(oakStepRandom(raw))
   }
 }
 
@@ -108,13 +106,7 @@ struct Arena {
   let obs, policy, options, action, credit, imp, reward, utilOpt, bonus, alpha, beta, alphaPsi,
     betaPsi, alphaModel, betaModel, total: Int
   static func traces(_ o: Int) -> Int {
-    var v = max(o, 1)
-    var n = 1
-    while v > 1 {
-      v >>= 1
-      n += 1
-    }
-    return n
+    Int(log2(Double(max(o, 1)))) + 1
   }
   static func input(_ o: Int, _ d: Int) -> Int { traces(o) * max(o, 1) + max(d, 0) + 2 }
   init(_ o: Int, _ r: Int, _ d: Int) {
@@ -149,7 +141,7 @@ final class Engine {
   let rank, d, tg, learnTotal, actionGroups: Int
   let a: Arena
   let q: MTLCommandQueue, pipes: [MTLComputePipelineState], params, state: Shared<Float>,
-    uints: Shared<UInt32>
+    uints: Shared<UInt32>, res: [MTLBuffer]
   let scalarsB, statsB, configB: MTLBuffer
   let scalars: UnsafeMutablePointer<KernelScalars>, stats: UnsafeMutablePointer<KernelStats>,
     tgBytes: Int
@@ -160,7 +152,7 @@ final class Engine {
     d = env.dPolicy
     a = Arena(env.obsDim, rank, d)
     guard let cq = dev.makeCommandQueue() else {
-      throw OakError.message("Metal command queue unavailable.")
+      throw err("Metal command queue unavailable.")
     }
     q = cq
     let lib = try dev.makeLibrary(
@@ -169,7 +161,7 @@ final class Engine {
     { try dev.makeComputePipelineState(function: lib.makeFunction(name: $0)!) }
     let maxTG = pipes.map(\.maxTotalThreadsPerThreadgroup).min() ?? rank
     guard rank <= maxTG else {
-      throw OakError.message("Rank \(rank) exceeds device threadgroup capacity \(maxTG).")
+      throw err("Rank \(rank) exceeds device threadgroup capacity \(maxTG).")
     }
     tg = min(max(rank, pipes.map { Int($0.threadExecutionWidth) }.max() ?? 1), maxTG)
     tgBytes = tg * MemoryLayout<Float>.stride
@@ -187,6 +179,7 @@ final class Engine {
       length: MemoryLayout<KernelStats>.stride, options: [.storageModeShared])!
     configB = dev.makeBuffer(
       length: MemoryLayout<KernelConfig>.stride, options: [.storageModeShared])!
+    res = [params.b, state.b, uints.b, scalarsB, statsB, configB]
     scalars = scalarsB.contents().bindMemory(to: KernelScalars.self, capacity: 1)
     stats = statsB.contents().bindMemory(to: KernelStats.self, capacity: 1)
     scalars.initialize(to: KernelScalars())
@@ -226,8 +219,7 @@ final class Engine {
     c[6] = 0
     guard let cb = q.makeCommandBufferWithUnretainedReferences(),
       let e = cb.makeComputeCommandEncoder()
-    else { throw OakError.message("Failed to encode Metal command.") }
-    let res = [params.b, state.b, uints.b, scalarsB, statsB, configB]
+    else { throw err("Failed to encode Metal command.") }
     func bind(_ i: Int) {
       e.setComputePipelineState(pipes[i])
       for j in res.indices { e.setBuffer(res[j], offset: 0, index: j) }
@@ -235,9 +227,7 @@ final class Engine {
     func groups(_ i: Int, _ n: Int, _ mem: Int = 1, _ barrier: Bool = true) {
       bind(i)
       for m in 0..<mem { e.setThreadgroupMemoryLength(tgBytes, index: m) }
-      e.dispatchThreadgroups(
-        MTLSize(width: n, height: 1, depth: 1),
-        threadsPerThreadgroup: MTLSize(width: tg, height: 1, depth: 1))
+      e.dispatchThreadgroups(mtlSize(n), threadsPerThreadgroup: mtlSize(tg))
       if barrier { e.memoryBarrier(scope: [.buffers]) }
     }
     groups(0, 1, 7)
@@ -245,22 +235,20 @@ final class Engine {
     bind(2)
     let ltg = min(
       max(Int(pipes[2].threadExecutionWidth), 1), pipes[2].maxTotalThreadsPerThreadgroup)
-    e.dispatchThreads(
-      MTLSize(width: learnTotal, height: 1, depth: 1),
-      threadsPerThreadgroup: MTLSize(width: ltg, height: 1, depth: 1))
+    e.dispatchThreads(mtlSize(learnTotal), threadsPerThreadgroup: mtlSize(ltg))
     e.memoryBarrier(scope: [.buffers])
     groups(3, 1)
     groups(4, actionGroups, 1, false)
     e.endEncoding()
     cb.commit()
     cb.waitUntilCompleted()
-    if let err = cb.error { throw OakError.message("Metal command failed: \(err)") }
+    if let e = cb.error { throw err("Metal command failed: \(e)") }
     return capture ? stats.pointee : nil
   }
 }
 
 final class Run {
-  var steps = 0, done = 0, pulse = 0, kernelSteps = 0, nfE = 0, nfL = 0, nfP = 0, nfT = 0, optR = 0,
+  var steps = 0, done = 0, pulse = 0, nfE = 0, nfL = 0, nfP = 0, nfT = 0, optR = 0,
     featR = 0
   var seconds = 0.0, rewardSum = 0.0, rho = 0.0, floor: Double,
     start = DispatchTime.now().uptimeNanoseconds
@@ -271,11 +259,12 @@ final class Run {
     seconds = Double(DispatchTime.now().uptimeNanoseconds - start) / 1_000_000_000
     done += env.done
     let r = Double(env.reward)
-    guard r.isFinite else { throw OakError.message("Environment produced a non-finite reward.") }
+    guard r.isFinite else {
+      throw err("Environment produced a non-finite reward.")
+    }
     rewardSum += r
     rho += max(1 / Double(steps), floor) * (r - rho)
     if let s = stats {
-      kernelSteps += 1
       last = s
       nfE += Int(s.encodeNonFiniteCount)
       nfL += Int(s.learnNonFiniteCount)
@@ -305,9 +294,7 @@ final class Run {
   }
 }
 func stem(_ env: String, _ p: Policy, _ seed: Int) -> String {
-  ([env, p.rawValue, "seed\(seed)"].joined(separator: "-") as NSString).components(
-    separatedBy: CharacterSet.alphanumerics.inverted
-  ).filter { !$0.isEmpty }.joined(separator: "-")
+  "\(env)-\(p.rawValue)-seed\(seed)"
 }
 func writeMetric(
   _ env: Env, _ p: Policy, _ seed: Int, _ stop: Int, _ r: Run, _ seq: Int?, _ root: URL
@@ -350,7 +337,7 @@ func metricsRoot() -> URL {
       switch CommandLine.arguments.dropFirst().first {
       case "benchmark": try benchmark()
       case "benchmark-worker": try worker()
-      default: throw OakError.message("Use `OaK benchmark`.")
+      default: throw err("Use `OaK benchmark`.")
       }
     } catch {
       fputs("\(error)\n", stderr)
@@ -359,7 +346,7 @@ func metricsRoot() -> URL {
   }
   static func pol(_ s: String) throws -> Policy {
     guard let p = Policy(rawValue: s.lowercased()) else {
-      throw OakError.message("Unknown policy '\(s)'.")
+      throw err("Unknown policy '\(s)'.")
     }
     return p
   }
@@ -392,19 +379,8 @@ func metricsRoot() -> URL {
     let e = ProcessInfo.processInfo.environment
     guard let pr = e["OAK_POLICY"], let seed = e["OAK_SEED"].flatMap(Int.init),
       let stop = e["OAK_STOP_AFTER_STEPS"].flatMap(Int.init)
-    else { throw OakError.message("Incomplete benchmark-worker environment.") }
+    else { throw err("Incomplete benchmark-worker environment.") }
     try run(try pol(pr), seed, max(stop, 1), metricsRoot(), e["OAK_BENCH_ENV"] ?? defaultEnv)
-  }
-  static func exe() throws -> String {
-    let a = CommandLine.arguments[0]
-    let u =
-      a.hasPrefix("/")
-      ? URL(fileURLWithPath: a)
-      : URL(fileURLWithPath: FileManager.default.currentDirectoryPath).appendingPathComponent(a)
-    guard FileManager.default.isExecutableFile(atPath: u.path) else {
-      throw OakError.message("Cannot locate worker executable.")
-    }
-    return u.path
   }
   static func start(_ item: (Int, Policy), _ steps: Int, _ dir: URL, _ envId: String) throws
     -> pid_t
@@ -415,7 +391,7 @@ func metricsRoot() -> URL {
     e["OAK_STOP_AFTER_STEPS"] = "\(steps)"
     e["OAK_METRICS_STORAGE"] = dir.path
     e["OAK_BENCH_ENV"] = envId
-    let path = try exe()
+    let path = CommandLine.arguments[0]
     var pid = pid_t()
     var argv = [strdup(path), strdup("benchmark-worker"), nil]
     var envp = e.map { strdup("\($0.key)=\($0.value)") } + [nil]
@@ -426,12 +402,12 @@ func metricsRoot() -> URL {
     let rc = path.withCString { p in
       argv.withUnsafeMutableBufferPointer { a in
         envp.withUnsafeMutableBufferPointer { v in
-          posix_spawn(&pid, p, nil, nil, a.baseAddress, v.baseAddress)
+          posix_spawnp(&pid, p, nil, nil, a.baseAddress, v.baseAddress)
         }
       }
     }
     guard rc == 0 else {
-      throw OakError.message("posix_spawn failed: \(String(cString: strerror(rc)))")
+      throw err("posix_spawn failed: \(String(cString: strerror(rc)))")
     }
     return pid
   }
@@ -452,7 +428,7 @@ func metricsRoot() -> URL {
     let fd = open(
       lockDir.appendingPathComponent(lockName).path, O_CREAT | O_RDWR, S_IRUSR | S_IWUSR)
     guard fd >= 0, flock(fd, LOCK_EX) == 0 else {
-      throw OakError.message("Cannot lock benchmark workspace.")
+      throw err("Cannot lock benchmark workspace.")
     }
     defer {
       _ = flock(fd, LOCK_UN)
@@ -483,20 +459,16 @@ func metricsRoot() -> URL {
       }
     }
     try fill()
-    let progress = max(1, total / 20)
     while done < total {
       var st: Int32 = 0
       let pid = waitpid(-1, &st, 0)
       guard pid > 0, let item = running.removeValue(forKey: pid) else { continue }
       guard st == 0 else {
-        throw OakError.message(
+        throw err(
           "Benchmark worker failed for \(envId) seed \(item.0) policy \(item.1.rawValue) (status \(st))."
         )
       }
       done += 1
-      if done % progress == 0 || done == total {
-        fputs("OaK benchmark progress: \(done)/\(total)\n", stderr)
-      }
       try fill()
     }
   }
