@@ -1,20 +1,35 @@
 # OaK roadmap - Plan-orthodox continual improvement
 
 Last audited: 2026-04-26, after commit
-`b2d25f9fa` (`Synchronize encode option selection`) and the first
-bridge-verified high-return walking gates.
+`2425f9f71` (`Record post-walking audit probes`), the corrected 300k
+walking gate, and the first 10M seed-3 microscope.
 
 The live branch has moved from "negative but beats random" into a new factual
 regime: OaK can produce real HalfCheetah locomotion through the bridge, but the
 walking mode is not yet stable across seeds. The current 300k evidence is
-`.oak-benchmarks/fcstomp-encode-sync-clean-300k`: 10 HalfCheetah seeds x
+`.oak-benchmarks/fresh-postaudit-300k-20260426-030016`: 10 HalfCheetah seeds x
 `{oak,zero,random}`. Oak mean reward is `+5365.610`, max seed reward is
 `+109689.456`, mean `info:x_velocity` is `+0.037900`, positive velocity is
 `6/10`, and positive return is `2/10`. The strongest seed is not marginal:
 seed 3 reaches reward `+109689.456`, run reward `+119046.372`, and mean
 velocity `+0.396821` by 300k. The same gate still fails stability: seed 8 is
-strongly backward (`-37294.861`, mean velocity `-0.086680`), total non-finite
-health counts are `34`, and the promotion standard remains unmet.
+strongly backward (`-37294.861`, mean velocity `-0.086680`), corrected total
+Oak non-finite health counts are `4`, and the promotion standard remains
+unmet.
+
+The first deep microscope is
+`.oak-benchmarks/deep-seed3-10m-20260426-030016` (Oak seed 3, 10M steps).
+The seed keeps positive bridge-measured forward momentum over the full run
+(`info:x_velocity` mean `+0.011783`, `info:x_position` delta `+5891.636`) and
+finishes with reward `+64937.781`, but it loses the 300k/1M snowball. The first
+1M heartbeat is already `+117455.284`; the remaining 9M steps drift downward
+as control cost accumulates and run reward decays. Terminal diagnostics show
+the FC-STOMP feedback cycle going quiet rather than catastrophically reversing:
+`terminationRate=0`, `modelPriorityMax=0`, `optionDurationMean=1`,
+`actorSupportEntropy=0`, `actorUpdateNormMean=0`, huge finite
+`actionDeltaL2Mean=3.62e49`, and non-finites limited to
+`learn=1, tdPsi=1`. This is a better failure than collapse, but it is still a
+no-termination/actor-support fixed point that cannot be promoted.
 
 A bridge oracle now exists as a non-agent witness, not doctrine:
 `.venv/bin/python tools/bridge_oracle_cem.py --cem-iters 0 --eval-horizon 5000
@@ -63,6 +78,22 @@ credit, signed replacement utility, neutral utility birth, and diagnostic
 `alpha=1` all regressed 10k/50k gates. The next accepted fix must replace the
 accidental snowball with a Plan-honest FC-STOMP feedback/search-control
 mechanism; do not revive these probes by name without materially new evidence.
+
+Post-10M FC-STOMP probes rejected on 2026-04-26: exact chord-responsibility
+bridge credit kept full actor support but starved behavior (`10k` Oak mean
+`-58.869`, zero positive-velocity seeds); every-step live keyboard refresh was
+also rejected (`10k` mean `-92.077`); and the narrower all-continue refresh
+failed the 50k screen (`-498.482` mean, `2/10` positive return) versus the
+walking checkpoint's 60k heartbeat (`+596.453` mean, `4/10` positive return).
+The lesson is sharper now: keeping support alive is not enough if it erases the
+hard commitment that discovers the gait.
+
+Host health note: long runs exposed resident-memory drift in the benchmark
+worker. `Sources/Main.swift` now wraps each measured worker step in an
+`autoreleasepool`; the behavior-identical seed-3 300k check
+`.oak-benchmarks/autorelease-seed3-300k-20260426` reproduced reward
+`+109689.456` and sampled worker RSS stayed flat around `19.5 MB` from
+10s-90s.
 
 Host simplification gate: the Swift host and native bridge were collapsed to a
 HalfCheetah-only benchmark path, `ActionTransducer.swift` and `EnvBridge.swift`
@@ -1192,11 +1223,11 @@ but speed is infrastructure. It cannot promote a non-orthodox mechanism.
 
 Baseline for the next algorithmic change:
 
-- **Current behavioral baseline**: commit `b2d25f9fa`, artifact
-  `.oak-benchmarks/fcstomp-encode-sync-clean-300k`.
+- **Current behavioral baseline**: commit `2425f9f71`, artifact
+  `.oak-benchmarks/fresh-postaudit-300k-20260426-030016`.
 - HalfCheetah 300k, 10 seeds x `{oak,zero,random}`: Oak mean reward
   `+5365.610`, max `+109689.456`, positive velocity `6/10`, positive return
-  `2/10`, and total Oak non-finite counts `34`. This is the walking checkpoint,
+  `2/10`, and corrected total Oak non-finite counts `4`. This is the walking checkpoint,
   not a stable promotion.
 - **Historical negative floor**: `.oak-benchmarks/baseline-1m` remains useful
   for host/performance comparison only. It is no longer the behavioral target.

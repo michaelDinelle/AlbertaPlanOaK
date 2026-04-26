@@ -51,12 +51,15 @@ Strict current-status audit lives in `docs/roadmap.md`. The literature target is
 OaK is no longer only a negative-return random-beating control. The bridge has now shown real HalfCheetah walking:
 
 - `tools/bridge_oracle_cem.py` through the same C bridge, fixed open-loop sinusoid, 5 seeds x 5k steps: mean return `+4428.30`, mean `info:x_velocity=+0.983`.
-- `.oak-benchmarks/fcstomp-encode-sync-clean-300k`, 10 seeds x `{oak,zero,random}` at 300k: Oak mean return `+5365.61`, max seed `+109689.46`, mean `info:x_velocity=+0.0379`, positive velocity `6/10`, positive return `2/10`.
-- The same gate still fails stability: one seed is strongly backward (`-37294.86`, `info:x_velocity=-0.0867`), non-finite counts are not yet zero across all seeds (`34` total), and Oak is not 10/10 better than `zero` by the promotion standard.
+- `.oak-benchmarks/fresh-postaudit-300k-20260426-030016`, 10 seeds x `{oak,zero,random}` at 300k: Oak mean return `+5365.61`, max seed `+109689.46`, mean `info:x_velocity=+0.0379`, positive velocity `6/10`, positive return `2/10`, corrected Oak NF total `4`.
+- `.oak-benchmarks/deep-seed3-10m-20260426-030016`, Oak seed 3 at 10M: the gait loses its 1M snowball but never loses cumulative forward momentum (`info:x_velocity` mean `+0.011783`, x-position delta `+5891.636`, final return `+64937.78`). Terminal health shows the FC-STOMP cycle going quiet (`terminationRate=0`, `modelPriorityMax=0`, `optionDurationMean=1`, actor entropy/update norm `0`) after one learn NF and one TD-psi NF.
+- The same gate still fails stability: one seed is strongly backward (`-37294.86`, `info:x_velocity=-0.0867`), non-finite counts are not yet zero across all seeds, and Oak is not 10/10 better than `zero` by the promotion standard.
 
 Operational consequence: every stabilization change must preserve the high-return walking mode while improving seed coverage. Changes that merely calm actions, reduce commitment, refresh chords more often, or delete model-backed selection have repeatedly killed the strong seed and are not progress.
 
 Post-walking audit consequence: the current walking checkpoint appears to rely on an accidental delayed-plasticity/layout coupling in the Swift arena. Directly aligning the host arena with the kernel is not a keeper yet: it is more correct mechanically, but it kills the strong gait unless paired with a better FC-STOMP feedback/search-control mechanism. Q-per-duration aligned selection proved the system can still snowball a strong gait, but it can also snowball backward; do not promote it, selected-option execution/model credit, chord-basis model credit, signed utility, decoded duration TD, or reward-TD actor/score patches without fresh paired evidence.
+
+Post-10M audit consequence: exact chord-responsibility bridge credit, every-step live keyboard refresh, and all-continue keyboard refresh were tested and rejected on 10k/50k gates. Keeping actor support alive is not enough if it erases the hard commitment that discovers the gait. Long-run memory drift was host-side; `Sources/Main.swift` now wraps each measured benchmark step in `autoreleasepool`, and `.oak-benchmarks/autorelease-seed3-300k-20260426` reproduced the seed-3 300k reward while worker RSS stayed flat around `19.5 MB`.
 
 ### What the Plan eschews
 
