@@ -554,6 +554,11 @@ catastrophe.
   improve coverage (`6/10` positive velocity, `2/10` positive return) and made
   support/model diagnostics worse (`actorSupportEntropy` mean `0.064`,
   `modelPriorityMax` mean `7.37e15`). Not a stability repair.
+- Also rejected after this audit: absolute/no-baseline RR actor retest
+  (`fcstomp-absolute-actor-50k`). It addressed the concern that "least bad"
+  options can become positive under option-centering, but it deleted the strong
+  gait: max 50k reward fell from `+12351.967` to `+779.763`, mean reward fell
+  to `-399.283`, and `modelPriorityMax` mean rose to `1.10e12`.
 
 Current strategic read: the high-return gait depends on sustained commitment
 and model-backed chord pressure. The bad seeds are not merely "do nothing";
