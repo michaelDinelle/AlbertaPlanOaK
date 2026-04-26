@@ -233,7 +233,9 @@ inline void oak_keyboard_predict_body(Ctx ctx, uint tid,
         if (!isfinite(delta)) { delta = 0.0f; ctx.counters[OAK_CNT_LEARN_NF] += 1u; }
         ctx.td[0] = delta;
         float rhoNew = rhoOld + ctx.invR * delta;
-        ctx.scalars->rho = isfinite(rhoNew) ? rhoNew : rhoOld;
+        float rhoUse = isfinite(rhoNew) ? rhoNew : rhoOld;
+        ctx.scalars->rho = rhoUse;
+        tgScalars[11] = rhoUse;
     }
     if (tid == 0u) {
         float alphaTraceNorm = 0.0f;
@@ -296,11 +298,12 @@ inline void oak_keyboard_predict_body(Ctx ctx, uint tid,
             vModel = fma(ctx.valueW[j], nHat, vModel);
         }
         float dur = decode_duration(lRaw);
-        float q = rHat - ctx.scalars->rho * dur + vModel;
+        float q = rHat - tgScalars[11] * dur + vModel;
         float qAdv = q - vCurr;
         ctx.durationHat[tid] = dur;
         tgG[tid] = isfinite(qAdv) ? qAdv : 0.0f;
     }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
     if (tid == 0u) {
         float invK = ctx.invK;
         float gaugeRate = track_rate(ctx.stepCount, ctx.R);
