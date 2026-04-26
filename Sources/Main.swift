@@ -35,6 +35,7 @@ struct KernelStats {
   var encodeNonFiniteCount, learnNonFiniteCount, planNonFiniteCount, tdPsiNonFiniteCount: Float
   var oakOptionReinitCount, oakFeatureReinitCount, terminationRate, optionDurationMean: Float
   var importanceEss, actorUpdateNormMean, actorSupportEntropy, modelPriorityMax: Float
+  var selectedOptionAge, selectedOptionDuration, selectedOptionPriority, keyboardL1, actorAdvantageL1: Float
 }
 
 func root(_ p: String) -> URL {
@@ -313,6 +314,11 @@ final class Run {
       h["actorUpdateNormMean"] = s.actorUpdateNormMean.isFinite ? Double(s.actorUpdateNormMean) : NSNull()
       h["actorSupportEntropy"] = s.actorSupportEntropy.isFinite ? Double(s.actorSupportEntropy) : NSNull()
       h["modelPriorityMax"] = s.modelPriorityMax.isFinite ? Double(s.modelPriorityMax) : NSNull()
+      h["selectedOptionAge"] = s.selectedOptionAge.isFinite ? Double(s.selectedOptionAge) : NSNull()
+      h["selectedOptionDuration"] = s.selectedOptionDuration.isFinite ? Double(s.selectedOptionDuration) : NSNull()
+      h["selectedOptionPriority"] = s.selectedOptionPriority.isFinite ? Double(s.selectedOptionPriority) : NSNull()
+      h["keyboardL1"] = s.keyboardL1.isFinite ? Double(s.keyboardL1) : NSNull()
+      h["actorAdvantageL1"] = s.actorAdvantageL1.isFinite ? Double(s.actorAdvantageL1) : NSNull()
     }
     if !envInfo.isEmpty {
       h["envInfo"] = Dictionary(uniqueKeysWithValues: envInfo.sorted { $0.key < $1.key }.map {
@@ -408,7 +414,9 @@ func metricsRoot() -> URL {
     try env.reset()
     let engine = p == .oak ? try Engine(env, MTLCreateSystemDefaultDevice()!) : nil
     let run = Run(obsDim: env.obsDim)
-    let hb = max(steps / 10, 1)
+    let hb = max(
+      ProcessInfo.processInfo.environment["OAK_BENCH_HEARTBEAT_STEPS"].flatMap(Int.init) ?? steps / 10,
+      1)
     while run.steps < steps {
       try autoreleasepool {
         let next = run.steps + 1
@@ -472,7 +480,17 @@ func metricsRoot() -> URL {
     let fm = FileManager.default
     let envId = env["OAK_BENCH_ENV"] ?? defaultEnv
     let seed0 = env["OAK_BENCH_SEED_START"].flatMap(Int.init) ?? 0
-    let seeds = env["OAK_BENCH_SEED_COUNT"].flatMap(Int.init) ?? 10
+    let seedValues: [Int]
+    if let explicitSeeds = env["OAK_BENCH_SEEDS"] {
+      let parsed = explicitSeeds.split(separator: ",").compactMap {
+        Int(String($0).trimmingCharacters(in: .whitespaces))
+      }
+      seedValues = parsed.isEmpty
+        ? Array(seed0..<(seed0 + (env["OAK_BENCH_SEED_COUNT"].flatMap(Int.init) ?? 10)))
+        : parsed
+    } else {
+      seedValues = Array(seed0..<(seed0 + (env["OAK_BENCH_SEED_COUNT"].flatMap(Int.init) ?? 10)))
+    }
     let steps = max(env["OAK_BENCH_STEPS"].flatMap(Int.init) ?? 500_000, 1)
     let policies = try (env["OAK_BENCH_POLICIES"] ?? "oak,zero,random").split(separator: ",").map {
       try pol(String($0))
@@ -498,11 +516,11 @@ func metricsRoot() -> URL {
         isDirectory: true)
     }
     try fm.createDirectory(at: dir, withIntermediateDirectories: true)
-    let work = (seed0..<(seed0 + seeds)).flatMap { s in policies.map { (s, $0) } }
+    let work = seedValues.flatMap { s in policies.map { (s, $0) } }
     let total = work.count
     let conc = max(ProcessInfo.processInfo.processorCount, 1)
     fputs(
-      "OaK benchmark: \(total) \(envId) work items, single-stream B=1, N=\(conc) worker processes (steps=\(steps), seeds=\(seeds), dir=\(dir.path))\n",
+      "OaK benchmark: \(total) \(envId) work items, single-stream B=1, N=\(conc) worker processes (steps=\(steps), seeds=\(seedValues.count), dir=\(dir.path))\n",
       stderr)
     var next = 0
     var done = 0

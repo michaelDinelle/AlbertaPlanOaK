@@ -32,6 +32,8 @@ struct KernelStats {
     float actorUpdateNormMean;
     float actorSupportEntropy;
     float modelPriorityMax;
+    float selectedOptionAge, selectedOptionDuration, selectedOptionPriority;
+    float keyboardL1, actorAdvantageL1;
 };
 
 inline float safe_w(float old_w, float new_w) { return isfinite(new_w) ? new_w : old_w; }
@@ -350,7 +352,17 @@ inline void oak_keyboard_predict_body(Ctx ctx, uint tid,
             float w = ctx.keyboard[k];
             if (isfinite(w)) prevMag += fabs(w);
         }
-        bool refreshKeyboard = !continuing || prevMag <= 0.0f;
+        float actorMass = 0.0f;
+        float maxDur = 0.0f;
+        for (uint k = 0u; k < ctx.K; ++k) {
+            float a = ctx.actorAdv[k];
+            if (isfinite(a)) actorMass += fabs(a);
+            float d = ctx.durationHat[k];
+            if (isfinite(d)) maxDur = max(maxDur, d);
+        }
+        bool durationGrounded = maxDur <= float(ctx.stepCount + 1u);
+        bool deadCreditRefresh = termSum <= 0.0f && actorMass <= 0.0f && durationGrounded;
+        bool refreshKeyboard = !continuing || prevMag <= 0.0f || deadCreditRefresh;
         float mag = 0.0f;
         for (uint k = 0u; k < ctx.K; ++k) {
             float qAdv = tgG[k];
@@ -385,6 +397,21 @@ inline void oak_keyboard_predict_body(Ctx ctx, uint tid,
         ctx.selectedOption[0] = selected;
         float invK = ctx.invK;
         ctx.stats->terminationRate = termSum * invK;
+        float keyL1 = 0.0f, advL1 = 0.0f;
+        for (uint k = 0u; k < ctx.K; ++k) {
+            float w = ctx.keyboard[k];
+            float a = ctx.actorAdv[k];
+            if (isfinite(w)) keyL1 += fabs(w);
+            if (isfinite(a)) advL1 += fabs(a);
+        }
+        uint sOpt = selected % ctx.K;
+        float sDur = ctx.durationHat[sOpt];
+        float sPrio = ctx.prioOpt[sOpt];
+        ctx.stats->selectedOptionAge = float(ctx.optAge[sOpt]);
+        ctx.stats->selectedOptionDuration = isfinite(sDur) ? sDur : 0.0f;
+        ctx.stats->selectedOptionPriority = isfinite(sPrio) ? sPrio : 0.0f;
+        ctx.stats->keyboardL1 = keyL1;
+        ctx.stats->actorAdvantageL1 = advL1;
 
     }
 }
@@ -498,7 +525,10 @@ kernel void oak_plan(device float *params [[buffer(0)]],
         }
         float target = (1.0f - cont) * curr[j] + cont * nHat;
         nTd = target - nPrev;
-        if (!isfinite(nTd)) nTd = 0.0f;
+        if (!isfinite(nTd)) {
+            nTd = 0.0f;
+            ctx.counters[OAK_CNT_PLAN_NF] += 1u;
+        }
         ctx.nTdMat[k * ctx.R + j] = nTd;
         float vRel = isfinite(ctx.valueW[j]) ? ctx.valueW[j] * ctx.valueW[j] : 0.0f;
         tgModelErr[j] = vRel * nTd * nTd;
@@ -522,13 +552,18 @@ kernel void oak_plan(device float *params [[buffer(0)]],
         }
         float rTd = ctx.reward[0] + cont * rHat - rPrev;
         float dTd = 1.0f + cont * lRaw - lPrev;
+        bool modelFinite = isfinite(nErr) && isfinite(rTd) && isfinite(dTd) && isfinite(lRaw);
         if (!isfinite(rTd)) rTd = 0.0f;
         if (!isfinite(dTd)) dTd = 0.0f;
         ctx.optRewardTd[k] = rTd;
         ctx.durationTd[k] = dTd;
         ctx.durationHat[k] = decode_duration(lRaw);
         float modelErr = nErr + rTd * rTd + (ctx.scalars->rho * dTd) * (ctx.scalars->rho * dTd);
-        ctx.prioOpt[k] = isfinite(modelErr) ? sqrt(max(modelErr, 0.0f)) : 0.0f;
+        if (modelFinite && isfinite(modelErr)) {
+            ctx.prioOpt[k] = sqrt(max(modelErr, 0.0f));
+        } else {
+            ctx.counters[OAK_CNT_PLAN_NF] += 1u;
+        }
     }
 }
 

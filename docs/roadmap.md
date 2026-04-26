@@ -1,22 +1,22 @@
 # OaK roadmap - Plan-orthodox continual improvement
 
-Last audited: 2026-04-26, after commit
-`fb177c778` (`Record deep walking audit and fix worker autorelease`), the
-corrected 300k walking gate, the first 10M seed-3 microscope, and 1M
-coverage microscopes.
+Last audited: 2026-04-26, after commit `f44a27bf3` (`Record 1M walking
+microscope`), the corrected 300k walking gate, the first 10M seed-3
+microscope, 1M coverage microscopes, the 10k-pulse live diagnosis pass, and
+the grounded dead-credit refresh screen.
 
 The live branch has moved from "negative but beats random" into a new factual
 regime: OaK can produce real HalfCheetah locomotion through the bridge, but the
-walking mode is not yet stable across seeds. The current 300k evidence is
-`.oak-benchmarks/fresh-postaudit-300k-20260426-030016`: 10 HalfCheetah seeds x
-`{oak,zero,random}`. Oak mean reward is `+5365.610`, max seed reward is
-`+109689.456`, mean `info:x_velocity` is `+0.037900`, positive velocity is
-`6/10`, and positive return is `2/10`. The strongest seed is not marginal:
+walking mode is not yet stable across seeds. The current Oak-only 300k keeper
+evidence is `.oak-benchmarks/grounded-deadrefresh-oak-300k-20260426`: 10
+HalfCheetah seeds. Oak mean reward is `+5575.338`, max seed reward is
+`+109689.456`, mean `info:x_velocity` is `+0.038705`, positive velocity is
+`7/10`, positive return is `2/10`, and Oak NF total is `3`. The strongest seed
+is not marginal:
 seed 3 reaches reward `+109689.456`, run reward `+119046.372`, and mean
 velocity `+0.396821` by 300k. The same gate still fails stability: seed 8 is
-strongly backward (`-37294.861`, mean velocity `-0.086680`), corrected total
-Oak non-finite health counts are `4`, and the promotion standard remains
-unmet.
+strongly backward (`-37294.861`, mean velocity `-0.086680`), seed 1 still has
+non-finite health counts, and the promotion standard remains unmet.
 
 The first deep microscope is
 `.oak-benchmarks/deep-seed3-10m-20260426-030016` (Oak seed 3, 10M steps).
@@ -103,6 +103,232 @@ model-priority (`50k` mean `-1199.252`, NF total `2`). The lesson is sharper
 now: keeping support alive or waking silent options is not enough if it erases
 the hard commitment that discovers the gait or wakes bad commitments too early.
 
+Live diagnosis pass: `OAK_BENCH_HEARTBEAT_STEPS=10000` plus
+`tools/bench_watch.py` was added so heartbeats can be watched as a rolling
+stream instead of only ten coarse snapshots. The Oak-only 300k witness
+`.oak-benchmarks/live-diagnosis-oak-300k-20260426` is behavior-identical to the
+fresh post-audit 300k final, but the 10k windows expose distinct failure modes:
+seeds 0/1 enter a learn+TD-psi non-finite quiet trap and then carry zero
+actor/model pressure while duration predictions become enormous; seed 3 is a
+clean fast finite snowball through 300k; seed 8 is the same hard-commit
+machinery pointed backward with huge actor/model pressure and no NF; seeds
+2/6/9 remain connected but not yet strong. The quiet-seed limiter is therefore
+not simply missing exploration: replacement can churn without coupling back
+into actor pressure, while invalid model/subtask arithmetic can make FC-STOMP
+go silent.
+
+Efficiency rule after the closed-loop probe failures: new behavior candidates
+must first run a targeted seed screen before full grids. Use
+`OAK_BENCH_SEEDS=0,1,3,8` to cover quiet collapse, the strong seed-3 rocket, and
+the seed-8 backward attractor, then compare with `tools/bench_compare.py`. A
+candidate that cannot move seeds 0/1, preserve seed 3, and avoid worsening seed
+8 at 50k is rejected before a 300k spend.
+
+Two follow-up FC-STOMP probes were rejected. RR non-finite termination treated
+invalid RR stopping comparisons as forced option termination; it woke seed 1
+into a control-cost explosion (`rr-nf-terminate-50k-20260426`, Oak mean
+`-1016.360`, seed 1 reward `-14363.9`, `actionDeltaL2Mean=2.9e33`), so invalid
+continuation cannot be solved by forced refresh alone. Off-policy TD-energy
+normalization for option reward/transition/duration model updates improved the
+10k mean (`-75.155`) but killed the seed-3 rocket by 50k and created a seed-8
+control blowup (`model-implicit-energy-50k-20260426`, Oak mean `-1616.230`);
+fast model plasticity is part of the walking pathway and cannot be damped
+uniformly.
+
+One narrow truthfulness fix remains live: `oak_plan` now counts non-finite
+model TD arithmetic and preserves the previous option-model priority instead
+of silently converting a broken model update into zero priority. This did not
+change the 300k behavior (`prio-preserve-oak-300k-20260426` matches the fresh
+post-audit final rewards) but reveals hidden plan non-finites in quiet seeds
+instead of reporting false search-control certainty.
+
+ArXiv FC-STOMP search pass, 2026-04-26: the primary sources line up with the
+current empirical failures. Reward-Respecting Subtasks defines STOMP as
+subtask -> option -> model -> planning and explicitly calls out the missing
+FC-STOMP feedback: planning effectiveness judged by search control should
+influence which models, features, and feature-attainment options survive. The
+average-reward options paper supports reward/dynamics/duration option models
+and interruption only when finite option values show `q_mu(s,o) < v_mu(s)`;
+it does not support forcing termination on broken RR arithmetic. Option
+Keyboard combines intentions in cumulant/value space through cross-cumulant
+GPE/GPI (or an equivalent chord-descriptor model), not by merely blending
+component policy means. Meta-gradient search-control work is directly relevant
+to the quiet/backward split: useful planning should learn to avoid inaccurate
+or credit-stalling model queries. Operationally, the next stabilization change
+must repair keyboard/search-control/utility as one loop; isolated wakeups,
+uniform damping, and raw-TD priority substitutions are now treated as already
+disfavored unless they come with materially new paired evidence.
+
+The first post-search probe confirmed the warning. Replacing option-bundle
+survival priority with downstream utility plus keyboard mass, and clearing
+stale keyboard/search-control metadata on option rebirth, improved the 10k
+screen (`useful-reinit-10k-20260426`, Oak mean `-51.671`, positive velocity
+`5/10`, NF zero) but failed by 50k (`useful-reinit-50k-20260426`, Oak mean
+`-754.780`, positive velocity `3/10`): it killed the seed-3 rocket path and
+created a seed-6 pressure/duration blowup despite NF zero. Do not promote this
+simple "stale cleanup" variant; raw-priority protection is entangled with the
+current walking pathway until a better search-control signal replaces it.
+
+A more coherent but still incomplete planning-use probe was also rejected. It
+tracked per-option previous planned contribution times next real TD and fed
+that signal through keyboard scores, feature/model utility, option utility,
+and a heartbeat metric. This was closer to the FC-STOMP feedback target, but
+still not a complete architecture: `planning-use-50k-20260426` reached positive
+velocity `6/10` and positive reward `4/10`, yet mean reward was `-430.887`,
+seed 3 did not rocket (`-290.158`), seed 5 blew up in duration/planning-use
+with one NF, and the known walking mode was not preserved. Do not reattempt
+single-scalar planning-use credit; the next change must define the whole
+keyboard/search-control/utility contract before touching behavior.
+
+The first explicit cross-cumulant keyboard implementation was rejected on both
+learning and compute grounds. It added a dense `psiCross[K*K*R]` head, separated
+the chord descriptor from a behavior-responsibility vector, and used a
+GPI-style cross-cumulant score for action emission, planning pressure, utility,
+and replacement. The 10k screen looked alive (`cross-keyboard-10k-20260426`,
+Oak mean `-41.974`, positive reward `3/10`, positive velocity `5/10`, NF zero),
+but the 50k screen collapsed (`cross-keyboard-50k-20260426`, Oak mean
+`-2849.527`, positive reward `0/10`, mean velocity `-0.03064`, seed 8
+`-11198.767`). It also added O(K^2 R) hot-path work and visibly slowed the
+50k gate. Do not revive dense `psiCross`/GPI. A keeper FC-STOMP keyboard must
+be fixed-budget and low-rank/pagewise, with no more than the current order of
+per-step work unless Instruments evidence justifies the cost.
+
+A fixed-budget page-loop variant was then rejected on the 10k gate. It used no
+dense cross head and no new learner span, instead rotating one RR subtask page
+through the existing option-model decode and feeding that page signal into
+keyboard refresh, source-feature utility, option utility, and replacement.
+`.oak-benchmarks/page-loop-10k-20260426` was NF-clean, but Oak mean reward was
+`-84.616`, positive reward was `0/10`, mean velocity was `-0.003253`, positive
+velocity was `0/10`, and mean Oak SPS was `2292`. This failed both waking and
+compute criteria; do not revive pagewise cross pressure unless it is part of a
+fuller fixed-budget design that preserves seed-3 walking evidence.
+
+A causal reward-closed search-use vector was also rejected. It added one K-sized
+trace updated every step from the previous chord's normalized absolute
+responsibility, exact wrapper importance, and realized centered reward TD, then
+fed that same trace into keyboard scoring, feature utility, option utility, and
+replacement. This was the right kind of closed-loop test, but not a keeper:
+`.oak-benchmarks/searchuse-10k-20260426` was NF-clean with one positive-return
+seed, then `.oak-benchmarks/searchuse-50k-20260426` killed the seed-3 rocket and
+finished with Oak mean reward `-775.868`, positive reward `0/10`, mean velocity
+`-0.006057`, positive velocity `4/10`, NF zero, and mean SPS `2232`. The result
+reinforces that realized reward feedback cannot simply be added to model-backed
+keyboard scores; it must preserve the hard commitment pathway before it is
+allowed to redirect search or replacement.
+
+A duration-consistent priority-protection audit was rejected as behavior-dead.
+It stopped raw model priority from protecting an option/model bundle during
+replacement when its decoded duration exceeded the agent's entire lived stream.
+This was structurally cleaner and preserved the seed-3 rocket, but it did not
+change any 50k or 300k final reward/velocity/replacement result:
+`.oak-benchmarks/duration-consistency-50k-20260426` and
+`.oak-benchmarks/duration-consistency-oak-300k-20260426` matched the keeper
+per-seed rewards exactly. Do not keep self-consistency checks that only improve
+bookkeeping; the fix must change the FC-STOMP loop's behavior.
+
+Preserving the last finite RR subtask TD / actor advantage on non-finite
+subtask arithmetic was also rejected as behavior-dead. The hypothesis was that
+zeroing transient subtask pressure made quiet seeds collapse into do-nothing.
+`.oak-benchmarks/preserve-tdpsi-50k-20260426` and
+`.oak-benchmarks/preserve-tdpsi-oak-300k-20260426` did revive enormous finite
+actor pressure in the quiet seeds, but every final reward and velocity matched
+the keeper exactly. The lock is downstream of actor pressure: the continuation /
+keyboard emission path can remain behaviorally frozen even when actor updates
+become huge. Do not keep hidden pressure that does not move the policy.
+
+The first targeted-seed screen after adding `OAK_BENCH_SEEDS` rejected
+theorem-aligned value interruption as a standalone fix. Pure finite
+`q_mu(s,o) >= v_mu(s)` continuation woke seed 1 and greatly improved seed 8,
+but killed seed 3's rocket by 50k
+(`.oak-benchmarks/value-interrupt-target50k-20260426`: seed 3 delta
+`-12797.589`). Adding a live positive-TD guard still killed seed 3 and regressed
+seed 1 (`.oak-benchmarks/tdguard-interrupt-target50k-20260426`). Interruption is
+a real lever for the lock, but it cannot be allowed to break hard commitment;
+future attempts need a keyboard/emission mechanism that distinguishes productive
+commitment from stale continuation, not only a finite option-value comparison.
+Model-priority-gated interruption was also rejected by the same screen:
+`.oak-benchmarks/prio-gated-interrupt-target50k-20260426` still killed seed 3
+and drove seed 1 hard backward. Model surprise is not the missing discriminator
+by itself.
+The following stale-emission fallback was rejected as another too-blunt
+behavior repair. It used the previous emitted-action movement to fall back to
+selected-option execution when the chord blend was nearly stationary. The
+targeted screen `.oak-benchmarks/stale-fallback-target50k-20260426` improved
+seed 8 (`-4427.302 -> -120.987`) and seed 0 (`-610.384 -> -344.045`), but cut
+seed 3 from `+12351.967` to `+1368.633` at 50k. The lesson matches the
+interruption probes: low movement is not stale by itself; the stable repair must
+keep the productive blended snowball while giving quiet seeds a way into it.
+An all-continue dead-option generate-and-test repair was then rejected. It only
+replaced a mature option bundle when the whole option bank was continuing, the
+bundle had exactly zero actor pressure, and its utility had gone non-positive.
+`.oak-benchmarks/dead-option-gt-target50k-20260426` preserved seed 3 exactly,
+but worsened seed 0 (`-610.384 -> -935.493`) and left seed 1/8 unchanged.
+Bundle churn after actor credit is dead is too late; the repair has to change
+keyboard/search-control credit before the behavior path freezes.
+Low-rank chord-progress keyboard projection was also rejected as a direct
+behavior path. The raw projection
+`.oak-benchmarks/chord-progress-target50k-20260426` woke seed 0 and flipped
+seed 8 positive, but killed seed 3 (`+12351.967 -> -1771.834`) and drove seed 1
+backward. The agreement-only projection
+`.oak-benchmarks/chord-agree-target50k-20260426` improved seed 1 and seed 8,
+but still killed seed 3 (`-810.945`). The model-error-gated agreement variant
+`.oak-benchmarks/chord-erroragree-target50k-20260426` was worse. A `1/K`
+basis-normalized version (`.oak-benchmarks/chord-basisnorm-target50k-20260426`)
+still cut seed 3 to `+2103.403` and worsened seed 0. This is useful
+architectural evidence: cross-cumulant keyboard semantics are relevant, but
+direct low-rank behavior-weight overrides steal the identity/reward pathway
+that discovers the high gait.
+Signed behavior-responsibility main-TD actor pressure was rejected in two
+forms. The full version
+`.oak-benchmarks/responsibility-td-actor-target50k-20260426` woke seed 0 and
+partially rescued seed 8, but killed seed 3 (`+12351.967 -> -1377.770`). The
+degenerate-only version
+`.oak-benchmarks/degenerate-td-actor-target50k-20260426` preserved seed 3
+exactly, but did not wake seed 1/8 and worsened seed 0. The actor-collapse
+diagnosis is valid, but direct reward TD inside the option actor is either too
+invasive or too late.
+Search-failure-gated versions of the same actor idea were also rejected:
+`.oak-benchmarks/searchfail-tdactor-target50k-20260426`,
+`.oak-benchmarks/searchfail-rfloor-tdactor-target50k-20260426`, and
+`.oak-benchmarks/searchfail-negrho-tdactor-target50k-20260426`. They rescued
+seed 1 and partly seed 8, but still erased seed 3 even with structural
+model-priority/duration and `rho < -1/R` gates. The conclusion is now firm:
+main-reward actor pressure needs a learned arbitration state, not another
+inline behavior gate.
+The mature-selected-option variant
+`.oak-benchmarks/mature-searchfail-tdactor-target300k-20260426` is rejected for
+the same reason. It produced a large seed-1 gait (`+40979.575`) and mostly
+rescued seed 8 (`-37294.861 -> -1220.894`, positive velocity), but destroyed
+the seed-3 high mode (`+109689.456 -> -1338.779`) and worsened the four-seed
+target mean. This is the clearest evidence so far that the rescue actor is a
+useful organ, but it needs arbitration with the identity/reward pathway before
+it can be part of the body.
+The first scalar slow-arbiter attempt
+`.oak-benchmarks/slowarb-tdactor-target50k-20260426` was also rejected. A
+capacity-derived slow reward trace reduced the violence of the rescue actor,
+but still cut seed 3 from `+12351.967` to `+281.231` at 50k and missed seed 1.
+Arbitration likely needs to remember more than persistent negative reward; it
+must identify when the identity path is building a delayed snowball.
+Origin-lock rescue actor (`.oak-benchmarks/originlock-tdactor-target50k-20260426`)
+was rejected too. The selected-age diagnostics showed seed 8 and the quiet
+locks as origin-lock failures under the keeper, but using that symptom as an
+actor trigger pushed seed 3 into the same quiet origin-lock basin. Origin-lock
+is a diagnostic, not yet a behavior-safe control signal.
+
+The keeper from this loop is grounded dead-credit keyboard refresh. It refreshes
+the keyboard only when every RR option continues, actor credit is exactly dead,
+and all decoded option durations remain no larger than the agent's lived stream
+length. The ungrounded version
+`.oak-benchmarks/deadcredit-refresh-target50k-20260426` preserved seed 3 and
+helped seed 0, but blew up seed 1's control cost. Adding the duration-grounding
+check avoided that failure. Full 300k Oak-only evidence:
+`.oak-benchmarks/grounded-deadrefresh-oak-300k-20260426` improved mean return
+from `+5365.610` to `+5575.338`, positive velocity from `6/10` to `7/10`, and
+NF total from `8` to `3`, while preserving seed 3 bit-identically at
+`+109689.456`. This is a keeper substrate improvement, not the solution: seed 8
+is still the large backward attractor and only `2/10` seeds have positive total
+return.
+
 Host health note: long runs exposed resident-memory drift in the benchmark
 worker. `Sources/Main.swift` now wraps each measured worker step in an
 `autoreleasepool`; the behavior-identical seed-3 300k check
@@ -160,6 +386,7 @@ Primary sources:
 - Average-reward options: `docs/papers/WanNaikSutton_AvgRewardOptions_2110.13855.pdf`
 - Option keyboard: `docs/papers/OptionKeyboard_CombiningSkills_2106.13105.pdf`
 - Option Keyboard Basis: `docs/papers/OptionKeyboardBasis_2505.00787.pdf`
+- Meta-gradient search control: `docs/papers/MetaGradientSearchControl_DynaPlanning_2406.19561.pdf`
 - Supporting current mechanisms: Reward Centering, MetaOptimize, GraMa,
   generate-and-test, prioritized sweeping, and plasticity papers in
   `docs/papers/`. Deep Fourier/random-projection encoders are experimental
@@ -595,6 +822,10 @@ catastrophe.
   `+119046.372`, and mean velocity `+0.396821`; seed 8 is the main collapse
   counterexample at `-37294.861`, run reward `-26004.084`, and mean velocity
   `-0.086680`.
+- `.oak-benchmarks/grounded-deadrefresh-oak-300k-20260426`: Oak-only 10-seed
+  keeper improvement. Mean reward `+5575.338`, positive velocity `7/10`, NF
+  total `3`; seed 3 is bit-identical to the first walking checkpoint and seed
+  0 improves from `-2553.895` to `-456.618`.
 - Bridge oracle witness: `.venv/bin/python tools/bridge_oracle_cem.py
   --cem-iters 0 --eval-horizon 5000 --seed-count 5` returns mean reward
   `+4428.300`, mean run reward `+4914.978`, mean control cost `-486.678`, and
@@ -1019,13 +1250,20 @@ Current gap:
   uncertainty or use meta-gradient search control.
 - The Plan explicitly points at search control that accounts for model
   uncertainty.
+- The current walking evidence splits into three cases that raw TD priority
+  cannot distinguish: clean forward snowball, quiet non-finite stall, and
+  high-pressure backward snowball.
 
 Next orthodox mechanism:
 
-- Track uncertainty or variance of model TD error for one-step and option
-  models.
-- Use it to choose which state/model/option backups receive the fixed planning
-  budget each step.
+- Track planning usefulness as a downstream signal, not raw surprise alone:
+  whether an option-model backup improves the value/keyboard decision without
+  producing non-finite arithmetic or persistent credit stalls.
+- Use that signal to decide which feature/subtask/option/model bundles keep
+  the fixed planning budget and survive replacement.
+- Keep interruption theorem-aligned: only finite model-backed `q` versus `v`
+  comparisons may break an option early; invalid RR/model arithmetic is a
+  health event and search-control signal, not a behavior command.
 
 Diagnostics required:
 
@@ -1036,6 +1274,46 @@ Acceptance:
 
 - Must improve planning efficiency diagnostics first; reward lift is required
   at 10M before replacing F1/H1 as baseline.
+
+Whole FC-STOMP contract before the next behavior edit:
+
+- **Feature Construction** produces replaceable state features with parentage,
+  age, activity, and downstream utility. It must not churn just because a local
+  feature statistic looks bad; its utility must be credited from subtasks,
+  option policies, option models, and planning.
+- **SubTasks** remain RR feature-attainment GVFs: original reward cumulant, RR
+  Eq. 4 stopping value, and no env-semantic shaping. The missing piece is not a
+  different cumulant; it is evaluating how each learned option behaves under
+  other live RR cumulants.
+- **Options** keep their own RR-learned policy and termination. Interruption
+  must be value-theorem aligned and finite. Invalid continuation arithmetic is
+  health/search-control evidence, not a direct behavior command.
+- **Models** remain average-reward option models with reward, transition, and
+  duration. Raw model TD priority is a truth signal, not by itself usefulness
+  or replacement protection.
+- **Planning/Search Control** must judge whether option-model backups improve
+  the downstream value/keyboard decision under the fixed per-step planning
+  budget. It must distinguish useful surprise, useless surprise, quiet stalls,
+  and confidently bad backward snowballs.
+- **Option Keyboard** must become cumulant/value-space composition: either
+  cross-cumulant option values plus GPE/GPI-style behavior selection, or an
+  equivalent chord-descriptor model. A scalar chord over already-emitted policy
+  means is only a walking substrate, not the full architecture.
+- **Feedback / Remove-Replace** consumes the same bundle-level evidence used by
+  search control: feature usefulness, RR subtask usefulness, option policy
+  usefulness, model usefulness, and keyboard/planning usefulness. No future
+  keeper may replace only one of these scores while leaving the others on the
+  old contract.
+
+Implementation consequence: the next serious FC-STOMP patch should introduce a
+coherent bundle descriptor, likely centered on a fixed-budget/low-rank
+approximation of cross-cumulant option values and search-control usefulness,
+and route it through keyboard selection, model planning, feature utility,
+option utility, and replacement together. A patch that only changes refresh
+timing, damping, raw priority, interruption, or replacement scoring is now
+rejected on design grounds before benchmarking. A patch that adds dense
+O(K^2 R) keyboard machinery is rejected on compute grounds unless it is first
+made sparse/pagewise under the existing per-step budget.
 
 ## Next Implementation Sequence
 
@@ -1238,12 +1516,12 @@ but speed is infrastructure. It cannot promote a non-orthodox mechanism.
 
 Baseline for the next algorithmic change:
 
-- **Current behavioral baseline**: commit `2425f9f71`, artifact
-  `.oak-benchmarks/fresh-postaudit-300k-20260426-030016`.
-- HalfCheetah 300k, 10 seeds x `{oak,zero,random}`: Oak mean reward
-  `+5365.610`, max `+109689.456`, positive velocity `6/10`, positive return
-  `2/10`, and corrected total Oak non-finite counts `4`. This is the walking checkpoint,
-  not a stable promotion.
+- **Current behavioral baseline**: grounded dead-credit refresh in the live
+  working tree, artifact `.oak-benchmarks/grounded-deadrefresh-oak-300k-20260426`.
+- HalfCheetah 300k, 10 Oak seeds: mean reward `+5575.338`, max
+  `+109689.456`, positive velocity `7/10`, positive return `2/10`, and Oak
+  non-finite total `3`. This is an improved walking checkpoint, not a stable
+  promotion.
 - **Historical negative floor**: `.oak-benchmarks/baseline-1m` remains useful
   for host/performance comparison only. It is no longer the behavioral target.
 - K1 and rebuild-era runs remain historical comparison artifacts, not baselines.
