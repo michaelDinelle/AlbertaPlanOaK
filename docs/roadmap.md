@@ -377,6 +377,36 @@ stays NF-clean, but seed 1 regresses to `-467.506` with negative velocity. This
 narrows the next target: the high-mass/long-duration negative-rate discriminator
 is useful, but it still lacks a direction/effort arbiter.
 
+Direction/effort keyboard arbitration was then tested as that missing
+search-control organ. The signal is real but not yet keeper-quality. Raw
+direction/effort (`.oak-benchmarks/direff-keyboard-oak300k-20260426`) preserves
+the seed-3 rocket, improves seed 8 to `+15702.383`, and wakes seed 4 to
+`+1843.157`, but regresses seed 1 to `-5620.525`, seed 2 to `-3754.883`, and
+seed 7 to `-6105.790`. Full relative direction/effort
+(`.oak-benchmarks/direff-relative-oak300k-20260426`) is NF-clean and proves the
+quiet rescue path is reachable (`seed 1 +24706.231`, `seed 2 +2616.027`) while
+preserving seed 3, but it steals seed 8's active-short trajectory
+(`+6837.419 -> -171.070`). Refresh-arbiter and split variants show the same
+coupling: relative arbitration is right for low-mass quiet rescue, raw
+direction commitment is closer for seed 8, and scalar re-inference from the
+current chord is not enough to decide between them. The next FC-STOMP attempt
+should add an explicit keyboard/search-control state for commitment provenance
+and usefulness, not another stateless direction gate.
+
+The first keeper-quality provenance slice is now in code. In
+`.oak-benchmarks/provenance-direff-v7-oak300k-20260426`, persistent keyboard
+provenance routes raw direction/effort only through the active-backward
+commitment path. The result preserves seeds 0-7 and 9 bit-identically against
+the prior 300k keeper, while seed 8 improves from `+6837.419` to `+23119.758`
+and `info:x_velocity` improves from `+0.035589` to `+0.095005`. NF total stays
+at `3`, all from the already-known seed-1 quiet trap. This is not 10/10
+stability and not the full Option Keyboard/search-control loop: seed 1 remains
+invalid-quiet, seed 2 remains weak, positive-return coverage is still `3/10`,
+and the active-backward organ must not be generalized into the rejected
+relative-arbiter path. The next target is a separate quiet-rescue discriminator
+that can recover the relative seed-1/2 mode without changing seed 3 or stealing
+the strengthened seed-8 trajectory.
+
 Host health note: long runs exposed resident-memory drift in the benchmark
 worker. `Sources/Main.swift` now wraps each measured worker step in an
 `autoreleasepool`; the behavior-identical seed-3 300k check
