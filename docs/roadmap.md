@@ -1,8 +1,9 @@
 # OaK roadmap - Plan-orthodox continual improvement
 
 Last audited: 2026-04-26, after commit
-`2425f9f71` (`Record post-walking audit probes`), the corrected 300k
-walking gate, and the first 10M seed-3 microscope.
+`fb177c778` (`Record deep walking audit and fix worker autorelease`), the
+corrected 300k walking gate, the first 10M seed-3 microscope, and 1M
+coverage microscopes.
 
 The live branch has moved from "negative but beats random" into a new factual
 regime: OaK can produce real HalfCheetah locomotion through the bridge, but the
@@ -30,6 +31,17 @@ the FC-STOMP feedback cycle going quiet rather than catastrophically reversing:
 `actionDeltaL2Mean=3.62e49`, and non-finites limited to
 `learn=1, tdPsi=1`. This is a better failure than collapse, but it is still a
 no-termination/actor-support fixed point that cannot be promoted.
+
+The follow-up 1M microscopes
+`.oak-benchmarks/microscope-seeds0-5-1m-20260426` and
+`.oak-benchmarks/microscope-seeds6-9-1m-20260426` show that the 300k headline
+understates OaK's long-run upside but not its instability. Across seeds 0-9
+at 1M, Oak has mean reward `-2783.908`, mean `info:x_velocity=+0.020291`,
+positive reward/velocity `3/10`, and NF total `8`. Seeds 3, 6, and 9 are
+forward snowballs by 1M (`+117455.284`, `+28838.810`, `+43641.635`), while
+seed 8 is the large backward attractor (`-109670.777`, mean velocity
+`-0.073140`). Seeds 0 and 1 remain quiet low-motion failures; seeds 4 and 5
+become costly bad commitments.
 
 A bridge oracle now exists as a non-agent witness, not doctrine:
 `.venv/bin/python tools/bridge_oracle_cem.py --cem-iters 0 --eval-horizon 5000
@@ -85,8 +97,11 @@ bridge credit kept full actor support but starved behavior (`10k` Oak mean
 also rejected (`10k` mean `-92.077`); and the narrower all-continue refresh
 failed the 50k screen (`-498.482` mean, `2/10` positive return) versus the
 walking checkpoint's 60k heartbeat (`+596.453` mean, `4/10` positive return).
-The lesson is sharper now: keeping support alive is not enough if it erases the
-hard commitment that discovers the gait.
+Reward-signed resource utility was also rejected (`50k` mean `-771.168`, seed
+3 only `+548.251`), as was stale-search refresh on all-continue plus zero
+model-priority (`50k` mean `-1199.252`, NF total `2`). The lesson is sharper
+now: keeping support alive or waking silent options is not enough if it erases
+the hard commitment that discovers the gait or wakes bad commitments too early.
 
 Host health note: long runs exposed resident-memory drift in the benchmark
 worker. `Sources/Main.swift` now wraps each measured worker step in an
