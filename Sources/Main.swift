@@ -410,21 +410,23 @@ func metricsRoot() -> URL {
     let run = Run(obsDim: env.obsDim)
     let hb = max(steps / 10, 1)
     while run.steps < steps {
-      let next = run.steps + 1
-      let heartbeat = run.steps / hb < next / hb
-      let end = next == steps
-      let s = try engine?.step(env, capture: heartbeat || end)
-      if let e = engine {
+      try autoreleasepool {
+        let next = run.steps + 1
+        let heartbeat = run.steps / hb < next / hb
+        let end = next == steps
+        let s = try engine?.step(env, capture: heartbeat || end)
+        if let e = engine {
           try env.stepOak(e.policy, e.options, e.rank)
-      } else if p == .zero {
-        try env.stepZero()
-      } else {
-        try env.stepRandom()
-      }
-      try run.note(env, s)
-      if heartbeat {
-        run.pulse += 1
-        try writeMetric(env, p, seed, steps, run, run.pulse, root)
+        } else if p == .zero {
+          try env.stepZero()
+        } else {
+          try env.stepRandom()
+        }
+        try run.note(env, s)
+        if heartbeat {
+          run.pulse += 1
+          try writeMetric(env, p, seed, steps, run, run.pulse, root)
+        }
       }
     }
     try writeMetric(env, p, seed, steps, run, nil, root)
