@@ -1128,7 +1128,7 @@ more interesting; the Plan order matters.
 
 | Priority | Item | Status now | Why it comes here | Next decision |
 |---:|---|---|---|---|
-| 0 | Measurement hygiene | Active rule | A stale Metal library can completely corrupt health metrics. | Rebuild Metal after every kernel edit; never interpret a run whose metallib predates `Sources/OakKernel.metal`. |
+| 0 | Measurement hygiene | Active rule | A stale Metal library can completely corrupt health metrics. | Rebuild Metal after every kernel edit; the benchmark now refuses to run when `.build/OakKernel.metallib` predates `Sources/OakKernel.metal`. |
 | 1 | Walking-stability contract | **Active hard gate** | OaK now has a real high-return walking mode. The next risk is accidentally deleting it while chasing calmer diagnostics. | Any candidate must preserve the seed-3-scale high gait at 50k/300k and improve positive-velocity/positive-return seed coverage. "Less negative than random" is no longer enough. |
 | 2 | Step 2 feature resource audit | **Open architecture gap** | Feature discovery precedes stable traces, models, and option selection in the Plan. | Add diversity/decorrelation and utility-transfer diagnostics before adding more feature churn. |
 | 3 | Step 8 one-step model retry | **Rolled back, redesign required** | The model learned finite predictions but reduced K1 reward on `8/10` seeds and did not create a usable planning signal. | Retry only as an isolated value-relevance/search-control substrate, not as the old L1 heads coupled directly into utility and planning. |
@@ -1597,6 +1597,8 @@ Kernel build hygiene:
   and `xcrun -sdk macosx metallib .build/OakKernel.air -o .build/OakKernel.metallib`.
 - Before interpreting any smoke or paired run, verify `.build/OakKernel.metallib`
   is newer than `Sources/OakKernel.metal`.
+- `OaK benchmark` also checks this at engine startup and exits with a stale
+  Metal-library error instead of silently running an old kernel.
 
 ## Optimization Contract
 
