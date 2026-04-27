@@ -34,6 +34,9 @@ struct KernelStats {
     float modelPriorityMax;
     float selectedOptionAge, selectedOptionDuration, selectedOptionPriority;
     float keyboardL1, actorAdvantageL1;
+    float selectedOptionIndex, keyboardOrigin;
+    float selectedOptionFeature, selectedContinuation, selectedKeyboardWeight;
+    float mainTd, planTdValue;
 };
 
 inline float safe_w(float old_w, float new_w) { return isfinite(new_w) ? new_w : old_w; }
@@ -151,6 +154,10 @@ inline Ctx make_ctx(device float *params, device float *stateArena, device uint 
 
 inline device float *state_at(Ctx ctx, uint slot) { return ctx.state + slot * ctx.R; }
 inline float decode_duration(float raw) { return isfinite(raw) ? max(1.0f, raw) : 1.0f; }
+inline bool usable_priority(float p) { return isfinite(p) && p >= 0.0f; }
+inline bool usable_duration(Ctx ctx, float d) {
+    return isfinite(d) && d > 0.0f;
+}
 inline uint linear_input_width(Ctx ctx) { return (ctx.traceLevels + 1u) * ctx.O + ctx.D + ctx.K + 2u; }
 
 inline float standardized_obs(Ctx ctx, uint o) {
@@ -170,7 +177,19 @@ inline float linear_input(Ctx ctx, uint idx) {
     uint tail = idx - obsSpan;
     if (tail < ctx.D) return ctx.actionSignal[tail];
     tail -= ctx.D;
-    if (tail < ctx.K) return ctx.keyboard[tail];
+    if (tail < ctx.K) {
+        float w = ctx.keyboard[tail];
+        if (!isfinite(w)) return 0.0f;
+        if ((ctx.keyboardOrigin[0] % 3u) == 2u) {
+            float norm = 0.0f;
+            for (uint k = 0u; k < ctx.K; ++k) {
+                float wk = ctx.keyboard[k];
+                if (isfinite(wk)) norm += fabs(wk);
+            }
+            if (norm > float(ctx.K * ctx.K)) return w / norm;
+        }
+        return w;
+    }
     if (tail == ctx.K) return ctx.reward[0];
     return 1.0f;
 }
@@ -273,10 +292,12 @@ inline void oak_keyboard_predict_body(Ctx ctx, uint tid,
             }
         }
         float zStop = vCurrG - ctx.valueW[feat] * tgCurr[feat] + ctx.bonusW[feat] * tgCurr[feat];
+        bool rrFinite = isfinite(psiPrev) && isfinite(psiNext) && isfinite(zStop);
+        if (!rrFinite) ctx.counters[OAK_CNT_TDPSI_NF] += 1u;
         float beta = (isfinite(psiNext) && isfinite(zStop) && zStop >= psiNext) ? 1.0f : 0.0f;
         float cont = 1.0f - beta;
         ctx.continuation[tid] = cont;
-        float dPsi = rewardC + cont * psiNext + beta * zStop - psiPrev;
+        float dPsi = rrFinite ? (rewardC + cont * psiNext + beta * zStop - psiPrev) : 0.0f;
         if (!isfinite(dPsi)) {
             dPsi = 0.0f;
             ctx.counters[OAK_CNT_TDPSI_NF] += 1u;
@@ -303,12 +324,16 @@ inline void oak_keyboard_predict_body(Ctx ctx, uint tid,
             vModel = fma(ctx.valueW[j], nHat, vModel);
             direction = fma(nHat - tgCurr[j], tgCurr[j] - tgPrev[j], direction);
         }
+        bool modelFinite = isfinite(rHat) && isfinite(lRaw) && isfinite(vModel);
         float dur = decode_duration(lRaw);
+        bool durationTrusted = usable_duration(ctx, dur);
+        bool modelTrusted = usable_priority(ctx.prioOpt[tid]);
         float q = rHat - tgScalars[11] * dur + vModel;
         float qAdv = q - vCurr;
+        bool queryTrusted = rrFinite && modelTrusted && modelFinite && durationTrusted && isfinite(qAdv);
         ctx.durationHat[tid] = dur;
-        tgG[tid] = isfinite(qAdv) ? qAdv : 0.0f;
-        tgDir[tid] = isfinite(direction) ? direction : 0.0f;
+        tgG[tid] = queryTrusted ? qAdv : 0.0f;
+        tgDir[tid] = (queryTrusted && isfinite(direction)) ? direction : 0.0f;
         float effort = 0.0f;
         for (uint d = 0u; d < ctx.D; ++d) {
             float mu = ctx.optionPolicyMean[tid * ctx.D + d];
@@ -345,10 +370,10 @@ inline void oak_keyboard_predict_body(Ctx ctx, uint tid,
             termSum += tgTerm[k];
             float qAdv = tgG[k];
             if (!isfinite(qAdv)) qAdv = 0.0f;
-            float modelErr = ctx.prioOpt[k];
-            bool usableModel = isfinite(modelErr);
             float dur = ctx.durationHat[k];
             if (!isfinite(dur) || dur <= 0.0f) dur = 1.0f;
+            float modelErr = ctx.prioOpt[k];
+            bool usableModel = usable_priority(modelErr) && usable_duration(ctx, dur);
             float score = usableModel ? ((qAdv - modelErr) / dur) : -FLT_MAX;
             meanQ += (usableModel && isfinite(score)) ? score : 0.0f;
             if (usableModel) maxScorePrio = max(maxScorePrio, modelErr);
@@ -364,14 +389,22 @@ inline void oak_keyboard_predict_body(Ctx ctx, uint tid,
             float w = ctx.keyboard[k];
             if (isfinite(w)) prevMag += fabs(w);
         }
+        bool hasKeyboardCommitment = prevMag > 0.0f;
         float actorMass = 0.0f;
         float maxDur = 0.0f;
+        float impSum = 0.0f, impSq = 0.0f;
         for (uint k = 0u; k < ctx.K; ++k) {
             float a = ctx.actorAdv[k];
             if (isfinite(a)) actorMass += fabs(a);
+            float imp = ctx.importance[k];
+            if (isfinite(imp) && imp > 0.0f) {
+                impSum += imp;
+                impSq = fma(imp, imp, impSq);
+            }
             float d = ctx.durationHat[k];
             if (isfinite(d)) maxDur = max(maxDur, d);
         }
+        ctx.stats->importanceEss = (impSq > 0.0f) ? ((impSum * impSum) / (float(ctx.K) * impSq)) : 0.0f;
         bool durationGrounded = maxDur <= float(ctx.stepCount + 1u);
         bool deadCreditRefresh = termSum <= 0.0f && actorMass <= 0.0f && durationGrounded;
         float prevDur = ctx.durationHat[prevSel];
@@ -383,12 +416,42 @@ inline void oak_keyboard_predict_body(Ctx ctx, uint tid,
             && prevMag < float(ctx.K) && prevDur < float(ctx.K);
         uint origin = ctx.keyboardOrigin[0] % 3u;
         bool lowMassKeyboard = prevMag < float(ctx.K);
-        bool hasKeyboardCommitment = prevMag > 0.0f;
-        bool quietRescue = lowMassKeyboard && maxScorePrio > float(ctx.K * ctx.K) && termSum <= 1.0f;
+        bool finiteQuietBlowup = hasKeyboardCommitment
+            && prevMag > float(ctx.K * ctx.K * ctx.K)
+            && maxScorePrio > prevMag
+            && prevDur > float(ctx.K)
+            && termSum <= 1.0f
+            && ctx.scalars->rho < 0.0f;
+        bool selectedStale = ctx.scalars->rho < 0.0f
+            && termSum <= 0.0f
+            && actorMass <= 0.0f
+            && hasKeyboardCommitment
+            && origin == 2u;
+        bool selectedInvalid = selectedStale
+            || !usable_priority(ctx.prioOpt[prevSel]);
+        bool invalidQuietRescue = selectedInvalid && continuing && hasKeyboardCommitment
+            && termSum <= 1.0f && actorMass <= 0.0f;
+        bool staleQuietRescue = selectedStale && continuing && hasKeyboardCommitment
+            && termSum <= 1.0f;
+        bool ungroundedInvalidCommitment = selectedInvalid && continuing && hasKeyboardCommitment
+            && prevMag > float(ctx.stepCount + 1u);
+        bool quietPath = (finiteQuietBlowup || invalidQuietRescue || staleQuietRescue
+            || ungroundedInvalidCommitment) && !activeShortKeyboard;
+        bool relativeSupportLocked = origin == 2u
+            && negativeRate
+            && (ctx.td[0] > 0.0f || broadTermination)
+            && ctx.stats->importanceEss <= 2.0f * ctx.invK
+            && hasKeyboardCommitment
+            && !quietPath
+            && !activeShortKeyboard;
+        if (relativeSupportLocked) selected = prevSel;
+        bool quietRescue = (lowMassKeyboard && maxScorePrio > float(ctx.K * ctx.K) && termSum <= 1.0f)
+            || quietPath;
         bool refreshKeyboard = !continuing || prevMag <= 0.0f || deadCreditRefresh
-            || (continuing && activeShortKeyboard);
+            || (continuing && activeShortKeyboard) || quietPath;
+        if (relativeSupportLocked) refreshKeyboard = false;
         bool rawEligible = refreshKeyboard && hasKeyboardCommitment
-            && (activeShortKeyboard || (origin == 1u && !lowMassKeyboard));
+            && (activeShortKeyboard || (!quietPath && origin == 1u && !lowMassKeyboard));
         bool relativeEligible = refreshKeyboard && !rawEligible
             && hasKeyboardCommitment && (quietRescue || origin == 2u);
         float bankEffort = 0.0f;
@@ -435,16 +498,22 @@ inline void oak_keyboard_predict_body(Ctx ctx, uint tid,
             float modelErr = ctx.prioOpt[k];
             float dur = ctx.durationHat[k];
             if (!isfinite(dur) || dur <= 0.0f) dur = 1.0f;
-            float lam = isfinite(modelErr) ? ((qAdv - modelErr) / dur - meanQ) : 0.0f;
+            bool queryTrusted = usable_priority(modelErr) && usable_duration(ctx, ctx.durationHat[k]);
+            float lam = (queryTrusted && !quietPath) ? ((qAdv - modelErr) / dur - meanQ) : 0.0f;
             if (useRaw || useRelative) {
                 float effort = isfinite(tgEffort[k]) ? tgEffort[k] : 0.0f;
                 float denom = useRaw ? max(effort + ctx.invR, ctx.invR)
                                      : max(bankEffort + effort + ctx.invR, ctx.invR);
                 float dScore = tgDir[k] / denom;
                 if (!isfinite(dScore)) dScore = 0.0f;
-                lam = useRaw ? (dScore - rawMean) : ((dScore - relativeMean) / relativeAbs);
+                lam = useRaw ? (dScore - rawMean) : (dScore - relativeMean);
             }
             if (!isfinite(lam)) lam = 0.0f;
+            if (!queryTrusted) {
+                float incumbent = ctx.keyboard[k];
+                lam = (refreshKeyboard && hasKeyboardCommitment && !quietPath && isfinite(incumbent))
+                    ? incumbent : 0.0f;
+            }
             if (refreshKeyboard) ctx.keyboard[k] = lam;
             mag += fabs(lam);
         }
@@ -490,6 +559,13 @@ inline void oak_keyboard_predict_body(Ctx ctx, uint tid,
         ctx.stats->selectedOptionPriority = isfinite(sPrio) ? sPrio : 0.0f;
         ctx.stats->keyboardL1 = keyL1;
         ctx.stats->actorAdvantageL1 = advL1;
+        ctx.stats->selectedOptionIndex = float(sOpt);
+        ctx.stats->keyboardOrigin = float(ctx.keyboardOrigin[0] % 3u);
+        ctx.stats->selectedOptionFeature = float(ctx.optFeature[sOpt] % ctx.R);
+        ctx.stats->selectedContinuation = ctx.continuation[sOpt];
+        ctx.stats->selectedKeyboardWeight = isfinite(ctx.keyboard[sOpt]) ? ctx.keyboard[sOpt] : 0.0f;
+        ctx.stats->mainTd = ctx.td[0];
+        ctx.stats->planTdValue = ctx.planTd[0];
 
     }
 }
@@ -637,11 +713,15 @@ kernel void oak_plan(device float *params [[buffer(0)]],
         if (!isfinite(dTd)) dTd = 0.0f;
         ctx.optRewardTd[k] = rTd;
         ctx.durationTd[k] = dTd;
-        ctx.durationHat[k] = decode_duration(lRaw);
+        float dur = decode_duration(lRaw);
+        ctx.durationHat[k] = dur;
         float modelErr = nErr + rTd * rTd + (ctx.scalars->rho * dTd) * (ctx.scalars->rho * dTd);
         if (modelFinite && isfinite(modelErr)) {
             ctx.prioOpt[k] = sqrt(max(modelErr, 0.0f));
         } else {
+            float debt = fabs(ctx.prioOpt[k]);
+            if (!isfinite(debt) || debt <= 0.0f) debt = 1.0f;
+            ctx.prioOpt[k] = -debt;
             ctx.counters[OAK_CNT_PLAN_NF] += 1u;
         }
     }
@@ -697,6 +777,9 @@ kernel void oak_learn_heads(device float *params [[buffer(0)]],
         uint k = gid / (ctx.D * ctx.R);
         uint rem = gid - k * ctx.D * ctx.R;
         uint d = rem / ctx.R, i = rem % ctx.R;
+        bool relativeSupportCollapsed = (ctx.keyboardOrigin[0] % 3u) == 2u
+            && ctx.stats->importanceEss <= ctx.invK;
+        if (relativeSupportCollapsed) return;
         float rho = ctx.importance[k];
         if (!isfinite(rho)) rho = 0.0f;
         float w = ctx.optPolicy[(k * ctx.D + d) * ctx.R + i];
@@ -880,7 +963,7 @@ kernel void oak_replace(device float *params [[buffer(0)]],
             if (!isfinite(util)) util = 0.0f;
 	            float red = fabs(tgCurrState[i] * tgCurrState[pa]);
             if (!isfinite(red)) red = 0.0f;
-	            float optionUse = 0.0f;
+            float optionUse = 0.0f;
             for (uint k = 0u; k < ctx.K; ++k) {
                 if ((ctx.optFeature[k] % ctx.R) != i) continue;
                 float use = ctx.utilOpt[k] + fabs(ctx.keyboard[k]);
@@ -955,14 +1038,14 @@ kernel void oak_replace(device float *params [[buffer(0)]],
 	        ctx.betaPsi[worst] = log(ctx.alphaPsi[worst]); ctx.hPsi[worst] = 0.0f; ctx.gradEnergyPsi[worst] = 0.0f;
 		        ctx.alphaModel[worst] = ctx.invR;
 	        ctx.betaModel[worst] = log(ctx.alphaModel[worst]); ctx.hModel[worst] = 0.0f; ctx.gradEnergyModel[worst] = 0.0f;
-	        uint k = 0u;
-	        float worstBasis = FLT_MAX;
-	        for (uint ok = 0u; ok < ctx.K; ++ok) {
-		            float use = ctx.utilOpt[ok] + ctx.prioOpt[ok];
-	            if (!isfinite(use)) use = FLT_MAX;
-	            if (ctx.optFeature[ok] == worst) { k = ok; worstBasis = -FLT_MAX; break; }
-	            if (use < worstBasis) { worstBasis = use; k = ok; }
-	        }
+        uint k = 0u;
+        float worstBasis = FLT_MAX;
+        for (uint ok = 0u; ok < ctx.K; ++ok) {
+            float use = ctx.utilOpt[ok] + ctx.prioOpt[ok];
+            if (!isfinite(use)) use = FLT_MAX;
+            if (ctx.optFeature[ok] == worst) { k = ok; worstBasis = -FLT_MAX; break; }
+            if (use < worstBasis) { worstBasis = use; k = ok; }
+        }
 			        ctx.optAge[k] = 0u; ctx.optFeature[k] = worst; ctx.utilOpt[k] = float(ctx.R);
 		        ctx.actorAdv[k] = 0.0f;
 			        for (uint i = 0u; i < ctx.R; ++i) {

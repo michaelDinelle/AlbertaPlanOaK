@@ -36,6 +36,8 @@ struct KernelStats {
   var oakOptionReinitCount, oakFeatureReinitCount, terminationRate, optionDurationMean: Float
   var importanceEss, actorUpdateNormMean, actorSupportEntropy, modelPriorityMax: Float
   var selectedOptionAge, selectedOptionDuration, selectedOptionPriority, keyboardL1, actorAdvantageL1: Float
+  var selectedOptionIndex, keyboardOrigin: Float
+  var selectedOptionFeature, selectedContinuation, selectedKeyboardWeight, mainTd, planTdValue: Float
 }
 
 func root(_ p: String) -> URL {
@@ -47,6 +49,17 @@ func require(_ p: String, _ what: String) throws -> URL {
     throw err("Missing \(what). Run ./setup.sh first.")
   }
   return u
+}
+func requireFreshMetallib() throws -> URL {
+  let lib = try require(".build/OakKernel.metallib", "non-empty Metal library")
+  let src = root("Sources/OakKernel.metal")
+  let fm = FileManager.default
+  let libTime = try fm.attributesOfItem(atPath: lib.path)[.modificationDate] as? Date
+  let srcTime = try fm.attributesOfItem(atPath: src.path)[.modificationDate] as? Date
+  if let libTime, let srcTime, libTime < srcTime {
+    throw err("Stale Metal library. Rebuild with `xcrun -sdk macosx metal -fno-fast-math -c Sources/OakKernel.metal -o .build/OakKernel.air && xcrun -sdk macosx metallib .build/OakKernel.air -o .build/OakKernel.metallib`.")
+  }
+  return lib
 }
 func envError(_ raw: Raw?) -> String {
   oakError(raw).map { String(cString: $0) } ?? "native env error"
@@ -172,7 +185,7 @@ final class Engine {
     }
     q = cq
     let lib = try dev.makeLibrary(
-      URL: try require(".build/OakKernel.metallib", "non-empty Metal library"))
+      URL: try requireFreshMetallib())
     pipes = try ["oak_encode", "oak_plan", "oak_learn_heads", "oak_replace", "oak_action_emit"].map
     { try dev.makeComputePipelineState(function: lib.makeFunction(name: $0)!) }
     let maxTG = pipes.map(\.maxTotalThreadsPerThreadgroup).min() ?? rank
@@ -313,6 +326,13 @@ final class Run {
       h["selectedOptionPriority"] = s.selectedOptionPriority.isFinite ? Double(s.selectedOptionPriority) : NSNull()
       h["keyboardL1"] = s.keyboardL1.isFinite ? Double(s.keyboardL1) : NSNull()
       h["actorAdvantageL1"] = s.actorAdvantageL1.isFinite ? Double(s.actorAdvantageL1) : NSNull()
+      h["selectedOptionIndex"] = s.selectedOptionIndex.isFinite ? Double(s.selectedOptionIndex) : NSNull()
+      h["keyboardOrigin"] = s.keyboardOrigin.isFinite ? Double(s.keyboardOrigin) : NSNull()
+      h["selectedOptionFeature"] = s.selectedOptionFeature.isFinite ? Double(s.selectedOptionFeature) : NSNull()
+      h["selectedContinuation"] = s.selectedContinuation.isFinite ? Double(s.selectedContinuation) : NSNull()
+      h["selectedKeyboardWeight"] = s.selectedKeyboardWeight.isFinite ? Double(s.selectedKeyboardWeight) : NSNull()
+      h["mainTd"] = s.mainTd.isFinite ? Double(s.mainTd) : NSNull()
+      h["planTd"] = s.planTdValue.isFinite ? Double(s.planTdValue) : NSNull()
     }
     if !envInfo.isEmpty {
       h["envInfo"] = Dictionary(uniqueKeysWithValues: envInfo.sorted { $0.key < $1.key }.map {
