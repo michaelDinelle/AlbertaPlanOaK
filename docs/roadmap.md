@@ -68,6 +68,46 @@ tables, `oneReward`, `psiCross`, signed-keyboard lambda machinery, cached
 keyboard scores, and deep diagnostic ownership remain deleted because they were
 finite scale paths or shadow bookkeeping without earned control value.
 
+Architecture hygiene update: the kernel now names the FC-STOMP loop explicitly
+inside the existing five-dispatch shape. The live sections are
+`FeatureConstruction`, `GVFPrediction`, `RewardRespectingSubtasks`,
+`OptionPolicies`, `OptionModels`, `Planning`, `OptionKeyboard`,
+`SearchControl`, `GenerateAndTest`, and `ActionEmission`. `OAK_ABLATE` creates
+specialized Metal function-constant variants for each section/coupling and
+benchmark JSON is now `schemaVersion: 7` with `ablation` and `ablationLabel`.
+The first 50k focus smoke of the behavior-preserving default
+(`.oak-benchmarks/fcstomp-named-ablation-50k-v3`) preserved the seed-3 rocket
+at `+12351.967`, had positive velocity in `5/5` focus seeds, and kept NF at
+zero. A failed intermediate version that fed normalized keyboard responsibility
+into default representation/utility killed seed 3 by 50k; keep normalized
+responsibility as diagnostic/search evidence until a full keyboard
+chord-descriptor mechanism earns paired behavior evidence.
+
+First ablation use, `.oak-benchmarks/step11-ablation-focus50k-*`: the named
+section matrix turns the walking checkpoint into a sharper Step-11 diagnosis.
+Against `OAK_ABLATE=none` on focus seeds `0,1,3,7,8` at 50k, every Plan-spine
+ablation loses the seed-3 rocket, and the largest cliffs are the keyboard
+interfaces: `keyboard-to-policy` mean delta `-24916.6`, `option-keyboard`
+mean delta `-12569.1`, and `model-to-keyboard` seed-3 delta `-14237.6`.
+Disabling `search-control` improves seed 1 by `+242.3` but kills seed 3 by
+`-12570.5` and seed 8 by `-2424.5`, proving search control is a real but
+too-blunt coupling. Disabling `generate-and-test` keeps some of seed 3
+(`+6202.6`) but destroys seed 8 (`-7385.5`), so replacement is helping
+coverage even though it is not yet a full utility loop. Conclusion: do not
+remove organs. The next orthodox patch must improve the OptionKeyboard /
+SearchControl / GenerateAndTest interface around cumulant/value-space
+composition and bundle usefulness; isolated calming, direct interruption, or
+policy-output scaling is now even more clearly patch-and-pray.
+
+Performance caveat resolved: the first schema-7 diagnostics computed normalized
+keyboard responsibility by recomputing chord L1 inside option loops. This was
+only diagnostic, but it made the hot-path audit unnecessarily O(K^2). The
+follow-up `fcstomp-ablation-okdiag-50k` rewrite computes the same
+`searchControlUseMean` with one chord norm and records `keyboardEffectiveL1`
+directly from chord mass. It preserves exact 50k behavior parity on seeds
+`0,1,3,7,8` and raises measured mean SPS from `2381.0` to `2892.3` in that
+focus screen.
+
 Operational lesson from the first walking loop: changes that reduce commitment
 or "calm" the controller can look cleaner at 10k while deleting the high-return
 gait by 50k/300k. Pure-Q behavior selection, score-based interruption,

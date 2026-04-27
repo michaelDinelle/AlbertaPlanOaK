@@ -38,6 +38,38 @@ struct KernelStats {
   var selectedOptionAge, selectedOptionDuration, selectedOptionPriority, keyboardL1, actorAdvantageL1: Float
   var selectedOptionIndex, keyboardOrigin: Float
   var selectedOptionFeature, selectedContinuation, selectedKeyboardWeight, mainTd, planTdValue: Float
+  var keyboardSketchDim, keyboardEffectiveL1, searchControlUseMean, generateTestEligibleCount: Float
+}
+
+struct AblationSpec {
+  static let ordered = [
+    "feature-construction", "gvf-prediction", "rr-subtasks", "option-policies",
+    "option-models", "planning", "option-keyboard", "model-to-keyboard",
+    "keyboard-to-policy", "search-control", "search-to-generate-test", "generate-and-test",
+  ]
+  let names: [String]
+  var label: String { names.isEmpty ? "none" : names.joined(separator: ",") }
+  static func fromEnv(_ env: [String: String] = ProcessInfo.processInfo.environment) throws
+    -> AblationSpec
+  {
+    let raw = env["OAK_ABLATE"] ?? "none"
+    var seen = Set<String>()
+    for item in raw.split(separator: ",") {
+      let name = String(item).trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+      if name.isEmpty || name == "none" { continue }
+      guard ordered.contains(name) else {
+        throw err("Unknown OAK_ABLATE entry '\(name)'. Known: none,\(ordered.joined(separator: ","))")
+      }
+      seen.insert(name)
+    }
+    return AblationSpec(names: Array(seen).sorted())
+  }
+  func apply(to constants: MTLFunctionConstantValues) {
+    for (idx, name) in Self.ordered.enumerated() {
+      var enabled = names.contains(name)
+      constants.setConstantValue(&enabled, type: .bool, index: idx)
+    }
+  }
 }
 
 func root(_ p: String) -> URL {
@@ -176,7 +208,7 @@ final class Engine {
     tgBytes: Int
   var policy: UnsafePointer<Float> { UnsafePointer(state.p + a.policy) }
   var options: UnsafePointer<Float> { UnsafePointer(state.p + a.options) }
-  init(_ env: Env, _ dev: MTLDevice) throws {
+  init(_ env: Env, _ dev: MTLDevice, _ ablations: AblationSpec) throws {
     rank = max(env.obsDim, env.dPolicy * 2, 2)
     d = env.dPolicy
     a = Arena(env.obsDim, rank, d)
@@ -186,8 +218,12 @@ final class Engine {
     q = cq
     let lib = try dev.makeLibrary(
       URL: try requireFreshMetallib())
-    pipes = try ["oak_encode", "oak_plan", "oak_learn_heads", "oak_replace", "oak_action_emit"].map
-    { try dev.makeComputePipelineState(function: lib.makeFunction(name: $0)!) }
+    let constants = MTLFunctionConstantValues()
+    ablations.apply(to: constants)
+    pipes = try ["oak_encode", "oak_plan", "oak_learn_heads", "oak_replace", "oak_action_emit"].map {
+      let fn = try lib.makeFunction(name: $0, constantValues: constants)
+      return try dev.makeComputePipelineState(function: fn)
+    }
     let maxTG = pipes.map(\.maxTotalThreadsPerThreadgroup).min() ?? rank
     guard rank <= maxTG else {
       throw err("Rank \(rank) exceeds device threadgroup capacity \(maxTG).")
@@ -333,6 +369,11 @@ final class Run {
       h["selectedKeyboardWeight"] = s.selectedKeyboardWeight.isFinite ? Double(s.selectedKeyboardWeight) : NSNull()
       h["mainTd"] = s.mainTd.isFinite ? Double(s.mainTd) : NSNull()
       h["planTd"] = s.planTdValue.isFinite ? Double(s.planTdValue) : NSNull()
+      h["keyboardSketchDim"] = s.keyboardSketchDim.isFinite ? Double(s.keyboardSketchDim) : NSNull()
+      h["keyboardEffectiveL1"] = s.keyboardEffectiveL1.isFinite ? Double(s.keyboardEffectiveL1) : NSNull()
+      h["searchControlUseMean"] = s.searchControlUseMean.isFinite ? Double(s.searchControlUseMean) : NSNull()
+      h["generateTestEligibleCount"] =
+        s.generateTestEligibleCount.isFinite ? Double(s.generateTestEligibleCount) : NSNull()
     }
     if !envInfo.isEmpty {
       h["envInfo"] = Dictionary(uniqueKeysWithValues: envInfo.sorted { $0.key < $1.key }.map {
@@ -369,10 +410,12 @@ func stem(_ env: String, _ p: Policy, _ seed: Int) -> String {
   "\(env)-\(p.rawValue)-seed\(seed)"
 }
 func writeMetric(
-  _ env: Env, _ p: Policy, _ seed: Int, _ stop: Int, _ r: Run, _ seq: Int?, _ root: URL
+  _ env: Env, _ p: Policy, _ seed: Int, _ stop: Int, _ r: Run, _ seq: Int?, _ root: URL,
+  _ ablations: AblationSpec
 ) throws {
   var m: [String: Any] = [
-    "schemaVersion": 6, "command": "benchmark", "envId": env.envId, "policy": p.rawValue,
+    "schemaVersion": 7, "command": "benchmark", "envId": env.envId, "policy": p.rawValue,
+    "ablation": ablations.names, "ablationLabel": ablations.label,
     "seed": seed, "numEnvs": 1, "stopAfterMeasuredSteps": stop, "observationDim": env.obsDim,
     "actionDim": env.actDim, "measuredStepCount": r.steps, "measuredSeconds": r.seconds,
     "rewardSum": r.rewardSum, "doneCount": r.done,
@@ -423,10 +466,11 @@ func metricsRoot() -> URL {
     return p
   }
   static func run(_ p: Policy, _ seed: Int, _ steps: Int, _ root: URL, _ envId: String) throws {
+    let ablations = try AblationSpec.fromEnv()
     let env = try Env(envId, seed: seed)
     try env.prepare(p == .oak ? max(env.obsDim, env.dPolicy * 2, 2) : 0)
     try env.reset()
-    let engine = p == .oak ? try Engine(env, MTLCreateSystemDefaultDevice()!) : nil
+    let engine = p == .oak ? try Engine(env, MTLCreateSystemDefaultDevice()!, ablations) : nil
     let run = Run(obsDim: env.obsDim)
     let hb = max(
       ProcessInfo.processInfo.environment["OAK_BENCH_HEARTBEAT_STEPS"].flatMap(Int.init) ?? steps / 10,
@@ -447,11 +491,11 @@ func metricsRoot() -> URL {
         try run.note(env, s)
         if heartbeat {
           run.pulse += 1
-          try writeMetric(env, p, seed, steps, run, run.pulse, root)
+          try writeMetric(env, p, seed, steps, run, run.pulse, root, ablations)
         }
       }
     }
-    try writeMetric(env, p, seed, steps, run, nil, root)
+    try writeMetric(env, p, seed, steps, run, nil, root, ablations)
   }
   static func worker() throws {
     let e = ProcessInfo.processInfo.environment
@@ -491,6 +535,7 @@ func metricsRoot() -> URL {
   }
   static func benchmark() throws {
     let env = ProcessInfo.processInfo.environment
+    let ablations = try AblationSpec.fromEnv(env)
     let fm = FileManager.default
     let envId = env["OAK_BENCH_ENV"] ?? defaultEnv
     let seed0 = env["OAK_BENCH_SEED_START"].flatMap(Int.init) ?? 0
@@ -535,7 +580,7 @@ func metricsRoot() -> URL {
     let conc = max(
       env["OAK_BENCH_CONCURRENCY"].flatMap(Int.init) ?? ProcessInfo.processInfo.processorCount, 1)
     fputs(
-      "OaK benchmark: \(total) \(envId) work items, single-stream B=1, N=\(conc) worker processes (steps=\(steps), seeds=\(seedValues.count), dir=\(dir.path))\n",
+      "OaK benchmark: \(total) \(envId) work items, single-stream B=1, N=\(conc) worker processes (steps=\(steps), seeds=\(seedValues.count), ablation=\(ablations.label), dir=\(dir.path))\n",
       stderr)
     var next = 0
     var done = 0

@@ -45,6 +45,8 @@ Strict current-status audit lives in `docs/roadmap.md`. The literature target is
 - Planning over option models (RR-Subtasks eq. 19 / average-reward option backup).
 - **Option keyboard** = real-valued vector λ ∈ R^K, one component per subtask. Design A: chord blends K component options; model treats chord as opaque descriptor. Design B: chord defines a joint subtask. **Current OaK has a live scalar chord vector used to blend option policies, but it is not a fully operational Option Keyboard.** The unproven `psiCross`/GPE-GPI surrogate was deleted; current behavior is selected by RR continuation plus model-backed average-reward option scores, and emitted action means are a chord blend with selected-option fallback. A fully operational FC-STOMP keyboard/chord-descriptor cycle is an open architecture gap, not a hidden live feature.
 - **Feedback / utility / remove-replace.** Continually assess utility of features, subtasks, options, and option models. Replace what isn't pulling weight (Plan Step 11 + RR-Subtasks §8 FCSTOMP). **Current rebuild has age-gated feature/option-bundle replacement, `optFeature`, feature age, option age, and feature-ever-used metadata; richer utility remains an active research frontier.**
+- **Named FC-STOMP loop / ablations.** `Sources/OakKernel.metal` exposes the live loop vocabulary directly in code: `FeatureConstruction`, `GVFPrediction`, `RewardRespectingSubtasks`, `OptionPolicies`, `OptionModels`, `Planning`, `OptionKeyboard`, `SearchControl`, `GenerateAndTest`, and `ActionEmission`. `OAK_ABLATE` compiles specialized Metal pipeline variants for diagnostic ablations of those sections and couplings; canonical promotion runs use `OAK_ABLATE=none`.
+- **Ablation lesson.** The first 50k focus matrix (`.oak-benchmarks/step11-ablation-focus50k-*`) confirms the live walking mode depends on the whole FC-STOMP loop. The largest losses come from `keyboard-to-policy`, `option-keyboard`, and `model-to-keyboard`; `search-control` can help a quiet seed while killing the rocket. Treat this as evidence for a richer cumulant/value-space keyboard and bundle-utility loop, not as permission to delete organs.
 
 ### Current empirical status (2026-04-26)
 
@@ -148,6 +150,8 @@ oak_encode → oak_plan → oak_learn_heads → oak_replace → oak_action_emit
 | `oak_learn_heads` | Updates value, psi, option policy, and option reward/transition/duration using exact one-step ratios and wrapper-provided target-option score gradients. |
 | `oak_replace` → `oak_action_emit` | Commits utility/meta-learning diagnostics and age/capacity-gated replacements, then emits all option policy means after a dispatch boundary so action emission cannot race replacement writes. |
 
+The dispatch shape stays fixed, but the internal design pattern is the named FC-STOMP loop: `FeatureConstruction -> GVFPrediction -> RewardRespectingSubtasks -> OptionPolicies -> OptionModels -> Planning -> OptionKeyboard -> SearchControl -> GenerateAndTest -> ActionEmission`.
+
 ### Action interface (Inv-1)
 
 Each env declares one structured action spec: `Discrete N` (categorical) or `Box A` (continuous with `[low, high]` bounds). The integer `D_policy = component_param_count` is the agent's only window into the env's action structure.
@@ -162,9 +166,9 @@ Adding a new env or action-space shape requires adding to `ActionSpec` in Swift;
 
 ## Run metrics JSON
 
-Each benchmark worker writes one pretty-printed JSON file with stable alphabetical key order (`schemaVersion: 6`).
+Each benchmark worker writes one pretty-printed JSON file with stable alphabetical key order (`schemaVersion: 7`).
 
-**Top-level keys:** `command`, `envId`, `policy`, `seed`, `numEnvs` (always 1 — single-stream), `stopAfterMeasuredSteps`, `observationDim`, `actionDim`, `actionDiscreteCount` (when discrete), `measuredStepCount`, `measuredSeconds`, `stepsPerSecond`, `rewardSum`, `doneCount`, `stopReason`, `heartbeatSequence`, and `health`.
+**Top-level keys:** `schemaVersion`, `command`, `envId`, `policy`, `ablation`, `ablationLabel`, `seed`, `numEnvs` (always 1 — single-stream), `stopAfterMeasuredSteps`, `observationDim`, `actionDim`, `actionDiscreteCount` (when discrete), `measuredStepCount`, `measuredSeconds`, `stepsPerSecond`, `rewardSum`, `doneCount`, `stopReason`, `heartbeatSequence`, and `health`.
 
 **`health` block.** Symmetric across policies. Host-computable fields are populated for ANY policy (`oak`, `zero`, or `random`):
 
@@ -177,7 +181,7 @@ Kernel-side fields are populated only for `oak`:
 
 - `oakOptionReinitCountFinal`, `oakFeatureReinitCountFinal` — cumulative age-gated generate-and-test replacement counts.
 - `nonFiniteByPhase` = `{"encode": N, "learn": N, "plan": N, "tdPsi": N}` — per-phase NF counts. **Healthy = all zeros across the run.**
-- Search/model diagnostics: `modelPriorityMax`, `optionDurationMean`, `terminationRate`, `selectedOptionAge`, `selectedOptionDuration`, `selectedOptionPriority`, `keyboardL1`.
+- Search/model/keyboard diagnostics: `modelPriorityMax`, `optionDurationMean`, `terminationRate`, `selectedOptionAge`, `selectedOptionDuration`, `selectedOptionPriority`, `keyboardL1`, `keyboardEffectiveL1`, `keyboardSketchDim`, `searchControlUseMean`, `generateTestEligibleCount`.
 - Actor/support diagnostics: `importanceEss`, `actorUpdateNormMean`, `actorSupportEntropy`, `actorAdvantageL1`.
 
 **Storage.** Default directory `.oak-benchmarks/<run-id>/`, with `<run-root>/<envId>/seed<N>/<stem>.json` for finals and `<stem>.heartbeat-NNNNNN.json` for pulses. Override the run root with `OAK_METRICS_STORAGE`.
@@ -190,7 +194,7 @@ Use `python3 tools/bench_gate.py <keeper-root> <candidate-root>` as the default 
 
 The working goal is stable 10/10 HalfCheetah walking without bloating the policy or violating FC-STOMP. The loop is architecture-first, evidence-fast:
 
-1. State the FC-STOMP organ being changed before editing: feedback/search control, option keyboard/chord descriptor, option model, utility/remove-replace, or actor emission. A candidate that cannot name the organ is patch-and-pray.
+1. State the FC-STOMP section being changed before editing: feature construction, GVF prediction, RR subtasks, option policies, option models, planning, option keyboard, search control, generate-and-test, or action emission. A candidate that cannot name the section is patch-and-pray.
 2. Keep each behavior patch paired with a keeper-root comparison. Default target screen: `OAK_BENCH_POLICIES=oak`, `OAK_BENCH_SEEDS=0,1,3,8`, 10k with frequent heartbeats, then 50k if not obviously dead. Seed 3 is the rocket-preservation sentinel; seed 8 is the active-backward sentinel; seeds 0/1 are quiet-lock sentinels.
 3. Promote only after the target screen passes `tools/bench_gate.py`, then run Oak-only 300k x 10 seeds. Run `{oak,zero,random}` only for keeper/promotion evidence, bridge audits, and claims about beating baselines.
 4. Reject early if seed 3 loses the high-return path by 50k, seed 8 becomes more backward, or non-finite counts increase, unless the candidate produces broad 10/10 evidence in the same run. Do not average away per-seed collapse.
@@ -203,6 +207,8 @@ The working goal is stable 10/10 HalfCheetah walking without bloating the policy
 | Command | Use |
 |---|---|
 | `OaK benchmark` | Concurrent single-env multi-seed sweep. Each item runs in its own worker process so native env/global state cannot leak across independent streams. `OAK_BENCH_ENV` selects the env (default `HalfCheetah-v4`); `OAK_BENCH_STEPS`, `OAK_BENCH_SEED_COUNT`/`OAK_BENCH_SEEDS`, and `OAK_BENCH_POLICIES` define the workload. `OAK_BENCH_CONCURRENCY` caps worker count; otherwise concurrency is all logical cores, with deterministic refill from the canonical work list. One benchmark launcher owns the workspace at a time; nonempty requested roots get a fresh suffixed output dir. |
+
+`OAK_ABLATE` defaults to `none`. It accepts a comma-separated diagnostic list: `feature-construction`, `gvf-prediction`, `rr-subtasks`, `option-policies`, `option-models`, `planning`, `option-keyboard`, `model-to-keyboard`, `keyboard-to-policy`, `search-control`, `search-to-generate-test`, and `generate-and-test`. These are specialized Metal function-constant variants, not a promoted behavior mode.
 
 There is no deep-diagnostics shadow path in the live engine. Add audit heads only when they earn a Plan role and pass the same speed/learning gates as behavior code.
 
