@@ -29,12 +29,27 @@ struct KernelConfig {
     uint linearAnchorCount;
     float invRank, invOptionCount;
     float metaEta;
+    float rhoMax;       // V-trace-style importance ratio upper clip (FLT_MAX = off)
+    float vDiffMax;     // |v_curr - v_prev| clamp before TD update (FLT_MAX = off)
+    float modelErrMax;  // sqrt(modelErr) clamp before storing as prioOpt (FLT_MAX = off)
+    float betaMax;      // IDBD log-learning-rate cap (FLT_MAX = off)
+    float rescueKeyL1Ratio;  // emission rescue trigger: L1 > ratio * EMA (FLT_MAX = off)
+    float rescueEmaAlpha;    // EMA smoothing factor for keyL1Ema (default 0.001)
+    uint  rescueWarmup;      // ignore trigger before this step count (default UINT_MAX = off)
+    uint  exploreEvery;      // force runner-up every N steps when streak >= N (UINT_MAX = off)
+    uint  exploreWarmup;     // ignore exploration before this step count (default UINT_MAX = off)
+    float replaceAgeDivisor; // G&T: replaceAge = R * max(eligible / divisor, 1) (default 1.0 = original)
 };
 
 struct KernelScalars {
     uint stepCount;
     uint stateSlot;
     float rho;
+    float keyL1Ema;            // EMA of |keyboard| L1, used for rescue trigger
+    uint  keyL1HighStreak;     // consecutive steps with L1 >> ema (informational)
+    uint  keyboardRescueCount; // cumulative rescue trips (exposed via stats)
+    uint  selectedStreak;      // consecutive steps the same option has been selected
+    uint  optionExploreCount;  // cumulative forced runner-up explorations
 };
 
 struct KernelStats {
@@ -52,9 +67,16 @@ struct KernelStats {
     float mainTd, planTdValue;
     float keyboardSketchDim, keyboardEffectiveL1;
     float searchControlUseMean, generateTestEligibleCount;
+    float keyboardRescueCount;
 };
 
 inline float safe_w(float old_w, float new_w) { return isfinite(new_w) ? new_w : old_w; }
+
+// V-trace-style importance clip. Only modifies rho when rhoMax < FLT_MAX.
+// Designed as a tail-add so all original computations preserve their FP order.
+inline float clip_imp(float rho, float rhoMax) {
+    return rhoMax < FLT_MAX ? min(rho, rhoMax) : rho;
+}
 
 inline float track_rate(uint step, uint cap) {
     return max(1.0f / (float(step) + 1.0f), 1.0f / float(max(cap, 1u)));
@@ -65,6 +87,11 @@ struct Ctx {
     uint stepCount, stateSlot;
     float rho;
     float invR, invK, metaEta;
+    float rhoMax, vDiffMax, modelErrMax, betaMax;
+    float rescueKeyL1Ratio, rescueEmaAlpha;
+    uint  rescueWarmup;
+    uint  exploreEvery, exploreWarmup;
+    float replaceAgeDivisor;
     device float *valueW, *psi, *optPolicy, *optReward, *optTransition, *optDuration;
     device float *observation, *observationMean, *obsSM;
     device float *state;
@@ -99,6 +126,14 @@ inline Ctx make_ctx(device float *params, device float *stateArena, device uint 
     c.stepCount = scalars->stepCount; c.stateSlot = scalars->stateSlot;
     c.rho = scalars->rho;
     c.invR = cfg.invRank; c.invK = cfg.invOptionCount; c.metaEta = cfg.metaEta;
+    c.rhoMax = cfg.rhoMax; c.vDiffMax = cfg.vDiffMax;
+    c.modelErrMax = cfg.modelErrMax; c.betaMax = cfg.betaMax;
+    c.rescueKeyL1Ratio = cfg.rescueKeyL1Ratio;
+    c.rescueEmaAlpha = cfg.rescueEmaAlpha;
+    c.rescueWarmup = cfg.rescueWarmup;
+    c.exploreEvery = cfg.exploreEvery;
+    c.exploreWarmup = cfg.exploreWarmup;
+    c.replaceAgeDivisor = cfg.replaceAgeDivisor;
     uint p = 0u;
     c.valueW = params + p; p += c.R;
     c.psi = params + p; p += c.K * c.R;
@@ -222,7 +257,8 @@ inline void metaopt_update_slot(device float *alpha,
                                 float x,
                                 uint age,
                                 float metaEta,
-                                float decay) {
+                                float decay,
+                                float betaMax) {
     if (!isfinite(signal) || !isfinite(x)) return;
     float aOld = alpha[i];
     float hOld = h[i];
@@ -236,6 +272,7 @@ inline void metaopt_update_slot(device float *alpha,
     float normGrad = metaGrad * rsqrt(max(energy[i], 0.0f) + ridge);
     float bOld = beta[i];
     float bNew = bOld + metaEta * normGrad;
+    if (betaMax < FLT_MAX && isfinite(bNew)) bNew = min(bNew, betaMax);
     beta[i] = safe_w(bOld, bNew);
     alpha[i] = safe_w(aOld, exp(beta[i]));
     float curvature = x * x;
@@ -303,7 +340,16 @@ inline void fcstomp_prediction_control_loop(Ctx ctx, uint tid,
     float rhoOld = ctx.scalars->rho;
     float rewardC = ctx.reward[0] - rhoOld;
     if (tid == 0u) {
-        float delta = OAK_ABLATE_GVF_PREDICTION ? 0.0f : (rewardC + vCurrG - vPrevG);
+        float delta;
+        if (OAK_ABLATE_GVF_PREDICTION) {
+            delta = 0.0f;
+        } else if (ctx.vDiffMax < FLT_MAX) {
+            float vDiff = vCurrG - vPrevG;
+            if (isfinite(vDiff)) vDiff = clamp(vDiff, -ctx.vDiffMax, ctx.vDiffMax);
+            delta = rewardC + vDiff;
+        } else {
+            delta = rewardC + vCurrG - vPrevG;
+        }
         if (!isfinite(delta)) { delta = 0.0f; ctx.counters[OAK_CNT_LEARN_NF] += 1u; }
         ctx.td[0] = delta;
         float rhoNew = rhoOld + ctx.invR * delta;
@@ -362,6 +408,7 @@ inline void fcstomp_prediction_control_loop(Ctx ctx, uint tid,
         tgTdPsi[tid] = dPsi;
         float rho = ctx.importance[tid];
         if (!isfinite(rho) || rho < 0.0f) rho = 0.0f;
+        rho = clip_imp(rho, ctx.rhoMax);
         float implicitTrace = psiXX - cont * psiXY;
         float denom = fma(rho, implicitTrace, 1.0f);
         ctx.headDenom[tid] = (isfinite(denom) && denom > 0.0f) ? denom : 0.0f;
@@ -425,8 +472,8 @@ inline void fcstomp_prediction_control_loop(Ctx ctx, uint tid,
 
     // OptionKeyboard + Planning: GPI-style live-option selection and value pressure.
     if (tid == 0u) {
-        uint best = 0u;
-        float bestScore = -FLT_MAX, bestQ = 0.0f;
+        uint best = 0u, second = 0u;
+        float bestScore = -FLT_MAX, bestQ = 0.0f, secondScore = -FLT_MAX;
         float meanQ = 0.0f, maxScorePrio = 0.0f;
         float termSum = 0.0f;
         for (uint k = 0u; k < ctx.K; ++k) {
@@ -442,13 +489,36 @@ inline void fcstomp_prediction_control_loop(Ctx ctx, uint tid,
             float score = usableModel ? ((qAdv - modelErr) / dur) : -FLT_MAX;
             meanQ += (usableModel && isfinite(score)) ? score : 0.0f;
             if (usableModel) maxScorePrio = max(maxScorePrio, modelErr);
-            if (score > bestScore) { bestScore = score; bestQ = qAdv; best = k; }
+            if (score > bestScore) {
+                secondScore = bestScore; second = best;
+                bestScore = score; bestQ = qAdv; best = k;
+            } else if (score > secondScore) {
+                secondScore = score; second = k;
+            }
         }
         uint selected = best;
         uint prevSel = ctx.selectedOption[0] % ctx.K;
         bool continuing = tgCont[prevSel] > 0.0f;
         meanQ *= ctx.invK;
         if (continuing) selected = prevSel;
+        // Phase 4: forced runner-up exploration on long-streak incumbent. Only fires
+        // when the runner-up is competitive (advantage gap < 0.25 * |bestScore|) so
+        // we don't displace a clearly-dominant option.
+        if (ctx.exploreEvery < 0xffffffffu && ctx.stepCount > ctx.exploreWarmup) {
+            uint streak = ctx.scalars->selectedStreak;
+            if (selected == prevSel) streak += 1u; else streak = 0u;
+            bool secondViable = secondScore > -FLT_MAX && second != selected
+                && isfinite(bestScore) && isfinite(secondScore);
+            float gap = secondViable ? (bestScore - secondScore) : FLT_MAX;
+            float gapTol = 0.25f * fabs(bestScore);
+            bool competitive = secondViable && gap < gapTol;
+            if (streak >= ctx.exploreEvery && competitive) {
+                selected = second;
+                streak = 0u;
+                ctx.scalars->optionExploreCount = ctx.scalars->optionExploreCount + 1u;
+            }
+            ctx.scalars->selectedStreak = streak;
+        }
         float prevMag = 0.0f;
         for (uint k = 0u; k < ctx.K; ++k) {
             float w = ctx.keyboard[k];
@@ -463,6 +533,7 @@ inline void fcstomp_prediction_control_loop(Ctx ctx, uint tid,
             if (isfinite(a)) actorMass += fabs(a);
             float imp = ctx.importance[k];
             if (isfinite(imp) && imp > 0.0f) {
+                imp = clip_imp(imp, ctx.rhoMax);
                 impSum += imp;
                 impSq = fma(imp, imp, impSq);
             }
@@ -810,6 +881,10 @@ kernel void oak_plan(device float *params [[buffer(0)]],
         float dur = decode_duration(lRaw);
         ctx.durationHat[k] = dur;
         float modelErr = nErr + rTd * rTd + (ctx.scalars->rho * dTd) * (ctx.scalars->rho * dTd);
+        if (ctx.modelErrMax < FLT_MAX && isfinite(modelErr)) {
+            float cap = ctx.modelErrMax * ctx.modelErrMax;
+            if (modelErr > cap) modelErr = cap;
+        }
         if (OAK_ABLATE_SEARCH_CONTROL) {
             ctx.prioOpt[k] = 0.0f;
         } else if (modelFinite && isfinite(modelErr)) {
@@ -865,6 +940,7 @@ kernel void oak_learn_heads(device float *params [[buffer(0)]],
         uint k = gid / ctx.R, i = gid % ctx.R;
         float rho = ctx.importance[k];
         if (!isfinite(rho) || rho < 0.0f) rho = 0.0f;
+        rho = clip_imp(rho, ctx.rhoMax);
         float w = ctx.psi[k * ctx.R + i];
         float denom = ctx.headDenom[k];
         float scale = (isfinite(denom) && denom > 0.0f) ? (1.0f / denom) : 0.0f;
@@ -882,6 +958,7 @@ kernel void oak_learn_heads(device float *params [[buffer(0)]],
         if (relativeSupportCollapsed) return;
         float rho = ctx.importance[k];
         if (!isfinite(rho)) rho = 0.0f;
+        rho = clip_imp(rho, ctx.rhoMax);
         float w = ctx.optPolicy[(k * ctx.D + d) * ctx.R + i];
         float targetGrad = ctx.optionActorCredit[k * ctx.D + d];
         if (!isfinite(targetGrad)) targetGrad = 0.0f;
@@ -900,6 +977,7 @@ kernel void oak_learn_heads(device float *params [[buffer(0)]],
         if (OAK_ABLATE_OPTION_MODELS) return;
         uint k = gid / ctx.R, i = gid % ctx.R;
         float rho = ctx.importance[k]; if (!isfinite(rho) || rho < 0.0f) rho = 0.0f;
+        rho = clip_imp(rho, ctx.rhoMax);
         float denom = ctx.modelDenom[k];
         float scale = (isfinite(denom) && denom > 0.0f) ? (1.0f / denom) : 0.0f;
         float w = ctx.optReward[k * ctx.R + i];
@@ -913,6 +991,7 @@ kernel void oak_learn_heads(device float *params [[buffer(0)]],
         uint rem = gid - k * ctx.R * ctx.R;
         uint j = rem / ctx.R, i = rem % ctx.R;
         float rho = ctx.importance[k]; if (!isfinite(rho) || rho < 0.0f) rho = 0.0f;
+        rho = clip_imp(rho, ctx.rhoMax);
         float denom = ctx.modelDenom[k];
         float scale = (isfinite(denom) && denom > 0.0f) ? (1.0f / denom) : 0.0f;
         float w = ctx.optTransition[k * ctx.R * ctx.R + j * ctx.R + i];
@@ -925,6 +1004,7 @@ kernel void oak_learn_heads(device float *params [[buffer(0)]],
         if (OAK_ABLATE_OPTION_MODELS) return;
         uint k = gid / ctx.R, i = gid % ctx.R;
         float rho = ctx.importance[k]; if (!isfinite(rho) || rho < 0.0f) rho = 0.0f;
+        rho = clip_imp(rho, ctx.rhoMax);
         float denom = ctx.modelDenom[k];
         float dEnergy = ctx.durationTd[k] * ctx.durationTd[k];
         if (isfinite(dEnergy)) denom += ctx.invR * dEnergy;
@@ -993,7 +1073,7 @@ kernel void oak_replace(device float *params [[buffer(0)]],
             float keyMass = fabs(ctx.keyboard[k]);
             float modelUse = OAK_ABLATE_SEARCH_TO_GENERATE_TEST ? 0.0f : keyMass * fabs(ctx.planTd[0]);
             float keyUse = OAK_ABLATE_SEARCH_TO_GENERATE_TEST
-                ? 0.0f : keyMass * (fabs(ctx.actorAdv[k]) + max(ctx.importance[k], 0.0f));
+                ? 0.0f : keyMass * (fabs(ctx.actorAdv[k]) + clip_imp(max(ctx.importance[k], 0.0f), ctx.rhoMax));
             if (isfinite(psiUse)) psiSignal += psiUse;
             if (isfinite(modelUse)) modelSignal += modelUse;
             if (isfinite(keyUse)) keyboardSignal += keyUse;
@@ -1004,13 +1084,13 @@ kernel void oak_replace(device float *params [[buffer(0)]],
         ctx.utilFeat[i] += invT * (g - ctx.utilFeat[i]);
         uint age = ctx.featureAge[i];
         metaopt_update_slot(ctx.alpha, ctx.beta, ctx.hMeta, ctx.gradEnergy,
-                            i, ctx.td[0], prev[i], age, ctx.metaEta, ctx.invR);
+                            i, ctx.td[0], prev[i], age, ctx.metaEta, ctx.invR, ctx.betaMax);
         uint metaSlot = ctx.stepCount % max(ctx.R, 1u);
         if (i == metaSlot) {
             metaopt_update_slot(ctx.alphaPsi, ctx.betaPsi, ctx.hPsi, ctx.gradEnergyPsi,
-                                i, psiSignal, prev[i], age, ctx.metaEta, ctx.invR);
+                                i, psiSignal, prev[i], age, ctx.metaEta, ctx.invR, ctx.betaMax);
             metaopt_update_slot(ctx.alphaModel, ctx.betaModel, ctx.hModel, ctx.gradEnergyModel,
-                                i, modelSignal, prev[i], age, ctx.metaEta, ctx.invR);
+                                i, modelSignal, prev[i], age, ctx.metaEta, ctx.invR, ctx.betaMax);
         }
         if (isfinite(ctx.valueW[i]) && ctx.valueW[i] > ctx.bonusW[i]) ctx.bonusW[i] = ctx.valueW[i];
     }
@@ -1030,6 +1110,7 @@ kernel void oak_replace(device float *params [[buffer(0)]],
 	    for (uint k = 0u; k < ctx.K; ++k) {
 	        float w = ctx.importance[k];
 	        if (!isfinite(w)) { w = 0.0f; ctx.counters[OAK_CNT_IMPORTANCE_NF] += 1u; }
+	        w = clip_imp(w, ctx.rhoMax);
 	        wSum += w; wSq += w * w;
 	    }
 	    float invK = ctx.invK;
@@ -1131,7 +1212,9 @@ kernel void oak_replace(device float *params [[buffer(0)]],
             ctx.badFeatureAge[i] = 0u;
         }
     }
-		    uint replaceAge = ctx.R * max(eligible, 1u);
+		    uint denomElig = max(eligible, 1u);
+		    if (ctx.replaceAgeDivisor > 1.0f) denomElig = max(uint(float(eligible) / ctx.replaceAgeDivisor), 1u);
+		    uint replaceAge = ctx.R * denomElig;
 		    bool doReplace = !OAK_ABLATE_GENERATE_AND_TEST
             && structurallyReplaceable && worst < ctx.R && ctx.badFeatureAge[worst] >= replaceAge;
     if (doReplace && worst < ctx.R) {
@@ -1198,6 +1281,31 @@ kernel void oak_replace(device float *params [[buffer(0)]],
     ctx.stats->tdPsiNonFiniteCount = float(ctx.counters[OAK_CNT_TDPSI_NF] + ctx.counters[OAK_CNT_IMPORTANCE_NF]);
     ctx.stats->oakOptionReinitCount = float(ctx.counters[OAK_CNT_REINIT_OPT]);
     ctx.stats->oakFeatureReinitCount = float(ctx.counters[OAK_CNT_REINIT_FEAT]);
+    // Phase 5: emission-pathway rescue. EMA of keyboardL1; on spike vs EMA, reset
+    // ONLY the keyboard chord — preserve psi, optPolicy, optTransition, valueW,
+    // alpha/beta, prioOpt, selectedOption. Rate-limited via a cooldown counter
+    // stored in keyL1HighStreak (re-purposed: it's the steps remaining until next rescue armable).
+    if (ctx.rescueKeyL1Ratio < FLT_MAX) {
+        float curL1 = ctx.stats->keyboardL1;
+        float ema = ctx.scalars->keyL1Ema;
+        float a = ctx.rescueEmaAlpha;
+        if (!isfinite(a) || a <= 0.0f) a = 0.001f;
+        float emaNew = isfinite(ema) && ema > 0.0f ? (1.0f - a) * ema + a * curL1 : curL1;
+        ctx.scalars->keyL1Ema = isfinite(emaNew) ? emaNew : ema;
+        uint cooldown = ctx.scalars->keyL1HighStreak;
+        bool armed = cooldown == 0u && ctx.stepCount > ctx.rescueWarmup;
+        bool emaReady = ctx.scalars->keyL1Ema > 1.0f;
+        bool spike = isfinite(curL1) && curL1 > ctx.rescueKeyL1Ratio * ctx.scalars->keyL1Ema;
+        if (armed && emaReady && spike) {
+            for (uint k = 0u; k < ctx.K; ++k) ctx.keyboard[k] = 0.0f;
+            ctx.scalars->keyboardRescueCount = ctx.scalars->keyboardRescueCount + 1u;
+            ctx.scalars->keyL1Ema = 0.0f;       // re-arm EMA accumulation post-rescue
+            ctx.scalars->keyL1HighStreak = 5000u;  // 5k-step cooldown until next rescue
+        } else if (cooldown > 0u) {
+            ctx.scalars->keyL1HighStreak = cooldown - 1u;
+        }
+    }
+    ctx.stats->keyboardRescueCount = float(ctx.scalars->keyboardRescueCount);
     ctx.scalars->stateSlot = 1u - ctx.stateSlot;
     ctx.scalars->stepCount = ctx.stepCount + 1u;
 }
