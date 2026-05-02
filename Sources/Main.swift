@@ -313,6 +313,30 @@ final class Engine {
   }
 }
 
+final class ActionRecorder {
+  let handle: FileHandle
+  init(dir: URL, envId: String, seed: Int, actDim: Int) throws {
+    let fm = FileManager.default
+    try fm.createDirectory(at: dir, withIntermediateDirectories: true)
+    let meta: [String: Any] = [
+      "envId": envId, "seed": seed, "actDim": actDim, "recordVersion": 1,
+    ]
+    try JSONSerialization.data(withJSONObject: meta, options: [.prettyPrinted, .sortedKeys])
+      .write(to: dir.appendingPathComponent("meta.json"), options: .atomic)
+    let url = dir.appendingPathComponent("actions.bin")
+    fm.createFile(atPath: url.path, contents: nil)
+    handle = try FileHandle(forWritingTo: url)
+  }
+  deinit { try? handle.close() }
+  func record(_ env: Env) throws {
+    guard let action = env.v.action else { return }
+    var data = Data(
+      bytes: action, count: Int(env.v.actDim) * MemoryLayout<Float>.stride)
+    var done = UInt8(env.done == 0 ? 0 : 1)
+    withUnsafeBytes(of: &done) { data.append(contentsOf: $0) }
+    try handle.write(contentsOf: data)
+  }
+}
 final class Run {
   var steps = 0, done = 0, pulse = 0, nfE = 0, nfL = 0, nfP = 0, nfT = 0, optR = 0,
     featR = 0
@@ -320,6 +344,7 @@ final class Run {
     start = DispatchTime.now().uptimeNanoseconds
   var envInfo: [String: InfoStat] = [:]
   var last: KernelStats?
+  var recorder: ActionRecorder?
   init(obsDim: Int) { floor = 1 / Double(max(obsDim, 1)) }
   func note(_ env: Env, _ stats: KernelStats?) throws {
     steps += 1
@@ -341,6 +366,7 @@ final class Run {
       optR = Int(s.oakOptionReinitCount)
       featR = Int(s.oakFeatureReinitCount)
     }
+    try recorder?.record(env)
   }
   func health(_ env: Env) -> [String: Any] {
     var h: [String: Any] = [
@@ -472,6 +498,12 @@ func metricsRoot() -> URL {
     try env.reset()
     let engine = p == .oak ? try Engine(env, MTLCreateSystemDefaultDevice()!, ablations) : nil
     let run = Run(obsDim: env.obsDim)
+    if ProcessInfo.processInfo.environment["OAK_RECORD_ACTIONS"] == "1" {
+      let runDir = root.appendingPathComponent(envId, isDirectory: true)
+        .appendingPathComponent("seed\(seed)", isDirectory: true)
+      run.recorder = try ActionRecorder(
+        dir: runDir, envId: envId, seed: seed, actDim: env.actDim)
+    }
     let hb = max(
       ProcessInfo.processInfo.environment["OAK_BENCH_HEARTBEAT_STEPS"].flatMap(Int.init) ?? steps / 10,
       1)
