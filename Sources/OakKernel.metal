@@ -39,6 +39,7 @@ struct KernelConfig {
     uint  exploreEvery;      // force runner-up every N steps when streak >= N (UINT_MAX = off)
     uint  exploreWarmup;     // ignore exploration before this step count (default UINT_MAX = off)
     float replaceAgeDivisor; // G&T: replaceAge = R * max(eligible / divisor, 1) (default 1.0 = original)
+    float exploreGapTol;     // Phase 4 gate: fire only when (best-second) < gapTol*|best| (default 0.25)
 };
 
 struct KernelScalars {
@@ -92,6 +93,7 @@ struct Ctx {
     uint  rescueWarmup;
     uint  exploreEvery, exploreWarmup;
     float replaceAgeDivisor;
+    float exploreGapTol;     // Phase 4 gate: fire only if (best - second) < gapTol * |best| (default 0.25)
     device float *valueW, *psi, *optPolicy, *optReward, *optTransition, *optDuration;
     device float *observation, *observationMean, *obsSM;
     device float *state;
@@ -134,6 +136,7 @@ inline Ctx make_ctx(device float *params, device float *stateArena, device uint 
     c.exploreEvery = cfg.exploreEvery;
     c.exploreWarmup = cfg.exploreWarmup;
     c.replaceAgeDivisor = cfg.replaceAgeDivisor;
+    c.exploreGapTol = cfg.exploreGapTol;
     uint p = 0u;
     c.valueW = params + p; p += c.R;
     c.psi = params + p; p += c.K * c.R;
@@ -510,7 +513,8 @@ inline void fcstomp_prediction_control_loop(Ctx ctx, uint tid,
             bool secondViable = secondScore > -FLT_MAX && second != selected
                 && isfinite(bestScore) && isfinite(secondScore);
             float gap = secondViable ? (bestScore - secondScore) : FLT_MAX;
-            float gapTol = 0.25f * fabs(bestScore);
+            float gapTolFrac = ctx.exploreGapTol > 0.0f ? ctx.exploreGapTol : 0.25f;
+            float gapTol = gapTolFrac * fabs(bestScore);
             bool competitive = secondViable && gap < gapTol;
             if (streak >= ctx.exploreEvery && competitive) {
                 selected = second;
