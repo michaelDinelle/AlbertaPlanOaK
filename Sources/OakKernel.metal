@@ -52,6 +52,7 @@ struct KernelStats {
     float mainTd, planTdValue;
     float keyboardSketchDim, keyboardEffectiveL1;
     float searchControlUseMean, generateTestEligibleCount;
+    float learningMature;  // fraction of options whose tdPsiFast < tdPsiPeak (0..1)
 };
 
 inline float safe_w(float old_w, float new_w) { return isfinite(new_w) ? new_w : old_w; }
@@ -81,6 +82,7 @@ struct Ctx {
     device float *durationTd, *durationHat, *obsTraceMulti, *prioOpt, *continuation;
     device float *keyboard, *modelDenom;
     device float *valueGauge;
+    device float *tdPsiFast, *tdPsiPeak;  // per-option learning-progress EMAs
     device uint *counters, *optFeature, *featureAge, *optAge;
     device uint *featureParentA, *featureParentB, *featureKind, *featureBirthCount;
     device uint *selectedOption, *keyboardOrigin;
@@ -149,7 +151,9 @@ inline Ctx make_ctx(device float *params, device float *stateArena, device uint 
     c.continuation = stateArena + s; s += c.K;
     c.keyboard = stateArena + s; s += c.K;
     c.modelDenom = stateArena + s; s += c.K;
-    c.valueGauge = stateArena + s;
+    c.valueGauge = stateArena + s; s += 1u;
+    c.tdPsiFast = stateArena + s; s += c.K;
+    c.tdPsiPeak = stateArena + s; s += c.K;
 
     uint u = 0u;
     c.counters = uintArena + u; u += 7u;
@@ -360,6 +364,16 @@ inline void fcstomp_prediction_control_loop(Ctx ctx, uint tid,
         }
         ctx.tdPsi[tid] = dPsi;
         tgTdPsi[tid] = dPsi;
+        // Per-option learning-progress tracker (Structural Addition A).
+        // Fast EMA of |dPsi| with R-step memory; peak as pure all-time max.
+        // Maturity predicate (fast < peak) means recent error has improved
+        // past the historical high-water mark — i.e., learning has happened.
+        // Both quantities scale-free; only intrinsic constant is invR.
+        float absD = isfinite(dPsi) ? fabs(dPsi) : 0.0f;
+        float fastOld = ctx.tdPsiFast[tid];
+        float peakOld = ctx.tdPsiPeak[tid];
+        ctx.tdPsiFast[tid] = (1.0f - ctx.invR) * (isfinite(fastOld) ? fastOld : 0.0f) + ctx.invR * absD;
+        ctx.tdPsiPeak[tid] = max(isfinite(peakOld) ? peakOld : 0.0f, absD);
         float rho = ctx.importance[tid];
         if (!isfinite(rho) || rho < 0.0f) rho = 0.0f;
         float implicitTrace = psiXX - cont * psiXY;
@@ -1198,6 +1212,22 @@ kernel void oak_replace(device float *params [[buffer(0)]],
     ctx.stats->tdPsiNonFiniteCount = float(ctx.counters[OAK_CNT_TDPSI_NF] + ctx.counters[OAK_CNT_IMPORTANCE_NF]);
     ctx.stats->oakOptionReinitCount = float(ctx.counters[OAK_CNT_REINIT_OPT]);
     ctx.stats->oakFeatureReinitCount = float(ctx.counters[OAK_CNT_REINIT_FEAT]);
+    // Aggregate learning-progress diagnostic: mean over options of
+    //   1 - fast[k] / peak[k]
+    // where fast is the R-step EMA of |dPsi[k]| and peak is its all-time max.
+    // 0 means current error == peak (no progress); 1 means current error == 0
+    // (fully converged). Continuous, no threshold.
+    float progressSum = 0.0f;
+    uint progressCount = 0u;
+    for (uint k = 0u; k < ctx.K; ++k) {
+        float peak = ctx.tdPsiPeak[k];
+        float fast = ctx.tdPsiFast[k];
+        if (isfinite(peak) && peak > 0.0f && isfinite(fast)) {
+            progressSum += 1.0f - min(fast / peak, 1.0f);
+            progressCount += 1u;
+        }
+    }
+    ctx.stats->learningMature = (progressCount > 0u) ? progressSum / float(progressCount) : 0.0f;
     ctx.scalars->stateSlot = 1u - ctx.stateSlot;
     ctx.scalars->stepCount = ctx.stepCount + 1u;
 }
