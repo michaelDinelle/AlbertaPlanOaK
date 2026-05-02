@@ -31,6 +31,7 @@ struct KernelConfig {
   var rescueWarmup: UInt32
   var exploreEvery, exploreWarmup: UInt32
   var replaceAgeDivisor: Float
+  var exploreGapTol: Float
 }
 struct KernelScalars {
   var stepCount: UInt32 = 0, stateSlot: UInt32 = 0
@@ -347,7 +348,8 @@ final class Engine {
         rescueWarmup: envUInt("OAK_RESCUE_WARMUP"),
         exploreEvery: envUInt("OAK_EXPLORE_EVERY"),
         exploreWarmup: envUInt("OAK_EXPLORE_WARMUP"),
-        replaceAgeDivisor: { let v = envFloat("OAK_REPLACE_AGE_DIVISOR"); return v == .greatestFiniteMagnitude ? 1.0 : v }()))
+        replaceAgeDivisor: { let v = envFloat("OAK_REPLACE_AGE_DIVISOR"); return v == .greatestFiniteMagnitude ? 1.0 : v }(),
+        exploreGapTol: { let v = envFloat("OAK_EXPLORE_GAP_TOL"); return v == .greatestFiniteMagnitude ? 0.0 : v }()))
   }
   func step(_ env: Env, capture: Bool) throws -> KernelStats? {
     memcpy(state.p + a.obs, env.v.obs!, env.obsDim * MemoryLayout<Float>.stride)
