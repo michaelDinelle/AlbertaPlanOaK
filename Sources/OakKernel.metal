@@ -52,7 +52,7 @@ struct KernelStats {
     float mainTd, planTdValue;
     float keyboardSketchDim, keyboardEffectiveL1;
     float searchControlUseMean, generateTestEligibleCount;
-    float learningMature;  // fraction of options whose tdPsiFast < tdPsiPeak (0..1)
+    float learningMature;  // mean over options of (1 - fast/peak) of |tdPsi[k]|
 };
 
 inline float safe_w(float old_w, float new_w) { return isfinite(new_w) ? new_w : old_w; }
