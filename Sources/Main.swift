@@ -26,21 +26,10 @@ typealias Raw = UnsafeMutableRawPointer
 struct KernelConfig {
   var obsDim, rank, optionCount, actionParamCount, obsTraceLevels, linearAnchorCount: UInt32
   var invRank, invOptionCount, metaEta: Float
-  var rhoMax, vDiffMax, modelErrMax, betaMax: Float
-  var rescueKeyL1Ratio, rescueEmaAlpha: Float
-  var rescueWarmup: UInt32
-  var exploreEvery, exploreWarmup: UInt32
-  var replaceAgeDivisor: Float
-  var exploreGapTol: Float
 }
 struct KernelScalars {
   var stepCount: UInt32 = 0, stateSlot: UInt32 = 0
   var rho: Float = 0
-  var keyL1Ema: Float = 0
-  var keyL1HighStreak: UInt32 = 0
-  var keyboardRescueCount: UInt32 = 0
-  var selectedStreak: UInt32 = 0
-  var optionExploreCount: UInt32 = 0
 }
 struct KernelStats {
   var encodeNonFiniteCount, learnNonFiniteCount, planNonFiniteCount, tdPsiNonFiniteCount: Float
@@ -50,7 +39,6 @@ struct KernelStats {
   var selectedOptionIndex, keyboardOrigin: Float
   var selectedOptionFeature, selectedContinuation, selectedKeyboardWeight, mainTd, planTdValue: Float
   var keyboardSketchDim, keyboardEffectiveL1, searchControlUseMean, generateTestEligibleCount: Float
-  var keyboardRescueCount: Float = 0
 }
 
 struct AblationSpec {
@@ -210,28 +198,6 @@ final class Shared<T> {
     p.initialize(repeating: z, count: max(n, 1))
   }
 }
-struct SeededRNG {
-  // Splittable Mix64 (Stafford variant) — deterministic across platforms.
-  var state: UInt64
-  init(_ s: UInt64) { state = s == 0 ? 0xdeadbeefdeadbeef : s }
-  mutating func next() -> UInt64 {
-    state = state &+ 0x9e3779b97f4a7c15
-    var z = state
-    z = (z ^ (z >> 30)) &* 0xbf58476d1ce4e5b9
-    z = (z ^ (z >> 27)) &* 0x94d049bb133111eb
-    return z ^ (z >> 31)
-  }
-  mutating func uniform() -> Float {
-    Float(next() >> 40) * (1.0 / Float(1 << 24))  // U[0,1)
-  }
-  mutating func centered() -> Float { uniform() * 2 - 1 }  // U[-1,1)
-  mutating func gauss() -> Float {
-    let u = max(uniform(), Float.leastNormalMagnitude)
-    let v = uniform()
-    return Foundation.sqrtf(-2 * Foundation.logf(u))
-      * Foundation.cosf(2 * .pi * v)
-  }
-}
 final class Engine {
   let rank, d, tg, learnTotal, actionGroups: Int
   let a: Arena
@@ -242,7 +208,7 @@ final class Engine {
     tgBytes: Int
   var policy: UnsafePointer<Float> { UnsafePointer(state.p + a.policy) }
   var options: UnsafePointer<Float> { UnsafePointer(state.p + a.options) }
-  init(_ env: Env, _ dev: MTLDevice, _ ablations: AblationSpec, seed: Int) throws {
+  init(_ env: Env, _ dev: MTLDevice, _ ablations: AblationSpec) throws {
     rank = max(env.obsDim, env.dPolicy * 2, 2)
     d = env.dPolicy
     a = Arena(env.obsDim, rank, d)
@@ -288,68 +254,28 @@ final class Engine {
     let inv = 1 / sqrt(Float(rank))
     let anchors = min(rank, max(env.obsDim, d, 1))
     let alpha = 1 / Float(max(env.obsDim, 1))
-    let envP = ProcessInfo.processInfo.environment
-    let jitter = max(Float(envP["OAK_INIT_JITTER"] ?? "0") ?? 0, 0)
-    var rng = SeededRNG(UInt64(bitPattern: Int64(seed)) &+ 0x9e3779b97f4a7c15)
     for i in 0..<rank {
-      let dscale: Float = jitter > 0 ? (1 + jitter * rng.centered()) : 1
-      params.p[psi + i * rank + i] = inv * dscale
-      if jitter > 0 {
-        let off = jitter * 0.1
-        for j in 0..<rank where j != i {
-          params.p[psi + i * rank + j] = off * rng.gauss()
-        }
-      }
+      params.p[psi + i * rank + i] = inv
       uints.p[7 + i] = UInt32(i)
       uints.p[7 + 3 * rank + i] = UInt32(i % max(anchors, 1))
       uints.p[7 + 4 * rank + i] = UInt32((i * 7 + 3) % max(anchors, 1))
       uints.p[7 + 5 * rank + i] = UInt32(i % 3)
       state.p[a.utilOpt + i] = Float(rank)
-      let aJ: Float = jitter > 0 ? alpha * (1 + 0.5 * jitter * rng.centered()) : alpha
-      [a.alpha, a.alphaPsi, a.alphaModel].forEach { state.p[$0 + i] = aJ }
-      let bJ: Float = log(aJ)
-      [a.beta, a.betaPsi, a.betaModel].forEach { state.p[$0 + i] = bJ }
+      [a.alpha, a.alphaPsi, a.alphaModel].forEach { state.p[$0 + i] = alpha }
+      [a.beta, a.betaPsi, a.betaModel].forEach { state.p[$0 + i] = log(alpha) }
     }
     let basis = 1 / Float(max(d, 1))
-    var slotPerm = Array(0..<max(d, 1))
-    if jitter > 0 {
-      for i in stride(from: slotPerm.count - 1, through: 1, by: -1) {
-        let j = Int(rng.next() % UInt64(i + 1))
-        slotPerm.swapAt(i, j)
-      }
-    }
     for k in 0..<rank {
-      let baseSlot = k % max(d, 1)
-      let slot = jitter > 0 ? slotPerm[baseSlot] : baseSlot
+      let slot = k % max(d, 1)
       let sign: Float = ((k / max(d, 1)) % 2 == 0) ? 1 : -1
-      let mag: Float = jitter > 0 ? basis * (1 + jitter * rng.centered()) : basis
-      params.p[optPolicy + (k * d + slot) * rank] = sign * mag
-    }
-    func envFloat(_ key: String) -> Float {
-      guard let s = envP[key], let v = Float(s), v.isFinite else { return .greatestFiniteMagnitude }
-      return v
-    }
-    func envUInt(_ key: String) -> UInt32 {
-      guard let s = envP[key], let v = UInt32(s) else { return UInt32.max }
-      return v
+      params.p[optPolicy + (k * d + slot) * rank] = sign * basis
     }
     configB.contents().bindMemory(to: KernelConfig.self, capacity: 1).initialize(
       to: KernelConfig(
         obsDim: UInt32(env.obsDim), rank: UInt32(rank), optionCount: UInt32(rank),
         actionParamCount: UInt32(d), obsTraceLevels: UInt32(max(Arena.traces(env.obsDim) - 1, 0)),
         linearAnchorCount: UInt32(anchors), invRank: 1 / Float(rank),
-        invOptionCount: 1 / Float(rank), metaEta: 1 / Float(rank) / Float(max(rank + d, 1)),
-        rhoMax: envFloat("OAK_RHO_MAX"),
-        vDiffMax: envFloat("OAK_VDIFF_MAX"),
-        modelErrMax: envFloat("OAK_MODEL_ERR_MAX"),
-        betaMax: envFloat("OAK_BETA_MAX"),
-        rescueKeyL1Ratio: envFloat("OAK_RESCUE_KEYL1_RATIO"),
-        rescueEmaAlpha: { let v = envFloat("OAK_RESCUE_EMA_ALPHA"); return v == .greatestFiniteMagnitude ? 0.001 : v }(),
-        rescueWarmup: envUInt("OAK_RESCUE_WARMUP"),
-        exploreEvery: envUInt("OAK_EXPLORE_EVERY"),
-        exploreWarmup: envUInt("OAK_EXPLORE_WARMUP"),
-        replaceAgeDivisor: { let v = envFloat("OAK_REPLACE_AGE_DIVISOR"); return v == .greatestFiniteMagnitude ? 1.0 : v }(),
-        exploreGapTol: { let v = envFloat("OAK_EXPLORE_GAP_TOL"); return v == .greatestFiniteMagnitude ? 0.0 : v }()))
+        invOptionCount: 1 / Float(rank), metaEta: 1 / Float(rank) / Float(max(rank + d, 1))))
   }
   func step(_ env: Env, capture: Bool) throws -> KernelStats? {
     memcpy(state.p + a.obs, env.v.obs!, env.obsDim * MemoryLayout<Float>.stride)
@@ -523,8 +449,6 @@ final class Run {
       h["searchControlUseMean"] = s.searchControlUseMean.isFinite ? Double(s.searchControlUseMean) : NSNull()
       h["generateTestEligibleCount"] =
         s.generateTestEligibleCount.isFinite ? Double(s.generateTestEligibleCount) : NSNull()
-      h["keyboardRescueCount"] =
-        s.keyboardRescueCount.isFinite ? Double(s.keyboardRescueCount) : NSNull()
     }
     if !envInfo.isEmpty {
       h["envInfo"] = Dictionary(uniqueKeysWithValues: envInfo.sorted { $0.key < $1.key }.map {
@@ -621,7 +545,7 @@ func metricsRoot() -> URL {
     let env = try Env(envId, seed: seed)
     try env.prepare(p == .oak ? max(env.obsDim, env.dPolicy * 2, 2) : 0)
     try env.reset()
-    let engine = p == .oak ? try Engine(env, MTLCreateSystemDefaultDevice()!, ablations, seed: seed) : nil
+    let engine = p == .oak ? try Engine(env, MTLCreateSystemDefaultDevice()!, ablations) : nil
     let run = Run(obsDim: env.obsDim)
     if ProcessInfo.processInfo.environment["OAK_RECORD_ACTIONS"] == "1" {
       let runDir = root.appendingPathComponent(envId, isDirectory: true)
