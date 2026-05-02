@@ -39,6 +39,7 @@ struct KernelStats {
   var selectedOptionIndex, keyboardOrigin: Float
   var selectedOptionFeature, selectedContinuation, selectedKeyboardWeight, mainTd, planTdValue: Float
   var keyboardSketchDim, keyboardEffectiveL1, searchControlUseMean, generateTestEligibleCount: Float
+  var learningMature: Float = 0
 }
 
 struct AblationSpec {
@@ -186,7 +187,9 @@ struct Arena {
     betaPsi = alpha + 5 * r
     alphaModel = alpha + 8 * r
     betaModel = alpha + 9 * r
-    total = alpha + r * r + 21 * r + traceExtra * max(o, 1) + 1
+    // Base layout ends with `+ 1` (valueGauge slot). The trailing `+ 2 * r`
+    // is for tdPsiFast and tdPsiPeak — per-option learning-progress EMAs.
+    total = alpha + r * r + 21 * r + traceExtra * max(o, 1) + 1 + 2 * r
   }
 }
 final class Shared<T> {
@@ -449,6 +452,8 @@ final class Run {
       h["searchControlUseMean"] = s.searchControlUseMean.isFinite ? Double(s.searchControlUseMean) : NSNull()
       h["generateTestEligibleCount"] =
         s.generateTestEligibleCount.isFinite ? Double(s.generateTestEligibleCount) : NSNull()
+      h["learningMature"] =
+        s.learningMature.isFinite ? Double(s.learningMature) : NSNull()
     }
     if !envInfo.isEmpty {
       h["envInfo"] = Dictionary(uniqueKeysWithValues: envInfo.sorted { $0.key < $1.key }.map {
