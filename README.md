@@ -1,70 +1,420 @@
-# OaK
+# OaK — Options And Knowledge (ROUGH DRAFT)
 
-Big-World, Alberta-Plan agent on Apple Silicon.
+## This is an implementation of [Alberta Plan for AI Research](https://arxiv.org/abs/2208.11173)(https://arxiv.org/abs/2208.11173) (Sutton, Bowling & Pilarski,2022):
 
-## Setup
+
+
+A native Apple Silicon implementation of **Step 11** of the [Alberta Plan for
+AI Research] the **Oak architecture** — *Options And Knowledge* — built around a
+continually-running **FC-STOMP** loop. Behavior emerges from the loop running
+every time step on the live `(observation, action, reward)` stream; there is
+no training/eval split and no episode boundary inside the agent. The code in the current state was derived from over a month of trial and error with various language models from MuseSpark , Gemini 3.1 pro, Gemma4, Claude and gpt 5.5, gpt 5.5 pro.
+
+## Compared to modern Language Models. the goal of the OaK architecture is to keep our [`EyesOnThePrize.pdf`](docs/papers/EyesOnThePrize.pdf)
+
+
+The Alberta Plan exists in service of a single long-term goal Sutton calls
+*the Prize*: understanding the principles of intelligence well enough to
+create (or become) beings of greater intelligence (see
+. In that framing, intelligence is
+*"the computational part of an agent's ability to predict and control a
+stream of sensations, particularly a designated numerical sensation (called
+reward), while interacting with a vastly more complex world."* Everything
+the agent ever knows arrives through the **narrow aperture of experience** —
+the alternating stream of actions, sensations, and reward — and it must do
+its work in real time, against a world it can never fully contain.
+
+OaK is a working bet on the four commitments that follow from that goal:
+
+1. **Intelligence as real-time signal processing to maximize reward** under
+   bounded compute — not offline optimization on a curated dataset.
+2. **Continual learning from ordinary, unprepared experience** — no
+   training/eval split, no episode reset inside the agent, no demonstrations
+   or special training distributions.
+3. **[The Big-World Hypothesis](https://openreview.net/pdf?id=Sv7DazuCn8)** —
+   the agent is and always will be vastly less complex than its world, so
+   every component must approximate, track, and be revisable, even in the
+   limit.
+4. **Continual construction of abstractions** — features, subtasks, options,
+   GVFs — so the agent can think simply about long spans of time without
+   collapsing them into a fixed scale.
+
+Concretely: the FC-STOMP loop runs every step on the live stream; features,
+subtasks, options, and option models are generated, scored by utility, and
+removed-and-replaced when they fail to pull weight; planning is average-reward
+so there is no privileged episode horizon. The point of the repo is not a
+benchmark number — it is to keep these commitments load-bearing in actual
+code on a real continuous-control stream, and to fail loudly when any one of
+them quietly slips.
+
+### Sutton and Bowlings Architecture adddresses "The Problem With AI Nobody Wants to Face"
+
+[![Watch on YouTube](https://img.youtube.com/vi/qqXSpWYSxBw/hqdefault.jpg)](https://www.youtube.com/shorts/qqXSpWYSxBw)
+
+### `HalfCheetah-v4` Currently Oak Beats the Random baseline 10/10 how ever only recieves positve reward in a hand full of seeds
+
+Environment: [`HalfCheetah-v4`](https://gymnasium.farama.org/environments/mujoco/half_cheetah/)
+(MuJoCo, Gymnasium spec) — driven through our envpool-backed C++ bridge (see
+[The envpool bridge](#the-envpool-bridge) below).
+
+Seed three has been observed to learn to be a remarkably robust learner however it suffers from the classic catastrophic loss of placicity/knowlege in the current form of the code base.
+
+#### Three replays, same setup
+
+All three clips below are **seed 3** on `HalfCheetah-v4`, **500,000 steps**,
+rendered through `tools/replay_render.py` at 60 fps. Only the policy changes —
+so the contrast between them is purely a contrast between *what each policy
+does to the cheetah*.
+
+| Policy | File | What you should see |
+|---|---|---|
+| **OaK** (this repo, seed-3 zenith at 500k of a 1.5M run) | [`media/rocket-seed3-zenith-500k.mp4`](media/rocket-seed3-zenith-500k.mp4) | The "rocket" gait at its sharpest — sustained forward locomotion learned online from the live `(obs, action, reward)` stream. |
+| **Random baseline** (uniform action) | [`media/random-seed3-500k.mp4`](media/random-seed3-500k.mp4) | The random-walk floor OaK has to clear. Twitchy thrashing, no directed motion. |
+| **Zero baseline** (no-op, all actuators 0) | [`media/zero-seed3-500k.mp4`](media/zero-seed3-500k.mp4) | Raw HalfCheetah dynamics with no control signal — the cheetah falls and lies still. |
+
+> **⚠️Physics drift caveat — read before watching.⚠️** All three clips are
+> *replays* of `actions.bin` through `tools/replay_render.py`, which steps
+> a vanilla Gymnasium `HalfCheetah-v4` env on the recorded action stream.
+> The actions themselves were produced against our envpool-backed C++
+> bridge ([The envpool bridge](#the-envpool-bridge)), and envpool's MuJoCo
+> integration is **not bit-identical** to vanilla Gymnasium — small
+> floating-point differences in contact resolution and integration
+> compound over hundreds of thousands of steps. So over a 500k-step clip
+> the on-screen cheetah will visibly diverge from the trajectory the
+> agent actually saw at training time. **What you're watching is the
+> faithful action stream applied to a near-identical physics, not the
+> exact rollout the agent observed.** The reward / x-position / velocity
+> numbers in the [Numbers behind the clips](#numbers-behind-the-clips)
+> table come from the live envpool run, not the replay, so they *do*
+> reflect what the agent actually experienced.
+
+<!--
+  GitHub renders an inline player when the .mp4 URL points at
+  user-attachments/assets/... To get a URL, drag the file into any GitHub
+  issue/PR comment box, copy the resulting URL, and replace the matching
+  `src` below. Repo-relative links act as download fallbacks.
+-->
+
+### OaK — seed-3 @ 500k "Its Alive!"
+
+[![Watch on YouTube](https://img.youtube.com/vi/dViNYDHtED4/hqdefault.jpg)](https://www.youtube.com/watch?v=dViNYDHtED4)
+
+▶ Watch on YouTube: <https://www.youtube.com/watch?v=dViNYDHtED4>
+Local copy (not tracked in git, see `.gitignore`): [`media/rocket-seed3-zenith-500k.mp4`](media/rocket-seed3-zenith-500k.mp4)
+
+### Random baseline — uniform action, seed 3 @ 500k
+
+[![Watch on YouTube](https://img.youtube.com/vi/f0NfvXHVDmc/hqdefault.jpg)](https://youtu.be/f0NfvXHVDmc)
+
+▶ Watch on YouTube: <https://youtu.be/f0NfvXHVDmc>
+Local copy (not tracked in git, see `.gitignore`): [`media/random-seed3-500k.mp4`](media/random-seed3-500k.mp4)
+
+### Zero baseline — no-op, seed 3 @ 500k
+
+[![Watch on YouTube](https://img.youtube.com/vi/UPK3DUp6YMQ/hqdefault.jpg)](https://youtu.be/UPK3DUp6YMQ)
+
+▶ Watch on YouTube: <https://youtu.be/UPK3DUp6YMQ>
+Local copy (not tracked in git, see `.gitignore`): [`media/zero-seed3-500k.mp4`](media/zero-seed3-500k.mp4)
+
+#### Numbers behind the clips
+
+Cumulative env stats pulled directly from the benchmark output JSON. The
+random and zero runs are reported at their full 500k step budget. OaK
+emits heartbeats every 200k steps, so for the same run that produced the
+zenith video we report the bracket around the 500k mark — heartbeat 002
+(400k cumulative) and heartbeat 003 (600k cumulative).
+
+| Policy | Steps | Cumulative reward | Mean `x_velocity` | Final `x_position` | Mean `reward_run` | Mean `reward_ctrl` | `rewardRate` |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| **OaK** — heartbeat 002, zenith neighbourhood | 400,000 | **+119,099.91** | **+0.334** | **+6,681.19** | +0.3341 | −0.0363 | −0.0297 |
+| **OaK** — heartbeat 003, post-zenith | 600,000 | +117,304.54 | +0.222 | +6,669.00 | +0.2223 | −0.0268 | −0.0059 |
+| **Random** — uniform action | 500,000 | −129,132.35 | −0.058 | −1,453.67 | −0.0581 | −0.2001 | −0.5231 |
+| **Zero** — no-op (all actuators 0) | 500,000 | +0.66 | ≈ 0 | −0.05 | ≈ 0 | 0 | ≈ 0 |
+
+Three things worth pointing at:
+
+- **OaK is the only policy with strongly positive cumulative reward and a
+  positive forward velocity/x-position.** Random thrashes backward; zero
+  stays put.
+- **Random pays a heavy control cost** (`reward_ctrl.mean = −0.20`). The
+  env penalizes wild actuator commands, so uniform-action thrashing
+  accumulates a deep negative reward even though `reward_run` alone isn't
+  that bad — most of the −129k is paid in control.
+- **The zenith bracket is visible in OaK's own numbers.** Mean
+  `x_velocity` drops from **+0.334 → +0.222** between 400k and 600k
+  cumulative, even though `x_position.last` barely changes. The cheetah
+  is still on the ground at roughly the right place but has already lost
+  the rocket cadence by 600k — exactly why the canonical visual is the
+  500k checkpoint and not a later one.
+
+
+## Where this sits in the Alberta Plan
+
+The Alberta Plan lays out a 12-step roadmap, building from continual supervised
+learning (Step 1) up through prototype-AI agents (Steps 8–11) and on to
+Intelligence Amplification (Step 12). The progression is the architectural
+content; [The Big-World Hypothesis](https://openreview.net/pdf?id=Sv7DazuCn8) — that the environment is vastly more
+complex than the agent, so representations must track rather than converge — is
+the *motivating* commitment of the Plan, not an architecture in itself. It is
+why the Plan is experience-oriented, temporally uniform, compute-cost
+first-class, and unwilling to impose caps that would force a stationary scale
+prior. It is the north star, not the design.
+
+This repo is specifically **Step 11: Prototype-AI III: Oak**. Step 10 is the
+**STOMP progression** — *SubTask → Option → Model → Planning* — which builds
+temporal abstraction on top of given features. Step 11 (Oak) extends Step 10
+with two things:
+
+1. Continual **utility assessment and remove-replace feedback** over every
+   element (features, subtasks, options, option models). Anything that fails
+   to pull weight is eventually deleted and replaced.
+2. The **option keyboard**: a real-valued vector λ ∈ R^K, one component per
+   subtask, where playing multiple non-zero components ("a chord") references
+   a combined option.
+
+## The FC-STOMP cycle / OaK Architecture
+
+![Oak architecture diagram](media/OaK%20Architecture.png)
+
+The architecture for the Step-11 agent is the FC-STOMP cycle: the paper names
+the cycle STOMP and the architecture Oak; FC (Feature Construction) is
+prepended here because under the Big-World commitment features themselves must
+be continually constructed (Plan Steps 1–2) rather than given. The full live
+loop is exposed verbatim as named stages in
+[`Sources/OakKernel.metal`](Sources/OakKernel.metal):
+
+| Stage | Role |
+|---|---|
+| **F**eature **C**onstruction | Continual feature finding + GVFPrediction over feature cumulants; features are generated, tested, and replaced by utility (Plan Steps 1–3, 5; Step-11 feedback) |
+| **S**ub**T**ask | Reward-Respecting subtasks (stopping-value per [arXiv:2202.03466](https://arxiv.org/abs/2202.03466) eq. 4); low-utility subtasks are removed and replaced (Step-11 feedback) |
+| **O**ption | Option policies + RR-derived continuation; the **option keyboard** (chord λ ∈ R^K) blends component options into the emitted action (Step-11 addition) |
+| **M**odel | Option models r̂(s,o), n̂(s,o), and average-reward duration l̂(s,o); models that never pay off in planning are deleted with their option (Step-11 feedback) |
+| **P**lanning | Average-reward option backup `Q = rHat − ρ·lHat + V(nHat)`, driven by search-control prioritization |
+
+Every stage runs every step. `OAK_ABLATE` compiles diagnostic Metal pipeline
+variants that knock out individual sections or couplings; canonical promotion
+runs use `OAK_ABLATE=none`. The current chord is a real-valued blend over
+component options; a fully operational keyboard/chord-descriptor cycle is
+still an open architecture gap (see `AGENTS.md`).
+
+## Current state
+
+OaK is past "negative-return random-beating control" and into real HalfCheetah
+walking, but stability across all 10 seeds is still open research:
+
+- **Seed 3 zenith at 500k (`media/rocket-seed3-zenith-500k.mp4`):** the rocket
+  gait, captured at its sharpest. Seed 3 over the longer 10M horizon keeps
+  cumulative forward momentum (final return `+64,937.78`, x-position delta
+  `+5,891.6`, mean `info:x_velocity = +0.0118`) but the gait dulls past the
+  zenith, which is why the 500k checkpoint is the canonical visual.
+- **Seeds 3, 6, 9** become real forward snowballs by 1M.
+- **Seed 8** is the large backward attractor (preserved as a sentinel).
+- **Seeds 0/1** are quiet failures.
+- 10/10 stability and clean non-finite health remain unsolved.
+
+The strict, dated audit trail lives in [`AGENTS.md`](AGENTS.md) and the keeper
+log in [`docs/roadmap.md`](docs/roadmap.md). The literature corpus is in
+[`docs/papers/`](docs/papers/).
+
+## Install / build
+
+### Prerequisites (must be installed before `./setup.sh`)
+
+
+- **macOS on Apple Silicon** (Metal compute pipeline).
+- **Xcode command-line tools** — provides `swift`, `clang++` (C++20-capable),
+  and the Metal toolchain (`xcrun -sdk macosx metal`, `metallib`):
+  ```bash
+  xcode-select --install
+  ```
+- **Homebrew** + **Eigen** headers (the C++ env bridge needs
+  `/opt/homebrew/include/eigen3`):
+  ```bash
+  /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
+  brew install eigen
+  ```
+- **Python 3** on `PATH` — `setup.sh` prefers `python3.11`:
+  ```bash
+  brew install python@3.11
+  ```
+- **Git** (for the envpool source checkout `setup.sh` performs).
+
+### One-shot build
+
+Once the prerequisites above are present:
 
 ```bash
 ./setup.sh
 ```
 
-## Run
+`setup.sh` creates `.venv`, installs Python deps from `requirements.txt`
+(`envpool==1.2.0`, `mujoco`), vendors a small `oak_env_bridge` shim against an
+envpool `v1.2.0` checkout, copies `mujoco`'s dylib next to it with a
+relocatable id, compiles `Sources/OakKernel.metal` to a metallib, and finally
+runs `swift build -c release`. The resulting binary is
+`./.build/release/OaK`.
+
+For Swift / Metal-only changes, `scripts/halfcheetah_rebuild_10m.sh` recompiles
+just those parts before launching a benchmark — no need to rerun `setup.sh`.
+
+## The envpool bridge
+
+The agent does not talk to MuJoCo through Python. `setup.sh` synthesizes
+`oak_env_bridge.cc` against a vendored `envpool v1.2.0` checkout and links it
+into a single `liboakenv.dylib` that the Swift host loads via a small C ABI
+(`oak_env_open` / `oak_env_step_*` / `oak_env_view`). One env per handle,
+driven directly from the FC-STOMP step.
+
+Why we wrote it instead of using `gym.make` + a Python loop:
+
+- **No Python in the hot loop.** The FC-STOMP cycle runs on every
+  `(observation, action, reward)` triple at Metal speeds; a Python step would
+  dominate wall-clock and inject GIL/interpreter jitter into a loop that is
+  supposed to be temporally uniform.
+- **One process, one address space.** Observations, actions, option credits,
+  and importance weights are exposed as raw float pointers through `View`, so
+  the Swift host reads them with zero copies and zero serialization.
+- **Stripped envpool surface.** envpool is built for massively-batched
+  training; we only need `num_envs = 1` with deterministic seeding. The bridge
+  pins `batch_size = 1`, stubs out the offscreen GL renderer (`CreateGlContext`
+  returns `nullptr`, `Render` zeroes the buffer) so we link cleanly on
+  headless Apple Silicon, and forwards MuJoCo warnings through `mju_user_warning`
+  into the same error channel as bridge-level exceptions.
+- **Faithful HalfCheetah-v4 dynamics.** We use envpool's
+  `mujoco/gym/half_cheetah.h` directly, so reward, control cost, and the
+  `info:x_position` / `info:x_velocity` channels match the Gymnasium spec the
+  paper baselines use. The replay caveat (envpool ≠ vanilla gymnasium
+  bit-for-bit over long horizons) is called out under
+  [Watching the agent](#watching-the-agent).
+
+The bridge is intentionally the *only* env wired through today; adding another
+gym task means writing another `HCEnv`-shaped class against its envpool spec,
+not reworking the host.
+
+## Wait? No PyTorch? Lets Talk about that.
+
+Since this repo is mostly maintained by agents. We need to go **fast**. Why rely on an unoptimized framework when we can craft accelerated GPU kernels with claude directy? We can use XCODE traces and comparing the outputs of OaK bit for bit so we can losslessly upgrade and optimize the kernel without large dependencies or frameworks getting in our way. The Code is the algorithmic logic for OaK a thin launch script and thats it.
+
+![PyTorch crossed out](media/pytorch%20crossed%20out.png)
+
+
+## John Carmack "I am not a madman for saying that it is likely for Artificial General Inteligence is going to be tens of thousands of lines of code not millions"
+
+Carmacks Ideas line up with sutton and is even working with AMII.
+
+https://www.amii.ca/updates-insights/john-carmack-and-rich-sutton-agi
+
+I follow John Carmacks philosophy of AGI "I am not a madman for saying that it is likely for Artificial General Inteligence is going to be tens of thousands of lines of code not millions" 
+
+[![Watch on YouTube](https://img.youtube.com/vi/6gi8TGNpS_E/hqdefault.jpg)](https://www.youtube.com/watch?v=6gi8TGNpS_E&t=73s)
+
+▶ Watch on YouTube (jumps to 1:13): <https://www.youtube.com/watch?v=6gi8TGNpS_E&t=73s>
+
+
+PS. i think even this is pesemistic. OaK Works already.
+ i think its likely 1500 lines of our metal kernel at most ;)
+  We may very well just be a few hundred lines away from the grand prize.
+
+## Run a benchmark
 
 ```bash
-swift run -c release -- run <env-id>
 ./benchmark.sh
 ```
 
-For live benchmark diagnostics, lower the heartbeat stride and watch the JSON
-stream:
+Defaults are configurable via env vars (read in `Sources/Main.swift`):
+
+| Var | Default | Notes |
+|---|---|---|
+| `OAK_BENCH_ENV` | `HalfCheetah-v4` | Only env wired through the bridge today |
+| `OAK_BENCH_STEPS` | benchmark default | Per-seed step budget |
+| `OAK_BENCH_POLICIES` | `oak,zero,random` | Comma list |
+| `OAK_BENCH_SEEDS` | — | Explicit seed list, overrides count |
+| `OAK_BENCH_SEED_COUNT` | `10` | Used when `OAK_BENCH_SEEDS` is unset |
+| `OAK_BENCH_CONCURRENCY` | `8` | Worker process count |
+| `OAK_BENCH_HEARTBEAT_STEPS` | `200000` | Lower for live diagnostics |
+| `OAK_METRICS_STORAGE` | `.oak-benchmarks/...` | Output root |
+| `OAK_RECORD_ACTIONS` | unset | `1` writes `meta.json` + `actions.bin` |
+| `OAK_ABLATE` | `none` | Diagnostic FC-STOMP ablations |
+
+Live JSON heartbeat stream:
 
 ```bash
 OAK_BENCH_HEARTBEAT_STEPS=10000 ./benchmark.sh
 python3 tools/bench_watch.py --policy oak
 ```
 
-For paired candidate screens, run only the diagnostic seeds first and compare
-against the current keeper:
+Paired candidate screen against the keeper:
 
 ```bash
 OAK_BENCH_SEEDS=0,1,3,8 OAK_BENCH_STEPS=50000 OAK_BENCH_POLICIES=oak ./benchmark.sh
-python3 tools/bench_compare.py .oak-benchmarks/grounded-deadrefresh-50k-20260426 <candidate-root>
+python3 tools/bench_compare.py <keeper-root> <candidate-root>
+python3 tools/bench_gate.py    <keeper-root> <candidate-root>
 ```
+
+`bench_gate.py` encodes the empirical promotion law: preserve the rocket
+(seed 3), do not regress the backward attractor (seed 8), and do not hide new
+non-finites behind a better mean.
+
+## Reproducing the rocket (seed 3)
+
+The 1.5M-step run that produces `media/rocket-seed3-zenith-500k.mp4`:
+
+```bash
+OAK_RECORD_ACTIONS=1 \
+OAK_BENCH_POLICIES=oak \
+OAK_BENCH_SEEDS=3 \
+OAK_METRICS_STORAGE="$PWD/.oak-benchmarks/seed3-zenith-$(date +%Y%m%d-%H%M%S)" \
+./scripts/halfcheetah_rebuild_15m.sh
+```
+
+> **Heads-up on the script names.** Despite the suffixes, the rebuild scripts
+> count steps, not millions of steps, and the suffix is *abbreviated step
+> count*, not "Nx million":
+>
+> | Script | `OAK_BENCH_STEPS` | i.e. |
+> |---|---|---|
+> | `halfcheetah_rebuild_15m.sh` | `1500000` | **1.5M** steps |
+> | `halfcheetah_rebuild_10m.sh` | `10000000` | **10M** steps |
+>
+> The 500k zenith snapshot lives inside the 1.5M run; the 10M script is the
+> long-horizon variant used for the cumulative-return numbers in
+> [Current state](#current-state).
+
+When it finishes, render the recording:
+
+```bash
+RUN=$(ls -dt .oak-benchmarks/seed3-zenith-* | head -1)
+python3 tools/replay_render.py "$RUN/HalfCheetah-v4/seed3" --video media/rocket-seed3-zenith-500k.mp4 --fps 30
+```
+
+Recording is opt-in (`OAK_RECORD_ACTIONS=1`): one `fwrite` per step, no
+measurable benchmark overhead.
 
 ## Watching the agent
 
-To see the agent move in the env, record an action stream during a benchmark
-and replay it through standalone gymnasium (Box action spaces only). Recording
-is opt-in via `OAK_RECORD_ACTIONS=1` and writes `meta.json` + `actions.bin`
-alongside the JSON metrics; it adds a single per-step `fwrite` and does not
-perturb benchmark timing.
-
-```bash
-OAK_RECORD_ACTIONS=1 OAK_BENCH_SEEDS=3 OAK_BENCH_STEPS=200000 \
-  OAK_BENCH_POLICIES=oak OAK_BENCH_CONCURRENCY=1 ./benchmark.sh
-python3 tools/replay_render.py .oak-benchmarks/<run-id>/HalfCheetah-v4/seed3
-```
-
 `tools/replay_render.py <run-dir>` opens a pygame window (frames pulled with
 `render_mode="rgb_array"` to sidestep gymnasium 0.29's broken human-mode mujoco
-overlay). Esc or close the window to bail.
+overlay). Esc or close the window to exit.
 
 | Flag | Default | Notes |
 |---|---|---|
 | `--steps N` | all | Cap replay length |
-| `--fps N`   | `30` | Live playback speed; ignored under `--video` for the loop sleep, but still written as the encoded video's frame rate |
-| `--video FILE` | off | Skip the window, encode to `FILE` (mp4) via piped ffmpeg (`libx264`, crf 20, yuv420p). Runs as fast as the renderer + ffmpeg can chew through it; progress is printed to stderr |
+| `--fps N` | `30` | Live playback speed; under `--video` it becomes the encoded frame rate |
+| `--video FILE` | off | Skip the window, encode to `FILE` (mp4) via piped ffmpeg (`libx264`, crf 20, yuv420p) |
 
-Render-only seed 3 example (the rocket-preservation sentinel) and an offline
-encode of it:
+> **Physics drift caveat.** The envpool backend is not bit-identical to vanilla
+> gymnasium, so over long horizons the replayed cheetah will diverge from the
+> recorded trajectory. The agent's actions are faithful — what you see is the
+> policy that ran, applied to a near-identical physics — which is what you want
+> for "watch what the agent learned to do."
 
-```bash
-python3 tools/replay_render.py .oak-benchmarks/<run>/HalfCheetah-v4/seed3 --fps 60
-python3 tools/replay_render.py .oak-benchmarks/<run>/HalfCheetah-v4/seed3 --video rocket-seed3.mp4 --fps 60
+## Repo layout
+
 ```
-
-Physics drift caveat: the underlying envpool backend is not bit-identical to
-vanilla gymnasium, so over long horizons the replayed cheetah will diverge from
-the recorded trajectory. The agent's actions are faithful — what you see is the
-policy that ran, applied to a near-identical physics — which is what you want
-for "watch what the agent learned to do".
+Sources/        Swift host + OakKernel.metal (FC-STOMP loop)
+scripts/        HalfCheetah rebuild scripts (10M, 15M)
+tools/          bench_watch / bench_compare / bench_gate / replay_render / bridge_oracle_cem
+docs/papers/    Literature corpus (Alberta Plan, RR-Subtasks, STOMP, plasticity, etc.)
+docs/roadmap.md Strict keeper / rejection log
+AGENTS.md       Live audit trail and empirical lessons
+```
