@@ -176,6 +176,12 @@ with two things:
 
 ![Oak architecture diagram](media/OaK%20Architecture.png)
 
+Diagram source: [`docs/papers/AlbertaPlanSlides.pdf`](docs/papers/AlbertaPlanSlides.pdf)
+
+> *"Understanding intelligence is a grand scientific prize that may soon be
+> within reach; the glory will go to the bold."*
+> — [`AlbertaPlanSlides.pdf`](docs/papers/AlbertaPlanSlides.pdf), p. 12
+
 The architecture for the Step-11 agent is the FC-STOMP cycle: the paper names
 the cycle STOMP and the architecture Oak; FC (Feature Construction) is
 prepended here because under the Big-World commitment features themselves must
