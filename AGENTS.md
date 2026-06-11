@@ -117,7 +117,7 @@ These are the non-negotiables. Every kernel and every line of host code must res
 7. **Inv-8: strict objective isolation.** No intrinsic curiosity, no learning-progress bonus added to the main reward stream.
 8. **Inv-9: parameter-free meta-learning.** Every constant is structurally derived from agent capacity, stream shape, or device execution width (cap = R, K = R, α₀ = 1/cap, ridge = 1/(age+1)). No tunable knobs. **If you have a number to tweak, the underlying mechanism probably isn't Plan-orthodox** — strip the mechanism, not the number.
 9. **No magnitude caps on weights.** `safe_w(old, new) = isfinite(new) ? new : old` preserves on non-finite; weights grow as the agent's slice of reality demands. No `bounded_soft`, no `safe_half`, no fp16-derived `M = 256`.
-10. **Current single-agent stream semantics.** The live engine is one observation → one action → one reward per agent step (`B = 1`) because the Alberta Plan describes an agent's experience as a single time series. This is an implementation stance, not a sacred batch-size law: future batched kernels are allowed only if they are semantically N independent agents with disjoint state, no cross-stream reductions, and identical per-agent updates. Benchmark concurrency remains N independent worker processes for one environment/seed/policy grid.
+10. **Fleet stream semantics.** Each agent's experience is one observation → one action → one reward per step — a single time series, exactly as the Alberta Plan describes. The live engine batches **B semantically independent agents** (one per seed) into one process: per-lane disjoint state (agent-strided buffers, agentID on the grid's `.y` axis), zero cross-stream reductions, identical per-agent updates. Lane b runs seed b; a B=1 lane is byte-identical to the same seed run alone, and that equivalence is the standing acceptance test for any engine change (state-hash streams via `OAK_DUMP_STATE_EVERY` + `actions.bin` `cmp`). The env side is B one-env-per-handle bridge handles stepped inline on sharded CPU threads (the bridge drives envpool's `HalfCheetahEnv` synchronously — no pool worker threads).
 11. **Inv-10: zero-intelligence-hit optimization rule.** Kernel optimizations split into two classes. **Bit-identical** (kernel splits, per-thread parallelism without cross-thread reductions, pre-computed constants moved into `KernelConfig`/`KernelScalars`, `simd_max` / `simd_min` reductions, lane-0 sequential reductions via `simd_shuffle` or threadgroup memory that preserve the original `fma` sequence in original index order): ship with smoke + 1.5M paired bench. **FP-reorder** (`simd_sum`, threadgroup reductions where the input order changes from sequential, `fma` decomposed into separate multiply + add): ship only after a 10-seed paired bench shows **per-seed parity within ±3 % of the prior commit's per-seed lift** — aggregate parity is necessary but insufficient; per-seed reshuffling that averages to zero is still considered an intelligence hit. The first attempt at C2-perf used `simd_sum` for `oak_meta`/`oak_plan` and showed aggregate parity but per-seed chatter std doubled (0.020 → 0.041); the follow-up restored bit-identical with lane-0 sequential reductions for ~4 µs cost.
 
 ## Architecture
@@ -164,41 +164,78 @@ The agent emits `policyMean[D_policy]` from `oak_action_emit`. The env-wrapper l
 Adding a new env or action-space shape requires adding to `ActionSpec` in Swift; no agent or kernel changes.
 `doneCount` is a wrapper random-restart metric, not an episode signal to OaK; the engine state is never reset on `done`.
 
-## Run metrics JSON
+## Fleet run output (fleetSchemaVersion: 1)
 
-Each benchmark worker writes one pretty-printed JSON file with stable alphabetical key order (`schemaVersion: 7`).
+A fleet run root (`.oak-benchmarks/<run-id>/`, override with `OAK_METRICS_STORAGE`) contains:
 
-**Top-level keys:** `schemaVersion`, `command`, `envId`, `policy`, `ablation`, `ablationLabel`, `seed`, `numEnvs` (always 1 — single-stream), `stopAfterMeasuredSteps`, `observationDim`, `actionDim`, `actionDiscreteCount` (when discrete), `measuredStepCount`, `measuredSeconds`, `stepsPerSecond`, `rewardSum`, `doneCount`, `stopReason`, `heartbeatSequence`, and `health`.
+- **`meta.json`** — run config: `fleetSchemaVersion`, `envId`, `batch` (B), `seeds`, `steps`, `policies`, `ablation`/`ablationLabel`, `startedAt`.
+- **`fleet.jsonl`** — one compact-JSON row per (lane, heartbeat) and per (lane, final): `v`, `kind` (`hb`|`final`), `lane`, `seed`, `step`, `wallSeconds`, `stepsPerSecond`, `rewardSum`, `doneCount`, `firstNonFiniteStep`/`firstNonFiniteDetector` (the death certificate), `kernelRho` (the kernel's internal ρ — a divergence diagnostic, distinct from the host EMA), `paramAbsMax` (running max |param|; dates 1e36 blowups before NF counters fire), and the full `health` block (same fields as before: `rewardRate` host ρ̄, `actionDeltaL2Mean`/`Peak`, `continuingRestartCount`, `envInfo`, `nonFiniteByPhase` cumulative `{encode, learn, plan, tdPsi}`, search/model/keyboard diagnostics, actor diagnostics).
+- **`deaths.jsonl`** — one row per lane death event: `seed`, `lane`, `step`, `detector` (`envReward` | `policyMean` | `paramNonFinite` | `paramExplosion` | `kernelRho` | `envError`), `nfByPhase`, `rhoAtDeath`, `paramAbsMax`, `actorSupportEntropy`, `terminationRate`, `optionDurationMean`, `rewardSumAtDeath`, `lastGoodRewardRate`. A "dead" lane keeps stepping by default (one continual stream, never reset; recovery is data) — the certificate dates the first event. `OAK_FLEET_FREEZE_DEAD=1` opts into freezing certified lanes (gate tiers only; never for science runs where post-divergence behavior is the data).
+- **`aggregate.jsonl`** — one row per heartbeat per policy: `step`, `alive`/`dead`, delivered-rate P10/P50/P90, `aggStepsPerSecond`, `wallSeconds`. This is the live dashboard (`tools/fleet_watch.py`).
+- **`<envId>/seed<N>/`** — per-lane `actions.bin` + `meta.json` (+ optional `stats.bin`) for lanes selected by `OAK_RECORD_SEEDS=3,8` (or all lanes with `OAK_RECORD_ACTIONS=1`); `state-hashes.jsonl` when `OAK_DUMP_STATE_EVERY=N` is set (byte-identity validation).
 
-**`health` block.** Symmetric across policies. Host-computable fields are populated for ANY policy (`oak`, `zero`, or `random`):
+**Tools** (numpy; `requirements.txt`):
 
-- `rewardRate` — host-tracked ρ̄ via incremental EMA (Reward Centering).
-- `actionDeltaL2Mean` — mean L2 of consecutive `policyMean` deltas.
-- `continuingRestartCount` — mirror of wrapper `doneCount`, named to make clear that terminal events are random restarts outside the agent.
-- `envInfo` — generic wrapper audit telemetry keyed by raw env-provided `info:*` signal names, each with `count`, `finiteCount`, `nonFiniteCount`, `sum`, `mean`, `last`, and `delta`. These diagnostics are never agent inputs and must not be promoted into env-semantic benchmark contract fields such as "forward reward".
+- `python3 tools/fleet_stats.py <run-root>` — population report: Kaplan-Meier survival + RMST, divergence rate with Wilson 95% CI (overall + per detector), IQM delivered reward rate (`rewardSum/steps`) with bootstrap CI over ALL lanes (headline; never condition on survival) and survivors-only (diagnostic), plasticity quartiles (zenith step/rate, decay ratio), entropy-collapse rate. Markdown output pastes into `docs/roadmap.md`; also writes `summary.json`.
+- `python3 tools/fleet_gate.py <keeper-root> <candidate-root>` — **the promotion law.** Same seed set + horizon required (hard error); all bootstraps paired by seed. PASS iff ALL four hold (AND-gate ⇒ each one-sided α=0.05, no multiplicity correction): (1) divergence non-inferiority, 95th pct of paired Δp ≤ δ (default 0.64/√N: 0.02 @ N=1024); (2) IQM delivered-rate non-inferiority, 5th pct of ΔIQM ≥ −5%·|IQM_keeper|, with a non-blocking IMPROVEMENT flag (what SOTA claims must cite); (3) RMST survival non-inferiority, 5th pct of ΔRMST ≥ −5%·horizon; (4) no new NF phases and per-phase totals ≤ max(2× keeper, 100·N/10). Exit 0 = PROMOTE, 1 = REJECT. Seed-3/seed-8 folklore is not encoded anywhere — those seeds are ordinary lanes (lane 3, lane 8 of every fleet) whose trajectories remain inspectable in `fleet.jsonl`.
+- `python3 tools/fleet_watch.py <run-root> [--follow]` — live aggregate view.
 
-Kernel-side fields are populated only for `oak`:
+## The SOTA bar (HalfCheetah-v4, external)
 
-- `oakOptionReinitCountFinal`, `oakFeatureReinitCountFinal` — cumulative age-gated generate-and-test replacement counts.
-- `nonFiniteByPhase` = `{"encode": N, "learn": N, "plan": N, "tdPsi": N}` — per-phase NF counts. **Healthy = all zeros across the run.**
-- Search/model/keyboard diagnostics: `modelPriorityMax`, `optionDurationMean`, `terminationRate`, `selectedOptionAge`, `selectedOptionDuration`, `selectedOptionPriority`, `keyboardL1`, `keyboardEffectiveL1`, `keyboardSketchDim`, `searchControlUseMean`, `generateTestEligibleCount`.
-- Actor/support diagnostics: `importanceEss`, `actorUpdateNormMean`, `actorSupportEntropy`, `actorAdvantageL1`.
+Published results report **episodic return** over 1000-step episodes; divide by
+1000 to get per-step reward rate, directly comparable to our delivered
+`rewardSum/steps`. Values at 1M env steps (evaluation of the final policy):
 
-**Storage.** Default directory `.oak-benchmarks/<run-id>/`, with `<run-root>/<envId>/seed<N>/<stem>.json` for finals and `<stem>.heartbeat-NNNNNN.json` for pulses. Override the run root with `OAK_METRICS_STORAGE`.
-`OAK_BENCH_HEARTBEAT_STEPS=N` lowers or raises the host-only pulse stride for diagnostics; this does not change agent computation.
-Use `python3 tools/bench_watch.py <run-root>` to continuously summarize heartbeat/final JSON into per-seed reward, velocity, control, non-finite, model, actor, and replacement columns.
-`OAK_BENCH_SEEDS=0,1,3,8` overrides the contiguous seed range for targeted paired screens. Use `python3 tools/bench_compare.py <keeper-root> <candidate-root> --heartbeats` to locate first divergence before spending a full 10-seed gate.
-Use `python3 tools/bench_gate.py <keeper-root> <candidate-root>` as the default targeted gate. Add `--at-step 10000` or `--at-step 20000` when comparing a short candidate run against heartbeat records in a longer keeper root. It encodes the current empirical law: preserve the rocket seed, do not regress the backward attractor seed, and do not hide new non-finites behind a better mean.
+| Algorithm | Episode return @1M | Reward/step |
+|---|---|---|
+| TD7 | ~17,433 | ~17.4 |
+| TD-MPC2 | ~15,078 | ~15.1 |
+| MR.Q | ~13,305 | ~13.3 |
+| TD3 | ~10,051 | ~10.1 |
+| SAC | ~9,871 | ~9.9 |
+
+Sources: TD7/TD-MPC2/MR.Q table in [arXiv:2502.15280](https://arxiv.org/pdf/2502.15280);
+SAC/TD3 HalfCheetah-v4 @1M in [arXiv:2208.00755](https://arxiv.org/pdf/2208.00755).
+
+Reference point (first fleet keeper, 2026-06-11, B=1024 @250k): best lane
+(seed 3) delivered ~0.37/step; top-10 lanes ~0.14–0.22; population median
+−0.023. Raw gap to TD7 ≈ 47× at the best lane; population median is negative.
+
+Honest-comparison rules:
+
+1. **Eval vs delivered.** Published numbers evaluate the final policy on free
+   episodes; OaK's number is online delivered reward over the entire stream,
+   flailing included. SAC's delivered-during-training average over 1M is
+   roughly 5–7/step, so the delivered-vs-delivered gap is ~15–20×, not 47×.
+   Never mix the two framings in one claim.
+2. **Per-FLOP.** The project's actual SOTA target is reward-rate-per-FLOP
+   (SAC/TD7 spend large replay-batch gradient updates per env step; OaK spends
+   a few small linear heads). No per-FLOP claim is allowed until FLOP counts
+   are instrumented on both sides.
+3. The gap decomposes into two measured problems: (a) make the strong-walker
+   mode (~0.2–0.4/step, currently a ~1–2% population mode) the typical
+   outcome — this alone moves population IQM from ≈−0.02 to ≈+0.3; (b) raise
+   the mode's ceiling from ~0.4 toward 10+ — bound by the post-zenith
+   plasticity frontier.
 
 ## Streamlined research workflow
 
-The working goal is stable 10/10 HalfCheetah walking without bloating the policy or violating FC-STOMP. The loop is architecture-first, evidence-fast:
+The working goal is **general online robustness**: any seed, any horizon, population-level delivered reward rate that beats SOTA — measured on N=1024 lanes, not 10 anecdotes. The loop is architecture-first, evidence-fast:
 
 1. State the FC-STOMP section being changed before editing: feature construction, GVF prediction, RR subtasks, option policies, option models, planning, option keyboard, search control, generate-and-test, or action emission. A candidate that cannot name the section is patch-and-pray.
-2. Keep each behavior patch paired with a keeper-root comparison. Default target screen: `OAK_BENCH_POLICIES=oak`, `OAK_BENCH_SEEDS=0,1,3,8`, 10k with frequent heartbeats, then 50k if not obviously dead. Seed 3 is the rocket-preservation sentinel; seed 8 is the active-backward sentinel; seeds 0/1 are quiet-lock sentinels.
-3. Promote only after the target screen passes `tools/bench_gate.py`, then run Oak-only 300k x 10 seeds. Run `{oak,zero,random}` only for keeper/promotion evidence, bridge audits, and claims about beating baselines.
-4. Reject early if seed 3 loses the high-return path by 50k, seed 8 becomes more backward, or non-finite counts increase, unless the candidate produces broad 10/10 evidence in the same run. Do not average away per-seed collapse.
-5. Name run roots by hypothesis and scale, for example `.oak-benchmarks/closure-arbiter-target50k-YYYYMMDD`, and inspect live runs with `tools/bench_watch.py` rather than waiting for final JSON.
+2. Run every candidate up the tier ladder. **One fleet size (B=1024), one horizon ladder, one measured throughput constant**; tiers are prefix-nested (seeds 0–1023 everywhere) so every tier is a paired extension of the one below:
+
+   | Tier | B × horizon | Wall-clock (measured) | Use | Resolves |
+   |---|---|---|---|---|
+   | S | 1024 × 10k | ~71 s | every candidate | hard fails (NF, explosion) + divergence Δp ≳ 4% |
+   | M | 1024 × 100k | ~12 min | candidates passing S | divergence ±2–3%, IQM screen |
+   | L | 1024 × 1M | ~2 h | keeper promotion, frontier studies | survival curves through the ~1M plasticity frontier, Δp ≳ 2% |
+   | XL | 1024 × 10M | Phase-F-gated | decay-constant program (not a gate) | post-zenith time constants, 10M survival |
+
+   **Hard rule: no protocol step exceeds ~2 h wall-clock.** Wall-clock derives from the measured `aggSPS(B=1024) = 143.7K` recorded in `docs/roadmap.md` — never from estimates. The 10M XL tier and B=4096 SOTA reruns are unlocked by Phase F (GPU physics).
+3. Promote only on a Tier-L `fleet_gate.py` PROMOTE against the keeper baseline. The gate is population law (divergence Δp, IQM delivered rate, RMST survival, NF phases — all paired by seed); a SOTA claim additionally requires the gate's IMPROVEMENT flag.
+4. Per-seed collapse is population data, not an averaging input: `fleet_stats.py` reports it as divergence rate, survival curves, and detector counts. Individual seeds (3, 8, …) remain inspectable as lanes in every fleet, but no single seed blocks or licenses promotion.
+5. Name run roots by hypothesis and tier, for example `.oak-benchmarks/closure-arbiter-tierM-YYYYMMDD`, and inspect live runs with `tools/fleet_watch.py --follow` rather than waiting for final rows.
 6. Use subagents when the work can truly run in parallel: a Metrics Archaeologist mines benchmark roots, a Plan/Invariant Reviewer checks Alberta/FC-STOMP fit, a Mechanism Designer proposes closed-loop organs, a Benchmark Steward watches gates, and a Metal Auditor handles speed/FP-order risk. The main thread integrates; subagents do not define project doctrine.
 7. Archive rejected mechanisms in `docs/roadmap.md`/`AGENTS.md` when they teach a reusable lesson. Keep the live code lean; diagnostics earn their place only when they shorten the next decision.
 
@@ -206,7 +243,7 @@ The working goal is stable 10/10 HalfCheetah walking without bloating the policy
 
 | Command | Use |
 |---|---|
-| `OaK benchmark` | Concurrent single-env multi-seed sweep. Each item runs in its own worker process so native env/global state cannot leak across independent streams. `OAK_BENCH_ENV` selects the env (default `HalfCheetah-v4`); `OAK_BENCH_STEPS`, `OAK_BENCH_SEED_COUNT`/`OAK_BENCH_SEEDS`, and `OAK_BENCH_POLICIES` define the workload. `OAK_BENCH_CONCURRENCY` caps worker count; otherwise concurrency is all logical cores, with deterministic refill from the canonical work list. One benchmark launcher owns the workspace at a time; nonempty requested roots get a fresh suffixed output dir. |
+| `OaK benchmark` | One fleet per policy: B independent (agent, env, seed) lanes in one process — a single batched kernel dispatch per step, env stepping sharded across CPU threads. `OAK_BENCH_ENV` selects the env (default `HalfCheetah-v4`); `OAK_BENCH_STEPS`, `OAK_BENCH_SEED_COUNT` (default 1024) / `OAK_BENCH_SEEDS` / `OAK_BENCH_SEED_START`, and `OAK_BENCH_POLICIES` define the workload. `OAK_FLEET_ENV_THREADS` caps env-step shards (default: all cores); `OAK_FLEET_TIMING=1` prints per-phase wall shares each heartbeat; `OAK_FLEET_FREEZE_DEAD=1` stops stepping certified-dead lanes (gate tiers only). One launcher owns the workspace at a time; nonempty requested roots get a fresh suffixed output dir. |
 
 `OAK_ABLATE` defaults to `none`. It accepts a comma-separated diagnostic list: `feature-construction`, `gvf-prediction`, `rr-subtasks`, `option-policies`, `option-models`, `planning`, `option-keyboard`, `model-to-keyboard`, `keyboard-to-policy`, `search-control`, `search-to-generate-test`, and `generate-and-test`. These are specialized Metal function-constant variants, not a promoted behavior mode.
 

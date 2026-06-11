@@ -321,7 +321,13 @@ PS. i think even this is pesemistic. OaK Works already.
  i think its likely 1500 lines of our metal kernel at most ;)
   We may very well just be a few hundred lines away from the grand prize.
 
-## Run a benchmark
+## Run a benchmark (the fleet)
+
+The benchmark is a **fleet**: B independent (agent, env, seed) lanes in one
+process — one batched Metal dispatch per step for all B agents, env stepping
+sharded across CPU threads. Each lane is still one continual stream (one
+observation → one action → one reward per step, never reset); the fleet is
+N independent agents, not one agent with vectorized envs.
 
 ```bash
 ./benchmark.sh
@@ -332,34 +338,48 @@ Defaults are configurable via env vars (read in `Sources/Main.swift`):
 | Var | Default | Notes |
 |---|---|---|
 | `OAK_BENCH_ENV` | `HalfCheetah-v4` | Only env wired through the bridge today |
-| `OAK_BENCH_STEPS` | benchmark default | Per-seed step budget |
-| `OAK_BENCH_POLICIES` | `oak,zero,random` | Comma list |
+| `OAK_BENCH_STEPS` | `500000` | Per-lane step budget (horizon) |
+| `OAK_BENCH_POLICIES` | `oak,zero,random` | Comma list; one fleet per policy |
 | `OAK_BENCH_SEEDS` | — | Explicit seed list, overrides count |
-| `OAK_BENCH_SEED_COUNT` | `10` | Used when `OAK_BENCH_SEEDS` is unset |
-| `OAK_BENCH_CONCURRENCY` | `8` | Worker process count |
-| `OAK_BENCH_HEARTBEAT_STEPS` | `200000` | Lower for live diagnostics |
+| `OAK_BENCH_SEED_COUNT` | `1024` | B = lane count; lane b runs seed b |
+| `OAK_BENCH_HEARTBEAT_STEPS` | steps/10 | Lower for live diagnostics |
+| `OAK_FLEET_ENV_THREADS` | all cores | CPU shards for env stepping |
+| `OAK_FLEET_TIMING` | unset | `1` prints per-phase wall shares per heartbeat |
+| `OAK_FLEET_FREEZE_DEAD` | unset | `1` stops stepping certified-dead lanes (gate runs only) |
 | `OAK_METRICS_STORAGE` | `.oak-benchmarks/...` | Output root |
-| `OAK_RECORD_ACTIONS` | unset | `1` writes `meta.json` + `actions.bin` |
+| `OAK_RECORD_SEEDS` | unset | Comma list of lanes that record `actions.bin` |
+| `OAK_RECORD_ACTIONS` | unset | `1` records ALL lanes (small fleets only) |
+| `OAK_DUMP_STATE_EVERY` | unset | N = per-lane state-hash stride (byte-identity validation) |
 | `OAK_ABLATE` | `none` | Diagnostic FC-STOMP ablations |
 
-Live JSON heartbeat stream:
+Outputs are population-scale files in the run root, not per-seed trees:
+`fleet.jsonl` (one row per lane per heartbeat), `deaths.jsonl` (per-lane death
+certificates: first non-finite step, detector, ρ and max |param| at death),
+`aggregate.jsonl` (live dashboard rows), and per-lane `actions.bin` for
+recorded lanes.
+
+The tier ladder (one fleet size, horizons in powers of ten, seeds prefix-nested
+so every tier is a paired extension of the one below; no protocol step exceeds
+~2 h wall-clock):
+
+| Tier | B × horizon | Use |
+|---|---|---|
+| S | 1024 × 10k | every candidate (hard fails) |
+| M | 1024 × 100k | candidates passing S |
+| L | 1024 × 1M | keeper promotion + frontier studies |
+| XL | 128 × 10M | plasticity decay-constant program |
+
+Watch a live fleet, report a finished one, and gate a candidate:
 
 ```bash
-OAK_BENCH_HEARTBEAT_STEPS=10000 ./benchmark.sh
-python3 tools/bench_watch.py --policy oak
+python3 tools/fleet_watch.py <run-root> --follow
+python3 tools/fleet_stats.py <run-root>          # KM survival, Wilson CIs, IQM, plasticity
+python3 tools/fleet_gate.py  <keeper> <candidate> # population promotion law (paired by seed)
 ```
 
-Paired candidate screen against the keeper:
-
-```bash
-OAK_BENCH_SEEDS=0,1,3,8 OAK_BENCH_STEPS=50000 OAK_BENCH_POLICIES=oak ./benchmark.sh
-python3 tools/bench_compare.py <keeper-root> <candidate-root>
-python3 tools/bench_gate.py    <keeper-root> <candidate-root>
-```
-
-`bench_gate.py` encodes the empirical promotion law: preserve the rocket
-(seed 3), do not regress the backward attractor (seed 8), and do not hide new
-non-finites behind a better mean.
+`fleet_gate.py` is the promotion law: divergence-rate, IQM delivered-rate, and
+RMST-survival non-inferiority plus no new non-finite phases — all paired by
+seed across the full population. Single seeds are lanes in the data, not law.
 
 ## Reproducing the rocket (seed 3)
 
@@ -417,10 +437,10 @@ overlay). Esc or close the window to exit.
 ## Repo layout
 
 ```
-Sources/        Swift host + OakKernel.metal (FC-STOMP loop)
+Sources/        Swift host (fleet engine) + OakKernel.metal (B-lane FC-STOMP loop)
 scripts/        HalfCheetah rebuild scripts (10M, 15M)
-tools/          bench_watch / bench_compare / bench_gate / replay_render / bridge_oracle_cem
+tools/          fleet_watch / fleet_stats / fleet_gate / replay_render / bridge_oracle_cem
 docs/papers/    Literature corpus (Alberta Plan, RR-Subtasks, STOMP, plasticity, etc.)
-docs/roadmap.md Strict keeper / rejection log
+docs/roadmap.md Strict keeper / rejection log + fleet tier protocol
 AGENTS.md       Live audit trail and empirical lessons
 ```

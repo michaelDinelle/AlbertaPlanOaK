@@ -97,8 +97,6 @@ namespace oak_native { class LogStream { public: template<class T> LogStream& op
   }
 
   namespace {
-  template <typename T> Array A(std::size_t n) { return Array(Spec<T>({static_cast<int>(n)})); }
-  template <typename T> Array A(std::size_t r, std::size_t c) { return Array(Spec<T>({static_cast<int>(r), static_cast<int>(c)})); }
   std::string& GlobalError() { static thread_local std::string e; return e; }
   std::string& Warnings() { static thread_local std::string w; return w; }
   void OakWarn(const char* m) { if (m && *m) { auto& w = Warnings(); if (!w.empty()) w.push_back('\n'); w += m; } }
@@ -108,28 +106,73 @@ namespace oak_native { class LogStream { public: template<class T> LogStream& op
     c["num_envs"_] = 1; c["batch_size"_] = 1; c["seed"_] = seed; c["base_path"_] = base;
     return mujoco_gym::HalfCheetahEnvSpec(c.AllValues());
   }
+  // Raw synchronous env: subclasses envpool's HalfCheetahEnv to reuse its
+  // exact construction (model load, ResolveSeed -> gen_, reset-noise dists)
+  // and MujocoStep/MujocoReset primitives, but replaces the pool data path
+  // (SetAction/EnvStep/StateBufferQueue) with allocation-free replicas of
+  // Reset()/Step() that write straight into caller buffers. At fleet scale
+  // (B = 1024 handles in one process) the pool's per-step Array/shared_ptr/
+  // StateBuffer churn was the throughput ceiling; this path does ctrl copy,
+  // frame_skip x mj_step, reward math, obs copy — nothing else. Byte-identical
+  // per seed: same RNG consumption, same FP order as half_cheetah.h.
+  class HCRaw final : public mujoco_gym::HalfCheetahEnv {
+   public:
+    using mujoco_gym::HalfCheetahEnv::HalfCheetahEnv;
+    bool DoneRaw() const { return done_; }
+    void ResetRaw(float* obs, float& reward, double* info) {
+      done_ = false; elapsed_step_ = 0;
+      MujocoReset();
+      reward = 0.0f;
+      info[0] = 0.0; info[1] = -0.0; info[2] = 0.0; info[3] = 0.0;
+      CopyObs(obs);
+    }
+    void StepRaw(const mjtNum* act, float* obs, float& reward, int& done, double* info) {
+      mjtNum x_before = data_->qpos[0];
+      MujocoStep(act);
+      mjtNum x_after = data_->qpos[0];
+      mjtNum ctrl_cost = 0.0;
+      for (int i = 0; i < model_->nu; ++i) ctrl_cost += ctrl_cost_weight_ * act[i] * act[i];
+      mjtNum dt = frame_skip_ * model_->opt.timestep;
+      mjtNum xv = (x_after - x_before) / dt;
+      reward = static_cast<float>(xv * forward_reward_weight_ - ctrl_cost);
+      done_ = (++elapsed_step_ >= max_episode_steps_);
+      done = done_ ? 1 : 0;
+      info[0] = xv * forward_reward_weight_; info[1] = -ctrl_cost; info[2] = x_after; info[3] = xv;
+      CopyObs(obs);
+    }
+   private:
+    void CopyObs(float* obs) {
+      for (int i = no_pos_ ? 1 : 0; i < model_->nq; ++i) *(obs++) = static_cast<float>(data_->qpos[i]);
+      for (int i = 0; i < model_->nv; ++i) *(obs++) = static_cast<float>(data_->qvel[i]);
+    }
+  };
   class HCEnv final {
-    mujoco_gym::HalfCheetahEnvPool pool_;
+    mujoco_gym::HalfCheetahEnvSpec spec_;
+    HCRaw env_;
     int act_dim_, d_policy_, option_count_ = 0, steps_ = 0, done_ = 0;
     float reward_ = 0.0f; double delta_sum_ = 0.0;
-    Array env_ids_, player_ids_, action_;
+    std::vector<mjtNum> act_;
     std::vector<const char*> info_names_;
     std::vector<double> info_values_;
     std::vector<float> low_, high_, obs_, env_action_, action_signal_, option_credit_, importance_, logp_, last_policy_, descriptor_;
     std::mt19937 rng_;
     std::normal_distribution<float> normal_{0.0f, 1.0f};
     std::uniform_real_distribution<float> uniform_{0.0f, 1.0f};
-    void copy_obs(const std::vector<Array>& recv) { auto src = TArray<mjtNum>(recv[8]); for (int i = 0; i < obs_dim(); ++i) obs_[i] = static_cast<float>(src(0, i)); }
-    void copy_reward_done(const std::vector<Array>& recv) { auto r = TArray<float>(recv[4]); auto d = TArray<bool>(recv[3]); reward_ = r[0]; done_ = d[0] ? 1 : 0; }
-    void copy_info(const std::vector<Array>& recv) { auto run = TArray<mjtNum>(recv[9]); auto ctrl = TArray<mjtNum>(recv[10]); auto pos = TArray<mjtNum>(recv[11]); auto vel = TArray<mjtNum>(recv[12]); info_values_[0] = run[0]; info_values_[1] = ctrl[0]; info_values_[2] = pos[0]; info_values_[3] = vel[0]; }
-    void send() { auto* dst = static_cast<mjtNum*>(action_.Data()); for (int i = 0; i < act_dim_; ++i) dst[i] = static_cast<mjtNum>(env_action_[i]); pool_.Send(std::vector<Array>{env_ids_, player_ids_, action_}); auto recv = pool_.Recv(); copy_obs(recv); copy_reward_done(recv); copy_info(recv); }
+    void send() {
+      for (int i = 0; i < act_dim_; ++i) act_[i] = static_cast<mjtNum>(env_action_[i]);
+      if (env_.DoneRaw()) {
+        env_.ResetRaw(obs_.data(), reward_, info_values_.data());
+        done_ = 0;
+      } else {
+        env_.StepRaw(act_.data(), obs_.data(), reward_, done_, info_values_.data());
+      }
+    }
     void delta(const std::vector<float>& x) { double d = 0.0; for (int i = 0; i < d_policy_; ++i) { double v = double(x[i]) - double(last_policy_[i]); d += v * v; last_policy_[i] = x[i]; } delta_sum_ += d / double(std::max(d_policy_, 1)); }
    public:
-    HCEnv(int seed, const std::string& base) : pool_(Spec(seed, base)), act_dim_(pool_.spec.action_spec["action"_].shape.back()), d_policy_(2 * act_dim_), env_ids_(A<int>(1)), player_ids_(A<int>(1)), action_(A<mjtNum>(1, act_dim_)), info_names_{"info:reward_run", "info:reward_ctrl", "info:x_position", "info:x_velocity"}, info_values_(info_names_.size()), obs_(obs_dim()), env_action_(act_dim_), action_signal_(d_policy_), last_policy_(d_policy_), descriptor_(d_policy_), rng_(static_cast<uint32_t>(seed)) {
-      static_cast<int*>(env_ids_.Data())[0] = 0; static_cast<int*>(player_ids_.Data())[0] = 0;
-      auto b = pool_.spec.action_spec["action"_].bounds; low_.assign(act_dim_, static_cast<float>(std::get<0>(b))); high_.assign(act_dim_, static_cast<float>(std::get<1>(b)));
+    HCEnv(int seed, const std::string& base) : spec_(Spec(seed, base)), env_(spec_, 0), act_dim_(spec_.action_spec["action"_].shape.back()), d_policy_(2 * act_dim_), act_(act_dim_), info_names_{"info:reward_run", "info:reward_ctrl", "info:x_position", "info:x_velocity"}, info_values_(info_names_.size()), obs_(obs_dim()), env_action_(act_dim_), action_signal_(d_policy_), last_policy_(d_policy_), descriptor_(d_policy_), rng_(static_cast<uint32_t>(seed)) {
+      auto b = spec_.action_spec["action"_].bounds; low_.assign(act_dim_, static_cast<float>(std::get<0>(b))); high_.assign(act_dim_, static_cast<float>(std::get<1>(b)));
     }
-    int obs_dim() const { return pool_.spec.state_spec["obs"_].shape.back(); }
+    int obs_dim() const { return spec_.state_spec["obs"_].shape.back(); }
     int act_dim() const { return act_dim_; }
     int d_policy() const { return d_policy_; }
     const float* obs() const { return obs_.data(); }
@@ -143,7 +186,7 @@ namespace oak_native { class LogStream { public: template<class T> LogStream& op
     int done() const { return done_; }
     double action_delta_mean() const { return steps_ > 0 ? delta_sum_ / steps_ : 0.0; }
     void prepare(int k) { option_count_ = std::max(k, 0); option_credit_.assign(option_count_ * d_policy_, 0.0f); importance_.assign(option_count_, 1.0f); logp_.assign(option_count_, 0.0f); }
-    void reset() { pool_.Reset(env_ids_); auto recv = pool_.Recv(); copy_obs(recv); copy_info(recv); reward_ = 0.0f; done_ = 0; steps_ = 0; delta_sum_ = 0.0f; std::fill(last_policy_.begin(), last_policy_.end(), 0.0f); std::fill(action_signal_.begin(), action_signal_.end(), 0.0f); std::fill(option_credit_.begin(), option_credit_.end(), 0.0f); std::fill(importance_.begin(), importance_.end(), 1.0f); }
+    void reset() { env_.ResetRaw(obs_.data(), reward_, info_values_.data()); reward_ = 0.0f; done_ = 0; steps_ = 0; delta_sum_ = 0.0f; std::fill(last_policy_.begin(), last_policy_.end(), 0.0f); std::fill(action_signal_.begin(), action_signal_.end(), 0.0f); std::fill(option_credit_.begin(), option_credit_.end(), 0.0f); std::fill(importance_.begin(), importance_.end(), 1.0f); }
     void step_zero() { std::fill(env_action_.begin(), env_action_.end(), 0.0f); std::fill(action_signal_.begin(), action_signal_.end(), 0.0f); std::fill(descriptor_.begin(), descriptor_.end(), 0.0f); delta(descriptor_); ++steps_; send(); }
     void step_random() { for (int d = 0; d < act_dim_; ++d) { float x = low_[d] + (high_[d] - low_[d]) * uniform_(rng_); env_action_[d] = x; action_signal_[d] = x; action_signal_[act_dim_ + d] = 0.0f; descriptor_[d] = x; descriptor_[act_dim_ + d] = 0.0f; } delta(descriptor_); ++steps_; send(); }
     void step_oak(const float* policy, const float* options, int k) {

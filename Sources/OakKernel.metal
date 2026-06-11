@@ -1,5 +1,6 @@
 #include <metal_stdlib>
 #include <float.h>
+#include "OakPhysics.metal"
 using namespace metal;
 
 constant uint OAK_CNT_OBS_NF        = 0u;
@@ -29,6 +30,7 @@ struct KernelConfig {
     uint linearAnchorCount;
     float invRank, invOptionCount;
     float metaEta;
+    uint agentCount, paramStride, stateStride, uintStride;
 };
 
 struct KernelScalars {
@@ -93,7 +95,12 @@ struct Ctx {
 
 inline Ctx make_ctx(device float *params, device float *stateArena, device uint *uintArena,
                     device KernelScalars *scalars, device KernelStats *stats,
-                    constant KernelConfig &cfg) {
+                    constant KernelConfig &cfg, uint agentID) {
+    params += agentID * cfg.paramStride;
+    stateArena += agentID * cfg.stateStride;
+    uintArena += agentID * cfg.uintStride;
+    scalars += agentID;
+    stats += agentID;
     Ctx c;
     c.O = cfg.obsDim; c.R = cfg.rank; c.K = cfg.optionCount;
     c.D = cfg.actionParamCount; c.traceLevels = cfg.obsTraceLevels;
@@ -743,9 +750,11 @@ kernel void oak_encode(device float *params [[buffer(0)]],
                        threadgroup float *tgCurrState [[threadgroup(6)]],
                        threadgroup float *tgDir [[threadgroup(7)]],
                        threadgroup float *tgEffort [[threadgroup(8)]],
-                       uint tid [[thread_position_in_threadgroup]],
-                       uint tgW [[threads_per_threadgroup]]) {
-    Ctx ctx = make_ctx(params, stateArena, uintArena, scalars, stats, cfg);
+                       uint2 tpos [[thread_position_in_threadgroup]],
+                       uint2 tdim [[threads_per_threadgroup]],
+                       uint2 tgPos [[threadgroup_position_in_grid]]) {
+    uint tid = tpos.x, tgW = tdim.x;
+    Ctx ctx = make_ctx(params, stateArena, uintArena, scalars, stats, cfg, tgPos.y);
     FeatureConstruction(ctx, tid, tgW, tgPrevState, tgCurrState);
     fcstomp_prediction_control_loop(ctx, tid, tgPrevState, tgCurrState, tgG, tgCont, tgTerm,
                                     tgTdPsi, tgDir, tgEffort, tgScalars);
@@ -758,9 +767,10 @@ kernel void oak_plan(device float *params [[buffer(0)]],
                      device KernelStats *stats [[buffer(4)]],
                      constant KernelConfig &cfg [[buffer(5)]],
                      threadgroup float *tgModelErr [[threadgroup(0)]],
-                     uint j [[thread_position_in_threadgroup]],
-		                     uint k [[threadgroup_position_in_grid]]) {
-    Ctx ctx = make_ctx(params, stateArena, uintArena, scalars, stats, cfg);
+                     uint2 jpos [[thread_position_in_threadgroup]],
+                     uint2 tgPos [[threadgroup_position_in_grid]]) {
+    uint j = jpos.x, k = tgPos.x;
+    Ctx ctx = make_ctx(params, stateArena, uintArena, scalars, stats, cfg, tgPos.y);
     if (k >= ctx.K) return;
     device const float *prev = state_at(ctx, ctx.stateSlot);
     device const float *curr = state_at(ctx, 1u - ctx.stateSlot);
@@ -843,8 +853,9 @@ kernel void oak_learn_heads(device float *params [[buffer(0)]],
                             device KernelScalars *scalars [[buffer(3)]],
                             device KernelStats *stats [[buffer(4)]],
                             constant KernelConfig &cfg [[buffer(5)]],
-                            uint gid [[thread_position_in_grid]]) {
-    Ctx ctx = make_ctx(params, stateArena, uintArena, scalars, stats, cfg);
+                            uint2 gpos [[thread_position_in_grid]]) {
+    uint gid = gpos.x;
+    Ctx ctx = make_ctx(params, stateArena, uintArena, scalars, stats, cfg, gpos.y);
     // Uniform learning: value, GVFs, option policies, and option models share one stream.
     device const float *prev = state_at(ctx, ctx.stateSlot);
     device const float *curr = state_at(ctx, 1u - ctx.stateSlot);
@@ -990,9 +1001,11 @@ kernel void oak_replace(device float *params [[buffer(0)]],
                         device KernelStats *stats [[buffer(4)]],
                         constant KernelConfig &cfg [[buffer(5)]],
                         threadgroup float *tgCurrState [[threadgroup(0)]],
-                        uint tid [[thread_position_in_threadgroup]],
-                        uint tgW [[threads_per_threadgroup]]) {
-    Ctx ctx = make_ctx(params, stateArena, uintArena, scalars, stats, cfg);
+                        uint2 tpos [[thread_position_in_threadgroup]],
+                        uint2 tdim [[threads_per_threadgroup]],
+                        uint2 tgPos [[threadgroup_position_in_grid]]) {
+    uint tid = tpos.x, tgW = tdim.x;
+    Ctx ctx = make_ctx(params, stateArena, uintArena, scalars, stats, cfg, tgPos.y);
     // GenerateAndTest: bundle utility, replacement, and FC-STOMP health diagnostics.
     device const float *curr = state_at(ctx, 1u - ctx.stateSlot);
     device const float *prev = state_at(ctx, ctx.stateSlot);
@@ -1232,10 +1245,389 @@ kernel void oak_replace(device float *params [[buffer(0)]],
     ctx.scalars->stepCount = ctx.stepCount + 1u;
 }
 
-kernel void oak_action_emit(device float *params [[buffer(0)]], device float *stateArena [[buffer(1)]], device uint *uintArena [[buffer(2)]], device KernelScalars *scalars [[buffer(3)]], device KernelStats *stats [[buffer(4)]], constant KernelConfig &cfg [[buffer(5)]], threadgroup float *tgCurrState [[threadgroup(0)]], uint group [[threadgroup_position_in_grid]], uint tid [[thread_position_in_threadgroup]], uint tgW [[threads_per_threadgroup]]) {
-    Ctx ctx = make_ctx(params, stateArena, uintArena, scalars, stats, cfg);
+kernel void oak_action_emit(device float *params [[buffer(0)]], device float *stateArena [[buffer(1)]], device uint *uintArena [[buffer(2)]], device KernelScalars *scalars [[buffer(3)]], device KernelStats *stats [[buffer(4)]], constant KernelConfig &cfg [[buffer(5)]], threadgroup float *tgCurrState [[threadgroup(0)]], uint2 tgPos [[threadgroup_position_in_grid]], uint2 tpos [[thread_position_in_threadgroup]], uint2 tdim [[threads_per_threadgroup]]) {
+    uint group = tgPos.x, tid = tpos.x, tgW = tdim.x;
+    Ctx ctx = make_ctx(params, stateArena, uintArena, scalars, stats, cfg, tgPos.y);
     device const float *curr = state_at(ctx, ctx.stateSlot);
     for (uint i = tid; i < ctx.R; i += tgW) tgCurrState[i] = curr[i];
     threadgroup_barrier(mem_flags::mem_threadgroup);
     emit_action_grid(ctx, tgCurrState, group, tid, tgW);
+}
+
+// ===========================================================================
+// Phase F3: GPU-resident fleet env layer.
+//   oak_fleet_init   — per-lane env reset + arena seeding (one thread/lane)
+//   oak_sample_act   — exact Metal port of HCEnv::step_oak/step_zero/
+//                      step_random sampling (setup.sh oak_env_bridge.cc),
+//                      Philox stream 2 for the policy normals
+//   oak_fleet_env    — hc_env_step body + envInfo/reward accumulators +
+//                      death-detector latches + action recording
+//   oak_fleet_snapshot — heartbeat copy of per-lane health into a
+//                      double-buffered snapshot the host writer drains
+// The agent kernels above and the physics in OakPhysics.metal are untouched.
+// ===========================================================================
+
+constant uint HC_RNG_STREAM_ACT = 2u;  // 0 = reset noise, 1 = random ctrl
+
+// Death detector codes (host maps to the deaths.jsonl detector strings).
+constant uint OAK_DEATH_NONE       = 0xffffffffu;
+constant uint OAK_DET_ENV_REWARD   = 1u;
+constant uint OAK_DET_POLICY_MEAN  = 2u;
+constant uint OAK_DET_ENV_OBS      = 3u;
+
+struct OakFleetEnvCfg {
+    uint laneCount;
+    uint episodeLen;       // 0 = continuing (CPU-era bridge semantics), 1000 = gym
+    uint policyMode;       // 0 = oak, 1 = zero, 2 = random
+    uint recordCapacity;   // ring records per recorded lane (0 = no recording)
+    float invObsFloor;     // Run floor = 1/max(obsDim,1) for the host-rho EMA
+};
+
+struct OakFleetInfoAcc { uint count, finiteCount; float sum, sumC, first, last; };
+
+// Per-lane persistent fleet state (env + stream accumulators). All members
+// 4-byte scalars: layout is mirrored field-for-field on the Swift side.
+struct OakFleetLane {
+    HCState s;                            // qpos[9] qvel[9] ctrl[6] warmstart[9]
+    uint elapsed, resets;
+    uint steps, doneCount;
+    float ctrlPending[6];                 // clamped action from oak_sample_act
+    float lastDesc[12];                   // HCEnv::last_policy_ (d_policy = 12)
+    float deltaSum, deltaC, deltaPeak;    // Kahan delta_sum_ + running-mean peak
+    float rewardSum, rewardC, rho;        // Kahan rewardSum + host-EMA reward rate
+    uint deathStep, deathDetector;        // first-nonfinite latch
+    float deathRewardSum, deathRho;       // values at the latch step
+    OakFleetInfoAcc info[4];              // reward_run, reward_ctrl, x_position, x_velocity
+};
+static_assert(sizeof(OakFleetLane) == 356, "OakFleetLane layout drifted from the Swift mirror");
+
+// Heartbeat snapshot row (one per lane, double-buffered host-visible).
+struct OakLaneSnapshot {
+    KernelScalars scalars;
+    KernelStats stats;
+    float paramAbsMax;
+    uint paramNonFinite;
+    uint steps, doneCount, resets;
+    float rewardSum, rho;
+    float deltaSum, deltaPeak;
+    uint deathStep, deathDetector;
+    float deathRewardSum, deathRho;
+    OakFleetInfoAcc info[4];
+};
+static_assert(sizeof(OakLaneSnapshot) == 276, "OakLaneSnapshot layout drifted from the Swift mirror");
+
+inline float oak_safe(float x) { return isfinite(x) ? x : 0.0f; }
+
+// 6 standard normals via Philox stream 2 + Box-Muller (same construction as
+// hc_rng_reset_noise). PORT-NOTE: the CPU bridge uses mt19937 +
+// std::normal_distribution; only the law N(0,1) is shared, per the F2 RNG
+// contract for hc_rng_ctrl.
+inline void oak_rng_normal6(uint laneSeed, uint stepIdx, thread float *z) {
+    uint2 key = uint2(laneSeed, HC_RNG_STREAM_ACT);
+    uint4 r0 = hc_philox4x32(key, uint4(stepIdx, 0u, 0u, 0u));
+    uint4 r1 = hc_philox4x32(key, uint4(stepIdx, 1u, 0u, 0u));
+    uint raw[6] = { r0.x, r0.y, r0.z, r0.w, r1.x, r1.y };
+    for (int p = 0; p < 3; p++) {
+        float u1 = hc_u01open(raw[2*p]);
+        float u2 = hc_u01(raw[2*p + 1]);
+        float rad = sqrt(-2.0f * log(u1));
+        float ang = 2.0f * M_PI_F * u2;
+        z[2*p] = rad * cos(ang);
+        z[2*p + 1] = rad * sin(ang);
+    }
+}
+
+inline void oak_kahan_add(device float *sum, device float *comp, float x) {
+    float y = x - *comp;
+    float t = *sum + y;
+    *comp = (t - *sum) - y;
+    *sum = t;
+}
+
+// One thread per lane: env reset + lane-state zeroing + arena seeding,
+// replicating the CPU fleet prologue (env.prepare(rank); env.reset();) —
+// obs = reset obs, reward = 0, actionSignal/credit = 0, importance = 1.
+kernel void oak_fleet_init(device float *params [[buffer(0)]],
+                           device float *stateArena [[buffer(1)]],
+                           device uint *uintArena [[buffer(2)]],
+                           device KernelScalars *scalars [[buffer(3)]],
+                           device KernelStats *stats [[buffer(4)]],
+                           constant KernelConfig &cfg [[buffer(5)]],
+                           device OakFleetLane *lanes [[buffer(6)]],
+                           device const uint *laneSeeds [[buffer(7)]],
+                           constant OakFleetEnvCfg &ecfg [[buffer(8)]],
+                           uint gid [[thread_position_in_grid]]) {
+    if (gid >= ecfg.laneCount) return;
+    device OakFleetLane *lane = &lanes[gid];
+    HCState s;
+    uint elapsed = 0u, resets = 0u;
+    hc_env_reset(s, laneSeeds[gid], elapsed, resets);
+    lane->s = s;
+    lane->elapsed = elapsed; lane->resets = resets;
+    lane->steps = 0u; lane->doneCount = 0u;
+    for (int u = 0; u < 6; u++) lane->ctrlPending[u] = 0.0f;
+    for (int i = 0; i < 12; i++) lane->lastDesc[i] = 0.0f;
+    lane->deltaSum = 0.0f; lane->deltaC = 0.0f; lane->deltaPeak = 0.0f;
+    lane->rewardSum = 0.0f; lane->rewardC = 0.0f; lane->rho = 0.0f;
+    lane->deathStep = OAK_DEATH_NONE; lane->deathDetector = 0u;
+    lane->deathRewardSum = 0.0f; lane->deathRho = 0.0f;
+    for (int j = 0; j < 4; j++) {
+        lane->info[j].count = 0u; lane->info[j].finiteCount = 0u;
+        lane->info[j].sum = 0.0f; lane->info[j].sumC = 0.0f;
+        lane->info[j].first = 0.0f; lane->info[j].last = 0.0f;
+    }
+    if (ecfg.policyMode == 0u) {
+        Ctx ctx = make_ctx(params, stateArena, uintArena, scalars, stats, cfg, gid);
+        for (uint i = 0u; i + 1u < 9u; ++i) ctx.observation[i] = s.qpos[i + 1u];
+        for (uint i = 0u; i < 9u; ++i) ctx.observation[8u + i] = s.qvel[i];
+        ctx.reward[0] = 0.0f;
+        for (uint d = 0u; d < ctx.D; ++d) ctx.actionSignal[d] = 0.0f;
+        for (uint i = 0u; i < ctx.K * ctx.D; ++i) ctx.optionActorCredit[i] = 0.0f;
+        for (uint k = 0u; k < ctx.K; ++k) ctx.importance[k] = 1.0f;
+    }
+}
+
+// One thread per lane: action sampling. Exact port of HCEnv::step_oak /
+// step_zero / step_random up to (but excluding) send():
+//   descriptor[i] = safe(policyMean[i]); sd = 1/d_policy;
+//   per action dim d: sample = safe(mu + sd*z); ctrl = clamp(sample, -1, 1);
+//   actionSignal[d] = ctrl, actionSignal[A+d] = 0;
+//   behavior += log_sigma - z^2/2;
+//   per option o: oz = (sample - option_mu)/sd (UNclamped sample, as on CPU);
+//   logp[o] += log_sigma - oz^2/2; credit[o*D+d] = sample - option_mu;
+//   credit[o*D+A+d] = 0; importance[o] = exp(logp[o] - behavior).
+// Plus the actionDelta tracker: delta_sum += sum((desc-last)^2)/D, last = desc,
+// steps++ — all before the env step, exactly like the bridge.
+// PORT-NOTE: the bridge accumulates delta_sum_ in double; here fp32 Kahan.
+kernel void oak_sample_act(device float *params [[buffer(0)]],
+                           device float *stateArena [[buffer(1)]],
+                           device uint *uintArena [[buffer(2)]],
+                           device KernelScalars *scalars [[buffer(3)]],
+                           device KernelStats *stats [[buffer(4)]],
+                           constant KernelConfig &cfg [[buffer(5)]],
+                           device OakFleetLane *lanes [[buffer(6)]],
+                           device const uint *laneSeeds [[buffer(7)]],
+                           constant OakFleetEnvCfg &ecfg [[buffer(8)]],
+                           uint gid [[thread_position_in_grid]]) {
+    if (gid >= ecfg.laneCount) return;
+    device OakFleetLane *lane = &lanes[gid];
+    uint stepIdx = lane->steps;  // 0-based index of the step being taken
+    float desc[12];
+    float ctrl[6];
+    if (ecfg.policyMode == 1u) {  // step_zero
+        for (int u = 0; u < 6; u++) ctrl[u] = 0.0f;
+        for (int i = 0; i < 12; i++) desc[i] = 0.0f;
+    } else if (ecfg.policyMode == 2u) {  // step_random
+        hc_rng_ctrl(laneSeeds[gid], stepIdx, ctrl);
+        for (int d = 0; d < 6; d++) { desc[d] = ctrl[d]; desc[6 + d] = 0.0f; }
+    } else {  // step_oak
+        Ctx ctx = make_ctx(params, stateArena, uintArena, scalars, stats, cfg, gid);
+        uint A = ctx.D / 2u;  // act_dim (Box exposes 2A policy coordinates)
+        float sd = 1.0f / float(max(ctx.D, 1u));
+        float log_sigma = -log(sd);
+        float behavior = 0.0f;
+        for (uint i = 0u; i < ctx.D; ++i) desc[i] = oak_safe(ctx.policyMean[i]);
+        float z[6];
+        oak_rng_normal6(laneSeeds[gid], stepIdx, z);
+        float logp[64];
+        for (uint o = 0u; o < ctx.K; ++o) logp[o] = 0.0f;
+        for (uint d = 0u; d < A; ++d) {
+            float mu = desc[d];
+            float sample = oak_safe(mu + sd * z[d]);
+            float a = max(-1.0f, min(1.0f, sample));
+            ctrl[d] = a;
+            ctx.actionSignal[d] = a;
+            ctx.actionSignal[A + d] = 0.0f;
+            behavior += log_sigma - 0.5f * z[d] * z[d];
+            for (uint o = 0u; o < ctx.K; ++o) {
+                uint off = o * ctx.D;
+                float om = oak_safe(ctx.optionPolicyMean[off + d]);
+                float oz = (sample - om) / sd;
+                logp[o] += log_sigma - 0.5f * oz * oz;
+                ctx.optionActorCredit[off + d] = sample - om;
+                ctx.optionActorCredit[off + A + d] = 0.0f;
+            }
+        }
+        for (uint o = 0u; o < ctx.K; ++o) ctx.importance[o] = exp(logp[o] - behavior);
+    }
+    // delta(descriptor_); ++steps_;
+    float d2 = 0.0f;
+    for (int i = 0; i < 12; i++) {
+        float v = desc[i] - lane->lastDesc[i];
+        d2 += v * v;
+        lane->lastDesc[i] = desc[i];
+    }
+    oak_kahan_add(&lane->deltaSum, &lane->deltaC, d2 / 12.0f);
+    lane->steps = stepIdx + 1u;
+    float adm = lane->deltaSum / float(lane->steps);
+    if (isfinite(adm) && adm > lane->deltaPeak) lane->deltaPeak = adm;
+    for (int u = 0; u < 6; u++) lane->ctrlPending[u] = ctrl[u];
+}
+
+// One thread per lane: the env step (HCEnv::send semantics — exactly the
+// hc_env_step control flow, inlined to also expose the four envInfo values),
+// arena obs/reward write-back, stream accumulators, death latches, recording.
+kernel void oak_fleet_env(device float *params [[buffer(0)]],
+                          device float *stateArena [[buffer(1)]],
+                          device uint *uintArena [[buffer(2)]],
+                          device KernelScalars *scalars [[buffer(3)]],
+                          device KernelStats *stats [[buffer(4)]],
+                          constant KernelConfig &cfg [[buffer(5)]],
+                          device OakFleetLane *lanes [[buffer(6)]],
+                          device const uint *laneSeeds [[buffer(7)]],
+                          constant OakFleetEnvCfg &ecfg [[buffer(8)]],
+                          device const int *recordSlot [[buffer(9)]],
+                          device float *recordBuf [[buffer(10)]],
+                          uint gid [[thread_position_in_grid]]) {
+    if (gid >= ecfg.laneCount) return;
+    device OakFleetLane *lane = &lanes[gid];
+    HCState s = lane->s;
+    uint elapsed = lane->elapsed, resets = lane->resets;
+    float ctrl[6];
+    for (int u = 0; u < 6; u++) ctrl[u] = lane->ctrlPending[u];
+    float reward;
+    uint done;
+    float info[4];
+    if (ecfg.episodeLen != 0u && elapsed >= ecfg.episodeLen) {
+        // HCRaw::ResetRaw: action discarded, reward 0, done flag 0, info zeroed.
+        hc_env_reset(s, laneSeeds[gid], elapsed, resets);
+        reward = 0.0f;
+        done = 0u;
+        info[0] = 0.0f; info[1] = -0.0f; info[2] = 0.0f; info[3] = 0.0f;
+    } else {
+        float xBefore = s.qpos[0];
+        for (int u = 0; u < 6; u++) s.ctrl[u] = ctrl[u];
+        for (int k = 0; k < HC_FRAME_SKIP; k++) hc_mj_step(s);
+        float xv = (s.qpos[0] - xBefore) / (float(HC_FRAME_SKIP) * HC_TIMESTEP);
+        float ctrlCost = 0.0f;
+        for (int u = 0; u < 6; u++) ctrlCost += 0.1f * ctrl[u] * ctrl[u];
+        reward = xv * 1.0f - ctrlCost;
+        elapsed++;
+        done = (ecfg.episodeLen != 0u && elapsed >= ecfg.episodeLen) ? 1u : 0u;
+        info[0] = xv; info[1] = -ctrlCost; info[2] = s.qpos[0]; info[3] = xv;
+    }
+    float obs[17];
+    for (int i = 1; i < 9; i++) obs[i - 1] = s.qpos[i];
+    for (int i = 0; i < 9; i++) obs[8 + i] = s.qvel[i];
+    lane->s = s;
+    lane->elapsed = elapsed;
+    lane->resets = resets;
+    lane->doneCount += done;
+    uint stepNum = lane->steps;  // incremented by oak_sample_act
+
+    // Run.note: only finite rewards accumulate; non-finite latches envReward.
+    if (isfinite(reward)) {
+        oak_kahan_add(&lane->rewardSum, &lane->rewardC, reward);
+        float rate = max(1.0f / float(stepNum), ecfg.invObsFloor);
+        lane->rho += rate * (reward - lane->rho);
+    } else if (lane->deathStep == OAK_DEATH_NONE) {
+        lane->deathStep = stepNum;
+        lane->deathDetector = OAK_DET_ENV_REWARD;
+        lane->deathRewardSum = lane->rewardSum;
+        lane->deathRho = lane->rho;
+    }
+    // CPU fleet order: envReward first, then policyMean (engine lanes only).
+    if (ecfg.policyMode == 0u) {
+        Ctx ctx = make_ctx(params, stateArena, uintArena, scalars, stats, cfg, gid);
+        if (lane->deathStep == OAK_DEATH_NONE) {
+            for (uint i = 0u; i < ctx.D; ++i) {
+                if (!isfinite(ctx.policyMean[i])) {
+                    lane->deathStep = stepNum;
+                    lane->deathDetector = OAK_DET_POLICY_MEAN;
+                    lane->deathRewardSum = lane->rewardSum;
+                    lane->deathRho = lane->rho;
+                    break;
+                }
+            }
+        }
+        for (uint i = 0u; i < ctx.O && i < 17u; ++i) ctx.observation[i] = obs[i];
+        ctx.reward[0] = reward;
+    }
+    // envObs is GPU-mode-only: the CPU loop never finite-checked obs (qpos/qvel
+    // auto-reset on bad values inside mj_step), so this latch is belt-and-braces.
+    if (lane->deathStep == OAK_DEATH_NONE) {
+        bool obsBad = false;
+        for (int i = 0; i < 17; i++) obsBad = obsBad || !isfinite(obs[i]);
+        if (obsBad) {
+            lane->deathStep = stepNum;
+            lane->deathDetector = OAK_DET_ENV_OBS;
+            lane->deathRewardSum = lane->rewardSum;
+            lane->deathRho = lane->rho;
+        }
+    }
+    // envInfo accumulators (InfoStat.note semantics).
+    for (int j = 0; j < 4; j++) {
+        device OakFleetInfoAcc *a = &lane->info[j];
+        a->count += 1u;
+        if (isfinite(info[j])) {
+            if (a->finiteCount == 0u) a->first = info[j];
+            a->finiteCount += 1u;
+            oak_kahan_add(&a->sum, &a->sumC, info[j]);
+            a->last = info[j];
+        }
+    }
+    // ActionRecorder.record: actionSignal[0..actDim) (= clamped action) + done.
+    if (ecfg.recordCapacity != 0u) {
+        int slot = recordSlot[gid];
+        if (slot >= 0) {
+            ulong base = ((ulong)slot * ecfg.recordCapacity
+                          + ((stepNum - 1u) % ecfg.recordCapacity)) * 7ul;
+            for (int u = 0; u < 6; u++) recordBuf[base + u] = ctrl[u];
+            recordBuf[base + 6] = float(done);
+        }
+    }
+}
+
+// One thread per lane: heartbeat snapshot into snap[snapBase + lane].
+// paramAbsMax loops the lane's full param slice (CPU heartbeat parity:
+// non-finite short-circuits and is flagged; otherwise the running max).
+kernel void oak_fleet_snapshot(device float *params [[buffer(0)]],
+                               device float *stateArena [[buffer(1)]],
+                               device uint *uintArena [[buffer(2)]],
+                               device KernelScalars *scalars [[buffer(3)]],
+                               device KernelStats *stats [[buffer(4)]],
+                               constant KernelConfig &cfg [[buffer(5)]],
+                               device OakFleetLane *lanes [[buffer(6)]],
+                               device const uint *laneSeeds [[buffer(7)]],
+                               constant OakFleetEnvCfg &ecfg [[buffer(8)]],
+                               device OakLaneSnapshot *snap [[buffer(9)]],
+                               constant uint &snapBase [[buffer(10)]],
+                               uint gid [[thread_position_in_grid]]) {
+    if (gid >= ecfg.laneCount) return;
+    device OakFleetLane *lane = &lanes[gid];
+    device OakLaneSnapshot *o = &snap[snapBase + gid];
+    if (ecfg.policyMode == 0u) {
+        o->scalars = scalars[gid];
+        o->stats = stats[gid];
+        device const float *lp = params + gid * cfg.paramStride;
+        float mx = 0.0f;
+        uint nonFinite = 0u;
+        for (uint i = 0u; i < cfg.paramStride; ++i) {
+            float v = lp[i];
+            if (!isfinite(v)) { nonFinite = 1u; break; }
+            if (fabs(v) > mx) mx = fabs(v);
+        }
+        o->paramAbsMax = mx;
+        o->paramNonFinite = nonFinite;
+    } else {
+        o->scalars = KernelScalars{0u, 0u, 0.0f};
+        KernelStats zs;
+        thread float *zp = (thread float *)&zs;
+        for (uint i = 0u; i < sizeof(KernelStats) / sizeof(float); ++i) zp[i] = 0.0f;
+        o->stats = zs;
+        o->paramAbsMax = 0.0f;
+        o->paramNonFinite = 0u;
+    }
+    o->steps = lane->steps;
+    o->doneCount = lane->doneCount;
+    o->resets = lane->resets;
+    o->rewardSum = lane->rewardSum;
+    o->rho = lane->rho;
+    o->deltaSum = lane->deltaSum;
+    o->deltaPeak = lane->deltaPeak;
+    o->deathStep = lane->deathStep;
+    o->deathDetector = lane->deathDetector;
+    o->deathRewardSum = lane->deathRewardSum;
+    o->deathRho = lane->deathRho;
+    for (int j = 0; j < 4; j++) o->info[j] = lane->info[j];
 }
