@@ -10,19 +10,6 @@ let defaultEnv = "HalfCheetah-v4"
 let lockName = ".oak-benchmark.lock"
 typealias Raw = UnsafeMutableRawPointer
 
-@_silgen_name("oak_env_open") func oakOpen(
-  _: Int32, _: UnsafePointer<CChar>?, _: UnsafePointer<CChar>?
-) -> Raw?
-@_silgen_name("oak_env_close") func oakClose(_: Raw?)
-@_silgen_name("oak_env_error") func oakError(_: Raw?) -> UnsafePointer<CChar>?
-@_silgen_name("oak_env_prepare") func oakPrepare(_: Raw?, _: Int32) -> Int32
-@_silgen_name("oak_env_reset") func oakReset(_: Raw?) -> Int32
-@_silgen_name("oak_env_step_random") func oakStepRandom(_: Raw?) -> Int32
-@_silgen_name("oak_env_step_zero") func oakStepZero(_: Raw?) -> Int32
-@_silgen_name("oak_env_step_oak") func oakStepOak(
-  _: Raw?, _: UnsafePointer<Float>?, _: UnsafePointer<Float>?, _: Int32
-) -> Int32
-@_silgen_name("oak_env_view") func oakView(_: Raw?, _: UnsafeMutablePointer<EnvView>?) -> Int32
 
 struct KernelConfig {
   var obsDim, rank, optionCount, actionParamCount, obsTraceLevels, linearAnchorCount: UInt32
@@ -119,9 +106,6 @@ func requireFreshMetallib() throws -> URL {
   }
   return lib
 }
-func envError(_ raw: Raw?) -> String {
-  oakError(raw).map { String(cString: $0) } ?? "native env error"
-}
 func mtlSize(_ width: Int) -> MTLSize {
   MTLSize(width: width, height: 1, depth: 1)
 }
@@ -129,68 +113,6 @@ func sha256Hex(_ buf: UnsafeRawBufferPointer) -> String {
   var h = SHA256()
   h.update(bufferPointer: buf)
   return h.finalize().map { String(format: "%02x", $0) }.joined()
-}
-struct EnvView {
-  var obsDim, actDim, dPolicy, done: Int32
-  var reward: Float
-  var actionDeltaMean: Double
-  var infoCount: Int32
-  var infoNames: UnsafePointer<UnsafePointer<CChar>?>?
-  var infoValues: UnsafePointer<Double>?
-  var obs, action, credit, imp: UnsafePointer<Float>?
-}
-final class Env {
-  let raw: Raw, envId: String
-  var v = EnvView(
-    obsDim: 0, actDim: 0, dPolicy: 0, done: 0, reward: 0, actionDeltaMean: 0,
-    infoCount: 0, infoNames: nil, infoValues: nil, obs: nil, action: nil, credit: nil, imp: nil)
-  init(_ id: String, seed: Int) throws {
-    let assets = try require(".build/oak-native/env-assets", "native env assets").path
-    raw = try id.withCString { eid in
-      try assets.withCString { base in
-        guard let r = oakOpen(Int32(seed), eid, base) else {
-          throw err(envError(nil))
-        }
-        return r
-      }
-    }
-    envId = id
-    try refresh()
-  }
-  deinit { oakClose(raw) }
-  var obsDim: Int { Int(v.obsDim) }
-  var actDim: Int { Int(v.actDim) }
-  var dPolicy: Int { Int(v.dPolicy) }
-  var reward: Float { v.reward }
-  var done: Int { Int(v.done) }
-  var actionDeltaMean: Double { Double(v.actionDeltaMean) }
-  var envInfo: [(String, Double)] {
-    guard let names = v.infoNames, let values = v.infoValues else { return [] }
-    return (0..<Int(max(v.infoCount, 0))).compactMap { i in
-      names[i].map { (String(cString: $0), values[i]) }
-    }
-  }
-  func ok(_ x: Int32) throws { if x != 1 { throw err(envError(raw)) } }
-  func refresh() throws { try ok(oakView(raw, &v)) }
-  func update(_ x: Int32) throws {
-    try ok(x)
-    try refresh()
-  }
-  func prepare(_ k: Int) throws {
-    try update(oakPrepare(raw, Int32(k)))
-  }
-  func reset() throws {
-    try update(oakReset(raw))
-  }
-  func stepOak(_ p: UnsafePointer<Float>, _ o: UnsafePointer<Float>, _ k: Int) throws {
-    try update(oakStepOak(raw, p, o, Int32(k)))
-  }
-  func stepRandom() throws {
-    try update(oakStepRandom(raw))
-  }
-  func stepZero() throws {
-    try update(oakStepZero(raw))
-  }
 }
 
 struct Arena {
@@ -249,9 +171,6 @@ final class Engine {
     UnsafePointer(state.p + lane * a.total + a.options)
   }
   func stats(_ lane: Int) -> KernelStats { stats[lane] }
-  convenience init(_ env: Env, _ dev: MTLDevice, _ ablations: AblationSpec) throws {
-    try self.init(obsDim: env.obsDim, dPolicy: env.dPolicy, batch: 1, dev: dev, ablations: ablations)
-  }
   init(obsDim: Int, dPolicy: Int, batch b: Int, dev: MTLDevice, ablations: AblationSpec) throws {
     precondition(b >= 1, "Engine batch must be >= 1")
     batch = b
@@ -332,14 +251,6 @@ final class Engine {
         agentCount: UInt32(batch), paramStride: UInt32(paramTotal),
         stateStride: UInt32(a.total), uintStride: UInt32(uintTotal)))
   }
-  func encode(_ lane: Int, _ env: Env) {
-    let ls = state.p + lane * a.total
-    memcpy(ls + a.obs, env.v.obs!, obsDim * MemoryLayout<Float>.stride)
-    ls[a.reward] = env.reward
-    memcpy(ls + a.action, env.v.action!, d * MemoryLayout<Float>.stride)
-    memcpy(ls + a.credit, env.v.credit!, rank * d * MemoryLayout<Float>.stride)
-    memcpy(ls + a.imp, env.v.imp!, rank * MemoryLayout<Float>.stride)
-  }
   func dispatch() throws {
     guard let cb = q.makeCommandBufferWithUnretainedReferences(),
       let e = cb.makeComputeCommandEncoder()
@@ -370,11 +281,6 @@ final class Engine {
     cb.waitUntilCompleted()
     if let e = cb.error { throw err("Metal command failed: \(e)") }
   }
-  func step(_ env: Env, capture: Bool) throws -> KernelStats? {
-    encode(0, env)
-    try dispatch()
-    return capture ? stats(0) : nil
-  }
   // Validation instrumentation: SHA-256 over a lane's trajectory-bearing slices
   // (params | state arena | uints | scalars), excluding diagnostics (stats).
   func stateHashes(_ lane: Int) -> [String: String] {
@@ -390,183 +296,8 @@ final class Engine {
   }
 }
 
-final class ActionRecorder {
-  static let statsFields: [String] = [
-    "step", "selectedOptionIndex", "selectedOptionAge", "selectedOptionDuration",
-    "selectedOptionPriority", "selectedOptionFeature", "selectedContinuation",
-    "selectedKeyboardWeight", "keyboardL1", "keyboardEffectiveL1", "keyboardSketchDim",
-    "keyboardOrigin", "modelPriorityMax", "importanceEss", "terminationRate",
-    "optionDurationMean", "mainTd", "planTd", "actorUpdateNormMean", "actorSupportEntropy",
-    "actorAdvantageL1", "searchControlUseMean", "generateTestEligibleCount",
-    "encodeNonFiniteCount", "learnNonFiniteCount", "planNonFiniteCount",
-    "tdPsiNonFiniteCount", "oakOptionReinitCount", "oakFeatureReinitCount",
-    "actionDeltaMean", "rewardSum",
-  ]
-  let handle: FileHandle
-  let statsHandle: FileHandle?
-  let statsEvery: Int
-  init(dir: URL, envId: String, seed: Int, actDim: Int, statsEvery: Int) throws {
-    let fm = FileManager.default
-    try fm.createDirectory(at: dir, withIntermediateDirectories: true)
-    var meta: [String: Any] = [
-      "envId": envId, "seed": seed, "actDim": actDim, "recordVersion": 2,
-    ]
-    if statsEvery > 0 {
-      meta["statsEvery"] = statsEvery
-      meta["statsFields"] = Self.statsFields
-      meta["statsRecordBytes"] = Self.statsFields.count * MemoryLayout<Float>.stride
-    }
-    try JSONSerialization.data(withJSONObject: meta, options: [.prettyPrinted, .sortedKeys])
-      .write(to: dir.appendingPathComponent("meta.json"), options: .atomic)
-    let url = dir.appendingPathComponent("actions.bin")
-    fm.createFile(atPath: url.path, contents: nil)
-    handle = try FileHandle(forWritingTo: url)
-    self.statsEvery = statsEvery
-    if statsEvery > 0 {
-      let surl = dir.appendingPathComponent("stats.bin")
-      fm.createFile(atPath: surl.path, contents: nil)
-      statsHandle = try FileHandle(forWritingTo: surl)
-    } else {
-      statsHandle = nil
-    }
-  }
-  deinit { try? handle.close(); try? statsHandle?.close() }
-  func record(_ env: Env) throws {
-    guard let action = env.v.action else { return }
-    var data = Data(
-      bytes: action, count: Int(env.v.actDim) * MemoryLayout<Float>.stride)
-    var done = UInt8(env.done == 0 ? 0 : 1)
-    withUnsafeBytes(of: &done) { data.append(contentsOf: $0) }
-    try handle.write(contentsOf: data)
-  }
-  var capturesStatsEveryStep: Bool { statsEvery > 0 }
-  func recordStats(step: Int, env: Env, run: Run, stats: KernelStats?) throws {
-    guard let h = statsHandle, statsEvery > 0, step % statsEvery == 0, let s = stats else { return }
-    let row: [Float] = [
-      Float(step),
-      s.selectedOptionIndex, s.selectedOptionAge, s.selectedOptionDuration,
-      s.selectedOptionPriority, s.selectedOptionFeature, s.selectedContinuation,
-      s.selectedKeyboardWeight, s.keyboardL1, s.keyboardEffectiveL1, s.keyboardSketchDim,
-      s.keyboardOrigin, s.modelPriorityMax, s.importanceEss, s.terminationRate,
-      s.optionDurationMean, s.mainTd, s.planTdValue, s.actorUpdateNormMean,
-      s.actorSupportEntropy, s.actorAdvantageL1, s.searchControlUseMean,
-      s.generateTestEligibleCount, s.encodeNonFiniteCount, s.learnNonFiniteCount,
-      s.planNonFiniteCount, s.tdPsiNonFiniteCount, s.oakOptionReinitCount,
-      s.oakFeatureReinitCount, Float(env.actionDeltaMean), Float(run.rewardSum),
-    ]
-    let data = row.withUnsafeBufferPointer { Data(buffer: $0) }
-    try h.write(contentsOf: data)
-  }
-}
-final class Run {
-  var steps = 0, done = 0, pulse = 0, nfE = 0, nfL = 0, nfP = 0, nfT = 0, optR = 0,
-    featR = 0
-  var seconds = 0.0, rewardSum = 0.0, rho = 0.0, floor: Double,
-    start = DispatchTime.now().uptimeNanoseconds
-  var envInfo: [String: InfoStat] = [:]
-  var last: KernelStats?
-  var recorder: ActionRecorder?
-  var actionDeltaPeak = 0.0
-  init(obsDim: Int) { floor = 1 / Double(max(obsDim, 1)) }
-  // Returns whether the env reward was finite; a non-finite reward is a lane
-  // death event (certified by the fleet loop), not a process error.
-  @discardableResult
-  func note(_ env: Env, _ stats: KernelStats?) throws -> Bool {
-    steps += 1
-    seconds = Double(DispatchTime.now().uptimeNanoseconds - start) / 1_000_000_000
-    done += env.done
-    let r = Double(env.reward)
-    let rewardFinite = r.isFinite
-    if rewardFinite {
-      rewardSum += r
-      rho += max(1 / Double(steps), floor) * (r - rho)
-    }
-    let adm = env.actionDeltaMean
-    if adm.isFinite && adm > actionDeltaPeak { actionDeltaPeak = adm }
-    for (name, value) in env.envInfo { envInfo[name, default: InfoStat()].note(value) }
-    if let s = stats {
-      last = s
-      nfE = Int(s.encodeNonFiniteCount)
-      nfL = Int(s.learnNonFiniteCount)
-      nfP = Int(s.planNonFiniteCount)
-      nfT = Int(s.tdPsiNonFiniteCount)
-      optR = Int(s.oakOptionReinitCount)
-      featR = Int(s.oakFeatureReinitCount)
-    }
-    try recorder?.record(env)
-    try recorder?.recordStats(step: steps, env: env, run: self, stats: stats)
-    return rewardFinite
-  }
-  func health(_ env: Env) -> [String: Any] {
-    var h: [String: Any] = [
-      "rewardRate": rho.isFinite ? rho : NSNull(), "actionDeltaL2Mean": env.actionDeltaMean.isFinite ? env.actionDeltaMean : NSNull(),
-      "actionDeltaPeak": actionDeltaPeak.isFinite ? actionDeltaPeak : NSNull(),
-      "continuingRestartCount": Double(done),
-    ]
-    if let s = last {
-      h["oakOptionReinitCountFinal"] = optR
-      h["oakFeatureReinitCountFinal"] = featR
-      h["nonFiniteByPhase"] = ["encode": nfE, "learn": nfL, "plan": nfP, "tdPsi": nfT]
-      h["terminationRate"] = s.terminationRate.isFinite ? Double(s.terminationRate) : NSNull()
-      h["optionDurationMean"] = s.optionDurationMean.isFinite ? Double(s.optionDurationMean) : NSNull()
-      h["importanceEss"] = s.importanceEss.isFinite ? Double(s.importanceEss) : NSNull()
-      h["actorUpdateNormMean"] = s.actorUpdateNormMean.isFinite ? Double(s.actorUpdateNormMean) : NSNull()
-      h["actorSupportEntropy"] = s.actorSupportEntropy.isFinite ? Double(s.actorSupportEntropy) : NSNull()
-      h["modelPriorityMax"] = s.modelPriorityMax.isFinite ? Double(s.modelPriorityMax) : NSNull()
-      h["selectedOptionAge"] = s.selectedOptionAge.isFinite ? Double(s.selectedOptionAge) : NSNull()
-      h["selectedOptionDuration"] = s.selectedOptionDuration.isFinite ? Double(s.selectedOptionDuration) : NSNull()
-      h["selectedOptionPriority"] = s.selectedOptionPriority.isFinite ? Double(s.selectedOptionPriority) : NSNull()
-      h["keyboardL1"] = s.keyboardL1.isFinite ? Double(s.keyboardL1) : NSNull()
-      h["actorAdvantageL1"] = s.actorAdvantageL1.isFinite ? Double(s.actorAdvantageL1) : NSNull()
-      h["selectedOptionIndex"] = s.selectedOptionIndex.isFinite ? Double(s.selectedOptionIndex) : NSNull()
-      h["keyboardOrigin"] = s.keyboardOrigin.isFinite ? Double(s.keyboardOrigin) : NSNull()
-      h["selectedOptionFeature"] = s.selectedOptionFeature.isFinite ? Double(s.selectedOptionFeature) : NSNull()
-      h["selectedContinuation"] = s.selectedContinuation.isFinite ? Double(s.selectedContinuation) : NSNull()
-      h["selectedKeyboardWeight"] = s.selectedKeyboardWeight.isFinite ? Double(s.selectedKeyboardWeight) : NSNull()
-      h["mainTd"] = s.mainTd.isFinite ? Double(s.mainTd) : NSNull()
-      h["planTd"] = s.planTdValue.isFinite ? Double(s.planTdValue) : NSNull()
-      h["keyboardSketchDim"] = s.keyboardSketchDim.isFinite ? Double(s.keyboardSketchDim) : NSNull()
-      h["keyboardEffectiveL1"] = s.keyboardEffectiveL1.isFinite ? Double(s.keyboardEffectiveL1) : NSNull()
-      h["searchControlUseMean"] = s.searchControlUseMean.isFinite ? Double(s.searchControlUseMean) : NSNull()
-      h["generateTestEligibleCount"] =
-        s.generateTestEligibleCount.isFinite ? Double(s.generateTestEligibleCount) : NSNull()
-      h["learningMature"] =
-        s.learningMature.isFinite ? Double(s.learningMature) : NSNull()
-    }
-    if !envInfo.isEmpty {
-      h["envInfo"] = Dictionary(uniqueKeysWithValues: envInfo.sorted { $0.key < $1.key }.map {
-        ($0.key, $0.value.json)
-      })
-    }
-    return h
-  }
-}
-struct InfoStat {
-  var count = 0, finiteCount = 0, nonFiniteCount = 0
-  var sum = 0.0
-  var first: Double?
-  var last: Double?
-  mutating func note(_ x: Double) {
-    count += 1
-    guard x.isFinite else { nonFiniteCount += 1; return }
-    if first == nil { first = x }
-    last = x
-    sum += x
-    finiteCount += 1
-  }
-  var json: [String: Any] {
-    [
-      "count": count, "finiteCount": finiteCount, "nonFiniteCount": nonFiniteCount,
-      "sum": finiteCount > 0 ? sum : NSNull() as Any,
-      "mean": finiteCount > 0 ? sum / Double(finiteCount) : NSNull() as Any,
-      "last": last.map { $0 as Any } ?? NSNull(),
-      "delta": first.flatMap { a in last.map { ($0 - a) as Any } } ?? NSNull(),
-    ]
-  }
-}
 // Fleet lanes are disjoint by construction (per-lane state, per-lane env handle);
 // this box passes the shared handles into the env-step shards.
-struct UncheckedSendable<T>: @unchecked Sendable { let value: T }
 func jsonLine(_ obj: [String: Any]) throws -> Data {
   var d = try JSONSerialization.data(withJSONObject: obj, options: [.sortedKeys])
   d.append(0x0A)
@@ -606,281 +337,11 @@ func metricsRoot() -> URL {
     }
     return p
   }
-  // Backend dispatch: the GPU-resident loop (Phase F3) is the default; the
-  // CPU-physics loop survives untouched behind OAK_ENV_BACKEND=cpu until the
-  // F4 equivalence gate retires it.
   static func fleet(
     _ p: Policy, _ seeds: [Int], _ steps: Int, _ root: URL, _ envId: String,
     _ ablations: AblationSpec
   ) throws {
-    switch ProcessInfo.processInfo.environment["OAK_ENV_BACKEND"] ?? "gpu" {
-    case "cpu": try fleetCPU(p, seeds, steps, root, envId, ablations)
-    case "gpu": try fleetGPU(p, seeds, steps, root, envId, ablations)
-    case let b: throw err("Unknown OAK_ENV_BACKEND '\(b)' (use gpu|cpu).")
-    }
-  }
-  // One fleet = B independent (agent, env, seed) lanes in one process: a single
-  // batched kernel dispatch per step, env stepping sharded across CPU threads.
-  // Each lane is one continual stream; lanes never interact.
-  static func fleetCPU(
-    _ p: Policy, _ seeds: [Int], _ steps: Int, _ root: URL, _ envId: String,
-    _ ablations: AblationSpec
-  ) throws {
-    let B = seeds.count
-    let e = ProcessInfo.processInfo.environment
-    let fm = FileManager.default
-    let envs: [Env] = try seeds.map { s in
-      let env = try Env(envId, seed: s)
-      try env.prepare(p == .oak ? max(env.obsDim, env.dPolicy * 2, 2) : 0)
-      try env.reset()
-      return env
-    }
-    let engine =
-      p == .oak
-      ? try Engine(
-        obsDim: envs[0].obsDim, dPolicy: envs[0].dPolicy, batch: B,
-        dev: MTLCreateSystemDefaultDevice()!, ablations: ablations)
-      : nil
-    let runs = (0..<B).map { _ in Run(obsDim: envs[0].obsDim) }
-    func seedDir(_ s: Int) throws -> URL {
-      let dir = root.appendingPathComponent(envId, isDirectory: true)
-        .appendingPathComponent("seed\(s)", isDirectory: true)
-      try fm.createDirectory(at: dir, withIntermediateDirectories: true)
-      return dir
-    }
-    let recordAll = e["OAK_RECORD_ACTIONS"] == "1"
-    let recordSeeds = Set(
-      (e["OAK_RECORD_SEEDS"] ?? "").split(separator: ",").compactMap {
-        Int(String($0).trimmingCharacters(in: .whitespaces))
-      })
-    let statsEvery = max(e["OAK_RECORD_STATS_EVERY"].flatMap(Int.init) ?? 0, 0)
-    for (lane, s) in seeds.enumerated() where recordAll || recordSeeds.contains(s) {
-      runs[lane].recorder = try ActionRecorder(
-        dir: try seedDir(s), envId: envId, seed: s, actDim: envs[lane].actDim,
-        statsEvery: statsEvery)
-    }
-    let dumpEvery = max(e["OAK_DUMP_STATE_EVERY"].flatMap(Int.init) ?? 0, 0)
-    var hashHandles: [FileHandle?] = Array(repeating: nil, count: B)
-    if dumpEvery > 0, engine != nil {
-      for (lane, s) in seeds.enumerated() {
-        let url = try seedDir(s).appendingPathComponent("state-hashes.jsonl")
-        fm.createFile(atPath: url.path, contents: nil)
-        hashHandles[lane] = try FileHandle(forWritingTo: url)
-      }
-    }
-    func appender(_ name: String) throws -> FileHandle {
-      let url = root.appendingPathComponent(name)
-      if !fm.fileExists(atPath: url.path) { fm.createFile(atPath: url.path, contents: nil) }
-      let h = try FileHandle(forWritingTo: url)
-      try h.seekToEnd()
-      return h
-    }
-    let fleetOut = try appender("fleet.jsonl")
-    let deathsOut = try appender("deaths.jsonl")
-    let aggOut = try appender("aggregate.jsonl")
-    defer {
-      hashHandles.forEach { try? $0?.close() }
-      try? fleetOut.close()
-      try? deathsOut.close()
-      try? aggOut.close()
-    }
-    let hb = max(e["OAK_BENCH_HEARTBEAT_STEPS"].flatMap(Int.init) ?? steps / 10, 1)
-    let envThreads = min(
-      max(
-        e["OAK_FLEET_ENV_THREADS"].flatMap(Int.init)
-          ?? ProcessInfo.processInfo.activeProcessorCount, 1), B)
-    let freezeDead = e["OAK_FLEET_FREEZE_DEAD"] == "1"
-    let timing = e["OAK_FLEET_TIMING"] == "1"
-    // Per-lane slots written concurrently from env-step shards (disjoint indices).
-    let laneError = UnsafeMutableBufferPointer<UnsafeMutablePointer<CChar>?>.allocate(capacity: B)
-    laneError.initialize(repeating: nil)
-    defer {
-      laneError.forEach { if let x = $0 { free(x) } }
-      laneError.deallocate()
-    }
-    var deadStep = [Int?](repeating: nil, count: B)
-    var deadDetector = [String?](repeating: nil, count: B)
-    var paramAbsMax = [Double](repeating: 0, count: B)
-    let wallStart = DispatchTime.now().uptimeNanoseconds
-    func now() -> Double { Double(DispatchTime.now().uptimeNanoseconds - wallStart) / 1e9 }
-    var tEncode = 0.0, tGpu = 0.0, tEnv = 0.0, tBook = 0.0
-
-    func issueDeath(_ lane: Int, _ step: Int, _ detector: String) throws {
-      guard deadStep[lane] == nil else { return }
-      deadStep[lane] = step
-      deadDetector[lane] = detector
-      var row: [String: Any] = [
-        "seed": seeds[lane], "lane": lane, "step": step, "detector": detector,
-        "policy": p.rawValue, "rewardSumAtDeath": runs[lane].rewardSum,
-        "lastGoodRewardRate": runs[lane].rho.isFinite ? runs[lane].rho : NSNull(),
-      ]
-      if let msg = laneError[lane] { row["envError"] = String(cString: msg) }
-      if let eng = engine {
-        let s = eng.stats(lane)
-        row["nfByPhase"] = [
-          "encode": Int(s.encodeNonFiniteCount), "learn": Int(s.learnNonFiniteCount),
-          "plan": Int(s.planNonFiniteCount), "tdPsi": Int(s.tdPsiNonFiniteCount),
-        ]
-        row["actorSupportEntropy"] =
-          s.actorSupportEntropy.isFinite ? Double(s.actorSupportEntropy) : NSNull()
-        row["terminationRate"] = s.terminationRate.isFinite ? Double(s.terminationRate) : NSNull()
-        row["optionDurationMean"] =
-          s.optionDurationMean.isFinite ? Double(s.optionDurationMean) : NSNull()
-        let rho = eng.scalars[lane].rho
-        row["rhoAtDeath"] = rho.isFinite ? Double(rho) : NSNull()
-        row["paramAbsMax"] = paramAbsMax[lane].isFinite ? paramAbsMax[lane] : NSNull()
-      }
-      try deathsOut.write(contentsOf: jsonLine(row))
-    }
-
-    func writeRows(kind: String, step: Int) throws {
-      var lines = Data()
-      for lane in 0..<B {
-        let run = runs[lane]
-        var m: [String: Any] = [
-          "v": 1, "kind": kind, "envId": envId, "policy": p.rawValue,
-          "ablationLabel": ablations.label, "lane": lane, "seed": seeds[lane],
-          "step": run.steps, "wallSeconds": run.seconds, "rewardSum": run.rewardSum,
-          "doneCount": run.done, "health": run.health(envs[lane]),
-          "firstNonFiniteStep": deadStep[lane] ?? NSNull(),
-          "firstNonFiniteDetector": deadDetector[lane] ?? NSNull(),
-        ]
-        if run.seconds > 0 { m["stepsPerSecond"] = Double(run.steps) / run.seconds }
-        if let eng = engine {
-          let rho = eng.scalars[lane].rho
-          m["kernelRho"] = rho.isFinite ? Double(rho) : NSNull()
-          m["paramAbsMax"] = paramAbsMax[lane].isFinite ? paramAbsMax[lane] : NSNull()
-        }
-        if let msg = laneError[lane] { m["envError"] = String(cString: msg) }
-        lines.append(try jsonLine(m))
-      }
-      try fleetOut.write(contentsOf: lines)
-      let alive = deadStep.filter { $0 == nil }.count
-      let rates = runs.map { $0.steps > 0 ? $0.rewardSum / Double($0.steps) : 0 }.sorted()
-      func quantile(_ x: Double) -> Double {
-        rates[min(Int((Double(rates.count - 1) * x).rounded()), rates.count - 1)]
-      }
-      let wall = now()
-      try aggOut.write(
-        contentsOf: jsonLine([
-          "step": step, "kind": kind, "policy": p.rawValue, "alive": alive, "dead": B - alive,
-          "deliveredRateP10": quantile(0.1), "deliveredRateP50": quantile(0.5),
-          "deliveredRateP90": quantile(0.9), "wallSeconds": wall,
-          "aggStepsPerSecond": wall > 0 ? Double(step) * Double(B) / wall : 0,
-        ]))
-      if timing {
-        let sps = wall > 0 ? Double(step) * Double(B) / wall : 0
-        fputs(
-          String(
-            format: "[fleet %@] step %d alive %d/%d | encode %.1fs gpu %.1fs env %.1fs book %.1fs | %.0f agg steps/s\n",
-            p.rawValue, step, alive, B, tEncode, tGpu, tEnv, tBook, sps), stderr)
-      }
-    }
-
-    var step = 0
-    while step < steps {
-      try autoreleasepool {
-        step += 1
-        let heartbeat = (step - 1) / hb < step / hb
-        let final = step == steps
-        var t0 = now()
-        if let eng = engine {
-          for lane in 0..<B where !(freezeDead && deadStep[lane] != nil) {
-            eng.encode(lane, envs[lane])
-          }
-          tEncode += now() - t0
-          t0 = now()
-          try eng.dispatch()
-          tGpu += now() - t0
-        }
-        t0 = now()
-        let rank = engine?.rank ?? 0
-        let skip: [Bool] = (0..<B).map {
-          laneError[$0] != nil || (freezeDead && deadStep[$0] != nil)
-        }
-        let box = UncheckedSendable(
-          value: (
-            envs: envs, engine: engine, errors: laneError, skip: skip, batch: B,
-            threads: envThreads, policy: p, rank: rank
-          ))
-        DispatchQueue.concurrentPerform(iterations: envThreads) { w in
-          let c = box.value
-          // Contiguous shards with a stable thread->lane mapping: each worker
-          // touches the same lanes' mjData every step, keeping them cache-warm.
-          let lo = c.batch * w / c.threads
-          let hi = c.batch * (w + 1) / c.threads
-          for lane in lo..<hi {
-            if c.skip[lane] { continue }
-            do {
-              if let eng = c.engine {
-                try c.envs[lane].stepOak(eng.policy(lane), eng.options(lane), c.rank)
-              } else if c.policy == .zero {
-                try c.envs[lane].stepZero()
-              } else {
-                try c.envs[lane].stepRandom()
-              }
-            } catch {
-              c.errors[lane] = strdup("\(error)")
-            }
-          }
-        }
-        tEnv += now() - t0
-        t0 = now()
-        for lane in 0..<B {
-          if freezeDead && deadStep[lane] != nil { continue }
-          if laneError[lane] != nil {
-            try issueDeath(lane, step, "envError")
-            continue
-          }
-          let run = runs[lane]
-          let wantStats =
-            heartbeat || final || run.recorder?.capturesStatsEveryStep == true
-          let s: KernelStats? = wantStats ? engine?.stats(lane) : nil
-          let rewardFinite = try run.note(envs[lane], s)
-          if !rewardFinite { try issueDeath(lane, step, "envReward") }
-          if let eng = engine, deadStep[lane] == nil {
-            let pm = eng.policy(lane)
-            for i in 0..<eng.d where !pm[i].isFinite {
-              try issueDeath(lane, step, "policyMean")
-              break
-            }
-          }
-          if dumpEvery > 0, step % dumpEvery == 0, let h = hashHandles[lane], let eng = engine {
-            let hs = eng.stateHashes(lane)
-            let line =
-              "{\"seed\":\(seeds[lane]),\"step\":\(step),\"params\":\"\(hs["params"]!)\",\"state\":\"\(hs["state"]!)\",\"uints\":\"\(hs["uints"]!)\",\"scalars\":\"\(hs["scalars"]!)\"}\n"
-            try h.write(contentsOf: Data(line.utf8))
-          }
-        }
-        if heartbeat || final {
-          if let eng = engine {
-            for lane in 0..<B {
-              let lp = eng.params.p + lane * eng.paramTotal
-              var mx: Float = 0
-              var nonFinite = false
-              for i in 0..<eng.paramTotal {
-                let v = lp[i]
-                if !v.isFinite {
-                  nonFinite = true
-                  break
-                }
-                if abs(v) > mx { mx = abs(v) }
-              }
-              paramAbsMax[lane] = nonFinite ? Double.infinity : Double(mx)
-              if deadStep[lane] == nil {
-                if nonFinite || mx > 1e8 {
-                  try issueDeath(lane, step, nonFinite ? "paramNonFinite" : "paramExplosion")
-                } else if !eng.scalars[lane].rho.isFinite {
-                  try issueDeath(lane, step, "kernelRho")
-                }
-              }
-            }
-          }
-          try writeRows(kind: final ? "final" : "hb", step: step)
-        }
-        tBook += now() - t0
-      }
-    }
+    try fleetGPU(p, seeds, steps, root, envId, ablations)
   }
   // GPU-resident fleet (Phase F3): agent kernels + action sampling + physics
   // all live in multi-step command buffers; the CPU only drains heartbeat
@@ -898,7 +359,7 @@ func metricsRoot() -> URL {
   ) throws {
     guard envId == defaultEnv else {
       throw err(
-        "OAK_ENV_BACKEND=gpu supports \(defaultEnv) only (got \(envId)); set OAK_ENV_BACKEND=cpu.")
+        "Only \(defaultEnv) is wired through the GPU physics kernel (got \(envId)).")
     }
     let e = ProcessInfo.processInfo.environment
     let fm = FileManager.default
@@ -949,7 +410,7 @@ func metricsRoot() -> URL {
       fputs("OAK_FLEET_FREEZE_DEAD is CPU-backend only; GPU lanes always keep stepping.\n", stderr)
     }
     if (e["OAK_RECORD_STATS_EVERY"].flatMap(Int.init) ?? 0) > 0 {
-      throw err("OAK_RECORD_STATS_EVERY (stats.bin) requires OAK_ENV_BACKEND=cpu.")
+      throw err("OAK_RECORD_STATS_EVERY (stats.bin) is not supported by the GPU fleet.")
     }
     func seedDir(_ s: Int) throws -> URL {
       let dir = root.appendingPathComponent(envId, isDirectory: true)

@@ -226,76 +226,65 @@ log in [`docs/roadmap.md`](docs/roadmap.md). The literature corpus is in
 
 ### Prerequisites (must be installed before `./setup.sh`)
 
-
 - **macOS on Apple Silicon** (Metal compute pipeline).
-- **Xcode command-line tools** — provides `swift`, `clang++` (C++20-capable),
-  and the Metal toolchain (`xcrun -sdk macosx metal`, `metallib`):
+- **Xcode command-line tools** — provides `swift` and the Metal toolchain
+  (`xcrun -sdk macosx metal`, `metallib`):
   ```bash
   xcode-select --install
   ```
-- **Homebrew** + **Eigen** headers (the C++ env bridge needs
-  `/opt/homebrew/include/eigen3`):
-  ```bash
-  /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
-  brew install eigen
-  ```
-- **Python 3** on `PATH` — `setup.sh` prefers `python3.11`:
-  ```bash
-  brew install python@3.11
-  ```
-- **Git** (for the envpool source checkout `setup.sh` performs).
+- **Python 3** on `PATH` (validation/replay tooling only; the hot loop has
+  zero Python and zero C++ dependencies).
 
 ### One-shot build
-
-Once the prerequisites above are present:
 
 ```bash
 ./setup.sh
 ```
 
-`setup.sh` creates `.venv`, installs Python deps from `requirements.txt`
-(`envpool==1.2.0`, `mujoco`), vendors a small `oak_env_bridge` shim against an
-envpool `v1.2.0` checkout, copies `mujoco`'s dylib next to it with a
-relocatable id, compiles `Sources/OakKernel.metal` to a metallib, and finally
-runs `swift build -c release`. The resulting binary is
-`./.build/release/OaK`.
+`setup.sh` creates `.venv` and installs `requirements.txt` (`mujoco`, `numpy`
+— used only by the parity oracle and replay tools), compiles
+`Sources/OakKernel.metal` to a metallib, and runs `swift build -c release`.
+The resulting binary is `./.build/release/OaK`.
 
 For Swift / Metal-only changes, `scripts/halfcheetah_rebuild_10m.sh` recompiles
 just those parts before launching a benchmark — no need to rerun `setup.sh`.
 
-## The envpool bridge
+## The GPU environment (no bridge, no envpool, no C++)
 
-The agent does not talk to MuJoCo through Python. `setup.sh` synthesizes
-`oak_env_bridge.cc` against a vendored `envpool v1.2.0` checkout and links it
-into a single `liboakenv.dylib` that the Swift host loads via a small C ABI
-(`oak_env_open` / `oak_env_step_*` / `oak_env_view`). One env per handle,
-driven directly from the FC-STOMP step.
+The environment lives in the same Metal command buffer as the agent:
+[`Sources/OakPhysics.metal`](Sources/OakPhysics.metal) is a literal fp32 port
+of MuJoCo 3.6.0's `mj_step` for this exact model — planar CRB mass matrix,
+RNE, analytic capsule-vs-plane contacts, pyramidal Newton solver with
+Cholesky rank-1 updates and exact linesearch, `eulerdamp` implicit
+integration, warmstart, joint limits. The port contract with file:line
+citations into MuJoCo source is
+[`docs/gpu-physics-port-spec.md`](docs/gpu-physics-port-spec.md).
 
-Why we wrote it instead of using `gym.make` + a Python loop:
+**Fidelity is proven, not assumed** (`tools/physics_parity.py` is the fp64
+oracle — Python MuJoCo on the vendored
+[`assets/half_cheetah_envpool.xml`](assets/half_cheetah_envpool.xml)):
 
-- **No Python in the hot loop.** The FC-STOMP cycle runs on every
-  `(observation, action, reward)` triple at Metal speeds; a Python step would
-  dominate wall-clock and inject GIL/interpreter jitter into a loop that is
-  supposed to be temporally uniform.
-- **One process, one address space.** Observations, actions, option credits,
-  and importance weights are exposed as raw float pointers through `View`, so
-  the Swift host reads them with zero copies and zero serialization.
-- **Stripped envpool surface.** envpool is built for massively-batched
-  training; we only need `num_envs = 1` with deterministic seeding. The bridge
-  pins `batch_size = 1`, stubs out the offscreen GL renderer (`CreateGlContext`
-  returns `nullptr`, `Render` zeroes the buffer) so we link cleanly on
-  headless Apple Silicon, and forwards MuJoCo warnings through `mju_user_warning`
-  into the same error channel as bridge-level exceptions.
-- **Faithful HalfCheetah-v4 dynamics.** We use envpool's
-  `mujoco/gym/half_cheetah.h` directly, so reward, control cost, and the
-  `info:x_position` / `info:x_velocity` channels match the Gymnasium spec the
-  paper baselines use. The replay caveat (envpool ≠ vanilla gymnasium
-  bit-for-bit over long horizons) is called out under
-  [Watching the agent](#watching-the-agent).
+- Single-step parity vs fp64 over 2000 golden cases (multi-contact and
+  joint-limit states included): median rel err 6.4e-07, max 5.2e-05.
+- Rollout divergence rides the fp64 chaotic twin envelope (fp32 behaves like
+  a ~1e-7 perturbation, not a bias); energy traces agree to <0.0001%.
+- Per-lane fixed op order + no cross-lane operations ⇒ **bitwise run-to-run
+  reproducibility on the GPU**.
+- Population-level equivalence vs CPU MuJoCo certified by a null-calibrated
+  TOST gate at N=8192 lanes/side: divergence, IQM delivered rate, survival,
+  NF prevalence, and KS distribution tests all EQUIVALENT
+  (`tools/fleet_gate.py --equivalence`).
 
-The bridge is intentionally the *only* env wired through today; adding another
-gym task means writing another `HCEnv`-shaped class against its envpool spec,
-not reworking the host.
+> **fp32 caveat** (the honest counterpart of the old envpool≠gymnasium replay
+> caveat): Apple GPUs have no fp64, so trajectories are not bit-identical to
+> CPU MuJoCo — chaotic contact dynamics make bit-match meaningless past
+> ~100–1000 steps even between fp64 runs. What is preserved, and proven
+> above, is the *physics* (same algorithm, same constants, same op order)
+> and the *population statistics* (the science).
+
+One env-step is ~10–30 KFLOP of thread-local register math per lane: the
+environment is effectively free next to the learner, and the whole step loop
+runs in multi-step command buffers with no per-step CPU round-trip.
 
 ## Wait? No PyTorch? Lets Talk about that.
 

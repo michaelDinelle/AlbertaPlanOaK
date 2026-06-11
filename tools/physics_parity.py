@@ -31,7 +31,7 @@ from pathlib import Path
 import mujoco
 import numpy as np
 
-XML = "/Users/studio/OaKMeta/.build/oak-native/envpool-src/third_party/mujoco_gym_xml_patches/half_cheetah_envpool.xml"
+XML = str(Path(__file__).resolve().parent.parent / "assets" / "half_cheetah_envpool.xml")
 FRAME_SKIP = 5
 RESET_NOISE = 0.1
 
