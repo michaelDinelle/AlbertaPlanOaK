@@ -1593,40 +1593,53 @@ future audits as "obvious" fixes.
 ## Benchmark Protocol
 
 The benchmark protocol is part of the roadmap because false positives have
-repeatedly come from short runs and peak metrics.
+repeatedly come from short runs, peak metrics, and — above all — statistically
+underpowered seed counts (a Wilson 95% CI on a failure rate at N=10 is ±9%;
+at N=1024 it is ±2%).
 
-| Stage | Purpose | Gate |
-|---|---|---|
-| 10k smoke | Numerical and semantic sanity. | NF zero; no action, value, model, or trace explosion; diagnostics populated. |
-| 10 x 1.5M paired | Cheap screen only. | Mean lift sane, no negative-seed cluster, no obvious chatter explosion. Never use this alone for acceptance. |
-| 10 x 10M paired | Acceptance. | Mean lift, per-seed lift, last-2M incremental lift, NF, and mechanism-specific diagnostics. |
-| 10 x 15M paired | Tie-breaker. | Use only when 10M mean lift and last-window velocity disagree. |
+**The instrument is the fleet**: B independent (agent, env, seed) lanes in one
+process, one batched kernel dispatch per step, env stepping sharded across CPU
+threads. Lane b runs seed b; lanes are byte-identical to solo runs (proven via
+`OAK_DUMP_STATE_EVERY` hash streams + `actions.bin`). One fleet size, one
+horizon ladder, prefix-nested seeds (0–1023 everywhere), so every tier is a
+paired extension of the one below.
 
-Primary acceptance metric:
+| Tier | B × horizon | Wall-clock (measured) | Use | Resolves |
+|---|---|---|---|---|
+| S | 1024 × 10k | ~71 s | every candidate | hard fails (NF, explosion) + divergence Δp ≳ 4% |
+| M | 1024 × 100k | ~12 min | candidates passing S | divergence ±2–3%, IQM screen |
+| L | 1024 × 1M | ~2 h | keeper promotion, frontier studies | survival curves through the ~1M plasticity frontier, Δp ≳ 2% |
+| XL | 1024 × 10M | **Phase-F-gated** | decay-constant program (not a gate) | post-zenith time constants, 10M survival |
 
-- mean paired lift vs random over all 10 seeds.
+**Hard rule: no protocol step exceeds ~2 h wall-clock.** Wall-clock claims
+derive from the measured `aggSPS(B=1024) = 143.7K` constant below — never from
+estimates. Tier L sits exactly at the cap and already reaches through the ~1M
+plasticity frontier. The 10M-horizon XL tier and B=4096 SOTA reruns are
+unlocked by Phase F (GPU-resident physics, target ≥2M agg steps/s ⇒ XL ≈
+1.4 h); they are not run on the CPU-era instrument.
 
-Secondary acceptance metrics:
+Promotion is `tools/fleet_gate.py <keeper> <candidate>` at Tier L: four paired
+population criteria (divergence Δp non-inferiority, IQM delivered-rate
+non-inferiority over ALL lanes, RMST survival non-inferiority, no new NF
+phases), all one-sided α=0.05. The headline performance number is always
+delivered rate (`rewardSum/steps`) over all lanes — never survivors-only, never
+internal `rewardRateBest`/ρ peaks (divergence diagnostics), never max-seed
+storytelling.
 
-- number of seeds beating the prior baseline,
-- last-2M incremental lift,
-- NF zero,
-- final and heartbeat chatter,
-- mechanism-specific diagnostics.
+Measured throughput constants (M4 Max, 14 cores / 32-core GPU, 5k-step smokes;
+update on every engine promotion):
 
-Avoid using max peak reward-rate as a promotion criterion. It is useful for
-storytelling and failure analysis, but it has repeatedly misread the main
-learning signal.
-
-Concurrent seed sweeps:
-
-- Use `OaK benchmark` with `OAK_BENCH_ENV=HalfCheetah-v4` for HalfCheetah-only
-  seed sweeps. The parent owns a workspace lock, launches independent worker
-  processes at structural max concurrency (all logical cores), and
-  deterministically refills finished slots from the canonical seed/policy work
-  list.
-- Do not fall back to sequential seed loops for ordinary multi-seed evidence
-  unless a profiler or crash investigation requires serialized isolation.
+- pool-threaded bridge + interleaved lane sharding (both deleted):
+  B=128 → 51K, B=512 → 28K, B=1024 → 15K agg steps/s.
+- raw bridge (`HCRaw` allocation-free step) + **contiguous lane shards with a
+  stable thread→lane mapping** (current): B=128 → 89K, B=512 → 143K,
+  **B=1024 → 143.7K**, B=2048 → 144K (plateau), B=4096 → 101K (cache wall).
+  8.1× the old 14-process model at B=1024. Lesson: interleaved
+  (`lane = w, w+T, w+2T…`) sharding destroyed prefetch/TLB locality across the
+  per-lane mjData heap — sharding geometry mattered 10× more than the envpool
+  data path at high B. At the plateau, GPU dispatch (~3.4 ms/step) and env
+  stepping (~3.1 ms/step) are now comparable: the next big lever is Phase F
+  (GPU-resident physics, no per-step waitUntilCompleted round-trip).
 
 Kernel build hygiene:
 
@@ -1654,20 +1667,94 @@ intelligence by accident.
 Compute improvements matter because the Plan treats compute as first-class,
 but speed is infrastructure. It cannot promote a non-orthodox mechanism.
 
+GPU-physics derisk probes (2026-06-11, M4 Max):
+
+- **fp32 parity (F1 gate)**: `oak_physics` single-step port vs fp64 MuJoCo
+  3.6.0 over 2000 golden cases (incl. multi-contact + limit states): median
+  worst-component rel err 6.4e-07, p99 1.3e-05, max 5.2e-05 — PASS at 1e-4
+  with 2x margin. Key precision fix: double-float shadow chain on contact
+  distance (shallow-contact efc_D sensitivity). Spec: docs/gpu-physics-port-spec.md.
+- **Run-to-run bitwise reproducibility on GPU**: two probe runs byte-identical
+  (`cmp`) — per-lane fixed op order + no cross-lane ops + -fno-fast-math gives
+  deterministic GPU physics on Apple Silicon.
+- **Long command buffers**: 0.05/0.2/1/5 s compute CBs all complete cleanly
+  (no macOS watchdog); the fused-loop design cap of ≤100 ms/CB has 50x headroom.
+- **Newton solver reality**: fp64 reference measurement over 10k driven steps:
+  solver_niter mean 0.84 / p99 3 / max 4; ncon p99 2 / max 5; 48.5% of steps
+  contact-free.
+- **F2 env-step layer (all gates PASS)**: rollout divergence rides the fp64
+  chaotic twin envelope (ratio 0.28–3.5, gate 10x; first-10-step max rel err
+  2.6e-05); Philox4x32-10 matches a python mirror to 1 ulp, KS-clean reset and
+  ctrl distributions; energy traces agree to <0.0001% over 10k steps.
+  **Physics-only throughput: 1.56M env-steps/s @ B=4096, 3.25M @ B=16384**
+  (16.3M mj-steps/s) — the environment is free.
+- **EPISODE-SEMANTICS DISCOVERY (load-bearing)**: the deployed CPU bridge never
+  overrode envpool's `common_config` default `max_episode_steps = INT_MAX`
+  (the wrapper `Spec()` sets only num_envs/batch_size/seed/base_path), so
+  CPU-era fleet lanes NEVER auto-reset — every run to date, including the
+  Tier-L keeper, is a TRUE CONTINUING STREAM (hence `doneCount: 0`
+  everywhere). This is Alberta-orthodox by accident and is now the explicit
+  default: GPU fleet `episodeLen = 0` (continuing). Gym HalfCheetah-v4
+  semantics (auto-reset at 1000) is available as `episodeLen = 1000` for
+  SOTA-comparable runs and must be flagged in any external comparison (the
+  published numbers in AGENTS.md "The SOTA bar" are 1000-step-episode evals).
+  F4 equivalence gates run with episodeLen=0 to match the keeper.
+
+Fleet-era cutover proofs (2026-06-11), all byte-identical per lane (actions.bin
+`cmp` + SHA-256 state-hash streams via `OAK_DUMP_STATE_EVERY`):
+
+- agent-strided kernel (agentID on grid `.y`, strides in `KernelConfig`):
+  B=1 ≡ HEAD reference binary at seeds {0,1,3,8} × 20k and seed 3 × 300k
+  (`rewardSum` exact: `109689.45613318488`).
+- fleet loop: B=8 ≡ 8 × B=1 ≡ HEAD per-seed runs.
+- bridge inline EnvStep (pool worker threads deleted) ≡ pooled bridge.
+- bridge raw path (`HCRaw : HalfCheetahEnv` subclass; allocation-free
+  `StepRaw`/`ResetRaw` replicate `half_cheetah.h` `Step()`/`Reset()` exactly,
+  zero Array/StateBuffer churn) ≡ pooled bridge.
+
+Lesson: envpool's pool threading was NOT the per-step bottleneck at small B
+(raw MuJoCo ≈ 177 µs/lane-step dominates); at B ≥ 512 the superlinear env-phase
+inflation persists across pool/inline/raw paths, pointing at per-lane mjData
+working set vs cache, not allocator or thread overhead. The structural fix is
+GPU-resident physics (Phase F: ~100 floats/lane instead of ~100 KB mjData).
+
 ## Current Baseline Decision
 
-Baseline for the next algorithmic change:
+**THE keeper is now a fleet population baseline** (forward-only: prior 10-seed
+keepers are git history, not live references).
 
-- **Current behavioral baseline**: short/broad/surprising active-backward
-  refresh in the live working tree, artifact
-  `.oak-benchmarks/short-broad-surprise-full-300k-20260426`.
-- HalfCheetah 300k, 10 Oak seeds: mean reward `+9988.566`, max
-  `+109689.456`, positive velocity `8/10`, positive return and zero-beating
-  seeds `3/10`, and Oak non-finite total `3`. This is an improved walking
-  checkpoint, not a stable promotion.
-- **Historical negative floor**: `.oak-benchmarks/baseline-1m` remains useful
-  for host/performance comparison only. It is no longer the behavioral target.
-- K1 and rebuild-era runs remain historical comparison artifacts, not baselines.
+- **Artifact**: `.oak-benchmarks/keeper-fleet-tierL-20260611` — Tier L,
+  B=1024 × 1M steps, oak policy, same kernel behavior as the pre-fleet keeper
+  (byte-identity chain to HEAD proven; see Optimization Contract).
+- **Run facts**: 1.024B lane-steps in 6,897 s wall (1h55m), sustained
+  **148.5K agg steps/s** flat for the entire run. Recorded lanes 3 and 8 have
+  `actions.bin` for replay.
+- **Population (final row, N=1024)**: divergence-certified lanes 1021/1024
+  (99.7%; detectors dominated by paramExplosion — the markers date numeric
+  events, NOT behavioral death: top lanes keep delivering reward long after
+  their certificate). Delivered reward rate P10 −0.132, P50 −0.037,
+  P90 +0.0013. The strong-walker mode (~0.2–0.4/step at 250k: seeds 3, 802,
+  393, 383, 958, 856, 626, 860, 700, 558) is a ~1% population mode — the
+  rocket is not a seed-3 miracle, it is a reachable attractor.
+- **Official population numbers (fleet_stats.py, the figures every candidate
+  must beat):**
+  - Divergence (first numeric event by 1M): **99.7% [99.1%, 99.9%]** Wilson 95%
+    (detectors: paramExplosion 1017, policyMean 4). RMST/horizon **0.082**
+    (mean ~82k steps of certificate-free life).
+  - **IQM delivered reward rate, all lanes: −0.039194 [−0.04217, −0.03634]**
+    — THE headline number to improve. Survivors-only IQM −0.0246 (also
+    negative; survival alone does not buy positive delivery).
+  - Plasticity quartiles (25/50/75): zenith step 250k / 350k / 700k; zenith
+    rate −0.0338 / −0.0142 / +0.0014; decay ratio −2.64 / −0.31 / +0.85 —
+    the median lane ends BELOW zero relative to its zenith, the population
+    confirmation of the post-zenith decay frontier.
+  - Entropy collapse (actor entropy < 1e-6, 2 consecutive heartbeats):
+    **64.6% [61.6%, 67.4%]**.
+- All future candidates gate against this artifact via `tools/fleet_gate.py`
+  at matched tier. The SOTA bar this baseline is measured against is recorded
+  in `AGENTS.md` ("The SOTA bar": TD7 ≈ 17.4 reward/step eval; honest
+  delivered-vs-delivered gap ≈ 15–20× at the best lane, population median
+  negative).
 
 The roadmap objective is now sharper: stabilize and generalize the bridge-seen
 walking mode while repairing the missing Plan-order pieces, especially
