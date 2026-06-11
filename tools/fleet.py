@@ -36,6 +36,15 @@ import numpy as np
 ENTROPY_COLLAPSE_EPS = 1e-6
 NF_PHASES = ("encode", "learn", "plan", "tdPsi")
 
+# External SOTA reference lines (AGENTS.md "The SOTA bar" — sources cited there).
+# Two framings, NEVER mixed in one claim: eval-of-final-policy vs delivered-during-training.
+SOTA_EVAL = {"TD7": 17.4, "TD-MPC2": 15.1, "MR.Q": 13.3, "TD3": 10.1, "SAC": 9.9}
+SOTA_DELIVERED_EST = {"SAC (delivered, est.)": 6.0}
+SOTA_FRAMING_NOTE = (
+    "eval = final-policy evaluation on free 1000-step episodes (published); "
+    "delivered = online reward over the entire stream, flailing included (ours). "
+    "Per-FLOP claims require both sides instrumented (AGENTS.md rules).")
+
 
 # ---------------------------------------------------------------- statistics
 
@@ -204,6 +213,34 @@ def delivered(fin: dict[int, dict], seeds: list[int]) -> np.ndarray:
     return np.array([fin[s]["rewardSum"] / max(fin[s]["step"], 1) for s in seeds])
 
 
+def recent_rates(run: dict, policy: str, fin: dict[int, dict]) -> dict[int, float]:
+    """Per-lane delivered rate over the LAST heartbeat window (rewardSum delta /
+    step delta between the final two rows) — 'is this lane learning now', as
+    opposed to the lifetime average."""
+    out: dict[int, float] = {}
+    for s in sorted(fin):
+        rows = run["lanes"][(policy, s)]
+        if len(rows) >= 2 and rows[-1]["step"] > rows[-2]["step"]:
+            out[s] = (rows[-1]["rewardSum"] - rows[-2]["rewardSum"]) / (
+                rows[-1]["step"] - rows[-2]["step"])
+        else:
+            out[s] = fin[s]["rewardSum"] / max(fin[s]["step"], 1)
+    return out
+
+
+def sota_gap_line(best_rate: float, iqm_all: float) -> str:
+    td7 = SOTA_EVAL["TD7"]
+    sac_del = SOTA_DELIVERED_EST["SAC (delivered, est.)"]
+    def gap(x, ref):
+        if x <= 0:
+            return "n/a (rate <= 0)"
+        return f"{ref / x:,.0f}x"
+    return (f"**SOTA gap** — best lane {best_rate:+.3f}/step, population IQM {iqm_all:+.4f}/step. "
+            f"vs TD7 {td7}/step (eval): gap {gap(best_rate, td7)} at best lane. "
+            f"vs SAC ~{sac_del}/step (delivered, est.): gap {gap(best_rate, sac_del)} at best lane. "
+            f"({SOTA_FRAMING_NOTE})")
+
+
 def entropy_collapse_step(rows: list[dict]) -> int | None:
     """First heartbeat step where actorSupportEntropy < eps for 2 consecutive
     heartbeats (the FC-STOMP-goes-quiet fixed point)."""
@@ -260,6 +297,9 @@ def analyze_policy(run: dict, policy: str, window: int) -> dict:
         if det:
             by_detector[det] += 1
     surv_mask = events == 0
+    recents = recent_rates(run, policy, fin)
+    recent_arr = np.array([recents[s] for s in seeds])
+    best_idx = int(np.argmax(rates))
     out: dict = {
         "policy": policy, "lanes": n, "horizon": horizon,
         "divergence": {"dead": dead, "rate": p, "wilsonLo": lo, "wilsonHi": hi,
@@ -267,7 +307,20 @@ def analyze_policy(run: dict, policy: str, window: int) -> dict:
         "rmst": rmst(times, events, horizon),
         "iqmDeliveredAll": iqm(rates),
         "iqmDeliveredSurvivors": iqm(rates[surv_mask]) if surv_mask.any() else None,
+        "bestLaneSeed": seeds[best_idx],
+        "bestLaneRate": float(rates[best_idx]),
+        "bestLaneRewardSum": float(fin[seeds[best_idx]]["rewardSum"]),
+        "positiveLanes": int((rates > 0).sum()),
+        "positiveFraction": float((rates > 0).mean()),
+        "iqmRecent": iqm(recent_arr),
+        "recentMax": float(recent_arr.max()),
+        "recentRates": recents,
+        "deliveredBySeed": {s: float(r) for s, r in zip(seeds, rates)},
     }
+    flops = run["meta"].get("flopsPerLaneStep")
+    if flops:
+        out["rewardPerGFLOP"] = out["iqmDeliveredAll"] / (flops / 1e9)
+        out["bestRewardPerGFLOP"] = out["bestLaneRate"] / (flops / 1e9)
     if n >= 4:
         out["iqmDeliveredAllCI95"] = list(bootstrap_ci(rates, iqm, seed=1))
     ts, surv = km_curve(times, events)
@@ -303,22 +356,49 @@ def render_markdown(results: list[dict], meta: dict) -> str:
         f"### Fleet report — {meta['envId']} B={meta['batch']} × {meta['steps']} steps "
         f"(ablation={meta.get('ablationLabel', 'none')})",
         "",
-        "| policy | lanes | diverged (Wilson 95%) | RMST/horizon | IQM delivered (all) | IQM (survivors) | agg steps/s |",
-        "|---|---:|---|---:|---|---|---:|",
+        "**Delivered reward (the headline)**",
+        "",
+        "| policy | IQM rate (all lanes) | best lane | positive lanes | recent-window IQM | recent max"
+        + (" | reward/GFLOP |" if any(r.get("rewardPerGFLOP") is not None for r in results if r) else " |"),
+        "|---|---|---|---:|---|---"
+        + ("|---|" if any(r.get("rewardPerGFLOP") is not None for r in results if r) else "|"),
+    ]
+    has_flop = any(r.get("rewardPerGFLOP") is not None for r in results if r)
+    for r in results:
+        if not r:
+            continue
+        ci = r.get("iqmDeliveredAllCI95")
+        ci_s = f" [{ci[0]:.4g}, {ci[1]:.4g}]" if ci else ""
+        row = (f"| {r['policy']} | **{r['iqmDeliveredAll']:.5g}**{ci_s} "
+               f"| seed {r['bestLaneSeed']}: {r['bestLaneRate']:+.4f}/step "
+               f"({r['bestLaneRewardSum']:+,.0f} total) "
+               f"| {r['positiveLanes']}/{r['lanes']} = {r['positiveFraction']:.1%} "
+               f"| {r['iqmRecent']:+.5g} | {r['recentMax']:+.4f} ")
+        if has_flop:
+            rg = r.get("rewardPerGFLOP")
+            row += f"| {rg:+.4g} |" if rg is not None else "| n/a |"
+        else:
+            row += "|"
+        lines.append(row)
+    oak = next((r for r in results if r and r["policy"] == "oak"), None)
+    if oak:
+        lines += ["", sota_gap_line(oak["bestLaneRate"], oak["iqmDeliveredAll"])]
+    lines += [
+        "",
+        "**Survival & robustness**",
+        "",
+        "| policy | lanes | diverged (Wilson 95%) | RMST/horizon | IQM (survivors) |",
+        "|---|---:|---|---:|---|",
     ]
     for r in results:
         if not r:
             continue
         d = r["divergence"]
-        ci = r.get("iqmDeliveredAllCI95")
-        ci_s = f" [{ci[0]:.4g}, {ci[1]:.4g}]" if ci else ""
         surv = r.get("iqmDeliveredSurvivors")
         lines.append(
             f"| {r['policy']} | {r['lanes']} | {d['dead']}/{r['lanes']} = {d['rate']:.1%} "
             f"[{d['wilsonLo']:.1%}, {d['wilsonHi']:.1%}] | {r['rmst'] / r['horizon']:.3f} "
-            f"| {r['iqmDeliveredAll']:.5g}{ci_s} | "
-            f"{'n/a' if surv is None else f'{surv:.5g}'} | "
-            f"{r.get('aggStepsPerSecond', 0):,.0f} |")
+            f"| {'n/a' if surv is None else f'{surv:.5g}'} |")
     for r in results:
         if r and r.get("plasticity"):
             p_ = r["plasticity"]
@@ -333,6 +413,45 @@ def render_markdown(results: list[dict], meta: dict) -> str:
         if r and r["divergence"]["byDetector"]:
             dets = ", ".join(f"{k}: {v}" for k, v in r["divergence"]["byDetector"].items())
             lines.append(f"**{r['policy']} death detectors**: {dets}.")
+        if r:
+            lines.append(
+                f"**{r['policy']} throughput**: {r.get('aggStepsPerSecond', 0):,.0f} agg steps/s"
+                + (f"; {run_flops_str(r)}" if r.get("rewardPerGFLOP") is not None else "") + ".")
+    return "\n".join(lines)
+
+
+def run_flops_str(r: dict) -> str:
+    return f"best-lane reward/GFLOP {r['bestRewardPerGFLOP']:+.4g} (OaK measured; SOTA est. only)"
+
+
+def render_leaderboard(run: dict, result: dict, top: int) -> str:
+    policy = result["policy"]
+    fin = finals(run, policy)
+    delivered = result["deliveredBySeed"]
+    recents = result["recentRates"]
+    order = sorted(delivered, key=lambda s: delivered[s], reverse=True)[:top]
+    lines = [
+        "", f"**{policy} leaderboard — top {len(order)} lanes by delivered rate**", "",
+        "| seed | rate/step | total reward | recent rate | zenith step | status |",
+        "|---:|---|---|---|---:|---|",
+    ]
+    window = max(result["horizon"] // 5, 1)
+    for s in order:
+        rows = run["lanes"][(policy, s)]
+        pl = plasticity(rows, window)
+        zen = f"{pl['zenithStep']:,}" if pl else "n/a"
+        rec, life = recents[s], delivered[s]
+        nf = fin[s].get("firstNonFiniteStep") is not None
+        if rec > max(life, 0) * 1.1 and rec > 0:
+            status = "climbing"
+        elif pl and pl["zenithRate"] > 0 and rec < 0.5 * pl["zenithRate"]:
+            status = "decaying"
+        else:
+            status = "steady"
+        if nf:
+            status += " (NF)"
+        lines.append(
+            f"| {s} | {life:+.4f} | {fin[s]['rewardSum']:+,.0f} | {rec:+.4f} | {zen} | {status} |")
     return "\n".join(lines)
 
 
@@ -343,7 +462,13 @@ def cmd_report(args) -> int:
     policies = [args.policy] if args.policy else meta.get("policies", ["oak"])
     results = [analyze_policy(run, p, window) for p in policies]
     print(render_markdown(results, meta))
-    summary = {"meta": meta, "results": [r for r in results if r]}
+    if args.leaderboard:
+        for r in results:
+            if r:
+                print(render_leaderboard(run, r, args.top))
+    summary = {"meta": meta, "results": [
+        {k: v for k, v in r.items() if k not in ("recentRates", "deliveredBySeed")}
+        for r in results if r]}
     out = args.json or (args.root / "summary.json")
     out.write_text(json.dumps(summary, indent=2, sort_keys=True))
     return 0
@@ -539,6 +664,57 @@ def cmd_gate(args) -> int:
     return 0 if ok else 1
 
 
+# ---------------------------------------------------------------------- sota
+
+
+def cmd_sota(args) -> int:
+    """The project scoreboard: reward trajectory across all fleet roots vs the
+    fixed external reference lines. Answers 'are we closing the gap'."""
+    roots = []
+    for d in sorted(args.dir.iterdir()):
+        if not (d / "meta.json").exists() or not (d / "fleet.jsonl").exists():
+            continue
+        try:
+            meta = json.loads((d / "meta.json").read_text())
+        except json.JSONDecodeError:
+            continue
+        if "oak" not in meta.get("policies", []):
+            continue
+        if meta.get("batch", 0) < args.min_lanes or meta.get("steps", 0) < args.min_steps:
+            continue  # validation/debug roots are noise on the scoreboard
+        roots.append((meta.get("startedAt", ""), d, meta))
+    if not roots:
+        print(f"(no fleet roots with oak policy under {args.dir})")
+        return 1
+    print("### OaK reward scoreboard — delivered rate across fleet runs")
+    print()
+    print("| run | date | B × steps | IQM delivered (all) | best lane | positive | "
+          "recent IQM | gap to TD7 (eval) | gap to SAC (delivered est.) |")
+    print("|---|---|---|---|---|---:|---|---|---|")
+    td7 = SOTA_EVAL["TD7"]
+    sac = SOTA_DELIVERED_EST["SAC (delivered, est.)"]
+    for started, d, meta in roots:
+        try:
+            run = load_run(d)
+            r = analyze_policy(run, "oak", max(meta["steps"] // 5, 1))
+        except Exception as e:  # partial/live runs shouldn't kill the board
+            print(f"| {d.name} | {started[:10]} | (unreadable: {e}) | | | | | | |")
+            continue
+        if not r:
+            continue
+        best = r["bestLaneRate"]
+        g7 = f"{td7 / best:,.0f}x" if best > 0 else "n/a"
+        gs = f"{sac / best:,.0f}x" if best > 0 else "n/a"
+        print(f"| {d.name} | {started[:10]} | {meta['batch']}×{meta['steps']:,} "
+              f"| {r['iqmDeliveredAll']:+.5g} | seed {r['bestLaneSeed']}: {best:+.4f} "
+              f"| {r['positiveFraction']:.1%} | {r['iqmRecent']:+.5g} | {g7} | {gs} |")
+    print()
+    print(f"Reference lines: " + ", ".join(f"{k} {v}/step" for k, v in SOTA_EVAL.items())
+          + " (eval); " + ", ".join(f"{k} ~{v}/step" for k, v in SOTA_DELIVERED_EST.items()) + ".")
+    print(f"({SOTA_FRAMING_NOTE})")
+    return 0
+
+
 # --------------------------------------------------------------------- watch
 
 
@@ -560,15 +736,26 @@ def latest_rows(root: Path) -> dict[str, dict]:
 def render_watch(rows: dict[str, dict]) -> str:
     if not rows:
         return "(no aggregate.jsonl rows yet)"
-    out = [f"{'policy':8s} {'step':>10s} {'alive':>11s} "
-           f"{'P10':>10s} {'P50':>10s} {'P90':>10s} {'agg sps':>10s} {'wall':>8s}"]
+    has_best = any("bestLaneSeed" in r for r in rows.values())
+    hdr = (f"{'policy':8s} {'step':>10s} {'alive':>11s} "
+           f"{'P10':>10s} {'P50':>10s} {'P90':>10s}")
+    if has_best:
+        hdr += f" {'best lane':>16s} {'recentP50':>10s}"
+    hdr += f" {'agg sps':>10s} {'wall':>8s}"
+    out = [hdr]
     for pol, r in sorted(rows.items()):
         total = r["alive"] + r["dead"]
-        out.append(
-            f"{pol:8s} {r['step']:>10,d} {r['alive']:>6d}/{total:<4d} "
-            f"{r['deliveredRateP10']:>10.4g} {r['deliveredRateP50']:>10.4g} "
-            f"{r['deliveredRateP90']:>10.4g} {r['aggStepsPerSecond']:>10,.0f} "
-            f"{r['wallSeconds']:>7.0f}s")
+        line = (f"{pol:8s} {r['step']:>10,d} {r['alive']:>6d}/{total:<4d} "
+                f"{r['deliveredRateP10']:>10.4g} {r['deliveredRateP50']:>10.4g} "
+                f"{r['deliveredRateP90']:>10.4g}")
+        if has_best:
+            if "bestLaneSeed" in r:
+                line += (f" {('s' + str(r['bestLaneSeed']) + ':' + format(r['bestLaneDeliveredRate'], '+.3f')):>16s}"
+                         f" {r.get('recentRateP50', float('nan')):>10.4g}")
+            else:
+                line += f" {'-':>16s} {'-':>10s}"
+        line += f" {r['aggStepsPerSecond']:>10,.0f} {r['wallSeconds']:>7.0f}s"
+        out.append(line)
     return "\n".join(out)
 
 
@@ -596,6 +783,15 @@ def main() -> int:
                     help="rolling-rate window for plasticity (default: 2 heartbeats)")
     rp.add_argument("--json", type=Path, default=None,
                     help="summary.json path (default: <root>/summary.json)")
+    rp.add_argument("--leaderboard", action="store_true",
+                    help="append top-N lanes by delivered rate")
+    rp.add_argument("--top", type=int, default=10)
+
+    sp = sub.add_parser("sota", help="reward scoreboard across all fleet roots vs SOTA lines")
+    sp.add_argument("--dir", type=Path, default=Path(".oak-benchmarks"))
+    sp.add_argument("--min-lanes", type=int, default=512,
+                    help="hide validation/debug roots below this population")
+    sp.add_argument("--min-steps", type=int, default=50_000)
 
     gp = sub.add_parser("gate", help="promotion law / instrument-swap equivalence")
     gp.add_argument("keeper", type=Path)
@@ -616,7 +812,8 @@ def main() -> int:
     wp.add_argument("--interval", type=float, default=5.0)
 
     args = ap.parse_args()
-    return {"report": cmd_report, "gate": cmd_gate, "watch": cmd_watch}[args.cmd](args)
+    return {"report": cmd_report, "gate": cmd_gate, "watch": cmd_watch,
+            "sota": cmd_sota}[args.cmd](args)
 
 
 if __name__ == "__main__":
