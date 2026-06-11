@@ -1618,7 +1618,7 @@ plasticity frontier. The 10M-horizon XL tier and B=4096 SOTA reruns are
 unlocked by Phase F (GPU-resident physics, target ≥2M agg steps/s ⇒ XL ≈
 1.4 h); they are not run on the CPU-era instrument.
 
-Promotion is `tools/fleet_gate.py <keeper> <candidate>` at Tier L: four paired
+Promotion is `tools/fleet.py gate <keeper> <candidate>` at Tier L: four paired
 population criteria (divergence Δp non-inferiority, IQM delivered-rate
 non-inferiority over ALL lanes, RMST survival non-inferiority, no new NF
 phases), all one-sided α=0.05. The headline performance number is always
@@ -1708,7 +1708,7 @@ GPU-physics derisk probes (2026-06-11, M4 Max):
   invalid across physics backends (lanes are not twins — pairing gave zero
   variance reduction and the margins were calibrated for paired tests);
   (b) the ±5%·IQM margin is below the unpaired seed-noise floor at
-  N=1024 × 100k. Fix shipped in `fleet_gate.py --equivalence`: unpaired
+  N=1024 × 100k. Fix shipped in `fleet.py gate --equivalence`: unpaired
   bootstrap + TOST three-way verdicts (EQUIVALENT / DIFFERENT /
   INCONCLUSIVE-with-required-N), fixed practical-irrelevance bands
   (divergence ±3pp). At N=1024 both null and swap read INCONCLUSIVE on IQM
@@ -1769,7 +1769,7 @@ keepers are git history, not live references).
   P90 +0.0013. The strong-walker mode (~0.2–0.4/step at 250k: seeds 3, 802,
   393, 383, 958, 856, 626, 860, 700, 558) is a ~1% population mode — the
   rocket is not a seed-3 miracle, it is a reachable attractor.
-- **Official population numbers (fleet_stats.py, the figures every candidate
+- **Official population numbers (fleet.py report, the figures every candidate
   must beat):**
   - Divergence (first numeric event by 1M): **99.7% [99.1%, 99.9%]** Wilson 95%
     (detectors: paramExplosion 1017, policyMean 4). RMST/horizon **0.082**
@@ -1783,7 +1783,7 @@ keepers are git history, not live references).
     confirmation of the post-zenith decay frontier.
   - Entropy collapse (actor entropy < 1e-6, 2 consecutive heartbeats):
     **64.6% [61.6%, 67.4%]**.
-- All future candidates gate against this artifact via `tools/fleet_gate.py`
+- All future candidates gate against this artifact via `tools/fleet.py gate`
   at matched tier. The SOTA bar this baseline is measured against is recorded
   in `AGENTS.md` ("The SOTA bar": TD7 ≈ 17.4 reward/step eval; honest
   delivered-vs-delivered gap ≈ 15–20× at the best lane, population median
