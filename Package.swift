@@ -8,13 +8,7 @@ let package = Package(
     .executableTarget(
       name: "OaK",
       path: "Sources",
-      exclude: ["OakKernel.metal"],
-      linkerSettings: [
-        .unsafeFlags([
-          "-L", ".build/oak-native", "-loakenv",
-          "-Xlinker", "-rpath", "-Xlinker", "@executable_path/../../oak-native",
-        ])
-      ]
+      exclude: ["OakKernel.metal", "OakPhysics.metal", "HalfCheetahModel.metal"]
     )
   ]
 )

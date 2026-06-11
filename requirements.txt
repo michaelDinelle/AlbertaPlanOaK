@@ -1,3 +1,2 @@
-envpool==1.2.0
 mujoco
 numpy

@@ -1682,6 +1682,25 @@ GPU-physics derisk probes (2026-06-11, M4 Max):
 - **Newton solver reality**: fp64 reference measurement over 10k driven steps:
   solver_niter mean 0.84 / p99 3 / max 4; ncon p99 2 / max 5; 48.5% of steps
   contact-free.
+- **F4 VERDICT (2026-06-11): EQUIVALENT — GPU physics promoted.** At N=8192
+  lanes/side (Tier-M horizon), every criterion of the null-calibrated TOST
+  gate certifies: divergence Δ=−0.2pp CI[−1.0,+0.6] (band ±3pp); IQM
+  delivered Δ=−2.1e-05 (0.14% relative) CI[−0.00052,+0.00049] inside the
+  strict ±5% band; RMST Δ=+416 steps (band ±5000); NF prevalence all four
+  phases equivalent; KS deliveredRate p=0.958, deathTimes p=0.966. The CPU
+  bridge, envpool checkout, Env class, and `fleetCPU` are DELETED
+  (forward-only); the fp64 oracle XML is vendored at
+  `assets/half_cheetah_envpool.xml`; setup.sh is venv+metal+swift only.
+- **F5 measured constants (GPU-resident full loop, clean GPU)**:
+  B=1024 → 265.7K, B=4096 → 392.6K, **B=16384 → 401.9K agg steps/s**
+  (2.7× the CPU-era 148.5K; 22.7× the original 17.7K instrument).
+  Per-lane rate at B=1024 ≈ 259 steps/s ⇒ tier wall-clocks:
+  S(1024×10k) ≈ 39 s; M(1024×100k) ≈ 6.4 min; **L(1024×1M) ≈ 64 min**;
+  equivalence-grade M at N=8192 ≈ 34 min. **XL(10M horizon) remains gated on
+  per-lane rate** (~10.7 h at 259/s regardless of B — horizon divides by
+  per-lane rate, not aggregate): the binding cost is now the five agent
+  kernels (77% of step wall at B=1024); kernel fusion / occupancy work is
+  the open F5-opt item that unlocks XL.
 - **F4 gate-calibration finding (the null control earned its keep)**: the first
   equivalence run (CPU vs GPU Tier-M, N=1024) said NOT EQUIVALENT — but a
   same-physics null control (CPU seeds 0–1023 vs CPU seeds 1024–2047) FAILED
