@@ -1753,8 +1753,22 @@ GPU-resident physics (Phase F: ~100 floats/lane instead of ~100 KB mjData).
 
 ## Current Baseline Decision
 
-**THE keeper is now a fleet population baseline** (forward-only: prior 10-seed
-keepers are git history, not live references).
+**THE keeper: `.oak-benchmarks/keeper-fleet-tierL-gpu-20260611`** — Tier L,
+B=1024 × 1M, oak policy, on the certified GPU instrument (recorded lanes 3, 8;
+196K agg steps/s with recording overhead). Official numbers every candidate
+must beat (`tools/fleet.py report`):
+
+- Divergence by 1M: **99.4% [98.7%, 99.7%]** (paramExplosion 1012,
+  policyMean 6); RMST/horizon 0.089.
+- **IQM delivered, all lanes: −0.038358 [−0.04136, −0.03554]**.
+- Plasticity quartiles (25/50/75): zenith step 250k/350k/700k; decay ratio
+  −2.48/−0.30/+0.87. Entropy collapse 65.9% [63.0%, 68.8%].
+- Cross-instrument check: every figure sits inside the CPU-era keeper's CIs
+  and the zenith quartiles are identical — the F4 equivalence verdict
+  reproduced itself at Tier-L scale.
+
+CPU-instrument predecessor, same day, kept for the audit trail (forward-only:
+prior 10-seed keepers are git history, not live references):
 
 - **Artifact**: `.oak-benchmarks/keeper-fleet-tierL-20260611` — Tier L,
   B=1024 × 1M steps, oak policy, same kernel behavior as the pre-fleet keeper
