@@ -1682,6 +1682,20 @@ GPU-physics derisk probes (2026-06-11, M4 Max):
 - **Newton solver reality**: fp64 reference measurement over 10k driven steps:
   solver_niter mean 0.84 / p99 3 / max 4; ncon p99 2 / max 5; 48.5% of steps
   contact-free.
+- **F4 gate-calibration finding (the null control earned its keep)**: the first
+  equivalence run (CPU vs GPU Tier-M, N=1024) said NOT EQUIVALENT — but a
+  same-physics null control (CPU seeds 0–1023 vs CPU seeds 1024–2047) FAILED
+  THE SAME CRITERIA the same way. Diagnosis: (a) paired-by-seed bootstrap is
+  invalid across physics backends (lanes are not twins — pairing gave zero
+  variance reduction and the margins were calibrated for paired tests);
+  (b) the ±5%·IQM margin is below the unpaired seed-noise floor at
+  N=1024 × 100k. Fix shipped in `fleet_gate.py --equivalence`: unpaired
+  bootstrap + TOST three-way verdicts (EQUIVALENT / DIFFERENT /
+  INCONCLUSIVE-with-required-N), fixed practical-irrelevance bands
+  (divergence ±3pp). At N=1024 both null and swap read INCONCLUSIVE on IQM
+  (needs ~3.7× N) with all KS distribution tests clean — the conclusive
+  N=4096 experiment decides F4. Standing law: **equivalence margins must be
+  validated against a measured same-physics null before any swap verdict.**
 - **F2 env-step layer (all gates PASS)**: rollout divergence rides the fp64
   chaotic twin envelope (ratio 0.28–3.5, gate 10x; first-10-step max rel err
   2.6e-05); Philox4x32-10 matches a python mirror to 1 ulp, KS-clean reset and
