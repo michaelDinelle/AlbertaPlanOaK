@@ -54,8 +54,10 @@ them quietly slips.
 ### `HalfCheetah-v4` Currently Oak Beats the Random baseline 10/10 how ever only recieves positve reward in a hand full of seeds
 
 Environment: [`HalfCheetah-v4`](https://gymnasium.farama.org/environments/mujoco/half_cheetah/)
-(MuJoCo, Gymnasium spec) — driven through our envpool-backed C++ bridge (see
-[The envpool bridge](#the-envpool-bridge) below).
+(MuJoCo, Gymnasium spec) — GPU-resident in the same Metal command buffer as
+the agent (see [The GPU environment](#the-gpu-environment-no-bridge-no-envpool-no-c)
+below; clips and numbers in this section predate it and were produced on the
+since-deleted CPU envpool bridge, which the GPU port is certified equivalent to).
 
 Seed three has been observed to learn to be a remarkably robust learner however it suffers from the classic catastrophic loss of placicity/knowlege in the current form of the code base.
 
@@ -76,7 +78,8 @@ does to the cheetah*.
 > *replays* of `actions.bin` through `tools/replay_render.py`, which steps
 > a vanilla Gymnasium `HalfCheetah-v4` env on the recorded action stream.
 > The actions themselves were produced against our envpool-backed C++
-> bridge ([The envpool bridge](#the-envpool-bridge)), and envpool's MuJoCo
+> bridge (the CPU-era env path, since replaced by the certified-equivalent
+> [GPU environment](#the-gpu-environment-no-bridge-no-envpool-no-c)), and envpool's MuJoCo
 > integration is **not bit-identical** to vanilla Gymnasium — small
 > floating-point differences in contact resolution and integration
 > compound over hundreds of thousands of steps. So over a 500k-step clip
@@ -273,7 +276,7 @@ oracle — Python MuJoCo on the vendored
 - Population-level equivalence vs CPU MuJoCo certified by a null-calibrated
   TOST gate at N=8192 lanes/side: divergence, IQM delivered rate, survival,
   NF prevalence, and KS distribution tests all EQUIVALENT
-  (`tools/fleet_gate.py --equivalence`).
+  (`tools/fleet.py gate --equivalence`).
 
 > **fp32 caveat** (the honest counterpart of the old envpool≠gymnasium replay
 > caveat): Apple GPUs have no fp64, so trajectories are not bit-identical to
@@ -361,12 +364,12 @@ so every tier is a paired extension of the one below; no protocol step exceeds
 Watch a live fleet, report a finished one, and gate a candidate:
 
 ```bash
-python3 tools/fleet_watch.py <run-root> --follow
-python3 tools/fleet_stats.py <run-root>          # KM survival, Wilson CIs, IQM, plasticity
-python3 tools/fleet_gate.py  <keeper> <candidate> # population promotion law (paired by seed)
+python3 tools/fleet.py watch <run-root> --follow
+python3 tools/fleet.py report <run-root>          # KM survival, Wilson CIs, IQM, plasticity
+python3 tools/fleet.py gate  <keeper> <candidate> # population promotion law (paired by seed)
 ```
 
-`fleet_gate.py` is the promotion law: divergence-rate, IQM delivered-rate, and
+`fleet.py gate` is the promotion law: divergence-rate, IQM delivered-rate, and
 RMST-survival non-inferiority plus no new non-finite phases — all paired by
 seed across the full population. Single seeds are lanes in the data, not law.
 
@@ -427,8 +430,10 @@ overlay). Esc or close the window to exit.
 
 ```
 Sources/        Swift host (fleet engine) + OakKernel.metal (B-lane FC-STOMP loop)
+                + OakPhysics.metal (fp32 GPU HalfCheetah) + HalfCheetahModel.metal
+assets/         half_cheetah_envpool.xml (the fp64 parity-oracle model)
 scripts/        HalfCheetah rebuild scripts (10M, 15M)
-tools/          fleet_watch / fleet_stats / fleet_gate / replay_render / bridge_oracle_cem
+tools/          fleet.py (report/gate/watch) / physics_parity.py / replay_render.py
 docs/papers/    Literature corpus (Alberta Plan, RR-Subtasks, STOMP, plasticity, etc.)
 docs/roadmap.md Strict keeper / rejection log + fleet tier protocol
 AGENTS.md       Live audit trail and empirical lessons
