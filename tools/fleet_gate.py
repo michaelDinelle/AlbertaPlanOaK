@@ -171,13 +171,31 @@ def equivalence_gate(keep_fin, cand_fin, keep_seeds, cand_seeds, n, horizon, arg
         rmst(c_t[rc], c_e[rc], horizon) - rmst(k_t[rk], k_e[rk], horizon)
         for rk, rc in zip(ik, ic)])
     verdicts.append(tost("rmstSurvival", dr, args.rmst_rel * horizon, "{:+,.0f}"))
-    k_nf, c_nf = nf_totals(keep_fin), nf_totals(cand_fin)
-    nf_ok = (not [ph for ph in NF_PHASES if c_nf[ph] > 0 and k_nf[ph] == 0]
-             and not [ph for ph in NF_PHASES if c_nf[ph] > max(2 * k_nf[ph], 100 * n / 10)]
-             and not [ph for ph in NF_PHASES if k_nf[ph] > max(2 * c_nf[ph], 100 * n / 10)])
-    print(f"  [{'EQUIVALENT' if nf_ok else 'DIFFERENT':12s}] nfPhases       "
-          f"keeper={k_nf} cand={c_nf}")
-    verdicts.append("EQUIVALENT" if nf_ok else "DIFFERENT")
+    # NF equivalence by per-lane PREVALENCE (fraction of lanes with any NF in
+    # the phase), not raw fleet sums: sums are heavy-tailed (dominated by a few
+    # diverged lanes; the same-physics null showed 1.67x total swings) and are
+    # not a calibrated population statistic. Same TOST band as divergence.
+    def nf_prevalence(fin, seeds, phase):
+        return np.array([
+            1.0 if ((fin[s].get("health") or {}).get("nonFiniteByPhase") or {}).get(phase, 0) > 0
+            else 0.0
+            for s in seeds])
+    nf_details = []
+    for i, ph in enumerate(NF_PHASES):
+        kp = nf_prevalence(keep_fin, keep_seeds, ph)
+        cp = nf_prevalence(cand_fin, cand_seeds, ph)
+        d_nf = unpaired_bootstrap(kp, cp, np.mean, n_boot=args.boot, seed=20 + i)
+        lo, hi = np.percentile(d_nf, [5, 95])
+        if -band_p <= lo and hi <= band_p:
+            v = "EQUIVALENT"
+        elif hi < -band_p or lo > band_p:
+            v = "DIFFERENT"
+        else:
+            v = "INCONCLUSIVE"
+        verdicts.append(v)
+        nf_details.append(f"{ph} Δ={float(np.median(d_nf)):+.4f}[{lo:+.4f},{hi:+.4f}]({v[0]})")
+    print(f"  [{'mixed' if len(set(verdicts[-4:])) > 1 else verdicts[-1]:12s}] "
+          f"nfPrevalence   {' '.join(nf_details)} band=±{band_p:.4f}")
     d_del, p_del = ks_test(k_del, c_del)
     d_srv, p_srv = ks_test(k_t[k_e == 1], c_t[c_e == 1]) if k_e.sum() and c_e.sum() else (0.0, 1.0)
     ks_ok = p_del >= 0.01 and p_srv >= 0.01
