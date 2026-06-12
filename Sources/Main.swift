@@ -396,6 +396,18 @@ func metricsRoot() -> URL {
     let autoG = max(2, min(16, B / 32))
     let megaG = e["OAK_MEGA_LANES_PER_TG"].flatMap(Int.init) ?? autoG
     let wide2x = (e["OAK_MEGA_WIDE2X"].flatMap(Int.init).map { $0 != 0 }) ?? (B <= 512)
+    // Cooperative env stage (kernel constant 27): the lane's full simdgroup
+    // runs the physics chain (hc_mj_step_simd; bitwise-certified vs scalar).
+    // Geometry law (measured 2026-06-11, interleaved A/B, M4 Max): coop wins
+    // only when packed lanes cannot amortize the chain's instruction stream —
+    // oak B=64/G=2: 1262 -> 1228 us/lane-step; it LOSES from G=4 up
+    // (B=128 1400 -> 1495, B=256 1617 -> 1950, B=1024 2667 -> 5433, B=4096
+    // 12900 -> 23167), so the default is coop iff G <= 2 (the small-B/XL
+    // per-lane-rate configs). OAK_MEGA_ENV_COOP=0/1 overrides (bisect
+    // instrument / experiments). Needs threadgroup buffer 9
+    // (physScratchFloats = HC_SIMD_SCRATCH per lane) + device buffer 12.
+    let envCoop = (e["OAK_MEGA_ENV_COOP"].flatMap(Int.init).map { $0 != 0 }) ?? (megaG <= 2)
+    let physScratchFloats = 140  // mirrors HC_SIMD_SCRATCH in OakPhysics.metal
     let megaW = 32 * megaG * (wide2x ? 2 : 1)
     let megaConstants = MTLFunctionConstantValues()
     ablations.apply(to: megaConstants)
@@ -405,6 +417,8 @@ func metricsRoot() -> URL {
       var b = true
       megaConstants.setConstantValue(&b, type: .bool, index: 26)
     }
+    var envCoopVal = envCoop
+    megaConstants.setConstantValue(&envCoopVal, type: .bool, index: 27)
     // Shape specialization: oak runs bind the env dims (and derived strides)
     // as compile-time constants 13..24 — bit-identical by construction under
     // -fno-fast-math. zero/random runs have no engine (agent stages are
@@ -423,11 +437,12 @@ func metricsRoot() -> URL {
     let megaPipe = try dev.makeComputePipelineState(
       function: lib.makeFunction(name: "oak_megastep", constantValues: megaConstants))
     let megaSlotBytes = 32 * megaG * MemoryLayout<Float>.stride  // per-lane 32-float slots
+    let physTGBytes = envCoop ? physScratchFloats * megaG * MemoryLayout<Float>.stride : 16
     guard megaG >= 1, megaW <= megaPipe.maxTotalThreadsPerThreadgroup,
-      9 * megaSlotBytes <= dev.maxThreadgroupMemoryLength
+      9 * megaSlotBytes + physTGBytes <= dev.maxThreadgroupMemoryLength
     else {
       throw err(
-        "OAK_MEGA_LANES_PER_TG=\(megaG) needs \(megaW) threads/threadgroup (pipeline max \(megaPipe.maxTotalThreadsPerThreadgroup)) and \(9 * megaSlotBytes) tg bytes (device max \(dev.maxThreadgroupMemoryLength)).")
+        "OAK_MEGA_LANES_PER_TG=\(megaG) needs \(megaW) threads/threadgroup (pipeline max \(megaPipe.maxTotalThreadsPerThreadgroup)) and \(9 * megaSlotBytes + physTGBytes) tg bytes (device max \(dev.maxThreadgroupMemoryLength)).")
     }
     func makeBuf(_ len: Int) throws -> MTLBuffer {
       guard let b = dev.makeBuffer(length: max(len, 16), options: [.storageModeShared]) else {
@@ -489,6 +504,9 @@ func metricsRoot() -> URL {
       for (slot, lane) in recordLanes.enumerated() { rp[lane] = Int32(slot) }
     }
     let recordBuf = try makeBuf(recordLanes.count * recordCapacity * 7 * 4)
+    // Cooperative env stage device scratch: one HCSimdRows block per lane
+    // (1050 floats — mirrors HCSimdRows in OakPhysics.metal).
+    let physRowsBuf = try makeBuf(envCoop ? B * 1050 * 4 : 16)
     let snapStride = MemoryLayout<LaneSnapshot>.stride
     precondition(snapStride == 276, "LaneSnapshot layout drifted from OakLaneSnapshot")
     let snapBuf = try makeBuf(2 * B * snapStride)
@@ -548,7 +566,9 @@ func metricsRoot() -> URL {
       enc.setBuffer(recordBuf, offset: 0, index: 10)
       var n32 = UInt32(n)
       enc.setBytes(&n32, length: 4, index: 11)
+      enc.setBuffer(physRowsBuf, offset: 0, index: 12)
       for m in 0..<9 { enc.setThreadgroupMemoryLength(megaTGBytes, index: m) }
+      enc.setThreadgroupMemoryLength(physTGBytes, index: 9)
       enc.dispatchThreadgroups(
         MTLSize(width: (B + megaG - 1) / megaG, height: 1, depth: 1),
         threadsPerThreadgroup: mtlSize(megaW))
@@ -885,9 +905,14 @@ func metricsRoot() -> URL {
     }
     // Optional argv[4] == "debug": dump per-case solver intermediates (904 floats)
     // via oak_physics_probe_debug instead of the 18-float qpos'/qvel' output.
+    // Optional argv[4] == "coop": one 32-thread simdgroup per case through
+    // hc_mj_step_simd (the cooperative megastep env path); output must be
+    // bitwise equal to the scalar probe (order-preservation proof).
     let debug = args.count > 4 && args[4] == "debug"
+    let coop = args.count > 4 && args[4] == "coop"
     let outStride = debug ? 904 : 18
-    let kernelName = debug ? "oak_physics_probe_debug" : "oak_physics_probe"
+    let kernelName =
+      debug ? "oak_physics_probe_debug" : (coop ? "oak_physics_probe_coop" : "oak_physics_probe")
     guard let dev = MTLCreateSystemDefaultDevice(), let q = dev.makeCommandQueue() else {
       throw err("Metal unavailable.")
     }
@@ -897,7 +922,9 @@ func metricsRoot() -> URL {
     }
     let pipe = try dev.makeComputePipelineState(function: fn)
     guard let inBuf = dev.makeBuffer(length: inFloats * 4, options: [.storageModeShared]),
-      let outBuf = dev.makeBuffer(length: n * outStride * 4, options: [.storageModeShared])
+      let outBuf = dev.makeBuffer(length: n * outStride * 4, options: [.storageModeShared]),
+      let rowsBuf = dev.makeBuffer(
+        length: coop ? n * 1050 * 4 : 16, options: [.storageModePrivate])  // HCSimdRows/case
     else { throw err("Metal buffer allocation failed.") }
     data.withUnsafeBytes { raw in
       memcpy(inBuf.contents(), raw.baseAddress!.advanced(by: 4), inFloats * 4)
@@ -910,8 +937,14 @@ func metricsRoot() -> URL {
     enc.setBuffer(outBuf, offset: 0, index: 1)
     var count = UInt32(n)
     enc.setBytes(&count, length: MemoryLayout<UInt32>.stride, index: 2)
-    let tg = min(64, pipe.maxTotalThreadsPerThreadgroup)
-    enc.dispatchThreads(mtlSize(n), threadsPerThreadgroup: mtlSize(tg))
+    if coop {
+      enc.setBuffer(rowsBuf, offset: 0, index: 3)
+      enc.setThreadgroupMemoryLength(140 * MemoryLayout<Float>.stride, index: 0)  // HC_SIMD_SCRATCH
+      enc.dispatchThreadgroups(mtlSize(n), threadsPerThreadgroup: mtlSize(32))
+    } else {
+      let tg = min(64, pipe.maxTotalThreadsPerThreadgroup)
+      enc.dispatchThreads(mtlSize(n), threadsPerThreadgroup: mtlSize(tg))
+    }
     enc.endEncoding()
     cb.commit()
     cb.waitUntilCompleted()
