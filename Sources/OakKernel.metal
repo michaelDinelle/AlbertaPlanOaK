@@ -46,6 +46,30 @@ constant float OAK_SPEC_INV_RANK [[function_constant(22)]];
 constant float OAK_SPEC_INV_OPTION_COUNT [[function_constant(23)]];
 constant float OAK_SPEC_META_ETA [[function_constant(24)]];
 
+// Stage-resolved timing instrument (DEBUG ONLY, host: OAK_MEGA_STAGE_MASK).
+// Bitmask gating each oak_megastep stage: encode bit0, plan bit1, learn bit2,
+// replace bit3, emit bit4, sample bit5, env bit6. Skipped stages still hit
+// their barriers, so the loop structure is identical. Disabling stages changes
+// semantics (downstream reads of never-written state) — use only to read
+// aggregate throughput, never for science/gate runs. Undefined = all-on, and
+// the all-on path constant-folds to exactly the unmasked code.
+constant uint OAK_MEGA_STAGE_MASK [[function_constant(25)]];
+constant uint OAK_MEGA_STAGES = is_function_constant_defined(OAK_MEGA_STAGE_MASK)
+    ? OAK_MEGA_STAGE_MASK : 0xffffffffu;
+
+// Two simdgroups per lane (W = 64*G): the second simdgroup is idle in every
+// stage except oak_learn_heads, whose 22K independent elements remap over 64
+// threads instead of 32 (bit-identical: thread->element remap only; the
+// element math and element->value mapping are unchanged). Stage-internal
+// simdgroup barriers stay valid because every barriered stage runs only on
+// the lane's leading simdgroup. Host sets this with OAK_MEGA_WIDE2X and
+// doubles the dispatch width to match; threadgroup slots stay 32 floats per
+// lane. Default off = the certified one-simdgroup-per-lane geometry.
+constant bool OAK_MEGA_WIDE2X_FC [[function_constant(26)]];
+constant bool OAK_MEGA_WIDE2X = is_function_constant_defined(OAK_MEGA_WIDE2X_FC)
+    ? OAK_MEGA_WIDE2X_FC : false;
+
+
 struct KernelConfig {
     uint obsDim, rank, optionCount, actionParamCount;
     uint obsTraceLevels;
@@ -1558,6 +1582,73 @@ static inline void oak_stage_sample_act(device float *params,
     for (int u = 0; u < 6; u++) lane->ctrlPending[u] = ctrl[u];
 }
 
+// Wide (simdgroup-per-lane) variant of the OAK branch of oak_stage_sample_act,
+// used by oak_megastep. Bit-identical class — parallelism without cross-thread
+// reductions: tid 0 computes desc/z/sample/behavior, the env-facing ctrl, the
+// actionSignal writes, and the lane bookkeeping in exactly the packed order;
+// each thread o < K then runs option o's d-loop with the same operands in the
+// same ascending-d order (sample[d] and behavior broadcast bitwise through
+// threadgroup scratch), writing the same credit/importance values the packed
+// body wrote from its serial o-loop. scratch needs 7 floats; indices 20..26 of
+// the lane's 32-float slot are untouched by every other stage.
+static inline void oak_stage_sample_act_wide(Ctx ctx,
+                                             device OakFleetLane *lanes,
+                                             device const uint *laneSeeds,
+                                             uint gid, uint tid,
+                                             threadgroup float *scratch) {
+    device OakFleetLane *lane = &lanes[gid];
+    uint A = ctx.D / 2u;  // act_dim (Box exposes 2A policy coordinates)
+    float sd = 1.0f / float(max(ctx.D, 1u));
+    float log_sigma = -log(sd);
+    if (tid == 0u) {
+        uint stepIdx = lane->steps;  // 0-based index of the step being taken
+        float desc[12];
+        float ctrl[6];
+        float behavior = 0.0f;
+        for (uint i = 0u; i < ctx.D; ++i) desc[i] = oak_safe(ctx.policyMean[i]);
+        float z[6];
+        oak_rng_normal6(laneSeeds[gid], stepIdx, z);
+        for (uint d = 0u; d < A; ++d) {
+            float mu = desc[d];
+            float sample = oak_safe(mu + sd * z[d]);
+            float a = max(-1.0f, min(1.0f, sample));
+            ctrl[d] = a;
+            ctx.actionSignal[d] = a;
+            ctx.actionSignal[A + d] = 0.0f;
+            behavior += log_sigma - 0.5f * z[d] * z[d];
+            scratch[20u + d] = sample;
+        }
+        scratch[26u] = behavior;
+        // delta(descriptor_); ++steps_;
+        float d2 = 0.0f;
+        for (int i = 0; i < 12; i++) {
+            float v = desc[i] - lane->lastDesc[i];
+            d2 += v * v;
+            lane->lastDesc[i] = desc[i];
+        }
+        oak_kahan_add(&lane->deltaSum, &lane->deltaC, d2 / 12.0f);
+        lane->steps = stepIdx + 1u;
+        float adm = lane->deltaSum / float(lane->steps);
+        if (isfinite(adm) && adm > lane->deltaPeak) lane->deltaPeak = adm;
+        for (int u = 0; u < 6; u++) lane->ctrlPending[u] = ctrl[u];
+    }
+    simdgroup_barrier(mem_flags::mem_threadgroup);
+    if (tid < ctx.K) {
+        uint off = tid * ctx.D;
+        float behavior = scratch[26u];
+        float logp = 0.0f;
+        for (uint d = 0u; d < A; ++d) {
+            float sample = scratch[20u + d];
+            float om = oak_safe(ctx.optionPolicyMean[off + d]);
+            float oz = (sample - om) / sd;
+            logp += log_sigma - 0.5f * oz * oz;
+            ctx.optionActorCredit[off + d] = sample - om;
+            ctx.optionActorCredit[off + A + d] = 0.0f;
+        }
+        ctx.importance[tid] = exp(logp - behavior);
+    }
+}
+
 kernel void oak_sample_act(device float *params [[buffer(0)]],
                            device float *stateArena [[buffer(1)]],
                            device uint *uintArena [[buffer(2)]],
@@ -1766,24 +1857,37 @@ kernel void oak_megastep(device float *params [[buffer(0)]],
     uint laneBase = tgIdx * OAK_MEGA_G;
     if (laneBase >= ecfg.laneCount) return;
     uint lanesThisTg = min(OAK_MEGA_G, ecfg.laneCount - laneBase);
-    bool wideActive = sgrp < lanesThisTg;   // uniform within each simdgroup
-    uint wideLane = laneBase + sgrp;
+    // Lane geometry: one simdgroup per lane, or two when OAK_MEGA_WIDE2X
+    // (leading simdgroup = all barriered stages; both = learn only).
+    uint laneSg = OAK_MEGA_WIDE2X ? (sgrp >> 1) : sgrp;
+    bool laneLead = OAK_MEGA_WIDE2X ? ((sgrp & 1u) == 0u) : true;
+    bool wideActive = laneLead && laneSg < lanesThisTg;  // uniform per simdgroup
+    bool learnActive = laneSg < lanesThisTg;
+    uint learnTid = OAK_MEGA_WIDE2X ? (slane + 32u * (sgrp & 1u)) : slane;
+    uint learnW = OAK_MEGA_WIDE2X ? 64u : 32u;
+    uint wideLane = laneBase + laneSg;
     bool packedActive = tid < lanesThisTg;
     uint packedLane = laneBase + tid;
-    uint off = sgrp * 32u;                  // this lane's 32-float tg slots
+    // MEASURED: spreading packed lanes one-per-simdgroup (lane s -> thread
+    // s*32) to decouple the physics chains is a consistent loss at B=64
+    // (G=4: 1457->1566 us/step, G=8: 1611->1782; G=2 neutral) — lockstep
+    // packing's issue amortization beats divergence decoupling on M4.
+    uint off = laneSg * 32u;                // this lane's 32-float tg slots
     threadgroup float *lG = tgG + off, *lCont = tgCont + off, *lTerm = tgTerm + off,
                       *lTdPsi = tgTdPsi + off, *lScalars = tgScalars + off,
                       *lPrev = tgPrevState + off, *lCurr = tgCurrState + off,
                       *lDir = tgDir + off, *lEffort = tgEffort + off;
     for (uint it = 0u; it < stepsThisDispatch; ++it) {
         if (ecfg.policyMode == 0u) {
-            if (wideActive) {   // oak_encode: FeatureConstruction -> ... -> OptionKeyboard
+            if (wideActive && (OAK_MEGA_STAGES & 1u) != 0u) {
+                // oak_encode: FeatureConstruction -> ... -> OptionKeyboard
                 Ctx ctx = make_ctx(params, stateArena, uintArena, scalars, stats, cfg, wideLane);
                 oak_stage_encode(ctx, slane, 32u, lG, lCont, lTerm, lTdPsi, lScalars,
                                  lPrev, lCurr, lDir, lEffort);
             }
             threadgroup_barrier(mem_flags::mem_device);
-            if (wideActive) {   // oak_plan: sequential k (legacy: K concurrent threadgroups).
+            if (wideActive && (OAK_MEGA_STAGES & 2u) != 0u) {
+                // oak_plan: sequential k (legacy: K concurrent threadgroups).
                 // lG doubles as tgModelErr; the simdgroup fence at the top of
                 // each k is the WAR fence on that slot (covers both the encode
                 // stage's lG reads and the previous k's j==0 reads).
@@ -1794,20 +1898,30 @@ kernel void oak_megastep(device float *params [[buffer(0)]],
                 }
             }
             threadgroup_barrier(mem_flags::mem_device);
-            if (wideActive) {   // oak_learn_heads: independent elements, stride-32 remap
+            if (learnActive && (OAK_MEGA_STAGES & 4u) != 0u) {
+                // oak_learn_heads: independent elements, stride-32 remap (64
+                // under OAK_MEGA_WIDE2X — both of the lane's simdgroups).
+                // MEASURED: a 4-way element interleave (e, e+32, e+64, e+96
+                // issued back-to-back for MLP) is bit-identical but regressed
+                // the B=64 oak chain +7% (2005 -> 2145 us/step), and a 2-way
+                // interleave regressed ~+4% — inlined copies of the element
+                // body blow registers; keep the simple loop the compiler
+                // already pipelines.
                 Ctx ctx = make_ctx(params, stateArena, uintArena, scalars, stats, cfg, wideLane);
                 device const float *prev = state_at(ctx, ctx.stateSlot);
                 device const float *curr = state_at(ctx, 1u - ctx.stateSlot);
                 uint total = oak_learn_total(ctx);
-                for (uint e = slane; e < total; e += 32u) oak_learn_element(ctx, prev, curr, e);
+                for (uint e = learnTid; e < total; e += learnW) oak_learn_element(ctx, prev, curr, e);
             }
             threadgroup_barrier(mem_flags::mem_device);
-            if (wideActive) {   // oak_replace: GenerateAndTest commit + diagnostics
+            if (wideActive && (OAK_MEGA_STAGES & 8u) != 0u) {
+                // oak_replace: GenerateAndTest commit + diagnostics
                 Ctx ctx = make_ctx(params, stateArena, uintArena, scalars, stats, cfg, wideLane);
                 oak_stage_replace(ctx, slane, 32u, lCurr);
             }
             threadgroup_barrier(mem_flags::mem_device);
-            if (wideActive) {   // oak_action_emit: fresh ctx (replace flipped stateSlot), then
+            if (wideActive && (OAK_MEGA_STAGES & 16u) != 0u) {
+                // oak_action_emit: fresh ctx (replace flipped stateSlot), then
                 // the group loop — disjoint writes, no barrier needed between g
                 Ctx ctx = make_ctx(params, stateArena, uintArena, scalars, stats, cfg, wideLane);
                 device const float *curr = state_at(ctx, ctx.stateSlot);
@@ -1819,12 +1933,20 @@ kernel void oak_megastep(device float *params [[buffer(0)]],
             }
             threadgroup_barrier(mem_flags::mem_device);
         }
-        if (packedActive) {
+        if (ecfg.policyMode == 0u) {
+            // oak sampling is K-parallel: run it wide (simdgroup-per-lane;
+            // see oak_stage_sample_act_wide — bit-identical to the packed
+            // body, which stays live for zero/random and the bisect kernel).
+            if (wideActive && (OAK_MEGA_STAGES & 32u) != 0u) {
+                Ctx ctx = make_ctx(params, stateArena, uintArena, scalars, stats, cfg, wideLane);
+                oak_stage_sample_act_wide(ctx, lanes, laneSeeds, wideLane, slane, lScalars);
+            }
+        } else if (packedActive && (OAK_MEGA_STAGES & 32u) != 0u) {
             oak_stage_sample_act(params, stateArena, uintArena, scalars, stats, cfg,
                                  lanes, laneSeeds, ecfg, packedLane);
         }
         threadgroup_barrier(mem_flags::mem_device);
-        if (packedActive) {
+        if (packedActive && (OAK_MEGA_STAGES & 64u) != 0u) {
             oak_stage_fleet_env(params, stateArena, uintArena, scalars, stats, cfg,
                                 lanes, laneSeeds, ecfg, recordSlot, recordBuf, packedLane);
         }

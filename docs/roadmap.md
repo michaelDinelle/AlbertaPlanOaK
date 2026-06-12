@@ -1733,6 +1733,29 @@ GPU-physics derisk probes (2026-06-11, M4 Max):
   published numbers in AGENTS.md "The SOTA bar" are 1000-step-episode evals).
   F4 equivalence gates run with episodeLen=0 to match the keeper.
 
+Megakernel-era measured facts (2026-06-11, post-66a6cf445 lever rounds):
+
+- **Per-lane chain anatomy** (B=64 unsaturated, stage-mask instrument
+  `OAK_MEGA_STAGE_MASK`): physics ~850 µs (5 strictly-sequential fp32
+  `hc_mj_step`s — the chain floor), learn ~264 µs, everything else hidden by
+  cross-lane overlap at the shipped geometry. Chain 1,836 → **1,263 µs
+  (791 per-lane steps/s at B=64)** via the geometry law; B=1024 agg ~364K.
+- **Geometry law** (shipped): `G = max(2, min(16, B/32))` lanes per
+  threadgroup; learn-helper second simdgroup (`OAK_MEGA_WIDE2X`) on iff
+  B ≤ 512. Cross-geometry bitwise identity certified (G/W2X changes are
+  placement, not arithmetic).
+- **Thermal measurement law**: the M4 Max drifts ±15% across minutes under
+  sustained load — *only interleaved same-moment A/Bs are valid evidence*;
+  sequential before/after comparisons are inadmissible for perf claims.
+- **Rejected with measurements** (in-code notes): HCWork caller-scope hoist,
+  learn 2/4-way interleave (register blowup), physics row-loop unroll,
+  packed-stage one-lane-per-simdgroup spread. Kept: HCWork shrink (−2.2 KB
+  scratch, +1% agg), wide sample stage, stage-mask debug instrument.
+- **XL status**: 791/lane ⇒ 10M ≈ 3.5 h — still gated. The remaining floor is
+  the serial physics chain; the named next lever is simdgroup-cooperative
+  physics (row-parallel Jaref/Jv/quad with lane-leader order-preserving
+  compensated reductions — Inv-10 bit-identical class, deep restructure).
+
 Fleet-era cutover proofs (2026-06-11), all byte-identical per lane (actions.bin
 `cmp` + SHA-256 state-hash streams via `OAK_DUMP_STATE_EVERY`):
 
