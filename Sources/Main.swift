@@ -384,24 +384,50 @@ func metricsRoot() -> URL {
     // (OAK_MEGA_LANES_PER_TG; default = best measured; G=1 reproduces the v1
     // one-lane-per-threadgroup geometry). Threadgroup memory bounds G: nine
     // slots x G x 32 floats = G x 1152 bytes (G=24 -> 27.6 KB < 32 KB).
-    let megaG = e["OAK_MEGA_LANES_PER_TG"].flatMap(Int.init) ?? 16
-    let megaW = 32 * megaG
+    // Megastep geometry law (measured 2026-06-11, M4 Max 32 cores): G
+    // (lanes per threadgroup) and the learn helper simdgroup (OAK_MEGA_WIDE2X,
+    // kernel constant 26) trade per-lane chain latency against saturated
+    // occupancy. Measured oak fleet: B=64 wants G=2 + wide2x (1822 -> 1251
+    // us/step per lane vs the old G=16 default); B=256 wants G=8 + wide2x
+    // (153K vs 133K agg); B=512 is the crossover (~equal); B>=1024 wants
+    // G=16 without wide2x (351K agg vs 266K with wide2x). Geometry only —
+    // lane values are bitwise identical across G/wide2x (gated). Both env
+    // vars override the law for experiments.
+    let autoG = max(2, min(16, B / 32))
+    let megaG = e["OAK_MEGA_LANES_PER_TG"].flatMap(Int.init) ?? autoG
+    let wide2x = (e["OAK_MEGA_WIDE2X"].flatMap(Int.init).map { $0 != 0 }) ?? (B <= 512)
+    let megaW = 32 * megaG * (wide2x ? 2 : 1)
     let megaConstants = MTLFunctionConstantValues()
     ablations.apply(to: megaConstants)
     var megaG32 = UInt32(megaG)
     megaConstants.setConstantValue(&megaG32, type: .uint, index: 12)
+    if wide2x {
+      var b = true
+      megaConstants.setConstantValue(&b, type: .bool, index: 26)
+    }
     // Shape specialization: oak runs bind the env dims (and derived strides)
     // as compile-time constants 13..24 — bit-identical by construction under
     // -fno-fast-math. zero/random runs have no engine (agent stages are
     // skipped) and keep the generic cfg path.
     if let eng = engine { eng.applyShapeConstants(megaConstants) }
+    // OAK_MEGA_STAGE_MASK (DEBUG ONLY): stage-resolved timing instrument.
+    // Bitmask gates megastep stages (encode 1, plan 2, learn 4, replace 8,
+    // emit 16, sample 32, env 64); skipped stages still hit their barriers.
+    // Semantics are intentionally broken when any bit is off — read only
+    // aggStepsPerSecond. Unset = no constant bound = the certified all-on path.
+    if let mask = e["OAK_MEGA_STAGE_MASK"].flatMap(UInt32.init) {
+      var m = mask
+      megaConstants.setConstantValue(&m, type: .uint, index: 25)
+      fputs("OAK_MEGA_STAGE_MASK=\(mask): timing instrument, trajectories are garbage\n", stderr)
+    }
     let megaPipe = try dev.makeComputePipelineState(
       function: lib.makeFunction(name: "oak_megastep", constantValues: megaConstants))
+    let megaSlotBytes = 32 * megaG * MemoryLayout<Float>.stride  // per-lane 32-float slots
     guard megaG >= 1, megaW <= megaPipe.maxTotalThreadsPerThreadgroup,
-      9 * megaW * 4 <= dev.maxThreadgroupMemoryLength
+      9 * megaSlotBytes <= dev.maxThreadgroupMemoryLength
     else {
       throw err(
-        "OAK_MEGA_LANES_PER_TG=\(megaG) needs \(megaW) threads/threadgroup (pipeline max \(megaPipe.maxTotalThreadsPerThreadgroup)) and \(9 * megaW * 4) tg bytes (device max \(dev.maxThreadgroupMemoryLength)).")
+        "OAK_MEGA_LANES_PER_TG=\(megaG) needs \(megaW) threads/threadgroup (pipeline max \(megaPipe.maxTotalThreadsPerThreadgroup)) and \(9 * megaSlotBytes) tg bytes (device max \(dev.maxThreadgroupMemoryLength)).")
     }
     func makeBuf(_ len: Int) throws -> MTLBuffer {
       guard let b = dev.makeBuffer(length: max(len, 16), options: [.storageModeShared]) else {
@@ -515,7 +541,7 @@ func metricsRoot() -> URL {
     // threadgroup), which was certified equal to the retired 7-dispatch
     // per-step loop; the per-stage wrapper kernels in OakKernel.metal remain
     // as the bisect instrument.
-    let megaTGBytes = megaW * MemoryLayout<Float>.stride
+    let megaTGBytes = megaSlotBytes
     func encodeMegastep(_ enc: MTLComputeCommandEncoder, _ n: Int) {
       bindFleet(enc, megaPipe)
       enc.setBuffer(recordSlotBuf, offset: 0, index: 9)

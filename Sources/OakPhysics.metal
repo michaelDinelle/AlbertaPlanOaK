@@ -62,11 +62,20 @@ struct HCState {
 };
 
 // Per-step recomputed quantities (thread-local scratch).
+// PORT-NOTE (storage, shape-specialized shrink, MEASURED): pose scratch
+// (xpos/xquat/xmat), the contact pose/frame block (con_pos/con_frame/
+// con_exclude/con_geom), and the impedance coefficients (efc_imp/K/B) are
+// NOT stored here — they are short-lived locals (HCContacts/HCRefCoef
+// below) whose live ranges end before the Newton solver runs, so the stack
+// colorer can overlay them with the solver scratch. ~562 floats (~2.2 KB/
+// thread) off the per-step footprint; B=64 chain neutral, B=1024 saturated
+// agg +~1%. Arithmetic and operand order unchanged (bitwise-gated).
+// Rejected storage variants (all bitwise-clean, none faster at B=64):
+//   - hoisting HCWork to caller scope (see hc_mj_step note);
+//   - 2-way unrolling the independent efc row loops (Jaref/Jv/jar/efcB/aref):
+//     neutral-to-worse — the compiler already pipelines them.
 struct HCWork {
     // kinematics
-    float xpos[24];        // 8 bodies x 3
-    float xquat[32];       // 8 x 4
-    float xmat[72];        // 8 x 9 row-major
     float xipos[24];
     float ximat[72];
     float xanchor[27];     // 9 joints x 3
@@ -82,19 +91,12 @@ struct HCWork {
     float scale;           // island Newton scale = 1/trace(M)
     // contacts
     int ncon;
-    float con_pos[48];
     float con_dist[16];
-    float con_frame[144];
-    int con_exclude[16];
-    int con_geom[16];      // capsule geom id
     // constraint rows
     int nefc;
     float efc_J[630];      // dense 70 x 9
     float efc_pos[70];
     float efc_D[70];
-    float efc_imp[70];
-    float efc_K[70];
-    float efc_B[70];
     float efc_aref[70];
     // smooth dynamics
     float qfrc_bias[9];
@@ -104,6 +106,23 @@ struct HCWork {
     // solver outputs
     float qacc[9];
     float qfrc_constraint[9];
+};
+
+// Transient contact data: written by hc_collision, consumed by
+// hc_makeConstraint, dead before the solver (storage split only).
+struct HCContacts {
+    float con_pos[48];
+    float con_frame[144];
+    int con_exclude[16];
+    int con_geom[16];      // capsule geom id
+};
+
+// Transient impedance coefficients: written by hc_makeConstraint, consumed
+// by the mj_referenceConstraint loop in hc_forward (storage split only).
+struct HCRefCoef {
+    float efc_imp[70];
+    float efc_K[70];
+    float efc_B[70];
 };
 
 // ---------------------------------------------------------------------------
@@ -370,11 +389,16 @@ inline void hc_mulSymVecSparse(thread const float *M, thread const float *x, thr
 // §2.1 mj_kinematics + §2.2 mj_comPos
 // ---------------------------------------------------------------------------
 inline void hc_kinematics(thread const HCState &s, thread HCWork &w) {
+    // Body pose scratch: consumed entirely within this function (storage-only
+    // locals; were HCWork members).
+    float xpos[24];        // 8 bodies x 3
+    float xquat[32];       // 8 x 4
+    float xmat[72];        // 8 x 9 row-major
     // world body
-    for (int k = 0; k < 3; k++) { w.xpos[k] = 0.0f; w.xipos[k] = 0.0f; }
-    w.xquat[0] = 1.0f; w.xquat[1] = 0.0f; w.xquat[2] = 0.0f; w.xquat[3] = 0.0f;
+    for (int k = 0; k < 3; k++) { xpos[k] = 0.0f; w.xipos[k] = 0.0f; }
+    xquat[0] = 1.0f; xquat[1] = 0.0f; xquat[2] = 0.0f; xquat[3] = 0.0f;
     for (int k = 0; k < 9; k++) {
-        w.xmat[k] = (k % 4 == 0) ? 1.0f : 0.0f;
+        xmat[k] = (k % 4 == 0) ? 1.0f : 0.0f;
         w.ximat[k] = (k % 4 == 0) ? 1.0f : 0.0f;
     }
     // kinematics1: bodies 1..7
@@ -387,11 +411,11 @@ inline void hc_kinematics(thread const HCState &s, thread HCWork &w) {
             pos[0] = bpos[0]; pos[1] = bpos[1]; pos[2] = bpos[2];
             quat[0] = bquat[0]; quat[1] = bquat[1]; quat[2] = bquat[2]; quat[3] = bquat[3];
         } else {
-            thread const float *m = w.xmat + 9*pid;
-            pos[0] = m[0]*bpos[0] + m[1]*bpos[1] + m[2]*bpos[2] + w.xpos[3*pid + 0];
-            pos[1] = m[3]*bpos[0] + m[4]*bpos[1] + m[5]*bpos[2] + w.xpos[3*pid + 1];
-            pos[2] = m[6]*bpos[0] + m[7]*bpos[1] + m[8]*bpos[2] + w.xpos[3*pid + 2];
-            float pq[4] = { w.xquat[4*pid], w.xquat[4*pid + 1], w.xquat[4*pid + 2], w.xquat[4*pid + 3] };
+            thread const float *m = xmat + 9*pid;
+            pos[0] = m[0]*bpos[0] + m[1]*bpos[1] + m[2]*bpos[2] + xpos[3*pid + 0];
+            pos[1] = m[3]*bpos[0] + m[4]*bpos[1] + m[5]*bpos[2] + xpos[3*pid + 1];
+            pos[2] = m[6]*bpos[0] + m[7]*bpos[1] + m[8]*bpos[2] + xpos[3*pid + 2];
+            float pq[4] = { xquat[4*pid], xquat[4*pid + 1], xquat[4*pid + 2], xquat[4*pid + 3] };
             hc_mulQuat(quat, pq, bquat);
         }
         for (int j = 0; j < 9; j++) {
@@ -418,33 +442,33 @@ inline void hc_kinematics(thread const HCState &s, thread HCWork &w) {
             w.xaxis[3*j] = xax[0]; w.xaxis[3*j + 1] = xax[1]; w.xaxis[3*j + 2] = xax[2];
         }
         hc_normalize4(quat);
-        w.xpos[3*i] = pos[0]; w.xpos[3*i + 1] = pos[1]; w.xpos[3*i + 2] = pos[2];
-        w.xquat[4*i] = quat[0]; w.xquat[4*i + 1] = quat[1]; w.xquat[4*i + 2] = quat[2]; w.xquat[4*i + 3] = quat[3];
-        hc_quat2Mat(w.xmat + 9*i, quat);
+        xpos[3*i] = pos[0]; xpos[3*i + 1] = pos[1]; xpos[3*i + 2] = pos[2];
+        xquat[4*i] = quat[0]; xquat[4*i + 1] = quat[1]; xquat[4*i + 2] = quat[2]; xquat[4*i + 3] = quat[3];
+        hc_quat2Mat(xmat + 9*i, quat);
     }
     // kinematics2: inertial frames + geoms (full path; sameframe shortcut skipped —
     // PORT-NOTE: numerically identical inputs here, shortcut is an optimization)
     for (int i = 1; i < 8; i++) {
-        thread const float *m = w.xmat + 9*i;
+        thread const float *m = xmat + 9*i;
         float ip[3] = { HC_BODY_IPOS[3*i], HC_BODY_IPOS[3*i + 1], HC_BODY_IPOS[3*i + 2] };
-        w.xipos[3*i + 0] = m[0]*ip[0] + m[1]*ip[1] + m[2]*ip[2] + w.xpos[3*i + 0];
-        w.xipos[3*i + 1] = m[3]*ip[0] + m[4]*ip[1] + m[5]*ip[2] + w.xpos[3*i + 1];
-        w.xipos[3*i + 2] = m[6]*ip[0] + m[7]*ip[1] + m[8]*ip[2] + w.xpos[3*i + 2];
+        w.xipos[3*i + 0] = m[0]*ip[0] + m[1]*ip[1] + m[2]*ip[2] + xpos[3*i + 0];
+        w.xipos[3*i + 1] = m[3]*ip[0] + m[4]*ip[1] + m[5]*ip[2] + xpos[3*i + 1];
+        w.xipos[3*i + 2] = m[6]*ip[0] + m[7]*ip[1] + m[8]*ip[2] + xpos[3*i + 2];
         float iq[4] = { HC_BODY_IQUAT[4*i], HC_BODY_IQUAT[4*i + 1], HC_BODY_IQUAT[4*i + 2], HC_BODY_IQUAT[4*i + 3] };
-        float bq[4] = { w.xquat[4*i], w.xquat[4*i + 1], w.xquat[4*i + 2], w.xquat[4*i + 3] };
+        float bq[4] = { xquat[4*i], xquat[4*i + 1], xquat[4*i + 2], xquat[4*i + 3] };
         float q[4];
         hc_mulQuat(q, bq, iq);
         hc_quat2Mat(w.ximat + 9*i, q);
     }
     for (int g = 0; g < 9; g++) {
         int b = HC_GEOM_BODY[g];
-        thread const float *m = w.xmat + 9*b;
+        thread const float *m = xmat + 9*b;
         float gp[3] = { HC_GEOM_POS[3*g], HC_GEOM_POS[3*g + 1], HC_GEOM_POS[3*g + 2] };
-        w.geom_xpos[3*g + 0] = m[0]*gp[0] + m[1]*gp[1] + m[2]*gp[2] + w.xpos[3*b + 0];
-        w.geom_xpos[3*g + 1] = m[3]*gp[0] + m[4]*gp[1] + m[5]*gp[2] + w.xpos[3*b + 1];
-        w.geom_xpos[3*g + 2] = m[6]*gp[0] + m[7]*gp[1] + m[8]*gp[2] + w.xpos[3*b + 2];
+        w.geom_xpos[3*g + 0] = m[0]*gp[0] + m[1]*gp[1] + m[2]*gp[2] + xpos[3*b + 0];
+        w.geom_xpos[3*g + 1] = m[3]*gp[0] + m[4]*gp[1] + m[5]*gp[2] + xpos[3*b + 1];
+        w.geom_xpos[3*g + 2] = m[6]*gp[0] + m[7]*gp[1] + m[8]*gp[2] + xpos[3*b + 2];
         float gq[4] = { HC_GEOM_QUAT[4*g], HC_GEOM_QUAT[4*g + 1], HC_GEOM_QUAT[4*g + 2], HC_GEOM_QUAT[4*g + 3] };
-        float bq[4] = { w.xquat[4*b], w.xquat[4*b + 1], w.xquat[4*b + 2], w.xquat[4*b + 3] };
+        float bq[4] = { xquat[4*b], xquat[4*b + 1], xquat[4*b + 2], xquat[4*b + 3] };
         float q[4], gm[9];
         hc_mulQuat(q, bq, gq);
         hc_quat2Mat(gm, q);
@@ -681,7 +705,8 @@ inline void hc_capsuleDistsDf(thread const HCState &s, thread float *distOut) {
 // ---------------------------------------------------------------------------
 // §2.5 collision (static plane-capsule pair list)
 // ---------------------------------------------------------------------------
-inline void hc_collision(thread const HCState &s, thread HCWork &w) {
+inline void hc_collision(thread const HCState &s, thread HCWork &w,
+                         thread HCContacts &con) {
     float distDf[16];
     hc_capsuleDistsDf(s, distDf);
     w.ncon = 0;
@@ -708,14 +733,14 @@ inline void hc_collision(thread const HCState &s, thread HCWork &w) {
             int c = w.ncon;
             w.con_dist[c] = dist;
             float scl = dist*0.5f + r;
-            w.con_pos[3*c + 0] = center[0] - n[0]*scl;
-            w.con_pos[3*c + 1] = center[1] - n[1]*scl;
-            w.con_pos[3*c + 2] = center[2] - n[2]*scl;
+            con.con_pos[3*c + 0] = center[0] - n[0]*scl;
+            con.con_pos[3*c + 1] = center[1] - n[1]*scl;
+            con.con_pos[3*c + 2] = center[2] - n[2]*scl;
             float fr[9] = { n[0], n[1], n[2], axis[0], axis[1], axis[2], 0.0f, 0.0f, 0.0f };
             hc_makeFrame(fr);
-            for (int k = 0; k < 9; k++) w.con_frame[9*c + k] = fr[k];
-            w.con_exclude[c] = (dist >= 0.0f) ? 1 : 0;  // includemargin = 0
-            w.con_geom[c] = g;
+            for (int k = 0; k < 9; k++) con.con_frame[9*c + k] = fr[k];
+            con.con_exclude[c] = (dist >= 0.0f) ? 1 : 0;  // includemargin = 0
+            con.con_geom[c] = g;
             w.ncon = c + 1;
         }
     }
@@ -746,7 +771,8 @@ inline float hc_getimpedance(float pos, float d0, float d1, float width, float m
 // §2.6 mj_makeConstraint + mj_diagApprox + mj_makeImpedance
 // (impedance folded in per group — pure per-row math, order-equivalent)
 // ---------------------------------------------------------------------------
-inline void hc_makeConstraint(thread const HCState &s, thread HCWork &w) {
+inline void hc_makeConstraint(thread const HCState &s, thread HCWork &w,
+                              thread const HCContacts &con, thread HCRefCoef &ref) {
     int nefc = 0;
     // --- joint limit rows (§2.6.1), joint order, lower side first ---
     for (int j = 0; j < 9; j++) {
@@ -770,9 +796,9 @@ inline void hc_makeConstraint(thread const HCState &s, thread HCWork &w) {
                 float mid = HC_JNT_SOLIMP[5*j + 3];
                 float imp = hc_getimpedance(dist, d0, d1, width, mid);
                 float R = max(HC_MINVAL, (1.0f - imp)*dA/imp);
-                w.efc_imp[nefc] = imp;
-                w.efc_K[nefc] = 1.0f / max(HC_MINVAL, d1*d1*solref0*solref0*solref1*solref1);
-                w.efc_B[nefc] = 2.0f / max(HC_MINVAL, d1*solref0);
+                ref.efc_imp[nefc] = imp;
+                ref.efc_K[nefc] = 1.0f / max(HC_MINVAL, d1*d1*solref0*solref0*solref1*solref1);
+                ref.efc_B[nefc] = 2.0f / max(HC_MINVAL, d1*solref0);
                 w.efc_D[nefc] = 1.0f / R;
                 nefc++;
             }
@@ -780,8 +806,8 @@ inline void hc_makeConstraint(thread const HCState &s, thread HCWork &w) {
     }
     // --- contact rows (§2.6.2), contact record order, 4 pyramidal rows each ---
     for (int c = 0; c < w.ncon; c++) {
-        if (w.con_exclude[c]) continue;
-        int g = w.con_geom[c];
+        if (con.con_exclude[c]) continue;
+        int g = con.con_geom[c];
         int b = HC_GEOM_BODY[g];
         // contact params (§2.5.4): same priority, solmix 1/1 -> mix = 0.5
         float fri[3];
@@ -800,7 +826,7 @@ inline void hc_makeConstraint(thread const HCState &s, thread HCWork &w) {
         // contact Jacobian: world side (body 0) is all-zero; capsule body chain
         float jac[27];
         for (int k = 0; k < 27; k++) jac[k] = 0.0f;
-        float off[3] = { w.con_pos[3*c] - w.com1[0], w.con_pos[3*c + 1] - w.com1[1], w.con_pos[3*c + 2] - w.com1[2] };
+        float off[3] = { con.con_pos[3*c] - w.com1[0], con.con_pos[3*c + 1] - w.com1[1], con.con_pos[3*c + 2] - w.com1[2] };
         int i = HC_BODY_LASTDOF[b];
         while (i >= 0) {
             thread const float *cd = w.cdof + 6*i;
@@ -811,7 +837,7 @@ inline void hc_makeConstraint(thread const HCState &s, thread HCWork &w) {
         }
         // jacC = con.frame (3x3, rows n/t1/t2) @ jac
         float jacC[27];
-        thread const float *fr = w.con_frame + 9*c;
+        thread const float *fr = con.con_frame + 9*c;
         for (int rr = 0; rr < 3; rr++)
             for (int col = 0; col < 9; col++)
                 jacC[9*rr + col] = fr[3*rr + 0]*jac[0 + col] + fr[3*rr + 1]*jac[9 + col]
@@ -841,9 +867,9 @@ inline void hc_makeConstraint(thread const HCState &s, thread HCWork &w) {
         float conMu = friction0 * sqrt(R1/R0);
         float Rpy = 2.0f*conMu*conMu*R0;
         for (int row = first; row < first + 4; row++) {
-            w.efc_imp[row] = imp;
-            w.efc_K[row] = K;
-            w.efc_B[row] = B;
+            ref.efc_imp[row] = imp;
+            ref.efc_K[row] = K;
+            ref.efc_B[row] = B;
             w.efc_D[row] = 1.0f / Rpy;
         }
     }
@@ -1240,8 +1266,10 @@ inline void hc_forward(thread const HCState &s, thread HCWork &w) {
     hc_makeM(w);
     for (int k = 0; k < 36; k++) w.qLD[k] = w.M[k];
     hc_factorI(w.qLD, w.qLDiagInv);
-    hc_collision(s, w);
-    hc_makeConstraint(s, w);
+    HCContacts con;   // transient: dead after hc_makeConstraint
+    HCRefCoef ref;    // transient: dead after mj_referenceConstraint below
+    hc_collision(s, w, con);
+    hc_makeConstraint(s, w, con, ref);
     // mj_island: 1 island, identity maps; Newton scale = 1/trace(M) (§6.3)
     {
         float tr = 0.0f;
@@ -1264,7 +1292,7 @@ inline void hc_forward(thread const HCState &s, thread HCWork &w) {
         for (int v = 0; v < 9; v++) qvLocal[v] = s.qvel[v];
         for (int i = 0; i < w.nefc; i++) {
             float vel = hc_dot9c(w.efc_J + 9*i, qvLocal, 0.0f);
-            w.efc_aref[i] = -w.efc_B[i]*vel - w.efc_K[i]*w.efc_imp[i]*w.efc_pos[i];  // margin 0
+            w.efc_aref[i] = -ref.efc_B[i]*vel - ref.efc_K[i]*ref.efc_imp[i]*w.efc_pos[i];  // margin 0
         }
     }
     hc_rne(s, w);  // qfrc_bias
@@ -1313,6 +1341,11 @@ inline bool hc_isBadVec9(thread const float *x) {
     return bad;
 }
 
+// PORT-NOTE (storage, MEASURED): keep HCWork in THIS frame. Hoisting it to
+// caller scope (per-env-step or per-kernel-invocation, threaded through as
+// thread HCWork&) is bit-identical but showed no win in interleaved A/B at
+// B=64 (the call-site stack slot is already reused across the 5 frame_skip
+// calls); rejected to keep the per-call live range minimal.
 inline void hc_mj_step(thread HCState &s) {
     // mj_checkPos / mj_checkVel
     if (hc_isBadVec9(s.qpos)) hc_resetData(s);
