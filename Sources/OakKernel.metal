@@ -24,6 +24,28 @@ constant bool OAK_ABLATE_SEARCH_CONTROL [[function_constant(9)]];
 constant bool OAK_ABLATE_SEARCH_TO_GENERATE_TEST [[function_constant(10)]];
 constant bool OAK_ABLATE_GENERATE_AND_TEST [[function_constant(11)]];
 
+// Megastep v2 lane packing: one threadgroup of 32*OAK_MEGA_G threads owns
+// OAK_MEGA_G consecutive lanes. Required by the oak_megastep pipeline only.
+constant uint OAK_MEGA_G [[function_constant(12)]];
+
+// Shape specialization (optional, set at pipeline creation from the env dims).
+// Undefined = generic cfg-driven path. The host passes exactly the values it
+// writes into KernelConfig, so the specialized pipeline is bit-identical by
+// construction (-fno-fast-math forbids reassociation; unrolling/constant
+// folding cannot change the fma sequences).
+constant uint OAK_SPEC_OBS_DIM [[function_constant(13)]];
+constant uint OAK_SPEC_RANK [[function_constant(14)]];
+constant uint OAK_SPEC_OPTION_COUNT [[function_constant(15)]];
+constant uint OAK_SPEC_ACTION_PARAMS [[function_constant(16)]];
+constant uint OAK_SPEC_TRACE_LEVELS [[function_constant(17)]];
+constant uint OAK_SPEC_ANCHOR_COUNT [[function_constant(18)]];
+constant uint OAK_SPEC_PARAM_STRIDE [[function_constant(19)]];
+constant uint OAK_SPEC_STATE_STRIDE [[function_constant(20)]];
+constant uint OAK_SPEC_UINT_STRIDE [[function_constant(21)]];
+constant float OAK_SPEC_INV_RANK [[function_constant(22)]];
+constant float OAK_SPEC_INV_OPTION_COUNT [[function_constant(23)]];
+constant float OAK_SPEC_META_ETA [[function_constant(24)]];
+
 struct KernelConfig {
     uint obsDim, rank, optionCount, actionParamCount;
     uint obsTraceLevels;
@@ -96,18 +118,34 @@ struct Ctx {
 inline Ctx make_ctx(device float *params, device float *stateArena, device uint *uintArena,
                     device KernelScalars *scalars, device KernelStats *stats,
                     constant KernelConfig &cfg, uint agentID) {
-    params += agentID * cfg.paramStride;
-    stateArena += agentID * cfg.stateStride;
-    uintArena += agentID * cfg.uintStride;
+    uint paramStride = is_function_constant_defined(OAK_SPEC_PARAM_STRIDE)
+        ? OAK_SPEC_PARAM_STRIDE : cfg.paramStride;
+    uint stateStride = is_function_constant_defined(OAK_SPEC_STATE_STRIDE)
+        ? OAK_SPEC_STATE_STRIDE : cfg.stateStride;
+    uint uintStride = is_function_constant_defined(OAK_SPEC_UINT_STRIDE)
+        ? OAK_SPEC_UINT_STRIDE : cfg.uintStride;
+    params += agentID * paramStride;
+    stateArena += agentID * stateStride;
+    uintArena += agentID * uintStride;
     scalars += agentID;
     stats += agentID;
     Ctx c;
-    c.O = cfg.obsDim; c.R = cfg.rank; c.K = cfg.optionCount;
-    c.D = cfg.actionParamCount; c.traceLevels = cfg.obsTraceLevels;
-    c.anchorCount = cfg.linearAnchorCount;
+    c.O = is_function_constant_defined(OAK_SPEC_OBS_DIM) ? OAK_SPEC_OBS_DIM : cfg.obsDim;
+    c.R = is_function_constant_defined(OAK_SPEC_RANK) ? OAK_SPEC_RANK : cfg.rank;
+    c.K = is_function_constant_defined(OAK_SPEC_OPTION_COUNT)
+        ? OAK_SPEC_OPTION_COUNT : cfg.optionCount;
+    c.D = is_function_constant_defined(OAK_SPEC_ACTION_PARAMS)
+        ? OAK_SPEC_ACTION_PARAMS : cfg.actionParamCount;
+    c.traceLevels = is_function_constant_defined(OAK_SPEC_TRACE_LEVELS)
+        ? OAK_SPEC_TRACE_LEVELS : cfg.obsTraceLevels;
+    c.anchorCount = is_function_constant_defined(OAK_SPEC_ANCHOR_COUNT)
+        ? OAK_SPEC_ANCHOR_COUNT : cfg.linearAnchorCount;
     c.stepCount = scalars->stepCount; c.stateSlot = scalars->stateSlot;
     c.rho = scalars->rho;
-    c.invR = cfg.invRank; c.invK = cfg.invOptionCount; c.metaEta = cfg.metaEta;
+    c.invR = is_function_constant_defined(OAK_SPEC_INV_RANK) ? OAK_SPEC_INV_RANK : cfg.invRank;
+    c.invK = is_function_constant_defined(OAK_SPEC_INV_OPTION_COUNT)
+        ? OAK_SPEC_INV_OPTION_COUNT : cfg.invOptionCount;
+    c.metaEta = is_function_constant_defined(OAK_SPEC_META_ETA) ? OAK_SPEC_META_ETA : cfg.metaEta;
     uint p = 0u;
     c.valueW = params + p; p += c.R;
     c.psi = params + p; p += c.K * c.R;
@@ -304,7 +342,7 @@ inline void fcstomp_prediction_control_loop(Ctx ctx, uint tid,
         tgScalars[0] = vPrev;
         tgScalars[1] = vCurr;
     }
-    threadgroup_barrier(mem_flags::mem_threadgroup);
+    simdgroup_barrier(mem_flags::mem_threadgroup);
     vPrev = tgScalars[0];
     vCurr = tgScalars[1];
     float gauge = isfinite(ctx.valueGauge[0]) ? ctx.valueGauge[0] : 0.0f;
@@ -337,7 +375,7 @@ inline void fcstomp_prediction_control_loop(Ctx ctx, uint tid,
         tgScalars[7] = (isfinite(alphaTraceNorm) && alphaTraceNorm > 0.0f) ? alphaTraceNorm : 0.0f;
         tgScalars[10] = (isfinite(modelTraceNorm) && modelTraceNorm > 0.0f) ? modelTraceNorm : 0.0f;
     }
-    threadgroup_barrier(mem_flags::mem_threadgroup);
+    simdgroup_barrier(mem_flags::mem_threadgroup);
 
     // RewardRespectingSubtasks + OptionModels: RR continuation and model-backed option query.
     if (tid < ctx.K) {
@@ -423,7 +461,7 @@ inline void fcstomp_prediction_control_loop(Ctx ctx, uint tid,
         }
         tgEffort[tid] = effort * (1.0f / float(max(ctx.D, 1u)));
     }
-    threadgroup_barrier(mem_flags::mem_threadgroup);
+    simdgroup_barrier(mem_flags::mem_threadgroup);
     // OptionPolicies: centered RR advantages drive the option actor heads.
     if (tid == 0u) {
         float invK = ctx.invK;
@@ -442,7 +480,7 @@ inline void fcstomp_prediction_control_loop(Ctx ctx, uint tid,
             ctx.actorAdv[k] = adv;
         }
     }
-    threadgroup_barrier(mem_flags::mem_threadgroup);
+    simdgroup_barrier(mem_flags::mem_threadgroup);
 
     // OptionKeyboard + Planning: GPI-style live-option selection and value pressure.
     if (tid == 0u) {
@@ -681,7 +719,7 @@ inline void FeatureConstruction(Ctx ctx,
         }
     }
     if (nf > 0u) ctx.counters[OAK_CNT_OBS_NF] += nf;
-    threadgroup_barrier(mem_flags::mem_threadgroup);
+    simdgroup_barrier(mem_flags::mem_threadgroup);
 
     device const float *prev = state_at(ctx, ctx.stateSlot);
     device float *curr = state_at(ctx, 1u - ctx.stateSlot);
@@ -727,12 +765,40 @@ inline void FeatureConstruction(Ctx ctx,
         }
         curr[i] = x;
     }
-    threadgroup_barrier(mem_flags::mem_threadgroup);
+    simdgroup_barrier(mem_flags::mem_threadgroup);
     for (uint i = tid; i < ctx.R; i += tgW) {
         tgPrevState[i] = prev[i];
         tgCurrState[i] = curr[i];
     }
-    threadgroup_barrier(mem_flags::mem_threadgroup);
+    simdgroup_barrier(mem_flags::mem_threadgroup);
+}
+
+// ===========================================================================
+// Stage functions (megakernel + bisect instrument). Each per-step kernel body
+// lives in a `static inline` stage function; the kernel entry points below are
+// one-line wrappers so any megastep divergence can be bisected stage-by-stage
+// against the original dispatch sequence.
+// BARRIER CONTRACT: every stage-internal barrier is simdgroup-scope — a lane's
+// stage threads are exactly one 32-wide simdgroup, both in the packed megastep
+// (simdgroup s serves lane laneBase+s) and in the wrapper kernels (which must
+// be dispatched with <= 32 threads per lane-threadgroup; eng.tg == 32 today).
+// Arithmetic per lane is unchanged from the threadgroup-scope original — only
+// which other lanes wait is different.
+// ===========================================================================
+
+static inline void oak_stage_encode(Ctx ctx, uint tid, uint tgW,
+                                    threadgroup float *tgG,
+                                    threadgroup float *tgCont,
+                                    threadgroup float *tgTerm,
+                                    threadgroup float *tgTdPsi,
+                                    threadgroup float *tgScalars,
+                                    threadgroup float *tgPrevState,
+                                    threadgroup float *tgCurrState,
+                                    threadgroup float *tgDir,
+                                    threadgroup float *tgEffort) {
+    FeatureConstruction(ctx, tid, tgW, tgPrevState, tgCurrState);
+    fcstomp_prediction_control_loop(ctx, tid, tgPrevState, tgCurrState, tgG, tgCont, tgTerm,
+                                    tgTdPsi, tgDir, tgEffort, tgScalars);
 }
 
 kernel void oak_encode(device float *params [[buffer(0)]],
@@ -755,23 +821,14 @@ kernel void oak_encode(device float *params [[buffer(0)]],
                        uint2 tgPos [[threadgroup_position_in_grid]]) {
     uint tid = tpos.x, tgW = tdim.x;
     Ctx ctx = make_ctx(params, stateArena, uintArena, scalars, stats, cfg, tgPos.y);
-    FeatureConstruction(ctx, tid, tgW, tgPrevState, tgCurrState);
-    fcstomp_prediction_control_loop(ctx, tid, tgPrevState, tgCurrState, tgG, tgCont, tgTerm,
-                                    tgTdPsi, tgDir, tgEffort, tgScalars);
+    oak_stage_encode(ctx, tid, tgW, tgG, tgCont, tgTerm, tgTdPsi, tgScalars,
+                     tgPrevState, tgCurrState, tgDir, tgEffort);
 }
 
-kernel void oak_plan(device float *params [[buffer(0)]],
-                     device float *stateArena [[buffer(1)]],
-                     device uint *uintArena [[buffer(2)]],
-                     device KernelScalars *scalars [[buffer(3)]],
-                     device KernelStats *stats [[buffer(4)]],
-                     constant KernelConfig &cfg [[buffer(5)]],
-                     threadgroup float *tgModelErr [[threadgroup(0)]],
-                     uint2 jpos [[thread_position_in_threadgroup]],
-                     uint2 tgPos [[threadgroup_position_in_grid]]) {
-    uint j = jpos.x, k = tgPos.x;
-    Ctx ctx = make_ctx(params, stateArena, uintArena, scalars, stats, cfg, tgPos.y);
-    if (k >= ctx.K) return;
+// One option k of the planning pass; threads j cover the R transition rows.
+// The caller owns the k bound (kernel grid width or megastep sequential loop).
+static inline void oak_stage_plan_option(Ctx ctx, uint k, uint j,
+                                         threadgroup float *tgModelErr) {
     device const float *prev = state_at(ctx, ctx.stateSlot);
     device const float *curr = state_at(ctx, 1u - ctx.stateSlot);
     bool active = j < ctx.R;
@@ -809,7 +866,7 @@ kernel void oak_plan(device float *params [[buffer(0)]],
     } else {
         tgModelErr[j] = 0.0f;
     }
-    threadgroup_barrier(mem_flags::mem_threadgroup);
+    simdgroup_barrier(mem_flags::mem_threadgroup);
 
     if (j == 0u) {
         float nErr = 0.0f;
@@ -847,26 +904,38 @@ kernel void oak_plan(device float *params [[buffer(0)]],
     }
 }
 
-kernel void oak_learn_heads(device float *params [[buffer(0)]],
-                            device float *stateArena [[buffer(1)]],
-                            device uint *uintArena [[buffer(2)]],
-                            device KernelScalars *scalars [[buffer(3)]],
-                            device KernelStats *stats [[buffer(4)]],
-                            constant KernelConfig &cfg [[buffer(5)]],
-                            uint2 gpos [[thread_position_in_grid]]) {
-    uint gid = gpos.x;
-    Ctx ctx = make_ctx(params, stateArena, uintArena, scalars, stats, cfg, gpos.y);
+kernel void oak_plan(device float *params [[buffer(0)]],
+                     device float *stateArena [[buffer(1)]],
+                     device uint *uintArena [[buffer(2)]],
+                     device KernelScalars *scalars [[buffer(3)]],
+                     device KernelStats *stats [[buffer(4)]],
+                     constant KernelConfig &cfg [[buffer(5)]],
+                     threadgroup float *tgModelErr [[threadgroup(0)]],
+                     uint2 jpos [[thread_position_in_threadgroup]],
+                     uint2 tgPos [[threadgroup_position_in_grid]]) {
+    uint j = jpos.x, k = tgPos.x;
+    Ctx ctx = make_ctx(params, stateArena, uintArena, scalars, stats, cfg, tgPos.y);
+    if (k >= ctx.K) return;
+    oak_stage_plan_option(ctx, k, j, tgModelErr);
+}
+
+inline uint oak_learn_total(Ctx ctx) {
+    return ctx.R + ctx.K * ctx.R + ctx.K * ctx.D * ctx.R + ctx.K * ctx.R
+        + ctx.K * ctx.R * ctx.R + ctx.K * ctx.R;
+}
+
+// One learn element (gid indexes the concatenated head parameter list). All
+// elements are independent: each reads only pre-pass state and writes its own
+// parameter, so any thread->element remap is bit-identical.
+static inline void oak_learn_element(Ctx ctx, device const float *prev,
+                                     device const float *curr, uint gid) {
     // Uniform learning: value, GVFs, option policies, and option models share one stream.
-    device const float *prev = state_at(ctx, ctx.stateSlot);
-    device const float *curr = state_at(ctx, 1u - ctx.stateSlot);
     uint nVal = ctx.R;
     uint nPsi = ctx.K * ctx.R;
     uint nPi = ctx.K * ctx.D * ctx.R;
     uint nOR = ctx.K * ctx.R;
     uint nOT = ctx.K * ctx.R * ctx.R;
     uint nOD = ctx.K * ctx.R;
-    uint total = nVal + nPsi + nPi + nOR + nOT + nOD;
-    if (gid >= total) return;
 
     if (gid < nVal) {
         if (OAK_ABLATE_GVF_PREDICTION) return;
@@ -960,6 +1029,21 @@ kernel void oak_learn_heads(device float *params [[buffer(0)]],
     }
 }
 
+kernel void oak_learn_heads(device float *params [[buffer(0)]],
+                            device float *stateArena [[buffer(1)]],
+                            device uint *uintArena [[buffer(2)]],
+                            device KernelScalars *scalars [[buffer(3)]],
+                            device KernelStats *stats [[buffer(4)]],
+                            constant KernelConfig &cfg [[buffer(5)]],
+                            uint2 gpos [[thread_position_in_grid]]) {
+    uint gid = gpos.x;
+    Ctx ctx = make_ctx(params, stateArena, uintArena, scalars, stats, cfg, gpos.y);
+    if (gid >= oak_learn_total(ctx)) return;
+    device const float *prev = state_at(ctx, ctx.stateSlot);
+    device const float *curr = state_at(ctx, 1u - ctx.stateSlot);
+    oak_learn_element(ctx, prev, curr, gid);
+}
+
 inline void emit_action_grid(Ctx ctx, threadgroup const float *curr, uint group, uint tid, uint tgW) {
     // ActionEmission: expose option policy means plus the wrapper-facing behavior descriptor.
     uint gid = group * tgW + tid;
@@ -994,23 +1078,13 @@ inline void emit_action_grid(Ctx ctx, threadgroup const float *curr, uint group,
     }
 }
 
-kernel void oak_replace(device float *params [[buffer(0)]],
-                        device float *stateArena [[buffer(1)]],
-                        device uint *uintArena [[buffer(2)]],
-                        device KernelScalars *scalars [[buffer(3)]],
-                        device KernelStats *stats [[buffer(4)]],
-                        constant KernelConfig &cfg [[buffer(5)]],
-                        threadgroup float *tgCurrState [[threadgroup(0)]],
-                        uint2 tpos [[thread_position_in_threadgroup]],
-                        uint2 tdim [[threads_per_threadgroup]],
-                        uint2 tgPos [[threadgroup_position_in_grid]]) {
-    uint tid = tpos.x, tgW = tdim.x;
-    Ctx ctx = make_ctx(params, stateArena, uintArena, scalars, stats, cfg, tgPos.y);
+static inline void oak_stage_replace(Ctx ctx, uint tid, uint tgW,
+                                     threadgroup float *tgCurrState) {
     // GenerateAndTest: bundle utility, replacement, and FC-STOMP health diagnostics.
     device const float *curr = state_at(ctx, 1u - ctx.stateSlot);
     device const float *prev = state_at(ctx, ctx.stateSlot);
     for (uint i = tid; i < ctx.R; i += tgW) tgCurrState[i] = curr[i];
-    threadgroup_barrier(mem_flags::mem_threadgroup);
+    simdgroup_barrier(mem_flags::mem_threadgroup);
     float invT = track_rate(ctx.stepCount, ctx.R);
     for (uint i = tid; i < ctx.R; i += tgW) {
         float psiSignal = 0.0f, modelSignal = 0.0f, keyboardSignal = 0.0f;
@@ -1050,9 +1124,9 @@ kernel void oak_replace(device float *params [[buffer(0)]],
                 - err;
         ctx.utilOpt[k] += invT * (u - ctx.utilOpt[k]);
     }
-    threadgroup_barrier(mem_flags::mem_device);
+    simdgroup_barrier(mem_flags::mem_device);
 
-    if (tid != 0u) return;
+    if (tid == 0u) {  // serial lane-0 tail (no barriers inside)
 	    float wSum = 0.0f, wSq = 0.0f;
 	    for (uint k = 0u; k < ctx.K; ++k) {
 	        float w = ctx.importance[k];
@@ -1243,15 +1317,36 @@ kernel void oak_replace(device float *params [[buffer(0)]],
     ctx.stats->learningMature = (progressCount > 0u) ? progressSum / float(progressCount) : 0.0f;
     ctx.scalars->stateSlot = 1u - ctx.stateSlot;
     ctx.scalars->stepCount = ctx.stepCount + 1u;
+    }
+}
+
+kernel void oak_replace(device float *params [[buffer(0)]],
+                        device float *stateArena [[buffer(1)]],
+                        device uint *uintArena [[buffer(2)]],
+                        device KernelScalars *scalars [[buffer(3)]],
+                        device KernelStats *stats [[buffer(4)]],
+                        constant KernelConfig &cfg [[buffer(5)]],
+                        threadgroup float *tgCurrState [[threadgroup(0)]],
+                        uint2 tpos [[thread_position_in_threadgroup]],
+                        uint2 tdim [[threads_per_threadgroup]],
+                        uint2 tgPos [[threadgroup_position_in_grid]]) {
+    uint tid = tpos.x, tgW = tdim.x;
+    Ctx ctx = make_ctx(params, stateArena, uintArena, scalars, stats, cfg, tgPos.y);
+    oak_stage_replace(ctx, tid, tgW, tgCurrState);
+}
+
+static inline void oak_stage_action_emit(Ctx ctx, uint group, uint tid, uint tgW,
+                                         threadgroup float *tgCurrState) {
+    device const float *curr = state_at(ctx, ctx.stateSlot);
+    for (uint i = tid; i < ctx.R; i += tgW) tgCurrState[i] = curr[i];
+    simdgroup_barrier(mem_flags::mem_threadgroup);
+    emit_action_grid(ctx, tgCurrState, group, tid, tgW);
 }
 
 kernel void oak_action_emit(device float *params [[buffer(0)]], device float *stateArena [[buffer(1)]], device uint *uintArena [[buffer(2)]], device KernelScalars *scalars [[buffer(3)]], device KernelStats *stats [[buffer(4)]], constant KernelConfig &cfg [[buffer(5)]], threadgroup float *tgCurrState [[threadgroup(0)]], uint2 tgPos [[threadgroup_position_in_grid]], uint2 tpos [[thread_position_in_threadgroup]], uint2 tdim [[threads_per_threadgroup]]) {
     uint group = tgPos.x, tid = tpos.x, tgW = tdim.x;
     Ctx ctx = make_ctx(params, stateArena, uintArena, scalars, stats, cfg, tgPos.y);
-    device const float *curr = state_at(ctx, ctx.stateSlot);
-    for (uint i = tid; i < ctx.R; i += tgW) tgCurrState[i] = curr[i];
-    threadgroup_barrier(mem_flags::mem_threadgroup);
-    emit_action_grid(ctx, tgCurrState, group, tid, tgW);
+    oak_stage_action_emit(ctx, group, tid, tgW, tgCurrState);
 }
 
 // ===========================================================================
@@ -1399,17 +1494,16 @@ kernel void oak_fleet_init(device float *params [[buffer(0)]],
 // Plus the actionDelta tracker: delta_sum += sum((desc-last)^2)/D, last = desc,
 // steps++ — all before the env step, exactly like the bridge.
 // PORT-NOTE: the bridge accumulates delta_sum_ in double; here fp32 Kahan.
-kernel void oak_sample_act(device float *params [[buffer(0)]],
-                           device float *stateArena [[buffer(1)]],
-                           device uint *uintArena [[buffer(2)]],
-                           device KernelScalars *scalars [[buffer(3)]],
-                           device KernelStats *stats [[buffer(4)]],
-                           constant KernelConfig &cfg [[buffer(5)]],
-                           device OakFleetLane *lanes [[buffer(6)]],
-                           device const uint *laneSeeds [[buffer(7)]],
-                           constant OakFleetEnvCfg &ecfg [[buffer(8)]],
-                           uint gid [[thread_position_in_grid]]) {
-    if (gid >= ecfg.laneCount) return;
+static inline void oak_stage_sample_act(device float *params,
+                                        device float *stateArena,
+                                        device uint *uintArena,
+                                        device KernelScalars *scalars,
+                                        device KernelStats *stats,
+                                        constant KernelConfig &cfg,
+                                        device OakFleetLane *lanes,
+                                        device const uint *laneSeeds,
+                                        constant OakFleetEnvCfg &ecfg,
+                                        uint gid) {
     device OakFleetLane *lane = &lanes[gid];
     uint stepIdx = lane->steps;  // 0-based index of the step being taken
     float desc[12];
@@ -1464,22 +1558,36 @@ kernel void oak_sample_act(device float *params [[buffer(0)]],
     for (int u = 0; u < 6; u++) lane->ctrlPending[u] = ctrl[u];
 }
 
+kernel void oak_sample_act(device float *params [[buffer(0)]],
+                           device float *stateArena [[buffer(1)]],
+                           device uint *uintArena [[buffer(2)]],
+                           device KernelScalars *scalars [[buffer(3)]],
+                           device KernelStats *stats [[buffer(4)]],
+                           constant KernelConfig &cfg [[buffer(5)]],
+                           device OakFleetLane *lanes [[buffer(6)]],
+                           device const uint *laneSeeds [[buffer(7)]],
+                           constant OakFleetEnvCfg &ecfg [[buffer(8)]],
+                           uint gid [[thread_position_in_grid]]) {
+    if (gid >= ecfg.laneCount) return;
+    oak_stage_sample_act(params, stateArena, uintArena, scalars, stats, cfg,
+                         lanes, laneSeeds, ecfg, gid);
+}
+
 // One thread per lane: the env step (HCEnv::send semantics — exactly the
 // hc_env_step control flow, inlined to also expose the four envInfo values),
 // arena obs/reward write-back, stream accumulators, death latches, recording.
-kernel void oak_fleet_env(device float *params [[buffer(0)]],
-                          device float *stateArena [[buffer(1)]],
-                          device uint *uintArena [[buffer(2)]],
-                          device KernelScalars *scalars [[buffer(3)]],
-                          device KernelStats *stats [[buffer(4)]],
-                          constant KernelConfig &cfg [[buffer(5)]],
-                          device OakFleetLane *lanes [[buffer(6)]],
-                          device const uint *laneSeeds [[buffer(7)]],
-                          constant OakFleetEnvCfg &ecfg [[buffer(8)]],
-                          device const int *recordSlot [[buffer(9)]],
-                          device float *recordBuf [[buffer(10)]],
-                          uint gid [[thread_position_in_grid]]) {
-    if (gid >= ecfg.laneCount) return;
+static inline void oak_stage_fleet_env(device float *params,
+                                       device float *stateArena,
+                                       device uint *uintArena,
+                                       device KernelScalars *scalars,
+                                       device KernelStats *stats,
+                                       constant KernelConfig &cfg,
+                                       device OakFleetLane *lanes,
+                                       device const uint *laneSeeds,
+                                       constant OakFleetEnvCfg &ecfg,
+                                       device const int *recordSlot,
+                                       device float *recordBuf,
+                                       uint gid) {
     device OakFleetLane *lane = &lanes[gid];
     HCState s = lane->s;
     uint elapsed = lane->elapsed, resets = lane->resets;
@@ -1575,6 +1683,152 @@ kernel void oak_fleet_env(device float *params [[buffer(0)]],
             for (int u = 0; u < 6; u++) recordBuf[base + u] = ctrl[u];
             recordBuf[base + 6] = float(done);
         }
+    }
+}
+
+kernel void oak_fleet_env(device float *params [[buffer(0)]],
+                          device float *stateArena [[buffer(1)]],
+                          device uint *uintArena [[buffer(2)]],
+                          device KernelScalars *scalars [[buffer(3)]],
+                          device KernelStats *stats [[buffer(4)]],
+                          constant KernelConfig &cfg [[buffer(5)]],
+                          device OakFleetLane *lanes [[buffer(6)]],
+                          device const uint *laneSeeds [[buffer(7)]],
+                          constant OakFleetEnvCfg &ecfg [[buffer(8)]],
+                          device const int *recordSlot [[buffer(9)]],
+                          device float *recordBuf [[buffer(10)]],
+                          uint gid [[thread_position_in_grid]]) {
+    if (gid >= ecfg.laneCount) return;
+    oak_stage_fleet_env(params, stateArena, uintArena, scalars, stats, cfg,
+                        lanes, laneSeeds, ecfg, recordSlot, recordBuf, gid);
+}
+
+// ===========================================================================
+// oak_megastep v2: simdgroup-packed multi-lane megakernel. One threadgroup of
+// W = 32*OAK_MEGA_G threads owns OAK_MEGA_G consecutive lanes (laneBase =
+// tgIdx*G) and runs `stepsThisDispatch` whole step-iterations of the full
+// FC-STOMP + sampling + physics pipeline internally. Valid because lanes are
+// 100% disjoint (the standing fleet invariant). Two thread geometries per
+// step, both preserving the v1/keeper per-lane op order bitwise:
+//   - WIDE agent stages (encode/plan/learn/replace/emit): simdgroup s serves
+//     lane laneBase+s with tid := simd lane id and stage width 32 — exactly
+//     the v1 mapping (v1 ran one lane per threadgroup at W=32, one simdgroup).
+//     Each lane's nine threadgroup slots sit at offset s*32 floats inside the
+//     shared tg buffers. Stage-internal barriers are simdgroup-scope (see the
+//     BARRIER CONTRACT above), so lanes never serialize each other's stage
+//     progress.
+//   - PACKED serial stages (sample_act, fleet_env — the ~65K-FMA hc_mj_step
+//     chain): thread t < G runs lane laneBase+t's single-thread body. The G
+//     active threads fill the leading ceil(G/32) simdgroups, vs v1's 1 active
+//     thread per 32-wide simdgroup (the measured 4.95 ms/step zero-policy
+//     issue-efficiency hole).
+//   - threadgroup_barrier(mem_device) between stages covers the wide<->packed
+//     lane handoff (lane laneBase+t is served by simdgroup t in wide stages
+//     but by simdgroup t/32 in packed stages).
+//   - Remainder threadgroups (laneCount % G != 0) idle whole simdgroups in
+//     wide stages and threads t >= lanesThisTg in packed stages; between-stage
+//     barriers stay uniform across the whole threadgroup.
+//   - make_ctx is re-run at every stage boundary (oak_replace flips stateSlot
+//     mid-step — load-bearing).
+//   - zero/random policies skip the agent stages via the uniform policyMode
+//     guard, mirroring the oak_sample_act/oak_fleet_env policyMode branches.
+//   - KNOWN CARVE-OUT (inherited from v1): the legacy oak_plan grid ran K
+//     concurrent threadgroups per lane whose non-atomic
+//     counters[OAK_CNT_PLAN_NF] increments race (diagnostics-only); the
+//     sequential k loop serializes — and thereby fixes — that count, so uints
+//     may differ from legacy exactly there on NF-active lanes.
+//   - G=1 (W=32) reproduces the v1 one-lane-per-threadgroup geometry exactly.
+kernel void oak_megastep(device float *params [[buffer(0)]],
+                         device float *stateArena [[buffer(1)]],
+                         device uint *uintArena [[buffer(2)]],
+                         device KernelScalars *scalars [[buffer(3)]],
+                         device KernelStats *stats [[buffer(4)]],
+                         constant KernelConfig &cfg [[buffer(5)]],
+                         device OakFleetLane *lanes [[buffer(6)]],
+                         device const uint *laneSeeds [[buffer(7)]],
+                         constant OakFleetEnvCfg &ecfg [[buffer(8)]],
+                         device const int *recordSlot [[buffer(9)]],
+                         device float *recordBuf [[buffer(10)]],
+                         constant uint &stepsThisDispatch [[buffer(11)]],
+                         threadgroup float *tgG [[threadgroup(0)]],
+                         threadgroup float *tgCont [[threadgroup(1)]],
+                         threadgroup float *tgTerm [[threadgroup(2)]],
+                         threadgroup float *tgTdPsi [[threadgroup(3)]],
+                         threadgroup float *tgScalars [[threadgroup(4)]],
+                         threadgroup float *tgPrevState [[threadgroup(5)]],
+                         threadgroup float *tgCurrState [[threadgroup(6)]],
+                         threadgroup float *tgDir [[threadgroup(7)]],
+                         threadgroup float *tgEffort [[threadgroup(8)]],
+                         uint tgIdx [[threadgroup_position_in_grid]],
+                         uint tid [[thread_position_in_threadgroup]],
+                         uint slane [[thread_index_in_simdgroup]],
+                         uint sgrp [[simdgroup_index_in_threadgroup]]) {
+    uint laneBase = tgIdx * OAK_MEGA_G;
+    if (laneBase >= ecfg.laneCount) return;
+    uint lanesThisTg = min(OAK_MEGA_G, ecfg.laneCount - laneBase);
+    bool wideActive = sgrp < lanesThisTg;   // uniform within each simdgroup
+    uint wideLane = laneBase + sgrp;
+    bool packedActive = tid < lanesThisTg;
+    uint packedLane = laneBase + tid;
+    uint off = sgrp * 32u;                  // this lane's 32-float tg slots
+    threadgroup float *lG = tgG + off, *lCont = tgCont + off, *lTerm = tgTerm + off,
+                      *lTdPsi = tgTdPsi + off, *lScalars = tgScalars + off,
+                      *lPrev = tgPrevState + off, *lCurr = tgCurrState + off,
+                      *lDir = tgDir + off, *lEffort = tgEffort + off;
+    for (uint it = 0u; it < stepsThisDispatch; ++it) {
+        if (ecfg.policyMode == 0u) {
+            if (wideActive) {   // oak_encode: FeatureConstruction -> ... -> OptionKeyboard
+                Ctx ctx = make_ctx(params, stateArena, uintArena, scalars, stats, cfg, wideLane);
+                oak_stage_encode(ctx, slane, 32u, lG, lCont, lTerm, lTdPsi, lScalars,
+                                 lPrev, lCurr, lDir, lEffort);
+            }
+            threadgroup_barrier(mem_flags::mem_device);
+            if (wideActive) {   // oak_plan: sequential k (legacy: K concurrent threadgroups).
+                // lG doubles as tgModelErr; the simdgroup fence at the top of
+                // each k is the WAR fence on that slot (covers both the encode
+                // stage's lG reads and the previous k's j==0 reads).
+                Ctx ctx = make_ctx(params, stateArena, uintArena, scalars, stats, cfg, wideLane);
+                for (uint k = 0u; k < ctx.K; ++k) {
+                    simdgroup_barrier(mem_flags::mem_threadgroup);
+                    oak_stage_plan_option(ctx, k, slane, lG);
+                }
+            }
+            threadgroup_barrier(mem_flags::mem_device);
+            if (wideActive) {   // oak_learn_heads: independent elements, stride-32 remap
+                Ctx ctx = make_ctx(params, stateArena, uintArena, scalars, stats, cfg, wideLane);
+                device const float *prev = state_at(ctx, ctx.stateSlot);
+                device const float *curr = state_at(ctx, 1u - ctx.stateSlot);
+                uint total = oak_learn_total(ctx);
+                for (uint e = slane; e < total; e += 32u) oak_learn_element(ctx, prev, curr, e);
+            }
+            threadgroup_barrier(mem_flags::mem_device);
+            if (wideActive) {   // oak_replace: GenerateAndTest commit + diagnostics
+                Ctx ctx = make_ctx(params, stateArena, uintArena, scalars, stats, cfg, wideLane);
+                oak_stage_replace(ctx, slane, 32u, lCurr);
+            }
+            threadgroup_barrier(mem_flags::mem_device);
+            if (wideActive) {   // oak_action_emit: fresh ctx (replace flipped stateSlot), then
+                // the group loop — disjoint writes, no barrier needed between g
+                Ctx ctx = make_ctx(params, stateArena, uintArena, scalars, stats, cfg, wideLane);
+                device const float *curr = state_at(ctx, ctx.stateSlot);
+                for (uint i = slane; i < ctx.R; i += 32u) lCurr[i] = curr[i];
+                simdgroup_barrier(mem_flags::mem_threadgroup);
+                uint emitGroups = (ctx.K * ctx.D + 31u) / 32u;
+                for (uint g = 0u; g < emitGroups; ++g)
+                    emit_action_grid(ctx, lCurr, g, slane, 32u);
+            }
+            threadgroup_barrier(mem_flags::mem_device);
+        }
+        if (packedActive) {
+            oak_stage_sample_act(params, stateArena, uintArena, scalars, stats, cfg,
+                                 lanes, laneSeeds, ecfg, packedLane);
+        }
+        threadgroup_barrier(mem_flags::mem_device);
+        if (packedActive) {
+            oak_stage_fleet_env(params, stateArena, uintArena, scalars, stats, cfg,
+                                lanes, laneSeeds, ecfg, recordSlot, recordBuf, packedLane);
+        }
+        threadgroup_barrier(mem_flags::mem_device);
     }
 }
 
