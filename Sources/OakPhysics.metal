@@ -1373,6 +1373,598 @@ inline void hc_mj_step(thread HCState &s) {
     for (int v = 0; v < 9; v++) s.qacc_warmstart[v] = w.qacc[v];
 }
 
+// ===========================================================================
+// Simdgroup-cooperative hc_mj_step (megastep env stage; Inv-10 bit-identical
+// class). The scalar path above is the certified reference and is untouched;
+// the probe/rollout kernels keep using it.
+//
+// Execution model: LEADER-SERIAL + DISTRIBUTED ROW WORK.
+//   - The tree-sequential sections (FK parent chain, CRB backward pass, LDL
+//     factor/solve, collision narrowphase + df shadow chain, constraint
+//     assembly, RNE, dense 9x9 Cholesky factor/solve/update, linesearch
+//     bracket logic) run on the simdgroup leader (sgTid 0) with the SCALAR
+//     functions verbatim — one HCWork replica, one stream of stack traffic.
+//     (A fully redundant 32-replica variant measured SLOWER than the packed
+//     scalar chain: 32x stack-write bandwidth on HCWork swamped the
+//     distributed gains. Same for barrier-per-exchange: all small exchanges
+//     go through register-space simd_shuffle in uniform code instead.)
+//   - The leader publishes the per-row constraint data the workers consume
+//     (efc_J/pos/D/imp/K/B) into a per-lane device scratch block
+//     (HCSimdRows) and shuffles out the small replicated state (M,
+//     qfrc_smooth, qacc_smooth, scale, nefc).
+//   - The independent per-row hot loops are DISTRIBUTED across the
+//     simdgroup with per-element math verbatim:
+//       . constraint-row dots (aref / warmstart jar / efcB / Jaref / Jv):
+//         row r is owned by thread r%32; the whole compensated dot for a
+//         row runs on ONE thread in the original index order with the
+//         original compensation sequence;
+//       . J^T force: output column v is owned by thread v — the 9
+//         per-column compensated accumulator chains are mutually
+//         independent and each runs in the original ascending-row order;
+//         force[r] is recomputed from jar with the original expression;
+//       . linesearch quadratic totals: the a0/a1/a2 accumulator chains are
+//         owned by threads 0/1/2 (independent chains, original row order;
+//         the per-row quad values are recomputed with the exact original
+//         expressions from the same frozen Jaref/Jv/D inputs);
+//       . Hessian lower triangle: element (i,c) is owned by thread e%32
+//         (e = i*(i+1)/2 + c); per element the accumulation is in the
+//         original ascending-row order, then the original single M-scatter
+//         add. The dense L stays leader-only.
+//   - Control flow around every barrier/shuffle is uniform: predicates
+//     branch on replicated registers (costs, alpha, nefc, st masks) that
+//     every thread derives from the same shared inputs with the same fp ops.
+//   - PORT-NOTE (order, bit-identical): mj_referenceConstraint is hoisted
+//     after mj_fwdAcceleration (scalar order: passive -> reference -> rne).
+//     Its inputs (efc_J/pos, imp/K/B, qvel) and output (efc_aref) do not
+//     overlap rne/actuation/fwdAcceleration state, so every expression and
+//     accumulation sequence is unchanged — only the wall-clock position of
+//     an independent block moves (verified bitwise on the probe goldens and
+//     fleet streams).
+// No simd_sum, no reordered reductions, no decomposed fma anywhere.
+//
+// Threadgroup scratch per lane: HC_SIMD_SCRATCH floats —
+//   [0,70)    Jaref (also reused for the warmstart jar / efcB exchanges)
+//   [70,140)  Jv
+// Device scratch per lane: one HCSimdRows block.
+// ===========================================================================
+constant int HC_SIMD_SCRATCH = 140;
+
+// Worker-visible constraint-row data (leader-written copy-out except
+// efc_aref, which the distributed reference-constraint pass writes).
+struct HCSimdRows {
+    float efc_J[630];   // dense 70 x 9
+    float efc_pos[70];
+    float efc_D[70];
+    float efc_aref[70];
+    float efc_imp[70];
+    float efc_K[70];
+    float efc_B[70];
+};
+
+// hc_dot9c with the row operand in device memory (same compensated chain).
+inline float hc_dot9c_dev(device const float *a, thread const float *b, float init) {
+    HCAcc acc;
+    hc_accInit(acc, init);
+    for (int i = 0; i < 9; i++) hc_accMulAdd(acc, a[i], b[i]);
+    return hc_accGet(acc);
+}
+
+// Active-set bitmask: st[r] == QUADRATIC <=> bit r set. Lives in registers so
+// the redundant constraint-cost scans write no per-thread stack arrays.
+struct HCStMask { ulong lo, hi; };
+inline bool hc_st_get(HCStMask m, int r) {
+    return r < 64 ? (((m.lo >> r) & 1ul) != 0ul) : (((m.hi >> (r - 64)) & 1ul) != 0ul);
+}
+
+// hc_constraintUpdate, cost-only form (jar in threadgroup memory, D in device
+// memory): the identical compensated cost chain (same operands, same order);
+// force is not stored (consumers recompute the original expression on the
+// fly) and the active set goes to the register bitmask. Runs redundantly on
+// every thread — register-only state, so replication is free.
+inline float hc_costTG(int nefc, threadgroup const float *Jaref,
+                       device const float *D, thread HCStMask &st) {
+    HCAcc cost;
+    hc_accInit(cost, 0.0f);
+    st.lo = 0ul; st.hi = 0ul;
+    for (int i = 0; i < nefc; i++) {
+        float jar = Jaref[i];
+        if (jar >= 0.0f) {
+            // SATISFIED: force = 0 (recomputed at use)
+        } else {
+            if (i < 64) st.lo |= 1ul << i; else st.hi |= 1ul << (i - 64);
+            hc_accMulAdd(cost, 0.5f*D[i]*jar, jar);
+        }
+    }
+    return hc_accGet(cost);
+}
+
+// hc_gaussCost on replicated register vectors (same expressions/order).
+inline float hc_gaussCost_r(thread const float *qfsR, thread const float *qasR,
+                            thread const float *Ma, thread const float *qacc) {
+    HCAcc g;
+    hc_accInit(g, 0.0f);
+    for (int i = 0; i < 9; i++)
+        hc_accMulAdd(g, 0.5f*(Ma[i] - qfsR[i]), qacc[i] - qasR[i]);
+    return hc_accGet(g);
+}
+
+// hc_JTforce distributed by output column (thread v owns column v; per-column
+// chains are independent and keep the original ascending-row order). force[r]
+// is recomputed from jar with the original expression/branch (bit-identical
+// to the stored value). All threads return with the result replicated
+// (shuffle gather, no barriers).
+inline void hc_JTforce_simd(int nefc, device const float *J, device const float *D,
+                            threadgroup const float *Jaref, thread float *res,
+                            uint sgTid) {
+    float colRes = 0.0f;
+    if (sgTid < 9u) {
+        HCAcc acc;
+        hc_accInit(acc, 0.0f);
+        for (int r = 0; r < nefc; r++) {
+            float jar = Jaref[r];
+            float f;
+            if (jar >= 0.0f) f = 0.0f;
+            else f = -D[r]*jar;
+            if (f != 0.0f) hc_accMulAdd(acc, J[9*r + (int)sgTid], f);
+        }
+        colRes = hc_accGet(acc);
+    }
+    for (int v = 0; v < 9; v++) res[v] = simd_shuffle(colRes, (ushort)v);
+}
+
+// hc_makeHessian distributed by lower-triangle element e = i*(i+1)/2 + c
+// (thread e%32 owns elements e and e+32; per element the row accumulation is
+// the original ascending order, then the original single M-scatter add). The
+// dense L is LEADER-ONLY state (one replica): the leader gathers the lower
+// triangle through uniform shuffles and runs cholFactor alone (no barriers).
+inline void hc_makeHessian_simd(device const HCSimdRows *rows, int nefc,
+                                thread const float *MR, HCStMask st,
+                                thread float *L, uint sgTid) {
+    float accE[2] = { 0.0f, 0.0f };
+    for (uint e = sgTid; e < 45u; e += 32u) {
+        uint i = 0u;
+        while ((i + 1u)*(i + 2u)/2u <= e) i++;
+        uint c = e - i*(i + 1u)/2u;
+        float acc = 0.0f;
+        for (int r = 0; r < nefc; r++) {
+            if (!hc_st_get(st, r)) continue;
+            float Dj = rows->efc_D[r];
+            float t = rows->efc_J[9*r + (int)i];
+            if (t == 0.0f) continue;
+            float sc = t*Dj;
+            acc += rows->efc_J[9*r + (int)c]*sc;
+        }
+        int adr = HC_M_ROWADR[i];
+        for (int k = 0; k < HC_M_ROWNNZ[i]; k++)
+            if (HC_M_COLIND[adr + k] == (int)c) acc += MR[adr + k];
+        accE[e >> 5] = acc;
+    }
+    // uniform shuffle gather; the leader keeps L (non-leader L is never read)
+    if (sgTid == 0u)
+        for (int k = 0; k < 81; k++) L[k] = 0.0f;
+    for (uint e = 0u; e < 45u; ++e) {
+        float v = simd_shuffle(accE[e >> 5], (ushort)(e & 31u));
+        if (sgTid == 0u) {
+            uint i = 0u;
+            while ((i + 1u)*(i + 2u)/2u <= e) i++;
+            uint c = e - i*(i + 1u)/2u;
+            L[i*9u + c] = v;
+        }
+    }
+    if (sgTid == 0u) hc_cholFactor(L);
+}
+
+// hc_lsEval with the three accumulator chains distributed over threads 0..2
+// (independent chains, original row order). The per-row quad values are
+// recomputed with the exact scalar expressions: the scalar path froze them
+// per Newton iteration from the same Jaref/Jv/D, and neither changes during
+// the linesearch, so recomputation is the identical fp expression on
+// identical inputs. All threads return the replicated HCLS point
+// (shuffle gather, no barriers).
+inline HCLS hc_lsEval_simd(float alpha, int nefc,
+                           threadgroup const float *Jaref, threadgroup const float *Jv,
+                           device const float *D, thread const float *quadGauss,
+                           thread int &lsiter, uint sgTid) {
+    float qRes = 0.0f;
+    if (sgTid < 3u) {
+        // register-select (a dynamic index would force quadGauss to stack)
+        float qgInit = (sgTid == 0u) ? quadGauss[0] : ((sgTid == 1u) ? quadGauss[1] : quadGauss[2]);
+        HCAcc a;
+        hc_accInit(a, qgInit);
+        for (int i = 0; i < nefc; i++) {
+            float x = Jaref[i] + alpha*Jv[i];
+            if (x < 0.0f) {
+                float Dj = D[i];
+                float q;
+                if (sgTid == 0u) q = 0.5f*Dj*Jaref[i]*Jaref[i];
+                else if (sgTid == 1u) q = Dj*Jaref[i]*Jv[i];
+                else q = 0.5f*Dj*Jv[i]*Jv[i];
+                hc_accAdd(a, q);
+            }
+        }
+        qRes = hc_accGet(a);
+    }
+    float q0 = simd_shuffle(qRes, (ushort)0);
+    float q1 = simd_shuffle(qRes, (ushort)1);
+    float q2 = simd_shuffle(qRes, (ushort)2);
+    HCLS p;
+    p.alpha = alpha;
+    p.cost = q2*alpha*alpha + q1*alpha + q0;
+    p.deriv0 = 2.0f*q2*alpha + q1;
+    p.deriv1 = 2.0f*q2;
+    if (p.deriv1 <= 0.0f) p.deriv1 = HC_MINVAL;
+    lsiter++;
+    return p;
+}
+
+inline bool hc_updateBracket_simd(thread HCLS &p, thread const HCLS *cand, thread HCLS &pnext,
+                                  int nefc, threadgroup const float *Jaref,
+                                  threadgroup const float *Jv, device const float *D,
+                                  thread const float *quadGauss, thread int &lsiter,
+                                  uint sgTid) {
+    bool flag = false;
+    for (int k = 0; k < 3; k++) {
+        if (p.deriv0 < 0.0f && cand[k].deriv0 < 0.0f && cand[k].deriv0 > p.deriv0) {
+            p = cand[k]; flag = true;
+        } else if (p.deriv0 > 0.0f && cand[k].deriv0 > 0.0f && cand[k].deriv0 < p.deriv0) {
+            p = cand[k]; flag = true;
+        }
+    }
+    if (flag)  // uniform: p/cand are replicated across the simdgroup
+        pnext = hc_lsEval_simd(p.alpha - p.deriv0/p.deriv1, nefc, Jaref, Jv, D, quadGauss,
+                               lsiter, sgTid);
+    return flag;
+}
+
+inline float hc_primalSearch_simd(int nefc, threadgroup const float *Jaref,
+                                  threadgroup const float *Jv, device const float *D,
+                                  thread const float *quadGauss, float snorm, float scale,
+                                  uint sgTid) {
+    if (snorm < HC_MINVAL) return 0.0f;
+    float gtol = HC_SOLVER_TOL * HC_LS_TOL * snorm / scale;
+    int lsiter = 0;
+    HCLS p0 = hc_lsEval_simd(0.0f, nefc, Jaref, Jv, D, quadGauss, lsiter, sgTid);
+    HCLS p1 = hc_lsEval_simd(p0.alpha - p0.deriv0/p0.deriv1, nefc, Jaref, Jv, D, quadGauss,
+                             lsiter, sgTid);
+    if (fabs(p1.deriv0) < gtol) return p1.alpha;
+    float dir = (p1.deriv0 < 0.0f) ? 1.0f : -1.0f;
+    HCLS p2 = p0;
+    // one-sided phase
+    while (p1.deriv0*dir <= -gtol && lsiter < HC_LS_ITER) {
+        p2 = p1;
+        p1 = hc_lsEval_simd(p1.alpha - p1.deriv0/p1.deriv1, nefc, Jaref, Jv, D, quadGauss,
+                            lsiter, sgTid);
+        if (fabs(p1.deriv0) < gtol) return p1.alpha;
+    }
+    if (lsiter >= HC_LS_ITER) return p1.alpha;  // no bracket
+    // bracketed phase: p1, p2 bracket the deriv0 root
+    HCLS p2next = p1;
+    HCLS p1next = hc_lsEval_simd(p1.alpha - p1.deriv0/p1.deriv1, nefc, Jaref, Jv, D, quadGauss,
+                                 lsiter, sgTid);
+    while (lsiter < HC_LS_ITER) {
+        HCLS pmid = hc_lsEval_simd(0.5f*(p1.alpha + p2.alpha), nefc, Jaref, Jv, D, quadGauss,
+                                   lsiter, sgTid);
+        HCLS cand[3] = { p1next, p2next, pmid };
+        bool any = false;
+        HCLS best = pmid;
+        for (int k = 0; k < 3; k++) {
+            if (fabs(cand[k].deriv0) < gtol && (!any || cand[k].cost < best.cost)) {
+                best = cand[k];
+                any = true;
+            }
+        }
+        if (any) return best.alpha;
+        bool b1 = hc_updateBracket_simd(p1, cand, p1next, nefc, Jaref, Jv, D, quadGauss,
+                                        lsiter, sgTid);
+        bool b2 = hc_updateBracket_simd(p2, cand, p2next, nefc, Jaref, Jv, D, quadGauss,
+                                        lsiter, sgTid);
+        if (!b1 && !b2) return pmid.alpha;  // numerical floor
+    }
+    // out of evaluations: best bracket end if it improves on p0
+    if (p1.cost <= p2.cost && p1.cost < p0.cost) return p1.alpha;
+    if (p2.cost <= p1.cost && p2.cost < p0.cost) return p2.alpha;
+    return 0.0f;
+}
+
+// Leader-computed cholSolve with the result broadcast through uniform
+// shuffles (L is leader-only state; Mgrad comes back replicated, no barriers).
+inline void hc_cholSolveBcast(thread const float *L, thread const float *grad,
+                              thread float *Mgrad, uint sgTid) {
+    if (sgTid == 0u) hc_cholSolve(L, grad, Mgrad);
+    else for (int v = 0; v < 9; v++) Mgrad[v] = 0.0f;  // defined shuffle operand
+    for (int v = 0; v < 9; v++) Mgrad[v] = simd_shuffle(Mgrad[v], (ushort)0);
+}
+
+// §6.3 Newton, cooperative: row dots and Hessian/J^T-force/linesearch row
+// work distributed as described above; the dense Cholesky (factor/solve/
+// rank-1 update) is leader-only with shuffle broadcasts; the small 9-vector
+// state (qacc/Ma/Mv/grad/search) is replicated in registers.
+inline void hc_newton_simd(device HCSimdRows *rows, int nefc,
+                           thread const float *MR, thread const float *qfsR,
+                           thread const float *qasR, float scaleR,
+                           thread float *qaccR, thread float *qfcR,
+                           uint sgTid, threadgroup float *shr) {
+    threadgroup float *shrJaref = shr;
+    threadgroup float *shrJv = shr + 70;
+    float Ma[9];
+    hc_mulSymVecSparse(MR, qaccR, Ma);
+    for (int i = (int)sgTid; i < nefc; i += 32)
+        shrJaref[i] = hc_dot9c_dev(rows->efc_J + 9*i, qaccR, -rows->efc_aref[i]);
+    simdgroup_barrier(mem_flags::mem_threadgroup);
+    HCStMask st, oldst;
+    float costC = hc_costTG(nefc, shrJaref, rows->efc_D, st);
+    hc_JTforce_simd(nefc, rows->efc_J, rows->efc_D, shrJaref, qfcR, sgTid);
+    float gauss = hc_gaussCost_r(qfsR, qasR, Ma, qaccR);
+    float cost = costC + gauss;
+    float L[81];  // leader-only content
+    hc_makeHessian_simd(rows, nefc, MR, st, L, sgTid);
+    float grad[9], Mgrad[9], search[9];
+    for (int v = 0; v < 9; v++) grad[v] = Ma[v] - qfsR[v] - qfcR[v];
+    hc_cholSolveBcast(L, grad, Mgrad, sgTid);
+    for (int v = 0; v < 9; v++) search[v] = -Mgrad[v];
+
+    int iter = 0;
+    while (iter < HC_SOLVER_ITER) {
+        // PrimalSearch precompute
+        float snorm = sqrt(hc_dot9(search, search));
+        float Mv[9];
+        hc_mulSymVecSparse(MR, search, Mv);
+        for (int i = (int)sgTid; i < nefc; i += 32)
+            shrJv[i] = hc_dot9c_dev(rows->efc_J + 9*i, search, 0.0f);
+        simdgroup_barrier(mem_flags::mem_threadgroup);
+        float quadGauss[3];
+        quadGauss[0] = gauss;
+        {
+            HCAcc aq;
+            hc_accInit(aq, 0.0f);
+            for (int v = 0; v < 9; v++) hc_accMulAdd(aq, search[v], Ma[v]);
+            for (int v = 0; v < 9; v++) hc_accMulAdd(aq, -qfsR[v], search[v]);
+            quadGauss[1] = hc_accGet(aq);
+        }
+        quadGauss[2] = 0.5f*hc_dot9c(search, Mv, 0.0f);
+        float alpha = hc_primalSearch_simd(nefc, shrJaref, shrJv, rows->efc_D, quadGauss,
+                                           snorm, scaleR, sgTid);
+        if (alpha == 0.0f) break;
+        for (int v = 0; v < 9; v++) {
+            qaccR[v] += alpha*search[v];
+            Ma[v] += alpha*Mv[v];
+        }
+        simdgroup_barrier(mem_flags::mem_threadgroup);  // WAR: lsEval reads done
+        for (int i = (int)sgTid; i < nefc; i += 32) shrJaref[i] += alpha*shrJv[i];
+        simdgroup_barrier(mem_flags::mem_threadgroup);
+        oldst = st;
+        float oldcost = cost;
+        costC = hc_costTG(nefc, shrJaref, rows->efc_D, st);
+        hc_JTforce_simd(nefc, rows->efc_J, rows->efc_D, shrJaref, qfcR, sgTid);
+        gauss = hc_gaussCost_r(qfsR, qasR, Ma, qaccR);
+        cost = costC + gauss;
+        // HessianIncremental: leader-only rank-1 updates (L is leader-only);
+        // the full-rebuild verdict is shuffle-broadcast so the distributed
+        // hc_makeHessian_simd is entered uniformly.
+        float rebuild = 0.0f;
+        if (sgTid == 0u) {
+            for (int i = 0; i < nefc; i++) {
+                bool wasQ = hc_st_get(oldst, i), isQ = hc_st_get(st, i);
+                int up;
+                if (!wasQ && isQ) up = 1;
+                else if (wasQ && !isQ) up = 0;
+                else continue;
+                float sd = sqrt(rows->efc_D[i]);
+                float vec[9];
+                for (int v = 0; v < 9; v++) vec[v] = rows->efc_J[9*i + v]*sd;
+                int rank = hc_cholUpdate(L, vec, up);
+                if (rank < 9) {
+                    rebuild = 1.0f;
+                    break;
+                }
+            }
+        }
+        bool rebuildFlag = simd_shuffle(rebuild, (ushort)0) != 0.0f;
+        if (rebuildFlag) hc_makeHessian_simd(rows, nefc, MR, st, L, sgTid);
+        for (int v = 0; v < 9; v++) grad[v] = Ma[v] - qfsR[v] - qfcR[v];
+        hc_cholSolveBcast(L, grad, Mgrad, sgTid);
+        float improvement = scaleR*(oldcost - cost);
+        float gradient = scaleR*sqrt(hc_dot9(grad, grad));
+        iter++;
+        if (improvement < HC_SOLVER_TOL || gradient < HC_SOLVER_TOL) break;
+        for (int v = 0; v < 9; v++) search[v] = -Mgrad[v];
+    }
+}
+
+// §6.0/§6.1 constraint driver + warmstart, cooperative (row dots distributed;
+// all costs/choices replicated in registers).
+inline void hc_fwdConstraint_simd(thread const HCState &s, device HCSimdRows *rows,
+                                  int nefc, thread const float *MR,
+                                  thread const float *qfsR, thread const float *qasR,
+                                  float scaleR, thread float *qaccR, thread float *qfcR,
+                                  uint sgTid, threadgroup float *shr) {
+    for (int v = 0; v < 9; v++) qfcR[v] = 0.0f;
+    if (nefc == 0) {  // uniform (replicated nefc)
+        for (int v = 0; v < 9; v++) qaccR[v] = qasR[v];
+        return;
+    }
+    threadgroup float *shrJaref = shr;
+    HCStMask stTmp;
+    float wsR[9];
+    for (int v = 0; v < 9; v++) wsR[v] = s.qacc_warmstart[v];
+    // warmstart cost compare (§6.1)
+    for (int i = (int)sgTid; i < nefc; i += 32)
+        shrJaref[i] = hc_dot9c_dev(rows->efc_J + 9*i, wsR, -rows->efc_aref[i]);
+    simdgroup_barrier(mem_flags::mem_threadgroup);
+    float costWs = hc_costTG(nefc, shrJaref, rows->efc_D, stTmp);
+    float Maw[9];
+    {
+        hc_mulSymVecSparse(MR, wsR, Maw);
+        HCAcc aw;
+        hc_accInit(aw, costWs);
+        for (int v = 0; v < 9; v++)
+            hc_accMulAdd(aw, 0.5f*(Maw[v] - qfsR[v]), wsR[v] - qasR[v]);
+        costWs = hc_accGet(aw);
+    }
+    simdgroup_barrier(mem_flags::mem_threadgroup);  // WAR: jar fully consumed
+    for (int i = (int)sgTid; i < nefc; i += 32)
+        shrJaref[i] = hc_dot9c_dev(rows->efc_J + 9*i, qasR, -rows->efc_aref[i]);
+    simdgroup_barrier(mem_flags::mem_threadgroup);
+    float costSmooth = hc_costTG(nefc, shrJaref, rows->efc_D, stTmp);
+    if (costWs > costSmooth) {
+        for (int v = 0; v < 9; v++) qaccR[v] = qasR[v];
+    } else {
+        for (int v = 0; v < 9; v++) qaccR[v] = wsR[v];
+    }
+    simdgroup_barrier(mem_flags::mem_threadgroup);  // WAR: efcB fully consumed
+    hc_newton_simd(rows, nefc, MR, qfsR, qasR, scaleR, qaccR, qfcR, sgTid, shr);
+}
+
+// mj_forward, cooperative. The position/velocity phase (kinematics, comPos,
+// CRB, LDL, collision, constraint assembly, comVel, passive, RNE, actuation,
+// smooth acceleration) is the SCALAR code on the leader; the leader then
+// publishes the row block + shuffles out the replicated small state, and the
+// reference constraint + solver row work run distributed.
+inline void hc_forward_simd(thread const HCState &s, thread HCWork &w,
+                            device HCSimdRows *rows,
+                            thread float *qaccR, thread float *qfcR,
+                            uint sgTid, threadgroup float *shr) {
+    uint nefcU = 0u;
+    if (sgTid == 0u) {
+        // --- mj_fwdPosition (scalar, leader) ---
+        hc_kinematics(s, w);
+        hc_comPos(w);
+        hc_makeM(w);
+        for (int k = 0; k < 36; k++) w.qLD[k] = w.M[k];
+        hc_factorI(w.qLD, w.qLDiagInv);
+        HCContacts con;   // transient: dead after hc_makeConstraint
+        HCRefCoef ref;    // transient: published to rows below
+        hc_collision(s, w, con);
+        hc_makeConstraint(s, w, con, ref);
+        {
+            float tr = 0.0f;
+            for (int i = 0; i < 9; i++) tr += w.M[HC_M_ROWADR[i] + HC_M_ROWNNZ[i] - 1];
+            w.scale = 1.0f / tr;
+        }
+        // --- mj_fwdVelocity (scalar, leader; referenceConstraint deferred to
+        // the distributed pass below — see the PORT-NOTE in the header) ---
+        hc_comVel(s, w);
+        for (int j = 0; j < 9; j++) {
+            float spring = -HC_JNT_STIFFNESS[j]*(s.qpos[j] - HC_QPOS_SPRING[j]);
+            float damper = -HC_DOF_DAMPING[j]*s.qvel[j];
+            w.qfrc_passive[j] = spring + damper;
+        }
+        hc_rne(s, w);  // qfrc_bias
+
+        // --- mj_fwdActuation (scalar, leader) ---
+        float qfrcAct[9];
+        for (int v = 0; v < 9; v++) qfrcAct[v] = 0.0f;
+        {
+            float cl[6];
+            bool bad = false;
+            for (int u = 0; u < 6; u++) {
+                cl[u] = max(HC_ACT_CTRLRANGE[2*u + 0], min(HC_ACT_CTRLRANGE[2*u + 1], s.ctrl[u]));
+                if (hc_isBad(cl[u])) bad = true;
+            }
+            if (bad)
+                for (int u = 0; u < 6; u++) cl[u] = 0.0f;
+            for (int u = 0; u < 6; u++)
+                qfrcAct[HC_ACT_TRNID[u]] += HC_ACT_GEAR[u]*cl[u];
+        }
+
+        // --- mj_fwdAcceleration (scalar, leader) ---
+        for (int v = 0; v < 9; v++) {
+            w.qfrc_smooth[v] = w.qfrc_passive[v] - w.qfrc_bias[v] + qfrcAct[v];  // qfrc_applied = 0
+            w.qacc_smooth[v] = w.qfrc_smooth[v];
+        }
+        hc_solveLD(w.qacc_smooth, w.qLD, w.qLDiagInv);
+
+        // publish the worker-visible row data (bitwise copies)
+        for (int r = 0; r < w.nefc; r++) {
+            for (int k = 0; k < 9; k++) rows->efc_J[9*r + k] = w.efc_J[9*r + k];
+            rows->efc_pos[r] = w.efc_pos[r];
+            rows->efc_D[r] = w.efc_D[r];
+            rows->efc_imp[r] = ref.efc_imp[r];
+            rows->efc_K[r] = ref.efc_K[r];
+            rows->efc_B[r] = ref.efc_B[r];
+        }
+        nefcU = uint(w.nefc);
+    }
+    // shuffle out the replicated small state (divergent loads keep the
+    // workers' uninitialized HCWork unread)
+    int nefc = int(simd_shuffle(nefcU, (ushort)0));
+    float MR[36], qfsR[9], qasR[9];
+    float scaleR;
+    {
+        float t;
+        for (int k = 0; k < 36; k++) {
+            t = 0.0f;
+            if (sgTid == 0u) t = w.M[k];
+            MR[k] = simd_shuffle(t, (ushort)0);
+        }
+        for (int v = 0; v < 9; v++) {
+            t = 0.0f;
+            if (sgTid == 0u) t = w.qfrc_smooth[v];
+            qfsR[v] = simd_shuffle(t, (ushort)0);
+            t = 0.0f;
+            if (sgTid == 0u) t = w.qacc_smooth[v];
+            qasR[v] = simd_shuffle(t, (ushort)0);
+        }
+        t = 0.0f;
+        if (sgTid == 0u) t = w.scale;
+        scaleR = simd_shuffle(t, (ushort)0);
+    }
+    simdgroup_barrier(mem_flags::mem_device);  // rows copy-out visible
+    // mj_referenceConstraint, distributed per row (PORT-NOTE above): the
+    // expressions are the scalar ones with rows-> in place of w./ref.
+    {
+        float qvLocal[9];
+        for (int v = 0; v < 9; v++) qvLocal[v] = s.qvel[v];
+        for (int i = (int)sgTid; i < nefc; i += 32) {
+            float vel = hc_dot9c_dev(rows->efc_J + 9*i, qvLocal, 0.0f);
+            rows->efc_aref[i] = -rows->efc_B[i]*vel - rows->efc_K[i]*rows->efc_imp[i]*rows->efc_pos[i];  // margin 0
+        }
+    }
+    simdgroup_barrier(mem_flags::mem_device);  // aref visible
+    // --- mj_fwdConstraint (distributed) ---
+    hc_fwdConstraint_simd(s, rows, nefc, MR, qfsR, qasR, scaleR, qaccR, qfcR, sgTid, shr);
+}
+
+// mj_step, cooperative: call with the lane's full simdgroup (sgTid = simd
+// lane id), HC_SIMD_SCRATCH floats of per-lane threadgroup scratch, and the
+// lane's HCSimdRows device scratch block. Every thread carries a replica of
+// s and returns with the identical updated state.
+inline void hc_mj_step_simd(thread HCState &s, device HCSimdRows *rows,
+                            uint sgTid, threadgroup float *shr) {
+    // mj_checkPos / mj_checkVel (replicated, uniform)
+    if (hc_isBadVec9(s.qpos)) hc_resetData(s);
+    if (hc_isBadVec9(s.qvel)) hc_resetData(s);
+    HCWork w;  // leader-only content
+    float qaccR[9], qfcR[9];
+    hc_forward_simd(s, w, rows, qaccR, qfcR, sgTid, shr);
+    // mj_checkAcc: reset THEN recompute the whole forward pass (uniform —
+    // qaccR is the replicated solver qacc)
+    if (hc_isBadVec9(qaccR)) {
+        hc_resetData(s);
+        hc_forward_simd(s, w, rows, qaccR, qfcR, sgTid, shr);
+    }
+    // mj_Euler with implicit joint damping (EULERDAMP): qH = M + h*diag(damping)
+    // — leader-only (needs w.M / LDL), result broadcast; advance replicated.
+    float qaccInt[9];
+    if (sgTid == 0u) {
+        float qH[36], qHDiagInv[9];
+        for (int k = 0; k < 36; k++) qH[k] = w.M[k];
+        for (int i = 0; i < 9; i++)
+            qH[HC_M_ROWADR[i] + HC_M_ROWNNZ[i] - 1] += HC_TIMESTEP*HC_DOF_DAMPING[i];
+        hc_factorI(qH, qHDiagInv);
+        for (int v = 0; v < 9; v++) qaccInt[v] = w.qfrc_smooth[v] + qfcR[v];  // original operand order
+        hc_solveLD(qaccInt, qH, qHDiagInv);
+    } else {
+        for (int v = 0; v < 9; v++) qaccInt[v] = 0.0f;  // defined shuffle operand
+    }
+    for (int v = 0; v < 9; v++) qaccInt[v] = simd_shuffle(qaccInt[v], (ushort)0);
+    // mj_advance: velocity first, then positions with the NEW velocity
+    for (int v = 0; v < 9; v++) s.qvel[v] += HC_TIMESTEP*qaccInt[v];
+    for (int v = 0; v < 9; v++) s.qpos[v] += HC_TIMESTEP*s.qvel[v];
+    // qacc_warmstart <- SOLVER qacc (not the damped qacc_int)
+    for (int v = 0; v < 9; v++) s.qacc_warmstart[v] = qaccR[v];
+}
+
 // ---------------------------------------------------------------------------
 // Probe kernel: one thread = one case = exactly one mj_step.
 // Input layout per case: qpos[9], qvel[9], ctrl[6], warmstart[9] (33 floats).
@@ -1431,6 +2023,35 @@ kernel void oak_physics_probe_debug(device const float *in [[buffer(0)]],
     for (int i = 0; i < w.nefc; i++) o[134 + i] = w.efc_D[i];
     for (int i = 0; i < w.nefc; i++) o[204 + i] = w.efc_aref[i];
     for (int i = 0; i < 9*w.nefc; i++) o[274 + i] = w.efc_J[i];
+}
+
+// ---------------------------------------------------------------------------
+// Cooperative-path probe: one SIMDGROUP (32-thread threadgroup) = one case =
+// exactly one hc_mj_step_simd. Same input/output layout as oak_physics_probe;
+// bitwise equality of the two outputs is the order-preservation proof for the
+// cooperative restructure (dispatch with 32 threads/threadgroup and
+// HC_SIMD_SCRATCH floats of threadgroup memory at index 0).
+// ---------------------------------------------------------------------------
+kernel void oak_physics_probe_coop(device const float *in [[buffer(0)]],
+                                   device float *out [[buffer(1)]],
+                                   constant uint &count [[buffer(2)]],
+                                   device HCSimdRows *rowsBuf [[buffer(3)]],
+                                   threadgroup float *shr [[threadgroup(0)]],
+                                   uint tgid [[threadgroup_position_in_grid]],
+                                   uint tid [[thread_position_in_threadgroup]]) {
+    if (tgid >= count) return;
+    device const float *p = in + tgid*33;
+    HCState s;
+    for (int i = 0; i < 9; i++) s.qpos[i] = p[i];
+    for (int i = 0; i < 9; i++) s.qvel[i] = p[9 + i];
+    for (int i = 0; i < 6; i++) s.ctrl[i] = p[18 + i];
+    for (int i = 0; i < 9; i++) s.qacc_warmstart[i] = p[24 + i];
+    hc_mj_step_simd(s, &rowsBuf[tgid], tid, shr);
+    if (tid == 0u) {
+        device float *o = out + tgid*18;
+        for (int i = 0; i < 9; i++) o[i] = s.qpos[i];
+        for (int i = 0; i < 9; i++) o[9 + i] = s.qvel[i];
+    }
 }
 
 // ===========================================================================

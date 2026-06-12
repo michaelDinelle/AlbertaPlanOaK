@@ -69,6 +69,15 @@ constant bool OAK_MEGA_WIDE2X_FC [[function_constant(26)]];
 constant bool OAK_MEGA_WIDE2X = is_function_constant_defined(OAK_MEGA_WIDE2X_FC)
     ? OAK_MEGA_WIDE2X_FC : false;
 
+// Cooperative env stage: the lane's full simdgroup runs the per-lane physics
+// chain through hc_mj_step_simd (Inv-10 bit-identical class — see the
+// cooperative section of OakPhysics.metal). Default on; host sets
+// OAK_MEGA_ENV_COOP=0 to fall back to the packed scalar chain (bisect
+// instrument). Requires threadgroup buffer 9 (HC_SIMD_SCRATCH floats/lane).
+constant bool OAK_MEGA_ENV_COOP_FC [[function_constant(27)]];
+constant bool OAK_MEGA_ENV_COOP = is_function_constant_defined(OAK_MEGA_ENV_COOP_FC)
+    ? OAK_MEGA_ENV_COOP_FC : true;
+
 
 struct KernelConfig {
     uint obsDim, rank, optionCount, actionParamCount;
@@ -1777,6 +1786,125 @@ static inline void oak_stage_fleet_env(device float *params,
     }
 }
 
+// Simdgroup-cooperative variant of oak_stage_fleet_env (megastep env stage):
+// the lane's whole simdgroup carries replicated env state through the 5x
+// hc_mj_step_simd chain (OakPhysics.metal cooperative section, Inv-10
+// bit-identical class), then sgTid 0 commits the original bookkeeping
+// verbatim from the replicated values. The reset/step branch is uniform
+// (one lane per simdgroup); shr is the lane's HC_SIMD_SCRATCH-float slice.
+static inline void oak_stage_fleet_env_simd(device float *params,
+                                            device float *stateArena,
+                                            device uint *uintArena,
+                                            device KernelScalars *scalars,
+                                            device KernelStats *stats,
+                                            constant KernelConfig &cfg,
+                                            device OakFleetLane *lanes,
+                                            device const uint *laneSeeds,
+                                            constant OakFleetEnvCfg &ecfg,
+                                            device const int *recordSlot,
+                                            device float *recordBuf,
+                                            device HCSimdRows *rows,
+                                            uint gid, uint sgTid,
+                                            threadgroup float *shr) {
+    device OakFleetLane *lane = &lanes[gid];
+    HCState s = lane->s;
+    uint elapsed = lane->elapsed, resets = lane->resets;
+    float ctrl[6];
+    for (int u = 0; u < 6; u++) ctrl[u] = lane->ctrlPending[u];
+    float reward;
+    uint done;
+    float info[4];
+    if (ecfg.episodeLen != 0u && elapsed >= ecfg.episodeLen) {
+        // HCRaw::ResetRaw: action discarded, reward 0, done flag 0, info zeroed.
+        hc_env_reset(s, laneSeeds[gid], elapsed, resets);
+        reward = 0.0f;
+        done = 0u;
+        info[0] = 0.0f; info[1] = -0.0f; info[2] = 0.0f; info[3] = 0.0f;
+    } else {
+        float xBefore = s.qpos[0];
+        for (int u = 0; u < 6; u++) s.ctrl[u] = ctrl[u];
+        for (int k = 0; k < HC_FRAME_SKIP; k++) hc_mj_step_simd(s, rows, sgTid, shr);
+        float xv = (s.qpos[0] - xBefore) / (float(HC_FRAME_SKIP) * HC_TIMESTEP);
+        float ctrlCost = 0.0f;
+        for (int u = 0; u < 6; u++) ctrlCost += 0.1f * ctrl[u] * ctrl[u];
+        reward = xv * 1.0f - ctrlCost;
+        elapsed++;
+        done = (ecfg.episodeLen != 0u && elapsed >= ecfg.episodeLen) ? 1u : 0u;
+        info[0] = xv; info[1] = -ctrlCost; info[2] = s.qpos[0]; info[3] = xv;
+    }
+    if (sgTid != 0u) return;  // replicas done; the leader commits (no barriers below)
+    float obs[17];
+    for (int i = 1; i < 9; i++) obs[i - 1] = s.qpos[i];
+    for (int i = 0; i < 9; i++) obs[8 + i] = s.qvel[i];
+    lane->s = s;
+    lane->elapsed = elapsed;
+    lane->resets = resets;
+    lane->doneCount += done;
+    uint stepNum = lane->steps;  // incremented by oak_sample_act
+
+    // Run.note: only finite rewards accumulate; non-finite latches envReward.
+    if (isfinite(reward)) {
+        oak_kahan_add(&lane->rewardSum, &lane->rewardC, reward);
+        float rate = max(1.0f / float(stepNum), ecfg.invObsFloor);
+        lane->rho += rate * (reward - lane->rho);
+    } else if (lane->deathStep == OAK_DEATH_NONE) {
+        lane->deathStep = stepNum;
+        lane->deathDetector = OAK_DET_ENV_REWARD;
+        lane->deathRewardSum = lane->rewardSum;
+        lane->deathRho = lane->rho;
+    }
+    // CPU fleet order: envReward first, then policyMean (engine lanes only).
+    if (ecfg.policyMode == 0u) {
+        Ctx ctx = make_ctx(params, stateArena, uintArena, scalars, stats, cfg, gid);
+        if (lane->deathStep == OAK_DEATH_NONE) {
+            for (uint i = 0u; i < ctx.D; ++i) {
+                if (!isfinite(ctx.policyMean[i])) {
+                    lane->deathStep = stepNum;
+                    lane->deathDetector = OAK_DET_POLICY_MEAN;
+                    lane->deathRewardSum = lane->rewardSum;
+                    lane->deathRho = lane->rho;
+                    break;
+                }
+            }
+        }
+        for (uint i = 0u; i < ctx.O && i < 17u; ++i) ctx.observation[i] = obs[i];
+        ctx.reward[0] = reward;
+    }
+    // envObs is GPU-mode-only: the CPU loop never finite-checked obs (qpos/qvel
+    // auto-reset on bad values inside mj_step), so this latch is belt-and-braces.
+    if (lane->deathStep == OAK_DEATH_NONE) {
+        bool obsBad = false;
+        for (int i = 0; i < 17; i++) obsBad = obsBad || !isfinite(obs[i]);
+        if (obsBad) {
+            lane->deathStep = stepNum;
+            lane->deathDetector = OAK_DET_ENV_OBS;
+            lane->deathRewardSum = lane->rewardSum;
+            lane->deathRho = lane->rho;
+        }
+    }
+    // envInfo accumulators (InfoStat.note semantics).
+    for (int j = 0; j < 4; j++) {
+        device OakFleetInfoAcc *a = &lane->info[j];
+        a->count += 1u;
+        if (isfinite(info[j])) {
+            if (a->finiteCount == 0u) a->first = info[j];
+            a->finiteCount += 1u;
+            oak_kahan_add(&a->sum, &a->sumC, info[j]);
+            a->last = info[j];
+        }
+    }
+    // ActionRecorder.record: actionSignal[0..actDim) (= clamped action) + done.
+    if (ecfg.recordCapacity != 0u) {
+        int slot = recordSlot[gid];
+        if (slot >= 0) {
+            ulong base = ((ulong)slot * ecfg.recordCapacity
+                          + ((stepNum - 1u) % ecfg.recordCapacity)) * 7ul;
+            for (int u = 0; u < 6; u++) recordBuf[base + u] = ctrl[u];
+            recordBuf[base + 6] = float(done);
+        }
+    }
+}
+
 kernel void oak_fleet_env(device float *params [[buffer(0)]],
                           device float *stateArena [[buffer(1)]],
                           device uint *uintArena [[buffer(2)]],
@@ -1841,6 +1969,7 @@ kernel void oak_megastep(device float *params [[buffer(0)]],
                          device const int *recordSlot [[buffer(9)]],
                          device float *recordBuf [[buffer(10)]],
                          constant uint &stepsThisDispatch [[buffer(11)]],
+                         device HCSimdRows *physRows [[buffer(12)]],
                          threadgroup float *tgG [[threadgroup(0)]],
                          threadgroup float *tgCont [[threadgroup(1)]],
                          threadgroup float *tgTerm [[threadgroup(2)]],
@@ -1850,6 +1979,7 @@ kernel void oak_megastep(device float *params [[buffer(0)]],
                          threadgroup float *tgCurrState [[threadgroup(6)]],
                          threadgroup float *tgDir [[threadgroup(7)]],
                          threadgroup float *tgEffort [[threadgroup(8)]],
+                         threadgroup float *tgPhys [[threadgroup(9)]],
                          uint tgIdx [[threadgroup_position_in_grid]],
                          uint tid [[thread_position_in_threadgroup]],
                          uint slane [[thread_index_in_simdgroup]],
@@ -1946,9 +2076,19 @@ kernel void oak_megastep(device float *params [[buffer(0)]],
                                  lanes, laneSeeds, ecfg, packedLane);
         }
         threadgroup_barrier(mem_flags::mem_device);
-        if (packedActive && (OAK_MEGA_STAGES & 64u) != 0u) {
-            oak_stage_fleet_env(params, stateArena, uintArena, scalars, stats, cfg,
-                                lanes, laneSeeds, ecfg, recordSlot, recordBuf, packedLane);
+        if ((OAK_MEGA_STAGES & 64u) != 0u) {
+            if (OAK_MEGA_ENV_COOP) {
+                // Cooperative: one simdgroup per lane (wide mapping), the
+                // whole simdgroup drives the lane's 5x hc_mj_step chain.
+                if (wideActive)
+                    oak_stage_fleet_env_simd(params, stateArena, uintArena, scalars, stats,
+                                             cfg, lanes, laneSeeds, ecfg, recordSlot,
+                                             recordBuf, &physRows[wideLane], wideLane, slane,
+                                             tgPhys + laneSg * uint(HC_SIMD_SCRATCH));
+            } else if (packedActive) {
+                oak_stage_fleet_env(params, stateArena, uintArena, scalars, stats, cfg,
+                                    lanes, laneSeeds, ecfg, recordSlot, recordBuf, packedLane);
+            }
         }
         threadgroup_barrier(mem_flags::mem_device);
     }
