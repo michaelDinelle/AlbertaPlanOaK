@@ -547,9 +547,14 @@ func metricsRoot() -> URL {
       var lastDrainStep = 0
       var error: Error?
       var gpuSeconds = 0.0
+      // Previous-heartbeat rewardSums for recent-window delivered rates
+      // (the live "is the population learning NOW" signal).
+      var prevRewardSum: [Double]
+      var prevStep = 0
       init(_ b: Int) {
         deadStep = Array(repeating: nil, count: b)
         deadDetector = Array(repeating: nil, count: b)
+        prevRewardSum = Array(repeating: 0, count: b)
       }
     }
     let st = WriterState(B)
@@ -687,19 +692,39 @@ func metricsRoot() -> URL {
       if !deathLines.isEmpty { try deathsOut.write(contentsOf: deathLines) }
       try fleetOut.write(contentsOf: lines)
       let alive = st.deadStep.filter { $0 == nil }.count
-      let rates = (0..<B).map { l -> Double in
+      let unsorted = (0..<B).map { l -> Double in
         let sn = snapPtr[half * B + l]
         return sn.steps > 0 ? Double(sn.rewardSum) / Double(sn.steps) : 0
-      }.sorted()
-      func quantile(_ x: Double) -> Double {
-        rates[min(Int((Double(rates.count - 1) * x).rounded()), rates.count - 1)]
       }
+      let rates = unsorted.sorted()
+      func quantile(_ s: [Double], _ x: Double) -> Double {
+        s[min(Int((Double(s.count - 1) * x).rounded()), s.count - 1)]
+      }
+      // Recent-window per-lane rates from the previous heartbeat's rewardSums.
+      let dStep = step - st.prevStep
+      let recent = (0..<B).map { l -> Double in
+        let sn = snapPtr[half * B + l]
+        return dStep > 0
+          ? (Double(sn.rewardSum) - st.prevRewardSum[l]) / Double(dStep) : unsorted[l]
+      }
+      for l in 0..<B { st.prevRewardSum[l] = Double(snapPtr[half * B + l].rewardSum) }
+      st.prevStep = step
+      let recentSorted = recent.sorted()
+      let bestLane = unsorted.indices.max(by: { unsorted[$0] < unsorted[$1] }) ?? 0
       try aggOut.write(
         contentsOf: jsonLine([
           "step": step, "kind": kind, "policy": p.rawValue, "alive": alive, "dead": B - alive,
-          "deliveredRateP10": quantile(0.1), "deliveredRateP50": quantile(0.5),
-          "deliveredRateP90": quantile(0.9), "wallSeconds": wall,
+          "deliveredRateP10": quantile(rates, 0.1), "deliveredRateP50": quantile(rates, 0.5),
+          "deliveredRateP90": quantile(rates, 0.9), "wallSeconds": wall,
           "aggStepsPerSecond": wall > 0 ? Double(step) * Double(B) / wall : 0,
+          "bestLaneSeed": seeds[bestLane], "bestLaneDeliveredRate": unsorted[bestLane],
+          "bestLaneRewardSum": Double(snapPtr[half * B + bestLane].rewardSum),
+          "positiveRateLaneCount": unsorted.filter { $0 > 0 }.count,
+          "positiveRateFraction": Double(unsorted.filter { $0 > 0 }.count) / Double(B),
+          "recentRateP10": quantile(recentSorted, 0.1),
+          "recentRateP50": quantile(recentSorted, 0.5),
+          "recentRateP90": quantile(recentSorted, 0.9),
+          "recentRateMax": recentSorted[recentSorted.count - 1],
         ]))
       if !recordLanes.isEmpty {
         let rp = recordBuf.contents().bindMemory(
@@ -1047,12 +1072,23 @@ func metricsRoot() -> URL {
         isDirectory: true)
     }
     try fm.createDirectory(at: dir, withIntermediateDirectories: true)
+    // Static FMA-class op count per lane-step (build constant; the per-FLOP
+    // denominator for reward-rate-per-FLOP reporting). Derivation from the
+    // kernel loop bounds (HalfCheetah: O=17, D=12, R=K=24, learnTotal=22,488):
+    // encode option-model query + plan transition TDs ~ 2*K*R^2; learn ~ 2 ops
+    // per element; emit blend K*D*R; RR/psi encode + features ~ 4*K*R + 6*R^2;
+    // GPU physics ~ 20K (5 fp32 mj_steps: FK/CRB/RNE/contacts/Newton/Euler).
+    let mR = max(17, 12 * 2, 2)
+    let mLearnTotal = mR + mR * mR + mR * 12 * mR + mR * mR + mR * mR * mR + mR * mR
+    let flopsPerLaneStep =
+      2 * mR * mR * mR + 2 * mLearnTotal + mR * 12 * mR + 4 * mR * mR + 6 * mR * mR + 20_000
     try JSONSerialization.data(
       withJSONObject: [
         "fleetSchemaVersion": 1, "command": "benchmark", "envId": envId,
         "batch": seedValues.count, "seeds": seedValues, "steps": steps,
         "policies": policies.map(\.rawValue), "ablation": ablations.names,
         "ablationLabel": ablations.label,
+        "flopsPerLaneStep": flopsPerLaneStep,
         "startedAt": ISO8601DateFormatter().string(from: Date()),
       ] as [String: Any], options: [.prettyPrinted, .sortedKeys]
     ).write(to: dir.appendingPathComponent("meta.json"), options: .atomic)
