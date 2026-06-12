@@ -1660,8 +1660,8 @@ intelligence by accident.
 
 | Optimization type | Requirement |
 |---|---|
-| Bit-identical | Smoke plus 1.5M sanity bench. Preserve the original `fma` sequence when reductions feed agent state. |
-| FP reorder | 10-seed paired proof. Aggregate parity is insufficient; per-seed lift and chatter must stay within the accepted tolerance. |
+| Bit-identical (incl. megakernel stage fusion, grid/simdgroup remaps of independent work, shape-specialized unrolling under `-fno-fast-math`) | Bitwise A/B proof (`actions.bin` cmp + state-hash streams) + Tier-S smoke. Preserve the original `fma` sequence when reductions feed agent state. |
+| FP reorder (`simd_sum`, `simdgroup_matrix`, order-changing reductions) | `fleet.py gate` PROMOTE: Tier-M (N=1024×100k, paired) screen → Tier-L promotion vs the keeper. Replaces the retired 10-seed ±3% rule. |
 | New algorithmic reduction | Treat as algorithmic, not a perf patch. Needs the full mechanism benchmark. |
 
 Compute improvements matter because the Plan treats compute as first-class,

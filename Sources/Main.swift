@@ -178,6 +178,19 @@ final class Engine {
     rank = max(obsDim, dPolicy * 2, 2)
     d = dPolicy
     a = Arena(obsDim, rank, d)
+    let k = rank
+    paramTotal = rank + k * rank + k * d * rank + k * rank + k * rank * rank + k * rank
+    uintTotal = 9 + 8 * rank
+    learnTotal =
+      rank + rank * rank + rank * d * rank + rank * rank + rank * rank * rank + rank * rank
+    let anchors = min(rank, max(obsDim, d, 1))
+    let cfgValue = KernelConfig(
+      obsDim: UInt32(obsDim), rank: UInt32(rank), optionCount: UInt32(rank),
+      actionParamCount: UInt32(d), obsTraceLevels: UInt32(max(Arena.traces(obsDim) - 1, 0)),
+      linearAnchorCount: UInt32(anchors), invRank: 1 / Float(rank),
+      invOptionCount: 1 / Float(rank), metaEta: 1 / Float(rank) / Float(max(rank + d, 1)),
+      agentCount: UInt32(batch), paramStride: UInt32(paramTotal),
+      stateStride: UInt32(a.total), uintStride: UInt32(uintTotal))
     guard let cq = dev.makeCommandQueue() else {
       throw err("Metal command queue unavailable.")
     }
@@ -186,6 +199,7 @@ final class Engine {
       URL: try requireFreshMetallib())
     let constants = MTLFunctionConstantValues()
     ablations.apply(to: constants)
+    Self.applyShapeConstants(constants, cfgValue)
     pipes = try ["oak_encode", "oak_plan", "oak_learn_heads", "oak_replace", "oak_action_emit"].map {
       let fn = try lib.makeFunction(name: $0, constantValues: constants)
       return try dev.makeComputePipelineState(function: fn)
@@ -196,11 +210,6 @@ final class Engine {
     }
     tg = min(max(rank, pipes.map { Int($0.threadExecutionWidth) }.max() ?? 1), maxTG)
     tgBytes = tg * MemoryLayout<Float>.stride
-    let k = rank
-    paramTotal = rank + k * rank + k * d * rank + k * rank + k * rank * rank + k * rank
-    uintTotal = 9 + 8 * rank
-    learnTotal =
-      rank + rank * rank + rank * d * rank + rank * rank + rank * rank * rank + rank * rank
     actionGroups = max(1, (rank * d + tg - 1) / tg)
     params = Shared(dev, batch * paramTotal, 0)
     state = Shared(dev, batch * a.total, 0)
@@ -218,7 +227,6 @@ final class Engine {
     let psi = rank
     let optPolicy = psi + rank * rank
     let inv = 1 / sqrt(Float(rank))
-    let anchors = min(rank, max(obsDim, d, 1))
     let alpha = 1 / Float(max(obsDim, 1))
     for lane in 0..<batch {
       scalars[lane] = KernelScalars()
@@ -242,44 +250,26 @@ final class Engine {
         lp[optPolicy + (k * d + slot) * rank] = sign * basis
       }
     }
-    configB.contents().bindMemory(to: KernelConfig.self, capacity: 1).initialize(
-      to: KernelConfig(
-        obsDim: UInt32(obsDim), rank: UInt32(rank), optionCount: UInt32(rank),
-        actionParamCount: UInt32(d), obsTraceLevels: UInt32(max(Arena.traces(obsDim) - 1, 0)),
-        linearAnchorCount: UInt32(anchors), invRank: 1 / Float(rank),
-        invOptionCount: 1 / Float(rank), metaEta: 1 / Float(rank) / Float(max(rank + d, 1)),
-        agentCount: UInt32(batch), paramStride: UInt32(paramTotal),
-        stateStride: UInt32(a.total), uintStride: UInt32(uintTotal)))
+    configB.contents().bindMemory(to: KernelConfig.self, capacity: 1).initialize(to: cfgValue)
   }
-  func dispatch() throws {
-    guard let cb = q.makeCommandBufferWithUnretainedReferences(),
-      let e = cb.makeComputeCommandEncoder()
-    else { throw err("Failed to encode Metal command.") }
-    func bind(_ i: Int) {
-      e.setComputePipelineState(pipes[i])
-      for j in res.indices { e.setBuffer(res[j], offset: 0, index: j) }
-    }
-    func groups(_ i: Int, _ n: Int, _ mem: Int = 1, _ barrier: Bool = true) {
-      bind(i)
-      for m in 0..<mem { e.setThreadgroupMemoryLength(tgBytes, index: m) }
-      e.dispatchThreadgroups(
-        MTLSize(width: n, height: batch, depth: 1), threadsPerThreadgroup: mtlSize(tg))
-      if barrier { e.memoryBarrier(scope: [.buffers]) }
-    }
-    groups(0, 1, 9)
-    groups(1, rank)
-    bind(2)
-    let ltg = min(
-      max(Int(pipes[2].threadExecutionWidth), 1), pipes[2].maxTotalThreadsPerThreadgroup)
-    e.dispatchThreads(
-      MTLSize(width: learnTotal, height: batch, depth: 1), threadsPerThreadgroup: mtlSize(ltg))
-    e.memoryBarrier(scope: [.buffers])
-    groups(3, 1)
-    groups(4, actionGroups, 1, false)
-    e.endEncoding()
-    cb.commit()
-    cb.waitUntilCompleted()
-    if let e = cb.error { throw err("Metal command failed: \(e)") }
+  // Shape specialization: bind the env dims and derived strides as Metal
+  // function constants 13..24, sourced from the exact KernelConfig values the
+  // kernels otherwise load from the cfg buffer — a specialized pipeline is
+  // bit-identical to the generic one by construction (-fno-fast-math forbids
+  // reassociation, so unrolled/constant-folded code keeps the fma sequences).
+  static func applyShapeConstants(_ constants: MTLFunctionConstantValues, _ cfg: KernelConfig) {
+    var u: [UInt32] = [
+      cfg.obsDim, cfg.rank, cfg.optionCount, cfg.actionParamCount,
+      cfg.obsTraceLevels, cfg.linearAnchorCount,
+      cfg.paramStride, cfg.stateStride, cfg.uintStride,
+    ]
+    for i in u.indices { constants.setConstantValue(&u[i], type: .uint, index: 13 + i) }
+    var f: [Float] = [cfg.invRank, cfg.invOptionCount, cfg.metaEta]
+    for i in f.indices { constants.setConstantValue(&f[i], type: .float, index: 22 + i) }
+  }
+  func applyShapeConstants(_ constants: MTLFunctionConstantValues) {
+    Self.applyShapeConstants(
+      constants, configB.contents().bindMemory(to: KernelConfig.self, capacity: 1).pointee)
   }
   // Validation instrumentation: SHA-256 over a lane's trajectory-bearing slices
   // (params | state arena | uints | scalars), excluding diagnostics (stats).
@@ -370,21 +360,49 @@ func metricsRoot() -> URL {
       p == .oak
       ? try Engine(obsDim: obsDim, dPolicy: dPolicy, batch: B, dev: dev, ablations: ablations)
       : nil
-    if let eng = engine, eng.rank > 64 {
-      throw err("oak_sample_act logp capacity is 64 options; rank \(eng.rank) exceeds it.")
+    if let eng = engine, eng.rank > 32 {
+      throw err(
+        "Megastep lane stages are simdgroup-wide (32 threads, 32-float tg slots); rank \(eng.rank) exceeds 32.")
     }
     guard let q = engine?.q ?? dev.makeCommandQueue() else {
       throw err("Metal command queue unavailable.")
     }
     let lib = try dev.makeLibrary(URL: try requireFreshMetallib())
+    // make_ctx references the optional OAK_SPEC_* function constants, so every
+    // kernel touching it must come from the specialized-function path (plain
+    // makeFunction(name:) cannot build a pipeline once constants are present).
     func pipeline(_ name: String) throws -> MTLComputePipelineState {
-      guard let fn = lib.makeFunction(name: name) else { throw err("Missing \(name) kernel.") }
+      let fn = try lib.makeFunction(name: name, constantValues: MTLFunctionConstantValues())
       return try dev.makeComputePipelineState(function: fn)
     }
     let initPipe = try pipeline("oak_fleet_init")
-    let samplePipe = try pipeline("oak_sample_act")
-    let envPipe = try pipeline("oak_fleet_env")
     let snapPipe = try pipeline("oak_fleet_snapshot")
+    // Megastep pipeline: the stage functions reference the OAK_ABLATE function
+    // constants, so it must be specialized with the same constant values as the
+    // Engine's agent pipelines. OAK_MEGA_G (constant 12) sets the v2 lane
+    // packing: one threadgroup of 32*G threads owns G consecutive lanes
+    // (OAK_MEGA_LANES_PER_TG; default = best measured; G=1 reproduces the v1
+    // one-lane-per-threadgroup geometry). Threadgroup memory bounds G: nine
+    // slots x G x 32 floats = G x 1152 bytes (G=24 -> 27.6 KB < 32 KB).
+    let megaG = e["OAK_MEGA_LANES_PER_TG"].flatMap(Int.init) ?? 16
+    let megaW = 32 * megaG
+    let megaConstants = MTLFunctionConstantValues()
+    ablations.apply(to: megaConstants)
+    var megaG32 = UInt32(megaG)
+    megaConstants.setConstantValue(&megaG32, type: .uint, index: 12)
+    // Shape specialization: oak runs bind the env dims (and derived strides)
+    // as compile-time constants 13..24 — bit-identical by construction under
+    // -fno-fast-math. zero/random runs have no engine (agent stages are
+    // skipped) and keep the generic cfg path.
+    if let eng = engine { eng.applyShapeConstants(megaConstants) }
+    let megaPipe = try dev.makeComputePipelineState(
+      function: lib.makeFunction(name: "oak_megastep", constantValues: megaConstants))
+    guard megaG >= 1, megaW <= megaPipe.maxTotalThreadsPerThreadgroup,
+      9 * megaW * 4 <= dev.maxThreadgroupMemoryLength
+    else {
+      throw err(
+        "OAK_MEGA_LANES_PER_TG=\(megaG) needs \(megaW) threads/threadgroup (pipeline max \(megaPipe.maxTotalThreadsPerThreadgroup)) and \(9 * megaW * 4) tg bytes (device max \(dev.maxThreadgroupMemoryLength)).")
+    }
     func makeBuf(_ len: Int) throws -> MTLBuffer {
       guard let b = dev.makeBuffer(length: max(len, 16), options: [.storageModeShared]) else {
         throw err("Metal buffer allocation failed (\(len) bytes).")
@@ -480,7 +498,8 @@ func metricsRoot() -> URL {
       laneCount: UInt32(B), episodeLen: UInt32(episodeLen),
       policyMode: p == .oak ? 0 : (p == .zero ? 1 : 2),
       recordCapacity: UInt32(recordCapacity), invObsFloor: 1 / Float(obsDim))
-    let laneTG = mtlSize(min(64, envPipe.maxTotalThreadsPerThreadgroup))
+    let laneTG = mtlSize(
+      min(64, initPipe.maxTotalThreadsPerThreadgroup, snapPipe.maxTotalThreadsPerThreadgroup))
     func bindFleet(_ enc: MTLComputeCommandEncoder, _ pipe: MTLComputePipelineState) {
       enc.setComputePipelineState(pipe)
       for j in res.indices { enc.setBuffer(res[j], offset: 0, index: j) }
@@ -489,40 +508,24 @@ func metricsRoot() -> URL {
       var c = ecfg
       enc.setBytes(&c, length: MemoryLayout<FleetEnvCfg>.stride, index: 8)
     }
-    // One step-iteration: 5 agent kernels (oak only) -> sample -> env, with
-    // buffer barriers between every stage (same fences as Engine.dispatch).
-    func encodeStep(_ enc: MTLComputeCommandEncoder) {
-      if let eng = engine {
-        func bind(_ i: Int) {
-          enc.setComputePipelineState(eng.pipes[i])
-          for j in eng.res.indices { enc.setBuffer(eng.res[j], offset: 0, index: j) }
-        }
-        func groups(_ i: Int, _ n: Int, _ mem: Int = 1) {
-          bind(i)
-          for m in 0..<mem { enc.setThreadgroupMemoryLength(eng.tgBytes, index: m) }
-          enc.dispatchThreadgroups(
-            MTLSize(width: n, height: B, depth: 1), threadsPerThreadgroup: mtlSize(eng.tg))
-          enc.memoryBarrier(scope: [.buffers])
-        }
-        groups(0, 1, 9)
-        groups(1, eng.rank)
-        bind(2)
-        let ltg = min(
-          max(Int(eng.pipes[2].threadExecutionWidth), 1),
-          eng.pipes[2].maxTotalThreadsPerThreadgroup)
-        enc.dispatchThreads(
-          MTLSize(width: eng.learnTotal, height: B, depth: 1), threadsPerThreadgroup: mtlSize(ltg))
-        enc.memoryBarrier(scope: [.buffers])
-        groups(3, 1)
-        groups(4, eng.actionGroups, 1)
-      }
-      bindFleet(enc, samplePipe)
-      enc.dispatchThreads(mtlSize(B), threadsPerThreadgroup: laneTG)
-      enc.memoryBarrier(scope: [.buffers])
-      bindFleet(enc, envPipe)
+    // Megastep v2: one persistent dispatch runs n whole step-iterations on
+    // ceil(B/G) threadgroups x 32*G threads (each threadgroup owns G
+    // consecutive lanes; threadgroup slots 0..8 mirror oak_encode's nine at 32
+    // floats per lane). Bitwise-certified equal to v1 (one lane per
+    // threadgroup), which was certified equal to the retired 7-dispatch
+    // per-step loop; the per-stage wrapper kernels in OakKernel.metal remain
+    // as the bisect instrument.
+    let megaTGBytes = megaW * MemoryLayout<Float>.stride
+    func encodeMegastep(_ enc: MTLComputeCommandEncoder, _ n: Int) {
+      bindFleet(enc, megaPipe)
       enc.setBuffer(recordSlotBuf, offset: 0, index: 9)
       enc.setBuffer(recordBuf, offset: 0, index: 10)
-      enc.dispatchThreads(mtlSize(B), threadsPerThreadgroup: laneTG)
+      var n32 = UInt32(n)
+      enc.setBytes(&n32, length: 4, index: 11)
+      for m in 0..<9 { enc.setThreadgroupMemoryLength(megaTGBytes, index: m) }
+      enc.dispatchThreadgroups(
+        MTLSize(width: (B + megaG - 1) / megaG, height: 1, depth: 1),
+        threadsPerThreadgroup: mtlSize(megaW))
       enc.memoryBarrier(scope: [.buffers])
     }
     // Lane init (env reset + arena seeding), synchronous.
@@ -760,7 +763,7 @@ func metricsRoot() -> URL {
       guard let cb = q.makeCommandBuffer(), let enc = cb.makeComputeCommandEncoder() else {
         throw err("Failed to encode Metal command.")
       }
-      for _ in step..<target { encodeStep(enc) }
+      encodeMegastep(enc, target - step)
       if isSnap {
         bindFleet(enc, snapPipe)
         enc.setBuffer(snapBuf, offset: 0, index: 9)
