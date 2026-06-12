@@ -1733,6 +1733,22 @@ GPU-physics derisk probes (2026-06-11, M4 Max):
   published numbers in AGENTS.md "The SOTA bar" are 1000-step-episode evals).
   F4 equivalence gates run with episodeLen=0 to match the keeper.
 
+**First deep-horizon decay run** (`.oak-benchmarks/xl-lite-decay-3m-20260611`,
+B=128 × 3M, 82 min at 604/lane sustained):
+
+- **Zenith right-shifts with horizon**: quartiles 700k/1.15M/1.9M at the 3M
+  horizon vs 250k/350k/700k at 1M — "plasticity loss by ~1M" was partly a
+  measurement-horizon artifact; the median lane peaks beyond the old Tier-L
+  window, and 4 of the top-10 lanes are still climbing at 3M (one zenith at
+  exactly 3.0M).
+- **The decay cliff is still real for the population**: median decay ratio
+  −0.55, entropy collapse 69.5% [61.1, 76.8], median delivered negative.
+- Seed 40: +0.1304/step held ≈flat for ~2M steps past zenith (+391K total;
+  recent ≈ lifetime) — the existence proof of a long-lived stable gait.
+- Sharpened frontier question: what separates late-zenith/steady lanes from
+  deep-decayers, and does zenith keep shifting at 10M (the XL question —
+  still gated on per-lane rate).
+
 Megakernel-era measured facts (2026-06-11, post-66a6cf445 lever rounds):
 
 - **Per-lane chain anatomy** (B=64 unsaturated, stage-mask instrument
