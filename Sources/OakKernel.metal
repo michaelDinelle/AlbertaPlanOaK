@@ -24,15 +24,8 @@ constant bool OAK_ABLATE_SEARCH_CONTROL [[function_constant(9)]];
 constant bool OAK_ABLATE_SEARCH_TO_GENERATE_TEST [[function_constant(10)]];
 constant bool OAK_ABLATE_GENERATE_AND_TEST [[function_constant(11)]];
 
-// Megastep v2 lane packing: one threadgroup of 32*OAK_MEGA_G threads owns
-// OAK_MEGA_G consecutive lanes. Required by the oak_megastep pipeline only.
 constant uint OAK_MEGA_G [[function_constant(12)]];
 
-// Shape specialization (optional, set at pipeline creation from the env dims).
-// Undefined = generic cfg-driven path. The host passes exactly the values it
-// writes into KernelConfig, so the specialized pipeline is bit-identical by
-// construction (-fno-fast-math forbids reassociation; unrolling/constant
-// folding cannot change the fma sequences).
 constant uint OAK_SPEC_OBS_DIM [[function_constant(13)]];
 constant uint OAK_SPEC_RANK [[function_constant(14)]];
 constant uint OAK_SPEC_OPTION_COUNT [[function_constant(15)]];
@@ -46,38 +39,17 @@ constant float OAK_SPEC_INV_RANK [[function_constant(22)]];
 constant float OAK_SPEC_INV_OPTION_COUNT [[function_constant(23)]];
 constant float OAK_SPEC_META_ETA [[function_constant(24)]];
 
-// Stage-resolved timing instrument (DEBUG ONLY, host: OAK_MEGA_STAGE_MASK).
-// Bitmask gating each oak_megastep stage: encode bit0, plan bit1, learn bit2,
-// replace bit3, emit bit4, sample bit5, env bit6. Skipped stages still hit
-// their barriers, so the loop structure is identical. Disabling stages changes
-// semantics (downstream reads of never-written state) — use only to read
-// aggregate throughput, never for science/gate runs. Undefined = all-on, and
-// the all-on path constant-folds to exactly the unmasked code.
 constant uint OAK_MEGA_STAGE_MASK [[function_constant(25)]];
 constant uint OAK_MEGA_STAGES = is_function_constant_defined(OAK_MEGA_STAGE_MASK)
     ? OAK_MEGA_STAGE_MASK : 0xffffffffu;
 
-// Two simdgroups per lane (W = 64*G): the second simdgroup is idle in every
-// stage except oak_learn_heads, whose 22K independent elements remap over 64
-// threads instead of 32 (bit-identical: thread->element remap only; the
-// element math and element->value mapping are unchanged). Stage-internal
-// simdgroup barriers stay valid because every barriered stage runs only on
-// the lane's leading simdgroup. Host sets this with OAK_MEGA_WIDE2X and
-// doubles the dispatch width to match; threadgroup slots stay 32 floats per
-// lane. Default off = the certified one-simdgroup-per-lane geometry.
 constant bool OAK_MEGA_WIDE2X_FC [[function_constant(26)]];
 constant bool OAK_MEGA_WIDE2X = is_function_constant_defined(OAK_MEGA_WIDE2X_FC)
     ? OAK_MEGA_WIDE2X_FC : false;
 
-// Cooperative env stage: the lane's full simdgroup runs the per-lane physics
-// chain through hc_mj_step_simd (Inv-10 bit-identical class — see the
-// cooperative section of OakPhysics.metal). Default on; host sets
-// OAK_MEGA_ENV_COOP=0 to fall back to the packed scalar chain (bisect
-// instrument). Requires threadgroup buffer 9 (HC_SIMD_SCRATCH floats/lane).
 constant bool OAK_MEGA_ENV_COOP_FC [[function_constant(27)]];
 constant bool OAK_MEGA_ENV_COOP = is_function_constant_defined(OAK_MEGA_ENV_COOP_FC)
     ? OAK_MEGA_ENV_COOP_FC : true;
-
 
 struct KernelConfig {
     uint obsDim, rank, optionCount, actionParamCount;
@@ -109,7 +81,7 @@ struct KernelStats {
     float mainTd, planTdValue;
     float keyboardSketchDim, keyboardEffectiveL1;
     float searchControlUseMean, generateTestEligibleCount;
-    float learningMature;  // mean over options of (1 - fast/peak) of |tdPsi[k]|
+    float learningMature;
 };
 
 inline float safe_w(float old_w, float new_w) { return isfinite(new_w) ? new_w : old_w; }
@@ -139,7 +111,7 @@ struct Ctx {
     device float *durationTd, *durationHat, *obsTraceMulti, *prioOpt, *continuation;
     device float *keyboard, *modelDenom;
     device float *valueGauge;
-    device float *tdPsiFast, *tdPsiPeak;  // per-option learning-progress EMAs
+    device float *tdPsiFast, *tdPsiPeak;
     device uint *counters, *optFeature, *featureAge, *optAge;
     device uint *featureParentA, *featureParentB, *featureKind, *featureBirthCount;
     device uint *selectedOption, *keyboardOrigin;
@@ -361,7 +333,6 @@ inline void fcstomp_prediction_control_loop(Ctx ctx, uint tid,
                                       threadgroup float *tgDir,
                                       threadgroup float *tgEffort,
                                       threadgroup float *tgScalars) {
-    // GVFPrediction: reward-centered differential value and shared trace scales.
     float vPrev = 0.0f, vCurr = 0.0f;
     if (tid == 0u) {
         for (uint i = 0u; i < ctx.R; ++i) {
@@ -410,7 +381,6 @@ inline void fcstomp_prediction_control_loop(Ctx ctx, uint tid,
     }
     simdgroup_barrier(mem_flags::mem_threadgroup);
 
-    // RewardRespectingSubtasks + OptionModels: RR continuation and model-backed option query.
     if (tid < ctx.K) {
         uint feat = ctx.optFeature[tid] % ctx.R;
         uint base = tid * ctx.R;
@@ -442,11 +412,6 @@ inline void fcstomp_prediction_control_loop(Ctx ctx, uint tid,
         }
         ctx.tdPsi[tid] = dPsi;
         tgTdPsi[tid] = dPsi;
-        // Per-option learning-progress tracker (Structural Addition A).
-        // Fast EMA of |dPsi| with R-step memory; peak as pure all-time max.
-        // Maturity predicate (fast < peak) means recent error has improved
-        // past the historical high-water mark — i.e., learning has happened.
-        // Both quantities scale-free; only intrinsic constant is invR.
         float absD = isfinite(dPsi) ? fabs(dPsi) : 0.0f;
         float fastOld = ctx.tdPsiFast[tid];
         float peakOld = ctx.tdPsiPeak[tid];
@@ -495,7 +460,6 @@ inline void fcstomp_prediction_control_loop(Ctx ctx, uint tid,
         tgEffort[tid] = effort * (1.0f / float(max(ctx.D, 1u)));
     }
     simdgroup_barrier(mem_flags::mem_threadgroup);
-    // OptionPolicies: centered RR advantages drive the option actor heads.
     if (tid == 0u) {
         float invK = ctx.invK;
         float gaugeRate = track_rate(ctx.stepCount, ctx.R);
@@ -515,7 +479,6 @@ inline void fcstomp_prediction_control_loop(Ctx ctx, uint tid,
     }
     simdgroup_barrier(mem_flags::mem_threadgroup);
 
-    // OptionKeyboard + Planning: GPI-style live-option selection and value pressure.
     if (tid == 0u) {
         uint best = 0u;
         float bestScore = -FLT_MAX, bestQ = 0.0f;
@@ -806,19 +769,6 @@ inline void FeatureConstruction(Ctx ctx,
     simdgroup_barrier(mem_flags::mem_threadgroup);
 }
 
-// ===========================================================================
-// Stage functions (megakernel + bisect instrument). Each per-step kernel body
-// lives in a `static inline` stage function; the kernel entry points below are
-// one-line wrappers so any megastep divergence can be bisected stage-by-stage
-// against the original dispatch sequence.
-// BARRIER CONTRACT: every stage-internal barrier is simdgroup-scope — a lane's
-// stage threads are exactly one 32-wide simdgroup, both in the packed megastep
-// (simdgroup s serves lane laneBase+s) and in the wrapper kernels (which must
-// be dispatched with <= 32 threads per lane-threadgroup; eng.tg == 32 today).
-// Arithmetic per lane is unchanged from the threadgroup-scope original — only
-// which other lanes wait is different.
-// ===========================================================================
-
 static inline void oak_stage_encode(Ctx ctx, uint tid, uint tgW,
                                     threadgroup float *tgG,
                                     threadgroup float *tgCont,
@@ -858,15 +808,12 @@ kernel void oak_encode(device float *params [[buffer(0)]],
                      tgPrevState, tgCurrState, tgDir, tgEffort);
 }
 
-// One option k of the planning pass; threads j cover the R transition rows.
-// The caller owns the k bound (kernel grid width or megastep sequential loop).
 static inline void oak_stage_plan_option(Ctx ctx, uint k, uint j,
                                          threadgroup float *tgModelErr) {
     device const float *prev = state_at(ctx, ctx.stateSlot);
     device const float *curr = state_at(ctx, 1u - ctx.stateSlot);
     bool active = j < ctx.R;
     float cont = ctx.continuation[k];
-    // OptionModels + SearchControl: learn option reward/transition/duration and priority debt.
     if (OAK_ABLATE_OPTION_MODELS) {
         if (active) ctx.nTdMat[k * ctx.R + j] = 0.0f;
         if (j == 0u) {
@@ -957,12 +904,8 @@ inline uint oak_learn_total(Ctx ctx) {
         + ctx.K * ctx.R * ctx.R + ctx.K * ctx.R;
 }
 
-// One learn element (gid indexes the concatenated head parameter list). All
-// elements are independent: each reads only pre-pass state and writes its own
-// parameter, so any thread->element remap is bit-identical.
 static inline void oak_learn_element(Ctx ctx, device const float *prev,
                                      device const float *curr, uint gid) {
-    // Uniform learning: value, GVFs, option policies, and option models share one stream.
     uint nVal = ctx.R;
     uint nPsi = ctx.K * ctx.R;
     uint nPi = ctx.K * ctx.D * ctx.R;
@@ -1078,7 +1021,6 @@ kernel void oak_learn_heads(device float *params [[buffer(0)]],
 }
 
 inline void emit_action_grid(Ctx ctx, threadgroup const float *curr, uint group, uint tid, uint tgW) {
-    // ActionEmission: expose option policy means plus the wrapper-facing behavior descriptor.
     uint gid = group * tgW + tid;
     if (gid >= ctx.K * ctx.D) return;
     uint selected = ctx.selectedOption[0] % ctx.K;
@@ -1113,7 +1055,6 @@ inline void emit_action_grid(Ctx ctx, threadgroup const float *curr, uint group,
 
 static inline void oak_stage_replace(Ctx ctx, uint tid, uint tgW,
                                      threadgroup float *tgCurrState) {
-    // GenerateAndTest: bundle utility, replacement, and FC-STOMP health diagnostics.
     device const float *curr = state_at(ctx, 1u - ctx.stateSlot);
     device const float *prev = state_at(ctx, ctx.stateSlot);
     for (uint i = tid; i < ctx.R; i += tgW) tgCurrState[i] = curr[i];
@@ -1159,7 +1100,7 @@ static inline void oak_stage_replace(Ctx ctx, uint tid, uint tgW,
     }
     simdgroup_barrier(mem_flags::mem_device);
 
-    if (tid == 0u) {  // serial lane-0 tail (no barriers inside)
+    if (tid == 0u) {
 	    float wSum = 0.0f, wSq = 0.0f;
 	    for (uint k = 0u; k < ctx.K; ++k) {
 	        float w = ctx.importance[k];
@@ -1332,11 +1273,6 @@ static inline void oak_stage_replace(Ctx ctx, uint tid, uint tgW,
     ctx.stats->tdPsiNonFiniteCount = float(ctx.counters[OAK_CNT_TDPSI_NF] + ctx.counters[OAK_CNT_IMPORTANCE_NF]);
     ctx.stats->oakOptionReinitCount = float(ctx.counters[OAK_CNT_REINIT_OPT]);
     ctx.stats->oakFeatureReinitCount = float(ctx.counters[OAK_CNT_REINIT_FEAT]);
-    // Aggregate learning-progress diagnostic: mean over options of
-    //   1 - fast[k] / peak[k]
-    // where fast is the R-step EMA of |dPsi[k]| and peak is its all-time max.
-    // 0 means current error == peak (no progress); 1 means current error == 0
-    // (fully converged). Continuous, no threshold.
     float progressSum = 0.0f;
     uint progressCount = 0u;
     for (uint k = 0u; k < ctx.K; ++k) {
@@ -1382,22 +1318,8 @@ kernel void oak_action_emit(device float *params [[buffer(0)]], device float *st
     oak_stage_action_emit(ctx, group, tid, tgW, tgCurrState);
 }
 
-// ===========================================================================
-// Phase F3: GPU-resident fleet env layer.
-//   oak_fleet_init   — per-lane env reset + arena seeding (one thread/lane)
-//   oak_sample_act   — exact Metal port of HCEnv::step_oak/step_zero/
-//                      step_random sampling (setup.sh oak_env_bridge.cc),
-//                      Philox stream 2 for the policy normals
-//   oak_fleet_env    — hc_env_step body + envInfo/reward accumulators +
-//                      death-detector latches + action recording
-//   oak_fleet_snapshot — heartbeat copy of per-lane health into a
-//                      double-buffered snapshot the host writer drains
-// The agent kernels above and the physics in OakPhysics.metal are untouched.
-// ===========================================================================
+constant uint HC_RNG_STREAM_ACT = 2u;
 
-constant uint HC_RNG_STREAM_ACT = 2u;  // 0 = reset noise, 1 = random ctrl
-
-// Death detector codes (host maps to the deaths.jsonl detector strings).
 constant uint OAK_DEATH_NONE       = 0xffffffffu;
 constant uint OAK_DET_ENV_REWARD   = 1u;
 constant uint OAK_DET_POLICY_MEAN  = 2u;
@@ -1405,31 +1327,28 @@ constant uint OAK_DET_ENV_OBS      = 3u;
 
 struct OakFleetEnvCfg {
     uint laneCount;
-    uint episodeLen;       // 0 = continuing (CPU-era bridge semantics), 1000 = gym
-    uint policyMode;       // 0 = oak, 1 = zero, 2 = random
-    uint recordCapacity;   // ring records per recorded lane (0 = no recording)
-    float invObsFloor;     // Run floor = 1/max(obsDim,1) for the host-rho EMA
+    uint episodeLen;
+    uint policyMode;
+    uint recordCapacity;
+    float invObsFloor;
 };
 
 struct OakFleetInfoAcc { uint count, finiteCount; float sum, sumC, first, last; };
 
-// Per-lane persistent fleet state (env + stream accumulators). All members
-// 4-byte scalars: layout is mirrored field-for-field on the Swift side.
 struct OakFleetLane {
-    HCState s;                            // qpos[9] qvel[9] ctrl[6] warmstart[9]
+    HCState s;
     uint elapsed, resets;
     uint steps, doneCount;
-    float ctrlPending[6];                 // clamped action from oak_sample_act
-    float lastDesc[12];                   // HCEnv::last_policy_ (d_policy = 12)
-    float deltaSum, deltaC, deltaPeak;    // Kahan delta_sum_ + running-mean peak
-    float rewardSum, rewardC, rho;        // Kahan rewardSum + host-EMA reward rate
-    uint deathStep, deathDetector;        // first-nonfinite latch
-    float deathRewardSum, deathRho;       // values at the latch step
-    OakFleetInfoAcc info[4];              // reward_run, reward_ctrl, x_position, x_velocity
+    float ctrlPending[6];
+    float lastDesc[12];
+    float deltaSum, deltaC, deltaPeak;
+    float rewardSum, rewardC, rho;
+    uint deathStep, deathDetector;
+    float deathRewardSum, deathRho;
+    OakFleetInfoAcc info[4];
 };
 static_assert(sizeof(OakFleetLane) == 356, "OakFleetLane layout drifted from the Swift mirror");
 
-// Heartbeat snapshot row (one per lane, double-buffered host-visible).
 struct OakLaneSnapshot {
     KernelScalars scalars;
     KernelStats stats;
@@ -1446,10 +1365,6 @@ static_assert(sizeof(OakLaneSnapshot) == 276, "OakLaneSnapshot layout drifted fr
 
 inline float oak_safe(float x) { return isfinite(x) ? x : 0.0f; }
 
-// 6 standard normals via Philox stream 2 + Box-Muller (same construction as
-// hc_rng_reset_noise). PORT-NOTE: the CPU bridge uses mt19937 +
-// std::normal_distribution; only the law N(0,1) is shared, per the F2 RNG
-// contract for hc_rng_ctrl.
 inline void oak_rng_normal6(uint laneSeed, uint stepIdx, thread float *z) {
     uint2 key = uint2(laneSeed, HC_RNG_STREAM_ACT);
     uint4 r0 = hc_philox4x32(key, uint4(stepIdx, 0u, 0u, 0u));
@@ -1472,9 +1387,6 @@ inline void oak_kahan_add(device float *sum, device float *comp, float x) {
     *sum = t;
 }
 
-// One thread per lane: env reset + lane-state zeroing + arena seeding,
-// replicating the CPU fleet prologue (env.prepare(rank); env.reset();) —
-// obs = reset obs, reward = 0, actionSignal/credit = 0, importance = 1.
 kernel void oak_fleet_init(device float *params [[buffer(0)]],
                            device float *stateArena [[buffer(1)]],
                            device uint *uintArena [[buffer(2)]],
@@ -1515,18 +1427,6 @@ kernel void oak_fleet_init(device float *params [[buffer(0)]],
     }
 }
 
-// One thread per lane: action sampling. Exact port of HCEnv::step_oak /
-// step_zero / step_random up to (but excluding) send():
-//   descriptor[i] = safe(policyMean[i]); sd = 1/d_policy;
-//   per action dim d: sample = safe(mu + sd*z); ctrl = clamp(sample, -1, 1);
-//   actionSignal[d] = ctrl, actionSignal[A+d] = 0;
-//   behavior += log_sigma - z^2/2;
-//   per option o: oz = (sample - option_mu)/sd (UNclamped sample, as on CPU);
-//   logp[o] += log_sigma - oz^2/2; credit[o*D+d] = sample - option_mu;
-//   credit[o*D+A+d] = 0; importance[o] = exp(logp[o] - behavior).
-// Plus the actionDelta tracker: delta_sum += sum((desc-last)^2)/D, last = desc,
-// steps++ — all before the env step, exactly like the bridge.
-// PORT-NOTE: the bridge accumulates delta_sum_ in double; here fp32 Kahan.
 static inline void oak_stage_sample_act(device float *params,
                                         device float *stateArena,
                                         device uint *uintArena,
@@ -1538,18 +1438,18 @@ static inline void oak_stage_sample_act(device float *params,
                                         constant OakFleetEnvCfg &ecfg,
                                         uint gid) {
     device OakFleetLane *lane = &lanes[gid];
-    uint stepIdx = lane->steps;  // 0-based index of the step being taken
+    uint stepIdx = lane->steps;
     float desc[12];
     float ctrl[6];
-    if (ecfg.policyMode == 1u) {  // step_zero
+    if (ecfg.policyMode == 1u) {
         for (int u = 0; u < 6; u++) ctrl[u] = 0.0f;
         for (int i = 0; i < 12; i++) desc[i] = 0.0f;
-    } else if (ecfg.policyMode == 2u) {  // step_random
+    } else if (ecfg.policyMode == 2u) {
         hc_rng_ctrl(laneSeeds[gid], stepIdx, ctrl);
         for (int d = 0; d < 6; d++) { desc[d] = ctrl[d]; desc[6 + d] = 0.0f; }
-    } else {  // step_oak
+    } else {
         Ctx ctx = make_ctx(params, stateArena, uintArena, scalars, stats, cfg, gid);
-        uint A = ctx.D / 2u;  // act_dim (Box exposes 2A policy coordinates)
+        uint A = ctx.D / 2u;
         float sd = 1.0f / float(max(ctx.D, 1u));
         float log_sigma = -log(sd);
         float behavior = 0.0f;
@@ -1577,7 +1477,6 @@ static inline void oak_stage_sample_act(device float *params,
         }
         for (uint o = 0u; o < ctx.K; ++o) ctx.importance[o] = exp(logp[o] - behavior);
     }
-    // delta(descriptor_); ++steps_;
     float d2 = 0.0f;
     for (int i = 0; i < 12; i++) {
         float v = desc[i] - lane->lastDesc[i];
@@ -1591,26 +1490,17 @@ static inline void oak_stage_sample_act(device float *params,
     for (int u = 0; u < 6; u++) lane->ctrlPending[u] = ctrl[u];
 }
 
-// Wide (simdgroup-per-lane) variant of the OAK branch of oak_stage_sample_act,
-// used by oak_megastep. Bit-identical class — parallelism without cross-thread
-// reductions: tid 0 computes desc/z/sample/behavior, the env-facing ctrl, the
-// actionSignal writes, and the lane bookkeeping in exactly the packed order;
-// each thread o < K then runs option o's d-loop with the same operands in the
-// same ascending-d order (sample[d] and behavior broadcast bitwise through
-// threadgroup scratch), writing the same credit/importance values the packed
-// body wrote from its serial o-loop. scratch needs 7 floats; indices 20..26 of
-// the lane's 32-float slot are untouched by every other stage.
 static inline void oak_stage_sample_act_wide(Ctx ctx,
                                              device OakFleetLane *lanes,
                                              device const uint *laneSeeds,
                                              uint gid, uint tid,
                                              threadgroup float *scratch) {
     device OakFleetLane *lane = &lanes[gid];
-    uint A = ctx.D / 2u;  // act_dim (Box exposes 2A policy coordinates)
+    uint A = ctx.D / 2u;
     float sd = 1.0f / float(max(ctx.D, 1u));
     float log_sigma = -log(sd);
     if (tid == 0u) {
-        uint stepIdx = lane->steps;  // 0-based index of the step being taken
+        uint stepIdx = lane->steps;
         float desc[12];
         float ctrl[6];
         float behavior = 0.0f;
@@ -1628,7 +1518,6 @@ static inline void oak_stage_sample_act_wide(Ctx ctx,
             scratch[20u + d] = sample;
         }
         scratch[26u] = behavior;
-        // delta(descriptor_); ++steps_;
         float d2 = 0.0f;
         for (int i = 0; i < 12; i++) {
             float v = desc[i] - lane->lastDesc[i];
@@ -1673,9 +1562,6 @@ kernel void oak_sample_act(device float *params [[buffer(0)]],
                          lanes, laneSeeds, ecfg, gid);
 }
 
-// One thread per lane: the env step (HCEnv::send semantics — exactly the
-// hc_env_step control flow, inlined to also expose the four envInfo values),
-// arena obs/reward write-back, stream accumulators, death latches, recording.
 static inline void oak_stage_fleet_env(device float *params,
                                        device float *stateArena,
                                        device uint *uintArena,
@@ -1697,7 +1583,6 @@ static inline void oak_stage_fleet_env(device float *params,
     uint done;
     float info[4];
     if (ecfg.episodeLen != 0u && elapsed >= ecfg.episodeLen) {
-        // HCRaw::ResetRaw: action discarded, reward 0, done flag 0, info zeroed.
         hc_env_reset(s, laneSeeds[gid], elapsed, resets);
         reward = 0.0f;
         done = 0u;
@@ -1721,9 +1606,8 @@ static inline void oak_stage_fleet_env(device float *params,
     lane->elapsed = elapsed;
     lane->resets = resets;
     lane->doneCount += done;
-    uint stepNum = lane->steps;  // incremented by oak_sample_act
+    uint stepNum = lane->steps;
 
-    // Run.note: only finite rewards accumulate; non-finite latches envReward.
     if (isfinite(reward)) {
         oak_kahan_add(&lane->rewardSum, &lane->rewardC, reward);
         float rate = max(1.0f / float(stepNum), ecfg.invObsFloor);
@@ -1734,7 +1618,6 @@ static inline void oak_stage_fleet_env(device float *params,
         lane->deathRewardSum = lane->rewardSum;
         lane->deathRho = lane->rho;
     }
-    // CPU fleet order: envReward first, then policyMean (engine lanes only).
     if (ecfg.policyMode == 0u) {
         Ctx ctx = make_ctx(params, stateArena, uintArena, scalars, stats, cfg, gid);
         if (lane->deathStep == OAK_DEATH_NONE) {
@@ -1751,8 +1634,6 @@ static inline void oak_stage_fleet_env(device float *params,
         for (uint i = 0u; i < ctx.O && i < 17u; ++i) ctx.observation[i] = obs[i];
         ctx.reward[0] = reward;
     }
-    // envObs is GPU-mode-only: the CPU loop never finite-checked obs (qpos/qvel
-    // auto-reset on bad values inside mj_step), so this latch is belt-and-braces.
     if (lane->deathStep == OAK_DEATH_NONE) {
         bool obsBad = false;
         for (int i = 0; i < 17; i++) obsBad = obsBad || !isfinite(obs[i]);
@@ -1763,7 +1644,6 @@ static inline void oak_stage_fleet_env(device float *params,
             lane->deathRho = lane->rho;
         }
     }
-    // envInfo accumulators (InfoStat.note semantics).
     for (int j = 0; j < 4; j++) {
         device OakFleetInfoAcc *a = &lane->info[j];
         a->count += 1u;
@@ -1774,7 +1654,6 @@ static inline void oak_stage_fleet_env(device float *params,
             a->last = info[j];
         }
     }
-    // ActionRecorder.record: actionSignal[0..actDim) (= clamped action) + done.
     if (ecfg.recordCapacity != 0u) {
         int slot = recordSlot[gid];
         if (slot >= 0) {
@@ -1786,12 +1665,6 @@ static inline void oak_stage_fleet_env(device float *params,
     }
 }
 
-// Simdgroup-cooperative variant of oak_stage_fleet_env (megastep env stage):
-// the lane's whole simdgroup carries replicated env state through the 5x
-// hc_mj_step_simd chain (OakPhysics.metal cooperative section, Inv-10
-// bit-identical class), then sgTid 0 commits the original bookkeeping
-// verbatim from the replicated values. The reset/step branch is uniform
-// (one lane per simdgroup); shr is the lane's HC_SIMD_SCRATCH-float slice.
 static inline void oak_stage_fleet_env_simd(device float *params,
                                             device float *stateArena,
                                             device uint *uintArena,
@@ -1815,7 +1688,6 @@ static inline void oak_stage_fleet_env_simd(device float *params,
     uint done;
     float info[4];
     if (ecfg.episodeLen != 0u && elapsed >= ecfg.episodeLen) {
-        // HCRaw::ResetRaw: action discarded, reward 0, done flag 0, info zeroed.
         hc_env_reset(s, laneSeeds[gid], elapsed, resets);
         reward = 0.0f;
         done = 0u;
@@ -1832,7 +1704,7 @@ static inline void oak_stage_fleet_env_simd(device float *params,
         done = (ecfg.episodeLen != 0u && elapsed >= ecfg.episodeLen) ? 1u : 0u;
         info[0] = xv; info[1] = -ctrlCost; info[2] = s.qpos[0]; info[3] = xv;
     }
-    if (sgTid != 0u) return;  // replicas done; the leader commits (no barriers below)
+    if (sgTid != 0u) return;
     float obs[17];
     for (int i = 1; i < 9; i++) obs[i - 1] = s.qpos[i];
     for (int i = 0; i < 9; i++) obs[8 + i] = s.qvel[i];
@@ -1840,9 +1712,8 @@ static inline void oak_stage_fleet_env_simd(device float *params,
     lane->elapsed = elapsed;
     lane->resets = resets;
     lane->doneCount += done;
-    uint stepNum = lane->steps;  // incremented by oak_sample_act
+    uint stepNum = lane->steps;
 
-    // Run.note: only finite rewards accumulate; non-finite latches envReward.
     if (isfinite(reward)) {
         oak_kahan_add(&lane->rewardSum, &lane->rewardC, reward);
         float rate = max(1.0f / float(stepNum), ecfg.invObsFloor);
@@ -1853,7 +1724,6 @@ static inline void oak_stage_fleet_env_simd(device float *params,
         lane->deathRewardSum = lane->rewardSum;
         lane->deathRho = lane->rho;
     }
-    // CPU fleet order: envReward first, then policyMean (engine lanes only).
     if (ecfg.policyMode == 0u) {
         Ctx ctx = make_ctx(params, stateArena, uintArena, scalars, stats, cfg, gid);
         if (lane->deathStep == OAK_DEATH_NONE) {
@@ -1870,8 +1740,6 @@ static inline void oak_stage_fleet_env_simd(device float *params,
         for (uint i = 0u; i < ctx.O && i < 17u; ++i) ctx.observation[i] = obs[i];
         ctx.reward[0] = reward;
     }
-    // envObs is GPU-mode-only: the CPU loop never finite-checked obs (qpos/qvel
-    // auto-reset on bad values inside mj_step), so this latch is belt-and-braces.
     if (lane->deathStep == OAK_DEATH_NONE) {
         bool obsBad = false;
         for (int i = 0; i < 17; i++) obsBad = obsBad || !isfinite(obs[i]);
@@ -1882,7 +1750,6 @@ static inline void oak_stage_fleet_env_simd(device float *params,
             lane->deathRho = lane->rho;
         }
     }
-    // envInfo accumulators (InfoStat.note semantics).
     for (int j = 0; j < 4; j++) {
         device OakFleetInfoAcc *a = &lane->info[j];
         a->count += 1u;
@@ -1893,7 +1760,6 @@ static inline void oak_stage_fleet_env_simd(device float *params,
             a->last = info[j];
         }
     }
-    // ActionRecorder.record: actionSignal[0..actDim) (= clamped action) + done.
     if (ecfg.recordCapacity != 0u) {
         int slot = recordSlot[gid];
         if (slot >= 0) {
@@ -1922,41 +1788,6 @@ kernel void oak_fleet_env(device float *params [[buffer(0)]],
                         lanes, laneSeeds, ecfg, recordSlot, recordBuf, gid);
 }
 
-// ===========================================================================
-// oak_megastep v2: simdgroup-packed multi-lane megakernel. One threadgroup of
-// W = 32*OAK_MEGA_G threads owns OAK_MEGA_G consecutive lanes (laneBase =
-// tgIdx*G) and runs `stepsThisDispatch` whole step-iterations of the full
-// FC-STOMP + sampling + physics pipeline internally. Valid because lanes are
-// 100% disjoint (the standing fleet invariant). Two thread geometries per
-// step, both preserving the v1/keeper per-lane op order bitwise:
-//   - WIDE agent stages (encode/plan/learn/replace/emit): simdgroup s serves
-//     lane laneBase+s with tid := simd lane id and stage width 32 — exactly
-//     the v1 mapping (v1 ran one lane per threadgroup at W=32, one simdgroup).
-//     Each lane's nine threadgroup slots sit at offset s*32 floats inside the
-//     shared tg buffers. Stage-internal barriers are simdgroup-scope (see the
-//     BARRIER CONTRACT above), so lanes never serialize each other's stage
-//     progress.
-//   - PACKED serial stages (sample_act, fleet_env — the ~65K-FMA hc_mj_step
-//     chain): thread t < G runs lane laneBase+t's single-thread body. The G
-//     active threads fill the leading ceil(G/32) simdgroups, vs v1's 1 active
-//     thread per 32-wide simdgroup (the measured 4.95 ms/step zero-policy
-//     issue-efficiency hole).
-//   - threadgroup_barrier(mem_device) between stages covers the wide<->packed
-//     lane handoff (lane laneBase+t is served by simdgroup t in wide stages
-//     but by simdgroup t/32 in packed stages).
-//   - Remainder threadgroups (laneCount % G != 0) idle whole simdgroups in
-//     wide stages and threads t >= lanesThisTg in packed stages; between-stage
-//     barriers stay uniform across the whole threadgroup.
-//   - make_ctx is re-run at every stage boundary (oak_replace flips stateSlot
-//     mid-step — load-bearing).
-//   - zero/random policies skip the agent stages via the uniform policyMode
-//     guard, mirroring the oak_sample_act/oak_fleet_env policyMode branches.
-//   - KNOWN CARVE-OUT (inherited from v1): the legacy oak_plan grid ran K
-//     concurrent threadgroups per lane whose non-atomic
-//     counters[OAK_CNT_PLAN_NF] increments race (diagnostics-only); the
-//     sequential k loop serializes — and thereby fixes — that count, so uints
-//     may differ from legacy exactly there on NF-active lanes.
-//   - G=1 (W=32) reproduces the v1 one-lane-per-threadgroup geometry exactly.
 kernel void oak_megastep(device float *params [[buffer(0)]],
                          device float *stateArena [[buffer(1)]],
                          device uint *uintArena [[buffer(2)]],
@@ -1987,22 +1818,16 @@ kernel void oak_megastep(device float *params [[buffer(0)]],
     uint laneBase = tgIdx * OAK_MEGA_G;
     if (laneBase >= ecfg.laneCount) return;
     uint lanesThisTg = min(OAK_MEGA_G, ecfg.laneCount - laneBase);
-    // Lane geometry: one simdgroup per lane, or two when OAK_MEGA_WIDE2X
-    // (leading simdgroup = all barriered stages; both = learn only).
     uint laneSg = OAK_MEGA_WIDE2X ? (sgrp >> 1) : sgrp;
     bool laneLead = OAK_MEGA_WIDE2X ? ((sgrp & 1u) == 0u) : true;
-    bool wideActive = laneLead && laneSg < lanesThisTg;  // uniform per simdgroup
+    bool wideActive = laneLead && laneSg < lanesThisTg;
     bool learnActive = laneSg < lanesThisTg;
     uint learnTid = OAK_MEGA_WIDE2X ? (slane + 32u * (sgrp & 1u)) : slane;
     uint learnW = OAK_MEGA_WIDE2X ? 64u : 32u;
     uint wideLane = laneBase + laneSg;
     bool packedActive = tid < lanesThisTg;
     uint packedLane = laneBase + tid;
-    // MEASURED: spreading packed lanes one-per-simdgroup (lane s -> thread
-    // s*32) to decouple the physics chains is a consistent loss at B=64
-    // (G=4: 1457->1566 us/step, G=8: 1611->1782; G=2 neutral) — lockstep
-    // packing's issue amortization beats divergence decoupling on M4.
-    uint off = laneSg * 32u;                // this lane's 32-float tg slots
+    uint off = laneSg * 32u;
     threadgroup float *lG = tgG + off, *lCont = tgCont + off, *lTerm = tgTerm + off,
                       *lTdPsi = tgTdPsi + off, *lScalars = tgScalars + off,
                       *lPrev = tgPrevState + off, *lCurr = tgCurrState + off,
@@ -2010,17 +1835,12 @@ kernel void oak_megastep(device float *params [[buffer(0)]],
     for (uint it = 0u; it < stepsThisDispatch; ++it) {
         if (ecfg.policyMode == 0u) {
             if (wideActive && (OAK_MEGA_STAGES & 1u) != 0u) {
-                // oak_encode: FeatureConstruction -> ... -> OptionKeyboard
                 Ctx ctx = make_ctx(params, stateArena, uintArena, scalars, stats, cfg, wideLane);
                 oak_stage_encode(ctx, slane, 32u, lG, lCont, lTerm, lTdPsi, lScalars,
                                  lPrev, lCurr, lDir, lEffort);
             }
             threadgroup_barrier(mem_flags::mem_device);
             if (wideActive && (OAK_MEGA_STAGES & 2u) != 0u) {
-                // oak_plan: sequential k (legacy: K concurrent threadgroups).
-                // lG doubles as tgModelErr; the simdgroup fence at the top of
-                // each k is the WAR fence on that slot (covers both the encode
-                // stage's lG reads and the previous k's j==0 reads).
                 Ctx ctx = make_ctx(params, stateArena, uintArena, scalars, stats, cfg, wideLane);
                 for (uint k = 0u; k < ctx.K; ++k) {
                     simdgroup_barrier(mem_flags::mem_threadgroup);
@@ -2029,14 +1849,6 @@ kernel void oak_megastep(device float *params [[buffer(0)]],
             }
             threadgroup_barrier(mem_flags::mem_device);
             if (learnActive && (OAK_MEGA_STAGES & 4u) != 0u) {
-                // oak_learn_heads: independent elements, stride-32 remap (64
-                // under OAK_MEGA_WIDE2X — both of the lane's simdgroups).
-                // MEASURED: a 4-way element interleave (e, e+32, e+64, e+96
-                // issued back-to-back for MLP) is bit-identical but regressed
-                // the B=64 oak chain +7% (2005 -> 2145 us/step), and a 2-way
-                // interleave regressed ~+4% — inlined copies of the element
-                // body blow registers; keep the simple loop the compiler
-                // already pipelines.
                 Ctx ctx = make_ctx(params, stateArena, uintArena, scalars, stats, cfg, wideLane);
                 device const float *prev = state_at(ctx, ctx.stateSlot);
                 device const float *curr = state_at(ctx, 1u - ctx.stateSlot);
@@ -2045,14 +1857,11 @@ kernel void oak_megastep(device float *params [[buffer(0)]],
             }
             threadgroup_barrier(mem_flags::mem_device);
             if (wideActive && (OAK_MEGA_STAGES & 8u) != 0u) {
-                // oak_replace: GenerateAndTest commit + diagnostics
                 Ctx ctx = make_ctx(params, stateArena, uintArena, scalars, stats, cfg, wideLane);
                 oak_stage_replace(ctx, slane, 32u, lCurr);
             }
             threadgroup_barrier(mem_flags::mem_device);
             if (wideActive && (OAK_MEGA_STAGES & 16u) != 0u) {
-                // oak_action_emit: fresh ctx (replace flipped stateSlot), then
-                // the group loop — disjoint writes, no barrier needed between g
                 Ctx ctx = make_ctx(params, stateArena, uintArena, scalars, stats, cfg, wideLane);
                 device const float *curr = state_at(ctx, ctx.stateSlot);
                 for (uint i = slane; i < ctx.R; i += 32u) lCurr[i] = curr[i];
@@ -2064,9 +1873,6 @@ kernel void oak_megastep(device float *params [[buffer(0)]],
             threadgroup_barrier(mem_flags::mem_device);
         }
         if (ecfg.policyMode == 0u) {
-            // oak sampling is K-parallel: run it wide (simdgroup-per-lane;
-            // see oak_stage_sample_act_wide — bit-identical to the packed
-            // body, which stays live for zero/random and the bisect kernel).
             if (wideActive && (OAK_MEGA_STAGES & 32u) != 0u) {
                 Ctx ctx = make_ctx(params, stateArena, uintArena, scalars, stats, cfg, wideLane);
                 oak_stage_sample_act_wide(ctx, lanes, laneSeeds, wideLane, slane, lScalars);
@@ -2078,8 +1884,6 @@ kernel void oak_megastep(device float *params [[buffer(0)]],
         threadgroup_barrier(mem_flags::mem_device);
         if ((OAK_MEGA_STAGES & 64u) != 0u) {
             if (OAK_MEGA_ENV_COOP) {
-                // Cooperative: one simdgroup per lane (wide mapping), the
-                // whole simdgroup drives the lane's 5x hc_mj_step chain.
                 if (wideActive)
                     oak_stage_fleet_env_simd(params, stateArena, uintArena, scalars, stats,
                                              cfg, lanes, laneSeeds, ecfg, recordSlot,
@@ -2094,9 +1898,6 @@ kernel void oak_megastep(device float *params [[buffer(0)]],
     }
 }
 
-// One thread per lane: heartbeat snapshot into snap[snapBase + lane].
-// paramAbsMax loops the lane's full param slice (CPU heartbeat parity:
-// non-finite short-circuits and is flagged; otherwise the running max).
 kernel void oak_fleet_snapshot(device float *params [[buffer(0)]],
                                device float *stateArena [[buffer(1)]],
                                device uint *uintArena [[buffer(2)]],
