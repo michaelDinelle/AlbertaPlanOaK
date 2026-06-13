@@ -10,7 +10,6 @@ let defaultEnv = "HalfCheetah-v4"
 let lockName = ".oak-benchmark.lock"
 typealias Raw = UnsafeMutableRawPointer
 
-
 struct KernelConfig {
   var obsDim, rank, optionCount, actionParamCount, obsTraceLevels, linearAnchorCount: UInt32
   var invRank, invOptionCount, metaEta: Float
@@ -31,7 +30,6 @@ struct KernelStats {
   var learningMature: Float = 0
 }
 
-// ---- Phase F3 GPU fleet mirrors (must match OakKernel.metal layouts) ----
 struct FleetEnvCfg {
   var laneCount, episodeLen, policyMode, recordCapacity: UInt32
   var invObsFloor: Float
@@ -40,7 +38,6 @@ struct SnapInfo {
   var count: UInt32 = 0, finiteCount: UInt32 = 0
   var sum: Float = 0, sumC: Float = 0, first: Float = 0, last: Float = 0
 }
-// Mirror of Metal OakLaneSnapshot (all 4-byte scalars; stride 276).
 struct LaneSnapshot {
   var scalars: KernelScalars
   var stats: KernelStats
@@ -52,7 +49,7 @@ struct LaneSnapshot {
   var deathRewardSum, deathRho: Float
   var info0, info1, info2, info3: SnapInfo
 }
-let fleetLaneStride = 356  // Metal OakFleetLane (static_assert'd kernel-side)
+let fleetLaneStride = 356
 
 struct AblationSpec {
   static let ordered = [
@@ -97,12 +94,21 @@ func require(_ p: String, _ what: String) throws -> URL {
 }
 func requireFreshMetallib() throws -> URL {
   let lib = try require(".build/OakKernel.metallib", "non-empty Metal library")
-  let src = root("Sources/OakKernel.metal")
+  let sources = [
+    "Sources/OakKernel.metal",
+    "Sources/OakPhysics.metal",
+    "Sources/HalfCheetahModel.metal",
+  ].map(root)
   let fm = FileManager.default
   let libTime = try fm.attributesOfItem(atPath: lib.path)[.modificationDate] as? Date
-  let srcTime = try fm.attributesOfItem(atPath: src.path)[.modificationDate] as? Date
-  if let libTime, let srcTime, libTime < srcTime {
-    throw err("Stale Metal library. Rebuild with `xcrun -sdk macosx metal -fno-fast-math -c Sources/OakKernel.metal -o .build/OakKernel.air && xcrun -sdk macosx metallib .build/OakKernel.air -o .build/OakKernel.metallib`.")
+  let staleSource = try sources.first { src in
+    guard let libTime,
+      let srcTime = try fm.attributesOfItem(atPath: src.path)[.modificationDate] as? Date
+    else { return false }
+    return libTime < srcTime
+  }
+  if let staleSource {
+    throw err("Stale Metal library: \(staleSource.path) is newer than .build/OakKernel.metallib. Rebuild with `./setup.sh`.")
   }
   return lib
 }
@@ -139,8 +145,6 @@ struct Arena {
     betaPsi = alpha + 5 * r
     alphaModel = alpha + 8 * r
     betaModel = alpha + 9 * r
-    // Base layout ends with `+ 1` (valueGauge slot). The trailing `+ 2 * r`
-    // is for tdPsiFast and tdPsiPeak — per-option learning-progress EMAs.
     total = alpha + r * r + 21 * r + traceExtra * max(o, 1) + 1 + 2 * r
   }
 }
@@ -252,11 +256,6 @@ final class Engine {
     }
     configB.contents().bindMemory(to: KernelConfig.self, capacity: 1).initialize(to: cfgValue)
   }
-  // Shape specialization: bind the env dims and derived strides as Metal
-  // function constants 13..24, sourced from the exact KernelConfig values the
-  // kernels otherwise load from the cfg buffer — a specialized pipeline is
-  // bit-identical to the generic one by construction (-fno-fast-math forbids
-  // reassociation, so unrolled/constant-folded code keeps the fma sequences).
   static func applyShapeConstants(_ constants: MTLFunctionConstantValues, _ cfg: KernelConfig) {
     var u: [UInt32] = [
       cfg.obsDim, cfg.rank, cfg.optionCount, cfg.actionParamCount,
@@ -271,8 +270,6 @@ final class Engine {
     Self.applyShapeConstants(
       constants, configB.contents().bindMemory(to: KernelConfig.self, capacity: 1).pointee)
   }
-  // Validation instrumentation: SHA-256 over a lane's trajectory-bearing slices
-  // (params | state arena | uints | scalars), excluding diagnostics (stats).
   func stateHashes(_ lane: Int) -> [String: String] {
     func hex(_ base: UnsafeRawPointer, _ bytes: Int) -> String {
       sha256Hex(UnsafeRawBufferPointer(start: base, count: bytes))
@@ -286,8 +283,6 @@ final class Engine {
   }
 }
 
-// Fleet lanes are disjoint by construction (per-lane state, per-lane env handle);
-// this box passes the shared handles into the env-step shards.
 func jsonLine(_ obj: [String: Any]) throws -> Data {
   var d = try JSONSerialization.data(withJSONObject: obj, options: [.sortedKeys])
   d.append(0x0A)
@@ -333,16 +328,6 @@ func metricsRoot() -> URL {
   ) throws {
     try fleetGPU(p, seeds, steps, root, envId, ablations)
   }
-  // GPU-resident fleet (Phase F3): agent kernels + action sampling + physics
-  // all live in multi-step command buffers; the CPU only drains heartbeat
-  // snapshots into the same fleet.jsonl/deaths.jsonl/aggregate.jsonl contract.
-  //   - OAK_EPISODE_STEPS: 0 (default) = continuing stream (CPU-era bridge
-  //     semantics, docs/roadmap.md EPISODE-SEMANTICS DISCOVERY); 1000 = gym.
-  //   - OAK_STEPS_PER_CB: step-iterations per command buffer (default 32,
-  //     auto-tuned to keep CB GPU time <= ~80 ms when unset); 2 CBs in flight.
-  //   - Heartbeats/finals/state-hash dumps always land on CB boundaries
-  //     (OAK_DUMP_STATE_EVERY therefore forces a boundary + GPU drain at each
-  //     multiple — validation mode, serializes the pipeline at dump steps).
   static func fleetGPU(
     _ p: Policy, _ seeds: [Int], _ steps: Int, _ root: URL, _ envId: String,
     _ ablations: AblationSpec
@@ -354,7 +339,7 @@ func metricsRoot() -> URL {
     let e = ProcessInfo.processInfo.environment
     let fm = FileManager.default
     let B = seeds.count
-    let obsDim = 17, actDim = 6, dPolicy = 12  // HalfCheetah-v4 (matches the GPU physics port)
+    let obsDim = 17, actDim = 6, dPolicy = 12
     guard let dev = MTLCreateSystemDefaultDevice() else { throw err("Metal unavailable.") }
     let engine =
       p == .oak
@@ -368,46 +353,17 @@ func metricsRoot() -> URL {
       throw err("Metal command queue unavailable.")
     }
     let lib = try dev.makeLibrary(URL: try requireFreshMetallib())
-    // make_ctx references the optional OAK_SPEC_* function constants, so every
-    // kernel touching it must come from the specialized-function path (plain
-    // makeFunction(name:) cannot build a pipeline once constants are present).
     func pipeline(_ name: String) throws -> MTLComputePipelineState {
       let fn = try lib.makeFunction(name: name, constantValues: MTLFunctionConstantValues())
       return try dev.makeComputePipelineState(function: fn)
     }
     let initPipe = try pipeline("oak_fleet_init")
     let snapPipe = try pipeline("oak_fleet_snapshot")
-    // Megastep pipeline: the stage functions reference the OAK_ABLATE function
-    // constants, so it must be specialized with the same constant values as the
-    // Engine's agent pipelines. OAK_MEGA_G (constant 12) sets the v2 lane
-    // packing: one threadgroup of 32*G threads owns G consecutive lanes
-    // (OAK_MEGA_LANES_PER_TG; default = best measured; G=1 reproduces the v1
-    // one-lane-per-threadgroup geometry). Threadgroup memory bounds G: nine
-    // slots x G x 32 floats = G x 1152 bytes (G=24 -> 27.6 KB < 32 KB).
-    // Megastep geometry law (measured 2026-06-11, M4 Max 32 cores): G
-    // (lanes per threadgroup) and the learn helper simdgroup (OAK_MEGA_WIDE2X,
-    // kernel constant 26) trade per-lane chain latency against saturated
-    // occupancy. Measured oak fleet: B=64 wants G=2 + wide2x (1822 -> 1251
-    // us/step per lane vs the old G=16 default); B=256 wants G=8 + wide2x
-    // (153K vs 133K agg); B=512 is the crossover (~equal); B>=1024 wants
-    // G=16 without wide2x (351K agg vs 266K with wide2x). Geometry only —
-    // lane values are bitwise identical across G/wide2x (gated). Both env
-    // vars override the law for experiments.
     let autoG = max(2, min(16, B / 32))
     let megaG = e["OAK_MEGA_LANES_PER_TG"].flatMap(Int.init) ?? autoG
     let wide2x = (e["OAK_MEGA_WIDE2X"].flatMap(Int.init).map { $0 != 0 }) ?? (B <= 512)
-    // Cooperative env stage (kernel constant 27): the lane's full simdgroup
-    // runs the physics chain (hc_mj_step_simd; bitwise-certified vs scalar).
-    // Geometry law (measured 2026-06-11, interleaved A/B, M4 Max): coop wins
-    // only when packed lanes cannot amortize the chain's instruction stream —
-    // oak B=64/G=2: 1262 -> 1228 us/lane-step; it LOSES from G=4 up
-    // (B=128 1400 -> 1495, B=256 1617 -> 1950, B=1024 2667 -> 5433, B=4096
-    // 12900 -> 23167), so the default is coop iff G <= 2 (the small-B/XL
-    // per-lane-rate configs). OAK_MEGA_ENV_COOP=0/1 overrides (bisect
-    // instrument / experiments). Needs threadgroup buffer 9
-    // (physScratchFloats = HC_SIMD_SCRATCH per lane) + device buffer 12.
     let envCoop = (e["OAK_MEGA_ENV_COOP"].flatMap(Int.init).map { $0 != 0 }) ?? (megaG <= 2)
-    let physScratchFloats = 140  // mirrors HC_SIMD_SCRATCH in OakPhysics.metal
+    let physScratchFloats = 140
     let megaW = 32 * megaG * (wide2x ? 2 : 1)
     let megaConstants = MTLFunctionConstantValues()
     ablations.apply(to: megaConstants)
@@ -419,16 +375,7 @@ func metricsRoot() -> URL {
     }
     var envCoopVal = envCoop
     megaConstants.setConstantValue(&envCoopVal, type: .bool, index: 27)
-    // Shape specialization: oak runs bind the env dims (and derived strides)
-    // as compile-time constants 13..24 — bit-identical by construction under
-    // -fno-fast-math. zero/random runs have no engine (agent stages are
-    // skipped) and keep the generic cfg path.
     if let eng = engine { eng.applyShapeConstants(megaConstants) }
-    // OAK_MEGA_STAGE_MASK (DEBUG ONLY): stage-resolved timing instrument.
-    // Bitmask gates megastep stages (encode 1, plan 2, learn 4, replace 8,
-    // emit 16, sample 32, env 64); skipped stages still hit their barriers.
-    // Semantics are intentionally broken when any bit is off — read only
-    // aggStepsPerSecond. Unset = no constant bound = the certified all-on path.
     if let mask = e["OAK_MEGA_STAGE_MASK"].flatMap(UInt32.init) {
       var m = mask
       megaConstants.setConstantValue(&m, type: .uint, index: 25)
@@ -436,7 +383,7 @@ func metricsRoot() -> URL {
     }
     let megaPipe = try dev.makeComputePipelineState(
       function: lib.makeFunction(name: "oak_megastep", constantValues: megaConstants))
-    let megaSlotBytes = 32 * megaG * MemoryLayout<Float>.stride  // per-lane 32-float slots
+    let megaSlotBytes = 32 * megaG * MemoryLayout<Float>.stride
     let physTGBytes = envCoop ? physScratchFloats * megaG * MemoryLayout<Float>.stride : 16
     guard megaG >= 1, megaW <= megaPipe.maxTotalThreadsPerThreadgroup,
       9 * megaSlotBytes + physTGBytes <= dev.maxThreadgroupMemoryLength
@@ -477,8 +424,6 @@ func metricsRoot() -> URL {
       try fm.createDirectory(at: dir, withIntermediateDirectories: true)
       return dir
     }
-    // Action recording: GPU ring (2 heartbeat intervals deep), drained at
-    // heartbeats into the CPU-era actions.bin format (actDim f32 + done u8).
     let recordAll = e["OAK_RECORD_ACTIONS"] == "1"
     let recordSeeds = Set(
       (e["OAK_RECORD_SEEDS"] ?? "").split(separator: ",").compactMap {
@@ -504,8 +449,6 @@ func metricsRoot() -> URL {
       for (slot, lane) in recordLanes.enumerated() { rp[lane] = Int32(slot) }
     }
     let recordBuf = try makeBuf(recordLanes.count * recordCapacity * 7 * 4)
-    // Cooperative env stage device scratch: one HCSimdRows block per lane
-    // (1050 floats — mirrors HCSimdRows in OakPhysics.metal).
     let physRowsBuf = try makeBuf(envCoop ? B * 1050 * 4 : 16)
     let snapStride = MemoryLayout<LaneSnapshot>.stride
     precondition(snapStride == 276, "LaneSnapshot layout drifted from OakLaneSnapshot")
@@ -552,13 +495,6 @@ func metricsRoot() -> URL {
       var c = ecfg
       enc.setBytes(&c, length: MemoryLayout<FleetEnvCfg>.stride, index: 8)
     }
-    // Megastep v2: one persistent dispatch runs n whole step-iterations on
-    // ceil(B/G) threadgroups x 32*G threads (each threadgroup owns G
-    // consecutive lanes; threadgroup slots 0..8 mirror oak_encode's nine at 32
-    // floats per lane). Bitwise-certified equal to v1 (one lane per
-    // threadgroup), which was certified equal to the retired 7-dispatch
-    // per-step loop; the per-stage wrapper kernels in OakKernel.metal remain
-    // as the bisect instrument.
     let megaTGBytes = megaSlotBytes
     func encodeMegastep(_ enc: MTLComputeCommandEncoder, _ n: Int) {
       bindFleet(enc, megaPipe)
@@ -574,7 +510,6 @@ func metricsRoot() -> URL {
         threadsPerThreadgroup: mtlSize(megaW))
       enc.memoryBarrier(scope: [.buffers])
     }
-    // Lane init (env reset + arena seeding), synchronous.
     do {
       guard let cb = q.makeCommandBuffer(), let enc = cb.makeComputeCommandEncoder() else {
         throw err("Failed to encode Metal command.")
@@ -586,15 +521,12 @@ func metricsRoot() -> URL {
       cb.waitUntilCompleted()
       if let e = cb.error { throw err("Metal command failed: \(e)") }
     }
-    // ---- host writer (heartbeat snapshot -> jsonl rows) ----
     final class WriterState: @unchecked Sendable {
       var deadStep: [Int?]
       var deadDetector: [String?]
       var lastDrainStep = 0
       var error: Error?
       var gpuSeconds = 0.0
-      // Previous-heartbeat rewardSums for recent-window delivered rates
-      // (the live "is the population learning NOW" signal).
       var prevRewardSum: [Double]
       var prevStep = 0
       init(_ b: Int) {
@@ -746,7 +678,6 @@ func metricsRoot() -> URL {
       func quantile(_ s: [Double], _ x: Double) -> Double {
         s[min(Int((Double(s.count - 1) * x).rounded()), s.count - 1)]
       }
-      // Recent-window per-lane rates from the previous heartbeat's rewardSums.
       let dStep = step - st.prevStep
       let recent = (0..<B).map { l -> Double in
         let sn = snapPtr[half * B + l]
@@ -807,14 +738,10 @@ func metricsRoot() -> URL {
         try h.write(contentsOf: Data(line.utf8))
       }
     }
-    // ---- main loop: multi-step command buffers, 2 in flight ----
     let explicitN = e["OAK_STEPS_PER_CB"].flatMap(Int.init)
     let tuneLock = NSLock()
     var tunedN = max(explicitN ?? 32, 1)
     let inflight = DispatchSemaphore(value: 2)
-    // With recording or hash dumps active the writer must finish draining a
-    // heartbeat interval before the GPU can start the interval after next
-    // (record ring is 2 intervals deep) — cap outstanding snapshots at 1.
     let snapSlots = DispatchSemaphore(value: (recordLanes.isEmpty && dumpEvery == 0) ? 2 : 1)
     var snapHalf = 0
     var step = 0
@@ -876,7 +803,7 @@ func metricsRoot() -> URL {
       cb.commit()
       if isDump {
         cb.waitUntilCompleted()
-        writer.sync {}  // snapshot rows for this boundary are flushed first
+        writer.sync {}
         try writeHashes(step: target)
       }
       step = target
@@ -888,9 +815,6 @@ func metricsRoot() -> URL {
     inflight.signal()
     if let err = st.error { throw err }
   }
-  // fp32 Metal physics probe: argv[2] = input bin (uint32 count + count*33 f32:
-  // qpos[9], qvel[9], ctrl[6], warmstart[9]), argv[3] = output bin (count*18 f32:
-  // qpos'[9], qvel'[9]). One thread per case, exactly one hc_mj_step each.
   static func physicsProbe() throws {
     let args = CommandLine.arguments
     guard args.count >= 4 else {
@@ -903,11 +827,6 @@ func metricsRoot() -> URL {
     guard n > 0, data.count == 4 + inFloats * 4 else {
       throw err("Probe input size mismatch: \(data.count) bytes for \(n) cases.")
     }
-    // Optional argv[4] == "debug": dump per-case solver intermediates (904 floats)
-    // via oak_physics_probe_debug instead of the 18-float qpos'/qvel' output.
-    // Optional argv[4] == "coop": one 32-thread simdgroup per case through
-    // hc_mj_step_simd (the cooperative megastep env path); output must be
-    // bitwise equal to the scalar probe (order-preservation proof).
     let debug = args.count > 4 && args[4] == "debug"
     let coop = args.count > 4 && args[4] == "coop"
     let outStride = debug ? 904 : 18
@@ -924,7 +843,7 @@ func metricsRoot() -> URL {
     guard let inBuf = dev.makeBuffer(length: inFloats * 4, options: [.storageModeShared]),
       let outBuf = dev.makeBuffer(length: n * outStride * 4, options: [.storageModeShared]),
       let rowsBuf = dev.makeBuffer(
-        length: coop ? n * 1050 * 4 : 16, options: [.storageModePrivate])  // HCSimdRows/case
+        length: coop ? n * 1050 * 4 : 16, options: [.storageModePrivate])
     else { throw err("Metal buffer allocation failed.") }
     data.withUnsafeBytes { raw in
       memcpy(inBuf.contents(), raw.baseAddress!.advanced(by: 4), inFloats * 4)
@@ -939,7 +858,7 @@ func metricsRoot() -> URL {
     enc.setBytes(&count, length: MemoryLayout<UInt32>.stride, index: 2)
     if coop {
       enc.setBuffer(rowsBuf, offset: 0, index: 3)
-      enc.setThreadgroupMemoryLength(140 * MemoryLayout<Float>.stride, index: 0)  // HC_SIMD_SCRATCH
+      enc.setThreadgroupMemoryLength(140 * MemoryLayout<Float>.stride, index: 0)
       enc.dispatchThreadgroups(mtlSize(n), threadsPerThreadgroup: mtlSize(32))
     } else {
       let tg = min(64, pipe.maxTotalThreadsPerThreadgroup)
@@ -952,19 +871,7 @@ func metricsRoot() -> URL {
     try Data(bytes: outBuf.contents(), count: n * outStride * 4)
       .write(to: URL(fileURLWithPath: args[3]))
   }
-  // Env-step rollout host (Phase F2). Forms:
-  //   OaK physics-rollout <input.bin> <output.bin>
-  //     input: u32 header [lanes, steps, mode, seedBase, episodeLen], then
-  //     initial states (lanes*18 f32, modes 0/3), then ctrl (lanes*steps*6 f32,
-  //     mode 0). Output: mode 0/1 -> lanes*steps*37 f32, mode 3 -> lanes*steps*2.
-  //   OaK physics-rollout --bench
-  //     mode 2 (Philox reset + random ctrl, no trajectory): B from
-  //     OAK_ROLLOUT_LANES (4096), steps from OAK_ROLLOUT_STEPS (2000); reports
-  //     env-steps/s + mj-steps/s + output checksum to stderr.
-  //   OaK physics-rollout --rng-probe <out.bin>
-  //     mode 4 sampling probe: OAK_RNG_LANES (200000) lanes x 24 f32
-  //     (reset qpos[9]/qvel[9] + step-0 ctrl[6]).
-  static let rolloutLaneStride = 35 * 4  // sizeof(HCEnvLane): HCState 33 f + 2 u32
+  static let rolloutLaneStride = 35 * 4
   static func physicsRollout() throws {
     let args = CommandLine.arguments
     let e = ProcessInfo.processInfo.environment
@@ -1046,7 +953,6 @@ func metricsRoot() -> URL {
     let ctrlBuf = try buf(ctrl, 16)
     let outBuf = try buf(nil, outFloats * 4)
     let laneBuf = try buf(nil, lanes * rolloutLaneStride, shared: false)
-    // mode 3 steps are raw mj-steps; env-step chunks cost 5 mj-steps each.
     let chunkSteps = mode == 4 ? 1 : (mode == 3 ? 500 : 100)
     let tg = min(64, pipe.maxTotalThreadsPerThreadgroup)
     var gpuSeconds = 0.0
@@ -1131,12 +1037,6 @@ func metricsRoot() -> URL {
         isDirectory: true)
     }
     try fm.createDirectory(at: dir, withIntermediateDirectories: true)
-    // Static FMA-class op count per lane-step (build constant; the per-FLOP
-    // denominator for reward-rate-per-FLOP reporting). Derivation from the
-    // kernel loop bounds (HalfCheetah: O=17, D=12, R=K=24, learnTotal=22,488):
-    // encode option-model query + plan transition TDs ~ 2*K*R^2; learn ~ 2 ops
-    // per element; emit blend K*D*R; RR/psi encode + features ~ 4*K*R + 6*R^2;
-    // GPU physics ~ 20K (5 fp32 mj_steps: FK/CRB/RNE/contacts/Newton/Euler).
     let mR = max(17, 12 * 2, 2)
     let mLearnTotal = mR + mR * mR + mR * 12 * mR + mR * mR + mR * mR * mR + mR * mR
     let flopsPerLaneStep =

@@ -1,25 +1,4 @@
 #!/usr/bin/env python3
-"""Population science for OaK fleet runs: report, gate, watch.
-
-  fleet.py report <run-root>             KM survival + RMST, divergence Wilson
-                                         CIs, IQM delivered rate + bootstrap CI,
-                                         plasticity quartiles -> markdown +
-                                         summary.json
-  fleet.py gate <keeper> <candidate>     the promotion law: 4 paired
-                                         non-inferiority criteria (PROMOTE /
-                                         REJECT); --equivalence switches to the
-                                         unpaired TOST instrument-swap gate
-                                         (EQUIVALENT / DIFFERENT / INCONCLUSIVE)
-  fleet.py watch <run-root> [--follow]   live aggregate.jsonl dashboard
-
-Statistics notes (standing law, see docs/roadmap.md):
-- candidate gating is PAIRED by seed (variance reduction is real there);
-- instrument swaps (e.g. physics backends) use UNPAIRED bootstrap + TOST with
-  fixed practical-irrelevance bands, and any equivalence margin must first be
-  validated against a measured same-physics null control;
-- NF activity is compared by per-lane PREVALENCE, never by fleet sums (sums
-  are heavy-tailed and dominated by a few diverged lanes).
-"""
 
 from __future__ import annotations
 
@@ -36,8 +15,6 @@ import numpy as np
 ENTROPY_COLLAPSE_EPS = 1e-6
 NF_PHASES = ("encode", "learn", "plan", "tdPsi")
 
-# External SOTA reference lines (AGENTS.md "The SOTA bar" — sources cited there).
-# Two framings, NEVER mixed in one claim: eval-of-final-policy vs delivered-during-training.
 SOTA_EVAL = {"TD7": 17.4, "TD-MPC2": 15.1, "MR.Q": 13.3, "TD3": 10.1, "SAC": 9.9}
 SOTA_DELIVERED_EST = {"SAC (delivered, est.)": 6.0}
 SOTA_FRAMING_NOTE = (
@@ -45,12 +22,7 @@ SOTA_FRAMING_NOTE = (
     "delivered = online reward over the entire stream, flailing included (ours). "
     "Per-FLOP claims require both sides instrumented (AGENTS.md rules).")
 
-
-# ---------------------------------------------------------------- statistics
-
-
 def wilson(k: int, n: int, z: float = 1.96) -> tuple[float, float, float]:
-    """Wilson score interval for a binomial proportion: (p_hat, lo, hi)."""
     if n == 0:
         return float("nan"), 0.0, 1.0
     p = k / n
@@ -59,11 +31,7 @@ def wilson(k: int, n: int, z: float = 1.96) -> tuple[float, float, float]:
     half = z * math.sqrt(p * (1 - p) / n + z * z / (4 * n * n)) / denom
     return p, max(0.0, center - half), min(1.0, center + half)
 
-
 def km_curve(times: np.ndarray, events: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
-    """Kaplan-Meier estimator. times: event-or-censor step per lane;
-    events: 1 if death observed, 0 if censored (survived to horizon).
-    Returns (event_times, S(t) just after each event time)."""
     order = np.argsort(times)
     t_sorted, e_sorted = times[order], events[order]
     uniq = np.unique(t_sorted[e_sorted == 1])
@@ -77,9 +45,7 @@ def km_curve(times: np.ndarray, events: np.ndarray) -> tuple[np.ndarray, np.ndar
         surv.append(s)
     return uniq, np.array(surv)
 
-
 def rmst(times: np.ndarray, events: np.ndarray, horizon: int) -> float:
-    """Restricted mean survival time: area under KM curve up to horizon."""
     ts, surv = km_curve(times, events)
     area, prev_t, prev_s = 0.0, 0.0, 1.0
     for t, s in zip(ts, surv):
@@ -92,16 +58,13 @@ def rmst(times: np.ndarray, events: np.ndarray, horizon: int) -> float:
         area += prev_s * (horizon - prev_t)
     return area
 
-
 def iqm(values: np.ndarray) -> float:
-    """Interquartile mean (mean of middle 50%, rliable-style)."""
     if len(values) == 0:
         return float("nan")
     v = np.sort(np.asarray(values, dtype=float))
     n = len(v)
     lo, hi = n // 4, n - n // 4
     return float(v[lo:hi].mean()) if hi > lo else float(v.mean())
-
 
 def bootstrap_ci(
     values: np.ndarray, stat, n_boot: int = 10_000, seed: int = 0,
@@ -113,33 +76,23 @@ def bootstrap_ci(
     draws = np.array([stat(v[row]) for row in idx])
     return float(np.percentile(draws, lo_q)), float(np.percentile(draws, hi_q))
 
-
 def paired_bootstrap(
     keeper: np.ndarray, candidate: np.ndarray, stat, n_boot: int = 10_000, seed: int = 0
 ) -> np.ndarray:
-    """Bootstrap distribution of stat(candidate*) - stat(keeper*) where both
-    sides are resampled with the SAME seed indices (paired by lane)."""
     assert len(keeper) == len(candidate)
     rng = np.random.default_rng(seed)
     n = len(keeper)
     idx = rng.integers(0, n, size=(n_boot, n))
     return np.array([stat(candidate[row]) - stat(keeper[row]) for row in idx])
 
-
 def unpaired_bootstrap(keeper, candidate, stat, n_boot=10_000, seed=0):
-    """Bootstrap distribution of stat(candidate*) - stat(keeper*) with each side
-    resampled INDEPENDENTLY. Correct for physics-swap / disjoint-population
-    comparisons where lanes are not paired twins (pairing by seed is meaningless
-    across physics backends: different RNG streams, different trajectories)."""
     rng = np.random.default_rng(seed)
     k, c = np.asarray(keeper, dtype=float), np.asarray(candidate, dtype=float)
     ik = rng.integers(0, len(k), size=(n_boot, len(k)))
     ic = rng.integers(0, len(c), size=(n_boot, len(c)))
     return np.array([stat(c[rc]) - stat(k[rk]) for rk, rc in zip(ik, ic)])
 
-
 def ks_test(a: np.ndarray, b: np.ndarray) -> tuple[float, float]:
-    """Two-sample Kolmogorov-Smirnov statistic + asymptotic p-value (numpy only)."""
     a, b = np.sort(a), np.sort(b)
     allv = np.concatenate([a, b])
     cdf_a = np.searchsorted(a, allv, side="right") / len(a)
@@ -147,16 +100,13 @@ def ks_test(a: np.ndarray, b: np.ndarray) -> tuple[float, float]:
     d = float(np.abs(cdf_a - cdf_b).max())
     n = len(a) * len(b) / (len(a) + len(b))
     lam = (np.sqrt(n) + 0.12 + 0.11 / np.sqrt(n)) * d
-    if lam < 0.3:  # asymptotic series diverges as lam -> 0; p is 1 here
+    if lam < 0.3:
         return d, 1.0
     j = np.arange(1, 101)
     p = 2 * np.sum((-1) ** (j - 1) * np.exp(-2 * (lam * j) ** 2))
     return d, float(min(max(p, 0.0), 1.0))
 
-
 def rolling_rate(series: list[tuple[int, float]], window: int) -> list[tuple[int, float]]:
-    """For each (step, rewardSum), find the closest earlier point >= window steps
-    back and return (step, (rsum - rsum_back) / (step - step_back))."""
     out: list[tuple[int, float]] = []
     for i, (step, rsum) in enumerate(series):
         target = step - window
@@ -167,10 +117,6 @@ def rolling_rate(series: list[tuple[int, float]], window: int) -> list[tuple[int
             continue
         out.append((step, (rsum - series[j][1]) / (step - series[j][0])))
     return out
-
-
-# ------------------------------------------------------------------- loading
-
 
 def load_run(root: Path) -> dict:
     meta = json.loads((root / "meta.json").read_text())
@@ -188,7 +134,6 @@ def load_run(root: Path) -> dict:
             deaths = [json.loads(line) for line in f]
     return {"meta": meta, "lanes": lanes, "deaths": deaths}
 
-
 def finals(run: dict, policy: str) -> dict[int, dict]:
     out = {}
     for (pol, seed), rows in run["lanes"].items():
@@ -198,9 +143,7 @@ def finals(run: dict, policy: str) -> dict[int, dict]:
         out[seed] = fin[-1] if fin else rows[-1]
     return out
 
-
 def death_times(fin: dict[int, dict], horizon: int) -> tuple[np.ndarray, np.ndarray, list[int]]:
-    """(times, events, seeds) for time-to-first-nonfinite, censored at horizon."""
     seeds = sorted(fin)
     times = np.array(
         [fin[s].get("firstNonFiniteStep") or horizon for s in seeds], dtype=float)
@@ -208,15 +151,10 @@ def death_times(fin: dict[int, dict], horizon: int) -> tuple[np.ndarray, np.ndar
         [1 if fin[s].get("firstNonFiniteStep") is not None else 0 for s in seeds])
     return times, events, seeds
 
-
 def delivered(fin: dict[int, dict], seeds: list[int]) -> np.ndarray:
     return np.array([fin[s]["rewardSum"] / max(fin[s]["step"], 1) for s in seeds])
 
-
 def recent_rates(run: dict, policy: str, fin: dict[int, dict]) -> dict[int, float]:
-    """Per-lane delivered rate over the LAST heartbeat window (rewardSum delta /
-    step delta between the final two rows) — 'is this lane learning now', as
-    opposed to the lifetime average."""
     out: dict[int, float] = {}
     for s in sorted(fin):
         rows = run["lanes"][(policy, s)]
@@ -226,7 +164,6 @@ def recent_rates(run: dict, policy: str, fin: dict[int, dict]) -> dict[int, floa
         else:
             out[s] = fin[s]["rewardSum"] / max(fin[s]["step"], 1)
     return out
-
 
 def sota_gap_line(best_rate: float, iqm_all: float) -> str:
     td7 = SOTA_EVAL["TD7"]
@@ -240,10 +177,7 @@ def sota_gap_line(best_rate: float, iqm_all: float) -> str:
             f"vs SAC ~{sac_del}/step (delivered, est.): gap {gap(best_rate, sac_del)} at best lane. "
             f"({SOTA_FRAMING_NOTE})")
 
-
 def entropy_collapse_step(rows: list[dict]) -> int | None:
-    """First heartbeat step where actorSupportEntropy < eps for 2 consecutive
-    heartbeats (the FC-STOMP-goes-quiet fixed point)."""
     prev_low, prev_step = False, None
     for r in rows:
         ent = (r.get("health") or {}).get("actorSupportEntropy")
@@ -253,9 +187,7 @@ def entropy_collapse_step(rows: list[dict]) -> int | None:
         prev_low, prev_step = low, r["step"]
     return None
 
-
 def plasticity(rows: list[dict], window: int) -> dict | None:
-    """Zenith and decay statistics from the heartbeat rewardSum series."""
     series = [(r["step"], r["rewardSum"]) for r in rows]
     rates = rolling_rate(series, window)
     if not rates:
@@ -268,16 +200,11 @@ def plasticity(rows: list[dict], window: int) -> dict | None:
         "endRate": end_rate, "decayRatio": decay,
     }
 
-
-# -------------------------------------------------------------------- report
-
-
 def quartiles(v: list[float]) -> str:
     if not v:
         return "n/a"
     q = np.percentile(np.array(v, dtype=float), [25, 50, 75])
     return f"{q[0]:.4g} / {q[1]:.4g} / {q[2]:.4g}"
-
 
 def analyze_policy(run: dict, policy: str, window: int) -> dict:
     meta = run["meta"]
@@ -350,7 +277,6 @@ def analyze_policy(run: dict, policy: str, window: int) -> dict:
         out["laneStepsTotal"] = int(sum(fin[s]["step"] for s in seeds))
     return out
 
-
 def render_markdown(results: list[dict], meta: dict) -> str:
     lines = [
         f"### Fleet report — {meta['envId']} B={meta['batch']} × {meta['steps']} steps "
@@ -419,10 +345,8 @@ def render_markdown(results: list[dict], meta: dict) -> str:
                 + (f"; {run_flops_str(r)}" if r.get("rewardPerGFLOP") is not None else "") + ".")
     return "\n".join(lines)
 
-
 def run_flops_str(r: dict) -> str:
     return f"best-lane reward/GFLOP {r['bestRewardPerGFLOP']:+.4g} (OaK measured; SOTA est. only)"
-
 
 def render_leaderboard(run: dict, result: dict, top: int) -> str:
     policy = result["policy"]
@@ -454,7 +378,6 @@ def render_leaderboard(run: dict, result: dict, top: int) -> str:
             f"| {s} | {life:+.4f} | {fin[s]['rewardSum']:+,.0f} | {rec:+.4f} | {zen} | {status} |")
     return "\n".join(lines)
 
-
 def cmd_report(args) -> int:
     run = load_run(args.root)
     meta = run["meta"]
@@ -473,10 +396,6 @@ def cmd_report(args) -> int:
     out.write_text(json.dumps(summary, indent=2, sort_keys=True))
     return 0
 
-
-# ---------------------------------------------------------------------- gate
-
-
 def nf_totals(fin: dict[int, dict]) -> dict[str, int]:
     tot = dict.fromkeys(NF_PHASES, 0)
     for row in fin.values():
@@ -485,12 +404,10 @@ def nf_totals(fin: dict[int, dict]) -> dict[str, int]:
             tot[ph] += int(nf.get(ph, 0))
     return tot
 
-
 def gate_verdicts(keep_fin, cand_fin, keep_seeds, cand_seeds, n, horizon, args, label):
     delta = args.delta if args.delta is not None else 0.64 / np.sqrt(n)
     verdicts: list[tuple[str, bool, str]] = []
 
-    # 1. divergence non-inferiority (paired)
     k_times, k_events, _ = death_times(keep_fin, horizon)
     c_times, c_events, _ = death_times(cand_fin, horizon)
     dp = paired_bootstrap(k_events.astype(float), c_events.astype(float),
@@ -501,7 +418,6 @@ def gate_verdicts(keep_fin, cand_fin, keep_seeds, cand_seeds, n, horizon, args, 
         "divergence", dp95 <= delta,
         f"p keeper={p_keep:.3f} cand={p_cand:.3f} Δp95={dp95:+.4f} δ={delta:.4f}"))
 
-    # 2. IQM delivered-rate non-inferiority (paired, all lanes)
     k_del, c_del = delivered(keep_fin, keep_seeds), delivered(cand_fin, cand_seeds)
     di = paired_bootstrap(k_del, c_del, iqm, n_boot=args.boot, seed=12)
     di5 = float(np.percentile(di, 5))
@@ -513,7 +429,6 @@ def gate_verdicts(keep_fin, cand_fin, keep_seeds, cand_seeds, n, horizon, args, 
         f"IQM keeper={iqm_keep:.5g} cand={iqm(c_del):.5g} ΔIQM5={di5:+.5g} "
         f"margin={-margin:.5g}{' IMPROVEMENT' if improved else ''}"))
 
-    # 3. survival non-inferiority via RMST (paired)
     rng = np.random.default_rng(13)
     idx = rng.integers(0, n, size=(args.boot, n))
     dr = np.array([
@@ -528,7 +443,6 @@ def gate_verdicts(keep_fin, cand_fin, keep_seeds, cand_seeds, n, horizon, args, 
         f"cand={rmst(c_times, c_events, horizon):,.0f} ΔRMST5={dr5:+,.0f} "
         f"margin={-rmst_margin:,.0f}"))
 
-    # 4. no new NF phases + ceiling
     k_nf, c_nf = nf_totals(keep_fin), nf_totals(cand_fin)
     new_phases = [ph for ph in NF_PHASES if c_nf[ph] > 0 and k_nf[ph] == 0]
     over = [ph for ph in NF_PHASES
@@ -549,15 +463,7 @@ def gate_verdicts(keep_fin, cand_fin, keep_seeds, cand_seeds, n, horizon, args, 
         print(f"  [{'PASS' if passed else 'FAIL'}] {name:14s} {detail}")
     return ok
 
-
 def equivalence_gate(keep_fin, cand_fin, keep_seeds, cand_seeds, n, horizon, args) -> int:
-    """TOST-style two-sided equivalence with three-way verdicts per criterion:
-    EQUIVALENT   — 90% CI of the unpaired bootstrap difference lies inside the band
-    DIFFERENT    — 90% CI lies entirely outside the band
-    INCONCLUSIVE — CI spans a band edge: underpowered at this N/horizon; the
-                   printed factor estimates how much more N is needed.
-    Overall: EQUIVALENT iff all numeric criteria EQUIVALENT and KS p >= 0.01;
-    DIFFERENT if any criterion DIFFERENT or KS fails; else INCONCLUSIVE (exit 3)."""
     k_t, k_e, _ = death_times(keep_fin, horizon)
     c_t, c_e, _ = death_times(cand_fin, horizon)
     k_del, c_del = delivered(keep_fin, keep_seeds), delivered(cand_fin, cand_seeds)
@@ -583,8 +489,7 @@ def equivalence_gate(keep_fin, cand_fin, keep_seeds, cand_seeds, n, horizon, arg
     verdicts = []
     dp = unpaired_bootstrap(k_e.astype(float), c_e.astype(float), np.mean,
                             n_boot=args.boot, seed=11)
-    # Fixed practical-irrelevance band for instrument swaps (NOT N-dependent:
-    # the band encodes what difference we don't care about; N buys resolution).
+
     band_p = args.delta if args.delta is not None else 0.03
     verdicts.append(tost("divergence", dp, band_p))
     di = unpaired_bootstrap(k_del, c_del, iqm, n_boot=args.boot, seed=12)
@@ -597,10 +502,6 @@ def equivalence_gate(keep_fin, cand_fin, keep_seeds, cand_seeds, n, horizon, arg
         for rk, rc in zip(ik, ic)])
     verdicts.append(tost("rmstSurvival", dr, args.rmst_rel * horizon, "{:+,.0f}"))
 
-    # NF equivalence by per-lane PREVALENCE (fraction of lanes with any NF in
-    # the phase), not raw fleet sums: sums are heavy-tailed (dominated by a few
-    # diverged lanes; the same-physics null showed 1.67x total swings) and are
-    # not a calibrated population statistic. Same TOST band as divergence.
     def nf_prevalence(fin, seeds, phase):
         return np.array([
             1.0 if ((fin[s].get("health") or {}).get("nonFiniteByPhase") or {}).get(phase, 0) > 0
@@ -638,7 +539,6 @@ def equivalence_gate(keep_fin, cand_fin, keep_seeds, cand_seeds, n, horizon, arg
     print("INCONCLUSIVE — increase N or horizon and rerun")
     return 3
 
-
 def cmd_gate(args) -> int:
     keep_run, cand_run = load_run(args.keeper), load_run(args.candidate)
     keep_fin, cand_fin = (finals(r, args.policy) for r in (keep_run, cand_run))
@@ -663,13 +563,7 @@ def cmd_gate(args) -> int:
     print("PROMOTE" if ok else "REJECT")
     return 0 if ok else 1
 
-
-# ---------------------------------------------------------------------- sota
-
-
 def cmd_sota(args) -> int:
-    """The project scoreboard: reward trajectory across all fleet roots vs the
-    fixed external reference lines. Answers 'are we closing the gap'."""
     roots = []
     for d in sorted(args.dir.iterdir()):
         if not (d / "meta.json").exists() or not (d / "fleet.jsonl").exists():
@@ -681,7 +575,7 @@ def cmd_sota(args) -> int:
         if "oak" not in meta.get("policies", []):
             continue
         if meta.get("batch", 0) < args.min_lanes or meta.get("steps", 0) < args.min_steps:
-            continue  # validation/debug roots are noise on the scoreboard
+            continue
         roots.append((meta.get("startedAt", ""), d, meta))
     if not roots:
         print(f"(no fleet roots with oak policy under {args.dir})")
@@ -697,7 +591,7 @@ def cmd_sota(args) -> int:
         try:
             run = load_run(d)
             r = analyze_policy(run, "oak", max(meta["steps"] // 5, 1))
-        except Exception as e:  # partial/live runs shouldn't kill the board
+        except Exception as e:
             print(f"| {d.name} | {started[:10]} | (unreadable: {e}) | | | | | | |")
             continue
         if not r:
@@ -714,10 +608,6 @@ def cmd_sota(args) -> int:
     print(f"({SOTA_FRAMING_NOTE})")
     return 0
 
-
-# --------------------------------------------------------------------- watch
-
-
 def latest_rows(root: Path) -> dict[str, dict]:
     rows: dict[str, dict] = {}
     path = root / "aggregate.jsonl"
@@ -728,10 +618,9 @@ def latest_rows(root: Path) -> dict[str, dict]:
             try:
                 row = json.loads(line)
             except json.JSONDecodeError:
-                continue  # partial last line of a live run
+                continue
             rows[row["policy"]] = row
     return rows
-
 
 def render_watch(rows: dict[str, dict]) -> str:
     if not rows:
@@ -758,7 +647,6 @@ def render_watch(rows: dict[str, dict]) -> str:
         out.append(line)
     return "\n".join(out)
 
-
 def cmd_watch(args) -> int:
     while True:
         print(render_watch(latest_rows(args.root)), flush=True)
@@ -766,10 +654,6 @@ def cmd_watch(args) -> int:
             return 0
         time.sleep(args.interval)
         print()
-
-
-# ---------------------------------------------------------------------- main
-
 
 def main() -> int:
     ap = argparse.ArgumentParser(
@@ -814,7 +698,6 @@ def main() -> int:
     args = ap.parse_args()
     return {"report": cmd_report, "gate": cmd_gate, "watch": cmd_watch,
             "sota": cmd_sota}[args.cmd](args)
-
 
 if __name__ == "__main__":
     sys.exit(main())

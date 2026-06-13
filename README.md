@@ -245,8 +245,9 @@ log in [`docs/roadmap.md`](docs/roadmap.md). The literature corpus is in
 ```
 
 `setup.sh` creates `.venv` and installs `requirements.txt` (`mujoco`, `numpy`
-— used only by the parity oracle and replay tools), compiles
-`Sources/OakKernel.metal` to a metallib, and runs `swift build -c release`.
+— used only by the parity oracle and replay/report tools), compiles
+`Sources/OakKernel.metal` plus its included GPU physics/model sources to a
+metallib, and runs `swift build -c release`.
 The resulting binary is `./.build/release/OaK`.
 
 For Swift / Metal-only changes, `scripts/halfcheetah_rebuild_10m.sh` recompiles
@@ -329,15 +330,13 @@ Defaults are configurable via env vars (read in `Sources/Main.swift`):
 
 | Var | Default | Notes |
 |---|---|---|
-| `OAK_BENCH_ENV` | `HalfCheetah-v4` | Only env wired through the bridge today |
+| `OAK_BENCH_ENV` | `HalfCheetah-v4` | Only env wired through the GPU physics kernel today |
 | `OAK_BENCH_STEPS` | `500000` | Per-lane step budget (horizon) |
 | `OAK_BENCH_POLICIES` | `oak,zero,random` | Comma list; one fleet per policy |
 | `OAK_BENCH_SEEDS` | — | Explicit seed list, overrides count |
 | `OAK_BENCH_SEED_COUNT` | `1024` | B = lane count; lane b runs seed b |
 | `OAK_BENCH_HEARTBEAT_STEPS` | steps/10 | Lower for live diagnostics |
-| `OAK_FLEET_ENV_THREADS` | all cores | CPU shards for env stepping |
 | `OAK_FLEET_TIMING` | unset | `1` prints per-phase wall shares per heartbeat |
-| `OAK_FLEET_FREEZE_DEAD` | unset | `1` stops stepping certified-dead lanes (gate runs only) |
 | `OAK_METRICS_STORAGE` | `.oak-benchmarks/...` | Output root |
 | `OAK_RECORD_SEEDS` | unset | Comma list of lanes that record `actions.bin` |
 | `OAK_RECORD_ACTIONS` | unset | `1` records ALL lanes (small fleets only) |
@@ -364,9 +363,9 @@ so every tier is a paired extension of the one below; no protocol step exceeds
 Watch a live fleet, report a finished one, and gate a candidate:
 
 ```bash
-python3 tools/fleet.py watch <run-root> --follow
-python3 tools/fleet.py report <run-root>          # KM survival, Wilson CIs, IQM, plasticity
-python3 tools/fleet.py gate  <keeper> <candidate> # population promotion law (paired by seed)
+.venv/bin/python tools/fleet.py watch <run-root> --follow
+.venv/bin/python tools/fleet.py report <run-root>          # KM survival, Wilson CIs, IQM, plasticity
+.venv/bin/python tools/fleet.py gate  <keeper> <candidate> # population promotion law (paired by seed)
 ```
 
 `fleet.py gate` is the promotion law: divergence-rate, IQM delivered-rate, and

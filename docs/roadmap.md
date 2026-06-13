@@ -45,13 +45,13 @@ seed 8 is the large backward attractor (`-109670.777`, mean velocity
 `-0.073140`). Seeds 0 and 1 remain quiet low-motion failures; seeds 4 and 5
 become costly bad commitments.
 
-A bridge oracle now exists as a non-agent witness, not doctrine:
-`.venv/bin/python tools/bridge_oracle_cem.py --cem-iters 0 --eval-horizon 5000
---seed-count 5` runs a fixed open-loop sinusoid through the same C bridge and
-returns mean reward `+4428.300`, mean `info:reward_run=+4914.978`, mean
-`info:reward_ctrl=-486.678`, and mean `info:x_velocity=+0.982996`. This proves
-the bridge can carry positive locomotion and gives a scale target; none of its
-parameters or behavior enter OaK.
+The deleted CPU bridge had a non-agent oracle witness, not doctrine: a fixed
+open-loop sinusoid over 5 seeds x 5k steps returned mean reward `+4428.300`,
+mean `info:reward_run=+4914.978`, mean `info:reward_ctrl=-486.678`, and mean
+`info:x_velocity=+0.982996`. This proved the then-current instrument could
+carry positive locomotion and gave a scale target; none of its parameters or
+behavior enter OaK. The current GPU physics instrument is certified
+population-equivalent later in this file.
 
 The live architecture at this audit: default perception is direct normalized
 experience channels plus constructed feature slots, K=R options/subtasks,
@@ -145,8 +145,8 @@ model-priority (`50k` mean `-1199.252`, NF total `2`). The lesson is sharper
 now: keeping support alive or waking silent options is not enough if it erases
 the hard commitment that discovers the gait or wakes bad commitments too early.
 
-Live diagnosis pass: `OAK_BENCH_HEARTBEAT_STEPS=10000` plus
-`tools/bench_watch.py` was added so heartbeats can be watched as a rolling
+Live diagnosis pass: `OAK_BENCH_HEARTBEAT_STEPS=10000` plus the now-retired
+`tools/bench_watch.py` was added so heartbeats could be watched as a rolling
 stream instead of only ten coarse snapshots. The Oak-only 300k witness
 `.oak-benchmarks/live-diagnosis-oak-300k-20260426` is behavior-identical to the
 fresh post-audit 300k final, but the 10k windows expose distinct failure modes:
@@ -159,12 +159,12 @@ not simply missing exploration: replacement can churn without coupling back
 into actor pressure, while invalid model/subtask arithmetic can make FC-STOMP
 go silent.
 
-Efficiency rule after the closed-loop probe failures: new behavior candidates
-must first run a targeted seed screen before full grids. Use
-`OAK_BENCH_SEEDS=0,1,3,8` to cover quiet collapse, the strong seed-3 rocket, and
-the seed-8 backward attractor, then compare with `tools/bench_compare.py`. A
-candidate that cannot move seeds 0/1, preserve seed 3, and avoid worsening seed
-8 at 50k is rejected before a 300k spend.
+Efficiency rule after the closed-loop probe failures, now superseded by the
+fleet protocol: the historical targeted screen used `OAK_BENCH_SEEDS=0,1,3,8`
+to cover quiet collapse, the strong seed-3 rocket, and the seed-8 backward
+attractor before full grids. Current promotion uses `.venv/bin/python
+tools/fleet.py gate` at matched horizons; single seeds remain ordinary lanes,
+not promotion law.
 
 Two follow-up FC-STOMP probes were rejected. RR non-finite termination treated
 invalid RR stopping comparisons as forced option termination; it woke seed 1
@@ -966,12 +966,11 @@ catastrophe.
   total `3`; random mean `-78032.282`, zero mean `+0.010`. Seed 8 flips from the
   large backward attractor to forward positive return while seeds
   0/1/2/3/4/5/6/7/9 match grounded dead-credit bit-for-bit.
-- Bridge oracle witness: `.venv/bin/python tools/bridge_oracle_cem.py
-  --cem-iters 0 --eval-horizon 5000 --seed-count 5` returns mean reward
-  `+4428.300`, mean run reward `+4914.978`, mean control cost `-486.678`, and
-  mean velocity `+0.982996` through the same C bridge. The oracle is a witness
-  and scale target only; it is not agent knowledge and must not enter the
-  reward stream or action policy.
+- Historical bridge oracle witness: fixed open-loop sinusoid over 5 seeds x
+  5k steps returned mean reward `+4428.300`, mean run reward `+4914.978`, mean
+  control cost `-486.678`, and mean velocity `+0.982996` through the deleted
+  CPU bridge. The oracle is a witness and scale target only; it is not agent
+  knowledge and must not enter the reward stream or action policy.
 - Rejected after walking because they killed the gait or failed the 300k gate:
   pure average-reward Q selection (`fcstomp-pureq-50k`), score-based soft
   interruption (`fcstomp-softinterrupt-50k`), negative-TD chord refresh

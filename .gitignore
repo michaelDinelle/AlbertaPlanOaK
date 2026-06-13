@@ -1,27 +1,17 @@
-# Swift Package Manager
 /.build/
 /.swiftpm/
 /Packages/
 
-# Auto-generated bench artifacts (yyyyMMdd-HHmmss-<pid>). Curated runs are tracked
-# under named subdirectories like ".oak-benchmarks/<curated-name>/".
 .oak-benchmarks/
 
-# Replay videos. Multi-hundred-MB / multi-GB mp4s exceed GitHub's 100 MB hard
-# limit on push, so they live in media/ locally but are not tracked. Embed
-# them in the README via a user-attachments/assets/... URL (drag-drop into
-# any GitHub issue/PR comment box) — repo-relative paths in the README act
-# as download fallbacks for local viewers.
 media/*.mp4
 
-# Xcode and Apple toolchains
 /DerivedData/
 *.xcodeproj/xcuserdata/
 *.xcworkspace/xcuserdata/
 *.xcuserstate
 *.xcscmblueprint
 
-# Python caches and local environments
 __pycache__/
 *.py[cod]
 *.pyo
@@ -44,15 +34,14 @@ htmlcov/
 /ENV/
 .python-version
 
-# Local configuration
 .env
 .env.*
 !.env.example
 
-# macOS metadata
 .DS_Store
 
-# Traces and temp
+/.tmp/
+/tools/physics/.m3a/
 *.trace/
 *.profraw
 .cursor/

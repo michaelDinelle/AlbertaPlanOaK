@@ -1,12 +1,6 @@
 #!/bin/bash
 set -euo pipefail
 
-# OaK setup: the environment is GPU-resident (Sources/OakPhysics.metal, an
-# fp32 port of MuJoCo HalfCheetah verified against fp64 — see
-# docs/gpu-physics-port-spec.md). The only native dependencies are the Metal
-# toolchain and Swift. Python + mujoco are used solely by validation and
-# replay tooling (tools/physics_parity.py oracle, tools/replay_render.py).
-
 ROOT="$(cd "$(dirname "$0")" && pwd)"
 VENV="${OAK_VENV_DIR:-$ROOT/.venv}"
 PYBOOT="$(command -v python3.11 || command -v python3 || true)"
