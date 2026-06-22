@@ -1451,13 +1451,9 @@ static inline void oak_stage_sample_act(device float *params,
         Ctx ctx = make_ctx(params, stateArena, uintArena, scalars, stats, cfg, gid);
         uint A = ctx.D / 2u;
         float sd = 1.0f / float(max(ctx.D, 1u));
-        float log_sigma = -log(sd);
-        float behavior = 0.0f;
         for (uint i = 0u; i < ctx.D; ++i) desc[i] = oak_safe(ctx.policyMean[i]);
         float z[6];
         oak_rng_normal6(laneSeeds[gid], stepIdx, z);
-        float logp[64];
-        for (uint o = 0u; o < ctx.K; ++o) logp[o] = 0.0f;
         for (uint d = 0u; d < A; ++d) {
             float mu = desc[d];
             float sample = oak_safe(mu + sd * z[d]);
@@ -1465,17 +1461,14 @@ static inline void oak_stage_sample_act(device float *params,
             ctrl[d] = a;
             ctx.actionSignal[d] = a;
             ctx.actionSignal[A + d] = 0.0f;
-            behavior += log_sigma - 0.5f * z[d] * z[d];
             for (uint o = 0u; o < ctx.K; ++o) {
                 uint off = o * ctx.D;
                 float om = oak_safe(ctx.optionPolicyMean[off + d]);
-                float oz = (sample - om) / sd;
-                logp[o] += log_sigma - 0.5f * oz * oz;
                 ctx.optionActorCredit[off + d] = sample - om;
                 ctx.optionActorCredit[off + A + d] = 0.0f;
             }
         }
-        for (uint o = 0u; o < ctx.K; ++o) ctx.importance[o] = exp(logp[o] - behavior);
+        for (uint o = 0u; o < ctx.K; ++o) ctx.importance[o] = 1.0f;
     }
     float d2 = 0.0f;
     for (int i = 0; i < 12; i++) {
@@ -1498,12 +1491,10 @@ static inline void oak_stage_sample_act_wide(Ctx ctx,
     device OakFleetLane *lane = &lanes[gid];
     uint A = ctx.D / 2u;
     float sd = 1.0f / float(max(ctx.D, 1u));
-    float log_sigma = -log(sd);
     if (tid == 0u) {
         uint stepIdx = lane->steps;
         float desc[12];
         float ctrl[6];
-        float behavior = 0.0f;
         for (uint i = 0u; i < ctx.D; ++i) desc[i] = oak_safe(ctx.policyMean[i]);
         float z[6];
         oak_rng_normal6(laneSeeds[gid], stepIdx, z);
@@ -1514,10 +1505,8 @@ static inline void oak_stage_sample_act_wide(Ctx ctx,
             ctrl[d] = a;
             ctx.actionSignal[d] = a;
             ctx.actionSignal[A + d] = 0.0f;
-            behavior += log_sigma - 0.5f * z[d] * z[d];
             scratch[20u + d] = sample;
         }
-        scratch[26u] = behavior;
         float d2 = 0.0f;
         for (int i = 0; i < 12; i++) {
             float v = desc[i] - lane->lastDesc[i];
@@ -1533,17 +1522,13 @@ static inline void oak_stage_sample_act_wide(Ctx ctx,
     simdgroup_barrier(mem_flags::mem_threadgroup);
     if (tid < ctx.K) {
         uint off = tid * ctx.D;
-        float behavior = scratch[26u];
-        float logp = 0.0f;
         for (uint d = 0u; d < A; ++d) {
             float sample = scratch[20u + d];
             float om = oak_safe(ctx.optionPolicyMean[off + d]);
-            float oz = (sample - om) / sd;
-            logp += log_sigma - 0.5f * oz * oz;
             ctx.optionActorCredit[off + d] = sample - om;
             ctx.optionActorCredit[off + A + d] = 0.0f;
         }
-        ctx.importance[tid] = exp(logp - behavior);
+        ctx.importance[tid] = 1.0f;
     }
 }
 
