@@ -396,14 +396,6 @@ def cmd_report(args) -> int:
     out.write_text(json.dumps(summary, indent=2, sort_keys=True))
     return 0
 
-def nf_totals(fin: dict[int, dict]) -> dict[str, int]:
-    tot = dict.fromkeys(NF_PHASES, 0)
-    for row in fin.values():
-        nf = (row.get("health") or {}).get("nonFiniteByPhase") or {}
-        for ph in NF_PHASES:
-            tot[ph] += int(nf.get(ph, 0))
-    return tot
-
 def gate_verdicts(keep_fin, cand_fin, keep_seeds, cand_seeds, n, horizon, args, label):
     delta = args.delta if args.delta is not None else 0.64 / np.sqrt(n)
     verdicts: list[tuple[str, bool, str]] = []
@@ -443,15 +435,28 @@ def gate_verdicts(keep_fin, cand_fin, keep_seeds, cand_seeds, n, horizon, args, 
         f"cand={rmst(c_times, c_events, horizon):,.0f} ΔRMST5={dr5:+,.0f} "
         f"margin={-rmst_margin:,.0f}"))
 
-    k_nf, c_nf = nf_totals(keep_fin), nf_totals(cand_fin)
-    new_phases = [ph for ph in NF_PHASES if c_nf[ph] > 0 and k_nf[ph] == 0]
-    over = [ph for ph in NF_PHASES
-            if c_nf[ph] > max(2 * k_nf[ph], 100 * n / 10)]
+    # NF criterion: per-lane PREVALENCE non-inferiority per phase (the fraction of lanes with any
+    # non-finite in that phase), mirroring the divergence criterion (paired bootstrap, Δ95 ≤ δ) and
+    # consistent with the equivalence gate's nf_prevalence. Replaces a fleet-sum-of-totals test, which
+    # a few already-diverged lanes inflate by spraying non-finites after death — double-counting lanes
+    # the divergence criterion already counts. Population NF health is how MANY lanes go non-finite.
+    def nf_prevalence_vec(fin, seeds, phase):
+        return np.array([
+            1.0 if ((fin[s].get("health") or {}).get("nonFiniteByPhase") or {}).get(phase, 0) > 0
+            else 0.0
+            for s in seeds])
+    nf_over, nf_parts = [], []
+    for i, ph in enumerate(NF_PHASES):
+        kp = nf_prevalence_vec(keep_fin, keep_seeds, ph)
+        cp = nf_prevalence_vec(cand_fin, cand_seeds, ph)
+        dnf95 = float(np.percentile(
+            paired_bootstrap(kp, cp, np.mean, n_boot=args.boot, seed=20 + i), 95))
+        if dnf95 > delta:
+            nf_over.append(ph)
+        nf_parts.append(f"{ph} {kp.mean():.3f}->{cp.mean():.3f} Δ95={dnf95:+.4f}")
     verdicts.append((
-        "nfPhases", not new_phases and not over,
-        f"keeper={k_nf} cand={c_nf}"
-        + (f" NEW={new_phases}" if new_phases else "")
-        + (f" OVER={over}" if over else "")))
+        "nfPrevalence", not nf_over,
+        "; ".join(nf_parts) + (f" OVER={nf_over}" if nf_over else "") + f" δ={delta:.4f}"))
 
     hdr = f"fleet gate: N={n} horizon={horizon} policy={args.policy} boot={args.boot}"
     if label:
