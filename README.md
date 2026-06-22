@@ -207,6 +207,37 @@ runs use `OAK_ABLATE=none`. The current chord is a real-valued blend over
 component options; a fully operational keyboard/chord-descriptor cycle is
 still an open architecture gap (see `AGENTS.md`).
 
+### One general primitive, replicated per-X
+
+The architecture's power is structural, and it is the whole reason "drop it
+into any environment" is even coherent. OaK is not a collection of bespoke,
+task-shaped modules — it is **one general learning primitive, replicated per
+element**, each copy specializing to a slice of a world far too large to hold
+whole:
+
+- **representation** is per-feature — each constructed feature its own
+  predictive slot, with its own step-size and utility;
+- **knowledge** is per-GVF and per-option-model — each a prediction about some
+  signal, or about some option's consequences;
+- **control** is per-option;
+- **composition** is per-subtask — the chord weights what each subtask
+  contributes.
+
+Every one of those primitives reads a single shared, continually-constructed
+feature space, and every one is abstract and env-agnostic: there is *nothing
+env-specific to specialize*, which the invariants (no env knowledge,
+parameter-free constants, no scale priors) actively enforce. Generality is not
+a feature bolted on — it is what "per-X replication of one primitive" *means*.
+Scale follows the same way: capacity grows by adding copies, not by
+hand-engineering, so search and learning ride compute the way the Bitter Lesson
+says they must.
+
+Seen this way, the **world model is not a separate organ**. It is the
+population of per-option and per-GVF predictions over the shared feature space;
+planning rolls those predictions forward, and the option keyboard composes them
+— a per-feature chord dotted with each option's predicted outcome. One feature
+space, read by representation, prediction, planning, and the keyboard alike.
+
 ## Current state
 
 OaK is past "negative-return random-beating control" and into real HalfCheetah
