@@ -2,7 +2,7 @@
 
 Last updated: 2026-06-21. The instrument is the GPU-resident **fleet**: B=1024 independent lanes (one seed each), a population gate, and GPU physics certified equivalent to fp64 MuJoCo (the F4 verdict). See **Benchmark Protocol** for the tier ladder, **Current Baseline Decision** for the live keeper and the numbers every candidate must beat, and **Walking Checkpoint Evidence** / **Exhausted Families** for the April 2026 CPU-bridge history (kept as history, not current law).
 
-**Current status.** OaK produces real HalfCheetah locomotion, but only in a thin slice of the population, and it is not yet stable. The Tier-L keeper (`keeper-fleet-tierL-gpu-20260611`, B=1024 × 1M) diverges on **99.4%** of lanes by 1M (paramExplosion-dominated — the death certificate dates the first numeric event, not behavioral death; the strongest lanes keep delivering reward long past their certificate), delivers **IQM −0.0384/step** across all lanes, and collapses actor entropy on ~66% of lanes. The strong-walker mode (~0.2–0.4/step) is a reachable attractor in a ~1% slice (lanes 3, 802, 393, 383, 958, 856, …), not a seed-3 miracle. The April long-horizon microscopes (deep-seed3-10m, 1M coverage) are superseded by the **First deep-horizon decay run** recorded below.
+**Current status.** OaK produces real HalfCheetah locomotion, but only in a thin slice of the population, and it is not yet stable. The Tier-L keeper is now the **ρ≡1 on-policy substrate fix** (`probe-rho1-tierL-rerun`, B=1024 × 1M, PROMOTED 2026-06-22 over the prior `keeper-fleet-tierL-gpu-20260611`): it diverges on **77.3%** of lanes by 1M (down from 99.4%; paramExplosion-dominated — the certificate dates the first numeric event, not behavioral death), delivers **IQM −0.0223/step** across all lanes (up from −0.0384, an IMPROVEMENT), survives 5.4× longer (RMST/horizon 0.48), and **no longer collapses actor entropy** (0.0%, down from ~66%). Still negative, still 77% divergent — the substrate is better, not solved. The strong-walker mode (~0.2–0.4/step) is a reachable attractor in a ~1% slice (lanes 3, 802, 393, 383, 958, 856, …), not a seed-3 miracle. The April long-horizon microscopes (deep-seed3-10m, 1M coverage) are superseded by the **First deep-horizon decay run** recorded below.
 
 **The objective**, decomposed (see AGENTS.md, "The SOTA bar"): (a) make the strong-walker mode the typical outcome — this alone moves population IQM from ≈−0.04 to ≈+0.3; (b) raise that mode's ceiling from ~0.4 toward the external SOTA of 10+/step, bounded by the post-zenith plasticity frontier. Both are open.
 
@@ -1778,25 +1778,33 @@ GPU-resident physics (Phase F: ~100 floats/lane instead of ~100 KB mjData).
 
 ## Current Baseline Decision
 
-**THE keeper: `.oak-benchmarks/keeper-fleet-tierL-gpu-20260611`** — Tier L,
-B=1024 × 1M, oak policy, on the certified GPU instrument (recorded lanes 3, 8;
-196K agg steps/s with recording overhead). Official numbers every candidate
-must beat (`tools/fleet.py report`):
+**THE keeper: `.oak-benchmarks/probe-rho1-tierL-rerun`** (the ρ≡1 Tier-L run) —
+Tier L, B=1024 × 1M, oak policy, on the certified GPU instrument. The **ρ≡1
+on-policy substrate fix** (commit `deefb2bbc`: delete the off-policy importance
+ratio — see the Divergence audit and the [[oak-divergence-bottleneck]] memory),
+**PROMOTED 2026-06-22** over the prior keeper on a paired Tier-L `fleet.py gate`
+(all four criteria PASS, IQM IMPROVEMENT). Official numbers every candidate must
+beat (`tools/fleet.py report`):
 
-- Divergence by 1M: **99.4% [98.7%, 99.7%]** (paramExplosion 1012,
-  policyMean 6); RMST/horizon 0.089.
-- **IQM delivered, all lanes: −0.038358 [−0.04136, −0.03554]**.
-- Plasticity quartiles (25/50/75): zenith step 250k/350k/700k; decay ratio
-  −2.48/−0.30/+0.87. Entropy collapse 65.9% [63.0%, 68.8%].
-- Cross-instrument check: every figure sits inside the CPU-era keeper's CIs
-  and the zenith quartiles are identical — the F4 equivalence verdict
-  reproduced itself at Tier-L scale.
-- Re-verified 2026-06-21: a fresh HEAD Tier-L run (`verify-tierL-20260621`,
-  B=1024 × 1M, oak) reproduces the keeper essentially exactly — IQM delivered
-  −0.038358 [−0.04136, −0.03554], divergence 99.4% (paramExplosion 1012,
-  policyMean 6), RMST/horizon 0.089, zenith 250k/350k/700k, entropy collapse
-  65.9%. Best lane this run is lane 402 at +0.4152/step (+415,173 total). The
-  current build faithfully reproduces the keeper.
+- Divergence by 1M: **77.3%** (down from 99.4%); RMST/horizon **0.48** (5.4×).
+- **IQM delivered, all lanes: −0.022288** (up from −0.038358; IMPROVEMENT).
+- NF prevalence (fraction of lanes with any non-finite — the criterion-4 measure):
+  encode 0.9%, learn 2.1%, plan 19.3%, tdPsi 5.2% — all ≤ the prior keeper.
+- Entropy collapse **0.0%** (down from 65.9%). Best lane +0.066/step.
+
+This promotion also changed the gate's NF criterion from fleet-sum **totals** to
+per-lane **prevalence** (committed same day): the totals were dominated by a few
+already-diverged lanes spraying non-finites post-death, double-counting what the
+divergence criterion already measures; prevalence (how many lanes go non-finite)
+is the honest population measure and is what the equivalence gate already used.
+The follow-on **recenter** (contract `valueW[0]` to kill the value null-space
+drift) was **REJECTED** at Tier-L — it fixed the one outlier lane but perturbed
+the shared value every step and made the population worse (NF up ~5.5×, IQM
+down); reverted, not in the keeper.
+
+Prior keeper (`keeper-fleet-tierL-gpu-20260611` / `verify-tierL-20260621`: 99.4%
+divergence, IQM −0.038358, entropy collapse 65.9%, RMST/horizon 0.089), kept for
+the audit trail (forward-only: superseded references are git history).
 
 CPU-instrument predecessor, same day, kept for the audit trail (forward-only:
 prior 10-seed keepers are git history, not live references):
