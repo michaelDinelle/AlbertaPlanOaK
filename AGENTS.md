@@ -202,6 +202,13 @@ The working goal is **general online robustness**: any seed, any horizon, popula
 6. Use subagents when the work can truly run in parallel: a Metrics Archaeologist mines benchmark roots, a Plan/Invariant Reviewer checks Alberta/FC-STOMP fit, a Mechanism Designer proposes closed-loop organs, a Benchmark Steward watches gates, and a Metal Auditor handles speed/FP-order risk. The main thread integrates; subagents do not define project doctrine.
 7. Archive rejected mechanisms in `docs/roadmap.md`/`AGENTS.md` when they teach a reusable lesson. Keep the live code lean; diagnostics earn their place only when they shorten the next decision.
 
+### Reporting & reliability standard (non-negotiable — baked into the tools, not left to memory)
+
+- **Run every benchmark via `tools/run_fleet.sh <steps> <out-name> [keeper-root]`**, never a bare `OaK benchmark`. It bakes in `caffeinate -dimsu` (long GPU runs die SILENTLY when the laptop sleeps — the Metal context is lost; keep the lid open + on power), then auto-runs the population report and, if given a keeper, the gate. Launch it `run_in_background:true` so the harness notifies on completion; the log already holds the report + completeness verdict.
+- **The population is the deliverable — never a single lane.** The headline is `fleet.py report`'s "Population progress" row: rate P10/P50/P90, the fraction of lanes above each reward tier (`%>0` walking, `%>1` the milestone, `%>5` ~SAC-delivered, `%>SOTA(10)`), and the `sustaining` fraction (lanes holding ≥½ their zenith). The goal is the WHOLE population at SOTA **and staying there forever** (continuous online) — judge by the tier fractions + sustaining, not by the best lane. A hand-picked rocket lane is a *diagnostic*, never the claim; reporting one as the result is the retired seed-focusing trap.
+- **An incomplete run is poison.** A run that did not reach its declared horizon (laptop sleep / OOM / harness stop) is flagged loudly by `fleet.py report` (`⚠️ INCOMPLETE RUN`) and **refused** by `fleet.py gate` (`GATE ERROR`). Never trust, report, or gate a partial run. When a long run stops early, a silent death is the default suspect — check completeness FIRST.
+- **Strong-lane / zenith inspection is a REQUIRED diagnostic, not a headline.** IQM is robust to the tails, so a change that crushes the strong mode (or a silent death) can pass the IQM screen — always check the best-lane and `sustaining` for ceiling damage. But the promotion claim is always the paired population gate.
+
 ## CLI
 
 | Command | Use |

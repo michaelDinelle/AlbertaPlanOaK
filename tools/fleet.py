@@ -244,6 +244,21 @@ def analyze_policy(run: dict, policy: str, window: int) -> dict:
         "recentRates": recents,
         "deliveredBySeed": {s: float(r) for s, r in zip(seeds, rates)},
     }
+    # Completeness: a run is valid only if it reached its declared horizon. A silently-killed run
+    # (laptop sleep, OOM, harness stop) leaves lanes short of horizon — flag it loudly so no one
+    # gates or reports a partial run as if it finished.
+    max_step = max(int(f["step"]) for f in fin.values())
+    has_final = any(r["kind"] == "final" for s in seeds for r in run["lanes"][(policy, s)])
+    out["complete"] = bool(has_final and max_step >= horizon)
+    out["maxStep"] = max_step
+    # Population progress toward the goal (the WHOLE population at SOTA, staying there forever).
+    # Report the distribution and the fraction of lanes clearing each reward-rate tier — never a
+    # single hand-picked lane. Tiers: >0 walking at all, >1 the milestone, >5 ~SAC-delivered, >10 SOTA.
+    _pct = np.percentile(rates, [10, 25, 50, 75, 90, 99])
+    out["rateDistribution"] = {k: float(v) for k, v in
+                               zip(("p10", "p25", "p50", "p75", "p90", "p99"), _pct)}
+    out["tierFractions"] = {"gt0": float((rates > 0).mean()), "gt1": float((rates > 1).mean()),
+                            "gt5": float((rates > 5).mean()), "gt10": float((rates > 10).mean())}
     flops = run["meta"].get("flopsPerLaneStep")
     if flops:
         out["rewardPerGFLOP"] = out["iqmDeliveredAll"] / (flops / 1e9)
@@ -268,6 +283,11 @@ def analyze_policy(run: dict, policy: str, window: int) -> dict:
                 "decayRatioQ": quartiles(
                     [p_["decayRatio"] for p_ in plast if math.isfinite(p_["decayRatio"])]),
             }
+            # "Staying power": fraction of lanes retaining >= half their zenith rate at the end
+            # (the opposite of post-zenith decay/crash). A continuous online agent must STAY at rate.
+            _dec = [p_["decayRatio"] for p_ in plast if math.isfinite(p_["decayRatio"])]
+            out["sustainingFraction"] = (
+                float(np.mean([d >= 0.5 for d in _dec])) if _dec else None)
         cp, clo, chi = wilson(collapses, n)
         out["entropyCollapse"] = {"count": collapses, "rate": cp,
                                   "wilsonLo": clo, "wilsonHi": chi}
@@ -278,10 +298,18 @@ def analyze_policy(run: dict, policy: str, window: int) -> dict:
     return out
 
 def render_markdown(results: list[dict], meta: dict) -> str:
+    banner = []
+    for r in results:
+        if r and not r.get("complete", True):
+            banner += [
+                f"> ⚠️ **INCOMPLETE RUN — {r['policy']} reached step {r.get('maxStep', 0):,} of "
+                f"{meta['steps']:,} ({r.get('maxStep', 0) / max(meta['steps'], 1):.0%}); it was "
+                f"silently killed (sleep / OOM / harness stop). Do NOT gate or trust as final.**", ""]
     lines = [
         f"### Fleet report — {meta['envId']} B={meta['batch']} × {meta['steps']} steps "
         f"(ablation={meta.get('ablationLabel', 'none')})",
         "",
+        *banner,
         "**Delivered reward (the headline)**",
         "",
         "| policy | IQM rate (all lanes) | best lane | positive lanes | recent-window IQM | recent max"
@@ -309,6 +337,25 @@ def render_markdown(results: list[dict], meta: dict) -> str:
     oak = next((r for r in results if r and r["policy"] == "oak"), None)
     if oak:
         lines += ["", sota_gap_line(oak["bestLaneRate"], oak["iqmDeliveredAll"])]
+    lines += [
+        "",
+        "**Population progress (the whole population is the deliverable — never a single lane)**",
+        "",
+        "| policy | complete | rate P10/P50/P90 | %>0 | %>1 | %>5 | %>SOTA(10) | sustaining |",
+        "|---|---|---|---:|---:|---:|---:|---:|",
+    ]
+    for r in results:
+        if not r:
+            continue
+        rd, tf = r.get("rateDistribution", {}), r.get("tierFractions", {})
+        sust = r.get("sustainingFraction")
+        comp = ("yes" if r.get("complete", True)
+                else f"**NO {r.get('maxStep', 0) / max(meta['steps'], 1):.0%}**")
+        lines.append(
+            f"| {r['policy']} | {comp} "
+            f"| {rd.get('p10', 0):+.4f} / {rd.get('p50', 0):+.4f} / {rd.get('p90', 0):+.4f} "
+            f"| {tf.get('gt0', 0):.1%} | {tf.get('gt1', 0):.1%} | {tf.get('gt5', 0):.1%} "
+            f"| {tf.get('gt10', 0):.1%} | {'n/a' if sust is None else f'{sust:.1%}'} |")
     lines += [
         "",
         "**Survival & robustness**",
@@ -562,6 +609,15 @@ def cmd_gate(args) -> int:
         print(f"GATE ERROR: horizons differ (keeper {kh}, candidate {ch}).")
         return 2
     n, horizon = len(keep_seeds), kh
+    # Refuse to gate a silently-killed run: a partial run (laptop sleep / OOM / harness stop) that did
+    # not reach its declared horizon must never be PROMOTEd or REJECTed as if it finished.
+    for label, fin in (("keeper", keep_fin), ("candidate", cand_fin)):
+        ms = max((int(f["step"]) for f in fin.values()), default=0)
+        if ms < horizon:
+            print(f"GATE ERROR: {label} run is INCOMPLETE — reached step {ms:,} of {horizon:,} "
+                  f"({ms / max(horizon, 1):.0%}); it was silently killed (sleep / OOM / harness stop). "
+                  f"Re-run to completion before gating.")
+            return 2
     if args.equivalence:
         return equivalence_gate(keep_fin, cand_fin, keep_seeds, cand_seeds, n, horizon, args)
     ok = gate_verdicts(keep_fin, cand_fin, keep_seeds, cand_seeds, n, horizon, args, None)
