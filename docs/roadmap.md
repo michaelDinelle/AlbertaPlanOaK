@@ -1,57 +1,10 @@
 # OaK roadmap - Plan-orthodox continual improvement
 
-Last audited: 2026-04-26, after the corrected 300k walking gate, the first 10M
-seed-3 microscope, 1M coverage microscopes, the 10k-pulse live diagnosis pass,
-the grounded dead-credit refresh screen, and the short/broad/surprising
-active-backward refresh screen.
+Last updated: 2026-06-21. The instrument is the GPU-resident **fleet**: B=1024 independent lanes (one seed each), a population gate, and GPU physics certified equivalent to fp64 MuJoCo (the F4 verdict). See **Benchmark Protocol** for the tier ladder, **Current Baseline Decision** for the live keeper and the numbers every candidate must beat, and **Walking Checkpoint Evidence** / **Exhausted Families** for the April 2026 CPU-bridge history (kept as history, not current law).
 
-The live branch has moved from "negative but beats random" into a new factual
-regime: OaK can produce real HalfCheetah locomotion through the bridge, but the
-walking mode is not yet stable across seeds. The current 300k keeper
-evidence is `.oak-benchmarks/short-broad-surprise-full-300k-20260426`: 10
-HalfCheetah seeds x `{oak,zero,random}`. Oak mean reward is `+9988.566`, max
-seed reward is `+109689.456`, mean `info:x_velocity` is `+0.050932`, positive
-velocity is `8/10`, positive return and zero-beating seeds are `3/10`, and Oak
-NF total is `3`. Random mean is `-78032.282`; zero mean is `+0.010`. The
-strongest seed is not marginal:
-seed 3 reaches reward `+109689.456`, run reward `+119046.372`, and mean
-velocity `+0.396821` by 300k. Seed 8, the prior large backward attractor, is
-now forward (`+6837.419`, mean velocity `+0.035593`). The same gate still fails
-stability: multiple seeds remain negative-return weak walkers, seed 1 still has
-non-finite health counts, and the promotion standard remains unmet.
+**Current status.** OaK produces real HalfCheetah locomotion, but only in a thin slice of the population, and it is not yet stable. The Tier-L keeper (`keeper-fleet-tierL-gpu-20260611`, B=1024 × 1M) diverges on **99.4%** of lanes by 1M (paramExplosion-dominated — the death certificate dates the first numeric event, not behavioral death; the strongest lanes keep delivering reward long past their certificate), delivers **IQM −0.0384/step** across all lanes, and collapses actor entropy on ~66% of lanes. The strong-walker mode (~0.2–0.4/step) is a reachable attractor in a ~1% slice (lanes 3, 802, 393, 383, 958, 856, …), not a seed-3 miracle. The April long-horizon microscopes (deep-seed3-10m, 1M coverage) are superseded by the **First deep-horizon decay run** recorded below.
 
-The first deep microscope is
-`.oak-benchmarks/deep-seed3-10m-20260426-030016` (Oak seed 3, 10M steps).
-The seed keeps positive bridge-measured forward momentum over the full run
-(`info:x_velocity` mean `+0.011783`, `info:x_position` delta `+5891.636`) and
-finishes with reward `+64937.781`, but it loses the 300k/1M snowball. The first
-1M heartbeat is already `+117455.284`; the remaining 9M steps drift downward
-as control cost accumulates and run reward decays. Terminal diagnostics show
-the FC-STOMP feedback cycle going quiet rather than catastrophically reversing:
-`terminationRate=0`, `modelPriorityMax=0`, `optionDurationMean=1`,
-`actorSupportEntropy=0`, `actorUpdateNormMean=0`, huge finite
-`actionDeltaL2Mean=3.62e49`, and non-finites limited to
-`learn=1, tdPsi=1`. This is a better failure than collapse, but it is still a
-no-termination/actor-support fixed point that cannot be promoted.
-
-The follow-up 1M microscopes
-`.oak-benchmarks/microscope-seeds0-5-1m-20260426` and
-`.oak-benchmarks/microscope-seeds6-9-1m-20260426` show that the 300k headline
-understates OaK's long-run upside but not its instability. Across seeds 0-9
-at 1M, Oak has mean reward `-2783.908`, mean `info:x_velocity=+0.020291`,
-positive reward/velocity `3/10`, and NF total `8`. Seeds 3, 6, and 9 are
-forward snowballs by 1M (`+117455.284`, `+28838.810`, `+43641.635`), while
-seed 8 is the large backward attractor (`-109670.777`, mean velocity
-`-0.073140`). Seeds 0 and 1 remain quiet low-motion failures; seeds 4 and 5
-become costly bad commitments.
-
-The deleted CPU bridge had a non-agent oracle witness, not doctrine: a fixed
-open-loop sinusoid over 5 seeds x 5k steps returned mean reward `+4428.300`,
-mean `info:reward_run=+4914.978`, mean `info:reward_ctrl=-486.678`, and mean
-`info:x_velocity=+0.982996`. This proved the then-current instrument could
-carry positive locomotion and gave a scale target; none of its parameters or
-behavior enter OaK. The current GPU physics instrument is certified
-population-equivalent later in this file.
+**The objective**, decomposed (see AGENTS.md, "The SOTA bar"): (a) make the strong-walker mode the typical outcome — this alone moves population IQM from ≈−0.04 to ≈+0.3; (b) raise that mode's ceiling from ~0.4 toward the external SOTA of 10+/step, bounded by the post-zenith plasticity frontier. Both are open.
 
 The live architecture at this audit: default perception is direct normalized
 experience channels plus constructed feature slots, K=R options/subtasks,
@@ -130,7 +83,7 @@ mean velocity `-0.159385`), for mean reward `-7422.100`, positive velocity
 TD-corrected scores, selected-option execution/model credit, chord-basis model
 credit, signed replacement utility, neutral utility birth, and diagnostic
 `alpha=1` all regressed 10k/50k gates. The next accepted fix must replace the
-accidental snowball with a Plan-honest FC-STOMP feedback/search-control
+accidental snowball with a Plan-faithful FC-STOMP feedback/search-control
 mechanism; do not revive these probes by name without materially new evidence.
 
 Post-10M FC-STOMP probes rejected on 2026-04-26: exact chord-responsibility
@@ -1589,6 +1542,42 @@ future audits as "obvious" fixes.
 | Stochastic utility compositional reseed alone | K2 | Safe but neutral: 10M -72.8k vs F1, EffK uniform. Keep only as part of a fuller Step-2 system. |
 | Naive action-conditioned one-step model | L1 | Numerically clean and model TD decreased, but 1.5M reward moved away from K1: mean `-6.412k`, median `-4.284k`, `2/10` seed wins. Do not revive without a materially different design. |
 
+### Keyboard / search-control / arbiter era (April 2026, pre-fleet)
+
+These seed-3/seed-8-framed walking-loop results were relocated here from AGENTS.md so the always-loaded instruction file stays lean; the durable lessons are summarized there. The population gate later demoted per-seed framing, so read these as history.
+
+**Operating constraint of the era.** Every stabilization change had to preserve the high-return walking mode while improving seed coverage. Changes that merely calmed actions, reduced commitment, refreshed chords more often, or deleted model-backed selection repeatedly killed the strong seed and were not progress.
+
+**Post-walking audit.** The walking checkpoint appeared to rely on an accidental delayed-plasticity/layout coupling in the Swift arena. Directly aligning the host arena with the kernel was more correct mechanically but killed the strong gait unless paired with a better FC-STOMP feedback/search-control mechanism. Q-per-duration aligned selection could still snowball a strong gait but could also snowball backward; not promoted. Do not promote it, selected-option execution/model credit, chord-basis model credit, signed utility, decoded duration TD, or reward-TD actor/score patches without fresh paired evidence.
+
+**Post-10M audit.** Exact chord-responsibility bridge credit, every-step live keyboard refresh, all-continue keyboard refresh, reward-signed resource utility, and stale-search refresh were tested and rejected on 10k/50k gates. Keeping actor support alive or waking silent options is not enough if it erases the hard commitment that discovers the gait or wakes bad commitments too early. Long-run memory drift was host-side; `Sources/Main.swift` now wraps each measured benchmark step in `autoreleasepool`, and `autorelease-seed3-300k-20260426` reproduced the seed-3 300k reward while worker RSS stayed flat around 19.5 MB.
+
+**FC-STOMP audit.** Forced RR termination on non-finite stopping comparisons woke a quiet seed into a control-cost explosion; uniform off-policy TD-energy normalization of option reward/transition/duration model updates calmed 10k but killed the seed-3 rocket by 50k. The live code keeps only the truthful search-control correction: non-finite option-model TD arithmetic is counted and no longer silently converts model priority to zero.
+
+**ArXiv FC-STOMP read.** Reward-Respecting Subtasks says the missing feedback loop is later-stage planning/search-control effectiveness feeding back into which features, subtasks, options, and models survive. Average-reward options say interruption is justified by finite option values (`q_mu(s,o) < v_mu(s)`), not by invalid arithmetic. Option Keyboard says compositions happen in cumulant/value space through GPE/GPI or an equivalent chord descriptor, not by blending already-emitted policies. Meta-gradient search control says useful planning must learn to avoid inaccurate or credit-stalling model queries. So the next serious stabilization mechanism should be a coherent keyboard/search-control/utility repair, not another isolated chord refresh, damping rule, or non-finite termination patch.
+
+**Closed-loop probe.** Fixed-budget pagewise cross pressure, causal reward-closed search-use traces, duration-consistent priority protection, and "preserve last finite RR/actor signal" were all rejected. Page/search-use variants killed waking or the seed-3 rocket; duration-consistency and preserved actor pressure changed diagnostics without changing behavior. The lock is downstream of actor pressure: continuation/keyboard emission can stay frozen even when hidden actor updates become enormous. Do not add hidden utility or pressure unless it changes emitted behavior while preserving the strong walking seed.
+
+**Rejected interruption variants.** Finite value interruption is a real lever but not a keeper: `value-interrupt-target50k-20260426` woke seed 1 and improved seed 8 but killed seed 3's rocket; the positive-TD-guarded variant still killed seed 3. Model-priority-gated interruption (`prio-gated-interrupt-target50k-20260426`) killed seed 3 and made seed 1 much worse — surprise alone is not the productive/stale discriminator.
+
+**Rejected fallback/emission variants.** Stale-emission fallback (`stale-fallback-target50k-20260426`) improved seeds 8 and 0 but cut seed 3 from `+12351.97` to `+1368.63` at 50k. Heavy-losing selected-option fallback (`heavy-losing-fallback-target50k-20260426`) preserved seed 3 but turned seed 1 into `-7244.57` and seed 8 into `-7579.48`. Fallback cannot merely replace low-movement chord blends with selected-option execution; it must preserve the snowballing blended gait.
+
+**Rejected generate-and-test variants.** All-continue dead-option G&T (`dead-option-gt-target50k-20260426`) preserved seed 3 exactly but worsened seed 0 and left seeds 1/8 unchanged. Quiet-invalid option rebirth (`quiet-invalid-rebirth-target300k-20260426`) was behavior-dead — it reset seed 1's selected option repeatedly but final reward/velocity stayed bit-identical while churn exploded. Replacing mature zero-actor bundles is not enough; the missing loop is upstream in keyboard/search-control credit.
+
+**Rejected keyboard-projection variants.** Low-rank chord-progress keyboard projection (raw, agreement-only, model-error-gated, and `1/K` basis-normalized) can wake seeds 8 and 1 — proving the missing keyboard organ is real — but steals the seed-3 rocket. Do not reintroduce cross-cumulant behavior weights without stronger arbitration that preserves the identity/reward path when it is about to snowball.
+
+**Rejected reward-TD actor variants.** Signed behavior-responsibility main-TD actor pressure (full and degenerate-only), search-failure-gated main-TD pressure (even with `rho < -1/R` and model-priority/duration gates), and mature-selected-option search-failure pressure all either killed seed 3 or failed to wake seeds 1/8. The first slow-arbiter rescue actor (`slowarb-tdactor-target50k-20260426`) and the origin-lock rescue actor (`originlock-tdactor-target50k-20260426`) were also rejected — the scalar reward trace stole from seed 3, and origin-lock is a diagnostic symptom, not a safe trigger. Direct reward TD in the option actor is not the keeper; the gap needs a real arbiter.
+
+**Rejected refresh/arbitration variants.** Search-use closure arbitration (signed-utility and behavior-only: `closure-arbiter-target50k-20260426`, `closure-arbiter-noutil-target50k-20260426`) improved seed 8 but stole the seed-3 snowball. Active-short keyboard refresh (`active-short-keyrefresh-target50k`, `active-short-only-target50k`), negative-rate active-short (`negrate-active-short-target50k`), and quiet-ungrounded refresh (`quiet-ungrounded-target50k`) each failed: low keyboard mass plus short selected duration does not identify backward commitment, and quiet-ungrounded turned seed 1 into a control-cost catastrophe. Duration-grounded option scoring plus quiet refresh (`duration-grounded-score-target50k`) kept seed 3 bit-identical but exploded seed 1's control cost; score-only (`duration-grounded-scoreonly-target50k`) passed 50k but failed 300k (seed 3 `+109689.46` → `+65102.79` with three new non-finites). Other rejected probes: RR/psi implicit TD-energy normalization (`psi-implicit-target10k`, cooled the waking surface), preserving last finite RR continuation (`rr-preserve-cont-target50k`, woke seed 1 into a `-14506.99` sink), invalid-RR main-TD fallback (`rr-invalid-maintd-target50k`, behavior-identical), and query-valid/invalid-duration probes (`queryvalid-cont`, `invalid-quiet-refresh-fixed`, `invalid-duration-probe` — all woke seed 1 into a large control-cost sink). Heavy-long reward-TD actor arbitration (`heavy-long-tdactor-only-target50k`) was safer and NF-clean but regressed seed 1 to `-467.51`.
+
+**Direction/effort arbitration (real organ, narrow keeper).** Direction/effort keyboard arbitration was rejected as a full keeper in raw, relative, refresh-arbiter, active-short-protected, and split-score forms (`direff-keyboard-oak300k`, `direff-refresharb-oak300k`, `direff-relative-oak300k`, `direff-relative-noshort-oak300k`, `direff-splitscore-target50k`). It is a real FC-STOMP organ: relative direction/effort gave NF-clean positive seed 1 (`+24706.23`) and seed 2 (`+2616.03`) at 300k while preserving seed 3, and raw direction/effort preserved the seed-8 snowball (`+15702.38`) and woke seed 4 (`+1843.16`). The narrower keeper routes raw direction/effort only through the active-backward path via persistent keyboard provenance, leaving quiet rescue unpromoted (`provenance-direff-v7-oak300k`): seeds 0-7/9 bit-identical, seed 8 `+6837.42` → `+23119.76` (velocity `+0.0950`), sampled NF total 3. Quiet seeds 1 and 2 remain open.
+
+**Current keeper substrate (April, pre-fleet).** Grounded dead-credit keyboard refresh refreshes the keyboard under all-continue/zero-actor-credit only when option durations are still grounded by lived stream length — it improves seed 0 at 300k, reduces NF, and preserves the seed-3 rocket bit-identically. Short/broad/surprising active-backward refresh refreshes only when the live reward rate is structurally negative, model priority exceeds `K^2`, RR termination is broad (`termSum^2 > K`), the keyboard has low mass, and the selected duration is shorter than `K` — the first active-backward repair that preserves seeds 3/0/1 while flipping seed 8 forward at 300k. Neither solves seed 8 fully nor reaches 10/10 stability.
+
+**Cumulative-NF audit.** `cumulative-nf-arbgate-oak300k-20260426-165800` is behavior-identical to `provenance-agefree-oak300k-20260426` on every seed's reward and velocity, but showed the old NF gate was sampled, not cumulative: seed 1 had `871,952` cumulative non-finite events by 300k (`learn=274,413`, `plan=323,126`, `tdPsi=274,413`); all other seeds NF-clean. The same patch gated direction/effort scoring so the serial lane-0 score pass runs only when raw/relative arbitration is eligible, raising mean Oak SPS from ~`2030` to ~`2068` without changing behavior.
+
+**Late-switch audit.** `seed3-selected-bundle-trace420k-20260426-193108` showed the seed-3 rocket does not fade gradually — it switches from selected option 18 (positive reward rate, finite health) to selected option 0 (negative model-priority debt, duration 1, hidden keyboard mass ~`4.33e20`, catastrophic action deltas). The candidate `ungrounded-invalid-rescue-oak300k-20260426-195038` is 300k behavior-identical to `relative-td-or-broad-lock-oak300k-20260426-185147`; its only behavior change fires after an invalid selected option's hidden keyboard mass exceeds lived stream length. Focused 450k (`ungrounded-invalid-rescue-target450k-20260426-194018`) improved seed 3 `+77899.15` → `+118129.84` and reduced focus NF without changing seeds 1/5/7/8; focused 1M kept seed 3 high (`+115363.16`) while seeds 7/8 decayed — a useful search-control rescue, not a promotion. Rejected refinements: stored chord normalization (kills the rocket at 100k), raw-duration trust (kills the rocket, floods NF), positive-reward active-bundle protection (kills discovery), selected-behavior utility (wakes seed 1, destroys seed 3), effort-weighted model scoring (wakes seed 7, destroys seed 3), invalid-continuation interruption (hurts seed 7, does not save seed 3), ungrounded invalid option reset (contaminates seed 5 with NF). The late switch needs search-control handling of hidden invalid commitment without removing the magnitude memory that discovers the rocket.
+
 ## Benchmark Protocol
 
 The benchmark protocol is part of the roadmap because false positives have
@@ -1597,25 +1586,27 @@ underpowered seed counts (a Wilson 95% CI on a failure rate at N=10 is ±9%;
 at N=1024 it is ±2%).
 
 **The instrument is the fleet**: B independent (agent, env, seed) lanes in one
-process, one batched kernel dispatch per step, env stepping sharded across CPU
-threads. Lane b runs seed b; lanes are byte-identical to solo runs (proven via
-`OAK_DUMP_STATE_EVERY` hash streams + `actions.bin`). One fleet size, one
-horizon ladder, prefix-nested seeds (0–1023 everywhere), so every tier is a
-paired extension of the one below.
+process, one batched kernel dispatch per step, with GPU-resident physics in the
+same command buffer (no per-step CPU round-trip). Lane b runs seed b; lanes are
+byte-identical to solo runs (proven via `OAK_DUMP_STATE_EVERY` hash streams +
+`actions.bin`). One fleet size, one horizon ladder, prefix-nested seeds
+(0–1023 everywhere), so every tier is a paired extension of the one below.
 
-| Tier | B × horizon | Wall-clock (measured) | Use | Resolves |
+| Tier | B × horizon | Wall-clock (measured, GPU fleet) | Use | Resolves |
 |---|---|---|---|---|
-| S | 1024 × 10k | ~71 s | every candidate | hard fails (NF, explosion) + divergence Δp ≳ 4% |
-| M | 1024 × 100k | ~12 min | candidates passing S | divergence ±2–3%, IQM screen |
-| L | 1024 × 1M | ~2 h | keeper promotion, frontier studies | survival curves through the ~1M plasticity frontier, Δp ≳ 2% |
-| XL | 1024 × 10M | **Phase-F-gated** | decay-constant program (not a gate) | post-zenith time constants, 10M survival |
+| S | 1024 × 10k | ~39 s | every candidate | hard fails (NF, explosion) + divergence Δp ≳ 4% |
+| M | 1024 × 100k | ~6.4 min | candidates passing S | divergence ±2–3%, IQM screen |
+| L | 1024 × 1M | ~64 min | keeper promotion, frontier studies | survival curves through the ~1M plasticity frontier, Δp ≳ 2% |
+| M-8192 | 8192 × 100k | ~34 min | instrument equivalence, SOTA-grade CIs | divergence ±1pp, IQM at the strict ±5% band |
+| XL | 1024 × 10M | per-lane-rate-gated | decay-constant program (not a gate) | post-zenith time constants, 10M survival |
 
-**Hard rule: no protocol step exceeds ~2 h wall-clock.** Wall-clock claims
-derive from the measured `aggSPS(B=1024) = 143.7K` constant below — never from
-estimates. Tier L sits exactly at the cap and already reaches through the ~1M
-plasticity frontier. The 10M-horizon XL tier and B=4096 SOTA reruns are
-unlocked by Phase F (GPU-resident physics, target ≥2M agg steps/s ⇒ XL ≈
-1.4 h); they are not run on the CPU-era instrument.
+**Hard rule: no protocol step exceeds ~2 h wall-clock.** Wall-clock derives from
+the measured GPU-fleet constant `aggSPS(B=1024) = 265.7K` (per-lane ~259 steps/s)
+— never from estimates. Tier L sits well inside the cap and reaches through the
+~1M plasticity frontier. The 10M-horizon XL tier divides by the per-lane rate
+(~10.7 h at 259/s, independent of B), so it is gated on raising per-lane rate via
+agent-kernel fusion/occupancy (the five agent kernels are 77% of the step wall)
+— not on aggregate throughput.
 
 Promotion is `tools/fleet.py gate <keeper> <candidate>` at Tier L: four paired
 population criteria (divergence Δp non-inferiority, IQM delivered-rate
@@ -1625,20 +1616,16 @@ delivered rate (`rewardSum/steps`) over all lanes — never survivors-only, neve
 internal `rewardRateBest`/ρ peaks (divergence diagnostics), never max-seed
 storytelling.
 
-Measured throughput constants (M4 Max, 14 cores / 32-core GPU, 5k-step smokes;
-update on every engine promotion):
+Measured throughput constants (GPU-resident fleet, M4 Max; full derisk record in
+Optimization Contract → F5; update on every engine promotion):
 
-- pool-threaded bridge + interleaved lane sharding (both deleted):
-  B=128 → 51K, B=512 → 28K, B=1024 → 15K agg steps/s.
-- raw bridge (`HCRaw` allocation-free step) + **contiguous lane shards with a
-  stable thread→lane mapping** (current): B=128 → 89K, B=512 → 143K,
-  **B=1024 → 143.7K**, B=2048 → 144K (plateau), B=4096 → 101K (cache wall).
-  8.1× the old 14-process model at B=1024. Lesson: interleaved
-  (`lane = w, w+T, w+2T…`) sharding destroyed prefetch/TLB locality across the
-  per-lane mjData heap — sharding geometry mattered 10× more than the envpool
-  data path at high B. At the plateau, GPU dispatch (~3.4 ms/step) and env
-  stepping (~3.1 ms/step) are now comparable: the next big lever is Phase F
-  (GPU-resident physics, no per-step waitUntilCompleted round-trip).
+- **B=1024 → 265.7K agg steps/s** (per-lane ~259/s), B=4096 → 392.6K,
+  B=16384 → 401.9K — 2.7× the CPU-era bridge (148.5K) and 22.7× the original
+  14-process instrument.
+- The environment is effectively free (GPU-resident fp32 physics:
+  1.56M env-steps/s at B=4096, 3.25M at B=16384). The binding cost is now the
+  five agent kernels (77% of the step wall at B=1024); agent-kernel
+  fusion/occupancy is the open lever that unlocks the 10M XL tier.
 
 Kernel build hygiene:
 
@@ -1804,6 +1791,12 @@ must beat (`tools/fleet.py report`):
 - Cross-instrument check: every figure sits inside the CPU-era keeper's CIs
   and the zenith quartiles are identical — the F4 equivalence verdict
   reproduced itself at Tier-L scale.
+- Re-verified 2026-06-21: a fresh HEAD Tier-L run (`verify-tierL-20260621`,
+  B=1024 × 1M, oak) reproduces the keeper essentially exactly — IQM delivered
+  −0.038358 [−0.04136, −0.03554], divergence 99.4% (paramExplosion 1012,
+  policyMean 6), RMST/horizon 0.089, zenith 250k/350k/700k, entropy collapse
+  65.9%. Best lane this run is lane 402 at +0.4152/step (+415,173 total). The
+  current build faithfully reproduces the keeper.
 
 CPU-instrument predecessor, same day, kept for the audit trail (forward-only:
 prior 10-seed keepers are git history, not live references):

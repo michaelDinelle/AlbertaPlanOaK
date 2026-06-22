@@ -1,22 +1,23 @@
 # OaK — Options And Knowledge (ROUGH DRAFT)
 
-## This is an implementation of [Alberta Plan for AI Research](https://arxiv.org/abs/2208.11173)(https://arxiv.org/abs/2208.11173) (Sutton, Bowling & Pilarski,2022):
+## An implementation of [the Alberta Plan for AI Research](https://arxiv.org/abs/2208.11173) (Sutton, Bowling & Pilarski, 2022)
 
 
 
-A native Apple Silicon implementation of **Step 11** of the [Alberta Plan for
-AI Research] the **Oak architecture** — *Options And Knowledge* — built around a
-continually-running **FC-STOMP** loop. Behavior emerges from the loop running
-every time step on the live `(observation, action, reward)` stream; there is
-no training/eval split and no episode boundary inside the agent. The code in the current state was derived from over a month of trial and error with various language models from MuseSpark , Gemini 3.1 pro, Gemma4, Claude and gpt 5.5, gpt 5.5 pro.
+A native Apple Silicon implementation of **Step 11** of the Alberta Plan — the
+**Oak architecture**, *Options And Knowledge* — built around a continually-running
+**FC-STOMP** loop. Behavior emerges from the loop running every time step on the
+live `(observation, action, reward)` stream; there is no training/eval split and
+no episode boundary inside the agent. The code in its current state was derived
+from over a month of trial and error with various language models: MuseSpark,
+Gemini 3.1 Pro, Gemma 4, Claude, and GPT-5.5 / GPT-5.5 Pro.
 
-## Compared to modern Language Models. the goal of the OaK architecture is to keep our [`EyesOnThePrize.pdf`](docs/papers/EyesOnThePrize.pdf)
+## Eyes on the Prize ([`EyesOnThePrize.pdf`](docs/papers/EyesOnThePrize.pdf))
 
 
 The Alberta Plan exists in service of a single long-term goal Sutton calls
 *the Prize*: understanding the principles of intelligence well enough to
-create (or become) beings of greater intelligence (see
-. In that framing, intelligence is
+create (or become) beings of greater intelligence. In that framing, intelligence is
 *"the computational part of an agent's ability to predict and control a
 stream of sensations, particularly a designated numerical sensation (called
 reward), while interacting with a vastly more complex world."* Everything
@@ -47,11 +48,11 @@ benchmark number — it is to keep these commitments load-bearing in actual
 code on a real continuous-control stream, and to fail loudly when any one of
 them quietly slips.
 
-### Sutton and Bowlings Architecture adddresses "The Problem With AI Nobody Wants to Face"
+### Sutton and Bowling's architecture addresses "The Problem With AI Nobody Wants to Face"
 
 [![Watch on YouTube](https://img.youtube.com/vi/qqXSpWYSxBw/hqdefault.jpg)](https://www.youtube.com/shorts/qqXSpWYSxBw)
 
-### `HalfCheetah-v4` Currently Oak Beats the Random baseline 10/10 how ever only recieves positve reward in a hand full of seeds
+### `HalfCheetah-v4`: OaK beats the random baseline 10/10, but only receives positive reward in a handful of seeds
 
 Environment: [`HalfCheetah-v4`](https://gymnasium.farama.org/environments/mujoco/half_cheetah/)
 (MuJoCo, Gymnasium spec) — GPU-resident in the same Metal command buffer as
@@ -59,7 +60,7 @@ the agent (see [The GPU environment](#the-gpu-environment-no-bridge-no-envpool-n
 below; clips and numbers in this section predate it and were produced on the
 since-deleted CPU envpool bridge, which the GPU port is certified equivalent to).
 
-Seed three has been observed to learn to be a remarkably robust learner however it suffers from the classic catastrophic loss of placicity/knowlege in the current form of the code base.
+Seed 3 has been observed to learn a remarkably robust gait, but it suffers from the classic catastrophic loss of plasticity/knowledge in the current codebase.
 
 #### Three replays, same setup
 
@@ -248,7 +249,7 @@ log in [`docs/roadmap.md`](docs/roadmap.md). The literature corpus is in
 — used only by the parity oracle and replay/report tools), compiles
 `Sources/OakKernel.metal` plus its included GPU physics/model sources to a
 metallib, and runs `swift build -c release`.
-The resulting binary is `./.build/release/OaK`.
+The resulting binary is `./.build/Release/OaK`.
 
 For Swift / Metal-only changes, `scripts/halfcheetah_rebuild_10m.sh` recompiles
 just those parts before launching a benchmark — no need to rerun `setup.sh`.
@@ -279,7 +280,7 @@ oracle — Python MuJoCo on the vendored
   NF prevalence, and KS distribution tests all EQUIVALENT
   (`tools/fleet.py gate --equivalence`).
 
-> **fp32 caveat** (the honest counterpart of the old envpool≠gymnasium replay
+> **fp32 caveat** (the direct counterpart of the old envpool≠gymnasium replay
 > caveat): Apple GPUs have no fp64, so trajectories are not bit-identical to
 > CPU MuJoCo — chaotic contact dynamics make bit-match meaningless past
 > ~100–1000 steps even between fp64 runs. What is preserved, and proven
@@ -292,27 +293,25 @@ runs in multi-step command buffers with no per-step CPU round-trip.
 
 ## Wait? No PyTorch? Lets Talk about that.
 
-Since this repo is mostly maintained by agents. We need to go **fast**. Why rely on an unoptimized framework when we can craft accelerated GPU kernels with claude directy? We can use XCODE traces and comparing the outputs of OaK bit for bit so we can losslessly upgrade and optimize the kernel without large dependencies or frameworks getting in our way. The Code is the algorithmic logic for OaK a thin launch script and thats it.
+This repo is mostly maintained by agents, so we need to go **fast**. Why rely on an unoptimized framework when we can craft accelerated GPU kernels with Claude directly? We use Xcode traces and compare OaK's outputs bit for bit, so we can losslessly upgrade and optimize the kernel without large dependencies or frameworks getting in the way. The code is the algorithmic logic for OaK plus a thin launch script, and that's it.
 
 ![PyTorch crossed out](media/pytorch%20crossed%20out.png)
 
 
-## John Carmack "I am not a madman for saying that it is likely for Artificial General Inteligence is going to be tens of thousands of lines of code not millions"
+## John Carmack: "AGI is likely tens of thousands of lines of code, not millions"
 
-Carmacks Ideas line up with sutton and is even working with AMII.
+Carmack's ideas line up with Sutton's, and he is even working with Amii.
 
 https://www.amii.ca/updates-insights/john-carmack-and-rich-sutton-agi
 
-I follow John Carmacks philosophy of AGI "I am not a madman for saying that it is likely for Artificial General Inteligence is going to be tens of thousands of lines of code not millions" 
+I follow John Carmack's philosophy of AGI: "I am not a madman for saying that Artificial General Intelligence is likely to be tens of thousands of lines of code, not millions."
 
 [![Watch on YouTube](https://img.youtube.com/vi/6gi8TGNpS_E/hqdefault.jpg)](https://www.youtube.com/watch?v=6gi8TGNpS_E&t=73s)
 
 ▶ Watch on YouTube (jumps to 1:13): <https://www.youtube.com/watch?v=6gi8TGNpS_E&t=73s>
 
 
-PS. i think even this is pesemistic. OaK Works already.
- i think its likely 1500 lines of our metal kernel at most ;)
-  We may very well just be a few hundred lines away from the grand prize.
+PS — I think even that is pessimistic. OaK works already; I'd bet it's ~1500 lines of Metal kernel at most. We may be only a few hundred lines from the grand prize. ;)
 
 ## Run a benchmark (the fleet)
 
