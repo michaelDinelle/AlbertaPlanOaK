@@ -481,7 +481,7 @@ inline void fcstomp_prediction_control_loop(Ctx ctx, uint tid,
 
     if (tid == 0u) {
         uint best = 0u;
-        float bestScore = -FLT_MAX, bestQ = 0.0f;
+        float bestScore = -FLT_MAX;
         float meanQ = 0.0f, maxScorePrio = 0.0f;
         float termSum = 0.0f;
         for (uint k = 0u; k < ctx.K; ++k) {
@@ -497,7 +497,7 @@ inline void fcstomp_prediction_control_loop(Ctx ctx, uint tid,
             float score = usableModel ? ((qAdv - modelErr) / dur) : -FLT_MAX;
             meanQ += (usableModel && isfinite(score)) ? score : 0.0f;
             if (usableModel) maxScorePrio = max(maxScorePrio, modelErr);
-            if (score > bestScore) { bestScore = score; bestQ = qAdv; best = k; }
+            if (score > bestScore) { bestScore = score; best = k; }
         }
         uint selected = best;
         uint prevSel = ctx.selectedOption[0] % ctx.K;
@@ -667,17 +667,7 @@ inline void fcstomp_prediction_control_loop(Ctx ctx, uint tid,
             }
             ctx.keyboardOrigin[0] = 0u;
         }
-        float planNum = 0.0f, planNorm = 0.0f;
-        for (uint k = 0u; k < ctx.K; ++k) {
-            float w = ctx.keyboard[k];
-            float qAdv = tgG[k];
-            if (!isfinite(w)) w = 0.0f;
-            if (!isfinite(qAdv)) qAdv = 0.0f;
-            planNum = fma(w, qAdv, planNum);
-            planNorm += fabs(w);
-        }
-        float planDelta = (!OAK_ABLATE_PLANNING && planNorm > 0.0f) ? (planNum / planNorm) : bestQ;
-        if (OAK_ABLATE_PLANNING) planDelta = 0.0f;
+        float planDelta = OAK_ABLATE_PLANNING ? 0.0f : max(bestScore, 0.0f);
         ctx.planTd[0] = isfinite(planDelta) ? planDelta : 0.0f;
         ctx.selectedOption[0] = selected;
         float keyL1 = 0.0f, advL1 = 0.0f, effectiveL1 = 0.0f;
