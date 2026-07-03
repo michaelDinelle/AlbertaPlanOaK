@@ -145,7 +145,7 @@ struct Arena {
     betaPsi = alpha + 5 * r
     alphaModel = alpha + 8 * r
     betaModel = alpha + 9 * r
-    total = alpha + r * r + 21 * r + traceExtra * max(o, 1) + 1 + 2 * r
+    total = alpha + r * r + 21 * r + traceExtra * max(o, 1) + 1 + 2 * r + 2 * r + 2
   }
 }
 final class Shared<T> {
@@ -359,7 +359,7 @@ func metricsRoot() -> URL {
     }
     let initPipe = try pipeline("oak_fleet_init")
     let snapPipe = try pipeline("oak_fleet_snapshot")
-    let autoG = max(2, min(16, B / 32))
+    let autoG = max(2, min(32, B / 32))
     let megaG = e["OAK_MEGA_LANES_PER_TG"].flatMap(Int.init) ?? autoG
     let wide2x = (e["OAK_MEGA_WIDE2X"].flatMap(Int.init).map { $0 != 0 }) ?? (B <= 512)
     let envCoop = (e["OAK_MEGA_ENV_COOP"].flatMap(Int.init).map { $0 != 0 }) ?? (megaG <= 2)
@@ -386,10 +386,10 @@ func metricsRoot() -> URL {
     let megaSlotBytes = 32 * megaG * MemoryLayout<Float>.stride
     let physTGBytes = envCoop ? physScratchFloats * megaG * MemoryLayout<Float>.stride : 16
     guard megaG >= 1, megaW <= megaPipe.maxTotalThreadsPerThreadgroup,
-      9 * megaSlotBytes + physTGBytes <= dev.maxThreadgroupMemoryLength
+      7 * megaSlotBytes + physTGBytes <= dev.maxThreadgroupMemoryLength
     else {
       throw err(
-        "OAK_MEGA_LANES_PER_TG=\(megaG) needs \(megaW) threads/threadgroup (pipeline max \(megaPipe.maxTotalThreadsPerThreadgroup)) and \(9 * megaSlotBytes + physTGBytes) tg bytes (device max \(dev.maxThreadgroupMemoryLength)).")
+        "OAK_MEGA_LANES_PER_TG=\(megaG) needs \(megaW) threads/threadgroup (pipeline max \(megaPipe.maxTotalThreadsPerThreadgroup)) and \(7 * megaSlotBytes + physTGBytes) tg bytes (device max \(dev.maxThreadgroupMemoryLength)).")
     }
     func makeBuf(_ len: Int) throws -> MTLBuffer {
       guard let b = dev.makeBuffer(length: max(len, 16), options: [.storageModeShared]) else {
@@ -503,8 +503,8 @@ func metricsRoot() -> URL {
       var n32 = UInt32(n)
       enc.setBytes(&n32, length: 4, index: 11)
       enc.setBuffer(physRowsBuf, offset: 0, index: 12)
-      for m in 0..<9 { enc.setThreadgroupMemoryLength(megaTGBytes, index: m) }
-      enc.setThreadgroupMemoryLength(physTGBytes, index: 9)
+      for m in 0..<7 { enc.setThreadgroupMemoryLength(megaTGBytes, index: m) }
+      enc.setThreadgroupMemoryLength(physTGBytes, index: 7)
       enc.dispatchThreadgroups(
         MTLSize(width: (B + megaG - 1) / megaG, height: 1, depth: 1),
         threadsPerThreadgroup: mtlSize(megaW))
