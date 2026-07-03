@@ -39,6 +39,8 @@ constant float OAK_SPEC_INV_RANK [[function_constant(22)]];
 constant float OAK_SPEC_INV_OPTION_COUNT [[function_constant(23)]];
 constant float OAK_SPEC_META_ETA [[function_constant(24)]];
 
+constant uint OAK_SPEC_NURSERY [[function_constant(28)]];
+
 constant uint OAK_MEGA_STAGE_MASK [[function_constant(25)]];
 constant uint OAK_MEGA_STAGES = is_function_constant_defined(OAK_MEGA_STAGE_MASK)
     ? OAK_MEGA_STAGE_MASK : 0xffffffffu;
@@ -58,6 +60,7 @@ struct KernelConfig {
     float invRank, invOptionCount;
     float metaEta;
     uint agentCount, paramStride, stateStride, uintStride;
+    uint nurseryCount;
 };
 
 struct KernelScalars {
@@ -91,7 +94,7 @@ inline float track_rate(uint step, uint cap) {
 }
 
 struct Ctx {
-    uint O, R, K, D, traceLevels, anchorCount;
+    uint O, R, K, D, traceLevels, anchorCount, Rn;
     uint stepCount, stateSlot;
     float rho;
     float invR, invK, metaEta;
@@ -115,12 +118,13 @@ struct Ctx {
     device float *tdPsiFast, *tdPsiPeak;
     device float *headScale, *modelScale, *valueScale, *xNormPrev;
     device float *hDotPsi, *psiAuxScale, *psiRho;
+    device float *nurMean, *nurSM, *nurUtil;
     device uint *counters, *optFeature, *featureAge, *optAge;
     device uint *featureParentA, *featureParentB, *featureKind, *featureBirthCount;
     device uint *selectedOption, *keyboardOrigin;
-    device uint *badFeatureAge;
     device uint *explosionStep, *explosionElem;
     device uint *lastStopAge;
+    device uint *nurParentA, *nurParentB, *nurKind, *nurAge;
     device KernelScalars *scalars;
     device KernelStats *stats;
 };
@@ -150,6 +154,7 @@ inline Ctx make_ctx(device float *params, device float *stateArena, device uint 
         ? OAK_SPEC_TRACE_LEVELS : cfg.obsTraceLevels;
     c.anchorCount = is_function_constant_defined(OAK_SPEC_ANCHOR_COUNT)
         ? OAK_SPEC_ANCHOR_COUNT : cfg.linearAnchorCount;
+    c.Rn = is_function_constant_defined(OAK_SPEC_NURSERY) ? OAK_SPEC_NURSERY : cfg.nurseryCount;
     c.stepCount = scalars->stepCount; c.stateSlot = scalars->stateSlot;
     c.rho = scalars->rho;
     c.invR = is_function_constant_defined(OAK_SPEC_INV_RANK) ? OAK_SPEC_INV_RANK : cfg.invRank;
@@ -217,6 +222,9 @@ inline Ctx make_ctx(device float *params, device float *stateArena, device uint 
     c.hDotPsi = stateArena + s; s += c.K;
     c.psiAuxScale = stateArena + s; s += c.K;
     c.psiRho = stateArena + s; s += c.K;
+    c.nurMean = stateArena + s; s += c.Rn;
+    c.nurSM = stateArena + s; s += c.Rn;
+    c.nurUtil = stateArena + s; s += c.Rn;
 
     uint u = 0u;
     c.counters = uintArena + u; u += 7u;
@@ -229,10 +237,13 @@ inline Ctx make_ctx(device float *params, device float *stateArena, device uint 
     c.featureBirthCount = uintArena + u; u += c.R;
     c.selectedOption = uintArena + u; u += 1u;
     c.keyboardOrigin = uintArena + u; u += 1u;
-    c.badFeatureAge = uintArena + u; u += c.R;
     c.explosionStep = uintArena + u; u += 1u;
     c.explosionElem = uintArena + u; u += 1u;
-    c.lastStopAge = uintArena + u;
+    c.lastStopAge = uintArena + u; u += c.K;
+    c.nurParentA = uintArena + u; u += c.Rn;
+    c.nurParentB = uintArena + u; u += c.Rn;
+    c.nurKind = uintArena + u; u += c.Rn;
+    c.nurAge = uintArena + u;
     c.scalars = scalars; c.stats = stats;
     return c;
 }
@@ -1007,8 +1018,18 @@ static inline void oak_stage_replace(Ctx ctx, uint tid, uint tgW,
             if (isfinite(keyUse)) keyboardSignal += keyUse;
         }
         float planningSignal = fabs(ctx.td[0]) + fabs(ctx.planTd[0]);
+        // Behavioral load (GraMa lineage): value + action-path weight magnitudes
+        // persist when learning goes quiet, so the curator does not knife the
+        // features carrying a converged policy (the self-dismantling path).
+        uint sel = ctx.selectedOption[0] % ctx.K;
+        float actLoad = 0.0f;
+        for (uint d = 0u; d < ctx.D; ++d)
+            actLoad += fabs(ctx.optPolicy[(sel * ctx.D + d) * ctx.R + i]);
+        float load = fabs(prev[i]) * (fabs(ctx.valueW[i]) + actLoad);
+        if (!isfinite(load)) load = 0.0f;
         float g = fabs(planningSignal * prev[i])
-                + fabs((psiSignal + modelSignal + keyboardSignal) * prev[i]);
+                + fabs((psiSignal + modelSignal + keyboardSignal) * prev[i])
+                + load;
         ctx.utilFeat[i] += invT * (g - ctx.utilFeat[i]);
         uint age = ctx.featureAge[i];
         metaopt_update_slot(ctx.alpha, ctx.beta, ctx.hMeta, ctx.gradEnergy,
@@ -1035,6 +1056,30 @@ static inline void oak_stage_replace(Ctx ctx, uint tid, uint tgW,
                 + keyMass * (fabs(ctx.planTd[0]) + fabs(ctx.actorAdv[k]))
                 - err;
         ctx.utilOpt[k] += invT * (u - ctx.utilOpt[k]);
+    }
+    if (!OAK_ABLATE_GENERATE_AND_TEST) {
+        // Nursery (candidate axis): shadow feature candidates learn their
+        // standardization and a predictive utility from the stream every step,
+        // in parallel, without touching behavior. Promotion is evidence-based.
+        for (uint n = tid; n < ctx.Rn; n += tgW) {
+            uint pa = ctx.nurParentA[n] % ctx.R;
+            uint pb = ctx.nurParentB[n] % ctx.R;
+            float a = prev[pa], b = prev[pb];
+            uint kind = ctx.nurKind[n] % 3u;
+            float raw = (kind == 0u) ? a * b
+                      : (kind == 1u) ? (a + b) * 0.7071067811865475f
+                                     : a * (b - a);
+            uint age = ctx.nurAge[n];
+            float rate = max(1.0f / (float(age) + 1.0f), ctx.invR);
+            ctx.nurMean[n] += rate * (raw - ctx.nurMean[n]);
+            ctx.nurSM[n] += rate * (raw * raw - ctx.nurSM[n]);
+            float var = max(ctx.nurSM[n] - ctx.nurMean[n] * ctx.nurMean[n], 0.0f);
+            float ridge = 1.0f / (float(age) + 1.0f);
+            float xt = (raw - ctx.nurMean[n]) * rsqrt(var + ridge);
+            float sig = fabs(ctx.td[0] * xt) + fabs(ctx.planTd[0] * xt);
+            if (isfinite(sig)) ctx.nurUtil[n] += invT * (sig - ctx.nurUtil[n]);
+            if (age < 0xffffffffu) ctx.nurAge[n] = age + 1u;
+        }
     }
     {
         // Rotating-stripe explosion scan: covers the whole param arena every 32
@@ -1184,41 +1229,62 @@ static inline void oak_stage_replace(Ctx ctx, uint tid, uint tgW,
     bool lowDownstreamUse = worstDownstream <= meanEligibleDownstream;
 			    bool structurallyReplaceable = (eligible > 1u) && lowDownstreamUse && (lowUtility || highRedundancy);
     ctx.stats->generateTestEligibleCount = float(eligible);
-    for (uint i = candidateStart; i < ctx.R; ++i) {
-        if (structurallyReplaceable && i == worst) {
-            if (ctx.badFeatureAge[i] < 0xffffffffu) ctx.badFeatureAge[i] += 1u;
-        } else {
-            ctx.badFeatureAge[i] = 0u;
-        }
+		    // Nursery promotion (replace only on demonstrated better): the best
+    // mature shadow candidate must beat the worst incumbent's TOTAL utility
+    // (learning signal + behavioral load + downstream use). Maturity = R steps
+    // of standardization/utility evidence.
+    uint bestN = 0xffffffffu;
+    float bestNUtil = -FLT_MAX;
+    for (uint n = 0u; n < ctx.Rn; ++n) {
+        if (ctx.nurAge[n] < ctx.R) continue;
+        float uN = ctx.nurUtil[n];
+        if (!isfinite(uN)) continue;
+        if (uN > bestNUtil) { bestNUtil = uN; bestN = n; }
     }
-		    uint replaceAge = ctx.R * max(eligible, 1u);
-		    bool doReplace = !OAK_ABLATE_GENERATE_AND_TEST
-            && structurallyReplaceable && worst < ctx.R && ctx.badFeatureAge[worst] >= replaceAge;
+    bool doReplace = !OAK_ABLATE_GENERATE_AND_TEST
+        && structurallyReplaceable && worst < ctx.R
+        && bestN != 0xffffffffu
+        && bestNUtil > worstUtil + worstDownstream;
     if (doReplace && worst < ctx.R) {
-        uint pa = 0u, pb = (ctx.R > 1u) ? 1u : 0u;
-        float bestA = -FLT_MAX, bestB = -FLT_MAX;
-        for (uint i = 0u; i < ctx.R; ++i) {
-            if (i == worst) continue;
-            float u = ctx.utilFeat[i];
-            if (!isfinite(u)) u = -FLT_MAX;
-            if (u > bestA) { bestA = u; pa = i; }
-        }
-        for (uint i = 0u; i < ctx.R; ++i) {
-            if (i == worst || i == pa) continue;
-	        float decor = 1.0f / (1.0f + fabs(tgCurrState[i] * tgCurrState[pa]));
-	        float u = ctx.utilFeat[i] * decor;
-            if (!isfinite(u)) u = -FLT_MAX;
-            if (u > bestB) { bestB = u; pb = i; }
-        }
-        uint birth = ctx.featureBirthCount[worst] + 1u;
+        uint pa = ctx.nurParentA[bestN] % ctx.R;
+        uint pb = ctx.nurParentB[bestN] % ctx.R;
+uint birth = ctx.featureBirthCount[worst] + 1u;
         ctx.featureBirthCount[worst] = birth;
         ctx.featureParentA[worst] = pa;
         ctx.featureParentB[worst] = pb;
-	        ctx.featureKind[worst] = birth % 3u;
-		        ctx.featureAge[worst] = 0u;
-	        ctx.badFeatureAge[worst] = 0u;
-	        ctx.featureMean[worst] = 0.0f; ctx.featureSM[worst] = 0.0f;
-	        ctx.utilFeat[worst] = 0.0f; ctx.valueW[worst] = 0.0f; ctx.bonusW[worst] = 0.0f;
+        ctx.featureKind[worst] = ctx.nurKind[bestN] % 3u;
+        // Warm start: the graduate keeps the statistics and age it earned in the
+        // nursery — no cold-normalization shock on promotion.
+        ctx.featureAge[worst] = ctx.nurAge[bestN];
+        ctx.featureMean[worst] = ctx.nurMean[bestN];
+        ctx.featureSM[worst] = ctx.nurSM[bestN];
+        ctx.utilFeat[worst] = ctx.nurUtil[bestN];
+        ctx.valueW[worst] = 0.0f; ctx.bonusW[worst] = 0.0f;
+        // Reseed the nursery slot: utility-guided parents, rotated kind.
+        {
+            uint spa = 0u, spb = (ctx.R > 1u) ? 1u : 0u;
+            float bestA = -FLT_MAX, bestB = -FLT_MAX;
+            for (uint i = 0u; i < ctx.R; ++i) {
+                if (i == worst) continue;
+                float uu = ctx.utilFeat[i];
+                if (!isfinite(uu)) uu = -FLT_MAX;
+                if (uu > bestA) { bestA = uu; spa = i; }
+            }
+            for (uint i = 0u; i < ctx.R; ++i) {
+                if (i == worst || i == spa) continue;
+                float decor = 1.0f / (1.0f + fabs(tgCurrState[i] * tgCurrState[spa]));
+                float uu = ctx.utilFeat[i] * decor;
+                if (!isfinite(uu)) uu = -FLT_MAX;
+                if (uu > bestB) { bestB = uu; spb = i; }
+            }
+            ctx.nurParentA[bestN] = spa;
+            ctx.nurParentB[bestN] = spb;
+            ctx.nurKind[bestN] = (ctx.nurKind[bestN] + 1u) % 3u;
+            ctx.nurAge[bestN] = 0u;
+            ctx.nurMean[bestN] = 0.0f;
+            ctx.nurSM[bestN] = 0.0f;
+            ctx.nurUtil[bestN] = 0.0f;
+        }
 	        ctx.alpha[worst] = ctx.invR;
 	        ctx.beta[worst] = log(ctx.alpha[worst]); ctx.hMeta[worst] = 0.0f; ctx.gradEnergy[worst] = 0.0f;
 	        ctx.alphaPsi[worst] = ctx.invR;
