@@ -14,6 +14,7 @@ struct KernelConfig {
   var obsDim, rank, optionCount, actionParamCount, obsTraceLevels, linearAnchorCount: UInt32
   var invRank, invOptionCount, metaEta: Float
   var agentCount, paramStride, stateStride, uintStride: UInt32
+  var nurseryCount: UInt32
 }
 struct KernelScalars {
   var stepCount: UInt32 = 0, stateSlot: UInt32 = 0
@@ -128,7 +129,7 @@ struct Arena {
     Int(log2(Double(max(o, 1)))) + 1
   }
   static func input(_ o: Int, _ d: Int) -> Int { traces(o) * max(o, 1) + max(d, 0) + 2 }
-  init(_ o: Int, _ r: Int, _ d: Int) {
+  init(_ o: Int, _ r: Int, _ d: Int, _ rn: Int) {
     let traceExtra = max(Self.traces(o) - 1, 0)
     obs = 0
     policy = 3 * o + 2 * r
@@ -145,7 +146,7 @@ struct Arena {
     betaPsi = alpha + 5 * r
     alphaModel = alpha + 8 * r
     betaModel = alpha + 9 * r
-    total = alpha + r * r + 21 * r + traceExtra * max(o, 1) + 1 + 2 * r + 5 * r + 2
+    total = alpha + r * r + 21 * r + traceExtra * max(o, 1) + 1 + 2 * r + 5 * r + 2 + 3 * rn
   }
 }
 final class Shared<T> {
@@ -181,11 +182,15 @@ final class Engine {
     self.obsDim = obsDim
     rank = max(obsDim, dPolicy * 2, 2)
     d = dPolicy
-    a = Arena(obsDim, rank, d)
+    // Sutton-test instrument: scales the nursery capacity (canonical runs: 1).
+    let nurseryMult = max(
+      ProcessInfo.processInfo.environment["OAK_SUTTON_MULT"].flatMap(Int.init) ?? 1, 1)
+    let rn = rank * nurseryMult
+    a = Arena(obsDim, rank, d, rn)
     let k = rank
     paramTotal =
       rank + k * rank + k * d * rank + k * rank + k * rank * rank + k * rank + k * rank
-    uintTotal = 11 + 9 * rank
+    uintTotal = 11 + 8 * rank + 4 * rn
     learnTotal =
       rank + rank * rank + rank * d * rank + rank * rank + rank * rank * rank + rank * rank
       + rank * rank
@@ -196,7 +201,8 @@ final class Engine {
       linearAnchorCount: UInt32(anchors), invRank: 1 / Float(rank),
       invOptionCount: 1 / Float(rank), metaEta: 1 / Float(rank) / Float(max(rank + d, 1)),
       agentCount: UInt32(batch), paramStride: UInt32(paramTotal),
-      stateStride: UInt32(a.total), uintStride: UInt32(uintTotal))
+      stateStride: UInt32(a.total), uintStride: UInt32(uintTotal),
+      nurseryCount: UInt32(rn))
     guard let cq = dev.makeCommandQueue() else {
       throw err("Metal command queue unavailable.")
     }
@@ -239,8 +245,15 @@ final class Engine {
       let lp = params.p + lane * paramTotal
       let ls = state.p + lane * a.total
       let lu = uints.p + lane * uintTotal
-      lu[9 + 8 * rank] = UInt32.max
-      lu[10 + 8 * rank] = UInt32.max
+      lu[9 + 7 * rank] = UInt32.max
+      lu[10 + 7 * rank] = UInt32.max
+      let nb = 11 + 8 * rank
+      let rnLocal = (uintTotal - nb) / 4
+      for n in 0..<rnLocal {
+        lu[nb + n] = UInt32(n % rank)
+        lu[nb + rnLocal + n] = UInt32((n * 7 + 3) % rank)
+        lu[nb + 2 * rnLocal + n] = UInt32(n % 3)
+      }
       for i in 0..<rank {
         lp[psi + i * rank + i] = inv
         lu[7 + i] = UInt32(i)
@@ -269,6 +282,8 @@ final class Engine {
     for i in u.indices { constants.setConstantValue(&u[i], type: .uint, index: 13 + i) }
     var f: [Float] = [cfg.invRank, cfg.invOptionCount, cfg.metaEta]
     for i in f.indices { constants.setConstantValue(&f[i], type: .float, index: 22 + i) }
+    var nc = cfg.nurseryCount
+    constants.setConstantValue(&nc, type: .uint, index: 28)
   }
   func applyShapeConstants(_ constants: MTLFunctionConstantValues) {
     Self.applyShapeConstants(
@@ -630,7 +645,7 @@ func metricsRoot() -> URL {
           if let eng = engine, detector == "paramNonFinite" || detector == "paramExplosion" {
             // Kernel-dated explosion step (rotating-stripe scan, exact to 32 steps)
             // beats the heartbeat-cadence snapshot date.
-            let ex = eng.uints.p[lane * eng.uintTotal + 9 + 8 * eng.rank]
+            let ex = eng.uints.p[lane * eng.uintTotal + 9 + 7 * eng.rank]
             if ex != UInt32.max { dStep = Int(ex) }
           }
           if let det = detector {
@@ -659,8 +674,8 @@ func metricsRoot() -> URL {
               row["paramAbsMax"] = pm.isFinite ? pm : NSNull()
               if let eng = engine {
                 let base = lane * eng.uintTotal
-                let ex = eng.uints.p[base + 9 + 8 * eng.rank]
-                let el = eng.uints.p[base + 10 + 8 * eng.rank]
+                let ex = eng.uints.p[base + 9 + 7 * eng.rank]
+                let el = eng.uints.p[base + 10 + 7 * eng.rank]
                 row["explosionStep"] = ex != UInt32.max ? Int(ex) : NSNull()
                 row["explosionElem"] = el != UInt32.max ? Int(el) : NSNull()
               }
