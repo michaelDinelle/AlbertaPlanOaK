@@ -227,7 +227,7 @@ inline bool usable_priority(float p) { return isfinite(p) && p >= 0.0f; }
 inline bool usable_duration(Ctx ctx, float d) {
     return isfinite(d) && d > 0.0f;
 }
-inline uint linear_input_width(Ctx ctx) { return (ctx.traceLevels + 1u) * ctx.O + ctx.D + ctx.K + 2u; }
+inline uint linear_input_width(Ctx ctx) { return (ctx.traceLevels + 1u) * ctx.O + ctx.D + 2u; }
 
 inline uint keyboard_sketch_dim(Ctx ctx) {
     return max(1u, min(ctx.D, ctx.K));
@@ -250,20 +250,7 @@ inline float linear_input(Ctx ctx, uint idx) {
     uint tail = idx - obsSpan;
     if (tail < ctx.D) return ctx.actionSignal[tail];
     tail -= ctx.D;
-    if (tail < ctx.K) {
-        float w = ctx.keyboard[tail];
-        if (!isfinite(w)) return 0.0f;
-        if ((ctx.keyboardOrigin[0] % 3u) == 2u) {
-            float norm = 0.0f;
-            for (uint k = 0u; k < ctx.K; ++k) {
-                float wk = ctx.keyboard[k];
-                if (isfinite(wk)) norm += fabs(wk);
-            }
-            if (norm > float(ctx.K * ctx.K)) return w / norm;
-        }
-        return w;
-    }
-    if (tail == ctx.K) return ctx.reward[0];
+    if (tail == 0u) return ctx.reward[0];
     return 1.0f;
 }
 
@@ -290,10 +277,13 @@ inline void metaopt_update_slot(device float *alpha,
     float normGrad = metaGrad * rsqrt(max(energy[i], 0.0f) + ridge);
     float bOld = beta[i];
     float bNew = bOld + metaEta * normGrad;
-    beta[i] = safe_w(bOld, bNew);
+    // Structural bounds: alpha in [1/cap^2, 1] (capacity-derived, no knob).
+    beta[i] = safe_w(bOld, clamp(bNew, 2.0f * log(decay), 0.0f));
     alpha[i] = safe_w(aOld, exp(beta[i]));
     float curvature = x * x;
-    float traceDecay = (1.0f - decay) * (1.0f - aOld * curvature);
+    // IDBD trace: h <- h * max(0, 1 - alpha x^2) + alpha delta x; the max(0,·)
+    // keeps the meta-gradient from flipping sign when alpha x^2 > 1.
+    float traceDecay = (1.0f - decay) * max(0.0f, 1.0f - aOld * curvature);
     h[i] = safe_w(hOld, traceDecay * hOld + aOld * grad);
 }
 
@@ -394,10 +384,15 @@ inline void fcstomp_prediction_control_loop(Ctx ctx, uint tid,
                 psiXY = fma(a * tgPrev[i], tgCurr[i], psiXY);
             }
         }
-        float zStop = vCurrG - ctx.valueW[feat] * tgCurr[feat] + ctx.bonusW[feat] * tgCurr[feat];
+        // RR eq. 4 stopping value with a genuine unit bonus in standardized
+        // feature units (bonus weight = valueW[feat] + 1): stopping is worth
+        // v(s') + x_f(s'), so attaining the feature stays permanently valuable
+        // and the bonus can never track itself away.
+        float zStop = vCurrG + tgCurr[feat];
         bool rrFinite = isfinite(psiPrev) && isfinite(psiNext) && isfinite(zStop);
         if (!rrFinite) ctx.counters[OAK_CNT_TDPSI_NF] += 1u;
-        float beta = (isfinite(psiNext) && isfinite(zStop) && zStop >= psiNext) ? 1.0f : 0.0f;
+        // Strict inequality: ties (e.g. zero init) break toward continuation.
+        float beta = (isfinite(psiNext) && isfinite(zStop) && zStop > psiNext) ? 1.0f : 0.0f;
         if (OAK_ABLATE_RR_SUBTASKS) {
             rrFinite = true;
             beta = 1.0f;
@@ -426,7 +421,7 @@ inline void fcstomp_prediction_control_loop(Ctx ctx, uint tid,
         ctx.modelDenom[tid] = (isfinite(modelDenom) && modelDenom > 0.0f) ? modelDenom : 0.0f;
         tgCont[tid] = cont;
         tgTerm[tid] = beta;
-        float rHat = 0.0f, lRaw = 0.0f, vModel = 0.0f, direction = 0.0f;
+        float rHat = 0.0f, lRaw = 0.0f, vModel = 0.0f;
         if (!OAK_ABLATE_OPTION_MODELS) {
             for (uint j = 0u; j < ctx.R; ++j) {
                 uint idx = tid * ctx.R + j;
@@ -436,7 +431,6 @@ inline void fcstomp_prediction_control_loop(Ctx ctx, uint tid,
                 uint nBase = tid * ctx.R * ctx.R + j * ctx.R;
                 for (uint i = 0u; i < ctx.R; ++i) nHat = fma(ctx.optTransition[nBase + i], tgCurr[i], nHat);
                 vModel = fma(ctx.valueW[j], nHat, vModel);
-                direction = fma(nHat - tgCurr[j], tgCurr[j] - tgPrev[j], direction);
             }
         }
         bool modelFinite = isfinite(rHat) && isfinite(lRaw) && isfinite(vModel);
@@ -450,14 +444,8 @@ inline void fcstomp_prediction_control_loop(Ctx ctx, uint tid,
             && rrFinite && modelTrusted && modelFinite && durationTrusted && isfinite(qAdv);
         ctx.durationHat[tid] = dur;
         tgG[tid] = (queryTrusted && !OAK_ABLATE_MODEL_TO_KEYBOARD) ? qAdv : 0.0f;
-        tgDir[tid] = (queryTrusted && isfinite(direction) && !OAK_ABLATE_MODEL_TO_KEYBOARD)
-            ? direction : 0.0f;
-        float effort = 0.0f;
-        for (uint d = 0u; d < ctx.D; ++d) {
-            float mu = ctx.optionPolicyMean[tid * ctx.D + d];
-            if (isfinite(mu)) effort = fma(mu, mu, effort);
-        }
-        tgEffort[tid] = effort * (1.0f / float(max(ctx.D, 1u)));
+        // Trust flag for the selection/keyboard pass (1 = model-backed score usable).
+        tgDir[tid] = (queryTrusted && !OAK_ABLATE_MODEL_TO_KEYBOARD) ? 1.0f : 0.0f;
     }
     simdgroup_barrier(mem_flags::mem_threadgroup);
     if (tid == 0u) {
@@ -482,204 +470,80 @@ inline void fcstomp_prediction_control_loop(Ctx ctx, uint tid,
     if (tid == 0u) {
         uint best = 0u;
         float bestScore = -FLT_MAX;
-        float meanQ = 0.0f, maxScorePrio = 0.0f;
         float termSum = 0.0f;
         for (uint k = 0u; k < ctx.K; ++k) {
             termSum += tgTerm[k];
+            bool trusted = tgDir[k] > 0.0f;
             float qAdv = tgG[k];
-            if (!isfinite(qAdv)) qAdv = 0.0f;
+            if (!isfinite(qAdv)) { qAdv = 0.0f; trusted = false; }
             float dur = ctx.durationHat[k];
             if (!isfinite(dur) || dur <= 0.0f) dur = 1.0f;
-            float modelErr = OAK_ABLATE_SEARCH_CONTROL ? 0.0f : ctx.prioOpt[k];
-            bool usableModel = !OAK_ABLATE_MODEL_TO_KEYBOARD
-                && (OAK_ABLATE_SEARCH_CONTROL || usable_priority(modelErr))
-                && usable_duration(ctx, dur);
-            float score = usableModel ? ((qAdv - modelErr) / dur) : -FLT_MAX;
-            meanQ += (usableModel && isfinite(score)) ? score : 0.0f;
-            if (usableModel) maxScorePrio = max(maxScorePrio, modelErr);
+            float modelErr = OAK_ABLATE_SEARCH_CONTROL ? 0.0f : max(ctx.prioOpt[k], 0.0f);
+            if (!isfinite(modelErr)) modelErr = 0.0f;
+            float score = trusted ? ((qAdv - modelErr) / dur) : -FLT_MAX;
             if (score > bestScore) { bestScore = score; best = k; }
         }
-        uint selected = best;
         uint prevSel = ctx.selectedOption[0] % ctx.K;
         bool continuing = tgCont[prevSel] > 0.0f;
-        meanQ *= ctx.invK;
-        if (continuing) selected = prevSel;
-        float prevMag = 0.0f;
-        for (uint k = 0u; k < ctx.K; ++k) {
-            float w = ctx.keyboard[k];
-            if (isfinite(w)) prevMag += fabs(w);
-        }
-        bool hasKeyboardCommitment = prevMag > 0.0f;
-        float actorMass = 0.0f;
-        float maxDur = 0.0f;
-        float impSum = 0.0f, impSq = 0.0f;
+        uint selected = continuing ? prevSel : best;
+        float advL1 = 0.0f;
         for (uint k = 0u; k < ctx.K; ++k) {
             float a = ctx.actorAdv[k];
-            if (isfinite(a)) actorMass += fabs(a);
-            float imp = ctx.importance[k];
-            if (isfinite(imp) && imp > 0.0f) {
-                impSum += imp;
-                impSq = fma(imp, imp, impSq);
-            }
-            float d = ctx.durationHat[k];
-            if (isfinite(d)) maxDur = max(maxDur, d);
-        }
-        ctx.stats->importanceEss = (impSq > 0.0f) ? ((impSum * impSum) / (float(ctx.K) * impSq)) : 0.0f;
-        bool durationGrounded = maxDur <= float(ctx.stepCount + 1u);
-        bool deadCreditRefresh = termSum <= 0.0f && actorMass <= 0.0f && durationGrounded;
-        float prevDur = ctx.durationHat[prevSel];
-        if (!isfinite(prevDur) || prevDur <= 0.0f) prevDur = 1.0f;
-        bool negativeRate = ctx.scalars->rho < -ctx.invR;
-        bool surprising = maxScorePrio > float(ctx.K * ctx.K);
-        bool broadTermination = termSum * termSum > float(ctx.K);
-        bool activeShortKeyboard = negativeRate && surprising && broadTermination
-            && prevMag < float(ctx.K) && prevDur < float(ctx.K);
-        uint origin = ctx.keyboardOrigin[0] % 3u;
-        bool lowMassKeyboard = prevMag < float(ctx.K);
-        bool finiteQuietBlowup = hasKeyboardCommitment
-            && prevMag > float(ctx.K * ctx.K * ctx.K)
-            && maxScorePrio > prevMag
-            && prevDur > float(ctx.K)
-            && termSum <= 1.0f
-            && ctx.scalars->rho < 0.0f;
-        bool selectedStale = ctx.scalars->rho < 0.0f
-            && termSum <= 0.0f
-            && actorMass <= 0.0f
-            && hasKeyboardCommitment
-            && origin == 2u;
-        bool selectedInvalid = selectedStale
-            || (!OAK_ABLATE_SEARCH_CONTROL && !usable_priority(ctx.prioOpt[prevSel]));
-        bool invalidQuietRescue = selectedInvalid && continuing && hasKeyboardCommitment
-            && termSum <= 1.0f && actorMass <= 0.0f;
-        bool staleQuietRescue = selectedStale && continuing && hasKeyboardCommitment
-            && termSum <= 1.0f;
-        bool ungroundedInvalidCommitment = selectedInvalid && continuing && hasKeyboardCommitment
-            && prevMag > float(ctx.stepCount + 1u);
-        bool quietPath = (finiteQuietBlowup || invalidQuietRescue || staleQuietRescue
-            || ungroundedInvalidCommitment) && !activeShortKeyboard;
-        bool relativeSupportLocked = origin == 2u
-            && negativeRate
-            && (ctx.td[0] > 0.0f || broadTermination)
-            && ctx.stats->importanceEss <= 2.0f * ctx.invK
-            && hasKeyboardCommitment
-            && !quietPath
-            && !activeShortKeyboard;
-        if (relativeSupportLocked) selected = prevSel;
-        float keyL1Pre = 0.0f, advL1Pre = 0.0f;
-        for (uint k = 0u; k < ctx.K; ++k) {
-            float w = ctx.keyboard[k];
-            float a = ctx.actorAdv[k];
-            if (isfinite(w)) keyL1Pre += fabs(w);
-            if (isfinite(a)) advL1Pre += fabs(a);
+            if (isfinite(a)) advL1 += fabs(a);
         }
         if (OAK_ABLATE_OPTION_KEYBOARD) {
             for (uint k = 0u; k < ctx.K; ++k) ctx.keyboard[k] = 0.0f;
             ctx.keyboardOrigin[0] = 0u;
             ctx.planTd[0] = 0.0f;
             ctx.selectedOption[0] = selected;
-            fcstomp_record_keyboard_stats(ctx, selected, termSum, 0.0f, advL1Pre, 0.0f);
+            fcstomp_record_keyboard_stats(ctx, selected, termSum, 0.0f, advL1, 0.0f);
             return;
         }
-        bool quietRescue = (lowMassKeyboard && maxScorePrio > float(ctx.K * ctx.K) && termSum <= 1.0f)
-            || quietPath;
-        bool refreshKeyboard = !continuing || prevMag <= 0.0f || deadCreditRefresh
-            || (continuing && activeShortKeyboard) || quietPath;
-        if (relativeSupportLocked) refreshKeyboard = false;
-        bool rawEligible = refreshKeyboard && hasKeyboardCommitment
-            && (activeShortKeyboard || (!quietPath && origin == 1u && !lowMassKeyboard));
-        bool relativeEligible = refreshKeyboard && !rawEligible
-            && hasKeyboardCommitment && (quietRescue || origin == 2u);
-        float bankEffort = 0.0f;
-        float rawMean = 0.0f, relativeMean = 0.0f;
-        float rawAbs = 0.0f, relativeAbs = 0.0f;
-        if (rawEligible) {
-            for (uint k = 0u; k < ctx.K; ++k) {
-                float effort = isfinite(tgEffort[k]) ? tgEffort[k] : 0.0f;
-                float rawScore = tgDir[k] / max(effort + ctx.invR, ctx.invR);
-                rawMean += isfinite(rawScore) ? rawScore : 0.0f;
-            }
-            rawMean *= ctx.invK;
-            for (uint k = 0u; k < ctx.K; ++k) {
-                float effort = isfinite(tgEffort[k]) ? tgEffort[k] : 0.0f;
-                float rawScore = tgDir[k] / max(effort + ctx.invR, ctx.invR);
-                rawAbs += isfinite(rawScore) ? fabs(rawScore - rawMean) : 0.0f;
-            }
-            rawAbs *= ctx.invK;
-        } else if (relativeEligible) {
-            for (uint k = 0u; k < ctx.K; ++k) {
-                float effort = tgEffort[k];
-                if (isfinite(effort)) bankEffort += effort;
-            }
-            bankEffort *= ctx.invK;
-            for (uint k = 0u; k < ctx.K; ++k) {
-                float effort = isfinite(tgEffort[k]) ? tgEffort[k] : 0.0f;
-                float relScore = tgDir[k] / max(bankEffort + effort + ctx.invR, ctx.invR);
-                relativeMean += isfinite(relScore) ? relScore : 0.0f;
-            }
-            relativeMean *= ctx.invK;
-            for (uint k = 0u; k < ctx.K; ++k) {
-                float effort = isfinite(tgEffort[k]) ? tgEffort[k] : 0.0f;
-                float relScore = tgDir[k] / max(bankEffort + effort + ctx.invR, ctx.invR);
-                relativeAbs += isfinite(relScore) ? fabs(relScore - relativeMean) : 0.0f;
-            }
-            relativeAbs *= ctx.invK;
-        }
-        bool useRaw = rawEligible && rawAbs > ctx.invR;
-        bool useRelative = relativeEligible && relativeAbs > ctx.invR;
-        float mag = 0.0f;
+        // Plain GPI keyboard: nonnegative softmax weights over the model-backed
+        // scores of trusted options; commitment is governed by RR continuation
+        // and nothing else.
+        float prevMag = 0.0f;
         for (uint k = 0u; k < ctx.K; ++k) {
-            float qAdv = tgG[k];
-            if (!isfinite(qAdv)) qAdv = 0.0f;
-            float modelErr = OAK_ABLATE_SEARCH_CONTROL ? 0.0f : ctx.prioOpt[k];
-            float dur = ctx.durationHat[k];
-            if (!isfinite(dur) || dur <= 0.0f) dur = 1.0f;
-            bool queryTrusted = !OAK_ABLATE_MODEL_TO_KEYBOARD
-                && (OAK_ABLATE_SEARCH_CONTROL || usable_priority(modelErr))
-                && usable_duration(ctx, ctx.durationHat[k]);
-            float lam = (queryTrusted && !quietPath) ? ((qAdv - modelErr) / dur - meanQ) : 0.0f;
-            if (useRaw || useRelative) {
-                float effort = isfinite(tgEffort[k]) ? tgEffort[k] : 0.0f;
-                float denom = useRaw ? max(effort + ctx.invR, ctx.invR)
-                                     : max(bankEffort + effort + ctx.invR, ctx.invR);
-                float dScore = tgDir[k] / denom;
-                if (!isfinite(dScore)) dScore = 0.0f;
-                lam = useRaw ? (dScore - rawMean) : (dScore - relativeMean);
-            }
-            if (!isfinite(lam)) lam = 0.0f;
-            if (!queryTrusted) {
-                float incumbent = ctx.keyboard[k];
-                lam = (refreshKeyboard && hasKeyboardCommitment && !quietPath && isfinite(incumbent))
-                    ? incumbent : 0.0f;
-            }
-            if (refreshKeyboard) ctx.keyboard[k] = lam;
-            mag += fabs(lam);
+            float w = ctx.keyboard[k];
+            if (isfinite(w) && w > 0.0f) prevMag += w;
         }
+        bool refreshKeyboard = !continuing || prevMag <= 0.0f;
         if (refreshKeyboard) {
-            uint nextOrigin = useRaw ? 1u : (useRelative ? 2u : 0u);
-            ctx.keyboardOrigin[0] = nextOrigin;
-        }
-        uint probe = ctx.stepCount % max(ctx.K, 1u);
-        float floor = ctx.invK;
-        if (refreshKeyboard && mag <= 0.0f) {
+            float mag = 0.0f;
+            bool haveBest = bestScore > -FLT_MAX;
             for (uint k = 0u; k < ctx.K; ++k) {
-                float probeSign = (k == probe) ? 1.0f : -ctx.invK;
-                ctx.keyboard[k] = probeSign * floor;
+                bool trusted = tgDir[k] > 0.0f && haveBest && isfinite(tgG[k]);
+                float qAdv = isfinite(tgG[k]) ? tgG[k] : 0.0f;
+                float dur = ctx.durationHat[k];
+                if (!isfinite(dur) || dur <= 0.0f) dur = 1.0f;
+                float modelErr = OAK_ABLATE_SEARCH_CONTROL ? 0.0f : max(ctx.prioOpt[k], 0.0f);
+                if (!isfinite(modelErr)) modelErr = 0.0f;
+                float score = (qAdv - modelErr) / dur;
+                float lam = trusted ? exp(score - bestScore) : 0.0f;
+                if (!isfinite(lam)) lam = 0.0f;
+                ctx.keyboard[k] = lam;
+                mag += lam;
+            }
+            if (mag <= 0.0f) {
+                uint probe = ctx.stepCount % max(ctx.K, 1u);
+                for (uint k = 0u; k < ctx.K; ++k)
+                    ctx.keyboard[k] = (k == probe) ? ctx.invK : 0.0f;
             }
             ctx.keyboardOrigin[0] = 0u;
         }
-        float planDelta = OAK_ABLATE_PLANNING ? 0.0f : max(bestScore, 0.0f);
+        // Signed one-step planning backup at the current state: best model-backed
+        // duration-normalized, model-error-pessimistic advantage over v(s). Never
+        // clamped nonnegative — max(·,0) here is a value-inflation pump.
+        float planDelta = (OAK_ABLATE_PLANNING || bestScore <= -FLT_MAX) ? 0.0f : bestScore;
         ctx.planTd[0] = isfinite(planDelta) ? planDelta : 0.0f;
         ctx.selectedOption[0] = selected;
-        float keyL1 = 0.0f, advL1 = 0.0f, effectiveL1 = 0.0f;
+        float keyL1 = 0.0f;
         for (uint k = 0u; k < ctx.K; ++k) {
             float w = ctx.keyboard[k];
-            float a = ctx.actorAdv[k];
             if (isfinite(w)) keyL1 += fabs(w);
-            if (isfinite(a)) advL1 += fabs(a);
         }
-        effectiveL1 = keyL1 > 0.0f ? 1.0f : 0.0f;
-        fcstomp_record_keyboard_stats(ctx, selected, termSum, keyL1, advL1, effectiveL1);
-
+        fcstomp_record_keyboard_stats(ctx, selected, termSum, keyL1, advL1,
+                                      keyL1 > 0.0f ? 1.0f : 0.0f);
     }
 }
 
@@ -937,9 +801,6 @@ static inline void oak_learn_element(Ctx ctx, device const float *prev,
         uint k = gid / (ctx.D * ctx.R);
         uint rem = gid - k * ctx.D * ctx.R;
         uint d = rem / ctx.R, i = rem % ctx.R;
-        bool relativeSupportCollapsed = (ctx.keyboardOrigin[0] % 3u) == 2u
-            && ctx.stats->importanceEss <= ctx.invK;
-        if (relativeSupportCollapsed) return;
         float rho = ctx.importance[k];
         if (!isfinite(rho)) rho = 0.0f;
         float w = ctx.optPolicy[(k * ctx.D + d) * ctx.R + i];
@@ -1072,12 +933,17 @@ static inline void oak_stage_replace(Ctx ctx, uint tid, uint tgW,
                             i, ctx.td[0], prev[i], age, ctx.metaEta, ctx.invR);
         uint metaSlot = ctx.stepCount % max(ctx.R, 1u);
         if (i == metaSlot) {
+            // Signed per-head TDs (round-robin over heads): IDBD's mechanism is
+            // the sign correlation of successive gradients; a magnitude signal
+            // self-correlates and ratchets beta monotonically.
+            uint kSlot = ctx.stepCount % max(ctx.K, 1u);
+            float psiSigned = ctx.tdPsi[kSlot];
+            float modelSigned = ctx.optRewardTd[kSlot];
             metaopt_update_slot(ctx.alphaPsi, ctx.betaPsi, ctx.hPsi, ctx.gradEnergyPsi,
-                                i, psiSignal, prev[i], age, ctx.metaEta, ctx.invR);
+                                i, psiSigned, prev[i], age, ctx.metaEta, ctx.invR);
             metaopt_update_slot(ctx.alphaModel, ctx.betaModel, ctx.hModel, ctx.gradEnergyModel,
-                                i, modelSignal, prev[i], age, ctx.metaEta, ctx.invR);
+                                i, modelSigned, prev[i], age, ctx.metaEta, ctx.invR);
         }
-        if (isfinite(ctx.valueW[i]) && ctx.valueW[i] > ctx.bonusW[i]) ctx.bonusW[i] = ctx.valueW[i];
     }
     for (uint k = tid; k < ctx.K; k += tgW) {
         float err = ctx.prioOpt[k];
@@ -1159,7 +1025,7 @@ static inline void oak_stage_replace(Ctx ctx, uint tid, uint tgW,
                     + (OAK_ABLATE_SEARCH_TO_GENERATE_TEST ? 0.0f : fabs(ctx.keyboard[k]));
                 if (isfinite(use)) optionUse += use;
             }
-		            float downstreamUse = optionUse + fabs(ctx.valueW[i]) + fabs(ctx.bonusW[i]);
+		            float downstreamUse = optionUse + fabs(ctx.valueW[i]);
             if (!isfinite(downstreamUse)) downstreamUse = 0.0f;
             eligibleUtilSum += util;
             eligibleRedSum += red;
@@ -1444,6 +1310,7 @@ static inline void oak_stage_sample_act(device float *params,
         for (uint i = 0u; i < ctx.D; ++i) desc[i] = oak_safe(ctx.policyMean[i]);
         float z[6];
         oak_rng_normal6(laneSeeds[gid], stepIdx, z);
+        for (uint o = 0u; o < ctx.K; ++o) ctx.importance[o] = 0.0f;
         for (uint d = 0u; d < A; ++d) {
             float mu = desc[d];
             float sample = oak_safe(mu + sd * z[d]);
@@ -1451,14 +1318,23 @@ static inline void oak_stage_sample_act(device float *params,
             ctrl[d] = a;
             ctx.actionSignal[d] = a;
             ctx.actionSignal[A + d] = 0.0f;
+            float diffB = sample - mu;
             for (uint o = 0u; o < ctx.K; ++o) {
                 uint off = o * ctx.D;
                 float om = oak_safe(ctx.optionPolicyMean[off + d]);
                 ctx.optionActorCredit[off + d] = sample - om;
                 ctx.optionActorCredit[off + A + d] = 0.0f;
+                float diffO = sample - om;
+                ctx.importance[o] += diffB * diffB - diffO * diffO;
             }
         }
-        for (uint o = 0u; o < ctx.K; ++o) ctx.importance[o] = 1.0f;
+        // Exact one-step Gaussian ratio pi_k(a|s)/b(a|s), shared sigma; capped
+        // at K (bank capacity) to bound a single step's off-policy influence.
+        float inv2s2 = 1.0f / (2.0f * sd * sd);
+        for (uint o = 0u; o < ctx.K; ++o) {
+            float ratio = exp(ctx.importance[o] * inv2s2);
+            ctx.importance[o] = isfinite(ratio) ? min(ratio, float(ctx.K)) : float(ctx.K);
+        }
     }
     float d2 = 0.0f;
     for (int i = 0; i < 12; i++) {
@@ -1512,13 +1388,21 @@ static inline void oak_stage_sample_act_wide(Ctx ctx,
     simdgroup_barrier(mem_flags::mem_threadgroup);
     if (tid < ctx.K) {
         uint off = tid * ctx.D;
+        float acc = 0.0f;
         for (uint d = 0u; d < A; ++d) {
             float sample = scratch[20u + d];
             float om = oak_safe(ctx.optionPolicyMean[off + d]);
             ctx.optionActorCredit[off + d] = sample - om;
             ctx.optionActorCredit[off + A + d] = 0.0f;
+            float diffB = sample - oak_safe(ctx.policyMean[d]);
+            float diffO = sample - om;
+            acc += diffB * diffB - diffO * diffO;
         }
-        ctx.importance[tid] = 1.0f;
+        // Exact one-step Gaussian ratio pi_k(a|s)/b(a|s), shared sigma; capped
+        // at K (bank capacity) to bound a single step's off-policy influence.
+        float inv2s2 = 1.0f / (2.0f * sd * sd);
+        float ratio = exp(acc * inv2s2);
+        ctx.importance[tid] = isfinite(ratio) ? min(ratio, float(ctx.K)) : float(ctx.K);
     }
 }
 
