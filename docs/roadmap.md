@@ -1848,3 +1848,41 @@ feature/resource feedback, search control, exact subtask/option machinery, and
 any future Step-8 model design that can prove reward relevance before it is
 allowed into planning. More feature churn or calmer actor scaling without those
 repairs is unlikely to turn a 2/10 positive-return gait into 10/10 walking.
+
+## Mark II program (2026-07-03): compute-scaling architecture, landing sequence
+
+Governing mandates (user): (1) never diverge — structural, Tier-L divergence ≡ 0/1024;
+(2) never decline — zenith is a floor (sustaining → ~100%, decay ratio ≥ 1);
+(3) the Sutton test — every keeper candidate runs paired 1× vs 2× compute-absorption
+arms (OAK_SUTTON_MULT) at Tier-M; flat-in-compute = REJECT regardless of reward.
+Plan: ~/.claude/plans/in-the-mean-time-tidy-grove.md. Doctrine: absorption counts
+capacity-derived, never device-derived; explicit rejections — shared-brain fleet
+(destroys the population instrument), chunked frozen-weight learning (Inv-7),
+speculative experience (future work).
+
+Evidence ledger (all B=1024, HalfCheetah-v4):
+- audit-fixes Tier-L (pre-Mark-II substrate): REJECT 4/4 — divergence 99.9% vs
+  keeper 46.9%; tdPsi NF in 77.1% of lanes (vs 2.5%) = psi heads exploding once
+  real bootstrapping was unleashed (cont>0 + real importance ratios). Best lane
+  +0.313; a subpopulation rose monotonically 400k→1M.
+- mk2-L0 (ff69949a7, contractive substrate): GTD2 saddle-point psi (TDC tried,
+  still exploded — two-timescale unavailable parameter-free), per-head
+  differential cumulant centering (never-stopping options ⇒ unbounded fixed
+  points), subtask-viability recycle (G&T, not interruption), bank-wide column
+  reset on feature replacement (stale cross-head weights on replaced features
+  compounded into runaways — lane-36 signature), in-kernel explosion dating
+  (step+element exact). Tier-M: divergence 0/1024 (keeper 171), NF ≡ 0.
+  Tier-L: divergence 2/1024 vs keeper 480/1024; RMST 999,302/1M; NF ≡ 0 all
+  phases; entropy collapse 3.1% vs 87.6%. IQM REJECT (−0.0267 vs −0.0103):
+  survival exposed the pure decline signature (zenith ~300k, decay ratio −2.4).
+  Residual deaths: 2 late slow-drift (optTransition@366k, psi@919k) — L2
+  ensemble-uncertainty owns the tail.
+- mk2-L1 (03d65ea45, behavioral-load utility + nursery): Tier-M 0 deaths,
+  positive lanes 5.7% → 14.7%, best +0.028 → +0.072; IQM unchanged (−0.0084,
+  gate FAIL vs −0.0060 — IQM trims the improved quartile). First Sutton test
+  (2× nursery): FAIL — flat-to-worse; diagnosis winner's curse in promotion
+  (best-of-2R selects noisier estimates). Fix shipped: LCB promotion
+  (utility − sqrt(var·rate)) so candidate count buys selection reliability.
+- Keeper baseline health for context: gated-10 kills 17.1% of lanes by 100k and
+  46.9% by 1M; its Tier-M IQM (−0.0060) is flattered by quiet entropy-collapsed
+  lanes (87.6% at 1M).
