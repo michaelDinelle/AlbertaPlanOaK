@@ -145,7 +145,7 @@ struct Arena {
     betaPsi = alpha + 5 * r
     alphaModel = alpha + 8 * r
     betaModel = alpha + 9 * r
-    total = alpha + r * r + 21 * r + traceExtra * max(o, 1) + 1 + 2 * r + 2 * r + 2
+    total = alpha + r * r + 21 * r + traceExtra * max(o, 1) + 1 + 2 * r + 5 * r + 2
   }
 }
 final class Shared<T> {
@@ -183,10 +183,12 @@ final class Engine {
     d = dPolicy
     a = Arena(obsDim, rank, d)
     let k = rank
-    paramTotal = rank + k * rank + k * d * rank + k * rank + k * rank * rank + k * rank
-    uintTotal = 9 + 8 * rank
+    paramTotal =
+      rank + k * rank + k * d * rank + k * rank + k * rank * rank + k * rank + k * rank
+    uintTotal = 11 + 9 * rank
     learnTotal =
       rank + rank * rank + rank * d * rank + rank * rank + rank * rank * rank + rank * rank
+      + rank * rank
     let anchors = min(rank, max(obsDim, d, 1))
     let cfgValue = KernelConfig(
       obsDim: UInt32(obsDim), rank: UInt32(rank), optionCount: UInt32(rank),
@@ -237,6 +239,8 @@ final class Engine {
       let lp = params.p + lane * paramTotal
       let ls = state.p + lane * a.total
       let lu = uints.p + lane * uintTotal
+      lu[9 + 8 * rank] = UInt32.max
+      lu[10 + 8 * rank] = UInt32.max
       for i in 0..<rank {
         lp[psi + i * rank + i] = inv
         lu[7 + i] = UInt32(i)
@@ -623,6 +627,12 @@ func metricsRoot() -> URL {
               detector = "kernelRho"
             }
           }
+          if let eng = engine, detector == "paramNonFinite" || detector == "paramExplosion" {
+            // Kernel-dated explosion step (rotating-stripe scan, exact to 32 steps)
+            // beats the heartbeat-cadence snapshot date.
+            let ex = eng.uints.p[lane * eng.uintTotal + 9 + 8 * eng.rank]
+            if ex != UInt32.max { dStep = Int(ex) }
+          }
           if let det = detector {
             st.deadStep[lane] = dStep
             st.deadDetector[lane] = det
@@ -647,6 +657,13 @@ func metricsRoot() -> URL {
                 snap.scalars.rho.isFinite ? Double(snap.scalars.rho) : NSNull()
               let pm = snap.paramNonFinite != 0 ? Double.infinity : Double(snap.paramAbsMax)
               row["paramAbsMax"] = pm.isFinite ? pm : NSNull()
+              if let eng = engine {
+                let base = lane * eng.uintTotal
+                let ex = eng.uints.p[base + 9 + 8 * eng.rank]
+                let el = eng.uints.p[base + 10 + 8 * eng.rank]
+                row["explosionStep"] = ex != UInt32.max ? Int(ex) : NSNull()
+                row["explosionElem"] = el != UInt32.max ? Int(el) : NSNull()
+              }
             }
             deathLines.append(try jsonLine(row))
           }
