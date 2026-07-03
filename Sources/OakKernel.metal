@@ -96,6 +96,7 @@ struct Ctx {
     float rho;
     float invR, invK, metaEta;
     device float *valueW, *psi, *optPolicy, *optReward, *optTransition, *optDuration;
+    device float *psiAux;
     device float *observation, *observationMean, *obsSM;
     device float *state;
     device float *policyMean, *actionSignal, *optionActorCredit, *optionPolicyMean;
@@ -113,10 +114,13 @@ struct Ctx {
     device float *valueGauge;
     device float *tdPsiFast, *tdPsiPeak;
     device float *headScale, *modelScale, *valueScale, *xNormPrev;
+    device float *hDotPsi, *psiAuxScale, *psiRho;
     device uint *counters, *optFeature, *featureAge, *optAge;
     device uint *featureParentA, *featureParentB, *featureKind, *featureBirthCount;
     device uint *selectedOption, *keyboardOrigin;
     device uint *badFeatureAge;
+    device uint *explosionStep, *explosionElem;
+    device uint *lastStopAge;
     device KernelScalars *scalars;
     device KernelStats *stats;
 };
@@ -158,7 +162,8 @@ inline Ctx make_ctx(device float *params, device float *stateArena, device uint 
     c.optPolicy = params + p; p += c.K * c.D * c.R;
     c.optReward = params + p; p += c.K * c.R;
     c.optTransition = params + p; p += c.K * c.R * c.R;
-    c.optDuration = params + p;
+    c.optDuration = params + p; p += c.K * c.R;
+    c.psiAux = params + p;
 
     uint s = 0u;
     c.observation = stateArena + s; s += c.O;
@@ -209,6 +214,9 @@ inline Ctx make_ctx(device float *params, device float *stateArena, device uint 
     c.modelScale = stateArena + s; s += c.K;
     c.valueScale = stateArena + s; s += 1u;
     c.xNormPrev = stateArena + s; s += 1u;
+    c.hDotPsi = stateArena + s; s += c.K;
+    c.psiAuxScale = stateArena + s; s += c.K;
+    c.psiRho = stateArena + s; s += c.K;
 
     uint u = 0u;
     c.counters = uintArena + u; u += 7u;
@@ -221,7 +229,10 @@ inline Ctx make_ctx(device float *params, device float *stateArena, device uint 
     c.featureBirthCount = uintArena + u; u += c.R;
     c.selectedOption = uintArena + u; u += 1u;
     c.keyboardOrigin = uintArena + u; u += 1u;
-    c.badFeatureAge = uintArena + u;
+    c.badFeatureAge = uintArena + u; u += c.R;
+    c.explosionStep = uintArena + u; u += 1u;
+    c.explosionElem = uintArena + u; u += 1u;
+    c.lastStopAge = uintArena + u;
     c.scalars = scalars; c.stats = stats;
     return c;
 }
@@ -386,13 +397,19 @@ inline void fcstomp_prediction_control_loop(Ctx ctx, uint tid,
             if (isfinite(am) && am > 0.0f) modelTraceNorm = fma(am, xx, modelTraceNorm);
         }
         tgScalars[10] = (isfinite(modelTraceNorm) && modelTraceNorm > 0.0f) ? modelTraceNorm : 0.0f;
+        float xNormRaw = 0.0f;
+        for (uint i = 0u; i < ctx.R; ++i) {
+            float x = tgPrev[i];
+            if (isfinite(x)) xNormRaw = fma(x, x, xNormRaw);
+        }
+        tgScalars[7] = (isfinite(xNormRaw) && xNormRaw > 0.0f) ? xNormRaw : 0.0f;
     }
     simdgroup_barrier(mem_flags::mem_threadgroup);
 
     if (tid < ctx.K) {
         uint feat = ctx.optFeature[tid] % ctx.R;
         uint base = tid * ctx.R;
-        float psiPrev = 0.0f, psiNext = 0.0f, psiXX = 0.0f, psiXY = 0.0f;
+        float psiPrev = 0.0f, psiNext = 0.0f, psiXX = 0.0f, psiXY = 0.0f, psiYY = 0.0f;
         for (uint i = 0u; i < ctx.R; ++i) {
             psiPrev = fma(ctx.psi[base + i], tgPrev[i], psiPrev);
             psiNext = fma(ctx.psi[base + i], tgCurr[i], psiNext);
@@ -400,6 +417,7 @@ inline void fcstomp_prediction_control_loop(Ctx ctx, uint tid,
             if (isfinite(a) && a > 0.0f) {
                 psiXX = fma(a * tgPrev[i], tgPrev[i], psiXX);
                 psiXY = fma(a * tgPrev[i], tgCurr[i], psiXY);
+                psiYY = fma(a * tgCurr[i], tgCurr[i], psiYY);
             }
         }
         // RR eq. 4 stopping value with a genuine unit bonus in standardized
@@ -417,14 +435,23 @@ inline void fcstomp_prediction_control_loop(Ctx ctx, uint tid,
         }
         float cont = 1.0f - beta;
         ctx.continuation[tid] = cont;
+        if (beta > 0.0f) ctx.lastStopAge[tid] = 0u;
+        // Differential (average-reward) GVF, Plan Step 5 / Reward Centering
+        // applied per head: rewardC is centered for the MAIN policy; each
+        // option's own average differs, and with cont ~ 1 (a never-stopping
+        // head) an uncentered cumulant makes the fixed point unbounded.
+        float psiRhoOld = ctx.psiRho[tid];
+        if (!isfinite(psiRhoOld)) psiRhoOld = 0.0f;
         float dPsi = (!OAK_ABLATE_RR_SUBTASKS && rrFinite)
-            ? (rewardC + cont * psiNext + beta * zStop - psiPrev) : 0.0f;
+            ? (rewardC - psiRhoOld + cont * psiNext + beta * zStop - psiPrev) : 0.0f;
         if (!isfinite(dPsi)) {
             dPsi = 0.0f;
             ctx.counters[OAK_CNT_TDPSI_NF] += 1u;
         }
         ctx.tdPsi[tid] = dPsi;
         tgTdPsi[tid] = dPsi;
+        float psiRhoNew = psiRhoOld + ctx.invR * dPsi;
+        ctx.psiRho[tid] = safe_w(psiRhoOld, psiRhoNew);
         float absD = isfinite(dPsi) ? fabs(dPsi) : 0.0f;
         float fastOld = ctx.tdPsiFast[tid];
         float peakOld = ctx.tdPsiPeak[tid];
@@ -432,7 +459,9 @@ inline void fcstomp_prediction_control_loop(Ctx ctx, uint tid,
         ctx.tdPsiPeak[tid] = max(isfinite(peakOld) ? peakOld : 0.0f, absD);
         float rho = ctx.importance[tid];
         if (!isfinite(rho) || rho < 0.0f) rho = 0.0f;
-        float implicitTrace = psiXX - cont * psiXY;
+        // GTD2 implicit normalizer: alpha-weighted norm of the bootstrap
+        // difference vector (x - cont*x'), nonnegative by construction.
+        float implicitTrace = psiXX - 2.0f * cont * psiXY + cont * cont * psiYY;
         float denom = fma(rho, implicitTrace, 1.0f);
         ctx.headDenom[tid] = (isfinite(denom) && denom > 0.0f) ? denom : 0.0f;
         float modelDenom = fma(rho, tgScalars[10], 1.0f);
@@ -443,6 +472,22 @@ inline void fcstomp_prediction_control_loop(Ctx ctx, uint tid,
             ctx.headScale[tid] = (isfinite(hd) && hd > 0.0f) ? (1.0f / hd) : 0.0f;
             float md = ctx.modelDenom[tid];
             ctx.modelScale[tid] = (isfinite(md) && md > 0.0f) ? (1.0f / md) : 0.0f;
+        }
+        {
+            // TDC gradient correction (Sutton et al. 2009): hDot = h_k^T x for the
+            // off-policy bootstrapped psi head; at h = 0 the corrected update
+            // reduces exactly to plain TD. auxDenom is the implicit-update
+            // normalizer of h's LMS regression of delta onto x.
+            float hDot = 0.0f;
+            for (uint i = 0u; i < ctx.R; ++i)
+                hDot = fma(ctx.psiAux[base + i], tgPrev[i], hDot);
+            ctx.hDotPsi[tid] = isfinite(hDot) ? hDot : 0.0f;
+            // NLMS: h is a pure regression of delta onto x, so it runs at the
+            // fastest stable rate (unit effective step), parameter-free. A fast,
+            // accurate h is what GTD2 needs to stop costing learning speed.
+            float auxDenom = fma(rho, psiXX, 1.0f);
+            ctx.psiAuxScale[tid] = (isfinite(auxDenom) && auxDenom > 0.0f)
+                ? (1.0f / auxDenom) : 0.0f;
         }
         tgCont[tid] = cont;
         tgTerm[tid] = beta;
@@ -777,7 +822,7 @@ kernel void oak_plan(device float *params [[buffer(0)]],
 
 inline uint oak_learn_total(Ctx ctx) {
     return ctx.R + ctx.K * ctx.R + ctx.K * ctx.D * ctx.R + ctx.K * ctx.R
-        + ctx.K * ctx.R * ctx.R + ctx.K * ctx.R;
+        + ctx.K * ctx.R * ctx.R + ctx.K * ctx.R + ctx.K * ctx.R;
 }
 
 static inline void oak_learn_element(Ctx ctx, device const float *prev,
@@ -806,7 +851,18 @@ static inline void oak_learn_element(Ctx ctx, device const float *prev,
         if (!isfinite(rho) || rho < 0.0f) rho = 0.0f;
         float w = ctx.psi[k * ctx.R + i];
         float scale = ctx.headScale[k];
-        ctx.psi[k * ctx.R + i] = safe_w(w, w + ctx.alphaPsi[i] * rho * ctx.tdPsi[k] * prev[i] * scale);
+        // GTD2 saddle-point form (single-timescale-safe gradient TD): the w
+        // update moves along the h-estimated MSPBE gradient hDot*(x - cont*x').
+        // TDC's delta*x form was tried and still exploded (needs two timescales,
+        // which parameter-free matched steps cannot provide).
+        float cont = ctx.continuation[k];
+        if (!isfinite(cont)) cont = 0.0f;
+        float hDot = ctx.hDotPsi[k];
+        // Termination steps (cont == 0) have no bootstrap term: plain LMS on the
+        // stopping target is provably safe and restores learning speed there.
+        float grad = (cont > 0.0f) ? (hDot * (prev[i] - cont * curr[i]))
+                                   : (ctx.tdPsi[k] * prev[i]);
+        ctx.psi[k * ctx.R + i] = safe_w(w, w + ctx.alphaPsi[i] * rho * grad * scale);
         return;
     }
     gid -= nPsi;
@@ -863,6 +919,21 @@ static inline void oak_learn_element(Ctx ctx, device const float *prev,
         float scale = (isfinite(denom) && denom > 0.0f) ? (1.0f / denom) : 0.0f;
         float w = ctx.optDuration[k * ctx.R + i];
         ctx.optDuration[k * ctx.R + i] = safe_w(w, w + ctx.alphaModel[i] * rho * ctx.durationTd[k] * prev[i] * scale);
+        return;
+    }
+    gid -= nOD;
+    {
+        // TDC auxiliary weights: h_k regresses the TD error onto x (LMS with the
+        // implicit normalizer computed in encode).
+        if (OAK_ABLATE_RR_SUBTASKS) return;
+        uint k = gid / ctx.R, i = gid % ctx.R;
+        float rho = ctx.importance[k];
+        if (!isfinite(rho) || rho < 0.0f) rho = 0.0f;
+        float h = ctx.psiAux[k * ctx.R + i];
+        float scale = ctx.psiAuxScale[k];
+        float err = ctx.tdPsi[k] - ctx.hDotPsi[k];
+        ctx.psiAux[k * ctx.R + i] =
+            safe_w(h, h + ctx.alphaPsi[i] * rho * err * prev[i] * scale);
         return;
     }
 }
@@ -965,6 +1036,22 @@ static inline void oak_stage_replace(Ctx ctx, uint tid, uint tgW,
                 - err;
         ctx.utilOpt[k] += invT * (u - ctx.utilOpt[k]);
     }
+    {
+        // Rotating-stripe explosion scan: covers the whole param arena every 32
+        // steps, so death certificates are dated in-kernel (within 32 steps)
+        // instead of at heartbeat cadence. valueW is the params base pointer.
+        uint total = oak_learn_total(ctx);
+        uint stripe = ctx.stepCount % 32u;
+        uint badElem = 0xffffffffu;
+        for (uint e = stripe + 32u * tid; e < total; e += 32u * tgW) {
+            float v = ctx.valueW[e];
+            if (!isfinite(v) || fabs(v) > 1e8f) { badElem = e; break; }
+        }
+        if (badElem != 0xffffffffu && ctx.explosionStep[0] == 0xffffffffu) {
+            ctx.explosionStep[0] = ctx.stepCount;
+            ctx.explosionElem[0] = badElem;
+        }
+    }
     simdgroup_barrier(mem_flags::mem_device);
 
     if (tid == 0u) {
@@ -1054,7 +1141,38 @@ static inline void oak_stage_replace(Ctx ctx, uint tid, uint tgW,
     }
 	    for (uint k = 0u; k < ctx.K; ++k) {
 	        if (ctx.optAge[k] < 0xffffffffu) ctx.optAge[k] += 1u;
+	        if (ctx.lastStopAge[k] < 0xffffffffu) ctx.lastStopAge[k] += 1u;
 	    }
+    // Subtask viability (generate-and-test, not interruption): an option that has
+    // not stopped once in R*K steps is a degenerate subtask — its stopping-based
+    // quantities (psi, n-hat, l-hat) are ill-defined and grow without bound.
+    // Recycle the HEAD (fresh learner, same feature); behavior is untouched.
+    if (!OAK_ABLATE_GENERATE_AND_TEST) {
+        // R*K*K: catches true never-stoppers (observed SR explosions need >28k
+        // stale steps) without churning heads that stop on option timescales.
+        uint staleLimit = ctx.R * ctx.K * ctx.K;
+        for (uint k = 0u; k < ctx.K; ++k) {
+            if (ctx.lastStopAge[k] < staleLimit) continue;
+            ctx.optAge[k] = 0u;
+            ctx.lastStopAge[k] = 0u;
+            ctx.utilOpt[k] = float(ctx.R);
+            ctx.actorAdv[k] = 0.0f;
+            ctx.psiRho[k] = 0.0f;
+            uint feat = ctx.optFeature[k] % ctx.R;
+            for (uint i = 0u; i < ctx.R; ++i) {
+                ctx.psi[k * ctx.R + i] = 0.0f;
+                ctx.psiAux[k * ctx.R + i] = 0.0f;
+                ctx.optReward[k * ctx.R + i] = 0.0f;
+                ctx.optDuration[k * ctx.R + i] = 0.0f;
+                for (uint j = 0u; j < ctx.R; ++j)
+                    ctx.optTransition[k * ctx.R * ctx.R + j * ctx.R + i] = 0.0f;
+            }
+            float invSqrtR = rsqrt(float(max(ctx.R, 1u)));
+            ctx.psi[k * ctx.R + feat] = invSqrtR;
+            ctx.counters[OAK_CNT_REINIT_OPT] += 1u;
+            break;
+        }
+    }
 	    for (uint i = 0u; i < ctx.R; ++i) if (ctx.featureAge[i] < 0xffffffffu) ctx.featureAge[i] += 1u;
 
     float invEligible = 1.0f / float(max(eligible, 1u));
@@ -1119,6 +1237,7 @@ static inline void oak_stage_replace(Ctx ctx, uint tid, uint tgW,
 		        ctx.actorAdv[k] = 0.0f;
 			        for (uint i = 0u; i < ctx.R; ++i) {
 			            ctx.psi[k * ctx.R + i] = 0.0f;
+			            ctx.psiAux[k * ctx.R + i] = 0.0f;
 			            ctx.optReward[k * ctx.R + i] = 0.0f;
 		            ctx.optDuration[k * ctx.R + i] = 0.0f;
 		            for (uint d = 0u; d < ctx.D; ++d) ctx.optPolicy[(k * ctx.D + d) * ctx.R + i] = 0.0f;
@@ -1129,6 +1248,24 @@ static inline void oak_stage_replace(Ctx ctx, uint tid, uint tgW,
 			            float sign = ((k / ctx.D) % 2u == 0u) ? 1.0f : -1.0f;
 			            ctx.optPolicy[(k * ctx.D + slot) * ctx.R] = sign / float(ctx.D);
 			        }
+		        // Feature `worst` is now a DIFFERENT signal: every head's weight on that
+		        // index (and every transition row predicting it) is stale knowledge about
+		        // the old feature. Leaving them in place tears the shared fabric: on a
+		        // bootstrapped substrate the mismatch compounds into runaway model error
+		        // (observed: lane-wide 1e9 blow-ups driven by curation churn). Clear the
+		        // column bank-wide.
+		        for (uint ok = 0u; ok < ctx.K; ++ok) {
+		            ctx.psi[ok * ctx.R + worst] = 0.0f;
+		            ctx.psiAux[ok * ctx.R + worst] = 0.0f;
+		            ctx.optReward[ok * ctx.R + worst] = 0.0f;
+		            ctx.optDuration[ok * ctx.R + worst] = 0.0f;
+		            for (uint d = 0u; d < ctx.D; ++d)
+		                ctx.optPolicy[(ok * ctx.D + d) * ctx.R + worst] = 0.0f;
+		            for (uint j = 0u; j < ctx.R; ++j) {
+		                ctx.optTransition[ok * ctx.R * ctx.R + j * ctx.R + worst] = 0.0f;
+		                ctx.optTransition[ok * ctx.R * ctx.R + worst * ctx.R + j] = 0.0f;
+		            }
+		        }
 		        float invSqrtR = rsqrt(float(max(ctx.R, 1u)));
 		        ctx.psi[k * ctx.R + worst] = invSqrtR;
 	        ctx.counters[OAK_CNT_REINIT_FEAT] += 1u;
