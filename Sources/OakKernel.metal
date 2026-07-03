@@ -112,6 +112,7 @@ struct Ctx {
     device float *keyboard, *modelDenom;
     device float *valueGauge;
     device float *tdPsiFast, *tdPsiPeak;
+    device float *headScale, *modelScale, *valueScale, *xNormPrev;
     device uint *counters, *optFeature, *featureAge, *optAge;
     device uint *featureParentA, *featureParentB, *featureKind, *featureBirthCount;
     device uint *selectedOption, *keyboardOrigin;
@@ -204,6 +205,10 @@ inline Ctx make_ctx(device float *params, device float *stateArena, device uint 
     c.valueGauge = stateArena + s; s += 1u;
     c.tdPsiFast = stateArena + s; s += c.K;
     c.tdPsiPeak = stateArena + s; s += c.K;
+    c.headScale = stateArena + s; s += c.K;
+    c.modelScale = stateArena + s; s += c.K;
+    c.valueScale = stateArena + s; s += 1u;
+    c.xNormPrev = stateArena + s; s += 1u;
 
     uint u = 0u;
     c.counters = uintArena + u; u += 7u;
@@ -313,6 +318,25 @@ inline void fcstomp_record_keyboard_stats(Ctx ctx,
     ctx.stats->keyboardSketchDim = float(keyboard_sketch_dim(ctx));
 }
 
+// Precompute the learn-stage scale factors that are identical for every learned
+// element this step (Inv-10 bit-identical hoist: same expressions, same fma and
+// divide order as the per-element code they replace).
+inline void fcstomp_store_learn_scales(Ctx ctx,
+                                       threadgroup const float *prev,
+                                       threadgroup const float *curr) {
+    float denom = 1.0f;
+    for (uint j = 0u; j < ctx.R; ++j) {
+        float a = ctx.alpha[j];
+        if (isfinite(a) && a > 0.0f) denom += a * (prev[j] * prev[j] + curr[j] * curr[j]);
+    }
+    float updateEnergy = ctx.td[0] * ctx.td[0] + ctx.planTd[0] * ctx.planTd[0];
+    if (isfinite(updateEnergy)) denom += ctx.invR * updateEnergy;
+    ctx.valueScale[0] = (isfinite(denom) && denom > 0.0f) ? (1.0f / denom) : 0.0f;
+    float xNorm = 0.0f;
+    for (uint j = 0u; j < ctx.R; ++j) xNorm = fma(prev[j], prev[j], xNorm);
+    ctx.xNormPrev[0] = xNorm;
+}
+
 inline void fcstomp_prediction_control_loop(Ctx ctx, uint tid,
                                       threadgroup float *tgPrev,
                                       threadgroup float *tgCurr,
@@ -320,8 +344,6 @@ inline void fcstomp_prediction_control_loop(Ctx ctx, uint tid,
                                       threadgroup float *tgCont,
                                       threadgroup float *tgTerm,
                                       threadgroup float *tgTdPsi,
-                                      threadgroup float *tgDir,
-                                      threadgroup float *tgEffort,
                                       threadgroup float *tgScalars) {
     float vPrev = 0.0f, vCurr = 0.0f;
     if (tid == 0u) {
@@ -355,18 +377,14 @@ inline void fcstomp_prediction_control_loop(Ctx ctx, uint tid,
         tgScalars[11] = rhoUse;
     }
     if (tid == 0u) {
-        float alphaTraceNorm = 0.0f;
         float modelTraceNorm = 0.0f;
         for (uint i = 0u; i < ctx.R; ++i) {
             float x = tgPrev[i];
             if (!isfinite(x)) continue;
             float xx = x * x;
-            float av = ctx.alpha[i];
             float am = ctx.alphaModel[i];
-            if (isfinite(av) && av > 0.0f) alphaTraceNorm = fma(av, xx, alphaTraceNorm);
             if (isfinite(am) && am > 0.0f) modelTraceNorm = fma(am, xx, modelTraceNorm);
         }
-        tgScalars[7] = (isfinite(alphaTraceNorm) && alphaTraceNorm > 0.0f) ? alphaTraceNorm : 0.0f;
         tgScalars[10] = (isfinite(modelTraceNorm) && modelTraceNorm > 0.0f) ? modelTraceNorm : 0.0f;
     }
     simdgroup_barrier(mem_flags::mem_threadgroup);
@@ -419,6 +437,13 @@ inline void fcstomp_prediction_control_loop(Ctx ctx, uint tid,
         ctx.headDenom[tid] = (isfinite(denom) && denom > 0.0f) ? denom : 0.0f;
         float modelDenom = fma(rho, tgScalars[10], 1.0f);
         ctx.modelDenom[tid] = (isfinite(modelDenom) && modelDenom > 0.0f) ? modelDenom : 0.0f;
+        {
+            // Per-head reciprocal, hoisted from the learn stage (identical divide).
+            float hd = ctx.headDenom[tid];
+            ctx.headScale[tid] = (isfinite(hd) && hd > 0.0f) ? (1.0f / hd) : 0.0f;
+            float md = ctx.modelDenom[tid];
+            ctx.modelScale[tid] = (isfinite(md) && md > 0.0f) ? (1.0f / md) : 0.0f;
+        }
         tgCont[tid] = cont;
         tgTerm[tid] = beta;
         float rHat = 0.0f, lRaw = 0.0f, vModel = 0.0f;
@@ -443,9 +468,9 @@ inline void fcstomp_prediction_control_loop(Ctx ctx, uint tid,
             && !OAK_ABLATE_PLANNING
             && rrFinite && modelTrusted && modelFinite && durationTrusted && isfinite(qAdv);
         ctx.durationHat[tid] = dur;
-        tgG[tid] = (queryTrusted && !OAK_ABLATE_MODEL_TO_KEYBOARD) ? qAdv : 0.0f;
-        // Trust flag for the selection/keyboard pass (1 = model-backed score usable).
-        tgDir[tid] = (queryTrusted && !OAK_ABLATE_MODEL_TO_KEYBOARD) ? 1.0f : 0.0f;
+        // NaN marks an untrusted option; a finite tgG[k] is a usable model-backed
+        // advantage (queryTrusted implies qAdv is finite).
+        tgG[tid] = (queryTrusted && !OAK_ABLATE_MODEL_TO_KEYBOARD) ? qAdv : NAN;
     }
     simdgroup_barrier(mem_flags::mem_threadgroup);
     if (tid == 0u) {
@@ -473,9 +498,8 @@ inline void fcstomp_prediction_control_loop(Ctx ctx, uint tid,
         float termSum = 0.0f;
         for (uint k = 0u; k < ctx.K; ++k) {
             termSum += tgTerm[k];
-            bool trusted = tgDir[k] > 0.0f;
-            float qAdv = tgG[k];
-            if (!isfinite(qAdv)) { qAdv = 0.0f; trusted = false; }
+            bool trusted = isfinite(tgG[k]);
+            float qAdv = trusted ? tgG[k] : 0.0f;
             float dur = ctx.durationHat[k];
             if (!isfinite(dur) || dur <= 0.0f) dur = 1.0f;
             float modelErr = OAK_ABLATE_SEARCH_CONTROL ? 0.0f : max(ctx.prioOpt[k], 0.0f);
@@ -496,6 +520,7 @@ inline void fcstomp_prediction_control_loop(Ctx ctx, uint tid,
             ctx.keyboardOrigin[0] = 0u;
             ctx.planTd[0] = 0.0f;
             ctx.selectedOption[0] = selected;
+            fcstomp_store_learn_scales(ctx, tgPrev, tgCurr);
             fcstomp_record_keyboard_stats(ctx, selected, termSum, 0.0f, advL1, 0.0f);
             return;
         }
@@ -512,8 +537,8 @@ inline void fcstomp_prediction_control_loop(Ctx ctx, uint tid,
             float mag = 0.0f;
             bool haveBest = bestScore > -FLT_MAX;
             for (uint k = 0u; k < ctx.K; ++k) {
-                bool trusted = tgDir[k] > 0.0f && haveBest && isfinite(tgG[k]);
-                float qAdv = isfinite(tgG[k]) ? tgG[k] : 0.0f;
+                bool trusted = isfinite(tgG[k]) && haveBest;
+                float qAdv = trusted ? tgG[k] : 0.0f;
                 float dur = ctx.durationHat[k];
                 if (!isfinite(dur) || dur <= 0.0f) dur = 1.0f;
                 float modelErr = OAK_ABLATE_SEARCH_CONTROL ? 0.0f : max(ctx.prioOpt[k], 0.0f);
@@ -537,6 +562,7 @@ inline void fcstomp_prediction_control_loop(Ctx ctx, uint tid,
         float planDelta = (OAK_ABLATE_PLANNING || bestScore <= -FLT_MAX) ? 0.0f : bestScore;
         ctx.planTd[0] = isfinite(planDelta) ? planDelta : 0.0f;
         ctx.selectedOption[0] = selected;
+        fcstomp_store_learn_scales(ctx, tgPrev, tgCurr);
         float keyL1 = 0.0f;
         for (uint k = 0u; k < ctx.K; ++k) {
             float w = ctx.keyboard[k];
@@ -630,12 +656,10 @@ static inline void oak_stage_encode(Ctx ctx, uint tid, uint tgW,
                                     threadgroup float *tgTdPsi,
                                     threadgroup float *tgScalars,
                                     threadgroup float *tgPrevState,
-                                    threadgroup float *tgCurrState,
-                                    threadgroup float *tgDir,
-                                    threadgroup float *tgEffort) {
+                                    threadgroup float *tgCurrState) {
     FeatureConstruction(ctx, tid, tgW, tgPrevState, tgCurrState);
     fcstomp_prediction_control_loop(ctx, tid, tgPrevState, tgCurrState, tgG, tgCont, tgTerm,
-                                    tgTdPsi, tgDir, tgEffort, tgScalars);
+                                    tgTdPsi, tgScalars);
 }
 
 kernel void oak_encode(device float *params [[buffer(0)]],
@@ -651,15 +675,13 @@ kernel void oak_encode(device float *params [[buffer(0)]],
                        threadgroup float *tgScalars [[threadgroup(4)]],
                        threadgroup float *tgPrevState [[threadgroup(5)]],
                        threadgroup float *tgCurrState [[threadgroup(6)]],
-                       threadgroup float *tgDir [[threadgroup(7)]],
-                       threadgroup float *tgEffort [[threadgroup(8)]],
                        uint2 tpos [[thread_position_in_threadgroup]],
                        uint2 tdim [[threads_per_threadgroup]],
                        uint2 tgPos [[threadgroup_position_in_grid]]) {
     uint tid = tpos.x, tgW = tdim.x;
     Ctx ctx = make_ctx(params, stateArena, uintArena, scalars, stats, cfg, tgPos.y);
     oak_stage_encode(ctx, tid, tgW, tgG, tgCont, tgTerm, tgTdPsi, tgScalars,
-                     tgPrevState, tgCurrState, tgDir, tgEffort);
+                     tgPrevState, tgCurrState);
 }
 
 static inline void oak_stage_plan_option(Ctx ctx, uint k, uint j,
@@ -772,14 +794,7 @@ static inline void oak_learn_element(Ctx ctx, device const float *prev,
         uint i = gid;
         float w = ctx.valueW[i];
         float delta = ctx.td[0] * prev[i] + ctx.planTd[0] * curr[i];
-        float denom = 1.0f;
-        for (uint j = 0u; j < ctx.R; ++j) {
-            float a = ctx.alpha[j];
-            if (isfinite(a) && a > 0.0f) denom += a * (prev[j] * prev[j] + curr[j] * curr[j]);
-        }
-        float updateEnergy = ctx.td[0] * ctx.td[0] + ctx.planTd[0] * ctx.planTd[0];
-        if (isfinite(updateEnergy)) denom += ctx.invR * updateEnergy;
-        float scale = (isfinite(denom) && denom > 0.0f) ? (1.0f / denom) : 0.0f;
+        float scale = ctx.valueScale[0];
         ctx.valueW[i] = safe_w(w, w + ctx.alpha[i] * delta * scale);
         return;
     }
@@ -790,8 +805,7 @@ static inline void oak_learn_element(Ctx ctx, device const float *prev,
         float rho = ctx.importance[k];
         if (!isfinite(rho) || rho < 0.0f) rho = 0.0f;
         float w = ctx.psi[k * ctx.R + i];
-        float denom = ctx.headDenom[k];
-        float scale = (isfinite(denom) && denom > 0.0f) ? (1.0f / denom) : 0.0f;
+        float scale = ctx.headScale[k];
         ctx.psi[k * ctx.R + i] = safe_w(w, w + ctx.alphaPsi[i] * rho * ctx.tdPsi[k] * prev[i] * scale);
         return;
     }
@@ -808,8 +822,7 @@ static inline void oak_learn_element(Ctx ctx, device const float *prev,
         if (!isfinite(targetGrad)) targetGrad = 0.0f;
         float actorAlpha = 1.0f / float(max(ctx.D * ctx.R, 1u));
         float gradScale = rho * targetGrad;
-        float xNorm = 0.0f;
-        for (uint j = 0u; j < ctx.R; ++j) xNorm = fma(prev[j], prev[j], xNorm);
+        float xNorm = ctx.xNormPrev[0];
         float denom = 1.0f + actorAlpha * ctx.actorAdv[k] * ctx.actorAdv[k] * gradScale * gradScale * xNorm;
         float scale = (isfinite(denom) && denom > 0.0f) ? (1.0f / denom) : 0.0f;
         ctx.optPolicy[(k * ctx.D + d) * ctx.R + i] =
@@ -821,8 +834,7 @@ static inline void oak_learn_element(Ctx ctx, device const float *prev,
         if (OAK_ABLATE_OPTION_MODELS) return;
         uint k = gid / ctx.R, i = gid % ctx.R;
         float rho = ctx.importance[k]; if (!isfinite(rho) || rho < 0.0f) rho = 0.0f;
-        float denom = ctx.modelDenom[k];
-        float scale = (isfinite(denom) && denom > 0.0f) ? (1.0f / denom) : 0.0f;
+        float scale = ctx.modelScale[k];
         float w = ctx.optReward[k * ctx.R + i];
         ctx.optReward[k * ctx.R + i] = safe_w(w, w + ctx.alphaModel[i] * rho * ctx.optRewardTd[k] * prev[i] * scale);
         return;
@@ -834,8 +846,7 @@ static inline void oak_learn_element(Ctx ctx, device const float *prev,
         uint rem = gid - k * ctx.R * ctx.R;
         uint j = rem / ctx.R, i = rem % ctx.R;
         float rho = ctx.importance[k]; if (!isfinite(rho) || rho < 0.0f) rho = 0.0f;
-        float denom = ctx.modelDenom[k];
-        float scale = (isfinite(denom) && denom > 0.0f) ? (1.0f / denom) : 0.0f;
+        float scale = ctx.modelScale[k];
         float w = ctx.optTransition[k * ctx.R * ctx.R + j * ctx.R + i];
         ctx.optTransition[k * ctx.R * ctx.R + j * ctx.R + i] =
             safe_w(w, w + ctx.alphaModel[i] * rho * ctx.nTdMat[k * ctx.R + j] * prev[i] * scale);
@@ -1647,6 +1658,16 @@ kernel void oak_fleet_env(device float *params [[buffer(0)]],
                         lanes, laneSeeds, ecfg, recordSlot, recordBuf, gid);
 }
 
+// Fence between agent stages of the SAME lane. All agent-stage data flow is
+// lane-local (fleet lane-disjointness invariant) and one lane = one simdgroup,
+// so a simdgroup-scope device fence suffices — except under WIDE2X, where the
+// learn stage spans two simdgroups per lane. The env stage still crosses
+// simdgroups (packed on simdgroup 0) and keeps full threadgroup barriers.
+static inline void oak_lane_fence() {
+    if (OAK_MEGA_WIDE2X) threadgroup_barrier(mem_flags::mem_device);
+    else simdgroup_barrier(mem_flags::mem_device);
+}
+
 kernel void oak_megastep(device float *params [[buffer(0)]],
                          device float *stateArena [[buffer(1)]],
                          device uint *uintArena [[buffer(2)]],
@@ -1667,9 +1688,7 @@ kernel void oak_megastep(device float *params [[buffer(0)]],
                          threadgroup float *tgScalars [[threadgroup(4)]],
                          threadgroup float *tgPrevState [[threadgroup(5)]],
                          threadgroup float *tgCurrState [[threadgroup(6)]],
-                         threadgroup float *tgDir [[threadgroup(7)]],
-                         threadgroup float *tgEffort [[threadgroup(8)]],
-                         threadgroup float *tgPhys [[threadgroup(9)]],
+                         threadgroup float *tgPhys [[threadgroup(7)]],
                          uint tgIdx [[threadgroup_position_in_grid]],
                          uint tid [[thread_position_in_threadgroup]],
                          uint slane [[thread_index_in_simdgroup]],
@@ -1689,16 +1708,15 @@ kernel void oak_megastep(device float *params [[buffer(0)]],
     uint off = laneSg * 32u;
     threadgroup float *lG = tgG + off, *lCont = tgCont + off, *lTerm = tgTerm + off,
                       *lTdPsi = tgTdPsi + off, *lScalars = tgScalars + off,
-                      *lPrev = tgPrevState + off, *lCurr = tgCurrState + off,
-                      *lDir = tgDir + off, *lEffort = tgEffort + off;
+                      *lPrev = tgPrevState + off, *lCurr = tgCurrState + off;
     for (uint it = 0u; it < stepsThisDispatch; ++it) {
         if (ecfg.policyMode == 0u) {
             if (wideActive && (OAK_MEGA_STAGES & 1u) != 0u) {
                 Ctx ctx = make_ctx(params, stateArena, uintArena, scalars, stats, cfg, wideLane);
                 oak_stage_encode(ctx, slane, 32u, lG, lCont, lTerm, lTdPsi, lScalars,
-                                 lPrev, lCurr, lDir, lEffort);
+                                 lPrev, lCurr);
             }
-            threadgroup_barrier(mem_flags::mem_device);
+            oak_lane_fence();
             if (wideActive && (OAK_MEGA_STAGES & 2u) != 0u) {
                 Ctx ctx = make_ctx(params, stateArena, uintArena, scalars, stats, cfg, wideLane);
                 for (uint k = 0u; k < ctx.K; ++k) {
@@ -1706,7 +1724,7 @@ kernel void oak_megastep(device float *params [[buffer(0)]],
                     oak_stage_plan_option(ctx, k, slane, lG);
                 }
             }
-            threadgroup_barrier(mem_flags::mem_device);
+            oak_lane_fence();
             if (learnActive && (OAK_MEGA_STAGES & 4u) != 0u) {
                 Ctx ctx = make_ctx(params, stateArena, uintArena, scalars, stats, cfg, wideLane);
                 device const float *prev = state_at(ctx, ctx.stateSlot);
@@ -1714,12 +1732,12 @@ kernel void oak_megastep(device float *params [[buffer(0)]],
                 uint total = oak_learn_total(ctx);
                 for (uint e = learnTid; e < total; e += learnW) oak_learn_element(ctx, prev, curr, e);
             }
-            threadgroup_barrier(mem_flags::mem_device);
+            oak_lane_fence();
             if (wideActive && (OAK_MEGA_STAGES & 8u) != 0u) {
                 Ctx ctx = make_ctx(params, stateArena, uintArena, scalars, stats, cfg, wideLane);
                 oak_stage_replace(ctx, slane, 32u, lCurr);
             }
-            threadgroup_barrier(mem_flags::mem_device);
+            oak_lane_fence();
             if (wideActive && (OAK_MEGA_STAGES & 16u) != 0u) {
                 Ctx ctx = make_ctx(params, stateArena, uintArena, scalars, stats, cfg, wideLane);
                 device const float *curr = state_at(ctx, ctx.stateSlot);
@@ -1729,7 +1747,7 @@ kernel void oak_megastep(device float *params [[buffer(0)]],
                 for (uint g = 0u; g < emitGroups; ++g)
                     emit_action_grid(ctx, lCurr, g, slane, 32u);
             }
-            threadgroup_barrier(mem_flags::mem_device);
+            oak_lane_fence();
         }
         if (ecfg.policyMode == 0u) {
             if (wideActive && (OAK_MEGA_STAGES & 32u) != 0u) {
