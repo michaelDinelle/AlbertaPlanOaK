@@ -120,6 +120,7 @@ struct Ctx {
     device float *hDotPsi, *psiAuxScale, *psiRho;
     device float *vsTd, *vsDot, *vsScale, *vsAuxScale;
     device float *nurMean, *nurSM, *nurUtil, *nurUtilSM;
+    device float *muRaw, *polCoef;
     device uint *counters, *optFeature, *featureAge, *optAge;
     device uint *featureParentA, *featureParentB, *featureKind, *featureBirthCount;
     device uint *selectedOption, *keyboardOrigin;
@@ -232,6 +233,8 @@ inline Ctx make_ctx(device float *params, device float *stateArena, device uint 
     c.nurSM = stateArena + s; s += c.Rn;
     c.nurUtil = stateArena + s; s += c.Rn;
     c.nurUtilSM = stateArena + s; s += c.Rn;
+    c.muRaw = stateArena + s; s += c.K * c.D;
+    c.polCoef = stateArena + s; s += c.K * c.D;
 
     uint u = 0u;
     c.counters = uintArena + u; u += 7u;
@@ -858,6 +861,26 @@ static inline void oak_stage_plan_all(Ctx ctx, uint tid) {
     device const float *prev = state_at(ctx, ctx.stateSlot);
     device const float *curr = state_at(ctx, 1u - ctx.stateSlot);
     oak_plan_one(ctx, tid, prev, curr);
+    // Per-(k,d) actor coefficient, hoisted out of the K*D*A learn elements
+    // (they were 60% of learn traffic at ~6 device accesses each).
+    {
+        uint k = tid;
+        float rho = ctx.importance[k];
+        if (!isfinite(rho)) rho = 0.0f;
+        float adv = ctx.actorAdv[k];
+        if (!isfinite(adv)) adv = 0.0f;
+        float actorAlpha = 1.0f / float(max(ctx.D * 32u, 1u));
+        float xNorm = ctx.xNormPrev[0];
+        for (uint d = 0u; d < ctx.D; ++d) {
+            float targetGrad = ctx.optionActorCredit[k * ctx.D + d];
+            if (!isfinite(targetGrad)) targetGrad = 0.0f;
+            float gradScale = rho * targetGrad;
+            float denom = 1.0f + actorAlpha * adv * adv * gradScale * gradScale * xNorm;
+            float scale = (isfinite(denom) && denom > 0.0f) ? (1.0f / denom) : 0.0f;
+            float c = actorAlpha * adv * gradScale * scale;
+            ctx.polCoef[k * ctx.D + d] = isfinite(c) ? c : 0.0f;
+        }
+    }
 }
 
 static inline void oak_stage_plan_option(Ctx ctx, uint k, uint j,
@@ -985,18 +1008,9 @@ static inline void oak_learn_element(Ctx ctx, device const float *prev,
         uint k = gid / (ctx.D * A);
         uint rem = gid - k * ctx.D * A;
         uint d = rem / A, i = actP[rem % A];
-        float rho = ctx.importance[k];
-        if (!isfinite(rho)) rho = 0.0f;
         float w = ctx.optPolicy[(k * ctx.D + d) * ctx.R + i];
-        float targetGrad = ctx.optionActorCredit[k * ctx.D + d];
-        if (!isfinite(targetGrad)) targetGrad = 0.0f;
-        float actorAlpha = 1.0f / float(max(ctx.D * 32u, 1u));
-        float gradScale = rho * targetGrad;
-        float xNorm = ctx.xNormPrev[0];
-        float denom = 1.0f + actorAlpha * ctx.actorAdv[k] * ctx.actorAdv[k] * gradScale * gradScale * xNorm;
-        float scale = (isfinite(denom) && denom > 0.0f) ? (1.0f / denom) : 0.0f;
         ctx.optPolicy[(k * ctx.D + d) * ctx.R + i] =
-            safe_w(w, w + actorAlpha * ctx.actorAdv[k] * gradScale * prev[i] * scale);
+            safe_w(w, w + ctx.polCoef[k * ctx.D + d] * prev[i]);
         return;
     }
     gid -= nPi;
@@ -1072,30 +1086,36 @@ inline void emit_action_grid(Ctx ctx, threadgroup const float *curr, uint group,
     device const uint *act = act_at(ctx, ctx.stateSlot);
     if (OAK_ABLATE_OPTION_POLICIES) {
         ctx.optionPolicyMean[k * ctx.D + d] = 0.0f;
+        ctx.muRaw[k * ctx.D + d] = 0.0f;
         if (gid < ctx.D) ctx.policyMean[d] = 0.0f;
         return;
     }
     float mu = 0.0f;
     for (uint a = 0u; a < 32u; ++a)
         mu = fma(ctx.optPolicy[(k * ctx.D + d) * ctx.R + act[a]], curr[a], mu);
+    // Raw mean (pre-fallback) stashed for the blend pass — kills the K*32
+    // re-gather per action dim.
+    ctx.muRaw[k * ctx.D + d] = mu;
     if (!isfinite(mu)) mu = ctx.optionPolicyMean[k * ctx.D + d];
     ctx.optionPolicyMean[k * ctx.D + d] = mu;
-    if (gid < ctx.D) {
-        float blend = 0.0f, wNorm = 0.0f, fallback = 0.0f;
-        for (uint ok = 0u; ok < ctx.K; ++ok) {
-            float om = 0.0f;
-            for (uint a = 0u; a < 32u; ++a)
-                om = fma(ctx.optPolicy[(ok * ctx.D + d) * ctx.R + act[a]], curr[a], om);
-            if (!isfinite(om)) om = 0.0f;
-            if (ok == selected) fallback = om;
-            float w = ctx.keyboard[ok];
-            if (!isfinite(w)) w = 0.0f;
-            blend = fma(w, om, blend);
-            wNorm += fabs(w);
-        }
-        ctx.policyMean[d] = (wNorm > 0.0f && !OAK_ABLATE_KEYBOARD_TO_POLICY)
-            ? blend / wNorm : fallback;
+}
+
+inline void emit_blend_grid(Ctx ctx, uint tid) {
+    if (tid >= ctx.D) return;
+    uint d = tid;
+    uint selected = ctx.selectedOption[0] % ctx.K;
+    float blend = 0.0f, wNorm = 0.0f, fallback = 0.0f;
+    for (uint ok = 0u; ok < ctx.K; ++ok) {
+        float om = ctx.muRaw[ok * ctx.D + d];
+        if (!isfinite(om)) om = 0.0f;
+        if (ok == selected) fallback = om;
+        float w = ctx.keyboard[ok];
+        if (!isfinite(w)) w = 0.0f;
+        blend = fma(w, om, blend);
+        wNorm += fabs(w);
     }
+    ctx.policyMean[d] = (wNorm > 0.0f && !OAK_ABLATE_KEYBOARD_TO_POLICY)
+        ? blend / wNorm : fallback;
 }
 
 static inline void oak_stage_replace(Ctx ctx, uint tid, uint tgW,
@@ -1255,6 +1275,16 @@ static inline void oak_stage_replace(Ctx ctx, uint tid, uint tgW,
     ctx.stats->searchControlUseMean = searchUse * invK;
 
     uint candidateStart = ctx.anchorCount;
+    // Register-hoisted per-option (feature, use) pairs: the scan's inner loop
+    // previously re-read utilOpt/keyboard/optFeature from device 157x32 times
+    // per step on a single thread.
+    uint ofeat[32];
+    float ouse[32];
+    for (uint k = 0u; k < ctx.K && k < 32u; ++k) {
+        ofeat[k] = ctx.optFeature[k] % ctx.R;
+        ouse[k] = ctx.utilOpt[k]
+            + (OAK_ABLATE_SEARCH_TO_GENERATE_TEST ? 0.0f : fabs(ctx.keyboard[k]));
+    }
     uint eligible = 0u, worst = candidateStart;
     bool haveWorst = false;
     float worstUtil = 0.0f, worstRed = 0.0f, worstDownstream = 0.0f;
@@ -1270,10 +1300,8 @@ static inline void oak_stage_replace(Ctx ctx, uint tid, uint tgW,
             if (!isfinite(red)) red = 0.0f;
             float optionUse = 0.0f;
             for (uint k = 0u; k < ctx.K; ++k) {
-                if ((ctx.optFeature[k] % ctx.R) != i) continue;
-                float use = ctx.utilOpt[k]
-                    + (OAK_ABLATE_SEARCH_TO_GENERATE_TEST ? 0.0f : fabs(ctx.keyboard[k]));
-                if (isfinite(use)) optionUse += use;
+                if (ofeat[k] != i) continue;
+                if (isfinite(ouse[k])) optionUse += ouse[k];
             }
 		            float downstreamUse = optionUse + fabs(ctx.valueW[i]);
             if (!isfinite(downstreamUse)) downstreamUse = 0.0f;
@@ -1493,6 +1521,8 @@ static inline void oak_stage_action_emit(Ctx ctx, uint group, uint tid, uint tgW
     if (tid < 32u) tgCurrState[tid] = curr[act[tid]];
     simdgroup_barrier(mem_flags::mem_threadgroup);
     emit_action_grid(ctx, tgCurrState, group, tid, tgW);
+    simdgroup_barrier(mem_flags::mem_device);
+    if (group == 0u) emit_blend_grid(ctx, tid);
 }
 
 kernel void oak_action_emit(device float *params [[buffer(0)]], device float *stateArena [[buffer(1)]], device uint *uintArena [[buffer(2)]], device KernelScalars *scalars [[buffer(3)]], device KernelStats *stats [[buffer(4)]], constant KernelConfig &cfg [[buffer(5)]], threadgroup float *tgCurrState [[threadgroup(0)]], uint2 tgPos [[threadgroup_position_in_grid]], uint2 tpos [[thread_position_in_threadgroup]], uint2 tdim [[threads_per_threadgroup]]) {
@@ -2060,6 +2090,8 @@ kernel void oak_megastep(device float *params [[buffer(0)]],
                 uint emitGroups = (ctx.K * ctx.D + 31u) / 32u;
                 for (uint g = 0u; g < emitGroups; ++g)
                     emit_action_grid(ctx, lCurr, g, slane, 32u);
+                simdgroup_barrier(mem_flags::mem_device);
+                emit_blend_grid(ctx, slane);
             }
             oak_lane_fence();
         }
