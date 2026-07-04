@@ -29,6 +29,7 @@ struct KernelStats {
   var selectedOptionFeature, selectedContinuation, selectedKeyboardWeight, mainTd, planTdValue: Float
   var keyboardSketchDim, keyboardEffectiveL1, searchControlUseMean, generateTestEligibleCount: Float
   var learningMature: Float = 0
+  var dynaBackupMean: Float = 0
 }
 
 struct FleetEnvCfg {
@@ -177,6 +178,11 @@ struct Arena {
     _ = take(4 * r)  // eligScr (parallel eligibility tuples)
     _ = take(k)  // fcG (tg-diet: keyboard scores scratch)
     _ = take(16)  // fcS (tg-diet: fc scalars + sample exchange)
+    _ = take(32 * r)  // dyna ring values (R slots x 32 active tuples)
+    _ = take(k * max(rn / r, 1))  // dynaTd (backup deltas, K x mult)
+    _ = take(r)  // dynaAcc (window-accumulated dense per-feature backup sum)
+    _ = take(k)  // dynaC (copy-2 per-option update coefficients)
+    _ = take(4)  // planScr (reward snapshot, dyna-magnitude EMA)
     total = s
   }
 }
@@ -227,8 +233,8 @@ final class Engine {
     let rn = rank * nurseryMult
     let k = 32
     a = Arena(obsDim, rank, k, d, rn)
-    paramTotal = rank + 7 * k * rank + k * d * rank
-    uintTotal = 11 + 3 * k + 5 * rank + 4 * rn + 64
+    paramTotal = rank + 8 * k * rank + k * d * rank
+    uintTotal = 11 + 3 * k + 5 * rank + 4 * rn + 64 + 32 * rank
     learnTotal = 2 * 32 + 4 * k * 32 + k * d * 32 + 4 * k * 32
     let anchors = min(rank, inputW)
     let cfgValue = KernelConfig(
@@ -299,9 +305,15 @@ final class Engine {
         [a.beta, a.betaPsi, a.betaModel].forEach { ls[$0 + i] = log(alpha0) }
       }
       let basis = 1 / Float(max(d, 1))
+      // Ensemble copy-2 decorrelation: vStop2 gets a shifted diagonal (same
+      // magnitude as psi's diagonal, different index pattern); reward/duration
+      // copies start at zero like copy 1 and decorrelate through vStop2's
+      // different bootstrap plus the semi-gradient update geometry.
+      let vStop2 = rank + 7 * k * rank + k * d * rank
       for kk in 0..<k {
         lu[7 + kk] = UInt32(kk)
         lp[psi + kk * k + kk] = inv
+        lp[vStop2 + ((kk * 7 + 5) % rank) * k + kk] = inv
         ls[a.utilOpt + kk] = Float(rank)
         let slot = kk % max(d, 1)
         let sign: Float = ((kk / max(d, 1)) % 2 == 0) ? 1 : -1
@@ -518,7 +530,7 @@ func metricsRoot() -> URL {
     let recordBuf = try makeBuf(recordLanes.count * recordCapacity * 7 * 4)
     let physRowsBuf = try makeBuf(envCoop ? B * 1050 * 4 : 16)
     let snapStride = MemoryLayout<LaneSnapshot>.stride
-    precondition(snapStride == 276, "LaneSnapshot layout drifted from OakLaneSnapshot")
+    precondition(snapStride == 280, "LaneSnapshot layout drifted from OakLaneSnapshot")
     let snapBuf = try makeBuf(2 * B * snapStride)
     let snapPtr = snapBuf.contents().bindMemory(to: LaneSnapshot.self, capacity: 2 * B)
     let dumpEvery = max(e["OAK_DUMP_STATE_EVERY"].flatMap(Int.init) ?? 0, 0)
@@ -658,6 +670,7 @@ func metricsRoot() -> URL {
         h["keyboardSketchDim"] = f(s.keyboardSketchDim)
         h["keyboardEffectiveL1"] = f(s.keyboardEffectiveL1)
         h["searchControlUseMean"] = f(s.searchControlUseMean)
+        h["dynaBackupMean"] = f(s.dynaBackupMean)
         h["generateTestEligibleCount"] = f(s.generateTestEligibleCount)
         h["learningMature"] = f(s.learningMature)
       }
@@ -820,6 +833,9 @@ func metricsRoot() -> URL {
           let up = eng.uints.p + lane * eng.uintTotal
           let du = Data(bytes: up, count: eng.uintTotal * MemoryLayout<UInt32>.stride)
           try du.write(to: URL(fileURLWithPath: "\(rawDir)/uints-l\(lane)-s\(step).bin"))
+          let pp = eng.params.p + lane * eng.paramTotal
+          let dp = Data(bytes: pp, count: eng.paramTotal * MemoryLayout<Float>.stride)
+          try dp.write(to: URL(fileURLWithPath: "\(rawDir)/params-l\(lane)-s\(step).bin"))
         }
       }
       for lane in 0..<B {
