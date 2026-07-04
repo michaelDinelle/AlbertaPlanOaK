@@ -1082,6 +1082,231 @@ static inline void oak_learn_element(Ctx ctx, device const float *prev,
     }
 }
 
+
+// Quad-vectorized learn (megastep path): feature-major layout makes 4
+// consecutive heads' weights one aligned float4. Each thread owns stationary
+// head-quads (per-quad scalars loaded once into registers) and iterates the
+// active set with one vector RMW per quad — cutting the dominant instruction
+// stream ~4x. Per-component operand order matches the scalar path exactly
+// (bit-identical class).
+static inline void oak_learn_quads(Ctx ctx, device const float *prev,
+                                   device const float *curr, uint tid, uint tw) {
+    device const uint *actP = act_at(ctx, ctx.stateSlot);
+    device const uint *actC = act_at(ctx, 1u - ctx.stateSlot);
+    const uint A = 32u;
+    uint bankSize = ctx.R / 32u;
+    uint K4 = ctx.K / 4u;
+    uint KD4 = (ctx.K * ctx.D) / 4u;
+    uint total = KD4 + 8u * K4;
+    for (uint q = tid; q < total; q += tw) {
+        if (q < KD4) {
+            if (OAK_ABLATE_OPTION_POLICIES) continue;
+            uint kd0 = q * 4u;
+            float4 c = *(device const float4 *)&ctx.polCoef[kd0];
+            for (uint a = 0u; a < A; ++a) {
+                uint i = act_of(actP, a);
+                float x = prev[i];
+                device float4 *w4 = (device float4 *)&ctx.optPolicy[i * ctx.K * ctx.D + kd0];
+                float4 w = *w4;
+                w.x = safe_w(w.x, w.x + c.x * x);
+                w.y = safe_w(w.y, w.y + c.y * x);
+                w.z = safe_w(w.z, w.z + c.z * x);
+                w.w = safe_w(w.w, w.w + c.w * x);
+                *w4 = w;
+            }
+            continue;
+        }
+        uint qq = q - KD4;
+        uint bank = qq / K4;
+        uint k0 = (qq % K4) * 4u;
+        float4 rho, cont;
+        for (uint c4 = 0u; c4 < 4u; ++c4) {
+            float r = ctx.importance[k0 + c4];
+            if (!isfinite(r) || r < 0.0f) r = 0.0f;
+            rho[c4] = r;
+            float cn = ctx.continuation[k0 + c4];
+            cont[c4] = isfinite(cn) ? cn : 0.0f;
+        }
+        if (bank == 0u || bank == 1u) {
+            // psi P / psi C (GTD2)
+            if (OAK_ABLATE_RR_SUBTASKS) continue;
+            float4 hD, sc, td;
+            for (uint c4 = 0u; c4 < 4u; ++c4) {
+                hD[c4] = ctx.hDotPsi[k0 + c4];
+                sc[c4] = ctx.headScale[k0 + c4];
+                td[c4] = ctx.tdPsi[k0 + c4];
+            }
+            if (bank == 0u) {
+                for (uint a = 0u; a < A; ++a) {
+                    uint i = act_of(actP, a);
+                    float xp = prev[i], xc = curr[i];
+                    float aP = ctx.alphaPsi[i];
+                    device float4 *w4 = (device float4 *)&ctx.psi[i * ctx.K + k0];
+                    float4 w = *w4;
+                    for (uint c4 = 0u; c4 < 4u; ++c4) {
+                        float g = (cont[c4] > 0.0f) ? (hD[c4] * (xp - cont[c4] * xc))
+                                                    : (td[c4] * xp);
+                        w[c4] = safe_w(w[c4], w[c4] + aP * rho[c4] * g * sc[c4]);
+                    }
+                    *w4 = w;
+                }
+            } else {
+                for (uint a = 0u; a < A; ++a) {
+                    uint i = act_of(actC, a);
+                    if (actP[i / bankSize] == i) continue;
+                    float xc = curr[i];
+                    float aP = ctx.alphaPsi[i];
+                    device float4 *w4 = (device float4 *)&ctx.psi[i * ctx.K + k0];
+                    float4 w = *w4;
+                    for (uint c4 = 0u; c4 < 4u; ++c4) {
+                        if (cont[c4] <= 0.0f) continue;
+                        float g = -hD[c4] * cont[c4] * xc;
+                        w[c4] = safe_w(w[c4], w[c4] + aP * rho[c4] * g * sc[c4]);
+                    }
+                    *w4 = w;
+                }
+            }
+            continue;
+        }
+        if (bank == 2u || bank == 3u) {
+            // vStop P / C (GTD2)
+            if (OAK_ABLATE_OPTION_MODELS) continue;
+            float4 vD, vsc, vtd;
+            for (uint c4 = 0u; c4 < 4u; ++c4) {
+                vD[c4] = ctx.vsDot[k0 + c4];
+                vsc[c4] = ctx.vsScale[k0 + c4];
+                vtd[c4] = ctx.vsTd[k0 + c4];
+            }
+            if (bank == 2u) {
+                for (uint a = 0u; a < A; ++a) {
+                    uint i = act_of(actP, a);
+                    float xp = prev[i], xc = curr[i];
+                    float aM = ctx.alphaModel[i];
+                    device float4 *w4 = (device float4 *)&ctx.vStop[i * ctx.K + k0];
+                    float4 w = *w4;
+                    for (uint c4 = 0u; c4 < 4u; ++c4) {
+                        float g = (cont[c4] > 0.0f) ? (vD[c4] * (xp - cont[c4] * xc))
+                                                    : (vtd[c4] * xp);
+                        w[c4] = safe_w(w[c4], w[c4] + aM * rho[c4] * g * vsc[c4]);
+                    }
+                    *w4 = w;
+                }
+            } else {
+                for (uint a = 0u; a < A; ++a) {
+                    uint i = act_of(actC, a);
+                    if (actP[i / bankSize] == i) continue;
+                    float xc = curr[i];
+                    float aM = ctx.alphaModel[i];
+                    device float4 *w4 = (device float4 *)&ctx.vStop[i * ctx.K + k0];
+                    float4 w = *w4;
+                    for (uint c4 = 0u; c4 < 4u; ++c4) {
+                        if (cont[c4] <= 0.0f) continue;
+                        float g = -vD[c4] * cont[c4] * xc;
+                        w[c4] = safe_w(w[c4], w[c4] + aM * rho[c4] * g * vsc[c4]);
+                    }
+                    *w4 = w;
+                }
+            }
+            continue;
+        }
+        if (bank == 4u) {
+            if (OAK_ABLATE_OPTION_MODELS) continue;
+            float4 rtd, msc;
+            for (uint c4 = 0u; c4 < 4u; ++c4) {
+                rtd[c4] = ctx.optRewardTd[k0 + c4];
+                msc[c4] = ctx.modelScale[k0 + c4];
+            }
+            for (uint a = 0u; a < A; ++a) {
+                uint i = act_of(actP, a);
+                float xp = prev[i];
+                float aM = ctx.alphaModel[i];
+                device float4 *w4 = (device float4 *)&ctx.optReward[i * ctx.K + k0];
+                float4 w = *w4;
+                for (uint c4 = 0u; c4 < 4u; ++c4)
+                    w[c4] = safe_w(w[c4], w[c4] + aM * rho[c4] * rtd[c4] * xp * msc[c4]);
+                *w4 = w;
+            }
+            continue;
+        }
+        if (bank == 5u) {
+            if (OAK_ABLATE_OPTION_MODELS) continue;
+            float4 dtd, dsc;
+            for (uint c4 = 0u; c4 < 4u; ++c4) {
+                float dTd = ctx.durationTd[k0 + c4];
+                dtd[c4] = dTd;
+                float denom = ctx.modelDenom[k0 + c4];
+                float dE = dTd * dTd;
+                if (isfinite(dE)) denom += ctx.invR * dE;
+                dsc[c4] = (isfinite(denom) && denom > 0.0f) ? (1.0f / denom) : 0.0f;
+            }
+            for (uint a = 0u; a < A; ++a) {
+                uint i = act_of(actP, a);
+                float xp = prev[i];
+                float aM = ctx.alphaModel[i];
+                device float4 *w4 = (device float4 *)&ctx.optDuration[i * ctx.K + k0];
+                float4 w = *w4;
+                for (uint c4 = 0u; c4 < 4u; ++c4)
+                    w[c4] = safe_w(w[c4], w[c4] + aM * rho[c4] * dtd[c4] * xp * dsc[c4]);
+                *w4 = w;
+            }
+            continue;
+        }
+        if (bank == 6u) {
+            if (OAK_ABLATE_RR_SUBTASKS) continue;
+            float4 err, asc;
+            for (uint c4 = 0u; c4 < 4u; ++c4) {
+                err[c4] = ctx.tdPsi[k0 + c4] - ctx.hDotPsi[k0 + c4];
+                asc[c4] = ctx.psiAuxScale[k0 + c4];
+            }
+            for (uint a = 0u; a < A; ++a) {
+                uint i = act_of(actP, a);
+                float xp = prev[i];
+                float aP = ctx.alphaPsi[i];
+                device float4 *w4 = (device float4 *)&ctx.psiAux[i * ctx.K + k0];
+                float4 w = *w4;
+                for (uint c4 = 0u; c4 < 4u; ++c4)
+                    w[c4] = safe_w(w[c4], w[c4] + aP * rho[c4] * err[c4] * xp * asc[c4]);
+                *w4 = w;
+            }
+            continue;
+        }
+        {
+            if (OAK_ABLATE_OPTION_MODELS) continue;
+            float4 err, asc;
+            for (uint c4 = 0u; c4 < 4u; ++c4) {
+                err[c4] = ctx.vsTd[k0 + c4] - ctx.vsDot[k0 + c4];
+                asc[c4] = ctx.vsAuxScale[k0 + c4];
+            }
+            for (uint a = 0u; a < A; ++a) {
+                uint i = act_of(actP, a);
+                float xp = prev[i];
+                float aM = ctx.alphaModel[i];
+                device float4 *w4 = (device float4 *)&ctx.vsAux[i * ctx.K + k0];
+                float4 w = *w4;
+                for (uint c4 = 0u; c4 < 4u; ++c4)
+                    w[c4] = safe_w(w[c4], w[c4] + aM * rho[c4] * err[c4] * xp * asc[c4]);
+                *w4 = w;
+            }
+        }
+    }
+    // value banks (feature-indexed, scalar)
+    if (!OAK_ABLATE_GVF_PREDICTION) {
+        for (uint e = tid; e < 2u * A; e += tw) {
+            if (e < A) {
+                uint i = act_of(actP, e);
+                float w = ctx.valueW[i];
+                float delta = ctx.td[0] * prev[i] + ctx.planTd[0] * curr[i];
+                ctx.valueW[i] = safe_w(w, w + ctx.alpha[i] * delta * ctx.valueScale[0]);
+            } else {
+                uint i = act_of(actC, e - A);
+                if (actP[i / bankSize] == i) continue;
+                float w = ctx.valueW[i];
+                ctx.valueW[i] = safe_w(w, w + ctx.alpha[i] * ctx.planTd[0] * curr[i] * ctx.valueScale[0]);
+            }
+        }
+    }
+}
+
 kernel void oak_learn_heads(device float *params [[buffer(0)]],
                             device float *stateArena [[buffer(1)]],
                             device uint *uintArena [[buffer(2)]],
@@ -2098,8 +2323,7 @@ kernel void oak_megastep(device float *params [[buffer(0)]],
                 Ctx ctx = make_ctx(params, stateArena, uintArena, scalars, stats, cfg, wideLane);
                 device const float *prev = state_at(ctx, ctx.stateSlot);
                 device const float *curr = state_at(ctx, 1u - ctx.stateSlot);
-                uint total = oak_learn_total(ctx);
-                for (uint e = learnTid; e < total; e += learnW) oak_learn_element(ctx, prev, curr, e);
+                oak_learn_quads(ctx, prev, curr, learnTid, learnW);
             }
             oak_lane_fence();
             if (wideActive && (OAK_MEGA_STAGES & 8u) != 0u) {
