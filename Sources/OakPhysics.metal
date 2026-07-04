@@ -3,6 +3,13 @@
 
 #include <metal_stdlib>
 #include "HalfCheetahModel.metal"
+
+// Physics-scoped fast math (agent kernel math stays -fno-fast-math): the env
+// stage is a per-lane serial latency chain (~33% of step wall); relaxed fp
+// contraction/reassociation shortens it. Instrument change to the environment
+// — re-certified by the paired population gate at the M-8192 equivalence tier
+// (the F4 protocol). RNG helpers below are excluded (safe region).
+#pragma METAL fp math_mode(fast)
 using namespace metal;
 
 constant float HC_BODY_SUBTREEMASS[8] = { 14.0f, 14.0f, 4.22635983f, 2.68284519f, 1.09539749f, 3.52343096f, 2.08535565f, 0.884518828f };
@@ -1725,6 +1732,7 @@ constant uint HC_PHILOX_W1 = 0xBB67AE85u;
 constant uint HC_RNG_STREAM_RESET = 0u;
 constant uint HC_RNG_STREAM_CTRL = 1u;
 
+#pragma METAL fp math_mode(safe)
 inline uint4 hc_philox4x32(uint2 key, uint4 ctr) {
     for (int r = 0; r < 10; r++) {
         if (r > 0) { key.x += HC_PHILOX_W0; key.y += HC_PHILOX_W1; }
