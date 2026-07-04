@@ -98,8 +98,8 @@ struct Ctx {
     uint stepCount, stateSlot;
     float rho;
     float invR, invK, metaEta;
-    device float *valueW, *psi, *optPolicy, *optReward, *optTransition, *optDuration;
-    device float *psiAux;
+    device float *valueW, *psi, *optPolicy, *optReward, *optDuration;
+    device float *psiAux, *vStop, *vsAux;
     device float *observation, *observationMean, *obsSM;
     device float *state;
     device float *policyMean, *actionSignal, *optionActorCredit, *optionPolicyMean;
@@ -111,13 +111,14 @@ struct Ctx {
     device float *alphaPsi, *betaPsi, *hPsi, *gradEnergyPsi;
     device float *alphaModel, *betaModel, *hModel, *gradEnergyModel;
     device float *actorAdv;
-    device float *nTdMat, *optRewardTd, *headDenom;
+    device float *optRewardTd, *headDenom;
     device float *durationTd, *durationHat, *obsTraceMulti, *prioOpt, *continuation;
     device float *keyboard, *modelDenom;
     device float *valueGauge;
     device float *tdPsiFast, *tdPsiPeak;
     device float *headScale, *modelScale, *valueScale, *xNormPrev;
     device float *hDotPsi, *psiAuxScale, *psiRho;
+    device float *vsTd, *vsDot, *vsScale, *vsAuxScale;
     device float *nurMean, *nurSM, *nurUtil, *nurUtilSM;
     device uint *counters, *optFeature, *featureAge, *optAge;
     device uint *featureParentA, *featureParentB, *featureKind, *featureBirthCount;
@@ -166,9 +167,10 @@ inline Ctx make_ctx(device float *params, device float *stateArena, device uint 
     c.psi = params + p; p += c.K * c.R;
     c.optPolicy = params + p; p += c.K * c.D * c.R;
     c.optReward = params + p; p += c.K * c.R;
-    c.optTransition = params + p; p += c.K * c.R * c.R;
     c.optDuration = params + p; p += c.K * c.R;
-    c.psiAux = params + p;
+    c.psiAux = params + p; p += c.K * c.R;
+    c.vStop = params + p; p += c.K * c.R;
+    c.vsAux = params + p;
 
     uint s = 0u;
     c.observation = stateArena + s; s += c.O;
@@ -202,7 +204,6 @@ inline Ctx make_ctx(device float *params, device float *stateArena, device uint 
     c.hModel = stateArena + s; s += c.R;
     c.gradEnergyModel = stateArena + s; s += c.R;
     c.actorAdv = stateArena + s; s += c.K;
-    c.nTdMat = stateArena + s; s += c.K * c.R;
     c.optRewardTd = stateArena + s; s += c.K;
     c.headDenom = stateArena + s; s += c.K;
     c.durationTd = stateArena + s; s += c.K;
@@ -222,6 +223,10 @@ inline Ctx make_ctx(device float *params, device float *stateArena, device uint 
     c.hDotPsi = stateArena + s; s += c.K;
     c.psiAuxScale = stateArena + s; s += c.K;
     c.psiRho = stateArena + s; s += c.K;
+    c.vsTd = stateArena + s; s += c.K;
+    c.vsDot = stateArena + s; s += c.K;
+    c.vsScale = stateArena + s; s += c.K;
+    c.vsAuxScale = stateArena + s; s += c.K;
     c.nurMean = stateArena + s; s += c.Rn;
     c.nurSM = stateArena + s; s += c.Rn;
     c.nurUtil = stateArena + s; s += c.Rn;
@@ -509,10 +514,9 @@ inline void fcstomp_prediction_control_loop(Ctx ctx, uint tid,
                 uint idx = tid * ctx.R + j;
                 rHat = fma(ctx.optReward[idx], tgCurr[j], rHat);
                 lRaw = fma(ctx.optDuration[idx], tgCurr[j], lRaw);
-                float nHat = 0.0f;
-                uint nBase = tid * ctx.R * ctx.R + j * ctx.R;
-                for (uint i = 0u; i < ctx.R; ++i) nHat = fma(ctx.optTransition[nBase + i], tgCurr[i], nHat);
-                vModel = fma(ctx.valueW[j], nHat, vModel);
+                // vStop: scalar GVF predicting v at option stop (replaces the
+                // K*R*R transition tensor: v(n-hat) was its only live consumer).
+                vModel = fma(ctx.vStop[idx], tgCurr[j], vModel);
             }
         }
         bool modelFinite = isfinite(rHat) && isfinite(lRaw) && isfinite(vModel);
@@ -745,65 +749,63 @@ static inline void oak_stage_plan_option(Ctx ctx, uint k, uint j,
                                          threadgroup float *tgModelErr) {
     device const float *prev = state_at(ctx, ctx.stateSlot);
     device const float *curr = state_at(ctx, 1u - ctx.stateSlot);
-    bool active = j < ctx.R;
     float cont = ctx.continuation[k];
     if (OAK_ABLATE_OPTION_MODELS) {
-        if (active) ctx.nTdMat[k * ctx.R + j] = 0.0f;
         if (j == 0u) {
             ctx.optRewardTd[k] = 0.0f;
             ctx.durationTd[k] = 0.0f;
             ctx.durationHat[k] = 1.0f;
             ctx.prioOpt[k] = 0.0f;
+            ctx.vsTd[k] = 0.0f;
+            ctx.vsDot[k] = 0.0f;
+            ctx.vsScale[k] = 0.0f;
+            ctx.vsAuxScale[k] = 0.0f;
         }
         return;
     }
-
-    float nHat = 0.0f, nTd = 0.0f;
-    if (active) {
-        uint base = k * ctx.R * ctx.R + j * ctx.R;
-        float nPrev = 0.0f;
-        for (uint i = 0u; i < ctx.R; ++i) {
-            float w = ctx.optTransition[base + i];
-            nHat = fma(w, curr[i], nHat);
-            nPrev = fma(w, prev[i], nPrev);
-        }
-        float target = (1.0f - cont) * curr[j] + cont * nHat;
-        nTd = target - nPrev;
-        if (!isfinite(nTd)) {
-            nTd = 0.0f;
-            ctx.counters[OAK_CNT_PLAN_NF] += 1u;
-        }
-        ctx.nTdMat[k * ctx.R + j] = nTd;
-        float vRel = isfinite(ctx.valueW[j]) ? ctx.valueW[j] * ctx.valueW[j] : 0.0f;
-        tgModelErr[j] = vRel * nTd * nTd;
-    } else {
-        tgModelErr[j] = 0.0f;
-    }
-    simdgroup_barrier(mem_flags::mem_threadgroup);
-
     if (j == 0u) {
-        float nErr = 0.0f;
-        for (uint i = 0u; i < ctx.R; ++i) {
-            nErr += tgModelErr[i];
-        }
         float rHat = 0.0f, rPrev = 0.0f, lRaw = 0.0f, lPrev = 0.0f;
+        float vsPrev = 0.0f, vsNext = 0.0f, vX = 0.0f, vsDot = 0.0f;
+        float bootNorm = 0.0f, xNormA = 0.0f;
         for (uint i = 0u; i < ctx.R; ++i) {
             uint idx = k * ctx.R + i;
             rHat = fma(ctx.optReward[idx], curr[i], rHat);
             rPrev = fma(ctx.optReward[idx], prev[i], rPrev);
             lRaw = fma(ctx.optDuration[idx], curr[i], lRaw);
             lPrev = fma(ctx.optDuration[idx], prev[i], lPrev);
+            vsPrev = fma(ctx.vStop[idx], prev[i], vsPrev);
+            vsNext = fma(ctx.vStop[idx], curr[i], vsNext);
+            vX = fma(ctx.valueW[i], curr[i], vX);
+            vsDot = fma(ctx.vsAux[idx], prev[i], vsDot);
+            float am = ctx.alphaModel[i];
+            if (isfinite(am) && am > 0.0f) {
+                float bd = prev[i] - cont * curr[i];
+                bootNorm = fma(am * bd, bd, bootNorm);
+                xNormA = fma(am * prev[i], prev[i], xNormA);
+            }
         }
         float rTd = ctx.reward[0] + cont * rHat - rPrev;
         float dTd = 1.0f + cont * lRaw - lPrev;
-        bool modelFinite = isfinite(nErr) && isfinite(rTd) && isfinite(dTd) && isfinite(lRaw);
+        // vStop GVF: cumulant 0, continuation cont, payoff v(x') at stopping.
+        float vsTd = cont * vsNext + (1.0f - cont) * vX - vsPrev;
+        bool modelFinite = isfinite(rTd) && isfinite(dTd) && isfinite(lRaw) && isfinite(vsTd);
         if (!isfinite(rTd)) rTd = 0.0f;
         if (!isfinite(dTd)) dTd = 0.0f;
+        if (!isfinite(vsTd)) vsTd = 0.0f;
         ctx.optRewardTd[k] = rTd;
         ctx.durationTd[k] = dTd;
+        ctx.vsTd[k] = vsTd;
+        ctx.vsDot[k] = isfinite(vsDot) ? vsDot : 0.0f;
+        float rho = ctx.importance[k];
+        if (!isfinite(rho) || rho < 0.0f) rho = 0.0f;
+        float sDen = fma(rho, bootNorm, 1.0f);
+        ctx.vsScale[k] = (isfinite(sDen) && sDen > 0.0f) ? (1.0f / sDen) : 0.0f;
+        float aDen = fma(rho, xNormA, 1.0f);
+        ctx.vsAuxScale[k] = (isfinite(aDen) && aDen > 0.0f) ? (1.0f / aDen) : 0.0f;
         float dur = decode_duration(lRaw);
         ctx.durationHat[k] = dur;
-        float modelErr = nErr + rTd * rTd + (ctx.scalars->rho * dTd) * (ctx.scalars->rho * dTd);
+        float modelErr = vsTd * vsTd + rTd * rTd
+            + (ctx.scalars->rho * dTd) * (ctx.scalars->rho * dTd);
         if (OAK_ABLATE_SEARCH_CONTROL) {
             ctx.prioOpt[k] = 0.0f;
         } else if (modelFinite && isfinite(modelErr)) {
@@ -833,8 +835,9 @@ kernel void oak_plan(device float *params [[buffer(0)]],
 }
 
 inline uint oak_learn_total(Ctx ctx) {
+    // value + psi + policy + optReward + optDuration + psiAux + vStop + vsAux
     return ctx.R + ctx.K * ctx.R + ctx.K * ctx.D * ctx.R + ctx.K * ctx.R
-        + ctx.K * ctx.R * ctx.R + ctx.K * ctx.R + ctx.K * ctx.R;
+        + ctx.K * ctx.R + ctx.K * ctx.R + ctx.K * ctx.R + ctx.K * ctx.R;
 }
 
 static inline void oak_learn_element(Ctx ctx, device const float *prev,
@@ -843,7 +846,6 @@ static inline void oak_learn_element(Ctx ctx, device const float *prev,
     uint nPsi = ctx.K * ctx.R;
     uint nPi = ctx.K * ctx.D * ctx.R;
     uint nOR = ctx.K * ctx.R;
-    uint nOT = ctx.K * ctx.R * ctx.R;
     uint nOD = ctx.K * ctx.R;
 
     if (gid < nVal) {
@@ -908,19 +910,6 @@ static inline void oak_learn_element(Ctx ctx, device const float *prev,
         return;
     }
     gid -= nOR;
-    if (gid < nOT) {
-        if (OAK_ABLATE_OPTION_MODELS) return;
-        uint k = gid / (ctx.R * ctx.R);
-        uint rem = gid - k * ctx.R * ctx.R;
-        uint j = rem / ctx.R, i = rem % ctx.R;
-        float rho = ctx.importance[k]; if (!isfinite(rho) || rho < 0.0f) rho = 0.0f;
-        float scale = ctx.modelScale[k];
-        float w = ctx.optTransition[k * ctx.R * ctx.R + j * ctx.R + i];
-        ctx.optTransition[k * ctx.R * ctx.R + j * ctx.R + i] =
-            safe_w(w, w + ctx.alphaModel[i] * rho * ctx.nTdMat[k * ctx.R + j] * prev[i] * scale);
-        return;
-    }
-    gid -= nOT;
     if (gid < nOD) {
         if (OAK_ABLATE_OPTION_MODELS) return;
         uint k = gid / ctx.R, i = gid % ctx.R;
@@ -934,9 +923,8 @@ static inline void oak_learn_element(Ctx ctx, device const float *prev,
         return;
     }
     gid -= nOD;
-    {
-        // TDC auxiliary weights: h_k regresses the TD error onto x (LMS with the
-        // implicit normalizer computed in encode).
+    if (gid < nPsi) {
+        // GTD2 auxiliary weights for psi: h_k regresses the TD error onto x.
         if (OAK_ABLATE_RR_SUBTASKS) return;
         uint k = gid / ctx.R, i = gid % ctx.R;
         float rho = ctx.importance[k];
@@ -946,6 +934,35 @@ static inline void oak_learn_element(Ctx ctx, device const float *prev,
         float err = ctx.tdPsi[k] - ctx.hDotPsi[k];
         ctx.psiAux[k * ctx.R + i] =
             safe_w(h, h + ctx.alphaPsi[i] * rho * err * prev[i] * scale);
+        return;
+    }
+    gid -= nPsi;
+    if (gid < nOR) {
+        // vStop head (GTD2, same substrate as psi; alphaModel family).
+        if (OAK_ABLATE_OPTION_MODELS) return;
+        uint k = gid / ctx.R, i = gid % ctx.R;
+        float rho = ctx.importance[k];
+        if (!isfinite(rho) || rho < 0.0f) rho = 0.0f;
+        float cont = ctx.continuation[k];
+        if (!isfinite(cont)) cont = 0.0f;
+        float w = ctx.vStop[k * ctx.R + i];
+        float grad = (cont > 0.0f) ? (ctx.vsDot[k] * (prev[i] - cont * curr[i]))
+                                   : (ctx.vsTd[k] * prev[i]);
+        ctx.vStop[k * ctx.R + i] =
+            safe_w(w, w + ctx.alphaModel[i] * rho * grad * ctx.vsScale[k]);
+        return;
+    }
+    gid -= nOR;
+    {
+        // vStop auxiliary weights.
+        if (OAK_ABLATE_OPTION_MODELS) return;
+        uint k = gid / ctx.R, i = gid % ctx.R;
+        float rho = ctx.importance[k];
+        if (!isfinite(rho) || rho < 0.0f) rho = 0.0f;
+        float h = ctx.vsAux[k * ctx.R + i];
+        float err = ctx.vsTd[k] - ctx.vsDot[k];
+        ctx.vsAux[k * ctx.R + i] =
+            safe_w(h, h + ctx.alphaModel[i] * rho * err * prev[i] * ctx.vsAuxScale[k]);
         return;
     }
 }
@@ -1213,8 +1230,8 @@ static inline void oak_stage_replace(Ctx ctx, uint tid, uint tgW,
                 ctx.psiAux[k * ctx.R + i] = 0.0f;
                 ctx.optReward[k * ctx.R + i] = 0.0f;
                 ctx.optDuration[k * ctx.R + i] = 0.0f;
-                for (uint j = 0u; j < ctx.R; ++j)
-                    ctx.optTransition[k * ctx.R * ctx.R + j * ctx.R + i] = 0.0f;
+                ctx.vStop[k * ctx.R + i] = 0.0f;
+                ctx.vsAux[k * ctx.R + i] = 0.0f;
             }
             float invSqrtR = rsqrt(float(max(ctx.R, 1u)));
             ctx.psi[k * ctx.R + feat] = invSqrtR;
@@ -1317,8 +1334,9 @@ uint birth = ctx.featureBirthCount[worst] + 1u;
 			            ctx.psiAux[k * ctx.R + i] = 0.0f;
 			            ctx.optReward[k * ctx.R + i] = 0.0f;
 		            ctx.optDuration[k * ctx.R + i] = 0.0f;
+		            ctx.vStop[k * ctx.R + i] = 0.0f;
+		            ctx.vsAux[k * ctx.R + i] = 0.0f;
 		            for (uint d = 0u; d < ctx.D; ++d) ctx.optPolicy[(k * ctx.D + d) * ctx.R + i] = 0.0f;
-		            for (uint j = 0u; j < ctx.R; ++j) ctx.optTransition[k * ctx.R * ctx.R + j * ctx.R + i] = 0.0f;
 	        }
 			        if (ctx.D > 0u) {
 			            uint slot = k % ctx.D;
@@ -1338,10 +1356,8 @@ uint birth = ctx.featureBirthCount[worst] + 1u;
 		            ctx.optDuration[ok * ctx.R + worst] = 0.0f;
 		            for (uint d = 0u; d < ctx.D; ++d)
 		                ctx.optPolicy[(ok * ctx.D + d) * ctx.R + worst] = 0.0f;
-		            for (uint j = 0u; j < ctx.R; ++j) {
-		                ctx.optTransition[ok * ctx.R * ctx.R + j * ctx.R + worst] = 0.0f;
-		                ctx.optTransition[ok * ctx.R * ctx.R + worst * ctx.R + j] = 0.0f;
-		            }
+		            ctx.vStop[ok * ctx.R + worst] = 0.0f;
+		            ctx.vsAux[ok * ctx.R + worst] = 0.0f;
 		        }
 		        float invSqrtR = rsqrt(float(max(ctx.R, 1u)));
 		        ctx.psi[k * ctx.R + worst] = invSqrtR;

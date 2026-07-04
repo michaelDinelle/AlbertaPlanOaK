@@ -146,7 +146,7 @@ struct Arena {
     betaPsi = alpha + 5 * r
     alphaModel = alpha + 8 * r
     betaModel = alpha + 9 * r
-    total = alpha + r * r + 21 * r + traceExtra * max(o, 1) + 1 + 2 * r + 5 * r + 2 + 4 * rn
+    total = alpha + 21 * r + traceExtra * max(o, 1) + 1 + 2 * r + 5 * r + 2 + 4 * rn + 4 * r
   }
 }
 final class Shared<T> {
@@ -189,11 +189,11 @@ final class Engine {
     a = Arena(obsDim, rank, d, rn)
     let k = rank
     paramTotal =
-      rank + k * rank + k * d * rank + k * rank + k * rank * rank + k * rank + k * rank
+      rank + k * rank + k * d * rank + k * rank + k * rank + k * rank + k * rank + k * rank
     uintTotal = 11 + 8 * rank + 4 * rn
     learnTotal =
-      rank + rank * rank + rank * d * rank + rank * rank + rank * rank * rank + rank * rank
-      + rank * rank
+      rank + rank * rank + rank * d * rank + rank * rank + rank * rank + rank * rank
+      + rank * rank + rank * rank
     let anchors = min(rank, max(obsDim, d, 1))
     let cfgValue = KernelConfig(
       obsDim: UInt32(obsDim), rank: UInt32(rank), optionCount: UInt32(rank),
