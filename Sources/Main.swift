@@ -167,6 +167,7 @@ struct Arena {
     _ = take(2)  // valueScale, xNormPrev
     _ = take(3 * k)  // hDotPsi, psiAuxScale, psiRho
     _ = take(4 * k)  // vsTd, vsDot, vsScale, vsAuxScale
+    _ = take(3)  // 16B-align nurStats/muRaw/polCoef (float4 access)
     _ = take(4 * rn)  // nursery mean/SM/util/utilSM
     _ = take(k * d)  // muRaw (emit blend scratch)
     _ = take(k * d)  // polCoef (actor coefficient hoist)
