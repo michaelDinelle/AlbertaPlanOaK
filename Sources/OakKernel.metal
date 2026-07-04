@@ -442,8 +442,8 @@ inline void fcstomp_prediction_control_loop(Ctx ctx, uint tid,
         float psiPrev = 0.0f, psiNext = 0.0f, psiXX = 0.0f, psiXY = 0.0f, psiYY = 0.0f;
         for (uint a = 0u; a < 32u; ++a) {
             uint ip = actP[a], ic = actC[a];
-            psiPrev = fma(ctx.psi[base + ip], tgPrev[a], psiPrev);
-            psiNext = fma(ctx.psi[base + ic], tgCurr[a], psiNext);
+            psiPrev = fma(ctx.psi[(ip) * ctx.K + tid], tgPrev[a], psiPrev);
+            psiNext = fma(ctx.psi[(ic) * ctx.K + tid], tgCurr[a], psiNext);
             float ap = ctx.alphaPsi[ip];
             if (isfinite(ap) && ap > 0.0f) {
                 psiXX = fma(ap * tgPrev[a], tgPrev[a], psiXX);
@@ -513,7 +513,7 @@ inline void fcstomp_prediction_control_loop(Ctx ctx, uint tid,
             // normalizer of h's LMS regression of delta onto x.
             float hDot = 0.0f;
             for (uint a = 0u; a < 32u; ++a)
-                hDot = fma(ctx.psiAux[base + actP[a]], tgPrev[a], hDot);
+                hDot = fma(ctx.psiAux[actP[a] * ctx.K + tid], tgPrev[a], hDot);
             ctx.hDotPsi[tid] = isfinite(hDot) ? hDot : 0.0f;
             // NLMS: h is a pure regression of delta onto x, so it runs at the
             // fastest stable rate (unit effective step), parameter-free. A fast,
@@ -527,7 +527,7 @@ inline void fcstomp_prediction_control_loop(Ctx ctx, uint tid,
         float rHat = 0.0f, lRaw = 0.0f, vModel = 0.0f;
         if (!OAK_ABLATE_OPTION_MODELS) {
             for (uint a = 0u; a < 32u; ++a) {
-                uint idx = base + actC[a];
+                uint idx = actC[a] * ctx.K + tid;
                 rHat = fma(ctx.optReward[idx], tgCurr[a], rHat);
                 lRaw = fma(ctx.optDuration[idx], tgCurr[a], lRaw);
                 // vStop: scalar GVF predicting v at option stop (replaces the
@@ -799,7 +799,7 @@ static inline void oak_plan_one(Ctx ctx, uint k,
         float bootNorm = 0.0f, xNormA = 0.0f;
         for (uint a = 0u; a < 32u; ++a) {
             uint ip = actP[a], ic = actC[a];
-            uint idxP = k * ctx.R + ip, idxC = k * ctx.R + ic;
+            uint idxP = ip * ctx.K + k, idxC = ic * ctx.K + k;
             float xp = prev[ip], xc = curr[ic];
             rPrev = fma(ctx.optReward[idxP], xp, rPrev);
             rHat = fma(ctx.optReward[idxC], xc, rHat);
@@ -953,11 +953,11 @@ static inline void oak_learn_element(Ctx ctx, device const float *prev,
         if (!isfinite(rho) || rho < 0.0f) rho = 0.0f;
         float cont = ctx.continuation[k];
         if (!isfinite(cont)) cont = 0.0f;
-        float w = ctx.psi[k * ctx.R + i];
+        float w = ctx.psi[(i) * ctx.K + k];
         // P-bank owns i fully: the GTD2 grad including the -cont*curr correction.
         float g = (cont > 0.0f) ? (ctx.hDotPsi[k] * (prev[i] - cont * curr[i]))
                                 : (ctx.tdPsi[k] * prev[i]);
-        ctx.psi[k * ctx.R + i] = safe_w(w, w + ctx.alphaPsi[i] * rho * g * ctx.headScale[k]);
+        ctx.psi[(i) * ctx.K + k] = safe_w(w, w + ctx.alphaPsi[i] * rho * g * ctx.headScale[k]);
         return;
     }
     gid -= nPsiP;
@@ -969,9 +969,9 @@ static inline void oak_learn_element(Ctx ctx, device const float *prev,
         if (!isfinite(rho) || rho < 0.0f) rho = 0.0f;
         float cont = ctx.continuation[k];
         if (!isfinite(cont) || cont <= 0.0f) return;
-        float w = ctx.psi[k * ctx.R + i];
+        float w = ctx.psi[(i) * ctx.K + k];
         float g = -ctx.hDotPsi[k] * cont * curr[i];
-        ctx.psi[k * ctx.R + i] = safe_w(w, w + ctx.alphaPsi[i] * rho * g * ctx.headScale[k]);
+        ctx.psi[(i) * ctx.K + k] = safe_w(w, w + ctx.alphaPsi[i] * rho * g * ctx.headScale[k]);
         return;
     }
     gid -= nPsiC;
@@ -982,10 +982,10 @@ static inline void oak_learn_element(Ctx ctx, device const float *prev,
         if (!isfinite(rho) || rho < 0.0f) rho = 0.0f;
         float cont = ctx.continuation[k];
         if (!isfinite(cont)) cont = 0.0f;
-        float w = ctx.vStop[k * ctx.R + i];
+        float w = ctx.vStop[(i) * ctx.K + k];
         float g = (cont > 0.0f) ? (ctx.vsDot[k] * (prev[i] - cont * curr[i]))
                                 : (ctx.vsTd[k] * prev[i]);
-        ctx.vStop[k * ctx.R + i] = safe_w(w, w + ctx.alphaModel[i] * rho * g * ctx.vsScale[k]);
+        ctx.vStop[(i) * ctx.K + k] = safe_w(w, w + ctx.alphaModel[i] * rho * g * ctx.vsScale[k]);
         return;
     }
     gid -= nVSP;
@@ -997,9 +997,9 @@ static inline void oak_learn_element(Ctx ctx, device const float *prev,
         if (!isfinite(rho) || rho < 0.0f) rho = 0.0f;
         float cont = ctx.continuation[k];
         if (!isfinite(cont) || cont <= 0.0f) return;
-        float w = ctx.vStop[k * ctx.R + i];
+        float w = ctx.vStop[(i) * ctx.K + k];
         float g = -ctx.vsDot[k] * cont * curr[i];
-        ctx.vStop[k * ctx.R + i] = safe_w(w, w + ctx.alphaModel[i] * rho * g * ctx.vsScale[k]);
+        ctx.vStop[(i) * ctx.K + k] = safe_w(w, w + ctx.alphaModel[i] * rho * g * ctx.vsScale[k]);
         return;
     }
     gid -= nVSC;
@@ -1008,8 +1008,8 @@ static inline void oak_learn_element(Ctx ctx, device const float *prev,
         uint k = gid / (ctx.D * A);
         uint rem = gid - k * ctx.D * A;
         uint d = rem / A, i = actP[rem % A];
-        float w = ctx.optPolicy[(k * ctx.D + d) * ctx.R + i];
-        ctx.optPolicy[(k * ctx.D + d) * ctx.R + i] =
+        float w = ctx.optPolicy[(i) * ctx.K * ctx.D + k * ctx.D + d];
+        ctx.optPolicy[(i) * ctx.K * ctx.D + k * ctx.D + d] =
             safe_w(w, w + ctx.polCoef[k * ctx.D + d] * prev[i]);
         return;
     }
@@ -1018,8 +1018,8 @@ static inline void oak_learn_element(Ctx ctx, device const float *prev,
         if (OAK_ABLATE_OPTION_MODELS) return;
         uint k = gid / A, i = actP[gid % A];
         float rho = ctx.importance[k]; if (!isfinite(rho) || rho < 0.0f) rho = 0.0f;
-        float w = ctx.optReward[k * ctx.R + i];
-        ctx.optReward[k * ctx.R + i] =
+        float w = ctx.optReward[(i) * ctx.K + k];
+        ctx.optReward[(i) * ctx.K + k] =
             safe_w(w, w + ctx.alphaModel[i] * rho * ctx.optRewardTd[k] * prev[i] * ctx.modelScale[k]);
         return;
     }
@@ -1032,8 +1032,8 @@ static inline void oak_learn_element(Ctx ctx, device const float *prev,
         float dEnergy = ctx.durationTd[k] * ctx.durationTd[k];
         if (isfinite(dEnergy)) denom += ctx.invR * dEnergy;
         float scale = (isfinite(denom) && denom > 0.0f) ? (1.0f / denom) : 0.0f;
-        float w = ctx.optDuration[k * ctx.R + i];
-        ctx.optDuration[k * ctx.R + i] =
+        float w = ctx.optDuration[(i) * ctx.K + k];
+        ctx.optDuration[(i) * ctx.K + k] =
             safe_w(w, w + ctx.alphaModel[i] * rho * ctx.durationTd[k] * prev[i] * scale);
         return;
     }
@@ -1043,9 +1043,9 @@ static inline void oak_learn_element(Ctx ctx, device const float *prev,
         uint k = gid / A, i = actP[gid % A];
         float rho = ctx.importance[k];
         if (!isfinite(rho) || rho < 0.0f) rho = 0.0f;
-        float h = ctx.psiAux[k * ctx.R + i];
+        float h = ctx.psiAux[(i) * ctx.K + k];
         float err = ctx.tdPsi[k] - ctx.hDotPsi[k];
-        ctx.psiAux[k * ctx.R + i] =
+        ctx.psiAux[(i) * ctx.K + k] =
             safe_w(h, h + ctx.alphaPsi[i] * rho * err * prev[i] * ctx.psiAuxScale[k]);
         return;
     }
@@ -1055,9 +1055,9 @@ static inline void oak_learn_element(Ctx ctx, device const float *prev,
         uint k = gid / A, i = actP[gid % A];
         float rho = ctx.importance[k];
         if (!isfinite(rho) || rho < 0.0f) rho = 0.0f;
-        float h = ctx.vsAux[k * ctx.R + i];
+        float h = ctx.vsAux[(i) * ctx.K + k];
         float err = ctx.vsTd[k] - ctx.vsDot[k];
-        ctx.vsAux[k * ctx.R + i] =
+        ctx.vsAux[(i) * ctx.K + k] =
             safe_w(h, h + ctx.alphaModel[i] * rho * err * prev[i] * ctx.vsAuxScale[k]);
         return;
     }
@@ -1092,7 +1092,7 @@ inline void emit_action_grid(Ctx ctx, threadgroup const float *curr, uint group,
     }
     float mu = 0.0f;
     for (uint a = 0u; a < 32u; ++a)
-        mu = fma(ctx.optPolicy[(k * ctx.D + d) * ctx.R + act[a]], curr[a], mu);
+        mu = fma(ctx.optPolicy[act[a] * ctx.K * ctx.D + k * ctx.D + d], curr[a], mu);
     // Raw mean (pre-fallback) stashed for the blend pass — kills the K*32
     // re-gather per action dim.
     ctx.muRaw[k * ctx.D + d] = mu;
@@ -1148,7 +1148,7 @@ static inline void oak_stage_replace(Ctx ctx, uint tid, uint tgW,
         uint sel = ctx.selectedOption[0] % ctx.K;
         float actLoad = 0.0f;
         for (uint d = 0u; d < ctx.D; ++d)
-            actLoad += fabs(ctx.optPolicy[(sel * ctx.D + d) * ctx.R + i]);
+            actLoad += fabs(ctx.optPolicy[i * ctx.K * ctx.D + sel * ctx.D + d]);
         float load = fabs(prev[i]) * (fabs(ctx.valueW[i]) + actLoad);
         if (!isfinite(load)) load = 0.0f;
         float g = fabs(planningSignal * prev[i])
@@ -1340,15 +1340,15 @@ static inline void oak_stage_replace(Ctx ctx, uint tid, uint tgW,
             ctx.psiRho[k] = 0.0f;
             uint feat = ctx.optFeature[k] % ctx.R;
             for (uint i = 0u; i < ctx.R; ++i) {
-                ctx.psi[k * ctx.R + i] = 0.0f;
-                ctx.psiAux[k * ctx.R + i] = 0.0f;
-                ctx.optReward[k * ctx.R + i] = 0.0f;
-                ctx.optDuration[k * ctx.R + i] = 0.0f;
-                ctx.vStop[k * ctx.R + i] = 0.0f;
-                ctx.vsAux[k * ctx.R + i] = 0.0f;
+                ctx.psi[(i) * ctx.K + k] = 0.0f;
+                ctx.psiAux[(i) * ctx.K + k] = 0.0f;
+                ctx.optReward[(i) * ctx.K + k] = 0.0f;
+                ctx.optDuration[(i) * ctx.K + k] = 0.0f;
+                ctx.vStop[(i) * ctx.K + k] = 0.0f;
+                ctx.vsAux[(i) * ctx.K + k] = 0.0f;
             }
             float invSqrtR = rsqrt(float(max(ctx.R, 1u)));
-            ctx.psi[k * ctx.R + feat] = invSqrtR;
+            ctx.psi[(feat) * ctx.K + k] = invSqrtR;
             ctx.counters[OAK_CNT_REINIT_OPT] += 1u;
             break;
         }
@@ -1443,18 +1443,18 @@ uint birth = ctx.featureBirthCount[worst] + 1u;
 				        ctx.optAge[k] = 0u; ctx.optFeature[k] = worst; ctx.utilOpt[k] = float(ctx.R);
 		        ctx.actorAdv[k] = 0.0f;
 			        for (uint i = 0u; i < ctx.R; ++i) {
-			            ctx.psi[k * ctx.R + i] = 0.0f;
-			            ctx.psiAux[k * ctx.R + i] = 0.0f;
-			            ctx.optReward[k * ctx.R + i] = 0.0f;
-		            ctx.optDuration[k * ctx.R + i] = 0.0f;
-		            ctx.vStop[k * ctx.R + i] = 0.0f;
-		            ctx.vsAux[k * ctx.R + i] = 0.0f;
-		            for (uint d = 0u; d < ctx.D; ++d) ctx.optPolicy[(k * ctx.D + d) * ctx.R + i] = 0.0f;
+			            ctx.psi[(i) * ctx.K + k] = 0.0f;
+			            ctx.psiAux[(i) * ctx.K + k] = 0.0f;
+			            ctx.optReward[(i) * ctx.K + k] = 0.0f;
+		            ctx.optDuration[(i) * ctx.K + k] = 0.0f;
+		            ctx.vStop[(i) * ctx.K + k] = 0.0f;
+		            ctx.vsAux[(i) * ctx.K + k] = 0.0f;
+		            for (uint d = 0u; d < ctx.D; ++d) ctx.optPolicy[(i) * ctx.K * ctx.D + k * ctx.D + d] = 0.0f;
 	        }
 			        if (ctx.D > 0u) {
 			            uint slot = k % ctx.D;
 			            float sign = ((k / ctx.D) % 2u == 0u) ? 1.0f : -1.0f;
-			            ctx.optPolicy[(k * ctx.D + slot) * ctx.R] = sign / float(ctx.D);
+			            ctx.optPolicy[k * ctx.D + slot] = sign / float(ctx.D);
 			        }
 		        // Feature `worst` is now a DIFFERENT signal: every head's weight on that
 		        // index (and every transition row predicting it) is stale knowledge about
@@ -1463,17 +1463,17 @@ uint birth = ctx.featureBirthCount[worst] + 1u;
 		        // (observed: lane-wide 1e9 blow-ups driven by curation churn). Clear the
 		        // column bank-wide.
 		        for (uint ok = 0u; ok < ctx.K; ++ok) {
-		            ctx.psi[ok * ctx.R + worst] = 0.0f;
-		            ctx.psiAux[ok * ctx.R + worst] = 0.0f;
-		            ctx.optReward[ok * ctx.R + worst] = 0.0f;
-		            ctx.optDuration[ok * ctx.R + worst] = 0.0f;
+		            ctx.psi[worst * ctx.K + ok] = 0.0f;
+		            ctx.psiAux[worst * ctx.K + ok] = 0.0f;
+		            ctx.optReward[worst * ctx.K + ok] = 0.0f;
+		            ctx.optDuration[worst * ctx.K + ok] = 0.0f;
 		            for (uint d = 0u; d < ctx.D; ++d)
-		                ctx.optPolicy[(ok * ctx.D + d) * ctx.R + worst] = 0.0f;
-		            ctx.vStop[ok * ctx.R + worst] = 0.0f;
-		            ctx.vsAux[ok * ctx.R + worst] = 0.0f;
+		                ctx.optPolicy[worst * ctx.K * ctx.D + ok * ctx.D + d] = 0.0f;
+		            ctx.vStop[worst * ctx.K + ok] = 0.0f;
+		            ctx.vsAux[worst * ctx.K + ok] = 0.0f;
 		        }
 		        float invSqrtR = rsqrt(float(max(ctx.R, 1u)));
-		        ctx.psi[k * ctx.R + worst] = invSqrtR;
+		        ctx.psi[(worst) * ctx.K + k] = invSqrtR;
 	        ctx.counters[OAK_CNT_REINIT_FEAT] += 1u;
 	        ctx.counters[OAK_CNT_REINIT_OPT] += 1u;
 	    }
