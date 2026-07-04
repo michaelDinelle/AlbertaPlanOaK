@@ -1966,22 +1966,37 @@ static inline void oak_stage_sample_act_wide(Ctx ctx,
     device OakFleetLane *lane = &lanes[gid];
     uint A = ctx.D / 2u;
     float sd = 1.0f / float(max(ctx.D, 1u));
+    uint stepIdx = lane->steps;
+    // Sampling spread across action dims (bit-identical: each thread computes
+    // its own dim's Box-Muller pair redundantly — same values, parallel latency).
+    if (tid < A) {
+        uint d = tid;
+        uint2 key = uint2(laneSeeds[gid], HC_RNG_STREAM_ACT);
+        uint pair = d >> 1u;
+        uint4 r = hc_philox4x32(key, uint4(stepIdx, pair >> 1u, 0u, 0u));
+        // words for pair p within the two philox blocks (layout matches
+        // oak_rng_normal6: raw = {r0.x,r0.y,r0.z,r0.w,r1.x,r1.y})
+        uint w0, w1;
+        if (pair == 0u) { w0 = r.x; w1 = r.y; }
+        else if (pair == 1u) { w0 = r.z; w1 = r.w; }
+        else { w0 = r.x; w1 = r.y; }
+        float u1 = hc_u01open(w0);
+        float u2 = hc_u01(w1);
+        float rad = sqrt(-2.0f * log(u1));
+        float ang = 2.0f * M_PI_F * u2;
+        float z = ((d & 1u) == 0u) ? (rad * cos(ang)) : (rad * sin(ang));
+        float mu = oak_safe(ctx.policyMean[d]);
+        float sample = oak_safe(mu + sd * z);
+        float a = max(-1.0f, min(1.0f, sample));
+        lane->ctrlPending[d] = a;
+        ctx.actionSignal[d] = a;
+        ctx.actionSignal[A + d] = 0.0f;
+        scratch[20u + d] = sample;
+    }
+    simdgroup_barrier(mem_flags::mem_threadgroup);
     if (tid == 0u) {
-        uint stepIdx = lane->steps;
         float desc[12];
-        float ctrl[6];
         for (uint i = 0u; i < ctx.D; ++i) desc[i] = oak_safe(ctx.policyMean[i]);
-        float z[6];
-        oak_rng_normal6(laneSeeds[gid], stepIdx, z);
-        for (uint d = 0u; d < A; ++d) {
-            float mu = desc[d];
-            float sample = oak_safe(mu + sd * z[d]);
-            float a = max(-1.0f, min(1.0f, sample));
-            ctrl[d] = a;
-            ctx.actionSignal[d] = a;
-            ctx.actionSignal[A + d] = 0.0f;
-            scratch[20u + d] = sample;
-        }
         float d2 = 0.0f;
         for (int i = 0; i < 12; i++) {
             float v = desc[i] - lane->lastDesc[i];
@@ -1992,9 +2007,7 @@ static inline void oak_stage_sample_act_wide(Ctx ctx,
         lane->steps = stepIdx + 1u;
         float adm = lane->deltaSum / float(lane->steps);
         if (isfinite(adm) && adm > lane->deltaPeak) lane->deltaPeak = adm;
-        for (int u = 0; u < 6; u++) lane->ctrlPending[u] = ctrl[u];
     }
-    simdgroup_barrier(mem_flags::mem_threadgroup);
     if (tid < ctx.K) {
         uint off = tid * ctx.D;
         float acc = 0.0f;
