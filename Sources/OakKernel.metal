@@ -2402,6 +2402,14 @@ static inline void oak_dyna_backups(Ctx ctx, uint k) {
         // the never-diverge bound for each backup on its own).
         float den = 1.0f + xmNorm + ctx.invR * d * d;
         d = (isfinite(d) && isfinite(den) && den > 0.0f) ? (d / den) : 0.0f;
+        // Mass normalization: the planning stream's TOTAL per-step update
+        // mass is one experience-step equivalent (d/nB summed over nB
+        // backups), never nB experience-steps. Without this the sponge
+        // out-masses the real TD signal ~32:1 and erases value (measured:
+        // Tier-M IQM -0.4275 vs -0.0074 substrate). The Sutton knob then
+        // buys COVERAGE (more remembered states averaged into the planning
+        // direction), not raw mass.
+        d *= ctx.invK / float(mult);
         ctx.dynaTd[u] = d;
     }
     // Dense pre-accumulation, still inside the free window: the warp's 32
