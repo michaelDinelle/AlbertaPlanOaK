@@ -119,7 +119,7 @@ struct Ctx {
     device float *headScale, *modelScale, *valueScale, *xNormPrev;
     device float *hDotPsi, *psiAuxScale, *psiRho;
     device float *vsTd, *vsDot, *vsScale, *vsAuxScale;
-    device float *nurMean, *nurSM, *nurUtil, *nurUtilSM;
+    device float *nurStats;
     device float *muRaw, *polCoef;
     device uint *counters, *optFeature, *featureAge, *optAge;
     device uint *featureParentA, *featureParentB, *featureKind, *featureBirthCount;
@@ -229,10 +229,9 @@ inline Ctx make_ctx(device float *params, device float *stateArena, device uint 
     c.vsDot = stateArena + s; s += c.K;
     c.vsScale = stateArena + s; s += c.K;
     c.vsAuxScale = stateArena + s; s += c.K;
-    c.nurMean = stateArena + s; s += c.Rn;
-    c.nurSM = stateArena + s; s += c.Rn;
-    c.nurUtil = stateArena + s; s += c.Rn;
-    c.nurUtilSM = stateArena + s; s += c.Rn;
+    // Interleaved candidate stats {mean, sm, util, utilSM}: one line per
+    // candidate; access is sequential over n so coalescing is preserved.
+    c.nurStats = stateArena + s; s += 4u * c.Rn;
     c.muRaw = stateArena + s; s += c.K * c.D;
     c.polCoef = stateArena + s; s += c.K * c.D;
 
@@ -1195,15 +1194,15 @@ static inline void oak_stage_replace(Ctx ctx, uint tid, uint tgW,
                                      : a * (b - a);
             uint age = ctx.nurAge[n];
             float rate = max(1.0f / (float(age) + 1.0f), ctx.invR);
-            ctx.nurMean[n] += rate * (raw - ctx.nurMean[n]);
-            ctx.nurSM[n] += rate * (raw * raw - ctx.nurSM[n]);
-            float var = max(ctx.nurSM[n] - ctx.nurMean[n] * ctx.nurMean[n], 0.0f);
+            ctx.nurStats[(n) * 4u] += rate * (raw - ctx.nurStats[(n) * 4u]);
+            ctx.nurStats[(n) * 4u + 1u] += rate * (raw * raw - ctx.nurStats[(n) * 4u + 1u]);
+            float var = max(ctx.nurStats[(n) * 4u + 1u] - ctx.nurStats[(n) * 4u] * ctx.nurStats[(n) * 4u], 0.0f);
             float ridge = 1.0f / (float(age) + 1.0f);
-            float xt = (raw - ctx.nurMean[n]) * rsqrt(var + ridge);
+            float xt = (raw - ctx.nurStats[(n) * 4u]) * rsqrt(var + ridge);
             float sig = fabs(ctx.td[0] * xt) + fabs(ctx.planTd[0] * xt);
             if (isfinite(sig)) {
-                ctx.nurUtil[n] += invT * (sig - ctx.nurUtil[n]);
-                ctx.nurUtilSM[n] += invT * (sig * sig - ctx.nurUtilSM[n]);
+                ctx.nurStats[(n) * 4u + 2u] += invT * (sig - ctx.nurStats[(n) * 4u + 2u]);
+                ctx.nurStats[(n) * 4u + 3u] += invT * (sig * sig - ctx.nurStats[(n) * 4u + 3u]);
             }
             if (age < 0xffffffffu) ctx.nurAge[n] = age + 1u;
         }
@@ -1371,12 +1370,12 @@ static inline void oak_stage_replace(Ctx ctx, uint tid, uint tgW,
     float bestNUtil = -FLT_MAX;
     for (uint n = 0u; n < ctx.Rn; ++n) {
         if (ctx.nurAge[n] < ctx.R) continue;
-        float uN = ctx.nurUtil[n];
+        float uN = ctx.nurStats[(n) * 4u + 2u];
         if (!isfinite(uN)) continue;
         // Lower-confidence-bound promotion: penalize estimate noise so a larger
         // nursery buys selection RELIABILITY, not a sharper winner's curse
         // (the failure the first Sutton test exposed). se = sqrt(var * rate).
-        float varU = max(ctx.nurUtilSM[n] - uN * uN, 0.0f);
+        float varU = max(ctx.nurStats[(n) * 4u + 3u] - uN * uN, 0.0f);
         float rateU = max(1.0f / (float(ctx.nurAge[n]) + 1.0f), ctx.invR);
         float lcb = uN - sqrt(varU * rateU);
         if (isfinite(lcb) && lcb > bestNUtil) { bestNUtil = lcb; bestN = n; }
@@ -1396,9 +1395,9 @@ uint birth = ctx.featureBirthCount[worst] + 1u;
         // Warm start: the graduate keeps the statistics and age it earned in the
         // nursery — no cold-normalization shock on promotion.
         ctx.featureAge[worst] = ctx.nurAge[bestN];
-        ctx.featureMean[worst] = ctx.nurMean[bestN];
-        ctx.featureSM[worst] = ctx.nurSM[bestN];
-        ctx.utilFeat[worst] = ctx.nurUtil[bestN];
+        ctx.featureMean[worst] = ctx.nurStats[(bestN) * 4u];
+        ctx.featureSM[worst] = ctx.nurStats[(bestN) * 4u + 1u];
+        ctx.utilFeat[worst] = ctx.nurStats[(bestN) * 4u + 2u];
         ctx.valueW[worst] = 0.0f; ctx.bonusW[worst] = 0.0f;
         // Reseed the nursery slot: utility-guided parents, rotated kind.
         {
@@ -1421,10 +1420,10 @@ uint birth = ctx.featureBirthCount[worst] + 1u;
             ctx.nurParentB[bestN] = spb;
             ctx.nurKind[bestN] = (ctx.nurKind[bestN] + 1u) % 3u;
             ctx.nurAge[bestN] = 0u;
-            ctx.nurMean[bestN] = 0.0f;
-            ctx.nurSM[bestN] = 0.0f;
-            ctx.nurUtil[bestN] = 0.0f;
-            ctx.nurUtilSM[bestN] = 0.0f;
+            ctx.nurStats[(bestN) * 4u] = 0.0f;
+            ctx.nurStats[(bestN) * 4u + 1u] = 0.0f;
+            ctx.nurStats[(bestN) * 4u + 2u] = 0.0f;
+            ctx.nurStats[(bestN) * 4u + 3u] = 0.0f;
         }
 	        ctx.alpha[worst] = ctx.invR;
 	        ctx.beta[worst] = log(ctx.alpha[worst]); ctx.hMeta[worst] = 0.0f; ctx.gradEnergy[worst] = 0.0f;
