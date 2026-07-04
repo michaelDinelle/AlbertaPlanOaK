@@ -104,6 +104,7 @@ struct KernelStats {
     float keyboardSketchDim, keyboardEffectiveL1;
     float searchControlUseMean, generateTestEligibleCount;
     float learningMature;
+    float dynaBackupMean;
 };
 
 inline float safe_w_raw(float old_w, float new_w) { return isfinite(new_w) ? new_w : old_w; }
@@ -142,6 +143,8 @@ struct Ctx {
     device float *nurStats;
     device float *muRaw, *polCoef, *optUseByFeat, *lcbScr, *eligScr;
     device float *fcG, *fcS;
+    device float *ring, *dynaTd, *dynaAcc, *dynaC, *planScr;
+    device float *vStop2;
     device uint *counters, *optFeature, *featureAge, *optAge;
     device uint *featureParentA, *featureParentB, *featureKind, *featureBirthCount;
     device uint *selectedOption, *keyboardOrigin;
@@ -149,6 +152,7 @@ struct Ctx {
     device uint *lastStopAge;
     device uint *nurParentA, *nurParentB, *nurKind, *nurAge;
     device uint *actIdx;
+    device uint *ringIdx;
     device KernelScalars *scalars;
     device KernelStats *stats;
 };
@@ -193,7 +197,8 @@ inline Ctx make_ctx(device float *params, device float *stateArena, device uint 
     c.optDuration = params + p; p += c.K * c.R;
     c.psiAux = params + p; p += c.K * c.R;
     c.vStop = params + p; p += c.K * c.R;
-    c.vsAux = params + p;
+    c.vsAux = params + p; p += c.K * c.R;
+    c.vStop2 = params + p;
 
     uint s = 0u;
     c.observation = stateArena + s; s += c.O;
@@ -263,6 +268,13 @@ inline Ctx make_ctx(device float *params, device float *stateArena, device uint 
     c.eligScr = stateArena + s; s += 4u * c.R;
     c.fcG = stateArena + s; s += c.K;
     c.fcS = stateArena + s; s += 16u;
+    // Dyna sponge: sparse remembered states (R slots x 32 active tuples),
+    // per-unit backup deltas, and the reward snapshot for the env interval.
+    c.ring = stateArena + s; s += 32u * c.R;
+    c.dynaTd = stateArena + s; s += c.K * max(c.Rn / c.R, 1u);
+    c.dynaAcc = stateArena + s; s += c.R;
+    c.dynaC = stateArena + s; s += c.K;
+    c.planScr = stateArena + s; s += 4u;
 
     uint u = 0u;
     c.counters = uintArena + u; u += 7u;
@@ -282,7 +294,8 @@ inline Ctx make_ctx(device float *params, device float *stateArena, device uint 
     c.nurParentB = uintArena + u; u += c.Rn;
     c.nurKind = uintArena + u; u += c.Rn;
     c.nurAge = uintArena + u; u += c.Rn;
-    c.actIdx = uintArena + u;
+    c.actIdx = uintArena + u; u += 2u * 32u;
+    c.ringIdx = uintArena + u;
     c.scalars = scalars; c.stats = stats;
     return c;
 }
@@ -1285,20 +1298,49 @@ static inline void oak_learn_quads(Ctx ctx, device const float *prev,
             }
         }
     }
-    // value banks (feature-indexed, scalar)
+    // value banks (feature-indexed, scalar). Every valueW writer in this
+    // stage — active-set TD updates AND the Dyna apply below — must share one
+    // thread-ownership rule (i % tw), because a ring feature that is also in
+    // today's active set would otherwise get two concurrent RMW writers
+    // (the race that broke self-reproducibility at ring-fill). The scan is
+    // uniform across the simdgroup, so the extra reads are broadcasts; for
+    // the planning-ablated baseline this is a pure thread remap of the same
+    // single update per feature (bit-identical class).
     if (!OAK_ABLATE_GVF_PREDICTION) {
-        for (uint e = tid; e < 2u * A; e += tw) {
-            if (e < A) {
-                uint i = act_of(actP, e);
-                float w = ctx.valueW[i];
-                float delta = ctx.td[0] * prev[i] + ctx.planTd[0] * curr[i];
-                ctx.valueW[i] = safe_w(w, w + ctx.alpha[i] * delta * ctx.valueScale[0]);
-            } else {
-                uint i = act_of(actC, e - A);
-                if (actP[i / bankSize] == i) continue;
-                float w = ctx.valueW[i];
-                ctx.valueW[i] = safe_w(w, w + ctx.alpha[i] * ctx.planTd[0] * curr[i] * ctx.valueScale[0]);
+        for (uint e = 0u; e < 2u * A; ++e) {
+            uint i = (e < A) ? act_of(actP, e) : act_of(actC, e - A);
+            if (i % tw != tid) continue;
+            if (e >= A && actP[i / bankSize] == i) continue;
+            float w = ctx.valueW[i];
+            float delta = (e < A) ? (ctx.td[0] * prev[i] + ctx.planTd[0] * curr[i])
+                                  : (ctx.planTd[0] * curr[i]);
+            ctx.valueW[i] = safe_w(w, w + ctx.alpha[i] * delta * ctx.valueScale[0]);
+        }
+    }
+    // Dyna apply: last step's env-window backups arrive pre-accumulated as a
+    // dense per-feature sum (dynaAcc, built on the idle warps), so the agent
+    // window pays only a dense R-wide pass. Ownership stays (i % tw) — the
+    // same rule as the value banks above, so no feature ever has two writers.
+    if (!OAK_ABLATE_PLANNING && !OAK_ABLATE_GVF_PREDICTION) {
+        for (uint i = tid; i < ctx.R; i += tw) {
+            if (i % tw != tid) continue;
+            float acc = ctx.dynaAcc[i];
+            if (acc == 0.0f || !isfinite(acc)) continue;
+            float w = ctx.valueW[i];
+            ctx.valueW[i] = safe_w(w, w + ctx.alpha[i] * acc);
+        }
+        if (tid == 0u) {
+            // Search-control diagnostic: mean applied backup magnitude
+            // (tracking EMA at the structural 1/R rate); replace publishes it.
+            uint nB = ctx.K * max(ctx.Rn / ctx.R, 1u);
+            float sum = 0.0f;
+            for (uint u = 0u; u < nB; ++u) {
+                float d = ctx.dynaTd[u];
+                if (isfinite(d)) sum += fabs(d);
             }
+            float m = ctx.planScr[1];
+            if (!isfinite(m)) m = 0.0f;
+            ctx.planScr[1] = m + ctx.invR * (sum - m);
         }
     }
 }
@@ -1363,6 +1405,17 @@ static inline void oak_stage_replace(Ctx ctx, uint tid, uint tgW,
     device const float *curr = state_at(ctx, 1u - ctx.stateSlot);
     device const float *prev = state_at(ctx, ctx.stateSlot);
     device const uint *actP = act_at(ctx, ctx.stateSlot);
+    if (!OAK_ABLATE_PLANNING) {
+        // Dyna ring: remember this step's state as sparse active tuples
+        // (pre-curation values — the state learning actually saw).
+        uint slot = ctx.stepCount % ctx.R;
+        device const uint *actC = act_at(ctx, 1u - ctx.stateSlot);
+        if (tid < 32u) {
+            uint i = actC[tid];
+            ctx.ringIdx[slot * 32u + tid] = i;
+            ctx.ring[slot * 32u + tid] = curr[i];
+        }
+    }
     if (tid < 32u) tgCurrState[tid] = curr[act_at(ctx, 1u - ctx.stateSlot)[tid]];
     simdgroup_barrier(mem_flags::mem_threadgroup);
     float invT = track_rate(ctx.stepCount, ctx.R);
@@ -1561,6 +1614,7 @@ static inline void oak_stage_replace(Ctx ctx, uint tid, uint tgW,
     ctx.stats->optionDurationMean = durSum * invK;
     ctx.stats->modelPriorityMax = maxPrio;
     ctx.stats->searchControlUseMean = searchUse * invK;
+    ctx.stats->dynaBackupMean = ctx.planScr[1];
 
     uint candidateStart = ctx.anchorCount;
     uint eligible = 0u, worst = candidateStart;
@@ -1842,7 +1896,7 @@ struct OakLaneSnapshot {
     float deathRewardSum, deathRho;
     OakFleetInfoAcc info[4];
 };
-static_assert(sizeof(OakLaneSnapshot) == 276, "OakLaneSnapshot layout drifted from the Swift mirror");
+static_assert(sizeof(OakLaneSnapshot) == 280, "OakLaneSnapshot layout drifted from the Swift mirror");
 
 inline float oak_safe(float x) { return isfinite(x) ? x : 0.0f; }
 
@@ -2295,6 +2349,126 @@ static inline void oak_lane_fence() {
     else simdgroup_barrier(mem_flags::mem_device);
 }
 
+// ---- Wall-free Dyna sponge (Plan Steps 7/9). Runs in the env barrier
+// interval on the simdgroups that idle while one warp steps the physics
+// chain. Region contract (no intra-interval sync exists): env writes
+// {lanes[], observation[], reward[0], recordBuf}; this code reads copy-1
+// params (stable since learn), state slots + active sets (stable since
+// encode), prioOpt, planScr reward snapshot, scalars->rho, and writes only
+// {dynaTd/dynaSlot scratch, copy-2 model columns of its own option k} —
+// disjoint from env and from every other planning thread (column ownership
+// by k). No counters, no threadgroup memory, no barriers.
+static inline void oak_dyna_backups(Ctx ctx, uint k) {
+    if (OAK_ABLATE_PLANNING || k >= ctx.K) return;
+    uint mult = max(ctx.Rn / ctx.R, 1u);
+    uint M = ctx.R;
+    float rho = ctx.scalars->rho;
+    float err = ctx.prioOpt[k];
+    float trust = (isfinite(err) && err >= 0.0f) ? (1.0f / (1.0f + err)) : 0.0f;
+    for (uint b = 0u; b < mult; ++b) {
+        uint u = k * mult + b;
+        uint slot = (ctx.stepCount + (u * M) / max(ctx.K * mult, 1u)) % M;
+        if (ctx.stepCount < M && slot >= ctx.stepCount) {
+            // Ring slot not written yet: a backup there would target the
+            // phantom all-zero state (q = -rho at v = 0). Skip until wrap.
+            ctx.dynaTd[u] = 0.0f;
+            continue;
+        }
+        device const uint *ri = ctx.ringIdx + slot * 32u;
+        device const float *rv = ctx.ring + slot * 32u;
+        float r1 = 0.0f, l1 = 0.0f, s1 = 0.0f, s2 = 0.0f;
+        float vX = 0.0f, xmNorm = 0.0f;
+        for (uint a = 0u; a < 32u; ++a) {
+            uint i = ri[a];
+            float xv = rv[a];
+            uint idx = i * ctx.K + k;
+            r1 = fma(ctx.optReward[idx], xv, r1);
+            l1 = fma(ctx.optDuration[idx], xv, l1);
+            s1 = fma(ctx.vStop[idx], xv, s1);
+            s2 = fma(ctx.vStop2[idx], xv, s2);
+            vX = fma(ctx.valueW[i], xv, vX);
+            float ai = ctx.alpha[i];
+            if (isfinite(ai) && ai > 0.0f) xmNorm = fma(ai * xv, xv, xmNorm);
+        }
+        float body = r1 - rho * decode_duration(l1);
+        float q1 = body + s1;
+        float q2 = body + s2;
+        // Ensemble pessimism: parameter-free lower envelope of two
+        // structurally-decorrelated model copies (the Step 9 uncertainty gap
+        // that killed sponge-v1: error-trust alone passes untrained models).
+        float qB = min(q1, q2);
+        float d = (qB - vX) * trust;
+        // Per-backup contractive normalization (sponge-v1 form, verbatim —
+        // the never-diverge bound for each backup on its own).
+        float den = 1.0f + xmNorm + ctx.invR * d * d;
+        d = (isfinite(d) && isfinite(den) && den > 0.0f) ? (d / den) : 0.0f;
+        ctx.dynaTd[u] = d;
+    }
+    // Dense pre-accumulation, still inside the free window: the warp's 32
+    // backup deltas scatter into a per-feature sum so the learn stage's apply
+    // is a dense R-wide fma instead of a tuple scan on the agent-window
+    // critical path. The scatter is conflict-free BY THE WTA BANK STRUCTURE:
+    // a slot's 32 tuples are one winner per bank, and a feature can only
+    // appear at tuple position a = its bank (i / (R/32)) — so thread a owns
+    // bank a outright, no scanning, no collisions, deterministic u-order.
+    // Warp-uniform barrier is legal here (all 32 threads of this planning
+    // simdgroup execute it; the env warp is not involved).
+    simdgroup_barrier(mem_flags::mem_device);
+    {
+        uint nB = ctx.K * mult;
+        uint bankSize = ctx.R / 32u;
+        for (uint i = k * bankSize; i < (k + 1u) * bankSize; ++i) ctx.dynaAcc[i] = 0.0f;
+        for (uint u = 0u; u < nB; ++u) {
+            float d = ctx.dynaTd[u];
+            if (d == 0.0f || !isfinite(d)) continue;
+            uint slot = (ctx.stepCount + (u * M) / max(ctx.K * mult, 1u)) % M;
+            uint i = ctx.ringIdx[slot * 32u + k];
+            ctx.dynaAcc[i] = fma(d, ctx.ring[slot * 32u + k], ctx.dynaAcc[i]);
+        }
+    }
+    // Copy-2 model updates (planning-side machinery; semi-gradient TD on the
+    // same transition and exact one-step ratio as copy 1; different init and
+    // different update geometry keep the copies decorrelated through
+    // nonstationarity). Thread k is the sole toucher of copy-2 column k.
+    {
+        device const float *prev = state_at(ctx, ctx.stateSlot);
+        device const float *curr = state_at(ctx, 1u - ctx.stateSlot);
+        device const uint *actP = act_at(ctx, ctx.stateSlot);
+        device const uint *actC = act_at(ctx, 1u - ctx.stateSlot);
+        float cont = ctx.continuation[k];
+        if (!isfinite(cont)) cont = 0.0f;
+        float imp = ctx.importance[k];
+        if (!isfinite(imp) || imp < 0.0f) imp = 0.0f;
+        float vsPrev = 0.0f, vsNext = 0.0f, vX = 0.0f, xNormP = 0.0f;
+        for (uint a = 0u; a < 32u; ++a) {
+            uint ip = act_of(actP, a), ic = act_of(actC, a);
+            float xp = prev[ip], xc = curr[ic];
+            vsPrev = fma(ctx.vStop2[ip * ctx.K + k], xp, vsPrev);
+            vsNext = fma(ctx.vStop2[ic * ctx.K + k], xc, vsNext);
+            vX = fma(ctx.valueW[ic], xc, vX);
+            float am = ctx.alphaModel[ip];
+            if (isfinite(am) && am > 0.0f) xNormP = fma(am * xp, xp, xNormP);
+        }
+        float vsTd = cont * vsNext + (1.0f - cont) * vX - vsPrev;
+        if (!isfinite(vsTd)) vsTd = 0.0f;
+        float scS = fma(imp, xNormP, 1.0f) + ctx.invR * vsTd * vsTd;
+        scS = (isfinite(scS) && scS > 0.0f) ? (1.0f / scS) : 0.0f;
+        // Coefficient handoff: per-option coefficients go through scratch so
+        // the update phase can swap to ROW ownership — thread a updates all K
+        // columns of feature actP[a], one contiguous 128B line, instead of K
+        // line-scattered stride-K column writes per thread.
+        ctx.dynaC[k] = imp * vsTd * scS;
+        simdgroup_barrier(mem_flags::mem_device);
+        uint i = act_of(actP, k);
+        float aM = ctx.alphaModel[i] * prev[i];
+        uint row = i * ctx.K;
+        for (uint kk = 0u; kk < ctx.K; ++kk) {
+            float w = ctx.vStop2[row + kk];
+            ctx.vStop2[row + kk] = safe_w(w, w + aM * ctx.dynaC[kk]);
+        }
+    }
+}
+
 kernel void oak_megastep(device float *params [[buffer(0)]],
                          device float *stateArena [[buffer(1)]],
                          device uint *uintArena [[buffer(2)]],
@@ -2390,6 +2564,15 @@ kernel void oak_megastep(device float *params [[buffer(0)]],
                 oak_stage_fleet_env(params, stateArena, uintArena, scalars, stats, cfg,
                                     lanes, laneSeeds, ecfg, recordSlot, recordBuf, packedLane);
             }
+        }
+        if ((OAK_MEGA_STAGES & 2u) != 0u && ecfg.policyMode == 0u && wideActive) {
+            // Wall-free planning: the lead warps that idle during the env
+            // chain each run one lane's Dyna fan-out; the env warp (laneSg 0)
+            // reaches here after its packed env work and serves the last lane
+            // of the threadgroup, so every lane gets identical compute.
+            uint planLane = laneBase + ((laneSg + lanesThisTg - 1u) % lanesThisTg);
+            Ctx pctx = make_ctx(params, stateArena, uintArena, scalars, stats, cfg, planLane);
+            oak_dyna_backups(pctx, slane);
         }
         if ((OAK_MEGA_STAGES & 8u) == 0u && ecfg.policyMode == 0u && wideActive && slane == 0u) {
             // Timing-instrument fallback: replace owns the step/slot advance;
