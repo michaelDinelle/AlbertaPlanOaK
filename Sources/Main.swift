@@ -184,7 +184,9 @@ final class Shared<T> {
   let b: MTLBuffer
   let p: UnsafeMutablePointer<T>
   init(_ d: MTLDevice, _ n: Int, _ z: T) {
-    b = d.makeBuffer(length: max(n, 1) * MemoryLayout<T>.stride, options: [.storageModeShared])!
+    b = d.makeBuffer(
+      length: max(n, 1) * MemoryLayout<T>.stride,
+      options: [.storageModeShared])!
     p = b.contents().bindMemory(to: T.self, capacity: max(n, 1))
     p.initialize(repeating: z, count: max(n, 1))
   }
@@ -438,7 +440,8 @@ func metricsRoot() -> URL {
       megaConstants.setConstantValue(&b, type: .bool, index: 30)
       fputs("OAK_PROBE_FIXEDIDX=1: timing instrument, trajectories are garbage\n", stderr)
     }
-    if let mask = e["OAK_MEGA_STAGE_MASK"].flatMap(UInt32.init) {
+    let explicitMask = e["OAK_MEGA_STAGE_MASK"].flatMap(UInt32.init)
+    if let mask = explicitMask {
       var m = mask
       megaConstants.setConstantValue(&m, type: .uint, index: 25)
       fputs("OAK_MEGA_STAGE_MASK=\(mask): timing instrument, trajectories are garbage\n", stderr)
@@ -454,7 +457,9 @@ func metricsRoot() -> URL {
         "OAK_MEGA_LANES_PER_TG=\(megaG) needs \(megaW) threads/threadgroup (pipeline max \(megaPipe.maxTotalThreadsPerThreadgroup)) and \(3 * megaSlotBytes + physTGBytes) tg bytes (device max \(dev.maxThreadgroupMemoryLength)).")
     }
     func makeBuf(_ len: Int) throws -> MTLBuffer {
-      guard let b = dev.makeBuffer(length: max(len, 16), options: [.storageModeShared]) else {
+      guard let b = dev.makeBuffer(
+        length: max(len, 16), options: [.storageModeShared])
+      else {
         throw err("Metal buffer allocation failed (\(len) bytes).")
       }
       return b
@@ -565,6 +570,8 @@ func metricsRoot() -> URL {
       var n32 = UInt32(n)
       enc.setBytes(&n32, length: 4, index: 11)
       enc.setBuffer(physRowsBuf, offset: 0, index: 12)
+      var off0 = UInt32(0)
+      enc.setBytes(&off0, length: 4, index: 13)
       for m in 0..<3 { enc.setThreadgroupMemoryLength(megaTGBytes, index: m) }
       enc.setThreadgroupMemoryLength(physTGBytes, index: 3)
       enc.dispatchThreadgroups(
@@ -805,6 +812,16 @@ func metricsRoot() -> URL {
     }
     func writeHashes(step: Int) throws {
       guard let eng = engine else { return }
+      if let rawDir = e["OAK_DEBUG_RAW"] {
+        for lane in 0..<min(8, B) {
+          let sp = eng.state.p + lane * eng.a.total
+          let d = Data(bytes: sp, count: eng.a.total * MemoryLayout<Float>.stride)
+          try d.write(to: URL(fileURLWithPath: "\(rawDir)/state-l\(lane)-s\(step).bin"))
+          let up = eng.uints.p + lane * eng.uintTotal
+          let du = Data(bytes: up, count: eng.uintTotal * MemoryLayout<UInt32>.stride)
+          try du.write(to: URL(fileURLWithPath: "\(rawDir)/uints-l\(lane)-s\(step).bin"))
+        }
+      }
       for lane in 0..<B {
         guard let h = hashHandles[lane] else { continue }
         let hs = eng.stateHashes(lane)
@@ -816,6 +833,11 @@ func metricsRoot() -> URL {
     let explicitN = e["OAK_STEPS_PER_CB"].flatMap(Int.init)
     let tuneLock = NSLock()
     var tunedN = max(explicitN ?? 32, 1)
+    // Untracked buffers disable automatic hazard ordering BETWEEN command
+    // buffers; with 2 chunks in flight the GPU may overlap them. An event
+    // chain restores strict chunk order (async submission preserved).
+    guard let chunkOrder = dev.makeEvent() else { throw err("Failed to create Metal event.") }
+    var chunkSeq: UInt64 = 0
     let inflight = DispatchSemaphore(value: 2)
     let snapSlots = DispatchSemaphore(value: (recordLanes.isEmpty && dumpEvery == 0) ? 2 : 1)
     var snapHalf = 0
@@ -833,7 +855,11 @@ func metricsRoot() -> URL {
       inflight.wait()
       if let err = writer.sync(execute: { st.error }) { throw err }
       if isSnap { snapSlots.wait() }
-      guard let cb = q.makeCommandBuffer(), let enc = cb.makeComputeCommandEncoder() else {
+      guard let cb = q.makeCommandBuffer() else {
+        throw err("Failed to encode Metal command.")
+      }
+      cb.encodeWaitForEvent(chunkOrder, value: chunkSeq)
+      guard let enc = cb.makeComputeCommandEncoder() else {
         throw err("Failed to encode Metal command.")
       }
       encodeMegastep(enc, target - step)
@@ -845,6 +871,8 @@ func metricsRoot() -> URL {
         enc.dispatchThreads(mtlSize(B), threadsPerThreadgroup: laneTG)
       }
       enc.endEncoding()
+      chunkSeq += 1
+      cb.encodeSignalEvent(chunkOrder, value: chunkSeq)
       let thisHalf = snapHalf
       if isSnap { snapHalf ^= 1 }
       let kind = target == steps ? "final" : "hb"
