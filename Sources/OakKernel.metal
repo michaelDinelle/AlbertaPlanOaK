@@ -41,6 +41,15 @@ constant float OAK_SPEC_META_ETA [[function_constant(24)]];
 
 constant uint OAK_SPEC_NURSERY [[function_constant(28)]];
 
+// Timing probe (trajectories are garbage): replace active-index gathers with
+// fixed contiguous indices to separate memory-scatter cost from issue cost.
+constant bool OAK_PROBE_FIXEDIDX_FC [[function_constant(30)]];
+constant bool OAK_PROBE_FIXEDIDX = is_function_constant_defined(OAK_PROBE_FIXEDIDX_FC)
+    ? OAK_PROBE_FIXEDIDX_FC : false;
+inline uint act_of(device const uint *act, uint a) {
+    return OAK_PROBE_FIXEDIDX ? a : act[a];
+}
+
 constant uint OAK_MEGA_STAGE_MASK [[function_constant(25)]];
 constant uint OAK_MEGA_STAGES = is_function_constant_defined(OAK_MEGA_STAGE_MASK)
     ? OAK_MEGA_STAGE_MASK : 0xffffffffu;
@@ -391,8 +400,8 @@ inline void fcstomp_prediction_control_loop(Ctx ctx, uint tid,
     float vPrev = 0.0f, vCurr = 0.0f;
     if (tid == 0u) {
         for (uint a = 0u; a < 32u; ++a) {
-            vPrev = fma(ctx.valueW[actP[a]], tgPrev[a], vPrev);
-            vCurr = fma(ctx.valueW[actC[a]], tgCurr[a], vCurr);
+            vPrev = fma(ctx.valueW[act_of(actP, a)], tgPrev[a], vPrev);
+            vCurr = fma(ctx.valueW[act_of(actC, a)], tgCurr[a], vCurr);
         }
         if (OAK_ABLATE_GVF_PREDICTION) {
             vPrev = 0.0f;
@@ -427,7 +436,7 @@ inline void fcstomp_prediction_control_loop(Ctx ctx, uint tid,
             if (!isfinite(x)) continue;
             float xx = x * x;
             xNormRaw += xx;
-            float am = ctx.alphaModel[actP[a]];
+            float am = ctx.alphaModel[act_of(actP, a)];
             if (isfinite(am) && am > 0.0f) modelTraceNorm = fma(am, xx, modelTraceNorm);
         }
         tgScalars[10] = (isfinite(modelTraceNorm) && modelTraceNorm > 0.0f) ? modelTraceNorm : 0.0f;
@@ -440,7 +449,7 @@ inline void fcstomp_prediction_control_loop(Ctx ctx, uint tid,
         uint base = tid * ctx.R;
         float psiPrev = 0.0f, psiNext = 0.0f, psiXX = 0.0f, psiXY = 0.0f, psiYY = 0.0f;
         for (uint a = 0u; a < 32u; ++a) {
-            uint ip = actP[a], ic = actC[a];
+            uint ip = act_of(actP, a), ic = act_of(actC, a);
             psiPrev = fma(ctx.psi[(ip) * ctx.K + tid], tgPrev[a], psiPrev);
             psiNext = fma(ctx.psi[(ic) * ctx.K + tid], tgCurr[a], psiNext);
             float ap = ctx.alphaPsi[ip];
@@ -512,7 +521,7 @@ inline void fcstomp_prediction_control_loop(Ctx ctx, uint tid,
             // normalizer of h's LMS regression of delta onto x.
             float hDot = 0.0f;
             for (uint a = 0u; a < 32u; ++a)
-                hDot = fma(ctx.psiAux[actP[a] * ctx.K + tid], tgPrev[a], hDot);
+                hDot = fma(ctx.psiAux[act_of(actP, a) * ctx.K + tid], tgPrev[a], hDot);
             ctx.hDotPsi[tid] = isfinite(hDot) ? hDot : 0.0f;
             // NLMS: h is a pure regression of delta onto x, so it runs at the
             // fastest stable rate (unit effective step), parameter-free. A fast,
@@ -526,7 +535,7 @@ inline void fcstomp_prediction_control_loop(Ctx ctx, uint tid,
         float rHat = 0.0f, lRaw = 0.0f, vModel = 0.0f;
         if (!OAK_ABLATE_OPTION_MODELS) {
             for (uint a = 0u; a < 32u; ++a) {
-                uint idx = actC[a] * ctx.K + tid;
+                uint idx = act_of(actC, a) * ctx.K + tid;
                 rHat = fma(ctx.optReward[idx], tgCurr[a], rHat);
                 lRaw = fma(ctx.optDuration[idx], tgCurr[a], lRaw);
                 // vStop: scalar GVF predicting v at option stop (replaces the
@@ -797,7 +806,7 @@ static inline void oak_plan_one(Ctx ctx, uint k,
         float vsPrev = 0.0f, vsNext = 0.0f, vX = 0.0f, vsDot = 0.0f;
         float bootNorm = 0.0f, xNormA = 0.0f;
         for (uint a = 0u; a < 32u; ++a) {
-            uint ip = actP[a], ic = actC[a];
+            uint ip = act_of(actP, a), ic = act_of(actC, a);
             uint idxP = ip * ctx.K + k, idxC = ic * ctx.K + k;
             float xp = prev[ip], xc = curr[ic];
             rPrev = fma(ctx.optReward[idxP], xp, rPrev);
@@ -929,7 +938,7 @@ static inline void oak_learn_element(Ctx ctx, device const float *prev,
         if (OAK_ABLATE_GVF_PREDICTION) return;
         // P-bank owns i fully (both terms; curr[i] is a dense-exact read) so the
         // C-bank never touches the same weight — race-free by ownership.
-        uint i = actP[gid];
+        uint i = act_of(actP, gid);
         float w = ctx.valueW[i];
         float delta = ctx.td[0] * prev[i] + ctx.planTd[0] * curr[i];
         ctx.valueW[i] = safe_w(w, w + ctx.alpha[i] * delta * ctx.valueScale[0]);
@@ -938,7 +947,7 @@ static inline void oak_learn_element(Ctx ctx, device const float *prev,
     gid -= nValP;
     if (gid < nValC) {
         if (OAK_ABLATE_GVF_PREDICTION) return;
-        uint i = actC[gid];
+        uint i = act_of(actC, gid);
         if (actP[i / (ctx.R / 32u)] == i) return;  // index-exact: owned by the P-bank
         float w = ctx.valueW[i];
         ctx.valueW[i] = safe_w(w, w + ctx.alpha[i] * ctx.planTd[0] * curr[i] * ctx.valueScale[0]);
@@ -947,7 +956,7 @@ static inline void oak_learn_element(Ctx ctx, device const float *prev,
     gid -= nValC;
     if (gid < nPsiP) {
         if (OAK_ABLATE_RR_SUBTASKS) return;
-        uint k = gid / A, i = actP[gid % A];
+        uint k = gid / A, i = act_of(actP, gid % A);
         float rho = ctx.importance[k];
         if (!isfinite(rho) || rho < 0.0f) rho = 0.0f;
         float cont = ctx.continuation[k];
@@ -962,7 +971,7 @@ static inline void oak_learn_element(Ctx ctx, device const float *prev,
     gid -= nPsiP;
     if (gid < nPsiC) {
         if (OAK_ABLATE_RR_SUBTASKS) return;
-        uint k = gid / A, i = actC[gid % A];
+        uint k = gid / A, i = act_of(actC, gid % A);
         if (actP[i / (ctx.R / 32u)] == i) return;  // index-exact: owned by the P-bank
         float rho = ctx.importance[k];
         if (!isfinite(rho) || rho < 0.0f) rho = 0.0f;
@@ -976,7 +985,7 @@ static inline void oak_learn_element(Ctx ctx, device const float *prev,
     gid -= nPsiC;
     if (gid < nVSP) {
         if (OAK_ABLATE_OPTION_MODELS) return;
-        uint k = gid / A, i = actP[gid % A];
+        uint k = gid / A, i = act_of(actP, gid % A);
         float rho = ctx.importance[k];
         if (!isfinite(rho) || rho < 0.0f) rho = 0.0f;
         float cont = ctx.continuation[k];
@@ -990,7 +999,7 @@ static inline void oak_learn_element(Ctx ctx, device const float *prev,
     gid -= nVSP;
     if (gid < nVSC) {
         if (OAK_ABLATE_OPTION_MODELS) return;
-        uint k = gid / A, i = actC[gid % A];
+        uint k = gid / A, i = act_of(actC, gid % A);
         if (actP[i / (ctx.R / 32u)] == i) return;  // index-exact: owned by the P-bank
         float rho = ctx.importance[k];
         if (!isfinite(rho) || rho < 0.0f) rho = 0.0f;
@@ -1006,7 +1015,7 @@ static inline void oak_learn_element(Ctx ctx, device const float *prev,
         if (OAK_ABLATE_OPTION_POLICIES) return;
         uint k = gid / (ctx.D * A);
         uint rem = gid - k * ctx.D * A;
-        uint d = rem / A, i = actP[rem % A];
+        uint d = rem / A, i = act_of(actP, rem % A);
         float w = ctx.optPolicy[(i) * ctx.K * ctx.D + k * ctx.D + d];
         ctx.optPolicy[(i) * ctx.K * ctx.D + k * ctx.D + d] =
             safe_w(w, w + ctx.polCoef[k * ctx.D + d] * prev[i]);
@@ -1015,7 +1024,7 @@ static inline void oak_learn_element(Ctx ctx, device const float *prev,
     gid -= nPi;
     if (gid < nOR) {
         if (OAK_ABLATE_OPTION_MODELS) return;
-        uint k = gid / A, i = actP[gid % A];
+        uint k = gid / A, i = act_of(actP, gid % A);
         float rho = ctx.importance[k]; if (!isfinite(rho) || rho < 0.0f) rho = 0.0f;
         float w = ctx.optReward[(i) * ctx.K + k];
         ctx.optReward[(i) * ctx.K + k] =
@@ -1025,7 +1034,7 @@ static inline void oak_learn_element(Ctx ctx, device const float *prev,
     gid -= nOR;
     if (gid < nOR) {
         if (OAK_ABLATE_OPTION_MODELS) return;
-        uint k = gid / A, i = actP[gid % A];
+        uint k = gid / A, i = act_of(actP, gid % A);
         float rho = ctx.importance[k]; if (!isfinite(rho) || rho < 0.0f) rho = 0.0f;
         float denom = ctx.modelDenom[k];
         float dEnergy = ctx.durationTd[k] * ctx.durationTd[k];
@@ -1039,7 +1048,7 @@ static inline void oak_learn_element(Ctx ctx, device const float *prev,
     gid -= nOR;
     if (gid < nOR) {
         if (OAK_ABLATE_RR_SUBTASKS) return;
-        uint k = gid / A, i = actP[gid % A];
+        uint k = gid / A, i = act_of(actP, gid % A);
         float rho = ctx.importance[k];
         if (!isfinite(rho) || rho < 0.0f) rho = 0.0f;
         float h = ctx.psiAux[(i) * ctx.K + k];
@@ -1051,7 +1060,7 @@ static inline void oak_learn_element(Ctx ctx, device const float *prev,
     gid -= nOR;
     {
         if (OAK_ABLATE_OPTION_MODELS) return;
-        uint k = gid / A, i = actP[gid % A];
+        uint k = gid / A, i = act_of(actP, gid % A);
         float rho = ctx.importance[k];
         if (!isfinite(rho) || rho < 0.0f) rho = 0.0f;
         float h = ctx.vsAux[(i) * ctx.K + k];
@@ -1091,7 +1100,7 @@ inline void emit_action_grid(Ctx ctx, threadgroup const float *curr, uint group,
     }
     float mu = 0.0f;
     for (uint a = 0u; a < 32u; ++a)
-        mu = fma(ctx.optPolicy[act[a] * ctx.K * ctx.D + k * ctx.D + d], curr[a], mu);
+        mu = fma(ctx.optPolicy[act_of(act, a) * ctx.K * ctx.D + k * ctx.D + d], curr[a], mu);
     // Raw mean (pre-fallback) stashed for the blend pass — kills the K*32
     // re-gather per action dim.
     ctx.muRaw[k * ctx.D + d] = mu;
