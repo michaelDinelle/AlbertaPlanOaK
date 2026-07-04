@@ -292,12 +292,12 @@ final class Engine {
       let basis = 1 / Float(max(d, 1))
       for kk in 0..<k {
         lu[7 + kk] = UInt32(kk)
-        lp[psi + kk * rank + kk] = inv
+        lp[psi + kk * k + kk] = inv
         ls[a.utilOpt + kk] = Float(rank)
         let slot = kk % max(d, 1)
         let sign: Float = ((kk / max(d, 1)) % 2 == 0) ? 1 : -1
         // optPolicy offset: rank(value) + k*rank(psi)
-        lp[rank + k * rank + (kk * d + slot) * rank] = sign * basis
+        lp[rank + k * rank + kk * d + slot] = sign * basis
       }
     }
     configB.contents().bindMemory(to: KernelConfig.self, capacity: 1).initialize(to: cfgValue)
