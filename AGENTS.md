@@ -219,9 +219,25 @@ The working goal is **general online robustness**: any seed, any horizon, popula
 
 There is no deep-diagnostics shadow path in the live engine. Add audit heads only when they earn a Plan role and pass the same speed/learning gates as behavior code.
 
-## Performance: Metal trace
+## Performance: profiling (HEADLESS — verified 2026-07-04)
 
-Use Instruments → Metal System Trace with `tools/instruments/ShaderTemplate.tracetemplate` (Shader Timeline ON, no counters). The live CLI no longer has per-phase diagnostic JSON; use Instruments for phase shares.
+The repo template records without the Instruments GUI. Never trace (or rebuild the metallib) while a fleet run is in flight.
+
+```
+xctrace record --template tools/instruments/ShaderTemplate.tracetemplate \
+  --output out.trace --time-limit 15s \
+  --env OAK_BENCH_ENV=HalfCheetah-v4 --env OAK_BENCH_POLICIES=oak \
+  --env OAK_BENCH_STEPS=200000 --env OAK_BENCH_SEED_COUNT=1024 \
+  --env OAK_METRICS_STORAGE=/tmp/trace-run \
+  --launch -- .build/release/OaK benchmark
+xctrace export --input out.trace --toc                     # list tables
+xctrace export --input out.trace \
+  --xpath '/trace-toc/run[@number="1"]/data/table[@schema="SCHEMA"]' --output t.xml
+```
+
+Useful schemas: `metal-gpu-intervals` (per-dispatch GPU times), `gpu-performance-state-intervals` (clock derating, "Minimum … due to active device conditions"), `device-thermal-state-intervals` (thermal axis for SPS-decay questions). Caveat: `metal-shader-profiler-*` and `gpu-counter-*` tables exist but record ZERO rows with this template (shader-profiler/counter profiles are unarmed); arming them needs a one-time GUI template edit — bare `--instrument 'Metal GPU Counters'` records nothing in attach OR launch mode.
+
+Complementary in-code instruments: `OAK_MEGA_STAGE_MASK` (per-stage timing; single-stage-only masks isolate cost but DEGENERATE the data — prefer `encode+X` pairs under live dynamics), `OAK_PROBE_FIXEDIDX=1` (fixed contiguous gather indices — separates memory-scatter cost from issue cost). Both are timing instruments; trajectories are garbage. The per-stage/falsification evidence log lives in docs/roadmap.md (SPS program).
 
 ## Citations (all primary papers in `docs/papers/`)
 
