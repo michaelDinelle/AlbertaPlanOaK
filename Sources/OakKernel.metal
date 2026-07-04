@@ -141,6 +141,7 @@ struct Ctx {
     device float *vsTd, *vsDot, *vsScale, *vsAuxScale;
     device float *nurStats;
     device float *muRaw, *polCoef, *optUseByFeat, *lcbScr, *eligScr;
+    device float *fcG, *fcS;
     device uint *counters, *optFeature, *featureAge, *optAge;
     device uint *featureParentA, *featureParentB, *featureKind, *featureBirthCount;
     device uint *selectedOption, *keyboardOrigin;
@@ -260,6 +261,8 @@ inline Ctx make_ctx(device float *params, device float *stateArena, device uint 
     s += 3u;  // 16B-align eligScr (float4 per slot)
     s &= ~3u;
     c.eligScr = stateArena + s; s += 4u * c.R;
+    c.fcG = stateArena + s; s += c.K;
+    c.fcS = stateArena + s; s += 16u;
 
     uint u = 0u;
     c.counters = uintArena + u; u += 7u;
@@ -405,11 +408,11 @@ inline void fcstomp_store_learn_scales(Ctx ctx,
 inline void fcstomp_prediction_control_loop(Ctx ctx, uint tid,
                                       threadgroup float *tgPrev,
                                       threadgroup float *tgCurr,
-                                      threadgroup float *tgG,
-                                      threadgroup float *tgCont,
-                                      threadgroup float *tgTerm,
-                                      threadgroup float *tgTdPsi,
-                                      threadgroup float *tgScalars) {
+                                      threadgroup float *tgCont) {
+    // tg diet (2 tgs/core): tgG -> ctx.fcG, tgScalars -> ctx.fcS, tgTdPsi ->
+    // ctx.tdPsi (device, same values), tgTerm derived as (1 - tgCont).
+    device float *tgG = ctx.fcG;
+    device float *tgScalars = ctx.fcS;
     device const float *dPrev = state_at(ctx, ctx.stateSlot);
     device const float *dCurr = state_at(ctx, 1u - ctx.stateSlot);
     device const uint *actP = act_at(ctx, ctx.stateSlot);
@@ -443,7 +446,7 @@ inline void fcstomp_prediction_control_loop(Ctx ctx, uint tid,
         float rhoNew = rhoOld + ctx.invR * delta;
         float rhoUse = (!OAK_ABLATE_GVF_PREDICTION && isfinite(rhoNew)) ? rhoNew : rhoOld;
         ctx.scalars->rho = rhoUse;
-        tgScalars[11] = rhoUse;
+        tgScalars[4] = rhoUse;
     }
     if (tid == 0u) {
         float modelTraceNorm = 0.0f;
@@ -456,8 +459,8 @@ inline void fcstomp_prediction_control_loop(Ctx ctx, uint tid,
             float am = ctx.alphaModel[act_of(actP, a)];
             if (isfinite(am) && am > 0.0f) modelTraceNorm = fma(am, xx, modelTraceNorm);
         }
-        tgScalars[10] = (isfinite(modelTraceNorm) && modelTraceNorm > 0.0f) ? modelTraceNorm : 0.0f;
-        tgScalars[7] = (isfinite(xNormRaw) && xNormRaw > 0.0f) ? xNormRaw : 0.0f;
+        tgScalars[3] = (isfinite(modelTraceNorm) && modelTraceNorm > 0.0f) ? modelTraceNorm : 0.0f;
+        tgScalars[2] = (isfinite(xNormRaw) && xNormRaw > 0.0f) ? xNormRaw : 0.0f;
     }
     simdgroup_barrier(mem_flags::mem_threadgroup);
 
@@ -507,7 +510,6 @@ inline void fcstomp_prediction_control_loop(Ctx ctx, uint tid,
             ctx.counters[OAK_CNT_TDPSI_NF] += 1u;
         }
         ctx.tdPsi[tid] = dPsi;
-        tgTdPsi[tid] = dPsi;
         float psiRhoNew = psiRhoOld + ctx.invR * dPsi;
         ctx.psiRho[tid] = safe_w(psiRhoOld, psiRhoNew);
         float absD = isfinite(dPsi) ? fabs(dPsi) : 0.0f;
@@ -522,7 +524,7 @@ inline void fcstomp_prediction_control_loop(Ctx ctx, uint tid,
         float implicitTrace = psiXX - 2.0f * cont * psiXY + cont * cont * psiYY;
         float denom = fma(rho, implicitTrace, 1.0f);
         ctx.headDenom[tid] = (isfinite(denom) && denom > 0.0f) ? denom : 0.0f;
-        float modelDenom = fma(rho, tgScalars[10], 1.0f);
+        float modelDenom = fma(rho, tgScalars[3], 1.0f);
         ctx.modelDenom[tid] = (isfinite(modelDenom) && modelDenom > 0.0f) ? modelDenom : 0.0f;
         {
             // Per-head reciprocal, hoisted from the learn stage (identical divide).
@@ -548,7 +550,6 @@ inline void fcstomp_prediction_control_loop(Ctx ctx, uint tid,
                 ? (1.0f / auxDenom) : 0.0f;
         }
         tgCont[tid] = cont;
-        tgTerm[tid] = beta;
         float rHat = 0.0f, lRaw = 0.0f, vModel = 0.0f;
         if (!OAK_ABLATE_OPTION_MODELS) {
             for (uint a = 0u; a < 32u; ++a) {
@@ -564,7 +565,7 @@ inline void fcstomp_prediction_control_loop(Ctx ctx, uint tid,
         float dur = decode_duration(lRaw);
         bool durationTrusted = usable_duration(ctx, dur);
         bool modelTrusted = OAK_ABLATE_SEARCH_CONTROL ? modelFinite : usable_priority(ctx.prioOpt[tid]);
-        float q = rHat - tgScalars[11] * dur + vModel;
+        float q = rHat - tgScalars[4] * dur + vModel;
         float qAdv = q - vCurr;
         bool queryTrusted = !OAK_ABLATE_OPTION_MODELS
             && !OAK_ABLATE_PLANNING
@@ -582,13 +583,12 @@ inline void fcstomp_prediction_control_loop(Ctx ctx, uint tid,
         ctx.valueGauge[0] = safe_w(ctx.valueGauge[0], gaugeNew);
         float actorBaseline = 0.0f;
         for (uint k = 0u; k < ctx.K; ++k) {
-            actorBaseline += tgTdPsi[k];
+            actorBaseline += ctx.tdPsi[k];
         }
         actorBaseline *= invK;
         for (uint k = 0u; k < ctx.K; ++k) {
-            float adv = OAK_ABLATE_OPTION_POLICIES ? 0.0f : (tgTdPsi[k] - actorBaseline);
+            float adv = OAK_ABLATE_OPTION_POLICIES ? 0.0f : (ctx.tdPsi[k] - actorBaseline);
             if (!isfinite(adv)) adv = 0.0f;
-            tgTdPsi[k] = adv;
             ctx.actorAdv[k] = adv;
         }
     }
@@ -599,7 +599,7 @@ inline void fcstomp_prediction_control_loop(Ctx ctx, uint tid,
         float bestScore = -FLT_MAX;
         float termSum = 0.0f;
         for (uint k = 0u; k < ctx.K; ++k) {
-            termSum += tgTerm[k];
+            termSum += 1.0f - tgCont[k];
             bool trusted = isfinite(tgG[k]);
             float qAdv = trusted ? tgG[k] : 0.0f;
             float dur = ctx.durationHat[k];
@@ -767,16 +767,11 @@ inline void FeatureConstruction(Ctx ctx,
 }
 
 static inline void oak_stage_encode(Ctx ctx, uint tid, uint tgW,
-                                    threadgroup float *tgG,
                                     threadgroup float *tgCont,
-                                    threadgroup float *tgTerm,
-                                    threadgroup float *tgTdPsi,
-                                    threadgroup float *tgScalars,
                                     threadgroup float *tgPrevState,
                                     threadgroup float *tgCurrState) {
     FeatureConstruction(ctx, tid, tgW, tgPrevState, tgCurrState);
-    fcstomp_prediction_control_loop(ctx, tid, tgPrevState, tgCurrState, tgG, tgCont, tgTerm,
-                                    tgTdPsi, tgScalars);
+    fcstomp_prediction_control_loop(ctx, tid, tgPrevState, tgCurrState, tgCont);
 }
 
 kernel void oak_encode(device float *params [[buffer(0)]],
@@ -785,20 +780,15 @@ kernel void oak_encode(device float *params [[buffer(0)]],
                        device KernelScalars *scalars [[buffer(3)]],
                        device KernelStats *stats [[buffer(4)]],
                        constant KernelConfig &cfg [[buffer(5)]],
-                       threadgroup float *tgG [[threadgroup(0)]],
-                       threadgroup float *tgCont [[threadgroup(1)]],
-                       threadgroup float *tgTerm [[threadgroup(2)]],
-                       threadgroup float *tgTdPsi [[threadgroup(3)]],
-                       threadgroup float *tgScalars [[threadgroup(4)]],
-                       threadgroup float *tgPrevState [[threadgroup(5)]],
-                       threadgroup float *tgCurrState [[threadgroup(6)]],
+                       threadgroup float *tgCont [[threadgroup(0)]],
+                       threadgroup float *tgPrevState [[threadgroup(1)]],
+                       threadgroup float *tgCurrState [[threadgroup(2)]],
                        uint2 tpos [[thread_position_in_threadgroup]],
                        uint2 tdim [[threads_per_threadgroup]],
                        uint2 tgPos [[threadgroup_position_in_grid]]) {
     uint tid = tpos.x, tgW = tdim.x;
     Ctx ctx = make_ctx(params, stateArena, uintArena, scalars, stats, cfg, tgPos.y);
-    oak_stage_encode(ctx, tid, tgW, tgG, tgCont, tgTerm, tgTdPsi, tgScalars,
-                     tgPrevState, tgCurrState);
+    oak_stage_encode(ctx, tid, tgW, tgCont, tgPrevState, tgCurrState);
 }
 
 static inline void oak_plan_one(Ctx ctx, uint k,
@@ -1987,8 +1977,8 @@ static inline void oak_stage_sample_act(device float *params,
 static inline void oak_stage_sample_act_wide(Ctx ctx,
                                              device OakFleetLane *lanes,
                                              device const uint *laneSeeds,
-                                             uint gid, uint tid,
-                                             threadgroup float *scratch) {
+                                             uint gid, uint tid) {
+    device float *scratch = ctx.fcS + 8u;
     device OakFleetLane *lane = &lanes[gid];
     uint A = ctx.D / 2u;
     float sd = 1.0f / float(max(ctx.D, 1u));
@@ -2017,9 +2007,9 @@ static inline void oak_stage_sample_act_wide(Ctx ctx,
         lane->ctrlPending[d] = a;
         ctx.actionSignal[d] = a;
         ctx.actionSignal[A + d] = 0.0f;
-        scratch[20u + d] = sample;
+        scratch[d] = sample;
     }
-    simdgroup_barrier(mem_flags::mem_threadgroup);
+    simdgroup_barrier(mem_flags::mem_device);
     if (tid == 0u) {
         float desc[12];
         for (uint i = 0u; i < ctx.D; ++i) desc[i] = oak_safe(ctx.policyMean[i]);
@@ -2038,7 +2028,7 @@ static inline void oak_stage_sample_act_wide(Ctx ctx,
         uint off = tid * ctx.D;
         float acc = 0.0f;
         for (uint d = 0u; d < A; ++d) {
-            float sample = scratch[20u + d];
+            float sample = scratch[d];
             float om = oak_safe(ctx.optionPolicyMean[off + d]);
             ctx.optionActorCredit[off + d] = sample - om;
             ctx.optionActorCredit[off + A + d] = 0.0f;
@@ -2318,14 +2308,10 @@ kernel void oak_megastep(device float *params [[buffer(0)]],
                          device float *recordBuf [[buffer(10)]],
                          constant uint &stepsThisDispatch [[buffer(11)]],
                          device HCSimdRows *physRows [[buffer(12)]],
-                         threadgroup float *tgG [[threadgroup(0)]],
-                         threadgroup float *tgCont [[threadgroup(1)]],
-                         threadgroup float *tgTerm [[threadgroup(2)]],
-                         threadgroup float *tgTdPsi [[threadgroup(3)]],
-                         threadgroup float *tgScalars [[threadgroup(4)]],
-                         threadgroup float *tgPrevState [[threadgroup(5)]],
-                         threadgroup float *tgCurrState [[threadgroup(6)]],
-                         threadgroup float *tgPhys [[threadgroup(7)]],
+                         threadgroup float *tgCont [[threadgroup(0)]],
+                         threadgroup float *tgPrevState [[threadgroup(1)]],
+                         threadgroup float *tgCurrState [[threadgroup(2)]],
+                         threadgroup float *tgPhys [[threadgroup(3)]],
                          uint tgIdx [[threadgroup_position_in_grid]],
                          uint tid [[thread_position_in_threadgroup]],
                          uint slane [[thread_index_in_simdgroup]],
@@ -2343,15 +2329,13 @@ kernel void oak_megastep(device float *params [[buffer(0)]],
     bool packedActive = tid < lanesThisTg;
     uint packedLane = laneBase + tid;
     uint off = laneSg * 32u;
-    threadgroup float *lG = tgG + off, *lCont = tgCont + off, *lTerm = tgTerm + off,
-                      *lTdPsi = tgTdPsi + off, *lScalars = tgScalars + off,
+    threadgroup float *lCont = tgCont + off,
                       *lPrev = tgPrevState + off, *lCurr = tgCurrState + off;
     for (uint it = 0u; it < stepsThisDispatch; ++it) {
         if (ecfg.policyMode == 0u) {
             if (wideActive && (OAK_MEGA_STAGES & 1u) != 0u) {
                 Ctx ctx = make_ctx(params, stateArena, uintArena, scalars, stats, cfg, wideLane);
-                oak_stage_encode(ctx, slane, 32u, lG, lCont, lTerm, lTdPsi, lScalars,
-                                 lPrev, lCurr);
+                oak_stage_encode(ctx, slane, 32u, lCont, lPrev, lCurr);
             }
             oak_lane_fence();
             if (wideActive && (OAK_MEGA_STAGES & 2u) != 0u) {
@@ -2388,7 +2372,7 @@ kernel void oak_megastep(device float *params [[buffer(0)]],
         if (ecfg.policyMode == 0u) {
             if (wideActive && (OAK_MEGA_STAGES & 32u) != 0u) {
                 Ctx ctx = make_ctx(params, stateArena, uintArena, scalars, stats, cfg, wideLane);
-                oak_stage_sample_act_wide(ctx, lanes, laneSeeds, wideLane, slane, lScalars);
+                oak_stage_sample_act_wide(ctx, lanes, laneSeeds, wideLane, slane);
             }
         } else if (packedActive && (OAK_MEGA_STAGES & 32u) != 0u) {
             oak_stage_sample_act(params, stateArena, uintArena, scalars, stats, cfg,
