@@ -773,25 +773,22 @@ kernel void oak_encode(device float *params [[buffer(0)]],
                      tgPrevState, tgCurrState);
 }
 
-static inline void oak_stage_plan_option(Ctx ctx, uint k, uint j,
-                                         threadgroup float *tgModelErr) {
-    device const float *prev = state_at(ctx, ctx.stateSlot);
-    device const float *curr = state_at(ctx, 1u - ctx.stateSlot);
+static inline void oak_plan_one(Ctx ctx, uint k,
+                                device const float *prev,
+                                device const float *curr) {
     float cont = ctx.continuation[k];
     if (OAK_ABLATE_OPTION_MODELS) {
-        if (j == 0u) {
-            ctx.optRewardTd[k] = 0.0f;
-            ctx.durationTd[k] = 0.0f;
-            ctx.durationHat[k] = 1.0f;
-            ctx.prioOpt[k] = 0.0f;
-            ctx.vsTd[k] = 0.0f;
-            ctx.vsDot[k] = 0.0f;
-            ctx.vsScale[k] = 0.0f;
-            ctx.vsAuxScale[k] = 0.0f;
-        }
+        ctx.optRewardTd[k] = 0.0f;
+        ctx.durationTd[k] = 0.0f;
+        ctx.durationHat[k] = 1.0f;
+        ctx.prioOpt[k] = 0.0f;
+        ctx.vsTd[k] = 0.0f;
+        ctx.vsDot[k] = 0.0f;
+        ctx.vsScale[k] = 0.0f;
+        ctx.vsAuxScale[k] = 0.0f;
         return;
     }
-    if (j == 0u) {
+
         device const uint *actP = act_at(ctx, ctx.stateSlot);
         device const uint *actC = act_at(ctx, 1u - ctx.stateSlot);
         float rHat = 0.0f, rPrev = 0.0f, lRaw = 0.0f, lPrev = 0.0f;
@@ -853,6 +850,24 @@ static inline void oak_stage_plan_option(Ctx ctx, uint k, uint j,
             ctx.counters[OAK_CNT_PLAN_NF] += 1u;
         }
     }
+
+// All options planned in parallel: thread t owns option t (pure thread remap
+// of the former serial k-loop; the j threads only idled — bit-identical class).
+static inline void oak_stage_plan_all(Ctx ctx, uint tid) {
+    if (tid >= ctx.K) return;
+    device const float *prev = state_at(ctx, ctx.stateSlot);
+    device const float *curr = state_at(ctx, 1u - ctx.stateSlot);
+    oak_plan_one(ctx, tid, prev, curr);
+}
+
+static inline void oak_stage_plan_option(Ctx ctx, uint k, uint j,
+                                         threadgroup float *tgModelErr) {
+    if (j == 0u) {
+        device const float *prev = state_at(ctx, ctx.stateSlot);
+        device const float *curr = state_at(ctx, 1u - ctx.stateSlot);
+        oak_plan_one(ctx, k, prev, curr);
+    }
+    (void)tgModelErr;
 }
 
 kernel void oak_plan(device float *params [[buffer(0)]],
@@ -890,15 +905,19 @@ static inline void oak_learn_element(Ctx ctx, device const float *prev,
 
     if (gid < nValP) {
         if (OAK_ABLATE_GVF_PREDICTION) return;
+        // P-bank owns i fully (both terms; curr[i] is a dense-exact read) so the
+        // C-bank never touches the same weight — race-free by ownership.
         uint i = actP[gid];
         float w = ctx.valueW[i];
-        ctx.valueW[i] = safe_w(w, w + ctx.alpha[i] * ctx.td[0] * prev[i] * ctx.valueScale[0]);
+        float delta = ctx.td[0] * prev[i] + ctx.planTd[0] * curr[i];
+        ctx.valueW[i] = safe_w(w, w + ctx.alpha[i] * delta * ctx.valueScale[0]);
         return;
     }
     gid -= nValP;
     if (gid < nValC) {
         if (OAK_ABLATE_GVF_PREDICTION) return;
         uint i = actC[gid];
+        if (actP[i / (ctx.R / 32u)] == i) return;  // index-exact: owned by the P-bank
         float w = ctx.valueW[i];
         ctx.valueW[i] = safe_w(w, w + ctx.alpha[i] * ctx.planTd[0] * curr[i] * ctx.valueScale[0]);
         return;
@@ -912,7 +931,9 @@ static inline void oak_learn_element(Ctx ctx, device const float *prev,
         float cont = ctx.continuation[k];
         if (!isfinite(cont)) cont = 0.0f;
         float w = ctx.psi[k * ctx.R + i];
-        float g = (cont > 0.0f) ? (ctx.hDotPsi[k] * prev[i]) : (ctx.tdPsi[k] * prev[i]);
+        // P-bank owns i fully: the GTD2 grad including the -cont*curr correction.
+        float g = (cont > 0.0f) ? (ctx.hDotPsi[k] * (prev[i] - cont * curr[i]))
+                                : (ctx.tdPsi[k] * prev[i]);
         ctx.psi[k * ctx.R + i] = safe_w(w, w + ctx.alphaPsi[i] * rho * g * ctx.headScale[k]);
         return;
     }
@@ -920,6 +941,7 @@ static inline void oak_learn_element(Ctx ctx, device const float *prev,
     if (gid < nPsiC) {
         if (OAK_ABLATE_RR_SUBTASKS) return;
         uint k = gid / A, i = actC[gid % A];
+        if (actP[i / (ctx.R / 32u)] == i) return;  // index-exact: owned by the P-bank
         float rho = ctx.importance[k];
         if (!isfinite(rho) || rho < 0.0f) rho = 0.0f;
         float cont = ctx.continuation[k];
@@ -938,7 +960,8 @@ static inline void oak_learn_element(Ctx ctx, device const float *prev,
         float cont = ctx.continuation[k];
         if (!isfinite(cont)) cont = 0.0f;
         float w = ctx.vStop[k * ctx.R + i];
-        float g = (cont > 0.0f) ? (ctx.vsDot[k] * prev[i]) : (ctx.vsTd[k] * prev[i]);
+        float g = (cont > 0.0f) ? (ctx.vsDot[k] * (prev[i] - cont * curr[i]))
+                                : (ctx.vsTd[k] * prev[i]);
         ctx.vStop[k * ctx.R + i] = safe_w(w, w + ctx.alphaModel[i] * rho * g * ctx.vsScale[k]);
         return;
     }
@@ -946,6 +969,7 @@ static inline void oak_learn_element(Ctx ctx, device const float *prev,
     if (gid < nVSC) {
         if (OAK_ABLATE_OPTION_MODELS) return;
         uint k = gid / A, i = actC[gid % A];
+        if (actP[i / (ctx.R / 32u)] == i) return;  // index-exact: owned by the P-bank
         float rho = ctx.importance[k];
         if (!isfinite(rho) || rho < 0.0f) rho = 0.0f;
         float cont = ctx.continuation[k];
@@ -2011,10 +2035,7 @@ kernel void oak_megastep(device float *params [[buffer(0)]],
             oak_lane_fence();
             if (wideActive && (OAK_MEGA_STAGES & 2u) != 0u) {
                 Ctx ctx = make_ctx(params, stateArena, uintArena, scalars, stats, cfg, wideLane);
-                for (uint k = 0u; k < ctx.K; ++k) {
-                    simdgroup_barrier(mem_flags::mem_threadgroup);
-                    oak_stage_plan_option(ctx, k, slane, lG);
-                }
+                oak_stage_plan_all(ctx, slane);
             }
             oak_lane_fence();
             if (learnActive && (OAK_MEGA_STAGES & 4u) != 0u) {
