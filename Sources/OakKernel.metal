@@ -1317,18 +1317,15 @@ static inline void oak_learn_quads(Ctx ctx, device const float *prev,
             ctx.valueW[i] = safe_w(w, w + ctx.alpha[i] * delta * ctx.valueScale[0]);
         }
     }
-    // Dyna apply: last step's env-window backups arrive pre-accumulated as a
-    // dense per-feature sum (dynaAcc, built on the idle warps), so the agent
-    // window pays only a dense R-wide pass. Ownership stays (i % tw) — the
-    // same rule as the value banks above, so no feature ever has two writers.
+    // Dyna value-apply DELETED (2026-07-04): direct model->value regression
+    // at remembered states measured L-negative in every variant — v1 (R=24),
+    // A2 (min-pessimism bias, 1M IQM -0.341), A3 (unbiased symmetric target,
+    // -0.252) vs the -0.191 substrate. The lag between models tracking an
+    // improving policy and the learned values is a structural drag at long
+    // horizons. The window engine, ring, ensembles and backup stream stay as
+    // the decision-time-search substrate (Phase B): planning must influence
+    // BEHAVIOR at selection time, not overwrite learned values.
     if (!OAK_ABLATE_PLANNING && !OAK_ABLATE_GVF_PREDICTION) {
-        for (uint i = tid; i < ctx.R; i += tw) {
-            if (i % tw != tid) continue;
-            float acc = ctx.dynaAcc[i];
-            if (acc == 0.0f || !isfinite(acc)) continue;
-            float w = ctx.valueW[i];
-            ctx.valueW[i] = safe_w(w, w + ctx.alpha[i] * acc);
-        }
         if (tid == 0u) {
             // Search-control diagnostic: mean applied backup magnitude
             // (tracking EMA at the structural 1/R rate); replace publishes it.
@@ -2393,14 +2390,17 @@ static inline void oak_dyna_backups(Ctx ctx, uint k) {
         float body = r1 - rho * decode_duration(l1);
         float q1 = body + s1;
         float q2 = body + s2;
-        // Ensemble pessimism: parameter-free lower envelope of two
-        // structurally-decorrelated model copies (the Step 9 uncertainty gap
-        // that killed sponge-v1: error-trust alone passes untrained models).
-        float qB = min(q1, q2);
+        // Ensemble disagreement scales TRUST, never the TARGET: min(q1,q2)
+        // pessimism was a permanent downward-bias stream that compounded to
+        // Tier-L IQM -0.341 vs -0.191 substrate (uncertainty must gate, not
+        // shift). Symmetric target; |q1-q2| joins the contraction
+        // denominator in the same units as the backup delta (knob-free).
+        float qB = 0.5f * (q1 + q2);
+        float dis = fabs(q1 - q2);
         float d = (qB - vX) * trust;
-        // Per-backup contractive normalization (sponge-v1 form, verbatim —
-        // the never-diverge bound for each backup on its own).
-        float den = 1.0f + xmNorm + ctx.invR * d * d;
+        // Per-backup contractive normalization (sponge-v1 form + the
+        // disagreement term — the never-diverge bound for each backup).
+        float den = 1.0f + xmNorm + ctx.invR * d * d + (isfinite(dis) ? dis : 0.0f);
         d = (isfinite(d) && isfinite(den) && den > 0.0f) ? (d / den) : 0.0f;
         // Mass normalization: the planning stream's TOTAL per-step update
         // mass is one experience-step equivalent (d/nB summed over nB
