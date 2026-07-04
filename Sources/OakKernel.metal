@@ -249,6 +249,7 @@ inline Ctx make_ctx(device float *params, device float *stateArena, device uint 
     c.vsDot = stateArena + s; s += c.K;
     c.vsScale = stateArena + s; s += c.K;
     c.vsAuxScale = stateArena + s; s += c.K;
+    s += 3u;  // 16B-align nurStats/muRaw/polCoef (float4 access)
     // Interleaved candidate stats {mean, sm, util, utilSM}: one line per
     // candidate; access is sequential over n so coalescing is preserved.
     c.nurStats = stateArena + s; s += 4u * c.Rn;
