@@ -1908,10 +1908,21 @@ Evidence ledger (all B=1024, HalfCheetah-v4):
 - Keeper baseline health for context: gated-10 kills 17.1% of lanes by 100k and
   46.9% by 1M; its Tier-M IQM (−0.0060) is flattered by quiet entropy-collapsed
   lanes (87.6% at 1M).
-- mk2-D1 (20a0ea026, promotion bar vs mean): curation storm dead (featReinit
-  1,453 → ~1/lane/100k). Tier-M IQM −0.00739 (closest-ever to keeper), div 0.
-  Tier-L: NEVER-DIE ACHIEVED (divergence 1/1024, RMST 999,838/1M, NF ≡ 0) but
-  IQM −0.1908 vs keeper −0.0103 — the 1M-horizon decline is THE open frontier.
+- mk2-D1 (20a0ea026, promotion bar vs mean): Tier-M IQM −0.00739
+  (closest-ever to keeper), div 0. Tier-L: NEVER-DIE ACHIEVED (divergence
+  1/1024, RMST 999,838/1M, NF ≡ 0) but IQM −0.1908 vs keeper −0.0103.
+  **RECORD CORRECTED (2026-07-04 five-agent audit): D1's premise was wrong.**
+  The "curation storm" it killed (featReinit 1,453 → ~1/lane/100k) was the
+  IGNITION ENGINE: L3b sparse was the most ignition-rich config ever measured
+  (64 igniters, recentMax +0.54 at Tier-M); D1 froze representation search and
+  collapsed ignition 64 → 5 with 0% sustain-of-igniters. The median damage
+  the bar was built to stop was really banked-WTA replacement discontinuity
+  (each replacement flips a bank winner; ~13× dense-era damage) compounding
+  WTA blinding (≤3/17 obs channels visible/step) and spike-standardized
+  constructed features (~60% of actives). Tier-M IQM was blind to the whole
+  regression — igniters/sustain/best-lane/%positive are required gate
+  criteria from Mark III on. Full audit verdict: Mark III plan + the
+  oak-mark3-audit-verdict memory.
 - mk2-A / Phase A (dea5945b2→12a29d46e, compute-absorption program): wall-free
   Dyna sponge on the env-window idle warps (31 lead warps plan while warp 0
   steps physics; identical per-lane compute via rotated lane service), sparse

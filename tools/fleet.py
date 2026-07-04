@@ -283,6 +283,16 @@ def analyze_policy(run: dict, policy: str, window: int) -> dict:
                 "decayRatioQ": quartiles(
                     [p_["decayRatio"] for p_ in plast if math.isfinite(p_["decayRatio"])]),
             }
+            # Ignition metrics (Mark III audit law: Tier-M IQM alone is blind to
+            # walking-mode kills — the tail is a first-class gate axis).
+            # igniter := lane whose peak windowed rate exceeded 0.1/step;
+            # sustained := igniter still holding >= half its zenith at the end.
+            _ign = [p_ for p_ in plast if p_["zenithRate"] > 0.1]
+            _sus = [p_ for p_ in _ign
+                    if math.isfinite(p_["decayRatio"]) and p_["decayRatio"] >= 0.5]
+            out["igniters"] = len(_ign)
+            out["ignitersSustained"] = len(_sus)
+            out["igniterSustainFraction"] = (len(_sus) / len(_ign)) if _ign else None
             # "Staying power": fraction of lanes retaining >= half their zenith rate at the end
             # (the opposite of post-zenith decay/crash). A continuous online agent must STAY at rate.
             _dec = [p_["decayRatio"] for p_ in plast if math.isfinite(p_["decayRatio"])]
@@ -443,7 +453,8 @@ def cmd_report(args) -> int:
     out.write_text(json.dumps(summary, indent=2, sort_keys=True))
     return 0
 
-def gate_verdicts(keep_fin, cand_fin, keep_seeds, cand_seeds, n, horizon, args, label):
+def gate_verdicts(keep_fin, cand_fin, keep_seeds, cand_seeds, n, horizon, args, label,
+                  keep_run=None, cand_run=None):
     delta = args.delta if args.delta is not None else 0.64 / np.sqrt(n)
     verdicts: list[tuple[str, bool, str]] = []
 
@@ -504,6 +515,48 @@ def gate_verdicts(keep_fin, cand_fin, keep_seeds, cand_seeds, n, horizon, args, 
     verdicts.append((
         "nfPrevalence", not nf_over,
         "; ".join(nf_parts) + (f" OVER={nf_over}" if nf_over else "") + f" δ={delta:.4f}"))
+
+    # Ignition / walking-mode tail (Mark III audit law: Tier-M IQM alone approved a
+    # mode-kill — the tail is a first-class gate axis). Always reported; BLOCKING
+    # only when explicit bars are passed (--min-igniters/--min-best/--min-positive).
+    def _ign(run_, seeds_):
+        run_lanes = run_["lanes"]
+        pol = args.policy
+        window = max(horizon // 5, 1)
+        ign = sus = 0
+        for s_ in seeds_:
+            pl = plasticity(run_lanes[(pol, s_)], window)
+            if pl and pl["zenithRate"] > 0.1:
+                ign += 1
+                if math.isfinite(pl["decayRatio"]) and pl["decayRatio"] >= 0.5:
+                    sus += 1
+        return ign, sus
+    try:
+        if keep_run is None or cand_run is None:
+            raise ValueError("run data not provided")
+        k_ign, k_sus = _ign(keep_run, keep_seeds)
+        c_ign, c_sus = _ign(cand_run, cand_seeds)
+        c_best = float(np.max(c_del))
+        c_pos = float((c_del > 0).mean())
+        bars_given = any(v is not None for v in
+                         (args.min_igniters, args.min_best, args.min_positive))
+        ign_ok = True
+        if args.min_igniters is not None:
+            ign_ok &= c_ign >= args.min_igniters
+        if args.min_best is not None:
+            ign_ok &= c_best >= args.min_best
+        if args.min_positive is not None:
+            ign_ok &= c_pos >= args.min_positive
+        detail = (f"igniters keeper={k_ign}(sus {k_sus}) cand={c_ign}(sus {c_sus}); "
+                  f"best={c_best:+.4f} pos={c_pos:.1%}")
+        if bars_given:
+            detail += (f" bars[ign>={args.min_igniters} best>={args.min_best} "
+                       f"pos>={args.min_positive}]")
+            verdicts.append(("ignitionTail", ign_ok, detail))
+        else:
+            print(f"  [info] ignitionTail  {detail}")
+    except Exception as e:  # tail metrics must never break the core gate
+        print(f"  [info] ignitionTail  (unavailable: {e})")
 
     hdr = f"fleet gate: N={n} horizon={horizon} policy={args.policy} boot={args.boot}"
     if label:
@@ -620,7 +673,8 @@ def cmd_gate(args) -> int:
             return 2
     if args.equivalence:
         return equivalence_gate(keep_fin, cand_fin, keep_seeds, cand_seeds, n, horizon, args)
-    ok = gate_verdicts(keep_fin, cand_fin, keep_seeds, cand_seeds, n, horizon, args, None)
+    ok = gate_verdicts(keep_fin, cand_fin, keep_seeds, cand_seeds, n, horizon, args, None,
+                       keep_run=keep_run, cand_run=cand_run)
     print("PROMOTE" if ok else "REJECT")
     return 0 if ok else 1
 
@@ -748,6 +802,12 @@ def main() -> int:
     gp.add_argument("--rate-rel", type=float, default=0.05)
     gp.add_argument("--rmst-rel", type=float, default=0.05)
     gp.add_argument("--boot", type=int, default=10_000)
+    gp.add_argument("--min-igniters", type=int, default=None,
+                    help="blocking ignition bar: candidate lanes with peak windowed rate > 0.1")
+    gp.add_argument("--min-best", type=float, default=None,
+                    help="blocking bar: candidate best-lane delivered rate")
+    gp.add_argument("--min-positive", type=float, default=None,
+                    help="blocking bar: candidate positive-lane fraction (0..1)")
     gp.add_argument("--equivalence", action="store_true",
                     help="unpaired TOST instrument-swap gate (see module docstring)")
 
