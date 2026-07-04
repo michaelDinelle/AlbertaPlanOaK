@@ -421,6 +421,11 @@ func metricsRoot() -> URL {
     var envCoopVal = envCoop
     megaConstants.setConstantValue(&envCoopVal, type: .bool, index: 27)
     if let eng = engine { eng.applyShapeConstants(megaConstants) }
+    if e["OAK_PROBE_FTZ"] == "1" {
+      var b = true
+      megaConstants.setConstantValue(&b, type: .bool, index: 31)
+      fputs("OAK_PROBE_FTZ=1: timing instrument, trajectories are garbage\n", stderr)
+    }
     if e["OAK_PROBE_FIXEDIDX"] == "1" {
       var b = true
       megaConstants.setConstantValue(&b, type: .bool, index: 30)

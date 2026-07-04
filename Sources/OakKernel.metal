@@ -50,6 +50,16 @@ inline uint act_of(device const uint *act, uint a) {
     return OAK_PROBE_FIXEDIDX ? a : act[a];
 }
 
+// Timing probe (trajectories are garbage): flush sub-normal magnitudes on learn
+// writes to convict/acquit fp32 denormal execution cost as the SPS settling
+// transient (weights/aux decay toward underflow by construction).
+constant bool OAK_PROBE_FTZ_FC [[function_constant(31)]];
+constant bool OAK_PROBE_FTZ = is_function_constant_defined(OAK_PROBE_FTZ_FC)
+    ? OAK_PROBE_FTZ_FC : false;
+inline float ftz_probe(float w) {
+    return (OAK_PROBE_FTZ && fabs(w) < 1.1754944e-38f) ? 0.0f : w;
+}
+
 constant uint OAK_MEGA_STAGE_MASK [[function_constant(25)]];
 constant uint OAK_MEGA_STAGES = is_function_constant_defined(OAK_MEGA_STAGE_MASK)
     ? OAK_MEGA_STAGE_MASK : 0xffffffffu;
@@ -96,7 +106,8 @@ struct KernelStats {
     float learningMature;
 };
 
-inline float safe_w(float old_w, float new_w) { return isfinite(new_w) ? new_w : old_w; }
+inline float safe_w_raw(float old_w, float new_w) { return isfinite(new_w) ? new_w : old_w; }
+#define safe_w(o, n) ftz_probe(safe_w_raw((o), (n)))
 
 inline float track_rate(uint step, uint cap) {
     return max(1.0f / (float(step) + 1.0f), 1.0f / float(max(cap, 1u)));
