@@ -1719,6 +1719,28 @@ GPU-physics derisk probes (2026-06-11, M4 Max):
   published numbers in AGENTS.md "The SOTA bar" are 1000-step-episode evals).
   F4 equivalence gates run with episodeLen=0 to match the keeper.
 
+**SPS program, E2′ overlap falsification (2026-07-04, B=1024×5k, sane
+deterministic reference)**: dispatch-level split pipelines (agent+sample mask
+63 / env mask 64 as per-step dispatch pairs, dual queues, register budgets
+decoupled) measured legacy fused 10.16s/504K vs split 15.6s/328K (fences,
+env@32-wide) and 18.5s/277K (single-encoder memoryBarrier); legacy at 1
+CB/step gives the per-step dispatch floor: 12.36s ⇒ ~0.44 ms/step. Two
+dispatches/step + drains cost more than the maximum sum→max overlap gain, so
+E2′ is REJECTED — the hot-env ceiling (776K agg) is a machine-work bound that
+scheduling cannot raise; only cheaper env math can. The split's *logic* was
+proven exact before rejection: under safe-math physics the 63/64 split is
+bitwise-identical to fused; the residual ULP-scale obs-only divergence was
+fast-math physics compiling differently per pipeline (FP-reorder instrument
+class — any future multi-pipeline design of the fast-math env needs an
+M-8192 certificate, not a bitwise proof). Standing hazard lesson: with
+`hazardTrackingModeUntracked` buffers, consecutive command buffers on one
+queue may overlap execution — 2-in-flight chunks raced (64/64 lanes
+non-reproducible) and poisoned every measurement on that tree; fleet buffers
+are tracked again and the chunk loop carries an explicit MTLEvent chain as
+defense-in-depth. Forensic instrument kept: `OAK_DEBUG_RAW=<dir>` raw arena
+dumps at hash-dump steps (offset→arena-region diff localized the divergence
+to obs[] ULP noise in one shot).
+
 **First deep-horizon decay run** (`.oak-benchmarks/xl-lite-decay-3m-20260611`,
 B=128 × 3M, 82 min at 604/lane sustained):
 
