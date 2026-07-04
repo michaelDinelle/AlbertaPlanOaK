@@ -140,7 +140,7 @@ struct Ctx {
     device float *hDotPsi, *psiAuxScale, *psiRho;
     device float *vsTd, *vsDot, *vsScale, *vsAuxScale;
     device float *nurStats;
-    device float *muRaw, *polCoef;
+    device float *muRaw, *polCoef, *optUseByFeat, *lcbScr;
     device uint *counters, *optFeature, *featureAge, *optAge;
     device uint *featureParentA, *featureParentB, *featureKind, *featureBirthCount;
     device uint *selectedOption, *keyboardOrigin;
@@ -255,6 +255,8 @@ inline Ctx make_ctx(device float *params, device float *stateArena, device uint 
     c.nurStats = stateArena + s; s += 4u * c.Rn;
     c.muRaw = stateArena + s; s += c.K * c.D;
     c.polCoef = stateArena + s; s += c.K * c.D;
+    c.optUseByFeat = stateArena + s; s += c.R;
+    c.lcbScr = stateArena + s; s += c.Rn;
 
     uint u = 0u;
     c.counters = uintArena + u; u += 7u;
@@ -1440,19 +1442,40 @@ static inline void oak_stage_replace(Ctx ctx, uint tid, uint tgW,
                                      : a * (b - a);
             uint age = ctx.nurAge[n];
             float rate = max(1.0f / (float(age) + 1.0f), ctx.invR);
-            ctx.nurStats[(n) * 4u] += rate * (raw - ctx.nurStats[(n) * 4u]);
-            ctx.nurStats[(n) * 4u + 1u] += rate * (raw * raw - ctx.nurStats[(n) * 4u + 1u]);
-            float var = max(ctx.nurStats[(n) * 4u + 1u] - ctx.nurStats[(n) * 4u] * ctx.nurStats[(n) * 4u], 0.0f);
+            // One aligned float4 RMW per candidate ({mean, sm, util, utilSM}).
+            device float4 *st4 = (device float4 *)&ctx.nurStats[(n) * 4u];
+            float4 st = *st4;
+            st.x += rate * (raw - st.x);
+            st.y += rate * (raw * raw - st.y);
+            float var = max(st.y - st.x * st.x, 0.0f);
             float ridge = 1.0f / (float(age) + 1.0f);
-            float xt = (raw - ctx.nurStats[(n) * 4u]) * rsqrt(var + ridge);
+            float xt = (raw - st.x) * rsqrt(var + ridge);
             float sig = fabs(ctx.td[0] * xt) + fabs(ctx.planTd[0] * xt);
             if (isfinite(sig)) {
-                ctx.nurStats[(n) * 4u + 2u] += invT * (sig - ctx.nurStats[(n) * 4u + 2u]);
-                ctx.nurStats[(n) * 4u + 3u] += invT * (sig * sig - ctx.nurStats[(n) * 4u + 3u]);
+                st.z += invT * (sig - st.z);
+                st.w += invT * (sig * sig - st.w);
             }
+            *st4 = st;
             if (age < 0xffffffffu) ctx.nurAge[n] = age + 1u;
         }
     }
+    if (!OAK_ABLATE_GENERATE_AND_TEST) {
+        // Parallel precompute for the (previously serial) curation scans:
+        // per-candidate LCB and zeroed per-feature option-use scatter targets.
+        for (uint n = tid; n < ctx.Rn; n += tgW) {
+            float uN = ctx.nurStats[(n) * 4u + 2u];
+            float lcb = -FLT_MAX;
+            if (ctx.nurAge[n] >= ctx.R && isfinite(uN)) {
+                float varU = max(ctx.nurStats[(n) * 4u + 3u] - uN * uN, 0.0f);
+                float rateU = max(1.0f / (float(ctx.nurAge[n]) + 1.0f), ctx.invR);
+                float v = uN - sqrt(varU * rateU);
+                if (isfinite(v)) lcb = v;
+            }
+            ctx.lcbScr[n] = lcb;
+        }
+        for (uint i = tid; i < ctx.R; i += tgW) ctx.optUseByFeat[i] = 0.0f;
+    }
+    simdgroup_barrier(mem_flags::mem_device);
     {
         // Rotating-stripe explosion scan: covers the whole param arena every 32
         // steps, so death certificates are dated in-kernel (within 32 steps)
@@ -1520,15 +1543,12 @@ static inline void oak_stage_replace(Ctx ctx, uint tid, uint tgW,
     ctx.stats->searchControlUseMean = searchUse * invK;
 
     uint candidateStart = ctx.anchorCount;
-    // Register-hoisted per-option (feature, use) pairs: the scan's inner loop
-    // previously re-read utilOpt/keyboard/optFeature from device 157x32 times
-    // per step on a single thread.
-    uint ofeat[32];
-    float ouse[32];
-    for (uint k = 0u; k < ctx.K && k < 32u; ++k) {
-        ofeat[k] = ctx.optFeature[k] % ctx.R;
-        ouse[k] = ctx.utilOpt[k]
+    // Scatter per-option use onto features once (K ops) — replaces the 157x32
+    // register scan inside the serial eligibility loop.
+    for (uint k = 0u; k < ctx.K; ++k) {
+        float use = ctx.utilOpt[k]
             + (OAK_ABLATE_SEARCH_TO_GENERATE_TEST ? 0.0f : fabs(ctx.keyboard[k]));
+        if (isfinite(use)) ctx.optUseByFeat[ctx.optFeature[k] % ctx.R] += use;
     }
     uint eligible = 0u, worst = candidateStart;
     bool haveWorst = false;
@@ -1543,11 +1563,7 @@ static inline void oak_stage_replace(Ctx ctx, uint tid, uint tgW,
             if (!isfinite(util)) util = 0.0f;
 	            float red = fabs(curr[i] * curr[pa]);
             if (!isfinite(red)) red = 0.0f;
-            float optionUse = 0.0f;
-            for (uint k = 0u; k < ctx.K; ++k) {
-                if (ofeat[k] != i) continue;
-                if (isfinite(ouse[k])) optionUse += ouse[k];
-            }
+            float optionUse = ctx.optUseByFeat[i];
 		            float downstreamUse = optionUse + fabs(ctx.valueW[i]);
             if (!isfinite(downstreamUse)) downstreamUse = 0.0f;
             eligibleUtilSum += util;
@@ -1614,17 +1630,10 @@ static inline void oak_stage_replace(Ctx ctx, uint tid, uint tgW,
     // of standardization/utility evidence.
     uint bestN = 0xffffffffu;
     float bestNUtil = -FLT_MAX;
+    // LCB per candidate precomputed in parallel; serial pass is exact argmax.
     for (uint n = 0u; n < ctx.Rn; ++n) {
-        if (ctx.nurAge[n] < ctx.R) continue;
-        float uN = ctx.nurStats[(n) * 4u + 2u];
-        if (!isfinite(uN)) continue;
-        // Lower-confidence-bound promotion: penalize estimate noise so a larger
-        // nursery buys selection RELIABILITY, not a sharper winner's curse
-        // (the failure the first Sutton test exposed). se = sqrt(var * rate).
-        float varU = max(ctx.nurStats[(n) * 4u + 3u] - uN * uN, 0.0f);
-        float rateU = max(1.0f / (float(ctx.nurAge[n]) + 1.0f), ctx.invR);
-        float lcb = uN - sqrt(varU * rateU);
-        if (isfinite(lcb) && lcb > bestNUtil) { bestNUtil = lcb; bestN = n; }
+        float lcb = ctx.lcbScr[n];
+        if (lcb > bestNUtil) { bestNUtil = lcb; bestN = n; }
     }
     // Promotion bar vs the MEAN eligible total utility, not the graveyard's
     // worst: with 157 incumbents the worst is always a near-zero slot, so any

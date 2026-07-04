@@ -171,6 +171,8 @@ struct Arena {
     _ = take(4 * rn)  // nursery mean/SM/util/utilSM
     _ = take(k * d)  // muRaw (emit blend scratch)
     _ = take(k * d)  // polCoef (actor coefficient hoist)
+    _ = take(r)  // optUseByFeat (curation scan scatter)
+    _ = take(rn)  // lcbScr (parallel LCB precompute)
     total = s
   }
 }
