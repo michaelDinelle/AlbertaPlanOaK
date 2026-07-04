@@ -2407,6 +2407,14 @@ kernel void oak_megastep(device float *params [[buffer(0)]],
                                     lanes, laneSeeds, ecfg, recordSlot, recordBuf, packedLane);
             }
         }
+        if ((OAK_MEGA_STAGES & 8u) == 0u && ecfg.policyMode == 0u && wideActive && slane == 0u) {
+            // Timing-instrument fallback: replace owns the step/slot advance;
+            // with it masked, advance here so per-stage curves keep live
+            // dynamics. Compile-time dead in normal builds.
+            Ctx ctx = make_ctx(params, stateArena, uintArena, scalars, stats, cfg, wideLane);
+            ctx.scalars->stateSlot = 1u - ctx.stateSlot;
+            ctx.scalars->stepCount = ctx.stepCount + 1u;
+        }
         threadgroup_barrier(mem_flags::mem_device);
     }
 }
