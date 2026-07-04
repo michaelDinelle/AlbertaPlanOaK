@@ -1389,10 +1389,17 @@ static inline void oak_stage_replace(Ctx ctx, uint tid, uint tgW,
         float lcb = uN - sqrt(varU * rateU);
         if (isfinite(lcb) && lcb > bestNUtil) { bestNUtil = lcb; bestN = n; }
     }
+    // Promotion bar vs the MEAN eligible total utility, not the graveyard's
+    // worst: with 157 incumbents the worst is always a near-zero slot, so any
+    // mature candidate cleared the old bar — a promotion every ~70 steps whose
+    // bank-wide resets ground knowledge faster than learning rebuilt it (the
+    // median-decline driver) AND ramped serial curation work (the SPS decay:
+    // 376K->260K windowed; G&T-ablated probe: flat). The fabric tear is only
+    // worth an expected top-half contributor.
     bool doReplace = !OAK_ABLATE_GENERATE_AND_TEST
         && structurallyReplaceable && worst < ctx.R
         && bestN != 0xffffffffu
-        && bestNUtil > worstUtil + worstDownstream;
+        && bestNUtil > meanEligibleUtil + meanEligibleDownstream;
     if (doReplace && worst < ctx.R) {
         uint pa = ctx.nurParentA[bestN] % ctx.R;
         uint pb = ctx.nurParentB[bestN] % ctx.R;
