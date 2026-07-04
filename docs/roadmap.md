@@ -1908,3 +1908,38 @@ Evidence ledger (all B=1024, HalfCheetah-v4):
 - Keeper baseline health for context: gated-10 kills 17.1% of lanes by 100k and
   46.9% by 1M; its Tier-M IQM (−0.0060) is flattered by quiet entropy-collapsed
   lanes (87.6% at 1M).
+- mk2-D1 (20a0ea026, promotion bar vs mean): curation storm dead (featReinit
+  1,453 → ~1/lane/100k). Tier-M IQM −0.00739 (closest-ever to keeper), div 0.
+  Tier-L: NEVER-DIE ACHIEVED (divergence 1/1024, RMST 999,838/1M, NF ≡ 0) but
+  IQM −0.1908 vs keeper −0.0103 — the 1M-horizon decline is THE open frontier.
+- mk2-A / Phase A (dea5945b2→12a29d46e, compute-absorption program): wall-free
+  Dyna sponge on the env-window idle warps (31 lead warps plan while warp 0
+  steps physics; identical per-lane compute via rotated lane service), sparse
+  R-slot ring of active-set tuples, vStop2 stopping-value ensemble
+  (shifted-diag init, semi-gradient, window-updated, row-coherent writes),
+  WTA-bank-structured conflict-free scatter, one absorption knob
+  (OAK_SUTTON_MULT = backups coverage + nursery). SPS 490K (−2.3%, at bar).
+  Hard lessons (archived): (1) ALL writers of one head must share one
+  thread-ownership rule — the value banks (slot-indexed) vs dyna apply
+  (feature-owned) double-wrote features in both the active set and a ring
+  tuple; onset exactly at ring-fill; caught by the 3-run self-repro law.
+  (2) MASS: 32 full-alpha backups/step out-mass real experience 32:1 and
+  erase value (Tier-M IQM −0.4275); normalize the planning stream to ONE
+  experience-step equivalent (d·invK/mult) — the Sutton knob then buys
+  coverage, not mass. (3) Pessimism must gate TRUST, not shift the TARGET:
+  min(q1,q2) = permanent downward-bias stream → 1M IQM −0.341; symmetric
+  target + |q1−q2| in the contraction denominator recovered to −0.252
+  (PROMOTE+IMPROVEMENT over the biased form). (4) The residual −0.06 drag vs
+  the −0.191 substrate is TARGET LAG — one-step model compositions at
+  remembered states trail an improving policy's learned values; error-trust
+  cannot see value-space lag. Direct model→value regression is L-negative in
+  every variant (v1 R=24, A2, A3) — REJECTED as a family. VERDICT SHIPPED
+  (mk2-A4): value-apply deleted; behavior bitwise ≡ the D1 substrate; the
+  window engine + ring + ensemble ride as the decision-time-search substrate
+  (Phase B) — planning must influence behavior at SELECTION time.
+- SUTTON TEST, FIRST PASS (mk2-A-sponge2, Tier-M paired): the 2× absorption
+  arm was non-inferior on all four criteria and directionally better (IQM
+  −0.00691 vs −0.00741; also PROMOTEs over the D1 substrate) — the first
+  candidate whose population delivery improves with doubled compute. The
+  absorption machinery (window engine + coverage knob) is what Phase B
+  consumes.
