@@ -119,8 +119,6 @@ struct Ctx {
     device float *headScale, *modelScale, *valueScale, *xNormPrev;
     device float *hDotPsi, *psiAuxScale, *psiRho;
     device float *nurMean, *nurSM, *nurUtil, *nurUtilSM;
-    device float *ring, *dynaTd;
-    device uint *dynaSlot;
     device uint *counters, *optFeature, *featureAge, *optAge;
     device uint *featureParentA, *featureParentB, *featureKind, *featureBirthCount;
     device uint *selectedOption, *keyboardOrigin;
@@ -228,8 +226,6 @@ inline Ctx make_ctx(device float *params, device float *stateArena, device uint 
     c.nurSM = stateArena + s; s += c.Rn;
     c.nurUtil = stateArena + s; s += c.Rn;
     c.nurUtilSM = stateArena + s; s += c.Rn;
-    c.ring = stateArena + s; s += 32u * c.R * c.R;
-    c.dynaTd = stateArena + s; s += c.K;
 
     uint u = 0u;
     c.counters = uintArena + u; u += 7u;
@@ -248,8 +244,7 @@ inline Ctx make_ctx(device float *params, device float *stateArena, device uint 
     c.nurParentA = uintArena + u; u += c.Rn;
     c.nurParentB = uintArena + u; u += c.Rn;
     c.nurKind = uintArena + u; u += c.Rn;
-    c.nurAge = uintArena + u; u += c.Rn;
-    c.dynaSlot = uintArena + u;
+    c.nurAge = uintArena + u;
     c.scalars = scalars; c.stats = stats;
     return c;
 }
@@ -820,48 +815,6 @@ static inline void oak_stage_plan_option(Ctx ctx, uint k, uint j,
             ctx.counters[OAK_CNT_PLAN_NF] += 1u;
         }
     }
-    simdgroup_barrier(mem_flags::mem_threadgroup);
-    if (!OAK_ABLATE_PLANNING) {
-        // Dyna sponge (per-X): option k performs one backup per step at a
-        // remembered state (stratified ring coverage). The signed target
-        // q_k(x_m) - v(x_m) is trust-shrunk by model error and normalized
-        // implicitly per backup, so each backup is contractive on its own.
-        uint M = 32u * ctx.R;
-        uint slot = (ctx.stepCount + (k * M) / max(ctx.K, 1u)) % M;
-        device const float *xm = ctx.ring + slot * ctx.R;
-        float nHatm = 0.0f;
-        if (j < ctx.R) {
-            uint base = k * ctx.R * ctx.R + j * ctx.R;
-            for (uint i = 0u; i < ctx.R; ++i) nHatm = fma(ctx.optTransition[base + i], xm[i], nHatm);
-            tgModelErr[j] = isfinite(nHatm) ? ctx.valueW[j] * nHatm : 0.0f;
-        }
-        simdgroup_barrier(mem_flags::mem_threadgroup);
-        if (j == 0u) {
-            float vModelm = 0.0f, rHatm = 0.0f, lRawm = 0.0f, vXm = 0.0f, xmNorm = 0.0f;
-            for (uint i = 0u; i < ctx.R; ++i) {
-                vModelm += tgModelErr[i];
-                uint idx = k * ctx.R + i;
-                rHatm = fma(ctx.optReward[idx], xm[i], rHatm);
-                lRawm = fma(ctx.optDuration[idx], xm[i], lRawm);
-                vXm = fma(ctx.valueW[i], xm[i], vXm);
-                float ax = ctx.alpha[i];
-                if (isfinite(ax) && ax > 0.0f) xmNorm = fma(ax * xm[i], xm[i], xmNorm);
-            }
-            float durm = decode_duration(lRawm);
-            float q = rHatm - ctx.scalars->rho * durm + vModelm;
-            float dm = q - vXm;
-            float err = ctx.prioOpt[k];
-            float trust = (isfinite(err) && err >= 0.0f) ? (1.0f / (1.0f + err)) : 0.0f;
-            dm *= trust;
-            float denom = 1.0f + xmNorm + ctx.invR * dm * dm;
-            dm = (isfinite(dm) && isfinite(denom) && denom > 0.0f) ? (dm / denom) : 0.0f;
-            ctx.dynaTd[k] = dm;
-            ctx.dynaSlot[k] = slot;
-        }
-    } else if (j == 0u) {
-        ctx.dynaTd[k] = 0.0f;
-        ctx.dynaSlot[k] = 0u;
-    }
 }
 
 kernel void oak_plan(device float *params [[buffer(0)]],
@@ -899,15 +852,7 @@ static inline void oak_learn_element(Ctx ctx, device const float *prev,
         float w = ctx.valueW[i];
         float delta = ctx.td[0] * prev[i] + ctx.planTd[0] * curr[i];
         float scale = ctx.valueScale[0];
-        // Dyna backups: each option's pre-normalized signed backup, applied
-        // along its remembered state's features.
-        float dyna = 0.0f;
-        for (uint k = 0u; k < ctx.K; ++k) {
-            float dm = ctx.dynaTd[k];
-            if (dm == 0.0f || !isfinite(dm)) continue;
-            dyna = fma(dm, ctx.ring[ctx.dynaSlot[k] * ctx.R + i], dyna);
-        }
-        ctx.valueW[i] = safe_w(w, w + ctx.alpha[i] * (delta * scale + dyna));
+        ctx.valueW[i] = safe_w(w, w + ctx.alpha[i] * delta * scale);
         return;
     }
     gid -= nVal;
@@ -1059,12 +1004,6 @@ static inline void oak_stage_replace(Ctx ctx, uint tid, uint tgW,
     device const float *prev = state_at(ctx, ctx.stateSlot);
     for (uint i = tid; i < ctx.R; i += tgW) tgCurrState[i] = curr[i];
     simdgroup_barrier(mem_flags::mem_threadgroup);
-    {
-        // Dyna ring: remember the feature vector (32*R slots, ~74KB/lane).
-        uint slot = ctx.stepCount % (32u * ctx.R);
-        device float *dst = ctx.ring + slot * ctx.R;
-        for (uint i = tid; i < ctx.R; i += tgW) dst[i] = curr[i];
-    }
     float invT = track_rate(ctx.stepCount, ctx.R);
     for (uint i = tid; i < ctx.R; i += tgW) {
         float psiSignal = 0.0f, modelSignal = 0.0f, keyboardSignal = 0.0f;
