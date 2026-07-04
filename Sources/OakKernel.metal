@@ -140,7 +140,7 @@ struct Ctx {
     device float *hDotPsi, *psiAuxScale, *psiRho;
     device float *vsTd, *vsDot, *vsScale, *vsAuxScale;
     device float *nurStats;
-    device float *muRaw, *polCoef, *optUseByFeat, *lcbScr;
+    device float *muRaw, *polCoef, *optUseByFeat, *lcbScr, *eligScr;
     device uint *counters, *optFeature, *featureAge, *optAge;
     device uint *featureParentA, *featureParentB, *featureKind, *featureBirthCount;
     device uint *selectedOption, *keyboardOrigin;
@@ -257,6 +257,9 @@ inline Ctx make_ctx(device float *params, device float *stateArena, device uint 
     c.polCoef = stateArena + s; s += c.K * c.D;
     c.optUseByFeat = stateArena + s; s += c.R;
     c.lcbScr = stateArena + s; s += c.Rn;
+    s += 3u;  // 16B-align eligScr (float4 per slot)
+    s &= ~3u;
+    c.eligScr = stateArena + s; s += 4u * c.R;
 
     uint u = 0u;
     c.counters = uintArena + u; u += 7u;
@@ -1460,6 +1463,15 @@ static inline void oak_stage_replace(Ctx ctx, uint tid, uint tgW,
         }
     }
     if (!OAK_ABLATE_GENERATE_AND_TEST) {
+        if (tid == 0u) {
+            // K-scatter of option use (serial: options may share a feature).
+            for (uint i = 0u; i < ctx.R; ++i) ctx.optUseByFeat[i] = 0.0f;
+            for (uint k = 0u; k < ctx.K; ++k) {
+                float use = ctx.utilOpt[k]
+                    + (OAK_ABLATE_SEARCH_TO_GENERATE_TEST ? 0.0f : fabs(ctx.keyboard[k]));
+                if (isfinite(use)) ctx.optUseByFeat[ctx.optFeature[k] % ctx.R] += use;
+            }
+        }
         // Parallel precompute for the (previously serial) curation scans:
         // per-candidate LCB and zeroed per-feature option-use scatter targets.
         for (uint n = tid; n < ctx.Rn; n += tgW) {
@@ -1473,7 +1485,25 @@ static inline void oak_stage_replace(Ctx ctx, uint tid, uint tgW,
             }
             ctx.lcbScr[n] = lcb;
         }
-        for (uint i = tid; i < ctx.R; i += tgW) ctx.optUseByFeat[i] = 0.0f;
+    }
+    simdgroup_barrier(mem_flags::mem_device);
+    if (!OAK_ABLATE_GENERATE_AND_TEST) {
+        // Per-slot eligibility tuple {util, red, downstreamUse, eligible}: the
+        // serial pass becomes a constant-size compare/accumulate (no growth —
+        // this loop body was the residual SPS settling transient).
+        device const float *currS = state_at(ctx, 1u - ctx.stateSlot);
+        for (uint i = ctx.anchorCount + tid; i < ctx.R; i += tgW) {
+            device float4 *e4 = (device float4 *)&ctx.eligScr[i * 4u];
+            if (ctx.featureAge[i] < ctx.R) { *e4 = float4(0.0f, 0.0f, 0.0f, 0.0f); continue; }
+            uint pa = ctx.featureParentA[i] % ctx.R;
+            float util = ctx.utilFeat[i];
+            if (!isfinite(util)) util = 0.0f;
+            float red = fabs(currS[i] * currS[pa]);
+            if (!isfinite(red)) red = 0.0f;
+            float downstreamUse = ctx.optUseByFeat[i] + fabs(ctx.valueW[i]);
+            if (!isfinite(downstreamUse)) downstreamUse = 0.0f;
+            *e4 = float4(util, red, downstreamUse, 1.0f);
+        }
     }
     simdgroup_barrier(mem_flags::mem_device);
     {
@@ -1543,29 +1573,16 @@ static inline void oak_stage_replace(Ctx ctx, uint tid, uint tgW,
     ctx.stats->searchControlUseMean = searchUse * invK;
 
     uint candidateStart = ctx.anchorCount;
-    // Scatter per-option use onto features once (K ops) — replaces the 157x32
-    // register scan inside the serial eligibility loop.
-    for (uint k = 0u; k < ctx.K; ++k) {
-        float use = ctx.utilOpt[k]
-            + (OAK_ABLATE_SEARCH_TO_GENERATE_TEST ? 0.0f : fabs(ctx.keyboard[k]));
-        if (isfinite(use)) ctx.optUseByFeat[ctx.optFeature[k] % ctx.R] += use;
-    }
     uint eligible = 0u, worst = candidateStart;
     bool haveWorst = false;
     float worstUtil = 0.0f, worstRed = 0.0f, worstDownstream = 0.0f;
     uint worstAge = 0u;
     float eligibleUtilSum = 0.0f, eligibleRedSum = 0.0f, eligibleDownstreamSum = 0.0f;
     for (uint i = candidateStart; i < ctx.R; ++i) {
-        if (ctx.featureAge[i] >= ctx.R) {
+        float4 e = *(device const float4 *)&ctx.eligScr[i * 4u];
+        if (e.w > 0.0f) {
             eligible += 1u;
-            uint pa = ctx.featureParentA[i] % ctx.R;
-            float util = ctx.utilFeat[i];
-            if (!isfinite(util)) util = 0.0f;
-	            float red = fabs(curr[i] * curr[pa]);
-            if (!isfinite(red)) red = 0.0f;
-            float optionUse = ctx.optUseByFeat[i];
-		            float downstreamUse = optionUse + fabs(ctx.valueW[i]);
-            if (!isfinite(downstreamUse)) downstreamUse = 0.0f;
+            float util = e.x, red = e.y, downstreamUse = e.z;
             eligibleUtilSum += util;
             eligibleRedSum += red;
             eligibleDownstreamSum += downstreamUse;

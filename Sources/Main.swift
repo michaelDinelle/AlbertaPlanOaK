@@ -173,6 +173,8 @@ struct Arena {
     _ = take(k * d)  // polCoef (actor coefficient hoist)
     _ = take(r)  // optUseByFeat (curation scan scatter)
     _ = take(rn)  // lcbScr (parallel LCB precompute)
+    _ = take(3)  // align pad
+    _ = take(4 * r)  // eligScr (parallel eligibility tuples)
     total = s
   }
 }
