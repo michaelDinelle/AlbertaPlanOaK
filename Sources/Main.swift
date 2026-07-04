@@ -123,30 +123,52 @@ func sha256Hex(_ buf: UnsafeRawBufferPointer) -> String {
 }
 
 struct Arena {
-  let obs, policy, options, action, credit, imp, reward, utilOpt, bonus, alpha, beta, alphaPsi,
-    betaPsi, alphaModel, betaModel, total: Int
+  let obs, policy, options, utilOpt, alpha, beta, alphaPsi, betaPsi, alphaModel, betaModel,
+    total: Int
   static func traces(_ o: Int) -> Int {
     Int(log2(Double(max(o, 1)))) + 1
   }
   static func input(_ o: Int, _ d: Int) -> Int { traces(o) * max(o, 1) + max(d, 0) + 2 }
-  init(_ o: Int, _ r: Int, _ d: Int, _ rn: Int) {
-    let traceExtra = max(Self.traces(o) - 1, 0)
-    obs = 0
-    policy = 3 * o + 2 * r
-    action = policy + d
-    credit = action + d
-    options = credit + r * d
-    imp = options + r * d
-    reward = imp + r
-    utilOpt = reward + 3 + 2 * r
-    bonus = utilOpt + r
-    alpha = bonus + 3 * r
-    beta = alpha + r
-    alphaPsi = alpha + 4 * r
-    betaPsi = alpha + 5 * r
-    alphaModel = alpha + 8 * r
-    betaModel = alpha + 9 * r
-    total = alpha + 21 * r + traceExtra * max(o, 1) + 1 + 2 * r + 5 * r + 2 + 4 * rn + 4 * r
+  init(_ o: Int, _ r: Int, _ k: Int, _ d: Int, _ rn: Int) {
+    let tl = max(Self.traces(o) - 1, 0)
+    var s = 0
+    func take(_ n: Int) -> Int {
+      let at = s
+      s += n
+      return at
+    }
+    obs = take(3 * o)
+    _ = take(2 * r)  // state slots
+    policy = take(d)
+    _ = take(d)  // actionSignal
+    _ = take(k * d)  // optionActorCredit
+    options = take(k * d)  // optionPolicyMean
+    _ = take(k)  // importance
+    _ = take(3)  // reward, td, planTd
+    _ = take(k)  // tdPsi
+    _ = take(r)  // utilFeat
+    utilOpt = take(k)
+    _ = take(3 * r)  // bonusW, featureMean, featureSM
+    alpha = take(r)
+    beta = take(r)
+    _ = take(2 * r)  // hMeta, gradEnergy
+    alphaPsi = take(r)
+    betaPsi = take(r)
+    _ = take(2 * r)  // hPsi, gradEnergyPsi
+    alphaModel = take(r)
+    betaModel = take(r)
+    _ = take(2 * r)  // hModel, gradEnergyModel
+    _ = take(5 * k)  // actorAdv, optRewardTd, headDenom, durationTd, durationHat
+    _ = take(tl * max(o, 1))  // obsTraceMulti
+    _ = take(4 * k)  // prioOpt, continuation, keyboard, modelDenom
+    _ = take(1)  // valueGauge
+    _ = take(2 * k)  // tdPsiFast, tdPsiPeak
+    _ = take(2 * k)  // headScale, modelScale
+    _ = take(2)  // valueScale, xNormPrev
+    _ = take(3 * k)  // hDotPsi, psiAuxScale, psiRho
+    _ = take(4 * k)  // vsTd, vsDot, vsScale, vsAuxScale
+    _ = take(4 * rn)  // nursery mean/SM/util/utilSM
+    total = s
   }
 }
 final class Shared<T> {
@@ -180,26 +202,29 @@ final class Engine {
     precondition(b >= 1, "Engine batch must be >= 1")
     batch = b
     self.obsDim = obsDim
-    rank = max(obsDim, dPolicy * 2, 2)
+    // Sparse-wide: capacity = smallest power of two >= 2x linear input width
+    // (stream-shape-derived, Inv-9); active width = 32 (execution width) via
+    // banked WTA; K = active width.
+    let inputW = Arena.input(obsDim, dPolicy)
+    var cap = 32
+    while cap < 2 * inputW { cap *= 2 }
+    rank = cap
     d = dPolicy
     // Sutton-test instrument: scales the nursery capacity (canonical runs: 1).
     let nurseryMult = max(
       ProcessInfo.processInfo.environment["OAK_SUTTON_MULT"].flatMap(Int.init) ?? 1, 1)
     let rn = rank * nurseryMult
-    a = Arena(obsDim, rank, d, rn)
-    let k = rank
-    paramTotal =
-      rank + k * rank + k * d * rank + k * rank + k * rank + k * rank + k * rank + k * rank
-    uintTotal = 11 + 8 * rank + 4 * rn
-    learnTotal =
-      rank + rank * rank + rank * d * rank + rank * rank + rank * rank + rank * rank
-      + rank * rank + rank * rank
-    let anchors = min(rank, max(obsDim, d, 1))
+    let k = 32
+    a = Arena(obsDim, rank, k, d, rn)
+    paramTotal = rank + 7 * k * rank + k * d * rank
+    uintTotal = 11 + 3 * k + 5 * rank + 4 * rn + 64
+    learnTotal = 2 * 32 + 4 * k * 32 + k * d * 32 + 4 * k * 32
+    let anchors = min(rank, inputW)
     let cfgValue = KernelConfig(
-      obsDim: UInt32(obsDim), rank: UInt32(rank), optionCount: UInt32(rank),
+      obsDim: UInt32(obsDim), rank: UInt32(rank), optionCount: UInt32(k),
       actionParamCount: UInt32(d), obsTraceLevels: UInt32(max(Arena.traces(obsDim) - 1, 0)),
       linearAnchorCount: UInt32(anchors), invRank: 1 / Float(rank),
-      invOptionCount: 1 / Float(rank), metaEta: 1 / Float(rank) / Float(max(rank + d, 1)),
+      invOptionCount: 1 / Float(k), metaEta: 1 / Float(rank) / Float(max(rank + d, 1)),
       agentCount: UInt32(batch), paramStride: UInt32(paramTotal),
       stateStride: UInt32(a.total), uintStride: UInt32(uintTotal),
       nurseryCount: UInt32(rn))
@@ -216,13 +241,9 @@ final class Engine {
       let fn = try lib.makeFunction(name: $0, constantValues: constants)
       return try dev.makeComputePipelineState(function: fn)
     }
-    let maxTG = pipes.map(\.maxTotalThreadsPerThreadgroup).min() ?? rank
-    guard rank <= maxTG else {
-      throw err("Rank \(rank) exceeds device threadgroup capacity \(maxTG).")
-    }
-    tg = min(max(rank, pipes.map { Int($0.threadExecutionWidth) }.max() ?? 1), maxTG)
+    tg = 32
     tgBytes = tg * MemoryLayout<Float>.stride
-    actionGroups = max(1, (rank * d + tg - 1) / tg)
+    actionGroups = max(1, (k * d + tg - 1) / tg)
     params = Shared(dev, batch * paramTotal, 0)
     state = Shared(dev, batch * a.total, 0)
     uints = Shared(dev, batch * uintTotal, 0)
@@ -237,38 +258,44 @@ final class Engine {
     stats = statsB.contents().bindMemory(to: KernelStats.self, capacity: batch)
     memset(stats, 0, batch * MemoryLayout<KernelStats>.stride)
     let psi = rank
-    let optPolicy = psi + rank * rank
     let inv = 1 / sqrt(Float(rank))
-    let alpha = 1 / Float(max(obsDim, 1))
+    let alpha0 = 1 / Float(max(obsDim, 1))
+    // uint layout offsets (mirror make_ctx)
+    let uFeatAge = 7 + k
+    let uParentA = 7 + 2 * k + rank
+    let uParentB = 7 + 2 * k + 2 * rank
+    let uKind = 7 + 2 * k + 3 * rank
+    let uExplStep = 9 + 2 * k + 5 * rank
+    let uNur = 11 + 3 * k + 5 * rank
+    _ = uFeatAge
     for lane in 0..<batch {
       scalars[lane] = KernelScalars()
       let lp = params.p + lane * paramTotal
       let ls = state.p + lane * a.total
       let lu = uints.p + lane * uintTotal
-      lu[9 + 7 * rank] = UInt32.max
-      lu[10 + 7 * rank] = UInt32.max
-      let nb = 11 + 8 * rank
-      let rnLocal = (uintTotal - nb) / 4
-      for n in 0..<rnLocal {
-        lu[nb + n] = UInt32(n % rank)
-        lu[nb + rnLocal + n] = UInt32((n * 7 + 3) % rank)
-        lu[nb + 2 * rnLocal + n] = UInt32(n % 3)
+      lu[uExplStep] = UInt32.max
+      lu[uExplStep + 1] = UInt32.max
+      for n in 0..<rn {
+        lu[uNur + n] = UInt32(n % rank)
+        lu[uNur + rn + n] = UInt32((n * 7 + 3) % rank)
+        lu[uNur + 2 * rn + n] = UInt32(n % 3)
       }
       for i in 0..<rank {
-        lp[psi + i * rank + i] = inv
-        lu[7 + i] = UInt32(i)
-        lu[7 + 3 * rank + i] = UInt32(i % max(anchors, 1))
-        lu[7 + 4 * rank + i] = UInt32((i * 7 + 3) % max(anchors, 1))
-        lu[7 + 5 * rank + i] = UInt32(i % 3)
-        ls[a.utilOpt + i] = Float(rank)
-        [a.alpha, a.alphaPsi, a.alphaModel].forEach { ls[$0 + i] = alpha }
-        [a.beta, a.betaPsi, a.betaModel].forEach { ls[$0 + i] = log(alpha) }
+        lu[uParentA + i] = UInt32(i % max(anchors, 1))
+        lu[uParentB + i] = UInt32((i * 7 + 3) % max(anchors, 1))
+        lu[uKind + i] = UInt32(i % 3)
+        [a.alpha, a.alphaPsi, a.alphaModel].forEach { ls[$0 + i] = alpha0 }
+        [a.beta, a.betaPsi, a.betaModel].forEach { ls[$0 + i] = log(alpha0) }
       }
       let basis = 1 / Float(max(d, 1))
-      for k in 0..<rank {
-        let slot = k % max(d, 1)
-        let sign: Float = ((k / max(d, 1)) % 2 == 0) ? 1 : -1
-        lp[optPolicy + (k * d + slot) * rank] = sign * basis
+      for kk in 0..<k {
+        lu[7 + kk] = UInt32(kk)
+        lp[psi + kk * rank + kk] = inv
+        ls[a.utilOpt + kk] = Float(rank)
+        let slot = kk % max(d, 1)
+        let sign: Float = ((kk / max(d, 1)) % 2 == 0) ? 1 : -1
+        // optPolicy offset: rank(value) + k*rank(psi)
+        lp[rank + k * rank + (kk * d + slot) * rank] = sign * basis
       }
     }
     configB.contents().bindMemory(to: KernelConfig.self, capacity: 1).initialize(to: cfgValue)
@@ -364,10 +391,7 @@ func metricsRoot() -> URL {
       p == .oak
       ? try Engine(obsDim: obsDim, dPolicy: dPolicy, batch: B, dev: dev, ablations: ablations)
       : nil
-    if let eng = engine, eng.rank > 32 {
-      throw err(
-        "Megastep lane stages are simdgroup-wide (32 threads, 32-float tg slots); rank \(eng.rank) exceeds 32.")
-    }
+
     guard let q = engine?.q ?? dev.makeCommandQueue() else {
       throw err("Metal command queue unavailable.")
     }
@@ -645,7 +669,7 @@ func metricsRoot() -> URL {
           if let eng = engine, detector == "paramNonFinite" || detector == "paramExplosion" {
             // Kernel-dated explosion step (rotating-stripe scan, exact to 32 steps)
             // beats the heartbeat-cadence snapshot date.
-            let ex = eng.uints.p[lane * eng.uintTotal + 9 + 7 * eng.rank]
+            let ex = eng.uints.p[lane * eng.uintTotal + 9 + 2 * 32 + 5 * eng.rank]
             if ex != UInt32.max { dStep = Int(ex) }
           }
           if let det = detector {
@@ -674,8 +698,8 @@ func metricsRoot() -> URL {
               row["paramAbsMax"] = pm.isFinite ? pm : NSNull()
               if let eng = engine {
                 let base = lane * eng.uintTotal
-                let ex = eng.uints.p[base + 9 + 7 * eng.rank]
-                let el = eng.uints.p[base + 10 + 7 * eng.rank]
+                let ex = eng.uints.p[base + 9 + 2 * 32 + 5 * eng.rank]
+                let el = eng.uints.p[base + 10 + 2 * 32 + 5 * eng.rank]
                 row["explosionStep"] = ex != UInt32.max ? Int(ex) : NSNull()
                 row["explosionElem"] = el != UInt32.max ? Int(el) : NSNull()
               }
