@@ -38,6 +38,12 @@ def row(root, s):
     f = meta.get('flopsPerLaneStep', 105296)
     return r, tot, f, meta
 data = [row(rt, step) for rt in roots]
+horizons = [m.get('steps', 0) for _, _, _, m in data]
+if len(set(horizons)) > 1:
+    raise SystemExit(
+        f"TABLE ERROR: mixed run horizons {sorted(set(horizons))} — comparisons are "
+        f"same-horizon ONLY (user law 2026-07-05). Run the candidate at the full "
+        f"horizon; do not compare a short run against a long one.")
 def fmt(r, tot, f):
     return [str(r['dead']), '%+.4f' % r['deliveredRateP50'], '%+.4f' % r['recentRateP50'],
             '%+.4f' % r['deliveredRateP10'], '%.3f' % r['bestLaneDeliveredRate'],
