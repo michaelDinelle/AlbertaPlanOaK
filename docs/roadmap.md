@@ -1872,7 +1872,15 @@ archaeology, research gaps, compute). What changed, by FC-STOMP section:
 
 ## Current Baseline Decision
 
-**THE keeper: `.oak-benchmarks/mk5-tierL-noplan-20260704`** — Mark V, PROMOTED
+**THE keeper: `.oak-benchmarks/mk8-tierL-20260705`** — Mark VIII (tanh-bounded
+action means + exact score gradient — the zenith law: deaths, ceiling decay and
+the plateau were one unbounded-mean disease). PROMOTED 2026-07-05, 8/8 +
+IMPROVEMENT: IQM **+0.443**, positive lanes **98.1%**, divergence 1.4%,
+sustainers 673, best-lane class +1.766 (peak lanes ~2.7-3.3/step), SPS 470K.
+mk9 ledger: vStop/vsAux residual death channel in high-value lanes (7 @1M),
+late live-median easing, last ~2% lanes.
+
+Superseded keeper (mk5-tierL-noplan-20260704): — Mark V, PROMOTED
 2026-07-04 on ALL gate criteria incl. the blocking ignition axes, vs BOTH
 gated-10 (8/8 PASS + IMPROVEMENT) and gated-9 (ceiling 4.3x). Numbers every
 candidate must beat: IQM delivered (all lanes) **+0.293**, positive lanes

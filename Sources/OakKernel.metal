@@ -772,9 +772,13 @@ inline void fcstomp_prediction_control_loop(Ctx ctx, uint tid,
                 mag += lam;
             }
             if (mag <= 0.0f) {
+                // Unit-weight probe (anchor parity): at invK the probed
+                // direction got ~3% execution share — fitness evaluation
+                // starved and the consensus harvested nothing (900k
+                // forensics: chord 97% anchor at the plateau).
                 uint probe = ctx.stepCount % max(ctx.K, 1u);
                 for (uint k = 0u; k < ctx.K; ++k)
-                    ctx.keyboard[k] = (k == probe) ? ctx.invK : 0.0f;
+                    ctx.keyboard[k] = (k == probe) ? 1.0f : 0.0f;
             }
             ctx.keyboardOrigin[0] = 0u;
         }
@@ -968,14 +972,11 @@ static inline void oak_plan_one(Ctx ctx, uint k,
         // same step; learn follows it on the same warp).
         float rHat = ctx.rHatC[k], lRaw = ctx.lRawC[k], vsNext = ctx.vsNextC[k];
         float vX = ctx.fcS[1];
-        float rPrev = 0.0f, lPrev = 0.0f;
         float vsPrev = 0.0f, vsDot = 0.0f;
         for (uint a = 0u; a < OAK_ACT; ++a) {
             uint ip = act_of(actP, a);
             uint idxP = ip * ctx.K + k;
             float xp = prev[ip];
-            rPrev = fma(ctx.optReward[idxP], xp, rPrev);
-            lPrev = fma(ctx.optDuration[idxP], xp, lPrev);
             vsPrev = fma(ctx.vStop[idxP], xp, vsPrev);
             vsDot = fma(ctx.vsAux[idxP], xp, vsDot);
         }
@@ -991,13 +992,26 @@ static inline void oak_plan_one(Ctx ctx, uint k,
         // head carries per-head differential centering — the psiRho pattern).
         // rewardC = r - rho_main; optRho[k] tracks the residual per-head bias,
         // so slow-stopping options have a bounded fixed point.
+        // CONTINUAL learning restored (no frozen organs — Inv-7): the death
+        // channel was optReward's plain ||x||^2 implicit scale, which
+        // under-damps as cont -> 1. These heads now use the BOOTSTRAP-NORM
+        // scale (vsScale, alpha-weighted ||x - cont*x'||^2) — the correct
+        // implicit-TD contraction for bootstrapped heads; vStop uses it and
+        // never appeared in a death certificate.
+        float rPrev = 0.0f, lPrev = 0.0f, rHat2 = 0.0f, lRaw2 = 0.0f;
+        for (uint a = 0u; a < OAK_ACT; ++a) {
+            uint ip = act_of(actP, a);
+            uint idxP = ip * ctx.K + k;
+            float xp = prev[ip];
+            rPrev = fma(ctx.optReward[idxP], xp, rPrev);
+            lPrev = fma(ctx.optDuration[idxP], xp, lPrev);
+        }
+        rHat2 = rHat; lRaw2 = lRaw;
         float optRhoOld = ctx.optRho[k];
         if (!isfinite(optRhoOld)) optRhoOld = 0.0f;
-        float rTd = (ctx.planScr[0] - ctx.scalars->rho) - optRhoOld + cont * rHat - rPrev;
+        float rTd = (ctx.planScr[0] - ctx.scalars->rho) - optRhoOld + cont * rHat2 - rPrev;
         if (isfinite(rTd)) ctx.optRho[k] = optRhoOld + ctx.invR * rTd;
-        // Duration is a diagnostic/staleness head now (q carries no duration
-        // term); the never-stopping main-task key skips it (unbounded target).
-        float dTd = (k == 0u) ? 0.0f : (1.0f + cont * lRaw - lPrev);
+        float dTd = (k == 0u) ? 0.0f : (1.0f + cont * lRaw2 - lPrev);
         // vStop GVF: cumulant 0, continuation cont, payoff v(x') at stopping.
         float vsTd = cont * vsNext + (1.0f - cont) * vX - vsPrev;
         bool modelFinite = isfinite(rTd) && isfinite(dTd) && isfinite(lRaw) && isfinite(vsTd);
@@ -1092,8 +1106,6 @@ static inline void oak_learn_rows(Ctx ctx, device const float *prev,
     if (!isfinite(cont)) cont = 0.0f;
     float hD = ctx.hDotPsi[k], sc = ctx.headScale[k], td = ctx.tdPsi[k];
     float vD = ctx.vsDot[k], vsc = ctx.vsScale[k], vtd = ctx.vsTd[k];
-    float rtd = ctx.optRewardTd[k], msc = ctx.modelScale[k];
-    float dtd = ctx.durationTd[k];
     float psiErr = td - hD, psc = ctx.psiAuxScale[k];
     float vErr = vtd - vD, vasc = ctx.vsAuxScale[k];
     float cj[16];
@@ -1120,10 +1132,6 @@ static inline void oak_learn_rows(Ctx ctx, device const float *prev,
             *w = safe_w(*w, *w + aM * rho * gv * vsc);
             device float *h = &ctx.vsAux[i * K + k];
             *h = safe_w(*h, *h + aM * rho * vErr * xp * vasc);
-            device float *r = &ctx.optReward[i * K + k];
-            *r = safe_w(*r, *r + aM * rho * rtd * xp * msc);
-            device float *l = &ctx.optDuration[i * K + k];
-            *l = safe_w(*l, *l + aM * rho * dtd * xp * msc);
         }
     }
     // C-side rows: only gated entries can be C-only; psi/vStop GTD2 correction.
@@ -1200,7 +1208,13 @@ inline void emit_all_options(Ctx ctx, threadgroup const float *curr, uint tid) {
     }
     for (uint j = 0u; j < ctx.D; ++j) {
         uint kd = tid * ctx.D + j;
-        float mu = (j < DL) ? acc[j] : 0.0f;
+        // BOUNDED action means (Mark VIII): tanh tells the actor the actuator
+        // saturates. Forensics: every zenith collapse and death traced to
+        // unbounded mean growth past the env clamp (weights grow with zero
+        // behavioral gradient until the head stack detonates). tanh bounds
+        // the mean by construction and its score gradient (1 - m^2) self-
+        // extinguishes weight growth at saturation — the missing pullback.
+        float mu = (j < DL) ? tanh(acc[j]) : 0.0f;
         ctx.muRaw[kd] = mu;
         if (!isfinite(mu)) mu = ctx.optionPolicyMean[kd];
         ctx.optionPolicyMean[kd] = mu;
@@ -1967,7 +1981,7 @@ static inline void oak_stage_sample_act(device float *params,
             for (uint o = 0u; o < ctx.K; ++o) {
                 uint off = o * ctx.D;
                 float om = oak_safe(ctx.optionPolicyMean[off + d]);
-                ctx.creditStage[off + d] = sample - om;
+                ctx.creditStage[off + d] = (sample - om) * (1.0f - om * om);
                 ctx.creditStage[off + A + d] = 0.0f;
                 float diffO = sample - om;
                 ctx.impStage[o] += diffB * diffB - diffO * diffO;
@@ -2053,7 +2067,8 @@ static inline void oak_stage_sample_act_wide(Ctx ctx,
         for (uint d = 0u; d < A; ++d) {
             float sample = scratch[d];
             float om = oak_safe(ctx.optionPolicyMean[off + d]);
-            ctx.creditStage[off + d] = sample - om;
+            // d log pi / d mu_raw = (a - m) * (1 - m^2) / sigma^2
+            ctx.creditStage[off + d] = (sample - om) * (1.0f - om * om);
             ctx.creditStage[off + A + d] = 0.0f;
             float diffB = sample - oak_safe(ctx.policyMean[d]);
             float diffO = sample - om;
