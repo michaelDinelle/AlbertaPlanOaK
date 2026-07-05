@@ -38,12 +38,29 @@ def row(root, s):
     f = meta.get('flopsPerLaneStep', 105296)
     return r, tot, f, meta
 data = [row(rt, step) for rt in roots]
-horizons = [m.get('steps', 0) for _, _, _, m in data]
-if len(set(horizons)) > 1:
+# WHITELIST comparability gate (user law 2026-07-05): a table renders ONLY
+# when every field below is IDENTICAL across all roots. Anything not on the
+# allowed-to-differ list (run name, startedAt) that differs = hard refusal.
+# This is a whitelist by construction: new meta fields are compared by
+# default; a field must be explicitly added to ALLOWED_DIFF to be exempt.
+ALLOWED_DIFF = {'startedAt'}
+metas = [m for _, _, _, m in data]
+allkeys = set().union(*(m.keys() for m in metas))
+mismatches = []
+for kf in sorted(allkeys - ALLOWED_DIFF):
+    vals = [json.dumps(m.get(kf), sort_keys=True) for m in metas]
+    if len(set(vals)) > 1:
+        mismatches.append(f"  {kf}: " + " vs ".join(vals))
+windows_chk = [r['_window'] for r, _, _, _ in data]
+if len(set(windows_chk)) > 1:
+    mismatches.append(f"  heartbeatWindow@step: {windows_chk}")
+if mismatches:
     raise SystemExit(
-        f"TABLE ERROR: mixed run horizons {sorted(set(horizons))} — comparisons are "
-        f"same-horizon ONLY (user law 2026-07-05). Run the candidate at the full "
-        f"horizon; do not compare a short run against a long one.")
+        "TABLE ERROR: runs are not apples-to-apples — refusing to render.\n"
+        "Fields differing (whitelist: only startedAt may differ):\n"
+        + "\n".join(mismatches)
+        + "\nRun the candidate with the IDENTICAL config (same horizon, seeds, "
+        "ablation, env, cadence) before comparing.")
 def fmt(r, tot, f):
     return [str(r['dead']), '%+.4f' % r['deliveredRateP50'], '%+.4f' % r['recentRateP50'],
             '%+.4f' % r['deliveredRateP10'], '%.3f' % r['bestLaneDeliveredRate'],
@@ -53,13 +70,6 @@ def fmt(r, tot, f):
 names = ['deaths', 'median (cumulative)', 'median (live)', 'P10', 'best lane',
          'live max', 'positivity', 'SPS', 'reward/GFLOP (median)', 'fleet total (all lanes)']
 cols = [fmt(r, t, f) for r, t, f, _ in data]
-# live rows (median live, live max) are windowed: blank them on window mismatch
-windows = [r['_window'] for r, _, _, _ in data]
-if len(set(windows)) > 1:
-    LIVE_ROWS = [2, 5]  # median (live), live max
-    for c, w in zip(cols, windows):
-        for i in LIVE_ROWS:
-            c[i] = f'({c[i]} over {w//1000}k win — NOT comparable)'
 hdrs = [os.path.basename(os.path.normpath(rt)) for rt in roots]
 abls = [(m.get('ablationLabel') or 'none') for _, _, _, m in data]
 cfgs = [f'ablation={a}, B={len(m.get("seeds", [])) or m.get("batch")}, {m.get("steps", 0)//1000}k, {m.get("startedAt", "?")}'
@@ -69,6 +79,4 @@ print('|---|' + '---|' * len(roots))
 print('| config | %s |' % ' | '.join(cfgs))
 for i, n in enumerate(names):
     print('| %s | %s |' % (n, ' | '.join(c[i] for c in cols)))
-if len(set(abls)) > 1:
-    print(f'⚠️  CONFIG MISMATCH: ablations differ across columns ({abls}) — comparison invalid.')
 print('⤷ DISPLAY CONTRACT: paste this table VERBATIM into the reply text — tool output is not user-visible; keeper column mandatory; never summarize or say "table above".')
