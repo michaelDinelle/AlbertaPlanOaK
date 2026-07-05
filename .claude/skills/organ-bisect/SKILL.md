@@ -50,6 +50,20 @@ Estimated cost of theorizing first: ~6 hours. Cost of bisecting first: 10 min.
   learner — alias them to the on-policy critic (frozen psi₀ law).
 - Capacity-derived bounds (α∈[1/R²,1], ρ≤K) are structural, not knobs; their
   removal was measured as deaths both times.
+- THE ZENITH LAW: bounded actuators need bounded emission geometry (tanh means
+  + (a−m)(1−m²) score gradient) — unbounded means past the clamp = living-death
+  explosions + ceiling decay + plateau. Diagnose via TOP-lane trajectories over
+  time (paramAbsMax/actionDelta), not population aggregates.
+- Aux heads regularize the representation even when their consumers are dead
+  (mk6 REJECT); delete consumers, keep learners.
+- CENTERING LAW, refined (mk9): per-head integrator centering (psiRho/optRho)
+  applies ONLY to reward-cumulant heads. A ZERO-cumulant head (stop-value
+  GVFs) must never take an integrator — it becomes a marginally-stable double
+  integrator (2 full-system detonations by 300k, ρ̄ at −1e37). Its unbounded
+  part is the PAYOFF: gauge it (predict v(stop) − valueGauge, add the gauge
+  back at consumers).
+- tools/bisect.py is FORBIDDEN as a filename: it shadows stdlib `bisect` and
+  hijacks argparse across the repo (use ablate.py).
 
 ## Instruments
 

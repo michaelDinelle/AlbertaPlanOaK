@@ -59,6 +59,7 @@ Durable lessons from that work, independent of instrument or seed:
 - **The missing organ is a coherent keyboard / search-control / utility loop** — cumulant/value-space composition (GPE-GPI or a chord-descriptor model) plus search-control effectiveness feeding back into which features, subtasks, options, and models survive. Isolated chord refreshes, damping rules, fallbacks, and raw reward-TD actor pressure are patch-and-pray.
 - **Mark III audit law (2026-07-04, five-agent audit — supersedes any older record that says otherwise).** (a) High-rate generate-and-test replacement is the ignition engine, not a bug: throttling it (the D1 promotion bar) collapsed igniters 64→~5 (correction 2026-07-04: sustain-of-igniters was 1–2/5, not 0%). (b) Magnitude-competition WTA is forbidden as a sparsifier: it blinded the actor (≤3/17 obs channels visible/step), spike-standardized constructed features, and amplified replacement damage ~13×; sparsity must be GEOMETRY-gated (stationary function of state) with all raw inputs always visible. (c) Tier-M IQM alone is blind to walking-mode kills: igniters, sustainers, best-lane-class, and %positive are BLOCKING criteria in `fleet.py gate` (paired non-inferiority, shipped Mark IV). (d) Uncentered stopping-aware cumulants are structurally divergent for slow-stopping options — every option-model head carries per-head differential centering (the psiRho pattern).
 - **Judge the population, not a single seed.** Seeds 3 and 8 are inspectable lanes, not gates; promotion is the paired population gate (`tools/fleet.py gate`).
+- **Mark IV–VIII laws (2026-07-04/05, all gate- or forensics-measured; see `.claude/skills/organ-bisect` and `keeper-cycle` for the full list).** (a) Model estimates may gate/select; they must NEVER be written into `valueW` or ρ̄ (the planning value-backup was the population anti-learner: optimism-inflated ρ̄ made the agent judge real experience against model fantasy — ablating it took positivity 24.6%→97.8%). (b) THE ZENITH LAW: emission geometry must encode actuator bounds — tanh action means with the exact score gradient `(a−m)(1−m²)`; unbounded means past the env clamp caused every death, every ceiling turnover at ~400k, and the population plateau. (c) Every bootstrapped/cumulant head carries per-head differential centering (psiRho/optRho/vsRho — the one uncentered family was the one that died). (d) Never freeze an organ; fix its target/scale geometry (freezing measured −IQM and moved explosions). (e) Aux model heads regularize the shared representation even with consumers dead (deletion gate-REJECTED at −31% IQM). (f) Workflow: one diagnosed change → `tools/check.sh` at 100k → ONE Tier-L via `tools/run_fleet.sh` gated vs the keeper → commit on PROMOTE (the keeper-cycle skill).
 
 ### What the Plan eschews
 
@@ -153,6 +154,15 @@ A fleet run root (`.oak-benchmarks/<run-id>/`, override with `OAK_METRICS_STORAG
   organ-bisect matrix: runs baseline + each organ ablated on top of --base,
   prints the conviction table. (Named ablate.py deliberately: a tools/bisect.py
   shadows Python's stdlib `bisect` and hijacks fleet.py's argparse.)
+- `tools/table.py <candidate-root> <keeper-root> <step>` — THE CANONICAL
+  heartbeat table. **MANDATORY at every Tier-L heartbeat report**: never
+  hand-compose heartbeat tables (hand tables drift and drop rows — SPS was
+  silently lost once). Fixed rows, fixed order: deaths | median (cumulative) |
+  median (live) | P10 | best lane | live max | positivity | SPS |
+  reward/GFLOP (median) | fleet total (all lanes). fleet total (sum of
+  rewardSum across ALL lanes) is the population objective; reward/GFLOP is
+  the SOTA-target metric (internal comparison only until FLOPs are
+  instrumented on both sides).
 - **The organ-bisect law** (`.claude/skills/organ-bisect/SKILL.md`): for ANY
   population pathology, convict before you fix — trajectory shape, `lanes`
   diff, death certificates (`explosionElem` → head+column), then the ablation
