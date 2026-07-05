@@ -8,7 +8,14 @@ cand, keep, step = sys.argv[1], sys.argv[2], int(sys.argv[3])
 def row(root, s):
     aggs = [json.loads(l) for l in open(f'{root}/aggregate.jsonl')]
     r = [x for x in aggs if x['step'] == s]
-    r = r[-1] if r else aggs[-1]
+    if not r:
+        # HARD REFUSAL (user law 2026-07-05): a step-mismatched table is
+        # apples-to-oranges and must be impossible to produce, not warned about.
+        raise SystemExit(
+            f"TABLE ERROR: {root} has no row at step {s}.\n"
+            f"  available steps: {sorted(x['step'] for x in aggs)}\n"
+            f"  Compare only at steps present in BOTH roots.")
+    r = r[-1]
     # fleet total: nearest heartbeat step with rows (an exact-step miss used
     # to print a misleading 0.0M).
     hbs = {}
@@ -41,5 +48,4 @@ for n, a, b in zip(names, cv, kv):
     print(f'| {n} | {a} | {b} |')
 if ca != ka:
     print(f'⚠️  CONFIG MISMATCH: candidate ablation={ca} vs keeper ablation={ka} — comparison invalid.')
-if c['step'] != step or k['step'] != step:
-    print(f"⚠️  STEP MISMATCH: rows shown are candidate@{c['step']}, keeper@{k['step']} (requested {step}).")
+

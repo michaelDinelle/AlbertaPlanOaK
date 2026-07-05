@@ -162,8 +162,13 @@ A fleet run root (`.oak-benchmarks/<run-id>/`, override with `OAK_METRICS_STORAG
   "candidate/keeper" label) | deaths | median (cumulative) | median (live) |
   P10 | best lane | live max | positivity | SPS | reward/GFLOP (median) |
   fleet total (all lanes). It prints ⚠️ on candidate/keeper ablation mismatch
-  (the config error that poisoned a 1M Tier-L on 2026-07-05) and on step
-  mismatch. fleet total (sum of rewardSum across ALL lanes) is the population
+  (the config error that poisoned a 1M Tier-L on 2026-07-05) and it REFUSES
+  (hard error, no output) when either root lacks a row at the requested step —
+  apples-to-apples is structural: compare ONLY at steps present in BOTH roots
+  (user law 2026-07-05; mid-run peeks wait for the next common milestone).
+  Every table shown to the user is pasted VERBATIM into the reply text (no
+  retyping, no dropped rows), and the comparator is ALWAYS the current keeper
+  root. fleet total (sum of rewardSum across ALL lanes) is the population
   objective; reward/GFLOP is the SOTA-target metric (internal comparison only
   until FLOPs are instrumented on both sides).
 - **Heartbeat cadence + kill discipline (user law, 2026-07-05).** For every
