@@ -125,7 +125,7 @@ func sha256Hex(_ buf: UnsafeRawBufferPointer) -> String {
 
 struct Arena {
   let obs, policy, options, utilOpt, alpha, beta, alphaPsi, betaPsi, alphaModel, betaModel,
-    total: Int
+    alphaAct, betaAct, total: Int
   static func traces(_ o: Int) -> Int {
     Int(log2(Double(max(o, 1)))) + 1
   }
@@ -166,20 +166,29 @@ struct Arena {
     _ = take(2 * k)  // tdPsiFast, tdPsiPeak
     _ = take(2 * k)  // headScale, modelScale
     _ = take(2)  // valueScale, xNormPrev
-    _ = take(3 * k)  // hDotPsi, psiAuxScale, psiRho
+    _ = take(5 * k)  // hDotPsi, psiAuxScale, psiRho, optRho, optFit
+    alphaAct = take(k)  // actor IDBD multiplier (init 1)
+    betaAct = take(k)
+    _ = take(2 * k)  // hAct, energyAct
+    _ = take(k)  // impStage (sample->next-step importance staging)
+    _ = take(k * d)  // creditStage (sample->next-step actor-credit staging)
+    _ = take(8)  // sampleScr
+    _ = take(3 * k)  // rHatC, lRawC, vsNextC (encode->plan dot cache)
     _ = take(4 * k)  // vsTd, vsDot, vsScale, vsAuxScale
-    _ = take(3)  // 16B-align nurStats/muRaw/polCoef (float4 access)
+    _ = take(1)  // planScale
+    s = (s + 3) & ~3  // 16B-align nurStats/muRaw/polCoef (float4 access)
     _ = take(4 * rn)  // nursery mean/SM/util/utilSM
     _ = take(k * d)  // muRaw (emit blend scratch)
     _ = take(k * d)  // polCoef (actor coefficient hoist)
     _ = take(r)  // optUseByFeat (curation scan scatter)
     _ = take(rn)  // lcbScr (parallel LCB precompute)
-    _ = take(3)  // align pad
+    s = (s + 3) & ~3  // align pad
     _ = take(4 * r)  // eligScr (parallel eligibility tuples)
     _ = take(k)  // fcG (tg-diet: keyboard scores scratch)
     _ = take(16)  // fcS (tg-diet: fc scalars + sample exchange)
-    _ = take(32 * r)  // dyna ring values (R slots x 32 active tuples)
-    _ = take(k * max(rn / r, 1))  // dynaTd (backup deltas, K x mult)
+    _ = take(64 * r)  // ring values (R slots x 64 active tuples: core + gated)
+    _ = take(r)  // dynaTd (per-ring-slot backup priorities)
+    _ = take(32)  // dynaD (per-thread backup deltas)
     _ = take(r)  // dynaAcc (window-accumulated dense per-feature backup sum)
     _ = take(k)  // dynaC (copy-2 per-option update coefficients)
     _ = take(4)  // planScr (reward snapshot, dyna-magnitude EMA)
@@ -198,14 +207,13 @@ final class Shared<T> {
   }
 }
 final class Engine {
-  let rank, d, tg, learnTotal, actionGroups, batch, obsDim: Int
+  let rank, d, batch, obsDim: Int
   let a: Arena
   let paramTotal, uintTotal: Int
-  let q: MTLCommandQueue, pipes: [MTLComputePipelineState], params, state: Shared<Float>,
+  let q: MTLCommandQueue, params, state: Shared<Float>,
     uints: Shared<UInt32>, res: [MTLBuffer]
   let scalarsB, statsB, configB: MTLBuffer
-  let scalars: UnsafeMutablePointer<KernelScalars>, stats: UnsafeMutablePointer<KernelStats>,
-    tgBytes: Int
+  let scalars: UnsafeMutablePointer<KernelScalars>, stats: UnsafeMutablePointer<KernelStats>
   var policy: UnsafePointer<Float> { policy(0) }
   var options: UnsafePointer<Float> { options(0) }
   func policy(_ lane: Int) -> UnsafePointer<Float> {
@@ -233,10 +241,13 @@ final class Engine {
     let rn = rank * nurseryMult
     let k = 32
     a = Arena(obsDim, rank, k, d, rn)
-    paramTotal = rank + 8 * k * rank + k * d * rank
-    uintTotal = 11 + 3 * k + 5 * rank + 4 * rn + 64 + 32 * rank
-    learnTotal = 2 * 32 + 4 * k * 32 + k * d * 32 + 4 * k * 32
-    let anchors = min(rank, inputW)
+    paramTotal = rank + 8 * k * rank + k * (d / 2) * rank
+    // uints: 11 scalars + optFeature/optAge/lastStopAge (3k) + 5 rank arrays
+    // + 4 nursery arrays + actIdx (2*64) + dynaSlot (32) + ringIdx (32*rank)
+    uintTotal = 11 + 3 * k + 5 * rank + 4 * rn + 128 + 32 + 32 * rank
+    // Core region: 17 std obs + 12 prev-action + reward + bias + spare = 32
+    // always-active slots (Mark III law: all raw inputs visible every step).
+    let anchors = 32
     let cfgValue = KernelConfig(
       obsDim: UInt32(obsDim), rank: UInt32(rank), optionCount: UInt32(k),
       actionParamCount: UInt32(d), obsTraceLevels: UInt32(max(Arena.traces(obsDim) - 1, 0)),
@@ -249,18 +260,6 @@ final class Engine {
       throw err("Metal command queue unavailable.")
     }
     q = cq
-    let lib = try dev.makeLibrary(
-      URL: try requireFreshMetallib())
-    let constants = MTLFunctionConstantValues()
-    ablations.apply(to: constants)
-    Self.applyShapeConstants(constants, cfgValue)
-    pipes = try ["oak_encode", "oak_plan", "oak_learn_heads", "oak_replace", "oak_action_emit"].map {
-      let fn = try lib.makeFunction(name: $0, constantValues: constants)
-      return try dev.makeComputePipelineState(function: fn)
-    }
-    tg = 32
-    tgBytes = tg * MemoryLayout<Float>.stride
-    actionGroups = max(1, (k * d + tg - 1) / tg)
     params = Shared(dev, batch * paramTotal, 0)
     state = Shared(dev, batch * a.total, 0)
     uints = Shared(dev, batch * uintTotal, 0)
@@ -292,15 +291,33 @@ final class Engine {
       let lu = uints.p + lane * uintTotal
       lu[uExplStep] = UInt32.max
       lu[uExplStep + 1] = UInt32.max
+      let traceChannels = max((Arena.traces(obsDim) - 1) * obsDim, 1)  // 4 levels x 17
       for n in 0..<rn {
-        lu[uNur + n] = UInt32(n % rank)
-        lu[uNur + rn + n] = UInt32((n * 7 + 3) % rank)
-        lu[uNur + 2 * rn + n] = UInt32(n % 3)
+        // Generator seeds: kinds cycle product/sum/residual/trace; parents are
+        // core slots (always active) or trace channels for kind 3.
+        lu[uNur + n] = UInt32(n % ((n % 4 == 3) ? traceChannels : anchors))
+        lu[uNur + rn + n] = UInt32((n * 7 + 3) % anchors)
+        lu[uNur + 2 * rn + n] = UInt32(n % 4)
       }
       for i in 0..<rank {
-        lu[uParentA + i] = UInt32(i % max(anchors, 1))
-        lu[uParentB + i] = UInt32((i * 7 + 3) % max(anchors, 1))
-        lu[uKind + i] = UInt32(i % 3)
+        if i >= anchors {
+          // Gated region: first 68 slots are the multi-timescale obs traces
+          // (kind 3); the rest are products/sums/residuals of core channels.
+          let idx = i - anchors
+          if idx < traceChannels {
+            lu[uParentA + i] = UInt32(idx)
+            lu[uParentB + i] = 0
+            lu[uKind + i] = 3
+          } else {
+            lu[uParentA + i] = UInt32(idx % anchors)
+            lu[uParentB + i] = UInt32((idx * 7 + 3) % anchors)
+            lu[uKind + i] = UInt32(idx % 3)
+          }
+        } else {
+          lu[uParentA + i] = 0
+          lu[uParentB + i] = 0
+          lu[uKind + i] = 0
+        }
         [a.alpha, a.alphaPsi, a.alphaModel].forEach { ls[$0 + i] = alpha0 }
         [a.beta, a.betaPsi, a.betaModel].forEach { ls[$0 + i] = log(alpha0) }
       }
@@ -309,16 +326,23 @@ final class Engine {
       // magnitude as psi's diagonal, different index pattern); reward/duration
       // copies start at zero like copy 1 and decorrelate through vStop2's
       // different bootstrap plus the semi-gradient update geometry.
-      let vStop2 = rank + 7 * k * rank + k * d * rank
+      let vStop2 = rank + 7 * k * rank + k * (d / 2) * rank
       for kk in 0..<k {
         lu[7 + kk] = UInt32(kk)
         lp[psi + kk * k + kk] = inv
         lp[vStop2 + ((kk * 7 + 5) % rank) * k + kk] = inv
         ls[a.utilOpt + kk] = Float(rank)
-        let slot = kk % max(d, 1)
-        let sign: Float = ((kk / max(d, 1)) % 2 == 0) ? 1 : -1
-        // optPolicy offset: rank(value) + k*rank(psi)
-        lp[rank + k * rank + kk * d + slot] = sign * basis
+        ls[a.alphaAct + kk] = 1
+        ls[a.betaAct + kk] = 0
+        // Per-lane init diversity: every lane previously started at the SAME
+        // symmetric near-zero saddle, making ignition a pure noise-stream
+        // lottery. A cheap integer hash permutes each option's seeded action
+        // slot and sign per lane (deterministic per (lane, option)).
+        let h = UInt32(truncatingIfNeeded: lane &* 2_654_435_761 &+ kk &* 40_503 &+ 977)
+        let slot = Int(h % UInt32(max(d / 2, 1)))
+        let sign: Float = ((h >> 16) & 1) == 0 ? 1 : -1
+        // optPolicy offset: rank(value) + k*rank(psi); live-half stride d/2
+        lp[rank + k * rank + kk * (d / 2) + slot] = sign * basis
       }
     }
     configB.contents().bindMemory(to: KernelConfig.self, capacity: 1).initialize(to: cfgValue)
@@ -425,20 +449,17 @@ func metricsRoot() -> URL {
     }
     let initPipe = try pipeline("oak_fleet_init")
     let snapPipe = try pipeline("oak_fleet_snapshot")
+    // G=32 with scalar env measured fastest at B=1024 (mk5 geometry sweep).
     let autoG = max(2, min(32, B / 32))
     let megaG = e["OAK_MEGA_LANES_PER_TG"].flatMap(Int.init) ?? autoG
-    let wide2x = (e["OAK_MEGA_WIDE2X"].flatMap(Int.init).map { $0 != 0 }) ?? (B <= 512)
-    let envCoop = (e["OAK_MEGA_ENV_COOP"].flatMap(Int.init).map { $0 != 0 }) ?? (megaG <= 2)
+    // Scalar-env mode measured 3x faster than coop at high G (mk5 attribution).
+    let envCoop = (e["OAK_MEGA_ENV_COOP"].flatMap(Int.init).map { $0 != 0 }) ?? false
     let physScratchFloats = 140
-    let megaW = 32 * megaG * (wide2x ? 2 : 1)
+    let megaW = 32 * megaG
     let megaConstants = MTLFunctionConstantValues()
     ablations.apply(to: megaConstants)
     var megaG32 = UInt32(megaG)
     megaConstants.setConstantValue(&megaG32, type: .uint, index: 12)
-    if wide2x {
-      var b = true
-      megaConstants.setConstantValue(&b, type: .bool, index: 26)
-    }
     var envCoopVal = envCoop
     megaConstants.setConstantValue(&envCoopVal, type: .bool, index: 27)
     if let eng = engine { eng.applyShapeConstants(megaConstants) }
@@ -460,7 +481,8 @@ func metricsRoot() -> URL {
     }
     let megaPipe = try dev.makeComputePipelineState(
       function: lib.makeFunction(name: "oak_megastep", constantValues: megaConstants))
-    let megaSlotBytes = 32 * megaG * MemoryLayout<Float>.stride
+    // Per-lane tg caches are OAK_ACT = 64 floats wide (cont/prev/curr).
+    let megaSlotBytes = 64 * megaG * MemoryLayout<Float>.stride
     let physTGBytes = envCoop ? physScratchFloats * megaG * MemoryLayout<Float>.stride : 16
     guard megaG >= 1, megaW <= megaPipe.maxTotalThreadsPerThreadgroup,
       3 * megaSlotBytes + physTGBytes <= dev.maxThreadgroupMemoryLength
@@ -699,7 +721,7 @@ func metricsRoot() -> URL {
           } else if engine != nil {
             if snap.paramNonFinite != 0 {
               detector = "paramNonFinite"
-            } else if Double(snap.paramAbsMax) > 1e8 {
+            } else if Double(snap.paramAbsMax) > 1e16 {
               detector = "paramExplosion"
             } else if !snap.scalars.rho.isFinite {
               detector = "kernelRho"
@@ -897,7 +919,7 @@ func metricsRoot() -> URL {
       cb.addCompletedHandler { cb in
         let gpuT = cb.gpuEndTime - cb.gpuStartTime
         if explicitN == nil, gpuT > 0, nSteps > 0 {
-          let fit = max(1, min(Int(0.08 / (gpuT / Double(nSteps))), 8192))
+          let fit = max(1, min(Int(0.08 / (gpuT / Double(nSteps))), 1024))
           tuneLock.lock()
           tunedN = max(1, min(fit, tunedN * 4))
           tuneLock.unlock()
