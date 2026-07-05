@@ -157,12 +157,24 @@ A fleet run root (`.oak-benchmarks/<run-id>/`, override with `OAK_METRICS_STORAG
 - `tools/table.py <candidate-root> <keeper-root> <step>` — THE CANONICAL
   heartbeat table. **MANDATORY at every Tier-L heartbeat report**: never
   hand-compose heartbeat tables (hand tables drift and drop rows — SPS was
-  silently lost once). Fixed rows, fixed order: deaths | median (cumulative) |
-  median (live) | P10 | best lane | live max | positivity | SPS |
-  reward/GFLOP (median) | fleet total (all lanes). fleet total (sum of
-  rewardSum across ALL lanes) is the population objective; reward/GFLOP is
-  the SOTA-target metric (internal comparison only until FLOPs are
-  instrumented on both sides).
+  silently lost once). Fixed rows, fixed order: config (run names + ablation +
+  B + horizon + start time, self-identifying — never trust a bare
+  "candidate/keeper" label) | deaths | median (cumulative) | median (live) |
+  P10 | best lane | live max | positivity | SPS | reward/GFLOP (median) |
+  fleet total (all lanes). It prints ⚠️ on candidate/keeper ablation mismatch
+  (the config error that poisoned a 1M Tier-L on 2026-07-05) and on step
+  mismatch. fleet total (sum of rewardSum across ALL lanes) is the population
+  objective; reward/GFLOP is the SOTA-target metric (internal comparison only
+  until FLOPs are instrumented on both sides).
+- **Heartbeat cadence + kill discipline (user law, 2026-07-05).** For every
+  run ≥ 300k: print the canonical table IN CHAT at EVERY 100k milestone (a
+  Tier-L = 10 tables), via chained harness-notified waiters blocking on
+  `aggregate.jsonl` reaching the next milestone (never poll, never go
+  silent). Pre-register kill rules BEFORE launch (e.g., live median < ½
+  keeper's at the matching step; positivity collapse; death wave) and execute
+  them immediately — a run that is clearly not an upgrade is killed at the
+  milestone that shows it, not run to horizon. Screens exist to find gems
+  and discard stinkers early.
 - **The organ-bisect law** (`.claude/skills/organ-bisect/SKILL.md`): for ANY
   population pathology, convict before you fix — trajectory shape, `lanes`
   diff, death certificates (`explosionElem` → head+column), then the ablation

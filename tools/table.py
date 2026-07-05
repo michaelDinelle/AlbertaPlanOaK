@@ -3,17 +3,26 @@
 Rows (fixed order, never edit casually — the user reads these across runs):
 deaths | median cum | median live | P10 | best lane | live max | positivity |
 SPS | reward/GFLOP (median) | fleet total (all lanes)."""
-import json, sys
+import json, sys, os
 cand, keep, step = sys.argv[1], sys.argv[2], int(sys.argv[3])
 def row(root, s):
     aggs = [json.loads(l) for l in open(f'{root}/aggregate.jsonl')]
     r = [x for x in aggs if x['step'] == s]
     r = r[-1] if r else aggs[-1]
-    tot = sum(x['rewardSum'] for x in (json.loads(l) for l in open(f'{root}/fleet.jsonl'))
-              if x['step'] == r['step'] and x['kind'] == 'hb')
-    f = json.load(open(f'{root}/meta.json')).get('flopsPerLaneStep', 105296)
-    return r, tot, f
-(c, ct, cf), (k, kt, kf) = row(cand, step), row(keep, step)
+    # fleet total: nearest heartbeat step with rows (an exact-step miss used
+    # to print a misleading 0.0M).
+    hbs = {}
+    for l in open(f'{root}/fleet.jsonl'):
+        x = json.loads(l)
+        if x['kind'] == 'hb':
+            hbs.setdefault(x['step'], 0.0)
+            hbs[x['step']] += x['rewardSum']
+    tstep = min(hbs, key=lambda t: abs(t - r['step'])) if hbs else r['step']
+    tot = hbs.get(tstep, 0.0)
+    meta = json.load(open(f'{root}/meta.json'))
+    f = meta.get('flopsPerLaneStep', 105296)
+    return r, tot, f, meta
+(c, ct, cf, cm), (k, kt, kf, km) = row(cand, step), row(keep, step)
 def fmt(r, tot, f):
     return [str(r['dead']), '%+.4f' % r['deliveredRateP50'], '%+.4f' % r['recentRateP50'],
             '%+.4f' % r['deliveredRateP10'], '%.3f' % r['bestLaneDeliveredRate'],
@@ -23,7 +32,14 @@ def fmt(r, tot, f):
 names = ['deaths', 'median (cumulative)', 'median (live)', 'P10', 'best lane',
          'live max', 'positivity', 'SPS', 'reward/GFLOP (median)', 'fleet total (all lanes)']
 cv, kv = fmt(c, ct, cf), fmt(k, kt, kf)
-print(f'| @{step//1000}k | candidate | keeper |')
+cn, kn = os.path.basename(os.path.normpath(cand)), os.path.basename(os.path.normpath(keep))
+ca, ka = cm.get('ablationLabel') or 'none', km.get('ablationLabel') or 'none'
+print(f'| @{step//1000}k | {cn} | {kn} |')
 print('|---|---|---|')
+print(f'| config | ablation={ca}, B={len(cm.get("seeds", [])) or cm.get("batch")}, {cm.get("steps", 0)//1000}k, {cm.get("startedAt", "?")} | ablation={ka}, B={len(km.get("seeds", [])) or km.get("batch")}, {km.get("steps", 0)//1000}k, {km.get("startedAt", "?")} |')
 for n, a, b in zip(names, cv, kv):
     print(f'| {n} | {a} | {b} |')
+if ca != ka:
+    print(f'⚠️  CONFIG MISMATCH: candidate ablation={ca} vs keeper ablation={ka} — comparison invalid.')
+if c['step'] != step or k['step'] != step:
+    print(f"⚠️  STEP MISMATCH: rows shown are candidate@{c['step']}, keeper@{k['step']} (requested {step}).")

@@ -22,7 +22,21 @@ if [ "${1:-}" = "--job" ]; then
   shift
   STEPS="$1"; NAME="$2"; KEEPER="${3:-}"
   ROOT="$REPO/.oak-benchmarks/$NAME"
-  echo "[run_fleet] $NAME — B=${OAK_BENCH_SEED_COUNT:-1024} x $STEPS steps, caffeinate -dimsu, DETACHED."
+  # Ablation config: default = the CURRENT KEEPER CONFIG (planning ablated —
+  # the convicted planning value-backup poison). A Tier-L that silently ran
+  # ablation=none against a planning-ablated keeper poisoned a whole 1M run
+  # (2026-07-05); the guard below refuses config-mismatched gates.
+  ABLATE="${OAK_ABLATE:-planning}"
+  if [ -n "$KEEPER" ] && [ -f "$KEEPER/meta.json" ]; then
+    KABL="$(.venv/bin/python -c "import json,sys;print(json.load(open(sys.argv[1])).get('ablationLabel') or 'none')" "$KEEPER/meta.json")"
+    if [ "$KABL" != "$ABLATE" ] && [ "${OAK_ABLATE_FORCE:-0}" != "1" ]; then
+      echo "[run_fleet] CONFIG ERROR: candidate OAK_ABLATE='$ABLATE' != keeper ablation '$KABL'."
+      echo "[run_fleet] The gate would compare different configs. Set OAK_ABLATE='$KABL' or OAK_ABLATE_FORCE=1."
+      exit 2
+    fi
+  fi
+  echo "[run_fleet] $NAME — B=${OAK_BENCH_SEED_COUNT:-1024} x $STEPS steps, OAK_ABLATE=$ABLATE, caffeinate -dimsu, DETACHED."
+  OAK_ABLATE="$ABLATE" \
   OAK_BENCH_ENV="${OAK_BENCH_ENV:-HalfCheetah-v4}" \
   OAK_BENCH_POLICIES="${OAK_BENCH_POLICIES:-oak}" \
   OAK_BENCH_STEPS="$STEPS" \
