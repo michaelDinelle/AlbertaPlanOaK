@@ -6,6 +6,11 @@ cd "$(dirname "$0")/.."
 NAME="${1:?usage: check.sh <name> [steps] [ablate]}"; STEPS="${2:-100000}"; ABL="${3:-none}"
 ROOT=".oak-benchmarks/$NAME"
 rm -rf "$ROOT"
+# Heartbeats must land on 100k multiples for runs >= 300k (apples-to-apples
+# law: tables compare ONLY at steps present in both roots, and the keeper
+# roots heartbeat at 100k). 50k divides 100k and keeps mid-run resolution.
+HB=$(( STEPS >= 300000 ? 50000 : STEPS / 10 ))
+OAK_BENCH_HEARTBEAT_STEPS="$HB" \
 OAK_ABLATE="$ABL" OAK_BENCH_ENV=HalfCheetah-v4 OAK_BENCH_POLICIES=oak \
 OAK_BENCH_STEPS="$STEPS" OAK_BENCH_SEED_COUNT=1024 OAK_STEPS_PER_CB=1024 \
 OAK_FLEET_TIMING=1 OAK_METRICS_STORAGE="$ROOT" .build/release/OaK benchmark 2>&1 | tail -1
