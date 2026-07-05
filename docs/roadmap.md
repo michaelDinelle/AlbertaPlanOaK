@@ -1872,7 +1872,18 @@ archaeology, research gaps, compute). What changed, by FC-STOMP section:
 
 ## Current Baseline Decision
 
-**THE keeper: `.oak-benchmarks/gated-10-tierL`** — Tier L, B=1024 × 1M, oak
+**THE keeper: `.oak-benchmarks/mk5-tierL-noplan-20260704`** — Mark V, PROMOTED
+2026-07-04 on ALL gate criteria incl. the blocking ignition axes, vs BOTH
+gated-10 (8/8 PASS + IMPROVEMENT) and gated-9 (ceiling 4.3x). Numbers every
+candidate must beat: IQM delivered (all lanes) **+0.293**, positive lanes
+**95.0%**, median +0.30/step, best-lane class +1.304 (recentMax ~2.1),
+divergence 5.3%, RMST 986k/1M, SPS 453K settled. Config note: commit
+31136e787 run with `OAK_ABLATE=planning` (the ablation bisect convicted the
+planTd value-backup as the population anti-learner; successor work =
+hard-delete + selection-time planning redesign, optReward death channel,
+last 5% lanes, SPS to 489K).
+
+Superseded legal keeper (gated-10-tierL, PROMOTED 2026-06-23): — Tier L, B=1024 × 1M, oak
 policy, **PROMOTED 2026-06-23** (commit `0b40f60ba`, all four criteria PASS +
 IQM IMPROVEMENT vs probe-rho1). Official numbers every candidate must beat:
 IQM delivered (all lanes) **−0.0103**, divergence 46.9%, best lane 0.110
