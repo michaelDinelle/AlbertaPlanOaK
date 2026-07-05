@@ -841,9 +841,46 @@ def main() -> int:
     wp.add_argument("--follow", action="store_true")
     wp.add_argument("--interval", type=float, default=5.0)
 
+    lp2 = sub.add_parser("lanes", help="per-lane forensics: pack health diff at a step")
+    lp2.add_argument("root", type=Path)
+    lp2.add_argument("--at", type=int, required=True, help="heartbeat step to slice")
+    lp2.add_argument("--policy", default="oak")
+
     args = ap.parse_args()
-    return {"report": cmd_report, "gate": cmd_gate, "watch": cmd_watch,
+    return {"report": cmd_report, "gate": cmd_gate, "watch": cmd_watch, "lanes": cmd_lanes,
             "sota": cmd_sota}[args.cmd](args)
+
+
+def cmd_lanes(args) -> int:
+    """Per-lane forensics: crashed / near-zero / median / leader health diff."""
+    import statistics as _st
+    root = Path(args.root)
+    rows = [json.loads(l) for l in open(root / "fleet.jsonl")
+            if f'"step": {args.at}' in l or f'"step":{args.at}' in l]
+    lanes = [r for r in rows if r.get("kind") == "hb" and r.get("policy", "oak") == args.policy]
+    if not lanes:
+        print(f"no heartbeat rows at step {args.at}"); return 1
+    def rate(r): return r["rewardSum"] / max(r["step"], 1)
+    packs = {
+        "crashed(<-0.1)": [r for r in lanes if rate(r) < -0.1],
+        "negative": [r for r in lanes if -0.1 <= rate(r) < 0],
+        "low(0-0.15)": [r for r in lanes if 0 <= rate(r) < 0.15],
+        "mid(0.15-0.5)": [r for r in lanes if 0.15 <= rate(r) < 0.5],
+        "leaders(>0.5)": [r for r in lanes if rate(r) >= 0.5],
+    }
+    keys = ["actorSupportEntropy", "terminationRate", "optionDurationMean",
+            "keyboardL1", "oakFeatureReinitCountFinal", "actionDeltaL2Mean"]
+    print(f"pack | n | rate | " + " | ".join(keys) + " | pMax | rho")
+    for name, g in packs.items():
+        if not g: continue
+        def h(k):
+            vals = [(r["health"].get(k) if isinstance(r["health"].get(k), (int, float)) else 0) or 0 for r in g]
+            return _st.median(vals)
+        print(f"{name} | {len(g)} | {_st.median(rate(r) for r in g):+.3f} | "
+              + " | ".join(f"{h(k):.3g}" for k in keys)
+              + f" | {_st.median(r['paramAbsMax'] for r in g):.3g}"
+              + f" | {_st.median(r['kernelRho'] for r in g):+.3f}")
+    return 0
 
 if __name__ == "__main__":
     sys.exit(main())

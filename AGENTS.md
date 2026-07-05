@@ -39,9 +39,9 @@ Planning runs continually over the transition model. Eligibility traces are ment
 
 Strict current-status audit lives in `docs/roadmap.md`. The literature target is:
 
-- Subtasks defined by features (cumulant = reward, stopping value = feature attainment per Reward-Respecting Subtasks [arXiv:2202.03466](https://arxiv.org/abs/2202.03466) eq. 4). **Current rebuild OaK has the RR stopping-value branch live and has produced bridge-measured positive walking in some seeds; stable promotion is still open.**
+- Subtasks defined by features (cumulant = reward, stopping value = feature attainment per Reward-Respecting Subtasks [arXiv:2202.03466](https://arxiv.org/abs/2202.03466) eq. 4). **Mark IV: the eq.-4 bonus weight is LIVE — `bonusW[i]` is the high-water mark of `valueW[i]` (RR §6 optimism) plus a structural unit bonus, and stopping follows eq. 9's ≥ tie direction. Option 0 is RR p.12's subtask 0 (cumulant = reward, β = 0): the main-task key.**
 - Options = policies + termination. **Current rebuild continuation is derived from the RR stopping comparison, not H1 model-confidence hysteresis.**
-- Option models r̂(s,o), n̂(s,o), and for average-reward options duration l̂(s,o), used for planning. **Current L3-L7 keeps the orthodox raw option-reward-plus-duration form: `Q = rHat - rho*lHat + V(nHat)`. A coherent differential option-reward alternative was tested and rejected by the 10k paired gate, so do not revive it without materially new evidence.**
+- Option models r̂(s,o), n̂(s,o), and for average-reward options duration l̂(s,o), used for planning. **Mark IV (2026-07-04) moved to the centered differential form `Q = r̂_diff + V(stop)` with per-head differential centering (`optRho`, the psiRho pattern — Mark III law (d)); the materially new evidence for reviving it was the five-agent audit (raw-form staleness blow-ups, modelErr drip). Duration l̂ is a diagnostic/staleness head only; option 0 is the never-stopping main-task key.**
 - Planning over option models (RR-Subtasks eq. 19 / average-reward option backup).
 - **Option keyboard** = real-valued vector λ ∈ R^K, one component per subtask. Design A: chord blends K component options; model treats chord as opaque descriptor. Design B: chord defines a joint subtask. **Current OaK has a live scalar chord vector used to blend option policies, but it is not a fully operational Option Keyboard.** The unproven `psiCross`/GPE-GPI surrogate was deleted; current behavior is selected by RR continuation plus model-backed average-reward option scores, and emitted action means are a chord blend with selected-option fallback. A fully operational FC-STOMP keyboard/chord-descriptor cycle is an open architecture gap, not a hidden live feature.
 - **Feedback / utility / remove-replace.** Continually assess utility of features, subtasks, options, and option models. Replace what isn't pulling weight (Plan Step 11 + RR-Subtasks §8 FCSTOMP). **Current rebuild has age-gated feature/option-bundle replacement, `optFeature`, feature age, option age, and feature-ever-used metadata; richer utility remains an active research frontier.**
@@ -50,14 +50,14 @@ Strict current-status audit lives in `docs/roadmap.md`. The literature target is
 
 ### Current status
 
-OaK produces real HalfCheetah locomotion in a thin slice of seeds, but most seeds diverge and the population delivered rate is still negative. Current numbers come from fleet runs, not from this file — run `tools/fleet.py report`, and see the evidence sections in `docs/roadmap.md` (Walking Checkpoint Evidence, Current Evidence Ledger). The full April CPU-bridge walking-loop history — every status snapshot and every rejected stabilization mechanism — is archived in `docs/roadmap.md` under Exhausted Families (Keyboard / search-control / arbiter era).
+As of Mark IV (2026-07-04): divergence is essentially extinct on current substrates (0/1024 @100k) — the binding failure mode is chronic slightly-negative delivery with mode extinction ("never dies, never walks"), not numerical death. The last legally promoted keeper is `.oak-benchmarks/gated-10-tierL` (Tier-L IQM −0.0103); the mk2-D1/A4 substrate that followed was gate-REJECTED at both tiers and is not a keeper baseline. The June strong-mode ceiling was 0.58–0.71/step (probe-rho1, valuescale, gated-9 — all rejected for divergence under the old criteria); any 0.88 figure traces to an incomplete run (honest number: 0.451). Current numbers come from fleet runs, not from this file — run `tools/fleet.py report` and see `docs/roadmap.md`. The April CPU-bridge history is archived under Exhausted Families.
 
 Durable lessons from that work, independent of instrument or seed:
 
 - **Preserve the high-return walking mode while improving coverage.** Changes that calm actions, reduce commitment, refresh chords more often, or delete model-backed selection have repeatedly killed the strong mode. That is a regression, not a simplification.
 - **Interruption, termination, and duration-bounding are a dead end for plasticity** — every form tested killed the strong seed. Pursue representational plasticity instead (feature/representation rank maintenance, step-size adaptation, actor-entropy maintenance) in FeatureConstruction / GVFPrediction / GenerateAndTest.
 - **The missing organ is a coherent keyboard / search-control / utility loop** — cumulant/value-space composition (GPE-GPI or a chord-descriptor model) plus search-control effectiveness feeding back into which features, subtasks, options, and models survive. Isolated chord refreshes, damping rules, fallbacks, and raw reward-TD actor pressure are patch-and-pray.
-- **Mark III audit law (2026-07-04, five-agent audit — supersedes any older record that says otherwise).** (a) High-rate generate-and-test replacement is the ignition engine, not a bug: throttling it (the D1 promotion bar) collapsed igniters 64→5 with 0% sustain. (b) Magnitude-competition WTA is forbidden as a sparsifier: it blinded the actor (≤3/17 obs channels visible/step), spike-standardized constructed features, and amplified replacement damage ~13×; sparsity must be GEOMETRY-gated (stationary function of state) with all raw inputs always visible. (c) Tier-M IQM alone is blind to walking-mode kills: igniters, sustain-of-igniters, best-lane, and %positive are required gate criteria. (d) Uncentered stopping-aware cumulants are structurally divergent for slow-stopping options — every option-model head carries per-head differential centering (the psiRho pattern).
+- **Mark III audit law (2026-07-04, five-agent audit — supersedes any older record that says otherwise).** (a) High-rate generate-and-test replacement is the ignition engine, not a bug: throttling it (the D1 promotion bar) collapsed igniters 64→~5 (correction 2026-07-04: sustain-of-igniters was 1–2/5, not 0%). (b) Magnitude-competition WTA is forbidden as a sparsifier: it blinded the actor (≤3/17 obs channels visible/step), spike-standardized constructed features, and amplified replacement damage ~13×; sparsity must be GEOMETRY-gated (stationary function of state) with all raw inputs always visible. (c) Tier-M IQM alone is blind to walking-mode kills: igniters, sustainers, best-lane-class, and %positive are BLOCKING criteria in `fleet.py gate` (paired non-inferiority, shipped Mark IV). (d) Uncentered stopping-aware cumulants are structurally divergent for slow-stopping options — every option-model head carries per-head differential centering (the psiRho pattern).
 - **Judge the population, not a single seed.** Seeds 3 and 8 are inspectable lanes, not gates; promotion is the paired population gate (`tools/fleet.py gate`).
 
 ### What the Plan eschews
@@ -92,26 +92,25 @@ The agent is a focused-kernel single-stream Oak prototype over the Plan steps. K
 | Head | Shape | Role |
 |---|---|---|
 | `valueW` | R | Main value GVF (cumulant = reward, differential, ρ̄-centered). |
-| `psi` | K · R | K=R feature-indexed RR subtask GVFs. Cumulant is shared average-reward-centered reward; stopping value is RR Eq. 4: `V(s') - valueW[i]·x_i(s') + bonusW[i]·x_i(s')`. |
+| `psi` | K · R | K feature-indexed RR subtask GVFs (option 0 = main-task key, β=0). Cumulant is centered reward with per-head psiRho; stopping value is RR eq. 4 with the live high-water `bonusW` optimism term; eq.-9 ≥ ties stop. |
 | `optPolicy` | K · D · R | K component policies. The wrapper samples from the emitted behavior descriptor and returns exact one-step importance ratios for each target option policy in the active bank. |
-| `optReward` | K · R | K stopping-aware option reward models r̂^k. |
-| `optTransition` | K · R · R | K dense stopping-aware transition models `n̂^k_j(s) = Σ_i w^k_{j,i}·s[i]`. |
+| `optReward` | K · R | K CENTERED differential reward-to-stop models r̂^k (per-head `optRho` centering; `q = r̂ + v(stop)`). |
+| `vStop`, `vStop2` | 2 · K · R | Twin stop-value GVFs `E[v(s_stop)]` (value-equivalent partial model replacing the K·R·R transition tensor); twin disagreement gates planning trust, never the target. |
 | `optDuration` | K · R | K average-reward option-duration models l̂^k with a structural one-step lower bound at decode. |
 
-State representation is a finite adaptive predictive state, not a full reconstruction of the world: direct normalized experience channels (observation coordinates, multi-timescale observation traces, previous abstract action descriptor, previous reward, and an affine channel) plus constructed feature slots. Deep Fourier, random Fourier, and random-projection encoders are optional experimental modes, not Alberta Plan law. Constructed slots remain replaceable signed products/sums/residuals of useful parents. Plasticity is driven by MetaOptimize-style `alpha/beta/h/gradEnergy` families plus age/utility replacement; raw IDBD/Autostep are historical relatives, not the implementation target.
+State representation (Mark IV geometry-gated sparse): a 32-slot always-active CORE (17 standardized obs, 12 prev-action, prev reward, bias — all raw inputs visible every step, Mark III law (b)) plus 224 gated slots in 32 banks of 7, exactly one active per bank selected by a STATIONARY tile of a designated core channel (tile-coding geometry, never magnitude competition). Gated slots hold multi-timescale obs traces and constructed features; active width A = 64. Standardization ridges are floored at 1/O (no spike amplification). Deep Fourier, random Fourier, and random-projection encoders are optional experimental modes, not Alberta Plan law. Constructed slots remain replaceable signed products/sums/residuals of useful parents. Plasticity is driven by MetaOptimize-style `alpha/beta/h/gradEnergy` families plus age/utility replacement; raw IDBD/Autostep are historical relatives, not the implementation target.
 
-### Pipeline (5 Metal dispatches per step, direct command encoding)
+### Pipeline (single megakernel, multi-step command buffers)
 
-```
-oak_encode → oak_plan → oak_learn_heads → oak_replace → oak_action_emit
-```
+`oak_megastep` runs the whole per-step loop GPU-resident (encode → plan → learn → replace → emit → sample → env), with the eq.-19 prioritized-sweeping planning fan-out riding the warps that idle during the physics chain (wall-free). The discrete per-stage kernels were deleted in Mark IV (they were compiled but never dispatched).
 
-| Kernel | What it does |
+| Stage | What it does |
 |---|---|
-| `oak_encode` | Updates observation/traces, builds normalized anchor/constructed state features, then runs prediction/control: value TD, RR subtask TD, RR continuation, model-backed option scoring, and chord refresh. |
-| `oak_plan` | Updates the full option bank's stopping-aware model TDs, duration TDs, raw-reward option model, and model-priority statistics every step. |
-| `oak_learn_heads` | Updates value, psi, option policy, and option reward/transition/duration using exact one-step ratios and wrapper-provided target-option score gradients. |
-| `oak_replace` → `oak_action_emit` | Commits utility/meta-learning diagnostics and age/capacity-gated replacements, then emits all option policy means after a dispatch boundary so action emission cannot race replacement writes. |
+| encode | Observation/traces, core + geometry-gated features, value TD, RR subtask TDs, RR continuation, GPI selection, keyboard refresh, trust-gated one-step planning backup (planTd, fed into ρ̄ per differential planning). |
+| plan | Full option bank's centered reward-model TDs, duration TDs, twin stop-value TDs, model-priority statistics. |
+| learn | Value (decoupled td/plan normalizers), psi, option policies, option reward/duration, twin aux heads, and the prioritized-sweeping backup accumulator apply. |
+| replace → emit | Utility/meta commits, bonusW high-water, ring write + priorities, G&T replacement (pre-D1 rate), then option means + chord blend emission. |
+| env window | Physics chain on one warp; prioritized-sweeping eq.-19 backups + twin copy-2 updates on the idle warps. |
 
 The dispatch shape stays fixed, but the internal design pattern is the named FC-STOMP loop: `FeatureConstruction -> GVFPrediction -> RewardRespectingSubtasks -> OptionPolicies -> OptionModels -> Planning -> OptionKeyboard -> SearchControl -> GenerateAndTest -> ActionEmission`.
 
@@ -142,6 +141,23 @@ A fleet run root (`.oak-benchmarks/<run-id>/`, override with `OAK_METRICS_STORAG
 - `.venv/bin/python tools/fleet.py report <run-root>` — population report: Kaplan-Meier survival + RMST, divergence rate with Wilson 95% CI (overall + per detector), IQM delivered reward rate (`rewardSum/steps`) with bootstrap CI over ALL lanes (headline; never condition on survival) and survivors-only (diagnostic), plasticity quartiles (zenith step/rate, decay ratio), entropy-collapse rate. Markdown output pastes into `docs/roadmap.md`; also writes `summary.json`.
 - `.venv/bin/python tools/fleet.py gate <keeper-root> <candidate-root>` — **the promotion law.** Same seed set + horizon required (hard error); all bootstraps paired by seed. PASS iff ALL four hold (AND-gate ⇒ each one-sided α=0.05, no multiplicity correction): (1) divergence non-inferiority, 95th pct of paired Δp ≤ δ (default 0.64/√N: 0.02 @ N=1024); (2) IQM delivered-rate non-inferiority, 5th pct of ΔIQM ≥ −5%·|IQM_keeper|, with a non-blocking IMPROVEMENT flag (what SOTA claims must cite); (3) RMST survival non-inferiority, 5th pct of ΔRMST ≥ −5%·horizon; (4) per-phase NF prevalence non-inferiority — for each phase, 95th pct of paired Δ(fraction of lanes with any non-finite in that phase) ≤ δ (per-lane PREVALENCE, not fleet-sum totals: a few already-diverged lanes spray non-finites post-death and inflate totals without changing how many lanes fail, which double-counts what criterion 1 already measures; consistent with the equivalence gate's `nf_prevalence`). Exit 0 = PROMOTE, 1 = REJECT. Seed-3/seed-8 folklore is not encoded anywhere — those seeds are ordinary lanes (lane 3, lane 8 of every fleet) whose trajectories remain inspectable in `fleet.jsonl`.
 - `.venv/bin/python tools/fleet.py watch <run-root> [--follow]` — live aggregate view.
+- `.venv/bin/python tools/fleet.py lanes <run-root> --at <step>` — per-lane pack
+  forensics at a heartbeat: crashed/negative/low/mid/leader health-median diff
+  (entropy, termination, duration, keyboard L1, feature reinits, action delta,
+  paramAbsMax, ρ̄). The organ-bisect loop's step 2 as one command.
+- `tools/check.sh <name> [steps=100000] [ablate=none]` — the standard VISIBLE
+  verification run (B=1024, fixed CB=1024, output in `.oak-benchmarks/<name>`)
+  with the full heartbeat table printed. Use for every pre-launch check; never
+  run checks in a scratchpad the user can't watch.
+- `tools/ablate.py --steps N --base <ablations> <organ> [organ...]` — the
+  organ-bisect matrix: runs baseline + each organ ablated on top of --base,
+  prints the conviction table. (Named ablate.py deliberately: a tools/bisect.py
+  shadows Python's stdlib `bisect` and hijacks fleet.py's argparse.)
+- **The organ-bisect law** (`.claude/skills/organ-bisect/SKILL.md`): for ANY
+  population pathology, convict before you fix — trajectory shape, `lanes`
+  diff, death certificates (`explosionElem` → head+column), then the ablation
+  matrix, then fix at the source and verify at the pathology's own depth.
+  One ablation bisect found in 10 minutes what eight theorized fixes missed.
 
 ## The SOTA bar (HalfCheetah-v4, external)
 
