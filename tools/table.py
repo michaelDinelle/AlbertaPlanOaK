@@ -19,14 +19,17 @@ def row(root, s):
             f"  available steps: {sorted(x['step'] for x in aggs)}\n"
             f"  Compare only at steps present in ALL roots.")
     r = r[-1]
-    hbs = {}
+    # fleet total at the EXACT step, from hb AND final rows (a run's last
+    # step is written as kind=final; the old nearest-step fallback silently
+    # substituted the previous heartbeat's total — every 1M table showed the
+    # 900k sum. Exact-step or hard error, same law as the quantile rows.)
+    tot, nrows = 0.0, 0
     for l in open(f'{root}/fleet.jsonl'):
         x = json.loads(l)
-        if x['kind'] == 'hb':
-            hbs.setdefault(x['step'], 0.0)
-            hbs[x['step']] += x['rewardSum']
-    tstep = min(hbs, key=lambda t: abs(t - r['step'])) if hbs else r['step']
-    tot = hbs.get(tstep, 0.0)
+        if x['step'] == s and x['kind'] in ('hb', 'final'):
+            tot += x['rewardSum']; nrows += 1
+    if nrows == 0:
+        raise SystemExit(f"TABLE ERROR: {root} has no per-lane rows at step {s} — cannot compute fleet total.")
     meta = json.load(open(f'{root}/meta.json'))
     f = meta.get('flopsPerLaneStep', 105296)
     return r, tot, f, meta
@@ -51,3 +54,4 @@ for i, n in enumerate(names):
     print('| %s | %s |' % (n, ' | '.join(c[i] for c in cols)))
 if len(set(abls)) > 1:
     print(f'⚠️  CONFIG MISMATCH: ablations differ across columns ({abls}) — comparison invalid.')
+print('⤷ DISPLAY CONTRACT: paste this table VERBATIM into the reply text — tool output is not user-visible; keeper column mandatory; never summarize or say "table above".')
