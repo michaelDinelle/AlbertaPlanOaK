@@ -43,7 +43,10 @@ data = [row(rt, step) for rt in roots]
 # allowed-to-differ list (run name, startedAt) that differs = hard refusal.
 # This is a whitelist by construction: new meta fields are compared by
 # default; a field must be explicitly added to ALLOWED_DIFF to be exempt.
-ALLOWED_DIFF = {'startedAt'}
+# ablation is the TREATMENT variable — candidate vs keeper legitimately
+# differ in it (user ruling 2026-07-05); it stays loudly visible in the
+# config row. Everything else fail-closed.
+ALLOWED_DIFF = {'startedAt', 'ablation', 'ablationLabel'}
 metas = [m for _, _, _, m in data]
 allkeys = set().union(*(m.keys() for m in metas))
 mismatches = []
