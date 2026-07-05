@@ -19,6 +19,10 @@ def row(root, s):
             f"  available steps: {sorted(x['step'] for x in aggs)}\n"
             f"  Compare only at steps present in ALL roots.")
     r = r[-1]
+    # heartbeat window at this step: the 'live' rows average over exactly this
+    # many steps — comparable across roots ONLY if the windows match.
+    prior = [x['step'] for x in aggs if x['step'] < s]
+    r['_window'] = s - (max(prior) if prior else 0)
     # fleet total at the EXACT step, from hb AND final rows (a run's last
     # step is written as kind=final; the old nearest-step fallback silently
     # substituted the previous heartbeat's total — every 1M table showed the
@@ -43,6 +47,13 @@ def fmt(r, tot, f):
 names = ['deaths', 'median (cumulative)', 'median (live)', 'P10', 'best lane',
          'live max', 'positivity', 'SPS', 'reward/GFLOP (median)', 'fleet total (all lanes)']
 cols = [fmt(r, t, f) for r, t, f, _ in data]
+# live rows (median live, live max) are windowed: blank them on window mismatch
+windows = [r['_window'] for r, _, _, _ in data]
+if len(set(windows)) > 1:
+    LIVE_ROWS = [2, 5]  # median (live), live max
+    for c, w in zip(cols, windows):
+        for i in LIVE_ROWS:
+            c[i] = f'({c[i]} over {w//1000}k win — NOT comparable)'
 hdrs = [os.path.basename(os.path.normpath(rt)) for rt in roots]
 abls = [(m.get('ablationLabel') or 'none') for _, _, _, m in data]
 cfgs = [f'ablation={a}, B={len(m.get("seeds", [])) or m.get("batch")}, {m.get("steps", 0)//1000}k, {m.get("startedAt", "?")}'
