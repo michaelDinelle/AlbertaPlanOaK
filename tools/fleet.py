@@ -517,44 +517,69 @@ def gate_verdicts(keep_fin, cand_fin, keep_seeds, cand_seeds, n, horizon, args, 
         "; ".join(nf_parts) + (f" OVER={nf_over}" if nf_over else "") + f" δ={delta:.4f}"))
 
     # Ignition / walking-mode tail (Mark III audit law: Tier-M IQM alone approved a
-    # mode-kill — the tail is a first-class gate axis). Always reported; BLOCKING
-    # only when explicit bars are passed (--min-igniters/--min-best/--min-positive).
-    def _ign(run_, seeds_):
+    # mode-kill — the tail is a first-class BLOCKING gate axis). Four criteria,
+    # paired by seed with the same machinery as the core gate:
+    #   igniters      — per-lane igniter indicator, non-inferiority at δ
+    #   sustainers    — per-lane sustained-igniter indicator, non-inferiority at δ
+    #   bestLaneClass — paired top-8-lane mean delivered rate, 5% relative band
+    #   positiveFrac  — per-lane rate>0 indicator, non-inferiority at δ
+    # Explicit absolute bars (--min-igniters/--min-best/--min-positive) ADD on top.
+    def _ign_vec(run_, seeds_):
         run_lanes = run_["lanes"]
         pol = args.policy
         window = max(horizon // 5, 1)
-        ign = sus = 0
-        for s_ in seeds_:
+        ign = np.zeros(len(seeds_))
+        sus = np.zeros(len(seeds_))
+        for j, s_ in enumerate(seeds_):
             pl = plasticity(run_lanes[(pol, s_)], window)
             if pl and pl["zenithRate"] > 0.1:
-                ign += 1
+                ign[j] = 1.0
                 if math.isfinite(pl["decayRatio"]) and pl["decayRatio"] >= 0.5:
-                    sus += 1
+                    sus[j] = 1.0
         return ign, sus
     try:
         if keep_run is None or cand_run is None:
             raise ValueError("run data not provided")
-        k_ign, k_sus = _ign(keep_run, keep_seeds)
-        c_ign, c_sus = _ign(cand_run, cand_seeds)
+        k_ign_v, k_sus_v = _ign_vec(keep_run, keep_seeds)
+        c_ign_v, c_sus_v = _ign_vec(cand_run, cand_seeds)
         c_best = float(np.max(c_del))
         c_pos = float((c_del > 0).mean())
+        for name, kv, cv, seed_ in (("igniters", k_ign_v, c_ign_v, 30),
+                                    ("sustainers", k_sus_v, c_sus_v, 31)):
+            d95 = float(np.percentile(
+                paired_bootstrap(cv, kv, np.mean, n_boot=args.boot, seed=seed_), 95))
+            verdicts.append((name, d95 <= delta,
+                             f"keeper={int(kv.sum())} cand={int(cv.sum())} "
+                             f"Δ95={d95:+.4f} δ={delta:.4f}"))
+        def top8(x):
+            return float(np.mean(np.sort(x)[-8:]))
+        k_top = top8(k_del)
+        band_top = args.rate_rel * abs(k_top)
+        d_top5 = float(np.percentile(
+            paired_bootstrap(k_del, c_del, top8, n_boot=args.boot, seed=32), 5))
+        verdicts.append(("bestLaneClass", d_top5 >= -band_top,
+                         f"keeper={k_top:+.4f} cand={top8(c_del):+.4f} "
+                         f"Δ5={d_top5:+.5g} band={band_top:.5g}"))
+        k_pos_v = (k_del > 0).astype(float)
+        c_pos_v = (c_del > 0).astype(float)
+        d_pos95 = float(np.percentile(
+            paired_bootstrap(c_pos_v, k_pos_v, np.mean, n_boot=args.boot, seed=33), 95))
+        verdicts.append(("positiveFrac", d_pos95 <= delta,
+                         f"keeper={k_pos_v.mean():.1%} cand={c_pos:.1%} "
+                         f"Δ95={d_pos95:+.4f} δ={delta:.4f}"))
+        ign_ok = True
         bars_given = any(v is not None for v in
                          (args.min_igniters, args.min_best, args.min_positive))
-        ign_ok = True
         if args.min_igniters is not None:
-            ign_ok &= c_ign >= args.min_igniters
+            ign_ok &= int(c_ign_v.sum()) >= args.min_igniters
         if args.min_best is not None:
             ign_ok &= c_best >= args.min_best
         if args.min_positive is not None:
             ign_ok &= c_pos >= args.min_positive
-        detail = (f"igniters keeper={k_ign}(sus {k_sus}) cand={c_ign}(sus {c_sus}); "
-                  f"best={c_best:+.4f} pos={c_pos:.1%}")
         if bars_given:
-            detail += (f" bars[ign>={args.min_igniters} best>={args.min_best} "
-                       f"pos>={args.min_positive}]")
-            verdicts.append(("ignitionTail", ign_ok, detail))
-        else:
-            print(f"  [info] ignitionTail  {detail}")
+            verdicts.append(("ignitionBars", ign_ok,
+                             f"best={c_best:+.4f} pos={c_pos:.1%} bars[ign>={args.min_igniters} "
+                             f"best>={args.min_best} pos>={args.min_positive}]"))
     except Exception as e:  # tail metrics must never break the core gate
         print(f"  [info] ignitionTail  (unavailable: {e})")
 

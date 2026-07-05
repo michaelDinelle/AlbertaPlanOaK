@@ -1,6 +1,6 @@
 # OaK roadmap - Plan-orthodox continual improvement
 
-Last updated: 2026-06-21. The instrument is the GPU-resident **fleet**: B=1024 independent lanes (one seed each), a population gate, and GPU physics certified equivalent to fp64 MuJoCo (the F4 verdict). See **Benchmark Protocol** for the tier ladder, **Current Baseline Decision** for the live keeper and the numbers every candidate must beat, and **Walking Checkpoint Evidence** / **Exhausted Families** for the April 2026 CPU-bridge history (kept as history, not current law).
+Last updated: 2026-07-04 (Mark IV). The instrument is the GPU-resident **fleet**: B=1024 independent lanes (one seed each), a population gate, and GPU physics certified equivalent to fp64 MuJoCo (the F4 verdict). See **Benchmark Protocol** for the tier ladder, **Current Baseline Decision** for the live keeper and the numbers every candidate must beat, and **Walking Checkpoint Evidence** / **Exhausted Families** for the April 2026 CPU-bridge history (kept as history, not current law).
 
 **Current status.** OaK produces real HalfCheetah locomotion, but only in a thin slice of the population, and it is not yet stable. The Tier-L keeper is now the **ρ≡1 on-policy substrate fix** (`probe-rho1-tierL-rerun`, B=1024 × 1M, PROMOTED 2026-06-22 over the prior `keeper-fleet-tierL-gpu-20260611`): it diverges on **77.3%** of lanes by 1M (down from 99.4%; paramExplosion-dominated — the certificate dates the first numeric event, not behavioral death), delivers **IQM −0.0223/step** across all lanes (up from −0.0384, an IMPROVEMENT), survives 5.4× longer (RMST/horizon 0.48), and **no longer collapses actor entropy** (0.0%, down from ~66%). Still negative, still 77% divergent — the substrate is better, not solved. The strong-walker mode (~0.2–0.4/step) is a reachable attractor in a ~1% slice (lanes 3, 802, 393, 383, 958, 856, …), not a seed-3 miracle. The April long-horizon microscopes (deep-seed3-10m, 1M coverage) are superseded by the **First deep-horizon decay run** recorded below.
 
@@ -1798,15 +1798,101 @@ inflation persists across pool/inline/raw paths, pointing at per-lane mjData
 working set vs cache, not allocator or thread overhead. The structural fix is
 GPU-resident physics (Phase F: ~100 floats/lane instead of ~100 KB mjData).
 
+## Mark V amendments (2026-07-04, same uncommitted tree — the launch candidate)
+
+Run: `mk5-tierL-20260704`, gated vs gated-10-tierL AND (bestLaneClass) gated-9-tierL.
+
+- **0.7 restoration**: raw gated-9 eq.-19 max backup kept; the mid-sanity trust
+  multiplier on planTd DELETED (iter-10-style target suppression = the measured
+  ceiling killer). Stability = differential-planning ρ̄ + decoupled contraction
+  + reinstated capacity bounds.
+- **Deaths → 0 structurally**: α ∈ [1/R², 1] clamp and min(ρ, K) reinstated
+  (mk4 forensics: unbounded α exploded valueW via the sweep apply, lane 857;
+  uncapped ratios collapsed entropy and blew psiAux, lane 950). Overflow→0 kept.
+- **ARS consensus organ** (Mania et al. 2018, all-seeds-positive on HalfCheetah
+  at linear capacity): per-option fitness EMA ρ_k·(r−ρ̄), every-step
+  function-space recombination into the main-task key, G&T reseeds = seeded
+  perturbations of the consensus.
+- **Reactive-path pipeline** (Plan: "reactive action prioritized"): critical
+  path = encode → commit → emit → sample; plan+learn+prioritized-sweep+
+  curation-analytics ride the env window on idle warps, one whole lane per warp
+  (per-lane bitwise determinism kept; one rotating lane/step skips its window —
+  the metaSlot round-robin precedent). Sample outputs stage-buffered so the
+  window pairs (s_{t-1}→s_t) with a_{t-1} exactly.
+- **Perf**: budgeted 4-candidate sweep; option-independent GTD2/bootstrap norm
+  terms computed once (were 32×); function-space consensus (~1/20 FLOPs);
+  transposed row-major emit + learn; optPolicy stores only the live half of the
+  action descriptor (K·D/2·R — the reserved half is wrapper-inert); promotion
+  column work warp-parallelized; analytics on round-robin half-cadence;
+  CB tuner capped at 1024. SPS: 156K (mk4) → ~440-475K measured (settled,
+  B=1024); keeper reference 489K — residual gap is the psi/model head-dot
+  transposition, documented as the next lever if the gate demands it.
+
+## Mark IV — the one-shot overhaul (2026-07-04)
+
+One commit, one Tier-L verification run (`mk4-tierL-20260704`, gated vs
+`gated-10-tierL`), designed from four parallel audits (kernel math,
+archaeology, research gaps, compute). What changed, by FC-STOMP section:
+
+- **FeatureConstruction**: banked magnitude-WTA DELETED (it was still live
+  despite the Mark III law). New: 32-slot always-active core (all raw inputs
+  visible every step) + 224 gated slots in 32 banks of 7, one active per bank
+  by a stationary tile of a designated core channel (tile-coding geometry).
+  Active width 32→64. Standardization ridge floored at 1/O (spike-amplifier
+  channel closed). Traces are gated feature kind 3, G&T-proposable.
+- **GVFPrediction**: decoupled td/planTd implicit normalizers (pure NLMS — the
+  TD-energy soft caps on walking-scale TDs are deleted); ρ̄ additionally
+  integrates the planning TD (Wan-Naik-Sutton differential planning; without
+  it ρ̄ measured −36 by 10k as it absorbed planning value-growth as negative
+  reward bias).
+- **RewardRespectingSubtasks**: eq.-4 bonus weight LIVE (`bonusW` = high-water
+  mark of `valueW` + unit bonus); eq.-9 tie direction fixed (≥ stops);
+  cross-option actor mean-baseline DELETED (RR eq. 10: each actor climbs its
+  own δ). Option 0 = subtask 0 (cumulant reward, β=0) — the main-task key,
+  a primitive (one-step) option for selection.
+- **OptionModels**: centered differential reward-to-stop (per-head `optRho`,
+  Mark III (d)); `q = r̂ + v(stop)`; duration demoted to diagnostics;
+  staleness R·K·K → R·K.
+- **Planning/SearchControl**: planTd = trust-gated signed max-advantage (no
+  /dur, no −modelErr shift); eq.-19 prioritized-sweeping backups over the
+  64-tuple ring APPLIED to valueW (trust = twin disagreement gate, shipped
+  contraction + 1-experience-equivalent mass law), replacing the discarded
+  dynaAcc stream.
+- **ActionEmission**: importance-ratio cap-at-K deleted; exp-overflow ratio
+  now 0 (was K — backwards); per-lane seeded init diversity (the symmetric
+  saddle made ignition a pure noise lottery).
+- **GenerateAndTest**: pre-D1 promotion bar restored (ignition engine back);
+  replacement α reset = α₀ = 1/O (graduates learned 15× slower than anchors);
+  β clamp deleted (MetaOptimize has none; it was a stationary scale prior).
+- **Perf**: G=16 geometry (64 TGs; the min(32,·) law pigeonholed 40 cores),
+  coop physics at all G, never-dispatched discrete kernels deleted, simd_sum
+  value dots.
+- **Gate law**: igniters / sustainers / bestLaneClass / positiveFrac are now
+  BLOCKING paired non-inferiority criteria in `fleet.py gate` (Mark III (c)).
+
 ## Current Baseline Decision
 
-**THE keeper: `.oak-benchmarks/probe-rho1-tierL-rerun`** (the ρ≡1 Tier-L run) —
-Tier L, B=1024 × 1M, oak policy, on the certified GPU instrument. The **ρ≡1
-on-policy substrate fix** (commit `deefb2bbc`: delete the off-policy importance
-ratio — see the Divergence audit and the [[oak-divergence-bottleneck]] memory),
-**PROMOTED 2026-06-22** over the prior keeper on a paired Tier-L `fleet.py gate`
-(all four criteria PASS, IQM IMPROVEMENT). Official numbers every candidate must
-beat (`tools/fleet.py report`):
+**THE keeper: `.oak-benchmarks/gated-10-tierL`** — Tier L, B=1024 × 1M, oak
+policy, **PROMOTED 2026-06-23** (commit `0b40f60ba`, all four criteria PASS +
+IQM IMPROVEMENT vs probe-rho1). Official numbers every candidate must beat:
+IQM delivered (all lanes) **−0.0103**, divergence 46.9%, best lane 0.110
+(recentMax 0.296), %>0 = 1.0%.
+
+**Record correction (2026-07-04 archaeology audit):** everything after
+gated-10 is REJECT-lineage — the mk2-D1/A4 substrate at HEAD before Mark IV
+was gate-REJECTED at Tier-M (IQM −0.0074 vs −0.0060) AND Tier-L (IQM −0.191
+vs −0.0103, 18× worse) yet was used as a de-facto gating baseline; no Tier-L
+PROMOTE exists for it. Gate all candidates against `gated-10-tierL` until a
+legal PROMOTE replaces it. Also corrected: divergence is extinct on the
+mk2-era substrates (0/1024 @100k — the old "most seeds diverge" clause is
+false there; the failure mode is mode-extinction); the 0.884 best-lane figure
+came from the INCOMPLETE `valuescale-tierL-20260622` (honest number from the
+complete rerun: 0.451); gated-10's "87.6% entropy collapse" claim is
+contradicted by its own summary.json (0.000); the Mark III "0% sustain of
+igniters" clause is contradicted by verify-keeper (2/5 sustained).
+
+Superseded keeper (probe-rho1-tierL-rerun, PROMOTED 2026-06-22), kept for the
+audit trail:
 
 - Divergence by 1M: **77.3%** (down from 99.4%); RMST/horizon **0.48** (5.4×).
 - **IQM delivered, all lanes: −0.022288** (up from −0.038358; IMPROVEMENT).
