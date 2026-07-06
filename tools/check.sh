@@ -3,9 +3,21 @@
 # Usage: tools/check.sh <name> [steps=100000] [ablate=none]
 set -euo pipefail
 cd "$(dirname "$0")/.."
-NAME="${1:?usage: check.sh <name> [steps] [ablate]}"; STEPS="${2:-100000}"; ABL="${3:-none}"
+NAME="${1:?usage: check.sh <name> [steps] [ablate] [role]}"; STEPS="${2:-100000}"; ABL="${3:-none}"; ROLE="${4:-candidate}"
 ROOT=".oak-benchmarks/$NAME"
 rm -rf "$ROOT"
+# Role registry: a candidate launch IS the current candidate (the run the
+# user's tables track). Scaffold/baseline runs pass role=scaffold and never
+# touch the registry.
+if [ "$ROLE" = "candidate" ]; then
+  .venv/bin/python - "$NAME" <<'PY'
+import json, sys
+p = '.oak-benchmarks/ROLES.json'
+r = json.load(open(p))
+r['candidate'] = sys.argv[1]
+json.dump(r, open(p, 'w'), indent=1)
+PY
+fi
 # 100k CADENCE, PERIOD (user law 2026-07-05): every run >= 300k heartbeats
 # at exactly 100k — one cadence for all screens, Tier-Ls, and keepers, so
 # every milestone is a legal comparison point everywhere. Short checks
