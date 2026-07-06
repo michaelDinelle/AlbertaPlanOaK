@@ -7,9 +7,27 @@ apples-to-apples is structural. Rows fixed: config | deaths | median cum |
 median live | P10 | best lane | live max | positivity | SPS |
 reward/GFLOP (median) | fleet total (all lanes)."""
 import json, sys, os
-if len(sys.argv) < 4:
-    raise SystemExit("usage: table.py <root1> [root2 ...] <keeper-root> <step>  (>=2 roots: keeper column is MANDATORY)")
-roots, step = sys.argv[1:-1], int(sys.argv[-1])
+BENCH = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), '.oak-benchmarks')
+if len(sys.argv) >= 4:
+    roots, step = sys.argv[1:-1], int(sys.argv[-1])
+else:
+    # DEFAULT MODE (user law 2026-07-06): "the table" = CANDIDATE vs parent vs
+    # KEEPER from .oak-benchmarks/ROLES.json — no discretion about which roots
+    # to show. Optional single arg = step; omitted = latest common 100k
+    # milestone across the role roots.
+    R = json.load(open(f'{BENCH}/ROLES.json'))
+    roots = [f'{BENCH}/{R[k]}' for k in ('candidate', 'parent', 'keeper') if R.get(k)]
+    if len(sys.argv) == 2:
+        step = int(sys.argv[1])
+    else:
+        common = None
+        for rt in roots:
+            steps = {json.loads(l)['step'] for l in open(f'{rt}/aggregate.jsonl') if l.strip()}
+            steps = {t for t in steps if t % 100000 == 0}
+            common = steps if common is None else (common & steps)
+        if not common:
+            raise SystemExit("TABLE ERROR: no common 100k milestone across candidate/parent/keeper yet.")
+        step = max(common)
 def row(root, s):
     aggs = [json.loads(l) for l in open(f'{root}/aggregate.jsonl')]
     r = [x for x in aggs if x['step'] == s]
