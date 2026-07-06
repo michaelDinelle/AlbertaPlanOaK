@@ -23,7 +23,7 @@ fi
 # every milestone is a legal comparison point everywhere. Short checks
 # (< 300k) keep steps/10 for early kill resolution; their FINAL row lands on
 # the horizon (100k check -> 100k row) and is the only comparison point.
-HB=$(( STEPS >= 300000 ? 100000 : STEPS / 10 ))
+HB=100000   # 100k cadence PERIOD — every run, every horizon, one window everywhere
 OAK_BENCH_HEARTBEAT_STEPS="$HB" \
 OAK_ABLATE="$ABL" OAK_BENCH_ENV=HalfCheetah-v4 OAK_BENCH_POLICIES=oak \
 OAK_BENCH_STEPS="$STEPS" OAK_BENCH_SEED_COUNT=1024 OAK_STEPS_PER_CB=1024 \
