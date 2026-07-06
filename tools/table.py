@@ -46,7 +46,13 @@ data = [row(rt, step) for rt in roots]
 # ablation is the TREATMENT variable — candidate vs keeper legitimately
 # differ in it (user ruling 2026-07-05); it stays loudly visible in the
 # config row. Everything else fail-closed.
-ALLOWED_DIFF = {'startedAt', 'ablation', 'ablationLabel'}
+# 'steps' (run horizon) may differ ONLY because the separate heartbeat-window
+# equality check below enforces the REAL apples-to-apples criterion: identical
+# cadence at the compared step (100k everywhere by law). A row at step S with
+# equal windows is the same measurement regardless of how long the runs
+# ultimately go — this is what makes keeper tables possible at every 100k
+# milestone of a 300k screen (keeper-column-mandatory law).
+ALLOWED_DIFF = {'startedAt', 'ablation', 'ablationLabel', 'steps'}
 metas = [m for _, _, _, m in data]
 allkeys = set().union(*(m.keys() for m in metas))
 mismatches = []
