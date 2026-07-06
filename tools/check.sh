@@ -6,10 +6,12 @@ cd "$(dirname "$0")/.."
 NAME="${1:?usage: check.sh <name> [steps] [ablate]}"; STEPS="${2:-100000}"; ABL="${3:-none}"
 ROOT=".oak-benchmarks/$NAME"
 rm -rf "$ROOT"
-# Heartbeats must land on 100k multiples for runs >= 300k (apples-to-apples
-# law: tables compare ONLY at steps present in both roots, and the keeper
-# roots heartbeat at 100k). 50k divides 100k and keeps mid-run resolution.
-HB=$(( STEPS >= 300000 ? 50000 : STEPS / 10 ))
+# 100k CADENCE, PERIOD (user law 2026-07-05): every run >= 300k heartbeats
+# at exactly 100k — one cadence for all screens, Tier-Ls, and keepers, so
+# every milestone is a legal comparison point everywhere. Short checks
+# (< 300k) keep steps/10 for early kill resolution; their FINAL row lands on
+# the horizon (100k check -> 100k row) and is the only comparison point.
+HB=$(( STEPS >= 300000 ? 100000 : STEPS / 10 ))
 OAK_BENCH_HEARTBEAT_STEPS="$HB" \
 OAK_ABLATE="$ABL" OAK_BENCH_ENV=HalfCheetah-v4 OAK_BENCH_POLICIES=oak \
 OAK_BENCH_STEPS="$STEPS" OAK_BENCH_SEED_COUNT=1024 OAK_STEPS_PER_CB=1024 \
