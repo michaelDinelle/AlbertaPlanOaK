@@ -143,6 +143,37 @@ def finals(run: dict, policy: str) -> dict[int, dict]:
         out[seed] = fin[-1] if fin else rows[-1]
     return out
 
+def lane_env_map(run: dict, policy: str) -> dict[int, str]:
+    """seed -> envId. Mixed-env fleets stamp envId on every fleet.jsonl row and carry
+    meta.envSchedule; legacy single-env roots predate per-row envId — fall back to
+    meta.envId (every lane in those roots runs the one env)."""
+    default = run["meta"].get("envId")
+    out: dict[int, str] = {}
+    for (pol, seed), rows in run["lanes"].items():
+        if pol != policy:
+            continue
+        out[seed] = next((r.get("envId") for r in rows if r.get("envId")), default)
+    return out
+
+def env_slices(run: dict, policies: list[str]) -> dict[str, list[int]]:
+    """envId -> sorted seeds, unioned across the reported policies (env is a property
+    of the lane/seed, not the policy). Single-env roots return a one-entry map."""
+    slices: dict[str, set[int]] = defaultdict(set)
+    for p in policies:
+        for s, e in lane_env_map(run, p).items():
+            slices[e].add(s)
+    return {e: sorted(ss) for e, ss in sorted(slices.items())}
+
+def slice_run(run: dict, seeds: list[int]) -> dict:
+    """A run view restricted to the given lane seeds — analyze/render over it is
+    exactly the single-env computation over that env's lanes only."""
+    keep = set(seeds)
+    return {
+        "meta": run["meta"],
+        "lanes": {k: v for k, v in run["lanes"].items() if k[1] in keep},
+        "deaths": [d for d in run["deaths"] if d.get("seed") in keep],
+    }
+
 def death_times(fin: dict[int, dict], horizon: int) -> tuple[np.ndarray, np.ndarray, list[int]]:
     seeds = sorted(fin)
     times = np.array(
@@ -441,6 +472,27 @@ def cmd_report(args) -> int:
     window = args.window or max(meta["steps"] // 5, 1)
     policies = [args.policy] if args.policy else meta.get("policies", ["oak"])
     results = [analyze_policy(run, p, window) for p in policies]
+    # Mixed-env fleets (meta.envSchedule + per-lane envId): reward scales differ
+    # across envs, so lanes are NEVER pooled into one IQM — print the full
+    # population report once per env slice, then the legacy overall block with a
+    # warning. Single-env roots take the old path untouched (byte-identical output).
+    slices = env_slices(run, policies)
+    mixed = len(slices) > 1
+    slice_results: dict[str, list[dict]] = {}
+    if mixed:
+        for env_id, seeds in slices.items():
+            view = slice_run(run, seeds)
+            sres = [analyze_policy(view, p, window) for p in policies]
+            slice_results[env_id] = sres
+            print(render_markdown(sres, {**meta, "envId": env_id}))
+            if args.leaderboard:
+                for r in sres:
+                    if r:
+                        print(render_leaderboard(view, r, args.top))
+            print()
+        print("> ⚠️ MIXED-ENV RUN: overall block mixes envs; read slices "
+              "(reward scales differ across envs).")
+        print()
     print(render_markdown(results, meta))
     if args.leaderboard:
         for r in results:
@@ -449,6 +501,10 @@ def cmd_report(args) -> int:
     summary = {"meta": meta, "results": [
         {k: v for k, v in r.items() if k not in ("recentRates", "deliveredBySeed")}
         for r in results if r]}
+    if mixed:
+        summary["envSlices"] = {env: [
+            {k: v for k, v in r.items() if k not in ("recentRates", "deliveredBySeed")}
+            for r in sres if r] for env, sres in slice_results.items()}
     out = args.json or (args.root / "summary.json")
     out.write_text(json.dumps(summary, indent=2, sort_keys=True))
     return 0
@@ -672,6 +728,24 @@ def equivalence_gate(keep_fin, cand_fin, keep_seeds, cand_seeds, n, horizon, arg
 def cmd_gate(args) -> int:
     keep_run, cand_run = load_run(args.keeper), load_run(args.candidate)
     keep_fin, cand_fin = (finals(r, args.policy) for r in (keep_run, cand_run))
+    keep_envs = lane_env_map(keep_run, args.policy)
+    cand_envs = lane_env_map(cand_run, args.policy)
+    if args.env_slice is not None:
+        # Restrict BOTH roots to lanes on this env, paired by seed. The 8-criterion
+        # gate below then runs unchanged on the slices.
+        keep_fin = {s: f for s, f in keep_fin.items() if keep_envs.get(s) == args.env_slice}
+        cand_fin = {s: f for s, f in cand_fin.items() if cand_envs.get(s) == args.env_slice}
+        if not keep_fin or not cand_fin:
+            print(f"GATE ERROR: --env-slice {args.env_slice}: empty slice "
+                  f"(keeper {len(keep_fin)} lanes, candidate {len(cand_fin)} lanes).")
+            return 2
+        k_only = sorted(set(keep_fin) - set(cand_fin))
+        c_only = sorted(set(cand_fin) - set(keep_fin))
+        if k_only or c_only:
+            print(f"GATE ERROR: --env-slice {args.env_slice}: slice seed sets differ — "
+                  f"seeds only in keeper: {k_only[:8]}{'...' if len(k_only) > 8 else ''}; "
+                  f"only in candidate: {c_only[:8]}{'...' if len(c_only) > 8 else ''}.")
+            return 2
     keep_seeds, cand_seeds = sorted(keep_fin), sorted(cand_fin)
     if args.equivalence:
         if len(keep_seeds) != len(cand_seeds):
@@ -682,6 +756,16 @@ def cmd_gate(args) -> int:
         print(f"GATE ERROR: seed sets differ (keeper {len(keep_seeds)}, "
               f"candidate {len(cand_seeds)}); paired comparison requires identical seeds.")
         return 2
+    if args.env_slice is None:
+        # Same seed on different envs is not a paired comparison — reward scales differ.
+        mixed = [(s, keep_envs.get(s), cand_envs.get(s)) for s in keep_seeds
+                 if s in cand_envs and keep_envs.get(s) != cand_envs.get(s)]
+        if mixed:
+            ex = ", ".join(f"seed {s}: keeper={ke} candidate={ce}" for s, ke, ce in mixed[:5])
+            print(f"GATE ERROR: env mismatch on {len(mixed)} paired seed(s) — {ex}"
+                  f"{'...' if len(mixed) > 5 else ''}. Lanes on different envs are not "
+                  f"comparable; re-gate per env with --env-slice <envId>.")
+            return 2
     kh, ch = keep_run["meta"]["steps"], cand_run["meta"]["steps"]
     if kh != ch:
         print(f"GATE ERROR: horizons differ (keeper {kh}, candidate {ch}).")
@@ -698,7 +782,8 @@ def cmd_gate(args) -> int:
             return 2
     if args.equivalence:
         return equivalence_gate(keep_fin, cand_fin, keep_seeds, cand_seeds, n, horizon, args)
-    ok = gate_verdicts(keep_fin, cand_fin, keep_seeds, cand_seeds, n, horizon, args, None,
+    label = f"env={args.env_slice}" if args.env_slice is not None else None
+    ok = gate_verdicts(keep_fin, cand_fin, keep_seeds, cand_seeds, n, horizon, args, label,
                        keep_run=keep_run, cand_run=cand_run)
     print("PROMOTE" if ok else "REJECT")
     return 0 if ok else 1
@@ -835,6 +920,10 @@ def main() -> int:
                     help="blocking bar: candidate positive-lane fraction (0..1)")
     gp.add_argument("--equivalence", action="store_true",
                     help="unpaired TOST instrument-swap gate (see module docstring)")
+    gp.add_argument("--env-slice", default=None, metavar="ENV_ID",
+                    help="mixed-env fleets: restrict BOTH roots to lanes whose envId "
+                         "matches, paired by seed on the slice (hard error on empty or "
+                         "asymmetric slices), then run the gate unchanged")
 
     wp = sub.add_parser("watch", help="live aggregate dashboard")
     wp.add_argument("root", type=Path)
