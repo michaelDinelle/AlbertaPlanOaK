@@ -38,6 +38,7 @@ if [ "${1:-}" = "--job" ]; then
   echo "[run_fleet] $NAME — B=${OAK_BENCH_SEED_COUNT:-1024} x $STEPS steps, OAK_ABLATE=$ABLATE, caffeinate -dimsu, DETACHED."
   OAK_ABLATE="$ABLATE" \
   OAK_BENCH_ENV="${OAK_BENCH_ENV:-HalfCheetah-v4}" \
+  OAK_BENCH_ENVS="${OAK_BENCH_ENVS:-}" \
   OAK_BENCH_POLICIES="${OAK_BENCH_POLICIES:-oak}" \
   OAK_BENCH_STEPS="$STEPS" \
   OAK_BENCH_SEED_COUNT="${OAK_BENCH_SEED_COUNT:-1024}" \
