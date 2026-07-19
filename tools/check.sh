@@ -25,8 +25,8 @@ fi
 # the horizon (100k check -> 100k row) and is the only comparison point.
 HB=100000   # 100k cadence PERIOD — every run, every horizon, one window everywhere
 OAK_BENCH_HEARTBEAT_STEPS="$HB" \
-OAK_ABLATE="$ABL" OAK_BENCH_ENV=HalfCheetah-v4 OAK_BENCH_POLICIES=oak \
-OAK_BENCH_STEPS="$STEPS" OAK_BENCH_SEED_COUNT=1024 OAK_STEPS_PER_CB=1024 \
+OAK_ABLATE="$ABL" OAK_BENCH_POLICIES=oak \
+OAK_BENCH_STEPS="$STEPS" OAK_BENCH_SEED_COUNT=1408 OAK_STEPS_PER_CB=1024 \
 OAK_FLEET_TIMING=1 OAK_METRICS_STORAGE="$ROOT" .build/release/OaK benchmark 2>&1 | tail -1
 .venv/bin/python - "$ROOT" <<'PY'
 import json, sys

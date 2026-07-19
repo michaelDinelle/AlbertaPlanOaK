@@ -1236,23 +1236,30 @@ func metricsRoot() -> URL {
         Int(String($0).trimmingCharacters(in: .whitespaces))
       }
       seedValues = parsed.isEmpty
-        ? Array(seed0..<(seed0 + (env["OAK_BENCH_SEED_COUNT"].flatMap(Int.init) ?? 1024)))
+        ? Array(seed0..<(seed0 + (env["OAK_BENCH_SEED_COUNT"].flatMap(Int.init) ?? 1408)))
         : parsed
     } else {
-      seedValues = Array(seed0..<(seed0 + (env["OAK_BENCH_SEED_COUNT"].flatMap(Int.init) ?? 1024)))
+      seedValues = Array(seed0..<(seed0 + (env["OAK_BENCH_SEED_COUNT"].flatMap(Int.init) ?? 1408)))
     }
     let steps = max(env["OAK_BENCH_STEPS"].flatMap(Int.init) ?? 500_000, 1)
     let policies = try (env["OAK_BENCH_POLICIES"] ?? "oak,zero,random").split(separator: ",").map {
       try pol(String($0))
     }
-    // Seed-deterministic env schedule (universal env contract):
-    // OAK_BENCH_ENVS="HalfCheetah-v4:768,FourRooms-cont-v0:192,DeepSea-cont-v0:64"
-    // assigns contiguous seed ranges (seed b -> lane b). Default remains the
-    // single-env OAK_BENCH_ENV behavior EXACTLY as before (no envSchedule in
-    // meta.json, so single-env roots stay table.py-comparable with keepers).
+    // Seed-deterministic env schedule (universal env contract). Multi-env is
+    // the MANDATORY default (user law 2026-07-19): every run is a superset of
+    // the keeper — 1024 cheetah lanes (same seeds as the keeper) plus
+    // FourRooms/DeepSea lanes riding free on the GPU's spare capacity.
+    // OAK_BENCH_ENVS overrides the schedule; OAK_BENCH_ENV single-env is a
+    // hard error (no opt-out of multi-env science).
+    let defaultSchedule = "HalfCheetah-v4:1024,FourRooms-cont-v0:256,DeepSea-cont-v0:128"
+    var raw = env["OAK_BENCH_ENVS"] ?? defaultSchedule
+    if raw.trimmingCharacters(in: .whitespaces).isEmpty { raw = defaultSchedule }
+    if env["OAK_BENCH_ENV"] != nil {
+      throw err("OAK_BENCH_ENV single-env is deleted (user law 2026-07-19): every run is multi-env. Use OAK_BENCH_ENVS to change the schedule.")
+    }
     var laneEnvs = [String](repeating: envId, count: seedValues.count)
     var envSchedule: [(envId: String, seedStart: Int, seedEnd: Int)]? = nil
-    if let raw = env["OAK_BENCH_ENVS"], !raw.trimmingCharacters(in: .whitespaces).isEmpty {
+    if !raw.trimmingCharacters(in: .whitespaces).isEmpty {
       var entries: [(String, Int, Int)] = []
       var offset = 0
       for item in raw.split(separator: ",") {
