@@ -176,6 +176,11 @@ def gen_cases(env: str, n: int, seed: int):
     for _ in range(n):
         if env == "FourRooms-cont-v0":
             ls = int(rng.integers(0, 2**31))
+            # The case format transports ints as exact float32 values; f32
+            # rounds above 2**24, so the TRANSPORTED value is the contract:
+            # round-trip the seed through f32 and use that integer for both
+            # the record and the golden output (uint(F32(ls)) == ls exactly).
+            ls = int(F32(ls))
             ri = int(rng.integers(0, 64))
             x, y = FOUR_FREE[int(rng.integers(0, FOUR_NFREE))]
             gx, gy = FOUR_FREE[int(rng.integers(0, FOUR_NFREE))]

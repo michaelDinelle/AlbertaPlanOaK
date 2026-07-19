@@ -1,6 +1,7 @@
 #include <metal_stdlib>
 #include <float.h>
 #include "OakPhysics.metal"
+#include "Gridworld.metal"
 using namespace metal;
 
 constant uint OAK_CNT_OBS_NF        = 0u;
@@ -1877,8 +1878,16 @@ struct OakFleetLane {
     uint deathStep, deathDetector;
     float deathRewardSum, deathRho;
     OakFleetInfoAcc info[4];
+    // Universal-env-contract extension: envKind selects the env-window chain
+    // (0=HalfCheetah, 1=FourRooms-cont-v0, 2=DeepSea-cont-v0) and, in the
+    // sample stage only, the action family (Box vs Discrete-N) — the agent
+    // stages never read it (Inv-1). gw is the gridworld integer state:
+    // FourRooms [x, y, gx, gy, sinceGoal, respawnIdx]; DeepSea [r, c, lastA,
+    // maskLo, maskHi, -]. Unused by cheetah lanes.
+    uint envKind;
+    uint gw[6];
 };
-static_assert(sizeof(OakFleetLane) == 356, "OakFleetLane layout drifted from the Swift mirror");
+static_assert(sizeof(OakFleetLane) == 384, "OakFleetLane layout drifted from the Swift mirror");
 
 struct OakLaneSnapshot {
     KernelScalars scalars;
@@ -1927,12 +1936,31 @@ kernel void oak_fleet_init(device float *params [[buffer(0)]],
                            device OakFleetLane *lanes [[buffer(6)]],
                            device const uint *laneSeeds [[buffer(7)]],
                            constant OakFleetEnvCfg &ecfg [[buffer(8)]],
+                           device const uint *laneEnvKinds [[buffer(9)]],
                            uint gid [[thread_position_in_grid]]) {
     if (gid >= ecfg.laneCount) return;
     device OakFleetLane *lane = &lanes[gid];
+    uint ek = laneEnvKinds[gid];
+    lane->envKind = ek;
     HCState s;
     uint elapsed = 0u, resets = 0u;
-    hc_env_reset(s, laneSeeds[gid], elapsed, resets);
+    if (ek == OAK_ENV_FOURROOMS) {
+        // Deterministic reset (matches gridworld_ref.four_reset / fleet init).
+        hc_resetData(s);
+        lane->gw[0] = 1u; lane->gw[1] = 1u;
+        lane->gw[2] = 9u; lane->gw[3] = 9u;
+        lane->gw[4] = 0u; lane->gw[5] = 0u;
+    } else if (ek == OAK_ENV_DEEPSEA) {
+        // Hidden 64-bit mask from the RESET philox stream, ctr=(0,0,0,0).
+        hc_resetData(s);
+        uint4 rm = hc_philox4x32(uint2(laneSeeds[gid], HC_RNG_STREAM_RESET),
+                                 uint4(0u, 0u, 0u, 0u));
+        lane->gw[0] = 0u; lane->gw[1] = 0u; lane->gw[2] = 0u;
+        lane->gw[3] = rm.x; lane->gw[4] = rm.y; lane->gw[5] = 0u;
+    } else {
+        hc_env_reset(s, laneSeeds[gid], elapsed, resets);
+        for (int i = 0; i < 6; i++) lane->gw[i] = 0u;
+    }
     lane->s = s;
     lane->elapsed = elapsed; lane->resets = resets;
     lane->steps = 0u; lane->doneCount = 0u;
@@ -1949,8 +1977,18 @@ kernel void oak_fleet_init(device float *params [[buffer(0)]],
     }
     if (ecfg.policyMode == 0u) {
         Ctx ctx = make_ctx(params, stateArena, uintArena, scalars, stats, cfg, gid);
-        for (uint i = 0u; i + 1u < 9u; ++i) ctx.observation[i] = s.qpos[i + 1u];
-        for (uint i = 0u; i < 9u; ++i) ctx.observation[8u + i] = s.qvel[i];
+        if (ek == OAK_ENV_FOURROOMS) {
+            float o[17];
+            gw_four_obs(1u, 1u, 9u, 9u, 0u, o);
+            for (uint i = 0u; i < ctx.O && i < 17u; ++i) ctx.observation[i] = o[i];
+        } else if (ek == OAK_ENV_DEEPSEA) {
+            float o[17];
+            gw_deep_obs(0u, 0u, 0u, o);
+            for (uint i = 0u; i < ctx.O && i < 17u; ++i) ctx.observation[i] = o[i];
+        } else {
+            for (uint i = 0u; i + 1u < 9u; ++i) ctx.observation[i] = s.qpos[i + 1u];
+            for (uint i = 0u; i < 9u; ++i) ctx.observation[8u + i] = s.qvel[i];
+        }
         ctx.reward[0] = 0.0f;
         for (uint d = 0u; d < ctx.D; ++d) ctx.actionSignal[d] = 0.0f;
         for (uint i = 0u; i < ctx.K * ctx.D; ++i) ctx.optionActorCredit[i] = 0.0f;
@@ -1978,7 +2016,21 @@ static inline void oak_stage_sample_act(device float *params,
     uint stepIdx = lane->steps;
     float desc[12];
     float ctrl[6];
-    if (ecfg.policyMode == 1u) {
+    if (ecfg.policyMode != 0u && lane->envKind != OAK_ENV_CHEETAH) {
+        // Discrete-N baseline (zero/random policies): uniform-categorical
+        // action — the discrete analog of the modes' existing semantics
+        // (zero descriptor for mode 1, one-hot sampled action for mode 2).
+        // Draw: first ACT-stream word at this step (hc_u01, trunc).
+        uint N = (lane->envKind == OAK_ENV_FOURROOMS) ? 4u : 2u;
+        uint4 rw = hc_philox4x32(uint2(laneSeeds[gid], HC_RNG_STREAM_ACT),
+                                 uint4(stepIdx, 0u, 0u, 0u));
+        uint a = uint(hc_u01(rw.x) * float(N));
+        if (a >= N) a = N - 1u;
+        for (int u = 0; u < 6; u++) ctrl[u] = 0.0f;
+        ctrl[0] = float(a);
+        for (int i = 0; i < 12; i++) desc[i] = 0.0f;
+        if (ecfg.policyMode == 2u) desc[a] = 1.0f;
+    } else if (ecfg.policyMode == 1u) {
         for (int u = 0; u < 6; u++) ctrl[u] = 0.0f;
         for (int i = 0; i < 12; i++) desc[i] = 0.0f;
     } else if (ecfg.policyMode == 2u) {
@@ -2033,12 +2085,97 @@ static inline void oak_stage_sample_act(device float *params,
     for (int u = 0; u < 6; u++) lane->ctrlPending[u] = ctrl[u];
 }
 
+// Discrete-N categorical sampler (Gumbel-max, Maddison 2014): the first N of
+// the D emitted policy means are the logits, a = argmax_d(mu_d + G_d) with
+// G_d = -log(-log(U_d)) over ACT-stream uniforms; the actor score is
+// 1{a=d} − π_d (Williams 1992) with π the softmax over the N means; remaining
+// policy coords get zero score/action-signal entries. This re-implements in
+// Metal the deleted CPU-wrapper contract (AGENTS.md "Action interface").
+// Reached only for gridworld lanes — the Box path below is bitwise unchanged.
+// envKind is read here ONLY to pick N (action-family dispatch is sample-stage
+// business); every value is recomputed redundantly per thread from the same
+// inputs, so the result is bit-deterministic (same pattern as the Box path's
+// per-thread Box-Muller pairs).
+static inline void oak_stage_sample_act_discrete(Ctx ctx,
+                                                 device OakFleetLane *lane,
+                                                 device const uint *laneSeeds,
+                                                 uint gid, uint tid) {
+    uint N = (lane->envKind == OAK_ENV_FOURROOMS) ? 4u : 2u;
+    uint stepIdx = lane->steps;
+    uint4 rw = hc_philox4x32(uint2(laneSeeds[gid], HC_RNG_STREAM_ACT),
+                             uint4(stepIdx, 0u, 0u, 0u));
+    uint words[4] = { rw.x, rw.y, rw.z, rw.w };
+    // Behavior softmax over the N logits. The means are tanh-bounded (zenith
+    // law), so exp cannot overflow and no max-subtraction is needed; the
+    // ascending-order sum is sequential and identical on every thread.
+    float bSum = 0.0f;
+    for (uint d = 0u; d < N; ++d) bSum += exp(oak_safe(ctx.policyMean[d]));
+    uint act = 0u;
+    float bestG = -FLT_MAX;
+    for (uint d = 0u; d < N; ++d) {
+        float mu = oak_safe(ctx.policyMean[d]);
+        // U in (0,1]: clamp the exact-1 endpoint (log(-log(1)) is NaN).
+        float u = min(hc_u01open(words[d]), 0x1.fffffep-1f);
+        float g = mu - log(-log(u));
+        if (g > bestG) { bestG = g; act = d; }
+    }
+    // Same fence discipline as the Box path: lane->steps is read at function
+    // entry by every thread and written by tid 0 below — serialize before the
+    // per-thread writes land (no scratch exchange in this path).
+    simdgroup_barrier(mem_flags::mem_device);
+    if (tid < 6u) lane->ctrlPending[tid] = (tid == 0u) ? float(act) : 0.0f;
+    if (tid < ctx.D) {
+        float s = 0.0f;
+        if (tid < N)
+            s = ((tid == act) ? 1.0f : 0.0f) - exp(oak_safe(ctx.policyMean[tid])) / bSum;
+        ctx.actionSignal[tid] = s;
+    }
+    if (tid == 0u) {
+        float desc[12];
+        for (uint i = 0u; i < ctx.D; ++i) desc[i] = oak_safe(ctx.policyMean[i]);
+        float d2 = 0.0f;
+        for (int i = 0; i < 12; i++) {
+            float v = desc[i] - lane->lastDesc[i];
+            d2 += v * v;
+            lane->lastDesc[i] = desc[i];
+        }
+        oak_kahan_add(&lane->deltaSum, &lane->deltaC, d2 / 12.0f);
+        lane->steps = stepIdx + 1u;
+        float adm = lane->deltaSum / float(lane->steps);
+        if (isfinite(adm) && adm > lane->deltaPeak) lane->deltaPeak = adm;
+    }
+    if (tid < ctx.K) {
+        uint off = tid * ctx.D;
+        float oSum = 0.0f;
+        for (uint d = 0u; d < N; ++d)
+            oSum += exp(oak_safe(ctx.optionPolicyMean[off + d]));
+        for (uint d = 0u; d < ctx.D; ++d) {
+            float cr = 0.0f;
+            if (d < N)
+                cr = ((d == act) ? 1.0f : 0.0f)
+                   - exp(oak_safe(ctx.optionPolicyMean[off + d])) / oSum;
+            ctx.creditStage[off + d] = cr;
+        }
+        // Exact one-step categorical ratio π_o(a)/π_b(a), bounded at K (bank
+        // capacity — same structural clamp as the Gaussian path). Overflow or
+        // non-finite -> 0, never the maximum.
+        float pbA = exp(oak_safe(ctx.policyMean[act])) / bSum;
+        float poA = exp(oak_safe(ctx.optionPolicyMean[off + act])) / oSum;
+        float ratio = poA / pbA;
+        ctx.impStage[tid] = isfinite(ratio) ? min(ratio, float(ctx.K)) : 0.0f;
+    }
+}
+
 static inline void oak_stage_sample_act_wide(Ctx ctx,
                                              device OakFleetLane *lanes,
                                              device const uint *laneSeeds,
                                              uint gid, uint tid) {
-    device float *scratch = ctx.sampleScr;
     device OakFleetLane *lane = &lanes[gid];
+    if (lane->envKind != OAK_ENV_CHEETAH) {
+        oak_stage_sample_act_discrete(ctx, lane, laneSeeds, gid, tid);
+        return;
+    }
+    device float *scratch = ctx.sampleScr;
     uint A = ctx.D / 2u;
     float sd = ctx.sampleSigma;
     uint stepIdx = lane->steps;
@@ -2117,36 +2254,66 @@ static inline void oak_stage_fleet_env(device float *params,
                                        device float *recordBuf,
                                        uint gid) {
     device OakFleetLane *lane = &lanes[gid];
-    HCState s = lane->s;
-    uint elapsed = lane->elapsed, resets = lane->resets;
     float ctrl[6];
     for (int u = 0; u < 6; u++) ctrl[u] = lane->ctrlPending[u];
     float reward;
-    uint done;
+    uint done = 0u;
     float info[4];
-    if (ecfg.episodeLen != 0u && elapsed >= ecfg.episodeLen) {
-        hc_env_reset(s, laneSeeds[gid], elapsed, resets);
-        reward = 0.0f;
-        done = 0u;
-        info[0] = 0.0f; info[1] = -0.0f; info[2] = 0.0f; info[3] = 0.0f;
-    } else {
-        float xBefore = s.qpos[0];
-        for (int u = 0; u < 6; u++) s.ctrl[u] = ctrl[u];
-        for (int k = 0; k < HC_FRAME_SKIP; k++) hc_mj_step(s);
-        float xv = (s.qpos[0] - xBefore) / (float(HC_FRAME_SKIP) * HC_TIMESTEP);
-        float ctrlCost = 0.0f;
-        for (int u = 0; u < 6; u++) ctrlCost += 0.1f * ctrl[u] * ctrl[u];
-        reward = xv * 1.0f - ctrlCost;
-        elapsed++;
-        done = (ecfg.episodeLen != 0u && elapsed >= ecfg.episodeLen) ? 1u : 0u;
-        info[0] = xv; info[1] = -ctrlCost; info[2] = s.qpos[0]; info[3] = xv;
-    }
     float obs[17];
-    for (int i = 1; i < 9; i++) obs[i - 1] = s.qpos[i];
-    for (int i = 0; i < 9; i++) obs[8 + i] = s.qvel[i];
-    lane->s = s;
-    lane->elapsed = elapsed;
-    lane->resets = resets;
+    float pose[9];
+    if (lane->envKind == OAK_ENV_FOURROOMS) {
+        // Continuing integer gridworld (gridworld_ref.py bitwise contract):
+        // no done, no reset — the goal respawns inside the stream.
+        uint gws[6];
+        for (int i = 0; i < 6; i++) gws[i] = lane->gw[i];
+        reward = gw_four_step(gws, laneSeeds[gid], uint(ctrl[0]), obs);
+        for (int i = 0; i < 6; i++) lane->gw[i] = gws[i];
+        info[0] = reward;
+        info[1] = float(lane->gw[0]);
+        info[2] = float(lane->gw[1]);
+        info[3] = float(lane->gw[4]);
+        pose[0] = float(lane->gw[0]); pose[1] = float(lane->gw[1]);
+        pose[2] = float(lane->gw[2]); pose[3] = float(lane->gw[3]);
+        for (int i = 4; i < 9; i++) pose[i] = 0.0f;
+    } else if (lane->envKind == OAK_ENV_DEEPSEA) {
+        uint gws[6];
+        for (int i = 0; i < 6; i++) gws[i] = lane->gw[i];
+        reward = gw_deep_step(gws, uint(ctrl[0]), obs);
+        for (int i = 0; i < 6; i++) lane->gw[i] = gws[i];
+        info[0] = reward;
+        info[1] = float(lane->gw[0]);
+        info[2] = float(lane->gw[1]);
+        info[3] = float(lane->gw[2]);
+        pose[0] = float(lane->gw[0]); pose[1] = float(lane->gw[1]);
+        pose[2] = 7.0f; pose[3] = 7.0f;  // treasure at (N-1, N-1)
+        for (int i = 4; i < 9; i++) pose[i] = 0.0f;
+    } else {
+        HCState s = lane->s;
+        uint elapsed = lane->elapsed, resets = lane->resets;
+        if (ecfg.episodeLen != 0u && elapsed >= ecfg.episodeLen) {
+            hc_env_reset(s, laneSeeds[gid], elapsed, resets);
+            reward = 0.0f;
+            done = 0u;
+            info[0] = 0.0f; info[1] = -0.0f; info[2] = 0.0f; info[3] = 0.0f;
+        } else {
+            float xBefore = s.qpos[0];
+            for (int u = 0; u < 6; u++) s.ctrl[u] = ctrl[u];
+            for (int k = 0; k < HC_FRAME_SKIP; k++) hc_mj_step(s);
+            float xv = (s.qpos[0] - xBefore) / (float(HC_FRAME_SKIP) * HC_TIMESTEP);
+            float ctrlCost = 0.0f;
+            for (int u = 0; u < 6; u++) ctrlCost += 0.1f * ctrl[u] * ctrl[u];
+            reward = xv * 1.0f - ctrlCost;
+            elapsed++;
+            done = (ecfg.episodeLen != 0u && elapsed >= ecfg.episodeLen) ? 1u : 0u;
+            info[0] = xv; info[1] = -ctrlCost; info[2] = s.qpos[0]; info[3] = xv;
+        }
+        for (int i = 1; i < 9; i++) obs[i - 1] = s.qpos[i];
+        for (int i = 0; i < 9; i++) obs[8 + i] = s.qvel[i];
+        lane->s = s;
+        lane->elapsed = elapsed;
+        lane->resets = resets;
+        for (int i = 0; i < 9; i++) pose[i] = s.qpos[i];
+    }
     lane->doneCount += done;
     uint stepNum = lane->steps;
 
@@ -2199,10 +2366,12 @@ static inline void oak_stage_fleet_env(device float *params,
     if (ecfg.recordCapacity != 0u) {
         int slot = recordSlot[gid];
         if (slot >= 0) {
+            // Record v3: 16 floats per record — ctrl[6], done, pose[9].
             ulong base = ((ulong)slot * ecfg.recordCapacity
-                          + ((stepNum - 1u) % ecfg.recordCapacity)) * 7ul;
+                          + ((stepNum - 1u) % ecfg.recordCapacity)) * 16ul;
             for (int u = 0; u < 6; u++) recordBuf[base + u] = ctrl[u];
             recordBuf[base + 6] = float(done);
+            for (int i = 0; i < 9; i++) recordBuf[base + 7 + i] = pose[i];
         }
     }
 }
