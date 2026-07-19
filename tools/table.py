@@ -56,6 +56,16 @@ def row(root, s):
     f = meta.get('flopsPerLaneStep', 105296)
     return r, tot, f, meta
 data = [row(rt, step) for rt in roots]
+# envSchedule (mixed-env fleets): when EITHER root carries it, both must match
+# exactly — lanes on different env schedules are never apples-to-apples. Checked
+# explicitly ahead of the generic whitelist loop for an actionable error; roots
+# without the field (all legacy single-env runs) compare equal ('null') and pass.
+scheds = [json.dumps(m.get('envSchedule'), sort_keys=True) for _, _, _, m in data]
+if len(set(scheds)) > 1:
+    raise SystemExit(
+        "TABLE ERROR: envSchedule differs across roots — mixed-env fleets are not "
+        "apples-to-apples; refusing to render.\n  " + "\n  ".join(scheds)
+        + "\nGate per env (fleet.py gate --env-slice) instead of tabling pooled lanes.")
 # WHITELIST comparability gate (user law 2026-07-05): a table renders ONLY
 # when every field below is IDENTICAL across all roots. Anything not on the
 # allowed-to-differ list (run name, startedAt) that differs = hard refusal.
