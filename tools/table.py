@@ -3,14 +3,13 @@
 Any number of run roots, one column each. THE LAST ROOT MUST BE THE CURRENT
 KEEPER (user law 2026-07-05: every table shows the keeper, no exceptions).
 Refuses (hard error) if ANY root lacks a row at the requested step —
-apples-to-apples is structural. Rows fixed: config | deaths | median cum |
-median live | P10 | best lane | live max | positivity | SPS |
-reward/GFLOP (median) | fleet total (all lanes).
-Mixed-env runs (envSchedule): the table renders the POOLED block followed by a
-per-env block for every env in the schedule — user law 2026-07-19: the Tiers
-must include all environments in the table."""
+apples-to-apples is structural.
+User law 2026-07-19: one full table PER ENVIRONMENT under the same call —
+fleet total and SPS only make sense per env (reward scales and lane costs
+differ). Single-env runs print a single table. Rows fixed: config | deaths |
+median cum | median live | P10 | best lane | live max | positivity | SPS |
+reward/GFLOP (median) | fleet total."""
 import json, sys, os
-from collections import defaultdict
 BENCH = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), '.oak-benchmarks')
 if len(sys.argv) >= 4:
     roots, step = sys.argv[1:-1], int(sys.argv[-1])
@@ -45,168 +44,101 @@ def lane_envs(root):
             out[s] = x.get('envId', default)
     return out, meta
 
-def row(root, s):
-    aggs = [json.loads(l) for l in open(f'{root}/aggregate.jsonl')]
-    r = [x for x in aggs if x['step'] == s]
-    if not r:
-        raise SystemExit(
-            f"TABLE ERROR: {root} has no row at step {s}.\n"
-            f"  available steps: {sorted(x['step'] for x in aggs)}\n"
-            f"  Compare only at steps present in ALL roots.")
-    r = r[-1]
-    # heartbeat window at this step: the 'live' rows average over exactly this
-    # many steps — comparable across roots ONLY if the windows match.
-    prior = [x['step'] for x in aggs if x['step'] < s]
-    r['_window'] = s - (max(prior) if prior else 0)
-    # fleet total at the EXACT step, from hb AND final rows (a run's last
-    # step is written as kind=final; the old nearest-step fallback silently
-    # substituted the previous heartbeat's total — every 1M table showed the
-    # 900k sum. Exact-step or hard error, same law as the quantile rows.)
-    tot, nrows = 0.0, 0
-    for l in open(f'{root}/fleet.jsonl'):
-        x = json.loads(l)
-        if x['step'] == s and x['kind'] in ('hb', 'final'):
-            tot += x['rewardSum']; nrows += 1
-    if nrows == 0:
-        raise SystemExit(f"TABLE ERROR: {root} has no per-lane rows at step {s} — cannot compute fleet total.")
-    meta = json.load(open(f'{root}/meta.json'))
-    f = meta.get('flopsPerLaneStep', 105296)
-    return r, tot, f, meta
+def heartbeat_window(root, s):
+    aggs = [json.loads(l)['step'] for l in open(f'{root}/aggregate.jsonl')]
+    prior = [t for t in aggs if t < s]
+    return s - (max(prior) if prior else 0)
 
-def env_row(root, s, env_id, envs):
+def agg_rows(root, s):
     """Per-env aggregate at step s from fleet.jsonl lanes."""
-    rates, rewards, pos, dead = [], 0.0, 0, 0
-    best, live_max = 0.0, 0.0
-    recent = []
+    envs, meta = lane_envs(root)
+    flops = meta.get('flopsPerLaneStep', 105296)
+    by_env = {}
     for l in open(f'{root}/fleet.jsonl'):
         x = json.loads(l)
         if x['step'] != s or x['kind'] not in ('hb', 'final'):
             continue
-        if envs.get(x['seed']) != env_id:
+        e = envs.get(x['seed'])
+        if e is None:
             continue
-        rewards += x['rewardSum']
-        rates.append(x['rewardSum'] / s)
-        if x.get('firstNonFiniteStep'):
-            dead += 1
-        h = x.get('health', {})
-        rr = h.get('rewardRate', 0.0)
-        recent.append(rr)
-        if rr > 0:
-            pos += 1
-        best = max(best, x['rewardSum'] / s)
-        live_max = max(live_max, rr)
-    if not rates:
-        return None
-    rates.sort()
-    n = len(rates)
-    def q(p):
-        return rates[min(n - 1, int(p * n))]
-    return {
-        'dead': dead, 'median_cum': q(0.5), 'median_live': sorted(recent)[len(recent)//2] if recent else 0.0,
-        'p10': q(0.1), 'best': best, 'live_max': live_max,
-        'pos': 100.0 * pos / n, 'n': n, 'total': rewards,
-    }
+        by_env.setdefault(e, []).append(x)
+    out = {}
+    for e, rows in by_env.items():
+        rates = sorted(x['rewardSum'] / s for x in rows)
+        recent = [x.get('health', {}).get('rewardRate', 0.0) for x in rows]
+        recent_s = sorted(recent)
+        n = len(rates)
+        dead = sum(1 for x in rows if x.get('firstNonFiniteStep'))
+        pos = sum(1 for r in recent if r > 0)
+        sps = sum(x.get('stepsPerSecond', 0.0) for x in rows)
+        def q(p):
+            return rates[min(n - 1, int(p * n))]
+        out[e] = {
+            'dead': dead, 'median_cum': q(0.5),
+            'median_live': recent_s[n // 2] if recent_s else 0.0,
+            'p10': q(0.1), 'best': rates[-1], 'live_max': max(recent) if recent else 0.0,
+            'pos': 100.0 * pos / n, 'sps': sps, 'flops': flops,
+            'total': sum(x['rewardSum'] for x in rows), 'n': n,
+        }
+    return out, meta
 
-data = [row(rt, step) for rt in roots]
-env_maps = {}
+data = []
 for rt in roots:
-    env_maps[rt], _ = lane_envs(rt)
-# envSchedule (mixed-env fleets): when EITHER root carries it, both must match
-# exactly — lanes on different env schedules are never apples-to-apples. Checked
-# explicitly ahead of the generic whitelist loop for an actionable error; roots
-# without the field (all legacy single-env runs) compare equal ('null') and pass.
-scheds = [json.dumps(m.get('envSchedule'), sort_keys=True) for _, _, _, m in data]
-mixed_vs_single = len(set(scheds)) > 1 and 'null' in scheds
-if len(set(scheds)) > 1 and not mixed_vs_single:
+    # Step presence check (apples-to-apples structural law).
+    steps = {json.loads(l)['step'] for l in open(f'{rt}/aggregate.jsonl') if l.strip()}
+    if step not in steps:
+        raise SystemExit(
+            f"TABLE ERROR: {rt} has no row at step {step}.\n"
+            f"  available steps: {sorted(steps)}\n"
+            f"  Compare only at steps present in ALL roots.")
+    env_agg, meta = agg_rows(rt, step)
+    data.append((env_agg, meta))
+# envSchedule comparability (mixed-env fleets): schedules must match exactly.
+scheds = [json.dumps(m.get('envSchedule'), sort_keys=True) for _, m in data]
+if len(set(scheds)) > 1:
     raise SystemExit(
         "TABLE ERROR: envSchedule differs across roots — mixed-env fleets are not "
-        "apples-to-apples; refusing to render.\n  " + "\n  ".join(scheds)
-        + "\nGate per env (fleet.py gate --env-slice) instead of tabling pooled lanes.")
-# Mixed-vs-single (user law 2026-07-19): a multi-env candidate is a SUPERSET of
-# the single-env keeper. The pooled block shows each root's own lanes; the
-# per-env blocks let the keeper's env be compared slice-to-slice. A warning is
-# printed, never a refusal.
-# WHITELIST comparability gate (user law 2026-07-05): a table renders ONLY
-# when every field below is IDENTICAL across all roots. Anything not on the
-# allowed-to-differ list (run name, startedAt) that differs = hard refusal.
-# This is a whitelist by construction: new meta fields are compared by
-# default; a field must be explicitly added to ALLOWED_DIFF to be exempt.
-# ablation is the TREATMENT variable — candidate vs keeper legitimately
-# differ in it (user ruling 2026-07-05); it stays loudly visible in the
-# config row. Everything else fail-closed.
-# 'steps' (run horizon) may differ ONLY because the separate heartbeat-window
-# equality check below enforces the REAL apples-to-apples criterion: identical
-# cadence at the compared step (100k everywhere by law). A row at step S with
-# equal windows is the same measurement regardless of how long the runs
-# ultimately go — this is what makes keeper tables possible at every 100k
-# milestone of a 300k screen (keeper-column-mandatory law).
-# 'flopsPerLaneStep' is a derived accounting constant (feeds only the
-# reward/GFLOP row), not a behavior config: the 2026-07-19 slimming corrected
-# the hand formula (105296 -> structural 220768), so keeper roots predating the
-# fix legitimately differ. Exempt like startedAt.
+        "apples-to-apples; refusing to render.\n  " + "\n  ".join(scheds))
+# WHITELIST comparability gate (user law 2026-07-05).
 ALLOWED_DIFF = {'startedAt', 'ablation', 'ablationLabel', 'steps', 'flopsPerLaneStep'}
-if mixed_vs_single:
-    # Superset candidate (user law 2026-07-19): batch/seeds legitimately differ
-    # — the candidate carries the keeper's full seed set on its cheetah slice
-    # plus extra gridworld lanes. The per-env blocks do the slice comparison.
-    ALLOWED_DIFF |= {'batch', 'seeds', 'envSchedule'}
-metas = [m for _, _, _, m in data]
+metas = [m for _, m in data]
 allkeys = set().union(*(m.keys() for m in metas))
 mismatches = []
 for kf in sorted(allkeys - ALLOWED_DIFF):
     vals = [json.dumps(m.get(kf), sort_keys=True) for m in metas]
     if len(set(vals)) > 1:
         mismatches.append(f"  {kf}: " + " vs ".join(vals))
-windows_chk = [r['_window'] for r, _, _, _ in data]
+windows_chk = [heartbeat_window(rt, step) for rt in roots]
 if len(set(windows_chk)) > 1:
     mismatches.append(f"  heartbeatWindow@step: {windows_chk}")
 if mismatches:
     raise SystemExit(
         "TABLE ERROR: runs are not apples-to-apples — refusing to render.\n"
         "Fields differing (whitelist: only startedAt may differ):\n"
-        + "\n".join(mismatches)
-        + "\nRun the candidate with the IDENTICAL config (same horizon, seeds, "
-        "ablation, env, cadence) before comparing.")
+        + "\n".join(mismatches))
 
-def fmt(r, tot, f):
-    return [str(r['dead']), '%+.4f' % r['deliveredRateP50'], '%+.4f' % r['recentRateP50'],
-            '%+.4f' % r['deliveredRateP10'], '%.3f' % r['bestLaneDeliveredRate'],
-            '%.3f' % r['recentRateMax'], '%.1f%%' % (100 * r['positiveRateFraction']),
-            '%dK' % (r['aggStepsPerSecond'] / 1000), '%.0f' % (r['deliveredRateP50'] / f * 1e9),
-            '%.1fM' % (tot / 1e6)]
-
-def fmt_env(e):
+def fmt(e):
     if e is None:
-        return ['—'] * 8
+        return ['—'] * 10
     return [str(e['dead']), '%+.4f' % e['median_cum'], '%+.4f' % e['median_live'],
             '%+.4f' % e['p10'], '%.3f' % e['best'], '%.3f' % e['live_max'],
-            '%.1f%%' % e['pos'], '%.1fM' % (e['total'] / 1e6)]
+            '%.1f%%' % e['pos'], '%dK' % (e['sps'] / 1000),
+            '%.0f' % (e['median_cum'] / e['flops'] * 1e9) if e['flops'] else '—',
+            '%.1fM' % (e['total'] / 1e6)]
 
 names = ['deaths', 'median (cumulative)', 'median (live)', 'P10', 'best lane',
-         'live max', 'positivity', 'SPS', 'reward/GFLOP (median)', 'fleet total (all lanes)']
-env_names = ['deaths', 'median (cumulative)', 'median (live)', 'P10', 'best lane',
-             'live max', 'positivity', 'fleet total']
-cols = [fmt(r, t, f) for r, t, f, _ in data]
+         'live max', 'positivity', 'SPS', 'reward/GFLOP (median)', 'fleet total']
 hdrs = [os.path.basename(os.path.normpath(rt)) for rt in roots]
-abls = [(m.get('ablationLabel') or 'none') for _, _, _, m in data]
+abls = [(m.get('ablationLabel') or 'none') for _, m in data]
 cfgs = [f'ablation={a}, B={len(m.get("seeds", [])) or m.get("batch")}, {m.get("steps", 0)//1000}k, {m.get("startedAt", "?")}'
-        for a, (_, _, _, m) in zip(abls, data)]
-print('| @%dk | %s |' % (step // 1000, ' | '.join(hdrs)))
-print('|---|' + '---|' * len(roots))
-print('| config | %s |' % ' | '.join(cfgs))
-if mixed_vs_single:
-    print('| ⚠️ MIXED-vs-SINGLE: candidate is a multi-env superset; compare the keeper\'s env in the per-env blocks below, not the pooled rows. |' + ' |'.join([''] * (len(roots) - 1)) + (' |' if len(roots) > 1 else ''))
-for i, n in enumerate(names):
-    print('| %s | %s |' % (n, ' | '.join(c[i] for c in cols)))
-# Per-env blocks (user law 2026-07-19: the Tiers must include all environments).
-env_ids = sorted({e for em in env_maps.values() for e in em.values() if e})
-if len(env_ids) > 1:
-    for env_id in env_ids:
-        ecols = []
-        for rt in roots:
-            e = env_row(rt, step, env_id, env_maps[rt])
-            ecols.append(fmt_env(e))
-        print('| [%s] | %s |' % (env_id, ' | '.join([''] * len(roots))))
-        for i, n in enumerate(env_names):
-            print('|  %s %s | %s |' % (' ', n, ' | '.join(c[i] for c in ecols)))
+        for a, (_, m) in zip(abls, data)]
+env_ids = sorted({e for env_agg, _ in data for e in env_agg})
+for env_id in env_ids:
+    print('| @%dk [%s] | %s |' % (step // 1000, env_id, ' | '.join(hdrs)))
+    print('|---|' + '---|' * len(roots))
+    print('| config | %s |' % ' | '.join(cfgs))
+    cols = [fmt(env_agg.get(env_id)) for env_agg, _ in data]
+    for i, n in enumerate(names):
+        print('| %s | %s |' % (n, ' | '.join(c[i] for c in cols)))
+    print()
 print('⤷ DISPLAY CONTRACT: paste this table VERBATIM into the reply text — tool output is not user-visible; keeper column mandatory; never summarize or say "table above".')
