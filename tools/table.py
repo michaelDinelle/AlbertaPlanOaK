@@ -116,11 +116,16 @@ for rt in roots:
 # explicitly ahead of the generic whitelist loop for an actionable error; roots
 # without the field (all legacy single-env runs) compare equal ('null') and pass.
 scheds = [json.dumps(m.get('envSchedule'), sort_keys=True) for _, _, _, m in data]
-if len(set(scheds)) > 1:
+mixed_vs_single = len(set(scheds)) > 1 and 'null' in scheds
+if len(set(scheds)) > 1 and not mixed_vs_single:
     raise SystemExit(
         "TABLE ERROR: envSchedule differs across roots — mixed-env fleets are not "
         "apples-to-apples; refusing to render.\n  " + "\n  ".join(scheds)
         + "\nGate per env (fleet.py gate --env-slice) instead of tabling pooled lanes.")
+# Mixed-vs-single (user law 2026-07-19): a multi-env candidate is a SUPERSET of
+# the single-env keeper. The pooled block shows each root's own lanes; the
+# per-env blocks let the keeper's env be compared slice-to-slice. A warning is
+# printed, never a refusal.
 # WHITELIST comparability gate (user law 2026-07-05): a table renders ONLY
 # when every field below is IDENTICAL across all roots. Anything not on the
 # allowed-to-differ list (run name, startedAt) that differs = hard refusal.
@@ -140,6 +145,11 @@ if len(set(scheds)) > 1:
 # the hand formula (105296 -> structural 220768), so keeper roots predating the
 # fix legitimately differ. Exempt like startedAt.
 ALLOWED_DIFF = {'startedAt', 'ablation', 'ablationLabel', 'steps', 'flopsPerLaneStep'}
+if mixed_vs_single:
+    # Superset candidate (user law 2026-07-19): batch/seeds legitimately differ
+    # — the candidate carries the keeper's full seed set on its cheetah slice
+    # plus extra gridworld lanes. The per-env blocks do the slice comparison.
+    ALLOWED_DIFF |= {'batch', 'seeds', 'envSchedule'}
 metas = [m for _, _, _, m in data]
 allkeys = set().union(*(m.keys() for m in metas))
 mismatches = []
@@ -184,6 +194,8 @@ cfgs = [f'ablation={a}, B={len(m.get("seeds", [])) or m.get("batch")}, {m.get("s
 print('| @%dk | %s |' % (step // 1000, ' | '.join(hdrs)))
 print('|---|' + '---|' * len(roots))
 print('| config | %s |' % ' | '.join(cfgs))
+if mixed_vs_single:
+    print('| ⚠️ MIXED-vs-SINGLE: candidate is a multi-env superset; compare the keeper\'s env in the per-env blocks below, not the pooled rows. |' + ' |'.join([''] * (len(roots) - 1)) + (' |' if len(roots) > 1 else ''))
 for i, n in enumerate(names):
     print('| %s | %s |' % (n, ' | '.join(c[i] for c in cols)))
 # Per-env blocks (user law 2026-07-19: the Tiers must include all environments).

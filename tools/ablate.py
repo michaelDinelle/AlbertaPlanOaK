@@ -9,9 +9,9 @@ import argparse, json, os, subprocess
 def run_one(label, ablate, steps):
     root = f'.oak-benchmarks/ablate-{label}-{steps // 1000}k'
     subprocess.run(['rm', '-rf', root])
-    env = dict(os.environ, OAK_ABLATE=ablate, OAK_BENCH_ENV='HalfCheetah-v4',
+    env = dict(os.environ, OAK_ABLATE=ablate,
                OAK_BENCH_POLICIES='oak', OAK_BENCH_STEPS=str(steps),
-               OAK_BENCH_SEED_COUNT='1024', OAK_STEPS_PER_CB='1024',
+               OAK_BENCH_SEED_COUNT='1408', OAK_STEPS_PER_CB='1024',
                OAK_METRICS_STORAGE=root)
     print(f'== {label} (OAK_ABLATE={ablate}) ==', flush=True)
     subprocess.run(['.build/release/OaK', 'benchmark'], env=env,

@@ -8,7 +8,7 @@ xcrun -sdk macosx metal -fno-fast-math -c Sources/OakKernel.metal -o .build/OakK
 xcrun -sdk macosx metallib .build/OakKernel.air -o .build/OakKernel.metallib
 swift build -c release
 
-export OAK_BENCH_ENV="${OAK_BENCH_ENV:-HalfCheetah-v4}"
+
 export OAK_BENCH_STEPS="${OAK_REBUILD_STEPS:-1500000}"
 export OAK_BENCH_SEED_COUNT="${OAK_BENCH_SEED_COUNT:-1024}"
 export OAK_BENCH_POLICIES="${OAK_BENCH_POLICIES:-oak,zero,random}"

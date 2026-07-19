@@ -12,7 +12,7 @@
 #
 # Usage:  tools/run_fleet.sh <steps> <out-name> [keeper-root]
 # Check:  tail -f .oak-benchmarks/<out-name>.log   ;   ls .oak-benchmarks/<out-name>/.done
-# Env:    OAK_BENCH_ENV, OAK_BENCH_POLICIES, OAK_BENCH_SEED_COUNT
+# Env:    OAK_BENCH_ENVS, OAK_BENCH_POLICIES, OAK_BENCH_SEED_COUNT
 set -uo pipefail
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$REPO" || exit 1
@@ -35,13 +35,12 @@ if [ "${1:-}" = "--job" ]; then
       exit 2
     fi
   fi
-  echo "[run_fleet] $NAME — B=${OAK_BENCH_SEED_COUNT:-1024} x $STEPS steps, OAK_ABLATE=$ABLATE, caffeinate -dimsu, DETACHED."
+  echo "[run_fleet] $NAME — B=${OAK_BENCH_SEED_COUNT:-1408} x $STEPS steps, OAK_ABLATE=$ABLATE, caffeinate -dimsu, DETACHED."
   OAK_ABLATE="$ABLATE" \
-  OAK_BENCH_ENV="${OAK_BENCH_ENV:-HalfCheetah-v4}" \
   OAK_BENCH_ENVS="${OAK_BENCH_ENVS:-}" \
   OAK_BENCH_POLICIES="${OAK_BENCH_POLICIES:-oak}" \
   OAK_BENCH_STEPS="$STEPS" \
-  OAK_BENCH_SEED_COUNT="${OAK_BENCH_SEED_COUNT:-1024}" \
+  OAK_BENCH_SEED_COUNT="${OAK_BENCH_SEED_COUNT:-1408}" \
   OAK_FLEET_TIMING=1 \
   OAK_METRICS_STORAGE="$ROOT" \
   caffeinate -dimsu .build/release/OaK benchmark
