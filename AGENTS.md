@@ -50,7 +50,7 @@ Strict current-status audit lives in `docs/roadmap.md`. The literature target is
 
 ### Current status
 
-As of Mark IV (2026-07-04): divergence is essentially extinct on current substrates (0/1024 @100k) — the binding failure mode is chronic slightly-negative delivery with mode extinction ("never dies, never walks"), not numerical death. The last legally promoted keeper is `.oak-benchmarks/gated-10-tierL` (Tier-L IQM −0.0103); the mk2-D1/A4 substrate that followed was gate-REJECTED at both tiers and is not a keeper baseline. The June strong-mode ceiling was 0.58–0.71/step (probe-rho1, valuescale, gated-9 — all rejected for divergence under the old criteria); any 0.88 figure traces to an incomplete run (honest number: 0.451). Current numbers come from fleet runs, not from this file — run `tools/fleet.py report` and see `docs/roadmap.md`. The April CPU-bridge history is archived under Exhausted Families.
+As of Mark IV (2026-07-04): divergence is essentially extinct on current substrates (0/1024 @100k) — the binding failure mode is chronic slightly-negative delivery with mode extinction ("never dies, never walks"), not numerical death. The last legally promoted keeper is `.oak-benchmarks/mk8-tierL-20260705` (Tier-L IQM +0.4433, 98.1% positive, div 1.37%, sustain 0.664), which ships `OAK_ABLATE=planning`. (Superseded history: `.oak-benchmarks/gated-10-tierL`, Tier-L IQM −0.0103; the mk2-D1/A4 substrate that followed it was gate-REJECTED at both tiers and is not a keeper baseline.) The June strong-mode ceiling was 0.58–0.71/step (probe-rho1, valuescale, gated-9 — all rejected for divergence under the old criteria); any 0.88 figure traces to an incomplete run (honest number: 0.451). Current numbers come from fleet runs, not from this file — run `tools/fleet.py report` and see `docs/roadmap.md`. The April CPU-bridge history is archived under Exhausted Families.
 
 Durable lessons from that work, independent of instrument or seed:
 
@@ -73,7 +73,7 @@ Durable lessons from that work, independent of instrument or seed:
 These are the non-negotiables. Every kernel and every line of host code must respect them. When an invariant drifts from the cited research, update the invariant instead of preserving folklore.
 
 1. **Greenfield.** No legacy code, no compatibility fallbacks. Replace or refactor.
-2. **Inv-1: env-type knowledge boundary.** The agent (`OakMetalEngine`, `OakKernel.metal`, `KernelConfig`) contains ZERO action-space-type or env-identity branches. Action space (discrete vs continuous), bounds, env id, discrete count live exclusively in the env-wrapper layer (`EnvPoolEnv` and below). Agent reads only `obsDim` and `D_policy`.
+2. **Inv-1: env-type knowledge boundary.** The agent (`OakMetalEngine`, `OakKernel.metal`, `KernelConfig`) contains ZERO action-space-type or env-identity branches. Action space (discrete vs continuous), bounds, env id, discrete count live exclusively in the env-wrapper layer — now the megakernel's sample/env stage (`oak_stage_sample_act_wide` / `oak_stage_fleet_env`); the CPU wrapper types (`EnvPoolEnv` and below) were deleted per the F4 verdict. Agent reads only `obsDim` and `D_policy`.
 3. **Inv-4: no episodic semantics inside the agent.** Resets are wrapper events; the agent runs continually. The `done` signal is intentionally not plumbed through to the engine.
 4. **Inv-5: no special training phases.** Same updates every step.
 5. **Inv-6: no per-step heap allocation on the hot path.** Pre-allocated arenas only.
@@ -119,7 +119,7 @@ The dispatch shape stays fixed, but the internal design pattern is the named FC-
 
 Each env declares one structured action spec: `Discrete N` (categorical) or `Box A` (continuous with `[low, high]` bounds). The integer `D_policy = component_param_count` is the agent's only window into the env's action structure.
 
-The agent emits `policyMean[D_policy]` from `oak_action_emit`. The env-wrapper layer (`HCEnv::step_oak` in the native bridge) is the **sole** site that samples actions and computes score functions:
+The agent emits `policyMean[D_policy]` from the emit stage (`emit_all_options` / `emit_blend_grid`). The megakernel's sample stage (`oak_stage_sample_act_wide`; the CPU bridge's `HCEnv::step_oak` was deleted per the F4 verdict) is the **sole** site that samples actions and computes score functions:
 
 - Discrete N: Gumbel-max categorical (`-log(-log(U))` + argmax); target-option actor scores use `1{a=d} − π_d` (Maddison 2014; Williams 1992).
 - Box A: currently exposes `2A` policy coordinates to keep `D_policy`, default rank, and K stable. The first A coordinates are means; the second A coordinates are wrapper-reserved/inert. The wrapper samples with structural fixed `σ = 1/D_policy`, emits residual-style mean credit (`raw − μ`) for Box mean slots, writes zero score/action-signal entries for reserved scale slots, and clamps only the env-facing action. Full `D_policy = A` mean-only deletion failed the 1M gate and remains rejected unless a different actor geometry earns fresh evidence.
@@ -154,6 +154,13 @@ A fleet run root (`.oak-benchmarks/<run-id>/`, override with `OAK_METRICS_STORAG
   organ-bisect matrix: runs baseline + each organ ablated on top of --base,
   prints the conviction table. (Named ablate.py deliberately: a tools/bisect.py
   shadows Python's stdlib `bisect` and hijacks fleet.py's argparse.)
+- `tools/replay_html.py <rollout.bin|run-root> --out <dir> [--stride N]
+  [--lanes a-b] [--verify]` — packs recorded lanes (rollout-mode-0 binaries
+  today; record-v3 pose streams as they land) into a zero-dependency static
+  `index.html` "wall of streams": 32×32 treadmill cells (cheetah FK skeleton,
+  FourRooms/DeepSea mini-grids), reward-rate-tinted, 60fps single-canvas,
+  sort/race/zoom. `--selftest` runs the FK + codec checks. Replaces mp4 replay
+  videos for population presentation.
 - `tools/table.py <candidate-root> <keeper-root> <step>` — THE CANONICAL
   heartbeat table. **MANDATORY at every Tier-L heartbeat report**: never
   hand-compose heartbeat tables (hand tables drift and drop rows — SPS was
@@ -235,11 +242,11 @@ The working goal is **general online robustness**: any seed, any horizon, popula
    |---|---|---|---|---|
    | S | 1024 × 10k | ~39 s | every candidate | hard fails (NF, explosion) + divergence Δp ≳ 4% |
    | M | 1024 × 100k | ~6.4 min | candidates passing S | divergence ±2–3%, IQM screen |
-   | L | 1024 × 1M | ~64 min | keeper promotion, frontier studies | survival curves through the ~1M plasticity frontier, Δp ≳ 2% |
+   | L | 1024 × 1M | ~36–40 min (mk8-era) | keeper promotion, frontier studies | survival curves through the ~1M plasticity frontier, Δp ≳ 2% |
    | M-8192 | 8192 × 100k | ~34 min | instrument equivalence, SOTA-grade CIs | divergence ±1pp, IQM at the strict ±5% band |
    | XL | 1024 × 10M | F5-opt-gated | decay-constant program (not a gate) | post-zenith time constants, 10M survival |
 
-   **Hard rule: no protocol step exceeds ~2 h wall-clock.** Wall-clock derives from the measured constants in `docs/roadmap.md` (GPU loop: 265.7K agg @ B=1024, 401.9K @ B=16384) — never from estimates. XL's 10M horizon divides by the per-lane rate (~259 steps/s at B=1024), not aggregate throughput; it unlocks when agent-kernel fusion/occupancy work (the open F5-opt item — agent kernels are 77% of step wall) raises per-lane rate ~4×.
+   **Hard rule: no protocol step exceeds ~2 h wall-clock.** Wall-clock derives from the measured constants in `docs/roadmap.md` (GPU loop: ~470K agg @ B=1024 mk8-era — Tier-L ≈ 36–40 min; the older 265.7K agg @ B=1024 / 401.9K @ B=16384 constants are pre-Mark-IV) — never from estimates. XL's 10M horizon divides by the per-lane rate (~259 steps/s at B=1024), not aggregate throughput; it unlocks when agent-kernel fusion/occupancy work (the open F5-opt item — agent kernels are 77% of step wall) raises per-lane rate ~4×.
 3. Promote only on a Tier-L `fleet.py gate` PROMOTE against the keeper baseline. The gate is population law (divergence Δp, IQM delivered rate, RMST survival, NF phases — all paired by seed); a SOTA claim additionally requires the gate's IMPROVEMENT flag.
 4. Per-seed collapse is population data, not an averaging input: `fleet.py report` reports it as divergence rate, survival curves, and detector counts. Individual seeds (3, 8, …) remain inspectable as lanes in every fleet, but no single seed blocks or licenses promotion.
 5. Name run roots by hypothesis and tier, for example `.oak-benchmarks/closure-arbiter-tierM-YYYYMMDD`, and inspect live runs with `tools/fleet.py watch --follow` rather than waiting for final rows.
