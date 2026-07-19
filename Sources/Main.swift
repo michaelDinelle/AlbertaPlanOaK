@@ -57,7 +57,7 @@ struct LaneSnapshot {
   var deathRewardSum, deathRho: Float
   var info0, info1, info2, info3: SnapInfo
 }
-let fleetLaneStride = 356
+let fleetLaneStride = 384
 
 struct AblationSpec {
   static let ordered = [
@@ -106,6 +106,7 @@ func requireFreshMetallib() throws -> URL {
     "Sources/OakKernel.metal",
     "Sources/OakPhysics.metal",
     "Sources/HalfCheetahModel.metal",
+    "Sources/Gridworld.metal",
   ].map(root)
   let fm = FileManager.default
   let libTime = try fm.attributesOfItem(atPath: lib.path)[.modificationDate] as? Date
@@ -412,6 +413,7 @@ func metricsRoot() -> URL {
       switch CommandLine.arguments.dropFirst().first {
       case "benchmark": try benchmark()
       case "physics-probe": try physicsProbe()
+      case "gridworld-probe": try gridworldProbe()
       case "physics-rollout": try physicsRollout()
       default: throw err("Use `OaK benchmark`.")
       }
@@ -427,19 +429,30 @@ func metricsRoot() -> URL {
     return p
   }
   static func fleet(
-    _ p: Policy, _ seeds: [Int], _ steps: Int, _ root: URL, _ envId: String,
+    _ p: Policy, _ seeds: [Int], _ steps: Int, _ root: URL, _ laneEnvs: [String],
     _ ablations: AblationSpec
   ) throws {
-    try fleetGPU(p, seeds, steps, root, envId, ablations)
+    try fleetGPU(p, seeds, steps, root, laneEnvs, ablations)
+  }
+  // Universal env contract: envId -> kernel envKind (the ONLY env-identity
+  // mapping; the agent kernel stays env-blind, Inv-1).
+  static func envKind(_ envId: String) throws -> UInt32 {
+    switch envId {
+    case "HalfCheetah-v4": return 0
+    case "FourRooms-cont-v0": return 1
+    case "DeepSea-cont-v0": return 2
+    default:
+      throw err("Unknown env '\(envId)'. Known: HalfCheetah-v4, FourRooms-cont-v0, DeepSea-cont-v0.")
+    }
   }
   static func fleetGPU(
-    _ p: Policy, _ seeds: [Int], _ steps: Int, _ root: URL, _ envId: String,
+    _ p: Policy, _ seeds: [Int], _ steps: Int, _ root: URL, _ laneEnvs: [String],
     _ ablations: AblationSpec
   ) throws {
-    guard envId == defaultEnv else {
-      throw err(
-        "Only \(defaultEnv) is wired through the GPU physics kernel (got \(envId)).")
+    guard laneEnvs.count == seeds.count else {
+      throw err("laneEnvs (\(laneEnvs.count)) must match seed count (\(seeds.count)).")
     }
+    let laneEnvKinds = try laneEnvs.map(envKind)
     let e = ProcessInfo.processInfo.environment
     let fm = FileManager.default
     let B = seeds.count
@@ -512,6 +525,11 @@ func metricsRoot() -> URL {
       let sp = seedsBuf.contents().bindMemory(to: UInt32.self, capacity: B)
       for (i, s) in seeds.enumerated() { sp[i] = UInt32(truncatingIfNeeded: s) }
     }
+    let envKindsBuf = try makeBuf(B * 4)
+    do {
+      let kp = envKindsBuf.contents().bindMemory(to: UInt32.self, capacity: B)
+      for i in 0..<B { kp[i] = laneEnvKinds[i] }
+    }
     let res: [MTLBuffer]
     if let eng = engine {
       res = eng.res
@@ -527,9 +545,9 @@ func metricsRoot() -> URL {
     if (e["OAK_RECORD_STATS_EVERY"].flatMap(Int.init) ?? 0) > 0 {
       throw err("OAK_RECORD_STATS_EVERY (stats.bin) is not supported by the GPU fleet.")
     }
-    func seedDir(_ s: Int) throws -> URL {
-      let dir = root.appendingPathComponent(envId, isDirectory: true)
-        .appendingPathComponent("seed\(s)", isDirectory: true)
+    func seedDir(_ lane: Int) throws -> URL {
+      let dir = root.appendingPathComponent(laneEnvs[lane], isDirectory: true)
+        .appendingPathComponent("seed\(seeds[lane])", isDirectory: true)
       try fm.createDirectory(at: dir, withIntermediateDirectories: true)
       return dir
     }
@@ -541,8 +559,9 @@ func metricsRoot() -> URL {
     var recordLanes: [Int] = []
     var recordHandles: [FileHandle] = []
     for (lane, s) in seeds.enumerated() where recordAll || recordSeeds.contains(s) {
-      let dir = try seedDir(s)
-      let meta: [String: Any] = ["envId": envId, "seed": s, "actDim": actDim, "recordVersion": 2]
+      let dir = try seedDir(lane)
+      // Record v3: actions.bin records are 16 f32 — ctrl[6], done, pose[9].
+      let meta: [String: Any] = ["envId": laneEnvs[lane], "seed": s, "actDim": actDim, "recordVersion": 3]
       try JSONSerialization.data(withJSONObject: meta, options: [.prettyPrinted, .sortedKeys])
         .write(to: dir.appendingPathComponent("meta.json"), options: .atomic)
       let url = dir.appendingPathComponent("actions.bin")
@@ -557,7 +576,7 @@ func metricsRoot() -> URL {
       for i in 0..<B { rp[i] = -1 }
       for (slot, lane) in recordLanes.enumerated() { rp[lane] = Int32(slot) }
     }
-    let recordBuf = try makeBuf(recordLanes.count * recordCapacity * 7 * 4)
+    let recordBuf = try makeBuf(recordLanes.count * recordCapacity * 16 * 4)
     let snapStride = MemoryLayout<LaneSnapshot>.stride
     precondition(snapStride == 280, "LaneSnapshot layout drifted from OakLaneSnapshot")
     let snapBuf = try makeBuf(2 * B * snapStride)
@@ -565,8 +584,8 @@ func metricsRoot() -> URL {
     let dumpEvery = max(e["OAK_DUMP_STATE_EVERY"].flatMap(Int.init) ?? 0, 0)
     var hashHandles: [FileHandle?] = Array(repeating: nil, count: B)
     if dumpEvery > 0, engine != nil {
-      for (lane, s) in seeds.enumerated() {
-        let url = try seedDir(s).appendingPathComponent("state-hashes.jsonl")
+      for (lane, _) in seeds.enumerated() {
+        let url = try seedDir(lane).appendingPathComponent("state-hashes.jsonl")
         fm.createFile(atPath: url.path, contents: nil)
         hashHandles[lane] = try FileHandle(forWritingTo: url)
       }
@@ -621,6 +640,7 @@ func metricsRoot() -> URL {
         throw err("Failed to encode Metal command.")
       }
       bindFleet(enc, initPipe)
+      enc.setBuffer(envKindsBuf, offset: 0, index: 9)
       enc.dispatchThreads(mtlSize(B), threadsPerThreadgroup: laneTG)
       enc.endEncoding()
       cb.commit()
@@ -657,7 +677,7 @@ func metricsRoot() -> URL {
         "delta": finite > 0 ? (Double(a.last) - Double(a.first)) as Any : NSNull(),
       ]
     }
-    func health(_ snap: LaneSnapshot) -> [String: Any] {
+    func health(_ snap: LaneSnapshot, lane: Int) -> [String: Any] {
       let adm = Double(snap.deltaSum) / Double(max(Int(snap.steps), 1))
       var h: [String: Any] = [
         "rewardRate": snap.rho.isFinite ? Double(snap.rho) : NSNull(),
@@ -699,9 +719,20 @@ func metricsRoot() -> URL {
         h["generateTestEligibleCount"] = f(s.generateTestEligibleCount)
         h["learningMature"] = f(s.learningMature)
       }
+      // envInfo channel names are env-conditional (per lane's env): cheetah
+      // lanes keep the legacy MuJoCo names; gridworld lanes report their own.
+      let infoNames: [String]
+      switch laneEnvs[lane] {
+      case "FourRooms-cont-v0":
+        infoNames = ["info:goal", "info:x", "info:y", "info:since_goal"]
+      case "DeepSea-cont-v0":
+        infoNames = ["info:reward", "info:row", "info:col", "info:last_action"]
+      default:
+        infoNames = ["info:reward_run", "info:reward_ctrl", "info:x_position", "info:x_velocity"]
+      }
       h["envInfo"] = [
-        "info:reward_run": infoJSON(snap.info0), "info:reward_ctrl": infoJSON(snap.info1),
-        "info:x_position": infoJSON(snap.info2), "info:x_velocity": infoJSON(snap.info3),
+        infoNames[0]: infoJSON(snap.info0), infoNames[1]: infoJSON(snap.info1),
+        infoNames[2]: infoJSON(snap.info2), infoNames[3]: infoJSON(snap.info3),
       ]
       return h
     }
@@ -772,10 +803,10 @@ func metricsRoot() -> URL {
           }
         }
         var m: [String: Any] = [
-          "v": 1, "kind": kind, "envId": envId, "policy": p.rawValue,
+          "v": 1, "kind": kind, "envId": laneEnvs[lane], "policy": p.rawValue,
           "ablationLabel": ablations.label, "lane": lane, "seed": seeds[lane],
           "step": Int(snap.steps), "wallSeconds": wall, "rewardSum": Double(snap.rewardSum),
-          "doneCount": Int(snap.doneCount), "health": health(snap),
+          "doneCount": Int(snap.doneCount), "health": health(snap, lane: lane),
           "firstNonFiniteStep": st.deadStep[lane] ?? NSNull(),
           "firstNonFiniteDetector": st.deadDetector[lane] ?? NSNull(),
         ]
@@ -825,16 +856,15 @@ func metricsRoot() -> URL {
         ]))
       if !recordLanes.isEmpty {
         let rp = recordBuf.contents().bindMemory(
-          to: Float.self, capacity: recordLanes.count * recordCapacity * 7)
+          to: Float.self, capacity: recordLanes.count * recordCapacity * 16)
         for (slot, _) in recordLanes.enumerated() {
-          var data = Data(capacity: (step - st.lastDrainStep) * (actDim * 4 + 1))
+          var data = Data(capacity: (step - st.lastDrainStep) * (16 * 4))
           for r in st.lastDrainStep..<step {
-            let base = (slot * recordCapacity + (r % recordCapacity)) * 7
-            for u in 0..<actDim {
+            let base = (slot * recordCapacity + (r % recordCapacity)) * 16
+            for u in 0..<16 {
               var f = rp[base + u]
               withUnsafeBytes(of: &f) { data.append(contentsOf: $0) }
             }
-            data.append(rp[base + 6] != 0 ? 1 : 0)
           }
           try recordHandles[slot].write(contentsOf: data)
         }
@@ -1007,6 +1037,69 @@ func metricsRoot() -> URL {
     try Data(bytes: outBuf.contents(), count: n * outStride * 4)
       .write(to: URL(fileURLWithPath: args[3]))
   }
+  // Case-gate probe for the gridworld env contract: reads a
+  // gridworld_ref.py case file (header uint32 x3 = n, inW, outW; then n in
+  // records, then n golden out records), runs the in-records through the
+  // Metal env step (the SAME functions the fleet env window calls), and
+  // writes n out records for `gridworld_ref.py --compare cases out`.
+  static func gridworldProbe() throws {
+    let args = CommandLine.arguments
+    guard args.count >= 4 else {
+      throw err("Usage: OaK gridworld-probe <cases.bin> <out.bin>")
+    }
+    let data = try Data(contentsOf: URL(fileURLWithPath: args[2]))
+    guard data.count >= 12 else { throw err("Case file too small.") }
+    let (n, wi, wo): (Int, Int, Int) = data.withUnsafeBytes { raw in
+      (
+        Int(raw.load(fromByteOffset: 0, as: UInt32.self)),
+        Int(raw.load(fromByteOffset: 4, as: UInt32.self)),
+        Int(raw.load(fromByteOffset: 8, as: UInt32.self))
+      )
+    }
+    guard n > 0, (wi == 8 && wo == 24) || (wi == 6 && wo == 21) else {
+      throw err(
+        "Bad case header: n=\(n) in=\(wi) out=\(wo) (expected FourRooms 8/24 or DeepSea 6/21).")
+    }
+    guard data.count == 12 + n * wi * 4 + n * wo * 4 else {
+      throw err("Case file size mismatch: \(data.count) bytes for n=\(n) in=\(wi) out=\(wo).")
+    }
+    guard let dev = MTLCreateSystemDefaultDevice(), let q = dev.makeCommandQueue() else {
+      throw err("Metal unavailable.")
+    }
+    let lib = try dev.makeLibrary(URL: requireFreshMetallib())
+    guard let fn = lib.makeFunction(name: "oak_gridworld_probe") else {
+      throw err("Missing oak_gridworld_probe kernel.")
+    }
+    let pipe = try dev.makeComputePipelineState(function: fn)
+    guard let inBuf = dev.makeBuffer(length: n * wi * 4, options: [.storageModeShared]),
+      let outBuf = dev.makeBuffer(length: n * wo * 4, options: [.storageModeShared]),
+      let hdrBuf = dev.makeBuffer(length: 12, options: [.storageModeShared])
+    else { throw err("Metal buffer allocation failed.") }
+    data.withUnsafeBytes { raw in
+      memcpy(inBuf.contents(), raw.baseAddress!.advanced(by: 12), n * wi * 4)
+    }
+    do {
+      let hp = hdrBuf.contents().bindMemory(to: UInt32.self, capacity: 3)
+      hp[0] = UInt32(n)
+      hp[1] = UInt32(wi)
+      hp[2] = UInt32(wo)
+    }
+    guard let cb = q.makeCommandBuffer(), let enc = cb.makeComputeCommandEncoder() else {
+      throw err("Failed to encode Metal command.")
+    }
+    enc.setComputePipelineState(pipe)
+    enc.setBuffer(inBuf, offset: 0, index: 0)
+    enc.setBuffer(outBuf, offset: 0, index: 1)
+    enc.setBuffer(hdrBuf, offset: 0, index: 2)
+    let tg = min(64, pipe.maxTotalThreadsPerThreadgroup)
+    enc.dispatchThreads(mtlSize(n), threadsPerThreadgroup: mtlSize(tg))
+    enc.endEncoding()
+    cb.commit()
+    cb.waitUntilCompleted()
+    if let e = cb.error { throw err("Metal command failed: \(e)") }
+    try Data(bytes: outBuf.contents(), count: n * wo * 4)
+      .write(to: URL(fileURLWithPath: args[3]))
+  }
   static let rolloutLaneStride = 35 * 4
   static func physicsRollout() throws {
     let args = CommandLine.arguments
@@ -1152,6 +1245,38 @@ func metricsRoot() -> URL {
     let policies = try (env["OAK_BENCH_POLICIES"] ?? "oak,zero,random").split(separator: ",").map {
       try pol(String($0))
     }
+    // Seed-deterministic env schedule (universal env contract):
+    // OAK_BENCH_ENVS="HalfCheetah-v4:768,FourRooms-cont-v0:192,DeepSea-cont-v0:64"
+    // assigns contiguous seed ranges (seed b -> lane b). Default remains the
+    // single-env OAK_BENCH_ENV behavior EXACTLY as before (no envSchedule in
+    // meta.json, so single-env roots stay table.py-comparable with keepers).
+    var laneEnvs = [String](repeating: envId, count: seedValues.count)
+    var envSchedule: [(envId: String, seedStart: Int, seedEnd: Int)]? = nil
+    if let raw = env["OAK_BENCH_ENVS"], !raw.trimmingCharacters(in: .whitespaces).isEmpty {
+      var entries: [(String, Int, Int)] = []
+      var offset = 0
+      for item in raw.split(separator: ",") {
+        let parts = item.split(separator: ":")
+        guard parts.count == 2, let count = Int(parts[1].trimmingCharacters(in: .whitespaces)),
+          count > 0
+        else {
+          throw err("Bad OAK_BENCH_ENVS entry '\(item)' (expected EnvId:count).")
+        }
+        let name = String(parts[0]).trimmingCharacters(in: .whitespaces)
+        _ = try Main.envKind(name)
+        guard offset + count <= seedValues.count else {
+          throw err(
+            "OAK_BENCH_ENVS schedule overflows the fleet: \(offset + count) lanes > B=\(seedValues.count).")
+        }
+        for i in 0..<count { laneEnvs[offset + i] = name }
+        entries.append((name, seedValues[offset], seedValues[offset + count - 1]))
+        offset += count
+      }
+      guard offset == seedValues.count else {
+        throw err("OAK_BENCH_ENVS schedule covers \(offset) of B=\(seedValues.count) lanes.")
+      }
+      envSchedule = entries
+    }
     var dir = metricsRoot()
     let lockDir = URL(fileURLWithPath: fm.currentDirectoryPath).appendingPathComponent(
       ".oak-benchmarks", isDirectory: true)
@@ -1199,24 +1324,43 @@ func metricsRoot() -> URL {
     let fEmit = fK * fA * fDL + fD * fK
     let fDyna = 14 * fA * 32 + 4 * fK * fA + 2 * fK * 32
     let fWindow = fA * fK + fDL * fK + fDL * fA + fRn / 2 + fR
-    let fMisc = 4_000, fEnv = 20_000
-    let flopsPerLaneStep =
-      2 * (fEncode + fPlan + fLearn + fEmit + fDyna + fWindow + fMisc) + fEnv
+    let fMisc = 4_000
+    // Env-window flops are env-conditional per lane's env: the fp32
+    // HalfCheetah physics chain ~2e4 (F4-port family estimate); the integer
+    // gridworld steps are near-free (obs formulas dominate).
+    let agentFlops =
+      2 * (fEncode + fPlan + fLearn + fEmit + fDyna + fWindow + fMisc)
+    let envFlops: [String: Int] = [
+      "HalfCheetah-v4": 20_000, "FourRooms-cont-v0": 40, "DeepSea-cont-v0": 20,
+    ]
+    let flopsPerLaneStep = agentFlops + (envFlops[envId] ?? 20_000)
+    var runMeta: [String: Any] = [
+      "fleetSchemaVersion": 1, "command": "benchmark", "envId": envId,
+      "batch": seedValues.count, "seeds": seedValues, "steps": steps,
+      "policies": policies.map(\.rawValue), "ablation": ablations.names,
+      "ablationLabel": ablations.label,
+      "flopsPerLaneStep": flopsPerLaneStep,
+      "startedAt": ISO8601DateFormatter().string(from: Date()),
+    ]
+    if let envSchedule {
+      runMeta["envSchedule"] = envSchedule.map { e in
+        [
+          "envId": e.envId, "seedStart": e.seedStart, "seedEnd": e.seedEnd,
+          "flopsPerLaneStep": agentFlops + (envFlops[e.envId] ?? 0),
+        ] as [String: Any]
+      }
+    }
     try JSONSerialization.data(
-      withJSONObject: [
-        "fleetSchemaVersion": 1, "command": "benchmark", "envId": envId,
-        "batch": seedValues.count, "seeds": seedValues, "steps": steps,
-        "policies": policies.map(\.rawValue), "ablation": ablations.names,
-        "ablationLabel": ablations.label,
-        "flopsPerLaneStep": flopsPerLaneStep,
-        "startedAt": ISO8601DateFormatter().string(from: Date()),
-      ] as [String: Any], options: [.prettyPrinted, .sortedKeys]
+      withJSONObject: runMeta, options: [.prettyPrinted, .sortedKeys]
     ).write(to: dir.appendingPathComponent("meta.json"), options: .atomic)
+    let envDesc =
+      envSchedule?.map { "\($0.envId):\($0.seedEnd - $0.seedStart + 1)" }.joined(
+        separator: ",") ?? envId
     fputs(
-      "OaK fleet: B=\(seedValues.count) lanes × \(steps) steps × \(policies.count) policies on \(envId) (ablation=\(ablations.label), dir=\(dir.path))\n",
+      "OaK fleet: B=\(seedValues.count) lanes × \(steps) steps × \(policies.count) policies on \(envDesc) (ablation=\(ablations.label), dir=\(dir.path))\n",
       stderr)
     for p in policies {
-      try fleet(p, seedValues, steps, dir, envId, ablations)
+      try fleet(p, seedValues, steps, dir, laneEnvs, ablations)
     }
   }
 }
