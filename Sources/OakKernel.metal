@@ -772,58 +772,28 @@ inline void FeatureConstruction(Ctx ctx,
     for (uint i = lo; i < hi; ++i) {
         float x = 0.0f;
         if (!OAK_ABLATE_FEATURE_CONSTRUCTION) {
-            uint kind = ctx.featureKind[i] % 6u;
-            if (kind >= 4u) {
-                // GATED CHANGE (Phase-1 RFF diet — behavior change, requires a
-                // Tier-M/L fleet gate before promotion): RFF kinds (sin/cos of
-                // a sparse projection, 2410.20634) are evaluated for the bank
-                // winner ONLY — the gate tile is already known — and used RAW,
-                // since sin/cos are bounded [-1,1]: no mean/SM standardization
-                // and no per-slot stats tracking for bounded kinds.
-                if (i == winner) {
-                    // Sign masks (+1 / -1 channels) are a pure function of the
-                    // slot index, precomputed into featureParentA/B at the
-                    // replacement commit: the eval is a masked add/sub with the
-                    // same c-ordered fma sequence as the hash form (bitwise
-                    // identical z). NOTE: featureParentA of an RFF slot now
-                    // holds mask bits, so the eligibility redundancy scan's
-                    // parentA%R read for RFF slots changes value — a small
-                    // behavioral delta folded into the Phase-1 gated change.
-                    uint mp = ctx.featureParentA[i];
-                    uint mm = ctx.featureParentB[i];
-                    float z = 0.0f;
-                    for (uint c = 0u; c < OAK_CORE; ++c) {
-                        uint mb = 1u << c;
-                        if ((mp & mb) != 0u) z += prev[c];
-                        else if ((mm & mb) != 0u) z -= prev[c];
-                    }
-                    z *= rsqrt(float(OAK_CORE));
-                    x = (kind == 4u) ? sin(z) : cos(z);
-                    if (!isfinite(x)) { x = 0.0f; ctx.counters[OAK_CNT_OBS_NF] += 1u; }
-                }
+            uint pa = ctx.featureParentA[i] % ctx.R;
+            uint pb = ctx.featureParentB[i] % ctx.R;
+            uint kind = ctx.featureKind[i] % 4u;
+            float raw;
+            if (kind == 3u) {
+
+                raw = ctx.obsTraceMulti[ctx.featureParentA[i] % (ctx.traceLevels * ctx.O)];
             } else {
-                uint pa = ctx.featureParentA[i] % ctx.R;
-                uint pb = ctx.featureParentB[i] % ctx.R;
-                float raw;
-                if (kind == 3u) {
-
-                    raw = ctx.obsTraceMulti[ctx.featureParentA[i] % (ctx.traceLevels * ctx.O)];
-                } else {
-                    float a = prev[pa], b = prev[pb];
-                    raw = (kind == 0u) ? a * b
-                        : (kind == 1u) ? (a + b) * 0.7071067811865475f
-                                       : a * (b - a);
-                }
-                uint age = ctx.featureAge[i];
-                float rate = max(1.0f / (float(age) + 1.0f), ctx.invR);
-                ctx.featureMean[i] += rate * (raw - ctx.featureMean[i]);
-                ctx.featureSM[i] += rate * (raw * raw - ctx.featureSM[i]);
-                float var = max(ctx.featureSM[i] - ctx.featureMean[i] * ctx.featureMean[i], 0.0f);
-
-                float ridge = max(1.0f / (float(age) + 1.0f), 1.0f / float(max(ctx.O, 1u)));
-                x = (raw - ctx.featureMean[i]) * rsqrt(var + ridge);
-                if (!isfinite(x)) { x = 0.0f; ctx.counters[OAK_CNT_OBS_NF] += 1u; }
+                float a = prev[pa], b = prev[pb];
+                raw = (kind == 0u) ? a * b
+                    : (kind == 1u) ? (a + b) * 0.7071067811865475f
+                                   : a * (b - a);
             }
+            uint age = ctx.featureAge[i];
+            float rate = max(1.0f / (float(age) + 1.0f), ctx.invR);
+            ctx.featureMean[i] += rate * (raw - ctx.featureMean[i]);
+            ctx.featureSM[i] += rate * (raw * raw - ctx.featureSM[i]);
+            float var = max(ctx.featureSM[i] - ctx.featureMean[i] * ctx.featureMean[i], 0.0f);
+
+            float ridge = max(1.0f / (float(age) + 1.0f), 1.0f / float(max(ctx.O, 1u)));
+            x = (raw - ctx.featureMean[i]) * rsqrt(var + ridge);
+            if (!isfinite(x)) { x = 0.0f; ctx.counters[OAK_CNT_OBS_NF] += 1u; }
         }
         curr[i] = 0.0f;
         if (i == winner) winX = x;
@@ -1233,26 +1203,9 @@ static inline void oak_replace_commit(Ctx ctx, uint tid) {
         uint pb = ctx.nurParentB[bestN] % ctx.R;
 uint birth = ctx.featureBirthCount[worst] + 1u;
         ctx.featureBirthCount[worst] = birth;
-        uint newKind = ctx.nurKind[bestN] % 6u;
-        if (newKind >= 4u) {
-            // RFF slot: parents hold the projection sign masks — the SAME
-            // pure function of the nursery index the shadow eval used, so
-            // the promoted feature is the function the nursery validated.
-            uint mp = 0u, mm = 0u;
-            for (uint c = 0u; c < OAK_CORE; ++c) {
-                uint hw = bestN * 2654435761u + c * 40503u;
-                hw ^= hw >> 16u;
-                uint sel = hw % 3u;
-                if (sel == 0u) mp |= (1u << c);
-                else if (sel == 1u) mm |= (1u << c);
-            }
-            ctx.featureParentA[worst] = mp;
-            ctx.featureParentB[worst] = mm;
-        } else {
-            ctx.featureParentA[worst] = pa;
-            ctx.featureParentB[worst] = pb;
-        }
-        ctx.featureKind[worst] = newKind;
+        ctx.featureParentA[worst] = pa;
+        ctx.featureParentB[worst] = pb;
+        ctx.featureKind[worst] = ctx.nurKind[bestN] % 4u;
 
         ctx.featureAge[worst] = ctx.nurAge[bestN];
         ctx.featureMean[worst] = ctx.nurStats[(bestN) * 4u];
@@ -1278,7 +1231,7 @@ uint birth = ctx.featureBirthCount[worst] + 1u;
             }
             ctx.nurParentA[bestN] = spa;
             ctx.nurParentB[bestN] = spb;
-            ctx.nurKind[bestN] = (ctx.nurKind[bestN] + 1u) % 6u;
+            ctx.nurKind[bestN] = (ctx.nurKind[bestN] + 1u) % 4u;
             ctx.nurAge[bestN] = 0u;
             ctx.nurStats[(bestN) * 4u] = 0.0f;
             ctx.nurStats[(bestN) * 4u + 1u] = 0.0f;
@@ -1505,25 +1458,10 @@ static inline void oak_window_analytics(Ctx ctx, uint tid) {
         for (uint n = tid + (((tPrev >> 1u) & 1u) != 0u ? tgW : 0u); n < ctx.Rn; n += 2u * tgW) {
             uint pa = ctx.nurParentA[n] % ctx.R;
             uint pb = ctx.nurParentB[n] % ctx.R;
-            uint kind = ctx.nurKind[n] % 6u;
+            uint kind = ctx.nurKind[n] % 4u;
             float raw;
             if (kind == 3u) {
                 raw = ctx.obsTraceMulti[ctx.nurParentA[n] % (ctx.traceLevels * ctx.O)];
-            } else if (kind >= 4u) {
-                // RFF candidate: evaluate with the SAME mask the commit will
-                // store (a pure function of the nursery index n), so the
-                // shadow stats match the promoted feature — the Phase-2
-                // nursery kind-validation fix.
-                float z = 0.0f;
-                for (uint c = 0u; c < OAK_CORE; ++c) {
-                    uint hw = n * 2654435761u + c * 40503u;
-                    hw ^= hw >> 16u;
-                    uint sel = hw % 3u;
-                    if (sel == 0u) z += prev[c];
-                    else if (sel == 1u) z -= prev[c];
-                }
-                z *= rsqrt(float(OAK_CORE));
-                raw = (kind == 4u) ? sin(z) : cos(z);
             } else {
                 float a = prev[pa], b = prev[pb];
                 raw = (kind == 0u) ? a * b
