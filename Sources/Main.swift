@@ -15,6 +15,12 @@ struct KernelConfig {
   var invRank, invOptionCount, metaEta: Float
   var agentCount, paramStride, stateStride, uintStride: UInt32
   var nurseryCount: UInt32
+  // Host-precomputed constants (identical IEEE values — Float division is
+  // correctly rounded on both sides with fast-math off).
+  var keyboardSketchDim: UInt32  // max(1, min(D, K))
+  var sampleSigma: Float  // 1 / max(D, 1)
+  var sampleInv2S2: Float  // 1 / (2 * sampleSigma * sampleSigma)
+  var actorAlphaDenom: Float  // Float(max(D * 32, 1)) — divisor, NOT a reciprocal
 }
 struct KernelScalars {
   var stepCount: UInt32 = 0, stateSlot: UInt32 = 0
@@ -159,12 +165,12 @@ struct Arena {
     alphaModel = take(r)
     betaModel = take(r)
     _ = take(2 * r)  // hModel, gradEnergyModel
-    _ = take(5 * k)  // actorAdv, optRewardTd, headDenom, durationTd, durationHat
+    _ = take(5 * k)  // actorAdv, optRewardTd + 3 reserved (headDenom/durationTd/durationHat deleted)
     _ = take(tl * max(o, 1))  // obsTraceMulti
-    _ = take(4 * k)  // prioOpt, continuation, keyboard, modelDenom
+    _ = take(4 * k)  // prioOpt, continuation, keyboard + 1 reserved (modelDenom deleted)
     _ = take(1)  // valueGauge
-    _ = take(2 * k)  // tdPsiFast, tdPsiPeak
-    _ = take(2 * k)  // headScale, modelScale
+    _ = take(2 * k)  // reserved (tdPsiFast/tdPsiPeak deleted)
+    _ = take(2 * k)  // headScale + 1 reserved (modelScale deleted)
     _ = take(2)  // valueScale, xNormPrev
     _ = take(5 * k)  // hDotPsi, psiAuxScale, psiRho, optRho, optFit
     alphaAct = take(k)  // actor IDBD multiplier (init 1)
@@ -191,7 +197,7 @@ struct Arena {
     _ = take(32)  // dynaD (per-thread backup deltas)
     _ = take(r)  // dynaAcc (window-accumulated dense per-feature backup sum)
     _ = take(k)  // dynaC (copy-2 per-option update coefficients)
-    _ = take(4)  // planScr (reward snapshot, dyna-magnitude EMA)
+    _ = take(4)  // planScr (reward snapshot; slot 2 = rsqrt(R) cache; 1/3 reserved)
     total = s
   }
 }
@@ -248,6 +254,7 @@ final class Engine {
     // Core region: 17 std obs + 12 prev-action + reward + bias + spare = 32
     // always-active slots (Mark III law: all raw inputs visible every step).
     let anchors = 32
+    let sampleSigma = 1 / Float(max(d, 1))
     let cfgValue = KernelConfig(
       obsDim: UInt32(obsDim), rank: UInt32(rank), optionCount: UInt32(k),
       actionParamCount: UInt32(d), obsTraceLevels: UInt32(max(Arena.traces(obsDim) - 1, 0)),
@@ -255,7 +262,11 @@ final class Engine {
       invOptionCount: 1 / Float(k), metaEta: 1 / Float(rank) / Float(max(rank + d, 1)),
       agentCount: UInt32(batch), paramStride: UInt32(paramTotal),
       stateStride: UInt32(a.total), uintStride: UInt32(uintTotal),
-      nurseryCount: UInt32(rn))
+      nurseryCount: UInt32(rn),
+      keyboardSketchDim: UInt32(max(1, min(d, k))),
+      sampleSigma: sampleSigma,
+      sampleInv2S2: 1 / (2 * sampleSigma * sampleSigma),
+      actorAlphaDenom: Float(max(d * 32, 1)))
     guard let cq = dev.makeCommandQueue() else {
       throw err("Metal command queue unavailable.")
     }
@@ -452,16 +463,14 @@ func metricsRoot() -> URL {
     // G=32 with scalar env measured fastest at B=1024 (mk5 geometry sweep).
     let autoG = max(2, min(32, B / 32))
     let megaG = e["OAK_MEGA_LANES_PER_TG"].flatMap(Int.init) ?? autoG
-    // Scalar-env mode measured 3x faster than coop at high G (mk5 attribution).
-    let envCoop = (e["OAK_MEGA_ENV_COOP"].flatMap(Int.init).map { $0 != 0 }) ?? false
-    let physScratchFloats = 140
+    // Scalar-env mode measured 3x faster than coop at high G (mk5 attribution);
+    // the coop simd-env path (OAK_MEGA_ENV_COOP, physRows/tgPhys) was deleted
+    // in the kernel-slimming pass.
     let megaW = 32 * megaG
     let megaConstants = MTLFunctionConstantValues()
     ablations.apply(to: megaConstants)
     var megaG32 = UInt32(megaG)
     megaConstants.setConstantValue(&megaG32, type: .uint, index: 12)
-    var envCoopVal = envCoop
-    megaConstants.setConstantValue(&envCoopVal, type: .bool, index: 27)
     if let eng = engine { eng.applyShapeConstants(megaConstants) }
     if e["OAK_PROBE_FTZ"] == "1" {
       var b = true
@@ -483,12 +492,11 @@ func metricsRoot() -> URL {
       function: lib.makeFunction(name: "oak_megastep", constantValues: megaConstants))
     // Per-lane tg caches are OAK_ACT = 64 floats wide (cont/prev/curr).
     let megaSlotBytes = 64 * megaG * MemoryLayout<Float>.stride
-    let physTGBytes = envCoop ? physScratchFloats * megaG * MemoryLayout<Float>.stride : 16
     guard megaG >= 1, megaW <= megaPipe.maxTotalThreadsPerThreadgroup,
-      3 * megaSlotBytes + physTGBytes <= dev.maxThreadgroupMemoryLength
+      3 * megaSlotBytes <= dev.maxThreadgroupMemoryLength
     else {
       throw err(
-        "OAK_MEGA_LANES_PER_TG=\(megaG) needs \(megaW) threads/threadgroup (pipeline max \(megaPipe.maxTotalThreadsPerThreadgroup)) and \(3 * megaSlotBytes + physTGBytes) tg bytes (device max \(dev.maxThreadgroupMemoryLength)).")
+        "OAK_MEGA_LANES_PER_TG=\(megaG) needs \(megaW) threads/threadgroup (pipeline max \(megaPipe.maxTotalThreadsPerThreadgroup)) and \(3 * megaSlotBytes) tg bytes (device max \(dev.maxThreadgroupMemoryLength)).")
     }
     func makeBuf(_ len: Int) throws -> MTLBuffer {
       guard let b = dev.makeBuffer(
@@ -550,7 +558,6 @@ func metricsRoot() -> URL {
       for (slot, lane) in recordLanes.enumerated() { rp[lane] = Int32(slot) }
     }
     let recordBuf = try makeBuf(recordLanes.count * recordCapacity * 7 * 4)
-    let physRowsBuf = try makeBuf(envCoop ? B * 1050 * 4 : 16)
     let snapStride = MemoryLayout<LaneSnapshot>.stride
     precondition(snapStride == 280, "LaneSnapshot layout drifted from OakLaneSnapshot")
     let snapBuf = try makeBuf(2 * B * snapStride)
@@ -603,11 +610,7 @@ func metricsRoot() -> URL {
       enc.setBuffer(recordBuf, offset: 0, index: 10)
       var n32 = UInt32(n)
       enc.setBytes(&n32, length: 4, index: 11)
-      enc.setBuffer(physRowsBuf, offset: 0, index: 12)
-      var off0 = UInt32(0)
-      enc.setBytes(&off0, length: 4, index: 13)
       for m in 0..<3 { enc.setThreadgroupMemoryLength(megaTGBytes, index: m) }
-      enc.setThreadgroupMemoryLength(physTGBytes, index: 3)
       enc.dispatchThreadgroups(
         MTLSize(width: (B + megaG - 1) / megaG, height: 1, depth: 1),
         threadsPerThreadgroup: mtlSize(megaW))
@@ -906,7 +909,9 @@ func metricsRoot() -> URL {
         enc.setBuffer(snapBuf, offset: 0, index: 9)
         var base = UInt32(snapHalf * B)
         enc.setBytes(&base, length: 4, index: 10)
-        enc.dispatchThreads(mtlSize(B), threadsPerThreadgroup: laneTG)
+        // One threadgroup (= one simdgroup) per lane: the param scan is
+        // warp-parallel in-kernel.
+        enc.dispatchThreadgroups(mtlSize(B), threadsPerThreadgroup: mtlSize(32))
       }
       enc.endEncoding()
       chunkSeq += 1
@@ -969,10 +974,8 @@ func metricsRoot() -> URL {
       throw err("Probe input size mismatch: \(data.count) bytes for \(n) cases.")
     }
     let debug = args.count > 4 && args[4] == "debug"
-    let coop = args.count > 4 && args[4] == "coop"
     let outStride = debug ? 904 : 18
-    let kernelName =
-      debug ? "oak_physics_probe_debug" : (coop ? "oak_physics_probe_coop" : "oak_physics_probe")
+    let kernelName = debug ? "oak_physics_probe_debug" : "oak_physics_probe"
     guard let dev = MTLCreateSystemDefaultDevice(), let q = dev.makeCommandQueue() else {
       throw err("Metal unavailable.")
     }
@@ -982,9 +985,7 @@ func metricsRoot() -> URL {
     }
     let pipe = try dev.makeComputePipelineState(function: fn)
     guard let inBuf = dev.makeBuffer(length: inFloats * 4, options: [.storageModeShared]),
-      let outBuf = dev.makeBuffer(length: n * outStride * 4, options: [.storageModeShared]),
-      let rowsBuf = dev.makeBuffer(
-        length: coop ? n * 1050 * 4 : 16, options: [.storageModePrivate])
+      let outBuf = dev.makeBuffer(length: n * outStride * 4, options: [.storageModeShared])
     else { throw err("Metal buffer allocation failed.") }
     data.withUnsafeBytes { raw in
       memcpy(inBuf.contents(), raw.baseAddress!.advanced(by: 4), inFloats * 4)
@@ -997,14 +998,8 @@ func metricsRoot() -> URL {
     enc.setBuffer(outBuf, offset: 0, index: 1)
     var count = UInt32(n)
     enc.setBytes(&count, length: MemoryLayout<UInt32>.stride, index: 2)
-    if coop {
-      enc.setBuffer(rowsBuf, offset: 0, index: 3)
-      enc.setThreadgroupMemoryLength(140 * MemoryLayout<Float>.stride, index: 0)
-      enc.dispatchThreadgroups(mtlSize(n), threadsPerThreadgroup: mtlSize(32))
-    } else {
-      let tg = min(64, pipe.maxTotalThreadsPerThreadgroup)
-      enc.dispatchThreads(mtlSize(n), threadsPerThreadgroup: mtlSize(tg))
-    }
+    let tg = min(64, pipe.maxTotalThreadsPerThreadgroup)
+    enc.dispatchThreads(mtlSize(n), threadsPerThreadgroup: mtlSize(tg))
     enc.endEncoding()
     cb.commit()
     cb.waitUntilCompleted()
@@ -1178,10 +1173,35 @@ func metricsRoot() -> URL {
         isDirectory: true)
     }
     try fm.createDirectory(at: dir, withIntermediateDirectories: true)
-    let mR = max(17, 12 * 2, 2)
-    let mLearnTotal = mR + mR * mR + mR * 12 * mR + mR * mR + mR * mR * mR + mR * mR
+    // flopsPerLaneStep: honest per-lane-step multiply+add count (fma = 2
+    // flops) of the post-slimming megakernel, by stage, computed from the
+    // real config — R = rank, K = 32 options, D = 12, DL = D/2 live dims,
+    // A = 64 active rows, Rn nursery. Counts the fma-dominated terms:
+    //   encode  value dots 2A | psi dots 2KA | hDot KA | model dots 3KA | norms 6A
+    //   plan    prev-side model dots 4KA | polCoef K*DL
+    //   learn   policy apply KA*DL | psi/vStop+aux head updates 4KA | value banks 2A
+    //   emit    option means KA*DL | blend D*K
+    //   dyna    ring vX+xNorm 2A per warp thread | 4 candidates x 3 dots 12A per
+    //           thread | copy-2 4KA | dynaAcc apply 2K per thread
+    //   window  utility AK | consensus DL*K dir + DL*A apply | nursery Rn/2 | eligScr R
+    //   misc    serial scalar/keyboard/curation/stats loops ~4e3
+    //   env     fp32 HalfCheetah physics chain ~2e4 (F4-port family estimate)
+    let fObs = 17, fD = 12  // HalfCheetah config (same constants fleetGPU uses)
+    let fInputW = Arena.input(fObs, fD)
+    var fR = 32
+    while fR < 2 * fInputW { fR *= 2 }
+    let fK = 32, fA = 64, fDL = max(fD / 2, 1)
+    let fRn = fR * max(
+      ProcessInfo.processInfo.environment["OAK_SUTTON_MULT"].flatMap(Int.init) ?? 1, 1)
+    let fEncode = 2 * fA + 2 * fK * fA + fK * fA + 3 * fK * fA + 6 * fA
+    let fPlan = 4 * fK * fA + fK * fDL
+    let fLearn = fK * fA * fDL + 4 * fK * fA + 2 * fA
+    let fEmit = fK * fA * fDL + fD * fK
+    let fDyna = 14 * fA * 32 + 4 * fK * fA + 2 * fK * 32
+    let fWindow = fA * fK + fDL * fK + fDL * fA + fRn / 2 + fR
+    let fMisc = 4_000, fEnv = 20_000
     let flopsPerLaneStep =
-      2 * mR * mR * mR + 2 * mLearnTotal + mR * 12 * mR + 4 * mR * mR + 6 * mR * mR + 20_000
+      2 * (fEncode + fPlan + fLearn + fEmit + fDyna + fWindow + fMisc) + fEnv
     try JSONSerialization.data(
       withJSONObject: [
         "fleetSchemaVersion": 1, "command": "benchmark", "envId": envId,
