@@ -57,7 +57,7 @@ struct LaneSnapshot {
   var deathRewardSum, deathRho: Float
   var info0, info1, info2, info3: SnapInfo
 }
-let fleetLaneStride = 384
+let fleetLaneStride = 400
 
 struct AblationSpec {
   static let ordered = [
@@ -107,6 +107,7 @@ func requireFreshMetallib() throws -> URL {
     "Sources/OakPhysics.metal",
     "Sources/HalfCheetahModel.metal",
     "Sources/Gridworld.metal",
+    "Sources/ClassicControl.metal",
   ].map(root)
   let fm = FileManager.default
   let libTime = try fm.attributesOfItem(atPath: lib.path)[.modificationDate] as? Date
@@ -441,8 +442,14 @@ func metricsRoot() -> URL {
     case "HalfCheetah-v4": return 0
     case "FourRooms-cont-v0": return 1
     case "DeepSea-cont-v0": return 2
+    case "KeyCorridor-cont-v0": return 3
+    case "Acrobot-cont-v0": return 4
+    case "MountainCar-cont-v0": return 5
+    case "CartPole-cont-v0": return 6
+    case "Pendulum-cont-v0": return 7
+    case "Chain-cont-v0": return 8
     default:
-      throw err("Unknown env '\(envId)'. Known: HalfCheetah-v4, FourRooms-cont-v0, DeepSea-cont-v0.")
+      throw err("Unknown env '\(envId)'. Known: HalfCheetah-v4, FourRooms-cont-v0, DeepSea-cont-v0, KeyCorridor-cont-v0, Acrobot-cont-v0, MountainCar-cont-v0, CartPole-cont-v0, Pendulum-cont-v0, Chain-cont-v0.")
     }
   }
   static func fleetGPU(
@@ -503,13 +510,15 @@ func metricsRoot() -> URL {
     }
     let megaPipe = try dev.makeComputePipelineState(
       function: lib.makeFunction(name: "oak_megastep", constantValues: megaConstants))
-    // Per-lane tg caches are OAK_ACT = 64 floats wide (cont/prev/curr).
-    let megaSlotBytes = 64 * megaG * MemoryLayout<Float>.stride
+    // tg diet: only the K-wide continuation vector lives in threadgroup
+    // memory (K = 32, Engine's hardcoded option count); prev/curr active
+    // rows are gathered from device state at the point of use.
+    let megaSlotBytes = 32 * megaG * MemoryLayout<Float>.stride
     guard megaG >= 1, megaW <= megaPipe.maxTotalThreadsPerThreadgroup,
-      3 * megaSlotBytes <= dev.maxThreadgroupMemoryLength
+      megaSlotBytes <= dev.maxThreadgroupMemoryLength
     else {
       throw err(
-        "OAK_MEGA_LANES_PER_TG=\(megaG) needs \(megaW) threads/threadgroup (pipeline max \(megaPipe.maxTotalThreadsPerThreadgroup)) and \(3 * megaSlotBytes) tg bytes (device max \(dev.maxThreadgroupMemoryLength)).")
+        "OAK_MEGA_LANES_PER_TG=\(megaG) needs \(megaW) threads/threadgroup (pipeline max \(megaPipe.maxTotalThreadsPerThreadgroup)) and \(megaSlotBytes) tg bytes (device max \(dev.maxThreadgroupMemoryLength)).")
     }
     func makeBuf(_ len: Int) throws -> MTLBuffer {
       guard let b = dev.makeBuffer(
@@ -629,7 +638,7 @@ func metricsRoot() -> URL {
       enc.setBuffer(recordBuf, offset: 0, index: 10)
       var n32 = UInt32(n)
       enc.setBytes(&n32, length: 4, index: 11)
-      for m in 0..<3 { enc.setThreadgroupMemoryLength(megaTGBytes, index: m) }
+      enc.setThreadgroupMemoryLength(megaTGBytes, index: 0)
       enc.dispatchThreadgroups(
         MTLSize(width: (B + megaG - 1) / megaG, height: 1, depth: 1),
         threadsPerThreadgroup: mtlSize(megaW))
@@ -727,6 +736,18 @@ func metricsRoot() -> URL {
         infoNames = ["info:goal", "info:x", "info:y", "info:since_goal"]
       case "DeepSea-cont-v0":
         infoNames = ["info:reward", "info:row", "info:col", "info:last_action"]
+      case "KeyCorridor-cont-v0":
+        infoNames = ["info:goal", "info:x", "info:y", "info:since_goal"]
+      case "Chain-cont-v0":
+        infoNames = ["info:reward", "info:pos", "info:done", "info:unused"]
+      case "Acrobot-cont-v0":
+        infoNames = ["info:reward", "info:theta1", "info:theta2", "info:height"]
+      case "MountainCar-cont-v0":
+        infoNames = ["info:reward", "info:pos", "info:vel", "info:done"]
+      case "CartPole-cont-v0":
+        infoNames = ["info:reward", "info:x", "info:theta", "info:done"]
+      case "Pendulum-cont-v0":
+        infoNames = ["info:reward", "info:theta", "info:theta_dot", "info:torque"]
       default:
         infoNames = ["info:reward_run", "info:reward_ctrl", "info:x_position", "info:x_velocity"]
       }
@@ -1056,9 +1077,13 @@ func metricsRoot() -> URL {
         Int(raw.load(fromByteOffset: 8, as: UInt32.self))
       )
     }
-    guard n > 0, (wi == 8 && wo == 24) || (wi == 6 && wo == 21) else {
+    let isGrid = (wi == 8 && wo == 24) || (wi == 6 && wo == 21) || (wi == 11 && wo == 28)
+      || (wi == 2 && wo == 20)
+    let isClassic = (wi == 3 && wo == 4) || (wi == 5 && wo == 6) || (wi == 7 && wo == 6)
+      || (wi == 4 && wo == 4)
+    guard n > 0, isGrid || isClassic else {
       throw err(
-        "Bad case header: n=\(n) in=\(wi) out=\(wo) (expected FourRooms 8/24 or DeepSea 6/21).")
+        "Bad case header: n=\(n) in=\(wi) out=\(wo) (expected FourRooms 8/24, DeepSea 6/21, KeyCorridor 11/28, Chain 2/20, MountainCar 3/4, Acrobot 5/6, CartPole 7/6, or Pendulum 4/4).")
     }
     guard data.count == 12 + n * wi * 4 + n * wo * 4 else {
       throw err("Case file size mismatch: \(data.count) bytes for n=\(n) in=\(wi) out=\(wo).")
@@ -1067,8 +1092,9 @@ func metricsRoot() -> URL {
       throw err("Metal unavailable.")
     }
     let lib = try dev.makeLibrary(URL: requireFreshMetallib())
-    guard let fn = lib.makeFunction(name: "oak_gridworld_probe") else {
-      throw err("Missing oak_gridworld_probe kernel.")
+    let probeName = isGrid ? "oak_gridworld_probe" : "oak_classic_probe"
+    guard let fn = lib.makeFunction(name: probeName) else {
+      throw err("Missing \(probeName) kernel.")
     }
     let pipe = try dev.makeComputePipelineState(function: fn)
     guard let inBuf = dev.makeBuffer(length: n * wi * 4, options: [.storageModeShared]),
@@ -1251,7 +1277,7 @@ func metricsRoot() -> URL {
     // FourRooms/DeepSea lanes riding free on the GPU's spare capacity.
     // OAK_BENCH_ENVS overrides the schedule; OAK_BENCH_ENV single-env is a
     // hard error (no opt-out of multi-env science).
-    let defaultSchedule = "HalfCheetah-v4:1024,FourRooms-cont-v0:256,DeepSea-cont-v0:128"
+    let defaultSchedule = "HalfCheetah-v4:1024,KeyCorridor-cont-v0:128,FourRooms-cont-v0:64,DeepSea-cont-v0:64,Acrobot-cont-v0:64,MountainCar-cont-v0:64"
     var raw = env["OAK_BENCH_ENVS"] ?? defaultSchedule
     if raw.trimmingCharacters(in: .whitespaces).isEmpty { raw = defaultSchedule }
     if env["OAK_BENCH_ENV"] != nil {
@@ -1318,6 +1344,11 @@ func metricsRoot() -> URL {
     //   window  utility AK | consensus DL*K dir + DL*A apply | nursery Rn/2 | eligScr R
     //   misc    serial scalar/keyboard/curation/stats loops ~4e3
     //   env     fp32 HalfCheetah physics chain ~2e4 (F4-port family estimate)
+    // Ablation-aware: each term is counted only when the corresponding
+    // function-constant-guarded loop actually compiles in. Unguarded loops
+    // (value/psi/hDot dots, norms) run — and are counted — under every
+    // ablation. Canonical case: OAK_ABLATE=planning removes all of dyna
+    // (oak_dyna_backups early-returns and the dynaAcc apply compiles out).
     let fObs = 17, fD = 12  // HalfCheetah config (same constants fleetGPU uses)
     let fInputW = Arena.input(fObs, fD)
     var fR = 32
@@ -1325,12 +1356,24 @@ func metricsRoot() -> URL {
     let fK = 32, fA = 64, fDL = max(fD / 2, 1)
     let fRn = fR * max(
       ProcessInfo.processInfo.environment["OAK_SUTTON_MULT"].flatMap(Int.init) ?? 1, 1)
-    let fEncode = 2 * fA + 2 * fK * fA + fK * fA + 3 * fK * fA + 6 * fA
-    let fPlan = 4 * fK * fA + fK * fDL
-    let fLearn = fK * fA * fDL + 4 * fK * fA + 2 * fA
-    let fEmit = fK * fA * fDL + fD * fK
-    let fDyna = 14 * fA * 32 + 4 * fK * fA + 2 * fK * 32
-    let fWindow = fA * fK + fDL * fK + fDL * fA + fRn / 2 + fR
+    let ablated = Set(ablations.names)
+    var fEncode = 2 * fA + 2 * fK * fA + fK * fA + 6 * fA
+    if !ablated.contains("option-models") { fEncode += 3 * fK * fA }
+    var fPlan = fK * fDL
+    if !ablated.contains("option-models") { fPlan += 4 * fK * fA }
+    var fLearn = 0
+    if !ablated.contains("option-policies") { fLearn += fK * fA * fDL }
+    if !ablated.contains("rr-subtasks") { fLearn += 2 * fK * fA }
+    if !ablated.contains("option-models") { fLearn += 2 * fK * fA }
+    if !ablated.contains("gvf-prediction") { fLearn += 2 * fA }
+    var fEmit = fD * fK
+    if !ablated.contains("option-policies") { fEmit += fK * fA * fDL }
+    let fDyna = ablated.contains("planning") ? 0 : 14 * fA * 32 + 4 * fK * fA + 2 * fK * 32
+    var fWindow = fA * fK
+    if !ablated.contains("option-policies"), !ablated.contains("generate-and-test") {
+      fWindow += fDL * fK + fDL * fA
+    }
+    if !ablated.contains("generate-and-test") { fWindow += fRn / 2 + fR }
     let fMisc = 4_000
     // Env-window flops are env-conditional per lane's env: the fp32
     // HalfCheetah physics chain ~2e4 (F4-port family estimate); the integer
@@ -1339,6 +1382,8 @@ func metricsRoot() -> URL {
       2 * (fEncode + fPlan + fLearn + fEmit + fDyna + fWindow + fMisc)
     let envFlops: [String: Int] = [
       "HalfCheetah-v4": 20_000, "FourRooms-cont-v0": 40, "DeepSea-cont-v0": 20,
+      "KeyCorridor-cont-v0": 60, "Acrobot-cont-v0": 200, "MountainCar-cont-v0": 40,
+      "CartPole-cont-v0": 60, "Pendulum-cont-v0": 50, "Chain-cont-v0": 10,
     ]
     let flopsPerLaneStep = agentFlops + (envFlops[envId] ?? 20_000)
     var runMeta: [String: Any] = [

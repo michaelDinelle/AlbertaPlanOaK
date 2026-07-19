@@ -93,15 +93,34 @@ for rt in roots:
             f"  Compare only at steps present in ALL roots.")
     env_agg, meta = agg_rows(rt, step)
     data.append((env_agg, meta))
-# envSchedule comparability (mixed-env fleets): schedules must match exactly.
+# envSchedule comparability (mixed-env fleets): schedules must match exactly,
+# EXCEPT when one root is single-env (null schedule) and the other is mixed —
+# then we render only the single env they share (the overlapping slice).
 scheds = [json.dumps(m.get('envSchedule'), sort_keys=True) for _, m in data]
 if len(set(scheds)) > 1:
-    raise SystemExit(
-        "TABLE ERROR: envSchedule differs across roots — mixed-env fleets are not "
-        "apples-to-apples; refusing to render.\n  " + "\n  ".join(scheds))
+    null_sched = [i for i, s in enumerate(scheds) if s == 'null']
+    if len(null_sched) == len(scheds) - 1:
+        # One mixed root, rest single-env: restrict to the shared env.
+        shared = set()
+        for env_agg, _ in data:
+            shared |= set(env_agg.keys())
+        common = [e for e in shared if all(e in env_agg for env_agg, _ in data)]
+        if not common:
+            raise SystemExit(
+                "TABLE ERROR: mixed-vs-single roots share no env — refusing to render.")
+        # Filter all roots to the shared env(s).
+        data = [({e: agg[e] for e in common if e in agg}, m) for agg, m in data]
+    else:
+        raise SystemExit(
+            "TABLE ERROR: envSchedule differs across roots — mixed-env fleets are not "
+            "apples-to-apples; refusing to render.\n  " + "\n  ".join(scheds))
 # WHITELIST comparability gate (user law 2026-07-05).
-ALLOWED_DIFF = {'startedAt', 'ablation', 'ablationLabel', 'steps', 'flopsPerLaneStep'}
 metas = [m for _, m in data]
+ALLOWED_DIFF = {'startedAt', 'ablation', 'ablationLabel', 'steps', 'flopsPerLaneStep'}
+# Mixed-vs-single: batch/seeds/envSchedule differ by construction (the mixed
+# root has more lanes on other envs); the shared-env slice is apples-to-apples.
+if len(set(json.dumps(m.get('envSchedule'), sort_keys=True) for m in metas)) > 1:
+    ALLOWED_DIFF |= {'batch', 'seeds', 'envSchedule'}
 allkeys = set().union(*(m.keys() for m in metas))
 mismatches = []
 for kf in sorted(allkeys - ALLOWED_DIFF):

@@ -1,13 +1,15 @@
 #!/usr/bin/env python3
 """CPU reference for the continuing Metal gridworlds — the certification contract.
 
-Envs: FourRooms-cont-v0, DeepSea-cont-v0. Both are CONTINUING (no done, no reset:
-goal/treasure respawns inside the stream), deterministic given the per-lane Philox
-chain, and defined so the Metal port (Sources/Gridworld.metal) can match BITWISE.
+Envs: FourRooms-cont-v0, DeepSea-cont-v0, KeyCorridor-cont-v0, Chain-cont-v0.
+All are CONTINUING (no done, no reset: goal/treasure/key respawns inside the
+stream), deterministic given the per-lane Philox chain, and defined so the
+Metal port (Sources/Gridworld.metal) can match BITWISE.
 
 Universal I/O contract (agent kernel is env-blind, Inv-1): every env emits
 OBS_W=17 float32 observation channels and consumes the first N of POLICY_W=12
-policy coordinates as categorical logits (N=4 FourRooms, N=2 DeepSea).
+policy coordinates as categorical logits (N=4 FourRooms/KeyCorridor, N=2
+DeepSea/Chain).
 
 Bitwise rules both sides obey:
 - state is integer (uint8/uint32); obs channels are computed as float32(int) OP
@@ -23,6 +25,12 @@ Case format (all little-endian float32; ints transported as exact float32 values
   FourRooms out: [reward, nx, ny, ngx, ngy, nSinceGoal, nRespawnIdx, obs*17] (24)
   DeepSea in   : [maskLo, maskHi, r, c, lastA, action]                        (6)
   DeepSea out  : [reward, nr, nc, nLastA, obs*17]                            (21)
+  KeyCorr in   : [laneSeed, respawnIdx, x, y, kx, ky, gx, gy, flags,
+                  sinceGoal, action]                                         (11)
+  KeyCorr out  : [reward, nx, ny, nkx, nky, ngx, ngy, nflags, nSinceGoal,
+                  nRespawnIdx, done, obs*17]                                 (28)
+  Chain in     : [pos, action]                                                (2)
+  Chain out    : [reward, npos, done, obs*17]                                (20)
 Mask words are transported as their uint32 bit pattern reinterpreted as float32.
 
 CLI:
@@ -166,6 +174,98 @@ def deepsea_step(mask_lo, mask_hi, r, c, last_a, action):
         nr, nc = 0, 0
     return reward, nr, nc, n_last, deepsea_obs(nr, nc, n_last)
 
+# ---------------------------------------------------------------- KeyCorridor
+# 9x7 (x 0..8, y 0..6), border walls; interior wall x=4 except the door cell
+# (4,3). Left room x 1..3, right room x 5..7, y 1..5 (15 cells each). Key in
+# the left room, goal in the right room. Auto-pickup on co-location with the
+# key; the locked door cell opens on entry iff the key is carried (else
+# blocked). Goal entry: +1, done=1, DeepSea-pattern respawn — agent+key
+# redrawn in the left room, goal redrawn in the right room, door re-locked
+# (Philox stream 3, ctr=(respawnIdx,0,0,0); words x=agent, y=key, z=goal;
+# cell idx = trunc(u01(word)*15), room cell (1 or 5) + idx%3, 1 + idx//3).
+KC_NCELL = 15
+KC_LEFT = [(1 + i % 3, 1 + i // 3) for i in range(KC_NCELL)]
+KC_RIGHT = [(5 + i % 3, 1 + i // 3) for i in range(KC_NCELL)]
+KC_FREE = KC_LEFT + [(4, 3)] + KC_RIGHT
+
+def kc_is_wall(x: int, y: int) -> bool:
+    if x <= 0 or x >= 8 or y <= 0 or y >= 6:
+        return True
+    if x == 4 and y != 3:
+        return True
+    return False
+
+def kc_reset() -> tuple:
+    # (x, y, kx, ky, gx, gy, flags, sinceGoal, respawnIdx) — deterministic,
+    # matches fleet init. flags bit0 hasKey, bit1 doorOpen.
+    return (1, 1, 3, 5, 7, 1, 0, 0, 0)
+
+def kc_obs(x, y, kx, ky, gx, gy, flags, since_goal):
+    has_key = (flags & 1) != 0
+    o = np.zeros(OBS_W, dtype=F32)
+    o[0] = F32(x) / F32(8.0); o[1] = F32(y) / F32(6.0)
+    o[2] = F32(has_key); o[3] = F32((flags & 2) != 0); o[4] = F32(not has_key)
+    o[5] = F32(0.0) if has_key else F32(kx - x) / F32(8.0)
+    o[6] = F32(0.0) if has_key else F32(ky - y) / F32(6.0)
+    o[7] = F32(4 - x) / F32(8.0); o[8] = F32(3 - y) / F32(6.0)
+    o[9] = F32(gx - x) / F32(8.0); o[10] = F32(gy - y) / F32(6.0)
+    o[11] = F32(x == 4 and y == 3)
+    o[12] = min(F32(since_goal) / F32(256.0), F32(1.0))
+    o[13] = F32(1.0)
+    return o
+
+def kc_step(lane_seed, respawn_idx, x, y, kx, ky, gx, gy, flags, since_goal, action):
+    """One step. Returns (reward, nx, ny, nkx, nky, ngx, ngy, nflags,
+    nSinceGoal, nRespawnIdx, done, obs). action: 0=up 1=down 2=left 3=right.
+    Wall bump = stay, reward 0. Locked door without key = stay; with key it
+    opens (flags |= 2) and the agent enters. Key pickup on co-location."""
+    dx, dy = ((0, -1), (0, 1), (-1, 0), (1, 0))[action & 3]
+    nx, ny = x + dx, y + dy
+    if kc_is_wall(nx, ny):
+        nx, ny = x, y
+    elif nx == 4 and ny == 3 and not (flags & 2):
+        if flags & 1:
+            flags |= 2
+        else:
+            nx, ny = x, y
+    if not (flags & 1) and (nx, ny) == (kx, ky):
+        flags |= 1
+    reward, done, n_since, n_ri = F32(0.0), 0, since_goal + 1, respawn_idx
+    if (nx, ny) == (gx, gy):
+        reward, done, n_since, n_ri = F32(1.0), 1, 0, respawn_idx + 1
+        raw = _philox4x32_10(lane_seed, STREAM_GW, [respawn_idx, 0, 0, 0])
+        ai = int(_u01(raw[0]) * F32(KC_NCELL))
+        ki = int(_u01(raw[1]) * F32(KC_NCELL))
+        gi = int(_u01(raw[2]) * F32(KC_NCELL))
+        nx, ny = KC_LEFT[ai]
+        kx, ky = KC_LEFT[ki]
+        gx, gy = KC_RIGHT[gi]
+        flags = 0
+    return (reward, nx, ny, kx, ky, gx, gy, flags, n_since, n_ri, done,
+            kc_obs(nx, ny, kx, ky, gx, gy, flags, n_since))
+
+# ---------------------------------------------------------------- Chain
+# bsuite-style chain, L=16: pos 0..15. action 1 moves pos+1, action 0 moves
+# pos-1 (clamp 0). Delayed +1 at the chain end (pos 15), wrap to 0, done=1.
+CHAIN_L = 16
+
+def chain_obs(pos):
+    o = np.zeros(OBS_W, dtype=F32)
+    o[0] = F32(pos) / F32(16.0)
+    o[1] = F32(1.0)
+    return o
+
+def chain_step(pos, action):
+    """One step. Returns (reward, npos, done, obs)."""
+    reward, done = F32(0.0), 0
+    if action & 1:
+        pos += 1
+        if pos >= CHAIN_L - 1:
+            reward, pos, done = F32(1.0), 0, 1
+    else:
+        pos = max(pos - 1, 0)
+    return reward, pos, done, chain_obs(pos)
+
 # ---------------------------------------------------------------- case I/O
 def _u32f(x: int) -> F32:
     return np.array([x & 0xFFFFFFFF], dtype=np.uint32).view(F32)[0]
@@ -189,13 +289,51 @@ def gen_cases(env: str, n: int, seed: int):
             ins.append([F32(ls), F32(ri), F32(x), F32(y), F32(gx), F32(gy), F32(sg), F32(a)])
             r, nx, ny, ngx, ngy, nsg, nri, obs = four_step(ls, ri, x, y, gx, gy, sg, a)
             outs.append(np.concatenate([[r, F32(nx), F32(ny), F32(ngx), F32(ngy), F32(nsg), F32(nri)], obs]))
-        else:
+        elif env == "DeepSea-cont-v0":
             ml, mh = int(rng.integers(0, 2**32)), int(rng.integers(0, 2**32))
             r_, c_ = int(rng.integers(0, 8)), int(rng.integers(0, 8))
             la, a = int(rng.integers(0, 2)), int(rng.integers(0, 2))
             ins.append([_u32f(ml), _u32f(mh), F32(r_), F32(c_), F32(la), F32(a)])
             rw, nr, nc, nla, obs = deepsea_step(ml, mh, r_, c_, la, a)
             outs.append(np.concatenate([[rw, F32(nr), F32(nc), F32(nla)], obs]))
+        elif env == "KeyCorridor-cont-v0":
+            ls = int(F32(int(rng.integers(0, 2**31))))
+            ri = int(rng.integers(0, 64))
+            x, y = KC_FREE[int(rng.integers(0, len(KC_FREE)))]
+            kx, ky = KC_LEFT[int(rng.integers(0, KC_NCELL))]
+            gx, gy = KC_RIGHT[int(rng.integers(0, KC_NCELL))]
+            flags = int(rng.integers(0, 4))
+            sg = int(rng.integers(0, 1024))
+            a = int(rng.integers(0, 4))
+            u = rng.random()
+            if u < 0.25:
+                # force the completion/respawn path: step from a free neighbor
+                # cell straight into the goal
+                cands = []
+                for ddx, ddy, aa in ((1, 0, 2), (-1, 0, 3), (0, 1, 0), (0, -1, 1)):
+                    cx, cy = gx + ddx, gy + ddy
+                    if not kc_is_wall(cx, cy) and not (cx == 4 and cy == 3):
+                        cands.append((cx, cy, aa))
+                if cands:
+                    x, y, a = cands[int(rng.integers(0, len(cands)))]
+            elif u < 0.5:
+                # force the door path: step into the door cell with random flags
+                x, y, a = (3, 3, 3) if rng.random() < 0.5 else (5, 3, 2)
+            ins.append([F32(ls), F32(ri), F32(x), F32(y), F32(kx), F32(ky),
+                        F32(gx), F32(gy), F32(flags), F32(sg), F32(a)])
+            (r, nx, ny, nkx, nky, ngx, ngy, nfl, nsg, nri, dn, obs) = kc_step(
+                ls, ri, x, y, kx, ky, gx, gy, flags, sg, a)
+            outs.append(np.concatenate([
+                [r, F32(nx), F32(ny), F32(nkx), F32(nky), F32(ngx), F32(ngy),
+                 F32(nfl), F32(nsg), F32(nri), F32(dn)], obs]))
+        else:  # Chain-cont-v0
+            pos = int(rng.integers(0, CHAIN_L))
+            a = int(rng.integers(0, 2))
+            if rng.random() < 0.25:
+                pos, a = CHAIN_L - 2, 1   # force the chain-end wrap path
+            ins.append([F32(pos), F32(a)])
+            r, npos, dn, obs = chain_step(pos, a)
+            outs.append(np.concatenate([[r, F32(npos), F32(dn)], obs]))
     return (np.array(ins, dtype=F32), np.array(outs, dtype=F32))
 
 def ascii_map(env: str) -> str:
@@ -204,11 +342,22 @@ def ascii_map(env: str) -> str:
         for y in range(FOUR_H):
             rows.append("".join("#" if four_is_wall(x, y) else "." for x in range(FOUR_W)))
         return "\n".join(rows)
+    if env == "KeyCorridor-cont-v0":
+        rows = []
+        for y in range(7):
+            rows.append("".join(
+                "D" if (x, y) == (4, 3) else ("#" if kc_is_wall(x, y) else ".")
+                for x in range(9)))
+        return "\n".join(rows)
+    if env == "Chain-cont-v0":
+        return f"Chain L={CHAIN_L}: pos 0..{CHAIN_L - 1}, +1 at pos {CHAIN_L - 1}, wrap to 0"
     return f"DeepSea {DEEPSEA_N}x{DEEPSEA_N}: mask-dependent columns; treasure at (7,7)"
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("--env", choices=["FourRooms-cont-v0", "DeepSea-cont-v0"], default="FourRooms-cont-v0")
+    ap.add_argument("--env", choices=["FourRooms-cont-v0", "DeepSea-cont-v0",
+                                      "KeyCorridor-cont-v0", "Chain-cont-v0"],
+                    default="FourRooms-cont-v0")
     ap.add_argument("--emit-cases", metavar="OUT")
     ap.add_argument("--expect", metavar="CASES")
     ap.add_argument("--compare", nargs=2, metavar=("CASES", "GPU"))
@@ -226,12 +375,14 @@ def main():
             print("philox mirror: MATCHES physics_parity")
         except ImportError:
             print("philox mirror: physics_parity not importable (mujoco absent); local copy in force")
-        for env in ("FourRooms-cont-v0", "DeepSea-cont-v0"):
+        for env in ("FourRooms-cont-v0", "DeepSea-cont-v0", "KeyCorridor-cont-v0",
+                    "Chain-cont-v0"):
             a_i, a_o = gen_cases(env, 64, 999)
             b_i, b_o = gen_cases(env, 64, 999)
             assert np.array_equal(a_o, b_o) and np.array_equal(a_i, b_i)
             print(f"{env}: determinism OK (64 cases)")
         print(ascii_map("FourRooms-cont-v0"))
+        print(ascii_map("KeyCorridor-cont-v0"))
         return 0
     if args.map:
         print(ascii_map(args.env)); return 0

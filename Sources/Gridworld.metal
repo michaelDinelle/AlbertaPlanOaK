@@ -29,10 +29,36 @@ using namespace metal;
 // obs-formula divisions correctly rounded even if the include order moves.
 #pragma METAL fp math_mode(safe)
 
-constant uint OAK_ENV_CHEETAH   = 0u;
-constant uint OAK_ENV_FOURROOMS = 1u;
-constant uint OAK_ENV_DEEPSEA   = 2u;
-constant uint OAK_GW_STREAM     = 3u;  // philox stream: gridworld events
+constant uint OAK_ENV_CHEETAH     = 0u;
+constant uint OAK_ENV_FOURROOMS   = 1u;
+constant uint OAK_ENV_DEEPSEA     = 2u;
+constant uint OAK_ENV_KEYCORRIDOR = 3u;
+constant uint OAK_ENV_ACROBOT     = 4u;
+constant uint OAK_ENV_MOUNTAINCAR = 5u;
+constant uint OAK_ENV_CARTPOLE    = 6u;
+constant uint OAK_ENV_PENDULUM    = 7u;
+constant uint OAK_ENV_CHAIN       = 8u;
+constant uint OAK_ENV_COUNT       = 9u;
+constant uint OAK_GW_STREAM       = 3u;  // philox stream: gridworld events
+
+// Phase-3 multi-shape contract: envKind -> natural obs width, action kind
+// (0=Box, 1=Discrete), natural action count. The AGENT never reads this
+// (Inv-1); only the four sanctioned sites do (fleet init, sample stage, env
+// window, record path). Every env writes its natural obs channels and
+// zero-pads to OBS_W=17; discrete envs consume the first actionCount policy
+// coords as Gumbel-max logits, Box envs the first actionCount as means.
+struct OakEnvSpec { uint obsDimNatural; uint actionKind; uint actionCount; };
+constant OakEnvSpec OAK_ENV_SPECS[OAK_ENV_COUNT] = {
+    { 17u, 0u, 6u },  // OAK_ENV_CHEETAH: Box 6 (6 means + 6 reserved coords)
+    { 17u, 1u, 4u },  // OAK_ENV_FOURROOMS
+    {  8u, 1u, 2u },  // OAK_ENV_DEEPSEA
+    { 14u, 1u, 4u },  // OAK_ENV_KEYCORRIDOR
+    {  7u, 1u, 3u },  // OAK_ENV_ACROBOT
+    {  3u, 1u, 3u },  // OAK_ENV_MOUNTAINCAR
+    {  5u, 1u, 2u },  // OAK_ENV_CARTPOLE
+    {  4u, 0u, 1u },  // OAK_ENV_PENDULUM: Box 1
+    {  2u, 1u, 2u },  // OAK_ENV_CHAIN
+};
 
 // ---------------------------------------------------------------- FourRooms
 // 11x11, border walls; vertical wall col x=5 except hallways y in {2,8};
@@ -56,7 +82,7 @@ constant uchar GW_FREE_Y[68] = {
     3, 3, 3, 3, 3, 3, 3, 3, 4, 4, 4, 4, 4, 4, 4, 4,
     5, 5,
     6, 6, 6, 6, 6, 6, 6, 6, 7, 7, 7, 7, 7, 7, 7, 7,
-    8, 8, 8, 8, 8, 8, 8, 8, 9, 9, 9, 9, 9, 9, 9, 9 };
+    8, 8, 8, 8, 8, 8, 8, 8, 8, 9, 9, 9, 9, 9, 9, 9, 9 };
 
 inline int gw_four_room(int x, int y) {  // 0=TL 1=TR 2=BL 3=BR ; -1 hallway
     if (x < 5 && y < 5) return 0;
@@ -181,11 +207,117 @@ inline float gw_deep_step(thread uint *gw, uint action, thread float *o) {
     return reward;
 }
 
+// ------------------------------------------------------------ KeyCorridor
+// 9x7 (x 0..8, y 0..6), border walls; interior wall x=4 except the door cell
+// (4,3). Left room x 1..3, right room x 5..7, y 1..5 (15 cells each). Key
+// spawns in the left room, goal in the right room. Auto-pickup when the
+// agent is co-located with the key; entering the locked door cell opens it
+// iff the key is carried (locked + no key = blocked, stay). Goal entry:
+// reward +1, done=1, and the DeepSea-pattern respawn — agent + key redrawn
+// in the left room, goal redrawn in the right room, door re-locked (Philox
+// stream 3, ctr=(respawnIdx,0,0,0); words x=agent cell, y=key cell,
+// z=goal cell; cell idx = trunc(u01(word)*15), room cell (1 or 5) + idx%3,
+// 1 + idx/3). CONTINUING: no reset, the stream never breaks.
+// Lane state in gw[10]: 0=x, 1=y, 2=kx, 3=ky, 4=gx, 5=gy,
+// 6=flags (bit0 hasKey, bit1 doorOpen), 7=sinceGoal, 8=respawnIdx.
+inline bool gw_kc_is_wall(int x, int y) {
+    if (x <= 0 || x >= 8 || y <= 0 || y >= 6) return true;
+    if (x == 4 && y != 3) return true;
+    return false;
+}
+
+inline void gw_kc_obs(uint x, uint y, uint kx, uint ky, uint gx, uint gy,
+                      uint flags, uint sg, thread float *o) {
+    bool hasKey = (flags & 1u) != 0u;
+    o[0] = float(x) / 8.0f;
+    o[1] = float(y) / 6.0f;
+    o[2] = hasKey ? 1.0f : 0.0f;
+    o[3] = ((flags & 2u) != 0u) ? 1.0f : 0.0f;
+    o[4] = hasKey ? 0.0f : 1.0f;
+    o[5] = hasKey ? 0.0f : float(int(kx) - int(x)) / 8.0f;
+    o[6] = hasKey ? 0.0f : float(int(ky) - int(y)) / 6.0f;
+    o[7] = float(4 - int(x)) / 8.0f;
+    o[8] = float(3 - int(y)) / 6.0f;
+    o[9] = float(int(gx) - int(x)) / 8.0f;
+    o[10] = float(int(gy) - int(y)) / 6.0f;
+    o[11] = (x == 4u && y == 3u) ? 1.0f : 0.0f;
+    o[12] = min(float(sg) / 256.0f, 1.0f);
+    o[13] = 1.0f;
+    for (int i = 14; i < 17; i++) o[i] = 0.0f;
+}
+
+// action: 0=up 1=down 2=left 3=right (same convention as FourRooms).
+// Returns reward; obs written for the NEW state; *doneOut = 1 on completion.
+inline float gw_kc_step(thread uint *gw, uint laneSeed, uint action,
+                        thread float *obs, thread uint *doneOut) {
+    uint x = gw[0], y = gw[1], kx = gw[2], ky = gw[3], gx = gw[4], gy = gw[5];
+    uint flags = gw[6], sg = gw[7], ri = gw[8];
+    int dx = 0, dy = 0;
+    switch (action & 3u) {
+        case 0u: dy = -1; break;
+        case 1u: dy = 1; break;
+        case 2u: dx = -1; break;
+        default: dx = 1; break;
+    }
+    int nx = int(x) + dx, ny = int(y) + dy;
+    if (gw_kc_is_wall(nx, ny)) { nx = int(x); ny = int(y); }
+    else if (nx == 4 && ny == 3 && (flags & 2u) == 0u) {
+        if ((flags & 1u) != 0u) flags |= 2u;       // unlock and enter
+        else { nx = int(x); ny = int(y); }          // locked: blocked
+    }
+    if ((flags & 1u) == 0u && uint(nx) == kx && uint(ny) == ky) flags |= 1u;
+    float reward = 0.0f;
+    uint done = 0u, nsg = sg + 1u, nri = ri;
+    if (uint(nx) == gx && uint(ny) == gy) {
+        reward = 1.0f;
+        done = 1u;
+        nsg = 0u;
+        nri = ri + 1u;
+        uint4 raw = hc_philox4x32(uint2(laneSeed, OAK_GW_STREAM),
+                                  uint4(ri, 0u, 0u, 0u));
+        uint ai = uint(hc_u01(raw.x) * 15.0f);
+        uint ki = uint(hc_u01(raw.y) * 15.0f);
+        uint gi = uint(hc_u01(raw.z) * 15.0f);
+        nx = int(1u + ai % 3u); ny = int(1u + ai / 3u);
+        kx = 1u + ki % 3u; ky = 1u + ki / 3u;
+        gx = 5u + gi % 3u; gy = 1u + gi / 3u;
+        flags = 0u;
+    }
+    gw[0] = uint(nx); gw[1] = uint(ny); gw[2] = kx; gw[3] = ky;
+    gw[4] = gx; gw[5] = gy; gw[6] = flags; gw[7] = nsg; gw[8] = nri;
+    gw_kc_obs(uint(nx), uint(ny), kx, ky, gx, gy, flags, nsg, obs);
+    *doneOut = done;
+    return reward;
+}
+
+// ------------------------------------------------------------------ Chain
+// bsuite-style chain, L=16: pos 0..15. action 1 moves pos+1, action 0 moves
+// pos-1 (clamp 0). Delayed +1 at the chain end (pos 15), wrap to 0, done=1.
+// Lane state in gw[10]: 0=pos.
+inline float gw_chain_step(thread uint *gw, uint action, thread float *obs,
+                           thread uint *doneOut) {
+    uint pos = gw[0];
+    float reward = 0.0f;
+    uint done = 0u;
+    if ((action & 1u) != 0u) {
+        pos += 1u;
+        if (pos >= 15u) { reward = 1.0f; pos = 0u; done = 1u; }
+    } else {
+        pos = (pos > 0u) ? pos - 1u : 0u;
+    }
+    gw[0] = pos;
+    obs[0] = float(pos) / 16.0f;
+    obs[1] = 1.0f;
+    for (int i = 2; i < 17; i++) obs[i] = 0.0f;
+    *doneOut = done;
+    return reward;
+}
+
 // -------------------------------------------------- case-gate probe kernel
 // Reads a gridworld_ref.py case file's in-records (buffer 0), runs each
 // through the SAME env-step functions the fleet env window uses, and writes
 // out-records (buffer 1) in the case format. hdr = {count, inW, outW};
-// inW selects the env (8=FourRooms, 6=DeepSea).
+// inW selects the env (8=FourRooms, 6=DeepSea, 11=KeyCorridor, 2=Chain).
 kernel void oak_gridworld_probe(device const float *in  [[buffer(0)]],
                                 device float *out       [[buffer(1)]],
                                 constant uint *hdr      [[buffer(2)]],
@@ -203,7 +335,7 @@ kernel void oak_gridworld_probe(device const float *in  [[buffer(0)]],
         o[0] = r;
         for (int i = 0; i < 6; i++) o[1 + i] = float(gw[i]);
         for (int i = 0; i < 17; i++) o[7 + i] = obs[i];
-    } else {
+    } else if (inW == 6u) {
         // DeepSea in: [maskLo, maskHi, r, c, lastA, action]; mask words are
         // the uint32 bit pattern reinterpreted as float32.
         uint gw[6] = { uint(p[2]), uint(p[3]), uint(p[4]),
@@ -213,6 +345,29 @@ kernel void oak_gridworld_probe(device const float *in  [[buffer(0)]],
         o[0] = r;
         for (int i = 0; i < 3; i++) o[1 + i] = float(gw[i]);
         for (int i = 0; i < 17; i++) o[4 + i] = obs[i];
+    } else if (inW == 11u) {
+        // KeyCorridor in: [laneSeed, respawnIdx, x, y, kx, ky, gx, gy, flags,
+        // sinceGoal, action] (11)
+        uint gw[10] = { uint(p[2]), uint(p[3]), uint(p[4]), uint(p[5]),
+                        uint(p[6]), uint(p[7]), uint(p[8]), uint(p[9]),
+                        uint(p[1]), 0u };
+        float obs[17];
+        uint done = 0u;
+        float r = gw_kc_step(gw, uint(p[0]), uint(p[10]), obs, &done);
+        o[0] = r;
+        for (int i = 0; i < 9; i++) o[1 + i] = float(gw[i]);
+        o[10] = float(done);
+        for (int i = 0; i < 17; i++) o[11 + i] = obs[i];
+    } else {
+        // Chain in: [pos, action] (2)
+        uint gw[10] = { uint(p[0]), 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u };
+        float obs[17];
+        uint done = 0u;
+        float r = gw_chain_step(gw, uint(p[1]), obs, &done);
+        o[0] = r;
+        o[1] = float(gw[0]);
+        o[2] = float(done);
+        for (int i = 0; i < 17; i++) o[3 + i] = obs[i];
     }
 }
 
