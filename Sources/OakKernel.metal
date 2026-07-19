@@ -1235,13 +1235,12 @@ uint birth = ctx.featureBirthCount[worst] + 1u;
         ctx.featureBirthCount[worst] = birth;
         uint newKind = ctx.nurKind[bestN] % 6u;
         if (newKind >= 4u) {
-            // RFF slot: parents are unused by the eval — hold the slot's
-            // static projection sign masks (+1 channels in A, -1 in B), the
-            // same pure function of slot index the hash form computes inline.
-            // (Fleet init never seeds kind>=4, so this is the only write site.)
+            // RFF slot: parents hold the projection sign masks — the SAME
+            // pure function of the nursery index the shadow eval used, so
+            // the promoted feature is the function the nursery validated.
             uint mp = 0u, mm = 0u;
             for (uint c = 0u; c < OAK_CORE; ++c) {
-                uint hw = worst * 2654435761u + c * 40503u;
+                uint hw = bestN * 2654435761u + c * 40503u;
                 hw ^= hw >> 16u;
                 uint sel = hw % 3u;
                 if (sel == 0u) mp |= (1u << c);
@@ -1506,10 +1505,25 @@ static inline void oak_window_analytics(Ctx ctx, uint tid) {
         for (uint n = tid + (((tPrev >> 1u) & 1u) != 0u ? tgW : 0u); n < ctx.Rn; n += 2u * tgW) {
             uint pa = ctx.nurParentA[n] % ctx.R;
             uint pb = ctx.nurParentB[n] % ctx.R;
-            uint kind = ctx.nurKind[n] % 4u;
+            uint kind = ctx.nurKind[n] % 6u;
             float raw;
             if (kind == 3u) {
                 raw = ctx.obsTraceMulti[ctx.nurParentA[n] % (ctx.traceLevels * ctx.O)];
+            } else if (kind >= 4u) {
+                // RFF candidate: evaluate with the SAME mask the commit will
+                // store (a pure function of the nursery index n), so the
+                // shadow stats match the promoted feature — the Phase-2
+                // nursery kind-validation fix.
+                float z = 0.0f;
+                for (uint c = 0u; c < OAK_CORE; ++c) {
+                    uint hw = n * 2654435761u + c * 40503u;
+                    hw ^= hw >> 16u;
+                    uint sel = hw % 3u;
+                    if (sel == 0u) z += prev[c];
+                    else if (sel == 1u) z -= prev[c];
+                }
+                z *= rsqrt(float(OAK_CORE));
+                raw = (kind == 4u) ? sin(z) : cos(z);
             } else {
                 float a = prev[pa], b = prev[pb];
                 raw = (kind == 0u) ? a * b
