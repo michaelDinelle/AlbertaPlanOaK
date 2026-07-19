@@ -1,0 +1,574 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>OaK replay — wall of cheetahs</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  :root {
+    --bg: #0b0e13; --panel: #131823; --line: #232b38;
+    --txt: #c9d4e2; --dim: #76828f; --accent: #5ec1ff; --gold: #ffd166;
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; }
+  body {
+    margin: 0; background: var(--bg); color: var(--txt);
+    font: 12px/1.45 ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+    display: flex; flex-direction: column; overflow: hidden;
+  }
+  #hdr {
+    display: flex; gap: 20px; align-items: baseline; padding: 7px 14px;
+    background: var(--panel); border-bottom: 1px solid var(--line);
+    white-space: nowrap; overflow: hidden;
+  }
+  #hdr .title { font-weight: 700; color: #fff; font-size: 13px;
+    overflow: hidden; text-overflow: ellipsis; }
+  #hdr .stat { color: var(--dim); }
+  #hdr .stat b { color: #fff; font-weight: 600; }
+  #stage { flex: 1; position: relative; min-height: 0; }
+  #view { position: absolute; inset: 0; display: block; cursor: crosshair; }
+  #fps {
+    position: absolute; top: 6px; right: 10px; padding: 2px 8px;
+    background: rgba(10, 14, 20, 0.75); border: 1px solid var(--line);
+    border-radius: 4px; color: var(--dim); pointer-events: none; z-index: 3;
+  }
+  #ftr {
+    display: flex; gap: 10px; align-items: center; padding: 6px 14px;
+    background: var(--panel); border-top: 1px solid var(--line);
+  }
+  #ftr button, #ftr select {
+    background: #1c2330; color: var(--txt); border: 1px solid var(--line);
+    border-radius: 4px; font: inherit; padding: 3px 10px; cursor: pointer;
+  }
+  #ftr button:hover, #ftr select:hover { border-color: var(--accent); }
+  #ftr button.on { border-color: var(--accent); color: var(--accent); }
+  #scrub { flex: 1; accent-color: var(--accent); min-width: 80px; }
+  #ftr .hint { color: var(--dim); white-space: nowrap; overflow: hidden;
+    text-overflow: ellipsis; }
+  #err {
+    position: fixed; inset: 0; display: none; align-items: center;
+    justify-content: center; background: var(--bg); z-index: 10; padding: 40px;
+  }
+  #err .box {
+    max-width: 640px; border: 1px solid #7a2d2d; background: #1d1214;
+    border-radius: 8px; padding: 24px 28px;
+  }
+  #err h1 { margin: 0 0 12px; font-size: 15px; color: #ff8a8a; }
+  #err .msg { color: var(--txt); white-space: pre-wrap; word-break: break-word; }
+  #err code { color: var(--accent); }
+</style>
+</head>
+<body>
+<div id="hdr">
+  <span class="title" id="hTitle">OaK replay</span>
+  <span class="stat">step <b id="hStep">0</b></span>
+  <span class="stat" id="hLanes"></span>
+  <span class="stat">median <b id="hMed">–</b></span>
+  <span class="stat">%pos <b id="hPos">–</b></span>
+  <span class="stat" id="hMode"></span>
+</div>
+<div id="stage">
+  <canvas id="view"></canvas>
+  <div id="fps">…</div>
+</div>
+<div id="ftr">
+  <button id="bPlay" title="space">⏸</button>
+  <button id="bSpeed" title="up/down or 1-5">1×</button>
+  <input id="scrub" type="range" min="0" max="0" step="1" value="0">
+  <select id="selSort" title="s">
+    <option value="seed">sort: seed</option>
+    <option value="rate">sort: rate</option>
+  </select>
+  <button id="bRace" title="r">race</button>
+  <span class="hint">space play · ←/→ step · 1-5 speed · s sort · r race · f fps · click cell = zoom · esc back</span>
+</div>
+<div id="err"><div class="box"><h1>OaK replay — cannot start</h1><div class="msg" id="errMsg"></div></div></div>
+
+<script src="data.js"></script>
+<script>
+'use strict';
+/* OaK wall-of-cheetahs replay viewer. Zero dependencies; opens from file://.
+ * Expects data.js next to this file: const META = {...}; const QPOS = "<base64>".
+ * Packed lane layout (LE): fp32 first rootx | int32 rootx deltas[F] (x xDeltaScale)
+ * | int16 rest[F][8] (x qposScale; cheetah slots 1..7 are wrapped angles,
+ * gridworld slots raw ints [y, gx, gy, 0...]). */
+
+// ---------------------------------------------------------------- errors
+function fatal(msg) {
+  const e = document.getElementById('err');
+  document.getElementById('errMsg').textContent = msg;
+  e.style.display = 'flex';
+  throw new Error(msg);
+}
+window.addEventListener('error', ev => {
+  const e = document.getElementById('err');
+  if (e.style.display !== 'flex') {
+    document.getElementById('errMsg').textContent =
+      'JS error: ' + (ev.message || ev.type);
+    e.style.display = 'flex';
+  }
+});
+
+if (typeof META === 'undefined' || typeof QPOS === 'undefined') {
+  fatal('data.js is missing or failed to load.\n\nGenerate a replay pack:\n' +
+        '  .venv/bin/python tools/replay_html.py <run-or-rollout.bin> --out <dir>\n' +
+        'then open <dir>/index.html (not the repo copy).');
+} else if (!META || META.version !== 1) {
+  fatal('data.js version ' + (META && META.version) +
+        ' is not supported by this viewer (expected 1). Re-pack with the matching tools/replay_html.py.');
+} else {
+  boot();
+}
+
+// ---------------------------------------------------------------- boot
+function boot() {
+  const $ = id => document.getElementById(id);
+  const stage = $('stage'), canvas = $('view'), ctx = canvas.getContext('2d');
+  const F = META.frames | 0, QS = META.qposScale, XS = META.xDeltaScale;
+  if (!Array.isArray(META.lanes) || META.lanes.length === 0)
+    fatal('data.js contains 0 lanes.');
+  if (!(F > 0)) fatal('data.js contains 0 frames.');
+
+  // ---- decode base64 payload ----
+  const bin = atob(QPOS);
+  const u8 = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) u8[i] = bin.charCodeAt(i);
+  const buf = u8.buffer;
+  const perLane = 4 + F * 4 + F * 8 * 2;
+  if (buf.byteLength !== perLane * META.lanes.length)
+    fatal('data.js payload size mismatch: ' + buf.byteLength + ' bytes, expected ' +
+          perLane * META.lanes.length + ' (' + META.lanes.length + ' lanes x ' + F + ' frames).');
+
+  const GRID = /^(FourRooms|DeepSea)/;
+  const dv = new DataView(buf);
+  const lanes = META.lanes.map((m, i) => {
+    const off = i * perLane;
+    const grid = GRID.test(m.envId);
+    const deltas = new Int32Array(buf, off + 4, F);
+    const rest = new Int16Array(buf, off + 4 + F * 4, F * 8);
+    const x = new Float32Array(F);
+    let prev = dv.getFloat32(off, true);
+    const scale = grid ? 1 : XS;
+    for (let f = 0; f < F; f++) { prev += deltas[f] * scale; x[f] = prev; }
+    return { seed: m.seed, envId: m.envId, rate: (m.rate === null ? null : +m.rate),
+             lane: m.lane, grid, rest, x };
+  });
+  const N = lanes.length;
+
+  // ---- population stats ----
+  const rates = lanes.map(l => l.rate).filter(r => r !== null).sort((a, b) => a - b);
+  const median = rates.length
+    ? (rates.length & 1 ? rates[(rates.length - 1) / 2]
+                        : 0.5 * (rates[rates.length / 2 - 1] + rates[rates.length / 2]))
+    : null;
+  const pctPos = rates.length ? 100 * rates.filter(r => r > 0).length / rates.length : null;
+  const envCounts = {};
+  lanes.forEach(l => { envCounts[l.envId] = (envCounts[l.envId] || 0) + 1; });
+
+  $('hTitle').textContent = META.title || 'OaK replay';
+  document.title = (META.title || 'OaK replay') + ' — wall of cheetahs';
+  $('hLanes').textContent = N + ' lanes · ' +
+    Object.entries(envCounts).map(([k, v]) => v + '×' + k).join(' + ');
+  $('hMed').textContent = median === null ? 'n/a' : median.toFixed(4) + '/step';
+  $('hPos').textContent = pctPos === null ? 'n/a' : pctPos.toFixed(1) + '%';
+  $('scrub').max = String(F - 1);
+
+  // ---- gridworld wall templates (unit-cell coords) ----
+  function fourIsWall(x, y) {
+    if (x <= 0 || x >= 10 || y <= 0 || y >= 10) return true;
+    if (x === 5 && y !== 2 && y !== 8) return true;
+    if (y === 5 && x !== 2 && x !== 8) return true;
+    return false;
+  }
+  const wallsFour = new Path2D();
+  for (let y = 0; y < 11; y++)
+    for (let x = 0; x < 11; x++)
+      if (fourIsWall(x, y)) wallsFour.rect(x, y, 1, 1);
+  const wallsDeep = new Path2D();
+  wallsDeep.rect(0, 0, 8, 8);
+  for (let i = 1; i < 8; i++) {
+    wallsDeep.moveTo(i, 0); wallsDeep.lineTo(i, 8);
+    wallsDeep.moveTo(0, i); wallsDeep.lineTo(8, i);
+  }
+
+  // ---- state ----
+  const SPEEDS = [0.25, 0.5, 1, 2, 4];
+  let speedIdx = 2, playing = true, frame = 0, mode = 'grid';
+  let singleLane = 0, showFps = true, scrubbing = false;
+  let order = lanes.map((_, i) => i);
+  let COLS = 32, ROWS = 32, W = 0, H = 0, dpr = 1;
+  const bg = document.createElement('canvas');
+  const bctx = bg.getContext('2d');
+
+  function rateColor(rate, light) {
+    if (rate === null) return 'hsl(220,18%,' + (light ? 40 : 11) + '%)';
+    const t = Math.max(-1, Math.min(1, rate));
+    let h, l;
+    if (t >= 0) { h = 40 + 95 * Math.min(1, t * 1.4); l = (light ? 55 : 13) + (light ? 0 : 9) * Math.min(1, t); }
+    else { h = 40 - 38 * Math.min(1, -t * 2.5); l = light ? 50 : 13; }
+    return 'hsl(' + h.toFixed(0) + ',' + (light ? 70 : 50) + '%,' + l.toFixed(0) + '%)';
+  }
+
+  // ---- cheetah FK: qpos -> 10 points (bt ft bs bf toeB fs ff toeF head) ----
+  // R_y(t): (x,z) -> (x cos t + z sin t, -x sin t + z cos t), angles accumulate.
+  const P = new Float32Array(18);
+  function fk(L, f) {
+    const q = L.rest, b = f * 8;
+    const q1 = q[b] * QS, q2 = q[b + 1] * QS, q3 = q[b + 2] * QS, q4 = q[b + 3] * QS,
+          q5 = q[b + 4] * QS, q6 = q[b + 5] * QS, q7 = q[b + 6] * QS, q8 = q[b + 7] * QS;
+    const x = L.x[f], o1z = 0.7 + q1;
+    const t1 = q2, tbt = t1 + q3, tbs = tbt + q4, tbf = tbs + q5,
+              tft = t1 + q6, tfs = tft + q7, tff = tfs + q8;
+    let c = Math.cos(t1), s = Math.sin(t1);
+    const btx = x - 0.5 * c, btz = o1z + 0.5 * s;
+    const ftx = x + 0.5 * c, ftz = o1z - 0.5 * s;
+    const hdx = x + 0.6 * c + 0.1 * s, hdz = o1z - 0.6 * s + 0.1 * c;
+    c = Math.cos(tbt); s = Math.sin(tbt);
+    const bsx = btx + 0.16 * c - 0.25 * s, bsz = btz - 0.16 * s - 0.25 * c;
+    c = Math.cos(tbs); s = Math.sin(tbs);
+    const bfx = bsx - 0.28 * c - 0.14 * s, bfz = bsz + 0.28 * s - 0.14 * c;
+    c = Math.cos(tbf); s = Math.sin(tbf);
+    const tbx = bfx + 0.055 * c - 0.188 * s, tbz = bfz - 0.055 * s - 0.188 * c;
+    c = Math.cos(tft); s = Math.sin(tft);
+    const fsx = ftx - 0.14 * c - 0.24 * s, fsz = ftz + 0.14 * s - 0.24 * c;
+    c = Math.cos(tfs); s = Math.sin(tfs);
+    const ffx = fsx + 0.13 * c - 0.18 * s, ffz = fsz - 0.13 * s - 0.18 * c;
+    c = Math.cos(tff); s = Math.sin(tff);
+    P[0] = btx; P[1] = btz; P[2] = ftx; P[3] = ftz;
+    P[4] = bsx; P[5] = bsz; P[6] = bfx; P[7] = bfz;
+    P[8] = tbx; P[9] = tbz; P[10] = fsx; P[11] = fsz;
+    P[12] = ffx; P[13] = ffz;
+    P[14] = ffx + 0.085 * c - 0.128 * s; P[15] = ffz - 0.085 * s - 0.128 * c;
+    P[16] = hdx; P[17] = hdz;
+  }
+
+  function addCheetah(bones, camX, k, cx0, gy) {
+    // 7 segments + head ring, world (x,z) -> screen via cam pin and ground y
+    const X = i => cx0 + (P[i] - camX) * k, Z = i => gy - P[i] * k;
+    bones.moveTo(X(0), Z(1)); bones.lineTo(X(2), Z(3));      // torso
+    bones.moveTo(X(0), Z(1)); bones.lineTo(X(4), Z(5));      // bthigh
+    bones.moveTo(X(4), Z(5)); bones.lineTo(X(6), Z(7));      // bshin
+    bones.moveTo(X(6), Z(7)); bones.lineTo(X(8), Z(9));      // bfoot
+    bones.moveTo(X(2), Z(3)); bones.lineTo(X(10), Z(11));    // fthigh
+    bones.moveTo(X(10), Z(11)); bones.lineTo(X(12), Z(13));  // fshin
+    bones.moveTo(X(12), Z(13)); bones.lineTo(X(14), Z(15));  // ffoot
+    const hx = X(16), hy = Z(17), r = 0.15 * k;
+    bones.moveTo(hx + r, hy); bones.arc(hx, hy, r, 0, 6.2832);
+  }
+
+  function star(path, cx, cy, r) {
+    for (let i = 0; i < 10; i++) {
+      const a = -Math.PI / 2 + i * Math.PI / 5, rr = (i & 1) ? r * 0.45 : r;
+      const px = cx + rr * Math.cos(a), py = cy + rr * Math.sin(a);
+      if (i) path.lineTo(px, py); else path.moveTo(px, py);
+    }
+    path.closePath();
+  }
+
+  // ---- background (cell tints, labels) — rebuilt on resize/sort only ----
+  function rebuildBg() {
+    if (mode !== 'grid') return;
+    bg.width = canvas.width; bg.height = canvas.height;
+    bctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    bctx.fillStyle = '#0b0e13'; bctx.fillRect(0, 0, W, H);
+    const cw = W / COLS, ch = H / ROWS;
+    bctx.textBaseline = 'top';
+    for (let cell = 0; cell < N; cell++) {
+      const L = lanes[order[cell]];
+      const cx = (cell % COLS) * cw, cy = ((cell / COLS) | 0) * ch;
+      bctx.fillStyle = rateColor(L.rate, false);
+      bctx.fillRect(cx + 0.5, cy + 0.5, cw - 1, ch - 1);
+      if (L.rate !== null && L.rate >= 0.5) {          // strong lanes glow
+        bctx.save();
+        bctx.shadowColor = 'rgba(80,255,140,0.55)'; bctx.shadowBlur = 7;
+        bctx.strokeStyle = 'rgba(120,255,170,0.7)'; bctx.lineWidth = 1;
+        bctx.strokeRect(cx + 1.5, cy + 1.5, cw - 3, ch - 3);
+        bctx.restore();
+      }
+      if (cw > 44 && ch > 26) {
+        bctx.fillStyle = 'rgba(200,215,230,0.42)';
+        bctx.font = '9px ui-monospace, monospace';
+        bctx.fillText(String(L.seed), cx + 3, cy + 2);
+        if (L.rate !== null) {
+          bctx.textAlign = 'right';
+          bctx.fillText(L.rate.toFixed(2), cx + cw - 3, cy + ch - 11);
+          bctx.textAlign = 'left';
+        }
+      }
+    }
+  }
+
+  function resize() {
+    const r = stage.getBoundingClientRect();
+    W = Math.max(50, r.width); H = Math.max(50, r.height);
+    dpr = Math.min(2, window.devicePixelRatio || 1);
+    canvas.width = Math.round(W * dpr); canvas.height = Math.round(H * dpr);
+    canvas.style.width = W + 'px'; canvas.style.height = H + 'px';
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    rebuildBg();
+  }
+
+  // ---- grid render: all lanes batched into a handful of paths ----
+  function renderGrid(f) {
+    ctx.drawImage(bg, 0, 0, W, H);
+    const cw = W / COLS, ch = H / ROWS;
+    const k = Math.min(cw / 3.0, ch / 2.1);
+    const bones = new Path2D(), ground = new Path2D();
+    const dots = new Path2D(), stars = new Path2D();
+    for (let cell = 0; cell < N; cell++) {
+      const L = lanes[order[cell]];
+      const cx = (cell % COLS) * cw, cy = ((cell / COLS) | 0) * ch;
+      if (L.grid) {
+        const n = L.envId.startsWith('FourRooms') ? 11 : 8;
+        const s = Math.min(cw, ch) * 0.92, ox = cx + (cw - s) / 2, oy = cy + (ch - s) / 2;
+        const cs = s / n, b = f * 8;
+        ctx.save();
+        ctx.translate(ox, oy); ctx.scale(cs, cs);
+        ctx.fillStyle = 'rgba(15,20,28,0.85)';
+        ctx.fillRect(0, 0, n, n);
+        if (n === 11) { ctx.fillStyle = 'rgba(90,110,140,0.6)'; ctx.fill(wallsFour); }
+        else { ctx.strokeStyle = 'rgba(90,110,140,0.45)'; ctx.lineWidth = 0.08; ctx.stroke(wallsDeep); }
+        ctx.restore();
+        const ax = L.x[f], ay = L.rest[b], gx = L.rest[b + 1], gy2 = L.rest[b + 2];
+        const px = ox + (ax + 0.5) * cs, py = oy + (ay + 0.5) * cs;
+        dots.moveTo(px + cs * 0.3, py); dots.arc(px, py, cs * 0.3, 0, 6.2832);
+        star(stars, ox + (gx + 0.5) * cs, oy + (gy2 + 0.5) * cs, cs * 0.42);
+      } else {
+        const camX = L.x[f], gy = cy + ch * 0.80, cx0 = cx + cw / 2;
+        fk(L, f);
+        addCheetah(bones, camX, k, cx0, gy);
+        ground.moveTo(cx + 2, gy); ground.lineTo(cx + cw - 2, gy);
+      }
+    }
+    ctx.lineJoin = 'round'; ctx.lineCap = 'round';
+    ctx.strokeStyle = 'rgba(110,125,145,0.5)'; ctx.lineWidth = 1;
+    ctx.stroke(ground);
+    ctx.strokeStyle = 'rgba(225,235,245,0.92)';
+    ctx.lineWidth = Math.max(1, k * 0.055);
+    ctx.stroke(bones);
+    ctx.fillStyle = '#5ec1ff'; ctx.fill(dots);
+    ctx.fillStyle = '#ffd166'; ctx.fill(stars);
+  }
+
+  // ---- race mode: absolute rootx on a shared track, camera follows leader ----
+  function renderRace(f) {
+    ctx.fillStyle = '#0b0e13'; ctx.fillRect(0, 0, W, H);
+    const k = W / 40, gy = H * 0.72, viewW = W / k;
+    let lead = -Infinity;
+    for (const L of lanes) if (!L.grid && L.x[f] > lead) lead = L.x[f];
+    if (lead === -Infinity) { ctx.fillStyle = '#76828f';
+      ctx.fillText('no cheetah lanes in this pack', 20, 20); return; }
+    const camX = lead - viewW * 0.75;
+    const ground = new Path2D();
+    ground.moveTo(0, gy); ground.lineTo(W, gy);
+    ctx.strokeStyle = 'rgba(110,125,145,0.7)'; ctx.lineWidth = 1.5;
+    ctx.stroke(ground);
+    ctx.fillStyle = 'rgba(140,155,175,0.75)'; ctx.font = '10px ui-monospace, monospace';
+    ctx.textAlign = 'center';
+    const t0 = Math.floor(camX / 10) * 10;
+    for (let gx = t0; gx <= camX + viewW + 10; gx += 10) {
+      const sx = (gx - camX) * k;
+      ctx.fillRect(sx - 0.5, gy, 1, 6);
+      ctx.fillText(gx + 'm', sx, gy + 10);
+    }
+    ctx.textAlign = 'left';
+    let drawn = 0;
+    for (const L of lanes) {
+      if (L.grid) continue;
+      const x = L.x[f];
+      if (x < camX - 2 || x > camX + viewW + 2) continue;
+      fk(L, f);
+      const bones = new Path2D();
+      addCheetah(bones, camX, k, 0, gy);
+      ctx.strokeStyle = rateColor(L.rate, true);
+      ctx.lineWidth = 2;
+      ctx.stroke(bones);
+      drawn++;
+    }
+    ctx.fillStyle = 'rgba(200,215,230,0.8)';
+    ctx.fillText('leader ' + lead.toFixed(1) + 'm · ' + drawn + ' in view', 10, 16);
+  }
+
+  // ---- single lane zoom ----
+  const CH_NAMES = ['rootx', 'rootz', 'rooty', 'bthigh', 'bshin', 'bfoot',
+                    'fthigh', 'fshin', 'ffoot'];
+  function renderSingle(f) {
+    ctx.fillStyle = '#0b0e13'; ctx.fillRect(0, 0, W, H);
+    const L = lanes[singleLane];
+    ctx.fillStyle = '#e8eef6'; ctx.font = '13px ui-monospace, monospace';
+    ctx.fillText('lane ' + L.lane + ' · seed ' + L.seed + ' · ' + L.envId +
+                 ' · rate ' + (L.rate === null ? 'n/a' : L.rate.toFixed(4) + '/step') +
+                 ' · frame ' + f + '/' + (F - 1), 16, 18);
+    if (L.grid) {
+      const n = L.envId.startsWith('FourRooms') ? 11 : 8;
+      const s = Math.min(W, H) * 0.8, ox = (W * 0.4 - s) / 2, oy = (H - s) / 2;
+      const cs = s / n, b = f * 8;
+      ctx.save();
+      ctx.translate(ox, oy); ctx.scale(cs, cs);
+      ctx.fillStyle = 'rgba(20,26,36,1)'; ctx.fillRect(0, 0, n, n);
+      if (n === 11) { ctx.fillStyle = 'rgba(100,122,155,0.85)'; ctx.fill(wallsFour); }
+      else { ctx.strokeStyle = 'rgba(100,122,155,0.6)'; ctx.lineWidth = 0.05; ctx.stroke(wallsDeep); }
+      ctx.restore();
+      const ax = L.x[f], ay = L.rest[b], gx = L.rest[b + 1], gy2 = L.rest[b + 2];
+      const dots = new Path2D(), stars = new Path2D();
+      const px = ox + (ax + 0.5) * cs, py = oy + (ay + 0.5) * cs;
+      dots.moveTo(px + cs * 0.3, py); dots.arc(px, py, cs * 0.3, 0, 6.2832);
+      star(stars, ox + (gx + 0.5) * cs, oy + (gy2 + 0.5) * cs, cs * 0.42);
+      ctx.fillStyle = '#5ec1ff'; ctx.fill(dots);
+      ctx.fillStyle = '#ffd166'; ctx.fill(stars);
+      ctx.fillStyle = '#aeb9c6';
+      ctx.fillText('pose [' + ax + ', ' + ay + ', goal ' + gx + ', ' + gy2 + ']', 16, 40);
+      return;
+    }
+    const k = Math.min(W * 0.55 / 3.2, H * 0.7 / 2.2);
+    const gy = H * 0.68, cx0 = W * 0.32, camX = L.x[f];
+    fk(L, f);
+    const ground = new Path2D(), bones = new Path2D();
+    ground.moveTo(20, gy); ground.lineTo(W * 0.64, gy);
+    addCheetah(bones, camX, k, cx0, gy);
+    ctx.strokeStyle = 'rgba(110,125,145,0.7)'; ctx.lineWidth = 1.5; ctx.stroke(ground);
+    ctx.lineJoin = 'round'; ctx.lineCap = 'round';
+    ctx.strokeStyle = '#eef3f9'; ctx.lineWidth = Math.max(2, k * 0.05); ctx.stroke(bones);
+    ctx.fillStyle = rateColor(L.rate, true);
+    ctx.fillText('x = ' + L.x[f].toFixed(2) + 'm', 16, 40);
+    // qpos sparklines: last <=240 frames, 9 channels, auto-scaled strips
+    const win = Math.min(240, F), f0 = Math.max(0, f - win + 1), n = f - f0 + 1;
+    const sw = Math.min(320, W * 0.3), sx0 = W - sw - 16, sh = 16, gap = 6;
+    let sy = 44;
+    ctx.font = '9px ui-monospace, monospace';
+    for (let ch = 0; ch < 9; ch++) {
+      let mn = Infinity, mx = -Infinity;
+      for (let j = f0; j <= f; j++) {
+        const v = ch === 0 ? L.x[j] : L.rest[j * 8 + ch - 1] * QS;
+        if (v < mn) mn = v; if (v > mx) mx = v;
+      }
+      const rg = (mx - mn) || 1;
+      ctx.strokeStyle = 'rgba(60,72,90,0.8)'; ctx.lineWidth = 1;
+      ctx.strokeRect(sx0, sy, sw, sh);
+      ctx.beginPath();
+      for (let j = 0; j < n; j++) {
+        const v = ch === 0 ? L.x[f0 + j] : L.rest[(f0 + j) * 8 + ch - 1] * QS;
+        const px = sx0 + sw * j / Math.max(1, n - 1),
+              py = sy + sh - sh * (v - mn) / rg;
+        if (j) ctx.lineTo(px, py); else ctx.moveTo(px, py);
+      }
+      ctx.strokeStyle = '#5ec1ff'; ctx.stroke();
+      ctx.fillStyle = '#76828f';
+      ctx.fillText(CH_NAMES[ch] + ' ' + (ch === 0 ? L.x[f] : L.rest[f * 8 + ch - 1] * QS).toFixed(3),
+                   sx0 - 64, sy + sh - 5);
+      sy += sh + gap;
+    }
+  }
+
+  function render() {
+    const f = Math.min(F - 1, Math.max(0, Math.floor(frame)));
+    if (mode === 'race') renderRace(f);
+    else if (mode === 'single') renderSingle(f);
+    else renderGrid(f);
+  }
+
+  // ---- layout / ordering ----
+  function relayout() {
+    COLS = N >= 64 ? 32 : Math.ceil(Math.sqrt(N));
+    ROWS = Math.ceil(N / COLS);
+    rebuildBg();
+  }
+  function applySort() {
+    const byRate = $('selSort').value === 'rate';
+    order = lanes.map((_, i) => i);
+    if (byRate) order.sort((a, b) => {
+      const ra = lanes[a].rate, rb = lanes[b].rate;
+      if (ra === null && rb === null) return lanes[a].seed - lanes[b].seed;
+      if (ra === null) return 1;
+      if (rb === null) return -1;
+      return rb - ra || lanes[a].seed - lanes[b].seed;
+    });
+    else order.sort((a, b) => lanes[a].seed - lanes[b].seed || a - b);
+    rebuildBg();
+  }
+
+  // ---- controls ----
+  function setPlaying(p) {
+    playing = p;
+    $('bPlay').textContent = playing ? '⏸' : '▶';
+  }
+  function setSpeed(i) {
+    speedIdx = Math.max(0, Math.min(SPEEDS.length - 1, i));
+    $('bSpeed').textContent = SPEEDS[speedIdx] + '×';
+  }
+  function setMode(m) {
+    mode = m;
+    $('bRace').classList.toggle('on', m === 'race');
+    $('hMode').textContent = m === 'grid' ? '' : '[' + m + ' mode — esc returns]';
+    if (m === 'grid') rebuildBg();
+  }
+  $('bPlay').onclick = () => setPlaying(!playing);
+  $('bSpeed').onclick = () => setSpeed((speedIdx + 1) % SPEEDS.length);
+  $('bRace').onclick = () => setMode(mode === 'race' ? 'grid' : 'race');
+  $('selSort').onchange = applySort;
+  const scrub = $('scrub');
+  scrub.addEventListener('pointerdown', () => { scrubbing = true; });
+  window.addEventListener('pointerup', () => { scrubbing = false; });
+  scrub.addEventListener('input', () => { frame = +scrub.value; });
+  $('fps').style.display = showFps ? 'block' : 'none';
+
+  canvas.addEventListener('click', ev => {
+    if (mode === 'single') { setMode('grid'); return; }
+    if (mode !== 'grid') return;
+    const r = canvas.getBoundingClientRect();
+    const c = Math.floor((ev.clientX - r.left) / (W / COLS)),
+          rw = Math.floor((ev.clientY - r.top) / (H / ROWS));
+    const cell = rw * COLS + c;
+    if (cell >= 0 && cell < N) { singleLane = order[cell]; setMode('single'); }
+  });
+  window.addEventListener('keydown', ev => {
+    if (ev.key === 'Escape') { setMode('grid'); return; }
+    switch (ev.key) {
+      case ' ': setPlaying(!playing); ev.preventDefault(); break;
+      case 'ArrowRight': setPlaying(false); frame = Math.min(F - 1, Math.floor(frame) + 1); break;
+      case 'ArrowLeft': setPlaying(false); frame = Math.max(0, Math.floor(frame) - 1); break;
+      case 'ArrowUp': setSpeed(speedIdx + 1); break;
+      case 'ArrowDown': setSpeed(speedIdx - 1); break;
+      case 'f': showFps = !showFps;
+        $('fps').style.display = showFps ? 'block' : 'none'; break;
+      case 'r': setMode(mode === 'race' ? 'grid' : 'race'); break;
+      case 's': $('selSort').selectedIndex = 1 - $('selSort').selectedIndex;
+        applySort(); break;
+      case '1': case '2': case '3': case '4': case '5':
+        setSpeed(+ev.key - 1); break;
+    }
+  });
+  window.addEventListener('resize', resize);
+
+  // ---- main loop ----
+  let lastT = performance.now(), fpsFrames = 0, fpsT = lastT, renderMs = 0;
+  function tick(t) {
+    const dt = Math.min(0.1, (t - lastT) / 1000);
+    lastT = t;
+    if (playing && F > 1) frame = (frame + dt * 30 * SPEEDS[speedIdx]) % F;
+    const r0 = performance.now();
+    render();
+    renderMs = renderMs * 0.9 + (performance.now() - r0) * 0.1;
+    if (!scrubbing) scrub.value = String(Math.floor(frame));
+    fpsFrames++;
+    if (t - fpsT >= 500) {
+      if (showFps) $('fps').textContent =
+        (1000 * fpsFrames / (t - fpsT)).toFixed(0) + ' fps · ' +
+        renderMs.toFixed(1) + ' ms';
+      $('hStep').textContent = String(Math.floor(frame) * (META.stride | 0));
+      fpsFrames = 0; fpsT = t;
+    }
+    requestAnimationFrame(tick);
+  }
+
+  relayout();
+  resize();
+  applySort();
+  setSpeed(2);
+  setPlaying(true);
+  requestAnimationFrame(tick);
+  window.__oakReady = true;   // smoke-test hook
+}
+</script>
+</body>
+</html>
