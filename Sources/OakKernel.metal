@@ -1080,10 +1080,11 @@ static inline void oak_learn_rows(Ctx ctx, device const float *prev,
                 // optReward model's unanchored bootstrap explodes over long
                 // horizons (11 deaths @200k) and is REMOVED from the VI backup
                 // — the reward-to-go comes from the trajectory relay (Holland
-                // 2018), not a bootstrap reward model. Only optDuration learns
-                // (stable, for the de-bias duration).
+                // 2018), not a bootstrap reward model. optDuration at 0.05 rate
+                // (its bootstrap cont*lRaw2 also runs away over long horizons,
+                // 3 deaths @300k) — conservative rate for the de-bias duration.
                 device float *lw = &ctx.optDuration[i * K + k];
-                *lw = safe_w(*lw, *lw + aM * rho * dtd * xp * vsc * 0.1f);
+                *lw = safe_w(*lw, *lw + aM * rho * dtd * xp * vsc * 0.05f);
             }
         }
     }
