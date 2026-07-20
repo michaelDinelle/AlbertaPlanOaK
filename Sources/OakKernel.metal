@@ -130,7 +130,7 @@ struct Ctx {
     device float *alphaPsi, *betaPsi, *hPsi, *gradEnergyPsi;
     device float *alphaModel, *betaModel, *hModel, *gradEnergyModel;
     device float *actorAdv;
-    device float *optRewardTd;
+    device float *optRewardTd, *optDurationTd;
     device float *obsTraceMulti, *prioOpt, *continuation;
     device float *keyboard;
     device float *valueGauge;
@@ -240,9 +240,9 @@ inline Ctx make_ctx(device float *params, device float *stateArena, device uint 
     c.actorAdv = stateArena + s; s += c.K;
     c.optRewardTd = stateArena + s; s += c.K;
 
-    s += c.K;
-    s += c.K;
-    s += c.K;
+    s += c.K;  // headDenom (reserved)
+    c.optDurationTd = stateArena + s; s += c.K;  // revived from reserved (durationTd)
+    s += c.K;  // durationHat (reserved)
     c.obsTraceMulti = stateArena + s; s += c.traceLevels * c.O;
     c.prioOpt = stateArena + s; s += c.K;
     c.continuation = stateArena + s; s += c.K;
@@ -921,6 +921,7 @@ static inline void oak_plan_one(Ctx ctx, uint k,
         if (!isfinite(dTd)) dTd = 0.0f;
         if (!isfinite(vsTd)) vsTd = 0.0f;
         ctx.optRewardTd[k] = rTd;
+        ctx.optDurationTd[k] = dTd;
         ctx.vsTd[k] = vsTd;
         ctx.vsDot[k] = isfinite(vsDot) ? vsDot : 0.0f;
         float rho = ctx.importance[k];
@@ -989,6 +990,7 @@ static inline void oak_learn_rows(Ctx ctx, device const float *prev,
     if (!isfinite(cont)) cont = 0.0f;
     float hD = ctx.hDotPsi[k], sc = ctx.headScale[k], td = ctx.tdPsi[k];
     float vD = ctx.vsDot[k], vsc = ctx.vsScale[k], vtd = ctx.vsTd[k];
+    float rtd = ctx.optRewardTd[k], dtd = ctx.optDurationTd[k];
     float psiErr = td - hD, psc = ctx.psiAuxScale[k];
     float vErr = vtd - vD, vasc = ctx.vsAuxScale[k];
     float cj[16];
@@ -1026,11 +1028,26 @@ static inline void oak_learn_rows(Ctx ctx, device const float *prev,
                 *h = safe_w(*h, *h + aP * rho * psiErr * xp * psc);
             }
             if (!OAK_ABLATE_OPTION_MODELS) {
+                // Twin data-split (Phase 1): twin 1 (vStop/vsAux) updates on
+                // even steps, twin 2 (vStop2, dyna copy-2) on odd steps —
+                // disjoint data halves, genuine epistemic disagreement. The
+                // degenerate-twins fix (both were trained on the same stream
+                // with the same target, so disagreement measured nothing).
                 float gv = (cont > 0.0f) ? (vD * (xp - cont * xc)) : (vtd * xp);
-                device float *w = &ctx.vStop[i * K + k];
-                *w = safe_w(*w, *w + aM * rho * gv * vsc);
-                device float *h = &ctx.vsAux[i * K + k];
-                *h = safe_w(*h, *h + aM * rho * vErr * xp * vasc);
+                if ((ctx.stepCount & 1u) == 0u) {
+                    device float *w = &ctx.vStop[i * K + k];
+                    *w = safe_w(*w, *w + aM * rho * gv * vsc);
+                    device float *h = &ctx.vsAux[i * K + k];
+                    *h = safe_w(*h, *h + aM * rho * vErr * xp * vasc);
+                }
+                // Patch A (Phase 1): the option reward/duration models actually
+                // learn — they never had an apply (r-hat/l-hat were identically
+                // 0, the L1/L2 "models too inaccurate" confound). Semi-gradient
+                // differential TD with the same bootstrap-norm scale as vStop.
+                device float *rw = &ctx.optReward[i * K + k];
+                *rw = safe_w(*rw, *rw + aM * rho * rtd * xp * vsc);
+                device float *lw = &ctx.optDuration[i * K + k];
+                *lw = safe_w(*lw, *lw + aM * rho * dtd * xp * vsc);
             }
         }
     }
@@ -2524,13 +2541,17 @@ static inline void oak_dyna_backups(Ctx ctx, uint tid) {
         scS = (isfinite(scS) && scS > 0.0f) ? (1.0f / scS) : 0.0f;
         ctx.dynaC[k] = imp * vsTd * scS;
         simdgroup_barrier(mem_flags::mem_device);
-        for (uint a = tid; a < OAK_ACT; a += 32u) {
-            uint i = act_of(actP, a);
-            float aM = ctx.alphaModel[i] * prevS[i];
-            uint row = i * ctx.K;
-            for (uint kk = 0u; kk < ctx.K; ++kk) {
-                float w = ctx.vStop2[row + kk];
-                ctx.vStop2[row + kk] = safe_w(w, w + aM * ctx.dynaC[kk]);
+        // Twin data-split (Phase 1): twin 2 (vStop2) updates only on odd steps
+        // (twin 1 vStop/vsAux updates on even) — disjoint data halves.
+        if ((ctx.stepCount & 1u) != 0u) {
+            for (uint a = tid; a < OAK_ACT; a += 32u) {
+                uint i = act_of(actP, a);
+                float aM = ctx.alphaModel[i] * prevS[i];
+                uint row = i * ctx.K;
+                for (uint kk = 0u; kk < ctx.K; ++kk) {
+                    float w = ctx.vStop2[row + kk];
+                    ctx.vStop2[row + kk] = safe_w(w, w + aM * ctx.dynaC[kk]);
+                }
             }
         }
     }
