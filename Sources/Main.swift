@@ -182,7 +182,7 @@ struct Arena {
     _ = take(k)  // impStage (sample->next-step importance staging)
     _ = take(k * d)  // creditStage (sample->next-step actor-credit staging)
     _ = take(8)  // sampleScr
-    _ = take(3 * k)  // rHatC, lRawC, vsNextC (encode->plan dot cache)
+    _ = take(4 * k)  // rHatC, lRawC, vsNextC, twinDis (encode->plan dot cache)
     _ = take(4 * k)  // vsTd, vsDot, vsScale, vsAuxScale
     _ = take(1)  // planScale
     s = (s + 3) & ~3  // 16B-align nurStats/muRaw/polCoef (float4 access)
