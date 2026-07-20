@@ -409,29 +409,42 @@ inline void fcstomp_record_keyboard_stats(Ctx ctx,
     ctx.stats->keyboardSketchDim = float(ctx.keyboardSketchDimU);
 }
 
-inline void fcstomp_store_learn_scales(Ctx ctx) {
+inline void fcstomp_store_learn_scales(Ctx ctx, uint tid) {
 
     device const uint *actP = act_at(ctx, ctx.stateSlot);
     device const uint *actC = act_at(ctx, 1u - ctx.stateSlot);
     device const float *prevS = state_at(ctx, ctx.stateSlot);
     device const float *currS = state_at(ctx, 1u - ctx.stateSlot);
-    float denomTd = 1.0f, denomPlan = 1.0f;
-    for (uint a = 0u; a < OAK_ACT; ++a) {
-        float ap = ctx.alpha[actP[a]];
-        float xp = prevS[actP[a]];
-        if (isfinite(ap) && ap > 0.0f) denomTd += ap * (xp * xp);
-        float ac = ctx.alpha[actC[a]];
-        float xc = currS[actC[a]];
-        if (isfinite(ac) && ac > 0.0f) denomPlan += ac * (xc * xc);
+    // Warp-cooperative gather + ordered replay: lanes load their strided
+    // rows in parallel, then every lane replays the original ascending-a
+    // accumulation from simd_shuffle'd RAW values, re-evaluating the exact
+    // baseline expressions on the receiving lanes (Inv-10 lane-ordered
+    // reduction). The full expression MUST be re-evaluated after the
+    // shuffle: precomputing a product term per lane and adding it after the
+    // shuffle breaks the compiler's mul+add -> fma contraction of the
+    // baseline expression and diverges by 1 ulp (lab-verified on-device).
+    float denomTd = 1.0f, denomPlan = 1.0f, xNorm = 0.0f;
+    for (uint base = 0u; base < OAK_ACT; base += 32u) {
+        uint a = base + tid;
+        uint ip = actP[a], ic = actC[a];
+        float xp = prevS[ip], xc = currS[ic];
+        float ap = ctx.alpha[ip];
+        float ac = ctx.alpha[ic];
+        for (uint t = 0u; t < 32u; ++t) {
+            float x = simd_shuffle(xp, (ushort)t);
+            float aps = simd_shuffle(ap, (ushort)t);
+            if (isfinite(aps) && aps > 0.0f) denomTd += aps * (x * x);
+            float xs = simd_shuffle(xc, (ushort)t);
+            float acs = simd_shuffle(ac, (ushort)t);
+            if (isfinite(acs) && acs > 0.0f) denomPlan += acs * (xs * xs);
+            xNorm = fma(x, x, xNorm);
+        }
     }
-    ctx.valueScale[0] = (isfinite(denomTd) && denomTd > 0.0f) ? (1.0f / denomTd) : 0.0f;
-    ctx.planScale[0] = (isfinite(denomPlan) && denomPlan > 0.0f) ? (1.0f / denomPlan) : 0.0f;
-    float xNorm = 0.0f;
-    for (uint a = 0u; a < OAK_ACT; ++a) {
-        float xp = prevS[actP[a]];
-        xNorm = fma(xp, xp, xNorm);
+    if (tid == 0u) {
+        ctx.valueScale[0] = (isfinite(denomTd) && denomTd > 0.0f) ? (1.0f / denomTd) : 0.0f;
+        ctx.planScale[0] = (isfinite(denomPlan) && denomPlan > 0.0f) ? (1.0f / denomPlan) : 0.0f;
+        ctx.xNormPrev[0] = xNorm;
     }
-    ctx.xNormPrev[0] = xNorm;
 }
 
 inline void fcstomp_prediction_control_loop(Ctx ctx, uint tid,
@@ -643,76 +656,95 @@ inline void fcstomp_prediction_control_loop(Ctx ctx, uint tid,
         gpiBestScore = simd_max(score);
         gpiBest = simd_min((score == gpiBestScore) ? tid : 0xffffffffu);
     }
-    if (tid == 0u) {
-        uint best = gpiBest;
-        float bestScore = gpiBestScore;
-        float termSum = 0.0f;
-        for (uint k = 0u; k < ctx.K; ++k) termSum += 1.0f - tgCont[k];
-        uint prevSel = ctx.selectedOption[0] % ctx.K;
-
-        bool continuing = (prevSel != 0u) && tgCont[prevSel] > 0.0f;
-        uint selected = continuing ? prevSel : best;
-        float advL1 = 0.0f;
-        for (uint k = 0u; k < ctx.K; ++k) {
-            float a = ctx.actorAdv[k];
-            if (isfinite(a)) advL1 += fabs(a);
-        }
-        if (OAK_ABLATE_OPTION_KEYBOARD) {
-            for (uint k = 0u; k < ctx.K; ++k) ctx.keyboard[k] = 0.0f;
+    // Learn scales are gathered warp-cooperatively (ordered replay, exact
+    // serial add/fma sequence); the value is identical at both former call
+    // sites — nothing between them writes alpha/act/prev/curr.
+    fcstomp_store_learn_scales(ctx, tid);
+    // Warp-uniform keyboard refresh: the per-k raw values are gathered
+    // one-per-lane and the original expressions re-evaluated in ascending-k
+    // order from simd_shuffle (skips replicated exactly) — the identical
+    // add sequence as the former lane-0 serial sums (Inv-10 lane-ordered
+    // reduction).
+    uint prevSel = ctx.selectedOption[0] % ctx.K;
+    bool continuing = (prevSel != 0u) && tgCont[prevSel] > 0.0f;
+    uint selected = continuing ? prevSel : gpiBest;
+    float contK = 0.0f, advK = 0.0f, prevK = 0.0f;
+    if (tid < ctx.K) {
+        contK = tgCont[tid];
+        advK = ctx.actorAdv[tid];
+        prevK = ctx.keyboard[tid];
+    }
+    float termSum = 0.0f, advL1 = 0.0f, prevMag = 0.0f;
+    for (uint t = 0u; t < ctx.K; ++t) {
+        float c = simd_shuffle(contK, (ushort)t);
+        termSum += 1.0f - c;
+        float a = simd_shuffle(advK, (ushort)t);
+        if (isfinite(a)) advL1 += fabs(a);
+        float w = simd_shuffle(prevK, (ushort)t);
+        if (isfinite(w) && w > 0.0f) prevMag += w;
+    }
+    if (OAK_ABLATE_OPTION_KEYBOARD) {
+        if (tid < ctx.K) ctx.keyboard[tid] = 0.0f;
+        if (tid == 0u) {
             ctx.planTd[0] = 0.0f;
             ctx.selectedOption[0] = selected;
-            fcstomp_store_learn_scales(ctx);
             fcstomp_record_keyboard_stats(ctx, selected, termSum, 0.0f, advL1, 0.0f);
-            return;
         }
+        return;
+    }
 
-        float prevMag = 0.0f;
-        for (uint k = 0u; k < ctx.K; ++k) {
-            float w = ctx.keyboard[k];
-            if (isfinite(w) && w > 0.0f) prevMag += w;
+    // Softmax refresh: each lane computes and writes its own chord weight
+    // (same exp inputs as the serial loop); the mag replay keeps the
+    // ascending-k add order.
+    float lamK = 0.0f;
+    bool refreshKeyboard = (!continuing && gpiBest != prevSel) || prevMag <= 0.0f;
+    if (refreshKeyboard) {
+        bool haveBest = gpiBestScore > -FLT_MAX;
+        if (tid < ctx.K) {
+            bool trusted = isfinite(tgG[tid]) && haveBest;
+            float lam = trusted ? exp(tgG[tid] - gpiBestScore) : 0.0f;
+            if (!isfinite(lam)) lam = 0.0f;
+
+            if (ctx.optAge[tid] < ctx.R && tid != gpiBest && tid != 0u) lam = 0.0f;
+            ctx.keyboard[tid] = lam;
+            lamK = lam;
         }
+        float mag = 0.0f;
+        for (uint t = 0u; t < ctx.K; ++t) mag += simd_shuffle(lamK, (ushort)t);
+        if (mag <= 0.0f) {
 
-        bool refreshKeyboard = (!continuing && best != prevSel) || prevMag <= 0.0f;
-        if (refreshKeyboard) {
-            float mag = 0.0f;
-            bool haveBest = bestScore > -FLT_MAX;
-            for (uint k = 0u; k < ctx.K; ++k) {
-                bool trusted = isfinite(tgG[k]) && haveBest;
-                float lam = trusted ? exp(tgG[k] - bestScore) : 0.0f;
-                if (!isfinite(lam)) lam = 0.0f;
-
-                if (ctx.optAge[k] < ctx.R && k != best && k != 0u) lam = 0.0f;
-                ctx.keyboard[k] = lam;
-                mag += lam;
-            }
-            if (mag <= 0.0f) {
-
-                uint probe = ctx.stepCount % max(ctx.K, 1u);
-                for (uint k = 0u; k < ctx.K; ++k)
-                    ctx.keyboard[k] = (k == probe) ? 1.0f : 0.0f;
-            }
+            uint probe = ctx.stepCount % max(ctx.K, 1u);
+            lamK = (tid == probe) ? 1.0f : 0.0f;
+            if (tid < ctx.K) ctx.keyboard[tid] = lamK;
         }
+    }
 
-        float planDelta = (OAK_ABLATE_PLANNING || bestScore <= -FLT_MAX) ? 0.0f : bestScore;
-        {
+    float planDelta = (OAK_ABLATE_PLANNING || gpiBestScore <= -FLT_MAX) ? 0.0f : gpiBestScore;
+    {
 
-            float err = ctx.prioOpt[best];
-            float trust = (isfinite(err) && err >= 0.0f) ? (1.0f / (1.0f + err)) : 0.0f;
-            planDelta *= trust;
-        }
+        float err = ctx.prioOpt[gpiBest];
+        float trust = (isfinite(err) && err >= 0.0f) ? (1.0f / (1.0f + err)) : 0.0f;
+        planDelta *= trust;
+    }
 
+    // Final chord weights: what this lane just wrote, or the untouched
+    // device value on a no-refresh step (identical bits either way). The
+    // keyL1 replay re-evaluates the original skip expression on the
+    // shuffled raw weights.
+    float keyK = 0.0f;
+    if (tid < ctx.K) keyK = refreshKeyboard ? lamK : ctx.keyboard[tid];
+    float keyL1 = 0.0f;
+    for (uint t = 0u; t < ctx.K; ++t) {
+        float w = simd_shuffle(keyK, (ushort)t);
+        if (isfinite(w)) keyL1 += fabs(w);
+    }
+    if (tid == 0u) {
         if (!OAK_ABLATE_GVF_PREDICTION && isfinite(planDelta)) {
             float r2 = ctx.scalars->rho + ctx.invR * planDelta;
             if (isfinite(r2)) ctx.scalars->rho = r2;
         }
         ctx.planTd[0] = isfinite(planDelta) ? planDelta : 0.0f;
         ctx.selectedOption[0] = selected;
-        fcstomp_store_learn_scales(ctx);
-        float keyL1 = 0.0f;
-        for (uint k = 0u; k < ctx.K; ++k) {
-            float w = ctx.keyboard[k];
-            if (isfinite(w)) keyL1 += fabs(w);
-        }
         fcstomp_record_keyboard_stats(ctx, selected, termSum, keyL1, advL1,
                                       keyL1 > 0.0f ? 1.0f : 0.0f);
     }
@@ -1040,6 +1072,36 @@ inline void emit_all_options(Ctx ctx, uint tid) {
             ctx.muRaw[tid * ctx.D + j] = 0.0f;
         }
         if (tid < ctx.D) ctx.policyMean[tid] = 0.0f;
+        return;
+    }
+    if (DL == 6u) {
+        // Shape-specialized emit gather (DL = 6 under OAK_SPEC_ACTION_PARAMS,
+        // Inv-10 shape-specialized unrolling): six scalar accumulators keep
+        // the per-dim fma chains in registers — the generic acc[16] array
+        // risks a thread-memory spill. Pure gather; each chain keeps its
+        // original ascending-a fma order, interleaved for ILP only.
+        float acc0 = 0.0f, acc1 = 0.0f, acc2 = 0.0f;
+        float acc3 = 0.0f, acc4 = 0.0f, acc5 = 0.0f;
+        for (uint a = 0u; a < OAK_ACT; ++a) {
+            uint i = act_of(act, a);
+            float x = currS[i];
+            device const float *row = &ctx.optPolicy[i * KDL + tid * 6u];
+            acc0 = fma(row[0], x, acc0);
+            acc1 = fma(row[1], x, acc1);
+            acc2 = fma(row[2], x, acc2);
+            acc3 = fma(row[3], x, acc3);
+            acc4 = fma(row[4], x, acc4);
+            acc5 = fma(row[5], x, acc5);
+        }
+        float accv[6] = {acc0, acc1, acc2, acc3, acc4, acc5};
+        for (uint j = 0u; j < ctx.D; ++j) {
+            uint kd = tid * ctx.D + j;
+
+            float mu = (j < 6u) ? tanh(accv[j]) : 0.0f;
+            ctx.muRaw[kd] = mu;
+            if (!isfinite(mu)) mu = ctx.optionPolicyMean[kd];
+            ctx.optionPolicyMean[kd] = mu;
+        }
         return;
     }
     float acc[16];
