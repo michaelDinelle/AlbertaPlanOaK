@@ -946,7 +946,11 @@ static inline void oak_plan_one(Ctx ctx, uint k,
         float rHat2 = rHat, lRaw2 = lRaw;
         float optRhoOld = ctx.optRho[k];
         if (!isfinite(optRhoOld)) optRhoOld = 0.0f;
-        float rTd = (ctx.planScr[0] - ctx.scalars->rho) - optRhoOld + cont * rHat2 - rPrev;
+        // optReward TD with optRho-only centering (per-head, AGENTS.md): the
+        // cumulant is r - optRho, NOT (r - rho_bar) - optRho — the double
+        // centering was a systematic bias feeding the unanchored bootstrap's
+        // explosion. optRho tracks the option's own average reward rate.
+        float rTd = (ctx.planScr[0] - optRhoOld) + cont * rHat2 - rPrev;
         // optRho tracking at the structural track_rate (faster early than the
         // invR asymptote) — the per-head centering must catch up with the
         // young Patch-A model or the unanchored bootstrap runs away.
