@@ -198,9 +198,10 @@ struct Arena {
     _ = take(64 * r)  // ring values (R slots x 64 active tuples: core + gated)
     _ = take(r)  // dynaTd (per-ring-slot backup priorities)
     _ = take(32)  // dynaD (per-thread backup deltas)
-    _ = take(r)  // dynaAcc (window-accumulated dense per-feature backup sum)
+    _ = take(r)  // planU (planner-owned ring value table, reclaims dynaAcc)
     _ = take(k)  // dynaC (copy-2 per-option update coefficients)
     _ = take(4)  // planScr (reward snapshot; slot 2 = rsqrt(R) cache; 1/3 reserved)
+    _ = take(r)  // ringReward (outbound reward per ring slot, for the relay)
     total = s
   }
 }
