@@ -121,7 +121,7 @@ struct Ctx {
     device float *psiAux, *vStop, *vsAux;
     device float *observation, *observationMean, *obsSM;
     device float *state;
-    device float *policyMean, *actionSignal, *optionActorCredit, *optionPolicyMean;
+    device float *policyMean, *policyMeanRaw, *actionSignal, *optionActorCredit, *optionPolicyMean;
     device float *importance;
     device float *reward, *td, *planTd, *tdPsi;
     device float *utilFeat, *utilOpt, *bonusW, *featureMean, *featureSM;
@@ -212,6 +212,7 @@ inline Ctx make_ctx(device float *params, device float *stateArena, device uint 
     c.obsSM = stateArena + s; s += c.O;
     c.state = stateArena + s; s += 2u * c.R;
     c.policyMean = stateArena + s; s += c.D;
+    c.policyMeanRaw = stateArena + s; s += c.D;
     c.actionSignal = stateArena + s; s += c.D;
     c.optionActorCredit = stateArena + s; s += c.K * c.D;
     c.optionPolicyMean = stateArena + s; s += c.K * c.D;
@@ -1147,8 +1148,11 @@ inline void emit_all_options(Ctx ctx, uint tid) {
         for (uint j = 0u; j < ctx.D; ++j) {
             uint kd = tid * ctx.D + j;
 
+            // Zenith law scoped to Box (Phase 2): tanh stays on optionPolicyMean
+            // (cheetah actuator bounds, bit-identical); muRaw now holds the RAW
+            // acc — the unbounded discrete logits (commitment on sparse envs).
             float mu = (j < 6u) ? tanh(accv[j]) : 0.0f;
-            ctx.muRaw[kd] = mu;
+            ctx.muRaw[kd] = (j < 6u) ? accv[j] : 0.0f;
             if (!isfinite(mu)) mu = ctx.optionPolicyMean[kd];
             ctx.optionPolicyMean[kd] = mu;
         }
@@ -1166,7 +1170,7 @@ inline void emit_all_options(Ctx ctx, uint tid) {
         uint kd = tid * ctx.D + j;
 
         float mu = (j < DL) ? tanh(acc[j]) : 0.0f;
-        ctx.muRaw[kd] = mu;
+        ctx.muRaw[kd] = (j < DL) ? acc[j] : 0.0f;
         if (!isfinite(mu)) mu = ctx.optionPolicyMean[kd];
         ctx.optionPolicyMean[kd] = mu;
     }
@@ -1176,23 +1180,34 @@ inline void emit_blend_grid(Ctx ctx, uint tid) {
     if (tid >= ctx.D) return;
     uint d = tid;
     uint selected = ctx.selectedOption[0] % ctx.K;
+    // Cheetah behavior blend over tanh means (unchanged); discrete raw blend
+    // over raw-acc means (unbounded logits). Two separate accumulators.
     float blend = 0.0f, wNorm = 0.0f, fallback = 0.0f;
+    float blendR = 0.0f, fallbackR = 0.0f;
     for (uint ok = 0u; ok < ctx.K; ++ok) {
-        float om = ctx.muRaw[ok * ctx.D + d];
+        float om = ctx.optionPolicyMean[ok * ctx.D + d];
         if (!isfinite(om)) om = 0.0f;
         if (ok == selected) fallback = om;
+        float omR = ctx.muRaw[ok * ctx.D + d];
+        if (!isfinite(omR)) omR = 0.0f;
+        if (ok == selected) fallbackR = omR;
         float w = ctx.keyboard[ok];
         if (!isfinite(w)) w = 0.0f;
         blend = fma(w, om, blend);
+        blendR = fma(w, omR, blendR);
         wNorm += fabs(w);
     }
 
     {
-        float m0 = ctx.muRaw[d];
+        float m0 = ctx.optionPolicyMean[d];
         if (isfinite(m0)) { blend += m0; wNorm += 1.0f; }
+        float m0R = ctx.muRaw[d];
+        if (isfinite(m0R)) blendR += m0R;
     }
     ctx.policyMean[d] = (wNorm > 0.0f && !OAK_ABLATE_KEYBOARD_TO_POLICY)
         ? blend / wNorm : fallback;
+    ctx.policyMeanRaw[d] = (wNorm > 0.0f && !OAK_ABLATE_KEYBOARD_TO_POLICY)
+        ? blendR / wNorm : fallbackR;
 }
 
 static inline void oak_replace_commit(Ctx ctx, uint tid, threadgroup float *tgStash,
@@ -2084,12 +2099,18 @@ static inline void oak_stage_sample_act_discrete(Ctx ctx,
                              uint4(stepIdx, 0u, 0u, 0u));
     uint words[4] = { rw.x, rw.y, rw.z, rw.w };
 
+    // Discrete sampler on RAW (unbounded) logits (Phase 2 — the sparse-env
+    // unlock): policyMeanRaw for the behavior logits, muRaw for the target
+    // option logits. Max-subtracted softmax for numerical safety (unbounded
+    // logits can overflow exp; softmax is shift-invariant, argmax unchanged).
+    float bMax = -FLT_MAX;
+    for (uint d = 0u; d < N; ++d) bMax = max(bMax, oak_safe(ctx.policyMeanRaw[d]));
     float bSum = 0.0f;
-    for (uint d = 0u; d < N; ++d) bSum += exp(oak_safe(ctx.policyMean[d]));
+    for (uint d = 0u; d < N; ++d) bSum += exp(oak_safe(ctx.policyMeanRaw[d]) - bMax);
     uint act = 0u;
     float bestG = -FLT_MAX;
     for (uint d = 0u; d < N; ++d) {
-        float mu = oak_safe(ctx.policyMean[d]);
+        float mu = oak_safe(ctx.policyMeanRaw[d]);
 
         float u = min(hc_u01open(words[d]), 0x1.fffffep-1f);
         float g = mu - log(-log(u));
@@ -2101,12 +2122,12 @@ static inline void oak_stage_sample_act_discrete(Ctx ctx,
     if (tid < ctx.D) {
         float s = 0.0f;
         if (tid < N)
-            s = ((tid == act) ? 1.0f : 0.0f) - exp(oak_safe(ctx.policyMean[tid])) / bSum;
+            s = ((tid == act) ? 1.0f : 0.0f) - exp(oak_safe(ctx.policyMeanRaw[tid]) - bMax) / bSum;
         ctx.actionSignal[tid] = s;
     }
     if (tid == 0u) {
         float desc[12];
-        for (uint i = 0u; i < ctx.D; ++i) desc[i] = oak_safe(ctx.policyMean[i]);
+        for (uint i = 0u; i < ctx.D; ++i) desc[i] = oak_safe(ctx.policyMeanRaw[i]);
         float d2 = 0.0f;
         for (int i = 0; i < 12; i++) {
             float v = desc[i] - lane->lastDesc[i];
@@ -2120,19 +2141,21 @@ static inline void oak_stage_sample_act_discrete(Ctx ctx,
     }
     if (tid < ctx.K) {
         uint off = tid * ctx.D;
+        float oMax = -FLT_MAX;
+        for (uint d = 0u; d < N; ++d) oMax = max(oMax, oak_safe(ctx.muRaw[off + d]));
         float oSum = 0.0f;
         for (uint d = 0u; d < N; ++d)
-            oSum += exp(oak_safe(ctx.optionPolicyMean[off + d]));
+            oSum += exp(oak_safe(ctx.muRaw[off + d]) - oMax);
         for (uint d = 0u; d < ctx.D; ++d) {
             float cr = 0.0f;
             if (d < N)
                 cr = ((d == act) ? 1.0f : 0.0f)
-                   - exp(oak_safe(ctx.optionPolicyMean[off + d])) / oSum;
+                   - exp(oak_safe(ctx.muRaw[off + d]) - oMax) / oSum;
             ctx.creditStage[off + d] = cr;
         }
 
-        float pbA = exp(oak_safe(ctx.policyMean[act])) / bSum;
-        float poA = exp(oak_safe(ctx.optionPolicyMean[off + act])) / oSum;
+        float pbA = exp(oak_safe(ctx.policyMeanRaw[act]) - bMax) / bSum;
+        float poA = exp(oak_safe(ctx.muRaw[off + act]) - oMax) / oSum;
         float ratio = poA / pbA;
         ctx.impStage[tid] = isfinite(ratio) ? min(ratio, float(ctx.K)) : 0.0f;
     }
