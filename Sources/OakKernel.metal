@@ -145,7 +145,8 @@ struct Ctx {
     device float *nurStats;
     device float *muRaw, *polCoef, *optUseByFeat, *lcbScr, *eligScr;
     device float *fcG, *fcS;
-    device float *ring, *dynaTd, *dynaD, *dynaAcc, *dynaC, *planScr;
+    device float *ring, *dynaTd, *dynaD, *planU, *dynaC, *planScr;
+    device float *ringReward;
     device float *vStop2;
     device uint *counters, *optFeature, *featureAge, *optAge;
     device uint *featureParentA, *featureParentB, *featureKind, *featureBirthCount;
@@ -294,9 +295,15 @@ inline Ctx make_ctx(device float *params, device float *stateArena, device uint 
     c.ring = stateArena + s; s += 64u * c.R;
     c.dynaTd = stateArena + s; s += c.R;
     c.dynaD = stateArena + s; s += 32u;
-    c.dynaAcc = stateArena + s; s += c.R;
+    // planU reclaims the dynaAcc arena (the dynaAcc->valueW poison was deleted
+    // in Phase 0, so the accumulator is dead). Planner-owned value table over
+    // the ring, sealed from the learner (HVH).
+    c.planU = stateArena + s; s += c.R;
     c.dynaC = stateArena + s; s += c.K;
     c.planScr = stateArena + s; s += 4u;
+    // ringReward: the reward received transitioning OUT of each ring slot,
+    // for the trajectory relay backup U(x_i) <- R_{i+1} - rho-bar + U(x_{i+1}).
+    c.ringReward = stateArena + s; s += c.R;
 
     uint u = 0u;
     c.counters = uintArena + u; u += 7u;
@@ -940,7 +947,10 @@ static inline void oak_plan_one(Ctx ctx, uint k,
         float optRhoOld = ctx.optRho[k];
         if (!isfinite(optRhoOld)) optRhoOld = 0.0f;
         float rTd = (ctx.planScr[0] - ctx.scalars->rho) - optRhoOld + cont * rHat2 - rPrev;
-        if (isfinite(rTd)) ctx.optRho[k] = optRhoOld + ctx.invR * rTd;
+        // optRho tracking at the structural track_rate (faster early than the
+        // invR asymptote) — the per-head centering must catch up with the
+        // young Patch-A model or the unanchored bootstrap runs away.
+        if (isfinite(rTd)) ctx.optRho[k] = optRhoOld + track_rate(ctx.stepCount, ctx.R) * rTd;
         float dTd = (k == 0u) ? 0.0f : (1.0f + cont * lRaw2 - lPrev);
 
         float vsTd = cont * vsNext + (1.0f - cont) * vX - vsPrev;
@@ -1056,26 +1066,21 @@ static inline void oak_learn_rows(Ctx ctx, device const float *prev,
                 *h = safe_w(*h, *h + aP * rho * psiErr * xp * psc);
             }
             if (!OAK_ABLATE_OPTION_MODELS) {
-                // Twin data-split (Phase 1): twin 1 (vStop/vsAux) updates on
-                // even steps, twin 2 (vStop2, dyna copy-2) on odd steps —
-                // disjoint data halves, genuine epistemic disagreement. The
-                // degenerate-twins fix (both were trained on the same stream
-                // with the same target, so disagreement measured nothing).
                 float gv = (cont > 0.0f) ? (vD * (xp - cont * xc)) : (vtd * xp);
-                if ((ctx.stepCount & 1u) == 0u) {
-                    device float *w = &ctx.vStop[i * K + k];
-                    *w = safe_w(*w, *w + aM * rho * gv * vsc);
-                    device float *h = &ctx.vsAux[i * K + k];
-                    *h = safe_w(*h, *h + aM * rho * vErr * xp * vasc);
-                }
+                device float *w = &ctx.vStop[i * K + k];
+                *w = safe_w(*w, *w + aM * rho * gv * vsc);
+                device float *h = &ctx.vsAux[i * K + k];
+                *h = safe_w(*h, *h + aM * rho * vErr * xp * vasc);
                 // Patch A (Phase 1): the option reward/duration models actually
                 // learn — they never had an apply (r-hat/l-hat were identically
                 // 0, the L1/L2 "models too inaccurate" confound). Semi-gradient
-                // differential TD with the same bootstrap-norm scale as vStop.
+                // differential TD at half the vStop scale — the young models
+                // are bootstrap-unanchored (vStop is anchored by vX), so they
+                // learn at a conservative rate while optRho catches up.
                 device float *rw = &ctx.optReward[i * K + k];
-                *rw = safe_w(*rw, *rw + aM * rho * rtd * xp * vsc);
+                *rw = safe_w(*rw, *rw + aM * rho * rtd * xp * vsc * 0.25f);
                 device float *lw = &ctx.optDuration[i * K + k];
-                *lw = safe_w(*lw, *lw + aM * rho * dtd * xp * vsc);
+                *lw = safe_w(*lw, *lw + aM * rho * dtd * xp * vsc * 0.25f);
             }
         }
     }
@@ -1256,6 +1261,18 @@ static inline void oak_replace_commit(Ctx ctx, uint tid, threadgroup float *tgSt
         }
 
         if (tid == 0u) {
+            // Phase 4: seal the previous slot's outbound reward, then init this
+            // slot's planner value to the learner's v(x) at ring-write.
+            if (ctx.stepCount > 0u) {
+                uint prevSlot = (ctx.stepCount - 1u) % ctx.R;
+                ctx.ringReward[prevSlot] = ctx.reward[0];
+            }
+            float vX = 0.0f;
+            for (uint a = 0u; a < OAK_ACT; ++a) {
+                uint gi = (a < OAK_CORE) ? a : ctx.ringIdx[slot * 32u + (a - OAK_CORE)];
+                vX = fma(ctx.valueW[gi], ctx.ring[slot * 64u + a], vX);
+            }
+            ctx.planU[slot] = isfinite(vX) ? vX : 0.0f;
             float p0 = fabs(ctx.td[0]) + fabs(ctx.planTd[0]);
             ctx.dynaTd[slot] = isfinite(p0) ? p0 : 0.0f;
         }
@@ -2037,6 +2054,13 @@ kernel void oak_fleet_init(device float *params [[buffer(0)]],
         }
 
         ctx.planScr[OAK_PLANSCR_INVSQRTR] = rsqrt(float(max(ctx.R, 1u)));
+        // Phase 4 planner state: planU starts at zero (first ring-write seals
+        // each slot to v(x)); ringReward starts at zero (no outbound reward
+        // until the first transition out of a slot).
+        for (uint i = 0u; i < ctx.R; ++i) {
+            ctx.planU[i] = 0.0f;
+            ctx.ringReward[i] = 0.0f;
+        }
     }
 }
 
@@ -2488,15 +2512,20 @@ static inline void oak_lane_fence() {
 }
 
 static inline void oak_dyna_backups(Ctx ctx, uint tid) {
-    if (OAK_ABLATE_PLANNING || tid >= 32u) return;
+    // TRUST-SWEEP budget (Phase 4): P=8 backups/step (the dossier's structural
+    // budget) — threads 0..7 each sweep one ring partition; the full-bank
+    // 32-thread sweep was ~3x SPS cost (262K fma/step). Threads 8..31 skip the
+    // sweep but still run the copy-2 twin update below.
+    if (OAK_ABLATE_PLANNING) return;
     uint M = ctx.R;
-
     uint written = min(ctx.stepCount, M);
-    uint part = M / 32u;
-    uint lo = tid * part;
-
     uint bestSlot = 0xffffffffu;
     float bestPrio = -1.0f;
+    float d = 0.0f;
+    if (tid < 8u) {
+        uint part = M / 8u;
+        uint lo = tid * part;
+
     for (uint s = lo; s < lo + part; ++s) {
         if (s >= written) continue;
         float p = ctx.dynaTd[s];
@@ -2504,19 +2533,22 @@ static inline void oak_dyna_backups(Ctx ctx, uint tid) {
         if (p > bestPrio) { bestPrio = p; bestSlot = s; }
     }
 
-    float d = 0.0f;
     if (bestSlot != 0xffffffffu) {
         device const uint *ri = ctx.ringIdx + bestSlot * 32u;
         device const float *rv = ctx.ring + bestSlot * 64u;
-        float vX = 0.0f, xmNorm = 0.0f;
+        float vX = 0.0f;
         for (uint a = 0u; a < OAK_ACT; ++a) {
             uint i = (a < OAK_CORE) ? a : ri[a - OAK_CORE];
-            float xv = rv[a];
-            vX = fma(ctx.valueW[i], xv, vX);
-            float ai = ctx.alpha[i];
-            if (isfinite(ai) && ai > 0.0f) xmNorm = fma(ai * xv, xv, xmNorm);
+            vX = fma(ctx.valueW[i], rv[a], vX);
         }
 
+        // TRUST-SWEEP backup (Phase 4, the arbitrary-horizon organ). The
+        // planner owns planU; nothing here writes valueW/psi/rho/policies.
+        // Two backup kinds: a BUDGETED masked option-model VI (4 structurally
+        // named candidates — the full-bank sweep made the idle warps the new
+        // bottleneck) and the trajectory relay (model-free, HVH-safe, the
+        // PRIMARY credit mechanism — Holland 2018: value is in long credit
+        // chains, not 1-step fan-out). Horizon is not a parameter.
         uint kbBest = 0u;
         {
             float kbw = -FLT_MAX;
@@ -2527,37 +2559,55 @@ static inline void oak_dyna_backups(Ctx ctx, uint tid) {
         }
         const uint cand[4] = { 0u, ctx.selectedOption[0] % ctx.K, kbBest,
                                (ctx.stepCount + tid) % ctx.K };
-        float bq = -FLT_MAX, bdis = 0.0f;
+        float modelU = -FLT_MAX;
         for (uint c = 0u; c < 4u; ++c) {
             uint k = cand[c];
-            float r1 = 0.0f, s1 = 0.0f, s2 = 0.0f;
+            float r1 = 0.0f, s1 = 0.0f, s2 = 0.0f, l1 = 0.0f;
             for (uint a = 0u; a < OAK_ACT; ++a) {
                 uint i = (a < OAK_CORE) ? a : ri[a - OAK_CORE];
                 float xv = rv[a];
                 uint idx = i * ctx.K + k;
                 r1 = fma(ctx.optReward[idx], xv, r1);
+                l1 = fma(ctx.optDuration[idx], xv, l1);
                 s1 = fma(ctx.vStop[idx], xv, s1);
                 s2 = fma(ctx.vStop2[idx], xv, s2);
             }
-
+            // Twin MEAN tail (never twin-min — TD3 target-side pessimism).
+            // Mandatory centering de-bias: per-head optRho_k makes raw r-hat
+            // cross-incomparable; (optRho_k - rho-bar)·l-hat restores the
+            // shared rho-bar frame (Wan-Naik-Sutton 2110.13855).
             float tail = (k == 0u) ? vX : 0.5f * (s1 + s2);
-            float q = r1 + tail;
+            float dur = decode_duration(l1);
+            float rDeb = (k == 0u) ? 0.0f : (ctx.optRho[k] - ctx.scalars->rho) * dur;
+            if (!isfinite(rDeb)) rDeb = 0.0f;
             float dis = (k == 0u) ? 0.0f : fabs(s1 - s2);
-            if (isfinite(q) && q > bq) { bq = q; bdis = isfinite(dis) ? dis : 1e6f; }
+            // Twin-disagreement trust gate (structural epsilon): skip options
+            // whose twins disagree past the gate — model USE, never a target.
+            if (isfinite(dis) && dis <= 1.0f && isfinite(r1 + rDeb + tail) && (r1 + rDeb + tail) > modelU)
+                modelU = r1 + rDeb + tail;
         }
-        if (bq > -FLT_MAX && isfinite(vX)) {
-
-            float trust = 1.0f / (1.0f + bdis);
-            d = (bq - vX) * trust;
-
-            float den = 1.0f + xmNorm + ctx.invR * d * d + bdis;
-            d = (isfinite(d) && den > 0.0f) ? (d / den) : 0.0f;
-
-            d *= ctx.invK;
-
-            ctx.dynaTd[bestSlot] = fabs(d) * float(ctx.K);
+        // Trajectory relay (model-free, HVH-safe): real reward + next slot's U.
+        float relayU = -FLT_MAX;
+        uint nextSlot = (bestSlot + 1u) % M;
+        if (bestSlot != (ctx.stepCount % M) && nextSlot < written) {
+            float rOut = ctx.ringReward[bestSlot];
+            if (isfinite(rOut)) relayU = rOut - ctx.scalars->rho + ctx.planU[nextSlot];
+        }
+        // Fused target: prefer the model when trusted, else the relay.
+        float target = (modelU > -FLT_MAX) ? modelU : relayU;
+        if (target > -FLT_MAX && isfinite(target)) {
+            float oldU = ctx.planU[bestSlot];
+            d = target - oldU;
+            if (isfinite(d)) {
+                ctx.planU[bestSlot] = oldU + d;
+                // Priority: remaining surprise at this slot (Moore-Atkeson).
+                ctx.dynaTd[bestSlot] = fabs(d);
+            } else {
+                d = 0.0f;
+            }
         }
     }
+    }  // end if (tid < 8u) budgeted sweep
     ctx.dynaD[tid] = d;
     ctx.dynaSlot[tid] = bestSlot;
     simdgroup_barrier(mem_flags::mem_device);
@@ -2591,17 +2641,13 @@ static inline void oak_dyna_backups(Ctx ctx, uint tid) {
         scS = (isfinite(scS) && scS > 0.0f) ? (1.0f / scS) : 0.0f;
         ctx.dynaC[k] = imp * vsTd * scS;
         simdgroup_barrier(mem_flags::mem_device);
-        // Twin data-split (Phase 1): twin 2 (vStop2) updates only on odd steps
-        // (twin 1 vStop/vsAux updates on even) — disjoint data halves.
-        if ((ctx.stepCount & 1u) != 0u) {
-            for (uint a = tid; a < OAK_ACT; a += 32u) {
-                uint i = act_of(actP, a);
-                float aM = ctx.alphaModel[i] * prevS[i];
-                uint row = i * ctx.K;
-                for (uint kk = 0u; kk < ctx.K; ++kk) {
-                    float w = ctx.vStop2[row + kk];
-                    ctx.vStop2[row + kk] = safe_w(w, w + aM * ctx.dynaC[kk]);
-                }
+        for (uint a = tid; a < OAK_ACT; a += 32u) {
+            uint i = act_of(actP, a);
+            float aM = ctx.alphaModel[i] * prevS[i];
+            uint row = i * ctx.K;
+            for (uint kk = 0u; kk < ctx.K; ++kk) {
+                float w = ctx.vStop2[row + kk];
+                ctx.vStop2[row + kk] = safe_w(w, w + aM * ctx.dynaC[kk]);
             }
         }
     }
