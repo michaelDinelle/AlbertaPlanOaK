@@ -993,59 +993,105 @@ static inline void oak_learn_rows(Ctx ctx, device const float *prev,
     float vErr = vtd - vD, vasc = ctx.vsAuxScale[k];
     float cj[16];
     for (uint j = 0u; j < DL; ++j) cj[j] = ctx.polCoef[tid * DL + j];
-    for (uint a = 0u; a < A; ++a) {
-        uint i = act_of(actP, a);
-        float xp = prev[i], xc = curr[i];
-        float aP = ctx.alphaPsi[i], aM = ctx.alphaModel[i];
-        if (!OAK_ABLATE_OPTION_POLICIES) {
-            device float *prow = &ctx.optPolicy[i * KDL + tid * DL];
-            for (uint j = 0u; j < DL; ++j)
-                prow[j] = safe_w(prow[j], prow[j] + cj[j] * xp);
-        }
-        if (!OAK_ABLATE_RR_SUBTASKS && k != 0u) {
-            float g = (cont > 0.0f) ? (hD * (xp - cont * xc)) : (td * xp);
-            device float *w = &ctx.psi[i * K + k];
-            *w = safe_w(*w, *w + aP * rho * g * sc);
-            device float *h = &ctx.psiAux[i * K + k];
-            *h = safe_w(*h, *h + aP * rho * psiErr * xp * psc);
-        }
-        if (!OAK_ABLATE_OPTION_MODELS) {
-            float gv = (cont > 0.0f) ? (vD * (xp - cont * xc)) : (vtd * xp);
-            device float *w = &ctx.vStop[i * K + k];
-            *w = safe_w(*w, *w + aM * rho * gv * vsc);
-            device float *h = &ctx.vsAux[i * K + k];
-            *h = safe_w(*h, *h + aM * rho * vErr * xp * vasc);
+    // Row-data transpose (Inv-10 bit-identical load reduction): the five
+    // i-indexed row values (actP entry, prev/curr, alphaPsi/alphaModel) are
+    // lane-uniform — every lane re-loads the same address per row. Lane tid
+    // holds the cb+tid row slice as RAW loads and each broadcast round
+    // re-evaluates the exact baseline RMW bodies from simd_shuffle'd raw
+    // values (never precomputed products — same expression tree, same fma
+    // contraction), rows ascending per lane. No skips; the RMW bodies are
+    // untouched.
+    for (uint cb = 0u; cb < A; cb += 32u) {
+        uint aH = cb + tid;
+        uint iH = act_of(actP, aH);
+        float xpH = prev[iH], xcH = curr[iH];
+        float aPH = ctx.alphaPsi[iH], aMH = ctx.alphaModel[iH];
+        uint lEnd = min(32u, A - cb);
+        for (uint l = 0u; l < lEnd; ++l) {
+            uint i = simd_shuffle(iH, (ushort)l);
+            float xp = simd_shuffle(xpH, (ushort)l);
+            float xc = simd_shuffle(xcH, (ushort)l);
+            float aP = simd_shuffle(aPH, (ushort)l);
+            float aM = simd_shuffle(aMH, (ushort)l);
+            if (!OAK_ABLATE_OPTION_POLICIES) {
+                device float *prow = &ctx.optPolicy[i * KDL + tid * DL];
+                for (uint j = 0u; j < DL; ++j)
+                    prow[j] = safe_w(prow[j], prow[j] + cj[j] * xp);
+            }
+            if (!OAK_ABLATE_RR_SUBTASKS && k != 0u) {
+                float g = (cont > 0.0f) ? (hD * (xp - cont * xc)) : (td * xp);
+                device float *w = &ctx.psi[i * K + k];
+                *w = safe_w(*w, *w + aP * rho * g * sc);
+                device float *h = &ctx.psiAux[i * K + k];
+                *h = safe_w(*h, *h + aP * rho * psiErr * xp * psc);
+            }
+            if (!OAK_ABLATE_OPTION_MODELS) {
+                float gv = (cont > 0.0f) ? (vD * (xp - cont * xc)) : (vtd * xp);
+                device float *w = &ctx.vStop[i * K + k];
+                *w = safe_w(*w, *w + aM * rho * gv * vsc);
+                device float *h = &ctx.vsAux[i * K + k];
+                *h = safe_w(*h, *h + aM * rho * vErr * xp * vasc);
+            }
         }
     }
 
-    if (cont > 0.0f && rho > 0.0f) {
-        for (uint a = OAK_CORE; a < A; ++a) {
-            uint i = act_of(actC, a);
-            if (oak_in_prev_active(actP, i)) continue;
-            float xc = curr[i];
-            float aP = ctx.alphaPsi[i], aM = ctx.alphaModel[i];
-            if (!OAK_ABLATE_RR_SUBTASKS && k != 0u) {
-                device float *w = &ctx.psi[i * K + k];
-                *w = safe_w(*w, *w + aP * rho * (-hD * cont * xc) * sc);
-            }
-            if (!OAK_ABLATE_OPTION_MODELS) {
-                device float *w = &ctx.vStop[i * K + k];
-                *w = safe_w(*w, *w + aM * rho * (-vD * cont * xc) * vsc);
+    // Same transpose for the curr-only rows (OAK_CORE..A is exactly one
+    // simdgroup chunk). The membership flag and the four row values are RAW
+    // loads broadcast by uniform shuffles; the baseline's whole-loop gate
+    // (cont > 0 && rho > 0) is lane-constant, so applying it per row is
+    // value-identical — rows are independent RMWs on disjoint (i,k) slots,
+    // ascending order preserved.
+    {
+        uint i2H = act_of(actC, OAK_CORE + tid);
+        uint in2H = oak_in_prev_active(actP, i2H) ? 1u : 0u;
+        float xc2H = curr[i2H];
+        float aP2H = ctx.alphaPsi[i2H], aM2H = ctx.alphaModel[i2H];
+        for (uint l = 0u; l < 32u; ++l) {
+            uint i = simd_shuffle(i2H, (ushort)l);
+            uint inP = simd_shuffle(in2H, (ushort)l);
+            float xc = simd_shuffle(xc2H, (ushort)l);
+            float aP = simd_shuffle(aP2H, (ushort)l);
+            float aM = simd_shuffle(aM2H, (ushort)l);
+            if (inP != 0u) continue;
+            if (cont > 0.0f && rho > 0.0f) {
+                if (!OAK_ABLATE_RR_SUBTASKS && k != 0u) {
+                    device float *w = &ctx.psi[i * K + k];
+                    *w = safe_w(*w, *w + aP * rho * (-hD * cont * xc) * sc);
+                }
+                if (!OAK_ABLATE_OPTION_MODELS) {
+                    device float *w = &ctx.vStop[i * K + k];
+                    *w = safe_w(*w, *w + aM * rho * (-vD * cont * xc) * vsc);
+                }
             }
         }
     }
 
     if (!OAK_ABLATE_GVF_PREDICTION) {
-        for (uint e = 0u; e < 2u * A; ++e) {
-            uint i = (e < A) ? act_of(actP, e) : act_of(actC, e - A);
-            if (i % tw != tid) continue;
-            if (e >= A && oak_in_prev_active(actP, i)) continue;
-            float w = ctx.valueW[i];
-            float delta = (e < A)
-                ? (ctx.td[0] * prev[i] * ctx.valueScale[0]
-                   + ctx.planTd[0] * curr[i] * ctx.planScale[0])
-                : (ctx.planTd[0] * curr[i] * ctx.planScale[0]);
-            ctx.valueW[i] = safe_w(w, w + ctx.alpha[i] * delta);
+        // Same transpose for the active-set walk: lane tid holds the
+        // e = cb+tid active-row index and its prev-active membership flag as
+        // RAW loads, broadcast by uniform shuffles; the i % tw ownership
+        // filter and the RMW body are unchanged and stay per-lane. The four
+        // TD scalars are loop-invariant RAW loads hoisted with no
+        // expression-tree change.
+        float td0 = ctx.td[0], planTd0 = ctx.planTd[0];
+        float vScale0 = ctx.valueScale[0], pScale0 = ctx.planScale[0];
+        for (uint cb = 0u; cb < 2u * A; cb += 32u) {
+            uint eH = cb + tid;
+            uint iH = (eH < A) ? act_of(actP, eH) : act_of(actC, eH - A);
+            uint inH = (eH >= A && oak_in_prev_active(actP, iH)) ? 1u : 0u;
+            for (uint l = 0u; l < 32u; ++l) {
+                uint e = cb + l;
+                uint i = simd_shuffle(iH, (ushort)l);
+                uint inP = simd_shuffle(inH, (ushort)l);
+                if (i % tw != tid) continue;
+                if (e >= A && inP != 0u) continue;
+                float w = ctx.valueW[i];
+                float delta = (e < A)
+                    ? (td0 * prev[i] * vScale0
+                       + planTd0 * curr[i] * pScale0)
+                    : (planTd0 * curr[i] * pScale0);
+                ctx.valueW[i] = safe_w(w, w + ctx.alpha[i] * delta);
+            }
         }
     }
 
@@ -1463,23 +1509,57 @@ static inline void oak_window_analytics(Ctx ctx, uint tid) {
     device const uint *actP = act_at(ctx, 1u - ctx.stateSlot);
     float invT = track_rate(tPrev, ctx.R);
 
-    for (uint aIdx = tid; aIdx < OAK_ACT; aIdx += 32u) {
-        uint i = actP[aIdx];
-        float psiSignal = 0.0f, modelSignal = 0.0f, keyboardSignal = 0.0f;
-        for (uint k = 0u; k < ctx.K; ++k) {
-            if ((ctx.optFeature[k] % ctx.R) != i) continue;
-            float psiUse = fabs(ctx.tdPsi[k]);
-            float keyMass = fabs(ctx.keyboard[k]);
-            float modelUse = OAK_ABLATE_SEARCH_TO_GENERATE_TEST ? 0.0f : keyMass * fabs(ctx.planTd[0]);
-            float keyUse = OAK_ABLATE_SEARCH_TO_GENERATE_TEST
-                ? 0.0f : keyMass * (fabs(ctx.actorAdv[k]) + max(ctx.importance[k], 0.0f));
-            if (isfinite(psiUse)) psiSignal += psiUse;
-            if (isfinite(modelUse)) modelSignal += modelUse;
-            if (isfinite(keyUse)) keyboardSignal += keyUse;
+    // Transposed K-scan (Inv-10 bit-identical load reduction): lane tid
+    // holds the k = m+tid slice of the five K-indexed arrays as RAW loads;
+    // each broadcast round re-evaluates the exact baseline expressions from
+    // simd_shuffle'd raw values (never precomputed products — the fma
+    // contraction must see the same expression tree as the baseline), in
+    // ascending-k accumulation order per row. Same per-row add chains, same
+    // isfinite gates; only the redundant device loads are deduplicated.
+    const uint nSlot = OAK_ACT / 32u;
+    uint iS[nSlot];
+    float psiSigS[nSlot], modSigS[nSlot], keySigS[nSlot];
+    for (uint s = 0u; s < nSlot; ++s) {
+        iS[s] = actP[tid + s * 32u];
+        psiSigS[s] = 0.0f; modSigS[s] = 0.0f; keySigS[s] = 0.0f;
+    }
+    float planTd0 = ctx.planTd[0];
+    float td0 = ctx.td[0];
+    for (uint m = 0u; m < ctx.K; m += 32u) {
+        uint kH = m + tid;
+        bool kLive = kH < ctx.K;
+        uint   ofH = kLive ? ctx.optFeature[kH] : 0u;
+        float tdH = kLive ? ctx.tdPsi[kH] : 0.0f;
+        float kbH = kLive ? ctx.keyboard[kH] : 0.0f;
+        float aaH = kLive ? ctx.actorAdv[kH] : 0.0f;
+        float imH = kLive ? ctx.importance[kH] : 0.0f;
+        uint kEnd = min(32u, ctx.K - m);
+        for (uint l = 0u; l < kEnd; ++l) {
+            uint   ofV = simd_shuffle(ofH, (ushort)l);
+            float tdV = simd_shuffle(tdH, (ushort)l);
+            float kbV = simd_shuffle(kbH, (ushort)l);
+            float aaV = simd_shuffle(aaH, (ushort)l);
+            float imV = simd_shuffle(imH, (ushort)l);
+            for (uint s = 0u; s < nSlot; ++s) {
+                if ((ofV % ctx.R) != iS[s]) continue;
+                float psiUse = fabs(tdV);
+                float keyMass = fabs(kbV);
+                float modelUse = OAK_ABLATE_SEARCH_TO_GENERATE_TEST ? 0.0f : keyMass * fabs(planTd0);
+                float keyUse = OAK_ABLATE_SEARCH_TO_GENERATE_TEST
+                    ? 0.0f : keyMass * (fabs(aaV) + max(imV, 0.0f));
+                if (isfinite(psiUse)) psiSigS[s] += psiUse;
+                if (isfinite(modelUse)) modSigS[s] += modelUse;
+                if (isfinite(keyUse)) keySigS[s] += keyUse;
+            }
         }
-        float planningSignal = fabs(ctx.td[0]) + fabs(ctx.planTd[0]);
+    }
+    uint sel = ctx.selectedOption[0] % ctx.K;
+    for (uint s = 0u; s < nSlot; ++s) {
+        uint aIdx = tid + s * 32u;
+        uint i = iS[s];
+        float psiSignal = psiSigS[s], modelSignal = modSigS[s], keyboardSignal = keySigS[s];
+        float planningSignal = fabs(td0) + fabs(planTd0);
 
-        uint sel = ctx.selectedOption[0] % ctx.K;
         float actLoad = 0.0f;
         for (uint d = 0u; d < oak_dl(ctx); ++d)
             actLoad += fabs(ctx.optPolicy[i * ctx.K * oak_dl(ctx) + sel * oak_dl(ctx) + d]);
@@ -1498,7 +1578,7 @@ static inline void oak_window_analytics(Ctx ctx, uint tid) {
         }
         uint age = ctx.featureAge[i];
         metaopt_update_slot(ctx.alpha, ctx.beta, ctx.hMeta, ctx.gradEnergy,
-                            i, ctx.td[0], prev[i], age, ctx.metaEta, ctx.invR);
+                            i, td0, prev[i], age, ctx.metaEta, ctx.invR);
         uint metaSlot = tPrev % 32u;
         if (aIdx == metaSlot) {
 
@@ -1523,9 +1603,14 @@ static inline void oak_window_analytics(Ctx ctx, uint tid) {
 
     if (!OAK_ABLATE_OPTION_POLICIES && !OAK_ABLATE_GENERATE_AND_TEST) {
 
+        // Lane tid holds optFit[tid] as a RAW load; the full-warp sequential
+        // sums below re-read it via uniform simd_shuffle in ascending-k
+        // order — identical add/fma chains, one device load per lane instead
+        // of one per (lane, k).
+        float fH = (tid < ctx.K) ? ctx.optFit[tid] : 0.0f;
         float fitMean = 0.0f;
         for (uint k = 0u; k < ctx.K; ++k) {
-            float f = ctx.optFit[k];
+            float f = simd_shuffle(fH, (ushort)k);
             fitMean += isfinite(f) ? f : 0.0f;
         }
         fitMean *= ctx.invK;
@@ -1538,20 +1623,26 @@ static inline void oak_window_analytics(Ctx ctx, uint tid) {
         // Consensus dir hoist: dir depends only on the action dim d, so
         // compute it once per d (lanes 0..DLc-1) instead of once per
         // (d, feature) item — identical fma order per d, broadcast by shuffle.
+        // The optFit re-reads ride the same uniform fH broadcast; the
+        // per-lane chain (and its optionPolicyMean loads) stays predicated
+        // on tid < DLc exactly as the baseline's early-exit form.
         float dirD = 0.0f;
+        float m0 = 0.0f;
         if (tid < DLc) {
-            uint d = tid;
-            float m0 = ctx.optionPolicyMean[d];
+            m0 = ctx.optionPolicyMean[tid];
             if (!isfinite(m0)) m0 = 0.0f;
-            float dir = 0.0f;
-            for (uint k = 1u; k < ctx.K; ++k) {
-                float f = ctx.optFit[k];
+        }
+        float dir = 0.0f;
+        for (uint k = 1u; k < ctx.K; ++k) {
+            float f = simd_shuffle(fH, (ushort)k);
+            if (tid < DLc) {
                 float cf = (isfinite(f) ? f : 0.0f) - fitMean;
-                float mk = ctx.optionPolicyMean[k * ctx.D + d];
+                float mk = ctx.optionPolicyMean[k * ctx.D + tid];
                 dir = fma(cf, (isfinite(mk) ? mk : 0.0f) - m0, dir);
             }
-            dirD = isfinite(dir) ? (dir / (1.0f + fabs(dir))) : 0.0f;
         }
+        if (tid < DLc)
+            dirD = isfinite(dir) ? (dir / (1.0f + fabs(dir))) : 0.0f;
         for (uint witem = tid; witem < DLc * OAK_ACT; witem += tgW) {
             uint d = witem / OAK_ACT;
             uint a = witem % OAK_ACT;
