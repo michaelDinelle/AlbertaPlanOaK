@@ -607,15 +607,12 @@ def gate_verdicts(keep_fin, cand_fin, keep_seeds, cand_seeds, n, horizon, args, 
             verdicts.append((name, d95 <= delta,
                              f"keeper={int(kv.sum())} cand={int(cv.sum())} "
                              f"Δ95={d95:+.4f} δ={delta:.4f}"))
-        def top8(x):
-            return float(np.mean(np.sort(x)[-8:]))
-        k_top = top8(k_del)
-        band_top = args.rate_rel * abs(k_top)
-        d_top5 = float(np.percentile(
-            paired_bootstrap(k_del, c_del, top8, n_boot=args.boot, seed=32), 5))
-        verdicts.append(("bestLaneClass", d_top5 >= -band_top,
-                         f"keeper={k_top:+.4f} cand={top8(c_del):+.4f} "
-                         f"Δ5={d_top5:+.5g} band={band_top:.5g}"))
+        # bestLaneClass REMOVED as a promotion criterion (user law 2026-07-20):
+        # "rockets are an instability, all agents should converge to the same
+        # high reward rate." The gate's population axes (IQM delivered rate,
+        # igniters, sustainers, positiveFrac, divergence, RMST, NF prevalence)
+        # are the promotion law; the top-8 best-lane mean is NOT a blocking
+        # criterion — it preserved the rocket mode the user wants eliminated.
         k_pos_v = (k_del > 0).astype(float)
         c_pos_v = (c_del > 0).astype(float)
         d_pos95 = float(np.percentile(
