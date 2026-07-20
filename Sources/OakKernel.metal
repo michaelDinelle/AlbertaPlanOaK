@@ -139,6 +139,7 @@ struct Ctx {
     device float *alphaAct, *betaAct, *hAct, *energyAct;
     device float *impStage, *creditStage, *sampleScr;
     device float *rHatC, *lRawC, *vsNextC;
+    device float *twinDis;
     device float *vsTd, *vsDot, *vsScale, *vsAuxScale;
     device float *planScale;
     device float *nurStats;
@@ -271,6 +272,7 @@ inline Ctx make_ctx(device float *params, device float *stateArena, device uint 
     c.rHatC = stateArena + s; s += c.K;
     c.lRawC = stateArena + s; s += c.K;
     c.vsNextC = stateArena + s; s += c.K;
+    c.twinDis = stateArena + s; s += c.K;
     c.vsTd = stateArena + s; s += c.K;
     c.vsDot = stateArena + s; s += c.K;
     c.vsScale = stateArena + s; s += c.K;
@@ -530,7 +532,7 @@ inline void fcstomp_prediction_control_loop(Ctx ctx, uint tid,
         // its original ascending-a fma order (the chains are interleaved for
         // ILP, never reordered).
         float psiPrev = 0.0f, psiNext = 0.0f, hDot = 0.0f;
-        float rHat = 0.0f, lRaw = 0.0f, vModel = 0.0f;
+        float rHat = 0.0f, lRaw = 0.0f, vModel = 0.0f, vModel2 = 0.0f;
         float pdVs = 0.0f, pdVsA = 0.0f, pdR = 0.0f, pdL = 0.0f;
         for (uint a = 0u; a < OAK_ACT; ++a) {
             uint ip = act_of(actP, a), ic = act_of(actC, a);
@@ -543,6 +545,7 @@ inline void fcstomp_prediction_control_loop(Ctx ctx, uint tid,
                 rHat = fma(ctx.optReward[idxC], xc, rHat);
                 lRaw = fma(ctx.optDuration[idxC], xc, lRaw);
                 vModel = fma(ctx.vStop[idxC], xc, vModel);
+                vModel2 = fma(ctx.vStop2[idxC], xc, vModel2);
             }
             pdVs = fma(ctx.vStop[idxP], xp, pdVs);
             pdVsA = fma(ctx.vsAux[idxP], xp, pdVsA);
@@ -620,6 +623,11 @@ inline void fcstomp_prediction_control_loop(Ctx ctx, uint tid,
         ctx.rHatC[tid] = rHat;
         ctx.lRawC[tid] = lRaw;
         ctx.vsNextC[tid] = vModel;
+        // Twin disagreement (Phase 3): epistemic uncertainty at the current
+        // state, per option — feeds the vacuum probe (disagreement·duration
+        // argmax). With the data-split twins this is now a real signal.
+        float tdis = fabs(vModel - vModel2);
+        ctx.twinDis[tid] = isfinite(tdis) ? tdis : 0.0f;
 
         if (tid == 0u) vModel = vCurr;
         bool modelFinite = isfinite(rHat) && isfinite(lRaw) && isfinite(vModel);
@@ -670,10 +678,13 @@ inline void fcstomp_prediction_control_loop(Ctx ctx, uint tid,
     bool continuing = (prevSel != 0u) && tgCont[prevSel] > 0.0f;
     uint selected = continuing ? prevSel : gpiBest;
     float contK = 0.0f, advK = 0.0f, prevK = 0.0f;
+    float twinDisK = 0.0f, lRawK = 0.0f;
     if (tid < ctx.K) {
         contK = tgCont[tid];
         advK = ctx.actorAdv[tid];
         prevK = ctx.keyboard[tid];
+        twinDisK = ctx.twinDis[tid];
+        lRawK = ctx.lRawC[tid];
     }
     float termSum = 0.0f, advL1 = 0.0f, prevMag = 0.0f;
     for (uint t = 0u; t < ctx.K; ++t) {
@@ -713,8 +724,24 @@ inline void fcstomp_prediction_control_loop(Ctx ctx, uint tid,
         float mag = 0.0f;
         for (uint t = 0u; t < ctx.K; ++t) mag += simd_shuffle(lamK, (ushort)t);
         if (mag <= 0.0f) {
-
-            uint probe = ctx.stepCount % max(ctx.K, 1u);
+            // Vacuum probe (Phase 3, the chicken-and-egg breaker): probe the
+            // option with the highest twin-disagreement × duration — epistemic
+            // uncertainty at the current state, weighted toward temporally-
+            // extended commitments. Fires ONLY in commitment vacuum (a rocket
+            // lane is always continuing, so it never sees this). Replaces the
+            // blind round-robin probe. Collects exactly the transition data
+            // that maximally reduces model error (M2AC's mask inverted into a
+            // directed data-collection rule). Early on l-hat≈1 so it's pure
+            // disagreement; anneals toward long-horizon probing as duration
+            // models learn (stationary rule, annealing behavior, no schedule).
+            float bestScore = -FLT_MAX;
+            uint probe = 0u;
+            for (uint t = 0u; t < ctx.K; ++t) {
+                float dis = simd_shuffle(twinDisK, (ushort)t);
+                float dur = decode_duration(simd_shuffle(lRawK, (ushort)t));
+                float sc = dis * dur;
+                if (isfinite(sc) && sc > bestScore) { bestScore = sc; probe = t; }
+            }
             lamK = (tid == probe) ? 1.0f : 0.0f;
             if (tid < ctx.K) ctx.keyboard[tid] = lamK;
         }
