@@ -1103,13 +1103,22 @@ inline void hc_fwdConstraint(thread const HCState &s, thread HCWork &w) {
 
 inline void hc_forward(thread const HCState &s, thread HCWork &w) {
     hc_kinematics(s, w);
+    HCContacts con;
+    HCRefCoef ref;
+    // collision depends only on kinematics outputs (geom_xpos/geom_xaxis) and
+    // s.qpos; it is writes-disjoint with comPos/comVel/rne/makeM/factorI, so
+    // the Df contact chain issues ahead of them (ILP statement motion).
+    hc_collision(s, w, con);
     hc_comPos(w);
+    // ILP reorder (writes-disjoint, bit-identical statement motion): comVel
+    // needs only comPos's cdof (+qvel) and writes cvel/cdofdot; rne consumes
+    // those plus comPos's cinert and writes only qfrc_bias. Neither touches
+    // M/con/efc_*, so both hoist above makeM/collision.
+    hc_comVel(s, w);
+    hc_rne(s, w);
     hc_makeM(w);
     for (int k = 0; k < 36; k++) w.qLD[k] = w.M[k];
     hc_factorI(w.qLD, w.qLDiagInv);
-    HCContacts con;
-    HCRefCoef ref;
-    hc_collision(s, w, con);
     hc_makeConstraint(s, w, con, ref);
     {
         float tr = 0.0f;
@@ -1117,7 +1126,6 @@ inline void hc_forward(thread const HCState &s, thread HCWork &w) {
         w.scale = 1.0f / tr;
     }
 
-    hc_comVel(s, w);
     for (int j = 0; j < 9; j++) {
         float spring = -HC_JNT_STIFFNESS[j]*(s.qpos[j] - HC_QPOS_SPRING[j]);
         float damper = -HC_DOF_DAMPING[j]*s.qvel[j];
@@ -1131,7 +1139,6 @@ inline void hc_forward(thread const HCState &s, thread HCWork &w) {
             w.efc_aref[i] = -ref.efc_B[i]*vel - ref.efc_K[i]*ref.efc_imp[i]*w.efc_pos[i];
         }
     }
-    hc_rne(s, w);
 
     float qfrcAct[9];
     for (int v = 0; v < 9; v++) qfrcAct[v] = 0.0f;
