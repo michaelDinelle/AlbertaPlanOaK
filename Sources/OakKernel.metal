@@ -2644,10 +2644,10 @@ static inline void oak_dyna_backups(Ctx ctx, uint tid) {
         if (!isfinite(vsTd)) vsTd = 0.0f;
         float scS = fma(imp, xNormP, 1.0f);
         scS = (isfinite(scS) && scS > 0.0f) ? (1.0f / scS) : 0.0f;
-        // vStop2 at half rate — it lacks vStop's GTD2 anchor (vStop uses the
+        // vStop2 at 0.1 rate — it lacks vStop's GTD2 anchor (vStop uses the
         // aux-corrected gv gradient; vStop2 uses the raw dynaC form) and was
-        // exploding over long horizons (7 deaths @100k).
-        ctx.dynaC[k] = imp * vsTd * scS * 0.5f;
+        // exploding over long horizons (7 deaths @100k, 5 @200k, 10 @400k).
+        ctx.dynaC[k] = imp * vsTd * scS * 0.1f;
         simdgroup_barrier(mem_flags::mem_device);
         for (uint a = tid; a < OAK_ACT; a += 32u) {
             uint i = act_of(actP, a);
