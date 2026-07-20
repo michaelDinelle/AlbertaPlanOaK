@@ -739,10 +739,10 @@ inline void fcstomp_prediction_control_loop(Ctx ctx, uint tid,
         if (isfinite(w)) keyL1 += fabs(w);
     }
     if (tid == 0u) {
-        if (!OAK_ABLATE_GVF_PREDICTION && isfinite(planDelta)) {
-            float r2 = ctx.scalars->rho + ctx.invR * planDelta;
-            if (isfinite(r2)) ctx.scalars->rho = r2;
-        }
+        // Poison deleted (Phase 0): planTd does NOT feed rho-bar. rho-bar is
+        // real-stream-only (Wan-Naik-Sutton 2006.16318); model estimates must
+        // never write into rho-bar (the self-referential estimator — the 13
+        // measured runaways to +539). planTd is a diagnostic-only signal now.
         ctx.planTd[0] = isfinite(planDelta) ? planDelta : 0.0f;
         ctx.selectedOption[0] = selected;
         fcstomp_record_keyboard_stats(ctx, selected, termSum, keyL1, advL1,
@@ -1068,40 +1068,27 @@ static inline void oak_learn_rows(Ctx ctx, device const float *prev,
 
     if (!OAK_ABLATE_GVF_PREDICTION) {
         // Same transpose for the active-set walk: lane tid holds the
-        // e = cb+tid active-row index and its prev-active membership flag as
-        // RAW loads, broadcast by uniform shuffles; the i % tw ownership
-        // filter and the RMW body are unchanged and stay per-lane. The four
-        // TD scalars are loop-invariant RAW loads hoisted with no
-        // expression-tree change.
-        float td0 = ctx.td[0], planTd0 = ctx.planTd[0];
-        float vScale0 = ctx.valueScale[0], pScale0 = ctx.planScale[0];
-        for (uint cb = 0u; cb < 2u * A; cb += 32u) {
+        // e = cb+tid active-row index as a RAW load, broadcast by uniform
+        // shuffles; the i % tw ownership filter and the RMW body are
+        // unchanged and stay per-lane. The TD scalar is a loop-invariant RAW
+        // load hoisted with no expression-tree change.
+        float td0 = ctx.td[0];
+        float vScale0 = ctx.valueScale[0];
+        // Poison deleted (Phase 0): planTd and dynaAcc do NOT write into
+        // valueW (model estimates must never write into learner weights — the
+        // measured population anti-learner). Only the real experience TD moves
+        // the value bank; the e>=A (planTd-only) half is deleted entirely.
+        for (uint cb = 0u; cb < A; cb += 32u) {
             uint eH = cb + tid;
-            uint iH = (eH < A) ? act_of(actP, eH) : act_of(actC, eH - A);
-            uint inH = (eH >= A && oak_in_prev_active(actP, iH)) ? 1u : 0u;
+            uint iH = act_of(actP, eH);
             for (uint l = 0u; l < 32u; ++l) {
                 uint e = cb + l;
                 uint i = simd_shuffle(iH, (ushort)l);
-                uint inP = simd_shuffle(inH, (ushort)l);
                 if (i % tw != tid) continue;
-                if (e >= A && inP != 0u) continue;
                 float w = ctx.valueW[i];
-                float delta = (e < A)
-                    ? (td0 * prev[i] * vScale0
-                       + planTd0 * curr[i] * pScale0)
-                    : (planTd0 * curr[i] * pScale0);
+                float delta = td0 * prev[i] * vScale0;
                 ctx.valueW[i] = safe_w(w, w + ctx.alpha[i] * delta);
             }
-        }
-    }
-
-    if (!OAK_ABLATE_PLANNING && !OAK_ABLATE_GVF_PREDICTION) {
-        for (uint i = tid; i < ctx.R; i += tw) {
-            float acc = ctx.dynaAcc[i];
-            if (acc == 0.0f || !isfinite(acc)) continue;
-            float w = ctx.valueW[i];
-            ctx.valueW[i] = safe_w(w, w + ctx.alpha[i] * acc);
-            ctx.dynaAcc[i] = 0.0f;
         }
     }
 }
@@ -2507,24 +2494,9 @@ static inline void oak_dyna_backups(Ctx ctx, uint tid) {
     ctx.dynaD[tid] = d;
     ctx.dynaSlot[tid] = bestSlot;
     simdgroup_barrier(mem_flags::mem_device);
-
-    {
-        ctx.dynaAcc[tid] = 0.0f;
-        for (uint i = OAK_CORE + tid * OAK_GATE_BANK;
-             i < OAK_CORE + (tid + 1u) * OAK_GATE_BANK; ++i)
-            ctx.dynaAcc[i] = 0.0f;
-        simdgroup_barrier(mem_flags::mem_device);
-        float coreAcc = 0.0f;
-        for (uint t = 0u; t < 32u; ++t) {
-            float dt = ctx.dynaD[t];
-            uint slot = ctx.dynaSlot[t];
-            if (dt == 0.0f || slot == 0xffffffffu) continue;
-            coreAcc = fma(dt, ctx.ring[slot * 64u + tid], coreAcc);
-            uint gi = ctx.ringIdx[slot * 32u + tid];
-            ctx.dynaAcc[gi] += dt * ctx.ring[slot * 64u + OAK_CORE + tid];
-        }
-        ctx.dynaAcc[tid] += coreAcc;
-    }
+    // Poison deleted (Phase 0): the dynaAcc accumulation into valueW is gone,
+    // so the accumulator fill is dead work — removed. The dynaAcc arena is
+    // reserved for the Phase-4 planner-owned U table.
 
     {
         uint k = tid;
