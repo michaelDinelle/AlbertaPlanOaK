@@ -149,6 +149,7 @@ struct Arena {
     obs = take(3 * o)
     _ = take(2 * r)  // state slots
     policy = take(d)
+    _ = take(d)  // policyMeanRaw (raw-acc blend for discrete logits)
     _ = take(d)  // actionSignal
     _ = take(k * d)  // optionActorCredit
     options = take(k * d)  // optionPolicyMean
