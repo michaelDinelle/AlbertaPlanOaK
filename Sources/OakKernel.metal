@@ -435,7 +435,8 @@ inline void fcstomp_store_learn_scales(Ctx ctx) {
 }
 
 inline void fcstomp_prediction_control_loop(Ctx ctx, uint tid,
-                                      threadgroup float *tgCont) {
+                                      threadgroup float *tgCont,
+                                      threadgroup float *tgStash) {
 
     device float *tgG = ctx.fcG;
     device float *tgScalars = ctx.fcS;
@@ -510,12 +511,39 @@ inline void fcstomp_prediction_control_loop(Ctx ctx, uint tid,
 
     if (tid < ctx.K) {
         uint feat = ctx.optFeature[tid] % ctx.R;
-        float psiPrev = 0.0f, psiNext = 0.0f;
+        // One-pass gather over the active rows: psi/hDot/model dots plus the
+        // plan-stage prev-dots, each an independent accumulator chain keeping
+        // its original ascending-a fma order (the chains are interleaved for
+        // ILP, never reordered).
+        float psiPrev = 0.0f, psiNext = 0.0f, hDot = 0.0f;
+        float rHat = 0.0f, lRaw = 0.0f, vModel = 0.0f;
+        float pdVs = 0.0f, pdVsA = 0.0f, pdR = 0.0f, pdL = 0.0f;
         for (uint a = 0u; a < OAK_ACT; ++a) {
             uint ip = act_of(actP, a), ic = act_of(actC, a);
-            psiPrev = fma(ctx.psi[(ip) * ctx.K + tid], dPrev[ip], psiPrev);
-            psiNext = fma(ctx.psi[(ic) * ctx.K + tid], dCurr[ic], psiNext);
+            float xp = dPrev[ip], xc = dCurr[ic];
+            uint idxP = ip * ctx.K + tid, idxC = ic * ctx.K + tid;
+            psiPrev = fma(ctx.psi[idxP], xp, psiPrev);
+            psiNext = fma(ctx.psi[idxC], xc, psiNext);
+            hDot = fma(ctx.psiAux[idxP], xp, hDot);
+            if (!OAK_ABLATE_OPTION_MODELS) {
+                rHat = fma(ctx.optReward[idxC], xc, rHat);
+                lRaw = fma(ctx.optDuration[idxC], xc, lRaw);
+                vModel = fma(ctx.vStop[idxC], xc, vModel);
+            }
+            pdVs = fma(ctx.vStop[idxP], xp, pdVs);
+            pdVsA = fma(ctx.vsAux[idxP], xp, pdVsA);
+            pdR = fma(ctx.optReward[idxP], xp, pdR);
+            pdL = fma(ctx.optDuration[idxP], xp, pdL);
         }
+        // Stash the prev-dots for oak_plan_one (threadgroup memory, visible
+        // after the stage threadgroup_barrier). oak_replace_commit zeroes an
+        // option's stash when it reinitializes that option's rows, matching
+        // what a post-replace gather would produce (rows zeroed, finite state
+        // -> +0.0f).
+        tgStash[tid * 4u + 0u] = pdVs;
+        tgStash[tid * 4u + 1u] = pdVsA;
+        tgStash[tid * 4u + 2u] = pdR;
+        tgStash[tid * 4u + 3u] = pdL;
 
         float psiXX = tgScalars[5], psiXY = tgScalars[6], psiYY = tgScalars[7];
 
@@ -568,12 +596,6 @@ inline void fcstomp_prediction_control_loop(Ctx ctx, uint tid,
         float hd = (isfinite(denom) && denom > 0.0f) ? denom : 0.0f;
         ctx.headScale[tid] = (isfinite(hd) && hd > 0.0f) ? (1.0f / hd) : 0.0f;
         {
-
-            float hDot = 0.0f;
-            for (uint a = 0u; a < OAK_ACT; ++a) {
-                uint ip = act_of(actP, a);
-                hDot = fma(ctx.psiAux[ip * ctx.K + tid], dPrev[ip], hDot);
-            }
             ctx.hDotPsi[tid] = isfinite(hDot) ? hDot : 0.0f;
 
             float auxDenom = fma(rho, psiXX, 1.0f);
@@ -581,19 +603,6 @@ inline void fcstomp_prediction_control_loop(Ctx ctx, uint tid,
                 ? (1.0f / auxDenom) : 0.0f;
         }
         tgCont[tid] = cont;
-        float rHat = 0.0f, lRaw = 0.0f, vModel = 0.0f;
-        if (!OAK_ABLATE_OPTION_MODELS) {
-            for (uint a = 0u; a < OAK_ACT; ++a) {
-                uint ic = act_of(actC, a);
-                uint idx = ic * ctx.K + tid;
-                float xc = dCurr[ic];
-                rHat = fma(ctx.optReward[idx], xc, rHat);
-                lRaw = fma(ctx.optDuration[idx], xc, lRaw);
-
-                vModel = fma(ctx.vStop[idx], xc, vModel);
-            }
-        }
-
         ctx.rHatC[tid] = rHat;
         ctx.lRawC[tid] = lRaw;
         ctx.vsNextC[tid] = vModel;
@@ -733,8 +742,11 @@ inline void FeatureConstruction(Ctx ctx,
     if (tid < ctx.K) ctx.importance[tid] = ctx.impStage[tid];
     for (uint j = tid; j < ctx.K * ctx.D; j += tgW)
         ctx.optionActorCredit[j] = ctx.creditStage[j];
-    simdgroup_barrier(mem_flags::mem_device);
-    simdgroup_barrier(mem_flags::mem_threadgroup);
+    // No fence here: the staged copies above are consumed either same-thread
+    // (fcstomp reads importance[tid]) or in later stages behind the step's
+    // threadgroup_barrier (plan reads optionActorCredit). The cross-thread
+    // RAWs below (curr[gateCh], kind-3 obsTraceMulti) are covered by the
+    // mem_device barrier after the core-slot writes.
 
     device const float *prev = state_at(ctx, ctx.stateSlot);
     device float *curr = state_at(ctx, 1u - ctx.stateSlot);
@@ -806,14 +818,15 @@ inline void FeatureConstruction(Ctx ctx,
 }
 
 static inline void oak_stage_encode(Ctx ctx, uint tid, uint tgW,
-                                    threadgroup float *tgCont) {
+                                    threadgroup float *tgCont,
+                                    threadgroup float *tgStash) {
     FeatureConstruction(ctx, tid, tgW);
-    fcstomp_prediction_control_loop(ctx, tid, tgCont);
+    fcstomp_prediction_control_loop(ctx, tid, tgCont, tgStash);
 }
 
 static inline void oak_plan_one(Ctx ctx, uint k,
-                                device const float *prev,
-                                device const float *curr, uint pSlot) {
+                                threadgroup const float *stash,
+                                bool stashDirty, uint pSlot) {
     float cont = ctx.continuation[k];
     if (OAK_ABLATE_OPTION_MODELS) {
         ctx.optRewardTd[k] = 0.0f;
@@ -825,18 +838,36 @@ static inline void oak_plan_one(Ctx ctx, uint k,
         return;
     }
 
-        device const uint *actP = act_at(ctx, pSlot);
+        // Prev-dots were gathered by encode (same actP/prev rows, same fma
+        // order) and stashed in threadgroup memory; replace zeroes the stash
+        // of any option whose rows it reinitialized this step. A feature
+        // replacement (dynaSlot type 1) additionally zeroes one feature ROW
+        // of every option's model rows after the stash was written; that
+        // (rare) step sets the lane's dirty flag and we re-gather here —
+        // identical chains to the stash path, read post-replace.
+        float vsPrev, vsDot, rPrev, lPrev;
+        if (!stashDirty) {
+            vsPrev = stash[k * 4u + 0u];
+            vsDot = stash[k * 4u + 1u];
+            rPrev = stash[k * 4u + 2u];
+            lPrev = stash[k * 4u + 3u];
+        } else {
+            device const uint *actP = act_at(ctx, pSlot);
+            device const float *prev = state_at(ctx, pSlot);
+            vsPrev = 0.0f; vsDot = 0.0f; rPrev = 0.0f; lPrev = 0.0f;
+            for (uint a = 0u; a < OAK_ACT; ++a) {
+                uint ip = act_of(actP, a);
+                uint idxP = ip * ctx.K + k;
+                float xp = prev[ip];
+                vsPrev = fma(ctx.vStop[idxP], xp, vsPrev);
+                vsDot = fma(ctx.vsAux[idxP], xp, vsDot);
+                rPrev = fma(ctx.optReward[idxP], xp, rPrev);
+                lPrev = fma(ctx.optDuration[idxP], xp, lPrev);
+            }
+        }
 
         float rHat = ctx.rHatC[k], lRaw = ctx.lRawC[k], vsNext = ctx.vsNextC[k];
         float vX = ctx.fcS[1];
-        float vsPrev = 0.0f, vsDot = 0.0f;
-        for (uint a = 0u; a < OAK_ACT; ++a) {
-            uint ip = act_of(actP, a);
-            uint idxP = ip * ctx.K + k;
-            float xp = prev[ip];
-            vsPrev = fma(ctx.vStop[idxP], xp, vsPrev);
-            vsDot = fma(ctx.vsAux[idxP], xp, vsDot);
-        }
 
         float xNormA = ctx.fcS[8];
         float bootNorm = ctx.fcS[8] - 2.0f * cont * ctx.fcS[9]
@@ -845,15 +876,7 @@ static inline void oak_plan_one(Ctx ctx, uint k,
         if (!isfinite(bootNorm)) bootNorm = 0.0f;
         if (!isfinite(xNormA) || xNormA < 0.0f) xNormA = 0.0f;
 
-        float rPrev = 0.0f, lPrev = 0.0f, rHat2 = 0.0f, lRaw2 = 0.0f;
-        for (uint a = 0u; a < OAK_ACT; ++a) {
-            uint ip = act_of(actP, a);
-            uint idxP = ip * ctx.K + k;
-            float xp = prev[ip];
-            rPrev = fma(ctx.optReward[idxP], xp, rPrev);
-            lPrev = fma(ctx.optDuration[idxP], xp, lPrev);
-        }
-        rHat2 = rHat; lRaw2 = lRaw;
+        float rHat2 = rHat, lRaw2 = lRaw;
         float optRhoOld = ctx.optRho[k];
         if (!isfinite(optRhoOld)) optRhoOld = 0.0f;
         float rTd = (ctx.planScr[0] - ctx.scalars->rho) - optRhoOld + cont * rHat2 - rPrev;
@@ -887,11 +910,11 @@ static inline void oak_plan_one(Ctx ctx, uint k,
         }
     }
 
-static inline void oak_stage_plan_all(Ctx ctx, uint tid, uint pSlot) {
+static inline void oak_stage_plan_all(Ctx ctx, uint tid,
+                                      threadgroup const float *stash,
+                                      bool stashDirty, uint pSlot) {
     if (tid >= ctx.K) return;
-    device const float *prev = state_at(ctx, pSlot);
-    device const float *curr = state_at(ctx, 1u - pSlot);
-    oak_plan_one(ctx, tid, prev, curr, pSlot);
+    oak_plan_one(ctx, tid, stash, stashDirty, pSlot);
 
     {
         uint k = tid;
@@ -1060,7 +1083,11 @@ inline void emit_blend_grid(Ctx ctx, uint tid) {
         ? blend / wNorm : fallback;
 }
 
-static inline void oak_replace_commit(Ctx ctx, uint tid) {
+static inline void oak_replace_commit(Ctx ctx, uint tid, threadgroup float *tgStash,
+                                      threadgroup float *tgDirty) {
+    // Per-step stash validity flag for plan (cleared here, set if a feature
+    // replacement zeroes a model row out from under encode's stashed dots).
+    if (tid == 0u) tgDirty[0] = 0.0f;
     device const float *curr = state_at(ctx, 1u - ctx.stateSlot);
     if (!OAK_ABLATE_PLANNING) {
 
@@ -1179,6 +1206,13 @@ static inline void oak_replace_commit(Ctx ctx, uint tid) {
                 ctx.vsAux[(i) * ctx.K + k] = 0.0f;
             }
             ctx.psi[(feat) * ctx.K + k] = ctx.planScr[OAK_PLANSCR_INVSQRTR];
+            // Rows zeroed above -> encode's stashed prev-dots for k no longer
+            // match a post-replace gather; zero the stash (finite state ->
+            // the gather would produce +0.0f).
+            tgStash[k * 4u + 0u] = 0.0f;
+            tgStash[k * 4u + 1u] = 0.0f;
+            tgStash[k * 4u + 2u] = 0.0f;
+            tgStash[k * 4u + 3u] = 0.0f;
             ctx.counters[OAK_CNT_REINIT_OPT] += 1u;
             break;
         }
@@ -1303,6 +1337,19 @@ uint birth = ctx.featureBirthCount[worst] + 1u;
         float basis = 1.0f / float(max(ctx.D, 1u));
         uint DLc = oak_dl(ctx);
         uint KDL = ctx.K * DLc;
+
+        if (tid == 0u) {
+            // Option k's rows are zeroed below; keep encode's stashed
+            // prev-dots in step with a post-replace gather (+0.0f).
+            tgStash[k * 4u + 0u] = 0.0f;
+            tgStash[k * 4u + 1u] = 0.0f;
+            tgStash[k * 4u + 2u] = 0.0f;
+            tgStash[k * 4u + 3u] = 0.0f;
+            // Type 1 additionally zeroes feature row `worst` of EVERY
+            // option's model rows; the encode-time stash cannot be patched
+            // for that (fp order), so plan re-gathers this step.
+            if (ctx.dynaSlot[0] == 1u) tgDirty[0] = 1.0f;
+        }
 
         for (uint i = tid; i < ctx.R; i += 32u) {
             ctx.psi[(i) * ctx.K + k] = 0.0f;
@@ -2390,22 +2437,25 @@ kernel void oak_megastep(device float *params [[buffer(0)]],
     bool packedActive = tid < lanesThisTg;
     uint packedLane = laneBase + tid;
     // tg diet: prev/curr active rows are gathered from device state at the
-    // point of use (same values, L2-resident 1KB row); only the K-wide
-    // continuation vector stays in threadgroup memory, strided by K.
+    // point of use (same values, L2-resident 1KB row). Threadgroup memory
+    // holds, per lane: the K-wide continuation vector, then a 4K prev-dot
+    // stash written by encode and consumed gather-free by oak_plan_one.
     uint tgK = is_function_constant_defined(OAK_SPEC_OPTION_COUNT)
         ? OAK_SPEC_OPTION_COUNT : cfg.optionCount;
     threadgroup float *lCont = tgCont + laneSg * tgK;
+    threadgroup float *lStash = tgCont + OAK_MEGA_G * tgK + laneSg * 4u * tgK;
+    threadgroup float *lDirty = tgCont + 5u * OAK_MEGA_G * tgK + laneSg;
     for (uint it = 0u; it < stepsThisDispatch; ++it) {
 
         if (ecfg.policyMode == 0u) {
             if (wideActive && (OAK_MEGA_STAGES & 1u) != 0u) {
                 Ctx ctx = make_ctx(params, stateArena, uintArena, scalars, stats, cfg, wideLane);
-                oak_stage_encode(ctx, slane, 32u, lCont);
+                oak_stage_encode(ctx, slane, 32u, lCont, lStash);
             }
             oak_lane_fence();
             if (wideActive && (OAK_MEGA_STAGES & 8u) != 0u) {
                 Ctx ctx = make_ctx(params, stateArena, uintArena, scalars, stats, cfg, wideLane);
-                oak_replace_commit(ctx, slane);
+                oak_replace_commit(ctx, slane, lStash, lDirty);
             }
             oak_lane_fence();
             if (wideActive && (OAK_MEGA_STAGES & 16u) != 0u) {
@@ -2423,7 +2473,9 @@ kernel void oak_megastep(device float *params [[buffer(0)]],
             oak_stage_sample_act(params, stateArena, uintArena, scalars, stats, cfg,
                                  lanes, laneSeeds, ecfg, packedLane);
         }
-        threadgroup_barrier(mem_flags::mem_device);
+        // mem_threadgroup ordering added for the prev-dot stash (encode /
+        // replace write it, plan reads it on a different simdgroup).
+        threadgroup_barrier(mem_flags::mem_device_and_threadgroup);
 
         if ((OAK_MEGA_STAGES & 64u) != 0u) {
             if (packedActive && sgrp == 0u)
@@ -2442,9 +2494,16 @@ kernel void oak_megastep(device float *params [[buffer(0)]],
                 uint wLane = laneBase + idx;
                 Ctx pctx = make_ctx(params, stateArena, uintArena, scalars, stats, cfg, wLane);
                 uint pSlot = 1u - pctx.stateSlot;
+                threadgroup const float *pStash = tgCont + OAK_MEGA_G * tgK + idx * 4u * tgK;
+                bool stashDirty = tgCont[5u * OAK_MEGA_G * tgK + idx] != 0.0f;
                 if ((OAK_MEGA_STAGES & 2u) != 0u)
-                    oak_stage_plan_all(pctx, slane, pSlot);
-                simdgroup_barrier(mem_flags::mem_device);
+                    oak_stage_plan_all(pctx, slane, pStash, stashDirty, pSlot);
+                // No fence plan->learn: they communicate only through
+                // column-k slots (vsTd/vsDot/vsScale/vsAuxScale/optRewardTd/
+                // prioOpt/polCoef) produced and consumed by the same thread
+                // k = tid, and shared arrays are learn-write/plan-read-only
+                // in the same column. Everything wider is behind the step's
+                // threadgroup_barrier.
                 if ((OAK_MEGA_STAGES & 4u) != 0u) {
                     device const float *prevS = state_at(pctx, pSlot);
                     device const float *currS = state_at(pctx, 1u - pSlot);

@@ -510,10 +510,11 @@ func metricsRoot() -> URL {
     }
     let megaPipe = try dev.makeComputePipelineState(
       function: lib.makeFunction(name: "oak_megastep", constantValues: megaConstants))
-    // tg diet: only the K-wide continuation vector lives in threadgroup
-    // memory (K = 32, Engine's hardcoded option count); prev/curr active
-    // rows are gathered from device state at the point of use.
-    let megaSlotBytes = 32 * megaG * MemoryLayout<Float>.stride
+    // tg: per lane, the K-wide continuation vector plus a 4K prev-dot stash
+    // (encode gathers plan's prev-dots; plan reads them gather-free) and a
+    // stash-dirty flag (feature replacement forces a plan re-gather).
+    // K = 32, Engine's hardcoded option count.
+    let megaSlotBytes = (5 * 32 + 1) * megaG * MemoryLayout<Float>.stride
     guard megaG >= 1, megaW <= megaPipe.maxTotalThreadsPerThreadgroup,
       megaSlotBytes <= dev.maxThreadgroupMemoryLength
     else {
