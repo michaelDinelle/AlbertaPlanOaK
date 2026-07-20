@@ -946,15 +946,16 @@ static inline void oak_plan_one(Ctx ctx, uint k,
         float rHat2 = rHat, lRaw2 = lRaw;
         float optRhoOld = ctx.optRho[k];
         if (!isfinite(optRhoOld)) optRhoOld = 0.0f;
-        // optReward TD with optRho-only centering (per-head, AGENTS.md): the
-        // cumulant is r - optRho, NOT (r - rho_bar) - optRho — the double
-        // centering was a systematic bias feeding the unanchored bootstrap's
-        // explosion. optRho tracks the option's own average reward rate.
+        // optRho as a simple importance-weighted EMA of the reward (NOT the
+        // optReward bootstrap TD — the optReward model's unanchored bootstrap
+        // explodes over long horizons and is REMOVED from the VI backup). This
+        // tracks the option's average reward rate directly, stably, for the
+        // de-bias (optRho_k - rho-bar)·l-hat.
         float rTd = (ctx.planScr[0] - optRhoOld) + cont * rHat2 - rPrev;
-        // optRho tracking at the structural track_rate (faster early than the
-        // invR asymptote) — the per-head centering must catch up with the
-        // young Patch-A model or the unanchored bootstrap runs away.
-        if (isfinite(rTd)) ctx.optRho[k] = optRhoOld + track_rate(ctx.stepCount, ctx.R) * rTd;
+        float rhoImp = ctx.importance[k];
+        if (!isfinite(rhoImp) || rhoImp < 0.0f) rhoImp = 0.0f;
+        if (isfinite(ctx.planScr[0]))
+            ctx.optRho[k] = optRhoOld + track_rate(ctx.stepCount, ctx.R) * rhoImp * (ctx.planScr[0] - optRhoOld);
         float dTd = (k == 0u) ? 0.0f : (1.0f + cont * lRaw2 - lPrev);
 
         float vsTd = cont * vsNext + (1.0f - cont) * vX - vsPrev;
@@ -1076,15 +1077,13 @@ static inline void oak_learn_rows(Ctx ctx, device const float *prev,
                 device float *h = &ctx.vsAux[i * K + k];
                 *h = safe_w(*h, *h + aM * rho * vErr * xp * vasc);
                 // Patch A (Phase 1): the option reward/duration models actually
-                // learn — they never had an apply (r-hat/l-hat were identically
-                // 0, the L1/L2 "models too inaccurate" confound). Semi-gradient
-                // differential TD at half the vStop scale — the young models
-                // are bootstrap-unanchored (vStop is anchored by vX), so they
-                // learn at a conservative rate while optRho catches up.
-                device float *rw = &ctx.optReward[i * K + k];
-                *rw = safe_w(*rw, *rw + aM * rho * rtd * xp * vsc * 0.25f);
+                // optReward model's unanchored bootstrap explodes over long
+                // horizons (11 deaths @200k) and is REMOVED from the VI backup
+                // — the reward-to-go comes from the trajectory relay (Holland
+                // 2018), not a bootstrap reward model. Only optDuration learns
+                // (stable, for the de-bias duration).
                 device float *lw = &ctx.optDuration[i * K + k];
-                *lw = safe_w(*lw, *lw + aM * rho * dtd * xp * vsc * 0.25f);
+                *lw = safe_w(*lw, *lw + aM * rho * dtd * xp * vsc * 0.1f);
             }
         }
     }
@@ -2566,20 +2565,22 @@ static inline void oak_dyna_backups(Ctx ctx, uint tid) {
         float modelU = -FLT_MAX;
         for (uint c = 0u; c < 4u; ++c) {
             uint k = cand[c];
-            float r1 = 0.0f, s1 = 0.0f, s2 = 0.0f, l1 = 0.0f;
+            float s1 = 0.0f, s2 = 0.0f, l1 = 0.0f;
             for (uint a = 0u; a < OAK_ACT; ++a) {
                 uint i = (a < OAK_CORE) ? a : ri[a - OAK_CORE];
                 float xv = rv[a];
                 uint idx = i * ctx.K + k;
-                r1 = fma(ctx.optReward[idx], xv, r1);
                 l1 = fma(ctx.optDuration[idx], xv, l1);
                 s1 = fma(ctx.vStop[idx], xv, s1);
                 s2 = fma(ctx.vStop2[idx], xv, s2);
             }
             // Twin MEAN tail (never twin-min — TD3 target-side pessimism).
-            // Mandatory centering de-bias: per-head optRho_k makes raw r-hat
-            // cross-incomparable; (optRho_k - rho-bar)·l-hat restores the
-            // shared rho-bar frame (Wan-Naik-Sutton 2110.13855).
+            // optReward is REMOVED from the VI backup: its unanchored bootstrap
+            // explodes over long horizons (11 deaths @200k). The option value
+            // here is the twin-mean stop value plus the centering de-bias
+            // (optRho_k - rho-bar)·l-hat (Wan-Naik-Sutton 2110.13855); the
+            // reward-to-go comes from the trajectory relay (the PRIMARY credit
+            // mechanism, Holland 2018), not a bootstrap reward model.
             float tail = (k == 0u) ? vX : 0.5f * (s1 + s2);
             float dur = decode_duration(l1);
             float rDeb = (k == 0u) ? 0.0f : (ctx.optRho[k] - ctx.scalars->rho) * dur;
@@ -2587,8 +2588,8 @@ static inline void oak_dyna_backups(Ctx ctx, uint tid) {
             float dis = (k == 0u) ? 0.0f : fabs(s1 - s2);
             // Twin-disagreement trust gate (structural epsilon): skip options
             // whose twins disagree past the gate — model USE, never a target.
-            if (isfinite(dis) && dis <= 1.0f && isfinite(r1 + rDeb + tail) && (r1 + rDeb + tail) > modelU)
-                modelU = r1 + rDeb + tail;
+            if (isfinite(dis) && dis <= 1.0f && isfinite(rDeb + tail) && (rDeb + tail) > modelU)
+                modelU = rDeb + tail;
         }
         // Trajectory relay (model-free, HVH-safe): real reward + next slot's U.
         float relayU = -FLT_MAX;
@@ -2643,7 +2644,10 @@ static inline void oak_dyna_backups(Ctx ctx, uint tid) {
         if (!isfinite(vsTd)) vsTd = 0.0f;
         float scS = fma(imp, xNormP, 1.0f);
         scS = (isfinite(scS) && scS > 0.0f) ? (1.0f / scS) : 0.0f;
-        ctx.dynaC[k] = imp * vsTd * scS;
+        // vStop2 at half rate — it lacks vStop's GTD2 anchor (vStop uses the
+        // aux-corrected gv gradient; vStop2 uses the raw dynaC form) and was
+        // exploding over long horizons (7 deaths @100k).
+        ctx.dynaC[k] = imp * vsTd * scS * 0.5f;
         simdgroup_barrier(mem_flags::mem_device);
         for (uint a = tid; a < OAK_ACT; a += 32u) {
             uint i = act_of(actP, a);
