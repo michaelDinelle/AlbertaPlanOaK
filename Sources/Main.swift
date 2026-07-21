@@ -1346,55 +1346,110 @@ func metricsRoot() -> URL {
         isDirectory: true)
     }
     try fm.createDirectory(at: dir, withIntermediateDirectories: true)
-    // flopsPerLaneStep: honest per-lane-step multiply+add count (fma = 2
-    // flops) of the post-slimming megakernel, by stage, computed from the
-    // real config — R = rank, K = 32 options, D = 12, DL = D/2 live dims,
-    // A = 64 active rows, Rn nursery. Counts the fma-dominated terms:
-    //   encode  value dots 2A | psi dots 2KA | hDot KA | model dots 3KA | norms 6A
-    //   plan    prev-side model dots 4KA | polCoef K*DL
-    //   learn   policy apply KA*DL | psi/vStop+aux head updates 4KA | value banks 2A
-    //   emit    option means KA*DL | blend D*K
-    //   dyna    ring vX+xNorm 2A per warp thread | 4 candidates x 3 dots 12A per
-    //           thread | copy-2 4KA | dynaAcc apply 2K per thread
-    //   window  utility AK | consensus DL*K dir + DL*A apply | nursery Rn/2 | eligScr R
-    //   misc    serial scalar/keyboard/curation/stats loops ~4e3
-    //   env     fp32 HalfCheetah physics chain ~2e4 (F4-port family estimate)
+    // organFlops / flopsPerLaneStep (organCostVersion 1): honest per-lane-step
+    // multiply+add count (fma = 2 flops) of the post-slimming megakernel,
+    // binned by FC-STOMP ORGAN (not pipeline stage), computed from the real
+    // config — R = rank, K = 32 options, D = 12, DL = D/2 live dims, A = 64
+    // active rows, Rn nursery, traceLevels from Arena. Each organ maps to a
+    // set of (stage, loop, trip-count) terms; this is the old per-stage model
+    // re-binned, plus three corrections found by reading the actual loops
+    // (docs/research/allocation-and-instrument-design.md §1):
+    //   1. twin-dot undercount: the encode K-gather computes 11 dots/option-
+    //      step (psiPrev/psiNext/hDot = 3A; rHat/lRaw/vModel/vModel2 = 4A;
+    //      pdVs/pdVsA/pdR/pdL stash = 4A — OakKernel.metal:624-643); the stage
+    //      model counted 10KA — the second twin vModel2 dot was uncounted.
+    //      +KA lands in OptionModels.
+    //   2. FeatureConstruction was absent: obs stats + trace EMAs
+    //      (OakKernel.metal:877-888), core write (:920-959), gate/tile eval
+    //      (:962-987), gated-bank eval 32 banks x 7 slots (:988-1010).
+    //   3. ActionEmission (sample stage) was absent: Philox + Box-Muller per
+    //      dim (:2536-2546), behavior-credit staging ~3/(option,live-dim) +
+    //      importance ratio K (:2570-2586); Gumbel-max discrete (:2460-2515).
     // Ablation-aware: each term is counted only when the corresponding
-    // function-constant-guarded loop actually compiles in. Unguarded loops
-    // (value/psi/hDot dots, norms) run — and are counted — under every
-    // ablation. Canonical case: OAK_ABLATE=planning removes all of dyna
-    // (oak_dyna_backups early-returns and the dynaAcc apply compiles out).
-    let fObs = 17, fD = 12  // HalfCheetah config (same constants fleetGPU uses)
+    // function-constant-guarded loop actually compiles in (guard placement
+    // identical to the old stage model). Unguarded loops (value/psi/hDot
+    // dots, norms, polCoef, keyboard, utility scan, sample) run — and are
+    // counted — under every ablation. Canonical case: OAK_ABLATE=planning
+    // removes all of dyna (oak_dyna_backups early-returns and the dynaAcc
+    // apply compiles out). K-parking (Phase 9.3) is DYNAMIC — parked options
+    // skip their A-gathers at runtime; the static model counts full-width
+    // trip counts regardless (parking's refund shows up in wall-clock/SPS,
+    // not here).
+    // CONSUME AS RELATIVE SHARES (or per-organ deltas across ablations),
+    // NEVER ABSOLUTE SILICON FLOPS: static trip counts over-attribute ~3-5x
+    // vs measured wall (design §1 calibration). organCostVersion gates
+    // cross-version absolute comparisons (pre-organ roots are version 0).
+    let fObs = 17, fD = 12  // universal I/O contract (same constants fleetGPU uses)
     let fInputW = Arena.input(fObs, fD)
     var fR = 32
     while fR < 2 * fInputW { fR *= 2 }
     let fK = 32, fA = 64, fDL = max(fD / 2, 1)
+    let fTraceLevels = max(Arena.traces(fObs) - 1, 0)
     let fRn = fR * max(
       ProcessInfo.processInfo.environment["OAK_SUTTON_MULT"].flatMap(Int.init) ?? 1, 1)
     let ablated = Set(ablations.names)
-    var fEncode = 2 * fA + 2 * fK * fA + fK * fA + 6 * fA
-    if !ablated.contains("option-models") { fEncode += 3 * fK * fA }
-    var fPlan = fK * fDL
-    if !ablated.contains("option-models") { fPlan += 4 * fK * fA }
-    var fLearn = 0
-    if !ablated.contains("option-policies") { fLearn += fK * fA * fDL }
-    if !ablated.contains("rr-subtasks") { fLearn += 2 * fK * fA }
-    if !ablated.contains("option-models") { fLearn += 2 * fK * fA }
-    if !ablated.contains("gvf-prediction") { fLearn += 2 * fA }
-    var fEmit = fD * fK
-    if !ablated.contains("option-policies") { fEmit += fK * fA * fDL }
-    let fDyna = ablated.contains("planning") ? 0 : 14 * fA * 32 + 4 * fK * fA + 2 * fK * 32
-    var fWindow = fA * fK
-    if !ablated.contains("option-policies"), !ablated.contains("generate-and-test") {
-      fWindow += fDL * fK + fDL * fA
+    var organFma: [String: Int] = [
+      "FeatureConstruction": 0, "GVFPrediction": 0, "RewardRespectingSubtasks": 0,
+      "OptionPolicies": 0, "OptionModels": 0, "Planning": 0, "OptionKeyboard": 0,
+      "SearchControl": 0, "GenerateAndTest": 0, "ActionEmission": 0, "misc": 0,
+    ]
+    // FeatureConstruction (encode): core write 32 slots + gate/tile eval 32
+    // banks run under every ablation; obs stats/traces and the gated-bank
+    // eval compile out under feature-construction.
+    organFma["FeatureConstruction"]! += 16 + 3 * 32
+    if !ablated.contains("feature-construction") {
+      organFma["FeatureConstruction"]! += fObs * (2 + fTraceLevels) + 32 * 7 * 5
     }
-    if !ablated.contains("generate-and-test") { fWindow += fRn / 2 + fR }
-    let fMisc = 4_000
+    // GVFPrediction: value dots 2A + norms 6A (encode, unguarded) + value
+    // banks 2A (learn).
+    organFma["GVFPrediction"]! += 2 * fA + 6 * fA
+    if !ablated.contains("gvf-prediction") { organFma["GVFPrediction"]! += 2 * fA }
+    // RewardRespectingSubtasks: encode psi dots 2KA + hDot KA (unguarded) +
+    // learn 2KA + headScale/psiRho K.
+    organFma["RewardRespectingSubtasks"]! += 2 * fK * fA + fK * fA
+    if !ablated.contains("rr-subtasks") {
+      organFma["RewardRespectingSubtasks"]! += 2 * fK * fA + fK
+    }
+    // OptionPolicies: polCoef K*DL (plan, unguarded) + learn apply KA*DL +
+    // emit option means KA*DL + consensus DL*K dir + DL*A apply (window).
+    organFma["OptionPolicies"]! += fK * fDL
+    if !ablated.contains("option-policies") {
+      organFma["OptionPolicies"]! += 2 * fK * fA * fDL
+      if !ablated.contains("generate-and-test") {
+        organFma["OptionPolicies"]! += fDL * fK + fDL * fA
+      }
+    }
+    // OptionModels (correction 1 — encode gather 4KA now includes the vModel2
+    // twin dot): encode 4KA + plan-stage prev-dot stash 4KA + learn 2KA +
+    // oak_plan_one scalars ~16/option (OakKernel.metal:1086-1126).
+    if !ablated.contains("option-models") {
+      organFma["OptionModels"]! += 4 * fK * fA + 4 * fK * fA + 2 * fK * fA + 16 * fK
+    }
+    // Planning (dyna): ring vX+xNorm 2A per warp thread | 4 candidates x 3
+    // dots 12A per thread | copy-2 4KA | dynaAcc apply 2K per thread.
+    if !ablated.contains("planning") {
+      organFma["Planning"]! += 14 * fA * 32 + 4 * fK * fA + 2 * fK * 32
+    }
+    // OptionKeyboard: softmax refresh K + chord blend D*K + GPI scans K.
+    organFma["OptionKeyboard"]! += fK + fD * fK + fK
+    // SearchControl: window utility scan A*K + prioOpt K + ESS/entropy ~1/4-step.
+    organFma["SearchControl"]! += fA * fK + fK + fK / 2
+    // GenerateAndTest: nursery Rn/2 + eligScr R + LCB scan K.
+    if !ablated.contains("generate-and-test") {
+      organFma["GenerateAndTest"]! += fRn / 2 + fR + fK
+    }
+    // ActionEmission (correction 3, sample stage): Philox + Box-Muller ~5/dim
+    // + behavior-credit staging ~3 per (option, live dim) + importance ratio K.
+    organFma["ActionEmission"]! += 5 * fD + 3 * fK * fDL + fK
+    // misc: serial scalar/keyboard/curation/stats loops (unattributed
+    // overhead no single organ owns).
+    organFma["misc"]! += 4_000
+    let organCostVersion = 1
+    let organFlops = organFma.mapValues { 2 * $0 }
     // Env-window flops are env-conditional per lane's env: the fp32
     // HalfCheetah physics chain ~2e4 (F4-port family estimate); the integer
     // gridworld steps are near-free (obs formulas dominate).
-    let agentFlops =
-      2 * (fEncode + fPlan + fLearn + fEmit + fDyna + fWindow + fMisc)
+    let agentFlops = organFlops.values.reduce(0, +)
     let envFlops: [String: Int] = [
       "HalfCheetah-v4": 20_000, "FourRooms-cont-v0": 40, "DeepSea-cont-v0": 20,
       "KeyCorridor-cont-v0": 60, "Acrobot-cont-v0": 200, "MountainCar-cont-v0": 40,
@@ -1407,6 +1462,8 @@ func metricsRoot() -> URL {
       "policies": policies.map(\.rawValue), "ablation": ablations.names,
       "ablationLabel": ablations.label,
       "flopsPerLaneStep": flopsPerLaneStep,
+      "organFlops": organFlops,
+      "organCostVersion": organCostVersion,
       "startedAt": ISO8601DateFormatter().string(from: Date()),
     ]
     if let envSchedule {

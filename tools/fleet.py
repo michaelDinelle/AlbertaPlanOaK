@@ -22,6 +22,132 @@ SOTA_FRAMING_NOTE = (
     "delivered = online reward over the entire stream, flailing included (ours). "
     "Per-FLOP claims require both sides instrumented (AGENTS.md rules).")
 
+# --- Phase 8: per-organ reward/GFLOP instrument ----------------------------
+# organCostVersion 1 mirror of the host-side static FLOP model
+# (Sources/Main.swift, "organFlops / flopsPerLaneStep"). MUST stay term-for-term
+# identical to the Swift derivation: same guards, same fma-units-then-x2
+# convention. Legacy roots (no organFlops in meta.json) are recomputed with
+# this mirror and flagged "recomputed-v1".
+ORGAN_COST_VERSION = 1
+ORGAN_COST_NOTE = (
+    "static trip-count model (fma=2 flops), ablation-aware; over-attributes "
+    "~3-5x vs silicon — consume organ values as RELATIVE SHARES or per-organ "
+    "deltas across ablations, never absolute FLOPs (design "
+    "docs/research/allocation-and-instrument-design.md §1). Cross-version "
+    "absolute comparisons are refused.")
+# Env-window physics estimates (mirror of the Swift envFlops table).
+ENV_FLOPS = {
+    "HalfCheetah-v4": 20_000, "FourRooms-cont-v0": 40, "DeepSea-cont-v0": 20,
+    "KeyCorridor-cont-v0": 60, "Acrobot-cont-v0": 200, "MountainCar-cont-v0": 40,
+    "CartPole-cont-v0": 60, "Pendulum-cont-v0": 50, "Chain-cont-v0": 10,
+}
+
+def organ_flops_v1(ablations) -> dict[str, int]:
+    """organCostVersion 1: FC-STOMP organ -> flops/lane-step (agent only).
+    fma-units accumulation x2 at the end; guards identical to the Swift model.
+    Config: universal I/O contract O=17, D=12 -> inputW=99 -> R=256, K=32,
+    A=64, DL=6, traceLevels=4, Rn=R (OAK_SUTTON_MULT=1)."""
+    abl = set(ablations or [])
+    f_obs, f_d = 17, 12
+    traces = int(math.log2(max(f_obs, 1))) + 1
+    input_w = traces * f_obs + f_d + 2
+    f_r = 32
+    while f_r < 2 * input_w:
+        f_r *= 2
+    f_k, f_a, f_dl = 32, 64, max(f_d // 2, 1)
+    f_tl = max(traces - 1, 0)
+    f_rn = f_r
+    fma = {
+        "FeatureConstruction": 16 + 3 * 32,
+        "GVFPrediction": 2 * f_a + 6 * f_a,
+        "RewardRespectingSubtasks": 2 * f_k * f_a + f_k * f_a,
+        "OptionPolicies": f_k * f_dl,
+        "OptionModels": 0, "Planning": 0,
+        "OptionKeyboard": f_k + f_d * f_k + f_k,
+        "SearchControl": f_a * f_k + f_k + f_k // 2,
+        "GenerateAndTest": 0,
+        "ActionEmission": 5 * f_d + 3 * f_k * f_dl + f_k,
+        "misc": 4_000,
+    }
+    if "feature-construction" not in abl:
+        fma["FeatureConstruction"] += f_obs * (2 + f_tl) + 32 * 7 * 5
+    if "gvf-prediction" not in abl:
+        fma["GVFPrediction"] += 2 * f_a
+    if "rr-subtasks" not in abl:
+        fma["RewardRespectingSubtasks"] += 2 * f_k * f_a + f_k
+    if "option-policies" not in abl:
+        fma["OptionPolicies"] += 2 * f_k * f_a * f_dl
+        if "generate-and-test" not in abl:
+            fma["OptionPolicies"] += f_dl * f_k + f_dl * f_a
+    if "option-models" not in abl:
+        fma["OptionModels"] += 4 * f_k * f_a + 4 * f_k * f_a + 2 * f_k * f_a + 16 * f_k
+    if "planning" not in abl:
+        fma["Planning"] += 14 * f_a * 32 + 4 * f_k * f_a + 2 * f_k * 32
+    if "generate-and-test" not in abl:
+        fma["GenerateAndTest"] += f_rn // 2 + f_r + f_k
+    return {k: 2 * v for k, v in fma.items()}
+
+# Design §2 Tier-0: per-organ online yield proxies already flowing through
+# fleet.jsonl health (kernelRho lives at row top level). Ranking signals only
+# — they never convict and are never written into learning targets.
+TIER0_SIGNALS = {
+    "FeatureConstruction": ["oakFeatureReinitCountFinal"],
+    "GVFPrediction": ["mainTd", "kernelRho"],
+    "RewardRespectingSubtasks": ["terminationRate", "selectedContinuation",
+                                 "optionDurationMean"],
+    "OptionPolicies": ["actorAdvantageL1", "actorUpdateNormMean",
+                       "actorSupportEntropy", "actionDeltaL2Mean"],
+    "OptionModels": ["modelPriorityMax", "importanceEss"],
+    "Planning": ["planTd"],
+    "OptionKeyboard": ["keyboardL1", "keyboardEffectiveL1",
+                       "selectedKeyboardWeight"],
+    "SearchControl": ["searchControlUseMean"],
+    "GenerateAndTest": ["generateTestEligibleCount"],
+    "ActionEmission": ["actionDeltaL2Mean", "actionDeltaPeak"],
+}
+
+def env_flops_map(meta: dict) -> dict[str, int]:
+    """envId -> per-env flopsPerLaneStep from meta.envSchedule (mixed runs)."""
+    return {e["envId"]: e["flopsPerLaneStep"]
+            for e in (meta.get("envSchedule") or []) if e.get("flopsPerLaneStep")}
+
+def tier0_yields(run: dict, policy: str = "oak") -> dict[str, dict[str, dict]]:
+    """Per-organ Tier-0 yield trend: per heartbeat, the cross-lane median of
+    each mapped signal; reported as q25/q50/q75 over heartbeats + first/last
+    (the trend). Organs whose signals are absent in this root are omitted."""
+    by_step: dict[int, list[dict]] = defaultdict(list)
+    for (pol, _seed), rows in run["lanes"].items():
+        if pol != policy:
+            continue
+        for r in rows:
+            if r.get("kind") in ("hb", "final"):
+                by_step[r["step"]].append(r)
+    def sig_val(r, key):
+        v = r.get(key)
+        if not isinstance(v, (int, float)):
+            v = (r.get("health") or {}).get(key)
+        return v if isinstance(v, (int, float)) and math.isfinite(v) else None
+    out: dict[str, dict[str, dict]] = {}
+    for organ, keys in TIER0_SIGNALS.items():
+        for key in keys:
+            medians = []
+            for step in sorted(by_step):
+                vals = [v for v in (sig_val(r, key) for r in by_step[step])
+                        if v is not None]
+                if vals:
+                    medians.append((step, float(np.median(vals))))
+            if not medians:
+                continue
+            arr = np.array([m for _, m in medians])
+            q = np.percentile(arr, [25, 50, 75])
+            out.setdefault(organ, {})[key] = {
+                "heartbeatMedianQ25": float(q[0]), "heartbeatMedianQ50": float(q[1]),
+                "heartbeatMedianQ75": float(q[2]),
+                "firstHeartbeatMedian": float(arr[0]), "lastHeartbeatMedian": float(arr[-1]),
+                "heartbeats": len(medians),
+            }
+    return out
+
 def wilson(k: int, n: int, z: float = 1.96) -> tuple[float, float, float]:
     if n == 0:
         return float("nan"), 0.0, 1.0
@@ -132,7 +258,7 @@ def load_run(root: Path) -> dict:
     if deaths_path.exists():
         with open(deaths_path) as f:
             deaths = [json.loads(line) for line in f]
-    return {"meta": meta, "lanes": lanes, "deaths": deaths}
+    return {"meta": meta, "lanes": lanes, "deaths": deaths, "root": root}
 
 def finals(run: dict, policy: str) -> dict[int, dict]:
     out = {}
@@ -466,6 +592,127 @@ def render_leaderboard(run: dict, result: dict, top: int) -> str:
             f"| {s} | {life:+.4f} | {fin[s]['rewardSum']:+,.0f} | {rec:+.4f} | {zen} | {status} |")
     return "\n".join(lines)
 
+def build_organ_report(run: dict, slice_results: dict[str, list[dict]],
+                       results: list[dict], slices: dict[str, list[int]]) -> dict:
+    """<run-root>/organ-report.json — the Phase-8 purge artifact: per-organ
+    FLOP share (meta.organFlops when present, else the recomputed v1 mirror),
+    per-organ Tier-0 yield trends, and the per-env reward/GFLOP breakdown, so
+    a purge can read 'organ X: Y% of agent FLOPs, Z measured yield'."""
+    meta = run["meta"]
+    ablations = meta.get("ablation") or []
+    if meta.get("organFlops"):
+        organ_flops = {k: int(v) for k, v in meta["organFlops"].items()}
+        version = int(meta.get("organCostVersion", 0))
+        source = "meta.json"
+    else:
+        organ_flops = organ_flops_v1(ablations)
+        version = ORGAN_COST_VERSION
+        source = "recomputed-v1 (legacy root predates organFlops)"
+    agent_flops = sum(organ_flops.values())
+    yields = tier0_yields(run)
+    organs = {}
+    for organ in sorted(organ_flops):
+        fl = organ_flops[organ]
+        entry = {
+            "flopsPerLaneStep": fl,
+            "share": fl / agent_flops if agent_flops else 0.0,
+        }
+        if organ in yields:
+            entry["tier0Yield"] = yields[organ]
+        organs[organ] = entry
+    envs: dict[str, dict] = {}
+    env_flops = env_flops_map(meta)
+    res_by_env = slice_results if slice_results else {meta.get("envId"): results}
+    for env_id, sres in res_by_env.items():
+        r = next((x for x in sres if x and x.get("policy") == "oak"), None) or \
+            next((x for x in sres if x), None)
+        if not r:
+            continue
+        fl = env_flops.get(env_id) or meta.get("flopsPerLaneStep")
+        env_ph = ENV_FLOPS.get(env_id)
+        v1_fl = (agent_flops + env_ph) if env_ph is not None else None
+        envs[env_id] = {
+            "lanes": r["lanes"],
+            "flopsPerLaneStep": fl,
+            "envFlopsPerLaneStep": env_ph,
+            "agentFlopsPerLaneStep": agent_flops,
+            # v1-consistent lane cost: this report's organ model + the env
+            # physics estimate. For legacy roots (v0 meta) `flopsPerLaneStep`
+            # above embeds the pre-organ agent model — use the v1 pair for any
+            # cross-root ratio work (the caveat's version rule, applied).
+            "v1FlopsPerLaneStep": v1_fl,
+            "iqmDeliveredAll": r["iqmDeliveredAll"],
+            "positiveFraction": r["positiveFraction"],
+            "sustainingFraction": r.get("sustainingFraction"),
+            "divergenceRate": r["divergence"]["rate"],
+            "rewardPerGFLOP": (r["iqmDeliveredAll"] / (fl / 1e9)) if fl else None,
+            "v1RewardPerGFLOP": (r["iqmDeliveredAll"] / (v1_fl / 1e9)) if v1_fl else None,
+        }
+    report = {
+        "organCostVersion": version,
+        "organCostSource": source,
+        "caveat": ORGAN_COST_NOTE,
+        "ablation": ablations,
+        "ablationLabel": meta.get("ablationLabel", "none"),
+        "agentFlopsPerLaneStep": agent_flops,
+        "envLanes": {e: len(s) for e, s in slices.items()},
+        "organs": organs,
+        "envs": envs,
+    }
+    ledger = Path(run["root"]).parent / "ORGANS.json"
+    if ledger.exists():
+        # The cross-run conviction ledger (Tier-1 ablation-matrix verdicts):
+        # attached verbatim so this report is the single purge brief.
+        try:
+            report["organsLedger"] = json.loads(ledger.read_text())
+        except json.JSONDecodeError:
+            report["organsLedger"] = {"error": "unparseable ORGANS.json"}
+    return report
+
+def render_organ_section(report: dict) -> str:
+    """Compact printed form of the organ report (full artifact: organ-report.json)."""
+    lines = [
+        "",
+        "**Organ yield × GFLOP** (organCostVersion %d, %s)"
+        % (report["organCostVersion"], report["organCostSource"]),
+        "",
+        "> Shares are RELATIVE (static trip-count model, ~3-5x over-attribution "
+        "vs silicon); per-organ reward conviction comes from the paired "
+        "ablation matrix (ORGANS.json), not from this table. Tier-0 yields "
+        "rank hypotheses — they never convict.",
+        "",
+        "| organ | FLOP share | flops/lane-step | tier-0 yield (heartbeat-median q50, first→last) |",
+        "|---|---:|---:|---|",
+    ]
+    for organ, e in sorted(report["organs"].items(),
+                           key=lambda kv: -kv[1]["flopsPerLaneStep"]):
+        y = e.get("tier0Yield") or {}
+        ys = "; ".join(
+            f"{k} {v['heartbeatMedianQ50']:.3g} ({v['firstHeartbeatMedian']:.3g}→"
+            f"{v['lastHeartbeatMedian']:.3g})" for k, v in sorted(y.items())) or "—"
+        lines.append("| %s | %.1f%% | %s | %s |"
+                     % (organ, 100.0 * e["share"], f"{e['flopsPerLaneStep']:,}", ys))
+    if report.get("envs"):
+        lines += [
+            "",
+            "**Per-env reward/GFLOP** (per-env lane cost = agent + env physics; "
+            "IQM delivered over all lanes of the slice)",
+            "",
+            "| env | lanes | IQM delivered | %>0 | sustaining | divergence | reward/GFLOP |",
+            "|---|---:|---:|---:|---:|---:|---:|",
+        ]
+        for env_id, e in sorted(report["envs"].items()):
+            sust = e["sustainingFraction"]
+            rpg = e["rewardPerGFLOP"]
+            lines.append(
+                "| %s | %d | %+.4f | %.1f%% | %s | %.1f%% | %s |"
+                % (env_id, e["lanes"], e["iqmDeliveredAll"],
+                   100.0 * e["positiveFraction"],
+                   "n/a" if sust is None else f"{sust:.1%}",
+                   100.0 * e["divergenceRate"],
+                   "n/a" if rpg is None else f"{rpg:+.4g}"))
+    return "\n".join(lines)
+
 def cmd_report(args) -> int:
     run = load_run(args.root)
     meta = run["meta"]
@@ -480,11 +727,20 @@ def cmd_report(args) -> int:
     mixed = len(slices) > 1
     slice_results: dict[str, list[dict]] = {}
     if mixed:
+        env_flops = env_flops_map(meta)
         for env_id, seeds in slices.items():
             view = slice_run(run, seeds)
+            # Per-env slice view: the env's own lane cost (env physics differs
+            # per env; the top-level flopsPerLaneStep is the primary env's) and
+            # lane count, so rewardPerGFLOP and the header are per-env honest.
+            view["meta"] = {
+                **meta, "envId": env_id, "batch": len(seeds),
+                "flopsPerLaneStep": env_flops.get(
+                    env_id, meta.get("flopsPerLaneStep")),
+            }
             sres = [analyze_policy(view, p, window) for p in policies]
             slice_results[env_id] = sres
-            print(render_markdown(sres, {**meta, "envId": env_id}))
+            print(render_markdown(sres, view["meta"]))
             if args.leaderboard:
                 for r in sres:
                     if r:
@@ -507,6 +763,11 @@ def cmd_report(args) -> int:
             for r in sres if r] for env, sres in slice_results.items()}
     out = args.json or (args.root / "summary.json")
     out.write_text(json.dumps(summary, indent=2, sort_keys=True))
+    # Phase 8: per-organ reward/GFLOP artifact (the purge brief).
+    organ_report = build_organ_report(run, slice_results, results, slices)
+    (args.root / "organ-report.json").write_text(
+        json.dumps(organ_report, indent=2, sort_keys=True))
+    print(render_organ_section(organ_report))
     return 0
 
 def gate_verdicts(keep_fin, cand_fin, keep_seeds, cand_seeds, n, horizon, args, label,
