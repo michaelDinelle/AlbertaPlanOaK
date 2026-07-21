@@ -171,6 +171,7 @@ struct Ctx {
     device uint *actIdx;
     device uint *dynaSlot;
     device uint *ringIdx;
+    device uint *planTree;
     device KernelScalars *scalars;
     device KernelStats *stats;
 };
@@ -344,7 +345,12 @@ inline Ctx make_ctx(device float *params, device float *stateArena, device uint 
     c.nurAge = uintArena + u; u += c.Rn;
     c.actIdx = uintArena + u; u += 2u * 64u;
     c.dynaSlot = uintArena + u; u += 32u;
-    c.ringIdx = uintArena + u;
+    c.ringIdx = uintArena + u; u += 32u * c.R;
+    // planTree (Phase 9.1 priority index): binary tournament tree over the
+    // ring's dynaTd priorities, one aligned subtree per sweep partition;
+    // internal nodes 8..M-1 hold winner slots (leaves are dynaTd itself).
+    // Appended last so every legacy uint offset is unchanged.
+    c.planTree = uintArena + u; u += c.R;
     c.scalars = scalars; c.stats = stats;
     return c;
 }
@@ -1360,6 +1366,42 @@ inline void emit_blend_grid(Ctx ctx, uint tid) {
         ? blendR / wNorm : fallbackR;
 }
 
+// Phase 9.1 planning priority index (Inv-10 bit-identical class): a binary
+// tournament tree over the ring's dynaTd priorities, one aligned subtree per
+// sweep partition (the P=8 budget; partitions are pow2-aligned, so partition
+// p's slots are exactly the subtree rooted at node 8+p). Internal node i
+// (8 <= i < M) stores the winner slot of its range under the sweep scan's
+// exact ordering — higher priority wins, ties go to the lower slot — so the
+// sweep's per-partition argmax is the single read planTree[8+p] instead of an
+// M/8-slot scan (this is what keeps a larger ring M scan-free). dynaTd has
+// exactly two write sites (the ring-write seed in oak_replace_commit and the
+// backup's own write in oak_dyna_backups); both call oak_plan_index_update,
+// so the tree equals a fresh full scan at every read. Comparison-only: no FP
+// arithmetic, no value or selection change.
+static inline float oak_plan_prio(Ctx ctx, uint slot) {
+    float p = ctx.dynaTd[slot];
+    return isfinite(p) ? p : 0.0f;  // the scan's own defensive map
+}
+
+static inline uint oak_plan_winner(Ctx ctx, uint node, uint M) {
+    // Winner slot of a tree position: leaves (node >= M) win their own slot.
+    return (node >= M) ? (node - M) : ctx.planTree[node];
+}
+
+static inline void oak_plan_index_update(Ctx ctx, uint slot) {
+    uint M = ctx.R;
+    uint proot = 8u + slot / (M / 8u);  // this slot's partition root
+    for (uint i = (M + slot) >> 1; i >= proot; i >>= 1) {
+        uint wa = oak_plan_winner(ctx, 2u * i, M);
+        uint wb = oak_plan_winner(ctx, 2u * i + 1u, M);
+        // Scan tie-break (strictly-greater keeps the first, lowest slot): the
+        // left child's winner is always the lower slot, so the right child
+        // must strictly exceed it to take the node.
+        ctx.planTree[i] =
+            (oak_plan_prio(ctx, wb) > oak_plan_prio(ctx, wa)) ? wb : wa;
+    }
+}
+
 static inline void oak_replace_commit(Ctx ctx, uint tid, threadgroup float *tgStash,
                                       threadgroup float *tgDirty) {
     // Per-step stash validity flag for plan (cleared here, set if a feature
@@ -1393,6 +1435,7 @@ static inline void oak_replace_commit(Ctx ctx, uint tid, threadgroup float *tgSt
             ctx.planU[slot] = isfinite(vX) ? vX : 0.0f;
             float p0 = fabs(ctx.td[0]) + fabs(ctx.planTd[0]);
             ctx.dynaTd[slot] = isfinite(p0) ? p0 : 0.0f;
+            oak_plan_index_update(ctx, slot);
         }
     }
 
@@ -2191,6 +2234,11 @@ kernel void oak_fleet_init(device float *params [[buffer(0)]],
             ctx.planU[i] = 0.0f;
             ctx.ringReward[i] = 0.0f;
         }
+        // Phase 9.1 priority index: with dynaTd all-zero every internal node's
+        // winner is its range's lowest slot (ties go left); descending order
+        // computes children before their parents.
+        for (uint i = ctx.R - 1u; i >= 8u; --i)
+            ctx.planTree[i] = oak_plan_winner(ctx, 2u * i, ctx.R);
     }
 }
 
@@ -2652,18 +2700,17 @@ static inline void oak_dyna_backups(Ctx ctx, uint tid) {
     uint M = ctx.R;
     uint written = min(ctx.stepCount, M);
     uint bestSlot = 0xffffffffu;
-    float bestPrio = -1.0f;
     float d = 0.0f;
     if (tid < 8u) {
         uint part = M / 8u;
         uint lo = tid * part;
 
-    for (uint s = lo; s < lo + part; ++s) {
-        if (s >= written) continue;
-        float p = ctx.dynaTd[s];
-        if (!isfinite(p)) p = 0.0f;
-        if (p > bestPrio) { bestPrio = p; bestSlot = s; }
-    }
+    // Phase 9.1: the per-partition argmax is one priority-index read. The
+    // tree winner is provably the scan's leftmost-max over the eligible
+    // slots: unwritten slots hold zero and lose every tie to the partition's
+    // lowest slot, which is eligible whenever any slot is; the guard covers
+    // the scan's all-ineligible -> no-selection case.
+    if (lo < written) bestSlot = ctx.planTree[8u + tid];
 
     if (bestSlot != 0xffffffffu) {
         device const uint *ri = ctx.ringIdx + bestSlot * 32u;
@@ -2736,6 +2783,7 @@ static inline void oak_dyna_backups(Ctx ctx, uint tid) {
                 ctx.planU[bestSlot] = oldU + d;
                 // Priority: remaining surprise at this slot (Moore-Atkeson).
                 ctx.dynaTd[bestSlot] = fabs(d);
+                oak_plan_index_update(ctx, bestSlot);
             } else {
                 d = 0.0f;
             }
