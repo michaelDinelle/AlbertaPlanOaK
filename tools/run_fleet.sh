@@ -22,11 +22,16 @@ if [ "${1:-}" = "--job" ]; then
   shift
   STEPS="$1"; NAME="$2"; KEEPER="${3:-}"
   ROOT="$REPO/.oak-benchmarks/$NAME"
-  # Ablation config: default = the CURRENT KEEPER CONFIG (planning ablated —
-  # the convicted planning value-backup poison). A Tier-L that silently ran
-  # ablation=none against a planning-ablated keeper poisoned a whole 1M run
-  # (2026-07-05); the guard below refuses config-mismatched gates.
-  ABLATE="${OAK_ABLATE:-planning}"
+  # Ablation config: default = the current keeper config. The planner is LIVE
+  # (Phases 0-4 un-poisoned it: TRUST-SWEEP arbitrary-horizon backups + search
+  # control). The greedy-Q-selection organ (model-to-keyboard) was MEASURED
+  # toxic on 2026-07-20 (Phase 6 gate vs p4m: `none` halved IQM 0.107 vs 0.206
+  # and crushed igniters — planner-Q argmax selection = the never-dies-never-
+  # walks trap), so the keeper runs with it cut. It is CONVICTED, and the
+  # planned fix is EXCISION (Phase 7.5, keeper-bitwise) — not the ablation flag
+  # and not `none`. The guard refuses config-mismatched gates; a deliberate
+  # config change IS the experiment (pass OAK_ABLATE + OAK_ABLATE_FORCE=1).
+  ABLATE="${OAK_ABLATE:-model-to-keyboard}"
   if [ -n "$KEEPER" ] && [ -f "$KEEPER/meta.json" ]; then
     KABL="$(.venv/bin/python -c "import json,sys;print(json.load(open(sys.argv[1])).get('ablationLabel') or 'none')" "$KEEPER/meta.json")"
     if [ "$KABL" != "$ABLATE" ] && [ "${OAK_ABLATE_FORCE:-0}" != "1" ]; then

@@ -3,7 +3,7 @@
 # Usage: tools/check.sh <name> [steps=100000] [ablate=none]
 set -euo pipefail
 cd "$(dirname "$0")/.."
-NAME="${1:?usage: check.sh <name> [steps] [ablate] [role]}"; STEPS="${2:-100000}"; ABL="${3:-none}"; ROLE="${4:-candidate}"
+NAME="${1:?usage: check.sh <name> [steps] [ablate] [role]}"; STEPS="${2:-100000}"; ABL="${3:-model-to-keyboard}"; ROLE="${4:-candidate}"
 ROOT=".oak-benchmarks/$NAME"
 rm -rf "$ROOT"
 # Role registry: a candidate launch IS the current candidate (the run the
