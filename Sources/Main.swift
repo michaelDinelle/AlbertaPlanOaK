@@ -264,7 +264,8 @@ final class Engine {
     paramTotal = rank + 8 * k * rank + k * (d / 2) * rank
     // uints: 11 scalars + optFeature/optAge/lastStopAge (3k) + 5 rank arrays
     // + 4 nursery arrays + actIdx (2*64) + dynaSlot (32) + ringIdx (32*rank)
-    uintTotal = 11 + 3 * k + 5 * rank + 4 * rn + 128 + 32 + 32 * rank
+    // + planTree (rank, Phase 9.1 planning priority index)
+    uintTotal = 11 + 3 * k + 5 * rank + 4 * rn + 128 + 32 + 32 * rank + rank
     // Core region: 17 std obs + 12 prev-action + reward + bias + spare = 32
     // always-active slots (Mark III law: all raw inputs visible every step).
     let anchors = 32
