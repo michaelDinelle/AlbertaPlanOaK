@@ -57,13 +57,22 @@ struct LaneSnapshot {
   var deathRewardSum, deathRho: Float
   var info0, info1, info2, info3: SnapInfo
 }
-let fleetLaneStride = 400
+let fleetLaneStride = 408
 
 struct AblationSpec {
   static let ordered = [
     "feature-construction", "gvf-prediction", "rr-subtasks", "option-policies",
     "option-models", "planning", "option-keyboard", "model-to-keyboard",
     "keyboard-to-policy", "search-control", "search-to-generate-test", "generate-and-test",
+    "derived-core", "joint-geometry",
+  ]
+  // Metal function-constant index per organ. The first twelve map identity
+  // (0-11); the Phase-7 representation-geometry organs take the free slots
+  // 26/27 — 12-25/28-31 are OAK_MEGA_G, OAK_SPEC_*, the stage mask,
+  // OAK_SPEC_NURSERY, and the probes (Sources/OakKernel.metal:16-40).
+  static let functionConstantIndex = [
+    "derived-core": 26,
+    "joint-geometry": 27,
   ]
   let names: [String]
   var label: String { names.isEmpty ? "none" : names.joined(separator: ",") }
@@ -85,7 +94,8 @@ struct AblationSpec {
   func apply(to constants: MTLFunctionConstantValues) {
     for (idx, name) in Self.ordered.enumerated() {
       var enabled = names.contains(name)
-      constants.setConstantValue(&enabled, type: .bool, index: idx)
+      constants.setConstantValue(
+        &enabled, type: .bool, index: Self.functionConstantIndex[name] ?? idx)
     }
   }
 }
