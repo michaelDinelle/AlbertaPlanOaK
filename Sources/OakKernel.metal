@@ -20,7 +20,6 @@ constant bool OAK_ABLATE_OPTION_POLICIES [[function_constant(3)]];
 constant bool OAK_ABLATE_OPTION_MODELS [[function_constant(4)]];
 constant bool OAK_ABLATE_PLANNING [[function_constant(5)]];
 constant bool OAK_ABLATE_OPTION_KEYBOARD [[function_constant(6)]];
-constant bool OAK_ABLATE_MODEL_TO_KEYBOARD [[function_constant(7)]];
 constant bool OAK_ABLATE_KEYBOARD_TO_POLICY [[function_constant(8)]];
 constant bool OAK_ABLATE_SEARCH_CONTROL [[function_constant(9)]];
 constant bool OAK_ABLATE_SEARCH_TO_GENERATE_TEST [[function_constant(10)]];
@@ -720,18 +719,14 @@ inline void fcstomp_prediction_control_loop(Ctx ctx, uint tid,
         ctx.twinDis[tid] = isfinite(tdis) ? tdis : 0.0f;
 
         if (tid == 0u) vModel = vCurr;
-        bool modelFinite = isfinite(rHat) && isfinite(lRaw) && isfinite(vModel);
-        float dur = decode_duration(lRaw);
-        bool durationTrusted = usable_duration(ctx, dur);
-        bool modelTrusted = OAK_ABLATE_SEARCH_CONTROL ? modelFinite : usable_priority(ctx.prioOpt[tid]);
-
-        float q = rHat + vModel;
-        float qAdv = q - vCurr;
-        bool queryTrusted = !OAK_ABLATE_OPTION_MODELS
-            && !OAK_ABLATE_PLANNING
-            && rrFinite && modelTrusted && modelFinite && durationTrusted && isfinite(qAdv);
-
-        tgG[tid] = (queryTrusted && !OAK_ABLATE_MODEL_TO_KEYBOARD) ? qAdv : NAN;
+        // Toxic greedy-Q-selection organ EXCISED (Phase 7.5): the model-backed
+        // qAdv -> gpiBest selection path was CONVICTED (Phase 6: enabling it
+        // halved IQM 0.107 vs 0.206, crushed igniters — the never-dies-never-
+        // walks trap). It is permanently OFF (tgG = NAN), so the keeper's
+        // model-to-keyboard behavior is the DEFAULT — no ablation flag, `none`
+        // is healthy. gpiBest/keyboard-lam/planDelta degenerate to the keeper's
+        // frozen-chord behavior exactly as under the old ablation.
+        tgG[tid] = NAN;
     }
     simdgroup_barrier(mem_flags::mem_threadgroup);
     if (tid == 0u) {
