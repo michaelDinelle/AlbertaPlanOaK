@@ -62,15 +62,22 @@ let fleetLaneStride = 408
 struct AblationSpec {
   static let ordered = [
     "feature-construction", "gvf-prediction", "rr-subtasks", "option-policies",
-    "option-models", "planning", "option-keyboard", "model-to-keyboard",
+    "option-models", "planning", "option-keyboard",
     "keyboard-to-policy", "search-control", "search-to-generate-test", "generate-and-test",
     "derived-core", "joint-geometry",
   ]
-  // Metal function-constant index per organ. The first twelve map identity
-  // (0-11); the Phase-7 representation-geometry organs take the free slots
-  // 26/27 — 12-25/28-31 are OAK_MEGA_G, OAK_SPEC_*, the stage mask,
-  // OAK_SPEC_NURSERY, and the probes (Sources/OakKernel.metal:16-40).
+  // Metal function-constant index per organ. The first seven map identity
+  // (0-6); the greedy-Q-selection organ ("model-to-keyboard", was index 7) is
+  // EXCISED (Phase 7.5, convicted toxic in Phase 6) — removed from the list, so
+  // the next four keep their original indices explicitly to avoid shifting.
+  // The Phase-7 representation-geometry organs take the free slots 26/27 —
+  // 12-25/28-31 are OAK_MEGA_G, OAK_SPEC_*, the stage mask, OAK_SPEC_NURSERY,
+  // and the probes (Sources/OakKernel.metal:16-40).
   static let functionConstantIndex = [
+    "keyboard-to-policy": 8,
+    "search-control": 9,
+    "search-to-generate-test": 10,
+    "generate-and-test": 11,
     "derived-core": 26,
     "joint-geometry": 27,
   ]
