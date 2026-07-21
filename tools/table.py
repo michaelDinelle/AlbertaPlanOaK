@@ -53,6 +53,10 @@ def agg_rows(root, s):
     """Per-env aggregate at step s from fleet.jsonl lanes."""
     envs, meta = lane_envs(root)
     flops = meta.get('flopsPerLaneStep', 105296)
+    # Per-env lane cost: mixed runs stamp flopsPerLaneStep per envSchedule
+    # entry (env physics differs per env; the agent part is env-independent).
+    env_flops = {e['envId']: e.get('flopsPerLaneStep', flops)
+                 for e in (meta.get('envSchedule') or [])}
     by_env = {}
     for l in open(f'{root}/fleet.jsonl'):
         x = json.loads(l)
@@ -77,7 +81,7 @@ def agg_rows(root, s):
             'dead': dead, 'median_cum': q(0.5),
             'median_live': recent_s[n // 2] if recent_s else 0.0,
             'p10': q(0.1), 'best': rates[-1], 'live_max': max(recent) if recent else 0.0,
-            'pos': 100.0 * pos / n, 'sps': sps, 'flops': flops,
+            'pos': 100.0 * pos / n, 'sps': sps, 'flops': env_flops.get(e, flops),
             'total': sum(x['rewardSum'] for x in rows), 'n': n,
         }
     return out, meta
@@ -96,7 +100,14 @@ for rt in roots:
 # envSchedule comparability (mixed-env fleets): schedules must match exactly,
 # EXCEPT when one root is single-env (null schedule) and the other is mixed —
 # then we render only the single env they share (the overlapping slice).
-scheds = [json.dumps(m.get('envSchedule'), sort_keys=True) for _, m in data]
+# The per-entry flopsPerLaneStep is measurement metadata (like the whitelisted
+# top-level key — it changes with organCostVersion), so the comparison keys on
+# the lane ASSIGNMENT (envId + seed ranges) only.
+def _sched_sig(m):
+    sig = [{k: v for k, v in e.items() if k != 'flopsPerLaneStep'}
+           for e in (m.get('envSchedule') or [])]
+    return json.dumps(sig or None, sort_keys=True)
+scheds = [_sched_sig(m) for _, m in data]
 if len(set(scheds)) > 1:
     null_sched = [i for i, s in enumerate(scheds) if s == 'null']
     if len(null_sched) == len(scheds) - 1:
@@ -116,10 +127,19 @@ if len(set(scheds)) > 1:
             "apples-to-apples; refusing to render.\n  " + "\n  ".join(scheds))
 # WHITELIST comparability gate (user law 2026-07-05).
 metas = [m for _, m in data]
-ALLOWED_DIFF = {'startedAt', 'ablation', 'ablationLabel', 'steps', 'flopsPerLaneStep'}
+# organFlops/organCostVersion are measurement metadata (Phase 8), not run
+# config: pre-organ roots (version 0) MUST stay comparable with v1 roots —
+# the keeper-comparison law outranks the version gate. A version split is
+# flagged below the table instead of refusing (cross-version ABSOLUTE
+# reward/GFLOP claims remain refused; the row is a ratio-share instrument).
+ALLOWED_DIFF = {'startedAt', 'ablation', 'ablationLabel', 'steps', 'flopsPerLaneStep',
+                'organFlops', 'organCostVersion',
+                # lane-assignment equality already enforced by the _sched_sig
+                # gate above; raw entries may differ only in per-entry flops.
+                'envSchedule'}
 # Mixed-vs-single: batch/seeds/envSchedule differ by construction (the mixed
 # root has more lanes on other envs); the shared-env slice is apples-to-apples.
-if len(set(json.dumps(m.get('envSchedule'), sort_keys=True) for m in metas)) > 1:
+if len(set(_sched_sig(m) for m in metas)) > 1:
     ALLOWED_DIFF |= {'batch', 'seeds', 'envSchedule'}
 allkeys = set().union(*(m.keys() for m in metas))
 mismatches = []
@@ -160,4 +180,11 @@ for env_id in env_ids:
     for i, n in enumerate(names):
         print('| %s | %s |' % (n, ' | '.join(c[i] for c in cols)))
     print()
+ocv = {m.get('organCostVersion', 0) for _, m in data}
+if len(ocv) > 1:
+    print('⚠️ organCostVersion differs across roots (%s): the FLOP model changed '
+          '(Phase 8 re-bin + twin-dot/FeatureConstruction/ActionEmission corrections). '
+          'reward/GFLOP rows are computed from each run\'s own model — compare them as '
+          'ratios; cross-version ABSOLUTE FLOP claims are refused (design §1).'
+          % ' vs '.join(str(v) for v in sorted(ocv)))
 print('⤷ DISPLAY CONTRACT: paste this table VERBATIM into the reply text — tool output is not user-visible; keeper column mandatory; never summarize or say "table above".')
