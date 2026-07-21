@@ -172,6 +172,7 @@ struct Ctx {
     device uint *dynaSlot;
     device uint *ringIdx;
     device uint *planTree;
+    device uint *parked;
     device KernelScalars *scalars;
     device KernelStats *stats;
 };
@@ -351,6 +352,9 @@ inline Ctx make_ctx(device float *params, device float *stateArena, device uint 
     // internal nodes 8..M-1 hold winner slots (leaves are dynaTd itself).
     // Appended last so every legacy uint offset is unchanged.
     c.planTree = uintArena + u; u += c.R;
+    // parked (Phase 9.3 K-parking): per-option hibernation flags (0 = live).
+    // Appended after planTree so every earlier uint offset is unchanged.
+    c.parked = uintArena + u; u += c.K;
     c.scalars = scalars; c.stats = stats;
     return c;
 }
@@ -595,7 +599,23 @@ inline void fcstomp_prediction_control_loop(Ctx ctx, uint tid,
     }
     simdgroup_barrier(mem_flags::mem_threadgroup);
 
-    if (tid < ctx.K) {
+    if (tid < ctx.K && ctx.parked[tid] != 0u) {
+        // Phase 9.3 K-parking: a parked option hibernates — its parameter
+        // rows are KEPT but frozen; the 11-dot A-gather, RR TDs, and model
+        // trust computation are skipped. The outputs written here are the
+        // neutral elements of the full-width K scans below (stopped
+        // continuation, zero tdPsi/keyboard, untrusted q -> never GPI-
+        // selectable), so selection/keyboard/GPI keep their exact shapes
+        // over the LIVE bank. twinDis/lRawC deliberately keep their last
+        // live values: the vacuum probe reads them across the full bank and
+        // may select a parked option — the probe-revive path (the window
+        // analytics assessment unparks it the same step).
+        ctx.continuation[tid] = 0.0f;
+        ctx.tdPsi[tid] = 0.0f;
+        ctx.keyboard[tid] = 0.0f;
+        tgCont[tid] = 0.0f;
+        tgG[tid] = NAN;
+    } else if (tid < ctx.K) {
         uint feat = ctx.optFeature[tid] % ctx.R;
         // One-pass gather over the active rows: psi/hDot/model dots plus the
         // plan-stage prev-dots, each an independent accumulator chain keeping
@@ -1110,6 +1130,21 @@ static inline void oak_stage_plan_all(Ctx ctx, uint tid,
                                       threadgroup const float *stash,
                                       bool stashDirty, uint pSlot) {
     if (tid >= ctx.K) return;
+    if (ctx.parked[tid] != 0u) {
+        // Phase 9.3: a parked option's model rows are frozen — skip the model
+        // TDs, polCoef, and the actor meta-step, and publish the neutral
+        // outputs (the same zeros the option-models ablation path writes).
+        // prioOpt = 0 keeps the full-width utility/priority scans measuring
+        // the LIVE bank only.
+        ctx.optRewardTd[tid] = 0.0f;
+        ctx.optDurationTd[tid] = 0.0f;
+        ctx.vsTd[tid] = 0.0f;
+        ctx.vsDot[tid] = 0.0f;
+        ctx.vsScale[tid] = 0.0f;
+        ctx.vsAuxScale[tid] = 0.0f;
+        ctx.prioOpt[tid] = 0.0f;
+        return;
+    }
     oak_plan_one(ctx, tid, stash, stashDirty, pSlot);
 
     {
@@ -1147,6 +1182,13 @@ static inline void oak_learn_rows(Ctx ctx, device const float *prev,
     uint KDL = K * DL;
 
     uint k = tid;
+    // Phase 9.3: a parked option's rows are frozen — skip its column RMWs
+    // (the A×DL policy apply and the A-priced psi/model applies). The lane
+    // still loads and broadcasts its transpose rows below (every lane's row
+    // slice is needed by all 32 option columns) and still applies its owned
+    // valueW rows at the end: the value bank is feature-indexed, never
+    // option-indexed.
+    const bool optLive = (ctx.parked[k] == 0u);
     float rho = ctx.importance[k];
     if (!isfinite(rho) || rho < 0.0f) rho = 0.0f;
     float cont = ctx.continuation[k];
@@ -1178,6 +1220,7 @@ static inline void oak_learn_rows(Ctx ctx, device const float *prev,
             float xc = simd_shuffle(xcH, (ushort)l);
             float aP = simd_shuffle(aPH, (ushort)l);
             float aM = simd_shuffle(aMH, (ushort)l);
+            if (!optLive) continue;  // parked: frozen rows (Phase 9.3)
             if (!OAK_ABLATE_OPTION_POLICIES) {
                 device float *prow = &ctx.optPolicy[i * KDL + tid * DL];
                 for (uint j = 0u; j < DL; ++j)
@@ -1226,7 +1269,7 @@ static inline void oak_learn_rows(Ctx ctx, device const float *prev,
             float xc = simd_shuffle(xc2H, (ushort)l);
             float aP = simd_shuffle(aP2H, (ushort)l);
             float aM = simd_shuffle(aM2H, (ushort)l);
-            if (inP != 0u) continue;
+            if (!optLive || inP != 0u) continue;
             if (cont > 0.0f && rho > 0.0f) {
                 if (!OAK_ABLATE_RR_SUBTASKS && k != 0u) {
                     device float *w = &ctx.psi[i * K + k];
@@ -1279,6 +1322,16 @@ inline void emit_all_options(Ctx ctx, uint tid) {
             ctx.muRaw[tid * ctx.D + j] = 0.0f;
         }
         if (tid < ctx.D) ctx.policyMean[tid] = 0.0f;
+        return;
+    }
+    if (ctx.parked[tid] != 0u) {
+        // Phase 9.3: a parked option emits exact zeros and skips the A×DL
+        // gather — its keyboard weight is zero (or it is being probe-revived
+        // this step), and its rows stay frozen, never zeroed.
+        for (uint j = 0u; j < ctx.D; ++j) {
+            ctx.optionPolicyMean[tid * ctx.D + j] = 0.0f;
+            ctx.muRaw[tid * ctx.D + j] = 0.0f;
+        }
         return;
     }
     if (DL == 6u) {
@@ -1520,14 +1573,31 @@ static inline void oak_replace_commit(Ctx ctx, uint tid, threadgroup float *tgSt
     if (!OAK_ABLATE_GENERATE_AND_TEST) {
 
         uint staleLimit = ctx.R * ctx.K;
-        for (uint k = 1u; k < ctx.K; ++k) {
-            if (ctx.lastStopAge[k] < staleLimit) continue;
+        // Phase 9.3: parked options are the first victims of the staleStop
+        // recycle (hibernate-don't-delete — the recycle zeroes the rows and
+        // clears the parked flag below, doubling as hibernation's revive
+        // path). The stale limit still gates parked victims, so parking
+        // never schedules an immediate deletion.
+        uint kStale = 0u;
+        for (uint k2 = 1u; k2 < ctx.K; ++k2) {
+            if (ctx.parked[k2] == 0u || ctx.lastStopAge[k2] < staleLimit) continue;
+            kStale = k2; break;
+        }
+        if (kStale == 0u) {
+            for (uint k2 = 1u; k2 < ctx.K; ++k2) {
+                if (ctx.parked[k2] != 0u || ctx.lastStopAge[k2] < staleLimit) continue;
+                kStale = k2; break;
+            }
+        }
+        if (kStale != 0u) {
+            uint k = kStale;
             ctx.optAge[k] = 0u;
             ctx.lastStopAge[k] = 0u;
             ctx.utilOpt[k] = float(ctx.R);
             ctx.actorAdv[k] = 0.0f;
             ctx.psiRho[k] = 0.0f;
             ctx.optRho[k] = 0.0f;
+            ctx.parked[k] = 0u;
             uint feat = ctx.optFeature[k] % ctx.R;
             for (uint i = 0u; i < ctx.R; ++i) {
                 ctx.psi[(i) * ctx.K + k] = 0.0f;
@@ -1546,7 +1616,6 @@ static inline void oak_replace_commit(Ctx ctx, uint tid, threadgroup float *tgSt
             tgStash[k * 4u + 2u] = 0.0f;
             tgStash[k * 4u + 3u] = 0.0f;
             ctx.counters[OAK_CNT_REINIT_OPT] += 1u;
-            break;
         }
     }
 
@@ -1681,6 +1750,9 @@ static inline void oak_replace_commit(Ctx ctx, uint tid, threadgroup float *tgSt
             tgStash[k * 4u + 1u] = 0.0f;
             tgStash[k * 4u + 2u] = 0.0f;
             tgStash[k * 4u + 3u] = 0.0f;
+            // Phase 9.3: a recycled option is reborn live (fresh zeroed
+            // rows, age 0 probation) — clear its hibernation flag.
+            ctx.parked[k] = 0u;
             // Type 1 additionally zeroes feature row `worst` of EVERY
             // option's model rows; the encode-time stash cannot be patched
             // for that (fp order), so plan re-gathers this step.
@@ -1829,6 +1901,53 @@ static inline void oak_window_analytics(Ctx ctx, uint tid) {
         ctx.utilOpt[k] += invT * (u - ctx.utilOpt[k]);
     }
 
+    // Phase 9.3 K-parking (per-option hibernation, allocation design §4a):
+    // the park/unpark assessment runs EVERY step (Inv-7) and commits at most
+    // one park and one unpark per step (the structural single-commit rate,
+    // mirroring the G&T single-reinit break — no step-count gates). The
+    // threshold is the mean utility of the LIVE matured bank (optAge >= R —
+    // the same maturation horizon as keyboard eligibility and nursery LCB;
+    // Inv-9 structural statistic, no new constants). Park exemptions: option
+    // 0 (main-task key), the selected option, and any chord/probe member
+    // (keyboard mass — parking a blend contributor would silently alter the
+    // emitted action). Unpark = revive, never a freeze (Mark IV law (d)):
+    // selected, chord/probe mass (the vacuum probe can pick a parked option
+    // on its kept stale twin-disagreement), or utility back at/above the
+    // live matured mean. Rows are KEPT while parked; the staleStop recycle
+    // (replace stage) prefers parked victims and clears the flag.
+    if (tid == 0u) {
+        float utilSum = 0.0f;
+        uint maturedLive = 0u;
+        for (uint k = 0u; k < ctx.K; ++k) {
+            if (ctx.parked[k] != 0u || ctx.optAge[k] < ctx.R) continue;
+            float u = ctx.utilOpt[k];
+            utilSum += isfinite(u) ? u : 0.0f;
+            maturedLive += 1u;
+        }
+        float meanLiveUtil = (maturedLive > 0u) ? utilSum / float(maturedLive) : 0.0f;
+        uint selOpt = ctx.selectedOption[0] % ctx.K;
+        for (uint k = 1u; k < ctx.K; ++k) {
+            if (ctx.parked[k] == 0u) continue;
+            float u = ctx.utilOpt[k];
+            bool revived = (k == selOpt) || (ctx.keyboard[k] > 0.0f)
+                || (isfinite(u) && u >= meanLiveUtil);
+            if (revived) { ctx.parked[k] = 0u; break; }
+        }
+        uint parkK = 0xffffffffu;
+        float parkUtil = 0.0f;
+        for (uint k = 1u; k < ctx.K; ++k) {
+            if (ctx.parked[k] != 0u || ctx.optAge[k] < ctx.R || k == selOpt) continue;
+            float kb = ctx.keyboard[k];
+            if (!isfinite(kb) || kb > 0.0f) continue;
+            float u = ctx.utilOpt[k];
+            if (!isfinite(u)) u = 0.0f;
+            if (u < meanLiveUtil && (parkK == 0xffffffffu || u < parkUtil)) {
+                parkK = k; parkUtil = u;
+            }
+        }
+        if (parkK != 0xffffffffu) ctx.parked[parkK] = 1u;
+    }
+
     if (!OAK_ABLATE_OPTION_POLICIES && !OAK_ABLATE_GENERATE_AND_TEST) {
 
         // Lane tid holds optFit[tid] as a RAW load; the full-warp sequential
@@ -1863,6 +1982,9 @@ static inline void oak_window_analytics(Ctx ctx, uint tid) {
         float dir = 0.0f;
         for (uint k = 1u; k < ctx.K; ++k) {
             float f = simd_shuffle(fH, (ushort)k);
+            // Phase 9.3: the consensus direction is a property of the LIVE
+            // bank (parked options emit zeros and their rows are frozen).
+            if (ctx.parked[k] != 0u) continue;
             if (tid < DLc) {
                 float cf = (isfinite(f) ? f : 0.0f) - fitMean;
                 float mk = ctx.optionPolicyMean[k * ctx.D + tid];
@@ -2239,6 +2361,8 @@ kernel void oak_fleet_init(device float *params [[buffer(0)]],
         // computes children before their parents.
         for (uint i = ctx.R - 1u; i >= 8u; --i)
             ctx.planTree[i] = oak_plan_winner(ctx, 2u * i, ctx.R);
+        // Phase 9.3 K-parking: every option starts live.
+        for (uint k = 0u; k < ctx.K; ++k) ctx.parked[k] = 0u;
     }
 }
 
@@ -2741,6 +2865,7 @@ static inline void oak_dyna_backups(Ctx ctx, uint tid) {
         float modelU = -FLT_MAX;
         for (uint c = 0u; c < 4u; ++c) {
             uint k = cand[c];
+            if (ctx.parked[k] != 0u) continue;  // Phase 9.3: frozen rows, stale model dots
             float s1 = 0.0f, s2 = 0.0f, l1 = 0.0f;
             for (uint a = 0u; a < OAK_ACT; ++a) {
                 uint i = (a < OAK_CORE) ? a : ri[a - OAK_CORE];
@@ -2800,8 +2925,13 @@ static inline void oak_dyna_backups(Ctx ctx, uint tid) {
     {
         uint k = tid;
         device const float *prevS = state_at(ctx, 1u - ctx.stateSlot);
-        device const float *currS = state_at(ctx, ctx.stateSlot);
         device const uint *actP = act_at(ctx, 1u - ctx.stateSlot);
+        if (ctx.parked[k] != 0u) {
+            // Phase 9.3: parked twin row frozen — neutral update coefficient,
+            // no dots; the apply below skips every parked column.
+            ctx.dynaC[k] = 0.0f;
+        } else {
+        device const float *currS = state_at(ctx, ctx.stateSlot);
         device const uint *actC = act_at(ctx, ctx.stateSlot);
         float cont = ctx.continuation[k];
         if (!isfinite(cont)) cont = 0.0f;
@@ -2825,12 +2955,14 @@ static inline void oak_dyna_backups(Ctx ctx, uint tid) {
         // aux-corrected gv gradient; vStop2 uses the raw dynaC form) and was
         // exploding over long horizons (7 deaths @100k, 5 @200k, 10 @400k).
         ctx.dynaC[k] = imp * vsTd * scS * 0.1f;
+        }
         simdgroup_barrier(mem_flags::mem_device);
         for (uint a = tid; a < OAK_ACT; a += 32u) {
             uint i = act_of(actP, a);
             float aM = ctx.alphaModel[i] * prevS[i];
             uint row = i * ctx.K;
             for (uint kk = 0u; kk < ctx.K; ++kk) {
+                if (ctx.parked[kk] != 0u) continue;  // Phase 9.3: frozen row
                 float w = ctx.vStop2[row + kk];
                 ctx.vStop2[row + kk] = safe_w(w, w + aM * ctx.dynaC[kk]);
             }
