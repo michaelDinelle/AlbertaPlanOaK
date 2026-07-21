@@ -26,6 +26,17 @@ constant bool OAK_ABLATE_SEARCH_CONTROL [[function_constant(9)]];
 constant bool OAK_ABLATE_SEARCH_TO_GENERATE_TEST [[function_constant(10)]];
 constant bool OAK_ABLATE_GENERATE_AND_TEST [[function_constant(11)]];
 
+// Phase-7 representation-geometry diagnostic organs (representation-generality
+// design §5.3 step 4 / §7). Each gates ONLY the !legacy (non-cheetah) path, so
+// cheetah stays bitwise-identical under any combination. Indices 26/27 are
+// the free slots: 12-25/28-31 are OAK_MEGA_G, OAK_SPEC_*, the stage mask,
+// OAK_SPEC_NURSERY, and the probes. (Index 29 is free again: the Phase-7 §3
+// generalized-G&T organ was deleted outright — the KeyCorridor population
+// bisect convicted the enumerated pair sweep and the two extra construct
+// kinds of the feature-explosion divergence. Greenfield removal, no flag.)
+constant bool OAK_ABLATE_DERIVED_CORE [[function_constant(26)]];
+constant bool OAK_ABLATE_JOINT_GEOMETRY [[function_constant(27)]];
+
 constant uint OAK_MEGA_G [[function_constant(12)]];
 
 constant uint OAK_SPEC_OBS_DIM [[function_constant(13)]];
@@ -112,6 +123,9 @@ inline float track_rate(uint step, uint cap) {
 
 struct Ctx {
     uint O, R, K, D, traceLevels, anchorCount, Rn;
+    // Stream shape (natural obs width / natural action count), from
+    // OakFleetLane via make_ctx; drives the §1-§2 representation geometry.
+    uint naturalO, naturalA;
     uint stepCount, stateSlot;
     float rho;
     float invR, invK, metaEta;
@@ -163,7 +177,8 @@ struct Ctx {
 
 inline Ctx make_ctx(device float *params, device float *stateArena, device uint *uintArena,
                     device KernelScalars *scalars, device KernelStats *stats,
-                    constant KernelConfig &cfg, uint agentID) {
+                    constant KernelConfig &cfg, uint agentID,
+                    uint naturalO, uint naturalA) {
     uint paramStride = is_function_constant_defined(OAK_SPEC_PARAM_STRIDE)
         ? OAK_SPEC_PARAM_STRIDE : cfg.paramStride;
     uint stateStride = is_function_constant_defined(OAK_SPEC_STATE_STRIDE)
@@ -187,6 +202,10 @@ inline Ctx make_ctx(device float *params, device float *stateArena, device uint 
     c.anchorCount = is_function_constant_defined(OAK_SPEC_ANCHOR_COUNT)
         ? OAK_SPEC_ANCHOR_COUNT : cfg.linearAnchorCount;
     c.Rn = is_function_constant_defined(OAK_SPEC_NURSERY) ? OAK_SPEC_NURSERY : cfg.nurseryCount;
+    // Shape default: a caller without lane shape must land on legacy geometry
+    // (O, D/2) — never (0,0), which would collapse the §1.3 source cycle.
+    c.naturalO = (naturalO != 0u) ? naturalO : c.O;
+    c.naturalA = (naturalA != 0u) ? naturalA : max(c.D / 2u, 1u);
     c.stepCount = scalars->stepCount; c.stateSlot = scalars->stateSlot;
     c.rho = scalars->rho;
     c.invR = is_function_constant_defined(OAK_SPEC_INV_RANK) ? OAK_SPEC_INV_RANK : cfg.invRank;
@@ -344,6 +363,44 @@ inline uint gate_channel(Ctx ctx, uint b) { return b % (ctx.O + ctx.D + 1u); }
 inline uint gate_tile(float z) {
     if (!isfinite(z)) return 3u;
     return uint(clamp(floor(z + 3.5f), 0.0f, 6.0f));
+}
+
+// §1.2 legacy predicate (the bitwise firewall): the (17, 6) stream shape keeps
+// today's exact geometry; everything in §1.3/§2 lives behind !legacy. Deliber-
+// ately shape-based, not identity-based (Inv-1).
+inline bool oak_legacy_geometry(Ctx ctx) {
+    return (ctx.naturalO == ctx.O) && (2u * ctx.naturalA == ctx.D);
+}
+
+// §1.3 informative-source cycle: S = O_n + A_n + 1 gate sources per occurrence
+// round; bank b -> (src = b % S, occ = b / S). src selects a core channel
+// among obs (O_n) -> action (A_n) -> reward (1); occ picks the re-coverage
+// rule (0: single tile; >=1 even b: zoom; >=1 odd b: joint bank).
+inline uint gate_source_channel(Ctx ctx, uint src) {
+    return (src < ctx.naturalO) ? src
+         : (src < ctx.naturalO + ctx.naturalA) ? ctx.O + (src - ctx.naturalO)
+                                              : ctx.O + ctx.D;
+}
+
+// Zoom tile (occ >= 1, even b): bins of width 2^-z_l sigma over
+// +/-3.5*2^-z_l, edges saturate (extreme detector); z_l = min(occ, 2) since
+// finer than T/4-wide bins adds no tile capacity. z_l = 0 is gate_tile.
+inline uint gate_tile_zoom(float z, uint zl) {
+    if (!isfinite(z)) return 3u;
+    float zoom = float(1u << min(zl, 2u));
+    return uint(clamp(floor(z * zoom + 3.5f), 0.0f, 6.0f));
+}
+
+// Joint cell (occ >= 1, odd b): balanced 3x2 tiling of two channels plus
+// overflow cell 6 — the maximal balanced 2-D tiling of one T=7 bank (T prime).
+// occ half-bin staggers the grid; cell 6 mirrors gate_tile's clamp/NF
+// conventions. Used by the §1.3 gate.
+inline uint joint_cell(float va, float vb, uint occ) {
+    if (!isfinite(va) || !isfinite(vb) || fabs(va) >= 3.5f || fabs(vb) >= 3.5f) return 6u;
+    va += ((occ & 1u) == 0u) ? (7.0f / 6.0f) : 0.0f;
+    uint ta = uint(clamp(floor((va + 3.5f) * (3.0f / 7.0f)), 0.0f, 2.0f));
+    uint tb = uint(clamp(floor((vb + 3.5f) * (2.0f / 7.0f)), 0.0f, 1.0f));
+    return ta * 2u + tb;
 }
 
 inline bool oak_in_prev_active(device const uint *actP, uint i) {
@@ -819,19 +876,52 @@ inline void FeatureConstruction(Ctx ctx,
     device float *curr = state_at(ctx, 1u - ctx.stateSlot);
     device uint *actC = act_at(ctx, 1u - ctx.stateSlot);
 
+    const bool legacy = oak_legacy_geometry(ctx);
+    // derived-core organ (§2 content off): the padded-width slots [naturalO,O)
+    // and slot 31 fall back to the legacy writes (standardized_obs / 0.0f)
+    // while §1 geometry stays live. The trace barrier below
+    // is value-neutral under the organ, so it stays conditioned on !legacy.
+    const bool derivedCore = !legacy && !OAK_ABLATE_DERIVED_CORE;
+    if (!legacy) {
+        // §2's derived core slots below read obsTraceMulti slots updated by
+        // OTHER threads of this warp in the trace loop above; order the
+        // cross-thread RAW (the same discipline as the mem_device barrier
+        // after the core-slot writes). Uniform across the lane's simdgroup;
+        // the legacy path reads no other-thread trace state here and skips it.
+        simdgroup_barrier(mem_flags::mem_device);
+    }
+
     {
         uint i = tid;
         float x;
         if (OAK_ABLATE_FEATURE_CONSTRUCTION) {
             x = (i == 0u) ? 1.0f : 0.0f;
         } else if (i < ctx.O) {
-            x = standardized_obs(ctx, i);
+            if (derivedCore && i >= ctx.naturalO) {
+                // §2 derived core channel: the slots the padded width leaves
+                // unused hold multi-timescale obs traces, row-major
+                // (channel, level): free-slot j = level*O_n + channel.
+                uint j = i - ctx.naturalO;
+                uint lvl = j / ctx.naturalO;
+                x = (lvl < ctx.traceLevels)
+                    ? ctx.obsTraceMulti[lvl * ctx.O + (j - lvl * ctx.naturalO)]
+                    : 0.0f;
+            } else {
+                x = standardized_obs(ctx, i);
+            }
         } else if (i < ctx.O + ctx.D) {
             x = ctx.actionSignal[i - ctx.O];
         } else if (i == ctx.O + ctx.D) {
             x = ctx.reward[0];
         } else if (i == ctx.O + ctx.D + 1u) {
             x = 1.0f;
+        } else if (derivedCore) {
+            // §2 slot 31: the last free slot (j = O - O_n), same trace fill.
+            uint j = ctx.O - ctx.naturalO;
+            uint lvl = j / ctx.naturalO;
+            x = (lvl < ctx.traceLevels)
+                ? ctx.obsTraceMulti[lvl * ctx.O + (j - lvl * ctx.naturalO)]
+                : 0.0f;
         } else {
             x = 0.0f;
         }
@@ -843,8 +933,32 @@ inline void FeatureConstruction(Ctx ctx,
     }
     simdgroup_barrier(mem_flags::mem_device);
 
-    uint gateCh = gate_channel(ctx, tid);
-    uint tile = gate_tile(curr[gateCh]);
+    uint tile;
+    if (legacy) {
+        uint gateCh = gate_channel(ctx, tid);
+        tile = gate_tile(curr[gateCh]);
+    } else {
+        // §1.3 geometry from stream shape: S = O_n + A_n + 1 informative gate
+        // sources per occurrence round. occ 0 = single tile; occ >= 1 even
+        // bank = zoom tile; occ >= 1 odd bank = joint 3x2+overflow cell over
+        // (ch(src), obs (src+occ) % O_n). Exactly one winner per bank either
+        // way (Mark III law (b): stationary geometry gating, no magnitude
+        // competition).
+        uint S = ctx.naturalO + ctx.naturalA + 1u;
+        uint src = tid % S, occ = tid / S;
+        // joint-geometry organ (§1.3 zoom/joint off): every bank keeps the
+        // informative-source cycle ch(src) but gates on the occ-0 single tile
+        // — single-channel tiles, still shape-derived; §2 stays live.
+        if (occ == 0u || OAK_ABLATE_JOINT_GEOMETRY) {
+            tile = gate_tile(curr[gate_source_channel(ctx, src)]);
+        } else if ((tid & 1u) == 0u) {
+            tile = gate_tile_zoom(curr[gate_source_channel(ctx, src)], occ);
+        } else {
+            uint ca = gate_source_channel(ctx, src);
+            uint cb = (src + occ) % ctx.naturalO;
+            tile = joint_cell(curr[ca], curr[cb], occ);
+        }
+    }
     uint lo = OAK_CORE + tid * OAK_GATE_BANK, hi = lo + OAK_GATE_BANK;
     uint winner = lo + tile;
     float winX = 0.0f;
@@ -1408,13 +1522,15 @@ static inline void oak_replace_commit(Ctx ctx, uint tid, threadgroup float *tgSt
         && bestN != 0xffffffffu
         && bestNUtil > worstUtil + worstDownstream;
     if (doReplace && worst < ctx.R) {
+        const bool legacy = oak_legacy_geometry(ctx);
         uint pa = ctx.nurParentA[bestN] % ctx.R;
         uint pb = ctx.nurParentB[bestN] % ctx.R;
-uint birth = ctx.featureBirthCount[worst] + 1u;
+        uint kind = ctx.nurKind[bestN] % 4u;
+        uint birth = ctx.featureBirthCount[worst] + 1u;
         ctx.featureBirthCount[worst] = birth;
         ctx.featureParentA[worst] = pa;
         ctx.featureParentB[worst] = pb;
-        ctx.featureKind[worst] = ctx.nurKind[bestN] % 4u;
+        ctx.featureKind[worst] = kind;
 
         ctx.featureAge[worst] = ctx.nurAge[bestN];
         ctx.featureMean[worst] = ctx.nurStats[(bestN) * 4u];
@@ -1422,31 +1538,33 @@ uint birth = ctx.featureBirthCount[worst] + 1u;
         ctx.utilFeat[worst] = ctx.nurStats[(bestN) * 4u + 2u];
         ctx.valueW[worst] = 0.0f; ctx.bonusW[worst] = 0.0f;
 
-        {
-            uint spa = 0u, spb = (ctx.R > 1u) ? 1u : 0u;
-            float bestA = -FLT_MAX, bestB = -FLT_MAX;
-            for (uint i = 0u; i < ctx.R; ++i) {
-                if (i == worst) continue;
-                float uu = ctx.utilFeat[i];
-                if (!isfinite(uu)) uu = -FLT_MAX;
-                if (uu > bestA) { bestA = uu; spa = i; }
-            }
-            for (uint i = 0u; i < ctx.R; ++i) {
-                if (i == worst || i == spa) continue;
-                float decor = 1.0f / (1.0f + fabs(curr[i] * curr[spa]));
-                float uu = ctx.utilFeat[i] * decor;
-                if (!isfinite(uu)) uu = -FLT_MAX;
-                if (uu > bestB) { bestB = uu; spb = i; }
-            }
-            ctx.nurParentA[bestN] = spa;
-            ctx.nurParentB[bestN] = spb;
-            ctx.nurKind[bestN] = (ctx.nurKind[bestN] + 1u) % 4u;
-            ctx.nurAge[bestN] = 0u;
-            ctx.nurStats[(bestN) * 4u] = 0.0f;
-            ctx.nurStats[(bestN) * 4u + 1u] = 0.0f;
-            ctx.nurStats[(bestN) * 4u + 2u] = 0.0f;
-            ctx.nurStats[(bestN) * 4u + 3u] = 0.0f;
+        uint spa = 0u, spb = (ctx.R > 1u) ? 1u : 0u;
+        float bestA = -FLT_MAX, bestB = -FLT_MAX;
+        // Parents are total functions of state — the utility argmax is
+        // core-only on the !legacy path (gated slots are partial: 0 whenever
+        // not the bank winner), matching the host seeding invariant.
+        uint pLim = legacy ? ctx.R : uint(OAK_CORE);
+        for (uint i = 0u; i < pLim; ++i) {
+            if (i == worst) continue;
+            float uu = ctx.utilFeat[i];
+            if (!isfinite(uu)) uu = -FLT_MAX;
+            if (uu > bestA) { bestA = uu; spa = i; }
         }
+        for (uint i = 0u; i < pLim; ++i) {
+            if (i == worst || i == spa) continue;
+            float decor = 1.0f / (1.0f + fabs(curr[i] * curr[spa]));
+            float uu = ctx.utilFeat[i] * decor;
+            if (!isfinite(uu)) uu = -FLT_MAX;
+            if (uu > bestB) { bestB = uu; spb = i; }
+        }
+        ctx.nurParentA[bestN] = spa;
+        ctx.nurParentB[bestN] = spb;
+        ctx.nurKind[bestN] = (ctx.nurKind[bestN] + 1u) % 4u;
+        ctx.nurAge[bestN] = 0u;
+        ctx.nurStats[(bestN) * 4u] = 0.0f;
+        ctx.nurStats[(bestN) * 4u + 1u] = 0.0f;
+        ctx.nurStats[(bestN) * 4u + 2u] = 0.0f;
+        ctx.nurStats[(bestN) * 4u + 3u] = 0.0f;
 
         float alpha0 = 1.0f / float(max(ctx.O, 1u));
         ctx.alpha[worst] = alpha0;
@@ -1903,8 +2021,11 @@ struct OakFleetLane {
 
     uint envKind;
     uint gw[10];
+    // Stream SHAPE (Inv-1): written by oak_fleet_init from OAK_ENV_SPECS; the
+    // agent reads only these widths, never envKind.
+    uint naturalO, naturalA;
 };
-static_assert(sizeof(OakFleetLane) == 400, "OakFleetLane layout drifted from the Swift mirror");
+static_assert(sizeof(OakFleetLane) == 408, "OakFleetLane layout drifted from the Swift mirror");
 
 struct OakLaneSnapshot {
     KernelScalars scalars;
@@ -1959,6 +2080,10 @@ kernel void oak_fleet_init(device float *params [[buffer(0)]],
     device OakFleetLane *lane = &lanes[gid];
     uint ek = laneEnvKinds[gid];
     lane->envKind = ek;
+    // Sanctioned OAK_ENV_SPECS read (fleet init): deliver the lane's stream
+    // shape to the agent (Inv-1 — shape, never identity).
+    lane->naturalO = OAK_ENV_SPECS[ek].obsDimNatural;
+    lane->naturalA = OAK_ENV_SPECS[ek].actionCount;
     HCState s;
     uint elapsed = 0u, resets = 0u;
     for (int i = 0; i < 10; i++) lane->gw[i] = 0u;
@@ -2011,7 +2136,8 @@ kernel void oak_fleet_init(device float *params [[buffer(0)]],
         lane->info[j].first = 0.0f; lane->info[j].last = 0.0f;
     }
     if (ecfg.policyMode == 0u) {
-        Ctx ctx = make_ctx(params, stateArena, uintArena, scalars, stats, cfg, gid);
+        Ctx ctx = make_ctx(params, stateArena, uintArena, scalars, stats, cfg, gid,
+                           lane->naturalO, lane->naturalA);
         if (ek == OAK_ENV_FOURROOMS) {
             float o[17];
             gw_four_obs(1u, 1u, 9u, 9u, 0u, o);
@@ -2100,7 +2226,8 @@ static inline void oak_stage_sample_act(device float *params,
         hc_rng_ctrl(laneSeeds[gid], stepIdx, ctrl);
         for (int d = 0; d < 6; d++) { desc[d] = ctrl[d]; desc[6 + d] = 0.0f; }
     } else {
-        Ctx ctx = make_ctx(params, stateArena, uintArena, scalars, stats, cfg, gid);
+        Ctx ctx = make_ctx(params, stateArena, uintArena, scalars, stats, cfg, gid,
+                           lane->naturalO, lane->naturalA);
         uint A = ctx.D / 2u;
         float sd = ctx.sampleSigma;
         for (uint i = 0u; i < ctx.D; ++i) desc[i] = oak_safe(ctx.policyMean[i]);
@@ -2463,7 +2590,8 @@ static inline void oak_stage_fleet_env(device float *params,
         lane->deathRho = lane->rho;
     }
     if (ecfg.policyMode == 0u) {
-        Ctx ctx = make_ctx(params, stateArena, uintArena, scalars, stats, cfg, gid);
+        Ctx ctx = make_ctx(params, stateArena, uintArena, scalars, stats, cfg, gid,
+                           lane->naturalO, lane->naturalA);
         if (lane->deathStep == OAK_DEATH_NONE) {
             for (uint i = 0u; i < ctx.D; ++i) {
                 if (!isfinite(ctx.policyMean[i])) {
@@ -2700,24 +2828,28 @@ kernel void oak_megastep(device float *params [[buffer(0)]],
 
         if (ecfg.policyMode == 0u) {
             if (wideActive && (OAK_MEGA_STAGES & 1u) != 0u) {
-                Ctx ctx = make_ctx(params, stateArena, uintArena, scalars, stats, cfg, wideLane);
+                Ctx ctx = make_ctx(params, stateArena, uintArena, scalars, stats, cfg, wideLane,
+                                   lanes[wideLane].naturalO, lanes[wideLane].naturalA);
                 oak_stage_encode(ctx, slane, 32u, lCont, lStash);
             }
             oak_lane_fence();
             if (wideActive && (OAK_MEGA_STAGES & 8u) != 0u) {
-                Ctx ctx = make_ctx(params, stateArena, uintArena, scalars, stats, cfg, wideLane);
+                Ctx ctx = make_ctx(params, stateArena, uintArena, scalars, stats, cfg, wideLane,
+                                   lanes[wideLane].naturalO, lanes[wideLane].naturalA);
                 oak_replace_commit(ctx, slane, lStash, lDirty);
             }
             oak_lane_fence();
             if (wideActive && (OAK_MEGA_STAGES & 16u) != 0u) {
-                Ctx ctx = make_ctx(params, stateArena, uintArena, scalars, stats, cfg, wideLane);
+                Ctx ctx = make_ctx(params, stateArena, uintArena, scalars, stats, cfg, wideLane,
+                                   lanes[wideLane].naturalO, lanes[wideLane].naturalA);
                 emit_all_options(ctx, slane);
                 simdgroup_barrier(mem_flags::mem_device);
                 emit_blend_grid(ctx, slane);
             }
             oak_lane_fence();
             if (wideActive && (OAK_MEGA_STAGES & 32u) != 0u) {
-                Ctx ctx = make_ctx(params, stateArena, uintArena, scalars, stats, cfg, wideLane);
+                Ctx ctx = make_ctx(params, stateArena, uintArena, scalars, stats, cfg, wideLane,
+                                   lanes[wideLane].naturalO, lanes[wideLane].naturalA);
                 oak_stage_sample_act_wide(ctx, lanes, laneSeeds, wideLane, slane);
             }
         } else if (packedActive && (OAK_MEGA_STAGES & 32u) != 0u) {
@@ -2743,7 +2875,8 @@ kernel void oak_megastep(device float *params [[buffer(0)]],
             }
             if (idx < lanesThisTg) {
                 uint wLane = laneBase + idx;
-                Ctx pctx = make_ctx(params, stateArena, uintArena, scalars, stats, cfg, wLane);
+                Ctx pctx = make_ctx(params, stateArena, uintArena, scalars, stats, cfg, wLane,
+                                    lanes[wLane].naturalO, lanes[wLane].naturalA);
                 uint pSlot = 1u - pctx.stateSlot;
                 threadgroup const float *pStash = tgCont + OAK_MEGA_G * tgK + idx * 4u * tgK;
                 bool stashDirty = tgCont[5u * OAK_MEGA_G * tgK + idx] != 0.0f;
