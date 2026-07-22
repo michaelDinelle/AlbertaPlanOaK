@@ -2274,8 +2274,28 @@ kernel void oak_fleet_init(device float *params [[buffer(0)]],
 
         hc_resetData(s);
         lane->gw[0] = as_type<uint>(M_PI_F);  // hang down
+    } else if (ek == OAK_ENV_LARGEDEEPSEA) {
+
+        hc_resetData(s);
+        uint4 rm0 = hc_philox4x32(uint2(laneSeeds[gid], HC_RNG_STREAM_RESET),
+                                  uint4(0u, 0u, 0u, 0u));
+        uint4 rm1 = hc_philox4x32(uint2(laneSeeds[gid], HC_RNG_STREAM_RESET),
+                                  uint4(1u, 0u, 0u, 0u));
+        lane->gw[0] = 0u;                       // r=0, c=0, lastA=0 (packed)
+        lane->gw[1] = rm0.x; lane->gw[2] = rm0.y;
+        lane->gw[3] = rm0.z; lane->gw[4] = rm0.w;
+        lane->gw[5] = rm1.x; lane->gw[6] = rm1.y;
+        lane->gw[7] = rm1.z; lane->gw[8] = rm1.w;
+    } else if (ek == OAK_ENV_MULTIKEYCORRIDOR) {
+
+        hc_resetData(s);
+        lane->gw[0] = 1u; lane->gw[1] = 1u;            // agent, room 0
+        lane->gw[2] = 3u | (5u << 4u);                 // key1, room 0
+        lane->gw[3] = 7u | (5u << 4u);                 // key2, room 1
+        lane->gw[4] = 11u | (5u << 4u);                // key3, room 2
+        lane->gw[5] = 15u; lane->gw[6] = 1u;           // goal, room 3
     } else if (ek == OAK_ENV_ACROBOT || ek == OAK_ENV_CARTPOLE ||
-               ek == OAK_ENV_CHAIN) {
+               ek == OAK_ENV_CHAIN || ek == OAK_ENV_MEMORYCHAIN) {
 
         hc_resetData(s);   // deterministic zero state (hang / upright / pos 0)
     } else {
@@ -2330,6 +2350,19 @@ kernel void oak_fleet_init(device float *params [[buffer(0)]],
             float o[17];
             o[0] = 0.0f; o[1] = 1.0f;
             for (int i = 2; i < 17; i++) o[i] = 0.0f;
+            for (uint i = 0u; i < ctx.O && i < 17u; ++i) ctx.observation[i] = o[i];
+        } else if (ek == OAK_ENV_LARGEDEEPSEA) {
+            float o[17];
+            gw_ldeep_obs(0u, 0u, 0u, o);
+            for (uint i = 0u; i < ctx.O && i < 17u; ++i) ctx.observation[i] = o[i];
+        } else if (ek == OAK_ENV_MULTIKEYCORRIDOR) {
+            float o[17];
+            gw_mkc_obs(1u, 1u, 3u | (5u << 4u), 7u | (5u << 4u), 11u | (5u << 4u),
+                       15u, 1u, 0u, o);
+            for (uint i = 0u; i < ctx.O && i < 17u; ++i) ctx.observation[i] = o[i];
+        } else if (ek == OAK_ENV_MEMORYCHAIN) {
+            float o[17];
+            gw_mchain_obs(0u, 0u, 0u, o);
             for (uint i = 0u; i < ctx.O && i < 17u; ++i) ctx.observation[i] = o[i];
         } else {
             for (uint i = 0u; i + 1u < 9u; ++i) ctx.observation[i] = s.qpos[i + 1u];
@@ -2657,6 +2690,51 @@ static inline void oak_stage_fleet_env(device float *params,
         info[3] = 0.0f;
         pose[0] = float(lane->gw[0]); pose[1] = 15.0f;
         for (int i = 2; i < 9; i++) pose[i] = 0.0f;
+    } else if (lane->envKind == OAK_ENV_LARGEDEEPSEA) {
+
+        uint gws[10];
+        for (int i = 0; i < 10; i++) gws[i] = lane->gw[i];
+        reward = gw_ldeep_step(gws, uint(ctrl[0]), obs);
+        for (int i = 0; i < 10; i++) lane->gw[i] = gws[i];
+        info[0] = reward;
+        info[1] = float(lane->gw[0] & 15u);
+        info[2] = float((lane->gw[0] >> 4u) & 15u);
+        info[3] = float((lane->gw[0] >> 8u) & 1u);
+        pose[0] = info[1]; pose[1] = info[2];
+        pose[2] = 15.0f; pose[3] = 15.0f;
+        for (int i = 4; i < 9; i++) pose[i] = 0.0f;
+    } else if (lane->envKind == OAK_ENV_MULTIKEYCORRIDOR) {
+
+        uint gws[10];
+        for (int i = 0; i < 10; i++) gws[i] = lane->gw[i];
+        uint dn = 0u;
+        reward = gw_mkc_step(gws, laneSeeds[gid], uint(ctrl[0]), obs, &dn);
+        done = dn;
+        for (int i = 0; i < 10; i++) lane->gw[i] = gws[i];
+        info[0] = reward;
+        info[1] = float(lane->gw[0]);
+        info[2] = float(lane->gw[1]);
+        info[3] = float(lane->gw[8]);
+        pose[0] = float(lane->gw[0]); pose[1] = float(lane->gw[1]);
+        pose[2] = float(lane->gw[5]); pose[3] = float(lane->gw[6]);
+        pose[4] = float(lane->gw[7] & 7u);
+        pose[5] = float((lane->gw[7] >> 3u) & 7u);
+        for (int i = 6; i < 9; i++) pose[i] = 0.0f;
+    } else if (lane->envKind == OAK_ENV_MEMORYCHAIN) {
+
+        uint gws[10];
+        for (int i = 0; i < 10; i++) gws[i] = lane->gw[i];
+        uint dn = 0u;
+        reward = gw_mchain_step(gws, laneSeeds[gid], uint(ctrl[0]), obs, &dn);
+        done = dn;
+        for (int i = 0; i < 10; i++) lane->gw[i] = gws[i];
+        info[0] = reward;
+        info[1] = float(lane->gw[0]);
+        info[2] = float(done);
+        info[3] = float(lane->gw[1]);
+        pose[0] = float(lane->gw[0]); pose[1] = 31.0f;
+        pose[2] = float(lane->gw[1]);
+        for (int i = 3; i < 9; i++) pose[i] = 0.0f;
     } else if (lane->envKind == OAK_ENV_ACROBOT) {
 
         uint gws[10];

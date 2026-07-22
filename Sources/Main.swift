@@ -469,8 +469,11 @@ func metricsRoot() -> URL {
     case "CartPole-cont-v0": return 6
     case "Pendulum-cont-v0": return 7
     case "Chain-cont-v0": return 8
+    case "LargeDeepSea-cont-v0": return 9
+    case "MultiKeyCorridor-cont-v0": return 10
+    case "MemoryChain-cont-v0": return 11
     default:
-      throw err("Unknown env '\(envId)'. Known: HalfCheetah-v4, FourRooms-cont-v0, DeepSea-cont-v0, KeyCorridor-cont-v0, Acrobot-cont-v0, MountainCar-cont-v0, CartPole-cont-v0, Pendulum-cont-v0, Chain-cont-v0.")
+      throw err("Unknown env '\(envId)'. Known: HalfCheetah-v4, FourRooms-cont-v0, DeepSea-cont-v0, KeyCorridor-cont-v0, Acrobot-cont-v0, MountainCar-cont-v0, CartPole-cont-v0, Pendulum-cont-v0, Chain-cont-v0, LargeDeepSea-cont-v0, MultiKeyCorridor-cont-v0, MemoryChain-cont-v0.")
     }
   }
   static func fleetGPU(
@@ -762,6 +765,12 @@ func metricsRoot() -> URL {
         infoNames = ["info:goal", "info:x", "info:y", "info:since_goal"]
       case "Chain-cont-v0":
         infoNames = ["info:reward", "info:pos", "info:done", "info:unused"]
+      case "LargeDeepSea-cont-v0":
+        infoNames = ["info:reward", "info:row", "info:col", "info:last_action"]
+      case "MultiKeyCorridor-cont-v0":
+        infoNames = ["info:goal", "info:x", "info:y", "info:since_goal"]
+      case "MemoryChain-cont-v0":
+        infoNames = ["info:reward", "info:pos", "info:done", "info:cue"]
       case "Acrobot-cont-v0":
         infoNames = ["info:reward", "info:theta1", "info:theta2", "info:height"]
       case "MountainCar-cont-v0":
@@ -1100,12 +1109,13 @@ func metricsRoot() -> URL {
       )
     }
     let isGrid = (wi == 8 && wo == 24) || (wi == 6 && wo == 21) || (wi == 11 && wo == 28)
-      || (wi == 2 && wo == 20)
+      || (wi == 2 && wo == 20) || (wi == 12 && wo == 21) || (wi == 15 && wo == 32)
+      || (wi == 7 && wo == 23)
     let isClassic = (wi == 3 && wo == 4) || (wi == 5 && wo == 6) || (wi == 7 && wo == 6)
       || (wi == 4 && wo == 4)
     guard n > 0, isGrid || isClassic else {
       throw err(
-        "Bad case header: n=\(n) in=\(wi) out=\(wo) (expected FourRooms 8/24, DeepSea 6/21, KeyCorridor 11/28, Chain 2/20, MountainCar 3/4, Acrobot 5/6, CartPole 7/6, or Pendulum 4/4).")
+        "Bad case header: n=\(n) in=\(wi) out=\(wo) (expected FourRooms 8/24, DeepSea 6/21, KeyCorridor 11/28, Chain 2/20, LargeDeepSea 12/21, MultiKeyCorridor 15/32, MemoryChain 7/23, MountainCar 3/4, Acrobot 5/6, CartPole 7/6, or Pendulum 4/4).")
     }
     guard data.count == 12 + n * wi * 4 + n * wo * 4 else {
       throw err("Case file size mismatch: \(data.count) bytes for n=\(n) in=\(wi) out=\(wo).")
@@ -1461,6 +1471,8 @@ func metricsRoot() -> URL {
       "HalfCheetah-v4": 20_000, "FourRooms-cont-v0": 40, "DeepSea-cont-v0": 20,
       "KeyCorridor-cont-v0": 60, "Acrobot-cont-v0": 200, "MountainCar-cont-v0": 40,
       "CartPole-cont-v0": 60, "Pendulum-cont-v0": 50, "Chain-cont-v0": 10,
+      "LargeDeepSea-cont-v0": 25, "MultiKeyCorridor-cont-v0": 60,
+      "MemoryChain-cont-v0": 15,
     ]
     let flopsPerLaneStep = agentFlops + (envFlops[envId] ?? 20_000)
     var runMeta: [String: Any] = [

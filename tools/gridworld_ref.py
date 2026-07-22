@@ -1,15 +1,16 @@
 #!/usr/bin/env python3
 """CPU reference for the continuing Metal gridworlds — the certification contract.
 
-Envs: FourRooms-cont-v0, DeepSea-cont-v0, KeyCorridor-cont-v0, Chain-cont-v0.
-All are CONTINUING (no done, no reset: goal/treasure/key respawns inside the
-stream), deterministic given the per-lane Philox chain, and defined so the
+Envs: FourRooms-cont-v0, DeepSea-cont-v0, KeyCorridor-cont-v0, Chain-cont-v0,
+LargeDeepSea-cont-v0, MultiKeyCorridor-cont-v0, MemoryChain-cont-v0.
+All are CONTINUING (no done, no reset: goal/treasure/key/cue respawns inside
+the stream), deterministic given the per-lane Philox chain, and defined so the
 Metal port (Sources/Gridworld.metal) can match BITWISE.
 
 Universal I/O contract (agent kernel is env-blind, Inv-1): every env emits
 OBS_W=17 float32 observation channels and consumes the first N of POLICY_W=12
-policy coordinates as categorical logits (N=4 FourRooms/KeyCorridor, N=2
-DeepSea/Chain).
+policy coordinates as categorical logits (N=4 FourRooms/KeyCorridor/
+MultiKeyCorridor, N=2 DeepSea/Chain/LargeDeepSea/MemoryChain).
 
 Bitwise rules both sides obey:
 - state is integer (uint8/uint32); obs channels are computed as float32(int) OP
@@ -31,6 +32,14 @@ Case format (all little-endian float32; ints transported as exact float32 values
                   nRespawnIdx, done, obs*17]                                 (28)
   Chain in     : [pos, action]                                                (2)
   Chain out    : [reward, npos, done, obs*17]                                (20)
+  LargeDS in   : [mask0..mask7, r, c, lastA, action]                         (12)
+  LargeDS out  : [reward, nr, nc, nLastA, obs*17]                            (21)
+  MultiKC in   : [laneSeed, respawnIdx, x, y, k1x, k1y, k2x, k2y, k3x, k3y,
+                  gx, gy, flags, sinceGoal, action]                          (15)
+  MultiKC out  : [reward, nx, ny, k1x, k1y, k2x, k2y, k3x, k3y, ngx, ngy,
+                  nflags, nSinceGoal, nRespawnIdx, done, obs*17]             (32)
+  MemChain in  : [pos, cue, lastA, respawnIdx, laneSeed, action, pad]         (7)
+  MemChain out : [reward, npos, ncue, nlastA, nRespawnIdx, done, obs*17]     (23)
 Mask words are transported as their uint32 bit pattern reinterpreted as float32.
 
 CLI:
@@ -266,6 +275,169 @@ def chain_step(pos, action):
         pos = max(pos - 1, 0)
     return reward, pos, done, chain_obs(pos)
 
+# ---------------------------------------------------------------- LargeDeepSea
+# DeepSea scaled to N=16 (the canonical hard-exploration gridworld,
+# exponentially harder with size). Same mechanics as N=8: hidden per-cell
+# action map (bit r*16+c of the 256-bit mask, fixed per lane at reset);
+# M==1 -> action 1 moves c+1, action 0 moves c-1 (normal); M==0 -> inverted.
+# c clamped to [0,15]; r += 1 every step. Reward: -0.000625 if action==1 (the
+# -0.01/N right-cost at N=16), +1 on reaching (r=15, c=15); on reaching r==15
+# the agent resurfaces to (0,0), mask kept.
+LDEEPSEA_N = 16
+LDEEPSEA_RIGHT_COST = F32(-0.000625)
+
+def ldeepsea_reset(lane_seed):
+    raw0 = _philox4x32_10(lane_seed, 0, [0, 0, 0, 0])  # RESET stream
+    raw1 = _philox4x32_10(lane_seed, 0, [1, 0, 0, 0])
+    return (0, 0, 0, list(raw0) + list(raw1))  # (r, c, lastA, mask[8])
+
+def ldeepsea_obs(r, c, last_a):
+    o = np.zeros(OBS_W, dtype=F32)
+    n1 = F32(LDEEPSEA_N - 1)
+    o[0] = F32(r) / n1; o[1] = F32(c) / n1
+    o[2] = F32((LDEEPSEA_N - 1) - c) / n1; o[3] = F32((LDEEPSEA_N - 1) - r) / n1
+    o[4] = F32(c == LDEEPSEA_N - 1); o[5] = F32(c == 0)
+    o[6] = F32(last_a); o[7] = F32(1.0)
+    return o
+
+def ldeepsea_step(mask, r, c, last_a, action):
+    """One step. Returns (reward, nr, nc, nLastA, obs). mask = 8 uint32 words."""
+    bit_idx = r * LDEEPSEA_N + c
+    bit = (mask[bit_idx >> 5] >> (bit_idx & 31)) & 1
+    dc = 1 if (action & 1) == bit else -1
+    nc = min(max(c + dc, 0), LDEEPSEA_N - 1)
+    nr = r + 1
+    reward = LDEEPSEA_RIGHT_COST if (action & 1) else F32(0.0)
+    n_last = action & 1
+    if nr >= LDEEPSEA_N - 1:
+        if nc == LDEEPSEA_N - 1:
+            reward = F32(reward + F32(1.0))
+        nr, nc = 0, 0
+    return reward, nr, nc, n_last, ldeepsea_obs(nr, nc, n_last)
+
+# ------------------------------------------------------- MultiKeyCorridor
+# KeyCorridor extended to 3 sequential keys and doors. 17x7 (x 0..16, y 0..6),
+# border walls; interior walls x=4, x=8, x=12 except the door cells (4,3),
+# (8,3), (12,3). Four rooms x in {1..3, 5..7, 9..11, 13..15}, y 1..5 (15
+# cells each): key1 in room 0, key2 in room 1, key3 in room 2, goal in room
+# 3. Auto-pickup on co-location; the locked door j cell opens on entry iff
+# key j is carried (else blocked). Goal entry: +1, done=1, DeepSea-pattern
+# respawn — agent redrawn in room 0, keys redrawn in rooms 0/1/2, goal
+# redrawn in room 3, doors re-locked (Philox stream 3,
+# ctr=(respawnIdx,0,0,0): x=agent, y=key1, z=key2, w=key3; then
+# ctr=(respawnIdx,1,0,0) word x=goal; cell idx = trunc(u01(word)*15), room
+# base (1,5,9,13) + idx%3, 1 + idx//3).
+MKC_NCELL = 15
+MKC_BASE = (1, 5, 9, 13)
+MKC_ROOMS = [[(b + i % 3, 1 + i // 3) for i in range(MKC_NCELL)] for b in MKC_BASE]
+MKC_FREE = MKC_ROOMS[0] + MKC_ROOMS[1] + MKC_ROOMS[2] + MKC_ROOMS[3] + [
+    (4, 3), (8, 3), (12, 3)]
+
+def mkc_is_wall(x: int, y: int) -> bool:
+    if x <= 0 or x >= 16 or y <= 0 or y >= 6:
+        return True
+    if x in (4, 8, 12) and y != 3:
+        return True
+    return False
+
+def mkc_reset() -> tuple:
+    # (x, y, k1, k2, k3, gx, gy, flags, sinceGoal, respawnIdx) —
+    # deterministic, matches fleet init. flags bits0-2 hasKey1..3,
+    # bits3-5 doorOpen1..3.
+    return (1, 1, (3, 5), (7, 5), (11, 5), 15, 1, 0, 0, 0)
+
+def mkc_obs(x, y, k1, k2, k3, gx, gy, flags):
+    hk = [(flags & (1 << j)) != 0 for j in range(3)]
+    o = np.zeros(OBS_W, dtype=F32)
+    o[0] = F32(x) / F32(16.0); o[1] = F32(y) / F32(6.0)
+    o[2] = F32(hk[0]); o[3] = F32(hk[1]); o[4] = F32(hk[2])
+    o[5] = F32((flags & 8) != 0); o[6] = F32((flags & 16) != 0)
+    o[7] = F32((flags & 32) != 0)
+    for j, k in enumerate((k1, k2, k3)):
+        o[8 + 2 * j] = F32(0.0) if hk[j] else F32(k[0] - x) / F32(16.0)
+        o[9 + 2 * j] = F32(0.0) if hk[j] else F32(k[1] - y) / F32(6.0)
+    o[14] = F32(gx - x) / F32(16.0); o[15] = F32(gy - y) / F32(6.0)
+    o[16] = F32(1.0)
+    return o
+
+def mkc_step(lane_seed, respawn_idx, x, y, k1, k2, k3, gx, gy, flags,
+             since_goal, action):
+    """One step. Returns (reward, nx, ny, nk1, nk2, nk3, ngx, ngy, nflags,
+    nSinceGoal, nRespawnIdx, done, obs). action: 0=up 1=down 2=left 3=right.
+    Wall bump = stay; locked door without its key = stay, with its key it
+    opens and the agent enters. Key pickup on co-location."""
+    dx, dy = ((0, -1), (0, 1), (-1, 0), (1, 0))[action & 3]
+    nx, ny = x + dx, y + dy
+    if mkc_is_wall(nx, ny):
+        nx, ny = x, y
+    elif ny == 3 and nx in (4, 8, 12):
+        j = (nx >> 2) - 1  # door index 0..2
+        if not (flags & (8 << j)):
+            if flags & (1 << j):
+                flags |= 8 << j
+            else:
+                nx, ny = x, y
+    keys = [k1, k2, k3]
+    for j in range(3):
+        if not (flags & (1 << j)) and (nx, ny) == keys[j]:
+            flags |= 1 << j
+    reward, done, n_since, n_ri = F32(0.0), 0, since_goal + 1, respawn_idx
+    if (nx, ny) == (gx, gy):
+        reward, done, n_since, n_ri = F32(1.0), 1, 0, respawn_idx + 1
+        raw = _philox4x32_10(lane_seed, STREAM_GW, [respawn_idx, 0, 0, 0])
+        raw2 = _philox4x32_10(lane_seed, STREAM_GW, [respawn_idx, 1, 0, 0])
+        ai = int(_u01(raw[0]) * F32(MKC_NCELL))
+        ki = [int(_u01(raw[j + 1]) * F32(MKC_NCELL)) for j in range(3)]
+        gi = int(_u01(raw2[0]) * F32(MKC_NCELL))
+        nx, ny = MKC_ROOMS[0][ai]
+        keys = [MKC_ROOMS[j][ki[j]] for j in range(3)]
+        gx, gy = MKC_ROOMS[3][gi]
+        flags = 0
+    k1, k2, k3 = keys
+    return (reward, nx, ny, k1, k2, k3, gx, gy, flags, n_since, n_ri, done,
+            mkc_obs(nx, ny, k1, k2, k3, gx, gy, flags))
+
+# ------------------------------------------------------------- MemoryChain
+# bsuite Memory Chain: corridor of length 32 (pos 0..31). The cue (0=left,
+# 1=right) is observable ONLY at pos==0; the agent must carry it across the
+# full corridor, and at the far end (pos==31) its action IS the choice: +1
+# iff (action&1) == cue (0 otherwise), done=1, respawn at pos 0 with a
+# freshly drawn cue (Philox stream 3, ctr=(respawnIdx,0,0,0), cue =
+# raw[0]&1). Away from the end, action 1 walks pos+1, action 0 walks pos-1
+# (clamp 0).
+MCHAIN_L = 32
+
+def mchain_reset() -> tuple:
+    # (pos, cue, lastA, respawnIdx) — deterministic, matches fleet init.
+    return (0, 0, 0, 0)
+
+def mchain_obs(pos, cue, last_a):
+    o = np.zeros(OBS_W, dtype=F32)
+    o[0] = F32(pos) / F32(32.0)
+    o[1] = F32(cue) if pos == 0 else F32(0.0)
+    o[2] = F32(pos == 0)
+    o[3] = F32(pos == MCHAIN_L - 1)
+    o[4] = F32(last_a)
+    o[5] = F32(1.0)
+    return o
+
+def mchain_step(lane_seed, pos, cue, last_a, respawn_idx, action):
+    """One step. Returns (reward, npos, ncue, nlastA, nRespawnIdx, done, obs)."""
+    reward, done = F32(0.0), 0
+    if pos >= MCHAIN_L - 1:
+        reward = F32(1.0) if (action & 1) == cue else F32(0.0)
+        done = 1
+        raw = _philox4x32_10(lane_seed, STREAM_GW, [respawn_idx, 0, 0, 0])
+        cue = raw[0] & 1
+        respawn_idx += 1
+        pos = 0
+    elif action & 1:
+        pos += 1
+    else:
+        pos = max(pos - 1, 0)
+    n_last = action & 1
+    return reward, pos, cue, n_last, respawn_idx, done, mchain_obs(pos, cue, n_last)
+
 # ---------------------------------------------------------------- case I/O
 def _u32f(x: int) -> F32:
     return np.array([x & 0xFFFFFFFF], dtype=np.uint32).view(F32)[0]
@@ -326,6 +498,63 @@ def gen_cases(env: str, n: int, seed: int):
             outs.append(np.concatenate([
                 [r, F32(nx), F32(ny), F32(nkx), F32(nky), F32(ngx), F32(ngy),
                  F32(nfl), F32(nsg), F32(nri), F32(dn)], obs]))
+        elif env == "LargeDeepSea-cont-v0":
+            mask = [int(rng.integers(0, 2**32)) for _ in range(8)]
+            r_, c_ = int(rng.integers(0, 16)), int(rng.integers(0, 16))
+            la, a = int(rng.integers(0, 2)), int(rng.integers(0, 2))
+            if rng.random() < 0.25:
+                # force the resurface path (and sometimes the treasure)
+                r_ = 14
+            ins.append([_u32f(m) for m in mask] + [F32(r_), F32(c_), F32(la), F32(a)])
+            rw, nr, nc, nla, obs = ldeepsea_step(mask, r_, c_, la, a)
+            outs.append(np.concatenate([[rw, F32(nr), F32(nc), F32(nla)], obs]))
+        elif env == "MultiKeyCorridor-cont-v0":
+            ls = int(F32(int(rng.integers(0, 2**31))))
+            ri = int(rng.integers(0, 64))
+            x, y = MKC_FREE[int(rng.integers(0, len(MKC_FREE)))]
+            ks = [MKC_ROOMS[j][int(rng.integers(0, MKC_NCELL))] for j in range(3)]
+            gx, gy = MKC_ROOMS[3][int(rng.integers(0, MKC_NCELL))]
+            flags = int(rng.integers(0, 64))
+            sg = int(rng.integers(0, 1024))
+            a = int(rng.integers(0, 4))
+            u = rng.random()
+            if u < 0.25:
+                # force the completion/respawn path: step from a free neighbor
+                # cell straight into the goal
+                cands = []
+                for ddx, ddy, aa in ((1, 0, 2), (-1, 0, 3), (0, 1, 0), (0, -1, 1)):
+                    cx, cy = gx + ddx, gy + ddy
+                    if not mkc_is_wall(cx, cy) and not (cx in (4, 8, 12) and cy == 3):
+                        cands.append((cx, cy, aa))
+                if cands:
+                    x, y, a = cands[int(rng.integers(0, len(cands)))]
+            elif u < 0.5:
+                # force a door path: step into a random door cell (random flags)
+                d0 = 4 * int(rng.integers(1, 4))
+                x, y, a = (d0 - 1, 3, 3) if rng.random() < 0.5 else (d0 + 1, 3, 2)
+            ins.append([F32(ls), F32(ri), F32(x), F32(y),
+                        F32(ks[0][0]), F32(ks[0][1]), F32(ks[1][0]), F32(ks[1][1]),
+                        F32(ks[2][0]), F32(ks[2][1]), F32(gx), F32(gy),
+                        F32(flags), F32(sg), F32(a)])
+            (r, nx, ny, nk1, nk2, nk3, ngx, ngy, nfl, nsg, nri, dn, obs) = mkc_step(
+                ls, ri, x, y, ks[0], ks[1], ks[2], gx, gy, flags, sg, a)
+            outs.append(np.concatenate([
+                [r, F32(nx), F32(ny), F32(nk1[0]), F32(nk1[1]), F32(nk2[0]),
+                 F32(nk2[1]), F32(nk3[0]), F32(nk3[1]), F32(ngx), F32(ngy),
+                 F32(nfl), F32(nsg), F32(nri), F32(dn)], obs]))
+        elif env == "MemoryChain-cont-v0":
+            ls = int(F32(int(rng.integers(0, 2**31))))
+            pos = int(rng.integers(0, MCHAIN_L))
+            cue, la = int(rng.integers(0, 2)), int(rng.integers(0, 2))
+            ri = int(rng.integers(0, 64))
+            a = int(rng.integers(0, 2))
+            if rng.random() < 0.3:
+                pos = MCHAIN_L - 1   # force the choice/respawn path
+            ins.append([F32(pos), F32(cue), F32(la), F32(ri), F32(ls), F32(a),
+                        F32(0.0)])
+            r, npos, ncue, nla, nri, dn, obs = mchain_step(ls, pos, cue, la, ri, a)
+            outs.append(np.concatenate([
+                [r, F32(npos), F32(ncue), F32(nla), F32(nri), F32(dn)], obs]))
         else:  # Chain-cont-v0
             pos = int(rng.integers(0, CHAIN_L))
             a = int(rng.integers(0, 2))
@@ -351,12 +580,26 @@ def ascii_map(env: str) -> str:
         return "\n".join(rows)
     if env == "Chain-cont-v0":
         return f"Chain L={CHAIN_L}: pos 0..{CHAIN_L - 1}, +1 at pos {CHAIN_L - 1}, wrap to 0"
+    if env == "MultiKeyCorridor-cont-v0":
+        rows = []
+        for y in range(7):
+            rows.append("".join(
+                "D" if (x in (4, 8, 12) and y == 3) else ("#" if mkc_is_wall(x, y) else ".")
+                for x in range(17)))
+        return "\n".join(rows)
+    if env == "MemoryChain-cont-v0":
+        return (f"MemoryChain L={MCHAIN_L}: pos 0..{MCHAIN_L - 1}, cue visible at pos 0, "
+                f"choice at pos {MCHAIN_L - 1} (+1 iff action == cue)")
+    if env == "LargeDeepSea-cont-v0":
+        return f"DeepSea {LDEEPSEA_N}x{LDEEPSEA_N}: mask-dependent columns; treasure at (15,15)"
     return f"DeepSea {DEEPSEA_N}x{DEEPSEA_N}: mask-dependent columns; treasure at (7,7)"
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--env", choices=["FourRooms-cont-v0", "DeepSea-cont-v0",
-                                      "KeyCorridor-cont-v0", "Chain-cont-v0"],
+                                      "KeyCorridor-cont-v0", "Chain-cont-v0",
+                                      "LargeDeepSea-cont-v0", "MultiKeyCorridor-cont-v0",
+                                      "MemoryChain-cont-v0"],
                     default="FourRooms-cont-v0")
     ap.add_argument("--emit-cases", metavar="OUT")
     ap.add_argument("--expect", metavar="CASES")
@@ -376,13 +619,19 @@ def main():
         except ImportError:
             print("philox mirror: physics_parity not importable (mujoco absent); local copy in force")
         for env in ("FourRooms-cont-v0", "DeepSea-cont-v0", "KeyCorridor-cont-v0",
-                    "Chain-cont-v0"):
+                    "Chain-cont-v0", "LargeDeepSea-cont-v0", "MultiKeyCorridor-cont-v0",
+                    "MemoryChain-cont-v0"):
             a_i, a_o = gen_cases(env, 64, 999)
             b_i, b_o = gen_cases(env, 64, 999)
-            assert np.array_equal(a_o, b_o) and np.array_equal(a_i, b_i)
+            # Compare the uint32 bit view: mask words transported as f32 bit
+            # patterns can BE NaN values (array_equal would fail NaN != NaN
+            # even on bit-identical arrays).
+            assert (np.array_equal(a_o.view(np.uint32), b_o.view(np.uint32))
+                    and np.array_equal(a_i.view(np.uint32), b_i.view(np.uint32)))
             print(f"{env}: determinism OK (64 cases)")
         print(ascii_map("FourRooms-cont-v0"))
         print(ascii_map("KeyCorridor-cont-v0"))
+        print(ascii_map("MultiKeyCorridor-cont-v0"))
         return 0
     if args.map:
         print(ascii_map(args.env)); return 0
