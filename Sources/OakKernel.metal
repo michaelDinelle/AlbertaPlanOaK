@@ -2294,8 +2294,23 @@ kernel void oak_fleet_init(device float *params [[buffer(0)]],
         lane->gw[3] = 7u | (5u << 4u);                 // key2, room 1
         lane->gw[4] = 11u | (5u << 4u);                // key3, room 2
         lane->gw[5] = 15u; lane->gw[6] = 1u;           // goal, room 3
+    } else if (ek == OAK_ENV_PROCEDURALMAZE) {
+
+        hc_resetData(s);
+        uint pmw[3];
+        gw_pmaze_gen(laneSeeds[gid], pmw);             // per-lane wall layout
+        lane->gw[6] = pmw[0]; lane->gw[7] = pmw[1]; lane->gw[8] = pmw[2];
+        lane->gw[0] = 1u; lane->gw[1] = 1u;            // agent (path start)
+        lane->gw[2] = 9u; lane->gw[3] = 9u;            // goal (path end)
+    } else if (ek == OAK_ENV_HIGHDIMMAZE || ek == OAK_ENV_POMAZE) {
+
+        hc_resetData(s);
+        lane->gw[0] = 1u; lane->gw[1] = 1u;            // agent, corridor end
+        lane->gw[2] = 9u; lane->gw[3] = 9u;            // goal, far end
+        lane->gw[6] = 1u;                              // lastDir = down (hdm)
     } else if (ek == OAK_ENV_ACROBOT || ek == OAK_ENV_CARTPOLE ||
-               ek == OAK_ENV_CHAIN || ek == OAK_ENV_MEMORYCHAIN) {
+               ek == OAK_ENV_CHAIN || ek == OAK_ENV_MEMORYCHAIN ||
+               ek == OAK_ENV_DELAYEDCHAIN) {
 
         hc_resetData(s);   // deterministic zero state (hang / upright / pos 0)
     } else {
@@ -2363,6 +2378,24 @@ kernel void oak_fleet_init(device float *params [[buffer(0)]],
         } else if (ek == OAK_ENV_MEMORYCHAIN) {
             float o[17];
             gw_mchain_obs(0u, 0u, 0u, o);
+            for (uint i = 0u; i < ctx.O && i < 17u; ++i) ctx.observation[i] = o[i];
+        } else if (ek == OAK_ENV_PROCEDURALMAZE) {
+            float o[17];
+            gw_pmaze_obs(1u, 1u, 9u, 9u, 0u,
+                         lane->gw[6], lane->gw[7], lane->gw[8], o);
+            for (uint i = 0u; i < ctx.O && i < 17u; ++i) ctx.observation[i] = o[i];
+        } else if (ek == OAK_ENV_HIGHDIMMAZE) {
+            float o[17];
+            gw_hdm_obs(1u, 1u, 9u, 9u, o);
+            for (uint i = 0u; i < ctx.O && i < 17u; ++i) ctx.observation[i] = o[i];
+        } else if (ek == OAK_ENV_POMAZE) {
+            float o[17];
+            gw_po_obs(1u, 1u, 9u, 9u, o);
+            for (uint i = 0u; i < ctx.O && i < 17u; ++i) ctx.observation[i] = o[i];
+        } else if (ek == OAK_ENV_DELAYEDCHAIN) {
+            float o[17];
+            o[0] = 0.0f; o[1] = 0.0f; o[2] = 1.0f;
+            for (int i = 3; i < 17; i++) o[i] = 0.0f;
             for (uint i = 0u; i < ctx.O && i < 17u; ++i) ctx.observation[i] = o[i];
         } else {
             for (uint i = 0u; i + 1u < 9u; ++i) ctx.observation[i] = s.qpos[i + 1u];
@@ -2726,6 +2759,67 @@ static inline void oak_stage_fleet_env(device float *params,
         for (int i = 0; i < 10; i++) gws[i] = lane->gw[i];
         uint dn = 0u;
         reward = gw_mchain_step(gws, laneSeeds[gid], uint(ctrl[0]), obs, &dn);
+        done = dn;
+        for (int i = 0; i < 10; i++) lane->gw[i] = gws[i];
+        info[0] = reward;
+        info[1] = float(lane->gw[0]);
+        info[2] = float(done);
+        info[3] = float(lane->gw[1]);
+        pose[0] = float(lane->gw[0]); pose[1] = 31.0f;
+        pose[2] = float(lane->gw[1]);
+        for (int i = 3; i < 9; i++) pose[i] = 0.0f;
+    } else if (lane->envKind == OAK_ENV_PROCEDURALMAZE) {
+
+        uint gws[10];
+        for (int i = 0; i < 10; i++) gws[i] = lane->gw[i];
+        uint dn = 0u;
+        reward = gw_pmaze_step(gws, laneSeeds[gid], uint(ctrl[0]), obs, &dn);
+        done = dn;
+        for (int i = 0; i < 10; i++) lane->gw[i] = gws[i];
+        info[0] = reward;
+        info[1] = float(lane->gw[0]);
+        info[2] = float(lane->gw[1]);
+        info[3] = float(lane->gw[4]);
+        pose[0] = float(lane->gw[0]); pose[1] = float(lane->gw[1]);
+        pose[2] = float(lane->gw[2]); pose[3] = float(lane->gw[3]);
+        for (int i = 4; i < 9; i++) pose[i] = 0.0f;
+    } else if (lane->envKind == OAK_ENV_HIGHDIMMAZE) {
+
+        uint gws[10];
+        for (int i = 0; i < 10; i++) gws[i] = lane->gw[i];
+        uint dn = 0u;
+        reward = gw_hdm_step(gws, laneSeeds[gid], uint(ctrl[0]), obs, &dn);
+        done = dn;
+        for (int i = 0; i < 10; i++) lane->gw[i] = gws[i];
+        info[0] = reward;
+        info[1] = float(lane->gw[0]);
+        info[2] = float(lane->gw[1]);
+        info[3] = float(lane->gw[4]);
+        pose[0] = float(lane->gw[0]); pose[1] = float(lane->gw[1]);
+        pose[2] = float(lane->gw[2]); pose[3] = float(lane->gw[3]);
+        pose[4] = float(lane->gw[6]);
+        for (int i = 5; i < 9; i++) pose[i] = 0.0f;
+    } else if (lane->envKind == OAK_ENV_POMAZE) {
+
+        uint gws[10];
+        for (int i = 0; i < 10; i++) gws[i] = lane->gw[i];
+        uint dn = 0u;
+        reward = gw_po_step(gws, laneSeeds[gid], uint(ctrl[0]), obs, &dn);
+        done = dn;
+        for (int i = 0; i < 10; i++) lane->gw[i] = gws[i];
+        info[0] = reward;
+        info[1] = float(lane->gw[0]);
+        info[2] = float(lane->gw[1]);
+        info[3] = float(lane->gw[4]);
+        pose[0] = float(lane->gw[0]); pose[1] = float(lane->gw[1]);
+        pose[2] = float(lane->gw[2]); pose[3] = float(lane->gw[3]);
+        for (int i = 4; i < 9; i++) pose[i] = 0.0f;
+    } else if (lane->envKind == OAK_ENV_DELAYEDCHAIN) {
+
+        uint gws[10];
+        for (int i = 0; i < 10; i++) gws[i] = lane->gw[i];
+        uint dn = 0u;
+        reward = gw_dchain_step(gws, uint(ctrl[0]), obs, &dn);
         done = dn;
         for (int i = 0; i < 10; i++) lane->gw[i] = gws[i];
         info[0] = reward;

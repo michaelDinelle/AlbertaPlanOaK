@@ -40,6 +40,10 @@ ENV_FLOPS = {
     "HalfCheetah-v4": 20_000, "FourRooms-cont-v0": 40, "DeepSea-cont-v0": 20,
     "KeyCorridor-cont-v0": 60, "Acrobot-cont-v0": 200, "MountainCar-cont-v0": 40,
     "CartPole-cont-v0": 60, "Pendulum-cont-v0": 50, "Chain-cont-v0": 10,
+    "LargeDeepSea-cont-v0": 25, "MultiKeyCorridor-cont-v0": 60,
+    "MemoryChain-cont-v0": 15,
+    "ProceduralMaze-cont-v0": 50, "HighDimMaze-cont-v0": 55,
+    "POMaze-cont-v0": 55, "DelayedChain-cont-v0": 8,
 }
 
 def organ_flops_v1(ablations) -> dict[str, int]:

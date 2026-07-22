@@ -472,8 +472,12 @@ func metricsRoot() -> URL {
     case "LargeDeepSea-cont-v0": return 9
     case "MultiKeyCorridor-cont-v0": return 10
     case "MemoryChain-cont-v0": return 11
+    case "ProceduralMaze-cont-v0": return 12
+    case "HighDimMaze-cont-v0": return 13
+    case "POMaze-cont-v0": return 14
+    case "DelayedChain-cont-v0": return 15
     default:
-      throw err("Unknown env '\(envId)'. Known: HalfCheetah-v4, FourRooms-cont-v0, DeepSea-cont-v0, KeyCorridor-cont-v0, Acrobot-cont-v0, MountainCar-cont-v0, CartPole-cont-v0, Pendulum-cont-v0, Chain-cont-v0, LargeDeepSea-cont-v0, MultiKeyCorridor-cont-v0, MemoryChain-cont-v0.")
+      throw err("Unknown env '\(envId)'. Known: HalfCheetah-v4, FourRooms-cont-v0, DeepSea-cont-v0, KeyCorridor-cont-v0, Acrobot-cont-v0, MountainCar-cont-v0, CartPole-cont-v0, Pendulum-cont-v0, Chain-cont-v0, LargeDeepSea-cont-v0, MultiKeyCorridor-cont-v0, MemoryChain-cont-v0, ProceduralMaze-cont-v0, HighDimMaze-cont-v0, POMaze-cont-v0, DelayedChain-cont-v0.")
     }
   }
   static func fleetGPU(
@@ -771,6 +775,10 @@ func metricsRoot() -> URL {
         infoNames = ["info:goal", "info:x", "info:y", "info:since_goal"]
       case "MemoryChain-cont-v0":
         infoNames = ["info:reward", "info:pos", "info:done", "info:cue"]
+      case "ProceduralMaze-cont-v0", "HighDimMaze-cont-v0", "POMaze-cont-v0":
+        infoNames = ["info:goal", "info:x", "info:y", "info:since_goal"]
+      case "DelayedChain-cont-v0":
+        infoNames = ["info:reward", "info:pos", "info:done", "info:last_action"]
       case "Acrobot-cont-v0":
         infoNames = ["info:reward", "info:theta1", "info:theta2", "info:height"]
       case "MountainCar-cont-v0":
@@ -1110,12 +1118,13 @@ func metricsRoot() -> URL {
     }
     let isGrid = (wi == 8 && wo == 24) || (wi == 6 && wo == 21) || (wi == 11 && wo == 28)
       || (wi == 2 && wo == 20) || (wi == 12 && wo == 21) || (wi == 15 && wo == 32)
-      || (wi == 7 && wo == 23)
+      || (wi == 7 && wo == 23) || (wi == 13 && wo == 25) || (wi == 1 && wo == 6)
+      || (wi == 9 && wo == 26) || (wi == 10 && wo == 25) || (wi == 3 && wo == 21)
     let isClassic = (wi == 3 && wo == 4) || (wi == 5 && wo == 6) || (wi == 7 && wo == 6)
       || (wi == 4 && wo == 4)
     guard n > 0, isGrid || isClassic else {
       throw err(
-        "Bad case header: n=\(n) in=\(wi) out=\(wo) (expected FourRooms 8/24, DeepSea 6/21, KeyCorridor 11/28, Chain 2/20, LargeDeepSea 12/21, MultiKeyCorridor 15/32, MemoryChain 7/23, MountainCar 3/4, Acrobot 5/6, CartPole 7/6, or Pendulum 4/4).")
+        "Bad case header: n=\(n) in=\(wi) out=\(wo) (expected FourRooms 8/24, DeepSea 6/21, KeyCorridor 11/28, Chain 2/20, LargeDeepSea 12/21, MultiKeyCorridor 15/32, MemoryChain 7/23, ProceduralMaze 13/25, ProceduralMazeGen 1/6, HighDimMaze 9/26, POMaze 10/25, DelayedChain 3/21, MountainCar 3/4, Acrobot 5/6, CartPole 7/6, or Pendulum 4/4).")
     }
     guard data.count == 12 + n * wi * 4 + n * wo * 4 else {
       throw err("Case file size mismatch: \(data.count) bytes for n=\(n) in=\(wi) out=\(wo).")
@@ -1473,6 +1482,8 @@ func metricsRoot() -> URL {
       "CartPole-cont-v0": 60, "Pendulum-cont-v0": 50, "Chain-cont-v0": 10,
       "LargeDeepSea-cont-v0": 25, "MultiKeyCorridor-cont-v0": 60,
       "MemoryChain-cont-v0": 15,
+      "ProceduralMaze-cont-v0": 50, "HighDimMaze-cont-v0": 55,
+      "POMaze-cont-v0": 55, "DelayedChain-cont-v0": 8,
     ]
     let flopsPerLaneStep = agentFlops + (envFlops[envId] ?? 20_000)
     var runMeta: [String: Any] = [
