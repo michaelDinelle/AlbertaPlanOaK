@@ -140,7 +140,7 @@ A fleet run root (`.oak-benchmarks/<run-id>/`, override with `OAK_METRICS_STORAG
 - **`fleet.jsonl`** — one compact-JSON row per (lane, heartbeat) and per (lane, final): `v`, `kind` (`hb`|`final`), `lane`, `seed`, `envId` (per-LANE under a mixed schedule), `step`, `wallSeconds`, `stepsPerSecond`, `rewardSum`, `doneCount`, `firstNonFiniteStep`/`firstNonFiniteDetector` (the death certificate), `kernelRho` (the kernel's internal ρ — a divergence diagnostic, distinct from the host EMA), `paramAbsMax` (running max |param|; dates 1e36 blowups before NF counters fire), and the full `health` block (same fields as before: `rewardRate` host ρ̄, `actionDeltaL2Mean`/`Peak`, `continuingRestartCount`, `envInfo` — channel names env-conditional per lane's env, `nonFiniteByPhase` cumulative `{encode, learn, plan, tdPsi}`, search/model/keyboard diagnostics, actor diagnostics).
 - **`deaths.jsonl`** — one row per lane death event: `seed`, `lane`, `step`, `detector` (`envReward` | `policyMean` | `paramNonFinite` | `paramExplosion` | `kernelRho` | `envError`), `nfByPhase`, `rhoAtDeath`, `paramAbsMax`, `actorSupportEntropy`, `terminationRate`, `optionDurationMean`, `rewardSumAtDeath`, `lastGoodRewardRate`. A "dead" lane keeps stepping in the GPU fleet (one continual stream, never reset; recovery is data); the certificate dates the first event.
 - **`aggregate.jsonl`** — one row per heartbeat per policy: `step`, `alive`/`dead`, delivered-rate P10/P50/P90, `aggStepsPerSecond`, `wallSeconds`. This is the live dashboard (`tools/fleet.py watch`).
-- **`<envId>/seed<N>/`** — per-lane `actions.bin` + `meta.json` (+ optional `stats.bin`) for lanes selected by `OAK_RECORD_SEEDS=3,8` (or all lanes with `OAK_RECORD_ACTIONS=1`); `state-hashes.jsonl` when `OAK_DUMP_STATE_EVERY=N` is set (byte-identity validation). Record v3 (`recordVersion: 3` in the per-lane meta): `actions.bin` is 16 f32 per step — `ctrl[6], done, pose[9]` (cheetah pose = post-step qpos9; FourRooms = x,y,gx,gy,0...; DeepSea = r,c,7,7,0...); the directory's `<envId>` level is the lane's own env under a mixed schedule. Feeds the HTML viewer (`tools/replay_html.py`).
+- **`<envId>/seed<N>/`** — per-lane `actions.bin` + `meta.json` (+ optional `stats.bin`) for lanes selected by `OAK_RECORD_SEEDS=3,8` (or all lanes with `OAK_RECORD_ACTIONS=1`); `state-hashes.jsonl` when `OAK_DUMP_STATE_EVERY=N` is set (byte-identity validation). Record v3 (`recordVersion: 3` in the per-lane meta): `actions.bin` is 16 f32 per step — `ctrl[6], done, pose[9]` (cheetah pose = post-step qpos9; FourRooms = x,y,gx,gy,0...; DeepSea = r,c,7,7,0...); the directory's `<envId>` level is the lane's own env under a mixed schedule. Feeds the `frontend/` replay theater (served raw over `/api/runs/:id/recordings/...`).
 
 **Tools** (numpy; `requirements.txt`):
 
@@ -159,13 +159,13 @@ A fleet run root (`.oak-benchmarks/<run-id>/`, override with `OAK_METRICS_STORAG
   organ-bisect matrix: runs baseline + each organ ablated on top of --base,
   prints the conviction table. (Named ablate.py deliberately: a tools/bisect.py
   shadows Python's stdlib `bisect` and hijacks fleet.py's argparse.)
-- `tools/replay_html.py <rollout.bin|run-root> --out <dir> [--stride N]
-  [--lanes a-b] [--verify]` — packs recorded lanes (rollout-mode-0 binaries
-  today; record-v3 pose streams as they land) into a zero-dependency static
-  `index.html` "wall of streams": 32×32 treadmill cells (cheetah FK skeleton,
-  FourRooms/DeepSea mini-grids), reward-rate-tinted, 60fps single-canvas,
-  sort/race/zoom. `--selftest` runs the FK + codec checks. Replaces mp4 replay
-  videos for population presentation.
+- **`frontend/` — the visualization app** (Bun + Vite + Three.js; replaced the
+  retired `tools/replay_html.py` 2D viewer, 2026-08-04): run gallery over every
+  `.oak-benchmarks/` root, per-run population dashboard, live watch (SSE), and a
+  3D replay theater with one artisanal, accuracy-locked nature scene per env
+  (all 16; sim decoders certified bitwise vs `tools/gridworld_ref.py`, cheetah
+  FK to 1e-9). `cd frontend && bun run dev` → http://localhost:5173. See
+  `frontend/README.md`; scene law in `frontend/src/scenes/STYLE.md`.
 - `tools/table.py <candidate-root> <keeper-root> <step>` — THE CANONICAL
   heartbeat table. **MANDATORY at every Tier-L heartbeat report**: never
   hand-compose heartbeat tables (hand tables drift and drop rows — SPS was

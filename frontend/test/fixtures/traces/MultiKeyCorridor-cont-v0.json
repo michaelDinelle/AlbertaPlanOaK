@@ -1,0 +1,7057 @@
+{
+ "version": 1,
+ "envId": "MultiKeyCorridor-cont-v0",
+ "seed": 80,
+ "steps": 200,
+ "source": ".oak-benchmarks/frontend-demo-16env-20260803/MultiKeyCorridor-cont-v0/seed80/actions.bin",
+ "note": "frames[0] is the synthesized init frame (step -1); frames[i+1] decodes record row i. events[i] fires on the transition INTO frames[i]; events[0] is always empty.",
+ "eventCounts": {
+  "key": 1
+ },
+ "rewardSum": 0.0,
+ "frames": [
+  {
+   "x": 1,
+   "y": 1,
+   "gx": 15,
+   "gy": 1,
+   "keys": [
+    {
+     "x": 3,
+     "y": 5
+    },
+    {
+     "x": 7,
+     "y": 5
+    },
+    {
+     "x": 11,
+     "y": 5
+    }
+   ],
+   "hasKey": [
+    false,
+    false,
+    false
+   ],
+   "doorOpen": [
+    false,
+    false,
+    false
+   ],
+   "flags": 0,
+   "respawnIdx": 0,
+   "poseAgrees": true
+  },
+  {
+   "x": 1,
+   "y": 2,
+   "gx": 15,
+   "gy": 1,
+   "keys": [
+    {
+     "x": 3,
+     "y": 5
+    },
+    {
+     "x": 7,
+     "y": 5
+    },
+    {
+     "x": 11,
+     "y": 5
+    }
+   ],
+   "hasKey": [
+    false,
+    false,
+    false
+   ],
+   "doorOpen": [
+    false,
+    false,
+    false
+   ],
+   "flags": 0,
+   "respawnIdx": 0,
+   "poseAgrees": true
+  },
+  {
+   "x": 1,
+   "y": 1,
+   "gx": 15,
+   "gy": 1,
+   "keys": [
+    {
+     "x": 3,
+     "y": 5
+    },
+    {
+     "x": 7,
+     "y": 5
+    },
+    {
+     "x": 11,
+     "y": 5
+    }
+   ],
+   "hasKey": [
+    false,
+    false,
+    false
+   ],
+   "doorOpen": [
+    false,
+    false,
+    false
+   ],
+   "flags": 0,
+   "respawnIdx": 0,
+   "poseAgrees": true
+  },
+  {
+   "x": 1,
+   "y": 1,
+   "gx": 15,
+   "gy": 1,
+   "keys": [
+    {
+     "x": 3,
+     "y": 5
+    },
+    {
+     "x": 7,
+     "y": 5
+    },
+    {
+     "x": 11,
+     "y": 5
+    }
+   ],
+   "hasKey": [
+    false,
+    false,
+    false
+   ],
+   "doorOpen": [
+    false,
+    false,
+    false
+   ],
+   "flags": 0,
+   "respawnIdx": 0,
+   "poseAgrees": true
+  },
+  {
+   "x": 1,
+   "y": 1,
+   "gx": 15,
+   "gy": 1,
+   "keys": [
+    {
+     "x": 3,
+     "y": 5
+    },
+    {
+     "x": 7,
+     "y": 5
+    },
+    {
+     "x": 11,
+     "y": 5
+    }
+   ],
+   "hasKey": [
+    false,
+    false,
+    false
+   ],
+   "doorOpen": [
+    false,
+    false,
+    false
+   ],
+   "flags": 0,
+   "respawnIdx": 0,
+   "poseAgrees": true
+  },
+  {
+   "x": 1,
+   "y": 1,
+   "gx": 15,
+   "gy": 1,
+   "keys": [
+    {
+     "x": 3,
+     "y": 5
+    },
+    {
+     "x": 7,
+     "y": 5
+    },
+    {
+     "x": 11,
+     "y": 5
+    }
+   ],
+   "hasKey": [
+    false,
+    false,
+    false
+   ],
+   "doorOpen": [
+    false,
+    false,
+    false
+   ],
+   "flags": 0,
+   "respawnIdx": 0,
+   "poseAgrees": true
+  },
+  {
+   "x": 1,
+   "y": 1,
+   "gx": 15,
+   "gy": 1,
+   "keys": [
+    {
+     "x": 3,
+     "y": 5
+    },
+    {
+     "x": 7,
+     "y": 5
+    },
+    {
+     "x": 11,
+     "y": 5
+    }
+   ],
+   "hasKey": [
+    false,
+    false,
+    false
+   ],
+   "doorOpen": [
+    false,
+    false,
+    false
+   ],
+   "flags": 0,
+   "respawnIdx": 0,
+   "poseAgrees": true
+  },
+  {
+   "x": 1,
+   "y": 1,
+   "gx": 15,
+   "gy": 1,
+   "keys": [
+    {
+     "x": 3,
+     "y": 5
+    },
+    {
+     "x": 7,
+     "y": 5
+    },
+    {
+     "x": 11,
+     "y": 5
+    }
+   ],
+   "hasKey": [
+    false,
+    false,
+    false
+   ],
+   "doorOpen": [
+    false,
+    false,
+    false
+   ],
+   "flags": 0,
+   "respawnIdx": 0,
+   "poseAgrees": true
+  },
+  {
+   "x": 2,
+   "y": 1,
+   "gx": 15,
+   "gy": 1,
+   "keys": [
+    {
+     "x": 3,
+     "y": 5
+    },
+    {
+     "x": 7,
+     "y": 5
+    },
+    {
+     "x": 11,
+     "y": 5
+    }
+   ],
+   "hasKey": [
+    false,
+    false,
+    false
+   ],
+   "doorOpen": [
+    false,
+    false,
+    false
+   ],
+   "flags": 0,
+   "respawnIdx": 0,
+   "poseAgrees": true
+  },
+  {
+   "x": 2,
+   "y": 1,
+   "gx": 15,
+   "gy": 1,
+   "keys": [
+    {
+     "x": 3,
+     "y": 5
+    },
+    {
+     "x": 7,
+     "y": 5
+    },
+    {
+     "x": 11,
+     "y": 5
+    }
+   ],
+   "hasKey": [
+    false,
+    false,
+    false
+   ],
+   "doorOpen": [
+    false,
+    false,
+    false
+   ],
+   "flags": 0,
+   "respawnIdx": 0,
+   "poseAgrees": true
+  },
+  {
+   "x": 3,
+   "y": 1,
+   "gx": 15,
+   "gy": 1,
+   "keys": [
+    {
+     "x": 3,
+     "y": 5
+    },
+    {
+     "x": 7,
+     "y": 5
+    },
+    {
+     "x": 11,
+     "y": 5
+    }
+   ],
+   "hasKey": [
+    false,
+    false,
+    false
+   ],
+   "doorOpen": [
+    false,
+    false,
+    false
+   ],
+   "flags": 0,
+   "respawnIdx": 0,
+   "poseAgrees": true
+  },
+  {
+   "x": 3,
+   "y": 1,
+   "gx": 15,
+   "gy": 1,
+   "keys": [
+    {
+     "x": 3,
+     "y": 5
+    },
+    {
+     "x": 7,
+     "y": 5
+    },
+    {
+     "x": 11,
+     "y": 5
+    }
+   ],
+   "hasKey": [
+    false,
+    false,
+    false
+   ],
+   "doorOpen": [
+    false,
+    false,
+    false
+   ],
+   "flags": 0,
+   "respawnIdx": 0,
+   "poseAgrees": true
+  },
+  {
+   "x": 3,
+   "y": 2,
+   "gx": 15,
+   "gy": 1,
+   "keys": [
+    {
+     "x": 3,
+     "y": 5
+    },
+    {
+     "x": 7,
+     "y": 5
+    },
+    {
+     "x": 11,
+     "y": 5
+    }
+   ],
+   "hasKey": [
+    false,
+    false,
+    false
+   ],
+   "doorOpen": [
+    false,
+    false,
+    false
+   ],
+   "flags": 0,
+   "respawnIdx": 0,
+   "poseAgrees": true
+  },
+  {
+   "x": 2,
+   "y": 2,
+   "gx": 15,
+   "gy": 1,
+   "keys": [
+    {
+     "x": 3,
+     "y": 5
+    },
+    {
+     "x": 7,
+     "y": 5
+    },
+    {
+     "x": 11,
+     "y": 5
+    }
+   ],
+   "hasKey": [
+    false,
+    false,
+    false
+   ],
+   "doorOpen": [
+    false,
+    false,
+    false
+   ],
+   "flags": 0,
+   "respawnIdx": 0,
+   "poseAgrees": true
+  },
+  {
+   "x": 2,
+   "y": 3,
+   "gx": 15,
+   "gy": 1,
+   "keys": [
+    {
+     "x": 3,
+     "y": 5
+    },
+    {
+     "x": 7,
+     "y": 5
+    },
+    {
+     "x": 11,
+     "y": 5
+    }
+   ],
+   "hasKey": [
+    false,
+    false,
+    false
+   ],
+   "doorOpen": [
+    false,
+    false,
+    false
+   ],
+   "flags": 0,
+   "respawnIdx": 0,
+   "poseAgrees": true
+  },
+  {
+   "x": 2,
+   "y": 4,
+   "gx": 15,
+   "gy": 1,
+   "keys": [
+    {
+     "x": 3,
+     "y": 5
+    },
+    {
+     "x": 7,
+     "y": 5
+    },
+    {
+     "x": 11,
+     "y": 5
+    }
+   ],
+   "hasKey": [
+    false,
+    false,
+    false
+   ],
+   "doorOpen": [
+    false,
+    false,
+    false
+   ],
+   "flags": 0,
+   "respawnIdx": 0,
+   "poseAgrees": true
+  },
+  {
+   "x": 3,
+   "y": 4,
+   "gx": 15,
+   "gy": 1,
+   "keys": [
+    {
+     "x": 3,
+     "y": 5
+    },
+    {
+     "x": 7,
+     "y": 5
+    },
+    {
+     "x": 11,
+     "y": 5
+    }
+   ],
+   "hasKey": [
+    false,
+    false,
+    false
+   ],
+   "doorOpen": [
+    false,
+    false,
+    false
+   ],
+   "flags": 0,
+   "respawnIdx": 0,
+   "poseAgrees": true
+  },
+  {
+   "x": 3,
+   "y": 4,
+   "gx": 15,
+   "gy": 1,
+   "keys": [
+    {
+     "x": 3,
+     "y": 5
+    },
+    {
+     "x": 7,
+     "y": 5
+    },
+    {
+     "x": 11,
+     "y": 5
+    }
+   ],
+   "hasKey": [
+    false,
+    false,
+    false
+   ],
+   "doorOpen": [
+    false,
+    false,
+    false
+   ],
+   "flags": 0,
+   "respawnIdx": 0,
+   "poseAgrees": true
+  },
+  {
+   "x": 3,
+   "y": 5,
+   "gx": 15,
+   "gy": 1,
+   "keys": [
+    {
+     "x": 3,
+     "y": 5
+    },
+    {
+     "x": 7,
+     "y": 5
+    },
+    {
+     "x": 11,
+     "y": 5
+    }
+   ],
+   "hasKey": [
+    true,
+    false,
+    false
+   ],
+   "doorOpen": [
+    false,
+    false,
+    false
+   ],
+   "flags": 1,
+   "respawnIdx": 0,
+   "poseAgrees": true
+  },
+  {
+   "x": 3,
+   "y": 5,
+   "gx": 15,
+   "gy": 1,
+   "keys": [
+    {
+     "x": 3,
+     "y": 5
+    },
+    {
+     "x": 7,
+     "y": 5
+    },
+    {
+     "x": 11,
+     "y": 5
+    }
+   ],
+   "hasKey": [
+    true,
+    false,
+    false
+   ],
+   "doorOpen": [
+    false,
+    false,
+    false
+   ],
+   "flags": 1,
+   "respawnIdx": 0,
+   "poseAgrees": true
+  },
+  {
+   "x": 3,
+   "y": 5,
+   "gx": 15,
+   "gy": 1,
+   "keys": [
+    {
+     "x": 3,
+     "y": 5
+    },
+    {
+     "x": 7,
+     "y": 5
+    },
+    {
+     "x": 11,
+     "y": 5
+    }
+   ],
+   "hasKey": [
+    true,
+    false,
+    false
+   ],
+   "doorOpen": [
+    false,
+    false,
+    false
+   ],
+   "flags": 1,
+   "respawnIdx": 0,
+   "poseAgrees": true
+  },
+  {
+   "x": 2,
+   "y": 5,
+   "gx": 15,
+   "gy": 1,
+   "keys": [
+    {
+     "x": 3,
+     "y": 5
+    },
+    {
+     "x": 7,
+     "y": 5
+    },
+    {
+     "x": 11,
+     "y": 5
+    }
+   ],
+   "hasKey": [
+    true,
+    false,
+    false
+   ],
+   "doorOpen": [
+    false,
+    false,
+    false
+   ],
+   "flags": 1,
+   "respawnIdx": 0,
+   "poseAgrees": true
+  },
+  {
+   "x": 2,
+   "y": 4,
+   "gx": 15,
+   "gy": 1,
+   "keys": [
+    {
+     "x": 3,
+     "y": 5
+    },
+    {
+     "x": 7,
+     "y": 5
+    },
+    {
+     "x": 11,
+     "y": 5
+    }
+   ],
+   "hasKey": [
+    true,
+    false,
+    false
+   ],
+   "doorOpen": [
+    false,
+    false,
+    false
+   ],
+   "flags": 1,
+   "respawnIdx": 0,
+   "poseAgrees": true
+  },
+  {
+   "x": 2,
+   "y": 3,
+   "gx": 15,
+   "gy": 1,
+   "keys": [
+    {
+     "x": 3,
+     "y": 5
+    },
+    {
+     "x": 7,
+     "y": 5
+    },
+    {
+     "x": 11,
+     "y": 5
+    }
+   ],
+   "hasKey": [
+    true,
+    false,
+    false
+   ],
+   "doorOpen": [
+    false,
+    false,
+    false
+   ],
+   "flags": 1,
+   "respawnIdx": 0,
+   "poseAgrees": true
+  },
+  {
+   "x": 1,
+   "y": 3,
+   "gx": 15,
+   "gy": 1,
+   "keys": [
+    {
+     "x": 3,
+     "y": 5
+    },
+    {
+     "x": 7,
+     "y": 5
+    },
+    {
+     "x": 11,
+     "y": 5
+    }
+   ],
+   "hasKey": [
+    true,
+    false,
+    false
+   ],
+   "doorOpen": [
+    false,
+    false,
+    false
+   ],
+   "flags": 1,
+   "respawnIdx": 0,
+   "poseAgrees": true
+  },
+  {
+   "x": 1,
+   "y": 3,
+   "gx": 15,
+   "gy": 1,
+   "keys": [
+    {
+     "x": 3,
+     "y": 5
+    },
+    {
+     "x": 7,
+     "y": 5
+    },
+    {
+     "x": 11,
+     "y": 5
+    }
+   ],
+   "hasKey": [
+    true,
+    false,
+    false
+   ],
+   "doorOpen": [
+    false,
+    false,
+    false
+   ],
+   "flags": 1,
+   "respawnIdx": 0,
+   "poseAgrees": true
+  },
+  {
+   "x": 1,
+   "y": 3,
+   "gx": 15,
+   "gy": 1,
+   "keys": [
+    {
+     "x": 3,
+     "y": 5
+    },
+    {
+     "x": 7,
+     "y": 5
+    },
+    {
+     "x": 11,
+     "y": 5
+    }
+   ],
+   "hasKey": [
+    true,
+    false,
+    false
+   ],
+   "doorOpen": [
+    false,
+    false,
+    false
+   ],
+   "flags": 1,
+   "respawnIdx": 0,
+   "poseAgrees": true
+  },
+  {
+   "x": 1,
+   "y": 3,
+   "gx": 15,
+   "gy": 1,
+   "keys": [
+    {
+     "x": 3,
+     "y": 5
+    },
+    {
+     "x": 7,
+     "y": 5
+    },
+    {
+     "x": 11,
+     "y": 5
+    }
+   ],
+   "hasKey": [
+    true,
+    false,
+    false
+   ],
+   "doorOpen": [
+    false,
+    false,
+    false
+   ],
+   "flags": 1,
+   "respawnIdx": 0,
+   "poseAgrees": true
+  },
+  {
+   "x": 1,
+   "y": 3,
+   "gx": 15,
+   "gy": 1,
+   "keys": [
+    {
+     "x": 3,
+     "y": 5
+    },
+    {
+     "x": 7,
+     "y": 5
+    },
+    {
+     "x": 11,
+     "y": 5
+    }
+   ],
+   "hasKey": [
+    true,
+    false,
+    false
+   ],
+   "doorOpen": [
+    false,
+    false,
+    false
+   ],
+   "flags": 1,
+   "respawnIdx": 0,
+   "poseAgrees": true
+  },
+  {
+   "x": 1,
+   "y": 4,
+   "gx": 15,
+   "gy": 1,
+   "keys": [
+    {
+     "x": 3,
+     "y": 5
+    },
+    {
+     "x": 7,
+     "y": 5
+    },
+    {
+     "x": 11,
+     "y": 5
+    }
+   ],
+   "hasKey": [
+    true,
+    false,
+    false
+   ],
+   "doorOpen": [
+    false,
+    false,
+    false
+   ],
+   "flags": 1,
+   "respawnIdx": 0,
+   "poseAgrees": true
+  },
+  {
+   "x": 1,
+   "y": 5,
+   "gx": 15,
+   "gy": 1,
+   "keys": [
+    {
+     "x": 3,
+     "y": 5
+    },
+    {
+     "x": 7,
+     "y": 5
+    },
+    {
+     "x": 11,
+     "y": 5
+    }
+   ],
+   "hasKey": [
+    true,
+    false,
+    false
+   ],
+   "doorOpen": [
+    false,
+    false,
+    false
+   ],
+   "flags": 1,
+   "respawnIdx": 0,
+   "poseAgrees": true
+  },
+  {
+   "x": 1,
+   "y": 5,
+   "gx": 15,
+   "gy": 1,
+   "keys": [
+    {
+     "x": 3,
+     "y": 5
+    },
+    {
+     "x": 7,
+     "y": 5
+    },
+    {
+     "x": 11,
+     "y": 5
+    }
+   ],
+   "hasKey": [
+    true,
+    false,
+    false
+   ],
+   "doorOpen": [
+    false,
+    false,
+    false
+   ],
+   "flags": 1,
+   "respawnIdx": 0,
+   "poseAgrees": true
+  },
+  {
+   "x": 1,
+   "y": 5,
+   "gx": 15,
+   "gy": 1,
+   "keys": [
+    {
+     "x": 3,
+     "y": 5
+    },
+    {
+     "x": 7,
+     "y": 5
+    },
+    {
+     "x": 11,
+     "y": 5
+    }
+   ],
+   "hasKey": [
+    true,
+    false,
+    false
+   ],
+   "doorOpen": [
+    false,
+    false,
+    false
+   ],
+   "flags": 1,
+   "respawnIdx": 0,
+   "poseAgrees": true
+  },
+  {
+   "x": 1,
+   "y": 5,
+   "gx": 15,
+   "gy": 1,
+   "keys": [
+    {
+     "x": 3,
+     "y": 5
+    },
+    {
+     "x": 7,
+     "y": 5
+    },
+    {
+     "x": 11,
+     "y": 5
+    }
+   ],
+   "hasKey": [
+    true,
+    false,
+    false
+   ],
+   "doorOpen": [
+    false,
+    false,
+    false
+   ],
+   "flags": 1,
+   "respawnIdx": 0,
+   "poseAgrees": true
+  },
+  {
+   "x": 1,
+   "y": 4,
+   "gx": 15,
+   "gy": 1,
+   "keys": [
+    {
+     "x": 3,
+     "y": 5
+    },
+    {
+     "x": 7,
+     "y": 5
+    },
+    {
+     "x": 11,
+     "y": 5
+    }
+   ],
+   "hasKey": [
+    true,
+    false,
+    false
+   ],
+   "doorOpen": [
+    false,
+    false,
+    false
+   ],
+   "flags": 1,
+   "respawnIdx": 0,
+   "poseAgrees": true
+  },
+  {
+   "x": 1,
+   "y": 4,
+   "gx": 15,
+   "gy": 1,
+   "keys": [
+    {
+     "x": 3,
+     "y": 5
+    },
+    {
+     "x": 7,
+     "y": 5
+    },
+    {
+     "x": 11,
+     "y": 5
+    }
+   ],
+   "hasKey": [
+    true,
+    false,
+    false
+   ],
+   "doorOpen": [
+    false,
+    false,
+    false
+   ],
+   "flags": 1,
+   "respawnIdx": 0,
+   "poseAgrees": true
+  },
+  {
+   "x": 1,
+   "y": 3,
+   "gx": 15,
+   "gy": 1,
+   "keys": [
+    {
+     "x": 3,
+     "y": 5
+    },
+    {
+     "x": 7,
+     "y": 5
+    },
+    {
+     "x": 11,
+     "y": 5
+    }
+   ],
+   "hasKey": [
+    true,
+    false,
+    false
+   ],
+   "doorOpen": [
+    false,
+    false,
+    false
+   ],
+   "flags": 1,
+   "respawnIdx": 0,
+   "poseAgrees": true
+  },
+  {
+   "x": 1,
+   "y": 4,
+   "gx": 15,
+   "gy": 1,
+   "keys": [
+    {
+     "x": 3,
+     "y": 5
+    },
+    {
+     "x": 7,
+     "y": 5
+    },
+    {
+     "x": 11,
+     "y": 5
+    }
+   ],
+   "hasKey": [
+    true,
+    false,
+    false
+   ],
+   "doorOpen": [
+    false,
+    false,
+    false
+   ],
+   "flags": 1,
+   "respawnIdx": 0,
+   "poseAgrees": true
+  },
+  {
+   "x": 1,
+   "y": 4,
+   "gx": 15,
+   "gy": 1,
+   "keys": [
+    {
+     "x": 3,
+     "y": 5
+    },
+    {
+     "x": 7,
+     "y": 5
+    },
+    {
+     "x": 11,
+     "y": 5
+    }
+   ],
+   "hasKey": [
+    true,
+    false,
+    false
+   ],
+   "doorOpen": [
+    false,
+    false,
+    false
+   ],
+   "flags": 1,
+   "respawnIdx": 0,
+   "poseAgrees": true
+  },
+  {
+   "x": 1,
+   "y": 3,
+   "gx": 15,
+   "gy": 1,
+   "keys": [
+    {
+     "x": 3,
+     "y": 5
+    },
+    {
+     "x": 7,
+     "y": 5
+    },
+    {
+     "x": 11,
+     "y": 5
+    }
+   ],
+   "hasKey": [
+    true,
+    false,
+    false
+   ],
+   "doorOpen": [
+    false,
+    false,
+    false
+   ],
+   "flags": 1,
+   "respawnIdx": 0,
+   "poseAgrees": true
+  },
+  {
+   "x": 2,
+   "y": 3,
+   "gx": 15,
+   "gy": 1,
+   "keys": [
+    {
+     "x": 3,
+     "y": 5
+    },
+    {
+     "x": 7,
+     "y": 5
+    },
+    {
+     "x": 11,
+     "y": 5
+    }
+   ],
+   "hasKey": [
+    true,
+    false,
+    false
+   ],
+   "doorOpen": [
+    false,
+    false,
+    false
+   ],
+   "flags": 1,
+   "respawnIdx": 0,
+   "poseAgrees": true
+  },
+  {
+   "x": 2,
+   "y": 4,
+   "gx": 15,
+   "gy": 1,
+   "keys": [
+    {
+     "x": 3,
+     "y": 5
+    },
+    {
+     "x": 7,
+     "y": 5
+    },
+    {
+     "x": 11,
+     "y": 5
+    }
+   ],
+   "hasKey": [
+    true,
+    false,
+    false
+   ],
+   "doorOpen": [
+    false,
+    false,
+    false
+   ],
+   "flags": 1,
+   "respawnIdx": 0,
+   "poseAgrees": true
+  },
+  {
+   "x": 2,
+   "y": 5,
+   "gx": 15,
+   "gy": 1,
+   "keys": [
+    {
+     "x": 3,
+     "y": 5
+    },
+    {
+     "x": 7,
+     "y": 5
+    },
+    {
+     "x": 11,
+     "y": 5
+    }
+   ],
+   "hasKey": [
+    true,
+    false,
+    false
+   ],
+   "doorOpen": [
+    false,
+    false,
+    false
+   ],
+   "flags": 1,
+   "respawnIdx": 0,
+   "poseAgrees": true
+  },
+  {
+   "x": 2,
+   "y": 4,
+   "gx": 15,
+   "gy": 1,
+   "keys": [
+    {
+     "x": 3,
+     "y": 5
+    },
+    {
+     "x": 7,
+     "y": 5
+    },
+    {
+     "x": 11,
+     "y": 5
+    }
+   ],
+   "hasKey": [
+    true,
+    false,
+    false
+   ],
+   "doorOpen": [
+    false,
+    false,
+    false
+   ],
+   "flags": 1,
+   "respawnIdx": 0,
+   "poseAgrees": true
+  },
+  {
+   "x": 1,
+   "y": 4,
+   "gx": 15,
+   "gy": 1,
+   "keys": [
+    {
+     "x": 3,
+     "y": 5
+    },
+    {
+     "x": 7,
+     "y": 5
+    },
+    {
+     "x": 11,
+     "y": 5
+    }
+   ],
+   "hasKey": [
+    true,
+    false,
+    false
+   ],
+   "doorOpen": [
+    false,
+    false,
+    false
+   ],
+   "flags": 1,
+   "respawnIdx": 0,
+   "poseAgrees": true
+  },
+  {
+   "x": 1,
+   "y": 4,
+   "gx": 15,
+   "gy": 1,
+   "keys": [
+    {
+     "x": 3,
+     "y": 5
+    },
+    {
+     "x": 7,
+     "y": 5
+    },
+    {
+     "x": 11,
+     "y": 5
+    }
+   ],
+   "hasKey": [
+    true,
+    false,
+    false
+   ],
+   "doorOpen": [
+    false,
+    false,
+    false
+   ],
+   "flags": 1,
+   "respawnIdx": 0,
+   "poseAgrees": true
+  },
+  {
+   "x": 1,
+   "y": 5,
+   "gx": 15,
+   "gy": 1,
+   "keys": [
+    {
+     "x": 3,
+     "y": 5
+    },
+    {
+     "x": 7,
+     "y": 5
+    },
+    {
+     "x": 11,
+     "y": 5
+    }
+   ],
+   "hasKey": [
+    true,
+    false,
+    false
+   ],
+   "doorOpen": [
+    false,
+    false,
+    false
+   ],
+   "flags": 1,
+   "respawnIdx": 0,
+   "poseAgrees": true
+  },
+  {
+   "x": 1,
+   "y": 4,
+   "gx": 15,
+   "gy": 1,
+   "keys": [
+    {
+     "x": 3,
+     "y": 5
+    },
+    {
+     "x": 7,
+     "y": 5
+    },
+    {
+     "x": 11,
+     "y": 5
+    }
+   ],
+   "hasKey": [
+    true,
+    false,
+    false
+   ],
+   "doorOpen": [
+    false,
+    false,
+    false
+   ],
+   "flags": 1,
+   "respawnIdx": 0,
+   "poseAgrees": true
+  },
+  {
+   "x": 1,
+   "y": 4,
+   "gx": 15,
+   "gy": 1,
+   "keys": [
+    {
+     "x": 3,
+     "y": 5
+    },
+    {
+     "x": 7,
+     "y": 5
+    },
+    {
+     "x": 11,
+     "y": 5
+    }
+   ],
+   "hasKey": [
+    true,
+    false,
+    false
+   ],
+   "doorOpen": [
+    false,
+    false,
+    false
+   ],
+   "flags": 1,
+   "respawnIdx": 0,
+   "poseAgrees": true
+  },
+  {
+   "x": 1,
+   "y": 5,
+   "gx": 15,
+   "gy": 1,
+   "keys": [
+    {
+     "x": 3,
+     "y": 5
+    },
+    {
+     "x": 7,
+     "y": 5
+    },
+    {
+     "x": 11,
+     "y": 5
+    }
+   ],
+   "hasKey": [
+    true,
+    false,
+    false
+   ],
+   "doorOpen": [
+    false,
+    false,
+    false
+   ],
+   "flags": 1,
+   "respawnIdx": 0,
+   "poseAgrees": true
+  },
+  {
+   "x": 1,
+   "y": 5,
+   "gx": 15,
+   "gy": 1,
+   "keys": [
+    {
+     "x": 3,
+     "y": 5
+    },
+    {
+     "x": 7,
+     "y": 5
+    },
+    {
+     "x": 11,
+     "y": 5
+    }
+   ],
+   "hasKey": [
+    true,
+    false,
+    false
+   ],
+   "doorOpen": [
+    false,
+    false,
+    false
+   ],
+   "flags": 1,
+   "respawnIdx": 0,
+   "poseAgrees": true
+  },
+  {
+   "x": 1,
+   "y": 5,
+   "gx": 15,
+   "gy": 1,
+   "keys": [
+    {
+     "x": 3,
+     "y": 5
+    },
+    {
+     "x": 7,
+     "y": 5
+    },
+    {
+     "x": 11,
+     "y": 5
+    }
+   ],
+   "hasKey": [
+    true,
+    false,
+    false
+   ],
+   "doorOpen": [
+    false,
+    false,
+    false
+   ],
+   "flags": 1,
+   "respawnIdx": 0,
+   "poseAgrees": true
+  },
+  {
+   "x": 1,
+   "y": 5,
+   "gx": 15,
+   "gy": 1,
+   "keys": [
+    {
+     "x": 3,
+     "y": 5
+    },
+    {
+     "x": 7,
+     "y": 5
+    },
+    {
+     "x": 11,
+     "y": 5
+    }
+   ],
+   "hasKey": [
+    true,
+    false,
+    false
+   ],
+   "doorOpen": [
+    false,
+    false,
+    false
+   ],
+   "flags": 1,
+   "respawnIdx": 0,
+   "poseAgrees": true
+  },
+  {
+   "x": 1,
+   "y": 5,
+   "gx": 15,
+   "gy": 1,
+   "keys": [
+    {
+     "x": 3,
+     "y": 5
+    },
+    {
+     "x": 7,
+     "y": 5
+    },
+    {
+     "x": 11,
+     "y": 5
+    }
+   ],
+   "hasKey": [
+    true,
+    false,
+    false
+   ],
+   "doorOpen": [
+    false,
+    false,
+    false
+   ],
+   "flags": 1,
+   "respawnIdx": 0,
+   "poseAgrees": true
+  },
+  {
+   "x": 2,
+   "y": 5,
+   "gx": 15,
+   "gy": 1,
+   "keys": [
+    {
+     "x": 3,
+     "y": 5
+    },
+    {
+     "x": 7,
+     "y": 5
+    },
+    {
+     "x": 11,
+     "y": 5
+    }
+   ],
+   "hasKey": [
+    true,
+    false,
+    false
+   ],
+   "doorOpen": [
+    false,
+    false,
+    false
+   ],
+   "flags": 1,
+   "respawnIdx": 0,
+   "poseAgrees": true
+  },
+  {
+   "x": 2,
+   "y": 5,
+   "gx": 15,
+   "gy": 1,
+   "keys": [
+    {
+     "x": 3,
+     "y": 5
+    },
+    {
+     "x": 7,
+     "y": 5
+    },
+    {
+     "x": 11,
+     "y": 5
+    }
+   ],
+   "hasKey": [
+    true,
+    false,
+    false
+   ],
+   "doorOpen": [
+    false,
+    false,
+    false
+   ],
+   "flags": 1,
+   "respawnIdx": 0,
+   "poseAgrees": true
+  },
+  {
+   "x": 3,
+   "y": 5,
+   "gx": 15,
+   "gy": 1,
+   "keys": [
+    {
+     "x": 3,
+     "y": 5
+    },
+    {
+     "x": 7,
+     "y": 5
+    },
+    {
+     "x": 11,
+     "y": 5
+    }
+   ],
+   "hasKey": [
+    true,
+    false,
+    false
+   ],
+   "doorOpen": [
+    false,
+    false,
+    false
+   ],
+   "flags": 1,
+   "respawnIdx": 0,
+   "poseAgrees": true
+  },
+  {
+   "x": 2,
+   "y": 5,
+   "gx": 15,
+   "gy": 1,
+   "keys": [
+    {
+     "x": 3,
+     "y": 5
+    },
+    {
+     "x": 7,
+     "y": 5
+    },
+    {
+     "x": 11,
+     "y": 5
+    }
+   ],
+   "hasKey": [
+    true,
+    false,
+    false
+   ],
+   "doorOpen": [
+    false,
+    false,
+    false
+   ],
+   "flags": 1,
+   "respawnIdx": 0,
+   "poseAgrees": true
+  },
+  {
+   "x": 2,
+   "y": 4,
+   "gx": 15,
+   "gy": 1,
+   "keys": [
+    {
+     "x": 3,
+     "y": 5
+    },
+    {
+     "x": 7,
+     "y": 5
+    },
+    {
+     "x": 11,
+     "y": 5
+    }
+   ],
+   "hasKey": [
+    true,
+    false,
+    false
+   ],
+   "doorOpen": [
+    false,
+    false,
+    false
+   ],
+   "flags": 1,
+   "respawnIdx": 0,
+   "poseAgrees": true
+  },
+  {
+   "x": 1,
+   "y": 4,
+   "gx": 15,
+   "gy": 1,
+   "keys": [
+    {
+     "x": 3,
+     "y": 5
+    },
+    {
+     "x": 7,
+     "y": 5
+    },
+    {
+     "x": 11,
+     "y": 5
+    }
+   ],
+   "hasKey": [
+    true,
+    false,
+    false
+   ],
+   "doorOpen": [
+    false,
+    false,
+    false
+   ],
+   "flags": 1,
+   "respawnIdx": 0,
+   "poseAgrees": true
+  },
+  {
+   "x": 1,
+   "y": 5,
+   "gx": 15,
+   "gy": 1,
+   "keys": [
+    {
+     "x": 3,
+     "y": 5
+    },
+    {
+     "x": 7,
+     "y": 5
+    },
+    {
+     "x": 11,
+     "y": 5
+    }
+   ],
+   "hasKey": [
+    true,
+    false,
+    false
+   ],
+   "doorOpen": [
+    false,
+    false,
+    false
+   ],
+   "flags": 1,
+   "respawnIdx": 0,
+   "poseAgrees": true
+  },
+  {
+   "x": 1,
+   "y": 5,
+   "gx": 15,
+   "gy": 1,
+   "keys": [
+    {
+     "x": 3,
+     "y": 5
+    },
+    {
+     "x": 7,
+     "y": 5
+    },
+    {
+     "x": 11,
+     "y": 5
+    }
+   ],
+   "hasKey": [
+    true,
+    false,
+    false
+   ],
+   "doorOpen": [
+    false,
+    false,
+    false
+   ],
+   "flags": 1,
+   "respawnIdx": 0,
+   "poseAgrees": true
+  },
+  {
+   "x": 1,
+   "y": 5,
+   "gx": 15,
+   "gy": 1,
+   "keys": [
+    {
+     "x": 3,
+     "y": 5
+    },
+    {
+     "x": 7,
+     "y": 5
+    },
+    {
+     "x": 11,
+     "y": 5
+    }
+   ],
+   "hasKey": [
+    true,
+    false,
+    false
+   ],
+   "doorOpen": [
+    false,
+    false,
+    false
+   ],
+   "flags": 1,
+   "respawnIdx": 0,
+   "poseAgrees": true
+  },
+  {
+   "x": 1,
+   "y": 4,
+   "gx": 15,
+   "gy": 1,
+   "keys": [
+    {
+     "x": 3,
+     "y": 5
+    },
+    {
+     "x": 7,
+     "y": 5
+    },
+    {
+     "x": 11,
+     "y": 5
+    }
+   ],
+   "hasKey": [
+    true,
+    false,
+    false
+   ],
+   "doorOpen": [
+    false,
+    false,
+    false
+   ],
+   "flags": 1,
+   "respawnIdx": 0,
+   "poseAgrees": true
+  },
+  {
+   "x": 1,
+   "y": 4,
+   "gx": 15,
+   "gy": 1,
+   "keys": [
+    {
+     "x": 3,
+     "y": 5
+    },
+    {
+     "x": 7,
+     "y": 5
+    },
+    {
+     "x": 11,
+     "y": 5
+    }
+   ],
+   "hasKey": [
+    true,
+    false,
+    false
+   ],
+   "doorOpen": [
+    false,
+    false,
+    false
+   ],
+   "flags": 1,
+   "respawnIdx": 0,
+   "poseAgrees": true
+  },
+  {
+   "x": 1,
+   "y": 4,
+   "gx": 15,
+   "gy": 1,
+   "keys": [
+    {
+     "x": 3,
+     "y": 5
+    },
+    {
+     "x": 7,
+     "y": 5
+    },
+    {
+     "x": 11,
+     "y": 5
+    }
+   ],
+   "hasKey": [
+    true,
+    false,
+    false
+   ],
+   "doorOpen": [
+    false,
+    false,
+    false
+   ],
+   "flags": 1,
+   "respawnIdx": 0,
+   "poseAgrees": true
+  },
+  {
+   "x": 1,
+   "y": 4,
+   "gx": 15,
+   "gy": 1,
+   "keys": [
+    {
+     "x": 3,
+     "y": 5
+    },
+    {
+     "x": 7,
+     "y": 5
+    },
+    {
+     "x": 11,
+     "y": 5
+    }
+   ],
+   "hasKey": [
+    true,
+    false,
+    false
+   ],
+   "doorOpen": [
+    false,
+    false,
+    false
+   ],
+   "flags": 1,
+   "respawnIdx": 0,
+   "poseAgrees": true
+  },
+  {
+   "x": 1,
+   "y": 5,
+   "gx": 15,
+   "gy": 1,
+   "keys": [
+    {
+     "x": 3,
+     "y": 5
+    },
+    {
+     "x": 7,
+     "y": 5
+    },
+    {
+     "x": 11,
+     "y": 5
+    }
+   ],
+   "hasKey": [
+    true,
+    false,
+    false
+   ],
+   "doorOpen": [
+    false,
+    false,
+    false
+   ],
+   "flags": 1,
+   "respawnIdx": 0,
+   "poseAgrees": true
+  },
+  {
+   "x": 2,
+   "y": 5,
+   "gx": 15,
+   "gy": 1,
+   "keys": [
+    {
+     "x": 3,
+     "y": 5
+    },
+    {
+     "x": 7,
+     "y": 5
+    },
+    {
+     "x": 11,
+     "y": 5
+    }
+   ],
+   "hasKey": [
+    true,
+    false,
+    false
+   ],
+   "doorOpen": [
+    false,
+    false,
+    false
+   ],
+   "flags": 1,
+   "respawnIdx": 0,
+   "poseAgrees": true
+  },
+  {
+   "x": 2,
+   "y": 5,
+   "gx": 15,
+   "gy": 1,
+   "keys": [
+    {
+     "x": 3,
+     "y": 5
+    },
+    {
+     "x": 7,
+     "y": 5
+    },
+    {
+     "x": 11,
+     "y": 5
+    }
+   ],
+   "hasKey": [
+    true,
+    false,
+    false
+   ],
+   "doorOpen": [
+    false,
+    false,
+    false
+   ],
+   "flags": 1,
+   "respawnIdx": 0,
+   "poseAgrees": true
+  },
+  {
+   "x": 3,
+   "y": 5,
+   "gx": 15,
+   "gy": 1,
+   "keys": [
+    {
+     "x": 3,
+     "y": 5
+    },
+    {
+     "x": 7,
+     "y": 5
+    },
+    {
+     "x": 11,
+     "y": 5
+    }
+   ],
+   "hasKey": [
+    true,
+    false,
+    false
+   ],
+   "doorOpen": [
+    false,
+    false,
+    false
+   ],
+   "flags": 1,
+   "respawnIdx": 0,
+   "poseAgrees": true
+  },
+  {
+   "x": 2,
+   "y": 5,
+   "gx": 15,
+   "gy": 1,
+   "keys": [
+    {
+     "x": 3,
+     "y": 5
+    },
+    {
+     "x": 7,
+     "y": 5
+    },
+    {
+     "x": 11,
+     "y": 5
+    }
+   ],
+   "hasKey": [
+    true,
+    false,
+    false
+   ],
+   "doorOpen": [
+    false,
+    false,
+    false
+   ],
+   "flags": 1,
+   "respawnIdx": 0,
+   "poseAgrees": true
+  },
+  {
+   "x": 2,
+   "y": 5,
+   "gx": 15,
+   "gy": 1,
+   "keys": [
+    {
+     "x": 3,
+     "y": 5
+    },
+    {
+     "x": 7,
+     "y": 5
+    },
+    {
+     "x": 11,
+     "y": 5
+    }
+   ],
+   "hasKey": [
+    true,
+    false,
+    false
+   ],
+   "doorOpen": [
+    false,
+    false,
+    false
+   ],
+   "flags": 1,
+   "respawnIdx": 0,
+   "poseAgrees": true
+  },
+  {
+   "x": 1,
+   "y": 5,
+   "gx": 15,
+   "gy": 1,
+   "keys": [
+    {
+     "x": 3,
+     "y": 5
+    },
+    {
+     "x": 7,
+     "y": 5
+    },
+    {
+     "x": 11,
+     "y": 5
+    }
+   ],
+   "hasKey": [
+    true,
+    false,
+    false
+   ],
+   "doorOpen": [
+    false,
+    false,
+    false
+   ],
+   "flags": 1,
+   "respawnIdx": 0,
+   "poseAgrees": true
+  },
+  {
+   "x": 1,
+   "y": 5,
+   "gx": 15,
+   "gy": 1,
+   "keys": [
+    {
+     "x": 3,
+     "y": 5
+    },
+    {
+     "x": 7,
+     "y": 5
+    },
+    {
+     "x": 11,
+     "y": 5
+    }
+   ],
+   "hasKey": [
+    true,
+    false,
+    false
+   ],
+   "doorOpen": [
+    false,
+    false,
+    false
+   ],
+   "flags": 1,
+   "respawnIdx": 0,
+   "poseAgrees": true
+  },
+  {
+   "x": 1,
+   "y": 5,
+   "gx": 15,
+   "gy": 1,
+   "keys": [
+    {
+     "x": 3,
+     "y": 5
+    },
+    {
+     "x": 7,
+     "y": 5
+    },
+    {
+     "x": 11,
+     "y": 5
+    }
+   ],
+   "hasKey": [
+    true,
+    false,
+    false
+   ],
+   "doorOpen": [
+    false,
+    false,
+    false
+   ],
+   "flags": 1,
+   "respawnIdx": 0,
+   "poseAgrees": true
+  },
+  {
+   "x": 1,
+   "y": 5,
+   "gx": 15,
+   "gy": 1,
+   "keys": [
+    {
+     "x": 3,
+     "y": 5
+    },
+    {
+     "x": 7,
+     "y": 5
+    },
+    {
+     "x": 11,
+     "y": 5
+    }
+   ],
+   "hasKey": [
+    true,
+    false,
+    false
+   ],
+   "doorOpen": [
+    false,
+    false,
+    false
+   ],
+   "flags": 1,
+   "respawnIdx": 0,
+   "poseAgrees": true
+  },
+  {
+   "x": 1,
+   "y": 4,
+   "gx": 15,
+   "gy": 1,
+   "keys": [
+    {
+     "x": 3,
+     "y": 5
+    },
+    {
+     "x": 7,
+     "y": 5
+    },
+    {
+     "x": 11,
+     "y": 5
+    }
+   ],
+   "hasKey": [
+    true,
+    false,
+    false
+   ],
+   "doorOpen": [
+    false,
+    false,
+    false
+   ],
+   "flags": 1,
+   "respawnIdx": 0,
+   "poseAgrees": true
+  },
+  {
+   "x": 1,
+   "y": 4,
+   "gx": 15,
+   "gy": 1,
+   "keys": [
+    {
+     "x": 3,
+     "y": 5
+    },
+    {
+     "x": 7,
+     "y": 5
+    },
+    {
+     "x": 11,
+     "y": 5
+    }
+   ],
+   "hasKey": [
+    true,
+    false,
+    false
+   ],
+   "doorOpen": [
+    false,
+    false,
+    false
+   ],
+   "flags": 1,
+   "respawnIdx": 0,
+   "poseAgrees": true
+  },
+  {
+   "x": 1,
+   "y": 4,
+   "gx": 15,
+   "gy": 1,
+   "keys": [
+    {
+     "x": 3,
+     "y": 5
+    },
+    {
+     "x": 7,
+     "y": 5
+    },
+    {
+     "x": 11,
+     "y": 5
+    }
+   ],
+   "hasKey": [
+    true,
+    false,
+    false
+   ],
+   "doorOpen": [
+    false,
+    false,
+    false
+   ],
+   "flags": 1,
+   "respawnIdx": 0,
+   "poseAgrees": true
+  },
+  {
+   "x": 1,
+   "y": 3,
+   "gx": 15,
+   "gy": 1,
+   "keys": [
+    {
+     "x": 3,
+     "y": 5
+    },
+    {
+     "x": 7,
+     "y": 5
+    },
+    {
+     "x": 11,
+     "y": 5
+    }
+   ],
+   "hasKey": [
+    true,
+    false,
+    false
+   ],
+   "doorOpen": [
+    false,
+    false,
+    false
+   ],
+   "flags": 1,
+   "respawnIdx": 0,
+   "poseAgrees": true
+  },
+  {
+   "x": 1,
+   "y": 2,
+   "gx": 15,
+   "gy": 1,
+   "keys": [
+    {
+     "x": 3,
+     "y": 5
+    },
+    {
+     "x": 7,
+     "y": 5
+    },
+    {
+     "x": 11,
+     "y": 5
+    }
+   ],
+   "hasKey": [
+    true,
+    false,
+    false
+   ],
+   "doorOpen": [
+    false,
+    false,
+    false
+   ],
+   "flags": 1,
+   "respawnIdx": 0,
+   "poseAgrees": true
+  },
+  {
+   "x": 2,
+   "y": 2,
+   "gx": 15,
+   "gy": 1,
+   "keys": [
+    {
+     "x": 3,
+     "y": 5
+    },
+    {
+     "x": 7,
+     "y": 5
+    },
+    {
+     "x": 11,
+     "y": 5
+    }
+   ],
+   "hasKey": [
+    true,
+    false,
+    false
+   ],
+   "doorOpen": [
+    false,
+    false,
+    false
+   ],
+   "flags": 1,
+   "respawnIdx": 0,
+   "poseAgrees": true
+  },
+  {
+   "x": 2,
+   "y": 3,
+   "gx": 15,
+   "gy": 1,
+   "keys": [
+    {
+     "x": 3,
+     "y": 5
+    },
+    {
+     "x": 7,
+     "y": 5
+    },
+    {
+     "x": 11,
+     "y": 5
+    }
+   ],
+   "hasKey": [
+    true,
+    false,
+    false
+   ],
+   "doorOpen": [
+    false,
+    false,
+    false
+   ],
+   "flags": 1,
+   "respawnIdx": 0,
+   "poseAgrees": true
+  },
+  {
+   "x": 2,
+   "y": 2,
+   "gx": 15,
+   "gy": 1,
+   "keys": [
+    {
+     "x": 3,
+     "y": 5
+    },
+    {
+     "x": 7,
+     "y": 5
+    },
+    {
+     "x": 11,
+     "y": 5
+    }
+   ],
+   "hasKey": [
+    true,
+    false,
+    false
+   ],
+   "doorOpen": [
+    false,
+    false,
+    false
+   ],
+   "flags": 1,
+   "respawnIdx": 0,
+   "poseAgrees": true
+  },
+  {
+   "x": 2,
+   "y": 3,
+   "gx": 15,
+   "gy": 1,
+   "keys": [
+    {
+     "x": 3,
+     "y": 5
+    },
+    {
+     "x": 7,
+     "y": 5
+    },
+    {
+     "x": 11,
+     "y": 5
+    }
+   ],
+   "hasKey": [
+    true,
+    false,
+    false
+   ],
+   "doorOpen": [
+    false,
+    false,
+    false
+   ],
+   "flags": 1,
+   "respawnIdx": 0,
+   "poseAgrees": true
+  },
+  {
+   "x": 3,
+   "y": 3,
+   "gx": 15,
+   "gy": 1,
+   "keys": [
+    {
+     "x": 3,
+     "y": 5
+    },
+    {
+     "x": 7,
+     "y": 5
+    },
+    {
+     "x": 11,
+     "y": 5
+    }
+   ],
+   "hasKey": [
+    true,
+    false,
+    false
+   ],
+   "doorOpen": [
+    false,
+    false,
+    false
+   ],
+   "flags": 1,
+   "respawnIdx": 0,
+   "poseAgrees": true
+  },
+  {
+   "x": 3,
+   "y": 4,
+   "gx": 15,
+   "gy": 1,
+   "keys": [
+    {
+     "x": 3,
+     "y": 5
+    },
+    {
+     "x": 7,
+     "y": 5
+    },
+    {
+     "x": 11,
+     "y": 5
+    }
+   ],
+   "hasKey": [
+    true,
+    false,
+    false
+   ],
+   "doorOpen": [
+    false,
+    false,
+    false
+   ],
+   "flags": 1,
+   "respawnIdx": 0,
+   "poseAgrees": true
+  },
+  {
+   "x": 2,
+   "y": 4,
+   "gx": 15,
+   "gy": 1,
+   "keys": [
+    {
+     "x": 3,
+     "y": 5
+    },
+    {
+     "x": 7,
+     "y": 5
+    },
+    {
+     "x": 11,
+     "y": 5
+    }
+   ],
+   "hasKey": [
+    true,
+    false,
+    false
+   ],
+   "doorOpen": [
+    false,
+    false,
+    false
+   ],
+   "flags": 1,
+   "respawnIdx": 0,
+   "poseAgrees": true
+  },
+  {
+   "x": 1,
+   "y": 4,
+   "gx": 15,
+   "gy": 1,
+   "keys": [
+    {
+     "x": 3,
+     "y": 5
+    },
+    {
+     "x": 7,
+     "y": 5
+    },
+    {
+     "x": 11,
+     "y": 5
+    }
+   ],
+   "hasKey": [
+    true,
+    false,
+    false
+   ],
+   "doorOpen": [
+    false,
+    false,
+    false
+   ],
+   "flags": 1,
+   "respawnIdx": 0,
+   "poseAgrees": true
+  },
+  {
+   "x": 2,
+   "y": 4,
+   "gx": 15,
+   "gy": 1,
+   "keys": [
+    {
+     "x": 3,
+     "y": 5
+    },
+    {
+     "x": 7,
+     "y": 5
+    },
+    {
+     "x": 11,
+     "y": 5
+    }
+   ],
+   "hasKey": [
+    true,
+    false,
+    false
+   ],
+   "doorOpen": [
+    false,
+    false,
+    false
+   ],
+   "flags": 1,
+   "respawnIdx": 0,
+   "poseAgrees": true
+  },
+  {
+   "x": 1,
+   "y": 4,
+   "gx": 15,
+   "gy": 1,
+   "keys": [
+    {
+     "x": 3,
+     "y": 5
+    },
+    {
+     "x": 7,
+     "y": 5
+    },
+    {
+     "x": 11,
+     "y": 5
+    }
+   ],
+   "hasKey": [
+    true,
+    false,
+    false
+   ],
+   "doorOpen": [
+    false,
+    false,
+    false
+   ],
+   "flags": 1,
+   "respawnIdx": 0,
+   "poseAgrees": true
+  },
+  {
+   "x": 2,
+   "y": 4,
+   "gx": 15,
+   "gy": 1,
+   "keys": [
+    {
+     "x": 3,
+     "y": 5
+    },
+    {
+     "x": 7,
+     "y": 5
+    },
+    {
+     "x": 11,
+     "y": 5
+    }
+   ],
+   "hasKey": [
+    true,
+    false,
+    false
+   ],
+   "doorOpen": [
+    false,
+    false,
+    false
+   ],
+   "flags": 1,
+   "respawnIdx": 0,
+   "poseAgrees": true
+  },
+  {
+   "x": 2,
+   "y": 3,
+   "gx": 15,
+   "gy": 1,
+   "keys": [
+    {
+     "x": 3,
+     "y": 5
+    },
+    {
+     "x": 7,
+     "y": 5
+    },
+    {
+     "x": 11,
+     "y": 5
+    }
+   ],
+   "hasKey": [
+    true,
+    false,
+    false
+   ],
+   "doorOpen": [
+    false,
+    false,
+    false
+   ],
+   "flags": 1,
+   "respawnIdx": 0,
+   "poseAgrees": true
+  },
+  {
+   "x": 2,
+   "y": 2,
+   "gx": 15,
+   "gy": 1,
+   "keys": [
+    {
+     "x": 3,
+     "y": 5
+    },
+    {
+     "x": 7,
+     "y": 5
+    },
+    {
+     "x": 11,
+     "y": 5
+    }
+   ],
+   "hasKey": [
+    true,
+    false,
+    false
+   ],
+   "doorOpen": [
+    false,
+    false,
+    false
+   ],
+   "flags": 1,
+   "respawnIdx": 0,
+   "poseAgrees": true
+  },
+  {
+   "x": 2,
+   "y": 1,
+   "gx": 15,
+   "gy": 1,
+   "keys": [
+    {
+     "x": 3,
+     "y": 5
+    },
+    {
+     "x": 7,
+     "y": 5
+    },
+    {
+     "x": 11,
+     "y": 5
+    }
+   ],
+   "hasKey": [
+    true,
+    false,
+    false
+   ],
+   "doorOpen": [
+    false,
+    false,
+    false
+   ],
+   "flags": 1,
+   "respawnIdx": 0,
+   "poseAgrees": true
+  },
+  {
+   "x": 2,
+   "y": 2,
+   "gx": 15,
+   "gy": 1,
+   "keys": [
+    {
+     "x": 3,
+     "y": 5
+    },
+    {
+     "x": 7,
+     "y": 5
+    },
+    {
+     "x": 11,
+     "y": 5
+    }
+   ],
+   "hasKey": [
+    true,
+    false,
+    false
+   ],
+   "doorOpen": [
+    false,
+    false,
+    false
+   ],
+   "flags": 1,
+   "respawnIdx": 0,
+   "poseAgrees": true
+  },
+  {
+   "x": 2,
+   "y": 3,
+   "gx": 15,
+   "gy": 1,
+   "keys": [
+    {
+     "x": 3,
+     "y": 5
+    },
+    {
+     "x": 7,
+     "y": 5
+    },
+    {
+     "x": 11,
+     "y": 5
+    }
+   ],
+   "hasKey": [
+    true,
+    false,
+    false
+   ],
+   "doorOpen": [
+    false,
+    false,
+    false
+   ],
+   "flags": 1,
+   "respawnIdx": 0,
+   "poseAgrees": true
+  },
+  {
+   "x": 1,
+   "y": 3,
+   "gx": 15,
+   "gy": 1,
+   "keys": [
+    {
+     "x": 3,
+     "y": 5
+    },
+    {
+     "x": 7,
+     "y": 5
+    },
+    {
+     "x": 11,
+     "y": 5
+    }
+   ],
+   "hasKey": [
+    true,
+    false,
+    false
+   ],
+   "doorOpen": [
+    false,
+    false,
+    false
+   ],
+   "flags": 1,
+   "respawnIdx": 0,
+   "poseAgrees": true
+  },
+  {
+   "x": 1,
+   "y": 4,
+   "gx": 15,
+   "gy": 1,
+   "keys": [
+    {
+     "x": 3,
+     "y": 5
+    },
+    {
+     "x": 7,
+     "y": 5
+    },
+    {
+     "x": 11,
+     "y": 5
+    }
+   ],
+   "hasKey": [
+    true,
+    false,
+    false
+   ],
+   "doorOpen": [
+    false,
+    false,
+    false
+   ],
+   "flags": 1,
+   "respawnIdx": 0,
+   "poseAgrees": true
+  },
+  {
+   "x": 1,
+   "y": 3,
+   "gx": 15,
+   "gy": 1,
+   "keys": [
+    {
+     "x": 3,
+     "y": 5
+    },
+    {
+     "x": 7,
+     "y": 5
+    },
+    {
+     "x": 11,
+     "y": 5
+    }
+   ],
+   "hasKey": [
+    true,
+    false,
+    false
+   ],
+   "doorOpen": [
+    false,
+    false,
+    false
+   ],
+   "flags": 1,
+   "respawnIdx": 0,
+   "poseAgrees": true
+  },
+  {
+   "x": 1,
+   "y": 3,
+   "gx": 15,
+   "gy": 1,
+   "keys": [
+    {
+     "x": 3,
+     "y": 5
+    },
+    {
+     "x": 7,
+     "y": 5
+    },
+    {
+     "x": 11,
+     "y": 5
+    }
+   ],
+   "hasKey": [
+    true,
+    false,
+    false
+   ],
+   "doorOpen": [
+    false,
+    false,
+    false
+   ],
+   "flags": 1,
+   "respawnIdx": 0,
+   "poseAgrees": true
+  },
+  {
+   "x": 1,
+   "y": 2,
+   "gx": 15,
+   "gy": 1,
+   "keys": [
+    {
+     "x": 3,
+     "y": 5
+    },
+    {
+     "x": 7,
+     "y": 5
+    },
+    {
+     "x": 11,
+     "y": 5
+    }
+   ],
+   "hasKey": [
+    true,
+    false,
+    false
+   ],
+   "doorOpen": [
+    false,
+    false,
+    false
+   ],
+   "flags": 1,
+   "respawnIdx": 0,
+   "poseAgrees": true
+  },
+  {
+   "x": 1,
+   "y": 3,
+   "gx": 15,
+   "gy": 1,
+   "keys": [
+    {
+     "x": 3,
+     "y": 5
+    },
+    {
+     "x": 7,
+     "y": 5
+    },
+    {
+     "x": 11,
+     "y": 5
+    }
+   ],
+   "hasKey": [
+    true,
+    false,
+    false
+   ],
+   "doorOpen": [
+    false,
+    false,
+    false
+   ],
+   "flags": 1,
+   "respawnIdx": 0,
+   "poseAgrees": true
+  },
+  {
+   "x": 1,
+   "y": 3,
+   "gx": 15,
+   "gy": 1,
+   "keys": [
+    {
+     "x": 3,
+     "y": 5
+    },
+    {
+     "x": 7,
+     "y": 5
+    },
+    {
+     "x": 11,
+     "y": 5
+    }
+   ],
+   "hasKey": [
+    true,
+    false,
+    false
+   ],
+   "doorOpen": [
+    false,
+    false,
+    false
+   ],
+   "flags": 1,
+   "respawnIdx": 0,
+   "poseAgrees": true
+  },
+  {
+   "x": 1,
+   "y": 4,
+   "gx": 15,
+   "gy": 1,
+   "keys": [
+    {
+     "x": 3,
+     "y": 5
+    },
+    {
+     "x": 7,
+     "y": 5
+    },
+    {
+     "x": 11,
+     "y": 5
+    }
+   ],
+   "hasKey": [
+    true,
+    false,
+    false
+   ],
+   "doorOpen": [
+    false,
+    false,
+    false
+   ],
+   "flags": 1,
+   "respawnIdx": 0,
+   "poseAgrees": true
+  },
+  {
+   "x": 1,
+   "y": 3,
+   "gx": 15,
+   "gy": 1,
+   "keys": [
+    {
+     "x": 3,
+     "y": 5
+    },
+    {
+     "x": 7,
+     "y": 5
+    },
+    {
+     "x": 11,
+     "y": 5
+    }
+   ],
+   "hasKey": [
+    true,
+    false,
+    false
+   ],
+   "doorOpen": [
+    false,
+    false,
+    false
+   ],
+   "flags": 1,
+   "respawnIdx": 0,
+   "poseAgrees": true
+  },
+  {
+   "x": 1,
+   "y": 2,
+   "gx": 15,
+   "gy": 1,
+   "keys": [
+    {
+     "x": 3,
+     "y": 5
+    },
+    {
+     "x": 7,
+     "y": 5
+    },
+    {
+     "x": 11,
+     "y": 5
+    }
+   ],
+   "hasKey": [
+    true,
+    false,
+    false
+   ],
+   "doorOpen": [
+    false,
+    false,
+    false
+   ],
+   "flags": 1,
+   "respawnIdx": 0,
+   "poseAgrees": true
+  },
+  {
+   "x": 1,
+   "y": 2,
+   "gx": 15,
+   "gy": 1,
+   "keys": [
+    {
+     "x": 3,
+     "y": 5
+    },
+    {
+     "x": 7,
+     "y": 5
+    },
+    {
+     "x": 11,
+     "y": 5
+    }
+   ],
+   "hasKey": [
+    true,
+    false,
+    false
+   ],
+   "doorOpen": [
+    false,
+    false,
+    false
+   ],
+   "flags": 1,
+   "respawnIdx": 0,
+   "poseAgrees": true
+  },
+  {
+   "x": 1,
+   "y": 2,
+   "gx": 15,
+   "gy": 1,
+   "keys": [
+    {
+     "x": 3,
+     "y": 5
+    },
+    {
+     "x": 7,
+     "y": 5
+    },
+    {
+     "x": 11,
+     "y": 5
+    }
+   ],
+   "hasKey": [
+    true,
+    false,
+    false
+   ],
+   "doorOpen": [
+    false,
+    false,
+    false
+   ],
+   "flags": 1,
+   "respawnIdx": 0,
+   "poseAgrees": true
+  },
+  {
+   "x": 2,
+   "y": 2,
+   "gx": 15,
+   "gy": 1,
+   "keys": [
+    {
+     "x": 3,
+     "y": 5
+    },
+    {
+     "x": 7,
+     "y": 5
+    },
+    {
+     "x": 11,
+     "y": 5
+    }
+   ],
+   "hasKey": [
+    true,
+    false,
+    false
+   ],
+   "doorOpen": [
+    false,
+    false,
+    false
+   ],
+   "flags": 1,
+   "respawnIdx": 0,
+   "poseAgrees": true
+  },
+  {
+   "x": 1,
+   "y": 2,
+   "gx": 15,
+   "gy": 1,
+   "keys": [
+    {
+     "x": 3,
+     "y": 5
+    },
+    {
+     "x": 7,
+     "y": 5
+    },
+    {
+     "x": 11,
+     "y": 5
+    }
+   ],
+   "hasKey": [
+    true,
+    false,
+    false
+   ],
+   "doorOpen": [
+    false,
+    false,
+    false
+   ],
+   "flags": 1,
+   "respawnIdx": 0,
+   "poseAgrees": true
+  },
+  {
+   "x": 2,
+   "y": 2,
+   "gx": 15,
+   "gy": 1,
+   "keys": [
+    {
+     "x": 3,
+     "y": 5
+    },
+    {
+     "x": 7,
+     "y": 5
+    },
+    {
+     "x": 11,
+     "y": 5
+    }
+   ],
+   "hasKey": [
+    true,
+    false,
+    false
+   ],
+   "doorOpen": [
+    false,
+    false,
+    false
+   ],
+   "flags": 1,
+   "respawnIdx": 0,
+   "poseAgrees": true
+  },
+  {
+   "x": 3,
+   "y": 2,
+   "gx": 15,
+   "gy": 1,
+   "keys": [
+    {
+     "x": 3,
+     "y": 5
+    },
+    {
+     "x": 7,
+     "y": 5
+    },
+    {
+     "x": 11,
+     "y": 5
+    }
+   ],
+   "hasKey": [
+    true,
+    false,
+    false
+   ],
+   "doorOpen": [
+    false,
+    false,
+    false
+   ],
+   "flags": 1,
+   "respawnIdx": 0,
+   "poseAgrees": true
+  },
+  {
+   "x": 3,
+   "y": 2,
+   "gx": 15,
+   "gy": 1,
+   "keys": [
+    {
+     "x": 3,
+     "y": 5
+    },
+    {
+     "x": 7,
+     "y": 5
+    },
+    {
+     "x": 11,
+     "y": 5
+    }
+   ],
+   "hasKey": [
+    true,
+    false,
+    false
+   ],
+   "doorOpen": [
+    false,
+    false,
+    false
+   ],
+   "flags": 1,
+   "respawnIdx": 0,
+   "poseAgrees": true
+  },
+  {
+   "x": 3,
+   "y": 3,
+   "gx": 15,
+   "gy": 1,
+   "keys": [
+    {
+     "x": 3,
+     "y": 5
+    },
+    {
+     "x": 7,
+     "y": 5
+    },
+    {
+     "x": 11,
+     "y": 5
+    }
+   ],
+   "hasKey": [
+    true,
+    false,
+    false
+   ],
+   "doorOpen": [
+    false,
+    false,
+    false
+   ],
+   "flags": 1,
+   "respawnIdx": 0,
+   "poseAgrees": true
+  },
+  {
+   "x": 3,
+   "y": 2,
+   "gx": 15,
+   "gy": 1,
+   "keys": [
+    {
+     "x": 3,
+     "y": 5
+    },
+    {
+     "x": 7,
+     "y": 5
+    },
+    {
+     "x": 11,
+     "y": 5
+    }
+   ],
+   "hasKey": [
+    true,
+    false,
+    false
+   ],
+   "doorOpen": [
+    false,
+    false,
+    false
+   ],
+   "flags": 1,
+   "respawnIdx": 0,
+   "poseAgrees": true
+  },
+  {
+   "x": 3,
+   "y": 1,
+   "gx": 15,
+   "gy": 1,
+   "keys": [
+    {
+     "x": 3,
+     "y": 5
+    },
+    {
+     "x": 7,
+     "y": 5
+    },
+    {
+     "x": 11,
+     "y": 5
+    }
+   ],
+   "hasKey": [
+    true,
+    false,
+    false
+   ],
+   "doorOpen": [
+    false,
+    false,
+    false
+   ],
+   "flags": 1,
+   "respawnIdx": 0,
+   "poseAgrees": true
+  },
+  {
+   "x": 3,
+   "y": 1,
+   "gx": 15,
+   "gy": 1,
+   "keys": [
+    {
+     "x": 3,
+     "y": 5
+    },
+    {
+     "x": 7,
+     "y": 5
+    },
+    {
+     "x": 11,
+     "y": 5
+    }
+   ],
+   "hasKey": [
+    true,
+    false,
+    false
+   ],
+   "doorOpen": [
+    false,
+    false,
+    false
+   ],
+   "flags": 1,
+   "respawnIdx": 0,
+   "poseAgrees": true
+  },
+  {
+   "x": 3,
+   "y": 1,
+   "gx": 15,
+   "gy": 1,
+   "keys": [
+    {
+     "x": 3,
+     "y": 5
+    },
+    {
+     "x": 7,
+     "y": 5
+    },
+    {
+     "x": 11,
+     "y": 5
+    }
+   ],
+   "hasKey": [
+    true,
+    false,
+    false
+   ],
+   "doorOpen": [
+    false,
+    false,
+    false
+   ],
+   "flags": 1,
+   "respawnIdx": 0,
+   "poseAgrees": true
+  },
+  {
+   "x": 3,
+   "y": 1,
+   "gx": 15,
+   "gy": 1,
+   "keys": [
+    {
+     "x": 3,
+     "y": 5
+    },
+    {
+     "x": 7,
+     "y": 5
+    },
+    {
+     "x": 11,
+     "y": 5
+    }
+   ],
+   "hasKey": [
+    true,
+    false,
+    false
+   ],
+   "doorOpen": [
+    false,
+    false,
+    false
+   ],
+   "flags": 1,
+   "respawnIdx": 0,
+   "poseAgrees": true
+  },
+  {
+   "x": 2,
+   "y": 1,
+   "gx": 15,
+   "gy": 1,
+   "keys": [
+    {
+     "x": 3,
+     "y": 5
+    },
+    {
+     "x": 7,
+     "y": 5
+    },
+    {
+     "x": 11,
+     "y": 5
+    }
+   ],
+   "hasKey": [
+    true,
+    false,
+    false
+   ],
+   "doorOpen": [
+    false,
+    false,
+    false
+   ],
+   "flags": 1,
+   "respawnIdx": 0,
+   "poseAgrees": true
+  },
+  {
+   "x": 3,
+   "y": 1,
+   "gx": 15,
+   "gy": 1,
+   "keys": [
+    {
+     "x": 3,
+     "y": 5
+    },
+    {
+     "x": 7,
+     "y": 5
+    },
+    {
+     "x": 11,
+     "y": 5
+    }
+   ],
+   "hasKey": [
+    true,
+    false,
+    false
+   ],
+   "doorOpen": [
+    false,
+    false,
+    false
+   ],
+   "flags": 1,
+   "respawnIdx": 0,
+   "poseAgrees": true
+  },
+  {
+   "x": 3,
+   "y": 1,
+   "gx": 15,
+   "gy": 1,
+   "keys": [
+    {
+     "x": 3,
+     "y": 5
+    },
+    {
+     "x": 7,
+     "y": 5
+    },
+    {
+     "x": 11,
+     "y": 5
+    }
+   ],
+   "hasKey": [
+    true,
+    false,
+    false
+   ],
+   "doorOpen": [
+    false,
+    false,
+    false
+   ],
+   "flags": 1,
+   "respawnIdx": 0,
+   "poseAgrees": true
+  },
+  {
+   "x": 3,
+   "y": 1,
+   "gx": 15,
+   "gy": 1,
+   "keys": [
+    {
+     "x": 3,
+     "y": 5
+    },
+    {
+     "x": 7,
+     "y": 5
+    },
+    {
+     "x": 11,
+     "y": 5
+    }
+   ],
+   "hasKey": [
+    true,
+    false,
+    false
+   ],
+   "doorOpen": [
+    false,
+    false,
+    false
+   ],
+   "flags": 1,
+   "respawnIdx": 0,
+   "poseAgrees": true
+  },
+  {
+   "x": 2,
+   "y": 1,
+   "gx": 15,
+   "gy": 1,
+   "keys": [
+    {
+     "x": 3,
+     "y": 5
+    },
+    {
+     "x": 7,
+     "y": 5
+    },
+    {
+     "x": 11,
+     "y": 5
+    }
+   ],
+   "hasKey": [
+    true,
+    false,
+    false
+   ],
+   "doorOpen": [
+    false,
+    false,
+    false
+   ],
+   "flags": 1,
+   "respawnIdx": 0,
+   "poseAgrees": true
+  },
+  {
+   "x": 3,
+   "y": 1,
+   "gx": 15,
+   "gy": 1,
+   "keys": [
+    {
+     "x": 3,
+     "y": 5
+    },
+    {
+     "x": 7,
+     "y": 5
+    },
+    {
+     "x": 11,
+     "y": 5
+    }
+   ],
+   "hasKey": [
+    true,
+    false,
+    false
+   ],
+   "doorOpen": [
+    false,
+    false,
+    false
+   ],
+   "flags": 1,
+   "respawnIdx": 0,
+   "poseAgrees": true
+  },
+  {
+   "x": 2,
+   "y": 1,
+   "gx": 15,
+   "gy": 1,
+   "keys": [
+    {
+     "x": 3,
+     "y": 5
+    },
+    {
+     "x": 7,
+     "y": 5
+    },
+    {
+     "x": 11,
+     "y": 5
+    }
+   ],
+   "hasKey": [
+    true,
+    false,
+    false
+   ],
+   "doorOpen": [
+    false,
+    false,
+    false
+   ],
+   "flags": 1,
+   "respawnIdx": 0,
+   "poseAgrees": true
+  },
+  {
+   "x": 2,
+   "y": 1,
+   "gx": 15,
+   "gy": 1,
+   "keys": [
+    {
+     "x": 3,
+     "y": 5
+    },
+    {
+     "x": 7,
+     "y": 5
+    },
+    {
+     "x": 11,
+     "y": 5
+    }
+   ],
+   "hasKey": [
+    true,
+    false,
+    false
+   ],
+   "doorOpen": [
+    false,
+    false,
+    false
+   ],
+   "flags": 1,
+   "respawnIdx": 0,
+   "poseAgrees": true
+  },
+  {
+   "x": 2,
+   "y": 1,
+   "gx": 15,
+   "gy": 1,
+   "keys": [
+    {
+     "x": 3,
+     "y": 5
+    },
+    {
+     "x": 7,
+     "y": 5
+    },
+    {
+     "x": 11,
+     "y": 5
+    }
+   ],
+   "hasKey": [
+    true,
+    false,
+    false
+   ],
+   "doorOpen": [
+    false,
+    false,
+    false
+   ],
+   "flags": 1,
+   "respawnIdx": 0,
+   "poseAgrees": true
+  },
+  {
+   "x": 3,
+   "y": 1,
+   "gx": 15,
+   "gy": 1,
+   "keys": [
+    {
+     "x": 3,
+     "y": 5
+    },
+    {
+     "x": 7,
+     "y": 5
+    },
+    {
+     "x": 11,
+     "y": 5
+    }
+   ],
+   "hasKey": [
+    true,
+    false,
+    false
+   ],
+   "doorOpen": [
+    false,
+    false,
+    false
+   ],
+   "flags": 1,
+   "respawnIdx": 0,
+   "poseAgrees": true
+  },
+  {
+   "x": 3,
+   "y": 2,
+   "gx": 15,
+   "gy": 1,
+   "keys": [
+    {
+     "x": 3,
+     "y": 5
+    },
+    {
+     "x": 7,
+     "y": 5
+    },
+    {
+     "x": 11,
+     "y": 5
+    }
+   ],
+   "hasKey": [
+    true,
+    false,
+    false
+   ],
+   "doorOpen": [
+    false,
+    false,
+    false
+   ],
+   "flags": 1,
+   "respawnIdx": 0,
+   "poseAgrees": true
+  },
+  {
+   "x": 2,
+   "y": 2,
+   "gx": 15,
+   "gy": 1,
+   "keys": [
+    {
+     "x": 3,
+     "y": 5
+    },
+    {
+     "x": 7,
+     "y": 5
+    },
+    {
+     "x": 11,
+     "y": 5
+    }
+   ],
+   "hasKey": [
+    true,
+    false,
+    false
+   ],
+   "doorOpen": [
+    false,
+    false,
+    false
+   ],
+   "flags": 1,
+   "respawnIdx": 0,
+   "poseAgrees": true
+  },
+  {
+   "x": 3,
+   "y": 2,
+   "gx": 15,
+   "gy": 1,
+   "keys": [
+    {
+     "x": 3,
+     "y": 5
+    },
+    {
+     "x": 7,
+     "y": 5
+    },
+    {
+     "x": 11,
+     "y": 5
+    }
+   ],
+   "hasKey": [
+    true,
+    false,
+    false
+   ],
+   "doorOpen": [
+    false,
+    false,
+    false
+   ],
+   "flags": 1,
+   "respawnIdx": 0,
+   "poseAgrees": true
+  },
+  {
+   "x": 2,
+   "y": 2,
+   "gx": 15,
+   "gy": 1,
+   "keys": [
+    {
+     "x": 3,
+     "y": 5
+    },
+    {
+     "x": 7,
+     "y": 5
+    },
+    {
+     "x": 11,
+     "y": 5
+    }
+   ],
+   "hasKey": [
+    true,
+    false,
+    false
+   ],
+   "doorOpen": [
+    false,
+    false,
+    false
+   ],
+   "flags": 1,
+   "respawnIdx": 0,
+   "poseAgrees": true
+  },
+  {
+   "x": 2,
+   "y": 1,
+   "gx": 15,
+   "gy": 1,
+   "keys": [
+    {
+     "x": 3,
+     "y": 5
+    },
+    {
+     "x": 7,
+     "y": 5
+    },
+    {
+     "x": 11,
+     "y": 5
+    }
+   ],
+   "hasKey": [
+    true,
+    false,
+    false
+   ],
+   "doorOpen": [
+    false,
+    false,
+    false
+   ],
+   "flags": 1,
+   "respawnIdx": 0,
+   "poseAgrees": true
+  },
+  {
+   "x": 1,
+   "y": 1,
+   "gx": 15,
+   "gy": 1,
+   "keys": [
+    {
+     "x": 3,
+     "y": 5
+    },
+    {
+     "x": 7,
+     "y": 5
+    },
+    {
+     "x": 11,
+     "y": 5
+    }
+   ],
+   "hasKey": [
+    true,
+    false,
+    false
+   ],
+   "doorOpen": [
+    false,
+    false,
+    false
+   ],
+   "flags": 1,
+   "respawnIdx": 0,
+   "poseAgrees": true
+  },
+  {
+   "x": 2,
+   "y": 1,
+   "gx": 15,
+   "gy": 1,
+   "keys": [
+    {
+     "x": 3,
+     "y": 5
+    },
+    {
+     "x": 7,
+     "y": 5
+    },
+    {
+     "x": 11,
+     "y": 5
+    }
+   ],
+   "hasKey": [
+    true,
+    false,
+    false
+   ],
+   "doorOpen": [
+    false,
+    false,
+    false
+   ],
+   "flags": 1,
+   "respawnIdx": 0,
+   "poseAgrees": true
+  },
+  {
+   "x": 2,
+   "y": 1,
+   "gx": 15,
+   "gy": 1,
+   "keys": [
+    {
+     "x": 3,
+     "y": 5
+    },
+    {
+     "x": 7,
+     "y": 5
+    },
+    {
+     "x": 11,
+     "y": 5
+    }
+   ],
+   "hasKey": [
+    true,
+    false,
+    false
+   ],
+   "doorOpen": [
+    false,
+    false,
+    false
+   ],
+   "flags": 1,
+   "respawnIdx": 0,
+   "poseAgrees": true
+  },
+  {
+   "x": 2,
+   "y": 1,
+   "gx": 15,
+   "gy": 1,
+   "keys": [
+    {
+     "x": 3,
+     "y": 5
+    },
+    {
+     "x": 7,
+     "y": 5
+    },
+    {
+     "x": 11,
+     "y": 5
+    }
+   ],
+   "hasKey": [
+    true,
+    false,
+    false
+   ],
+   "doorOpen": [
+    false,
+    false,
+    false
+   ],
+   "flags": 1,
+   "respawnIdx": 0,
+   "poseAgrees": true
+  },
+  {
+   "x": 2,
+   "y": 1,
+   "gx": 15,
+   "gy": 1,
+   "keys": [
+    {
+     "x": 3,
+     "y": 5
+    },
+    {
+     "x": 7,
+     "y": 5
+    },
+    {
+     "x": 11,
+     "y": 5
+    }
+   ],
+   "hasKey": [
+    true,
+    false,
+    false
+   ],
+   "doorOpen": [
+    false,
+    false,
+    false
+   ],
+   "flags": 1,
+   "respawnIdx": 0,
+   "poseAgrees": true
+  },
+  {
+   "x": 1,
+   "y": 1,
+   "gx": 15,
+   "gy": 1,
+   "keys": [
+    {
+     "x": 3,
+     "y": 5
+    },
+    {
+     "x": 7,
+     "y": 5
+    },
+    {
+     "x": 11,
+     "y": 5
+    }
+   ],
+   "hasKey": [
+    true,
+    false,
+    false
+   ],
+   "doorOpen": [
+    false,
+    false,
+    false
+   ],
+   "flags": 1,
+   "respawnIdx": 0,
+   "poseAgrees": true
+  },
+  {
+   "x": 1,
+   "y": 1,
+   "gx": 15,
+   "gy": 1,
+   "keys": [
+    {
+     "x": 3,
+     "y": 5
+    },
+    {
+     "x": 7,
+     "y": 5
+    },
+    {
+     "x": 11,
+     "y": 5
+    }
+   ],
+   "hasKey": [
+    true,
+    false,
+    false
+   ],
+   "doorOpen": [
+    false,
+    false,
+    false
+   ],
+   "flags": 1,
+   "respawnIdx": 0,
+   "poseAgrees": true
+  },
+  {
+   "x": 1,
+   "y": 1,
+   "gx": 15,
+   "gy": 1,
+   "keys": [
+    {
+     "x": 3,
+     "y": 5
+    },
+    {
+     "x": 7,
+     "y": 5
+    },
+    {
+     "x": 11,
+     "y": 5
+    }
+   ],
+   "hasKey": [
+    true,
+    false,
+    false
+   ],
+   "doorOpen": [
+    false,
+    false,
+    false
+   ],
+   "flags": 1,
+   "respawnIdx": 0,
+   "poseAgrees": true
+  },
+  {
+   "x": 1,
+   "y": 1,
+   "gx": 15,
+   "gy": 1,
+   "keys": [
+    {
+     "x": 3,
+     "y": 5
+    },
+    {
+     "x": 7,
+     "y": 5
+    },
+    {
+     "x": 11,
+     "y": 5
+    }
+   ],
+   "hasKey": [
+    true,
+    false,
+    false
+   ],
+   "doorOpen": [
+    false,
+    false,
+    false
+   ],
+   "flags": 1,
+   "respawnIdx": 0,
+   "poseAgrees": true
+  },
+  {
+   "x": 1,
+   "y": 2,
+   "gx": 15,
+   "gy": 1,
+   "keys": [
+    {
+     "x": 3,
+     "y": 5
+    },
+    {
+     "x": 7,
+     "y": 5
+    },
+    {
+     "x": 11,
+     "y": 5
+    }
+   ],
+   "hasKey": [
+    true,
+    false,
+    false
+   ],
+   "doorOpen": [
+    false,
+    false,
+    false
+   ],
+   "flags": 1,
+   "respawnIdx": 0,
+   "poseAgrees": true
+  },
+  {
+   "x": 1,
+   "y": 2,
+   "gx": 15,
+   "gy": 1,
+   "keys": [
+    {
+     "x": 3,
+     "y": 5
+    },
+    {
+     "x": 7,
+     "y": 5
+    },
+    {
+     "x": 11,
+     "y": 5
+    }
+   ],
+   "hasKey": [
+    true,
+    false,
+    false
+   ],
+   "doorOpen": [
+    false,
+    false,
+    false
+   ],
+   "flags": 1,
+   "respawnIdx": 0,
+   "poseAgrees": true
+  },
+  {
+   "x": 1,
+   "y": 2,
+   "gx": 15,
+   "gy": 1,
+   "keys": [
+    {
+     "x": 3,
+     "y": 5
+    },
+    {
+     "x": 7,
+     "y": 5
+    },
+    {
+     "x": 11,
+     "y": 5
+    }
+   ],
+   "hasKey": [
+    true,
+    false,
+    false
+   ],
+   "doorOpen": [
+    false,
+    false,
+    false
+   ],
+   "flags": 1,
+   "respawnIdx": 0,
+   "poseAgrees": true
+  },
+  {
+   "x": 1,
+   "y": 3,
+   "gx": 15,
+   "gy": 1,
+   "keys": [
+    {
+     "x": 3,
+     "y": 5
+    },
+    {
+     "x": 7,
+     "y": 5
+    },
+    {
+     "x": 11,
+     "y": 5
+    }
+   ],
+   "hasKey": [
+    true,
+    false,
+    false
+   ],
+   "doorOpen": [
+    false,
+    false,
+    false
+   ],
+   "flags": 1,
+   "respawnIdx": 0,
+   "poseAgrees": true
+  },
+  {
+   "x": 1,
+   "y": 4,
+   "gx": 15,
+   "gy": 1,
+   "keys": [
+    {
+     "x": 3,
+     "y": 5
+    },
+    {
+     "x": 7,
+     "y": 5
+    },
+    {
+     "x": 11,
+     "y": 5
+    }
+   ],
+   "hasKey": [
+    true,
+    false,
+    false
+   ],
+   "doorOpen": [
+    false,
+    false,
+    false
+   ],
+   "flags": 1,
+   "respawnIdx": 0,
+   "poseAgrees": true
+  },
+  {
+   "x": 1,
+   "y": 3,
+   "gx": 15,
+   "gy": 1,
+   "keys": [
+    {
+     "x": 3,
+     "y": 5
+    },
+    {
+     "x": 7,
+     "y": 5
+    },
+    {
+     "x": 11,
+     "y": 5
+    }
+   ],
+   "hasKey": [
+    true,
+    false,
+    false
+   ],
+   "doorOpen": [
+    false,
+    false,
+    false
+   ],
+   "flags": 1,
+   "respawnIdx": 0,
+   "poseAgrees": true
+  },
+  {
+   "x": 1,
+   "y": 4,
+   "gx": 15,
+   "gy": 1,
+   "keys": [
+    {
+     "x": 3,
+     "y": 5
+    },
+    {
+     "x": 7,
+     "y": 5
+    },
+    {
+     "x": 11,
+     "y": 5
+    }
+   ],
+   "hasKey": [
+    true,
+    false,
+    false
+   ],
+   "doorOpen": [
+    false,
+    false,
+    false
+   ],
+   "flags": 1,
+   "respawnIdx": 0,
+   "poseAgrees": true
+  },
+  {
+   "x": 1,
+   "y": 3,
+   "gx": 15,
+   "gy": 1,
+   "keys": [
+    {
+     "x": 3,
+     "y": 5
+    },
+    {
+     "x": 7,
+     "y": 5
+    },
+    {
+     "x": 11,
+     "y": 5
+    }
+   ],
+   "hasKey": [
+    true,
+    false,
+    false
+   ],
+   "doorOpen": [
+    false,
+    false,
+    false
+   ],
+   "flags": 1,
+   "respawnIdx": 0,
+   "poseAgrees": true
+  },
+  {
+   "x": 1,
+   "y": 3,
+   "gx": 15,
+   "gy": 1,
+   "keys": [
+    {
+     "x": 3,
+     "y": 5
+    },
+    {
+     "x": 7,
+     "y": 5
+    },
+    {
+     "x": 11,
+     "y": 5
+    }
+   ],
+   "hasKey": [
+    true,
+    false,
+    false
+   ],
+   "doorOpen": [
+    false,
+    false,
+    false
+   ],
+   "flags": 1,
+   "respawnIdx": 0,
+   "poseAgrees": true
+  },
+  {
+   "x": 1,
+   "y": 2,
+   "gx": 15,
+   "gy": 1,
+   "keys": [
+    {
+     "x": 3,
+     "y": 5
+    },
+    {
+     "x": 7,
+     "y": 5
+    },
+    {
+     "x": 11,
+     "y": 5
+    }
+   ],
+   "hasKey": [
+    true,
+    false,
+    false
+   ],
+   "doorOpen": [
+    false,
+    false,
+    false
+   ],
+   "flags": 1,
+   "respawnIdx": 0,
+   "poseAgrees": true
+  },
+  {
+   "x": 1,
+   "y": 3,
+   "gx": 15,
+   "gy": 1,
+   "keys": [
+    {
+     "x": 3,
+     "y": 5
+    },
+    {
+     "x": 7,
+     "y": 5
+    },
+    {
+     "x": 11,
+     "y": 5
+    }
+   ],
+   "hasKey": [
+    true,
+    false,
+    false
+   ],
+   "doorOpen": [
+    false,
+    false,
+    false
+   ],
+   "flags": 1,
+   "respawnIdx": 0,
+   "poseAgrees": true
+  },
+  {
+   "x": 1,
+   "y": 4,
+   "gx": 15,
+   "gy": 1,
+   "keys": [
+    {
+     "x": 3,
+     "y": 5
+    },
+    {
+     "x": 7,
+     "y": 5
+    },
+    {
+     "x": 11,
+     "y": 5
+    }
+   ],
+   "hasKey": [
+    true,
+    false,
+    false
+   ],
+   "doorOpen": [
+    false,
+    false,
+    false
+   ],
+   "flags": 1,
+   "respawnIdx": 0,
+   "poseAgrees": true
+  },
+  {
+   "x": 1,
+   "y": 4,
+   "gx": 15,
+   "gy": 1,
+   "keys": [
+    {
+     "x": 3,
+     "y": 5
+    },
+    {
+     "x": 7,
+     "y": 5
+    },
+    {
+     "x": 11,
+     "y": 5
+    }
+   ],
+   "hasKey": [
+    true,
+    false,
+    false
+   ],
+   "doorOpen": [
+    false,
+    false,
+    false
+   ],
+   "flags": 1,
+   "respawnIdx": 0,
+   "poseAgrees": true
+  },
+  {
+   "x": 1,
+   "y": 3,
+   "gx": 15,
+   "gy": 1,
+   "keys": [
+    {
+     "x": 3,
+     "y": 5
+    },
+    {
+     "x": 7,
+     "y": 5
+    },
+    {
+     "x": 11,
+     "y": 5
+    }
+   ],
+   "hasKey": [
+    true,
+    false,
+    false
+   ],
+   "doorOpen": [
+    false,
+    false,
+    false
+   ],
+   "flags": 1,
+   "respawnIdx": 0,
+   "poseAgrees": true
+  },
+  {
+   "x": 1,
+   "y": 2,
+   "gx": 15,
+   "gy": 1,
+   "keys": [
+    {
+     "x": 3,
+     "y": 5
+    },
+    {
+     "x": 7,
+     "y": 5
+    },
+    {
+     "x": 11,
+     "y": 5
+    }
+   ],
+   "hasKey": [
+    true,
+    false,
+    false
+   ],
+   "doorOpen": [
+    false,
+    false,
+    false
+   ],
+   "flags": 1,
+   "respawnIdx": 0,
+   "poseAgrees": true
+  },
+  {
+   "x": 2,
+   "y": 2,
+   "gx": 15,
+   "gy": 1,
+   "keys": [
+    {
+     "x": 3,
+     "y": 5
+    },
+    {
+     "x": 7,
+     "y": 5
+    },
+    {
+     "x": 11,
+     "y": 5
+    }
+   ],
+   "hasKey": [
+    true,
+    false,
+    false
+   ],
+   "doorOpen": [
+    false,
+    false,
+    false
+   ],
+   "flags": 1,
+   "respawnIdx": 0,
+   "poseAgrees": true
+  },
+  {
+   "x": 2,
+   "y": 3,
+   "gx": 15,
+   "gy": 1,
+   "keys": [
+    {
+     "x": 3,
+     "y": 5
+    },
+    {
+     "x": 7,
+     "y": 5
+    },
+    {
+     "x": 11,
+     "y": 5
+    }
+   ],
+   "hasKey": [
+    true,
+    false,
+    false
+   ],
+   "doorOpen": [
+    false,
+    false,
+    false
+   ],
+   "flags": 1,
+   "respawnIdx": 0,
+   "poseAgrees": true
+  },
+  {
+   "x": 2,
+   "y": 2,
+   "gx": 15,
+   "gy": 1,
+   "keys": [
+    {
+     "x": 3,
+     "y": 5
+    },
+    {
+     "x": 7,
+     "y": 5
+    },
+    {
+     "x": 11,
+     "y": 5
+    }
+   ],
+   "hasKey": [
+    true,
+    false,
+    false
+   ],
+   "doorOpen": [
+    false,
+    false,
+    false
+   ],
+   "flags": 1,
+   "respawnIdx": 0,
+   "poseAgrees": true
+  },
+  {
+   "x": 2,
+   "y": 1,
+   "gx": 15,
+   "gy": 1,
+   "keys": [
+    {
+     "x": 3,
+     "y": 5
+    },
+    {
+     "x": 7,
+     "y": 5
+    },
+    {
+     "x": 11,
+     "y": 5
+    }
+   ],
+   "hasKey": [
+    true,
+    false,
+    false
+   ],
+   "doorOpen": [
+    false,
+    false,
+    false
+   ],
+   "flags": 1,
+   "respawnIdx": 0,
+   "poseAgrees": true
+  },
+  {
+   "x": 2,
+   "y": 1,
+   "gx": 15,
+   "gy": 1,
+   "keys": [
+    {
+     "x": 3,
+     "y": 5
+    },
+    {
+     "x": 7,
+     "y": 5
+    },
+    {
+     "x": 11,
+     "y": 5
+    }
+   ],
+   "hasKey": [
+    true,
+    false,
+    false
+   ],
+   "doorOpen": [
+    false,
+    false,
+    false
+   ],
+   "flags": 1,
+   "respawnIdx": 0,
+   "poseAgrees": true
+  },
+  {
+   "x": 2,
+   "y": 2,
+   "gx": 15,
+   "gy": 1,
+   "keys": [
+    {
+     "x": 3,
+     "y": 5
+    },
+    {
+     "x": 7,
+     "y": 5
+    },
+    {
+     "x": 11,
+     "y": 5
+    }
+   ],
+   "hasKey": [
+    true,
+    false,
+    false
+   ],
+   "doorOpen": [
+    false,
+    false,
+    false
+   ],
+   "flags": 1,
+   "respawnIdx": 0,
+   "poseAgrees": true
+  },
+  {
+   "x": 2,
+   "y": 3,
+   "gx": 15,
+   "gy": 1,
+   "keys": [
+    {
+     "x": 3,
+     "y": 5
+    },
+    {
+     "x": 7,
+     "y": 5
+    },
+    {
+     "x": 11,
+     "y": 5
+    }
+   ],
+   "hasKey": [
+    true,
+    false,
+    false
+   ],
+   "doorOpen": [
+    false,
+    false,
+    false
+   ],
+   "flags": 1,
+   "respawnIdx": 0,
+   "poseAgrees": true
+  },
+  {
+   "x": 2,
+   "y": 4,
+   "gx": 15,
+   "gy": 1,
+   "keys": [
+    {
+     "x": 3,
+     "y": 5
+    },
+    {
+     "x": 7,
+     "y": 5
+    },
+    {
+     "x": 11,
+     "y": 5
+    }
+   ],
+   "hasKey": [
+    true,
+    false,
+    false
+   ],
+   "doorOpen": [
+    false,
+    false,
+    false
+   ],
+   "flags": 1,
+   "respawnIdx": 0,
+   "poseAgrees": true
+  },
+  {
+   "x": 2,
+   "y": 5,
+   "gx": 15,
+   "gy": 1,
+   "keys": [
+    {
+     "x": 3,
+     "y": 5
+    },
+    {
+     "x": 7,
+     "y": 5
+    },
+    {
+     "x": 11,
+     "y": 5
+    }
+   ],
+   "hasKey": [
+    true,
+    false,
+    false
+   ],
+   "doorOpen": [
+    false,
+    false,
+    false
+   ],
+   "flags": 1,
+   "respawnIdx": 0,
+   "poseAgrees": true
+  },
+  {
+   "x": 2,
+   "y": 5,
+   "gx": 15,
+   "gy": 1,
+   "keys": [
+    {
+     "x": 3,
+     "y": 5
+    },
+    {
+     "x": 7,
+     "y": 5
+    },
+    {
+     "x": 11,
+     "y": 5
+    }
+   ],
+   "hasKey": [
+    true,
+    false,
+    false
+   ],
+   "doorOpen": [
+    false,
+    false,
+    false
+   ],
+   "flags": 1,
+   "respawnIdx": 0,
+   "poseAgrees": true
+  },
+  {
+   "x": 2,
+   "y": 4,
+   "gx": 15,
+   "gy": 1,
+   "keys": [
+    {
+     "x": 3,
+     "y": 5
+    },
+    {
+     "x": 7,
+     "y": 5
+    },
+    {
+     "x": 11,
+     "y": 5
+    }
+   ],
+   "hasKey": [
+    true,
+    false,
+    false
+   ],
+   "doorOpen": [
+    false,
+    false,
+    false
+   ],
+   "flags": 1,
+   "respawnIdx": 0,
+   "poseAgrees": true
+  },
+  {
+   "x": 1,
+   "y": 4,
+   "gx": 15,
+   "gy": 1,
+   "keys": [
+    {
+     "x": 3,
+     "y": 5
+    },
+    {
+     "x": 7,
+     "y": 5
+    },
+    {
+     "x": 11,
+     "y": 5
+    }
+   ],
+   "hasKey": [
+    true,
+    false,
+    false
+   ],
+   "doorOpen": [
+    false,
+    false,
+    false
+   ],
+   "flags": 1,
+   "respawnIdx": 0,
+   "poseAgrees": true
+  },
+  {
+   "x": 1,
+   "y": 3,
+   "gx": 15,
+   "gy": 1,
+   "keys": [
+    {
+     "x": 3,
+     "y": 5
+    },
+    {
+     "x": 7,
+     "y": 5
+    },
+    {
+     "x": 11,
+     "y": 5
+    }
+   ],
+   "hasKey": [
+    true,
+    false,
+    false
+   ],
+   "doorOpen": [
+    false,
+    false,
+    false
+   ],
+   "flags": 1,
+   "respawnIdx": 0,
+   "poseAgrees": true
+  },
+  {
+   "x": 1,
+   "y": 3,
+   "gx": 15,
+   "gy": 1,
+   "keys": [
+    {
+     "x": 3,
+     "y": 5
+    },
+    {
+     "x": 7,
+     "y": 5
+    },
+    {
+     "x": 11,
+     "y": 5
+    }
+   ],
+   "hasKey": [
+    true,
+    false,
+    false
+   ],
+   "doorOpen": [
+    false,
+    false,
+    false
+   ],
+   "flags": 1,
+   "respawnIdx": 0,
+   "poseAgrees": true
+  },
+  {
+   "x": 1,
+   "y": 3,
+   "gx": 15,
+   "gy": 1,
+   "keys": [
+    {
+     "x": 3,
+     "y": 5
+    },
+    {
+     "x": 7,
+     "y": 5
+    },
+    {
+     "x": 11,
+     "y": 5
+    }
+   ],
+   "hasKey": [
+    true,
+    false,
+    false
+   ],
+   "doorOpen": [
+    false,
+    false,
+    false
+   ],
+   "flags": 1,
+   "respawnIdx": 0,
+   "poseAgrees": true
+  },
+  {
+   "x": 1,
+   "y": 2,
+   "gx": 15,
+   "gy": 1,
+   "keys": [
+    {
+     "x": 3,
+     "y": 5
+    },
+    {
+     "x": 7,
+     "y": 5
+    },
+    {
+     "x": 11,
+     "y": 5
+    }
+   ],
+   "hasKey": [
+    true,
+    false,
+    false
+   ],
+   "doorOpen": [
+    false,
+    false,
+    false
+   ],
+   "flags": 1,
+   "respawnIdx": 0,
+   "poseAgrees": true
+  },
+  {
+   "x": 1,
+   "y": 1,
+   "gx": 15,
+   "gy": 1,
+   "keys": [
+    {
+     "x": 3,
+     "y": 5
+    },
+    {
+     "x": 7,
+     "y": 5
+    },
+    {
+     "x": 11,
+     "y": 5
+    }
+   ],
+   "hasKey": [
+    true,
+    false,
+    false
+   ],
+   "doorOpen": [
+    false,
+    false,
+    false
+   ],
+   "flags": 1,
+   "respawnIdx": 0,
+   "poseAgrees": true
+  },
+  {
+   "x": 1,
+   "y": 1,
+   "gx": 15,
+   "gy": 1,
+   "keys": [
+    {
+     "x": 3,
+     "y": 5
+    },
+    {
+     "x": 7,
+     "y": 5
+    },
+    {
+     "x": 11,
+     "y": 5
+    }
+   ],
+   "hasKey": [
+    true,
+    false,
+    false
+   ],
+   "doorOpen": [
+    false,
+    false,
+    false
+   ],
+   "flags": 1,
+   "respawnIdx": 0,
+   "poseAgrees": true
+  },
+  {
+   "x": 1,
+   "y": 1,
+   "gx": 15,
+   "gy": 1,
+   "keys": [
+    {
+     "x": 3,
+     "y": 5
+    },
+    {
+     "x": 7,
+     "y": 5
+    },
+    {
+     "x": 11,
+     "y": 5
+    }
+   ],
+   "hasKey": [
+    true,
+    false,
+    false
+   ],
+   "doorOpen": [
+    false,
+    false,
+    false
+   ],
+   "flags": 1,
+   "respawnIdx": 0,
+   "poseAgrees": true
+  },
+  {
+   "x": 1,
+   "y": 1,
+   "gx": 15,
+   "gy": 1,
+   "keys": [
+    {
+     "x": 3,
+     "y": 5
+    },
+    {
+     "x": 7,
+     "y": 5
+    },
+    {
+     "x": 11,
+     "y": 5
+    }
+   ],
+   "hasKey": [
+    true,
+    false,
+    false
+   ],
+   "doorOpen": [
+    false,
+    false,
+    false
+   ],
+   "flags": 1,
+   "respawnIdx": 0,
+   "poseAgrees": true
+  },
+  {
+   "x": 1,
+   "y": 2,
+   "gx": 15,
+   "gy": 1,
+   "keys": [
+    {
+     "x": 3,
+     "y": 5
+    },
+    {
+     "x": 7,
+     "y": 5
+    },
+    {
+     "x": 11,
+     "y": 5
+    }
+   ],
+   "hasKey": [
+    true,
+    false,
+    false
+   ],
+   "doorOpen": [
+    false,
+    false,
+    false
+   ],
+   "flags": 1,
+   "respawnIdx": 0,
+   "poseAgrees": true
+  },
+  {
+   "x": 2,
+   "y": 2,
+   "gx": 15,
+   "gy": 1,
+   "keys": [
+    {
+     "x": 3,
+     "y": 5
+    },
+    {
+     "x": 7,
+     "y": 5
+    },
+    {
+     "x": 11,
+     "y": 5
+    }
+   ],
+   "hasKey": [
+    true,
+    false,
+    false
+   ],
+   "doorOpen": [
+    false,
+    false,
+    false
+   ],
+   "flags": 1,
+   "respawnIdx": 0,
+   "poseAgrees": true
+  },
+  {
+   "x": 2,
+   "y": 3,
+   "gx": 15,
+   "gy": 1,
+   "keys": [
+    {
+     "x": 3,
+     "y": 5
+    },
+    {
+     "x": 7,
+     "y": 5
+    },
+    {
+     "x": 11,
+     "y": 5
+    }
+   ],
+   "hasKey": [
+    true,
+    false,
+    false
+   ],
+   "doorOpen": [
+    false,
+    false,
+    false
+   ],
+   "flags": 1,
+   "respawnIdx": 0,
+   "poseAgrees": true
+  },
+  {
+   "x": 3,
+   "y": 3,
+   "gx": 15,
+   "gy": 1,
+   "keys": [
+    {
+     "x": 3,
+     "y": 5
+    },
+    {
+     "x": 7,
+     "y": 5
+    },
+    {
+     "x": 11,
+     "y": 5
+    }
+   ],
+   "hasKey": [
+    true,
+    false,
+    false
+   ],
+   "doorOpen": [
+    false,
+    false,
+    false
+   ],
+   "flags": 1,
+   "respawnIdx": 0,
+   "poseAgrees": true
+  },
+  {
+   "x": 3,
+   "y": 2,
+   "gx": 15,
+   "gy": 1,
+   "keys": [
+    {
+     "x": 3,
+     "y": 5
+    },
+    {
+     "x": 7,
+     "y": 5
+    },
+    {
+     "x": 11,
+     "y": 5
+    }
+   ],
+   "hasKey": [
+    true,
+    false,
+    false
+   ],
+   "doorOpen": [
+    false,
+    false,
+    false
+   ],
+   "flags": 1,
+   "respawnIdx": 0,
+   "poseAgrees": true
+  },
+  {
+   "x": 3,
+   "y": 2,
+   "gx": 15,
+   "gy": 1,
+   "keys": [
+    {
+     "x": 3,
+     "y": 5
+    },
+    {
+     "x": 7,
+     "y": 5
+    },
+    {
+     "x": 11,
+     "y": 5
+    }
+   ],
+   "hasKey": [
+    true,
+    false,
+    false
+   ],
+   "doorOpen": [
+    false,
+    false,
+    false
+   ],
+   "flags": 1,
+   "respawnIdx": 0,
+   "poseAgrees": true
+  },
+  {
+   "x": 3,
+   "y": 1,
+   "gx": 15,
+   "gy": 1,
+   "keys": [
+    {
+     "x": 3,
+     "y": 5
+    },
+    {
+     "x": 7,
+     "y": 5
+    },
+    {
+     "x": 11,
+     "y": 5
+    }
+   ],
+   "hasKey": [
+    true,
+    false,
+    false
+   ],
+   "doorOpen": [
+    false,
+    false,
+    false
+   ],
+   "flags": 1,
+   "respawnIdx": 0,
+   "poseAgrees": true
+  },
+  {
+   "x": 2,
+   "y": 1,
+   "gx": 15,
+   "gy": 1,
+   "keys": [
+    {
+     "x": 3,
+     "y": 5
+    },
+    {
+     "x": 7,
+     "y": 5
+    },
+    {
+     "x": 11,
+     "y": 5
+    }
+   ],
+   "hasKey": [
+    true,
+    false,
+    false
+   ],
+   "doorOpen": [
+    false,
+    false,
+    false
+   ],
+   "flags": 1,
+   "respawnIdx": 0,
+   "poseAgrees": true
+  },
+  {
+   "x": 1,
+   "y": 1,
+   "gx": 15,
+   "gy": 1,
+   "keys": [
+    {
+     "x": 3,
+     "y": 5
+    },
+    {
+     "x": 7,
+     "y": 5
+    },
+    {
+     "x": 11,
+     "y": 5
+    }
+   ],
+   "hasKey": [
+    true,
+    false,
+    false
+   ],
+   "doorOpen": [
+    false,
+    false,
+    false
+   ],
+   "flags": 1,
+   "respawnIdx": 0,
+   "poseAgrees": true
+  },
+  {
+   "x": 2,
+   "y": 1,
+   "gx": 15,
+   "gy": 1,
+   "keys": [
+    {
+     "x": 3,
+     "y": 5
+    },
+    {
+     "x": 7,
+     "y": 5
+    },
+    {
+     "x": 11,
+     "y": 5
+    }
+   ],
+   "hasKey": [
+    true,
+    false,
+    false
+   ],
+   "doorOpen": [
+    false,
+    false,
+    false
+   ],
+   "flags": 1,
+   "respawnIdx": 0,
+   "poseAgrees": true
+  },
+  {
+   "x": 3,
+   "y": 1,
+   "gx": 15,
+   "gy": 1,
+   "keys": [
+    {
+     "x": 3,
+     "y": 5
+    },
+    {
+     "x": 7,
+     "y": 5
+    },
+    {
+     "x": 11,
+     "y": 5
+    }
+   ],
+   "hasKey": [
+    true,
+    false,
+    false
+   ],
+   "doorOpen": [
+    false,
+    false,
+    false
+   ],
+   "flags": 1,
+   "respawnIdx": 0,
+   "poseAgrees": true
+  },
+  {
+   "x": 3,
+   "y": 1,
+   "gx": 15,
+   "gy": 1,
+   "keys": [
+    {
+     "x": 3,
+     "y": 5
+    },
+    {
+     "x": 7,
+     "y": 5
+    },
+    {
+     "x": 11,
+     "y": 5
+    }
+   ],
+   "hasKey": [
+    true,
+    false,
+    false
+   ],
+   "doorOpen": [
+    false,
+    false,
+    false
+   ],
+   "flags": 1,
+   "respawnIdx": 0,
+   "poseAgrees": true
+  },
+  {
+   "x": 3,
+   "y": 2,
+   "gx": 15,
+   "gy": 1,
+   "keys": [
+    {
+     "x": 3,
+     "y": 5
+    },
+    {
+     "x": 7,
+     "y": 5
+    },
+    {
+     "x": 11,
+     "y": 5
+    }
+   ],
+   "hasKey": [
+    true,
+    false,
+    false
+   ],
+   "doorOpen": [
+    false,
+    false,
+    false
+   ],
+   "flags": 1,
+   "respawnIdx": 0,
+   "poseAgrees": true
+  },
+  {
+   "x": 3,
+   "y": 3,
+   "gx": 15,
+   "gy": 1,
+   "keys": [
+    {
+     "x": 3,
+     "y": 5
+    },
+    {
+     "x": 7,
+     "y": 5
+    },
+    {
+     "x": 11,
+     "y": 5
+    }
+   ],
+   "hasKey": [
+    true,
+    false,
+    false
+   ],
+   "doorOpen": [
+    false,
+    false,
+    false
+   ],
+   "flags": 1,
+   "respawnIdx": 0,
+   "poseAgrees": true
+  },
+  {
+   "x": 3,
+   "y": 2,
+   "gx": 15,
+   "gy": 1,
+   "keys": [
+    {
+     "x": 3,
+     "y": 5
+    },
+    {
+     "x": 7,
+     "y": 5
+    },
+    {
+     "x": 11,
+     "y": 5
+    }
+   ],
+   "hasKey": [
+    true,
+    false,
+    false
+   ],
+   "doorOpen": [
+    false,
+    false,
+    false
+   ],
+   "flags": 1,
+   "respawnIdx": 0,
+   "poseAgrees": true
+  },
+  {
+   "x": 3,
+   "y": 3,
+   "gx": 15,
+   "gy": 1,
+   "keys": [
+    {
+     "x": 3,
+     "y": 5
+    },
+    {
+     "x": 7,
+     "y": 5
+    },
+    {
+     "x": 11,
+     "y": 5
+    }
+   ],
+   "hasKey": [
+    true,
+    false,
+    false
+   ],
+   "doorOpen": [
+    false,
+    false,
+    false
+   ],
+   "flags": 1,
+   "respawnIdx": 0,
+   "poseAgrees": true
+  },
+  {
+   "x": 3,
+   "y": 2,
+   "gx": 15,
+   "gy": 1,
+   "keys": [
+    {
+     "x": 3,
+     "y": 5
+    },
+    {
+     "x": 7,
+     "y": 5
+    },
+    {
+     "x": 11,
+     "y": 5
+    }
+   ],
+   "hasKey": [
+    true,
+    false,
+    false
+   ],
+   "doorOpen": [
+    false,
+    false,
+    false
+   ],
+   "flags": 1,
+   "respawnIdx": 0,
+   "poseAgrees": true
+  },
+  {
+   "x": 3,
+   "y": 1,
+   "gx": 15,
+   "gy": 1,
+   "keys": [
+    {
+     "x": 3,
+     "y": 5
+    },
+    {
+     "x": 7,
+     "y": 5
+    },
+    {
+     "x": 11,
+     "y": 5
+    }
+   ],
+   "hasKey": [
+    true,
+    false,
+    false
+   ],
+   "doorOpen": [
+    false,
+    false,
+    false
+   ],
+   "flags": 1,
+   "respawnIdx": 0,
+   "poseAgrees": true
+  },
+  {
+   "x": 3,
+   "y": 2,
+   "gx": 15,
+   "gy": 1,
+   "keys": [
+    {
+     "x": 3,
+     "y": 5
+    },
+    {
+     "x": 7,
+     "y": 5
+    },
+    {
+     "x": 11,
+     "y": 5
+    }
+   ],
+   "hasKey": [
+    true,
+    false,
+    false
+   ],
+   "doorOpen": [
+    false,
+    false,
+    false
+   ],
+   "flags": 1,
+   "respawnIdx": 0,
+   "poseAgrees": true
+  },
+  {
+   "x": 3,
+   "y": 3,
+   "gx": 15,
+   "gy": 1,
+   "keys": [
+    {
+     "x": 3,
+     "y": 5
+    },
+    {
+     "x": 7,
+     "y": 5
+    },
+    {
+     "x": 11,
+     "y": 5
+    }
+   ],
+   "hasKey": [
+    true,
+    false,
+    false
+   ],
+   "doorOpen": [
+    false,
+    false,
+    false
+   ],
+   "flags": 1,
+   "respawnIdx": 0,
+   "poseAgrees": true
+  },
+  {
+   "x": 3,
+   "y": 2,
+   "gx": 15,
+   "gy": 1,
+   "keys": [
+    {
+     "x": 3,
+     "y": 5
+    },
+    {
+     "x": 7,
+     "y": 5
+    },
+    {
+     "x": 11,
+     "y": 5
+    }
+   ],
+   "hasKey": [
+    true,
+    false,
+    false
+   ],
+   "doorOpen": [
+    false,
+    false,
+    false
+   ],
+   "flags": 1,
+   "respawnIdx": 0,
+   "poseAgrees": true
+  }
+ ],
+ "events": [
+  [],
+  [],
+  [],
+  [],
+  [],
+  [],
+  [],
+  [],
+  [],
+  [],
+  [],
+  [],
+  [],
+  [],
+  [],
+  [],
+  [],
+  [],
+  [
+   {
+    "type": "key",
+    "index": 0
+   }
+  ],
+  [],
+  [],
+  [],
+  [],
+  [],
+  [],
+  [],
+  [],
+  [],
+  [],
+  [],
+  [],
+  [],
+  [],
+  [],
+  [],
+  [],
+  [],
+  [],
+  [],
+  [],
+  [],
+  [],
+  [],
+  [],
+  [],
+  [],
+  [],
+  [],
+  [],
+  [],
+  [],
+  [],
+  [],
+  [],
+  [],
+  [],
+  [],
+  [],
+  [],
+  [],
+  [],
+  [],
+  [],
+  [],
+  [],
+  [],
+  [],
+  [],
+  [],
+  [],
+  [],
+  [],
+  [],
+  [],
+  [],
+  [],
+  [],
+  [],
+  [],
+  [],
+  [],
+  [],
+  [],
+  [],
+  [],
+  [],
+  [],
+  [],
+  [],
+  [],
+  [],
+  [],
+  [],
+  [],
+  [],
+  [],
+  [],
+  [],
+  [],
+  [],
+  [],
+  [],
+  [],
+  [],
+  [],
+  [],
+  [],
+  [],
+  [],
+  [],
+  [],
+  [],
+  [],
+  [],
+  [],
+  [],
+  [],
+  [],
+  [],
+  [],
+  [],
+  [],
+  [],
+  [],
+  [],
+  [],
+  [],
+  [],
+  [],
+  [],
+  [],
+  [],
+  [],
+  [],
+  [],
+  [],
+  [],
+  [],
+  [],
+  [],
+  [],
+  [],
+  [],
+  [],
+  [],
+  [],
+  [],
+  [],
+  [],
+  [],
+  [],
+  [],
+  [],
+  [],
+  [],
+  [],
+  [],
+  [],
+  [],
+  [],
+  [],
+  [],
+  [],
+  [],
+  [],
+  [],
+  [],
+  [],
+  [],
+  [],
+  [],
+  [],
+  [],
+  [],
+  [],
+  [],
+  [],
+  [],
+  [],
+  [],
+  [],
+  [],
+  [],
+  [],
+  [],
+  [],
+  [],
+  [],
+  [],
+  [],
+  [],
+  [],
+  [],
+  [],
+  [],
+  [],
+  [],
+  [],
+  [],
+  [],
+  []
+ ],
+ "rewards": [
+  0.0,
+  0.0,
+  0.0,
+  0.0,
+  0.0,
+  0.0,
+  0.0,
+  0.0,
+  0.0,
+  0.0,
+  0.0,
+  0.0,
+  0.0,
+  0.0,
+  0.0,
+  0.0,
+  0.0,
+  0.0,
+  0.0,
+  0.0,
+  0.0,
+  0.0,
+  0.0,
+  0.0,
+  0.0,
+  0.0,
+  0.0,
+  0.0,
+  0.0,
+  0.0,
+  0.0,
+  0.0,
+  0.0,
+  0.0,
+  0.0,
+  0.0,
+  0.0,
+  0.0,
+  0.0,
+  0.0,
+  0.0,
+  0.0,
+  0.0,
+  0.0,
+  0.0,
+  0.0,
+  0.0,
+  0.0,
+  0.0,
+  0.0,
+  0.0,
+  0.0,
+  0.0,
+  0.0,
+  0.0,
+  0.0,
+  0.0,
+  0.0,
+  0.0,
+  0.0,
+  0.0,
+  0.0,
+  0.0,
+  0.0,
+  0.0,
+  0.0,
+  0.0,
+  0.0,
+  0.0,
+  0.0,
+  0.0,
+  0.0,
+  0.0,
+  0.0,
+  0.0,
+  0.0,
+  0.0,
+  0.0,
+  0.0,
+  0.0,
+  0.0,
+  0.0,
+  0.0,
+  0.0,
+  0.0,
+  0.0,
+  0.0,
+  0.0,
+  0.0,
+  0.0,
+  0.0,
+  0.0,
+  0.0,
+  0.0,
+  0.0,
+  0.0,
+  0.0,
+  0.0,
+  0.0,
+  0.0,
+  0.0,
+  0.0,
+  0.0,
+  0.0,
+  0.0,
+  0.0,
+  0.0,
+  0.0,
+  0.0,
+  0.0,
+  0.0,
+  0.0,
+  0.0,
+  0.0,
+  0.0,
+  0.0,
+  0.0,
+  0.0,
+  0.0,
+  0.0,
+  0.0,
+  0.0,
+  0.0,
+  0.0,
+  0.0,
+  0.0,
+  0.0,
+  0.0,
+  0.0,
+  0.0,
+  0.0,
+  0.0,
+  0.0,
+  0.0,
+  0.0,
+  0.0,
+  0.0,
+  0.0,
+  0.0,
+  0.0,
+  0.0,
+  0.0,
+  0.0,
+  0.0,
+  0.0,
+  0.0,
+  0.0,
+  0.0,
+  0.0,
+  0.0,
+  0.0,
+  0.0,
+  0.0,
+  0.0,
+  0.0,
+  0.0,
+  0.0,
+  0.0,
+  0.0,
+  0.0,
+  0.0,
+  0.0,
+  0.0,
+  0.0,
+  0.0,
+  0.0,
+  0.0,
+  0.0,
+  0.0,
+  0.0,
+  0.0,
+  0.0,
+  0.0,
+  0.0,
+  0.0,
+  0.0,
+  0.0,
+  0.0,
+  0.0,
+  0.0,
+  0.0,
+  0.0,
+  0.0,
+  0.0,
+  0.0,
+  0.0,
+  0.0,
+  0.0,
+  0.0,
+  0.0,
+  0.0,
+  0.0,
+  0.0,
+  0.0,
+  0.0,
+  0.0,
+  0.0,
+  0.0,
+  0.0,
+  0.0
+ ]
+}
