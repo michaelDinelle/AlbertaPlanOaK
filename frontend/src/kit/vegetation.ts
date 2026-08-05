@@ -1,20 +1,3 @@
-// kit/vegetation — the preserve's plant life.
-//
-// STYLE.md: "Silhouette-first low-poly geometry", "Vertex-color / ramp-driven albedo",
-// "kit/rng (seeded with ctx.seed) for ALL scatter/randomness — scenes are deterministic",
-// and the tier contract "vegetation ×0.5 (medium) / ×0.15 (thumb)".
-//
-// Shape of the API: ONE InstancedMesh per archetype (one draw call for ten thousand
-// grass blades), per-instance hue jitter carried on `instanceColor`, wind in the vertex
-// shader via `oakMaterial({ wind })`. Because three multiplies
-// `material.color * vertexColor * instanceColor`, a scene RETINTS a whole scatter with
-// `handle.retint(color)` and keeps every per-blade variation — no remodelling, no
-// second geometry, no second draw call.
-//
-// Placement is a deterministic rejection sample: `exclude(x, z)` returns true for cells
-// the art must never cover (the playfield, the boardwalk, the track). A scatter that
-// lands on the playfield is an accuracy bug, so exclusion is a first-class argument
-// rather than something scenes remember to do.
 
 import * as THREE from 'three';
 import { oakMaterial, oakUniforms } from './materials';
@@ -22,78 +5,53 @@ import type { OakMaterial } from './materials';
 import { streamFor } from './rng';
 import type { QualityTier } from './types';
 
-/** hero ×1 / medium ×0.5 / thumb ×0.15 (STYLE.md quality tiers). */
 export function vegetationTierScale(tier: QualityTier | undefined): number {
   return tier === 'thumb' ? 0.15 : tier === 'medium' ? 0.5 : 1;
 }
 
-/** Rectangular or annular scatter region, in world units. */
 export interface ScatterArea {
-  /** center (default origin) */
   x?: number;
   z?: number;
   halfX: number;
   halfZ: number;
-  /** skip anything inside this radius of the center (keeps hero space clear) */
   innerRadius?: number;
 }
 
-/** true = do NOT place here. This is how "never on the playfield" is enforced. */
 export type ExcludeFn = (x: number, z: number) => boolean;
 
 export interface ScatterOptions {
-  /** hero-tier instance count (tier scaling is applied inside) */
   count: number;
   area: ScatterArea;
-  /** lane seed — ctx.seed, always */
   seed: number;
   tier?: QualityTier;
-  /** the playfield test: return true where nothing may be placed */
   exclude?: ExcludeFn;
-  /** ground height lookup (terrain.sampleHeight); default flat y = 0 */
   heightAt?: (x: number, z: number) => number;
-  /** skip placements on ground steeper than this (0..1, 1 = allow anything) */
   maxSlope?: number;
-  /** base tint — `retint()` replaces this later */
   color: THREE.ColorRepresentation;
-  /** per-instance multiplicative hue/value jitter, 0..1 (default 0.16) */
   hueJitter?: number;
-  /** uniform scale range [min, max] (default [0.8, 1.25]) */
   scale?: readonly [number, number];
-  /** extra vertical stretch range applied on top of `scale` */
   stretch?: readonly [number, number];
-  /** vertex wind amplitude at full height (0 disables) */
   wind?: number;
   windFrequency?: number;
-  /** sky-tinted fresnel */
   rimColor?: THREE.ColorRepresentation;
   rimStrength?: number;
   castShadow?: boolean;
   receiveShadow?: boolean;
-  /** attempts per instance before giving up on the exclusion test (default 12) */
   maxTries?: number;
   name?: string;
 }
 
 export interface VegetationHandle {
-  /** add this ONE object to the scene */
   group: THREE.Group;
-  /** one per archetype — trees have three, everything else has one */
   meshes: THREE.InstancedMesh[];
   materials: OakMaterial[];
-  /** instances actually placed (after tier scaling and exclusion) */
   count: number;
-  /** ctx.time() — drives the vertex wind */
   setTime(t: number): void;
-  /** re-tint every archetype, preserving per-instance jitter */
   retint(color: THREE.ColorRepresentation, secondary?: THREE.ColorRepresentation): void;
   setWind(amplitude: number, frequency?: number): void;
   dispose(): void;
 }
 
-// ---------------------------------------------------------------------------
-// placement
-// ---------------------------------------------------------------------------
 
 interface Placement {
   x: number;
@@ -106,10 +64,6 @@ interface Placement {
   variant: number;
 }
 
-/**
- * Deterministic rejection sampling inside `area`, honouring `exclude` and `maxSlope`.
- * Exported for scenes that need the same placement for a bespoke hero mesh.
- */
 export function scatterPlacements(opts: ScatterOptions, streamName: string, variants = 1): Placement[] {
   const scale = vegetationTierScale(opts.tier);
   const wanted = Math.max(0, Math.round(opts.count * scale));
@@ -129,8 +83,6 @@ export function scatterPlacements(opts: ScatterOptions, streamName: string, vari
     for (let attempt = 0; attempt < maxTries && !placed; attempt++) {
       const x = cx + (rng() * 2 - 1) * opts.area.halfX;
       const z = cz + (rng() * 2 - 1) * opts.area.halfZ;
-      // draw the remaining stream values unconditionally so a rejected sample does not
-      // desynchronize the stream for later instances
       const s = sMin + rng() * (sMax - sMin);
       const t = tMin + rng() * (tMax - tMin);
       const yaw = rng() * Math.PI * 2;
@@ -159,7 +111,6 @@ export function scatterPlacements(opts: ScatterOptions, streamName: string, vari
 
 interface ArchetypeSpec {
   geometry: THREE.BufferGeometry;
-  /** local height at which wind sway is full */
   windHeight: number;
   color: THREE.ColorRepresentation;
 }
@@ -282,11 +233,7 @@ function buildScatter(
   };
 }
 
-// ---------------------------------------------------------------------------
-// procedural archetypes
-// ---------------------------------------------------------------------------
 
-/** vertical gradient vertex colors: dark at the base, bright at the tip */
 function gradeByHeight(geometry: THREE.BufferGeometry, low = 0.55, high = 1.15): THREE.BufferGeometry {
   const pos = geometry.getAttribute('position');
   let minY = Infinity;
@@ -309,7 +256,6 @@ function gradeByHeight(geometry: THREE.BufferGeometry, low = 0.55, high = 1.15):
   return geometry;
 }
 
-/** A tufted grass clump: 3 crossed tapered blades, base at y = 0. */
 export function grassClumpGeometry(blades = 3, height = 0.45, width = 0.06): THREE.BufferGeometry {
   const tris = blades * 2;
   const positions = new Float32Array(tris * 3 * 3);
@@ -320,7 +266,6 @@ export function grassClumpGeometry(blades = 3, height = 0.45, width = 0.06): THR
     const dz = Math.sin(a) * width;
     const lean = ((b % 2 === 0 ? 1 : -1) * width) * 1.8;
     const h = height * (0.72 + 0.35 * ((b * 7919) % 11) / 11);
-    // two triangles per blade (a quad tapering to a point)
     const x0 = -dx;
     const z0 = -dz;
     const x1 = dx;
@@ -347,7 +292,6 @@ export function grassClumpGeometry(blades = 3, height = 0.45, width = 0.06): THR
   return gradeByHeight(g, 0.5, 1.2);
 }
 
-/** Archetype A — broadleaf: a trunk plus a cluster of icosahedral canopy blobs. */
 export function broadleafTreeGeometry(detail = 1): THREE.BufferGeometry {
   const parts: THREE.BufferGeometry[] = [];
   const trunk = new THREE.CylinderGeometry(0.055, 0.1, 1.15, Math.max(4, 4 + detail * 2), 1);
@@ -367,7 +311,6 @@ export function broadleafTreeGeometry(detail = 1): THREE.BufferGeometry {
   return finishTree(parts, 'oakBroadleaf');
 }
 
-/** Archetype B — conifer: a stack of shrinking cones on a short trunk. */
 export function coniferTreeGeometry(detail = 1): THREE.BufferGeometry {
   const parts: THREE.BufferGeometry[] = [];
   const radial = Math.max(5, 5 + detail * 3);
@@ -387,7 +330,6 @@ export function coniferTreeGeometry(detail = 1): THREE.BufferGeometry {
   return finishTree(parts, 'oakConifer');
 }
 
-/** Archetype C — bare: a trunk with three angled boughs (winter, moor, ruin). */
 export function bareTreeGeometry(detail = 1): THREE.BufferGeometry {
   const parts: THREE.BufferGeometry[] = [];
   const radial = Math.max(4, 4 + detail * 2);
@@ -416,10 +358,6 @@ function finishTree(parts: THREE.BufferGeometry[], name: string): THREE.BufferGe
   return gradeByHeight(merged, 0.6, 1.1);
 }
 
-/**
- * Merge position-only geometries into one non-indexed buffer. Deliberately tiny (no
- * BufferGeometryUtils import): archetypes are built once, at scene init.
- */
 export function mergePositions(parts: readonly THREE.BufferGeometry[], name: string): THREE.BufferGeometry {
   let total = 0;
   for (const p of parts) {
@@ -446,7 +384,6 @@ export function mergePositions(parts: readonly THREE.BufferGeometry[], name: str
   return g;
 }
 
-/** A faceted boulder: an icosahedron pushed around deterministically. */
 export function rockGeometry(seedFactor = 1, detail = 0): THREE.BufferGeometry {
   const g = new THREE.IcosahedronGeometry(0.3, detail);
   const pos = g.getAttribute('position');
@@ -463,7 +400,6 @@ export function rockGeometry(seedFactor = 1, detail = 0): THREE.BufferGeometry {
   return gradeByHeight(g, 0.72, 1.08);
 }
 
-/** A four-petal flower head on a short stem. */
 export function flowerGeometry(petals = 5): THREE.BufferGeometry {
   const parts: THREE.BufferGeometry[] = [];
   const stem = new THREE.CylinderGeometry(0.008, 0.012, 0.22, 4, 1);
@@ -481,11 +417,7 @@ export function flowerGeometry(petals = 5): THREE.BufferGeometry {
   return gradeByHeight(merged, 0.5, 1.25);
 }
 
-// ---------------------------------------------------------------------------
-// the four scatters
-// ---------------------------------------------------------------------------
 
-/** Wind-leaning grass tufts. The densest scatter in the kit — one draw call. */
 export function scatterGrass(opts: ScatterOptions): VegetationHandle {
   const detail = opts.tier === 'thumb' ? 2 : opts.tier === 'medium' ? 3 : 4;
   return buildScatter(
@@ -496,11 +428,6 @@ export function scatterGrass(opts: ScatterOptions): VegetationHandle {
   );
 }
 
-/**
- * Trees, in the three house archetypes (broadleaf cluster / conifer stack / bare).
- * `retint(primary, secondary)` ramps across the archetypes, so an autumn scene and a
- * spring scene are the same three meshes with different colors.
- */
 export function scatterTrees(opts: ScatterOptions & { archetypes?: readonly TreeArchetype[] }): VegetationHandle {
   const detail = opts.tier === 'thumb' ? 0 : opts.tier === 'medium' ? 0 : 1;
   const wanted = opts.archetypes ?? (['broadleaf', 'conifer', 'bare'] as const);
@@ -519,7 +446,6 @@ export function scatterTrees(opts: ScatterOptions & { archetypes?: readonly Tree
 
 export type TreeArchetype = 'broadleaf' | 'conifer' | 'bare';
 
-/** Faceted boulders and scree. Never wind-animated. */
 export function scatterRocks(opts: ScatterOptions): VegetationHandle {
   const detail = opts.tier === 'hero' ? 1 : 0;
   return buildScatter(
@@ -533,7 +459,6 @@ export function scatterRocks(opts: ScatterOptions): VegetationHandle {
   );
 }
 
-/** Flower heads for meadows, blossom quadrants and lantern-flowers. */
 export function scatterFlowers(opts: ScatterOptions): VegetationHandle {
   return buildScatter(
     opts,
@@ -543,23 +468,17 @@ export function scatterFlowers(opts: ScatterOptions): VegetationHandle {
   );
 }
 
-/**
- * The standard "never on the playfield" test for grid scenes: excludes an axis-aligned
- * rect (the cell field) plus a margin.
- */
 export function excludeRect(x: number, z: number, halfX: number, halfZ: number, margin = 0.5): ExcludeFn {
   const hx = halfX + margin;
   const hz = halfZ + margin;
   return (px, pz) => Math.abs(px - x) <= hx && Math.abs(pz - z) <= hz;
 }
 
-/** Exclude a corridor along x (the MountainCar track, the CartPole boardwalk). */
 export function excludeBand(z: number, halfWidth: number, margin = 0.4): ExcludeFn {
   const h = halfWidth + margin;
   return (_px, pz) => Math.abs(pz - z) <= h;
 }
 
-/** Compose exclusion tests: excluded if ANY of them says so. */
 export function excludeAny(...tests: readonly (ExcludeFn | undefined)[]): ExcludeFn {
   const live = tests.filter((t): t is ExcludeFn => typeof t === 'function');
   return (x, z) => {

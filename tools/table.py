@@ -20,10 +20,6 @@ def best_kernel_key(R):
 if len(sys.argv) >= 4:
     roots, step = sys.argv[1:-1], int(sys.argv[-1])
 else:
-    # DEFAULT MODE (user law 2026-07-06): "the table" = CANDIDATE vs parent vs
-    # BEST KERNEL from .oak-benchmarks/ROLES.json — no discretion about which
-    # roots to show. Optional single arg = step; omitted = latest common 100k
-    # milestone across the role roots.
     R = json.load(open(f'{BENCH}/ROLES.json'))
     names = [R.get('candidate'), R.get('parent'), best_kernel_key(R)]
     roots = [f'{BENCH}/{n}' for n in names if n]
@@ -85,8 +81,6 @@ def agg_rows(root, s):
     """
     envs, meta = lane_envs(root)
     flops = meta.get('flopsPerLaneStep', 105296)
-    # Per-env seed cost: mixed runs stamp flopsPerLaneStep per envSchedule
-    # entry (env physics differs per env; the agent part is env-independent).
     env_flops = {e['envId']: e.get('flopsPerLaneStep', flops)
                  for e in (meta.get('envSchedule') or [])}
     prev_step = max(s - heartbeat_window(root, s), 0)
@@ -130,7 +124,6 @@ def agg_rows(root, s):
 
 data = []
 for rt in roots:
-    # Step presence check (apples-to-apples structural law).
     steps = {json.loads(l)['step'] for l in open(f'{rt}/aggregate.jsonl') if l.strip()}
     if step not in steps:
         raise SystemExit(
@@ -139,12 +132,6 @@ for rt in roots:
             f"  Compare only at steps present in ALL roots.")
     env_agg, meta = agg_rows(rt, step)
     data.append((env_agg, meta))
-# envSchedule comparability (mixed-env fleets): schedules must match exactly,
-# EXCEPT when one root is single-env (null schedule) and the other is mixed —
-# then we render only the single env they share (the overlapping slice).
-# The per-entry flopsPerLaneStep is measurement metadata (like the whitelisted
-# top-level key — it changes with organCostVersion), so the comparison keys on
-# the lane ASSIGNMENT (envId + seed ranges) only.
 def _sched_sig(m):
     sig = [{k: v for k, v in e.items() if k != 'flopsPerLaneStep'}
            for e in (m.get('envSchedule') or [])]
@@ -153,7 +140,6 @@ scheds = [_sched_sig(m) for _, m in data]
 if len(set(scheds)) > 1:
     null_sched = [i for i, s in enumerate(scheds) if s == 'null']
     if len(null_sched) == len(scheds) - 1:
-        # One mixed root, rest single-env: restrict to the shared env.
         shared = set()
         for env_agg, _ in data:
             shared |= set(env_agg.keys())
@@ -161,26 +147,15 @@ if len(set(scheds)) > 1:
         if not common:
             raise SystemExit(
                 "TABLE ERROR: mixed-vs-single roots share no env — refusing to render.")
-        # Filter all roots to the shared env(s).
         data = [({e: agg[e] for e in common if e in agg}, m) for agg, m in data]
     else:
         raise SystemExit(
             "TABLE ERROR: envSchedule differs across roots — mixed-env fleets are not "
             "apples-to-apples; refusing to render.\n  " + "\n  ".join(scheds))
-# WHITELIST comparability gate (user law 2026-07-05).
 metas = [m for _, m in data]
-# organFlops/organCostVersion are measurement metadata (Phase 8), not run
-# config: pre-organ roots (version 0) MUST stay comparable with v1 roots —
-# the keeper-comparison law outranks the version gate. A version split is
-# flagged below the table instead of refusing (cross-version ABSOLUTE
-# reward/GFLOP claims remain refused; the row is a ratio-share instrument).
 ALLOWED_DIFF = {'startedAt', 'ablation', 'ablationLabel', 'steps', 'flopsPerLaneStep',
                 'organFlops', 'organCostVersion',
-                # lane-assignment equality already enforced by the _sched_sig
-                # gate above; raw entries may differ only in per-entry flops.
                 'envSchedule'}
-# Mixed-vs-single: batch/seeds/envSchedule differ by construction (the mixed
-# root has more lanes on other envs); the shared-env slice is apples-to-apples.
 if len(set(_sched_sig(m) for m in metas)) > 1:
     ALLOWED_DIFF |= {'batch', 'seeds', 'envSchedule'}
 allkeys = set().union(*(m.keys() for m in metas))

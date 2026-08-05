@@ -1,18 +1,12 @@
-// JSONL readers. Every fleet artifact is append-only JSONL written by a live run, so
-// EVERY reader here must tolerate a truncated final line (the writer may be mid-row).
-// Nothing in this module throws on malformed content — bad lines are counted, not fatal.
 
 import { lstat, stat } from 'node:fs/promises';
 
 export interface JsonlParse<T> {
   rows: T[];
-  /** lines that failed JSON.parse (blank lines are not counted) */
   skipped: number;
-  /** the final line was unterminated and unparseable — i.e. the writer is mid-row */
   truncatedTail: boolean;
 }
 
-/** Parse a whole JSONL string. Blank lines are ignored; unparseable lines are skipped. */
 export function parseJsonlDetailed<T>(text: string): JsonlParse<T> {
   const rows: T[] = [];
   let skipped = 0;
@@ -45,7 +39,6 @@ export interface FileStat {
   mtimeMs: number;
 }
 
-/** stat that answers `null` instead of throwing for a missing path. */
 export async function statOrNull(path: string): Promise<FileStat | null> {
   try {
     const s = await stat(path);
@@ -61,10 +54,6 @@ export interface LinkStat extends FileStat {
   isFile: boolean;
 }
 
-/**
- * lstat that answers `null` instead of throwing. Does NOT follow symlinks — this is how
- * the recording scanner tells a real lane file from a link pointing out of the bench root.
- */
 export async function lstatOrNull(path: string): Promise<LinkStat | null> {
   try {
     const s = await lstat(path);
@@ -84,18 +73,9 @@ export interface TailRead {
   text: string;
   size: number;
   mtimeMs: number;
-  /** true when the window did not start at byte 0 (a leading partial line was dropped) */
   windowed: boolean;
 }
 
-/**
- * Read the last `bytes` of a file. When the window does not cover the whole file the
- * leading partial line is dropped, so the returned text always starts on a row boundary.
- *
- * Fails SOFT: a path that is a directory, unreadable (EACCES), or deleted mid-read
- * answers `null` exactly like a missing file. One hostile run root must never be able to
- * take the whole index down.
- */
 export async function readTail(path: string, bytes: number): Promise<TailRead | null> {
   const s = await statOrNull(path);
   if (s === null) return null;
@@ -116,11 +96,6 @@ export async function readTail(path: string, bytes: number): Promise<TailRead | 
   };
 }
 
-/**
- * Read complete JSONL rows appended after `offset`. Returns the new byte offset, which
- * only advances past the last newline — a partially written trailing row is left for the
- * next call. Handles truncation/replacement by reporting `reset`.
- */
 export async function readJsonlFrom<T>(
   path: string,
   offset: number,
@@ -139,7 +114,6 @@ export async function readJsonlFrom<T>(
   try {
     buf = new Uint8Array(await Bun.file(path).slice(from, s.size).arrayBuffer());
   } catch {
-    // Unreadable (directory / EACCES / vanished mid-read): treat as "nothing new yet".
     return { rows: [], nextOffset: from, size: s.size, reset };
   }
   let lastNl = -1;
@@ -159,11 +133,6 @@ export async function readJsonlFrom<T>(
   };
 }
 
-/**
- * Stream a JSONL file line by line without materializing it (fleet.jsonl reaches 175 MB).
- * A truncated final line is passed to the parser like any other and simply counted as
- * skipped.
- */
 export async function streamJsonl<T>(
   path: string,
   onRow: (row: T) => void,
@@ -187,9 +156,6 @@ export async function streamJsonl<T>(
     }
   };
 
-  // Unreadable (directory / EACCES / vanished after the stat) — at acquisition or
-  // mid-read — fails soft like every other reader in this module: the rows already
-  // delivered via onRow are reflected in the returned counts.
   try {
     const reader = Bun.file(path).stream().getReader();
     try {
@@ -219,12 +185,10 @@ export async function streamJsonl<T>(
   return { rows, skipped };
 }
 
-// ---------- dotted field paths (e.g. "health.rewardRate") ----------
 
 const SEGMENT = /^[A-Za-z_][A-Za-z0-9_]*$/;
 const BANNED = new Set(['__proto__', 'constructor', 'prototype']);
 
-/** Validate + split a dotted field path. Returns null for anything unsafe or malformed. */
 export function parseFieldPath(field: string): string[] | null {
   const segs = field.split('.');
   if (segs.length === 0 || segs.length > 4) return null;
@@ -234,7 +198,6 @@ export function parseFieldPath(field: string): string[] | null {
   return segs;
 }
 
-/** Read a numeric leaf out of a parsed row. Missing/non-numeric/non-finite all yield null. */
 export function pluckNumber(row: unknown, path: readonly string[]): number | null {
   let cur: unknown = row;
   for (const seg of path) {

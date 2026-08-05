@@ -1,19 +1,4 @@
 /// <reference types="bun" />
-// The Slot Canyons (HighDimMaze-cont-v0) — the accuracy + lifecycle self-check.
-//
-// This mirrors four-rooms.test.ts's shape (the grid canon) and adds what THIS env has to
-// prove, none of which FourRooms exercises:
-//
-//   * the wisp probe is `wisp.avatar`, because this scene calls `Wisp.face()` — so the
-//     probe must be exact AND idempotent while the body is mid-turn;
-//   * `pose[4]` (lastDir) maps to a facing with no guessing;
-//   * a DASH moves two cells in one 8 Hz step, and the hop must stay on the corridor
-//     segment and land exactly on the true cell;
-//   * the +1 blooms on the cell the agent SCORED on — the previous frame's goal — because
-//     this env rejection-redraws BOTH the agent and the goal, so neither of their new
-//     cells means anything;
-//   * `done` here is always the +1, so the scene must never sigh;
-//   * the two arches sit on the env's own gap cells, oriented off the flanking walls.
 
 import { describe, expect, test } from 'bun:test';
 import * as THREE from 'three';
@@ -80,8 +65,7 @@ import {
   type StubSceneContext,
 } from './aligned';
 
-const SEED = 104; // the demo run's first HighDimMaze lane
-/** 81 interior cells − 18 fin cells + the 2 gaps */
+const SEED = 104;
 const FREE_CELLS = 65;
 
 function geometryOf(): EnvGeometry {
@@ -127,7 +111,6 @@ function worldOf(module: SceneModule, probeName: string): THREE.Vector3 {
   return new THREE.Vector3().setFromMatrixPosition(probe.object.matrixWorld);
 }
 
-// ---------------------------------------------------------------------------
 
 describe('high-dim-maze / manifest + fixtures', () => {
   test('manifest declares the frozen contract fields', () => {
@@ -146,7 +129,6 @@ describe('high-dim-maze / manifest + fixtures', () => {
     const p = manifest.thumbFrame.pose;
     expect(highDimMazeIsWall(p[0] ?? -1, p[1] ?? -1)).toBe(false);
     expect(highDimMazeIsWall(p[2] ?? -1, p[3] ?? -1)).toBe(false);
-    // lastDir is a cardinal action index, always
     expect(p[4]).toBeGreaterThanOrEqual(0);
     expect(p[4]).toBeLessThanOrEqual(3);
   });
@@ -179,7 +161,7 @@ describe('high-dim-maze / manifest + fixtures', () => {
     expect(start.pose[1]).toBe(HIGHDIMMAZE_START.y);
     expect(start.pose[2]).toBe(HIGHDIMMAZE_GOAL.x);
     expect(start.pose[3]).toBe(HIGHDIMMAZE_GOAL.y);
-    expect(start.pose[4]).toBe(1); // oak_fleet_init sets lastDir = down
+    expect(start.pose[4]).toBe(1);
   });
 });
 
@@ -210,7 +192,6 @@ describe('high-dim-maze / the layout is read, never re-derived', () => {
     expect(gaps.length).toBe(HIGHDIMMAZE_GAPS.length);
     for (const gap of gaps) {
       expect(isWall(grid, gap.x, gap.y)).toBe(false);
-      // a gap is a hole in a fin: rock on two opposite sides
       const vertical = isWall(grid, gap.x, gap.y - 1) && isWall(grid, gap.x, gap.y + 1);
       const horizontal = isWall(grid, gap.x - 1, gap.y) && isWall(grid, gap.x + 1, gap.y);
       expect(vertical || horizontal).toBe(true);
@@ -221,16 +202,14 @@ describe('high-dim-maze / the layout is read, never re-derived', () => {
   test('arch orientation is READ from the flanking walls, never assumed', () => {
     const grid = resolveGrid(geometryOf());
     for (const gap of resolveGaps(grid)) {
-      // both of this maze's fins run north-south, so both arches span z and are yawed
       expect(archAxis(grid, gap)).toBe('alongZ');
       expect(archYaw(archAxis(grid, gap))).toBeCloseTo(Math.PI / 2, 12);
     }
-    // and the OTHER branch is reachable: a synthetic east-west fin yields the other axis
     const w = 3;
     const h = 3;
     const walls = new Uint8Array(w * h);
-    walls[1 * w + 0] = 1; // (0,1) wall
-    walls[1 * w + 2] = 1; // (2,1) wall — a wall running along x with a hole at (1,1)
+    walls[1 * w + 0] = 1;
+    walls[1 * w + 2] = 1;
     const synthetic = { w, h, walls };
     expect(archAxis(synthetic, { x: 1, y: 1 })).toBe('alongX');
     expect(archYaw('alongX')).toBe(0);
@@ -251,14 +230,10 @@ describe('high-dim-maze / the layout is read, never re-derived', () => {
         const hi = isRimCell(grid, x, y) ? RIM_HEIGHT_NORTH : FIN_HEIGHT_NORTH;
         expect(h).toBeGreaterThanOrEqual(lo - 1e-9);
         expect(h).toBeLessThanOrEqual(hi + 1e-9);
-        // the built height is that line times the notch, and nothing else
         expect(wallHeightAt(grid, x, y)).toBeCloseTo(h * archNotch(grid, x, y), 12);
       }
     }
-    // the near (south) rim really is lower than the far one — that is what keeps the
-    // front row of the grid out of its own occlusion
     expect(wallNominalAt(grid, 5, grid.h - 1)).toBeLessThan(wallNominalAt(grid, 5, 0));
-    // and the interior fins stand taller than the rim beside them
     expect(wallNominalAt(grid, 3, 5)).toBeGreaterThan(wallNominalAt(grid, 0, 5));
   });
 
@@ -272,19 +247,15 @@ describe('high-dim-maze / the layout is read, never re-derived', () => {
           const x = alongZ ? gap.x : gap.x + dir * k;
           const y = alongZ ? gap.y + dir * k : gap.y;
           if (!isWall(grid, x, y) || isRimCell(grid, x, y)) continue;
-          // exactly the published factor, and monotonically rising away from the gap
           expect(archNotch(grid, x, y)).toBeCloseTo(ARCH_NOTCH[k - 1] ?? 1, 12);
           expect(wallHeightAt(grid, x, y)).toBeLessThan(wallNominalAt(grid, x, y));
         }
       }
-      // the ramp is a NECK, not a crater: it never touches a cell off the fin's line
       const off = alongZ ? { x: gap.x + 1, y: gap.y } : { x: gap.x, y: gap.y + 1 };
       if (isWall(grid, off.x, off.y)) expect(archNotch(grid, off.x, off.y)).toBe(1);
     }
-    // every cell three or more out along the fin keeps its full line
     expect(archNotch(grid, 7, 1 + ARCH_NOTCH.length + 1)).toBe(1);
     expect(archNotch(grid, 3, 5)).toBe(1);
-    // the outer rim is never notched — its silhouette is the canyon's edge
     expect(archNotch(grid, 7, 0)).toBe(1);
   });
 
@@ -294,7 +265,6 @@ describe('high-dim-maze / the layout is read, never re-derived', () => {
       const top = archHeight(grid, gap);
       const jamb = Math.max(wallHeightAt(grid, gap.x, gap.y - 1), wallHeightAt(grid, gap.x, gap.y + 1));
       expect(top).toBeGreaterThan(jamb);
-      // headroom: the orb rides at wispHeight and the opening must clear it
       expect(Math.min(ARCH_OPENING, top - 0.4)).toBeGreaterThan(TOKENS.wispHeight);
     }
   });
@@ -310,14 +280,13 @@ describe('high-dim-maze / the layout is read, never re-derived', () => {
         }
         const d = wallDistance(grid, x, y);
         expect(d).toBeGreaterThanOrEqual(1);
-        // the two narrow slots are 2 cells wide, so a wall is ALWAYS beside you there
         if (d > 1) {
           open++;
-          expect(x).toBe(5); // only the middle column of the wide slot gets clearance
+          expect(x).toBe(5);
         }
       }
     }
-    expect(open).toBe(7); // (5,2) .. (5,8)
+    expect(open).toBe(7);
   });
 
   test('the sand-fall curtains land on cliff lips, deterministically', () => {
@@ -329,7 +298,6 @@ describe('high-dim-maze / the layout is read, never re-derived', () => {
     expect(sandFallSpots(grid, SEED, 0).length).toBe(0);
     for (const spot of a) {
       expect(spot.top).toBeGreaterThan(0);
-      // inside the canyon footprint, never out on the desert
       expect(Math.abs(spot.x)).toBeLessThanOrEqual(CANYON_HALF);
       expect(Math.abs(spot.z)).toBeLessThanOrEqual(CANYON_HALF);
     }
@@ -353,8 +321,7 @@ describe('high-dim-maze / the layout is read, never re-derived', () => {
     const skin = canyonSkin(TOKENS.palettes.afternoon, TOKENS);
     expect(skin.strata.length).toBe(4);
     const hexes = new Set(skin.strata.map((c) => c.getHex()));
-    expect(hexes.size).toBe(4); // no two beds share a colour
-    // the caprock is the brightest rock and the bottom bed the darkest
+    expect(hexes.size).toBe(4);
     const cap = skin.strata[3];
     const floorBed = skin.strata[0];
     expect(cap).toBeDefined();
@@ -362,10 +329,8 @@ describe('high-dim-maze / the layout is read, never re-derived', () => {
     if (cap && floorBed) {
       const lum = (c: THREE.Color): number => 0.2126 * c.r + 0.7152 * c.g + 0.0722 * c.b;
       expect(lum(cap)).toBeGreaterThan(lum(floorBed));
-      // canon: under a 2.7 key a terracotta albedo must stay well under the bloom line
       expect(lum(cap)).toBeLessThan(0.72);
     }
-    // water reads cool against every rock in the canyon
     expect(skin.water.b).toBeGreaterThan(skin.stone.b);
     expect(skin.stone.r).toBeGreaterThan(skin.stone.b);
   });
@@ -375,7 +340,6 @@ describe('high-dim-maze / alignment', () => {
   test('every probe lands on ground truth at hero tier', async () => {
     const module = createScene();
     const report = await assertAligned(module, fixtures, { geometry: geometryOf(), seed: SEED, tier: 'hero' });
-    // these roots carry POSITION ONLY — they should be exact, not merely within 1e-3
     expect(report.worst.get('wisp') ?? 1).toBeLessThan(1e-9);
     expect(report.worst.get('oasis') ?? 1).toBeLessThan(1e-9);
     expect(report.worst.get('arch-0') ?? 1).toBeLessThan(1e-9);
@@ -449,7 +413,6 @@ describe('high-dim-maze / alignment', () => {
       expect(w.x).toBeCloseTo(truth[0], 10);
       expect(w.y).toBeCloseTo(0, 10);
       expect(w.z).toBeCloseTo(truth[2], 10);
-      // the arch mesh under it is yawed by the READ orientation, not by a constant
       const mesh = module.scene.getObjectByName(`canyonArch${i}`);
       expect(mesh?.rotation.y ?? -1).toBeCloseTo(archYaw(archAxis(grid, gap)), 12);
     }
@@ -459,11 +422,10 @@ describe('high-dim-maze / alignment', () => {
 
 describe('high-dim-maze / the facing is pose[4], read not guessed', () => {
   test('lastDir maps to the env\'s own four cardinal deltas', () => {
-    expect(facingDelta(0)).toEqual({ dx: 0, dy: -1 }); // up
-    expect(facingDelta(1)).toEqual({ dx: 0, dy: 1 }); // down
-    expect(facingDelta(2)).toEqual({ dx: -1, dy: 0 }); // left
-    expect(facingDelta(3)).toEqual({ dx: 1, dy: 0 }); // right
-    // out-of-range values wrap the way the kernel's `lastDir & 3` does
+    expect(facingDelta(0)).toEqual({ dx: 0, dy: -1 });
+    expect(facingDelta(1)).toEqual({ dx: 0, dy: 1 });
+    expect(facingDelta(2)).toEqual({ dx: -1, dy: 0 });
+    expect(facingDelta(3)).toEqual({ dx: 1, dy: 0 });
     expect(facingDelta(7)).toEqual(facingDelta(3));
     expect(facingDelta(-1)).toEqual(facingDelta(3));
   });
@@ -473,16 +435,14 @@ describe('high-dim-maze / the facing is pose[4], read not guessed', () => {
       const d = facingDelta(dir);
       expect(facingYaw(dir)).toBeCloseTo(yawFromGridDelta(d.dx, d.dy), 12);
     }
-    expect(facingYaw(1)).toBeCloseTo(0, 12); // down = +z = yaw 0
-    expect(facingYaw(3)).toBeCloseTo(Math.PI / 2, 12); // right = +x
+    expect(facingYaw(1)).toBeCloseTo(0, 12);
+    expect(facingYaw(3)).toBeCloseTo(Math.PI / 2, 12);
   });
 
   test('the scarf turn damps on the shortest arc, exactly like the wisp body', () => {
-    // a turn from just under +PI to just over -PI must go the SHORT way
     const out = dampAngle(Math.PI - 0.1, -Math.PI + 0.1, 1 / 60);
     expect(out).toBeGreaterThan(Math.PI - 0.1);
     expect(dampAngle(0, 0, 1 / 60)).toBe(0);
-    // and it converges, never overshoots
     let a = 0;
     for (let i = 0; i < 400; i++) a = dampAngle(a, 1.2, 1 / 60);
     expect(a).toBeCloseTo(1.2, 6);
@@ -496,13 +456,11 @@ describe('high-dim-maze / the facing is pose[4], read not guessed', () => {
     expect(body).toBeDefined();
     for (const dir of [0, 1, 2, 3]) {
       ctx.setTime(20 + dir);
-      // a scrubbed frame snaps the facing, so the body yaw is the target exactly
       module.update(toFrameUpdate(poseFixture('turn', 5, 5, 9, 9, dir), { scrubbed: true }));
       const avatar = worldOf(module, 'wisp');
       cellToWorld(5, 5, grid, truth);
       expect(avatar.x).toBeCloseTo(truth[0], 10);
       expect(avatar.z).toBeCloseTo(truth[2], 10);
-      // the scarf hangs off the avatar and carries the facing
       const scarf = module.scene.getObjectByName('canyonScarf');
       expect(scarf).toBeDefined();
       expect(scarf?.rotation.y ?? NaN).toBeCloseTo(facingYaw(dir), 6);
@@ -546,7 +504,7 @@ describe('high-dim-maze / the hop is bounded, never a path plan', () => {
     const from: [number, number, number] = [0, 0, 0];
     const to: [number, number, number] = [0, 0, 0];
     cellToWorld(5, 5, grid, from);
-    cellToWorld(5, 3, grid, to); // two cells north — every cell between them is free
+    cellToWorld(5, 3, grid, to);
 
     ctx.setTime(30);
     module.update(toFrameUpdate(poseFixture('pre', 5, 5, 2, 2, 0, 0, 0)));
@@ -560,17 +518,14 @@ describe('high-dim-maze / the hop is bounded, never a path plan', () => {
         toFrameUpdate(poseFixture('dash', 5, 3, 2, 2, 0, HIGHDIMMAZE_DASH, 1), { scrubbed: false }),
       );
       const w = worldOf(module, 'wisp');
-      // the dash is collinear along lastDir, so the glide never leaves the corridor
       expect(w.x).toBeCloseTo(from[0], 6);
       expect(w.z).toBeGreaterThanOrEqual(Math.min(from[2], to[2]) - 1e-6);
       expect(w.z).toBeLessThanOrEqual(Math.max(from[2], to[2]) + 1e-6);
     }
-    // one control step later the two-cell glide has landed EXACTLY on the true cell
     const landed = worldOf(module, 'wisp');
     expect(landed.x).toBeCloseTo(to[0], 10);
     expect(landed.z).toBeCloseTo(to[2], 10);
     expect(landed.y).toBeCloseTo(0, 10);
-    // and the wake lies on the segment it crossed
     const wake = module.scene.getObjectByName('wispSandWake');
     expect(wake).toBeDefined();
     expect(wake?.visible ?? false).toBe(true);
@@ -591,7 +546,6 @@ describe('high-dim-maze / the hop is bounded, never a path plan', () => {
     const after = worldOf(module, 'wisp');
     expect(after.x).toBeCloseTo(before.x, 10);
     expect(after.z).toBeCloseTo(before.z, 10);
-    // a normal step puts the ring away again — it is a pure function of the action
     module.update(toFrameUpdate(poseFixture('move', 8, 5, 1, 7, 1, 1, 12), { scrubbed: false }));
     expect(module.scene.getObjectByName('wispSettleRing')?.visible ?? true).toBe(false);
     module.dispose();
@@ -640,13 +594,11 @@ describe('high-dim-maze / update contract', () => {
     expect(pool).not.toBeNull();
     if (!pool) return;
 
-    // standing exactly ON the goal cell with no event: nothing may fire
     ctx.setTime(1);
     module.update(toFrameUpdate(poseFixture('onGoal', 9, 9, 9, 9, 1, 0, 100), { scrubbed: false }));
     expect(pool.stats.bursts).toBe(0);
     expect(pool.stats.ripples).toBe(0);
 
-    // the decoder's real batch on a +1: goal + teleport + done, all in one step
     ctx.setTime(2);
     module.update(
       toFrameUpdate(poseFixture('scored', 2, 4, 6, 7, 1, 0, 101), {
@@ -657,7 +609,6 @@ describe('high-dim-maze / update contract', () => {
     expect(pool.stats.bursts).toBe(1);
     expect(pool.stats.ripples).toBe(1);
     expect(pool.pulse.bloom).toBeGreaterThan(0);
-    // `done` here is only ever the +1 — the scene must NEVER sigh
     expect(pool.pulse.sigh).toBe(0);
     module.dispose();
   });
@@ -665,11 +616,9 @@ describe('high-dim-maze / update contract', () => {
   test('the bloom lands on the cell the agent SCORED on, not on either new cell', async () => {
     const { module, ctx } = await live();
     const grid = resolveGrid(geometryOf());
-    // step N: the agent is beside the oasis at (9,9)
     ctx.setTime(3);
     const before = poseFixture('run', 8, 9, 9, 9, 3, 3, 200);
     module.update(toFrameUpdate(before, { scrubbed: false }));
-    // step N+1: it entered (9,9), scored, and BOTH it and the goal were redrawn
     ctx.setTime(3.125);
     module.update(
       toFrameUpdate(poseFixture('scored', 2, 4, 6, 7, 3, 3, 201), {
@@ -682,11 +631,10 @@ describe('high-dim-maze / update contract', () => {
     expect(light).toBeDefined();
     if (!light) return;
     const truth: [number, number, number] = [0, 0, 0];
-    cellToWorld(9, 9, grid, truth); // the OLD goal — where the +1 happened
+    cellToWorld(9, 9, grid, truth);
     expect(light.position.x).toBeCloseTo(truth[0], 10);
     expect(light.position.z).toBeCloseTo(truth[2], 10);
     expect((light as THREE.PointLight).intensity).toBeGreaterThan(0);
-    // the new oasis is already on its new cell, welling up from nothing
     const oasis = worldOf(module, 'oasis');
     cellToWorld(6, 7, grid, truth);
     expect(oasis.x).toBeCloseTo(truth[0], 10);
@@ -709,22 +657,16 @@ describe('high-dim-maze / update contract', () => {
         events: [{ type: 'goal' }, { type: 'teleport' }, { type: 'done' }],
       }),
     );
-    // no easing may cross a teleport: the wisp is ON the redrawn cell in the same frame
     const w = worldOf(module, 'wisp');
     cellToWorld(1, 2, grid, truth);
     expect(w.x).toBeCloseTo(truth[0], 10);
     expect(w.z).toBeCloseTo(truth[2], 10);
     expect(w.y).toBeCloseTo(0, 10);
-    // and the gust it might have been mid-dash through is gone
     expect(module.scene.getObjectByName('wispSpeedLines')?.visible ?? true).toBe(false);
     module.dispose();
   });
 
   test('the grow-in bounce actually reaches the alcove (it is not clamped away)', async () => {
-    // The bug this locks: `growth()` overshoots 1 on purpose, and `Oasis.setState` ran it
-    // through clamp01 — so the alcove could never scale past 1 and the documented "wells up
-    // with a little bounce" beat rendered as a plain ease. Drive the real scene through the
-    // real event and watch the real node.
     const { module, ctx } = await live();
     const alcove = module.scene.getObjectByName('oasisGrow');
     expect(alcove).toBeDefined();
@@ -735,16 +677,15 @@ describe('high-dim-maze / update contract', () => {
         events: [{ type: 'goal' }, { type: 'teleport' }, { type: 'done' }],
       }),
     );
-    expect(alcove?.scale.x ?? 1).toBeLessThan(0.2); // the new oasis starts from nothing
+    expect(alcove?.scale.x ?? 1).toBeLessThan(0.2);
     let peak = 0;
     for (let i = 1; i <= 40; i++) {
       ctx.setTime(100 + (i / 40) * 0.8);
       module.update(toFrameUpdate(poseFixture('after', 2, 4, 6, 7, 1, 0, 500 + i), { scrubbed: false }));
       peak = Math.max(peak, alcove?.scale.x ?? 0);
     }
-    expect(peak).toBeGreaterThan(1.02); // it really overshoots on screen
-    expect(peak).toBeLessThan(1.12); // and never becomes a cartoon
-    // …and it settles to exactly its cell-sized self
+    expect(peak).toBeGreaterThan(1.02);
+    expect(peak).toBeLessThan(1.12);
     ctx.setTime(102);
     module.update(toFrameUpdate(poseFixture('settled', 2, 4, 6, 7, 1, 0, 560), { scrubbed: false }));
     expect(alcove?.scale.x ?? 0).toBeCloseTo(1, 9);
@@ -785,17 +726,12 @@ describe('high-dim-maze / update contract', () => {
       expect(g).toBeLessThanOrEqual(1.1);
       peak = Math.max(peak, g);
     }
-    // THE BOUNCE IS REAL, NOT DECORATIVE MATHS. The first pass's overshoot peaked at 1.008
-    // — under a thousandth of a cell on the alcove — and was then clamped away entirely by
-    // the actor. A documented beat has to be big enough to see.
     expect(peak).toBeGreaterThan(1.03);
-    // …and it still lands exactly on its resting value, with no step at the window's end
     expect(growth(0.8 - 1e-6)).toBeCloseTo(1, 3);
     expect(envelope(-Infinity, 1, 2)).toBe(0);
     expect(envelope(Number.NaN, 1, 2)).toBe(0);
     expect(envelope(0, 1, 2)).toBe(1);
     expect(envelope(2, 1, 2)).toBe(0);
-    // nearness is bounded and rises as the wisp closes in
     const far = nearness({ x: 1, y: 1 }, { x: 9, y: 9 });
     const near = nearness({ x: 9, y: 8 }, { x: 9, y: 9 });
     expect(far).toBe(0);
@@ -809,23 +745,18 @@ describe('high-dim-maze / the dash draws only the step the env can make', () => 
     expect(isDashSegment(0, 0, 0, 1)).toBe(true);
     expect(isDashSegment(0, 0, 0, -2)).toBe(true);
     expect(isDashSegment(0, 0, 2, 0)).toBe(true);
-    expect(isDashSegment(0, 0, 0, 0)).toBe(false); // a dash that moved nothing
-    expect(isDashSegment(0, 0, 1, 1)).toBe(false); // diagonal — the env cannot make one
-    expect(isDashSegment(0, 0, 0, 3)).toBe(false); // three cells — nor one of these
+    expect(isDashSegment(0, 0, 0, 0)).toBe(false);
+    expect(isDashSegment(0, 0, 1, 1)).toBe(false);
+    expect(isDashSegment(0, 0, 0, 3)).toBe(false);
     expect(isDashSegment(-3, 2, -3, 4)).toBe(true);
   });
 
   test('a DASH that moves ZERO cells draws no speed lines (and no stale ones)', async () => {
-    // `gw_hdm_step` stops a dash at the first wall, so action 5 at (1,1) with lastDir = up
-    // is an ordinary legal transition that advances nothing. The bug this locks: the scene
-    // refreshed the segment only when the cell changed, so the PREVIOUS dash's from/to were
-    // still in the scratch vectors and this frame painted its speed lines across the maze.
     const { module, ctx } = await live();
     const lines = module.scene.getObjectByName('wispSpeedLines');
     const wake = module.scene.getObjectByName('wispSandWake');
     expect(lines).toBeDefined();
 
-    // a real two-cell dash south→north up the middle slot, five cells from (1,1)
     ctx.setTime(20);
     module.update(toFrameUpdate(poseFixture('pre', 5, 5, 2, 2, 0, 0, 0)));
     ctx.setTime(20.05);
@@ -834,7 +765,6 @@ describe('high-dim-maze / the dash draws only the step the env can make', () => 
     );
     expect(lines?.visible ?? false).toBe(true);
 
-    // walk away, then a BLOCKED dash at (1,1): action 5, cell unchanged
     ctx.setTime(20.4);
     module.update(toFrameUpdate(poseFixture('walk', 1, 1, 2, 2, 0, 0, 2), { scrubbed: false }));
     ctx.setTime(20.6);
@@ -843,8 +773,6 @@ describe('high-dim-maze / the dash draws only the step the env can make', () => 
     );
     expect(lines?.visible ?? true).toBe(false);
 
-    // the WAKE is allowed to outlive its dash — sand hangs — but it stays anchored on the
-    // segment that dash actually crossed, never re-anchored onto the blocked one
     const grid = resolveGrid(geometryOf());
     const from: [number, number, number] = [0, 0, 0];
     const to: [number, number, number] = [0, 0, 0];
@@ -858,9 +786,6 @@ describe('high-dim-maze / the dash draws only the step the env can make', () => 
   });
 
   test('a non-collinear "dash" from the fixture loop draws nothing at all', async () => {
-    // the harness's fixture fallback plays canonical poses back to back, so two frames of
-    // it can differ by a diagonal jump. The env cannot make that step; the scene must not
-    // draw one either.
     const { module, ctx } = await live();
     const lines = module.scene.getObjectByName('wispSpeedLines');
     ctx.setTime(40);
@@ -886,12 +811,10 @@ describe('high-dim-maze / the dash draws only the step the env can make', () => 
       toFrameUpdate(poseFixture('dash', 5, 3, 2, 2, 0, HIGHDIMMAZE_DASH, 1), { scrubbed: false }),
     );
     expect(wake?.visible ?? false).toBe(true);
-    // a scrub across the maze: nothing in flight may survive it
     ctx.setTime(60.1);
     module.update(toFrameUpdate(poseFixture('elsewhere', 9, 2, 2, 2, 1, 0, 900), { scrubbed: true }));
     expect(lines?.visible ?? true).toBe(false);
     expect(wake?.visible ?? true).toBe(false);
-    // and a dash on the very next frame draws its OWN segment, from the new cell
     ctx.setTime(60.2);
     module.update(
       toFrameUpdate(poseFixture('dash2', 9, 4, 2, 2, 1, HIGHDIMMAZE_DASH, 901), { scrubbed: false }),
@@ -908,13 +831,7 @@ describe('high-dim-maze / the dash draws only the step the env can make', () => 
 });
 
 describe('high-dim-maze / the agent is visible on every cell it can stand on', () => {
-  // THE SCENE'S HARDEST ACCURACY CLAIM, and the one a still cannot fake: a 1.3-unit cliff on
-  // a 1-unit cell will hide a 0.35-unit orb from the wrong camera, and the frame that does
-  // it looks perfectly composed. So the occlusion is MEASURED here — real Raycaster, real
-  // wall instances, real strata, real arches — for every free cell, at the composed camera
-  // and at every corner of the rig's own limits.
   const OCCLUDER = /oakCellWallMesh|canyonStrata|canyonArch\d|canyonDesert/;
-  /** must mirror index.ts's OrbitRig limits + composed pose */
   const CAM = { azimuth: CAMERA_AZIMUTH, polar: 0.86, distance: 17, targetY: 0.62 };
   const LIMITS = { az: [CAMERA_AZIMUTH - 0.04, CAMERA_AZIMUTH + 0.04], polar: [0.74, 0.88], dist: [17, 24] };
 
@@ -936,7 +853,6 @@ describe('high-dim-maze / the agent is visible on every cell it can stand on', (
     return out;
   }
 
-  /** what fraction of the wisp orb a camera at `cam` can see on this cell */
   function visibleFraction(
     occluders: THREE.Object3D[],
     cam: THREE.Vector3,
@@ -981,10 +897,9 @@ describe('high-dim-maze / the agent is visible on every cell it can stand on', (
     module.update(toFrameUpdate(fixtureNamed('canyon-start')));
     const grid = resolveGrid(geometryOf());
     const occluders = occludersOf(module);
-    expect(occluders.length).toBeGreaterThan(2); // walls + strata + both arches at least
+    expect(occluders.length).toBeGreaterThan(2);
 
     const cam = module.camera.position.clone();
-    // the rig really did compose the frame this test is auditing
     expect(cam.distanceTo(new THREE.Vector3(0, CAM.targetY, 0))).toBeCloseTo(CAM.distance, 3);
     expect(Math.atan2(cam.x, cam.z)).toBeCloseTo(CAM.azimuth, 6);
 
@@ -1001,8 +916,6 @@ describe('high-dim-maze / the agent is visible on every cell it can stand on', (
         worstCell = `(${cell.x},${cell.y})`;
       }
     }
-    // NOT ONE hidden cell. The first pass hid 8 of these 65 — the whole corridor west of
-    // the x = 3 fin plus the high arch — and the source claimed the camera hid nothing.
     expect(`${worstCell}:${worst.toFixed(2)}`).not.toContain(':0.00');
     expect(worst).toBeGreaterThan(0.1);
     expect(total / cells.length).toBeGreaterThan(0.8);
@@ -1100,7 +1013,7 @@ describe('high-dim-maze / lifecycle', () => {
     expect(Math.hypot(cam.position.x, cam.position.z)).toBeGreaterThan(CANYON_HALF);
     const dir = new THREE.Vector3();
     cam.getWorldDirection(dir);
-    expect(dir.y).toBeLessThan(-0.5); // a genuine aerial, never a horizon shot
+    expect(dir.y).toBeLessThan(-0.5);
     expect(cam.fov).toBeGreaterThanOrEqual(35);
     expect(cam.fov).toBeLessThanOrEqual(45);
     module.dispose();
@@ -1112,15 +1025,12 @@ describe('high-dim-maze / lifecycle', () => {
     const scored = { ...init, done: 1 };
     const kinds = highDimMazeDecoder.deriveEvents(init, scored, st).map((e) => e.type);
     expect(kinds).toEqual(['goal', 'teleport', 'done']);
-    // and nothing fires on an ordinary step
     expect(highDimMazeDecoder.deriveEvents(init, init, st).length).toBe(0);
   });
 });
 
 describe('high-dim-maze / the canyon geometry is a function of the maze', () => {
   test('a synthetic maze with a different gap moves the arch with it', async () => {
-    // the acid test for "read, never re-derive": hand the scene a DIFFERENT layout and the
-    // arch must follow the hallway list, not the numbers this env happens to use
     const w = HIGHDIMMAZE_W;
     const h = HIGHDIMMAZE_H;
     const walls = new Uint8Array(w * h);
@@ -1148,7 +1058,6 @@ describe('high-dim-maze / the canyon geometry is a function of the maze', () => 
       expect(world.x).toBeCloseTo(truth[0], 10);
       expect(world.z).toBeCloseTo(truth[2], 10);
     }
-    // exactly one arch, because the layout has exactly one hallway
     expect(module.probes().filter((p) => p.name.startsWith('arch-')).length).toBe(1);
     module.dispose();
   });
@@ -1156,10 +1065,6 @@ describe('high-dim-maze / the canyon geometry is a function of the maze', () => 
 
 describe('high-dim-maze / the thumb wall-view cap', () => {
   test('the thumb frame fits STYLE.md\u2019s 40 draws / 50k triangles, overlay included', async () => {
-    // The wall view is the whole gallery on one page: every scene there is a thumb, and
-    // the cap is what keeps 16 of them at 60 fps. Measured with the ground-truth overlay
-    // ON, because that is the state review screenshots are taken in, and across every
-    // fixture, because the busiest legal state is the one that has to fit.
     const { module } = await live('thumb');
     module.setDebug(true);
     for (const f of fixtures) module.update(toFrameUpdate(f));

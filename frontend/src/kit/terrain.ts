@@ -1,14 +1,3 @@
-// kit/terrain — displaced ground with ramp-driven vertex colors.
-//
-// STYLE.md: "Vertex-color / ramp-driven albedo — never image textures for surface
-// detail", "Ground/floor at y = 0", and the accuracy law — every state-bearing mesh is
-// positioned from ctx.geometry + FrameState, which for terrain-riding scenes means
-// `heightAt`. `sampleHeight()` here IS the rendered surface: it bilinearly interpolates
-// the exact height field the vertices were built from, so a cart placed at
-// `sampleHeight(x, z)` sits on the visible ground, not near it.
-//
-// The optional `flattenMask` carves a flat inset (a grid playfield, a courtyard floor)
-// out of an otherwise rolling terrain with a feathered edge — one mesh, one draw call.
 
 import * as THREE from 'three';
 import { hash2f } from './rng';
@@ -16,57 +5,37 @@ import { oakMaterial, type OakMaterialOptions } from './materials';
 import type { QualityTier } from './types';
 
 export interface TerrainRampStop {
-  /** normalized height in [0, 1] */
   t: number;
   color: THREE.ColorRepresentation;
 }
 
-/** Full control: returns the vertex color for a sample. */
 export type TerrainColorFn = (height: number, slope: number, x: number, z: number) => THREE.ColorRepresentation;
 
 export interface FlattenRect {
-  /** center */
   x: number;
   z: number;
   halfX: number;
   halfZ: number;
-  /** world units over which the flatten fades out (0 = hard edge) */
   feather?: number;
 }
 
 export type FlattenMask = FlattenRect | ((x: number, z: number) => number);
 
 export interface TerrainOptions {
-  /** world extent: a number is square, or [width(x), depth(z)] */
   size: number | readonly [number, number];
-  /** hero segment count before tier scaling; a number is square */
   segments?: number | readonly [number, number];
-  /** world-space height field; defaults to a flat plane at y = 0 */
   heightFn?: (x: number, z: number) => number;
-  /** ramp stops over normalized height, or a full color function */
   colorRamp?: readonly TerrainRampStop[] | TerrainColorFn;
-  /** color blended in on steep faces (rock through grass) */
   slopeColor?: THREE.ColorRepresentation;
   slopeStrength?: number;
-  /** exponent on the slope term — higher = only the steepest faces show rock */
   slopeSharpness?: number;
-  /** per-vertex value break-up, deterministic from `seed` (0 disables) */
   colorNoise?: number;
   flattenMask?: FlattenMask;
-  /** the height the flattened region is pulled to (default 0 = the grid floor) */
   flattenHeight?: number;
-  /** lane seed — the only randomness source (kit/rng) */
   seed?: number;
-  /**
-   * Lateral vertex jitter in world units, for a hand-made silhouette. Heights stay on
-   * the lattice, so jitter > 0 makes the mesh deviate from `sampleHeight` by
-   * O(jitter · slope). Default 0 — accuracy first.
-   */
   jitter?: number;
   tier?: QualityTier;
-  /** override the material entirely (must handle vertexColors itself) */
   material?: THREE.Material;
-  /** extra options for the default oakMaterial */
   materialOptions?: OakMaterialOptions;
   receiveShadow?: boolean;
   castShadow?: boolean;
@@ -81,18 +50,14 @@ export interface TerrainHandle {
   depth: number;
   segmentsX: number;
   segmentsZ: number;
-  /** (segmentsX+1) × (segmentsZ+1) row-major lattice, index = j*(segmentsX+1)+i */
   heights: Float32Array;
   minHeight: number;
   maxHeight: number;
-  /** the rendered surface height at any world (x, z); clamped to the terrain bounds */
   sampleHeight(x: number, z: number): number;
-  /** analytic surface normal at (x, z), written into `out` (allocation-free) */
   sampleNormal(x: number, z: number, out: THREE.Vector3): THREE.Vector3;
   dispose(): void;
 }
 
-/** hero 1.0 / medium 0.6 / thumb 0.3 — kit factories scale themselves (STYLE.md). */
 export function terrainSegmentScale(tier: QualityTier | undefined): number {
   return tier === 'thumb' ? 0.3 : tier === 'medium' ? 0.6 : 1;
 }
@@ -109,7 +74,6 @@ function smoothstep01(t: number): number {
   return t * t * (3 - 2 * t);
 }
 
-/** Flatten weight in [0,1] for a rect mask (1 = fully flattened). */
 export function rectFlattenWeight(rect: FlattenRect, x: number, z: number): number {
   const feather = Math.max(0, rect.feather ?? 0);
   const dx = Math.abs(x - rect.x);
@@ -159,18 +123,6 @@ function sampleStops(stops: readonly LinearStop[], t: number, out: THREE.Color):
   return out.copy(last.color);
 }
 
-/**
- * Build a terrain.
- *
- * ```ts
- * const t = makeTerrain({
- *   size: [24, 12], segments: 160, tier,
- *   heightFn: (x) => Math.sin(3 * x) * 0.45 + 0.55,     // MountainCar IS this curve
- *   colorRamp: [{ t: 0, color: p.groundA }, { t: 0.7, color: p.groundB }, { t: 1, color: 0xffffff }],
- * });
- * cart.position.set(x, t.sampleHeight(x, 0), 0);         // exactly on the ground
- * ```
- */
 export function makeTerrain(opts: TerrainOptions): TerrainHandle {
   const [width, depth] = pair(opts.size, 10);
   const scale = terrainSegmentScale(opts.tier);
@@ -187,7 +139,6 @@ export function makeTerrain(opts: TerrainOptions): TerrainHandle {
   const heightFn = opts.heightFn;
   const flattenHeight = opts.flattenHeight ?? 0;
 
-  // ---- height field (the authority for both the mesh and sampleHeight) ----
   const heights = new Float32Array(nx * nz);
   let minHeight = Infinity;
   let maxHeight = -Infinity;
@@ -215,7 +166,6 @@ export function makeTerrain(opts: TerrainOptions): TerrainHandle {
     return heights[cj * nx + ci] as number;
   };
 
-  // ---- attributes ----
   const count = nx * nz;
   const positions = new Float32Array(count * 3);
   const normals = new Float32Array(count * 3);
@@ -239,7 +189,6 @@ export function makeTerrain(opts: TerrainOptions): TerrainHandle {
       const z = z0 + j * dz;
       const h = heights[idx] as number;
 
-      // analytic normal from central differences on the lattice
       const hx = (heightAtIndex(i + 1, j) - heightAtIndex(i - 1, j)) / ((i === 0 || i === segmentsX ? 1 : 2) * dx);
       const hz = (heightAtIndex(i, j + 1) - heightAtIndex(i, j - 1)) / ((j === 0 || j === segmentsZ ? 1 : 2) * dz);
       const nlen = Math.sqrt(hx * hx + 1 + hz * hz);
@@ -283,7 +232,6 @@ export function makeTerrain(opts: TerrainOptions): TerrainHandle {
     }
   }
 
-  // ---- indices (CCW when viewed from +y) ----
   const triCount = segmentsX * segmentsZ * 2;
   const indices = count > 65535 ? new Uint32Array(triCount * 3) : new Uint16Array(triCount * 3);
   let o = 0;

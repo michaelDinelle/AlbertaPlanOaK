@@ -1,14 +1,4 @@
 /// <reference types="bun" />
-// CartPole-cont-v0 decoder unit tests: the fp32 failure bounds a scene must
-// draw at exactly the env's thresholds, the pole kinematics, the deterministic
-// init, and the done/teleport pair (CartPole has no goal — its reward is the
-// dense per-step +1, and `done` is a failure).
-//
-// Oracles: test/fixtures/init_states.json (oak_fleet_init) and the trace
-// goldens (fp64 one-step parity against tools/physics_parity.py). The
-// row-by-row comparison lives in test/decode.test.ts; CartPole's head window
-// already contains 8 real failures, so the event path is covered by real data
-// there too.
 
 import { describe, expect, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
@@ -60,7 +50,6 @@ describe('constants mirror the kernel', () => {
   test('the failure bounds are the fp32 literals the kernel compares against', () => {
     expect(CP_X_LIMIT).toBe(Math.fround(2.4));
     expect(CP_TH_LIMIT).toBe(Math.fround(0.2094395));
-    // 12 degrees, to the precision of the kernel's own rounded literal
     expect(CP_TH_LIMIT).toBeCloseTo((12 * Math.PI) / 180, 6);
   });
 
@@ -124,7 +113,6 @@ describe('decoder contract', () => {
       expect(f.state.thDot).toBe(0);
       expect(f.state.xMargin).toBe(0);
       expect(f.state.thMargin).toBe(0);
-      // no action has been taken yet — not a leftward shove
       expect(f.state.action).toBe(0);
       expect(f.state.force).toBe(0);
     }
@@ -170,8 +158,6 @@ describe('decoder contract', () => {
     const half = frameOf(0, row([CP_X_LIMIT / 2, 0, -CP_TH_LIMIT / 2, 0]), prev);
     expect(half.state.xMargin).toBeCloseTo(0.5, 6);
     expect(half.state.thMargin).toBeCloseTo(0.5, 6);
-    // the recorded state can never exceed the bound (the kernel resets first),
-    // but the margins clamp at 1 if a future recorder ever shows one
     const over = frameOf(1, row([CP_X_LIMIT * 3, 0, CP_TH_LIMIT * 3, 0]), prev);
     expect(over.state.xMargin).toBe(1);
     expect(over.state.thMargin).toBe(1);
@@ -188,8 +174,6 @@ describe('events', () => {
   });
 
   test('done is a failure reset — never a goal', () => {
-    // the kernel tests |x| > 2.4 or |th| > 0.2094395, then zeroes the state in
-    // the same step, so the recorded row is the upright reset with done = 1
     const a = frameOf(0, row([-0.18, -1.2, -0.2, -1.4]), prev);
     const b = frameOf(1, row([0, 0, 0, 0], 1), a);
     const evs = cartPoleDecoder.deriveEvents(a, b, STATIC);

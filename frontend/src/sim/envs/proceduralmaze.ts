@@ -1,25 +1,3 @@
-// ProceduralMaze-cont-v0 decoder.
-//
-// Oracles (ported, never guessed):
-//   Sources/Gridworld.metal      gw_pmaze_gen L539, gw_pmaze_is_wall L558,
-//                                gw_pmaze_step L589
-//   tools/gridworld_ref.py       pmaze_gen L478, pmaze_is_wall L501
-//   Sources/OakKernel.metal      pose packing L2773-2786, init L2299-2306
-//
-// 11x11 with a border wall and a PER-LANE 9x9 interior PERFECT maze generated
-// once at fleet init from the RESET stream: all-wall start (81 bits packed
-// into 3 words, bit idx = (x-1) + 9*(y-1), w2 masked to its low 17 bits), the
-// 25 room cells at odd interior coords (2i+1, 2j+1) cleared, then a
-// randomized-DFS spanning tree carved over the 5x5 room lattice (unvisited
-// neighbors in fixed order right/down/left/up, descend into `word % n`,
-// carve the between-cell; words from RESET blocks ctr=(c,0,0,0), 4 words per
-// block, integer-only). Every one of the 49 free cells is mutually reachable
-// by construction — solvable from any respawn. carvedPath is the 24
-// between-cells in carve order — a DEBUG overlay only, never art.
-// The maze itself never resets; only the agent and goal are redrawn on a
-// completion, and both land in the pose, so no replay is needed.
-//
-// pose = [x, y, gx, gy, 0, 0, 0, 0, 0].
 
 import { philoxDraw, STREAM_RESET } from '../philox';
 import { CTRL_LEN, OFF_CTRL, OFF_DONE, OFF_POSE, POSE_LEN } from '../record';
@@ -28,7 +6,6 @@ import { NO_EVENTS } from '../events';
 
 export const PROCMAZE_W = 11;
 export const PROCMAZE_H = 11;
-/** interior cells (9x9), the bit domain of the wall words */
 export const PROCMAZE_INTERIOR = 9;
 export const PROCMAZE_START: GridCell = Object.freeze({ x: 1, y: 1 });
 export const PROCMAZE_GOAL: GridCell = Object.freeze({ x: 9, y: 9 });
@@ -36,38 +13,28 @@ export const PROCMAZE_GOAL: GridCell = Object.freeze({ x: 9, y: 9 });
 export interface ProceduralMazeState {
   x: number;
   y: number;
-  /** LIVE goal cell (rejection-redrawn to a free cell on completion) */
   gx: number;
   gy: number;
 }
 
 export interface ProceduralMazeStatic {
   seed: number;
-  /** the 3 packed wall words, exactly as the kernel holds them */
   words: Uint32Array;
   walls: Uint8Array;
-  /** the 24 between-cells the DFS carved, in carve order — DEBUG OVERLAY ONLY */
   carvedPath: GridCell[];
 }
 
-/** `gw_pmaze_is_wall` for a raw word triple. */
 export function procMazeIsWall(words: ArrayLike<number>, x: number, y: number): boolean {
   if (x <= 0 || x >= 10 || y <= 0 || y >= 10) return true;
   const idx = x - 1 + PROCMAZE_INTERIOR * (y - 1);
   return (((words[idx >>> 5] ?? 0) >>> (idx & 31)) & 1) !== 0;
 }
 
-/**
- * `gw_pmaze_gen`: the per-lane perfect-maze wall words plus the DFS carve
- * order. Integer-only (no u01), bitwise identical to Metal and the Python
- * reference. Word arithmetic runs in a Uint32Array so every clear stays
- * unsigned.
- */
 export function procMazeGen(seed: number): { words: Uint32Array; carvedPath: GridCell[] } {
   const words = Uint32Array.from([0xffffffff, 0xffffffff, 0x1ffff]);
   for (let j = 0; j < 5; j++) {
     for (let i = 0; i < 5; i++) {
-      const idx = 2 * i + PROCMAZE_INTERIOR * (2 * j); // room (2i+1, 2j+1)
+      const idx = 2 * i + PROCMAZE_INTERIOR * (2 * j);
       words[idx >>> 5] = (words[idx >>> 5] ?? 0) & ~(1 << (idx & 31));
     }
   }
@@ -107,7 +74,7 @@ export function procMazeGen(seed: number): { words: Uint32Array; carvedPath: Gri
     bi++;
     const ni = nxt % 5;
     const nj = (nxt / 5) | 0;
-    const idx = ci + ni + PROCMAZE_INTERIOR * (cj + nj); // the between-cell
+    const idx = ci + ni + PROCMAZE_INTERIOR * (cj + nj);
     words[idx >>> 5] = (words[idx >>> 5] ?? 0) & ~(1 << (idx & 31));
     carvedPath.push({ x: ci + ni + 1, y: cj + nj + 1 });
     visited |= 1 << nxt;
@@ -116,7 +83,6 @@ export function procMazeGen(seed: number): { words: Uint32Array; carvedPath: Gri
   return { words, carvedPath };
 }
 
-/** w*h row-major occupancy, 1 = wall. */
 export function procMazeWalls(words: ArrayLike<number>): Uint8Array {
   const walls = new Uint8Array(PROCMAZE_W * PROCMAZE_H);
   for (let y = 0; y < PROCMAZE_H; y++) {

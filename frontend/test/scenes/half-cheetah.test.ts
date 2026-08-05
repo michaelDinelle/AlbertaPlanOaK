@@ -1,11 +1,4 @@
 /// <reference types="bun" />
-// Gold Hour Savanna (HalfCheetah-v4) — the accuracy + lifecycle self-check.
-//
-// This mirrors mountain-car.test.ts's shape and adds what the ONE ARTICULATED HERO has to
-// prove: every joint node lands on `fk()` EXACTLY (not within tolerance), every bone spans
-// the two joints it claims to span, the savanna floor is identically y = 0 wherever a toe
-// can reach it, and the endless treadmill is a pure function of rootx — scrub 1000 metres
-// away and back and the same grass grows in the same places.
 
 import { describe, expect, test } from 'bun:test';
 import * as THREE from 'three';
@@ -46,7 +39,7 @@ import {
   type StubSceneContext,
 } from './aligned';
 
-const SEED = 0; // the demo run's first HalfCheetah lane
+const SEED = 0;
 
 function geometryOf(): EnvGeometry {
   return halfCheetahDecoder.geometry(halfCheetahDecoder.initStatic(SEED), SEED);
@@ -63,7 +56,6 @@ async function live(
   return { module, ctx };
 }
 
-/** The lowest point of the WORLD-SPACE surface of every mesh whose name matches. */
 function lowestSurfaceY(module: SceneModule, match: (name: string) => boolean): number {
   const v = new THREE.Vector3();
   let lowest = Infinity;
@@ -83,13 +75,11 @@ function lowestSurfaceY(module: SceneModule, match: (name: string) => boolean): 
 const isTail = (name: string): boolean => name.startsWith('cheetahTailMesh');
 const isBone = (name: string): boolean => name.startsWith('cheetah_');
 
-/** A fixture played at a CHOSEN forward speed (the tail's droop is a function of it). */
 function atSpeed(fixture: SceneFixture, velX: number): SceneFixture {
   const derived = (fixture.derived as Record<string, unknown> | undefined) ?? {};
   return { ...fixture, derived: { ...derived, velX } };
 }
 
-/** The instance matrices of one treadmill bank, as a comparable array. */
 function bankMatrices(module: SceneModule, name: string): number[] {
   const mesh = module.scene.getObjectByName(name) as THREE.InstancedMesh | undefined;
   if (!mesh?.isInstancedMesh) throw new Error(`bank "${name}" missing`);
@@ -113,11 +103,6 @@ function worldOf(object: THREE.Object3D): THREE.Vector3 {
   return new THREE.Vector3().setFromMatrixPosition(object.matrixWorld);
 }
 
-/**
- * The observable of `update()` for a scene whose whole world moves: every object's world
- * matrix AND visibility AND every instanced bank's instance matrices. A treadmill that
- * re-randomized itself, or a tail that integrated instead of reading state, shows up here.
- */
 function worldSnapshot(module: SceneModule): number[] {
   const out: number[] = [];
   module.scene.updateMatrixWorld(true);
@@ -133,7 +118,6 @@ function worldSnapshot(module: SceneModule): number[] {
   return out;
 }
 
-// ---------------------------------------------------------------------------
 
 describe('half-cheetah / manifest + fixtures', () => {
   test('manifest declares the frozen contract fields', () => {
@@ -151,7 +135,6 @@ describe('half-cheetah / manifest + fixtures', () => {
   test('the thumbFrame is a REAL recorded pose (the hero stride), not a posed one', () => {
     const stride = fixtureNamed('stride-plant');
     expect([...manifest.thumbFrame.pose]).toEqual([...stride.pose]);
-    // and it is a CONTACT frame: the back toe is on the ground, one geom radius up
     const truth = fk(poseOf(stride));
     expect(truth[FK_POINT_INDEX.toe_b * 2 + 1] ?? 1).toBeLessThan(CHEETAH_RADIUS);
     expect(truth[FK_POINT_INDEX.toe_f * 2 + 1] ?? 0).toBeGreaterThan(0.15);
@@ -163,12 +146,9 @@ describe('half-cheetah / manifest + fixtures', () => {
       expect(f.pose.length).toBe(9);
       const out = fk(poseOf(f));
       const rootY = out[1] ?? 0;
-      // the torso is never underground and never in orbit
       expect(rootY).toBeGreaterThan(0.15);
       expect(rootY).toBeLessThan(1.2);
-      // the recorded root height is ROOT_Z0 + qpos[1], by definition
       expect(rootY).toBeCloseTo(ROOT_Z0 + (f.pose[1] ?? 0), 6);
-      // no toe is ever driven meaningfully through the floor
       expect(out[FK_POINT_INDEX.toe_b * 2 + 1] ?? 0).toBeGreaterThan(-CHEETAH_RADIUS);
       expect(out[FK_POINT_INDEX.toe_f * 2 + 1] ?? 0).toBeGreaterThan(-CHEETAH_RADIUS);
     }
@@ -226,8 +206,6 @@ describe('half-cheetah / alignment', () => {
   test('every probe lands on ground truth EXACTLY at hero tier', async () => {
     const module = createScene();
     const report = await assertAligned(module, fixtures, { geometry: geometryOf(), seed: SEED, tier: 'hero' });
-    // joint nodes carry POSITION ONLY under an identity parent: the error is not "small",
-    // it is zero, and it stays zero 431 metres down the plain
     for (const name of ['torso', 'toe-back', 'toe-front', 'head']) {
       expect(report.worst.get(name) ?? 1).toBe(0);
     }
@@ -256,7 +234,6 @@ describe('half-cheetah / alignment', () => {
       expect(probe).toBeDefined();
       if (!probe) continue;
       const world = worldOf(probe.object);
-      // the pose arrives as f32, so ground truth is the f32 round-trip
       expect(world.x).toBe(Math.fround(rootX));
       expect(world.y).toBeCloseTo(ROOT_Z0 + Math.fround(rootZ), 6);
       expect(world.z).toBe(0);
@@ -285,14 +262,12 @@ describe('half-cheetah / the coat is a rigid skin on the exact skeleton', () => 
         const bx = truth[bone[1] * 2] ?? 0;
         const by = truth[bone[1] * 2 + 1] ?? 0;
         const half = Math.hypot(bx - ax, by - ay) * 0.5;
-        // the capsule's local ±half along +y are its two ends
         for (const [sign, tx, ty] of [
           [-1, ax, ay],
           [1, bx, by],
         ] as const) {
           local.set(0, sign * half, 0);
           world.copy(local).applyMatrix4(mesh.matrixWorld);
-          // tolerance is the f32 record's own resolution at 431 m, not the model's
           expect(world.x).toBeCloseTo(tx, 4);
           expect(world.y).toBeCloseTo(ty, 4);
           expect(world.z).toBeCloseTo(0, 9);
@@ -310,15 +285,11 @@ describe('half-cheetah / the coat is a rigid skin on the exact skeleton', () => 
     for (const f of fixtures) {
       module.update(toFrameUpdate(f));
       const truth = fk(poseOf(f));
-      // the yaw is the TORSO BONE's own heading, to the last bit — it is read off the
-      // same two FK points the mesh is placed from, never off pose[2]
       const dx = (truth[FK_POINT_INDEX.ft * 2] ?? 0) - (truth[FK_POINT_INDEX.bt * 2] ?? 0);
       const dy = (truth[FK_POINT_INDEX.ft * 2 + 1] ?? 0) - (truth[FK_POINT_INDEX.bt * 2 + 1] ?? 0);
       expect(node.rotation.z).toBe(Math.atan2(dy, dx));
-      // and that heading IS −qpos[2]: FK rotates by R_y(t1), so a positive pitch drops the
-      // nose. (The 1e-4 band is the f32 record's own resolution 431 m down the plain.)
       expect(node.rotation.z).toBeCloseTo(-(f.pose[2] ?? 0), 4);
-      expect(node.position.lengthSq()).toBe(0); // it is a rotation, never a translation
+      expect(node.position.lengthSq()).toBe(0);
     }
     module.dispose();
   });
@@ -327,23 +298,19 @@ describe('half-cheetah / the coat is a rigid skin on the exact skeleton', () => 
     const { module } = await live();
     const scuffs = ['cheetahScuff0', 'cheetahScuff1'];
 
-    // feet in the air on the reset drop: no dust, no scuff
     module.update(toFrameUpdate(fixtureNamed('reset-drop')));
     for (const name of scuffs) {
       expect(module.scene.getObjectByName(name)?.visible).toBe(false);
     }
 
-    // mid-bound at speed with BOTH feet clear: still nothing (the scene never fakes contact)
     module.update(toFrameUpdate(fixtureNamed('stride-extend')));
     expect(module.scene.getObjectByName('cheetahScuff1')?.visible).toBe(false);
 
-    // planted and creeping forward: both scuffs alight
     module.update(toFrameUpdate(fixtureNamed('flail-sprawl')));
     for (const name of scuffs) {
       expect(module.scene.getObjectByName(name)?.visible).toBe(true);
     }
 
-    // and they sit under the toes they belong to
     const truth = fk(poseOf(fixtureNamed('flail-sprawl')));
     const back = module.scene.getObjectByName('cheetahScuff0');
     const front = module.scene.getObjectByName('cheetahScuff1');
@@ -354,10 +321,6 @@ describe('half-cheetah / the coat is a rigid skin on the exact skeleton', () => 
 });
 
 describe('half-cheetah / the tail never breaks the contact plane', () => {
-  // The tail is the one part of this animal the sim does not simulate, so it is the one
-  // part that could lie about contact. It used to hang on speed alone, which put its tip
-  // BELOW the ground — and below the planted toe — in every low-speed pose, i.e. in 85%
-  // of the shipped lane. The droop is now solved against the plane, and this is the lock.
   const SPEEDS = [0, 0.3, 1.1];
 
   test('no tail surface is ever below y = 0, at any fixture and any speed', async () => {
@@ -367,8 +330,6 @@ describe('half-cheetah / the tail never breaks the contact plane', () => {
         module.update(toFrameUpdate(atSpeed(f, velX)));
         const tail = lowestSurfaceY(module, isTail);
         expect(`${f.name}@${velX}: ${tail >= 0}`).toBe(`${f.name}@${velX}: true`);
-        // and it clears by the sim's own capsule radius — the height at which a toe counts
-        // as planted, so the tail can never read as a contact
         expect(tail).toBeGreaterThanOrEqual(CHEETAH_RADIUS);
       }
     }
@@ -382,7 +343,6 @@ describe('half-cheetah / the tail never breaks the contact plane', () => {
         module.update(toFrameUpdate(atSpeed(f, velX)));
         const tail = lowestSurfaceY(module, isTail);
         const coat = lowestSurfaceY(module, isBone);
-        // the coat's floor is honest: it is the sim's own capsule, radius included
         expect(`${f.name}@${velX}: ${tail > coat}`).toBe(`${f.name}@${velX}: true`);
       }
     }
@@ -396,8 +356,6 @@ describe('half-cheetah / the tail never breaks the contact plane', () => {
     const rest = lowestSurfaceY(module, isTail);
     module.update(toFrameUpdate(atSpeed(stride, 1.1)));
     const run = lowestSurfaceY(module, isTail);
-    // a running tail is a counterweight held out behind — measurably higher than at rest,
-    // and the rest pose is still a real hang, not a rigid pole
     expect(run).toBeGreaterThan(rest + 0.15);
     const hip = fk(poseOf(stride))[FK_POINT_INDEX.bt * 2 + 1] ?? 0;
     expect(rest).toBeLessThan(hip - 0.15);
@@ -412,12 +370,10 @@ describe('half-cheetah / the tail never breaks the contact plane', () => {
     let checked = 0;
     for (let n = 0; n < 240; n++) {
       pose[0] = (rng() - 0.5) * 40;
-      pose[1] = -0.35 + rng() * 0.85; // root 0.35 .. 1.2 — the recorded lane lives here
-      pose[2] = (rng() - 0.5) * 3.2; // pitch past vertical, both ways
+      pose[1] = -0.35 + rng() * 0.85;
+      pose[2] = (rng() - 0.5) * 3.2;
       for (let i = 3; i < 9; i++) pose[i] = (rng() - 0.5) * 2.4;
       const truth = fk(pose);
-      // the tail hangs off the hip; a hip BELOW its own root radius is a pose the sim
-      // cannot produce (the recorded lane's lowest hip is 0.5156, 8x this bar)
       if ((truth[FK_POINT_INDEX.bt * 2 + 1] ?? 0) < 0.062) continue;
       for (const velX of SPEEDS) {
         module.update(toFrameUpdate({ name: `sweep${n}`, pose: [...pose], step: n, derived: { velX } }));
@@ -436,7 +392,6 @@ describe('half-cheetah / the tail never breaks the contact plane', () => {
     const slow = fixtureNamed('nose-dip');
     module.update(toFrameUpdate(atSpeed(stride, 0.2), { scrubbed: false }));
     const a = worldSnapshot(module);
-    // walk somewhere else entirely (which engages and releases the ground clamp) and back
     module.update(toFrameUpdate(atSpeed(slow, 1.1), { scrubbed: false }));
     module.update(toFrameUpdate(atSpeed(fixtureNamed('reset-drop'), 0), { scrubbed: true }));
     module.update(toFrameUpdate(atSpeed(stride, 0.2), { scrubbed: false }));
@@ -473,7 +428,6 @@ describe('half-cheetah / the treadmill is a pure function of rootx', () => {
       module.update(toFrameUpdate({ name: `g${x}`, pose: [x, -0.1, 0, 0, 0, 0, 0, 0, 0], step: 0 }));
       const offset = ground.position.x / GROUND_PERIOD;
       expect(Math.abs(offset - Math.round(offset))).toBeLessThan(1e-9);
-      // and the window always contains the runner with room to spare
       expect(Math.abs(ground.position.x - x)).toBeLessThanOrEqual(GROUND_PERIOD / 2 + 1e-6);
     }
     module.dispose();
@@ -497,7 +451,6 @@ describe('half-cheetah / the treadmill is a pure function of rootx', () => {
     for (let i = 1; i < xs.length; i++) {
       expect((xs[i] ?? 0) - (xs[i - 1] ?? 0)).toBeCloseTo(10, 6);
     }
-    // the ruler brackets the runner
     expect(xs[0] ?? 0).toBeLessThan(96.4);
     expect(xs[xs.length - 1] ?? 0).toBeGreaterThan(96.4);
     module.dispose();
@@ -515,19 +468,15 @@ describe('half-cheetah / the treadmill is a pure function of rootx', () => {
     const again = await live('hero', 0);
     for (const m of [a, b, again]) m.module.update(toFrameUpdate(at(240)));
     for (const bank of BANKS) {
-      // a different lane grows different grass in different places...
       expect(`${bank} differs by seed: ${bankMatrices(b.module, bank).join() !== bankMatrices(a.module, bank).join()}`).toBe(
         `${bank} differs by seed: true`,
       );
-      // ...and the SAME lane is reproducible from nothing but its seed and rootx
       expect(bankMatrices(again.module, bank)).toEqual(bankMatrices(a.module, bank));
     }
     for (const m of [a, b, again]) m.module.dispose();
   });
 
   test('each bank draws its OWN stream (a name length is not an identity)', () => {
-    // 'savannaGrass'.length === 'savannaRocks'.length === 12: keyed by length, the rock
-    // bank's existence roll WAS the grass bank's first clump offset.
     expect('savannaGrass'.length).toBe('savannaRocks'.length);
     expect(bankKey('savannaGrass')).not.toBe(bankKey('savannaRocks'));
     expect(bankKey('savannaGrass')).not.toBe(bankKey('savannaAcacias'));
@@ -541,24 +490,19 @@ describe('half-cheetah / the treadmill is a pure function of rootx', () => {
       expect(draw(rocks)).not.toBe(g);
       expect(draw(trees)).not.toBe(g);
     }
-    // and the same bank + tile + seed is the same stream forever (the scrub contract)
     const once = rngAt(317, bankKey('savannaGrass'), SEED);
     const twice = rngAt(317, bankKey('savannaGrass'), SEED);
     expect(twice()).toBe(once());
   });
 
   test('no scattered prop ever stands inside the runner’s silhouette', async () => {
-    // The lane seed now really does re-roll the scatter, so composition cannot be a lucky
-    // draw: a termite hummock is taller than the animal, and one standing 1.2 m behind it
-    // (or anywhere on the camera side) would swallow the hero's outline. The rule is
-    // structural — distance from the lane scales with the prop's own height.
     const { module } = await live();
     const rocks = module.scene.getObjectByName('savannaRocks') as THREE.InstancedMesh | undefined;
     expect(rocks).toBeDefined();
     if (!rocks) return;
     rocks.geometry.computeBoundingBox();
     const propTop = rocks.geometry.boundingBox?.max.y ?? 0;
-    expect(propTop).toBeGreaterThan(0.1); // the kit rock really is a squashed lump
+    expect(propTop).toBeGreaterThan(0.1);
     const m = new THREE.Matrix4();
     const p = new THREE.Vector3();
     const q = new THREE.Quaternion();
@@ -569,7 +513,7 @@ describe('half-cheetah / the treadmill is a pure function of rootx', () => {
       for (let i = 0; i < rocks.count; i++) {
         rocks.getMatrixAt(i, m);
         m.decompose(p, q, s);
-        if (s.lengthSq() === 0) continue; // an unused slot
+        if (s.lengthSq() === 0) continue;
         seen++;
         const top = propTop * s.y;
         if (Math.abs(p.z) < 2.5) expect(`near prop top ${top < 0.45}`).toBe('near prop top true');
@@ -603,20 +547,16 @@ describe('half-cheetah / the treadmill is a pure function of rootx', () => {
     const a = centroid();
     module.update(toFrameUpdate({ name: 'b', pose: [200 * TILE, -0.1, 0, 0, 0, 0, 0, 0, 0], step: 0 }));
     const b = centroid();
-    // not an exact translation — each tile draws its own jitter from its own stream — but
-    // the window has to have walked the whole 1200 m with the runner
     expect(Math.abs(b - a - 200 * TILE)).toBeLessThan(0.5);
     module.dispose();
   });
 });
 
 describe('half-cheetah / the sim owns the animal’s dimensions', () => {
-  /** the SAME skeleton, a fatter capsule and a bigger skull — the model, changed. */
   function scaledGeometry(radius: number, headRadius: number): EnvGeometry {
     return { kind: 'cheetah', cheetah: { fk, radius, headRadius } };
   }
 
-  /** half-extent of a named mesh's geometry on one axis (local, un-posed) */
   function halfExtent(module: SceneModule, name: string, axis: 'x' | 'y' | 'z'): number {
     const mesh = module.scene.getObjectByName(name) as THREE.Mesh | undefined;
     if (!mesh) throw new Error(`mesh "${name}" missing`);
@@ -630,10 +570,6 @@ describe('half-cheetah / the sim owns the animal’s dimensions', () => {
   }
 
   test('the coat CONTAINS the capsule the physics simulates, at whatever radius it has', async () => {
-    // The foot capsule's coat profile is thinner than the collision radius everywhere, so
-    // the tube is floored at the sim's radius along its whole length — and the foot's
-    // section is round (deep = wide = 1), so its widest vertex sits at exactly that radius.
-    // (vertex buffers are f32, so ground truth is the f32 round of the sim's own number)
     const base = await live();
     expect(halfExtent(base.module, 'cheetah_footBack', 'x')).toBe(Math.fround(CHEETAH_RADIUS));
     base.module.dispose();
@@ -642,8 +578,6 @@ describe('half-cheetah / the sim owns the animal’s dimensions', () => {
     expect(halfExtent(fat.module, 'cheetah_footBack', 'x')).toBe(Math.fround(CHEETAH_RADIUS * 2));
     fat.module.dispose();
 
-    // the TAIL is not floored: the physics model has no tail, so nothing there has to
-    // contain a capsule and the tip really does taper past the collision radius
     const tailTip = await live();
     expect(halfExtent(tailTip.module, 'cheetahTailMesh3', 'x')).toBeLessThan(CHEETAH_RADIUS);
     tailTip.module.dispose();
@@ -651,14 +585,11 @@ describe('half-cheetah / the sim owns the animal’s dimensions', () => {
 
   test('the skull IS the sim’s head sphere (the overlay draws that same circle)', async () => {
     const base = await live();
-    // the skull is the head sphere with a 1.08 stretch along the muzzle axis
     expect(halfExtent(base.module, 'cheetahSkull', 'x')).toBeCloseTo(CHEETAH_HEAD_RADIUS * 1.08, 6);
     base.module.dispose();
 
     const big = await live('hero', SEED, scaledGeometry(CHEETAH_RADIUS, CHEETAH_HEAD_RADIUS * 2));
     expect(halfExtent(big.module, 'cheetahSkull', 'x')).toBeCloseTo(CHEETAH_HEAD_RADIUS * 2 * 1.08, 6);
-    // the face rides on the skull: muzzle, nose and ears scale with it, they are not
-    // literals that would float off a bigger head
     const baseFace = await live();
     const smallFace = halfExtent(baseFace.module, 'cheetahFace', 'x');
     expect(halfExtent(big.module, 'cheetahFace', 'x')).toBeCloseTo(smallFace * 2, 6);
@@ -690,7 +621,7 @@ describe('half-cheetah / update contract', () => {
   test('update is idempotent on the WHOLE world matrix, treadmill included', async () => {
     const { module, ctx } = await live();
     for (const f of fixtures) {
-      ctx.setTime(3.25); // freeze the ambient clock: only state may move the world
+      ctx.setTime(3.25);
       module.update(toFrameUpdate(f, { scrubbed: false, events: [] }));
       const a = worldSnapshot(module);
       module.update(toFrameUpdate(f, { scrubbed: false, events: [] }));
@@ -726,7 +657,6 @@ describe('half-cheetah / update contract', () => {
     expect(pool.stats.ripples).toBe(0);
     expect(pool.pulse.bloom).toBe(0);
 
-    // even handed a goal/done batch the decoder can never produce, the scene stays quiet
     ctx.setTime(2);
     module.update(
       toFrameUpdate(fixtureNamed('stride-extend'), {
@@ -737,7 +667,6 @@ describe('half-cheetah / update contract', () => {
     expect(pool.stats.bursts).toBe(0);
     expect(pool.stats.ripples).toBe(0);
 
-    // a teleport is the ONE beat: a warm flash, no particles
     ctx.setTime(3);
     module.update(
       toFrameUpdate(fixtureNamed('reset-drop'), { scrubbed: false, events: [{ type: 'teleport' }] }),
@@ -776,7 +705,6 @@ describe('half-cheetah / update contract', () => {
     module.update(toFrameUpdate(stride, { scrubbed: false }));
     expect(torso().x).toBe(Math.fround(stride.pose[0] ?? 0));
 
-    // the respawn row: rootx snaps back past the decoder's own teleport threshold
     ctx.setTime(1.05);
     const respawn = fixtureNamed('reset-drop');
     expect(Math.abs((stride.pose[0] ?? 0) - (respawn.pose[0] ?? 0))).toBeGreaterThan(CHEETAH_TELEPORT_DX);
@@ -788,7 +716,6 @@ describe('half-cheetah / update contract', () => {
       }),
     );
     expect(torso().x).toBe(Math.fround(respawn.pose[0] ?? 0));
-    // the camera cut with it — no easing may cross a teleport
     expect(module.camera.position.x).toBeCloseTo((respawn.pose[0] ?? 0) + (CAM_OFFSET[0] ?? 0), 5);
     expect(module.camera.position.y).toBeCloseTo(TRACK_Y + (CAM_OFFSET[1] ?? 0), 5);
     module.dispose();
@@ -807,16 +734,14 @@ describe('half-cheetah / update contract', () => {
     const at = Math.fround(stride.pose[0] ?? 0);
     expect(torsoX()).toBe(at);
 
-    // the host lerps across the respawn row: 189.5 -> 95 inside ONE control step
     const slide: SceneFixture = {
       name: 'mid-slide',
       pose: [95, -0.1, 0, 0.1, 0.05, 0, -0.05, 0.1, 0],
       step: stride.step ?? 0,
     };
     module.update(toFrameUpdate(slide, { scrubbed: false }));
-    expect(torsoX()).toBe(at); // held, not slid down the plain
+    expect(torsoX()).toBe(at);
 
-    // ... but a real stride of a few centimetres is never held
     const next: SceneFixture = {
       name: 'next-step',
       pose: [(stride.pose[0] ?? 0) + 0.048, -0.1, 0, 0.1, 0.05, 0, -0.05, 0.1, 0],
@@ -898,10 +823,6 @@ function boneName(index: number): string {
 
 describe('half-cheetah / the thumb wall-view cap', () => {
   test('the thumb frame fits STYLE.md\u2019s 40 draws / 50k triangles, overlay included', async () => {
-    // The wall view is the whole gallery on one page: every scene there is a thumb, and
-    // the cap is what keeps 16 of them at 60 fps. Measured with the ground-truth overlay
-    // ON, because that is the state review screenshots are taken in, and across every
-    // fixture, because the busiest legal state is the one that has to fit.
     const { module } = await live('thumb');
     module.setDebug(true);
     for (const f of fixtures) module.update(toFrameUpdate(f));

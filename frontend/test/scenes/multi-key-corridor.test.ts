@@ -1,28 +1,4 @@
 /// <reference types="bun" />
-// Temple of Three Gates (MultiKeyCorridor-cont-v0) — the accuracy + lifecycle self-check.
-//
-// This mirrors four-rooms.test.ts's shape (the grid canon) and adds the three things
-// THIS env makes checkable and no other one does:
-//
-//   1. THE KEY CELLS ARE REPLAYED. They are not in the record at all, so the scene has
-//      to follow `state.keys[j]` — which the decoder recovers by re-running the real
-//      `mkcStep` dynamics over the ctrl stream. The centre-piece test below drives the
-//      decoder's OWN step function for 600 actions, feeds every resulting state to the
-//      scene, and asserts the three altars land on the replayed cells to the last bit,
-//      across several respawns (which is the only way the key cells ever move).
-//
-//   2. THE +1 IS NOT WHERE THE AGENT IS. The agent is thrown back to chamber 0 in the
-//      same step it scores, so the celebration has to read the PREVIOUS frame's goal
-//      cell. That is test-locked here, because getting it wrong is invisible in a still
-//      and fires the whole grammar four chambers away.
-//
-//   3. GATE STATE IS A PURE READ of `state.doorOpen[j]` AND OF THE PLAYBACK CLOCK — a
-//      scrubbed frame lands on gates that are exactly as open as the frame says, a
-//      respawn relocks all three, a paused transport freezes all three mechanisms, and
-//      playback speed scales them like every other beat. The gate probes are
-//      position-only roots and the eased mechanism hangs a level below them, so
-//      `assertUpdateIdempotent` is blind to it by construction: the block below measures
-//      the mechanism itself (stepping-stone height, curtain parting, cane span) instead.
 
 import { describe, expect, test } from 'bun:test';
 import * as THREE from 'three';
@@ -77,8 +53,7 @@ import {
   type StubSceneContext,
 } from './aligned';
 
-const SEED = 80; // the demo run's first MultiKeyCorridor lane
-/** interior 15×5 minus the three wall columns, plus the three gate cells back */
+const SEED = 80;
 const FREE_CELLS = 63;
 
 function geometryOf(): EnvGeometry {
@@ -105,7 +80,6 @@ function worldOf(module: SceneModule, probeName: string): THREE.Vector3 {
   return new THREE.Vector3().setFromMatrixPosition(probe.object.matrixWorld);
 }
 
-/** a MultiKeyCorridorState from raw parts (the derived payload the host hands over) */
 function stateOf(
   x: number,
   y: number,
@@ -139,7 +113,6 @@ function frameOf(name: string, s: MultiKeyCorridorState, step = 0): SceneFixture
   };
 }
 
-// ---------------------------------------------------------------------------
 
 describe('multi-key-corridor / manifest + fixtures', () => {
   test('manifest declares the frozen contract fields', () => {
@@ -158,7 +131,6 @@ describe('multi-key-corridor / manifest + fixtures', () => {
     const p = manifest.thumbFrame.pose;
     expect(mkcIsWall(p[0] ?? -1, p[1] ?? -1)).toBe(false);
     expect(mkcIsWall(p[2] ?? -1, p[3] ?? -1)).toBe(false);
-    // the thumbnail stands ON a gate cell — the threshold case, deliberately
     const onGate = MKC_DOORS.some((d) => d.x === p[0] && d.y === p[1]);
     expect(onGate).toBe(true);
   });
@@ -170,7 +142,6 @@ describe('multi-key-corridor / manifest + fixtures', () => {
       expect(mkcIsWall(f.pose[0] ?? -1, f.pose[1] ?? -1)).toBe(false);
       expect(mkcIsWall(f.pose[2] ?? -1, f.pose[3] ?? -1)).toBe(false);
       const s = f.derived as MultiKeyCorridorState;
-      // the goal only ever respawns in the sanctum, and a key only in its own chamber
       expect(chamberOf(s.gx, s.gy)).toBe(3);
       for (let j = 0; j < 3; j++) {
         const k = s.keys[j] as GridCell;
@@ -185,7 +156,6 @@ describe('multi-key-corridor / manifest + fixtures', () => {
     expect(states.some((s) => s.x === MKC_START.x && s.y === MKC_START.y && s.flags === 0)).toBe(true);
     expect(states.some((s) => MKC_DOORS.some((d) => d.x === s.x && d.y === s.y))).toBe(true);
     expect(states.some((s) => s.hasKey.every(Boolean) && s.doorOpen.every(Boolean))).toBe(true);
-    // a respawn fixture: fresh cells, gates relocked, nothing carried
     const respawn = states.find((s) => s.respawnIdx > 0);
     expect(respawn).toBeDefined();
     expect(respawn?.flags).toBe(0);
@@ -223,9 +193,8 @@ describe('multi-key-corridor / the layout is read, never re-derived', () => {
       const truth = MKC_DOORS[j] as GridCell;
       expect(d.x).toBe(truth.x);
       expect(d.y).toBe(truth.y);
-      expect(isWall(grid, d.x, d.y)).toBe(false); // a gate is a hole in a wall
-      expect(chamberOf(d.x, d.y)).toBe(-1); // ...and belongs to no chamber
-      // the wall runs along z here, so the passage — and the portal — face x
+      expect(isWall(grid, d.x, d.y)).toBe(false);
+      expect(chamberOf(d.x, d.y)).toBe(-1);
       expect(gateFacesX(grid, d)).toBe(true);
     }
   });
@@ -241,7 +210,6 @@ describe('multi-key-corridor / the layout is read, never re-derived', () => {
         painted++;
       }
     }
-    // 4 chambers × 15 cells + 3 thresholds = every free cell of the temple
     expect(painted + MKC_DOORS.length).toBe(FREE_CELLS);
     expect(chamberOf(-1, 3)).toBe(-1);
     expect(chamberOf(0, 0)).toBe(-1);
@@ -251,13 +219,12 @@ describe('multi-key-corridor / the layout is read, never re-derived', () => {
     const grid = resolveGrid(geometryOf());
     for (let c = 0; c < CHAMBERS; c++) {
       const b = chamberBounds(grid, c);
-      expect(b.cells).toBe(MKC_ROOM_CELLS); // 3 wide × 5 deep
+      expect(b.cells).toBe(MKC_ROOM_CELLS);
       expect(b.halfX).toBeCloseTo(1.5 * CELL, 10);
       expect(b.halfZ).toBeCloseTo(2.5 * CELL, 10);
       expect(Math.abs(b.cx) + b.halfX).toBeLessThanOrEqual(TEMPLE_HALF_X + 1e-9);
       expect(Math.abs(b.cz) + b.halfZ).toBeLessThanOrEqual(TEMPLE_HALF_Z + 1e-9);
     }
-    // and they really are laid out west to east, in processional order
     for (let c = 1; c < CHAMBERS; c++) {
       expect(chamberBounds(grid, c).cx).toBeGreaterThan(chamberBounds(grid, c - 1).cx);
     }
@@ -267,19 +234,16 @@ describe('multi-key-corridor / the layout is read, never re-derived', () => {
     const skin = templeSkin(TOKENS.palettes.morning, TOKENS);
     expect(skin.chambers.length).toBe(CHAMBERS);
     const hexes = new Set(skin.chambers.map((c) => c.floor.getHex()));
-    expect(hexes.size).toBe(CHAMBERS); // no two chambers share a floor
-    // "warm" measured as red-minus-blue: it must rise every step toward the sanctum
+    expect(hexes.size).toBe(CHAMBERS);
     let previous = -Infinity;
     for (const c of skin.chambers) {
       const warmth = c.floor.r - c.floor.b;
       expect(warmth).toBeGreaterThan(previous);
       previous = warmth;
     }
-    // the noon albedo law (the morning key is 2.6): no floor may sit near white
     for (const c of skin.chambers) {
       expect(Math.max(c.floor.r, c.floor.g, c.floor.b)).toBeLessThan(0.8);
     }
-    // the three keys are three different colors, and the pearl is the brightest
     expect(new Set(skin.keys.map((k) => k.getHex())).size).toBe(3);
     const pearl = skin.keys[1] as THREE.Color;
     expect(pearl.r + pearl.g + pearl.b).toBeGreaterThan(2.4);
@@ -304,7 +268,6 @@ describe('multi-key-corridor / alignment', () => {
   test('every probe lands on ground truth at hero tier', async () => {
     const module = createScene();
     const report = await assertAligned(module, fixtures, { geometry: geometryOf(), seed: SEED, tier: 'hero' });
-    // these roots carry POSITION ONLY — they should be exact, not merely within 1e-3
     for (const name of ['wisp', 'wisp-anchor', 'shrine', 'key-altar-0', 'key-altar-1', 'key-altar-2']) {
       expect(report.worst.get(name) ?? 1).toBeLessThan(1e-9);
     }
@@ -337,7 +300,6 @@ describe('multi-key-corridor / alignment', () => {
         expect(w.x).toBeCloseTo(truth[0], 10);
         expect(w.y).toBeCloseTo(0, 10);
         expect(w.z).toBeCloseTo(truth[2], 10);
-        // the orb centre rides exactly wispHeight above it
         expect(worldOf(module, 'wisp').y).toBeCloseTo(TOKENS.wispHeight, 10);
         visited++;
       }
@@ -364,10 +326,6 @@ describe('multi-key-corridor / alignment', () => {
   });
 
   test('the altars follow the REPLAYED key cells through real dynamics, over respawns', async () => {
-    // The centre-piece: drive the decoder's OWN step function (the port of
-    // `gw_mkc_step`) for 600 actions and assert the scene tracks the hidden state it
-    // produces. Nothing here is guessed — if the scene ever fell back to the opening
-    // key layout, the first respawn would break it.
     const { module } = await live();
     const grid = resolveGrid(geometryOf());
     const truth: [number, number, number] = [0, 0, 0];
@@ -380,7 +338,6 @@ describe('multi-key-corridor / alignment', () => {
       flags: 0,
       respawnIdx: 0,
     };
-    // a deterministic action stream biased east, so the run really does complete
     let rng = 0x9e3779b9;
     const nextAction = (): number => {
       rng = (rng * 1664525 + 1013904223) >>> 0;
@@ -406,7 +363,6 @@ describe('multi-key-corridor / alignment', () => {
       expect(agent.x).toBeCloseTo(truth[0], 10);
       expect(agent.z).toBeCloseTo(truth[2], 10);
     }
-    // the stream really did respawn, so the altars really did have to move
     expect(replay.respawnIdx).toBeGreaterThanOrEqual(1);
     expect(seenKeyLayouts.size).toBeGreaterThanOrEqual(2);
     module.dispose();
@@ -416,38 +372,30 @@ describe('multi-key-corridor / alignment', () => {
     const { module } = await live();
     const grid = resolveGrid(geometryOf());
     const truth: [number, number, number] = [0, 0, 0];
-    // key 1 is held; its altar must still stand on the key's own cell
     module.update(toFrameUpdate(frameOf('carrying', stateOf(6, 3, 15, 1, MKC_KEYS, 0b010))));
     const w = worldOf(module, 'key-altar-1');
     const cell = MKC_KEYS[1] as GridCell;
     cellToWorld(cell.x, cell.y, grid, truth);
     expect(w.x).toBeCloseTo(truth[0], 10);
     expect(w.z).toBeCloseTo(truth[2], 10);
-    // the gem is off the altar...
     expect(module.scene.getObjectByName('keyToken1')?.visible).toBe(false);
     expect(module.scene.getObjectByName('keyToken0')?.visible).toBe(true);
-    // ...and on the wisp: the carried motes are one InstancedMesh, and "not carried" is
-    // a zero-scale instance (three draws for three keys is a third of the thumb budget)
     const rack = module.scene.getObjectByName('carriedKeys') as THREE.InstancedMesh;
     expect(rack).toBeDefined();
-    // read the basis magnitude straight off the instance matrix: three 0.185's
-    // `decompose` reports (1,1,1) for a degenerate matrix, so it cannot see a zero
-    // scale at all
     const m = new THREE.Matrix4();
     const basis = (i: number): number => {
       rack.getMatrixAt(i, m);
       const e = m.elements;
       return Math.hypot(e[0] ?? 0, e[1] ?? 0, e[2] ?? 0);
     };
-    expect(basis(1)).toBeCloseTo(1, 6); // the pearl rides the wisp
-    expect(basis(0)).toBe(0); // the seed is still on its altar
+    expect(basis(1)).toBeCloseTo(1, 6);
+    expect(basis(0)).toBe(0);
     expect(basis(2)).toBe(0);
     module.dispose();
   });
 });
 
 describe('multi-key-corridor / the gates are a pure read of the frame', () => {
-  /** the middle stepping stone's world height — the ford's openness, measured */
   function stoneY(module: SceneModule): number {
     const stones = module.scene.getObjectByName('riverSteppingStones') as THREE.InstancedMesh;
     expect(stones).toBeDefined();
@@ -464,10 +412,8 @@ describe('multi-key-corridor / the gates are a pure read of the frame', () => {
     module.update(
       toFrameUpdate(frameOf('open', stateOf(9, 3, 15, 1, MKC_KEYS, 0b111000)), { scrubbed: true }),
     );
-    // the middle stepping stone has surfaced — instantly, because the frame was a jump
     const risen = stoneY(module);
     expect(risen).toBeGreaterThan(sunk);
-    // and back again, exactly, on the next jump: no easing may cross a scrub
     module.update(toFrameUpdate(frameOf('shut', stateOf(1, 1, 15, 1, MKC_KEYS, 0)), { scrubbed: true }));
     expect(stoneY(module)).toBe(sunk);
     module.dispose();
@@ -476,7 +422,6 @@ describe('multi-key-corridor / the gates are a pure read of the frame', () => {
   test('a respawn relocks all three gates in the same frame as the teleport', async () => {
     const { module, ctx } = await live();
     ctx.setTime(2);
-    // the fully-shut height, from a settled scrub
     module.update(toFrameUpdate(frameOf('shut', stateOf(1, 1, 15, 1, MKC_KEYS, 0)), { scrubbed: true }));
     const sunk = stoneY(module);
     module.update(toFrameUpdate(frameOf('open', stateOf(14, 1, 15, 1, MKC_KEYS, 0b111111)), { scrubbed: true }));
@@ -498,28 +443,17 @@ describe('multi-key-corridor / the gates are a pure read of the frame', () => {
         ],
       }),
     );
-    // a relock is a HARD snap in the teleport's own frame — not an ease toward shut
     expect(stoneY(module)).toBe(sunk);
     module.dispose();
   });
 });
 
 describe('multi-key-corridor / the gates run on the PLAYBACK clock', () => {
-  /**
-   * The three mechanisms, measured where they actually move. Every one of these hangs
-   * below the gate's probe root, which is exactly why the probe-based idempotence check
-   * cannot see them and why they are asserted by hand here.
-   */
   interface Mechanism {
-    /** the middle stepping stone's local height — the ford opening */
     ford(): number;
-    /** the near mist curtain's parting offset along the doorway */
     mist(): number;
-    /** the first bramble cane's span (1 = laced across, ~0.14 = swung onto its pier) */
     bramble(): number;
-    /** the bramble's flare emissive — a flourish, so it must ride the playback clock too */
     brambleGlow(): number;
-    /** the ford's caustic web strength */
     caustics(): number;
   }
 
@@ -550,7 +484,6 @@ describe('multi-key-corridor / the gates run on the PLAYBACK clock', () => {
     };
   }
 
-  /** the frame that opens gate j, with the decoder's own event batch */
   function opening(j: number, step: number, flags = (1 << j) | (8 << j)) {
     return toFrameUpdate(
       frameOf('opening', stateOf(4 + 4 * j, 3, MKC_GOAL.x, MKC_GOAL.y, MKC_KEYS, flags), step),
@@ -566,8 +499,6 @@ describe('multi-key-corridor / the gates run on the PLAYBACK clock', () => {
     module.update(toFrameUpdate(frameOf('shut', stateOf(1, 1, MKC_GOAL.x, MKC_GOAL.y, MKC_KEYS, 0)), { scrubbed: true }));
     const shut = { ford: gate.ford(), mist: gate.mist(), bramble: gate.bramble() };
 
-    // all three doors give way at t = 5, then the transport PAUSES: ctx.time() stops and
-    // only wall time advances, which is what a paused viewer's frames look like
     const openFlags = 0b111111;
     for (let j = 0; j < 3; j++) module.update(opening(j, 100 + j, openFlags));
     module.update(
@@ -576,7 +507,6 @@ describe('multi-key-corridor / the gates run on the PLAYBACK clock', () => {
       }),
     );
     const atPause = { ford: gate.ford(), mist: gate.mist(), bramble: gate.bramble(), glow: gate.brambleGlow() };
-    // ...and they are still SHUT, because the door events landed this very instant
     expect(atPause.ford).toBe(shut.ford);
     expect(atPause.mist).toBe(shut.mist);
     expect(atPause.bramble).toBe(shut.bramble);
@@ -589,14 +519,11 @@ describe('multi-key-corridor / the gates run on the PLAYBACK clock', () => {
         }),
       );
     }
-    // 0.67 s of WALL time later — more than a full gate swing — nothing has moved
     expect(gate.ford()).toBe(atPause.ford);
     expect(gate.mist()).toBe(atPause.mist);
     expect(gate.bramble()).toBe(atPause.bramble);
     expect(gate.brambleGlow()).toBe(atPause.glow);
 
-    // let the PLAYBACK clock run, without a single extra frame of wall time, and the
-    // whole mechanism swings
     ctx.setTime(5 + GATE_SECONDS);
     module.update(
       toFrameUpdate(frameOf('open', stateOf(9, 3, MKC_GOAL.x, MKC_GOAL.y, MKC_KEYS, openFlags), 103), {
@@ -611,9 +538,6 @@ describe('multi-key-corridor / the gates run on the PLAYBACK clock', () => {
   });
 
   test('openness follows the playback age, and ignores how fast frames arrive', async () => {
-    // the same stream at 0.25× and at 4×: identical playback ages, wildly different
-    // dtReal budgets. Every other beat in the temple scales with playback speed; before
-    // this the gates were the one mechanism that did not.
     async function swing(dtReal: number, frames: number): Promise<number[]> {
       const { module, ctx } = await live();
       const gate = mechanism(module);
@@ -622,7 +546,6 @@ describe('multi-key-corridor / the gates run on the PLAYBACK clock', () => {
       module.update(opening(1, 10));
       const out: number[] = [];
       for (let i = 1; i <= frames; i++) {
-        // the playback clock walks the SAME ages in both runs
         ctx.setTime(2 + (i / frames) * GATE_SECONDS);
         module.update(
           toFrameUpdate(frameOf('swing', stateOf(8, 3, MKC_GOAL.x, MKC_GOAL.y, MKC_KEYS, 0b010010), 11), {
@@ -635,25 +558,20 @@ describe('multi-key-corridor / the gates run on the PLAYBACK clock', () => {
       module.dispose();
       return out;
     }
-    const slow = await swing(1 / 240, 12); // 0.25× — four times the frames per second
-    const fast = await swing(4 / 60, 12); // 4× — a frame every 67 ms of wall time
+    const slow = await swing(1 / 240, 12);
+    const fast = await swing(4 / 60, 12);
     expect(fast).toEqual(slow);
-    // and it really did swing over the window, monotonically, landing fully open
     expect(slow[0] ?? 1).toBeLessThan(slow[slow.length - 1] ?? 0);
     for (let i = 1; i < slow.length; i++) expect(slow[i] ?? 0).toBeGreaterThanOrEqual(slow[i - 1] ?? 0);
   });
 
   test('gatePhase is pure, bounded, and settles on the frame\'s own bit', () => {
-    // a never-fired or long-expired clock returns the BIT, which is what makes a scrub,
-    // a teleport and a relock hard cuts without any snap flag
     expect(gatePhase(true, -Infinity)).toBe(1);
     expect(gatePhase(false, -Infinity)).toBe(0);
     expect(gatePhase(true, Number.NaN)).toBe(1);
     expect(gatePhase(false, Number.NaN)).toBe(0);
     expect(gatePhase(true, 99)).toBe(1);
     expect(gatePhase(false, 99)).toBe(0);
-    // at the event instant the gate is still where it was, and it crosses the middle
-    // halfway through the window in both directions
     expect(gatePhase(true, 0)).toBe(0);
     expect(gatePhase(false, 0)).toBe(1);
     expect(gatePhase(true, GATE_SECONDS / 2)).toBeCloseTo(0.5, 12);
@@ -673,14 +591,12 @@ describe('multi-key-corridor / the gates run on the PLAYBACK clock', () => {
     ctx.setTime(7);
     module.update(toFrameUpdate(frameOf('shut', stateOf(1, 1, MKC_GOAL.x, MKC_GOAL.y, MKC_KEYS, 0)), { scrubbed: true }));
     for (let j = 0; j < 3; j++) module.update(opening(j, 200 + j));
-    // half a swing in: the state the probe-based idempotence check cannot see
     ctx.setTime(7 + GATE_SECONDS * 0.5);
     const frame = frameOf('mid', stateOf(9, 3, MKC_GOAL.x, MKC_GOAL.y, MKC_KEYS, 0b111111), 210);
     module.update(toFrameUpdate(frame, { scrubbed: false }));
     const a = [gate.ford(), gate.mist(), gate.bramble(), gate.brambleGlow(), gate.caustics()];
     for (let i = 0; i < 5; i++) module.update(toFrameUpdate(frame, { scrubbed: false }));
     expect([gate.ford(), gate.mist(), gate.bramble(), gate.brambleGlow(), gate.caustics()]).toEqual(a);
-    // it really is mid-swing, not settled at either end
     expect(a[0]).toBeGreaterThan(-0.03);
     expect(a[0]).toBeLessThan(0.1);
     module.dispose();
@@ -689,17 +605,16 @@ describe('multi-key-corridor / the gates run on the PLAYBACK clock', () => {
   test('every flourish the gates carry settles back to its built-in idle', async () => {
     const { module, ctx } = await live();
     const gate = mechanism(module);
-    const IDLE_CAUSTICS = 0.26; // what makeWater was constructed with
+    const IDLE_CAUSTICS = 0.26;
     expect(gate.caustics()).toBeCloseTo(IDLE_CAUSTICS, 12);
     expect(gate.brambleGlow()).toBe(0);
 
     ctx.setTime(3);
     module.update(opening(1, 300, 0b011011));
-    expect(gate.caustics()).toBeGreaterThan(IDLE_CAUSTICS + 1); // the ford flashes
+    expect(gate.caustics()).toBeGreaterThan(IDLE_CAUSTICS + 1);
     module.update(opening(0, 301, 0b011011));
     expect(gate.brambleGlow()).toBeGreaterThan(0);
 
-    // ...and burns out completely on the playback clock, back to the CONSTRUCTED value
     ctx.setTime(3 + 2);
     module.update(
       toFrameUpdate(frameOf('after', stateOf(9, 3, MKC_GOAL.x, MKC_GOAL.y, MKC_KEYS, 0b011011), 320), {
@@ -709,7 +624,6 @@ describe('multi-key-corridor / the gates run on the PLAYBACK clock', () => {
     expect(gate.caustics()).toBeCloseTo(IDLE_CAUSTICS, 12);
     expect(gate.brambleGlow()).toBe(0);
 
-    // a scrub back into the middle of a flare leaves nothing latched either
     ctx.setTime(3.05);
     module.update(opening(1, 300, 0b011011));
     expect(gate.caustics()).toBeGreaterThan(IDLE_CAUSTICS);
@@ -721,10 +635,6 @@ describe('multi-key-corridor / the gates run on the PLAYBACK clock', () => {
   });
 
   test('the ford is water-coloured — the kit palette default is not honest here', async () => {
-    // The kit lerps a constructor `shallow` 35% toward palette.groundB and a `deep` 55%
-    // toward palette.skyBottom, which under morning turns a river into pale mint stone —
-    // the same wedge as the mist gate two chambers along. `setColors` is the verbatim
-    // override, and THIS is the assertion that keeps the ford blue.
     const { module } = await live();
     const water = module.scene.getObjectByName('riverWater') as THREE.Mesh;
     const uniforms = (water.material as THREE.ShaderMaterial).uniforms;
@@ -732,13 +642,11 @@ describe('multi-key-corridor / the gates run on the PLAYBACK clock', () => {
     const deep = uniforms.uDeep?.value as THREE.Color;
     const underwater = TOKENS.palettes.underwater;
 
-    // verbatim: exactly the cross-palette blend the scene asked for
     const wantShallow = blendTokens(underwater.skyTop, underwater.groundB, 0.32);
     const wantDeep = new THREE.Color(underwater.skyBottom);
     expect(shallow.getHex()).toBe(wantShallow.getHex());
     expect(deep.getHex()).toBe(wantDeep.getHex());
 
-    // blue-dominant at both ends, which the morning-palette default is not
     for (const c of [shallow, deep]) {
       expect(c.b).toBeGreaterThan(c.r * 3);
       expect(c.b).toBeGreaterThan(c.g);
@@ -746,9 +654,8 @@ describe('multi-key-corridor / the gates run on the PLAYBACK clock', () => {
     const morning = TOKENS.palettes.morning;
     const kitDefault = new THREE.Color(morning.skyHorizon).lerp(new THREE.Color(morning.groundB), 0.35);
     expect(shallow.getHex()).not.toBe(kitDefault.getHex());
-    expect(kitDefault.b).toBeLessThan(kitDefault.r * 3); // ...because the default is pale mint
+    expect(kitDefault.b).toBeLessThan(kitDefault.r * 3);
 
-    // and it is a different colour from the mist gate: three gates, three skins
     const curtain = module.scene.getObjectByName('mistCurtain0_0') as THREE.Mesh;
     const mistColor = (curtain.material as THREE.MeshStandardMaterial).color;
     const distance = Math.hypot(mistColor.r - shallow.r, mistColor.g - shallow.g, mistColor.b - shallow.b);
@@ -759,8 +666,6 @@ describe('multi-key-corridor / the gates run on the PLAYBACK clock', () => {
 
 describe('multi-key-corridor / the temple is built from the geometry it is handed', () => {
   test('the opening key cells and relic cell come from ctx.geometry, never a literal', async () => {
-    // A geometry whose layout deliberately disagrees with the env's own opening cells:
-    // if any MKC constant were written into the scene, these props would land on it.
     const keys: GridCell[] = [
       { x: 2, y: 2 },
       { x: 6, y: 4 },
@@ -779,7 +684,6 @@ describe('multi-key-corridor / the temple is built from the geometry it is hande
         hallways: MKC_DOORS.map((c) => ({ ...c })),
       },
     };
-    // the fixture layout really is different, or this test proves nothing
     expect(keys).not.toEqual(MKC_KEYS.map((k) => ({ ...k })));
     expect(goal).not.toEqual({ ...MKC_GOAL });
 
@@ -787,7 +691,6 @@ describe('multi-key-corridor / the temple is built from the geometry it is hande
     await module.init(makeSceneContext({ geometry, seed: SEED, tier: 'hero' }));
     const grid = resolveGrid(geometry);
     const truth: [number, number, number] = [0, 0, 0];
-    // BEFORE any frame arrives — this is the layout the temple opens on
     for (let j = 0; j < 3; j++) {
       const w = worldOf(module, `key-altar-${j}`);
       const k = keys[j] as GridCell;
@@ -806,13 +709,11 @@ describe('multi-key-corridor / the temple is built from the geometry it is hande
     const real = resolveGrid(geometryOf());
     expect(real.keys).toBeDefined();
     expect(real.goal).toBeDefined();
-    expect(resolveKeys(real) === real.keys).toBe(true); // the decoder's array, untouched
+    expect(resolveKeys(real) === real.keys).toBe(true);
     expect(resolveGoal(real) === real.goal).toBe(true);
-    // a placeholder geometry degrades to the env's own opening layout
     const placeholder = resolveGrid({ kind: 'grid' });
     expect(resolveKeys(placeholder).map((k) => ({ x: k.x, y: k.y }))).toEqual(MKC_KEYS.map((k) => ({ ...k })));
     expect({ ...resolveGoal(placeholder) }).toEqual({ ...MKC_GOAL });
-    // and a grid that carries no key list at all still answers with the decoder's
     expect(resolveKeys({ w: MKC_W, h: MKC_H, walls: mkcWalls() }).length).toBe(3);
     expect({ ...resolveGoal({ w: MKC_W, h: MKC_H, walls: mkcWalls() }) }).toEqual({ ...MKC_GOAL });
   });
@@ -910,7 +811,6 @@ describe('multi-key-corridor / update contract', () => {
     expect(pool).not.toBeNull();
     if (!pool) return;
 
-    // standing exactly ON the goal cell, holding everything, with no event: silence
     ctx.setTime(1);
     module.update(
       toFrameUpdate(frameOf('onGoal', stateOf(15, 1, 15, 1, MKC_KEYS, 0b111111), 100), { scrubbed: false }),
@@ -919,7 +819,6 @@ describe('multi-key-corridor / update contract', () => {
     expect(pool.stats.ripples).toBe(0);
     expect(pool.pulse.bloom).toBe(0);
 
-    // the decoder's real batch for a completion
     ctx.setTime(2);
     module.update(
       toFrameUpdate(frameOf('scored', stateOf(2, 4, 13, 5, MKC_KEYS, 0, 1), 101), {
@@ -931,14 +830,11 @@ describe('multi-key-corridor / update contract', () => {
     expect(pool.stats.bursts).toBe(1);
     expect(pool.stats.ripples).toBe(1);
     expect(pool.pulse.bloom).toBeGreaterThan(0);
-    // ...and no sigh: this env's `done` is a +1, never a failure
     expect(pool.pulse.sigh).toBe(0);
     module.dispose();
   });
 
   test('the +1 blooms on the relic that was reached, NOT on the respawn cell', async () => {
-    // The MKC variant of canon lesson 18: the agent is thrown back to chamber 0 in the
-    // same step, so the celebration lives at the PREVIOUS frame's goal cell.
     const { module, ctx } = await live();
     const grid = resolveGrid(geometryOf());
     ctx.setTime(3);
@@ -955,16 +851,14 @@ describe('multi-key-corridor / update contract', () => {
     const light = module.scene.getObjectByName('oakPoint2') as THREE.PointLight;
     expect(light).toBeDefined();
     const truth: [number, number, number] = [0, 0, 0];
-    cellToWorld(15, 1, grid, truth); // the OLD goal cell
+    cellToWorld(15, 1, grid, truth);
     expect(light.position.x).toBeCloseTo(truth[0], 10);
     expect(light.position.z).toBeCloseTo(truth[2], 10);
     expect(light.intensity).toBeGreaterThan(0);
-    // the wisp is already four chambers away, and it did NOT bloom there
     const agent = worldOf(module, 'wisp-anchor');
     cellToWorld(2, 4, grid, truth);
     expect(agent.x).toBeCloseTo(truth[0], 10);
     expect(Math.abs(light.position.x - agent.x)).toBeGreaterThan(10);
-    // and the new relic is already on its new cell, growing in from nothing
     const shrine = worldOf(module, 'shrine');
     cellToWorld(13, 5, grid, truth);
     expect(shrine.x).toBeCloseTo(truth[0], 10);
@@ -980,7 +874,6 @@ describe('multi-key-corridor / update contract', () => {
     const grid = resolveGrid(geometryOf());
     const truth: [number, number, number] = [0, 0, 0];
 
-    // a key pickup blooms on the key's own cell (auto-pickup is co-location)
     ctx.setTime(1);
     module.update(
       toFrameUpdate(frameOf('gotKey', stateOf(3, 5, 15, 1, MKC_KEYS, 0b001), 10), {
@@ -996,7 +889,6 @@ describe('multi-key-corridor / update contract', () => {
     expect(light.position.x).toBeCloseTo(truth[0], 10);
     expect(light.position.z).toBeCloseTo(truth[2], 10);
 
-    // a gate opening blooms on the gate cell
     ctx.setTime(1.5);
     module.update(
       toFrameUpdate(frameOf('opened', stateOf(4, 3, 15, 1, MKC_KEYS, 0b1001), 11), {
@@ -1011,7 +903,6 @@ describe('multi-key-corridor / update contract', () => {
     cellToWorld(door0.x, door0.y, grid, truth);
     expect(light.position.x).toBeCloseTo(truth[0], 10);
 
-    // a RELOCK is silent — the respawn's hard snap says it instead
     ctx.setTime(2);
     module.update(
       toFrameUpdate(frameOf('relocked', stateOf(2, 2, 13, 5, MKC_KEYS, 0, 1), 12), {
@@ -1039,7 +930,6 @@ describe('multi-key-corridor / update contract', () => {
     module.update(toFrameUpdate(fixtureNamed('temple-start'), { scrubbed: true }));
     expect(pool.pulse.bloom).toBe(0);
     expect(pool.activeRipples).toBe(0);
-    // growth does not survive the discontinuity either
     expect(module.scene.getObjectByName('shrineDecor')?.scale.x ?? 0).toBeCloseTo(1, 6);
     expect(module.scene.getObjectByName('keyAltarDecor0')?.scale.x ?? 0).toBeCloseTo(1, 6);
     module.dispose();
@@ -1074,7 +964,7 @@ describe('multi-key-corridor / lifecycle', () => {
     });
     expect(report.census.length).toBe(3);
     expect((report.census[0]?.geometries.size ?? 0) > 0).toBe(true);
-    expect((report.census[0]?.textures.size ?? 0) > 0).toBe(true); // the mist alpha maps
+    expect((report.census[0]?.textures.size ?? 0) > 0).toBe(true);
   });
 
   test('every tier round-trips clean too', async () => {
@@ -1117,10 +1007,9 @@ describe('multi-key-corridor / lifecycle', () => {
     expect(Math.hypot(cam.position.x, cam.position.z)).toBeGreaterThan(TEMPLE_HALF_Z);
     const dir = new THREE.Vector3();
     cam.getWorldDirection(dir);
-    expect(dir.y).toBeLessThan(-0.5); // a genuine aerial, never a horizon shot
+    expect(dir.y).toBeLessThan(-0.5);
     expect(cam.fov).toBeGreaterThanOrEqual(35);
     expect(cam.fov).toBeLessThanOrEqual(45);
-    // and it frames the 17-unit hall: both far corners inside the frustum
     cam.updateMatrixWorld();
     const frustum = new THREE.Frustum().setFromProjectionMatrix(
       new THREE.Matrix4().multiplyMatrices(cam.projectionMatrix, cam.matrixWorldInverse),
@@ -1161,10 +1050,6 @@ describe('multi-key-corridor / lifecycle', () => {
 
 describe('multi-key-corridor / the thumb wall-view cap', () => {
   test('the thumb frame fits STYLE.md\u2019s 40 draws / 50k triangles, overlay included', async () => {
-    // The wall view is the whole gallery on one page: every scene there is a thumb, and
-    // the cap is what keeps 16 of them at 60 fps. Measured with the ground-truth overlay
-    // ON, because that is the state review screenshots are taken in, and across every
-    // fixture, because the busiest legal state is the one that has to fit.
     const { module } = await live('thumb');
     module.setDebug(true);
     for (const f of fixtures) module.update(toFrameUpdate(f));

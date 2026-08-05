@@ -1,9 +1,3 @@
-// The request handler. Kept separate from server.ts so tests can mount an app on an
-// ephemeral port without the module-load side effect of the real entry point.
-//
-// SECURITY INVARIANT: no request-supplied string is ever joined into a filesystem path.
-// `:id` is a key into the discovered run map, `:envId`/`:seed` are keys into that run's
-// discovered recording list, and the static handler resolves + re-checks against distDir.
 
 import { normalize, resolve, sep } from 'node:path';
 import type { RolesResponse } from '@shared/types';
@@ -27,13 +21,10 @@ import { deriveWall, parseWallRequest, wallCacheFor } from './wall';
 
 export interface AppOptions {
   benchRoot?: string;
-  /** null disables the persisted run-index cache (tests) */
   cacheFile?: string | null;
-  /** null disables the fleet disk cache (tests) */
   fleetCacheDir?: string | null;
   distDir?: string;
   production?: boolean;
-  /** run-index rescan throttle; 0 forces a rescan per request (tests) */
   ttlMs?: number;
 }
 
@@ -57,7 +48,6 @@ function fail(status: number, error: string): Response {
   return json({ error }, { status });
 }
 
-/** Split + percent-decode a pathname. Rejects anything that could re-introduce a separator. */
 function decodeSegments(pathname: string): string[] | null {
   const parts = pathname.split('/').filter((s) => s.length > 0);
   const out: string[] = [];
@@ -74,11 +64,9 @@ function decodeSegments(pathname: string): string[] | null {
   return out;
 }
 
-// ---------- byte-range file serving ----------
 
 type RangeSpec = { start: number; end: number } | 'unsatisfiable' | null;
 
-/** Single-range only (RFC 7233 §3.1). Multi-range answers null = serve the whole entity. */
 export function parseRangeHeader(header: string | null, size: number): RangeSpec {
   if (header === null) return null;
   const m = /^bytes=(.*)$/.exec(header.trim());
@@ -91,7 +79,6 @@ export function parseRangeHeader(header: string | null, size: number): RangeSpec
   const rawEnd = spec.slice(dash + 1).trim();
 
   if (rawStart.length === 0) {
-    // suffix range: last N bytes
     if (!/^\d+$/.test(rawEnd)) return null;
     const n = Number(rawEnd);
     if (n === 0) return 'unsatisfiable';
@@ -124,9 +111,6 @@ async function serveStatic(
     'cache-control': 'private, max-age=0, must-revalidate',
   };
 
-  // RFC 7232 §3.2: `If-None-Match: *` matches whenever a current representation exists —
-  // which, given the stat above, it does. The wildcard is checked BEFORE the token
-  // comparison because "*" is not an entity-tag and would never compare equal to one.
   const inm = req.headers.get('if-none-match');
   if (inm !== null) {
     const tokens = inm.split(',').map((t) => t.trim());
@@ -159,17 +143,11 @@ async function serveStatic(
   return new Response(Bun.file(path), { status: 200, headers });
 }
 
-// ---------- app ----------
 
 export function createApp(opts: AppOptions = {}): App {
   const benchRoot = opts.benchRoot ?? benchRootFromEnv();
-  // Both derived caches are keyed by bench root: pointing OAK_BENCH_DIR at a second store
-  // must not read — or overwrite — the first store's entries.
   const cacheFile = opts.cacheFile === undefined ? runIndexCacheFile(benchRoot) : opts.cacheFile;
   const fleetCache = opts.fleetCacheDir === undefined ? fleetCacheDir(benchRoot) : opts.fleetCacheDir;
-  // The wall's derived cache follows the same setting: production takes the real
-  // per-bench-root directory, `null` disables persistence, and a test-supplied
-  // directory gets a `wall/` subdirectory of it rather than the repo's .cache.
   const wallCache = wallCacheFor(benchRoot, opts.fleetCacheDir);
   const distDir = resolve(opts.distDir ?? DIST_DIR);
   const production = opts.production ?? process.env['NODE_ENV'] === 'production';
@@ -177,7 +155,6 @@ export function createApp(opts: AppOptions = {}): App {
   const index = new RunIndex({ benchRoot, cacheFile, ttlMs: opts.ttlMs });
 
   async function handleApi(req: Request, url: URL, segs: string[]): Promise<Response> {
-    // segs[0] === 'api'
     const head = segs[1];
 
     if (head === 'health' && segs.length === 2) {
@@ -189,9 +166,6 @@ export function createApp(opts: AppOptions = {}): App {
       return json(roles);
     }
 
-    // Per-task normalization floors (written by `fleet.py floors` from a zero/random
-    // policy sweep; see FLOORS.json's floorsSchemaVersion). Served verbatim; absent
-    // until a floor run has been extracted.
     if (head === 'floors' && segs.length === 2) {
       const floorsPath = resolve(benchRoot, 'FLOORS.json');
       if ((await statOrNull(floorsPath)) === null) return fail(404, 'no floors extracted');
@@ -213,7 +187,6 @@ export function createApp(opts: AppOptions = {}): App {
     const run = await index.resolve(id);
     if (run === undefined) return fail(404, 'unknown run');
 
-    // /api/runs/:id
     if (segs.length === 3) {
       const recs = await index.recordingsFor(run.id);
       return json(await buildRunDetail(run, recs), {
@@ -223,7 +196,6 @@ export function createApp(opts: AppOptions = {}): App {
 
     const sub = segs[3];
 
-    // /api/runs/:id/fleet
     if (sub === 'fleet' && segs.length === 4) {
       const parsed = parseFleetQuery(url);
       if ('error' in parsed) return fail(400, parsed.error);
@@ -237,7 +209,6 @@ export function createApp(opts: AppOptions = {}): App {
       return json(data, { cache: run.entry.inFlight ? 'no-store' : 'private, max-age=30' });
     }
 
-    // /api/runs/:id/curves
     if (sub === 'curves' && segs.length === 4) {
       const parsed = parseCurvesQuery(url);
       if ('error' in parsed) return fail(400, parsed.error);
@@ -251,7 +222,6 @@ export function createApp(opts: AppOptions = {}): App {
       return json(data, { cache: run.entry.inFlight ? 'no-store' : 'private, max-age=30' });
     }
 
-    // /api/runs/:id/wall/:envId — every recorded seed of one env, projected + deflated
     if (sub === 'wall' && segs.length === 5) {
       const parsed = parseWallRequest(segs[4], url);
       if ('error' in parsed) return fail(parsed.status, parsed.error);
@@ -270,8 +240,6 @@ export function createApp(opts: AppOptions = {}): App {
         headers: {
           'content-type': 'application/octet-stream',
           'content-length': String(body.byteLength),
-          // Advertised so a client can size the split without reading the body — the
-          // body carries the same two numbers, this is the cheap HEAD answer.
           'x-wall-header-bytes': String(header.headerBytes),
           'x-wall-binary-bytes': String(header.binaryBytes),
           'cache-control': run.entry.inFlight ? 'no-store' : 'private, max-age=30',
@@ -279,12 +247,10 @@ export function createApp(opts: AppOptions = {}): App {
       });
     }
 
-    // /api/runs/:id/live
     if (sub === 'live' && segs.length === 4) {
       return createLiveResponse(req, { id: run.id, dir: run.dir, steps: run.entry.steps });
     }
 
-    // /api/runs/:id/recordings/:envId/:seed  — descriptor for one lane
     if (sub === 'recordings' && segs.length === 6) {
       const envId = segs[4];
       const seedText = segs[5];
@@ -293,9 +259,6 @@ export function createApp(opts: AppOptions = {}): App {
       const recs = await index.recordingsFor(run.id);
       const rec = findRecording(recs, envId, Number(seedText));
       if (rec === undefined) return fail(404, 'unknown recording');
-      // The v4 fields are ADDITIVE and only present on v4 lanes, so a v3 lane's
-      // descriptor stays byte-comparable with what this endpoint has always sent.
-      // `chunks` is what makes the theater's prefix fetch chunk-aware.
       return json({
         envId: rec.envId,
         seed: rec.seed,
@@ -309,7 +272,6 @@ export function createApp(opts: AppOptions = {}): App {
       });
     }
 
-    // /api/runs/:id/recordings/:envId/:seed/(actions.bin|meta.json)
     if (sub === 'recordings' && segs.length === 7) {
       const envId = segs[4];
       const seedText = segs[5];
@@ -379,9 +341,6 @@ export function createApp(opts: AppOptions = {}): App {
     if (st !== null && !rel.endsWith('/')) {
       return serveStatic(req, target, contentTypeFor(target));
     }
-    // SPA fallback: NAVIGATION routes render the client shell. Missing build assets
-    // (/assets/*, or any path with a static-file extension) must 404 rather than
-    // serve index.html as 200 text/html — that masks broken deploys (E2E finding).
     if (rel.startsWith('/assets/') || /\.[a-z0-9]{1,8}$/i.test(rel)) {
       return fail(404, 'not found');
     }
@@ -390,10 +349,6 @@ export function createApp(opts: AppOptions = {}): App {
     return serveStatic(req, indexPath, 'text/html; charset=utf-8');
   }
 
-  /**
-   * Stamp the origin policy on the way out. Applying it in ONE place is what keeps a new
-   * endpoint (the SSE stream was exactly this bug) from silently shipping without it.
-   */
   function withCors(req: Request, res: Response): Response {
     const headers = corsHeaders(req, production);
     for (const [k, v] of Object.entries(headers)) res.headers.set(k, v);
@@ -413,8 +368,6 @@ export function createApp(opts: AppOptions = {}): App {
       try {
         return await handleApi(req, url, segs);
       } catch (err) {
-        // Log the real error server-side; never echo it to the client — messages
-        // can carry absolute filesystem paths (EACCES/EISDIR).
         const message = err instanceof Error ? err.message : String(err);
         console.error(`[oak-frontend] ${url.pathname}: ${message}`);
         return fail(500, 'internal error');

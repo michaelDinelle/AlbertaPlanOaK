@@ -1,13 +1,3 @@
-// uPlot wrappers, dark-observatory themed.
-//
-// Every chart here is resize-observing and destroy()able; construction is
-// deferred until the container actually has width, so a chart can be built
-// before its view is appended to the document.
-//
-// Colors come from the validated data palette in styles/main.css:
-//   series  #2b98d9   critical #e0614f   ordinal ramp #22587a -> #79c9f2
-// (checked with the dataviz validator against surface #121722: categorical
-// PASS on all five checks; ramp PASS on all four ordinal checks.)
 
 import uPlot from 'uplot';
 import { el } from './table';
@@ -36,61 +26,39 @@ export interface SeriesSpec {
   fill?: string;
   dash?: number[];
   stepped?: boolean;
-  /** draw as columns rather than a line (per-seed totals) */
   bars?: boolean;
-  /** band edges and spaghetti lanes stay out of the legend and tooltip */
   quiet?: boolean;
   scale?: string;
 }
 
 export interface ChartSpec {
   height?: number;
-  /** extra uPlot plugins prepended to the built-ins */
   plugins?: uPlot.Plugin[];
   series: readonly SeriesSpec[];
   data: uPlot.AlignedData;
-  /** 1-based series indices; hi must be the upper edge */
   bands?: readonly { hi: number; lo: number; fill: string }[];
   yFormat?: (value: number) => string;
   xFormat?: (value: number) => string;
-  /** axis ticks when they should read differently from the tooltip (rank vs seed) */
   xAxisFormat?: (value: number) => string;
-  /** shown under the y axis as a micro-caps unit label */
   yUnit?: string;
   xUnit?: string;
   zeroLine?: boolean;
   legend?: boolean;
   tooltip?: 'all' | 'focus' | 'none';
-  /** override the generated legend (a band reads as one region, not two edges) */
   legendItems?: readonly { label: string; color: string; shape?: 'line' | 'area' }[];
-  /** enable series focus-on-proximity (spaghetti) */
   focus?: boolean;
   onFocus?(seriesIndex: number | null): void;
-  /**
-   * Scrub-on-chart: the x axis is the run's own timeline (steps). Press and
-   * drag seeks continuously (phase 'drag'), release commits ('end'), and a
-   * press without movement is a 'tap'. Charts with a per-item click (spaghetti
-   * lanes) compose the tap themselves.
-   */
   onSeek?(x: number, phase: 'drag' | 'end' | 'tap'): void;
-  /** size the plot to fill the container's height (resizable cells) */
   fillHeight?: boolean;
   yRange?: (min: number, max: number) => [number, number];
-  /**
-   * Pin the x domain. Only for axes whose meaningful range is a FIXED property of the
-   * quantity (a ratio that lives in [0,1]), never to hide inconvenient data — a chart
-   * that clips must say so in its own caption.
-   */
   xRange?: (min: number, max: number) => [number, number];
 }
 
 export interface ChartHandle {
   root: HTMLElement;
   setData(data: uPlot.AlignedData): void;
-  /** re-measure after a layout change (tab switch, panel expand) */
   refresh(): void;
   focusSeries(index: number | null): void;
-  /** vertical playhead at an x value (null hides it) — the wall's clock cursor */
   setMarker(x: number | null): void;
   destroy(): void;
 }
@@ -135,7 +103,6 @@ function tooltipPlugin(spec: ChartSpec, tip: HTMLElement): uPlot.Plugin {
           tip.hidden = true;
           return;
         }
-        // read top-to-bottom in the same order the marks stack on the canvas
         rows.sort((a, b) => b.value - a.value);
         tip.replaceChildren(
           el('div', { class: 'tip-head', text: `${xFormat(Number(x))}${spec.xUnit ? ` ${spec.xUnit}` : ''}` }),
@@ -207,7 +174,6 @@ export function createChart(spec: ChartSpec): ChartHandle {
   let destroyed = false;
   let marker: number | null = null;
 
-  /** fill mode: the plot's height is whatever the cell leaves after the chrome */
   function targetHeight(): number {
     if (!spec.fillHeight) return height;
     let chrome = 0;
@@ -236,7 +202,7 @@ export function createChart(spec: ChartSpec): ChartHandle {
           down = true;
           moved = false;
           startX = ev.clientX;
-          try { over.setPointerCapture(ev.pointerId); } catch { /* inactive pointer */ }
+          try { over.setPointerCapture(ev.pointerId); } catch {  }
         });
         over.addEventListener('pointermove', (ev) => {
           if (!down) return;
@@ -264,8 +230,6 @@ export function createChart(spec: ChartSpec): ChartHandle {
         if (marker === null) return;
         const x = u.valToPos(marker, 'x', true);
         const { top, height: h, left, width: w } = u.bbox;
-        // never draw outside the plot box (a step-0 marker on a chart whose
-        // data starts later used to hang half-clipped over the y axis)
         if (!Number.isFinite(x) || x < left || x > left + w) return;
         u.ctx.save();
         u.ctx.strokeStyle = 'rgba(255, 209, 102, 0.9)';
@@ -303,8 +267,6 @@ export function createChart(spec: ChartSpec): ChartHandle {
         if (s.fill) entry.fill = s.fill;
         if (s.dash) entry.dash = s.dash;
         if (s.stepped) entry.paths = uPlot.paths.stepped?.({ align: 1 });
-        // size: [factor, maxWidth] — factor 1 so a 250-column profile reads as a
-        // continuous distribution, capped so a 6-column one does not read as a blob.
         if (s.bars) entry.paths = uPlot.paths.bars?.({ size: [1, 14], align: 0 });
         return entry;
       }),
@@ -425,7 +387,6 @@ export function createChart(spec: ChartSpec): ChartHandle {
   };
 }
 
-// ---------- named forms ----------
 
 export interface TimeSeriesSpec extends Omit<ChartSpec, 'series' | 'data'> {
   steps: readonly number[];
@@ -457,21 +418,16 @@ export interface BandSpec extends Omit<ChartSpec, 'series' | 'data' | 'bands'> {
   labels?: { low: string; mid: string; high: string };
   stroke?: string;
   fill?: string;
-  /** overlay series drawn on top of the band (e.g. the hero seed's own curve) */
   extra?: { label: string; values: readonly (number | null)[]; stroke: string; width?: number }[];
-  /** optional inner 95% CI band around the mid line */
   ci?: { lo: readonly (number | null)[]; hi: readonly (number | null)[] };
 }
 
-/** p10/p90 fill with the p50 line on top — the population headline chart. */
 export function band(spec: BandSpec): ChartHandle {
   const labels = spec.labels ?? { low: 'P10', mid: 'Median', high: 'P90' };
   const stroke = spec.stroke ?? VIZ.series;
   const fill = spec.fill ?? VIZ.seriesSoft;
   return createChart({
     ...spec,
-    // all three are readable in the tooltip; the legend names the band as one
-    // region, because two edge entries would imply two independent series
     series: [
       { label: labels.high, stroke: 'rgba(43,152,217,0.45)', width: 1 },
       { label: labels.low, stroke: 'rgba(43,152,217,0.45)', width: 1 },
@@ -515,7 +471,6 @@ export interface SteppedSpec extends Omit<ChartSpec, 'series' | 'data'> {
   stroke?: string;
 }
 
-/** Kaplan-Meier survival: a step function, never interpolated between deaths. */
 export function steppedLine(spec: SteppedSpec): ChartHandle {
   return createChart({
     ...spec,
@@ -535,23 +490,14 @@ export interface PopulationBand {
 
 export interface PopulationChartSpec extends Omit<ChartSpec, 'series' | 'data' | 'bands' | 'tooltip'> {
   steps: readonly number[];
-  /** the population statistics drawn OVER the lanes; omit when they don't share the x grid */
   band?: PopulationBand;
   lanes: readonly SpaghettiLane[];
-  /** the hero seed's lane, lifted in the env accent */
   highlightKey?: string | null;
   highlightStroke?: string;
   onLaneFocus?(key: string | null): void;
-  /** tap on a focused lane — watch that seed, at the tapped step */
   onLaneClick?(key: string, step: number): void;
 }
 
-/**
- * THE population chart: every seed's own curve ghosted under the population
- * statistics (P10–P90 spread, bootstrap 95% CI, IQM), with the hero seed lifted
- * in its env accent. One tile carries what used to be two — the RL-paper figure
- * and the per-seed spaghetti are the same picture at two alphas.
- */
 export function populationChart(spec: PopulationChartSpec): ChartHandle {
   const b = spec.band;
   const hasCi = b?.ciLo !== undefined && b?.ciHi !== undefined;
@@ -619,7 +565,6 @@ export function populationChart(spec: PopulationChartSpec): ChartHandle {
     ] as unknown as uPlot.AlignedData,
     legend: true,
     onFocus: (index) => {
-      // band series are not lanes; focus semantics belong to seeds only
       focused = index === null || index < laneOffset ? null : spec.lanes[index - laneOffset]?.key ?? null;
       spec.onLaneFocus?.(focused);
       spec.onFocus?.(index);
@@ -633,29 +578,16 @@ export function populationChart(spec: PopulationChartSpec): ChartHandle {
 }
 
 export interface ColumnsSpec extends Omit<ChartSpec, 'series' | 'data'> {
-  /** already in the order they should be drawn (rank order, usually) */
   values: readonly number[];
-  /** per-column name for the tooltip header, e.g. "seed 312" */
   labels?: readonly string[];
   posLabel?: string;
   negLabel?: string;
-  /** click a column (hovered index) — the wall uses this for click-to-watch */
   onColumnClick?(index: number): void;
-  /** the hero seed's column, restroked in the env accent */
   highlight?: { index: number; color: string };
 }
 
-/**
- * A sorted column profile — per-seed totals, one bar per seed.
- *
- * Split into two series by SIGN rather than tinted per bar: "which seeds paid and which
- * cost" is the whole question a per-seed total answers, and a diverging pair states it
- * without a legend lookup. The x axis is rank, so its tick labels are suppressed and
- * the tooltip names the seed instead.
- */
 export function columns(spec: ColumnsSpec): ChartHandle {
   const labels = spec.labels;
-  // restroke the hero's column in the env accent, over the series paint
   const highlightPlugin = (): uPlot.Plugin => ({
     hooks: {
       draw: (u) => {
@@ -706,11 +638,6 @@ export function columns(spec: ColumnsSpec): ChartHandle {
       positive,
       negative,
     ] as unknown as uPlot.AlignedData,
-    // rank is an ordering, not a quantity: the axis counts seeds, the tooltip names one.
-    // Only INTEGER splits get a label. uPlot picks tick positions on a continuous scale,
-    // so a short profile (8 seeds) lands ticks at 0, ⅓, ⅔, 1 … and rounding each one to
-    // a rank printed "#1 #1 #2 #2 #2 #3 …" — a real axis with a stutter. Blanking the
-    // fractional splits leaves each rank labelled exactly once.
     xFormat: spec.xFormat ?? ((v: number) => labels?.[Math.round(v)] ?? `#${Math.round(v) + 1}`),
     xAxisFormat:
       spec.xAxisFormat
@@ -736,14 +663,9 @@ export interface SpaghettiSpec extends Omit<ChartSpec, 'series' | 'data' | 'tool
   steps: readonly number[];
   lanes: readonly SpaghettiLane[];
   onLaneFocus?(key: string | null): void;
-  /** click the focused (hovered) lane — watch that seed, at the clicked step */
   onLaneClick?(key: string, step: number): void;
 }
 
-/**
- * Per-lane spaghetti. Lanes are neutral low-alpha strokes — never generated
- * hues — with the hovered lane lifted to the light ramp step and named.
- */
 export function spaghetti(spec: SpaghettiSpec): ChartHandle {
   let focused: string | null = null;
   const handle = createChart({

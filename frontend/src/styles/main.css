@@ -1,19 +1,5 @@
-/* OaK Preserve — app chrome.
- *
- * Register: an observatory instrument panel, not a SaaS dashboard. Three rules
- * hold the whole thing together:
- *   1. The monospace face carries every identity in this project — run roots,
- *      env ids, seeds, steps, rates. Sans is reserved for prose.
- *   2. Structure is a hairline: 1px borders, micro-caps eyebrows with a leading
- *      rule, 3px radius, no shadows, no gradients except the brand mark.
- *   3. The one accent that carries information is the env spectrum, tinted from
- *      kit/tokens.ts so a run looks the same here as it does in the theater.
- *
- * Scene canvases own their own color; this file must never fight them.
- */
 
 :root {
-  /* surfaces */
   --bg: #0b0e13;
   --bg-raised: #121722;
   --bg-sunken: #090c11;
@@ -21,21 +7,15 @@
   --border: #232c3d;
   --border-strong: #33415a;
 
-  /* ink */
   --text: #d7dfeb;
   --text-dim: #8494ab;
   --text-faint: #5c6a80;
 
-  /* chrome accents (UI, not data) */
   --accent: #5ec1ff;
   --gold: #ffd166;
   --good: #7fd47a;
   --bad: #e8766a;
 
-  /* data palette — validated with the dataviz validator against surface
-     #121722. Categorical {series, crit}: PASS on all five checks.
-     Ordinal ramp: PASS on all four ordinal checks. Do not hand-edit these
-     without re-running scripts/validate_palette.js. */
   --viz-series: #2b98d9;
   --viz-series-soft: rgba(43, 152, 217, 0.16);
   --viz-crit: #e0614f;
@@ -79,7 +59,6 @@ button { font: inherit; color: inherit; }
 
 .placeholder { margin: auto; color: var(--text-dim); font-family: var(--mono); }
 
-/* ---------- header ---------- */
 
 .view { flex: 1; display: flex; flex-direction: column; }
 
@@ -92,8 +71,6 @@ button { font: inherit; color: inherit; }
   gap: 28px;
   height: 46px;
   padding: 0 var(--pad);
-  /* opaque on purpose: a translucent + blurred sticky header is a compositing
-     liability and the flat direction does not need the effect */
   background: var(--bg);
   border-bottom: 1px solid var(--border);
 }
@@ -125,7 +102,6 @@ button { font: inherit; color: inherit; }
 .live-pip.is-off { background: var(--text-faint); box-shadow: none; animation: none; }
 @keyframes pip { 0%, 100% { opacity: 1; } 50% { opacity: 0.35; } }
 
-/* ---------- view scaffolding ---------- */
 
 .view-body {
   flex: 1;
@@ -187,18 +163,10 @@ button { font: inherit; color: inherit; }
 .banner-warn { border-left-color: var(--viz-crit); }
 .banner-good { border-left-color: var(--viz-series); }
 .banner strong { font-weight: 600; }
-/* Every `display:` rule in this file outranks the UA's `[hidden] { display: none }`,
-   so a class with a display beats its own hidden attribute. A hidden banner used to
-   paint a 24px empty bordered box on every live watch view. Any new class that both
-   sets `display` and gets toggled via `.hidden` belongs in this list. */
 .banner[hidden] { display: none; }
 
-/* A swappable holder whose children lay out as if it were not there — used where a
-   policy switch has to replace one badge (or the whole incomplete banner) without
-   introducing a wrapper that would break the row's flex geometry. */
 .slot { display: contents; }
 
-/* ---------- controls ---------- */
 
 .controls { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-bottom: 14px; }
 .controls-inline { margin-bottom: 0; }
@@ -249,7 +217,6 @@ input.input[type="search"] { min-width: 230px; }
   letter-spacing: 0.06em; margin-bottom: 14px;
 }
 
-/* ---------- gallery ---------- */
 
 .gallery {
   display: grid;
@@ -260,9 +227,6 @@ input.input[type="search"] { min-width: 230px; }
 .gallery-group { --section-accent: var(--border-strong); }
 .gallery-group > .eyebrow .eyebrow-rule { background: var(--section-accent); width: 18px; height: 2px; }
 
-/* A card is ONE anchor to the run dashboard. The theater deep link is a sibling
-   inside the shell, never a child of that anchor: nested interactive content is
-   invalid HTML and browsers un-nest it, which silently drops the inner link. */
 .card-shell { position: relative; display: flex; min-width: 0; }
 .card-shell > .card { flex: 1; min-width: 0; }
 
@@ -299,7 +263,6 @@ input.input[type="search"] { min-width: 230px; }
   white-space: nowrap;
 }
 .card-theater:hover { background: var(--accent); color: var(--bg); text-decoration: none; }
-/* the floating link needs a lane the chips can never wrap into */
 .card-shell.has-theater .card-chips { padding-right: 74px; min-height: 17px; }
 
 .spectrum { display: flex; height: 4px; width: 100%; gap: 1px; background: var(--bg-sunken); flex: none; }
@@ -338,7 +301,6 @@ input.input[type="search"] { min-width: 230px; }
 
 .card-chips { display: flex; flex-wrap: wrap; gap: 5px; }
 
-/* ---------- badges ---------- */
 
 .badge {
   display: inline-flex;
@@ -362,12 +324,10 @@ input.input[type="search"] { min-width: 230px; }
 .badge-live { color: var(--viz-ramp-4); border-color: color-mix(in srgb, var(--viz-ramp-4) 45%, transparent); }
 .badge-quiet { color: var(--text-faint); border-color: var(--border); }
 
-/* ---------- run view ---------- */
 
 .run-chips { display: flex; flex-wrap: wrap; gap: 5px; align-items: center; }
 .run-head-actions { margin-left: auto; display: flex; gap: 6px; align-self: center; }
 
-/* ---------- breadcrumb ---------- */
 
 .crumbs {
   display: flex; align-items: baseline; gap: 6px; flex-wrap: wrap;
@@ -392,7 +352,6 @@ input.input[type="search"] { min-width: 230px; }
   border-radius: var(--r);
   overflow: hidden;
 }
-/* the tile grid is its own border — with no tiles it paints as a 2px rule */
 .stat-row:empty { display: none; }
 .stat { padding: 10px 12px 11px; background: var(--bg-raised); display: flex; flex-direction: column; gap: 1px; }
 .stat-label {
@@ -408,8 +367,6 @@ input.input[type="search"] { min-width: 230px; }
 .tone-neutral { color: var(--text); }
 
 .block { display: flex; flex-direction: column; }
-/* the chart stack a live view hides wholesale until its first heartbeat lands —
-   three eyebrows over three empty divs is not an empty state */
 .block-stack { display: flex; flex-direction: column; gap: 26px; }
 .block-grid {
   display: grid;
@@ -433,7 +390,6 @@ input.input[type="search"] { min-width: 230px; }
 .seed-num { font-family: var(--mono); font-size: 11.5px; }
 .seed-steps { font-family: var(--mono); font-size: 9.5px; letter-spacing: 0.1em; color: var(--text-faint); }
 
-/* ---------- charts ---------- */
 
 .chart { position: relative; width: 100%; }
 .chart-canvas { width: 100%; }
@@ -474,8 +430,6 @@ input.input[type="search"] { min-width: 230px; }
 .tip-name { color: var(--text-dim); }
 .tip-value { margin-left: auto; font-variant-numeric: tabular-nums; }
 
-/* uPlot structural CSS, dark. Replaces the stock light-theme stylesheet so the
-   theme lives in one place; keep in sync with uPlot's own layout rules. */
 .uplot, .uplot *, .uplot *::before, .uplot *::after { box-sizing: border-box; }
 .uplot { font-family: var(--mono); line-height: 1.5; width: min-content; }
 .u-wrap { position: relative; user-select: none; }
@@ -493,7 +447,6 @@ input.input[type="search"] { min-width: 230px; }
 }
 .u-axis.u-off, .u-select.u-off, .u-cursor-x.u-off, .u-cursor-y.u-off, .u-cursor-pt.u-off { display: none; }
 
-/* ---------- bars ---------- */
 
 .bars { width: 100%; }
 .bars-svg { display: block; width: 100%; overflow: visible; }
@@ -514,12 +467,10 @@ input.input[type="search"] { min-width: 230px; }
 .bar-mark { transition: opacity 120ms ease; }
 .bar-row:hover .bar-mark { opacity: 0.86; }
 
-/* ---------- spark ---------- */
 
 .spark { width: 100%; display: block; }
 .spark-canvas { display: block; }
 
-/* ---------- table ---------- */
 
 .table-wrap { width: 100%; overflow-x: auto; }
 .table {
@@ -554,7 +505,6 @@ input.input[type="search"] { min-width: 230px; }
 .table-empty { text-align: center; color: var(--text-faint); padding: 18px 0; }
 .table-more { margin-top: 10px; align-self: flex-start; }
 
-/* ---------- watch ---------- */
 
 .watch-list { display: flex; flex-direction: column; gap: 10px; }
 .watch-row {
@@ -586,7 +536,6 @@ input.input[type="search"] { min-width: 230px; }
   white-space: nowrap;
 }
 
-/* ---------- states ---------- */
 
 .empty {
   padding: 22px 18px;
@@ -604,7 +553,6 @@ input.input[type="search"] { min-width: 230px; }
 a.btn { display: inline-flex; align-items: center; text-decoration: none; }
 a.btn:hover { text-decoration: none; }
 
-/* ---------- active-filter readout (the gallery's zero-match state) ---------- */
 
 .filter-readout { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; margin-top: 10px; }
 .filter-chip {
@@ -638,14 +586,6 @@ a.btn:hover { text-decoration: none; }
 .link-quiet { color: var(--text-dim); }
 .link-quiet:hover { color: var(--accent); }
 
-/* ---------- the wall (#/) ----------
- *
- * The home page is a stage, not a document: it fills the viewport exactly once
- * and nothing on it scrolls except the seed rail. Everything structural is the
- * same hairline register as the rest of the app — the only saturated colour is
- * the env accent on the chip strip and the hero row, and even that is a 3px
- * mark rather than a fill, so it never competes with live art two pixels away.
- */
 
 .wall-root { flex: none; height: 100vh; overflow-y: auto; }
 .wall-root > .view-body { min-height: 0; }
@@ -684,11 +624,7 @@ a.btn:hover { text-decoration: none; }
 }
 @media (max-width: 940px) { .wall-run-meta { display: none; } }
 
-/* ---- env chips ---- */
 
-/* All 16 chips are visible at once — the strip WRAPS rather than scrolls. A
-   horizontal scroller hides the last environments behind a gesture, and the
-   whole point of flattening the dropdown was that every task is one click. */
 .wall-envs {
   flex: none;
   display: flex;
@@ -733,11 +669,8 @@ a.btn:hover { text-decoration: none; }
 .wall-chip.is-empty { color: var(--text-faint); }
 .wall-select { display: none; margin: 0 var(--pad) 10px; }
 
-/* ---- stage + rail ---- */
 
 .wall-main { display: flex; min-width: 0; border-top: 1px solid var(--border); }
-/* The science rows are FIXED height, so the stage takes every remaining pixel
-   of the viewport — the whole page fits one screen by construction. */
 .wall-main { flex: 1 1 auto; min-height: 320px; }
 .wall-main.rail-hidden .wall-rail { display: none; }
 .wall-main[hidden] { display: none; }
@@ -745,7 +678,6 @@ a.btn:hover { text-decoration: none; }
 .wall-stage { position: relative; flex: 1; min-height: 0; overflow: hidden; background: #05070c; }
 .wall-stage-col:fullscreen { background: #05070c; }
 .wall-stage-col:fullscreen .wall-stage { min-height: 0; }
-/* the scene host names its own canvas; the wall and the theater both host it */
 .theater-canvas { position: absolute; inset: 0; width: 100%; height: 100%; display: block; }
 
 .wall-tag {
@@ -776,12 +708,6 @@ a.btn:hover { text-decoration: none; }
 .wall-cover .cover-extra { max-width: 74ch; text-align: left; }
 .wall-cover .empty { background: color-mix(in srgb, var(--bg-raised) 82%, transparent); }
 
-/* ---- the field: the population's true extent along the track ----
-   The stage can hold ~5 m of track and the seeds end up kilometres apart, so this
-   strip is where the whole population actually lives. `.wall-field-window` is the
-   camera's own slice drawn at the SAME scale — a sliver late in a run, most of the
-   strip early on — which is what makes "one animal on stage" legible instead of
-   suspicious. */
 
 .wall-field {
   flex: none;
@@ -831,7 +757,6 @@ a.btn:hover { text-decoration: none; }
   font-variant-numeric: tabular-nums;
 }
 
-/* ---- transport ---- */
 
 .wall-transport {
   flex: none;
@@ -874,8 +799,6 @@ a.btn:hover { text-decoration: none; }
 .wall-scrub .scrub-input:focus-visible + .wall-scrub-track { box-shadow: 0 0 0 2px var(--accent); }
 .wall-scrub-head { position: absolute; top: 50%; width: 2px; height: 12px; margin: -6px 0 0 -1px; background: var(--text); border-radius: 1px; pointer-events: none; z-index: 3; }
 .wall-scrub-ticks { position: absolute; inset: 0; pointer-events: none; }
-/* height/opacity are written per tick (density); only the width and the hover
-   state live here, so the strip reads as a histogram rather than a barcode */
 .wtick {
   position: absolute; top: 50%; width: 3px; height: 13px; margin: -6.5px 0 0 -1.5px;
   border: 0; padding: 0; border-radius: 1px; cursor: pointer; z-index: 2; pointer-events: auto;
@@ -887,7 +810,6 @@ a.btn:hover { text-decoration: none; }
 .wtick-cue { background: #5ee0ff; }
 .wtick-done { background: var(--viz-crit); }
 
-/* ---- the seed rail ---- */
 
 .wall-rail {
   width: var(--rail-w, 620px); flex: none; min-height: 0;
@@ -896,7 +818,6 @@ a.btn:hover { text-decoration: none; }
   background: var(--bg-raised);
 }
 .wall-main.rail-hidden .wall-rail { display: none; }
-/* the live splitter between stage and rail: drag to resize, dblclick to collapse */
 .wall-split {
   flex: none; width: 7px; margin: 0 -3px 0 -4px; z-index: 5;
   cursor: col-resize; background: transparent;
@@ -905,9 +826,6 @@ a.btn:hover { text-decoration: none; }
 @media (max-width: 1180px) { .wall-rail { width: 300px; } .wall-split { display: none; } }
 .wall-rail-head { padding: 13px 14px 11px; border-bottom: 1px solid var(--border); }
 .wall-pop { display: grid; grid-template-columns: 1fr 1fr; gap: 8px 12px; }
-/* The headline figure carries its confidence interval, and an IQM whose CI is
-   elided is a different claim from one whose CI is shown — so it gets the full
-   width and the CI is allowed to wrap under it rather than be truncated. */
 .wall-pop > .pop-figure:first-child { grid-column: 1 / -1; }
 .wall-pop > .pop-figure:first-child .pop-value { white-space: normal; font-size: 15px; }
 .pop-figure { display: flex; flex-direction: column; gap: 1px; min-width: 0; }
@@ -978,7 +896,6 @@ a.btn:hover { text-decoration: none; }
   .wall-pop { grid-template-columns: 1fr; }
 }
 
-/* ---------- responsive ---------- */
 
 @media (max-width: 860px) {
   :root { --pad: 14px; }
@@ -991,7 +908,6 @@ a.btn:hover { text-decoration: none; }
   *, *::before, *::after { animation-duration: 0.001ms !important; transition-duration: 0.001ms !important; }
 }
 
-/* ---------- the wall's rate strip, science block, run picker ---------- */
 
 
 .wall-science { flex: none; width: 100%; margin: 0; padding: 10px var(--pad) 12px; }
@@ -1010,13 +926,11 @@ a.btn:hover { text-decoration: none; }
 .science-cell > .chart, .science-cell > .view-status { flex: 1; min-height: 0; }
 .chart-fill { height: 100%; display: flex; flex-direction: column; min-height: 0; }
 .chart-fill .chart-canvas { flex: 1; min-height: 0; }
-/* the horizontal splitter above the chart row */
 .wall-vsplit {
   flex: none; height: 7px; margin: -3px 0 -4px; z-index: 5;
   cursor: row-resize; background: transparent;
 }
 .wall-vsplit:hover { background: color-mix(in srgb, var(--accent) 28%, transparent); }
-/* the playhead riding every rail sparkline — one CSS var write per tick */
 .wall-spark { position: relative; cursor: ew-resize; touch-action: none; }
 .wall-spark::after {
   content: ''; position: absolute; top: 0; bottom: 0;

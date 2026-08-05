@@ -1,43 +1,3 @@
-// #/ — the Wall. The home page, and the only page that shows a whole population
-// living at once.
-//
-// One environment, one run, every recorded seed. The leader plays full-fidelity
-// in the hero scene; every other recorded seed rides the same clock as a ghost.
-// The rail on the right is the population as numbers — rank, seed, average
-// reward rate, the shape of its learning — and the two halves are the same
-// fleet, so hovering a row lights its ghost and clicking it makes that seed the
-// hero without touching anything else.
-//
-// Vocabulary is the lab's (shared/types.ts v2): SEEDS, average reward rate,
-// numerically diverged, retention. Never "lanes", never "delivered".
-//
-// WHAT THIS FILE OWNS: the view. Four things it deliberately does not own:
-//
-//   * the SCENE — `theater/sceneHost` mounts it, exactly as the Theater does, so
-//     a scene that is right there is right here.
-//   * the HERO DATA — `theater/loader.loadTheaterRecording`, the same streamed,
-//     chunk-aware, damage-reporting path the Theater uses.
-//   * the POPULATION DATA — `api.fetchWall`, one request per environment that
-//     brings every recorded seed down as strided pose samples.
-//   * the GHOST RENDERING — `kit/ghosts`, handed to `sceneHost` as a mount option
-//     so it lives inside the hero's own scene and survives its tier rebuilds.
-//
-// What is left is exactly the wall's own job: WHICH run and seed are on stage,
-// WHICH sample of the population the clock is on, and what the numbers mean.
-//
-// The clock is `sceneHost`'s clock and nothing else. Ghost samples are indexed
-// off the very same frame position, so hero and ghosts cannot drift: there is
-// one time on this page. Nothing here is ever fabricated — a run with no
-// recordings gets a rail and an honest note, never a fake ghost.
-//
-// THE FIELD. A ghost is drawn at its TRUE position, and on a track environment the
-// population's true positions do not fit in one camera: HalfCheetah seeds start
-// 0.18 units apart and finish 1.7 KILOMETRES apart, while the savanna frame is
-// about five metres wide. So the stage is not asked to lie about that — the strip
-// under it (`paintField`, and the geometry section further down) draws every seed's
-// position along the track at a scale that fits, with the camera's own window
-// marked inside it, and the transport chip prints how many ghosts are genuinely in
-// frame rather than how many were submitted to the GPU.
 
 import type { ViewHandle, ViewMount } from '../router';
 import type {
@@ -104,27 +64,11 @@ import {
   type SceneHostHandle,
 } from '../theater/sceneHost';
 
-// ---------------------------------------------------------------------------
-// constants — every one of them a stated choice, not a knob
-// ---------------------------------------------------------------------------
 
-/**
- * ONE speed model for the whole app: a preset is a REAL-TIME multiple of the
- * environment's own clock (×1 = controlHz record steps per second), the same
- * meaning the playback clock has always had. ×1..×16 are walked playback
- * (events fire); the top presets are honestly a flip-book of the run — the
- * host snaps past MAX_CATCHUP_FRAMES and celebrations thin out on their own.
- */
 export const WALL_SPEEDS: readonly number[] = [1, 4, 16, 64, 256, 1024];
 
-/** Ghost samples per lane. 2400 at 12 fps = a 200 s pass at ×1, any run length. */
 export const WALL_TARGET_SAMPLES = 2400;
 
-/**
- * Rows that get a sparkline. 1024 rows of text are cheap; 1024 canvases with a
- * ResizeObserver each are not. Past this the rail keeps every seed and drops the
- * per-row curve (the numbers are the ranking; the curve is the flourish).
- */
 export const SPARK_ROW_BUDGET = 128;
 
 export type WallSort = 'rate' | 'seed' | 'retention';
@@ -136,26 +80,16 @@ const SORT_LABEL: Record<WallSort, string> = {
   retention: 'retention',
 };
 
-// ---------------------------------------------------------------------------
-// the URL — #/?run=&env=&seed=&at=&speed=&sort=
-// ---------------------------------------------------------------------------
 
 export interface WallParams {
   run?: string;
   env?: EnvId;
-  /** the PROMOTED seed; absent means "whoever leads" */
   seed?: number;
-  /** frame position */
   at?: number;
   speed?: number;
   sort?: WallSort;
 }
 
-/**
- * Parse the wall's query. Every field is optional and every bad field is
- * DROPPED rather than corrected: a stale `env=` from a renamed environment
- * should land on the wall's own default, not on a neighbouring env's scene.
- */
 export function parseWallParams(hash: string): WallParams {
   const out: WallParams = {};
   const q = hash.indexOf('?');
@@ -193,7 +127,6 @@ export function parseWallParams(hash: string): WallParams {
   return out;
 }
 
-/** The canonical wall link. Fixed key order, so a round-trip is byte-stable. */
 export function wallHref(params: WallParams = {}): string {
   const parts: string[] = [];
   const push = (key: string, value: string): void => {
@@ -208,33 +141,12 @@ export function wallHref(params: WallParams = {}): string {
   return parts.length > 0 ? `#/?${parts.join('&')}` : '#/';
 }
 
-/**
- * The frame position a URL write must carry.
- *
- * THE BUG THIS EXISTS TO PREVENT. The wall's `at` used to be serialized from the
- * cached progress FRACTION, which is written by `onFrame` and by nothing else — so
- * every `syncUrl` that runs synchronously after a seek wrote the position the reader
- * had just LEFT. Measured before the fix: an arrow key moved the player to frame 889
- * and the address bar to `at=50`; three arrows reached 2,569 and wrote `at=1730`; and
- * a deep link with `?at=1234` seeked correctly and then immediately rewrote itself
- * WITHOUT `at`, so refreshing your own shared link restarted the run at zero.
- *
- * So the position comes from the clock — which `seek` updates synchronously, before
- * any frame ticks — and from the pending deep-linked position when no host is mounted
- * yet, which is the case the first `syncUrl` of a page load runs in.
- *
- * Returns null when there is nothing worth writing (position 0 is the default and is
- * omitted from the href).
- */
 export function urlPosition(clockPosition: number | null, pending: number): number | null {
   const at = clockPosition !== null && Number.isFinite(clockPosition) ? clockPosition : pending;
   if (!Number.isFinite(at) || at <= 0) return null;
   return Math.floor(at);
 }
 
-// ---------------------------------------------------------------------------
-// which run the wall opens on
-// ---------------------------------------------------------------------------
 
 export type FeaturedSource = 'param' | 'bestKernel' | 'newest' | null;
 
@@ -243,18 +155,6 @@ export interface FeaturedPick {
   source: FeaturedSource;
 }
 
-/**
- * Featured-run resolution, in order:
- *
- *   1. `?run=` — an explicit ask is always honoured, recordings or not. That is
- *      how a run with nothing recorded (the degraded wall) is reachable at all.
- *   3. ROLES `bestKernel`, IF it has recordings. The current best kernel is the
- *      run worth staring at; a best kernel with no recordings cannot be a wall,
- *      so it is skipped rather than shown empty.
- *   4. the newest COMPLETE run with recordings.
- *   5. any run with recordings (newest first) — better than an empty page.
- *   6. null: the honest empty state.
- */
 export function resolveFeaturedRun(
   entries: readonly RunIndexEntry[],
   roles: RolesResponse | null,
@@ -286,11 +186,7 @@ export function resolveFeaturedRun(
   return { runId: null, source: null };
 }
 
-// ---------------------------------------------------------------------------
-// the wall clock: stride
-// ---------------------------------------------------------------------------
 
-/** Is `n` prime? Trial division — the callers ask for values in the hundreds. */
 export function isPrime(n: number): boolean {
   if (!Number.isInteger(n) || n < 2) return false;
   if (n % 2 === 0) return n === 2;
@@ -298,37 +194,12 @@ export function isPrime(n: number): boolean {
   return true;
 }
 
-/** Smallest prime at or above `n`. */
 export function nextPrime(n: number): number {
   let candidate = Math.max(2, Math.ceil(Number.isFinite(n) ? n : 2));
   while (!isPrime(candidate)) candidate++;
   return candidate;
 }
 
-/**
- * Record steps per ghost sample, so a lane of any length is ~`target` samples.
- *
- * The stride is a PRIME, not the bare `ceil(steps / target)`, because a sampling
- * grid that shares a factor with an environment's own cycle length is PHASE-LOCKED:
- * every sample lands on the same phase and the ghost stands still while the hero
- * moves. That is measured, not hypothetical. DeepSea descends on a 7-step cycle;
- * the bare ceiling picks 42 on a 100k lane and 417 on a 1M one, and 42 is an
- * exact multiple of 7. Against the live
- * endpoint (`frontend-demo-16env-20260803`, DeepSea, 8 seeds): stride 42 visited
- * 3 distinct poses in 2382 samples and stride 105 visited 3 in 954, while the next
- * primes up — 43 and 107 — visited 28 and 27. Seven frozen ghosts on one cell are
- * indistinguishable from "these seeds never learned", so the wall must not be able
- * to produce that grid at all.
- *
- * A prime `p` divides no integer below itself, so a prime stride is coprime to every
- * cycle length under it — and a run long enough to need a stride past 64 (anything
- * over `64 × target` steps) is coprime to the entire 2..64 gridworld range. Shorter
- * runs get a prime that could itself be a cycle length (a 15k-step run wants 7); it
- * is still the best available choice, since only 1 and the primes above 64 are
- * coprime to ALL of 2..64 and forcing `p > 64` on a short run would throw away most
- * of its samples for a case no root on disk has. `steps <= target` returns 1 — every
- * row, no grid, no aliasing possible.
- */
 export function wallStride(steps: number, target: number = WALL_TARGET_SAMPLES): number {
   if (!Number.isFinite(steps) || steps <= 0) return 1;
   const want = Math.max(1, Math.floor(target));
@@ -336,29 +207,18 @@ export function wallStride(steps: number, target: number = WALL_TARGET_SAMPLES):
   return need <= 1 ? 1 : nextPrime(need);
 }
 
-// ---------------------------------------------------------------------------
-// the hero selection state machine
-// ---------------------------------------------------------------------------
 
 export interface HeroSelection {
-  /** the seed that leads by final average reward rate, among PLAYABLE seeds */
   leader: number | null;
-  /** the seed the reader promoted, if any */
   promoted: number | null;
 }
 
 export const EMPTY_SELECTION: HeroSelection = { leader: null, promoted: null };
 
-/** The seed on stage: the promotion when there is one, the leader otherwise. */
 export function heroSeed(selection: HeroSelection): number | null {
   return selection.promoted ?? selection.leader;
 }
 
-/**
- * Promote a seed. A seed with no recording cannot be a hero, so the promotion is
- * REFUSED (state returned unchanged) rather than swapping the stage for an error
- * — the rail row for such a seed is marked and does not pretend to be clickable.
- */
 export function promoteSeed(
   selection: HeroSelection,
   seed: number,
@@ -369,17 +229,11 @@ export function promoteSeed(
   return { ...selection, promoted: seed };
 }
 
-/** Esc: back to the leader. Idempotent when nothing is promoted. */
 export function escapeSelection(selection: HeroSelection): HeroSelection {
   if (selection.promoted === null) return selection;
   return { ...selection, promoted: null };
 }
 
-/**
- * A new leader (env switch, data refresh). A promotion SURVIVES it only when the
- * promoted seed is still playable here — otherwise the reader would be staring
- * at another environment's seed number.
- */
 export function setLeader(
   selection: HeroSelection,
   leader: number | null,
@@ -389,17 +243,7 @@ export function setLeader(
   return { leader, promoted };
 }
 
-// ---------------------------------------------------------------------------
-// the degraded wall
-// ---------------------------------------------------------------------------
 
-/**
- * Why this (run, env) cannot show a stage — or null when it can.
- *
- * A run with no recordings is a perfectly good POPULATION (the rail still reads
- * from fleet.jsonl); it just has no experience to replay. The wall says exactly
- * that and prints the recipe. It never fabricates a ghost.
- */
 export function degradedReason(
   recordings: readonly RecordingRef[],
   envId: EnvId | null,
@@ -414,31 +258,20 @@ export const RECORD_RECIPE =
   'Re-run the fleet with OAK_RECORD_ACTIONS=1 (every seed) or OAK_RECORD_SEEDS=3,8 (a couple) '
   + 'to write the actions.bin streams the wall replays.';
 
-// ---------------------------------------------------------------------------
-// the rail: one row per seed
-// ---------------------------------------------------------------------------
 
 export interface SeedRow {
   seed: number;
-  /** final AVERAGE REWARD RATE — cumulative rewardSum ÷ steps, the lab's headline */
   rate: number | null;
-  /** final ÷ peak of the MEASURED windowed rate; null when there is no positive peak */
   retention: number | null;
-  /** step of the first non-finite value; null = never numerically diverged */
   divergedAt: number | null;
-  /** the windowed reward-rate series — the sparkline's shape */
   spark: (number | null)[];
-  /** step fraction (0..1) of each spark point — the playhead's own axis */
   sparkXs: number[];
-  /** is there an actions.bin for this seed (can it be the hero) */
   recorded: boolean;
 }
 
 export interface SeedRowOptions {
   recorded?: ReadonlySet<number>;
-  /** cumulative reward field (default `rewardSum`) */
   rateField?: string;
-  /** divergence field (default `firstNonFiniteStep`) */
   divergenceField?: string;
 }
 
@@ -450,15 +283,6 @@ function lastFinite(values: readonly (number | null)[]): { value: number; index:
   return null;
 }
 
-/**
- * Retention, per seed: final ÷ peak of the windowed reward rate — the same ratio
- * `tools/fleet.py report` publishes, computed here from fleet.jsonl so it exists
- * on every root instead of only on summarySchemaVersion 2 ones.
- *
- * A seed whose peak is not positive has no meaningful ratio (dividing by ~0 or by
- * a negative peak produces a number that ranks nonsense above sense), so it is
- * null and sinks in the sort.
- */
 export function retentionOf(window: readonly (number | null)[]): number | null {
   let peak = -Infinity;
   for (const value of window) {
@@ -469,15 +293,11 @@ export function retentionOf(window: readonly (number | null)[]): number | null {
   return final.value / peak;
 }
 
-/** Columnar fleet data -> one row per seed. Pure. */
 export function buildSeedRows(columnar: FleetColumnar, options: SeedRowOptions = {}): SeedRow[] {
   const rateField = options.rateField ?? 'rewardSum';
   const divergenceField = options.divergenceField ?? 'firstNonFiniteStep';
   const recorded = options.recorded ?? new Set<number>();
   const steps = columnar.steps;
-  // every spark shares ONE x geometry with the playhead: step fraction of the
-  // run, with each windowed value at its window CENTER (window (a,b] plotted
-  // at b renders peaks late — the death-then-peak illusion)
   const lastStep = steps.length > 0 ? steps[steps.length - 1] ?? 0 : 0;
   const sparkXs = windowMidpoints(steps).map((mid) => (lastStep > 0 ? mid / lastStep : 0));
   const cumulative = laneSeries(columnar, rateField);
@@ -505,16 +325,6 @@ export function buildSeedRows(columnar: FleetColumnar, options: SeedRowOptions =
   return rows;
 }
 
-/**
- * The sort as an INDEX PERMUTATION over the row array.
- *
- * Rows are built once and never reordered; sorting produces the order to paint
- * them in. That is what lets a re-sort animate (the same node moves) and what
- * guarantees a ghost's tint — which is keyed on the row's own identity — cannot
- * change just because the reader asked for a different ranking.
- *
- * Stable: equal keys keep seed order, and nulls always sink.
- */
 export function sortPermutation(rows: readonly SeedRow[], sort: WallSort): number[] {
   const order = rows.map((_, index) => index);
   const direction = sort === 'seed' ? 1 : -1;
@@ -542,7 +352,6 @@ export function nextSort(sort: WallSort): WallSort {
   return WALL_SORTS[(index + 1) % WALL_SORTS.length] ?? 'rate';
 }
 
-/** The leader: best final average reward rate among seeds that can actually play. */
 export function leaderSeed(rows: readonly SeedRow[]): number | null {
   let best: SeedRow | null = null;
   for (const row of rows) {
@@ -552,19 +361,13 @@ export function leaderSeed(rows: readonly SeedRow[]): number | null {
   return best?.seed ?? null;
 }
 
-// ---------------------------------------------------------------------------
-// the population header
-// ---------------------------------------------------------------------------
 
 export interface PopulationFigures {
   positive: string;
   nonDiverged: string;
   retention: string;
-  /** solved-threshold seeds — summary v2 roots only */
   solved: string;
-  /** best-seed reward per GFLOP — summary v2 roots only */
   perGflop: string;
-  /** where the numbers came from — the UI says so rather than implying a summary */
   source: 'summary' | 'measured' | 'none';
 }
 
@@ -572,21 +375,6 @@ function finite(value: unknown): number | null {
   return typeof value === 'number' && Number.isFinite(value) ? value : null;
 }
 
-/**
- * The one line above the rail, in RL-paper words:
- *
- *   100% seeds > 0 · 8/8 non-diverged · retention 62.5% · solved 3 · 41.9 reward/GFLOP
- *
- * Deliberately NO reward-rate figure here: the learning curve under the stage
- * IS this environment's reward rate (line, CI, and endpoint) — a scalar copy of
- * its last point was redundancy, not information. The rail carries only what
- * the curve cannot: population health and the two summary-only figures.
- *
- * summary.json's per-env slice is preferred because it is what `fleet.py report`
- * published and what a gate would read. When a root has none (the ~600 legacy
- * ones), the health figures are MEASURED from fleet.jsonl and the caller is
- * told which it got — the two are not interchangeable claims.
- */
 export function populationFigures(
   slice: SummaryPolicyResult | null,
   rows: readonly SeedRow[],
@@ -627,7 +415,6 @@ export function populationFigures(
   };
 }
 
-/** The run's own identity line: `16 tasks × 64 seeds × 1M steps`. */
 export function runScheduleLine(meta: Pick<RunMeta, 'envId' | 'batch' | 'steps' | 'envSchedule'>): string {
   const shares = envShares(meta);
   const horizon = `${formatStep(meta.steps)} steps`;
@@ -640,9 +427,6 @@ export function runScheduleLine(meta: Pick<RunMeta, 'envId' | 'batch' | 'steps' 
   return `${shares.length} tasks × ${seeds} × ${horizon}`;
 }
 
-// ---------------------------------------------------------------------------
-// keyboard
-// ---------------------------------------------------------------------------
 
 export type WallAction =
   | { kind: 'toggle' }
@@ -654,7 +438,6 @@ export type WallAction =
   | { kind: 'tier' }
   | { kind: 'escape' };
 
-/** space play/pause · arrows scrub · `[` `]` env · `s` sort · `g` debug · `f` fullscreen · `t` quality · Esc leader. */
 export function wallKeyAction(key: string, shift = false): WallAction | null {
   switch (key) {
     case ' ':
@@ -691,7 +474,6 @@ export function wallKeyAction(key: string, shift = false): WallAction | null {
   }
 }
 
-/** Cycle the env chip strip, wrapping. */
 export function cycleEnv(list: readonly EnvId[], current: EnvId | null, direction: 1 | -1): EnvId | null {
   if (list.length === 0) return null;
   const index = current === null ? -1 : list.indexOf(current);
@@ -699,7 +481,6 @@ export function cycleEnv(list: readonly EnvId[], current: EnvId | null, directio
   return list[next] ?? null;
 }
 
-/** Environments of a run, canonical order, recorded ones first-class. */
 export function wallEnvs(meta: Pick<RunMeta, 'envId' | 'batch' | 'envSchedule'>, recordings: readonly RecordingRef[]): EnvId[] {
   const seen = new Set<EnvId>();
   for (const share of envShares(meta)) seen.add(share.envId);
@@ -707,29 +488,11 @@ export function wallEnvs(meta: Pick<RunMeta, 'envId' | 'batch' | 'envSchedule'>,
   return ENV_IDS.filter((id) => seen.has(id));
 }
 
-// ---------------------------------------------------------------------------
-// ghosts — the population layer
-// ---------------------------------------------------------------------------
-//
-// `api.fetchWall` brings one env's whole population down as strided pose samples
-// (`WallLane`), and `kit/ghosts` draws them as instanced ghosts inside the hero's
-// own scene. This file owns exactly two things in between: WHICH sample the wall
-// clock is on, and WHAT each ghost's colour and emphasis should be.
 
-/** Ghosts the layer is built for. More than this and the swarm is noise, not data. */
 export const WALL_GHOST_CAP = 512;
 
-/** Environments whose ghost samples stay in memory (see `loadWall`). */
 export const WALL_CACHE_ENVS = 3;
 
-/**
- * Which strided sample a record-frame position lands on.
- *
- * The server samples rows `0, stride, 2·stride, …` plus the lane's final row, so
- * the last sample is reachable from any position past it and a fractional frame
- * position floors rather than rounds — a ghost is never shown a state the seed
- * has not reached yet.
- */
 export function ghostSampleIndex(position: number, stride: number, samples: number): number {
   if (samples <= 0) return 0;
   if (!Number.isFinite(position) || position <= 0) return 0;
@@ -737,28 +500,10 @@ export function ghostSampleIndex(position: number, stride: number, samples: numb
   return index >= samples ? samples - 1 : index;
 }
 
-/**
- * Is this seed still finite at this record row?
- *
- * `firstNonFiniteRow` is the wall's death certificate. Past it the layer freezes
- * the ghost at its last finite pose and turns it dark red — so a numerically
- * diverged seed stops moving ON THE STEP IT DIED, in the same frame the rail row
- * says `div`. Before that row it is alive even if it dies later.
- */
 export function ghostAlive(firstNonFiniteRow: number | null, row: number): boolean {
   return firstNonFiniteRow === null || row < firstNonFiniteRow;
 }
 
-/**
- * Each seed's POPULATION QUANTILE of average reward rate, in [0, 1].
- *
- * The ghost ramp is a quantile ramp (kit/ghosts), so it is fed a rank, never a
- * raw rate: one rocket seed at 40× the median would otherwise flatten every other
- * ghost onto the bottom colour, and the wall would show one bright dot over a
- * uniform swarm instead of the distribution. Seeds with no rate get 0 and stay
- * at the dark end. Ties share the lower rank, so an all-equal population is all
- * the same colour rather than an arbitrary gradient.
- */
 export function rateQuantiles(rows: readonly SeedRow[]): Map<number, number> {
   const rated = rows.filter((row): row is SeedRow & { rate: number } =>
     row.rate !== null && Number.isFinite(row.rate));
@@ -777,82 +522,30 @@ export function rateQuantiles(rows: readonly SeedRow[]): Map<number, number> {
   return out;
 }
 
-/** The ghost bank the wall drives: one entry per lane, in instance order. */
 interface GhostView {
   stride: number;
   entries: { lane: WallLane; seed: number }[];
 }
 
-// ---------------------------------------------------------------------------
-// the field — the population's own extent, because the stage cannot hold it
-// ---------------------------------------------------------------------------
-//
-// THE GEOMETRY PROBLEM, stated plainly, because it is the wall's hardest one.
-//
-// `kit/ghosts` places a cheetah ghost at its TRUE rootx on the hero's own track,
-// and the savanna camera tracks the HERO's rootx (scenes/half-cheetah:
-// `rig.setTarget(rootX, …)`), so hero and ghosts share one coordinate frame and a
-// ghost is on stage exactly when it is within the camera's own window of the hero.
-// That window is about five metres wide. The population's is not: measured on
-// `frontend-demo-16env-20260803` (HalfCheetah, 8 seeds, `pose[0] = rootx`), the
-// spread across seeds is 0.18 units at step 0, 0.84 at 5k, 10.09 at 25k, 221.56 at
-// 50k and 1747.65 at 100k. Seeds that learn different gaits end up KILOMETRES
-// apart, and no framing puts a 1.7 km line of one-metre animals on one screen:
-// fit the camera to the extent and every seed is a third of a pixel.
-//
-// So the wall does two honest things instead of one dishonest one:
-//
-//   * it COUNTS. `inFrameCount` says how many ghosts are actually inside the
-//     stage's window this sample, and the transport chip prints that number. It
-//     never claims seven bodies are on stage when one is.
-//   * it SHOWS THE FIELD. The strip under the stage is the whole population's
-//     position along the track, drawn to a scale that fits — every seed a mark,
-//     the hero marked apart, and the camera's own window drawn at the SAME scale
-//     so the sliver the stage can hold is visible next to the kilometre it cannot.
-//     Marks are live, hover-linked to the rail, and click to promote.
-//
-// Grid and classic scenes frame a BOUNDED world, so their whole population is on
-// stage by construction and the strip is not drawn for them.
 
-/** How a scene frames its world: one unbounded track, or a bounded world seen whole. */
 export type StageFraming = 'track' | 'world';
 
 export function stageFraming(category: EnvCategory): StageFraming {
   return category === 'cheetah' ? 'track' : 'world';
 }
 
-/**
- * The savanna camera, in the two numbers this file needs — mirrored from
- * `scenes/half-cheetah` (`CAM_OFFSET[2]`, `CAM_LOOK[0]`) rather than imported,
- * because reaching into a scene module would pull its whole Three.js world into
- * the wall's bundle to read two constants. `test/wall.test.ts` pins them.
- */
 export const CHEETAH_CAM_DEPTH = 3.5;
 export const CHEETAH_CAM_LOOK_X = 0.68;
 
-/** The stage's visible window along the track, as distance behind and ahead of the hero. */
 export interface TrackWindow {
   back: number;
   ahead: number;
-  /** total width, in world units — what the chip and the field strip quote */
   width: number;
 }
 
-/**
- * How much track the hero stage actually shows, in world units.
- *
- * Derived, not guessed: the camera sits `CHEETAH_CAM_DEPTH` off the animal's plane
- * with a vertical field of view of `TOKENS.fovHero`, so half the frame height at
- * that plane is `depth · tan(fov/2)` and half its width is that times the stage's
- * aspect ratio; looking `CHEETAH_CAM_LOOK_X` ahead of the runner shifts the whole
- * window forward, which is why `back` and `ahead` differ.
- */
 export function trackWindow(aspect: number): TrackWindow {
   const a = Number.isFinite(aspect) && aspect > 0 ? aspect : 16 / 9;
   const half = CHEETAH_CAM_DEPTH * Math.tan((TOKENS.fovHero * Math.PI) / 360) * a;
-  // `back` is floored at 0 because the rig is CENTRED on the hero: whatever the
-  // aspect, the animal the camera is tracking is in its own frame, so a window that
-  // excluded dx = 0 would be arithmetic overruling a fact.
   return {
     back: Math.max(0, half - CHEETAH_CAM_LOOK_X),
     ahead: half + CHEETAH_CAM_LOOK_X,
@@ -860,7 +553,6 @@ export function trackWindow(aspect: number): TrackWindow {
   };
 }
 
-/** A lane's position along the track at one sample (`pose[0]`), or null when it has none. */
 export function laneTrackX(lane: Pick<WallLane, 'pose' | 'samples'>, sample: number): number | null {
   if (lane.samples <= 0) return null;
   const at = sample < 0 ? 0 : sample >= lane.samples ? lane.samples - 1 : sample;
@@ -868,7 +560,6 @@ export function laneTrackX(lane: Pick<WallLane, 'pose' | 'samples'>, sample: num
   return x === undefined || !Number.isFinite(x) ? null : x;
 }
 
-/** How many of `values` are inside the stage's window around the hero. Non-finite entries never count. */
 export function inFrameCount(
   values: ArrayLike<number>,
   count: number,
@@ -892,7 +583,6 @@ export interface FieldExtent {
   span: number;
 }
 
-/** Min/max of the finite track positions, or null when nothing is placeable. */
 export function fieldExtent(values: ArrayLike<number>, count: number): FieldExtent | null {
   let min = Infinity;
   let max = -Infinity;
@@ -906,16 +596,6 @@ export function fieldExtent(values: ArrayLike<number>, count: number): FieldExte
   return { min, max, span: max - min };
 }
 
-/**
- * The strip's domain: the population's extent UNION the camera's own window.
- *
- * The union is what makes the window drawable to scale in both regimes. Early in a
- * run the whole fleet fits inside one frame, so the window is the wider of the two
- * and fills the strip — which is the true statement "everything is on stage". Late
- * in a run the extent is kilometres and the window is a hairline at the hero's
- * mark — also true, and the reason only one animal is visible. A small pad keeps
- * the end marks off the edges.
- */
 export function fieldScale(
   extent: FieldExtent | null,
   heroX: number | null,
@@ -932,7 +612,6 @@ export function fieldScale(
   return { min: min - pad, max: max + pad };
 }
 
-/** Where a track position sits on the strip, in percent. Clamped, so nothing escapes it. */
 export function fieldPercent(x: number, scale: { min: number; max: number }): number {
   const span = scale.max - scale.min;
   if (!Number.isFinite(x) || !(span > 0)) return 50;
@@ -940,7 +619,6 @@ export function fieldPercent(x: number, scale: { min: number; max: number }): nu
   return t < 0 ? 0 : t > 100 ? 100 : t;
 }
 
-/** Distances the wall quotes are metres of track — `1.7 km`, `221 m`, `0.84 m`. */
 export function formatDistance(metres: number): string {
   if (!Number.isFinite(metres)) return '—';
   const m = Math.abs(metres);
@@ -950,11 +628,7 @@ export function formatDistance(metres: number): string {
   return `${metres.toFixed(2)} m`;
 }
 
-// ---------------------------------------------------------------------------
-// the view
-// ---------------------------------------------------------------------------
 
-/** UI name ↔ scene tier: the scenes' internal tiers are thumb/medium/hero */
 const TIER_BY_LABEL = { low: 'thumb', medium: 'medium', high: 'hero' } as const;
 export type TierLabel = keyof typeof TIER_BY_LABEL;
 export const TIER_LABELS: readonly TierLabel[] = ['low', 'medium', 'high'];
@@ -974,16 +648,10 @@ function tint<T extends HTMLElement>(node: T, color: string): T {
 export const mount: ViewMount = (host) => {
   const query = parseWallParams(typeof window === 'undefined' ? '' : window.location.hash);
 
-  // ---- chrome: the single header bar carries the run identity ----
-  // Brand left, run right: name (the picker button), schedule line, badges.
-  // There is no second title row and no nav — this is the only page.
   const runName = el('button', { class: 'wall-run', type: 'button', text: '—', title: 'Switch run' });
   const runMeta = el('span', { class: 'wall-run-meta', text: '' });
   const runBadges = el('span', { class: 'wall-run-badges' });
 
-  // The run PICKER — the gallery, collapsed into the one place it is needed.
-  // Search + a compact list with the badges that matter; picking a run rewrites
-  // the URL and the wall remounts on it.
   const pickerSearch = el('input', { class: 'input', type: 'search', placeholder: 'find a run…', ariaLabel: 'Find a run' });
   const pickerRows = el('div', { class: 'wall-picker-rows' });
   const picker = el('div', { class: 'wall-picker' }, [pickerSearch, pickerRows]);
@@ -1035,7 +703,6 @@ export const mount: ViewMount = (host) => {
   let destroyed = false;
   const abort = new AbortController();
 
-  // ---- view state ----
   let detail: RunDetail | null = null;
   let envList: EnvId[] = [];
   let envId: EnvId | null = query.env ?? null;
@@ -1047,25 +714,9 @@ export const mount: ViewMount = (host) => {
   let stride = 1;
   let heroSteps = 0;
   let frameCount = 1;
-  let progress = 0; // 0..1 across the lane — what survives an env switch
-  /**
-   * The wall's position in RECORD FRAMES, which is what `?at=` carries.
-   *
-   * `progress` is a FRACTION and is only ever written by `onFrame`, so a `syncUrl`
-   * that runs right after a seek — a deep link landing, an arrow key, a step
-   * button — would serialize the position the reader just left. The clock is the
-   * truth whenever a host is mounted; this is the truth before one is (a
-   * deep-linked `at=` that has not been consumed yet), so between them `syncUrl`
-   * always has the real answer.
-   */
+  let progress = 0;
   let frameAt = query.at ?? 0;
   let scrubbing = false;
-  /**
-   * Primed past the throttle so the FIRST presented frame writes the readout.
-   * A 150 ms cadence is right for a live page and wrong for a still: a headless
-   * capture ticks rAF a couple of times, and every review shipped with an empty
-   * readout when the gate had to warm up first (the artisan page's own lesson).
-   */
   let statsAccum = 1000;
   let debugOn = false;
   const TIER_KEY = 'oakWallTier';
@@ -1077,32 +728,23 @@ export const mount: ViewMount = (host) => {
   let sceneHost: SceneHostHandle | null = null;
   let ghostView: GhostView | null = null;
   let ghostLayer: GhostLayer | null = null;
-  /** the layer THIS view built (the host owns only the ones it rebuilds) */
   let createdGhostLayer: GhostLayer | null = null;
   let ghostSample = -1;
   let emphasised: number | null = null;
   let heroGeneration = 0;
-  /** the hero's own decoded frames — the exact per-frame track position the stage draws */
   let heroSource: HarnessSource | null = null;
-  /** every lane of this env (hero included), in field-mark order */
   let fieldLanes: WallLane[] = [];
-  /** their track positions at the current sample; index-parallel to `fieldLanes` */
   let fieldX = new Float64Array(0);
   let fieldMarks: HTMLElement[] = [];
   let framing: StageFraming = 'world';
   let stageWindow: TrackWindow = trackWindow(16 / 9);
-  /** ghosts inside the stage's own window at the current sample — the chip's number */
   let ghostsInFrame = 0;
-  /** the sample the field is currently drawn at; -1 = never drawn */
   let fieldSample = -1;
   const ghostPose = new Float32Array(9);
   const sparks: SparklineHandle[] = [];
   const columnarCache = new Map<string, Promise<FleetColumnar>>();
   const wallCache = new Map<string, Promise<WallData>>();
 
-  // The chips row IS the colored env band: full-bleed flush segments, one per
-  // environment, each drawn on its own scene accent (kit/tokens.ts), the active
-  // one at full strength. One row: identity, color, and the switch.
   const chipStrip = el('div', { class: 'wall-envs', role: 'tablist', ariaLabel: 'Environment' });
   const envSelect = el('select', { class: 'input input-select wall-select', ariaLabel: 'Environment' });
   envSelect.addEventListener('change', () => {
@@ -1123,7 +765,6 @@ export const mount: ViewMount = (host) => {
   const cover = el('div', { class: 'wall-cover' }, [coverTitle, coverBar, coverLabel, coverExtra]);
   stage.append(stageTag, cover);
 
-  // ---- the field strip ----
   const fieldNote = el('span', { class: 'wall-field-note', text: '' });
   const fieldMarkHolder = el('div', { class: 'wall-field-marks' });
   const fieldWindow = el('div', {
@@ -1147,7 +788,6 @@ export const mount: ViewMount = (host) => {
   ]);
   field.hidden = true;
 
-  // ---- transport ----
   const playButton = el('button', { class: 'tbtn tbtn-play', type: 'button', text: 'pause' });
   const backButton = el('button', { class: 'tbtn', type: 'button', text: '‹', title: 'Back (←)' });
   const fwdButton = el('button', { class: 'tbtn', type: 'button', text: '›', title: 'Forward (→)' });
@@ -1190,7 +830,7 @@ export const mount: ViewMount = (host) => {
   function setTier(next: TierLabel): void {
     tierLabel = next;
     paintTier();
-    try { localStorage.setItem(TIER_KEY, next); } catch { /* private mode */ }
+    try { localStorage.setItem(TIER_KEY, next); } catch {  }
     void sceneHost?.setTier(TIER_BY_LABEL[next]);
   }
   for (const [label, button] of tierButtons) {
@@ -1213,7 +853,6 @@ export const mount: ViewMount = (host) => {
     fullButton,
   ]);
 
-  // ---- rail ----
   const popLine = el('div', { class: 'wall-pop' });
   const popNote = el('div', { class: 'wall-pop-note', text: '' });
   const sortButton = el('button', { class: 'chip wall-sort', type: 'button', text: 'sort reward rate' });
@@ -1229,9 +868,6 @@ export const mount: ViewMount = (host) => {
   body.append(chipStrip, envSelect, status);
 
   const stageCol = el('div', { class: 'wall-stage-col' }, [stage, field, transport]);
-  // The stage/rail boundary is a live SPLITTER: drag it to resize both (the
-  // scene re-frames as it goes), double-click to collapse the rail entirely.
-  // The width survives reloads.
   const splitter = el('div', {
     class: 'wall-split',
     role: 'separator',
@@ -1253,7 +889,7 @@ export const mount: ViewMount = (host) => {
     let dragging = false;
     splitter.addEventListener('pointerdown', (ev) => {
       dragging = true;
-      try { splitter.setPointerCapture(ev.pointerId); } catch { /* inactive pointer */ }
+      try { splitter.setPointerCapture(ev.pointerId); } catch {  }
     });
     splitter.addEventListener('pointermove', (ev) => {
       if (!dragging) return;
@@ -1270,7 +906,7 @@ export const mount: ViewMount = (host) => {
     const settle = (): void => {
       if (!dragging) return;
       dragging = false;
-      try { localStorage.setItem(RAIL_KEY, String(railW)); } catch { /* private mode */ }
+      try { localStorage.setItem(RAIL_KEY, String(railW)); } catch {  }
     };
     splitter.addEventListener('pointerup', settle);
     splitter.addEventListener('pointercancel', settle);
@@ -1283,11 +919,6 @@ export const mount: ViewMount = (host) => {
   body.append(main);
 
 
-  // The run's science lives HERE, under the wall — env section first, whole-run
-  // statistics collapsed below. One page; nothing to click through to.
-  // The stage/science boundary is the SECOND splitter: drag it and the chart
-  // row grows or shrinks (every chart refits its cell) while the stage takes
-  // the rest. Height persists like the rail width does.
   const vsplit = el('div', {
     class: 'wall-vsplit',
     role: 'separator',
@@ -1307,7 +938,7 @@ export const mount: ViewMount = (host) => {
     let dragging = false;
     vsplit.addEventListener('pointerdown', (ev) => {
       dragging = true;
-      try { vsplit.setPointerCapture(ev.pointerId); } catch { /* inactive pointer */ }
+      try { vsplit.setPointerCapture(ev.pointerId); } catch {  }
     });
     vsplit.addEventListener('pointermove', (ev) => {
       if (!dragging) return;
@@ -1318,24 +949,13 @@ export const mount: ViewMount = (host) => {
     const settle = (): void => {
       if (!dragging) return;
       dragging = false;
-      try { localStorage.setItem(SCI_KEY, String(scienceH)); } catch { /* private mode */ }
+      try { localStorage.setItem(SCI_KEY, String(scienceH)); } catch {  }
     };
     vsplit.addEventListener('pointerup', settle);
     vsplit.addEventListener('pointercancel', settle);
   }
   let science: RunScienceHandle | null = null;
 
-  // ---- URL ----
-  /**
-   * Rewrite the address bar from live state.
-   *
-   * `at` is read from the CLOCK, never from the cached `progress` fraction: every
-   * seek (a keypress, a step button, a tick click, the scrub's release) calls this
-   * synchronously, before any frame has ticked, so a cached fraction serializes the
-   * position the reader just left. Before a host exists the pending `frameAt` — the
-   * deep-linked `at=` — stands in, which is what stops a shared link from erasing
-   * its own position the moment it is opened.
-   */
   function syncUrl(): void {
     if (typeof history === 'undefined' || typeof window === 'undefined') return;
     const params: WallParams = {};
@@ -1349,14 +969,11 @@ export const mount: ViewMount = (host) => {
     history.replaceState(null, '', wallHref(params));
   }
 
-  // ---- transport wiring ----
   function syncPlay(): void {
     playButton.textContent = sceneHost?.clock.playing ? 'pause' : 'play';
   }
 
   function applySpeed(): void {
-    // ONE speed model: the preset is a real-time multiple of the env's own clock —
-    // exactly what the playback clock means by `speed`, everywhere in the app.
     sceneHost?.setSpeed(speed);
     for (const button of speedRow.querySelectorAll('button')) {
       button.classList.toggle('is-on', button.dataset['speed'] === String(speed));
@@ -1386,14 +1003,10 @@ export const mount: ViewMount = (host) => {
   backButton.addEventListener('click', () => stepFrames(-Math.max(1, stride)));
   fwdButton.addEventListener('click', () => stepFrames(Math.max(1, stride)));
   debugButton.addEventListener('click', () => setDebug(!debugOn));
-  // Fullscreen takes the whole stage COLUMN, so the transport (and the field)
-  // stay usable over the scene; Esc is the browser's own exit.
   function toggleFullscreen(): void {
     if (document.fullscreenElement) {
       void document.exitFullscreen();
     } else {
-      // Embedded webviews can deny the Fullscreen permission outright — the
-      // rejection is the environment's answer, not an error worth spamming.
       stageCol.requestFullscreen().catch(() => {});
     }
   }
@@ -1420,17 +1033,14 @@ export const mount: ViewMount = (host) => {
     sceneHost?.seek(clampPosition(Number(scrubInput.value), frameCount));
   });
 
-  /** env STEP -> record frame (v4 records every step, so this is ~identity) */
   function frameFromStep(step: number): number {
     const scale = heroSteps > 0 ? frameCount / heroSteps : 1;
     return clampPosition(step * scale, frameCount);
   }
-  /** record frame -> env STEP — the x every science chart speaks */
   function stepFromFrame(frame: number): number {
     const scale = frameCount > 0 ? heroSteps / frameCount : 1;
     return frame * scale;
   }
-  /** chart-timeline scrub: seek live; write the URL only when the hand settles */
   function scrubToStep(step: number, commit: boolean): void {
     if (!sceneHost) return;
     sceneHost.seek(frameFromStep(step));
@@ -1511,7 +1121,6 @@ export const mount: ViewMount = (host) => {
   };
   if (typeof window !== 'undefined') window.addEventListener('keydown', onKey);
 
-  // ---- painting ----
   function paintChips(): void {
     const recordings = detail?.recordings ?? [];
     chipStrip.replaceChildren(
@@ -1615,9 +1224,6 @@ export const mount: ViewMount = (host) => {
         sparks.push(spark);
         node.append(holder);
 
-        // The sparkline is a scrub surface too: its width IS the run, so a
-        // horizontal drag seeks playback by fraction. A tap stays a tap — it
-        // falls through to the row's own click and promotes the seed.
         let down = false;
         let startX = 0;
         const fracStep = (ev: PointerEvent): number => {
@@ -1629,7 +1235,7 @@ export const mount: ViewMount = (host) => {
           if (ev.button !== 0) return;
           down = true;
           startX = ev.clientX;
-          try { holder.setPointerCapture(ev.pointerId); } catch { /* inactive pointer */ }
+          try { holder.setPointerCapture(ev.pointerId); } catch {  }
         });
         holder.addEventListener('pointermove', (ev) => {
           if (!down) return;
@@ -1649,8 +1255,6 @@ export const mount: ViewMount = (host) => {
       node.addEventListener('focus', () => emphasise(row.seed));
       node.addEventListener('blur', () => emphasise(null));
       node.addEventListener('click', () => {
-        // a spark drag ends with a click event on the row — that was a scrub,
-        // not a request to switch seeds
         if (sparkDragged) { sparkDragged = false; return; }
         watchSeed(row.seed);
       });
@@ -1668,12 +1272,6 @@ export const mount: ViewMount = (host) => {
     }
   }
 
-  /**
-   * Light one seed's ghost. Emphasis 1 ("readable"), never 2 — level 2 is the
-   * one gain allowed to rim past the bloom threshold, and a hover is not a
-   * reason to bloom. The hero is not a ghost, so the brightest thing on the
-   * stage stays the seed actually being replayed.
-   */
   function ghostEmphasis(seed: number | null): void {
     const layer = sceneHost?.ghosts ?? null;
     if (!layer || !ghostView) return;
@@ -1684,27 +1282,23 @@ export const mount: ViewMount = (host) => {
     });
   }
 
-  /** One seed, lit in both halves of the population view: its ghost and its field mark. */
   function emphasise(seed: number | null): void {
     ghostEmphasis(seed);
     fieldEmphasis(seed);
   }
 
-  /** Light one seed's mark on the field strip, to match its ghost. */
   function fieldEmphasis(seed: number | null): void {
     for (const mark of fieldMarks) {
       mark.classList.toggle('is-lit', seed !== null && Number(mark.dataset['seed']) === seed);
     }
   }
 
-  /** Samples the field can address — the longest lane's, so nothing is cut short. */
   function fieldSamples(): number {
     let most = 0;
     for (const lane of fieldLanes) if (lane.samples > most) most = lane.samples;
     return most;
   }
 
-  /** One mark per seed, built once per hero mount; only their positions move after that. */
   function buildField(lanes: readonly WallLane[], hero: number | null): void {
     fieldLanes = [...lanes].sort((a, b) => a.seed - b.seed);
     fieldX = new Float64Array(fieldLanes.length);
@@ -1734,22 +1328,10 @@ export const mount: ViewMount = (host) => {
       return mark;
     });
     fieldMarkHolder.replaceChildren(...fieldMarks);
-    // One seed is not a field. A track env with a single recorded lane has nothing to
-    // spread, and a strip with one mark on it would imply a population that is not there.
     field.hidden = framing !== 'track' || fieldLanes.length < 2;
     fieldSample = -1;
   }
 
-  /**
-   * Redraw the field for one strided sample: every seed's true position along the
-   * track, the hero apart, and the stage's own window at the same scale.
-   *
-   * `heroX` is the hero's EXACT per-frame position (its decoded frame), not its
-   * strided sample — the stage draws the hero every frame and the ghosts only every
-   * `stride`, and at stride 43 a cheetah covers most of a frame width between
-   * samples, so using the sample here would make the window jitter around the animal
-   * it is supposed to be centred on.
-   */
   function paintField(sample: number, heroX: number | null): void {
     if (field.hidden || fieldLanes.length === 0) return;
     const aspect = stage.clientHeight > 0 ? stage.clientWidth / stage.clientHeight : 16 / 9;
@@ -1791,8 +1373,6 @@ export const mount: ViewMount = (host) => {
       fieldWindow.hidden = true;
     }
 
-    // The chip counts GHOSTS, and `fieldX` also carries the hero — who is at dx = 0 and
-    // therefore always inside the window the rig centres on him. Discount exactly that.
     const inFrame = centre === null ? 0 : inFrameCount(fieldX, fieldLanes.length, centre, stageWindow);
     const heroCounted = heroIndex >= 0 && Number.isFinite(fieldX[heroIndex] ?? Number.NaN) ? 1 : 0;
     ghostsInFrame = Math.max(0, inFrame - heroCounted);
@@ -1804,7 +1384,6 @@ export const mount: ViewMount = (host) => {
         + `the stage frames ${formatDistance(stageWindow.width)} of it`;
   }
 
-  /** The hero's exact track position at a decoded frame index. */
   function heroTrackX(index: number): number | null {
     if (heroSource === null || heroSource.frameCount === 0) return null;
     const frame = heroSource.frameAt(Math.min(index, heroSource.frameCount - 1));
@@ -1812,7 +1391,6 @@ export const mount: ViewMount = (host) => {
     return x === undefined || !Number.isFinite(x) ? null : x;
   }
 
-  /** Write every ghost's pose for one strided sample. Allocation-free. */
   function paintGhosts(layer: GhostLayer, view: GhostView, sample: number): void {
     for (let index = 0; index < view.entries.length; index++) {
       const entry = view.entries[index];
@@ -1832,14 +1410,6 @@ export const mount: ViewMount = (host) => {
     return recordingRef(detail.recordings, envId, seed) !== null;
   }
 
-  /**
-   * The landmark strip under the scrub bar, drawn as a DENSITY.
-   *
-   * A seed that reaches its goal every few hundred steps fills all 180 buckets,
-   * and 180 identical full-height ticks is a gold barcode that says only "there
-   * were events". Opacity carries the count instead, so the strip shows WHERE
-   * the seed was productive — the same data, in the shape a reader can use.
-   */
   function paintTicks(ticks: readonly TimelineTick[]): void {
     let busiest = 1;
     for (const tick of ticks) if (tick.count > busiest) busiest = tick.count;
@@ -1884,9 +1454,6 @@ export const mount: ViewMount = (host) => {
     scrubHead.style.left = `${percent}%`;
     if (!scrubbing) scrubInput.value = String(info.position);
 
-    // The ghosts move on SAMPLE changes, not display frames: at ×1 that is 12
-    // writes a second instead of 60, and a tier rebuild (which hands back a new
-    // layer) re-primes them by identity rather than by a flag.
     const layer = sceneHost?.ghosts ?? null;
     if (layer && ghostView) {
       const sample = ghostSampleIndex(info.position, ghostView.stride, ghostSamples(ghostView));
@@ -1900,8 +1467,6 @@ export const mount: ViewMount = (host) => {
         paintGhosts(layer, ghostView, sample);
       }
     }
-    // The field is driven off the wall's own stride rather than off the ghost layer,
-    // so an environment with too few recorded seeds to ghost still animates its strip.
     if (!field.hidden && fieldLanes.length > 0) {
       const sample = ghostSampleIndex(info.position, stride, fieldSamples());
       if (sample !== fieldSample) {
@@ -1913,8 +1478,6 @@ export const mount: ViewMount = (host) => {
     statsAccum += info.frameMs;
     if (statsAccum < 150) return;
     statsAccum = 0;
-    // frames[0] is sim-core's SYNTHESIZED init state and carries step -1; naming
-    // it beats printing a negative step on the front page of the lab.
     readout.textContent =
       `step ${info.step < 0 ? 'init' : formatCount(info.step)} / ${formatStep(heroSteps)}`
       + ` · ${formatClock(info.simTime)}`;
@@ -1922,17 +1485,6 @@ export const mount: ViewMount = (host) => {
     syncPlay();
   }
 
-  /**
-   * What the ghost chip is allowed to say.
-   *
-   * The draw count is NOT the claim a reader hears — instanced draws are submitted
-   * whether or not anything they describe is inside the frustum, and on a cheetah
-   * wall past ~25k steps the seeds are metres to kilometres apart, so "7 ghosts ·
-   * 8 draws" over a stage holding one animal was a true sentence that read as a
-   * false one. The number printed is therefore how many ghosts are inside the
-   * stage's own window RIGHT NOW, measured from the same positions they are drawn
-   * at (`paintField`), with the field strip underneath carrying the rest.
-   */
   function ghostChipText(view: GhostView): string {
     const total = view.entries.length;
     if (framing !== 'track') return `ghosts ${formatCount(total)} · all in frame`;
@@ -1940,7 +1492,6 @@ export const mount: ViewMount = (host) => {
     return `ghosts ${formatCount(total)} · ${inFrame} in frame`;
   }
 
-  // ---- data ----
   let lastMarkerAt = 0;
 
   function loadColumnar(id: string, env: EnvId): Promise<FleetColumnar> {
@@ -1959,17 +1510,10 @@ export const mount: ViewMount = (host) => {
     return promise;
   }
 
-  /**
-   * One env's whole population, strided, cached per (run, env, stride).
-   *
-   * A promotion re-mounts the hero but must NOT re-download the population: the
-   * ghosts do not depend on which seed is on stage.
-   */
   function loadWall(id: string, env: EnvId, at: number): Promise<WallData> {
     const key = `${id}|${env}|${at}`;
     const cached = wallCache.get(key);
     if (cached) {
-      // touch: Map keeps insertion order, so re-inserting makes this the newest
       wallCache.delete(key);
       wallCache.set(key, cached);
       return cached;
@@ -1980,10 +1524,6 @@ export const mount: ViewMount = (host) => {
         throw error;
       });
     wallCache.set(key, promise);
-    // A 64-seed env is ~5 MB of pose samples. Walking all 16 environments of a
-    // mixed fleet would otherwise pin ~90 MB in a page nobody reloads, so the
-    // cache keeps the few most recent and re-fetches the rest (the server caches
-    // its own derivation, so a return visit is cheap).
     while (wallCache.size > WALL_CACHE_ENVS) {
       const oldest = wallCache.keys().next();
       if (oldest.done === true) break;
@@ -1992,14 +1532,12 @@ export const mount: ViewMount = (host) => {
     return promise;
   }
 
-  /** Samples the wall can address — the longest lane's, so nothing is cut short. */
   function ghostSamples(view: GhostView): number {
     let most = 0;
     for (const entry of view.entries) if (entry.lane.samples > most) most = entry.lane.samples;
     return most;
   }
 
-  /** Colour and emphasis, once per layer: the ramp is a rank, never a raw rate. */
   function primeGhosts(layer: GhostLayer, view: GhostView): void {
     const quantiles = rateQuantiles(rows);
     view.entries.forEach((entry, index) => {
@@ -2011,8 +1549,6 @@ export const mount: ViewMount = (host) => {
   function teardownStage(): void {
     sceneHost?.destroy();
     sceneHost = null;
-    // The host disposes only layers IT built on a tier rebuild (`ghostOwned` in
-    // sceneHost); the one handed in at mount is ours to the end.
     createdGhostLayer?.dispose();
     createdGhostLayer = null;
     ghostLayer = null;
@@ -2028,7 +1564,6 @@ export const mount: ViewMount = (host) => {
     field.hidden = true;
   }
 
-  /** Mount (or re-mount) the hero lane, preserving where the reader was. */
   async function mountHero(): Promise<void> {
     const generation = ++heroGeneration;
     const run = detail;
@@ -2059,10 +1594,6 @@ export const mount: ViewMount = (host) => {
       tagSub.textContent = `seed ${seed}${selection.promoted === null ? ' · leader' : ' · promoted'}`;
     }
 
-    // The stride is fixed BEFORE either request: it comes from the lane's declared
-    // step count, so the hero fetch and the population fetch agree on one sampling
-    // grid without waiting for each other, and both are in flight at once — the
-    // population is not a second page load.
     const ref = recordingRef(run.recordings, env, seed);
     stride = wallStride(ref?.steps ?? detail?.meta.steps ?? 0);
     applySpeed();
@@ -2101,13 +1632,6 @@ export const mount: ViewMount = (host) => {
       : progress * (frameCount - 1);
     frameAt = at;
 
-    // ---- the population layer ----
-    //
-    // Built BEFORE the host, because the layer is a MOUNT option: `sceneHost`
-    // attaches its group after the scene's `init()` and re-attaches it across
-    // every tier rebuild, which is the only way a layer survives one. It is fed
-    // the hero's own `geometry` — the same ground truth the hero is drawn from,
-    // never a second derivation.
     coverLabel.textContent = 'reading the population';
     const wall = await wallPromise.catch(() => null);
     if (destroyed || generation !== heroGeneration) return;
@@ -2119,8 +1643,6 @@ export const mount: ViewMount = (host) => {
         .slice(0, WALL_GHOST_CAP)
         .map((lane) => ({ lane, seed: lane.seed }));
       if (entries.length > 0) {
-        // the server's own stride is the truth (it clamps); the tempo follows it
-        // so one wall frame is exactly one ghost sample at ×1
         stride = wall.header.stride > 0 ? wall.header.stride : stride;
         ghostView = { stride, entries };
         const build = (tier: QualityTier): GhostLayer => makeGhostLayer({
@@ -2135,9 +1657,6 @@ export const mount: ViewMount = (host) => {
         createdGhostLayer = build(TIER_BY_LABEL[tierLabel]);
         ghosts = { layer: createdGhostLayer, rebuild: build };
       }
-      // The FIELD is the whole population — the hero included, and every seed the
-      // ghost cap left out — because the strip's job is exactly the seeds the stage
-      // cannot hold.
       buildField(wall.lanes.filter((lane) => lane.samples > 0 && lane.error === undefined), seed);
     }
     applySpeed();
@@ -2170,17 +1689,13 @@ export const mount: ViewMount = (host) => {
     stage.insertBefore(sceneHost.canvas, stageTag);
     cover.hidden = true;
     syncPlay();
-    statsAccum = 1000; // a hero swap reports its own numbers on its first frame
+    statsAccum = 1000;
 
     if (recording.health.message) {
       coverExtra.replaceChildren();
       stageTag.title = recording.health.message;
     }
 
-    // First paint before a frame is asked for, so a paused deep link still shows
-    // the population rather than an empty stage waiting on rAF. The field goes first:
-    // the chip's in-frame count is measured there, and it is drawn whether or not this
-    // environment had enough seeds to build a ghost layer.
     fieldSample = ghostSampleIndex(at, stride, fieldSamples());
     paintField(fieldSample, heroTrackX(Math.round(at)));
     const layer = sceneHost.ghosts;
@@ -2237,8 +1752,6 @@ export const mount: ViewMount = (host) => {
     transport.classList.add('is-idle');
   }
 
-  /** Switch environment: new scene, new rail, same place in the run. */
-  /** Promote a seed to hero — the rail rows and the science columns both land here. */
   function watchSeed(seed: number): void {
     const next = promoteSeed(selection, seed, playable);
     if (next === selection) return;
@@ -2272,10 +1785,6 @@ export const mount: ViewMount = (host) => {
       (error: unknown) => {
         if (destroyed || envId !== next) return;
         railRows.replaceChildren(errorState(error instanceof Error ? error.message : String(error)));
-        // The stage does not depend on fleet.jsonl. Without it there is no ranking,
-        // so the LEADER is unknowable — but the recordings still exist, and the
-        // lowest recorded seed is an honest stand-in that keeps the wall playing
-        // while the rail says what failed. The wall degrades one half at a time.
         const fallback = seedsFor(run.recordings, next)[0] ?? null;
         selection = setLeader(selection, fallback, playable);
         void mountHero();
@@ -2326,7 +1835,7 @@ export const mount: ViewMount = (host) => {
       envId: first,
       onWatchSeed: (env, seed, step) => {
         if (isEnvId(env) && env !== envId) selectEnv(env);
-        if (step !== undefined) frameAt = frameFromStep(step); // the remount consumes it
+        if (step !== undefined) frameAt = frameFromStep(step);
         watchSeed(seed);
         if (step !== undefined) seekToStep(step);
         window.scrollTo({ top: 0, behavior: 'smooth' });

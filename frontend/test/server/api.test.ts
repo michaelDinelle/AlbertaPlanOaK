@@ -1,12 +1,4 @@
 /// <reference types="bun" />
-// Server integration tests.
-//
-// Two fixture sources on purpose:
-//   1. a synthetic bench root under test/fixtures/server/bench — hermetic, and the only
-//      way to exercise the INCOMPLETE / killed-early / not-a-run-root cases (we must
-//      never write into .oak-benchmarks);
-//   2. the real .oak-benchmarks/frontend-demo-16env-20260803 — the complete-run and
-//      128-recording cases, skipped when that root is absent.
 
 import { afterAll, beforeAll, describe, expect, it } from 'bun:test';
 import { existsSync } from 'node:fs';
@@ -29,20 +21,17 @@ import { clearV4StepsCache, scanRecordings } from '../../server/recordings';
 import { RunIndex, runCompleteness } from '../../server/runIndex';
 import { statOrNull } from '../../server/jsonl';
 
-const HERE = dirname(fileURLToPath(import.meta.url)); // frontend/test/server
+const HERE = dirname(fileURLToPath(import.meta.url));
 const FIXTURE_ROOT = resolve(HERE, '..', 'fixtures', 'server');
 const BENCH = join(FIXTURE_ROOT, 'bench');
-/** a second bench root holding only roots that are meant to be broken or hostile */
 const HOSTILE = join(FIXTURE_ROOT, 'bench-hostile');
-/** deliberately OUTSIDE every bench root — the target symlink escapes are aimed at */
 const OUTSIDE = join(FIXTURE_ROOT, 'outside');
 const FLEET_CACHE = join(FIXTURE_ROOT, 'fleet-cache');
-const SECRET = 'TOP-SECRET-NOT-A-RECORDING-'.repeat(16); // > 64 B, so size alone would pass
+const SECRET = 'TOP-SECRET-NOT-A-RECORDING-'.repeat(16);
 const REAL_BENCH = resolve(HERE, '..', '..', '..', '.oak-benchmarks');
 const DEMO_ID = 'frontend-demo-16env-20260805';
 const DEMO_DIR = join(REAL_BENCH, DEMO_ID);
 
-// ---------- fixture construction ----------
 
 interface FleetRowSeed {
   kind: 'hb' | 'final';
@@ -79,11 +68,6 @@ function fleetRow(s: FleetRowSeed): string {
   });
 }
 
-/**
- * Minimal OAKT v1 tape (METRICS LAW 2026-08-05): header + one raw-DEFLATE
- * segment. `windows` gives per-window `{start, count, values}` where values
- * maps tape field name -> per-lane numbers; unlisted fields are 0.
- */
 function tapeBytes(
   laneCount: number,
   windows: { start: number; count: number; values: Record<string, number[]> }[],
@@ -103,13 +87,13 @@ function tapeBytes(
   });
   const json = Buffer.from(JSON.stringify({ fields }), 'utf8');
   const head = Buffer.alloc(16);
-  head.writeUInt32LE(0x544b414f, 0); // OAKT
+  head.writeUInt32LE(0x544b414f, 0);
   head.writeUInt32LE(1, 4);
   head.writeUInt32LE(laneCount, 8);
   head.writeUInt32LE(json.length, 12);
   const comp = deflateRawSync(payload);
   const seg = Buffer.alloc(20);
-  seg.writeUInt32LE(0x54474553, 0); // SEGT
+  seg.writeUInt32LE(0x54474553, 0);
   seg.writeUInt32LE(windows.length, 4);
   seg.writeUInt32LE(payload.length, 8);
   seg.writeUInt32LE(comp.length, 12);
@@ -141,12 +125,11 @@ function aggRow(step: number, kind: 'hb' | 'final'): string {
   });
 }
 
-/** record-v3 payload: 16 float32 per step (ctrl[6], done, pose[9]). */
 function recordBytes(steps: number, seedTag: number): Uint8Array {
   const f = new Float32Array(steps * 16);
   for (let s = 0; s < steps; s++) {
     for (let c = 0; c < 16; c++) f[s * 16 + c] = seedTag * 100 + s * 16 + c;
-    f[s * 16 + 6] = 0; // done
+    f[s * 16 + 6] = 0;
   }
   return new Uint8Array(f.buffer);
 }
@@ -165,24 +148,15 @@ async function writeLane(
   await Bun.write(join(dir, 'actions.bin'), recordBytes(steps, seed));
 }
 
-// ---------- record v4 fixtures ----------
-//
-// The server NEVER inflates a v4 payload and never checks a crc — it walks chunk
-// HEADERS to count steps and serves bytes. (Inflating every lane on every rescan
-// would mean reading the whole store; validity is the client decoder's job, per
-// src/sim/RECORD_V4_SPEC.md.) So these files carry REAL framing and opaque filler
-// payloads, which is exactly the surface the server reads.
 
 const V4_FILE_HEADER = 16;
 const V4_CHUNK_HEADER = 32;
 const V4_FILE_MAGIC = 0x344b414f;
 const V4_CHUNK_MAGIC = 0x344b4843;
 
-/** compressed-payload size this fixture pretends each chunk has */
 const v4PayloadBytes = (steps: number): number => 8 + steps * 3;
 
 interface V4Options {
-  /** append a half-written trailing chunk header claiming a payload the file lacks */
   tornTail?: boolean;
 }
 
@@ -224,12 +198,11 @@ function recordBytesV4(
     dv.setUint32(off, V4_CHUNK_MAGIC, true);
     dv.setUint32(off + 4, step, true);
     dv.setUint32(off + 8, 99, true);
-    dv.setUint32(off + 16, 4096, true); // a payload the file does not hold
+    dv.setUint32(off + 16, 4096, true);
   }
   return { bytes, chunks, steps: step };
 }
 
-/** the codec descriptors the two v4 fixture lanes carry, verbatim from the spec table */
 const V4_CODECS: Record<string, unknown> = {
   'Chain-cont-v0': { category: 'grid', ctrl: 'index', poseFields: [{ idx: 0, enc: 'u8' }], poseConst: { 1: 15 } },
   'Pendulum-cont-v0': {
@@ -276,7 +249,6 @@ async function buildFixtures(): Promise<void> {
     JSON.stringify({ candidate: 'beta-incomplete', keeper: 'alpha-complete', note: 'fixture' }, null, 1),
   );
 
-  // --- alpha-complete: reached its horizon, has recordings + summary + a death ---
   const alpha = join(BENCH, 'alpha-complete');
   await mkdir(alpha, { recursive: true });
   await writeFile(
@@ -298,8 +270,6 @@ async function buildFixtures(): Promise<void> {
       ],
     }),
   );
-  // METRICS LAW (2026-08-05): fleet.jsonl carries final certificates only;
-  // the step-100 series values live on the tape.
   await writeFile(
     join(alpha, 'fleet.jsonl'),
     [
@@ -334,16 +304,12 @@ async function buildFixtures(): Promise<void> {
   await writeFile(join(alpha, 'summary.json'), JSON.stringify({ results: [{ policy: 'oak', lanes: 2 }] }));
   await writeLane(alpha, 'HalfCheetah-v4', 0, 3, 4, 6);
   await writeLane(alpha, 'FourRooms-cont-v0', 1, 3, 3, 1);
-  await writeLane(alpha, 'DeepSea-cont-v0', 2, 2, 5, 1); // recordVersion 2 -> never served
-  // v4, finalized: meta.json carries `steps` + the chunk table
+  await writeLane(alpha, 'DeepSea-cont-v0', 2, 2, 5, 1);
   await writeLaneV4(alpha, 'Chain-cont-v0', 5, 8, 1, [4, 3]);
-  // v4, still being written: no `steps`, no chunk table, and a torn trailing header
-  // -> the step count has to come from a walk of the chunk headers
   await writeLaneV4(alpha, 'Pendulum-cont-v0', 6, 7, 1, [5, 6], { finalized: false, tornTail: true });
-  await mkdir(join(alpha, 'NotAnEnv-v9', 'seed4'), { recursive: true }); // unknown env dir -> ignored
+  await mkdir(join(alpha, 'NotAnEnv-v9', 'seed4'), { recursive: true });
   await writeFile(join(alpha, 'NotAnEnv-v9', 'seed4', 'meta.json'), JSON.stringify({ recordVersion: 3 }));
 
-  // --- beta-incomplete: killed mid-run. Has a LYING .done marker and a half-written row.
   const beta = join(BENCH, 'beta-incomplete');
   await mkdir(beta, { recursive: true });
   await writeFile(
@@ -368,9 +334,8 @@ async function buildFixtures(): Promise<void> {
     ].join('\n')}\n{"v":1,"kind":"hb","lane":1,"step":200,"health":{"rewardRa`,
   );
   await writeFile(join(beta, 'aggregate.jsonl'), `${aggRow(100, 'hb')}\n${aggRow(200, 'hb')}\n`);
-  await writeFile(join(beta, '.done'), ''); // the marker we deliberately do not trust
+  await writeFile(join(beta, '.done'), '');
 
-  // --- gamma-short-final: finals written at a kill milestone, well short of the horizon ---
   const gamma = join(BENCH, 'gamma-short-final');
   await mkdir(gamma, { recursive: true });
   await writeFile(
@@ -390,7 +355,6 @@ async function buildFixtures(): Promise<void> {
     `${fleetRow({ kind: 'final', lane: 0, step: 400, envId: 'DeepSea-cont-v0', rewardSum: 1, rewardRate: 0.0025 })}\n`,
   );
 
-  // --- delta-lane-meta: a per-lane recording meta.json shape; must NOT index as a run ---
   const delta = join(BENCH, 'delta-lane-meta');
   await mkdir(delta, { recursive: true });
   await writeFile(
@@ -398,7 +362,6 @@ async function buildFixtures(): Promise<void> {
     JSON.stringify({ envId: 'HalfCheetah-v4', seed: 3, actDim: 6, recordVersion: 3 }),
   );
 
-  // --- epsilon-live: driven by the SSE test ---
   const eps = join(BENCH, 'epsilon-live');
   await mkdir(eps, { recursive: true });
   await writeFile(
@@ -420,7 +383,6 @@ async function buildFixtures(): Promise<void> {
   await writeFile(join(eps, 'aggregate.jsonl'), `${aggRow(100, 'hb')}\n`);
 }
 
-/** Minimal valid run root: meta.json + a complete fleet.jsonl. */
 async function writeRunRoot(
   root: string,
   id: string,
@@ -448,19 +410,12 @@ async function writeRunRoot(
   return dir;
 }
 
-/**
- * The hostile bench root. Every entry here models a real failure a shared lab volume
- * produces: a root whose fleet.jsonl is a directory (a mkdir typo, or a run root reused
- * as a folder), one that is chmod 000 (written by another user), and lanes whose files
- * are symlinks pointing out of the bench root.
- */
 async function buildHostileFixtures(): Promise<void> {
   await rm(HOSTILE, { recursive: true, force: true });
   await rm(OUTSIDE, { recursive: true, force: true });
   await mkdir(HOSTILE, { recursive: true });
   await mkdir(join(OUTSIDE, 'lane'), { recursive: true });
 
-  // What a symlinked lane file would exfiltrate, plus a whole plausible lane directory.
   await writeFile(join(OUTSIDE, 'secret.bin'), SECRET);
   await writeFile(
     join(OUTSIDE, 'lane', 'meta.json'),
@@ -468,29 +423,23 @@ async function buildHostileFixtures(): Promise<void> {
   );
   await Bun.write(join(OUTSIDE, 'lane', 'actions.bin'), recordBytes(4, 8));
 
-  // 1. healthy neighbour: must still be indexed with everything derived
   const good = await writeRunRoot(HOSTILE, 'good-run', 'HalfCheetah-v4', '2026-08-02T09:00:00Z');
   await writeLane(good, 'HalfCheetah-v4', 0, 3, 4, 6);
 
-  // 2. fleet.jsonl is a DIRECTORY — stat succeeds, every read of it throws EISDIR
   const dirFleet = await writeRunRoot(HOSTILE, 'dir-fleet', 'DeepSea-cont-v0', '2026-08-02T08:00:00Z');
   await rm(join(dirFleet, 'fleet.jsonl'), { force: true });
   await mkdir(join(dirFleet, 'fleet.jsonl'), { recursive: true });
 
-  // 3. fleet.jsonl unreadable (EACCES). aggregate.jsonl too, for the detail endpoint.
   const noperm = await writeRunRoot(HOSTILE, 'noperm-fleet', 'CartPole-cont-v0', '2026-08-02T07:00:00Z');
   await writeFile(join(noperm, 'aggregate.jsonl'), `${aggRow(100, 'hb')}\n`);
   await chmod(join(noperm, 'fleet.jsonl'), 0o000);
   await chmod(join(noperm, 'aggregate.jsonl'), 0o000);
 
-  // 4. summary.json + a recording lane land AFTER the first index build (issue 3)
   await writeRunRoot(HOSTILE, 'stale-cache', 'Pendulum-cont-v0', '2026-08-02T06:00:00Z');
 
-  // 5. symlinked lane payloads next to legitimate ones (issue 4)
   const links = await writeRunRoot(HOSTILE, 'link-lanes', 'HalfCheetah-v4', '2026-08-02T05:00:00Z');
-  await writeLane(links, 'HalfCheetah-v4', 0, 3, 4, 6); // legitimate, must survive
+  await writeLane(links, 'HalfCheetah-v4', 0, 3, 4, 6);
 
-  // actions.bin -> a file outside the bench root
   const linkedActions = join(links, 'HalfCheetah-v4', 'seed7');
   await mkdir(linkedActions, { recursive: true });
   await writeFile(
@@ -499,13 +448,11 @@ async function buildHostileFixtures(): Promise<void> {
   );
   await symlink(join(OUTSIDE, 'secret.bin'), join(linkedActions, 'actions.bin'));
 
-  // meta.json -> outside (the descriptor read, rather than the payload read)
   const linkedMeta = join(links, 'HalfCheetah-v4', 'seed9');
   await mkdir(linkedMeta, { recursive: true });
   await Bun.write(join(linkedMeta, 'actions.bin'), recordBytes(4, 9));
   await symlink(join(OUTSIDE, 'lane', 'meta.json'), join(linkedMeta, 'meta.json'));
 
-  // the whole lane directory -> outside
   await mkdir(join(links, 'FourRooms-cont-v0'), { recursive: true });
   await symlink(join(OUTSIDE, 'lane'), join(links, 'FourRooms-cont-v0', 'seed8'));
 }
@@ -531,7 +478,6 @@ async function jsonCacheFiles(dir: string): Promise<string[]> {
   }
 }
 
-/** Poll an async predicate — the disk cache is written fire-and-forget, by design. */
 async function waitUntilAsync(pred: () => Promise<boolean>, ms = 5000): Promise<void> {
   const t0 = Date.now();
   while (!(await pred())) {
@@ -540,8 +486,6 @@ async function waitUntilAsync(pred: () => Promise<boolean>, ms = 5000): Promise<
   }
 }
 
-// Resolved synchronously at module load: `it.skipIf` is evaluated when the test is
-// registered, which happens before any beforeAll hook runs.
 const demoPresent = existsSync(join(DEMO_DIR, 'meta.json'));
 
 beforeAll(async () => {
@@ -550,21 +494,17 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
-  // chmod back before the next run's rm -rf; a 000 file inside a writable directory is
-  // removable, but leaving it is a trap for anyone poking at the fixtures by hand.
   await chmod(join(HOSTILE, 'noperm-fleet', 'fleet.jsonl'), 0o644).catch(() => undefined);
   await chmod(join(HOSTILE, 'noperm-fleet', 'aggregate.jsonl'), 0o644).catch(() => undefined);
   await rm(FLEET_CACHE, { recursive: true, force: true });
 });
 
-// ---------- run index ----------
 
 describe('run index discovery', () => {
   it('indexes only directories whose meta.json carries fleetSchemaVersion', async () => {
     const entries = await makeIndex().list();
     const ids = entries.map((e) => e.id).sort();
     expect(ids).toEqual(['alpha-complete', 'beta-incomplete', 'epsilon-live', 'gamma-short-final']);
-    // a per-lane recording meta.json is never mistaken for a run root
     expect(ids).not.toContain('delta-lane-meta');
   });
 
@@ -609,10 +549,10 @@ describe('run index discovery', () => {
   it('calls an interrupted run incomplete despite a .done marker, and in-flight while fresh', async () => {
     const entries = await makeIndex().list();
     const beta = entries.find((e) => e.id === 'beta-incomplete') as RunIndexEntry;
-    expect(await statOrNull(join(BENCH, 'beta-incomplete', '.done'))).not.toBeNull(); // the lie
+    expect(await statOrNull(join(BENCH, 'beta-incomplete', '.done'))).not.toBeNull();
     expect(beta.complete).toBe(false);
-    expect(beta.maxStep).toBe(200); // truncated trailing row contributes nothing
-    expect(beta.inFlight).toBe(true); // just written -> under the 120 s window
+    expect(beta.maxStep).toBe(200);
+    expect(beta.inFlight).toBe(true);
     expect(beta.hasSummary).toBe(false);
     expect(beta.hasRecordings).toBe(false);
     expect(beta.role).toBe('candidate');
@@ -667,7 +607,7 @@ describe('run index discovery', () => {
     const gamma = third.find((e) => e.id === 'gamma-short-final') as RunIndexEntry;
     expect(gamma.maxStep).toBe(1000);
     expect(gamma.complete).toBe(true);
-    await writeFile(fleetPath, prev); // restore
+    await writeFile(fleetPath, prev);
   });
 });
 
@@ -687,7 +627,6 @@ describe('completeness against the real demo root', () => {
   });
 });
 
-// ---------- recordings ----------
 
 describe('recordings discovery', () => {
   it('serves recordVersion 3 and 4, in canonical env order', async () => {
@@ -695,12 +634,10 @@ describe('recordings discovery', () => {
     expect(recs.map((r) => `${r.envId}/${r.seed}`)).toEqual([
       'HalfCheetah-v4/0', 'FourRooms-cont-v0/1', 'Pendulum-cont-v0/6', 'Chain-cont-v0/5',
     ]);
-    // v3: steps = byteLength / 64
     expect(recs[0]?.steps).toBe(4);
     expect(recs[0]?.bytes).toBe(4 * 64);
     expect(recs[0]?.actDim).toBe(6);
     expect(recs[1]?.steps).toBe(3);
-    // recordVersion 2 and the unknown env directory are both absent
     expect(recs.some((r) => r.envId === 'DeepSea-cont-v0')).toBe(false);
     expect(recs.length).toBe(4);
   });
@@ -717,7 +654,6 @@ describe('recordings discovery', () => {
   });
 });
 
-// ---------- record v4 discovery ----------
 
 describe('record v4 discovery', () => {
   const find = async (envId: string, seed: number) => {
@@ -729,14 +665,13 @@ describe('record v4 discovery', () => {
     const rec = await find('Chain-cont-v0', 5);
     expect(rec).toBeDefined();
     expect(rec?.recordVersion).toBe(4);
-    expect(rec?.steps).toBe(7); // 4 + 3, as declared
+    expect(rec?.steps).toBe(7);
     expect(rec?.codecVersion).toBe(1);
     expect(rec?.codec).toEqual(V4_CODECS['Chain-cont-v0']);
     expect(rec?.chunks).toEqual([
       [0, 4, V4_FILE_HEADER, V4_CHUNK_HEADER + v4PayloadBytes(4)],
       [4, 3, V4_FILE_HEADER + V4_CHUNK_HEADER + v4PayloadBytes(4), V4_CHUNK_HEADER + v4PayloadBytes(3)],
     ]);
-    // bytes is still the file size, not a decoded size
     expect(rec?.bytes).toBe(
       V4_FILE_HEADER + 2 * V4_CHUNK_HEADER + v4PayloadBytes(4) + v4PayloadBytes(3),
     );
@@ -745,10 +680,8 @@ describe('record v4 discovery', () => {
   it('walks the chunk headers when meta.json has no steps, and stops at the torn tail', async () => {
     const rec = await find('Pendulum-cont-v0', 6);
     expect(rec).toBeDefined();
-    // 5 + 6 whole chunks; the half-written trailing header contributes nothing
     expect(rec?.steps).toBe(11);
     expect(rec?.chunks).toBeUndefined();
-    // the codec descriptor is still carried — it is written at open, not at finalize
     expect(rec?.codecVersion).toBe(1);
     expect(rec?.codec).toEqual(V4_CODECS['Pendulum-cont-v0']);
   });
@@ -761,11 +694,9 @@ describe('record v4 discovery', () => {
       await writeLaneV4(root, 'Chain-cont-v0', 0, 8, 1, [10, 10], { finalized: false });
       expect((await scanRecordings(root, { root }))[0]?.steps).toBe(20);
 
-      // the recorder drains two more chunks
       await writeLaneV4(root, 'Chain-cont-v0', 0, 8, 1, [10, 10, 10, 5], { finalized: false });
       expect((await scanRecordings(root, { root }))[0]?.steps).toBe(35);
 
-      // and a stale memo would keep answering 35 after finalize, so prove it does not
       await writeLaneV4(root, 'Chain-cont-v0', 0, 8, 1, [10, 10, 10, 5, 1], { finalized: false });
       expect((await scanRecordings(root, { root }))[0]?.steps).toBe(36);
     } finally {
@@ -789,7 +720,6 @@ describe('record v4 discovery', () => {
       clearV4StepsCache();
       expect((await scanRecordings(root, { root }))[0]?.steps).toBe(0);
 
-      // shorter than the 16-byte file header -> not a servable lane at all
       await Bun.write(lane, good.slice(0, 8));
       clearV4StepsCache();
       expect(await scanRecordings(root, { root })).toEqual([]);
@@ -800,7 +730,6 @@ describe('record v4 discovery', () => {
   });
 });
 
-// ---------- Range header parsing ----------
 
 describe('parseRangeHeader', () => {
   const size = 6400;
@@ -822,7 +751,6 @@ describe('parseRangeHeader', () => {
   });
 });
 
-// ---------- HTTP surface ----------
 
 describe('http api (fixture bench root)', () => {
   let server: ReturnType<typeof Bun.serve> | null = null;
@@ -847,8 +775,6 @@ describe('http api (fixture bench root)', () => {
   });
 
   it('GET /api/roles reads v1 `keeper` as v2 `bestKernel`, nulls for absent roles', async () => {
-    // The fixture ROLES.json is deliberately still the v1 shape: readers accept both
-    // spellings for one migration cycle, and this is the proof the fallback works.
     const roles = (await (await fetch(`${base}/api/roles`)).json()) as RolesResponse;
     expect(roles).toEqual({
       bestKernel: 'alpha-complete',
@@ -890,7 +816,6 @@ describe('http api (fixture bench root)', () => {
       [-5, -8],
       [3, 9],
     ]);
-    // step-100 comes from the tape (f32 storage), step-200 from the final row (JSON double)
     expect(col.series['health.rewardRate']?.[1]).toEqual([Math.fround(0.03), 0.045]);
   });
 
@@ -919,7 +844,6 @@ describe('http api (fixture bench root)', () => {
     expect(ranged.headers.get('content-range')).toBe('bytes 64-127/256');
     const chunk = new Float32Array(await ranged.arrayBuffer());
     expect(chunk.length).toBe(16);
-    // step 1 of seed 0: value = seedTag*100 + step*16 + channel, with done (index 6) zeroed
     expect(chunk[0]).toBe(16);
     expect(chunk[6]).toBe(0);
     expect(chunk[15]).toBe(31);
@@ -965,12 +889,10 @@ describe('http api (fixture bench root)', () => {
     expect(v4.steps).toBe(7);
     expect(v4.codecVersion).toBe(1);
     expect(v4.codec).toEqual(V4_CODECS['Chain-cont-v0']);
-    // this is what makes the theater's prefix fetch chunk-aware
     expect(v4.chunks?.length).toBe(2);
     expect(v4.chunks?.[0]?.[0]).toBe(0);
     expect(v4.chunks?.[1]?.[1]).toBe(3);
 
-    // an in-flight v4 lane has a step count but no chunk table yet
     const inFlight = (await (
       await fetch(`${base}/api/runs/alpha-complete/recordings/Pendulum-cont-v0/6`)
     ).json()) as Descriptor;
@@ -978,7 +900,6 @@ describe('http api (fixture bench root)', () => {
     expect(inFlight.chunks).toBeUndefined();
     expect(inFlight.codecVersion).toBe(1);
 
-    // a v3 lane's descriptor is unchanged — no v4 keys at all
     const v3 = (await (
       await fetch(`${base}/api/runs/alpha-complete/recordings/HalfCheetah-v4/0`)
     ).json()) as Descriptor;
@@ -995,7 +916,6 @@ describe('http api (fixture bench root)', () => {
     expect(whole.byteLength).toBe(expected);
     expect(new DataView(whole.buffer).getUint32(0, true)).toBe(V4_FILE_MAGIC);
 
-    // the loader's chunk-aware prefix: chunk 0 only
     const firstChunkEnd = V4_FILE_HEADER + V4_CHUNK_HEADER + v4PayloadBytes(4);
     const ranged = await fetch(url, { headers: { range: `bytes=0-${firstChunkEnd - 1}` } });
     expect(ranged.status).toBe(206);
@@ -1011,7 +931,7 @@ describe('http api (fixture bench root)', () => {
       ['/api/runs/%2e%2e%2f%2e%2e%2fetc%2fpasswd', 400],
       ['/api/runs/alpha-complete/recordings/%2e%2e%2f%2e%2e%2fetc/0/actions.bin', 400],
       ['/api/runs/alpha-complete/recordings/NotAnEnv-v9/4/actions.bin', 404],
-      ['/api/runs/alpha-complete/recordings/DeepSea-cont-v0/2/actions.bin', 404], // recordVersion 2
+      ['/api/runs/alpha-complete/recordings/DeepSea-cont-v0/2/actions.bin', 404],
       ['/api/runs/alpha-complete/recordings/HalfCheetah-v4/9/actions.bin', 404],
       ['/api/runs/alpha-complete/recordings/HalfCheetah-v4/0/summary.json', 404],
       ['/api/runs/alpha-complete/nope', 404],
@@ -1034,7 +954,7 @@ describe('http api (fixture bench root)', () => {
     const res = await fetch(`${base}/api/runs/alpha-complete/live`, { signal: ac.signal });
     expect(res.status).toBe(200);
     expect(res.headers.get('content-type')).toContain('text/event-stream');
-    const text = await res.text(); // completed run: hello + status + done, then closed
+    const text = await res.text();
     expect(text).toContain('event: hello');
     expect(text).toContain('event: done');
     ac.abort();
@@ -1077,13 +997,12 @@ describe('http api (real bench root)', () => {
     const buf = await res.arrayBuffer();
     expect(buf.byteLength).toBe(128);
     const f = new Float32Array(buf);
-    expect(f.length).toBe(32); // exactly two record-v3 frames
+    expect(f.length).toBe(32);
     expect(Number.isFinite(f[0] ?? Number.NaN)).toBe(true);
-    expect(f[6]).toBe(0); // done channel of frame 0
+    expect(f[6]).toBe(0);
   });
 });
 
-// ---------- production static serving ----------
 
 describe('production static serving', () => {
   const DIST = join(FIXTURE_ROOT, 'dist');
@@ -1143,7 +1062,6 @@ describe('production static serving', () => {
   });
 });
 
-// ---------- SSE follow ----------
 
 interface SseEvent {
   event: string;
@@ -1178,7 +1096,6 @@ function drainSse(body: ReadableStream<Uint8Array>): { events: SseEvent[]; close
         if (done) break;
       }
     } catch {
-      /* stream torn down */
     }
     state.done = true;
   })();
@@ -1220,13 +1137,11 @@ describe('live SSE', () => {
     expect(firstStatus.complete).toBe(false);
     expect(firstStatus.inFlight).toBe(true);
 
-    // the run writes another heartbeat
     await writeFile(aggPath, `${await Bun.file(aggPath).text()}${aggRow(200, 'hb')}\n`);
     await waitUntil(() => sink.events.some((e) => e.event === 'row'));
     const row = JSON.parse(sink.events.find((e) => e.event === 'row')?.data ?? '{}') as { step: number };
     expect(row.step).toBe(200);
 
-    // ... and then finishes
     await writeFile(
       fleetPath,
       `${await Bun.file(fleetPath).text()}${fleetRow({
@@ -1265,7 +1180,6 @@ describe('live SSE', () => {
   });
 });
 
-// ---------- hostile bench root: one broken run must not take the index down ----------
 
 describe('hostile run roots (error isolation)', () => {
   let server: ReturnType<typeof Bun.serve> | null = null;
@@ -1299,8 +1213,6 @@ describe('hostile run roots (error isolation)', () => {
     expect(res.status).toBe(200);
     const runs = (await res.json()) as RunIndexEntry[];
     expect(runs.some((r) => r.id === 'good-run' && r.complete)).toBe(true);
-    // the broken roots are degraded, never fatal: no final row is readable, so they read
-    // as incomplete rather than vanishing or throwing
     for (const id of ['dir-fleet', 'noperm-fleet']) {
       const bad = runs.find((r) => r.id === id);
       if (bad !== undefined) {
@@ -1338,7 +1250,6 @@ describe('hostile run roots (error isolation)', () => {
   });
 });
 
-// ---------- symlink containment ----------
 
 describe('recording symlink containment', () => {
   let server: ReturnType<typeof Bun.serve> | null = null;
@@ -1365,9 +1276,9 @@ describe('recording symlink containment', () => {
 
   it('404s every symlinked lane over HTTP and never leaks the target bytes', async () => {
     const cases = [
-      '/api/runs/link-lanes/recordings/HalfCheetah-v4/7/actions.bin', // actions.bin -> outside
-      '/api/runs/link-lanes/recordings/HalfCheetah-v4/9/meta.json', // meta.json -> outside
-      '/api/runs/link-lanes/recordings/FourRooms-cont-v0/8/actions.bin', // lane dir -> outside
+      '/api/runs/link-lanes/recordings/HalfCheetah-v4/7/actions.bin',
+      '/api/runs/link-lanes/recordings/HalfCheetah-v4/9/meta.json',
+      '/api/runs/link-lanes/recordings/FourRooms-cont-v0/8/actions.bin',
     ];
     for (const path of cases) {
       const res = await fetch(`${base}${path}`);
@@ -1384,20 +1295,16 @@ describe('recording symlink containment', () => {
   });
 });
 
-// ---------- derived-cache key freshness ----------
 
 describe('run-index derived cache invalidation', () => {
   it('sees a summary.json and a recording written after the run finished', async () => {
     const dir = join(HOSTILE, 'stale-cache');
-    // ONE index instance: a fresh one would re-derive anyway, which proves nothing.
     const index = new RunIndex({ benchRoot: HOSTILE, cacheFile: null, ttlMs: 0 });
 
     const before = (await index.list()).find((e) => e.id === 'stale-cache') as RunIndexEntry;
     expect(before.hasSummary).toBe(false);
     expect(before.hasRecordings).toBe(false);
 
-    // summary.json is written by `fleet.py report` AFTER the run stops appending to
-    // fleet.jsonl — the mtime the old key was built from never changes again.
     await writeFile(join(dir, 'summary.json'), JSON.stringify({ results: [{ policy: 'oak' }] }));
     const withSummary = (await index.list()).find((e) => e.id === 'stale-cache') as RunIndexEntry;
     expect(withSummary.hasSummary).toBe(true);
@@ -1411,7 +1318,6 @@ describe('run-index derived cache invalidation', () => {
   });
 });
 
-// ---------- resolve() miss throttle ----------
 
 describe('RunIndex.resolve miss throttling', () => {
   it('does not rescan for an unknown id inside the TTL window, and does after it', async () => {
@@ -1423,12 +1329,9 @@ describe('RunIndex.resolve miss throttling', () => {
     const index = new RunIndex({ benchRoot: root, cacheFile: null, ttlMs: 60_000 });
     expect(await index.resolve('seed-run')).toBeDefined();
 
-    // A run root that appeared after the scan. Inside the TTL the miss is just a miss —
-    // otherwise any 404-spamming client forces a full rescan per request.
     await writeRunRoot(root, 'late-run', 'DeepSea-cont-v0', '2026-08-02T03:00:00Z');
     expect(await index.resolve('late-run')).toBeUndefined();
 
-    // Same filesystem state, TTL 0: the miss-rescan is allowed and finds it.
     const eager = new RunIndex({ benchRoot: root, cacheFile: null, ttlMs: 0 });
     await eager.list();
     expect(await eager.resolve('late-run')).toBeDefined();
@@ -1436,7 +1339,6 @@ describe('RunIndex.resolve miss throttling', () => {
   });
 });
 
-// ---------- fleet query: envId + field-order normalization ----------
 
 describe('parseFleetQuery', () => {
   it('sorts fields so permutations collapse to one cache entry', () => {
@@ -1489,7 +1391,6 @@ describe('fleet envId filtering over HTTP', () => {
     expect(col.lanes).toEqual([{ lane: 1, seed: 1, policy: 'oak', envId: 'FourRooms-cont-v0' }]);
     expect(col.series['rewardSum']).toEqual([[3, 9]]);
 
-    // and the unfiltered query is still whole
     const all = (await (
       await fetch(`${base}/api/runs/alpha-complete/fleet?fields=rewardSum`)
     ).json()) as FleetColumnar;
@@ -1515,7 +1416,6 @@ describe('fleet envId filtering over HTTP', () => {
   });
 });
 
-// ---------- fleet disk cache: soundness, single-flight, bound ----------
 
 describe('fleet disk cache', () => {
   const dir = join(BENCH, 'alpha-complete');
@@ -1535,12 +1435,11 @@ describe('fleet disk cache', () => {
     expect(rec['fields']).toEqual(['rewardSum']);
     expect(rec['envId']).toBeNull();
 
-    // Simulate a 32-bit hash collision: right file name, different query, wrong columns.
     rec['fields'] = ['health.rewardRate'];
     rec['data'] = { steps: [-1], lanes: [], series: { 'health.rewardRate': [] } };
     await writeFile(path, JSON.stringify(rec));
 
-    clearFleetCache(); // force the disk path
+    clearFleetCache();
     const second = await deriveFleetColumnar({ id: 'alpha-complete', dir, query, inFlight: false, cacheDir: FLEET_CACHE });
     expect(second.steps).toEqual([100, 200]);
     expect(second.series['rewardSum']).toEqual([
@@ -1576,7 +1475,6 @@ describe('fleet disk cache', () => {
       deriveFleetColumnar({ id: 'alpha-complete', dir, query, inFlight: true, cacheDir: null }),
     );
     const results = await Promise.all(calls);
-    // one parse => one result object, handed to all eight callers
     for (const r of results) expect(r).toBe(results[0] as FleetColumnar);
     expect(results[0]?.steps).toEqual([100, 200]);
   });
@@ -1622,7 +1520,6 @@ describe('fleet disk cache', () => {
   });
 });
 
-// ---------- cache paths are per bench root ----------
 
 describe('derived cache paths', () => {
   it('keys the run-index file and fleet cache dir by bench root', () => {
@@ -1630,15 +1527,13 @@ describe('derived cache paths', () => {
     const b = '/tmp/bench-b';
     expect(runIndexCacheFile(a)).not.toBe(runIndexCacheFile(b));
     expect(fleetCacheDir(a)).not.toBe(fleetCacheDir(b));
-    expect(runIndexCacheFile(a)).toBe(runIndexCacheFile(a)); // deterministic
+    expect(runIndexCacheFile(a)).toBe(runIndexCacheFile(a));
     expect(runIndexCacheFile(a).startsWith(CACHE_DIR)).toBe(true);
     expect(fleetCacheDir(a).startsWith(join(CACHE_DIR, 'fleet'))).toBe(true);
-    // a trailing separator names the same root
     expect(runIndexCacheFile(a)).toBe(runIndexCacheFile(`${a}/`));
   });
 });
 
-// ---------- CORS + conditional requests ----------
 
 describe('origin policy', () => {
   let dev: ReturnType<typeof Bun.serve> | null = null;

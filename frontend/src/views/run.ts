@@ -1,14 +1,3 @@
-// The run-science module the wall embeds (`#/run/:id` itself just redirects).
-//
-// House rule: metrics are NEVER pooled across environments, and nothing is
-// shown twice. The wall already carries the run identity (header bar), every
-// per-env reward figure (the learning curve + the rail), and the env switcher
-// (the chips) — so this module adds ONLY the two things with no other surface:
-// the per-seed detail for the current environment, and fleet-wide population
-// health (divergence, survival, retention, positivity), which is population-
-// typed or scale-free by construction. The only cross-env chart is positivity,
-// because "fraction of seeds above zero" is the one quantity that means the
-// same thing in CartPole and in HalfCheetah.
 
 import type { ViewMount } from '../router';
 import type { CurvesResponse, FleetColumnar, RunDetail } from '@shared/types';
@@ -57,17 +46,8 @@ interface Disposable {
 
 const LANE_CAP = 140;
 
-/** the seed cap for the per-seed total-reward profile (one bar per column) */
 const COLUMN_CAP = 256;
 
-/**
- * Reverse ECDF of a per-seed ratio: for every observed value x, the fraction of seeds
- * at or above it. Stepped, it reads as "how much of the population kept how much of
- * its peak" — and its height at x = ½ is exactly the retention-rate tile, which makes
- * the two cross-check each other instead of being two unrelated numbers.
- *
- * Ties collapse onto one step (a value shared by 40 seeds is one drop, not 40).
- */
 function lastFinite(values: readonly (number | null)[]): { value: number; index: number } | null {
   for (let i = values.length - 1; i >= 0; i--) {
     const value = values[i];
@@ -76,7 +56,6 @@ function lastFinite(values: readonly (number | null)[]): { value: number; index:
   return null;
 }
 
-/** final ÷ peak of a windowed-rate series — the rail's own retention semantics */
 function retentionOf(window: readonly (number | null)[]): number | null {
   let peak = -Infinity;
   for (const value of window) {
@@ -99,10 +78,6 @@ function retentionCurve(values: readonly number[]): { steps: number[]; fraction:
     steps.push(value);
     fraction.push((n - i) / n);
   }
-  // Anchor the FULL [0, 1] domain. A reverse ECDF is defined everywhere:
-  // left of the lowest observed value the fraction is "everything at or above
-  // 0", and right of the highest it is 0 — without these anchors the curve
-  // simply started at the first observation and looked like missing data.
   const first = steps[0];
   if (n > 0 && first !== undefined && first > 0) {
     const atZero = sorted.filter((v) => v >= 0).length / n;
@@ -117,14 +92,6 @@ function retentionCurve(values: readonly number[]): { steps: number[]; fraction:
   return { steps, fraction };
 }
 
-// ---------------------------------------------------------------------------
-// the science module
-//
-// This file no longer owns a page. `#/run/:id` redirects into the wall, and the
-// wall embeds `mountRunScience` below its learning-curve strip: the CURRENT
-// environment's per-seed detail (collapsible; total-reward columns are
-// click-to-watch), then population health in a second collapsed block.
-// ---------------------------------------------------------------------------
 
 export const mount: ViewMount = (el_, params) => {
   const id = params['id'];
@@ -135,21 +102,15 @@ export const mount: ViewMount = (el_, params) => {
 
 export interface RunScienceOptions {
   runId: string;
-  /** the environment whose section leads; null = first in the schedule */
   envId: string | null;
-  /** click-to-watch: a seed picked in the totals columns or a population lane */
   onWatchSeed?(envId: string, seed: number, step?: number): void;
-  /** scrub from a science chart's timeline; commit=false while dragging */
   onSeek?(step: number, commit: boolean): void;
 }
 
 export interface RunScienceHandle {
   destroy(): void;
-  /** swap the leading environment section (the wall's env chips call this) */
   setEnv(envId: string): void;
-  /** ride the wall's clock: the gold playhead on every step-axis chart */
   setPlayhead(step: number | null): void;
-  /** the hero seed — its lane is lifted in the population chart */
   setHighlight(seed: number | null): void;
 }
 
@@ -161,7 +122,6 @@ export function mountRunScience(host: HTMLElement, opts: RunScienceOptions): Run
   const disposables: Disposable[] = [];
   let destroyed = false;
   let envSwap: ((envId: string) => void) | null = null;
-  /** every chart whose x axis is the run's own timeline */
   const playheadCharts = new Set<ChartHandle>();
   let playheadStep: number | null = null;
   let heroSeed: number | null = null;
@@ -199,14 +159,6 @@ export function mountRunScience(host: HTMLElement, opts: RunScienceOptions): Run
     const mixed = shares.length > 1;
     const horizon = meta.steps;
 
-    /**
-     * `summary` is null for two OPPOSITE reasons and the advice differs. Missing =
-     * fleet.py report was never run here, so run it. Unreadable = the file is on
-     * disk and was REJECTED as invalid JSON — telling the user to re-run the tool
-     * that just wrote it is a doom loop, and claiming the file is absent (or that
-     * it "predates" a field it actually contains) is simply false. Every empty
-     * state below asks this first.
-     */
     const summaryUnreadable = detail.summaryError === 'unreadable';
     const SUMMARY_REJECTED =
       'summary.json is present on this root but could not be parsed, so it was rejected as '
@@ -214,20 +166,8 @@ export function mountRunScience(host: HTMLElement, opts: RunScienceOptions): Run
       + 'half-flushed write, or a non-finite number serialized as bare NaN (JSON has no NaN). '
       + 'Re-running tools/fleet.py report helps only once the writer emits valid JSON.';
 
-    /**
-     * EVERY policy-dependent number resolves through this (see state.policyView).
-     * A policy switch must RE-DERIVE the figures — redrawing the charts while the
-     * hero IQM, positivity, survival and completeness still describe the previous
-     * policy is the worst kind of wrong: confidently mislabelled.
-     */
     const forPolicy = (name: string): PolicyView => policyView(detail, name);
 
-    // ---------------- header ----------------
-    // The wall's single bar already carries the run's identity: name, schedule
-    // line, ablation, age, best-kernel/incomplete badges, and the env chips name
-    // every environment with its recorded-seed count. The science therefore adds
-    // NO identity of its own — only the loud incomplete-run banner, because that
-    // one changes how every number below must be read.
     const bannerSlot = el('div', { class: 'slot' });
     body.append(bannerSlot);
 
@@ -248,21 +188,12 @@ export function mountRunScience(host: HTMLElement, opts: RunScienceOptions): Run
     }
     syncBanner();
 
-    // ---------------- seed-tab state (shared with the per-env tab) ----------------
     let currentEnv: string =
       opts.envId !== null && shares.some((sh) => sh.envId === opts.envId)
         ? opts.envId
         : shares[0]?.envId ?? meta.envId;
     let selectedEnv: string = currentEnv;
 
-    // ---------------- tab machinery ----------------
-    /**
-     * A panel owns everything it built. Charts are kept apart because they also
-     * need refresh() on tab show; `handles` is every other disposable (bars,
-     * rangeBars, tables, fetch-scoped state) — all of them hold ResizeObservers,
-     * so leaving them in the VIEW-level list leaked one observer per policy
-     * switch, still watching a detached node.
-     */
     interface Panel {
       node: HTMLElement;
       built: boolean;
@@ -270,9 +201,7 @@ export function mountRunScience(host: HTMLElement, opts: RunScienceOptions): Run
       handles: Disposable[];
     }
     interface PanelScope {
-      /** register a chart and return its root (refreshed on show, destroyed on rebuild) */
       chart(handle: ChartHandle): HTMLElement;
-      /** register any other disposable this panel owns */
       hold<T extends Disposable>(item: T): T;
     }
     const tabs: { key: string; label: string; build(panel: HTMLElement, scope: PanelScope): void }[] = [];
@@ -297,7 +226,6 @@ export function mountRunScience(host: HTMLElement, opts: RunScienceOptions): Run
       };
     }
 
-    /** Tear every panel back down to unbuilt — the policy switch and view destroy. */
     function resetPanels(): void {
       for (const panel of panels.values()) {
         for (const chart of panel.charts) chart.destroy();
@@ -310,7 +238,6 @@ export function mountRunScience(host: HTMLElement, opts: RunScienceOptions): Run
     }
     track({ destroy: resetPanels });
 
-    /** register a step-axis chart for the playhead + scrub grammar */
     function trackChart(scope: PanelScope, handle: ChartHandle): ChartHandle {
       playheadCharts.add(handle);
       handle.setMarker(playheadStep);
@@ -321,32 +248,14 @@ export function mountRunScience(host: HTMLElement, opts: RunScienceOptions): Run
       opts.onSeek?.(Math.round(step), phase !== 'drag');
     };
 
-    // ---------------- this environment: the per-seed detail ----------------
-    // Deliberately NOTHING else, and NOTHING folded. The env's stat tiles used
-    // to sit here and every one of them restated an always-visible surface: IQM
-    // and recent IQM are the learning curve's line and endpoint, positive is
-    // the rail's "seeds > 0", best seed is the rail's row #1, and solved /
-    // reward-per-GFLOP moved INTO the rail. Per-seed curves and totals are the
-    // only env science with no other home — two cells beside the wall's curve.
     addTab('env', 'Per-seed detail', (panel, scope) => {
       buildSeedsDetail(panel, scope);
     });
 
-    // ---------------- this environment: the per-seed detail ----------------
-    // Deliberately NOTHING else, and NOTHING folded. The env's stat tiles used
-    // to sit here and every one of them restated an always-visible surface: IQM
-    // and recent IQM are the learning curve's line and endpoint, positive is
-    // the rail's "seeds > 0", best seed is the rail's row #1, and solved /
-    // reward-per-GFLOP moved INTO the rail. Per-seed curves and totals are the
-    // only env science with no other home — two cells beside the wall's curve.
     addTab('env', 'Per-seed detail', (panel, scope) => {
       buildSeedsDetail(panel, scope);
     });
 
-    // ---------------- per-seed detail (env-scoped) ----------------
-    // The columnar fetch is cached per POLICY: an env switch rebuilds this panel
-    // but filters the same fleet columnar client-side — refetching megabytes of
-    // per-lane series sixteen times for one run would be self-inflicted latency.
     const fleetCache = new Map<string, Promise<FleetColumnar>>();
     const fleetFor = (name: string): Promise<FleetColumnar> => {
       let hit = fleetCache.get(name);
@@ -379,7 +288,7 @@ export function mountRunScience(host: HTMLElement, opts: RunScienceOptions): Run
       let stale = false;
       scope.hold({
         destroy() {
-          stale = true; // a policy/env switch rebuilds this panel; drop the in-flight fetch
+          stale = true;
           if (laneChart) playheadCharts.delete(laneChart);
           if (repaintLanes) repaintLanes = null;
           if (seedsChart) playheadCharts.delete(seedsChart);
@@ -402,14 +311,6 @@ export function mountRunScience(host: HTMLElement, opts: RunScienceOptions): Run
       let throughputChart: ChartHandle | null = null;
       let retentionChart: ChartHandle | null = null;
 
-      /**
-       * The default series is MEASURED: rewardSum differenced over each heartbeat
-       * window. `health.rewardRate` is the agent's own internal average-reward
-       * estimate ρ̄ (Sources/Main.swift) — a learned parameter that is also a
-       * divergence diagnostic, not reward the environment paid. It used to be
-       * plotted here under a reward-rate label, which quietly showed the agent's
-       * self-assessment instead of its results; it now needs asking for by name.
-       */
       const SERIES_MODES = {
         measured: { field: 'rewardSum', label: 'measured rate', windowed: true },
         rho: { field: 'health.rewardRate', label: 'agent ρ̄', windowed: false },
@@ -434,14 +335,6 @@ export function mountRunScience(host: HTMLElement, opts: RunScienceOptions): Run
       panel.append(chartHost, seedsHost, throughputHost, retentionHost, totalsHost);
       chartHost.append(laneStatus);
 
-      /**
-       * Total reward by seed: the FINAL cumulative `rewardSum` of every seed, sorted.
-       *
-       * Same fetch as the curves — no second request — and deliberately the total
-       * rather than a rate, because it is the population objective (`fleet total` in
-       * tools/table.py) and because sorting it exposes the shape the IQM hides: whether
-       * the fleet is one mode or a handful of rockets over a flat negative field.
-       */
       function paintTotals(): void {
         if (!columnar) return;
         const finals = laneSeries(columnar, 'rewardSum', mixed ? selectedEnv : undefined)
@@ -479,14 +372,6 @@ export function mountRunScience(host: HTMLElement, opts: RunScienceOptions): Run
         totalsChart.refresh();
       }
 
-      /**
-       * Survival, positivity, retention and throughput for THIS environment
-       * (throughput excepted — all lanes step in lockstep on one GPU, so it is
-       * fleet-wide and says so). Survival and positivity are both fractions of
-       * this env's seeds over the same timeline, so they share ONE tile.
-       * Semantics match the rail exactly: divergedAt = last value of
-       * firstNonFiniteStep, retention = final ÷ peak of the windowed rate.
-       */
       function paintEnvHealth(): void {
         if (!columnar) return;
         const steps = columnar.steps;
@@ -555,7 +440,6 @@ export function mountRunScience(host: HTMLElement, opts: RunScienceOptions): Run
 
         const agg = aggregateSeries(detail.aggregate, policy);
         if (agg.steps.length >= 2) {
-          // windowed average -> window centers; step-hold anchors at 0 and the horizon
           const aggLast = agg.steps[agg.steps.length - 1] ?? 0;
           throughputChart = trackChart(scope, timeSeries({
             steps: [0, ...windowMidpoints(agg.steps), aggLast],
@@ -635,10 +519,6 @@ export function mountRunScience(host: HTMLElement, opts: RunScienceOptions): Run
         shown = capLanes(all, LANE_CAP);
         const capped = shown.length < all.length;
 
-        // The population statistics overlay ONLY when the server curve shares the
-        // lanes' exact heartbeat grid (same fleet.jsonl, so it always should) and
-        // the lanes are in MEASURED mode — ρ̄ is a different quantity than the
-        // measured band and overlaying them would be confidently mislabelled.
         const grid = curves;
         const sameGrid = grid !== null
           && grid.steps.length === columnar.steps.length
@@ -650,13 +530,6 @@ export function mountRunScience(host: HTMLElement, opts: RunScienceOptions): Run
 
         if (laneChart) playheadCharts.delete(laneChart);
         laneChart?.destroy();
-        // TIME PLACEMENT IS THE CONTRACT. Windowed averages (measured mode,
-        // and the IQM/CI band) are plotted at their window CENTERS — plotting
-        // window (a, b] at b rendered a seed's peak up to one full window
-        // after the scene showed it dying. The exact anchors close the edges:
-        // t = 0 is truly 0 delivered, and the final window's value holds to
-        // the horizon. ρ̄ is a point-in-time estimate read AT each heartbeat,
-        // so it stays on the raw heartbeat grid (with its true 0 init).
         const centered = mode === 'measured';
         const lastStep = columnar.steps[columnar.steps.length - 1] ?? 0;
         const steps0 = centered
@@ -714,10 +587,6 @@ export function mountRunScience(host: HTMLElement, opts: RunScienceOptions): Run
       }
       repaintLanes = paintLanes;
 
-      // Both series arrive in ONE request so the toggle never refetches. The server
-      // filters fleet.jsonl by policy (defaulting to `oak`), so the selected policy
-      // has to travel with it or a zero/random view silently reads oak's seeds.
-      // The population curve rides the same paint: one tile, one source of truth.
       Promise.all([
         fleetFor(policy),
         curvesFor(selectedEnv, policy).catch(() => null),
@@ -737,10 +606,6 @@ export function mountRunScience(host: HTMLElement, opts: RunScienceOptions): Run
     }
 
 
-    // ---------------- assemble: ONE fixed row of six cells ----------------
-    // Learning curve (the wall's cell, adopted — the wall keeps painting it),
-    // per-seed curves, totals, then survival, positivity, retention. One fixed
-    // row is what lets the stage above flex to a real video shape.
     function buildAll(): void {
       for (const tab of tabs) {
         const panel = panels.get(tab.key);
@@ -755,7 +620,6 @@ export function mountRunScience(host: HTMLElement, opts: RunScienceOptions): Run
     if (envPanel) chartsRow.append(envPanel.node);
     panelHost.append(chartsRow);
 
-    // The wall's env chips land here: rebuild ONLY the env section for the new env.
     envSwap = (envId: string) => {
       if (envId === currentEnv) return;
       currentEnv = envId;
@@ -778,8 +642,6 @@ export function mountRunScience(host: HTMLElement, opts: RunScienceOptions): Run
       policySelect.value = policy;
       policySelect.addEventListener('change', () => {
         policy = policySelect.value;
-        // numbers AND charts AND the banner rebuild together — nothing survives
-        // a policy switch except the run's own identity.
         resetPanels();
         syncBanner();
         buildAll();

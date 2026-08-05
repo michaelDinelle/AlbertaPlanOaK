@@ -1,17 +1,4 @@
 /// <reference types="bun" />
-// The Ivy Gate (KeyCorridor-cont-v0) — the accuracy + lifecycle self-check.
-//
-// This mirrors four-rooms.test.ts's shape and adds what THIS env has that FourRooms did
-// not: a live key cell whose token is carried, a live door bit that drives a two-beat
-// animation, and a goal that teleports the agent across the garden in the same frame it
-// pays out. Each of those is a place a scene can silently lie, so each has its own lock:
-//
-//   * every probe is EXACT (< 1e-9), at all three tiers, on every free cell;
-//   * the seed's dish tracks `(kx, ky)` whether the seed is in it or on the wisp, and the
-//     token is provably reparented in both directions;
-//   * the gate's phase is a pure function of `(doorOpen, age)` that lands on 0 or 1;
-//   * the goal bloom lands on the PREVIOUS frame's goal cell, not the respawned one;
-//   * a `teleport` hard-cuts the wisp instead of gliding it through the wall.
 
 import { describe, expect, test } from 'bun:test';
 import * as THREE from 'three';
@@ -70,7 +57,7 @@ import {
   type StubSceneContext,
 } from './aligned';
 
-const SEED = 24; // the demo run's first KeyCorridor lane
+const SEED = 24;
 
 function geometryOf(): EnvGeometry {
   return keyCorridorDecoder.geometry(keyCorridorDecoder.initStatic(SEED), SEED);
@@ -89,7 +76,6 @@ function fixtureNamed(name: string): SceneFixture {
   return f;
 }
 
-/** pose = [x, y, gx, gy, kx, ky, hasKey, doorOpen, 0] */
 function poseFixture(
   name: string,
   x: number,
@@ -125,7 +111,6 @@ function objectWorld(module: SceneModule, name: string): THREE.Vector3 {
   return new THREE.Vector3().setFromMatrixPosition(object.matrixWorld);
 }
 
-/** how many ivy sprigs the vine currently draws (a retracted sprig is scaled to zero) */
 function liveSprigCount(vine: THREE.InstancedMesh): () => number {
   const m = new THREE.Matrix4();
   const s = new THREE.Vector3();
@@ -140,7 +125,6 @@ function liveSprigCount(vine: THREE.InstancedMesh): () => number {
   };
 }
 
-/** how much vine is drawn in total — a continuous measure of the wrap */
 function vineExtent(vine: THREE.InstancedMesh): () => number {
   const m = new THREE.Matrix4();
   const s = new THREE.Vector3();
@@ -164,7 +148,6 @@ function isDescendantOf(object: THREE.Object3D, ancestorName: string): boolean {
   return false;
 }
 
-// ---------------------------------------------------------------------------
 
 describe('key-corridor / manifest + fixtures', () => {
   test('manifest declares the frozen contract fields', () => {
@@ -185,11 +168,9 @@ describe('key-corridor / manifest + fixtures', () => {
     expect(keyCorridorIsWall(p[0] ?? -1, p[1] ?? -1)).toBe(false);
     expect(keyCorridorIsWall(p[2] ?? -1, p[3] ?? -1)).toBe(false);
     expect(keyCorridorIsWall(p[4] ?? -1, p[5] ?? -1)).toBe(false);
-    // the agent and the seed start on the wild side, the shrine on the formal one
     expect(gardenSide(door, p[0] ?? 0)).toBe(SIDE_WEST);
     expect(gardenSide(door, p[4] ?? 0)).toBe(SIDE_WEST);
     expect(gardenSide(door, p[2] ?? 0)).toBe(SIDE_EAST);
-    // locked and unpicked: the state the gate is most itself in
     expect(p[6]).toBe(0);
     expect(p[7]).toBe(0);
   });
@@ -205,7 +186,6 @@ describe('key-corridor / manifest + fixtures', () => {
       expect(keyCorridorIsWall(x, y)).toBe(false);
       expect(keyCorridorIsWall(gx, gy)).toBe(false);
       expect(keyCorridorIsWall(kx, ky)).toBe(false);
-      // the env draws the key from the LEFT room list and the goal from the RIGHT one
       expect(west.has(`${kx},${ky}`)).toBe(true);
       expect(east.has(`${gx},${gy}`)).toBe(true);
       void door;
@@ -255,10 +235,8 @@ describe('key-corridor / the layout is read, never re-derived', () => {
     const grid = resolveGrid(geometryOf());
     const door = resolveDoor(grid);
     expect(door).toEqual({ x: KEYCORRIDOR_DOOR.x, y: KEYCORRIDOR_DOOR.y });
-    // canon lesson 14: the lock lives in the STATE, not in the walls array
     expect(isWall(grid, door.x, door.y)).toBe(false);
     expect(keyCorridorIsWall(door.x, door.y)).toBe(false);
-    // and its north/south neighbours are wall, which is what makes it a gate
     expect(isWall(grid, door.x, door.y - 1)).toBe(true);
     expect(isWall(grid, door.x, door.y + 1)).toBe(true);
   });
@@ -266,10 +244,7 @@ describe('key-corridor / the layout is read, never re-derived', () => {
   test('the gate yaw is READ off the flanking wall cells (lesson 15)', () => {
     const grid = resolveGrid(geometryOf());
     const door = resolveDoor(grid);
-    // this wall runs along z, so the gate is turned a quarter turn from the local build
     expect(gateYaw(grid, door)).toBeCloseTo(Math.PI / 2, 12);
-    // a synthetic door flanked EAST and WEST sits in a wall running along x, and must
-    // NOT be turned — the same code has to orient a regenerated layout
     const flat = { w: 3, h: 3, walls: Uint8Array.from([0, 0, 0, 1, 0, 1, 0, 0, 0]) };
     expect(gateYaw(flat, { x: 1, y: 1 })).toBe(0);
   });
@@ -282,7 +257,6 @@ describe('key-corridor / the layout is read, never re-derived', () => {
         if (isDividerWall(grid, x, y)) cells.push({ x, y });
       }
     }
-    // x = 4 for y = 1, 2, 4, 5 — the door (4,3) is free and (4,0)/(4,6) are border
     expect(cells).toEqual([
       { x: 4, y: 1 },
       { x: 4, y: 2 },
@@ -303,14 +277,12 @@ describe('key-corridor / the layout is read, never re-derived', () => {
     const east = sideBounds(grid, door, SIDE_EAST);
     expect(west.cells).toBe(15);
     expect(east.cells).toBe(15);
-    // each room is 3 x 5 cells, so ±1.5 / ±2.5 world units plus half a cell of margin
     for (const b of [west, east]) {
       expect(b.halfX).toBeCloseTo(1.5, 10);
       expect(b.halfZ).toBeCloseTo(2.5, 10);
       expect(Math.abs(b.cx) + b.halfX).toBeLessThanOrEqual(GARDEN_HALF_X + 1e-9);
       expect(Math.abs(b.cz) + b.halfZ).toBeLessThanOrEqual(GARDEN_HALF_Z + 1e-9);
     }
-    // and they really are on opposite sides of the origin
     expect(west.cx).toBeLessThan(0);
     expect(east.cx).toBeGreaterThan(0);
   });
@@ -324,9 +296,7 @@ describe('key-corridor / the layout is read, never re-derived', () => {
       skin.ivy.getHex(),
     ]);
     expect(hexes.size).toBe(4);
-    // the divider is the darkest stone in the garden — that is how the plan reads
     expect(luma(skin.divider)).toBeLessThan(luma(skin.kerb));
-    // and every ground albedo respects the bright-key law (~140–175 sRGB, never 220)
     for (const c of [skin.wildFloor, skin.formalFloor, skin.threshold]) {
       expect(luma(c)).toBeLessThan(0.72);
     }
@@ -355,7 +325,6 @@ describe('key-corridor / alignment', () => {
   test('every probe lands on ground truth at hero tier', async () => {
     const module = createScene();
     const report = await assertAligned(module, fixtures, { geometry: geometryOf(), seed: SEED, tier: 'hero' });
-    // these roots carry POSITION ONLY — they should be exact, not merely within 1e-3
     for (const name of ['wisp', 'wisp-anchor', 'shrine', 'seed-bed', 'gate']) {
       expect(report.worst.get(name) ?? 1).toBeLessThan(1e-9);
     }
@@ -392,7 +361,6 @@ describe('key-corridor / alignment', () => {
         visited++;
       }
     }
-    // 15 + 15 room cells + the door cell
     expect(visited).toBe(31);
     module.dispose();
   });
@@ -472,12 +440,10 @@ describe('key-corridor / the seed is carried, not copied', () => {
     module.update(toFrameUpdate(poseFixture('lifted', 3, 5, 7, 1, 3, 5, true, false)));
     expect(isDescendantOf(token, 'gardenWisp')).toBe(true);
     expect(isDescendantOf(token, 'seedCradle')).toBe(false);
-    // a carried seed rides the wisp: same cell, and off the floor
     const carried = objectWorld(module, 'amberSeed');
     const orb = worldOf(module, 'wisp');
     expect(carried.distanceTo(orb)).toBeLessThan(0.5);
 
-    // ...and the respawn puts it back in a dish, on the new key cell
     module.update(toFrameUpdate(poseFixture('respawn', 2, 3, 7, 4, 2, 4, false, false)));
     expect(isDescendantOf(token, 'seedCradle')).toBe(true);
     const grid = resolveGrid(geometryOf());
@@ -506,12 +472,10 @@ describe('key-corridor / the seed is carried, not copied', () => {
 
 describe('key-corridor / the gate is one bit, sequenced', () => {
   test('the phase is a pure function of (doorOpen, age) and lands on its target', () => {
-    // a settled clock returns the target exactly, in both directions
     expect(gatePhase(false, -Infinity)).toBe(0);
     expect(gatePhase(true, -Infinity)).toBe(1);
     expect(gatePhase(false, Number.NaN)).toBe(0);
     expect(gatePhase(true, 99)).toBe(1);
-    // a fresh clock starts from the OTHER end and runs monotonically to the target
     expect(gatePhase(true, 0)).toBeCloseTo(0, 12);
     expect(gatePhase(false, 0)).toBeCloseTo(1, 12);
     let last = 0;
@@ -533,11 +497,8 @@ describe('key-corridor / the gate is one bit, sequenced', () => {
   });
 
   test('THE TWO CLOCKS ARE NOT THE SAME LENGTH: the opening is one hop, the relock is not', () => {
-    // the agent is walking THROUGH the opening in the same control step, so it finishes
-    // inside a hop; the relock rides the teleport and may take its time
-    expect(GATE_OPEN_SECONDS).toBeLessThanOrEqual(0.125); // one 8 Hz control step
+    expect(GATE_OPEN_SECONDS).toBeLessThanOrEqual(0.125);
     expect(GATE_RELOCK_SECONDS).toBeGreaterThan(4 * GATE_OPEN_SECONDS);
-    // ...and the asymmetry is really in the function, not just in the constants
     expect(gatePhase(true, GATE_OPEN_SECONDS)).toBe(1);
     expect(gatePhase(false, GATE_OPEN_SECONDS)).toBeGreaterThan(0.5);
     expect(gatePhase(false, GATE_RELOCK_SECONDS)).toBe(0);
@@ -567,23 +528,19 @@ describe('key-corridor / the gate is one bit, sequenced', () => {
     module.update(toFrameUpdate(poseFixture('open', 4, 3, 7, 1, 3, 5, true, true)));
     const released = liveCount();
 
-    // a locked gate is fully sewn; an open one keeps its architecture green
     expect(wrapped).toBe(vine.count);
     expect(released).toBeLessThan(wrapped);
     expect(released).toBeGreaterThan(0);
-    // the survivors are exactly the frame strand, within one feathered sprig
     expect(Math.abs(released / vine.count - IVY_FRAME_SPAN)).toBeLessThan(0.12);
     module.dispose();
   });
 
   test("the vine's door strand really lies across the leaf, and its frame strand does not", () => {
     const p = new THREE.Vector3();
-    // the frame strand climbs and crosses the arch: it is deep in z and high in y
     vinePoint(0.15, p);
     expect(p.y).toBeGreaterThan(0.3);
     vinePoint(0.4, p);
     expect(p.y).toBeGreaterThan(0.9);
-    // the door strand hugs the leaf's OUTER face plane, just proud of it
     for (const u of [0.7, 0.85, 1]) {
       vinePoint(u, p);
       expect(p.z).toBeLessThan(DOOR_FACE_Z);
@@ -606,7 +563,6 @@ describe('key-corridor / the gate is one bit, sequenced', () => {
     const sewn = sprigs();
     expect(sewn).toBe(vine.count);
 
-    // the door event starts the clock; the leaf has not moved on the event's own frame
     module.update(
       toFrameUpdate(poseFixture('opening', 4, 3, 7, 1, 3, 5, true, true), {
         scrubbed: false,
@@ -615,9 +571,6 @@ describe('key-corridor / the gate is one bit, sequenced', () => {
     );
     expect(hinge.rotation.y).toBeCloseTo(0, 10);
 
-    // CAUSE BEFORE EFFECT, measured on the clock rather than asserted in a comment: walk
-    // the window and record when the ivy's door strand has fully let go and when the leaf
-    // reaches full swing. The release must complete first.
     ctx.setTime(12);
     module.update(toFrameUpdate(poseFixture('open', 5, 3, 7, 1, 3, 5, true, true), { scrubbed: false }));
     const settledAngle = Math.abs(hinge.rotation.y);
@@ -638,35 +591,23 @@ describe('key-corridor / the gate is one bit, sequenced', () => {
       if (swung >= 0.999 && age < leafOpenAt) leafOpenAt = age;
     }
     expect(ivyFreeAt).toBeLessThan(leafOpenAt);
-    // and the ivy is off the leaf before the leaf is even half-way round
     expect(ivyFreeAt).toBeLessThanOrEqual(sixtyPercentAt);
-    // both beats land inside the opening window (a settled gate, not a half-swung one)
     expect(leafOpenAt).toBeLessThanOrEqual(GATE_OPEN_SECONDS);
     module.dispose();
   });
 
   test('THE BLOCKER: driven at the harness cadence, the gate is open BEFORE the wisp reaches it', async () => {
-    // The env opens the door and moves the agent into the door cell in the SAME control
-    // step, so this is the only instrument that can see the failure the fixture loop
-    // cannot: fixtures default to `scrubbed: true`, which snaps the gate to its settled
-    // pose and hides every timing lie. Here the clock runs at 60 fps with a control step
-    // every 0.125 s, exactly as the harness plays the recording (demo lane seed 24, rows
-    // 116-122: (3,3) -> door opens + agent enters (4,3) -> (5,3)).
     const { module, ctx } = await live();
     const hinge = module.scene.getObjectByName('ivyGateHinge');
     const vine = module.scene.getObjectByName('ivyVine');
     if (!hinge || !(vine instanceof THREE.InstancedMesh)) throw new Error('no gate');
     const sprigs = liveSprigCount(vine);
 
-    // the leaf's own plane, read off the scene (the hinge IS the shut leaf's plane)
     const leafPlaneX = objectWorld(module, 'ivyGateHinge').x;
-    // what a settled open gate looks like — the bar every driven frame is measured against
     ctx.setTime(0);
     module.update(toFrameUpdate(poseFixture('settled', 5, 3, 7, 1, 3, 5, true, true), { scrubbed: true }));
     const settledAngle = Math.abs(hinge.rotation.y);
     const frameStrand = sprigs();
-    // ...and now put the garden back the way the recording has it one step earlier: the
-    // wisp standing on (3,3), the gate shut and sewn, every clock settled
     ctx.setTime(1);
     module.update(toFrameUpdate(poseFixture('before', 3, 3, 7, 1, 3, 5, true, false), { scrubbed: true }));
     expect(worldOf(module, 'wisp-anchor').x).toBeLessThan(leafPlaneX);
@@ -703,12 +644,9 @@ describe('key-corridor / the gate is one bit, sequenced', () => {
       }
     }
 
-    // THE ASSERTION THE REVIEW BOUGHT: the frame the orb crosses the leaf's plane, the
-    // leaf is out of the way and the ivy that was holding it is already gone.
     expect(crossedAngle / settledAngle).toBeGreaterThan(0.9);
     expect(crossedSprigs).toBe(frameStrand);
     expect(crossedSprigs).toBeLessThan(vine.count);
-    // ...and by the time it is standing in the doorway the gate is fully open
     expect(inDoorAngle).toBeCloseTo(settledAngle, 6);
     module.dispose();
   });
@@ -720,8 +658,6 @@ describe('key-corridor / the gate is one bit, sequenced', () => {
     if (!hinge || !(vine instanceof THREE.InstancedMesh)) throw new Error('no gate');
     const sprigs = liveSprigCount(vine);
 
-    // how much vine is actually DRAWN — the sprig count only says a sprig exists, and the
-    // last one spends the whole tail of the relock growing back to full size
     const extent = vineExtent(vine);
     ctx.setTime(20);
     module.update(toFrameUpdate(poseFixture('open', 5, 3, 7, 1, 3, 5, true, true), { scrubbed: true }));
@@ -732,7 +668,6 @@ describe('key-corridor / the gate is one bit, sequenced', () => {
     expect(sewnExtent).toBeGreaterThan(openExtent);
     expect(sprigs()).toBe(vine.count);
 
-    // the goal frame: relock + teleport, the wisp already back in the wild garden
     ctx.setTime(20);
     module.update(toFrameUpdate(poseFixture('open', 5, 3, 7, 1, 3, 5, true, true), { scrubbed: true }));
     module.update(
@@ -754,10 +689,8 @@ describe('key-corridor / the gate is one bit, sequenced', () => {
       }
       if (extent() >= sewnExtent - 1e-6 && age < ivySewnAt) ivySewnAt = age;
     }
-    // the reverse order: the leaf shuts, and only then does the ivy finish sewing over it
     expect(leafShutAt).toBeLessThan(ivySewnAt);
     expect(extentAtShut).toBeLessThan(sewnExtent);
-    // and it really is the long window — this beat has no agent to overtake
     expect(ivySewnAt).toBeGreaterThan(4 * GATE_OPEN_SECONDS);
     expect(ivySewnAt).toBeLessThanOrEqual(GATE_RELOCK_SECONDS + 1e-9);
     module.dispose();
@@ -774,10 +707,10 @@ describe('key-corridor / the gate is one bit, sequenced', () => {
         events: [{ type: 'door', index: 0, open: true }],
       }),
     );
-    expect(hinge.rotation.y).toBeCloseTo(0, 10); // mid-transition, still shut
+    expect(hinge.rotation.y).toBeCloseTo(0, 10);
     ctx.setTime(3.02);
     module.update(toFrameUpdate(poseFixture('scrub', 6, 2, 7, 1, 3, 5, true, true), { scrubbed: true }));
-    expect(Math.abs(hinge.rotation.y)).toBeGreaterThan(1.3); // snapped fully open
+    expect(Math.abs(hinge.rotation.y)).toBeGreaterThan(1.3);
     module.dispose();
   });
 });
@@ -809,17 +742,14 @@ describe('key-corridor / update contract', () => {
     expect(pool).not.toBeNull();
     if (!pool) return;
 
-    // standing exactly ON the shrine cell with no event: nothing may fire
     ctx.setTime(1);
     module.update(toFrameUpdate(poseFixture('onGoal', 7, 1, 7, 1, 3, 5, true, true, 100), { scrubbed: false }));
     expect(pool.stats.bursts).toBe(0);
     expect(pool.stats.ripples).toBe(0);
 
-    // carrying the seed with no key event: still nothing
     module.update(toFrameUpdate(poseFixture('carrying', 6, 1, 7, 1, 3, 5, true, true, 101), { scrubbed: false }));
     expect(pool.stats.bursts).toBe(0);
 
-    // the decoder's real batch for a goal frame
     ctx.setTime(2);
     module.update(
       toFrameUpdate(poseFixture('scored', 2, 3, 7, 4, 2, 4, false, false, 102), {
@@ -835,7 +765,6 @@ describe('key-corridor / update contract', () => {
     expect(pool.stats.bursts).toBe(1);
     expect(pool.stats.ripples).toBe(1);
     expect(pool.pulse.bloom).toBeGreaterThan(0);
-    // a `done` that came WITH the reward must never sigh
     expect(pool.pulse.sigh).toBe(0);
     module.dispose();
   });
@@ -862,7 +791,6 @@ describe('key-corridor / update contract', () => {
     );
     expect(pool.stats.bursts).toBe(2);
     expect(pool.stats.ripples).toBe(0);
-    // a relock is part of the respawn, not a beat of its own
     ctx.setTime(6);
     module.update(
       toFrameUpdate(poseFixture('relock', 2, 3, 7, 4, 2, 4, false, false, 12), {
@@ -878,12 +806,10 @@ describe('key-corridor / update contract', () => {
     const { module, ctx } = await live();
     const grid = resolveGrid(geometryOf());
 
-    // the frame before: the wisp is one cell short of the shrine on (7,1)
     const before = poseFixture('run', 7, 2, 7, 1, 3, 5, true, true, 200);
     ctx.setTime(3);
     module.update(toFrameUpdate(before, { scrubbed: false }));
 
-    // ...and now the goal frame: everything has already respawned
     ctx.setTime(3.125);
     module.update(
       toFrameUpdate(poseFixture('scored', 2, 3, 7, 4, 2, 4, false, false, 201), {
@@ -893,7 +819,6 @@ describe('key-corridor / update contract', () => {
       }),
     );
 
-    // the celebration point light rides the bloom position: the OLD shrine cell
     const light = module.scene.getObjectByName('oakPoint3');
     expect(light).toBeDefined();
     if (!light) return;
@@ -903,7 +828,6 @@ describe('key-corridor / update contract', () => {
     expect(light.position.z).toBeCloseTo(truth[2], 10);
     expect((light as THREE.PointLight).intensity).toBeGreaterThan(0);
 
-    // and the new shrine is already on its new cell, growing in from nothing
     const shrine = worldOf(module, 'shrine');
     cellToWorld(7, 4, grid, truth);
     expect(shrine.x).toBeCloseTo(truth[0], 10);
@@ -921,7 +845,6 @@ describe('key-corridor / update contract', () => {
     ctx.setTime(8);
     module.update(toFrameUpdate(poseFixture('at-goal', 7, 2, 7, 1, 3, 5, true, true, 300), { scrubbed: false }));
 
-    // the respawn frame — same playback instant, so a HOP would still be at its start
     module.update(
       toFrameUpdate(poseFixture('respawned', 1, 5, 7, 4, 2, 4, false, false, 301), {
         scrubbed: false,
@@ -1005,7 +928,6 @@ describe('key-corridor / update contract', () => {
   test('readState prefers the decoder state and falls back to the raw pose', () => {
     const grid = resolveGrid(geometryOf());
     const out = makeGardenState();
-    // no `derived`: the packing is read straight off the 9 floats
     const bare = toFrameState({ name: 'bare', pose: [3, 4, 7, 2, 1, 5, 1, 1, 0] });
     readState(bare, grid, out);
     expect(out.agent).toEqual({ x: 3, y: 4 });
@@ -1013,7 +935,6 @@ describe('key-corridor / update contract', () => {
     expect(out.key).toEqual({ x: 1, y: 5 });
     expect(out.hasKey).toBe(true);
     expect(out.doorOpen).toBe(true);
-    // with `derived`, sim-core wins
     const decoded = toFrameState({
       name: 'decoded',
       pose: [0, 0, 0, 0, 0, 0, 0, 0, 0],
@@ -1027,15 +948,7 @@ describe('key-corridor / update contract', () => {
   });
 });
 
-// ---------------------------------------------------------------------------
-// THE COMPOSED FRAME — the two instruments a still cannot argue with.
-//
-// A scene can be perfectly aligned and still be unwatchable: the avatar can sit behind
-// the very prop the scene is about, and the playfield can run off the bottom edge. Both
-// were filed against this scene and both are now measured here rather than eyeballed.
-// ---------------------------------------------------------------------------
 
-/** every opaque mesh that is NOT the avatar (or the debug overlay) */
 function occluderMeshes(module: SceneModule): THREE.Object3D[] {
   const out: THREE.Object3D[] = [];
   module.scene.traverse((o) => {
@@ -1048,19 +961,12 @@ function occluderMeshes(module: SceneModule): THREE.Object3D[] {
     }
     const mat = mesh.material as THREE.Material | THREE.Material[] | undefined;
     const mats = Array.isArray(mat) ? mat : mat ? [mat] : [];
-    // a veil is not an occluder: mist planes and additive pools are see-through by design
     if (mats.length > 0 && mats.every((m) => m.transparent || m.depthWrite === false)) return;
     out.push(o);
   });
   return out;
 }
 
-/**
- * Cast from the live camera to the avatar's orb centre on every free cell and report the
- * cells where something opaque gets in the way. Each probe uses a REACHABLE state with the
- * agent on that cell — the seed is carried, the gate is open, and the shrine and the dish
- * stand somewhere else — so the only things that can be in the way are the world's props.
- */
 function occludedCells(module: SceneModule): string[] {
   const grid = resolveGrid(geometryOf());
   const camera = module.camera;
@@ -1108,8 +1014,6 @@ describe('key-corridor / the composed frame', () => {
     });
     await module.init(ctx);
     module.resize({ width: 1600, height: 900, dpr: 1 });
-    // the door cell is the one this scene exists to dramatise, and it was the one the
-    // gate's own crown was hiding — for the four control steps the agent spends there
     expect(occludedCells(module)).toEqual([]);
     module.dispose();
   });
@@ -1147,13 +1051,10 @@ describe('key-corridor / the composed frame', () => {
         for (const cz of [-GARDEN_HALF_Z, GARDEN_HALF_Z]) {
           for (const cy of [0, 0.5]) {
             p.set(cx, cy, cz).project(camera);
-            // vFOV is fixed at 40° whatever the aspect (canon lesson 11), so the vertical
-            // fit is aspect-independent and this must hold at every framing
             expect(Math.abs(p.y)).toBeLessThan(1);
           }
         }
       }
-      // and the playfield keeps real margin, not a hairline
       let worst = 0;
       for (let y = 0; y < grid.h; y++) {
         for (let x = 0; x < grid.w; x++) {
@@ -1210,11 +1111,8 @@ describe('key-corridor / the composed frame', () => {
 
   test('the shut leaf separates from the wall it hangs on by albedo, not by hope', () => {
     const skin = gardenSkin(TOKENS.palettes.morning, TOKENS);
-    // the leaf and the divider's west face take the same key light, so the only separation
-    // the eye gets is the albedo step between them
     expect(luma(skin.wood) - luma(skin.divider)).toBeGreaterThan(0.2);
     expect(luma(skin.woodDark) - luma(skin.divider)).toBeGreaterThan(0.12);
-    // ...and it still sits under the raked courtyard, which is the scene's bloom ceiling
     expect(luma(skin.wood)).toBeLessThan(luma(skin.formalFloor));
   });
 });
@@ -1272,11 +1170,9 @@ describe('key-corridor / lifecycle', () => {
     expect(Math.hypot(cam.position.x, cam.position.z)).toBeGreaterThan(GARDEN_HALF_X);
     const dir = new THREE.Vector3();
     cam.getWorldDirection(dir);
-    expect(dir.y).toBeLessThan(-0.5); // a genuine aerial, never a horizon shot
+    expect(dir.y).toBeLessThan(-0.5);
     expect(cam.fov).toBeGreaterThanOrEqual(35);
     expect(cam.fov).toBeLessThanOrEqual(45);
-    // the whole point of the azimuth: the camera stands WEST of the wall, so the door's
-    // west face is turned toward it rather than edge-on
     expect(cam.position.x).toBeLessThan(-3);
     const horiz = Math.hypot(dir.x, dir.z);
     expect(dir.x / horiz).toBeGreaterThan(0.4);
@@ -1286,10 +1182,6 @@ describe('key-corridor / lifecycle', () => {
 
 describe('key-corridor / the thumb wall-view cap', () => {
   test('the thumb frame fits STYLE.md\u2019s 40 draws / 50k triangles, overlay included', async () => {
-    // The wall view is the whole gallery on one page: every scene there is a thumb, and
-    // the cap is what keeps 16 of them at 60 fps. Measured with the ground-truth overlay
-    // ON, because that is the state review screenshots are taken in, and across every
-    // fixture, because the busiest legal state is the one that has to fit.
     const { module } = await live('thumb');
     module.setDebug(true);
     for (const f of fixtures) module.update(toFrameUpdate(f));

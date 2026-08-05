@@ -1,23 +1,3 @@
-// The Abyss — the three things down here that are alive (or were).
-//
-// ACCURACY. Every actor's `root` is an empty node whose world position is EXACTLY
-// `cellToWorld(cell)` with y = 0, and nothing else — no hover, no tilt, no bob. The wreck's
-// list, the anglerfish's swim and the bubble's wobble all live on CHILD nodes. Delete every
-// mesh in this file and what remains is three correctly-placed empty nodes.
-//
-// The wreck carries a SECOND probe: `heartAnchor`, a bare node at a fixed local height over
-// the goal cell. It is what the brief asks to be provable ("wreck heart at (15,15)"), and
-// it is provable precisely because the glow that pulses on it is its child, not itself.
-//
-// CLOCKS. Nothing in this file owns a clock or integrates one. Every actor is driven by
-// `setTime(ctx.time())` plus PURE WRITES of scene-computed scalars (`setFlare`, `setGain`),
-// which is the pattern the sibling reef's clam uses (`deep-sea/actors.ts setState`). The
-// wreck's heart flare used to decay internally on wall seconds, and that was a real bug in
-// two directions: a PAUSED playback drained the celebration out of the mesh while the point
-// light — driven by the scene's `ctx.time()` envelope — stayed pinned, and a SCRUB left the
-// heart blazing for another wall second because a scrub carries no dt to decay. As a pure
-// write of the scene's `treasure` envelope, both cases are correct by construction: pause
-// freezes the beat mid-air, and a scrub zeroes `treasureAt` and therefore the flare.
 
 import { emissiveMaterial, oakMaterial, oakUniforms, setEmissiveIntensity } from '@kit/materials';
 import type { EmissiveMaterial, OakMaterial } from '@kit/materials';
@@ -25,60 +5,27 @@ import type { QualityTier } from '@kit/types';
 import * as THREE from 'three';
 import { blendTokens, clamp01, mergeColoredParts, type AbyssSkin, type ColoredPart } from './world';
 
-// ---------------------------------------------------------------------------
-// the sunken wreck — the treasure at (15, 15)
-// ---------------------------------------------------------------------------
 
-/** local height of the heart node over the goal cell — a probe constant, never animated */
 export const HEART_Y = 0.62;
-/**
- * The heart's HDR gain. Down here the key light is 0.35 and the hemisphere 0.45, so the
- * whole frame lives well under the 0.85 bloom threshold and an emitter has to be pushed
- * hard to become a light source rather than a bright pixel (canon lesson 22). At 0.98 —
- * the value the noon lantern-flower uses — this was a dull orange dot two cells wide.
- */
 export const HEART_HDR = 2.6;
-/**
- * The wreck is built at 1.35× a cell because of where it stands. (15, 15) is the FAR
- * corner from this scene's camera — 33 units out, past the fog, at the smallest end of the
- * perspective — and it is the thing the entire environment is about. At 1:1 it was a
- * six-pixel smudge under its own glow, which is a fine way to render a place nobody ever
- * reaches and a bad way to render a goal.
- */
 export const WRECK_SCALE = 1.35;
 
 export interface WreckOptions {
   tier: QualityTier;
   skin: AbyssSkin;
-  /** the ice-blue scene accent, for the rim on the drowned timber */
   accent: THREE.ColorRepresentation;
   name?: string;
 }
 
 export interface WreckHandle {
-  /** add this ONE group to the scene */
   group: THREE.Group;
-  /** probe object: world position === cellToWorld(goal), y = 0, always */
   root: THREE.Object3D;
-  /** probe object: exactly HEART_Y above the goal cell — position only */
   heartAnchor: THREE.Object3D;
-  /**
-   * How hard the heart blazes, 0…1. A PURE WRITE, exactly like the sibling clam's
-   * `setState`: the handle keeps no decay of its own, because the only honest source for
-   * "how long ago was the treasure taken" is the scene's `ctx.time()` envelope.
-   */
   setFlare(flare01: number): void;
-  /** ctx.time() — the list, the heartbeat and the material clock */
   setTime(t: number): void;
   dispose(): void;
 }
 
-/**
- * A hull that broke its back: a keel lying across the corner cell, seven ribs arching out
- * of it (two of them snapped short), a stern block and a leaning mast stump. The heart —
- * whatever the ship was carrying — burns between the ribs, which is why the ribs are built
- * as an OPEN cage: the light has to get out through the gaps for the silhouette to read.
- */
 export function buildWreck(opts: WreckOptions): WreckHandle {
   const { tier, skin } = opts;
   const detail = tier === 'thumb' ? 0.4 : tier === 'medium' ? 0.7 : 1;
@@ -89,7 +36,6 @@ export function buildWreck(opts: WreckOptions): WreckHandle {
   root.name = 'wreckRoot';
   group.add(root);
 
-  // the hull leans: a static pose on a CHILD, so the probe root stays pure
   const hull = new THREE.Object3D();
   hull.name = 'wreckHull';
   hull.rotation.set(0.1, -0.62, 0.13);
@@ -99,7 +45,6 @@ export function buildWreck(opts: WreckOptions): WreckHandle {
   const parts: ColoredPart[] = [];
   const radial = Math.max(4, Math.round(7 * detail));
 
-  // keel
   {
     const keel = new THREE.BoxGeometry(1.58, 0.13, 0.3);
     keel.translate(0, 0.075, 0);
@@ -109,7 +54,6 @@ export function buildWreck(opts: WreckOptions): WreckHandle {
     parts.push({ geometry: spine, color: skin.timber });
   }
 
-  // ribs — an open cage, tallest amidships, two of them snapped
   const RIBS = tier === 'thumb' ? 4 : 7;
   for (let i = 0; i < RIBS; i++) {
     const t = RIBS > 1 ? i / (RIBS - 1) : 0.5;
@@ -125,7 +69,6 @@ export function buildWreck(opts: WreckOptions): WreckHandle {
     parts.push({ geometry: rib, color: i % 3 === 0 ? skin.timber : skin.timberDark });
   }
 
-  // stern block + a mast stump snapped off at head height
   {
     const stern = new THREE.BoxGeometry(0.34, 0.46, 0.5);
     stern.rotateX(0.12);
@@ -150,8 +93,6 @@ export function buildWreck(opts: WreckOptions): WreckHandle {
     roughness: 0.92,
     side: THREE.DoubleSide,
     rimColor: opts.accent,
-    // the rim is doing real work here: it is most of what separates a black hull from a
-    // black trench, and it is the only reason the ribs read as a cage at 35 units out
     rimStrength: 0.95,
     rimPower: 2.2,
     toonSteps: 2,
@@ -166,7 +107,6 @@ export function buildWreck(opts: WreckOptions): WreckHandle {
   hullMesh.receiveShadow = tier !== 'thumb';
   hull.add(hullMesh);
 
-  // ---- the heart ----
   const heartAnchor = new THREE.Object3D();
   heartAnchor.name = 'wreckHeartAnchor';
   heartAnchor.position.set(0, HEART_Y, 0);
@@ -183,8 +123,6 @@ export function buildWreck(opts: WreckOptions): WreckHandle {
   core.name = 'wreckHeartCore';
   heartDecor.add(core);
 
-  // the halo is deliberately small and thin. Bloom does the spreading; a fat additive
-  // sphere on top of it turned the wreck into a streetlamp and ate its own ribs.
   const haloGeometry = new THREE.IcosahedronGeometry(0.23, tier === 'thumb' ? 0 : 1);
   const haloMaterial: EmissiveMaterial = emissiveMaterial(blendTokens(skin.heart, opts.accent, 0.45), HEART_HDR * 0.24, {
     transparent: true,
@@ -197,7 +135,6 @@ export function buildWreck(opts: WreckOptions): WreckHandle {
   halo.name = 'wreckHeartHalo';
   heartDecor.add(halo);
 
-  /** written ONLY by `setFlare`; never integrated, never decayed in here */
   let flareAmount = 0;
 
   return {
@@ -208,8 +145,6 @@ export function buildWreck(opts: WreckOptions): WreckHandle {
       flareAmount = clamp01(flare01);
     },
     setTime(t) {
-      // The wreck breathes on the swell; the heart beats faster than the hull moves,
-      // which is the whole reason it reads as a heart and not as a lamp.
       hull.position.y = Math.sin(t * 0.42) * 0.012;
       hull.rotation.z = 0.13 + Math.sin(t * 0.33) * 0.014;
       const beat = 0.5 + 0.5 * Math.sin(t * 1.35);
@@ -234,43 +169,27 @@ export function buildWreck(opts: WreckOptions): WreckHandle {
   };
 }
 
-// ---------------------------------------------------------------------------
-// anglerfish — the lures that replace the sunbeams
-// ---------------------------------------------------------------------------
 
 export const LURE_HDR = 3.6;
 
 export interface AnglerOptions {
   tier: QualityTier;
   skin: AbyssSkin;
-  /** lure colour — this scene's accent, or its magenta counterpart */
   lure: THREE.ColorRepresentation;
-  /** hover height of the fish over its shelf cell */
   hover: number;
-  /** phase offset so two fish never swim in lockstep */
   phase: number;
-  /** body scale */
   scale: number;
   name?: string;
 }
 
 export interface AnglerHandle {
   group: THREE.Group;
-  /** probe object: world position === cellToWorld(cell), y = 0 */
   root: THREE.Object3D;
-  /** the lure bulb's node — the scene reads its world position for the point light */
   lureAnchor: THREE.Object3D;
   setTime(t: number): void;
   dispose(): void;
 }
 
-/**
- * A blunt, ugly, beautiful fish: a fat tapered body, a tail fan, a jaw of teeth, and an
- * illicium — the fishing rod — arching forward off its skull with the esca (the bulb)
- * burning on the end. The body is nearly black on purpose: what you see from across the
- * trench is a moving light with a suggestion of an animal behind it, which is exactly what
- * you would see.
- */
 export function buildAngler(opts: AnglerOptions): AnglerHandle {
   const { tier, skin } = opts;
   const detail = tier === 'thumb' ? 0.45 : tier === 'medium' ? 0.7 : 1;
@@ -281,7 +200,6 @@ export function buildAngler(opts: AnglerOptions): AnglerHandle {
   root.name = `${opts.name ?? 'angler'}Root`;
   group.add(root);
 
-  // everything that swims hangs here; the root never moves off its cell
   const swim = new THREE.Object3D();
   swim.name = `${opts.name ?? 'angler'}Swim`;
   swim.position.y = opts.hover;
@@ -301,23 +219,19 @@ export function buildAngler(opts: AnglerOptions): AnglerHandle {
     jaw.scale(1.25, 0.55, 0.85);
     jaw.translate(0.19, -0.11, 0);
     parts.push({ geometry: jaw, color: belly });
-    // tail fan
     const tail = new THREE.ConeGeometry(0.17, 0.3, Math.max(3, Math.round(5 * detail)), 1, true);
     tail.rotateZ(Math.PI / 2);
     tail.translate(-0.42, 0.02, 0);
     parts.push({ geometry: tail, color: dark });
-    // dorsal
     const fin = new THREE.ConeGeometry(0.09, 0.2, 3, 1, true);
     fin.rotateX(-0.3);
     fin.translate(-0.06, 0.24, 0);
     parts.push({ geometry: fin, color: dark });
-    // the rod, arching forward over the jaw
     const rod = new THREE.CylinderGeometry(0.011, 0.02, 0.5, Math.max(3, radial - 4));
     rod.translate(0, 0.25, 0);
     rod.rotateZ(-0.72);
     rod.translate(0.06, 0.16, 0);
     parts.push({ geometry: rod, color: dark });
-    // teeth — four of them, just enough to be unsettling at hero tier
     if (tier !== 'thumb') {
       for (let i = 0; i < 4; i++) {
         const tooth = new THREE.ConeGeometry(0.014, 0.06, 3);
@@ -377,7 +291,6 @@ export function buildAngler(opts: AnglerOptions): AnglerHandle {
     lureAnchor,
     setTime(t) {
       const p = opts.phase;
-      // a slow hunting circle, plus the tail-driven yaw that makes it look propelled
       swim.position.x = Math.sin(t * 0.21 + p) * 0.55;
       swim.position.z = Math.cos(t * 0.17 + p * 1.7) * 0.42;
       swim.position.y = opts.hover + Math.sin(t * 0.29 + p * 0.6) * 0.17;
@@ -403,40 +316,22 @@ export function buildAngler(opts: AnglerOptions): AnglerHandle {
   };
 }
 
-// ---------------------------------------------------------------------------
-// the dive bubble — the wisp's diving bell
-// ---------------------------------------------------------------------------
 
 export interface DiveBubbleOptions {
   tier: QualityTier;
-  /** the scene accent — the bubble's fresnel skin */
   accent: THREE.ColorRepresentation;
-  /** the deep water the bubble is filled with */
   water: THREE.ColorRepresentation;
   radius?: number;
   name?: string;
 }
 
 export interface DiveBubbleHandle {
-  /** add this ONE group to the scene; the scene positions it from the wisp every frame */
   group: THREE.Group;
-  /**
-   * How hard the bubble burns, 0…1. The brief's rule: it reads the ROW. A pure function
-   * of state — no easing, no history, so a scrubbed frame shows exactly what a played one
-   * would.
-   */
   setGain(gain01: number): void;
   setTime(t: number): void;
   dispose(): void;
 }
 
-/**
- * A soft glass sphere the wisp rides inside. It is deliberately NOT an emissive ball: the
- * shell is an `oakMaterial` with a huge fresnel rim and almost no body, so it reads as a
- * curved surface catching what little light there is — and the rim gain is what the depth
- * drives. The inner shell is the only emissive part, and it stays under the bloom
- * threshold until the dive is well down the trench.
- */
 export function buildDiveBubble(opts: DiveBubbleOptions): DiveBubbleHandle {
   const tier = opts.tier;
   const radius = opts.radius ?? 0.36;
@@ -486,16 +381,12 @@ export function buildDiveBubble(opts: DiveBubbleOptions): DiveBubbleHandle {
     group,
     setGain(gain01) {
       gain = clamp01(gain01);
-      // the fresnel skin brightens with depth: a soft shell up in the light, a lantern
-      // on the floor. The base is low on purpose — a rim is additive and albedo-blind, so a
-      // bright one over the surface rows' high-gain albedo bloomed the whole shallow end.
       oakUniforms(shellMaterial)?.setRim(0.5 + 3.4 * gain);
       shellMaterial.opacity = 0.16 + 0.16 * gain;
       setEmissiveIntensity(innerMaterial, 0.16 + 1.7 * gain);
       innerMaterial.opacity = 0.05 + 0.2 * gain;
     },
     setTime(t) {
-      // a bubble is never quite still and never quite round
       const wobble = Math.sin(t * 1.7) * 0.035 + Math.sin(t * 2.9) * 0.018;
       shell.scale.set(1 + wobble, 1 - wobble * 0.8, 1 + wobble * 0.5);
       inner.scale.setScalar(1 - wobble * 0.4);

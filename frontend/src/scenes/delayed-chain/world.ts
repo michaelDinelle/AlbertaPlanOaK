@@ -1,22 +1,3 @@
-// The Long Night Road — the static world (DelayedChain-cont-v0).
-//
-// THE ONE IDEA: DISTANCE IS THE SUBJECT. DelayedChain pays +1 at pos 31 and nowhere
-// else, so the art has to make thirty-one dark cells FELT: a bare moorland path of 32
-// worn flagstones, one unlit lantern post per cell, and an aurora that hangs over the
-// far end alone. Everything bright in this scene is either the wisp (the agent) or the
-// reward's own end of the road; the middle of the walk is deliberately, honestly empty.
-//
-// PATTERNS COPIED FROM THE TWO EXEMPLARS
-//  * `buildCellField` is the substrate (four-rooms lesson 13): white base material +
-//    per-cell `floorTint`, so the moonlight pools cost nothing but an instance color.
-//  * All decorative height is multiplied by a weight that is IDENTICALLY ZERO over the
-//    road band (mountain-car lesson 3) — the flagstones sit on a mathematically flat
-//    strip, and `makeTerrain`'s flatten mask has nothing to fight.
-//  * Nothing lives between the camera and the physics: the camera stands on the +z side
-//    of the road, so the lantern posts are planted on the −z side and the tree line is
-//    excluded from the camera's own lane.
-//  * Night is a DARK palette, so emissive gain is palette-relative (four-rooms lesson
-//    22): the lantern flame runs hotter here than the same flame would at noon.
 
 import * as THREE from 'three';
 import {
@@ -51,63 +32,27 @@ import { DELAYEDCHAIN_END, DELAYEDCHAIN_L, delayedChainDecoder } from '@sim/envs
 import type { EnvGeometry, GridGeometry } from '@sim/types';
 import { buildAurora, type AuroraHandle } from './aurora';
 
-// ---------------------------------------------------------------------------
-// world constants (1 cell = 1 world unit; the road really is 32 units long)
-// ---------------------------------------------------------------------------
 
-/** half the road's footprint along x, derived from the env's own corridor length */
 export const ROAD_HALF = (DELAYEDCHAIN_L * CELL) / 2;
-/** the lantern line: the FAR side of the road, so no post ever stands in front of the wisp */
 export const LANTERN_Z = -0.62;
-/** the lamp hangs this far back toward the road from its post */
 export const LAMP_REACH = 0.3;
-/** flagstone half-width; the verge starts here */
 export const ROAD_HALF_Z = 0.44;
-/** the moor sits a few centimetres under the flagstones, so the joints read as peat */
 export const ROAD_SINK = -0.05;
 
 export const TERRAIN_SIZE: readonly [number, number] = [220, 140];
 export const TERRAIN_SEGMENTS: readonly [number, number] = [176, 112];
 
-/**
- * Fog reach. `applyFog` turns extent into density through `fogDensityHint` (night =
- * 0.6), so 150 puts full density ~90 units out: the far end of the road, 32 units from
- * the start, sits about a third hazed — enough that the walk reads as LONG and the
- * terrain's own edge is invisible, while the lantern flames (emissive, unfogged) still
- * punch through the haze when the wave lights them.
- */
 export const FOG_EXTENT = 150;
 
-/**
- * The moon: high (38°) and BEHIND the camera's shoulder, north-west of the road. Two
- * reasons, both measured. A low night key rakes a 1.75-unit lantern post into a 4-unit
- * shadow that swallows three cells (mountain-car lesson 8), and a moon placed down-road
- * would backlight the flagstones into silhouette — this scene needs the path readable
- * and the SKY ahead free for the aurora.
- */
 export const MOON_DIR: readonly [number, number, number] = [-0.52, 0.62, 0.59];
-/** the shadow frustum follows the wisp; this is its radius (see index.ts) */
 export const SHADOW_RADIUS = 9;
 
-/**
- * The aurora's arc is centred on the road's END and stands this far beyond it. Brought in
- * from 34 with the arc narrowed to 0.6 rad (see aurora.ts): a narrow arc held at the old
- * radius is a bright STRIP on the horizon 50 units past the cairn, while the same arc at
- * 26 hangs over the terminus with the road running under it — the curtain is the far end's
- * own sky, so it has to be the size of a sky over that end and not a distant wall.
- */
 export const AURORA_RADIUS = 26;
-/** the first cell the aurora is allowed to reach over — the brief's "cells ~24-31" */
 export const AURORA_FIRST_CELL = 24;
 
-/** the camera's azimuth, shared with index.ts so planting and framing never disagree */
 export const CAMERA_AZIMUTH = -1.16;
-/** the +z lane the camera travels down — nothing tall may be planted in it */
 export const CAMERA_LANE_Z = 2.9;
 
-// ---------------------------------------------------------------------------
-// small shared helpers (actors.ts and aurora.ts import these)
-// ---------------------------------------------------------------------------
 
 export function smoothstep01(t: number): number {
   return t <= 0 ? 0 : t >= 1 ? 1 : t * t * (3 - 2 * t);
@@ -117,7 +62,6 @@ export function clamp01(v: number): number {
   return v < 0 ? 0 : v > 1 ? 1 : v;
 }
 
-/** A scene-local color: STYLE.md allows only BLENDS of token colors. */
 export function blendTokens(
   a: THREE.ColorRepresentation,
   b: THREE.ColorRepresentation,
@@ -126,11 +70,6 @@ export function blendTokens(
   return new THREE.Color(a).lerp(new THREE.Color(b), k);
 }
 
-/**
- * Take a blend down into shade. `night.skyTop` is the darkest token there is and
- * STYLE.md names it as the legal way to reach near-black, so "shade" is a blend like
- * every other color here.
- */
 export function shade(color: THREE.ColorRepresentation, k: number): THREE.Color {
   return blendTokens(color, TOKENS.palettes.night.skyTop, k);
 }
@@ -140,10 +79,6 @@ export interface ColoredPart {
   color: THREE.ColorRepresentation;
 }
 
-/**
- * Merge pre-transformed parts into ONE geometry carrying a flat per-part vertex color,
- * disposing the sources. A lantern is five little primitives and one draw call.
- */
 export function mergeColoredParts(parts: readonly ColoredPart[], name: string): THREE.BufferGeometry {
   let total = 0;
   for (const p of parts) {
@@ -187,15 +122,7 @@ export function mergeColoredParts(parts: readonly ColoredPart[], name: string): 
   return g;
 }
 
-// ---------------------------------------------------------------------------
-// the env's own truth
-// ---------------------------------------------------------------------------
 
-/**
- * The corridor the scene draws. The host hands us the decoder's geometry; the fallback
- * is the DECODER'S OWN geometry builder, never a scene re-derivation, so a placeholder
- * degrades to the correct 32×1 road instead of a guess.
- */
 export function resolveGrid(geometry: EnvGeometry): GridGeometry {
   const g = geometry.grid;
   if (g && g.w === DELAYEDCHAIN_L && g.h === 1) return g;
@@ -210,44 +137,27 @@ export function resolveGrid(geometry: EnvGeometry): GridGeometry {
   );
 }
 
-/** The paying cell, read from the env geometry (never the constant 31 typed inline). */
 export function goalCellOf(grid: GridGeometry): number {
   const g = grid.goal;
   return g ? g.x : grid.w - 1;
 }
 
-// ---------------------------------------------------------------------------
-// the skin (every color a blend of tokens — STYLE.md)
-// ---------------------------------------------------------------------------
 
 export interface MoorSkin {
-  /** peat under the heather */
   peat: THREE.Color;
-  /** the rolling moor top */
   moor: THREE.Color;
-  /** worn flagstone, unlit */
   flagstone: THREE.Color;
-  /** the same stone standing in a pool of moonlight */
   flagstoneMoonlit: THREE.Color;
-  /** packed-earth verge either side of the path */
   verge: THREE.Color;
-  /** wind-bleached moor grass */
   grass: THREE.Color;
-  /** heather in flower — a dusky violet, the moor's only hue */
   heather: THREE.Color;
-  /** wet granite: milestone, cairn, moor stones */
   stone: THREE.Color;
   stoneDark: THREE.Color;
-  /** moss on the milestone */
   moss: THREE.Color;
-  /** cold wrought iron: the lantern posts */
   iron: THREE.Color;
   ironLight: THREE.Color;
-  /** the flame the wave lights — warm gold against a cold moor */
   flame: THREE.Color;
-  /** bare windblown thorn trees on the horizon */
   thorn: THREE.Color;
-  /** ground mist */
   mist: THREE.Color;
 }
 
@@ -259,9 +169,6 @@ export function moorSkin(palette: Palette, tokens: typeof TOKENS): MoorSkin {
   return {
     peat: shade(blendTokens(palette.hemiGround, palette.groundA, 0.45), 0.2),
     moor: shade(blendTokens(palette.groundA, palette.groundB, 0.45), 0.12),
-    // Night ground albedo is the mirror of the noon albedo law (four-rooms lesson 19):
-    // under a 0.5 key a stone shaded to 40 sRGB is a black hole on screen, so the
-    // flagstones sit BRIGHT for a night palette and still never approach bloom.
     flagstone: blendTokens(palette.groundB, moon, 0.2),
     flagstoneMoonlit: blendTokens(palette.groundB, moon, 0.52),
     verge: shade(blendTokens(palette.groundA, palette.hemiGround, 0.4), 0.18),
@@ -278,26 +185,15 @@ export function moorSkin(palette: Palette, tokens: typeof TOKENS): MoorSkin {
   };
 }
 
-// ---------------------------------------------------------------------------
-// moonlight pools — the only bright thing on the road that is not the agent
-// ---------------------------------------------------------------------------
 
 export interface MoonPool {
-  /** cell index the pool is centred on (fractional) */
   cell: number;
-  /** reach in cells */
   radius: number;
   strength: number;
 }
 
-/** hero 5 pools / medium 4 / thumb 3 — a break in the cloud every seven-ish cells. */
 export const MOON_POOL_COUNT = 5;
 
-/**
- * Deterministic breaks in the cloud, spread down the road with a seeded offset. Pure
- * geometry of the LANE (a stationary function of cell index), never of the agent's
- * history — the same seed always lights the same stones.
- */
 export function moonPools(seed: number, count = MOON_POOL_COUNT, length = DELAYEDCHAIN_L): MoonPool[] {
   const pools: MoonPool[] = [];
   const span = length / count;
@@ -313,7 +209,6 @@ export function moonPools(seed: number, count = MOON_POOL_COUNT, length = DELAYE
   return pools;
 }
 
-/** Moonlight at a cell in [0, 1] — a smooth sum over the pools, clamped. */
 export function moonlightAt(cell: number, pools: readonly MoonPool[]): number {
   let m = 0;
   for (let i = 0; i < pools.length; i++) {
@@ -326,15 +221,7 @@ export function moonlightAt(cell: number, pools: readonly MoonPool[]): number {
   return clamp01(m);
 }
 
-// ---------------------------------------------------------------------------
-// the moor height field
-// ---------------------------------------------------------------------------
 
-/**
- * Rolling moor everywhere, identically flat over the road. `w` is 0 for every point
- * within one cell of the path, so the flagstones stand on an exactly level strip and
- * `sampleHeight` along the road is exactly `ROAD_SINK` (asserted in the test).
- */
 export function makeMoorHeight(seed: number): (x: number, z: number) => number {
   return (x, z) => {
     const out = Math.abs(z) - (ROAD_HALF_Z + 0.55);
@@ -344,16 +231,12 @@ export function makeMoorHeight(seed: number): (x: number, z: number) => number {
     const n2 = valueNoise2(x * 0.11 + 1.3, z * 0.11 + 4.9, 128, seed ^ 0x51ed270b) - 0.5;
     const n3 = valueNoise2(x * 0.31 + 6.1, z * 0.31 + 2.3, 128, seed ^ 0x1b873593) - 0.5;
     const rolling = n1 * 3.4 + n2 * 1.1 + n3 * 0.28;
-    // a far ridge line so the moor has a horizon instead of an edge
     const far = Math.max(0, (Math.max(Math.abs(x) - ROAD_HALF, Math.abs(z)) - 34) / 46);
     const ridge = smoothstep01(far) * (2.6 + 2.2 * (valueNoise2(x * 0.02 + 11.3, z * 0.02 + 5.5, 128, seed) - 0.5));
     return w * (rolling + ridge);
   };
 }
 
-// ---------------------------------------------------------------------------
-// world handle
-// ---------------------------------------------------------------------------
 
 export interface WorldHandle {
   group: THREE.Group;
@@ -364,7 +247,6 @@ export interface WorldHandle {
   aurora: AuroraHandle;
   skin: MoorSkin;
   pools: readonly MoonPool[];
-  /** ctx.time() — mist, grass, aurora and flagstone rims all move on the one clock */
   setTime(t: number): void;
   setPixelRatio(dpr: number): void;
   dispose(): void;
@@ -388,7 +270,6 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene, grid: GridGeom
   const owned: Disposable[] = [];
   const timed: Timed[] = [];
 
-  // ---- sky (exactly one): a night gradient with the token star field ----
   const sky = skyFromPalette(palette, 'night', tier, {
     sunDir: MOON_DIR,
     sunSize: 0.022,
@@ -405,7 +286,6 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene, grid: GridGeom
   owned.push(sky);
   timed.push({ setTime: (t) => sky.setTime(t) });
 
-  // ---- the light budget: moon + hemi + 4 points (wisp / wave front / goal / aurora) ----
   const rig = makeLightRig(palette, tier, {
     sunDir: sky.sunDirection,
     pointCount: 4,
@@ -416,10 +296,8 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene, grid: GridGeom
   owned.push(rig);
   rig.setShadowFocus({ x: 0, y: 0.3, z: 0 }, SHADOW_RADIUS);
 
-  // ---- fog, always ----
   applyFog(scene, palette, FOG_EXTENT);
 
-  // ---- the moor ----
   const terrain = makeTerrain({
     size: TERRAIN_SIZE,
     segments: TERRAIN_SEGMENTS,
@@ -453,9 +331,6 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene, grid: GridGeom
   group.add(terrain.mesh);
   owned.push(terrain);
 
-  // ---- the path: 32 flagstones, one per cell, straight off `grid.walls` ----
-  // White base + full-color tint (four-rooms lesson 13): the moonlight pools are an
-  // instance color, so the whole road is ONE draw call however the cloud breaks.
   const pools = moonPools(ctx.seed, tier === 'thumb' ? 3 : tier === 'medium' ? 4 : MOON_POOL_COUNT, grid.w);
   const field = buildCellField(
     grid,
@@ -465,7 +340,6 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene, grid: GridGeom
       floorTint: (x) => {
         const m = moonlightAt(x, pools);
         const c = skin.flagstone.clone().lerp(skin.flagstoneMoonlit, m);
-        // every eighth stone is a darker slab, so the path reads as laid stone, not tape
         return x % 8 === 3 ? c.lerp(skin.stoneDark, 0.22) : c;
       },
       wallShape: 'block',
@@ -483,7 +357,6 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene, grid: GridGeom
   owned.push(field);
   timed.push({ setTime: (t) => field.setTime(t) });
 
-  // ---- the verges: two packed-earth strips framing the path, one draw ----
   {
     const parts: ColoredPart[] = [];
     const length = grid.w * CELL + 1.2;
@@ -517,7 +390,6 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene, grid: GridGeom
     });
   }
 
-  // ---- the aurora: the ONE bespoke ShaderMaterial, over the far end alone ----
   const aurora = buildAurora({
     tier,
     palette,
@@ -530,7 +402,6 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene, grid: GridGeom
   owned.push(aurora);
   timed.push({ setTime: (t) => aurora.setTime(t) });
 
-  // ---- planting: nothing on the path, nothing tall in the camera's lane ----
   const offRoad: ExcludeFn = excludeBand(0, ROAD_HALF_Z + 0.42, 0.24);
   const nearCamera: ExcludeFn = excludeRect(0, CAMERA_LANE_Z, ROAD_HALF + 12, 1.9, 0.4);
 
@@ -546,7 +417,6 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene, grid: GridGeom
     scale: [0.42, 0.95],
     stretch: [0.9, 1.7],
     hueJitter: 0.26,
-    // "breath of wind in the grass" — the moor is never still
     wind: 0.07,
     windFrequency: 1.15,
     rimColor: palette.hemiSky,
@@ -573,9 +443,6 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene, grid: GridGeom
     wind: 0.045,
     windFrequency: 1.35,
     rimColor: palette.accentLight,
-    // Under a 0.5 night key a rim-dominated flower is a PALE SPECK: at 0.5 the heather
-    // read as a field of little white mushrooms rather than as the moor's one hue. 0.26
-    // lets the dusky violet win and the rim only catch the tops.
     rimStrength: 0.26,
     castShadow: false,
     name: 'moorHeather',
@@ -605,9 +472,6 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene, grid: GridGeom
   owned.push(stones);
   timed.push(stones);
 
-  // A thin line of wind-killed thorns on the horizon: the moor needs a silhouette, and
-  // bare archetypes at night are pure shape. Kept out of the camera lane AND off the
-  // near verge, so they never cross the road.
   const thorns = scatterTrees({
     archetypes: ['bare'],
     count: 90,
@@ -632,7 +496,6 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene, grid: GridGeom
   owned.push(thorns);
   timed.push(thorns);
 
-  // ---- ground mist + night air ----
   const mist: MistPlanesHandle = makeMistPlanes({
     size: [110, 54],
     color: skin.mist,
@@ -651,17 +514,6 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene, grid: GridGeom
   owned.push(mist);
   timed.push(mist);
 
-  // Dust motes, not fireflies: the night moor is empty, and the specks only read at all
-  // because the wisp is dragging its own light through them.
-  //
-  // TWO MEASURED CORRECTIONS, both canon lesson 5 in its sharpest form. (a) SIZE. The kit
-  // sizes a point as `uSize · 60/dist` screen px, so a field the CAMERA STANDS INSIDE
-  // renders its nearest members at ~100 px: the first pass at 1.6 filled the road picture
-  // with soft bokeh discs that read as a dirty lens, not as night air. 0.42 puts a mote at
-  // 5 px a metre away and one pixel at the far end — dust. (b) PLACEMENT. The camera walks
-  // the +z lane, so the field is pushed onto the −z side of the road: the motes drift
-  // BETWEEN the wisp and the lantern line, where its light can find them, instead of
-  // swimming across the lens.
   const motes: AmbientParticlesHandle = makeAmbientParticles({
     preset: 'dust',
     count: 1200,
@@ -705,11 +557,7 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene, grid: GridGeom
   };
 }
 
-// ---------------------------------------------------------------------------
-// small shared prop material (actors.ts)
-// ---------------------------------------------------------------------------
 
-/** The one stone/iron material shape every prop in this scene is cut from. */
 export function propMaterial(palette: Palette, tier: QualityTier, name: string): OakMaterial {
   return oakMaterial({
     vertexColors: true,
@@ -725,12 +573,10 @@ export function propMaterial(palette: Palette, tier: QualityTier, name: string):
   });
 }
 
-/** Drive one prop material's clock (kept here so actors.ts imports one thing). */
 export function setPropTime(material: THREE.Material | null, t: number): void {
   oakUniforms(material)?.setTime(t);
 }
 
-/** World x of a (possibly fractional) cell index — the wave front rides this. */
 export function cellX(cell: number, grid: GridSize, out?: Vec3Tuple): number {
   return cellToWorld(cell, 0, grid, out)[0];
 }

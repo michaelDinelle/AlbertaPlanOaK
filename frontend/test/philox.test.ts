@@ -1,10 +1,4 @@
 /// <reference types="bun" />
-// Philox4x32-10 / u01 golden tests.
-//
-// Vectors come from tools/gridworld_ref.py (the bitwise certification oracle,
-// itself cross-checked against tools/physics_parity.py and OakPhysics.metal).
-// Regenerate with:
-//   /Users/studio/OaKMeta/.venv/bin/python frontend/test/fixtures/gen.py --only core
 
 import { describe, expect, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
@@ -60,7 +54,6 @@ describe('philox4x32_10', () => {
     for (const c of vectors.cases) {
       const got = philox4x32_10(c.k0, c.k1, c.ctr[0], c.ctr[1], c.ctr[2], c.ctr[3]);
       expect(got).toEqual(c.out);
-      // every word is a genuine uint32
       for (const w of got) {
         expect(Number.isInteger(w)).toBe(true);
         expect(w).toBeGreaterThanOrEqual(0);
@@ -132,7 +125,6 @@ describe('mulhi', () => {
       const want = Number((BigInt(a >>> 0) * BigInt(b >>> 0)) >> 32n);
       expect(mulhi(a, b)).toBe(want);
     }
-    // fuzz against BigInt (BigInt is a test-only oracle; never in the hot path)
     let s = 0x12345678;
     for (let i = 0; i < 2000; i++) {
       s = (Math.imul(s, 1664525) + 1013904223) >>> 0;
@@ -165,7 +157,6 @@ describe('u01 / u01open', () => {
       expect(c.u01).toBeLessThan(1);
       expect(c.u01open).toBeGreaterThan(0);
       expect(c.u01open).toBeLessThanOrEqual(1);
-      // every u01 value is exactly representable in float32
       expect(Object.is(Math.fround(c.u01), c.u01)).toBe(true);
     }
   });

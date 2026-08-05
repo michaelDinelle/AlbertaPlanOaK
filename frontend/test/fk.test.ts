@@ -1,15 +1,4 @@
 /// <reference types="bun" />
-// Cheetah forward-kinematics golden tests.
-//
-// Oracle: tools/replay_html.py `fk()` (L87-114), whose qpos=0 and bent-pose
-// values are independently hand-verified in its --selftest. Regenerate with:
-//   /Users/studio/OaKMeta/.venv/bin/python frontend/test/fixtures/gen.py --only core
-//
-// Precision note: `fk()` returns a Float32Array per the frozen CheetahGeometry
-// contract, so its values are the double-precision result rounded once on
-// store. The double-precision path `fk64()` is compared against the oracle at
-// 1e-9 directly; the Float32Array path is compared against Math.fround of the
-// oracle at the same 1e-9 (i.e. it must land on the identical float32).
 
 import { describe, expect, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
@@ -96,11 +85,8 @@ describe('hand-verified poses', () => {
       const c = caseByLabel(label);
       const hand = c.hand;
       expect(hand).not.toBeNull();
-      // oracle vs its own hand values (fixture self-check, carried into JS)
       expect(maxAbsDiff(c.pts, hand as number[], false)).toBeLessThanOrEqual(TOL);
-      // double path vs the hand values
       expect(maxAbsDiff(fk64(c.qpos), hand as number[], false)).toBeLessThanOrEqual(TOL);
-      // float32 path vs the float32 rounding of the hand values
       expect(maxAbsDiff(fk(c.qpos), hand as number[], true)).toBeLessThanOrEqual(TOL);
     });
   }

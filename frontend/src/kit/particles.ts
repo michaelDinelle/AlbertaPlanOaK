@@ -1,16 +1,3 @@
-// kit/particles — the ambient life of the preserve.
-//
-// STYLE.md idle-motion briefs: fireflies (MemoryChain), pollen (HalfCheetah), snow
-// (FourRooms winter quadrant), embers (MountainCar / DelayedChain), bubbles (DeepSea),
-// dust (ProceduralMaze shafts, HighDimMaze canyons). One implementation, six presets.
-//
-// EVERY particle's motion is computed in the VERTEX SHADER from `uTime`: the CPU writes
-// each particle's base position, seed and phase exactly once, and never touches the
-// buffers again. That is what lets a 4000-mote firefly swarm cost one draw call and zero
-// per-frame JS, and what makes a paused playback clock freeze the swarm coherently.
-//
-// Tier: hero ×1, medium ×0.5, thumb OFF (count 0, invisible handle — callers never
-// branch on null).
 
 import * as THREE from 'three';
 import { fbm } from './textures';
@@ -20,28 +7,19 @@ import type { QualityTier } from './types';
 export type ParticlePreset = 'fireflies' | 'pollen' | 'snow' | 'embers' | 'bubbles' | 'dust';
 
 export interface ParticlePresetSpec {
-  /** hero-tier particle count */
   count: number;
-  /** base point size (screen px at 1 world unit) */
   size: number;
   color: number;
-  /** HDR multiplier — >1 feeds the bloom */
   intensity: number;
-  /** vertical drift, world units per second (+ = up) */
   rise: number;
-  /** horizontal wander amplitude, world units */
   swirl: number;
-  /** wander frequency, radians per second */
   swirlFreq: number;
-  /** alpha modulation depth in [0, 1] */
   twinkle: number;
-  /** sprite edge softness exponent (higher = tighter core) */
   softness: number;
   additive: boolean;
   opacity: number;
 }
 
-/** The six house presets. Scenes tune `color`/`count`, never the physics. */
 export const PARTICLE_PRESETS: Record<ParticlePreset, ParticlePresetSpec> = Object.freeze({
   fireflies: { count: 220, size: 9, color: 0x9ff0a8, intensity: 2.6, rise: 0.06, swirl: 0.45, swirlFreq: 0.55, twinkle: 0.85, softness: 2.4, additive: true, opacity: 1 },
   pollen: { count: 900, size: 4, color: 0xffe9b0, intensity: 1.5, rise: 0.09, swirl: 0.3, swirlFreq: 0.35, twinkle: 0.35, softness: 2.0, additive: true, opacity: 0.75 },
@@ -51,14 +29,11 @@ export const PARTICLE_PRESETS: Record<ParticlePreset, ParticlePresetSpec> = Obje
   dust: { count: 1100, size: 3, color: 0xffe0b8, intensity: 1.2, rise: 0.02, swirl: 0.18, swirlFreq: 0.22, twinkle: 0.2, softness: 1.8, additive: true, opacity: 0.6 },
 });
 
-/** hero 1 / medium 0.5 / thumb 0 (STYLE.md: "thumb: no particles/mist"). */
 export function particleTierScale(tier: QualityTier | undefined): number {
   return tier === 'thumb' ? 0 : tier === 'medium' ? 0.5 : 1;
 }
 
-/** The box particles live in; motion wraps inside it, so the field never empties. */
 export interface ParticleBounds {
-  /** center */
   x?: number;
   y?: number;
   z?: number;
@@ -70,10 +45,8 @@ export interface ParticleBounds {
 export interface AmbientParticlesOptions {
   preset: ParticlePreset;
   bounds: ParticleBounds;
-  /** lane seed — placement is deterministic */
   seed: number;
   tier?: QualityTier;
-  /** override the preset count (before tier scaling) */
   count?: number;
   color?: THREE.ColorRepresentation;
   size?: number;
@@ -85,22 +58,18 @@ export interface AmbientParticlesOptions {
 }
 
 export interface AmbientParticlesHandle {
-  /** add this to the scene; at thumb tier it is an empty, invisible Points */
   points: THREE.Points;
   material: THREE.ShaderMaterial;
-  /** particles actually allocated (0 at thumb) */
   count: number;
-  /** ctx.time() — the ONLY clock */
   setTime(t: number): void;
   setColor(color: THREE.ColorRepresentation): void;
   setIntensity(i: number): void;
-  /** 0..1 — the fraction of particles drawn (cheetah dust rises with speed) */
   setDensity(f01: number): void;
   setPixelRatio(ratio: number): void;
   dispose(): void;
 }
 
-const AMBIENT_VERT = /* glsl */ `
+const AMBIENT_VERT =  `
 #include <common>
 uniform float uTime;
 uniform float uPixelRatio;
@@ -136,7 +105,7 @@ void main() {
 }
 `;
 
-const AMBIENT_FRAG = /* glsl */ `
+const AMBIENT_FRAG =  `
 #include <common>
 uniform vec3 uColor;
 uniform float uIntensity;
@@ -154,16 +123,6 @@ void main() {
 }
 `;
 
-/**
- * A deterministic ambient particle field.
- *
- * ```ts
- * const flies = makeAmbientParticles({ preset: 'fireflies', seed: ctx.seed, tier,
- *   bounds: { halfX: 8, halfY: 2, halfZ: 8, y: 1.2 } });
- * scene.add(flies.points);
- * // update(): flies.setTime(ctx.time());
- * ```
- */
 export function makeAmbientParticles(opts: AmbientParticlesOptions): AmbientParticlesHandle {
   const spec = PARTICLE_PRESETS[opts.preset];
   const scale = particleTierScale(opts.tier);
@@ -257,29 +216,18 @@ export function makeAmbientParticles(opts: AmbientParticlesOptions): AmbientPart
   };
 }
 
-// ---------------------------------------------------------------------------
-// mist — stacked depth-faded sprite planes
-// ---------------------------------------------------------------------------
 
 export interface MistPlanesOptions {
-  /** world extent: a number is square, or [x, z] */
   size: number | readonly [number, number];
   color: THREE.ColorRepresentation;
-  /** lane seed */
   seed: number;
   tier?: QualityTier;
-  /** planes at hero tier (default 5) */
   layers?: number;
-  /** lowest plane height (default 0.15) */
   baseY?: number;
-  /** vertical spread of the stack (default 1.4) */
   spread?: number;
   opacity?: number;
-  /** uv drift, world units per second (default 0.012) */
   speed?: number;
-  /** noise tiling across the extent (default 2.5) */
   scale?: number;
-  /** distance at which a plane is fully faded IN (closer = invisible) */
   nearFade?: number;
   name?: string;
 }
@@ -294,7 +242,7 @@ export interface MistPlanesHandle {
   dispose(): void;
 }
 
-const MIST_VERT = /* glsl */ `
+const MIST_VERT =  `
 #include <common>
 varying vec2 vMistUv;
 varying float vDepth;
@@ -306,7 +254,7 @@ void main() {
 }
 `;
 
-const MIST_FRAG = /* glsl */ `
+const MIST_FRAG =  `
 #include <common>
 uniform sampler2D uNoise;
 uniform vec3 uColor;
@@ -338,10 +286,6 @@ void main() {
 }
 `;
 
-/**
- * Horizontal mist/fog banks — the cheap way to get valley mist, dawn haze and god-ray
- * volume without a volumetric pass. Off at thumb tier (an empty group).
- */
 export function makeMistPlanes(opts: MistPlanesOptions): MistPlanesHandle {
   const group = new THREE.Group();
   group.name = opts.name ?? 'oakMist';

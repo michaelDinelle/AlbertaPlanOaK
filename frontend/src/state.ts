@@ -1,6 +1,3 @@
-// App data layer: a minimal store, TTL-cached resources, and the pure helpers
-// (formatters, columnar reshaping, gallery filtering) the views build on.
-// Zero DOM — everything here is unit-testable.
 
 import { api } from './api';
 import type {
@@ -14,7 +11,6 @@ import type {
 } from '@shared/types';
 import { ENVS, ENV_IDS, isEnvId, type EnvId } from '@shared/envs';
 
-// ---------- store ----------
 
 export interface Store<T> {
   get(): T;
@@ -42,7 +38,6 @@ export function createStore<T>(initial: T): Store<T> {
   };
 }
 
-// ---------- TTL resource ----------
 
 export type AsyncStatus = 'idle' | 'loading' | 'ready' | 'error';
 
@@ -55,7 +50,6 @@ export interface AsyncState<T> {
 
 export interface Resource<T> {
   store: Store<AsyncState<T>>;
-  /** returns cached data inside the TTL; refetches otherwise (or when forced) */
   load(force?: boolean): Promise<T>;
   invalidate(): void;
 }
@@ -93,7 +87,6 @@ export function createResource<T>(
       return inflight;
     },
     invalidate() {
-      // back to idle, but keep the data so the UI has something to show
       store.set({ ...store.get(), status: 'idle', fetchedAt: 0 });
     },
   };
@@ -104,7 +97,6 @@ export const RUN_INDEX_TTL_MS = 60_000;
 export const runIndex: Resource<RunIndexEntry[]> = createResource(() => api.runs(), RUN_INDEX_TTL_MS);
 export const roles: Resource<RolesResponse> = createResource(() => api.roles(), RUN_INDEX_TTL_MS);
 
-/** per-run detail cache — the gallery hydrates cards lazily, the run view reuses them */
 const detailCache = new Map<string, Promise<RunDetail>>();
 
 export function loadRunDetail(id: string, force = false): Promise<RunDetail> {
@@ -119,12 +111,7 @@ export function loadRunDetail(id: string, force = false): Promise<RunDetail> {
   return promise;
 }
 
-// ---------- formatters ----------
 
-/**
- * Average reward rates span 1e-5 (MountainCar) to 1e0 (CartPole) in one fleet,
- * so a fixed decimal count is useless. Pick a representation by magnitude.
- */
 export function formatRate(value: number | null | undefined, sig = 3): string {
   if (value === null || value === undefined || !Number.isFinite(value)) return '—';
   if (value === 0) return '0';
@@ -145,7 +132,6 @@ export function formatCount(value: number | null | undefined): string {
   return Math.round(value).toLocaleString('en-US');
 }
 
-/** 100000 -> "100k", 1000000 -> "1M", 1500000 -> "1.5M" */
 export function formatStep(value: number | null | undefined): string {
   if (value === null || value === undefined || !Number.isFinite(value)) return '—';
   const abs = Math.abs(value);
@@ -193,7 +179,6 @@ export function formatAgo(iso: string | null | undefined, now: number = Date.now
   return `${Math.round(days / 365.25)}y ago`;
 }
 
-// ---------- run/summary readers ----------
 
 export function primaryResult(summary: RunDetail['summary'], policy?: string): SummaryPolicyResult | null {
   const results = summary?.results;
@@ -219,25 +204,13 @@ export function envSliceResult(
   return slice[0] ?? null;
 }
 
-/** Everything about a run that changes when the shown policy changes. */
 export interface PolicyView {
   policy: string;
   result: SummaryPolicyResult | null;
-  /** furthest heartbeat for THIS policy (summary first, aggregate as the fallback) */
   maxStep: number;
-  /** did THIS policy reach the declared horizon */
   complete: boolean;
 }
 
-/**
- * Derive the policy-dependent block of a run.
- *
- * `summary.results` has one entry per policy and `aggregate.jsonl` one series per
- * policy, so every headline number — IQM, positivity, survival, best lane,
- * completeness — belongs to ONE policy. Capturing them once and then only
- * redrawing the charts on a policy switch leaves confidently mislabelled numbers
- * on screen, which is worse than showing none.
- */
 export function policyView(
   detail: Pick<RunDetail, 'summary' | 'aggregate' | 'meta'>,
   policy: string,
@@ -263,10 +236,6 @@ export interface EnvShare {
   fraction: number;
 }
 
-/**
- * Seed apportionment per env, in the canonical ENV_IDS order (so two runs with
- * the same envs always draw the same strip). Single-env runs report one share.
- */
 export function envShares(meta: Pick<RunMeta, 'envId' | 'batch' | 'envSchedule'>): EnvShare[] {
   const counts = new Map<EnvId, number>();
   const schedule = meta.envSchedule;
@@ -286,13 +255,6 @@ export function envShares(meta: Pick<RunMeta, 'envId' | 'batch' | 'envSchedule'>
   });
 }
 
-/**
- * The envs of an index entry, in canonical order. Lane apportionment is NOT
- * derivable here: the run index carries `envIds` and `batch`, never the per-env
- * split (that lives in meta.envSchedule, i.e. behind a detail fetch). Anything
- * that needs true counts calls `envShares(meta)`; anything that only needs the
- * identity strip uses this and shows no numbers.
- */
 export function envIdsOf(entry: Pick<RunIndexEntry, 'envIds'>): EnvId[] {
   return ENV_IDS.filter((id) => entry.envIds.includes(id));
 }
@@ -305,7 +267,6 @@ export function envSlug(envId: string): string {
   return isEnvId(envId) ? ENVS[envId].slug : envId.toLowerCase();
 }
 
-// ---------- gallery filtering ----------
 
 export interface GalleryFilter {
   search: string;
@@ -343,7 +304,6 @@ export function matchesFilter(entry: RunIndexEntry, filter: GalleryFilter): bool
 
 const ROLE_RANK: Record<string, number> = { bestKernel: 0, candidate: 1, parent: 2 };
 
-/** roles first (best kernel, then candidate, then parent), then newest, then id. */
 export function sortRuns(entries: readonly RunIndexEntry[]): RunIndexEntry[] {
   return [...entries].sort((a, b) => {
     if (a.inFlight !== b.inFlight) return a.inFlight ? -1 : 1;
@@ -363,7 +323,6 @@ export function envIdsInIndex(entries: readonly RunIndexEntry[]): EnvId[] {
   return ENV_IDS.filter((id) => seen.has(id));
 }
 
-// ---------- aggregate reshaping ----------
 
 export interface AggregateSeries {
   steps: number[];
@@ -382,14 +341,12 @@ const EMPTY_AGGREGATE: AggregateSeries = {
   steps: [], p10: [], p50: [], p90: [], alive: [], dead: [], sps: [], positivity: [], bestLane: [], wallSeconds: [],
 };
 
-/** Deduplicates by step (a `final` row repeats the last heartbeat) and sorts ascending. */
 export function aggregateSeries(rows: readonly AggregateRow[], policy?: string): AggregateSeries {
   const filtered = policy ? rows.filter((r) => r.policy === policy) : rows;
   if (filtered.length === 0) return { ...EMPTY_AGGREGATE };
   const byStep = new Map<number, AggregateRow>();
   for (const row of filtered) {
     const existing = byStep.get(row.step);
-    // a `final` row wins over the `hb` row at the same step
     if (!existing || row.kind === 'final') byStep.set(row.step, row);
   }
   const ordered = [...byStep.values()].sort((a, b) => a.step - b.step);
@@ -417,30 +374,17 @@ export function policiesIn(rows: readonly AggregateRow[]): string[] {
   return [...seen].sort();
 }
 
-/**
- * Dedup key for a LIVE aggregate buffer. A heartbeat is unique per (policy, step),
- * never per step: a run with oak + zero + random emits three rows at every step,
- * so a step-keyed buffer keeps whichever arrived last and the resulting "series"
- * is a splice of three populations that no run ever produced.
- */
 export function aggregateKey(row: Pick<AggregateRow, 'policy' | 'step'>): string {
   return `${row.policy}:${row.step}`;
 }
 
-/** Absorb one row into a live buffer; the `final` row wins its own `hb` duplicate. */
 export function absorbAggregateRow(buffer: Map<string, AggregateRow>, row: AggregateRow): void {
   const key = aggregateKey(row);
   const existing = buffer.get(key);
   if (!existing || row.kind === 'final') buffer.set(key, row);
 }
 
-// ---------- Kaplan-Meier ----------
 
-/**
- * summary.survival is a sparse `{step: survivingFraction}` map — only the steps
- * where a lane died. Expand it into a stepped curve anchored at (0, 1) and the
- * horizon so the line spans the whole run.
- */
 export function kmCurve(
   survival: Record<string, number> | undefined,
   horizon: number,
@@ -463,7 +407,6 @@ export function kmCurve(
   return { steps, fraction };
 }
 
-// ---------- fleet columnar reshaping ----------
 
 export interface LaneSeries {
   lane: number;
@@ -471,11 +414,9 @@ export interface LaneSeries {
   envId: string;
   policy: string;
   values: (number | null)[];
-  /** last finite value, for ranking/labels */
   last: number | null;
 }
 
-/** First present key among candidates — the server picks the field naming. */
 export function pickField(columnar: FleetColumnar, candidates: readonly string[]): string | null {
   const keys = Object.keys(columnar.series ?? {});
   for (const candidate of candidates) if (keys.includes(candidate)) return candidate;
@@ -506,25 +447,6 @@ export function laneSeries(columnar: FleetColumnar, field: string, envId?: strin
   return out;
 }
 
-/**
- * Turn a cumulative `rewardSum` series into the MEASURED reward rate over each
- * heartbeat window: (sum_i − sum_{i−1}) / (step_i − step_{i−1}).
- *
- * This is what "reward rate" means everywhere else in the lab — reward the
- * environment actually paid, divided by steps. It is NOT `health.rewardRate`,
- * which is the agent's own internal average-reward estimate ρ̄ (a learned
- * parameter, and a divergence diagnostic): plotting ρ̄ under a "reward rate"
- * label was the chart telling you what the agent BELIEVES it earns.
- *
- * The first window is measured from the origin (0 steps, 0 reward), which is
- * exactly its cumulative rate. Nulls propagate — a missing endpoint means the
- * window is unknown, never zero — and so does a zero-width step gap.
- */
-/**
- * Where a trailing-window average BELONGS on the time axis: its window's
- * center. Plotting window (a, b] at b renders everything up to one full
- * window late — a run that died mid-window drew its peak AFTER the death.
- */
 export function windowMidpoints(steps: readonly number[]): number[] {
   return steps.map((step, i) => (i === 0 ? step / 2 : ((steps[i - 1] ?? 0) + step) / 2));
 }
@@ -553,7 +475,6 @@ export function windowRates(
   return out;
 }
 
-/** Apply `windowRates` to every seed's series in place of the cumulative one. */
 export function toWindowRates(steps: readonly number[], series: readonly LaneSeries[]): LaneSeries[] {
   return series.map((entry) => {
     const values = windowRates(steps, entry.values);
@@ -569,10 +490,6 @@ export function toWindowRates(steps: readonly number[], series: readonly LaneSer
   });
 }
 
-/**
- * Cap a spaghetti plot without lying about it: always keep the extremes and the
- * median seed, then fill with an even stride over the rank order. Deterministic.
- */
 export function capLanes(series: readonly LaneSeries[], cap: number): LaneSeries[] {
   if (series.length <= cap) return [...series];
   const ranked = [...series].sort((a, b) => (a.last ?? -Infinity) - (b.last ?? -Infinity));
@@ -585,14 +502,12 @@ export function capLanes(series: readonly LaneSeries[], cap: number): LaneSeries
   return picked.filter((entry): entry is LaneSeries => entry !== undefined);
 }
 
-/** Rank seeds by final value, descending — the seed ledger's default order. */
 export function rankLanes(series: readonly LaneSeries[]): LaneSeries[] {
   return [...series].sort((a, b) => (b.last ?? -Infinity) - (a.last ?? -Infinity));
 }
 
 export type SortDirection = 'asc' | 'desc';
 
-/** Stable comparator used by the sortable table; nulls always sink. */
 export function compareValues(a: unknown, b: unknown, direction: SortDirection): number {
   const nullA = a === null || a === undefined || (typeof a === 'number' && !Number.isFinite(a));
   const nullB = b === null || b === undefined || (typeof b === 'number' && !Number.isFinite(b));

@@ -1,8 +1,3 @@
-// #/harness/:slug — the artisan dev page.
-//
-// A thin ViewMount adapter: every moving part lives in `kit/harness`, so the harness is
-// testable and reusable (the theater host reads the same frame-assembly helpers).
-// Route registration is orchestrator-owned; this file only exports `mount`.
 
 import type { ViewMount } from '../router';
 import { mountHarness, type HarnessHandle, type HarnessOptions } from '@kit/harness';
@@ -10,7 +5,6 @@ import type { QualityTier } from '@kit/types';
 
 const TIERS: readonly string[] = ['hero', 'medium', 'thumb'];
 
-/** `#/harness/mountain-car?tier=medium&run=<id>&steps=4000&at=1200&pause=1&debug=1` */
 function optionsFromQuery(): HarnessOptions {
   const opts: HarnessOptions = {};
   if (typeof window === 'undefined') return opts;

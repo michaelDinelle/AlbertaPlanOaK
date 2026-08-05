@@ -24,8 +24,8 @@ from pathlib import Path
 
 import numpy as np
 
-FILE_MAGIC = 0x544B414F  # "OAKT"
-SEG_MAGIC = 0x54474553   # "SEGT"
+FILE_MAGIC = 0x544B414F
+SEG_MAGIC = 0x54474553
 
 
 def read_tape(path: Path | str) -> dict:
@@ -37,13 +37,13 @@ def read_tape(path: Path | str) -> dict:
         raise ValueError(f"{path}: not an OAKT v1 tape (magic {magic:#x} v{version})")
     fields = json.loads(data[16:16 + json_len])["fields"]
     n_f = len(fields)
-    row_bytes = 8 + n_f * lane_count * 4  # u32 stepStart + u32 stepCount + F x f32[B]
+    row_bytes = 8 + n_f * lane_count * 4
     starts, counts, mats = [], [], []
     off = 16 + json_len
     while off + 20 <= len(data):
         smagic, n_win, raw_bytes, comp_bytes, crc = struct.unpack_from("<5I", data, off)
         if smagic != SEG_MAGIC or off + 20 + comp_bytes > len(data):
-            break  # torn tail
+            break
         comp = data[off + 20: off + 20 + comp_bytes]
         if zlib.crc32(comp) != crc:
             break
@@ -94,7 +94,6 @@ def find_tape(run_root: Path | str, policy: str = "oak") -> Path | None:
     return p if p.exists() else None
 
 
-# --------------------------------------------------- fleet.jsonl row synthesis
 def _lane_env_map(meta: dict) -> dict[int, str]:
     sched = meta.get("envSchedule") or []
     if not sched:
@@ -153,7 +152,7 @@ def synth_hb_rows(root: Path | str, policy: str = "oak") -> list[dict]:
         idx = _np.nonzero(ends == s)[0]
         if idx.size == 0:
             continue
-        w = tape["data"][idx[0]]  # (F, B)
+        w = tape["data"][idx[0]]
         wall = hb.get((s, policy), {}).get("wallSeconds")
         def g(name, lane):
             v = float(w[fi[name], lane])

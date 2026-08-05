@@ -20,8 +20,8 @@ from pathlib import Path
 
 import numpy as np
 
-FILE_MAGIC = 0x344B_414F   # "OAK4"
-CHUNK_MAGIC = 0x344B_4843  # "CHK4"
+FILE_MAGIC = 0x344B_414F
+CHUNK_MAGIC = 0x344B_4843
 ROW_F32 = 16
 
 
@@ -30,12 +30,10 @@ def _decode_chunk(payload: bytes, step_count: int, codec: dict) -> np.ndarray:
     rows = np.zeros((step_count, ROW_F32), dtype=np.float32)
     off = 0
 
-    # 1. hdr column: bit0-3 action index, bit4 done, bit5 escape
     hdr = np.frombuffer(payload, dtype=np.uint8, count=step_count, offset=off)
     off += step_count
-    rows[:, 6] = (hdr >> 4) & 1  # done
+    rows[:, 6] = (hdr >> 4) & 1
 
-    # 2. Box ctrl columns (u8 quantized, v = q / 127.5 - 1)
     ctrl = codec.get("ctrl")
     if ctrl == "index":
         rows[:, 0] = (hdr & 0x0F).astype(np.float32)
@@ -45,14 +43,12 @@ def _decode_chunk(payload: bytes, step_count: int, codec: dict) -> np.ndarray:
             off += step_count
             rows[:, i] = (q.astype(np.float64) / 127.5 - 1.0).astype(np.float32)
 
-    # 3. cheetah chunkBaseX (present iff a dx32 pose field exists)
     has_dx = any(f["enc"] == "dx32" for f in codec.get("poseFields", []))
     chunk_base_x = 0.0
     if has_dx:
         (chunk_base_x,) = struct.unpack_from("<d", payload, off)
         off += 8
 
-    # 4. pose columns, in descriptor order
     for f in codec.get("poseFields", []):
         idx = 7 + int(f["idx"])
         if f["enc"] == "u8":
@@ -72,11 +68,9 @@ def _decode_chunk(payload: bytes, step_count: int, codec: dict) -> np.ndarray:
         else:
             raise ValueError(f"unknown pose encoding {f['enc']!r}")
 
-    # poseConst fills
     for k, v in (codec.get("poseConst") or {}).items():
         rows[:, 7 + int(k)] = np.float32(v)
 
-    # 5. escape table: verbatim v3 rows replace everything above
     (n_esc,) = struct.unpack_from("<I", payload, off)
     off += 4
     for _ in range(n_esc):
@@ -101,11 +95,11 @@ def read_v4(path: Path | str, codec: dict) -> np.ndarray:
         (cmagic, _step_start, step_count, raw_bytes, comp_bytes, crc,
          _done_count) = struct.unpack_from("<7I", data, off)
         if cmagic != CHUNK_MAGIC or off + 32 + comp_bytes > len(data):
-            break  # torn tail: drop this chunk and everything after
+            break
         comp = data[off + 32: off + 32 + comp_bytes]
         if zlib.crc32(comp) != crc:
             break
-        payload = zlib.decompress(comp, wbits=-15)  # raw DEFLATE
+        payload = zlib.decompress(comp, wbits=-15)
         if len(payload) != raw_bytes:
             break
         chunks.append(_decode_chunk(payload, step_count, codec))

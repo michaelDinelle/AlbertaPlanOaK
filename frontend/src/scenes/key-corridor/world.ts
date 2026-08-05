@@ -1,39 +1,3 @@
-// The Ivy Gate — the static world (KeyCorridor-cont-v0).
-//
-// THE ONE IDEA OF THIS SCENE: the env is a garden with ONE WALL AND ONE WAY THROUGH IT.
-// Every visual decision serves that sentence. The outer wall is a LOW honey-stone kerb
-// (0.5) so the plan view survives; the interior divider is a TALL, THIN ivy-clad wall
-// (1.02 high, 0.7 thick) that dominates the frame without becoming a road; and the single
-// free cell in it — the door — is the only thing in the garden the eye is asked to care
-// about. West of the divider the planting is wild (moss, grass, the amber seed); east of
-// it the ground is raked pale gravel around a lantern shrine on a warm flagstone. Wild →
-// gate → formal, left to right, in one glance.
-//
-// NOTHING HERE RE-DERIVES THE LAYOUT (four-rooms canon lesson 12). Walls come from
-// `grid.walls`; the door comes from `grid.doors` / `grid.hallways`; "is this cell the
-// divider" is a STRUCTURAL read of the walls array (a wall with free cells on both sides
-// along one axis), so the same code skins a regenerated layout. "West / east / threshold"
-// is the sign of `x - door.x`, which is the env's own partition and not a typed-in range.
-//
-// PATTERNS COPIED FROM THE GRID CANON
-//  * `buildCellField` is a SUBSTRATE: white base material + full-color `floorTint` /
-//    `wallTint` instance colors, so the whole garden floor is ONE draw and the whole
-//    kerb is one more.
-//  * The divider cells COLLAPSE their cell-field instances (`wallInstanceAt` + zero
-//    scale) and a taller bespoke wall segment owns them — the walls array is untouched,
-//    so the ground-truth overlay still draws its boxes over the new prop.
-//  * Orientation is READ (lesson 15): the gate faces the axis its flanking wall cells
-//    run along, so `gateYaw` works on any layout that puts a door in a wall.
-//
-// LIGHT AND CAMERA ARE ONE DECISION. The door sits in a wall that runs north–south, so
-// its faces look east and west: a camera due south sees the gate edge-on and the whole
-// scene loses its subject. The frame is therefore a south-WEST 3/4 (azimuth −0.72, a 54.5°
-// aerial — `index.ts` derives the elevation from the sightline census, not from taste),
-// which reads the gate's west face at 45° while the divider hides only ~0.37 of a cell of
-// the far room's floor. The sun then cannot sit where the camera is (a key light behind
-// the lens is a flat light), so it stands ~89° off the view azimuth, west-by-north at 51°:
-// the gate's visible face is lit, shadows rake across the frame toward the viewer, and the
-// divider lays a soft bar of shade over the formal garden.
 
 import * as THREE from 'three';
 import {
@@ -72,67 +36,26 @@ import {
 } from '@sim/envs/keycorridor';
 import type { EnvGeometry, GridCell, GridGeometry } from '@sim/types';
 
-// ---------------------------------------------------------------------------
-// world constants (1 cell = 1 world unit; the garden really is 9 × 7)
-// ---------------------------------------------------------------------------
 
 export const GARDEN_HALF_X = (KEYCORRIDOR_W * CELL) / 2;
 export const GARDEN_HALF_Z = (KEYCORRIDOR_H * CELL) / 2;
 export const TERRAIN_SIZE = 40;
 export const TERRAIN_SEGMENTS = 128;
 
-/**
- * The outer kerb. LOW on purpose: at the composed aerial a 0.9 wall hides 0.64 of the cell
- * behind it (h / tan 54.5°), and the near row of the garden stops reading as a grid. Half
- * that height hides a third of a cell, which the eye takes for depth rather than for loss.
- */
 export const KERB_HEIGHT = 0.5;
-/** the divider: the ONE thing in the garden you cannot walk through, so it stands tall */
 export const DIVIDER_HEIGHT = 1.02;
 export const DIVIDER_CAP = 0.11;
-/**
- * How thick the divider is across the direction you would walk through it. A wall cell is
- * a whole cell to the ENV, but a full-cell stone prism reads from the air as a road, not
- * as a wall — the top face is then the widest, brightest surface in the frame and it wins
- * the composition. At 0.7 the wall keeps a wall's proportions, the cells beside it get
- * their floor back, and the overlay still draws the full cell box over it.
- */
 export const DIVIDER_THICKNESS = 0.7;
-/** the lawn sits a few centimetres under the flagstones so the joints read as soil */
 export const GARDEN_SINK = -0.06;
 
-/**
- * Fog reach. `applyFog` turns extent into density via `fogDensityHint` (morning = 0.35):
- * 11 × the terrain puts full density ~154 units out, which hazes the tree line at its
- * ~22-unit distance by about 6%. That is morning air. The first pass at 6 × put 18% of a
- * near-white fog over the tree line AND over the garden, and the whole frame went milky —
- * a grid scene cannot spend contrast on atmosphere, it has to spend it on cells.
- */
 export const FOG_EXTENT = TERRAIN_SIZE * 11;
 
-/**
- * Morning key light: west-by-north, elevation 51°. Two constraints pin it. It has to be
- * roughly side-on to the camera (~89° off the view azimuth) or the frame goes flat, and
- * it has to have a NEGATIVE x so the gate's visible west face is lit rather than in its
- * own wall's shadow. At 51° the divider throws 0.83 of a cell — a bar of shade across the
- * formal garden's near column. Dropping it to 30° threw 1.8 cells and swallowed a room.
- */
 export const SUN_DIR: readonly [number, number, number] = [-0.46, 0.78, -0.42];
-/** the shadow frustum must cover the FRAME (garden + near meadow), not just the cells */
 export const SHADOW_RADIUS = 9.5;
 
-/**
- * The composition azimuth, shared with `index.ts`'s OrbitRig so the planting, the sun and
- * the camera can never disagree. South-west: far enough round to read the gate's west
- * face at 45°, near enough to south that the divider only eats ~½ cell of the far room.
- */
 export const CAMERA_AZIMUTH = -0.72;
-/** how far out along that azimuth the "keep it clear" wedge is centred */
 export const CAMERA_STANDOFF = 12;
 
-// ---------------------------------------------------------------------------
-// small shared helpers (actors.ts imports these too)
-// ---------------------------------------------------------------------------
 
 export function smoothstep01(t: number): number {
   return t <= 0 ? 0 : t >= 1 ? 1 : t * t * (3 - 2 * t);
@@ -142,13 +65,11 @@ export function clamp01(v: number): number {
   return v < 0 ? 0 : v > 1 ? 1 : v;
 }
 
-/** smoothstep between two edges — the sequencing tool for the gate's two beats. */
 export function smoothBand(edge0: number, edge1: number, x: number): number {
   if (edge1 <= edge0) return x >= edge1 ? 1 : 0;
   return smoothstep01((x - edge0) / (edge1 - edge0));
 }
 
-/** A scene-local color: STYLE.md allows only BLENDS of token colors. */
 export function blendTokens(
   a: THREE.ColorRepresentation,
   b: THREE.ColorRepresentation,
@@ -157,15 +78,6 @@ export function blendTokens(
   return new THREE.Color(a).lerp(new THREE.Color(b), k);
 }
 
-/**
- * Take a token blend down into shade. `night.skyTop` is the darkest token there is and
- * STYLE.md names it as the legal way to reach near-black.
- *
- * The morning key is 2.6 — only a shade under noon's 3.0 — so the four-rooms albedo law
- * still binds here: ground albedo belongs around 140–175 sRGB, not 220. A pale gravel
- * courtyard is exactly the surface that wants to be typed in at 230 and exactly the one
- * that then crosses the bloom threshold and smears the east room into one white slab.
- */
 export function shade(color: THREE.ColorRepresentation, k: number): THREE.Color {
   return blendTokens(color, TOKENS.palettes.night.skyTop, k);
 }
@@ -175,11 +87,6 @@ export interface ColoredPart {
   color: THREE.ColorRepresentation;
 }
 
-/**
- * Merge pre-transformed parts into ONE geometry carrying a flat per-part vertex color,
- * disposing the sources. A hand-built stone prop wants its SOURCE normals plus a per-part
- * palette baked in, so one mesh + one material draws the whole thing.
- */
 export function mergeColoredParts(parts: readonly ColoredPart[], name: string): THREE.BufferGeometry {
   let total = 0;
   for (const p of parts) {
@@ -223,15 +130,7 @@ export function mergeColoredParts(parts: readonly ColoredPart[], name: string): 
   return g;
 }
 
-// ---------------------------------------------------------------------------
-// the env's own truth
-// ---------------------------------------------------------------------------
 
-/**
- * The grid the scene draws. The host always hands us the decoder's geometry; the fallback
- * is the DECODER'S OWN wall builder, never a scene re-derivation, so a placeholder
- * geometry degrades to the correct garden instead of a guess.
- */
 export function resolveGrid(geometry: EnvGeometry): GridGeometry {
   const g = geometry.grid;
   if (g && g.w === KEYCORRIDOR_W && g.h === KEYCORRIDOR_H) return g;
@@ -244,7 +143,6 @@ export function resolveGrid(geometry: EnvGeometry): GridGeometry {
   };
 }
 
-/** The door cell, from the env geometry when present (doors, then hallways). */
 export function resolveDoor(grid: GridGeometry): GridCell {
   const d = grid.doors?.[0] ?? grid.hallways?.[0];
   return d ? { x: d.x, y: d.y } : { ...KEYCORRIDOR_DOOR };
@@ -254,22 +152,10 @@ export const SIDE_WEST = -1;
 export const SIDE_THRESHOLD = 0;
 export const SIDE_EAST = 1;
 
-/**
- * Which garden a cell belongs to, derived from the DOOR's own column: west of it is the
- * wild garden, east of it is the formal one, and the door's column is the threshold.
- * The env's rooms really are "left of the divider" and "right of the divider" — this is
- * that partition read off the geometry, not the decoder's hard-coded 1..3 / 5..7.
- */
 export function gardenSide(door: GridCell, x: number): number {
   return x < door.x ? SIDE_WEST : x > door.x ? SIDE_EAST : SIDE_THRESHOLD;
 }
 
-/**
- * Is this wall cell part of an INTERIOR divider? A divider cell is a wall with free cells
- * on both sides along one axis — the structural definition of "a wall you have to get
- * through", true for KeyCorridor's x = 4 column and for any regenerated layout. Border
- * walls fail it because the outside of the grid counts as wall.
- */
 export function isDividerWall(grid: GridGeometry, x: number, y: number): boolean {
   if (!isWall(grid, x, y)) return false;
   const openX = !isWall(grid, x - 1, y) && !isWall(grid, x + 1, y);
@@ -277,18 +163,11 @@ export function isDividerWall(grid: GridGeometry, x: number, y: number): boolean
   return openX || openZ;
 }
 
-/**
- * The gate's yaw. Canon lesson 15: a gate faces the axis its FLANKING WALL CELLS run
- * along. A door whose north and south neighbours are wall sits in a wall running along z,
- * so the passage — and the door leaf — is turned 90° from the local build orientation
- * (which is built with the opening along ±z).
- */
 export function gateYaw(grid: GridGeometry, door: GridCell): number {
   const wallRunsAlongZ = isWall(grid, door.x, door.y - 1) && isWall(grid, door.x, door.y + 1);
   return wallRunsAlongZ ? Math.PI / 2 : 0;
 }
 
-/** World-space bounding box of every FREE cell on one side of the divider. */
 export interface SideBounds {
   cx: number;
   cz: number;
@@ -297,11 +176,6 @@ export interface SideBounds {
   cells: number;
 }
 
-/**
- * Scan the walls array for one side's free cells and return their world extent (cell
- * centres ± ½ cell). Derived, never typed in: the per-room planting and mote fields are
- * clipped to the rooms the env actually has.
- */
 export function sideBounds(grid: GridGeometry, door: GridCell, side: number): SideBounds {
   let minX = Infinity;
   let maxX = -Infinity;
@@ -332,59 +206,34 @@ export function sideBounds(grid: GridGeometry, door: GridCell, side: number): Si
   };
 }
 
-// ---------------------------------------------------------------------------
-// the palette (every color a blend of tokens — STYLE.md)
-// ---------------------------------------------------------------------------
 
 export interface GardenSkin {
-  /** the wild west garden's floor: moss over dark earth */
   wildFloor: THREE.Color;
-  /** the formal east garden's floor: raked pale gravel */
   formalFloor: THREE.Color;
-  /** the door cell: a worn threshold stone */
   threshold: THREE.Color;
-  /** soil under the walls */
   soil: THREE.Color;
-  /** the low outer kerb: warm honey stone */
   kerb: THREE.Color;
-  /** the tall divider: cool grey-green stone under its ivy */
   divider: THREE.Color;
   dividerCap: THREE.Color;
-  /** the ivy itself — the scene's signature green */
   ivy: THREE.Color;
   ivyDark: THREE.Color;
-  /** the door: warm weathered oak + its iron */
   wood: THREE.Color;
   woodDark: THREE.Color;
   iron: THREE.Color;
-  /** the shrine's pale stone */
   shrineStone: THREE.Color;
   shrineDark: THREE.Color;
-  /** the amber that the key, the shrine's ember and the celebration all share */
   amber: THREE.Color;
-  /** the one floor tile the shrine stands on — repainted as the goal respawns */
   shrinePad: THREE.Color;
-  /** wild planting */
   wildGrass: THREE.Color;
   wildBloom: THREE.Color;
-  /** formal planting */
   gravel: THREE.Color;
   topiary: THREE.Color;
-  /** the meadow outside the wall */
   meadow: THREE.Color;
   tree: THREE.Color;
-  /** the two idle mote fields */
   motesWild: THREE.Color;
   motesFormal: THREE.Color;
 }
 
-/**
- * The palette. The amber is this scene's own accent (`accents['key-corridor']`), the ivy
- * borrows four-rooms' garden green and procedural-maze's moss, the stone borrows
- * multi-key-corridor's temple gold and po-maze's fog silver, and the oak borrows
- * high-dim-maze's terracotta warmed with the dusk earth. Every hue is on the shared
- * table, so the gallery still reads as one preserve.
- */
 export function gardenSkin(palette: Palette, tokens: typeof TOKENS): GardenSkin {
   const amber = tokens.accents['key-corridor'] ?? tokens.celebrationGold;
   const leaf = tokens.accents['four-rooms'] ?? palette.groundB;
@@ -396,22 +245,14 @@ export function gardenSkin(palette: Palette, tokens: typeof TOKENS): GardenSkin 
 
   return {
     wildFloor: shade(blendTokens(palette.groundA, moss, 0.36), 0.34),
-    // pale, but SHADED pale: the raked courtyard is the surface most likely to bloom out
     formalFloor: shade(blendTokens(palette.hemiSky, palette.hemiGround, 0.36), 0.3),
     threshold: shade(blendTokens(gold, palette.hemiGround, 0.3), 0.34),
     soil: shade(blendTokens(palette.hemiGround, earth, 0.45), 0.42),
     kerb: shade(blendTokens(palette.skyBottom, terracotta, 0.34), 0.54),
-    // the darkest stone in the garden, so the one wall you cannot pass reads as a PLAN
     divider: shade(blendTokens(palette.groundA, silver, 0.3), 0.72),
     dividerCap: shade(blendTokens(silver, palette.hemiGround, 0.46), 0.52),
     ivy: shade(blendTokens(leaf, palette.groundA, 0.34), 0.26),
     ivyDark: shade(blendTokens(moss, palette.groundA, 0.55), 0.52),
-    // THE OAK IS THE ONE WARM MASS IN A GREY WALL, and it has to win that argument on
-    // VALUE, not only on hue. The leaf hangs on the divider's west face, which takes the
-    // same 0.46 of the key light the leaf does, so the only separation the eye gets is
-    // albedo: measured on the composed hero still, the shut leaf's median screen luma runs
-    // ~34 levels over the wall's ~103, and the first pass (a wood shaded 0.12 toward night)
-    // ran a third of that. Kept under the raked courtyard's 169 so the gate never blooms.
     wood: shade(blendTokens(terracotta, earth, 0.16), 0.02),
     woodDark: shade(blendTokens(terracotta, earth, 0.38), 0.16),
     iron: shade(blendTokens(palette.hemiGround, silver, 0.18), 0.68),
@@ -430,15 +271,7 @@ export function gardenSkin(palette: Palette, tokens: typeof TOKENS): GardenSkin 
   };
 }
 
-// ---------------------------------------------------------------------------
-// scatter exclusions
-// ---------------------------------------------------------------------------
 
-/**
- * Keep a clear disc around every cell CENTER. The grid must stay legible under the
- * planting: props live in the joints between cells, never on the square the agent
- * actually occupies.
- */
 export function excludeCellCenters(grid: GridSize, radius: number): ExcludeFn {
   const r2 = radius * radius;
   const ox = (grid.w - 1) / 2;
@@ -452,22 +285,13 @@ export function excludeCellCenters(grid: GridSize, radius: number): ExcludeFn {
   };
 }
 
-/** Nothing plants itself on a wall cell (read from the walls array, never inferred). */
 export function excludeWallCells(grid: GridGeometry): ExcludeFn {
   const ox = (grid.w - 1) / 2;
   const oz = (grid.h - 1) / 2;
   return (x, z) => isWall(grid, Math.round(x / CELL + ox), Math.round(z / CELL + oz));
 }
 
-// ---------------------------------------------------------------------------
-// the meadow height field
-// ---------------------------------------------------------------------------
 
-/**
- * Rolling meadow OUTSIDE the garden, identically flat inside it. The weight is 0 for
- * everything within the garden footprint, so `makeTerrain`'s flatten mask has nothing to
- * fight and the ground under the flagstones is exactly `GARDEN_SINK`.
- */
 export function makeMeadowHeight(seed: number): (x: number, z: number) => number {
   return (x, z) => {
     const out = Math.max(Math.abs(x) - GARDEN_HALF_X, Math.abs(z) - GARDEN_HALF_Z);
@@ -479,9 +303,6 @@ export function makeMeadowHeight(seed: number): (x: number, z: number) => number
   };
 }
 
-// ---------------------------------------------------------------------------
-// world handle
-// ---------------------------------------------------------------------------
 
 export interface WorldHandle {
   group: THREE.Group;
@@ -489,17 +310,11 @@ export interface WorldHandle {
   rig: LightRig;
   terrain: TerrainHandle;
   field: CellFieldHandle;
-  /** the door cell, straight from the env geometry */
   door: GridCell;
-  /** the yaw the gate (and its ivy) is built with */
   gateYaw: number;
-  /** every divider cell the tall wall prop owns — the collapsed cell-field instances */
   dividerCells: readonly GridCell[];
-  /** paint one floor tile (the shrine's pad follows the goal from cell to cell) */
   paintFloor(x: number, y: number, color: THREE.ColorRepresentation): void;
-  /** put a painted tile back to exactly the tint + jitter `buildCellField` gave it */
   restoreFloorTint(x: number, y: number): void;
-  /** ctx.time() — one clock for kerb, ivy wall, planting, motes and mist */
   setTime(t: number): void;
   setPixelRatio(dpr: number): void;
   dispose(): void;
@@ -526,7 +341,6 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene, grid: GridGeom
   const door = resolveDoor(grid);
   const yaw = gateYaw(grid, door);
 
-  // ---- sky (exactly one) ----
   const sky = skyFromPalette(palette, 'morning', tier, {
     sunDir: SUN_DIR,
     sunSize: 0.04,
@@ -541,7 +355,6 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene, grid: GridGeom
   owned.push(sky);
   timed.push({ setTime: (t) => sky.setTime(t) });
 
-  // ---- the one light budget: sun + hemi + 4 points (shrine / seed / wisp / bloom) ----
   const rig = makeLightRig(palette, tier, {
     sunDir: sky.sunDirection,
     pointCount: 4,
@@ -552,10 +365,8 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene, grid: GridGeom
   owned.push(rig);
   rig.setShadowFocus({ x: 0, y: 0.3, z: 0 }, SHADOW_RADIUS);
 
-  // ---- fog, always ----
   applyFog(scene, palette, FOG_EXTENT);
 
-  // ---- the meadow the garden sits in ----
   const terrain = makeTerrain({
     size: [TERRAIN_SIZE, TERRAIN_SIZE],
     segments: [TERRAIN_SEGMENTS, TERRAIN_SEGMENTS],
@@ -569,8 +380,6 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene, grid: GridGeom
     slopeSharpness: 2.2,
     flattenMask: { x: 0, z: 0, halfX: GARDEN_HALF_X + 0.25, halfZ: GARDEN_HALF_Z + 0.25, feather: 1.1 },
     flattenHeight: GARDEN_SINK,
-    // real range top to bottom: a single-tone meadow made the garden look pasted onto a
-    // billiard table, and no amount of scatter fixes a ground plane with no value in it
     colorRamp: [
       { t: 0, color: blendTokens(skin.meadow, skin.soil, 0.55) },
       { t: 0.4, color: skin.meadow },
@@ -591,12 +400,7 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene, grid: GridGeom
   group.add(terrain.mesh);
   owned.push(terrain);
 
-  // The per-cell floor tint, hoisted so `restoreFloorTint` can undo a state-driven repaint
-  // BIT FOR BIT — including `buildCellField`'s own per-cell jitter, which the scene has to
-  // reproduce because the field hands back no way to ask for it.
   const FLOOR_JITTER = 0.17;
-  // the five tones a floor tile can take, built ONCE: `restoreFloorTint` runs from inside
-  // update() on the frame the goal respawns, and update() may not allocate
   const TINT_WILD_A = skin.wildFloor;
   const TINT_WILD_B = blendTokens(skin.wildFloor, skin.soil, 0.24);
   const TINT_FORMAL_A = skin.formalFloor;
@@ -605,17 +409,10 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene, grid: GridGeom
     if (isWall(grid, x, y)) return skin.soil;
     const side = gardenSide(door, x);
     if (side === SIDE_THRESHOLD) return skin.threshold;
-    // the wild side is uneven ground, not a painted plane
     if (side === SIDE_WEST) return ((x * 3 + y * 5) & 1) === 0 ? TINT_WILD_A : TINT_WILD_B;
-    // the formal court is RAKED: tone banded by row, so the ground carries parallel lines
-    // across the whole courtyard. A chequer read as a chessboard and fought the grid; rows
-    // read as a swept surface and agree with it.
     return (y & 1) === 0 ? TINT_FORMAL_A : TINT_FORMAL_B;
   };
 
-  // ---- the garden: ONE floor draw, ONE kerb draw, straight off `grid.walls` ----
-  // White base + full-color tint: the instance color MULTIPLIES the material color, so
-  // this is how a cell field gets arbitrary per-cell hues without a second material.
   const white = palette.sun;
   const field = buildCellField(
     grid,
@@ -632,9 +429,6 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene, grid: GridGeom
       floorThickness: 0.14,
       jitter: FLOOR_JITTER,
       rimColor: palette.skyHorizon,
-      // 0.09, not the 0.22 a hero prop wants. Every wall in a plan-ish aerial is seen at a
-      // grazing angle — precisely where the fresnel term peaks — so a normal rim strength
-      // paints the whole cell field fog-white and the garden loses its stonework.
       rimStrength: 0.09,
       seed: ctx.seed,
       name: 'ivyGateCells',
@@ -645,9 +439,6 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene, grid: GridGeom
   owned.push(field);
   timed.push({ setTime: (t) => field.setTime(t) });
 
-  // ---- the tall divider: the cells the kerb gives up to a bespoke wall ----
-  // Canon lesson 14: collapse the generic instance, keep the walls array untouched. The
-  // overlay still draws a box on every one of these cells.
   const dividerCells: GridCell[] = [];
   for (let y = 0; y < grid.h; y++) {
     for (let x = 0; x < grid.w; x++) {
@@ -674,8 +465,6 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene, grid: GridGeom
     mesh.name = 'ivyGateDivider';
     mesh.castShadow = shadows;
     mesh.receiveShadow = shadows;
-    // a per-cell tone MULTIPLIER on top of the baked vertex colours: four identical
-    // segments in a row look extruded, four subtly different ones look built
     mesh.instanceColor = new THREE.InstancedBufferAttribute(
       new Float32Array(dividerCells.length * 3),
       3,
@@ -693,9 +482,6 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene, grid: GridGeom
       cellToWorld(cell.x, cell.y, grid, world);
       const n = hash2f(cell.x, cell.y, ctx.seed ^ 0x1d7a);
       position.set(world[0], 0, world[2]);
-      // the segment is built with its ivy draping one face; a half-turn on half the
-      // instances drapes the other, so the wall is green on both sides without a
-      // second geometry
       euler.set(0, yaw + (n > 0.5 ? Math.PI : 0), 0);
       quaternion.setFromEuler(euler);
       scale.set(1, 1 + (n - 0.5) * 0.06, 1);
@@ -712,7 +498,6 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene, grid: GridGeom
     owned.push({ dispose: () => mesh.dispose() });
   }
 
-  // ---- planting: wild west, formal east, clipped to the rooms the env actually has ----
   const noPlanting = excludeAny(excludeWallCells(grid), excludeCellCenters(grid, 0.3));
   const wild = sideBounds(grid, door, SIDE_WEST);
   const formal = sideBounds(grid, door, SIDE_EAST);
@@ -760,7 +545,6 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene, grid: GridGeom
   timed.push(wildBlooms);
   planting.push(wildBlooms);
 
-  // the formal side: swept gravel (flattened rocks) and a handful of clipped box balls
   const gravel = scatterRocks({
     count: 130,
     area: { x: formal.cx, z: formal.cz, halfX: formal.halfX, halfZ: formal.halfZ },
@@ -788,7 +572,6 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene, grid: GridGeom
     tier,
     exclude: noPlanting,
     color: skin.topiary,
-    // round and squat: a rock archetype at stretch ~0.9 is a clipped box ball
     scale: [0.16, 0.34],
     stretch: [0.75, 1.15],
     hueJitter: 0.16,
@@ -802,7 +585,6 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene, grid: GridGeom
   timed.push(topiary);
   planting.push(topiary);
 
-  // ---- the meadow outside, and the tree line beyond it ----
   const offGarden = excludeRect(0, 0, GARDEN_HALF_X, GARDEN_HALF_Z, 0.9);
   const nearCamera = excludeRect(
     Math.sin(CAMERA_AZIMUTH) * CAMERA_STANDOFF,
@@ -821,8 +603,6 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene, grid: GridGeom
     exclude: outside,
     heightAt: (x, z) => terrain.sampleHeight(x, z),
     maxSlope: 0.85,
-    // lifted well above the ground tone: a blade seen from a steep aerial is edge-on, and a
-    // grass colour picked to match the meadow renders as a scatter of dark shards
     color: blendTokens(palette.groundB, palette.sun, 0.22),
     scale: [0.42, 0.85],
     stretch: [0.7, 1.05],
@@ -839,8 +619,6 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene, grid: GridGeom
   timed.push(meadowGrass);
   planting.push(meadowGrass);
 
-  // THE VERGE. A garden wall standing in bare lawn looks pasted on; a band of taller
-  // meadow flowers breaking against its foot is what makes it look BUILT there.
   const verge = scatterFlowers({
     count: 105,
     area: { halfX: GARDEN_HALF_X + 1.5, halfZ: GARDEN_HALF_Z + 1.5 },
@@ -889,10 +667,6 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene, grid: GridGeom
   timed.push(treeLine);
   planting.push(treeLine);
 
-  // ---- idle life ----
-  // NOTE for every grid scene: the kit particle presets size their motes for a ~20-unit
-  // field. This garden is 9 units across with the camera ~13 out, so `gl_PointSize`'s
-  // 60/distance term wants sizes around 1, not the preset's 4–9.
   const motes: AmbientParticlesHandle[] = [];
   const wildMotes = makeAmbientParticles({
     preset: 'pollen',
@@ -932,19 +706,12 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene, grid: GridGeom
   timed.push(formalMotes);
   motes.push(formalMotes);
 
-  // Morning air, banked ABOVE the kerb line. Any lower and it veils the cells, which is
-  // the one thing a grid scene may not trade away; at 0.95 it hangs over the walls and
-  // reads as the hour instead of as a filter.
   const mist = makeMistPlanes({
     size: [38, 36],
     color: blendTokens(palette.fog, palette.sun, 0.3),
     seed: ctx.seed ^ 0x3ac1,
     layers: 2,
     tier,
-    // The camera looks DOWN through every mist plane at every cell, so a stack of them is
-    // a stack of veils over the one thing the scene has to keep readable. Two layers at a
-    // twentieth opacity, hung a metre above the wall line, read as morning air; the first
-    // pass (four layers at 0.16) read as a dirty lens and cost the garden all its contrast.
     baseY: 1.75,
     spread: 1.1,
     opacity: 0.05,
@@ -994,15 +761,7 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene, grid: GridGeom
   };
 }
 
-// ---------------------------------------------------------------------------
-// props
-// ---------------------------------------------------------------------------
 
-/**
- * Collapse one cell-field wall instance to nothing so a bespoke prop can own that cell.
- * The walls array is NOT touched: the cell is still a wall to the env, to the overlay and
- * to every accuracy check — only the generic kerb block that stood there is gone.
- */
 export function collapseWallInstance(field: CellFieldHandle, x: number, y: number): void {
   const mesh = field.wallMeshes[0];
   const id = field.wallInstanceAt(x, y);
@@ -1018,24 +777,11 @@ export function collapseWallInstance(field: CellFieldHandle, x: number, y: numbe
   mesh.instanceMatrix.needsUpdate = true;
 }
 
-/**
- * One segment of the tall ivy wall: a stone block filling the cell, a capstone, and ivy
- * draping ONE face — a mat of leaves over the top course plus two runners down it. The
- * drape is BAKED, because a divider segment is not state-bearing: it never changes, so
- * paying a per-frame matrix for it would be pure cost. The gate's ivy — the one that
- * actually unwinds — is the animated system in actors.ts.
- *
- * Built in local space around the cell centre with the drape on −z, so `gateYaw` turns
- * the whole wall together with the door it contains.
- */
 export function makeDividerGeometry(skin: GardenSkin, tier: QualityTier): THREE.BufferGeometry {
   const detail = tier === 'thumb' ? 0.35 : tier === 'medium' ? 0.7 : 1;
   const parts: ColoredPart[] = [];
   const size = CELL - 0.03;
 
-  // three courses, not one block: a wall this size is the frame's darkest mass and a
-  // single smooth prism reads as poured concrete. The tone alternates by course, which is
-  // all the "stonework" a flat-shaded silhouette needs at this distance.
   const courses = tier === 'thumb' ? 2 : 3;
   for (let i = 0; i < courses; i++) {
     const y0 = (i / courses) * DIVIDER_HEIGHT;
@@ -1053,14 +799,10 @@ export function makeDividerGeometry(skin: GardenSkin, tier: QualityTier): THREE.
   cap.translate(0, DIVIDER_HEIGHT + DIVIDER_CAP * 0.5, 0);
   parts.push({ geometry: cap, color: skin.dividerCap });
 
-  // a spread footing, so the thinner wall still OCCUPIES the cell the env says it does
   const footing = new THREE.BoxGeometry(size, 0.13, DIVIDER_THICKNESS + 0.2);
   footing.translate(0, 0.065, 0);
   parts.push({ geometry: footing, color: skin.dividerCap });
 
-  // A CUSHION of leaves over the top course. The first pass used one flat green box and
-  // the wall read as a highway barrier with a stripe painted on it; ivy is a texture of
-  // overlapping blades and nothing but real blades will say so.
   const rows = tier === 'thumb' ? 1 : 2;
   const perRow = tier === 'thumb' ? 5 : Math.max(5, Math.round(9 * detail));
   for (let r = 0; r < rows; r++) {
@@ -1082,7 +824,6 @@ export function makeDividerGeometry(skin: GardenSkin, tier: QualityTier): THREE.
     }
   }
 
-  // runners down the face, each a short ladder of leaves that thins as it falls
   const runners = tier === 'thumb' ? 1 : 2;
   const leavesPer = Math.max(3, Math.round(8 * detail));
   for (let r = 0; r < runners; r++) {
@@ -1105,17 +846,9 @@ export function makeDividerGeometry(skin: GardenSkin, tier: QualityTier): THREE.
   return mergeColoredParts(parts, 'ivyWallSegment');
 }
 
-/**
- * ONE ivy leaf: a five-vertex spade in the xy plane, stem at the origin, tip at +y, with
- * a vertex grade that darkens the stem end. Three triangles is all a leaf needs at this
- * scale, and it is the atom of both the baked wall drape and the animated gate vine.
- */
 export function ivyLeafGeometry(): THREE.BufferGeometry {
   const w = 0.105;
   const l = 0.2;
-  //      tip
-  //   sh0   sh1     (shoulders)
-  //      base
   const base: readonly [number, number, number] = [0, 0, 0];
   const sh0: readonly [number, number, number] = [-w, l * 0.46, 0.012];
   const sh1: readonly [number, number, number] = [w, l * 0.46, 0.012];

@@ -1,30 +1,14 @@
-// kit/sky — the one sky. STYLE.md: "makeGradientSky (or its underwater/cave
-// parameterization) — exactly one sky", "A horizon or depth gradient is always visible",
-// "HDR emissives (>1.0) are the only things that bloom" (the sun disc is one of them).
-//
-// An inward icosphere carrying a single ShaderMaterial: a three-stop vertical gradient,
-// an optional HDR sun disc + glow, an optional star field, and a screen-space dither
-// that kills banding across the big gradients. Disable the sun and it becomes the
-// underwater / cave depth column (vertical gradient, no disc) with no second code path.
-//
-// The dome follows the camera in onBeforeRender (allocation-free), so scenes can move
-// the camera anywhere without leaving the sky.
 
 import * as THREE from 'three';
 import type { Palette } from './tokens';
 import type { QualityTier } from './types';
 
 export interface SkyStarOptions {
-  /** lattice cells per unit direction — higher = more, smaller stars */
   density?: number;
-  /** star radius in cell units */
   size?: number;
-  /** cell occupancy: higher = fewer stars (0..1) */
   threshold?: number;
-  /** twinkle depth in [0,1] */
   twinkle?: number;
   color?: THREE.ColorRepresentation;
-  /** HDR gain — >1 lets the brightest stars bloom */
   intensity?: number;
 }
 
@@ -32,26 +16,18 @@ export interface GradientSkyOptions {
   top: THREE.ColorRepresentation;
   horizon: THREE.ColorRepresentation;
   bottom: THREE.ColorRepresentation;
-  /** how far up the horizon color reaches (0..1 of the hemisphere) */
   topSpread?: number;
-  /** how far down the horizon color reaches */
   bottomSpread?: number;
 
-  /** omit (or pass null) for the underwater/cave depth column */
   sunDir?: THREE.Vector3 | readonly [number, number, number] | null;
   sunColor?: THREE.ColorRepresentation;
-  /** angular radius of the disc, radians (~0.02 = a real sun, 0.05 = stylized) */
   sunSize?: number;
-  /** HDR multiplier on the disc — this is what blooms */
   sunHdr?: number;
-  /** broad scattering halo around the sun */
   sunGlow?: number;
   sunGlowPower?: number;
 
   stars?: boolean | SkyStarOptions;
-  /** dome radius in world units (must sit inside the camera far plane is NOT required — depth test is off) */
   radius?: number;
-  /** gradient dither amplitude (0 disables) */
   dither?: number;
   tier?: QualityTier;
   name?: string;
@@ -83,7 +59,6 @@ export interface SkyHandle {
   mesh: THREE.Mesh;
   material: THREE.ShaderMaterial;
   uniforms: SkyUniforms;
-  /** the sun direction the light rig should match (unit vector, points TOWARD the sun) */
   sunDirection: THREE.Vector3;
   setSunDirection(x: number, y: number, z: number): void;
   setColors(top: THREE.ColorRepresentation, horizon: THREE.ColorRepresentation, bottom: THREE.ColorRepresentation): void;
@@ -91,7 +66,7 @@ export interface SkyHandle {
   dispose(): void;
 }
 
-const VERT = /* glsl */ `
+const VERT =  `
 varying vec3 vOakDir;
 void main() {
 	vOakDir = normalize( position );
@@ -99,7 +74,7 @@ void main() {
 }
 `;
 
-const FRAG_HEAD = /* glsl */ `
+const FRAG_HEAD =  `
 #include <common>
 uniform vec3 uTop;
 uniform vec3 uHorizon;
@@ -117,7 +92,7 @@ float oakHash13( vec3 p ) {
 }
 `;
 
-const FRAG_SUN_DECL = /* glsl */ `
+const FRAG_SUN_DECL =  `
 uniform vec3 uSunDir;
 uniform vec3 uSunColor;
 uniform float uSunSize;
@@ -126,7 +101,7 @@ uniform float uSunGlow;
 uniform float uSunGlowPower;
 `;
 
-const FRAG_STAR_DECL = /* glsl */ `
+const FRAG_STAR_DECL =  `
 uniform vec3 uStarColor;
 uniform float uStarDensity;
 uniform float uStarSize;
@@ -135,7 +110,7 @@ uniform float uStarTwinkle;
 uniform float uStarIntensity;
 `;
 
-const FRAG_MAIN_OPEN = /* glsl */ `
+const FRAG_MAIN_OPEN =  `
 void main() {
 	vec3 dir = normalize( vOakDir );
 	float h = clamp( dir.y, -1.0, 1.0 );
@@ -145,7 +120,7 @@ void main() {
 	col = mix( col, uBottom, smoothstep( 0.0, max( uBottomSpread, 0.001 ), -h ) );
 `;
 
-const FRAG_SUN_APPLY = /* glsl */ `
+const FRAG_SUN_APPLY =  `
 	{
 		vec3 sd = normalize( uSunDir );
 		float cosA = dot( dir, sd );
@@ -156,7 +131,7 @@ const FRAG_SUN_APPLY = /* glsl */ `
 	}
 `;
 
-const FRAG_STAR_APPLY = /* glsl */ `
+const FRAG_STAR_APPLY =  `
 	{
 		float above = smoothstep( -0.08, 0.12, dir.y );
 		vec3 g = dir * uStarDensity;
@@ -170,7 +145,7 @@ const FRAG_STAR_APPLY = /* glsl */ `
 	}
 `;
 
-const FRAG_MAIN_CLOSE = /* glsl */ `
+const FRAG_MAIN_CLOSE =  `
 	col += ( oakHash13( vec3( gl_FragCoord.xy, 1.0 ) ) - 0.5 ) * uDither;
 	gl_FragColor = vec4( col, 1.0 );
 	#include <tonemapping_fragment>
@@ -190,13 +165,6 @@ function toVec3(v: THREE.Vector3 | readonly [number, number, number] | null | un
   return out.set(a[0], a[1], a[2]);
 }
 
-/**
- * The one sky. Add `handle.mesh` to the scene; it renders first, never writes depth,
- * and follows the camera automatically.
- *
- * Underwater / cave: pass `sunDir: null` — the disc and its glow are compiled out and
- * what remains is a pure vertical depth column (top = surface light, bottom = the dark).
- */
 export function makeGradientSky(opts: GradientSkyOptions): SkyHandle {
   const hasSun = opts.sunDir !== null && opts.sunDir !== undefined;
   const stars = opts.stars;
@@ -288,11 +256,6 @@ export function makeGradientSky(opts: GradientSkyOptions): SkyHandle {
   };
 }
 
-/**
- * Default sun elevation for a palette: dim palettes sit low (dusk/night), bright ones
- * high (noon). Derived from the palette itself so scenes never hand-tune a number.
- * Returns a unit vector pointing TOWARD the sun.
- */
 export function paletteSunDirection(palette: Palette, out?: THREE.Vector3): THREE.Vector3 {
   const v = out ?? new THREE.Vector3();
   const k = Math.max(0, Math.min(1, palette.sunIntensity / 3));
@@ -302,20 +265,14 @@ export function paletteSunDirection(palette: Palette, out?: THREE.Vector3): THRE
   return v.set(Math.cos(azimuth) * horiz, elevation, Math.sin(azimuth) * horiz).normalize();
 }
 
-/** true for the palettes that are a water/rock column rather than a sky. */
 export function isDepthColumnPalette(name: string): boolean {
   return name === 'underwater' || name === 'abyss' || name === 'cave';
 }
 
 export interface PaletteSkyOptions extends Partial<Omit<GradientSkyOptions, 'top' | 'horizon' | 'bottom'>> {
-  /** force the depth-column parameterization (no sun disc) */
   depthColumn?: boolean;
 }
 
-/**
- * Token-driven sky: everything comes from the palette, so all 16 scenes read as one
- * day. `depthColumn` (or an underwater/abyss/cave palette) drops the sun disc.
- */
 export function skyFromPalette(
   palette: Palette,
   paletteName: string,

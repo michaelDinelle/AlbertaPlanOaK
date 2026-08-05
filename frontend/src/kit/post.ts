@@ -1,18 +1,3 @@
-// kit/post — the HOST's post chain. Scenes never build one and never add passes
-// (STYLE.md: "Touch the renderer ... or add composer passes" is a MUST NOT); they only
-// parameterize it through `manifest.postConfig`.
-//
-// Chain: RenderPass -> UnrealBloomPass -> grade/vignette ShaderPass -> OutputPass.
-//
-// Why that order works: while the composer is rendering into its own target, three
-// disables per-material tone mapping, so RenderPass writes LINEAR HDR into a HalfFloat
-// buffer. Bloom therefore sees the true >1.0 emissives (and only those, at threshold
-// ~0.85), the grade pass works in linear, and OutputPass applies ACES + sRGB once at
-// the end. Exposure is fixed here (tokens.exposure = 1.0), never by a scene.
-//
-// Tiers: hero = half-res bloom + 4× MSAA composer targets; medium = quarter-res bloom,
-// no MSAA; thumb = NO post at all (the composer is null and render() goes straight to
-// the renderer, which then applies tone mapping itself — same look, zero passes).
 
 import * as THREE from 'three';
 import { EffectComposer } from 'three/examples/jsm/postprocessing/EffectComposer.js';
@@ -23,13 +8,9 @@ import { UnrealBloomPass } from 'three/examples/jsm/postprocessing/UnrealBloomPa
 import type { QualityTier, SceneSize } from './types';
 import { TOKENS } from './tokens';
 
-/** Structurally `SceneManifest['postConfig']`. */
 export interface PostConfig {
-  /** 0.25–0.9 */
   bloomStrength: number;
-  /** ~0.85 */
   bloomThreshold: number;
-  /** hex — grade pass tint */
   fogTint: number;
 }
 
@@ -45,40 +26,29 @@ export interface GradeUniforms {
 }
 
 export interface ComposerHandle {
-  /** null at thumb tier (no post) — use render() and never branch on this */
   composer: EffectComposer | null;
   bloom: UnrealBloomPass | null;
-  /** null at thumb tier */
   gradeUniforms: GradeUniforms | null;
-  /** base (unpulsed) bloom strength from the manifest */
   bloomStrength: number;
-  /** 0 = idle, 1 = full celebration pulse (host drives the 300 ms decay) */
   setBloomPulse(t01: number): void;
   render(deltaTime?: number): void;
   resize(width: number, height: number, dpr?: number): void;
   dispose(): void;
 }
 
-// ---------------------------------------------------------------------------
-// pure tier policy (unit-testable without a GL context)
-// ---------------------------------------------------------------------------
 
-/** bloom internal resolution as a fraction of the frame; 0 = no bloom. */
 export function bloomResolutionScale(tier: QualityTier): number {
   return tier === 'hero' ? 0.5 : tier === 'medium' ? 0.25 : 0;
 }
 
-/** MSAA samples on the composer targets. */
 export function msaaSamples(tier: QualityTier): number {
   return tier === 'hero' ? 4 : 0;
 }
 
-/** thumb renders straight to the screen — no composer, no passes. */
 export function usesPost(tier: QualityTier): boolean {
   return tier !== 'thumb';
 }
 
-/** The 300 ms celebration pulse curve (STYLE.md beat 3). */
 export function pulsedBloomStrength(base: number, t01: number): number {
   const t = t01 < 0 ? 0 : t01 > 1 ? 1 : t01;
   return base * (1 + 1.2 * t);
@@ -93,7 +63,6 @@ export interface GradeSettings {
   grain: number;
 }
 
-/** Token-derived grade defaults: the scene's fogTint is the whole knob. */
 export function gradeDefaults(config: PostConfig, tier: QualityTier): GradeSettings {
   const hero = tier === 'hero';
   return {
@@ -106,11 +75,8 @@ export function gradeDefaults(config: PostConfig, tier: QualityTier): GradeSetti
   };
 }
 
-// ---------------------------------------------------------------------------
-// grade shader
-// ---------------------------------------------------------------------------
 
-const GRADE_VERT = /* glsl */ `
+const GRADE_VERT =  `
 varying vec2 vUv;
 void main() {
 	vUv = uv;
@@ -118,9 +84,7 @@ void main() {
 }
 `;
 
-// Ordered (Bayer 8×8) dither rather than animated noise: static grain does not crawl
-// under the 60 fps treadmill and costs three fract()s.
-const GRADE_FRAG = /* glsl */ `
+const GRADE_FRAG =  `
 uniform sampler2D tDiffuse;
 uniform vec3 uLift;
 uniform vec3 uTint;
@@ -160,7 +124,6 @@ void main() {
 }
 `;
 
-/** The grade/vignette shader definition (exported for tests and review). */
 export const OakGradeShader = {
   name: 'OakGradeShader',
   uniforms: {
@@ -177,19 +140,7 @@ export const OakGradeShader = {
   fragmentShader: GRADE_FRAG,
 };
 
-// ---------------------------------------------------------------------------
-// builder
-// ---------------------------------------------------------------------------
 
-/**
- * Build the host post chain for one scene.
- *
- * ```ts
- * const post = buildComposer(renderer, scene.scene, scene.camera, scene.manifest.postConfig, tier, size);
- * // per frame: post.setBloomPulse(pulse01); post.render(dt);
- * // on resize: post.resize(w, h, dpr);
- * ```
- */
 export function buildComposer(
   renderer: THREE.WebGLRenderer,
   scene: THREE.Scene,
@@ -198,7 +149,6 @@ export function buildComposer(
   tier: QualityTier,
   size: SceneSize,
 ): ComposerHandle {
-  // Exposure/tone mapping live here — fixed globally, never touched by a scene.
   renderer.toneMapping = THREE.ACESFilmicToneMapping;
   renderer.toneMappingExposure = TOKENS.exposure;
 
@@ -214,25 +164,18 @@ export function buildComposer(
       gradeUniforms: null,
       bloomStrength,
       setBloomPulse() {
-        /* no bloom at thumb tier */
       },
       render() {
         renderer.render(scene, camera);
       },
       resize() {
-        // Nothing to resize: there is no post chain at thumb tier, and the renderer /
-        // canvas are host-owned (kit/types.ts ownership boundary) in every tier.
       },
       dispose() {
-        /* nothing owned */
       },
     };
   }
 
   const samples = msaaSamples(tier);
-  // Created at CSS size: EffectComposer reads `renderTarget.width/height` as its CSS
-  // size and multiplies by the pixel ratio itself. Passing device pixels here would
-  // square the DPR.
   const target = new THREE.WebGLRenderTarget(width, height, {
     type: THREE.HalfFloatType,
     samples,
@@ -300,8 +243,6 @@ export function buildComposer(
       currentDpr = ratio !== undefined && ratio > 0 ? ratio : currentDpr;
       composer.setPixelRatio(currentDpr);
       composer.setSize(rw, rh);
-      // composer.setSize already re-sized every pass at full res; force the bloom back
-      // down to its tier fraction.
       resizeBloom(rw, rh, currentDpr);
       gradeUniforms.uResolution.value.set(rw * currentDpr, rh * currentDpr);
     },

@@ -1,14 +1,4 @@
 /// <reference types="bun" />
-// The Willow Swing (Acrobot-cont-v0) — the accuracy + lifecycle self-check.
-//
-// This mirrors four-rooms.test.ts's shape and adds what a TWO-BONE CHAIN has to prove:
-// the elbow and the lantern land on the decoder's own `acrobotPoints` over a dense sweep
-// of both angles, the links are exactly 1.0 long at every pose, the string of lights sits
-// exactly on the `successLine` anchor (so "lantern above the bulbs" and "the env scores"
-// are the same statement), the elbow torque glow is on the correct side of the joint, and
-// — the one thing a screenshot can never catch — the arc guard turns the host's linear
-// lerp across a ±π wrap and across the post-success respawn into physically reachable
-// motion instead of a whip.
 
 import { describe, expect, test } from 'bun:test';
 import * as THREE from 'three';
@@ -53,15 +43,9 @@ import {
   type StubSceneContext,
 } from './aligned';
 
-const SEED = 32; // the demo run's first Acrobot lane
+const SEED = 32;
 
-/** one rendered frame at 60 fps — WALL seconds, exactly what the host reports */
 const DT_WALL = 1 / 60;
-/**
- * The transport speeds the harness ships. EVERY guard test runs all of them: the pose
- * timeline advances in PLAYBACK seconds (`dtReal · speed`), so a guard that reads
- * `dtReal` is right at 1× by coincidence and wrong everywhere else.
- */
 const SPEEDS = [0.25, 0.5, 1, 2, 4] as const;
 
 function geometryOf(): EnvGeometry {
@@ -81,11 +65,6 @@ function fixtureNamed(name: string): SceneFixture {
   return f;
 }
 
-/**
- * A frame as the HOST assembles it: the pose is interpolated (so it may be anywhere
- * between two control rows) while `derived` stays the exact floor-frame state, which is
- * precisely the asymmetry the arc guard reads.
- */
 function hostFrame(
   name: string,
   pose: readonly [number, number, number, number],
@@ -128,12 +107,6 @@ function clamp01(v: number): number {
   return v < 0 ? 0 : v > 1 ? 1 : v;
 }
 
-/**
- * Closest distance between two 3D segments (Ericson, *Real-Time Collision Detection*
- * §5.1.9). The swing-clearance question is exactly this: a link is a segment, a bough is
- * a segment, and "the arm passes through the branch" is their distance falling under the
- * sum of the two mesh radii.
- */
 function segmentDistance(
   p1: readonly [number, number, number],
   q1: readonly [number, number, number],
@@ -156,7 +129,6 @@ function segmentDistance(
   let s = 0;
   let t = 0;
   if (a <= EPS && e <= EPS) {
-    // two points
   } else if (a <= EPS) {
     t = clamp01(f / e);
   } else {
@@ -185,27 +157,12 @@ function segmentDistance(
 }
 
 export interface StepPlayback {
-  /** frames delivered */
   frames: number;
-  /** PLAYBACK seconds actually elapsed across them */
   elapsedPlay: number;
-  /** total distance the lantern travelled, summed frame to frame */
   path: number;
-  /** the worst single-frame jump of the lantern */
   worstJump: number;
 }
 
-/**
- * Play ONE control step exactly the way `kit/harness` does at transport `speed`:
- *
- *   * the host advances `ctx.time()` by `dtReal · clock.speed` (PLAYBACK seconds) and
- *     hands the scene the WALL `dtReal`;
- *   * the pose is lerped by the playback fraction of the step, while `derived` stays the
- *     exact floor frame — the asymmetry the arc guard exists to read.
- *
- * `make(alpha)` builds the interpolated frame. Returns what the lantern actually did, so
- * a test can bound the rendered motion against the physics at every speed.
- */
 function playControlStep(
   module: SceneModule,
   ctx: StubSceneContext,
@@ -234,7 +191,6 @@ function playControlStep(
   return { frames, elapsedPlay, path, worstJump };
 }
 
-// ---------------------------------------------------------------------------
 
 describe('acrobot / manifest + fixtures', () => {
   test('manifest declares the frozen contract fields', () => {
@@ -252,8 +208,8 @@ describe('acrobot / manifest + fixtures', () => {
   test('the thumbFrame is a reachable, un-scored pose', () => {
     const p = manifest.thumbFrame.pose;
     const h = acrobotTipHeight(p[0] ?? 0, p[1] ?? 0);
-    expect(h).toBeLessThan(AB_SUCCESS_HEIGHT); // the env would have reset it otherwise
-    expect(h).toBeGreaterThan(0.9); // ...but it is a hand's width from scoring
+    expect(h).toBeLessThan(AB_SUCCESS_HEIGHT);
+    expect(h).toBeGreaterThan(0.9);
   });
 
   test('ships at least three canonical poses, all with a consistent derived state', () => {
@@ -294,7 +250,6 @@ describe('acrobot / the FK is the scene graph', () => {
   test('every probe lands on ground truth at hero tier', async () => {
     const module = createScene();
     const report = await assertAligned(module, fixtures, { geometry: geometryOf(), seed: SEED, tier: 'hero' });
-    // these roots carry POSITION ONLY — they are exact, not merely within 1e-3
     expect(report.worst.get('pivot') ?? 1).toBe(0);
     expect(report.worst.get('success-line') ?? 1).toBe(0);
     expect(report.worst.get('elbow') ?? 1).toBeLessThan(1e-12);
@@ -322,7 +277,6 @@ describe('acrobot / the FK is the scene graph', () => {
       for (let j = 0; j < 24; j++) {
         const th2 = -Math.PI + (j / 24) * 2 * Math.PI;
         module.update(toFrameUpdate(hostFrame(`s${i}-${j}`, [th1, th2, 0, 0], [th1, th2, 0, 0], 1, i * 24 + j)));
-        // the pose crosses the host as f32, so ground truth is its f32 round-trip
         acrobotPointsExact(Math.fround(th1), Math.fround(th2), points);
         const elbow = worldOf(module, 'elbow');
         const tip = worldOf(module, 'lantern');
@@ -351,10 +305,8 @@ describe('acrobot / the FK is the scene graph', () => {
         acrobotPointsExact(th1, th2, exact);
         acrobotPoints(th1, th2, decoder);
         for (let k = 0; k < 4; k++) {
-          // the ONLY difference is the decoder's Float32Array storage
           expect(Math.abs((exact[k] ?? 0) - (decoder[k] ?? 0))).toBeLessThan(2e-7);
         }
-        // ...and the free end's height is the env's own success quantity, bitwise
         expect(exact[3]).toBe(acrobotTipHeight(th1, th2));
       }
     }
@@ -371,7 +323,6 @@ describe('acrobot / the FK is the scene graph', () => {
       const tip = worldOf(module, 'lantern');
       expect(pivot.distanceTo(elbow)).toBeCloseTo(AB_L1, 12);
       expect(elbow.distanceTo(tip)).toBeCloseTo(AB_L2, 12);
-      // the swing is planar: everything stays on the pivot's own z
       expect(elbow.z).toBeCloseTo(pivot.z, 12);
       expect(tip.z).toBeCloseTo(pivot.z, 12);
     }
@@ -380,20 +331,16 @@ describe('acrobot / the FK is the scene graph', () => {
 
   test('th1 is measured from straight DOWN and th2 relative to link 1', async () => {
     const { module } = await live();
-    // hang: the whole arm points straight down from the pivot
     module.update(toFrameUpdate(hostFrame('hang', [0, 0, 0, 0], [0, 0, 0, 0])));
     expect(worldOf(module, 'elbow').y).toBeCloseTo(pivotAnchor(geometryOf())[1] - AB_L1, 12);
     expect(worldOf(module, 'lantern').y).toBeCloseTo(pivotAnchor(geometryOf())[1] - AB_L1 - AB_L2, 12);
     expect(worldOf(module, 'elbow').x).toBeCloseTo(pivotAnchor(geometryOf())[0], 12);
 
-    // th1 = π/2 swings link 1 to +x; th2 = 0 keeps link 2 in line with it
-    // (the pose crosses the wire as f32, so π/2 arrives rounded: 1e-7, not 1e-12)
     module.update(toFrameUpdate(hostFrame('right', [Math.PI / 2, 0, 0, 0], [Math.PI / 2, 0, 0, 0])));
     const pivot = pivotAnchor(geometryOf());
     expect(worldOf(module, 'elbow').x).toBeCloseTo(pivot[0] + AB_L1, 7);
     expect(worldOf(module, 'lantern').x).toBeCloseTo(pivot[0] + AB_L1 + AB_L2, 7);
 
-    // th2 = −π/2 folds link 2 back to straight down — RELATIVE to link 1, not the world
     module.update(toFrameUpdate(hostFrame('folded', [Math.PI / 2, -Math.PI / 2, 0, 0], [Math.PI / 2, -Math.PI / 2, 0, 0])));
     expect(worldOf(module, 'lantern').x).toBeCloseTo(pivot[0] + AB_L1, 7);
     expect(worldOf(module, 'lantern').y).toBeCloseTo(pivot[1] - AB_L2, 7);
@@ -427,7 +374,6 @@ describe('acrobot / the success surface is physically placed', () => {
     const success = successAnchor(geometryOf());
     const th1 = 2;
     for (const delta of [-0.25, -0.05, 0, 0.05, 0.3]) {
-      // walk th2 either side of the exact crossing solution
       const th2 = th2ForSuccess(th1) + delta * 0.35;
       const height = acrobotTipHeight(th1, th2);
       module.update(toFrameUpdate(hostFrame('cross', [th1, th2, 0, 0], [th1, th2, 0, 0])));
@@ -450,8 +396,6 @@ describe('acrobot / the success surface is physically placed', () => {
     for (let i = 0; i < (fronds?.count ?? 0); i++) {
       fronds?.getMatrixAt(i, m);
       m.decompose(p, q, sc);
-      // a strand hangs from p down by FROND_LEN * scale.y; only strands well out of the
-      // swing plane are allowed to hang low at all
       if (Math.abs(p.z) >= 0.62) continue;
       const bottom = p.y - 1.5 * sc.y;
       const closestY = bottom > 0 ? bottom : p.y > 0 ? 0 : p.y;
@@ -464,7 +408,6 @@ describe('acrobot / the success surface is physically placed', () => {
     for (let i = 0; i < (pads?.count ?? 0); i++) {
       pads?.getMatrixAt(i, m);
       p.setFromMatrixPosition(m);
-      // a pad floats ON the surface and never under the arm's own column
       expect(p.y).toBeGreaterThan(WATER_Y);
       expect(p.y).toBeLessThan(WATER_Y + 0.05);
       expect(Math.abs(p.x) >= 1.55 || p.z <= -1.6 || p.z >= 1.6).toBe(true);
@@ -473,12 +416,6 @@ describe('acrobot / the success surface is physically placed', () => {
   });
 
   test('the willow BOUGHS keep out of the swing plane wherever they are inside the reach', () => {
-    // THE REGRESSION THIS LOCKS. The frond/pad test below never looked at the limb the
-    // fronds hang from: the main bough ran through [0, BOUGH_Y, 0] — 0.34 from the pivot,
-    // dead centre of the disc, in the plane the arm swings in — and the recorded stream
-    // put a link within a mesh radius of it on 2.25% of frames. The env's objective is to
-    // raise the tip a full link ABOVE the pivot, so this is not a rare pose: the arm
-    // crosses the bough's line on every scoring swing.
     const pivot = pivotAnchor(geometryOf());
     let worstInPlane = Infinity;
     for (const bough of willowBoughs()) {
@@ -490,8 +427,6 @@ describe('acrobot / the success surface is physically placed', () => {
           const x = a[0] + (b[0] - a[0]) * t - pivot[0];
           const y = a[1] + (b[1] - a[1]) * t - pivot[1];
           const z = a[2] + (b[2] - a[2]) * t - pivot[2];
-          // the arm sweeps the disc r ≤ REACH at z = pivot.z; anything inside it must be
-          // out of the plane, and there is no "close enough" — 0.007 was measured
           if (Math.hypot(x, y) > REACH) continue;
           worstInPlane = Math.min(worstInPlane, Math.abs(z));
         }
@@ -501,8 +436,6 @@ describe('acrobot / the success surface is physically placed', () => {
   });
 
   test('no willow or garland VERTEX stands in the swing volume, bar the hinge sleeve', async () => {
-    // the polyline test above is the skeleton; this is the MESH the reviewer measured —
-    // every triangle of the willow and of the garland rig, in world space
     const { module } = await live();
     const pivot = pivotAnchor(geometryOf());
     const v = new THREE.Vector3();
@@ -518,14 +451,11 @@ describe('acrobot / the success surface is physically placed', () => {
       for (let i = 0; i < pos.count; i++) {
         v.fromBufferAttribute(pos, i).applyMatrix4(mesh.matrixWorld);
         const r = Math.hypot(v.x - pivot[0], v.y - pivot[1]);
-        if (r > REACH) continue; // outside the arm's reach: it may be anywhere
+        if (r > REACH) continue;
         if (Math.abs(v.z - pivot[2]) >= SWING_PLANE_CLEARANCE) {
           checked++;
-          continue; // inside the reach but out of the plane: clear
+          continue;
         }
-        // Inside the reach AND in the plane. Only the hinge sleeve may be here — the
-        // brass collar and the tie at the foot of the cord, i.e. the attachment the arm
-        // turns about. A hinge that cleared its own axle would be a lie.
         hinge++;
         worstHingeR = Math.max(worstHingeR, r);
         if (!(r <= HINGE_R)) {
@@ -537,13 +467,8 @@ describe('acrobot / the success surface is physically placed', () => {
         }
       }
       if (name === 'willow') {
-        // the bough really does pass through the disc — this test would be vacuous if it
-        // did not — and the hinge exemption really is only the hinge
         expect(checked).toBeGreaterThan(120);
         expect(hinge).toBeGreaterThan(0);
-        // The exemption is not a loophole. Two independent bounds: no in-plane vertex
-        // reaches past 0.36 (the number world.ts's HINGE_R comment claims), and the set is
-        // small enough to be only the collar + the cord's tie — a limb could not hide in it.
         expect(worstHingeR).toBeLessThan(0.36);
         expect(hinge).toBeLessThan(400);
       }
@@ -552,12 +477,9 @@ describe('acrobot / the success surface is physically placed', () => {
   });
 
   test('the swept arm clears every bough over a dense sweep of both angles', async () => {
-    // the end-to-end statement: no pose of the two links comes within a mesh radius of a
-    // limb. Segment-to-segment, over 33 × 33 poses, against every bough of the willow.
     const pivot = pivotAnchor(geometryOf());
     const points = new Float64Array(EXACT_POINT_FLOATS);
     const boughs = willowBoughs();
-    /** bough radius (0.115 at the trunk) + the thicker vine (0.055) + the lantern's body */
     const MESH_RADII = 0.115 + 0.055;
     let worst = Infinity;
     for (let i = 0; i <= 32; i++) {
@@ -581,12 +503,10 @@ describe('acrobot / the success surface is physically placed', () => {
   });
 
   test('nothing solid is planted inside the swing disc', () => {
-    // the willow's bank sits well clear of the arm's reach, and the pond is below it
     const bank = makeBankHeight(SEED);
     expect(WATER_Y).toBeLessThan(-(AB_L1 + AB_L2));
     for (let i = 0; i <= 40; i++) {
       const x = -REACH + (i / 40) * REACH * 2;
-      // under the whole swing the bed is flat and submerged: no lump can breach the mirror
       expect(bank(x, 0)).toBeLessThan(WATER_Y);
       expect(bank(x, 0)).toBe(bank(0, 0));
     }
@@ -600,7 +520,6 @@ describe('acrobot / the torque curl is sign-correct', () => {
     expect(curl).toBeDefined();
     if (!curl) return;
 
-    // the arm hanging: increasing th2 (what +1 torque does) drives the free end toward +x
     module.update(toFrameUpdate(hostFrame('push', [0, 0, 0, 0], [0, 0, 0, 0], 2)));
     expect(curl.visible).toBe(true);
     const elbow = worldOf(module, 'elbow');
@@ -611,7 +530,6 @@ describe('acrobot / the torque curl is sign-correct', () => {
     expect(curl.visible).toBe(true);
     const headMinus = objectWorld(module, 'torqueHead');
     expect(headMinus.x - elbow.x).toBeLessThan(-0.05);
-    // the two sides are mirror images about the joint
     expect(headMinus.x - elbow.x).toBeCloseTo(-(headPlus.x - elbow.x), 12);
     expect(headMinus.y).toBeCloseTo(headPlus.y, 12);
 
@@ -629,23 +547,18 @@ describe('acrobot / the torque curl is sign-correct', () => {
     expect(torqueOf(base)).toBe(0);
     base.derived = { torque: -1 };
     base.ctrl[0] = 2;
-    expect(torqueOf(base)).toBe(-1); // sim-core wins over the raw ctrl
+    expect(torqueOf(base)).toBe(-1);
   });
 });
 
 describe('acrobot / the arc guard', () => {
   test('arcCorrupt fires on a wrap and on a respawn slide, never on plausible motion', () => {
-    // a th1 wrap: the lerp sets off backwards while the true motion is forwards
     expect(arcCorrupt(-3.0, 0.4, 0.4)).toBe(true);
-    expect(arcCorrupt(-0.2, 3.0, 3.0)).toBe(true); // caught in the first frames, by direction
-    // the respawn slide: the whole arm sliding home inside one control step
+    expect(arcCorrupt(-0.2, 3.0, 3.0)).toBe(true);
     expect(arcCorrupt(-1.0, 1.6, 0.8)).toBe(true);
-    // ordinary fast swinging is NOT corrupt
     expect(arcCorrupt(0.05, 2.0, 2.1)).toBe(false);
     expect(arcCorrupt(0.9, 4.0, 4.4)).toBe(false);
-    // a turning point inside a step: a small reversal must stay legal
     expect(arcCorrupt(-0.02, 1.0, 0.4)).toBe(false);
-    // and a still joint is never tripped by noise
     expect(arcCorrupt(0.001, 0, 0)).toBe(false);
   });
 
@@ -659,15 +572,8 @@ describe('acrobot / the arc guard', () => {
   });
 
   test('a host lerp across a ±π wrap never whips the forearm — at EVERY transport speed', async () => {
-    // THE REGRESSION THIS LOCKS. The guard integrates and budgets in PLAYBACK seconds, so
-    // every claim below must hold identically at 0.25× and at 4×. Driven on wall time it
-    // passed at 1× and rendered a 1.6-unit single-frame teleport of the lantern at 0.25×
-    // (the one-control-step budget burnt 4× early and released mid-wrap) — worse than no
-    // guard at all, and invisible to a 1×-only test.
     for (const speed of SPEEDS) {
       const { module, ctx } = await live();
-      // the real shape of the artefact: th2 = 3.10 -> −3.10 in one control step, i.e. a
-      // TRUE displacement of +0.083 that the linear lerp renders as −6.20.
       const anchor: readonly [number, number, number, number] = [0.2, 3.1, 0.5, 0.4];
       const target = -3.1;
       ctx.setTime(10);
@@ -677,15 +583,10 @@ describe('acrobot / the arc guard', () => {
         hostFrame(`mid@${speed}`, [0.2 + 0.1 * alpha, 3.1 + (target - 3.1) * alpha, 0.5, 0.4], anchor, 1, 100),
       );
 
-      // an unguarded lerp sweeps the forearm most of a half circle (> 2.5 units of tip
-      // path); the physical bound here is (|w1| + |w1 + w2|) · AB_DT = 0.28
       expect(`${speed}x path ${played.path < 0.6}`).toBe(`${speed}x path true`);
-      // ...and no single frame may move the tip further than it can physically travel in
-      // one frame of PLAYBACK time — the teleport test, which is what actually broke
       const reach = 1.4 * DT_WALL * speed + 0.02;
       expect(`${speed}x jump ${played.worstJump < reach}`).toBe(`${speed}x jump true`);
 
-      // ...and the forearm is left within a few degrees of the TRUE continuous angle
       const link2 = module.scene.getObjectByName('link2Node');
       expect(link2).toBeDefined();
       const trueTh2 = 3.1 + 0.083 * (played.elapsedPlay / AB_DT);
@@ -699,9 +600,6 @@ describe('acrobot / the arc guard', () => {
     const anchor: readonly [number, number, number, number] = [0.2, 3.1, 0.5, 0.4];
     ctx.setTime(10);
     module.update(toFrameUpdate(hostFrame('pre', [0.2, 3.1, 0.5, 0.4], anchor, 1, 100), { scrubbed: false }));
-    // Engage the guard mid-wrap: three frames of a corrupt lerp leave `held` well inside
-    // its one-control-step budget, i.e. the guard is actively CARRYING the angle on the
-    // velocity channel — the branch that used to integrate on wall time.
     const rawTh2 = (k: number): number => 3.1 - 6.2 * (k / 12);
     for (let k = 1; k <= 3; k++) {
       ctx.setTime(10 + k * DT_WALL);
@@ -713,14 +611,8 @@ describe('acrobot / the arc guard', () => {
       );
     }
     const link2 = module.scene.getObjectByName('link2Node');
-    // proof the carrying branch is live: the render is nowhere near the pose it was handed
     expect(Math.abs(wrapPi((link2?.rotation.z ?? 0) - rawTh2(3)))).toBeGreaterThan(1);
 
-    // ...and now PAUSE. The host keeps calling update() with a real dtReal and re-delivers
-    // the SAME frame with ctx.time() frozen (kit/harness: `clock.advance` is a no-op while
-    // paused, the rAF loop is not). A guard on wall time integrates right through it —
-    // measured 1.229 world units of travel and then a 0.614 snap back. STYLE.md: pause
-    // must freeze the world coherently.
     const paused = toFrameUpdate(hostFrame('paused', [0.2, rawTh2(3), 0.5, 0.4], anchor, 1, 100), {
       scrubbed: false,
       dtReal: DT_WALL,
@@ -742,8 +634,6 @@ describe('acrobot / the arc guard', () => {
     const anchor: readonly [number, number, number, number] = [0.2, 3.1, 0.5, 0.4];
     ctx.setTime(0);
     module.update(toFrameUpdate(hostFrame('pre', [0.2, 3.1, 0.5, 0.4], anchor, 1, 100), { scrubbed: false }));
-    // 20 frames of a corrupt lerp: the guard's budget is ONE control step, after which it
-    // must take the pose at its word rather than integrate forever
     for (let k = 1; k <= 20; k++) {
       ctx.setTime(k / 60);
       module.update(
@@ -802,13 +692,11 @@ describe('acrobot / update contract', () => {
     expect(pool).not.toBeNull();
     if (!pool) return;
 
-    // hanging exactly on the success surface with no event: nothing may fire
     ctx.setTime(1);
     module.update(toFrameUpdate(fixtureNamed('crossing-the-lights'), { scrubbed: false }));
     expect(pool.stats.bursts).toBe(0);
     expect(pool.stats.ripples).toBe(0);
 
-    // the decoder's real batch (goal + done + teleport arrive together): one celebration
     ctx.setTime(2);
     module.update(
       toFrameUpdate(fixtureNamed('dawn-hang'), {
@@ -823,11 +711,6 @@ describe('acrobot / update contract', () => {
   });
 
   test('the bloom happens at the APEX the lantern reached — at EVERY transport speed', async () => {
-    // The recorded goal row IS the all-zero hang, so the host slides the whole arm home
-    // for a full control step BEFORE the event arrives. On wall time the guard's budget
-    // ran out mid-slide at every speed below 1×, and the celebration then fired at
-    // y = −2.000 — the reset hang, 3 units under the success it was celebrating. This is
-    // the same defect as the wrap test, seen through the celebration.
     const success = successAnchor(geometryOf());
     const crossing = fixtureNamed('crossing-the-lights');
     const th1 = crossing.pose[0] ?? 0;
@@ -840,8 +723,6 @@ describe('acrobot / update contract', () => {
       const apex = worldOf(module, 'lantern');
       expect(apex.y).toBeCloseTo(success[1], 6);
 
-      // the host lerps the arm all the way into the all-zero reset row over one control
-      // step; `derived` stays the crossing, which is the exact truth the guard reads
       const played = playControlStep(module, ctx, speed, 3, (alpha) =>
         hostFrame(
           'slide',
@@ -852,15 +733,10 @@ describe('acrobot / update contract', () => {
         ),
       );
       const carried = worldOf(module, 'lantern');
-      // the guard carried the arm ON ITS OWN VELOCITY instead of sliding it home: it is
-      // still up at the lights (the slide would have taken it to y = −2)...
       expect(`${speed}x apexY ${carried.y > success[1] - 0.2}`).toBe(`${speed}x apexY true`);
-      // ...and it never moved further than the tip can physically travel in that time
-      // (|d(tip)/dt| = 2.05 at this pose), which is what "held at the apex" really means
       const reach = 2.05 * played.elapsedPlay + 0.05;
       expect(`${speed}x carried ${carried.distanceTo(apex) < reach}`).toBe(`${speed}x carried true`);
 
-      // now the event frame: the recorded row IS the hang
       ctx.setTime(3 + AB_DT + DT_WALL * speed);
       module.update(
         toFrameUpdate(hostFrame('scored', [0, 0, 0, 0], [0, 0, 0, 0], 1, (crossing.step ?? 0) + 1), {
@@ -869,13 +745,11 @@ describe('acrobot / update contract', () => {
           events: [{ type: 'goal' }, { type: 'done' }, { type: 'teleport' }],
         }),
       );
-      // the celebration light rides the apex, ~3 units above the hang it fired on
       const light = module.scene.getObjectByName('oakPoint2') as THREE.PointLight | undefined;
       expect(light).toBeDefined();
       if (!light) return;
       expect(`${speed}x lightY ${light.position.y > success[1] - 0.3}`).toBe(`${speed}x lightY true`);
       expect(light.intensity).toBeGreaterThan(0);
-      // and the teleport is a HARD SNAP: the arm is already back at the hang
       expect(worldOf(module, 'lantern').y).toBeCloseTo(pivotAnchor(geometryOf())[1] - AB_L1 - AB_L2, 9);
       module.dispose();
     }
@@ -885,7 +759,6 @@ describe('acrobot / update contract', () => {
     const { module, ctx } = await live();
     const pool = existingCelebrations(module.scene);
     if (!pool) throw new Error('no pool');
-    // build a real ribbon first
     for (let k = 0; k <= 12; k++) {
       ctx.setTime(k * 0.05);
       const th1 = 0.4 + k * 0.12;
@@ -997,12 +870,10 @@ describe('acrobot / lifecycle', () => {
     const cam = module.camera;
     const dir = new THREE.Vector3();
     cam.getWorldDirection(dir);
-    // near-profile: it looks down −z at the swing plane, never from above or along x
     expect(dir.z).toBeLessThan(-0.9);
     expect(Math.abs(dir.y)).toBeLessThan(0.25);
     expect(cam.fov).toBeGreaterThanOrEqual(35);
     expect(cam.fov).toBeLessThanOrEqual(45);
-    // far enough back that the 40° vertical FOV contains the lights AND the pond
     const halfH = Math.tan((cam.fov * Math.PI) / 360) * cam.position.z;
     expect(halfH).toBeGreaterThan((AB_SUCCESS_HEIGHT - WATER_Y) / 2);
     module.dispose();
@@ -1011,10 +882,6 @@ describe('acrobot / lifecycle', () => {
 
 describe('acrobot / the thumb wall-view cap', () => {
   test('the thumb frame fits STYLE.md\u2019s 40 draws / 50k triangles, overlay included', async () => {
-    // The wall view is the whole gallery on one page: every scene there is a thumb, and
-    // the cap is what keeps 16 of them at 60 fps. Measured with the ground-truth overlay
-    // ON, because that is the state review screenshots are taken in, and across every
-    // fixture, because the busiest legal state is the one that has to fit.
     const { module } = await live('thumb');
     module.setDebug(true);
     for (const f of fixtures) module.update(toFrameUpdate(f));

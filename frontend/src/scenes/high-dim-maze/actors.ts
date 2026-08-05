@@ -1,25 +1,3 @@
-// The Slot Canyons — the actors (HighDimMaze-cont-v0).
-//
-// Four things move in this canyon, and each of them is a pure function of the frame:
-//
-//  * THE OASIS (the goal). `root` is the probe object: its world position is EXACTLY
-//    `cellToWorld(gx, gy)` with y = 0 and nothing else. The basin, the water, the reeds,
-//    the shaft of light and the kit `GoalBeacon` glow all hang off `alcove`, a child that
-//    carries the grow-in scale. Delete every decoration and a correctly-placed empty node
-//    remains.
-//  * THE SCARF. HighDimMaze is the one grid env with a FACING (pose[4] = lastDir), so the
-//    wisp is the only one in the preserve that is not radially symmetric. The scarf is
-//    the reason a still frame tells you which way the agent is pointed. It hangs off
-//    `wisp.avatar` — the exact cell node — and carries its own damped yaw, so the probe
-//    that node feeds stays bit-exact (THE WISP PROBE RULE).
-//  * THE GUST. `dash` (action 5) is a two-cell sprint inside one 8 Hz step; the hop
-//    itself is a straight line along the corridor, and this adds the speed lines that
-//    make it read as speed plus the ground wake that says which cells were crossed.
-//  * THE SETTLE. `stay` (action 4) is the wisp holding station: the scarf goes slack, a
-//    faint ring of disturbed sand hangs under it, and dust sifts down.
-//
-// ZERO ALLOCATION: every per-frame path here writes into preallocated Matrix4 / Vector3 /
-// Color scratch. Every clock is `ctx.time()`.
 
 import { GoalBeacon } from '@kit/grid';
 import {
@@ -36,29 +14,13 @@ import { makeWater, type WaterHandle } from '@kit/water';
 import * as THREE from 'three';
 import { clamp01, mergeColoredParts, type CanyonSkin, type ColoredPart } from './world';
 
-// ---------------------------------------------------------------------------
-// the oasis — the goal
-// ---------------------------------------------------------------------------
 
-/** basin outer radius; a shade under half a cell, so the alcove owns its cell and no more */
 const BASIN_R = 0.44;
 const BASIN_RIM_Y = 0.13;
 const POOL_R = 0.315;
 const POOL_Y = 0.052;
-/** the shaft climbs to the canyon rim — it is how the eye finds the goal from across the maze */
 const SHAFT_TOP = 1.62;
-/**
- * The shaft's HDR gain. It is the one thing in this canyon that crosses the 0.85 bloom
- * threshold, and it is deliberately modest: at 2.4 the shaft, the beacon column and a
- * sunlit terracotta floor stacked up and bloomed into a white pillar three cells wide.
- * The goal must read as WATER IN SHADE with light falling on it, not as a lens flare.
- */
 const SHAFT_HDR = 0.62;
-/**
- * The most the grow-in scale may reach. It is a guard on garbage input, NOT the shape of
- * the beat: `growth()` peaks at 1.06 and settles to 1, and clamping at 1 (the first pass)
- * is what killed the bounce.
- */
 const GROW_CEILING = 1.2;
 
 export interface OasisOptions {
@@ -69,16 +31,11 @@ export interface OasisOptions {
 }
 
 export interface OasisHandle {
-  /** add this ONE group to the scene */
   group: THREE.Group;
-  /** the probe object: world position === cellToWorld(gx, gy), y = 0, always */
   root: THREE.Object3D;
-  /** local height of the shaft's core — the scene lifts its point light to it */
   readonly crownHeight: number;
-  /** the whole visual state: grow-in from the last respawn, and how near the wisp is */
   setState(grow01: number, near01: number): void;
   flare(strength?: number): void;
-  /** ctx.time() — water, shaft breath and reed sway */
   setTime(t: number): void;
   update(dt: number, time: number): void;
   dispose(): void;
@@ -90,18 +47,14 @@ export function buildOasis(opts: OasisOptions): OasisHandle {
   const group = new THREE.Group();
   group.name = opts.name ?? 'oasisAlcove';
 
-  // ---- the probe root: position only, forever ----
   const root = new THREE.Object3D();
   root.name = 'oasisRoot';
   group.add(root);
 
-  // ---- everything else hangs off the growth node ----
   const alcove = new THREE.Object3D();
   alcove.name = 'oasisGrow';
   root.add(alcove);
 
-  // ---- the kit goal beacon, demoted to a decoration child at the local origin ----
-  // Never `setCell`ed: parented at (0,0,0) under `root`, it inherits the exact goal cell.
   const beacon = new GoalBeacon({
     color: skin.shaft,
     tier,
@@ -112,7 +65,6 @@ export function buildOasis(opts: OasisOptions): OasisHandle {
   });
   alcove.add(beacon.group);
 
-  // ---- the basin: a broken ring of wet rock around a sunken pool ----
   const basinParts: ColoredPart[] = [];
   {
     const stones = tier === 'thumb' ? 6 : 11;
@@ -127,14 +79,12 @@ export function buildOasis(opts: OasisOptions): OasisHandle {
         color: i % 3 === 0 ? (skin.strata[1] ?? skin.stone) : (skin.strata[2] ?? skin.stone),
       });
     }
-    // a dark, damp floor under the water so the pool never shows the sand through it
     const bed = new THREE.CylinderGeometry(POOL_R * 1.08, POOL_R * 0.8, 0.09, Math.max(6, Math.round(16 * detail)));
     bed.translate(0, 0.02, 0);
     basinParts.push({ geometry: bed, color: skin.waterDeep });
   }
   const basinGeometry = mergeColoredParts(basinParts, 'oasisBasin');
   const basinMaterial: OakMaterial = oakMaterial({
-    // the same white base the canyon's rock uses, so the alcove is graded like its cliff
     color: palette.sun,
     vertexColors: true,
     flatShading: true,
@@ -153,7 +103,6 @@ export function buildOasis(opts: OasisOptions): OasisHandle {
   basin.receiveShadow = tier !== 'thumb';
   alcove.add(basin);
 
-  // ---- the water ----
   const water: WaterHandle = makeWater({
     size: POOL_R * 2,
     palette,
@@ -176,7 +125,6 @@ export function buildOasis(opts: OasisOptions): OasisHandle {
   water.mesh.name = 'oasisWater';
   alcove.add(water.mesh);
 
-  // ---- reeds: the only green in the canyon, and that is why the eye finds the goal ----
   const reedGeometry = makeReedGeometry(tier);
   const reedMaterial: OakMaterial = oakMaterial({
     color: skin.reed,
@@ -207,7 +155,6 @@ export function buildOasis(opts: OasisOptions): OasisHandle {
     const s = new THREE.Vector3();
     const c = new THREE.Color();
     for (let i = 0; i < reedCount; i++) {
-      // a fixed arc on the shaded (north) lip: deterministic, so a scrub rebuilds it
       const a = -2.7 + (i / Math.max(1, reedCount - 1)) * 3.6 + ((i * 3) % 5) * 0.06;
       const r = BASIN_R * (0.82 + 0.12 * (((i * 7) % 4) / 3));
       p.set(Math.cos(a) * r, 0.02, Math.sin(a) * r);
@@ -226,7 +173,6 @@ export function buildOasis(opts: OasisOptions): OasisHandle {
   }
   alcove.add(reeds);
 
-  // ---- the shaft: afternoon light finding its way down into the slot ----
   const shaftGeometry = new THREE.CylinderGeometry(
     POOL_R * 2.5,
     POOL_R * 0.6,
@@ -257,21 +203,10 @@ export function buildOasis(opts: OasisOptions): OasisHandle {
     crownHeight,
 
     setState(grow01, near01) {
-      // THE GROW-IN IS ALLOWED TO OVERSHOOT. A `clamp01` here flattened every value above
-      // 1, which silently deleted the bounce the caller's `growth()` computes — the alcove
-      // rose to exactly 1 and stopped, and the documented "wells up with a little bounce"
-      // beat rendered as nothing at all. The ceiling is a guard against garbage, not a
-      // shape: it sits above the envelope's own peak (1.06) and nowhere near it.
       const grow = grow01 > 0 ? (grow01 < GROW_CEILING ? grow01 : GROW_CEILING) : 0;
       const near = clamp01(near01);
-      // growth is a SCALE on the decoration node — the root never moves, so an oasis that
-      // is 3% grown is still exactly on its cell
       alcove.scale.setScalar(grow);
-      // the LIGHT does not bounce with it: the shaft is a level, not a spring, so its terms
-      // read the settled 0..1 growth and the overshoot stays purely geometric
       const lit = clamp01(grow);
-      // the shaft strengthens as the wisp closes in: nothing the agent does not already
-      // know (its own cell and the goal's), and it makes the last two cells feel inevitable
       setEmissiveIntensity(shaftMaterial, SHAFT_HDR * (0.55 + 0.7 * near) * (0.2 + 0.8 * lit));
       shaftMaterial.opacity = (0.115 + 0.09 * near) * lit;
     },
@@ -284,7 +219,6 @@ export function buildOasis(opts: OasisOptions): OasisHandle {
       water.setTime(t);
       oakUniforms(reedMaterial)?.setTime(t);
       oakUniforms(basinMaterial)?.setTime(t);
-      // the shaft breathes with the dust drifting through it
       const breath = 1 + 0.07 * Math.sin(t * 0.9) + 0.03 * Math.sin(t * 2.3);
       shaft.scale.set(breath, 1, breath);
       shaft.rotation.y = t * 0.11;
@@ -310,7 +244,6 @@ export function buildOasis(opts: OasisOptions): OasisHandle {
   };
 }
 
-/** One reed: three tapering blades from a common root, graded dark at the base. */
 function makeReedGeometry(tier: QualityTier): THREE.BufferGeometry {
   const blades = tier === 'thumb' ? 2 : 3;
   const positions = new Float32Array(blades * 2 * 3 * 3);
@@ -354,35 +287,21 @@ function makeReedGeometry(tier: QualityTier): THREE.BufferGeometry {
   return g;
 }
 
-// ---------------------------------------------------------------------------
-// the scarf — pose[4] made visible
-// ---------------------------------------------------------------------------
 
 export interface ScarfOptions {
   tier: QualityTier;
   color: THREE.ColorRepresentation;
-  /** the wisp's orb height — the scarf ties on just under it */
   height: number;
   name?: string;
 }
 
 export interface ScarfHandle {
-  /** parent this ONE node to `wisp.avatar` (the exact cell node) */
   group: THREE.Group;
   segments: number;
-  /**
-   * `yaw` is the facing this frame, `slack` in [0,1] is how still the wisp is (1 = a
-   * settled `stay`, 0 = a full dash), `speed` in [0,1] is how hard the air is moving.
-   */
   setState(yaw: number, slack: number, speed: number, time: number): void;
   dispose(): void;
 }
 
-/**
- * A windswept scarf: a chain of tapering panels streaming BEHIND the facing direction.
- * One InstancedMesh, one draw; the chain is walked on the CPU into preallocated scratch,
- * which is five `compose()` calls a frame and buys a silhouette that reads at a glance.
- */
 export function buildScarf(opts: ScarfOptions): ScarfHandle {
   const group = new THREE.Group();
   group.name = opts.name ?? 'wispScarf';
@@ -394,7 +313,6 @@ export function buildScarf(opts: ScarfOptions): ScarfHandle {
       group,
       segments,
       setState() {
-        /* thumb wears no scarf */
       },
       dispose() {
         group.removeFromParent();
@@ -449,8 +367,6 @@ export function buildScarf(opts: ScarfOptions): ScarfHandle {
     segments,
     setState(yaw, slack, speed, time) {
       group.rotation.y = yaw;
-      // the chain: each panel hangs a little further back, lifts with the airflow and
-      // wags with a phase that runs down the length
       let x = 0;
       let y = 0;
       let z = 0;
@@ -459,14 +375,11 @@ export function buildScarf(opts: ScarfOptions): ScarfHandle {
       const wag = 0.45 + 0.6 * speed;
       for (let i = 0; i < segments; i++) {
         const t = (i + 1) / segments;
-        // the wave runs DOWN the length with a long phase lag; a short lag and a big
-        // per-segment turn made a lightning bolt, not a ribbon
         const phase = time * (1.9 + 1.6 * speed) - i * 0.52;
         const swing = Math.sin(phase) * (0.1 + 0.26 * t) * wag * (0.35 + 0.65 * (1 - slack));
         const droop = -(0.12 + 0.42 * t) * slack;
         heading += swing * 0.3;
         const pitch = droop + lift * (0.5 - 0.5 * t) + 0.07 * Math.cos(phase * 0.8);
-        // step BACKWARD along the current heading (local -z is behind the facing)
         const dx = Math.sin(heading) * SEG_LEN;
         const dz = -Math.cos(heading) * SEG_LEN;
         const dy = Math.sin(pitch) * SEG_LEN * 0.5;
@@ -494,7 +407,6 @@ export function buildScarf(opts: ScarfOptions): ScarfHandle {
   };
 }
 
-/** One scarf panel: a flat trapezoid lying along local −z, graded toward its trailing edge. */
 function makeScarfPanelGeometry(length: number): THREE.BufferGeometry {
   const w0 = 0.105;
   const w1 = 0.078;
@@ -527,9 +439,6 @@ function makeScarfPanelGeometry(length: number): THREE.BufferGeometry {
   return g;
 }
 
-// ---------------------------------------------------------------------------
-// the gust — dash (action 5) and stay (action 4)
-// ---------------------------------------------------------------------------
 
 export interface GustOptions {
   tier: QualityTier;
@@ -539,12 +448,7 @@ export interface GustOptions {
 }
 
 export interface GustHandle {
-  /** add this ONE group to the scene (world space) */
   group: THREE.Group;
-  /**
-   * The speed lines that trail a dashing wisp. `from`/`to` are the world XZ of the two
-   * cells; `progress` is the hop's own 0→1; `amount` in [0,1] fades the whole thing.
-   */
   setLines(
     fromX: number,
     fromZ: number,
@@ -554,25 +458,17 @@ export interface GustHandle {
     progress: number,
     amount: number,
   ): void;
-  /** the sand wake lying on the traversed cells; `amount` is its fade envelope */
   setWake(fromX: number, fromZ: number, toX: number, toZ: number, amount: number): void;
-  /** the disturbed-sand ring under a settled wisp */
   setSettle(x: number, z: number, amount: number, time: number): void;
-  /** kill everything with no easing (scrub / teleport) */
   clear(): void;
   dispose(): void;
 }
 
-/**
- * The dash and stay trappings, pooled into three preallocated meshes. Every one of them
- * is invisible at amount 0 and never allocates.
- */
 export function buildGust(opts: GustOptions): GustHandle {
   const group = new THREE.Group();
   group.name = opts.name ?? 'wispGust';
   const lines = opts.tier === 'thumb' ? 0 : opts.tier === 'medium' ? 4 : 6;
 
-  // ---- speed lines: thin additive streaks strung along the dash segment ----
   const lineGeometry = new THREE.PlaneGeometry(1, 0.022);
   lineGeometry.rotateX(-Math.PI / 2);
   const lineMaterial: EmissiveMaterial = emissiveMaterial(opts.color, 1.1, {
@@ -591,7 +487,6 @@ export function buildGust(opts: GustOptions): GustHandle {
   lineMesh.renderOrder = 3;
   group.add(lineMesh);
 
-  // ---- the sand wake: a stretched smear on the floor along the cells crossed ----
   const wakeGeometry = new THREE.PlaneGeometry(1, 1, 1, 1);
   wakeGeometry.rotateX(-Math.PI / 2);
   const wakeMaterial: OakMaterial = oakMaterial({
@@ -612,7 +507,6 @@ export function buildGust(opts: GustOptions): GustHandle {
   wake.renderOrder = 1;
   group.add(wake);
 
-  // ---- the settle ring: disturbed sand under a wisp holding station ----
   const ringGeometry = new THREE.RingGeometry(0.2, 0.36, opts.tier === 'thumb' ? 10 : 26);
   ringGeometry.rotateX(-Math.PI / 2);
   const ringMaterial: EmissiveMaterial = emissiveMaterial(opts.skin.dust, 0.55, {
@@ -647,7 +541,6 @@ export function buildGust(opts: GustOptions): GustHandle {
       const dz = toZ - fromZ;
       const span = Math.hypot(dx, dz);
       const yaw = Math.atan2(dx, dz);
-      // the head of the streak sits where the wisp is; the tail lags behind it
       const headX = fromX + dx * progress;
       const headZ = fromZ + dz * progress;
       for (let i = 0; i < lines; i++) {

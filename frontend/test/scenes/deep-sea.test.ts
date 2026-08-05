@@ -1,21 +1,4 @@
 /// <reference types="bun" />
-// Sunlit Descent (DeepSea-cont-v0) — the accuracy + lifecycle self-check.
-//
-// This mirrors four-rooms.test.ts's shape and adds what THIS env has to prove:
-//
-//  * **r is depth, and it is not transposed.** `pose = [r, c, 7, 7]` — row FIRST. The
-//    wisp for pose [3, 2] must stand at `cellToWorld(2, 3)`, i.e. x = −1.5 and z = −0.5,
-//    NOT the other way round, and its y must be row 3's terrace. That single assertion is
-//    the regression test for the bug the retired 2-D viewer shipped.
-//  * **the reef is the reachable set.** `reefReachable` runs the decoder's own transition
-//    forward; the test re-derives the same set independently (a plain BFS over
-//    `deepSeaNextCol`) for all eight recorded lanes and checks it against the c ≤ r
-//    triangle — so the art can never quietly grow a shelf the dive cannot stand on.
-//  * **the kelp is the mask.** Every clump's lean direction is decoded back out of its
-//    instance matrix and checked against `grid.actionMask`, cell for cell — the same bit
-//    the ground-truth overlay draws its arrows from.
-//  * **the wrap is a hard cut.** Leaving row N−2 always resurfaces the diver at (0, 0);
-//    the scene must snap, never glide a straight line across six terraces.
 
 import { describe, expect, test } from 'bun:test';
 import * as THREE from 'three';
@@ -59,7 +42,6 @@ import {
   type StubSceneContext,
 } from './aligned';
 
-/** the demo run's first DeepSea lane (seeds 16–23 are the eight recorded lanes) */
 const SEED = 16;
 const RECORDED_SEEDS = [16, 17, 18, 19, 20, 21, 22, 23] as const;
 
@@ -84,7 +66,6 @@ function fixtureNamed(name: string): SceneFixture {
   return f;
 }
 
-/** pose = [r, c, …] — ROW FIRST, exactly as the record packs it. */
 function poseFixture(name: string, r: number, c: number, action = 0, step = 0): SceneFixture {
   return {
     name,
@@ -102,7 +83,6 @@ function worldOf(module: SceneModule, probeName: string): THREE.Vector3 {
   return new THREE.Vector3().setFromMatrixPosition(probe.object.matrixWorld);
 }
 
-/** An INDEPENDENT re-derivation of the dive's reachable set (not the scene's function). */
 function bfsReachable(grid: GridGeometry): Uint8Array {
   const mask = grid.actionMask ?? new Uint8Array(grid.w * grid.h);
   const st: DeepSeaStatic = { seed: 0, maskLo: 0, maskHi: 0, mask };
@@ -124,7 +104,6 @@ function reefCellCount(grid: GridGeometry, reach: Uint8Array): number {
   return n;
 }
 
-// ---------------------------------------------------------------------------
 
 describe('deep-sea / manifest + fixtures', () => {
   test('manifest declares the frozen contract fields', () => {
@@ -147,7 +126,6 @@ describe('deep-sea / manifest + fixtures', () => {
     const c = p[1] ?? -1;
     expect(r).toBeLessThanOrEqual(DEEPSEA_LAST_ROW);
     expect(isReef(reach, grid, c, r)).toBe(true);
-    // the pose really does carry the treasure cell in slots 2 and 3
     expect(p[2]).toBe(DEEPSEA_N - 1);
     expect(p[3]).toBe(DEEPSEA_N - 1);
   });
@@ -160,7 +138,6 @@ describe('deep-sea / manifest + fixtures', () => {
       expect(f.pose.length).toBe(9);
       const r = f.pose[0] ?? -1;
       const c = f.pose[1] ?? -1;
-      // rows 0..N-2 are the only rows a dive is ever observed in
       expect(r).toBeGreaterThanOrEqual(0);
       expect(r).toBeLessThanOrEqual(DEEPSEA_LAST_ROW);
       expect(isReef(reach, grid, c, r)).toBe(true);
@@ -208,7 +185,6 @@ describe('deep-sea / the reef is the reachable set, never a typed-in triangle', 
           expect(on).toBe((independent[r * grid.w + c] ?? 0) !== 0);
         }
       }
-      // 1 + 2 + … + 8 = 36 shelves; the other 28 cells are open blue water
       expect(reefCellCount(grid, reach)).toBe((DEEPSEA_N * (DEEPSEA_N + 1)) / 2);
     }
   });
@@ -221,7 +197,6 @@ describe('deep-sea / the reef is the reachable set, never a typed-in triangle', 
         expect(isReefLip(reach, grid, c, r)).toBe(c === r);
       }
     }
-    // the shallow / far-column corner is water: no shelf, no kelp, nothing to stand on
     expect(isReef(reach, grid, DEEPSEA_N - 1, 0)).toBe(false);
     expect(isReef(reach, grid, DEEPSEA_N - 1, DEEPSEA_N - 2)).toBe(false);
   });
@@ -243,7 +218,6 @@ describe('deep-sea / the depth axis', () => {
       expect(reefDepthY(r - 1) - reefDepthY(r)).toBeCloseTo(ROW_DROP, 12);
     }
     expect(reefDepthY(0)).toBeCloseTo(0, 12);
-    // the slabs must overlap or daylight shows between the terraces
     expect(SHELF_THICKNESS).toBeGreaterThan(ROW_DROP);
   });
 
@@ -252,7 +226,6 @@ describe('deep-sea / the depth axis', () => {
     const out: [number, number, number] = [0, 0, 0];
     for (let r = 0; r < grid.h; r++) {
       cellToWorld(0, r, grid, out);
-      // bit-identical, which is what lets the alignment probes assert 0 error
       expect(reefDepthYAt(out[2], grid)).toBe(reefDepthY(r));
     }
   });
@@ -260,7 +233,6 @@ describe('deep-sea / the depth axis', () => {
   test('cellToReefWorld is row-major-correct: pose [r, c] -> (x from c, z from r)', () => {
     const grid = gridOf();
     const out: [number, number, number] = [0, 0, 0];
-    // the anti-transposition case: r = 3, c = 2 is NOT r = 2, c = 3
     cellToReefWorld(2, 3, grid, out);
     expect(out[0]).toBeCloseTo((2 - (DEEPSEA_N - 1) / 2) * CELL, 12);
     expect(out[2]).toBeCloseTo((3 - (DEEPSEA_N - 1) / 2) * CELL, 12);
@@ -279,9 +251,7 @@ describe('deep-sea / the depth axis', () => {
     for (let r = 0; r < grid.h; r++) {
       for (let c = 0; c < grid.w; c++) {
         cellToWorld(c, r, grid, truth);
-        // a marker the overlay drew 0.03 above the flat plane...
         p.set(truth[0], 0.03, truth[2]).applyMatrix4(m);
-        // ...lands 0.03 above the terrace, with x and z untouched
         expect(p.x).toBeCloseTo(truth[0], 12);
         expect(p.z).toBeCloseTo(truth[2], 12);
         expect(p.y).toBeCloseTo(reefDepthY(r) + 0.03, 12);
@@ -294,7 +264,6 @@ describe('deep-sea / alignment', () => {
   test('every probe lands on ground truth at hero tier', async () => {
     const module = createScene();
     const report = await assertAligned(module, fixtures, { geometry: geometryOf(), seed: SEED, tier: 'hero' });
-    // these roots carry POSITION ONLY — they should be exact, not merely within 1e-3
     expect(report.worst.get('wisp') ?? 1).toBeLessThan(1e-9);
     expect(report.worst.get('wisp-anchor') ?? 1).toBeLessThan(1e-9);
     expect(report.worst.get('clam') ?? 1).toBeLessThan(1e-9);
@@ -325,13 +294,11 @@ describe('deep-sea / alignment', () => {
         expect(w.x).toBeCloseTo(truth[0], 10);
         expect(w.y).toBeCloseTo(truth[1], 10);
         expect(w.z).toBeCloseTo(truth[2], 10);
-        // the orb centre rides exactly wispHeight above the shelf
         const orb = worldOf(module, 'wisp');
         expect(orb.y).toBeCloseTo(truth[1] + TOKENS.wispHeight, 10);
         visited++;
       }
     }
-    // rows 0..N-2 hold 1 + 2 + … + (N-1) cells
     expect(visited).toBe((DEEPSEA_N * (DEEPSEA_N - 1)) / 2);
     module.dispose();
   });
@@ -346,7 +313,6 @@ describe('deep-sea / alignment', () => {
     expect(w.x).toBeCloseTo(truth[0], 10);
     expect(w.y).toBeCloseTo(truth[1], 10);
     expect(w.z).toBeCloseTo(truth[2], 10);
-    // and it really is the deepest thing in the reef
     expect(w.y).toBeCloseTo(reefDepthY(DEEPSEA_N - 1), 10);
     module.dispose();
   });
@@ -372,11 +338,8 @@ describe('deep-sea / alignment', () => {
       const r = Math.round(p.z + (grid.h - 1) / 2);
       expect(isReef(reach, grid, c, r)).toBe(true);
       cellToReefWorld(c, r, grid, truth);
-      // instance matrices live in a Float32Array, so these are f32-exact, not f64-exact
       expect(p.x).toBeCloseTo(truth[0], 5);
       expect(p.z).toBeCloseTo(truth[2], 5);
-      // the slab geometry's TOP FACE is at local y = 0 and jitter only scales it
-      // downward, so the instance origin IS the shelf top
       expect(p.y).toBeCloseTo(reefDepthY(r), 5);
       checked++;
     }
@@ -408,13 +371,10 @@ describe('deep-sea / the kelp is the action mask', () => {
       const r = Math.round(p.z + (grid.h - 1) / 2);
       expect(isReef(reach, grid, c, r)).toBe(true);
       seen.add(`${c},${r}`);
-      // a clump's own axis, rotated into the world: its x sign IS the current's direction
       up.set(0, 1, 0).applyQuaternion(q);
       const bit = (grid.actionMask?.[r * grid.w + c] ?? 0) !== 0;
       expect(`${c},${r} leansRight=${up.x > 0}`).toBe(`${c},${r} leansRight=${bit}`);
-      // and it is a real, visible lean, not a rounding artefact
       expect(Math.abs(up.x)).toBeGreaterThan(Math.sin(KELP_LEAN * 0.7) - 1e-6);
-      // it stands on its own terrace (f32 instance matrix)
       expect(p.y).toBeCloseTo(reefDepthY(r), 5);
     }
     expect(seen.size).toBe(mesh.count);
@@ -434,7 +394,6 @@ describe('deep-sea / the dive glides, the wrap cuts', () => {
     cellToReefWorld(1, 2, grid, from);
     cellToReefWorld(2, 3, grid, to);
 
-    // step one row deeper and one column right; sample the glide over one control step
     ctx.setTime(10);
     module.update(toFrameUpdate(poseFixture('b', 3, 2, 1, 1), { scrubbed: false }));
     for (let k = 0; k <= 8; k++) {
@@ -445,7 +404,6 @@ describe('deep-sea / the dive glides, the wrap cuts', () => {
       expect(w.x).toBeLessThanOrEqual(Math.max(from[0], to[0]) + 1e-6);
       expect(w.z).toBeGreaterThanOrEqual(Math.min(from[2], to[2]) - 1e-6);
       expect(w.z).toBeLessThanOrEqual(Math.max(from[2], to[2]) + 1e-6);
-      // and it is always DESCENDING through the terraces, never above the shallower one
       expect(w.y).toBeLessThanOrEqual(from[1] + 0.07);
       expect(w.y).toBeGreaterThanOrEqual(to[1] - 1e-6);
     }
@@ -462,7 +420,6 @@ describe('deep-sea / the dive glides, the wrap cuts', () => {
     const truth: [number, number, number] = [0, 0, 0];
     ctx.setTime(4);
     module.update(toFrameUpdate(poseFixture('deep', DEEPSEA_LAST_ROW, 5, 1, 100), { scrubbed: false }));
-    // the decoder fires [goal?, resurface] on the frame the diver is already at (0, 0)
     ctx.setTime(4.125);
     module.update(
       toFrameUpdate(poseFixture('surfaced', 0, 0, 1, 101), {
@@ -472,7 +429,6 @@ describe('deep-sea / the dive glides, the wrap cuts', () => {
     );
     const w = worldOf(module, 'wisp-anchor');
     cellToReefWorld(0, 0, grid, truth);
-    // no interpolation at all: the very frame the event lands, the diver is at the surface
     expect(w.x).toBeCloseTo(truth[0], 10);
     expect(w.y).toBeCloseTo(truth[1], 10);
     expect(w.z).toBeCloseTo(truth[2], 10);
@@ -538,13 +494,11 @@ describe('deep-sea / update contract', () => {
     expect(pool).not.toBeNull();
     if (!pool) return;
 
-    // sitting one move from the treasure with no event: nothing may fire
     ctx.setTime(1);
     module.update(toFrameUpdate(fixtureNamed('treasure-approach'), { scrubbed: false }));
     expect(pool.stats.bursts).toBe(0);
     expect(pool.stats.ripples).toBe(0);
 
-    // a resurface alone is not a reward: bubbles, but no celebration
     ctx.setTime(1.125);
     module.update(
       toFrameUpdate(poseFixture('surfaced', 0, 0, 1, 3), { scrubbed: false, events: [{ type: 'resurface' }] }),
@@ -553,7 +507,6 @@ describe('deep-sea / update contract', () => {
     expect(pool.stats.ripples).toBe(0);
     expect(pool.pulse.bloom).toBe(0);
 
-    // the decoder's real batch on a successful dive: goal AND resurface, same frame
     ctx.setTime(2);
     module.update(
       toFrameUpdate(poseFixture('treasure', 0, 0, 1, 4), {
@@ -586,10 +539,8 @@ describe('deep-sea / update contract', () => {
     cellToReefWorld(DEEPSEA_N - 1, DEEPSEA_N - 1, grid, truth);
     expect(light.position.x).toBeCloseTo(truth[0], 10);
     expect(light.position.z).toBeCloseTo(truth[2], 10);
-    // above the shelf (the pearl sits inside the shells), and lit
     expect(light.position.y).toBeGreaterThan(truth[1]);
     expect((light as THREE.PointLight).intensity).toBeGreaterThan(0);
-    // meanwhile the diver really is back at the surface
     const w = worldOf(module, 'wisp-anchor');
     cellToReefWorld(0, 0, grid, truth);
     expect(w.z).toBeCloseTo(truth[2], 10);
@@ -624,11 +575,9 @@ describe('deep-sea / update contract', () => {
         expect(g).toBeLessThanOrEqual(1);
       }
     }
-    // deep AND near the treasure column opens wider than shallow and far
     const far = gape(0, { r: 0, c: 0, lastA: 0 }, grid);
     const near = gape(0, { r: DEEPSEA_LAST_ROW, c: DEEPSEA_N - 2, lastA: 0 }, grid);
     expect(near).toBeGreaterThan(far);
-    // and it is a pure function: same arguments, same answer
     expect(gape(3.3, { r: 4, c: 6, lastA: 1 }, grid)).toBe(gape(3.3, { r: 4, c: 6, lastA: 1 }, grid));
   });
 });
@@ -690,7 +639,6 @@ describe('deep-sea / lifecycle', () => {
     for (let i = 0; i < 16; i++) {
       expect(overlay.matrix.elements[i] ?? NaN).toBeCloseTo(expected.elements[i] ?? NaN, 12);
     }
-    // the overlay's own agent cross for a mid-dive pose lands on that row's terrace
     overlay.updateWorldMatrix(true, false);
     const truth: [number, number, number] = [0, 0, 0];
     cellToReefWorld(2, 3, grid, truth);
@@ -704,20 +652,13 @@ describe('deep-sea / lifecycle', () => {
     module.update(toFrameUpdate(fixtureNamed('mid-dive')));
     const grid = gridOf();
     const cam = module.camera;
-    // above the reef, outside the board, genuinely looking down into it
     expect(cam.position.y).toBeGreaterThan(2);
     expect(Math.hypot(cam.position.x, cam.position.z)).toBeGreaterThan((DEEPSEA_N * CELL) / 2);
     const dir = new THREE.Vector3();
     cam.getWorldDirection(dir);
     expect(dir.y).toBeLessThan(-0.25);
-    // THE COMPOSITION INVARIANT. Both coordinates are positive, which puts the camera over
-    // the treasure corner (+x = the far columns, +z = the DEEP rows). That is not taste:
-    // with the dive receding, `spacing·sin(elev)` and `drop·cos(elev)` cancel exactly when
-    // the shelf tops are visible, and the staircase renders flat. Coming toward the eye,
-    // the two add. Flip either sign and the descent stops reading.
     expect(cam.position.x).toBeGreaterThan(0);
     expect(cam.position.z).toBeGreaterThan(0);
-    // ...and the deepest row really is the nearest thing in the frame
     const near: [number, number, number] = [0, 0, 0];
     const far: [number, number, number] = [0, 0, 0];
     cellToReefWorld(0, DEEPSEA_N - 1, grid, near);
@@ -742,10 +683,6 @@ describe('deep-sea / lifecycle', () => {
 
 describe('deep-sea / the thumb wall-view cap', () => {
   test('the thumb frame fits STYLE.md\u2019s 40 draws / 50k triangles, overlay included', async () => {
-    // The wall view is the whole gallery on one page: every scene there is a thumb, and
-    // the cap is what keeps 16 of them at 60 fps. Measured with the ground-truth overlay
-    // ON, because that is the state review screenshots are taken in, and across every
-    // fixture, because the busiest legal state is the one that has to fit.
     const { module } = await live('thumb');
     module.setDebug(true);
     for (const f of fixtures) module.update(toFrameUpdate(f));

@@ -1,18 +1,3 @@
-// LargeDeepSea-cont-v0 decoder (N = 16).
-//
-// Oracles (ported, never guessed):
-//   Sources/Gridworld.metal      gw_ldeep_step L356, gw_ldeep_obs L343
-//   tools/gridworld_ref.py       ldeepsea_reset L310, ldeepsea_step L324
-//   Sources/OakKernel.metal      pose packing L2726-2737, init L2278-2290
-//
-// DeepSea scaled to 16x16: the hidden per-cell action map is bit r*16+c of a
-// 256-bit mask drawn ONCE per lane from the RESET stream — words 0..3 from
-// ctr = (0,0,0,0) and words 4..7 from ctr = (1,0,0,0) — then fixed for the
-// lane's lifetime. Reaching r+1 >= 15 resurfaces to (0,0); arriving at
-// column 15 on that step also collects the treasure (+1), which the wrap
-// hides, so success is recovered by re-simulating the last dive step.
-//
-// pose = [r, c, 15, 15, 0, 0, 0, 0, 0]; done is never emitted.
 
 import { philoxDraw, STREAM_RESET } from '../philox';
 import { CTRL_LEN, OFF_CTRL, OFF_DONE, OFF_POSE, POSE_LEN } from '../record';
@@ -20,36 +5,27 @@ import type { EnvDecoder, EnvFrame, EnvGeometry, SimEvent } from '../types';
 import { NO_EVENTS } from '../events';
 
 export const LARGE_DEEPSEA_N = 16;
-/** the -0.01/N per-right-move cost */
 export const LARGE_DEEPSEA_RIGHT_COST = -0.000625;
-/** the last row the agent can occupy: reaching r = N-1 wraps to (0,0) */
 export const LARGE_DEEPSEA_LAST_ROW = LARGE_DEEPSEA_N - 2;
 
 export interface LargeDeepSeaState {
-  /** row 0..N-2 (row N-1 is never observed: it wraps in the same step) */
   r: number;
-  /** column 0..N-1 */
   c: number;
-  /** action & 1 of the step that produced this frame */
   lastA: number;
 }
 
 export interface LargeDeepSeaStatic {
   seed: number;
-  /** the 8 mask words as drawn (bit r*16+c, word = idx>>5) */
   words: Uint32Array;
-  /** N*N row-major expansion of the mask, 1 = action 1 moves right */
   mask: Uint8Array;
 }
 
-/** RESET-stream mask draw (`ldeepsea_reset`): blocks 0 and 1, 4 words each. */
 export function largeDeepSeaMaskWords(seed: number): Uint32Array {
   const a = philoxDraw(seed, STREAM_RESET, 0, 0);
   const b = philoxDraw(seed, STREAM_RESET, 1, 0);
   return Uint32Array.from([a[0], a[1], a[2], a[3], b[0], b[1], b[2], b[3]]);
 }
 
-/** N*N row-major expansion of the 8 mask words. */
 export function largeDeepSeaMask(words: ArrayLike<number>): Uint8Array {
   const mask = new Uint8Array(LARGE_DEEPSEA_N * LARGE_DEEPSEA_N);
   for (let i = 0; i < mask.length; i++) {
@@ -58,12 +34,10 @@ export function largeDeepSeaMask(words: ArrayLike<number>): Uint8Array {
   return mask;
 }
 
-/** M[r][c] as the kernel reads it. */
 export function largeDeepSeaBit(st: LargeDeepSeaStatic, r: number, c: number): number {
   return st.mask[r * LARGE_DEEPSEA_N + c] ?? 0;
 }
 
-/** Pre-wrap column reached by `action` from (r, c) — `nc` in `gw_ldeep_step`. */
 export function largeDeepSeaNextCol(
   st: LargeDeepSeaStatic,
   r: number,

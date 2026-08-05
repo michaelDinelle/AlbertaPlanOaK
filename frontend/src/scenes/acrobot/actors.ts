@@ -1,27 +1,3 @@
-// The Willow Swing — the trapeze and everything that hangs off it.
-//
-// ACCURACY: the FK *is* the scene graph. The chain is
-//
-//   pivotRoot (env anchor)            world === geometry.classic.anchors.pivot
-//     └ link1Node   rotation.z = th1
-//         └ elbowRoot   position (0, −L1, 0)     world === (sin th1, −cos th1)
-//             └ link2Node   rotation.z = th2
-//                 └ tipRoot   position (0, −L2, 0)  world === elbow + (sin(th1+th2), …)
-//
-// because R_z(φ) · (0, −1, 0) = (sin φ, −cos φ, 0) — which is exactly the decoder's
-// `acrobotPoints`. The three roots therefore carry POSITION ONLY (canon lesson 1): every
-// skin — vine, knot, lantern, torque curl — is a CHILD of an exact bone, so deleting all
-// of it would leave a correct (if invisible) acrobot. `th2` really is applied in link 1's
-// frame, which is the joint semantics the env integrates, not an approximation of it.
-//
-// THE ONE PIECE OF HISTORY IN THIS SCENE is the tip ribbon (`pushTrail`). STYLE.md's
-// canon lesson 2 wants state visuals to be pure functions of state, and every other
-// visual here is: the lantern, the glint, the torque curl and the flame all read the
-// frame and nothing else. A motion trail cannot be — the acrobot's tip path is not
-// recoverable from one state the way MountainCar's is from the terrain curve. So it is a
-// PREALLOCATED RING BUFFER of (x, y, playbackTime), it is cleared on every `scrubbed`
-// frame and every `teleport`, and its samples are stamped with `ctx.time()` so a paused
-// playback freezes the ribbon exactly where it is instead of draining it.
 
 import {
   emissiveMaterial,
@@ -45,9 +21,6 @@ import {
   type ColoredPart,
 } from './world';
 
-// ---------------------------------------------------------------------------
-// dimensions (world units — each link is exactly 1.0, the env's own link length)
-// ---------------------------------------------------------------------------
 
 const VINE_R1 = 0.055;
 const VINE_R2 = 0.042;
@@ -57,45 +30,26 @@ const LANTERN_R = 0.125;
 const LANTERN_H = 0.225;
 const LANTERN_BASE_HDR = 1.06;
 const CURL_R = 0.22;
-/** the curl sweeps ±CURL_SWEEP about the elbow; its head is at the CCW end */
 const CURL_SWEEP = 0.92;
 
-/** ring capacity: at the 22 ms sampling below this holds ~1.4 s, comfortably more
- *  than the 0.95 s window `TRAIL_SPAN` ever displays */
 const TRAIL_SAMPLES = 64;
-/** playback seconds between ribbon samples (below this the head sample is updated) */
 const TRAIL_SAMPLE_DT = 0.022;
-/** a sample older than this is gone — the ribbon's length is measured in TIME, not
- *  in frames, so it looks the same at 30 fps and at 120 */
 export const TRAIL_SPAN = 0.95;
 const TRAIL_MAX_HALF_W = 0.046;
 
 export interface ArmHandle {
-  /** add this ONE group to the scene */
   group: THREE.Group;
-  /** probe: world position === the env's `pivot` anchor, always */
   pivotRoot: THREE.Object3D;
-  /** probe: world position === pivot + (sin th1, −cos th1) · L1 */
   elbowRoot: THREE.Object3D;
-  /** probe: world position === elbow + (sin(th1+th2), −cos(th1+th2)) · L2 */
   tipRoot: THREE.Object3D;
-  /** the torque curl's head — its side of the elbow IS the sign of the torque */
   torqueHead: THREE.Object3D;
-  /** world position of the free end, refreshed by setState (preallocated) */
   readonly tipWorld: THREE.Vector3;
-  /** world position of the lantern flame, refreshed by setState (preallocated) */
   readonly lanternWorld: THREE.Vector3;
-  /** the whole visual state, from the (guarded) frame angles and nothing else */
   setState(th1: number, th2: number, torque: number, tipSpeed: number): void;
-  /** ctx.time() — flame flicker and curl shimmer */
   setTime(t: number): void;
-  /** 1 = the idle lantern, >1 = a success flare */
   setLanternGain(gain: number): void;
-  /** append the current tip to the ribbon at playback time `t` */
   pushTrail(t: number): void;
-  /** rebuild the ribbon for playback time `t` (call every frame) */
   refreshTrail(t: number): void;
-  /** scrub / teleport: nothing may survive a discontinuity */
   clearTrail(): void;
   setPixelRatio(dpr: number): void;
   dispose(): void;
@@ -107,7 +61,6 @@ export interface ArmOptions {
   accent: THREE.ColorRepresentation;
   gold: THREE.ColorRepresentation;
   seed: number;
-  /** the env's own pivot anchor — sim-core truth, never a scene constant */
   pivot: readonly [number, number, number];
 }
 
@@ -117,13 +70,11 @@ export function buildArm(opts: ArmOptions): ArmHandle {
   const group = new THREE.Group();
   group.name = 'trapezeRig';
 
-  // the arm is the hero: it reads as a dark silhouette against the bright dawn pond
   const vineDark = blendTokens(palette.hemiGround, TOKEN_BLACK, 0.45);
   const vineLit = blendTokens(palette.hemiGround, palette.groundB, 0.3);
   const leaf = blendTokens(palette.groundB, palette.sun, 0.3);
   const brass = blendTokens(palette.sun, palette.hemiGround, 0.4);
 
-  // ---- the exact chain ----
   const pivotRoot = new THREE.Object3D();
   pivotRoot.name = 'pivotRoot';
   pivotRoot.position.set(pivot[0], pivot[1], pivot[2]);
@@ -147,7 +98,6 @@ export function buildArm(opts: ArmOptions): ArmHandle {
   tipRoot.position.set(0, -AB_L2, 0);
   link2Node.add(tipRoot);
 
-  // ---- the two vines ----
   const vineMaterial: OakMaterial = oakMaterial({
     vertexColors: true,
     flatShading: true,
@@ -173,7 +123,6 @@ export function buildArm(opts: ArmOptions): ArmHandle {
   link2.castShadow = shadows;
   link2Node.add(link2);
 
-  // ---- the elbow knot: a child of the EXACT elbow bone, no offset of its own ----
   const knotParts: ColoredPart[] = [];
   {
     const ball = new THREE.IcosahedronGeometry(ELBOW_R, 1);
@@ -192,12 +141,6 @@ export function buildArm(opts: ArmOptions): ArmHandle {
   knot.castShadow = shadows;
   elbowRoot.add(knot);
 
-  // ---- the torque curl: sign-correct by construction ----
-  // Local +x is the CCW side. Increasing th2 moves the free end toward +x when the arm
-  // hangs (d/dth2 of the tip is (cos(th1+th2), sin(th1+th2)) = (1, 0) at th1 = th2 = 0),
-  // and +1 torque is what increases th2 — so the head sits at +x for +1 and the whole
-  // node is MIRRORED in x for −1, which reverses the arc's orientation as well as its
-  // side. Nothing else in the scene encodes the sign.
   const curl = new THREE.Object3D();
   curl.name = 'torqueCurl';
   curl.visible = false;
@@ -222,7 +165,6 @@ export function buildArm(opts: ArmOptions): ArmHandle {
   torqueHead.position.set(Math.cos(CURL_SWEEP) * CURL_R, Math.sin(CURL_SWEEP) * CURL_R, 0);
   curl.add(torqueHead);
 
-  // ---- the lantern: a child of the EXACT tip bone ----
   const lantern = new THREE.Object3D();
   lantern.name = 'lantern';
   lantern.position.set(0, -LANTERN_DROP, 0);
@@ -275,13 +217,8 @@ export function buildArm(opts: ArmOptions): ArmHandle {
   core.name = 'lanternCore';
   lantern.add(core);
 
-  // ---- the tip ribbon (the one history buffer — see the file header) ----
   const trailX = new Float32Array(TRAIL_SAMPLES);
   const trailY = new Float32Array(TRAIL_SAMPLES);
-  // f64 ON PURPOSE. `ctx.time()` is a double and a sample's age is `t − trailT[i]`; an
-  // f32 round-trip of the newest stamp lands ABOVE the double it came from, so the head
-  // sample reads as having a negative age and the whole ribbon disappears every other
-  // frame. (It did. This comment is the scar.)
   const trailT = new Float64Array(TRAIL_SAMPLES);
   const liveX = new Float32Array(TRAIL_SAMPLES);
   const liveY = new Float32Array(TRAIL_SAMPLES);
@@ -328,7 +265,6 @@ export function buildArm(opts: ArmOptions): ArmHandle {
   ribbon.visible = false;
   group.add(ribbon);
 
-  // ---- preallocated scratch ----
   const points = new Float64Array(EXACT_POINT_FLOATS);
   const tipWorld = new THREE.Vector3();
   const lanternWorld = new THREE.Vector3();
@@ -351,13 +287,11 @@ export function buildArm(opts: ArmOptions): ArmHandle {
     lanternWorld,
 
     setState(th1, th2, torque, tipSpeed) {
-      // THE state application: two rotations, nothing else moves.
       link1Node.rotation.z = th1;
       link2Node.rotation.z = th2;
 
       acrobotPointsExact(th1, th2, points);
       tipWorld.set(pivot[0] + (points[2] ?? 0), pivot[1] + (points[3] ?? 0), pivot[2]);
-      // the lantern hangs LANTERN_DROP further along link 2's own axis
       const sx = Math.sin(th1 + th2);
       const cy = -Math.cos(th1 + th2);
       lanternWorld.set(
@@ -366,7 +300,6 @@ export function buildArm(opts: ArmOptions): ArmHandle {
         pivot[2],
       );
 
-      // the torque curl — sign only, never magnitude beyond {−1, 0, +1}
       const t = torque > 0 ? 1 : torque < 0 ? -1 : 0;
       curl.visible = t !== 0;
       if (t !== 0) {
@@ -374,13 +307,11 @@ export function buildArm(opts: ArmOptions): ArmHandle {
         curlMaterial.opacity = 0.2 + 0.14 * flicker;
       }
 
-      // a fast tip stretches the flame and brightens the ribbon
       speed01 = clampRange(tipSpeed / 8, 0, 1);
       paper.scale.set(1, 1 + speed01 * 0.06, 1);
     },
 
     setTime(t) {
-      // paper lanterns breathe; the curl shimmers a little faster
       flicker = 1 + 0.09 * Math.sin(t * 3.1) + 0.05 * Math.sin(t * 7.7 + 1.3);
       applyLantern();
     },
@@ -397,10 +328,8 @@ export function buildArm(opts: ArmOptions): ArmHandle {
         const head = trailHead;
         const dt = t - (trailT[head] ?? 0);
         if (dt < 0) {
-          // playback went backwards (a loop or a scrub the host did not flag): restart
           trailCount = 0;
         } else if (dt < TRAIL_SAMPLE_DT) {
-          // below the sampling interval the ribbon's leading edge just follows the tip
           trailX[head] = x;
           trailY[head] = y;
           trailT[head] = t;
@@ -415,7 +344,6 @@ export function buildArm(opts: ArmOptions): ArmHandle {
     },
 
     refreshTrail(t) {
-      // pass 1: collect the live samples, newest first, into the preallocated scratch
       let live = 0;
       for (let k = 0; k < trailCount; k++) {
         const i = (trailHead - k + TRAIL_SAMPLES * 2) % TRAIL_SAMPLES;
@@ -431,7 +359,6 @@ export function buildArm(opts: ArmOptions): ArmHandle {
         ribbonGeometry.setDrawRange(0, 0);
         return;
       }
-      // pass 2: a two-sided ribbon whose normal at every sample comes from its NEIGHBOURS
       for (let k = 0; k < live; k++) {
         const ax = liveX[Math.max(0, k - 1)] ?? 0;
         const ay = liveY[Math.max(0, k - 1)] ?? 0;
@@ -481,7 +408,6 @@ export function buildArm(opts: ArmOptions): ArmHandle {
     },
 
     setPixelRatio() {
-      /* nothing here is a point sprite */
     },
 
     dispose() {
@@ -504,15 +430,7 @@ export function buildArm(opts: ArmOptions): ArmHandle {
   };
 }
 
-// ---------------------------------------------------------------------------
-// geometry
-// ---------------------------------------------------------------------------
 
-/**
- * One link of the trapeze: a woven vine running from the local origin DOWN to
- * (0, −length, 0) — the exact bone — with knots and a couple of leaf nubs for
- * silhouette. Every part is baked into one geometry so a link is one draw call.
- */
 export function makeVineGeometry(
   length: number,
   radius: number,
@@ -532,7 +450,6 @@ export function makeVineGeometry(
     seg.translate(bow * (i % 2 === 0 ? 1 : -1) * 0.5, (y0 + y1) * 0.5, 0);
     parts.push({ geometry: seg, color: i % 2 === 0 ? dark : lit });
   }
-  // binding knots
   for (let i = 1; i < SEGS; i += 2) {
     const y = -(length * i) / SEGS;
     const knot = new THREE.TorusGeometry(radius * 1.15, radius * 0.34, 4, 8);
@@ -540,7 +457,6 @@ export function makeVineGeometry(
     knot.translate(0, y, 0);
     parts.push({ geometry: knot, color: lit });
   }
-  // two leaf nubs, deterministic from the seed
   for (let i = 0; i < 2; i++) {
     const y = -length * (0.3 + rng() * 0.45);
     const a = rng() * Math.PI * 2;
@@ -553,11 +469,6 @@ export function makeVineGeometry(
   return mergeColoredParts(parts, 'trapezeVine');
 }
 
-/**
- * The torque curl: a tapered arc in the local x-y plane sweeping CCW from −`sweep` to
- * +`sweep`, with an arrowhead at the +end. Mirroring the node in x turns it into the
- * matching CW curl on the other side of the joint.
- */
 export function makeCurlGeometry(radius: number, sweep: number): THREE.BufferGeometry {
   const STEPS = 14;
   const tris: number[] = [];
@@ -593,7 +504,6 @@ export function makeCurlGeometry(radius: number, sweep: number): THREE.BufferGeo
     prevOutX = ox;
     prevOutY = oy;
   }
-  // the arrowhead, tangential at the CCW end
   {
     const a = sweep;
     const cx = Math.cos(a);

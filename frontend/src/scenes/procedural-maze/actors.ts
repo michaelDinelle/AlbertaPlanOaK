@@ -1,28 +1,3 @@
-// The Overgrown Ruins — the sunbeam atrium (the goal).
-//
-// ACCURACY: `root` is the probe object. Its world position is EXACTLY
-// `cellToWorld(gx, gy)` with y = 0 and nothing else — no hover, no lean, no easing. The
-// beam, the pool of light on the flagstone and the four broken column stubs all hang off
-// `decor`, a child that carries the grow-in scale. Delete every decoration and what
-// remains is a correctly-placed empty node on the live goal cell.
-//
-// THE BEAM IS THIS SCENE'S ONE BESPOKE SHADER (STYLE.md allows exactly one). It is a
-// hollow cone drawn additively, and the trick that makes a shell read as a volume is
-// `abs(dot(normal, viewDir))`: the shell is brightest where it faces the camera — through
-// the middle of the beam — and fades to nothing at its own silhouette, which is the
-// opposite of a fresnel rim and the reason it does not look like a paper cone. Its axis
-// is the SCENE's sun direction, shared with the sky dome and the key light, so the beam,
-// the sun disc and the shadows can never disagree about where the sun is.
-//
-// HONESTY: this marks the goal cell and only the goal cell. The maze is a perfect maze
-// (every free cell reachable), but the route is the agent's problem, not the art's —
-// so there is no trail, no arrow, no glow along the way, and nothing here ever reads
-// `carvedPath`.
-//
-// IDEMPOTENCE: `setState(grow)` and `setTime(t)` are pure. Nothing integrates, remembers
-// a position or accumulates, so calling them twice with the same arguments leaves the
-// same world, and a scrub that snaps grow to 1 lands exactly on the frame a long-settled
-// atrium would show.
 
 import { emissiveMaterial, oakMaterial, oakUniforms, setEmissiveIntensity } from '@kit/materials';
 import type { EmissiveMaterial, OakMaterial } from '@kit/materials';
@@ -32,69 +7,34 @@ import type { QualityTier } from '@kit/types';
 import * as THREE from 'three';
 import { clamp01, mergeColoredParts, type ColoredPart, type RuinSkin } from './world';
 
-/**
- * How far up the beam reaches along the sun direction. At 5.6 it leaned 2.7 units clear
- * of the ruin and ran out of the top of the composed frame, which reads as a light leak
- * rather than as a column of air; a shaft has to END somewhere you can see.
- */
 export const BEAM_LENGTH = 4.4;
-/**
- * Where it lands, and how much it spreads. A sunbeam through a hole in a roof is very
- * nearly PARALLEL — the sun is half a degree wide. The first pass opened to 1.12 at the
- * top and the result read as a theatre spotlight aimed at the floor, which is a completely
- * different (and much cheaper) idea than daylight finding its way in.
- */
 export const BEAM_BASE_RADIUS = 0.4;
 export const BEAM_TOP_RADIUS = 0.62;
-/**
- * The beam's gain. It sits DELIBERATELY under the 0.85 bloom threshold: at 1.22 (the first
- * pass) an additive cone five units tall, stacked on its own pool and halo, bloomed into a
- * white column that ate four cells of maze and cropped out of the frame. A shaft of
- * sunlight is bright AIR. The only thing here allowed over the threshold is the small hot
- * pool where it actually lands.
- */
 export const BEAM_HDR = 0.86;
-/** the warm pool where it lands — the one bloom-feeder of the atrium */
 export const POOL_HDR = 0.62;
-/**
- * The wide soft halo the pool sits inside — a suggestion of light, never a second lamp.
- * It is declared at the value the halo actually RENDERS at: `applyIntensity()` re-derives
- * every emissive from its constant on the first frame, so a constant that disagreed with
- * that line (this one read 0.14 while the halo drew at 0.34) was documentation of a value
- * nothing ever showed.
- */
 export const HALO_HDR = 0.34;
-/** local height the scene lifts its point light to */
 const LIGHT_HEIGHT = 0.55;
 
 export interface SunShaftOptions {
   tier: QualityTier;
   palette: Palette;
   skin: RuinSkin;
-  /** unit vector pointing TOWARD the sun — the world's, never a second opinion */
   sunDir: readonly [number, number, number];
   name?: string;
 }
 
 export interface SunShaftHandle {
-  /** add this ONE group to the scene */
   group: THREE.Group;
-  /** the probe object: world position === cellToWorld(gx, gy), y = 0, always */
   root: THREE.Object3D;
-  /** local height of the light source the scene should put its point light at */
   readonly lightHeight: number;
-  /** the whole visual state: how far the atrium has grown in since it moved */
   setState(grow01: number): void;
-  /** a bright kindling beat when the sun finds a new opening */
   flare(strength?: number): void;
-  /** ctx.time() — the dust banding and the slow breath */
   setTime(t: number): void;
-  /** flare decay (dt is wall seconds, time the playback clock) */
   update(dt: number, time: number): void;
   dispose(): void;
 }
 
-const BEAM_VERT = /* glsl */ `
+const BEAM_VERT =  `
 #include <common>
 varying vec3 vBeamNormal;
 varying vec3 vBeamView;
@@ -109,7 +49,7 @@ void main() {
 }
 `;
 
-const BEAM_FRAG = /* glsl */ `
+const BEAM_FRAG =  `
 #include <common>
 uniform vec3 uColor;
 uniform float uIntensity;
@@ -145,17 +85,14 @@ export function buildSunShaft(opts: SunShaftOptions): SunShaftHandle {
   const group = new THREE.Group();
   group.name = opts.name ?? 'sunShaft';
 
-  // ---- the probe root: position only, forever ----
   const root = new THREE.Object3D();
   root.name = 'sunShaftRoot';
   group.add(root);
 
-  // ---- everything decorative rides the grow-in scale ----
   const decor = new THREE.Group();
   decor.name = 'sunShaftDecor';
   root.add(decor);
 
-  // ---- the beam ----
   const radial = Math.max(8, Math.round(22 * detail));
   const beamGeometry = new THREE.CylinderGeometry(
     BEAM_TOP_RADIUS,
@@ -188,19 +125,12 @@ export function buildSunShaft(opts: SunShaftOptions): SunShaftHandle {
   const beam = new THREE.Mesh(beamGeometry, beamMaterial);
   beam.name = 'sunShaftBeam';
   beam.frustumCulled = false;
-  // point the cone's +y axis at the sun: the beam comes FROM the sky, along the same
-  // vector the key light and the sun disc use
   const axis = new THREE.Vector3(sunDir[0], sunDir[1], sunDir[2]).normalize();
   beam.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), axis);
   decor.add(beam);
 
-  // ---- the warm pool on the flagstone ----
   const sprite = radialSprite(64, 2.1);
   sprite.name = 'sunShaftPoolSprite';
-  // ONE CELL OF LIGHT, and no more: the pool is where the beam LANDS, and a pool that
-  // spilled over its neighbours would be claiming ground the goal does not occupy. The
-  // quad is 1.15 so the sprite's own falloff — (1 − r)^2.1, exactly 0 at the quad's
-  // inscribed circle — has somewhere to land: at the cell edge it is already 0.013.
   const poolGeometry = new THREE.PlaneGeometry(1.15, 1.15);
   poolGeometry.rotateX(-Math.PI / 2);
   poolGeometry.name = 'sunShaftPool';
@@ -235,7 +165,6 @@ export function buildSunShaft(opts: SunShaftOptions): SunShaftHandle {
   halo.renderOrder = 1;
   decor.add(halo);
 
-  // ---- the atrium: four broken column stubs around the opening ----
   const stubGeometry = atriumGeometry(skin, tier);
   const stubMaterial: OakMaterial = oakMaterial({
     vertexColors: true,
@@ -274,8 +203,6 @@ export function buildSunShaft(opts: SunShaftOptions): SunShaftHandle {
 
     setState(grow01) {
       grow = clamp01(grow01);
-      // growth is a SCALE on the decoration node — the root never moves, so an atrium
-      // that is 3% grown is still exactly on its cell
       decor.scale.setScalar(grow);
       applyIntensity();
     },
@@ -287,7 +214,6 @@ export function buildSunShaft(opts: SunShaftOptions): SunShaftHandle {
 
     setTime(t) {
       (beamMaterial.uniforms.uTime as { value: number }).value = t;
-      // the beam breathes as the air moves through it — pure ctx.time()
       breath = 1 + 0.09 * Math.sin(t * 0.73);
       applyIntensity();
       oakUniforms(stubMaterial)?.setTime(t);
@@ -316,13 +242,6 @@ export function buildSunShaft(opts: SunShaftOptions): SunShaftHandle {
   };
 }
 
-/**
- * The atrium floor: four broken column stubs at the corners of the cell plus a worn
- * threshold ring. The widest thing here is the tallest stub's sheared top corner at 0.455
- * from the cell centre (0.33 offset + 0.105 radius, leaned 0.08 rad); the foundation face
- * of the block next door stands at 0.52, so an atrium that respawns hard against a wall
- * still never pushes into the masonry.
- */
 function atriumGeometry(skin: RuinSkin, tier: QualityTier): THREE.BufferGeometry {
   const detail = tier === 'thumb' ? 0.45 : tier === 'medium' ? 0.7 : 1;
   const radial = Math.max(5, Math.round(10 * detail));
@@ -338,7 +257,6 @@ function atriumGeometry(skin: RuinSkin, tier: QualityTier): THREE.BufferGeometry
     const c = corners[i] as readonly [number, number, number];
     const stub = new THREE.CylinderGeometry(0.085, 0.105, c[2], radial, 1);
     stub.translate(0, c[2] * 0.5, 0);
-    // each stub sheared a different way, so four of them never read as a table
     stub.rotateZ((i % 2 === 0 ? 1 : -1) * 0.08);
     stub.translate(c[0], 0.03, c[1]);
     parts.push({ geometry: stub, color: i % 2 === 0 ? skin.stoneLight : skin.stoneDark });

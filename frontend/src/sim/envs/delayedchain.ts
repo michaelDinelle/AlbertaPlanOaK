@@ -1,27 +1,13 @@
-// DelayedChain-cont-v0 decoder (bare corridor, L = 32).
-//
-// Oracles (ported, never guessed):
-//   Sources/Gridworld.metal      gw_dchain_step L867
-//   tools/gridworld_ref.py       dchain_step L745
-//   Sources/OakKernel.metal      pose packing L2810-2822, init L2320-2325
-//
-// The cleanest long credit chain: action 1 walks pos+1, action 0 walks pos-1
-// (clamped at 0), and the ONLY reward is +1 for reaching pos 31, which sets
-// done=1 and wraps to pos 0. pos 31 is therefore never observed.
-//
-// pose = [pos, 31, lastA, 0, 0, 0, 0, 0, 0].
 
 import { CTRL_LEN, OFF_CTRL, OFF_DONE, OFF_POSE, POSE_LEN } from '../record';
 import type { EnvDecoder, EnvFrame, EnvGeometry, SimEvent } from '../types';
 import { NO_EVENTS } from '../events';
 
 export const DELAYEDCHAIN_L = 32;
-/** the paying cell — reached and immediately wrapped away from */
 export const DELAYEDCHAIN_END = DELAYEDCHAIN_L - 1;
 
 export interface DelayedChainState {
   pos: number;
-  /** action & 1 of the step that produced this frame */
   lastA: number;
   len: number;
 }

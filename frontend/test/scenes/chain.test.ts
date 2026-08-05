@@ -1,13 +1,4 @@
 /// <reference types="bun" />
-// Sixteen Stones (Chain-cont-v0) — the accuracy + lifecycle self-check.
-//
-// This mirrors four-rooms.test.ts's shape and adds what THIS env has to prove, all of which
-// comes down to one asymmetry: the reward is paid at stone 15 and the pose has already
-// wrapped to stone 0 by the time anyone can see it. So the tests lock, separately:
-//   * the wisp is HARD-SNAPPED to stone 0 on the wrap frame (never eased across the ford),
-//   * the celebration nonetheless blooms at STONE 15, under the tree,
-//   * `done` never sighs here, because `done` IS the +1,
-//   * and the petal ferry is decoration that exists only inside its own event window.
 
 import { describe, expect, test } from 'bun:test';
 import * as THREE from 'three';
@@ -64,7 +55,7 @@ import {
   type StubSceneContext,
 } from './aligned';
 
-const SEED = 64; // the demo run's first Chain lane
+const SEED = 64;
 
 function geometryOf(): EnvGeometry {
   return chainDecoder.geometry(chainDecoder.initStatic(SEED), SEED);
@@ -102,7 +93,6 @@ function capColor(module: SceneModule, index: number): THREE.Color {
   return c;
 }
 
-/** The blossom tree's heartwood is the one observable that reads the bloom clock directly. */
 function heartScale(module: SceneModule): number {
   return module.scene.getObjectByName('blossomTreeHeart')?.scale.x ?? -1;
 }
@@ -114,12 +104,6 @@ export interface NdcBounds {
   maxY: number;
 }
 
-/**
- * The screen-space BOX a set of meshes occupies — instances expanded by their own bounding
- * sphere, so a blossom cluster counts as the puff it is and not as its anchor point. This is
- * the instrument the framing tests were missing: the old one projected a single world point
- * (the crown's centre) and could not see the bough that was hanging off the right edge.
- */
 function ndcBounds(module: SceneModule, camera: THREE.Camera, names: readonly string[]): NdcBounds {
   const out: NdcBounds = { minX: Infinity, maxX: -Infinity, minY: Infinity, maxY: -Infinity };
   const v = new THREE.Vector3();
@@ -148,8 +132,6 @@ function ndcBounds(module: SceneModule, camera: THREE.Camera, names: readonly st
         scale.setFromMatrixScale(m4);
         m4.premultiply(object.matrixWorld);
         const r = radius * Math.max(scale.x, scale.y, scale.z);
-        // the instance's own centre, grown by its (scaled) bounding sphere: an axis-aligned
-        // screen box around the whole puff, which is what a silhouette actually is
         for (const dx of [-r, r]) for (const dy of [-r, r]) for (const dz of [-r, r]) take(dx, dy, dz, m4);
       }
     } else {
@@ -167,7 +149,6 @@ function instancedNamed(module: SceneModule, name: string): THREE.InstancedMesh 
   return o;
 }
 
-/** accumulated world y of an object's parents (the cell field rides a group offset) */
 function worldY(object: THREE.Object3D): number {
   let y = 0;
   let node: THREE.Object3D | null = object;
@@ -178,16 +159,6 @@ function worldY(object: THREE.Object3D): number {
   return y;
 }
 
-/**
- * THE CONTAINMENT MEASUREMENT (review fix). How far INSIDE its stone cap the submerged
- * plinth's worst corner sits, in world units, over every stone of the ford and every depth
- * at which the two overlap. Positive = hidden by the stone; negative = a dark box corner
- * poking out through the silhouette, which is exactly what shipped before.
- *
- * This reads the REAL instance matrices — the cap's random yaw and its per-instance xz
- * scale, the slab's identity yaw — because those three facts together are what the old
- * one-line "half-diagonal < 0.37" assertion silently assumed away.
- */
 function plinthClearance(module: SceneModule, tier: QualityTier): number {
   const caps = instancedNamed(module, 'chainStoneCaps');
   const plinths = instancedNamed(module, 'oakCellFloorMesh');
@@ -214,8 +185,6 @@ function plinthClearance(module: SceneModule, tier: QualityTier): number {
     plinths.getMatrixAt(i, m4);
     slabPos.setFromMatrixPosition(m4);
 
-    // sample every depth at which the cap still covers the slab: the cap's own foot is
-    // -CAP_HEIGHT * its y scale, and below that the submerged shaft is meant to show.
     const capFoot = capPos.y - CAP_HEIGHT * capScale.y;
     for (let s = 0; s <= 16; s++) {
       const y = plinthTop + ((capFoot - plinthTop) * s) / 16;
@@ -228,14 +197,12 @@ function plinthClearance(module: SceneModule, tier: QualityTier): number {
             ? CAP_R_TOP + (CAP_R_WAIST - CAP_R_TOP) * (localY / waist)
             : CAP_R_WAIST + (CAP_R_FOOT - CAP_R_WAIST) * ((localY - waist) / (-CAP_HEIGHT - waist));
       const apothem = r * capScale.x * Math.cos(Math.PI / sides);
-      // the slab's four corners, in the cap's own (unyawed) frame
       for (const sx of [-1, 1]) {
         for (const sz of [-1, 1]) {
           const dx = slabPos.x + sx * half - capPos.x;
           const dz = slabPos.z + sz * half - capPos.z;
           const lx = dx * Math.cos(yaw) - dz * Math.sin(yaw);
           const lz = dx * Math.sin(yaw) + dz * Math.cos(yaw);
-          // distance from the polygon's tightest edge: max over edge normals
           let outside = -Infinity;
           for (let k = 0; k < sides; k++) {
             const a = ((k + 0.5) / sides) * Math.PI * 2;
@@ -250,7 +217,6 @@ function plinthClearance(module: SceneModule, tier: QualityTier): number {
   return clearance;
 }
 
-// ---------------------------------------------------------------------------
 
 describe('chain / manifest + fixtures', () => {
   test('manifest declares the frozen contract fields', () => {
@@ -268,7 +234,6 @@ describe('chain / manifest + fixtures', () => {
   test('the thumbFrame is a pose the record can actually contain', () => {
     const p = manifest.thumbFrame.pose;
     expect(p[0]).toBeGreaterThanOrEqual(0);
-    // pos 15 is paid and wrapped in the same step, so it is never observed
     expect(p[0]).toBeLessThan(CHAIN_END);
     expect(p[1]).toBe(CHAIN_END);
     expect(manifest.thumbFrame.derived).toEqual(chainDerived(p[0] ?? 0));
@@ -326,7 +291,6 @@ describe('chain / the corridor is read, never re-derived', () => {
     expect(readPos(withDerived, grid)).toBe(4);
     const poseOnly = { ...withDerived, derived: null };
     expect(readPos(poseOnly, grid)).toBe(9);
-    // and it clamps rather than indexing off the end of the ford
     const wild = { ...withDerived, derived: chainDerived(999) };
     expect(readPos(wild, grid)).toBe(CHAIN_L - 1);
     const negative = { ...withDerived, derived: chainDerived(-4) };
@@ -349,16 +313,11 @@ describe('chain / the creek and the stones', () => {
     }
     expect(top).toBe(0);
     expect(bottom).toBeCloseTo(-0.5, 10);
-    // and it stays inside its own cell, so sixteen stones never fuse into a causeway
     expect(maxRadius).toBeLessThan(CELL * 0.5);
     g.dispose();
   });
 
   test('the plinth is CONTAINED by its cap — the derivation', () => {
-    // The old test "proved" containment with `((CELL - 0.25*2)/2)*SQRT2 < 0.37` and shipped a
-    // ford where half the stones had box corners sticking out of them. Three things it missed,
-    // all of them now in the bound: 0.37 is the CIRCUMradius (the tightest presentation is the
-    // APOTHEM r·cos(π/n)), n falls to 5 at thumb, and every cap is xz-scaled down to 0.9.
     for (const [tier, sides] of [
       ['hero', 7],
       ['medium', 6],
@@ -367,16 +326,13 @@ describe('chain / the creek and the stones', () => {
       expect(`${tier}:${capSides(tier)}`).toBe(`${tier}:${sides}`);
       expect(PLINTH_HALF * Math.SQRT2).toBeLessThan(capApothem(sides, CAP_SCALE_MIN));
     }
-    // the apothem is genuinely tighter than the radius the old test used — that IS the bug
     expect(capApothem(5, CAP_SCALE_MIN)).toBeLessThan(CAP_R_TOP);
-    // and the slab still has real mass under the stone (a needle would be no plinth at all)
     expect(PLINTH_HALF * 2).toBeGreaterThan(0.3);
   });
 
   test('...and the measured ford agrees, at every tier, on every stone, at every depth', async () => {
     for (const tier of ['hero', 'medium', 'thumb'] as const) {
       const { module } = await live(tier);
-      // the derivation's premise: no cap is placed outside the declared xz scale range
       const caps = instancedNamed(module, 'chainStoneCaps');
       const m4 = new THREE.Matrix4();
       const scale = new THREE.Vector3();
@@ -385,9 +341,8 @@ describe('chain / the creek and the stones', () => {
         scale.setFromMatrixScale(m4);
         expect(scale.x).toBeGreaterThanOrEqual(CAP_SCALE_MIN - 1e-9);
         expect(scale.x).toBeLessThanOrEqual(CAP_SCALE_MAX + 1e-9);
-        expect(scale.z).toBeCloseTo(scale.x, 12); // a stone may not be squashed in one axis
+        expect(scale.z).toBeCloseTo(scale.x, 12);
       }
-      // and every slab corner is comfortably INSIDE the stone above it (2 cm of shading room)
       const clearance = plinthClearance(module, tier);
       expect(`${tier} clearance=${clearance > 0.02}`).toBe(`${tier} clearance=true`);
       expect(clearance).toBeGreaterThan(0.02);
@@ -396,20 +351,16 @@ describe('chain / the creek and the stones', () => {
   });
 
   test('the plinth hides under the crown, not above it', () => {
-    // it sinks by PLINTH_DROP so the two coplanar faces cannot z-fight, and that drop stays
-    // small enough that the slab is still swallowed by the cap and never breaks the waterline
     expect(PLINTH_DROP).toBeGreaterThan(0);
     expect(PLINTH_DROP).toBeLessThan(Math.abs(WATER_LEVEL));
   });
 
   test('the creek bed is a ford: submerged across the crossing, dry beyond both banks', () => {
     const h = makeCreekHeight(SEED);
-    // every stone stands in water
     const grid = resolveGrid(geometryOf());
     for (let i = 0; i < grid.w; i++) {
       expect(h(stoneX(i, grid), 0)).toBeLessThan(WATER_LEVEL - 0.2);
     }
-    // and both banks are genuinely dry well outside the ford
     for (const side of [-1, 1]) {
       const x = side * (CREEK_HALF + BANK_RISE + 1.5);
       for (let j = -4; j <= 4; j++) expect(h(x, j * 3)).toBeGreaterThan(WATER_LEVEL + 0.3);
@@ -420,7 +371,6 @@ describe('chain / the creek and the stones', () => {
     const skin = creekSkin(TOKENS.palettes.afternoon, TOKENS);
     const hexes = new Set([skin.stoneDry.getHex(), skin.stoneWet.getHex(), skin.stoneDeep.getHex(), skin.stoneGlow.getHex()]);
     expect(hexes.size).toBe(4);
-    // the afternoon albedo law: no ground/stone tone may sit in bloom territory
     for (const c of [skin.stoneDry, skin.stoneWet, skin.bed, skin.bank, skin.bankHigh]) {
       expect(Math.max(c.r, c.g, c.b)).toBeLessThan(0.78);
     }
@@ -440,7 +390,6 @@ describe('chain / the creek and the stones', () => {
 });
 
 describe('chain / the bank is ground, not the y = 0 plane', () => {
-  /** the exact height field the scene builds for a lane (same seed, same tier, same size) */
   function terrainFor(seed: number): { sample: (x: number, z: number) => number; world: ReturnType<typeof buildWorld> } {
     const geometry = chainDecoder.geometry(chainDecoder.initStatic(seed), seed);
     const scene = new THREE.Scene();
@@ -449,10 +398,6 @@ describe('chain / the bank is ground, not the y = 0 plane', () => {
   }
 
   test('the ford lantern is planted on the bank, dry, on every lane', async () => {
-    // It used to be planted at y = 0 with a typed offset, which — because the bank edge
-    // MEANDERs ±0.55 per lane — put it over open water in 11 of 14 sampled seeds (0.55 above
-    // the bed and 0.17 above the WATER at seed 64: a floating slab with a sliver of creek
-    // under its front edge). The art now walks out to the bank and sits on the terrain.
     for (const seed of [64, 65, 66, 70]) {
       const { sample, world } = terrainFor(seed);
       const geometry = chainDecoder.geometry(chainDecoder.initStatic(seed), seed);
@@ -466,9 +411,7 @@ describe('chain / the bank is ground, not the y = 0 plane', () => {
       bodyNode.updateWorldMatrix(true, false);
       const art = new THREE.Vector3().setFromMatrixPosition(bodyNode.matrixWorld);
 
-      // 1. dry land, not creek — the whole base plate clears the water
       expect(`seed${seed} dry`).toBe(`seed${seed} ${art.y >= WATER_LEVEL + LANTERN_DRY - 1e-9 ? 'dry' : `wet(${art.y.toFixed(3)})`}`);
-      // 2. nothing floats: no point of the footprint is UNDER the plate...
       let lowest = Infinity;
       for (let k = 0; k < 8; k++) {
         const a = (k / 8) * Math.PI * 2;
@@ -476,12 +419,9 @@ describe('chain / the bank is ground, not the y = 0 plane', () => {
         expect(g).toBeGreaterThanOrEqual(art.y - 1e-6);
         if (g < lowest) lowest = g;
       }
-      // ...and it does not hover either: it rests on the lowest ground it covers
       expect(lowest - art.y).toBeLessThan(1e-6);
-      // 3. still the upstream bookend: off the crossing line, short of the first stone
       expect(art.z).toBeCloseTo(LANTERN_Z, 10);
       expect(art.x).toBeLessThan(stoneX(0, grid));
-      // 4. and NONE of it moved the accuracy probe: the root is the derived cell, exactly
       const root = worldOf(module, 'ford-lantern');
       const truth: [number, number, number] = [0, 0, 0];
       cellToWorld(-1, 0, grid, truth);
@@ -495,16 +435,13 @@ describe('chain / the bank is ground, not the y = 0 plane', () => {
   });
 
   test('the lantern walks out only as far as the bank makes it, and never off the scan', () => {
-    // a flat dry world: it should not move at all
     const flat = groundedLanternOffset(() => 0.4, -8.5);
     expect(flat[0]).toBeCloseTo(-0.45, 10);
     expect(flat[1]).toBeCloseTo(0.4, 10);
-    // a world that is dry only far out: it walks, and stops the moment it finds bank
     const shore = (x: number): number => (x < -10 ? 0.5 : -0.8);
     const walked = groundedLanternOffset((x) => shore(x), -8.5);
     expect(walked[0]).toBeLessThan(-1.0);
     expect(walked[1]).toBeCloseTo(0.5, 10);
-    // a world with no bank at all: it still returns a real, finite, best-effort footing
     const drowned = groundedLanternOffset((x) => -0.9 - Math.abs(x + 9) * 0.01, -8.5);
     expect(Number.isFinite(drowned[0])).toBe(true);
     expect(Number.isFinite(drowned[1])).toBe(true);
@@ -537,10 +474,8 @@ describe('chain / the bank is ground, not the y = 0 plane', () => {
         }
       });
       expect(checked).toBeGreaterThan(0);
-      // planted ON the surface the terrain draws, not on the y = 0 plane
       beds.push(`${name}: rooted=${worst < 1e-6}`);
       if (name === 'shallowReeds') {
-        // and they are EMERGENT reeds: rooted in 0.7–1.1 of water, most still break it
         expect(emergent / checked).toBeGreaterThan(0.4);
       }
     }
@@ -558,7 +493,6 @@ describe('chain / alignment', () => {
   test('every probe lands on ground truth at hero tier', async () => {
     const module = createScene();
     const report = await assertAligned(module, fixtures, { geometry: geometryOf(), seed: SEED, tier: 'hero' });
-    // these roots carry POSITION ONLY — they should be exact, not merely within 1e-3
     expect(report.worst.get('wisp') ?? 1).toBeLessThan(1e-9);
     expect(report.worst.get('wisp-anchor') ?? 1).toBeLessThan(1e-9);
     expect(report.worst.get('blossom-tree') ?? 1).toBeLessThan(1e-9);
@@ -588,7 +522,6 @@ describe('chain / alignment', () => {
       expect(w.x).toBeCloseTo(truth[0], 10);
       expect(w.y).toBeCloseTo(0, 10);
       expect(w.z).toBeCloseTo(truth[2], 10);
-      // the orb centre rides exactly wispHeight above the stone's crown
       expect(worldOf(module, 'wisp').y).toBeCloseTo(TOKENS.wispHeight, 10);
     }
     module.dispose();
@@ -610,7 +543,6 @@ describe('chain / alignment', () => {
     cellToWorld(-1, 0, grid, truth);
     expect(lantern.x).toBeCloseTo(truth[0], 10);
     expect(lantern.y).toBeCloseTo(0, 10);
-    // one cell short of stone 0, on the same line
     expect(lantern.x).toBeCloseTo(stoneX(0, grid) - CELL, 10);
     module.dispose();
   });
@@ -652,7 +584,6 @@ describe('chain / the hop is bounded, and the wrap is a cut', () => {
 
     ctx.setTime(20);
     module.update(toFrameUpdate(posFixture('walking', CHAIN_END - 1, 45), { scrubbed: false }));
-    // the real batch sim-core emits for a Chain `done` frame — and the pose is ALREADY 0
     ctx.setTime(20.125);
     module.update(
       toFrameUpdate(posFixture('paid', 0, 46), {
@@ -663,9 +594,8 @@ describe('chain / the hop is bounded, and the wrap is a cut', () => {
     const w = worldOf(module, 'wisp-anchor');
     cellToWorld(0, 0, grid, truth);
     expect(w.x).toBeCloseTo(truth[0], 10);
-    expect(w.y).toBeCloseTo(0, 10); // not mid-arc: a teleport has no arc
+    expect(w.y).toBeCloseTo(0, 10);
 
-    // and it stays there — no easing crosses a teleport
     ctx.setTime(20.19);
     module.update(toFrameUpdate(posFixture('paid', 0, 46), { scrubbed: false }));
     expect(worldOf(module, 'wisp-anchor').x).toBeCloseTo(truth[0], 10);
@@ -720,14 +650,11 @@ describe('chain / update contract', () => {
     expect(pool).not.toBeNull();
     if (!pool) return;
 
-    // standing on the last observed stone, one step from the reward, with no event
     ctx.setTime(1);
     module.update(toFrameUpdate(posFixture('almost', CHAIN_END - 1, 100), { scrubbed: false }));
     expect(pool.stats.bursts).toBe(0);
     expect(pool.stats.ripples).toBe(0);
 
-    // and even landing back on stone 0 without an event is silent (the pose alone is a lie
-    // about a wrap — plenty of frames sit at pos 0 without a reward)
     ctx.setTime(1.125);
     module.update(toFrameUpdate(posFixture('home', 0, 101), { scrubbed: false }));
     expect(pool.stats.bursts).toBe(0);
@@ -742,7 +669,6 @@ describe('chain / update contract', () => {
     expect(pool.stats.bursts).toBe(1);
     expect(pool.stats.ripples).toBe(1);
     expect(pool.pulse.bloom).toBeGreaterThan(0);
-    // `done` here IS the +1, so the failure grammar must never have fired
     expect(pool.pulse.sigh).toBe(0);
     module.dispose();
   });
@@ -763,15 +689,12 @@ describe('chain / update contract', () => {
     const flash = module.scene.getObjectByName('oakPoint2');
     expect(flash).toBeDefined();
     if (!flash) return;
-    // the celebration light is at the far end of the creek...
     expect(flash.position.x).toBeGreaterThan(stoneX(CHAIN_END, grid) - 0.01);
     expect(flash.position.z).toBeCloseTo(0, 10);
     expect(flash.position.y).toBeGreaterThan(1);
     expect((flash as THREE.PointLight).intensity).toBeGreaterThan(0);
-    // ...and nowhere near the stone the agent was snapped to
     expect(flash.position.x - stoneX(0, grid)).toBeGreaterThan(CHAIN_END - 1);
 
-    // the wisp itself is home, and the tree is in full flower
     expect(worldOf(module, 'wisp-anchor').x).toBeCloseTo(stoneX(0, grid), 10);
     expect(heartScale(module)).toBeCloseTo(0.86, 6);
     module.dispose();
@@ -787,7 +710,6 @@ describe('chain / update contract', () => {
 
     ctx.setTime(1);
     module.update(toFrameUpdate(posFixture('step', 5, 300), { scrubbed: false }));
-    // the stone the wisp just arrived on is warmer than it was
     expect(capColor(module, 5).getHex()).not.toBe(rest[5]);
 
     module.update(
@@ -803,7 +725,6 @@ describe('chain / update contract', () => {
     module.update(toFrameUpdate(fixtureNamed('midstream'), { scrubbed: true }));
     expect(pool.pulse.bloom).toBe(0);
     expect(pool.activeRipples).toBe(0);
-    // a bare tree, and sixteen cold stones — every one of them back to its resting tone
     expect(heartScale(module)).toBeCloseTo(0.42, 6);
     for (let i = 0; i < CHAIN_L; i++) {
       expect(`stone${i}=${capColor(module, i).getHex()}`).toBe(`stone${i}=${rest[i]}`);
@@ -817,7 +738,6 @@ describe('chain / update contract', () => {
     ctx.setTime(50);
     module.update(toFrameUpdate(posFixture('step', 9, 400), { scrubbed: false }));
     expect(capColor(module, 9).getHex()).not.toBe(rest);
-    // GLOW_SPAN is 2.2 s; well past it the stone is exactly its resting tone again
     ctx.setTime(53.5);
     module.update(toFrameUpdate(posFixture('step', 9, 400), { scrubbed: false }));
     expect(capColor(module, 9).getHex()).toBe(rest);
@@ -836,11 +756,8 @@ describe('chain / update contract', () => {
         expect(v).toBeLessThanOrEqual(1);
       }
     }
-    // the tree keeps a real memory between goals (~2.3 s at the recorded pace) and goes
-    // bare when the lane stops scoring
     expect(treeBloom(2.3)).toBeGreaterThan(0.3);
     expect(treeBloom(12)).toBeLessThan(0.01);
-    // and the ferry always lands before the next reward can arrive
     expect(FERRY_SECONDS).toBeLessThan(2.3);
   });
 });
@@ -893,7 +810,6 @@ describe('chain / lifecycle', () => {
   test('the composed frame holds the whole crown, not just its centre point', async () => {
     const { module } = await live();
     const grid = resolveGrid(geometryOf());
-    // a goal, so the blossoms are at full size — the widest the crown ever is
     module.update(toFrameUpdate(fixtureNamed('midstream')));
     module.update(
       toFrameUpdate(posFixture('paid', 0, 1), {
@@ -901,7 +817,6 @@ describe('chain / lifecycle', () => {
         events: [{ type: 'goal' }, { type: 'teleport' }, { type: 'done' }],
       }),
     );
-    // STYLE lesson 11: test hero framings at the REAL aspect
     module.resize({ width: 1600, height: 900, dpr: 1 });
     const cam = module.camera;
     cam.updateMatrixWorld(true);
@@ -914,26 +829,18 @@ describe('chain / lifecycle', () => {
       expect(Math.abs(v.y)).toBeLessThan(0.85);
     }
 
-    // THE FIX THIS TEST EXISTS FOR. The old version projected ONE point — the crown's centre
-    // (ndcX 0.76, comfortably inside) — while the bark reached 1.13 and three blossom clusters
-    // were off the right edge. A silhouette is a BOX, so measure the box.
     const crown = ndcBounds(module, cam, ['blossomTreeBark', 'blossomTreePetals']);
     expect(`crown ndcX max ${crown.maxX < 0.94}`).toBe('crown ndcX max true');
     expect(crown.maxX).toBeLessThan(0.94);
     expect(crown.minX).toBeGreaterThan(-0.94);
     expect(crown.maxY).toBeLessThan(0.94);
     expect(crown.minY).toBeGreaterThan(-0.94);
-    // the bough really does reach past the stone it grows from — this is what got clipped
     expect(crown.maxX).toBeGreaterThan(0.6);
 
-    // and the other bookend, box and all
     const lantern = ndcBounds(module, cam, ['fordLanternMesh']);
     expect(Math.max(Math.abs(lantern.minX), Math.abs(lantern.maxX))).toBeLessThan(0.96);
     expect(Math.max(Math.abs(lantern.minY), Math.abs(lantern.maxY))).toBeLessThan(0.96);
 
-    // A genuine LOW 3/4 over the water: pitch between 16° and 38°. Steeper than that and
-    // the ford flattens into a dotted line with no horizon in the frame (the first pass);
-    // shallower and the sixteen stones fuse into one bar at the waterline.
     expect(cam.position.y).toBeGreaterThan(4);
     expect(cam.position.y).toBeLessThan(14);
     const dir = new THREE.Vector3();
@@ -942,7 +849,6 @@ describe('chain / lifecycle', () => {
     expect(dir.y).toBeGreaterThan(-0.616);
     expect(cam.fov).toBeGreaterThanOrEqual(35);
     expect(cam.fov).toBeLessThanOrEqual(45);
-    // the crown really is above the stone the tree stands on, centre point included
     v.set(stoneX(CHAIN_END, grid), blossomTreeCrownHeight(), 0).project(cam);
     expect(Math.abs(v.x)).toBeLessThan(0.94);
     module.dispose();
@@ -953,8 +859,6 @@ describe('chain / lifecycle', () => {
     const grid = resolveGrid(geometryOf());
     module.update(toFrameUpdate(posFixture('thumb', manifest.thumbFrame.pose[0] ?? 12, 42)));
 
-    // 1:1 first — this is the crop the contract is written for, and the one the shipped rig
-    // failed: at distance 19.5 stone 0 projected to ndcX −1.045, off the frame entirely.
     for (const [w, h, limit] of [
       [900, 900, 0.94],
       [1600, 900, 0.94],
@@ -970,14 +874,10 @@ describe('chain / lifecycle', () => {
           `${w}x${h} stone${i} inside=true`,
         );
       }
-      // and the contract is the STONES, not their centres: the whole cap row, silhouette and
-      // all, has to be in the square. (At d = 25 the centres fitted while stone 0's cap sat
-      // on the frame edge at −0.965 — the same "measure the point, miss the box" trap.)
       const ford = ndcBounds(module, cam, ['chainStoneCaps']);
       expect(`${w}x${h} caps inside=${Math.max(Math.abs(ford.minX), Math.abs(ford.maxX)) < limit}`).toBe(
         `${w}x${h} caps inside=true`,
       );
-      // and the tree it leads to is whole in the wall view as well
       const crown = ndcBounds(module, cam, ['blossomTreeBark', 'blossomTreePetals']);
       expect(Math.max(Math.abs(crown.minX), Math.abs(crown.maxX))).toBeLessThan(limit);
       expect(Math.max(Math.abs(crown.minY), Math.abs(crown.maxY))).toBeLessThan(limit);
@@ -988,10 +888,6 @@ describe('chain / lifecycle', () => {
 
 describe('chain / the thumb wall-view cap', () => {
   test('the thumb frame fits STYLE.md\u2019s 40 draws / 50k triangles, overlay included', async () => {
-    // The wall view is the whole gallery on one page: every scene there is a thumb, and
-    // the cap is what keeps 16 of them at 60 fps. Measured with the ground-truth overlay
-    // ON, because that is the state review screenshots are taken in, and across every
-    // fixture, because the busiest legal state is the one that has to fit.
     const { module } = await live('thumb');
     module.setDebug(true);
     for (const f of fixtures) module.update(toFrameUpdate(f));

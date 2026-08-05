@@ -1,29 +1,3 @@
-// fleet.jsonl -> learning curves (the RL-paper chart).
-//
-// At every heartbeat the population's MEASURED reward rate over that window —
-// (rewardSum_i − rewardSum_{i−1}) / (step_i − step_{i−1}), per seed — is reduced to
-// an interquartile mean with a percentile-bootstrap 95% CI, plus the P10/P50/P90
-// spread. Three properties this module is built around:
-//
-//   * MEASURED, NOT BELIEVED. The source column is `rewardSum`, the reward the
-//     environment actually paid. `health.rewardRate` is the agent's own average-reward
-//     estimate ρ̄ — a learned parameter and a divergence diagnostic, not a result.
-//   * THE SAME IQM tools/fleet.py REPORTS. `iqm()` here is a transcription of
-//     fleet.py's: sort, drop ⌊n/4⌋ from each end, mean the rest. A dashboard that
-//     computed a different "IQM" than the promotion gate would be worse than none.
-//   * DETERMINISTIC. The bootstrap draws from a seeded PRNG keyed by heartbeat index,
-//     so one fleet.jsonl always yields one set of CI bounds — reloading the page must
-//     never move the error bars.
-//
-// Nothing here needs summary.json: legacy roots (fleet.jsonl only) answer in full.
-//
-// Caching mirrors server/fleetDerive.ts (LRU + disk keyed on fleet.jsonl mtime+size +
-// single-flight + a compute semaphore; in-flight runs bypass the disk cache because the
-// file is still growing). It is a deliberate copy rather than a shared helper: the two
-// modules are owned by different tracks right now, and duplicating ~90 lines of cache
-// plumbing is the cheaper of the two mistakes. One difference, and it matters at 16
-// envs: the single-flight key is the FILE, not the query, because ONE pass computes
-// every env slice — a 16-panel dashboard costs a single stream of a 175 MB file.
 
 import { readFileSync } from 'node:fs';
 import { readdir, unlink, writeFile } from 'node:fs/promises';
@@ -40,30 +14,22 @@ import { statOrNull, streamJsonl } from './jsonl';
 import { readTape, sampleWindows } from './metricsTape';
 import { ensureCacheDir } from './runIndex';
 
-/** bootstrap resamples per heartbeat — fleet.py reports at 10k; 2k is the interactive budget */
 export const CURVES_BOOTSTRAP = 2000;
-/** tape windows per curve — the bootstrap is O(windows x resamples x lanes) */
 const CURVES_TAPE_WINDOWS = 256;
-/** in-memory depth: one run's env set (16 envs + the pooled key) has to fit */
 const CURVES_LRU_MAX = 24;
-/** cache key of the un-filtered (all lanes) curve */
 const ALL_ENVS = '*';
 
 export interface CurvesQuery {
   policy: string;
-  /** restrict to lanes of one env (mixed-env runs); null = every lane */
   envId: string | null;
 }
 
-/** Parse + validate the query string. Same rules as the fleet endpoint's. */
 export function parseCurvesQuery(url: URL): { query: CurvesQuery } | { error: string } {
   const policy = url.searchParams.get('policy') ?? 'oak';
   if (!/^[A-Za-z0-9_-]{1,32}$/.test(policy)) return { error: 'bad policy' };
 
   const rawEnv = url.searchParams.get('envId');
   const envText = rawEnv === null ? '' : rawEnv.trim();
-  // Absent/empty means "all lanes"; present-but-unknown is a client bug worth
-  // surfacing, not a filter that silently matches nothing.
   if (envText.length > 0 && !isEnvId(envText)) return { error: `bad envId: ${envText}` };
   return { query: { policy, envId: envText.length > 0 ? envText : null } };
 }
@@ -72,12 +38,7 @@ export function emptyCurves(): CurvesResponse {
   return { steps: [], iqm: [], ciLo: [], ciHi: [], p10: [], p50: [], p90: [], seeds: 0 };
 }
 
-// ---------- statistics ----------
 
-/**
- * mulberry32. Chosen for being 4 lines, dependency-free and stable forever: the CI
- * bounds this module ships are only reproducible if the generator never drifts.
- */
 export function makeRng(seed: number): () => number {
   let a = seed >>> 0;
   return () => {
@@ -89,12 +50,6 @@ export function makeRng(seed: number): () => number {
   };
 }
 
-/**
- * numpy's default `np.percentile` interpolation (linear on the (q/100)·(n−1) index).
- * The factor order is numpy's, not the algebraically equivalent ((n−1)·q)/100 — they
- * differ in the last ulp, and this module's whole claim is that it reports the same
- * numbers as the Python that gates promotions.
- */
 export function percentileSorted(sorted: readonly number[], q: number): number {
   const n = sorted.length;
   if (n === 0) return Number.NaN;
@@ -107,7 +62,6 @@ export function percentileSorted(sorted: readonly number[], q: number): number {
   return lo === hi ? a : a + (b - a) * (pos - lo);
 }
 
-/** Interquartile mean of an ASCENDING array — tools/fleet.py `iqm()`, transcribed. */
 export function iqmSorted(sorted: readonly number[]): number {
   const n = sorted.length;
   if (n === 0) return Number.NaN;
@@ -128,15 +82,6 @@ export function iqm(values: readonly number[]): number {
   return iqmSorted([...values].sort((a, b) => a - b));
 }
 
-/**
- * Percentile-bootstrap 95% CI of the IQM, over an ASCENDING array.
- *
- * Resampling is done as COUNTS over the already-sorted values rather than as a fresh
- * array to sort: a resample's sorted order is just the sorted originals repeated by
- * their draw counts, so the trimmed mean is one linear walk. That turns an O(B·n·log n)
- * loop into O(B·n) — the difference between ~4 s and ~0.2 s at n=1408, B=2000, which is
- * the difference between a chart that loads and one nobody waits for.
- */
 export function bootstrapIqmCi(
   sorted: readonly number[],
   boot: number,
@@ -179,7 +124,6 @@ export function bootstrapIqmCi(
   return [percentileSorted(ordered, 2.5), percentileSorted(ordered, 97.5)];
 }
 
-// ---------- LRU ----------
 
 interface LruEntry {
   key: string;
@@ -204,24 +148,18 @@ function lruPut(key: string, value: CurvesResponse): void {
   while (lru.length > CURVES_LRU_MAX) lru.shift();
 }
 
-/** test hook */
 export function clearCurvesCache(): void {
   lru.length = 0;
   inFlight.clear();
 }
 
-// ---------- single-flight + compute semaphore ----------
 
-/** keyed on `${dir}|${policy}|${fileKey}` — one pass answers every env slice */
 const inFlight = new Map<string, Promise<Map<string, CurvesResponse>>>();
 
 let computeActive = 0;
 const computeQueue: (() => void)[] = [];
 
 async function withComputeSlot<T>(fn: () => Promise<T>): Promise<T> {
-  // Queue behind existing waiters even when a slot looks free: a released slot is
-  // claimed by the woken waiter one microtask later, so a "free" reading between the
-  // release and that wake-up would let LIMIT+1 parses run at once.
   if (computeActive >= FLEET_COMPUTE_CONCURRENCY || computeQueue.length > 0) {
     await new Promise<void>((res) => computeQueue.push(res));
   }
@@ -235,7 +173,6 @@ async function withComputeSlot<T>(fn: () => Promise<T>): Promise<T> {
   }
 }
 
-// ---------- disk cache ----------
 
 function safeName(id: string): string {
   return id.replace(/[^A-Za-z0-9._-]/g, '_').slice(0, 96);
@@ -244,7 +181,6 @@ function safeName(id: string): string {
 interface DiskCacheFile {
   v: 2;
   kind: 'curves';
-  /** fleet.jsonl `${mtimeMs}:${size}` */
   key: string;
   policy: string;
   envId: string | null;
@@ -256,7 +192,6 @@ function queryKey(q: CurvesQuery): string {
 }
 
 function diskCachePath(cacheDir: string, id: string, q: CurvesQuery): string {
-  // The hash names the file; the record inside proves what it is.
   return join(cacheDir, `${safeName(id)}--curves-${hash32(queryKey(q))}.json`);
 }
 
@@ -266,7 +201,7 @@ async function readDiskCache(path: string, key: string, q: CurvesQuery): Promise
     if (parsed === null || typeof parsed !== 'object') return null;
     const f = parsed as Partial<DiskCacheFile>;
     if (f.v !== 2 || f.kind !== 'curves' || f.key !== key || f.data === undefined) return null;
-    if (f.policy !== q.policy || (f.envId ?? null) !== q.envId) return null; // hash collision
+    if (f.policy !== q.policy || (f.envId ?? null) !== q.envId) return null;
     return f.data;
   } catch {
     return null;
@@ -278,12 +213,10 @@ async function writeDiskCache(path: string, payload: DiskCacheFile): Promise<voi
     await ensureCacheDir(path);
     await writeFile(path, JSON.stringify(payload));
   } catch {
-    /* cache is an optimization */
   }
   await evictDiskCache(path);
 }
 
-/** Keep the cache directory under both ceilings by deleting oldest-by-mtime first. */
 async function evictDiskCache(writtenPath: string): Promise<void> {
   const dir = dirname(writtenPath);
   try {
@@ -298,29 +231,25 @@ async function evictDiskCache(writtenPath: string): Promise<void> {
       total += st.size;
     }
     if (entries.length <= FLEET_CACHE_MAX_FILES && total <= FLEET_CACHE_MAX_BYTES) return;
-    entries.sort((a, b) => a.mtimeMs - b.mtimeMs); // oldest first
+    entries.sort((a, b) => a.mtimeMs - b.mtimeMs);
     let count = entries.length;
     for (const e of entries) {
       if (count <= FLEET_CACHE_MAX_FILES && total <= FLEET_CACHE_MAX_BYTES) break;
-      if (e.path === writtenPath) continue; // never evict what we just wrote
+      if (e.path === writtenPath) continue;
       await unlink(e.path).catch(() => undefined);
       count--;
       total -= e.size;
     }
   } catch {
-    /* eviction is best-effort */
   }
 }
 
-// ---------- derivation ----------
 
 export interface CurvesOptions {
   id: string;
   dir: string;
   query: CurvesQuery;
-  /** in-flight runs bypass the disk cache (the file is still being appended to) */
   inFlight: boolean;
-  /** disk-cache directory; null/absent disables persistence */
   cacheDir?: string | null;
 }
 
@@ -347,8 +276,6 @@ export async function deriveCurves(opts: CurvesOptions): Promise<CurvesResponse>
     }
   }
 
-  // Single-flight on the FILE: the 16 env panels of one dashboard open together and
-  // must share one parse, not queue 16 of them behind a 2-slot semaphore.
   const passKey = `${dir}|${query.policy}|${fileKey}`;
   let pass = inFlight.get(passKey);
   if (pass === undefined) {
@@ -379,13 +306,6 @@ interface LaneKeyed {
   envId: string;
 }
 
-/**
- * One stream of fleet.jsonl -> a curve per env plus the pooled one.
- *
- * Staged row-major during the pass (the lane/step extents are unknown until it ends),
- * then materialized into a lane × heartbeat grid of cumulative rewardSum, differenced
- * into windowed rates, and reduced across seeds.
- */
 async function computeCurves(fleetPath: string, policy: string): Promise<Map<string, CurvesResponse>> {
   const stepValues: number[] = [];
   const stepSlot = new Map<number, number>();
@@ -397,9 +317,6 @@ async function computeCurves(fleetPath: string, policy: string): Promise<Map<str
 
   await streamJsonl<FleetRow>(fleetPath, (row) => {
     if (row === null || typeof row !== 'object') return;
-    // METRICS LAW (2026-08-05): fleet.jsonl carries final certificates only;
-    // the series come from the tape below. Pre-tape archives' hb rows are
-    // ignored, not adapted.
     if ((row as { kind?: unknown }).kind === 'hb') return;
     if (typeof row.policy === 'string' && row.policy !== policy) return;
     if (typeof row.policy !== 'string' && policy !== 'oak') return;
@@ -425,8 +342,6 @@ async function computeCurves(fleetPath: string, policy: string): Promise<Map<str
     rowSum.push(typeof sum === 'number' && Number.isFinite(sum) ? sum : null);
   });
 
-  // The continuous curve: tape windows at ~1k-step resolution, capped to keep
-  // the bootstrap interactive. Final rows (above) stay authoritative.
   {
     const dir = dirname(fleetPath);
     const tape = readTape(join(dir, `metrics.${policy}.oakt`));
@@ -435,7 +350,6 @@ async function computeCurves(fleetPath: string, policy: string): Promise<Map<str
       try {
         meta = JSON.parse(readFileSync(join(dir, 'meta.json'), 'utf8')) as typeof meta;
       } catch {
-        /* lane-indexed defaults below */
       }
       const envOf = (seed: number): string => {
         for (const e of meta.envSchedule ?? []) {
@@ -448,7 +362,7 @@ async function computeCurves(fleetPath: string, policy: string): Promise<Map<str
       if (fi >= 0) {
         for (const w of sampleWindows(tape.data.length, CURVES_TAPE_WINDOWS)) {
           const stepEnd = (tape.stepStart[w] ?? 0) + (tape.stepCount[w] ?? 0);
-          if (stepSlot.has(stepEnd)) continue; // finals are authoritative
+          if (stepSlot.has(stepEnd)) continue;
           const si = stepValues.length;
           stepValues.push(stepEnd);
           stepSlot.set(stepEnd, si);
@@ -475,7 +389,6 @@ async function computeCurves(fleetPath: string, policy: string): Promise<Map<str
   const nL = laneValues.length;
   if (nS === 0 || nL === 0) return new Map([[ALL_ENVS, emptyCurves()]]);
 
-  // steps ascending; lanes by lane index (so a slice is a stable seed order)
   const stepOrder = stepValues.map((_, i) => i).sort((a, b) => (stepValues[a] ?? 0) - (stepValues[b] ?? 0));
   const stepRemap = new Array<number>(nS).fill(0);
   const steps: number[] = [];
@@ -496,20 +409,14 @@ async function computeCurves(fleetPath: string, policy: string): Promise<Map<str
     if (lv !== undefined) lanes.push(lv);
   }
 
-  // lane × heartbeat cumulative reward. NaN marks "no row" — distinct from a real 0.
   const grid = new Float64Array(nL * nS).fill(Number.NaN);
   for (let r = 0; r < rowLane.length; r++) {
     const li = laneRemap[rowLane[r] ?? 0] ?? 0;
     const si = stepRemap[rowStep[r] ?? 0] ?? 0;
     const v = rowSum[r];
-    // Later rows win: a kind:"final" row lands on the last heartbeat's (lane, step)
-    // and is the authoritative value.
     grid[li * nS + si] = v === null || v === undefined ? Number.NaN : v;
   }
 
-  // Windowed measured rate, in place. Walked BACKWARDS so each window still reads the
-  // untouched cumulative value of its predecessor. The first window is measured from
-  // the origin (0 steps, 0 reward), which is exactly its cumulative rate.
   for (let l = 0; l < nL; l++) {
     const base = l * nS;
     for (let i = nS - 1; i >= 0; i--) {
@@ -534,8 +441,6 @@ async function computeCurves(fleetPath: string, policy: string): Promise<Map<str
   const pooled = reduceCurve(grid, nS, all, steps);
   out.set(ALL_ENVS, pooled);
   for (const [envId, indices] of byEnv) {
-    // A single-env run's slice IS the pooled curve — same seeds, same numbers. Share
-    // the object instead of paying for a second bootstrap of the same population.
     out.set(envId, indices.length === nL ? pooled : reduceCurve(grid, nS, indices, steps));
   }
   return out;
@@ -547,7 +452,6 @@ function allLaneIndices(n: number): number[] {
   return out;
 }
 
-/** Across-seed reduction at every heartbeat: IQM ± bootstrap CI, and the P10/50/90 spread. */
 function reduceCurve(
   grid: Float64Array,
   nS: number,
@@ -581,8 +485,6 @@ function reduceCurve(
       continue;
     }
     const sorted = [...column].sort((a, b) => a - b);
-    // Seeded per heartbeat index, so a curve is reproducible column by column no
-    // matter how many heartbeats the file has grown to.
     const [lo, hi] = bootstrapIqmCi(sorted, CURVES_BOOTSTRAP, (0x9e3779b9 ^ (i * 0x85ebca6b)) >>> 0);
     out.iqm.push(finiteOrNull(iqmSorted(sorted)));
     out.ciLo.push(finiteOrNull(lo));

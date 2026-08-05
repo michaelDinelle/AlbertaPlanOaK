@@ -1,18 +1,4 @@
 /// <reference types="bun" />
-// Headless unit tests for the nature-kit LIFE + infrastructure modules (grid, wisp,
-// vegetation, particles, water, celebrate, rigs, debug, harness).
-//
-// There is no WebGL context under `bun test`, so nothing here renders. What IS tested is
-// everything that can be wrong without a GPU — and that turns out to be all the parts
-// that carry accuracy:
-//   * grid      — cellToWorld/worldToCell round-trip and wall placement against a HAND
-//                 grid (the backbone every grid scene resolves through)
-//   * HopMotion — the snap semantics the `scrubbed` / `teleport` contract depends on
-//   * celebrate — pool reuse: firing 400 celebrations must not grow a single buffer
-//   * rigs      — the clamp math and the exact snap targets
-//   * vegetation— determinism from the seed and the "never on the playfield" exclusion
-//   * debug     — layer 31 and the agent cross landing on the TRUE cell
-//   * harness   — the playback clock and the pose interpolate/snap policy
 
 import { describe, expect, test } from 'bun:test';
 import type { SimEvent } from '@sim/types';
@@ -87,11 +73,7 @@ import { TOKENS } from '@kit/tokens';
 import type { FrameState } from '@kit/types';
 import type { EnvFrame, EnvGeometry, GridGeometry } from '@sim/types';
 
-// ---------------------------------------------------------------------------
-// helpers
-// ---------------------------------------------------------------------------
 
-/** A hand-written 5x4 grid. `#` = wall. 8 walls, 12 floors. */
 const HAND_ROWS = [
   '#####',
   '#..#.',
@@ -131,9 +113,6 @@ function makeState(pose: readonly number[], derived: unknown = null): FrameState
   return { pose: p, ctrl: new Float32Array(6), done: false, step: 0, simTime: 0, derived };
 }
 
-// ===========================================================================
-// grid — the accuracy backbone
-// ===========================================================================
 
 describe('grid coordinates', () => {
   test('1 cell = 1 world unit and the grid is centered on the origin', () => {
@@ -143,7 +122,6 @@ describe('grid coordinates', () => {
     expect(cellToWorld(0, 0, odd)).toEqual([-5, 0, -5]);
     expect(cellToWorld(10, 10, odd)).toEqual([5, 0, 5]);
 
-    // even grids straddle the origin
     const even = { w: 8, h: 8 };
     expect(cellToWorld(0, 0, even)).toEqual([-3.5, 0, -3.5]);
     expect(cellToWorld(7, 7, even)).toEqual([3.5, 0, 3.5]);
@@ -207,7 +185,7 @@ describe('grid coordinates', () => {
     expect(isWall(g, 0, 0)).toBe(true);
     expect(isWall(g, 1, 1)).toBe(false);
     expect(isWall(g, 3, 1)).toBe(true);
-    expect(isWall(g, 0, 3)).toBe(false); // the hand grid's open bottom-left corner
+    expect(isWall(g, 0, 3)).toBe(false);
     expect(isWall(g, -1, 1)).toBe(true);
     expect(isWall(g, 5, 1)).toBe(true);
   });
@@ -221,9 +199,6 @@ describe('grid coordinates', () => {
   });
 });
 
-// ===========================================================================
-// cell field — walls placed STRICTLY from the walls array
-// ===========================================================================
 
 describe('buildCellField', () => {
   test('places exactly one wall block per 1 in the walls array', () => {
@@ -254,7 +229,7 @@ describe('buildCellField', () => {
           const [wx, , wz] = cellToWorld(x, y, g);
           const t = instanceTranslation(mesh, id);
           expect(t[0]).toBeCloseTo(wx, 12);
-          expect(t[1]).toBeCloseTo(0, 12); // wall base sits ON the floor plane
+          expect(t[1]).toBeCloseTo(0, 12);
           expect(t[2]).toBeCloseTo(wz, 12);
         } else {
           expect(id).toBe(-1);
@@ -272,7 +247,6 @@ describe('buildCellField', () => {
     expect(full.wallCount).toBe(handWallCount());
     full.dispose();
 
-    // DeepSea-style: only the reachable triangle gets a floor
     const triangle = buildCellField(g, { ...BASIC_STYLE, floorFilter: (x, y) => x <= y });
     let expectedFloors = 0;
     forEachCell(g, (x, y, wall) => {
@@ -377,9 +351,6 @@ describe('cell-placed components', () => {
   });
 });
 
-// ===========================================================================
-// HopMotion — the scrub / teleport contract
-// ===========================================================================
 
 describe('HopMotion', () => {
   const grid = { w: 11, h: 11 };
@@ -439,7 +410,6 @@ describe('HopMotion', () => {
 
     for (const t of [0.1, 0.25, 0.5, 0.75, 0.9]) {
       hop.update(t);
-      // cross product of (pos - from) x (to - from) in xz must vanish: no path planning
       const px = hop.position.x - from[0];
       const pz = hop.position.z - from[2];
       const dx = to[0] - from[0];
@@ -451,7 +421,7 @@ describe('HopMotion', () => {
     hop.update(0.5);
     expect(hop.position.x).toBeCloseTo((from[0] + to[0]) / 2, 9);
     expect(hop.position.z).toBeCloseTo((from[2] + to[2]) / 2, 9);
-    expect(hop.position.y).toBeCloseTo(0.4, 9); // apex = height at t = 0.5
+    expect(hop.position.y).toBeCloseTo(0.4, 9);
 
     hop.update(1);
     expect(hop.position.x).toBe(to[0]);
@@ -469,8 +439,6 @@ describe('HopMotion', () => {
   });
 
   test('setGrid rebases an IN-FLIGHT hop into the new grid', () => {
-    // ProceduralMaze regenerates its layout mid-stream: a hop launched in an 11x11
-    // must land on the 21x21 cell it was aimed at, not at the old grid's world point.
     const small = { w: 11, h: 11 };
     const big = { w: 21, h: 21 };
     const hop = new HopMotion(small, { duration: 1 });
@@ -481,7 +449,6 @@ describe('HopMotion', () => {
     const midZ = hop.position.z;
 
     hop.setGrid(big);
-    // the arc is carried across by the same translation cellToWorld applies
     expect(hop.position.x).toBeCloseTo(midX + ((small.w - big.w) / 2) * CELL, 12);
     expect(hop.position.z).toBeCloseTo(midZ + ((small.h - big.h) / 2) * CELL, 12);
 
@@ -501,7 +468,6 @@ describe('HopMotion', () => {
     expect(hop.position.y).toBe(0);
     expect(hop.position.z).toBeCloseTo(z, 12);
     expect(hop.progress).toBe(1);
-    // a same-size rebind is inert
     hop.setGrid({ w: 5, h: 9 });
     expect(hop.position.x).toBeCloseTo(x, 12);
   });
@@ -521,9 +487,6 @@ describe('HopMotion', () => {
   });
 });
 
-// ===========================================================================
-// wisp — the shared avatar
-// ===========================================================================
 
 describe('Wisp', () => {
   const grid = { w: 11, h: 11 };
@@ -547,9 +510,6 @@ describe('Wisp', () => {
   });
 
   test('the probe object NEVER moves off the exact height — 4 s of idle bob', () => {
-    // The idle bob used to ride on the same node as the orb, so probeObject
-    // oscillated ±0.018: 18× assertAligned's 1e-3 tolerance, i.e. no grid scene
-    // could ever have passed the accuracy check.
     const wisp = new Wisp({ color: 0x8fd47a }, grid);
     wisp.setCell(4, 6, grid);
     const [x, , z] = cellToWorld(4, 6, grid);
@@ -568,7 +528,6 @@ describe('Wisp', () => {
     expect(worstXZ).toBeLessThan(1e-6);
     expect(wisp.probeObject).toBe(wisp.core);
 
-    // the decoration still moves — the bob was relocated, not deleted
     const halo = wisp.group.getObjectByName('oakWispHalo');
     expect(halo).toBeDefined();
     let haloSpread = 0;
@@ -592,7 +551,6 @@ describe('Wisp', () => {
       wisp.update(1 / 60, time);
       wisp.group.updateMatrixWorld(true);
       wisp.probeObject.getWorldPosition(world);
-      // the orb rides exactly `height` above the hop arc at every instant
       expect(world.y - wisp.position.y).toBeCloseTo(TOKENS.wispHeight, 9);
     }
     wisp.dispose();
@@ -634,8 +592,8 @@ describe('Wisp', () => {
 
   test('face() accepts yaw radians or a grid delta', () => {
     expect(yawFromGridDelta(0, 0)).toBe(0);
-    expect(yawFromGridDelta(0, 1)).toBeCloseTo(0, 12); // south = +z = yaw 0
-    expect(yawFromGridDelta(1, 0)).toBeCloseTo(Math.PI / 2, 12); // east
+    expect(yawFromGridDelta(0, 1)).toBeCloseTo(0, 12);
+    expect(yawFromGridDelta(1, 0)).toBeCloseTo(Math.PI / 2, 12);
     expect(yawFromGridDelta(-1, 0)).toBeCloseTo(-Math.PI / 2, 12);
 
     const wisp = new Wisp({ color: 0x8fd47a }, grid);
@@ -683,9 +641,6 @@ describe('Wisp', () => {
   });
 });
 
-// ===========================================================================
-// celebrate — pooled, no growth
-// ===========================================================================
 
 describe('celebration pool', () => {
   test('capacity is tier policy and thumb celebrates silently', () => {
@@ -768,7 +723,6 @@ describe('celebration pool', () => {
     pulse.reset();
     expect(pulse.sigh).toBe(0);
 
-    // fire() takes the max, never stacks past 1
     pulse.fire(0.4);
     pulse.fire(0.9);
     expect(pulse.bloom).toBe(0.9);
@@ -777,8 +731,6 @@ describe('celebration pool', () => {
   });
 
   test('two pools do not share a pulse channel', () => {
-    // the theater wall renders many scenes at once; a shared module channel meant
-    // one lane's +1 bloomed every other lane's frame
     const a = new CelebrationPool({ tier: 'medium' });
     const b = new CelebrationPool({ tier: 'medium' });
     expect(a.pulse).not.toBe(b.pulse);
@@ -789,7 +741,6 @@ describe('celebration pool', () => {
     expect(b.pulse.bloom).toBe(0);
     expect(pulseChannel.bloom).toBe(0);
 
-    // and a host that WANTS one channel still gets it, explicitly
     const shared = makePulseChannel();
     const c = new CelebrationPool({ tier: 'medium', pulse: shared });
     const d = new CelebrationPool({ tier: 'medium', pulse: shared });
@@ -802,7 +753,6 @@ describe('celebration pool', () => {
   test('a host resolves the pulse per scene', () => {
     const scene = new THREE.Scene();
     expect(existingCelebrations(scene)).toBeNull();
-    // no pool attached: the host falls back to the module convenience channel
     expect(celebrationPulse(scene)).toBe(pulseChannel);
 
     const pool = celebrationsFor(scene, { tier: 'medium' });
@@ -815,9 +765,6 @@ describe('celebration pool', () => {
   });
 
   test('a burst fired before the first update() at a non-zero playhead is still alive', () => {
-    // particle age is `uTime - aStart` on the HOST clock; a pool still at time 0
-    // stamped every burst at 0, so the first update(dt, 1234) rendered it as
-    // 1234 s old — dead on arrival, invisibly.
     const pool = new CelebrationPool({ tier: 'hero', seed: 3 });
     const points = pool.group.children.find((c) => c.name === 'oakCelebrationBurst') as THREE.Points;
     const starts = points.geometry.getAttribute('aStart');
@@ -834,7 +781,6 @@ describe('celebration pool', () => {
     expect(age).toBeLessThan(life.getX(0));
     expect(pool.activeRipples).toBe(1);
 
-    // setTime() is the same fix for a host that would rather adopt the clock once
     const other = new CelebrationPool({ tier: 'hero', seed: 3 });
     other.setTime(now);
     other.burst({ x: 0, y: 1, z: 0 }, 0xffd166, 1);
@@ -842,7 +788,6 @@ describe('celebration pool', () => {
       .geometry.getAttribute('aStart');
     expect(otherStarts.getX(0)).toBeCloseTo(now, 3);
 
-    // and the documented ordering (update first) keeps working unchanged
     const ordered = new CelebrationPool({ tier: 'hero', seed: 3 });
     ordered.update(1 / 60, now);
     ordered.burst({ x: 0, y: 1, z: 0 }, 0xffd166, 1);
@@ -870,9 +815,6 @@ describe('celebration pool', () => {
   });
 });
 
-// ===========================================================================
-// rigs — clamp math and exact snap targets
-// ===========================================================================
 
 describe('rig math', () => {
   test('damp is frame-rate independent and degenerate-safe', () => {
@@ -931,14 +873,12 @@ describe('rig math', () => {
     rig.zoom(-1e6);
     expect(rig.desired.distance).toBe(4);
 
-    // snap lands the smoothed state on the desired state exactly
     rig.setDesired(0.4, 0.9, 11);
     rig.snap();
     expect(rig.state).toEqual(rig.desired);
     const expected = orbitPosition(rig.desired, rig.target, new THREE.Vector3());
     expect(rig.camera.position.distanceTo(expected)).toBeLessThan(1e-9);
 
-    // and update() never escapes the limits either
     rig.orbit(50, 50);
     for (let i = 0; i < 200; i++) rig.update(1 / 60);
     expect(rig.state.polar).toBeLessThanOrEqual(rig.limits.maxPolar + 1e-12);
@@ -957,7 +897,6 @@ describe('rig math', () => {
     expect(rig.camera.position.z).toBeCloseTo(5, 9);
     expect(rig.velocity.length()).toBe(0);
 
-    // moving forward builds velocity and leads the camera
     for (let i = 1; i <= 30; i++) {
       rig.setTarget(10 + i * 0.1, 0.7, 0);
       rig.update(1 / 60);
@@ -965,7 +904,6 @@ describe('rig math', () => {
     expect(rig.velocity.x).toBeGreaterThan(0);
     expect(rig.camera.position.x).toBeGreaterThan(10);
 
-    // a hard cut kills the velocity and re-frames instantly
     rig.setTarget(-40, 0.7, 0);
     rig.snap();
     expect(rig.velocity.length()).toBe(0);
@@ -981,7 +919,6 @@ describe('rig math', () => {
       rig.setTarget(i * 1, 0, 0);
       rig.update(1 / 60);
     }
-    // velocity is ~60 u/s, lookAhead 10 s => 600 u, capped at 2
     expect(rig.camera.position.x - rig.target.x).toBeLessThanOrEqual(2 + 1e-6);
     rig.dispose();
   });
@@ -993,7 +930,6 @@ describe('rig math', () => {
     expect(rig.camera.position.y).toBeCloseTo(2, 9);
     expect(rig.camera.position.z).toBeCloseTo(8, 9);
 
-    // full-travel displacement = parallax * sqrt(1 + parallaxY^2)
     const maxTravel = 0.5 * Math.sqrt(1 + 0.5 * 0.5);
     rig.setPointer(1, 0);
     rig.snap();
@@ -1004,7 +940,6 @@ describe('rig math', () => {
     for (let i = 0; i < 200; i++) rig.update(1 / 60);
     expect(rig.camera.position.distanceTo(rig.base)).toBeLessThan(1e-6);
 
-    // pointer input is clamped to the unit square
     rig.setPointer(50, -50);
     rig.snap();
     expect(rig.camera.position.distanceTo(rig.base)).toBeCloseTo(maxTravel, 9);
@@ -1022,9 +957,6 @@ describe('rig math', () => {
   });
 });
 
-// ===========================================================================
-// vegetation — determinism + "never on the playfield"
-// ===========================================================================
 
 describe('vegetation', () => {
   const area = { halfX: 20, halfZ: 20 };
@@ -1095,7 +1027,7 @@ describe('vegetation', () => {
 
     const geometries = handle.meshes.map((m) => m.geometry);
     handle.retint(0xff0000, 0x0000ff);
-    expect(handle.meshes.map((m) => m.geometry)).toEqual(geometries); // no remodel
+    expect(handle.meshes.map((m) => m.geometry)).toEqual(geometries);
     const first = handle.materials[0] as THREE.MeshStandardMaterial;
     const last = handle.materials[2] as THREE.MeshStandardMaterial;
     expect(first.color.r).toBeGreaterThan(first.color.b);
@@ -1167,9 +1099,6 @@ describe('vegetation', () => {
   });
 });
 
-// ===========================================================================
-// particles + water
-// ===========================================================================
 
 describe('particles', () => {
   test('tier scale turns particles OFF at thumb', () => {
@@ -1285,9 +1214,6 @@ describe('water', () => {
   });
 });
 
-// ===========================================================================
-// debug — the ground-truth overlay
-// ===========================================================================
 
 describe('GroundTruthOverlay', () => {
   const grid = handGrid();
@@ -1327,7 +1253,6 @@ describe('GroundTruthOverlay', () => {
     const cross = overlay.group.getObjectByName('oakDebugAgentCross') as THREE.LineSegments;
     const p = cross.geometry.getAttribute('position').array as Float32Array;
     const [wx, , wz] = cellToWorld(3, 1, grid);
-    // vertex 4 is the base of the vertical stick, vertex 5 its top
     expect(p[12] as number).toBeCloseTo(wx, 9);
     expect(p[14] as number).toBeCloseTo(wz, 9);
     expect(p[16] as number).toBeGreaterThan(p[13] as number);
@@ -1340,19 +1265,16 @@ describe('GroundTruthOverlay', () => {
     const cross = overlay.group.getObjectByName('oakDebugAgentCross') as THREE.LineSegments;
     const p = cross.geometry.getAttribute('position').array as Float32Array;
 
-    // DeepSea-style {r, c}: r is the ROW (grid y), c the COLUMN (grid x)
     overlay.setState(makeState([], { r: 2, c: 1, lastA: 0 }));
     let expected = cellToWorld(1, 2, grid);
     expect(p[12] as number).toBeCloseTo(expected[0], 9);
     expect(p[14] as number).toBeCloseTo(expected[2], 9);
 
-    // Chain-style {pos}: a 1-D corridor lives on row 0
     overlay.setState(makeState([], { pos: 3, len: 5 }));
     expected = cellToWorld(3, 0, grid);
     expect(p[12] as number).toBeCloseTo(expected[0], 9);
     expect(p[14] as number).toBeCloseTo(expected[2], 9);
 
-    // no derived state at all: fall back to pose[0], pose[1]
     overlay.setState(makeState([2, 3]));
     expected = cellToWorld(2, 3, grid);
     expect(p[12] as number).toBeCloseTo(expected[0], 9);
@@ -1377,7 +1299,6 @@ describe('GroundTruthOverlay', () => {
     const goal = overlay.group.getObjectByName('oakDebugGoal') as THREE.LineSegments;
     const p = goal.geometry.getAttribute('position').array as Float32Array;
     const [gx, , gz] = cellToWorld(4, 2, grid);
-    // the diamond's first vertex is (cx, y, cz - r); buffers are f32
     expect(p[0] as number).toBeCloseTo(gx, 5);
     expect((p[2] as number) + 0.42).toBeCloseTo(gz, 5);
     expect(goal.visible).toBe(true);
@@ -1450,7 +1371,6 @@ describe('GroundTruthOverlay', () => {
     overlay.setState(makeState([0, 0, 0, 0, 0, 0, 0, 0, 0]));
     expect(calls).toBe(1);
     const p = skeleton.geometry.getAttribute('position').array as Float32Array;
-    // bone 0 is bt(1)->ft(2): fk gives point i at (0.2i, 0.2i+0.1) -> world (x, z, 0)
     expect(p[2] as number).toBe(0);
     expect(Number.isFinite(p[0] as number)).toBe(true);
     expect(overlay.group.getObjectByName('oakDebugToes')).toBeDefined();
@@ -1472,9 +1392,6 @@ describe('GroundTruthOverlay', () => {
   });
 });
 
-// ===========================================================================
-// harness — the pure playback pieces
-// ===========================================================================
 
 function fakeFrame(step: number, x: number): EnvFrame<{ x: number }> {
   const pose = new Float32Array(9);
@@ -1516,7 +1433,6 @@ describe('harness playback', () => {
     clock.seek(1e6);
     expect(clock.position()).toBeCloseTo(10, 9);
 
-    // paused means paused
     clock.seek(2);
     clock.playing = false;
     expect(clock.advance(10)).toBeCloseTo(2, 9);
@@ -1537,11 +1453,11 @@ describe('harness playback', () => {
     const out = makeState([]);
 
     sampleFrame(fakeSource(false), 1.5, out);
-    expect(out.pose[0]).toBeCloseTo(15, 9); // halfway between frames 1 and 2
+    expect(out.pose[0]).toBeCloseTo(15, 9);
     expect(out.pose[1]).toBeCloseTo(30, 9);
 
     sampleFrame(fakeSource(true), 1.5, out);
-    expect(out.pose[0]).toBe(10); // a grid agent is never between cells
+    expect(out.pose[0]).toBe(10);
     expect(out.pose[1]).toBe(20);
   });
 

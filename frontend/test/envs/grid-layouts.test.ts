@@ -1,10 +1,4 @@
 /// <reference types="bun" />
-// Gridworld STATIC geometry golden tests: wall layouts, hallway/door/key/gap
-// cells, per-lane ProceduralMaze walls, and the DeepSea-family action masks.
-//
-// Oracle: tools/gridworld_ref.py (the module `Sources/Gridworld.metal` is
-// bitwise-certified against by `OaK gridworld-probe`). Regenerate with:
-//   /Users/studio/OaKMeta/.venv/bin/python frontend/test/fixtures/gen.py --only grid
 
 import { describe, expect, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
@@ -80,7 +74,6 @@ function gridOf(g: EnvGeometry): GridGeometry {
   return g.grid;
 }
 
-/** every decoder's geometry against the fixture's w/h/walls/goal. */
 function expectLayout(envId: string, grid: GridGeometry): void {
   const l = layoutOf(envId);
   expect(grid.w).toBe(l.w);
@@ -98,9 +91,8 @@ describe('static wall layouts', () => {
     expect(free).toBe(FOURROOMS_FREE_CELLS);
     expect(free).toBe(68);
     expect(grid.hallways).toEqual(layoutOf('FourRooms-cont-v0').hallways);
-    // the hallway cells are exactly the free cells on the two wall lines
     for (const c of grid.hallways ?? []) expect(fourRoomsIsWall(c.x, c.y)).toBe(false);
-    expect(fourRoomsIsWall(5, 5)).toBe(true); // the centre is wall
+    expect(fourRoomsIsWall(5, 5)).toBe(true);
   });
 
   test('FourRooms: free-cell enumeration matches the reference order', () => {
@@ -186,7 +178,6 @@ describe('ProceduralMaze per-lane generation', () => {
     for (const c of procmaze.cases) {
       const { words } = procMazeGen(c.seed);
       expect(Array.from(words)).toEqual(c.words);
-      // w2 is masked to its low 17 bits (81 bits total)
       expect((words[2] ?? 0) >>> 17).toBe(0);
     }
   });
@@ -196,15 +187,11 @@ describe('ProceduralMaze per-lane generation', () => {
       const { words, carvedPath } = procMazeGen(c.seed);
       expect(Array.from(procMazeWalls(words))).toEqual(c.walls);
       expect(carvedPath).toEqual(c.carvedPath);
-      // a spanning tree over the 5x5 room lattice carves exactly 24 edges
       expect(carvedPath.length).toBe(24);
       for (const cell of carvedPath) {
         expect(c.walls[cell.y * 11 + cell.x]).toBe(0);
-        // every carved cell is a between-cell: exactly one coordinate even
         expect((cell.x % 2) + (cell.y % 2)).toBe(1);
       }
-      // perfect maze: exactly 49 free cells (25 rooms + 24 carved edges),
-      // all mutually reachable from the start room
       const free: number[] = [];
       for (let y = 1; y < 10; y++)
         for (let x = 1; x < 10; x++) if (!procMazeIsWall(words, x, y)) free.push(y * 11 + x);

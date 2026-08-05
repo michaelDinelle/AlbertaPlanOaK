@@ -1,13 +1,4 @@
 /// <reference types="bun" />
-// The Fogbound Forest (POMaze-cont-v0) — the accuracy + lifecycle + HONESTY self-check.
-//
-// This mirrors four-rooms.test.ts's shape and adds the thing this scene exists to prove:
-// that what the art shows and what the AGENT observes are the same set, cell for cell.
-// `poMazeView` publishes eight wall bits; `bubbleVisibility` decides which spruce are
-// drawn; the tests below walk every free cell of the maze and assert those two agree
-// EXACTLY — not approximately, not "mostly outside the bubble", exactly. Plus the
-// compass: the moth may encode the four sign bits POMaze publishes and must be provably
-// independent of the distance it is not told.
 
 import { describe, expect, test } from 'bun:test';
 import * as THREE from 'three';
@@ -55,7 +46,7 @@ import {
   type StubSceneContext,
 } from './aligned';
 
-const SEED = 112; // the demo run's first POMaze lane
+const SEED = 112;
 
 function geometryOf(): EnvGeometry {
   return poMazeDecoder.geometry(poMazeDecoder.initStatic(SEED), SEED);
@@ -97,7 +88,6 @@ function objectNamed(module: SceneModule, name: string): THREE.Object3D {
   return o;
 }
 
-/** every FREE cell of the maze, in row-major order */
 function freeCells(): GridCell[] {
   const out: GridCell[] = [];
   for (let y = 0; y < POMAZE_H; y++) {
@@ -106,19 +96,6 @@ function freeCells(): GridCell[] {
   return out;
 }
 
-/**
- * Every spruce instance the scene is currently DRAWING, resolved back to the cell it
- * stands on. An instance whose basis vectors have zero length transforms every vertex of
- * its cone onto one point: no area, no fragment, nothing on screen. A cell is "shown"
- * when at least one of its trees still has extent.
- *
- * The lengths are measured off the raw matrix ELEMENTS rather than through
- * `Matrix4.decompose`, and that is not a style preference: three r185's decompose carries
- * a `det === 0` guard that returns scale (1, 1, 1) for exactly the degenerate matrices
- * this test exists to detect. Decomposing here would report a collapsed forest as a
- * fully-grown one and pass a scene that gives the whole maze away. This is the honesty
- * instrument, so it reads what the vertex shader reads.
- */
 function shownWallCells(module: SceneModule): Set<string> {
   const mesh = objectNamed(module, 'spruceRankMesh') as THREE.InstancedMesh;
   const m = new THREE.Matrix4();
@@ -137,7 +114,6 @@ function shownWallCells(module: SceneModule): Set<string> {
   return shown;
 }
 
-/** The 8 Chebyshev neighbours of a cell that are walls — the agent's own observation. */
 function observedWallCells(x: number, y: number): Set<string> {
   const deltas: readonly (readonly [number, number])[] = [
     [0, -1], [1, -1], [1, 0], [1, 1], [0, 1], [-1, 1], [-1, 0], [-1, -1],
@@ -151,12 +127,6 @@ function observedWallCells(x: number, y: number): Set<string> {
   return out;
 }
 
-/**
- * A headless draw-call / triangle census of the scene graph — the harness HUD's numbers
- * without a GPU. One draw per visible mesh/points/line, plus one more for every shadow
- * caster (three renders the shadow map in its own pass); triangles from the geometries,
- * multiplied by live instance counts.
- */
 function census(module: SceneModule, shadows: boolean): { draws: number; triangles: number } {
   let draws = 0;
   let triangles = 0;
@@ -179,7 +149,6 @@ function census(module: SceneModule, shadows: boolean): { draws: number; triangl
   return { draws, triangles: Math.round(triangles) };
 }
 
-// ---------------------------------------------------------------------------
 
 describe('po-maze / manifest + fixtures', () => {
   test('manifest declares the frozen contract fields', () => {
@@ -213,11 +182,8 @@ describe('po-maze / manifest + fixtures', () => {
     const at = (c: GridCell): boolean =>
       fixtures.some((f) => (f.pose[0] ?? -1) === c.x && (f.pose[1] ?? -1) === c.y);
     for (const gap of POMAZE_GAPS) expect(at(gap)).toBe(true);
-    // a cell with NO wall in its 3 × 3 window at all
     const empty = fixtures.some((f) => observedWallCells(f.pose[0] ?? 0, f.pose[1] ?? 0).size === 0);
     expect(empty).toBe(true);
-    // and one where the goal is Chebyshev-adjacent — the state the frame must NOT betray
-    // (the agent's four sign bits say "north-east" there and nothing more)
     const goalSeen = fixtures.some((f) => {
       const dx = Math.abs((f.pose[2] ?? 0) - (f.pose[0] ?? 0));
       const dy = Math.abs((f.pose[3] ?? 0) - (f.pose[1] ?? 0));
@@ -245,7 +211,6 @@ describe('po-maze / the layout is read, never re-derived', () => {
         if (!isWall(grid, x, y)) free++;
       }
     }
-    // 9 × 9 interior, minus the two eight-cell bands, plus the two gaps
     expect(free).toBe(65);
     expect(freeCells().length).toBe(65);
   });
@@ -260,7 +225,6 @@ describe('po-maze / the layout is read, never re-derived', () => {
       expect(g.x).toBe(truth.x);
       expect(g.y).toBe(truth.y);
       expect(isWall(grid, g.x, g.y)).toBe(false);
-      // the band runs along x: east and west of a gap are wall, north and south are not
       expect(isWall(grid, g.x - 1, g.y)).toBe(true);
       expect(isWall(grid, g.x + 1, g.y)).toBe(true);
       expect(isWall(grid, g.x, g.y - 1)).toBe(false);
@@ -299,18 +263,15 @@ describe('po-maze / the layout is read, never re-derived', () => {
 
 describe('po-maze / THE BUBBLE IS THE OBSERVATION', () => {
   test('bubbleVisibility is 1 inside one cell, 0 past two, and monotone between', () => {
-    // the eight neighbours, sampled at their exact centres
     for (const [dx, dz] of [[1, 0], [0, 1], [-1, 0], [0, -1], [1, 1], [-1, 1], [1, -1], [-1, -1]]) {
       expect(bubbleVisibility(0, 0, (dx ?? 0) * CELL, (dz ?? 0) * CELL)).toBe(1);
     }
-    // everything at Chebyshev 2 or more, in every direction
     for (let dx = -3; dx <= 3; dx++) {
       for (let dz = -3; dz <= 3; dz++) {
         if (Math.max(Math.abs(dx), Math.abs(dz)) < 2) continue;
         expect(bubbleVisibility(0, 0, dx * CELL, dz * CELL)).toBe(0);
       }
     }
-    // and it really is a falloff, not a step, so a hop dissolves
     let previous = 1;
     for (let k = 0; k <= 20; k++) {
       const d = BUBBLE_INNER + ((BUBBLE_OUTER - BUBBLE_INNER) * k) / 20;
@@ -362,7 +323,6 @@ describe('po-maze / THE BUBBLE IS THE OBSERVATION', () => {
 
   test('the dissolve is a pure function of position: a scrub lands on the exact bubble', async () => {
     const { module, ctx } = await live();
-    // walk into a hop, then scrub somewhere else and back — the bubble must be identical
     ctx.setTime(3);
     module.update(toFrameUpdate(poseFixture('a', 4, 5, 9, 9), { scrubbed: false }));
     ctx.setTime(3.05);
@@ -373,7 +333,6 @@ describe('po-maze / THE BUBBLE IS THE OBSERVATION', () => {
     ctx.setTime(3.05);
     module.update(toFrameUpdate(poseFixture('b', 5, 5, 9, 9), { scrubbed: true }));
     const settled = shownWallCells(module);
-    // mid-hop the bubble may straddle two cells; settled it is exactly the observation
     expect([...settled].sort()).toEqual([...observedWallCells(5, 5)].sort());
     expect(midHop.size).toBeGreaterThanOrEqual(0);
     module.dispose();
@@ -382,35 +341,19 @@ describe('po-maze / THE BUBBLE IS THE OBSERVATION', () => {
   test('the gap gates appear only when the agent is adjacent to the gap', async () => {
     const { module } = await live();
     const gap = POMAZE_GAPS[0] as GridCell;
-    // standing next to the north gap: its stones are up
     module.update(toFrameUpdate(poseFixture('near', gap.x, gap.y - 1, 1, 1)));
     expect(objectNamed(module, 'gapGateBody0').visible).toBe(true);
-    // three cells away: gone
     module.update(toFrameUpdate(poseFixture('away', gap.x - 3, gap.y - 1, 1, 1)));
     expect(objectNamed(module, 'gapGateBody0').visible).toBe(false);
     module.dispose();
   });
 });
 
-/**
- * THE HONESTY DIGEST — every VISIBLE thing in the frame, plus every light.
- *
- * `gw_po_obs` (Sources/Gridworld.metal) publishes eight wall bits, the agent's own
- * position and FOUR SIGN BITS for the goal — no distance, no presence bit at any range.
- * So two states that differ only in how far away the goal is, with the same sign pair,
- * are the SAME observation, and the frame must be pixel-identical between them. This
- * digest is the instrument: it reads the world matrix of everything that draws (skipping
- * anything hidden, itself or by an ancestor) and the position + intensity of every light,
- * because a light parked on the goal cell would leak it just as loudly as a mesh.
- */
 function frameDigest(module: SceneModule): string {
   const rows: string[] = [];
   module.scene.updateMatrixWorld(true);
   module.scene.traverse((o) => {
     if (!o.visible) return;
-    // the goal BEACON is the one sanctioned exception: viewer knowledge by
-    // owner's ruling (2026-08-05) — every drawable outside its subtree still
-    // holds the sign-bits contract this digest enforces
     if (o.name === 'goalBeacon' || o.name.startsWith('beacon:')) return;
     for (let p = o.parent; p; p = p.parent) {
       if (!p.visible) return;
@@ -432,8 +375,6 @@ describe('po-maze / THE FRAME NEVER KNOWS MORE THAN THE AGENT', () => {
   test('two goals sharing a sign pair are INDISTINGUISHABLE outside the goal beacon', async () => {
     const { module, ctx } = await live();
     ctx.setTime(7.5);
-    // group every free cell by the four sign bits it presents from (5,5) — the agent's
-    // WHOLE knowledge of the goal — and demand one frame per group
     const bySign = new Map<string, GridCell[]>();
     for (const g of freeCells()) {
       if (g.x === 5 && g.y === 5) continue;
@@ -442,7 +383,7 @@ describe('po-maze / THE FRAME NEVER KNOWS MORE THAN THE AGENT', () => {
       if (bucket) bucket.push(g);
       else bySign.set(key, [g]);
     }
-    expect(bySign.size).toBe(8); // all eight octants really are exercised
+    expect(bySign.size).toBe(8);
 
     for (const [key, cells] of bySign) {
       let reference: string | null = null;
@@ -478,8 +419,6 @@ describe('po-maze / the goal is exact and invisible', () => {
     const truth: [number, number, number] = [0, 0, 0];
     const bloom = objectNamed(module, 'moonflowerBloom');
 
-    // the whole state space that matters: every free agent cell against every free goal
-    // cell in its own 3 × 3 window — the states the old build betrayed
     let adjacentChecked = 0;
     for (const cell of freeCells()) {
       for (let dy = -1; dy <= 1; dy++) {
@@ -488,7 +427,6 @@ describe('po-maze / the goal is exact and invisible', () => {
           if (poMazeIsWall(g.x, g.y)) continue;
           module.update(toFrameUpdate(poseFixture('adjacent', cell.x, cell.y, g.x, g.y)));
           expect(bloom.visible).toBe(false);
-          // …and the anchor is on the goal to the last bit while the art says nothing
           const w = worldOf(module, 'goal-anchor');
           cellToWorld(g.x, g.y, grid, truth);
           expect(w.x).toBeCloseTo(truth[0], 10);
@@ -512,7 +450,6 @@ describe('po-maze / the goal is exact and invisible', () => {
     module.update(before);
     expect(bloom.visible).toBe(false);
 
-    // the agent walks into (5,6); POMaze throws it to (1,9) and hides a new goal at (8,2)
     ctx.setTime(1.05);
     module.update(
       toFrameUpdate(poseFixture('scored', 1, 9, 8, 2, 801), {
@@ -524,14 +461,12 @@ describe('po-maze / the goal is exact and invisible', () => {
     expect(bloom.visible).toBe(true);
     bloom.updateWorldMatrix(true, false);
     const w = new THREE.Vector3().setFromMatrixPosition(bloom.matrixWorld);
-    cellToWorld(5, 6, grid, truth); // the cell the reward was EARNED on
+    cellToWorld(5, 6, grid, truth);
     expect(w.x).toBeCloseTo(truth[0], 10);
     expect(w.z).toBeCloseTo(truth[2], 10);
-    // and NOT on the new goal (8,2), which nothing in the frame may name
     cellToWorld(8, 2, grid, truth);
     expect(Math.hypot(w.x - truth[0], w.z - truth[2])).toBeGreaterThan(1);
 
-    // the breath closes and takes the flower with it
     ctx.setTime(12);
     module.update(toFrameUpdate(poseFixture('later', 1, 9, 8, 2, 802), { scrubbed: false }));
     expect(bloom.visible).toBe(false);
@@ -557,7 +492,6 @@ describe('po-maze / the goal is exact and invisible', () => {
 describe('po-maze / THE COMPASS CARRIES SIGNS, NEVER DISTANCE', () => {
   test('compassOffset is a pure function of the four sign bits and the clock', () => {
     const out = new THREE.Vector3();
-    // it takes SIGNS: every magnitude with the same sign pair gives the same offset
     const reference = new THREE.Vector3();
     compassOffset(1, -1, 2.5, 0.7, reference);
     for (const [dx, dy] of [[1, -1], [4, -1], [1, -9], [7, -7], [10, -3]]) {
@@ -566,15 +500,12 @@ describe('po-maze / THE COMPASS CARRIES SIGNS, NEVER DISTANCE', () => {
       expect(out.y).toBe(reference.y);
       expect(out.z).toBe(reference.z);
     }
-    // the radius never depends on the direction either: at a given instant EVERY bearing
-    // sits on one circle, so no pairing of moth position and time can encode a distance
     const radii: number[] = [];
     for (const [dx, dy] of [[1, 0], [0, 1], [-1, 0], [0, -1], [1, 1], [-1, 1], [1, -1], [-1, -1]]) {
       compassOffset(dx ?? 0, dy ?? 0, 2.5, 0.7, out);
       radii.push(Math.hypot(out.x, out.z));
     }
     expect(Math.max(...radii) - Math.min(...radii)).toBeLessThan(1e-12);
-    // and the bearing wander is bounded well inside the 45° that would blur an octant
     for (let k = 0; k <= 200; k++) {
       const t = (k / 200) * 40;
       compassOffset(1, 0, t, 0.7, out);
@@ -583,14 +514,9 @@ describe('po-maze / THE COMPASS CARRIES SIGNS, NEVER DISTANCE', () => {
       expect(MOTH_SWING).toBeLessThan(Math.PI / 4);
       expect(Math.hypot(out.x, out.z)).toBeGreaterThan(MOTH_RIM - MOTH_BREATH - 1e-12);
     }
-    // a goal on the agent's own cell has no direction at all
     expect(compassOffset(0, 0, 2.5, 0.7, out)).toBe(false);
   });
 
-  // the compass MOTH is retired (owner's ruling 2026-08-05): a second glowing
-  // creature beside the wisp read as a second agent, and the viewer's goal
-  // beacon carries direction now. `compassOffset` stays tested above as the
-  // pure sign-bits function it always was.
   test('the goal BEACON stands on the live goal cell exactly, at every range', async () => {
     const { module, ctx } = await live();
     ctx.setTime(3.25);
@@ -618,7 +544,6 @@ describe('po-maze / alignment', () => {
   test('every probe lands on ground truth at hero tier', async () => {
     const module = createScene();
     const report = await assertAligned(module, fixtures, { geometry: geometryOf(), seed: SEED, tier: 'hero' });
-    // these roots carry POSITION ONLY — they must be exact, not merely within 1e-3
     expect(report.worst.get('wisp-anchor') ?? 1).toBeLessThan(1e-9);
     expect(report.worst.get('goal-anchor') ?? 1).toBeLessThan(1e-9);
     expect(report.worst.get('gap-gate0') ?? 1).toBeLessThan(1e-9);
@@ -780,7 +705,6 @@ describe('po-maze / update contract', () => {
     expect(pool).not.toBeNull();
     if (!pool) return;
 
-    // standing exactly ON the goal cell with no event: nothing may fire
     ctx.setTime(1);
     module.update(toFrameUpdate(poseFixture('onGoal', 9, 9, 9, 9, 100), { scrubbed: false }));
     expect(pool.stats.bursts).toBe(0);
@@ -802,11 +726,9 @@ describe('po-maze / update contract', () => {
   test('the breath opens on the cell the +1 was EARNED on, not on the agent\'s new one', async () => {
     const { module, ctx } = await live();
     const grid = resolveGrid(geometryOf());
-    // the agent walks toward a goal at (5,6)…
     ctx.setTime(3);
     const before = toFrameUpdate(poseFixture('run', 5, 5, 5, 6, 200), { scrubbed: false });
     module.update(before);
-    // …enters it, and POMaze redraws BOTH: the agent lands on (1,9), the goal on (8,2)
     ctx.setTime(3.125);
     module.update(
       toFrameUpdate(poseFixture('scored', 1, 9, 8, 2, 201), {
@@ -815,7 +737,6 @@ describe('po-maze / update contract', () => {
         events: [{ type: 'goal' }, { type: 'teleport' }, { type: 'done' }],
       }),
     );
-    // the breath light stands over (5,6) — where the reward happened — not (1,9) or (8,2)
     const light = module.scene.getObjectByName('oakPoint1');
     expect(light).toBeDefined();
     if (!light) return;
@@ -847,7 +768,6 @@ describe('po-maze / update contract', () => {
     );
     expect(fog.density).toBeLessThan(standing);
 
-    // …and it closes again, all the way back, with no residue
     ctx.setTime(12);
     module.update(toFrameUpdate(poseFixture('later', 1, 9, 8, 2, 400), { scrubbed: false }));
     expect(fog.density).toBeCloseTo(standing, 12);
@@ -867,10 +787,8 @@ describe('po-maze / update contract', () => {
         events: [{ type: 'goal' }, { type: 'teleport' }, { type: 'done' }],
       }),
     );
-    // more than the eight bits at (1,1) are lit: the clearing is open
     const duringBreath = shownWallCells(module);
     expect(duringBreath.size).toBeGreaterThan(observedWallCells(1, 1).size);
-    // and once it has closed, the forest is back to exactly the observation
     ctx.setTime(12);
     module.update(toFrameUpdate(poseFixture('after', 1, 1, 9, 9, 600), { scrubbed: false }));
     expect([...shownWallCells(module)].sort()).toEqual([...observedWallCells(1, 1)].sort());
@@ -964,7 +882,6 @@ describe('po-maze / lifecycle', () => {
     const grid = resolveGrid(geometryOf());
     module.update(toFrameUpdate(fixtureNamed('forest-start')));
     const cam = module.camera;
-    // four-rooms sits 12.5 units up and 17.8 out; this one is a spirit's-eye view
     expect(cam.position.y).toBeLessThan(4);
     expect(cam.position.y).toBeGreaterThan(1);
     const truth: [number, number, number] = [0, 0, 0];
@@ -973,12 +890,11 @@ describe('po-maze / lifecycle', () => {
     expect(standoff).toBeLessThan(8);
     const dir = new THREE.Vector3();
     cam.getWorldDirection(dir);
-    expect(dir.y).toBeLessThan(0); // still looking down at the litter
-    expect(dir.y).toBeGreaterThan(-0.5); // but nowhere near an aerial
+    expect(dir.y).toBeLessThan(0);
+    expect(dir.y).toBeGreaterThan(-0.5);
     expect(cam.fov).toBeGreaterThanOrEqual(35);
     expect(cam.fov).toBeLessThanOrEqual(45);
 
-    // and it follows: the same camera over a cell in the far corner
     module.update(toFrameUpdate(poseFixture('corner', 9, 9, 1, 1)));
     cellToWorld(9, 9, grid, truth);
     const standoffB = Math.hypot(cam.position.x - truth[0], cam.position.z - truth[2]);
@@ -991,13 +907,11 @@ describe('po-maze / lifecycle', () => {
     const grid = resolveGrid(geometryOf());
     const cam = module.camera;
     const at: [number, number, number] = [0, 0, 0];
-    /** how far the eye stands from the cell it is framing, once settled */
     const standoff = (x: number, y: number): number => {
       cellToWorld(x, y, grid, at);
       return Math.hypot(cam.position.x - at[0], cam.position.z - at[2]);
     };
 
-    // settle on (8,9), one step short of the goal at (9,9)
     ctx.setTime(20);
     let before = toFrameUpdate(poseFixture('run', 8, 9, 9, 9, 900));
     module.update(before);
@@ -1009,8 +923,6 @@ describe('po-maze / lifecycle', () => {
     const settled = standoff(8, 9);
     expect(settled).toBeGreaterThan(1);
 
-    // the +1: the agent is thrown to (1,1), a new goal is hidden at (5,6), and the eye
-    // must be ON the clearing (9,9) on this very frame — not a frame of the way there
     const scoreTime = 21.6;
     ctx.setTime(scoreTime);
     module.update(
@@ -1023,15 +935,12 @@ describe('po-maze / lifecycle', () => {
     expect(standoff(9, 9)).toBeCloseTo(settled, 9);
     const cutPos = cam.position.clone();
 
-    // …and it HOLDS there: no drift while the fog breathes
     for (let i = 1; i <= 8; i++) {
       ctx.setTime(scoreTime + i * 0.05);
       module.update(toFrameUpdate(poseFixture('hold', 1, 1, 5, 6, 902), { scrubbed: false }));
       expect(cam.position.distanceTo(cutPos)).toBeLessThan(1e-9);
     }
 
-    // the linger ends: ONE frame later the eye is framed on the wisp, eleven cells away.
-    // An exponential drift at CAM_FOLLOW_RATE would have covered 3.6% of that in a frame.
     ctx.setTime(scoreTime + LINGER_SECONDS + 1e-3);
     module.update(toFrameUpdate(poseFixture('after', 1, 1, 5, 6, 903), { scrubbed: false }));
     expect(standoff(1, 1)).toBeCloseTo(settled, 9);
@@ -1061,7 +970,6 @@ describe('po-maze / lifecycle', () => {
     cam.updateMatrixWorld(true);
     const pose = cam.matrixWorld.clone();
 
-    // every free cell, a hop chain, a scrub and a full +1 — the card holds all of it
     let frames = 0;
     for (const cell of freeCells()) {
       ctx.setTime(50 + frames * 0.05);
@@ -1084,7 +992,6 @@ describe('po-maze / lifecycle', () => {
     }
     expect(frames).toBe(65);
 
-    // and the shot it holds is the manifest's own thumbFrame cell, dead ahead
     const at: [number, number, number] = [0, 0, 0];
     cellToWorld(manifest.thumbFrame.pose[0] ?? 0, manifest.thumbFrame.pose[1] ?? 0, grid, at);
     const toCell = new THREE.Vector2(at[0] - cam.position.x, at[2] - cam.position.z).normalize();
@@ -1102,7 +1009,6 @@ describe('po-maze / lifecycle', () => {
       module.update(toFrameUpdate(poseFixture('walk', cell.x, cell.y, 5, 5)));
       worst = Math.max(worst, Math.hypot(module.camera.position.x, module.camera.position.z));
     }
-    // the ring starts at 13 (world.ts OUTER_FOREST_INNER): nothing between eye and physics
     expect(worst).toBeLessThan(13);
     module.dispose();
   });
@@ -1128,7 +1034,6 @@ describe('po-maze / lifecycle', () => {
     const thumbLive = await live('thumb');
     thumbLive.module.update(toFrameUpdate(fixtureNamed('north-gap')));
     const thumb = census(thumbLive.module, false);
-    // STYLE.md's thumb contract
     expect(thumb.draws).toBeLessThanOrEqual(40);
     expect(thumb.triangles).toBeLessThanOrEqual(50_000);
     thumbLive.module.dispose();

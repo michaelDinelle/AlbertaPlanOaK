@@ -1,13 +1,4 @@
 /// <reference types="bun" />
-// Acrobot-cont-v0 decoder unit tests: the deterministic init, the pose slot
-// mapping, the tip kinematics (which must agree with the env's own success
-// quantity), and the goal/done/teleport triple.
-//
-// Oracles: test/fixtures/init_states.json (oak_fleet_init) and the trace
-// goldens, whose rows all passed an fp64 one-step parity check against
-// tools/physics_parity.py before being written. The end-to-end row-by-row
-// comparison lives in test/decode.test.ts; this file covers the semantics
-// those goldens cannot reach (synthetic edge frames, geometry, constants).
 
 import { describe, expect, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
@@ -80,9 +71,6 @@ describe('kinematics', () => {
   });
 
   test('the tip y IS the env success quantity', () => {
-    // -cos(th1) - cos(th1+th2) is exactly the free end's height, so a scene
-    // drawing acrobotPoints and the successLine anchor cannot disagree with
-    // the reward the kernel paid.
     const out = new Float32Array(ACROBOT_POINT_FLOATS);
     for (let i = 0; i < 64; i++) {
       const th1 = -Math.PI + (2 * Math.PI * i) / 64;
@@ -130,7 +118,6 @@ describe('decoder contract', () => {
       expect(f.state.w1).toBe(0);
       expect(f.state.w2).toBe(0);
       expect(f.state.tipHeight).toBe(-2);
-      // no action has been taken yet
       expect(f.state.action).toBe(0);
       expect(f.state.torque).toBe(0);
     }
@@ -144,7 +131,6 @@ describe('decoder contract', () => {
     expect(a.restElbow).toEqual([0, -AB_L1, 0]);
     expect(a.restTip).toEqual([0, -(AB_L1 + AB_L2), 0]);
     expect(a.successLine).toEqual([0, AB_SUCCESS_HEIGHT, 0]);
-    // no terrain function for a pendulum-family env
     expect(g.classic?.heightAt).toBeUndefined();
     expect(acrobotDecoder.geometry(STATIC, 32)).toBe(g);
   });
@@ -178,8 +164,6 @@ describe('events', () => {
   });
 
   test('done is a swing-up success, and the state snaps back to hang', () => {
-    // the kernel scores tipHeight > 1, then zeroes the state in the same step,
-    // so the recorded row is the hang state with done = 1
     const a = frameOf(0, row([1.5, 0.6, 2.6, -0.7]), prev);
     const b = frameOf(1, row([0, 0, 0, 0], 1), a);
     expect(acrobotDecoder.deriveEvents(a, b, STATIC)).toEqual([

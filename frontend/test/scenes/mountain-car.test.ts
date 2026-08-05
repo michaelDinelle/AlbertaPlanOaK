@@ -1,10 +1,4 @@
 /// <reference types="bun" />
-// Alpine Valley (MountainCar-cont-v0) — the accuracy + lifecycle self-check.
-//
-// This is the reference shape for all 16 scene tests: alignment at every tier, an
-// init/dispose round trip that proves nothing leaks, update idempotence, and the two
-// contract rules a screenshot can never catch — celebrations come ONLY from
-// `frame.events`, and a `teleport` is a hard snap, never an ease.
 
 import { describe, expect, test } from 'bun:test';
 import * as THREE from 'three';
@@ -37,7 +31,7 @@ import {
   type StubSceneContext,
 } from './aligned';
 
-const SEED = 40; // the demo run's first MountainCar lane
+const SEED = 40;
 
 function geometryOf(): EnvGeometry {
   return mountainCarDecoder.geometry(mountainCarDecoder.initStatic(SEED), SEED);
@@ -56,7 +50,6 @@ function fixtureNamed(name: string): SceneFixture {
   return f;
 }
 
-// ---------------------------------------------------------------------------
 
 describe('mountain-car / manifest + fixtures', () => {
   test('manifest declares the frozen contract fields', () => {
@@ -96,7 +89,6 @@ describe('mountain-car / the terrain IS the physics', () => {
 
   test('past the track ends the profile is free to wander (the exact zone is the playfield)', () => {
     const ridge = makeRidgeHeight(mountainCarHeight, SEED);
-    // continuous across the boundary — the weight is smoothstepped, never a seam
     expect(ridge(MC_MAX_POS + 0.001, 0)).toBeCloseTo(mountainCarHeight(MC_MAX_POS + 0.001), 5);
     let wander = 0;
     for (const x of [-2.6, -1.9, 1.4, 2.8]) {
@@ -120,7 +112,6 @@ describe('mountain-car / alignment', () => {
   test('every probe lands on ground truth at hero tier', async () => {
     const module = createScene();
     const report = await assertAligned(module, fixtures, { geometry: geometryOf(), seed: SEED, tier: 'hero' });
-    // the cart root carries POSITION ONLY — it should be exact, not merely within 1e-3
     expect(report.worst.get('cart') ?? 1).toBeLessThan(1e-9);
     expect(report.worst.get('summit-cairn') ?? 1).toBeLessThan(1e-9);
     expect(report.worst.get('trailhead') ?? 1).toBeLessThan(1e-9);
@@ -152,7 +143,6 @@ describe('mountain-car / alignment', () => {
       if (!probe) continue;
       probe.object.updateWorldMatrix(true, false);
       world.setFromMatrixPosition(probe.object.matrixWorld);
-      // the pose arrives as f32, so ground truth is the f32 round-trip of `pos`
       const truth = Math.fround(pos);
       expect(world.x).toBeCloseTo(truth, 10);
       expect(world.y).toBeCloseTo(mountainCarHeight(truth), 10);
@@ -187,7 +177,6 @@ describe('mountain-car / the cart rides the tangent', () => {
       expect(forward.x).toBeCloseTo(expected.x, 9);
       expect(forward.y).toBeCloseTo(expected.y, 9);
       expect(forward.z).toBeCloseTo(0, 9);
-      // and it is a TILT, not a translation: the root must stay exactly on the curve
       expect(tilt.position.lengthSq()).toBe(0);
     }
     module.dispose();
@@ -221,13 +210,11 @@ describe('mountain-car / update contract', () => {
     expect(pool).not.toBeNull();
     if (!pool) return;
 
-    // standing exactly on the goal line, with no event: nothing may fire
     ctx.setTime(1);
     module.update(toFrameUpdate(fixtureNamed('summit'), { scrubbed: false }));
     expect(pool.stats.bursts).toBe(0);
     expect(pool.stats.ripples).toBe(0);
 
-    // the same pose, with the decoder's real event batch: exactly one celebration
     ctx.setTime(2);
     module.update(
       toFrameUpdate(fixtureNamed('summit'), {
@@ -271,7 +258,6 @@ describe('mountain-car / update contract', () => {
     module.update(atSummit);
     expect(probeOf().x).toBeCloseTo(MC_GOAL_POS, 10);
 
-    // the recorded goal row IS the respawn: [-0.5, 0, 0.5] with done = 1
     ctx.setTime(1.033);
     const respawn: SceneFixture = {
       name: 'respawn',
@@ -304,7 +290,6 @@ describe('mountain-car / update contract', () => {
     module.update(toFrameUpdate(fixtureNamed('summit'), { scrubbed: false }));
     expect(cartX()).toBeCloseTo(MC_GOAL_POS, 10);
 
-    // the host lerps pose across the respawn row: 0.5 -> -0.5 inside ONE control step
     const midSlide: SceneFixture = {
       name: 'mid-slide',
       pose: [0, 0.02, MC_GOAL_POS, 0, 0, 0, 0, 0, 0],
@@ -312,7 +297,7 @@ describe('mountain-car / update contract', () => {
       step: fixtureNamed('summit').step ?? 0,
     };
     module.update(toFrameUpdate(midSlide, { scrubbed: false }));
-    expect(cartX()).toBeCloseTo(MC_GOAL_POS, 10); // held, not eased through the valley
+    expect(cartX()).toBeCloseTo(MC_GOAL_POS, 10);
     module.dispose();
   });
 });
@@ -365,10 +350,6 @@ describe('mountain-car / lifecycle', () => {
 
 describe('mountain-car / the thumb wall-view cap', () => {
   test('the thumb frame fits STYLE.md\u2019s 40 draws / 50k triangles, overlay included', async () => {
-    // The wall view is the whole gallery on one page: every scene there is a thumb, and
-    // the cap is what keeps 16 of them at 60 fps. Measured with the ground-truth overlay
-    // ON, because that is the state review screenshots are taken in, and across every
-    // fixture, because the busiest legal state is the one that has to fit.
     const { module } = await live('thumb');
     module.setDebug(true);
     for (const f of fixtures) module.update(toFrameUpdate(f));

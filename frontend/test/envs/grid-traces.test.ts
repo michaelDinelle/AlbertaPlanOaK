@@ -1,16 +1,4 @@
 /// <reference types="bun" />
-// Gridworld end-to-end decode goldens.
-//
-// Two layers, both replayed through `decodeRecording`:
-//   1. traces/<envId>.bin  — the first 200 record-v3 rows of a REAL fleet lane
-//      (.oak-benchmarks/frontend-demo-16env-20260803), with the per-frame
-//      decoded state produced independently by tools/gridworld_ref.py.
-//   2. grid_event_cases.json — SYNTHESIZED rows from scripted solves, so every
-//      event type fires on every env (a 200-step window of a 100k lane almost
-//      never contains a goal on the harder envs).
-//
-// Regenerate both with:
-//   /Users/studio/OaKMeta/.venv/bin/python frontend/test/fixtures/gen.py --only grid
 
 import { describe, expect, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
@@ -78,7 +66,6 @@ function loadJson<T>(name: string): T {
   return JSON.parse(readFileSync(fixtureUrl(name), 'utf8')) as T;
 }
 
-/** read a fixture .bin as a standalone ArrayBuffer (Node Buffers are pooled) */
 function loadBin(name: string): ArrayBuffer {
   const b = readFileSync(fixtureUrl(name));
   return b.buffer.slice(b.byteOffset, b.byteOffset + b.byteLength) as ArrayBuffer;
@@ -90,7 +77,6 @@ function decoderFor(envId: string): EnvDecoder<unknown, unknown> {
   return d;
 }
 
-/** decode + compare against a (frames, events) golden pair */
 function expectGolden(
   envId: string,
   seed: number,
@@ -209,7 +195,7 @@ describe('scripted event cases (every event type, every env)', () => {
     const c = fx.cases.find((x) => x.envId === 'MemoryChain-cont-v0')!;
     expect(c.eventCounts['done']).toBe(4);
     expect(c.eventCounts['cue']).toBe(4);
-    expect(c.eventCounts['goal']).toBe(2); // every other round is deliberately wrong
+    expect(c.eventCounts['goal']).toBe(2);
     const data = new Float32Array(c.rows.length * RECORD_FLOATS);
     for (let i = 0; i < c.rows.length; i++) data.set(c.rows[i] ?? [], i * RECORD_FLOATS);
     const dec = decodeRecording(
@@ -236,7 +222,6 @@ describe('scripted event cases (every event type, every env)', () => {
       const dry = surfaces.filter((evs) => !evs.some((e) => e.type === 'goal'));
       expect(surfaces.length).toBe(c.eventCounts['resurface'] ?? 0);
       expect(dry.length).toBe(1);
-      // and a successful dive puts goal BEFORE resurface
       const wet = surfaces.find((evs) => evs.some((e) => e.type === 'goal'))!;
       expect(wet[0]).toEqual({ type: 'goal' });
       expect(wet[1]).toEqual({ type: 'resurface' });
@@ -264,8 +249,6 @@ describe('init frames', () => {
   });
 
   test('the init pose uses the same packing as the record rows', () => {
-    // frame -1 -> row 0 must be a legal one-step transition, so the init pose
-    // has to be packed exactly like a recorded pose.
     for (const envId of GRID_ENVS) {
       const fx = loadJson<TraceFixture>(`traces/${envId}.json`);
       const d = decoderFor(envId);

@@ -15,16 +15,7 @@ import numpy as np
 ENTROPY_COLLAPSE_EPS = 1e-6
 NF_PHASES = ("encode", "learn", "plan", "tdPsi")
 
-# summary.json schema. v2 (2026-08-04) is the terminology migration: a fleet lane
-# IS a seed (one agent, one stream), "delivered rate" IS the average reward rate,
-# "zenith/decay" IS peak/retention, and an "igniter" IS a seed that crossed the
-# solved threshold. Same numbers, same gate decisions — only the names moved.
-# Readers accept v1 (no summarySchemaVersion) via frontend/server/summaryAdapter.ts.
 SUMMARY_SCHEMA_VERSION = 2
-# A seed counts as SOLVED when its peak windowed reward rate exceeded this.
-# Structural, not tuned: it is the same 0.1/step bar the gate's solved-seed
-# (was: igniter) criterion has always used — published in summary.json so no
-# reader has to hard-code it.
 SOLVED_THRESHOLD = 0.1
 
 SOTA_EVAL = {"TD7": 17.4, "TD-MPC2": 15.1, "MR.Q": 13.3, "TD3": 10.1, "SAC": 9.9}
@@ -66,12 +57,6 @@ def write_json(path: Path, payload) -> None:
     path.write_text(json.dumps(json_safe(payload), indent=2, sort_keys=True,
                                allow_nan=False))
 
-# --- Phase 8: per-organ reward/GFLOP instrument ----------------------------
-# organCostVersion 1 mirror of the host-side static FLOP model
-# (Sources/Main.swift, "organFlops / flopsPerLaneStep"). MUST stay term-for-term
-# identical to the Swift derivation: same guards, same fma-units-then-x2
-# convention. Legacy roots (no organFlops in meta.json) are recomputed with
-# this mirror and flagged "recomputed-v1".
 ORGAN_COST_VERSION = 1
 ORGAN_COST_NOTE = (
     "static trip-count model (fma=2 flops), ablation-aware; over-attributes "
@@ -79,7 +64,6 @@ ORGAN_COST_NOTE = (
     "deltas across ablations, never absolute FLOPs (design "
     "docs/research/allocation-and-instrument-design.md §1). Cross-version "
     "absolute comparisons are refused.")
-# Env-window physics estimates (mirror of the Swift envFlops table).
 ENV_FLOPS = {
     "HalfCheetah-v4": 20_000, "FourRooms-cont-v0": 40, "DeepSea-cont-v0": 20,
     "KeyCorridor-cont-v0": 60, "Acrobot-cont-v0": 200, "MountainCar-cont-v0": 40,
@@ -135,14 +119,9 @@ def organ_flops_v1(ablations) -> dict[str, int]:
         fma["GenerateAndTest"] += f_rn // 2 + f_r + f_k
     return {k: 2 * v for k, v in fma.items()}
 
-# Design §2 Tier-0: per-organ online yield proxies already flowing through
-# fleet.jsonl health (kernelRho lives at row top level). Ranking signals only
-# — they never convict and are never written into learning targets.
 TIER0_SIGNALS = {
     "FeatureConstruction": ["oakFeatureReinitCountFinal"],
     "GVFPrediction": ["mainTd", "kernelRho"],
-    # optionDurationMean was removed 2026-08-05: the kernel wrote a literal
-    # 0.0f into it (a ranking signal that was identically zero).
     "RewardRespectingSubtasks": ["terminationRate", "selectedContinuation"],
     "OptionPolicies": ["actorAdvantageL1", "actorUpdateNormMean",
                        "actorSupportEntropy", "actionDeltaL2Mean"],
@@ -301,12 +280,9 @@ def load_run(root: Path) -> dict:
         for line in f:
             row = json.loads(line)
             if row.get("kind") == "hb":
-                continue  # pre-tape archives; the tape is the only series source
+                continue
             lanes[(row["policy"], row["seed"])].append(row)
             policies_seen.add(row["policy"])
-    # METRICS LAW (2026-08-05): fleet.jsonl carries only the final certificate
-    # rows; every heartbeat row comes from the continuous metrics tape. No
-    # legacy path — a root without a tape is not a valid instrument.
     import metrics_tape
     for pol in policies_seen:
         if metrics_tape.find_tape(root, pol) is None:
@@ -466,23 +442,13 @@ def analyze_policy(run: dict, policy: str, window: int) -> dict:
         "positiveFraction": float((rates > 0).mean()),
         "recentRewardRateIQM": iqm(recent_arr),
         "recentRewardRateMax": float(recent_arr.max()),
-        # Per-seed vectors are PERSISTED in summary.json (v2): the population is
-        # the deliverable, and a reader that cannot see the per-seed spread has to
-        # re-parse fleet.jsonl to draw it.
         "recentRewardRateBySeed": recents,
         "rewardRateBySeed": {s: float(r) for s, r in zip(seeds, rates)},
     }
-    # Completeness: a run is valid only if it reached its declared horizon. A silently-killed run
-    # (laptop sleep, OOM, harness stop) leaves lanes short of horizon — flag it loudly so no one
-    # gates or reports a partial run as if it finished.
     max_step = max(int(f["step"]) for f in fin.values())
     has_final = any(r["kind"] == "final" for s in seeds for r in run["lanes"][(policy, s)])
     out["complete"] = bool(has_final and max_step >= horizon)
     out["maxStep"] = max_step
-    # Population progress toward the goal (the WHOLE population at SOTA, staying there forever).
-    # Report the distribution and the fraction of seeds clearing each reward-rate threshold — never
-    # a single hand-picked seed. Thresholds: >0 walking at all, >1 the milestone, >5 ~SAC-delivered,
-    # >10 SOTA.
     _pct = np.percentile(rates, [10, 25, 50, 75, 90, 99])
     out["rewardRatePercentiles"] = {k: float(v) for k, v in
                                     zip(("p10", "p25", "p50", "p75", "p90", "p99"), _pct)}
@@ -492,9 +458,6 @@ def analyze_policy(run: dict, policy: str, window: int) -> dict:
     if flops:
         out["rewardPerGFLOP"] = out["rewardRateIQM"] / (flops / 1e9)
         out["bestSeedRewardPerGFLOP"] = out["bestSeedRewardRate"] / (flops / 1e9)
-    # `n` is THIS view's seed count — for a per-env slice that is the slice's own
-    # population, never the pooled fleet, so a 64-seed env slice still publishes
-    # its own CI.
     if n >= 4:
         out["rewardRateIQMCI95"] = list(bootstrap_ci(rates, iqm, seed=1))
     ts, surv = km_curve(times, events)
@@ -518,18 +481,12 @@ def analyze_policy(run: dict, policy: str, window: int) -> dict:
                     [p_["retention"] for p_ in plast if math.isfinite(p_["retention"])]),
             }
             out["retentionBySeed"] = retention_by_seed
-            # Solved-threshold metrics (Mark III audit law: Tier-M IQM alone is blind
-            # to walking-mode kills — the tail is a first-class gate axis).
-            # solved   := seed whose peak windowed rate exceeded SOLVED_THRESHOLD;
-            # retained := solved seed still holding >= half its peak at the end.
             _ign = [p_ for p_ in plast if p_["peakRewardRate"] > SOLVED_THRESHOLD]
             _sus = [p_ for p_ in _ign
                     if math.isfinite(p_["retention"]) and p_["retention"] >= 0.5]
             out["solvedSeeds"] = len(_ign)
             out["solvedSeedsRetained"] = len(_sus)
             out["solvedRetentionFraction"] = (len(_sus) / len(_ign)) if _ign else None
-            # "Staying power": fraction of seeds retaining >= half their peak rate at the end
-            # (the opposite of post-peak decay/crash). A continuous online agent must STAY at rate.
             _dec = [p_["retention"] for p_ in plast if math.isfinite(p_["retention"])]
             out["retentionFraction"] = (
                 float(np.mean([d >= 0.5 for d in _dec])) if _dec else None)
@@ -715,10 +672,6 @@ def build_organ_report(run: dict, slice_results: dict[str, list[dict]],
             "flopsPerLaneStep": fl,
             "envFlopsPerLaneStep": env_ph,
             "agentFlopsPerLaneStep": agent_flops,
-            # v1-consistent lane cost: this report's organ model + the env
-            # physics estimate. For legacy roots (v0 meta) `flopsPerLaneStep`
-            # above embeds the pre-organ agent model — use the v1 pair for any
-            # cross-root ratio work (the caveat's version rule, applied).
             "v1FlopsPerLaneStep": v1_fl,
             "rewardRateIQM": r["rewardRateIQM"],
             "positiveFraction": r["positiveFraction"],
@@ -740,8 +693,6 @@ def build_organ_report(run: dict, slice_results: dict[str, list[dict]],
     }
     ledger = Path(run["root"]).parent / "ORGANS.json"
     if ledger.exists():
-        # The cross-run conviction ledger (Tier-1 ablation-matrix verdicts):
-        # attached verbatim so this report is the single purge brief.
         try:
             report["organsLedger"] = json.loads(ledger.read_text())
         except json.JSONDecodeError:
@@ -798,10 +749,6 @@ def cmd_report(args) -> int:
     window = args.window or max(meta["steps"] // 5, 1)
     policies = [args.policy] if args.policy else meta.get("policies", ["oak"])
     results = [analyze_policy(run, p, window) for p in policies]
-    # Mixed-env fleets (meta.envSchedule + per-lane envId): reward scales differ
-    # across envs, so lanes are NEVER pooled into one IQM — print the full
-    # population report once per env slice, then the legacy overall block with a
-    # warning. Single-env roots take the old path untouched (byte-identical output).
     slices = env_slices(run, policies)
     mixed = len(slices) > 1
     slice_results: dict[str, list[dict]] = {}
@@ -809,9 +756,6 @@ def cmd_report(args) -> int:
         env_flops = env_flops_map(meta)
         for env_id, seeds in slices.items():
             view = slice_run(run, seeds)
-            # Per-env slice view: the env's own lane cost (env physics differs
-            # per env; the top-level flopsPerLaneStep is the primary env's) and
-            # lane count, so rewardPerGFLOP and the header are per-env honest.
             view["meta"] = {
                 **meta, "envId": env_id, "batch": len(seeds),
                 "flopsPerLaneStep": env_flops.get(
@@ -833,10 +777,6 @@ def cmd_report(args) -> int:
         for r in results:
             if r:
                 print(render_leaderboard(run, r, args.top))
-    # v2 persists the per-seed vectors (rewardRateBySeed / recentRewardRateBySeed /
-    # retentionBySeed) instead of stripping them: the population IS the deliverable,
-    # and a reader that only gets aggregates has to re-parse fleet.jsonl to draw the
-    # spread. Nothing is dropped on the way out any more.
     summary = {
         "summarySchemaVersion": SUMMARY_SCHEMA_VERSION,
         "solvedThreshold": SOLVED_THRESHOLD,
@@ -848,7 +788,6 @@ def cmd_report(args) -> int:
                                 for env, sres in slice_results.items()}
     out = args.json or (args.root / "summary.json")
     write_json(out, summary)
-    # Phase 8: per-organ reward/GFLOP artifact (the purge brief).
     organ_report = build_organ_report(run, slice_results, results, slices)
     write_json(args.root / "organ-report.json", organ_report)
     print(render_organ_section(organ_report))
@@ -894,11 +833,6 @@ def gate_verdicts(keep_fin, cand_fin, keep_seeds, cand_seeds, n, horizon, args, 
         f"cand={rmst(c_times, c_events, horizon):,.0f} ΔRMST5={dr5:+,.0f} "
         f"margin={-rmst_margin:,.0f}"))
 
-    # NF criterion: per-lane PREVALENCE non-inferiority per phase (the fraction of lanes with any
-    # non-finite in that phase), mirroring the divergence criterion (paired bootstrap, Δ95 ≤ δ) and
-    # consistent with the equivalence gate's nf_prevalence. Replaces a fleet-sum-of-totals test, which
-    # a few already-diverged lanes inflate by spraying non-finites after death — double-counting lanes
-    # the divergence criterion already counts. Population NF health is how MANY lanes go non-finite.
     def nf_prevalence_vec(fin, seeds, phase):
         return np.array([
             1.0 if ((fin[s].get("health") or {}).get("nonFiniteByPhase") or {}).get(phase, 0) > 0
@@ -917,14 +851,6 @@ def gate_verdicts(keep_fin, cand_fin, keep_seeds, cand_seeds, n, horizon, args, 
         "nfPrevalence", not nf_over,
         "; ".join(nf_parts) + (f" OVER={nf_over}" if nf_over else "") + f" δ={delta:.4f}"))
 
-    # Ignition / walking-mode tail (Mark III audit law: Tier-M IQM alone approved a
-    # mode-kill — the tail is a first-class BLOCKING gate axis). Four criteria,
-    # paired by seed with the same machinery as the core gate:
-    #   solvedSeeds   — per-seed solved indicator, non-inferiority at δ
-    #   retainedSeeds — per-seed retained-solved indicator, non-inferiority at δ
-    #   bestLaneClass — paired top-8-seed mean reward rate, 5% relative band
-    #   positiveFrac  — per-seed rate>0 indicator, non-inferiority at δ
-    # Explicit absolute bars (--min-igniters/--min-best/--min-positive) ADD on top.
     def _ign_vec(run_, seeds_):
         run_lanes = run_["lanes"]
         pol = args.policy
@@ -952,12 +878,6 @@ def gate_verdicts(keep_fin, cand_fin, keep_seeds, cand_seeds, n, horizon, args, 
             verdicts.append((name, d95 <= delta,
                              f"keeper={int(kv.sum())} cand={int(cv.sum())} "
                              f"Δ95={d95:+.4f} δ={delta:.4f}"))
-        # bestLaneClass REMOVED as a promotion criterion (user law 2026-07-20):
-        # "rockets are an instability, all agents should converge to the same
-        # high reward rate." The gate's population axes (IQM delivered rate,
-        # igniters, sustainers, positiveFrac, divergence, RMST, NF prevalence)
-        # are the promotion law; the top-8 best-lane mean is NOT a blocking
-        # criterion — it preserved the rocket mode the user wants eliminated.
         k_pos_v = (k_del > 0).astype(float)
         c_pos_v = (c_del > 0).astype(float)
         d_pos95 = float(np.percentile(
@@ -978,7 +898,7 @@ def gate_verdicts(keep_fin, cand_fin, keep_seeds, cand_seeds, n, horizon, args, 
             verdicts.append(("solvedBars (was ignitionBars)", ign_ok,
                              f"best={c_best:+.4f} pos={c_pos:.1%} bars[solved>={args.min_igniters} "
                              f"best>={args.min_best} pos>={args.min_positive}]"))
-    except Exception as e:  # tail metrics must never break the core gate
+    except Exception as e:
         print(f"  [info] solvedTail  (unavailable: {e})")
 
     hdr = f"fleet gate: N={n} seeds horizon={horizon} policy={args.policy} boot={args.boot}"
@@ -986,8 +906,6 @@ def gate_verdicts(keep_fin, cand_fin, keep_seeds, cand_seeds, n, horizon, args, 
         hdr += f" [{label}]"
     print(hdr)
     ok = True
-    # Criterion labels carry their pre-v2 name in parens; the tests, thresholds and
-    # PASS/FAIL semantics behind them are unchanged.
     width = max((len(name) for name, _, _ in verdicts), default=14)
     for name, passed, detail in verdicts:
         ok &= passed
@@ -1025,7 +943,7 @@ def print_per_env_delta(keep_run, cand_run, keep_fin, cand_fin, seeds, args) -> 
         if e is not None:
             by_env[e].append(s)
     if len(by_env) < 2:
-        return  # single-env root: the headline IQM already IS the per-env number
+        return
     rows = []
     for i, (env_id, e_seeds) in enumerate(sorted(by_env.items())):
         k = delivered(keep_fin, e_seeds)
@@ -1035,7 +953,7 @@ def print_per_env_delta(keep_run, cand_run, keep_fin, cand_fin, seeds, args) -> 
             paired_bootstrap(k, c, iqm, n_boot=args.boot, seed=40 + i), 5))
         rel = (c_iqm - k_iqm) / abs(k_iqm) if k_iqm else float("nan")
         rows.append((rel, env_id, len(e_seeds), k_iqm, c_iqm, d5))
-    rows.sort(key=lambda r: (math.isnan(r[0]), r[0]))  # worst first, undefined last
+    rows.sort(key=lambda r: (math.isnan(r[0]), r[0]))
     print(f"  [info] perEnvDelta  (diagnostic, NOT a criterion — "
           f"per-env verdicts: gate --env-slice <envId>)")
     for rel, env_id, m, k_iqm, c_iqm, d5 in rows:
@@ -1125,8 +1043,6 @@ def cmd_gate(args) -> int:
     keep_envs = lane_env_map(keep_run, args.policy)
     cand_envs = lane_env_map(cand_run, args.policy)
     if args.env_slice is not None:
-        # Restrict BOTH roots to lanes on this env, paired by seed. The 8-criterion
-        # gate below then runs unchanged on the slices.
         keep_fin = {s: f for s, f in keep_fin.items() if keep_envs.get(s) == args.env_slice}
         cand_fin = {s: f for s, f in cand_fin.items() if cand_envs.get(s) == args.env_slice}
         if not keep_fin or not cand_fin:
@@ -1151,7 +1067,6 @@ def cmd_gate(args) -> int:
               f"candidate {len(cand_seeds)}); paired comparison requires identical seeds.")
         return 2
     if args.env_slice is None:
-        # Same seed on different envs is not a paired comparison — reward scales differ.
         mixed = [(s, keep_envs.get(s), cand_envs.get(s)) for s in keep_seeds
                  if s in cand_envs and keep_envs.get(s) != cand_envs.get(s)]
         if mixed:
@@ -1165,8 +1080,6 @@ def cmd_gate(args) -> int:
         print(f"GATE ERROR: horizons differ (keeper {kh}, candidate {ch}).")
         return 2
     n, horizon = len(keep_seeds), kh
-    # Refuse to gate a silently-killed run: a partial run (laptop sleep / OOM / harness stop) that did
-    # not reach its declared horizon must never be PROMOTEd or REJECTed as if it finished.
     for label, fin in (("keeper", keep_fin), ("candidate", cand_fin)):
         ms = max((int(f["step"]) for f in fin.values()), default=0)
         if ms < horizon:

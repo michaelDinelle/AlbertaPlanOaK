@@ -1,11 +1,3 @@
-// Gold Hour Savanna — canonical poses.
-//
-// Every one of these is a REAL qpos9 lifted out of the demo run's own HalfCheetah lane
-// (`frontend-demo-16env-20260803`, seed 0), except `reset-drop`, which is the decoder's
-// synthesized frame −1 for that same seed. Between them they exercise every claim the
-// scene makes: feet in the air, belly-down flailing, a full extended stride at 0.96 m/s,
-// a nose-down stumble, and — the one that matters for a treadmill — a pose 431 metres
-// down the plain, where f32 world coordinates have to keep the toes on the ground.
 
 import type { SceneFixture } from '@kit/types';
 import { CHEETAH_DT, type CheetahState } from '@sim/envs/halfcheetah';
@@ -27,7 +19,6 @@ function fixture(name: string, step: number, pose: number[], ctrl: number[], vel
   return { name, pose, ctrl, derived: state(pose, velX), step };
 }
 
-/** frame −1: `HC_QPOS0 + U(-0.1, 0.1)^9` for lane seed 0 — dropped, feet clear of the ground */
 const RESET_POSE = [
   -0.020190715789794922, 0.07610403746366501, 0.04714255779981613, 0.0210963636636734,
   -0.01655038446187973, 0.08292048424482346, -0.009654700756072998, -0.09430766105651855,
@@ -35,11 +26,8 @@ const RESET_POSE = [
 ];
 
 export const fixtures: SceneFixture[] = [
-  // the deterministic init draw: airborne, about to land. Toes at z ≈ 0.22.
-  // (its velX is the reset draw's own qvel[0] — the one frame that knows its true speed)
   fixture('reset-drop', -1, RESET_POSE, [0, 0, 0, 0, 0, 0], 0.031030923128128052),
 
-  // step 617: the early stream. Belly low, both toes planted, barely creeping forward.
   fixture(
     'flail-sprawl',
     617,
@@ -55,10 +43,6 @@ export const fixtures: SceneFixture[] = [
     0.2486179769039154,
   ),
 
-  // step 52025: THE hero pose, and the manifest's thumbFrame. 0.97 m/s with the back toe
-  // PLANTED (0.044, one geom radius = standing on the ground) and the front leg swinging
-  // clear at 0.185 — a real contact frame, which is what makes the dust and the shadow
-  // line up in the gallery thumbnail.
   fixture(
     'stride-plant',
     52025,
@@ -71,8 +55,6 @@ export const fixtures: SceneFixture[] = [
     0.966,
   ),
 
-  // step 51472: mid-bound — BOTH feet clear of the ground at 0.96 m/s. The frame that
-  // proves the scene never fakes contact: no dust, no scuff, shadow only.
   fixture(
     'stride-extend',
     51472,
@@ -88,7 +70,6 @@ export const fixtures: SceneFixture[] = [
     0.95977783203125,
   ),
 
-  // step 49693: a stumble — nose pitched 12° down, sliding backwards, back foot high.
   fixture(
     'nose-dip',
     49693,
@@ -104,8 +85,6 @@ export const fixtures: SceneFixture[] = [
     -0.2606201171875,
   ),
 
-  // step 99999: 431 m down the treadmill, reared up at 56° with the back leg in the air.
-  // If the world snap or the f32 pose ever drifted, this is the fixture that shows it.
   fixture(
     'far-field-rear',
     99999,
@@ -122,7 +101,6 @@ export const fixtures: SceneFixture[] = [
   ),
 ];
 
-/** the control-step the velocities above are measured over (documented, not re-derived) */
 export const FIXTURE_DT = CHEETAH_DT;
 
 export default fixtures;

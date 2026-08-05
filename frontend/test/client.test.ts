@@ -1,7 +1,4 @@
 /// <reference types="bun" />
-// Client-shell pure logic: store, TTL resource, API URL building, formatters,
-// and the reshaping helpers the views depend on. No DOM here — happy-dom is not
-// installed, so views are verified by hand against the running API server.
 
 import { describe, expect, test } from 'bun:test';
 
@@ -41,7 +38,6 @@ import {
 import { parseQuartiles } from '../src/components/bars';
 import type { AggregateRow, FleetColumnar, RunDetail, RunIndexEntry } from '@shared/types';
 
-// ---------------------------------------------------------------- store
 
 describe('createStore', () => {
   test('get / set / subscribe / unsubscribe', () => {
@@ -82,7 +78,6 @@ describe('createStore', () => {
   });
 });
 
-// ------------------------------------------------------------- resource
 
 describe('createResource', () => {
   test('serves from cache inside the TTL and refetches after it', async () => {
@@ -144,7 +139,6 @@ describe('createResource', () => {
   });
 });
 
-// ------------------------------------------------------------------ api
 
 describe('apiUrl', () => {
   test('prefixes /api once', () => {
@@ -154,7 +148,6 @@ describe('apiUrl', () => {
   });
 
   test('drops empty values and joins arrays with commas', () => {
-    // 0 is a value, not an absence — only '', null and undefined are dropped
     expect(apiUrl('/runs/x/fleet', { fields: ['a.b', 'c'], envId: undefined, limit: 0 })).toBe(
       '/api/runs/x/fleet?fields=a.b%2Cc&limit=0',
     );
@@ -169,21 +162,15 @@ describe('apiUrl', () => {
   });
 
   test('the fleet query is fields + envId + policy, and nothing else', () => {
-    // policy is load-bearing: the server filters fleet.jsonl by it (default `oak`),
-    // so a zero/random view that omits it silently reads oak's lanes. maxLanes is
-    // gone — lane capping is a client-side decision (capLanes), never a request.
     expect(
       apiUrl('/runs/p93/fleet', { fields: ['health.rewardRate'], envId: 'DeepSea-cont-v0', policy: 'zero' }),
     ).toBe('/api/runs/p93/fleet?fields=health.rewardRate&envId=DeepSea-cont-v0&policy=zero');
   });
 
   test('the curves query is envId + policy, and the run id is escaped', () => {
-    // Same law as the fleet query: the curve is built from ONE policy's seeds, and
-    // envId is what keeps a mixed fleet's environments on their own scales.
     expect(apiUrl('/runs/p93/curves', { envId: 'HalfCheetah-v4', policy: 'oak' })).toBe(
       '/api/runs/p93/curves?envId=HalfCheetah-v4&policy=oak',
     );
-    // an absent env means "every lane, pooled" — it must not appear as an empty filter
     expect(apiUrl('/runs/p93/curves', { envId: undefined, policy: 'oak' })).toBe(
       '/api/runs/p93/curves?policy=oak',
     );
@@ -196,7 +183,6 @@ describe('apiUrl', () => {
   });
 });
 
-// ----------------------------------------------------------- formatters
 
 describe('formatters', () => {
   test('formatRate picks a representation by magnitude', () => {
@@ -244,7 +230,6 @@ describe('formatters', () => {
   });
 });
 
-// -------------------------------------------------------------- env map
 
 describe('envShares', () => {
   test('expands a mixed schedule in canonical env order', () => {
@@ -271,8 +256,6 @@ describe('envShares', () => {
   });
 
   test('an index entry yields env IDENTITY only, in canonical order', () => {
-    // the index carries envIds + batch but never the split, so there is no lane
-    // count to be had here — inventing batch/n printed fiction on every mixed run
     expect(envIdsOf({ envIds: ['DeepSea-cont-v0', 'HalfCheetah-v4'] })).toEqual([
       'HalfCheetah-v4',
       'DeepSea-cont-v0',
@@ -282,7 +265,6 @@ describe('envShares', () => {
   });
 });
 
-// -------------------------------------------------------------- gallery
 
 function entry(overrides: Partial<RunIndexEntry> = {}): RunIndexEntry {
   return {
@@ -343,7 +325,6 @@ describe('gallery filtering and ordering', () => {
   });
 });
 
-// ------------------------------------------------------------ aggregate
 
 function agg(step: number, kind: 'hb' | 'final', p50: number, policy = 'oak'): AggregateRow {
   return {
@@ -383,7 +364,6 @@ describe('live aggregate buffering (the watch view)', () => {
 
   test('a three-policy stream stays three series instead of one splice', () => {
     const buffer = new Map<string, AggregateRow>();
-    // exactly what a multi-policy live stream delivers: three rows per step
     for (const step of [10_000, 20_000, 30_000]) {
       absorbAggregateRow(buffer, agg(step, 'hb', 0.4, 'oak'));
       absorbAggregateRow(buffer, agg(step, 'hb', -0.2, 'zero'));
@@ -402,7 +382,6 @@ describe('live aggregate buffering (the watch view)', () => {
     absorbAggregateRow(buffer, agg(10_000, 'hb', 1, 'oak'));
     absorbAggregateRow(buffer, agg(10_000, 'final', 9, 'oak'));
     absorbAggregateRow(buffer, agg(10_000, 'hb', 2, 'zero'));
-    // a late duplicate hb must not clobber the final
     absorbAggregateRow(buffer, agg(10_000, 'hb', 3, 'oak'));
     expect(buffer.get('oak:10000')?.deliveredRateP50).toBe(9);
     expect(buffer.get('zero:10000')?.deliveredRateP50).toBe(2);
@@ -442,7 +421,6 @@ describe('policyView (the run dashboard)', () => {
     d.summary = { results: [{ policy: 'oak' }, { policy: 'zero' }] };
     expect(policyView(d, 'oak').maxStep).toBe(1_000_000);
     expect(policyView(d, 'oak').complete).toBe(true);
-    // zero stalled at 300k — reading oak's last step here is exactly the bug
     expect(policyView(d, 'zero').maxStep).toBe(300_000);
     expect(policyView(d, 'zero').complete).toBe(false);
   });
@@ -480,7 +458,6 @@ describe('kmCurve', () => {
   });
 });
 
-// --------------------------------------------------------------- fleet
 
 function columnar(): FleetColumnar {
   return {
@@ -531,9 +508,6 @@ describe('fleet columnar reshaping', () => {
   });
 });
 
-// The rho-bar fix: the Seeds tab plots MEASURED reward per step, derived here from
-// the cumulative rewardSum column, instead of health.rewardRate (the agent's own
-// internal average-reward estimate rho-bar).
 describe('windowRates — measured reward rate per heartbeat window', () => {
   test('differences the cumulative sum over each window', () => {
     expect(windowRates([100, 200, 400], [10, 30, 30])).toEqual([0.1, 0.2, 0]);
@@ -564,7 +538,7 @@ describe('windowRates — measured reward rate per heartbeat window', () => {
     );
     expect(rows[0]?.seed).toBe(3);
     expect(rows[0]?.values).toEqual([0.1, 0.2]);
-    expect(rows[0]?.last).toBe(0.2); // the last WINDOW, not the cumulative total
+    expect(rows[0]?.last).toBe(0.2);
   });
 
   test('a trailing null falls back to the last finite window', () => {
@@ -600,7 +574,6 @@ describe('capLanes', () => {
   });
 });
 
-// --------------------------------------------------------------- misc
 
 describe('compareValues', () => {
   test('numbers numerically, strings naturally, nulls always last', () => {

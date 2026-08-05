@@ -1,23 +1,3 @@
-// The Willow Swing — the static world.
-//
-// THE ACCURACY CLAIM OF THIS FILE: every world position that means something to the env
-// is read from `geometry.classic.anchors` and nowhere else.
-//   * `pivot`       -> the bough anchor the trapeze hangs from (the scene-graph root of
-//                      the whole arm; see actors.ts)
-//   * `successLine` -> the y the string of lights is strung at. The bulbs' centres ARE
-//                      that surface: `tipHeight > 1` is true exactly when the lantern is
-//                      above the bulbs, so the honesty rule ("never hide what the env
-//                      defines — Acrobot success line") is satisfied by construction and
-//                      not by a tuned decoration.
-//   * `restTip`     -> where the lantern hangs at the reset, i.e. how far the pond has to
-//                      sit below the pivot for the swing to skim it.
-// Nothing in this file re-derives link lengths, the success height, or the reach; the
-// decoder's `AB_L1`, `AB_L2` and the anchors are the only sources.
-//
-// LIGHT: the sun is low, left and BEHIND, so the willow is a backlit curtain, the pond
-// carries a long specular path toward the camera, and the lantern — the one warm HDR
-// thing on the near side — owns the frame. `toonFloor` is generous throughout: a dawn
-// shadow side is blue, never black.
 
 import * as THREE from 'three';
 import { applyFog, makeLightRig, type LightRig } from '@kit/lighting';
@@ -45,75 +25,31 @@ import { makeWater, type WaterHandle } from '@kit/water';
 import { AB_L1, AB_L2, AB_SUCCESS_HEIGHT } from '@sim/envs/acrobot';
 import type { EnvGeometry } from '@sim/types';
 
-// ---------------------------------------------------------------------------
-// world constants (1 link === 1 world unit — the reach really is 2 units)
-// ---------------------------------------------------------------------------
 
-/** the arm's full reach from the pivot; nothing solid may enter this disc at z ≈ 0 */
 export const REACH = AB_L1 + AB_L2;
-/** a little clearance past the reach for the lantern's own body */
 export const SWING_CLEARANCE = 0.3;
 
-/**
- * The pond surface. The lantern hangs at `restTip` (y = −2) and is ~0.2 deep, so a
- * surface 0.42 under the rest tip lets the swing SKIM the water at the bottom of every
- * arc without ever touching it — the reflection meets the lantern and parts again.
- */
 export const WATER_Y = -(AB_L1 + AB_L2) - 0.42;
 export const POND_SIZE: readonly [number, number] = [30, 30];
 
 export const TERRAIN_SIZE: readonly [number, number] = [46, 34];
 export const TERRAIN_SEGMENTS: readonly [number, number] = [152, 112];
 
-/** the string of lights spans the frame; the cords sit either side of the swing plane */
 export const GARLAND_HALF_X = 3.42;
 export const GARLAND_Z = 0.34;
 export const GARLAND_BULBS = 13;
 
-/** the willow stands off the left edge, its great bough arching in over the pond */
 export const WILLOW_X = -4.95;
 export const WILLOW_Z = -1.25;
-/** the bough passes over the pivot at this height; a short hanger drops to the anchor */
 export const BOUGH_Y = 0.34;
-/**
- * ...and it passes over it BEHIND THE SWING PLANE. The load-bearing bough is the one
- * solid the arm could ever hit: the pivot hangs only 0.34 under it, and the env's whole
- * objective is to raise the free end a full link ABOVE the pivot, so a bough drawn at
- * z = 0 is crossed by the arm on every scoring swing (measured on the recorded stream:
- * link 1 or link 2 came within a mesh radius of the limb on 2.25% of frames, and passed
- * clean through its axis at the near-success poses). Everything inside the reach is
- * therefore offset by more than (bough radius 0.076 + lantern radius 0.127), and a
- * near-profile camera foreshortens the offset away.
- */
 export const BOUGH_Z = -0.36;
-/**
- * The minimum |z − pivot.z| any solid may have inside the swing disc. It is the clearance
- * the arm's own body needs, not a style choice: the lantern is 0.127 wide in z and the
- * bough 0.076, so 0.25 is the first round number that guarantees a gap.
- */
 export const SWING_PLANE_CLEARANCE = 0.25;
-/**
- * The hinge sleeve. The brass collar the arm turns in and the last stretch of the hanger
- * cord are the ONLY solids allowed to touch the swing plane, because they ARE the
- * attachment the arm rotates about — a hinge that cleared its own axle would be a lie.
- * Measured (locked by the test): the furthest vertex inside the plane sits at an in-plane
- * radius of 0.358 — a 0.02-radius cord and a 0.075 collar, 18% of the arm's reach.
- */
 export const HINGE_R = 0.45;
 
-/** fog reach is derived from the world footprint, never hand-tuned per shot */
 export const FOG_EXTENT = 210;
 
-/**
- * Low, left and behind: elevation 27° (canon lesson 8 — a lower sun smears the willow's
- * shadow across the whole pond), azimuth well behind the subject so the fronds are a
- * backlit curtain and the water carries a specular path back toward the camera.
- */
 export const SUN_DIR: readonly [number, number, number] = [-0.578, 0.458, -0.677];
 
-// ---------------------------------------------------------------------------
-// small shared helpers (actors.ts imports these too)
-// ---------------------------------------------------------------------------
 
 export function smoothstep01(t: number): number {
   return t <= 0 ? 0 : t >= 1 ? 1 : t * t * (3 - 2 * t);
@@ -123,12 +59,10 @@ export function clampRange(v: number, lo: number, hi: number): number {
   return v < lo ? lo : v > hi ? hi : v;
 }
 
-/** A scene-local color: STYLE.md allows only BLENDS of token colors. */
 export function blendTokens(a: THREE.ColorRepresentation, b: THREE.ColorRepresentation, k: number): THREE.Color {
   return new THREE.Color(a).lerp(new THREE.Color(b), k);
 }
 
-/** `noon.sun` is the token white and `night.skyTop` the token near-black (canon 9). */
 export const TOKEN_WHITE = TOKENS.palettes.noon.sun;
 export const TOKEN_BLACK = TOKENS.palettes.night.skyTop;
 
@@ -137,12 +71,6 @@ export interface ColoredPart {
   color: THREE.ColorRepresentation;
 }
 
-/**
- * Merge pre-transformed parts into ONE geometry carrying a flat per-part vertex color,
- * disposing the sources. Hand-built props (a willow, a trapeze, a garland) want their
- * SOURCE normals plus a bark/vine/brass palette baked per part, so one mesh + one
- * material draws the whole prop.
- */
 export function mergeColoredParts(parts: readonly ColoredPart[], name: string): THREE.BufferGeometry {
   let total = 0;
   for (const p of parts) {
@@ -186,7 +114,6 @@ export function mergeColoredParts(parts: readonly ColoredPart[], name: string): 
   return g;
 }
 
-/** A capsule-free limb: one tapered cylinder laid between two points in the x-y plane. */
 export function boneGeometry(
   ax: number,
   ay: number,
@@ -200,21 +127,13 @@ export function boneGeometry(
   const dy = by - ay;
   const len = Math.hypot(dx, dy);
   const g = new THREE.CylinderGeometry(r1, r0, len, radial, 1);
-  // local +y runs a→b; rotate it onto the segment and drop it at the midpoint
   g.rotateZ(Math.atan2(dy, dx) - Math.PI / 2);
   g.translate((ax + bx) * 0.5, (ay + by) * 0.5, 0);
   return g;
 }
 
-/** floats written by `acrobotPointsExact`: [elbowX, elbowY, tipX, tipY] */
 export const EXACT_POINT_FLOATS = 4;
 
-/**
- * The f64 twin of the decoder's `acrobotPoints`. IDENTICAL formula — the decoder writes
- * into a `Float32Array`, which rounds every coordinate to ~2e-8, and a probe measured
- * against that would be grading the scene against a rounded truth. `out[3]` is bitwise
- * `acrobotTipHeight(th1, th2)`; the test pins both claims against the decoder itself.
- */
 export function acrobotPointsExact(th1: number, th2: number, out: Float64Array): Float64Array {
   const ex = AB_L1 * Math.sin(th1);
   const ey = -AB_L1 * Math.cos(th1);
@@ -225,11 +144,6 @@ export function acrobotPointsExact(th1: number, th2: number, out: Float64Array):
   return out;
 }
 
-/**
- * The env's own anchors, never a scene re-derivation (STYLE.md accuracy law).
- * A missing anchor falls back to the decoder's own literal, so a placeholder geometry
- * (the harness fixture loop) still builds a correct world.
- */
 export function anchorOf(
   geometry: EnvGeometry,
   key: string,
@@ -238,26 +152,15 @@ export function anchorOf(
   return geometry.classic?.anchors?.[key] ?? fallback;
 }
 
-/** The bough anchor: the hinge the whole arm hangs from. */
 export function pivotAnchor(geometry: EnvGeometry): readonly [number, number, number] {
   return anchorOf(geometry, 'pivot', [0, 0, 0]);
 }
 
-/** The success surface: `tipHeight > 1`, drawn as the string of lights. */
 export function successAnchor(geometry: EnvGeometry): readonly [number, number, number] {
   return anchorOf(geometry, 'successLine', [0, AB_SUCCESS_HEIGHT, 0]);
 }
 
-// ---------------------------------------------------------------------------
-// the bank height field
-// ---------------------------------------------------------------------------
 
-/**
- * A pond floor a metre under the surface everywhere the camera can see water, climbing
- * into a low far shore beyond z = −7.5 and into side banks past |x| = 9.5. The whole
- * near field (the swing's own water) is identically flat, so nothing the art invents can
- * ever poke through the mirror the lantern is reflected in.
- */
 export function makeBankHeight(seed: number): (x: number, z: number) => number {
   const floor = WATER_Y - 1.05;
   return (x, z) => {
@@ -271,9 +174,6 @@ export function makeBankHeight(seed: number): (x: number, z: number) => number {
   };
 }
 
-// ---------------------------------------------------------------------------
-// world handle
-// ---------------------------------------------------------------------------
 
 export interface WorldHandle {
   group: THREE.Group;
@@ -281,22 +181,12 @@ export interface WorldHandle {
   rig: LightRig;
   water: WaterHandle;
   terrain: TerrainHandle;
-  /** the string of lights — a probe object, world position === anchor `successLine` */
   garlandRoot: THREE.Object3D;
-  /** pond surface height (the ripple plane and the lantern's glint pool) */
   waterY: number;
-  /** ctx.time() — pause freezes wind, mist, fireflies and the dawn together */
   setTime(t: number): void;
-  /** 0 = deep blue hour (fireflies out, mist thick), 1 = full dawn */
   setDawn(k01: number): void;
-  /**
-   * 0 → 1 celebration flare progress; bulbs light in sequence from the centre outward.
-   * A NEGATIVE progress is "idle" (every bulb back to its resting gain).
-   */
   setFlare(progress: number): void;
-  /** 0..1 petal rain from the willow */
   setPetals(env01: number): void;
-  /** the lantern's glint pool on the water: world x/z of the lantern + a 0..1 gain */
   setGlint(x: number, z: number, gain: number): void;
   setPixelRatio(dpr: number): void;
   dispose(): void;
@@ -325,7 +215,6 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene): WorldHandle {
   const pivot = pivotAnchor(ctx.geometry);
   const success = successAnchor(ctx.geometry);
 
-  // ---- palette-derived surface colors (blends of tokens only) ----
   const bark = blendTokens(palette.hemiGround, TOKEN_BLACK, 0.42);
   const barkLit = blendTokens(palette.hemiGround, TOKEN_BLACK, 0.28);
   const frondA = blendTokens(palette.hemiGround, TOKEN_BLACK, 0.3);
@@ -334,15 +223,12 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene): WorldHandle {
   const shoreLit = blendTokens(palette.groundB, palette.skyHorizon, 0.28);
   const brass = blendTokens(palette.sun, palette.hemiGround, 0.42);
 
-  // ---- sky (exactly one) ----
   const sky = skyFromPalette(palette, 'dawn', tier, {
     sunDir: SUN_DIR,
     sunSize: 0.034,
     sunHdr: 3.6,
     sunGlow: 0.34,
     sunGlowPower: 20,
-    // a small topSpread lets the dawn BLUE come all the way down to the treeline; the
-    // kit default keeps the peach horizon so high that the whole sky reads as one cream
     topSpread: 0.28,
     bottomSpread: 0.42,
     radius: 320,
@@ -351,7 +237,6 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene): WorldHandle {
   owned.push(sky);
   timed.push({ setTime: (t) => sky.setTime(t) });
 
-  // ---- the one light budget ----
   const rig = makeLightRig(palette, tier, {
     sunDir: sky.sunDirection,
     pointCount: 3,
@@ -360,14 +245,10 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene): WorldHandle {
   });
   group.add(rig.group);
   owned.push(rig);
-  // the focus must COVER what is on screen (canon lesson 8): the whole swing disc plus
-  // the near bank, or the border texel paints amoebas across the far shore.
   rig.setShadowFocus({ x: 0, y: -0.45, z: -0.6 }, 4.2);
 
-  // ---- fog, always ----
   applyFog(scene, palette, FOG_EXTENT);
 
-  // ---- the pond floor and the banks ----
   const bankHeight = makeBankHeight(ctx.seed);
   const rampColor = new THREE.Color();
   const bedColor = blendTokens(palette.hemiGround, TOKEN_BLACK, 0.78);
@@ -383,7 +264,6 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene): WorldHandle {
     slopeStrength: 0.6,
     slopeSharpness: 2.1,
     colorRamp: (h) => {
-      // under the water it is a dark bed; above it, damp shore into dawn-lit meadow
       const wet = smoothstep01((h - (WATER_Y - 0.55)) / 0.75);
       const dry = smoothstep01((h - (WATER_Y + 0.55)) / 1.5);
       rampColor.copy(bedColor).lerp(shore, wet);
@@ -404,11 +284,6 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene): WorldHandle {
   group.add(terrain.mesh);
   owned.push(terrain);
 
-  // ---- the mirror pond ----
-  // MEASURED, not guessed: at this grazing angle the kit's palette-derived default water
-  // renders around 80% white — it is tuned for a pond seen from ABOVE, where most of what
-  // you see is the bed. Here the pond is a MIRROR at dawn, and a mirror is dark: the sky
-  // glow arrives through the fresnel rim and the sun path, never through the body colour.
   const pondShallow = blendTokens(palette.skyTop, TOKEN_BLACK, 0.86);
   const pondDeep = blendTokens(TOKEN_BLACK, palette.skyTop, 0.12);
   const water = makeWater({
@@ -424,9 +299,6 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene): WorldHandle {
     amplitude: 0.012,
     waveScale: 0.7,
     speed: 0.4,
-    // a near-profile camera sees the fresnel term over the WHOLE surface (dot(n, view)
-    // never gets far from grazing), so the kit default rim turns the mirror into a sheet
-    // of horizon. The rim here is a hint at the far edge, nothing more.
     fresnel: 0.22,
     caustics: 0.06,
     depthFalloff: 11,
@@ -434,23 +306,16 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene): WorldHandle {
     sunDir: sky.sunDirection,
     name: 'mirrorPond',
   });
-  // KIT GAP (worked around, filed): `WaterOptions.shallow`/`deep` are not used as given —
-  // makeWater lerps them 35% toward `palette.groundB` and 55% toward `palette.skyBottom`,
-  // so on a warm palette NO override can reach a dark water. `setColors` writes the live
-  // uniforms directly and is the only way to get a dawn mirror instead of a tan sheet.
   water.setColors(pondShallow, pondDeep);
-  // the specular path is the ONE bloom feeder the water is allowed
   water.uniforms.uSpecular.value = tier === 'thumb' ? 0 : 1.15;
   group.add(water.mesh);
   owned.push(water);
   timed.push(water);
 
-  // ---- the willow: trunk, boughs, and the hanger the trapeze swings from ----
   const boughPoints = willowBoughs();
   const willowParts: ColoredPart[] = [];
   {
     const rng = streamFor(ctx.seed, 'willow');
-    // trunk: a stack of leaning segments so the silhouette is never a pipe
     const SEGS = 8;
     let x = WILLOW_X;
     let y = WATER_Y + 0.05;
@@ -467,7 +332,6 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene): WorldHandle {
       x = nx;
       y = ny;
     }
-    // root flare at the waterline
     for (let i = 0; i < 5; i++) {
       const a = (i / 5) * Math.PI * 2 + rng();
       const g = new THREE.IcosahedronGeometry(0.2 + rng() * 0.1, 0);
@@ -475,7 +339,6 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene): WorldHandle {
       g.translate(WILLOW_X + Math.cos(a) * 0.26, WATER_Y + 0.1, WILLOW_Z + Math.sin(a) * 0.26);
       willowParts.push({ geometry: g, color: bark });
     }
-    // the boughs
     for (const bough of boughPoints) {
       for (let i = 0; i < bough.length - 1; i++) {
         const a = bough[i] as readonly [number, number, number];
@@ -493,11 +356,6 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene): WorldHandle {
         willowParts.push({ geometry: g, color: i % 2 === 0 ? barkLit : bark });
       }
     }
-    // The hanger: a braided drop from the bough down to the env's pivot anchor. It leans
-    // FORWARD out of the bough's plane (BOUGH_Z → the pivot) instead of dropping straight,
-    // so the only part of it standing in the arm's own column is the tie at the hinge —
-    // where the collar is, and where the arm is attached anyway. A leaning cord reads
-    // exactly like a cord; a vertical rod through the swing does not.
     const hangerTop: readonly [number, number, number] = [pivot[0], BOUGH_Y, pivot[2] + BOUGH_Z];
     const hangerFoot: readonly [number, number, number] = [pivot[0], pivot[1] + 0.03, pivot[2]];
     const hanger = new THREE.CylinderGeometry(
@@ -510,7 +368,6 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene): WorldHandle {
       ),
       5,
     );
-    // local +y runs top → foot, so the FIRST radius is the one at the hinge
     alignSegment(hanger, hangerTop, hangerFoot);
     willowParts.push({ geometry: hanger, color: bark });
     const collar = new THREE.CylinderGeometry(0.062, 0.075, 0.075, 8);
@@ -543,7 +400,6 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene): WorldHandle {
     },
   });
 
-  // ---- the frond curtain: ONE InstancedMesh, per-instance wind phase (canon 10) ----
   const FROND_LEN = 1.5;
   const frondGeometry = makeFrondGeometry(FROND_LEN);
   const FROND_WIND = 0.075;
@@ -553,8 +409,6 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene): WorldHandle {
     side: THREE.DoubleSide,
     roughness: 0.88,
     rimColor: palette.sun,
-    // a thin strand is edge-on almost everywhere, so a strong rim turns the whole
-    // curtain into lit straw; the willow wants a dark silhouette with a lit EDGE
     rimStrength: 0.3,
     toonSteps: 2,
     toonSoftness: 0.4,
@@ -582,7 +436,6 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene): WorldHandle {
     },
   });
 
-  // ---- the string of lights: the success surface, physically placed ----
   const garlandRoot = new THREE.Object3D();
   garlandRoot.name = 'garlandRoot';
   garlandRoot.position.set(success[0], success[1], success[2]);
@@ -590,8 +443,6 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene): WorldHandle {
 
   const rigParts: ColoredPart[] = [];
   {
-    // two slender stakes driven into the pond hold the far end; the near end is tied
-    // into the willow's own bough, so the line is a real span, not a floating rule.
     for (const z of [-GARLAND_Z, GARLAND_Z]) {
       const stakeH = success[1] + 0.42 - WATER_Y;
       const stake = new THREE.CylinderGeometry(0.02, 0.034, stakeH, 6);
@@ -605,7 +456,6 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene): WorldHandle {
       tie.rotateY(Math.PI / 2);
       tie.translate(GARLAND_HALF_X, success[1] + 0.02, z);
       rigParts.push({ geometry: tie, color: barkLit });
-      // the cord itself: dead straight, exactly on the success height
       const cord = new THREE.BoxGeometry(GARLAND_HALF_X * 2, 0.011, 0.011);
       cord.translate(0, success[1], z);
       rigParts.push({ geometry: cord, color: bark });
@@ -614,7 +464,6 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene): WorldHandle {
   const garlandGeometry = mergeColoredParts(rigParts, 'garlandRig');
   const garlandMesh = new THREE.Mesh(garlandGeometry, woodMaterial);
   garlandMesh.name = 'garlandRig';
-  // sub-texel props must not cast (canon lesson 8): an 11 mm cord shadows as dashes
   garlandMesh.castShadow = false;
   group.add(garlandMesh);
   owned.push({ dispose: () => garlandGeometry.dispose() });
@@ -632,7 +481,6 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene): WorldHandle {
   bulbs.name = 'garlandBulbs';
   const bulbGain = new Float32Array(bulbCount * 3).fill(1);
   bulbs.instanceColor = new THREE.InstancedBufferAttribute(bulbGain, 3);
-  /** |x| of each bulb, for the centre-outward flare sequence */
   const bulbSpan = new Float32Array(bulbCount);
   {
     const m = new THREE.Matrix4();
@@ -644,7 +492,6 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene): WorldHandle {
       for (let i = 0; i < GARLAND_BULBS; i++) {
         const t = GARLAND_BULBS > 1 ? i / (GARLAND_BULBS - 1) : 0.5;
         const x = -GARLAND_HALF_X + t * GARLAND_HALF_X * 2;
-        // the bulbs' CENTRES are the success surface: y === anchor successLine exactly
         p.set(x, success[1], z);
         m.compose(p, q, s);
         bulbs.setMatrixAt(n, m);
@@ -664,9 +511,6 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene): WorldHandle {
     },
   });
 
-  // ---- reeds: a fringe in the true shallows, never a marsh over the mirror ----
-  // The pond IS the scene: nothing stands in the open water the lantern is reflected in,
-  // and nothing stands between the camera and the physics (the mountain-car lesson).
   const notShallow: ExcludeFn = (x, z) =>
     bankHeight(x, z) < WATER_Y - 0.85 || bankHeight(x, z) > WATER_Y - 0.02;
   const nearCamera: ExcludeFn = (_x, z) => z > -1.4;
@@ -737,9 +581,6 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene): WorldHandle {
   owned.push(farTrees);
   timed.push(farTrees);
 
-  // ---- lily pads: the only thing allowed to float on the mirror ----
-  // They give the water a scale and a near-field, and they are kept strictly out of the
-  // swing's own column so the lantern's reflection always lands on open water.
   const padGeometry = makePadGeometry(tier);
   const padMaterial = oakMaterial({
     color: TOKEN_WHITE,
@@ -775,10 +616,6 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene): WorldHandle {
     },
   });
 
-  // ---- the lantern's glint pool: the mirror the swing skims ----
-  // A horizontal streak ON the surface rather than a mirrored copy of the lantern: at
-  // this near-profile camera the reflected image of a light IS a streak drawn toward the
-  // viewer, and a streak costs one draw and can never be occluded wrongly.
   const glintSprite = radialSprite(64, 1.7);
   const glintMaterial: EmissiveMaterial = emissiveMaterial(blendTokens(palette.sun, accent, 0.3), 1.6, {
     map: glintSprite,
@@ -804,9 +641,6 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene): WorldHandle {
     },
   });
 
-  // ---- atmosphere ----
-  // Kit particle/mist presets are tuned for ~20-unit fields (canon lesson 5). This
-  // diorama is ~5 units of subject seen from 5.7, so sizes are scaled ~4× down.
   const mist: MistPlanesHandle = makeMistPlanes({
     size: [22, 12],
     color: blendTokens(palette.fog, palette.skyHorizon, 0.4),
@@ -818,8 +652,6 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene): WorldHandle {
     opacity: 0.07,
     speed: 0.007,
     scale: 2.1,
-    // the near half of the pond stays a clean mirror: mist is a DEPTH cue here, and a
-    // horizontal plane seen at this grazing angle veils the whole surface if it is let
     nearFade: 6.5,
     name: 'pondMist',
   });
@@ -863,12 +695,9 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene): WorldHandle {
   owned.push(pollen);
   timed.push(pollen);
 
-  // petal rain — off until a success, then a slow blossom fall out of the canopy
   const petals: AmbientParticlesHandle = makeAmbientParticles({
     preset: 'snow',
     count: 420,
-    // the canopy the petals fall OUT of, not the whole sky (canon lesson 6: a small
-    // frame needs half the amplitude of the default grammar, all of the beat)
     bounds: { x: WILLOW_X * 0.42, y: 0.55, z: -1.3, halfX: 2.9, halfY: 1.75, halfZ: 1.9 },
     seed: ctx.seed ^ 0x3ce1,
     tier,
@@ -905,7 +734,6 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene): WorldHandle {
 
     setDawn(k01) {
       const k = clampRange(k01, 0, 1);
-      // the light coming up puts the fireflies out and burns the mist off
       fireflies.setIntensity(2.4 * (1 - k) + 0.15);
       fireflies.setDensity(0.25 + 0.75 * (1 - k));
       mist.setOpacity(0.035 + 0.075 * (1 - k));
@@ -919,7 +747,6 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene): WorldHandle {
       flareIdle = idle;
       const e = idle ? -1 : clampRange(progress, 0, 1);
       for (let i = 0; i < bulbCount; i++) {
-        // a bump that leaves the centre and travels out to both stakes, then settles
         const phase = e - (bulbSpan[i] ?? 0) * 0.6;
         const k = idle ? 0 : clampRange(1 - Math.abs(phase) / 0.3, 0, 1);
         const gain = 1 + 6.5 * k * k;
@@ -961,18 +788,7 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene): WorldHandle {
   };
 }
 
-// ---------------------------------------------------------------------------
-// willow construction
-// ---------------------------------------------------------------------------
 
-/**
- * The bough skeleton, in world space. The FIRST bough is the load-bearing one: it leaves
- * the trunk, arches over the pond and passes over the env's pivot at `BOUGH_Y` — one
- * `BOUGH_Z` BEHIND the swing plane, so the trapeze's hanger is a real attachment rather
- * than a floating hinge AND the arm never has to pass through the limb it hangs from.
- * The whole stretch inside the reach keeps |z| ≥ `BOUGH_Z`; the tail only curls back
- * toward the camera once it is clear of the disc (x = 2.35 is already r = 2.48).
- */
 export function willowBoughs(): readonly (readonly (readonly [number, number, number])[])[] {
   const trunkTop: readonly [number, number, number] = [WILLOW_X + 0.95, 1.72, WILLOW_Z];
   const main: (readonly [number, number, number])[] = [
@@ -1005,7 +821,6 @@ export function willowBoughs(): readonly (readonly (readonly [number, number, nu
   return [main, upper, back, front];
 }
 
-/** Rotate + place a +y cylinder so it runs from `a` to `b` (world space). */
 function alignSegment(
   g: THREE.BufferGeometry,
   a: readonly [number, number, number],
@@ -1024,12 +839,6 @@ function alignSegment(
   g.applyMatrix4(m);
 }
 
-/**
- * One willow frond, built going UP from the origin. The kit's vertex wind reads OBJECT
- * space y (`transformed.y / uWindHeight`), so a strand modelled downward would never
- * sway; every instance is rotated π about z instead, which puts the high-sway tip at the
- * bottom — exactly what a willow does.
- */
 export function makeFrondGeometry(length: number): THREE.BufferGeometry {
   const SEGMENTS = 4;
   const g = new THREE.PlaneGeometry(0.038, length, 1, SEGMENTS);
@@ -1038,8 +847,6 @@ export function makeFrondGeometry(length: number): THREE.BufferGeometry {
   const cols = new Float32Array(pos.count * 3);
   for (let i = 0; i < pos.count; i++) {
     const t = clampRange(pos.getY(i) / length, 0, 1);
-    // taper to a point, and BOW: the strand leaves the bough almost vertically and curls
-    // away at the tip, which is the whole silhouette of a willow
     pos.setX(i, pos.getX(i) * (0.26 + 0.74 * t) + t * t * 0.34);
     pos.setZ(i, pos.getZ(i) + (1 - t) * (1 - t) * 0.14);
     const k = 0.55 + 0.6 * t;
@@ -1065,11 +872,6 @@ interface FrondOptions {
   colors: readonly THREE.Color[];
 }
 
-/**
- * Hang fronds off every bough. The hard placement rules: nothing may enter the arm's
- * swing disc, nothing may hang down through the frame the arm and the lights live in,
- * and a foreground strand may only appear at the very edges of the shot.
- */
 function buildFronds(opts: FrondOptions): THREE.InstancedMesh & { dispose(): void } {
   const perTier = opts.tier === 'thumb' ? 0.18 : opts.tier === 'medium' ? 0.5 : 1;
   const wanted = Math.max(8, Math.round(620 * perTier));
@@ -1103,21 +905,15 @@ function buildFronds(opts: FrondOptions): THREE.InstancedMesh & { dispose(): voi
     const scale = 0.55 + rng() * 0.95;
     const len = opts.length * scale;
 
-    // the swing-disc rejection: only strands well out of the plane may hang low
     const inPlane = Math.abs(z) < 0.62;
     if (inPlane) {
-      // closest approach of the vertical hang [y-len, y] to the pivot at the origin
       const yy = y - len > 0 ? y - len : y > 0 ? 0 : y;
       if (Math.hypot(x, yy) < REACH + SWING_CLEARANCE) continue;
     }
-    // nothing at all between the camera and the physics: a foreground strand may only
-    // hang at the very edges of the frame, high up
     if (z > 0.9 && (Math.abs(x) < 2.8 || y - len < 1.05)) continue;
-    // ...nor may any strand hang down through the frame the arm and the lights live in
     if (Math.abs(z) < 3.4 && Math.abs(x) < 3.05 && y - len < 0.5) continue;
 
     p.set(x, y, z);
-    // π about z hangs the strand tip-down; the yaw keeps the curtain from reading flat
     e.set(0, rng() * Math.PI * 2, Math.PI + (rng() - 0.5) * 0.5);
     q.setFromEuler(e);
     s.set(0.7 + rng() * 0.7, scale, 1);
@@ -1135,7 +931,6 @@ function buildFronds(opts: FrondOptions): THREE.InstancedMesh & { dispose(): voi
 }
 
 
-/** One lily pad: a notched disc lying flat, with a slight lift at the rim. */
 export function makePadGeometry(tier: QualityTier): THREE.BufferGeometry {
   const seg = tier === 'thumb' ? 6 : 9;
   const g = new THREE.CircleGeometry(0.5, seg, 0.34, Math.PI * 2 - 0.68);
@@ -1185,7 +980,6 @@ function buildPads(opts: PadOptions): THREE.InstancedMesh & { dispose(): void } 
     guard++;
     const x = (rng() * 2 - 1) * 7.5;
     const z = -5.5 + rng() * 10.5;
-    // never under the swing, never on ground that is about to break the surface
     if (Math.abs(x) < 1.55 && z > -1.6 && z < 1.6) continue;
     if (opts.bankHeight(x, z) > WATER_Y - 0.35) continue;
     const scale = 0.38 + rng() * 0.5;

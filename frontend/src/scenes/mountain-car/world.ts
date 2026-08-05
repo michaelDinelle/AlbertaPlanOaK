@@ -1,21 +1,3 @@
-// Alpine Valley — the static world.
-//
-// THE ACCURACY CLAIM OF THIS FILE: on the track band (|z| <= BAND_HALF_Z) the terrain
-// height field is EXACTLY `geometry.classic.heightAt(x)` — `sin(3x)·0.45+0.55` — with no
-// noise, no swell and no lateral jitter. Everything that makes the ground read as a
-// mountain (the ±z ridge swell, two octaves of value noise, the ragged snowline) is
-// multiplied by a weight that is identically 0 inside the band and only ramps up outside
-// it. The debug overlay's terrain polyline is drawn from the same function at z = 0, so
-// "the polyline lies on the ground" is true by construction, not by tuning.
-//
-// The other rule this file obeys: `makeTerrain({ jitter })` stays at its 0 default.
-// Lateral vertex jitter would move the mesh off `sampleHeight` by O(jitter · slope) —
-// silhouette candy paid for in accuracy, which is the wrong trade for the canon scene.
-//
-// LIGHT: the sun sits low, right and a little behind, so the climb from the trough to
-// the summit is BACKLIT — the valley falls into cool hemisphere shade, every right-facing
-// slope catches the last warm light, and the cairn on the crest is a rim-lit silhouette.
-// That is why `toonFloor` is generous here: a shadow side must stay painterly, not black.
 
 import * as THREE from 'three';
 import { applyFog, makeLightRig, type LightRig } from '@kit/lighting';
@@ -43,58 +25,22 @@ import {
 import type { EnvGeometry } from '@sim/types';
 import { MC_GOAL_POS, MC_MAX_POS, MC_MIN_POS, MC_START_POS, mountainCarHeight } from '@sim/envs/mountaincar';
 
-// ---------------------------------------------------------------------------
-// world constants (1 env unit === 1 world unit — the playfield really is 1.8 wide)
-// ---------------------------------------------------------------------------
 
 export const TERRAIN_W = 10.24;
 export const TERRAIN_D = 8;
-// Segments are deliberately lopsided toward x. `sampleHeight` is a BILINEAR read of the
-// lattice, so its error against the true sine is (1/8)·|h''|·dx² = 0.51·dx² — all in x,
-// none in z (the band is a function of x alone). At hero dx = 0.0246 -> 3e-4; the tier
-// scale drops thumb to dx = 0.082 -> 3e-3, still a third of a wheel radius. Spending the
-// triangles on z instead would buy nothing but a rounder background.
 export const TERRAIN_SEG_X = 416;
 export const TERRAIN_SEG_Z = 84;
-/** |z| <= this is the EXACT profile band: heightFn === heightAt(x), no noise at all. */
 export const BAND_HALF_Z = 0.34;
 const BAND_FEATHER = 0.6;
-/** world height where the meadow gives way to snow (ragged by ±0.08 of value noise) */
 export const SNOW_LINE = 0.7;
-/** fog reach is derived from the terrain footprint, never hand-tuned per shot */
 export const FOG_EXTENT = TERRAIN_W * 4;
-/**
- * Right, a little behind, and 28° up. Lower reads more "sunset" but a 16° sun makes a
- * 0.7-unit conifer throw a 2.6-unit shadow — every tree behind the ridge then drags a
- * black smear across the basin and the physics disappears under it. 28° keeps the warm
- * raking light on the crests and the cool hemisphere fill in the shadowed flanks.
- */
 export const SUN_DIR: readonly [number, number, number] = [0.798, 0.47, -0.379];
-/** the respawn signpost stands beside the track, inside the exact band (|z| < BAND_HALF_Z) */
 export const TRAILHEAD_Z = 0.24;
-/**
- * The eagle's ray. Two constraints fight here and both are unforgiving: the glide must
- * clear the far ridge (the first attempt at radius 3.9 flew straight INTO the background
- * and rendered nothing), and it must stay inside the fixed 40° vertical FOV — vFOV never
- * changes with aspect ratio, only the horizontal does, so a "safe" wide framing does not
- * help. This ray puts the bird ~18° right and ~14° above the authored view axis, past
- * the terrain's z edge, where nothing can occlude it.
- */
 const EAGLE_DIR: readonly [number, number, number] = [0.277, 0.328, -0.904];
 const EAGLE_RADIUS = 6.86;
-/**
- * And it glides AWAY from the camera, not across it. A soaring bird's wings lie in the
- * horizontal plane: fly it across the frame and the whole wingspan points into the
- * screen and projects to a four-pixel sliver; bank it upright to compensate and it
- * projects as a vertical slab. Flying it away puts the span across the frame, which is
- * the shape everyone reads as "eagle", and "leaving into the sunset" is the better beat.
- */
 const EAGLE_TRAVEL: readonly [number, number, number] = [0.35, -0.06, -0.935];
 const EAGLE_SWEEP = 2;
 
-// ---------------------------------------------------------------------------
-// small shared helpers (actors.ts imports these too)
-// ---------------------------------------------------------------------------
 
 export function smoothstep01(t: number): number {
   return t <= 0 ? 0 : t >= 1 ? 1 : t * t * (3 - 2 * t);
@@ -104,12 +50,10 @@ export function clampRange(v: number, lo: number, hi: number): number {
   return v < lo ? lo : v > hi ? hi : v;
 }
 
-/** A scene-local color: STYLE.md allows only BLENDS of token colors. */
 export function blendTokens(a: THREE.ColorRepresentation, b: THREE.ColorRepresentation, k: number): THREE.Color {
   return new THREE.Color(a).lerp(new THREE.Color(b), k);
 }
 
-/** `noon.sun` is the token white — the only legal way for this preserve to say "snow". */
 export const TOKEN_WHITE = TOKENS.palettes.noon.sun;
 
 export interface ColoredPart {
@@ -117,12 +61,6 @@ export interface ColoredPart {
   color: THREE.ColorRepresentation;
 }
 
-/**
- * Merge pre-transformed parts into ONE geometry carrying a flat per-part vertex color,
- * disposing the sources. `kit/vegetation.mergePositions` drops color and recomputes
- * normals; hand-built props (a cart, a cairn, a signpost) want their SOURCE normals plus
- * a wood/stone/iron palette baked per part, so one mesh + one material draws the prop.
- */
 export function mergeColoredParts(parts: readonly ColoredPart[], name: string): THREE.BufferGeometry {
   let total = 0;
   for (const p of parts) {
@@ -166,21 +104,11 @@ export function mergeColoredParts(parts: readonly ColoredPart[], name: string): 
   return g;
 }
 
-/** The env's own height function, never a scene re-derivation (STYLE.md accuracy law). */
 export function heightResolver(geometry: EnvGeometry): (x: number) => number {
   return geometry.classic?.heightAt ?? mountainCarHeight;
 }
 
-// ---------------------------------------------------------------------------
-// the ridge height field
-// ---------------------------------------------------------------------------
 
-/**
- * `heightAt(x)` everywhere, plus a ridge that only exists where the weight is > 0.
- * The weight is max(lateral, longitudinal): identically 0 on the whole track band AND
- * inside the playfield's x range, so the exact profile survives at z = 0 for every x in
- * [MC_MIN_POS, MC_MAX_POS] — which is precisely the overlay polyline's range.
- */
 export function makeRidgeHeight(
   heightAt: (x: number) => number,
   seed: number,
@@ -193,9 +121,6 @@ export function makeRidgeHeight(
     const longitudinal = smoothstep01(outside / 0.45);
     const w = lateral > longitudinal ? lateral : longitudinal;
     if (w <= 0) return base;
-    // -z is "into the frame". Behind the track the valley walls climb into big noisy
-    // ridges; in FRONT of it the ground banks away hard and stays smooth, because
-    // anything in the foreground is between the camera and the physics.
     const behind = -z;
     const front = behind <= 0;
     const swell = front ? behind * 0.46 : behind * 0.115 + behind * behind * 0.022;
@@ -206,26 +131,17 @@ export function makeRidgeHeight(
   };
 }
 
-// ---------------------------------------------------------------------------
-// world handle
-// ---------------------------------------------------------------------------
 
 export interface WorldHandle {
   group: THREE.Group;
   sky: SkyHandle;
   rig: LightRig;
   terrain: TerrainHandle;
-  /** the summit cairn's BASE — a probe object, no decoration offsets */
   cairnRoot: THREE.Object3D;
-  /** the respawn signpost at MC_START_POS — a probe object, no decoration offsets */
   trailheadRoot: THREE.Object3D;
-  /** world point the summit celebration blooms from (the cairn's crown) */
   summitBurst: THREE.Vector3;
-  /** ctx.time() — pause freezes wind, mist, glitter and the eagle together */
   setTime(t: number): void;
-  /** 0 = still evening air, 1 = the goal gust */
   setGust(env01: number): void;
-  /** 0..1 crossing progress, or null to hide */
   setEagle(progress: number | null): void;
   setPixelRatio(dpr: number): void;
   dispose(): void;
@@ -250,7 +166,6 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene): WorldHandle {
   const timed: Timed[] = [];
   const shadows = tier !== 'thumb';
 
-  // ---- palette-derived surface colors (blends of tokens only) ----
   const cValley = blendTokens(palette.groundA, palette.hemiGround, 0.55);
   const cMeadow = blendTokens(palette.groundA, TOKENS.palettes.noon.groundA, 0.5);
   const cSnow = blendTokens(TOKEN_WHITE, palette.hemiSky, 0.3);
@@ -259,7 +174,6 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene): WorldHandle {
   const woodDark = blendTokens(palette.groundA, palette.hemiGround, 0.62);
   const stone = blendTokens(palette.hemiGround, palette.skyTop, 0.5);
 
-  // ---- sky (exactly one) ----
   const sky = skyFromPalette(palette, 'dusk', tier, {
     sunDir: SUN_DIR,
     sunSize: 0.05,
@@ -274,7 +188,6 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene): WorldHandle {
   owned.push(sky);
   timed.push({ setTime: (t) => sky.setTime(t) });
 
-  // ---- the one light budget ----
   const rig = makeLightRig(palette, tier, {
     sunDir: sky.sunDirection,
     pointCount: 2,
@@ -283,15 +196,10 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene): WorldHandle {
   });
   group.add(rig.group);
   owned.push(rig);
-  // the focus must COVER everything on screen, not just the track: outside the ortho
-  // frustum three clamps the shadow lookup to the border texel and smears black amoebas
-  // across the terrain. 2048 over 6.8 units is still 3 mm per texel.
   rig.setShadowFocus({ x: -0.1, y: 0.5, z: -0.6 }, 5.5);
 
-  // ---- fog, always ----
   applyFog(scene, palette, FOG_EXTENT);
 
-  // ---- the terrain IS the physics ----
   const ridge = makeRidgeHeight(heightAt, ctx.seed);
   const rampColor = new THREE.Color();
   const terrain = makeTerrain({
@@ -300,7 +208,7 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene): WorldHandle {
     tier,
     seed: ctx.seed,
     heightFn: ridge,
-    jitter: 0, // accuracy first: the mesh must stay on sampleHeight
+    jitter: 0,
     colorNoise: 0.055,
     slopeColor: cRock,
     slopeStrength: 0.72,
@@ -321,16 +229,13 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene): WorldHandle {
       toonFloor: 0.2,
     },
     receiveShadow: shadows,
-    // NOT a caster: with a backlight this low the far ridge would shadow the whole frame
     castShadow: false,
     name: 'alpineRidge',
   });
   group.add(terrain.mesh);
   owned.push(terrain);
 
-  // ---- vegetation: never on the track line, never above the snow ----
   const aboveSnow: ExcludeFn = (x, z) => terrain.sampleHeight(x, z) > SNOW_LINE + 0.02;
-  // nothing lives between the camera and the physics: the near bank stays bare
   const nearCamera: ExcludeFn = (_x, z) => z > 0.62;
   const sampleAt = (x: number, z: number): number => terrain.sampleHeight(x, z);
 
@@ -340,7 +245,6 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene): WorldHandle {
     area: { x: -0.4, z: -2.2, halfX: 3.6, halfZ: 2 },
     seed: ctx.seed,
     tier,
-    // the profile silhouette must survive: no conifer stands within 1.35 of the track
     exclude: excludeAny(excludeBand(0, 1.2, 0.15), nearCamera, aboveSnow),
     heightAt: sampleAt,
     maxSlope: 0.62,
@@ -401,7 +305,6 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene): WorldHandle {
   owned.push(grass);
   timed.push(grass);
 
-  // ---- the summit cairn, planted exactly on the goal line ----
   const cairnRoot = new THREE.Object3D();
   cairnRoot.name = 'summitCairnRoot';
   cairnRoot.position.set(MC_GOAL_POS, heightAt(MC_GOAL_POS), 0);
@@ -453,9 +356,6 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene): WorldHandle {
   const cordTopA = heightAt(MC_GOAL_POS) + cairnStack + POLE_H * 0.94;
   const summitBurst = new THREE.Vector3(MC_GOAL_POS, cordTopA - 0.05, 0);
 
-  // ---- two bunting strings draped over the summit, built in world space ----
-  // one runs back down the climb (the way the cart comes), one over the far side, so
-  // the cairn reads as a shrine on a col rather than a lone stick.
   interface Guy {
     x: number;
     top: number;
@@ -466,9 +366,6 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene): WorldHandle {
   ];
   const buntingParts: ColoredPart[] = [];
   {
-    // the crowning pole lives in the BUNTING mesh, not the cairn: a 6 mm pole is
-    // sub-texel in the shadow map and its 3-unit raking shadow renders as a dashed
-    // black streak flung across the basin. The stones still cast; the sticks do not.
     const pole = new THREE.CylinderGeometry(0.005, 0.008, POLE_H, 5);
     pole.translate(MC_GOAL_POS, heightAt(MC_GOAL_POS) + cairnStack + POLE_H * 0.5, 0);
     buntingParts.push({ geometry: pole, color: woodDark });
@@ -497,13 +394,11 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene): WorldHandle {
   group.add(buntingMesh);
   owned.push({ dispose: () => buntingGeometry.dispose() });
 
-  // ---- prayer flags: one InstancedMesh, per-instance wind phase ----
   const FLAG_W = 0.038;
   const FLAG_H = 0.052;
   const flagGeometry = new THREE.PlaneGeometry(FLAG_W, FLAG_H, 1, 2);
   flagGeometry.translate(0, FLAG_H * 0.5, 0);
   {
-    // faint vertical grade: the free edge reads lighter than the pinned edge
     const pos = flagGeometry.getAttribute('position');
     const cols = new Float32Array(pos.count * 3);
     for (let i = 0; i < pos.count; i++) {
@@ -557,7 +452,6 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene): WorldHandle {
         const sag = Math.sin(Math.PI * t) * 0.045;
         const y = cordTopA + (guy.top - cordTopA) * t - sag;
         p.set(x, y, 0.004 * (n % 2 === 0 ? 1 : -1));
-        // local +y is the FREE end; flip it so the pinned edge hangs from the cord
         e.set(Math.PI + (rng() - 0.5) * 0.34, (rng() - 0.5) * 0.55, (rng() - 0.5) * 0.4);
         q.setFromEuler(e);
         s.setScalar(0.82 + rng() * 0.45);
@@ -580,13 +474,9 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene): WorldHandle {
       flagMaterial.dispose();
     },
   });
-  // the one list of scene-owned animated materials; setMaterialsTime drives it
   const animated: OakMaterial[] = [flagMaterial];
   timed.push({ setTime: (t) => setMaterialsTime(animated, t) });
 
-  // ---- the trailhead signpost, planted exactly on the respawn point ----
-  // Offset in z (still inside the EXACT band, so the height is untouched) so it marks
-  // the respawn abscissa without standing in the cart's parking space.
   const trailheadRoot = new THREE.Object3D();
   trailheadRoot.name = 'trailheadRoot';
   trailheadRoot.position.set(MC_START_POS, heightAt(MC_START_POS), TRAILHEAD_Z);
@@ -612,11 +502,6 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene): WorldHandle {
   trailheadRoot.add(signMesh);
   owned.push({ dispose: () => signGeometry.dispose() });
 
-  // ---- atmosphere ----
-  // NOTE for the other fifteen scenes: kit particle/mist defaults are tuned for a
-  // ~20-unit playfield. This one is 1.8 units across and the camera sits 2.5 away, so
-  // `gl_PointSize`'s 1/distance term makes a default mote ~150 px. Everything below is
-  // scaled by ~10× down; treat the presets' `size` as "per 20 world units".
   const mist: MistPlanesHandle = makeMistPlanes({
     size: [4.6, 3.2],
     color: blendTokens(palette.fog, palette.hemiSky, 0.4),
@@ -671,11 +556,6 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene): WorldHandle {
   owned.push(glitter);
   timed.push(glitter);
 
-  // ---- the eagle (goal flourish): a silhouette crossing the sun's glow ----
-  // A soaring bird's wings lie in the HORIZONTAL plane, and this camera looks almost
-  // horizontally — an unbanked eagle presents its wingspan edge-on and renders as a
-  // four-pixel speck. The bank node rolls it about its own travel axis so the wing plane
-  // faces the frame, which is also what a bird actually does mid-turn.
   const eagle = new THREE.Group();
   eagle.name = 'eagle';
   eagle.visible = false;
@@ -685,9 +565,6 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene): WorldHandle {
   eagleBank.rotation.x = -0.24;
   eagle.add(eagleBank);
   const eagleMaterial = oakMaterial({
-    // a SILHOUETTE: near-black albedo (night.skyTop is the darkest token there is), so
-    // even the sunlit upper wing surface stays a shape against the sky rather than a
-    // lit object. Almost no rim.
     color: blendTokens(TOKENS.palettes.night.skyTop, palette.skyTop, 0.25),
     flatShading: true,
     roughness: 1,
@@ -741,8 +618,6 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene): WorldHandle {
     },
     setGust(env01) {
       const e = env01 < 0 ? 0 : env01 > 1 ? 1 : env01;
-      // a gust, not a buzz: the old 4.6× amplitude at ~8 Hz read as the flags
-      // malfunctioning every time the car summited
       oakUniforms(flagMaterial)?.setWind(BASE_WIND * (1 + 1.6 * e), 2.4 + 1.4 * e);
       grass.setWind(0.05 * (1 + 1.7 * e), 1.5 + 2.6 * e);
       trees.setWind(0.02 * (1 + 1.3 * e), 0.9 + 1.2 * e);
@@ -758,11 +633,9 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene): WorldHandle {
         eagleDir.y * EAGLE_RADIUS + eagleTangent.y * sweep + Math.sin(progress * Math.PI) * 0.26,
         eagleDir.z * EAGLE_RADIUS + eagleTangent.z * sweep,
       );
-      // a slow soaring beat, not a sparrow's flutter
       const flap = Math.sin(progress * 11) * 0.34;
       wingL.rotation.x = flap;
       wingR.rotation.x = -flap;
-      // it rolls out of a shallow bank as it settles onto the glide
       eagleBank.rotation.x = -0.24 + 0.18 * Math.sin(progress * Math.PI);
       eagle.visible = true;
     },
@@ -780,20 +653,14 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene): WorldHandle {
   };
 }
 
-/**
- * One swept wing, root at the body and tip at +z. Four triangles, because two make a
- * slab: an eagle is read entirely from the taper of its trailing edge and the rake of
- * its tip, and at 60 px on screen that outline is the whole animal.
- */
 function makeWingGeometry(): THREE.BufferGeometry {
-  // (x forward, z outward)
   const p: readonly (readonly [number, number])[] = [
-    [0.12, 0.015], // 0 root leading
-    [-0.13, 0.015], // 1 root trailing
-    [0.08, 0.2], // 2 mid leading
-    [-0.18, 0.2], // 3 mid trailing
-    [-0.02, 0.46], // 4 tip leading
-    [-0.2, 0.4], // 5 tip trailing
+    [0.12, 0.015],
+    [-0.13, 0.015],
+    [0.08, 0.2],
+    [-0.18, 0.2],
+    [-0.02, 0.46],
+    [-0.2, 0.4],
   ];
   const tris: readonly (readonly [number, number, number])[] = [
     [0, 1, 3],
@@ -819,7 +686,6 @@ function makeWingGeometry(): THREE.BufferGeometry {
   return g;
 }
 
-/** A fanned tail behind the body, in the same plane as the wings. */
 function makeTailGeometry(): THREE.BufferGeometry {
   const v = new Float32Array([
     -0.1, 0, 0.02, -0.27, 0, 0.075, -0.29, 0, 0,

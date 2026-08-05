@@ -1,19 +1,3 @@
-// The Lantern Bell — the rod, the lantern and the torque curl.
-//
-// ACCURACY: `bobRoot` is the probe object. Its world position is EXACTLY
-// pivot + (L·sin θ, −L·cos θ, 0) — written straight from `Math.sin`/`Math.cos` of the
-// angle, with no bob, no lean and no lift on it. The lantern body, the tassel and the
-// flame are children; delete every one of them and the rig is still correct.
-//
-// `swingRoot` sits ON the pivot and carries rotation only (`rotation.z = θ`), which is
-// exactly the rotation that maps the local down-vector (0, −L) onto (L·sin θ, −L·cos θ).
-// The rod is drawn from it, so rod and lantern can never disagree about the angle.
-//
-// THE TORQUE CURL. `curlRoot` hangs off `swingRoot` at (0, −L, 0), so its local +x is the
-// +θ TANGENT of the swing circle and its local −y points radially outward, whatever the
-// angle. A curl drawn once in that frame is therefore sign-correct at every θ for free:
-// positive torque shows the +x family, negative torque shows the same geometry mirrored.
-// Nothing here is a history buffer — every value below is a pure function of the frame.
 
 import {
   emissiveMaterial,
@@ -45,32 +29,18 @@ import {
 } from './dims';
 import { blendTokens, clampRange, mergeColoredParts, type ColoredPart } from './world';
 
-// ---------------------------------------------------------------------------
-// dimensions (world units — the lantern is 0.3 tall on a 1.0 rod)
-//
-// Every number that decides how far the assembly reaches lives in `dims.ts`, because
-// `world.ts` places the torii's tie beam from that reach. Change a lantern dimension and
-// the arch moves with it; the test measures these meshes and re-derives the envelope.
-// ---------------------------------------------------------------------------
 
 const ROD_TOP = -0.05;
 const ROD_BOTTOM = -(ROD_LEN - 0.15);
 const PAPER_BASE_HDR = 2.7;
 
 export interface LanternRigHandle {
-  /** add this ONE group to the scene */
   group: THREE.Group;
-  /** rotation-only node on the pivot: `rotation.z = θ`. A probe object. */
   swingRoot: THREE.Object3D;
-  /** the bob: world position === pivot + (L sin θ, −L cos θ, 0), always. A probe object. */
   bobRoot: THREE.Object3D;
-  /** world position of the lantern's flame core, refreshed by setState (preallocated) */
   readonly flameWorld: THREE.Vector3;
-  /** the whole visual state, from the frame and nothing else */
   setState(theta: number, thetaDot: number, torque: number): void;
-  /** 0..1 — how brightly the paper burns (the shaped reward, see index.ts) */
   setGlow(serenity: number): void;
-  /** ctx.time() — the lantern's idle breath and the curl's drift */
   setTime(t: number): void;
   dispose(): void;
 }
@@ -79,11 +49,8 @@ export interface LanternRigOptions {
   tier: QualityTier;
   palette: Palette;
   accent: THREE.ColorRepresentation;
-  /** the decoder's own pivot anchor */
   pivot: readonly [number, number, number];
-  /** |torque| that counts as full effort (PD_MAX_TORQUE) */
   maxTorque: number;
-  /** |thdot| clip (PD_MAX_SPEED) */
   maxSpeed: number;
 }
 
@@ -97,17 +64,13 @@ export function buildLanternRig(opts: LanternRigOptions): LanternRigHandle {
   const ironLight = blendTokens(iron, palette.hemiSky, 0.35);
   const cord = blendTokens(palette.groundA, palette.hemiGround, 0.5);
 
-  // ---- the rotation node, exactly on the pivot ----
   const swingRoot = new THREE.Object3D();
   swingRoot.name = 'swingRoot';
   swingRoot.position.set(pivot[0], pivot[1], pivot[2]);
   group.add(swingRoot);
 
-  // ---- the rod: iron, drawn from the pivot down to the lantern's yoke ----
   const rodParts: ColoredPart[] = [];
   {
-    // the eye: a forged eyelet whose HOLE the torii's pin passes through (dims.ts sizes
-    // both, so the two files can never disagree about which one is inside the other)
     const eye = new THREE.TorusGeometry(EYE_MAJOR, EYE_TUBE, 5, 10);
     eye.translate(0, -EYE_DROP, 0);
     rodParts.push({ geometry: eye, color: ironLight });
@@ -115,7 +78,6 @@ export function buildLanternRig(opts: LanternRigOptions): LanternRigHandle {
     const shaft = new THREE.CylinderGeometry(0.024, 0.031, len, 6);
     shaft.translate(0, ROD_BOTTOM + len * 0.5, 0);
     rodParts.push({ geometry: shaft, color: iron });
-    // the yoke that carries the lantern's top ring
     const yoke = new THREE.TorusGeometry(0.036, 0.011, 5, 10);
     yoke.translate(0, ROD_BOTTOM - 0.012, 0);
     rodParts.push({ geometry: yoke, color: ironLight });
@@ -129,7 +91,6 @@ export function buildLanternRig(opts: LanternRigOptions): LanternRigHandle {
     flatShading: true,
     roughness: 0.68,
     metalness: 0.12,
-    // moon-silver rim: the iron reads as a hard edge against the stars even unlit
     rimColor: blendTokens(palette.sun, palette.hemiSky, 0.35),
     rimStrength: 0.6,
     toonSteps: 3,
@@ -143,17 +104,14 @@ export function buildLanternRig(opts: LanternRigOptions): LanternRigHandle {
   rodMesh.castShadow = shadows;
   swingRoot.add(rodMesh);
 
-  // ---- the bob: POSITION ONLY, forever ----
   const bobRoot = new THREE.Object3D();
   bobRoot.name = 'bobRoot';
   group.add(bobRoot);
 
-  // decoration node: everything that is not the bob's position hangs off this
   const bobTilt = new THREE.Object3D();
   bobTilt.name = 'bobTilt';
   bobRoot.add(bobTilt);
 
-  // ---- the lantern's iron frame (ribs, caps, finial, tassel) ----
   const frameParts: ColoredPart[] = [];
   {
     const topCap = new THREE.CylinderGeometry(CAP_R * 0.62, CAP_R, 0.05, 6);
@@ -168,16 +126,12 @@ export function buildLanternRig(opts: LanternRigOptions): LanternRigHandle {
     const ring = new THREE.TorusGeometry(RING_R, RING_TUBE, 4, 9);
     ring.translate(0, LANTERN_H * 0.5 + 0.113, 0);
     frameParts.push({ geometry: ring, color: iron });
-    // six vertical ribs on the paper's corners
     for (let i = 0; i < 6; i++) {
       const a = (i / 6) * Math.PI * 2;
       const rib = new THREE.BoxGeometry(RIB_HALF * 2, LANTERN_H + 0.02, RIB_HALF * 2);
       rib.translate(Math.cos(a) * LANTERN_R * RIB_INSET, 0, Math.sin(a) * LANTERN_R * RIB_INSET);
       frameParts.push({ geometry: rib, color: iron });
     }
-    // The tassel: a short cord and a weight, the silhouette that says "hanging" — and
-    // the FARTHEST thing from the bob, so `LANTERN_REACH` is measured to this cone's apex
-    // and the tie beam is placed above it (dims.ts).
     const tasselCord = new THREE.CylinderGeometry(0.005, 0.005, TASSEL_CORD_LEN, 4);
     tasselCord.translate(0, -LANTERN_H * 0.5 - (TASSEL_DROP - TASSEL_WEIGHT_H * 0.92), 0);
     frameParts.push({ geometry: tasselCord, color: cord });
@@ -192,9 +146,6 @@ export function buildLanternRig(opts: LanternRigOptions): LanternRigHandle {
   frameMesh.castShadow = shadows;
   bobTilt.add(frameMesh);
 
-  // ---- the paper: the scene's one bloom feeder ----
-  // A six-sided barrel bulging at the waist. `emissiveMaterial` is unlit and unfogged, so
-  // its brightness is ENTIRELY the shaped reward — there is no ambient floor hiding in it.
   const paperGeometry = makePaperGeometry();
   const paperMaterial: EmissiveMaterial = emissiveMaterial(
     blendTokens(accent, palette.sun, 0.22),
@@ -205,7 +156,6 @@ export function buildLanternRig(opts: LanternRigOptions): LanternRigHandle {
   paperMesh.name = 'lanternPaper';
   bobTilt.add(paperMesh);
 
-  // the flame core inside the paper — small, very hot, the thing the bloom latches onto
   const flameGeometry = new THREE.IcosahedronGeometry(0.05, 1);
   flameGeometry.scale(1, 1.45, 1);
   const flameMaterial: EmissiveMaterial = emissiveMaterial(
@@ -218,7 +168,6 @@ export function buildLanternRig(opts: LanternRigOptions): LanternRigHandle {
   flameMesh.position.y = -0.01;
   bobTilt.add(flameMesh);
 
-  // ---- the torque curl: wind around the bob, in the swing-tangent frame ----
   const curlRoot = new THREE.Object3D();
   curlRoot.name = 'torqueCurlRoot';
   curlRoot.position.set(0, -ROD_LEN, 0);
@@ -238,8 +187,6 @@ export function buildLanternRig(opts: LanternRigOptions): LanternRigHandle {
   );
   curlMaterial.vertexColors = true;
   curlMaterial.opacity = 0;
-  // THUMB drops the curl with the particles and the mist: with no post chain there is
-  // nothing for an HDR additive flourish to bloom into, and it reads as a smear.
   const curlTier = tier !== 'thumb';
   const curlPos = new THREE.Mesh(curlGeometry, curlMaterial);
   curlPos.name = 'torqueCurlPositive';
@@ -258,8 +205,6 @@ export function buildLanternRig(opts: LanternRigOptions): LanternRigHandle {
   let spin = 0;
 
   const applyFlame = (): void => {
-    // an idle flicker that never reaches zero, scaled by the light level so a dark
-    // lantern is dark and still, not a dying candle
     const flicker = 1 + 0.07 * Math.sin(breath * 3.1) + 0.04 * Math.sin(breath * 7.7 + 1.1);
     const level = glow * flicker;
     setEmissiveIntensity(paperMaterial, PAPER_BASE_HDR * (0.035 + 0.965 * level));
@@ -274,18 +219,14 @@ export function buildLanternRig(opts: LanternRigOptions): LanternRigHandle {
     flameWorld,
 
     setState(theta, thetaDot, torque) {
-      // THE ONE ACCURACY LINE: the bob is the env's own kinematics, nothing else.
       const sin = Math.sin(theta);
       const cos = Math.cos(theta);
       bobRoot.position.set(pivot[0] + ROD_LEN * sin, pivot[1] - ROD_LEN * cos, pivot[2]);
       swingRoot.rotation.z = theta;
 
-      // The lantern is carried by the rod (rigid: at θ = ±π it really is upside down),
-      // with the small give a hook has — a pure function of θ̇, so a scrub reproduces it.
       const lag = clampRange(thetaDot / maxSpeed, -1, 1);
       bobTilt.rotation.z = theta + lag * 0.22;
 
-      // the curl: sign picks the family, |torque| drives scale and opacity
       const effort = clampRange(Math.abs(torque) / maxTorque, 0, 1);
       const live = curlTier && effort > 0.02;
       curlPos.visible = live && torque > 0;
@@ -306,7 +247,6 @@ export function buildLanternRig(opts: LanternRigOptions): LanternRigHandle {
     setTime(t) {
       breath = t;
       spin = t;
-      // the curl drifts outward as it fades — the wind is moving, not painted on
       const drift = 1 + 0.05 * Math.sin(spin * 2.3);
       curlRoot.rotation.z = 0.09 * Math.sin(spin * 1.7);
       curlRoot.scale.setScalar(drift);
@@ -329,11 +269,9 @@ export function buildLanternRig(opts: LanternRigOptions): LanternRigHandle {
   };
 }
 
-/** A six-sided paper barrel that bulges at the waist — three stacked frustums. */
 function makePaperGeometry(): THREE.BufferGeometry {
   const parts: ColoredPart[] = [];
   const rings: readonly (readonly [number, number, number])[] = [
-    // [yBottom, yTop, radiusBottom -> radiusTop is taken from the next entry]
     [-LANTERN_H * 0.5, -LANTERN_H * 0.18, CAP_R * 0.92],
     [-LANTERN_H * 0.18, LANTERN_H * 0.18, LANTERN_R],
     [LANTERN_H * 0.18, LANTERN_H * 0.5, LANTERN_R],
@@ -352,19 +290,8 @@ function makePaperGeometry(): THREE.BufferGeometry {
   return mergeColoredParts(parts, 'lanternPaper');
 }
 
-/**
- * Three wind strokes swirling past the bob, drawn once in the tangent frame: local +x is
- * "the direction this torque pushes", local ±y is radially in/out.
- *
- * Each stroke is a SPIRAL — the radius grows along the sweep — so it comes in tight
- * behind the lantern, wraps it and is flung off wide toward +x, tapering to a needle. The
- * first pass used constant-radius arcs spanning 180° each and the family closed into a
- * halo: a ring reads as an aura, and an aura has no direction. A spiral that leaves the
- * frame on one side does.
- */
 function makeCurlGeometry(): THREE.BufferGeometry {
   interface Stroke {
-    /** radius at the tail and at the tip — the difference is what makes it a swirl */
     radius: number;
     radiusEnd: number;
     from: number;
@@ -373,8 +300,6 @@ function makeCurlGeometry(): THREE.BufferGeometry {
     lift: number;
   }
   const strokes: readonly Stroke[] = [
-    // ~120° each and all of them confined to the +x half. Three strokes of 180° close
-    // into a halo however you phase them, and a halo has no direction.
     { radius: 0.21, radiusEnd: 0.42, from: 1.78, to: -0.38, width: 0.062, lift: 0.16 },
     { radius: 0.3, radiusEnd: 0.58, from: 1.42, to: -0.72, width: 0.078, lift: 0.19 },
     { radius: 0.25, radiusEnd: 0.47, from: 2.16, to: 0.18, width: 0.048, lift: 0.13 },
@@ -393,7 +318,6 @@ function makeCurlGeometry(): THREE.BufferGeometry {
       const radius = stroke.radius + (stroke.radiusEnd - stroke.radius) * k * k;
       const cx = Math.cos(a) * radius;
       const cy = Math.sin(a) * radius;
-      // taper: nothing at the tail, full at 40%, a needle at the tip
       const taper = Math.sin(Math.PI * Math.pow(k, 0.72)) * (1 - 0.55 * k);
       const half = stroke.width * taper;
       const nx = Math.cos(a);

@@ -1,18 +1,3 @@
-// kit/debug — the GroundTruthOverlay, the QA instrument the whole accuracy contract is
-// checked with.
-//
-// STYLE.md: "setDebug(true) renders the kit GroundTruthOverlay (raw grid/walls/agent
-// cross/goal/FK stick skeleton/terrain polyline) over the art. Review screenshots use
-// it." and the honesty rules: POMaze's full map, MemoryChain's cue after pos 0 and
-// ProceduralMaze's carved path may appear HERE and nowhere else.
-//
-// The overlay draws ONLY from `EnvGeometry` + `FrameState` — never from the scene's
-// meshes. That is the point: if the art and the overlay disagree, the art is wrong.
-//
-// Rendering: every object lives on LAYER 31 with `depthTest: false` and a high render
-// order, so it floats over the art. A camera must OPT IN
-// (`camera.layers.enable(DEBUG_LAYER)`); pass `camera` in the options and the `visible`
-// setter does it for you.
 
 import * as THREE from 'three';
 import { CHEETAH_BONES, FK_FLOATS, FK_POINT_INDEX } from '@sim/fk/cheetah';
@@ -21,48 +6,32 @@ import { cellToWorld, type Vec3Tuple } from './grid';
 import { TOKENS } from './tokens';
 import type { FrameState } from './types';
 
-/** The overlay layer. Cameras must `layers.enable(DEBUG_LAYER)` to see it. */
 export const DEBUG_LAYER = 31;
 
-/** Opt a camera in to the overlay layer. */
 export function enableDebugLayer(camera: THREE.Camera): void {
   camera.layers.enable(DEBUG_LAYER);
 }
 
-/** Opt a camera back out. */
 export function disableDebugLayer(camera: THREE.Camera): void {
   camera.layers.disable(DEBUG_LAYER);
 }
 
-/** Put an object and its whole subtree on the debug layer. */
 export function applyDebugLayer(object: THREE.Object3D): void {
   object.traverse((o) => o.layers.set(DEBUG_LAYER));
 }
 
 export interface GroundTruthOptions {
-  /** primary line color (default tokens.uiCyan) */
   color?: THREE.ColorRepresentation;
-  /** goal / reward marker color (default tokens.celebrationGold) */
   goalColor?: THREE.ColorRepresentation;
-  /** wall occupancy color (default a cool grey-blue) */
   wallColor?: THREE.ColorRepresentation;
-  /** camera to auto-enable the debug layer on */
   camera?: THREE.Camera | null;
-  /** agent cell resolver (grid envs). Default sniffs {x,y} / {r,c} / {pos}. */
   agentCell?(state: FrameState): GridCell | null;
-  /** live goal cell resolver. Default sniffs {gx,gy}, else geometry.grid.goal. */
   goalCell?(state: FrameState): GridCell | null;
-  /** live key cells. Default sniffs {kx,ky} and {keys}. */
   keyCells?(state: FrameState): readonly GridCell[] | null;
-  /** door open flags, aligned with geometry.grid.doors. Default sniffs {doorOpen}. */
   doorStates?(state: FrameState): readonly boolean[] | null;
-  /** classic envs: the agent's world position for the cross. */
   agentPos?(state: FrameState): readonly [number, number, number] | null;
-  /** classic terrain polyline range; defaults to the anchors' x extent. */
   profileRange?: readonly [number, number];
-  /** cheetah: map planar FK [x, z] to world. Default (x, z, 0) — x east, z up. */
   fkToWorld?(x: number, z: number, out: Vec3Tuple): Vec3Tuple;
-  /** max key markers preallocated (default 4) */
   maxKeys?: number;
   name?: string;
 }
@@ -102,7 +71,6 @@ function segments(count: number, material: THREE.LineBasicMaterial, name: string
   return { object, positions, attr };
 }
 
-/** `derived`-sniffing fallbacks — scenes SHOULD pass explicit resolvers instead. */
 function sniffAgentCell(state: FrameState): GridCell | null {
   const d = state.derived as Record<string, unknown> | null | undefined;
   if (d && typeof d === 'object') {
@@ -150,16 +118,6 @@ function sniffDoorStates(state: FrameState): readonly boolean[] | null {
   return null;
 }
 
-/**
- * The ground-truth overlay.
- *
- * ```ts
- * this.overlay = new GroundTruthOverlay(ctx.geometry, { camera: this.camera });
- * this.scene.add(this.overlay.group);
- * // setDebug(on): this.overlay.visible = on;
- * // update():     this.overlay.setState(frame.state);
- * ```
- */
 export class GroundTruthOverlay {
   readonly group = new THREE.Group();
 
@@ -169,7 +127,6 @@ export class GroundTruthOverlay {
   private readonly geometry: EnvGeometry;
   private readonly opts: GroundTruthOptions;
 
-  // grid parts
   private readonly grid: GridGeometry | null;
   private agentCross: THREE.LineSegments | null = null;
   private agentCrossPos: Float32Array | null = null;
@@ -185,7 +142,6 @@ export class GroundTruthOverlay {
   private doorMarkerAttr: THREE.BufferAttribute | null = null;
   private readonly maxKeys: number;
 
-  // cheetah parts
   private skeleton: THREE.LineSegments | null = null;
   private skeletonPos: Float32Array | null = null;
   private skeletonAttr: THREE.BufferAttribute | null = null;
@@ -194,7 +150,6 @@ export class GroundTruthOverlay {
   private toesAttr: THREE.BufferAttribute | null = null;
   private readonly fkOut = new Float32Array(FK_FLOATS);
 
-  // classic parts
   private classicMarker: THREE.LineSegments | null = null;
   private classicMarkerPos: Float32Array | null = null;
   private classicMarkerAttr: THREE.BufferAttribute | null = null;
@@ -237,7 +192,6 @@ export class GroundTruthOverlay {
     }
   }
 
-  /** Update every state-driven marker from the FRAME, never from the scene. */
   setState(state: FrameState): void {
     if (this.grid) this.updateGrid(state, this.grid);
     if (this.geometry.kind === 'cheetah') this.updateCheetah(state);
@@ -253,7 +207,6 @@ export class GroundTruthOverlay {
     this.group.clear();
   }
 
-  // ---------------------------------------------------------------- grid
 
   private buildGrid(
     grid: GridGeometry,
@@ -264,7 +217,6 @@ export class GroundTruthOverlay {
     const y = 0.02;
     const half = 0.5;
 
-    // ---- lattice lines ----
     const latticeCount = grid.w + 1 + grid.h + 1;
     const lattice = segments(latticeCount, wallMat, 'oakDebugLattice');
     {
@@ -286,7 +238,6 @@ export class GroundTruthOverlay {
     }
     this.add(lattice.object);
 
-    // ---- wall occupancy boxes: 12 edges per wall cell, from the walls array only ----
     let walls = 0;
     for (let i = 0; i < grid.w * grid.h; i++) if ((grid.walls[i] ?? 0) !== 0) walls++;
     if (walls > 0) {
@@ -308,17 +259,14 @@ export class GroundTruthOverlay {
             p[o++] = ax; p[o++] = ay; p[o++] = az;
             p[o++] = bx; p[o++] = by; p[o++] = bz;
           };
-          // bottom square
           edge(x0, 0, z0, x1, 0, z0);
           edge(x1, 0, z0, x1, 0, z1);
           edge(x1, 0, z1, x0, 0, z1);
           edge(x0, 0, z1, x0, 0, z0);
-          // top square
           edge(x0, h, z0, x1, h, z0);
           edge(x1, h, z0, x1, h, z1);
           edge(x1, h, z1, x0, h, z1);
           edge(x0, h, z1, x0, h, z0);
-          // uprights
           edge(x0, 0, z0, x0, h, z0);
           edge(x1, 0, z0, x1, h, z0);
           edge(x1, 0, z1, x1, h, z1);
@@ -329,7 +277,6 @@ export class GroundTruthOverlay {
       this.add(boxes.object);
     }
 
-    // ---- DeepSea family: the per-cell action-flip mask, drawn as arrows ----
     const mask = grid.actionMask;
     if (mask && mask.length >= grid.w * grid.h) {
       const arrows = segments(grid.w * grid.h * 3, main, 'oakDebugMaskArrows');
@@ -342,10 +289,8 @@ export class GroundTruthOverlay {
           const cx = this.scratch[0];
           const cz = this.scratch[2];
           const d = right ? 0.28 : -0.28;
-          // shaft
           p[o++] = cx - d; p[o++] = y; p[o++] = cz;
           p[o++] = cx + d; p[o++] = y; p[o++] = cz;
-          // head
           p[o++] = cx + d; p[o++] = y; p[o++] = cz;
           p[o++] = cx + d * 0.55; p[o++] = y; p[o++] = cz - 0.12;
           p[o++] = cx + d; p[o++] = y; p[o++] = cz;
@@ -356,7 +301,6 @@ export class GroundTruthOverlay {
       this.add(arrows.object);
     }
 
-    // ---- ProceduralMaze: the carved solution path (DEBUG ONLY, never in the art) ----
     const carved = grid.carvedPath;
     if (carved && carved.length > 1) {
       const path = segments(carved.length - 1, goalMat, 'oakDebugCarvedPath');
@@ -374,7 +318,6 @@ export class GroundTruthOverlay {
       this.add(path.object);
     }
 
-    // ---- state-driven markers ----
     const cross = segments(3, main, 'oakDebugAgentCross');
     this.agentCross = cross.object;
     this.agentCrossPos = cross.positions;
@@ -403,7 +346,6 @@ export class GroundTruthOverlay {
   private updateGrid(state: FrameState, grid: GridGeometry): void {
     const y = 0.03;
 
-    // agent: an X in the cell plus a vertical stick at the true center
     const cell = this.opts.agentCell ? this.opts.agentCell(state) : sniffAgentCell(state);
     const cp = this.agentCrossPos;
     if (cp && this.agentCross && this.agentCrossAttr) {
@@ -426,7 +368,6 @@ export class GroundTruthOverlay {
       this.agentCrossAttr.needsUpdate = true;
     }
 
-    // goal: a diamond on the LIVE goal cell (respawns must track)
     const goal = this.opts.goalCell ? this.opts.goalCell(state) : sniffGoalCell(state, grid);
     const gp = this.goalMarkerPos;
     if (gp && this.goalMarker && this.goalMarkerAttr) {
@@ -451,7 +392,6 @@ export class GroundTruthOverlay {
       this.goalMarkerAttr.needsUpdate = true;
     }
 
-    // keys: small squares on each live key cell
     const keys = this.opts.keyCells ? this.opts.keyCells(state) : sniffKeyCells(state, grid);
     const kp = this.keyMarkerPos;
     if (kp && this.keyMarker && this.keyMarkerAttr) {
@@ -478,7 +418,6 @@ export class GroundTruthOverlay {
       this.keyMarkerAttr.needsUpdate = true;
     }
 
-    // doors: a bar per door cell — full width shut, split open
     const doors = grid.doors;
     const dp = this.doorMarkerPos;
     if (dp && this.doorMarker && this.doorMarkerAttr) {
@@ -504,7 +443,6 @@ export class GroundTruthOverlay {
     }
   }
 
-  // ------------------------------------------------------------- cheetah
 
   private buildCheetah(main: THREE.LineBasicMaterial, goalMat: THREE.LineBasicMaterial): void {
     const bones = segments(CHEETAH_BONES.length, main, 'oakDebugSkeleton');
@@ -513,7 +451,6 @@ export class GroundTruthOverlay {
     this.skeletonAttr = bones.attr;
     this.add(bones.object);
 
-    // two toe crosses (2 segments each)
     const toe = segments(4, goalMat, 'oakDebugToes');
     this.toes = toe.object;
     this.toesPos = toe.positions;
@@ -558,7 +495,6 @@ export class GroundTruthOverlay {
     }
   }
 
-  // ------------------------------------------------------------- classic
 
   private buildClassic(main: THREE.LineBasicMaterial, goalMat: THREE.LineBasicMaterial): void {
     const classic = this.geometry.classic;
@@ -578,7 +514,6 @@ export class GroundTruthOverlay {
       Number.isFinite(maxX) ? maxX : 1,
     ];
 
-    // terrain profile polyline (MountainCar's sin(3x)*0.45+0.55 IS this line)
     const heightAt = classic.heightAt;
     if (heightAt && range[1] > range[0]) {
       const profile = segments(PROFILE_SAMPLES, main, 'oakDebugProfile');
@@ -596,7 +531,6 @@ export class GroundTruthOverlay {
       this.add(profile.object);
     }
 
-    // anchor crosses — every named world anchor the env defines
     if (anchors.length > 0) {
       const marks = segments(anchors.length * 2, goalMat, 'oakDebugAnchors');
       const p = marks.positions;
@@ -646,7 +580,6 @@ export class GroundTruthOverlay {
   }
 }
 
-/** Planar FK [x, z] -> world (x, z, 0): x east, z up, the classic-control plane. */
 export function defaultFkToWorld(x: number, z: number, out: Vec3Tuple): Vec3Tuple {
   out[0] = x;
   out[1] = z;

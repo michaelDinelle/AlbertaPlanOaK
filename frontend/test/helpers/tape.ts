@@ -1,5 +1,3 @@
-// Shared OAKT v1 tape builder for server tests (METRICS LAW 2026-08-05).
-// Mirrors Sources/Main.swift MetricsTapeWriter: header + raw-DEFLATE segments.
 
 import { crc32, deflateRawSync } from 'node:zlib';
 
@@ -16,7 +14,6 @@ export const DEFAULT_TAPE_FIELDS = [
 export interface TapeWindowSpec {
   start: number;
   count: number;
-  /** tape field name -> per-lane values; unlisted fields are 0 */
   values: Record<string, number[]>;
 }
 
@@ -39,13 +36,13 @@ export function tapeBytes(
   });
   const json = Buffer.from(JSON.stringify({ fields }), 'utf8');
   const head = Buffer.alloc(16);
-  head.writeUInt32LE(0x544b414f, 0); // OAKT
+  head.writeUInt32LE(0x544b414f, 0);
   head.writeUInt32LE(1, 4);
   head.writeUInt32LE(laneCount, 8);
   head.writeUInt32LE(json.length, 12);
   const comp = deflateRawSync(payload);
   const seg = Buffer.alloc(20);
-  seg.writeUInt32LE(0x54474553, 0); // SEGT
+  seg.writeUInt32LE(0x54474553, 0);
   seg.writeUInt32LE(windows.length, 4);
   seg.writeUInt32LE(payload.length, 8);
   seg.writeUInt32LE(comp.length, 12);

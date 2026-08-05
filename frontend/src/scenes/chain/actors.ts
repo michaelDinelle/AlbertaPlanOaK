@@ -1,26 +1,3 @@
-// Sixteen Stones — the blossom tree on the last stone, and the petal ferry.
-//
-// ACCURACY: `BlossomTree.root` is the probe object. Its world position is EXACTLY
-// `cellToWorld(15, 0)` with y = 0 and nothing else — no lean, no sway, no scale. The trunk,
-// the boughs, the blossoms and the heartwood glow all hang off `crown`, a child that
-// carries every bit of motion. Delete the whole tree and what remains is a correctly
-// placed empty node on the paying stone.
-//
-// WHY THE TREE STANDS ON STONE 15. The env never SHOWS pos 15: reaching it pays the +1,
-// sets done and wraps to 0 in the same step, so the recorded stream only ever contains
-// 0..14. Stone 15 is therefore the one stone the wisp can never be standing on, which is
-// exactly the stone that can carry a tree. The reward lives there and nowhere else, and
-// the frame says so without a single symbol.
-//
-// THE BLOSSOMS ARE ONE DRAW. A bare tree flowers by opening dozens of buds, which normally
-// costs a node each; here they are instances of one five-petal rosette, re-posed from
-// `(bloom, time)` into a preallocated Matrix4 (the four-rooms lantern pattern). Their
-// anchors are sampled along the SAME bough parameterization the bark mesh is built from,
-// so a blossom can never float off a branch.
-//
-// PURITY: bloom and ferry are pure functions of `(ctx.time() − the last goal event)`.
-// Nothing integrates, nothing accumulates. A never-fired clock (−Infinity) is a bare tree
-// and an empty sky, which is exactly what a scrub must land on.
 
 import { emissiveMaterial, oakMaterial, oakUniforms, setEmissiveIntensity } from '@kit/materials';
 import type { EmissiveMaterial, OakMaterial } from '@kit/materials';
@@ -32,20 +9,15 @@ import { blendTokens, clamp01, mergeColoredParts, smoothstep01, tubeGeometry, ty
 
 type Vec3 = readonly [number, number, number];
 
-// ---------------------------------------------------------------------------
-// the bough skeleton — the one source of truth for bark AND blossom placement
-// ---------------------------------------------------------------------------
 
 interface Limb {
   a: Vec3;
   b: Vec3;
   ra: number;
   rb: number;
-  /** twigs carry blossoms; trunk and primary boughs do not */
   twig: boolean;
 }
 
-/** the fork the primary boughs spring from */
 const FORK: Vec3 = [0.22, 1.52, -0.08];
 
 const TRUNK: readonly Limb[] = [
@@ -53,12 +25,6 @@ const TRUNK: readonly Limb[] = [
   { a: [0.1, 0.78, -0.03], b: FORK, ra: 0.135, rb: 0.092, twig: false },
 ];
 
-/**
- * Four primary boughs, each BENT: a straight stick from a fork reads as an umbrella frame,
- * and the first pass looked exactly like one. Every bough is two segments through a mid
- * point that lies off the fork-to-tip line, so the silhouette carries the outward-then-up
- * curve an old blossom tree actually has. One of them reaches back over the crossing.
- */
 const BOUGHS: readonly { mid: Vec3; tip: Vec3 }[] = [
   { mid: [-0.5, 1.95, 0.16], tip: [-1.12, 2.34, 0.36] },
   { mid: [0.78, 1.9, -0.22], tip: [1.46, 2.24, -0.46] },
@@ -66,11 +32,6 @@ const BOUGHS: readonly { mid: Vec3; tip: Vec3 }[] = [
   { mid: [0.38, 2.04, -0.56], tip: [0.58, 2.5, -1.14] },
 ];
 
-/**
- * Each bough sprouts THREE twigs — one from its bend and two from its tip. Two was not
- * enough mass: eight twigs on four boughs left the crown a wire diagram, and a bare
- * blossom tree still has to read as a tree on the frames between rewards.
- */
 const TWIGS: readonly Vec3[] = [
   [-0.42, 0.44, 0.32],
   [-0.3, 0.5, -0.3],
@@ -94,7 +55,6 @@ function lerp3(a: Vec3, b: Vec3, t: number): Vec3 {
   return [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t, a[2] + (b[2] - a[2]) * t];
 }
 
-/** The whole skeleton, derived once. Bark and blossoms both read THIS list. */
 export function blossomTreeLimbs(): Limb[] {
   const limbs: Limb[] = [...TRUNK];
   for (let i = 0; i < BOUGHS.length; i++) {
@@ -111,7 +71,6 @@ export function blossomTreeLimbs(): Limb[] {
   return limbs;
 }
 
-/** Highest point of the crown — the scene lifts its point light and its burst to it. */
 export function blossomTreeCrownHeight(): number {
   let top = 0;
   for (const limb of blossomTreeLimbs()) {
@@ -121,39 +80,27 @@ export function blossomTreeCrownHeight(): number {
   return top;
 }
 
-// ---------------------------------------------------------------------------
-// the tree
-// ---------------------------------------------------------------------------
 
 export interface BlossomTreeOptions {
   tier: QualityTier;
   palette: Palette;
-  /** petal color (the scene accent) */
   blossom: THREE.ColorRepresentation;
   bark: THREE.ColorRepresentation;
   moss: THREE.ColorRepresentation;
-  /** the heartwood glow — the tree's one HDR emitter */
   ember: THREE.ColorRepresentation;
   name?: string;
 }
 
 export interface BlossomTreeHandle {
-  /** add this ONE group to the scene */
   group: THREE.Group;
-  /** the probe object: world position === cellToWorld(15, 0), y = 0, always */
   root: THREE.Object3D;
-  /** local height of the crown (the burst and the tree light ride it) */
   readonly crownHeight: number;
-  /** blossoms actually instanced (0 is legal — thumb still keeps the bare tree) */
   readonly blossomCount: number;
-  /** the whole visual state, from the bloom clock and ctx.time() and nothing else */
   setState(bloom01: number, time: number): void;
-  /** ctx.time() — the crown sway and the material clocks */
   setTime(t: number): void;
   dispose(): void;
 }
 
-/** blossoms per twig, per tier */
 function blossomsPerTwig(tier: QualityTier): number {
   return tier === 'thumb' ? 2 : tier === 'medium' ? 4 : 6;
 }
@@ -165,17 +112,14 @@ export function buildBlossomTree(opts: BlossomTreeOptions): BlossomTreeHandle {
   const group = new THREE.Group();
   group.name = opts.name ?? 'blossomTree';
 
-  // ---- the probe root: position only, forever ----
   const root = new THREE.Object3D();
   root.name = 'blossomTreeRoot';
   group.add(root);
 
-  // ---- the crown: everything that moves ----
   const crown = new THREE.Object3D();
   crown.name = 'blossomTreeCrown';
   root.add(crown);
 
-  // ---- bark: trunk + boughs + twigs, one merged mesh ----
   const limbs = blossomTreeLimbs();
   const barkParts: ColoredPart[] = [];
   const barkLight = blendTokens(bark, palette.groundB, 0.22);
@@ -185,8 +129,6 @@ export function buildBlossomTree(opts: BlossomTreeOptions): BlossomTreeHandle {
       color: limb.twig ? barkLight : bark,
     });
   }
-  // a mossy root boss: the old tree took hold on the far stone, and the boss is what
-  // makes that read as roots rather than a post in a socket
   {
     const boss = new THREE.IcosahedronGeometry(0.33, tier === 'thumb' ? 0 : 1);
     boss.scale(1.05, 0.44, 0.98);
@@ -223,7 +165,6 @@ export function buildBlossomTree(opts: BlossomTreeOptions): BlossomTreeHandle {
   barkMesh.receiveShadow = tier !== 'thumb';
   crown.add(barkMesh);
 
-  // ---- blossoms: one rosette geometry, instanced along the twigs ----
   const perTwig = blossomsPerTwig(tier);
   const twigs = limbs.filter((l) => l.twig);
   const blossomCount = twigs.length * perTwig;
@@ -252,7 +193,6 @@ export function buildBlossomTree(opts: BlossomTreeOptions): BlossomTreeHandle {
   blossoms.instanceColor = new THREE.InstancedBufferAttribute(new Float32Array(Math.max(1, blossomCount) * 3), 3);
   crown.add(blossoms);
 
-  // per-blossom anchor, orientation, size and opening phase — all deterministic
   const anchors = new Float32Array(Math.max(1, blossomCount) * 3);
   const quats = new Float32Array(Math.max(1, blossomCount) * 4);
   const sizes = new Float32Array(Math.max(1, blossomCount));
@@ -280,7 +220,6 @@ export function buildBlossomTree(opts: BlossomTreeOptions): BlossomTreeHandle {
         quats[k * 4 + 2] = q.z;
         quats[k * 4 + 3] = q.w;
         sizes[k] = 0.9 + h2 * 0.7;
-        // blossoms near the trunk open first; the wave runs out to the tips
         phases[k] = clamp01(u * 0.72 + h0 * 0.28);
         c.setRGB(0.9 + h0 * 0.2, 0.9 + h1 * 0.16, 0.92 + h2 * 0.16);
         blossoms.setColorAt(k, c);
@@ -290,7 +229,6 @@ export function buildBlossomTree(opts: BlossomTreeOptions): BlossomTreeHandle {
     if (blossoms.instanceColor) blossoms.instanceColor.needsUpdate = true;
   }
 
-  // ---- the heartwood: the tree's ONE bloom-feeder, small and only just over threshold ----
   const emberGeometry = new THREE.IcosahedronGeometry(0.1, tier === 'thumb' ? 0 : 1);
   const emberMaterial: EmissiveMaterial = emissiveMaterial(ember, 0.0, { name: 'blossomTreeHeart' });
   const emberMesh = new THREE.Mesh(emberGeometry, emberMaterial);
@@ -298,7 +236,6 @@ export function buildBlossomTree(opts: BlossomTreeOptions): BlossomTreeHandle {
   emberMesh.position.set(FORK[0], FORK[1] + 0.08, FORK[2]);
   crown.add(emberMesh);
 
-  // ---- preallocated scratch: setState runs every frame and may not allocate ----
   const matrix = new THREE.Matrix4();
   const position = new THREE.Vector3();
   const quaternion = new THREE.Quaternion();
@@ -317,7 +254,6 @@ export function buildBlossomTree(opts: BlossomTreeOptions): BlossomTreeHandle {
       if (blossomCount > 0) {
         for (let i = 0; i < blossomCount; i++) {
           const phase = phases[i] ?? 0;
-          // the wave: a blossom is fully open once the bloom clears its own phase
           const open = clamp01((bloom - phase * 0.42) / 0.58);
           const eased = open * open * (3 - 2 * open);
           const breath = 1 + 0.07 * Math.sin(time * 1.35 + phase * 9.4);
@@ -329,16 +265,11 @@ export function buildBlossomTree(opts: BlossomTreeOptions): BlossomTreeHandle {
         }
         blossoms.instanceMatrix.needsUpdate = true;
       }
-      // Just over the 0.85 bloom threshold at full flower, nothing at rest: a bare tree in a
-      // quiet stream must be genuinely bare. 1.15 was the first pass and it bloomed into a
-      // white star that ate the fork and the first two boughs with it — the tree has to read
-      // as a tree in flower, not as a light where a tree used to be.
       setEmissiveIntensity(emberMaterial, 0.72 * bloom * bloom);
       emberMesh.scale.setScalar(0.42 + 0.44 * bloom);
     },
 
     setTime(t) {
-      // a slow lean in the afternoon air, on the CROWN, never on the root
       crown.rotation.z = Math.sin(t * 0.62) * 0.02 * (0.5 + 0.5 * bloom);
       crown.rotation.x = Math.cos(t * 0.47) * 0.016 * (0.5 + 0.5 * bloom);
       oakUniforms(barkMaterial)?.setTime(t);
@@ -359,17 +290,6 @@ export function buildBlossomTree(opts: BlossomTreeOptions): BlossomTreeHandle {
   };
 }
 
-/**
- * A blossom CLUSTER: three five-petal rosettes on slightly different tilts, overlapping into
- * one ~0.26-unit puff. Not an aesthetic flourish — an arithmetic one. A single rosette is
- * 0.16 across, which from the composed 14.6-unit standoff is NINE PIXELS: seventy of them
- * scattered on a tree read as a faint pink dusting and the whole bloom event disappeared in
- * the first live pass. Three rosettes in one instance cost 30 triangles, keep the whole
- * crown at one draw call, and give the flower mass the scene's one event needs.
- *
- * The vertex grade (warm at the throat, pale at the rim) is what makes flat triangles look
- * like flowers under a single toon ramp.
- */
 export function blossomClusterGeometry(tier: QualityTier): THREE.BufferGeometry {
   const petals = tier === 'thumb' ? 4 : 5;
   const heads: readonly { at: Vec3; tilt: number; yaw: number; scale: number }[] =
@@ -409,7 +329,6 @@ export function blossomClusterGeometry(tier: QualityTier): THREE.BufferGeometry 
       const a0 = (i / petals) * Math.PI * 2;
       const a1 = ((i + 1) / petals) * Math.PI * 2;
       const am = (a0 + a1) * 0.5;
-      // each petal is two triangles: a notched lobe, so the rim reads five-lobed
       const sx = Math.cos(a0) * inner;
       const sz = Math.sin(a0) * inner;
       const ex = Math.cos(a1) * inner;
@@ -436,22 +355,15 @@ export function blossomClusterGeometry(tier: QualityTier): THREE.BufferGeometry 
   return g;
 }
 
-// ---------------------------------------------------------------------------
-// the petal ferry — DECORATION, and deliberately so
-// ---------------------------------------------------------------------------
 
-/** how long one crossing of petals takes, including the launch stagger */
 export const FERRY_SECONDS = 1.55;
-/** the last petal leaves this many seconds after the first */
 export const FERRY_STAGGER = 0.42;
 
 export interface PetalFerryOptions {
   tier: QualityTier;
   palette: Palette;
   blossom: THREE.ColorRepresentation;
-  /** where the stream is born: the crown over the paying stone */
   from: readonly [number, number, number];
-  /** where it lands: the start stone the agent has ALREADY been snapped to */
   to: readonly [number, number, number];
   name?: string;
 }
@@ -459,24 +371,13 @@ export interface PetalFerryOptions {
 export interface PetalFerryHandle {
   mesh: THREE.InstancedMesh;
   readonly count: number;
-  /** launch the stream on a goal event (host playback clock) */
   fire(now: number): void;
-  /** scrub: nothing survives a discontinuity */
   clear(): void;
-  /** ctx.time() — the whole stream is a pure function of `time − fired` */
   setTime(time: number): void;
-  /** 0..1 — how much of the stream is in the air right now (drives nothing but taste) */
   progress(time: number): number;
   dispose(): void;
 }
 
-/**
- * The wrap, told honestly. The agent's pose has ALREADY wrapped to stone 0 by the time this
- * fires, and the wisp has already hard-snapped there — so these petals are not carrying
- * anything. They stream from the blooming tree back down the creek BEHIND the wisp, which
- * is what the wrap felt like, without ever pretending the avatar eased across sixteen
- * stones it was never at.
- */
 export function buildPetalFerry(opts: PetalFerryOptions): PetalFerryHandle {
   const { tier, palette, blossom, from, to } = opts;
   const count = tier === 'thumb' ? 0 : tier === 'medium' ? 22 : 38;
@@ -551,7 +452,6 @@ export function buildPetalFerry(opts: PetalFerryOptions): PetalFerryHandle {
         const raw = (age - start) / span;
         const t = raw <= 0 ? 0 : raw >= 1 ? 1 : raw;
         const live = raw > 0 && raw < 1 ? 1 : 0;
-        // ease out of the tree fast, drift in slow
         const e = Math.pow(t, 0.82);
         const arc = Math.sin(Math.PI * t);
         const px = from[0] + (to[0] - from[0]) * e;
@@ -577,64 +477,30 @@ export function buildPetalFerry(opts: PetalFerryOptions): PetalFerryHandle {
   };
 }
 
-// ---------------------------------------------------------------------------
-// the ford lantern — the other end of the composition
-// ---------------------------------------------------------------------------
 
 export interface FordLanternOptions {
   tier: QualityTier;
   palette: Palette;
   stone: THREE.ColorRepresentation;
   moss: THREE.ColorRepresentation;
-  /**
-   * Where the ART stands relative to the probe root, in world units — including its Y, which
-   * the scene reads off `terrain.sampleHeight` so the lantern is planted on the bank the
-   * scene actually built. The ROOT never moves: it is `cellToWorld(-1, 0)`, y = 0, forever.
-   */
   offset?: readonly [number, number, number];
   name?: string;
 }
 
-/**
- * The art is scaled up because 20 units from the camera a 1.5-unit lantern is 40 px of grey
- * stone against a grey bank, and the left bookend has to be READ. Everything the scene needs
- * in order to plant it is derived from these three numbers, so the footing can never drift
- * out of sync with the mesh.
- */
 export const LANTERN_ART_SCALE = 1.45;
 const LANTERN_PLINTH_R = 0.3;
 const LANTERN_PLINTH_H = 0.15;
-/** the base plate's world radius — the footprint that has to be on the ground */
 export const LANTERN_BASE_RADIUS = LANTERN_PLINTH_R * LANTERN_ART_SCALE;
-/** the base plate's world height — how much ground variation it can bed into before it buries */
 export const LANTERN_BASE_HEIGHT = LANTERN_PLINTH_H * LANTERN_ART_SCALE;
-/** the default art offset, used when the scene has no terrain to consult (never in the app) */
 export const LANTERN_OFFSET: readonly [number, number, number] = [-0.45, 0, -2.35];
 
 export interface FordLanternHandle {
   group: THREE.Group;
-  /** the probe object: world position === cellToWorld(-1, 0), y = 0 — one cell upstream */
   root: THREE.Object3D;
   setTime(t: number): void;
   dispose(): void;
 }
 
-/**
- * A weathered stone lantern on the near bank, planted one cell UPSTREAM of the first stone
- * (`cellToWorld(-1, 0)`) and stepped off the crossing line so it can never be mistaken for a
- * seventeenth stone. It is unlit on purpose: the blossom tree is the only thing in this
- * creek that glows, and a lantern that competed with it would cost the scene its one idea.
- *
- * Compositionally it is the left bookend. Sixteen stones between a dark stone lantern and a
- * blossoming tree is a frame; sixteen stones running off the edge is a diagram.
- *
- * WHERE IT STANDS IS TERRAIN, NOT TASTE (review fix). The offset used to be a typed
- * `(-0.45, 0, -2.35)` with no y at all, which put the base plate on the y = 0 plane — 0.55
- * above the creek bed and 0.17 above the WATER at seed 64, so it read as a slab hovering
- * over the ford with a sliver of creek under its front edge (11 of 14 sampled lanes had it
- * over water, because the bank edge meanders per lane). The scene now hands in an offset it
- * derived from `terrain.sampleHeight`, and the probe root is untouched by all of it.
- */
 export function buildFordLantern(opts: FordLanternOptions): FordLanternHandle {
   const { tier, palette, stone, moss } = opts;
   const offset = opts.offset ?? LANTERN_OFFSET;
@@ -647,13 +513,10 @@ export function buildFordLantern(opts: FordLanternOptions): FordLanternHandle {
   root.name = 'fordLanternRoot';
   group.add(root);
 
-  // the art sits off the crossing line AND on the ground; the ROOT stays exactly on the
-  // derived cell, y = 0, carrying position only
   const body = new THREE.Object3D();
   body.name = 'fordLanternBody';
   body.position.set(offset[0], offset[1], offset[2]);
   body.rotation.y = 0.38;
-  // the left bookend has to be READ from the standoff, so the art (never the root) is scaled
   body.scale.setScalar(LANTERN_ART_SCALE);
   root.add(body);
 
@@ -673,7 +536,6 @@ export function buildFordLantern(opts: FordLanternOptions): FordLanternHandle {
     const finial = new THREE.IcosahedronGeometry(0.065, tier === 'thumb' ? 0 : 1);
     finial.translate(0, 1.46, 0);
     parts.push({ geometry: finial, color: stone });
-    // a moss collar at the waterline end of the plinth
     const collar = new THREE.CylinderGeometry(0.32, 0.34, 0.06, sides, 1);
     collar.translate(0, 0.02, 0);
     parts.push({ geometry: collar, color: moss });
@@ -713,10 +575,7 @@ export function buildFordLantern(opts: FordLanternOptions): FordLanternHandle {
   };
 }
 
-/** A single tumbling petal: a notched lozenge, two triangles, graded tip-to-throat. */
 export function petalGeometry(): THREE.BufferGeometry {
-  // 1.5× the first pass: a 0.16-unit petal is twelve pixels from the composed standoff and
-  // the ferry read as three specks of dust drifting down an empty creek.
   const pts: readonly (readonly [number, number, number, number])[] = [
     [0, 0, -0.115, 1.2],
     [-0.068, 0.021, 0.018, 0.92],

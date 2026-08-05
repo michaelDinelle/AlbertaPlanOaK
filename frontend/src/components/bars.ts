@@ -1,10 +1,3 @@
-// SVG categorical bars: tier fractions, per-env positivity, plasticity quartiles.
-//
-// Mark spec (dataviz): thin bars, 4px rounded DATA end only (the baseline end
-// stays square), a 2px surface gap between adjacent bars, and a direct value
-// label on every row — there are never enough rows here for a legend to beat
-// labelling each one. Magnitude bars take one hue (or an ordinal ramp);
-// zero-crossing bars take the validated cyan/red diverging pair.
 
 import { el } from './table';
 
@@ -27,7 +20,6 @@ function svg<K extends keyof SVGElementTagNameMap>(
   return node;
 }
 
-/** Rounded data-end, square baseline-end. `dir` 1 = grows right, -1 = grows left. */
 function barPath(x: number, y: number, width: number, height: number, radius: number, dir: 1 | -1): string {
   const w = Math.abs(width);
   if (w < 1) return `M${x - (dir < 0 ? 1 : 0)},${y} h1 v${height} h-1 Z`;
@@ -41,7 +33,6 @@ function barPath(x: number, y: number, width: number, height: number, radius: nu
 export interface BarItem {
   label: string;
   value: number;
-  /** overrides the formatted value on the right */
   display?: string;
   hint?: string;
   color?: string;
@@ -50,10 +41,8 @@ export interface BarItem {
 
 export interface BarsSpec {
   items: readonly BarItem[];
-  /** explicit domain; defaults to [min(0, …), max(…)] */
   domain?: [number, number];
   format?(value: number): string;
-  /** tint each bar by its rank using the ordinal ramp (ordered categories only) */
   ramp?: boolean;
   rowHeight?: number;
   barHeight?: number;
@@ -102,7 +91,7 @@ export function bars(spec: BarsSpec): BarsHandle {
 
     items.forEach((item, index) => {
       const y = index * rowHeight;
-      const barY = y + (rowHeight - barHeight) / 2 + 1; // +1 keeps the 2px inter-bar gap
+      const barY = y + (rowHeight - barHeight) / 2 + 1;
 
       const group = svg('g', { class: item.onClick ? 'bar-row is-clickable' : 'bar-row' });
       if (item.onClick) {
@@ -175,14 +164,12 @@ export function bars(spec: BarsSpec): BarsHandle {
   };
 }
 
-// ---------- quartile ranges ----------
 
 export interface RangeRow {
   label: string;
   q1: number;
   q2: number;
   q3: number;
-  /** each row carries its OWN domain — these metrics do not share a scale */
   domain: [number, number];
   format?(value: number): string;
   hint?: string;
@@ -194,12 +181,6 @@ export interface RangeBarsSpec {
   labelWidth?: number;
 }
 
-/**
- * Quartile strips (q25 – q75 with a median tick). Every row is normalized to its
- * own domain and prints all three numbers, because zenith step, zenith rate and
- * decay ratio have nothing in common but their source — sharing one axis would
- * be the dual-axis mistake in bar form.
- */
 export function rangeBars(spec: RangeBarsSpec): RangeBarsHandle {
   const rowHeight = spec.rowHeight ?? 34;
   let rows = [...spec.rows];
@@ -277,7 +258,6 @@ export function rangeBars(spec: RangeBarsSpec): RangeBarsHandle {
   };
 }
 
-/** "0.8474 / 1 / 1" -> [0.8474, 1, 1]; returns null when the shape is unexpected. */
 export function parseQuartiles(text: unknown): [number, number, number] | null {
   if (typeof text !== 'string') return null;
   const parts = text.split('/').map((p) => Number(p.trim()));

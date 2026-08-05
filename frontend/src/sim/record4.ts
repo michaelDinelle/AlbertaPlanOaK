@@ -1,24 +1,3 @@
-// record-v4 `actions.bin` decoder — the chunked, quantized, DEFLATEd lane codec.
-//
-// THE SPEC IS `src/sim/RECORD_V4_SPEC.md` AND IT IS FROZEN LAW. This module
-// implements that document and nothing else; the Swift encoder (`Sources/Main.swift`)
-// implements the same document, and the Tier-S v3/v4 A/B proves they agree.
-//
-// What v4 buys: ~22× smaller lanes. What it must NOT cost: a single semantic
-// difference downstream. So the decoder's output is the EXACT v3 `RawRecording`
-// row shape — flat LE f32[n][16] = ctrl[6], done, pose[9] — which means every env
-// decoder, the MultiKeyCorridor bitwise replay, the DeepSea event simulation and
-// the damaged-row semantics in `decode.ts` all run unchanged and unaware.
-//
-// Two readers, one decode core:
-//   * `parseActionsBinV4`  — materializes the whole lane (theater / harness).
-//   * `walkChunksV4`       — streams chunk by chunk, never holding the lane
-//                            (aggregate passes over many lanes at once).
-//
-// Torn tails are DATA, not errors: a killed run leaves a half-written chunk, and a
-// byte-prefix Range request deliberately cuts the file short. The chunk scan drops
-// the first invalid chunk and everything after it, and the readers decode the
-// valid prefix — exactly as the spec prescribes.
 
 import { ENV_IDS, isEnvId } from '@shared/envs';
 import type { EnvId } from '@shared/envs';
@@ -26,23 +5,13 @@ import type { RecordingMeta } from '@shared/types';
 import { RECORD_FLOATS, RecordParseError } from './record';
 import type { RawRecording } from './types';
 
-// ---------------------------------------------------------------------------
-// constants (spec: "File layout")
-// ---------------------------------------------------------------------------
 
-/** `meta.recordVersion` this module decodes */
 export const RECORD_V4_VERSION = 4;
-/** the frozen codec revision; any semantic change bumps it */
 export const CODEC_VERSION = 1;
-/** u32 file magic — "OAK4" (0x344B414F LE = O,A,K,4) */
 export const FILE_MAGIC = 0x344b414f;
-/** u32 chunk magic — "CHK4" (0x344B4843 LE = C,H,K,4) */
 export const CHUNK_MAGIC = 0x344b4843;
-/** magic + formatVersion + envKind + codecVersion */
 export const FILE_HEADER_BYTES = 16;
-/** magic + stepStart + stepCount + rawBytes + compBytes + crc32 + doneCount + rewardDelta */
 export const CHUNK_HEADER_BYTES = 32;
-/** escape-table entry: u32 rowIdxInChunk + 64 verbatim v3 bytes */
 export const ESCAPE_ENTRY_BYTES = 4 + RECORD_FLOATS * 4;
 
 const LITTLE_ENDIAN = (() => {
@@ -51,10 +20,6 @@ const LITTLE_ENDIAN = (() => {
   return probe[0] === 1;
 })();
 
-/**
- * Subclasses the v3 error so one `catch (e) { e instanceof RecordParseError }`
- * covers both record versions.
- */
 export class Record4ParseError extends RecordParseError {
   constructor(message: string) {
     super(message);
@@ -62,36 +27,27 @@ export class Record4ParseError extends RecordParseError {
   }
 }
 
-// ---------------------------------------------------------------------------
-// the static codec table (spec: "Static codec table")
-// ---------------------------------------------------------------------------
 
 export type PoseEncoding = 'u8' | 'i16' | 'dx32';
 
 export interface PoseFieldSpec {
-  /** index into pose[9] */
   readonly idx: number;
   readonly enc: PoseEncoding;
-  /** quantization step; absent for `u8` */
   readonly scale?: number;
-  /** wrap into [−π, π) before quantizing (encoder side) */
   readonly wrap?: boolean;
 }
 
 export interface CtrlBoxSpec {
   readonly kind: 'u8box';
-  /** number of u8 ctrl columns (cheetah 6, pendulum 1) */
   readonly n: number;
 }
 
-/** `'index'` = the action index rides the hdr byte's low nibble. */
 export type CtrlSpec = 'index' | CtrlBoxSpec;
 
 export interface CodecDescriptor {
   readonly category: 'grid' | 'classic' | 'cheetah';
   readonly ctrl: CtrlSpec;
   readonly poseFields: readonly PoseFieldSpec[];
-  /** pose indices filled with a fixed value on decode, keyed by index-as-string */
   readonly poseConst?: Readonly<Record<string, number>>;
 }
 
@@ -104,35 +60,26 @@ const u8Range = (from: number, to: number): PoseFieldSpec[] => {
 const i16 = (idx: number, scale: number): PoseFieldSpec => ({ idx, enc: 'i16', scale });
 const i16w = (idx: number, scale: number): PoseFieldSpec => ({ idx, enc: 'i16', scale, wrap: true });
 
-/**
- * envKind → envId. Mirrors `OakFleetLane.envKind` (Sources/OakKernel.metal, the
- * `oak_stage_fleet_env` switch) and the file header's `envKind` field. It is
- * ASSERTED equal to `ENV_IDS` in the tests rather than aliased to it: the two
- * orderings agree today, and the assertion is what keeps a future insertion into
- * the display list from silently re-labelling every recorded lane.
- */
 export const RECORD_V4_ENV_KINDS: readonly EnvId[] = [
-  'HalfCheetah-v4',        // 0
-  'FourRooms-cont-v0',     // 1
-  'DeepSea-cont-v0',       // 2
-  'KeyCorridor-cont-v0',   // 3
-  'Acrobot-cont-v0',       // 4
-  'MountainCar-cont-v0',   // 5
-  'CartPole-cont-v0',      // 6
-  'Pendulum-cont-v0',      // 7
-  'Chain-cont-v0',         // 8
-  'LargeDeepSea-cont-v0',  // 9
-  'MultiKeyCorridor-cont-v0', // 10
-  'MemoryChain-cont-v0',   // 11
-  'ProceduralMaze-cont-v0', // 12
-  'HighDimMaze-cont-v0',   // 13
-  'POMaze-cont-v0',        // 14
-  'DelayedChain-cont-v0',  // 15
+  'HalfCheetah-v4',
+  'FourRooms-cont-v0',
+  'DeepSea-cont-v0',
+  'KeyCorridor-cont-v0',
+  'Acrobot-cont-v0',
+  'MountainCar-cont-v0',
+  'CartPole-cont-v0',
+  'Pendulum-cont-v0',
+  'Chain-cont-v0',
+  'LargeDeepSea-cont-v0',
+  'MultiKeyCorridor-cont-v0',
+  'MemoryChain-cont-v0',
+  'ProceduralMaze-cont-v0',
+  'HighDimMaze-cont-v0',
+  'POMaze-cont-v0',
+  'DelayedChain-cont-v0',
 ];
 
-/** The frozen descriptor table, indexed by envKind. */
 export const RECORD_V4_CODECS: readonly CodecDescriptor[] = [
-  // 0 HalfCheetah — 6 ctrl columns, rootx as a chained delta, everything else i16
   {
     category: 'cheetah',
     ctrl: { kind: 'u8box', n: 6 },
@@ -148,88 +95,57 @@ export const RECORD_V4_CODECS: readonly CodecDescriptor[] = [
       i16w(8, 1e-4),
     ],
   },
-  // 1 FourRooms — x, y, gx, gy
   { category: 'grid', ctrl: 'index', poseFields: u8Range(0, 3) },
-  // 2 DeepSea — r, c (+ constant 7×7 extent)
   { category: 'grid', ctrl: 'index', poseFields: u8Range(0, 1), poseConst: { 2: 7, 3: 7 } },
-  // 3 KeyCorridor
   { category: 'grid', ctrl: 'index', poseFields: u8Range(0, 7) },
-  // 4 Acrobot — two wrapped joint angles + two velocities
   {
     category: 'classic',
     ctrl: 'index',
     poseFields: [i16w(0, 1e-4), i16w(1, 1e-4), i16(2, 1e-3), i16(3, 1e-3)],
   },
-  // 5 MountainCar — position + (fine) velocity, constant goal marker
   {
     category: 'classic',
     ctrl: 'index',
     poseFields: [i16(0, 1e-4), i16(1, 1e-5)],
     poseConst: { 2: 0.5 },
   },
-  // 6 CartPole — x, xdot, theta (wrapped), thetadot
   {
     category: 'classic',
     ctrl: 'index',
     poseFields: [i16(0, 1e-4), i16(1, 1e-3), i16w(2, 1e-4), i16(3, 1e-3)],
   },
-  // 7 Pendulum — theta (wrapped), thetadot, applied torque; one u8 ctrl column
   {
     category: 'classic',
     ctrl: { kind: 'u8box', n: 1 },
     poseFields: [i16w(0, 1e-4), i16(1, 1e-3), i16(2, 1e-3)],
   },
-  // 8 Chain — position, constant length
   { category: 'grid', ctrl: 'index', poseFields: [u8(0)], poseConst: { 1: 15 } },
-  // 9 LargeDeepSea
   { category: 'grid', ctrl: 'index', poseFields: u8Range(0, 1), poseConst: { 2: 15, 3: 15 } },
-  // 10 MultiKeyCorridor
   { category: 'grid', ctrl: 'index', poseFields: u8Range(0, 7) },
-  // 11 MemoryChain — position + cue, constant length
   { category: 'grid', ctrl: 'index', poseFields: [u8(0), u8(2)], poseConst: { 1: 31 } },
-  // 12 ProceduralMaze
   { category: 'grid', ctrl: 'index', poseFields: u8Range(0, 3) },
-  // 13 HighDimMaze
   { category: 'grid', ctrl: 'index', poseFields: u8Range(0, 4) },
-  // 14 POMaze
   { category: 'grid', ctrl: 'index', poseFields: u8Range(0, 3) },
-  // 15 DelayedChain
   { category: 'grid', ctrl: 'index', poseFields: [u8(0), u8(2)], poseConst: { 1: 31 } },
 ];
 
-/** envKind for an env id, or −1. */
 export function envKindOf(envId: string): number {
   return RECORD_V4_ENV_KINDS.indexOf(envId as EnvId);
 }
 
-/** The frozen descriptor for an envKind. Throws for an unknown kind. */
 export function codecForEnvKind(envKind: number): CodecDescriptor {
   const desc = RECORD_V4_CODECS[envKind];
   if (desc === undefined) throw new Record4ParseError(`unknown envKind ${envKind}`);
   return desc;
 }
 
-/** The frozen descriptor for an env id. Throws for an unknown env. */
 export function codecForEnv(envId: string): CodecDescriptor {
   const kind = envKindOf(envId);
   if (kind < 0) throw new Record4ParseError(`no v4 codec for envId ${JSON.stringify(envId)}`);
   return codecForEnvKind(kind);
 }
 
-// ---------------------------------------------------------------------------
-// descriptor comparison — meta.json carries the descriptor, we carry the table
-// ---------------------------------------------------------------------------
 
-/**
- * Fold a descriptor (ours, or a `meta.codec` blob of unknown shape) into four
- * comparable strings.
- *
- * Deliberately tolerant of the two places the spec's JSON leaves slack — an
- * absent `poseConst` versus `{}`, and key ORDER inside `poseConst` — because
- * neither changes a decoded byte. Everything that DOES change a decoded byte
- * (category, ctrl shape, the ordered pose columns, each scale and wrap flag,
- * every constant) is compared exactly.
- */
 function normalizeCodec(value: unknown): {
   category: string;
   ctrl: string;
@@ -288,7 +204,6 @@ function normalizeCodec(value: unknown): {
   };
 }
 
-/** True when `value` describes the same codec as `desc`. */
 export function codecMatches(desc: CodecDescriptor, value: unknown): boolean {
   const a = normalizeCodec(desc);
   const b = normalizeCodec(value);
@@ -301,47 +216,27 @@ export function codecMatches(desc: CodecDescriptor, value: unknown): boolean {
   );
 }
 
-// ---------------------------------------------------------------------------
-// shared numeric contract (spec: "Payload")
-// ---------------------------------------------------------------------------
 
 const TWO_PI = Math.PI * 2;
 
-/**
- * The spec's wrap into [−π, π): `w = v − 2π·floor((v + π) / (2π))`.
- * Floor-based on purpose — `floor` agrees bit for bit between Swift and JS,
- * where `%`/`fmod` and `trunc` do not for negative inputs.
- *
- * ENCODER-side only: the decoder just multiplies the stored i16 by its scale.
- * Exported so the reference encoder and any cross-language verifier share ONE
- * implementation instead of two that drift.
- */
 export function wrapAngle(v: number): number {
   return v - TWO_PI * Math.floor((v + Math.PI) / TWO_PI);
 }
 
-/** Box ctrl quantization: `q = round((clamp(v, −1, 1) + 1) · 127.5)`. */
 export function quantizeCtrlU8(v: number): number {
   const clamped = v < -1 ? -1 : v > 1 ? 1 : v;
   return roundHalfAwayFromZero((clamped + 1) * 127.5);
 }
 
-/** Box ctrl dequantization: `v = q / 127.5 − 1`. */
 export function dequantizeCtrlU8(q: number): number {
   return q / 127.5 - 1;
 }
 
-/**
- * The spec's `round(...)`: half away from zero, matching C/Swift `round()`.
- * NOT `Math.round`, which is half toward +∞ and therefore disagrees with the
- * Swift encoder on every exact −x.5 tie.
- */
 export function roundHalfAwayFromZero(v: number): number {
   if (!Number.isFinite(v)) return v;
   return v < 0 ? -Math.round(-v) : Math.round(v);
 }
 
-/** zlib/IEEE CRC-32 over `bytes[start, end)`. */
 export function crc32(bytes: Uint8Array, start = 0, end = bytes.length): number {
   let c = 0xffffffff;
   for (let i = start; i < end; i++) {
@@ -360,9 +255,6 @@ const CRC_TABLE = (() => {
   return table;
 })();
 
-// ---------------------------------------------------------------------------
-// chunk scan (spec: "A torn tail (killed run) is detected by …")
-// ---------------------------------------------------------------------------
 
 export interface FileHeaderV4 {
   magic: number;
@@ -372,7 +264,6 @@ export interface FileHeaderV4 {
 }
 
 export interface ChunkRecordV4 {
-  /** position in the file's chunk sequence */
   index: number;
   stepStart: number;
   stepCount: number;
@@ -380,38 +271,24 @@ export interface ChunkRecordV4 {
   compBytes: number;
   crc32: number;
   doneCount: number;
-  /** lane rewardSum delta over this chunk; NaN when the host had no snapshot */
   rewardDelta: number;
-  /** offset of the chunk HEADER from file start */
   byteOffset: number;
-  /** CHUNK_HEADER_BYTES + compBytes */
   byteLength: number;
-  /** offset of the compressed payload from file start */
   payloadOffset: number;
 }
 
 export interface ChunkScanV4 {
   header: FileHeaderV4;
-  /** valid chunks, in file order and step-contiguous from 0 */
   chunks: ChunkRecordV4[];
-  /** Σ stepCount over `chunks` */
   steps: number;
-  /** byte offset the scan stopped at, when it stopped before the end */
   truncatedAt: number | null;
-  /** why it stopped; null when the file ended cleanly */
   truncatedReason: string | null;
 }
 
 export interface ScanOptionsV4 {
-  /**
-   * Verify each chunk's crc32 over its compressed payload (default true). The
-   * readers always verify; a pure index pass over a file whose bytes are not all
-   * present can turn it off.
-   */
   verifyCrc?: boolean;
 }
 
-/** Resolve any accepted buffer form to the window the caller actually meant. */
 function asWindow(buf: ArrayBuffer | ArrayBufferView): Uint8Array {
   if (ArrayBuffer.isView(buf)) {
     return new Uint8Array(buf.buffer, buf.byteOffset, buf.byteLength);
@@ -419,7 +296,6 @@ function asWindow(buf: ArrayBuffer | ArrayBufferView): Uint8Array {
   return new Uint8Array(buf);
 }
 
-/** Read the 16-byte file header. Throws when it is absent or not ours. */
 export function readFileHeaderV4(buf: ArrayBuffer | ArrayBufferView): FileHeaderV4 {
   const bytes = asWindow(buf);
   if (bytes.byteLength < FILE_HEADER_BYTES) {
@@ -450,14 +326,6 @@ export function readFileHeaderV4(buf: ArrayBuffer | ArrayBufferView): FileHeader
   return header;
 }
 
-/**
- * Walk the chunk headers, keeping the longest valid prefix.
- *
- * A chunk is dropped — along with every chunk after it — on a short header, a
- * foreign magic, a payload that runs past the buffer, a crc mismatch, a
- * non-advancing size, or a stepStart that does not continue the sequence. That
- * covers both real damage and the deliberate cut of a byte-prefix Range request.
- */
 export function scanChunksV4(
   buf: ArrayBuffer | ArrayBufferView,
   opts: ScanOptionsV4 = {},
@@ -498,7 +366,6 @@ export function scanChunksV4(
     const rewardDelta = dv.getFloat32(offset + 28, true);
 
     if (stepCount === 0 || rawBytes === 0 || compBytes === 0) {
-      // A zero-size field cannot advance the scan; treat it as the torn edge.
       stop('empty chunk');
       break;
     }
@@ -536,9 +403,6 @@ export function scanChunksV4(
   return { header, chunks, steps, truncatedAt, truncatedReason };
 }
 
-// ---------------------------------------------------------------------------
-// the meta.json chunk table — a HINT, used for range planning only
-// ---------------------------------------------------------------------------
 
 export interface ChunkTableEntryV4 {
   stepStart: number;
@@ -547,13 +411,6 @@ export interface ChunkTableEntryV4 {
   byteLength: number;
 }
 
-/**
- * `meta.chunks` as a validated table, or null when it is absent or incoherent.
- *
- * Null is not a failure — it is the spec's own fallback ("readers of in-flight or
- * torn files fall back to a sequential header scan"), which for the loader means
- * "fetch the whole file and let the scan sort it out".
- */
 export function chunkTableFromMeta(meta: Pick<RecordingMeta, 'chunks'>): ChunkTableEntryV4[] | null {
   const raw = meta.chunks;
   if (!Array.isArray(raw) || raw.length === 0) return null;
@@ -581,20 +438,11 @@ export function chunkTableFromMeta(meta: Pick<RecordingMeta, 'chunks'>): ChunkTa
 }
 
 export interface PrefixPlanV4 {
-  /** whole chunks to fetch */
   chunks: number;
-  /** steps those chunks decode to (≥ wantSteps unless the lane is shorter) */
   steps: number;
-  /** bytes from file start, header included; 0 when nothing can be planned */
   bytes: number;
 }
 
-/**
- * Fewest WHOLE chunks that cover `[0, wantSteps)`.
- *
- * Whole chunks because a chunk is the unit of everything: one DEFLATE stream,
- * one crc, one dx32 reconstruction chain. Half a chunk decodes to nothing.
- */
 export function planPrefixV4(
   table: readonly ChunkTableEntryV4[],
   wantSteps: number,
@@ -612,10 +460,6 @@ export function planPrefixV4(
   return { chunks, steps, bytes };
 }
 
-/**
- * The `Range` header value for the first `wantSteps` steps, or null for
- * "ask for the whole file" (v3 lanes, or a v4 lane with no usable chunk table).
- */
 export function rangeHeaderForSteps(
   meta: Pick<RecordingMeta, 'recordVersion' | 'chunks'>,
   wantSteps: number,
@@ -628,17 +472,9 @@ export function rangeHeaderForSteps(
   return `bytes=0-${plan.bytes - 1}`;
 }
 
-// ---------------------------------------------------------------------------
-// decode
-// ---------------------------------------------------------------------------
 
-/** raw-DEFLATE inflate of one chunk payload, checked against `rawBytes`. */
 async function inflateChunk(bytes: Uint8Array, chunk: ChunkRecordV4): Promise<Uint8Array> {
-  // `.slice()` detaches the payload from the lane buffer before it enters the
-  // stream: a stream implementation is free to hold, transfer or neuter what it
-  // is handed, and the lane buffer must survive every chunk.
   const comp = bytes.slice(chunk.payloadOffset, chunk.payloadOffset + chunk.compBytes);
-  // Typed as BufferSource, which is what `DecompressionStream.writable` accepts.
   const source = new ReadableStream<BufferSource>({
     start(controller) {
       controller.enqueue(comp);
@@ -656,16 +492,6 @@ async function inflateChunk(bytes: Uint8Array, chunk: ChunkRecordV4): Promise<Ui
   return inflated;
 }
 
-/**
- * Decode one inflated chunk payload into `out` at float offset `base`,
- * in the v3 row shape.
- *
- * Column order is the spec's, exactly: hdr, Box ctrl columns, cheetah
- * `chunkBaseX`, the descriptor's pose columns, then the escape table. Escaped
- * rows still carry a value in every quantized column (that is what keeps the
- * dx32 chain deterministic on both sides) and are overwritten wholesale at the
- * end from their verbatim 64 bytes.
- */
 export function decodeChunkPayload(
   payload: Uint8Array,
   desc: CodecDescriptor,
@@ -706,7 +532,6 @@ export function decodeChunkPayload(
   const escapeCount = dv.getUint32(take(4, 'the escape count'), true);
   const escapeOff = take(escapeCount * ESCAPE_ENTRY_BYTES, 'the escape table');
 
-  // ---- rows ----
   const floats = stepCount * RECORD_FLOATS;
   out.fill(0, base, base + floats);
 
@@ -754,8 +579,6 @@ export function decodeChunkPayload(
         out[base + i * RECORD_FLOATS + slot] = dv.getInt16(col + i * 2, true) * scale;
       }
     } else {
-      // dx32: the chained reconstruction, accumulated in f64 exactly as the
-      // encoder did, then stored to f32 (the spec's `Math.fround` semantics).
       const scale = field.scale ?? 1;
       let recon = chunkBaseX;
       for (let i = 0; i < stepCount; i++) {
@@ -765,7 +588,6 @@ export function decodeChunkPayload(
     }
   }
 
-  // ---- escapes: the whole row, verbatim ----
   if (escapeCount > 0) {
     const outBytes = LITTLE_ENDIAN
       ? new Uint8Array(out.buffer, out.byteOffset, out.byteLength)
@@ -781,8 +603,6 @@ export function decodeChunkPayload(
       }
       const row = base + rowIdx * RECORD_FLOATS;
       if (outBytes !== null) {
-        // Byte copy, not 16 float reads: a NaN payload survives the round trip
-        // exactly as it does in the v3 zero-copy view.
         outBytes.set(payload.subarray(at + 4, at + ESCAPE_ENTRY_BYTES), row * 4);
       } else {
         for (let j = 0; j < RECORD_FLOATS; j++) {
@@ -793,9 +613,6 @@ export function decodeChunkPayload(
   }
 }
 
-// ---------------------------------------------------------------------------
-// readers
-// ---------------------------------------------------------------------------
 
 interface PreparedV4 {
   bytes: Uint8Array;
@@ -845,15 +662,6 @@ function prepareV4(buf: ArrayBuffer | ArrayBufferView, meta: RecordingMeta): Pre
   return { bytes, envId: meta.envId, seed: meta.seed, desc, scan };
 }
 
-/**
- * Parse a v4 `actions.bin` into the v3 `RawRecording` row shape.
- *
- * Accepts a bare `ArrayBuffer` or any view of one; only the view's own window is
- * read (a Bun `Buffer` is a view into a shared pool — decoding from offset 0
- * would read a neighbour's bytes). A torn or deliberately truncated tail yields
- * the valid prefix; a file with no valid chunk at all yields `steps === 0`, which
- * the caller reports as an empty lane.
- */
 export async function parseActionsBinV4(
   buf: ArrayBuffer | ArrayBufferView,
   meta: RecordingMeta,
@@ -867,13 +675,8 @@ export async function parseActionsBinV4(
     try {
       payload = await inflateChunk(bytes, chunk);
     } catch {
-      // The spec's last torn-tail signal: the payload will not inflate, or it
-      // inflates to the wrong size. Drop this chunk and everything after it.
       break;
     }
-    // NOT caught: a crc-valid chunk that inflated to exactly `rawBytes` and is
-    // still structurally wrong is a CODEC bug, not a torn tail. Truncating there
-    // would quietly play half a lane and call it the truth.
     decodeChunkPayload(payload, desc, chunk.stepCount, data, steps * RECORD_FLOATS);
     steps += chunk.stepCount;
   }
@@ -888,25 +691,13 @@ export async function parseActionsBinV4(
 
 export interface ChunkRowsV4 {
   chunk: ChunkRecordV4;
-  /** 0-based step index of `data`'s first row */
   stepStart: number;
   stepCount: number;
-  /**
-   * `stepCount × 16` floats in the v3 row shape. REUSED between chunks — copy
-   * anything that must outlive the visit.
-   */
   data: Float32Array;
 }
 
 export type ChunkVisitorV4 = (rows: ChunkRowsV4) => boolean | void | Promise<boolean | void>;
 
-/**
- * Streaming variant: decode chunk by chunk without ever materializing the lane.
- *
- * One scratch row buffer is reused across chunks, so a 1M-step lane costs one
- * chunk's worth of floats instead of 64 MB. Return `false` from `visit` to stop.
- * Answers the number of steps visited.
- */
 export async function walkChunksV4(
   buf: ArrayBuffer | ArrayBufferView,
   meta: RecordingMeta,
@@ -925,8 +716,6 @@ export async function walkChunksV4(
     }
     const floats = chunk.stepCount * RECORD_FLOATS;
     if (scratch.length < floats) scratch = new Float32Array(floats);
-    // As in `parseActionsBinV4`: a structural error past the crc is a codec bug
-    // and propagates; only the inflate is treated as a torn tail.
     decodeChunkPayload(payload, desc, chunk.stepCount, scratch, 0);
     steps += chunk.stepCount;
     const stop = await visit({

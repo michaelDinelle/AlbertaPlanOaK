@@ -1,13 +1,9 @@
-// DOM primitives shared by the app chrome, plus the sortable data table.
-// (The primitives live here rather than in a fifth module so the client track
-// stays inside its file ownership; they are deliberately tiny.)
 
 import { TOKENS } from '@kit/tokens';
 import { ENVS, type EnvId } from '@shared/envs';
 import type { RunIndexEntry } from '@shared/types';
 import { compareValues, envIdsOf, envName, formatCount, type EnvShare, type SortDirection } from '../state';
 
-// ---------- element helpers ----------
 
 export interface ElAttrs {
   class?: string;
@@ -47,8 +43,6 @@ export function el<K extends keyof HTMLElementTagNameMap>(
   if (attrs.placeholder && (node instanceof HTMLInputElement || node instanceof HTMLTextAreaElement)) {
     node.placeholder = attrs.placeholder;
   }
-  // options and selects carry values too — setting it only on inputs silently
-  // produced valueless <option>s that no select could ever select
   if (attrs.value !== undefined && 'value' in node) (node as { value: string }).value = attrs.value;
   if (attrs.dataset) for (const key of Object.keys(attrs.dataset)) node.dataset[key] = attrs.dataset[key];
   if (attrs.style) Object.assign(node.style, attrs.style);
@@ -59,7 +53,6 @@ export function el<K extends keyof HTMLElementTagNameMap>(
   return node;
 }
 
-/** micro-caps section label with a leading hairline — the app's structural device */
 export function eyebrow(label: string, trailing?: Node | string | null): HTMLElement {
   return el('div', { class: 'eyebrow' }, [
     el('span', { class: 'eyebrow-rule' }),
@@ -84,12 +77,6 @@ export function badge(text: string, kind = 'neutral', title?: string): HTMLEleme
   return el('span', { class: `badge badge-${kind}`, text, ...(title ? { title } : {}) });
 }
 
-/**
- * An anchor that reads as a button — the action shape empty states and view
- * headers use. Default is the hairline `.btn`; `quiet` swaps the border for a
- * raised fill, which only reads on the page background (inside a `.run-head`,
- * whose surface IS `--bg-raised`, a quiet button is invisible).
- */
 export function linkButton(label: string, href: string, options: { quiet?: boolean; title?: string } = {}): HTMLElement {
   return el('a', {
     class: `btn${options.quiet ? ' btn-quiet' : ''}`,
@@ -107,12 +94,6 @@ export function actionButton(label: string, onClick: () => void, options: { quie
 
 type Actions = Node | readonly (Node | null | undefined)[] | null | undefined;
 
-/**
- * One or many action nodes get the same footer row, so a state with a single
- * "Try again" and one with three links share a baseline. Returns null when
- * nothing survives, which keeps an empty `.empty-actions` (a 0-height flex row
- * that still eats the container's gap) out of the DOM.
- */
 function actionRow(actions: Actions): HTMLElement | null {
   const list = (actions === null || actions === undefined
     ? []
@@ -133,18 +114,10 @@ export function emptyState(title: string, detail?: string, action?: Actions): HT
 }
 
 export interface ErrorStateOptions {
-  /** overrides the default "Could not load" headline */
   title?: string;
-  /** rendered after the retry button */
   actions?: Actions;
 }
 
-/**
- * The failure twin of `emptyState`. `retry` is optional on purpose: a 404 is a
- * settled answer, and offering "Try again" on one trains people to mash a button
- * that can only fail again — those callers pass a title, a plain-English detail
- * and a way out instead.
- */
 export function errorState(message: string, retry?: () => void, options: ErrorStateOptions = {}): HTMLElement {
   const extra = options.actions === undefined ? [] : Array.isArray(options.actions) ? options.actions : [options.actions];
   return el('div', { class: 'empty empty-error' }, [
@@ -158,14 +131,7 @@ export function spinner(label = 'Loading'): HTMLElement {
   return el('div', { class: 'loading' }, [el('span', { class: 'loading-pip' }), el('span', { text: label })]);
 }
 
-// ---------- app header ----------
 
-/**
- * The one persistent chrome element, ONE bar: identity on the left (the brand
- * is the way home), and whatever the view needs on the right — the wall puts
- * its run picker there, the live view its pip. There is no nav: this is a
- * one-page app and a "Wall" link on the wall was a button to nowhere.
- */
 export function appHeader(trailing?: Node | null): HTMLElement {
   return el('header', { class: 'app-header' }, [
     el('a', { class: 'brand', href: '#/', title: 'OaK Preserve — the wall' }, [
@@ -185,23 +151,9 @@ export function viewShell(trailing?: Node | null): { root: HTMLElement; body: HT
 
 export interface Crumb {
   label: string;
-  /** omit on the trailing crumb — it is where you already are */
   href?: string;
 }
 
-/**
- * The second navigation device, under the header: where this page sits.
- *
- * Every deep view in the app is reachable from a shallower one and every deep
- * URL carries its parents (`#/run/:id`, `#/theater/:id/:envId/:seed`), so a
- * crumb trail is always reconstructible from the route alone — no history stack,
- * no view-to-view state, and a pasted URL keeps its way back. Separators are real
- * elements rather than `::after` content so the trail reads correctly aloud and
- * survives copy-paste.
- *
- * `trailing: true` prints the final separator and nothing after it — the shape
- * every view here uses, because the page's own `h1` IS the last crumb.
- */
 export function breadcrumb(items: readonly Crumb[], options: { trailing?: boolean } = {}): HTMLElement {
   const nav = el('nav', { class: 'crumbs', ariaLabel: 'Breadcrumb' });
   items.forEach((item, index) => {
@@ -216,17 +168,13 @@ export function breadcrumb(items: readonly Crumb[], options: { trailing?: boolea
   return nav;
 }
 
-// ---------- sortable data table ----------
 
 export interface TableColumn<R> {
   key: string;
   label: string;
-  /** sortable value (numbers sort numerically, strings naturally) */
   value(row: R): unknown;
-  /** rendered cell; defaults to String(value) */
   render?(row: R): Node | string;
   align?: 'left' | 'right';
-  /** monospace + tabular figures (the default for numeric columns) */
   mono?: boolean;
   width?: string;
   title?: string;
@@ -241,14 +189,12 @@ export interface TableOptions<R> {
   onRowClick?(row: R): void;
   onRowHover?(row: R | null): void;
   emptyLabel?: string;
-  /** rows rendered before the "show all" control appears */
   pageSize?: number;
 }
 
 export interface TableHandle<R> {
   root: HTMLElement;
   setRows(rows: readonly R[]): void;
-  /** paint one row as focused (drives lane-chart <-> table cross-highlight) */
   highlight(key: string | null): void;
   destroy(): void;
 }
@@ -369,24 +315,13 @@ export function dataTable<R>(options: TableOptions<R>): TableHandle<R> {
   };
 }
 
-// ---------- env identity (moved here when the gallery page retired) ----------
 
-/** The accent hex the 3D scenes use for this env slug (kit/tokens.ts). */
 export function accentCss(slug: string): string {
   const value = TOKENS.accents[slug];
   if (value === undefined) return '#5c6a80';
   return `#${value.toString(16).padStart(6, '0')}`;
 }
 
-/**
- * The env spectrum strip: one accent cell per env, ordered by the canonical env
- * table. Two inputs, deliberately unequal in what they claim:
- *   * `EnvShare[]` — TRUE apportionment from `envShares(meta)`: cell widths are
- *     the real seed fractions and each cell names its seed count.
- *   * a run-index entry — IDENTITY ONLY: equal-width cells, no seed numbers,
- *     because the index never carries the split (inventing `batch / envIds.length`
- *     printed confident fiction on every mixed run).
- */
 export function envSpectrum(source: Pick<RunIndexEntry, 'envIds'> | readonly EnvShare[]): HTMLElement {
   let shares: readonly EnvShare[] | null = null;
   let ids: EnvId[];

@@ -1,26 +1,3 @@
-// Alpine Valley — MountainCar-cont-v0. The visual canon for the OaK Preserve.
-//
-// THE ONE IDEA: the ground IS the physics. `mountainCarHeight(x) = sin(3x)·0.45+0.55`
-// over x ∈ [-1.2, 0.6] is not "inspiration for" the terrain — it is the terrain, at 1:1
-// world scale, and the cart sits on it at (pose[0], heightAt(pose[0]), 0) with the tilt
-// read off the analytic slope. Every other element is placed from an env anchor: the
-// cairn on the goal line at 0.5, the signpost on the respawn at -0.5.
-//
-// PATTERNS THE OTHER FIFTEEN SCENES SHOULD COPY
-//  * probe roots carry POSITION ONLY. Tilt lives on `cartTilt`, lift lives in the part
-//    geometry. Deleting every decoration would leave a correct scene.
-//  * state visuals are PURE FUNCTIONS of the frame. The momentum trail is the terrain
-//    curve traced backwards over `|vel|` world units, not a history buffer, so it is
-//    idempotent, scrub-safe and free on a teleport.
-//  * every non-state animation is keyed off `ctx.time()` — including the goal gust, the
-//    eagle crossing and the teleport flash — so a paused playback freezes the whole
-//    world coherently, celebrations included.
-//  * celebrations fire ONLY from `frame.events`. `done` here always accompanies `goal`
-//    (MountainCar's done IS the +1), so this scene never sighs — that would be a lie.
-//  * the SUPERLUMINAL GUARD (see `update`): the host linearly interpolates continuous
-//    poses, so the single control step that contains a respawn renders the cart sliding
-//    from the summit back down the map. Holding the last physically-reachable pose for
-//    at most a few frames turns that ease into the hard cut the contract demands.
 
 import { GroundTruthOverlay } from '@kit/debug';
 import { makeFrameRig, type FrameRig } from '@kit/rigs';
@@ -49,39 +26,22 @@ import { buildCart, type CartHandle } from './actors';
 import { manifest } from './manifest';
 import { buildWorld, heightResolver, TRAILHEAD_Z, type WorldHandle } from './world';
 
-// ---------------------------------------------------------------------------
-// composition
-// ---------------------------------------------------------------------------
 
-// THE FRAME. Near-profile and close: the whole point of this scene is that the ground is
-// the physics, and a 3/4 view turns `sin(3x)` into "some mountains". The camera sits at
-// the track's own centre (x = -0.3), 2.1 units out, high enough to see the trough floor —
-// at 16:9 that frames x ∈ [-1.6, 1.0] and y ∈ [0.2, 1.7], i.e. the left wall, the whole
-// basin and the summit cairn, with a few degrees of offset for depth.
 const CAM_BASE: readonly [number, number, number] = [-0.16, 1.06, 2.56];
 const CAM_LOOK: readonly [number, number, number] = [-0.31, 0.75, -0.05];
-/** thumb pulls back so the whole 1.8-unit playfield survives a square-ish crop */
 const CAM_BASE_THUMB: readonly [number, number, number] = [-0.28, 1.1, 3.05];
 const CAM_LOOK_THUMB: readonly [number, number, number] = [-0.3, 0.72, 0];
 
-// celebration/flourish envelopes, all measured on ctx.time()
 const GUST_SECONDS = 3.2;
 const EAGLE_SECONDS = 6.5;
 const FLASH_SECONDS = 0.24;
 const SUMMIT_FLARE_SECONDS = 1.3;
 const SCREE_SECONDS = 0.85;
-// Celebration weights, tuned against a REAL goal (seed 40, step 44984). Everything in
-// this scene is small and the snow is already near the bloom threshold, so the default
-// full-strength grammar whites the frame out: a 2.4-intensity point light on a snow
-// crest plus a 1.0 bloom pulse smears the whole ridge. Half the amplitude, all of the
-// beat.
-/** the burst travels ~0.3 world units in a 1.8-unit playfield */
 const BURST_SCALE = 0.38;
 const RIPPLE_SCALE = 0.22;
 const BURST_PARTICLES = 84;
 const PULSE_STRENGTH = 0.6;
 
-/** a control step can move the cart at most MC_MAX_SPEED; anything more is a respawn */
 const SUPERLUMINAL_SLACK = 0.025;
 const MAX_HELD_FRAMES = 4;
 
@@ -91,7 +51,6 @@ interface MountainCarLike {
   force?: unknown;
 }
 
-/** force ∈ {-1, 0, +1}: sim-core's decode when present, the raw ctrl otherwise. */
 function forceOf(state: FrameState): number {
   const d = state.derived as MountainCarLike | null | undefined;
   if (d && typeof d === 'object' && typeof d.force === 'number') return d.force;
@@ -115,7 +74,6 @@ class AlpineValleyScene implements SceneModule {
   private accent: number = 0xe86e4d;
   private gold: number = 0xffd166;
 
-  // ---- flourish clocks (playback seconds; -Infinity = idle) ----
   private gustAt = -Infinity;
   private eagleAt = -Infinity;
   private flashAt = -Infinity;
@@ -123,7 +81,6 @@ class AlpineValleyScene implements SceneModule {
   private screeAt = -Infinity;
   private screeStep = Number.NaN;
 
-  // ---- the superluminal guard ----
   private heldPos = Number.NaN;
   private heldStep = Number.NaN;
   private heldFrames = 0;
@@ -145,9 +102,6 @@ class AlpineValleyScene implements SceneModule {
     this.world = world;
     this.scene.add(world.group);
 
-    // This scene claims exactly two of the rig's point lights, and their colour and
-    // (for the summit) position are STATIC — only intensity is state-driven, so update()
-    // never touches a Color. points[] is empty at thumb; the guards are the tier policy.
     const lanternLight = world.rig.points[0];
     if (lanternLight) lanternLight.color.set(palette.accentLight);
     const summitLight = world.rig.points[1];
@@ -185,7 +139,6 @@ class AlpineValleyScene implements SceneModule {
     this.camera = rig.camera;
     rig.snap();
 
-    // the host reads this pool's own channel through celebrationPulse(scene)
     const pool = new CelebrationPool({
       tier: ctx.tier,
       seed: ctx.seed,
@@ -232,10 +185,8 @@ class AlpineValleyScene implements SceneModule {
     const time = ctx.time();
     const state = frame.state;
 
-    // 1. the pool adopts the host clock BEFORE anything fires into it
     pool.update(frame.dtReal, time);
 
-    // 2. a scrub wipes every in-flight beat: nothing may survive a discontinuity
     if (frame.scrubbed) {
       pool.clear();
       this.gustAt = -Infinity;
@@ -249,7 +200,6 @@ class AlpineValleyScene implements SceneModule {
       rig.snap();
     }
 
-    // 3. events — celebrations are NEVER inferred from the state stream
     let teleported = false;
     for (let i = 0; i < frame.events.length; i++) {
       const ev = frame.events[i];
@@ -264,10 +214,8 @@ class AlpineValleyScene implements SceneModule {
       } else if (ev.type === 'teleport') {
         teleported = true;
       }
-      // `done` is MountainCar's +1, never a failure: this scene must not sigh.
     }
 
-    // 4. the superluminal guard (see the header note)
     const rawPos = state.pose[0] ?? 0;
     const vel = state.pose[1] ?? 0;
     let pos = rawPos;
@@ -283,13 +231,10 @@ class AlpineValleyScene implements SceneModule {
         this.heldFrames = 0;
       }
     }
-    // a teleport gets a one-frame warm flash, but NEVER a pool.clear(): the goal burst
-    // fired in the same event batch and must survive the snap it caused.
     if (teleported) this.flashAt = time;
     this.heldPos = pos;
     this.heldStep = state.step;
 
-    // 5. a failed climb: the velocity turns over below the summit and kicks scree
     const prev = frame.prev;
     if (!frame.scrubbed && !teleported && prev) {
       const prevVel = prev.pose[1] ?? 0;
@@ -300,7 +245,6 @@ class AlpineValleyScene implements SceneModule {
       }
     }
 
-    // 6. envelopes — every one of them measured on the playback clock
     const gust = envelope(time - this.gustAt, GUST_SECONDS, 1.7);
     const flash = envelope(time - this.flashAt, FLASH_SECONDS, 1);
     const flare = envelope(time - this.flareAt, SUMMIT_FLARE_SECONDS, 2.2);
@@ -308,14 +252,12 @@ class AlpineValleyScene implements SceneModule {
     const eagleAge = time - this.eagleAt;
     const eagle = eagleAge >= 0 && eagleAge <= EAGLE_SECONDS ? eagleAge / EAGLE_SECONDS : null;
 
-    // 7. the state visuals
     cart.setDustKick(scree);
     cart.setState(pos, vel, forceOf(state));
     cart.setLanternGain(1 + 1.4 * flash);
     world.setGust(gust);
     world.setEagle(eagle);
 
-    // 8. the two point lights this scene claims from the rig
     const lantern = world.rig.points[0];
     if (lantern) {
       lantern.position.copy(cart.lanternWorld);
@@ -326,11 +268,9 @@ class AlpineValleyScene implements SceneModule {
       summit.intensity = 0.04 + 0.7 * flare;
     }
 
-    // 9. one clock for the whole world (setMaterialsTime under the hood)
     world.setTime(time);
     cart.setTime(time);
 
-    // 10. camera easing runs in WALL time so a paused frame is still explorable
     rig.update(frame.dtReal);
 
     if (this.debugOn && this.overlay) this.overlay.setState(state);
@@ -369,7 +309,6 @@ class AlpineValleyScene implements SceneModule {
         expectWorldPos: () => [MC_GOAL_POS, heightAt(MC_GOAL_POS), 0] as const,
       },
       {
-        // planted on the respawn abscissa, offset in z inside the exact-profile band
         name: 'trailhead',
         object: trailhead,
         expectWorldPos: () => [MC_START_POS, heightAt(MC_START_POS), TRAILHEAD_Z] as const,
@@ -401,11 +340,6 @@ class AlpineValleyScene implements SceneModule {
   }
 }
 
-/**
- * Exponential decay in [0, 1] over `span` playback seconds, 0 outside the window.
- * The linear tail term is not cosmetic: a bare exp() still has real amplitude when the
- * window closes, so every flourish would end on a one-frame pop.
- */
 function envelope(age: number, span: number, rate: number): number {
   if (!(age >= 0) || age > span) return 0;
   const e = Math.exp(-rate * age) * (1 - age / span);

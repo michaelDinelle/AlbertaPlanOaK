@@ -1,24 +1,3 @@
-// Run discovery + the index cache.
-//
-// A run root is any directory ONE level under the bench root whose meta.json carries
-// `fleetSchemaVersion`. Per-lane recording meta.json files live two levels deeper and
-// lack that key, so they can never be mistaken for a run root.
-//
-// Completeness is measured, never trusted: `.done` is written by the launcher and lies
-// about interrupted runs, so we read the LAST 256 KB of fleet.jsonl instead (rows are
-// step-ordered and the kind:"final" block is the last thing written). That window also
-// yields maxStep.
-//
-// The expensive half (tail scan + recording scan + summary probe) is memoized on
-// (meta.json mtime, fleet.jsonl mtime+size, summary.json mtime, recordings signature) and
-// persisted to frontend/.cache; the cheap half (inFlight, role) is recomputed on every
-// request. Every input the derived record REPORTS is in that key — omitting summary.json
-// or the recordings tree makes hasSummary/hasRecordings/recordings permanently stale for
-// a run whose fleet.jsonl stopped changing (a summary.json written after the run ends is
-// the normal case).
-//
-// A single unreadable root (EACCES, a fleet.jsonl that is a directory, a run deleted
-// mid-scan) is SKIPPED, never fatal: /api/runs must keep answering for the other 600.
 
 import { mkdir, readdir, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
@@ -41,16 +20,10 @@ import {
   type RecordingEntry,
 } from './recordings';
 
-/** floor between run-index cache writes (the file is ~240 KB at 600 runs) */
 const PERSIST_MIN_INTERVAL_MS = 10_000;
 
-// ---------- derived-per-root cache record ----------
 
 interface CachedRun {
-  /**
-   * `${metaMtime}:${fleetMtime}:${fleetSize}:${summaryMtime}:${recordingsSignature}` —
-   * every input of the derived record below, so no field can go stale.
-   */
   key: string;
   id: string;
   envIds: string[];
@@ -65,11 +38,6 @@ interface CachedRun {
   hasRecordings: boolean;
 }
 
-// `v` bumps whenever DISCOVERY SEMANTICS change (not just file shapes): a derived
-// record is memoized on file mtimes alone, so a code change that alters what a scan
-// would find must invalidate persisted records — the files it mis-scanned never
-// change again. v1 -> v2: RECORD_VERSION_SERVABLE gained 4; v1 caches persisted
-// hasRecordings:false for v4-only roots forever.
 interface CacheFile {
   v: 2;
   benchRoot: string;
@@ -83,7 +51,6 @@ export interface ResolvedRun {
   entry: RunIndexEntry;
 }
 
-// ---------- meta.json ----------
 
 function asStringArray(v: unknown): string[] {
   return Array.isArray(v) ? v.filter((x): x is string => typeof x === 'string') : [];
@@ -94,7 +61,6 @@ async function readRunMeta(path: string): Promise<RunMeta | null> {
     const parsed: unknown = JSON.parse(await Bun.file(path).text());
     if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) return null;
     const o = parsed as Record<string, unknown>;
-    // The one discriminator that separates a run root from a per-lane recording dir.
     if (typeof o['fleetSchemaVersion'] !== 'number') return null;
     return parsed as RunMeta;
   } catch {
@@ -122,7 +88,6 @@ function ablationLabelOf(meta: RunMeta): string {
   return abl.length > 0 ? abl.join(',') : 'none';
 }
 
-// ---------- completeness (tail probe) ----------
 
 export interface FleetTailProbe {
   hasFinal: boolean;
@@ -130,10 +95,6 @@ export interface FleetTailProbe {
   rowsScanned: number;
 }
 
-/**
- * Scan the tail window of fleet.jsonl for the completeness signals. Reading a bounded
- * window is what makes indexing ~600 runs (up to 175 MB each) a sub-second operation.
- */
 export async function probeFleetTail(
   fleetPath: string,
   bytes = FLEET_TAIL_BYTES,
@@ -150,14 +111,10 @@ export async function probeFleetTail(
   return { hasFinal, maxStep, rowsScanned: rows.length };
 }
 
-// ---------- the index ----------
 
 export interface RunIndexOptions {
-  /** absolute path to the fleet-run store */
   benchRoot: string;
-  /** where to persist the derived cache; null disables persistence (tests) */
   cacheFile?: string | null;
-  /** rescan throttle */
   ttlMs?: number;
 }
 
@@ -176,7 +133,6 @@ export class RunIndex {
   private lastPersistAt = 0;
   private inFlightScan: Promise<void> | null = null;
   private dirty = false;
-  /** roots already reported as skipped, so a permanently broken one logs once, not per scan */
   private readonly loggedSkips = new Set<string>();
 
   constructor(opts: RunIndexOptions) {
@@ -185,24 +141,15 @@ export class RunIndex {
     this.ttlMs = opts.ttlMs ?? INDEX_TTL_MS;
   }
 
-  /** Newest-first list of every discovered run. */
   async list(): Promise<RunIndexEntry[]> {
     await this.ensureFresh();
     return this.order.map((id) => this.runs.get(id)?.entry).filter((e): e is RunIndexEntry => e !== undefined);
   }
 
-  /**
-   * Resolve a request-supplied id against the discovered set. This is the ONLY way a
-   * request reaches the filesystem: the id is a map key, never a path component.
-   */
   async resolve(id: string): Promise<ResolvedRun | undefined> {
     await this.ensureFresh();
     const hit = this.runs.get(id);
     if (hit !== undefined) return hit;
-    // A run created since the last scan deserves one rescan — but an unknown id is also
-    // the cheapest thing an attacker (or a stale bookmark on a refresh loop) can send, so
-    // the miss-rescan obeys the same TTL as everything else. Inside the window, a miss is
-    // simply a miss.
     if (Date.now() - this.lastScanAt < this.ttlMs) return undefined;
     await this.rescan();
     return this.runs.get(id);
@@ -255,9 +202,6 @@ export class RunIndex {
 
         const fleetPath = join(dir, 'fleet.jsonl');
         const fleetStat = await statOrNull(fleetPath);
-        // Tape-era roots (METRICS LAW 2026-08-05) write fleet.jsonl only at
-        // the end (final rows); mid-run liveness comes from aggregate.jsonl,
-        // which every era appends per heartbeat.
         const aggStat = await statOrNull(join(dir, 'aggregate.jsonl'));
         const fleetMtime = Math.max(fleetStat?.mtimeMs ?? 0, aggStat?.mtimeMs ?? 0);
         const fleetSize = (fleetStat?.size ?? 0) + (aggStat?.size ?? 0);
@@ -279,9 +223,6 @@ export class RunIndex {
           const probe = fleetStat === null
             ? { hasFinal: false, maxStep: 0, rowsScanned: 0 }
             : await probeFleetTail(fleetPath);
-          // Mid-run progress for tape-era roots: fleet.jsonl is empty until
-          // the final rows land, so the step high-water comes from the
-          // aggregate heartbeat stream.
           if (!probe.hasFinal && aggStat !== null) {
             const aggProbe = await probeFleetTail(join(dir, 'aggregate.jsonl'));
             probe.maxStep = Math.max(probe.maxStep, aggProbe.maxStep);
@@ -331,8 +272,6 @@ export class RunIndex {
           },
         });
       } catch (err) {
-        // One broken root is data, not an outage: drop it from this index build and keep
-        // going. Logged once per id for the life of the process.
         if (!this.loggedSkips.has(id)) {
           this.loggedSkips.add(id);
           const message = err instanceof Error ? err.message : String(err);
@@ -351,14 +290,13 @@ export class RunIndex {
       const eb = nextRuns.get(b)?.entry;
       const sa = ea?.startedAt ?? '';
       const sb = eb?.startedAt ?? '';
-      if (sa !== sb) return sa < sb ? 1 : -1; // newest first
+      if (sa !== sb) return sa < sb ? 1 : -1;
       return a < b ? 1 : a > b ? -1 : 0;
     });
     this.lastScanAt = Date.now();
     void this.persist();
   }
 
-  // ---------- disk cache ----------
 
   private async loadCache(): Promise<void> {
     if (this.loadedCache) return;
@@ -375,14 +313,11 @@ export class RunIndex {
         }
       }
     } catch {
-      /* a cold or corrupt cache just means a full scan */
     }
   }
 
   private async persist(): Promise<void> {
     if (this.cacheFile === null || !this.dirty) return;
-    // An in-flight run re-derives every rescan; without a floor that would rewrite the
-    // whole index file every TTL for the life of a 40-minute Tier-L.
     const now = Date.now();
     if (this.lastPersistAt !== 0 && now - this.lastPersistAt < PERSIST_MIN_INTERVAL_MS) return;
     this.lastPersistAt = now;
@@ -396,12 +331,10 @@ export class RunIndex {
       await ensureCacheDir(this.cacheFile);
       await writeFile(this.cacheFile, JSON.stringify(payload));
     } catch {
-      /* cache is an optimization, never a hard dependency */
     }
   }
 }
 
-/** Create the cache directory for `file` and drop a self-ignoring .gitignore into it. */
 export async function ensureCacheDir(file: string): Promise<void> {
   const dir = dirname(file);
   if (dir.length === 0 || dir === file) return;
@@ -412,14 +345,7 @@ export async function ensureCacheDir(file: string): Promise<void> {
   }
 }
 
-// ---------- run detail ----------
 
-/**
- * Read + parse a JSON file, keeping "there is no file" and "the file is not JSON"
- * APART. Collapsing them into one `null` makes every downstream empty state a
- * guess, and the wrong guess sends the user to re-run the tool that wrote the
- * broken file. `missing` is a normal state; `unreadable` is a defect worth naming.
- */
 type JsonRead<T> =
   | { value: T; error: null }
   | { value: null; error: 'missing' | 'unreadable' };
@@ -438,7 +364,6 @@ async function readJsonFile<T>(path: string): Promise<JsonRead<T>> {
   }
 }
 
-/** Whole-file read that answers `null` for missing OR unreadable (directory, EACCES). */
 async function readTextOrNull(path: string): Promise<string | null> {
   try {
     return await Bun.file(path).text();
@@ -448,11 +373,8 @@ async function readTextOrNull(path: string): Promise<string | null> {
 }
 
 export async function buildRunDetail(run: ResolvedRun, recs: RecordingEntry[]): Promise<RunDetail> {
-  // Every summary leaves this function in v2 vocabulary, whichever schema is on disk —
-  // the ~600 historical roots are never regenerated, and the client speaks one language.
   const summaryRead = await readJsonFile<RunSummary>(join(run.dir, 'summary.json'));
   const summary = adaptSummary(summaryRead.value);
-  // A present-but-unparseable summary is reported as such; missing stays plain null.
   const summaryError = summaryRead.error === 'unreadable' ? 'unreadable' : null;
 
   const aggText = await readTextOrNull(join(run.dir, 'aggregate.jsonl'));
@@ -472,7 +394,6 @@ export async function buildRunDetail(run: ResolvedRun, recs: RecordingEntry[]): 
   };
 }
 
-// ---------- standalone helper used by the tests + the SSE status event ----------
 
 export interface Completeness {
   complete: boolean;

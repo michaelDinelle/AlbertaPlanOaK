@@ -270,22 +270,6 @@ def rollout_compare(m: mujoco.MjModel, gpu_bin: Path, ref_npz: Path) -> int:
     print("ROLLOUT PASS" if ok_early and ok_env else "ROLLOUT FAIL")
     return 0 if (ok_early and ok_env) else 1
 
-# ---------------------------------------------------------------- classic control
-# fp64 oracle (+ numpy fp32 shadow null) for the continuing classic-control
-# envs ported to Sources/ClassicControl.metal. Certification standard: the
-# F4-verdict precedent — (a) an F1-style ONE-STEP parity gate (every recorded
-# (state, action) transition replayed in fp64; chaotic trajectories are never
-# compared over long horizons), and (b) an F4-style POPULATION TOST on
-# per-lane metrics (rewardSum, doneCount, state means), unpaired across
-# backends (the F4 gate-calibration finding: paired-by-seed tests are invalid
-# across physics backends), validated against a same-source null (the fp32
-# numpy shadow vs the fp64 oracle at the same bands).
-#
-# The input run root is a fleet run of the env with the RANDOM policy and all
-# lanes recorded, e.g.:
-#   OAK_BENCH_ENVS="Acrobot-cont-v0:512" OAK_BENCH_SEED_COUNT=512 \
-#     OAK_BENCH_STEPS=500 OAK_BENCH_POLICIES=random OAK_RECORD_ACTIONS=1 \
-#     OAK_METRICS_STORAGE=<root> .build/release/OaK benchmark
 CLASSIC_ENVS = ("Acrobot-cont-v0", "MountainCar-cont-v0", "CartPole-cont-v0",
                 "Pendulum-cont-v0")
 CLASSIC_STATE_DIMS = {
@@ -294,8 +278,8 @@ CLASSIC_STATE_DIMS = {
     "CartPole-cont-v0": ["x", "xdot", "th", "thdot"],
     "Pendulum-cont-v0": ["th", "thdot"],
 }
-CLASSIC_BOX = {"Pendulum-cont-v0"}   # action = ctrl[0]; others: int(ctrl[0])
-CLASSIC_ANGLE_DIMS = {   # 2*pi-periodic state dims (wrapped state compared mod 2*pi)
+CLASSIC_BOX = {"Pendulum-cont-v0"}
+CLASSIC_ANGLE_DIMS = {
     "Acrobot-cont-v0": [0, 1],
     "MountainCar-cont-v0": [],
     "CartPole-cont-v0": [2],
@@ -311,7 +295,6 @@ def _state_diff(a: np.ndarray, b: np.ndarray, angle_dims) -> np.ndarray:
     return d
 
 def _wrap_pi(x):
-    # floor-mod into [-pi, pi); identical formula to gw_wrap_pi (Metal side).
     return x - 2.0 * np.pi * np.floor((x + np.pi) / (2.0 * np.pi))
 
 def _acro_dsdt(st, tau):
@@ -373,13 +356,10 @@ def classic_step(env: str, st: np.ndarray, ctrl0: float):
         th = _wrap_pi(th)
         d = 0.0
         out = np.array([x, xd, th, thd], dtype=st.dtype)
-        # thresholds as fp32-rounded literals — the Metal side compares the
-        # fp32 state against the fp32 constants 2.4f / 0.2094395f
         if abs(x) > float(np.float32(2.4)) or abs(th) > float(np.float32(0.2094395)):
             d = 1.0
             out = np.zeros_like(out)
         return out, 1.0, d
-    # Pendulum-cont-v0
     th, thd = st
     u = np.clip(2.0 * ctrl0, -2.0, 2.0)
     thn = _wrap_pi(th)
@@ -391,7 +371,6 @@ def classic_step(env: str, st: np.ndarray, ctrl0: float):
     return np.array([th, nthd], dtype=st.dtype), -cost, 0.0
 
 def classic_init(env: str, dtype) -> np.ndarray:
-    # Fleet-init state (oak_fleet_init); fp32-exact seeds of the stream.
     if env == "Acrobot-cont-v0":
         return np.zeros(4, dtype=dtype)
     if env == "MountainCar-cont-v0":
@@ -436,10 +415,6 @@ def classic_tost(run_root: Path) -> int:
     k = len(dims)
     lane_dirs = sorted((run_root / env).glob("seed*/"), key=lambda p: int(p.name[4:]))
     assert lane_dirs, f"no recorded lanes under {run_root / env}"
-    # This gate's tolerances (1e-4 one-step parity) sit BELOW the record-v4
-    # quantization contract (poses 1e-4, ctrl 1/255), so certification runs
-    # must be recorded raw. The fleet default is v4 — cut certification runs
-    # with OAK_RECORD_FORMAT=3 explicitly.
     for p in lane_dirs:
         lm = json.loads((p / "meta.json").read_text())
         assert lm.get("recordVersion") != 4, (
@@ -449,7 +424,6 @@ def classic_tost(run_root: Path) -> int:
     finals = {r["seed"]: r for r in fleet if r.get("kind") == "final"}
 
     ok = True
-    # ---- one-step parity (F1-style) --------------------------------------
     angle_dims = CLASSIC_ANGLE_DIMS[env]
     done_flips = 0
     n_trans = 0
@@ -480,7 +454,6 @@ def classic_tost(run_root: Path) -> int:
     print(f"  done flips: {done_flips}/{n_trans} ({flip_rate:.2e}, gate <= 1e-4) "
           f"{'PASS' if flips_ok else 'FAIL'}")
 
-    # ---- population TOST (F4-style, unpaired) -----------------------------
     def lane_metrics(dtype_or_metal):
         """(rewardSum, doneCount, stateMean[k]) per lane."""
         rows = []
@@ -502,9 +475,6 @@ def classic_tost(run_root: Path) -> int:
     null_m = lane_metrics(np.float32)
     names = ["rewardSum", "doneCount"] + [f"mean({d})" for d in dims]
 
-    # Same-physics null (F4 gate-calibration law): the fp64 oracle's lanes
-    # split into disjoint halves; the null CI per metric is the sampling-noise
-    # floor — no equivalence band may be tighter than it.
     half = len(ref_m) // 2
     null_a, null_b = ref_m[:half], ref_m[half:2 * half]
 
@@ -512,14 +482,14 @@ def classic_tost(run_root: Path) -> int:
           f"same-physics null N={half}/half)")
     for j, name in enumerate(names):
         x, y = metal_m[:, j], ref_m[:, j]
-        b0 = max(0.05 * abs(y.mean()), 1e-3)          # strict practical band
+        b0 = max(0.05 * abs(y.mean()), 1e-3)
         dn = null_a[:, j].mean() - null_b[:, j].mean()
         if null_a[:, j].std() == 0.0 and null_b[:, j].std() == 0.0:
             null_half = abs(dn)
         else:
             se_n = np.sqrt(null_a[:, j].var(ddof=1) / half + null_b[:, j].var(ddof=1) / half)
             null_half = 1.96 * se_n
-        band = max(b0, abs(dn) + null_half)            # null-calibrated band
+        band = max(b0, abs(dn) + null_half)
         if x.std() == 0.0 and y.std() == 0.0:
             dmean = x.mean() - y.mean()
             verdict = "EQUIVALENT" if abs(dmean) <= band else "DIFFERENT"
@@ -547,7 +517,6 @@ def classic_tost(run_root: Path) -> int:
               f"band ±{band:.4g}{extra} KS p {ks.pvalue:.3f} -> {verdict}{n_note}"
               f"{'' if metric_ok else ' <-- FAIL'}")
 
-    # fp32 numpy shadow vs fp64 oracle: the same swap verdict, transparently.
     print(f"{env}: fp32-shadow cross-check (should track metal-vs-fp64)")
     for j, name in enumerate(names):
         x, y = null_m[:, j], ref_m[:, j]
@@ -557,11 +526,6 @@ def classic_tost(run_root: Path) -> int:
     print("CLASSIC TOST PASS" if ok else "CLASSIC TOST FAIL")
     return 0 if ok else 1
 
-# ------------------------------------------------- classic boundary case gate
-# Single-step case probe (oak_classic_probe kernel) that forces the boundary
-# paths the random-policy fleet may never reach — respawn-on-complete
-# (MountainCar hilltop, Acrobot swing-up, CartPole fall) and threshold logic.
-# fp64 golden at fp32 tolerance (state/reward 1e-4, done flag exact-counted).
 CLASSIC_PROBE_W = {
     "MountainCar-cont-v0": (3, 4),
     "Acrobot-cont-v0": (5, 6),
@@ -582,7 +546,7 @@ def classic_probe_emit(env: str, out: Path, n: int, seed: int) -> None:
             rows.append([rng.uniform(-1.2, 0.6), rng.uniform(-0.07, 0.07),
                          float(rng.integers(0, 3))])
     elif env == "Acrobot-cont-v0":
-        b = 2.0944   # swing-up height boundary: |th1| at th2 = 0
+        b = 2.0944
         for th1 in (-b - 0.001, -b, b, b + 0.001, 0.0, np.pi):
             for th2 in (0.0, -0.5, 0.5, 2.0, -2.0):
                 for w in (0.0, 1.0, -1.0, 4.0):
@@ -603,7 +567,7 @@ def classic_probe_emit(env: str, out: Path, n: int, seed: int) -> None:
             rows.append([rng.uniform(-2.4, 2.4), rng.uniform(-2.0, 2.0),
                          rng.uniform(-0.3, 0.3), rng.uniform(-2.0, 2.0),
                          float(rng.integers(0, 2)), 0.0, 0.0])
-    else:  # Pendulum-cont-v0
+    else:
         for th in (-np.pi, -np.pi + 0.001, -0.001, 0.0, 0.001, np.pi - 0.001,
                    np.pi, 1.5, -1.5):
             for thd in (-8.0, -1.0, 0.0, 1.0, 8.0):
@@ -638,7 +602,6 @@ def classic_probe_compare(cases: Path, gpu: Path, tol: float = 1e-4) -> int:
     k = len(CLASSIC_STATE_DIMS[env])
     angle_fields = [1 + j for j in CLASSIC_ANGLE_DIMS[env]]
     ok = True
-    # state + reward fields: fp32-vs-fp64 tolerance (angles mod 2*pi)
     for j in range(wo - 1):
         if j in angle_fields:
             diff = np.abs(_wrap_pi(
@@ -650,8 +613,6 @@ def classic_probe_compare(cases: Path, gpu: Path, tol: float = 1e-4) -> int:
         ok &= bad == 0
         print(f"  field {j}: max diff {diff.max():.2e} (tol {tol:g}+rel) "
               f"violations {bad} {'PASS' if bad == 0 else 'FAIL'}")
-    # done flag (last field): exact, counted (threshold-straddling fp noise
-    # may flip a handful; a logic bug flips a quarter of the boundary grid)
     dm = got[:, -1] != exp[:, -1]
     flip_rate = float(dm.mean())
     done_ok = flip_rate <= 0.01

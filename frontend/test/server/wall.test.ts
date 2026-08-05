@@ -1,22 +1,4 @@
 /// <reference types="bun" />
-// Wall endpoint tests: /api/runs/:id/wall/:envId.
-//
-// The claim under test is narrow and total: for EVERY recorded seed of an env, the
-// bytes the wall ships at row r are the bytes a full decode of that lane produces at
-// row r. So the correctness tests do not check "shapes look right" — they decode each
-// lane a second time with `parseActionsBinV4` / `parseActionsBin` (the theater's own
-// readers) and compare the sampled rows f32 by f32 with `Object.is`, which makes NaN
-// compare equal to NaN and −0 unequal to 0.
-//
-// Three fixture sources, each for what only it can prove:
-//   * .oak-benchmarks/v4ab-tierS-v4        — v4, 16 envs × 64 lanes × 10k. The real
-//                                            all-lanes shape and the real codec table.
-//   * .oak-benchmarks/frontend-demo-16env  — v3, 8 lanes × 100k. The wall must work on
-//                                            the pre-v4 roots too.
-//   * a temp bench root built here         — the cases real data cannot contain on
-//                                            demand: a non-finite lane, a torn file, a
-//                                            lane whose bytes change under the cache.
-// Real roots are read ONLY; every mutation happens on a copy under the OS temp dir.
 
 import { afterAll, beforeAll, describe, expect, it } from 'bun:test';
 import { cpSync, existsSync } from 'node:fs';
@@ -61,13 +43,12 @@ import {
 } from '../../src/sim/record4';
 import { fetchWall, wallUrl, WALL_POSE_LEN } from '../../src/api';
 
-const HERE = dirname(fileURLToPath(import.meta.url)); // frontend/test/server
+const HERE = dirname(fileURLToPath(import.meta.url));
 const REAL_BENCH = resolve(HERE, '..', '..', '..', '.oak-benchmarks');
 
 const V4_ID = 'v4ab-tierS-v4';
 const V4_XS_ID = 'v4probe-xs-v4';
 const DEMO_ID = 'frontend-demo-16env-20260805';
-/** the degraded-wall case: a real run root with no recordings at all */
 const NOREC_ID = 'p93-tierL-20260721';
 
 const v4Present = existsSync(join(REAL_BENCH, V4_ID, 'meta.json'));
@@ -75,16 +56,12 @@ const v4XsPresent = existsSync(join(REAL_BENCH, V4_XS_ID, 'meta.json'));
 const demoPresent = existsSync(join(REAL_BENCH, DEMO_ID, 'meta.json'));
 const norecPresent = existsSync(join(REAL_BENCH, NOREC_ID, 'meta.json'));
 
-// ---------------------------------------------------------------------------
-// framing reader — deliberately INDEPENDENT of src/api.ts's fetchWall
-// ---------------------------------------------------------------------------
 
 interface UnpackedLane {
   seed: number;
   steps: number;
   samples: number;
   firstNonFiniteRow: number | null;
-  /** samples × 9 */
   pose: Float32Array;
   done: Uint8Array;
 }
@@ -103,7 +80,6 @@ async function inflateRaw(bytes: Uint8Array): Promise<Uint8Array> {
   );
 }
 
-/** Split + inflate a framed wall body by the documented rule, checking every claim in it. */
 async function unpack(body: Uint8Array): Promise<{ header: WallResponse; lanes: UnpackedLane[] }> {
   const nl = body.indexOf(0x0a);
   expect(nl).toBeGreaterThan(0);
@@ -142,11 +118,7 @@ async function unpack(body: Uint8Array): Promise<{ header: WallResponse; lanes: 
   return { header, lanes };
 }
 
-// ---------------------------------------------------------------------------
-// the sampling rule, restated independently
-// ---------------------------------------------------------------------------
 
-/** rows `0, stride, 2·stride, …` plus the final row when the stride missed it */
 function expectedRows(steps: number, stride: number): number[] {
   if (steps <= 0) return [];
   const rows: number[] = [];
@@ -155,7 +127,6 @@ function expectedRows(steps: number, stride: number): number[] {
   return rows;
 }
 
-/** Compare a lane's shipped samples against a full second decode of the same lane. */
 function expectLaneMatches(
   lane: UnpackedLane,
   reference: { data: Float32Array; steps: number },
@@ -184,7 +155,6 @@ function expectLaneMatches(
   }
 }
 
-/** First row whose pose or done is non-finite, from a full decode. */
 function referenceFirstNonFinite(data: Float32Array, steps: number): number | null {
   for (let r = 0; r < steps; r++) {
     const base = r * RECORD_FLOATS;
@@ -198,11 +168,7 @@ async function readLaneMeta(path: string): Promise<RecordingMeta> {
   return JSON.parse(await Bun.file(path).text()) as RecordingMeta;
 }
 
-// ---------------------------------------------------------------------------
-// synthetic lanes (temp bench root)
-// ---------------------------------------------------------------------------
 
-/** record-v3 lane bytes: `steps × 16` f32, filled by the caller. */
 function v3Bytes(steps: number, fill: (row: Float32Array, i: number) => void): Uint8Array {
   const f = new Float32Array(steps * RECORD_FLOATS);
   const row = new Float32Array(RECORD_FLOATS);
@@ -228,12 +194,6 @@ async function deflateRawBytes(bytes: Uint8Array): Promise<Uint8Array> {
   );
 }
 
-/**
- * A spec-conformant v4 encoder for the `grid` category (hdr + u8 pose columns +
- * escapes) — enough to build FourRooms/DeepSea lanes, which is all the synthetic cases
- * need. The general encoder lives in test/record4.test.ts; duplicating the grid subset
- * here keeps this file from importing another test file's internals.
- */
 async function v4GridLane(
   envId: EnvId,
   data: Float32Array,
@@ -342,17 +302,12 @@ async function v4GridLane(
   return { bytes, chunks };
 }
 
-// ---------------------------------------------------------------------------
-// temp bench root
-// ---------------------------------------------------------------------------
 
 let TMP = '';
 let SYN_BENCH = '';
 let SYN_RUN = '';
 const SYN_ID = 'wall-synthetic';
-/** row the synthetic v3 lane goes non-finite at */
 const V3_NAN_ROW = 500;
-/** row the synthetic v4 lane goes non-finite at */
 const V4_NAN_ROW = 137;
 const SYN_STEPS = 1200;
 
@@ -374,7 +329,6 @@ async function buildSynthetic(): Promise<void> {
   );
   await writeFile(join(SYN_RUN, 'fleet.jsonl'), '');
 
-  // --- v3 cheetah lanes: seed 0 finite, seed 1 non-finite from V3_NAN_ROW on ---
   for (const seed of [0, 1]) {
     const dir = join(SYN_RUN, 'HalfCheetah-v4', `seed${seed}`);
     await mkdir(dir, { recursive: true });
@@ -391,7 +345,6 @@ async function buildSynthetic(): Promise<void> {
     await Bun.write(join(dir, 'actions.bin'), bytes);
   }
 
-  // --- v4 FourRooms lane: escaped non-finite row at V4_NAN_ROW ---
   const gridFloats = new Float32Array(SYN_STEPS * RECORD_FLOATS);
   for (let i = 0; i < SYN_STEPS; i++) {
     const base = i * RECORD_FLOATS;
@@ -444,9 +397,6 @@ async function deriveFor(
   return deriveWall({ id, dir: runDir, envId, stride, recordings, inFlight: false, cacheDir });
 }
 
-// ===========================================================================
-// request parsing
-// ===========================================================================
 
 describe('parseWallRequest', () => {
   const url = (q: string): URL => new URL(`http://x/api/runs/r/wall/HalfCheetah-v4${q}`);
@@ -515,7 +465,6 @@ describe('effectiveStride (the payload budget)', () => {
   });
 
   it('coarsens rather than allocating a wall it cannot hold', () => {
-    // a fully-recorded Tier-L: 1024 seeds × 1M steps, asked for at the default stride
     const tierL = Array.from({ length: 1024 }, () => ({ steps: 1_000_000 }));
     const s = effectiveStride(tierL, WALL_DEFAULT_STRIDE);
     expect(s).toBeGreaterThan(WALL_DEFAULT_STRIDE);
@@ -533,20 +482,14 @@ describe('effectiveStride (the payload budget)', () => {
 
   it('shows up in the header, so a client can map samples back to rows', async () => {
     clearWallCache();
-    // The synthetic root is tiny, so its stride is honoured exactly — the point here is
-    // that the header REPORTS the stride used rather than the one requested.
     const { header } = await unpack((await deriveFor(SYN_BENCH, SYN_RUN, SYN_ID, 'HalfCheetah-v4', 37)).body);
     expect(header.stride).toBe(37);
     expect(header.lanes[0]?.samples).toBe(expectedRows(SYN_STEPS, 37).length);
   });
 });
 
-// ===========================================================================
-// the DECODE budget: what the server spends, not what it ships
-// ===========================================================================
 
 describe('effectiveStride (the decode budget)', () => {
-  /** rows a lane costs at a stride, restated independently of decodedRowsAt */
   function decoded(steps: number, chunkSteps: number, stride: number): number {
     if (stride <= chunkSteps) return steps;
     let rows = 0;
@@ -574,8 +517,6 @@ describe('effectiveStride (the decode budget)', () => {
         const got = decodedRowsAt({ steps, chunkSteps: chunk }, stride);
         const want = decoded(steps, chunk, stride);
         const label = `stride ${stride} steps ${steps}/${chunk}`;
-        // Exact in the regime that matters (a stride past a chunk is where skipping
-        // happens); an upper bound by at most one short tail chunk below it.
         if (stride > chunk) expect(`${label}: ${got}`).toBe(`${label}: ${want}`);
         else expect(`${label}: ${got >= want}`).toBe(`${label}: true`);
         expect(got).toBeLessThanOrEqual(steps);
@@ -584,17 +525,12 @@ describe('effectiveStride (the decode budget)', () => {
   });
 
   it('charges the WHOLE lane when there is no chunk table to skip by', () => {
-    // v3 lanes, and torn v4 lanes: no chunk geometry, so nothing can be skipped.
     expect(decodedRowsAt({ steps: 1_000_000 }, 4096)).toBe(1_000_000);
     expect(decodedRowsAt({ steps: 1_000_000, chunkSteps: 0 }, 4096)).toBe(1_000_000);
-    // and a stride finer than a chunk never skips one either
     expect(decodedRowsAt({ steps: 10_000, chunkSteps: 1000 }, 64)).toBe(10_000);
   });
 
   it('coarsens a fully-recorded Tier-L until the DECODE fits, not just the payload', () => {
-    // 1024 seeds × 1M steps in 1000-step chunks — the case the module doc names. The
-    // payload budget alone would answer 283, which decodes 1.02e9 rows: ~92 s of CPU
-    // holding one of two compute slots. The decode budget is what forbids that.
     const tierL = Array.from({ length: 1024 }, () => ({ steps: 1_000_000, chunkSteps: 1000 }));
     const payloadOnly = 283;
     const s = effectiveStride(tierL, WALL_DEFAULT_STRIDE);
@@ -602,19 +538,15 @@ describe('effectiveStride (the decode budget)', () => {
     let rows = 0;
     for (const lane of tierL) rows += decodedRowsAt(lane, s);
     expect(rows).toBeLessThanOrEqual(WALL_MAX_DECODE_ROWS);
-    // …and it is the FINEST stride that fits: one step finer must not.
     let finer = 0;
     for (const lane of tierL) finer += decodedRowsAt(lane, s - 1);
     expect(finer).toBeGreaterThan(WALL_MAX_DECODE_ROWS);
-    // the payload budget still holds too
     let samples = 0;
     for (const lane of tierL) samples += Math.ceil(lane.steps / s) + 1;
     expect(samples * WALL_SAMPLE_BYTES).toBeLessThanOrEqual(WALL_MAX_RAW_BYTES);
   });
 
   it('stops at the stride ceiling and leaves the rest to the runtime cap', () => {
-    // 8192 seeds × 10M: no stride inside the ceiling brings this inside the budget, so
-    // the answer is the ceiling and each lane is cut by `laneCaps` instead.
     const huge = Array.from({ length: 8192 }, () => ({ steps: 10_000_000, chunkSteps: 1000 }));
     expect(effectiveStride(huge, 1)).toBe(WALL_MAX_STRIDE);
   });
@@ -640,9 +572,6 @@ describe('wallCacheFor', () => {
   });
 });
 
-// ===========================================================================
-// synthetic lanes: non-finite tracking, sampling rule, both record versions
-// ===========================================================================
 
 describe('wall projection (synthetic bench root)', () => {
   it('dates the first non-finite ROW of a v3 lane and leaves a finite one null', async () => {
@@ -652,12 +581,11 @@ describe('wall projection (synthetic bench root)', () => {
 
     expect(header.envId).toBe('HalfCheetah-v4');
     expect(header.lanes.map((l) => l.seed)).toEqual([0, 1]);
-    expect(header.chunkEvents).toBeUndefined(); // v3 lanes carry no chunk framing
+    expect(header.chunkEvents).toBeUndefined();
 
     expect(lanes[0]?.firstNonFiniteRow).toBeNull();
     expect(lanes[1]?.firstNonFiniteRow).toBe(V3_NAN_ROW);
 
-    // …and the NaN really is in the shipped samples, not just in the header.
     const nanSample = expectedRows(SYN_STEPS, 64).indexOf(512);
     expect(nanSample).toBeGreaterThanOrEqual(0);
     expect(Number.isNaN(lanes[1]?.pose[nanSample * 9 + 3] ?? 0)).toBe(true);
@@ -672,8 +600,6 @@ describe('wall projection (synthetic bench root)', () => {
       const rows = expectedRows(SYN_STEPS, stride);
       const lane = lanes[0];
       expect(lane?.samples).toBe(rows.length);
-      // pose[0] of the synthetic lane is `row·0.01`, so a sample's own value names
-      // the row it came from — the sampling rule is checked against the DATA.
       for (let s = 0; s < rows.length; s++) {
         expect(lane?.pose[s * 9]).toBeCloseTo((rows[s] ?? 0) * 0.01, 4);
       }
@@ -682,7 +608,6 @@ describe('wall projection (synthetic bench root)', () => {
   });
 
   it('never duplicates the final row when the stride already lands on it', async () => {
-    // 1200 steps, stride 1199 -> rows 0 and 1199; 1199 IS the final row.
     clearWallCache();
     const { body } = await deriveFor(SYN_BENCH, SYN_RUN, SYN_ID, 'HalfCheetah-v4', 1199);
     const { lanes } = await unpack(body);
@@ -693,7 +618,6 @@ describe('wall projection (synthetic bench root)', () => {
   it('carries the done bit through, chunked v4 and flat v3 alike', async () => {
     clearWallCache();
     const v3 = await unpack((await deriveFor(SYN_BENCH, SYN_RUN, SYN_ID, 'HalfCheetah-v4', 1)).body);
-    // v3 lane sets done at i % 250 === 249.
     for (let r = 0; r < SYN_STEPS; r++) {
       expect(v3.lanes[0]?.done[r]).toBe(r % 250 === 249 ? 1 : 0);
     }
@@ -716,9 +640,7 @@ describe('wall projection (synthetic bench root)', () => {
     expect(events?.seed).toBe(7);
     expect(events?.stepStart).toEqual([0, 400, 800]);
     expect(events?.stepCount).toEqual([400, 400, 400]);
-    // done at i % 300 === 299 -> rows 299 (chunk 0), 599 (chunk 1), 899 + 1199 (chunk 2)
     expect(events?.doneCount).toEqual([1, 1, 2]);
-    // NaN on the wire is null, never a synthesized 0.
     expect(events?.rewardDelta).toEqual([1.5, null, null]);
   });
 
@@ -742,7 +664,6 @@ describe('wall projection (synthetic bench root)', () => {
     cpSync(SYN_BENCH, torn, { recursive: true });
     const runDir = join(torn, SYN_ID);
     const lanePath = join(runDir, 'HalfCheetah-v4', 'seed0', 'actions.bin');
-    // 900 whole rows + 40 bytes of a 41st
     await truncate(lanePath, 900 * RECORD_BYTES + 40);
     clearWallCache();
     const { lanes } = await unpack((await deriveFor(torn, runDir, SYN_ID, 'HalfCheetah-v4', 64)).body);
@@ -763,9 +684,6 @@ describe('wall projection (synthetic bench root)', () => {
   });
 });
 
-// ===========================================================================
-// caching
-// ===========================================================================
 
 async function wallFiles(dir: string): Promise<string[]> {
   try {
@@ -775,7 +693,6 @@ async function wallFiles(dir: string): Promise<string[]> {
   }
 }
 
-/** The disk write is fire-and-forget, so wait for it rather than racing it. */
 async function waitForWallFiles(dir: string, want: number): Promise<string[]> {
   for (let i = 0; i < 200; i++) {
     const names = await wallFiles(dir);
@@ -797,18 +714,15 @@ describe('wall caching', () => {
     const names = await waitForWallFiles(cacheDir, 1);
     expect(names.length).toBe(1);
 
-    // memory hit: the very same object, not merely an equal one
     const memHit = await deriveFor(root, runDir, SYN_ID, 'HalfCheetah-v4', 64, cacheDir);
     expect(memHit.body).toBe(first.body);
 
-    // disk hit: LRU dropped, bytes must still come back identical
     clearWallCache();
     const diskHit = await deriveFor(root, runDir, SYN_ID, 'HalfCheetah-v4', 64, cacheDir);
     expect(diskHit.body).not.toBe(first.body);
     expect(Buffer.from(diskHit.body).equals(Buffer.from(first.body))).toBe(true);
-    expect(await wallFiles(cacheDir)).toEqual(names); // no second entry written
+    expect(await wallFiles(cacheDir)).toEqual(names);
 
-    // an mtime bump alone moves the KEY (the file may have been rewritten identically)
     const lanePath = join(runDir, 'HalfCheetah-v4', 'seed0', 'actions.bin');
     const now = new Date(Date.now() + 5_000);
     await utimes(lanePath, now, now);
@@ -819,7 +733,6 @@ describe('wall caching', () => {
     const names2 = await waitForWallFiles(cacheDir, 2);
     expect(names2.length).toBe(2);
 
-    // a CONTENT change must change the answer, not just the key
     await truncate(lanePath, 300 * RECORD_BYTES);
     clearWallCache();
     clearV4StepsCache();
@@ -859,10 +772,6 @@ describe('wall caching', () => {
   });
 
   it('re-derives when a lane’s META changes and its actions.bin does not', async () => {
-    // The lane meta.json is a DECODE INPUT — `recordVersion`, `actDim`, `codec`,
-    // `codecVersion` all reach the decoders — so a key over actions.bin alone would keep
-    // serving the pre-edit projection. Reproduced exactly: derive, cache to disk, rewrite
-    // recordVersion 4 -> 3 leaving the payload byte-identical, drop the LRU, re-derive.
     const root = join(TMP, 'meta-key-bench');
     cpSync(SYN_BENCH, root, { recursive: true });
     const runDir = join(root, SYN_ID);
@@ -879,19 +788,16 @@ describe('wall caching', () => {
     const meta = JSON.parse(await Bun.file(metaPath).text()) as Record<string, unknown>;
     await writeFile(metaPath, JSON.stringify({ ...meta, recordVersion: 3 }));
     const laneAfter = await stat(lanePath);
-    expect(laneAfter.size).toBe(laneBefore.size); // the payload did not move
+    expect(laneAfter.size).toBe(laneBefore.size);
     expect(laneAfter.mtimeMs).toBe(laneBefore.mtimeMs);
 
     clearWallCache();
     clearV4StepsCache();
     const second = await deriveFor(root, runDir, SYN_ID, 'FourRooms-cont-v0', 64, cacheDir);
-    // A v4 file read as v3 cannot decode to the same wall — whatever it answers, it must
-    // not be the CACHED one.
     expect(Buffer.from(second.body).equals(Buffer.from(first.body))).toBe(false);
     const names = await waitForWallFiles(cacheDir, 2);
     expect(names.length).toBe(2);
 
-    // and putting the meta back brings the original wall back, byte for byte
     await writeFile(metaPath, JSON.stringify(meta));
     clearWallCache();
     clearV4StepsCache();
@@ -900,10 +806,6 @@ describe('wall caching', () => {
   });
 
   it('binds the row DECODER’s revision into the key, not just the projection’s', async () => {
-    // A revision of `@sim/record4` changes what the same bytes mean while no lane file's
-    // mtime or size moves, so `CODEC_VERSION` has to be in the key beside the wall's own
-    // — otherwise every cached entry keeps serving the pre-fix projection. Read back off
-    // the identity record the cache actually wrote.
     const cacheDir = join(TMP, 'key-record-store');
     clearWallCache();
     await deriveFor(SYN_BENCH, SYN_RUN, SYN_ID, 'FourRooms-cont-v0', 64, cacheDir);
@@ -919,10 +821,6 @@ describe('wall caching', () => {
   });
 
   it('takes a cache MISS on a corrupted body instead of serving it', async () => {
-    // `parseWallBody` re-checks headerBytes and binaryBytes, which catches truncation and
-    // a wrong split — but a flipped bit inside the deflate section changes no length. The
-    // record now carries the body's own crc32, so corruption is a miss (and a correct
-    // re-derive) rather than a panel that fails in the browser's inflate, permanently.
     const root = join(TMP, 'corrupt-bench');
     cpSync(SYN_BENCH, root, { recursive: true });
     const runDir = join(root, SYN_ID);
@@ -935,18 +833,15 @@ describe('wall caching', () => {
     const onDisk = new Uint8Array(await Bun.file(cachePath).arrayBuffer());
     expect(onDisk.byteLength).toBeGreaterThan(64);
 
-    // one bit, eight bytes from the end — deep inside the deflate section
     const flipped = onDisk.slice();
     const at = flipped.byteLength - 8;
     flipped[at] = (flipped[at] ?? 0) ^ 0x01;
     await Bun.write(cachePath, flipped);
-    expect((await stat(cachePath)).size).toBe(onDisk.byteLength); // same length, so only a checksum can tell
+    expect((await stat(cachePath)).size).toBe(onDisk.byteLength);
 
     clearWallCache();
     const second = await deriveFor(root, runDir, SYN_ID, 'HalfCheetah-v4', 64, cacheDir);
-    // the corrupted bytes were NOT served…
     expect(Buffer.from(second.body).equals(Buffer.from(flipped.subarray(flipped.indexOf(0x0a) + 1)))).toBe(false);
-    // …and what came back is the real wall, which still inflates
     expect(Buffer.from(second.body).equals(Buffer.from(first.body))).toBe(true);
     const { lanes } = await unpack(second.body);
     expect(lanes[0]?.samples).toBe(expectedRows(SYN_STEPS, 64).length);
@@ -970,25 +865,18 @@ describe('wall caching', () => {
   });
 });
 
-// ===========================================================================
-// selective decode: a strided projection must be a strided DECODE
-// ===========================================================================
 
 describe('selective chunk decoding', () => {
   it('skips whole chunks the stride never samples, and says so in scannedRows', async () => {
-    // The synthetic v4 lane is 1200 steps in 3 chunks of 400. At stride 1000 the
-    // sampled rows are 0, 1000 and the final 1199 — chunk 1 ([400, 800)) holds none of
-    // them, so it is never crc'd, never inflated and never decoded.
     clearWallCache();
     const { header, lanes } = await unpack(
       (await deriveFor(SYN_BENCH, SYN_RUN, SYN_ID, 'FourRooms-cont-v0', 1000)).body,
     );
     const head = header.lanes[0];
     expect(head?.steps).toBe(SYN_STEPS);
-    expect(head?.scannedRows).toBe(800); // chunks 0 and 2 only
+    expect(head?.scannedRows).toBe(800);
     expect(lanes[0]?.samples).toBe(expectedRows(SYN_STEPS, 1000).length);
 
-    // …and what it shipped is still exactly what a full decode says.
     const dir = join(SYN_RUN, 'FourRooms-cont-v0', 'seed7');
     const meta = await readLaneMeta(join(dir, 'meta.json'));
     const raw = await parseActionsBinV4(await Bun.file(join(dir, 'actions.bin')).arrayBuffer(), meta);
@@ -996,7 +884,6 @@ describe('selective chunk decoding', () => {
     if (lane === undefined) throw new Error('no lane');
     expectLaneMatches(lane, raw, 1000, 'skipped-chunk lane');
 
-    // Chunk events come from the chunk HEADERS, so a skipped chunk still reports itself.
     expect(header.chunkEvents?.[0]?.stepStart).toEqual([0, 400, 800]);
     expect(header.chunkEvents?.[0]?.doneCount).toEqual([1, 1, 2]);
   });
@@ -1013,8 +900,6 @@ describe('selective chunk decoding', () => {
   });
 
   it('still dates a death inside a decoded chunk exactly', async () => {
-    // V4_NAN_ROW (137) is in chunk 0, which every stride decodes (row 0 is always
-    // sampled), so the certificate is exact even when later chunks are skipped.
     clearWallCache();
     const { header } = await unpack(
       (await deriveFor(SYN_BENCH, SYN_RUN, SYN_ID, 'FourRooms-cont-v0', 1000)).body,
@@ -1023,11 +908,6 @@ describe('selective chunk decoding', () => {
   });
 
   it('reports null — never a guess — for a death inside a SKIPPED chunk, and flags the scan', async () => {
-    // The one thing the skip costs, made explicit. A lane whose only non-finite row is
-    // in a chunk no sample falls in comes back `firstNonFiniteRow: null` WITH
-    // `scannedRows < steps`, which is the client's signal that the answer is
-    // chunk-resolution, not row-resolution. The alternative — a full scan of every
-    // chunk — is the ~180 s Tier-L derive this whole path exists to avoid.
     const root = join(TMP, 'skip-bench');
     const runDir = join(root, SYN_ID);
     await mkdir(join(runDir, 'DeepSea-cont-v0', 'seed1'), { recursive: true });
@@ -1044,7 +924,6 @@ describe('selective chunk decoding', () => {
       floats[base + 9] = 7;
       floats[base + 10] = 7;
     }
-    // row 500 — inside chunk 1 ([400, 800)), which stride 1000 does not sample
     floats[500 * RECORD_FLOATS + 7] = Number.NaN;
     const built = await v4GridLane('DeepSea-cont-v0', floats, steps, 400);
     const dir = join(runDir, 'DeepSea-cont-v0', 'seed1');
@@ -1067,7 +946,6 @@ describe('selective chunk decoding', () => {
     expect(coarse.header.lanes[0]?.scannedRows).toBe(800);
     expect(coarse.header.lanes[0]?.firstNonFiniteRow).toBeNull();
 
-    // the same lane at a stride that decodes everything finds it exactly
     clearWallCache();
     const fine = await unpack((await deriveFor(root, runDir, SYN_ID, 'DeepSea-cont-v0', 64)).body);
     expect(fine.header.lanes[0]?.scannedRows).toBeUndefined();
@@ -1077,7 +955,6 @@ describe('selective chunk decoding', () => {
   it('costs strictly less work at a coarser stride — the point of the whole exercise', async () => {
     if (!v4Present) return;
     const runDir = join(REAL_BENCH, V4_ID);
-    // 64 lanes × 10k steps in 1000-step chunks.
     clearWallCache();
     const fine = await deriveFor(REAL_BENCH, runDir, V4_ID, 'HalfCheetah-v4', 64);
     clearWallCache();
@@ -1085,11 +962,10 @@ describe('selective chunk decoding', () => {
 
     const scanned = (p: WallPayload): number =>
       p.header.lanes.reduce((a, l) => a + (l.scannedRows ?? l.steps), 0);
-    expect(scanned(fine)).toBe(64 * 10_000); // stride < chunk: every row
-    expect(scanned(coarse)).toBe(64 * 4000); // rows 0, 4096, 8192 + the final row's chunk
+    expect(scanned(fine)).toBe(64 * 10_000);
+    expect(scanned(coarse)).toBe(64 * 4000);
     expect(scanned(coarse)).toBeLessThan(scanned(fine));
 
-    // and the coarse wall is still exact where it sampled
     const { header, lanes } = await unpack(coarse.body);
     const head = header.lanes[0];
     const lane = lanes[0];
@@ -1101,10 +977,6 @@ describe('selective chunk decoding', () => {
   });
 
   it('crc-checks every chunk it decodes, and stops at a corrupted one', async () => {
-    // The framing scan runs with `verifyCrc: false` (it would crc chunks this lane is
-    // about to skip), so the integrity check moves to the point of use. A chunk whose
-    // payload was corrupted must be treated as the torn tail it looks like: the lane
-    // ends before it, and nothing after it is served.
     const root = join(TMP, 'bad-crc');
     cpSync(SYN_BENCH, root, { recursive: true });
     const runDir = join(root, SYN_ID);
@@ -1117,7 +989,7 @@ describe('selective chunk decoding', () => {
 
     const lanePath = join(dir, 'actions.bin');
     const bytes = new Uint8Array(await Bun.file(lanePath).arrayBuffer());
-    const at = third[2] + CHUNK_HEADER_BYTES + 3; // inside chunk 2's compressed payload
+    const at = third[2] + CHUNK_HEADER_BYTES + 3;
     bytes[at] = (bytes[at] ?? 0) ^ 0x55;
     await Bun.write(lanePath, bytes);
 
@@ -1127,18 +999,14 @@ describe('selective chunk decoding', () => {
       (await deriveFor(root, runDir, SYN_ID, 'FourRooms-cont-v0', 64)).body,
     );
     const head = header.lanes[0];
-    expect(head?.steps).toBe(800); // chunks 0 and 1 only
-    expect(head?.error).toBeUndefined(); // a torn tail is DATA, not a lane failure
+    expect(head?.steps).toBe(800);
+    expect(head?.error).toBeUndefined();
     expect(head?.samples).toBe(expectedRows(800, 64).length);
     expect(header.chunkEvents?.[0]?.stepStart).toEqual([0, 400]);
     expect(lanes[0]?.pose[(lanes[0].samples - 1) * 9]).toBe(799 % 11);
   });
 
   it('keeps @sim/record4’s own lane checks — a meta that contradicts the file is an error', async () => {
-    // The selective reader restates `prepareV4`'s validations rather than inheriting
-    // them, so they are tested where they now live: a lane whose meta names the wrong
-    // env, the wrong codec revision or the wrong record version must fail the lane
-    // (with `error`), never decode as something else.
     const root = join(TMP, 'meta-lies');
     cpSync(SYN_BENCH, root, { recursive: true });
     const runDir = join(root, SYN_ID);
@@ -1165,7 +1033,6 @@ describe('selective chunk decoding', () => {
       expect(`${label}: ${head?.error === undefined ? 'decoded' : 'error'}`).toBe(`${label}: error`);
       expect(head?.samples).toBe(0);
     }
-    // …and the same lane with its real meta back decodes as it always did
     await writeFile(metaPath, JSON.stringify(good));
     clearWallCache();
     clearV4StepsCache();
@@ -1175,12 +1042,8 @@ describe('selective chunk decoding', () => {
   });
 });
 
-// ===========================================================================
-// the ceilings, made real
-// ===========================================================================
 
 describe('budget ceilings', () => {
-  /** Copy the synthetic root, then grow one lane BEHIND the discovery it was scanned with. */
   async function staleRoot(name: string): Promise<string> {
     const root = join(TMP, name);
     cpSync(SYN_BENCH, root, { recursive: true });
@@ -1191,11 +1054,9 @@ describe('budget ceilings', () => {
     const root = await staleRoot('stale-v3');
     const runDir = join(root, SYN_ID);
     const lanePath = join(runDir, 'HalfCheetah-v4', 'seed0', 'actions.bin');
-    // discovery FIRST: this is the stale count the budget will be planned from
     const recordings = await scanRecordings(runDir, { root });
     expect(recordings.find((r) => r.seed === 0 && r.envId === 'HalfCheetah-v4')?.steps).toBe(SYN_STEPS);
 
-    // now the lane grows to 5000 rows — 4× what the index says
     const grown = v3Bytes(5000, (row, i) => {
       for (let p = 0; p < 9; p++) row[7 + p] = i * 0.01 + p;
     });
@@ -1209,13 +1070,10 @@ describe('budget ceilings', () => {
       })).body,
     );
     const head = header.lanes[0];
-    // WALL_LANE_OVERSHOOT × the plan, and not a row more
     expect(head?.steps).toBe(SYN_STEPS * WALL_LANE_OVERSHOOT);
     expect(head?.truncated).toBe(true);
     expect(head?.samples).toBe(expectedRows(SYN_STEPS * WALL_LANE_OVERSHOOT, 64).length);
-    // the samples it DID ship are real rows, and the last one is row `steps − 1`
     expect(lanes[0]?.pose[(lanes[0].samples - 1) * 9]).toBeCloseTo((SYN_STEPS * 2 - 1) * 0.01, 4);
-    // the lane that did not grow is untouched — a cap is per lane, not a mode
     expect(header.lanes[1]?.truncated).toBeUndefined();
     expect(header.lanes[1]?.steps).toBe(SYN_STEPS);
   });
@@ -1228,7 +1086,7 @@ describe('budget ceilings', () => {
     await writeFile(join(runDir, 'meta.json'), await Bun.file(join(SYN_RUN, 'meta.json')).text());
     await writeFile(join(runDir, 'fleet.jsonl'), '');
 
-    const steps = 3600; // 9 chunks of 400
+    const steps = 3600;
     const floats = new Float32Array(steps * RECORD_FLOATS);
     for (let i = 0; i < steps; i++) {
       const base = i * RECORD_FLOATS;
@@ -1240,8 +1098,6 @@ describe('budget ceilings', () => {
     }
     const built = await v4GridLane('FourRooms-cont-v0', floats, steps, 400);
     await Bun.write(join(dir, 'actions.bin'), built.bytes);
-    // …but the meta still describes the lane as it was at 1200 steps (3 chunks): the
-    // in-flight case, where discovery predates the rows on disk.
     await writeFile(
       join(dir, 'meta.json'),
       JSON.stringify({
@@ -1265,12 +1121,10 @@ describe('budget ceilings', () => {
     );
     const head = header.lanes[0];
     expect(head?.truncated).toBe(true);
-    expect(head?.steps).toBe(SYN_STEPS * WALL_LANE_OVERSHOOT); // 2400 = 6 whole chunks
+    expect(head?.steps).toBe(SYN_STEPS * WALL_LANE_OVERSHOOT);
     expect((head?.steps ?? 0) % 400).toBe(0);
     expect(head?.samples).toBe(expectedRows(SYN_STEPS * WALL_LANE_OVERSHOOT, 64).length);
-    // events end where the decode did — they never describe rows the wall does not carry
     expect(header.chunkEvents?.[0]?.stepStart).toEqual([0, 400, 800, 1200, 1600, 2000]);
-    // and every shipped sample is still bit-equal to a full decode of the same file
     const raw = await parseActionsBinV4(
       await Bun.file(join(dir, 'actions.bin')).arrayBuffer(),
       await readLaneMeta(join(dir, 'meta.json')),
@@ -1288,15 +1142,12 @@ describe('budget ceilings', () => {
   it('bounds the in-memory cache by BYTES, not only by entry count', async () => {
     clearWallCache();
     expect(wallCacheBytes()).toBe(0);
-    // Four distinct walls of the synthetic root (one per stride) — small, so all four
-    // fit and the byte count is the sum of their bodies.
     const bodies: number[] = [];
     for (const stride of [16, 32, 64, 128]) {
       const w = await deriveFor(SYN_BENCH, SYN_RUN, SYN_ID, 'HalfCheetah-v4', stride);
       bodies.push(w.body.byteLength);
     }
     expect(wallCacheBytes()).toBe(bodies.reduce((a, b) => a + b, 0));
-    // a fifth evicts the oldest by COUNT (the cap this cache already had)
     await deriveFor(SYN_BENCH, SYN_RUN, SYN_ID, 'HalfCheetah-v4', 256);
     expect(wallCacheBytes()).toBeLessThan(bodies.reduce((a, b) => a + b, 0) + 4096);
     expect(wallCacheBytes()).toBeGreaterThan(0);
@@ -1305,9 +1156,6 @@ describe('budget ceilings', () => {
   });
 });
 
-// ===========================================================================
-// real v4 root — the all-lanes shape
-// ===========================================================================
 
 describe.if(v4Present)(`wall over ${V4_ID} (v4, 64 lanes)`, () => {
   const runDir = join(REAL_BENCH, V4_ID);
@@ -1334,7 +1182,6 @@ describe.if(v4Present)(`wall over ${V4_ID} (v4, 64 lanes)`, () => {
       );
       expect(lanes.length).toBeGreaterThan(0);
 
-      // Three lanes decoded in full: the first, the last, and one in the middle.
       const probe = [0, lanes.length >> 1, lanes.length - 1];
       for (const idx of probe) {
         const lane = lanes[idx];
@@ -1368,7 +1215,6 @@ describe.if(v4Present)(`wall over ${V4_ID} (v4, 64 lanes)`, () => {
     }
     expect(at).toBe(header.lanes[0]?.steps ?? -1);
 
-    // doneCount is the recorder's own tally: recount it from a full decode.
     const dir = join(runDir, 'DeepSea-cont-v0', `seed${seed}`);
     const meta = await readLaneMeta(join(dir, 'meta.json'));
     const raw = await parseActionsBinV4(await Bun.file(join(dir, 'actions.bin')).arrayBuffer(), meta);
@@ -1395,7 +1241,6 @@ describe.if(v4Present)(`wall over ${V4_ID} (v4, 64 lanes)`, () => {
       const la = a.lanes[i];
       const lb = b.lanes[i];
       if (la === undefined || lb === undefined) continue;
-      // the last sample of both is the SAME record row, so it is the same 9 floats
       for (let j = 0; j < 9; j++) {
         expect(Object.is(la.pose[(la.samples - 1) * 9 + j], lb.pose[(lb.samples - 1) * 9 + j])).toBe(true);
       }
@@ -1403,9 +1248,6 @@ describe.if(v4Present)(`wall over ${V4_ID} (v4, 64 lanes)`, () => {
   });
 });
 
-// ===========================================================================
-// real v3 root — the wall must work on pre-v4 roots
-// ===========================================================================
 
 describe.if(demoPresent)(`wall over ${DEMO_ID} (v3)`, () => {
   const runDir = join(REAL_BENCH, DEMO_ID);
@@ -1418,7 +1260,7 @@ describe.if(demoPresent)(`wall over ${DEMO_ID} (v3)`, () => {
         (await deriveFor(REAL_BENCH, runDir, DEMO_ID, envId, stride)).body,
       );
       expect(lanes.length).toBe(8);
-      expect(header.chunkEvents).toBeUndefined(); // v3 has no chunk framing
+      expect(header.chunkEvents).toBeUndefined();
 
       for (const idx of [0, lanes.length - 1]) {
         const lane = lanes[idx];
@@ -1438,9 +1280,6 @@ describe.if(demoPresent)(`wall over ${DEMO_ID} (v3)`, () => {
   }
 });
 
-// ===========================================================================
-// HTTP: routing, framing round-trip through the real client helper
-// ===========================================================================
 
 describe('HTTP /api/runs/:id/wall/:envId', () => {
   let server: ReturnType<typeof Bun.serve> | null = null;
@@ -1456,8 +1295,6 @@ describe('HTTP /api/runs/:id/wall/:envId', () => {
     });
     server = Bun.serve({ hostname: '127.0.0.1', port: 0, fetch: app.fetch });
     base = `http://127.0.0.1:${server.port}`;
-    // `src/api.ts` builds RELATIVE urls (it runs in a page); resolve them against the
-    // ephemeral server so the real client helper can be exercised unmodified.
     globalThis.fetch = ((input: RequestInfo | URL, init?: RequestInit) =>
       realFetch(typeof input === 'string' ? new URL(input, base).toString() : input, init)) as typeof fetch;
   });
@@ -1495,7 +1332,6 @@ describe('HTTP /api/runs/:id/wall/:envId', () => {
         expect(Object.is(a.pose[k], b.pose[k])).toBe(true);
       }
       expect(Buffer.from(a.done).equals(Buffer.from(b.done))).toBe(true);
-      // `rows` names the record row each sample was taken at
       expect(a.rows[0]).toBe(0);
       expect(a.rows[a.samples - 1]).toBe(a.steps - 1);
       if (a.samples > 2) expect(a.rows[1]).toBe(64);
@@ -1540,25 +1376,21 @@ describe('HTTP /api/runs/:id/wall/:envId', () => {
     const cases: [string, number][] = [
       [`/api/runs/no-such-run/wall/HalfCheetah-v4`, 404],
       [`/api/runs/${SYN_ID}/wall/NotAnEnv`, 404],
-      [`/api/runs/${SYN_ID}/wall/HalfCheetah`, 404], // near-miss env id
+      [`/api/runs/${SYN_ID}/wall/HalfCheetah`, 404],
       [`/api/runs/${SYN_ID}/wall/%2e%2e%2f%2e%2e%2fetc%2fpasswd`, 400],
       [`/api/runs/${SYN_ID}/wall/..%2f..%2fetc%2fpasswd`, 400],
       [`/api/runs/${SYN_ID}/wall/HalfCheetah-v4%00`, 400],
-      [`/api/runs/${SYN_ID}/wall`, 404], // no env segment
+      [`/api/runs/${SYN_ID}/wall`, 404],
       [`/api/runs/${SYN_ID}/wall/HalfCheetah-v4/extra`, 404],
     ];
     for (const [path, status] of cases) {
       const res = await realFetch(`${base}${path}`);
       expect(`${path} -> ${res.status}`).toBe(`${path} -> ${status}`);
-      // nothing that failed may ever answer with lane bytes
       expect(res.headers.get('content-type')).toContain('application/json');
     }
   });
 
   it('cannot be addressed with a bare dot segment: the URL parser collapses it first', async () => {
-    // `wall/..` and its percent-encoded twin are removed by WHATWG dot-segment
-    // normalization before the request is issued, so the router never sees them as an
-    // env id — they address `/api/runs/:id`, an ordinary endpoint, not a path.
     for (const suffix of ['..', '%2e%2e']) {
       const res = await realFetch(`${base}/api/runs/${SYN_ID}/wall/${suffix}`);
       expect(new URL(res.url).pathname).toBe(`/api/runs/${SYN_ID}/`);
@@ -1585,9 +1417,6 @@ describe('HTTP /api/runs/:id/wall/:envId', () => {
   });
 });
 
-// ===========================================================================
-// the degraded wall: a real run root with no recordings
-// ===========================================================================
 
 describe.if(norecPresent)(`wall over ${NOREC_ID} (no recordings)`, () => {
   it('answers a valid empty wall rather than a 404', async () => {
@@ -1603,9 +1432,6 @@ describe.if(norecPresent)(`wall over ${NOREC_ID} (no recordings)`, () => {
   });
 });
 
-// ===========================================================================
-// the tiny real root — every one of the 16 envs walks
-// ===========================================================================
 
 describe.if(v4XsPresent)(`wall over ${V4_XS_ID} (all 16 envs)`, () => {
   it('decodes a lane of every env with no lane reporting an error', async () => {

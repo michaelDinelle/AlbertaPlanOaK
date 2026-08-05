@@ -1,14 +1,4 @@
 /// <reference types="bun" />
-// Headless unit tests for the nature-kit CORE (kit/rng, textures, materials, sky,
-// lighting, post, terrain). No WebGL context exists under `bun test`, so anything that
-// needs a live renderer (EffectComposer construction, shader compilation) is exercised
-// through its PURE parts instead:
-//   * rng / textures / terrain — fully deterministic CPU math, tested directly
-//   * materials — the onBeforeCompile patch is run against three's real ShaderLib source
-//     and the resulting GLSL is asserted, which catches a chunk rename in three without
-//     a GPU
-//   * post — tier policy + shader definition
-//   * lighting/sky — object graphs (light counts, budgets, uniform wiring)
 
 import { describe, expect, test } from 'bun:test';
 import * as THREE from 'three';
@@ -77,9 +67,6 @@ import type { QualityTier } from '@kit/types';
 
 const TIERS: QualityTier[] = ['hero', 'medium', 'thumb'];
 
-// ---------------------------------------------------------------------------
-// rng
-// ---------------------------------------------------------------------------
 
 describe('kit/rng', () => {
   test('mulberry32 is deterministic and in range', () => {
@@ -222,9 +209,6 @@ describe('kit/rng', () => {
   });
 });
 
-// ---------------------------------------------------------------------------
-// textures
-// ---------------------------------------------------------------------------
 
 describe('kit/textures', () => {
   test('clampSize enforces the ≤1024 power-of-two contract', () => {
@@ -332,7 +316,7 @@ describe('kit/textures', () => {
     const f = fbm(3, { size: 32 });
     expect(f.image.width).toBe(32);
     expect(f.image.height).toBe(32);
-    expect(f.version).toBeGreaterThan(0); // needsUpdate is write-only; version proves the upload flag
+    expect(f.version).toBeGreaterThan(0);
     const v = voronoi(3, { size: 16, cells: 3 });
     expect(v.image.width).toBe(16);
     const r = rampTexture([{ t: 0, color: TOKENS.accents['mountain-car'] as number }], 32);
@@ -362,11 +346,7 @@ describe('kit/textures', () => {
   });
 });
 
-// ---------------------------------------------------------------------------
-// materials
-// ---------------------------------------------------------------------------
 
-/** Run a material's onBeforeCompile against three's real physical shader source. */
 function compilePatch(material: THREE.Material): { vertexShader: string; fragmentShader: string; uniforms: Record<string, { value: unknown }> } {
   const lib = THREE.ShaderLib.physical as { vertexShader: string; fragmentShader: string };
   const shader = {
@@ -388,7 +368,6 @@ describe('kit/materials', () => {
     expect(out).not.toBe(src);
     expect(out).toContain('oakToonRamp( dotNL )');
     expect(out).toContain('reflectedLight.directDiffuse +=');
-    // specular must stay physical
     expect(out).toContain('reflectedLight.directSpecular += irradiance *');
     expect(out).not.toContain('#include <lights_physical_pars_fragment>');
   });
@@ -423,7 +402,6 @@ describe('kit/materials', () => {
     expect(shader.fragmentShader).toContain('oakFresnel');
     expect(shader.vertexShader).toContain('uWindAmp');
     expect(shader.vertexShader).toContain('#ifdef USE_INSTANCING');
-    // the same uniform object the handle drives is the one the program binds
     expect(shader.uniforms.uTime).toBe(h?.uniforms.uTime as unknown as { value: unknown });
     h?.setTime(4.5);
     expect(shader.uniforms.uTime?.value).toBe(4.5);
@@ -512,14 +490,11 @@ describe('kit/materials', () => {
     const plain = new THREE.MeshBasicMaterial();
     expect(oakUniforms(plain)).toBeNull();
     expect(oakUniforms(null)).toBeNull();
-    setMaterialTime(plain, 1); // must not throw
+    setMaterialTime(plain, 1);
     plain.dispose();
   });
 });
 
-// ---------------------------------------------------------------------------
-// sky
-// ---------------------------------------------------------------------------
 
 describe('kit/sky', () => {
   test('gradient sky is a BackSide, depth-free dome that follows the camera', () => {
@@ -604,9 +579,6 @@ describe('kit/sky', () => {
   });
 });
 
-// ---------------------------------------------------------------------------
-// lighting
-// ---------------------------------------------------------------------------
 
 describe('kit/lighting', () => {
   test('tier budgets match STYLE.md exactly', () => {
@@ -640,7 +612,6 @@ describe('kit/lighting', () => {
       if (tier !== 'thumb') {
         expect(rig.sun.shadow.mapSize.width).toBe(shadowMapSize(tier));
       }
-      // point lights start silent but VISIBLE, so light counts never change mid-run
       for (const p of rig.points) {
         expect(p.intensity).toBe(0);
         expect(p.visible).toBe(true);
@@ -705,9 +676,7 @@ describe('kit/lighting', () => {
     expect(fog).toBeInstanceOf(THREE.FogExp2);
     expect(fog.color.getHex(THREE.SRGBColorSpace)).toBe(p.fog);
     const reach = p.fogDensityHint * 40;
-    // ~95% extinction at hint*extent
     expect(Math.exp(-Math.pow(fog.density * reach, 2))).toBeCloseTo(0.05, 3);
-    // denser palettes (higher hint means fog closes in later) stay monotone in extent
     expect(makeFog(p, 80).density).toBeLessThan(fog.density);
 
     const scene = new THREE.Scene();
@@ -717,8 +686,6 @@ describe('kit/lighting', () => {
   });
 
   test('configureRendererShadows sets PCF per tier (host-only helper)', () => {
-    // three 0.185 deprecated PCFSoftShadowMap (silently substitutes PCFShadowMap);
-    // the kit sets PCFShadowMap directly to keep the identical result warning-free.
     const fake = { shadowMap: { enabled: false, type: THREE.BasicShadowMap } } as unknown as THREE.WebGLRenderer;
     configureRendererShadows(fake, 'hero');
     expect(fake.shadowMap.enabled).toBe(true);
@@ -728,9 +695,6 @@ describe('kit/lighting', () => {
   });
 });
 
-// ---------------------------------------------------------------------------
-// post
-// ---------------------------------------------------------------------------
 
 describe('kit/post', () => {
   test('tier policy: half-res hero bloom, quarter medium, none thumb', () => {
@@ -801,22 +765,17 @@ describe('kit/post', () => {
     expect(handle.composer).toBeNull();
     expect(handle.bloom).toBeNull();
     expect(handle.gradeUniforms).toBeNull();
-    // exposure/tone mapping are owned here, not by scenes
     expect(fake.toneMapping).toBe(THREE.ACESFilmicToneMapping);
     expect(fake.toneMappingExposure).toBe(TOKENS.exposure);
-    handle.setBloomPulse(1); // no-op, must not throw
+    handle.setBloomPulse(1);
     handle.render(0.016);
     expect(rendered).toBe(1);
-    // resize touches the post chain only — canvas/renderer sizing is host-owned
     handle.resize(640, 480, 2);
     expect(touchedRenderer).toBe(0);
     handle.dispose();
   });
 });
 
-// ---------------------------------------------------------------------------
-// terrain
-// ---------------------------------------------------------------------------
 
 describe('kit/terrain', () => {
   const wave = (x: number, z: number) => Math.sin(3 * x) * 0.45 + 0.55 + Math.cos(z) * 0.1;
@@ -900,7 +859,7 @@ describe('kit/terrain', () => {
     const t = makeTerrain({ size: 8, segments: 32, heightFn: ramp });
     const n = t.sampleNormal(0, 0, new THREE.Vector3());
     expect(n.length()).toBeCloseTo(1, 9);
-    expect(n.x).toBeLessThan(0); // uphill towards +x tilts the normal towards -x
+    expect(n.x).toBeLessThan(0);
     expect(n.y).toBeGreaterThan(0);
     expect(n.z).toBeCloseTo(0, 9);
     t.dispose();
@@ -965,7 +924,6 @@ describe('kit/terrain', () => {
       expect(color.getX(i)).toBeGreaterThanOrEqual(0);
       expect(color.getX(i)).toBeLessThanOrEqual(1.05);
     }
-    // first triangle must face +y
     const pos = t.geometry.getAttribute('position');
     const a = new THREE.Vector3().fromBufferAttribute(pos, index?.getX(0) as number);
     const b = new THREE.Vector3().fromBufferAttribute(pos, index?.getX(1) as number);

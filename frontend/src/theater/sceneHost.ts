@@ -1,25 +1,6 @@
-// theater/sceneHost — the WebGL half of the Theater.
-//
-// The grown-up sibling of `kit/harness`: same host contract, same frame
-// assembly, same composer wiring, same celebration-pulse hook — so a scene that
-// looks right on the artisan page looks right here. What it adds is what a hero
-// view needs and a dev page does not:
-//
-//   * the TIER GOVERNOR (STYLE.md makes tier selection a host duty): p95 frame
-//     time over budget for two sustained seconds drops a tier and rebuilds.
-//   * a UI-free surface — every readout is pushed to the view through callbacks,
-//     so the chrome is ordinary DOM the rest of the app can style.
-//   * frame-accurate transport (step buttons, seek, speed) driven from outside.
-//
-// Ownership (kit/types.ts): this file owns the ONE WebGLRenderer, the canvas and
-// its resize, the playback clock, the EffectComposer chain, tier selection and
-// the debug toggle. The scene owns everything inside its THREE.Scene.
 
 import * as THREE from 'three';
 import type { EnvId } from '@shared/envs';
-// The clock and the frame sampler are the harness's, unchanged — the Theater
-// renders the same SceneModule through the same host contract, so it must assemble
-// frames the same way (`player.advanceCursor` carries the catch-up rule).
 import { makePlaybackClock, sampleFrame, type HarnessSource, type PlaybackClock } from '@kit/harness';
 import { celebrationPulse } from '@kit/celebrate';
 import type { GhostLayer } from '@kit/ghosts';
@@ -39,13 +20,9 @@ import type { SimEvent } from '@sim/types';
 import { sceneRegistry } from '../scenes/registry';
 import { advanceCursor, collectEvents, makeFrameCursor, makeTierGovernor, type TierGovernor } from './player';
 
-/** Per-frame readout pushed to the view. The SAME object every frame — copy what you keep. */
 export interface HostFrameInfo {
-  /** fractional frame position */
   position: number;
-  /** integer frame index */
   index: number;
-  /** record step of that frame (-1 for the synthesized init frame) */
   step: number;
   simTime: number;
   frameCount: number;
@@ -54,57 +31,18 @@ export interface HostFrameInfo {
   tier: QualityTier;
   fps: number;
   frameMs: number;
-  /** governor's p95 frame time in ms; 0 until its window is warm */
   p95: number;
-  /** the ms p95 must exceed to count as over budget; 0 until warm */
   p95Threshold: number;
-  /** draws/triangles latched at the scene's onAfterRender, before the post chain */
   draws: number;
   triangles: number;
-  /**
-   * How many of `draws` the ghost layer accounts for (0 without one). The ghost group
-   * is a child of the scene, so it is already inside the latch — this is the split, so
-   * a view can say "34 draws, 8 of them the population" instead of guessing.
-   */
   ghostDraws: number;
-  /**
-   * How many of `triangles` the ghost layer accounts for (0 without one).
-   *
-   * This is the split that MATTERS. Instancing pins the population's draw count to the
-   * body plan — 8 for cheetah at 64 ghosts and at 8192 — but its triangle count is
-   * strictly linear in the ghost count (kit/ghosts `GHOST_TRIANGLES_PER_GHOST`: a hero
-   * cheetah ghost is 1188, so 1024 seeds are 1.22M triangles, several times a whole
-   * scene's budget). Without the split, `triangles` reads over budget and no caller can
-   * tell an expensive SCENE from a large POPULATION.
-   */
   ghostTriangles: number;
-  /**
-   * The SCENE's manifest budget — it governs `draws − ghostDraws` and
-   * `triangles − ghostTriangles`. The population is a separate, declared cost: it is
-   * chosen by `maxGhosts` against `GhostLayer.trianglesPerGhost()`, not by this.
-   */
   budget: { drawCalls: number; triangles: number };
-  /** true while the last jump was a scrub (no events delivered) */
   scrubbed: boolean;
 }
 
-/**
- * The population layer, mounted alongside the hero scene (kit/ghosts).
- *
- * The host attaches `layer.group` (named `oakGhostLayer`) to the scene AFTER `init()`
- * and detaches it before every rebuild, so the layer survives tier changes and no scene
- * ever sees it — the boundary in kit/types.ts. The host also ticks the layer with the
- * SAME dt and playback clock it hands the scene, so a glint freezes on pause like every
- * other celebration envelope (canon lesson 7).
- */
 export interface SceneHostGhosts {
-  /** the caller builds and OWNS this one; the host never disposes it */
   layer: GhostLayer;
-  /**
-   * Optional: rebuild the layer at a new quality tier (instance detail scales with tier
-   * exactly like a scene's). The host disposes the layer it replaces and owns whatever
-   * this returns. Without it, one layer is carried across every tier change.
-   */
   rebuild?(tier: QualityTier): GhostLayer;
 }
 
@@ -114,22 +52,12 @@ export interface SceneHostOptions {
   tier?: QualityTier;
   debug?: boolean;
   paused?: boolean;
-  /** OPTIONAL population layer — omit and the theater behaves exactly as before */
   ghosts?: SceneHostGhosts;
-  /** initial frame position */
   at?: number;
   speed?: number;
-  /** every rendered frame; the argument is REUSED */
   onFrame?(info: HostFrameInfo): void;
-  /**
-   * Sim events delivered on a sequential step. Both arrays are REUSED and are
-   * parallel: `steps[i]` is the record step `events[i]` fired on (a catch-up
-   * tick can span several).
-   */
   onEvents?(events: readonly SimEvent[], steps: readonly number[]): void;
-  /** a tier change that has finished rebuilding */
   onTier?(tier: QualityTier, reason: 'auto' | 'manual'): void;
-  /** the scene module is built and the first frame is up */
   onReady?(manifest: SceneManifest): void;
 }
 
@@ -140,11 +68,9 @@ export interface SceneHostHandle {
   readonly tier: QualityTier;
   readonly debug: boolean;
   readonly canvas: HTMLCanvasElement;
-  /** the LIVE population layer (a tier rebuild can replace it), or null */
   readonly ghosts: GhostLayer | null;
   play(): void;
   pause(): void;
-  /** returns the new playing state */
   toggle(): boolean;
   setSpeed(speed: number): void;
   seek(position: number): void;
@@ -180,18 +106,10 @@ function copyFrameState(from: FrameState, to: FrameState): void {
   to.derived = from.derived;
 }
 
-/** DPR ceiling per tier — the same ladder the artisan page uses. */
 function tierDpr(tier: QualityTier): number {
   return tier === 'thumb' ? 1 : tier === 'medium' ? 1.5 : 2;
 }
 
-/**
- * Mount one scene against one decoded lane.
- *
- * Rejects (never silently degrades) when the env has no scene or WebGL is
- * unavailable: the Theater's whole job is showing real experience, so a
- * placeholder standing in for it would be a lie the view must be free to report.
- */
 export async function mountSceneHost(
   container: HTMLElement,
   options: SceneHostOptions,
@@ -217,13 +135,9 @@ export async function mountSceneHost(
     throw new SceneHostError(`WebGL unavailable: ${String(cause)}`);
   }
   renderer.setClearColor(0x05070c, 1);
-  // The manifest budget is a SCENE budget, but the composer issues ~15 more
-  // draws afterwards — so reset once per frame and latch at onAfterRender.
   renderer.info.autoReset = false;
 
   const factory = (await loader()).default;
-  // Build ONE module up front for its manifest; the first buildScene() consumes
-  // this same instance, so nothing is constructed and thrown away.
   let pendingModule: SceneModule | null = factory();
   const manifest = pendingModule.manifest;
 
@@ -236,9 +150,7 @@ export async function mountSceneHost(
   let tier: QualityTier = options.tier ?? 'hero';
   const ghostConfig = options.ghosts ?? null;
   let ghostLayer: GhostLayer | null = ghostConfig?.layer ?? null;
-  /** the tier the CURRENT ghost layer was built for */
   let ghostTier: QualityTier = tier;
-  /** true once the host built the live layer itself (and therefore must dispose it) */
   let ghostOwned = false;
   let debugOn = options.debug === true;
   let scene: SceneModule | null = null;
@@ -297,16 +209,11 @@ export async function mountSceneHost(
     post?.resize(size.width, size.height, size.dpr);
   };
 
-  // Scene builds are async, so two quick tier switches can interleave: build A is
-  // still awaiting init when build B disposes and starts over, and A then installs
-  // itself over B. A generation counter makes the superseded build clean up and return.
   let buildGeneration = 0;
 
   const buildScene = async (): Promise<void> => {
     const generation = ++buildGeneration;
     building = true;
-    // The ghost layer outlives scene rebuilds, so detach it BEFORE the scene that is
-    // holding it is disposed — a scene must never dispose (or even see) this group.
     ghostLayer?.group.removeFromParent();
     scene?.dispose();
     post?.dispose();
@@ -333,7 +240,6 @@ export async function mountSceneHost(
       return;
     }
     scene = module;
-    // chain, never clobber: the scene owns its THREE.Scene and may use this hook
     type AfterRender = THREE.Scene['onAfterRender'];
     const sceneHook: AfterRender = module.scene.onAfterRender;
     module.scene.onAfterRender = function (this: THREE.Scene, ...args: Parameters<AfterRender>) {
@@ -341,8 +247,6 @@ export async function mountSceneHost(
       sceneTriangles = renderer.info.render.triangles;
       sceneHook.apply(this, args);
     };
-    // Ghosts: rebuild at the new tier when the caller supplied a factory, guarded by the
-    // same generation counter — a superseded build disposes what it just made and leaves.
     if (ghostConfig?.rebuild && ghostTier !== tier) {
       const next = ghostConfig.rebuild(tier);
       if (destroyed || generation !== buildGeneration) {
@@ -359,16 +263,12 @@ export async function mountSceneHost(
     post = buildComposer(renderer, module.scene, module.camera, module.manifest.postConfig, tier, size);
     module.setDebug(debugOn);
     applySize();
-    // force a snap on the first frame after any rebuild
     cursor.lastIndex = -1;
     cursor.hasPrevious = false;
     governor.reset();
     building = false;
   };
 
-  // Nothing can have destroyed us yet: the handle that owns `destroy()` does not
-  // exist until this function returns, and the caller's own teardown path
-  // disposes the resolved handle.
   await buildScene();
 
   const observer = typeof ResizeObserver === 'undefined' ? null : new ResizeObserver(() => applySize());
@@ -389,8 +289,6 @@ export async function mountSceneHost(
 
     const position = clock.advance(dtReal);
 
-    // `hasPrevious` must be read BEFORE the cursor advances — it is the answer to
-    // "was there a frame before this one", and advanceCursor sets it to true.
     const hadPrevious = cursor.hasPrevious;
     if (hadPrevious) copyFrameState(state, previous);
     sampleFrame(source, position, state);
@@ -403,24 +301,18 @@ export async function mountSceneHost(
     frameUpdate.dtReal = dtReal;
     frameUpdate.scrubbed = !step.sequential;
     scene.update(frameUpdate);
-    // same dt, same playback clock as the scene: a ghost glint freezes on pause
     ghostLayer?.update(dtReal, clock.time());
 
     renderer.info.reset();
-    // the scene's OWN channel (celebration pools own theirs), so one lane's +1
-    // can never bloom another scene's frame
     post.setBloomPulse(celebrationPulse(scene.scene).bloom);
     post.render(dtReal);
 
     if (eventBuffer.length > 0 && options.onEvents) {
       eventSteps.length = 0;
-      // frame i holds RECORD row i-1; frame 0 is the synthesized step -1.
       for (const frame of eventFrames) eventSteps.push(frame - 1);
       options.onEvents(eventBuffer, eventSteps);
     }
 
-    // The governor only judges steady-state frames: a rebuild's shader compiles
-    // and texture uploads are not a budget failure.
     if (!building && frameMs > 0) {
       const drop = governor.sample(frameMs);
       if (drop && drop !== tier) {
@@ -500,8 +392,6 @@ export async function mountSceneHost(
       cancelAnimationFrame(raf);
       observer?.disconnect();
       window.removeEventListener('resize', onWindowResize);
-      // the caller's own layer is theirs to dispose; anything the host built is the
-      // host's to release
       ghostLayer?.group.removeFromParent();
       if (ghostOwned) ghostLayer?.dispose();
       scene?.dispose();

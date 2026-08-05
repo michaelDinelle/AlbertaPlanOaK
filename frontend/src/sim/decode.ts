@@ -1,22 +1,3 @@
-// The decode driver: one sequential pass over a RawRecording, producing the
-// DecodedRecording the theater plays back.
-//
-// Contract (src/sim/types.ts):
-//   frames[0]   = decoder.initFrame(seed, static)   — the synthesized step -1
-//   frames[i+1] = decoder.decodeFrame(i, row_i, static, frames[i])
-//   events[i]   = events fired on the transition INTO frames[i]; events[0] = []
-//                 (empty entries are the shared frozen NO_EVENTS singleton and
-//                 must never be mutated — see DecodedRecording.events)
-//
-// The pass is strictly sequential and prev-threaded so replay-dependent envs
-// (MultiKeyCorridor) can advance hidden state as they go. Row views are
-// zero-copy subarrays of the recording buffer: rows are disjoint and the
-// buffer outlives the decode, so a decoder may retain a row view safely.
-//
-// Damage handling: a record row carrying a non-finite float is counted
-// (`nonFiniteRows`) and, for `needsReplay` decoders, FREEZES the replay —
-// `Math.trunc(NaN) & 3 === 0` would otherwise feed the hidden-state replay a
-// plausible-looking action and desync every later frame with no way back.
 
 import { ENVS, isEnvId } from '@shared/envs';
 import { NO_EVENTS } from './events';
@@ -33,11 +14,9 @@ export class DecodeError extends Error {
 }
 
 export interface DecodeOptions {
-  /** decode only the first N record rows (frames = N + 1). Default: all. */
   maxSteps?: number;
 }
 
-/** true when any of the row's 16 floats is NaN/±Infinity (or the row is short). */
 function rowHasNonFinite(row: Float32Array): boolean {
   for (let j = 0; j < RECORD_FLOATS; j++) {
     if (!Number.isFinite(row[j])) return true;
@@ -45,24 +24,20 @@ function rowHasNonFinite(row: Float32Array): boolean {
   return false;
 }
 
-/** the state's `poseAgrees` flag if it has one (replay decoders), else undefined. */
 function poseAgreesOf(state: unknown): boolean | undefined {
   if (typeof state !== 'object' || state === null) return undefined;
   const v = (state as { poseAgrees?: unknown }).poseAgrees;
   return typeof v === 'boolean' ? v : undefined;
 }
 
-/** shallow copy with `poseAgrees` forced false; unchanged if the state has no flag. */
 function markDisagree<S>(state: S): S {
   if (poseAgreesOf(state) === undefined) return state;
   return { ...(state as object), poseAgrees: false } as S;
 }
 
-/** shared per-pass bookkeeping so `decodeRecording` and `walkRecording` agree. */
 interface Drive<S, St> {
   decoder: EnvDecoder<S, St>;
   st: St;
-  /** replay health is tracked for needsReplay decoders and any poseAgrees state */
   tracks: boolean;
   frozen: boolean;
   frozenState: S | undefined;
@@ -88,13 +63,6 @@ function startDrive<S, St>(
   };
 }
 
-/**
- * Decode one row. Once a `needsReplay` decoder hits a damaged row the frame is
- * a HOLD of the previous one (ctrl/pose/state carried over, done cleared, no
- * events) with `poseAgrees` forced false — the replay is stopped rather than
- * marched forward through garbage. `step` still advances so playback indices,
- * scrubbing and event alignment stay intact.
- */
 function driveRow<S, St>(
   d: Drive<S, St>,
   i: number,
@@ -129,15 +97,6 @@ function driveRow<S, St>(
   }
 }
 
-/**
- * Decode a recording with its env decoder.
- *
- * Throws a DecodeError if the recording's envId is not a known env, if the
- * decoder's envId does not match it, or if the recording claims more steps than
- * its buffer holds. Reports two health fields alongside the frames:
- * `nonFiniteRows` (damaged record rows in the decoded window) and, for replay
- * decoders, `replay` (first disagreeing row + total).
- */
 export function decodeRecording<S, St>(
   raw: RawRecording,
   decoder: EnvDecoder<S, St>,
@@ -196,12 +155,6 @@ export function decodeRecording<S, St>(
   };
 }
 
-/**
- * Streaming variant: decode without materializing every frame. `visit` is
- * called for the init frame (step -1, no events) and then once per row.
- * Return `false` from `visit` to stop early. Same `maxSteps` clamp and same
- * damaged-row handling as `decodeRecording`, so both agree frame for frame.
- */
 export function walkRecording<S, St>(
   raw: RawRecording,
   decoder: EnvDecoder<S, St>,
@@ -238,53 +191,31 @@ export function walkRecording<S, St>(
   }
 }
 
-/** `opts.maxSteps` clamped into [0, steps]; `steps` when unset. */
 function clampSteps(steps: number, opts: DecodeOptions): number {
   return opts.maxSteps === undefined
     ? steps
     : Math.max(0, Math.min(steps, Math.floor(opts.maxSteps)));
 }
 
-// ---------------------------------------------------------------------------
-// the lens: full-horizon random access without full-horizon materialization
-// ---------------------------------------------------------------------------
 
-/** Frames materialized per block; checkpoints are block-aligned. */
 export const LENS_BLOCK = 4096;
 
 interface LensCheckpoint<S> {
-  /** the frame BEFORE the block's first row (prev-chain resume point) */
   frame: EnvFrame<S>;
   frozen: boolean;
   frozenState: S | undefined;
 }
 
-/**
- * Random access over a full recording at bounded memory: the raw buffer stays
- * whole (64 MB for a 1M-step lane), frames materialize in LENS_BLOCK windows
- * around the playhead, and every mutable input of the decode rides the
- * prev-frame chain — so a block-aligned checkpoint (`{frame, frozen,
- * frozenState}`) resumes `driveRow` exactly, replay decoders included.
- *
- * One full streaming pass at construction captures the sparse event map,
- * damage/replay health, and the checkpoints (~245 retained frames for a 1M
- * lane). Sequential playback hits the block cache; a scrub re-decodes at most
- * one block (≤ LENS_BLOCK rows) from its checkpoint.
- */
 export interface RecordingLens<S = unknown> {
   envId: RawRecording['envId'];
   seed: number;
   controlHz: number;
   discretePose: boolean;
   geometry: ReturnType<EnvDecoder<S, never>['geometry']>;
-  /** steps + 1 (frames[0] is the synthesized init frame, step −1) */
   frameCount: number;
-  /** record steps (frameCount − 1) */
   steps: number;
   frameAt(i: number): EnvFrame<S>;
-  /** events fired on the transition INTO frame i (NO_EVENTS when none) */
   eventsAt(i: number): SimEvent[];
-  /** sparse — only frames with events; ascending frame index */
   eventEntries(): IterableIterator<[number, SimEvent[]]>;
   replay?: { firstDisagreeStep: number | null; disagreeCount: number };
   nonFiniteRows: number;
@@ -314,7 +245,6 @@ export function lensRecording<S, St>(
   const geometry = decoder.geometry(st, raw.seed);
   const init = decoder.initFrame(raw.seed, st);
 
-  // ---- construction pass: events + health + block checkpoints ----
   const eventsMap = new Map<number, SimEvent[]>();
   const checkpoints: LensCheckpoint<S>[] = [];
   const d = startDrive(decoder, st, init);
@@ -330,7 +260,6 @@ export function lensRecording<S, St>(
     prev = out.frame;
   }
 
-  // ---- the block cache: current + previous (interpolation reads i and i+1) ----
   const cache = new Map<number, EnvFrame<S>[]>();
   const decodeBlock = (b: number): EnvFrame<S>[] => {
     const hit = cache.get(b);
@@ -342,7 +271,7 @@ export function lensRecording<S, St>(
     const rd: Drive<S, St> = {
       decoder,
       st,
-      tracks: false, // health was captured in the construction pass
+      tracks: false,
       frozen: ck.frozen,
       frozenState: ck.frozenState,
       nonFiniteRows: 0,
@@ -360,7 +289,6 @@ export function lensRecording<S, St>(
       p = o.frame;
     }
     cache.set(b, block);
-    // keep the cache tiny: the current block plus its neighbours
     if (cache.size > 3) {
       for (const key of cache.keys()) {
         if (Math.abs(key - b) > 1) cache.delete(key);
@@ -373,7 +301,7 @@ export function lensRecording<S, St>(
   const frameAt = (i: number): EnvFrame<S> => {
     const clamped = Math.max(0, Math.min(steps, Math.floor(i)));
     if (clamped === 0) return init;
-    const row = clamped - 1; // record row index
+    const row = clamped - 1;
     const b = Math.floor(row / LENS_BLOCK);
     const block = decodeBlock(b);
     const frame = block[row - b * LENS_BLOCK];
@@ -401,7 +329,6 @@ export function lensRecording<S, St>(
   };
 }
 
-/** Flatten a DecodedRecording's events into a time-indexed list. */
 export function eventTimeline<S>(
   dec: DecodedRecording<S>,
 ): { frame: number; step: number; event: SimEvent }[] {

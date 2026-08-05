@@ -1,10 +1,8 @@
-// Hash router. Each view exports mount(el, params) => { destroy() }.
 
 export interface ViewHandle { destroy(): void }
 export type ViewMount = (el: HTMLElement, params: Record<string, string>) => ViewHandle | Promise<ViewHandle>;
 
 export interface Route {
-  /** pattern like '#/run/:id' — ':' segments become params */
   pattern: string;
   view: () => Promise<{ mount: ViewMount }>;
 }
@@ -34,13 +32,12 @@ export function startRouter(el: HTMLElement, routes: Route[], fallback: string):
       const params = matchRoute(route.pattern, hash);
       if (!params) continue;
       const mod = await route.view();
-      if (gen !== generation) return; // superseded while loading
+      if (gen !== generation) return;
       current?.destroy();
       current = null;
       el.replaceChildren();
       const handle = await mod.mount(el, params);
       if (gen !== generation) {
-        // superseded during an async mount — never leak the orphaned view
         handle.destroy();
         return;
       }

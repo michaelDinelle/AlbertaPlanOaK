@@ -1,26 +1,3 @@
-// kit/harness — the artisan dev page.
-//
-// One scene, one lane, full transport, on-screen budget readout, ground-truth toggle.
-// This is where a scene is BUILT: the theater renders the same SceneModule through the
-// same host contract, so anything that looks right here looks right there.
-//
-// Host responsibilities it implements (kit/types.ts ownership boundary):
-//   * the ONE WebGLRenderer + canvas + resize
-//   * the playback clock and transport (play / pause / speed / scrub)
-//   * the EffectComposer chain via kit/post (scenes only parameterize it)
-//   * the celebration bloom pulse, resolved PER SCENE via `celebrationPulse(scene)` —
-//     pools own their channel now, so a scene must attach its pool
-//     (`attachCelebrations` / `celebrationsFor`) for the host to see its beats
-//   * quality-tier selection (a switch re-inits the scene, as the contract requires)
-//   * the debug toggle (`g`)
-//   * frame assembly: pose interpolation for continuous envs, snap for grids, event
-//     delivery ONLY on sequential steps, `scrubbed` on every jump
-//
-// Data: the same-origin API's recordings for the scene's env (first available seed),
-// parsed by @sim/record and decoded by @sim/decode + @sim/registry. If the env has no
-// decoder registered yet, the harness falls back to a static fixture loop built from the
-// scene manifest's thumbFrame plus `scenes/<slug>/fixtures.ts` if it exists, so art work
-// is never blocked on sim-core.
 
 import * as THREE from 'three';
 import { ENVS, envBySlug, type EnvId } from '@shared/envs';
@@ -45,31 +22,22 @@ import type {
   SceneSize,
 } from './types';
 
-/** The demo run every artisan page reads from. */
 export const DEFAULT_HARNESS_RUN = 'frontend-demo-16env-20260803';
 
 export const TIERS: readonly QualityTier[] = ['hero', 'medium', 'thumb'];
 const SPEEDS: readonly number[] = [0.25, 0.5, 1, 2, 4];
 
-// ---------------------------------------------------------------------------
-// playback clock
-// ---------------------------------------------------------------------------
 
 export interface PlaybackClock {
-  /** playback seconds — SceneContext.time() */
   time(): number;
-  /** frame position in [0, frameCount-1] */
   position(): number;
   playing: boolean;
   speed: number;
-  /** advance by wall seconds; returns the new position */
   advance(dtReal: number): number;
-  /** jump to a frame position (a scrub) */
   seek(position: number): void;
   readonly duration: number;
 }
 
-/** Frame position <-> playback seconds is exactly `controlHz`. */
 export function makePlaybackClock(frameCount: number, controlHz: number): PlaybackClock {
   const hz = controlHz > 0 ? controlHz : 8;
   const last = Math.max(0, frameCount - 1);
@@ -96,9 +64,6 @@ export function makePlaybackClock(frameCount: number, controlHz: number): Playba
   return clock;
 }
 
-// ---------------------------------------------------------------------------
-// data source
-// ---------------------------------------------------------------------------
 
 export interface HarnessSource {
   kind: 'recording' | 'fixture';
@@ -107,17 +72,11 @@ export interface HarnessSource {
   controlHz: number;
   discretePose: boolean;
   geometry: EnvGeometry;
-  /** frames incl. the synthesized init frame; ALWAYS the full recorded horizon */
   frameCount: number;
-  /** lens-backed random access — full 1M-step lanes at bounded memory */
   frameAt(i: number): EnvFrame<unknown>;
-  /** events fired on the transition INTO frame i (NO_EVENTS when none) */
   eventsAt(i: number): SimEvent[];
-  /** sparse ascending [frameIndex, events] — scrub ticks, timelines */
   eventEntries(): IterableIterator<[number, SimEvent[]]>;
-  /** short human label for the HUD */
   label: string;
-  /** why we fell back, when we did */
   note?: string;
   replay?: { firstDisagreeStep: number | null; disagreeCount: number };
   nonFiniteRows?: number;
@@ -129,7 +88,6 @@ async function getJson<T>(url: string, signal?: AbortSignal): Promise<T> {
   return (await res.json()) as T;
 }
 
-/** The first recorded lane for an env in a run, or null. */
 export function firstRecordingFor(recordings: readonly RecordingRef[], envId: EnvId): RecordingRef | null {
   let best: RecordingRef | null = null;
   for (const rec of recordings) {
@@ -139,7 +97,6 @@ export function firstRecordingFor(recordings: readonly RecordingRef[], envId: En
   return best;
 }
 
-/** A synthetic frame the fixture fallback plays back. */
 function fixtureFrame(step: number, fixture: SceneFixture | null, thumbPose: readonly number[]): EnvFrame<unknown> {
   const pose = new Float32Array(9);
   const source = fixture?.pose ?? thumbPose;
@@ -149,7 +106,6 @@ function fixtureFrame(step: number, fixture: SceneFixture | null, thumbPose: rea
   return { step, ctrl, done: 0, pose, state: fixture?.derived ?? null };
 }
 
-/** Placeholder geometry so art work can proceed before a decoder lands. */
 function placeholderGeometry(envId: EnvId): EnvGeometry {
   const info = ENVS[envId];
   if (info.category === 'grid') {
@@ -176,16 +132,10 @@ export interface LoadSourceOptions {
   runId?: string;
   maxSteps?: number;
   signal?: AbortSignal;
-  /** fixtures for the fallback loop */
   fixtures?: readonly SceneFixture[];
-  /** manifest thumbFrame pose for the fallback loop */
   thumbPose?: readonly number[];
 }
 
-/**
- * Load one lane of real experience for an env, or fall back to a fixture loop.
- * Never throws for a missing run / missing decoder — the dev page must always mount.
- */
 export async function loadHarnessSource(envId: EnvId, opts: LoadSourceOptions = {}): Promise<HarnessSource> {
   const info = ENVS[envId];
   const runId = opts.runId ?? DEFAULT_HARNESS_RUN;
@@ -239,9 +189,6 @@ export async function loadHarnessSource(envId: EnvId, opts: LoadSourceOptions = 
   const base = `/api/runs/${encodeURIComponent(runId)}/recordings/${encodeURIComponent(envId)}/${ref.seed}`;
   try {
     const meta = await getJson<RecordingMeta>(`${base}/meta.json`, opts.signal);
-    // The FULL lane, always — the lens gives full-horizon random access at bounded
-    // memory, so there is no cap and no prefix-range dance (a 1M-step v4 lane is
-    // ~2-19 MB on the wire; a 100k v3 demo lane is 6.4 MB).
     const res = await fetch(`${base}/actions.bin`, opts.signal ? { signal: opts.signal } : {});
     if (!res.ok) throw new Error(`${res.status} actions.bin`);
     const buffer = await res.arrayBuffer();
@@ -268,7 +215,6 @@ export async function loadHarnessSource(envId: EnvId, opts: LoadSourceOptions = 
   }
 }
 
-/** `scenes/<slug>/fixtures.ts` if the artisan has written one yet. */
 export async function loadSceneFixtures(slug: string): Promise<SceneFixture[]> {
   try {
     const modules = import.meta.glob('../scenes/*/fixtures.ts');
@@ -284,9 +230,6 @@ export async function loadSceneFixtures(slug: string): Promise<SceneFixture[]> {
   }
 }
 
-// ---------------------------------------------------------------------------
-// frame assembly
-// ---------------------------------------------------------------------------
 
 function makeFrameState(): FrameState {
   return {
@@ -308,11 +251,6 @@ function copyFrameState(from: FrameState, to: FrameState): void {
   to.derived = from.derived;
 }
 
-/**
- * Fill `out` from the source at a fractional frame position.
- * Continuous envs interpolate the 9-float pose; `discretePose` envs snap (a grid agent
- * is never between cells — that is what HopMotion is for).
- */
 export function sampleFrame(source: HarnessSource, position: number, out: FrameState): void {
   const n = source.frameCount;
   if (n === 0) return;
@@ -339,25 +277,16 @@ export function sampleFrame(source: HarnessSource, position: number, out: FrameS
   out.derived = frame.state;
 }
 
-/** Max frames we will walk in one tick before declaring the jump a scrub. */
 export const MAX_CATCHUP_FRAMES = 12;
 
-// ---------------------------------------------------------------------------
-// the page
-// ---------------------------------------------------------------------------
 
 export interface HarnessOptions {
   runId?: string;
-  /** initial tier (default hero) */
   tier?: QualityTier;
   maxSteps?: number;
-  /** override the fixture list (tests / previews) */
   fixtures?: readonly SceneFixture[];
-  /** start scrubbed to this frame position (deterministic stills / headless screenshots) */
   at?: number;
-  /** start paused (deterministic stills / headless screenshots) */
   paused?: boolean;
-  /** start with the ground-truth overlay on */
   debug?: boolean;
 }
 
@@ -402,11 +331,6 @@ function el<K extends keyof HTMLElementTagNameMap>(
   return node;
 }
 
-/**
- * Mount the artisan page for one scene slug.
- * Route wiring lives in the router (orchestrator-owned); `views/harness.ts` is the thin
- * ViewMount adapter over this function.
- */
 export async function mountHarness(
   container: HTMLElement,
   slug: string,
@@ -437,7 +361,6 @@ export async function mountHarness(
   const abort = new AbortController();
   let destroyed = false;
 
-  // ---- data + scene factory in parallel ----
   const [fixtures, mod] = await Promise.all([
     opts.fixtures ? Promise.resolve([...opts.fixtures]) : loadSceneFixtures(slug),
     loader(),
@@ -445,8 +368,6 @@ export async function mountHarness(
   if (destroyed) return { destroy: () => root.remove() };
 
   const factory = mod.default;
-  // Build ONE module up front for its manifest; buildScene() consumes this same
-  // instance on its first call, so nothing is constructed and thrown away.
   let pendingModule: SceneModule | null = factory();
   const probeManifest = pendingModule.manifest;
   const source = await loadHarnessSource(info.envId, {
@@ -462,7 +383,6 @@ export async function mountHarness(
     return { destroy: () => root.remove() };
   }
 
-  // ---- renderer + canvas (host-owned, one for the page's whole life) ----
   const canvas = el('canvas');
   root.appendChild(canvas);
   let renderer: THREE.WebGLRenderer;
@@ -474,7 +394,6 @@ export async function mountHarness(
   }
   renderer.setClearColor(0x05070c, 1);
 
-  // ---- HUD ----
   const hudLeft = el('div', 'oak-hud tl');
   const titleLine = el('div', 'oak-title');
   const sourceLine = el('div', 'oak-dim');
@@ -519,27 +438,14 @@ export async function mountHarness(
   sourceLine.textContent = `${source.kind} · ${source.label}`;
   noteLine.textContent = source.note ?? '';
 
-  // ---- mutable per-tier state ----
   let tier: QualityTier = opts.tier ?? 'hero';
   tierSelect.value = tier;
   let scene: SceneModule | null = null;
   let post: ComposerHandle | null = null;
   let debugOn = false;
-  // The manifest budget is a SCENE budget, but a composer chain issues ~15 more draws
-  // after the scene is done. `info.autoReset` would also reset the counters at every
-  // pass, leaving only the last one. So: reset once per frame, and latch the counts the
-  // instant the scene finishes rendering (Scene.onAfterRender fires after its draws are
-  // submitted, shadow pass included).
   renderer.info.autoReset = false;
   let sceneCalls = 0;
   let sceneTriangles = 0;
-  // The stats line is written on a 0.25 s cadence, which is right for a live page and
-  // wrong for a headless one: `--virtual-time-budget` screenshots only ever tick rAF a
-  // couple of times, so the gate never opened and EVERY review still shipped with an
-  // empty HUD. The first PRESENTED frame now writes the line immediately (the counters
-  // are latched by then — `Scene.onAfterRender` fired inside `post.render`), and the
-  // cadence takes over from there. Reset on every rebuild, so a tier switch reports its
-  // own numbers at once.
   let statsPrimed = false;
 
   const clock = makePlaybackClock(source.frameCount, source.controlHz);
@@ -570,10 +476,6 @@ export async function mountHarness(
     post?.resize(size.width, size.height, size.dpr);
   };
 
-  // Scene builds are async (module.init awaits textures/geometry), so two quick tier
-  // switches can interleave: build A is still awaiting init when build B disposes and
-  // starts over, and A then installs itself over B. A generation counter makes the
-  // superseded build dispose what it made and return.
   let buildGeneration = 0;
 
   const buildScene = async (): Promise<void> => {
@@ -604,7 +506,6 @@ export async function mountHarness(
       return;
     }
     scene = module;
-    // chain, never clobber: the scene owns its THREE.Scene and may use this hook itself
     type AfterRender = THREE.Scene['onAfterRender'];
     const sceneHook: AfterRender = module.scene.onAfterRender;
     module.scene.onAfterRender = function (this: THREE.Scene, ...args: Parameters<AfterRender>) {
@@ -615,15 +516,11 @@ export async function mountHarness(
     post = buildComposer(renderer, module.scene, module.camera, module.manifest.postConfig, tier, size);
     module.setDebug(debugOn);
     applySize();
-    // force a snap on the first frame after any rebuild
     hasPrevious = false;
     lastFrameIndex = -1;
-    // a tier switch is a new scene with new counts: show them on its first frame too
     statsPrimed = false;
   };
 
-  // Deterministic-still options (?at=&pause=1&debug=1 — headless screenshot loop).
-  // debugOn is applied by buildScene itself (it restores overlay state on every rebuild).
   if (opts.debug) debugOn = true;
 
   await buildScene();
@@ -635,7 +532,6 @@ export async function mountHarness(
   }
   if (opts.paused) clock.playing = false;
 
-  // ---- transport wiring ----
   const syncPlayButton = (): void => {
     playButton.textContent = clock.playing ? 'pause' : 'play';
   };
@@ -681,7 +577,6 @@ export async function mountHarness(
   const onResize = (): void => applySize();
   window.addEventListener('resize', onResize);
 
-  // ---- the loop ----
   let raf = 0;
   let lastWall = 0;
   let fps = 0;
@@ -717,15 +612,10 @@ export async function mountHarness(
     hasPrevious = true;
 
     renderer.info.reset();
-    // the scene's OWN channel (celebrate pools no longer share a global one);
-    // falls back to the module channel for a scene that attached no pool
     post.setBloomPulse(celebrationPulse(scene.scene).bloom);
     post.render(dtReal);
 
-    // HUD
     statsTimer += dtReal;
-    // seed the EMA with the first real sample instead of ramping up from zero — the ramp
-    // made the first second of every session report an fps nobody was running at
     fps = dtReal > 0 ? (fps > 0 ? fps * 0.9 + (1 / dtReal) * 0.1 : 1 / dtReal) : fps;
     if (!statsPrimed || statsTimer > 0.25) {
       statsPrimed = true;

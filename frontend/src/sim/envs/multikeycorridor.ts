@@ -1,22 +1,3 @@
-// MultiKeyCorridor-cont-v0 decoder — the one gridworld that NEEDS a replay.
-//
-// Oracles (ported, never guessed):
-//   Sources/Gridworld.metal      gw_mkc_is_wall L391, gw_mkc_step L423
-//   tools/gridworld_ref.py       mkc_is_wall L357, mkc_step L384
-//   Sources/OakKernel.metal      pose packing L2743-2757, init L2291-2298
-//
-// 17x7 (x 0..16, y 0..6), border walls; interior walls x = 4, 8, 12 except
-// the door cells (4,3), (8,3), (12,3). Four rooms at x bases 1/5/9/13, y 1..5
-// (15 cells each): key j in room j, goal in room 3. Auto-pickup on
-// co-location; locked door j opens on entry iff key j is carried. Goal entry:
-// +1, done=1, and a full respawn (agent in room 0, keys in rooms 0/1/2, goal
-// in room 3, doors re-locked) drawn from Philox stream 3.
-//
-// pose = [x, y, gx, gy, keyMask3, doorMask3, 0, 0, 0] — the KEY POSITIONS are
-// NOT recorded, so they are recovered by replaying ctrl[0] through the exact
-// mkc dynamics above, threading (keys, flags, respawnIdx) frame to frame.
-// Every replayed field that IS in the pose is cross-checked each frame and
-// reported as `poseAgrees`.
 
 import { philoxDraw, STREAM_GRIDWORLD, uniformIndex } from '../philox';
 import { CTRL_LEN, OFF_CTRL, OFF_DONE, OFF_POSE, POSE_LEN } from '../record';
@@ -25,11 +6,8 @@ import { NO_EVENTS } from '../events';
 
 export const MKC_W = 17;
 export const MKC_H = 7;
-/** cells per room (3 x 5) */
 export const MKC_ROOM_CELLS = 15;
-/** x of the leftmost column of each room */
 export const MKC_ROOM_BASE: readonly number[] = Object.freeze([1, 5, 9, 13]);
-/** the three locked-door cells, in key order */
 export const MKC_DOORS: readonly GridCell[] = Object.freeze([
   { x: 4, y: 3 },
   { x: 8, y: 3 },
@@ -46,20 +24,13 @@ export const MKC_GOAL: GridCell = Object.freeze({ x: 15, y: 1 });
 export interface MultiKeyCorridorState {
   x: number;
   y: number;
-  /** LIVE goal cell (respawns in room 3) */
   gx: number;
   gy: number;
-  /** LIVE key cells, one per room 0..2 — replayed, never recorded */
   keys: GridCell[];
-  /** hasKey bits 0..2 */
   hasKey: [boolean, boolean, boolean];
-  /** doorOpen bits 0..2 */
   doorOpen: [boolean, boolean, boolean];
-  /** raw flags word: bits 0-2 hasKey1..3, bits 3-5 doorOpen1..3 */
   flags: number;
-  /** number of completions so far — the Philox respawn counter */
   respawnIdx: number;
-  /** every pose-recorded field matched the replay on this frame */
   poseAgrees: boolean;
 }
 
@@ -68,14 +39,12 @@ export interface MultiKeyCorridorStatic {
   walls: Uint8Array;
 }
 
-/** `gw_mkc_is_wall` / `mkc_is_wall`. */
 export function mkcIsWall(x: number, y: number): boolean {
   if (x <= 0 || x >= 16 || y <= 0 || y >= 6) return true;
   if ((x === 4 || x === 8 || x === 12) && y !== 3) return true;
   return false;
 }
 
-/** w*h row-major occupancy, 1 = wall (door cells count as free). */
 export function mkcWalls(): Uint8Array {
   const walls = new Uint8Array(MKC_W * MKC_H);
   for (let y = 0; y < MKC_H; y++) {
@@ -84,7 +53,6 @@ export function mkcWalls(): Uint8Array {
   return walls;
 }
 
-/** room `r` cell list: `MKC_ROOMS[r]`, idx -> cell. */
 export function mkcRoomCells(room: number): GridCell[] {
   const base = MKC_ROOM_BASE[room] ?? 1;
   const out: GridCell[] = [];
@@ -94,7 +62,6 @@ export function mkcRoomCells(room: number): GridCell[] {
   return out;
 }
 
-/** room cell for a drawn index (`room base + idx%3`, `1 + idx/3`). */
 function roomCell(room: number, idx: number): GridCell {
   return { x: (MKC_ROOM_BASE[room] ?? 1) + (idx % 3), y: 1 + Math.floor(idx / 3) };
 }
@@ -106,7 +73,6 @@ const MOVES: readonly (readonly [number, number])[] = [
   [1, 0],
 ];
 
-/** internal replay state — everything `gw_mkc_step` reads and writes. */
 interface Replay {
   x: number;
   y: number;
@@ -117,10 +83,6 @@ interface Replay {
   respawnIdx: number;
 }
 
-/**
- * One `gw_mkc_step` in place. `sinceGoal` is omitted: it only feeds the
- * observation, never the dynamics. Returns 1 on completion (done).
- */
 export function mkcStep(seed: number, s: Replay, action: number): number {
   const mv = MOVES[action & 3] ?? MOVES[3]!;
   let nx = s.x + mv[0];
@@ -129,7 +91,7 @@ export function mkcStep(seed: number, s: Replay, action: number): number {
     nx = s.x;
     ny = s.y;
   } else if (ny === 3 && (nx === 4 || nx === 8 || nx === 12)) {
-    const j = (nx >> 2) - 1; // door index 0..2
+    const j = (nx >> 2) - 1;
     if ((s.flags & (8 << j)) === 0) {
       if ((s.flags & (1 << j)) !== 0) s.flags |= 8 << j;
       else {

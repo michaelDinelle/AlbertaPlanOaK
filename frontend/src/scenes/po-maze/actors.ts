@@ -1,23 +1,3 @@
-// The Fogbound Forest — the three things in it that are alive.
-//
-// THE MOONFLOWER is the goal, and it is built in TWO PIECES because the agent's knowledge
-// of the goal comes in two pieces. `root` is an empty anchor on `cellToWorld(gx, gy)`
-// carrying position only — the alignment probe, and the thing the ground-truth overlay
-// agrees with; it never draws anything, because POMaze never tells the agent where the
-// goal IS. `bloom` is the visible flower, and it is NOT a child of the root: the scene
-// stands it on the cell a +1 was earned on, for the length of the goal breath. That is the
-// one instant the location is a fact the agent owns — it just collected the reward there —
-// so it is the one instant a flower may be drawn.
-//
-// THE MOTH is the compass. POMaze's observation carries four bits — gx>x, gx<x, gy>y,
-// gy<y — and NOT the distance, so the moth flies on the rim of the visibility bubble in
-// the direction those bits give, at a radius that is a function of the clock alone, and
-// never one centimetre nearer for being close. It is decoration by construction (it has no
-// probe) precisely because its position is not a state the env owns: it is the SIGN of a
-// state.
-//
-// THE LANTERN POOL is the wisp's own light on the litter — the warm disc that makes the
-// bubble a place rather than a radius. It follows the avatar and nothing else.
 
 import { emissiveMaterial, oakMaterial, setEmissiveIntensity, type EmissiveMaterial, type OakMaterial } from '@kit/materials';
 import { radialSprite } from '@kit/textures';
@@ -25,13 +5,9 @@ import type { QualityTier } from '@kit/types';
 import * as THREE from 'three';
 import { clamp01, mergeColoredParts, smoothstep01, type ColoredPart, type ForestSkin } from './world';
 
-// ---------------------------------------------------------------------------
-// the goal beacon — VIEWER knowledge (owner's ruling 2026-08-05)
-// ---------------------------------------------------------------------------
 
 export interface GoalBeaconOptions {
   tier: QualityTier;
-  /** the marker color (the moonflower's own glow family) */
   glow: THREE.ColorRepresentation;
   name?: string;
 }
@@ -42,13 +18,6 @@ export interface GoalBeaconHandle {
   dispose(): void;
 }
 
-/**
- * The audience's marker on the live goal cell: a slim shaft of light and a soft
- * breathing ring. Every material is `fog: false` and additive — the whole point
- * is to be readable THROUGH the fog the agent cannot see through, at any
- * distance, at any tier. Deliberately cool and dim next to the wisp's warm
- * bubble: an omen on the horizon, not a second character.
- */
 export function buildGoalBeacon(opts: GoalBeaconOptions): GoalBeaconHandle {
   const group = new THREE.Group();
   group.name = opts.name ?? 'goalBeacon';
@@ -104,7 +73,6 @@ export function buildGoalBeacon(opts: GoalBeaconOptions): GoalBeaconHandle {
   return {
     group,
     setTime(t) {
-      // one slow breath — enough life to read as meaningful, never a strobe
       const breath = 0.82 + 0.18 * Math.sin(t * 1.4);
       beamMaterial.opacity = 0.34 * breath;
       ringMaterial.opacity = 0.5 * breath;
@@ -118,58 +86,36 @@ export function buildGoalBeacon(opts: GoalBeaconOptions): GoalBeaconHandle {
   };
 }
 
-// ---------------------------------------------------------------------------
-// the moonflower — the goal
-// ---------------------------------------------------------------------------
 
 export interface MoonflowerOptions {
   tier: QualityTier;
   skin: ForestSkin;
-  /** the emissive heart color (accent-derived) */
   glow: THREE.ColorRepresentation;
   name?: string;
 }
 
 export interface MoonflowerHandle {
-  /** PROBE OBJECT: the live goal cell, position only, y = 0 — and it never draws. */
   root: THREE.Object3D;
-  /**
-   * Everything visible, parented to the SCENE and not to the root: the scene stands it on
-   * the clearing a +1 was earned on, which is the only goal position the agent is ever
-   * given. `open` scales it; the root's exactness is untouched by any of that.
-   */
   bloom: THREE.Object3D;
-  /** world height of the flower's heart, for the point light */
   readonly crownHeight: number;
-  /** `open` in [0,1] is the goal breath; `flare` is the celebration hook */
   setState(open: number, time: number): void;
   flare(strength?: number): void;
   update(dt: number, time: number): void;
   dispose(): void;
 }
 
-/** the heart sits here above the litter */
 const CROWN_HEIGHT = 0.3;
 
-/**
- * A moonflower: a ring of pale petals cupped around a luminous heart, on a short stem,
- * with a glow pooled on the litter under it. The agent never sees it coming — it is drawn
- * only in the breath after a +1, on the cell where that +1 happened — so it is built to
- * open and read INSTANTLY through fog, not to reward inspection.
- */
 export function buildMoonflower(opts: MoonflowerOptions): MoonflowerHandle {
   const { tier, skin } = opts;
   const detail = tier === 'thumb' ? 0.4 : tier === 'medium' ? 0.7 : 1;
   const root = new THREE.Object3D();
   root.name = opts.name ?? 'moonflowerRoot';
-  // NOT a child of root: the anchor tracks the live goal, the flower stands on the
-  // clearing. Parenting them would make the picture say where the next goal is.
   const body = new THREE.Object3D();
   body.name = 'moonflowerBloom';
 
   const geometries: THREE.BufferGeometry[] = [];
 
-  // ---- petals + stem: one merged, vertex-colored prop ----
   const petals = Math.max(4, Math.round(6 * detail));
   const parts: ColoredPart[] = [];
   const stem = new THREE.CylinderGeometry(0.016, 0.026, CROWN_HEIGHT, Math.max(4, Math.round(6 * detail)), 1);
@@ -204,7 +150,6 @@ export function buildMoonflower(opts: MoonflowerOptions): MoonflowerHandle {
   petalMesh.castShadow = tier !== 'thumb';
   body.add(petalMesh);
 
-  // ---- the heart: the only HDR emitter down here ----
   const heartGeo = new THREE.IcosahedronGeometry(0.055, tier === 'thumb' ? 0 : 1);
   geometries.push(heartGeo);
   const heartMaterial = emissiveMaterial(opts.glow, 1.15, { name: 'moonflowerHeart' });
@@ -227,7 +172,6 @@ export function buildMoonflower(opts: MoonflowerOptions): MoonflowerHandle {
   halo.position.y = CROWN_HEIGHT + 0.05;
   body.add(halo);
 
-  // ---- the pool of light it lays on the litter ----
   const poolTexture = radialSprite(64, 2.2);
   const poolGeo = new THREE.PlaneGeometry(1.5, 1.5);
   poolGeo.rotateX(-Math.PI / 2);
@@ -256,7 +200,6 @@ export function buildMoonflower(opts: MoonflowerOptions): MoonflowerHandle {
     setState(o, time) {
       open = clamp01(o);
       const e = smoothstep01(open);
-      // the flower does not just appear: it opens out of the litter as the fog lifts
       body.scale.set(e, e * (0.35 + 0.65 * e), e);
       body.visible = e > 0.002;
       const breath = 1 + 0.1 * Math.sin(time * 1.6);
@@ -291,9 +234,6 @@ export function buildMoonflower(opts: MoonflowerOptions): MoonflowerHandle {
   };
 }
 
-// ---------------------------------------------------------------------------
-// the moth — the compass, and the ONLY thing that knows where the goal is
-// ---------------------------------------------------------------------------
 
 export interface MothOptions {
   tier: QualityTier;
@@ -303,22 +243,14 @@ export interface MothOptions {
 
 export interface MothHandle {
   group: THREE.Group;
-  /** where the light rig should hang its point light */
   readonly position: THREE.Vector3;
-  /** 0 hides it entirely (the goal is on the agent's own cell, or it has been found) */
   setVisibility(v: number): void;
-  /** wings and body attitude, all on the playback clock */
   setTime(time: number): void;
   flare(strength?: number): void;
   update(dt: number, time: number): void;
   dispose(): void;
 }
 
-/**
- * A moth: a fat little body, two beating wings and a halo, all emissive. It is drawn
- * unlit and additively so it reads as a spark of light through fog rather than a model —
- * at two metres in this density a shaded insect would be a grey smudge.
- */
 export function buildMoth(opts: MothOptions): MothHandle {
   const group = new THREE.Group();
   group.name = opts.name ?? 'compassMoth';
@@ -339,8 +271,6 @@ export function buildMoth(opts: MothOptions): MothHandle {
 
   const wingGeo = new THREE.BufferGeometry();
   {
-    // one triangle pair per wing, built in the xz plane hinged on x = 0. It is a MOTH,
-    // not a bird: at 3 units through this fog anything larger reads as a lantern.
     const v = new Float32Array([
       0, 0, -0.012, 0.078, 0.009, -0.045, 0.06, 0.003, 0.033,
       0, 0, -0.012, 0.06, 0.003, 0.033, 0.021, 0, 0.027,
@@ -391,8 +321,6 @@ export function buildMoth(opts: MothOptions): MothHandle {
       group.visible = e > 0.002;
     },
     setTime(time) {
-      // a beat, a roll and a slow yaw wander — every term on the playback clock, so a
-      // paused frame freezes the moth mid-wingbeat instead of stalling it flat
       const beat = Math.sin(time * 11) * 0.6 + Math.sin(time * 23) * 0.12;
       wingL.rotation.z = -0.5 - beat;
       wingR.rotation.z = 0.5 + beat;
@@ -422,27 +350,14 @@ export function buildMoth(opts: MothOptions): MothHandle {
   };
 }
 
-// ---------------------------------------------------------------------------
-// the lantern pool — the wisp's own light on the litter
-// ---------------------------------------------------------------------------
 
 export interface WispAuraHandle {
   mesh: THREE.Mesh;
-  /** billboard it: the aura is scattering, and scattering has no orientation */
   face(camera: THREE.Camera): void;
   setGain(gain: number): void;
   dispose(): void;
 }
 
-/**
- * The halo of scattered light around the wisp.
- *
- * The kit avatar's own halo is a flat-shaded icosahedron, which at four metres in a
- * 40° frame renders as a visible faceted marble rather than a glow — this scene stands
- * closer to its avatar than any other, so it is the one scene where that shows. A
- * billboarded radial sprite in front of it does what fog actually does to a light source
- * and lets the orb stay small and hard-edged underneath.
- */
 export function buildWispAura(color: THREE.ColorRepresentation, size: number, tier: QualityTier): WispAuraHandle {
   const texture = radialSprite(tier === 'thumb' ? 64 : 128, 1.5);
   const geometry = new THREE.PlaneGeometry(size, size);
@@ -479,16 +394,11 @@ export function buildWispAura(color: THREE.ColorRepresentation, size: number, ti
 export interface LanternPoolHandle {
   mesh: THREE.Mesh;
   material: EmissiveMaterial;
-  /** radius in world units — the bubble made visible */
   readonly radius: number;
   setGain(gain: number): void;
   dispose(): void;
 }
 
-/**
- * The warm disc the wisp lays on the needle litter. Its radius is the bubble's OUTER
- * edge, so what the agent can see and what the frame lights up are the same circle.
- */
 export function buildLanternPool(color: THREE.ColorRepresentation, radius: number, tier: QualityTier): LanternPoolHandle {
   const texture = radialSprite(tier === 'thumb' ? 64 : 128, 1.7);
   const geometry = new THREE.PlaneGeometry(radius * 2, radius * 2);

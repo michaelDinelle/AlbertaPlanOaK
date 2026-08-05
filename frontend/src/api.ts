@@ -1,8 +1,3 @@
-// Typed fetch client over the FROZEN DTOs in shared/types.ts.
-//
-// Everything here speaks the contract, not the server: if an endpoint is missing
-// or half-built, callers get a typed ApiError they can render instead of a crash.
-// URL building is a pure exported function so it can be tested without a network.
 
 import type {
   AggregateRow,
@@ -34,10 +29,6 @@ export class ApiError extends Error {
 
 export type QueryValue = string | number | boolean | readonly string[] | null | undefined;
 
-/**
- * Build an /api URL. Empty, null and undefined values are dropped; arrays join
- * with commas (the server-side convention for `fields=a,b,c`).
- */
 export function apiUrl(path: string, query?: Record<string, QueryValue>): string {
   const rel = path.startsWith('/') ? path : `/${path}`;
   const base = rel.startsWith(`${API_BASE}/`) || rel === API_BASE ? rel : `${API_BASE}${rel}`;
@@ -79,22 +70,13 @@ async function getJson<T>(url: string, options?: RequestOptions): Promise<T> {
 }
 
 export interface FleetQuery {
-  /** columnar fields to materialize, e.g. ['health.rewardRate'] */
   fields?: readonly string[];
-  /** restrict to one env's lane range (mixed-env runs) */
   envId?: string;
-  /**
-   * Which policy's lanes to materialize. The server filters fleet.jsonl by this
-   * and defaults to `oak`, so a multi-policy run MUST pass the policy it is
-   * showing or it silently reads the wrong lanes.
-   */
   policy?: string;
 }
 
 export interface CurvesQuery {
-  /** restrict to one env's lanes (mixed-env runs); absent = every lane, pooled */
   envId?: string;
-  /** which policy's seeds the curve is built from; the server defaults to `oak` */
   policy?: string;
 }
 
@@ -118,12 +100,6 @@ export const api = {
     );
   },
 
-  /**
-   * Learning curve: per-heartbeat IQM ± bootstrap CI and P10/P50/P90 of the MEASURED
-   * reward rate. Derived server-side from fleet.jsonl, so it answers on legacy roots
-   * that never got a summary.json — and `envId` keeps a mixed fleet's environments on
-   * their own scales instead of pooling them.
-   */
   curves(id: string, query?: CurvesQuery, options?: RequestOptions): Promise<CurvesResponse> {
     return getJson<CurvesResponse>(
       apiUrl(`/runs/${encodeURIComponent(id)}/curves`, {
@@ -139,35 +115,20 @@ export const api = {
   },
 };
 
-// ---------- /api/runs/:id/wall/:envId ----------
 
-/** pose[9] f32 + done u8, tightly packed — the wire record (`WallResponse` framing). */
 export const WALL_SAMPLE_BYTES = 37;
-/** pose floats per sample */
 export const WALL_POSE_LEN = 9;
 
 export interface WallLane {
   seed: number;
-  /** rows these samples COVER (a torn tail or a budget stop yields fewer than meta claims) */
   steps: number;
   samples: number;
-  /**
-   * First record row whose pose/done went non-finite; null when no scanned row did.
-   * Exact over the rows the server decoded — when `scannedRows` is set, the death is
-   * dated to within one v4 chunk rather than to the row.
-   */
   firstNonFiniteRow: number | null;
-  /** rows the server decoded; present only when it skipped whole chunks (< `steps`) */
   scannedRows?: number;
-  /** the server stopped this seed early to stay inside its budget; `steps` is the span shown */
   truncated?: true;
-  /** present only when the server could not decode this lane */
   error?: string;
-  /** `samples × 9`, row-major — sample s is `pose.subarray(s*9, s*9+9)` */
   pose: Float32Array;
-  /** `samples` done bits */
   done: Uint8Array;
-  /** record row index each sample was taken at: `s·stride`, last entry the final row */
   rows: Int32Array;
 }
 
@@ -177,13 +138,7 @@ export interface WallData {
 }
 
 export interface WallQuery {
-  /**
-   * Rows per sample; the server clamps to [1, 4096] and defaults to 64. It is a FLOOR:
-   * a run big enough to blow the server's payload budget comes back coarser, so read
-   * `header.stride` (and each lane's `rows`) instead of assuming this value was used.
-   */
   stride?: number;
-  /** accepted here as well as in `options`, since a wall fetch is the thing callers cancel */
   signal?: AbortSignal;
 }
 
@@ -194,8 +149,6 @@ export function wallUrl(id: string, envId: string, query?: WallQuery): string {
 }
 
 async function inflateRaw(bytes: Uint8Array): Promise<Uint8Array> {
-  // A fresh ArrayBuffer-backed copy: `BufferSource` excludes SharedArrayBuffer-backed
-  // views, and a stream is free to hold or neuter what it is handed.
   const copy = new Uint8Array(bytes.byteLength);
   copy.set(bytes);
   const source = new ReadableStream<BufferSource>({
@@ -209,19 +162,6 @@ async function inflateRaw(bytes: Uint8Array): Promise<Uint8Array> {
   );
 }
 
-/**
- * Fetch + decode one env's wall.
- *
- * The response is a JSON header, a newline, and a deflate-raw section (see
- * `WallResponse` in shared/types.ts). The split is taken at `headerBytes` and CHECKED
- * against the first newline: the two agreeing is what proves the body arrived whole,
- * and a disagreement is a corrupted response, not something to paper over.
- *
- * The wire packs pose and done together at a 37-byte stride, which leaves every f32 at
- * an unaligned offset. They are de-interleaved here into an aligned `Float32Array` per
- * lane — the shape a renderer can hand straight to a buffer attribute — at the cost of
- * one pass over data that was already going to be walked once.
- */
 export async function fetchWall(
   id: string,
   envId: string,
@@ -301,8 +241,6 @@ export async function fetchWall(
         pose[s * WALL_POSE_LEN + j] = view.getFloat32(base + j * 4, true);
       }
       done[s] = flat[base + WALL_POSE_LEN * 4] ?? 0;
-      // The server samples `0, stride, 2·stride, …` and then appends the final row
-      // when the stride missed it — so only the LAST sample can be off-grid.
       const strided = s * stride;
       rows[s] = s === n - 1 && lane.steps > 0 ? lane.steps - 1 : strided;
     }
@@ -312,7 +250,6 @@ export async function fetchWall(
       steps: lane.steps,
       samples: n,
       firstNonFiniteRow: lane.firstNonFiniteRow,
-      // Both are absent on a fully decoded lane, so they stay absent here too.
       ...(lane.scannedRows !== undefined ? { scannedRows: lane.scannedRows } : {}),
       ...(lane.truncated === true ? { truncated: true as const } : {}),
       ...(lane.error !== undefined ? { error: lane.error } : {}),
@@ -325,24 +262,18 @@ export async function fetchWall(
   return { header, lanes };
 }
 
-// ---------- SSE: /api/runs/:id/live ----------
 
 export interface LiveHandlers {
   open?(): void;
-  /** initial replay of everything already on disk */
   hello?(payload: LiveHello): void;
-  /** one appended aggregate heartbeat */
   row?(row: AggregateRow): void;
   status?(status: LiveStatus): void;
-  /** stream ended cleanly (run reached its horizon) */
   done?(): void;
-  /** transport error; the browser retries on its own unless we close() */
   error?(error: Event): void;
 }
 
 export interface LiveConnection {
   readonly url: string;
-  /** true once close() ran or the stream ended */
   readonly closed: boolean;
   close(): void;
 }
@@ -365,11 +296,6 @@ export function liveUrl(id: string): string {
   return apiUrl(`/runs/${encodeURIComponent(id)}/live`);
 }
 
-/**
- * EventSource wrapper with typed handlers. Event names are not pinned by the
- * frozen contract, so every plausible name is bound and the default `message`
- * channel additionally accepts a `{type, data}` envelope.
- */
 export function openLive(id: string, handlers: LiveHandlers): LiveConnection {
   const url = liveUrl(id);
   let closed = false;

@@ -1,17 +1,3 @@
-// kit/grid — THE ACCURACY BACKBONE for all 10 grid environments.
-//
-// STYLE.md: "1 grid cell = 1 world unit, grid centered at origin, +x = grid-x (east),
-// +z = grid-y (south), y up", "Ground/floor at y = 0", "kit/grid (cellToWorld,
-// buildCellField) + the Wisp avatar for every grid env", "Path-plan between cells
-// (straight hop only)" is a MUST NOT — hence HopMotion's straight-line arc.
-//
-// Everything geometric in a grid scene resolves through THIS file. `cellToWorld` is the
-// single conversion; `buildCellField` places walls STRICTLY from `GridGeometry.walls`
-// (no inference, no border assumptions, no "obviously it's a ring" shortcuts) so a
-// procedurally regenerated maze is as correct as a hand-written one.
-//
-// Floor tiles sit with their TOP FACE at y = 0 (the style contract's ground plane) and
-// wall blocks sit with their BASE at y = 0.
 
 import * as THREE from 'three';
 import type { GridCell, GridGeometry } from '@sim/types';
@@ -21,14 +7,9 @@ import type { EmissiveMaterial, OakMaterial } from './materials';
 import { TOKENS } from './tokens';
 import type { QualityTier } from './types';
 
-// ---------------------------------------------------------------------------
-// coordinates — the one conversion
-// ---------------------------------------------------------------------------
 
-/** 1 cell = 1 world unit (tokens.cellSize). */
 export const CELL = TOKENS.cellSize;
 
-/** The only part of GridGeometry the conversion needs. */
 export interface GridSize {
   w: number;
   h: number;
@@ -36,12 +17,6 @@ export interface GridSize {
 
 export type Vec3Tuple = [number, number, number];
 
-/**
- * Cell (x, y) -> world [wx, 0, wz]. The grid is centered at the origin, so cell
- * ((w-1)/2, (h-1)/2) is exactly the origin. +x = grid x (east), +z = grid y (south).
- *
- * Pass `out` to stay allocation-free inside update().
- */
 export function cellToWorld(x: number, y: number, grid: GridSize, out?: Vec3Tuple): Vec3Tuple {
   const t: Vec3Tuple = out ?? [0, 0, 0];
   t[0] = (x - (grid.w - 1) / 2) * CELL;
@@ -50,12 +25,10 @@ export function cellToWorld(x: number, y: number, grid: GridSize, out?: Vec3Tupl
   return t;
 }
 
-/** `cellToWorld` straight into a Vector3 (allocation-free with a preallocated `out`). */
 export function cellToWorldVec(x: number, y: number, grid: GridSize, out: THREE.Vector3): THREE.Vector3 {
   return out.set((x - (grid.w - 1) / 2) * CELL, 0, (y - (grid.h - 1) / 2) * CELL);
 }
 
-/** Exact inverse of `cellToWorld` for cell centers; rounds elsewhere. Never clamps. */
 export function worldToCell(wx: number, wz: number, grid: GridSize, out?: GridCell): GridCell {
   const c: GridCell = out ?? { x: 0, y: 0 };
   c.x = Math.round(wx / CELL + (grid.w - 1) / 2);
@@ -63,7 +36,6 @@ export function worldToCell(wx: number, wz: number, grid: GridSize, out?: GridCe
   return c;
 }
 
-/** Clamp a cell into the grid (a separate, explicit step — worldToCell never hides drift). */
 export function clampCell(cell: GridCell, grid: GridSize): GridCell {
   cell.x = cell.x < 0 ? 0 : cell.x > grid.w - 1 ? grid.w - 1 : cell.x;
   cell.y = cell.y < 0 ? 0 : cell.y > grid.h - 1 ? grid.h - 1 : cell.y;
@@ -74,29 +46,24 @@ export function inBounds(x: number, y: number, grid: GridSize): boolean {
   return x >= 0 && y >= 0 && x < grid.w && y < grid.h;
 }
 
-/** Row-major index of a cell. Returns -1 out of bounds. */
 export function cellIndex(x: number, y: number, grid: GridSize): number {
   return inBounds(x, y, grid) ? y * grid.w + x : -1;
 }
 
-/** Wall occupancy read STRICTLY from the walls array. Out of bounds counts as wall. */
 export function isWall(grid: Pick<GridGeometry, 'w' | 'h' | 'walls'>, x: number, y: number): boolean {
   if (!inBounds(x, y, grid)) return true;
   return (grid.walls[y * grid.w + x] ?? 0) !== 0;
 }
 
-/** World-space extent of the playfield: [width(x), depth(z)]. */
 export function gridExtent(grid: GridSize): { width: number; depth: number } {
   return { width: grid.w * CELL, depth: grid.h * CELL };
 }
 
-/** Radius that covers the whole playfield (shadow focus, fog extent, camera framing). */
 export function gridRadius(grid: GridSize): number {
   const { width, depth } = gridExtent(grid);
   return 0.5 * Math.sqrt(width * width + depth * depth);
 }
 
-/** Number of 1s in the walls array — the count `buildCellField` must place. */
 export function wallCellCount(grid: Pick<GridGeometry, 'w' | 'h' | 'walls'>): number {
   let n = 0;
   const total = grid.w * grid.h;
@@ -104,7 +71,6 @@ export function wallCellCount(grid: Pick<GridGeometry, 'w' | 'h' | 'walls'>): nu
   return n;
 }
 
-/** Iterate every cell in row-major order with its wall flag. */
 export function forEachCell(
   grid: Pick<GridGeometry, 'w' | 'h' | 'walls'>,
   visit: (x: number, y: number, wall: boolean, index: number) => void,
@@ -117,9 +83,6 @@ export function forEachCell(
   }
 }
 
-// ---------------------------------------------------------------------------
-// cell field — floors + walls, one draw call each
-// ---------------------------------------------------------------------------
 
 export type CellTintFn = (x: number, y: number) => THREE.ColorRepresentation | null | undefined;
 export type CellFilterFn = (x: number, y: number) => boolean;
@@ -127,71 +90,41 @@ export type CellFilterFn = (x: number, y: number) => boolean;
 export type WallShape = 'block' | 'hedge' | 'pillar';
 
 export interface CellFieldStyle {
-  /** base floor color; per-cell variation comes from `floorTint` + instance jitter */
   floorColor: THREE.ColorRepresentation;
-  /** base wall color */
   wallColor: THREE.ColorRepresentation;
-  /**
-   * Per-cell floor tint (rooms, seasons, reef shelves). The returned color MULTIPLIES
-   * `floorColor` on the instance, so `0xffffff` means "leave it alone".
-   */
   floorTint?: CellTintFn;
-  /** per-cell wall tint, multiplied against `wallColor` the same way */
   wallTint?: CellTintFn;
-  /** skip floor tiles where this returns false (DeepSea's open blue water) */
   floorFilter?: CellFilterFn;
-  /** also place a floor tile under wall cells (default false) */
   floorUnderWalls?: boolean;
   wallShape?: WallShape;
-  /** world height of a wall block (default 0.9) */
   wallHeight?: number;
-  /** shrink of a wall block in x/z, world units per side (default 0.02) */
   wallInset?: number;
-  /** shrink of a floor tile in x/z, world units per side (default 0.03) */
   floorInset?: number;
-  /** floor slab thickness; the TOP face stays at y = 0 (default 0.12) */
   floorThickness?: number;
-  /** deterministic per-cell height/tone jitter in [0,1] (default 0.06) */
   jitter?: number;
-  /** vertex wind amplitude for hedge walls (default 0 for block/pillar) */
   wind?: number;
-  /** sky-tinted fresnel rim color */
   rimColor?: THREE.ColorRepresentation;
   rimStrength?: number;
-  /** lane seed — the only randomness source */
   seed?: number;
   name?: string;
 }
 
 export interface CellFieldHandle {
-  /** add this ONE object to the scene */
   group: THREE.Group;
-  /** one InstancedMesh per floor archetype (currently 1; array for future skins) */
   floorMeshes: THREE.InstancedMesh[];
-  /** one InstancedMesh per wall archetype (currently 1) */
   wallMeshes: THREE.InstancedMesh[];
   floorMaterial: OakMaterial;
   wallMaterial: OakMaterial;
-  /** instances actually placed */
   floorCount: number;
   wallCount: number;
-  /** instance id of the floor tile at a cell, or -1 */
   floorInstanceAt(x: number, y: number): number;
-  /** instance id of the wall block at a cell, or -1 */
   wallInstanceAt(x: number, y: number): number;
-  /**
-   * Per-instance tint for one floor tile (goal shrine glow, recently-passed stones).
-   * This is a MULTIPLIER over `floorMaterial.color`, not an absolute color — pass
-   * ~white to reset, a bright hue to push, a dark one to sink.
-   */
   setFloorColor(x: number, y: number, color: THREE.ColorRepresentation): void;
-  /** Per-instance tint MULTIPLIER for one wall block. */
   setWallColor(x: number, y: number, color: THREE.ColorRepresentation): void;
   setTime(t: number): void;
   dispose(): void;
 }
 
-/** hero 1.0 / medium 0.6 / thumb 0.3 — geometry detail, never cell coverage. */
 export function cellFieldDetail(tier: QualityTier | undefined): number {
   return tier === 'thumb' ? 0.3 : tier === 'medium' ? 0.6 : 1;
 }
@@ -206,7 +139,6 @@ function wallGeometryFor(shape: WallShape, tier: QualityTier | undefined, size: 
   }
   if (shape === 'hedge') {
     const seg = Math.max(1, Math.round(3 * detail));
-    // a slightly tapered box reads as a clipped hedge and gives wind something to bend
     const g = new THREE.BoxGeometry(size, height, size, seg, seg, seg);
     const pos = g.getAttribute('position');
     for (let i = 0; i < pos.count; i++) {
@@ -226,15 +158,6 @@ function wallGeometryFor(shape: WallShape, tier: QualityTier | undefined, size: 
   return g;
 }
 
-/**
- * Build the playfield: instanced floor tiles + wall blocks, placed strictly from
- * `grid.walls`.
- *
- * ```ts
- * const field = buildCellField(ctx.geometry.grid!, { floorColor: p.groundA, wallColor: p.groundB }, ctx.tier);
- * scene.add(field.group);
- * ```
- */
 export function buildCellField(
   grid: Pick<GridGeometry, 'w' | 'h' | 'walls'>,
   style: CellFieldStyle,
@@ -290,7 +213,7 @@ export function buildCellField(
   });
 
   const floorGeometry = new THREE.BoxGeometry(CELL - floorInset * 2, floorThickness, CELL - floorInset * 2);
-  floorGeometry.translate(0, -floorThickness / 2, 0); // top face exactly at y = 0
+  floorGeometry.translate(0, -floorThickness / 2, 0);
   const wallGeometry = wallGeometryFor(shape, tier, CELL - wallInset * 2, wallHeight);
 
   const floorMesh = new THREE.InstancedMesh(floorGeometry, floorMaterial, Math.max(1, floorCapacity));
@@ -421,9 +344,6 @@ export function buildCellField(
   };
 }
 
-// ---------------------------------------------------------------------------
-// cell-placed components
-// ---------------------------------------------------------------------------
 
 interface CellPlaced {
   readonly group: THREE.Group;
@@ -436,18 +356,12 @@ interface CellPlaced {
 export interface GoalBeaconOptions {
   color: THREE.ColorRepresentation;
   tier?: QualityTier;
-  /** column height in world units (default 1.6) */
   height?: number;
   radius?: number;
   intensity?: number;
   name?: string;
 }
 
-/**
- * The goal marker every grid scene reskins: a soft emissive column + a ground disc.
- * Position comes ONLY from `setCell`, so a respawning goal is exactly where sim-core
- * says it is.
- */
 export class GoalBeacon implements CellPlaced {
   readonly group = new THREE.Group();
   private readonly core: THREE.Mesh;
@@ -506,7 +420,6 @@ export class GoalBeacon implements CellPlaced {
     this.group.visible = v;
   }
 
-  /** Celebration hook: a bright flash that decays over ~0.6 s. */
   flare(strength = 1): void {
     this.flareAmount = Math.max(this.flareAmount, strength);
   }
@@ -536,21 +449,13 @@ export class GoalBeacon implements CellPlaced {
 export interface DoorGateOptions {
   color: THREE.ColorRepresentation;
   tier?: QualityTier;
-  /** door leaf height (default 0.95) */
   height?: number;
-  /** door thickness (default 0.18) */
   thickness?: number;
-  /** seconds for a full open/close (default 0.55) */
   duration?: number;
-  /** 'slide' sinks the leaf into the floor, 'swing' rotates it open */
   motion?: 'slide' | 'swing';
   name?: string;
 }
 
-/**
- * A door on an exact cell. `setOpen` starts an animation driven from the host clock via
- * `update(dt, ...)`; `setOpen(v, true)` snaps (scrub-safe).
- */
 export class DoorGate implements CellPlaced {
   readonly group = new THREE.Group();
   private readonly leaf: THREE.Mesh;
@@ -595,7 +500,6 @@ export class DoorGate implements CellPlaced {
     this.group.visible = v;
   }
 
-  /** `immediate` (scrub / teleport) snaps with no easing. */
   setOpen(open: boolean, immediate = false): void {
     this.targetOpenness = open ? 1 : 0;
     if (immediate) {
@@ -608,12 +512,10 @@ export class DoorGate implements CellPlaced {
     return this.targetOpenness >= 0.5;
   }
 
-  /** 0 = shut, 1 = fully open. */
   get progress(): number {
     return this.openness;
   }
 
-  /** Force the animation to its target (scene `snap()` / scrubbed frames). */
   snap(): void {
     this.openness = this.targetOpenness;
     this.apply();
@@ -651,18 +553,12 @@ export class DoorGate implements CellPlaced {
 export interface KeyTokenOptions {
   color: THREE.ColorRepresentation;
   tier?: QualityTier;
-  /** token radius (default 0.11) */
   radius?: number;
-  /** hover height above the floor (default 0.42) */
   hover?: number;
   intensity?: number;
   name?: string;
 }
 
-/**
- * The carryable token (seed / pearl / ember). It lives at a cell until the wisp picks it
- * up, at which point a scene reparents `group` under `Wisp.carry()`.
- */
 export class KeyToken implements CellPlaced {
   readonly group = new THREE.Group();
   private readonly mesh: THREE.Mesh;
@@ -728,29 +624,13 @@ export class KeyToken implements CellPlaced {
   }
 }
 
-// ---------------------------------------------------------------------------
-// HopMotion — the ONLY sanctioned cell-to-cell motion (STYLE.md: straight hop only)
-// ---------------------------------------------------------------------------
 
 export interface HopMotionOptions {
-  /** seconds per hop (default 0.16 — one 8 Hz grid step) */
   duration?: number;
-  /** arc apex height in world units (default 0.22) */
   height?: number;
 }
 
-/**
- * A straight-line cell-to-cell arc. NO path planning, NO extrapolation: the motion is a
- * lerp in xz plus a parabola in y between exactly two cells.
- *
- * ```ts
- * hop.hopTo(cell.x, cell.y, ctx.time());   // on a state change
- * hop.update(ctx.time());                  // every frame
- * hop.snap();                              // on `scrubbed` / `teleport`
- * ```
- */
 export class HopMotion {
-  /** current world position — read it, do not write it */
   readonly position = new THREE.Vector3();
   private grid: GridSize;
   private readonly duration: number;
@@ -766,21 +646,11 @@ export class HopMotion {
     this.grid = grid;
     this.duration = Math.max(1e-4, opts.duration ?? 0.16);
     this.height = opts.height ?? 0.22;
-    // start landed on cell (0, 0) so position and cell agree before the first hop
     cellToWorldVec(0, 0, grid, this.to);
     this.from.copy(this.to);
     this.position.copy(this.to);
   }
 
-  /**
-   * Rebind the grid (ProceduralMaze regenerates its layout mid-stream, so the
-   * playfield can change size under a hop that is still in the air).
-   *
-   * cellToWorld is a pure translation in w and h, so the in-flight arc is carried
-   * across by that same translation and the DESTINATION is re-derived from the
-   * cell — leaving `from`/`to` in the old grid's coordinates made the wisp land
-   * off-cell and stay there until the next hop.
-   */
   setGrid(grid: GridSize): void {
     if (grid.w === this.grid.w && grid.h === this.grid.h) {
       this.grid = grid;
@@ -797,22 +667,18 @@ export class HopMotion {
     if (this.t >= 1) this.position.copy(this.to);
   }
 
-  /** destination cell x (allocation-free — prefer this inside update()) */
   get cellX(): number {
     return this._cellX;
   }
 
-  /** destination cell y */
   get cellY(): number {
     return this._cellY;
   }
 
-  /** the DESTINATION cell as an object. ALLOCATES — never call it from update(). */
   get cell(): Readonly<GridCell> {
     return { x: this._cellX, y: this._cellY };
   }
 
-  /** 0 at hop start, 1 when landed */
   get progress(): number {
     return this.t;
   }
@@ -821,7 +687,6 @@ export class HopMotion {
     return this.t < 1;
   }
 
-  /** Start a straight hop to a cell. A hop already in flight is replaced (no queueing). */
   hopTo(x: number, y: number, now: number): void {
     if (x === this._cellX && y === this._cellY && this.t >= 1) return;
     this.from.copy(this.position);
@@ -833,10 +698,6 @@ export class HopMotion {
     this.update(now);
   }
 
-  /**
-   * `snap(x, y)` teleports to a cell; `snap()` finishes the current hop instantly.
-   * Both leave `airborne === false` and `progress === 1` — the scrub/teleport contract.
-   */
   snap(x?: number, y?: number): void {
     if (x !== undefined && y !== undefined) {
       this._cellX = x;

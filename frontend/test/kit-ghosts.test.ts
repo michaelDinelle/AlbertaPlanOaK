@@ -1,24 +1,4 @@
 /// <reference types="bun" />
-// Headless tests for kit/ghosts — THE POPULATION LAYER.
-//
-// There is no WebGL context under `bun test`, so nothing here renders. What IS tested is
-// everything the layer can get wrong without a GPU, and that turns out to be every claim
-// the module makes:
-//
-//   * SCALE     — the draw count is a function of the CATEGORY, never of the ghost count:
-//                 identical at 64 and at 512 instances, and inside the per-category cap.
-//                 The TRIANGLE count is the opposite — strictly linear in the ghost count
-//                 — so it is measured against the layer's own published per-ghost table
-//                 (`GHOST_TRIANGLES_PER_GHOST`), which is what a caller sizes `maxGhosts`
-//                 against. A flat draw count is not a free population.
-//   * ACCURACY  — cheetah ghost bones decompose back to `fk()` truth (position, heading
-//                 and length) for 3 poses x 8 ghosts, each ghost at its own TRUE rootx;
-//                 grid ghosts land inside their own cell for 64 co-located seeds; classic
-//                 markers sit exactly on the `@sim/envs` kinematics helpers.
-//   * COLOUR    — the rate ramp is monotone in luminance for all 16 accents, emphasis 0
-//                 and 1 stay under the bloom threshold, and a diverged seed freezes.
-//   * LIFECYCLE — build -> dispose round-trips clean three times, and `update()` allocates
-//                 no THREE objects and never reallocates an instance buffer.
 
 import { describe, expect, test } from 'bun:test';
 import * as THREE from 'three';
@@ -47,9 +27,6 @@ import { cartPoleTip } from '@sim/envs/cartpole';
 import { mountainCarHeight } from '@sim/envs/mountaincar';
 import { pendulumTip } from '@sim/envs/pendulum';
 
-// ---------------------------------------------------------------------------
-// fixtures
-// ---------------------------------------------------------------------------
 
 const CHEETAH_GEOMETRY: EnvGeometry = { kind: 'cheetah', cheetah: cheetahGeometry };
 
@@ -57,7 +34,6 @@ function gridGeometry(w = 11, h = 11): EnvGeometry {
   return { kind: 'grid', grid: { w, h, walls: new Uint8Array(w * h) } };
 }
 
-/** The classic geometries, taken from the decoders so the anchors are the real ones. */
 const CLASSIC_GEOMETRY: EnvGeometry = {
   kind: 'classic',
   classic: {
@@ -95,7 +71,6 @@ const CHEETAH_POSES: readonly Float32Array[] = [
   pose9([-17.25, -0.06, 0.63, -0.9, 0.72, -0.4, 0.85, -0.66, 0.31]),
 ];
 
-/** Decompose instance `i` of `bank` into position / quaternion / scale. */
 function readInstance(
   layer: GhostLayer,
   bankName: string,
@@ -112,11 +87,6 @@ function readInstance(
   return { pos, quat, scale };
 }
 
-/**
- * The RAW instance matrix. `Matrix4.decompose` reports a degenerate (zero-scale)
- * transform as scale (1,1,1) — it bails on `det === 0` — so "this ghost is hidden" has to
- * be read off the elements, not off the decomposition.
- */
 function readMatrix(layer: GhostLayer, bankName: string, i: number): THREE.Matrix4 {
   const bank = layer.banks.find((b) => b.name === bankName);
   if (!bank) throw new Error(`no bank named ${bankName}`);
@@ -125,7 +95,6 @@ function readMatrix(layer: GhostLayer, bankName: string, i: number): THREE.Matri
   return m;
 }
 
-/** Largest absolute entry of the 3x3 linear block — 0 means "draws nothing". */
 function linearMagnitude(m: THREE.Matrix4): number {
   const e = m.elements;
   let max = 0;
@@ -141,14 +110,10 @@ function readColor(layer: GhostLayer, bankName: string, i: number): THREE.Color 
   return c;
 }
 
-/** Rec.709 luminance of whatever space three keeps the channels in. */
 function luminance(c: THREE.Color): number {
   return 0.2126 * c.r + 0.7152 * c.g + 0.0722 * c.b;
 }
 
-// ---------------------------------------------------------------------------
-// scale: the draw budget
-// ---------------------------------------------------------------------------
 
 describe('kit/ghosts — draw budget', () => {
   const CAPS: Record<GhostCategory, number> = { cheetah: 8, grid: 3, classic: 3 };
@@ -160,7 +125,6 @@ describe('kit/ghosts — draw budget', () => {
       expect(small.draws()).toBe(large.draws());
       expect(large.draws()).toBeLessThanOrEqual(CAPS[category]);
       expect(large.draws()).toBeGreaterThan(0);
-      // every bank really does carry every ghost — the cap is instancing, not truncation
       for (const bank of large.banks) expect(bank.mesh.count).toBe(512);
       for (const bank of small.banks) expect(bank.mesh.count).toBe(64);
       small.dispose();
@@ -179,7 +143,7 @@ describe('kit/ghosts — draw budget', () => {
       expect(bank.mesh.frustumCulled).toBe(false);
       expect(bank.mesh.castShadow).toBe(false);
       expect((bank.mesh.material as THREE.Material).depthWrite).toBe(false);
-      expect(bank.mesh.renderOrder).toBeLessThan(0); // behind the hero
+      expect(bank.mesh.renderOrder).toBeLessThan(0);
     }
     expect(layer.draws()).toBe(8);
     layer.dispose();
@@ -253,12 +217,8 @@ describe('kit/ghosts — draw budget', () => {
   });
 });
 
-// ---------------------------------------------------------------------------
-// scale: the TRIANGLE budget — the half the draw count cannot express
-// ---------------------------------------------------------------------------
 
 describe('kit/ghosts — triangle budget', () => {
-  /** three's own rule: indexed geometry counts index/3, otherwise position/3 */
   function trianglesOf(layer: GhostLayer): number {
     let n = 0;
     for (const bank of layer.banks) {
@@ -275,11 +235,9 @@ describe('kit/ghosts — triangle budget', () => {
       const layers = counts.map((maxGhosts) => makeLayer({ category, maxGhosts }));
       const [a, b, c] = layers;
       if (!a || !b || !c) throw new Error('layer build failed');
-      // the claim the commit made and the one it did not
       expect(a.draws()).toBe(c.draws());
       expect(c.triangles()).toBe(a.triangles() * 16);
       expect(b.triangles()).toBe(a.triangles() * 2);
-      // and each agrees with an independent count off the raw buffers
       for (const layer of layers) expect(layer.triangles()).toBe(trianglesOf(layer));
       for (const layer of layers) layer.dispose();
     }
@@ -291,15 +249,12 @@ describe('kit/ghosts — triangle budget', () => {
         const layer = makeLayer({ category, maxGhosts: 1024, tier });
         const per = layer.trianglesPerGhost();
         const quoted = GHOST_TRIANGLES_PER_GHOST[category][tier];
-        // the table is a per-category upper bound (classic plans differ by env)
         expect(`${category}/${tier}: ${per} <= ${quoted}`).toBe(`${category}/${tier}: ${per} <= ${quoted}`);
         expect(per).toBeLessThanOrEqual(quoted);
         expect(layer.triangles()).toBe(per * 1024);
         layer.dispose();
       }
     }
-    // the two plans that do not vary by env are quoted EXACTLY, so the table is not
-    // silently generous: this is the number a caller sizes a population against.
     for (const [category, tier, want] of [
       ['cheetah', 'hero', 1188],
       ['cheetah', 'medium', 668],
@@ -350,7 +305,7 @@ describe('kit/ghosts — triangle budget', () => {
   test('a hidden group, an empty layer and a disposed layer all cost zero triangles', () => {
     const empty = makeLayer({ category: 'grid', maxGhosts: 0 });
     expect(empty.triangles()).toBe(0);
-    expect(empty.trianglesPerGhost()).toBeGreaterThan(0); // the plan exists; nobody is in it
+    expect(empty.trianglesPerGhost()).toBeGreaterThan(0);
     empty.dispose();
 
     const live = makeLayer({ category: 'cheetah', maxGhosts: 32 });
@@ -365,9 +320,6 @@ describe('kit/ghosts — triangle budget', () => {
   });
 });
 
-// ---------------------------------------------------------------------------
-// accuracy: cheetah
-// ---------------------------------------------------------------------------
 
 describe('kit/ghosts — cheetah accuracy', () => {
   test('every bone decomposes back to fk() truth for 3 poses x 8 ghosts', () => {
@@ -376,7 +328,6 @@ describe('kit/ghosts — cheetah accuracy', () => {
     let worst = 0;
 
     for (const base of CHEETAH_POSES) {
-      // each ghost races at its OWN rootx — the population spreads along the real track
       const poses: Float32Array[] = [];
       for (let g = 0; g < 8; g++) {
         const p = pose9(Array.from(base));
@@ -395,13 +346,11 @@ describe('kit/ghosts — cheetah accuracy', () => {
           const by = truth[bone[1] * 2 + 1] ?? 0;
           const { pos, quat, scale } = readInstance(layer, `bone${b}`, g);
 
-          // FK x -> world x, FK z -> world y, z = 0 (the hero's own planar mapping)
           const posErr = pos.distanceTo(
             new THREE.Vector3((ax + bx) / 2, (ay + by) / 2, 0),
           );
           const len = Math.hypot(bx - ax, by - ay);
           const lenErr = Math.abs(scale.y - len);
-          // the unit geometry runs along +y; the rotation must map it onto the bone
           const axis = new THREE.Vector3(0, 1, 0).applyQuaternion(quat);
           const dirErr = axis.distanceTo(new THREE.Vector3((bx - ax) / len, (by - ay) / len, 0));
 
@@ -409,7 +358,6 @@ describe('kit/ghosts — cheetah accuracy', () => {
           expect(posErr).toBeLessThan(1e-3);
           expect(lenErr).toBeLessThan(1e-3);
           expect(dirErr).toBeLessThan(1e-3);
-          // the radial scale is the SIM's own capsule radius (instanceMatrix is f32)
           expect(scale.x).toBeCloseTo(radius, 6);
           expect(scale.z).toBeCloseTo(radius, 6);
         }
@@ -456,11 +404,10 @@ describe('kit/ghosts — cheetah accuracy', () => {
     const colorDuring = readColor(layer, 'bone0', 0);
 
     expect(during.pos.distanceTo(before.pos)).toBeLessThan(1e-9);
-    expect(Math.abs(during.scale.y - before.scale.y)).toBeLessThan(1e-9); // length exact
-    expect(during.scale.x).toBeGreaterThan(before.scale.x); // thickness puffs
+    expect(Math.abs(during.scale.y - before.scale.y)).toBeLessThan(1e-9);
+    expect(during.scale.x).toBeGreaterThan(before.scale.x);
     expect(luminance(colorDuring)).toBeGreaterThan(luminance(colorBefore));
 
-    // ...and it retires cleanly at the end of its 300 ms span (canon lesson 6)
     layer.update(1 / 60, 10 + GHOST_GLINT_SECONDS + 0.01);
     const after = readInstance(layer, 'bone0', 0);
     expect(after.scale.x).toBeCloseTo(before.scale.x, 9);
@@ -469,9 +416,6 @@ describe('kit/ghosts — cheetah accuracy', () => {
   });
 });
 
-// ---------------------------------------------------------------------------
-// accuracy: grid
-// ---------------------------------------------------------------------------
 
 describe('kit/ghosts — grid accuracy', () => {
   test('64 co-located ghosts all render INSIDE their true cell', () => {
@@ -488,11 +432,9 @@ describe('kit/ghosts — grid accuracy', () => {
       const { pos } = readInstance(layer, 'core', g);
       const d = Math.hypot(pos.x - tx, pos.z - tz);
       maxOffset = Math.max(maxOffset, d);
-      // the strongest statement: it decodes back to the cell the agent is actually in
       expect(worldToCell(pos.x, pos.z, grid)).toEqual(cell);
       seen.add(`${pos.x.toFixed(6)},${pos.z.toFixed(6)}`);
     }
-    // bounded by construction, and every seed is separable
     expect(maxOffset).toBeLessThanOrEqual(GHOST_CELL_OFFSET_MAX * CELL + 1e-6);
     expect(maxOffset).toBeLessThan(0.5 * CELL);
     expect(seen.size).toBe(64);
@@ -519,9 +461,9 @@ describe('kit/ghosts — grid accuracy', () => {
     expect(core.pos.y).toBeGreaterThan(0);
     expect(core.pos.y).toBeLessThan(TOKENS.wispHeight);
     expect(shell.pos.y).toBeCloseTo(core.pos.y, 6);
-    expect(shell.scale.x).toBeGreaterThan(core.scale.x); // a shell, not a billboard
+    expect(shell.scale.x).toBeGreaterThan(core.scale.x);
     expect(shade.pos.y).toBeGreaterThan(0);
-    expect(shade.pos.y).toBeLessThan(0.05); // just off the floor plane, never z-fighting
+    expect(shade.pos.y).toBeLessThan(0.05);
     expect(shade.pos.x).toBeCloseTo(core.pos.x, 6);
     expect(shade.pos.z).toBeCloseTo(core.pos.z, 6);
     layer.dispose();
@@ -549,9 +491,6 @@ describe('kit/ghosts — grid accuracy', () => {
   });
 });
 
-// ---------------------------------------------------------------------------
-// accuracy: classic
-// ---------------------------------------------------------------------------
 
 describe('kit/ghosts — classic accuracy', () => {
   test('MountainCar ghosts sit on the terrain curve at their own position', () => {
@@ -632,9 +571,6 @@ describe('kit/ghosts — classic accuracy', () => {
   });
 });
 
-// ---------------------------------------------------------------------------
-// colour
-// ---------------------------------------------------------------------------
 
 describe('kit/ghosts — the rate ramp', () => {
   test('is monotone in luminance for every one of the 16 accents', () => {
@@ -663,15 +599,12 @@ describe('kit/ghosts — the rate ramp', () => {
     const night = new THREE.Color(TOKENS.palettes.night.skyTop);
     const gold = new THREE.Color(TOKENS.celebrationGold);
 
-    // the bottom of the ramp is night, dimmed by the value floor
     expect(low.getHex()).not.toBe(gold.getHex());
     expect(luminance(low)).toBeLessThan(luminance(night) + 1e-6);
-    // the knee is the env's own accent at full value
     expect(mid.r / Math.max(mid.g, 1e-9)).toBeCloseTo(
       new THREE.Color(accent).r / Math.max(new THREE.Color(accent).g, 1e-9),
       3,
     );
-    // and only the very top is gold
     expect(top.getHexString()).toBe(gold.getHexString());
     layer.dispose();
   });
@@ -685,7 +618,7 @@ describe('kit/ghosts — the rate ramp', () => {
       layer.setRate(0, k / 64);
       const head = luminance(readColor(layer, 'head', 0));
       const bone = luminance(readColor(layer, 'bone3', 0));
-      expect(head).toBeCloseTo(bone, 12); // one ghost, one colour, every bank
+      expect(head).toBeCloseTo(bone, 12);
       expect(head).toBeGreaterThanOrEqual(previous - 1e-9);
       previous = head;
     }
@@ -734,9 +667,6 @@ describe('kit/ghosts — the rate ramp', () => {
   });
 });
 
-// ---------------------------------------------------------------------------
-// divergence + glint semantics
-// ---------------------------------------------------------------------------
 
 describe('kit/ghosts — divergence and the glint', () => {
   test('a numerically diverged seed freezes at its last finite pose and turns dark red', () => {
@@ -752,11 +682,10 @@ describe('kit/ghosts — divergence and the glint', () => {
     const frozen = readInstance(layer, 'head', 0);
     const deadColor = readColor(layer, 'head', 0);
 
-    expect(frozen.pos.distanceTo(alive.pos)).toBeLessThan(1e-9); // frozen, not teleported
+    expect(frozen.pos.distanceTo(alive.pos)).toBeLessThan(1e-9);
     expect(deadColor.getHexString()).not.toBe(aliveColor.getHexString());
     expect(deadColor.r).toBeGreaterThan(deadColor.g);
     expect(deadColor.r).toBeGreaterThan(deadColor.b);
-    // and it is dark: a death certificate, not a celebration
     expect(luminance(deadColor)).toBeLessThan(luminance(aliveColor));
     layer.dispose();
   });
@@ -808,19 +737,16 @@ describe('kit/ghosts — divergence and the glint', () => {
     const first = luminance(readColor(layer, 'core', 0));
     expect(first).toBeGreaterThan(rest);
 
-    // a second glint mid-flight does NOT restart the envelope (no strobing)
     layer.glint(0);
     layer.update(1 / 60, 5.04);
     const second = luminance(readColor(layer, 'core', 0));
     expect(second).toBeLessThan(first);
 
-    // ...but once the span is over, the ghost can glint again
     layer.update(1 / 60, 5 + GHOST_GLINT_SECONDS + 0.01);
     layer.glint(0);
     layer.update(1 / 60, 5 + GHOST_GLINT_SECONDS + 0.02);
     expect(luminance(readColor(layer, 'core', 0))).toBeGreaterThan(rest);
 
-    // a numerically diverged seed is inert
     layer.setGhostFrame(1, pose9([3, 3]), false);
     const deadRest = luminance(readColor(layer, 'core', 1));
     layer.glint(1);
@@ -838,7 +764,7 @@ describe('kit/ghosts — divergence and the glint', () => {
     layer.glint(0);
     layer.update(1 / 60, 20.01);
     expect(luminance(readColor(layer, 'core', 0))).toBeGreaterThan(rest);
-    layer.update(1 / 60, 3); // scrubbed backwards
+    layer.update(1 / 60, 3);
     expect(luminance(readColor(layer, 'core', 0))).toBeCloseTo(rest, 9);
     layer.dispose();
   });
@@ -858,9 +784,6 @@ describe('kit/ghosts — divergence and the glint', () => {
   });
 });
 
-// ---------------------------------------------------------------------------
-// lifecycle
-// ---------------------------------------------------------------------------
 
 interface Resources {
   geometries: Set<THREE.BufferGeometry>;
@@ -886,12 +809,6 @@ function collectResources(root: THREE.Object3D): Resources {
   return { geometries, materials, textures };
 }
 
-/**
- * three stamps a monotonically increasing id on every Object3D, BufferGeometry and
- * Material it constructs, so one probe of each before and after a workload MEASURES how
- * many were built in between. (`Material.id` is real at runtime but missing from
- * @types/three, hence the cast.)
- */
 function probeIds(): { object: number; geometry: number; material: number } {
   return {
     object: new THREE.Object3D().id,
@@ -931,7 +848,6 @@ describe('kit/ghosts — lifecycle', () => {
         }
         expect(layer.group.children.length).toBe(0);
         expect(layer.draws()).toBe(0);
-        // dispose is idempotent — a double teardown must not double-free
         expect(() => layer.dispose()).not.toThrow();
       }
     }
@@ -968,8 +884,6 @@ describe('kit/ghosts — lifecycle', () => {
         });
       }
 
-      // A stray `new THREE.Vector3` would not show up in this probe, but a stray mesh,
-      // geometry or material — the allocations that actually cost — would.
       const before = probeIds();
       for (let frame = 0; frame < 240; frame++) {
         const t = frame / 60;
@@ -1022,9 +936,6 @@ describe('kit/ghosts — lifecycle', () => {
   });
 });
 
-// ---------------------------------------------------------------------------
-// density normalization (the co-located-blowout guard)
-// ---------------------------------------------------------------------------
 
 describe('GhostLayer density normalization', () => {
   const grid = (): EnvGeometry => ({
@@ -1062,9 +973,8 @@ describe('GhostLayer density normalization', () => {
     pack.update(0.016, 0);
     const packLum = lum(pack.emitterColor(7, new THREE.Color()));
     expect(packLum).toBeGreaterThan(0);
-    expect(packLum).toBeCloseTo(loneLum / 8, 3); // 1/sqrt(64)
+    expect(packLum).toBeCloseTo(loneLum / 8, 3);
 
-    // total summed brightness stays bounded: 64 * (1/8) = 8x one ghost, not 64x
     expect(64 * packLum).toBeLessThan(9 * loneLum);
     pack.dispose();
   });
@@ -1081,7 +991,6 @@ describe('GhostLayer density normalization', () => {
     layer.update(0.016, 0);
     const spreadLum = lum(layer.emitterColor(3, new THREE.Color()));
 
-    // now co-locate everyone; the emphasized one keeps full (higher) gain
     pose[0] = 2; pose[1] = 2;
     for (let i = 0; i < 64; i++) layer.setGhostFrame(i, pose, true);
     layer.setEmphasis(5, 1);
@@ -1089,7 +998,7 @@ describe('GhostLayer density normalization', () => {
     const dimmed = lum(layer.emitterColor(3, new THREE.Color()));
     const emphasized = lum(layer.emitterColor(5, new THREE.Color()));
     expect(dimmed).toBeLessThan(spreadLum * 0.2);
-    expect(emphasized).toBeGreaterThan(spreadLum); // emphasis-1 gain > emphasis-0, undimmed
+    expect(emphasized).toBeGreaterThan(spreadLum);
     layer.dispose();
   });
 });

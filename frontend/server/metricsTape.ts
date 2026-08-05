@@ -1,28 +1,15 @@
-// OAKT v1 — the continuous metrics tape (METRICS LAW 2026-08-05).
-//
-// Written by Sources/Main.swift `MetricsTapeWriter`: one row per lane per
-// command-buffer window (~1024 steps), raw-DEFLATE segments flushed at
-// heartbeat cadence. Mirrors tools/metrics_tape.py — both implement the
-// layout documented on the Swift writer. Torn tails drop segment-by-segment
-// via crc, like record v4 chunks.
-//
-// Tape-era roots write only `final` rows to fleet.jsonl; `fleetDerive`
-// injects tape windows into the same columnar reduction, so every dashboard
-// series gains ~CB-cadence resolution with zero client changes.
 
 import { readFileSync } from 'node:fs';
 import { crc32, inflateRawSync } from 'node:zlib';
 
-const FILE_MAGIC = 0x544b414f; // "OAKT"
-const SEG_MAGIC = 0x54474553; // "SEGT"
+const FILE_MAGIC = 0x544b414f;
+const SEG_MAGIC = 0x54474553;
 
 export interface MetricsTape {
   fields: string[];
   laneCount: number;
-  /** per window */
   stepStart: number[];
   stepCount: number[];
-  /** data[window] = Float32Array(fields.length * laneCount), field-major */
   data: Float32Array[];
 }
 
@@ -56,7 +43,7 @@ export function readTape(path: string): MetricsTape | null {
     const rawBytes = buf.readUInt32LE(off + 8);
     const compBytes = buf.readUInt32LE(off + 12);
     const crc = buf.readUInt32LE(off + 16);
-    if (off + 20 + compBytes > buf.length) break; // torn tail
+    if (off + 20 + compBytes > buf.length) break;
     const comp = buf.subarray(off + 20, off + 20 + compBytes);
     if ((crc32(comp) >>> 0) !== crc) break;
     let payload: Buffer;
@@ -70,7 +57,6 @@ export function readTape(path: string): MetricsTape | null {
       const p = w * rowBytes;
       stepStart.push(payload.readUInt32LE(p));
       stepCount.push(payload.readUInt32LE(p + 4));
-      // copy: subarray alignment is not guaranteed float-aligned
       const vals = new Float32Array(fields.length * laneCount);
       for (let i = 0; i < vals.length; i++) vals[i] = payload.readFloatLE(p + 8 + i * 4);
       data.push(vals);
@@ -81,11 +67,6 @@ export function readTape(path: string): MetricsTape | null {
   return { fields, laneCount, stepStart, stepCount, data };
 }
 
-/**
- * fleet.jsonl field path -> tape field, for the columnar injection. Two
- * specials handled in fleetDerive: `health.actionDeltaL2Mean` (= deltaSum /
- * stepEnd) and `paramAbsMax` (negative sentinel = "not scanned" -> null).
- */
 export const TAPE_FIELD_MAP: Readonly<Record<string, string>> = {
   rewardSum: 'rewardSum',
   doneCount: 'doneCount',
@@ -114,7 +95,6 @@ export const TAPE_FIELD_MAP: Readonly<Record<string, string>> = {
   'health.nonFiniteByPhase.tdPsi': 'nfTdPsi',
 };
 
-/** Value of one fleet-row field path at (window, lane); null when unmapped or sentinel. */
 export function tapeValue(
   tape: MetricsTape,
   fieldPath: string,
@@ -142,10 +122,6 @@ export function tapeValue(
   return mapped === undefined ? null : get(mapped);
 }
 
-/**
- * Evenly-spaced window subset (always keeping the last window) so a full-run
- * tape (~1000 windows x 1024 lanes) reduces to a wire-safe grid.
- */
 export function sampleWindows(total: number, cap: number): number[] {
   if (total <= cap) return Array.from({ length: total }, (_, i) => i);
   const out: number[] = [];

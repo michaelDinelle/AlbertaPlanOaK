@@ -1,21 +1,3 @@
-// kit/water — ONE parameterized water material for every wet surface in the preserve:
-// the Acrobot mirror pond, the CartPole lake, the Pendulum koi pond, the Chain creek,
-// and the DeepSea / LargeDeepSea column surface.
-//
-// STYLE.md allows at most one bespoke ShaderMaterial PER SCENE; this is a kit material,
-// so a scene spends nothing from that budget by using it. Everything is token-driven:
-// the shallow/deep colors, the sky tint of the fresnel rim and the caustic color all
-// come from a `Palette`, so the water in five different scenes reads as the same water
-// under five different skies.
-//
-// One material does all of it:
-//   * vertex: sum of four sines (two cross-swell, two ripple) with the analytic normal
-//     derived from the same sum — the lighting can never disagree with the silhouette
-//   * fragment: depth gradient (shallow -> deep by view-space depth AND by wave height),
-//     a fresnel rim in the sky color, and a procedural caustic shimmer built from two
-//     counter-scrolling triangle-wave lattices (no texture, no dependent reads)
-//
-// All animation comes from `uTime` = ctx.time().
 
 import * as THREE from 'three';
 import type { Palette } from './tokens';
@@ -39,36 +21,22 @@ export interface WaterUniforms {
 }
 
 export interface WaterOptions {
-  /** world extent: a number is square, or [x, z] */
   size: number | readonly [number, number];
   palette: Palette;
   tier?: QualityTier;
-  /** mesh segments at hero tier (default 96); tier-scaled */
   segments?: number;
-  /** override the palette-derived shallow color */
   shallow?: THREE.ColorRepresentation;
-  /** override the palette-derived deep color */
   deep?: THREE.ColorRepresentation;
-  /** sky tint for the fresnel rim (default palette.skyHorizon) */
   sky?: THREE.ColorRepresentation;
-  /** caustic shimmer color (default palette.sun) */
   caustic?: THREE.ColorRepresentation;
-  /** wave height in world units (default 0.035) */
   amplitude?: number;
-  /** spatial frequency multiplier (default 1) */
   waveScale?: number;
-  /** temporal speed multiplier (default 1) */
   speed?: number;
-  /** 0..1 rim strength (default 0.55) */
   fresnel?: number;
-  /** 0..1 caustic strength (default 0.35) */
   caustics?: number;
-  /** how fast the color reaches `deep` with view depth, world units (default 9) */
   depthFalloff?: number;
   opacity?: number;
-  /** unit vector toward the sun (sky.sunDirection) — drives the specular glint */
   sunDir?: THREE.Vector3 | readonly [number, number, number];
-  /** surface height (default 0) */
   level?: number;
   name?: string;
 }
@@ -77,25 +45,19 @@ export interface WaterHandle {
   mesh: THREE.Mesh;
   material: THREE.ShaderMaterial;
   uniforms: WaterUniforms;
-  /** ctx.time() — the ONLY clock */
   setTime(t: number): void;
   setLevel(y: number): void;
   setColors(shallow: THREE.ColorRepresentation, deep: THREE.ColorRepresentation): void;
   setSunDirection(x: number, y: number, z: number): void;
-  /** the rendered surface height at a world point — keep floaters ON the water */
   sampleHeight(x: number, z: number, time: number): number;
   dispose(): void;
 }
 
-/** hero 1 / medium 0.55 / thumb 0.22 — vertex density only, never the look. */
 export function waterSegmentScale(tier: QualityTier | undefined): number {
   return tier === 'thumb' ? 0.22 : tier === 'medium' ? 0.55 : 1;
 }
 
-// The four waves, shared by the GPU and the CPU sampler so a lantern floating on the
-// pond sits exactly on the rendered surface (the kit/terrain sampleHeight contract).
 const WAVES: readonly (readonly [number, number, number, number])[] = [
-  // [dirX, dirZ, frequency, speed]
   [1.0, 0.15, 0.9, 0.55],
   [-0.35, 1.0, 1.35, 0.42],
   [0.7, -0.7, 2.6, 0.95],
@@ -103,7 +65,6 @@ const WAVES: readonly (readonly [number, number, number, number])[] = [
 ];
 const WAVE_AMPS: readonly number[] = [0.55, 0.3, 0.11, 0.06];
 
-/** CPU twin of the vertex displacement — same constants, same result. */
 export function waterHeightAt(x: number, z: number, time: number, amplitude: number, waveScale: number, speed: number): number {
   let h = 0;
   for (let i = 0; i < WAVES.length; i++) {
@@ -114,7 +75,7 @@ export function waterHeightAt(x: number, z: number, time: number, amplitude: num
   return h * amplitude;
 }
 
-const WAVE_GLSL = /* glsl */ `
+const WAVE_GLSL =  `
 const int OAK_WAVES = 4;
 const vec4 OAK_WAVE[ OAK_WAVES ] = vec4[ OAK_WAVES ](
 	vec4( 1.0, 0.15, 0.9, 0.55 ),
@@ -145,7 +106,7 @@ vec2 oakWaveSlope( vec2 p, float t, float scale, float speed ) {
 }
 `;
 
-const WATER_VERT = /* glsl */ `
+const WATER_VERT =  `
 #include <common>
 #include <fog_pars_vertex>
 uniform float uTime;
@@ -176,7 +137,7 @@ void main() {
 }
 `;
 
-const WATER_FRAG = /* glsl */ `
+const WATER_FRAG =  `
 #include <common>
 #include <fog_pars_fragment>
 uniform vec3 uShallow;
@@ -237,16 +198,6 @@ void main() {
 }
 `;
 
-/**
- * Build a water surface.
- *
- * ```ts
- * const pond = makeWater({ size: 14, palette: tokens.palettes.dawn, tier, sunDir: sky.sunDirection });
- * scene.add(pond.mesh);
- * // update(): pond.setTime(ctx.time());
- * lantern.position.y = pond.sampleHeight(lx, lz, ctx.time());   // floats exactly
- * ```
- */
 export function makeWater(opts: WaterOptions): WaterHandle {
   const sizeX = typeof opts.size === 'number' ? opts.size : opts.size[0];
   const sizeZ = typeof opts.size === 'number' ? opts.size : opts.size[1];
@@ -301,7 +252,6 @@ export function makeWater(opts: WaterOptions): WaterHandle {
     fog: true,
   });
   material.name = opts.name ?? 'oakWater';
-  // UniformsUtils.merge CLONES every uniform, so re-point the handle at the live objects
   const live = material.uniforms as unknown as WaterUniforms;
   live.uTime.value = 0;
   live.uShallow.value.copy(uniforms.uShallow.value);

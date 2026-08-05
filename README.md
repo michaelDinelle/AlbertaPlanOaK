@@ -92,12 +92,6 @@ does to the cheetah*.
 > table come from the live envpool run, not the replay, so they *do*
 > reflect what the agent actually experienced.
 
-<!--
-  GitHub renders an inline player when the .mp4 URL points at
-  user-attachments/assets/... To get a URL, drag the file into any GitHub
-  issue/PR comment box, copy the resulting URL, and replace the matching
-  `src` below. Repo-relative links act as download fallbacks.
--->
 
 ### OaK — seed-3 @ 500k "Its Alive!"
 

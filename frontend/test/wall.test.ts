@@ -1,11 +1,4 @@
 /// <reference types="bun" />
-// The Wall's pure logic: which run it opens on, the URL round-trip, the sort as
-// an index permutation, the timelapse arithmetic, the promote/Esc state machine,
-// the degraded predicate, the rail's per-seed derivation and the population line.
-//
-// No DOM here (happy-dom is not installed) — `views/wall.ts`'s mount half is the
-// DOM/WebGL part and is verified against the running dev server plus headless
-// screenshots. Everything it DECIDES is exported and pinned down here.
 
 import { describe, expect, test } from 'bun:test';
 
@@ -61,9 +54,6 @@ import {
   type WallSort,
 } from '../src/views/wall';
 
-// ---------------------------------------------------------------------------
-// fixtures
-// ---------------------------------------------------------------------------
 
 function entry(id: string, overrides: Partial<RunIndexEntry> = {}): RunIndexEntry {
   return {
@@ -94,7 +84,6 @@ function row(seed: number, overrides: Partial<SeedRow> = {}): SeedRow {
   return { seed, rate: 0, retention: null, divergedAt: null, spark: [], sparkXs: [], recorded: true, ...overrides };
 }
 
-// ---------------------------------------------------------------------------
 
 describe('featured-run resolution', () => {
   const entries = [
@@ -192,8 +181,6 @@ describe('URL round-trip', () => {
 });
 
 describe('?at= survives its own write', () => {
-  // The three measured defects, driven through the REAL clock and step helpers with
-  // no frame in between — which is exactly the window every one of them lived in.
   const FRAMES = 100_000;
   const CONTROL_HZ = 20;
   const STRIDE = wallStride(FRAMES);
@@ -208,7 +195,6 @@ describe('?at= survives its own write', () => {
     });
 
   test('a deep-linked at is written back before any host exists, not erased', () => {
-    // page load: parse ?at=1234, no scene host yet — the first syncUrl runs here
     const pending = parseWallParams('#/?run=r&env=DeepSea-cont-v0&seed=19&at=1234&sort=retention').at ?? 0;
     expect(pending).toBe(1234);
     expect(urlPosition(null, pending)).toBe(1234);
@@ -218,14 +204,11 @@ describe('?at= survives its own write', () => {
   test('an arrow key writes where the player IS, not where it was', () => {
     const clock = makePlaybackClock(FRAMES, CONTROL_HZ);
     let pending = 0;
-    // one ArrowRight: 20 frames × stride, seeked and serialized in the same turn
     clock.seek(stepPosition(clock.position(), 20 * STRIDE, FRAMES));
     expect(Math.round(clock.position())).toBe(20 * STRIDE);
     expect(urlPosition(clock.position(), pending)).toBe(20 * STRIDE);
-    // three more, still with no frame between the seek and the URL write
     for (let i = 0; i < 3; i++) clock.seek(stepPosition(clock.position(), 20 * STRIDE, FRAMES));
     expect(urlPosition(clock.position(), pending)).toBe(80 * STRIDE);
-    // and the stale cached fraction can no longer win: pending is ignored outright
     pending = 50;
     expect(urlPosition(clock.position(), pending)).toBe(80 * STRIDE);
   });
@@ -243,19 +226,14 @@ describe('?at= survives its own write', () => {
     const clock = makePlaybackClock(FRAMES, CONTROL_HZ);
     expect(urlPosition(clock.position(), 0)).toBe(null);
     clock.seek(-40);
-    expect(urlPosition(clock.position(), 1234)).toBe(null); // a mounted clock wins, even at 0
+    expect(urlPosition(clock.position(), 1234)).toBe(null);
     expect(urlPosition(Number.NaN, 900)).toBe(900);
     expect(urlPosition(null, 0)).toBe(null);
   });
 });
 
 describe('the sampling grid cannot phase-lock', () => {
-  // The defect this pins: `ceil(steps/target)` gave 42 on a 100k lane and 105 on a
-  // capped 1M one, both exact multiples of DeepSea's 7-step descent cycle, so every
-  // sample landed on the same phase — measured against the live endpoint, 3 distinct
-  // poses in 2382 samples (and 3 in 954 at stride 105) while 43 and 107 gave 28/27.
-  const CYCLES = Array.from({ length: 63 }, (_, i) => i + 2); // every cycle length 2..64
-  /** the exact periods the app's periodic environments have: DeepSea 7, the chains 16 and 32 */
+  const CYCLES = Array.from({ length: 63 }, (_, i) => i + 2);
   const REAL_CYCLES = [7, 16, 32];
 
   const gcd = (a: number, b: number): number => (b === 0 ? a : gcd(b, a % b));
@@ -267,8 +245,6 @@ describe('the sampling grid cannot phase-lock', () => {
   });
 
   test('past 64 × the sample budget that is coprimality with the WHOLE 2..64 range', () => {
-    // need > 64 ⟺ steps > 64 × WALL_TARGET_SAMPLES; every root the wall ships against
-    // (100k, the 250k hero cap, 1M) is here, and a prime above 64 divides nothing in it
     for (const steps of [200_000, 250_000, 1_000_000, 10_000_000]) {
       const stride = wallStride(steps);
       expect(stride).toBeGreaterThan(64);
@@ -280,10 +256,6 @@ describe('the sampling grid cannot phase-lock', () => {
   });
 
   test('and below it the prime is still coprime to every period an environment HAS', () => {
-    // Under 153,600 steps the prime can be small enough to be a cycle length itself —
-    // only 1 and the primes above 64 are coprime to all of 2..64, and forcing p > 64 on
-    // a 10k root would throw away 92% of its samples. What must hold is the real thing:
-    // no aliasing against a period that actually exists in these environments.
     for (const steps of [2_000, 5_000, 10_000, 20_000, 50_000, 100_000, 153_600]) {
       const stride = wallStride(steps);
       for (const cycle of REAL_CYCLES) {
@@ -294,8 +266,8 @@ describe('the sampling grid cannot phase-lock', () => {
   });
 
   test('the two strides that were measured aliasing are gone', () => {
-    expect(wallStride(100_000)).toBe(43); // was 42 = 6 × 7
-    expect(wallStride(250_000)).toBe(107); // was 105 = 15 × 7
+    expect(wallStride(100_000)).toBe(43);
+    expect(wallStride(250_000)).toBe(107);
   });
 
   test('a lane short enough to sample whole is stride 1 — no grid, nothing to alias', () => {
@@ -335,9 +307,7 @@ describe('sort as an index permutation', () => {
     const first = sortPermutation(rows, 'rate');
     const again = sortPermutation(rows, 'rate');
     expect(again).toEqual(first);
-    // seeds 1 and 3 tie at 0.4 and stay in input order
     expect(first.indexOf(1)).toBeLessThan(first.indexOf(3));
-    // the null-rate seed is last
     expect(first[first.length - 1]).toBe(2);
   });
 
@@ -400,7 +370,6 @@ describe('promote / Esc state machine', () => {
   test('a new leader keeps a promotion only while that seed is still playable', () => {
     const promoted = promoteSeed(base, 8, playable);
     expect(setLeader(promoted, 2, playable)).toEqual({ leader: 2, promoted: 8 });
-    // switching to an env where seed 8 has no recording drops the promotion
     expect(setLeader(promoted, 2, (seed) => seed === 2)).toEqual({ leader: 2, promoted: null });
   });
 
@@ -435,7 +404,6 @@ describe('the seed rail', () => {
       { lane: 2, seed: 2, policy: 'oak', envId: 'HalfCheetah-v4' },
     ],
     series: {
-      // cumulative reward: seed 0 climbs, seed 1 peaks then fades, seed 2 dies
       rewardSum: [
         [100, 400, 900],
         [300, 600, 610],
@@ -454,7 +422,6 @@ describe('the seed rail', () => {
     expect(rows.map((r) => r.seed)).toEqual([0, 1, 2]);
     expect(rows[0]?.rate).toBeCloseTo(900 / 3000, 12);
     expect(rows[1]?.rate).toBeCloseTo(610 / 3000, 12);
-    // seed 2 only ever reported at step 1000
     expect(rows[2]?.rate).toBeCloseTo(50 / 1000, 12);
   });
 
@@ -468,7 +435,6 @@ describe('the seed rail', () => {
     const rows = buildSeedRows(columnar);
     expect(rows[0]?.retention).toBeCloseTo(0.5 / 0.5, 12);
     expect(rows[1]?.retention).toBeCloseTo(0.01 / 0.3, 12);
-    // a seed that never had a positive peak has no meaningful ratio
     expect(retentionOf([-0.4, -0.2])).toBe(null);
     expect(retentionOf([])).toBe(null);
   });
@@ -526,8 +492,6 @@ describe('the population header', () => {
     expect(figures.positive).toBe('75%');
     expect(figures.nonDiverged).toBe('3/4');
     expect(figures.retention).toBe('50%');
-    // solved and reward/GFLOP exist only in summary v2 — a measured fallback
-    // that invented them would be fiction
     expect(figures.solved).toBe('—');
     expect(figures.perGflop).toBe('—');
   });
@@ -571,7 +535,7 @@ describe('run identity line', () => {
   });
 
   test('a 1M lane strides prime and coprime to every gridworld cycle', () => {
-    expect(wallStride(1_000_000)).toBe(419); // prime > 64 — coprime to all of 2..64
+    expect(wallStride(1_000_000)).toBe(419);
   });
 });
 
@@ -639,7 +603,6 @@ describe('driving the ghosts', () => {
   });
 
   test('the colour ramp is fed a population QUANTILE, not a raw rate', () => {
-    // one rocket seed would otherwise flatten every other ghost onto the floor
     const quantiles = rateQuantiles([
       row(0, { rate: 0.01 }),
       row(1, { rate: 0.02 }),
@@ -653,11 +616,6 @@ describe('driving the ghosts', () => {
   });
 
   test('the population that does not fit is counted, never claimed', () => {
-    // Real numbers, from the wall endpoint on frontend-demo-16env-20260803
-    // (HalfCheetah, 8 seeds, pose[0] = rootx): the spread across seeds is 0.18 units
-    // at step 0, 0.84 at 5k, 10.09 at 25k, 221.56 at 50k, 1747.65 at 100k. The stage
-    // frames about five metres. So most of the run has ONE animal on it, and the
-    // chip's number has to be the measured one.
     const window = trackWindow(16 / 9);
     expect(window.width).toBeCloseTo(2 * CHEETAH_CAM_DEPTH * Math.tan((TOKENS.fovHero * Math.PI) / 360) * (16 / 9), 9);
     expect(window.ahead - window.back).toBeCloseTo(2 * CHEETAH_CAM_LOOK_X, 12);
@@ -665,32 +623,23 @@ describe('driving the ghosts', () => {
     expect(window.width).toBeLessThan(8);
 
     const heroX = 236.1;
-    // step 50k, the frame the review screenshotted: 8 seeds over 221.56 units. Only the
-    // hero and the one seed 0.7 units behind it are inside a ~4.5 m frame; the seed at
-    // 233.9 is already 2.2 m back, past the window's short edge.
     const spread = [14.6, 60.2, 110.9, 158.4, 200.0, 233.9, 235.4, 236.1];
     expect(inFrameCount(spread, spread.length, heroX, window)).toBe(2);
     expect(window.back).toBeLessThan(2.2);
-    // step 0, the same fleet 0.18 units apart: everything is genuinely on stage
     const together = [-0.1, -0.05, 0, 0.02, 0.04, 0.05, 0.06, 0.08];
     expect(inFrameCount(together, together.length, 0, window)).toBe(8);
-    // a seed that went non-finite contributes nothing rather than counting as here
     expect(inFrameCount([Number.NaN, 0], 2, 0, window)).toBe(1);
     expect(inFrameCount([0], 1, Number.NaN, window)).toBe(0);
   });
 
   test('the window is asymmetric because the camera looks ahead of the runner', () => {
     const window = trackWindow(2);
-    // a seed the hero has just overtaken drops out of frame sooner than one ahead
     expect(inFrameCount([-window.back + 0.01], 1, 0, window)).toBe(1);
     expect(inFrameCount([-window.back - 0.01], 1, 0, window)).toBe(0);
     expect(inFrameCount([window.ahead - 0.01], 1, 0, window)).toBe(1);
     expect(inFrameCount([window.ahead + 0.01], 1, 0, window)).toBe(0);
-    // a wider stage sees more track, in exact proportion
     expect(trackWindow(4).width).toBeCloseTo(2 * trackWindow(2).width, 9);
     expect(trackWindow(0).width).toBeCloseTo(trackWindow(16 / 9).width, 9);
-    // and however narrow the stage gets, the hero the rig is centred on is in its own
-    // frame — the count can never report the animal on screen as off it
     for (const aspect of [0.2, 0.5, 1, 16 / 9, 3]) {
       const w = trackWindow(aspect);
       expect(w.back).toBeGreaterThanOrEqual(0);
@@ -711,19 +660,16 @@ describe('driving the ghosts', () => {
     expect(extent).toEqual({ min: 123.5, max: 1871.2, span: 1747.7 });
 
     const scale = fieldScale(extent, 1871.2, window);
-    // every seed lands inside the strip, the leader at the far end
     for (const x of xs) {
       const p = fieldPercent(x, scale);
       expect(p).toBeGreaterThanOrEqual(0);
       expect(p).toBeLessThanOrEqual(100);
     }
     expect(fieldPercent(xs[0] as number, scale)).toBeLessThan(fieldPercent(xs[4] as number, scale));
-    // and the camera's own slice is a hairline at this scale — which is the point
     const left = fieldPercent(1871.2 - window.back, scale);
     const right = fieldPercent(1871.2 + window.ahead, scale);
     expect(right - left).toBeLessThan(1);
 
-    // early in the run the window is WIDER than the fleet, so it fills the strip
     const tight = fieldExtent([-0.1, 0.08], 2);
     const early = fieldScale(tight, 0, window);
     const earlyLeft = fieldPercent(-window.back, early);
@@ -734,7 +680,6 @@ describe('driving the ghosts', () => {
   test('the field degrades without inventing a position', () => {
     expect(fieldExtent([Number.NaN, Number.NaN], 2)).toBe(null);
     expect(fieldExtent([], 0)).toBe(null);
-    // no extent and no hero: a strip with a domain, not a divide-by-zero
     const scale = fieldScale(null, null, trackWindow(16 / 9));
     expect(scale.max).toBeGreaterThan(scale.min);
     expect(fieldPercent(Number.NaN, scale)).toBe(50);
@@ -747,7 +692,6 @@ describe('driving the ghosts', () => {
     const lane = { pose: new Float32Array([1, 0, 0, 0, 0, 0, 0, 0, 0, 7, 0, 0, 0, 0, 0, 0, 0, 0]), samples: 2 };
     expect(laneTrackX(lane, 0)).toBe(1);
     expect(laneTrackX(lane, 1)).toBe(7);
-    // past the end it HOLDS the final sample, exactly as the ghost does
     expect(laneTrackX(lane, 99)).toBe(7);
     expect(laneTrackX(lane, -3)).toBe(1);
     expect(laneTrackX({ pose: new Float32Array(0), samples: 0 }, 0)).toBe(null);

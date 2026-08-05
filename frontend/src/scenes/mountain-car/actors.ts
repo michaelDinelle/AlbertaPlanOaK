@@ -1,16 +1,3 @@
-// Alpine Valley — the cart and everything that moves with it.
-//
-// ACCURACY: `root` is the probe object. Its world position is EXACTLY
-// (pose[0], heightAt(pose[0]), 0) and nothing else — no bob, no lift, no lean. The
-// wheel-radius lift and the slope tilt live on child nodes, so deleting every decoration
-// would leave a correct (if invisible) cart.
-//
-// IDEMPOTENCE: every visual here is a pure function of (pos, vel, force). The momentum
-// trail in particular is NOT a history buffer — it is the terrain curve itself, traced
-// backwards from the cart over a length proportional to |vel|. That is exactly the ground
-// the cart came along, it costs no state, and it survives a scrub or a teleport for free:
-// the respawn writes vel = 0, so the trail collapses to nothing in the same frame the
-// cart snaps home.
 
 import {
   emissiveMaterial,
@@ -27,9 +14,6 @@ import * as THREE from 'three';
 import { MC_MAX_SPEED } from '@sim/envs/mountaincar';
 import { blendTokens, clampRange, mergeColoredParts, type ColoredPart } from './world';
 
-// ---------------------------------------------------------------------------
-// dimensions (world units — the cart is 0.20 long in a 1.8-wide playfield)
-// ---------------------------------------------------------------------------
 
 const WHEEL_R = 0.034;
 const WHEEL_T = 0.012;
@@ -49,19 +33,12 @@ const RIBBON_LIFT = 0.048;
 const LANTERN_BASE_HDR = 2.4;
 
 export interface CartHandle {
-  /** add this ONE group to the scene */
   group: THREE.Group;
-  /** the probe object: world position === (pos, heightAt(pos), 0), always */
   root: THREE.Object3D;
-  /** world position of the lantern flame, refreshed by setState (preallocated) */
   readonly lanternWorld: THREE.Vector3;
-  /** the whole visual state, from the frame and nothing else */
   setState(pos: number, vel: number, force: number): void;
-  /** ctx.time() — drives the dust field; the cart itself is state-driven */
   setTime(t: number): void;
-  /** 0..1 scree kick layered on top of the rolling dust */
   setDustKick(env01: number): void;
-  /** 1 = the idle lantern, >1 = the teleport flash */
   setLanternGain(gain: number): void;
   setPixelRatio(dpr: number): void;
   dispose(): void;
@@ -72,7 +49,6 @@ export interface CartOptions {
   palette: Palette;
   accent: THREE.ColorRepresentation;
   seed: number;
-  /** the env's own curve — sim-core truth, never a scene re-derivation */
   heightAt(x: number): number;
   slopeAt(x: number): number;
 }
@@ -88,17 +64,14 @@ export function buildCart(opts: CartOptions): CartHandle {
   const woodDark = blendTokens(palette.groundA, palette.hemiGround, 0.7);
   const iron = blendTokens(palette.hemiGround, palette.skyTop, 0.55);
 
-  // ---- the probe root: position only, forever ----
   const root = new THREE.Object3D();
   root.name = 'cartRoot';
   group.add(root);
 
-  // ---- decoration node: the slope tilt (rotation only, so the root stays exact) ----
   const tilt = new THREE.Object3D();
   tilt.name = 'cartTilt';
   root.add(tilt);
 
-  // ---- body: one merged geometry, one material ----
   const bodyParts: ColoredPart[] = [];
   {
     const beam = new THREE.BoxGeometry(0.196, 0.015, 0.116);
@@ -132,7 +105,6 @@ export function buildCart(opts: CartOptions): CartHandle {
       board.translate(x, FLOOR_Y + SLAT_H * 0.45, 0);
       bodyParts.push({ geometry: board, color: woodMid });
     }
-    // the lantern bracket + cage
     const post = new THREE.BoxGeometry(0.009, 0.074, 0.009);
     post.translate(0.094, FLOOR_Y + 0.037, 0);
     bodyParts.push({ geometry: post, color: iron });
@@ -164,7 +136,6 @@ export function buildCart(opts: CartOptions): CartHandle {
   bodyMesh.castShadow = shadows;
   tilt.add(bodyMesh);
 
-  // ---- wheels: one merged geometry per axle, each rotating about its own hub ----
   const wheelGeometry = makeAxleGeometry(woodDark, iron);
   const wheelFront = new THREE.Mesh(wheelGeometry, bodyMaterial);
   wheelFront.name = 'cartAxleFront';
@@ -176,7 +147,6 @@ export function buildCart(opts: CartOptions): CartHandle {
   wheelRear.castShadow = shadows;
   tilt.add(wheelFront, wheelRear);
 
-  // ---- the lantern flame: the cart's one bloom feeder ----
   const flameGeometry = new THREE.IcosahedronGeometry(0.013, 1);
   flameGeometry.scale(1, 1.4, 1);
   const flameMaterial: EmissiveMaterial = emissiveMaterial(
@@ -189,7 +159,6 @@ export function buildCart(opts: CartOptions): CartHandle {
   flame.position.set(LANTERN_X, LANTERN_FLAME_Y, 0);
   tilt.add(flame);
 
-  // ---- the push shimmer: a soft ground smear behind the driven wheel ----
   const shimmerSprite = radialSprite(48, 2.6);
   const shimmerMaterial: EmissiveMaterial = emissiveMaterial(blendTokens(accent, palette.sun, 0.4), 1.5, {
     map: shimmerSprite,
@@ -211,7 +180,6 @@ export function buildCart(opts: CartOptions): CartHandle {
   shimmerRight.visible = false;
   tilt.add(shimmerLeft, shimmerRight);
 
-  // ---- the momentum trail: the terrain curve, traced backwards ----
   const ribbonVerts = (RIBBON_SEGMENTS + 1) * 2;
   const ribbonPos = new Float32Array(ribbonVerts * 3);
   const ribbonCol = new Float32Array(ribbonVerts * 4);
@@ -249,7 +217,6 @@ export function buildCart(opts: CartOptions): CartHandle {
   ribbon.renderOrder = 3;
   group.add(ribbon);
 
-  // ---- rolling dust / scree at the contact point ----
   const dust: AmbientParticlesHandle = makeAmbientParticles({
     preset: 'dust',
     count: 150,
@@ -281,20 +248,17 @@ export function buildCart(opts: CartOptions): CartHandle {
       root.position.set(pos, height, 0);
       tilt.rotation.z = theta;
 
-      // the wheels roll as a pure function of position — a scrub reproduces the spokes
       const roll = -pos / WHEEL_R;
       wheelFront.rotation.z = roll;
       wheelRear.rotation.z = roll;
 
       const speed01 = clampRange(Math.abs(vel) / MC_MAX_SPEED, 0, 1);
 
-      // push shimmer, kicked out behind the driven wheel; nothing on an idle engine
       const pushing = force !== 0 && speed01 > 0.02;
       shimmerLeft.visible = pushing && force > 0;
       shimmerRight.visible = pushing && force < 0;
       shimmerMaterial.opacity = pushing ? 0.2 + 0.42 * speed01 : 0;
 
-      // the trail: the curve behind the cart, its length read off |vel|
       const dir = vel >= 0 ? -1 : 1;
       const len = RIBBON_MAX_LEN * speed01;
       for (let i = 0; i <= RIBBON_SEGMENTS; i++) {
@@ -330,11 +294,9 @@ export function buildCart(opts: CartOptions): CartHandle {
       ribbonColAttr.needsUpdate = true;
       ribbon.visible = speed01 > 0.015;
 
-      // rolling dust follows the contact point; a scree kick rides on top
       dust.points.position.set(pos, height + 0.01, 0);
       dust.setDensity(clampRange(speed01 * 0.5 + dustKick * 0.85, 0, 1));
 
-      // the lantern's world position, for the point light (allocation-free)
       const c = Math.cos(theta);
       const s2 = Math.sin(theta);
       lanternWorld.set(
@@ -378,7 +340,6 @@ export function buildCart(opts: CartOptions): CartHandle {
   };
 }
 
-/** Two wheels + a hub + spokes, merged; the axle's local origin is the hub center. */
 function makeAxleGeometry(rim: THREE.Color, hub: THREE.Color): THREE.BufferGeometry {
   const parts: ColoredPart[] = [];
   const hubBar = new THREE.CylinderGeometry(0.0055, 0.0055, WHEEL_Z * 2 + WHEEL_T, 6);

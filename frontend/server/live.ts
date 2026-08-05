@@ -1,15 +1,3 @@
-// SSE live feed for a run: aggregate.jsonl tail-follow + completeness status.
-//
-// Backed by a plain 2 s poll rather than fs.watch: the writers are separate processes on
-// a possibly-networked volume, watch events on macOS coalesce unpredictably, and a poll
-// of one stat + a bounded read is cheaper than the reconnect logic a missed event costs.
-//
-// Every watcher is torn down on client disconnect (request abort OR stream cancel) — a
-// dashboard tab left open for a day must not leak an interval per reload.
-//
-// CORS: this Response deliberately carries no origin headers of its own. app.ts stamps the
-// shared policy (server/cors.ts) on EVERY response on the way out, which is what stopped
-// this endpoint from being the one that forgot them.
 
 import { join } from 'node:path';
 import type { AggregateRow, LiveHello, LiveStatus } from '@shared/types';
@@ -20,7 +8,6 @@ import { probeFleetTail } from './runIndex';
 export interface LiveTarget {
   id: string;
   dir: string;
-  /** meta.steps — the declared horizon completeness is measured against */
   steps: number;
 }
 
@@ -61,18 +48,15 @@ export function createLiveResponse(req: Request, target: LiveTarget, pollMs = LI
         try {
           controller.close();
         } catch {
-          /* already closed by the platform */
         }
       };
 
       const readStatus = async (): Promise<LiveStatus | null> => {
-        // Tape-era roots (METRICS LAW 2026-08-05) write fleet.jsonl only at
-        // the end; mid-run freshness and progress come from aggregate.jsonl.
         const st = await statOrNull(fleetPath);
         const ag = await statOrNull(aggPath);
         if (st === null && ag === null) return { maxStep: 0, inFlight: false, complete: false };
         const key = `${st?.mtimeMs ?? 0}:${st?.size ?? 0}:${ag?.mtimeMs ?? 0}:${ag?.size ?? 0}`;
-        if (key === fleetKey && lastStatus !== '') return null; // unchanged
+        if (key === fleetKey && lastStatus !== '') return null;
         fleetKey = key;
         const probe = st === null
           ? { hasFinal: false, maxStep: 0, rowsScanned: 0 }
@@ -161,7 +145,6 @@ export function createLiveResponse(req: Request, target: LiveTarget, pollMs = LI
       try {
         req.signal.removeEventListener('abort', onAbort);
       } catch {
-        /* ignore */
       }
       onAbort = null;
     }

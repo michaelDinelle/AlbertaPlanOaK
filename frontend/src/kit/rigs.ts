@@ -1,29 +1,16 @@
-// kit/rigs — the three sanctioned cameras.
-//
-// STYLE.md: "Camera from a kit rig: TrackRig (cheetah), OrbitRig (grids), FrameRig
-// (classic)", "Hero FOV 35–45 (default tokens.fovHero = 40)".
-//
-// Every rig owns exactly one PerspectiveCamera, damps in WALL time (`update(dt)`, so
-// pausing playback still lets you look around), and supports a hard `snap()` for the
-// scrub / teleport contract. Pointer input is optional: pass `canvas` for an interactive
-// rig, omit it for a headless or fixed one — the clamp math is identical either way and
-// is exported as pure functions for tests.
 
 import * as THREE from 'three';
 import { TOKENS } from './tokens';
 
 export interface RigHandle {
   readonly camera: THREE.PerspectiveCamera;
-  /** `dt` is WALL seconds — camera easing keeps working while playback is paused */
   update(dt: number): void;
   resize(aspect: number): void;
-  /** hard cut: every eased value jumps to its target */
   snap(): void;
   dispose(): void;
 }
 
 interface BaseCameraOptions {
-  /** 35–45 per the style contract; defaults to tokens.fovHero */
   fov?: number;
   near?: number;
   far?: number;
@@ -42,20 +29,14 @@ function makeCamera(opts: BaseCameraOptions, name: string): THREE.PerspectiveCam
   return camera;
 }
 
-/** exponential smoothing factor for a per-second rate — frame-rate independent */
 export function damp(rate: number, dt: number): number {
   if (!(rate > 0) || !(dt > 0)) return rate > 0 ? 0 : 1;
   return 1 - Math.exp(-rate * dt);
 }
 
-// ---------------------------------------------------------------------------
-// OrbitRig — the grid camera
-// ---------------------------------------------------------------------------
 
 export interface OrbitState {
-  /** radians, 0 looks down +z toward the target */
   azimuth: number;
-  /** radians from +y; 0 = straight down, PI/2 = horizon */
   polar: number;
   distance: number;
 }
@@ -69,11 +50,6 @@ export interface OrbitLimits {
   maxDistance: number;
 }
 
-/** House defaults: never under the floor, never straight down, a generous azimuth arc. */
-// THE one camera envelope (owner's ruling 2026-08-05: free orbit in EVERY
-// environment, no per-scene pens). Azimuth is unbounded so the eye can circle
-// continuously; polar never goes under the floor or straight down; distance
-// covers the smallest pond and the largest canyon.
 export const DEFAULT_ORBIT_LIMITS: OrbitLimits = Object.freeze({
   minPolar: 0.18,
   maxPolar: 1.36,
@@ -87,7 +63,6 @@ export function clamp(v: number, lo: number, hi: number): number {
   return v < lo ? lo : v > hi ? hi : v;
 }
 
-/** Clamp an orbit state in place and return it. Pure math — no camera, no DOM. */
 export function clampOrbit(state: OrbitState, limits: OrbitLimits): OrbitState {
   state.polar = clamp(state.polar, limits.minPolar, limits.maxPolar);
   state.azimuth = clamp(state.azimuth, limits.minAzimuth, limits.maxAzimuth);
@@ -95,7 +70,6 @@ export function clampOrbit(state: OrbitState, limits: OrbitLimits): OrbitState {
   return state;
 }
 
-/** Spherical orbit state -> world camera position around `target`. */
 export function orbitPosition(state: OrbitState, target: THREE.Vector3, out: THREE.Vector3): THREE.Vector3 {
   const sp = Math.sin(state.polar);
   return out.set(
@@ -106,36 +80,28 @@ export function orbitPosition(state: OrbitState, target: THREE.Vector3, out: THR
 }
 
 export interface OrbitRigOptions extends BaseCameraOptions {
-  /** attach pointer controls; omit for a headless / non-interactive rig */
   canvas?: HTMLCanvasElement | null;
   target?: readonly [number, number, number];
   distance?: number;
   azimuth?: number;
   polar?: number;
   limits?: Partial<OrbitLimits>;
-  /** damping rate per second (default 8) */
   damping?: number;
   rotateSpeed?: number;
   zoomSpeed?: number;
 }
 
 export interface OrbitRig extends RigHandle {
-  /** the look-at point — move it, the rig follows */
   readonly target: THREE.Vector3;
-  /** smoothed, currently-rendered state */
   readonly state: OrbitState;
-  /** clamped target state the rig is easing toward */
   readonly desired: OrbitState;
   readonly limits: OrbitLimits;
-  /** relative nudge in radians (pointer drag, keyboard) */
   orbit(dAzimuth: number, dPolar: number): void;
-  /** relative zoom; positive pulls out */
   zoom(delta: number): void;
   setDesired(azimuth: number, polar: number, distance: number): void;
   setTarget(x: number, y: number, z: number): void;
 }
 
-/** The grid-scene camera: damped orbit with hard clamps and optional pointer control. */
 export function makeOrbitRig(opts: OrbitRigOptions = {}): OrbitRig {
   const camera = makeCamera(opts, 'oakOrbitRig');
   const limits: OrbitLimits = { ...DEFAULT_ORBIT_LIMITS, ...opts.limits };
@@ -161,7 +127,6 @@ export function makeOrbitRig(opts: OrbitRigOptions = {}): OrbitRig {
   };
   apply();
 
-  // ---- pointer controls (optional) ----
   const canvas = opts.canvas ?? null;
   let dragging = false;
   let lastX = 0;
@@ -254,7 +219,6 @@ export function makeOrbitRig(opts: OrbitRigOptions = {}): OrbitRig {
     canvas.addEventListener('pointerup', onPointerUp);
     canvas.addEventListener('pointercancel', onPointerUp);
     canvas.addEventListener('wheel', onWheel, { passive: false });
-    // double-click: back to the composed home shot — the universal escape hatch
     canvas.addEventListener('dblclick', () => {
       desired.azimuth = home.azimuth;
       desired.polar = home.polar;
@@ -265,54 +229,28 @@ export function makeOrbitRig(opts: OrbitRigOptions = {}): OrbitRig {
   return rig;
 }
 
-/** Factory alias — `const rig: OrbitRig = OrbitRig({ ... })` (no `new`). */
 export const OrbitRig = makeOrbitRig;
 
-// ---------------------------------------------------------------------------
-// TrackRig — the cheetah camera
-// ---------------------------------------------------------------------------
 
 export interface TrackRigOptions extends BaseCameraOptions {
-  /** attach pointer orbit/zoom around the tracked subject; omit for headless */
   canvas?: HTMLCanvasElement | null;
-  /** camera offset from the tracked point, world units */
   offset?: readonly [number, number, number];
-  /** where the camera looks, relative to the tracked point */
   lookOffset?: readonly [number, number, number];
-  /** seconds of velocity to lead the subject by (default 0.35) */
   lookAhead?: number;
-  /** cap on the look-ahead displacement, world units (default 3) */
   maxLookAhead?: number;
-  /** position damping per second (default 4) */
   damping?: number;
-  /** look-target damping per second (default 6) */
   lookDamping?: number;
-  /** velocity smoothing per second (default 5) */
   velocityDamping?: number;
 }
 
 export interface TrackRig extends RigHandle {
-  /** the tracked world point (the cheetah root) */
   readonly target: THREE.Vector3;
-  /** smoothed world velocity of the target */
   readonly velocity: THREE.Vector3;
   setTarget(x: number, y: number, z: number): void;
-  /**
-   * Feed the SUBJECT'S OWN velocity (sim units) instead of deriving it from
-   * wall-clock target displacement. Without this, boosted playback multiplies
-   * the derived velocity by the speed factor and the look-ahead saturates —
-   * the camera pans permanently ahead of the animal at ×64 and above.
-   */
   setVelocity(x: number, y: number, z: number): void;
-  /** teleport / hard cut — no easing may cross a `teleport` event */
   snap(): void;
 }
 
-/**
- * The follow camera: damped position + velocity look-ahead, so a running cheetah sits
- * slightly behind the frame center and a stopped one re-centers. `snap()` is the
- * `teleport` contract (STYLE.md: "teleport = hard cut ... + TrackRig.snap()").
- */
 export function makeTrackRig(opts: TrackRigOptions = {}): TrackRig {
   const camera = makeCamera(opts, 'oakTrackRig');
   const offset = new THREE.Vector3(...(opts.offset ?? [0, 1.6, 6]));
@@ -335,10 +273,6 @@ export function makeTrackRig(opts: TrackRigOptions = {}): TrackRig {
   let primed = false;
   let externalVelocity = false;
 
-  // ---- user orbit around the SUBJECT: the follow never stops, the eye moves ----
-  // The composed offset is the home shot; a drag swings it around the runner
-  // (yaw + a clamped pitch) and the wheel breathes the distance. Nothing here
-  // fights the tracking — the offset itself is what rotates.
   let userYaw = 0;
   let userPitch = 0;
   let userZoom = 1;
@@ -355,15 +289,12 @@ export function makeTrackRig(opts: TrackRigOptions = {}): TrackRig {
     if (len > maxLookAhead) lead.multiplyScalar(maxLookAhead / len);
     orbited.copy(offset);
     if (userPitch !== 0) {
-      // pitch about the horizontal axis perpendicular to the (flattened) offset
       const px = -offset.z;
       const pz = offset.x;
       const norm = Math.hypot(px, pz) || 1;
       orbited.applyAxisAngle(scratchAxis.set(px / norm, 0, pz / norm), userPitch);
     }
     orbited.applyAxisAngle(Y_AXIS, userYaw).multiplyScalar(userZoom);
-    // never under the ground — but the floor may not move the HOME shot, whose
-    // composed height is the scene's own business (the cheetah cam sits at 0.33)
     const minY = Math.min(offset.y, 0.3);
     if (orbited.y < minY) orbited.y = minY;
     desiredPos.copy(target).add(orbited).add(lead);
@@ -371,7 +302,6 @@ export function makeTrackRig(opts: TrackRigOptions = {}): TrackRig {
   };
   const scratchAxis = new THREE.Vector3();
 
-  // pointer controls (optional) — same grammar as the orbit rig
   const canvas = opts.canvas ?? null;
   if (canvas) {
     let dragging = false;
@@ -384,7 +314,7 @@ export function makeTrackRig(opts: TrackRigOptions = {}): TrackRig {
       activePointer = e.pointerId;
       lastX = e.clientX;
       lastY = e.clientY;
-      try { canvas.setPointerCapture(e.pointerId); } catch { /* inactive pointer */ }
+      try { canvas.setPointerCapture(e.pointerId); } catch {  }
     });
     canvas.addEventListener('pointermove', (e: PointerEvent) => {
       if (!dragging || e.pointerId !== activePointer) return;
@@ -397,7 +327,7 @@ export function makeTrackRig(opts: TrackRigOptions = {}): TrackRig {
       if (e.pointerId !== activePointer) return;
       dragging = false;
       activePointer = -1;
-      try { canvas.releasePointerCapture(e.pointerId); } catch { /* released */ }
+      try { canvas.releasePointerCapture(e.pointerId); } catch {  }
     };
     canvas.addEventListener('pointerup', endDrag);
     canvas.addEventListener('pointercancel', endDrag);
@@ -406,7 +336,6 @@ export function makeTrackRig(opts: TrackRigOptions = {}): TrackRig {
       e.preventDefault();
       userZoom = Math.min(Math.max(userZoom * (1 + e.deltaY * 0.0011), ZOOM_MIN), ZOOM_MAX);
     }, { passive: false });
-    // double-click: back to the composed home shot — the universal escape hatch
     canvas.addEventListener('dblclick', () => {
       userYaw = 0;
       userPitch = 0;
@@ -456,7 +385,6 @@ export function makeTrackRig(opts: TrackRigOptions = {}): TrackRig {
       primed = true;
     },
     dispose() {
-      /* no listeners */
     },
   };
 
@@ -466,36 +394,23 @@ export function makeTrackRig(opts: TrackRigOptions = {}): TrackRig {
 
 export const TrackRig = makeTrackRig;
 
-// ---------------------------------------------------------------------------
-// FrameRig — the classic-control camera
-// ---------------------------------------------------------------------------
 
 export interface FrameRigOptions extends BaseCameraOptions {
   position: readonly [number, number, number];
   lookAt?: readonly [number, number, number];
-  /** attach pointer micro-parallax; omit for a fixed frame */
   canvas?: HTMLCanvasElement | null;
-  /** world units of camera travel at the screen edge (default 0.18) */
   parallax?: number;
-  /** vertical parallax as a fraction of horizontal (default 0.5) */
   parallaxY?: number;
-  /** damping per second (default 3) */
   damping?: number;
 }
 
 export interface FrameRig extends RigHandle {
-  /** the fixed cinematic position, before parallax */
   readonly base: THREE.Vector3;
   readonly lookAt: THREE.Vector3;
-  /** pointer position in [-1, 1]^2; drive it manually for a headless rig */
   setPointer(nx: number, ny: number): void;
   setBase(x: number, y: number, z: number): void;
 }
 
-/**
- * The still frame: a composed camera that breathes a few centimeters with the pointer.
- * The composition is authored, never automatic — classic-control scenes are dioramas.
- */
 export function makeFrameRig(opts: FrameRigOptions): FrameRig {
   const camera = makeCamera(opts, 'oakFrameRig');
   const base = new THREE.Vector3(...opts.position);
@@ -515,7 +430,6 @@ export function makeFrameRig(opts: FrameRigOptions): FrameRig {
     if (forward.lengthSq() < 1e-12) forward.set(0, 0, -1);
     forward.normalize();
     right.crossVectors(forward, THREE.Object3D.DEFAULT_UP);
-    // straight-down / straight-up framings have no unique "right"; pick +x
     if (right.lengthSq() < 1e-12) right.set(1, 0, 0);
     right.normalize();
     up.crossVectors(right, forward).normalize();

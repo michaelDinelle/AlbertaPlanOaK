@@ -1,23 +1,4 @@
 /// <reference types="bun" />
-// The Lantern Bell (Pendulum-cont-v0) — the accuracy + lifecycle self-check.
-//
-// This mirrors four-rooms.test.ts's shape and adds what THIS env has to prove:
-//   * the bob is exactly pivot + (L sin θ, −L cos θ) on the whole circle, at every tier;
-//   * the torii clears the volume the LANTERN sweeps — measured off the built meshes, at
-//     every z, with no exemptions (the earlier version of this test used a hand-written
-//     clearance 0.13 short of the truth and skipped exactly the z band the hanger lives
-//     in, so it passed while the cables ran through the paper barrel);
-//   * the ANGLE-WRAP TRAP is handled AT EVERY SAMPLING DENSITY. The host advances
-//     `controlHz·speed·dtReal` rows per render frame, so one record row can be 1 frame or
-//     48; the earlier version tested only the 3-frames-per-row case, which is the one
-//     density where the shipped guard happened to work. Here the env's own integrator
-//     generates the trajectories and the host's own sampling law replays them at
-//     0.75 … 48 frames per row;
-//   * the lighting IS the shaped reward — a state the env scores BETTER is never rendered
-//     darker, checked over a (θ, θ̇, u) grid rather than along the one slice where the old
-//     product law could not fail;
-//   * the torque curl is sign-correct and magnitude-scaled;
-//   * and this scene NEVER celebrates, not even when handed an event batch.
 
 import { describe, expect, test } from 'bun:test';
 import * as THREE from 'three';
@@ -79,7 +60,7 @@ import {
   type StubSceneContext,
 } from './aligned';
 
-const SEED = 56; // the demo run's first Pendulum lane
+const SEED = 56;
 
 function geometryOf(): EnvGeometry {
   return pendulumDecoder.geometry(pendulumDecoder.initStatic(SEED), SEED);
@@ -126,7 +107,6 @@ function emissiveGain(material: THREE.Material): number {
   return typeof v === 'number' ? v : Number.NaN;
 }
 
-/** The rig's point lights, in the order world.ts claims them. */
 function pointLights(module: SceneModule): THREE.PointLight[] {
   const out: THREE.PointLight[] = [];
   module.scene.traverse((o) => {
@@ -135,26 +115,20 @@ function pointLights(module: SceneModule): THREE.PointLight[] {
   return out;
 }
 
-/** the guard's own "I am holding this frame" flag */
 function isHolding(module: SceneModule): boolean {
   return (module as unknown as { wrapHeld: boolean }).wrapHeld;
 }
 
-/** the paper's emissive gain the scene WOULD show for a state, via a scrubbed frame */
 function emissiveGainOf(module: SceneModule, th: number, thd: number, u: number): number {
   module.update(toFrameUpdate(poseFixture('probe', th, thd, u, 0)));
   return emissiveGain(meshNamed(module, 'lanternPaper').material as THREE.Material);
 }
 
-/** the angle the scene actually RENDERED, read back off the bob probe */
 function renderedTheta(module: SceneModule): number {
   const bob = worldOf(module, 'bob');
   return Math.atan2(bob.x, -bob.y);
 }
 
-// ---------------------------------------------------------------------------
-// the env, transcribed — `gw_pend_step`, Sources/ClassicControl.metal L189-200
-// ---------------------------------------------------------------------------
 
 interface Row {
   th: number;
@@ -162,13 +136,11 @@ interface Row {
   u: number;
 }
 
-/** one control step, in the kernel's own order (θ integrates the PRE-clamp velocity) */
 function pendStep(th: number, thd: number, ctrl0: number): Row {
   const u = Math.max(-PD_MAX_TORQUE, Math.min(PD_MAX_TORQUE, 2 * ctrl0));
   let nthd = thd + (((1.5 * PD_G) / PD_L) * Math.sin(th + Math.PI) + (3 * u) / (PD_M * PD_L * PD_L)) * PD_DT;
   const next = wrapPi(th + nthd * PD_DT);
   nthd = Math.max(-PD_MAX_SPEED, Math.min(PD_MAX_SPEED, nthd));
-  // the recorder writes f32, and the host hands the scene a Float32Array
   return { th: Math.fround(next), thd: Math.fround(nthd), u: Math.fround(u) };
 }
 
@@ -178,7 +150,6 @@ function simulate(th0: number, thd0: number, ctrl: (i: number) => number, n: num
   return rows;
 }
 
-/** rows that contain a ±π crossing (the host's linear lerp fabricates a revolution here) */
 function wrapRows(rows: readonly Row[]): number[] {
   const out: number[] = [];
   for (let i = 1; i < rows.length; i++) if (Math.abs(rows[i]!.th - rows[i - 1]!.th) > Math.PI) out.push(i - 1);
@@ -187,26 +158,15 @@ function wrapRows(rows: readonly Row[]): number[] {
 
 interface ReplayReport {
   frames: number;
-  /** worst |rendered − physically-correct short-arc angle|, in radians */
   maxError: number;
-  /** the highest cos-distance the render ever put between itself and the truth */
   worstAt: number;
   holdFrames: number;
   holdRuns: number;
   maxHoldRun: number;
-  /** lowest rendered bob y — a false revolution dives to −1 */
   minY: number;
-  /** lowest rendered bob y over the frames inside a genuine wrap step */
   minYAtWrap: number;
 }
 
-/**
- * Replay `rows` through the scene the way the HOST does: `kit/harness.ts` advances a
- * fractional frame position by `controlHz · speed · dtReal` rows per render frame, samples
- * the 9-float pose by LINEAR interpolation between the two neighbouring rows, and reports
- * `state.step` as the FLOOR of that position. `rowsPerFrame` is the whole sampling
- * regime: 1/3 is 60 fps at 1×, 1/24 is 120 fps at 0.25×, 1.33 is 60 fps at 4×.
- */
 function replay(module: SceneModule, rows: readonly Row[], rowsPerFrame: number): ReplayReport {
   const wraps = new Set(wrapRows(rows));
   const last = rows.length - 1;
@@ -228,7 +188,6 @@ function replay(module: SceneModule, rows: readonly Row[], rowsPerFrame: number)
     const a = pos - i;
     const A = rows[i] as Row;
     const B = rows[j] as Row;
-    // the host's LINEAR lerp — the bug the guard exists to refuse
     const th = A.th + (B.th - A.th) * a;
     const thd = A.thd + (B.thd - A.thd) * a;
     const u = A.u + (B.u - A.u) * a;
@@ -244,7 +203,6 @@ function replay(module: SceneModule, rows: readonly Row[], rowsPerFrame: number)
     } else run = 0;
     prevHeld = held;
 
-    // the physically correct sub-step angle: the SHORT ARC on the circle
     const truth = wrapPi(A.th + wrapPi(B.th - A.th) * a);
     const err = Math.abs(wrapPi(renderedTheta(module) - truth));
     if (err > report.maxError) {
@@ -258,18 +216,10 @@ function replay(module: SceneModule, rows: readonly Row[], rowsPerFrame: number)
   return report;
 }
 
-/** every sampling density the transport can produce: 0.25×…4× across 30…240 Hz */
 const DENSITIES: readonly number[] = [1 / 48, 1 / 24, 1 / 12, 1 / 6, 1 / 3, 1 / 2, 2 / 3, 1, 4 / 3, 8 / 3];
 
-/**
- * The lowest bob y a frame inside a WRAP row may render. A wrap row's own angle is within
- * one control step of ±π, and the guard keeps the render within 2·PD_MAX_DTHETA + slack of
- * the truth, so the bob is pinned to a cap around the top of its arc. The fabricated
- * revolution reaches −1.
- */
 const TOP_CAP_Y = -Math.cos(Math.PI - 3 * PD_MAX_DTHETA - 0.02);
 
-// ---------------------------------------------------------------------------
 
 describe('pendulum / manifest + fixtures', () => {
   test('manifest declares the frozen contract fields', () => {
@@ -289,7 +239,6 @@ describe('pendulum / manifest + fixtures', () => {
     expect(Math.abs(p[0] ?? 9)).toBeLessThanOrEqual(Math.PI);
     expect(Math.abs(p[1] ?? 99)).toBeLessThanOrEqual(PD_MAX_SPEED);
     expect(Math.abs(p[2] ?? 99)).toBeLessThanOrEqual(PD_MAX_TORQUE);
-    // and it is a handsome one: the lantern lit, but visibly off the vertical
     expect(serenityOf(p[0] ?? 0, p[1] ?? 0, p[2] ?? 0)).toBeGreaterThan(0.8);
     expect(Math.abs(p[0] ?? 0)).toBeGreaterThan(0.2);
   });
@@ -309,8 +258,6 @@ describe('pendulum / manifest + fixtures', () => {
     expect(fixtures.some((f) => Math.abs(f.pose[0] ?? 0) === Math.PI)).toBe(true);
     expect(fixtures.some((f) => (f.pose[2] ?? 0) > 0.5)).toBe(true);
     expect(fixtures.some((f) => (f.pose[2] ?? 0) < -0.5)).toBe(true);
-    // the two wrap edges are the guard's two different regimes: one caught by the
-    // direction test (|θ̇| well above the sign-flip bound), one only by the reach bound
     const fast = fixtureNamed('wrap-edge');
     const slow = fixtureNamed('wrap-edge-slow');
     expect(Math.abs(fast.pose[1] ?? 0)).toBeGreaterThan(PD_MAX_DTHETADOT);
@@ -326,15 +273,13 @@ describe("pendulum / the kinematics are the decoder's, never re-derived", () => 
   });
 
   test('the still-water plane sits below the bob at every angle', () => {
-    // the lantern must never dip into the pond, at any θ
     expect(WATER_LEVEL).toBeLessThan(-PD_L - 0.25);
   });
 
   test("the pond bed really is a bowl, and its shoreline is inside the arch's span", () => {
     const bed = makePondBed(SEED);
-    expect(bed(0, 0)).toBeLessThan(WATER_LEVEL - 0.6); // deep water under the lantern
-    expect(bed(POND_RX * 1.6, 0)).toBeGreaterThan(WATER_LEVEL); // dry bank beyond the rim
-    // the water's edge is somewhere between half and one ellipse-radius out
+    expect(bed(0, 0)).toBeLessThan(WATER_LEVEL - 0.6);
+    expect(bed(POND_RX * 1.6, 0)).toBeGreaterThan(WATER_LEVEL);
     let crossing = Number.NaN;
     for (let i = 1; i <= 400; i++) {
       const x = (POND_RX * 1.6 * i) / 400;
@@ -353,7 +298,6 @@ describe('pendulum / alignment', () => {
     for (const tier of ['hero', 'medium', 'thumb'] as const) {
       const module = createScene();
       const report = await assertAligned(module, fixtures, { geometry: geometryOf(), seed: SEED, tier });
-      // probe roots carry POSITION ONLY — these should be exact, not merely within 1e-3
       expect(report.worst.get('bob') ?? 1).toBeLessThan(1e-12);
       expect(report.worst.get('swing-root') ?? 1).toBe(0);
       expect(report.worst.get('pivot') ?? 1).toBe(0);
@@ -369,16 +313,13 @@ describe('pendulum / alignment', () => {
       const th = -Math.PI + (2 * Math.PI * i) / 180;
       module.update(toFrameUpdate(poseFixture(`sweep${i}`, th, 0, 0, i)));
       const world = worldOf(module, 'bob');
-      // the pose arrives as f32, so ground truth is the f32 round-trip of θ
       const truth = Math.fround(th);
       expect(world.x).toBeCloseTo(PD_L * Math.sin(truth), 12);
       expect(world.y).toBeCloseTo(-PD_L * Math.cos(truth), 12);
       expect(world.z).toBeCloseTo(0, 12);
-      // and it is the decoder's own kinematics (which rounds its output to f32)
       pendulumTip(truth, tip);
       expect(world.x).toBeCloseTo(tip[0] ?? 0, 6);
       expect(world.y).toBeCloseTo(tip[1] ?? 0, 6);
-      // and the radius is exactly the rod length, everywhere
       expect(Math.hypot(world.x, world.y)).toBeCloseTo(PD_L, 12);
     }
     module.dispose();
@@ -397,7 +338,7 @@ describe('pendulum / alignment', () => {
     expect(bob.rotation.z).toBe(0);
     expect(bob.scale.x).toBe(1);
     expect(tilt.position.lengthSq()).toBe(0);
-    expect(Math.abs(tilt.rotation.z)).toBeGreaterThan(0.5); // the tilt really is carried here
+    expect(Math.abs(tilt.rotation.z)).toBeGreaterThan(0.5);
     module.dispose();
   });
 
@@ -411,7 +352,6 @@ describe('pendulum / alignment', () => {
       expect(swing).toBeDefined();
       if (!swing) return;
       swing.updateWorldMatrix(true, false);
-      // rotation only: the node itself never leaves the pivot
       expect(swing.scale.x).toBe(1);
       down.set(0, -PD_L, 0).applyMatrix4(swing.matrixWorld);
       const bob = worldOf(module, 'bob');
@@ -436,19 +376,13 @@ describe('pendulum / alignment', () => {
   });
 });
 
-// ---------------------------------------------------------------------------
-// the arch is built around what the LANTERN sweeps — not around the bare rod
-// ---------------------------------------------------------------------------
 
 interface Envelope {
-  /** closest and farthest material from the rotation centre, in the x-y plane */
   rIn: number;
   rOut: number;
-  /** half-thickness across the swing plane (rotation about z never changes z) */
   halfZ: number;
 }
 
-/** the true swept envelope of a set of meshes about a local origin, measured, not declared */
 function envelopeOf(module: SceneModule, names: readonly string[], origin: THREE.Vector3): Envelope {
   const v = new THREE.Vector3();
   let rIn = Infinity;
@@ -469,14 +403,6 @@ function envelopeOf(module: SceneModule, names: readonly string[], origin: THREE
   return { rIn, rOut, halfZ };
 }
 
-/**
- * Triangles of `mesh` that intersect the annulus (rIn, rOut) × (−halfZ, halfZ) swept about
- * the pivot's z-axis, tested by AABB.
- *
- * A VERTEX test is not enough and that is not a detail: a box face can cross the swept
- * volume with all eight of its corners outside it. The hanger plate is exactly that shape
- * — it spans ±z past the barrel while its underside sits inside the lantern's reach.
- */
 function sweptHits(mesh: THREE.Mesh, halfZ: number, rIn: number, rOut: number): number {
   const pos = mesh.geometry.getAttribute('position');
   let hits = 0;
@@ -506,7 +432,6 @@ function sweptHits(mesh: THREE.Mesh, halfZ: number, rIn: number, rOut: number): 
   return hits;
 }
 
-/** the same AABB test for one axis-aligned box, so the test can prove it has teeth */
 function boxHitsSwept(
   w: number,
   h: number,
@@ -533,8 +458,6 @@ describe('pendulum / the arch is built around the swept lantern', () => {
     const { module } = await live();
     module.update(toFrameUpdate(fixtureNamed('at-rest')));
     const lantern = envelopeOf(module, ['lanternFrame', 'lanternPaper', 'lanternFlame'], new THREE.Vector3(0, -ROD_LEN, 0));
-    // the declared envelope is the built one — this is what stops the arch and the
-    // lantern drifting apart again
     expect(lantern.rOut).toBeCloseTo(LANTERN_REACH, 6);
     expect(lantern.halfZ).toBeCloseTo(LANTERN_HALF_Z, 6);
     expect(SWING_REACH).toBeCloseTo(ROD_LEN + LANTERN_REACH, 12);
@@ -547,7 +470,6 @@ describe('pendulum / the arch is built around the swept lantern', () => {
     module.update(toFrameUpdate(fixtureNamed('at-rest')));
     const torii = meshNamed(module, 'torii');
     const lantern = envelopeOf(module, ['lanternFrame', 'lanternPaper', 'lanternFlame'], new THREE.Vector3(0, -ROD_LEN, 0));
-    // measured envelope, every z, no exemptions
     expect(sweptHits(torii, lantern.halfZ, ROD_LEN - lantern.rOut, ROD_LEN + lantern.rOut)).toBe(0);
     module.dispose();
   });
@@ -558,7 +480,6 @@ describe('pendulum / the arch is built around the swept lantern', () => {
     const torii = meshNamed(module, 'torii');
     const rod = envelopeOf(module, ['lanternRod'], new THREE.Vector3(0, 0, 0));
     expect(sweptHits(torii, rod.halfZ, rod.rIn, rod.rOut)).toBe(0);
-    // …which is only possible because the pin passes through the eye's HOLE
     expect(PIN_R).toBeLessThan(rod.rIn);
     expect(EYE_MAJOR - EYE_TUBE).toBeGreaterThan(PIN_R);
     module.dispose();
@@ -570,11 +491,8 @@ describe('pendulum / the arch is built around the swept lantern', () => {
     const lantern = envelopeOf(module, ['lanternFrame', 'lanternPaper', 'lanternFlame'], new THREE.Vector3(0, -ROD_LEN, 0));
     const rIn = ROD_LEN - lantern.rOut;
     const rOut = ROD_LEN + lantern.rOut;
-    // the shipped hanger plate: 0.24 × 0.03 × 0.26 under a nuki at y = 1.30
     expect(boxHitsSwept(0.24, 0.03, 0.26, 0, 1.238, 0, lantern.halfZ, rIn, rOut)).toBe(true);
-    // the shipped cables: z = ±0.105, inside a 0.135 barrel
     expect(boxHitsSwept(0.016, 1.22, 0.016, 0, 0.61, 0.105, lantern.halfZ, rIn, rOut)).toBe(true);
-    // the shipped tie beam itself
     expect(boxHitsSwept(3.9, 0.1, 0.3, 0, 1.3, 0, lantern.halfZ, rIn, rOut)).toBe(true);
     module.dispose();
   });
@@ -582,9 +500,7 @@ describe('pendulum / the arch is built around the swept lantern', () => {
   test('the hanger cables straddle the barrel, and the beam clears the tassel', async () => {
     const { module } = await live();
     module.update(toFrameUpdate(fixtureNamed('inverted-init')));
-    // the near face of a cable is outside the widest part of the paper barrel
     expect(STRAP_Z - STRAP_HALF).toBeGreaterThan(LANTERN_HALF_Z);
-    // and the lowest static thing in the swing plane really does clear the tassel's apex
     const torii = meshNamed(module, 'torii');
     const pos = torii.geometry.getAttribute('position');
     let lowestInPlane = Infinity;
@@ -592,11 +508,10 @@ describe('pendulum / the arch is built around the swept lantern', () => {
       if (Math.abs(pos.getZ(i)) >= LANTERN_HALF_Z) continue;
       const x = pos.getX(i);
       const y = pos.getY(i);
-      if (y <= 0) continue; // the pillars run all the way down; only the crown is overhead
+      if (y <= 0) continue;
       lowestInPlane = Math.min(lowestInPlane, Math.hypot(x, y));
     }
     expect(lowestInPlane).toBeGreaterThanOrEqual(SWING_REACH + SWING_CLEARANCE);
-    // and the bob at θ = π really is up there, under it
     expect(worldOf(module, 'bob').y).toBeCloseTo(ROD_LEN, 6);
     module.dispose();
   });
@@ -608,7 +523,6 @@ describe('pendulum / the arch is built around the swept lantern', () => {
     let front = 0;
     let back = 0;
     for (let i = 0; i < pos.count; i++) {
-      // near the pivot in x/y, but off the plane in z: that is the hanger
       if (Math.hypot(pos.getX(i), pos.getY(i)) > 0.6) continue;
       const z = pos.getZ(i);
       if (z > STRAP_Z * 0.8) front++;
@@ -620,13 +534,9 @@ describe('pendulum / the arch is built around the swept lantern', () => {
   });
 });
 
-// ---------------------------------------------------------------------------
-// the angle-wrap trap, at every sampling density the transport can produce
-// ---------------------------------------------------------------------------
 
 describe('pendulum / the angle-wrap trap', () => {
   test("the guard's reach constants are the env's own, and they bound it", () => {
-    // brute-force the integrator over the whole reachable state space
     let worstDTheta = 0;
     let worstDThetaDot = 0;
     for (let ti = 0; ti <= 64; ti++) {
@@ -640,45 +550,29 @@ describe('pendulum / the angle-wrap trap', () => {
         }
       }
     }
-    // (the recorder writes f32, so the bound holds to a float32 epsilon, not exactly —
-    // which is a thousand times inside the guard's own slack)
     expect(worstDTheta).toBeLessThanOrEqual(PD_MAX_DTHETA * (1 + 1e-6));
     expect(worstDThetaDot).toBeLessThanOrEqual(PD_MAX_DTHETADOT * (1 + 1e-6));
-    // and they are TIGHT — a bound nowhere near the truth would hide real jumps
     expect(worstDTheta).toBeGreaterThan(PD_MAX_DTHETA * 0.85);
-    // the shipped constant (PD_MAX_SPEED · PD_DT) was BELOW the env's real reach
     expect(PD_MAX_SPEED * PD_DT).toBeLessThan(worstDTheta);
-    // the reach is monotone in both arguments and never over-claims
     expect(wrapReach(0, 1)).toBeLessThan(wrapReach(PD_MAX_SPEED, 1));
     expect(wrapReach(PD_MAX_SPEED, 1)).toBeLessThanOrEqual(PD_MAX_DTHETA + 0.02 + 1e-12);
     expect(wrapReach(PD_MAX_SPEED, 2)).toBeGreaterThan(wrapReach(PD_MAX_SPEED, 1));
   });
 
   test('the fabricated revolution is refused at EVERY sampling density', async () => {
-    // a real swing-up that rotates through ±π four times under full positive torque
     const rows = simulate(2.4, 3.2, () => 1, 60);
     expect(wrapRows(rows).length).toBeGreaterThanOrEqual(4);
     for (const rowsPerFrame of DENSITIES) {
       const { module } = await live();
       const report = replay(module, rows, rowsPerFrame);
-      // the render never leaves the neighbourhood the env could actually have reached
       expect(report.maxError).toBeLessThanOrEqual(2 * PD_MAX_DTHETA + 0.02);
-      // and above all: the lantern stays at the TOP through the crossing — it never
-      // swings down through the bottom of its arc, which is the fabricated revolution.
-      // A wrap row's true angle is within one step of ±π, and the render is within the
-      // bound above of that, so the bob cannot leave this cap. (Measured: 0.849, i.e.
-      // four times better than the bound; the shipped guard reached −1.000.)
       expect(report.minYAtWrap).toBeGreaterThan(TOP_CAP_Y);
-      // no more hold runs than there are wraps to refuse: the shipped guard produced 6
-      // where the lane has 2, freezing honest motion
       expect(report.holdRuns).toBeLessThanOrEqual(wrapRows(rows).length);
       module.dispose();
     }
   });
 
   test('the SLOW crossing (lane 56 row 3) is refused too — reach alone catches it', async () => {
-    // tipping over the top at |θ̇| ≈ 0.06: far below the speed the direction test needs,
-    // so the reach bound is the only thing standing between this and a false revolution
     const rows = simulate(3.1377, 0.0133, () => 0.15, 40);
     const first = wrapRows(rows)[0] ?? -1;
     expect(first).toBeGreaterThanOrEqual(0);
@@ -694,7 +588,6 @@ describe('pendulum / the angle-wrap trap', () => {
   });
 
   test('honest motion is NEVER held, at any density — including fast transport', async () => {
-    // the fastest legal sweep that stays off the branch cut: full torque from the bottom
     const rows = simulate(0, 0, () => 1, 30);
     expect(wrapRows(rows).length).toBe(0);
     for (const rowsPerFrame of DENSITIES) {
@@ -704,15 +597,12 @@ describe('pendulum / the angle-wrap trap', () => {
       expect(report.maxError).toBeLessThan(1e-6);
       module.dispose();
     }
-    // and a long free swing through the bottom at the speed clip
     const fast = simulate(-2.5, 7.5, () => 0, 40);
     for (const rowsPerFrame of DENSITIES) {
       const { module } = await live();
       const report = replay(module, fast, rowsPerFrame);
       expect(report.maxError).toBeLessThanOrEqual(2 * PD_MAX_DTHETA + 0.02);
       expect(report.holdRuns).toBeLessThanOrEqual(wrapRows(fast).length);
-      // the bob really does pass through the bottom on a free swing — the guard is not
-      // just refusing everything below the horizontal
       expect(report.minY).toBeLessThan(-0.9);
       module.dispose();
     }
@@ -720,7 +610,6 @@ describe('pendulum / the angle-wrap trap', () => {
 
   test('a hold never outlasts MAX_HOLD_STEPS control steps', async () => {
     const { module } = await live();
-    // an angle that is unreachable forever: the guard must still let go
     module.update(toFrameUpdate(poseFixture('anchor', 0, 0, 0, 0)));
     let held = 0;
     for (let step = 1; step <= MAX_HOLD_STEPS + 4; step++) {
@@ -729,20 +618,18 @@ describe('pendulum / the angle-wrap trap', () => {
     }
     expect(held).toBeLessThanOrEqual(MAX_HOLD_STEPS);
     expect(isHolding(module)).toBe(false);
-    // …and it landed on the truth, not on the anchor
     expect(worldOf(module, 'bob').y).toBeCloseTo(PD_L, 6);
     module.dispose();
   });
 
   test('the recorded lane-56 wrap holds at the apex, then releases onto the truth', async () => {
     const { module } = await live();
-    const A = 3.088365; // row 39
-    const B = -3.06844; // row 40 — +0.127 rad THROUGH the top
+    const A = 3.088365;
+    const B = -3.06844;
     module.update(toFrameUpdate(poseFixture('wrapA', A, 2.621751, -0.723766, 39)));
     const apex = worldOf(module, 'bob');
-    expect(apex.y).toBeGreaterThan(0.9); // it really is near the top
+    expect(apex.y).toBeGreaterThan(0.9);
 
-    // every frame the host can produce inside that one control step, at 24 per row
     for (let k = 1; k < 24; k++) {
       const a = k / 24;
       module.update(
@@ -755,7 +642,6 @@ describe('pendulum / the angle-wrap trap', () => {
       expect(Math.abs(wrapPi(renderedTheta(module) - Math.fround(A)))).toBeLessThanOrEqual(PD_MAX_DTHETA + 0.02);
     }
 
-    // the lerp lands on record row 40: reachable on the circle (0.127 rad), so released
     module.update(toFrameUpdate(poseFixture('wrapB', B, 2.52761, -0.361593, 40), { scrubbed: false }));
     expect(isHolding(module)).toBe(false);
     const after = worldOf(module, 'bob');
@@ -766,7 +652,6 @@ describe('pendulum / the angle-wrap trap', () => {
 
   test('a physically legal crossing of ±π is NEVER held', async () => {
     const { module } = await live();
-    // walk the circle at the env's own maximum rate, straight through the branch cut
     const rate = PD_MAX_SPEED * PD_DT;
     let th = 2.0;
     module.update(toFrameUpdate(poseFixture('start', th, PD_MAX_SPEED, 0, 0)));
@@ -785,17 +670,14 @@ describe('pendulum / the angle-wrap trap', () => {
   test('a scrub releases the guard on the spot (hard snap, never an ease)', async () => {
     const { module } = await live();
     module.update(toFrameUpdate(poseFixture('wrapA', 3.088, 2.62, 0, 39)));
-    // an unreachable angle on a SEQUENTIAL frame is held...
     module.update(toFrameUpdate(poseFixture('mid', 0.1, 2.6, 0, 39), { scrubbed: false }));
     expect(isHolding(module)).toBe(true);
     expect(worldOf(module, 'bob').y).toBeGreaterThan(0.9);
-    // ...and the same angle on a SCRUBBED frame snaps straight there
     module.update(toFrameUpdate(poseFixture('mid', 0.1, 2.6, 0, 39), { scrubbed: true }));
     expect(isHolding(module)).toBe(false);
     const snapped = worldOf(module, 'bob');
     expect(snapped.y).toBeCloseTo(-PD_L * Math.cos(Math.fround(0.1)), 9);
     expect(snapped.y).toBeLessThan(-0.9);
-    // and the scrub re-anchored: the next sequential frame is judged from HERE
     module.update(toFrameUpdate(poseFixture('after', 0.2, 2.6, 0, 40), { scrubbed: false }));
     expect(isHolding(module)).toBe(false);
     module.dispose();
@@ -806,25 +688,17 @@ describe('pendulum / the angle-wrap trap', () => {
     const paper = (): number => emissiveGain(meshNamed(module, 'lanternPaper').material as THREE.Material);
     module.update(toFrameUpdate(poseFixture('apex', 3.088365, 2.621751, -0.723766, 39)));
     const atApex = paper();
-    // the lerp's midpoint is θ ≈ 0 — the COST MINIMUM. If the scene lit the raw angle the
-    // pond would flare to full brightness in the middle of a wrap.
     module.update(toFrameUpdate(poseFixture('mid', 0.01, 2.57, -0.54, 39), { scrubbed: false }));
     expect(isHolding(module)).toBe(true);
-    // the flame tracks the HELD angle: it drifts only by the honest θ̇/torque lerp, and
-    // stays nowhere near the blaze the raw θ ≈ 0 would have produced
     expect(Math.abs(paper() - atApex)).toBeLessThan(0.05 * atApex);
     expect(paper()).toBeLessThan(0.25 * emissiveGainOf(module, 0, 0, 0));
     module.dispose();
   });
 });
 
-// ---------------------------------------------------------------------------
-// the shaped reward IS the lighting
-// ---------------------------------------------------------------------------
 
 describe('pendulum / the shaped reward IS the lighting', () => {
   test("pendulumCost is the env's own expression", () => {
-    // an independent transcription of `gw_pend_step`'s cost line
     for (let i = 0; i <= 40; i++) {
       const th = -Math.PI + (2 * Math.PI * i) / 40;
       for (const thd of [-8, -3.3, 0, 1.7, 8]) {
@@ -834,7 +708,6 @@ describe('pendulum / the shaped reward IS the lighting', () => {
         }
       }
     }
-    // it is a function ON THE CIRCLE: θ and θ ± 2π are the same state
     expect(pendulumCost(3, 1, 0)).toBeCloseTo(pendulumCost(3 - 2 * Math.PI, 1, 0), 12);
     expect(COST_MAX).toBeCloseTo(Math.PI ** 2 + 0.1 * PD_MAX_SPEED ** 2 + 0.001 * PD_MAX_TORQUE ** 2, 12);
   });
@@ -870,25 +743,19 @@ describe('pendulum / the shaped reward IS the lighting', () => {
         );
       }
     }
-    // and it is not degenerate: the range really is used
     expect((samples[0] as Sample).serenity).toBeGreaterThan(0.99);
     expect((samples[samples.length - 1] as Sample).serenity).toBeLessThan(0.01);
   });
 
   test('the specific inversions the old product law rendered are gone', () => {
-    // measured on the shipped law: (θ=0, θ̇=8) cost 6.40 rendered 0.620, while
-    // (θ=2.4, θ̇=0) cost 5.76 — a BETTER state — rendered 0.131, i.e. 4.7× darker
     expect(pendulumCost(0, 8, 0)).toBeGreaterThan(pendulumCost(2.4, 0, 0));
     expect(serenityOf(0, 8, 0)).toBeLessThan(serenityOf(2.4, 0, 0));
     expect(pendulumCost(0, 8, 0)).toBeGreaterThan(pendulumCost(2.0, 0, 0));
     expect(serenityOf(0, 8, 0)).toBeLessThan(serenityOf(2.0, 0, 0));
-    // the cost minimum is the brightest frame in the scene, exactly
     expect(serenityOf(0, 0, 0)).toBe(1);
-    // …and the darkest is not merely "inverted": it is inverted AND spinning AND pushing
     expect(serenityOf(Math.PI, PD_MAX_SPEED, PD_MAX_TORQUE)).toBe(0);
     expect(serenityOf(Math.PI, 0, 0)).toBeGreaterThan(0);
     expect(serenityOf(Math.PI, 0, 0)).toBeLessThan(serenityOf(0, PD_MAX_SPEED, 0));
-    // the velocity term carries real weight — a third of the mean cost on the real lane
     expect(serenityOf(0, PD_MAX_SPEED, 0)).toBeLessThan(0.4);
   });
 
@@ -917,9 +784,7 @@ describe('pendulum / the shaped reward IS the lighting', () => {
     expect(lit.flame).toBeGreaterThan(dark.flame * 4);
     expect(lit.lights).toBeGreaterThan(dark.lights * 4);
     expect(lit.reflection).toBeGreaterThan(dark.reflection * 2);
-    // the inverted pose is a dim ember, well under the scene's bloom threshold
     expect(dark.paper).toBeLessThan(manifest.postConfig.bloomThreshold);
-    // and the ordering is the reward's, everywhere in between
     let prev = Infinity;
     for (let i = 0; i <= 16; i++) {
       module.update(toFrameUpdate(poseFixture(`ramp${i}`, (Math.PI * i) / 16, 0, 0, i)));
@@ -942,7 +807,7 @@ describe('pendulum / the shaped reward IS the lighting', () => {
       for (let i = 0; i < koi.count; i++) {
         koi.getMatrixAt(i, m);
         p.setFromMatrixPosition(m);
-        expect(p.y).toBeLessThan(WATER_LEVEL - 0.04); // always under the water
+        expect(p.y).toBeLessThan(WATER_LEVEL - 0.04);
         sum += p.y;
       }
       return sum / koi.count;
@@ -974,7 +839,6 @@ describe('pendulum / the torque curl', () => {
     module.update(toFrameUpdate(poseFixture('push-', 0.3, 0, -PD_MAX_TORQUE, 2)));
     expect(pos.visible).toBe(false);
     expect(neg.visible).toBe(true);
-    // the negative family is the same geometry, mirrored across the tangent
     expect(neg.scale.x).toBeLessThan(0);
 
     module.update(toFrameUpdate(poseFixture('nudge', 0.3, 0, PD_MAX_TORQUE * 0.25, 3)));
@@ -1011,11 +875,9 @@ describe('pendulum / the torque curl', () => {
       const th = -Math.PI + (2 * Math.PI * i) / 24;
       module.update(toFrameUpdate(poseFixture(`curl${i}`, th, 0, 1, i)));
       curl.updateWorldMatrix(true, false);
-      // it sits on the bob…
       world.setFromMatrixPosition(curl.matrixWorld);
       const bob = worldOf(module, 'bob');
       expect(world.distanceTo(bob)).toBeLessThan(1e-9);
-      // …and its local +x is the +θ tangent of the swing circle: d/dθ (sin θ, −cos θ)
       tangent.set(1, 0, 0).transformDirection(curl.matrixWorld);
       const t = Math.fround(th);
       expect(tangent.x).toBeCloseTo(Math.cos(t), 6);
@@ -1065,7 +927,6 @@ describe('pendulum / update contract', () => {
     expect(pool).not.toBeNull();
     if (!pool) return;
 
-    // every canonical pose, played sequentially: a meditation piece has no beats
     let t = 0;
     for (const f of fixtures) {
       ctx.setTime((t += 1));
@@ -1075,7 +936,6 @@ describe('pendulum / update contract', () => {
     expect(pool.stats.ripples).toBe(0);
     expect(pool.pulse.bloom).toBe(0);
 
-    // and even handed the full event grammar (which this env can never emit), nothing
     ctx.setTime(99);
     module.update(
       toFrameUpdate(fixtureNamed('at-rest'), {
@@ -1150,10 +1010,7 @@ describe('pendulum / lifecycle', () => {
     module.update(toFrameUpdate(poseFixture('apex', 3.088365, 2.621751, 0, 39)));
     module.update(toFrameUpdate(poseFixture('mid', 0.01, 2.6, 0, 39), { scrubbed: false }));
     expect(isHolding(module)).toBe(true);
-    // the art holds the apex…
     expect(worldOf(module, 'bob').y).toBeGreaterThan(0.9);
-    // …and the probe's own ground truth is still the raw pose, so the review overlay
-    // would draw the disagreement rather than hide it
     const probe = module.probes().find((p) => p.name === 'bob');
     expect(probe).toBeDefined();
     const truth = probe?.expectWorldPos({
@@ -1171,10 +1028,6 @@ describe('pendulum / lifecycle', () => {
 
 describe('pendulum / the thumb wall-view cap', () => {
   test('the thumb frame fits STYLE.md\u2019s 40 draws / 50k triangles, overlay included', async () => {
-    // The wall view is the whole gallery on one page: every scene there is a thumb, and
-    // the cap is what keeps 16 of them at 60 fps. Measured with the ground-truth overlay
-    // ON, because that is the state review screenshots are taken in, and across every
-    // fixture, because the busiest legal state is the one that has to fit.
     const { module } = await live('thumb');
     module.setDebug(true);
     for (const f of fixtures) module.update(toFrameUpdate(f));

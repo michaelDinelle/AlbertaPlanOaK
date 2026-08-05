@@ -1,7 +1,3 @@
-// The 16 OaK environments — the single client/server-shared env table.
-// Semantics verified against Sources/Gridworld.metal, Sources/ClassicControl.metal,
-// Sources/OakKernel.metal (oak_stage_fleet_env pose packing, L2650–2979).
-// FROZEN in Phase 0: additive changes only.
 
 export const ENV_IDS = [
   'HalfCheetah-v4',
@@ -28,21 +24,12 @@ export type EnvCategory = 'cheetah' | 'classic' | 'grid';
 
 export interface EnvInfo {
   envId: EnvId;
-  /** kebab-case directory/route slug */
   slug: string;
-  /** display name (env identity, not the scene title — scenes name themselves) */
   name: string;
   category: EnvCategory;
-  /** 'box' N means N continuous means; 'discrete' N means N-way categorical */
   action: { kind: 'box' | 'discrete'; n: number };
-  /**
-   * Steps per simulated second for realtime playback. Gridworlds are unitless;
-   * they carry a readable default tempo (8 Hz).
-   */
   controlHz: number;
-  /** true = integer/cell state, playback snaps (no pose interpolation) */
   discretePose: boolean;
-  /** whether the env ever emits done=1 in the record stream */
   emitsDone: boolean;
 }
 

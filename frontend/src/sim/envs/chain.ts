@@ -1,28 +1,13 @@
-// Chain-cont-v0 decoder (bsuite chain, L = 16).
-//
-// Oracles (ported, never guessed):
-//   Sources/Gridworld.metal      gw_chain_step L314
-//   tools/gridworld_ref.py       chain_step L288
-//   Sources/OakKernel.metal      pose packing L2712-2724, init L2320-2325
-//
-// A 16-cell corridor: action 1 walks pos+1, action 0 walks pos-1 (clamped at
-// 0). Reaching pos 15 pays the delayed +1, sets done=1 and WRAPS to pos 0 —
-// so pos 15 is never observed in the record and every `done` frame is both
-// the reward and a teleport back to the start.
-//
-// pose = [pos, 15, 0, 0, 0, 0, 0, 0, 0].
 
 import { CTRL_LEN, OFF_CTRL, OFF_DONE, OFF_POSE, POSE_LEN } from '../record';
 import type { EnvDecoder, EnvFrame, EnvGeometry, SimEvent } from '../types';
 import { NO_EVENTS } from '../events';
 
 export const CHAIN_L = 16;
-/** the paying cell — reached and immediately wrapped away from */
 export const CHAIN_END = CHAIN_L - 1;
 
 export interface ChainState {
   pos: number;
-  /** corridor length, so a scene never has to import the constant */
   len: number;
 }
 

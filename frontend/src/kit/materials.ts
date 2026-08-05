@@ -1,29 +1,7 @@
-// kit/materials — the one stylization language for every lit surface.
-//
-// STYLE.md: "Stylized-PBR with soft toon ramping. kit/materials.oakMaterial() on every
-// lit surface: soft 2–3-step NdotL ramp (softness ~0.25 — painterly, never hard cel),
-// sky-tinted fresnel rim, optional vertex wind."
-//
-// Implementation notes that matter to scenes:
-//  * `oakMaterial` is a real MeshStandardMaterial patched in `onBeforeCompile`, so it
-//    keeps shadows, fog, instancing, vertex colors and env lighting for free. One
-//    material instance can back any number of Mesh / InstancedMesh objects.
-//  * `customProgramCacheKey` encodes the patch flags, so two differently-patched
-//    materials never share a compiled program.
-//  * Animation is driven through a per-material UNIFORM HANDLE, never by touching
-//    shader internals: `oakUniforms(mat)?.setTime(ctx.time())` (or the convenience
-//    `setMaterialTime`). The handle exists before the first compile and is reused by
-//    every program compiled from that material.
-//  * Vertex wind displaces the render pass only; the shadow depth material is
-//    untouched, so wind-animated foliage casts its rest-pose shadow. That is a
-//    deliberate cost/coherence trade for grass and canopies.
 
 import * as THREE from 'three';
 import type { QualityTier } from './types';
 
-// ---------------------------------------------------------------------------
-// uniform handle
-// ---------------------------------------------------------------------------
 
 export interface NumberUniform {
   value: number;
@@ -33,11 +11,9 @@ export interface ColorUniform {
 }
 
 export interface OakUniforms {
-  /** seconds — ALWAYS driven from ctx.time(), never a private clock */
   uTime: NumberUniform;
   uWindAmp: NumberUniform;
   uWindFreq: NumberUniform;
-  /** world height at which sway reaches full amplitude */
   uWindHeight: NumberUniform;
   uRimColor: ColorUniform;
   uRimStrength: NumberUniform;
@@ -56,7 +32,6 @@ export interface OakHandle {
   setToon(steps: number, softness?: number): void;
 }
 
-/** A MeshStandardMaterial carrying the kit stylization + its uniform handle. */
 export interface OakMaterial extends THREE.MeshStandardMaterial {
   readonly oak: OakHandle;
 }
@@ -70,7 +45,6 @@ function isOakHandle(v: unknown): v is OakHandle {
   return typeof v === 'object' && v !== null && 'uniforms' in v && 'setTime' in v;
 }
 
-/** The handle for any kit material, or null for a plain material. */
 export function oakUniforms(material: THREE.Material | null | undefined): OakHandle | null {
   if (!material) return null;
   const m = material as unknown as HasOak;
@@ -79,27 +53,19 @@ export function oakUniforms(material: THREE.Material | null | undefined): OakHan
   return isOakHandle(ud) ? ud : null;
 }
 
-/** Drive one material's clock. No-op for materials without a handle. */
 export function setMaterialTime(material: THREE.Material | null | undefined, t: number): void {
   const h = oakUniforms(material);
   if (h) h.uniforms.uTime.value = t;
 }
 
-/** Drive a whole list (scenes keep one preallocated array of animated materials). */
 export function setMaterialsTime(materials: readonly (THREE.Material | null | undefined)[], t: number): void {
   for (let i = 0; i < materials.length; i++) setMaterialTime(materials[i], t);
 }
 
-// ---------------------------------------------------------------------------
-// oakMaterial
-// ---------------------------------------------------------------------------
 
 export interface OakWindOptions {
-  /** world-unit sway at full height */
   amplitude: number;
-  /** radians per second */
   frequency?: number;
-  /** local height (object space) at which sway is full; below it, sway tapers to 0 */
   height?: number;
 }
 
@@ -120,23 +86,16 @@ export interface OakMaterialOptions {
   fog?: boolean;
   name?: string;
 
-  /** 2–3 for the house look. 0 disables the ramp (physical diffuse). */
   toonSteps?: number;
-  /** band blend width in [0,1]; ~0.25 is the house softness (never hard cel) */
   toonSoftness?: number;
-  /** minimum diffuse response so shadowed faces stay painterly, not black */
   toonFloor?: number;
 
-  /** sky-tinted fresnel rim — pass a palette sky color */
   rimColor?: THREE.ColorRepresentation;
-  /** 0 disables the rim */
   rimStrength?: number;
   rimPower?: number;
 
-  /** vertex wind; a bare number is the amplitude */
   wind?: OakWindOptions | number;
 
-  /** scales rim/wind cost down for medium, off for thumb */
   tier?: QualityTier;
 }
 
@@ -146,7 +105,6 @@ const DEFAULT_RIM_POWER = 3;
 const DEFAULT_WIND_FREQ = 1.1;
 const DEFAULT_WIND_HEIGHT = 1;
 
-/** rim/wind scale per tier — thumb drops both (fixed camera, tiny raster). */
 export function tierEffectScale(tier: QualityTier | undefined): { rim: number; wind: number } {
   switch (tier) {
     case 'thumb':
@@ -158,7 +116,7 @@ export function tierEffectScale(tier: QualityTier | undefined): { rim: number; w
   }
 }
 
-const TOON_FN = /* glsl */ `
+const TOON_FN =  `
 uniform float uToonSteps;
 uniform float uToonSoftness;
 uniform float uToonFloor;
@@ -174,13 +132,13 @@ float oakToonRamp( const in float x ) {
 }
 `;
 
-const RIM_DECL = /* glsl */ `
+const RIM_DECL =  `
 uniform vec3 uRimColor;
 uniform float uRimStrength;
 uniform float uRimPower;
 `;
 
-const RIM_APPLY = /* glsl */ `
+const RIM_APPLY =  `
 {
 	vec3 oakViewDir = normalize( vViewPosition );
 	float oakFresnel = pow( clamp( 1.0 - dot( normal, oakViewDir ), 0.0, 1.0 ), uRimPower );
@@ -188,14 +146,14 @@ const RIM_APPLY = /* glsl */ `
 }
 `;
 
-const WIND_DECL = /* glsl */ `
+const WIND_DECL =  `
 uniform float uTime;
 uniform float uWindAmp;
 uniform float uWindFreq;
 uniform float uWindHeight;
 `;
 
-const WIND_APPLY = /* glsl */ `
+const WIND_APPLY =  `
 {
 	vec3 oakOrigin = modelMatrix[ 3 ].xyz;
 	#ifdef USE_INSTANCING
@@ -213,11 +171,6 @@ const DIFFUSE_LINE = /reflectedLight\.directDiffuse\s*\+=\s*irradiance\s*\*\s*BR
 
 let warnedToon = false;
 
-/**
- * Patch the physical lighting chunk so the DIFFUSE term reads a soft NdotL ramp while
- * specular stays physical. Returns the original fragment source unchanged (and warns
- * once) if three's chunk text ever moves — a stylization miss, never a crash.
- */
 export function patchToonFragment(fragment: string): string {
   const chunk = THREE.ShaderChunk.lights_physical_pars_fragment;
   if (typeof chunk !== 'string' || !DIFFUSE_LINE.test(chunk)) {
@@ -240,15 +193,6 @@ function normalizeWind(wind: OakWindOptions | number | undefined): OakWindOption
   return wind.amplitude > 0 ? wind : null;
 }
 
-/**
- * The house material. Every lit surface in every scene is one of these.
- *
- * ```ts
- * const grass = oakMaterial({ color: p.groundB, rimColor: p.skyHorizon, rimStrength: 0.3,
- *                             wind: { amplitude: 0.06, frequency: 1.4, height: 0.6 }, tier });
- * // in update(): oakUniforms(grass)!.setTime(frame-independent ctx.time())
- * ```
- */
 export function oakMaterial(opts: OakMaterialOptions = {}): OakMaterial {
   const scale = tierEffectScale(opts.tier);
   const wind = normalizeWind(opts.wind);
@@ -348,9 +292,6 @@ export function oakMaterial(opts: OakMaterialOptions = {}): OakMaterial {
   return material;
 }
 
-// ---------------------------------------------------------------------------
-// emissive (the only bloom feeders)
-// ---------------------------------------------------------------------------
 
 export interface EmissiveMaterialOptions {
   transparent?: boolean;
@@ -360,19 +301,13 @@ export interface EmissiveMaterialOptions {
   blending?: THREE.Blending;
   name?: string;
   map?: THREE.Texture | null;
-  /** false = the material ignores scene fog (through-the-fog markers) */
   fog?: boolean;
 }
 
 export interface EmissiveMaterial extends THREE.MeshBasicMaterial {
-  /** unscaled token color (intensity is applied on top of this) */
   readonly baseColor: THREE.Color;
 }
 
-/**
- * An unlit HDR emitter. `intensity > 1` pushes the color past the bloom threshold —
- * per STYLE.md these are the ONLY things that bloom. Renders unfogged and unlit.
- */
 export function emissiveMaterial(
   color: THREE.ColorRepresentation,
   intensity = 1.6,
@@ -396,29 +331,21 @@ export function emissiveMaterial(
   return material;
 }
 
-/** Re-scale an emissive material's HDR intensity (lantern brightness, cue reveal). */
 export function setEmissiveIntensity(material: EmissiveMaterial, intensity: number): void {
   material.color.copy(material.baseColor).multiplyScalar(Math.max(0, intensity));
   material.userData.oakEmissiveIntensity = intensity;
 }
 
-/** Tint an emissive material without losing its intensity (cue cyan ↔ magenta). */
 export function setEmissiveColor(material: EmissiveMaterial, color: THREE.ColorRepresentation): void {
   material.baseColor.set(color);
   const i = typeof material.userData.oakEmissiveIntensity === 'number' ? material.userData.oakEmissiveIntensity : 1;
   material.color.copy(material.baseColor).multiplyScalar(Math.max(0, i));
 }
 
-// ---------------------------------------------------------------------------
-// wisp — the shared avatar glow
-// ---------------------------------------------------------------------------
 
 export interface WispMaterialOptions {
-  /** HDR multiplier; >1 blooms */
   intensity?: number;
-  /** halo tightness */
   rimPower?: number;
-  /** idle breathing depth in [0,1] */
   breathe?: number;
   tier?: QualityTier;
   name?: string;
@@ -426,11 +353,10 @@ export interface WispMaterialOptions {
 
 export interface WispMaterial extends THREE.ShaderMaterial {
   readonly oak: OakHandle;
-  /** 0 = idle, >0 = celebration flare (host/scene drives this from events) */
   readonly pulse: NumberUniform;
 }
 
-const WISP_VERT = /* glsl */ `
+const WISP_VERT =  `
 #include <common>
 varying vec3 vOakNormalV;
 varying vec3 vOakViewDir;
@@ -444,7 +370,7 @@ void main() {
 }
 `;
 
-const WISP_FRAG = /* glsl */ `
+const WISP_FRAG =  `
 #include <common>
 uniform vec3 uColor;
 uniform float uIntensity;
@@ -468,11 +394,6 @@ void main() {
 }
 `;
 
-/**
- * The Wisp avatar's body material: an additive, depth-write-free glow with a soft halo
- * and an idle breath. Shareable across every grid scene; drive with
- * `oakUniforms(mat)!.setTime(ctx.time())` and `mat.pulse.value` on celebration.
- */
 export function wispMaterial(color: THREE.ColorRepresentation, opts: WispMaterialOptions = {}): WispMaterial {
   const scale = tierEffectScale(opts.tier);
   const uTime: NumberUniform = { value: 0 };
@@ -516,14 +437,12 @@ export function wispMaterial(color: THREE.ColorRepresentation, opts: WispMateria
       uTime.value = t;
     },
     setWind() {
-      /* wisps do not sway */
     },
     setRim(strength: number, c?: THREE.ColorRepresentation) {
       uniforms.uIntensity.value = strength;
       if (c !== undefined) uniforms.uColor.value.set(c);
     },
     setToon() {
-      /* no ramp on an unlit glow */
     },
   };
   Object.defineProperty(material, 'oak', { value: handle, enumerable: false, writable: false });

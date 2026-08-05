@@ -1,11 +1,4 @@
 /// <reference types="bun" />
-// MountainCar-cont-v0 decoder unit tests: the terrain function every scene
-// stands the car on, the anchors that must sit on it, the deterministic init,
-// and the goal/done/teleport triple.
-//
-// Oracles: test/fixtures/init_states.json (oak_fleet_init) and the trace
-// goldens (fp64 one-step parity against tools/physics_parity.py). The
-// row-by-row comparison lives in test/decode.test.ts.
 
 import { describe, expect, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
@@ -93,7 +86,6 @@ describe('terrain', () => {
       const fd = (mountainCarHeight(x + eps) - mountainCarHeight(x - eps)) / (2 * eps);
       expect(mountainCarSlope(x)).toBeCloseTo(fd, 6);
     }
-    // flat at the crest and the trough
     expect(mountainCarSlope(MC_CREST_X)).toBeCloseTo(0, 12);
     expect(mountainCarSlope(MC_TROUGH_X)).toBeCloseTo(0, 12);
   });
@@ -182,8 +174,6 @@ describe('events', () => {
   });
 
   test('done is a summit, and the car is already back at the respawn', () => {
-    // the kernel scores pos >= 0.5, then respawns at (-0.5, 0) in the same
-    // step, so the recorded row is the respawn with done = 1
     const a = frameOf(0, row([0.487, 0.02, 0.5]), prev);
     const b = frameOf(1, row([MC_START_POS, 0, 0.5], 1), a);
     expect(mountainCarDecoder.deriveEvents(a, b, STATIC)).toEqual([

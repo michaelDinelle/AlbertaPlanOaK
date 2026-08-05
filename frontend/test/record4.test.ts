@@ -1,19 +1,4 @@
 /// <reference types="bun" />
-// record-v4 codec tests.
-//
-// The proof obligation is not "the decoder runs" — it is "v4 changes nothing a
-// consumer can see". So the shape of every test here is: take REAL v3 experience,
-// push it through a v4 encode/decode round trip, and assert the thing downstream
-// actually reads is unchanged — bit-identical rows for the gridworlds, a bounded
-// half-quantum for the continuous envs, and identical decoded event timelines and
-// MultiKeyCorridor replay health for all of them.
-//
-// The encoder below is a TS REFERENCE implementation of `src/sim/RECORD_V4_SPEC.md`,
-// written for these tests. It is deliberately independent of the decoder: they share
-// only the spec's own vocabulary (the codec table, `wrapAngle`, the ctrl quantizer,
-// crc32) so a mistake in one is not silently mirrored in the other. The Swift encoder
-// in `Sources/Main.swift` implements the same document; the cross-language proof is
-// the Tier-S v3/v4 A/B run, not this file.
 
 import { describe, expect, test } from 'bun:test';
 import { existsSync, readFileSync, readdirSync } from 'node:fs';
@@ -57,16 +42,7 @@ import type { EnvDecoder } from '@sim/types';
 import { loadHarnessSource } from '@kit/harness';
 import { TheaterLoadError, loadTheaterRecording } from '../src/theater/loader';
 
-// ---------------------------------------------------------------------------
-// the reference encoder (test-only)
-// ---------------------------------------------------------------------------
 
-// Clamp bounds are SYMMETRIC, mirroring the Swift encoder: `min(max(q, -32767),
-// 32767)` and `min(max(q, -2147483647), 2147483647)`. The extra negative value
-// each two's-complement type could hold is deliberately unused, so the two
-// reference encoders emit the same BYTES for the same input — the mutual
-// agreement this pair exists to have. (These rows escape either way, so the
-// decoded output is identical regardless; the bytes are not.)
 const I16_MAX = 32767;
 const I32_MAX = 2147483647;
 const U8_MAX = 255;
@@ -81,23 +57,18 @@ function clampInt(v: number, lo: number, hi: number): number {
 interface EncodeOptions {
   envId: EnvId;
   seed?: number;
-  /** v3 rows: `steps × 16` floats */
   data: Float32Array;
   steps: number;
-  /** rows per chunk; default = one chunk for the whole lane */
   chunkSteps?: number;
-  /** leave `chunks` (and `steps`) out of the meta — the in-flight / pre-finalize shape */
   omitChunkTable?: boolean;
 }
 
 export interface EncodedV4 {
   bytes: Uint8Array;
   meta: RecordingMeta;
-  /** [stepStart, stepCount, byteOffset, byteLength] per chunk */
   chunks: [number, number, number, number][];
 }
 
-/** One chunk's uncompressed columnar payload + its header counters. */
 function buildChunkPayload(
   desc: CodecDescriptor,
   data: Float32Array,
@@ -118,8 +89,6 @@ function buildChunkPayload(
   );
   const escapes: number[] = [];
 
-  // The cheetah dx32 chain's origin: the EXACT f64 promotion of row 0's pose[0]
-  // (reading a Float32Array element already gives that promotion).
   const chunkBaseX = desc.category === 'cheetah' ? at(data, stepStart * RECORD_FLOATS + 7) : 0;
   let recon = chunkBaseX;
   let doneCount = 0;
@@ -165,18 +134,13 @@ function buildChunkPayload(
           if (!(q >= -I32_MAX && q <= I32_MAX)) escape = true;
           q = clampInt(q, -I32_MAX, I32_MAX);
         } else {
-          escape = true; // a poisoned chain cannot reconstruct: escape verbatim
+          escape = true;
         }
         col[i] = q;
         recon += q * scale;
       }
     }
 
-    // done is BIT-EXACT (spec: "Discrete actions, done: bit-exact"). Exactly 1.0
-    // sets the flag and is counted; exactly 0.0 (or -0.0) clears it; anything
-    // else — 0.5, NaN — ESCAPES with the flag clear. A truthiness test would be
-    // lossy for a fractional done (0.5 decoding as 1.0, unescaped) and would
-    // disagree with the Swift encoder on the header's doneCount for a NaN done.
     const doneV = at(data, row + 6);
     let done = false;
     if (doneV === 1) {
@@ -189,7 +153,6 @@ function buildChunkPayload(
     if (escape) escapes.push(i);
   }
 
-  // ---- lay the columns out in the spec's order ----
   let size = stepCount + ctrlCount * stepCount;
   if (desc.category === 'cheetah') size += 8;
   for (const field of desc.poseFields) {
@@ -242,8 +205,6 @@ function buildChunkPayload(
 }
 
 async function deflateRaw(bytes: Uint8Array): Promise<Uint8Array> {
-  // A fresh ArrayBuffer-backed copy: `BufferSource` excludes SharedArrayBuffer-backed
-  // views, which is what a bare `Uint8Array` widens to.
   const copy = new Uint8Array(bytes.byteLength);
   copy.set(bytes);
   const source = new ReadableStream<BufferSource>({
@@ -264,7 +225,6 @@ interface RawChunkV4 {
   doneCount: number;
 }
 
-/** File header + framed, DEFLATEd chunks. Split out so a test can hand-build a payload. */
 async function assembleV4(
   envKind: number,
   raw: readonly RawChunkV4[],
@@ -306,7 +266,6 @@ async function assembleV4(
   return { bytes, chunks };
 }
 
-/** Encode v3 float rows into a spec-conformant v4 file. */
 async function encodeV4(opts: EncodeOptions): Promise<EncodedV4> {
   const desc = codecForEnv(opts.envId);
   const seed = opts.seed ?? 0;
@@ -335,16 +294,11 @@ async function encodeV4(opts: EncodeOptions): Promise<EncodedV4> {
   return { bytes, meta, chunks };
 }
 
-// ---------------------------------------------------------------------------
-// comparison helpers
-// ---------------------------------------------------------------------------
 
-/** Per-column absolute tolerance for one env; 0 means "bit-identical required". */
 function toleranceFor(desc: CodecDescriptor): { tol: Float64Array; angular: boolean[] } {
   const tol = new Float64Array(RECORD_FLOATS);
   const angular = new Array<boolean>(RECORD_FLOATS).fill(false);
   if (desc.ctrl !== 'index') {
-    // q = round((clamp(v,-1,1)+1)*127.5) -> one quantum is 1/127.5
     for (let c = 0; c < desc.ctrl.n; c++) tol[c] = 1 / 255 + 1e-7;
   }
   for (const field of desc.poseFields) {
@@ -356,28 +310,8 @@ function toleranceFor(desc: CodecDescriptor): { tol: Float64Array; angular: bool
   return { tol, angular };
 }
 
-/**
- * Ceiling on the reported budget FRACTION.
- *
- * The quantum is not the whole error: the reconstruction is computed in f64 and
- * then stored to f32, which adds up to half an f32 ulp. Measured worst case over
- * the real 100k-step demo lanes is cheetah rootx at row 52554, where |Δ| =
- * 5.005e-3 against a 5e-3 half-quantum — the extra 5e-6 is inside the 1.5e-5
- * half-ulp of an f32 at 212.7 m. So the honest contract is
- * `|Δ| ≤ scale/2 + ½ulp(v)`, which `worstColumnError` enforces exactly; this
- * looser constant only guards the REPORTED ratio against a real drift.
- */
 const MAX_BUDGET_FRACTION = 1.01;
 
-/**
- * Every column within its own budget: 0 (bit-identical) for the exact ones, half
- * a quantum plus the f32 store for the quantized ones, and an ANGULAR half-quantum
- * for the wrapped ones.
- *
- * Answers the worst fraction of the pure quantum used, which the caller asserts is
- * > 0 — a continuous env whose round trip is exactly lossless means the quantized
- * columns were never read and the whole comparison is vacuous.
- */
 function worstColumnError(
   envId: EnvId,
   want: Float32Array,
@@ -415,9 +349,6 @@ function expectRowsIdentical(want: Float32Array, got: Float32Array, steps: numbe
   }
 }
 
-// ---------------------------------------------------------------------------
-// fixtures — the real v3 traces every env decoder is already goldened against
-// ---------------------------------------------------------------------------
 
 interface TraceCase {
   name: string;
@@ -449,22 +380,14 @@ const TRACE_NAMES: string[] = [
   'MountainCar-cont-v0.events',
 ];
 
-/**
- * Traces whose 200-step window actually fires events (measured from the checked-in
- * fixtures). Asserting they stay non-empty is what stops the "identical event
- * timeline" test from passing vacuously — comparing [] to [] proves nothing, and a
- * regenerated fixture could quietly make it so.
- */
 const TRACES_WITH_EVENTS = new Set([
   'DeepSea-cont-v0', 'KeyCorridor-cont-v0', 'CartPole-cont-v0', 'Chain-cont-v0',
   'LargeDeepSea-cont-v0', 'MultiKeyCorridor-cont-v0',
   'Acrobot-cont-v0.events', 'MountainCar-cont-v0.events',
 ]);
 
-// ---------------------------------------------------------------------------
 
 describe('the comparators themselves', () => {
-  // A comparison harness that cannot fail is worse than no harness at all.
   test('bit-identity fails on a one-ulp difference', () => {
     const a = new Float32Array(RECORD_FLOATS);
     const b = new Float32Array(RECORD_FLOATS);
@@ -472,7 +395,6 @@ describe('the comparators themselves', () => {
     b[7] = Math.fround(0.1 + 1e-8);
     expect(() => expectRowsIdentical(a, b, 1, 'self-test')).toThrow(/float 7/);
     expect(() => expectRowsIdentical(a, a, 1, 'self-test')).not.toThrow();
-    // NaN is compared by Object.is, so NaN vs NaN passes and NaN vs 0 does not
     a[3] = Number.NaN;
     b.set(a);
     expect(() => expectRowsIdentical(a, b, 1, 'self-test')).not.toThrow();
@@ -483,13 +405,11 @@ describe('the comparators themselves', () => {
   test('the tolerance comparator fails past half a quantum and is angular where the spec says', () => {
     const a = new Float32Array(RECORD_FLOATS);
     const b = new Float32Array(RECORD_FLOATS);
-    // CartPole pose[1] (xdot) has a 1e-3 quantum -> 5e-4 budget
     a[8] = 1;
     b[8] = 1 + 4e-4;
     expect(worstColumnError('CartPole-cont-v0', a, b, 1)).toBeGreaterThan(0.5);
     b[8] = 1 + 2e-3;
     expect(() => worstColumnError('CartPole-cont-v0', a, b, 1)).toThrow(/col 8/);
-    // pose[2] (theta) is wrapped: a full 2π apart is ZERO error, 1e-3 apart is not
     const c = new Float32Array(RECORD_FLOATS);
     const d = new Float32Array(RECORD_FLOATS);
     c[9] = Math.PI - 1e-6;
@@ -497,7 +417,6 @@ describe('the comparators themselves', () => {
     expect(worstColumnError('CartPole-cont-v0', c, d, 1)).toBeLessThan(1);
     d[9] = Math.PI - 1e-6 + 1e-3;
     expect(() => worstColumnError('CartPole-cont-v0', c, d, 1)).toThrow(/col 9/);
-    // an exact column (done) has a zero budget
     const e = new Float32Array(RECORD_FLOATS);
     const f = new Float32Array(RECORD_FLOATS);
     f[6] = 1;
@@ -518,7 +437,6 @@ describe('the frozen codec table', () => {
       const desc = RECORD_V4_CODECS[kind] as CodecDescriptor;
       expect(envKindOf(envId)).toBe(kind);
       expect(codecForEnv(envId)).toBe(desc);
-      // the spec's three categories map onto the shared env table's categories
       expect(desc.category).toBe(ENVS[envId].category);
 
       const used = new Set<number>();
@@ -533,10 +451,8 @@ describe('the frozen codec table', () => {
       for (const key of Object.keys(desc.poseConst ?? {})) {
         const idx = Number(key);
         expect(Number.isInteger(idx) && idx >= 0 && idx < 9).toBe(true);
-        // a constant and a column would fight over the same slot
         expect(used.has(idx)).toBe(false);
       }
-      // Box ctrl columns never exceed the 6 recorded ctrl slots
       if (desc.ctrl !== 'index') expect(desc.ctrl.n).toBeLessThanOrEqual(6);
     }
   });
@@ -544,11 +460,8 @@ describe('the frozen codec table', () => {
   test('a descriptor compares equal across the JSON round trip and unequal on any change', () => {
     const desc = codecForEnv('CartPole-cont-v0');
     expect(codecMatches(desc, JSON.parse(JSON.stringify(desc)))).toBe(true);
-    // absent vs empty poseConst is the one difference that is NOT a difference
     expect(codecMatches(codecForEnv('FourRooms-cont-v0'), { ...codecForEnv('FourRooms-cont-v0'), poseConst: {} })).toBe(true);
-    // key order inside poseConst does not matter
     expect(codecMatches(codecForEnv('DeepSea-cont-v0'), { category: 'grid', ctrl: 'index', poseFields: [{ idx: 0, enc: 'u8' }, { idx: 1, enc: 'u8' }], poseConst: { 3: 7, 2: 7 } })).toBe(true);
-    // everything that changes a decoded byte does matter
     expect(codecMatches(desc, { ...desc, category: 'grid' })).toBe(false);
     expect(codecMatches(desc, { ...desc, ctrl: { kind: 'u8box', n: 1 } })).toBe(false);
     expect(codecMatches(desc, { ...desc, poseFields: desc.poseFields.slice(1) })).toBe(false);
@@ -586,7 +499,7 @@ describe('the spec numerics', () => {
   test('round() is half AWAY FROM ZERO, as C and Swift do it — not Math.round', () => {
     expect(roundHalfAwayFromZero(0.5)).toBe(1);
     expect(roundHalfAwayFromZero(-0.5)).toBe(-1);
-    expect(Math.round(-0.5)).toBe(-0); // the trap this helper exists to avoid
+    expect(Math.round(-0.5)).toBe(-0);
     expect(roundHalfAwayFromZero(-1.5)).toBe(-2);
     expect(roundHalfAwayFromZero(2.5)).toBe(3);
     expect(roundHalfAwayFromZero(-2.4)).toBe(-2);
@@ -611,15 +524,11 @@ describe('the spec numerics', () => {
     expect(crc32(enc.encode('a'))).toBe(0xe8b7be43);
     expect(crc32(enc.encode('abc'))).toBe(0x352441c2);
     expect(crc32(enc.encode('123456789'))).toBe(0xcbf43926);
-    // windowed
     const padded = enc.encode('XXabcYY');
     expect(crc32(padded, 2, 5)).toBe(0x352441c2);
   });
 });
 
-// ---------------------------------------------------------------------------
-// the round trip that matters
-// ---------------------------------------------------------------------------
 
 describe('v3 → v4 → v3 over every real trace fixture', () => {
   for (const name of TRACE_NAMES) {
@@ -639,18 +548,13 @@ describe('v3 → v4 → v3 over every real trace fixture', () => {
       expect(raw4.steps).toBe(trace.raw.steps);
 
       if (desc.category === 'grid') {
-        // Gridworld rows are integers, constants and action indices — nothing to
-        // quantize, so anything short of bit-identical is a codec bug.
         expectRowsIdentical(trace.raw.data, raw4.data, trace.raw.steps, `${name} v4`);
       } else {
         const worst = worstColumnError(trace.envId, trace.raw.data, raw4.data, trace.raw.steps);
         expect(worst).toBeLessThan(MAX_BUDGET_FRACTION);
-        // …and the quantized columns really were exercised: an exactly lossless
-        // continuous round trip would mean the comparison never looked at them.
         expect(worst).toBeGreaterThan(0.05);
       }
 
-      // done is bit-exact for every category
       for (let i = 0; i < trace.raw.steps; i++) {
         expect(at(raw4.data, i * RECORD_FLOATS + 6)).toBe(at(trace.raw.data, i * RECORD_FLOATS + 6));
       }
@@ -664,7 +568,7 @@ describe('v3 → v4 → v3 over every real trace fixture', () => {
         seed: trace.seed,
         data: trace.raw.data,
         steps: trace.raw.steps,
-        chunkSteps: 37, // uneven chunking, so the chunk seams are under test too
+        chunkSteps: 37,
       });
       const raw4 = await parseActionsBinV4(enc.bytes, enc.meta);
 
@@ -675,8 +579,6 @@ describe('v3 → v4 → v3 over every real trace fixture', () => {
       if (TRACES_WITH_EVENTS.has(name)) expect(eventTimeline(d3).length).toBeGreaterThan(0);
       expect(eventTimeline(d4)).toEqual(eventTimeline(d3));
       expect(d4.nonFiniteRows).toBe(d3.nonFiniteRows);
-      // MultiKeyCorridor replays hidden key cells from ctrl and cross-checks the
-      // recorded pose every frame: a desync here would mean v4 moved an action.
       expect(d4.replay).toEqual(d3.replay);
       if (ENVS[trace.envId].category === 'grid') {
         expect(d4.frames.map((f) => f.state)).toEqual(d3.frames.map((f) => f.state));
@@ -713,17 +615,11 @@ describe('v3 → v4 → v3 over every real trace fixture', () => {
       steps: trace.raw.steps,
       chunkSteps: 200,
     });
-    // 200 steps is a tiny sample (one chunk header + one DEFLATE dictionary warm-up),
-    // so this is a floor check, not the 22× headline the spec quotes at 1M steps.
     expect(enc.bytes.byteLength).toBeLessThan(trace.raw.steps * 64 * 0.75);
   });
 });
 
-// ---------------------------------------------------------------------------
-// synthetic extremes
-// ---------------------------------------------------------------------------
 
-/** A v3 row buffer built from a per-row writer. */
 function makeRows(steps: number, fill: (row: Float32Array, i: number) => void): Float32Array {
   const data = new Float32Array(steps * RECORD_FLOATS);
   for (let i = 0; i < steps; i++) fill(data.subarray(i * RECORD_FLOATS, (i + 1) * RECORD_FLOATS), i);
@@ -733,8 +629,6 @@ function makeRows(steps: number, fill: (row: Float32Array, i: number) => void): 
 describe('synthetic extremes', () => {
   test('a −400 m rootx teleport survives inside a chunk AND across a chunk seam', async () => {
     const steps = 40;
-    // Two jumps: one at row 12 (inside chunk 0) and one at row 20 (the seam of a
-    // 20-step chunking). The dx32 chain has to absorb both without drifting.
     const data = makeRows(steps, (row, i) => {
       for (let c = 0; c < 6; c++) row[c] = Math.sin(i * 0.3 + c) * 0.4;
       row[6] = 0;
@@ -750,10 +644,8 @@ describe('synthetic extremes', () => {
       for (let i = 0; i < steps; i++) {
         const want = at(data, i * RECORD_FLOATS + 7);
         const got = at(raw4.data, i * RECORD_FLOATS + 7);
-        // 1 cm quantum, and it must NOT accumulate over the chain
         expect(Math.abs(got - want)).toBeLessThanOrEqual(0.005 + Math.abs(want) * 1.2e-7 + 1e-9);
       }
-      // no row escaped: −40000 quanta is nowhere near the i32 ceiling
       expect(scanChunksV4(enc.bytes).steps).toBe(steps);
     }
   });
@@ -767,9 +659,9 @@ describe('synthetic extremes', () => {
     const data = makeRows(steps, (row, i) => {
       row[0] = 0.5;
       row[6] = 0;
-      row[7] = boundaries[i] ?? 0; // theta, wrapped i16 @1e-4
-      row[8] = 1.25; // thetadot
-      row[9] = -0.5; // torque
+      row[7] = boundaries[i] ?? 0;
+      row[8] = 1.25;
+      row[9] = -0.5;
     });
     const enc = await encodeV4({ envId: 'Pendulum-cont-v0', data, steps });
     const raw4 = await parseActionsBinV4(enc.bytes, enc.meta);
@@ -779,7 +671,6 @@ describe('synthetic extremes', () => {
       const got = at(raw4.data, i * RECORD_FLOATS + 7);
       expect(got).toBeGreaterThanOrEqual(-Math.PI - 1e-4);
       expect(got).toBeLessThanOrEqual(Math.PI + 1e-4);
-      // the only promise the spec makes about a wrapped angle: sin/cos agree
       expect(Math.abs(Math.sin(got) - Math.sin(want))).toBeLessThan(1e-4);
       expect(Math.abs(Math.cos(got) - Math.cos(want))).toBeLessThan(1e-4);
       expect(Math.abs(wrapAngle(got - want))).toBeLessThanOrEqual(5e-5 + 1e-6);
@@ -810,7 +701,6 @@ describe('synthetic extremes', () => {
         else expect(b).toBe(a);
       }
     }
-    // and the damaged-row accounting downstream is unchanged
     const decoder = decoders['Pendulum-cont-v0'] as EnvDecoder<unknown, unknown>;
     const d3 = decodeRecording(parseActionsBin(new Uint8Array(data.buffer), {
       envId: 'Pendulum-cont-v0', seed: 0, actDim: 1, recordVersion: 3,
@@ -820,15 +710,12 @@ describe('synthetic extremes', () => {
   });
 
   test('an escaped row is verbatim across ALL 16 floats — even channels the codec drops', async () => {
-    // Pendulum's codec carries ctrl[0] and pose[0..2]; ctrl[1..5] and pose[3..8]
-    // are not columns at all. An escape must still restore every one of them, so
-    // this row is filled edge to edge with distinct values.
     const steps = 3;
     const data = makeRows(steps, (row, i) => {
       for (let c = 0; c < RECORD_FLOATS; c++) row[c] = (i + 1) * 1000 + c * 7 + 0.5;
       row[6] = i === 1 ? 1 : 0;
     });
-    data[1 * RECORD_FLOATS + 4] = Number.NaN; // escape row 1 (a ctrl slot the codec ignores)
+    data[1 * RECORD_FLOATS + 4] = Number.NaN;
     const enc = await encodeV4({ envId: 'Pendulum-cont-v0', data, steps });
     const raw4 = await parseActionsBinV4(enc.bytes, enc.meta);
     expectRowsIdentical(
@@ -840,19 +727,16 @@ describe('synthetic extremes', () => {
   });
 
   test('a NON-escaped row DROPS the channels the codec does not carry (declared lossy surface)', async () => {
-    // Not a bug — the spec says "remaining ctrl = 0" and "unlisted pose indices = 0".
-    // Every real recording writes zeros there; this pins the behaviour so a future
-    // env that starts using pose[8] cannot slip through unnoticed.
     const steps = 2;
     const data = makeRows(steps, (row) => {
-      row[0] = 0.25;   // Pendulum's only ctrl column
-      row[3] = 0.75;   // dropped
+      row[0] = 0.25;
+      row[3] = 0.75;
       row[6] = 0;
-      row[7] = 1.5;    // theta
-      row[8] = -2;     // thetadot
-      row[9] = 0.5;    // torque
-      row[13] = 4.25;  // pose[6] — dropped
-      row[15] = 9.75;  // pose[8] — dropped
+      row[7] = 1.5;
+      row[8] = -2;
+      row[9] = 0.5;
+      row[13] = 4.25;
+      row[15] = 9.75;
     });
     const enc = await encodeV4({ envId: 'Pendulum-cont-v0', data, steps });
     const raw4 = await parseActionsBinV4(enc.bytes, enc.meta);
@@ -869,7 +753,7 @@ describe('synthetic extremes', () => {
       row[0] = i % 2;
       row[6] = 0;
       row[7] = 0.05;
-      row[8] = i === 4 ? 1e6 : 0.75; // xdot @1e-3 -> q = 1e9, way past 32767
+      row[8] = i === 4 ? 1e6 : 0.75;
       row[9] = 0.02;
       row[10] = i === 6 ? -12345.6 : 0.5;
     });
@@ -883,53 +767,37 @@ describe('synthetic extremes', () => {
         `escaped CartPole row ${i}`,
       );
     }
-    // the in-range rows still went through the quantized columns
     expect(at(raw4.data, 0 * RECORD_FLOATS + 8)).toBeCloseTo(0.75, 3);
   });
 
   test('an escaped row stores the SYMMETRIC clamp in the quantized columns', async () => {
-    // Escaped rows still occupy the columns, and the dx32 chain advances by what
-    // is stored — so those bytes are part of the format even though the decoder
-    // overwrites the row. The Swift encoder clamps to ±32767 / ±(2^31−1), never
-    // to the extra negative value the two's-complement type could hold; this
-    // reference encoder must emit the same bytes.
-    // (Measured on the real Swift encoder by
-    //  `bun scripts/verify-record-v4.ts --escape-probe`.)
     const desc = codecForEnv('CartPole-cont-v0');
     const steps = 2;
     const data = makeRows(steps, (row, i) => {
       row[0] = 0;
       row[6] = 0;
       row[7] = 0.05;
-      row[8] = i === 0 ? 1e6 : -1e6; // xdot @1e-3 -> q = ±1e9, way past the ceiling
+      row[8] = i === 0 ? 1e6 : -1e6;
       row[9] = 0.02;
       row[10] = 0.5;
     });
     const { payload } = buildChunkPayload(desc, data, 0, steps);
-    // columns: hdr[2] | pose0 i16[2] | pose1 i16[2] | ...
     const pv = new DataView(payload.buffer, payload.byteOffset, payload.byteLength);
-    const pose1Off = steps + 2 * steps; // hdr, then pose[0]'s i16 column
+    const pose1Off = steps + 2 * steps;
     expect(pv.getInt16(pose1Off, true)).toBe(32767);
     expect(pv.getInt16(pose1Off + 2, true)).toBe(-32767);
-    expect(payload[0]! & 0x20).toBe(0x20); // both rows escaped
+    expect(payload[0]! & 0x20).toBe(0x20);
     expect(payload[1]! & 0x20).toBe(0x20);
   });
 
   test('an exact −n.5 quantization tie rounds AWAY from zero, end to end', async () => {
-    // The spec writes `round(...)` without naming the tie rule, and real traces
-    // never produce an exact tie (every scale is non-dyadic). One can be built:
-    // −3.21875 is an exact f32 and −3.21875 / 1e-4 is exactly −32187.5, so the
-    // rule is observable — away from zero gives −32188, Math.round gives −32187,
-    // and NEITHER escapes, so the decoded value silently differs. Swift's
-    // `.rounded()` gives −32188; measured on the real encoder by
-    // `bun scripts/verify-record-v4.ts --escape-probe`.
     const tie = -3.21875;
     expect(tie / 1e-4).toBe(-32187.5);
     const steps = 2;
     const data = makeRows(steps, (row, i) => {
       row[0] = 0;
       row[6] = 0;
-      row[7] = i === 0 ? tie : 0.05; // x @1e-4
+      row[7] = i === 0 ? tie : 0.05;
       row[8] = 0.75;
       row[9] = 0.02;
       row[10] = 0.5;
@@ -938,7 +806,7 @@ describe('synthetic extremes', () => {
     const { payload } = buildChunkPayload(desc, data, 0, steps);
     const pv = new DataView(payload.buffer, payload.byteOffset, payload.byteLength);
     expect(pv.getInt16(steps, true)).toBe(-32188);
-    expect(payload[0]! & 0x20).toBe(0); // in range: NOT escaped, so the value ships
+    expect(payload[0]! & 0x20).toBe(0);
     const enc = await encodeV4({ envId: 'CartPole-cont-v0', data, steps });
     const raw4 = await parseActionsBinV4(enc.bytes, enc.meta);
     expect(at(raw4.data, 7)).toBeCloseTo(-3.2188, 6);
@@ -950,18 +818,15 @@ describe('synthetic extremes', () => {
     const data = makeRows(steps, (row, i) => {
       for (let c = 0; c < 6; c++) row[c] = 0.1;
       row[6] = 0;
-      row[7] = i === 1 ? 3e7 : i === 2 ? -3e7 : 0; // ±3e9 quanta at s = 0.01
+      row[7] = i === 1 ? 3e7 : i === 2 ? -3e7 : 0;
       row[8] = 0.35;
       for (let p = 2; p < 9; p++) row[7 + p] = 0.1;
     });
     const { payload } = buildChunkPayload(desc, data, 0, steps);
     const pv = new DataView(payload.buffer, payload.byteOffset, payload.byteLength);
-    // hdr[3] | 6 ctrl u8 columns [3 each] | chunkBaseX f64 | dx32 column
     const dxOff = steps * (1 + 6) + 8;
     expect(pv.getInt32(dxOff + 4, true)).toBe(2147483647);
     expect(pv.getInt32(dxOff + 8, true)).toBe(-2147483647);
-    // the decoder walks the same clamped chain, so the escaped rows still land
-    // byte-verbatim and row 0 is untouched
     const enc = await encodeV4({ envId: 'HalfCheetah-v4', data, steps });
     const raw4 = await parseActionsBinV4(enc.bytes, enc.meta);
     for (const i of [1, 2]) {
@@ -974,8 +839,8 @@ describe('synthetic extremes', () => {
     const data = makeRows(steps, (row, i) => {
       row[0] = i % 4;
       row[6] = 0;
-      row[7] = i === 2 ? 900 : i;      // x past the u8 ceiling
-      row[8] = i === 4 ? 1.5 : 3;      // y not an integer
+      row[7] = i === 2 ? 900 : i;
+      row[8] = i === 4 ? 1.5 : 3;
       row[9] = 9;
       row[10] = 9;
     });
@@ -985,19 +850,15 @@ describe('synthetic extremes', () => {
   });
 
   test('the hdr nibble carries the FULL 0..15 index alongside done and escape', async () => {
-    // No live env emits an index above 5, so the fixtures alone would let a
-    // decoder mask 3 bits instead of 4 (or bleed the done/escape bits into the
-    // index) and still pass. The spec says bits 0-3, so exercise all 16.
     const steps = 32;
     const data = makeRows(steps, (row, i) => {
       row[0] = i % 16;
-      row[6] = i % 3 === 0 ? 1 : 0; // done overlaps the nibble's neighbour bit
+      row[6] = i % 3 === 0 ? 1 : 0;
       row[7] = (i % 9) + 1;
       row[8] = (i % 7) + 1;
       row[9] = 9;
       row[10] = 9;
     });
-    // one escaped row, so the escape bit is set in the same byte as a live index
     data[13 * RECORD_FLOATS + 8] = Number.NaN;
     const enc = await encodeV4({ envId: 'FourRooms-cont-v0', data, steps, chunkSteps: 11 });
     const raw4 = await parseActionsBinV4(enc.bytes, enc.meta);
@@ -1025,11 +886,6 @@ describe('synthetic extremes', () => {
   });
 
   test('a done that is not exactly 0 or 1 ESCAPES — it is never rounded into the flag', async () => {
-    // `done` is a documented bit-exact field AND the source of the chunk header's
-    // doneCount, so a truthiness test would be doubly wrong: 0.5 would decode as
-    // 1.0 unescaped (lossy), and a NaN done would be counted (the header would
-    // disagree with the rows). The Swift encoder sets the bit for exactly 1.0 and
-    // escapes everything else; this asserts the same rule end to end.
     const steps = 5;
     const doneValues = [0, 1, 0.5, Number.NaN, 1];
     const data = makeRows(steps, (row, i) => {
@@ -1042,9 +898,7 @@ describe('synthetic extremes', () => {
     });
     const enc = await encodeV4({ envId: 'FourRooms-cont-v0', data, steps });
     const raw4 = await parseActionsBinV4(enc.bytes, enc.meta);
-    // rows 2 and 3 come back verbatim (0.5 stays 0.5, NaN stays NaN), not as 1.0
     expectRowsIdentical(data, raw4.data, steps, 'FourRooms with a non-binary done');
-    // the header counts ONLY the exactly-1.0 rows
     const counted: number[] = [];
     await walkChunksV4(enc.bytes, enc.meta, (rows) => {
       counted.push(rows.chunk.doneCount);
@@ -1053,9 +907,6 @@ describe('synthetic extremes', () => {
   });
 });
 
-// ---------------------------------------------------------------------------
-// torn tails and damaged files
-// ---------------------------------------------------------------------------
 
 async function chainFixture(steps = 60, chunkSteps = 20): Promise<EncodedV4 & { data: Float32Array }> {
   const data = makeRows(steps, (row, i) => {
@@ -1099,12 +950,11 @@ describe('torn tails, damage and truncation', () => {
     const damaged = fx.bytes.slice();
     const second = fx.chunks[1] as [number, number, number, number];
     const flipAt = second[2] + CHUNK_HEADER_BYTES + 2;
-    damaged[flipAt] = (damaged[flipAt] ?? 0) ^ 0xff; // flip a payload byte
+    damaged[flipAt] = (damaged[flipAt] ?? 0) ^ 0xff;
     const scan = scanChunksV4(damaged);
     expect(scan.chunks.length).toBe(1);
     expect(scan.truncatedReason).toBe('chunk crc32 mismatch');
     expect((await parseActionsBinV4(damaged, fx.meta)).steps).toBe(20);
-    // with crc verification off, the scan indexes it and the INFLATE catches it
     expect(scanChunksV4(damaged, { verifyCrc: false }).steps).toBe(60);
   });
 
@@ -1113,8 +963,7 @@ describe('torn tails, damage and truncation', () => {
     const damaged = fx.bytes.slice();
     const second = fx.chunks[1] as [number, number, number, number];
     const dv = new DataView(damaged.buffer);
-    dv.setUint32(second[2] + 12, 999999, true); // lie about rawBytes
-    // crc still matches (it covers the compressed bytes), so only the reader catches it
+    dv.setUint32(second[2] + 12, 999999, true);
     expect(scanChunksV4(damaged).chunks.length).toBe(3);
     expect((await parseActionsBinV4(damaged, fx.meta)).steps).toBe(20);
   });
@@ -1130,9 +979,6 @@ describe('torn tails, damage and truncation', () => {
   });
 
   test('a crc-valid chunk that is structurally wrong THROWS, it does not truncate', async () => {
-    // Past the crc and the rawBytes check, a malformed payload is a CODEC bug,
-    // not a torn tail. Quietly playing the chunks before it would present half a
-    // lane as the whole truth — the one failure mode a replay tool must not have.
     const steps = 10;
     const data = makeRows(steps, (row, i) => {
       row[0] = i % 2;
@@ -1146,23 +992,19 @@ describe('torn tails, damage and truncation', () => {
       envId: 'Chain-cont-v0', seed: 0, actDim: 2, recordVersion: 4, codecVersion: 1,
     };
 
-    // (a) the escape count (the payload's last 4 bytes when nothing escaped) claims
-    //     rows the payload does not carry -> the escape table runs past the end
     const overrun = payload.slice();
     new DataView(overrun.buffer).setUint32(overrun.byteLength - 4, 3, true);
     const a = await assembleV4(envKindOf('Chain-cont-v0'), [
       { payload: overrun, stepStart: 0, stepCount: steps, doneCount },
     ]);
-    expect(scanChunksV4(a.bytes).chunks.length).toBe(1); // the framing is impeccable
+    expect(scanChunksV4(a.bytes).chunks.length).toBe(1);
     await expect(parseActionsBinV4(a.bytes, meta)).rejects.toThrow(/escape table/);
 
-    // (b) the header claims more steps than the columns hold
     const b = await assembleV4(envKindOf('Chain-cont-v0'), [
       { payload: payload.slice(), stepStart: 0, stepCount: steps + 40, doneCount },
     ]);
     await expect(parseActionsBinV4(b.bytes, meta)).rejects.toThrow(Record4ParseError);
 
-    // and the streaming reader agrees
     await expect(walkChunksV4(a.bytes, meta, () => undefined)).rejects.toThrow(Record4ParseError);
   });
 
@@ -1175,9 +1017,6 @@ describe('torn tails, damage and truncation', () => {
   });
 });
 
-// ---------------------------------------------------------------------------
-// header + meta validation
-// ---------------------------------------------------------------------------
 
 describe('header and meta validation', () => {
   test('rejects a short, foreign or future file header', async () => {
@@ -1216,7 +1055,7 @@ describe('header and meta validation', () => {
   test('the header envKind must agree with the meta envId', async () => {
     const fx = await chainFixture();
     const relabelled = fx.bytes.slice();
-    new DataView(relabelled.buffer).setUint32(8, 2, true); // say DeepSea
+    new DataView(relabelled.buffer).setUint32(8, 2, true);
     await expect(parseActionsBinV4(relabelled, fx.meta)).rejects.toThrow(/contradicts meta envId/);
   });
 
@@ -1227,7 +1066,6 @@ describe('header and meta validation', () => {
       codec: { category: 'grid', ctrl: 'index', poseFields: [{ idx: 0, enc: 'u8' }], poseConst: { 1: 16 } },
     };
     await expect(parseActionsBinV4(fx.bytes, wrong)).rejects.toThrow(/codec descriptor/);
-    // …and a meta with NO codec is fine: the file header's envKind picks the table entry
     const bare: RecordingMeta = {
       envId: fx.meta.envId, seed: fx.meta.seed, actDim: fx.meta.actDim, recordVersion: 4,
     };
@@ -1248,31 +1086,24 @@ describe('header and meta validation', () => {
   });
 });
 
-// ---------------------------------------------------------------------------
-// buffer windows
-// ---------------------------------------------------------------------------
 
 describe('buffer views', () => {
   test('only the view\'s own window is read (the pooled Buffer trap)', async () => {
     const fx = await chainFixture();
     const padded = new Uint8Array(fx.bytes.byteLength + 96);
     padded.fill(0xab);
-    padded.set(fx.bytes, 33); // deliberately not 4-byte aligned
+    padded.set(fx.bytes, 33);
     const view = padded.subarray(33, 33 + fx.bytes.byteLength);
 
     const raw4 = await parseActionsBinV4(view, fx.meta);
     expect(raw4.steps).toBe(60);
     expectRowsIdentical(fx.data, raw4.data, 60, 'unaligned view');
-    // an ArrayBuffer and a DataView of the same window agree
     expect((await parseActionsBinV4(fx.bytes.slice().buffer, fx.meta)).steps).toBe(60);
     expect((await parseActionsBinV4(new DataView(padded.buffer, 33, fx.bytes.byteLength), fx.meta)).steps)
       .toBe(60);
   });
 });
 
-// ---------------------------------------------------------------------------
-// the streaming reader
-// ---------------------------------------------------------------------------
 
 describe('walkChunksV4', () => {
   test('visits every chunk and reproduces parseActionsBinV4 exactly', async () => {
@@ -1302,7 +1133,6 @@ describe('walkChunksV4', () => {
       retained.push(rows.data);
     });
     expect(retained.length).toBe(3);
-    // all three views sit on the same scratch allocation: the documented contract
     expect(retained[1]?.buffer).toBe(retained[0]?.buffer as ArrayBufferLike);
     expect(retained[2]?.buffer).toBe(retained[0]?.buffer as ArrayBufferLike);
   });
@@ -1345,9 +1175,6 @@ describe('walkChunksV4', () => {
   });
 });
 
-// ---------------------------------------------------------------------------
-// range planning
-// ---------------------------------------------------------------------------
 
 describe('chunk-table range planning', () => {
   test('plans the fewest WHOLE chunks covering the wanted steps', async () => {
@@ -1397,12 +1224,10 @@ describe('chunk-table range planning', () => {
     expect(bare.meta.steps).toBeUndefined();
     expect(chunkTableFromMeta(bare.meta)).toBeNull();
     expect(rangeHeaderForSteps(bare.meta, 20)).toBeNull();
-    // …and the decode is unaffected: the file's own headers are the truth
     expect((await parseActionsBinV4(bare.bytes, bare.meta)).steps).toBe(60);
 
     expect(chunkTableFromMeta({ chunks: [] })).toBeNull();
     expect(chunkTableFromMeta({ chunks: undefined })).toBeNull();
-    // a table that does not start at the file header, skips steps, or carries junk
     expect(chunkTableFromMeta({ chunks: [[0, 10, 999, 100]] })).toBeNull();
     expect(chunkTableFromMeta({ chunks: [[0, 10, FILE_HEADER_BYTES, 100], [99, 10, FILE_HEADER_BYTES + 100, 100]] })).toBeNull();
     expect(chunkTableFromMeta({ chunks: [[0, 0, FILE_HEADER_BYTES, 100]] })).toBeNull();
@@ -1418,19 +1243,11 @@ describe('chunk-table range planning', () => {
   });
 });
 
-// ---------------------------------------------------------------------------
-// the two consumers: the theater loader and the artisan harness
-// ---------------------------------------------------------------------------
 
 interface LaneServerLog {
   ranges: (string | null)[];
 }
 
-/**
- * A fetch double for one v4 lane: meta.json, actions.bin with real single-range
- * support, and (for the harness) the run detail that points at the lane. Records
- * every Range header it was asked for, which is the thing under test.
- */
 function laneFetch(
   enc: EncodedV4,
   log: LaneServerLog,
@@ -1485,7 +1302,6 @@ describe('the theater loader on a v4 lane', () => {
       fetchImpl: laneFetch(fx, log),
     });
 
-    // Full-horizon law: the whole lane, no Range prefix, no decode cap.
     expect(log.ranges).toEqual([null]);
     expect(rec.steps).toBe(100);
     expect(rec.availableSteps).toBe(100);
@@ -1504,14 +1320,14 @@ describe('the theater loader on a v4 lane', () => {
       runId: 'demo', envId: 'Chain-cont-v0', seed: 0,
       fetchImpl: laneFetch(bare, log),
     });
-    expect(log.ranges).toEqual([null]); // no Range header at all
+    expect(log.ranges).toEqual([null]);
     expect(rec.bytes).toBe(bare.bytes.byteLength);
     expect(rec.steps).toBe(60);
   });
 
   test('a v4 body cut mid-chunk still opens on the whole chunks before the cut', async () => {
     const fx = await chainFixture(60, 20);
-    const cut = (fx.chunks[1] as number[])[2]! + 6; // mid chunk 1
+    const cut = (fx.chunks[1] as number[])[2]! + 6;
     const truncated: EncodedV4 = { ...fx, bytes: fx.bytes.slice(0, cut) };
     const log: LaneServerLog = { ranges: [] };
     const rec = await loadTheaterRecording({
@@ -1533,15 +1349,11 @@ describe('the theater loader on a v4 lane', () => {
   });
 });
 
-// ---------------------------------------------------------------------------
-// real 100k-step lanes — the only place the codec meets its actual workload
-// ---------------------------------------------------------------------------
 
-const HERE = dirname(fileURLToPath(import.meta.url)); // frontend/test
+const HERE = dirname(fileURLToPath(import.meta.url));
 const DEMO_ROOT = resolve(HERE, '..', '..', '.oak-benchmarks', 'frontend-demo-16env-20260803');
 const demoPresent = existsSync(DEMO_ROOT);
 
-/** first recorded lane for an env in the demo root */
 function demoLane(envId: EnvId): { path: string; seed: number } | null {
   const dir = join(DEMO_ROOT, envId);
   if (!existsSync(dir)) return null;
@@ -1552,13 +1364,7 @@ function demoLane(envId: EnvId): { path: string; seed: number } | null {
 }
 
 describe.skipIf(!demoPresent)('real 100k-step demo lanes', () => {
-  // A 200-step fixture cannot show a chain that drifts, a DEFLATE window that
-  // never warms up, or an accidental O(n²). These are the real files the theater
-  // opens, at the real length.
   const CASES: { envId: EnvId; minRatio: number }[] = [
-    // HalfCheetah is the codec's WORST case by a wide margin: 9 quantized pose
-    // columns of near-white noise, so DEFLATE has almost nothing to find. The
-    // spec's ~22× headline is the FLEET aggregate over 16 envs, not this lane.
     { envId: 'HalfCheetah-v4', minRatio: 3 },
     { envId: 'CartPole-cont-v0', minRatio: 15 },
     { envId: 'FourRooms-cont-v0', minRatio: 40 },
@@ -1576,7 +1382,6 @@ describe.skipIf(!demoPresent)('real 100k-step demo lanes', () => {
       });
       expect(raw3.steps).toBeGreaterThanOrEqual(100_000);
 
-      // 4096 steps/chunk: a plausible record-drain interval
       const enc = await encodeV4({
         envId, seed, data: raw3.data, steps: raw3.steps, chunkSteps: 4096,
       });
@@ -1596,7 +1401,6 @@ describe.skipIf(!demoPresent)('real 100k-step demo lanes', () => {
         `(${ratio.toFixed(1)}×, ${enc.chunks.length} chunks)`,
       );
 
-      // …and a chunk-aware prefix really does open a 2000-step window of it
       const plan = planPrefixV4(chunkTableFromMeta(enc.meta) ?? [], 2000);
       expect(plan.chunks).toBe(1);
       const prefix = await parseActionsBinV4(enc.bytes.slice(0, plan.bytes), enc.meta);
@@ -1613,11 +1417,10 @@ describe('the artisan harness on a v4 lane', () => {
     globalThis.fetch = laneFetch(fx, log, { runId: 'v4-run', steps: 100 });
     try {
       const source = await loadHarnessSource('Chain-cont-v0', { runId: 'v4-run' });
-      // a fixture fallback would be the silent failure mode here
       expect(source.note).toBeUndefined();
       expect(source.kind).toBe('recording');
       expect(source.frameCount).toBe(101);
-      expect(log.ranges).toEqual([null]); // full lane, no prefix range
+      expect(log.ranges).toEqual([null]);
     } finally {
       globalThis.fetch = realFetch;
     }

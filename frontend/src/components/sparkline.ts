@@ -1,29 +1,14 @@
-// Canvas sparkline for gallery cards: the shape of a run's median delivered
-// rate, no axes, no legend. It answers "did this run go anywhere?" — the
-// numbers next to it answer "how far".
-//
-// A zero baseline is drawn whenever the data crosses it, because the sign of
-// the delivered rate is the whole question in this project.
 
 import { el } from './table';
 
 export interface SparklineSpec {
   values: readonly (number | null)[];
-  /**
-   * x position of each value as a FRACTION of the run [0..1]. Without it,
-   * points spread by index — which silently invents a different x axis than
-   * the playhead's step/horizon and misaligns every overlay. Pass it whenever
-   * the sparkline sits under a time cursor.
-   */
   xs?: readonly number[];
   height?: number;
-  /** fixed width; omit to track the container */
   width?: number;
   stroke?: string;
   fill?: string;
-  /** draw a hairline at 0 when the series crosses it */
   zeroLine?: boolean;
-  /** terminal dot at the last finite sample */
   endDot?: boolean;
   ariaLabel?: string;
 }
@@ -81,9 +66,6 @@ export function sparkline(spec: SparklineSpec): SparklineHandle {
     const span = max - min;
     const n = values.length;
     const xs = spec.xs;
-    // With xs the x geometry is the TRUE timeline (0..1 of the run, full
-    // width, no horizontal pad) so an overlay at step/horizon lands exactly
-    // on the curve; without it, index spacing with padding as before.
     const xAt = (i: number): number => (
       xs !== undefined
         ? Math.min(Math.max(xs[i] ?? 0, 0), 1) * width
@@ -112,8 +94,6 @@ export function sparkline(spec: SparklineSpec): SparklineHandle {
     }
     if (points.length < 2) return;
 
-    // The fill is a fade, not a block: at card size a solid area reads as a bar
-    // chart and competes with the line, which is the part that carries shape.
     const baseY = min < 0 && max > 0 ? yAt(0) : height - pad;
     ctx.beginPath();
     ctx.moveTo(points[0]![0], baseY);

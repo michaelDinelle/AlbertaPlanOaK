@@ -78,8 +78,6 @@ FOUR_W, FOUR_H = 11, 11
 DEEPSEA_N = 8
 STREAM_GW = 3
 
-# ---------------------------------------------------------------- Philox mirror
-# Must match tools/physics_parity.py:_philox4x32_10 (selftest asserts this).
 def _philox4x32_10(key0: int, key1: int, ctr) -> list[int]:
     M0, M1 = 0xD2511F53, 0xCD9E8D57
     W0, W1 = 0x9E3779B9, 0xBB67AE85
@@ -101,9 +99,6 @@ def _u01(x: int) -> np.float32:
 
 F32 = np.float32
 
-# ---------------------------------------------------------------- FourRooms
-# 11x11, border walls; vertical wall col x=5 except hallways y in {2,8};
-# horizontal wall row y=5 except hallways x in {2,8}. Center (5,5) is wall.
 def four_is_wall(x: int, y: int) -> bool:
     if x <= 0 or x >= 10 or y <= 0 or y >= 10:
         return True
@@ -115,9 +110,9 @@ def four_is_wall(x: int, y: int) -> bool:
 
 FOUR_FREE = [(x, y) for y in range(FOUR_H) for x in range(FOUR_W) if not four_is_wall(x, y)]
 assert len(FOUR_FREE) == 68, len(FOUR_FREE)
-FOUR_NFREE = len(FOUR_FREE)  # 68: 121 cells - 40 border - 8 inner wall line cells
+FOUR_NFREE = len(FOUR_FREE)
 
-def four_room(x: int, y: int) -> int:  # 0=TL 1=TR 2=BL 3=BR ; -1 hallway
+def four_room(x: int, y: int) -> int:
     if x < 5 and y < 5: return 0
     if x > 5 and y < 5: return 1
     if x < 5 and y > 5: return 2
@@ -125,7 +120,6 @@ def four_room(x: int, y: int) -> int:  # 0=TL 1=TR 2=BL 3=BR ; -1 hallway
     return -1
 
 def four_reset() -> tuple[int, int, int, int, int, int]:
-    # (x, y, gx, gy, sinceGoal, respawnIdx) — deterministic, matches fleet init.
     return (1, 1, 9, 9, 0, 0)
 
 def four_obs(x, y, gx, gy, since_goal):
@@ -170,17 +164,11 @@ def four_step(lane_seed, respawn_idx, x, y, gx, gy, since_goal, action):
             block, word = block + 1, 0
     return reward, nx, ny, ngx, ngy, n_since, n_respawn, four_obs(nx, ny, ngx, ngy, n_since)
 
-# ---------------------------------------------------------------- DeepSea
-# N=8. Hidden per-cell action map M[r][c] (bit r*8+c of the 64-bit mask, fixed
-# per lane at reset): M==1 -> action 1 moves c+1, action 0 moves c-1 (normal);
-# M==0 -> inverted. c clamped to [0,N-1]; r += 1 every step.
-# Reward: -0.00125 if action==1 (the -0.01/N right-cost at N=8), +1 on reaching
-# (r=N-1, c=N-1); on reaching r==N-1 the agent resurfaces to (0,0), mask kept.
 DEEPSEA_RIGHT_COST = F32(-0.00125)
 
 def deepsea_reset(lane_seed):
-    raw = _philox4x32_10(lane_seed, 0, [0, 0, 0, 0])  # RESET stream
-    return (0, 0, 0, raw[0], raw[1])  # (r, c, lastA, maskLo, maskHi)
+    raw = _philox4x32_10(lane_seed, 0, [0, 0, 0, 0])
+    return (0, 0, 0, raw[0], raw[1])
 
 def deepsea_obs(r, c, last_a):
     o = np.zeros(OBS_W, dtype=F32)
@@ -204,15 +192,6 @@ def deepsea_step(mask_lo, mask_hi, r, c, last_a, action):
         nr, nc = 0, 0
     return reward, nr, nc, n_last, deepsea_obs(nr, nc, n_last)
 
-# ---------------------------------------------------------------- KeyCorridor
-# 9x7 (x 0..8, y 0..6), border walls; interior wall x=4 except the door cell
-# (4,3). Left room x 1..3, right room x 5..7, y 1..5 (15 cells each). Key in
-# the left room, goal in the right room. Auto-pickup on co-location with the
-# key; the locked door cell opens on entry iff the key is carried (else
-# blocked). Goal entry: +1, done=1, DeepSea-pattern respawn — agent+key
-# redrawn in the left room, goal redrawn in the right room, door re-locked
-# (Philox stream 3, ctr=(respawnIdx,0,0,0); words x=agent, y=key, z=goal;
-# cell idx = trunc(u01(word)*15), room cell (1 or 5) + idx%3, 1 + idx//3).
 KC_NCELL = 15
 KC_LEFT = [(1 + i % 3, 1 + i // 3) for i in range(KC_NCELL)]
 KC_RIGHT = [(5 + i % 3, 1 + i // 3) for i in range(KC_NCELL)]
@@ -226,8 +205,6 @@ def kc_is_wall(x: int, y: int) -> bool:
     return False
 
 def kc_reset() -> tuple:
-    # (x, y, kx, ky, gx, gy, flags, sinceGoal, respawnIdx) — deterministic,
-    # matches fleet init. flags bit0 hasKey, bit1 doorOpen.
     return (1, 1, 3, 5, 7, 1, 0, 0, 0)
 
 def kc_obs(x, y, kx, ky, gx, gy, flags, since_goal):
@@ -274,9 +251,6 @@ def kc_step(lane_seed, respawn_idx, x, y, kx, ky, gx, gy, flags, since_goal, act
     return (reward, nx, ny, kx, ky, gx, gy, flags, n_since, n_ri, done,
             kc_obs(nx, ny, kx, ky, gx, gy, flags, n_since))
 
-# ---------------------------------------------------------------- Chain
-# bsuite-style chain, L=16: pos 0..15. action 1 moves pos+1, action 0 moves
-# pos-1 (clamp 0). Delayed +1 at the chain end (pos 15), wrap to 0, done=1.
 CHAIN_L = 16
 
 def chain_obs(pos):
@@ -296,21 +270,13 @@ def chain_step(pos, action):
         pos = max(pos - 1, 0)
     return reward, pos, done, chain_obs(pos)
 
-# ---------------------------------------------------------------- LargeDeepSea
-# DeepSea scaled to N=16 (the canonical hard-exploration gridworld,
-# exponentially harder with size). Same mechanics as N=8: hidden per-cell
-# action map (bit r*16+c of the 256-bit mask, fixed per lane at reset);
-# M==1 -> action 1 moves c+1, action 0 moves c-1 (normal); M==0 -> inverted.
-# c clamped to [0,15]; r += 1 every step. Reward: -0.000625 if action==1 (the
-# -0.01/N right-cost at N=16), +1 on reaching (r=15, c=15); on reaching r==15
-# the agent resurfaces to (0,0), mask kept.
 LDEEPSEA_N = 16
 LDEEPSEA_RIGHT_COST = F32(-0.000625)
 
 def ldeepsea_reset(lane_seed):
-    raw0 = _philox4x32_10(lane_seed, 0, [0, 0, 0, 0])  # RESET stream
+    raw0 = _philox4x32_10(lane_seed, 0, [0, 0, 0, 0])
     raw1 = _philox4x32_10(lane_seed, 0, [1, 0, 0, 0])
-    return (0, 0, 0, list(raw0) + list(raw1))  # (r, c, lastA, mask[8])
+    return (0, 0, 0, list(raw0) + list(raw1))
 
 def ldeepsea_obs(r, c, last_a):
     o = np.zeros(OBS_W, dtype=F32)
@@ -336,18 +302,6 @@ def ldeepsea_step(mask, r, c, last_a, action):
         nr, nc = 0, 0
     return reward, nr, nc, n_last, ldeepsea_obs(nr, nc, n_last)
 
-# ------------------------------------------------------- MultiKeyCorridor
-# KeyCorridor extended to 3 sequential keys and doors. 17x7 (x 0..16, y 0..6),
-# border walls; interior walls x=4, x=8, x=12 except the door cells (4,3),
-# (8,3), (12,3). Four rooms x in {1..3, 5..7, 9..11, 13..15}, y 1..5 (15
-# cells each): key1 in room 0, key2 in room 1, key3 in room 2, goal in room
-# 3. Auto-pickup on co-location; the locked door j cell opens on entry iff
-# key j is carried (else blocked). Goal entry: +1, done=1, DeepSea-pattern
-# respawn — agent redrawn in room 0, keys redrawn in rooms 0/1/2, goal
-# redrawn in room 3, doors re-locked (Philox stream 3,
-# ctr=(respawnIdx,0,0,0): x=agent, y=key1, z=key2, w=key3; then
-# ctr=(respawnIdx,1,0,0) word x=goal; cell idx = trunc(u01(word)*15), room
-# base (1,5,9,13) + idx%3, 1 + idx//3).
 MKC_NCELL = 15
 MKC_BASE = (1, 5, 9, 13)
 MKC_ROOMS = [[(b + i % 3, 1 + i // 3) for i in range(MKC_NCELL)] for b in MKC_BASE]
@@ -362,9 +316,6 @@ def mkc_is_wall(x: int, y: int) -> bool:
     return False
 
 def mkc_reset() -> tuple:
-    # (x, y, k1, k2, k3, gx, gy, flags, sinceGoal, respawnIdx) —
-    # deterministic, matches fleet init. flags bits0-2 hasKey1..3,
-    # bits3-5 doorOpen1..3.
     return (1, 1, (3, 5), (7, 5), (11, 5), 15, 1, 0, 0, 0)
 
 def mkc_obs(x, y, k1, k2, k3, gx, gy, flags):
@@ -392,7 +343,7 @@ def mkc_step(lane_seed, respawn_idx, x, y, k1, k2, k3, gx, gy, flags,
     if mkc_is_wall(nx, ny):
         nx, ny = x, y
     elif ny == 3 and nx in (4, 8, 12):
-        j = (nx >> 2) - 1  # door index 0..2
+        j = (nx >> 2) - 1
         if not (flags & (8 << j)):
             if flags & (1 << j):
                 flags |= 8 << j
@@ -418,18 +369,9 @@ def mkc_step(lane_seed, respawn_idx, x, y, k1, k2, k3, gx, gy, flags,
     return (reward, nx, ny, k1, k2, k3, gx, gy, flags, n_since, n_ri, done,
             mkc_obs(nx, ny, k1, k2, k3, gx, gy, flags))
 
-# ------------------------------------------------------------- MemoryChain
-# bsuite Memory Chain: corridor of length 32 (pos 0..31). The cue (0=left,
-# 1=right) is observable ONLY at pos==0; the agent must carry it across the
-# full corridor, and at the far end (pos==31) its action IS the choice: +1
-# iff (action&1) == cue (0 otherwise), done=1, respawn at pos 0 with a
-# freshly drawn cue (Philox stream 3, ctr=(respawnIdx,0,0,0), cue =
-# raw[0]&1). Away from the end, action 1 walks pos+1, action 0 walks pos-1
-# (clamp 0).
 MCHAIN_L = 32
 
 def mchain_reset() -> tuple:
-    # (pos, cue, lastA, respawnIdx) — deterministic, matches fleet init.
     return (0, 0, 0, 0)
 
 def mchain_obs(pos, cue, last_a):
@@ -459,31 +401,6 @@ def mchain_step(lane_seed, pos, cue, last_a, respawn_idx, action):
     n_last = action & 1
     return reward, pos, cue, n_last, respawn_idx, done, mchain_obs(pos, cue, n_last)
 
-# --------------------------------------------------------- ProceduralMaze
-# 11x11 (border walls) whose 9x9 interior WALL LAYOUT is a per-lane PERFECT
-# maze generated from the lane's Philox chain (RESET stream) — deterministic
-# per lane, different across lanes, then fixed for the lane's lifetime.
-# Gen (once at fleet init, amortized): start all-wall (81 bits in 3 words,
-# bit idx = (x-1) + 9*(y-1), 1=wall; w2 masked to its low 17 bits); clear the
-# 25 room cells at odd interior coords (2i+1, 2j+1), i,j in 0..4; then carve
-# a randomized-DFS spanning tree over the 5x5 room lattice: start at room 0
-# = (1,1); at each step collect the current room's unvisited lattice
-# neighbors in fixed order right, down, left, up and descend into candidate
-# `word % n`, carving the between-cell free; backtrack (consuming no words)
-# when none remain. Words come from RESET-stream blocks ctr=(c,0,0,0),
-# c = 0,1,2,..., 4 words per block, consumed in order — INTEGER-ONLY (no
-# u01), so all three oracles are trivially bitwise identical. A spanning
-# tree over all 25 rooms makes every one of the exactly 49 free cells
-# (25 rooms + 24 carved edges) mutually reachable: the maze is solvable from
-# ANY respawn, by construction. (The pre-2026-08-05 generator — 50% random
-# walls plus one carved monotone path — left disconnected free pockets in
-# 999/1024 lane seeds; ~17% of free cells were off the main component, so
-# respawns stranded the agent or the goal and lanes went permanently
-# unsolvable. That environment bug, not the agent, was the flat slice.)
-# Completion: +1, done=1, agent and goal rejection-redrawn to free cells
-# (stream 3, ctr=(respawnIdx, block,0,0); agent from blocks 0,2,4..., goal
-# from blocks 1,3,5... != agent cell; cell idx = trunc(u01(w)*81), cell
-# (1 + idx%9, 1 + idx//9)). CONTINUING: the maze itself never resets.
 PMAZE_FREE_CACHE = {}
 
 def pmaze_gen(lane_seed):
@@ -491,12 +408,12 @@ def pmaze_gen(lane_seed):
     w = [0xFFFFFFFF, 0xFFFFFFFF, 0x1FFFF]
     for j in range(5):
         for i in range(5):
-            idx = 2 * i + 9 * (2 * j)  # room (2i+1, 2j+1)
+            idx = 2 * i + 9 * (2 * j)
             w[idx >> 5] &= 0xFFFFFFFF ^ (1 << (idx & 31))
     visited = 1
     stack = [0]
     ctr, bi = 0, 0
-    buf = _philox4x32_10(lane_seed, 0, [0, 0, 0, 0])  # RESET stream
+    buf = _philox4x32_10(lane_seed, 0, [0, 0, 0, 0])
     while stack:
         cur = stack[-1]
         ci, cj = cur % 5, cur // 5
@@ -514,7 +431,7 @@ def pmaze_gen(lane_seed):
             bi = 0
         ni, nj = cand[buf[bi] % len(cand)]
         bi += 1
-        idx = (ci + ni) + 9 * (cj + nj)  # the between-cell
+        idx = (ci + ni) + 9 * (cj + nj)
         w[idx >> 5] &= 0xFFFFFFFF ^ (1 << (idx & 31))
         visited |= 1 << (ni + 5 * nj)
         stack.append(ni + 5 * nj)
@@ -562,7 +479,7 @@ def pmaze_step(lane_seed, respawn_idx, x, y, gx, gy, since_goal, w, action):
     if (nx, ny) == (gx, gy):
         reward, done, n_since, n_ri = F32(1.0), 1, 0, respawn_idx + 1
         block = 0
-        while True:  # agent redraw: first free cell
+        while True:
             raw = _philox4x32_10(lane_seed, STREAM_GW, [respawn_idx, block, 0, 0])
             found = False
             for wd in raw:
@@ -576,7 +493,7 @@ def pmaze_step(lane_seed, respawn_idx, x, y, gx, gy, since_goal, w, action):
                 break
             block += 2
         block = 1
-        while True:  # goal redraw: free and != agent cell
+        while True:
             raw = _philox4x32_10(lane_seed, STREAM_GW, [respawn_idx, block, 0, 0])
             found = False
             for wd in raw:
@@ -592,15 +509,6 @@ def pmaze_step(lane_seed, respawn_idx, x, y, gx, gy, since_goal, w, action):
     return (reward, nx, ny, gx, gy, n_since, n_ri, done,
             pmaze_obs(nx, ny, gx, gy, n_since, w))
 
-# ------------------------------------------------------------ HighDimMaze
-# 11x11 serpentine maze (border walls; interior wall x=3 except the gap
-# (3,9), interior wall x=7 except the gap (7,1)): three corridors — down
-# x1..2, through (3,9), up x4..6, through (7,1), down x8..9. SIX discrete
-# actions: 0=up 1=down 2=left 3=right, 4=stay, 5=dash (up to two cells in
-# lastDir, stopping at walls; lastDir = the last cardinal action, init down).
-# Rich 16-channel observation: position, 4 wall sensors, goal relative
-# position, and an 8-bit binary position code. +1 on goal entry, done=1,
-# agent+goal rejection-redrawn to free cells (same scheme as ProceduralMaze).
 def hdm_is_wall(x: int, y: int) -> bool:
     if x <= 0 or x >= 10 or y <= 0 or y >= 10:
         return True
@@ -643,7 +551,7 @@ def hdm_step(lane_seed, respawn_idx, x, y, gx, gy, since_goal, last_dir, action)
     if (nx, ny) == (gx, gy):
         reward, done, n_since, n_ri = F32(1.0), 1, 0, respawn_idx + 1
         block = 0
-        while True:  # agent redraw: first free cell
+        while True:
             raw = _philox4x32_10(lane_seed, STREAM_GW, [respawn_idx, block, 0, 0])
             found = False
             for wd in raw:
@@ -657,7 +565,7 @@ def hdm_step(lane_seed, respawn_idx, x, y, gx, gy, since_goal, last_dir, action)
                 break
             block += 2
         block = 1
-        while True:  # goal redraw: free and != agent cell
+        while True:
             raw = _philox4x32_10(lane_seed, STREAM_GW, [respawn_idx, block, 0, 0])
             found = False
             for wd in raw:
@@ -673,13 +581,6 @@ def hdm_step(lane_seed, respawn_idx, x, y, gx, gy, since_goal, last_dir, action)
     return (reward, nx, ny, gx, gy, n_since, n_ri, last_dir, done,
             hdm_obs(nx, ny, gx, gy))
 
-# ---------------------------------------------------------------- POMaze
-# 11x11 PARTIAL-OBSERVABILITY maze (border walls; interior wall y=3 except
-# the gap (8,3), interior wall y=7 except the gap (2,7)): three bands, a
-# serpentine route. The agent sees ONLY the 8 adjacent cells (wall bits
-# N,NE,E,SE,S,SW,W,NW), its own position, and the goal's compass direction —
-# never the map. +1 on goal entry, done=1, agent+goal rejection-redrawn to
-# free cells (same scheme as ProceduralMaze).
 def po_is_wall(x: int, y: int) -> bool:
     if x <= 0 or x >= 10 or y <= 0 or y >= 10:
         return True
@@ -693,14 +594,14 @@ PO_FREE = [(x, y) for y in range(1, 10) for x in range(1, 10) if not po_is_wall(
 
 def po_obs(x, y, gx, gy):
     o = np.zeros(OBS_W, dtype=F32)
-    o[0] = F32(po_is_wall(x, y - 1))     # N
-    o[1] = F32(po_is_wall(x + 1, y - 1))  # NE
-    o[2] = F32(po_is_wall(x + 1, y))     # E
-    o[3] = F32(po_is_wall(x + 1, y + 1))  # SE
-    o[4] = F32(po_is_wall(x, y + 1))     # S
-    o[5] = F32(po_is_wall(x - 1, y + 1))  # SW
-    o[6] = F32(po_is_wall(x - 1, y))     # W
-    o[7] = F32(po_is_wall(x - 1, y - 1))  # NW
+    o[0] = F32(po_is_wall(x, y - 1))
+    o[1] = F32(po_is_wall(x + 1, y - 1))
+    o[2] = F32(po_is_wall(x + 1, y))
+    o[3] = F32(po_is_wall(x + 1, y + 1))
+    o[4] = F32(po_is_wall(x, y + 1))
+    o[5] = F32(po_is_wall(x - 1, y + 1))
+    o[6] = F32(po_is_wall(x - 1, y))
+    o[7] = F32(po_is_wall(x - 1, y - 1))
     o[8] = F32(x) / F32(10.0); o[9] = F32(y) / F32(10.0)
     o[10] = F32(gx > x); o[11] = F32(gx < x)
     o[12] = F32(gy > y); o[13] = F32(gy < y)
@@ -718,7 +619,7 @@ def po_step(lane_seed, respawn_idx, x, y, gx, gy, since_goal, action):
     if (nx, ny) == (gx, gy):
         reward, done, n_since, n_ri = F32(1.0), 1, 0, respawn_idx + 1
         block = 0
-        while True:  # agent redraw: first free cell
+        while True:
             raw = _philox4x32_10(lane_seed, STREAM_GW, [respawn_idx, block, 0, 0])
             found = False
             for wd in raw:
@@ -732,7 +633,7 @@ def po_step(lane_seed, respawn_idx, x, y, gx, gy, since_goal, action):
                 break
             block += 2
         block = 1
-        while True:  # goal redraw: free and != agent cell
+        while True:
             raw = _philox4x32_10(lane_seed, STREAM_GW, [respawn_idx, block, 0, 0])
             found = False
             for wd in raw:
@@ -748,14 +649,10 @@ def po_step(lane_seed, respawn_idx, x, y, gx, gy, since_goal, action):
     return (reward, nx, ny, gx, gy, n_since, n_ri, done,
             po_obs(nx, ny, gx, gy))
 
-# ------------------------------------------------------------ DelayedChain
-# Bare corridor, L=32: pos 0..31. action 1 moves pos+1, action 0 moves pos-1
-# (clamp 0). Reward +1 ONLY at the far end (reaching pos 31), wrap to 0,
-# done=1 — the cleanest long bare credit chain.
 DCHAIN_L = 32
 
 def dchain_reset() -> tuple:
-    return (0, 0)  # (pos, lastA) — deterministic, matches fleet init
+    return (0, 0)
 
 def dchain_obs(pos, last_a):
     o = np.zeros(OBS_W, dtype=F32)
@@ -776,7 +673,6 @@ def dchain_step(pos, last_a, action):
     n_last = action & 1
     return reward, pos, n_last, done, dchain_obs(pos, n_last)
 
-# ---------------------------------------------------------------- case I/O
 def _u32f(x: int) -> F32:
     return np.array([x & 0xFFFFFFFF], dtype=np.uint32).view(F32)[0]
 
@@ -786,10 +682,6 @@ def gen_cases(env: str, n: int, seed: int):
     for _ in range(n):
         if env == "FourRooms-cont-v0":
             ls = int(rng.integers(0, 2**31))
-            # The case format transports ints as exact float32 values; f32
-            # rounds above 2**24, so the TRANSPORTED value is the contract:
-            # round-trip the seed through f32 and use that integer for both
-            # the record and the golden output (uint(F32(ls)) == ls exactly).
             ls = int(F32(ls))
             ri = int(rng.integers(0, 64))
             x, y = FOUR_FREE[int(rng.integers(0, FOUR_NFREE))]
@@ -817,8 +709,6 @@ def gen_cases(env: str, n: int, seed: int):
             a = int(rng.integers(0, 4))
             u = rng.random()
             if u < 0.25:
-                # force the completion/respawn path: step from a free neighbor
-                # cell straight into the goal
                 cands = []
                 for ddx, ddy, aa in ((1, 0, 2), (-1, 0, 3), (0, 1, 0), (0, -1, 1)):
                     cx, cy = gx + ddx, gy + ddy
@@ -827,7 +717,6 @@ def gen_cases(env: str, n: int, seed: int):
                 if cands:
                     x, y, a = cands[int(rng.integers(0, len(cands)))]
             elif u < 0.5:
-                # force the door path: step into the door cell with random flags
                 x, y, a = (3, 3, 3) if rng.random() < 0.5 else (5, 3, 2)
             ins.append([F32(ls), F32(ri), F32(x), F32(y), F32(kx), F32(ky),
                         F32(gx), F32(gy), F32(flags), F32(sg), F32(a)])
@@ -841,7 +730,6 @@ def gen_cases(env: str, n: int, seed: int):
             r_, c_ = int(rng.integers(0, 16)), int(rng.integers(0, 16))
             la, a = int(rng.integers(0, 2)), int(rng.integers(0, 2))
             if rng.random() < 0.25:
-                # force the resurface path (and sometimes the treasure)
                 r_ = 14
             ins.append([_u32f(m) for m in mask] + [F32(r_), F32(c_), F32(la), F32(a)])
             rw, nr, nc, nla, obs = ldeepsea_step(mask, r_, c_, la, a)
@@ -857,8 +745,6 @@ def gen_cases(env: str, n: int, seed: int):
             a = int(rng.integers(0, 4))
             u = rng.random()
             if u < 0.25:
-                # force the completion/respawn path: step from a free neighbor
-                # cell straight into the goal
                 cands = []
                 for ddx, ddy, aa in ((1, 0, 2), (-1, 0, 3), (0, 1, 0), (0, -1, 1)):
                     cx, cy = gx + ddx, gy + ddy
@@ -867,7 +753,6 @@ def gen_cases(env: str, n: int, seed: int):
                 if cands:
                     x, y, a = cands[int(rng.integers(0, len(cands)))]
             elif u < 0.5:
-                # force a door path: step into a random door cell (random flags)
                 d0 = 4 * int(rng.integers(1, 4))
                 x, y, a = (d0 - 1, 3, 3) if rng.random() < 0.5 else (d0 + 1, 3, 2)
             ins.append([F32(ls), F32(ri), F32(x), F32(y),
@@ -887,7 +772,7 @@ def gen_cases(env: str, n: int, seed: int):
             ri = int(rng.integers(0, 64))
             a = int(rng.integers(0, 2))
             if rng.random() < 0.3:
-                pos = MCHAIN_L - 1   # force the choice/respawn path
+                pos = MCHAIN_L - 1
             ins.append([F32(pos), F32(cue), F32(la), F32(ri), F32(ls), F32(a),
                         F32(0.0)])
             r, npos, ncue, nla, nri, dn, obs = mchain_step(ls, pos, cue, la, ri, a)
@@ -903,8 +788,6 @@ def gen_cases(env: str, n: int, seed: int):
             sg = int(rng.integers(0, 1024))
             a = int(rng.integers(0, 4))
             if rng.random() < 0.25:
-                # force the completion/respawn path: step from a free neighbor
-                # cell straight into the goal
                 cands = []
                 for ddx, ddy, aa in ((1, 0, 2), (-1, 0, 3), (0, 1, 0), (0, -1, 1)):
                     cx, cy = gx + ddx, gy + ddy
@@ -938,10 +821,8 @@ def gen_cases(env: str, n: int, seed: int):
             u = rng.random()
             if (u < 0.125 and gx >= 3 and not hdm_is_wall(gx - 1, gy)
                     and not hdm_is_wall(gx - 2, gy)):
-                # force completion via a dash: two cells left of the goal
                 x, y, ld, a = gx - 2, gy, 3, 5
             elif u < 0.25:
-                # force completion via a walk-in from a free neighbor cell
                 cands = []
                 for ddx, ddy, aa in ((1, 0, 2), (-1, 0, 3), (0, 1, 0), (0, -1, 1)):
                     cx, cy = gx + ddx, gy + ddy
@@ -982,15 +863,15 @@ def gen_cases(env: str, n: int, seed: int):
             pos = int(rng.integers(0, DCHAIN_L))
             la, a = int(rng.integers(0, 2)), int(rng.integers(0, 2))
             if rng.random() < 0.3:
-                pos, a = DCHAIN_L - 2, 1   # force the far-end reward/wrap path
+                pos, a = DCHAIN_L - 2, 1
             ins.append([F32(pos), F32(la), F32(a)])
             r, npos, nla, dn, obs = dchain_step(pos, la, a)
             outs.append(np.concatenate([[r, F32(npos), F32(nla), F32(dn)], obs]))
-        else:  # Chain-cont-v0
+        else:
             pos = int(rng.integers(0, CHAIN_L))
             a = int(rng.integers(0, 2))
             if rng.random() < 0.25:
-                pos, a = CHAIN_L - 2, 1   # force the chain-end wrap path
+                pos, a = CHAIN_L - 2, 1
             ins.append([F32(pos), F32(a)])
             r, npos, dn, obs = chain_step(pos, a)
             outs.append(np.concatenate([[r, F32(npos), F32(dn)], obs]))
@@ -1076,9 +957,6 @@ def main():
                     "HighDimMaze-cont-v0", "POMaze-cont-v0", "DelayedChain-cont-v0"):
             a_i, a_o = gen_cases(env, 64, 999)
             b_i, b_o = gen_cases(env, 64, 999)
-            # Compare the uint32 bit view: mask words transported as f32 bit
-            # patterns can BE NaN values (array_equal would fail NaN != NaN
-            # even on bit-identical arrays).
             assert (np.array_equal(a_o.view(np.uint32), b_o.view(np.uint32))
                     and np.array_equal(a_i.view(np.uint32), b_i.view(np.uint32)))
             print(f"{env}: determinism OK (64 cases)")

@@ -1,5 +1,3 @@
-// Env decoder registry. ORCHESTRATOR-OWNED: decoder agents own their env files;
-// entries are merged here after each build wave.
 
 import type { EnvId } from '@shared/envs';
 import type { EnvDecoder } from './types';

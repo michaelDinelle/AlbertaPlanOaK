@@ -1,22 +1,4 @@
 /// <reference types="bun" />
-// Pendulum-cont-v0 decoder unit tests.
-//
-// The load-bearing test here is the ANGLE CONVENTION. Every other env's
-// geometry is pinned by a position or a bound; Pendulum's is pinned only by
-// the sign of a sine, and the Metal comments disagree with the Metal code
-// ("hang down" for an init of th = pi, "angle from upright" for a cost that is
-// minimised at th = 0). Getting it backwards would render every pendulum scene
-// upside down with no test failing anywhere else, so the convention is
-// FALSIFIED against real recorded data below: reproducing
-//     thdot_{t+1} = clamp(thdot_t + (-15 sin(th_t) + 3 u_{t+1}) * 0.05, +-8)
-//     th_{t+1}    = wrap(th_t + thdot_{t+1} * 0.05)
-// over 200 recorded steps agrees to ~3e-7, while the opposite sign (+15 sin)
-// is off by 1.5 — five orders of magnitude apart. th = 0 is therefore the
-// stable hanging-down state and th = +-pi is inverted.
-//
-// Other oracles: test/fixtures/init_states.json (oak_fleet_init) and the trace
-// golden (fp64 one-step parity against tools/physics_parity.py). The
-// row-by-row comparison lives in test/decode.test.ts.
 
 import { describe, expect, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
@@ -74,10 +56,6 @@ function frameOf(
   return pendulumDecoder.decodeFrame(i, r, STATIC, prev);
 }
 
-/**
- * Replay the kernel's own update with the gravity sign under test, using only
- * recorded values. Returns the worst absolute residual over the trace.
- */
 function residualForGravitySign(frames: EnvFrame<PendulumState>[], sign: number): number {
   let worst = 0;
   for (let i = 1; i < frames.length; i++) {
@@ -105,13 +83,11 @@ describe('angle convention (falsified against recorded data)', () => {
     const correct = residualForGravitySign(frames, -1);
     const flipped = residualForGravitySign(frames, +1);
     expect(correct).toBeLessThan(1e-5);
-    // the opposite convention is not a near miss; it is a different env
     expect(flipped).toBeGreaterThan(0.1);
     expect(flipped / Math.max(correct, 1e-12)).toBeGreaterThan(1e4);
   });
 
   test('the lane falls away from the inverted init within the trace', () => {
-    // th = pi is the unstable equilibrium: the stream leaves it and heads for 0
     expect(Math.abs(frames[0]?.state.th ?? 0)).toBeGreaterThan(3.1);
     expect(Math.abs(frames[200]?.state.th ?? 0)).toBeLessThan(2);
   });
@@ -132,7 +108,6 @@ describe('constants mirror the kernel', () => {
     expect(PD_MAX_TORQUE).toBe(2);
     expect(PD_G).toBe(10);
     expect(PD_L).toBe(1);
-    // the kernel's 15 = 3g/2l
     expect((3 * PD_G) / (2 * PD_L)).toBe(15);
   });
 });
@@ -172,7 +147,6 @@ describe('wrapPi', () => {
       const w = wrapPi(x);
       expect(w).toBeGreaterThanOrEqual(-Math.PI);
       expect(w).toBeLessThan(Math.PI);
-      // same physical angle
       expect(Math.abs(Math.sin(w) - Math.sin(x))).toBeLessThan(1e-12);
       expect(Math.abs(Math.cos(w) - Math.cos(x))).toBeLessThan(1e-12);
     }
@@ -228,7 +202,6 @@ describe('decoder contract', () => {
     expect(f.state.th).toBe(1.25);
     expect(f.state.thDot).toBe(-2.5);
     expect(f.state.torque).toBe(1.5);
-    // the Box action is the raw ctrl[0]; the kernel's torque is 2 * ctrl[0]
     expect(f.state.action).toBe(0.75);
     expect(f.state.effort).toBe(0.75);
   });
@@ -244,7 +217,6 @@ describe('events', () => {
   const prev = pendulumDecoder.initFrame(56, STATIC);
 
   test('a continuing env fires nothing, not even across a wrap', () => {
-    // th wrapping from +pi to -pi is continuous on the circle
     const a = frameOf(0, row([3.1409824, 0.1, 0]), prev);
     const b = frameOf(1, row([-3.1396763, 0.12, 0]), a);
     expect(pendulumDecoder.deriveEvents(a, b, STATIC)).toEqual([]);

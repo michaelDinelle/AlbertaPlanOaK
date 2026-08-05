@@ -1,10 +1,3 @@
-// Gold Hour Savanna — scene manifest (HalfCheetah-v4).
-//
-// The thumbFrame is a REAL recorded pose: step 52025 of the demo run's seed-0 lane — the
-// animal running at 0.97 m/s with its back toe planted at 0.044 (one geom radius, i.e.
-// standing on the ground) and the front leg swinging through. Nothing about it is posed;
-// it is what the agent actually did after 52k steps of learning, which is the point of
-// the gallery.
 
 import * as THREE from 'three';
 import { TOKENS } from '@kit/tokens';
@@ -44,11 +37,6 @@ export const manifest: SceneManifest = {
       .lerp(new THREE.Color(TOKENS.palettes.dusk.skyTop), 0.55)
       .getHex(),
   },
-  // Measured by walking the built scene graph at each tier with the treadmill fully
-  // populated (shadow pass counted as a second draw per caster):
-  //   hero 50 draws / 172k tris · medium 48 / 100k · thumb 22 draws / 28k tris
-  // Declared with headroom for the ground-truth overlay and the celebration pool, well
-  // inside STYLE.md's 300 / 500k hero cap — and thumb is inside its 40 / 50k contract.
   budget: { drawCalls: 72, triangles: 220000 },
 };
 

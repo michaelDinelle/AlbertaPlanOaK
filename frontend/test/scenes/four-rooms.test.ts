@@ -1,11 +1,4 @@
 /// <reference types="bun" />
-// Four Seasons Courtyard (FourRooms-cont-v0) — the accuracy + lifecycle self-check.
-//
-// This mirrors mountain-car.test.ts's shape and adds what the GRID canon has to prove:
-// the wisp's two anchors land on `cellToWorld` at every tier, the goal beacon tracks a
-// RESPAWNING goal (including onto a hallway), the seasonal skin is a pure read of the
-// env's own `fourRoomsRoom`, and a hop is bounded by one cell — the scene may lag the
-// truth, but never by more than the step it is gliding through.
 
 import { describe, expect, test } from 'bun:test';
 import * as THREE from 'three';
@@ -47,7 +40,7 @@ import {
   type StubSceneContext,
 } from './aligned';
 
-const SEED = 8; // the demo run's first FourRooms lane
+const SEED = 8;
 
 function geometryOf(): EnvGeometry {
   return fourRoomsDecoder.geometry(fourRoomsDecoder.initStatic(SEED), SEED);
@@ -83,7 +76,6 @@ function worldOf(module: SceneModule, probeName: string): THREE.Vector3 {
   return new THREE.Vector3().setFromMatrixPosition(probe.object.matrixWorld);
 }
 
-// ---------------------------------------------------------------------------
 
 describe('four-rooms / manifest + fixtures', () => {
   test('manifest declares the frozen contract fields', () => {
@@ -151,18 +143,15 @@ describe('four-rooms / the layout is read, never re-derived', () => {
     let total = 0;
     for (let room = 0; room < 4; room++) {
       const b = roomBounds(grid, room);
-      expect(b.cells).toBe(16); // each room is a 4x4 block of free cells
+      expect(b.cells).toBe(16);
       total += b.cells;
-      // the box covers exactly its cells' centres, plus half a cell of margin
       expect(b.halfX).toBeCloseTo(2 * CELL, 10);
       expect(b.halfZ).toBeCloseTo(2 * CELL, 10);
       expect(Math.abs(b.cx)).toBeCloseTo(2.5 * CELL, 10);
       expect(Math.abs(b.cz)).toBeCloseTo(2.5 * CELL, 10);
-      // and it stays inside the courtyard footprint
       expect(Math.abs(b.cx) + b.halfX).toBeLessThanOrEqual(COURT_HALF + 1e-9);
       expect(Math.abs(b.cz) + b.halfZ).toBeLessThanOrEqual(COURT_HALF + 1e-9);
     }
-    // 64 room cells + 4 hallways = the 68 free cells the env reports
     expect(total + FOURROOMS_HALLWAYS.length).toBe(FOURROOMS_FREE_CELLS);
   });
 
@@ -170,7 +159,7 @@ describe('four-rooms / the layout is read, never re-derived', () => {
     const skin = courtyardSkin(TOKENS.palettes.noon, TOKENS);
     expect(skin.seasons.length).toBe(4);
     const hexes = new Set(skin.seasons.map((s) => s.floor.getHex()));
-    expect(hexes.size).toBe(4); // no two seasons share a floor
+    expect(hexes.size).toBe(4);
     for (const s of skin.seasons) expect(s.hedge.getHex()).not.toBe(skin.evergreen.getHex());
   });
 
@@ -183,7 +172,6 @@ describe('four-rooms / the layout is read, never re-derived', () => {
         expect(h(x, z)).toBe(0);
       }
     }
-    // ...and really does roll outside it
     let wander = 0;
     for (const p of [-16, -13, 13, 16]) wander = Math.max(wander, Math.abs(h(p, p)));
     expect(wander).toBeGreaterThan(0.05);
@@ -194,7 +182,6 @@ describe('four-rooms / alignment', () => {
   test('every probe lands on ground truth at hero tier', async () => {
     const module = createScene();
     const report = await assertAligned(module, fixtures, { geometry: geometryOf(), seed: SEED, tier: 'hero' });
-    // these roots carry POSITION ONLY — they should be exact, not merely within 1e-3
     expect(report.worst.get('wisp') ?? 1).toBeLessThan(1e-9);
     expect(report.worst.get('wisp-anchor') ?? 1).toBeLessThan(1e-9);
     expect(report.worst.get('goal-lantern') ?? 1).toBeLessThan(1e-9);
@@ -225,7 +212,6 @@ describe('four-rooms / alignment', () => {
         expect(w.x).toBeCloseTo(truth[0], 10);
         expect(w.y).toBeCloseTo(0, 10);
         expect(w.z).toBeCloseTo(truth[2], 10);
-        // the orb centre rides exactly wispHeight above it
         const orb = worldOf(module, 'wisp');
         expect(orb.y).toBeCloseTo(TOKENS.wispHeight, 10);
         visited++;
@@ -254,7 +240,6 @@ describe('four-rooms / alignment', () => {
     const { module } = await live();
     const grid = resolveGrid(geometryOf());
     const truth: [number, number, number] = [0, 0, 0];
-    // the scene registers the first hallway as a probe; check the whole set on the graph
     for (let i = 0; i < FOURROOMS_HALLWAYS.length; i++) {
       const h = FOURROOMS_HALLWAYS[i];
       if (!h) continue;
@@ -266,7 +251,6 @@ describe('four-rooms / alignment', () => {
       cellToWorld(h.x, h.y, grid, truth);
       expect(w.x).toBeCloseTo(truth[0], 10);
       expect(w.z).toBeCloseTo(truth[2], 10);
-      // a hallway is a FREE cell in a wall — that is what makes it a gate
       expect(fourRoomsIsWall(h.x, h.y)).toBe(false);
       expect(fourRoomsRoom(h.x, h.y)).toBe(-1);
     }
@@ -281,26 +265,22 @@ describe('four-rooms / the hop is bounded, never a path plan', () => {
     const from: [number, number, number] = [0, 0, 0];
     const to: [number, number, number] = [0, 0, 0];
 
-    // settle on (1,1)
     ctx.setTime(10);
     module.update(toFrameUpdate(poseFixture('a', 1, 1, 9, 9, 0)));
     cellToWorld(1, 1, grid, from);
     cellToWorld(2, 1, grid, to);
 
-    // step east; sample the glide at 1/8 s worth of playback (one control step)
     ctx.setTime(10);
     module.update(toFrameUpdate(poseFixture('b', 2, 1, 9, 9, 1), { scrubbed: false }));
     for (let k = 0; k <= 8; k++) {
       ctx.setTime(10 + (k / 8) * 0.125);
       module.update(toFrameUpdate(poseFixture('b', 2, 1, 9, 9, 1), { scrubbed: false }));
       const w = worldOf(module, 'wisp-anchor');
-      // never outside the two cells it is travelling between (a straight hop, plus arc)
       expect(w.x).toBeGreaterThanOrEqual(Math.min(from[0], to[0]) - 1e-6);
       expect(w.x).toBeLessThanOrEqual(Math.max(from[0], to[0]) + 1e-6);
       expect(w.z).toBeCloseTo(from[2], 6);
       expect(w.y).toBeGreaterThanOrEqual(-1e-6);
     }
-    // one control step later the glide has landed exactly on the true cell
     const landed = worldOf(module, 'wisp-anchor');
     expect(landed.x).toBeCloseTo(to[0], 10);
     expect(landed.y).toBeCloseTo(0, 10);
@@ -313,7 +293,6 @@ describe('four-rooms / the hop is bounded, never a path plan', () => {
     const truth: [number, number, number] = [0, 0, 0];
     ctx.setTime(4);
     module.update(toFrameUpdate(poseFixture('a', 1, 1, 9, 9, 0), { scrubbed: false }));
-    // jump clean across the courtyard on a scrubbed frame
     module.update(toFrameUpdate(poseFixture('far', 9, 9, 1, 1, 4000), { scrubbed: true }));
     const w = worldOf(module, 'wisp-anchor');
     cellToWorld(9, 9, grid, truth);
@@ -351,13 +330,11 @@ describe('four-rooms / update contract', () => {
     expect(pool).not.toBeNull();
     if (!pool) return;
 
-    // standing exactly ON the goal cell with no event: nothing may fire
     ctx.setTime(1);
     module.update(toFrameUpdate(poseFixture('onGoal', 9, 9, 9, 9, 100), { scrubbed: false }));
     expect(pool.stats.bursts).toBe(0);
     expect(pool.stats.ripples).toBe(0);
 
-    // the decoder's real batch: the agent has entered the old goal and it has respawned
     ctx.setTime(2);
     module.update(
       toFrameUpdate(poseFixture('scored', 9, 9, 3, 7, 101), { scrubbed: false, events: [{ type: 'goal' }] }),
@@ -377,7 +354,6 @@ describe('four-rooms / update contract', () => {
     module.update(
       toFrameUpdate(poseFixture('scored', 9, 9, 1, 3, 201), { scrubbed: false, events: [{ type: 'goal' }] }),
     );
-    // the celebration point light rides the bloom position
     const light = module.scene.getObjectByName('oakPoint2');
     expect(light).toBeDefined();
     if (!light) return;
@@ -386,7 +362,6 @@ describe('four-rooms / update contract', () => {
     expect(light.position.x).toBeCloseTo(truth[0], 10);
     expect(light.position.z).toBeCloseTo(truth[2], 10);
     expect((light as THREE.PointLight).intensity).toBeGreaterThan(0);
-    // and the new lantern is already on its new cell, growing in from nothing
     const lantern = worldOf(module, 'goal-lantern');
     cellToWorld(1, 3, grid, truth);
     expect(lantern.x).toBeCloseTo(truth[0], 10);
@@ -409,7 +384,6 @@ describe('four-rooms / update contract', () => {
     module.update(toFrameUpdate(fixtureNamed('courtyard-start'), { scrubbed: true }));
     expect(pool.pulse.bloom).toBe(0);
     expect(pool.activeRipples).toBe(0);
-    // growth does not survive the discontinuity either: the lantern is fully grown
     const bud = module.scene.getObjectByName('lanternBud');
     expect(bud?.scale.x ?? 0).toBeCloseTo(1, 6);
     module.dispose();
@@ -425,7 +399,6 @@ describe('four-rooms / update contract', () => {
       expect(g).toBeGreaterThanOrEqual(0);
       expect(g).toBeLessThanOrEqual(1.05);
     }
-    // opening never leaves [0,1] and opens wider as the wisp closes in
     const far = opening(0, { x: 1, y: 1 }, { x: 9, y: 9 });
     const near = opening(0, { x: 9, y: 8 }, { x: 9, y: 9 });
     expect(far).toBeGreaterThanOrEqual(0);
@@ -483,12 +456,11 @@ describe('four-rooms / lifecycle', () => {
     const { module } = await live();
     module.update(toFrameUpdate(fixtureNamed('courtyard-start')));
     const cam = module.camera;
-    // above the hedges, outside the walls, and looking down at the grid
     expect(cam.position.y).toBeGreaterThan(6);
     expect(Math.hypot(cam.position.x, cam.position.z)).toBeGreaterThan(COURT_HALF);
     const dir = new THREE.Vector3();
     cam.getWorldDirection(dir);
-    expect(dir.y).toBeLessThan(-0.5); // a genuine aerial, never a horizon shot
+    expect(dir.y).toBeLessThan(-0.5);
     expect(cam.fov).toBeGreaterThanOrEqual(35);
     expect(cam.fov).toBeLessThanOrEqual(45);
     module.dispose();
@@ -505,10 +477,6 @@ describe('four-rooms / lifecycle', () => {
 
 describe('four-rooms / the thumb wall-view cap', () => {
   test('the thumb frame fits STYLE.md\u2019s 40 draws / 50k triangles, overlay included', async () => {
-    // The wall view is the whole gallery on one page: every scene there is a thumb, and
-    // the cap is what keeps 16 of them at 60 fps. Measured with the ground-truth overlay
-    // ON, because that is the state review screenshots are taken in, and across every
-    // fixture, because the busiest legal state is the one that has to fit.
     const { module } = await live('thumb');
     module.setDebug(true);
     for (const f of fixtures) module.update(toFrameUpdate(f));

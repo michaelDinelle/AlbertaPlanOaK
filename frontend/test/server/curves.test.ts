@@ -1,15 +1,4 @@
 /// <reference types="bun" />
-// Learning-curve endpoint tests.
-//
-// The fixture root is built in a temp directory rather than under test/fixtures, so it
-// cannot collide with the fixture tree api.test.ts rebuilds in its own beforeAll (bun
-// runs both files in one process). Its numbers are chosen to be checkable by hand:
-// every seed holds a CONSTANT reward rate, so each heartbeat's population is an exact
-// small set whose IQM and percentiles were cross-checked against numpy (the same
-// `np.percentile` linear interpolation and the same trimming rule as tools/fleet.py).
-//
-// The real roots are used for the shape-and-scale claims (16 envs, 6 envs, 1408 seeds)
-// and skipped when .oak-benchmarks is absent.
 
 import { afterAll, beforeAll, describe, expect, it } from 'bun:test';
 import { existsSync } from 'node:fs';
@@ -44,7 +33,6 @@ const ENV_A = 'HalfCheetah-v4';
 const ENV_B = 'FourRooms-cont-v0';
 const STEPS = [100, 200, 300] as const;
 
-/** every seed holds one constant rate, so rewardSum at step s is simply rate·s */
 const RATES: { lane: number; envId: string; rate: number }[] = [
   { lane: 0, envId: ENV_A, rate: 1 },
   { lane: 1, envId: ENV_A, rate: 2 },
@@ -98,29 +86,22 @@ async function buildFixture(): Promise<void> {
     }),
   );
 
-  // METRICS LAW (2026-08-05): fleet.jsonl carries final certificates only;
-  // the heartbeat series live on per-policy tapes.
   const finalStep = STEPS[STEPS.length - 1] ?? 300;
   const lines: string[] = [];
   for (const seed of RATES) {
     lines.push(row(seed.lane, seed.envId, finalStep, seed.rate * finalStep));
   }
-  // a second policy in the same file — the filter has to keep them apart
-  // (a tape covers EVERY lane, so the zero policy carries all 6 at rate 9)
   for (const seed of RATES) {
     lines.push(row(seed.lane, seed.envId, finalStep, 9 * finalStep, 'zero'));
   }
-  // ...and a half-written trailing row, exactly as a live writer leaves one
   await writeFile(join(RUN_DIR, 'fleet.jsonl'), `${lines.join('\n')}\n{"v":1,"kind":"final","lane":2,"step":4`);
   await writeFile(join(RUN_DIR, 'aggregate.jsonl'), '');
 
-  const tapeSteps = STEPS.slice(0, -1); // finals own the last step
+  const tapeSteps = STEPS.slice(0, -1);
   const oakWindows = tapeSteps.map((end, i) => ({
     start: i === 0 ? 0 : (tapeSteps[i - 1] ?? 0),
     count: end - (i === 0 ? 0 : (tapeSteps[i - 1] ?? 0)),
     values: {
-      // lane 3's window at 200 is unknown (NaN), and so is the 300 window that
-      // would have to difference against it — the old missing-row case.
       rewardSum: RATES.map((s) => (s.lane === 3 && end === 200 ? Number.NaN : s.rate * end)),
     },
   }));
@@ -151,7 +132,6 @@ function curves(search: string, opts: { cacheDir?: string | null } = {}): Promis
   });
 }
 
-/** every series of a curve has one entry per heartbeat — a chart cannot align otherwise */
 function expectAligned(curve: CurvesResponse): void {
   const n = curve.steps.length;
   for (const key of ['iqm', 'ciLo', 'ciHi', 'p10', 'p50', 'p90'] as const) {
@@ -168,16 +148,14 @@ afterAll(async () => {
   await rm(BENCH, { recursive: true, force: true });
 });
 
-// ---------- statistics ----------
 
 describe('curve statistics', () => {
   it('iqm is tools/fleet.py\'s: sort, drop ⌊n/4⌋ from each end, mean the rest', () => {
-    expect(iqm([4, 1, 3, 2])).toBeCloseTo(2.5, 12); // n=4 -> middle two
-    expect(iqm([3, 1, 2])).toBeCloseTo(2, 12); // n=3 -> nothing dropped
+    expect(iqm([4, 1, 3, 2])).toBeCloseTo(2.5, 12);
+    expect(iqm([3, 1, 2])).toBeCloseTo(2, 12);
     expect(iqm([-0.5, 0.5])).toBeCloseTo(0, 12);
     expect(iqm([5])).toBeCloseTo(5, 12);
-    expect(iqm([-0.5, 0.5, 1, 2, 3, 4])).toBeCloseTo(1.625, 12); // n=6 -> drop 1 each end
-    // n=8: drop two each end, mean the middle four
+    expect(iqm([-0.5, 0.5, 1, 2, 3, 4])).toBeCloseTo(1.625, 12);
     expect(iqmSorted([1, 2, 3, 4, 5, 6, 7, 100])).toBeCloseTo(4.5, 12);
     expect(Number.isNaN(iqm([]))).toBe(true);
   });
@@ -217,7 +195,6 @@ describe('curve statistics', () => {
     expect(bootstrapIqmCi(sample, 2000, 12345)).toEqual([lo, hi]);
     expect(lo).toBeLessThan(iqmSorted(sample));
     expect(hi).toBeGreaterThan(iqmSorted(sample));
-    // a different seed moves the bounds a little, never to the other side of the estimate
     const [lo2, hi2] = bootstrapIqmCi(sample, 2000, 999);
     expect(lo2).toBeLessThan(iqmSorted(sample));
     expect(hi2).toBeGreaterThan(iqmSorted(sample));
@@ -233,7 +210,6 @@ describe('curve statistics', () => {
   });
 });
 
-// ---------- query parsing ----------
 
 describe('parseCurvesQuery', () => {
   it('defaults to the oak policy and all lanes', () => {
@@ -250,7 +226,6 @@ describe('parseCurvesQuery', () => {
   });
 });
 
-// ---------- derivation over the fixture root ----------
 
 describe('curves from fleet.jsonl', () => {
   it('measures the reward rate over each heartbeat window, per env', async () => {
@@ -258,7 +233,6 @@ describe('curves from fleet.jsonl', () => {
     expect(a.steps).toEqual([100, 200, 300]);
     expect(a.seeds).toBe(4);
     expectAligned(a);
-    // step 100: [1,2,3,4]. Steps 200 and 300: lane 3 is unmeasurable, so [1,2,3].
     expect(a.iqm.map((v) => v ?? Number.NaN)).toEqual([2.5, 2, 2]);
     expect(a.p10.map((v) => Number((v ?? 0).toFixed(12)))).toEqual([1.3, 1.2, 1.2]);
     expect(a.p50.map((v) => v ?? Number.NaN)).toEqual([2.5, 2, 2]);
@@ -275,7 +249,6 @@ describe('curves from fleet.jsonl', () => {
     const all = await curves('');
     expect(all.seeds).toBe(6);
     expect(all.steps).toEqual([100, 200, 300]);
-    // step 100 pools [-0.5, 0.5, 1, 2, 3, 4]
     expect(all.iqm[0]).toBeCloseTo(1.625, 12);
     expect(all.p10[0]).toBeCloseTo(0, 12);
     expect(all.p50[0]).toBeCloseTo(1.5, 12);
@@ -331,7 +304,6 @@ describe('curves from fleet.jsonl', () => {
   });
 });
 
-// ---------- caching ----------
 
 describe('curves cache', () => {
   it('shares ONE parse between the env panels of a dashboard', async () => {
@@ -344,7 +316,6 @@ describe('curves cache', () => {
     expect(a.seeds).toBe(4);
     expect(b.seeds).toBe(2);
     expect(all.seeds).toBe(6);
-    // the slices are distinct objects with distinct populations, from one pass
     expect(a.iqm[0]).toBeCloseTo(2.5, 12);
     expect(b.iqm[0]).toBeCloseTo(0, 12);
   });
@@ -362,11 +333,10 @@ describe('curves cache', () => {
     expect(rec['kind']).toBe('curves');
     expect(rec['envId']).toBe(ENV_A);
 
-    // Simulate a 32-bit hash collision: right file name, wrong query inside.
     rec['envId'] = ENV_B;
     rec['data'] = { steps: [-1], iqm: [], ciLo: [], ciHi: [], p10: [], p50: [], p90: [], seeds: -1 };
     await writeFile(path, JSON.stringify(rec));
-    clearCurvesCache(); // force the disk path
+    clearCurvesCache();
     const again = await curves(`?envId=${ENV_A}`, { cacheDir: CACHE });
     expect(again.seeds).toBe(4);
     expect(again.steps).toEqual([100, 200, 300]);
@@ -383,13 +353,12 @@ describe('curves cache', () => {
   });
 });
 
-/** the disk record is written fire-and-forget, by design — poll for it */
 async function waitForCacheFiles(count: number, ms = 5000): Promise<string[]> {
   const t0 = Date.now();
   for (;;) {
     const names = await readdir(CACHE).then(
       (list) => list.filter((n) => n.endsWith('.json')).sort(),
-      () => [] as string[], // the directory itself is created by the first write
+      () => [] as string[],
     );
     if (names.length >= count) return names;
     if (Date.now() - t0 > ms) throw new Error(`timed out waiting for ${count} cache files`);
@@ -397,7 +366,6 @@ async function waitForCacheFiles(count: number, ms = 5000): Promise<string[]> {
   }
 }
 
-// ---------- over HTTP ----------
 
 describe('GET /api/runs/:id/curves', () => {
   let server: ReturnType<typeof Bun.serve> | null = null;
@@ -438,7 +406,6 @@ describe('GET /api/runs/:id/curves', () => {
   });
 });
 
-// ---------- real roots ----------
 
 describe('curves against the real bench roots', () => {
   let server: ReturnType<typeof Bun.serve> | null = null;
@@ -458,7 +425,6 @@ describe('curves against the real bench roots', () => {
   it.skipIf(!demoPresent)('slices the 16-env demo run per environment', async () => {
     const all = (await (await fetch(`${base}/api/runs/${DEMO_ID}/curves`)).json()) as CurvesResponse;
     expect(all.seeds).toBe(128);
-    // ~100 tape windows (CB cadence) — the final step comes from fleet.jsonl finals
     expect(all.steps.length).toBeGreaterThan(50);
     expect(all.steps.at(-1)).toBe(100000);
     expectAligned(all);
@@ -471,8 +437,6 @@ describe('curves against the real bench roots', () => {
     ).json()) as CurvesResponse;
     expect(cheetah.seeds).toBe(8);
     expect(cartpole.seeds).toBe(8);
-    // The house rule made measurable: CartPole tops out at 1.0/step and HalfCheetah
-    // does not, so the two slices must not be the same numbers.
     expect(cartpole.iqm.at(-1)).not.toBe(cheetah.iqm.at(-1));
     for (let i = 0; i < all.steps.length; i++) {
       const lo = all.p10[i];
@@ -486,7 +450,6 @@ describe('curves against the real bench roots', () => {
   it.skipIf(!keeperPresent)('slices the 1024-seed keeper run per environment', async () => {
     const all = (await (await fetch(`${base}/api/runs/${KEEPER_ID}/curves`)).json()) as CurvesResponse;
     expect(all.seeds).toBe(1024);
-    // 255 sampled tape windows + the final certificate step
     expect(all.steps.length).toBe(256);
     expectAligned(all);
     const cheetah = (await (
@@ -494,31 +457,15 @@ describe('curves against the real bench roots', () => {
     ).json()) as CurvesResponse;
     expect(cheetah.seeds).toBe(64);
     expect(cheetah.steps).toEqual(all.steps);
-    // 64 HalfCheetah seeds at 1M steps: a real, finite, positive-ended curve
     const last = cheetah.iqm.at(-1);
     expect(typeof last).toBe('number');
     expect(Number.isFinite(last ?? Number.NaN)).toBe(true);
   }, 60000);
 
-  /**
-   * The numbers themselves, pinned.
-   *
-   * The structural tests above would all still pass if `iqmSorted` drifted to a plain
-   * mean or `percentileSorted` to a nearest-rank rule — the curve would stay monotone,
-   * finite and aligned while quietly disagreeing with the Python that gates promotions.
-   * These constants were produced independently: fleet.jsonl -> numpy, IQM by
-   * tools/fleet.py's own definition (sort, drop ⌊n/4⌋ each end, mean the rest) and the
-   * spread by np.percentile's default linear interpolation. The percentiles matched to
-   * 0.0 and the IQM to 7e-16 (float summation order) across all 6 p93 slices and all 16
-   * of the demo's, so the tolerance here is about summation order, not about agreement.
-   */
   it.skipIf(!keeperPresent)('reports the same statistics numpy does for the keeper', async () => {
     const cheetah = (await (
       await fetch(`${base}/api/runs/${KEEPER_ID}/curves?envId=HalfCheetah-v4`)
     ).json()) as CurvesResponse;
-    // 255 sampled tape windows + the final step; constants recomputed from the
-    // TAPE with independent numpy (window sampling replicated, IQM by
-    // tools/fleet.py's definition, percentiles by np.percentile linear).
     expect(cheetah.steps.length).toBe(256);
     expect(cheetah.steps[0]).toBe(3150);
     expect(cheetah.steps.at(-1)).toBe(1000000);
@@ -532,11 +479,10 @@ describe('curves against the real bench roots', () => {
     close(cheetah.p10.at(-1), 0.24822101637639718);
     close(cheetah.p50.at(-1), 0.530007148427346);
     close(cheetah.p90.at(-1), 0.7833815310631663);
-    // and the CI is an interval around the point estimate, not a decoration
     const lo = cheetah.ciLo.at(-1) ?? Number.NaN;
     const hi = cheetah.ciHi.at(-1) ?? Number.NaN;
     expect(lo).toBeLessThanOrEqual(0.5451980642383675);
     expect(hi).toBeGreaterThanOrEqual(0.5451980642383675);
-    expect(hi - lo).toBeLessThan(0.3); // 64 seeds: a real interval, not a shrug
+    expect(hi - lo).toBeLessThan(0.3);
   }, 60000);
 });

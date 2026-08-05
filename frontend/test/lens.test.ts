@@ -1,6 +1,4 @@
 /// <reference types="bun" />
-// RecordingLens agrees frame-for-frame and event-for-event with decodeRecording,
-// at any access order, on real recordings — including the replay decoder (MKC).
 
 import { describe, expect, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
@@ -21,9 +19,9 @@ function load(envId: string, seed: number) {
 }
 
 const CASES: [string, number][] = [
-  ['HalfCheetah-v4', 0],           // prev-dependent derived state (velX)
-  ['MultiKeyCorridor-cont-v0', 80], // needsReplay — checkpoint-resume must be exact
-  ['DeepSea-cont-v0', 16],          // mask-simulated events
+  ['HalfCheetah-v4', 0],
+  ['MultiKeyCorridor-cont-v0', 80],
+  ['DeepSea-cont-v0', 16],
 ];
 
 describe('RecordingLens ≡ decodeRecording', () => {
@@ -36,7 +34,6 @@ describe('RecordingLens ≡ decodeRecording', () => {
       expect(lens.nonFiniteRows).toBe(full.nonFiniteRows ?? 0);
       expect(lens.replay ?? null).toEqual(full.replay ?? null);
 
-      // Deliberately hostile access order: end, start, block boundaries, then a sweep.
       const probes = [
         lens.frameCount - 1, 0, 1,
         LENS_BLOCK, LENS_BLOCK - 1, LENS_BLOCK + 1,
@@ -53,8 +50,6 @@ describe('RecordingLens ≡ decodeRecording', () => {
         expect(JSON.stringify(a.state)).toBe(JSON.stringify(b.state));
       }
 
-      // Events: sparse map equals the dense array everywhere it is non-empty,
-      // sampled at every event index plus 1k random indices.
       let eventFrames = 0;
       for (const [i, evs] of lens.eventEntries()) {
         eventFrames++;

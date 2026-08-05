@@ -16,11 +16,9 @@ struct KernelConfig {
   var invRank, invOptionCount, metaEta: Float
   var agentCount, paramStride, stateStride, uintStride: UInt32
   var nurseryCount: UInt32
-  // Host-precomputed constants (identical IEEE values — Float division is
-  // correctly rounded on both sides with fast-math off).
-  var sampleSigma: Float  // 1 / max(D, 1)
-  var sampleInv2S2: Float  // 1 / (2 * sampleSigma * sampleSigma)
-  var actorAlphaDenom: Float  // Float(max(D * 32, 1)) — divisor, NOT a reciprocal
+  var sampleSigma: Float
+  var sampleInv2S2: Float
+  var actorAlphaDenom: Float
 }
 struct KernelScalars {
   var stepCount: UInt32 = 0, stateSlot: UInt32 = 0
@@ -58,13 +56,6 @@ struct AblationSpec {
     "keyboard-to-policy", "search-control", "search-to-generate-test", "generate-and-test",
     "derived-core", "joint-geometry",
   ]
-  // Metal function-constant index per organ. The first seven map identity
-  // (0-6); the greedy-Q-selection organ ("model-to-keyboard", was index 7) is
-  // EXCISED (Phase 7.5, convicted toxic in Phase 6) — removed from the list, so
-  // the next four keep their original indices explicitly to avoid shifting.
-  // The Phase-7 representation-geometry organs take the free slots 26/27 —
-  // 12-25/28-31 are OAK_MEGA_G, OAK_SPEC_*, the stage mask, OAK_SPEC_NURSERY,
-  // and the probes (Sources/OakKernel.metal:16-40).
   static let functionConstantIndex = [
     "keyboard-to-policy": 8,
     "search-control": 9,
@@ -156,61 +147,61 @@ struct Arena {
       return at
     }
     obs = take(3 * o)
-    _ = take(2 * r)  // state slots
+    _ = take(2 * r)
     policy = take(d)
-    _ = take(d)  // policyMeanRaw (raw-acc blend for discrete logits)
-    _ = take(d)  // actionSignal
-    _ = take(k * d)  // optionActorCredit
-    options = take(k * d)  // optionPolicyMean
-    _ = take(k)  // importance
-    _ = take(3)  // reward, td, planTd
-    _ = take(k)  // tdPsi
-    _ = take(r)  // utilFeat
+    _ = take(d)
+    _ = take(d)
+    _ = take(k * d)
+    options = take(k * d)
+    _ = take(k)
+    _ = take(3)
+    _ = take(k)
+    _ = take(r)
     utilOpt = take(k)
-    _ = take(3 * r)  // bonusW, featureMean, featureSM
+    _ = take(3 * r)
     alpha = take(r)
     beta = take(r)
-    _ = take(2 * r)  // hMeta, gradEnergy
+    _ = take(2 * r)
     alphaPsi = take(r)
     betaPsi = take(r)
-    _ = take(2 * r)  // hPsi, gradEnergyPsi
+    _ = take(2 * r)
     alphaModel = take(r)
     betaModel = take(r)
-    _ = take(2 * r)  // hModel, gradEnergyModel
-    _ = take(5 * k)  // actorAdv, optRewardTd + 3 reserved (headDenom/durationTd/durationHat deleted)
-    _ = take(tl * max(o, 1))  // obsTraceMulti
-    _ = take(4 * k)  // prioOpt, continuation, keyboard + 1 reserved (modelDenom deleted)
-    _ = take(1)  // valueGauge
-    _ = take(2 * k)  // reserved (tdPsiFast/tdPsiPeak deleted)
-    _ = take(2 * k)  // headScale + 1 reserved (modelScale deleted)
-    _ = take(2)  // valueScale, xNormPrev
-    _ = take(5 * k)  // hDotPsi, psiAuxScale, psiRho, optRho, optFit
-    alphaAct = take(k)  // actor IDBD multiplier (init 1)
+    _ = take(2 * r)
+    _ = take(5 * k)
+    _ = take(tl * max(o, 1))
+    _ = take(4 * k)
+    _ = take(1)
+    _ = take(2 * k)
+    _ = take(2 * k)
+    _ = take(2)
+    _ = take(5 * k)
+    alphaAct = take(k)
     betaAct = take(k)
-    _ = take(2 * k)  // hAct, energyAct
-    _ = take(k)  // impStage (sample->next-step importance staging)
-    _ = take(k * d)  // creditStage (sample->next-step actor-credit staging)
-    _ = take(8)  // sampleScr
-    _ = take(4 * k)  // rHatC, lRawC, vsNextC, twinDis (encode->plan dot cache)
-    _ = take(4 * k)  // vsTd, vsDot, vsScale, vsAuxScale
-    _ = take(1)  // planScale
-    s = (s + 3) & ~3  // 16B-align nurStats/muRaw/polCoef (float4 access)
-    _ = take(4 * rn)  // nursery mean/SM/util/utilSM
-    _ = take(k * d)  // muRaw (emit blend scratch)
-    _ = take(k * d)  // polCoef (actor coefficient hoist)
-    _ = take(r)  // optUseByFeat (curation scan scatter)
-    _ = take(rn)  // lcbScr (parallel LCB precompute)
-    s = (s + 3) & ~3  // align pad
-    _ = take(4 * r)  // eligScr (parallel eligibility tuples)
-    _ = take(k)  // fcG (tg-diet: keyboard scores scratch)
-    _ = take(16)  // fcS (tg-diet: fc scalars + sample exchange)
-    _ = take(64 * r)  // ring values (R slots x 64 active tuples: core + gated)
-    _ = take(r)  // dynaTd (per-ring-slot backup priorities)
-    _ = take(32)  // dynaD (per-thread backup deltas)
-    _ = take(r)  // planU (planner-owned ring value table, reclaims dynaAcc)
-    _ = take(k)  // dynaC (copy-2 per-option update coefficients)
-    _ = take(4)  // planScr (reward snapshot; slot 2 = rsqrt(R) cache; 1/3 reserved)
-    _ = take(r)  // ringReward (outbound reward per ring slot, for the relay)
+    _ = take(2 * k)
+    _ = take(k)
+    _ = take(k * d)
+    _ = take(8)
+    _ = take(4 * k)
+    _ = take(4 * k)
+    _ = take(1)
+    s = (s + 3) & ~3
+    _ = take(4 * rn)
+    _ = take(k * d)
+    _ = take(k * d)
+    _ = take(r)
+    _ = take(rn)
+    s = (s + 3) & ~3
+    _ = take(4 * r)
+    _ = take(k)
+    _ = take(16)
+    _ = take(64 * r)
+    _ = take(r)
+    _ = take(32)
+    _ = take(r)
+    _ = take(k)
+    _ = take(4)
+    _ = take(r)
     total = s
   }
 }
@@ -246,28 +237,18 @@ final class Engine {
     precondition(b >= 1, "Engine batch must be >= 1")
     batch = b
     self.obsDim = obsDim
-    // Sparse-wide: capacity = smallest power of two >= 2x linear input width
-    // (stream-shape-derived, Inv-9); active width = 32 (execution width) via
-    // banked WTA; K = active width.
     let inputW = Arena.input(obsDim, dPolicy)
     var cap = 32
     while cap < 2 * inputW { cap *= 2 }
     rank = cap
     d = dPolicy
-    // Sutton-test instrument: scales the nursery capacity (canonical runs: 1).
     let nurseryMult = max(
       ProcessInfo.processInfo.environment["OAK_SUTTON_MULT"].flatMap(Int.init) ?? 1, 1)
     let rn = rank * nurseryMult
     let k = 32
     a = Arena(obsDim, rank, k, d, rn)
     paramTotal = rank + 8 * k * rank + k * (d / 2) * rank
-    // uints: 11 scalars + optFeature/optAge/lastStopAge (3k) + 5 rank arrays
-    // + 4 nursery arrays + actIdx (2*64) + dynaSlot (32) + ringIdx (32*rank)
-    // + planTree (rank, Phase 9.1 planning priority index)
-    // + parked (k, Phase 9.3 K-parking hibernation flags)
     uintTotal = 11 + 3 * k + 5 * rank + 4 * rn + 128 + 32 + 32 * rank + rank + k
-    // Core region: 17 std obs + 12 prev-action + reward + bias + spare = 32
-    // always-active slots (Mark III law: all raw inputs visible every step).
     let anchors = 32
     let sampleSigma = 1 / Float(max(d, 1))
     let cfgValue = KernelConfig(
@@ -301,7 +282,6 @@ final class Engine {
     let psi = rank
     let inv = 1 / sqrt(Float(rank))
     let alpha0 = 1 / Float(max(obsDim, 1))
-    // uint layout offsets (mirror make_ctx)
     let uFeatAge = 7 + k
     let uParentA = 7 + 2 * k + rank
     let uParentB = 7 + 2 * k + 2 * rank
@@ -316,18 +296,14 @@ final class Engine {
       let lu = uints.p + lane * uintTotal
       lu[uExplStep] = UInt32.max
       lu[uExplStep + 1] = UInt32.max
-      let traceChannels = max((Arena.traces(obsDim) - 1) * obsDim, 1)  // 4 levels x 17
+      let traceChannels = max((Arena.traces(obsDim) - 1) * obsDim, 1)
       for n in 0..<rn {
-        // Generator seeds: kinds cycle product/sum/residual/trace; parents are
-        // core slots (always active) or trace channels for kind 3.
         lu[uNur + n] = UInt32(n % ((n % 4 == 3) ? traceChannels : anchors))
         lu[uNur + rn + n] = UInt32((n * 7 + 3) % anchors)
         lu[uNur + 2 * rn + n] = UInt32(n % 4)
       }
       for i in 0..<rank {
         if i >= anchors {
-          // Gated region: first 68 slots are the multi-timescale obs traces
-          // (kind 3); the rest are products/sums/residuals of core channels.
           let idx = i - anchors
           if idx < traceChannels {
             lu[uParentA + i] = UInt32(idx)
@@ -347,10 +323,6 @@ final class Engine {
         [a.beta, a.betaPsi, a.betaModel].forEach { ls[$0 + i] = log(alpha0) }
       }
       let basis = 1 / Float(max(d, 1))
-      // Ensemble copy-2 decorrelation: vStop2 gets a shifted diagonal (same
-      // magnitude as psi's diagonal, different index pattern); reward/duration
-      // copies start at zero like copy 1 and decorrelate through vStop2's
-      // different bootstrap plus the semi-gradient update geometry.
       let vStop2 = rank + 7 * k * rank + k * (d / 2) * rank
       for kk in 0..<k {
         lu[7 + kk] = UInt32(kk)
@@ -359,14 +331,9 @@ final class Engine {
         ls[a.utilOpt + kk] = Float(rank)
         ls[a.alphaAct + kk] = 1
         ls[a.betaAct + kk] = 0
-        // Per-lane init diversity: every lane previously started at the SAME
-        // symmetric near-zero saddle, making ignition a pure noise-stream
-        // lottery. A cheap integer hash permutes each option's seeded action
-        // slot and sign per lane (deterministic per (lane, option)).
         let h = UInt32(truncatingIfNeeded: lane &* 2_654_435_761 &+ kk &* 40_503 &+ 977)
         let slot = Int(h % UInt32(max(d / 2, 1)))
         let sign: Float = ((h >> 16) & 1) == 0 ? 1 : -1
-        // optPolicy offset: rank(value) + k*rank(psi); live-half stride d/2
         lp[rank + k * rank + kk * (d / 2) + slot] = sign * basis
       }
     }
@@ -419,16 +386,6 @@ func metricsRoot() -> URL {
     ".oak-benchmarks/\(id)", isDirectory: true)
 }
 
-// ---------------------------------------------------------------------------
-// Record format v4 — the FROZEN codec of frontend/src/sim/RECORD_V4_SPEC.md.
-//
-// This encoder and the TS decoder (frontend/src/sim/record4.ts) both implement
-// that document verbatim; frontend/scripts/verify-record-v4.ts proves agreement
-// against a paired v3 run. Any change to the layout bumps codecVersion.
-//
-// The kernel ring write is UNTOUCHED (Inv-10 bit-identity of the agent stream):
-// recording stays passive, the host drain transcodes v3 rows into v4 chunks.
-// ---------------------------------------------------------------------------
 
 enum V4Enc: String { case u8, i16, dx32 }
 
@@ -443,7 +400,6 @@ struct V4Field {
     self.scale = scale
     self.wrap = wrap
   }
-  /// Bytes this column occupies for `n` rows.
   func bytes(_ n: Int) -> Int {
     switch enc {
     case .u8: return n
@@ -461,8 +417,6 @@ struct V4Field {
 
 struct V4Codec {
   let category: String
-  /// 0 = ctrl "index" (discrete envs, action in hdr bits 0-3); else the number
-  /// of u8-quantized Box ctrl columns.
   let ctrlBox: Int
   let fields: [V4Field]
   let poseConst: [Int: Double]
@@ -477,9 +431,6 @@ struct V4Codec {
       "poseConst": pc,
     ]
   }
-  /// The static codec table, verbatim from RECORD_V4_SPEC.md. envKind numbering
-  /// is Main.envKind(_:) — the ONLY env-identity mapping (Inv-1 keeps it out of
-  /// the agent; the recorder is a host-side wrapper concern like the env window).
   static func table(_ envKind: UInt32) throws -> V4Codec {
     func grid(_ idxs: [Int], _ consts: [Int: Double] = [:]) -> V4Codec {
       V4Codec(
@@ -487,57 +438,53 @@ struct V4Codec {
         poseConst: consts)
     }
     switch envKind {
-    case 0:  // HalfCheetah — dx-chained rootx, wrapped angles, 6 u8 ctrl columns
+    case 0:
       var f = [V4Field(0, .dx32, 0.01), V4Field(1, .i16, 1e-4)]
       for i in 2...8 { f.append(V4Field(i, .i16, 1e-4, true)) }
       return V4Codec(category: "cheetah", ctrlBox: 6, fields: f, poseConst: [:])
-    case 1: return grid([0, 1, 2, 3])  // FourRooms
-    case 2: return grid([0, 1], [2: 7, 3: 7])  // DeepSea
-    case 3: return grid([0, 1, 2, 3, 4, 5, 6, 7])  // KeyCorridor
-    case 4:  // Acrobot
+    case 1: return grid([0, 1, 2, 3])
+    case 2: return grid([0, 1], [2: 7, 3: 7])
+    case 3: return grid([0, 1, 2, 3, 4, 5, 6, 7])
+    case 4:
       return V4Codec(
         category: "classic", ctrlBox: 0,
         fields: [
           V4Field(0, .i16, 1e-4, true), V4Field(1, .i16, 1e-4, true),
           V4Field(2, .i16, 1e-3), V4Field(3, .i16, 1e-3),
         ], poseConst: [:])
-    case 5:  // MountainCar
+    case 5:
       return V4Codec(
         category: "classic", ctrlBox: 0,
         fields: [V4Field(0, .i16, 1e-4), V4Field(1, .i16, 1e-5)], poseConst: [2: 0.5])
-    case 6:  // CartPole
+    case 6:
       return V4Codec(
         category: "classic", ctrlBox: 0,
         fields: [
           V4Field(0, .i16, 1e-4), V4Field(1, .i16, 1e-3),
           V4Field(2, .i16, 1e-4, true), V4Field(3, .i16, 1e-3),
         ], poseConst: [:])
-    case 7:  // Pendulum (Box 1 -> one u8 ctrl column)
+    case 7:
       return V4Codec(
         category: "classic", ctrlBox: 1,
         fields: [
           V4Field(0, .i16, 1e-4, true), V4Field(1, .i16, 1e-3), V4Field(2, .i16, 1e-3),
         ], poseConst: [:])
-    case 8: return grid([0], [1: 15])  // Chain
-    case 9: return grid([0, 1], [2: 15, 3: 15])  // LargeDeepSea
-    case 10: return grid([0, 1, 2, 3, 4, 5, 6, 7])  // MultiKeyCorridor
-    case 11: return grid([0, 2], [1: 31])  // MemoryChain
-    case 12: return grid([0, 1, 2, 3])  // ProceduralMaze
-    case 13: return grid([0, 1, 2, 3, 4])  // HighDimMaze
-    case 14: return grid([0, 1, 2, 3])  // POMaze
-    case 15: return grid([0, 2], [1: 31])  // DelayedChain
+    case 8: return grid([0], [1: 15])
+    case 9: return grid([0, 1], [2: 15, 3: 15])
+    case 10: return grid([0, 1, 2, 3, 4, 5, 6, 7])
+    case 11: return grid([0, 2], [1: 31])
+    case 12: return grid([0, 1, 2, 3])
+    case 13: return grid([0, 1, 2, 3, 4])
+    case 14: return grid([0, 1, 2, 3])
+    case 15: return grid([0, 2], [1: 31])
     default: throw err("No record-v4 codec for envKind \(envKind).")
     }
   }
 }
 
-/// One recorded lane's v4 file. Chunk-per-drain, append-only; a torn tail (killed
-/// run) is detectable by the reader (short header / missing bytes / crc).
-/// Instances are touched by exactly one drain worker at a time (the drain is
-/// serialized on the writer queue, then fanned out one lane per iteration).
 final class RecordV4Writer: @unchecked Sendable {
-  static let fileMagic: UInt32 = 0x344B_414F  // "OAK4"
-  static let chunkMagic: UInt32 = 0x344B_4843  // "CHK4"
+  static let fileMagic: UInt32 = 0x344B_414F
+  static let chunkMagic: UInt32 = 0x344B_4843
   static let codecVersion = 1
 
   let handle: FileHandle
@@ -584,17 +531,12 @@ final class RecordV4Writer: @unchecked Sendable {
       .write(to: metaURL, options: .atomic)
   }
 
-  /// Transcode `[stepStart, stepStart+stepCount)` of the kernel ring into one
-  /// compressed chunk and append it. `rewardDelta` is the lane's rewardSum delta
-  /// over THIS CHUNK (NaN when the caller cannot measure exactly that interval).
   func encodeChunk(
     _ rp: UnsafePointer<Float>, slot: Int, capacity: Int, stepStart: Int, stepCount: Int,
     rewardDelta: Float
   ) throws {
     guard stepCount > 0 else { return }
     let nBox = codec.ctrlBox
-    // Column offsets: hdr | box ctrl columns | chunkBaseX (f64, cheetah) | pose
-    // columns in descriptor order | u32 escape count | escape rows.
     let baseOff = stepCount * (1 + nBox)
     var cursor = baseOff + (codec.hasDx ? 8 : 0)
     var off: [Int] = []
@@ -614,7 +556,6 @@ final class RecordV4Writer: @unchecked Sendable {
       memset(b, 0, fixed)
       var recon = 0.0
       if codec.hasDx, let dxIdx = fields.first(where: { $0.enc == .dx32 })?.idx {
-        // chunkBaseX: the EXACT f64 promotion of the first row's pose value.
         let r0 = (slot * capacity + (stepStart % capacity)) * 16
         recon = Double(rp[r0 + 7 + dxIdx])
         var bits = recon.bitPattern.littleEndian
@@ -625,8 +566,6 @@ final class RecordV4Writer: @unchecked Sendable {
         var esc = false
         for u in 0..<16 where !rp[base + u].isFinite { esc = true }
         var hdr: UInt8 = 0
-        // done is BIT-EXACT by contract: anything that is not exactly 0 or 1
-        // escapes rather than being rounded into the flag.
         let doneV = rp[base + 6]
         if doneV == 1 {
           hdr |= 0x10
@@ -657,7 +596,6 @@ final class RecordV4Writer: @unchecked Sendable {
           case .i16:
             var w = v
             if f.wrap, w.isFinite {
-              // floor-based positive wrap into [-pi, pi) — identical in Swift and JS.
               w -= 2 * Double.pi * ((w + Double.pi) / (2 * Double.pi)).rounded(.down)
             }
             var q = w.isFinite ? (w / f.scale).rounded() : 0
@@ -672,10 +610,8 @@ final class RecordV4Writer: @unchecked Sendable {
               if !(q >= -2_147_483_647 && q <= 2_147_483_647) { esc = true }
               q = min(max(q, -2_147_483_647), 2_147_483_647)
             } else {
-              esc = true  // a poisoned chain cannot reconstruct: escape verbatim
+              esc = true
             }
-            // The chain uses the CLAMPED value, so encoder and decoder stay in
-            // lockstep even across escaped rows.
             recon += q * f.scale
             var qi = Int32(q).littleEndian
             withUnsafeBytes(of: &qi) { memcpy(b + off[j] + 4 * i, $0.baseAddress!, 4) }
@@ -700,9 +636,6 @@ final class RecordV4Writer: @unchecked Sendable {
       payload.append(UnsafeRawPointer(rp + base).assumingMemoryBound(to: UInt8.self), count: 64)
     }
 
-    // Compression's COMPRESSION_ZLIB is RFC-1951 RAW DEFLATE (no zlib wrapper),
-    // which is what the TS side inflates (inflateRawSync / 'deflate-raw').
-    // Verified at runtime on this lane's first chunk rather than trusted.
     let comp = try (payload as NSData).compressed(using: .zlib) as Data
     if !deflateVerified {
       deflateVerified = true
@@ -737,31 +670,12 @@ final class RecordV4Writer: @unchecked Sendable {
     totalSteps += stepCount
   }
 
-  /// Compressed bytes written so far (chunk headers included) — drain telemetry.
   var bytesWritten: Int { fileOffset }
 }
 
-/// Continuous metrics tape (OAKT v1) — the replacement for fleet.jsonl's
-/// per-lane heartbeat snapshots (METRICS LAW 2026-08-05). One file per run
-/// root per policy (`metrics.<policy>.oakt`); one row per lane per
-/// command-buffer window, so the on-disk curve resolution is the CB cadence
-/// (~1024 steps), not the heartbeat. Self-describing: the header carries the
-/// field table as JSON, so readers never hard-code the schema. Windows are
-/// buffered in memory and flushed as one raw-DEFLATE segment per heartbeat
-/// (same cadence, same writer queue, same codec family as record v4 — zero
-/// new I/O rhythm). Torn tails drop segment-by-segment via crc, exactly like
-/// v4 chunks. Layout, all little-endian:
-///   FileHeader: u32 magic "OAKT", u32 version=1, u32 laneCount,
-///               u32 jsonLen, jsonLen bytes of {"fields":[...names]}
-///   Segment:    u32 magic "SEGT", u32 windowCount, u32 rawBytes,
-///               u32 compBytes, u32 crc32(compressed), then compBytes of
-///               raw DEFLATE. Inflated payload = windowCount windows, each:
-///               u32 stepStart, u32 stepCount, then fields × f32[laneCount].
 final class MetricsTapeWriter {
-  static let fileMagic: UInt32 = 0x544B_414F  // "OAKT"
-  static let segMagic: UInt32 = 0x54_4745_53  // "SEGT"
-  /// The curated continuous set (everything else was removed as dead weight
-  /// or lives only in the final fleet.jsonl row / deaths.jsonl certificate).
+  static let fileMagic: UInt32 = 0x544B_414F
+  static let segMagic: UInt32 = 0x54_4745_53
   static let fields: [String] = [
     "rewardSum", "doneCount", "rewardRate", "kernelRho", "deltaSum",
     "deltaPeak", "mainTd", "actorSupportEntropy", "terminationRate",
@@ -770,8 +684,6 @@ final class MetricsTapeWriter {
     "searchControlUseMean", "selectedOptionPriority", "selectedContinuation",
     "generateTestEligibleCount", "featureReinitCount", "optionReinitCount",
     "nfEncode", "nfLearn", "nfPlan", "nfTdPsi",
-    // -1 sentinel on per-CB windows ("not scanned"); the real O(paramStride)
-    // scan value on heartbeat windows only.
     "paramAbsMax",
   ]
   private let handle: FileHandle
@@ -794,7 +706,6 @@ final class MetricsTapeWriter {
     try handle.write(contentsOf: head)
   }
 
-  /// One window row per lane from the CB-boundary snapshot. Writer queue only.
   func append(snap: UnsafeMutablePointer<LaneSnapshot>, half: Int,
               stepStart: Int, stepCount: Int) {
     for v: UInt32 in [UInt32(stepStart), UInt32(stepCount)] {
@@ -838,7 +749,6 @@ final class MetricsTapeWriter {
     pendingWindows += 1
   }
 
-  /// Compress and write all buffered windows as one segment. Writer queue only.
   func flush() throws {
     guard pendingWindows > 0 else { return }
     let comp = try (pending as NSData).compressed(using: .zlib) as Data
@@ -867,9 +777,6 @@ final class MetricsTapeWriter {
 }
 
 @main struct Main {
-  /// Set at launch when a multi-policy workload makes default-on recording
-  /// unsafe (all policies share one <envId>/seed<N>/actions.bin — the
-  /// truncation trap). An EXPLICIT OAK_RECORD_ACTIONS=1 request still throws.
   nonisolated(unsafe) static var recordingDefaultSuppressed = false
 
   static func main() {
@@ -900,8 +807,6 @@ final class MetricsTapeWriter {
   ) throws {
     try fleetGPU(p, seeds, steps, root, laneEnvs, ablations)
   }
-  // Universal env contract: envId <-> kernel envKind (the ONLY env-identity
-  // mapping; the agent kernel stays env-blind, Inv-1). Index = envKind.
   static let envIdsByKind: [String] = [
     "HalfCheetah-v4", "FourRooms-cont-v0", "DeepSea-cont-v0", "KeyCorridor-cont-v0",
     "Acrobot-cont-v0", "MountainCar-cont-v0", "CartPole-cont-v0", "Pendulum-cont-v0",
@@ -948,12 +853,8 @@ final class MetricsTapeWriter {
     }
     let initPipe = try pipeline("oak_fleet_init")
     let snapPipe = try pipeline("oak_fleet_snapshot")
-    // G=32 with scalar env measured fastest at B=1024 (mk5 geometry sweep).
     let autoG = max(2, min(32, B / 32))
     let megaG = e["OAK_MEGA_LANES_PER_TG"].flatMap(Int.init) ?? autoG
-    // Scalar-env mode measured 3x faster than coop at high G (mk5 attribution);
-    // the coop simd-env path (OAK_MEGA_ENV_COOP, physRows/tgPhys) was deleted
-    // in the kernel-slimming pass.
     let megaW = 32 * megaG
     let megaConstants = MTLFunctionConstantValues()
     ablations.apply(to: megaConstants)
@@ -978,10 +879,6 @@ final class MetricsTapeWriter {
     }
     let megaPipe = try dev.makeComputePipelineState(
       function: lib.makeFunction(name: "oak_megastep", constantValues: megaConstants))
-    // tg: per lane, the K-wide continuation vector plus a 4K prev-dot stash
-    // (encode gathers plan's prev-dots; plan reads them gather-free) and a
-    // stash-dirty flag (feature replacement forces a plan re-gather).
-    // K = 32, Engine's hardcoded option count.
     let megaSlotBytes = (5 * 32 + 1) * megaG * MemoryLayout<Float>.stride
     guard megaG >= 1, megaW <= megaPipe.maxTotalThreadsPerThreadgroup,
       megaSlotBytes <= dev.maxThreadgroupMemoryLength
@@ -1029,26 +926,12 @@ final class MetricsTapeWriter {
       try fm.createDirectory(at: dir, withIntermediateDirectories: true)
       return dir
     }
-    // RECORDING LAW (2026-08-05): every fleet run records every lane by
-    // default (v4). Opt out with OAK_RECORD_ACTIONS=0 (OAK_RECORD_SEEDS then
-    // still selects individual lanes); multi-policy workloads auto-suppress
-    // at the launch guard via recordingDefaultSuppressed.
     let recordAll =
       e["OAK_RECORD_ACTIONS"] != "0" && !Main.recordingDefaultSuppressed
     let recordSeeds = Set(
       (e["OAK_RECORD_SEEDS"] ?? "").split(separator: ",").compactMap {
         Int(String($0).trimmingCharacters(in: .whitespaces))
       })
-    // Recorded stream format: 4 = the columnar/quantized codec (DEFAULT —
-    // frontend/src/sim/RECORD_V4_SPEC.md; RECORDING LAW 2026-08-05: ~22x
-    // smaller — 2.7 GiB vs 61 GiB for a 1024x1M fleet — at measured SPS
-    // parity), 3 = flat f32[16] rows, the EXPLICIT certification format for
-    // gates whose tolerances sit below the v4 quantization contract:
-    // `tools/physics_parity.py --classic-tost` (1e-4 one-step parity) and
-    // `frontend/test/fixtures/gen_classic.py` (1e-6 cheetah replay) REFUSE
-    // v4 lanes with a clear error. Every other Python consumer reads both
-    // via `tools/record4.py::load_rows` (dispatches on recordVersion); the
-    // frontend theater has always read both.
     let recordFormat = e["OAK_RECORD_FORMAT"] ?? "4"
     guard recordFormat == "3" || recordFormat == "4" else {
       throw err("OAK_RECORD_FORMAT must be 3 or 4 (got '\(recordFormat)').")
@@ -1068,7 +951,6 @@ final class MetricsTapeWriter {
             handle: h, envKind: laneEnvKinds[lane], metaURL: metaURL, envId: laneEnvs[lane],
             seed: s, actDim: actDim))
       } else {
-        // Record v3: actions.bin records are 16 f32 — ctrl[6], done, pose[9].
         let meta: [String: Any] = ["envId": laneEnvs[lane], "seed": s, "actDim": actDim, "recordVersion": 3]
         try JSONSerialization.data(withJSONObject: meta, options: [.prettyPrinted, .sortedKeys])
           .write(to: metaURL, options: .atomic)
@@ -1076,9 +958,6 @@ final class MetricsTapeWriter {
       recordHandles.append(h)
       recordLanes.append(lane)
     }
-    // Ring flush cadence. Default = the heartbeat (the historical drain point);
-    // OAK_RECORD_DRAIN_STEPS adds intermediate flush-only boundaries, which is
-    // what keeps the ring (and its allocation) small at long horizons.
     let drainEvery = max(e["OAK_RECORD_DRAIN_STEPS"].flatMap(Int.init) ?? hb, 1)
     let recordCapacity = recordLanes.isEmpty ? 0 : 2 * drainEvery
     let recordSlotBuf = try makeBuf(B * 4)
@@ -1168,9 +1047,6 @@ final class MetricsTapeWriter {
       var gpuSeconds = 0.0
       var prevRewardSum: [Double]
       var prevStep = 0
-      /// Per-RECORDED-lane rewardSum at the last snapshot drain, and the step it
-      /// was taken at — the v4 chunk header's rewardDelta baseline. A chunk may
-      /// carry a finite delta ONLY when `recPrevStep` is its own first step.
       var recPrevReward: [Double]
       var recPrevStep = 0
       init(_ b: Int, _ rec: Int) {
@@ -1185,10 +1061,6 @@ final class MetricsTapeWriter {
     let detectorNames: [UInt32: String] = [1: "envReward", 2: "policyMean", 3: "envObs"]
     let wallStart = DispatchTime.now().uptimeNanoseconds
     func now() -> Double { Double(DispatchTime.now().uptimeNanoseconds - wallStart) / 1e9 }
-    // METRICS LAW (2026-08-05): the continuous series live in the metrics
-    // tape; this block survives only on the FINAL fleet.jsonl row. envInfo,
-    // the structurally-zero stats, and the never-read fields were deleted at
-    // the source (kernel + lane struct), not just here.
     func health(_ snap: LaneSnapshot, lane: Int) -> [String: Any] {
       let adm = Double(snap.deltaSum) / Double(max(Int(snap.steps), 1))
       var h: [String: Any] = [
@@ -1225,8 +1097,6 @@ final class MetricsTapeWriter {
       }
       return h
     }
-    // Errors out of the per-lane fan-out (DispatchQueue.concurrentPerform can
-    // neither throw nor safely write a captured Array from several threads).
     final class DrainErr: @unchecked Sendable {
       private let lock = NSLock()
       private var first: Error?
@@ -1241,10 +1111,6 @@ final class MetricsTapeWriter {
         return first
       }
     }
-    /// Flush ring rows [lastDrainStep, step) to disk. `half` is the snapshot
-    /// buffer half when this drain rides a heartbeat (the only place a lane
-    /// rewardSum exists, so the only place the v4 chunk header's rewardDelta can
-    /// be finite); nil on flush-only boundaries.
     func drainRecords(step: Int, half: Int?) throws {
       guard !recordLanes.isEmpty, step > st.lastDrainStep else { return }
       let t0 = DispatchTime.now().uptimeNanoseconds
@@ -1275,14 +1141,6 @@ final class MetricsTapeWriter {
         }
         return
       }
-      // rewardDelta is the delta over THIS CHUNK (RECORD_V4_SPEC.md), or NaN.
-      // The host only holds a lane rewardSum at heartbeat snapshots, so a chunk
-      // owns a real delta only when the previous snapshot landed exactly on the
-      // chunk's first step — true for every chunk at the default cadence
-      // (drainEvery == heartbeat). With OAK_RECORD_DRAIN_STEPS < heartbeat the
-      // interval spans several chunks and NONE of them owns it, so they all
-      // carry NaN ("unavailable"); an interval total is never mislabelled as a
-      // chunk total on the chunk that happens to close the interval.
       var deltas = [Float](repeating: .nan, count: recordLanes.count)
       if let half {
         let exact = st.recPrevStep == start
@@ -1345,8 +1203,6 @@ final class MetricsTapeWriter {
             }
           }
           if let eng = engine, detector == "paramNonFinite" || detector == "paramExplosion" {
-            // Kernel-dated explosion step (rotating-stripe scan, exact to 32 steps)
-            // beats the heartbeat-cadence snapshot date.
             let ex = eng.uints.p[lane * eng.uintTotal + 9 + 2 * 32 + 5 * eng.rank]
             if ex != UInt32.max { dStep = Int(ex) }
           }
@@ -1383,9 +1239,6 @@ final class MetricsTapeWriter {
             deathLines.append(try jsonLine(row))
           }
         }
-        // METRICS LAW (2026-08-05): per-lane heartbeat rows are gone — the
-        // continuous series live in the metrics tape. fleet.jsonl keeps only
-        // the FINAL certificate row per lane (plus deaths.jsonl, unchanged).
         if kind == "final" {
           var m: [String: Any] = [
             "v": 1, "kind": kind, "envId": laneEnvs[lane], "policy": p.rawValue,
@@ -1476,18 +1329,11 @@ final class MetricsTapeWriter {
     let explicitN = e["OAK_STEPS_PER_CB"].flatMap(Int.init)
     let tuneLock = NSLock()
     var tunedN = max(explicitN ?? 32, 1)
-    // Untracked buffers disable automatic hazard ordering BETWEEN command
-    // buffers; with 2 chunks in flight the GPU may overlap them. An event
-    // chain restores strict chunk order (async submission preserved).
     guard let chunkOrder = dev.makeEvent() else { throw err("Failed to create Metal event.") }
     var chunkSeq: UInt64 = 0
     let inflight = DispatchSemaphore(value: 2)
     let snapSlots = DispatchSemaphore(value: (recordLanes.isEmpty && dumpEvery == 0) ? 2 : 1)
     var snapHalf = 0
-    // Tape window: the autotuner can settle on tiny CBs (~33 steps at
-    // B=1024, 80 ms GPU each), so the tape coalesces to >= this many steps
-    // per row instead of one row per CB — resolution stays ~1k steps while
-    // the snapshot dispatch is skipped entirely on non-tape CBs.
     let tapeWindow = max(e["OAK_TAPE_WINDOW_STEPS"].flatMap(Int.init) ?? 1024, 1)
     var lastTapeStep = 0
     var step = 0
@@ -1503,14 +1349,8 @@ final class MetricsTapeWriter {
       }
       let target = min(boundary, step + n)
       let isSnap = target == nextHb
-      // Flush-only ring boundary: same snapSlots gating as a heartbeat (the ring
-      // holds 2 x drainEvery rows, so the next chunk may not be encoded until the
-      // previous drain has copied its rows out), no fleet/aggregate rows.
       let isDrain = !recordLanes.isEmpty && !isSnap && target % drainEvery == 0
       let isDump = dumpEvery > 0 && target % dumpEvery == 0
-      // METRICS LAW (2026-08-05): a tape row lands when >= tapeWindow steps
-      // have elapsed since the last one (and on every heartbeat). Only those
-      // CBs carry the snapshot dispatch and take a snapshot half.
       let isTape = isSnap || target - lastTapeStep >= tapeWindow
       inflight.wait()
       if let err = writer.sync(execute: { st.error }) { throw err }
@@ -1528,12 +1368,8 @@ final class MetricsTapeWriter {
         enc.setBuffer(snapBuf, offset: 0, index: 9)
         var base = UInt32(snapHalf * B)
         enc.setBytes(&base, length: 4, index: 10)
-        // The O(paramStride) paramAbsMax scan stays at heartbeat cadence; the
-        // tape-window snapshot skips it (fullScan = 0 -> sentinel -1).
         var fullScan: UInt32 = isSnap ? 1 : 0
         enc.setBytes(&fullScan, length: 4, index: 11)
-        // One threadgroup (= one simdgroup) per lane: the param scan is
-        // warp-parallel in-kernel.
         enc.dispatchThreadgroups(mtlSize(B), threadsPerThreadgroup: mtlSize(32))
       }
       enc.endEncoding()
@@ -1592,19 +1428,8 @@ final class MetricsTapeWriter {
     inflight.signal()
     inflight.signal()
     if let err = st.error { throw err }
-    // Finalize: the chunk table + total step count are a reader HINT written at
-    // close (an in-flight or torn file is still readable by sequential scan).
     for w in recordV4 { try w.writeMeta(final: true) }
   }
-  // Case-gate probe for the record-v4 ENCODER. `RecordV4Writer.encodeChunk`'s
-  // escape branch is unreachable from a healthy fleet (it needs a non-finite row
-  // or a field past its integer ceiling), so a fleet A/B can only ever prove the
-  // happy path. This feeds the REAL encoder a hand-built ring — the caller's
-  // escape zoo — and writes a real <out-dir>/{actions.bin,meta.json} pair for
-  // frontend/scripts/verify-record-v4.ts to decode and compare.
-  //
-  // Case file: u32 envKind, u32 rowCount, u32 chunkSteps, then rowCount x 16 f32
-  // in v3 row order (ctrl[6], done, pose[9]).
   static func recordV4Probe() throws {
     let args = CommandLine.arguments
     guard args.count >= 4 else {
@@ -1630,12 +1455,9 @@ final class MetricsTapeWriter {
     FileManager.default.createFile(atPath: url.path, contents: nil)
     let h = try FileHandle(forWritingTo: url)
     defer { try? h.close() }
-    // actDim is the fleet's constant 6 (Box half of D_policy = 12).
     let w = try RecordV4Writer(
       handle: h, envKind: kind, metaURL: dir.appendingPathComponent("meta.json"),
       envId: envId, seed: 0, actDim: 6)
-    // The rows ARE the ring: slot 0, capacity = rowCount, so the writer's
-    // `(stepStart + i) % capacity` indexes them absolutely.
     try data.withUnsafeBytes { raw in
       let rp = raw.baseAddress!.advanced(by: 12).assumingMemoryBound(to: Float.self)
       var start = 0
@@ -1694,11 +1516,6 @@ final class MetricsTapeWriter {
     try Data(bytes: outBuf.contents(), count: n * outStride * 4)
       .write(to: URL(fileURLWithPath: args[3]))
   }
-  // Case-gate probe for the gridworld env contract: reads a
-  // gridworld_ref.py case file (header uint32 x3 = n, inW, outW; then n in
-  // records, then n golden out records), runs the in-records through the
-  // Metal env step (the SAME functions the fleet env window calls), and
-  // writes n out records for `gridworld_ref.py --compare cases out`.
   static func gridworldProbe() throws {
     let args = CommandLine.arguments
     guard args.count >= 4 else {
@@ -1909,33 +1726,16 @@ final class MetricsTapeWriter {
     let policies = try (env["OAK_BENCH_POLICIES"] ?? "oak,zero,random").split(separator: ",").map {
       try pol(String($0))
     }
-    // Recording + multiple policies is the TRUNCATION TRAP: every policy runs the
-    // same lane set and writes the SAME <envId>/seed<N>/actions.bin, so each
-    // policy truncates the previous one's stream and the surviving meta.json
-    // describes a file that was written by a different policy. The DEFAULT
-    // OAK_BENCH_POLICIES is "oak,zero,random", so this fires on the obvious
-    // `OAK_RECORD_ACTIONS=1` invocation — refuse instead of silently shipping
-    // mislabeled recordings.
     let recordingRequested =
       env["OAK_RECORD_ACTIONS"] == "1"
       || !(env["OAK_RECORD_SEEDS"] ?? "").trimmingCharacters(in: .whitespaces).isEmpty
     if recordingRequested, policies.count > 1 {
       throw err("Recording (OAK_RECORD_ACTIONS / OAK_RECORD_SEEDS) with \(policies.count) policies (\(policies.map(\.rawValue).joined(separator: ","))) would TRUNCATE: all policies share one <envId>/seed<N>/actions.bin, so each overwrites the last and meta.json ends up describing another policy's stream. Set OAK_BENCH_POLICIES=oak (the default is oak,zero,random).")
     }
-    // RECORDING LAW (2026-08-05): recording is default-ON, but the default
-    // cannot apply to a multi-policy workload (the truncation trap above) —
-    // suppress with a visible line instead of throwing; an EXPLICIT request
-    // still throws.
     if policies.count > 1, env["OAK_RECORD_ACTIONS"] == nil {
       recordingDefaultSuppressed = true
       print("[fleet] default recording disabled: \(policies.count) policies share lane dirs (set OAK_BENCH_POLICIES=oak to record)")
     }
-    // Seed-deterministic env schedule (universal env contract). Multi-env is
-    // the MANDATORY default (user law 2026-07-19): every run is a superset of
-    // the keeper — 1024 cheetah lanes (same seeds as the keeper) plus
-    // FourRooms/DeepSea lanes riding free on the GPU's spare capacity.
-    // OAK_BENCH_ENVS overrides the schedule; OAK_BENCH_ENV single-env is a
-    // hard error (no opt-out of multi-env science).
     let defaultSchedule = "HalfCheetah-v4:1024,KeyCorridor-cont-v0:128,FourRooms-cont-v0:64,DeepSea-cont-v0:64,Acrobot-cont-v0:64,MountainCar-cont-v0:64"
     var raw = env["OAK_BENCH_ENVS"] ?? defaultSchedule
     if raw.trimmingCharacters(in: .whitespaces).isEmpty { raw = defaultSchedule }
@@ -1990,40 +1790,7 @@ final class MetricsTapeWriter {
         isDirectory: true)
     }
     try fm.createDirectory(at: dir, withIntermediateDirectories: true)
-    // organFlops / flopsPerLaneStep (organCostVersion 1): honest per-lane-step
-    // multiply+add count (fma = 2 flops) of the post-slimming megakernel,
-    // binned by FC-STOMP ORGAN (not pipeline stage), computed from the real
-    // config — R = rank, K = 32 options, D = 12, DL = D/2 live dims, A = 64
-    // active rows, Rn nursery, traceLevels from Arena. Each organ maps to a
-    // set of (stage, loop, trip-count) terms; this is the old per-stage model
-    // re-binned, plus three corrections found by reading the actual loops
-    // (docs/research/allocation-and-instrument-design.md §1):
-    //   1. twin-dot undercount: the encode K-gather computes 11 dots/option-
-    //      step (psiPrev/psiNext/hDot = 3A; rHat/lRaw/vModel/vModel2 = 4A;
-    //      pdVs/pdVsA/pdR/pdL stash = 4A — OakKernel.metal:624-643); the stage
-    //      model counted 10KA — the second twin vModel2 dot was uncounted.
-    //      +KA lands in OptionModels.
-    //   2. FeatureConstruction was absent: obs stats + trace EMAs
-    //      (OakKernel.metal:877-888), core write (:920-959), gate/tile eval
-    //      (:962-987), gated-bank eval 32 banks x 7 slots (:988-1010).
-    //   3. ActionEmission (sample stage) was absent: Philox + Box-Muller per
-    //      dim (:2536-2546), behavior-credit staging ~3/(option,live-dim) +
-    //      importance ratio K (:2570-2586); Gumbel-max discrete (:2460-2515).
-    // Ablation-aware: each term is counted only when the corresponding
-    // function-constant-guarded loop actually compiles in (guard placement
-    // identical to the old stage model). Unguarded loops (value/psi/hDot
-    // dots, norms, polCoef, keyboard, utility scan, sample) run — and are
-    // counted — under every ablation. Canonical case: OAK_ABLATE=planning
-    // removes all of dyna (oak_dyna_backups early-returns and the dynaAcc
-    // apply compiles out). K-parking (Phase 9.3) is DYNAMIC — parked options
-    // skip their A-gathers at runtime; the static model counts full-width
-    // trip counts regardless (parking's refund shows up in wall-clock/SPS,
-    // not here).
-    // CONSUME AS RELATIVE SHARES (or per-organ deltas across ablations),
-    // NEVER ABSOLUTE SILICON FLOPS: static trip counts over-attribute ~3-5x
-    // vs measured wall (design §1 calibration). organCostVersion gates
-    // cross-version absolute comparisons (pre-organ roots are version 0).
-    let fObs = 17, fD = 12  // universal I/O contract (same constants fleetGPU uses)
+    let fObs = 17, fD = 12
     let fInputW = Arena.input(fObs, fD)
     var fR = 32
     while fR < 2 * fInputW { fR *= 2 }
@@ -2037,25 +1804,16 @@ final class MetricsTapeWriter {
       "OptionPolicies": 0, "OptionModels": 0, "Planning": 0, "OptionKeyboard": 0,
       "SearchControl": 0, "GenerateAndTest": 0, "ActionEmission": 0, "misc": 0,
     ]
-    // FeatureConstruction (encode): core write 32 slots + gate/tile eval 32
-    // banks run under every ablation; obs stats/traces and the gated-bank
-    // eval compile out under feature-construction.
     organFma["FeatureConstruction"]! += 16 + 3 * 32
     if !ablated.contains("feature-construction") {
       organFma["FeatureConstruction"]! += fObs * (2 + fTraceLevels) + 32 * 7 * 5
     }
-    // GVFPrediction: value dots 2A + norms 6A (encode, unguarded) + value
-    // banks 2A (learn).
     organFma["GVFPrediction"]! += 2 * fA + 6 * fA
     if !ablated.contains("gvf-prediction") { organFma["GVFPrediction"]! += 2 * fA }
-    // RewardRespectingSubtasks: encode psi dots 2KA + hDot KA (unguarded) +
-    // learn 2KA + headScale/psiRho K.
     organFma["RewardRespectingSubtasks"]! += 2 * fK * fA + fK * fA
     if !ablated.contains("rr-subtasks") {
       organFma["RewardRespectingSubtasks"]! += 2 * fK * fA + fK
     }
-    // OptionPolicies: polCoef K*DL (plan, unguarded) + learn apply KA*DL +
-    // emit option means KA*DL + consensus DL*K dir + DL*A apply (window).
     organFma["OptionPolicies"]! += fK * fDL
     if !ablated.contains("option-policies") {
       organFma["OptionPolicies"]! += 2 * fK * fA * fDL
@@ -2063,36 +1821,21 @@ final class MetricsTapeWriter {
         organFma["OptionPolicies"]! += fDL * fK + fDL * fA
       }
     }
-    // OptionModels (correction 1 — encode gather 4KA now includes the vModel2
-    // twin dot): encode 4KA + plan-stage prev-dot stash 4KA + learn 2KA +
-    // oak_plan_one scalars ~16/option (OakKernel.metal:1086-1126).
     if !ablated.contains("option-models") {
       organFma["OptionModels"]! += 4 * fK * fA + 4 * fK * fA + 2 * fK * fA + 16 * fK
     }
-    // Planning (dyna): ring vX+xNorm 2A per warp thread | 4 candidates x 3
-    // dots 12A per thread | copy-2 4KA | dynaAcc apply 2K per thread.
     if !ablated.contains("planning") {
       organFma["Planning"]! += 14 * fA * 32 + 4 * fK * fA + 2 * fK * 32
     }
-    // OptionKeyboard: softmax refresh K + chord blend D*K + GPI scans K.
     organFma["OptionKeyboard"]! += fK + fD * fK + fK
-    // SearchControl: window utility scan A*K + prioOpt K + ESS/entropy ~1/4-step.
     organFma["SearchControl"]! += fA * fK + fK + fK / 2
-    // GenerateAndTest: nursery Rn/2 + eligScr R + LCB scan K.
     if !ablated.contains("generate-and-test") {
       organFma["GenerateAndTest"]! += fRn / 2 + fR + fK
     }
-    // ActionEmission (correction 3, sample stage): Philox + Box-Muller ~5/dim
-    // + behavior-credit staging ~3 per (option, live dim) + importance ratio K.
     organFma["ActionEmission"]! += 5 * fD + 3 * fK * fDL + fK
-    // misc: serial scalar/keyboard/curation/stats loops (unattributed
-    // overhead no single organ owns).
     organFma["misc"]! += 4_000
     let organCostVersion = 1
     let organFlops = organFma.mapValues { 2 * $0 }
-    // Env-window flops are env-conditional per lane's env: the fp32
-    // HalfCheetah physics chain ~2e4 (F4-port family estimate); the integer
-    // gridworld steps are near-free (obs formulas dominate).
     let agentFlops = organFlops.values.reduce(0, +)
     let envFlops: [String: Int] = [
       "HalfCheetah-v4": 20_000, "FourRooms-cont-v0": 40, "DeepSea-cont-v0": 20,

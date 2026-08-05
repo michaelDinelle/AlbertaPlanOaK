@@ -1,19 +1,3 @@
-// POMaze-cont-v0 decoder.
-//
-// Oracles (ported, never guessed):
-//   Sources/Gridworld.metal      gw_po_is_wall L773, gw_po_step L803
-//   tools/gridworld_ref.py       po_is_wall L661, po_step L688
-//   Sources/OakKernel.metal      pose packing L2801-2809, init L2307-2312
-//
-// 11x11 partial-observability maze: border walls, interior wall y=3 except
-// the gap (8,3), interior wall y=7 except the gap (2,7) — three bands joined
-// into a serpentine route. The AGENT sees only its 8 neighbours, its own
-// position, and the goal's compass direction; the map here is the ground
-// truth for the SCENE (the fog is a rendering choice, not a decode choice).
-// Goal entry: +1, done=1, agent and goal rejection-redrawn — both land in
-// the pose, so no replay is needed.
-//
-// pose = [x, y, gx, gy, 0, 0, 0, 0, 0].
 
 import { CTRL_LEN, OFF_CTRL, OFF_DONE, OFF_POSE, POSE_LEN } from '../record';
 import type { EnvDecoder, EnvFrame, EnvGeometry, GridCell, SimEvent } from '../types';
@@ -23,18 +7,15 @@ export const POMAZE_W = 11;
 export const POMAZE_H = 11;
 export const POMAZE_START: GridCell = Object.freeze({ x: 1, y: 1 });
 export const POMAZE_GOAL: GridCell = Object.freeze({ x: 9, y: 9 });
-/** the two gaps that stitch the three bands together */
 export const POMAZE_GAPS: readonly GridCell[] = Object.freeze([
   { x: 8, y: 3 },
   { x: 2, y: 7 },
 ]);
-/** the agent's view radius — it sees exactly these 8 neighbours */
 export const POMAZE_VIEW_RADIUS = 1;
 
 export interface POMazeState {
   x: number;
   y: number;
-  /** LIVE goal cell (rejection-redrawn to a free cell on completion) */
   gx: number;
   gy: number;
 }
@@ -44,7 +25,6 @@ export interface POMazeStatic {
   walls: Uint8Array;
 }
 
-/** `gw_po_is_wall` / `po_is_wall`. */
 export function poMazeIsWall(x: number, y: number): boolean {
   if (x <= 0 || x >= 10 || y <= 0 || y >= 10) return true;
   if (y === 3 && x !== 8) return true;
@@ -52,7 +32,6 @@ export function poMazeIsWall(x: number, y: number): boolean {
   return false;
 }
 
-/** w*h row-major occupancy, 1 = wall. */
 export function poMazeWalls(): Uint8Array {
   const walls = new Uint8Array(POMAZE_W * POMAZE_H);
   for (let y = 0; y < POMAZE_H; y++) {
@@ -63,10 +42,6 @@ export function poMazeWalls(): Uint8Array {
   return walls;
 }
 
-/**
- * The 8 wall bits the agent actually observes, in the kernel's channel order
- * N, NE, E, SE, S, SW, W, NW (`gw_po_obs` o[0..7]).
- */
 export function poMazeView(x: number, y: number): Uint8Array {
   const d: readonly (readonly [number, number])[] = [
     [0, -1],

@@ -1,11 +1,3 @@
-// summary.json v1 -> v2 adapter: the golden test.
-//
-// The adapter's contract is not "these names map to those names" — it is "a v1 root
-// and a freshly-reported v2 root describe the SAME run identically". So the fixture is
-// one mini fleet root (test/fixtures/server/summary-adapter/run, built deterministically
-// by make_fixture.py) reported TWICE: once by the pre-rename fleet.py (summary-v1.json)
-// and once by the current one (summary-v2.json). If a future rename lands in fleet.py
-// without landing here, these deep-equals fail.
 
 import { describe, expect, it } from 'bun:test';
 import { readFileSync } from 'node:fs';
@@ -21,11 +13,6 @@ function fixture(name: string): RunSummary {
   return JSON.parse(readFileSync(join(FIXTURES, name), 'utf8')) as RunSummary;
 }
 
-/**
- * Fields v2 ADDS rather than renames. v1 never wrote them, and the adapter's second
- * rule is "synthesize nothing", so adapt(v1) legitimately lacks them. Listing them
- * explicitly means a new v2 field cannot quietly slip past the golden comparison.
- */
 const V2_ONLY_TOP = ['solvedThreshold'] as const;
 const V2_ONLY_RESULT = ['rewardRateBySeed', 'recentRewardRateBySeed', 'retentionBySeed'] as const;
 
@@ -55,7 +42,6 @@ describe('summaryAdapter — v1 root vs a freshly-reported v2 root', () => {
     expect(v1['summarySchemaVersion']).toBeUndefined();
     expect(v2['summarySchemaVersion']).toBe(SUMMARY_SCHEMA_VERSION);
     expect(v2['solvedThreshold']).toBe(0.1);
-    // same root => same meta, same policies, same env slices
     expect(v1['meta']).toEqual(v2['meta']);
     expect(Object.keys(v1['envSlices'] as object).sort()).toEqual(Object.keys(v2['envSlices'] as object).sort());
   });
@@ -100,13 +86,10 @@ describe('summaryAdapter — v1 root vs a freshly-reported v2 root', () => {
   it('drops no v1 field on the floor: every old key has a new home or its own name', () => {
     const legacy = (v1['results'] as Record<string, unknown>[])[0] as Record<string, unknown>;
     const out = ((adaptSummary(v1) as RunSummary)['results'] as Record<string, unknown>[])[0] as Record<string, unknown>;
-    // v1 keys that keep their name must still be present and equal. `divergence`
-    // keeps its name but renames a member (dead -> diverged), asserted above.
     for (const key of Object.keys(legacy)) {
       if (key === 'divergence') continue;
       if (Object.prototype.hasOwnProperty.call(out, key)) expect(out[key]).toEqual(legacy[key]);
     }
-    // and the count is preserved: 21 renames + `plasticity` -> `peak` is 1-for-1
     expect(Object.keys(out).length).toBe(Object.keys(legacy).length);
   });
 
@@ -117,7 +100,6 @@ describe('summaryAdapter — v1 root vs a freshly-reported v2 root', () => {
       expect(slice, envId).toBeDefined();
       expect(slice?.['rewardRateIQM']).toBeTypeOf('number');
       expect(slice?.['iqmDeliveredAll']).toBeUndefined();
-      // the slice CI is the slice's OWN population, never gated on the pooled n
       expect(slice?.['rewardRateIQMCI95']).toBeInstanceOf(Array);
     }
   });
@@ -141,7 +123,6 @@ describe('summaryAdapter — the two safety rules', () => {
     expect('retentionFraction' in result).toBe(false);
     expect('peak' in result).toBe(false);
     expect('solvedThreshold' in out).toBe(false);
-    // the ONE thing it adds is the marker that it ran
     expect(out.summarySchemaVersion).toBe(SUMMARY_SCHEMA_VERSION);
   });
 

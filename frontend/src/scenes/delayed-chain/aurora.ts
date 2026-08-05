@@ -1,19 +1,3 @@
-// The Long Night Road — the aurora. THE ONE bespoke ShaderMaterial of this scene
-// (STYLE.md: "At most ONE bespoke ShaderMaterial per scene ... it must consume token
-// colors and ctx.time()").
-//
-// WHY IT IS SHAPED LIKE THIS. DelayedChain's reward lives at pos 31 and nowhere else,
-// so the aurora is not weather — it is the reward's own address, and it must never
-// wander back over the walk. The curtain is therefore an ARC CENTRED ON THE GOAL CELL:
-// every vertex of it stands `radius` beyond the paying end of the road, so from any
-// point on the road the light hangs over the far end and only the far end. The test
-// asserts exactly that (min world x of the arc ≥ the cell the brief allows it to reach).
-//
-// The material itself is four gaussian ribbons in curtain space: each drifts on its own
-// slow phase, widens with height, and is streaked vertically by a cheap 1-D value noise.
-// Colour runs token teal at the base into token violet at the top with a gold ember in
-// the lowest band — all three are blends of the design tokens, no free colours. `uGain`
-// is the scene's one handle: the celebration surges it, nothing else touches it.
 
 import * as THREE from 'three';
 import { TOKENS, type Palette } from '@kit/tokens';
@@ -24,9 +8,7 @@ export interface AuroraOptions {
   tier: QualityTier;
   palette: Palette;
   tokens: typeof TOKENS;
-  /** world x of the goal cell — the arc is centred on it */
   center: number;
-  /** how far beyond the goal the curtain stands */
   radius: number;
   name?: string;
 }
@@ -35,32 +17,18 @@ export interface AuroraHandle {
   group: THREE.Group;
   mesh: THREE.Mesh;
   material: THREE.ShaderMaterial;
-  /** the nearest world x any vertex of the curtain reaches (an honesty assertion) */
   readonly nearestX: number;
-  /** 1 = idle; the goal celebration pushes it up and lets it fall back */
   setGain(g: number): void;
-  /** ctx.time() — the ONLY clock */
   setTime(t: number): void;
   dispose(): void;
 }
 
-/**
- * Half-angle of the arc around +x, radians. A CANOPY, NOT A WEATHER FRONT: at the first
- * pass's 1.0 rad the curtain subtended ±55° about the road's axis, so its four ribbons
- * drifted far to the SIDE of the terminus — in the hero stills one habitually hung over
- * open moor, 400 px from the cairn it is supposed to be advertising, which reads as sky
- * rather than as "the reward lives THERE". At 0.6 rad every ribbon, at every phase of its
- * own drift, stands within ±34° of the road's own axis: from anywhere on the walk the
- * curtain is the thing above the far end. (The honesty claim is unchanged and is still
- * asserted: narrowing the arc moves the curtain's nearest vertex FURTHER from the walk,
- * `center + radius·cos(ARC)`.)
- */
 const ARC = 0.6;
 const BASE_Y = 0.5;
 const TOP_Y = 17;
 const RIBBONS = 4;
 
-const VERT = /* glsl */ `
+const VERT =  `
 varying vec2 vAur;
 void main() {
 	vAur = uv;
@@ -68,7 +36,7 @@ void main() {
 }
 `;
 
-const FRAG = /* glsl */ `
+const FRAG =  `
 #include <common>
 uniform float uTime;
 uniform float uGain;
@@ -128,11 +96,6 @@ void main() {
 }
 `;
 
-/**
- * A curtain arc standing `radius` beyond `center` on the +x side, spanning ±ARC radians
- * about the road's own axis. Local space is centred on the goal cell, so the group sits
- * at the goal and the geometry never has to know where the road is.
- */
 function auroraGeometry(segments: number, rows: number): THREE.BufferGeometry {
   const nu = segments + 1;
   const nv = rows + 1;
@@ -178,7 +141,6 @@ export function buildAurora(opts: AuroraOptions): AuroraHandle {
   const rows = Math.max(2, Math.round(9 * detail));
 
   const geometry = auroraGeometry(segments, rows);
-  // the ring radius lives in the group's scale, so the geometry is a unit arc
   const group = new THREE.Group();
   group.name = opts.name ?? 'aurora';
   group.position.set(opts.center, 0, 0);
@@ -193,9 +155,6 @@ export function buildAurora(opts: AuroraOptions): AuroraHandle {
     uniforms: {
       uTime: { value: 0 },
       uGain: { value: 1 },
-      // Emissive gain is palette-relative (four-rooms lesson 22): on a 0x0b1030 night
-      // sky a 0.55 curtain is already a presence, and the ribbon cores sit just under
-      // the 0.85 bloom threshold so only a surge blooms.
       uIntensity: { value: 0.62 },
       uBase: { value: base },
       uCrown: { value: crown },

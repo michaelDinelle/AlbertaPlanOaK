@@ -1,24 +1,3 @@
-// Sunlit Descent — the static world (DeepSea-cont-v0).
-//
-// The reef IS the reachable set and the descent IS the row index. Nothing here is typed
-// in: the shelves come from `reefReachable()` (the decoder's own transition run forward),
-// the shelf heights from `reefDepthY(row)`, the kelp's lean from `grid.actionMask`, and
-// the treasure shelf from `grid.goal`.
-//
-// PATTERNS WORTH COPYING
-//  * `buildCellField` is a SUBSTRATE. `floorFilter` deletes the unreachable cells (that
-//    is the open blue water — a hole in the board, not a dark tile), white base +
-//    `floorTint` gives every shelf its own depth hue inside ONE draw, and a pass of
-//    instance-matrix surgery afterwards sinks each row to its terrace. The floor
-//    geometry keeps its top face at local y = 0, so the shelf top of row r is EXACTLY
-//    `reefDepthY(r)` no matter what per-cell jitter the field applied.
-//  * The action mask is shown, never hidden (STYLE.md honesty rule: "never hide what the
-//    env defines — DeepSea mask currents"). Each reef cell grows a kelp clump leaning the
-//    way action 1 carries the diver there. Turn the overlay on and the mask arrows point
-//    the same way, cell for cell.
-//  * ONE bespoke ShaderMaterial, spent on the caustics — the shimmer is the whole reason
-//    the frame reads as "underwater" rather than "teal desert". It consumes token colors
-//    and `ctx.time()` and nothing else.
 
 import {
   buildCellField,
@@ -63,72 +42,26 @@ import {
   type ReefSkin,
 } from './reef';
 
-// ---------------------------------------------------------------------------
-// world constants
-// ---------------------------------------------------------------------------
 
-/**
- * The key light. 56° above the horizon and thrown across the descent from the left. The
- * ratio between its y and its z is the whole staircase: every terrace riser faces +z,
- * straight at the camera, so 0.83 on the shelf tops against 0.32 on the risers is what
- * keeps eight rows of shadow banding across the reef. Pushed to +0.37 the risers came up
- * to within a hair of the tops and the descent flattened into one ramp; pushed BEHIND the
- * steps (−z) they went to hemisphere light alone and the whole reef went murky.
- * Straight overhead flattens it into a mosaic; below ~35° the shadows swallow the next
- * shelf whole (canon lesson 8).
- */
 export const SUN_DIR: readonly [number, number, number] = [-0.46, 0.83, 0.32];
-/** covers the whole reef (8 × 8 board, 3.5 units of descent, 1.35 of cliff) with margin */
 export const SHADOW_RADIUS = 7.6;
-/**
- * Fog reach — and the number this scene got most wrong. `makeFog` reads the palette's
- * `fogDensityHint` (underwater = 0.7) and sets FogExp2 density so transmittance is 0.05
- * at `hint · extent`. The composed camera stands 19 units off the reef, so an extent of
- * 33 put the whole playfield at ~87% fog: every shelf tint, every riser shadow and the
- * entire eight-step staircase were being averaged into one flat sheet of fog colour, and
- * three passes of re-tinting and re-lighting could not have fixed it.
- *
- * At 96 the density is ~0.0257, which costs the NEAR shelves ~12% and the far ones ~36%.
- * That is a depth cue instead of a wash. (four-rooms is the same arithmetic from the
- * other side: an 11-unit courtyard at 17.8 units with a 520-unit extent — 5% fog.)
- */
 export const FOG_EXTENT = 96;
-/** the composition azimuth, shared with index.ts so planting and camera cannot disagree */
 export const CAMERA_AZIMUTH = 0.78;
 
-/** the surface plane the god rays fall from (well above row 0's shelf) */
 export const SURFACE_Y = 7.2;
-/** how far a shaft reaches before it dissolves */
 export const SHAFT_LENGTH = 9.5;
-/**
- * The annulus the shafts stand in. The inner radius keeps them out of the reef's own
- * airspace and the outer one keeps them off the CAMERA: a shaft that passes within a
- * unit or two of the eye is a full-alpha additive quad seen edge-on, which renders as a
- * hard white streak across the whole frame. The first pass had them out to 9.6 and the
- * frame looked like a lens-flare stock plate.
- */
 export const SHAFT_RADIUS_MIN = 2.0;
 export const SHAFT_RADIUS_MAX = 8.0;
 
-// ---------------------------------------------------------------------------
-// exclusions + height field
-// ---------------------------------------------------------------------------
 
-/**
- * The shelf top under a world point — the reef's ground for anything scattered on it.
- * Only z matters: a terrace is flat across its whole row, which is the entire reason the
- * dive's column is a free choice and its row is not.
- */
 export function shelfHeightAt(_x: number, z: number, grid: GridSize): number {
   return reefDepthY(rowAtZ(z, grid));
 }
 
-/** Nothing is planted on open water (there is no floor there to plant it on). */
 export function excludeOpenWater(grid: GridSize, reach: Uint8Array): ExcludeFn {
   return (x, z) => !isReef(reach, grid, colAtX(x, grid), rowAtZ(z, grid));
 }
 
-/** Keep a clear disc around every cell CENTRE so the dive's cell stays legible. */
 export function excludeCellCenters(grid: GridSize, radius: number): ExcludeFn {
   const r2 = radius * radius;
   const ox = (grid.w - 1) / 2;
@@ -142,18 +75,7 @@ export function excludeCellCenters(grid: GridSize, radius: number): ExcludeFn {
   };
 }
 
-// ---------------------------------------------------------------------------
-// the terrace pass
-// ---------------------------------------------------------------------------
 
-/**
- * Sink every shelf instance to its row's terrace. `buildCellField` lays the board flat
- * (that is its whole contract); this is the four-rooms "collapse an instance and own the
- * cell" trick applied to a whole axis. The slab geometry keeps its TOP FACE at local
- * y = 0 and the field's jitter only scales the slab downward, so after this pass the
- * shelf top of row r is exactly `reefDepthY(r)` — which is what the alignment probes and
- * the ground-truth shear both assume.
- */
 export function terraceShelves(field: CellFieldHandle, grid: GridSize): void {
   const mesh = field.floorMeshes[0];
   if (!mesh) return;
@@ -176,19 +98,10 @@ export function terraceShelves(field: CellFieldHandle, grid: GridSize): void {
   mesh.computeBoundingSphere();
 }
 
-// ---------------------------------------------------------------------------
-// kelp — the mask, made visible
-// ---------------------------------------------------------------------------
 
-/** how far a kelp clump leans off vertical, radians */
 export const KELP_LEAN = 0.42;
 export const KELP_HEIGHT = 0.74;
 
-/**
- * One clump of blades, built once and instanced per reef cell. The blades are SYMMETRIC
- * about their own axis on purpose: the only directional information in the kelp is the
- * lean, so it can never say anything the mask did not.
- */
 export function makeKelpGeometry(tier: QualityTier | undefined): THREE.BufferGeometry {
   const detail = cellFieldDetail(tier);
   const blades = Math.max(3, Math.round(5 * detail));
@@ -209,7 +122,6 @@ export function makeKelpGeometry(tier: QualityTier | undefined): THREE.BufferGeo
   };
 
   for (let b = 0; b < blades; b++) {
-    // irregular fan so a clump never reads as a machined rosette
     const yaw = (b / blades) * Math.PI * 2 + ((b * 7) % 5) * 0.19;
     const cos = Math.cos(yaw);
     const sin = Math.sin(yaw);
@@ -222,7 +134,6 @@ export function makeKelpGeometry(tier: QualityTier | undefined): THREE.BufferGeo
       const y1 = t1 * height;
       const w0 = 0.055 * (1 - 0.78 * t0);
       const w1 = 0.055 * (1 - 0.78 * t1);
-      // a gentle S in the blade's own plane: a straight plank reads as plastic
       const s0 = Math.sin(t0 * 2.4) * 0.055;
       const s1 = Math.sin(t1 * 2.4) * 0.055;
       const k0 = 0.42 + 0.7 * t0;
@@ -259,14 +170,6 @@ export interface KelpHandle {
   dispose(): void;
 }
 
-/**
- * A kelp clump on every reef cell, leaning the way action 1 carries the diver there.
- *
- * `Euler(0, yaw, tilt, 'ZYX')` composes as `Rz(tilt) · Ry(yaw)`: the yaw turns the clump
- * in its own frame and the tilt then leans it about the WORLD +z axis — which tips the
- * blades toward −x for a positive angle. So `tilt = −dir · KELP_LEAN` leans toward +x
- * exactly when the mask bit says action 1 moves right, matching the overlay's arrows.
- */
 export function buildKelp(
   grid: GridGeometry,
   reach: Uint8Array,
@@ -327,7 +230,6 @@ export function buildKelp(
       scale.set(s, s * (0.86 + 0.3 * jitter), s);
       matrix.compose(position, quaternion, scale);
       mesh.setMatrixAt(n, matrix);
-      // deeper kelp is darker; the shelf tint and the plants agree about the depth
       const depth = grid.h > 1 ? r / (grid.h - 1) : 0;
       const k = (1.1 - 0.42 * depth) * (0.88 + 0.24 * jitter);
       color.setRGB(k, k * (1 + 0.05 * (jitter2 - 0.5)), k * (1 - 0.05 * (jitter2 - 0.5)));
@@ -356,11 +258,8 @@ export function buildKelp(
   };
 }
 
-// ---------------------------------------------------------------------------
-// caustics — THE one bespoke ShaderMaterial of this scene
-// ---------------------------------------------------------------------------
 
-const CAUSTIC_VERT = /* glsl */ `
+const CAUSTIC_VERT =  `
 #include <common>
 varying vec3 vReefWorld;
 varying vec2 vReefUv;
@@ -372,10 +271,7 @@ void main() {
 }
 `;
 
-// Two counter-scrolling triangle lattices -> the classic pool-caustic web, no texture and
-// no dependent reads. Same construction as kit/water's `oakCaustic`, so the reef floor and
-// every pond in the preserve shimmer with the same hand.
-const CAUSTIC_FRAG = /* glsl */ `
+const CAUSTIC_FRAG =  `
 #include <common>
 uniform float uTime;
 uniform vec3 uColor;
@@ -421,11 +317,6 @@ export interface CausticHandle {
   dispose(): void;
 }
 
-/**
- * One additive decal per shelf ROW, merged into a single mesh: the caustic web is
- * computed in world xz so it crosses the terraces as one continuous pattern instead of
- * eight independent tiles.
- */
 export function buildCaustics(
   grid: GridSize,
   reach: Uint8Array,
@@ -520,19 +411,11 @@ export function buildCaustics(
   };
 }
 
-// ---------------------------------------------------------------------------
-// god rays
-// ---------------------------------------------------------------------------
 
-/**
- * The shaft sprite: soft across (so the quad edges never show) and fading along its
- * length (so the beam dissolves before it reaches the reef). Procedural, 64², no network.
- */
 export function makeShaftSprite(size = 64): THREE.DataTexture {
   const s = Math.max(8, size);
   const data = new Uint8Array(s * s * 4);
   for (let y = 0; y < s; y++) {
-    // uv.y = 1 at the surface end of the shaft
     const v = (y + 0.5) / s;
     const along = Math.pow(v, 1.5);
     for (let x = 0; x < s; x++) {
@@ -561,12 +444,6 @@ export interface GodRayHandle {
   dispose(): void;
 }
 
-/**
- * Sunbeams breaking through the surface. Each shaft is three quads crossed at 60°, so it
- * keeps a volume from any azimuth, and the whole rig is rotated to the KEY LIGHT's own
- * direction — the beams and the shadows on the terraces can never disagree about where
- * the sun is.
- */
 export function buildGodRays(
   sunDir: THREE.Vector3,
   skin: ReefSkin,
@@ -595,7 +472,6 @@ export function buildGodRays(
       const a = (p / planes) * Math.PI + h3 * 0.7;
       const dx = Math.cos(a) * width * 0.5;
       const dz = Math.sin(a) * width * 0.5;
-      // uv.y = 1 at the top (surface end) — that is where the sprite is brightest
       const quad: readonly (readonly [number, number, number, number, number])[] = [
         [cx - dx, 0, cz - dz, 0, 1],
         [cx + dx, 0, cz + dz, 1, 1],
@@ -636,7 +512,6 @@ export function buildGodRays(
   mesh.name = 'reefGodRayShafts';
   mesh.frustumCulled = false;
   mesh.renderOrder = 3;
-  // local +y becomes the sun direction, so the shafts hang exactly along the light
   mesh.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), sunDir.clone().normalize());
   mesh.position.y = SURFACE_Y;
   group.add(mesh);
@@ -645,7 +520,6 @@ export function buildGodRays(
     group,
     material,
     setTime(t) {
-      // the surface swell drifts the whole curtain and breathes its brightness
       group.rotation.y = Math.sin(t * 0.055) * 0.09;
       material.opacity = 0.095 + 0.028 * Math.sin(t * 0.31);
     },
@@ -660,9 +534,6 @@ export function buildGodRays(
   };
 }
 
-// ---------------------------------------------------------------------------
-// the world handle
-// ---------------------------------------------------------------------------
 
 export interface WorldHandle {
   group: THREE.Group;
@@ -671,9 +542,7 @@ export interface WorldHandle {
   field: CellFieldHandle;
   kelp: KelpHandle;
   skin: ReefSkin;
-  /** the drifting silt the diver stirs — the scene drives its position + density */
   silt: AmbientParticlesHandle;
-  /** the column of bubbles a resurfacing diver leaves behind */
   rush: AmbientParticlesHandle;
   setTime(t: number): void;
   setPixelRatio(dpr: number): void;
@@ -705,18 +574,12 @@ export function buildWorld(
   const timed: Timed[] = [];
   const pixelated: AmbientParticlesHandle[] = [];
 
-  // ---- the one sky: a depth COLUMN, no sun disc (isDepthColumnPalette('underwater')) ----
   const sky = skyFromPalette(palette, 'underwater', tier, {
-    // the surface light piles up overhead and the dark reaches a long way down
     topSpread: 0.34,
     bottomSpread: 0.88,
     dither: 0.012,
     radius: 300,
   });
-  // The column, graded: a bright ceiling of surface light, a mid-water that is already
-  // much darker than the palette's own horizon, and a near-black under the reef. All three
-  // are token blends; without them the reef floats in a flat wall of the same blue it is
-  // made of.
   sky.setColors(
     blendTokens(palette.skyTop, palette.sun, 0.3),
     blendTokens(palette.skyHorizon, palette.skyBottom, 0.62),
@@ -726,7 +589,6 @@ export function buildWorld(
   owned.push(sky);
   timed.push({ setTime: (t) => sky.setTime(t) });
 
-  // ---- the one light budget: sun + hemi + 3 points (pearl / diver / celebration) ----
   const rig = makeLightRig(palette, tier, {
     sunDir: SUN_DIR,
     pointCount: 3,
@@ -737,21 +599,11 @@ export function buildWorld(
   owned.push(rig);
   rig.setShadowFocus({ x: 0, y: reefDepthY((grid.h - 1) / 2), z: 0 }, SHADOW_RADIUS);
 
-  // ---- fog, always ----
-  // Token-derived density (`makeFog` reads `fogDensityHint`), token-derived color — but
-  // the palette's own fog is a MID blue, and fogging a reef toward mid blue in a mid-blue
-  // column erases it. Blended toward `skyBottom`, distance now costs the reef VALUE, so
-  // the far shelves sink into the dark exactly like the depth column above them.
   const fog = makeFog(palette, FOG_EXTENT);
   fog.color.set(blendTokens(palette.fog, palette.skyBottom, 0.62));
   scene.fog = fog;
 
-  // ---- the reef: ONE draw for every shelf, and the open water is a HOLE, not a tile ----
   const tint = new THREE.Color();
-  // The base is token WHITE (canon lesson 9: `palettes.noon.sun` is the legal off-palette
-  // white), NOT the underwater sun. The instance tint MULTIPLIES this, and the underwater
-  // sun is 0xbfe8ff — using it as the base quietly halves the reef's red channel and
-  // costs the rock a third of its value against a column that is already blue.
   const white = ctxTokens.palettes.noon.sun;
   const field = buildCellField(
     grid,
@@ -761,7 +613,6 @@ export function buildWorld(
       floorFilter: (x, y) => isReef(reach, grid, x, y),
       floorTint: (x, y) => {
         shelfTint(skin, grid, x, y, tint);
-        // the frontier column of each row catches the surface light on its edge
         return isReefLip(reach, grid, x, y) ? tint.clone().lerp(skin.shelfLip, 0.45) : tint.clone();
       },
       floorInset: 0.022,
@@ -775,20 +626,17 @@ export function buildWorld(
     tier,
   );
   terraceShelves(field, grid);
-  // the risers must throw onto the shelf below or the staircase has no edges
   const floorMesh = field.floorMeshes[0];
   if (floorMesh) floorMesh.castShadow = shadows;
   group.add(field.group);
   owned.push(field);
   timed.push({ setTime: (t) => field.setTime(t) });
 
-  // ---- the mask, growing out of the rock ----
   const kelp = buildKelp(grid, reach, skin, palette, tier, ctx.seed);
   group.add(kelp.mesh);
   owned.push(kelp);
   timed.push(kelp);
 
-  // ---- coral rubble + anemones, only ever on rock the dive can reach ----
   const offReef = excludeAny(excludeOpenWater(grid, reach), excludeCellCenters(grid, 0.34));
   const reefArea = { x: 0, z: 0, halfX: (grid.w * 0.5) - 0.1, halfZ: (grid.h * 0.5) - 0.1 };
   const coral = scatterRocks({
@@ -833,13 +681,11 @@ export function buildWorld(
   owned.push(anemones);
   timed.push(anemones);
 
-  // ---- the shimmer (the one bespoke shader) ----
   const caustics = buildCaustics(grid, reach, skin, tier);
   group.add(caustics.mesh);
   owned.push(caustics);
   timed.push(caustics);
 
-  // ---- sunbeams (hero + medium; thumb takes no mist per STYLE.md) ----
   let godRays: GodRayHandle | null = null;
   if (tier !== 'thumb') {
     godRays = buildGodRays(rig.sunDirection, skin, tier, ctx.seed);
@@ -848,7 +694,6 @@ export function buildWorld(
     timed.push(godRays);
   }
 
-  // ---- the water column itself: haze banks stacked through the frame ----
   const haze: MistPlanesHandle = makeMistPlanes({
     size: [34, 34],
     color: skin.bubble,
@@ -867,9 +712,6 @@ export function buildWorld(
   owned.push(haze);
   timed.push(haze);
 
-  // ---- rising bubbles over the whole reef ----
-  // Canon lesson 5: the presets size their motes for a ~20-unit field; this reef is 8
-  // units across with the camera ~14 out, so the sizes here are ~1, not the preset's 7.
   const bubbles = makeAmbientParticles({
     preset: 'bubbles',
     count: 150,
@@ -889,7 +731,6 @@ export function buildWorld(
   timed.push(bubbles);
   pixelated.push(bubbles);
 
-  // ---- the silt the diver stirs (position + density driven by the frame) ----
   const silt = makeAmbientParticles({
     preset: 'dust',
     count: 110,
@@ -910,7 +751,6 @@ export function buildWorld(
   timed.push(silt);
   pixelated.push(silt);
 
-  // ---- the resurfacing column ----
   const rush = makeAmbientParticles({
     preset: 'bubbles',
     count: 220,
@@ -957,7 +797,6 @@ export function buildWorld(
   };
 }
 
-/** The treasure cell the clam owns, read from the env geometry (never guessed). */
 export function treasureCell(grid: GridGeometry): { c: number; r: number } {
   const goal = grid.goal;
   if (goal) return { c: goal.x, r: goal.y };

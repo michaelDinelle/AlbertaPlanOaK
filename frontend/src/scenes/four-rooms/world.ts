@@ -1,34 +1,3 @@
-// Four Seasons Courtyard — the static world (FourRooms-cont-v0).
-//
-// THE ONE IDEA OF THIS SCENE: `state.room` IS THE ART. The env's own
-// `fourRoomsRoom(x, y)` — 0=TL 1=TR 2=BL 3=BR, −1 on the cross line — is the ONLY
-// function that decides what a cell looks like. Room 0 is spring, 1 summer, 2 autumn,
-// 3 winter; −1 is the evergreen yew of the dividing hedges and the stone thresholds of
-// the four hallways. Nothing in this file re-derives the layout: walls come from
-// `grid.walls`, hallways from `grid.hallways`, quadrant extents from a scan of the
-// walls array. Change the env and the art follows.
-//
-// PATTERNS THE NINE OTHER GRID SCENES SHOULD COPY
-//  * `buildCellField` is a SUBSTRATE, not a look. Set `floorColor`/`wallColor` to the
-//    token white and let `floorTint`/`wallTint` return the real per-cell color: the
-//    instance tint MULTIPLIES the material color, so white base + full-color tint gives
-//    a scene complete per-cell control inside ONE floor draw and ONE wall draw.
-//  * A cell that wants a bespoke prop (here (5,5), the sundial) COLLAPSES its cell-field
-//    instance to zero scale through the exposed `wallMeshes[0]` + `wallInstanceAt()`
-//    and plants a probe-rooted prop in its place. The walls array still says "wall", the
-//    debug overlay still draws the box, and the art is free.
-//  * Orientation is READ, never assumed: a hallway's gate faces the axis its flanking
-//    wall cells run along (`isWall(h.x, h.y±1)`), so the same code orients every gate in
-//    every layout, including a regenerated one.
-//  * Quadrant extents come from `roomBounds()` — a scan of the free cells — so the
-//    per-room particle fields and ground scatters are clipped to the rooms that exist,
-//    not to hand-typed rectangles.
-//
-// LIGHT: noon, high and slightly north-west, so shadows are SHORT. A grid scene lives or
-// dies on cell readability; a long raking shadow eats two cells and the courtyard stops
-// being a grid. The shadow focus covers the frame (courtyard + the near tree line), not
-// just the playfield — outside the ortho frustum three clamps to the border texel and
-// smears black across the lawn.
 
 import * as THREE from 'three';
 import {
@@ -67,46 +36,18 @@ import {
 } from '@sim/envs/fourrooms';
 import type { EnvGeometry, GridCell, GridGeometry } from '@sim/types';
 
-// ---------------------------------------------------------------------------
-// world constants (1 cell = 1 world unit; the courtyard really is 11 × 11)
-// ---------------------------------------------------------------------------
 
-/** half the courtyard footprint, derived from the env's own grid size */
 export const COURT_HALF = (FOURROOMS_W * CELL) / 2;
 export const TERRAIN_SIZE = 40;
 export const TERRAIN_SEGMENTS = 128;
-/** hedge height: below the wisp's eyeline from a 3/4 aerial, above its orb */
 export const HEDGE_HEIGHT = 0.86;
-/** the meadow sits a few centimetres under the flagstones, so the joints read as soil */
 export const COURT_SINK = -0.06;
-/**
- * Fog reach. `applyFog` turns extent into density via `fogDensityHint` (noon = 0.25), so
- * this puts full density ~130 units out and leaves the far tree line about 15% hazed at
- * its ~30-unit distance. Eight × the footprint was the first guess and it fogged that
- * tree line by a third: on a noon palette whose fog color is nearly white, that reads as
- * a blown exposure rather than as air, and it cost the courtyard its contrast.
- */
 export const FOG_EXTENT = TERRAIN_SIZE * 13;
-/**
- * High, north-west, 60° up. Noon means SHORT shadows: at 60° a 0.86 hedge throws 0.5 of
- * a cell, which reads as depth without swallowing its neighbour. Dropping the sun to 30°
- * doubled the throw and the four rooms stopped reading as a grid.
- */
 export const SUN_DIR: readonly [number, number, number] = [-0.4, 0.866, -0.3];
-/** the shadow frustum must cover the FRAME (courtyard + near trees), not the playfield */
 export const SHADOW_RADIUS = 11.5;
-/**
- * The composition azimuth, shared with `index.ts`'s OrbitRig so the planting and the
- * camera can never disagree. MountainCar's law — nothing lives between the camera and
- * the physics — needs a ground position to exclude, and this is where it comes from.
- */
 export const CAMERA_AZIMUTH = 0.55;
-/** how far out along that azimuth the "keep it clear" wedge is centred */
 export const CAMERA_STANDOFF = 12.5;
 
-// ---------------------------------------------------------------------------
-// small shared helpers (actors.ts imports these too)
-// ---------------------------------------------------------------------------
 
 export function smoothstep01(t: number): number {
   return t <= 0 ? 0 : t >= 1 ? 1 : t * t * (3 - 2 * t);
@@ -116,7 +57,6 @@ export function clamp01(v: number): number {
   return v < 0 ? 0 : v > 1 ? 1 : v;
 }
 
-/** A scene-local color: STYLE.md allows only BLENDS of token colors. */
 export function blendTokens(
   a: THREE.ColorRepresentation,
   b: THREE.ColorRepresentation,
@@ -125,19 +65,6 @@ export function blendTokens(
   return new THREE.Color(a).lerp(new THREE.Color(b), k);
 }
 
-/**
- * Take a token blend down into shade. `night.skyTop` is the darkest token there is and
- * STYLE.md names it as the legal way to reach near-black, so "shade" is a blend like
- * every other color here — not a magic multiplier.
- *
- * WHY EVERY SURFACE IN THIS SCENE NEEDS IT, and why the other noon scenes will too: the
- * noon palette's key light is 3.0, half again as strong as dusk's. An albedo bright
- * enough to look like "white frost" in isolation renders at ~2.0 linear radiance, which
- * ACES maps to 0.93 — past the 0.85 bloom threshold — and the whole winter room turns
- * into one glowing white slab with the grid lines smeared out of it. Shaded to ~0.6 sRGB
- * the same hue reads as frost AND keeps its cell edges. The rule: under a noon key,
- * ground albedo belongs around 140–170, not 220.
- */
 export function shade(color: THREE.ColorRepresentation, k: number): THREE.Color {
   return blendTokens(color, TOKENS.palettes.night.skyTop, k);
 }
@@ -147,12 +74,6 @@ export interface ColoredPart {
   color: THREE.ColorRepresentation;
 }
 
-/**
- * Merge pre-transformed parts into ONE geometry carrying a flat per-part vertex color,
- * disposing the sources. Hand-built stone props (a moon gate, a sundial) want their
- * SOURCE normals plus a per-part stone palette baked in, so one mesh + one material
- * draws the whole prop.
- */
 export function mergeColoredParts(parts: readonly ColoredPart[], name: string): THREE.BufferGeometry {
   let total = 0;
   for (const p of parts) {
@@ -196,15 +117,7 @@ export function mergeColoredParts(parts: readonly ColoredPart[], name: string): 
   return g;
 }
 
-// ---------------------------------------------------------------------------
-// the env's own truth
-// ---------------------------------------------------------------------------
 
-/**
- * The grid the scene draws. The host always hands us the decoder's geometry; the
- * fallback is the DECODER'S OWN wall builder, never a scene re-derivation, so a
- * placeholder geometry degrades to the correct courtyard instead of a guess.
- */
 export function resolveGrid(geometry: EnvGeometry): GridGeometry {
   const g = geometry.grid;
   if (g && g.w === FOURROOMS_W && g.h === FOURROOMS_H) return g;
@@ -216,7 +129,6 @@ export function resolveGrid(geometry: EnvGeometry): GridGeometry {
   };
 }
 
-/** The four hallway cells, from the env geometry when present. */
 export function resolveHallways(grid: GridGeometry): readonly GridCell[] {
   const h = grid.hallways;
   return h && h.length > 0 ? h : FOURROOMS_HALLWAYS;
@@ -228,7 +140,6 @@ export const SEASON_AUTUMN = 2;
 export const SEASON_WINTER = 3;
 export const SEASON_NAMES: readonly string[] = ['spring', 'summer', 'autumn', 'winter'];
 
-/** World-space bounding box of every FREE cell of a room, in world units. */
 export interface RoomBounds {
   cx: number;
   cz: number;
@@ -237,11 +148,6 @@ export interface RoomBounds {
   cells: number;
 }
 
-/**
- * Scan the walls array for a room's free cells and return their world extent (cell
- * centers ±½ cell). Derived, never typed in: the per-room particle field and ground
- * scatter are clipped to the room the env actually has.
- */
 export function roomBounds(grid: GridGeometry, room: number): RoomBounds {
   let minX = Infinity;
   let maxX = -Infinity;
@@ -272,42 +178,24 @@ export function roomBounds(grid: GridGeometry, room: number): RoomBounds {
   };
 }
 
-// ---------------------------------------------------------------------------
-// the seasons (every color a blend of tokens — STYLE.md)
-// ---------------------------------------------------------------------------
 
 export interface SeasonSkin {
-  /** floor tile tint */
   floor: THREE.Color;
-  /** hedge tint */
   hedge: THREE.Color;
-  /** ground scatter (blossom / grass / leaf litter / snow lumps) */
   litter: THREE.Color;
-  /** the trees leaning over that quadrant's wall */
   tree: THREE.Color;
-  /** the idle particle field */
   motes: THREE.Color;
 }
 
 export interface CourtyardSkin {
   seasons: readonly SeasonSkin[];
-  /** the dividing hedges and the border on the cross line: evergreen yew */
   evergreen: THREE.Color;
-  /** the four hallway floors: worn stone */
   threshold: THREE.Color;
-  /** the bed under every hedge */
   soil: THREE.Color;
   stoneLight: THREE.Color;
   stoneDark: THREE.Color;
 }
 
-/**
- * The palette. Spring is `chain`'s blossom pink over the pale noon ground, summer is
- * `cart-pole`'s young-leaf green over the deep one, autumn is `multi-key-corridor` gold
- * warmed with `high-dim-maze` terracotta, and winter is the token white cooled with
- * `po-maze` fog silver. Four accents from the shared table — the gallery still reads as
- * one preserve, and the four rooms are four different times of year.
- */
 export function courtyardSkin(palette: Palette, tokens: typeof TOKENS): CourtyardSkin {
   const blossom = tokens.accents['chain'] ?? tokens.celebrationGold;
   const leaf = tokens.accents['cart-pole'] ?? palette.groundA;
@@ -349,8 +237,6 @@ export function courtyardSkin(palette: Palette, tokens: typeof TOKENS): Courtyar
 
   return {
     seasons,
-    // deep yew, not sky-blue: the dividing hedges are the darkest thing in the courtyard
-    // so the cross of walls reads as a PLAN at a glance
     evergreen: shade(blendTokens(palette.groundA, leaf, 0.12), 0.58),
     threshold: shade(blendTokens(silver, palette.hemiGround, 0.4), 0.3),
     soil: shade(blendTokens(palette.hemiGround, TOKENS.palettes.dusk.groundA, 0.45), 0.4),
@@ -359,15 +245,7 @@ export function courtyardSkin(palette: Palette, tokens: typeof TOKENS): Courtyar
   };
 }
 
-// ---------------------------------------------------------------------------
-// scatter exclusions
-// ---------------------------------------------------------------------------
 
-/**
- * Keep a clear disc around every cell CENTER. The grid must stay legible under the
- * planting: props live in the joints between cells, never on the square the agent
- * actually occupies.
- */
 export function excludeCellCenters(grid: GridSize, radius: number): ExcludeFn {
   const r2 = radius * radius;
   const ox = (grid.w - 1) / 2;
@@ -381,22 +259,13 @@ export function excludeCellCenters(grid: GridSize, radius: number): ExcludeFn {
   };
 }
 
-/** Nothing plants itself on a wall cell (read from the walls array, never inferred). */
 export function excludeWallCells(grid: GridGeometry): ExcludeFn {
   const ox = (grid.w - 1) / 2;
   const oz = (grid.h - 1) / 2;
   return (x, z) => isWall(grid, Math.round(x / CELL + ox), Math.round(z / CELL + oz));
 }
 
-// ---------------------------------------------------------------------------
-// the meadow height field
-// ---------------------------------------------------------------------------
 
-/**
- * Rolling meadow OUTSIDE the courtyard, identically flat inside it. The weight is 0 for
- * everything within the courtyard footprint, so `makeTerrain`'s flatten mask has nothing
- * to fight and the ground under the flagstones is exactly `COURT_SINK`.
- */
 export function makeMeadowHeight(seed: number): (x: number, z: number) => number {
   return (x, z) => {
     const out = Math.max(Math.abs(x), Math.abs(z)) - COURT_HALF;
@@ -408,9 +277,6 @@ export function makeMeadowHeight(seed: number): (x: number, z: number) => number
   };
 }
 
-// ---------------------------------------------------------------------------
-// world handle
-// ---------------------------------------------------------------------------
 
 export interface WorldHandle {
   group: THREE.Group;
@@ -418,12 +284,9 @@ export interface WorldHandle {
   rig: LightRig;
   terrain: TerrainHandle;
   field: CellFieldHandle;
-  /** probe object: the sundial plinth's base, exactly on cell (5,5). POSITION ONLY. */
   sundialRoot: THREE.Object3D;
-  /** probe objects: the moon gates, in `grid.hallways` order. POSITION ONLY. */
   gateRoots: THREE.Object3D[];
   hallways: readonly GridCell[];
-  /** ctx.time() — pause freezes hedges, petals, pollen, leaves and snow together */
   setTime(t: number): void;
   setPixelRatio(dpr: number): void;
   dispose(): void;
@@ -447,7 +310,6 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene, grid: GridGeom
   const owned: Disposable[] = [];
   const timed: Timed[] = [];
 
-  // ---- sky (exactly one) ----
   const sky = skyFromPalette(palette, 'noon', tier, {
     sunDir: SUN_DIR,
     sunSize: 0.035,
@@ -462,7 +324,6 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene, grid: GridGeom
   owned.push(sky);
   timed.push({ setTime: (t) => sky.setTime(t) });
 
-  // ---- the one light budget: sun + hemi + 3 points (lantern / wisp / bloom) ----
   const rig = makeLightRig(palette, tier, {
     sunDir: sky.sunDirection,
     pointCount: 3,
@@ -473,10 +334,8 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene, grid: GridGeom
   owned.push(rig);
   rig.setShadowFocus({ x: 0, y: 0.35, z: 0 }, SHADOW_RADIUS);
 
-  // ---- fog, always ----
   applyFog(scene, palette, FOG_EXTENT);
 
-  // ---- the meadow the courtyard sits in ----
   const terrain = makeTerrain({
     size: [TERRAIN_SIZE, TERRAIN_SIZE],
     segments: [TERRAIN_SEGMENTS, TERRAIN_SEGMENTS],
@@ -509,9 +368,6 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene, grid: GridGeom
   group.add(terrain.mesh);
   owned.push(terrain);
 
-  // ---- the courtyard: ONE floor draw, ONE hedge draw, straight off `grid.walls` ----
-  // White base + full-color tint: the instance color MULTIPLIES the material color, so
-  // this is how a cell field gets arbitrary per-cell hues without a second material.
   const white = palette.sun;
   const field = buildCellField(
     grid,
@@ -546,7 +402,6 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene, grid: GridGeom
   owned.push(field);
   timed.push({ setTime: (t) => field.setTime(t) });
 
-  // ---- stone: gates + sundial share one material ----
   const stoneMaterial: OakMaterial = oakMaterial({
     vertexColors: true,
     flatShading: true,
@@ -561,7 +416,6 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene, grid: GridGeom
   });
   owned.push({ dispose: () => stoneMaterial.dispose() });
 
-  // ---- the four moon gates, one per hallway cell ----
   const hallways = resolveHallways(grid);
   const gateGeometry = makeMoonGateGeometry(skin, tier);
   owned.push({ dispose: () => gateGeometry.dispose() });
@@ -575,9 +429,6 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene, grid: GridGeom
       root.name = `moonGateRoot${i}`;
       cellToWorld(h.x, h.y, grid, world);
       root.position.set(world[0], 0, world[2]);
-      // The gate faces the way the WALL runs. Read it, never assume it: a hallway with
-      // wall cells north and south of it sits in a wall that runs along z, so the
-      // passage — and the ring's opening — is along x.
       const wallRunsAlongZ = isWall(grid, h.x, h.y - 1) && isWall(grid, h.x, h.y + 1);
       const mesh = new THREE.Mesh(gateGeometry, stoneMaterial);
       mesh.name = `moonGate${i}`;
@@ -590,10 +441,6 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene, grid: GridGeom
     }
   }
 
-  // ---- the sundial plinth: the wall cell at the courtyard's heart ----
-  // The cell field placed a hedge there (it IS a wall). Collapse that one instance and
-  // plant the plinth on the same cell: the walls array is untouched, the debug overlay
-  // still draws its box, and the centre of the courtyard becomes architecture.
   collapseWallInstance(field, (grid.w / 2) | 0, (grid.h / 2) | 0);
   const sundialRoot = new THREE.Object3D();
   sundialRoot.name = 'sundialRoot';
@@ -613,7 +460,6 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene, grid: GridGeom
     sundialRoot.add(mesh);
   }
 
-  // ---- per-room planting, clipped to the room the env actually has ----
   const noPlanting = excludeAny(excludeWallCells(grid), excludeCellCenters(grid, 0.3));
   const bounds: RoomBounds[] = [];
   for (let room = 0; room < 4; room++) bounds.push(roomBounds(grid, room));
@@ -660,8 +506,6 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene, grid: GridGeom
   owned.push(lawn);
   timed.push(lawn);
 
-  // fallen leaves: the rock archetype squashed flat is a leaf drift, and it is the one
-  // scatter in the kit that never sways — exactly right for litter on the ground.
   const autumnArea = bounds[SEASON_AUTUMN] as RoomBounds;
   const leafDrifts = scatterRocks({
     count: 300,
@@ -670,7 +514,6 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene, grid: GridGeom
     tier,
     exclude: noPlanting,
     color: skin.seasons[SEASON_AUTUMN]?.litter ?? white,
-    // flat and wide, not round: a rock at stretch 0.4 is a pebble, at 0.16 it is a leaf
     scale: [0.11, 0.26],
     stretch: [0.1, 0.2],
     hueJitter: 0.3,
@@ -703,11 +546,6 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene, grid: GridGeom
   owned.push(snowLumps);
   timed.push(snowLumps);
 
-  // ---- the tree line: each quadrant's season leans over its own wall ----
-  // Two exclusions, and the second is the one that matters: MountainCar's law says
-  // nothing lives between the camera and the physics, and at this azimuth the camera
-  // stands over the winter corner — the first pass put two bare trunks straight through
-  // the near edge of the frame.
   const offCourt = excludeRect(0, 0, COURT_HALF, COURT_HALF, 1.1);
   const nearCamera = excludeRect(
     Math.sin(CAMERA_AZIMUTH) * CAMERA_STANDOFF,
@@ -725,8 +563,6 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene, grid: GridGeom
   const trees: VegetationHandle[] = [];
   for (const spec of treeSpecs) {
     const b = bounds[spec.room] as RoomBounds;
-    // push the band outward from the room's own centre, so a quadrant's trees are the
-    // ones you see over that quadrant's hedge
     const dirX = Math.sign(b.cx) || 1;
     const dirZ = Math.sign(b.cz) || 1;
     const handle = scatterTrees({
@@ -755,10 +591,6 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene, grid: GridGeom
     trees.push(handle);
   }
 
-  // ---- idle life, one field per room, clipped to that room's footprint ----
-  // NOTE for the other grid scenes: the kit particle presets size their motes for a
-  // ~20-unit field. This courtyard is 11 units across with the camera ~16 out, so
-  // `gl_PointSize`'s 60/distance term wants sizes around 1, not the preset's 4–9.
   const motes: AmbientParticlesHandle[] = [];
   const moteSpecs: readonly {
     room: number;
@@ -825,15 +657,7 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene, grid: GridGeom
   };
 }
 
-// ---------------------------------------------------------------------------
-// props
-// ---------------------------------------------------------------------------
 
-/**
- * Collapse one cell-field wall instance to nothing so a bespoke prop can own that cell.
- * The walls array is NOT touched: the cell is still a wall to the env, to the overlay
- * and to every accuracy check — only the generic hedge that stood there is gone.
- */
 export function collapseWallInstance(field: CellFieldHandle, x: number, y: number): void {
   const mesh = field.wallMeshes[0];
   const id = field.wallInstanceAt(x, y);
@@ -849,11 +673,6 @@ export function collapseWallInstance(field: CellFieldHandle, x: number, y: numbe
   mesh.instanceMatrix.needsUpdate = true;
 }
 
-/**
- * A moon gate: a stone ring you step through, two jambs rising to its widest point and a
- * keystone at its crown. Built in LOCAL space around the hallway cell's centre with its
- * opening along ±z, so a gate in a wall that runs along z is the same geometry yawed 90°.
- */
 export function makeMoonGateGeometry(skin: CourtyardSkin, tier: QualityTier): THREE.BufferGeometry {
   const detail = tier === 'thumb' ? 0.4 : tier === 'medium' ? 0.7 : 1;
   const tubular = Math.max(10, Math.round(26 * detail));
@@ -876,7 +695,6 @@ export function makeMoonGateGeometry(skin: CourtyardSkin, tier: QualityTier): TH
   keystone.translate(0, RING_Y + RING_R + 0.04, 0);
   parts.push({ geometry: keystone, color: skin.stoneLight });
 
-  // a worn threshold slab across the passage, flush with the flagstones
   const slab = new THREE.BoxGeometry(0.86, 0.05, 0.44);
   slab.translate(0, 0.024, 0);
   parts.push({ geometry: slab, color: skin.stoneDark });
@@ -884,11 +702,6 @@ export function makeMoonGateGeometry(skin: CourtyardSkin, tier: QualityTier): TH
   return mergeColoredParts(parts, 'moonGate');
 }
 
-/**
- * The sundial: a square kerb filling the wall cell's footprint (it must still READ as
- * impassable), a drum, a dial plate with twelve hour marks, and a tilted gnomon. Built in
- * local space around the cell centre.
- */
 export function makeSundialGeometry(skin: CourtyardSkin, tier: QualityTier): THREE.BufferGeometry {
   const detail = tier === 'thumb' ? 0.45 : tier === 'medium' ? 0.7 : 1;
   const radial = Math.max(6, Math.round(14 * detail));

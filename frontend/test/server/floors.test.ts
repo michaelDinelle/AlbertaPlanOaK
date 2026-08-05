@@ -1,5 +1,4 @@
 /// <reference types="bun" />
-// GET /api/floors — the per-task normalization floors (fleet.py floors output).
 
 import { describe, expect, it } from 'bun:test';
 import { statOrNull } from '../../server/jsonl';

@@ -1,18 +1,4 @@
 /// <reference types="bun" />
-// The Overgrown Ruins (ProceduralMaze-cont-v0) — the accuracy + lifecycle self-check.
-//
-// This mirrors four-rooms.test.ts's shape and adds what THIS env, alone among the ten
-// grid scenes, has to prove: the maze is regenerated per lane, so the scene is not a
-// layout but a wall-SKINNING system, and the only way to check a skinning system is to
-// point it at more than one maze. Every structural assertion below runs over BOTH seed 96
-// (the harness's default lane) and seed 97, and asserts the masonry against
-// `procMazeIsWall` rather than against anything this scene believes.
-//
-// It also locks the two behaviours that separate this env from FourRooms:
-//   * BOTH ends teleport on a completion, so the celebration must be read from the
-//     PREVIOUS frame's goal cell — the only cell that still remembers where the +1 was —
-//     and the wisp must hard-cut instead of gliding;
-//   * `done` fires on that same successful batch, so the scene must never sigh.
 
 import { describe, expect, test } from 'bun:test';
 import * as THREE from 'three';
@@ -67,7 +53,6 @@ import {
   type StubSceneContext,
 } from './aligned';
 
-/** the harness's default ProceduralMaze lane, and a second maze to prove the system */
 const SEED = FIXTURE_SEED;
 const SEED_B = 97;
 const SEEDS: readonly number[] = [SEED, SEED_B];
@@ -115,7 +100,6 @@ function worldOf(module: SceneModule, probeName: string): THREE.Vector3 {
   return new THREE.Vector3().setFromMatrixPosition(probe.object.matrixWorld);
 }
 
-/** Every instance translation of an InstancedMesh, keyed nowhere — just the raw list. */
 function instanceTranslations(mesh: THREE.InstancedMesh): THREE.Vector3[] {
   const out: THREE.Vector3[] = [];
   const m = new THREE.Matrix4();
@@ -126,7 +110,6 @@ function instanceTranslations(mesh: THREE.InstancedMesh): THREE.Vector3[] {
   return out;
 }
 
-/** The cell a world position sits on (exact inverse of cellToWorld for cell centres). */
 function cellOfWorld(v: THREE.Vector3, grid: GridGeometry): GridCell {
   return {
     x: Math.round(v.x / CELL + (grid.w - 1) / 2),
@@ -134,7 +117,6 @@ function cellOfWorld(v: THREE.Vector3, grid: GridGeometry): GridCell {
   };
 }
 
-/** Every instance's full transform, in placement order. */
 function instanceTransforms(mesh: THREE.InstancedMesh): {
   position: THREE.Vector3;
   quaternion: THREE.Quaternion;
@@ -153,11 +135,6 @@ function instanceTransforms(mesh: THREE.InstancedMesh): {
   return out;
 }
 
-/**
- * THE FRAMING PROBE. The worst |ndc| any corner tower reaches through the scene's own
- * camera at a given aspect — the tower's whole silhouette, not its centre: the ±0.5-cell
- * footprint at both the flagstones and the tallest crown this env can generate.
- */
 function worstCornerNdc(module: SceneModule, grid: GridGeometry, aspect: number): { x: number; y: number } {
   module.resize({ width: 1600, height: Math.round(1600 / aspect), dpr: 1 });
   const cam = module.camera;
@@ -182,7 +159,6 @@ function worstCornerNdc(module: SceneModule, grid: GridGeometry, aspect: number)
   return { x, y };
 }
 
-// ---------------------------------------------------------------------------
 
 describe('procedural-maze / manifest + fixtures', () => {
   test('manifest declares the frozen contract fields', () => {
@@ -198,8 +174,6 @@ describe('procedural-maze / manifest + fixtures', () => {
   });
 
   test('the thumbFrame stands on the only cells legal on EVERY seed', () => {
-    // the generator clears the 25 room cells at odd interior coords on every seed, and
-    // (1,1) / (9,9) are the corner rooms — free on every maze the env can produce
     const p = manifest.thumbFrame.pose;
     expect(p[0]).toBe(PROCMAZE_START.x);
     expect(p[1]).toBe(PROCMAZE_START.y);
@@ -224,14 +198,11 @@ describe('procedural-maze / manifest + fixtures', () => {
 
   test('the fixtures really do cover a dead end and a doorway', () => {
     const grid = gridOf(FIXTURE_SEED);
-    // dead-end: the GOAL is a free cell walled on three sides — the deepest cul-de-sac
-    // shape a perfect maze produces; the art states the goal, never the route to it
     const deadEnd = fixtureNamed('dead-end');
     const gx = deadEnd.pose[2] ?? -1;
     const gy = deadEnd.pose[3] ?? -1;
     expect(isWall(grid, gx, gy)).toBe(false);
     expect(wallNeighbours(grid, gx, gy)).toBe(3);
-    // under-the-arch: the AGENT stands on a doorway cell `archCells()` nominates
     const arch = fixtureNamed('under-the-arch');
     const ax = arch.pose[0] ?? -1;
     const ay = arch.pose[1] ?? -1;
@@ -249,8 +220,6 @@ describe('procedural-maze / the layout is read, never re-derived', () => {
   });
 
   test("a placeholder geometry falls back to the DECODER's own maze, not an empty room", () => {
-    // the harness's generic grid placeholder is a bare border ring with no carvedPath;
-    // an 11×11 check alone would accept it and draw an empty courtyard
     const placeholder: EnvGeometry = {
       kind: 'grid',
       grid: { w: PROCMAZE_W, h: PROCMAZE_H, walls: new Uint8Array(PROCMAZE_W * PROCMAZE_H) },
@@ -308,15 +277,11 @@ describe('procedural-maze / the wall-skinning system', () => {
           expect(s.crown).toBeLessThanOrEqual(MAX_CROWN + 1e-9);
           expect(s.moss).toBeGreaterThanOrEqual(0);
           expect(s.moss).toBeLessThanOrEqual(1);
-          // a capstone can only sit on a second course
           if (s.cap > 0) expect(s.upper).toBeGreaterThan(0);
           if (s.upper === 0) stumps++;
           if (s.crown > 0.9) tall++;
         }
       }
-      // the ruin must actually be RUINED: some cells collapsed to their foundation, some
-      // still stand tall. A skin that made every block identical would pass every
-      // alignment check in this file and look like a hedge maze.
       expect(walls).toBeGreaterThan(40);
       expect(stumps).toBeGreaterThan(2);
       expect(tall).toBeGreaterThan(5);
@@ -377,7 +342,6 @@ describe('procedural-maze / the wall-skinning system', () => {
           expect(cornerKeys.has(c.y * grid.w + c.x)).toBe(false);
         }
       }
-      // and each instance really is standing on its own cell, at the right course height
       const upper = instanceTranslations(courses.upperMesh);
       expect(upper.length).toBe(courses.upperCells.length);
       const truth: [number, number, number] = [0, 0, 0];
@@ -397,7 +361,6 @@ describe('procedural-maze / the wall-skinning system', () => {
         cellToWorld(cell.x, cell.y, grid, truth);
         expect(p.x).toBeCloseTo(truth[0], 10);
         expect(p.z).toBeCloseTo(truth[2], 10);
-        // instance matrices are f32: cell centres are exact halves, a course height is not
         expect(p.y).toBeCloseTo(BASE_COURSE + s.upper, 6);
       }
       courses.dispose();
@@ -414,11 +377,9 @@ describe('procedural-maze / the wall-skinning system', () => {
         const w = isWall(grid, a.cell.x - 1, a.cell.y);
         const e = isWall(grid, a.cell.x + 1, a.cell.y);
         if (a.eastWest) {
-          // walled north and south: the passage runs east–west, the arch spans north–south
           expect(n && s).toBe(true);
           expect(w || e).toBe(false);
         } else {
-          // walled east and west: the passage runs north–south, the arch spans east–west
           expect(w && e).toBe(true);
           expect(n || s).toBe(false);
         }
@@ -462,7 +423,6 @@ describe('procedural-maze / the built scene matches the walls array, on both see
       const truth: [number, number, number] = [0, 0, 0];
       for (const p of instanceTranslations(field)) {
         const cell = cellOfWorld(p, grid);
-        // every block stands on a cell the ENV calls a wall...
         expect(isWall(grid, cell.x, cell.y)).toBe(true);
         cellToWorld(cell.x, cell.y, grid, truth);
         expect(p.x).toBeCloseTo(truth[0], 10);
@@ -470,8 +430,6 @@ describe('procedural-maze / the built scene matches the walls array, on both see
         expect(p.y).toBeCloseTo(0, 10);
         seen.add(cell.y * grid.w + cell.x);
       }
-      // ...and every wall cell got exactly one, the corner towers included (their generic
-      // instance is collapsed to zero scale, never moved off its cell)
       expect(seen.size).toBe(wallCellCount(grid));
       for (let y = 0; y < grid.h; y++) {
         for (let x = 0; x < grid.w; x++) {
@@ -512,7 +470,6 @@ describe('procedural-maze / the built scene matches the walls array, on both see
         cellToWorld(a.cell.x, a.cell.y, grid, truth);
         expect(w.x).toBeCloseTo(truth[0], 10);
         expect(w.z).toBeCloseTo(truth[2], 10);
-        // the doorway faces the axis its flanking wall cells run along
         const mesh = module.scene.getObjectByName(`ruinArch${i}`);
         expect(mesh?.rotation.y ?? -1).toBeCloseTo(a.eastWest ? 0 : Math.PI / 2, 10);
       }
@@ -539,17 +496,12 @@ describe('procedural-maze / the built scene matches the walls array, on both see
 });
 
 describe('procedural-maze / the frame holds the whole ruin', () => {
-  // CANON LESSON 21, made into a gate. "Camera distance is arithmetic": the four broken
-  // towers are the silhouette every seed shares AND the corner probe, and the first pass
-  // hung the south-east one clean out of the picture (ndc.y −1.17 at 16:9 AND 4:3) under a
-  // comment claiming the opposite. A composition claim nobody can measure is folklore.
   test('every corner tower is inside the hero frame at 16:9 and 4:3, on both seeds', async () => {
     for (const seed of SEEDS) {
       const { module } = await live('hero', seed);
       const grid = gridOf(seed);
       for (const aspect of [16 / 9, 4 / 3]) {
         const worst = worstCornerNdc(module, grid, aspect);
-        // inside the frame, with margin — not "just on the edge"
         expect(worst.x).toBeLessThan(0.94);
         expect(worst.y).toBeLessThan(0.94);
       }
@@ -558,8 +510,6 @@ describe('procedural-maze / the frame holds the whole ruin', () => {
   });
 
   test('the thumb holds all 11 × 11 at a SQUARE crop, towers included', async () => {
-    // the wall-view contract: at aspect 1 the horizontal half-angle collapses to 20°, and
-    // a distance that frames the field at 16:9 slices the west tower in half at 1:1
     for (const seed of SEEDS) {
       const { module } = await live('thumb', seed);
       const grid = gridOf(seed);
@@ -576,17 +526,12 @@ describe('procedural-maze / the frame holds the whole ruin', () => {
     const { module } = await live('hero', SEED);
     const grid = gridOf(SEED);
     const worst = worstCornerNdc(module, grid, 16 / 9);
-    // the near/far corners must still reach most of the way to the edges
     expect(worst.y).toBeGreaterThan(0.72);
     module.dispose();
   });
 });
 
 describe('procedural-maze / the masonry stands on the foundation it was promised', () => {
-  // The scene stacks courses 2 and 3 at heights it computes from `skinWallCell`, so the
-  // kit's foundation MUST finish at exactly BASE_COURSE. `CellFieldStyle.jitter` scales
-  // the wall block's height as well as its tone (kit/grid: scale.y = 1 + (nw-0.5)*jitter*2),
-  // and passing 0.09 made half the ruin's second courses float and the other half sink.
   test('every foundation block is exactly BASE_COURSE tall, on both seeds', async () => {
     for (const seed of SEEDS) {
       const { module } = await live('hero', seed);
@@ -594,7 +539,6 @@ describe('procedural-maze / the masonry stands on the foundation it was promised
       const walls = module.scene.getObjectByName('oakCellWallMesh') as THREE.InstancedMesh;
       expect(walls.count).toBe(wallCellCount(grid));
       for (const t of instanceTransforms(walls)) {
-        // unit y-scale on a wallHeight = BASE_COURSE block: the top face is the promise
         expect(t.scale.y).toBe(1);
         expect(t.position.y * 1 + BASE_COURSE * t.scale.y).toBeCloseTo(BASE_COURSE, 12);
       }
@@ -618,7 +562,6 @@ describe('procedural-maze / the masonry stands on the foundation it was promised
         const cell = cellOfWorld(t.position, grid);
         const top = foundationTop.get(cell.y * grid.w + cell.x);
         expect(top).toBeDefined();
-        // zero daylight, zero burial — the block's underside IS the foundation's top face
         expect(t.position.y).toBeCloseTo(top ?? -1, 6);
         checked++;
       }
@@ -641,12 +584,9 @@ describe('procedural-maze / the masonry stands on the foundation it was promised
         const c = courses.capCells[i] as GridCell;
         const t = caps[i] as { position: THREE.Vector3; scale: THREE.Vector3 };
         const s = skinWallCell(grid, c.x, c.y, seed);
-        // the slab is a unit box scaled by its own thickness, so its top face is
-        // position.y + scale.y — and THAT is the crown the rest of the scene is promised
         expect(t.scale.y).toBeCloseTo(s.cap, 6);
         expect(t.position.y + t.scale.y).toBeCloseTo(crownHeightAt(grid, c.x, c.y, seed), 6);
       }
-      // and where no lintel fell, the second course IS the crown
       const uppers = instanceTransforms(courses.upperMesh);
       let bare = 0;
       for (let i = 0; i < uppers.length; i++) {
@@ -672,7 +612,6 @@ describe('procedural-maze / the masonry stands on the foundation it was promised
     expect(field).not.toBeNull();
     const painted = new THREE.Color();
     const restored = new THREE.Color();
-    // walk the beam over a run of free cells, then read the tile it left behind
     const visited: GridCell[] = [];
     for (let y = 1; y < grid.h - 1 && visited.length < 6; y++) {
       for (let x = 1; x < grid.w - 1 && visited.length < 6; x++) {
@@ -680,7 +619,6 @@ describe('procedural-maze / the masonry stands on the foundation it was promised
       }
     }
     for (const c of visited) module.update(toFrameUpdate(poseFixture('beam', 1, 1, c.x, c.y)));
-    // the last cell keeps the warm tint; every earlier one is back to its own colour
     const positions = instanceTranslations(floor);
     for (let i = 0; i < visited.length - 1; i++) {
       const c = visited[i] as GridCell;
@@ -724,19 +662,14 @@ describe('procedural-maze / the ivy holds on to stone', () => {
         const ledge = ivyLedge(s, entry.strand);
         const a = (((s.ivyFace + entry.strand * 2) % 4) * Math.PI) / 2;
         cellToWorld(entry.cell.x, entry.cell.y, grid, truth);
-        // the outward distance along the face normal (the lateral jitter is tangential)
         const radial =
           (t.position.x - truth[0]) * Math.sin(a) + (t.position.z - truth[2]) * Math.cos(a);
         expect(t.position.y).toBeCloseTo(ledge.y, 6);
-        // ...and it is exactly one cling clear of the stone THAT EXISTS at that height
         expect(radial).toBeCloseTo(blockHalfWidthAt(s, ledge.y) + IVY_CLING, 6);
-        // both ends stay on the block: never above its crown, never through the floor
         expect(ledge.y).toBeLessThanOrEqual(s.crown + 1e-9);
         expect(t.position.y - t.scale.y).toBeGreaterThanOrEqual(IVY_FLOOR_GAP - 1e-6);
         if (ledge.y > BASE_COURSE) onStandingCourse++;
       }
-      // the ruin's ivy is not all swept down onto the base course: the standing stone
-      // keeps its creepers, which is the whole reason the strands exist
       expect(onStandingCourse).toBeGreaterThan(ivy.count / 3);
       courses.dispose();
       module.dispose();
@@ -775,12 +708,9 @@ describe('procedural-maze / idle life', () => {
     for (let i = 0; i < after.length; i++) {
       const t = after[i] as { position: THREE.Vector3; quaternion: THREE.Quaternion };
       const from = before[i] as THREE.Vector3;
-      // the bird geometry's nose is local +z
       heading.set(0, 0, 1).applyQuaternion(t.quaternion).setY(0).normalize();
       travel.copy(t.position).sub(from).setY(0);
       expect(travel.length()).toBeGreaterThan(1e-3);
-      // > 0.9, not just > 0: half the flock circles the other way, and the operator
-      // precedence bug that flew them tail-first scored exactly −1
       expect(heading.dot(travel.normalize())).toBeGreaterThan(0.9);
       checked++;
     }
@@ -793,7 +723,6 @@ describe('procedural-maze / alignment', () => {
   test('every probe lands on ground truth at hero tier — exactly, not within tolerance', async () => {
     const module = createScene();
     const report = await assertAligned(module, fixtures, { geometry: geometryOf(SEED), seed: SEED, tier: 'hero' });
-    // these roots carry POSITION ONLY, so the error is 0, not "small"
     expect(report.worst.get('wisp') ?? 1).toBeLessThan(1e-9);
     expect(report.worst.get('wisp-anchor') ?? 1).toBeLessThan(1e-9);
     expect(report.worst.get('sun-shaft') ?? 1).toBeLessThan(1e-9);
@@ -854,9 +783,6 @@ describe('procedural-maze / alignment', () => {
         if (wallNeighbours(grid, x, y) === 3) deadEnds++;
       }
     }
-    // the generator is a perfect maze: every free cell is reachable, so a sealed
-    // pocket (4 walls around a free cell) can never exist — but dead ends do, and
-    // the beam lands on them the same as anywhere else
     expect(sealed).toBe(0);
     expect(deadEnds).toBeGreaterThan(0);
     module.dispose();
@@ -898,7 +824,6 @@ describe('procedural-maze / the hop is bounded, and a teleport is a hard cut', (
     const truth: [number, number, number] = [0, 0, 0];
     ctx.setTime(4);
     module.update(toFrameUpdate(poseFixture('a', 9, 8, 9, 9, 100), { scrubbed: false }));
-    // the real completion batch: goal + teleport + done, with BOTH ends redrawn
     ctx.setTime(4.125);
     module.update(
       toFrameUpdate(poseFixture('respawned', 5, 2, 2, 5, 101), {
@@ -958,7 +883,6 @@ describe('procedural-maze / update contract', () => {
     expect(pool).not.toBeNull();
     if (!pool) return;
 
-    // standing exactly ON the goal cell with no event: nothing may fire
     ctx.setTime(1);
     module.update(toFrameUpdate(poseFixture('onGoal', 9, 9, 9, 9, 100), { scrubbed: false }));
     expect(pool.stats.bursts).toBe(0);
@@ -975,7 +899,6 @@ describe('procedural-maze / update contract', () => {
     expect(pool.stats.bursts).toBe(1);
     expect(pool.stats.ripples).toBe(1);
     expect(pool.pulse.bloom).toBeGreaterThan(0);
-    // `done` fired on that same batch and it is the SUCCESS: no sigh may have run
     expect(pool.pulse.sigh).toBe(0);
     module.dispose();
   });
@@ -993,8 +916,6 @@ describe('procedural-maze / update contract', () => {
         events: [{ type: 'goal' }, { type: 'teleport' }, { type: 'done' }],
       }),
     );
-    // the celebration point light rides the bloom position: (9,9), NOT the new agent
-    // cell (5,2) and NOT the new goal cell (2,5)
     const light = module.scene.getObjectByName('oakPoint2');
     expect(light).toBeDefined();
     if (!light) return;
@@ -1003,7 +924,6 @@ describe('procedural-maze / update contract', () => {
     expect(light.position.x).toBeCloseTo(truth[0], 10);
     expect(light.position.z).toBeCloseTo(truth[2], 10);
     expect((light as THREE.PointLight).intensity).toBeGreaterThan(0);
-    // and the sunbeam is already on its new cell, opening up from nothing
     const shaft = worldOf(module, 'sun-shaft');
     cellToWorld(2, 5, grid, truth);
     expect(shaft.x).toBeCloseTo(truth[0], 10);
@@ -1041,7 +961,6 @@ describe('procedural-maze / update contract', () => {
     expect(readGoalCell(toFrameState(poseFixture('d', 1, 1, 4, 7)), grid, out)).toEqual({ x: 4, y: 7 });
     const bare = toFrameState({ name: 'bare', pose: [1, 1, 6, 3, 0, 0, 0, 0, 0] });
     expect(readGoalCell(bare, grid, out)).toEqual({ x: 6, y: 3 });
-    // out-of-range poses clamp rather than escaping the playfield
     const wild = toFrameState({ name: 'wild', pose: [1, 1, 99, -4, 0, 0, 0, 0, 0] });
     expect(readGoalCell(wild, grid, out)).toEqual({ x: grid.w - 1, y: 0 });
   });
@@ -1059,7 +978,6 @@ describe('procedural-maze / update contract', () => {
     expect(envelope(-1, 1.5, 2.4)).toBe(0);
     expect(envelope(99, 1.5, 2.4)).toBe(0);
     expect(envelope(0, 1.5, 2.4)).toBeCloseTo(1, 10);
-    // the linear tail exists so no flourish ends on a pop
     expect(envelope(1.4999, 1.5, 2.4)).toBeLessThan(1e-4);
   });
 });
@@ -1075,7 +993,6 @@ describe('procedural-maze / honesty', () => {
         carvedCount++;
       }
     });
-    // exactly one, and it belongs to kit/debug — nothing in the art draws the solution
     expect(carvedCount).toBe(1);
     const path = carved as THREE.Object3D | null;
     expect(path).not.toBeNull();
@@ -1083,7 +1000,6 @@ describe('procedural-maze / honesty', () => {
     const debugLayer = new THREE.Layers();
     debugLayer.set(DEBUG_LAYER);
     expect(path.layers.test(debugLayer)).toBe(true);
-    // and while debug is off the camera cannot see that layer at all
     expect(module.camera.layers.test(debugLayer)).toBe(false);
     module.dispose();
   });
@@ -1153,7 +1069,7 @@ describe('procedural-maze / lifecycle', () => {
     expect(Math.hypot(cam.position.x, cam.position.z)).toBeGreaterThan(RUIN_HALF);
     const dir = new THREE.Vector3();
     cam.getWorldDirection(dir);
-    expect(dir.y).toBeLessThan(-0.5); // a genuine aerial, never a horizon shot
+    expect(dir.y).toBeLessThan(-0.5);
     expect(cam.fov).toBeGreaterThanOrEqual(35);
     expect(cam.fov).toBeLessThanOrEqual(45);
     module.dispose();
@@ -1170,10 +1086,6 @@ describe('procedural-maze / lifecycle', () => {
 
 describe('procedural-maze / the thumb wall-view cap', () => {
   test('the thumb frame fits STYLE.md\u2019s 40 draws / 50k triangles, overlay included', async () => {
-    // The wall view is the whole gallery on one page: every scene there is a thumb, and
-    // the cap is what keeps 16 of them at 60 fps. Measured with the ground-truth overlay
-    // ON, because that is the state review screenshots are taken in, and across every
-    // fixture, because the busiest legal state is the one that has to fit.
     const { module } = await live('thumb');
     module.setDebug(true);
     for (const f of fixtures) module.update(toFrameUpdate(f));

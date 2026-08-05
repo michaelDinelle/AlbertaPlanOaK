@@ -1,23 +1,4 @@
 /// <reference types="bun" />
-// End-to-end decode driver tests: every classic-control + HalfCheetah trace
-// golden is run through `decodeRecording` and compared, field by field,
-// against the Python-generated expectation.
-//
-// Oracles (test/fixtures/gen_classic.py):
-//   * the trace `.bin` is a verbatim cut of a real fleet recording
-//     (.oak-benchmarks/frontend-demo-16env-20260803)
-//   * the trace `.json` is generated from that same `.bin` by an independent
-//     Python decode, and every classic row additionally passed an F1-style
-//     fp64 one-step parity check against tools/physics_parity.py before the
-//     fixture was written (`oneStepParity` in each file)
-// Regenerate with:
-//   /Users/studio/OaKMeta/.venv/bin/python frontend/test/fixtures/gen.py --only classic
-//
-// Exactness: pose fields and every state field that is a copy of the pose (or
-// exact arithmetic on it) are compared with `===`, which is bit equality for
-// float32-sourced doubles. Fields listed in the fixture's `approxFields` are
-// transcendental (sin/cos), where numpy's libm and V8's may differ in the last
-// ulp; those use a 1e-12 absolute tolerance.
 
 import { describe, expect, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
@@ -82,7 +63,6 @@ function loadRaw(doc: TraceDoc): RawRecording {
   });
 }
 
-/** float64 equality that treats -0 and 0 as the same value (they carry no meaning here). */
 function same(a: number, b: number): boolean {
   return a === b || (Number.isNaN(a) && Number.isNaN(b));
 }
@@ -91,10 +71,6 @@ function eventTypes(evs: readonly SimEvent[]): string[] {
   return evs.map((e) => e.type);
 }
 
-/**
- * Decode one trace fixture and compare every frame against the expectation.
- * Returns the mismatch list (empty = pass) so the caller can assert on it.
- */
 function checkTrace<S, St>(decoder: EnvDecoder<S, St>, name: string): string[] {
   const doc = loadDoc(name);
   const raw = loadRaw(doc);
@@ -134,13 +110,11 @@ function checkTrace<S, St>(decoder: EnvDecoder<S, St>, name: string): string[] {
     const got = frame.state as unknown as Record<string, number>;
     const wantKeys = Object.keys(state);
     for (const k of wantKeys) cmp(label, got[k] ?? NaN, state[k] ?? NaN, k);
-    // every expected field must exist on the decoded state
     for (const k of wantKeys) {
       if (!(k in got)) bad.push(`${label}: state is missing field ${k}`);
     }
   };
 
-  // frame 0 is the decoder's synthesized init frame
   const init = dec.frames[0];
   if (!init) {
     bad.push(`${name}: no init frame`);
@@ -162,7 +136,6 @@ function checkTrace<S, St>(decoder: EnvDecoder<S, St>, name: string): string[] {
     checkFrame(`${name} row ${i}`, frame, want.step, want.done, want.pose, want.state);
   }
 
-  // ctrl views: the first 8 rows are pinned in full
   for (let i = 0; i < doc.ctrlHead.length; i++) {
     const want = doc.ctrlHead[i];
     const frame = dec.frames[i + 1];
@@ -173,7 +146,6 @@ function checkTrace<S, St>(decoder: EnvDecoder<S, St>, name: string): string[] {
     }
   }
 
-  // events fire exactly on the done rows, with the env's documented types
   const fired = dec.events
     .map((e, i) => (e.length > 0 ? i : -1))
     .filter((i) => i >= 0);
@@ -199,7 +171,6 @@ const HEAD_CASES: [string, () => string[]][] = [
   ['Pendulum-cont-v0', () => checkTrace(pendulumDecoder, 'Pendulum-cont-v0')],
 ];
 
-// windows cut around the first `done` of envs whose first 200 rows have none
 const EVENT_CASES: [string, () => string[]][] = [
   ['Acrobot-cont-v0.events', () => checkTrace(acrobotDecoder, 'Acrobot-cont-v0.events')],
   ['MountainCar-cont-v0.events', () => checkTrace(mountainCarDecoder, 'MountainCar-cont-v0.events')],
@@ -209,7 +180,6 @@ describe('decodeRecording — trace goldens', () => {
   for (const [name, run] of [...HEAD_CASES, ...EVENT_CASES]) {
     test(name, () => {
       const bad = run();
-      // slice: a systematic error would otherwise print thousands of lines
       expect(bad.slice(0, 12)).toEqual([]);
       expect(bad.length).toBe(0);
     });
@@ -254,7 +224,6 @@ describe('decode driver contract', () => {
     expect(dec.frames.length).toBe(18);
     expect(dec.events.length).toBe(18);
     expect(dec.frames[17]?.step).toBe(16);
-    // maxSteps 0 still yields the init frame
     expect(decodeRecording(raw, cartPoleDecoder, { maxSteps: 0 }).frames.length).toBe(1);
   });
 
@@ -318,10 +287,6 @@ describe('decode driver contract', () => {
   });
 });
 
-// The driver threads `prev` into decodeFrame so replay-dependent envs
-// (MultiKeyCorridor) can advance hidden state as they go. None of the five
-// envs in this track need that, so it is exercised with a synthetic decoder —
-// a grid-shaped stand-in whose state depends on the whole action prefix.
 describe('decode driver threads hidden replay state', () => {
   interface ReplayState { pos: number; visits: number }
   interface ReplayStatic { walls: Uint8Array }
@@ -359,7 +324,7 @@ describe('decode driver threads hidden replay state', () => {
   test('prev-threaded state accumulates across the whole pass', () => {
     const n = 6;
     const data = new Float32Array(RECORD_FLOATS * n);
-    for (let i = 0; i < n; i++) data[i * RECORD_FLOATS] = i % 2; // 0,1,0,1,0,1
+    for (let i = 0; i < n; i++) data[i * RECORD_FLOATS] = i % 2;
     const raw = rawRecordingFromFloats('FourRooms-cont-v0', 8, data);
     const dec = decodeRecording(raw, replayDecoder);
 
@@ -368,18 +333,11 @@ describe('decode driver threads hidden replay state', () => {
     expect(dec.frames[n]?.state.visits).toBe(n);
     expect(dec.geometry.kind).toBe('grid');
     expect(Array.from(dec.geometry.grid?.walls ?? [])).toEqual([0, 1, 0, 0]);
-    // events fire only on the transitions that moved
     expect(dec.events.map((e) => e.length)).toEqual([0, 0, 1, 0, 1, 0, 1]);
   });
 });
 
-// ---------------------------------------------------------------------------
-// Hardening regressions (sim verifier wave 1)
-// ---------------------------------------------------------------------------
 
-// `readFileSync` hands back a view into Node/Bun's shared 64 KiB Buffer POOL:
-// `.buffer` is that pool, and the file lives at `.byteOffset`. A parser that
-// does `new Float32Array(buf)` therefore decodes whatever was pooled before it.
 describe('parseActionsBin accepts buffer VIEWS, not just bare ArrayBuffers', () => {
   const META = { envId: 'CartPole-cont-v0', seed: 48, actDim: 6, recordVersion: 3 };
 
@@ -388,8 +346,6 @@ describe('parseActionsBin accepts buffer VIEWS, not just bare ArrayBuffers', () 
     return loadRaw(doc).data;
   }
 
-  // the shape of the bug: a readFileSync Buffer handed straight in, with no
-  // defensive `.buffer.slice(byteOffset, ...)` at the call site
   test('a readFileSync Buffer decodes to the same floats as its slice', () => {
     const doc = loadDoc('CartPole-cont-v0');
     const b = readFileSync(new URL(`./fixtures/traces/${doc.bin}`, import.meta.url));
@@ -404,9 +360,8 @@ describe('parseActionsBin accepts buffer VIEWS, not just bare ArrayBuffers', () 
     const want = reference();
     const bytes = want.length * 4;
     for (const pad of [8, 64, 2, 6]) {
-      // pad 2 / 6 are NOT 4-byte aligned: the parser must copy, not throw
       const padded = new ArrayBuffer(pad + bytes + 32);
-      new Uint8Array(padded).fill(0xab); // poison the neighbours
+      new Uint8Array(padded).fill(0xab);
       new Uint8Array(padded, pad, bytes).set(
         new Uint8Array(want.buffer, want.byteOffset, bytes),
       );
@@ -430,7 +385,6 @@ describe('parseActionsBin accepts buffer VIEWS, not just bare ArrayBuffers', () 
 
   test('the row-alignment check uses the VIEW length, not the whole buffer', () => {
     const padded = new ArrayBuffer(RECORD_BYTES * 4);
-    // a 3.5-row window inside a perfectly row-aligned buffer must be rejected
     const view = new Uint8Array(padded, 0, RECORD_BYTES * 3 + 8);
     expect(() => parseActionsBin(view, META)).toThrow(RecordParseError);
   });
@@ -447,8 +401,6 @@ describe('unvalidated envIds are rejected with a typed error', () => {
   });
 
   test('decodeRecording refuses an unknown envId instead of TypeErroring on ENVS', () => {
-    // a decoder that agrees with the bogus id gets past the mismatch check and
-    // used to reach `ENVS[envId].controlHz` -> "cannot read properties of undefined"
     const rogue = { ...cartPoleDecoder, envId: bogus } as EnvDecoder<unknown, unknown>;
     const raw: RawRecording = {
       envId: bogus,
@@ -505,8 +457,6 @@ describe('the empty event list is one shared frozen singleton', () => {
     expect(NO_EVENTS.length).toBe(0);
   });
 
-  // every decoder — a fresh [] per quiet frame is 100k allocations per lane and
-  // breaks `events[i] === NO_EVENTS` as a "nothing fired" test
   for (const envId of ENV_IDS) {
     test(`${envId} returns the singleton for quiet frames`, () => {
       const doc = JSON.parse(
@@ -523,7 +473,7 @@ describe('the empty event list is one shared frozen singleton', () => {
           expect({ i, singleton: evs === NO_EVENTS }).toEqual({ i, singleton: true });
         }
       }
-      expect(quiet).toBeGreaterThan(0); // the assertion above must have bitten
+      expect(quiet).toBeGreaterThan(0);
     });
   }
 });
@@ -543,14 +493,12 @@ describe('non-finite record rows are counted, not silently decoded', () => {
 
   test('NaN / Infinity anywhere in a row counts that row once', () => {
     const raw = cartPoleRaw();
-    raw.data[3 * RECORD_FLOATS + 0] = NaN; // ctrl[0]
-    raw.data[9 * RECORD_FLOATS + 6] = Infinity; // done
-    raw.data[9 * RECORD_FLOATS + 8] = NaN; // pose[1] of the SAME row
-    raw.data[20 * RECORD_FLOATS + 15] = -Infinity; // pose[8]
+    raw.data[3 * RECORD_FLOATS + 0] = NaN;
+    raw.data[9 * RECORD_FLOATS + 6] = Infinity;
+    raw.data[9 * RECORD_FLOATS + 8] = NaN;
+    raw.data[20 * RECORD_FLOATS + 15] = -Infinity;
     const dec = decodeRecording(raw, cartPoleDecoder);
     expect(dec.nonFiniteRows).toBe(3);
-    // a non-replay decoder still decodes every row (per-decoder NaN hardening
-    // is deliberately out of scope) — the count is the tripwire
     expect(dec.frames.length).toBe(raw.steps + 1);
   });
 

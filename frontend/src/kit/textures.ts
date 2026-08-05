@@ -1,22 +1,9 @@
-// kit/textures — seeded procedural texture generators.
-//
-// STYLE.md: "never image textures for surface detail (procedural kit/textures only,
-// ≤1024², zero network requests)". Everything here is generated from an integer seed
-// on the CPU and uploaded as a DataTexture, so it works identically in the browser and
-// in headless `bun test` (no canvas, no DOM). Canvas-backed generation is available but
-// guarded — it returns null where there is no DOM.
-//
-// Every generator returns a texture the CALLER owns and must dispose(). There is no
-// shared cache on purpose: scene dispose() must never free a texture another scene
-// still holds.
 
 import * as THREE from 'three';
 import { hash2f, hash2i, mulberry32 } from './rng';
 
-/** Hard ceiling from the style contract. */
 export const MAX_TEXTURE_SIZE = 1024;
 
-/** Clamp to [4, 1024] and round down to a power of two (safe repeat + mipmaps). */
 export function clampSize(size: number): number {
   const s = Math.max(4, Math.min(MAX_TEXTURE_SIZE, Math.floor(size) || 4));
   return 1 << Math.floor(Math.log2(s));
@@ -38,11 +25,7 @@ function wrapIndex(i: number, period: number): number {
   return ((i % period) + period) % period;
 }
 
-// ---------------------------------------------------------------------------
-// value noise / fbm
-// ---------------------------------------------------------------------------
 
-/** Tiling 2-D value noise in [0, 1); the lattice wraps every `period` cells. */
 export function valueNoise2(x: number, y: number, period: number, seed: number): number {
   const ix = Math.floor(x);
   const iy = Math.floor(y);
@@ -60,22 +43,15 @@ export function valueNoise2(x: number, y: number, period: number, seed: number):
 }
 
 export interface FbmOptions {
-  /** texture edge in pixels; clamped to a power of two ≤ 1024 */
   size?: number;
-  /** base lattice cells across the texture (the wrap period) */
   frequency?: number;
   octaves?: number;
-  /** amplitude falloff per octave */
   gain?: number;
-  /** frequency growth per octave */
   lacunarity?: number;
-  /** ridged (|2n-1| inverted) instead of plain fbm — for rock/canyon strata */
   ridged?: boolean;
-  /** output contrast curve applied after normalization (1 = linear) */
   contrast?: number;
 }
 
-/** Raw fbm field in [0, 1], row-major, size*size floats. */
 export function fbmField(seed: number, opts: FbmOptions = {}): { size: number; data: Float32Array } {
   const size = clampSize(opts.size ?? 256);
   const frequency = Math.max(1, Math.floor(opts.frequency ?? 4));
@@ -115,30 +91,18 @@ export function fbmField(seed: number, opts: FbmOptions = {}): { size: number; d
   return { size, data };
 }
 
-/** fbm as an 8-bit RGBA DataTexture (r = g = b = field, a = 255). */
 export function fbm(seed: number, opts: FbmOptions = {}): THREE.DataTexture {
   const { size, data } = fbmField(seed, opts);
   return grayTexture(data, size, 'oak-fbm');
 }
 
-// ---------------------------------------------------------------------------
-// voronoi / worley
-// ---------------------------------------------------------------------------
 
 export interface VoronoiOptions {
   size?: number;
-  /** feature cells across the texture (the wrap period) */
   cells?: number;
-  /** 0 = perfect lattice, 1 = fully jittered feature points */
   jitter?: number;
 }
 
-/**
- * Worley field. Returns three co-registered channels:
- *  - `f1`: distance to the nearest feature point, normalized by the cell size
- *  - `edge`: F2 − F1 (0 on a cell boundary — cracks, scales, caustic cells)
- *  - `cell`: per-cell random id in [0, 1) (flat cell colors)
- */
 export function voronoiField(
   seed: number,
   opts: VoronoiOptions = {},
@@ -189,7 +153,6 @@ export function voronoiField(
   return { size, f1, edge, cell };
 }
 
-/** Voronoi as RGBA: r = F1, g = F2−F1 (edge), b = cell id, a = 255. */
 export function voronoi(seed: number, opts: VoronoiOptions = {}): THREE.DataTexture {
   const { size, f1, edge, cell } = voronoiField(seed, opts);
   const rgba = new Uint8Array(size * size * 4);
@@ -203,24 +166,13 @@ export function voronoi(seed: number, opts: VoronoiOptions = {}): THREE.DataText
   return makeDataTexture(rgba, size, size, 'oak-voronoi');
 }
 
-// ---------------------------------------------------------------------------
-// ramps (toon ramps, terrain ramps, gradient lookups)
-// ---------------------------------------------------------------------------
 
 export interface RampStop {
-  /** position in [0, 1] */
   t: number;
-  /** token hex color */
   color: number;
-  /** optional alpha in [0, 1] (default 1) */
   alpha?: number;
 }
 
-/**
- * Sample a stop list at `t`, writing into `out` as [r, g, b, a] bytes.
- * Interpolation is in sRGB byte space — what the ramp looks like in the swatch is
- * what it looks like on the surface.
- */
 export function sampleRamp(stops: readonly RampStop[], t: number, out: Uint8Array, offset = 0): void {
   const n = stops.length;
   if (n === 0) {
@@ -258,7 +210,6 @@ export function sampleRamp(stops: readonly RampStop[], t: number, out: Uint8Arra
   out[offset + 3] = Math.round(clamp01(lerp(la, ha, k)) * 255);
 }
 
-/** Ramp bytes, `width` texels wide, RGBA. Stops are sorted by t (input untouched). */
 export function rampData(stops: readonly RampStop[], width = 64): Uint8Array {
   const w = clampSize(width);
   const sorted = [...stops].sort((a, b) => a.t - b.t);
@@ -269,10 +220,6 @@ export function rampData(stops: readonly RampStop[], width = 64): Uint8Array {
   return data;
 }
 
-/**
- * A 1×N gradient lookup — the toon ramp / terrain ramp primitive.
- * Marked sRGB, clamped, unfiltered mipmaps (a ramp must never bleed across its edges).
- */
 export function rampTexture(stops: readonly RampStop[], width = 64): THREE.DataTexture {
   const w = clampSize(width);
   const tex = makeDataTexture(rampData(stops, w), w, 1, 'oak-ramp');
@@ -282,19 +229,13 @@ export function rampTexture(stops: readonly RampStop[], width = 64): THREE.DataT
   return tex;
 }
 
-// ---------------------------------------------------------------------------
-// grain
-// ---------------------------------------------------------------------------
 
 export interface GrainOptions {
   size?: number;
-  /** 0 = flat gray, 1 = full-range white noise */
   strength?: number;
-  /** blend towards a 1-octave value-noise field (softer, film-like) */
   softness?: number;
 }
 
-/** White/soft noise field in [0, 1], centered on 0.5. */
 export function grainField(seed: number, opts: GrainOptions = {}): { size: number; data: Float32Array } {
   const size = clampSize(opts.size ?? 256);
   const strength = clamp01(opts.strength ?? 1);
@@ -313,17 +254,12 @@ export function grainField(seed: number, opts: GrainOptions = {}): { size: numbe
   return { size, data };
 }
 
-/** Grain as an 8-bit RGBA DataTexture. */
 export function grain(seed: number, opts: GrainOptions = {}): THREE.DataTexture {
   const { size, data } = grainField(seed, opts);
   return grayTexture(data, size, 'oak-grain');
 }
 
-// ---------------------------------------------------------------------------
-// texture plumbing
-// ---------------------------------------------------------------------------
 
-/** Pack a [0,1] float field as RGBA bytes (r = g = b = field). */
 export function fieldToRGBA(field: Float32Array): Uint8Array {
   const rgba = new Uint8Array(field.length * 4);
   for (let i = 0; i < field.length; i++) {
@@ -341,7 +277,6 @@ function grayTexture(field: Float32Array, size: number, name: string): THREE.Dat
   return makeDataTexture(fieldToRGBA(field), size, size, name);
 }
 
-/** DataTexture with the kit defaults: repeat wrap, linear filter, mipmapped, uploaded. */
 export function makeDataTexture(data: Uint8Array, width: number, height: number, name = 'oak-data'): THREE.DataTexture {
   const tex = new THREE.DataTexture(data, width, height, THREE.RGBAFormat, THREE.UnsignedByteType);
   tex.name = name;
@@ -355,16 +290,10 @@ export function makeDataTexture(data: Uint8Array, width: number, height: number,
   return tex;
 }
 
-/** true when a 2-D canvas can be created (false under `bun test`). */
 export function hasCanvas2D(): boolean {
   return typeof document !== 'undefined' && typeof document.createElement === 'function';
 }
 
-/**
- * Canvas-backed generation for the rare thing procedural math cannot do (soft radial
- * sprites, text-free glyph masks). Returns null headless — callers MUST have a
- * DataTexture fallback, never a hard dependency.
- */
 export function canvasTexture(
   size: number,
   draw: (ctx: CanvasRenderingContext2D, size: number) => void,
@@ -389,11 +318,6 @@ export function canvasTexture(
   return tex;
 }
 
-/**
- * Radial falloff sprite (particles, glows, light pools) as a DataTexture — the
- * headless-safe replacement for the usual canvas radial gradient.
- * `power` > 1 tightens the core; alpha carries the falloff, rgb stays white.
- */
 export function radialSprite(size = 64, power = 2): THREE.DataTexture {
   const s = clampSize(size);
   const data = new Uint8Array(s * s * 4);

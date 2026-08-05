@@ -1,7 +1,4 @@
 /// <reference types="bun" />
-// Unit tests for the JSONL readers. Every fleet artifact is appended to by a LIVE run,
-// so the contract under test is: a half-written final line must never lose earlier rows
-// and must never throw.
 
 import { afterAll, beforeAll, describe, expect, it } from 'bun:test';
 import { mkdir, rm, writeFile } from 'node:fs/promises';
@@ -19,7 +16,7 @@ import {
   streamJsonl,
 } from '../../server/jsonl';
 
-const HERE = dirname(fileURLToPath(import.meta.url)); // frontend/test/server
+const HERE = dirname(fileURLToPath(import.meta.url));
 const TMP = join(HERE, '..', 'fixtures', 'server', 'jsonl-tmp');
 
 beforeAll(async () => {
@@ -90,9 +87,7 @@ describe('readTail', () => {
     const rows = parseJsonl<{ i: number }>(t?.text ?? '');
     expect(rows.length).toBeGreaterThan(0);
     expect(rows.length).toBeLessThan(200);
-    // every surviving row parsed, and the last one is the last row of the file
     expect(rows[rows.length - 1]?.i).toBe(199);
-    // no partial head leaked through
     expect(t?.text.startsWith('{"i":')).toBe(true);
   });
 });
@@ -103,7 +98,7 @@ describe('readJsonlFrom', () => {
     await writeFile(p, '{"n":1}\n{"n":2}\n{"n":3');
     const first = await readJsonlFrom<{ n: number }>(p, 0);
     expect(first?.rows).toEqual([{ n: 1 }, { n: 2 }]);
-    expect(first?.nextOffset).toBe(16); // two complete 8-byte rows
+    expect(first?.nextOffset).toBe(16);
     expect(first?.reset).toBe(false);
 
     await writeFile(p, '{"n":1}\n{"n":2}\n{"n":3}\n{"n":4}\n');

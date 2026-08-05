@@ -1,36 +1,3 @@
-// kit/wisp — THE shared avatar. Every one of the 10 grid environments is the same
-// forest spirit in a different place; that is what makes the gallery read as one
-// preserve (STYLE.md: "One sun logic, one avatar, one celebration grammar").
-//
-// Anatomy: a soft orb core (wispMaterial glow), a petal/leaf skirt that counter-rotates
-// under it, and a trailing ribbon that remembers where the wisp has been. Height is
-// tokens.wispHeight (0.35) — the orb center sits exactly there above the floor plane.
-//
-// Accuracy: the wisp's world position is `HopMotion.position`, which is a straight-line
-// arc between two `cellToWorld` cells and nothing else. Delete the skirt and the ribbon
-// and the remaining orb is still exactly on the true cell.
-//
-// Rig (STYLE.md "skins are children of exact bones"):
-//   group → avatar (= HopMotion.position) → body (yaw, y = height EXACTLY) →
-//     ├── core      the probe object. NOTHING decorative ever moves it.
-//     ├── silhouette the dark side of the glow — see LEGIBILITY below
-//     └── decor     the idle bob lives here — halo, skirt, carry anchor.
-//   group → shade   the ground-contact pool (floor plane, never the hop arc)
-// The bob used to ride on `body`, which meant the probe object oscillated ±0.018 —
-// 18× the 1e-3 assertAligned tolerance, so no grid scene could ever have passed.
-//
-// LEGIBILITY (canon lesson 22b, measured 2026-08-03). The core, the halo and the ribbon
-// are all ADDITIVE: they can only ever add light to whatever is behind them. Across the
-// 11 grid scenes the floors run from 27.9 to 189.8 sRGB, and on the bright end the
-// creature's peak luminance and its background land within 1.25× of each other — the
-// wisp dissolves into the floor of four-rooms and chain. Luminance cannot buy that back
-// (more gain just crosses the bloom threshold and smears, canon lesson 19). VALUE can:
-// a soft dark under-silhouette behind the orb and a soft contact shade on the floor give
-// the wisp its own local background, so the contrast is read against the rim — dark in
-// every palette — instead of against the floor. Both are the wisp's OWN accent blended
-// most of the way to `palettes.night.skyTop` (canon lesson 9's legal near-black), so on a
-// dark floor they are already the floor's value and vanish. Background-agnostic by
-// construction: no palette branch, no per-scene tuning, one treatment for all 11 scenes.
 
 import * as THREE from 'three';
 import type { GridCell } from '@sim/types';
@@ -41,32 +8,22 @@ import { radialSprite } from './textures';
 import { TOKENS } from './tokens';
 import type { QualityTier } from './types';
 
-/** A facing direction: yaw radians, or a grid-plane delta (dx = east, dy = south). */
 export type FaceDir = number | { dx: number; dy: number };
 
-/** Yaw (radians about +y) that points along a grid delta. dy is +z (south). */
 export function yawFromGridDelta(dx: number, dy: number): number {
   if (dx === 0 && dy === 0) return 0;
   return Math.atan2(dx, dy);
 }
 
 export interface WispOptions {
-  /** accent color, normally tokens.accents[slug] */
   color: THREE.ColorRepresentation;
   tier?: QualityTier;
-  /** orb center height (default tokens.wispHeight) */
   height?: number;
-  /** orb radius (default 0.16) */
   radius?: number;
-  /** petal/leaf skirt (default true above thumb) */
   skirt?: boolean;
-  /** trailing ribbon (default true above thumb) */
   ribbon?: boolean;
-  /** ribbon sample count at hero (default 24) */
   ribbonLength?: number;
-  /** dark under-silhouette behind the orb — the bright-floor legibility organ (default true) */
   silhouette?: boolean;
-  /** soft ground-contact shade on the floor plane under the avatar (default true) */
   contactShade?: boolean;
   hop?: HopMotionOptions;
   name?: string;
@@ -74,52 +31,21 @@ export interface WispOptions {
 
 const RIBBON_MIN = 6;
 
-/** How far the accent is carried toward `night.skyTop` for the dark side of the glow. */
 const SHADE_BLEND = 0.93;
-/**
- * Under-silhouette RADIUS, in core radii — a shell just outside the orb and well inside
- * the halo (2.4 r). What buys contrast here is not luminance under the core (measured on
- * four-rooms: the additive core plus ACES compression eat a 0.5-alpha darkening for
- * −0.055 L) but the orb's own HUE: over a bright floor the core's additive green landed
- * on 174-sRGB gold and washed to white, and over the shell it stays green.
- */
 const SILHOUETTE_SIZE = 1.4;
-/**
- * Contact-shade diameter, in core radii — the organ that actually moves the number. It
- * lies on the FLOOR, outside the core/halo/bloom footprint, so its darkening survives
- * tone mapping and gives the creature a pocket to read against.
- */
 const SHADE_SIZE = 5.6;
-/** The shade lifts off the floor plane by this much so it never z-fights the floor. */
 const SHADE_LIFT = 0.014;
-/** Peak darkness of each, before `brightness`. */
 const SILHOUETTE_OPACITY = 0.8;
 const SHADE_OPACITY = 0.5;
-/** Falloff exponent of the contact-shade sprite: 1 = a linear cone, soft to the edge. */
 const SHADE_FALLOFF = 1;
 
-/**
- * The avatar.
- *
- * ```ts
- * const wisp = new Wisp({ color: tokens.accents['four-rooms'], tier });
- * scene.add(wisp.group);
- * wisp.setCell(x, y, grid);            // init / teleport
- * wisp.hopTo({ x, y });                // on a state change
- * wisp.update(frame.dtReal, ctx.time());
- * ```
- */
 export class Wisp {
-  /** add this ONE object to the scene; it stays at the origin */
   readonly group = new THREE.Group();
-  /** the moving avatar — its position IS `HopMotion.position` (world space) */
   readonly avatar = new THREE.Group();
-  /** the exact state-bearing object — probes() should register this */
   readonly core: THREE.Mesh;
   readonly motion: HopMotion;
 
   private readonly body = new THREE.Group();
-  /** everything that breathes, bobs or spins — never the core */
   private readonly decor = new THREE.Group();
   private readonly skirt: THREE.Mesh | null;
   private readonly carryAnchor = new THREE.Group();
@@ -136,7 +62,6 @@ export class Wisp {
   private readonly halo: THREE.Mesh;
   private readonly geometries: THREE.BufferGeometry[] = [];
 
-  // the dark side of the glow (see LEGIBILITY at the top of the file)
   private readonly silhouette: THREE.Mesh | null;
   private readonly silhouetteMaterial: EmissiveMaterial | null;
   private readonly shade: THREE.Mesh | null;
@@ -153,7 +78,6 @@ export class Wisp {
   private flareAmount = 0;
   private carried: THREE.Object3D | null = null;
   private readonly baseIntensity: number;
-  /** hop-arc falloff of the contact shade, 1 when landed (see `syncShade`) */
   private shadeLift = 1;
 
   constructor(opts: WispOptions, grid: GridSize = { w: 1, h: 1 }) {
@@ -165,7 +89,6 @@ export class Wisp {
     this.group.name = opts.name ?? 'oakWisp';
     this.motion = new HopMotion(grid, opts.hop);
 
-    // ---- orb core ----
     const coreGeo = new THREE.IcosahedronGeometry(radius, tier === 'thumb' ? 1 : 2);
     const haloGeo = new THREE.IcosahedronGeometry(radius * 2.4, tier === 'thumb' ? 0 : 1);
     this.geometries.push(coreGeo, haloGeo);
@@ -185,11 +108,9 @@ export class Wisp {
     this.core.name = 'oakWispCore';
     this.halo = new THREE.Mesh(haloGeo, this.haloMaterial);
     this.halo.name = 'oakWispHalo';
-    // the core hangs off the exact bone; every decoration hangs off `decor`
     this.body.add(this.core, this.decor);
     this.decor.add(this.halo);
 
-    // ---- the dark side of the glow ----
     const wantsSilhouette = opts.silhouette ?? true;
     const wantsShade = opts.contactShade ?? true;
     this.shadeSprite = wantsShade ? radialSprite(tier === 'thumb' ? 32 : 64, SHADE_FALLOFF) : null;
@@ -197,14 +118,6 @@ export class Wisp {
     this.shadeSize = radius * SHADE_SIZE;
 
     if (wantsSilhouette) {
-      // A SHELL, not a billboard. The silhouette has to read the same from every rig in
-      // the gallery and `Wisp.update()` is never handed a camera, so it must be
-      // view-independent — and a sphere is. (The obvious camera-free alternative, a
-      // sizeAttenuated Points sprite, was built and measured first: three scales point
-      // size by `height/2`, NOT by the focal length, so at fov 40 it renders 2.75× under
-      // its nominal world size and the rim came out a 3 px fringe. Geometry, not points.)
-      // It reuses the CORE geometry at a scale — no second geometry, and the ring width
-      // stays constant because it breathes with the orb.
       this.silhouetteMaterial = emissiveMaterial(shadeColor, 1, {
         transparent: true,
         opacity: SILHOUETTE_OPACITY,
@@ -214,7 +127,6 @@ export class Wisp {
       this.silhouette = new THREE.Mesh(coreGeo, this.silhouetteMaterial);
       this.silhouette.name = 'oakWispSilhouette';
       this.silhouette.scale.setScalar(SILHOUETTE_SIZE);
-      // BEFORE the additive core and halo — it is their background, not their neighbour
       this.silhouette.renderOrder = -1;
       this.body.add(this.silhouette);
     } else {
@@ -237,8 +149,6 @@ export class Wisp {
       this.shade = new THREE.Mesh(geo, this.shadeMaterial);
       this.shade.name = 'oakWispShade';
       this.shade.renderOrder = -1;
-      // the shade belongs to the FLOOR, not to the hop arc: it lives in group space and
-      // is placed from the avatar's x/z every frame (`syncShade`)
       this.shade.position.y = SHADE_LIFT;
       this.shade.scale.setScalar(this.shadeSize);
       this.group.add(this.shade);
@@ -247,7 +157,6 @@ export class Wisp {
       this.shadeMaterial = null;
     }
 
-    // ---- petal / leaf skirt ----
     const wantsSkirt = (opts.skirt ?? true) && hero;
     if (wantsSkirt) {
       const petals = Math.max(3, Math.round(6 * detail));
@@ -277,7 +186,6 @@ export class Wisp {
       this.skirtMaterial = null;
     }
 
-    // ---- carry anchor (a token orbits just in front of the orb) ----
     this.carryAnchor.name = 'oakWispCarry';
     this.carryAnchor.position.set(0, radius * 0.2, radius * 1.5);
     this.decor.add(this.carryAnchor);
@@ -287,7 +195,6 @@ export class Wisp {
     this.avatar.add(this.body);
     this.group.add(this.avatar);
 
-    // ---- trailing ribbon ----
     const wantsRibbon = (opts.ribbon ?? true) && hero;
     if (wantsRibbon) {
       this.ribbonCount = Math.max(RIBBON_MIN, Math.round((opts.ribbonLength ?? 24) * detail));
@@ -310,7 +217,6 @@ export class Wisp {
       this.ribbon = new THREE.Line(geo, this.ribbonMaterial);
       this.ribbon.name = 'oakWispRibbon';
       this.ribbon.frustumCulled = false;
-      // the trail lives in SCENE space (a sibling of the avatar), so it stays behind
       this.group.add(this.ribbon);
     } else {
       this.ribbon = null;
@@ -325,12 +231,10 @@ export class Wisp {
     this.syncShade();
   }
 
-  /** world position of the avatar (the orb sits `height` above it) */
   get position(): THREE.Vector3 {
     return this.avatar.position;
   }
 
-  /** the destination cell (what sim-core says) */
   get cellX(): number {
     return this.motion.cellX;
   }
@@ -339,12 +243,10 @@ export class Wisp {
     return this.motion.cellY;
   }
 
-  /** the object a scene should hand to `AlignmentProbe` (world pos = orb center) */
   get probeObject(): THREE.Object3D {
     return this.core;
   }
 
-  /** Bind (or rebind) the grid and TELEPORT to a cell — no easing, scrub-safe. */
   setCell(x: number, y: number, grid: GridSize): void {
     this.motion.setGrid(grid);
     this.motion.snap(x, y);
@@ -353,22 +255,16 @@ export class Wisp {
     this.syncShade();
   }
 
-  /** Start a straight hop to a cell (STYLE.md: straight hop only, never path-planned). */
   hopTo(cell: GridCell | { x: number; y: number }, now?: number): void {
     this.motion.hopTo(cell.x, cell.y, now ?? this.time);
     this.avatar.position.copy(this.motion.position);
     this.syncShade();
   }
 
-  /** Face a direction: yaw radians, or a grid delta { dx, dy }. */
   face(dir: FaceDir): void {
     this.targetYaw = typeof dir === 'number' ? dir : yawFromGridDelta(dir.dx, dir.dy);
   }
 
-  /**
-   * Carry a token (a `KeyToken.group`, a pearl, an ember) or `null` to let go.
-   * Returns whatever was being carried, so the scene can put it back where it belongs.
-   */
   carry(token: THREE.Object3D | null): THREE.Object3D | null {
     const previous = this.carried;
     if (previous) {
@@ -387,25 +283,18 @@ export class Wisp {
     return this.carried;
   }
 
-  /** Fade toward a resting glow (POMaze fog, MemoryChain darkness). */
   dim(amount = 0.45): void {
     this.targetBrightness = Math.max(0, amount);
   }
 
-  /** Back to full glow. */
   undim(): void {
     this.targetBrightness = 1;
   }
 
-  /** Celebration beat: a bright flash that decays over ~0.5 s. */
   flare(strength = 1): void {
     this.flareAmount = Math.max(this.flareAmount, strength);
   }
 
-  /**
-   * Hard snap for `scrubbed` / `teleport`: land the hop, kill the ribbon history, drop
-   * every eased value to its target. No easing may cross a scrub (STYLE.md).
-   */
   snap(): void {
     this.motion.snap();
     this.avatar.position.copy(this.motion.position);
@@ -418,13 +307,11 @@ export class Wisp {
     this.applyBrightness();
   }
 
-  /** `dt` is wall seconds (ambient easing); `time` is the host playback clock. */
   update(dt: number, time: number): void {
     this.time = time;
     this.motion.update(time);
     this.avatar.position.copy(this.motion.position);
 
-    // facing: shortest-arc damped turn
     const k = 1 - Math.exp(-12 * Math.max(0, dt));
     let d = this.targetYaw - this.yaw;
     while (d > Math.PI) d -= Math.PI * 2;
@@ -432,14 +319,9 @@ export class Wisp {
     this.yaw += d * k;
     this.body.rotation.y = this.yaw;
 
-    // idle bob rides on the DECOR node, never on the bone: `body` stays at exactly
-    // `height` so core.worldPos is the cell truth to the last bit. The orb keeps its
-    // own life through a breath in SCALE — scale never moves an object's origin, so
-    // the probe reads the same number whether the wisp is inhaling or not.
     this.decor.position.y = Math.sin(time * 1.9) * 0.018;
     const breath = 1 + Math.sin(time * 1.9) * 0.03;
     this.core.scale.setScalar(breath);
-    // the shell breathes WITH the orb, so the dark ring keeps its width
     this.silhouette?.scale.setScalar(SILHOUETTE_SIZE * breath);
     if (this.skirt) {
       this.skirt.rotation.y = -time * 0.9;
@@ -470,7 +352,6 @@ export class Wisp {
     this.group.clear();
   }
 
-  // ---- internals ----
 
   private applyBrightness(): void {
     const gain = this.brightness * (1 + 1.8 * this.flareAmount);
@@ -479,19 +360,10 @@ export class Wisp {
     setEmissiveIntensity(this.haloMaterial, this.baseIntensity * gain);
     if (this.ribbonMaterial) this.ribbonMaterial.opacity = 0.4 * this.brightness;
     if (this.skirtMaterial) this.skirtMaterial.opacity = 0.85 * this.brightness;
-    // the dark side dims with the creature (POMaze fog, MemoryChain darkness) but is
-    // deliberately deaf to `flare`: a celebration brightens a wisp, it does not deepen
-    // the hole under it
     if (this.silhouetteMaterial) this.silhouetteMaterial.opacity = SILHOUETTE_OPACITY * this.brightness;
     if (this.shadeMaterial) this.shadeMaterial.opacity = SHADE_OPACITY * this.brightness * this.shadeLift;
   }
 
-  /**
-   * The contact shade is a pure function of the avatar's position: it lies on the FLOOR
-   * plane (group space, y = SHADE_LIFT) under the wisp's x/z, and shrinks and fades with
-   * the height of the hop arc — exactly what a contact shadow does. No history, so it is
-   * scrub-safe by construction (canon lesson 2).
-   */
   private syncShade(): void {
     const shade = this.shade;
     if (!shade) return;
@@ -523,7 +395,6 @@ export class Wisp {
     const p = this.ribbonPositions;
     if (!p || !this.ribbonAttr) return;
     if (!this.ribbonFilled) this.resetRibbon();
-    // shift back one sample (fixed-size in-place move, no allocation)
     p.copyWithin(3, 0, (this.ribbonCount - 1) * 3);
     p[0] = this.avatar.position.x;
     p[1] = this.avatar.position.y + this.height;
@@ -532,7 +403,6 @@ export class Wisp {
   }
 }
 
-/** A ring of tapered petals, cupped downward. Built once per wisp. */
 function buildSkirt(petals: number, radius: number): THREE.BufferGeometry {
   const positions = new Float32Array(petals * 3 * 3);
   const colors = new Float32Array(petals * 3 * 3);
@@ -567,7 +437,6 @@ function buildSkirt(petals: number, radius: number): THREE.BufferGeometry {
   return g;
 }
 
-/** Place any object at a cell (KeyToken drop points, beacons, camera targets). */
 export function placeAtCell(object: THREE.Object3D, x: number, y: number, grid: GridSize, height = 0): void {
   cellToWorldVec(x, y, grid, object.position);
   object.position.y = height;

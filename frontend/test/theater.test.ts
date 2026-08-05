@@ -1,13 +1,4 @@
 /// <reference types="bun" />
-// Theater pure logic: the deep link, the picker's filtering, download progress,
-// the scrub-bar event timeline, the replay-damage predicate, the transport rules
-// and the tier governor's state machine.
-//
-// No DOM here (happy-dom is not installed) — `views/theater.ts` and
-// `theater/sceneHost.ts` are the DOM/WebGL halves and are verified by hand
-// against the running dev server plus headless screenshots. Everything those two
-// files DECIDE lives in `theater/loader.ts` and `theater/player.ts`, which is
-// what this file pins down.
 
 import { describe, expect, test } from 'bun:test';
 
@@ -59,7 +50,6 @@ import {
   type TickerEntry,
 } from '../src/theater/player';
 
-// ---------------------------------------------------------------- fixtures
 
 function runEntry(overrides: Partial<RunIndexEntry> = {}): RunIndexEntry {
   return {
@@ -88,7 +78,6 @@ function entry(frame: number, event: SimEvent, step = frame - 1): TimelineEntry 
   return { frame, step, event };
 }
 
-// ---------------------------------------------------------------- deep link
 
 describe('deep link', () => {
   test('parses #/theater/:id/:envId/:seed', () => {
@@ -114,8 +103,6 @@ describe('deep link', () => {
   });
 
   test('the picker is the answer for anything incomplete or invalid', () => {
-    // A broken link must NOT be silently "corrected" into playing some other
-    // lane: the URL is the source of truth, so an unparseable one has no lane.
     expect(parseTheaterParams({})).toBeNull();
     expect(parseTheaterParams({ id: 'demo', envId: 'FourRooms-cont-v0' })).toBeNull();
     expect(parseTheaterParams({ id: '', envId: 'FourRooms-cont-v0', seed: '8' })).toBeNull();
@@ -143,7 +130,6 @@ describe('parseTheaterQuery', () => {
   });
 });
 
-// ---------------------------------------------------------------- picker
 
 describe('pickerRuns', () => {
   test('keeps only runs that actually have recordings', () => {
@@ -161,7 +147,6 @@ describe('pickerRuns', () => {
       runEntry({ id: 'other', startedAt: '2026-08-02T00:00:00Z' }),
     ]);
     expect(runs[0]?.id).toBe(DEFAULT_THEATER_RUN);
-    // the rest keep the gallery's own ordering (roles first, then newest)
     expect(runs.slice(1).map((r) => r.id)).toEqual(['best', 'other']);
   });
 
@@ -201,7 +186,6 @@ describe('envChips', () => {
   });
 });
 
-// ---------------------------------------------------------------- progress
 
 describe('load progress', () => {
   test('is monotone across the phase ladder', () => {
@@ -222,7 +206,6 @@ describe('load progress', () => {
     expect(lo).toBeCloseTo(0.04, 6);
     expect(mid).toBeCloseTo(0.04 + (0.78 - 0.04) / 2, 6);
     expect(hi).toBeCloseTo(0.78, 6);
-    // the next phase begins exactly where the download ends
     expect(progressFraction('decode')).toBeCloseTo(0.78, 6);
   });
 
@@ -259,7 +242,6 @@ describe('load progress', () => {
   });
 });
 
-// ---------------------------------------------------------------- damage
 
 describe('replayHealth', () => {
   test('a clean recording raises nothing', () => {
@@ -295,7 +277,6 @@ describe('replayHealth', () => {
   });
 });
 
-// ---------------------------------------------------------------- timeline
 
 describe('event timeline ticks', () => {
   test('only landmark kinds get a tick', () => {
@@ -304,7 +285,6 @@ describe('event timeline ticks', () => {
     expect(tickKindOf({ type: 'key', index: 0 })).toBe('key');
     expect(tickKindOf({ type: 'door', index: 1, open: true })).toBe('door');
     expect(tickKindOf({ type: 'cue', value: 1 })).toBe('cue');
-    // continuity, not landmarks — a respawn is not something you seek to
     expect(tickKindOf({ type: 'teleport' })).toBeNull();
     expect(tickKindOf({ type: 'resurface' })).toBeNull();
   });
@@ -330,7 +310,6 @@ describe('event timeline ticks', () => {
   });
 
   test('a dense lane is bucketed, never emitted one node per event', () => {
-    // MemoryChain fires ~4400 events over a 100k-step lane; the bar is ~1400px.
     const timeline: TimelineEntry[] = [];
     for (let i = 0; i < 4400; i++) {
       timeline.push(entry(i * 22, i % 3 === 0 ? { type: 'goal' } : { type: 'done' }));
@@ -340,7 +319,7 @@ describe('event timeline ticks', () => {
     expect(ticks.length).toBeGreaterThan(100);
     let total = 0;
     for (const tick of ticks) total += tick.count;
-    expect(total).toBe(4400); // nothing is lost, only merged
+    expect(total).toBe(4400);
   });
 
   test('a merged bucket keeps its earliest frame and its highest-ranked kind', () => {
@@ -355,7 +334,7 @@ describe('event timeline ticks', () => {
     );
     expect(ticks).toHaveLength(1);
     const tick = ticks[0];
-    expect(tick?.kind).toBe('goal'); // goal outranks done — it is the celebration
+    expect(tick?.kind).toBe('goal');
     expect(tick?.frame).toBe(40);
     expect(tick?.step).toBe(39);
     expect(tick?.count).toBe(3);
@@ -379,14 +358,10 @@ describe('event timeline ticks', () => {
   });
 
   test('clicking a tick lands BEFORE the event so the celebration plays', () => {
-    // The host only delivers events on a sequential step: landing exactly on the
-    // event frame arrives as a scrub, which swallows the beat by contract.
     expect(seekTargetForTick({ frame: 10 })).toBe(7);
     expect(seekTargetForTick({ frame: 10 }, 1)).toBe(9);
     expect(seekTargetForTick({ frame: 1 })).toBe(0);
     expect(seekTargetForTick({ frame: 0 })).toBe(0);
-    // and the lead stays inside the harness catch-up window, or the seek itself
-    // would register as the scrub it is trying to avoid
     expect(seekTargetForTick({ frame: 100 })).toBeGreaterThanOrEqual(100 - MAX_CATCHUP_FRAMES);
   });
 
@@ -400,7 +375,6 @@ describe('event timeline ticks', () => {
   });
 });
 
-// ---------------------------------------------------------------- transport
 
 describe('transport rules', () => {
   test('speeds ladder from 0.25 to 8 and clamp at both ends', () => {
@@ -411,7 +385,7 @@ describe('transport rules', () => {
     expect(nextSpeed(8, 1)).toBe(8);
     expect(nextSpeed(0.25, -1)).toBe(0.25);
     expect(nearestSpeedIndex(1)).toBe(2);
-    expect(nearestSpeedIndex(0)).toBe(2); // a nonsense speed reads as 1×
+    expect(nearestSpeedIndex(0)).toBe(2);
   });
 
   test('tier keys cycle down and the governor ladder ends at thumb', () => {
@@ -543,8 +517,6 @@ describe('event ticker', () => {
   });
 
   test('a catch-up burst dates every event to ITS OWN step', () => {
-    // At 8× one tick walks up to twelve frames; attributing them all to the
-    // frame the tick landed on would misdate the record.
     const ticker = pushTicker(
       [],
       [{ type: 'key', index: 0 }, { type: 'door', index: 0, open: true }, { type: 'goal' }],
@@ -564,9 +536,7 @@ describe('event ticker', () => {
   });
 });
 
-// ---------------------------------------------------------------- governor
 
-/** Feed a constant frame time and report every tier the governor asked for. */
 function runGovernor(
   governor: ReturnType<typeof makeTierGovernor>,
   frameMs: number,
@@ -588,9 +558,6 @@ describe('tier governor', () => {
   });
 
   test('a HEALTHY vsync-locked 60 Hz page is never dropped', () => {
-    // The measured reality this guard exists for: a perfectly good theater frame
-    // reads 17.2–18.6 ms because the sample is the frame INTERVAL. A bare 20 ms
-    // rule leaves ~7% headroom and would drop tiers on a machine doing nothing wrong.
     const governor = makeTierGovernor();
     let dropped = false;
     for (let i = 0; i < 1200; i++) {
@@ -598,13 +565,11 @@ describe('tier governor', () => {
     }
     expect(dropped).toBe(false);
     expect(governor.p95).toBeCloseTo(18.6, 6);
-    expect(governor.threshold).toBeCloseTo(1.5 * REFRESH_CAP_MS, 6); // 25 ms — one and a half refreshes
+    expect(governor.threshold).toBeCloseTo(1.5 * REFRESH_CAP_MS, 6);
     expect(governor.tier).toBe('hero');
   });
 
   test('at 120 Hz the absolute 20 ms budget still governs', () => {
-    // The vsync floor scales the threshold DOWN toward the budget on a fast
-    // display; it must never demand 120 fps, and never excuse 45 fps either.
     const governor = makeTierGovernor();
     let dropped = false;
     for (let i = 0; i < 400; i++) {
@@ -631,11 +596,8 @@ describe('tier governor', () => {
     const first = drops.findIndex((d) => d !== null);
     expect(first).toBeGreaterThan(0);
     expect(drops[first]).toBe('medium');
-    // Exactly: 30 samples to warm the window (the 30th is also the first one
-    // judged, so it starts the accumulator), then ceil(2 / 0.03) = 67 frames of
-    // over-budget time — 30 + 67 - 1 = 96 samples in total.
     expect(first + 1).toBe(30 + Math.ceil(2 / 0.03) - 1);
-    expect(governor.drops).toBeGreaterThanOrEqual(2); // hero -> medium -> thumb
+    expect(governor.drops).toBeGreaterThanOrEqual(2);
     expect(governor.tier).toBe('thumb');
   });
 
@@ -645,7 +607,7 @@ describe('tier governor', () => {
     expect(drops.every((d) => d === null)).toBe(true);
     expect(governor.tier).toBe('thumb');
     expect(governor.starving).toBe(true);
-    expect(governor.overSeconds).toBe(2); // pinned at the sustain window, not unbounded
+    expect(governor.overSeconds).toBe(2);
   });
 
   test('a drop restarts the window, so the next one costs another full two seconds', () => {
@@ -661,7 +623,6 @@ describe('tier governor', () => {
   });
 
   test('occasional spikes are spikes, not a budget failure', () => {
-    // 2% of frames at 60 ms with the rest at 8 ms: the mean would panic, p95 does not.
     const governor = makeTierGovernor();
     let dropped = false;
     for (let i = 0; i < 2000; i++) {
@@ -684,8 +645,6 @@ describe('tier governor', () => {
   });
 
   test('a cold window is not judged: warmup frames cannot drop a tier', () => {
-    // 29 samples of 100 ms is 2.9 s of over-budget wall clock — more than the
-    // sustain window — but a scene build's shader compiles are not steady state.
     const governor = makeTierGovernor();
     for (let i = 0; i < 29; i++) expect(governor.sample(100)).toBeNull();
     expect(governor.overSeconds).toBe(0);
@@ -695,8 +654,6 @@ describe('tier governor', () => {
   });
 
   test('a scene that never once hits refresh still drops', () => {
-    // The refresh estimate is the window's FASTEST frame, capped at one 60 Hz
-    // interval, so a rock-solid 33 fps cannot talk itself into a lenient threshold.
     const governor = makeTierGovernor();
     const drops = runGovernor(governor, 30, 400);
     expect(governor.threshold).toBeCloseTo(1.5 * REFRESH_CAP_MS, 6);
@@ -731,7 +688,6 @@ describe('tier governor', () => {
   });
 });
 
-// ---------------------------------------------------------------- the fetch
 
 const META: RecordingMeta = {
   envId: 'HalfCheetah-v4',
@@ -740,14 +696,13 @@ const META: RecordingMeta = {
   recordVersion: RECORD_VERSION,
 };
 
-/** A synthetic actions.bin: `rows` record-v3 rows of finite floats. */
 function makeActionsBin(rows: number, damageRow = -1): Uint8Array {
   const floats = new Float32Array(rows * RECORD_FLOATS);
   for (let i = 0; i < rows; i++) {
     const base = i * RECORD_FLOATS;
     for (let c = 0; c < 6; c++) floats[base + c] = Math.sin(i * 0.1 + c) * 0.5;
     floats[base + 6] = 0;
-    floats[base + 7] = i * 0.01; // rootx marches forward
+    floats[base + 7] = i * 0.01;
     for (let p = 1; p < 9; p++) floats[base + 7 + p] = Math.cos(i * 0.05 + p) * 0.2;
     if (i === damageRow) floats[base + 8] = Number.NaN;
   }
@@ -757,11 +712,9 @@ function makeActionsBin(rows: number, damageRow = -1): Uint8Array {
 interface FakeFetchOptions {
   bytes: Uint8Array;
   chunk?: number;
-  /** omit the streaming body to exercise the arrayBuffer fallback */
   noStream?: boolean;
   metaStatus?: number;
   binStatus?: number;
-  /** serve fewer bytes than asked for (a truncated tail) */
   serve?: number;
 }
 
@@ -818,7 +771,6 @@ describe('loadTheaterRecording', () => {
     expect(recording.source.seed).toBe(3);
     expect(recording.source.controlHz).toBe(ENVS['HalfCheetah-v4'].controlHz);
     expect(recording.source.discretePose).toBe(false);
-    // frame 0 is the synthesized init frame (step -1); the lens serves the full lane
     expect(recording.source.frameCount).toBe(201);
     expect(recording.source.frameAt(0).step).toBe(-1);
     expect(recording.source.frameAt(200).step).toBe(199);
@@ -842,7 +794,6 @@ describe('loadTheaterRecording', () => {
       expect(phases[0]).toBe('meta');
       expect(phases).toContain('download');
       expect(phases[phases.length - 1]).toBe('decode');
-      // several download reports, one per chunk, and each one advances
       const downloads = progress.filter((p) => p.phase === 'download');
       expect(downloads.length).toBeGreaterThan(4);
       for (let i = 1; i < downloads.length; i++) {
@@ -882,8 +833,6 @@ describe('loadTheaterRecording', () => {
   });
 
   test('a torn tail is truncated to whole record rows, never parsed as one', () => {
-    // parseActionsBin rejects a non-row-aligned length outright, so a stream cut
-    // mid-row must be trimmed by the loader or the whole lane fails to open.
     const bytes = makeActionsBin(10);
     return loadTheaterRecording({
       runId: 'demo',

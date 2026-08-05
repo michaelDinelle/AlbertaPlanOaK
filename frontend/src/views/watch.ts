@@ -1,8 +1,3 @@
-// #/watch and #/watch/:id — the live wall.
-//
-// A fleet heartbeat lands every 10k steps, so "live" here means a chart that
-// grows a point every few seconds for half an hour. The view is built for that
-// tempo: nothing animates, the numbers just become true.
 
 import type { ViewMount } from '../router';
 import type { AggregateRow, RunIndexEntry } from '@shared/types';
@@ -44,7 +39,6 @@ function progressBar(fraction: number): HTMLElement {
   return el('span', { class: 'progress' }, [fill]);
 }
 
-// ---------------- live view ----------------
 
 function mountLive(host: HTMLElement, id: string): { destroy(): void } {
   const pip = el('span', { class: 'live-pip is-waiting' });
@@ -55,14 +49,7 @@ function mountLive(host: HTMLElement, id: string): { destroy(): void } {
   let horizon = 0;
   let frame = 0;
   const charts: ChartHandle[] = [];
-  /**
-   * Keyed `policy:step`, NOT step. A run with oak + zero + random emits three
-   * heartbeats per step; keyed by step alone they overwrite each other and the
-   * "live population" chart becomes a splice of three different populations —
-   * a series no run ever produced.
-   */
   const rows = new Map<string, AggregateRow>();
-  /** the policy on screen; `null` until the first row tells us what exists */
   let policy: string | null = null;
 
   const statusChips = el('div', { class: 'run-chips' });
@@ -78,11 +65,6 @@ function mountLive(host: HTMLElement, id: string): { destroy(): void } {
   const bandHost = el('div');
   const throughputHost = el('div');
   const livesHost = el('div');
-  /**
-   * Three eyebrows over three empty divs is not an empty state — until a
-   * heartbeat lands there is nothing to title. The whole stack stays hidden and
-   * appears in one move when the first row arrives.
-   */
   const chartStack = el('div', { class: 'block-stack' }, [
     el('section', { class: 'block' }, [
       eyebrow('Average reward rate', el('span', { class: 'eyebrow-note', text: 'P10 · median · P90, all seeds' })),
@@ -208,11 +190,9 @@ function mountLive(host: HTMLElement, id: string): { destroy(): void } {
   }
 
   function absorb(row: AggregateRow): void {
-    // keyed (policy, step) — see state.aggregateKey
     absorbAggregateRow(rows, row);
   }
 
-  /** Multi-policy runs get a selector; single-policy runs never see one. */
   function syncPolicies(): void {
     const names = policiesIn([...rows.values()]);
     if (names.length === 0) return;
@@ -238,7 +218,7 @@ function mountLive(host: HTMLElement, id: string): { destroy(): void } {
   }
 
   function finish(message: string, kind: 'good' | 'warn'): void {
-    if (missing) return; // a run that does not exist has not "completed"
+    if (missing) return;
     banner.hidden = false;
     banner.className = `banner banner-${kind}`;
     banner.replaceChildren(
@@ -249,22 +229,15 @@ function mountLive(host: HTMLElement, id: string): { destroy(): void } {
     pip.classList.add('is-off');
   }
 
-  /**
-   * The live view has two independent sources — the detail fetch (identity,
-   * horizon, backlog) and the SSE stream — and either can fail on its own. When
-   * the detail 404s the run simply is not there, and saying "no live stream,
-   * showing what is on disk" over a permanently blank page is a lie; that state
-   * wins over the transport message.
-   */
   let missing = false;
 
   function showBlankState(): void {
-    if (rows.size > 0) return; // real data on screen beats any message about its absence
+    if (rows.size > 0) return;
     status.hidden = false;
     if (missing) {
       pip.classList.remove('is-waiting');
       pip.classList.add('is-off');
-      headActions.remove(); // the dashboard would 404 on the same id
+      headActions.remove();
       status.replaceChildren(
         errorState(
           'Nothing under .oak-benchmarks answers to this id, so there is no stream to follow and no history to replay.',
@@ -351,8 +324,6 @@ function mountLive(host: HTMLElement, id: string): { destroy(): void } {
 export const mount: ViewMount = (host, params) => {
   const id = params['id'];
   if (!id) {
-    // The standalone live LIST is retired — running fleets surface at the top of
-    // #/runs. The per-run live view (#/watch/:id) is still the live instrument.
     window.location.replace('#/runs');
     void host;
     return { destroy() {} };

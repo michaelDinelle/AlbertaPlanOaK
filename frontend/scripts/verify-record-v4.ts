@@ -1,45 +1,4 @@
 #!/usr/bin/env bun
-/**
- * verify-record-v4 — the cross-language proof for the frozen v4 codec.
- *
- *   bun scripts/verify-record-v4.ts <v3-run-root> <v4-run-root>
- *   bun scripts/verify-record-v4.ts --escape-probe [<OaK binary>]
- *
- * MODE 1 (paired runs). The two roots must be the SAME fleet configuration run
- * twice, once with OAK_RECORD_FORMAT=3 and once with =4 (identical seeds/env
- * schedule/horizon; the paired `state-hashes.jsonl` files prove the agent stream
- * is bit-identical, so the recorded rows are the same rows in two encodings).
- *
- * MODE 2 (`--escape-probe`). A fleet A/B can only ever prove the HAPPY path:
- * every healthy row is inside contract, so the Swift encoder's escape branch
- * never executes (measured: `esc = 0` on every lane of every probe run). This
- * mode feeds `OaK record-v4-probe` a hand-built ring — non-finite floats,
- * fractional/NaN `done`, out-of-range action indices, u8/i16/dx32 ceiling
- * overflows — and checks the REAL Swift encoder's output: every escaped row
- * byte-verbatim, the header `done` bit set only for exactly 1.0, and this file's
- * independent decode bit-identical to `@sim/record4`.
- *
- * What MODE 1 proves, per lane present in both roots:
- *
- *   1. STRUCTURE — an INDEPENDENT reader (this file, written from
- *      src/sim/RECORD_V4_SPEC.md, importing neither the Swift encoder nor the TS
- *      decoder) walks the file: header magic/version/envKind, chunk chain,
- *      crc32 over the compressed bytes, raw-DEFLATE inflate to exactly
- *      `rawBytes`, escape-table arithmetic, dx32 chain finiteness, and the
- *      meta.json `chunks` hint against the real byte offsets.
- *   2. CONTRACT — the independently decoded v3-shaped rows vs the real v3 file:
- *      same step count, action indices and done bits BIT-EXACT, escaped rows
- *      byte-identical, every quantized field within half a quantum, and every
- *      pose slot the codec does not carry actually zero in v3 (this is what
- *      catches a stale static table).
- *   3. SEMANTICS — @sim/decode over both recordings: identical event timelines,
- *      identical nonFiniteRows, identical replay health (the MultiKeyCorridor
- *      bitwise replay decoder included).
- *   4. AGREEMENT — if src/sim/record4.ts exists, its parseActionsBinV4 output
- *      must be bit-identical to this file's independent decode.
- *
- * Exit 0 = VERIFIED, 1 = any failure (or a usage/IO error).
- */
 
 import { spawnSync } from 'node:child_process';
 import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
@@ -55,9 +14,6 @@ import { parseActionsBin, rawRecordingFromFloats } from '@sim/record';
 import { decoderFor } from '@sim/registry';
 import type { RawRecording, SimEvent } from '@sim/types';
 
-// ---------------------------------------------------------------------------
-// The static codec table, transcribed INDEPENDENTLY from RECORD_V4_SPEC.md.
-// ---------------------------------------------------------------------------
 
 type Enc = 'u8' | 'i16' | 'dx32';
 interface Field {
@@ -69,7 +25,6 @@ interface Field {
 interface Codec {
   envKind: number;
   category: 'grid' | 'classic' | 'cheetah';
-  /** 0 = ctrl "index" (action in hdr bits 0-3), else u8 Box ctrl column count */
   ctrlBox: number;
   fields: Field[];
   poseConst: Map<number, number>;
@@ -128,14 +83,11 @@ const CODECS: Record<EnvId, Codec> = {
   'DelayedChain-cont-v0': grid(15, [0, 2], { 1: 31 }),
 };
 
-const FILE_MAGIC = 0x344b414f; // "OAK4"
-const CHUNK_MAGIC = 0x344b4843; // "CHK4"
+const FILE_MAGIC = 0x344b414f;
+const CHUNK_MAGIC = 0x344b4843;
 const ROW_FLOATS = 16;
 const ROW_BYTES = 64;
 
-// ---------------------------------------------------------------------------
-// crc32 (zlib polynomial), independent of node:zlib
-// ---------------------------------------------------------------------------
 
 const CRC_TABLE = (() => {
   const t = new Uint32Array(256);
@@ -153,9 +105,6 @@ function crc32(buf: Uint8Array): number {
   return (c ^ 0xffffffff) >>> 0;
 }
 
-// ---------------------------------------------------------------------------
-// The independent v4 reader
-// ---------------------------------------------------------------------------
 
 interface ChunkInfo {
   stepStart: number;
@@ -174,17 +123,11 @@ interface V4Read {
   codecVersion: number;
   steps: number;
   chunks: ChunkInfo[];
-  /** v3-shaped rows: f32[steps][16] */
   data: Float32Array;
-  /** 1 = the row came verbatim from an escape table */
   escaped: Uint8Array;
-  /** the raw `hdr` byte per absolute step (bits 0-3 action, 4 done, 5 escape) */
   hdrBits: Uint8Array;
-  /** absolute step -> the 64 verbatim bytes in its escape-table entry */
   escBytes: Map<number, Uint8Array>;
-  /** each chunk's inflated payload, parallel to `chunks` (raw column bytes) */
   payloads: Uint8Array[];
-  /** structural problems (each one is a failure) */
   problems: string[];
 }
 
@@ -203,7 +146,6 @@ function readV4(bytes: Uint8Array, codec: Codec): V4Read {
   const codecVersion = dv.getUint32(12, true);
   if (codecVersion !== 1) problems.push(`codecVersion ${codecVersion} != 1`);
 
-  // pass 1: walk the chunk chain
   const chunks: ChunkInfo[] = [];
   const payloads: Uint8Array[] = [];
   let off = 16;
@@ -257,7 +199,6 @@ function readV4(bytes: Uint8Array, codec: Codec): V4Read {
     off += 32 + compBytes;
   }
 
-  // pass 2: decode payloads into v3-shaped rows
   const data = new Float32Array(steps * ROW_FLOATS);
   const escaped = new Uint8Array(steps);
   const hdrBits = new Uint8Array(steps);
@@ -291,7 +232,6 @@ function readV4(bytes: Uint8Array, codec: Codec): V4Read {
     }
     chunk.escapes = escCount;
 
-    // escape table: row index -> payload offset of its 64 verbatim bytes
     const escAt = new Map<number, number>();
     let prevIdx = -1;
     for (let k = 0; k < escCount; k++) {
@@ -356,7 +296,6 @@ function readV4(bytes: Uint8Array, codec: Codec): V4Read {
   };
 }
 
-/** Byte offset of each pose column inside a chunk payload (the spec's order). */
 function columnOffsets(codec: Codec, stepCount: number): number[] {
   let cursor = stepCount * (1 + codec.ctrlBox) + (codec.fields.some((f) => f.enc === 'dx32') ? 8 : 0);
   return codec.fields.map((f) => {
@@ -366,9 +305,6 @@ function columnOffsets(codec: Codec, stepCount: number): number[] {
   });
 }
 
-// ---------------------------------------------------------------------------
-// per-lane verification
-// ---------------------------------------------------------------------------
 
 interface LaneResult {
   envId: EnvId;
@@ -381,7 +317,6 @@ interface LaneResult {
   failures: string[];
 }
 
-/** floor-based positive wrap into [-pi, pi) — the spec's formula */
 function wrap(v: number): number {
   return v - 2 * Math.PI * Math.floor((v + Math.PI) / (2 * Math.PI));
 }
@@ -401,7 +336,6 @@ function compareRows(
   const nBox = codec.ctrlBox;
   const carried = new Set<number>(codec.fields.map((f) => f.idx));
   for (const [idx] of codec.poseConst) carried.add(idx);
-  // f32 rounding slack on top of the exact half-quantum bound
   const slack = (v: number) => 1e-9 + 1e-6 * Math.abs(v);
   let bad = 0;
   for (let i = 0; i < steps && bad < 8; i++) {
@@ -419,20 +353,13 @@ function compareRows(
       }
       continue;
     }
-    // done: BIT-EXACT
     if (v3[a + 6] !== v4.data[a + 6]) push(`done ${v3[a + 6]} != ${v4.data[a + 6]}`);
-    // ctrl
     if (nBox === 0) {
       if (v3[a] !== v4.data[a]) push(`action index ${v3[a]} != ${v4.data[a]}`);
     } else {
       const hq = 0.5 / 127.5;
       for (let c = 0; c < nBox; c++) {
         const raw = v3[a + c]!;
-        // The codec CLAMPS Box ctrl into [-1,1] and does not escape out-of-range
-        // values, so a recorded ctrl outside the actuator bounds would be lossy
-        // beyond the precision contract. The kernel clamps before the ring write
-        // (oak_stage_sample_act_wide) and zero/random are in-range, so this can
-        // only fire if that ever changes — which the codec would have to follow.
         if (!(raw >= -1 && raw <= 1)) push(`v3 ctrl[${c}] = ${raw} is outside [-1,1]; the codec clamps it`);
         const ref = Math.min(Math.max(raw, -1), 1);
         const d = Math.abs(ref - v4.data[a + c]!);
@@ -443,7 +370,6 @@ function compareRows(
       if (v3[a + c] !== 0) push(`v3 ctrl[${c}] = ${v3[a + c]} but the codec drops it`);
       if (v4.data[a + c] !== 0) push(`v4 ctrl[${c}] = ${v4.data[a + c]} (expected 0)`);
     }
-    // pose fields
     for (const f of codec.fields) {
       const want = v3[a + 7 + f.idx]!;
       const got = v4.data[a + 7 + f.idx]!;
@@ -487,24 +413,14 @@ function semantics(raw: RawRecording): { events: string; count: number; health: 
   };
 }
 
-// ---------------------------------------------------------------------------
-// MODE 2: the Swift ENCODER escape-branch probe
-//
-// Healthy fleet data never leaves contract, so `RecordV4Writer.encodeChunk`'s
-// escape branch has zero execution coverage from any A/B run. These cases are
-// built to hit every clause of the spec's escape rule, pushed through the REAL
-// Swift encoder by `OaK record-v4-probe`, and read back here.
-// ---------------------------------------------------------------------------
 
 interface ZooRow {
   label: string;
   values: number[];
-  /** [float index, u32 bit pattern] applied after `values` — exact NaN payloads */
   bits?: [number, number][];
   mustEscape: boolean;
 }
 
-/** An in-contract row for `codec`: carried fields populated, dropped slots zero. */
 function healthyValues(codec: Codec): number[] {
   const r = new Array<number>(ROW_FLOATS).fill(0);
   if (codec.ctrlBox === 0) r[0] = 1;
@@ -516,13 +432,6 @@ function healthyValues(codec: Codec): number[] {
   return r;
 }
 
-/**
- * An f32 whose f64 quotient `v / scale` is EXACTLY `n + 0.5` for a negative `n`
- * — the only input on which the spec's unpinned `round(...)` could split the two
- * implementations (half away from zero gives `n`, JS `Math.round` gives `n + 1`,
- * and both land inside i16 so neither escapes and the DECODED value differs).
- * Returns `[v, n]`, or null if no tie exists in the window.
- */
 function negativeHalfTie(scale: number): [number, number] | null {
   for (let n = -32000; n > -32760; n--) {
     const v = Math.fround((n + 0.5) * scale);
@@ -541,15 +450,11 @@ function escapeZoo(codec: Codec): ZooRow[] {
   };
   const firstField = codec.fields[0]!;
 
-  // non-finite floats anywhere in the row
   add('nan-ctrl0', true, (v) => { v[0] = Number.NaN; });
   add('posinf-pose', true, (v) => { v[7 + firstField.idx] = Number.POSITIVE_INFINITY; });
   add('neginf-pose', true, (v) => { v[7 + firstField.idx] = Number.NEGATIVE_INFINITY; });
-  // an exact NaN PAYLOAD in a slot the codec drops: escapes on the non-finite
-  // scan, and the verbatim bytes must carry the payload back unchanged.
   add('nan-payload-pose8', true, () => {}, [[15, 0x7f800001]]);
 
-  // done is bit-exact: only 1.0 sets the flag, anything else escapes
   add('done-one', false, (v) => { v[6] = 1; });
   add('done-fractional', true, (v) => { v[6] = 0.5; });
   add('done-nan', true, (v) => { v[6] = Number.NaN; });
@@ -573,8 +478,6 @@ function escapeZoo(codec: Codec): ZooRow[] {
     add('i16-underflow', true, (v) => { v[7 + plain.idx] = -(32767 + 500) * plain.scale; });
   }
   const wrapped = codec.fields.find((f) => f.enc === 'i16' && f.wrap);
-  // wrap FIRST, quantize second: 100 rad is 1e6 quanta raw but ~5e3 wrapped, so
-  // the spec's wrap is what keeps it inside i16 — this row must NOT escape.
   if (wrapped) add('i16-wrapped-safe', false, (v) => { v[7 + wrapped.idx] = 100; });
   if (plain) {
     const tie = negativeHalfTie(plain.scale);
@@ -583,8 +486,6 @@ function escapeZoo(codec: Codec): ZooRow[] {
 
   const dx = codec.fields.find((f) => f.enc === 'dx32');
   if (dx) {
-    // BEFORE the over/underflows: those advance the chain by their clamped
-    // value, and the tie assertion needs a chunk-local `recon` of exactly 0.
     const tie = negativeHalfTie(dx.scale);
     if (tie) add('dx32-negative-tie', false, (v) => { v[7 + dx.idx] = tie[0]; });
     add('dx32-overflow', true, (v) => { v[7 + dx.idx] = 3e7; });
@@ -594,18 +495,11 @@ function escapeZoo(codec: Codec): ZooRow[] {
   return rows;
 }
 
-/** The clamp an out-of-range field is stored with — SYMMETRIC, so the negative
- *  extreme of each two's-complement type is deliberately never emitted. */
 const CLAMP_I16 = 32767;
 const CLAMP_I32 = 2147483647;
 
-/** rows = healthy, case, healthy, case, … so every chunk of 4 STARTS healthy
- *  (the cheetah chunkBaseX is read from the chunk's first row). */
 function zooRows(codec: Codec): { data: Float32Array; mustEscape: boolean[]; labels: string[] } {
   const zoo = escapeZoo(codec);
-  // Case k lands at row 2k+1, i.e. chunk position 1 for even k and 3 for odd k.
-  // The dx32 tie must sit at position 1, where the chain's `recon` is still
-  // exactly 0 — pad the list so its index is even, whatever the case count is.
   const dxTie = zoo.findIndex((z) => z.label === 'dx32-negative-tie');
   if (dxTie % 2 === 1) {
     zoo.splice(dxTie, 0, { label: 'filler', values: healthyValues(codec), mustEscape: false });
@@ -691,7 +585,6 @@ async function escapeProbe(binary: string): Promise<number> {
         if (mustEscape[i] === true && !esc) fail(`row ${i} (${labels[i]}) did NOT escape`);
         const hdr = v4.hdrBits[i]!;
         if (((hdr >> 5) & 1) !== (esc ? 1 : 0)) fail(`row ${i}: hdr escape bit != escape table`);
-        // done: the flag is set for EXACTLY 1.0 and nothing else (0x3f800000).
         const wantDone = doneBits[i * ROW_FLOATS + 6] === 0x3f800000 ? 1 : 0;
         if (((hdr >> 4) & 1) !== wantDone) {
           fail(`row ${i} (${labels[i]}): hdr done bit ${(hdr >> 4) & 1} != ${wantDone}`);
@@ -712,9 +605,6 @@ async function escapeProbe(binary: string): Promise<number> {
       }
       compareRows(data, v4, codec, Math.min(steps, v4.steps), fail);
 
-      // The bytes an ESCAPED row leaves in the quantized columns are still part
-      // of the format (the dx32 chain advances by them, so both sides must agree
-      // exactly). Read them back out of the payload and pin the clamp.
       const plain = codec.fields.findIndex((f) => f.enc === 'i16' && !f.wrap);
       const dx = codec.fields.findIndex((f) => f.enc === 'dx32');
       for (let ci = 0; ci < v4.chunks.length; ci++) {
@@ -735,9 +625,6 @@ async function escapeProbe(binary: string): Promise<number> {
             const got = pv.getInt32(colOff[dx]! + 4 * i, true);
             if (got !== sign * CLAMP_I32) fail(`row ${row} (${label}): dx32 column ${got} != ${sign * CLAMP_I32}`);
           }
-          // `round(...)` is HALF AWAY FROM ZERO, so an exact −n.5 quantizes to
-          // −(n+1) — never JS `Math.round`'s −n. Unpinned by the spec text; this
-          // is the measurement that keeps the two implementations together.
           if (plain >= 0 && label === 'i16-negative-tie') {
             const tie = negativeHalfTie(codec.fields[plain]!.scale);
             const got = pv.getInt16(colOff[plain]! + 2 * i, true);
@@ -745,8 +632,6 @@ async function escapeProbe(binary: string): Promise<number> {
           }
           if (dx >= 0 && label === 'dx32-negative-tie') {
             const tie = negativeHalfTie(codec.fields[dx]!.scale);
-            // the tie is measured against a chunk-local recon of exactly 0, which
-            // holds only at chunk position 1 (position 0 is a healthy pose[0] = 0)
             if (i !== 1) {
               fail(`row ${row} (${label}) sits at chunk position ${i}, not 1 — the zoo layout drifted`);
             } else {
@@ -802,9 +687,6 @@ async function escapeProbe(binary: string): Promise<number> {
   return ok ? 0 : 1;
 }
 
-// ---------------------------------------------------------------------------
-// driver
-// ---------------------------------------------------------------------------
 
 interface LaneRef {
   envId: EnvId;
@@ -830,8 +712,6 @@ function lanesOf(root: string): Map<string, LaneRef> {
   return out;
 }
 
-/** parseActionsBinV4 may be sync or async (the browser path inflates through
- *  DecompressionStream) — `await` covers both. */
 type ParseV4 = (
   buf: ArrayBuffer | ArrayBufferView,
   meta: unknown,
@@ -903,7 +783,6 @@ async function main(): Promise<number> {
     if (v4Meta.seed !== v3Meta.seed) fail(`seed ${v4Meta.seed} != ${v3Meta.seed}`);
     if (!v4Meta.codec || typeof v4Meta.codec !== 'object') fail('v4 meta has no codec descriptor');
 
-    // the codec descriptor in meta must agree with the frozen static table
     const desc = v4Meta.codec ?? {};
     if (desc.category !== codec.category) fail(`codec.category ${desc.category} != ${codec.category}`);
     const ctrlOk =
@@ -933,7 +812,6 @@ async function main(): Promise<number> {
     const v4 = readV4(new Uint8Array(v4Buf.buffer, v4Buf.byteOffset, v4Buf.byteLength), codec);
     v4.problems.forEach(fail);
 
-    // meta.json chunks hint vs the real byte walk
     const hint: [number, number, number, number][] = v4Meta.chunks ?? [];
     if (hint.length !== v4.chunks.length) {
       fail(`meta.chunks length ${hint.length} != walked ${v4.chunks.length}`);
@@ -956,7 +834,6 @@ async function main(): Promise<number> {
     const steps = Math.min(rawV3.steps, v4.steps);
     compareRows(rawV3.data, v4, codec, steps, fail);
 
-    // decoder cross-check: record4.ts must reproduce this file's decode exactly
     if (parseV4) {
       try {
         const rawV4 = await parseV4(v4Buf, v4Meta);
@@ -975,7 +852,6 @@ async function main(): Promise<number> {
       }
     }
 
-    // semantics: identical events / replay health through the real decoders
     let events = 0;
     try {
       const s3 = semantics(rawV3);
