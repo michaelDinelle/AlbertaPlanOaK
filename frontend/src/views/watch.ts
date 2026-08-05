@@ -271,7 +271,7 @@ function mountLive(host: HTMLElement, id: string): { destroy(): void } {
           undefined,
           {
             title: `No run named “${id}”`,
-            actions: [linkButton('Back to Watch', '#/watch'), linkButton('Browse every run', '#/runs')],
+            actions: [linkButton('Back to Watch', '#/watch'), linkButton('Back to the wall', '#/')],
           },
         ),
       );

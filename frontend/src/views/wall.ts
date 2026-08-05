@@ -66,10 +66,13 @@ import {
   viewShell,
 } from '../components/table';
 import { sparkline, type SparklineHandle } from '../components/sparkline';
+import { band, type ChartHandle } from '../components/chart';
+import { mountRunScience, type RunScienceHandle } from './run';
 import {
   envName,
   envShares,
   envSliceResult,
+  envSlug,
   formatCount,
   formatPercent,
   formatSigned,
@@ -80,6 +83,7 @@ import {
   primaryResult,
   roles as rolesResource,
   runIndex,
+  sortRuns,
   windowRates,
 } from '../state';
 import { accentCss } from './gallery';
@@ -1029,12 +1033,59 @@ export const mount: ViewMount = (host) => {
   const wallCache = new Map<string, Promise<WallData>>();
 
   // ---- chrome ----
-  const runName = el('a', { class: 'wall-run', href: '#/', text: '—' });
+  const runName = el('button', { class: 'wall-run', type: 'button', text: '—', title: 'Switch run' });
   const runMeta = el('span', { class: 'wall-run-meta', text: '' });
   const runBadges = el('span', { class: 'wall-run-badges' });
+
+  // The run PICKER — the gallery, collapsed into the one place it is needed.
+  // Search + a compact list with the badges that matter; picking a run rewrites
+  // the URL and the wall remounts on it.
+  const pickerSearch = el('input', { class: 'input', type: 'search', placeholder: 'find a run…', ariaLabel: 'Find a run' });
+  const pickerRows = el('div', { class: 'wall-picker-rows' });
+  const picker = el('div', { class: 'wall-picker' }, [pickerSearch, pickerRows]);
+  picker.hidden = true;
+
+  function paintPicker(): void {
+    const query = pickerSearch.value.trim().toLowerCase();
+    const state = runIndex.store.get();
+    const all: RunIndexEntry[] = state.status === 'ready' && state.data !== null ? state.data : [];
+    const entries = sortRuns(all.filter((entry) => !query || entry.id.toLowerCase().includes(query)))
+      .slice(0, 40);
+    pickerRows.replaceChildren(
+      ...entries.map((entry): HTMLElement => {
+        const row = el('button', { class: 'wall-picker-row', type: 'button' }, [
+          entry.inFlight ? el('span', { class: 'live-pip' }) : null,
+          el('span', { class: 'wall-picker-id', text: entry.id }),
+          entry.role === 'bestKernel' ? badge('best kernel', 'keeper') : null,
+          entry.hasRecordings ? badge('recordings', 'quiet') : null,
+          entry.complete ? null : badge('incomplete', 'warn'),
+          el('span', { class: 'wall-picker-meta', text: `${entry.envIds.length} envs · ${formatStep(entry.steps)}` }),
+        ]);
+        row.addEventListener('click', () => {
+          picker.hidden = true;
+          window.location.hash = `#/?run=${encodeURIComponent(entry.id)}`;
+        });
+        return row;
+      }),
+    );
+    if (entries.length === 0) {
+      pickerRows.append(el('div', { class: 'wall-picker-empty', text: 'no runs match' }));
+    }
+  }
+  pickerSearch.addEventListener('input', paintPicker);
+  runName.addEventListener('click', () => {
+    picker.hidden = !picker.hidden;
+    if (!picker.hidden) {
+      void runIndex.load(false).then(() => { if (!picker.hidden) paintPicker(); });
+      paintPicker();
+      pickerSearch.focus();
+    }
+  });
+
   const head = el('div', { class: 'wall-head' }, [
     el('div', { class: 'wall-head-line' }, [runName, runBadges]),
     runMeta,
+    picker,
   ]);
 
   const chipStrip = el('div', { class: 'wall-envs', role: 'tablist', ariaLabel: 'Environment' });
@@ -1139,6 +1190,20 @@ export const mount: ViewMount = (host) => {
   ]);
   main.hidden = true;
   body.append(main);
+
+  // THE RATE — the ONE learning-curve chart: the current environment's measured
+  // reward rate over the whole run (IQM, 95% CI, P10–P90 across all seeds), the
+  // hero seed's own curve on top, and a playhead riding the clock. It lives
+  // directly under the stage, first thing in the scrolling half of the page —
+  // NEVER inside the stage column, whose height belongs to the scene.
+  const rateHost = el('div', { class: 'wall-curve' });
+  rateHost.hidden = true;
+
+  // The run's science lives HERE, under the wall — env section first, whole-run
+  // statistics collapsed below. One page; nothing to click through to.
+  const scienceHost = el('div', { class: 'wall-science' });
+  body.append(rateHost, scienceHost);
+  let science: RunScienceHandle | null = null;
 
   // ---- URL ----
   /**
@@ -1388,18 +1453,7 @@ export const mount: ViewMount = (host) => {
       node.addEventListener('mouseleave', () => emphasise(null));
       node.addEventListener('focus', () => emphasise(row.seed));
       node.addEventListener('blur', () => emphasise(null));
-      node.addEventListener('click', () => {
-        const next = promoteSeed(selection, row.seed, playable);
-        if (next === selection) return;
-        selection = next;
-        paintRail();
-        void mountHero();
-        syncUrl();
-      });
-      node.addEventListener('dblclick', () => {
-        if (!detail || envId === null || !row.recorded) return;
-        window.location.hash = theaterHref({ runId: detail.id, envId, seed: row.seed });
-      });
+      node.addEventListener('click', () => watchSeed(row.seed));
       nodes.push(node);
     });
 
@@ -1618,6 +1672,11 @@ export const mount: ViewMount = (host) => {
   function onFrame(info: HostFrameInfo): void {
     progress = frameCount > 1 ? info.position / (frameCount - 1) : 0;
     frameAt = info.position;
+    const nowMs = performance.now();
+    if (rateChart && nowMs - lastMarkerAt > 100) {
+      lastMarkerAt = nowMs;
+      rateChart.setMarker(Math.max(0, info.position - 1));
+    }
     const percent = (progress * 100).toFixed(3);
     scrubFill.style.width = `${percent}%`;
     scrubHead.style.left = `${percent}%`;
@@ -1680,6 +1739,66 @@ export const mount: ViewMount = (host) => {
   }
 
   // ---- data ----
+  let rateChart: ChartHandle | null = null;
+  let rateColumnar: FleetColumnar | null = null;
+  let lastMarkerAt = 0;
+
+  /**
+   * (Re)build THE RATE for the current env + hero. Population band from the
+   * server's /curves (IQM ± 95% CI + P10/P90, cached, fleet.jsonl-derived);
+   * the hero seed's own windowed curve rides on top in the env accent.
+   */
+  function buildRateStrip(): void {
+    if (!detail || envId === null) return;
+    const run = detail;
+    const env = envId;
+    const hero0 = heroSeed(selection);
+    void api.curves(run.id, { envId: env, ...(policy ? { policy } : {}) }).then(
+      (curves) => {
+        if (destroyed || envId !== env || !rateHost.isConnected) return;
+        rateChart?.destroy();
+        rateChart = null;
+        const hero = rateColumnar && hero0 !== null
+          ? windowRates(
+              rateColumnar.steps,
+              laneSeries(rateColumnar, 'rewardSum', env).find((lane) => lane.seed === hero0)?.values ?? [],
+            )
+          : null;
+        rateChart = band({
+          steps: curves.steps,
+          p10: curves.p10,
+          p50: curves.iqm,
+          p90: curves.p90,
+          labels: { low: 'P10', mid: 'IQM', high: 'P90' },
+          ci: { lo: curves.ciLo, hi: curves.ciHi },
+          height: 148,
+          zeroLine: true,
+          yUnit: 'reward rate',
+          ...(hero && hero.some((v) => v !== null)
+            ? { extra: [{ label: `seed ${hero0}`, values: hero, stroke: accentCss(envSlug(env)), width: 1.75 }] }
+            : {}),
+        });
+        rateHost.hidden = false;
+        rateHost.replaceChildren(
+          eyebrow(
+            `Learning curve — ${envName(env)}`,
+            el('span', {
+              class: 'eyebrow-note',
+              text: 'measured reward rate · IQM ± 95% CI · P10–P90 · hero seed overlaid · the gold line is the playhead · hover for values',
+            }),
+          ),
+          rateChart.root,
+        );
+        rateChart.refresh();
+      },
+      () => {
+        if (destroyed || envId !== env) return;
+        rateHost.hidden = true;
+        rateHost.replaceChildren();
+      },
+    );
+  }
+
   function loadColumnar(id: string, env: EnvId): Promise<FleetColumnar> {
     const key = `${id}|${env}|${policy}`;
     const cached = columnarCache.get(key);
@@ -1975,9 +2094,21 @@ export const mount: ViewMount = (host) => {
   }
 
   /** Switch environment: new scene, new rail, same place in the run. */
+  /** Promote a seed to hero — the rail rows and the science columns both land here. */
+  function watchSeed(seed: number): void {
+    const next = promoteSeed(selection, seed, playable);
+    if (next === selection) return;
+    selection = next;
+    paintRail();
+    void mountHero();
+    syncUrl();
+    buildRateStrip();
+  }
+
   function selectEnv(next: EnvId): void {
     if (!detail) return;
     envId = next;
+    science?.setEnv(next);
     transport.classList.remove('is-idle');
     paintChips();
     rows = [];
@@ -1989,11 +2120,13 @@ export const mount: ViewMount = (host) => {
       (columnar) => {
         if (destroyed || envId !== next) return;
         rows = buildSeedRows(columnar, { recorded: new Set(seedsFor(run.recordings, next)) });
+        rateColumnar = columnar;
         selection = setLeader(selection, leaderSeed(rows), playable);
         paintPopulation();
         paintRail();
         void mountHero();
         syncUrl();
+        buildRateStrip();
       },
       (error: unknown) => {
         if (destroyed || envId !== next) return;
@@ -2017,8 +2150,6 @@ export const mount: ViewMount = (host) => {
     main.hidden = false;
 
     runName.textContent = next.id;
-    runName.href = `#/run/${encodeURIComponent(next.id)}`;
-    runName.title = 'Open this run’s dashboard';
     runMeta.textContent = runScheduleLine(next.meta);
     const result = primaryResult(next.summary, policy);
     runBadges.replaceChildren(
@@ -2042,6 +2173,19 @@ export const mount: ViewMount = (host) => {
       return;
     }
     selectEnv(first);
+
+    science?.destroy();
+    science = null;
+    scienceHost.replaceChildren();
+    science = mountRunScience(scienceHost, {
+      runId: next.id,
+      envId: first,
+      onWatchSeed: (env, seed) => {
+        if (isEnvId(env) && env !== envId) selectEnv(env);
+        watchSeed(seed);
+        window.scrollTo({ top: 0, behavior: 'smooth' });
+      },
+    });
   }
 
   function start(force: boolean): void {
@@ -2104,6 +2248,10 @@ export const mount: ViewMount = (host) => {
       if (typeof window !== 'undefined') window.removeEventListener('keydown', onKey);
       for (const spark of sparks) spark.destroy();
       sparks.length = 0;
+      rateChart?.destroy();
+      rateChart = null;
+      science?.destroy();
+      science = null;
       teardownStage();
       root.remove();
     },

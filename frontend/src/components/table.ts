@@ -183,7 +183,6 @@ export function appHeader(active: NavKey, trailing?: Node | null): HTMLElement {
     ]),
     el('nav', { class: 'nav', ariaLabel: 'Primary' }, [
       link('wall', 'Wall', '#/'),
-      link('gallery', 'Runs', '#/runs'),
     ]),
     el('div', { class: 'header-trailing' }, [trailing ?? null]),
   ]);

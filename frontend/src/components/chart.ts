@@ -45,6 +45,8 @@ export interface SeriesSpec {
 
 export interface ChartSpec {
   height?: number;
+  /** extra uPlot plugins prepended to the built-ins */
+  plugins?: uPlot.Plugin[];
   series: readonly SeriesSpec[];
   data: uPlot.AlignedData;
   /** 1-based series indices; hi must be the upper edge */
@@ -79,6 +81,8 @@ export interface ChartHandle {
   /** re-measure after a layout change (tab switch, panel expand) */
   refresh(): void;
   focusSeries(index: number | null): void;
+  /** vertical playhead at an x value (null hides it) — the wall's clock cursor */
+  setMarker(x: number | null): void;
   destroy(): void;
 }
 
@@ -191,14 +195,35 @@ export function createChart(spec: ChartSpec): ChartHandle {
   let lastWidth = 0;
   let frame = 0;
   let destroyed = false;
+  let marker: number | null = null;
+
+  const markerPlugin = (): uPlot.Plugin => ({
+    hooks: {
+      draw: (u) => {
+        if (marker === null) return;
+        const x = u.valToPos(marker, 'x', true);
+        const { top, height: h } = u.bbox;
+        if (!Number.isFinite(x)) return;
+        u.ctx.save();
+        u.ctx.strokeStyle = 'rgba(255, 209, 102, 0.9)';
+        u.ctx.lineWidth = 1;
+        u.ctx.beginPath();
+        u.ctx.moveTo(x, top);
+        u.ctx.lineTo(x, top + h);
+        u.ctx.stroke();
+        u.ctx.restore();
+      },
+    },
+  });
 
   const yFormat = spec.yFormat ?? ((v: number) => formatRate(v));
   const xFormat = spec.xFormat ?? formatStep;
 
   function build(width: number): void {
-    const plugins: uPlot.Plugin[] = [];
+    const plugins: uPlot.Plugin[] = [...(spec.plugins ?? [])];
     if (spec.tooltip !== 'none') plugins.push(tooltipPlugin(spec, tip));
     if (spec.zeroLine) plugins.push(zeroLinePlugin());
+    plugins.push(markerPlugin());
 
     const series: uPlot.Series[] = [
       { label: 'x' },
@@ -309,6 +334,10 @@ export function createChart(spec: ChartSpec): ChartHandle {
 
   return {
     root,
+    setMarker(x) {
+      marker = x;
+      plot?.redraw(false, false);
+    },
     setData(next) {
       data = next;
       if (plot) plot.setData(next);
@@ -361,6 +390,10 @@ export interface BandSpec extends Omit<ChartSpec, 'series' | 'data' | 'bands'> {
   labels?: { low: string; mid: string; high: string };
   stroke?: string;
   fill?: string;
+  /** overlay series drawn on top of the band (e.g. the hero seed's own curve) */
+  extra?: { label: string; values: readonly (number | null)[]; stroke: string; width?: number }[];
+  /** optional inner 95% CI band around the mid line */
+  ci?: { lo: readonly (number | null)[]; hi: readonly (number | null)[] };
 }
 
 /** p10/p90 fill with the p50 line on top — the population headline chart. */
@@ -375,18 +408,34 @@ export function band(spec: BandSpec): ChartHandle {
     series: [
       { label: labels.high, stroke: 'rgba(43,152,217,0.45)', width: 1 },
       { label: labels.low, stroke: 'rgba(43,152,217,0.45)', width: 1 },
+      ...(spec.ci
+        ? [
+            { label: 'CI hi', stroke: 'rgba(43,152,217,0.35)', width: 0.5 },
+            { label: 'CI lo', stroke: 'rgba(43,152,217,0.35)', width: 0.5 },
+          ]
+        : []),
       { label: labels.mid, stroke, width: 2 },
+      ...(spec.extra ?? []).map((x) => ({ label: x.label, stroke: x.stroke, width: x.width ?? 1.5 })),
     ],
     legendItems: [
       { label: `${labels.low}–${labels.high}`, color: fill, shape: 'area' },
+      ...(spec.ci ? [{ label: '95% CI', color: 'rgba(43,152,217,0.34)', shape: 'area' as const }] : []),
       { label: labels.mid, color: stroke, shape: 'line' },
+      ...(spec.extra ?? []).map((x) => ({ label: x.label, color: x.stroke, shape: 'line' as const })),
     ],
-    bands: [{ hi: 1, lo: 2, fill }],
+    bands: spec.ci
+      ? [
+          { hi: 1, lo: 2, fill },
+          { hi: 3, lo: 4, fill: 'rgba(43,152,217,0.24)' },
+        ]
+      : [{ hi: 1, lo: 2, fill }],
     data: [
       spec.steps as number[],
       spec.p90 as (number | null)[],
       spec.p10 as (number | null)[],
+      ...(spec.ci ? [spec.ci.hi as (number | null)[], spec.ci.lo as (number | null)[]] : []),
       spec.p50 as (number | null)[],
+      ...(spec.extra ?? []).map((x) => x.values as (number | null)[]),
     ] as unknown as uPlot.AlignedData,
     legend: spec.legend ?? true,
   });
@@ -478,6 +527,8 @@ export interface ColumnsSpec extends Omit<ChartSpec, 'series' | 'data'> {
   labels?: readonly string[];
   posLabel?: string;
   negLabel?: string;
+  /** click a column (hovered index) — the wall uses this for click-to-watch */
+  onColumnClick?(index: number): void;
 }
 
 /**
@@ -490,12 +541,24 @@ export interface ColumnsSpec extends Omit<ChartSpec, 'series' | 'data'> {
  */
 export function columns(spec: ColumnsSpec): ChartHandle {
   const labels = spec.labels;
+  const clickPlugin = (): uPlot.Plugin => ({
+    hooks: {
+      ready: (u) => {
+        u.over.style.cursor = spec.onColumnClick ? 'pointer' : '';
+        u.over.addEventListener('click', () => {
+          const idx = u.cursor.idx;
+          if (idx !== null && idx !== undefined && spec.onColumnClick) spec.onColumnClick(idx);
+        });
+      },
+    },
+  });
   const positive = spec.values.map((v) => (v >= 0 ? v : null));
   const negative = spec.values.map((v) => (v < 0 ? v : null));
   const hasPositive = positive.some((v) => v !== null);
   const hasNegative = negative.some((v) => v !== null);
   return createChart({
     ...spec,
+    plugins: [clickPlugin()],
     series: [
       { label: spec.posLabel ?? 'above zero', stroke: VIZ.series, fill: VIZ.series, bars: true, width: 1 },
       { label: spec.negLabel ?? 'below zero', stroke: VIZ.crit, fill: VIZ.crit, bars: true, width: 1 },

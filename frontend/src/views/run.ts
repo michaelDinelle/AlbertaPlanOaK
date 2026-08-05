@@ -37,8 +37,6 @@ import {
 } from '../state';
 import {
   badge,
-  breadcrumb,
-  dataTable,
   el,
   emptyState,
   errorState,
@@ -47,7 +45,6 @@ import {
   spinner,
   statTile,
   viewShell,
-  type TableHandle,
 } from '../components/table';
 import {
   VIZ,
@@ -60,7 +57,7 @@ import {
   type ChartHandle,
 } from '../components/chart';
 import { bars, parseQuartiles, rangeBars, type RangeRow } from '../components/bars';
-import { GALLERY_PATH, accentCss, envSpectrum, theaterHref } from './gallery';
+import { accentCss, envSpectrum } from './gallery';
 
 /**
  * The Wall link for this run — `#/?run=<id>&env=<envId>`.
@@ -116,70 +113,54 @@ function retentionCurve(values: readonly number[]): { steps: number[]; fraction:
   return { steps, fraction };
 }
 
-export const mount: ViewMount = (host, params) => {
-  const id = params['id'] ?? '';
-  const { root, body } = viewShell('gallery');
-  host.append(root);
+// ---------------------------------------------------------------------------
+// the science module
+//
+// This file no longer owns a page. `#/run/:id` redirects into the wall, and the
+// wall embeds `mountRunScience` below the stage: the CURRENT environment's
+// science first (stats, learning curve, and a collapsible per-seed detail whose
+// total-reward columns are click-to-watch), then the whole-run statistics in a
+// collapsed block. Nothing was deleted from the science — it moved to where the
+// environment is.
+// ---------------------------------------------------------------------------
+
+export const mount: ViewMount = (el_, params) => {
+  const id = params['id'];
+  window.location.replace(id ? `#/?run=${encodeURIComponent(id)}` : '#/');
+  void el_;
+  return { destroy() {} };
+};
+
+export interface RunScienceOptions {
+  runId: string;
+  /** the environment whose section leads; null = first in the schedule */
+  envId: string | null;
+  /** click-to-watch: a seed picked in the total-reward columns (or curve) */
+  onWatchSeed?(envId: string, seed: number): void;
+}
+
+export interface RunScienceHandle {
+  destroy(): void;
+  /** swap the leading environment section (the wall's env chips call this) */
+  setEnv(envId: string): void;
+}
+
+export function mountRunScience(host: HTMLElement, opts: RunScienceOptions): RunScienceHandle {
+  const id = opts.runId;
+  const body = el('div', { class: 'science' });
+  host.append(body);
 
   const disposables: Disposable[] = [];
   let destroyed = false;
+  let envSwap: ((envId: string) => void) | null = null;
 
   function track<T extends Disposable>(item: T): T {
     disposables.push(item);
     return item;
   }
 
-  // The failure path gets the same chrome as the success path: a run id in the URL
-  // is a claim about something on disk, and "that root is not there" is an answer
-  // worth presenting, not a stack trace in a box.
-  const head = el('div', { class: 'view-head' }, [
-    el('div', { class: 'run-title-row' }, [
-      breadcrumb([{ label: 'Runs', href: GALLERY_PATH }], { trailing: true }),
-      el('h1', { class: 'run-title', text: id || 'run' }),
-    ]),
-  ]);
-  const status = el('div', { class: 'view-status' }, [spinner(`Loading ${id}`)]);
+  const status = el('div', { class: 'view-status' }, [spinner(`Loading ${id} statistics`)]);
   body.append(status);
-
-  function fail(error: unknown, retry: boolean): void {
-    if (head.parentNode === null) body.prepend(head);
-    const notFound = error instanceof ApiError && error.status === 404;
-    if (notFound) {
-      // A 404 is settled — there is nothing to retry, only somewhere else to go.
-      status.replaceChildren(
-        errorState(
-          'Nothing under .oak-benchmarks answers to this id. It may have been renamed, moved or deleted; '
-            + 'the gallery lists every root the server can see.',
-          undefined,
-          { title: `No run named “${id}”`, actions: [linkButton('Back to all runs', GALLERY_PATH)] },
-        ),
-      );
-      return;
-    }
-    const message = error instanceof Error ? error.message : String(error);
-    status.replaceChildren(
-      errorState(
-        message,
-        retry
-          ? () => {
-              status.replaceChildren(spinner('Retrying'));
-              loadRunDetail(id, true).then(
-                (detail) => {
-                  head.remove();
-                  status.remove();
-                  render(detail);
-                },
-                (again: unknown) => fail(again, false),
-              );
-            }
-          : undefined,
-        {
-          title: 'Could not load this run',
-          actions: [linkButton('Back to all runs', GALLERY_PATH)],
-        },
-      ),
-    );
-  }
 
   loadRunDetail(id).then(
     (detail) => {
@@ -188,7 +169,12 @@ export const mount: ViewMount = (host, params) => {
       render(detail);
     },
     (error: unknown) => {
-      if (!destroyed) fail(error, true);
+      if (destroyed) return;
+      status.replaceChildren(
+        errorState(error instanceof Error ? error.message : String(error), undefined, {
+          title: `Could not load ${id}`,
+        }),
+      );
     },
   );
 
@@ -230,47 +216,18 @@ export const mount: ViewMount = (host, params) => {
     const policySlot = el('span', { class: 'slot' });
     const bannerSlot = el('div', { class: 'slot' });
 
-    // One outbound link per intent, both into the Wall (the one way to watch):
-    // this one lands with a specific seed already promoted to hero.
-    const firstRecording = detail.recordings[0];
-    const theaterAction = firstRecording
-      ? linkButton(
-          `Watch seed ${firstRecording.seed} · ${envName(firstRecording.envId)}`,
-          theaterHref(detail.id, firstRecording),
-          {
-            title: `${formatCount(detail.recordings.length)} recorded seed${detail.recordings.length === 1 ? '' : 's'}`
-              + ' — the Recordings section lists them all',
-          },
-        )
-      : null;
-
-    // …and the Wall, which is the same recordings seen the other way round: every
-    // recorded seed of ONE environment at once instead of one seed in full. It is
-    // offered only when there is something to replay — a wall with no ghosts and
-    // no hero is a page telling you what you cannot have.
-    // NOT `quiet`: this sits inside `.run-head`, whose surface IS --bg-raised, and a
-    // quiet button there is invisible (the caveat on `linkButton`).
-    const wallAction = firstRecording
-      ? linkButton(`Wall · ${envName(firstRecording.envId)}`, wallLink(detail.id, firstRecording.envId), {
-          title: `Play every recorded ${envName(firstRecording.envId)} seed of this run side by side`,
-        })
-      : null;
-
+    // Embedded below the wall: the wall names the run, so the header here is
+    // just the schedule strip, the chips, and the banners.
     body.append(
       el('section', { class: 'run-head' }, [
         envSpectrum(shares),
         el('div', { class: 'run-head-body' }, [
-          el('div', { class: 'run-title-row' }, [
-            breadcrumb([{ label: 'Runs', href: GALLERY_PATH }], { trailing: true }),
-            el('h1', { class: 'run-title', text: detail.id }),
-            completeSlot,
-            theaterAction ? el('div', { class: 'run-head-actions' }, [wallAction, theaterAction]) : null,
-          ]),
           el('div', {
             class: 'run-envs',
             text: shares.map((s) => `${envName(s.envId)} ×${Math.round(s.lanes)}`).join('   ·   '),
           }),
           el('div', { class: 'run-chips' }, [
+            completeSlot,
             badge(`B ${meta.batch}`, 'quiet', 'seeds in the fleet'),
             badge(`${formatStep(horizon)} steps`, 'quiet', 'declared horizon'),
             badge(
@@ -310,8 +267,11 @@ export const mount: ViewMount = (host, params) => {
     syncPolicyHeader();
 
     // ---------------- seed-tab state (shared with the per-env tab) ----------------
-    let selectedEnv: string = shares[0]?.envId ?? meta.envId;
-    let requestLaneEnv: ((envId: string) => void) | null = null;
+    let currentEnv: string =
+      opts.envId !== null && shares.some((sh) => sh.envId === opts.envId)
+        ? opts.envId
+        : shares[0]?.envId ?? meta.envId;
+    let selectedEnv: string = currentEnv;
 
     // ---------------- learning curves ----------------
     /**
@@ -419,7 +379,6 @@ export const mount: ViewMount = (host, params) => {
 
     /** Tear every panel back down to unbuilt — the policy switch and view destroy. */
     function resetPanels(): void {
-      requestLaneEnv = null;
       for (const panel of panels.values()) {
         for (const chart of panel.charts) chart.destroy();
         panel.charts.length = 0;
@@ -431,17 +390,58 @@ export const mount: ViewMount = (host, params) => {
     }
     track({ destroy: resetPanels });
 
-    /** retired tab keys still living in bookmarks and pasted links */
-    const TAB_ALIASES: Record<string, string> = { lanes: 'seeds' };
-
-    function currentTab(): string {
-      const query = window.location.hash.split('?')[1] ?? '';
-      const raw = new URLSearchParams(query).get('tab');
-      const requested = raw === null ? null : TAB_ALIASES[raw] ?? raw;
-      return requested && panels.has(requested) ? requested : tabs[0]?.key ?? 'overview';
-    }
-
     // ---------------- overview ----------------
+    addTab('env', 'This environment', (panel, scope) => {
+      const slice = envSliceResult(detail.summary, currentEnv, policy);
+      const info = isEnvId(currentEnv) ? ENVS[currentEnv] : null;
+      const section = el('section', { class: 'env-section' }, [
+        el('div', { class: 'env-head' }, [
+          el('h2', { class: 'env-name', text: envName(currentEnv) }),
+          el('span', { class: 'env-sub', text: info ? `${info.action.kind} ${info.action.n} · ${info.category}` : '' }),
+        ]),
+        el('div', { class: 'stat-row' }, [
+          statTile('IQM', formatSigned(num(slice?.rewardRateIQM), 4), {
+            tone: tone(num(slice?.rewardRateIQM)), hint: 'all seeds',
+          }),
+          statTile('recent IQM', formatSigned(num(slice?.recentRewardRateIQM), 4), { hint: 'last window' }),
+          statTile('positive', formatPercent(num(slice?.positiveFraction), 0), {
+            hint: `${formatCount(num(slice?.seeds))} seeds`,
+          }),
+          statTile('best seed', formatRate(num(slice?.bestSeedRewardRate)), {
+            hint: `seed ${formatCount(num(slice?.bestSeed))}`,
+          }),
+          statTile('solved-threshold seeds', formatCount(num(slice?.solvedSeeds)), {
+            hint: `${formatCount(num(slice?.solvedSeedsRetained))} retained`,
+          }),
+          statTile('reward / GFLOP', formatRate(num(slice?.bestSeedRewardPerGFLOP)), { hint: 'best seed' }),
+        ]),
+      ]);
+      // NO learning curve here: THE RATE strip above the science IS this
+      // environment's learning curve (same statistic, plus the playhead).
+      section.style.setProperty('--section-accent', accentCss(envSlug(currentEnv)));
+      panel.append(section);
+
+      // Per-seed detail, collapsed by default: valuable, env-specific, optional.
+      const detailBlock = el('details', { class: 'block science-details' }, [
+        el('summary', { text: `Per-seed detail — ${envName(currentEnv)}` }),
+      ]);
+      const detailHost = el('div');
+      detailBlock.append(detailHost);
+      let seedsBuilt = false;
+      const buildSeeds = (): void => {
+        if (seedsBuilt) return;
+        seedsBuilt = true;
+        buildSeedsDetail(detailHost, scope);
+      };
+      detailBlock.addEventListener('toggle', () => {
+        if ((detailBlock as HTMLDetailsElement).open) {
+          buildSeeds();
+          for (const chart of panels.get('env')?.charts ?? []) chart.refresh();
+        }
+      });
+      panel.append(detailBlock);
+    });
+
     addTab('overview', 'Overview', (panel, scope) => {
       const chart = (handle: ChartHandle): HTMLElement => scope.chart(handle);
       // derived HERE, not in render(): this closure re-runs on every policy switch
@@ -806,11 +806,10 @@ export const mount: ViewMount = (host, params) => {
         for (const share of shares) {
           const slice = sliceFor(share.envId);
           const info = isEnvId(share.envId) ? ENVS[share.envId] : null;
-          const inspect = el('button', { class: 'btn btn-quiet', text: 'Inspect seeds' });
-          inspect.addEventListener('click', () => {
-            selectedEnv = share.envId;
-            scrollToSection('seeds');
-            requestLaneEnv?.(share.envId);
+          const inspect = el('a', {
+            class: 'btn btn-quiet',
+            text: 'Watch on the wall',
+            href: wallLink(id, share.envId),
           });
           const section = el('section', { class: 'env-section' }, [
             el('div', { class: 'env-head' }, [
@@ -850,12 +849,11 @@ export const mount: ViewMount = (host, params) => {
       });
     }
 
-    // ---------------- seeds ----------------
-    addTab('seeds', 'Seeds', (panel, scope) => {
+    // ---------------- per-seed detail (env-scoped, lives under the env section) ----------------
+    function buildSeedsDetail(panel: HTMLElement, scope: PanelScope): void {
       let columnar: FleetColumnar | null = null;
       let laneChart: ChartHandle | null = null;
       let totalsChart: ChartHandle | null = null;
-      let laneTable: TableHandle<LaneSeries> | null = null;
       let shown: LaneSeries[] = [];
       let stale = false;
       scope.hold({
@@ -863,7 +861,6 @@ export const mount: ViewMount = (host, params) => {
           stale = true; // a policy switch rebuilds this panel; drop the in-flight fetch
           laneChart?.destroy();
           totalsChart?.destroy();
-          laneTable?.destroy();
         },
       });
 
@@ -871,8 +868,6 @@ export const mount: ViewMount = (host, params) => {
       const laneStatus = el('div', { class: 'view-status' }, [spinner('Reading fleet.jsonl')]);
       const chartHost = el('section', { class: 'block' });
       const totalsHost = el('section', { class: 'block' });
-      const tableHost = el('section', { class: 'block' });
-      let select: HTMLSelectElement | null = null;
 
       /**
        * The default series is MEASURED: rewardSum differenced over each heartbeat
@@ -900,24 +895,7 @@ export const mount: ViewMount = (host, params) => {
       });
       controls.append(el('span', { class: 'control-label', text: 'series' }), seriesSelect);
 
-      if (mixed) {
-        select = el('select', { class: 'input input-select', ariaLabel: 'Environment' });
-        for (const share of shares) select.append(el('option', { value: share.envId, text: envName(share.envId) }));
-        select.value = selectedEnv;
-        select.addEventListener('change', () => {
-          selectedEnv = select?.value ?? selectedEnv;
-          paintLanes();
-        });
-        controls.append(el('span', { class: 'control-label', text: 'environment' }), select);
-        requestLaneEnv = (envId) => {
-          if (!select) return;
-          selectedEnv = envId;
-          select.value = envId;
-          paintLanes();
-        };
-      }
-
-      panel.append(controls, laneStatus, chartHost, totalsHost, tableHost);
+      panel.append(controls, laneStatus, chartHost, totalsHost);
 
       /**
        * Total reward by seed: the FINAL cumulative `rewardSum` of every seed, sorted.
@@ -939,19 +917,27 @@ export const mount: ViewMount = (host, params) => {
         }
         const picked = rankLanes(capLanes(finals, COLUMN_CAP));
         const capped = picked.length < finals.length;
+        const recordedSeeds = new Set(
+          detail.recordings.filter((r) => r.envId === selectedEnv).map((r) => r.seed),
+        );
         totalsChart = columns({
           values: picked.map((lane) => lane.last ?? 0),
-          labels: picked.map((lane) => `seed ${lane.seed}`),
+          labels: picked.map((lane) =>
+            `seed ${lane.seed}${recordedSeeds.has(lane.seed) ? ' · click to watch' : ''}`),
           height: 170,
           yFormat: (v) => formatSigned(v, 3),
           yUnit: 'total reward',
+          onColumnClick: (index) => {
+            const lane = picked[index];
+            if (lane && recordedSeeds.has(lane.seed)) opts.onWatchSeed?.(selectedEnv, lane.seed);
+          },
         });
         totalsHost.replaceChildren(
           eyebrow('Total reward by seed', el('span', {
             class: 'eyebrow-note',
-            text: capped
+            text: (capped
               ? `${picked.length} of ${finals.length} seeds · sorted · extremes and median always kept`
-              : `${finals.length} seeds · sorted`,
+              : `${finals.length} seeds · sorted`) + ' · click a column to watch that seed',
           })),
           totalsChart.root,
         );
@@ -974,7 +960,6 @@ export const mount: ViewMount = (host, params) => {
           totalsChart?.destroy();
           totalsChart = null;
           totalsHost.replaceChildren();
-          tableHost.replaceChildren();
           return;
         }
         const all = windowed ? toWindowRates(columnar.steps, raw) : raw;
@@ -991,7 +976,6 @@ export const mount: ViewMount = (host, params) => {
           zeroLine: true,
           yUnit: label,
           xUnit: 'steps',
-          onLaneFocus: (key) => laneTable?.highlight(key),
         });
         chartHost.replaceChildren(
           eyebrow('Per-seed reward-rate curves', el('span', {
@@ -1006,53 +990,6 @@ export const mount: ViewMount = (host, params) => {
 
         paintTotals();
 
-        const recordedSeeds = new Set(
-          detail.recordings.filter((r) => !mixed || r.envId === selectedEnv).map((r) => r.seed),
-        );
-        laneTable?.destroy();
-        laneTable = dataTable<LaneSeries>({
-          columns: [
-            // No lane column: the seed IS the identity of a stream (seed b runs in
-            // lane b), and showing both invites the reader to treat them as two facts.
-            { key: 'seed', label: 'seed', value: (row) => row.seed, align: 'left', render: (row) => String(row.seed) },
-            {
-              key: 'rate',
-              label,
-              value: (row) => row.last,
-              render: (row) => el('span', { class: `tone-${tone(row.last)}`, text: formatSigned(row.last, 4) }),
-            },
-            {
-              key: 'replay',
-              label: 'replay',
-              value: (row) => (recordedSeeds.has(row.seed) ? 1 : 0),
-              render: (row) => recordedSeeds.has(row.seed)
-                ? el('a', {
-                    class: 'link-quiet',
-                    href: theaterHref(id, { envId: row.envId, seed: row.seed }),
-                    text: 'watch',
-                  })
-                : el('span', { class: 'tone-dim', text: '—' }),
-            },
-          ],
-          rows: rankLanes(all),
-          sortKey: 'rate',
-          sortDirection: 'desc',
-          rowKey: (row) => String(row.seed),
-          onRowHover: (row) => {
-            if (!row) {
-              laneChart?.focusSeries(null);
-              return;
-            }
-            const index = shown.findIndex((lane) => lane.seed === row.seed);
-            laneChart?.focusSeries(index >= 0 ? index : null);
-          },
-          pageSize: 24,
-          emptyLabel: 'No seeds',
-        });
-        tableHost.replaceChildren(
-          eyebrow('Seed ledger', el('span', { class: 'eyebrow-note', text: 'sortable · hover to trace a seed above' })),
-          laneTable.root,
-        );
       }
 
       // Both series arrive in ONE request so the toggle never refetches. The server
@@ -1070,64 +1007,8 @@ export const mount: ViewMount = (host, params) => {
           laneStatus.replaceChildren(errorState(error instanceof Error ? error.message : String(error)));
         },
       );
-    });
+    }
 
-    // ---------------- recordings ----------------
-    addTab('recordings', detail.recordings.length > 0 ? `Recordings · ${detail.recordings.length}` : 'Recordings', (panel) => {
-      if (detail.recordings.length === 0) {
-        panel.append(
-          el('section', { class: 'block' }, [
-            eyebrow('Recordings', el('span', { class: 'eyebrow-note', text: 'theater replay sources' })),
-            emptyState(
-              'No recordings on this root',
-              'The wall replays per-seed actions.bin streams and this run wrote none. '
-                + 'Re-run the fleet with OAK_RECORD_ACTIONS=1 for every seed, or OAK_RECORD_SEEDS=3,8 for a couple.',
-              [linkButton('Find runs that have them', GALLERY_PATH, { title: 'The run list has a “recordings” filter' })],
-            ),
-          ]),
-        );
-        return;
-      }
-      panel.append(
-        eyebrow(
-          'Recordings',
-          el('span', {
-            class: 'eyebrow-note',
-            text: `${formatCount(detail.recordings.length)} replayable seeds · pick one to watch it on the wall`,
-          }),
-        ),
-      );
-      const byEnv = new Map<string, RunDetail['recordings']>();
-      for (const recording of detail.recordings) {
-        const list = byEnv.get(recording.envId) ?? [];
-        list.push(recording);
-        byEnv.set(recording.envId, list);
-      }
-      for (const [envId, list] of byEnv) {
-        const seeds = el('div', { class: 'seed-grid' });
-        for (const recording of [...list].sort((a, b) => a.seed - b.seed)) {
-          seeds.append(
-            el('a', {
-              class: 'seed-chip',
-              href: theaterHref(id, { envId: recording.envId, seed: recording.seed }),
-              title: `${formatCount(recording.steps)} recorded steps`,
-            }, [
-              el('span', { class: 'seed-num', text: `seed ${recording.seed}` }),
-              el('span', { class: 'seed-steps', text: formatStep(recording.steps) }),
-            ]),
-          );
-        }
-        const section = el('section', { class: 'env-section' }, [
-          el('div', { class: 'env-head' }, [
-            el('h2', { class: 'env-name', text: envName(envId) }),
-            el('span', { class: 'env-sub', text: `${list.length} seed${list.length === 1 ? '' : 's'}` }),
-          ]),
-          seeds,
-        ]);
-        section.style.setProperty('--section-accent', accentCss(envSlug(envId)));
-        panel.append(section);
-      }
-    });
 
     // ---------------- assemble: ONE scrolling page, no tabs ----------------
     // Every section builds eagerly and stacks in reading order. Old ?tab= links
@@ -1141,13 +1022,41 @@ export const mount: ViewMount = (host, params) => {
         for (const chart of panel.charts) chart.refresh();
       }
     }
-    function scrollToSection(key: string): void {
-      panels.get(TAB_ALIASES[key] ?? key)?.node.scrollIntoView({ block: 'start' });
+    // Assembly order: the CURRENT environment leads; the whole-run statistics
+    // (fleet-wide aggregates + the 16-env comparison) sit in one collapsed block.
+    const envPanel = panels.get('env');
+    if (envPanel) panelHost.append(envPanel.node);
+    const runDetails = el('details', { class: 'block science-details science-run' }, [
+      el('summary', { text: 'Whole-run statistics — every task, every seed' }),
+    ]);
+    for (const key of ['overview', 'envs']) {
+      const panel = panels.get(key);
+      if (panel) runDetails.append(panel.node);
     }
-    for (const tab of tabs) {
-      const panel = panels.get(tab.key);
-      if (panel) panelHost.append(panel.node);
-    }
+    runDetails.addEventListener('toggle', () => {
+      if (!(runDetails as HTMLDetailsElement).open) return;
+      for (const key of ['overview', 'envs']) {
+        for (const chart of panels.get(key)?.charts ?? []) chart.refresh();
+      }
+    });
+    panelHost.append(runDetails);
+
+    // The wall's env chips land here: rebuild ONLY the env section for the new env.
+    envSwap = (envId: string) => {
+      if (envId === currentEnv) return;
+      currentEnv = envId;
+      selectedEnv = envId;
+      const panel = panels.get('env');
+      if (!panel) return;
+      for (const chart of panel.charts) chart.destroy();
+      panel.charts.length = 0;
+      for (const item of panel.handles) item.destroy();
+      panel.handles.length = 0;
+      panel.node.replaceChildren();
+      panel.built = true;
+      tabs.find((tab) => tab.key === 'env')?.build(panel.node, scopeFor(panel));
+      for (const chart of panel.charts) chart.refresh();
+    };
 
     if (policies.length > 1) {
       const policySelect = el('select', { class: 'input input-select', ariaLabel: 'Policy' });
@@ -1169,16 +1078,17 @@ export const mount: ViewMount = (host, params) => {
 
     body.append(panelHost);
     buildAll();
-    const requested = currentTab();
-    if (requested !== tabs[0]?.key) scrollToSection(requested);
   }
 
   return {
+    setEnv(envId: string) {
+      envSwap?.(envId);
+    },
     destroy() {
       destroyed = true;
       for (const item of disposables) item.destroy();
       disposables.length = 0;
-      root.remove();
+      body.remove();
     },
   };
-};
+}

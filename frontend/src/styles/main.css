@@ -714,7 +714,7 @@ a.btn:hover { text-decoration: none; }
  * mark rather than a fill, so it never competes with live art two pixels away.
  */
 
-.wall-root { height: 100vh; max-height: 100vh; overflow: hidden; }
+.wall-root { min-height: 100vh; }
 .wall-root > .view-body {
   max-width: none;
   padding: 0;
@@ -792,7 +792,10 @@ a.btn:hover { text-decoration: none; }
 
 /* ---- stage + rail ---- */
 
-.wall-main { flex: 1; display: flex; min-height: 0; min-width: 0; border-top: 1px solid var(--border); }
+.wall-main { display: flex; min-width: 0; border-top: 1px solid var(--border); }
+/* The page SCROLLS now (the science lives below), so the stage cannot lean on
+   flex:1-of-viewport — it declares its own height and the rail matches it. */
+.wall-main { height: clamp(430px, 62vh, 780px); }
 .wall-main[hidden] { display: none; }
 .wall-stage-col { flex: 1; display: flex; flex-direction: column; min-width: 0; min-height: 0; }
 .wall-stage { position: relative; flex: 1; min-height: 0; overflow: hidden; background: #05070c; }
@@ -887,6 +890,7 @@ a.btn:hover { text-decoration: none; }
 .wall-transport {
   flex: none;
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: 9px;
   padding: 8px 14px;
@@ -1006,8 +1010,7 @@ a.btn:hover { text-decoration: none; }
 }
 
 @media (max-width: 940px) {
-  .wall-root { height: auto; max-height: none; overflow: visible; }
-  .wall-main { flex-direction: column; }
+  .wall-main { flex-direction: column; height: auto; }
   .wall-stage { min-height: 58vh; }
   .wall-rail { width: auto; border-left: 0; border-top: 1px solid var(--border); }
   .wall-rows { max-height: 46vh; }
@@ -1032,3 +1035,40 @@ a.btn:hover { text-decoration: none; }
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation-duration: 0.001ms !important; transition-duration: 0.001ms !important; }
 }
+
+/* ---------- the wall's rate strip, science block, run picker ---------- */
+
+.wall-curve { max-width: var(--maxw); margin: 18px auto 0; padding: 0 var(--pad); }
+.wall-curve[hidden] { display: none; }
+.wall-curve .chart { background: var(--bg-raised); border: 1px solid var(--border); border-radius: var(--r); padding: 8px 10px 4px; }
+
+.wall-science { max-width: var(--maxw); margin: 18px auto 72px; padding: 0 var(--pad); }
+.science-details { margin-top: 18px; border: 1px solid var(--border); border-radius: var(--r); background: var(--bg-raised); }
+.science-details > summary {
+  cursor: pointer; padding: 10px 14px; font-family: var(--mono); font-size: 11px;
+  letter-spacing: 0.12em; text-transform: uppercase; color: var(--text-dim);
+  user-select: none;
+}
+.science-details[open] > summary { border-bottom: 1px solid var(--border); color: var(--text); }
+.science-details > *:not(summary) { padding: 12px 14px; }
+
+.wall-picker {
+  position: absolute; z-index: 30; margin-top: 6px; width: min(560px, 92vw);
+  background: var(--bg-raised); border: 1px solid var(--border-strong); border-radius: var(--r);
+  padding: 10px; box-shadow: 0 12px 32px rgba(0, 0, 0, 0.45);
+}
+.wall-picker[hidden] { display: none; }
+.wall-picker .input { width: 100%; margin-bottom: 8px; }
+.wall-picker-rows { max-height: 50vh; overflow-y: auto; display: flex; flex-direction: column; gap: 2px; }
+.wall-picker-row {
+  display: flex; align-items: center; gap: 8px; width: 100%; text-align: left;
+  padding: 6px 8px; background: transparent; border: 0; border-radius: var(--r);
+  font-family: var(--mono); font-size: 12px; cursor: pointer; color: var(--text);
+}
+.wall-picker-row:hover { background: var(--bg-hover); }
+.wall-picker-id { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.wall-picker-meta { margin-left: auto; color: var(--text-faint); font-size: 10.5px; flex: none; }
+.wall-picker-empty { color: var(--text-faint); padding: 8px; font-family: var(--mono); font-size: 11px; }
+.wall-head { position: relative; }
+button.wall-run { background: none; border: 0; padding: 0; cursor: pointer; }
+button.wall-run:hover { text-decoration: underline; }

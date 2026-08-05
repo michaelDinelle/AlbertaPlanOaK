@@ -55,8 +55,10 @@ frontend/
                    fixtures). STYLE.md in this directory is law
     theater/       the replay host: loader.ts (fetch + decode), player.ts (transport,
                    scrubbing, speed), sceneHost.ts (renderer, camera, tier switching)
-    views/         one module per route — gallery.ts, run.ts, watch.ts, theater.ts,
-                   harness.ts. Each exports mount(el, params) => { destroy() }
+    views/         wall.ts (THE page), watch.ts (live), harness.ts (scene dev),
+                   run.ts (the science module the wall embeds), gallery.ts +
+                   theater.ts (redirect stubs + shared helpers). Each route
+                   module exports mount(el, params) => { destroy() }
     components/    the DOM layer views share: table.ts (element helpers, header,
                    breadcrumb, empty/error states, sortable table), chart.ts (uPlot
                    wrappers), bars.ts, sparkline.ts
@@ -71,14 +73,10 @@ Routes:
 
 | Route | View |
 |---|---|
-| `#/` | THE WALL — one run, one environment, every recorded seed at once (hero + ghosts, leaderboard rail, env chips) |
-| `#/runs` | run gallery |
-| `#/run/:id` | run dashboard (`?tab=overview\|envs\|lanes\|recordings`) |
-| `#/watch` | live fleets — runs still emitting heartbeats |
-| `#/watch/:id` | one fleet, live |
-| `#/theater` | recording picker |
-| `#/theater/:id/:envId/:seed` | replay one recorded lane |
+| `#/` | THE WALL — the one page: one run playing (hero + ghosts, leaderboard rail, env chips, run picker), the learning-curve strip with a playhead, and the run's full science below (per-env stats, collapsible per-seed detail with click-to-watch, collapsible whole-run statistics). `?run=&env=&seed=&at=&speed=` deep-link every part of it |
+| `#/watch/:id` | one still-running fleet, live (SSE) |
 | `#/harness/:slug` | the artisan scene dev page |
+| `#/runs`, `#/run/:id`, `#/theater/...` | redirects into `#/` — kept so old links keep working |
 
 API (all under `/api`, all JSON unless noted):
 
@@ -143,14 +141,13 @@ tools/run_fleet.sh 100000 frontend-demo-16env-$(date +%Y%m%d)
 those two, which is enough for a spot check and far smaller on disk. Recordings
 appear in the app as soon as the files land — the run index rescans on demand.
 
-## Theater usage
+## Watching a lane
 
-`#/theater` is a three-column picker — runs with recordings → environments →
-seeds. `#/theater/:id/:envId/:seed` plays one lane directly; that URL is what
-the gallery card's **theater** chip, the run dashboard's **Theater** button, the
-Recordings tab's seed chips, and the Lanes table's *watch* links all point at, so
-any lane you are looking at is one click from its replay, and the theater links
-back to the run dashboard it came from.
+Everything plays on the wall. Pick the run from the header picker, pick the
+environment from the chips, and pick a seed either from the leaderboard rail or
+by clicking its column in **Total reward by seed** (inside the per-seed detail
+block) — the wall promotes that seed to hero. `#/?run=<id>&env=<envId>&seed=<n>`
+deep-links a specific lane; old `#/theater/...` URLs redirect there.
 
 Transport keys: `space` play/pause · `← →` step one frame · `[ ]` speed ·
 `g` ground-truth overlay · `t` quality tier.
