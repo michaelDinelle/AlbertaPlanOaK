@@ -50,7 +50,7 @@ import type {
   SummaryPolicyResult,
 } from '@shared/types';
 import { ENVS, ENV_IDS, isEnvId, type EnvCategory, type EnvId } from '@shared/envs';
-import { MAX_CATCHUP_FRAMES } from '@kit/harness';
+import { MAX_CATCHUP_FRAMES, type HarnessSource } from '@kit/harness';
 import { makeGhostLayer, type GhostLayer } from '@kit/ghosts';
 import { TOKENS } from '@kit/tokens';
 import type { QualityTier } from '@kit/types';
@@ -104,33 +104,17 @@ import {
 // constants — every one of them a stated choice, not a knob
 // ---------------------------------------------------------------------------
 
-/** Timelapse presets. They MULTIPLY the wall's own base timelapse. */
-export const WALL_SPEEDS: readonly number[] = [1, 4, 16, 64];
-
 /**
- * Ghost samples shown per real second at ×1.
- *
- * 12 is not decorative. The wall advances `stride × WALL_SAMPLE_FPS` RECORD
- * FRAMES per second, so at 60 Hz display that is `stride × 0.2` frames per tick
- * — with the stride that `wallStride` picks (43 on a 100k lane) it lands at
- * ~8.6, just under `MAX_CATCHUP_FRAMES` (12). Below that ceiling the host walks
- * frames instead of snapping: scenes interpolate and events still fire. Above
- * it every tick is a scrub. ×1 therefore stays a real playback and the faster
- * presets are honestly a flip-book.
+ * ONE speed model for the whole app: a preset is a REAL-TIME multiple of the
+ * environment's own clock (×1 = controlHz record steps per second), the same
+ * meaning the playback clock has always had. ×1..×16 are walked playback
+ * (events fire); the top presets are honestly a flip-book of the run — the
+ * host snaps past MAX_CATCHUP_FRAMES and celebrations thin out on their own.
  */
-export const WALL_SAMPLE_FPS = 12;
+export const WALL_SPEEDS: readonly number[] = [1, 4, 16, 64, 256, 1024];
 
 /** Ghost samples per lane. 2400 at 12 fps = a 200 s pass at ×1, any run length. */
 export const WALL_TARGET_SAMPLES = 2400;
-
-/**
- * Hero decode ceiling. The hero is the full-fidelity lane — every record row —
- * and a decoded frame is two typed arrays, so a 1M-step lane would be several
- * hundred MB of frame objects. Past this the wall shows the run's first
- * `WALL_HERO_MAX_STEPS` steps and SAYS SO in the header; the ghost tracks are
- * cut to the same span so hero and ghosts always share one time domain.
- */
-export const WALL_HERO_MAX_STEPS = 250_000;
 
 /**
  * Rows that get a sparkline. 1024 rows of text are cheap; 1024 canvases with a
@@ -248,7 +232,7 @@ export function urlPosition(clockPosition: number | null, pending: number): numb
 // which run the wall opens on
 // ---------------------------------------------------------------------------
 
-export type FeaturedSource = 'param' | 'featured' | 'bestKernel' | 'newest' | null;
+export type FeaturedSource = 'param' | 'bestKernel' | 'newest' | null;
 
 export interface FeaturedPick {
   runId: string | null;
@@ -260,7 +244,6 @@ export interface FeaturedPick {
  *
  *   1. `?run=` — an explicit ask is always honoured, recordings or not. That is
  *      how a run with nothing recorded (the degraded wall) is reachable at all.
- *   2. ROLES `featured` — the showcase slot, when something claims it.
  *   3. ROLES `bestKernel`, IF it has recordings. The current best kernel is the
  *      run worth staring at; a best kernel with no recordings cannot be a wall,
  *      so it is skipped rather than shown empty.
@@ -278,8 +261,6 @@ export function resolveFeaturedRun(
 
   if (requested !== undefined && byId.has(requested)) return { runId: requested, source: 'param' };
 
-  const featured = roles?.featured ?? null;
-  if (featured !== null && byId.has(featured)) return { runId: featured, source: 'featured' };
 
   const best = roles?.bestKernel ?? null;
   if (best !== null && byId.get(best)?.hasRecordings === true) return { runId: best, source: 'bestKernel' };
@@ -302,7 +283,7 @@ export function resolveFeaturedRun(
 }
 
 // ---------------------------------------------------------------------------
-// the wall clock: stride, timelapse
+// the wall clock: stride
 // ---------------------------------------------------------------------------
 
 /** Is `n` prime? Trial division — the callers ask for values in the hundreds. */
@@ -327,8 +308,8 @@ export function nextPrime(n: number): number {
  * grid that shares a factor with an environment's own cycle length is PHASE-LOCKED:
  * every sample lands on the same phase and the ghost stands still while the hero
  * moves. That is measured, not hypothetical. DeepSea descends on a 7-step cycle;
- * the bare ceiling picks 42 on a 100k lane and 105 on a 1M one capped at
- * `WALL_HERO_MAX_STEPS`, and both are exact multiples of 7. Against the live
+ * the bare ceiling picks 42 on a 100k lane and 417 on a 1M one, and 42 is an
+ * exact multiple of 7. Against the live
  * endpoint (`frontend-demo-16env-20260803`, DeepSea, 8 seeds): stride 42 visited
  * 3 distinct poses in 2382 samples and stride 105 visited 3 in 954, while the next
  * primes up — 43 and 107 — visited 28 and 27. Seven frozen ghosts on one cell are
@@ -349,55 +330,6 @@ export function wallStride(steps: number, target: number = WALL_TARGET_SAMPLES):
   const want = Math.max(1, Math.floor(target));
   const need = Math.ceil(steps / want);
   return need <= 1 ? 1 : nextPrime(need);
-}
-
-/**
- * How much faster than the environment's own clock the wall is running.
- *
- * The wall advances `stride × fps × speed` record frames per real second; the
- * env lives at `controlHz` frames per second. Their ratio is the number the
- * timelapse chip prints — a MEASURED property of the playback, never a label.
- */
-export function timelapseFactor(
-  stride: number,
-  controlHz: number,
-  speed: number,
-  fps: number = WALL_SAMPLE_FPS,
-): number {
-  const hz = controlHz > 0 ? controlHz : 1;
-  const s = speed > 0 ? speed : 1;
-  return (Math.max(1, stride) * fps * s) / hz;
-}
-
-export function formatTimelapse(factor: number): string {
-  if (!Number.isFinite(factor) || factor <= 0) return '×1';
-  if (factor >= 1000) return `×${(factor / 1000).toFixed(1)}k`;
-  if (factor >= 10) return `×${Math.round(factor)}`;
-  const text = factor.toFixed(1);
-  return `×${text.endsWith('.0') ? text.slice(0, -2) : text}`;
-}
-
-/** Frames the host must advance per second to hit that timelapse. */
-export function wallFramesPerSecond(stride: number, speed: number, fps: number = WALL_SAMPLE_FPS): number {
-  return Math.max(1, stride) * fps * (speed > 0 ? speed : 1);
-}
-
-/**
- * Will the host WALK the frames at this tempo, or snap through them?
- *
- * `sceneHost` walks up to `MAX_CATCHUP_FRAMES` frames per tick — inside that
- * window scenes interpolate and events fire; past it every tick is a scrub. At
- * ×1 that holds for lanes up to ~144k steps (60 Hz × 12 frames ÷ 12 fps × 2400
- * samples), which is every root on disk today. A 1M-step lane is a flip-book
- * even at ×1, and the chip says so rather than implying motion it is not showing.
- */
-export function walksFrames(
-  stride: number,
-  speed: number,
-  displayHz = 60,
-  fps: number = WALL_SAMPLE_FPS,
-): boolean {
-  return wallFramesPerSecond(stride, speed, fps) / Math.max(1, displayHz) <= MAX_CATCHUP_FRAMES;
 }
 
 // ---------------------------------------------------------------------------
@@ -1041,7 +973,7 @@ export const mount: ViewMount = (host) => {
   let envList: EnvId[] = [];
   let envId: EnvId | null = query.env ?? null;
   let sort: WallSort = query.sort ?? 'rate';
-  let speed: number = query.speed ?? 1;
+  let speed: number = query.speed ?? 64;
   let selection: HeroSelection = { leader: null, promoted: query.seed ?? null };
   let rows: SeedRow[] = [];
   let policy = 'oak';
@@ -1079,7 +1011,7 @@ export const mount: ViewMount = (host) => {
   let emphasised: number | null = null;
   let heroGeneration = 0;
   /** the hero's own decoded frames — the exact per-frame track position the stage draws */
-  let heroFrames: readonly { pose: Float32Array }[] = [];
+  let heroSource: HarnessSource | null = null;
   /** every lane of this env (hero included), in field-mark order */
   let fieldLanes: WallLane[] = [];
   /** their track positions at the current sample; index-parallel to `fieldLanes` */
@@ -1170,11 +1102,6 @@ export const mount: ViewMount = (host) => {
     scrubHead,
   ]);
   const readout = el('div', { class: 'wall-readout', text: 'step — / —' });
-  const timelapseChip = el('span', {
-    class: 'wall-lapse',
-    text: 'timelapse —',
-    title: 'How much faster than the environment’s own clock this is playing',
-  });
   const speedRow = el('div', { class: 'wall-speeds' });
   const ghostChip = el('span', { class: 'wall-ghosts', text: 'ghosts —' });
   const debugButton = el('button', { class: 'tbtn', type: 'button', text: 'g', title: 'Ground-truth overlay (g)' });
@@ -1185,7 +1112,6 @@ export const mount: ViewMount = (host) => {
     scrub,
     readout,
     el('div', { class: 'tsep' }),
-    timelapseChip,
     speedRow,
     el('div', { class: 'tsep' }),
     ghostChip,
@@ -1244,19 +1170,9 @@ export const mount: ViewMount = (host) => {
   }
 
   function applySpeed(): void {
-    const info = envId === null ? null : ENVS[envId];
-    const factor = timelapseFactor(stride, info?.controlHz ?? 1, speed);
-    const walking = walksFrames(stride, speed);
-    timelapseChip.textContent = `timelapse ${formatTimelapse(factor)}`;
-    timelapseChip.classList.toggle('is-flipbook', !walking);
-    timelapseChip.title =
-      `${formatTimelapse(factor)} the environment’s own clock — `
-      + `${formatCount(wallFramesPerSecond(stride, speed))} record steps per second, `
-      + `ghosts sampled every ${formatCount(stride)}. `
-      + (walking
-        ? 'Every frame is walked, so motion is real and events still fire.'
-        : 'Faster than the host can walk: frames are sampled, so this is a flip-book of the run.');
-    sceneHost?.setSpeed(factor);
+    // ONE speed model: the preset is a real-time multiple of the env's own clock —
+    // exactly what the playback clock means by `speed`, everywhere in the app.
+    sceneHost?.setSpeed(speed);
     for (const button of speedRow.querySelectorAll('button')) {
       button.classList.toggle('is-on', button.dataset['speed'] === String(speed));
     }
@@ -1268,7 +1184,7 @@ export const mount: ViewMount = (host) => {
       type: 'button',
       text: `×${preset}`,
       dataset: { speed: String(preset) },
-      title: `${preset}× the wall's base timelapse`,
+      title: `×${preset} real time (${preset} × the environment's own clock)`,
     });
     button.addEventListener('click', () => {
       speed = preset;
@@ -1636,8 +1552,9 @@ export const mount: ViewMount = (host) => {
 
   /** The hero's exact track position at a decoded frame index. */
   function heroTrackX(index: number): number | null {
-    const frame = heroFrames[index] ?? heroFrames[heroFrames.length - 1];
-    const x = frame?.pose[0];
+    if (heroSource === null || heroSource.frameCount === 0) return null;
+    const frame = heroSource.frameAt(Math.min(index, heroSource.frameCount - 1));
+    const x = frame.pose[0];
     return x === undefined || !Number.isFinite(x) ? null : x;
   }
 
@@ -1839,7 +1756,7 @@ export const mount: ViewMount = (host) => {
     ghostView = null;
     ghostSample = -1;
     emphasised = null;
-    heroFrames = [];
+    heroSource = null;
     fieldLanes = [];
     fieldMarks = [];
     fieldMarkHolder.replaceChildren();
@@ -1884,7 +1801,7 @@ export const mount: ViewMount = (host) => {
     // grid without waiting for each other, and both are in flight at once — the
     // population is not a second page load.
     const ref = recordingRef(run.recordings, env, seed);
-    stride = wallStride(Math.min(ref?.steps ?? WALL_HERO_MAX_STEPS, WALL_HERO_MAX_STEPS));
+    stride = wallStride(ref?.steps ?? detail?.meta.steps ?? 0);
     applySpeed();
     const wallPromise = loadWall(run.id, env, stride);
     ghostChip.textContent = 'ghosts …';
@@ -1895,7 +1812,6 @@ export const mount: ViewMount = (host) => {
         runId: run.id,
         envId: env,
         seed,
-        maxSteps: WALL_HERO_MAX_STEPS,
         ...(ref ? { expectedSteps: ref.steps } : {}),
         signal: abort.signal,
         onProgress: (p) => {
@@ -1911,8 +1827,8 @@ export const mount: ViewMount = (host) => {
     if (destroyed || generation !== heroGeneration) return;
 
     heroSteps = recording.steps;
-    frameCount = recording.source.frames.length;
-    heroFrames = recording.source.frames;
+    frameCount = recording.source.frameCount;
+    heroSource = recording.source;
     framing = stageFraming(info.category);
     scrubInput.max = String(Math.max(1, frameCount - 1));
     paintTicks(recording.ticks);
@@ -1970,7 +1886,7 @@ export const mount: ViewMount = (host) => {
         source: recording.source,
         tier: HERO_TIER,
         at,
-        speed: timelapseFactor(stride, info.controlHz, speed),
+        speed,
         debug: debugOn,
         ...(ghosts ? { ghosts } : {}),
         onFrame,
@@ -2046,9 +1962,6 @@ export const mount: ViewMount = (host) => {
     );
     ghostChip.textContent = 'ghosts —';
     readout.textContent = 'no recording';
-    // there is no playback, so there is no timelapse to state
-    timelapseChip.textContent = 'timelapse —';
-    timelapseChip.title = 'Nothing is playing: this run wrote no recordings.';
     transport.classList.add('is-idle');
   }
 
@@ -2106,12 +2019,9 @@ export const mount: ViewMount = (host) => {
     runName.textContent = next.id;
     runName.href = `#/run/${encodeURIComponent(next.id)}`;
     runName.title = 'Open this run’s dashboard';
-    const truncated = next.meta.steps > WALL_HERO_MAX_STEPS;
-    runMeta.textContent = runScheduleLine(next.meta)
-      + (truncated ? ` · wall shows the first ${formatStep(WALL_HERO_MAX_STEPS)}` : '');
+    runMeta.textContent = runScheduleLine(next.meta);
     const result = primaryResult(next.summary, policy);
     runBadges.replaceChildren(
-      ...(pick.source === 'featured' ? [badge('featured', 'good', 'ROLES.json featured slot')] : []),
       ...(pick.source === 'bestKernel' ? [badge('best kernel', 'keeper', 'The current promoted best kernel')] : []),
       ...(next.recordings.length === 0 ? [badge('no recordings', 'warn', 'Nothing on this run can be replayed')] : []),
       ...(result?.complete === false ? [badge('incomplete', 'warn', 'Did not reach its declared horizon')] : []),

@@ -227,7 +227,7 @@ export async function mountSceneHost(
   let pendingModule: SceneModule | null = factory();
   const manifest = pendingModule.manifest;
 
-  const clock = makePlaybackClock(source.frames.length, source.controlHz);
+  const clock = makePlaybackClock(source.frameCount, source.controlHz);
   clock.speed = options.speed && options.speed > 0 ? options.speed : 1;
   if (options.at !== undefined && Number.isFinite(options.at)) clock.seek(options.at);
   if (options.paused) clock.playing = false;
@@ -267,7 +267,7 @@ export async function mountSceneHost(
     index: 0,
     step: 0,
     simTime: 0,
-    frameCount: source.frames.length,
+    frameCount: source.frameCount,
     playing: clock.playing,
     speed: clock.speed,
     tier,
@@ -395,8 +395,8 @@ export async function mountSceneHost(
     if (hadPrevious) copyFrameState(state, previous);
     sampleFrame(source, position, state);
 
-    const step = advanceCursor(cursor, position, source.frames.length);
-    if (step.sequential) collectEvents(source.events, step.from, step.to, eventBuffer, eventFrames);
+    const step = advanceCursor(cursor, position, source.frameCount);
+    if (step.sequential) collectEvents(source.eventsAt, step.from, step.to, eventBuffer, eventFrames);
     else eventBuffer.length = 0;
 
     frameUpdate.prev = hadPrevious ? previous : null;
@@ -414,8 +414,8 @@ export async function mountSceneHost(
 
     if (eventBuffer.length > 0 && options.onEvents) {
       eventSteps.length = 0;
-      // frames[i].step is the RECORD row; frames[0] is the synthesized step -1.
-      for (const frame of eventFrames) eventSteps.push(source.frames[frame]?.step ?? frame - 1);
+      // frame i holds RECORD row i-1; frame 0 is the synthesized step -1.
+      for (const frame of eventFrames) eventSteps.push(frame - 1);
       options.onEvents(eventBuffer, eventSteps);
     }
 
@@ -455,7 +455,7 @@ export async function mountSceneHost(
 
   const handle: SceneHostHandle = {
     manifest,
-    frameCount: source.frames.length,
+    frameCount: source.frameCount,
     clock,
     get tier() {
       return tier;

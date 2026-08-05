@@ -25,9 +25,9 @@
 import * as THREE from 'three';
 import { ENVS, envBySlug, type EnvId } from '@shared/envs';
 import type { RecordingMeta, RecordingRef, RunDetail } from '@shared/types';
-import { decodeRecording } from '@sim/decode';
-import { RECORD_BYTES, parseActionsBin } from '@sim/record';
-import { RECORD_V4_VERSION, parseActionsBinV4, rangeHeaderForSteps } from '@sim/record4';
+import { NO_EVENTS, lensRecording } from '@sim/decode';
+import { parseActionsBin } from '@sim/record';
+import { RECORD_V4_VERSION, parseActionsBinV4 } from '@sim/record4';
 import { decoders } from '@sim/registry';
 import type { EnvDecoder, EnvFrame, EnvGeometry, SimEvent } from '@sim/types';
 import { sceneRegistry } from '../scenes/registry';
@@ -47,9 +47,6 @@ import type {
 
 /** The demo run every artisan page reads from. */
 export const DEFAULT_HARNESS_RUN = 'frontend-demo-16env-20260803';
-
-/** Frames decoded for the dev page. A 100k-step lane is far more than art work needs. */
-export const DEFAULT_MAX_STEPS = 20000;
 
 export const TIERS: readonly QualityTier[] = ['hero', 'medium', 'thumb'];
 const SPEEDS: readonly number[] = [0.25, 0.5, 1, 2, 4];
@@ -110,12 +107,20 @@ export interface HarnessSource {
   controlHz: number;
   discretePose: boolean;
   geometry: EnvGeometry;
-  frames: EnvFrame<unknown>[];
-  events: SimEvent[][];
+  /** frames incl. the synthesized init frame; ALWAYS the full recorded horizon */
+  frameCount: number;
+  /** lens-backed random access — full 1M-step lanes at bounded memory */
+  frameAt(i: number): EnvFrame<unknown>;
+  /** events fired on the transition INTO frame i (NO_EVENTS when none) */
+  eventsAt(i: number): SimEvent[];
+  /** sparse ascending [frameIndex, events] — scrub ticks, timelines */
+  eventEntries(): IterableIterator<[number, SimEvent[]]>;
   /** short human label for the HUD */
   label: string;
   /** why we fell back, when we did */
   note?: string;
+  replay?: { firstDisagreeStep: number | null; disagreeCount: number };
+  nonFiniteRows?: number;
 }
 
 async function getJson<T>(url: string, signal?: AbortSignal): Promise<T> {
@@ -190,11 +195,9 @@ export async function loadHarnessSource(envId: EnvId, opts: LoadSourceOptions = 
     const fixtures = opts.fixtures ?? [];
     const thumbPose = opts.thumbPose ?? [];
     const frames: EnvFrame<unknown>[] = [];
-    const events: SimEvent[][] = [];
     const count = Math.max(2, fixtures.length);
     for (let i = 0; i < count; i++) {
       frames.push(fixtureFrame(i - 1, fixtures[i % Math.max(1, fixtures.length)] ?? null, thumbPose));
-      events.push([]);
     }
     let resolved = geometry;
     if (!resolved && decoder) {
@@ -212,8 +215,10 @@ export async function loadHarnessSource(envId: EnvId, opts: LoadSourceOptions = 
       controlHz: Math.max(1, Math.min(8, info.controlHz)),
       discretePose: info.discretePose,
       geometry: resolved ?? placeholderGeometry(envId),
-      frames,
-      events,
+      frameCount: frames.length,
+      frameAt: (i) => frames[Math.max(0, Math.min(frames.length - 1, Math.floor(i)))] as EnvFrame<unknown>,
+      eventsAt: () => NO_EVENTS,
+      eventEntries: () => new Map<number, SimEvent[]>().entries(),
       label: `fixtures ×${count}`,
       note,
     };
@@ -232,37 +237,31 @@ export async function loadHarnessSource(envId: EnvId, opts: LoadSourceOptions = 
   if (!ref) return fallback(`no ${envId} recording in ${runId} — fixture loop`);
 
   const base = `/api/runs/${encodeURIComponent(runId)}/recordings/${encodeURIComponent(envId)}/${ref.seed}`;
-  const maxSteps = opts.maxSteps ?? DEFAULT_MAX_STEPS;
   try {
     const meta = await getJson<RecordingMeta>(`${base}/meta.json`, opts.signal);
-    // A 100k-step v3 lane is 6.4 MB; the dev page decodes `maxSteps` of it. The API
-    // serves byte ranges, so ask for exactly what we are going to decode: 64 B per row
-    // for v3, the whole chunks covering those rows for v4. `rangeHeaderForSteps`
-    // answers null when a v4 lane carries no usable chunk table (in-flight, torn) —
-    // then we take the whole file. A server that ignores the header does the same.
-    const wantSteps = Math.max(1, Math.min(ref.steps || maxSteps, maxSteps));
-    const isV4 = meta.recordVersion === RECORD_V4_VERSION;
-    const range = isV4
-      ? rangeHeaderForSteps(meta, wantSteps)
-      : `bytes=0-${wantSteps * RECORD_BYTES - 1}`;
-    const res = await fetch(`${base}/actions.bin`, {
-      ...(range !== null ? { headers: { range } } : {}),
-      ...(opts.signal ? { signal: opts.signal } : {}),
-    });
-    if (!res.ok && res.status !== 206) throw new Error(`${res.status} actions.bin`);
+    // The FULL lane, always — the lens gives full-horizon random access at bounded
+    // memory, so there is no cap and no prefix-range dance (a 1M-step v4 lane is
+    // ~2-19 MB on the wire; a 100k v3 demo lane is 6.4 MB).
+    const res = await fetch(`${base}/actions.bin`, opts.signal ? { signal: opts.signal } : {});
+    if (!res.ok) throw new Error(`${res.status} actions.bin`);
     const buffer = await res.arrayBuffer();
+    const isV4 = meta.recordVersion === RECORD_V4_VERSION;
     const raw = isV4 ? await parseActionsBinV4(buffer, meta) : parseActionsBin(buffer, meta);
-    const decoded = decodeRecording(raw, decoder, { maxSteps });
+    const lens = lensRecording(raw, decoder);
     return {
       kind: 'recording',
       envId,
-      seed: decoded.seed,
-      controlHz: decoded.controlHz,
-      discretePose: decoded.discretePose,
-      geometry: decoded.geometry,
-      frames: decoded.frames,
-      events: decoded.events,
-      label: `${runId} · seed ${decoded.seed} · ${decoded.frames.length - 1} steps`,
+      seed: lens.seed,
+      controlHz: lens.controlHz,
+      discretePose: lens.discretePose,
+      geometry: lens.geometry,
+      frameCount: lens.frameCount,
+      frameAt: lens.frameAt,
+      eventsAt: lens.eventsAt,
+      eventEntries: lens.eventEntries,
+      label: `${runId} · seed ${lens.seed} · ${lens.steps} steps`,
+      ...(lens.replay ? { replay: lens.replay } : {}),
+      nonFiniteRows: lens.nonFiniteRows,
     };
   } catch (cause) {
     return fallback(`decode failed for ${envId} seed ${ref.seed} (${String(cause)}) — fixture loop`, undefined, ref.seed);
@@ -315,13 +314,13 @@ function copyFrameState(from: FrameState, to: FrameState): void {
  * is never between cells — that is what HopMotion is for).
  */
 export function sampleFrame(source: HarnessSource, position: number, out: FrameState): void {
-  const n = source.frames.length;
+  const n = source.frameCount;
   if (n === 0) return;
   const last = n - 1;
   const p = position < 0 ? 0 : position > last ? last : position;
   const i = Math.min(last, Math.floor(p));
-  const frame = source.frames[i] as EnvFrame<unknown>;
-  const next = source.frames[Math.min(last, i + 1)] as EnvFrame<unknown>;
+  const frame = source.frameAt(i);
+  const next = source.frameAt(Math.min(last, i + 1));
   const alpha = source.discretePose ? 0 : p - i;
 
   if (alpha > 0 && next !== frame) {
@@ -508,7 +507,7 @@ export async function mountHarness(
   const scrub = el('input');
   scrub.type = 'range';
   scrub.min = '0';
-  scrub.max = String(Math.max(1, source.frames.length - 1));
+  scrub.max = String(Math.max(1, source.frameCount - 1));
   scrub.step = '0.01';
   scrub.value = '0';
   const readout = el('div', 'oak-readout');
@@ -543,7 +542,7 @@ export async function mountHarness(
   // own numbers at once.
   let statsPrimed = false;
 
-  const clock = makePlaybackClock(source.frames.length, source.controlHz);
+  const clock = makePlaybackClock(source.frameCount, source.controlHz);
   const state = makeFrameState();
   const previous = makeFrameState();
   let hasPrevious = false;
@@ -630,7 +629,7 @@ export async function mountHarness(
   await buildScene();
 
   if (opts.at !== undefined && Number.isFinite(opts.at)) {
-    const target = Math.max(0, Math.min(source.frames.length - 1, opts.at));
+    const target = Math.max(0, Math.min(source.frameCount - 1, opts.at));
     clock.seek(target);
     scrub.value = String(target);
   }
@@ -700,14 +699,14 @@ export async function mountHarness(
     if (hasPrevious) copyFrameState(state, previous);
     sampleFrame(source, position, state);
 
-    const index = Math.min(source.frames.length - 1, Math.max(0, Math.floor(position)));
+    const index = Math.min(source.frameCount - 1, Math.max(0, Math.floor(position)));
     const delta = index - lastFrameIndex;
     const sequential = hasPrevious && delta >= 0 && delta <= MAX_CATCHUP_FRAMES;
     eventBuffer.length = 0;
     if (sequential) {
       for (let i = lastFrameIndex + 1; i <= index; i++) {
-        const evs = source.events[i];
-        if (evs) for (const ev of evs) eventBuffer.push(ev);
+        const evs = source.eventsAt(i);
+        if (evs !== NO_EVENTS) for (const ev of evs) eventBuffer.push(ev);
       }
     }
     frameUpdate.prev = hasPrevious ? previous : null;
@@ -737,7 +736,7 @@ export async function mountHarness(
         `${fps > 0 ? fps.toFixed(0) : '--'} fps · ${sceneCalls}/${budget.drawCalls} draws · ` +
         `${(sceneTriangles / 1000).toFixed(1)}k/${(budget.triangles / 1000).toFixed(0)}k tris` +
         `${over} · ${renderer.info.render.calls} total`;
-      readout.textContent = `step ${state.step} · ${state.simTime.toFixed(2)}s · f${index}/${source.frames.length - 1}`;
+      readout.textContent = `step ${state.step} · ${state.simTime.toFixed(2)}s · f${index}/${source.frameCount - 1}`;
     }
   };
   raf = requestAnimationFrame(tick);

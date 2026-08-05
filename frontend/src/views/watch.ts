@@ -44,126 +44,6 @@ function progressBar(fraction: number): HTMLElement {
   return el('span', { class: 'progress' }, [fill]);
 }
 
-// ---------------- run list ----------------
-
-function mountList(host: HTMLElement): { destroy(): void } {
-  const { root, body } = viewShell('watch');
-  host.append(root);
-  let destroyed = false;
-
-  const status = el('div', { class: 'view-status' }, [spinner('Looking for running fleets')]);
-  /** labels the fallback list so six finished runs never read as six live ones */
-  const listHead = el('div');
-  listHead.hidden = true;
-  const list = el('div', { class: 'watch-list' });
-
-  body.append(
-    el('div', { class: 'view-head' }, [
-      el('h1', { class: 'view-title', text: 'Watch' }),
-      el('p', { class: 'view-lede', text: 'Fleets still emitting heartbeats. Open one to follow its population live.' }),
-    ]),
-    status,
-    listHead,
-    list,
-  );
-
-  function row(entry: RunIndexEntry, live: boolean): HTMLElement {
-    const fraction = entry.steps > 0 ? entry.maxStep / entry.steps : 0;
-    return el('a', { class: 'watch-row', href: `#/watch/${encodeURIComponent(entry.id)}` }, [
-      envSpectrum(entry),
-      el('div', { class: 'watch-row-body' }, [
-        el('div', { class: 'watch-row-head' }, [
-          el('span', { class: 'card-name', text: entry.id }),
-          live ? badge('running', 'live') : entry.complete ? badge('complete', 'good') : badge('stalled', 'warn'),
-        ]),
-        el('div', {
-          class: 'card-meta',
-          text: [
-            entry.envIds.length === 1 ? envName(entry.envIds[0] ?? '') : `${entry.envIds.length} envs`,
-            `B ${entry.batch}`,
-            formatAgo(entry.startedAt),
-          ].join('  ·  '),
-        }),
-        el('div', { class: 'watch-progress' }, [
-          progressBar(fraction),
-          el('span', { class: 'watch-progress-text', text: `${formatStep(entry.maxStep)} / ${formatStep(entry.steps)}` }),
-        ]),
-      ]),
-    ]);
-  }
-
-  function paint(entries: readonly RunIndexEntry[]): void {
-    const running = sortRuns(entries.filter((entry) => entry.inFlight));
-    if (running.length > 0) {
-      status.replaceChildren();
-      listHead.hidden = false;
-      listHead.replaceChildren(
-        eyebrow('Live now', el('span', { class: 'eyebrow-count', text: String(running.length) })),
-      );
-      list.replaceChildren(...running.map((entry) => row(entry, true)));
-      return;
-    }
-    if (entries.length === 0) {
-      status.replaceChildren(
-        emptyState(
-          'No fleet roots on disk',
-          'The server found nothing under .oak-benchmarks. Point it elsewhere with OAK_BENCH_DIR, '
-            + 'or produce a run with tools/run_fleet.sh.',
-        ),
-      );
-      listHead.hidden = true;
-      list.replaceChildren();
-      return;
-    }
-    // Not an error: no fleet is running most of the time. Say so, then offer the
-    // next most useful thing rather than an empty page.
-    status.replaceChildren(
-      emptyState(
-        'Nothing is running',
-        'No fleet root has been written to in the last two minutes. The most recent runs are below — '
-          + 'their live views replay what is already on disk.',
-        [linkButton('Browse every run', '#/runs')],
-      ),
-    );
-    listHead.hidden = false;
-    listHead.replaceChildren(
-      eyebrow('Most recent', el('span', { class: 'eyebrow-note', text: 'finished — replayed from disk' })),
-    );
-    list.replaceChildren(...sortRuns(entries).slice(0, 6).map((entry) => row(entry, false)));
-  }
-
-  function load(force: boolean): void {
-    runIndex.load(force).then(
-      (entries) => {
-        if (!destroyed) paint(entries);
-      },
-      (error: unknown) => {
-        if (destroyed) return;
-        listHead.hidden = true;
-        list.replaceChildren();
-        status.replaceChildren(
-          errorState(error instanceof Error ? error.message : String(error), () => {
-            status.replaceChildren(spinner('Retrying'));
-            load(true);
-          }, {
-            title: 'Could not reach the API',
-            actions: [linkButton('Back to the gallery', '#/runs')],
-          }),
-        );
-      },
-    );
-  }
-
-  load(false);
-
-  return {
-    destroy() {
-      destroyed = true;
-      root.remove();
-    },
-  };
-}
-
 // ---------------- live view ----------------
 
 function mountLive(host: HTMLElement, id: string): { destroy(): void } {
@@ -470,5 +350,12 @@ function mountLive(host: HTMLElement, id: string): { destroy(): void } {
 
 export const mount: ViewMount = (host, params) => {
   const id = params['id'];
-  return id ? mountLive(host, id) : mountList(host);
+  if (!id) {
+    // The standalone live LIST is retired — running fleets surface at the top of
+    // #/runs. The per-run live view (#/watch/:id) is still the live instrument.
+    window.location.replace('#/runs');
+    void host;
+    return { destroy() {} };
+  }
+  return mountLive(host, id);
 };

@@ -20,8 +20,6 @@ import {
   EMPTY_SELECTION,
   RECORD_RECIPE,
   SPARK_ROW_BUDGET,
-  WALL_HERO_MAX_STEPS,
-  WALL_SAMPLE_FPS,
   WALL_SORTS,
   WALL_SPEEDS,
   WALL_TARGET_SAMPLES,
@@ -33,7 +31,6 @@ import {
   fieldPercent,
   fieldScale,
   formatDistance,
-  formatTimelapse,
   ghostAlive,
   ghostSampleIndex,
   heroSeed,
@@ -54,15 +51,12 @@ import {
   setLeader,
   sortPermutation,
   stageFraming,
-  timelapseFactor,
   trackWindow,
   urlPosition,
   wallEnvs,
-  wallFramesPerSecond,
   wallHref,
   wallKeyAction,
   wallStride,
-  walksFrames,
   type SeedRow,
   type WallParams,
   type WallSort,
@@ -121,11 +115,6 @@ describe('featured-run resolution', () => {
 
   test('an unknown ?run= falls through instead of showing a run that is not there', () => {
     expect(resolveFeaturedRun(entries, NO_ROLES, 'typo-run').runId).toBe('newest-complete');
-  });
-
-  test('the ROLES featured slot comes next', () => {
-    const roles: RolesResponse = { ...NO_ROLES, featured: 'older-with-recordings', bestKernel: 'newest-complete' };
-    expect(resolveFeaturedRun(entries, roles)).toEqual({ runId: 'older-with-recordings', source: 'featured' });
   });
 
   test('bestKernel is used only when it has recordings', () => {
@@ -307,7 +296,7 @@ describe('the sampling grid cannot phase-lock', () => {
 
   test('the two strides that were measured aliasing are gone', () => {
     expect(wallStride(100_000)).toBe(43); // was 42 = 6 × 7
-    expect(wallStride(WALL_HERO_MAX_STEPS)).toBe(107); // was 105 = 15 × 7
+    expect(wallStride(250_000)).toBe(107); // was 105 = 15 × 7
   });
 
   test('a lane short enough to sample whole is stride 1 — no grid, nothing to alias', () => {
@@ -324,67 +313,6 @@ describe('the sampling grid cannot phase-lock', () => {
     expect(nextPrime(43)).toBe(43);
     expect(nextPrime(105)).toBe(107);
     expect(nextPrime(1)).toBe(2);
-  });
-});
-
-describe('timelapse arithmetic', () => {
-  test('stride keeps any run at ~WALL_TARGET_SAMPLES ghost samples', () => {
-    for (const steps of [2_000, 10_000, 100_000, 1_000_000]) {
-      const stride = wallStride(steps);
-      const samples = Math.ceil(steps / stride);
-      expect(samples).toBeLessThanOrEqual(WALL_TARGET_SAMPLES);
-      expect(samples).toBeGreaterThan(WALL_TARGET_SAMPLES / 2 - 1);
-    }
-    expect(wallStride(500)).toBe(1);
-    expect(wallStride(0)).toBe(1);
-  });
-
-  test('the factor is the ratio of wall frame rate to the env clock', () => {
-    // 100k steps -> stride 43; 43 samples/frame × 12 fps ÷ 20 Hz
-    const stride = wallStride(100_000);
-    expect(stride).toBe(43);
-    expect(timelapseFactor(stride, 20, 1)).toBeCloseTo((43 * WALL_SAMPLE_FPS) / 20, 6);
-    expect(timelapseFactor(stride, 20, 4)).toBeCloseTo(timelapseFactor(stride, 20, 1) * 4, 6);
-    // an 8 Hz gridworld is timelapsed harder at the same stride, by exactly 20/8
-    expect(timelapseFactor(stride, 8, 1) / timelapseFactor(stride, 20, 1)).toBeCloseTo(20 / 8, 6);
-  });
-
-  test('×1 walks frames on every root that exists today', () => {
-    // The reason WALL_SAMPLE_FPS is 12: frames advanced per 60 Hz tick must stay
-    // under MAX_CATCHUP_FRAMES or events never fire and every frame is a snap.
-    for (const steps of [2_000, 10_000, 100_000]) {
-      const perTick = wallFramesPerSecond(wallStride(steps), 1) / 60;
-      expect(perTick).toBeLessThanOrEqual(MAX_CATCHUP_FRAMES);
-      expect(walksFrames(wallStride(steps), 1)).toBe(true);
-    }
-  });
-
-  test('and admits when it cannot: a 1M lane is a flip-book even at ×1', () => {
-    expect(walksFrames(wallStride(1_000_000), 1)).toBe(false);
-    // every preset above ×1 is one by construction, at any length
-    expect(walksFrames(wallStride(100_000), 4)).toBe(false);
-  });
-
-  test('the chip states the speedup at a readable precision', () => {
-    expect(formatTimelapse(63)).toBe('×63');
-    expect(formatTimelapse(2016)).toBe('×2.0k');
-    expect(formatTimelapse(0.6)).toBe('×0.6');
-    expect(formatTimelapse(2)).toBe('×2');
-    expect(formatTimelapse(Number.NaN)).toBe('×1');
-  });
-
-  test('a full pass takes about the same wall-clock time whatever the run length', () => {
-    const pass = (steps: number): number => steps / wallFramesPerSecond(wallStride(steps), 1);
-    const nominal = WALL_TARGET_SAMPLES / WALL_SAMPLE_FPS; // 200 s
-    const ratio = pass(1_000_000) / pass(100_000);
-    expect(ratio).toBeGreaterThan(0.95);
-    expect(ratio).toBeLessThan(1.05);
-    // The prime stride sits at or just above the exact ratio, never below it, so a pass
-    // is at most the nominal 200 s and never much under (43 vs 41.67 costs 6 s).
-    expect(pass(100_000)).toBeLessThanOrEqual(nominal);
-    expect(pass(100_000)).toBeGreaterThan(nominal * 0.9);
-    expect(pass(1_000_000)).toBeLessThanOrEqual(nominal);
-    expect(pass(1_000_000)).toBeGreaterThan(nominal * 0.9);
   });
 });
 
@@ -641,8 +569,8 @@ describe('run identity line', () => {
       .toBe('HalfCheetah · 1,024 seeds · 1M steps');
   });
 
-  test('the hero decode ceiling is declared, so the header can say when it bites', () => {
-    expect(WALL_HERO_MAX_STEPS).toBeGreaterThanOrEqual(100_000);
+  test('a 1M lane strides prime and coprime to every gridworld cycle', () => {
+    expect(wallStride(1_000_000)).toBe(419); // prime > 64 — coprime to all of 2..64
   });
 });
 

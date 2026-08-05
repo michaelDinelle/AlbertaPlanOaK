@@ -230,17 +230,16 @@ export const mount: ViewMount = (host, params) => {
     const policySlot = el('span', { class: 'slot' });
     const bannerSlot = el('div', { class: 'slot' });
 
-    // The one outbound link the dashboard owes the theater. It names the seed it
-    // will open rather than the route, because "theater" alone hides the fact
-    // that a 1408-seed run replays exactly the handful that were recorded.
+    // One outbound link per intent, both into the Wall (the one way to watch):
+    // this one lands with a specific seed already promoted to hero.
     const firstRecording = detail.recordings[0];
     const theaterAction = firstRecording
       ? linkButton(
-          `Theater · ${envName(firstRecording.envId)} seed ${firstRecording.seed}`,
+          `Watch seed ${firstRecording.seed} · ${envName(firstRecording.envId)}`,
           theaterHref(detail.id, firstRecording),
           {
             title: `${formatCount(detail.recordings.length)} recorded seed${detail.recordings.length === 1 ? '' : 's'}`
-              + ' — the Recordings tab lists them all',
+              + ' — the Recordings section lists them all',
           },
         )
       : null;
@@ -440,25 +439,6 @@ export const mount: ViewMount = (host, params) => {
       const raw = new URLSearchParams(query).get('tab');
       const requested = raw === null ? null : TAB_ALIASES[raw] ?? raw;
       return requested && panels.has(requested) ? requested : tabs[0]?.key ?? 'overview';
-    }
-
-    function show(key: string): void {
-      for (const [tabKey, panel] of panels) {
-        const isActive = tabKey === key;
-        panel.node.hidden = !isActive;
-        if (isActive && !panel.built) {
-          panel.built = true;
-          tabs.find((tab) => tab.key === tabKey)?.build(panel.node, scopeFor(panel));
-        }
-        if (isActive) for (const chart of panel.charts) chart.refresh();
-      }
-      for (const button of tabBar.querySelectorAll('button')) {
-        const isActive = button.dataset['tab'] === key;
-        button.classList.toggle('is-active', isActive);
-        button.setAttribute('aria-selected', String(isActive));
-      }
-      const base = `#/run/${encodeURIComponent(id)}`;
-      if (window.location.hash.split('?')[0] === base) history.replaceState(null, '', `${base}?tab=${key}`);
     }
 
     // ---------------- overview ----------------
@@ -829,7 +809,7 @@ export const mount: ViewMount = (host, params) => {
           const inspect = el('button', { class: 'btn btn-quiet', text: 'Inspect seeds' });
           inspect.addEventListener('click', () => {
             selectedEnv = share.envId;
-            show('seeds');
+            scrollToSection('seeds');
             requestLaneEnv?.(share.envId);
           });
           const section = el('section', { class: 'env-section' }, [
@@ -1048,7 +1028,7 @@ export const mount: ViewMount = (host, params) => {
               render: (row) => recordedSeeds.has(row.seed)
                 ? el('a', {
                     class: 'link-quiet',
-                    href: `#/theater/${encodeURIComponent(id)}/${encodeURIComponent(row.envId)}/${row.seed}`,
+                    href: theaterHref(id, { envId: row.envId, seed: row.seed }),
                     text: 'watch',
                   })
                 : el('span', { class: 'tone-dim', text: '—' }),
@@ -1100,7 +1080,7 @@ export const mount: ViewMount = (host, params) => {
             eyebrow('Recordings', el('span', { class: 'eyebrow-note', text: 'theater replay sources' })),
             emptyState(
               'No recordings on this root',
-              'The theater replays per-seed actions.bin streams and this run wrote none. '
+              'The wall replays per-seed actions.bin streams and this run wrote none. '
                 + 'Re-run the fleet with OAK_RECORD_ACTIONS=1 for every seed, or OAK_RECORD_SEEDS=3,8 for a couple.',
               [linkButton('Find runs that have them', GALLERY_PATH, { title: 'The run list has a “recordings” filter' })],
             ),
@@ -1113,7 +1093,7 @@ export const mount: ViewMount = (host, params) => {
           'Recordings',
           el('span', {
             class: 'eyebrow-note',
-            text: `${formatCount(detail.recordings.length)} replayable seeds · pick one to open the theater`,
+            text: `${formatCount(detail.recordings.length)} replayable seeds · pick one to watch it on the wall`,
           }),
         ),
       );
@@ -1129,7 +1109,7 @@ export const mount: ViewMount = (host, params) => {
           seeds.append(
             el('a', {
               class: 'seed-chip',
-              href: `#/theater/${encodeURIComponent(id)}/${encodeURIComponent(recording.envId)}/${recording.seed}`,
+              href: theaterHref(id, { envId: recording.envId, seed: recording.seed }),
               title: `${formatCount(recording.steps)} recorded steps`,
             }, [
               el('span', { class: 'seed-num', text: `seed ${recording.seed}` }),
@@ -1149,11 +1129,22 @@ export const mount: ViewMount = (host, params) => {
       }
     });
 
-    // ---------------- assemble ----------------
+    // ---------------- assemble: ONE scrolling page, no tabs ----------------
+    // Every section builds eagerly and stacks in reading order. Old ?tab= links
+    // (and the retired 'lanes' spelling) scroll to their section instead.
+    function buildAll(): void {
+      for (const tab of tabs) {
+        const panel = panels.get(tab.key);
+        if (!panel || panel.built) continue;
+        panel.built = true;
+        tab.build(panel.node, scopeFor(panel));
+        for (const chart of panel.charts) chart.refresh();
+      }
+    }
+    function scrollToSection(key: string): void {
+      panels.get(TAB_ALIASES[key] ?? key)?.node.scrollIntoView({ block: 'start' });
+    }
     for (const tab of tabs) {
-      const button = el('button', { class: 'tab', text: tab.label, role: 'tab', dataset: { tab: tab.key } });
-      button.addEventListener('click', () => show(tab.key));
-      tabBar.append(button);
       const panel = panels.get(tab.key);
       if (panel) panelHost.append(panel.node);
     }
@@ -1168,15 +1159,18 @@ export const mount: ViewMount = (host, params) => {
         // a policy switch except the run's own identity.
         resetPanels();
         syncPolicyHeader();
-        show(currentTab());
+        buildAll();
       });
       tabBar.append(
         el('div', { class: 'tabs-trailing' }, [el('span', { class: 'control-label', text: 'policy' }), policySelect]),
       );
+      body.append(tabBar);
     }
 
-    body.append(tabBar, panelHost);
-    show(currentTab());
+    body.append(panelHost);
+    buildAll();
+    const requested = currentTab();
+    if (requested !== tabs[0]?.key) scrollToSection(requested);
   }
 
   return {

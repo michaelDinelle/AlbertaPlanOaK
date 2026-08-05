@@ -282,7 +282,7 @@ export function advanceCursor(cursor: FrameCursor, position: number, frameCount:
  * frame the tick happened to land on.
  */
 export function collectEvents(
-  events: readonly (readonly SimEvent[])[],
+  eventsAt: (i: number) => readonly SimEvent[],
   from: number,
   to: number,
   out: SimEvent[],
@@ -291,8 +291,7 @@ export function collectEvents(
   out.length = 0;
   if (outFrames) outFrames.length = 0;
   for (let i = from; i <= to; i++) {
-    const frameEvents = events[i];
-    if (!frameEvents) continue;
+    const frameEvents = eventsAt(i);
     for (const event of frameEvents) {
       out.push(event);
       outFrames?.push(i);

@@ -209,10 +209,14 @@ function clearHydrationQueue(): void {
  * replayable seed, and is upgraded to the seed-level theater route the moment
  * hydration names one. It is never left pointing at a route that does not exist.
  */
+/** A deep link into THE WALL — the one way to watch a run's seeds. */
 export function theaterHref(runId: string, recording?: { envId: string; seed: number }): string {
-  const run = encodeURIComponent(runId);
-  if (!recording) return `#/run/${run}?tab=recordings`;
-  return `#/theater/${run}/${encodeURIComponent(recording.envId)}/${recording.seed}`;
+  const q = new URLSearchParams({ run: runId });
+  if (recording) {
+    q.set('env', recording.envId);
+    q.set('seed', String(recording.seed));
+  }
+  return `#/?${q.toString()}`;
 }
 
 function buildCard(entry: RunIndexEntry): Card {
@@ -439,6 +443,10 @@ export const mount: ViewMount = (host) => {
 
   const count = el('div', { class: 'result-count' });
   const grid = el('div', { class: 'gallery' });
+  // Live fleets surface HERE, not on a separate Watch page — one list of runs,
+  // with the ones still emitting heartbeats pinned above it.
+  const liveStrip = el('div', { class: 'banner banner-good' });
+  liveStrip.hidden = true;
   const status = el('div', { class: 'view-status' }, [spinner('Reading .oak-benchmarks')]);
 
   body.append(
@@ -446,6 +454,7 @@ export const mount: ViewMount = (host) => {
       el('h1', { class: 'view-title', text: 'Run gallery' }),
       el('p', { class: 'view-lede', text: 'Every fleet root on disk. Cards fill in their population numbers as they scroll into view.' }),
     ]),
+    liveStrip,
     controls,
     count,
     status,
@@ -484,6 +493,18 @@ export const mount: ViewMount = (host) => {
 
     const visible = sortRuns(entries.filter((entry) => matchesFilter(entry, filter)));
     count.textContent = `${visible.length} of ${entries.length} runs`;
+
+    const live = entries.filter((entry) => entry.inFlight);
+    liveStrip.hidden = live.length === 0;
+    if (live.length > 0) {
+      liveStrip.replaceChildren(
+        el('span', { class: 'live-pip' }),
+        el('strong', { text: `${live.length} fleet${live.length === 1 ? '' : 's'} running` }),
+        ...live.slice(0, 6).map((entry) =>
+          el('a', { href: `#/watch/${encodeURIComponent(entry.id)}`, text: entry.id, title: 'Open the live view' }),
+        ),
+      );
+    }
 
     if (visible.length === 0) {
       grid.replaceChildren();

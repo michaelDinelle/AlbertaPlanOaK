@@ -15,6 +15,7 @@
 //   * harness   — the playback clock and the pose interpolate/snap policy
 
 import { describe, expect, test } from 'bun:test';
+import type { SimEvent } from '@sim/types';
 import * as THREE from 'three';
 
 import {
@@ -1483,6 +1484,8 @@ function fakeFrame(step: number, x: number): EnvFrame<{ x: number }> {
 }
 
 function fakeSource(discretePose: boolean): HarnessSource {
+  const frames = [fakeFrame(-1, 0), fakeFrame(0, 10), fakeFrame(1, 20), fakeFrame(2, 30)];
+  const events: SimEvent[][] = [[], [{ type: 'goal' }], [], [{ type: 'done' }]];
   return {
     kind: 'fixture',
     envId: 'FourRooms-cont-v0',
@@ -1490,8 +1493,10 @@ function fakeSource(discretePose: boolean): HarnessSource {
     controlHz: 10,
     discretePose,
     geometry: { kind: 'grid', grid: handGrid() },
-    frames: [fakeFrame(-1, 0), fakeFrame(0, 10), fakeFrame(1, 20), fakeFrame(2, 30)],
-    events: [[], [{ type: 'goal' }], [], [{ type: 'done' }]],
+    frameCount: 4,
+    frameAt: (i: number) => frames[Math.max(0, Math.min(3, Math.floor(i)))]!,
+    eventsAt: (i: number) => events[Math.floor(i)] ?? [],
+    eventEntries: () => new Map<number, SimEvent[]>([[1, [{ type: 'goal' }]], [3, [{ type: 'done' }]]]).entries(),
     label: 'test',
   };
 }

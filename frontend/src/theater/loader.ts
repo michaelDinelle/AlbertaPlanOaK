@@ -20,7 +20,7 @@ import { ENVS, ENV_IDS, isEnvId, type EnvId } from '@shared/envs';
 import type { RecordingMeta, RecordingRef, RunIndexEntry } from '@shared/types';
 import { DEFAULT_HARNESS_RUN, type HarnessSource } from '@kit/harness';
 import type { QualityTier } from '@kit/types';
-import { decodeRecording, eventTimeline } from '@sim/decode';
+import { eventTimeline, lensRecording, type RecordingLens } from '@sim/decode';
 import { RECORD_BYTES, parseActionsBin } from '@sim/record';
 import {
   FILE_HEADER_BYTES as RECORD_V4_HEADER_BYTES,
@@ -41,7 +41,6 @@ export const DEFAULT_THEATER_RUN = DEFAULT_HARNESS_RUN;
  * (measured), so the whole thing is affordable; the cap only exists so a future
  * 1M-step recording cannot silently allocate a gigabyte of frame objects.
  */
-export const DEFAULT_THEATER_STEPS = 100_000;
 
 const TIER_NAMES: readonly string[] = ['hero', 'medium', 'thumb'];
 
@@ -431,6 +430,18 @@ export function ticksFromRecording(
   return timelineTicks(eventTimeline(decoded), decoded.frames.length, options);
 }
 
+/** Same ticks, from a lens: the sparse event map IS the timeline. */
+export function ticksFromLens(
+  lens: Pick<RecordingLens, 'eventEntries' | 'frameCount'>,
+  options?: TimelineTickOptions,
+): TimelineTick[] {
+  const timeline: { frame: number; step: number; event: SimEvent }[] = [];
+  for (const [frame, events] of lens.eventEntries()) {
+    for (const event of events) timeline.push({ frame, step: frame - 1, event });
+  }
+  return timelineTicks(timeline, lens.frameCount, options);
+}
+
 /**
  * Clicking a tick seeks JUST BEFORE the event so the celebration actually
  * plays: the host fires events only on sequential steps, so landing exactly on
@@ -447,7 +458,6 @@ export function seekTargetForTick(tick: Pick<TimelineTick, 'frame'>, lead = 3): 
 export interface TheaterRecording {
   /** the `kit/harness` source shape — `sampleFrame` consumes this unchanged */
   source: HarnessSource;
-  decoded: DecodedRecording<unknown>;
   health: ReplayHealth;
   ticks: TimelineTick[];
   /** bytes actually downloaded */
@@ -459,8 +469,6 @@ export interface TheaterRecording {
 }
 
 export interface LoadRecordingOptions extends TheaterTarget {
-  /** decode at most this many record rows (default DEFAULT_THEATER_STEPS) */
-  maxSteps?: number;
   /** rows the API index says the lane has — the progress total before headers land */
   expectedSteps?: number;
   signal?: AbortSignal;
@@ -542,22 +550,12 @@ export async function loadTheaterRecording(options: LoadRecordingOptions): Promi
   }
   const meta = (await metaRes.json()) as RecordingMeta;
 
-  const maxSteps = Math.max(1, Math.floor(options.maxSteps ?? DEFAULT_THEATER_STEPS));
   const expected = Math.max(0, Math.floor(options.expectedSteps ?? 0));
-  const wantSteps = expected > 0 ? Math.min(expected, maxSteps) : maxSteps;
-
-  // How many bytes hold `wantSteps` steps.
-  //   v3: exactly 64 per row.
-  //   v4: the fewest WHOLE chunks covering them, off the meta.json chunk table —
-  //       whole because a chunk is one DEFLATE stream, one crc and one dx32
-  //       reconstruction chain, so half of one decodes to nothing. A lane with no
-  //       usable table (in-flight, torn, pre-finalize) plans 0 and we ask for the
-  //       whole file, which the tolerant chunk scan handles.
+  // The FULL lane, always — the lens gives full-horizon random access at bounded
+  // memory, so there is no decode cap and no prefix-range planning. A 1M-step v4
+  // lane is ~2-19 MB on the wire.
   const isV4 = meta.recordVersion === RECORD_V4_VERSION;
-  const v4Table = isV4 ? chunkTableFromMeta(meta) : null;
-  const wantBytes = isV4
-    ? (v4Table === null ? 0 : planPrefixV4(v4Table, wantSteps).bytes)
-    : wantSteps * RECORD_BYTES;
+  const wantBytes = isV4 ? 0 : Math.max(0, expected) * RECORD_BYTES;
 
   report(makeProgress('download', 0, wantBytes));
   const binRes = await doFetch(`${base}/actions.bin`, {
@@ -570,7 +568,7 @@ export async function loadTheaterRecording(options: LoadRecordingOptions): Promi
     throw new TheaterLoadError(`${binRes.status} — actions.bin unavailable for ${envId} seed ${seed}`);
   }
 
-  const total = expectedBytes(binRes.headers, isV4 ? 0 : wantSteps) || wantBytes;
+  const total = expectedBytes(binRes.headers, isV4 ? 0 : expected) || wantBytes;
   const align = isV4 ? 1 : RECORD_BYTES;
   let bytes: Uint8Array;
   const body = binRes.body;
@@ -609,27 +607,30 @@ export async function loadTheaterRecording(options: LoadRecordingOptions): Promi
   if (raw.steps === 0) {
     throw new TheaterLoadError(`actions.bin for ${envId} seed ${seed} is empty`);
   }
-  const decoded = decodeRecording(raw, decoder, { maxSteps });
+  const lens = lensRecording(raw, decoder);
   const info = ENVS[envId];
-  const steps = decoded.frames.length - 1;
+  const steps = lens.steps;
 
   const source: HarnessSource = {
     kind: 'recording',
     envId,
-    seed: decoded.seed,
-    controlHz: decoded.controlHz,
-    discretePose: decoded.discretePose,
-    geometry: decoded.geometry,
-    frames: decoded.frames,
-    events: decoded.events,
-    label: `${runId} · ${info.name} · seed ${decoded.seed} · ${steps} steps`,
+    seed: lens.seed,
+    controlHz: lens.controlHz,
+    discretePose: lens.discretePose,
+    geometry: lens.geometry,
+    frameCount: lens.frameCount,
+    frameAt: lens.frameAt,
+    eventsAt: lens.eventsAt,
+    eventEntries: lens.eventEntries,
+    label: `${runId} · ${info.name} · seed ${lens.seed} · ${steps} steps`,
+    ...(lens.replay ? { replay: lens.replay } : {}),
+    nonFiniteRows: lens.nonFiniteRows,
   };
 
   return {
     source,
-    decoded,
-    health: replayHealth(decoded),
-    ticks: ticksFromRecording(decoded),
+    health: replayHealth(lens),
+    ticks: ticksFromLens(lens),
     bytes: bytes.byteLength,
     steps,
     availableSteps: expected > 0 ? expected : raw.steps,

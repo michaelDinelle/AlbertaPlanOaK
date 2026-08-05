@@ -1482,19 +1482,15 @@ describe('the theater loader on a v4 lane', () => {
       envId: 'Chain-cont-v0',
       seed: 0,
       expectedSteps: 100,
-      maxSteps: 25,
       fetchImpl: laneFetch(fx, log),
     });
 
-    const plan = planPrefixV4(chunkTableFromMeta(fx.meta) ?? [], 25);
-    expect(log.ranges).toEqual([`bytes=0-${plan.bytes - 1}`]);
-    // whole chunks: 25 wanted -> 30 fetched, decoded, then clamped to maxSteps
-    expect(plan.steps).toBe(30);
-    expect(rec.bytes).toBe(plan.bytes);
-    expect(rec.steps).toBe(25);
+    // Full-horizon law: the whole lane, no Range prefix, no decode cap.
+    expect(log.ranges).toEqual([null]);
+    expect(rec.steps).toBe(100);
     expect(rec.availableSteps).toBe(100);
     expect(rec.source.kind).toBe('recording');
-    expect(rec.source.frames.length).toBe(26);
+    expect(rec.source.frameCount).toBe(101);
     expect(rec.health.damaged).toBe(false);
   });
 
@@ -1505,12 +1501,12 @@ describe('the theater loader on a v4 lane', () => {
     });
     const log: LaneServerLog = { ranges: [] };
     const rec = await loadTheaterRecording({
-      runId: 'demo', envId: 'Chain-cont-v0', seed: 0, maxSteps: 10,
+      runId: 'demo', envId: 'Chain-cont-v0', seed: 0,
       fetchImpl: laneFetch(bare, log),
     });
     expect(log.ranges).toEqual([null]); // no Range header at all
     expect(rec.bytes).toBe(bare.bytes.byteLength);
-    expect(rec.steps).toBe(10);
+    expect(rec.steps).toBe(60);
   });
 
   test('a v4 body cut mid-chunk still opens on the whole chunks before the cut', async () => {
@@ -1519,7 +1515,7 @@ describe('the theater loader on a v4 lane', () => {
     const truncated: EncodedV4 = { ...fx, bytes: fx.bytes.slice(0, cut) };
     const log: LaneServerLog = { ranges: [] };
     const rec = await loadTheaterRecording({
-      runId: 'demo', envId: 'Chain-cont-v0', seed: 0, maxSteps: 60,
+      runId: 'demo', envId: 'Chain-cont-v0', seed: 0,
       fetchImpl: laneFetch(truncated, log),
     });
     expect(rec.steps).toBe(20);
@@ -1616,13 +1612,12 @@ describe('the artisan harness on a v4 lane', () => {
     const realFetch = globalThis.fetch;
     globalThis.fetch = laneFetch(fx, log, { runId: 'v4-run', steps: 100 });
     try {
-      const source = await loadHarnessSource('Chain-cont-v0', { runId: 'v4-run', maxSteps: 15 });
+      const source = await loadHarnessSource('Chain-cont-v0', { runId: 'v4-run' });
       // a fixture fallback would be the silent failure mode here
       expect(source.note).toBeUndefined();
       expect(source.kind).toBe('recording');
-      expect(source.frames.length).toBe(16);
-      const plan = planPrefixV4(chunkTableFromMeta(fx.meta) ?? [], 15);
-      expect(log.ranges).toEqual([`bytes=0-${plan.bytes - 1}`]);
+      expect(source.frameCount).toBe(101);
+      expect(log.ranges).toEqual([null]); // full lane, no prefix range
     } finally {
       globalThis.fetch = realFetch;
     }

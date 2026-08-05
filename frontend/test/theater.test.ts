@@ -502,7 +502,7 @@ describe('frame cursor', () => {
     expect(step.sequential).toBe(true);
     expect(step.from).toBe(8);
     expect(step.to).toBe(7);
-    expect(collectEvents([], step.from, step.to, [])).toEqual([]);
+    expect(collectEvents(() => [], step.from, step.to, [])).toEqual([]);
   });
 
   test('positions clamp to the frame range', () => {
@@ -513,10 +513,11 @@ describe('frame cursor', () => {
 
   test('collectEvents drains an inclusive frame range into one buffer', () => {
     const events: SimEvent[][] = [[], [{ type: 'goal' }], [], [{ type: 'done' }, { type: 'teleport' }]];
+    const at = (i: number): readonly SimEvent[] => events[i] ?? [];
     const out: SimEvent[] = [{ type: 'cue', value: 0 }];
-    collectEvents(events, 1, 3, out);
+    collectEvents(at, 1, 3, out);
     expect(out).toEqual([{ type: 'goal' }, { type: 'done' }, { type: 'teleport' }]);
-    collectEvents(events, 2, 2, out);
+    collectEvents(at, 2, 2, out);
     expect(out).toEqual([]);
   });
 
@@ -524,7 +525,7 @@ describe('frame cursor', () => {
     const events: SimEvent[][] = [[], [{ type: 'goal' }], [], [{ type: 'done' }, { type: 'teleport' }]];
     const out: SimEvent[] = [];
     const frames: number[] = [99];
-    collectEvents(events, 0, 3, out, frames);
+    collectEvents((i) => events[i] ?? [], 0, 3, out, frames);
     expect(frames).toEqual([1, 3, 3]);
     expect(frames).toHaveLength(out.length);
   });
@@ -817,11 +818,11 @@ describe('loadTheaterRecording', () => {
     expect(recording.source.seed).toBe(3);
     expect(recording.source.controlHz).toBe(ENVS['HalfCheetah-v4'].controlHz);
     expect(recording.source.discretePose).toBe(false);
-    // frames[0] is the synthesized init frame (step -1)
-    expect(recording.source.frames).toHaveLength(201);
-    expect(recording.source.frames[0]?.step).toBe(-1);
-    expect(recording.source.frames[200]?.step).toBe(199);
-    expect(recording.source.events).toHaveLength(201);
+    // frame 0 is the synthesized init frame (step -1); the lens serves the full lane
+    expect(recording.source.frameCount).toBe(201);
+    expect(recording.source.frameAt(0).step).toBe(-1);
+    expect(recording.source.frameAt(200).step).toBe(199);
+    expect(recording.source.eventsAt(0)).toEqual([]);
     expect(recording.source.label).toContain('seed 3');
     expect(recording.health.damaged).toBe(false);
   });
@@ -867,17 +868,16 @@ describe('loadTheaterRecording', () => {
     expect(recording.steps).toBe(32);
   });
 
-  test('maxSteps clamps the decode without breaking the frame contract', async () => {
+  test('the FULL lane decodes — there is no cap and no truncation note to write', async () => {
     const recording = await loadTheaterRecording({
       runId: 'demo',
       envId: 'HalfCheetah-v4',
       seed: 3,
       expectedSteps: 500,
-      maxSteps: 40,
       fetchImpl: fakeFetch({ bytes: makeActionsBin(500) }),
     });
-    expect(recording.steps).toBe(40);
-    expect(recording.source.frames).toHaveLength(41);
+    expect(recording.steps).toBe(500);
+    expect(recording.source.frameCount).toBe(501);
     expect(recording.availableSteps).toBe(500);
   });
 
