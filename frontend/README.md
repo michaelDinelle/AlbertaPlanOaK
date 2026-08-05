@@ -71,9 +71,10 @@ Routes:
 
 | Route | View |
 |---|---|
-| `#/` | run gallery |
+| `#/` | THE WALL — one run, one environment, every recorded seed at once (hero + ghosts, leaderboard rail, env chips) |
+| `#/runs` | run gallery |
 | `#/run/:id` | run dashboard (`?tab=overview\|envs\|lanes\|recordings`) |
-| `#/watch` | live wall — fleets still emitting heartbeats |
+| `#/watch` | live fleets — runs still emitting heartbeats |
 | `#/watch/:id` | one fleet, live |
 | `#/theater` | recording picker |
 | `#/theater/:id/:envId/:seed` | replay one recorded lane |
@@ -211,8 +212,10 @@ property of the run, not of the app — `fleet.py gate` refuses those roots, and
 dashboard says so in a banner.
 
 **The theater says a run has no recordings.** It was written without
-`OAK_RECORD_ACTIONS` / `OAK_RECORD_SEEDS`. Only `recordVersion: 3` lanes are
-servable; older record formats are ignored on purpose.
+`OAK_RECORD_ACTIONS` / `OAK_RECORD_SEEDS`. `recordVersion` 3 (flat f32, 64 B/step)
+and 4 (the compact chunked codec — `src/sim/RECORD_V4_SPEC.md`, default since
+2026-08-04, ~20× smaller, all-lane Tier-L ≈ 3 GiB) are servable; older record
+formats are ignored on purpose.
 
 **A scene looks wrong.** Turn on the ground-truth overlay (`g`, or `&debug=1` in
 the harness). If the art disagrees with the overlay it is a scene bug; if the

@@ -93,6 +93,15 @@ motes). Mid-tier events (door open, key pickup) use `burst` at reduced scale, no
   DPR 1, ≤40 draw calls, ≤50k tris. (This is the future wall-view contract.)
 Kit factories take `tier` and scale themselves — prefer kit scaling over hand-rolled.
 
+## The reserved ghost layer (host-owned, additive 2026-08-04)
+
+The host MAY attach one host-owned group named **`oakGhostLayer`** (`kit/ghosts` — every
+seed of the env drawn as instanced ghosts around the hero) to the scene AFTER `init()`
+resolves, and detaches it before any rebuild. Scenes MUST NOT read, move, re-parent,
+traverse into or dispose it, MUST NOT count it in `manifest.budget` or return anything
+inside it from `probes()`, and MUST NOT create a group of their own by that name. It is
+not part of the scene; it is the population, standing behind it.
+
 ## The 16 briefs
 
 Each brief: setting → hero elements → accuracy hooks → celebration skin → idle motion.

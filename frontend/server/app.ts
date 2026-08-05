@@ -16,12 +16,14 @@ import {
   runIndexCacheFile,
 } from './config';
 import { corsHeaders } from './cors';
+import { deriveCurves, parseCurvesQuery } from './curves';
 import { deriveFleetColumnar, parseFleetQuery } from './fleetDerive';
 import { statOrNull } from './jsonl';
 import { createLiveResponse } from './live';
 import { findRecording } from './recordings';
 import { RunIndex, buildRunDetail } from './runIndex';
 import { readRoles } from './roles';
+import { deriveWall, parseWallRequest, wallCacheFor } from './wall';
 
 export interface AppOptions {
   benchRoot?: string;
@@ -165,6 +167,10 @@ export function createApp(opts: AppOptions = {}): App {
   // must not read — or overwrite — the first store's entries.
   const cacheFile = opts.cacheFile === undefined ? runIndexCacheFile(benchRoot) : opts.cacheFile;
   const fleetCache = opts.fleetCacheDir === undefined ? fleetCacheDir(benchRoot) : opts.fleetCacheDir;
+  // The wall's derived cache follows the same setting: production takes the real
+  // per-bench-root directory, `null` disables persistence, and a test-supplied
+  // directory gets a `wall/` subdirectory of it rather than the repo's .cache.
+  const wallCache = wallCacheFor(benchRoot, opts.fleetCacheDir);
   const distDir = resolve(opts.distDir ?? DIST_DIR);
   const production = opts.production ?? process.env['NODE_ENV'] === 'production';
 
@@ -181,6 +187,19 @@ export function createApp(opts: AppOptions = {}): App {
     if (head === 'roles' && segs.length === 2) {
       const roles: RolesResponse = await readRoles(benchRoot);
       return json(roles);
+    }
+
+    // Per-task normalization floors (written by `fleet.py floors` from a zero/random
+    // policy sweep; see FLOORS.json's floorsSchemaVersion). Served verbatim; absent
+    // until a floor run has been extracted.
+    if (head === 'floors' && segs.length === 2) {
+      const floorsPath = resolve(benchRoot, 'FLOORS.json');
+      if ((await statOrNull(floorsPath)) === null) return fail(404, 'no floors extracted');
+      try {
+        return json(JSON.parse(await Bun.file(floorsPath).text()));
+      } catch {
+        return fail(500, 'internal error');
+      }
     }
 
     if (head !== 'runs') return fail(404, 'unknown endpoint');
@@ -218,6 +237,48 @@ export function createApp(opts: AppOptions = {}): App {
       return json(data, { cache: run.entry.inFlight ? 'no-store' : 'private, max-age=30' });
     }
 
+    // /api/runs/:id/curves
+    if (sub === 'curves' && segs.length === 4) {
+      const parsed = parseCurvesQuery(url);
+      if ('error' in parsed) return fail(400, parsed.error);
+      const data = await deriveCurves({
+        id: run.id,
+        dir: run.dir,
+        query: parsed.query,
+        inFlight: run.entry.inFlight,
+        cacheDir: fleetCache,
+      });
+      return json(data, { cache: run.entry.inFlight ? 'no-store' : 'private, max-age=30' });
+    }
+
+    // /api/runs/:id/wall/:envId — every recorded seed of one env, projected + deflated
+    if (sub === 'wall' && segs.length === 5) {
+      const parsed = parseWallRequest(segs[4], url);
+      if ('error' in parsed) return fail(parsed.status, parsed.error);
+      const recs = await index.recordingsFor(run.id);
+      const { body, header } = await deriveWall({
+        id: run.id,
+        dir: run.dir,
+        envId: parsed.envId,
+        stride: parsed.stride,
+        recordings: recs,
+        inFlight: run.entry.inFlight,
+        cacheDir: wallCache,
+      });
+      return new Response(req.method === 'HEAD' ? null : body, {
+        status: 200,
+        headers: {
+          'content-type': 'application/octet-stream',
+          'content-length': String(body.byteLength),
+          // Advertised so a client can size the split without reading the body — the
+          // body carries the same two numbers, this is the cheap HEAD answer.
+          'x-wall-header-bytes': String(header.headerBytes),
+          'x-wall-binary-bytes': String(header.binaryBytes),
+          'cache-control': run.entry.inFlight ? 'no-store' : 'private, max-age=30',
+        },
+      });
+    }
+
     // /api/runs/:id/live
     if (sub === 'live' && segs.length === 4) {
       return createLiveResponse(req, { id: run.id, dir: run.dir, steps: run.entry.steps });
@@ -232,6 +293,9 @@ export function createApp(opts: AppOptions = {}): App {
       const recs = await index.recordingsFor(run.id);
       const rec = findRecording(recs, envId, Number(seedText));
       if (rec === undefined) return fail(404, 'unknown recording');
+      // The v4 fields are ADDITIVE and only present on v4 lanes, so a v3 lane's
+      // descriptor stays byte-comparable with what this endpoint has always sent.
+      // `chunks` is what makes the theater's prefix fetch chunk-aware.
       return json({
         envId: rec.envId,
         seed: rec.seed,
@@ -239,6 +303,9 @@ export function createApp(opts: AppOptions = {}): App {
         actDim: rec.actDim,
         recordVersion: rec.recordVersion,
         bytes: rec.bytes,
+        ...(rec.codec !== undefined ? { codec: rec.codec } : {}),
+        ...(rec.codecVersion !== undefined ? { codecVersion: rec.codecVersion } : {}),
+        ...(rec.chunks !== undefined ? { chunks: rec.chunks } : {}),
       });
     }
 

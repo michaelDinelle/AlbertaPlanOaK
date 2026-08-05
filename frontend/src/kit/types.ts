@@ -6,6 +6,13 @@
 // quality-tier selection + frame governor, thumbnails, the debug toggle.
 // SCENE OWNS: its THREE.Scene, fog, camera (built from kit rigs), lights (kit rig
 // presets only), all meshes, ambient motion.
+//
+// RESERVED GROUP (additive, 2026-08-04). The host MAY attach one host-owned group named
+// `oakGhostLayer` (kit/ghosts — every seed of the env drawn as instanced ghosts) to the
+// scene AFTER init() resolves, and detaches it before any rebuild. Scenes MUST NOT read,
+// move, re-parent, traverse into or dispose it, MUST NOT count it in `budget` or return
+// anything inside it from `probes()`, and MUST NOT create a group of their own by that
+// name. It is not part of the scene; it is the population, standing behind it.
 
 import type * as THREE from 'three';
 import type { EnvId } from '@shared/envs';

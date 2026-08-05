@@ -22,6 +22,7 @@ import type { EnvId } from '@shared/envs';
 // frames the same way (`player.advanceCursor` carries the catch-up rule).
 import { makePlaybackClock, sampleFrame, type HarnessSource, type PlaybackClock } from '@kit/harness';
 import { celebrationPulse } from '@kit/celebrate';
+import type { GhostLayer } from '@kit/ghosts';
 import { configureRendererShadows } from '@kit/lighting';
 import { buildComposer, type ComposerHandle } from '@kit/post';
 import { TOKENS } from '@kit/tokens';
@@ -60,9 +61,51 @@ export interface HostFrameInfo {
   /** draws/triangles latched at the scene's onAfterRender, before the post chain */
   draws: number;
   triangles: number;
+  /**
+   * How many of `draws` the ghost layer accounts for (0 without one). The ghost group
+   * is a child of the scene, so it is already inside the latch — this is the split, so
+   * a view can say "34 draws, 8 of them the population" instead of guessing.
+   */
+  ghostDraws: number;
+  /**
+   * How many of `triangles` the ghost layer accounts for (0 without one).
+   *
+   * This is the split that MATTERS. Instancing pins the population's draw count to the
+   * body plan — 8 for cheetah at 64 ghosts and at 8192 — but its triangle count is
+   * strictly linear in the ghost count (kit/ghosts `GHOST_TRIANGLES_PER_GHOST`: a hero
+   * cheetah ghost is 1188, so 1024 seeds are 1.22M triangles, several times a whole
+   * scene's budget). Without the split, `triangles` reads over budget and no caller can
+   * tell an expensive SCENE from a large POPULATION.
+   */
+  ghostTriangles: number;
+  /**
+   * The SCENE's manifest budget — it governs `draws − ghostDraws` and
+   * `triangles − ghostTriangles`. The population is a separate, declared cost: it is
+   * chosen by `maxGhosts` against `GhostLayer.trianglesPerGhost()`, not by this.
+   */
   budget: { drawCalls: number; triangles: number };
   /** true while the last jump was a scrub (no events delivered) */
   scrubbed: boolean;
+}
+
+/**
+ * The population layer, mounted alongside the hero scene (kit/ghosts).
+ *
+ * The host attaches `layer.group` (named `oakGhostLayer`) to the scene AFTER `init()`
+ * and detaches it before every rebuild, so the layer survives tier changes and no scene
+ * ever sees it — the boundary in kit/types.ts. The host also ticks the layer with the
+ * SAME dt and playback clock it hands the scene, so a glint freezes on pause like every
+ * other celebration envelope (canon lesson 7).
+ */
+export interface SceneHostGhosts {
+  /** the caller builds and OWNS this one; the host never disposes it */
+  layer: GhostLayer;
+  /**
+   * Optional: rebuild the layer at a new quality tier (instance detail scales with tier
+   * exactly like a scene's). The host disposes the layer it replaces and owns whatever
+   * this returns. Without it, one layer is carried across every tier change.
+   */
+  rebuild?(tier: QualityTier): GhostLayer;
 }
 
 export interface SceneHostOptions {
@@ -71,6 +114,8 @@ export interface SceneHostOptions {
   tier?: QualityTier;
   debug?: boolean;
   paused?: boolean;
+  /** OPTIONAL population layer — omit and the theater behaves exactly as before */
+  ghosts?: SceneHostGhosts;
   /** initial frame position */
   at?: number;
   speed?: number;
@@ -95,6 +140,8 @@ export interface SceneHostHandle {
   readonly tier: QualityTier;
   readonly debug: boolean;
   readonly canvas: HTMLCanvasElement;
+  /** the LIVE population layer (a tier rebuild can replace it), or null */
+  readonly ghosts: GhostLayer | null;
   play(): void;
   pause(): void;
   /** returns the new playing state */
@@ -187,6 +234,12 @@ export async function mountSceneHost(
 
   const governor: TierGovernor = makeTierGovernor({ tier: options.tier ?? 'hero' });
   let tier: QualityTier = options.tier ?? 'hero';
+  const ghostConfig = options.ghosts ?? null;
+  let ghostLayer: GhostLayer | null = ghostConfig?.layer ?? null;
+  /** the tier the CURRENT ghost layer was built for */
+  let ghostTier: QualityTier = tier;
+  /** true once the host built the live layer itself (and therefore must dispose it) */
+  let ghostOwned = false;
   let debugOn = options.debug === true;
   let scene: SceneModule | null = null;
   let post: ComposerHandle | null = null;
@@ -224,6 +277,8 @@ export async function mountSceneHost(
     p95Threshold: 0,
     draws: 0,
     triangles: 0,
+    ghostDraws: 0,
+    ghostTriangles: 0,
     budget: manifest.budget,
     scrubbed: true,
   };
@@ -250,6 +305,9 @@ export async function mountSceneHost(
   const buildScene = async (): Promise<void> => {
     const generation = ++buildGeneration;
     building = true;
+    // The ghost layer outlives scene rebuilds, so detach it BEFORE the scene that is
+    // holding it is disposed — a scene must never dispose (or even see) this group.
+    ghostLayer?.group.removeFromParent();
     scene?.dispose();
     post?.dispose();
     scene = null;
@@ -283,6 +341,21 @@ export async function mountSceneHost(
       sceneTriangles = renderer.info.render.triangles;
       sceneHook.apply(this, args);
     };
+    // Ghosts: rebuild at the new tier when the caller supplied a factory, guarded by the
+    // same generation counter — a superseded build disposes what it just made and leaves.
+    if (ghostConfig?.rebuild && ghostTier !== tier) {
+      const next = ghostConfig.rebuild(tier);
+      if (destroyed || generation !== buildGeneration) {
+        next.dispose();
+      } else {
+        if (ghostOwned) ghostLayer?.dispose();
+        ghostLayer = next;
+        ghostOwned = true;
+        ghostTier = tier;
+      }
+    }
+    if (ghostLayer) module.scene.add(ghostLayer.group);
+
     post = buildComposer(renderer, module.scene, module.camera, module.manifest.postConfig, tier, size);
     module.setDebug(debugOn);
     applySize();
@@ -330,6 +403,8 @@ export async function mountSceneHost(
     frameUpdate.dtReal = dtReal;
     frameUpdate.scrubbed = !step.sequential;
     scene.update(frameUpdate);
+    // same dt, same playback clock as the scene: a ghost glint freezes on pause
+    ghostLayer?.update(dtReal, clock.time());
 
     renderer.info.reset();
     // the scene's OWN channel (celebration pools own theirs), so one lane's +1
@@ -370,6 +445,8 @@ export async function mountSceneHost(
     info.p95Threshold = governor.threshold;
     info.draws = sceneCalls;
     info.triangles = sceneTriangles;
+    info.ghostDraws = ghostLayer ? ghostLayer.draws() : 0;
+    info.ghostTriangles = ghostLayer ? ghostLayer.triangles() : 0;
     info.scrubbed = !step.sequential;
     options.onFrame?.(info);
   };
@@ -385,6 +462,9 @@ export async function mountSceneHost(
     },
     get debug() {
       return debugOn;
+    },
+    get ghosts() {
+      return ghostLayer;
     },
     canvas,
     play() {
@@ -420,6 +500,10 @@ export async function mountSceneHost(
       cancelAnimationFrame(raf);
       observer?.disconnect();
       window.removeEventListener('resize', onWindowResize);
+      // the caller's own layer is theirs to dispose; anything the host built is the
+      // host's to release
+      ghostLayer?.group.removeFromParent();
+      if (ghostOwned) ghostLayer?.dispose();
       scene?.dispose();
       post?.dispose();
       pendingModule?.dispose();

@@ -122,7 +122,7 @@ function mountList(host: HTMLElement): { destroy(): void } {
         'Nothing is running',
         'No fleet root has been written to in the last two minutes. The most recent runs are below — '
           + 'their live views replay what is already on disk.',
-        [linkButton('Browse every run', '#/')],
+        [linkButton('Browse every run', '#/runs')],
       ),
     );
     listHead.hidden = false;
@@ -147,7 +147,7 @@ function mountList(host: HTMLElement): { destroy(): void } {
             load(true);
           }, {
             title: 'Could not reach the API',
-            actions: [linkButton('Back to the gallery', '#/')],
+            actions: [linkButton('Back to the gallery', '#/runs')],
           }),
         );
       },
@@ -205,19 +205,19 @@ function mountLive(host: HTMLElement, id: string): { destroy(): void } {
    */
   const chartStack = el('div', { class: 'block-stack' }, [
     el('section', { class: 'block' }, [
-      eyebrow('Delivered rate', el('span', { class: 'eyebrow-note', text: 'P10 · median · P90, all lanes' })),
+      eyebrow('Average reward rate', el('span', { class: 'eyebrow-note', text: 'P10 · median · P90, all seeds' })),
       bandHost,
     ]),
     el('div', { class: 'block-grid' }, [
       el('section', { class: 'block' }, [eyebrow('Throughput'), throughputHost]),
-      el('section', { class: 'block' }, [eyebrow('Alive vs dead lanes'), livesHost]),
+      el('section', { class: 'block' }, [eyebrow('Non-diverged seeds'), livesHost]),
     ]),
   ]);
   chartStack.hidden = true;
 
   const headActions = el('div', { class: 'run-head-actions' }, [
     linkButton('Full dashboard', `#/run/${encodeURIComponent(id)}`, {
-      title: 'Survival, plasticity, per-env slices and the lane ledger',
+      title: 'Survival, peak & retention, per-env slices and the seed ledger',
     }),
   ]);
 
@@ -255,18 +255,18 @@ function mountLive(host: HTMLElement, id: string): { destroy(): void } {
     const last = ordered.reduce((a, b) => (b.step > a.step ? b : a));
 
     statRow.replaceChildren(
-      statTile('median rate', formatSigned(last.deliveredRateP50, 4), {
+      statTile('median reward rate', formatSigned(last.deliveredRateP50, 4), {
         hint: `P10 ${formatSigned(last.deliveredRateP10, 3)} · P90 ${formatSigned(last.deliveredRateP90, 3)}`,
         tone: last.deliveredRateP50 > 0 ? 'pos' : last.deliveredRateP50 < 0 ? 'neg' : 'dim',
       }),
-      statTile('positive lanes', formatPercent(last.positiveRateFraction, 1), {
+      statTile('% seeds > 0', formatPercent(last.positiveRateFraction, 1), {
         hint: `${formatCount(last.positiveRateLaneCount)} of ${formatCount(last.alive + last.dead)}`,
       }),
-      statTile('alive', formatCount(last.alive), {
-        hint: `${formatCount(last.dead)} dead`,
+      statTile('non-diverged', formatCount(last.alive), {
+        hint: `${formatCount(last.dead)} numerically diverged`,
         tone: last.dead > 0 ? 'neg' : 'neutral',
       }),
-      statTile('best lane', formatRate(last.bestLaneDeliveredRate), { hint: `seed ${formatCount(last.bestLaneSeed)}` }),
+      statTile('best seed', formatRate(last.bestLaneDeliveredRate), { hint: `seed ${formatCount(last.bestLaneSeed)}` }),
       statTile('throughput', `${formatStep(last.aggStepsPerSecond)}/s`, { hint: formatWall(last.wallSeconds) }),
       statTile('step', formatStep(last.step), { hint: horizon > 0 ? `of ${formatStep(horizon)}` : 'horizon unknown' }),
     );
@@ -307,12 +307,12 @@ function mountLive(host: HTMLElement, id: string): { destroy(): void } {
       livesChart = timeSeries({
         steps: series.steps,
         lines: [
-          { label: 'alive', values: series.alive, stroke: VIZ.series },
-          { label: 'dead', values: series.dead, stroke: VIZ.crit },
+          { label: 'non-diverged', values: series.alive, stroke: VIZ.series },
+          { label: 'diverged', values: series.dead, stroke: VIZ.crit },
         ],
         height: 150,
         yFormat: (v) => formatCount(v),
-        yUnit: 'lanes',
+        yUnit: 'seeds',
         legend: true,
       });
       charts.push(livesChart);
@@ -391,7 +391,7 @@ function mountLive(host: HTMLElement, id: string): { destroy(): void } {
           undefined,
           {
             title: `No run named “${id}”`,
-            actions: [linkButton('Back to Watch', '#/watch'), linkButton('Browse every run', '#/')],
+            actions: [linkButton('Back to Watch', '#/watch'), linkButton('Browse every run', '#/runs')],
           },
         ),
       );

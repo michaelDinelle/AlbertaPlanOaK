@@ -33,6 +33,7 @@ import type {
 import { FLEET_TAIL_BYTES, INDEX_TTL_MS, IN_FLIGHT_MS } from './config';
 import { parseJsonl, parseJsonlDetailed, readTail, statOrNull } from './jsonl';
 import { roleMap, readRoles, type RunRole } from './roles';
+import { adaptSummary } from './summaryAdapter';
 import {
   recordingsSignature,
   scanRecordings,
@@ -64,8 +65,13 @@ interface CachedRun {
   hasRecordings: boolean;
 }
 
+// `v` bumps whenever DISCOVERY SEMANTICS change (not just file shapes): a derived
+// record is memoized on file mtimes alone, so a code change that alters what a scan
+// would find must invalidate persisted records — the files it mis-scanned never
+// change again. v1 -> v2: RECORD_VERSION_SERVABLE gained 4; v1 caches persisted
+// hasRecordings:false for v4-only roots forever.
 interface CacheFile {
-  v: 1;
+  v: 2;
   benchRoot: string;
   runs: Record<string, CachedRun>;
 }
@@ -351,7 +357,7 @@ export class RunIndex {
       const parsed: unknown = JSON.parse(await Bun.file(this.cacheFile).text());
       if (parsed === null || typeof parsed !== 'object') return;
       const f = parsed as Partial<CacheFile>;
-      if (f.v !== 1 || f.benchRoot !== this.benchRoot || typeof f.runs !== 'object' || f.runs === null) return;
+      if (f.v !== 2 || f.benchRoot !== this.benchRoot || typeof f.runs !== 'object' || f.runs === null) return;
       for (const [id, rec] of Object.entries(f.runs)) {
         if (rec !== null && typeof rec === 'object' && typeof (rec as CachedRun).key === 'string') {
           this.cache.set(id, rec as CachedRun);
@@ -371,7 +377,7 @@ export class RunIndex {
     this.lastPersistAt = now;
     this.dirty = false;
     const payload: CacheFile = {
-      v: 1,
+      v: 2,
       benchRoot: this.benchRoot,
       runs: Object.fromEntries(this.cache),
     };
@@ -397,11 +403,27 @@ export async function ensureCacheDir(file: string): Promise<void> {
 
 // ---------- run detail ----------
 
-async function readJsonFile<T>(path: string): Promise<T | null> {
+/**
+ * Read + parse a JSON file, keeping "there is no file" and "the file is not JSON"
+ * APART. Collapsing them into one `null` makes every downstream empty state a
+ * guess, and the wrong guess sends the user to re-run the tool that wrote the
+ * broken file. `missing` is a normal state; `unreadable` is a defect worth naming.
+ */
+type JsonRead<T> =
+  | { value: T; error: null }
+  | { value: null; error: 'missing' | 'unreadable' };
+
+async function readJsonFile<T>(path: string): Promise<JsonRead<T>> {
+  let text: string;
   try {
-    return JSON.parse(await Bun.file(path).text()) as T;
+    text = await Bun.file(path).text();
   } catch {
-    return null;
+    return { value: null, error: 'missing' };
+  }
+  try {
+    return { value: JSON.parse(text) as T, error: null };
+  } catch {
+    return { value: null, error: 'unreadable' };
   }
 }
 
@@ -415,7 +437,12 @@ async function readTextOrNull(path: string): Promise<string | null> {
 }
 
 export async function buildRunDetail(run: ResolvedRun, recs: RecordingEntry[]): Promise<RunDetail> {
-  const summary = await readJsonFile<RunSummary>(join(run.dir, 'summary.json'));
+  // Every summary leaves this function in v2 vocabulary, whichever schema is on disk —
+  // the ~600 historical roots are never regenerated, and the client speaks one language.
+  const summaryRead = await readJsonFile<RunSummary>(join(run.dir, 'summary.json'));
+  const summary = adaptSummary(summaryRead.value);
+  // A present-but-unparseable summary is reported as such; missing stays plain null.
+  const summaryError = summaryRead.error === 'unreadable' ? 'unreadable' : null;
 
   const aggText = await readTextOrNull(join(run.dir, 'aggregate.jsonl'));
   const aggregate: AggregateRow[] = aggText === null ? [] : parseJsonl<AggregateRow>(aggText);
@@ -427,6 +454,7 @@ export async function buildRunDetail(run: ResolvedRun, recs: RecordingEntry[]): 
     id: run.id,
     meta: run.meta,
     summary,
+    summaryError,
     aggregate,
     deathsCount,
     recordings: toRecordingRefs(recs),
