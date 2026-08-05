@@ -99,10 +99,12 @@ const HOP_HEIGHT = 0.14;
 // gets, so this one runs closer to full strength than the noon courtyard's — but the burst
 // is 40 units from the camera, so its job is to mark the spot while the swarm does the
 // travelling.
-const BURST_SCALE = 0.9;
+const BURST_SCALE = 0.72;
 const RIPPLE_SCALE = 0.62;
 const BURST_PARTICLES = 130;
-const PULSE_STRENGTH = 0.58;
+// screen-level bloom pulse: goals land every 32 steps, so at boosted playback
+// this fires constantly — it must read as a chime, not a strobe
+const PULSE_STRENGTH = 0.3;
 const SIGH_STRENGTH = 0.85;
 
 /** the burst blooms at the mouths' throat height, not on the wet stone */
@@ -269,17 +271,6 @@ class FireflyCaveScene implements SceneModule {
       distance: thumb ? CAM_DISTANCE_THUMB : CAM_DISTANCE,
       azimuth: thumb ? CAM_AZIMUTH_THUMB : CAMERA_AZIMUTH,
       polar: thumb ? CAM_POLAR_THUMB : CAM_POLAR,
-      limits: {
-        // never under the water, never straight down onto a 1-unit-wide corridor
-        minPolar: 0.86,
-        maxPolar: 1.35,
-        // the azimuth arc keeps the camera on the near bank, which is the half of the
-        // cavern shell that back-face culling opens up
-        minAzimuth: CAMERA_AZIMUTH - CAM_YAW_RANGE,
-        maxAzimuth: CAMERA_AZIMUTH + CAM_YAW_RANGE,
-        minDistance: 11,
-        maxDistance: 38,
-      },
       fov: ctx.tokens.fovHero,
       near: 0.1,
       far: 900,
@@ -399,7 +390,7 @@ class FireflyCaveScene implements SceneModule {
         pool.burst(this.bloomPos, color, BURST_SCALE, time);
         pool.ripple(this.choicePos, color, RIPPLE_SCALE, time);
         pool.pulse.fire(PULSE_STRENGTH);
-        wisp.flare(1);
+        wisp.flare(0.6);
         const floodLight = world.rig.points[3];
         if (floodLight) floodLight.color.copy(color);
       } else if (ev.type === 'cue') {
@@ -436,14 +427,20 @@ class FireflyCaveScene implements SceneModule {
     const kindle = envelope(time - this.kindleAt, KINDLE_SECONDS, 3.4);
     const atCue = pos === CUE_CELL;
     crystal.setCue(cue);
-    crystal.setGlow(atCue ? 1 + 0.45 * kindle : 0);
+    // the memoranda beat: while the agent READS the bit the crystal is the
+    // brightest thing in the cave, with a slow breath that says "this, remember
+    // this" — the honesty gate (zero off cell 0) is unchanged
+    crystal.setGlow(atCue ? 1.3 + 0.45 * kindle + 0.18 * Math.sin(time * 2.1) : 0);
     crystal.setTime(time);
 
     // 7. the two mouths: equal at rest, doused together on a loss, and only ever
     //    asymmetric during the flare that resolves a win
     const flare = envelope(time - this.flareAt, FLARE_SECONDS, 2.3);
     const douse = envelope(time - this.douseAt, DOUSE_SECONDS, 1.6);
-    const rest = MOUTH_REST * (1 - 0.94 * douse);
+    // at the choice cell the QUESTION is being asked: both mouths breathe up
+    // together — equal by construction, so no cue information leaks
+    const asking = pos === CHOICE_CELL ? 0.8 : 0;
+    const rest = MOUTH_REST * (1 + asking) * (1 - 0.94 * douse);
     cyan.setGlow(rest + (this.winner === 0 ? MOUTH_FLARE * flare : 0));
     magenta.setGlow(rest + (this.winner === 1 ? MOUTH_FLARE * flare : 0));
     cyan.setTime(time);
@@ -461,7 +458,7 @@ class FireflyCaveScene implements SceneModule {
       const eased = 1 - (1 - flood) * (1 - flood);
       world.flood.points.position.x = this.choiceX + (this.cueX - this.choiceX) * eased;
       world.flood.setDensity(1);
-      world.flood.setIntensity(3.6 * (1 - flood * flood));
+      world.flood.setIntensity(2.4 * (1 - flood * flood));
     } else {
       world.flood.points.position.x = this.choiceX;
       world.flood.setDensity(0);
@@ -483,12 +480,12 @@ class FireflyCaveScene implements SceneModule {
     }
     const choiceLight = world.rig.points[2];
     if (choiceLight) {
-      choiceLight.intensity = 2.4 * (1 - 0.94 * douse) + 6 * flare;
+      choiceLight.intensity = 2.4 * (1 - 0.94 * douse) + 3.5 * flare;
     }
     const floodLight = world.rig.points[3];
     if (floodLight) {
       floodLight.position.x = world.flood.points.position.x;
-      floodLight.intensity = flooding ? 5.2 * (1 - flood * flood) : 0;
+      floodLight.intensity = flooding ? 3.4 * (1 - flood * flood) : 0;
     }
 
     // 10. one clock for the whole cave

@@ -70,13 +70,17 @@ export interface OrbitLimits {
 }
 
 /** House defaults: never under the floor, never straight down, a generous azimuth arc. */
+// THE one camera envelope (owner's ruling 2026-08-05: free orbit in EVERY
+// environment, no per-scene pens). Azimuth is unbounded so the eye can circle
+// continuously; polar never goes under the floor or straight down; distance
+// covers the smallest pond and the largest canyon.
 export const DEFAULT_ORBIT_LIMITS: OrbitLimits = Object.freeze({
   minPolar: 0.18,
   maxPolar: 1.36,
-  minAzimuth: -Math.PI,
-  maxAzimuth: Math.PI,
+  minAzimuth: -Infinity,
+  maxAzimuth: Infinity,
   minDistance: 2,
-  maxDistance: 60,
+  maxDistance: 140,
 });
 
 export function clamp(v: number, lo: number, hi: number): number {
@@ -191,6 +195,7 @@ export function makeOrbitRig(opts: OrbitRigOptions = {}): OrbitRig {
     rig.zoom(e.deltaY * zoomSpeed * desired.distance);
   };
 
+  const home: OrbitState = { ...desired };
   const rig: OrbitRig = {
     camera,
     target,
@@ -249,6 +254,12 @@ export function makeOrbitRig(opts: OrbitRigOptions = {}): OrbitRig {
     canvas.addEventListener('pointerup', onPointerUp);
     canvas.addEventListener('pointercancel', onPointerUp);
     canvas.addEventListener('wheel', onWheel, { passive: false });
+    // double-click: back to the composed home shot — the universal escape hatch
+    canvas.addEventListener('dblclick', () => {
+      desired.azimuth = home.azimuth;
+      desired.polar = home.polar;
+      desired.distance = home.distance;
+    });
   }
 
   return rig;
@@ -262,6 +273,8 @@ export const OrbitRig = makeOrbitRig;
 // ---------------------------------------------------------------------------
 
 export interface TrackRigOptions extends BaseCameraOptions {
+  /** attach pointer orbit/zoom around the tracked subject; omit for headless */
+  canvas?: HTMLCanvasElement | null;
   /** camera offset from the tracked point, world units */
   offset?: readonly [number, number, number];
   /** where the camera looks, relative to the tracked point */
@@ -284,6 +297,13 @@ export interface TrackRig extends RigHandle {
   /** smoothed world velocity of the target */
   readonly velocity: THREE.Vector3;
   setTarget(x: number, y: number, z: number): void;
+  /**
+   * Feed the SUBJECT'S OWN velocity (sim units) instead of deriving it from
+   * wall-clock target displacement. Without this, boosted playback multiplies
+   * the derived velocity by the speed factor and the look-ahead saturates —
+   * the camera pans permanently ahead of the animal at ×64 and above.
+   */
+  setVelocity(x: number, y: number, z: number): void;
   /** teleport / hard cut — no easing may cross a `teleport` event */
   snap(): void;
 }
@@ -313,14 +333,86 @@ export function makeTrackRig(opts: TrackRigOptions = {}): TrackRig {
   const maxLookAhead = opts.maxLookAhead ?? 3;
 
   let primed = false;
+  let externalVelocity = false;
+
+  // ---- user orbit around the SUBJECT: the follow never stops, the eye moves ----
+  // The composed offset is the home shot; a drag swings it around the runner
+  // (yaw + a clamped pitch) and the wheel breathes the distance. Nothing here
+  // fights the tracking — the offset itself is what rotates.
+  let userYaw = 0;
+  let userPitch = 0;
+  let userZoom = 1;
+  const orbited = new THREE.Vector3();
+  const Y_AXIS = new THREE.Vector3(0, 1, 0);
+  const PITCH_MIN = -0.5;
+  const PITCH_MAX = 0.9;
+  const ZOOM_MIN = 0.45;
+  const ZOOM_MAX = 2.8;
 
   const computeDesired = (): void => {
     lead.copy(velocity).multiplyScalar(lookAhead);
     const len = lead.length();
     if (len > maxLookAhead) lead.multiplyScalar(maxLookAhead / len);
-    desiredPos.copy(target).add(offset).add(lead);
+    orbited.copy(offset);
+    if (userPitch !== 0) {
+      // pitch about the horizontal axis perpendicular to the (flattened) offset
+      const px = -offset.z;
+      const pz = offset.x;
+      const norm = Math.hypot(px, pz) || 1;
+      orbited.applyAxisAngle(scratchAxis.set(px / norm, 0, pz / norm), userPitch);
+    }
+    orbited.applyAxisAngle(Y_AXIS, userYaw).multiplyScalar(userZoom);
+    // never under the ground — but the floor may not move the HOME shot, whose
+    // composed height is the scene's own business (the cheetah cam sits at 0.33)
+    const minY = Math.min(offset.y, 0.3);
+    if (orbited.y < minY) orbited.y = minY;
+    desiredPos.copy(target).add(orbited).add(lead);
     desiredLook.copy(target).add(lookOffset).add(lead);
   };
+  const scratchAxis = new THREE.Vector3();
+
+  // pointer controls (optional) — same grammar as the orbit rig
+  const canvas = opts.canvas ?? null;
+  if (canvas) {
+    let dragging = false;
+    let lastX = 0;
+    let lastY = 0;
+    let activePointer = -1;
+    canvas.addEventListener('pointerdown', (e: PointerEvent) => {
+      if (e.button !== 0) return;
+      dragging = true;
+      activePointer = e.pointerId;
+      lastX = e.clientX;
+      lastY = e.clientY;
+      try { canvas.setPointerCapture(e.pointerId); } catch { /* inactive pointer */ }
+    });
+    canvas.addEventListener('pointermove', (e: PointerEvent) => {
+      if (!dragging || e.pointerId !== activePointer) return;
+      userYaw -= (e.clientX - lastX) * 0.006;
+      userPitch = Math.min(Math.max(userPitch + (e.clientY - lastY) * 0.004, PITCH_MIN), PITCH_MAX);
+      lastX = e.clientX;
+      lastY = e.clientY;
+    });
+    const endDrag = (e: PointerEvent): void => {
+      if (e.pointerId !== activePointer) return;
+      dragging = false;
+      activePointer = -1;
+      try { canvas.releasePointerCapture(e.pointerId); } catch { /* released */ }
+    };
+    canvas.addEventListener('pointerup', endDrag);
+    canvas.addEventListener('pointercancel', endDrag);
+    canvas.addEventListener('lostpointercapture', () => { dragging = false; activePointer = -1; });
+    canvas.addEventListener('wheel', (e: WheelEvent) => {
+      e.preventDefault();
+      userZoom = Math.min(Math.max(userZoom * (1 + e.deltaY * 0.0011), ZOOM_MIN), ZOOM_MAX);
+    }, { passive: false });
+    // double-click: back to the composed home shot — the universal escape hatch
+    canvas.addEventListener('dblclick', () => {
+      userYaw = 0;
+      userPitch = 0;
+      userZoom = 1;
+    });
+  }
 
   const rig: TrackRig = {
     camera,
@@ -333,8 +425,14 @@ export function makeTrackRig(opts: TrackRigOptions = {}): TrackRig {
         primed = true;
       }
     },
+    setVelocity(x, y, z) {
+      externalVelocity = true;
+      rawVelocity.set(x, y, z);
+    },
     update(dt) {
-      if (dt > 0) {
+      if (externalVelocity) {
+        if (dt > 0) velocity.lerp(rawVelocity, damp(velRate, dt));
+      } else if (dt > 0) {
         rawVelocity.copy(target).sub(previousTarget).divideScalar(dt);
         velocity.lerp(rawVelocity, damp(velRate, dt));
       }

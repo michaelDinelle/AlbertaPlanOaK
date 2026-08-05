@@ -258,16 +258,6 @@ class SunlitDescentScene implements SceneModule {
       distance: thumb ? CAM_DISTANCE_THUMB : CAM_DISTANCE,
       azimuth: thumb ? CAM_AZIMUTH_THUMB : CAM_AZIMUTH,
       polar: thumb ? CAM_POLAR_THUMB : CAM_POLAR,
-      limits: {
-        // never so high that the terraces flatten, never so low that the far shelves
-        // vanish behind the near risers
-        minPolar: 0.52,
-        maxPolar: 1.2,
-        minAzimuth: CAM_AZIMUTH - CAM_YAW_RANGE,
-        maxAzimuth: CAM_AZIMUTH + CAM_YAW_RANGE,
-        minDistance: 8,
-        maxDistance: 24,
-      },
       fov: ctx.tokens.fovHero,
       near: 0.1,
       far: 900,

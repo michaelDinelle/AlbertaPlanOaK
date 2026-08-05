@@ -338,16 +338,6 @@ class IvyGateScene implements SceneModule {
       distance: thumb ? CAM_DISTANCE_THUMB : CAM_DISTANCE,
       azimuth: thumb ? CAM_AZIMUTH_THUMB : CAM_AZIMUTH,
       polar: thumb ? CAM_POLAR_THUMB : CAM_POLAR,
-      limits: {
-        // never under the kerb, never straight down, and never round far enough that the
-        // gate goes edge-on again
-        minPolar: 0.42,
-        maxPolar: 0.95,
-        minAzimuth: CAM_AZIMUTH - CAM_YAW_RANGE,
-        maxAzimuth: CAM_AZIMUTH + CAM_YAW_RANGE,
-        minDistance: 8,
-        maxDistance: 22,
-      },
       fov: ctx.tokens.fovHero,
       near: 0.1,
       far: 900,

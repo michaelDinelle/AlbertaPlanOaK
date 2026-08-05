@@ -3,10 +3,10 @@
 // THE ONE IDEA: PARTIAL OBSERVABILITY IS THE SCENE. POMaze's agent gets eight wall bits
 // (its own 3 × 3 window) and four compass bits (the sign of the goal's offset, never the
 // distance). So the forest is drawn as the agent knows it: dense fog, a warm bubble of
-// light exactly one cell wide in every direction, spruce ranks that condense out of the
-// haze the moment they enter that window and dissolve the moment they leave it, and one
-// moth on the rim of the light carrying the only thing the agent is told about the goal —
-// which way. Press `g` and the ground-truth overlay draws the whole maze at once: that
+// light exactly one cell wide in every direction, and spruce ranks that condense out of
+// the haze the moment they enter that window and dissolve the moment they leave it. A
+// slim shaft of light stands on the live goal cell for the AUDIENCE — the agent never
+// sees it. Press `g` and the ground-truth overlay draws the whole maze at once: that
 // toggle, between "what it knows" and "what is there", is the drama of the scene.
 //
 // WHAT MAKES IT HONEST, structurally rather than by discipline
@@ -15,13 +15,15 @@
 //    the true bubble rather than a remembered one.
 //  * The floor is drawn under all 121 cells with a wall-blind tint, the interior holds no
 //    other structure, and the only silhouettes past the bubble live outside the playfield.
-//  * THE GOAL IS NEVER DRAWN WHERE IT IS. `gw_po_obs` gives the agent eight wall bits, its
-//    own position and FOUR SIGN BITS for the goal — no distance, no presence bit at any
-//    range — so a goal one cell north and a goal four cells north are the SAME
-//    observation, and this scene renders them as the same frame, down to the light
-//    positions (test: "two goals sharing a sign pair are INDISTINGUISHABLE"). The
-//    moonflower's root tracks the live goal exactly and draws nothing; the moth holds the
-//    rim of the bubble at a radius that is a function of the clock alone.
+//  * THE AGENT'S FRAME NEVER KNOWS MORE THAN THE AGENT — but the VIEWER is allowed one
+//    thing the agent is not: a closed moonflower bud stands on the live goal cell, dim in
+//    the fog, so the audience always knows where the prize is while the wisp does not
+//    (owner's ruling, 2026-08-05 — it replaced an absolute no-draw rule). The bud is
+//    VIEWER knowledge by construction: nothing the agent-knowledge machinery renders (the
+//    bubble, the moth, the lights) reads it, and the indistinguishability test still holds
+//    for every drawable OUTSIDE the beacon subtree. The moonflower's root keeps tracking
+//    the live goal exactly for the probes; the moth holds the rim of the bubble at a
+//    radius that is a function of the clock alone.
 //  * The one exception is bought with a +1, and it is the one moment the agent DOES know
 //    where the goal was — it just collected the reward standing on it. So the fog lifts
 //    for a breath around that cell and the moonflower opens there, on the clearing, as it
@@ -56,13 +58,13 @@ import { Wisp } from '@kit/wisp';
 import * as THREE from 'three';
 import type { GridCell, GridGeometry } from '@sim/types';
 import {
+  buildGoalBeacon,
   buildLanternPool,
   buildMoonflower,
-  buildMoth,
   buildWispAura,
+  type GoalBeaconHandle,
   type LanternPoolHandle,
   type MoonflowerHandle,
-  type MothHandle,
   type WispAuraHandle,
 } from './actors';
 import { manifest } from './manifest';
@@ -194,7 +196,7 @@ class FogboundForestScene implements SceneModule {
   private world: WorldHandle | null = null;
   private wisp: Wisp | null = null;
   private flower: MoonflowerHandle | null = null;
-  private moth: MothHandle | null = null;
+  private beacon: GoalBeaconHandle | null = null;
   private lantern: LanternPoolHandle | null = null;
   private aura: WispAuraHandle | null = null;
   private pool: CelebrationPool | null = null;
@@ -216,7 +218,6 @@ class FogboundForestScene implements SceneModule {
   private readonly bloomPos = new THREE.Vector3();
   private readonly groundPos = new THREE.Vector3();
   private readonly goalWorld = new THREE.Vector3();
-  private readonly mothOffset = new THREE.Vector3();
   private readonly camAnchor = new THREE.Vector3();
   private readonly lightPos = new THREE.Vector3();
   private camPrimed = false;
@@ -224,7 +225,6 @@ class FogboundForestScene implements SceneModule {
   private camFixed = false;
   /** was the eye holding the clearing last frame? its END is a cut, not a drift */
   private lingering = false;
-  private mothPhase = 0;
   // Defaults are TOKEN values, not literals: these are overwritten from `ctx.tokens` in
   // init, and a hex here would be a copy of a token that stops being one the day the
   // token moves (STYLE.md: tokens for every color, scene-local colors are token blends).
@@ -243,7 +243,6 @@ class FogboundForestScene implements SceneModule {
     const palette = ctx.tokens.palettes.dawn;
     const accent = ctx.tokens.accents[manifest.accent] ?? ctx.tokens.celebrationGold;
     this.gold = ctx.tokens.celebrationGold;
-    this.mothPhase = hash1f(ctx.seed | 0, 0x4d17) * Math.PI * 2;
 
     const world = buildWorld(ctx, this.scene, grid);
     this.world = world;
@@ -260,8 +259,6 @@ class FogboundForestScene implements SceneModule {
     if (breathLight) breathLight.color.set(this.gold);
     const flowerLight = world.rig.points[2];
     if (flowerLight) flowerLight.color.set(world.skin.bloom);
-    const mothLight = world.rig.points[3];
-    if (mothLight) mothLight.color.set(world.skin.moth);
 
     // ---- the shared avatar ----
     // The spirit is the one WARM thing in a cold volume of air. `accents['po-maze']` is
@@ -314,10 +311,17 @@ class FogboundForestScene implements SceneModule {
     this.scene.add(flower.root);
     this.scene.add(flower.bloom);
 
-    // ---- the compass ----
-    const moth = buildMoth({ tier: ctx.tier, color: world.skin.moth, name: 'compassMoth' });
-    this.moth = moth;
-    this.scene.add(moth.group);
+    // ---- the goal BEACON: viewer knowledge, never the agent's ----
+    // A slim fog-proof shaft of light on the live goal cell. Its whole subtree
+    // carries the beacon name so the honesty tests can hold the rest of the
+    // frame to the sign-bits contract while the audience keeps the prize.
+    const beacon = buildGoalBeacon({
+      tier: ctx.tier,
+      glow: world.skin.bloom,
+      name: 'goalBeacon',
+    });
+    this.beacon = beacon;
+    this.scene.add(beacon.group);
 
     // ---- camera ----
     const thumb = ctx.tier === 'thumb';
@@ -341,14 +345,6 @@ class FogboundForestScene implements SceneModule {
       distance: thumb ? CAM_DISTANCE_THUMB : CAM_DISTANCE,
       azimuth: thumb ? CAM_AZIMUTH_THUMB : CAM_AZIMUTH,
       polar: thumb ? CAM_POLAR_THUMB : CAM_POLAR,
-      limits: {
-        minPolar: CAM_MIN_POLAR,
-        maxPolar: CAM_MAX_POLAR,
-        minAzimuth: CAM_AZIMUTH - CAM_YAW_RANGE,
-        maxAzimuth: CAM_AZIMUTH + CAM_YAW_RANGE,
-        minDistance: CAM_MIN_DISTANCE,
-        maxDistance: CAM_MAX_DISTANCE,
-      },
       fov: ctx.tokens.fovHero,
       near: 0.1,
       far: 900,
@@ -405,8 +401,6 @@ class FogboundForestScene implements SceneModule {
     wisp.dim(0.5);
     wisp.setCell(0, 0, grid);
     flower.setState(0, 0);
-    moth.setVisibility(0);
-    moth.setTime(0);
     lantern.setGain(1);
   }
 
@@ -415,12 +409,11 @@ class FogboundForestScene implements SceneModule {
     const world = this.world;
     const wisp = this.wisp;
     const flower = this.flower;
-    const moth = this.moth;
     const lantern = this.lantern;
     const aura = this.aura;
     const pool = this.pool;
     const rig = this.rig;
-    if (!ctx || !world || !wisp || !flower || !moth || !lantern || !aura || !pool || !rig) return;
+    if (!ctx || !world || !wisp || !flower || !lantern || !aura || !pool || !rig) return;
 
     const time = ctx.time();
     const state = frame.state;
@@ -471,7 +464,6 @@ class FogboundForestScene implements SceneModule {
         pool.ripple(this.groundPos, this.gold, RIPPLE_SCALE, time);
         pool.pulse.fire(PULSE_STRENGTH);
         wisp.flare(1);
-        moth.flare(0.8);
         flower.flare(0.9);
         this.revealAt = time;
         this.lingerAt = time;
@@ -538,22 +530,17 @@ class FogboundForestScene implements SceneModule {
     flower.setState(breath, time);
     flower.update(frame.dtReal, time);
 
-    // 8. the compass moth. `compassOffset` is handed the four bits POMaze actually
-    //    publishes — the SIGNS of the goal offset — and the clock, and nothing else, so
-    //    the moth structurally cannot leak the distance it is never told. It holds the rim
-    //    at EVERY range, including the ranges where the goal is one cell away: to the
-    //    agent those states are identical, so they are identical here.
-    const pointing = compassOffset(goal.x - agent.x, goal.y - agent.y, time, this.mothPhase, this.mothOffset);
-    if (pointing) {
-      moth.position.set(wx + this.mothOffset.x, this.mothOffset.y, wz + this.mothOffset.z);
-      moth.setVisibility(1);
-    } else {
-      // the goal is on the agent's own cell: there is no direction to point, so the
-      // compass has nothing honest to say and stays out of the frame
-      moth.setVisibility(0);
+    //    …and the VIEWER'S half: the light shaft on the live goal — fog-proof,
+    //    dim next to the wisp's warm bubble, an omen rather than a lamp
+    const beacon = this.beacon;
+    if (beacon) {
+      beacon.group.position.set(this.goalWorld.x, 0, this.goalWorld.z);
+      beacon.setTime(time);
     }
-    moth.setTime(time);
-    moth.update(frame.dtReal, time);
+
+    // 8. (the compass moth is retired — the beacon is the audience's direction
+    //    now, and a second glowing creature beside the wisp read as a second
+    //    agent. `compassOffset` survives in world.ts as a tested pure function.)
 
     // 9. the wisp's light: a pool on the litter and a billboarded aura of scattering,
     //    both following the avatar and nothing else
@@ -582,10 +569,12 @@ class FogboundForestScene implements SceneModule {
       flowerLight.position.set(this.revealX, flower.crownHeight, this.revealZ);
       flowerLight.intensity = 0.75 * breath;
     }
-    const mothLight = world.rig.points[3];
-    if (mothLight) {
-      mothLight.position.copy(moth.position);
-      mothLight.intensity = 0.22;
+    const beaconLight = world.rig.points[3];
+    if (beaconLight) {
+      beaconLight.name = 'beacon:goalLight';
+      beaconLight.color.set(world.skin.bloom);
+      beaconLight.position.set(this.goalWorld.x, 1.4, this.goalWorld.z);
+      beaconLight.intensity = 0.3;
     }
 
     // 11. one clock for the whole forest
@@ -697,10 +686,10 @@ class FogboundForestScene implements SceneModule {
   dispose(): void {
     this.overlay?.dispose();
     this.overlay = null;
-    this.moth?.dispose();
-    this.moth = null;
     this.flower?.dispose();
     this.flower = null;
+    this.beacon?.dispose();
+    this.beacon = null;
     this.aura?.dispose();
     this.aura = null;
     this.lantern?.dispose();

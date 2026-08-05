@@ -741,7 +741,9 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene): WorldHandle {
     },
     setGust(env01) {
       const e = env01 < 0 ? 0 : env01 > 1 ? 1 : env01;
-      oakUniforms(flagMaterial)?.setWind(BASE_WIND * (1 + 3.6 * e), 2.4 + 5.5 * e);
+      // a gust, not a buzz: the old 4.6× amplitude at ~8 Hz read as the flags
+      // malfunctioning every time the car summited
+      oakUniforms(flagMaterial)?.setWind(BASE_WIND * (1 + 1.6 * e), 2.4 + 1.4 * e);
       grass.setWind(0.05 * (1 + 1.7 * e), 1.5 + 2.6 * e);
       trees.setWind(0.02 * (1 + 1.3 * e), 0.9 + 1.2 * e);
     },

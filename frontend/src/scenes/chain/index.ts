@@ -369,16 +369,6 @@ class SixteenStonesScene implements SceneModule {
       distance: thumb ? CAM_DISTANCE_THUMB : CAM_DISTANCE,
       azimuth: thumb ? CAM_AZIMUTH_THUMB : CAM_AZIMUTH,
       polar: thumb ? CAM_POLAR_THUMB : CAM_POLAR,
-      limits: {
-        // never a plan view (the ford becomes a dotted line), never at the waterline (the
-        // stones fuse into one bar)
-        minPolar: 0.62,
-        maxPolar: 1.26,
-        minAzimuth: CAM_AZIMUTH - CAM_YAW_RANGE,
-        maxAzimuth: CAM_AZIMUTH + CAM_YAW_RANGE,
-        minDistance: 8.5,
-        maxDistance: 26,
-      },
       fov: ctx.tokens.fovHero,
       near: 0.1,
       far: 900,

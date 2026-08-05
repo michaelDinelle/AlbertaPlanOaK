@@ -26,6 +26,99 @@ import * as THREE from 'three';
 import { clamp01, mergeColoredParts, smoothstep01, type ColoredPart, type ForestSkin } from './world';
 
 // ---------------------------------------------------------------------------
+// the goal beacon — VIEWER knowledge (owner's ruling 2026-08-05)
+// ---------------------------------------------------------------------------
+
+export interface GoalBeaconOptions {
+  tier: QualityTier;
+  /** the marker color (the moonflower's own glow family) */
+  glow: THREE.ColorRepresentation;
+  name?: string;
+}
+
+export interface GoalBeaconHandle {
+  group: THREE.Object3D;
+  setTime(t: number): void;
+  dispose(): void;
+}
+
+/**
+ * The audience's marker on the live goal cell: a slim shaft of light and a soft
+ * breathing ring. Every material is `fog: false` and additive — the whole point
+ * is to be readable THROUGH the fog the agent cannot see through, at any
+ * distance, at any tier. Deliberately cool and dim next to the wisp's warm
+ * bubble: an omen on the horizon, not a second character.
+ */
+export function buildGoalBeacon(opts: GoalBeaconOptions): GoalBeaconHandle {
+  const group = new THREE.Group();
+  group.name = opts.name ?? 'goalBeacon';
+  const geometries: THREE.BufferGeometry[] = [];
+  const materials: THREE.Material[] = [];
+
+  const BEAM_HEIGHT = 4.6;
+  const beamGeo = new THREE.CylinderGeometry(0.045, 0.13, BEAM_HEIGHT, 8, 1, true);
+  beamGeo.translate(0, BEAM_HEIGHT / 2, 0);
+  geometries.push(beamGeo);
+  const beamMaterial = emissiveMaterial(opts.glow, 0.9, {
+    transparent: true,
+    opacity: 0.34,
+    depthWrite: false,
+    blending: THREE.AdditiveBlending,
+    side: THREE.DoubleSide,
+    fog: false,
+    name: 'beacon:goalBeamMaterial',
+  });
+  materials.push(beamMaterial);
+  const beam = new THREE.Mesh(beamGeo, beamMaterial);
+  beam.name = 'beacon:goalBeam';
+  group.add(beam);
+
+  const ringTexture = radialSprite(64, 2.6);
+  const ringGeo = new THREE.PlaneGeometry(1.6, 1.6);
+  ringGeo.rotateX(-Math.PI / 2);
+  ringGeo.translate(0, 0.03, 0);
+  geometries.push(ringGeo);
+  const ringMaterial = emissiveMaterial(opts.glow, 0.8, {
+    transparent: true,
+    opacity: 0.5,
+    depthWrite: false,
+    blending: THREE.AdditiveBlending,
+    map: ringTexture,
+    fog: false,
+    name: 'beacon:goalRingMaterial',
+  });
+  materials.push(ringMaterial);
+  const ring = new THREE.Mesh(ringGeo, ringMaterial);
+  ring.name = 'beacon:goalRing';
+  group.add(ring);
+
+  const crownGeo = new THREE.IcosahedronGeometry(0.09, opts.tier === 'thumb' ? 0 : 1);
+  geometries.push(crownGeo);
+  const crownMaterial = emissiveMaterial(opts.glow, 1.6, { fog: false, name: 'beacon:goalCrownMaterial' });
+  materials.push(crownMaterial);
+  const crown = new THREE.Mesh(crownGeo, crownMaterial);
+  crown.name = 'beacon:goalCrown';
+  crown.position.y = BEAM_HEIGHT;
+  group.add(crown);
+
+  return {
+    group,
+    setTime(t) {
+      // one slow breath — enough life to read as meaningful, never a strobe
+      const breath = 0.82 + 0.18 * Math.sin(t * 1.4);
+      beamMaterial.opacity = 0.34 * breath;
+      ringMaterial.opacity = 0.5 * breath;
+      crown.position.y = BEAM_HEIGHT + 0.12 * Math.sin(t * 1.4);
+    },
+    dispose() {
+      for (const g of geometries) g.dispose();
+      for (const m of materials) m.dispose();
+      ringTexture.dispose();
+    },
+  };
+}
+
+// ---------------------------------------------------------------------------
 // the moonflower — the goal
 // ---------------------------------------------------------------------------
 

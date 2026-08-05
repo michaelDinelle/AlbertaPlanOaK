@@ -312,19 +312,6 @@ class SlotCanyonsScene implements SceneModule {
       distance: thumb ? CAM_DISTANCE_THUMB : CAM_DISTANCE,
       azimuth: thumb ? CAM_AZIMUTH_THUMB : CAM_AZIMUTH,
       polar: thumb ? CAM_POLAR_THUMB : CAM_POLAR,
-      limits: {
-        // THE WHOLE ENVELOPE IS AUDITED, not just the composed pose: every corner of these
-        // limits was ray-traced against the real cliffs and keeps all 65 free cells showing
-        // the agent (the test re-measures the corners). Never so low that the near rim hides
-        // the front row, never so high the fins lose their faces and the canyon flattens
-        // into a plan, and never yawed far enough for a fin to swallow its own corridor.
-        minPolar: 0.74,
-        maxPolar: 0.88,
-        minAzimuth: CAM_AZIMUTH - CAM_YAW_RANGE,
-        maxAzimuth: CAM_AZIMUTH + CAM_YAW_RANGE,
-        minDistance: 17,
-        maxDistance: 24,
-      },
       fov: ctx.tokens.fovHero,
       near: 0.1,
       far: 900,

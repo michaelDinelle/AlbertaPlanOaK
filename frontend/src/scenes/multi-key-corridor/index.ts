@@ -447,15 +447,6 @@ class TempleOfThreeGatesScene implements SceneModule {
       distance: thumb ? CAM_DISTANCE_THUMB : CAM_DISTANCE,
       azimuth: thumb ? CAM_AZIMUTH_THUMB : CAM_AZIMUTH,
       polar: thumb ? CAM_POLAR_THUMB : CAM_POLAR,
-      limits: {
-        minPolar: 0.42,
-        maxPolar: 1.0,
-        minAzimuth: CAM_AZIMUTH - CAM_YAW_RANGE,
-        maxAzimuth: CAM_AZIMUTH + CAM_YAW_RANGE,
-        // close enough to lean into one chamber, never close enough to lose the hall
-        minDistance: 10,
-        maxDistance: 26,
-      },
       fov: ctx.tokens.fovHero,
       near: 0.1,
       far: 900,

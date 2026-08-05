@@ -360,6 +360,8 @@ export interface EmissiveMaterialOptions {
   blending?: THREE.Blending;
   name?: string;
   map?: THREE.Texture | null;
+  /** false = the material ignores scene fog (through-the-fog markers) */
+  fog?: boolean;
 }
 
 export interface EmissiveMaterial extends THREE.MeshBasicMaterial {
@@ -382,7 +384,7 @@ export function emissiveMaterial(
     transparent: opts.transparent ?? false,
     opacity: opts.opacity ?? 1,
     side: opts.side ?? THREE.FrontSide,
-    fog: false,
+    fog: opts.fog ?? false,
     toneMapped: true,
     map: opts.map ?? null,
   }) as EmissiveMaterial;

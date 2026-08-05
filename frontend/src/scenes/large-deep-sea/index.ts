@@ -331,15 +331,6 @@ class TheAbyssScene implements SceneModule {
       distance: thumb ? CAM_DISTANCE_THUMB : CAM_DISTANCE,
       azimuth: CAM_AZIMUTH,
       polar: thumb ? CAM_POLAR_THUMB : CAM_POLAR,
-      limits: {
-        minPolar: 0.42,
-        maxPolar: 1.02,
-        minAzimuth: CAM_AZIMUTH - CAM_YAW_RANGE,
-        maxAzimuth: CAM_AZIMUTH + CAM_YAW_RANGE,
-        // close enough to swim down to a single shelf, never close enough to lose the dive
-        minDistance: 13,
-        maxDistance: 34,
-      },
       fov: ctx.tokens.fovHero,
       near: 0.1,
       far: 900,

@@ -408,7 +408,14 @@ function frameDigest(module: SceneModule): string {
   module.scene.updateMatrixWorld(true);
   module.scene.traverse((o) => {
     if (!o.visible) return;
-    for (let p = o.parent; p; p = p.parent) if (!p.visible) return;
+    // the goal BEACON is the one sanctioned exception: viewer knowledge by
+    // owner's ruling (2026-08-05) — every drawable outside its subtree still
+    // holds the sign-bits contract this digest enforces
+    if (o.name === 'goalBeacon' || o.name.startsWith('beacon:')) return;
+    for (let p = o.parent; p; p = p.parent) {
+      if (!p.visible) return;
+      if (p.name === 'goalBeacon' || p.name.startsWith('beacon:')) return;
+    }
     const drawable = o as THREE.Mesh & { isMesh?: boolean; isPoints?: boolean; isLine?: boolean };
     const light = o as THREE.PointLight & { isLight?: boolean };
     if (!drawable.isMesh && !drawable.isPoints && !drawable.isLine && !light.isLight) return;
@@ -422,7 +429,7 @@ function frameDigest(module: SceneModule): string {
 }
 
 describe('po-maze / THE FRAME NEVER KNOWS MORE THAN THE AGENT', () => {
-  test('two goals sharing a sign pair are INDISTINGUISHABLE in the frame', async () => {
+  test('two goals sharing a sign pair are INDISTINGUISHABLE outside the goal beacon', async () => {
     const { module, ctx } = await live();
     ctx.setTime(7.5);
     // group every free cell by the four sign bits it presents from (5,5) — the agent's
@@ -580,66 +587,29 @@ describe('po-maze / THE COMPASS CARRIES SIGNS, NEVER DISTANCE', () => {
     expect(compassOffset(0, 0, 2.5, 0.7, out)).toBe(false);
   });
 
-  test('the moth sits in the goal\'s true direction at a constant radius', async () => {
+  // the compass MOTH is retired (owner's ruling 2026-08-05): a second glowing
+  // creature beside the wisp read as a second agent, and the viewer's goal
+  // beacon carries direction now. `compassOffset` stays tested above as the
+  // pure sign-bits function it always was.
+  test('the goal BEACON stands on the live goal cell exactly, at every range', async () => {
     const { module, ctx } = await live();
-    ctx.setTime(0);
+    ctx.setTime(3.25);
     const grid = resolveGrid(geometryOf());
-    const wispPos: [number, number, number] = [0, 0, 0];
-    const radii: number[] = [];
-    /** every moth position seen for a given sign pair */
-    const bySign = new Map<string, THREE.Vector3[]>();
-
-    // EVERY free cell, adjacent ones included. A moth that flew in and landed on a goal
-    // one cell away would be reporting a distance the observation does not carry, so the
-    // Chebyshev ≤ 1 states are the ones this test most needs to cover, not skip.
+    const truth: [number, number, number] = [0, 0, 0];
+    let checked = 0;
     for (const goal of freeCells()) {
       if (goal.x === 5 && goal.y === 5) continue;
-      module.update(toFrameUpdate(poseFixture('compass', 5, 5, goal.x, goal.y)));
-      const moth = objectNamed(module, 'compassMoth');
-      moth.updateWorldMatrix(true, false);
-      const p = new THREE.Vector3().setFromMatrixPosition(moth.matrixWorld);
-      cellToWorld(5, 5, grid, wispPos);
-      const dx = p.x - wispPos[0];
-      const dz = p.z - wispPos[2];
-
-      // 1. the bearing is the sign vector's bearing, wandering at most MOTH_SWING
-      const want = Math.atan2(Math.sign(goal.y - 5), Math.sign(goal.x - 5));
-      let d = Math.atan2(dz, dx) - want;
-      while (d > Math.PI) d -= Math.PI * 2;
-      while (d < -Math.PI) d += Math.PI * 2;
-      expect(Math.abs(d)).toBeLessThanOrEqual(MOTH_SWING + 1e-9);
-      // 2. …which means the sign bits themselves are never misreported
-      if (goal.x !== 5) expect(Math.sign(dx)).toBe(Math.sign(goal.x - 5));
-      if (goal.y !== 5) expect(Math.sign(dz)).toBe(Math.sign(goal.y - 5));
-
-      radii.push(Math.hypot(dx, dz));
-      const key = `${Math.sign(goal.x - 5)},${Math.sign(goal.y - 5)}`;
-      const bucket = bySign.get(key);
-      if (bucket) bucket.push(p);
-      else bySign.set(key, [p]);
+      module.update(toFrameUpdate(poseFixture('beacon', 5, 5, goal.x, goal.y)));
+      const beacon = objectNamed(module, 'goalBeacon');
+      expect(beacon.visible).toBe(true);
+      beacon.updateWorldMatrix(true, false);
+      const p = new THREE.Vector3().setFromMatrixPosition(beacon.matrixWorld);
+      cellToWorld(goal.x, goal.y, grid, truth);
+      expect(p.x).toBeCloseTo(truth[0], 10);
+      expect(p.z).toBeCloseTo(truth[2], 10);
+      checked++;
     }
-
-    expect(radii.length).toBe(64); // all 65 free cells but the one under the agent
-    // EVERY goal, at EVERY range, puts the moth at the same radius: a moth that drifted
-    // outward for a far goal (or inward for a near one) would be leaking the distance the
-    // agent is never told
-    expect(Math.max(...radii) - Math.min(...radii)).toBeLessThan(1e-9);
-    // and the strongest form of the same claim — two goals that share a sign pair are
-    // INDISTINGUISHABLE in the frame, however far apart they are
-    expect(bySign.size).toBeGreaterThanOrEqual(8);
-    for (const [, positions] of bySign) {
-      const first = positions[0] as THREE.Vector3;
-      for (const p of positions) expect(p.distanceTo(first)).toBeLessThan(1e-9);
-    }
-    module.dispose();
-  });
-
-  test('a goal on the agent\'s own cell leaves the compass with nothing to say', async () => {
-    const { module } = await live();
-    module.update(toFrameUpdate(poseFixture('onGoal', 5, 5, 5, 5)));
-    expect(objectNamed(module, 'compassMoth').visible).toBe(false);
-    module.update(toFrameUpdate(poseFixture('offGoal', 5, 5, 9, 9)));
-    expect(objectNamed(module, 'compassMoth').visible).toBe(true);
+    expect(checked).toBe(64);
     module.dispose();
   });
 });

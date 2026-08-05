@@ -172,6 +172,7 @@ class GoldHourSavannaScene implements SceneModule {
 
     const thumb = ctx.tier === 'thumb';
     const rig = makeTrackRig({
+      canvas: thumb ? null : ctx.canvas,
       offset: thumb ? CAM_OFFSET_THUMB : CAM_OFFSET,
       lookOffset: thumb ? CAM_LOOK_THUMB : CAM_LOOK,
       fov: ctx.tokens.fovHero,
@@ -314,6 +315,9 @@ class GoldHourSavannaScene implements SceneModule {
     // 9. the camera: a hard cut across a teleport or a scrub, damped in WALL time
     //    otherwise, so a paused frame still settles
     rig.setTarget(rootX, TRACK_Y, 0);
+    // lead from the ENV'S OWN velocity (sim units): the look-ahead is then the
+    // same at ×1 and ×1024 — wall-clock displacement scales with playback speed
+    rig.setVelocity(velX, 0, 0);
     if (teleported || frame.scrubbed || ctx.tier === 'thumb') rig.snap();
     else rig.update(frame.dtReal);
 

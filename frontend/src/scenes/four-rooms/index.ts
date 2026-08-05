@@ -227,15 +227,6 @@ class FourSeasonsCourtyardScene implements SceneModule {
       distance: thumb ? CAM_DISTANCE_THUMB : CAM_DISTANCE,
       azimuth: thumb ? CAM_AZIMUTH_THUMB : CAM_AZIMUTH,
       polar: thumb ? CAM_POLAR_THUMB : CAM_POLAR,
-      limits: {
-        minPolar: 0.46,
-        maxPolar: 0.98,
-        minAzimuth: CAM_AZIMUTH - CAM_YAW_RANGE,
-        maxAzimuth: CAM_AZIMUTH + CAM_YAW_RANGE,
-        // close enough to lean into one room, never close enough to lose the plan view
-        minDistance: 11,
-        maxDistance: 25,
-      },
       fov: ctx.tokens.fovHero,
       near: 0.1,
       far: 900,

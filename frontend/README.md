@@ -110,7 +110,11 @@ This is the point of the whole app. Scenes are stylized; they are never inaccura
 4. **Honesty rules.** Never show what the agent cannot know outside the debug
    overlay (POMaze's full map, MemoryChain's cue after position 0, ProceduralMaze's
    carved path). Never hide what the environment defines (CartPole's failure arcs,
-   Acrobot's success line, DeepSea's mask currents) — show them, subtly.
+   Acrobot's success line, DeepSea's mask currents) — show them, subtly. One
+   sanctioned viewer-knowledge exception: POMaze marks the live goal with a closed
+   moonflower bud for the AUDIENCE (owner's ruling 2026-08-05); everything the
+   agent-knowledge machinery renders still holds the sign-bits contract, and the
+   scene test enforces it outside the beacon subtree.
 5. **Celebrations fire only from `frame.events`.** Nothing is synthesized from a
    value crossing a threshold.
 6. **Determinism.** All randomness comes from `kit/rng` seeded with `ctx.seed`; all
