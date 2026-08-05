@@ -15,8 +15,10 @@
 //     one operation on this server that can pin a core for seconds.
 //   * BOUNDED. The disk cache evicts oldest-by-mtime on write.
 
+import { readFileSync } from 'node:fs';
 import { readdir, unlink, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
+import { readTape, sampleWindows, tapeValue } from './metricsTape';
 import { isEnvId } from '@shared/envs';
 import type { FleetColumnar, FleetRow } from '@shared/types';
 import {
@@ -31,6 +33,10 @@ import { parseFieldPath, pluckNumber, statOrNull, streamJsonl } from './jsonl';
 import { ensureCacheDir } from './runIndex';
 
 export const DEFAULT_FLEET_FIELDS = ['rewardSum', 'health.rewardRate'] as const;
+
+/** tape windows injected per query — 256 evenly-spaced keeps a full-fleet
+ * (1024-lane) grid wire-safe while still 25x the old 10-heartbeat curve */
+const MAX_TAPE_WINDOWS = 256;
 
 export interface FleetQuery {
   policy: string;
@@ -138,7 +144,7 @@ function safeName(id: string): string {
 }
 
 interface DiskCacheFile {
-  v: 2;
+  v: 3;
   /** fleet.jsonl `${mtimeMs}:${size}` */
   key: string;
   policy: string;
@@ -165,7 +171,7 @@ async function readDiskCache(path: string, key: string, q: FleetQuery): Promise<
     const parsed: unknown = JSON.parse(await Bun.file(path).text());
     if (parsed === null || typeof parsed !== 'object') return null;
     const f = parsed as Partial<DiskCacheFile>;
-    if (f.v !== 2 || f.key !== key || f.data === undefined) return null;
+    if (f.v !== 3 || f.key !== key || f.data === undefined) return null;
     if (!sameQuery(f, q)) return null; // hash collision (or a hand-edited file): re-derive
     return f.data;
   } catch {
@@ -258,7 +264,7 @@ export async function deriveFleetColumnar(opts: DeriveOptions): Promise<FleetCol
     lruPut(memKey, data);
     if (!live && diskPath !== null) {
       void writeDiskCache(diskPath, {
-        v: 2,
+        v: 3,
         key: fileKey,
         policy: query.policy,
         fields: [...query.fields],
@@ -301,9 +307,12 @@ async function computeColumnar(fleetPath: string, query: FleetQuery): Promise<Fl
   const rowLane: number[] = [];
   const rowStep: number[] = [];
   const rowVals: (number | null)[][] = paths.map(() => []);
-
   await streamJsonl<FleetRow>(fleetPath, (row) => {
     if (row === null || typeof row !== 'object') return;
+    // METRICS LAW (2026-08-05): fleet.jsonl carries final certificates only;
+    // every time series comes from the tape. Pre-tape archives' hb rows are
+    // ignored, not adapted — no legacy path.
+    if ((row as { kind?: unknown }).kind === 'hb') return;
     if (typeof row.policy === 'string' && row.policy !== query.policy) return;
     if (typeof row.policy !== 'string' && query.policy !== 'oak') return;
     // envId is per-LANE under a mixed schedule, so the filter is a row predicate. A row
@@ -340,6 +349,64 @@ async function computeColumnar(fleetPath: string, query: FleetQuery): Promise<Fl
       dst.push(pluckNumber(row, p));
     }
   });
+
+  // The continuous series come from the metrics tape at ~1k-step window
+  // resolution, injected into the same staging arrays. The window count is
+  // capped so a full Tier-L grid stays wire-safe. A root without a tape
+  // (pre-tape archive) yields final-only columns.
+  {
+    const dir = dirname(fleetPath);
+    const tape = readTape(join(dir, `metrics.${query.policy}.oakt`));
+    if (tape !== null) {
+      let meta: { envSchedule?: { envId: string; seedStart: number; seedEnd: number }[]; envId?: string; seeds?: number[] } = {};
+      try {
+        meta = JSON.parse(readFileSync(join(dir, 'meta.json'), 'utf8')) as typeof meta;
+      } catch {
+        /* header-less roots keep lane-indexed defaults below */
+      }
+      const envOf = (seed: number): string => {
+        for (const e of meta.envSchedule ?? []) {
+          if (seed >= e.seedStart && seed <= e.seedEnd) return e.envId;
+        }
+        return meta.envId ?? '';
+      };
+      const seeds = meta.seeds ?? Array.from({ length: tape.laneCount }, (_, i) => i);
+      const windows = sampleWindows(tape.data.length, MAX_TAPE_WINDOWS);
+      for (const w of windows) {
+        const stepEnd = (tape.stepStart[w] ?? 0) + (tape.stepCount[w] ?? 0);
+        // Steps already present came from real fleet.jsonl rows (the final
+        // certificates) — those stay authoritative; the tape never overwrites.
+        if (stepSlot.has(stepEnd)) continue;
+        // Registered lazily on the first ACCEPTED lane, so an env filter that
+        // matches no lane leaves no phantom step behind.
+        let si: number | null = null;
+        for (let lane = 0; lane < tape.laneCount; lane++) {
+          const seed = seeds[lane] ?? lane;
+          const envId = envOf(seed);
+          if (query.envId !== null && envId !== query.envId) continue;
+          if (si === null) {
+            si = stepValues.length;
+            stepValues.push(stepEnd);
+            stepSlot.set(stepEnd, si);
+          }
+          let li = laneSlot.get(lane);
+          if (li === undefined) {
+            li = laneValues.length;
+            laneValues.push({ lane, seed, policy: query.policy, envId });
+            laneSlot.set(lane, li);
+          }
+          rowLane.push(li);
+          rowStep.push(si);
+          for (let f = 0; f < query.fields.length; f++) {
+            const name = query.fields[f];
+            const dst = rowVals[f];
+            if (name === undefined || dst === undefined) continue;
+            dst.push(tapeValue(tape, name, w, lane));
+          }
+        }
+      }
+    }
+  }
 
   // Sort steps ascending and lanes by lane index; build old-slot -> new-slot remaps.
   const stepOrder = stepValues.map((_, i) => i).sort((a, b) => (stepValues[a] ?? 0) - (stepValues[b] ?? 0));

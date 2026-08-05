@@ -15,7 +15,13 @@ from __future__ import annotations
 
 import json
 import math
+import struct
+import sys
+import zlib
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[5] / "tools"))
+import metrics_tape  # noqa: E402
 
 ROOT = Path(__file__).resolve().parent / "run"
 STEPS = 1000
@@ -35,7 +41,11 @@ def env_of(seed: int) -> tuple[str, int]:
 
 def reward_sum(seed: int, step: int) -> float:
     """A per-lane rate that peaks mid-run then decays, so plasticity/peak, the
-    solved-threshold count and retention are all exercised with real spread."""
+    solved-threshold count and retention are all exercised with real spread.
+    Seed 0 decreases monotonically — every windowed rate negative, peak <= 0,
+    retention undefined — the summaryJson strict-JSON regression case."""
+    if seed == 0:
+        return round(-0.5 * step, 6)
     rate0 = (seed - 6) * 0.05           # -0.30 .. +0.45 across the 16 lanes
     peak = 0.6 + 0.05 * (seed % 4)
     shape = math.sin(math.pi * min(step, STEPS) / STEPS) ** 2
@@ -86,32 +96,76 @@ def main() -> None:
     }
     (ROOT / "meta.json").write_text(json.dumps(meta, indent=1, sort_keys=True) + "\n")
 
+    # METRICS LAW (2026-08-05): fleet.jsonl carries only the final certificate
+    # rows; the heartbeat series live on the metrics tape below.
     fleet_lines: list[str] = []
     death_lines: list[str] = []
     for seed in seeds:
         env_id, _ = env_of(seed)
-        for step in HEARTBEATS:
+        step = STEPS
+        dead = seed == DEAD_LANE
+        row = {
+            "v": 1,
+            "kind": "final",
+            "envId": env_id,
+            "policy": "oak",
+            "ablationLabel": "none",
+            "lane": seed,
+            "seed": seed,
+            "step": step,
+            "wallSeconds": step / 100.0,
+            "stepsPerSecond": 1000.0 + seed,
+            "rewardSum": reward_sum(seed, step),
+            "doneCount": step // 200,
+            "kernelRho": round(0.001 * (seed % 5), 6),
+            "paramAbsMax": 1000.0 + seed,
+            "firstNonFiniteStep": DEAD_STEP if dead else None,
+            "firstNonFiniteDetector": "paramExplosion" if dead else None,
+            "health": health(seed, step, dead),
+        }
+        fleet_lines.append(json.dumps(row, sort_keys=True))
+
+    # The tape: one window per heartbeat interval, full writer field schema
+    # (unspecified diagnostics are 0), one DEFLATE segment.
+    fields = ["rewardSum", "doneCount", "rewardRate", "kernelRho", "deltaSum",
+              "deltaPeak", "mainTd", "actorSupportEntropy", "terminationRate",
+              "keyboardEffectiveL1", "keyboardL1", "actorAdvantageL1",
+              "modelPriorityMax", "importanceEss", "actorUpdateNormMean",
+              "searchControlUseMean", "selectedOptionPriority",
+              "selectedContinuation", "generateTestEligibleCount",
+              "featureReinitCount", "optionReinitCount",
+              "nfEncode", "nfLearn", "nfPlan", "nfTdPsi", "paramAbsMax"]
+    payload = b""
+    prev = 0
+    for step in HEARTBEATS:
+        payload += struct.pack("<2I", prev, step - prev)
+        cols: dict[str, list[float]] = {f: [0.0] * len(seeds) for f in fields}
+        for seed in seeds:
             dead = seed == DEAD_LANE and step >= DEAD_STEP
-            row = {
-                "v": 1,
-                "kind": "final" if step == STEPS else "hb",
-                "envId": env_id,
-                "policy": "oak",
-                "ablationLabel": "none",
-                "lane": seed,
-                "seed": seed,
-                "step": step,
-                "wallSeconds": step / 100.0,
-                "stepsPerSecond": 1000.0 + seed,
-                "rewardSum": reward_sum(seed, step),
-                "doneCount": step // 200,
-                "kernelRho": round(0.001 * (seed % 5), 6),
-                "paramAbsMax": 1000.0 + seed,
-                "firstNonFiniteStep": DEAD_STEP if dead else None,
-                "firstNonFiniteDetector": "paramExplosion" if dead else None,
-                "health": health(seed, step, dead),
-            }
-            fleet_lines.append(json.dumps(row, sort_keys=True))
+            h = health(seed, step, dead)
+            cols["rewardSum"][seed] = reward_sum(seed, step)
+            cols["doneCount"][seed] = float(step // 200)
+            cols["rewardRate"][seed] = h["rewardRate"]
+            cols["kernelRho"][seed] = round(0.001 * (seed % 5), 6)
+            cols["deltaSum"][seed] = h["actionDeltaL2Mean"] * step
+            cols["deltaPeak"][seed] = h["actionDeltaPeak"]
+            cols["mainTd"][seed] = h["mainTd"]
+            cols["actorSupportEntropy"][seed] = h["actorSupportEntropy"]
+            cols["terminationRate"][seed] = h["terminationRate"]
+            cols["keyboardL1"][seed] = h["keyboardL1"]
+            cols["nfPlan"][seed] = float(h["nonFiniteByPhase"]["plan"])
+            cols["paramAbsMax"][seed] = 1000.0 + seed
+        for f in fields:
+            payload += struct.pack(f"<{len(seeds)}f", *cols[f])
+        prev = step
+    header_json = json.dumps({"fields": fields}).encode()
+    comp = zlib.compress(payload, 9, wbits=-15)
+    tape = (struct.pack("<4I", metrics_tape.FILE_MAGIC, 1, len(seeds), len(header_json))
+            + header_json
+            + struct.pack("<5I", metrics_tape.SEG_MAGIC, len(HEARTBEATS),
+                          len(payload), len(comp), zlib.crc32(comp))
+            + comp)
+    (ROOT / "metrics.oak.oakt").write_bytes(tape)
     death_lines.append(json.dumps({
         "seed": DEAD_LANE, "lane": DEAD_LANE, "step": DEAD_STEP,
         "detector": "paramExplosion", "policy": "oak",

@@ -25,6 +25,7 @@
 // envs: the single-flight key is the FILE, not the query, because ONE pass computes
 // every env slice — a 16-panel dashboard costs a single stream of a 175 MB file.
 
+import { readFileSync } from 'node:fs';
 import { readdir, unlink, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { isEnvId } from '@shared/envs';
@@ -36,10 +37,13 @@ import {
   hash32,
 } from './config';
 import { statOrNull, streamJsonl } from './jsonl';
+import { readTape, sampleWindows } from './metricsTape';
 import { ensureCacheDir } from './runIndex';
 
 /** bootstrap resamples per heartbeat — fleet.py reports at 10k; 2k is the interactive budget */
 export const CURVES_BOOTSTRAP = 2000;
+/** tape windows per curve — the bootstrap is O(windows x resamples x lanes) */
+const CURVES_TAPE_WINDOWS = 256;
 /** in-memory depth: one run's env set (16 envs + the pooled key) has to fit */
 const CURVES_LRU_MAX = 24;
 /** cache key of the un-filtered (all lanes) curve */
@@ -238,7 +242,7 @@ function safeName(id: string): string {
 }
 
 interface DiskCacheFile {
-  v: 1;
+  v: 2;
   kind: 'curves';
   /** fleet.jsonl `${mtimeMs}:${size}` */
   key: string;
@@ -261,7 +265,7 @@ async function readDiskCache(path: string, key: string, q: CurvesQuery): Promise
     const parsed: unknown = JSON.parse(await Bun.file(path).text());
     if (parsed === null || typeof parsed !== 'object') return null;
     const f = parsed as Partial<DiskCacheFile>;
-    if (f.v !== 1 || f.kind !== 'curves' || f.key !== key || f.data === undefined) return null;
+    if (f.v !== 2 || f.kind !== 'curves' || f.key !== key || f.data === undefined) return null;
     if (f.policy !== q.policy || (f.envId ?? null) !== q.envId) return null; // hash collision
     return f.data;
   } catch {
@@ -359,7 +363,7 @@ export async function deriveCurves(opts: CurvesOptions): Promise<CurvesResponse>
   const data = slices.get(envKey) ?? emptyCurves();
   if (!live && diskPath !== null) {
     void writeDiskCache(diskPath, {
-      v: 1,
+      v: 2,
       kind: 'curves',
       key: fileKey,
       policy: query.policy,
@@ -393,6 +397,10 @@ async function computeCurves(fleetPath: string, policy: string): Promise<Map<str
 
   await streamJsonl<FleetRow>(fleetPath, (row) => {
     if (row === null || typeof row !== 'object') return;
+    // METRICS LAW (2026-08-05): fleet.jsonl carries final certificates only;
+    // the series come from the tape below. Pre-tape archives' hb rows are
+    // ignored, not adapted.
+    if ((row as { kind?: unknown }).kind === 'hb') return;
     if (typeof row.policy === 'string' && row.policy !== policy) return;
     if (typeof row.policy !== 'string' && policy !== 'oak') return;
     const lane = typeof row.lane === 'number' ? row.lane : -1;
@@ -416,6 +424,52 @@ async function computeCurves(fleetPath: string, policy: string): Promise<Map<str
     const sum = row.rewardSum;
     rowSum.push(typeof sum === 'number' && Number.isFinite(sum) ? sum : null);
   });
+
+  // The continuous curve: tape windows at ~1k-step resolution, capped to keep
+  // the bootstrap interactive. Final rows (above) stay authoritative.
+  {
+    const dir = dirname(fleetPath);
+    const tape = readTape(join(dir, `metrics.${policy}.oakt`));
+    if (tape !== null) {
+      let meta: { envSchedule?: { envId: string; seedStart: number; seedEnd: number }[]; envId?: string; seeds?: number[] } = {};
+      try {
+        meta = JSON.parse(readFileSync(join(dir, 'meta.json'), 'utf8')) as typeof meta;
+      } catch {
+        /* lane-indexed defaults below */
+      }
+      const envOf = (seed: number): string => {
+        for (const e of meta.envSchedule ?? []) {
+          if (seed >= e.seedStart && seed <= e.seedEnd) return e.envId;
+        }
+        return meta.envId ?? '';
+      };
+      const seeds = meta.seeds ?? Array.from({ length: tape.laneCount }, (_, i) => i);
+      const fi = tape.fields.indexOf('rewardSum');
+      if (fi >= 0) {
+        for (const w of sampleWindows(tape.data.length, CURVES_TAPE_WINDOWS)) {
+          const stepEnd = (tape.stepStart[w] ?? 0) + (tape.stepCount[w] ?? 0);
+          if (stepSlot.has(stepEnd)) continue; // finals are authoritative
+          const si = stepValues.length;
+          stepValues.push(stepEnd);
+          stepSlot.set(stepEnd, si);
+          const vals = tape.data[w];
+          if (vals === undefined) continue;
+          for (let lane = 0; lane < tape.laneCount; lane++) {
+            let li = laneSlot.get(lane);
+            if (li === undefined) {
+              li = laneValues.length;
+              laneValues.push({ lane, envId: envOf(seeds[lane] ?? lane) });
+              laneSlot.set(lane, li);
+            }
+            rowLane.push(li);
+            rowStep.push(si);
+            const v = vals[fi * tape.laneCount + lane];
+            rowSum.push(v !== undefined && Number.isFinite(v) ? v : null);
+          }
+        }
+      }
+    }
+  }
 
   const nS = stepValues.length;
   const nL = laneValues.length;

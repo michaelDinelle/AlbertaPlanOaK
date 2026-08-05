@@ -40,6 +40,23 @@ else:
                 "TABLE ERROR: no common 100k milestone across candidate/parent/best kernel yet.")
         step = max(common)
 
+def fleet_rows(root):
+    """Final certificate rows from fleet.jsonl + heartbeat rows synthesized
+    from the continuous metrics tape (METRICS LAW 2026-08-05). Tape-only —
+    a root without a tape is an archive, not an instrument."""
+    rows = [json.loads(l) for l in open(f'{root}/fleet.jsonl') if l.strip()]
+    rows = [x for x in rows if x.get('kind') != 'hb']
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    import metrics_tape
+    for pol in {x.get('policy', 'oak') for x in rows} or {'oak'}:
+        if metrics_tape.find_tape(root, pol) is None:
+            raise SystemExit(
+                f"TABLE ERROR: {root} has no metrics.{pol}.oakt tape. Pre-tape "
+                f"roots are archives — re-run on the current binary (the agent "
+                f"stream is bit-identical).")
+        rows.extend(metrics_tape.synth_hb_rows(root, pol))
+    return rows
+
 def lane_envs(root):
     """seed -> envId from fleet.jsonl rows (mixed) or meta.envId (legacy)."""
     meta = json.load(open(f'{root}/meta.json'))
@@ -75,8 +92,7 @@ def agg_rows(root, s):
     prev_step = max(s - heartbeat_window(root, s), 0)
     prev_sum = {}
     by_env = {}
-    for l in open(f'{root}/fleet.jsonl'):
-        x = json.loads(l)
+    for x in fleet_rows(root):
         if x['kind'] not in ('hb', 'final'):
             continue
         if prev_step > 0 and x['step'] == prev_step:

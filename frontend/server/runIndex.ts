@@ -255,8 +255,12 @@ export class RunIndex {
 
         const fleetPath = join(dir, 'fleet.jsonl');
         const fleetStat = await statOrNull(fleetPath);
-        const fleetMtime = fleetStat?.mtimeMs ?? 0;
-        const fleetSize = fleetStat?.size ?? 0;
+        // Tape-era roots (METRICS LAW 2026-08-05) write fleet.jsonl only at
+        // the end (final rows); mid-run liveness comes from aggregate.jsonl,
+        // which every era appends per heartbeat.
+        const aggStat = await statOrNull(join(dir, 'aggregate.jsonl'));
+        const fleetMtime = Math.max(fleetStat?.mtimeMs ?? 0, aggStat?.mtimeMs ?? 0);
+        const fleetSize = (fleetStat?.size ?? 0) + (aggStat?.size ?? 0);
         const summaryStat = await statOrNull(join(dir, 'summary.json'));
         const summaryMtime = summaryStat === null ? -1 : summaryStat.mtimeMs;
         const recSig = await recordingsSignature(dir);
@@ -275,6 +279,13 @@ export class RunIndex {
           const probe = fleetStat === null
             ? { hasFinal: false, maxStep: 0, rowsScanned: 0 }
             : await probeFleetTail(fleetPath);
+          // Mid-run progress for tape-era roots: fleet.jsonl is empty until
+          // the final rows land, so the step high-water comes from the
+          // aggregate heartbeat stream.
+          if (!probe.hasFinal && aggStat !== null) {
+            const aggProbe = await probeFleetTail(join(dir, 'aggregate.jsonl'));
+            probe.maxStep = Math.max(probe.maxStep, aggProbe.maxStep);
+          }
           const recs = await scanRecordings(dir, { root: this.benchRoot });
           seenRecordings.set(id, recs);
           const steps = typeof meta.steps === 'number' ? meta.steps : 0;

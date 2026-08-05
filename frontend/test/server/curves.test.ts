@@ -17,6 +17,7 @@ import { mkdtemp, mkdir, readdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { tapeBytes } from '../helpers/tape';
 
 import type { CurvesResponse } from '../../shared/types';
 import { createApp } from '../../server/app';
@@ -34,10 +35,10 @@ import {
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const REAL_BENCH = resolve(HERE, '..', '..', '..', '.oak-benchmarks');
-const DEMO_ID = 'frontend-demo-16env-20260803';
-const P93_ID = 'p93-tierL-20260721';
+const DEMO_ID = 'frontend-demo-16env-20260805';
+const KEEPER_ID = 'tape-reference-tierL-20260805';
 const demoPresent = existsSync(join(REAL_BENCH, DEMO_ID, 'fleet.jsonl'));
-const p93Present = existsSync(join(REAL_BENCH, P93_ID, 'fleet.jsonl'));
+const keeperPresent = existsSync(join(REAL_BENCH, KEEPER_ID, 'metrics.oak.oakt'));
 
 const ENV_A = 'HalfCheetah-v4';
 const ENV_B = 'FourRooms-cont-v0';
@@ -61,7 +62,7 @@ let CACHE = '';
 function row(lane: number, envId: string, step: number, rewardSum: number, policy = 'oak'): string {
   return JSON.stringify({
     v: 1,
-    kind: step === STEPS[STEPS.length - 1] ? 'final' : 'hb',
+    kind: 'final',
     envId,
     policy,
     lane,
@@ -97,20 +98,41 @@ async function buildFixture(): Promise<void> {
     }),
   );
 
+  // METRICS LAW (2026-08-05): fleet.jsonl carries final certificates only;
+  // the heartbeat series live on per-policy tapes.
+  const finalStep = STEPS[STEPS.length - 1] ?? 300;
   const lines: string[] = [];
-  for (const step of STEPS) {
-    for (const seed of RATES) {
-      // lane 3 misses the middle heartbeat: its window at 200 is unknown, and so is the
-      // one at 300 that would have to difference against it.
-      if (seed.lane === 3 && step === 200) continue;
-      lines.push(row(seed.lane, seed.envId, step, seed.rate * step));
-    }
-    // a second policy in the same file — the filter has to keep them apart
-    lines.push(row(0, ENV_A, step, 9 * step, 'zero'));
+  for (const seed of RATES) {
+    lines.push(row(seed.lane, seed.envId, finalStep, seed.rate * finalStep));
+  }
+  // a second policy in the same file — the filter has to keep them apart
+  // (a tape covers EVERY lane, so the zero policy carries all 6 at rate 9)
+  for (const seed of RATES) {
+    lines.push(row(seed.lane, seed.envId, finalStep, 9 * finalStep, 'zero'));
   }
   // ...and a half-written trailing row, exactly as a live writer leaves one
-  await writeFile(join(RUN_DIR, 'fleet.jsonl'), `${lines.join('\n')}\n{"v":1,"kind":"hb","lane":2,"step":4`);
+  await writeFile(join(RUN_DIR, 'fleet.jsonl'), `${lines.join('\n')}\n{"v":1,"kind":"final","lane":2,"step":4`);
   await writeFile(join(RUN_DIR, 'aggregate.jsonl'), '');
+
+  const tapeSteps = STEPS.slice(0, -1); // finals own the last step
+  const oakWindows = tapeSteps.map((end, i) => ({
+    start: i === 0 ? 0 : (tapeSteps[i - 1] ?? 0),
+    count: end - (i === 0 ? 0 : (tapeSteps[i - 1] ?? 0)),
+    values: {
+      // lane 3's window at 200 is unknown (NaN), and so is the 300 window that
+      // would have to difference against it — the old missing-row case.
+      rewardSum: RATES.map((s) => (s.lane === 3 && end === 200 ? Number.NaN : s.rate * end)),
+    },
+  }));
+  await writeFile(join(RUN_DIR, 'metrics.oak.oakt'), tapeBytes(RATES.length, oakWindows));
+  await writeFile(
+    join(RUN_DIR, 'metrics.zero.oakt'),
+    tapeBytes(RATES.length, tapeSteps.map((end, i) => ({
+      start: i === 0 ? 0 : (tapeSteps[i - 1] ?? 0),
+      count: end - (i === 0 ? 0 : (tapeSteps[i - 1] ?? 0)),
+      values: { rewardSum: RATES.map(() => 9 * end) },
+    }))),
+  );
 }
 
 function query(search: string): CurvesQuery {
@@ -276,7 +298,7 @@ describe('curves from fleet.jsonl', () => {
 
   it('keeps the policies apart', async () => {
     const zero = await curves('?policy=zero');
-    expect(zero.seeds).toBe(1);
+    expect(zero.seeds).toBe(6);
     expect(zero.iqm).toEqual([9, 9, 9]);
     const missing = await curves('?policy=random');
     expect(missing).toEqual({ steps: [], iqm: [], ciLo: [], ciHi: [], p10: [], p50: [], p90: [], seeds: 0 });
@@ -336,7 +358,7 @@ describe('curves cache', () => {
     const files = await waitForCacheFiles(1);
     const path = join(CACHE, files[0] ?? '');
     const rec = JSON.parse(await Bun.file(path).text()) as Record<string, unknown>;
-    expect(rec['v']).toBe(1);
+    expect(rec['v']).toBe(2);
     expect(rec['kind']).toBe('curves');
     expect(rec['envId']).toBe(ENV_A);
 
@@ -423,7 +445,7 @@ describe('curves against the real bench roots', () => {
   let base = '';
 
   beforeAll(() => {
-    if (!demoPresent && !p93Present) return;
+    if (!demoPresent && !keeperPresent) return;
     const app = createApp({ benchRoot: REAL_BENCH, cacheFile: null, fleetCacheDir: null, ttlMs: 0 });
     server = Bun.serve({ hostname: '127.0.0.1', port: 0, fetch: app.fetch });
     base = `http://127.0.0.1:${server.port}`;
@@ -436,7 +458,9 @@ describe('curves against the real bench roots', () => {
   it.skipIf(!demoPresent)('slices the 16-env demo run per environment', async () => {
     const all = (await (await fetch(`${base}/api/runs/${DEMO_ID}/curves`)).json()) as CurvesResponse;
     expect(all.seeds).toBe(128);
-    expect(all.steps.length).toBe(10);
+    // ~100 tape windows (CB cadence) — the final step comes from fleet.jsonl finals
+    expect(all.steps.length).toBeGreaterThan(50);
+    expect(all.steps.at(-1)).toBe(100000);
     expectAligned(all);
 
     const cheetah = (await (
@@ -459,21 +483,22 @@ describe('curves against the real bench roots', () => {
     }
   });
 
-  it.skipIf(!p93Present)('slices the 1408-seed keeper run per environment', async () => {
-    const all = (await (await fetch(`${base}/api/runs/${P93_ID}/curves`)).json()) as CurvesResponse;
-    expect(all.seeds).toBe(1408);
-    expect(all.steps.length).toBeGreaterThan(1);
+  it.skipIf(!keeperPresent)('slices the 1024-seed keeper run per environment', async () => {
+    const all = (await (await fetch(`${base}/api/runs/${KEEPER_ID}/curves`)).json()) as CurvesResponse;
+    expect(all.seeds).toBe(1024);
+    // 255 sampled tape windows + the final certificate step
+    expect(all.steps.length).toBe(256);
     expectAligned(all);
     const cheetah = (await (
-      await fetch(`${base}/api/runs/${P93_ID}/curves?envId=HalfCheetah-v4`)
+      await fetch(`${base}/api/runs/${KEEPER_ID}/curves?envId=HalfCheetah-v4`)
     ).json()) as CurvesResponse;
-    expect(cheetah.seeds).toBe(1024);
+    expect(cheetah.seeds).toBe(64);
     expect(cheetah.steps).toEqual(all.steps);
-    // 1024 HalfCheetah seeds at 1M steps: a real, finite, positive-ended curve
+    // 64 HalfCheetah seeds at 1M steps: a real, finite, positive-ended curve
     const last = cheetah.iqm.at(-1);
     expect(typeof last).toBe('number');
     expect(Number.isFinite(last ?? Number.NaN)).toBe(true);
-  });
+  }, 60000);
 
   /**
    * The numbers themselves, pinned.
@@ -487,28 +512,31 @@ describe('curves against the real bench roots', () => {
    * 0.0 and the IQM to 7e-16 (float summation order) across all 6 p93 slices and all 16
    * of the demo's, so the tolerance here is about summation order, not about agreement.
    */
-  it.skipIf(!p93Present)('reports the same statistics numpy does for the keeper', async () => {
+  it.skipIf(!keeperPresent)('reports the same statistics numpy does for the keeper', async () => {
     const cheetah = (await (
-      await fetch(`${base}/api/runs/${P93_ID}/curves?envId=HalfCheetah-v4`)
+      await fetch(`${base}/api/runs/${KEEPER_ID}/curves?envId=HalfCheetah-v4`)
     ).json()) as CurvesResponse;
-    expect(cheetah.steps).toEqual([
-      100000, 200000, 300000, 400000, 500000, 600000, 700000, 800000, 900000, 1000000,
-    ]);
+    // 255 sampled tape windows + the final step; constants recomputed from the
+    // TAPE with independent numpy (window sampling replicated, IQM by
+    // tools/fleet.py's definition, percentiles by np.percentile linear).
+    expect(cheetah.steps.length).toBe(256);
+    expect(cheetah.steps[0]).toBe(3150);
+    expect(cheetah.steps.at(-1)).toBe(1000000);
     const close = (got: number | null | undefined, want: number): void => {
       expect(got).not.toBeNull();
       expect(Math.abs((got ?? Number.NaN) - want)).toBeLessThan(1e-9);
     };
-    close(cheetah.iqm[0], 0.15900388458251954);
-    close(cheetah.iqm.at(-1), 0.5095395571136475);
-    close(cheetah.p50[0], 0.1552541552734375);
-    close(cheetah.p10.at(-1), 0.1575105);
-    close(cheetah.p50.at(-1), 0.51271984375);
-    close(cheetah.p90.at(-1), 0.7834062187499999);
+    close(cheetah.iqm[0], -0.006311481888332065);
+    close(cheetah.iqm.at(-1), 0.5451980642383675);
+    close(cheetah.p50[0], -0.006326222798180958);
+    close(cheetah.p10.at(-1), 0.24822101637639718);
+    close(cheetah.p50.at(-1), 0.530007148427346);
+    close(cheetah.p90.at(-1), 0.7833815310631663);
     // and the CI is an interval around the point estimate, not a decoration
     const lo = cheetah.ciLo.at(-1) ?? Number.NaN;
     const hi = cheetah.ciHi.at(-1) ?? Number.NaN;
-    expect(lo).toBeLessThanOrEqual(0.5095395571136475);
-    expect(hi).toBeGreaterThanOrEqual(0.5095395571136475);
-    expect(hi - lo).toBeLessThan(0.2); // 1024 seeds: a tight interval, not a shrug
-  });
+    expect(lo).toBeLessThanOrEqual(0.5451980642383675);
+    expect(hi).toBeGreaterThanOrEqual(0.5451980642383675);
+    expect(hi - lo).toBeLessThan(0.3); // 64 seeds: a real interval, not a shrug
+  }, 60000);
 });

@@ -18,7 +18,6 @@ struct KernelConfig {
   var nurseryCount: UInt32
   // Host-precomputed constants (identical IEEE values — Float division is
   // correctly rounded on both sides with fast-math off).
-  var keyboardSketchDim: UInt32  // max(1, min(D, K))
   var sampleSigma: Float  // 1 / max(D, 1)
   var sampleInv2S2: Float  // 1 / (2 * sampleSigma * sampleSigma)
   var actorAlphaDenom: Float  // Float(max(D * 32, 1)) — divisor, NOT a reciprocal
@@ -29,36 +28,28 @@ struct KernelScalars {
 }
 struct KernelStats {
   var encodeNonFiniteCount, learnNonFiniteCount, planNonFiniteCount, tdPsiNonFiniteCount: Float
-  var oakOptionReinitCount, oakFeatureReinitCount, terminationRate, optionDurationMean: Float
+  var oakOptionReinitCount, oakFeatureReinitCount, terminationRate: Float
   var importanceEss, actorUpdateNormMean, actorSupportEntropy, modelPriorityMax: Float
-  var selectedOptionAge, selectedOptionDuration, selectedOptionPriority, keyboardL1, actorAdvantageL1: Float
-  var selectedOptionIndex, keyboardOrigin: Float
-  var selectedOptionFeature, selectedContinuation, selectedKeyboardWeight, mainTd, planTdValue: Float
-  var keyboardSketchDim, keyboardEffectiveL1, searchControlUseMean, generateTestEligibleCount: Float
-  var learningMature: Float = 0
-  var dynaBackupMean: Float = 0
+  var selectedOptionAge, selectedOptionPriority, keyboardL1, actorAdvantageL1: Float
+  var selectedOptionIndex, selectedContinuation, selectedKeyboardWeight, mainTd, planTdValue: Float
+  var keyboardEffectiveL1, searchControlUseMean, generateTestEligibleCount: Float
 }
 
 struct FleetEnvCfg {
   var laneCount, episodeLen, policyMode, recordCapacity: UInt32
   var invObsFloor: Float
 }
-struct SnapInfo {
-  var count: UInt32 = 0, finiteCount: UInt32 = 0
-  var sum: Float = 0, sumC: Float = 0, first: Float = 0, last: Float = 0
-}
 struct LaneSnapshot {
   var scalars: KernelScalars
   var stats: KernelStats
   var paramAbsMax: Float
   var paramNonFinite: UInt32
-  var steps, doneCount, resets: UInt32
+  var steps, doneCount: UInt32
   var rewardSum, rho, deltaSum, deltaPeak: Float
   var deathStep, deathDetector: UInt32
   var deathRewardSum, deathRho: Float
-  var info0, info1, info2, info3: SnapInfo
 }
-let fleetLaneStride = 408
+let fleetLaneStride = 312
 
 struct AblationSpec {
   static let ordered = [
@@ -287,7 +278,6 @@ final class Engine {
       agentCount: UInt32(batch), paramStride: UInt32(paramTotal),
       stateStride: UInt32(a.total), uintStride: UInt32(uintTotal),
       nurseryCount: UInt32(rn),
-      keyboardSketchDim: UInt32(max(1, min(d, k))),
       sampleSigma: sampleSigma,
       sampleInv2S2: 1 / (2 * sampleSigma * sampleSigma),
       actorAlphaDenom: Float(max(d * 32, 1)))
@@ -751,6 +741,131 @@ final class RecordV4Writer: @unchecked Sendable {
   var bytesWritten: Int { fileOffset }
 }
 
+/// Continuous metrics tape (OAKT v1) — the replacement for fleet.jsonl's
+/// per-lane heartbeat snapshots (METRICS LAW 2026-08-05). One file per run
+/// root per policy (`metrics.<policy>.oakt`); one row per lane per
+/// command-buffer window, so the on-disk curve resolution is the CB cadence
+/// (~1024 steps), not the heartbeat. Self-describing: the header carries the
+/// field table as JSON, so readers never hard-code the schema. Windows are
+/// buffered in memory and flushed as one raw-DEFLATE segment per heartbeat
+/// (same cadence, same writer queue, same codec family as record v4 — zero
+/// new I/O rhythm). Torn tails drop segment-by-segment via crc, exactly like
+/// v4 chunks. Layout, all little-endian:
+///   FileHeader: u32 magic "OAKT", u32 version=1, u32 laneCount,
+///               u32 jsonLen, jsonLen bytes of {"fields":[...names]}
+///   Segment:    u32 magic "SEGT", u32 windowCount, u32 rawBytes,
+///               u32 compBytes, u32 crc32(compressed), then compBytes of
+///               raw DEFLATE. Inflated payload = windowCount windows, each:
+///               u32 stepStart, u32 stepCount, then fields × f32[laneCount].
+final class MetricsTapeWriter {
+  static let fileMagic: UInt32 = 0x544B_414F  // "OAKT"
+  static let segMagic: UInt32 = 0x54_4745_53  // "SEGT"
+  /// The curated continuous set (everything else was removed as dead weight
+  /// or lives only in the final fleet.jsonl row / deaths.jsonl certificate).
+  static let fields: [String] = [
+    "rewardSum", "doneCount", "rewardRate", "kernelRho", "deltaSum",
+    "deltaPeak", "mainTd", "actorSupportEntropy", "terminationRate",
+    "keyboardEffectiveL1", "keyboardL1", "actorAdvantageL1",
+    "modelPriorityMax", "importanceEss", "actorUpdateNormMean",
+    "searchControlUseMean", "selectedOptionPriority", "selectedContinuation",
+    "generateTestEligibleCount", "featureReinitCount", "optionReinitCount",
+    "nfEncode", "nfLearn", "nfPlan", "nfTdPsi",
+    // -1 sentinel on per-CB windows ("not scanned"); the real O(paramStride)
+    // scan value on heartbeat windows only.
+    "paramAbsMax",
+  ]
+  private let handle: FileHandle
+  private let laneCount: Int
+  private var pending = Data()
+  private var pendingWindows = 0
+  private var deflateVerified = false
+
+  init(url: URL, laneCount: Int) throws {
+    FileManager.default.createFile(atPath: url.path, contents: nil)
+    self.handle = try FileHandle(forWritingTo: url)
+    self.laneCount = laneCount
+    let json = try JSONSerialization.data(withJSONObject: ["fields": Self.fields])
+    var head = Data()
+    for v: UInt32 in [Self.fileMagic, 1, UInt32(laneCount), UInt32(json.count)] {
+      var x = v.littleEndian
+      withUnsafeBytes(of: &x) { head.append(contentsOf: $0) }
+    }
+    head.append(json)
+    try handle.write(contentsOf: head)
+  }
+
+  /// One window row per lane from the CB-boundary snapshot. Writer queue only.
+  func append(snap: UnsafeMutablePointer<LaneSnapshot>, half: Int,
+              stepStart: Int, stepCount: Int) {
+    for v: UInt32 in [UInt32(stepStart), UInt32(stepCount)] {
+      var x = v.littleEndian
+      withUnsafeBytes(of: &x) { pending.append(contentsOf: $0) }
+    }
+    var col = [Float](repeating: 0, count: laneCount)
+    func push(_ get: (LaneSnapshot) -> Float) {
+      for l in 0..<laneCount { col[l] = get(snap[half * laneCount + l]) }
+      col.withUnsafeBufferPointer {
+        pending.append(UnsafeRawPointer($0.baseAddress!).assumingMemoryBound(to: UInt8.self),
+                       count: laneCount * 4)
+      }
+    }
+    push { $0.rewardSum }
+    push { Float($0.doneCount) }
+    push { $0.rho }
+    push { $0.scalars.rho }
+    push { $0.deltaSum }
+    push { $0.deltaPeak }
+    push { $0.stats.mainTd }
+    push { $0.stats.actorSupportEntropy }
+    push { $0.stats.terminationRate }
+    push { $0.stats.keyboardEffectiveL1 }
+    push { $0.stats.keyboardL1 }
+    push { $0.stats.actorAdvantageL1 }
+    push { $0.stats.modelPriorityMax }
+    push { $0.stats.importanceEss }
+    push { $0.stats.actorUpdateNormMean }
+    push { $0.stats.searchControlUseMean }
+    push { $0.stats.selectedOptionPriority }
+    push { $0.stats.selectedContinuation }
+    push { $0.stats.generateTestEligibleCount }
+    push { $0.stats.oakFeatureReinitCount }
+    push { $0.stats.oakOptionReinitCount }
+    push { $0.stats.encodeNonFiniteCount }
+    push { $0.stats.learnNonFiniteCount }
+    push { $0.stats.planNonFiniteCount }
+    push { $0.stats.tdPsiNonFiniteCount }
+    push { $0.paramNonFinite != 0 ? Float.infinity : $0.paramAbsMax }
+    pendingWindows += 1
+  }
+
+  /// Compress and write all buffered windows as one segment. Writer queue only.
+  func flush() throws {
+    guard pendingWindows > 0 else { return }
+    let comp = try (pending as NSData).compressed(using: .zlib) as Data
+    if !deflateVerified {
+      deflateVerified = true
+      let back = try (comp as NSData).decompressed(using: .zlib) as Data
+      guard back == pending else {
+        throw err("metrics tape: deflate round-trip mismatch.")
+      }
+    }
+    let crc = comp.withUnsafeBytes { p in
+      UInt32(truncatingIfNeeded: crc32(0, p.bindMemory(to: UInt8.self).baseAddress, uInt(comp.count)))
+    }
+    var out = Data(capacity: 20 + comp.count)
+    for v: UInt32 in [
+      Self.segMagic, UInt32(pendingWindows), UInt32(pending.count), UInt32(comp.count), crc,
+    ] {
+      var x = v.littleEndian
+      withUnsafeBytes(of: &x) { out.append(contentsOf: $0) }
+    }
+    out.append(comp)
+    try handle.write(contentsOf: out)
+    pending = Data()
+    pendingWindows = 0
+  }
+}
+
 @main struct Main {
   /// Set at launch when a multi-policy workload makes default-on recording
   /// unsafe (all policies share one <envId>/seed<N>/actions.bin — the
@@ -974,7 +1089,7 @@ final class RecordV4Writer: @unchecked Sendable {
     }
     let recordBuf = try makeBuf(recordLanes.count * recordCapacity * 16 * 4)
     let snapStride = MemoryLayout<LaneSnapshot>.stride
-    precondition(snapStride == 280, "LaneSnapshot layout drifted from OakLaneSnapshot")
+    precondition(snapStride == 152, "LaneSnapshot layout drifted from OakLaneSnapshot")
     let snapBuf = try makeBuf(2 * B * snapStride)
     let snapPtr = snapBuf.contents().bindMemory(to: LaneSnapshot.self, capacity: 2 * B)
     let dumpEvery = max(e["OAK_DUMP_STATE_EVERY"].flatMap(Int.init) ?? 0, 0)
@@ -996,6 +1111,8 @@ final class RecordV4Writer: @unchecked Sendable {
     let fleetOut = try appender("fleet.jsonl")
     let deathsOut = try appender("deaths.jsonl")
     let aggOut = try appender("aggregate.jsonl")
+    let tape = try MetricsTapeWriter(
+      url: root.appendingPathComponent("metrics.\(p.rawValue).oakt"), laneCount: B)
     defer {
       hashHandles.forEach { try? $0?.close() }
       recordHandles.forEach { try? $0.close() }
@@ -1068,24 +1185,16 @@ final class RecordV4Writer: @unchecked Sendable {
     let detectorNames: [UInt32: String] = [1: "envReward", 2: "policyMean", 3: "envObs"]
     let wallStart = DispatchTime.now().uptimeNanoseconds
     func now() -> Double { Double(DispatchTime.now().uptimeNanoseconds - wallStart) / 1e9 }
-    func infoJSON(_ a: SnapInfo) -> [String: Any] {
-      let finite = Int(a.finiteCount)
-      return [
-        "count": Int(a.count), "finiteCount": finite,
-        "nonFiniteCount": Int(a.count) - finite,
-        "sum": finite > 0 ? Double(a.sum) : NSNull() as Any,
-        "mean": finite > 0 ? Double(a.sum) / Double(finite) : NSNull() as Any,
-        "last": finite > 0 ? Double(a.last) as Any : NSNull(),
-        "delta": finite > 0 ? (Double(a.last) - Double(a.first)) as Any : NSNull(),
-      ]
-    }
+    // METRICS LAW (2026-08-05): the continuous series live in the metrics
+    // tape; this block survives only on the FINAL fleet.jsonl row. envInfo,
+    // the structurally-zero stats, and the never-read fields were deleted at
+    // the source (kernel + lane struct), not just here.
     func health(_ snap: LaneSnapshot, lane: Int) -> [String: Any] {
       let adm = Double(snap.deltaSum) / Double(max(Int(snap.steps), 1))
       var h: [String: Any] = [
         "rewardRate": snap.rho.isFinite ? Double(snap.rho) : NSNull(),
         "actionDeltaL2Mean": adm.isFinite ? adm : NSNull(),
         "actionDeltaPeak": snap.deltaPeak.isFinite ? Double(snap.deltaPeak) : NSNull(),
-        "continuingRestartCount": Double(snap.doneCount),
       ]
       if engine != nil {
         let s = snap.stats
@@ -1097,67 +1206,23 @@ final class RecordV4Writer: @unchecked Sendable {
           "plan": Int(s.planNonFiniteCount), "tdPsi": Int(s.tdPsiNonFiniteCount),
         ]
         h["terminationRate"] = f(s.terminationRate)
-        h["optionDurationMean"] = f(s.optionDurationMean)
         h["importanceEss"] = f(s.importanceEss)
         h["actorUpdateNormMean"] = f(s.actorUpdateNormMean)
         h["actorSupportEntropy"] = f(s.actorSupportEntropy)
         h["modelPriorityMax"] = f(s.modelPriorityMax)
         h["selectedOptionAge"] = f(s.selectedOptionAge)
-        h["selectedOptionDuration"] = f(s.selectedOptionDuration)
         h["selectedOptionPriority"] = f(s.selectedOptionPriority)
         h["keyboardL1"] = f(s.keyboardL1)
         h["actorAdvantageL1"] = f(s.actorAdvantageL1)
         h["selectedOptionIndex"] = f(s.selectedOptionIndex)
-        h["keyboardOrigin"] = f(s.keyboardOrigin)
-        h["selectedOptionFeature"] = f(s.selectedOptionFeature)
         h["selectedContinuation"] = f(s.selectedContinuation)
         h["selectedKeyboardWeight"] = f(s.selectedKeyboardWeight)
         h["mainTd"] = f(s.mainTd)
         h["planTd"] = f(s.planTdValue)
-        h["keyboardSketchDim"] = f(s.keyboardSketchDim)
         h["keyboardEffectiveL1"] = f(s.keyboardEffectiveL1)
         h["searchControlUseMean"] = f(s.searchControlUseMean)
-        h["dynaBackupMean"] = f(s.dynaBackupMean)
         h["generateTestEligibleCount"] = f(s.generateTestEligibleCount)
-        h["learningMature"] = f(s.learningMature)
       }
-      // envInfo channel names are env-conditional (per lane's env): cheetah
-      // lanes keep the legacy MuJoCo names; gridworld lanes report their own.
-      let infoNames: [String]
-      switch laneEnvs[lane] {
-      case "FourRooms-cont-v0":
-        infoNames = ["info:goal", "info:x", "info:y", "info:since_goal"]
-      case "DeepSea-cont-v0":
-        infoNames = ["info:reward", "info:row", "info:col", "info:last_action"]
-      case "KeyCorridor-cont-v0":
-        infoNames = ["info:goal", "info:x", "info:y", "info:since_goal"]
-      case "Chain-cont-v0":
-        infoNames = ["info:reward", "info:pos", "info:done", "info:unused"]
-      case "LargeDeepSea-cont-v0":
-        infoNames = ["info:reward", "info:row", "info:col", "info:last_action"]
-      case "MultiKeyCorridor-cont-v0":
-        infoNames = ["info:goal", "info:x", "info:y", "info:since_goal"]
-      case "MemoryChain-cont-v0":
-        infoNames = ["info:reward", "info:pos", "info:done", "info:cue"]
-      case "ProceduralMaze-cont-v0", "HighDimMaze-cont-v0", "POMaze-cont-v0":
-        infoNames = ["info:goal", "info:x", "info:y", "info:since_goal"]
-      case "DelayedChain-cont-v0":
-        infoNames = ["info:reward", "info:pos", "info:done", "info:last_action"]
-      case "Acrobot-cont-v0":
-        infoNames = ["info:reward", "info:theta1", "info:theta2", "info:height"]
-      case "MountainCar-cont-v0":
-        infoNames = ["info:reward", "info:pos", "info:vel", "info:done"]
-      case "CartPole-cont-v0":
-        infoNames = ["info:reward", "info:x", "info:theta", "info:done"]
-      case "Pendulum-cont-v0":
-        infoNames = ["info:reward", "info:theta", "info:theta_dot", "info:torque"]
-      default:
-        infoNames = ["info:reward_run", "info:reward_ctrl", "info:x_position", "info:x_velocity"]
-      }
-      h["envInfo"] = [
-        infoNames[0]: infoJSON(snap.info0), infoNames[1]: infoJSON(snap.info1),
-        infoNames[2]: infoJSON(snap.info2), infoNames[3]: infoJSON(snap.info3),
-      ]
       return h
     }
     // Errors out of the per-lane fan-out (DispatchQueue.concurrentPerform can
@@ -1303,8 +1368,6 @@ final class RecordV4Writer: @unchecked Sendable {
                 s.actorSupportEntropy.isFinite ? Double(s.actorSupportEntropy) : NSNull()
               row["terminationRate"] =
                 s.terminationRate.isFinite ? Double(s.terminationRate) : NSNull()
-              row["optionDurationMean"] =
-                s.optionDurationMean.isFinite ? Double(s.optionDurationMean) : NSNull()
               row["rhoAtDeath"] =
                 snap.scalars.rho.isFinite ? Double(snap.scalars.rho) : NSNull()
               let pm = snap.paramNonFinite != 0 ? Double.infinity : Double(snap.paramAbsMax)
@@ -1320,24 +1383,29 @@ final class RecordV4Writer: @unchecked Sendable {
             deathLines.append(try jsonLine(row))
           }
         }
-        var m: [String: Any] = [
-          "v": 1, "kind": kind, "envId": laneEnvs[lane], "policy": p.rawValue,
-          "ablationLabel": ablations.label, "lane": lane, "seed": seeds[lane],
-          "step": Int(snap.steps), "wallSeconds": wall, "rewardSum": Double(snap.rewardSum),
-          "doneCount": Int(snap.doneCount), "health": health(snap, lane: lane),
-          "firstNonFiniteStep": st.deadStep[lane] ?? NSNull(),
-          "firstNonFiniteDetector": st.deadDetector[lane] ?? NSNull(),
-        ]
-        if wall > 0 { m["stepsPerSecond"] = Double(snap.steps) / wall }
-        if engine != nil {
-          m["kernelRho"] = snap.scalars.rho.isFinite ? Double(snap.scalars.rho) : NSNull()
-          let pm = snap.paramNonFinite != 0 ? Double.infinity : Double(snap.paramAbsMax)
-          m["paramAbsMax"] = pm.isFinite ? pm : NSNull()
+        // METRICS LAW (2026-08-05): per-lane heartbeat rows are gone — the
+        // continuous series live in the metrics tape. fleet.jsonl keeps only
+        // the FINAL certificate row per lane (plus deaths.jsonl, unchanged).
+        if kind == "final" {
+          var m: [String: Any] = [
+            "v": 1, "kind": kind, "envId": laneEnvs[lane], "policy": p.rawValue,
+            "ablationLabel": ablations.label, "lane": lane, "seed": seeds[lane],
+            "step": Int(snap.steps), "wallSeconds": wall, "rewardSum": Double(snap.rewardSum),
+            "doneCount": Int(snap.doneCount), "health": health(snap, lane: lane),
+            "firstNonFiniteStep": st.deadStep[lane] ?? NSNull(),
+            "firstNonFiniteDetector": st.deadDetector[lane] ?? NSNull(),
+          ]
+          if wall > 0 { m["stepsPerSecond"] = Double(snap.steps) / wall }
+          if engine != nil {
+            m["kernelRho"] = snap.scalars.rho.isFinite ? Double(snap.scalars.rho) : NSNull()
+            let pm = snap.paramNonFinite != 0 ? Double.infinity : Double(snap.paramAbsMax)
+            m["paramAbsMax"] = pm.isFinite ? pm : NSNull()
+          }
+          lines.append(try jsonLine(m))
         }
-        lines.append(try jsonLine(m))
       }
       if !deathLines.isEmpty { try deathsOut.write(contentsOf: deathLines) }
-      try fleetOut.write(contentsOf: lines)
+      if !lines.isEmpty { try fleetOut.write(contentsOf: lines) }
       let alive = st.deadStep.filter { $0 == nil }.count
       let unsorted = (0..<B).map { l -> Double in
         let sn = snapPtr[half * B + l]
@@ -1373,6 +1441,7 @@ final class RecordV4Writer: @unchecked Sendable {
           "recentRateMax": recentSorted[recentSorted.count - 1],
         ]))
       try drainRecords(step: step, half: half)
+      try tape.flush()
       if timing {
         fputs(
           String(
@@ -1415,6 +1484,12 @@ final class RecordV4Writer: @unchecked Sendable {
     let inflight = DispatchSemaphore(value: 2)
     let snapSlots = DispatchSemaphore(value: (recordLanes.isEmpty && dumpEvery == 0) ? 2 : 1)
     var snapHalf = 0
+    // Tape window: the autotuner can settle on tiny CBs (~33 steps at
+    // B=1024, 80 ms GPU each), so the tape coalesces to >= this many steps
+    // per row instead of one row per CB — resolution stays ~1k steps while
+    // the snapshot dispatch is skipped entirely on non-tape CBs.
+    let tapeWindow = max(e["OAK_TAPE_WINDOW_STEPS"].flatMap(Int.init) ?? 1024, 1)
+    var lastTapeStep = 0
     var step = 0
     while step < steps {
       tuneLock.lock()
@@ -1433,9 +1508,13 @@ final class RecordV4Writer: @unchecked Sendable {
       // previous drain has copied its rows out), no fleet/aggregate rows.
       let isDrain = !recordLanes.isEmpty && !isSnap && target % drainEvery == 0
       let isDump = dumpEvery > 0 && target % dumpEvery == 0
+      // METRICS LAW (2026-08-05): a tape row lands when >= tapeWindow steps
+      // have elapsed since the last one (and on every heartbeat). Only those
+      // CBs carry the snapshot dispatch and take a snapshot half.
+      let isTape = isSnap || target - lastTapeStep >= tapeWindow
       inflight.wait()
       if let err = writer.sync(execute: { st.error }) { throw err }
-      if isSnap || isDrain { snapSlots.wait() }
+      if isTape || isDrain { snapSlots.wait() }
       guard let cb = q.makeCommandBuffer() else {
         throw err("Failed to encode Metal command.")
       }
@@ -1444,11 +1523,15 @@ final class RecordV4Writer: @unchecked Sendable {
         throw err("Failed to encode Metal command.")
       }
       encodeMegastep(enc, target - step)
-      if isSnap {
+      if isTape {
         bindFleet(enc, snapPipe)
         enc.setBuffer(snapBuf, offset: 0, index: 9)
         var base = UInt32(snapHalf * B)
         enc.setBytes(&base, length: 4, index: 10)
+        // The O(paramStride) paramAbsMax scan stays at heartbeat cadence; the
+        // tape-window snapshot skips it (fullScan = 0 -> sentinel -1).
+        var fullScan: UInt32 = isSnap ? 1 : 0
+        enc.setBytes(&fullScan, length: 4, index: 11)
         // One threadgroup (= one simdgroup) per lane: the param scan is
         // warp-parallel in-kernel.
         enc.dispatchThreadgroups(mtlSize(B), threadsPerThreadgroup: mtlSize(32))
@@ -1457,10 +1540,12 @@ final class RecordV4Writer: @unchecked Sendable {
       chunkSeq += 1
       cb.encodeSignalEvent(chunkOrder, value: chunkSeq)
       let thisHalf = snapHalf
-      if isSnap { snapHalf ^= 1 }
+      if isTape { snapHalf ^= 1 }
       let kind = target == steps ? "final" : "hb"
       let tStep = target
       let nSteps = target - step
+      let wStart = lastTapeStep
+      if isTape { lastTapeStep = target }
       cb.addCompletedHandler { cb in
         let gpuT = cb.gpuEndTime - cb.gpuStartTime
         if explicitN == nil, gpuT > 0, nSteps > 0 {
@@ -1475,19 +1560,21 @@ final class RecordV4Writer: @unchecked Sendable {
           if let cbError, st.error == nil {
             st.error = err("Metal command failed: \(cbError)")
           }
+          if isTape, st.error == nil {
+            tape.append(snap: snapPtr, half: thisHalf, stepStart: wStart, stepCount: tStep - wStart)
+          }
           if isSnap {
             if st.error == nil {
               do { try writeSnapshot(half: thisHalf, step: tStep, kind: kind) } catch {
                 st.error = error
               }
             }
-            snapSlots.signal()
           } else if isDrain {
             if st.error == nil {
               do { try drainRecords(step: tStep, half: nil) } catch { st.error = error }
             }
-            snapSlots.signal()
           }
+          if isTape || isDrain { snapSlots.signal() }
           inflight.signal()
         }
       }

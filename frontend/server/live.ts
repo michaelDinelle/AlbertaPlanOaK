@@ -66,16 +66,26 @@ export function createLiveResponse(req: Request, target: LiveTarget, pollMs = LI
       };
 
       const readStatus = async (): Promise<LiveStatus | null> => {
+        // Tape-era roots (METRICS LAW 2026-08-05) write fleet.jsonl only at
+        // the end; mid-run freshness and progress come from aggregate.jsonl.
         const st = await statOrNull(fleetPath);
-        if (st === null) return { maxStep: 0, inFlight: false, complete: false };
-        const key = `${st.mtimeMs}:${st.size}`;
+        const ag = await statOrNull(aggPath);
+        if (st === null && ag === null) return { maxStep: 0, inFlight: false, complete: false };
+        const key = `${st?.mtimeMs ?? 0}:${st?.size ?? 0}:${ag?.mtimeMs ?? 0}:${ag?.size ?? 0}`;
         if (key === fleetKey && lastStatus !== '') return null; // unchanged
         fleetKey = key;
-        const probe = await probeFleetTail(fleetPath);
+        const probe = st === null
+          ? { hasFinal: false, maxStep: 0, rowsScanned: 0 }
+          : await probeFleetTail(fleetPath);
+        if (!probe.hasFinal && ag !== null) {
+          const aggProbe = await probeFleetTail(aggPath);
+          probe.maxStep = Math.max(probe.maxStep, aggProbe.maxStep);
+        }
         const complete = probe.hasFinal && probe.maxStep >= target.steps && target.steps > 0;
+        const fresh = Math.max(st?.mtimeMs ?? 0, ag?.mtimeMs ?? 0);
         return {
           maxStep: probe.maxStep,
-          inFlight: !complete && Date.now() - st.mtimeMs < IN_FLIGHT_MS,
+          inFlight: !complete && Date.now() - fresh < IN_FLIGHT_MS,
           complete,
         };
       };

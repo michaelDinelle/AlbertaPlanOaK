@@ -79,8 +79,6 @@ struct KernelConfig {
     float metaEta;
     uint agentCount, paramStride, stateStride, uintStride;
     uint nurseryCount;
-
-    uint keyboardSketchDim;
     float sampleSigma;
     float sampleInv2S2;
     float actorAlphaDenom;
@@ -97,20 +95,18 @@ struct KernelScalars {
 struct KernelStats {
     float encodeNonFiniteCount, learnNonFiniteCount, planNonFiniteCount, tdPsiNonFiniteCount;
     float oakOptionReinitCount, oakFeatureReinitCount;
-    float terminationRate, optionDurationMean;
+    float terminationRate;
     float importanceEss;
     float actorUpdateNormMean;
     float actorSupportEntropy;
     float modelPriorityMax;
-    float selectedOptionAge, selectedOptionDuration, selectedOptionPriority;
+    float selectedOptionAge, selectedOptionPriority;
     float keyboardL1, actorAdvantageL1;
-    float selectedOptionIndex, keyboardOrigin;
-    float selectedOptionFeature, selectedContinuation, selectedKeyboardWeight;
+    float selectedOptionIndex;
+    float selectedContinuation, selectedKeyboardWeight;
     float mainTd, planTdValue;
-    float keyboardSketchDim, keyboardEffectiveL1;
+    float keyboardEffectiveL1;
     float searchControlUseMean, generateTestEligibleCount;
-    float learningMature;
-    float dynaBackupMean;
 };
 
 inline float safe_w_raw(float old_w, float new_w) { return isfinite(new_w) ? new_w : old_w; }
@@ -128,7 +124,6 @@ struct Ctx {
     uint stepCount, stateSlot;
     float rho;
     float invR, invK, metaEta;
-    uint keyboardSketchDimU;
     float sampleSigma, sampleInv2S2, actorAlphaDenom;
     device float *valueW, *psi, *optPolicy, *optReward, *optDuration;
     device float *psiAux, *vStop, *vsAux;
@@ -213,7 +208,6 @@ inline Ctx make_ctx(device float *params, device float *stateArena, device uint 
     c.invK = is_function_constant_defined(OAK_SPEC_INV_OPTION_COUNT)
         ? OAK_SPEC_INV_OPTION_COUNT : cfg.invOptionCount;
     c.metaEta = is_function_constant_defined(OAK_SPEC_META_ETA) ? OAK_SPEC_META_ETA : cfg.metaEta;
-    c.keyboardSketchDimU = cfg.keyboardSketchDim;
     c.sampleSigma = cfg.sampleSigma;
     c.sampleInv2S2 = cfg.sampleInv2S2;
     c.actorAlphaDenom = cfg.actorAlphaDenom;
@@ -470,19 +464,15 @@ inline void fcstomp_record_keyboard_stats(Ctx ctx,
     float sPrio = ctx.prioOpt[sOpt];
     ctx.stats->terminationRate = termSum * ctx.invK;
     ctx.stats->selectedOptionAge = float(ctx.optAge[sOpt]);
-    ctx.stats->selectedOptionDuration = 0.0f;
     ctx.stats->selectedOptionPriority = isfinite(sPrio) ? sPrio : 0.0f;
     ctx.stats->keyboardL1 = keyL1;
     ctx.stats->keyboardEffectiveL1 = effectiveL1;
     ctx.stats->actorAdvantageL1 = advL1;
     ctx.stats->selectedOptionIndex = float(sOpt);
-    ctx.stats->keyboardOrigin = 0.0f;
-    ctx.stats->selectedOptionFeature = float(ctx.optFeature[sOpt] % ctx.R);
     ctx.stats->selectedContinuation = ctx.continuation[sOpt];
     ctx.stats->selectedKeyboardWeight = isfinite(ctx.keyboard[sOpt]) ? ctx.keyboard[sOpt] : 0.0f;
     ctx.stats->mainTd = ctx.td[0];
     ctx.stats->planTdValue = ctx.planTd[0];
-    ctx.stats->keyboardSketchDim = float(ctx.keyboardSketchDimU);
 }
 
 inline void fcstomp_store_learn_scales(Ctx ctx, uint tid) {
@@ -2134,10 +2124,8 @@ static inline void oak_window_analytics(Ctx ctx, uint tid) {
         maxPrio = max(maxPrio, p);
         if (keyNorm > 0.0f) searchUse += max(p, 0.0f) * fabs(w) / keyNorm;
     }
-    ctx.stats->optionDurationMean = 0.0f;
     ctx.stats->modelPriorityMax = maxPrio;
     ctx.stats->searchControlUseMean = searchUse * invK;
-    ctx.stats->dynaBackupMean = 0.0f;
 
     ctx.stats->encodeNonFiniteCount = float(ctx.counters[OAK_CNT_OBS_NF]);
     ctx.stats->learnNonFiniteCount = float(ctx.counters[OAK_CNT_LEARN_NF]);
@@ -2145,7 +2133,6 @@ static inline void oak_window_analytics(Ctx ctx, uint tid) {
     ctx.stats->tdPsiNonFiniteCount = float(ctx.counters[OAK_CNT_TDPSI_NF] + ctx.counters[OAK_CNT_IMPORTANCE_NF]);
     ctx.stats->oakOptionReinitCount = float(ctx.counters[OAK_CNT_REINIT_OPT]);
     ctx.stats->oakFeatureReinitCount = float(ctx.counters[OAK_CNT_REINIT_FEAT]);
-    ctx.stats->learningMature = 0.0f;
 
     }
 }
@@ -2165,8 +2152,6 @@ struct OakFleetEnvCfg {
     float invObsFloor;
 };
 
-struct OakFleetInfoAcc { uint count, finiteCount; float sum, sumC, first, last; };
-
 struct OakFleetLane {
     HCState s;
     uint elapsed, resets;
@@ -2177,7 +2162,6 @@ struct OakFleetLane {
     float rewardSum, rewardC, rho;
     uint deathStep, deathDetector;
     float deathRewardSum, deathRho;
-    OakFleetInfoAcc info[4];
 
     uint envKind;
     uint gw[10];
@@ -2185,21 +2169,20 @@ struct OakFleetLane {
     // agent reads only these widths, never envKind.
     uint naturalO, naturalA;
 };
-static_assert(sizeof(OakFleetLane) == 408, "OakFleetLane layout drifted from the Swift mirror");
+static_assert(sizeof(OakFleetLane) == 312, "OakFleetLane layout drifted from the Swift mirror");
 
 struct OakLaneSnapshot {
     KernelScalars scalars;
     KernelStats stats;
     float paramAbsMax;
     uint paramNonFinite;
-    uint steps, doneCount, resets;
+    uint steps, doneCount;
     float rewardSum, rho;
     float deltaSum, deltaPeak;
     uint deathStep, deathDetector;
     float deathRewardSum, deathRho;
-    OakFleetInfoAcc info[4];
 };
-static_assert(sizeof(OakLaneSnapshot) == 280, "OakLaneSnapshot layout drifted from the Swift mirror");
+static_assert(sizeof(OakLaneSnapshot) == 152, "OakLaneSnapshot layout drifted from the Swift mirror");
 
 inline float oak_safe(float x) { return isfinite(x) ? x : 0.0f; }
 
@@ -2325,11 +2308,6 @@ kernel void oak_fleet_init(device float *params [[buffer(0)]],
     lane->rewardSum = 0.0f; lane->rewardC = 0.0f; lane->rho = 0.0f;
     lane->deathStep = OAK_DEATH_NONE; lane->deathDetector = 0u;
     lane->deathRewardSum = 0.0f; lane->deathRho = 0.0f;
-    for (int j = 0; j < 4; j++) {
-        lane->info[j].count = 0u; lane->info[j].finiteCount = 0u;
-        lane->info[j].sum = 0.0f; lane->info[j].sumC = 0.0f;
-        lane->info[j].first = 0.0f; lane->info[j].last = 0.0f;
-    }
     if (ecfg.policyMode == 0u) {
         Ctx ctx = make_ctx(params, stateArena, uintArena, scalars, stats, cfg, gid,
                            lane->naturalO, lane->naturalA);
@@ -2664,7 +2642,6 @@ static inline void oak_stage_fleet_env(device float *params,
     for (int u = 0; u < 6; u++) ctrl[u] = lane->ctrlPending[u];
     float reward;
     uint done = 0u;
-    float info[4];
     float obs[17];
     float pose[9];
     if (lane->envKind == OAK_ENV_FOURROOMS) {
@@ -2673,10 +2650,6 @@ static inline void oak_stage_fleet_env(device float *params,
         for (int i = 0; i < 6; i++) gws[i] = lane->gw[i];
         reward = gw_four_step(gws, laneSeeds[gid], uint(ctrl[0]), obs);
         for (int i = 0; i < 6; i++) lane->gw[i] = gws[i];
-        info[0] = reward;
-        info[1] = float(lane->gw[0]);
-        info[2] = float(lane->gw[1]);
-        info[3] = float(lane->gw[4]);
         pose[0] = float(lane->gw[0]); pose[1] = float(lane->gw[1]);
         pose[2] = float(lane->gw[2]); pose[3] = float(lane->gw[3]);
         for (int i = 4; i < 9; i++) pose[i] = 0.0f;
@@ -2685,10 +2658,6 @@ static inline void oak_stage_fleet_env(device float *params,
         for (int i = 0; i < 6; i++) gws[i] = lane->gw[i];
         reward = gw_deep_step(gws, uint(ctrl[0]), obs);
         for (int i = 0; i < 6; i++) lane->gw[i] = gws[i];
-        info[0] = reward;
-        info[1] = float(lane->gw[0]);
-        info[2] = float(lane->gw[1]);
-        info[3] = float(lane->gw[2]);
         pose[0] = float(lane->gw[0]); pose[1] = float(lane->gw[1]);
         pose[2] = 7.0f; pose[3] = 7.0f;
         for (int i = 4; i < 9; i++) pose[i] = 0.0f;
@@ -2700,10 +2669,6 @@ static inline void oak_stage_fleet_env(device float *params,
         reward = gw_kc_step(gws, laneSeeds[gid], uint(ctrl[0]), obs, &dn);
         done = dn;
         for (int i = 0; i < 10; i++) lane->gw[i] = gws[i];
-        info[0] = reward;
-        info[1] = float(lane->gw[0]);
-        info[2] = float(lane->gw[1]);
-        info[3] = float(lane->gw[7]);
         pose[0] = float(lane->gw[0]); pose[1] = float(lane->gw[1]);
         pose[2] = float(lane->gw[4]); pose[3] = float(lane->gw[5]);
         pose[4] = float(lane->gw[2]); pose[5] = float(lane->gw[3]);
@@ -2717,10 +2682,6 @@ static inline void oak_stage_fleet_env(device float *params,
         reward = gw_chain_step(gws, uint(ctrl[0]), obs, &dn);
         done = dn;
         for (int i = 0; i < 10; i++) lane->gw[i] = gws[i];
-        info[0] = reward;
-        info[1] = float(lane->gw[0]);
-        info[2] = float(done);
-        info[3] = 0.0f;
         pose[0] = float(lane->gw[0]); pose[1] = 15.0f;
         for (int i = 2; i < 9; i++) pose[i] = 0.0f;
     } else if (lane->envKind == OAK_ENV_LARGEDEEPSEA) {
@@ -2729,11 +2690,7 @@ static inline void oak_stage_fleet_env(device float *params,
         for (int i = 0; i < 10; i++) gws[i] = lane->gw[i];
         reward = gw_ldeep_step(gws, uint(ctrl[0]), obs);
         for (int i = 0; i < 10; i++) lane->gw[i] = gws[i];
-        info[0] = reward;
-        info[1] = float(lane->gw[0] & 15u);
-        info[2] = float((lane->gw[0] >> 4u) & 15u);
-        info[3] = float((lane->gw[0] >> 8u) & 1u);
-        pose[0] = info[1]; pose[1] = info[2];
+        pose[0] = float(lane->gw[0] & 15u); pose[1] = float((lane->gw[0] >> 4u) & 15u);
         pose[2] = 15.0f; pose[3] = 15.0f;
         for (int i = 4; i < 9; i++) pose[i] = 0.0f;
     } else if (lane->envKind == OAK_ENV_MULTIKEYCORRIDOR) {
@@ -2744,10 +2701,6 @@ static inline void oak_stage_fleet_env(device float *params,
         reward = gw_mkc_step(gws, laneSeeds[gid], uint(ctrl[0]), obs, &dn);
         done = dn;
         for (int i = 0; i < 10; i++) lane->gw[i] = gws[i];
-        info[0] = reward;
-        info[1] = float(lane->gw[0]);
-        info[2] = float(lane->gw[1]);
-        info[3] = float(lane->gw[8]);
         pose[0] = float(lane->gw[0]); pose[1] = float(lane->gw[1]);
         pose[2] = float(lane->gw[5]); pose[3] = float(lane->gw[6]);
         pose[4] = float(lane->gw[7] & 7u);
@@ -2761,10 +2714,6 @@ static inline void oak_stage_fleet_env(device float *params,
         reward = gw_mchain_step(gws, laneSeeds[gid], uint(ctrl[0]), obs, &dn);
         done = dn;
         for (int i = 0; i < 10; i++) lane->gw[i] = gws[i];
-        info[0] = reward;
-        info[1] = float(lane->gw[0]);
-        info[2] = float(done);
-        info[3] = float(lane->gw[1]);
         pose[0] = float(lane->gw[0]); pose[1] = 31.0f;
         pose[2] = float(lane->gw[1]);
         for (int i = 3; i < 9; i++) pose[i] = 0.0f;
@@ -2776,10 +2725,6 @@ static inline void oak_stage_fleet_env(device float *params,
         reward = gw_pmaze_step(gws, laneSeeds[gid], uint(ctrl[0]), obs, &dn);
         done = dn;
         for (int i = 0; i < 10; i++) lane->gw[i] = gws[i];
-        info[0] = reward;
-        info[1] = float(lane->gw[0]);
-        info[2] = float(lane->gw[1]);
-        info[3] = float(lane->gw[4]);
         pose[0] = float(lane->gw[0]); pose[1] = float(lane->gw[1]);
         pose[2] = float(lane->gw[2]); pose[3] = float(lane->gw[3]);
         for (int i = 4; i < 9; i++) pose[i] = 0.0f;
@@ -2791,10 +2736,6 @@ static inline void oak_stage_fleet_env(device float *params,
         reward = gw_hdm_step(gws, laneSeeds[gid], uint(ctrl[0]), obs, &dn);
         done = dn;
         for (int i = 0; i < 10; i++) lane->gw[i] = gws[i];
-        info[0] = reward;
-        info[1] = float(lane->gw[0]);
-        info[2] = float(lane->gw[1]);
-        info[3] = float(lane->gw[4]);
         pose[0] = float(lane->gw[0]); pose[1] = float(lane->gw[1]);
         pose[2] = float(lane->gw[2]); pose[3] = float(lane->gw[3]);
         pose[4] = float(lane->gw[6]);
@@ -2807,10 +2748,6 @@ static inline void oak_stage_fleet_env(device float *params,
         reward = gw_po_step(gws, laneSeeds[gid], uint(ctrl[0]), obs, &dn);
         done = dn;
         for (int i = 0; i < 10; i++) lane->gw[i] = gws[i];
-        info[0] = reward;
-        info[1] = float(lane->gw[0]);
-        info[2] = float(lane->gw[1]);
-        info[3] = float(lane->gw[4]);
         pose[0] = float(lane->gw[0]); pose[1] = float(lane->gw[1]);
         pose[2] = float(lane->gw[2]); pose[3] = float(lane->gw[3]);
         for (int i = 4; i < 9; i++) pose[i] = 0.0f;
@@ -2822,10 +2759,6 @@ static inline void oak_stage_fleet_env(device float *params,
         reward = gw_dchain_step(gws, uint(ctrl[0]), obs, &dn);
         done = dn;
         for (int i = 0; i < 10; i++) lane->gw[i] = gws[i];
-        info[0] = reward;
-        info[1] = float(lane->gw[0]);
-        info[2] = float(done);
-        info[3] = float(lane->gw[1]);
         pose[0] = float(lane->gw[0]); pose[1] = 31.0f;
         pose[2] = float(lane->gw[1]);
         for (int i = 3; i < 9; i++) pose[i] = 0.0f;
@@ -2838,10 +2771,6 @@ static inline void oak_stage_fleet_env(device float *params,
         done = dn;
         for (int i = 0; i < 10; i++) lane->gw[i] = gws[i];
         float th1 = as_type<float>(lane->gw[0]), th2 = as_type<float>(lane->gw[1]);
-        info[0] = reward;
-        info[1] = th1;
-        info[2] = th2;
-        info[3] = -cos(th1) - cos(th1 + th2);
         pose[0] = th1; pose[1] = th2;
         pose[2] = as_type<float>(lane->gw[2]); pose[3] = as_type<float>(lane->gw[3]);
         for (int i = 4; i < 9; i++) pose[i] = 0.0f;
@@ -2853,10 +2782,6 @@ static inline void oak_stage_fleet_env(device float *params,
         reward = gw_mcar_step(gws, uint(ctrl[0]), obs, &dn);
         done = dn;
         for (int i = 0; i < 10; i++) lane->gw[i] = gws[i];
-        info[0] = reward;
-        info[1] = as_type<float>(lane->gw[0]);
-        info[2] = as_type<float>(lane->gw[1]);
-        info[3] = float(done);
         pose[0] = as_type<float>(lane->gw[0]); pose[1] = as_type<float>(lane->gw[1]);
         pose[2] = 0.5f;
         for (int i = 3; i < 9; i++) pose[i] = 0.0f;
@@ -2868,10 +2793,6 @@ static inline void oak_stage_fleet_env(device float *params,
         reward = gw_pole_step(gws, uint(ctrl[0]), obs, &dn);
         done = dn;
         for (int i = 0; i < 10; i++) lane->gw[i] = gws[i];
-        info[0] = reward;
-        info[1] = as_type<float>(lane->gw[0]);
-        info[2] = as_type<float>(lane->gw[2]);
-        info[3] = float(done);
         pose[0] = as_type<float>(lane->gw[0]); pose[1] = as_type<float>(lane->gw[1]);
         pose[2] = as_type<float>(lane->gw[2]); pose[3] = as_type<float>(lane->gw[3]);
         for (int i = 4; i < 9; i++) pose[i] = 0.0f;
@@ -2882,11 +2803,7 @@ static inline void oak_stage_fleet_env(device float *params,
         reward = gw_pend_step(gws, ctrl[0], obs);
         for (int i = 0; i < 10; i++) lane->gw[i] = gws[i];
         float th = as_type<float>(lane->gw[0]), thd = as_type<float>(lane->gw[1]);
-        info[0] = reward;
-        info[1] = th;
-        info[2] = thd;
-        info[3] = clamp(2.0f * ctrl[0], -2.0f, 2.0f);
-        pose[0] = th; pose[1] = thd; pose[2] = info[3];
+        pose[0] = th; pose[1] = thd; pose[2] = clamp(2.0f * ctrl[0], -2.0f, 2.0f);
         for (int i = 3; i < 9; i++) pose[i] = 0.0f;
     } else {
         HCState s = lane->s;
@@ -2895,7 +2812,6 @@ static inline void oak_stage_fleet_env(device float *params,
             hc_env_reset(s, laneSeeds[gid], elapsed, resets);
             reward = 0.0f;
             done = 0u;
-            info[0] = 0.0f; info[1] = -0.0f; info[2] = 0.0f; info[3] = 0.0f;
         } else {
             float xBefore = s.qpos[0];
             for (int u = 0; u < 6; u++) s.ctrl[u] = ctrl[u];
@@ -2906,7 +2822,6 @@ static inline void oak_stage_fleet_env(device float *params,
             reward = xv * 1.0f - ctrlCost;
             elapsed++;
             done = (ecfg.episodeLen != 0u && elapsed >= ecfg.episodeLen) ? 1u : 0u;
-            info[0] = xv; info[1] = -ctrlCost; info[2] = s.qpos[0]; info[3] = xv;
         }
         for (int i = 1; i < 9; i++) obs[i - 1] = s.qpos[i];
         for (int i = 0; i < 9; i++) obs[8 + i] = s.qvel[i];
@@ -2953,16 +2868,6 @@ static inline void oak_stage_fleet_env(device float *params,
             lane->deathDetector = OAK_DET_ENV_OBS;
             lane->deathRewardSum = lane->rewardSum;
             lane->deathRho = lane->rho;
-        }
-    }
-    for (int j = 0; j < 4; j++) {
-        device OakFleetInfoAcc *a = &lane->info[j];
-        a->count += 1u;
-        if (isfinite(info[j])) {
-            if (a->finiteCount == 0u) a->first = info[j];
-            a->finiteCount += 1u;
-            oak_kahan_add(&a->sum, &a->sumC, info[j]);
-            a->last = info[j];
         }
     }
     if (ecfg.recordCapacity != 0u) {
@@ -3263,6 +3168,7 @@ kernel void oak_fleet_snapshot(device float *params [[buffer(0)]],
                                constant OakFleetEnvCfg &ecfg [[buffer(8)]],
                                device OakLaneSnapshot *snap [[buffer(9)]],
                                constant uint &snapBase [[buffer(10)]],
+                               constant uint &fullScan [[buffer(11)]],
                                uint slane [[thread_index_in_simdgroup]],
                                uint sgid [[threadgroup_position_in_grid]]) {
 
@@ -3274,20 +3180,29 @@ kernel void oak_fleet_snapshot(device float *params [[buffer(0)]],
             o->scalars = scalars[sgid];
             o->stats = stats[sgid];
         }
-        device const float *lp = params + sgid * cfg.paramStride;
+        // The full-parameter scan is O(paramStride) reads per lane — heartbeat
+        // cadence only. Per-CB tape snapshots skip it (paramAbsMax = -1
+        // sentinel: "not scanned"); the per-step rotating-stripe explosion
+        // detector covers deaths continuously between heartbeats.
+        if (fullScan != 0u) {
+            device const float *lp = params + sgid * cfg.paramStride;
 
-        uint firstNF = 0xffffffffu;
-        for (uint i = slane; i < cfg.paramStride; i += 32u) {
-            if (!isfinite(lp[i])) { firstNF = i; break; }
-        }
-        firstNF = simd_min(firstNF);
-        uint lim = min(firstNF, cfg.paramStride);
-        float mx = 0.0f;
-        for (uint i = slane; i < lim; i += 32u) mx = max(mx, fabs(lp[i]));
-        mx = simd_max(mx);
-        if (slane == 0u) {
-            o->paramAbsMax = mx;
-            o->paramNonFinite = (firstNF == 0xffffffffu) ? 0u : 1u;
+            uint firstNF = 0xffffffffu;
+            for (uint i = slane; i < cfg.paramStride; i += 32u) {
+                if (!isfinite(lp[i])) { firstNF = i; break; }
+            }
+            firstNF = simd_min(firstNF);
+            uint lim = min(firstNF, cfg.paramStride);
+            float mx = 0.0f;
+            for (uint i = slane; i < lim; i += 32u) mx = max(mx, fabs(lp[i]));
+            mx = simd_max(mx);
+            if (slane == 0u) {
+                o->paramAbsMax = mx;
+                o->paramNonFinite = (firstNF == 0xffffffffu) ? 0u : 1u;
+            }
+        } else if (slane == 0u) {
+            o->paramAbsMax = -1.0f;
+            o->paramNonFinite = 0u;
         }
     } else {
         if (slane == 0u) {
@@ -3303,7 +3218,6 @@ kernel void oak_fleet_snapshot(device float *params [[buffer(0)]],
     if (slane != 0u) return;
     o->steps = lane->steps;
     o->doneCount = lane->doneCount;
-    o->resets = lane->resets;
     o->rewardSum = lane->rewardSum;
     o->rho = lane->rho;
     o->deltaSum = lane->deltaSum;
@@ -3312,5 +3226,4 @@ kernel void oak_fleet_snapshot(device float *params [[buffer(0)]],
     o->deathDetector = lane->deathDetector;
     o->deathRewardSum = lane->deathRewardSum;
     o->deathRho = lane->deathRho;
-    for (int j = 0; j < 4; j++) o->info[j] = lane->info[j];
 }

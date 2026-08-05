@@ -13,6 +13,7 @@ import { existsSync } from 'node:fs';
 import { chmod, mkdir, readdir, rm, symlink, writeFile } from 'node:fs/promises';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { crc32, deflateRawSync } from 'node:zlib';
 
 import type { FleetColumnar, RunDetail, RunIndexEntry, RolesResponse } from '../../shared/types';
 import { createApp, parseRangeHeader } from '../../server/app';
@@ -38,7 +39,7 @@ const OUTSIDE = join(FIXTURE_ROOT, 'outside');
 const FLEET_CACHE = join(FIXTURE_ROOT, 'fleet-cache');
 const SECRET = 'TOP-SECRET-NOT-A-RECORDING-'.repeat(16); // > 64 B, so size alone would pass
 const REAL_BENCH = resolve(HERE, '..', '..', '..', '.oak-benchmarks');
-const DEMO_ID = 'frontend-demo-16env-20260803';
+const DEMO_ID = 'frontend-demo-16env-20260805';
 const DEMO_DIR = join(REAL_BENCH, DEMO_ID);
 
 // ---------- fixture construction ----------
@@ -76,6 +77,44 @@ function fleetRow(s: FleetRowSeed): string {
       nonFiniteByPhase: { encode: 0, learn: 0, plan: 0, tdPsi: 0 },
     },
   });
+}
+
+/**
+ * Minimal OAKT v1 tape (METRICS LAW 2026-08-05): header + one raw-DEFLATE
+ * segment. `windows` gives per-window `{start, count, values}` where values
+ * maps tape field name -> per-lane numbers; unlisted fields are 0.
+ */
+function tapeBytes(
+  laneCount: number,
+  windows: { start: number; count: number; values: Record<string, number[]> }[],
+  fields: string[] = ['rewardSum', 'doneCount', 'rewardRate', 'kernelRho', 'deltaSum', 'deltaPeak', 'paramAbsMax'],
+): Buffer {
+  const rowBytes = 8 + fields.length * laneCount * 4;
+  const payload = Buffer.alloc(windows.length * rowBytes);
+  windows.forEach((w, wi) => {
+    const p = wi * rowBytes;
+    payload.writeUInt32LE(w.start, p);
+    payload.writeUInt32LE(w.count, p + 4);
+    fields.forEach((f, fi) => {
+      for (let l = 0; l < laneCount; l++) {
+        payload.writeFloatLE(w.values[f]?.[l] ?? 0, p + 8 + (fi * laneCount + l) * 4);
+      }
+    });
+  });
+  const json = Buffer.from(JSON.stringify({ fields }), 'utf8');
+  const head = Buffer.alloc(16);
+  head.writeUInt32LE(0x544b414f, 0); // OAKT
+  head.writeUInt32LE(1, 4);
+  head.writeUInt32LE(laneCount, 8);
+  head.writeUInt32LE(json.length, 12);
+  const comp = deflateRawSync(payload);
+  const seg = Buffer.alloc(20);
+  seg.writeUInt32LE(0x54474553, 0); // SEGT
+  seg.writeUInt32LE(windows.length, 4);
+  seg.writeUInt32LE(payload.length, 8);
+  seg.writeUInt32LE(comp.length, 12);
+  seg.writeUInt32LE(crc32(comp) >>> 0, 16);
+  return Buffer.concat([head, json, seg, comp]);
 }
 
 function aggRow(step: number, kind: 'hb' | 'final'): string {
@@ -259,15 +298,25 @@ async function buildFixtures(): Promise<void> {
       ],
     }),
   );
+  // METRICS LAW (2026-08-05): fleet.jsonl carries final certificates only;
+  // the step-100 series values live on the tape.
   await writeFile(
     join(alpha, 'fleet.jsonl'),
     [
-      fleetRow({ kind: 'hb', lane: 0, step: 100, envId: 'HalfCheetah-v4', rewardSum: -5, rewardRate: -0.05 }),
-      fleetRow({ kind: 'hb', lane: 1, step: 100, envId: 'FourRooms-cont-v0', rewardSum: 3, rewardRate: 0.03 }),
       fleetRow({ kind: 'final', lane: 0, step: 200, envId: 'HalfCheetah-v4', rewardSum: -8, rewardRate: -0.04 }),
       fleetRow({ kind: 'final', lane: 1, step: 200, envId: 'FourRooms-cont-v0', rewardSum: 9, rewardRate: 0.045 }),
       '',
     ].join('\n'),
+  );
+  await writeFile(
+    join(alpha, 'metrics.oak.oakt'),
+    tapeBytes(2, [
+      {
+        start: 0,
+        count: 100,
+        values: { rewardSum: [-5, 3], rewardRate: [-0.05, 0.03], kernelRho: [0.01, 0.01], paramAbsMax: [1.5, 1.5] },
+      },
+    ]),
   );
   await writeFile(join(alpha, 'aggregate.jsonl'), `${aggRow(100, 'hb')}\n${aggRow(200, 'final')}\n`);
   await writeFile(
@@ -841,7 +890,8 @@ describe('http api (fixture bench root)', () => {
       [-5, -8],
       [3, 9],
     ]);
-    expect(col.series['health.rewardRate']?.[1]).toEqual([0.03, 0.045]);
+    // step-100 comes from the tape (f32 storage), step-200 from the final row (JSON double)
+    expect(col.series['health.rewardRate']?.[1]).toEqual([Math.fround(0.03), 0.045]);
   });
 
   it('GET /api/runs/:id/fleet rejects unsafe field paths and unknown policies', async () => {
@@ -1481,7 +1531,7 @@ describe('fleet disk cache', () => {
     const [name] = await jsonCacheFiles(FLEET_CACHE);
     const path = join(FLEET_CACHE, name ?? '');
     const rec = JSON.parse(await Bun.file(path).text()) as Record<string, unknown>;
-    expect(rec['v']).toBe(2);
+    expect(rec['v']).toBe(3);
     expect(rec['fields']).toEqual(['rewardSum']);
     expect(rec['envId']).toBeNull();
 

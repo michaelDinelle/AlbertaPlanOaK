@@ -63,19 +63,12 @@ describe.skipIf(!toolsPresent)('fleet.py report — a seed with no positive peak
   it('writes summary.json as valid JSON, encoding undefined retention as null', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'oak-summary-nan-'));
     try {
+      // Seed 0's reward decreases monotonically BY CONSTRUCTION in the fixture
+      // (make_fixture.py): every windowed rate negative, peak <= 0, so
+      // `retention = end/peak` is undefined => nan. The series live on the
+      // metrics tape (METRICS LAW 2026-08-05), so the fixture bakes the case
+      // in rather than patching fleet.jsonl rows.
       cpSync(join(FIXTURES, 'run'), dir, { recursive: true });
-
-      // Seed 0's reward decreases monotonically, so EVERY windowed rate is negative
-      // and its peak rate is <= 0 => `retention = end/peak` is undefined => nan.
-      const rows = readFileSync(join(dir, 'fleet.jsonl'), 'utf8')
-        .split('\n')
-        .filter((line) => line.length > 0)
-        .map((line) => {
-          const row = JSON.parse(line) as Record<string, unknown>;
-          if (row['seed'] === 0) row['rewardSum'] = -0.5 * (row['step'] as number);
-          return JSON.stringify(row);
-        });
-      writeFileSync(join(dir, 'fleet.jsonl'), `${rows.join('\n')}\n`);
 
       const proc = Bun.spawn([PYTHON, FLEET_PY, 'report', dir], {
         cwd: REPO,

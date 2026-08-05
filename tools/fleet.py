@@ -141,8 +141,9 @@ def organ_flops_v1(ablations) -> dict[str, int]:
 TIER0_SIGNALS = {
     "FeatureConstruction": ["oakFeatureReinitCountFinal"],
     "GVFPrediction": ["mainTd", "kernelRho"],
-    "RewardRespectingSubtasks": ["terminationRate", "selectedContinuation",
-                                 "optionDurationMean"],
+    # optionDurationMean was removed 2026-08-05: the kernel wrote a literal
+    # 0.0f into it (a ranking signal that was identically zero).
+    "RewardRespectingSubtasks": ["terminationRate", "selectedContinuation"],
     "OptionPolicies": ["actorAdvantageL1", "actorUpdateNormMean",
                        "actorSupportEntropy", "actionDeltaL2Mean"],
     "OptionModels": ["modelPriorityMax", "importanceEss"],
@@ -295,9 +296,25 @@ def rolling_rate(series: list[tuple[int, float]], window: int) -> list[tuple[int
 def load_run(root: Path) -> dict:
     meta = json.loads((root / "meta.json").read_text())
     lanes: dict[tuple[str, int], list[dict]] = defaultdict(list)
+    policies_seen: set[str] = set()
     with open(root / "fleet.jsonl") as f:
         for line in f:
             row = json.loads(line)
+            if row.get("kind") == "hb":
+                continue  # pre-tape archives; the tape is the only series source
+            lanes[(row["policy"], row["seed"])].append(row)
+            policies_seen.add(row["policy"])
+    # METRICS LAW (2026-08-05): fleet.jsonl carries only the final certificate
+    # rows; every heartbeat row comes from the continuous metrics tape. No
+    # legacy path — a root without a tape is not a valid instrument.
+    import metrics_tape
+    for pol in policies_seen:
+        if metrics_tape.find_tape(root, pol) is None:
+            raise SystemExit(
+                f"LOAD ERROR: {root} has no metrics.{pol}.oakt tape. Pre-tape "
+                f"roots are archives, not instruments — re-run on the current "
+                f"binary (forward-only law; the agent stream is bit-identical).")
+        for row in metrics_tape.synth_hb_rows(root, pol):
             lanes[(row["policy"], row["seed"])].append(row)
     for rows in lanes.values():
         rows.sort(key=lambda r: r["step"])
@@ -1384,7 +1401,7 @@ def cmd_lanes(args) -> int:
         "mid(0.15-0.5)": [r for r in lanes if 0.15 <= rate(r) < 0.5],
         "leaders(>0.5)": [r for r in lanes if rate(r) >= 0.5],
     }
-    keys = ["actorSupportEntropy", "terminationRate", "optionDurationMean",
+    keys = ["actorSupportEntropy", "terminationRate",
             "keyboardL1", "oakFeatureReinitCountFinal", "actionDeltaL2Mean"]
     print(f"pack | n | rate | " + " | ".join(keys) + " | pMax | rho")
     for name, g in packs.items():

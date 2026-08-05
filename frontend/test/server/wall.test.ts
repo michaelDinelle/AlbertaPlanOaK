@@ -66,7 +66,7 @@ const REAL_BENCH = resolve(HERE, '..', '..', '..', '.oak-benchmarks');
 
 const V4_ID = 'v4ab-tierS-v4';
 const V4_XS_ID = 'v4probe-xs-v4';
-const DEMO_ID = 'frontend-demo-16env-20260803';
+const DEMO_ID = 'frontend-demo-16env-20260805';
 /** the degraded-wall case: a real run root with no recordings at all */
 const NOREC_ID = 'p93-tierL-20260721';
 
