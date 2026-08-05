@@ -2,6 +2,7 @@ import CryptoKit
 import Darwin
 import Foundation
 import Metal
+import zlib
 
 struct OakError: Error, CustomStringConvertible { let description: String }
 func err(_ s: String) -> OakError { OakError(description: s) }
@@ -428,6 +429,328 @@ func metricsRoot() -> URL {
     ".oak-benchmarks/\(id)", isDirectory: true)
 }
 
+// ---------------------------------------------------------------------------
+// Record format v4 — the FROZEN codec of frontend/src/sim/RECORD_V4_SPEC.md.
+//
+// This encoder and the TS decoder (frontend/src/sim/record4.ts) both implement
+// that document verbatim; frontend/scripts/verify-record-v4.ts proves agreement
+// against a paired v3 run. Any change to the layout bumps codecVersion.
+//
+// The kernel ring write is UNTOUCHED (Inv-10 bit-identity of the agent stream):
+// recording stays passive, the host drain transcodes v3 rows into v4 chunks.
+// ---------------------------------------------------------------------------
+
+enum V4Enc: String { case u8, i16, dx32 }
+
+struct V4Field {
+  let idx: Int
+  let enc: V4Enc
+  let scale: Double
+  let wrap: Bool
+  init(_ idx: Int, _ enc: V4Enc, _ scale: Double = 0, _ wrap: Bool = false) {
+    self.idx = idx
+    self.enc = enc
+    self.scale = scale
+    self.wrap = wrap
+  }
+  /// Bytes this column occupies for `n` rows.
+  func bytes(_ n: Int) -> Int {
+    switch enc {
+    case .u8: return n
+    case .i16: return 2 * n
+    case .dx32: return 4 * n
+    }
+  }
+  var json: [String: Any] {
+    var o: [String: Any] = ["idx": idx, "enc": enc.rawValue]
+    if enc != .u8 { o["scale"] = scale }
+    if wrap { o["wrap"] = true }
+    return o
+  }
+}
+
+struct V4Codec {
+  let category: String
+  /// 0 = ctrl "index" (discrete envs, action in hdr bits 0-3); else the number
+  /// of u8-quantized Box ctrl columns.
+  let ctrlBox: Int
+  let fields: [V4Field]
+  let poseConst: [Int: Double]
+  var hasDx: Bool { fields.contains { $0.enc == .dx32 } }
+  var json: [String: Any] {
+    var pc: [String: Any] = [:]
+    for (k, v) in poseConst { pc[String(k)] = v }
+    return [
+      "category": category,
+      "ctrl": ctrlBox == 0 ? "index" : ["kind": "u8box", "n": ctrlBox] as [String: Any],
+      "poseFields": fields.map(\.json),
+      "poseConst": pc,
+    ]
+  }
+  /// The static codec table, verbatim from RECORD_V4_SPEC.md. envKind numbering
+  /// is Main.envKind(_:) — the ONLY env-identity mapping (Inv-1 keeps it out of
+  /// the agent; the recorder is a host-side wrapper concern like the env window).
+  static func table(_ envKind: UInt32) throws -> V4Codec {
+    func grid(_ idxs: [Int], _ consts: [Int: Double] = [:]) -> V4Codec {
+      V4Codec(
+        category: "grid", ctrlBox: 0, fields: idxs.map { V4Field($0, .u8) },
+        poseConst: consts)
+    }
+    switch envKind {
+    case 0:  // HalfCheetah — dx-chained rootx, wrapped angles, 6 u8 ctrl columns
+      var f = [V4Field(0, .dx32, 0.01), V4Field(1, .i16, 1e-4)]
+      for i in 2...8 { f.append(V4Field(i, .i16, 1e-4, true)) }
+      return V4Codec(category: "cheetah", ctrlBox: 6, fields: f, poseConst: [:])
+    case 1: return grid([0, 1, 2, 3])  // FourRooms
+    case 2: return grid([0, 1], [2: 7, 3: 7])  // DeepSea
+    case 3: return grid([0, 1, 2, 3, 4, 5, 6, 7])  // KeyCorridor
+    case 4:  // Acrobot
+      return V4Codec(
+        category: "classic", ctrlBox: 0,
+        fields: [
+          V4Field(0, .i16, 1e-4, true), V4Field(1, .i16, 1e-4, true),
+          V4Field(2, .i16, 1e-3), V4Field(3, .i16, 1e-3),
+        ], poseConst: [:])
+    case 5:  // MountainCar
+      return V4Codec(
+        category: "classic", ctrlBox: 0,
+        fields: [V4Field(0, .i16, 1e-4), V4Field(1, .i16, 1e-5)], poseConst: [2: 0.5])
+    case 6:  // CartPole
+      return V4Codec(
+        category: "classic", ctrlBox: 0,
+        fields: [
+          V4Field(0, .i16, 1e-4), V4Field(1, .i16, 1e-3),
+          V4Field(2, .i16, 1e-4, true), V4Field(3, .i16, 1e-3),
+        ], poseConst: [:])
+    case 7:  // Pendulum (Box 1 -> one u8 ctrl column)
+      return V4Codec(
+        category: "classic", ctrlBox: 1,
+        fields: [
+          V4Field(0, .i16, 1e-4, true), V4Field(1, .i16, 1e-3), V4Field(2, .i16, 1e-3),
+        ], poseConst: [:])
+    case 8: return grid([0], [1: 15])  // Chain
+    case 9: return grid([0, 1], [2: 15, 3: 15])  // LargeDeepSea
+    case 10: return grid([0, 1, 2, 3, 4, 5, 6, 7])  // MultiKeyCorridor
+    case 11: return grid([0, 2], [1: 31])  // MemoryChain
+    case 12: return grid([0, 1, 2, 3])  // ProceduralMaze
+    case 13: return grid([0, 1, 2, 3, 4])  // HighDimMaze
+    case 14: return grid([0, 1, 2, 3])  // POMaze
+    case 15: return grid([0, 2], [1: 31])  // DelayedChain
+    default: throw err("No record-v4 codec for envKind \(envKind).")
+    }
+  }
+}
+
+/// One recorded lane's v4 file. Chunk-per-drain, append-only; a torn tail (killed
+/// run) is detectable by the reader (short header / missing bytes / crc).
+/// Instances are touched by exactly one drain worker at a time (the drain is
+/// serialized on the writer queue, then fanned out one lane per iteration).
+final class RecordV4Writer: @unchecked Sendable {
+  static let fileMagic: UInt32 = 0x344B_414F  // "OAK4"
+  static let chunkMagic: UInt32 = 0x344B_4843  // "CHK4"
+  static let codecVersion = 1
+
+  let handle: FileHandle
+  let codec: V4Codec
+  let metaURL: URL
+  let envId: String
+  let seed: Int
+  let actDim: Int
+  private var buf: [UInt8] = []
+  private var chunks: [[Int]] = []
+  private var fileOffset = 0
+  private var totalSteps = 0
+  private var deflateVerified = false
+
+  init(
+    handle: FileHandle, envKind: UInt32, metaURL: URL, envId: String, seed: Int, actDim: Int
+  ) throws {
+    self.handle = handle
+    self.codec = try V4Codec.table(envKind)
+    self.metaURL = metaURL
+    self.envId = envId
+    self.seed = seed
+    self.actDim = actDim
+    var head = Data(capacity: 16)
+    for v: UInt32 in [Self.fileMagic, 4, envKind, UInt32(Self.codecVersion)] {
+      var x = v.littleEndian
+      withUnsafeBytes(of: &x) { head.append(contentsOf: $0) }
+    }
+    try handle.write(contentsOf: head)
+    fileOffset = head.count
+    try writeMeta(final: false)
+  }
+
+  func writeMeta(final: Bool) throws {
+    var meta: [String: Any] = [
+      "envId": envId, "seed": seed, "actDim": actDim, "recordVersion": 4,
+      "codecVersion": Self.codecVersion, "codec": codec.json,
+    ]
+    if final {
+      meta["steps"] = totalSteps
+      meta["chunks"] = chunks
+    }
+    try JSONSerialization.data(withJSONObject: meta, options: [.prettyPrinted, .sortedKeys])
+      .write(to: metaURL, options: .atomic)
+  }
+
+  /// Transcode `[stepStart, stepStart+stepCount)` of the kernel ring into one
+  /// compressed chunk and append it. `rewardDelta` is the lane's rewardSum delta
+  /// over THIS CHUNK (NaN when the caller cannot measure exactly that interval).
+  func encodeChunk(
+    _ rp: UnsafePointer<Float>, slot: Int, capacity: Int, stepStart: Int, stepCount: Int,
+    rewardDelta: Float
+  ) throws {
+    guard stepCount > 0 else { return }
+    let nBox = codec.ctrlBox
+    // Column offsets: hdr | box ctrl columns | chunkBaseX (f64, cheetah) | pose
+    // columns in descriptor order | u32 escape count | escape rows.
+    let baseOff = stepCount * (1 + nBox)
+    var cursor = baseOff + (codec.hasDx ? 8 : 0)
+    var off: [Int] = []
+    off.reserveCapacity(codec.fields.count)
+    for f in codec.fields {
+      off.append(cursor)
+      cursor += f.bytes(stepCount)
+    }
+    let fixed = cursor + 4
+    if buf.count < fixed { buf = [UInt8](repeating: 0, count: fixed) }
+
+    var escRows: [Int] = []
+    var doneCount = 0
+    let fields = codec.fields
+    buf.withUnsafeMutableBufferPointer { bp in
+      let b = bp.baseAddress!
+      memset(b, 0, fixed)
+      var recon = 0.0
+      if codec.hasDx, let dxIdx = fields.first(where: { $0.enc == .dx32 })?.idx {
+        // chunkBaseX: the EXACT f64 promotion of the first row's pose value.
+        let r0 = (slot * capacity + (stepStart % capacity)) * 16
+        recon = Double(rp[r0 + 7 + dxIdx])
+        var bits = recon.bitPattern.littleEndian
+        withUnsafeBytes(of: &bits) { memcpy(b + baseOff, $0.baseAddress!, 8) }
+      }
+      for i in 0..<stepCount {
+        let base = (slot * capacity + ((stepStart + i) % capacity)) * 16
+        var esc = false
+        for u in 0..<16 where !rp[base + u].isFinite { esc = true }
+        var hdr: UInt8 = 0
+        // done is BIT-EXACT by contract: anything that is not exactly 0 or 1
+        // escapes rather than being rounded into the flag.
+        let doneV = rp[base + 6]
+        if doneV == 1 {
+          hdr |= 0x10
+          doneCount += 1
+        } else if doneV != 0 {
+          esc = true
+        }
+        if nBox == 0 {
+          let a = Double(rp[base])
+          if a.isFinite, a == a.rounded(), a >= 0, a <= 15 {
+            hdr |= UInt8(a) & 0x0F
+          } else {
+            esc = true
+          }
+        } else {
+          for c in 0..<nBox {
+            let v = Double(rp[base + c])
+            let q = v.isFinite ? ((min(max(v, -1), 1) + 1) * 127.5).rounded() : 0
+            b[stepCount * (1 + c) + i] = UInt8(min(max(q, 0), 255))
+          }
+        }
+        for (j, f) in fields.enumerated() {
+          let v = Double(rp[base + 7 + f.idx])
+          switch f.enc {
+          case .u8:
+            if !(v.isFinite && v == v.rounded() && v >= 0 && v <= 255) { esc = true }
+            b[off[j] + i] = UInt8(v.isFinite ? min(max(v.rounded(), 0), 255) : 0)
+          case .i16:
+            var w = v
+            if f.wrap, w.isFinite {
+              // floor-based positive wrap into [-pi, pi) — identical in Swift and JS.
+              w -= 2 * Double.pi * ((w + Double.pi) / (2 * Double.pi)).rounded(.down)
+            }
+            var q = w.isFinite ? (w / f.scale).rounded() : 0
+            if !(q >= -32767 && q <= 32767) { esc = true }
+            q = min(max(q, -32767), 32767)
+            var qi = Int16(q).littleEndian
+            withUnsafeBytes(of: &qi) { memcpy(b + off[j] + 2 * i, $0.baseAddress!, 2) }
+          case .dx32:
+            var q = 0.0
+            if v.isFinite, recon.isFinite {
+              q = ((v - recon) / f.scale).rounded()
+              if !(q >= -2_147_483_647 && q <= 2_147_483_647) { esc = true }
+              q = min(max(q, -2_147_483_647), 2_147_483_647)
+            } else {
+              esc = true  // a poisoned chain cannot reconstruct: escape verbatim
+            }
+            // The chain uses the CLAMPED value, so encoder and decoder stay in
+            // lockstep even across escaped rows.
+            recon += q * f.scale
+            var qi = Int32(q).littleEndian
+            withUnsafeBytes(of: &qi) { memcpy(b + off[j] + 4 * i, $0.baseAddress!, 4) }
+          }
+        }
+        if esc {
+          hdr |= 0x20
+          escRows.append(i)
+        }
+        b[i] = hdr
+      }
+      var cnt = UInt32(escRows.count).littleEndian
+      withUnsafeBytes(of: &cnt) { memcpy(b + fixed - 4, $0.baseAddress!, 4) }
+    }
+
+    var payload = Data(capacity: fixed + escRows.count * 68)
+    buf.withUnsafeBufferPointer { payload.append($0.baseAddress!, count: fixed) }
+    for i in escRows {
+      var idx = UInt32(i).littleEndian
+      withUnsafeBytes(of: &idx) { payload.append(contentsOf: $0) }
+      let base = (slot * capacity + ((stepStart + i) % capacity)) * 16
+      payload.append(UnsafeRawPointer(rp + base).assumingMemoryBound(to: UInt8.self), count: 64)
+    }
+
+    // Compression's COMPRESSION_ZLIB is RFC-1951 RAW DEFLATE (no zlib wrapper),
+    // which is what the TS side inflates (inflateRawSync / 'deflate-raw').
+    // Verified at runtime on this lane's first chunk rather than trusted.
+    let comp = try (payload as NSData).compressed(using: .zlib) as Data
+    if !deflateVerified {
+      deflateVerified = true
+      let wrapped = comp.count >= 2
+        && comp.withUnsafeBytes { p -> Bool in
+          let b0 = Int(p[0]), b1 = Int(p[1])
+          return b0 == 0x78 && ((b0 << 8) | b1) % 31 == 0
+        }
+      if wrapped {
+        throw err("record v4: Compression .zlib emitted a ZLIB-WRAPPED stream; the spec requires raw DEFLATE (frontend/src/sim/RECORD_V4_SPEC.md).")
+      }
+      let back = try (comp as NSData).decompressed(using: .zlib) as Data
+      guard back == payload else {
+        throw err("record v4: deflate round-trip mismatch (\(back.count) vs \(payload.count) bytes).")
+      }
+    }
+    let crc = comp.withUnsafeBytes { p in
+      UInt32(truncatingIfNeeded: crc32(0, p.bindMemory(to: UInt8.self).baseAddress, uInt(comp.count)))
+    }
+    var out = Data(capacity: 32 + comp.count)
+    for v: UInt32 in [
+      Self.chunkMagic, UInt32(stepStart), UInt32(stepCount), UInt32(payload.count),
+      UInt32(comp.count), crc, UInt32(doneCount), rewardDelta.bitPattern,
+    ] {
+      var x = v.littleEndian
+      withUnsafeBytes(of: &x) { out.append(contentsOf: $0) }
+    }
+    out.append(comp)
+    try handle.write(contentsOf: out)
+    chunks.append([stepStart, stepCount, fileOffset, 32 + comp.count])
+    fileOffset += 32 + comp.count
+    totalSteps += stepCount
+  }
+
+  /// Compressed bytes written so far (chunk headers included) — drain telemetry.
+  var bytesWritten: Int { fileOffset }
+}
+
 @main struct Main {
   static func main() {
     _ = pthread_set_qos_class_self_np(QOS_CLASS_USER_INTERACTIVE, 0)
@@ -436,6 +759,7 @@ func metricsRoot() -> URL {
       case "benchmark": try benchmark()
       case "physics-probe": try physicsProbe()
       case "gridworld-probe": try gridworldProbe()
+      case "record-v4-probe": try recordV4Probe()
       case "physics-rollout": try physicsRollout()
       default: throw err("Use `OaK benchmark`.")
       }
@@ -456,29 +780,25 @@ func metricsRoot() -> URL {
   ) throws {
     try fleetGPU(p, seeds, steps, root, laneEnvs, ablations)
   }
-  // Universal env contract: envId -> kernel envKind (the ONLY env-identity
-  // mapping; the agent kernel stays env-blind, Inv-1).
+  // Universal env contract: envId <-> kernel envKind (the ONLY env-identity
+  // mapping; the agent kernel stays env-blind, Inv-1). Index = envKind.
+  static let envIdsByKind: [String] = [
+    "HalfCheetah-v4", "FourRooms-cont-v0", "DeepSea-cont-v0", "KeyCorridor-cont-v0",
+    "Acrobot-cont-v0", "MountainCar-cont-v0", "CartPole-cont-v0", "Pendulum-cont-v0",
+    "Chain-cont-v0", "LargeDeepSea-cont-v0", "MultiKeyCorridor-cont-v0", "MemoryChain-cont-v0",
+    "ProceduralMaze-cont-v0", "HighDimMaze-cont-v0", "POMaze-cont-v0", "DelayedChain-cont-v0",
+  ]
   static func envKind(_ envId: String) throws -> UInt32 {
-    switch envId {
-    case "HalfCheetah-v4": return 0
-    case "FourRooms-cont-v0": return 1
-    case "DeepSea-cont-v0": return 2
-    case "KeyCorridor-cont-v0": return 3
-    case "Acrobot-cont-v0": return 4
-    case "MountainCar-cont-v0": return 5
-    case "CartPole-cont-v0": return 6
-    case "Pendulum-cont-v0": return 7
-    case "Chain-cont-v0": return 8
-    case "LargeDeepSea-cont-v0": return 9
-    case "MultiKeyCorridor-cont-v0": return 10
-    case "MemoryChain-cont-v0": return 11
-    case "ProceduralMaze-cont-v0": return 12
-    case "HighDimMaze-cont-v0": return 13
-    case "POMaze-cont-v0": return 14
-    case "DelayedChain-cont-v0": return 15
-    default:
-      throw err("Unknown env '\(envId)'. Known: HalfCheetah-v4, FourRooms-cont-v0, DeepSea-cont-v0, KeyCorridor-cont-v0, Acrobot-cont-v0, MountainCar-cont-v0, CartPole-cont-v0, Pendulum-cont-v0, Chain-cont-v0, LargeDeepSea-cont-v0, MultiKeyCorridor-cont-v0, MemoryChain-cont-v0, ProceduralMaze-cont-v0, HighDimMaze-cont-v0, POMaze-cont-v0, DelayedChain-cont-v0.")
+    guard let i = envIdsByKind.firstIndex(of: envId) else {
+      throw err("Unknown env '\(envId)'. Known: \(envIdsByKind.joined(separator: ", ")).")
     }
+    return UInt32(i)
+  }
+  static func envId(kind: UInt32) throws -> String {
+    guard Int(kind) < envIdsByKind.count else {
+      throw err("Unknown envKind \(kind) (0..\(envIdsByKind.count - 1)).")
+    }
+    return envIdsByKind[Int(kind)]
   }
   static func fleetGPU(
     _ p: Policy, _ seeds: [Int], _ steps: Int, _ root: URL, _ laneEnvs: [String],
@@ -594,20 +914,49 @@ func metricsRoot() -> URL {
       (e["OAK_RECORD_SEEDS"] ?? "").split(separator: ",").compactMap {
         Int(String($0).trimmingCharacters(in: .whitespaces))
       })
+    // Recorded stream format: 3 = flat f32[16] rows (DEFAULT), 4 = the
+    // columnar/quantized codec (frontend/src/sim/RECORD_V4_SPEC.md).
+    //
+    // v4 is OPT-IN on purpose. `actions.bin` is read by consumers outside the
+    // frontend that assume the f32[16] shape — `tools/physics_parity.py`
+    // (`np.fromfile(...).reshape(-1, 16)`, the --classic-tost certification gate
+    // for Sources/ClassicControl.metal) and `tools/replay_render.py`. Defaulting
+    // this to 4 silently rewired those; a recording format is not something a
+    // gate should acquire by surprise. The frontend reads BOTH (the theater
+    // loader dispatches on meta.json `recordVersion`), so the opt-in costs it
+    // nothing but disk.
+    let recordFormat = e["OAK_RECORD_FORMAT"] ?? "3"
+    guard recordFormat == "3" || recordFormat == "4" else {
+      throw err("OAK_RECORD_FORMAT must be 3 or 4 (got '\(recordFormat)').")
+    }
     var recordLanes: [Int] = []
     var recordHandles: [FileHandle] = []
+    var recordV4: [RecordV4Writer] = []
     for (lane, s) in seeds.enumerated() where recordAll || recordSeeds.contains(s) {
       let dir = try seedDir(lane)
-      // Record v3: actions.bin records are 16 f32 — ctrl[6], done, pose[9].
-      let meta: [String: Any] = ["envId": laneEnvs[lane], "seed": s, "actDim": actDim, "recordVersion": 3]
-      try JSONSerialization.data(withJSONObject: meta, options: [.prettyPrinted, .sortedKeys])
-        .write(to: dir.appendingPathComponent("meta.json"), options: .atomic)
       let url = dir.appendingPathComponent("actions.bin")
+      let metaURL = dir.appendingPathComponent("meta.json")
       fm.createFile(atPath: url.path, contents: nil)
-      recordHandles.append(try FileHandle(forWritingTo: url))
+      let h = try FileHandle(forWritingTo: url)
+      if recordFormat == "4" {
+        recordV4.append(
+          try RecordV4Writer(
+            handle: h, envKind: laneEnvKinds[lane], metaURL: metaURL, envId: laneEnvs[lane],
+            seed: s, actDim: actDim))
+      } else {
+        // Record v3: actions.bin records are 16 f32 — ctrl[6], done, pose[9].
+        let meta: [String: Any] = ["envId": laneEnvs[lane], "seed": s, "actDim": actDim, "recordVersion": 3]
+        try JSONSerialization.data(withJSONObject: meta, options: [.prettyPrinted, .sortedKeys])
+          .write(to: metaURL, options: .atomic)
+      }
+      recordHandles.append(h)
       recordLanes.append(lane)
     }
-    let recordCapacity = recordLanes.isEmpty ? 0 : 2 * hb
+    // Ring flush cadence. Default = the heartbeat (the historical drain point);
+    // OAK_RECORD_DRAIN_STEPS adds intermediate flush-only boundaries, which is
+    // what keeps the ring (and its allocation) small at long horizons.
+    let drainEvery = max(e["OAK_RECORD_DRAIN_STEPS"].flatMap(Int.init) ?? hb, 1)
+    let recordCapacity = recordLanes.isEmpty ? 0 : 2 * drainEvery
     let recordSlotBuf = try makeBuf(B * 4)
     do {
       let rp = recordSlotBuf.contents().bindMemory(to: Int32.self, capacity: B)
@@ -693,13 +1042,19 @@ func metricsRoot() -> URL {
       var gpuSeconds = 0.0
       var prevRewardSum: [Double]
       var prevStep = 0
-      init(_ b: Int) {
+      /// Per-RECORDED-lane rewardSum at the last snapshot drain, and the step it
+      /// was taken at — the v4 chunk header's rewardDelta baseline. A chunk may
+      /// carry a finite delta ONLY when `recPrevStep` is its own first step.
+      var recPrevReward: [Double]
+      var recPrevStep = 0
+      init(_ b: Int, _ rec: Int) {
         deadStep = Array(repeating: nil, count: b)
         deadDetector = Array(repeating: nil, count: b)
         prevRewardSum = Array(repeating: 0, count: b)
+        recPrevReward = Array(repeating: 0, count: rec)
       }
     }
-    let st = WriterState(B)
+    let st = WriterState(B, recordLanes.count)
     let writer = DispatchQueue(label: "oak.fleet.gpu.writer")
     let detectorNames: [UInt32: String] = [1: "envReward", 2: "policyMean", 3: "envObs"]
     let wallStart = DispatchTime.now().uptimeNanoseconds
@@ -795,6 +1150,100 @@ func metricsRoot() -> URL {
         infoNames[2]: infoJSON(snap.info2), infoNames[3]: infoJSON(snap.info3),
       ]
       return h
+    }
+    // Errors out of the per-lane fan-out (DispatchQueue.concurrentPerform can
+    // neither throw nor safely write a captured Array from several threads).
+    final class DrainErr: @unchecked Sendable {
+      private let lock = NSLock()
+      private var first: Error?
+      func record(_ e: Error) {
+        lock.lock()
+        if first == nil { first = e }
+        lock.unlock()
+      }
+      func take() -> Error? {
+        lock.lock()
+        defer { lock.unlock() }
+        return first
+      }
+    }
+    /// Flush ring rows [lastDrainStep, step) to disk. `half` is the snapshot
+    /// buffer half when this drain rides a heartbeat (the only place a lane
+    /// rewardSum exists, so the only place the v4 chunk header's rewardDelta can
+    /// be finite); nil on flush-only boundaries.
+    func drainRecords(step: Int, half: Int?) throws {
+      guard !recordLanes.isEmpty, step > st.lastDrainStep else { return }
+      let t0 = DispatchTime.now().uptimeNanoseconds
+      let start = st.lastDrainStep
+      let count = step - start
+      let rp = recordBuf.contents().bindMemory(
+        to: Float.self, capacity: recordLanes.count * recordCapacity * 16)
+      if recordV4.isEmpty {
+        for (slot, _) in recordLanes.enumerated() {
+          var data = Data(capacity: count * (16 * 4))
+          for r in start..<step {
+            let base = (slot * recordCapacity + (r % recordCapacity)) * 16
+            for u in 0..<16 {
+              var f = rp[base + u]
+              withUnsafeBytes(of: &f) { data.append(contentsOf: $0) }
+            }
+          }
+          try recordHandles[slot].write(contentsOf: data)
+        }
+        st.lastDrainStep = step
+        if timing {
+          let ms = Double(DispatchTime.now().uptimeNanoseconds - t0) / 1e6
+          fputs(
+            String(
+              format: "[record v3] step %d | %d lanes x %d rows | %.1f ms | %.2f MiB\n",
+              step, recordLanes.count, count, ms,
+              Double(recordLanes.count * count * 64) / 1_048_576), stderr)
+        }
+        return
+      }
+      // rewardDelta is the delta over THIS CHUNK (RECORD_V4_SPEC.md), or NaN.
+      // The host only holds a lane rewardSum at heartbeat snapshots, so a chunk
+      // owns a real delta only when the previous snapshot landed exactly on the
+      // chunk's first step — true for every chunk at the default cadence
+      // (drainEvery == heartbeat). With OAK_RECORD_DRAIN_STEPS < heartbeat the
+      // interval spans several chunks and NONE of them owns it, so they all
+      // carry NaN ("unavailable"); an interval total is never mislabelled as a
+      // chunk total on the chunk that happens to close the interval.
+      var deltas = [Float](repeating: .nan, count: recordLanes.count)
+      if let half {
+        let exact = st.recPrevStep == start
+        for (slot, lane) in recordLanes.enumerated() {
+          let rs = Double(snapPtr[half * B + lane].rewardSum)
+          if exact { deltas[slot] = Float(rs - st.recPrevReward[slot]) }
+          st.recPrevReward[slot] = rs
+        }
+        st.recPrevStep = step
+      }
+      let before = recordV4.reduce(0) { $0 + $1.bytesWritten }
+      let box = DrainErr()
+      let writers = recordV4
+      let cap = recordCapacity
+      DispatchQueue.concurrentPerform(iterations: writers.count) { slot in
+        do {
+          try writers[slot].encodeChunk(
+            rp, slot: slot, capacity: cap, stepStart: start, stepCount: count,
+            rewardDelta: deltas[slot])
+        } catch {
+          box.record(error)
+        }
+      }
+      if let e = box.take() { throw e }
+      st.lastDrainStep = step
+      if timing {
+        let ms = Double(DispatchTime.now().uptimeNanoseconds - t0) / 1e6
+        let wrote = recordV4.reduce(0) { $0 + $1.bytesWritten } - before
+        let raw = recordLanes.count * count * 64
+        fputs(
+          String(
+            format: "[record v4] step %d | %d lanes x %d rows | %.1f ms | %.2f MiB -> %.2f MiB (%.1fx)\n",
+            step, recordLanes.count, count, ms, Double(raw) / 1_048_576,
+            Double(wrote) / 1_048_576, wrote > 0 ? Double(raw) / Double(wrote) : 0), stderr)
+      }
     }
     func writeSnapshot(half: Int, step: Int, kind: String) throws {
       let wall = now()
@@ -914,22 +1363,7 @@ func metricsRoot() -> URL {
           "recentRateP90": quantile(recentSorted, 0.9),
           "recentRateMax": recentSorted[recentSorted.count - 1],
         ]))
-      if !recordLanes.isEmpty {
-        let rp = recordBuf.contents().bindMemory(
-          to: Float.self, capacity: recordLanes.count * recordCapacity * 16)
-        for (slot, _) in recordLanes.enumerated() {
-          var data = Data(capacity: (step - st.lastDrainStep) * (16 * 4))
-          for r in st.lastDrainStep..<step {
-            let base = (slot * recordCapacity + (r % recordCapacity)) * 16
-            for u in 0..<16 {
-              var f = rp[base + u]
-              withUnsafeBytes(of: &f) { data.append(contentsOf: $0) }
-            }
-          }
-          try recordHandles[slot].write(contentsOf: data)
-        }
-        st.lastDrainStep = step
-      }
+      try drainRecords(step: step, half: half)
       if timing {
         fputs(
           String(
@@ -980,12 +1414,19 @@ func metricsRoot() -> URL {
       let nextHb = min(((step / hb) + 1) * hb, steps)
       var boundary = nextHb
       if dumpEvery > 0 { boundary = min(boundary, ((step / dumpEvery) + 1) * dumpEvery) }
+      if !recordLanes.isEmpty {
+        boundary = min(boundary, ((step / drainEvery) + 1) * drainEvery)
+      }
       let target = min(boundary, step + n)
       let isSnap = target == nextHb
+      // Flush-only ring boundary: same snapSlots gating as a heartbeat (the ring
+      // holds 2 x drainEvery rows, so the next chunk may not be encoded until the
+      // previous drain has copied its rows out), no fleet/aggregate rows.
+      let isDrain = !recordLanes.isEmpty && !isSnap && target % drainEvery == 0
       let isDump = dumpEvery > 0 && target % dumpEvery == 0
       inflight.wait()
       if let err = writer.sync(execute: { st.error }) { throw err }
-      if isSnap { snapSlots.wait() }
+      if isSnap || isDrain { snapSlots.wait() }
       guard let cb = q.makeCommandBuffer() else {
         throw err("Failed to encode Metal command.")
       }
@@ -1032,6 +1473,11 @@ func metricsRoot() -> URL {
               }
             }
             snapSlots.signal()
+          } else if isDrain {
+            if st.error == nil {
+              do { try drainRecords(step: tStep, half: nil) } catch { st.error = error }
+            }
+            snapSlots.signal()
           }
           inflight.signal()
         }
@@ -1050,6 +1496,61 @@ func metricsRoot() -> URL {
     inflight.signal()
     inflight.signal()
     if let err = st.error { throw err }
+    // Finalize: the chunk table + total step count are a reader HINT written at
+    // close (an in-flight or torn file is still readable by sequential scan).
+    for w in recordV4 { try w.writeMeta(final: true) }
+  }
+  // Case-gate probe for the record-v4 ENCODER. `RecordV4Writer.encodeChunk`'s
+  // escape branch is unreachable from a healthy fleet (it needs a non-finite row
+  // or a field past its integer ceiling), so a fleet A/B can only ever prove the
+  // happy path. This feeds the REAL encoder a hand-built ring — the caller's
+  // escape zoo — and writes a real <out-dir>/{actions.bin,meta.json} pair for
+  // frontend/scripts/verify-record-v4.ts to decode and compare.
+  //
+  // Case file: u32 envKind, u32 rowCount, u32 chunkSteps, then rowCount x 16 f32
+  // in v3 row order (ctrl[6], done, pose[9]).
+  static func recordV4Probe() throws {
+    let args = CommandLine.arguments
+    guard args.count >= 4 else {
+      throw err("Usage: OaK record-v4-probe <cases.bin> <out-dir>")
+    }
+    let data = try Data(contentsOf: URL(fileURLWithPath: args[2]))
+    guard data.count >= 12 else { throw err("record-v4-probe: case file too small.") }
+    let (kind, rowCount, chunkSteps): (UInt32, Int, Int) = data.withUnsafeBytes { raw in
+      (
+        raw.load(fromByteOffset: 0, as: UInt32.self),
+        Int(raw.load(fromByteOffset: 4, as: UInt32.self)),
+        Int(raw.load(fromByteOffset: 8, as: UInt32.self))
+      )
+    }
+    guard rowCount > 0, chunkSteps > 0, data.count == 12 + rowCount * 16 * 4 else {
+      throw err(
+        "record-v4-probe: case size mismatch — \(data.count) bytes for \(rowCount) rows (want \(12 + rowCount * 16 * 4)), chunkSteps \(chunkSteps).")
+    }
+    let envId = try envId(kind: kind)
+    let dir = URL(fileURLWithPath: args[3], isDirectory: true)
+    try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+    let url = dir.appendingPathComponent("actions.bin")
+    FileManager.default.createFile(atPath: url.path, contents: nil)
+    let h = try FileHandle(forWritingTo: url)
+    defer { try? h.close() }
+    // actDim is the fleet's constant 6 (Box half of D_policy = 12).
+    let w = try RecordV4Writer(
+      handle: h, envKind: kind, metaURL: dir.appendingPathComponent("meta.json"),
+      envId: envId, seed: 0, actDim: 6)
+    // The rows ARE the ring: slot 0, capacity = rowCount, so the writer's
+    // `(stepStart + i) % capacity` indexes them absolutely.
+    try data.withUnsafeBytes { raw in
+      let rp = raw.baseAddress!.advanced(by: 12).assumingMemoryBound(to: Float.self)
+      var start = 0
+      while start < rowCount {
+        let n = min(chunkSteps, rowCount - start)
+        try w.encodeChunk(
+          rp, slot: 0, capacity: rowCount, stepStart: start, stepCount: n, rewardDelta: .nan)
+        start += n
+      }
+    }
+    try w.writeMeta(final: true)
   }
   static func physicsProbe() throws {
     let args = CommandLine.arguments
@@ -1311,6 +1812,19 @@ func metricsRoot() -> URL {
     let steps = max(env["OAK_BENCH_STEPS"].flatMap(Int.init) ?? 500_000, 1)
     let policies = try (env["OAK_BENCH_POLICIES"] ?? "oak,zero,random").split(separator: ",").map {
       try pol(String($0))
+    }
+    // Recording + multiple policies is the TRUNCATION TRAP: every policy runs the
+    // same lane set and writes the SAME <envId>/seed<N>/actions.bin, so each
+    // policy truncates the previous one's stream and the surviving meta.json
+    // describes a file that was written by a different policy. The DEFAULT
+    // OAK_BENCH_POLICIES is "oak,zero,random", so this fires on the obvious
+    // `OAK_RECORD_ACTIONS=1` invocation — refuse instead of silently shipping
+    // mislabeled recordings.
+    let recordingRequested =
+      env["OAK_RECORD_ACTIONS"] == "1"
+      || !(env["OAK_RECORD_SEEDS"] ?? "").trimmingCharacters(in: .whitespaces).isEmpty
+    if recordingRequested, policies.count > 1 {
+      throw err("Recording (OAK_RECORD_ACTIONS / OAK_RECORD_SEEDS) with \(policies.count) policies (\(policies.map(\.rawValue).joined(separator: ","))) would TRUNCATE: all policies share one <envId>/seed<N>/actions.bin, so each overwrites the last and meta.json ends up describing another policy's stream. Set OAK_BENCH_POLICIES=oak (the default is oak,zero,random).")
     }
     // Seed-deterministic env schedule (universal env contract). Multi-env is
     // the MANDATORY default (user law 2026-07-19): every run is a superset of

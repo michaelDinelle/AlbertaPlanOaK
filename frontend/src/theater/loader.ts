@@ -22,6 +22,13 @@ import { DEFAULT_HARNESS_RUN, type HarnessSource } from '@kit/harness';
 import type { QualityTier } from '@kit/types';
 import { decodeRecording, eventTimeline } from '@sim/decode';
 import { RECORD_BYTES, parseActionsBin } from '@sim/record';
+import {
+  FILE_HEADER_BYTES as RECORD_V4_HEADER_BYTES,
+  RECORD_V4_VERSION,
+  chunkTableFromMeta,
+  parseActionsBinV4,
+  planPrefixV4,
+} from '@sim/record4';
 import { decoders } from '@sim/registry';
 import type { DecodedRecording, EnvDecoder, SimEvent } from '@sim/types';
 import { sortRuns } from '../state';
@@ -473,9 +480,17 @@ function recordingBase(runId: string, envId: EnvId, seed: number): string {
   return `/api/runs/${encodeURIComponent(runId)}/recordings/${encodeURIComponent(envId)}/${seed}`;
 }
 
-/** Concatenate streamed chunks into one buffer truncated to whole 64-byte rows. */
-function joinRows(chunks: readonly Uint8Array[], received: number): Uint8Array {
-  const usable = Math.floor(received / RECORD_BYTES) * RECORD_BYTES;
+/**
+ * Concatenate streamed chunks into one buffer, truncated down to a multiple of
+ * `align`.
+ *
+ * v3 aligns to 64 because `parseActionsBin` rejects a non-row-aligned length
+ * outright, so a stream cut mid-row would fail the whole lane. v4 aligns to 1:
+ * its own chunk scan is the torn-tail authority and a partial trailing chunk is
+ * dropped there, with the crc as the backstop.
+ */
+function joinBytes(chunks: readonly Uint8Array[], received: number, align: number): Uint8Array {
+  const usable = align > 1 ? Math.floor(received / align) * align : received;
   const out = new Uint8Array(usable);
   let offset = 0;
   for (const chunk of chunks) {
@@ -531,18 +546,32 @@ export async function loadTheaterRecording(options: LoadRecordingOptions): Promi
   const expected = Math.max(0, Math.floor(options.expectedSteps ?? 0));
   const wantSteps = expected > 0 ? Math.min(expected, maxSteps) : maxSteps;
 
-  report(makeProgress('download', 0, wantSteps * RECORD_BYTES));
+  // How many bytes hold `wantSteps` steps.
+  //   v3: exactly 64 per row.
+  //   v4: the fewest WHOLE chunks covering them, off the meta.json chunk table —
+  //       whole because a chunk is one DEFLATE stream, one crc and one dx32
+  //       reconstruction chain, so half of one decodes to nothing. A lane with no
+  //       usable table (in-flight, torn, pre-finalize) plans 0 and we ask for the
+  //       whole file, which the tolerant chunk scan handles.
+  const isV4 = meta.recordVersion === RECORD_V4_VERSION;
+  const v4Table = isV4 ? chunkTableFromMeta(meta) : null;
+  const wantBytes = isV4
+    ? (v4Table === null ? 0 : planPrefixV4(v4Table, wantSteps).bytes)
+    : wantSteps * RECORD_BYTES;
+
+  report(makeProgress('download', 0, wantBytes));
   const binRes = await doFetch(`${base}/actions.bin`, {
-    // The API serves byte ranges, so ask for exactly the rows we will decode; a
+    // The API serves byte ranges, so ask for exactly the bytes we will decode; a
     // server that ignores the header sends the whole file, which still parses.
-    headers: { range: `bytes=0-${wantSteps * RECORD_BYTES - 1}` },
+    ...(wantBytes > 0 ? { headers: { range: `bytes=0-${wantBytes - 1}` } } : {}),
     ...(signal ? { signal } : {}),
   });
   if (!binRes.ok && binRes.status !== 206) {
     throw new TheaterLoadError(`${binRes.status} — actions.bin unavailable for ${envId} seed ${seed}`);
   }
 
-  const total = expectedBytes(binRes.headers, wantSteps);
+  const total = expectedBytes(binRes.headers, isV4 ? 0 : wantSteps) || wantBytes;
+  const align = isV4 ? 1 : RECORD_BYTES;
   let bytes: Uint8Array;
   const body = binRes.body;
   if (body && typeof body.getReader === 'function') {
@@ -562,21 +591,24 @@ export async function loadTheaterRecording(options: LoadRecordingOptions): Promi
     } finally {
       reader.releaseLock();
     }
-    bytes = joinRows(chunks, received);
+    bytes = joinBytes(chunks, received, align);
   } else {
     // No streaming body (older runtimes, some test doubles) — one shot, no progress.
     const buffer = await binRes.arrayBuffer();
     const whole = new Uint8Array(buffer);
-    bytes = joinRows([whole], whole.byteLength);
+    bytes = joinBytes([whole], whole.byteLength, align);
     report(makeProgress('download', whole.byteLength, total || whole.byteLength));
   }
 
-  if (bytes.byteLength < RECORD_BYTES) {
+  if (bytes.byteLength < (isV4 ? RECORD_V4_HEADER_BYTES : RECORD_BYTES)) {
     throw new TheaterLoadError(`actions.bin for ${envId} seed ${seed} is empty`);
   }
 
   report(makeProgress('decode', bytes.byteLength, total));
-  const raw = parseActionsBin(bytes, meta);
+  const raw = isV4 ? await parseActionsBinV4(bytes, meta) : parseActionsBin(bytes, meta);
+  if (raw.steps === 0) {
+    throw new TheaterLoadError(`actions.bin for ${envId} seed ${seed} is empty`);
+  }
   const decoded = decodeRecording(raw, decoder, { maxSteps });
   const info = ENVS[envId];
   const steps = decoded.frames.length - 1;

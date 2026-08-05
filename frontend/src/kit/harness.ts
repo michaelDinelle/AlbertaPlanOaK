@@ -27,6 +27,7 @@ import { ENVS, envBySlug, type EnvId } from '@shared/envs';
 import type { RecordingMeta, RecordingRef, RunDetail } from '@shared/types';
 import { decodeRecording } from '@sim/decode';
 import { RECORD_BYTES, parseActionsBin } from '@sim/record';
+import { RECORD_V4_VERSION, parseActionsBinV4, rangeHeaderForSteps } from '@sim/record4';
 import { decoders } from '@sim/registry';
 import type { EnvDecoder, EnvFrame, EnvGeometry, SimEvent } from '@sim/types';
 import { sceneRegistry } from '../scenes/registry';
@@ -234,16 +235,23 @@ export async function loadHarnessSource(envId: EnvId, opts: LoadSourceOptions = 
   const maxSteps = opts.maxSteps ?? DEFAULT_MAX_STEPS;
   try {
     const meta = await getJson<RecordingMeta>(`${base}/meta.json`, opts.signal);
-    // A 100k-step lane is 6.4 MB; the dev page decodes `maxSteps` of it. The API serves
-    // byte ranges, so ask for exactly the rows we are going to decode. A server that
-    // ignores the header just sends the whole file, which still parses.
+    // A 100k-step v3 lane is 6.4 MB; the dev page decodes `maxSteps` of it. The API
+    // serves byte ranges, so ask for exactly what we are going to decode: 64 B per row
+    // for v3, the whole chunks covering those rows for v4. `rangeHeaderForSteps`
+    // answers null when a v4 lane carries no usable chunk table (in-flight, torn) —
+    // then we take the whole file. A server that ignores the header does the same.
     const wantSteps = Math.max(1, Math.min(ref.steps || maxSteps, maxSteps));
+    const isV4 = meta.recordVersion === RECORD_V4_VERSION;
+    const range = isV4
+      ? rangeHeaderForSteps(meta, wantSteps)
+      : `bytes=0-${wantSteps * RECORD_BYTES - 1}`;
     const res = await fetch(`${base}/actions.bin`, {
-      headers: { range: `bytes=0-${wantSteps * RECORD_BYTES - 1}` },
+      ...(range !== null ? { headers: { range } } : {}),
       ...(opts.signal ? { signal: opts.signal } : {}),
     });
     if (!res.ok && res.status !== 206) throw new Error(`${res.status} actions.bin`);
-    const raw = parseActionsBin(await res.arrayBuffer(), meta);
+    const buffer = await res.arrayBuffer();
+    const raw = isV4 ? await parseActionsBinV4(buffer, meta) : parseActionsBin(buffer, meta);
     const decoded = decodeRecording(raw, decoder, { maxSteps });
     return {
       kind: 'recording',

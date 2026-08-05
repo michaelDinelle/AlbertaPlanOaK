@@ -78,6 +78,26 @@ export const FLEET_CACHE_MAX_FILES = 64;
 export const FLEET_CACHE_MAX_BYTES = 128 * 1024 * 1024;
 /** record v3: 16 float32 per step — ctrl[6], done, pose[9] */
 export const RECORD_V3_BYTES_PER_STEP = 64;
-export const RECORD_VERSION_SERVABLE = 3;
+/**
+ * Record versions the API will serve. v3 is the flat float layout; v4 is the
+ * chunked codec in `src/sim/RECORD_V4_SPEC.md`.
+ */
+export const RECORD_VERSION_SERVABLE: ReadonlySet<number> = new Set([3, 4]);
+
+// record v4 file framing. DUPLICATED from `src/sim/record4.ts` on purpose: the
+// server tsconfig includes only `server/` + `shared/`, so it cannot import from
+// `src/` — the same reason RECORD_V3_BYTES_PER_STEP above restates `RECORD_BYTES`.
+// The spec (`src/sim/RECORD_V4_SPEC.md`) is the shared source of truth for both.
+
+/** u32 magic + formatVersion + envKind + codecVersion */
+export const RECORD_V4_FILE_HEADER_BYTES = 16;
+/** magic + stepStart + stepCount + rawBytes + compBytes + crc32 + doneCount + rewardDelta */
+export const RECORD_V4_CHUNK_HEADER_BYTES = 32;
+/** "OAK4" (0x344B414F LE = O,A,K,4) */
+export const RECORD_V4_FILE_MAGIC = 0x344b414f;
+/** "CHK4" (0x344B4843 LE = C,H,K,4) */
+export const RECORD_V4_CHUNK_MAGIC = 0x344b4843;
+/** belt-and-braces bound on a header walk of a hostile/garbage actions.bin */
+export const RECORD_V4_MAX_CHUNKS = 1_000_000;
 /** hard ceiling on requested fleet fields (DoS guard on a local server) */
 export const MAX_FLEET_FIELDS = 24;
