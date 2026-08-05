@@ -520,6 +520,15 @@ export function laneSeries(columnar: FleetColumnar, field: string, envId?: strin
  * exactly its cumulative rate. Nulls propagate — a missing endpoint means the
  * window is unknown, never zero — and so does a zero-width step gap.
  */
+/**
+ * Where a trailing-window average BELONGS on the time axis: its window's
+ * center. Plotting window (a, b] at b renders everything up to one full
+ * window late — a run that died mid-window drew its peak AFTER the death.
+ */
+export function windowMidpoints(steps: readonly number[]): number[] {
+  return steps.map((step, i) => (i === 0 ? step / 2 : ((steps[i - 1] ?? 0) + step) / 2));
+}
+
 export function windowRates(
   steps: readonly number[],
   values: readonly (number | null)[],

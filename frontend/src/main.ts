@@ -11,7 +11,7 @@ import { startRouter, type Route } from './router';
 // redirect. Only navigation that means "home / the wall" may target `#/`.
 const routes: Route[] = [
   { pattern: '#/', view: () => import('./views/wall') },
-  { pattern: '#/runs', view: () => import('./views/gallery') },
+  { pattern: '#/runs', view: () => import('./views/wall') }, // legacy gallery URL — the wall canonicalizes it
   { pattern: '#/run/:id', view: () => import('./views/run') },
   { pattern: '#/watch', view: () => import('./views/watch') },
   { pattern: '#/watch/:id', view: () => import('./views/watch') },

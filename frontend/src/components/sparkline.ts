@@ -9,6 +9,13 @@ import { el } from './table';
 
 export interface SparklineSpec {
   values: readonly (number | null)[];
+  /**
+   * x position of each value as a FRACTION of the run [0..1]. Without it,
+   * points spread by index — which silently invents a different x axis than
+   * the playhead's step/horizon and misaligns every overlay. Pass it whenever
+   * the sparkline sits under a time cursor.
+   */
+  xs?: readonly number[];
   height?: number;
   /** fixed width; omit to track the container */
   width?: number;
@@ -73,7 +80,15 @@ export function sparkline(spec: SparklineSpec): SparklineHandle {
     }
     const span = max - min;
     const n = values.length;
-    const xAt = (i: number): number => pad + (i / Math.max(1, n - 1)) * (width - pad * 2);
+    const xs = spec.xs;
+    // With xs the x geometry is the TRUE timeline (0..1 of the run, full
+    // width, no horizontal pad) so an overlay at step/horizon lands exactly
+    // on the curve; without it, index spacing with padding as before.
+    const xAt = (i: number): number => (
+      xs !== undefined
+        ? Math.min(Math.max(xs[i] ?? 0, 0), 1) * width
+        : pad + (i / Math.max(1, n - 1)) * (width - pad * 2)
+    );
     const yAt = (v: number): number => height - pad - ((v - min) / span) * (height - pad * 2);
 
     if ((spec.zeroLine ?? true) && min < 0 && max > 0) {

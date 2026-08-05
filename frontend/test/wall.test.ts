@@ -11,7 +11,7 @@ import { describe, expect, test } from 'bun:test';
 
 import type { FleetColumnar, RecordingRef, RolesResponse, RunIndexEntry, SummaryPolicyResult } from '@shared/types';
 import { ENVS } from '@shared/envs';
-import { MAX_CATCHUP_FRAMES, makePlaybackClock } from '@kit/harness';
+import { makePlaybackClock } from '@kit/harness';
 import { TOKENS } from '@kit/tokens';
 import { stepPosition } from '../src/theater/player';
 import {
@@ -35,7 +35,6 @@ import {
   ghostSampleIndex,
   heroSeed,
   inFrameCount,
-  iqmOf,
   isPrime,
   laneTrackX,
   leaderSeed,
@@ -92,7 +91,7 @@ function recording(envId: RecordingRef['envId'], seed: number): RecordingRef {
 }
 
 function row(seed: number, overrides: Partial<SeedRow> = {}): SeedRow {
-  return { seed, rate: 0, retention: null, divergedAt: null, spark: [], recorded: true, ...overrides };
+  return { seed, rate: 0, retention: null, divergedAt: null, spark: [], sparkXs: [], recorded: true, ...overrides };
 }
 
 // ---------------------------------------------------------------------------
@@ -499,7 +498,7 @@ describe('the population header', () => {
     row(3, { rate: 0.3, retention: 0.8 }),
   ];
 
-  test('summary.json wins and carries its CI', () => {
+  test('summary.json wins; NO reward-rate figure — the learning curve is that surface', () => {
     const slice: SummaryPolicyResult = {
       policy: 'oak',
       seeds: 64,
@@ -508,34 +507,36 @@ describe('the population header', () => {
       positiveFraction: 0.995,
       retentionFraction: 0.664,
       divergence: { diverged: 2 },
+      solvedSeeds: 3,
+      bestSeedRewardPerGFLOP: 41.9,
     };
     const figures = populationFigures(slice, rows);
     expect(figures.source).toBe('summary');
-    expect(figures.iqm).toBe('+0.3872');
-    expect(figures.ci).toBe('[+0.310, +0.460]');
+    expect('iqm' in figures).toBe(false);
     expect(figures.positive).toBe('100%');
     expect(figures.nonDiverged).toBe('62/64');
     expect(figures.retention).toBe('66%');
+    expect(figures.solved).toBe('3');
+    expect(figures.perGflop).toBe('41.9');
   });
 
-  test('without a summary slice the same four figures are MEASURED and say so', () => {
+  test('without a summary slice the health figures are MEASURED and say so', () => {
     const figures = populationFigures(null, rows);
     expect(figures.source).toBe('measured');
-    expect(figures.ci).toBe(null);
     expect(figures.positive).toBe('75%');
     expect(figures.nonDiverged).toBe('3/4');
     expect(figures.retention).toBe('50%');
-    expect(figures.iqm).toBe(`+${iqmOf([0.4, 0.2, -0.1, 0.3])?.toFixed(4)}`);
+    // solved and reward/GFLOP exist only in summary v2 — a measured fallback
+    // that invented them would be fiction
+    expect(figures.solved).toBe('—');
+    expect(figures.perGflop).toBe('—');
   });
 
   test('no seeds at all is dashes, never zeros', () => {
     const figures = populationFigures(null, []);
-    expect(figures).toEqual({ iqm: '—', ci: null, positive: '—', nonDiverged: '—', retention: '—', source: 'none' });
-  });
-
-  test('the IQM is the interquartile mean', () => {
-    expect(iqmOf([1, 2, 3, 4, 5, 6, 7, 8])).toBeCloseTo((3 + 4 + 5 + 6) / 4, 12);
-    expect(iqmOf([])).toBe(null);
+    expect(figures).toEqual({
+      positive: '—', nonDiverged: '—', retention: '—', solved: '—', perGflop: '—', source: 'none',
+    });
   });
 });
 

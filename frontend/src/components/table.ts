@@ -2,7 +2,10 @@
 // (The primitives live here rather than in a fifth module so the client track
 // stays inside its file ownership; they are deliberately tiny.)
 
-import { compareValues, type SortDirection } from '../state';
+import { TOKENS } from '@kit/tokens';
+import { ENVS, type EnvId } from '@shared/envs';
+import type { RunIndexEntry } from '@shared/types';
+import { compareValues, envIdsOf, envName, formatCount, type EnvShare, type SortDirection } from '../state';
 
 // ---------- element helpers ----------
 
@@ -157,40 +160,26 @@ export function spinner(label = 'Loading'): HTMLElement {
 
 // ---------- app header ----------
 
-export type NavKey = 'wall' | 'gallery' | 'watch' | 'theater';
-
 /**
- * The one persistent chrome element: identity on the left, four routes on the
- * right. Each view mounts its own copy so views stay independently destroyable.
- *
- * `Wall` is `#/` — the home page — and the gallery lives at `#/runs` under the
- * name it actually has for a reader: Runs.
+ * The one persistent chrome element, ONE bar: identity on the left (the brand
+ * is the way home), and whatever the view needs on the right — the wall puts
+ * its run picker there, the live view its pip. There is no nav: this is a
+ * one-page app and a "Wall" link on the wall was a button to nowhere.
  */
-export function appHeader(active: NavKey, trailing?: Node | null): HTMLElement {
-  const link = (key: NavKey, label: string, href: string): HTMLElement => {
-    const anchor = el('a', { class: 'nav-link', href, text: label });
-    if (key === active) {
-      anchor.classList.add('is-active');
-      anchor.setAttribute('aria-current', 'page');
-    }
-    return anchor;
-  };
+export function appHeader(trailing?: Node | null): HTMLElement {
   return el('header', { class: 'app-header' }, [
-    el('a', { class: 'brand', href: '#/' }, [
+    el('a', { class: 'brand', href: '#/', title: 'OaK Preserve — the wall' }, [
       el('span', { class: 'brand-mark', ariaLabel: 'OaK Preserve' }),
       el('span', { class: 'brand-name', text: 'OaK' }),
       el('span', { class: 'brand-sub', text: 'Preserve' }),
-    ]),
-    el('nav', { class: 'nav', ariaLabel: 'Primary' }, [
-      link('wall', 'Wall', '#/'),
     ]),
     el('div', { class: 'header-trailing' }, [trailing ?? null]),
   ]);
 }
 
-export function viewShell(active: NavKey, trailing?: Node | null): { root: HTMLElement; body: HTMLElement } {
+export function viewShell(trailing?: Node | null): { root: HTMLElement; body: HTMLElement } {
   const body = el('main', { class: 'view-body' });
-  const root = el('div', { class: 'view' }, [appHeader(active, trailing), body]);
+  const root = el('div', { class: 'view' }, [appHeader(trailing), body]);
   return { root, body };
 }
 
@@ -378,4 +367,55 @@ export function dataTable<R>(options: TableOptions<R>): TableHandle<R> {
       root.remove();
     },
   };
+}
+
+// ---------- env identity (moved here when the gallery page retired) ----------
+
+/** The accent hex the 3D scenes use for this env slug (kit/tokens.ts). */
+export function accentCss(slug: string): string {
+  const value = TOKENS.accents[slug];
+  if (value === undefined) return '#5c6a80';
+  return `#${value.toString(16).padStart(6, '0')}`;
+}
+
+/**
+ * The env spectrum strip: one accent cell per env, ordered by the canonical env
+ * table. Two inputs, deliberately unequal in what they claim:
+ *   * `EnvShare[]` — TRUE apportionment from `envShares(meta)`: cell widths are
+ *     the real seed fractions and each cell names its seed count.
+ *   * a run-index entry — IDENTITY ONLY: equal-width cells, no seed numbers,
+ *     because the index never carries the split (inventing `batch / envIds.length`
+ *     printed confident fiction on every mixed run).
+ */
+export function envSpectrum(source: Pick<RunIndexEntry, 'envIds'> | readonly EnvShare[]): HTMLElement {
+  let shares: readonly EnvShare[] | null = null;
+  let ids: EnvId[];
+  if ('envIds' in source) {
+    ids = envIdsOf(source);
+  } else {
+    shares = source;
+    ids = source.map((share) => share.envId);
+  }
+  const strip = el('div', {
+    class: 'spectrum',
+    ariaLabel: ids.length > 0 ? `Environments: ${ids.map((id) => envName(id)).join(', ')}` : 'No environments',
+    role: 'img',
+  });
+  if (ids.length === 0) {
+    strip.append(el('span', { class: 'spectrum-cell', style: { flexGrow: '1', background: '#232c3d' } }));
+    return strip;
+  }
+  ids.forEach((envId, index) => {
+    const info = ENVS[envId];
+    const share = shares?.[index];
+    strip.append(el('span', {
+      class: 'spectrum-cell',
+      title: share ? `${info.name} — ${formatCount(share.lanes)} seeds` : info.name,
+      style: {
+        flexGrow: String(share ? Math.max(0.05, share.fraction) : 1),
+        background: accentCss(info.slug),
+      },
+    }));
+  });
+  return strip;
 }

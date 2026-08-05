@@ -1,8 +1,9 @@
 # OaK Preserve — frontend
 
-The visualization app for OaK fleet runs: a run gallery over every root in
-`.oak-benchmarks/`, a population dashboard per run, a live watch wall, and a
-Three.js replay theater with one artisanal nature scene per environment (all 16).
+The visualization app for OaK fleet runs: ONE page — the wall — that plays any
+run root in `.oak-benchmarks/` (hero + ghost population, one artisanal Three.js
+nature scene per environment, all 16), with the run's learning curve and
+population science on the same page and a live view for still-running fleets.
 
 It reads the fleet's own on-disk output and nothing else. No database, no build
 step for data, no npm dependencies beyond `three` and `uplot`.
@@ -56,9 +57,9 @@ frontend/
     theater/       the replay host: loader.ts (fetch + decode), player.ts (transport,
                    scrubbing, speed), sceneHost.ts (renderer, camera, tier switching)
     views/         wall.ts (THE page), watch.ts (live), harness.ts (scene dev),
-                   run.ts (the science module the wall embeds), gallery.ts +
-                   theater.ts (redirect stubs + shared helpers). Each route
-                   module exports mount(el, params) => { destroy() }
+                   run.ts (the science module the wall embeds), theater.ts
+                   (redirect stub). Each route module exports
+                   mount(el, params) => { destroy() }
     components/    the DOM layer views share: table.ts (element helpers, header,
                    breadcrumb, empty/error states, sortable table), chart.ts (uPlot
                    wrappers), bars.ts, sparkline.ts
@@ -73,7 +74,7 @@ Routes:
 
 | Route | View |
 |---|---|
-| `#/` | THE WALL — the one page: one run playing (hero + ghosts, leaderboard rail, env chips, run picker), the learning-curve strip with a playhead, and the run's full science below (per-env stats, collapsible per-seed detail with click-to-watch, collapsible whole-run statistics). `?run=&env=&seed=&at=&speed=` deep-link every part of it |
+| `#/` | THE WALL — the one page: one run playing (hero + ghosts, leaderboard rail, env chips, run picker in the header), the learning-curve strip with a playhead, and below it the only two science blocks that have no other surface: per-seed detail (click a total-reward column to watch that seed) and population health (divergence, survival, retention, positivity). `?run=&env=&seed=&at=&speed=` deep-link every part of it |
 | `#/watch/:id` | one still-running fleet, live (SSE) |
 | `#/harness/:slug` | the artisan scene dev page |
 | `#/runs`, `#/run/:id`, `#/theater/...` | redirects into `#/` — kept so old links keep working |

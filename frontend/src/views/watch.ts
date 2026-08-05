@@ -24,6 +24,7 @@ import {
   sortRuns,
 } from '../state';
 import {
+  envSpectrum,
   badge,
   breadcrumb,
   el,
@@ -36,7 +37,6 @@ import {
   viewShell,
 } from '../components/table';
 import { VIZ, band, timeSeries, type ChartHandle } from '../components/chart';
-import { envSpectrum } from './gallery';
 
 function progressBar(fraction: number): HTMLElement {
   const fill = el('span', { class: 'progress-fill' });
@@ -48,7 +48,7 @@ function progressBar(fraction: number): HTMLElement {
 
 function mountLive(host: HTMLElement, id: string): { destroy(): void } {
   const pip = el('span', { class: 'live-pip is-waiting' });
-  const { root, body } = viewShell('watch', el('span', { class: 'header-live' }, [pip, el('span', { text: 'live' })]));
+  const { root, body } = viewShell(el('span', { class: 'header-live' }, [pip, el('span', { text: 'live' })]));
   host.append(root);
 
   let destroyed = false;
@@ -96,8 +96,8 @@ function mountLive(host: HTMLElement, id: string): { destroy(): void } {
   chartStack.hidden = true;
 
   const headActions = el('div', { class: 'run-head-actions' }, [
-    linkButton('Full dashboard', `#/run/${encodeURIComponent(id)}`, {
-      title: 'Survival, peak & retention, per-env slices and the seed ledger',
+    linkButton('Open on the wall', `#/?run=${encodeURIComponent(id)}`, {
+      title: 'Replay, learning curve, per-seed detail and population health',
     }),
   ]);
 
