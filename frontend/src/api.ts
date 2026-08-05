@@ -6,12 +6,14 @@
 
 import type {
   AggregateRow,
+  CurvesResponse,
   FleetColumnar,
   LiveHello,
   LiveStatus,
   RolesResponse,
   RunDetail,
   RunIndexEntry,
+  WallResponse,
 } from '@shared/types';
 
 export const API_BASE = '/api';
@@ -89,6 +91,13 @@ export interface FleetQuery {
   policy?: string;
 }
 
+export interface CurvesQuery {
+  /** restrict to one env's lanes (mixed-env runs); absent = every lane, pooled */
+  envId?: string;
+  /** which policy's seeds the curve is built from; the server defaults to `oak` */
+  policy?: string;
+}
+
 export const api = {
   runs(options?: RequestOptions): Promise<RunIndexEntry[]> {
     return getJson<RunIndexEntry[]>(apiUrl('/runs'), options);
@@ -109,10 +118,212 @@ export const api = {
     );
   },
 
+  /**
+   * Learning curve: per-heartbeat IQM ± bootstrap CI and P10/P50/P90 of the MEASURED
+   * reward rate. Derived server-side from fleet.jsonl, so it answers on legacy roots
+   * that never got a summary.json — and `envId` keeps a mixed fleet's environments on
+   * their own scales instead of pooling them.
+   */
+  curves(id: string, query?: CurvesQuery, options?: RequestOptions): Promise<CurvesResponse> {
+    return getJson<CurvesResponse>(
+      apiUrl(`/runs/${encodeURIComponent(id)}/curves`, {
+        envId: query?.envId,
+        policy: query?.policy,
+      }),
+      options,
+    );
+  },
+
   roles(options?: RequestOptions): Promise<RolesResponse> {
     return getJson<RolesResponse>(apiUrl('/roles'), options);
   },
 };
+
+// ---------- /api/runs/:id/wall/:envId ----------
+
+/** pose[9] f32 + done u8, tightly packed — the wire record (`WallResponse` framing). */
+export const WALL_SAMPLE_BYTES = 37;
+/** pose floats per sample */
+export const WALL_POSE_LEN = 9;
+
+export interface WallLane {
+  seed: number;
+  /** rows these samples COVER (a torn tail or a budget stop yields fewer than meta claims) */
+  steps: number;
+  samples: number;
+  /**
+   * First record row whose pose/done went non-finite; null when no scanned row did.
+   * Exact over the rows the server decoded — when `scannedRows` is set, the death is
+   * dated to within one v4 chunk rather than to the row.
+   */
+  firstNonFiniteRow: number | null;
+  /** rows the server decoded; present only when it skipped whole chunks (< `steps`) */
+  scannedRows?: number;
+  /** the server stopped this seed early to stay inside its budget; `steps` is the span shown */
+  truncated?: true;
+  /** present only when the server could not decode this lane */
+  error?: string;
+  /** `samples × 9`, row-major — sample s is `pose.subarray(s*9, s*9+9)` */
+  pose: Float32Array;
+  /** `samples` done bits */
+  done: Uint8Array;
+  /** record row index each sample was taken at: `s·stride`, last entry the final row */
+  rows: Int32Array;
+}
+
+export interface WallData {
+  header: WallResponse;
+  lanes: WallLane[];
+}
+
+export interface WallQuery {
+  /**
+   * Rows per sample; the server clamps to [1, 4096] and defaults to 64. It is a FLOOR:
+   * a run big enough to blow the server's payload budget comes back coarser, so read
+   * `header.stride` (and each lane's `rows`) instead of assuming this value was used.
+   */
+  stride?: number;
+  /** accepted here as well as in `options`, since a wall fetch is the thing callers cancel */
+  signal?: AbortSignal;
+}
+
+export function wallUrl(id: string, envId: string, query?: WallQuery): string {
+  return apiUrl(`/runs/${encodeURIComponent(id)}/wall/${encodeURIComponent(envId)}`, {
+    stride: query?.stride,
+  });
+}
+
+async function inflateRaw(bytes: Uint8Array): Promise<Uint8Array> {
+  // A fresh ArrayBuffer-backed copy: `BufferSource` excludes SharedArrayBuffer-backed
+  // views, and a stream is free to hold or neuter what it is handed.
+  const copy = new Uint8Array(bytes.byteLength);
+  copy.set(bytes);
+  const source = new ReadableStream<BufferSource>({
+    start(controller) {
+      controller.enqueue(copy);
+      controller.close();
+    },
+  });
+  return new Uint8Array(
+    await new Response(source.pipeThrough(new DecompressionStream('deflate-raw'))).arrayBuffer(),
+  );
+}
+
+/**
+ * Fetch + decode one env's wall.
+ *
+ * The response is a JSON header, a newline, and a deflate-raw section (see
+ * `WallResponse` in shared/types.ts). The split is taken at `headerBytes` and CHECKED
+ * against the first newline: the two agreeing is what proves the body arrived whole,
+ * and a disagreement is a corrupted response, not something to paper over.
+ *
+ * The wire packs pose and done together at a 37-byte stride, which leaves every f32 at
+ * an unaligned offset. They are de-interleaved here into an aligned `Float32Array` per
+ * lane — the shape a renderer can hand straight to a buffer attribute — at the cost of
+ * one pass over data that was already going to be walked once.
+ */
+export async function fetchWall(
+  id: string,
+  envId: string,
+  query?: WallQuery,
+  options?: RequestOptions,
+): Promise<WallData> {
+  const url = wallUrl(id, envId, query);
+  const signal = options?.signal ?? query?.signal;
+  let response: Response;
+  try {
+    response = await fetch(url, {
+      headers: { accept: 'application/octet-stream' },
+      ...(signal ? { signal } : {}),
+    });
+  } catch (cause) {
+    if (cause instanceof DOMException && cause.name === 'AbortError') throw cause;
+    throw new ApiError(0, url, cause instanceof Error ? cause.message : String(cause));
+  }
+  if (!response.ok) {
+    throw new ApiError(response.status, url, await response.text().catch(() => ''));
+  }
+
+  const body = new Uint8Array(await response.arrayBuffer());
+  const nl = body.indexOf(0x0a);
+  if (nl < 0) throw new ApiError(response.status, url, 'wall body has no header terminator');
+
+  let header: WallResponse;
+  try {
+    header = JSON.parse(new TextDecoder().decode(body.subarray(0, nl))) as WallResponse;
+  } catch (cause) {
+    throw new ApiError(response.status, url, `invalid wall header: ${String(cause)}`);
+  }
+  if (header.v !== 1) {
+    throw new ApiError(response.status, url, `unsupported wall version ${String(header.v)}`);
+  }
+  if (header.headerBytes !== nl) {
+    throw new ApiError(
+      response.status,
+      url,
+      `wall headerBytes ${header.headerBytes} disagrees with the terminator at ${nl}`,
+    );
+  }
+  const compressed = body.subarray(nl + 1);
+  if (header.binaryBytes !== compressed.byteLength) {
+    throw new ApiError(
+      response.status,
+      url,
+      `wall binaryBytes ${header.binaryBytes} but ${compressed.byteLength} bytes followed`,
+    );
+  }
+
+  const lanesIn = Array.isArray(header.lanes) ? header.lanes : [];
+  let wanted = 0;
+  for (const lane of lanesIn) wanted += lane.samples * WALL_SAMPLE_BYTES;
+
+  const flat = compressed.byteLength === 0 ? new Uint8Array(0) : await inflateRaw(compressed);
+  if (flat.byteLength !== wanted) {
+    throw new ApiError(
+      response.status,
+      url,
+      `wall section inflated to ${flat.byteLength} bytes, header describes ${wanted}`,
+    );
+  }
+  const view = new DataView(flat.buffer, flat.byteOffset, flat.byteLength);
+
+  const stride = header.stride > 0 ? header.stride : 1;
+  const lanes: WallLane[] = [];
+  let off = 0;
+  for (const lane of lanesIn) {
+    const n = lane.samples;
+    const pose = new Float32Array(n * WALL_POSE_LEN);
+    const done = new Uint8Array(n);
+    const rows = new Int32Array(n);
+    for (let s = 0; s < n; s++) {
+      const base = off + s * WALL_SAMPLE_BYTES;
+      for (let j = 0; j < WALL_POSE_LEN; j++) {
+        pose[s * WALL_POSE_LEN + j] = view.getFloat32(base + j * 4, true);
+      }
+      done[s] = flat[base + WALL_POSE_LEN * 4] ?? 0;
+      // The server samples `0, stride, 2·stride, …` and then appends the final row
+      // when the stride missed it — so only the LAST sample can be off-grid.
+      const strided = s * stride;
+      rows[s] = s === n - 1 && lane.steps > 0 ? lane.steps - 1 : strided;
+    }
+    off += n * WALL_SAMPLE_BYTES;
+    lanes.push({
+      seed: lane.seed,
+      steps: lane.steps,
+      samples: n,
+      firstNonFiniteRow: lane.firstNonFiniteRow,
+      // Both are absent on a fully decoded lane, so they stay absent here too.
+      ...(lane.scannedRows !== undefined ? { scannedRows: lane.scannedRows } : {}),
+      ...(lane.truncated === true ? { truncated: true as const } : {}),
+      ...(lane.error !== undefined ? { error: lane.error } : {}),
+      pose,
+      done,
+      rows,
+    });
+  }
+
+  return { header, lanes };
+}
 
 // ---------- SSE: /api/runs/:id/live ----------
 

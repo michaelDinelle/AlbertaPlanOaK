@@ -15,12 +15,56 @@ import numpy as np
 ENTROPY_COLLAPSE_EPS = 1e-6
 NF_PHASES = ("encode", "learn", "plan", "tdPsi")
 
+# summary.json schema. v2 (2026-08-04) is the terminology migration: a fleet lane
+# IS a seed (one agent, one stream), "delivered rate" IS the average reward rate,
+# "zenith/decay" IS peak/retention, and an "igniter" IS a seed that crossed the
+# solved threshold. Same numbers, same gate decisions — only the names moved.
+# Readers accept v1 (no summarySchemaVersion) via frontend/server/summaryAdapter.ts.
+SUMMARY_SCHEMA_VERSION = 2
+# A seed counts as SOLVED when its peak windowed reward rate exceeded this.
+# Structural, not tuned: it is the same 0.1/step bar the gate's solved-seed
+# (was: igniter) criterion has always used — published in summary.json so no
+# reader has to hard-code it.
+SOLVED_THRESHOLD = 0.1
+
 SOTA_EVAL = {"TD7": 17.4, "TD-MPC2": 15.1, "MR.Q": 13.3, "TD3": 10.1, "SAC": 9.9}
 SOTA_DELIVERED_EST = {"SAC (delivered, est.)": 6.0}
 SOTA_FRAMING_NOTE = (
     "eval = final-policy evaluation on free 1000-step episodes (published); "
     "delivered = online reward over the entire stream, flailing included (ours). "
     "Per-FLOP claims require both sides instrumented (AGENTS.md rules).")
+
+
+def json_safe(o):
+    """Replace non-finite floats with `null` so the artifact is REAL JSON.
+
+    RFC 8259 / ECMA-404 have no NaN or Infinity; `json.dumps` emits them bare as a
+    Python extension, and every strict parser (JS `JSON.parse`, Go, Rust, jq)
+    rejects the whole document. v2 persists per-seed vectors, and `retentionBySeed`
+    carries `nan` for any seed whose peak windowed rate was <= 0 — so ONE such seed
+    used to make the entire summary unreadable and silently blanked the frontend's
+    population panel (`readJsonFile` in frontend/server/runIndex.ts returns null on
+    a parse error). `null` is the honest encoding of "undefined for this seed", and
+    it is what every reader already renders as "—".
+    """
+    if isinstance(o, dict):
+        return {k: json_safe(v) for k, v in o.items()}
+    if isinstance(o, (list, tuple)):
+        return [json_safe(v) for v in o]
+    if isinstance(o, float) and not math.isfinite(o):
+        return None
+    return o
+
+
+def write_json(path: Path, payload) -> None:
+    """The ONLY sanctioned artifact writer: sanitize, then refuse to emit non-JSON.
+
+    `allow_nan=False` is a permanent tripwire — if a non-finite ever escapes
+    `json_safe` (a new numpy scalar type, say), this raises instead of writing a
+    file that no reader can parse.
+    """
+    path.write_text(json.dumps(json_safe(payload), indent=2, sort_keys=True,
+                               allow_nan=False))
 
 # --- Phase 8: per-organ reward/GFLOP instrument ----------------------------
 # organCostVersion 1 mirror of the host-side static FLOP model
@@ -333,9 +377,9 @@ def sota_gap_line(best_rate: float, iqm_all: float) -> str:
         if x <= 0:
             return "n/a (rate <= 0)"
         return f"{ref / x:,.0f}x"
-    return (f"**SOTA gap** — best lane {best_rate:+.3f}/step, population IQM {iqm_all:+.4f}/step. "
-            f"vs TD7 {td7}/step (eval): gap {gap(best_rate, td7)} at best lane. "
-            f"vs SAC ~{sac_del}/step (delivered, est.): gap {gap(best_rate, sac_del)} at best lane. "
+    return (f"**SOTA gap** — best seed {best_rate:+.3f}/step, population IQM {iqm_all:+.4f}/step. "
+            f"vs TD7 {td7}/step (eval): gap {gap(best_rate, td7)} at best seed. "
+            f"vs SAC ~{sac_del}/step (delivered, est.): gap {gap(best_rate, sac_del)} at best seed. "
             f"({SOTA_FRAMING_NOTE})")
 
 def entropy_collapse_step(rows: list[dict]) -> int | None:
@@ -349,16 +393,19 @@ def entropy_collapse_step(rows: list[dict]) -> int | None:
     return None
 
 def plasticity(rows: list[dict], window: int) -> dict | None:
+    """Per-seed peak & retention over the windowed reward rate.
+    `retention` = final ÷ peak (was decayRatio): 1.0 means the seed still
+    delivers everything it ever delivered."""
     series = [(r["step"], r["rewardSum"]) for r in rows]
     rates = rolling_rate(series, window)
     if not rates:
         return None
-    zenith_step, zenith_rate = max(rates, key=lambda t: t[1])
+    peak_step, peak_rate = max(rates, key=lambda t: t[1])
     end_step, end_rate = rates[-1]
-    decay = end_rate / zenith_rate if zenith_rate > 0 else float("nan")
+    retention = end_rate / peak_rate if peak_rate > 0 else float("nan")
     return {
-        "zenithStep": zenith_step, "zenithRate": zenith_rate,
-        "endRate": end_rate, "decayRatio": decay,
+        "peakStep": peak_step, "peakRewardRate": peak_rate,
+        "endRewardRate": end_rate, "retention": retention,
     }
 
 def quartiles(v: list[float]) -> str:
@@ -389,21 +436,24 @@ def analyze_policy(run: dict, policy: str, window: int) -> dict:
     recent_arr = np.array([recents[s] for s in seeds])
     best_idx = int(np.argmax(rates))
     out: dict = {
-        "policy": policy, "lanes": n, "horizon": horizon,
-        "divergence": {"dead": dead, "rate": p, "wilsonLo": lo, "wilsonHi": hi,
+        "policy": policy, "seeds": n, "horizon": horizon,
+        "divergence": {"diverged": dead, "rate": p, "wilsonLo": lo, "wilsonHi": hi,
                        "byDetector": dict(sorted(by_detector.items()))},
         "rmst": rmst(times, events, horizon),
-        "iqmDeliveredAll": iqm(rates),
-        "iqmDeliveredSurvivors": iqm(rates[surv_mask]) if surv_mask.any() else None,
-        "bestLaneSeed": seeds[best_idx],
-        "bestLaneRate": float(rates[best_idx]),
-        "bestLaneRewardSum": float(fin[seeds[best_idx]]["rewardSum"]),
-        "positiveLanes": int((rates > 0).sum()),
+        "rewardRateIQM": iqm(rates),
+        "rewardRateIQMNonDiverged": iqm(rates[surv_mask]) if surv_mask.any() else None,
+        "bestSeed": seeds[best_idx],
+        "bestSeedRewardRate": float(rates[best_idx]),
+        "bestSeedTotalReward": float(fin[seeds[best_idx]]["rewardSum"]),
+        "positiveSeeds": int((rates > 0).sum()),
         "positiveFraction": float((rates > 0).mean()),
-        "iqmRecent": iqm(recent_arr),
-        "recentMax": float(recent_arr.max()),
-        "recentRates": recents,
-        "deliveredBySeed": {s: float(r) for s, r in zip(seeds, rates)},
+        "recentRewardRateIQM": iqm(recent_arr),
+        "recentRewardRateMax": float(recent_arr.max()),
+        # Per-seed vectors are PERSISTED in summary.json (v2): the population is
+        # the deliverable, and a reader that cannot see the per-seed spread has to
+        # re-parse fleet.jsonl to draw it.
+        "recentRewardRateBySeed": recents,
+        "rewardRateBySeed": {s: float(r) for s, r in zip(seeds, rates)},
     }
     # Completeness: a run is valid only if it reached its declared horizon. A silently-killed run
     # (laptop sleep, OOM, harness stop) leaves lanes short of horizon — flag it loudly so no one
@@ -413,51 +463,58 @@ def analyze_policy(run: dict, policy: str, window: int) -> dict:
     out["complete"] = bool(has_final and max_step >= horizon)
     out["maxStep"] = max_step
     # Population progress toward the goal (the WHOLE population at SOTA, staying there forever).
-    # Report the distribution and the fraction of lanes clearing each reward-rate tier — never a
-    # single hand-picked lane. Tiers: >0 walking at all, >1 the milestone, >5 ~SAC-delivered, >10 SOTA.
+    # Report the distribution and the fraction of seeds clearing each reward-rate threshold — never
+    # a single hand-picked seed. Thresholds: >0 walking at all, >1 the milestone, >5 ~SAC-delivered,
+    # >10 SOTA.
     _pct = np.percentile(rates, [10, 25, 50, 75, 90, 99])
-    out["rateDistribution"] = {k: float(v) for k, v in
-                               zip(("p10", "p25", "p50", "p75", "p90", "p99"), _pct)}
-    out["tierFractions"] = {"gt0": float((rates > 0).mean()), "gt1": float((rates > 1).mean()),
-                            "gt5": float((rates > 5).mean()), "gt10": float((rates > 10).mean())}
+    out["rewardRatePercentiles"] = {k: float(v) for k, v in
+                                    zip(("p10", "p25", "p50", "p75", "p90", "p99"), _pct)}
+    out["thresholdFractions"] = {"gt0": float((rates > 0).mean()), "gt1": float((rates > 1).mean()),
+                                 "gt5": float((rates > 5).mean()), "gt10": float((rates > 10).mean())}
     flops = run["meta"].get("flopsPerLaneStep")
     if flops:
-        out["rewardPerGFLOP"] = out["iqmDeliveredAll"] / (flops / 1e9)
-        out["bestRewardPerGFLOP"] = out["bestLaneRate"] / (flops / 1e9)
+        out["rewardPerGFLOP"] = out["rewardRateIQM"] / (flops / 1e9)
+        out["bestSeedRewardPerGFLOP"] = out["bestSeedRewardRate"] / (flops / 1e9)
+    # `n` is THIS view's seed count — for a per-env slice that is the slice's own
+    # population, never the pooled fleet, so a 64-seed env slice still publishes
+    # its own CI.
     if n >= 4:
-        out["iqmDeliveredAllCI95"] = list(bootstrap_ci(rates, iqm, seed=1))
+        out["rewardRateIQMCI95"] = list(bootstrap_ci(rates, iqm, seed=1))
     ts, surv = km_curve(times, events)
     out["survival"] = {str(int(t)): float(s) for t, s in zip(ts, surv)}
     if policy == "oak":
         plast, collapses = [], 0
+        retention_by_seed: dict[int, float] = {}
         for s in seeds:
             rows = run["lanes"][(policy, s)]
             pl = plasticity(rows, window)
             if pl:
                 plast.append(pl)
+                retention_by_seed[s] = float(pl["retention"])
             if entropy_collapse_step(rows) is not None:
                 collapses += 1
         if plast:
-            out["plasticity"] = {
-                "zenithStepQ": quartiles([p_["zenithStep"] for p_ in plast]),
-                "zenithRateQ": quartiles([p_["zenithRate"] for p_ in plast]),
-                "decayRatioQ": quartiles(
-                    [p_["decayRatio"] for p_ in plast if math.isfinite(p_["decayRatio"])]),
+            out["peak"] = {
+                "peakStepQ": quartiles([p_["peakStep"] for p_ in plast]),
+                "peakRewardRateQ": quartiles([p_["peakRewardRate"] for p_ in plast]),
+                "retentionQ": quartiles(
+                    [p_["retention"] for p_ in plast if math.isfinite(p_["retention"])]),
             }
-            # Ignition metrics (Mark III audit law: Tier-M IQM alone is blind to
-            # walking-mode kills — the tail is a first-class gate axis).
-            # igniter := lane whose peak windowed rate exceeded 0.1/step;
-            # sustained := igniter still holding >= half its zenith at the end.
-            _ign = [p_ for p_ in plast if p_["zenithRate"] > 0.1]
+            out["retentionBySeed"] = retention_by_seed
+            # Solved-threshold metrics (Mark III audit law: Tier-M IQM alone is blind
+            # to walking-mode kills — the tail is a first-class gate axis).
+            # solved   := seed whose peak windowed rate exceeded SOLVED_THRESHOLD;
+            # retained := solved seed still holding >= half its peak at the end.
+            _ign = [p_ for p_ in plast if p_["peakRewardRate"] > SOLVED_THRESHOLD]
             _sus = [p_ for p_ in _ign
-                    if math.isfinite(p_["decayRatio"]) and p_["decayRatio"] >= 0.5]
-            out["igniters"] = len(_ign)
-            out["ignitersSustained"] = len(_sus)
-            out["igniterSustainFraction"] = (len(_sus) / len(_ign)) if _ign else None
-            # "Staying power": fraction of lanes retaining >= half their zenith rate at the end
-            # (the opposite of post-zenith decay/crash). A continuous online agent must STAY at rate.
-            _dec = [p_["decayRatio"] for p_ in plast if math.isfinite(p_["decayRatio"])]
-            out["sustainingFraction"] = (
+                    if math.isfinite(p_["retention"]) and p_["retention"] >= 0.5]
+            out["solvedSeeds"] = len(_ign)
+            out["solvedSeedsRetained"] = len(_sus)
+            out["solvedRetentionFraction"] = (len(_sus) / len(_ign)) if _ign else None
+            # "Staying power": fraction of seeds retaining >= half their peak rate at the end
+            # (the opposite of post-peak decay/crash). A continuous online agent must STAY at rate.
+            _dec = [p_["retention"] for p_ in plast if math.isfinite(p_["retention"])]
+            out["retentionFraction"] = (
                 float(np.mean([d >= 0.5 for d in _dec])) if _dec else None)
         cp, clo, chi = wilson(collapses, n)
         out["entropyCollapse"] = {"count": collapses, "rate": cp,
@@ -465,7 +522,7 @@ def analyze_policy(run: dict, policy: str, window: int) -> dict:
     sps = [fin[s].get("stepsPerSecond") for s in seeds if fin[s].get("stepsPerSecond")]
     if sps:
         out["aggStepsPerSecond"] = float(np.median(sps)) * n
-        out["laneStepsTotal"] = int(sum(fin[s]["step"] for s in seeds))
+        out["seedStepsTotal"] = int(sum(fin[s]["step"] for s in seeds))
     return out
 
 def render_markdown(results: list[dict], meta: dict) -> str:
@@ -481,9 +538,10 @@ def render_markdown(results: list[dict], meta: dict) -> str:
         f"(ablation={meta.get('ablationLabel', 'none')})",
         "",
         *banner,
-        "**Delivered reward (the headline)**",
+        "**Average reward rate (the headline)**",
         "",
-        "| policy | IQM rate (all lanes) | best lane | positive lanes | recent-window IQM | recent max"
+        "| policy | IQM reward rate ± 95% CI (all seeds) | best seed | positive seeds "
+        "| recent-window IQM | recent max"
         + (" | reward/GFLOP |" if any(r.get("rewardPerGFLOP") is not None for r in results if r) else " |"),
         "|---|---|---|---:|---|---"
         + ("|---|" if any(r.get("rewardPerGFLOP") is not None for r in results if r) else "|"),
@@ -492,13 +550,13 @@ def render_markdown(results: list[dict], meta: dict) -> str:
     for r in results:
         if not r:
             continue
-        ci = r.get("iqmDeliveredAllCI95")
+        ci = r.get("rewardRateIQMCI95")
         ci_s = f" [{ci[0]:.4g}, {ci[1]:.4g}]" if ci else ""
-        row = (f"| {r['policy']} | **{r['iqmDeliveredAll']:.5g}**{ci_s} "
-               f"| seed {r['bestLaneSeed']}: {r['bestLaneRate']:+.4f}/step "
-               f"({r['bestLaneRewardSum']:+,.0f} total) "
-               f"| {r['positiveLanes']}/{r['lanes']} = {r['positiveFraction']:.1%} "
-               f"| {r['iqmRecent']:+.5g} | {r['recentMax']:+.4f} ")
+        row = (f"| {r['policy']} | **{r['rewardRateIQM']:.5g}**{ci_s} "
+               f"| seed {r['bestSeed']}: {r['bestSeedRewardRate']:+.4f}/step "
+               f"({r['bestSeedTotalReward']:+,.0f} total) "
+               f"| {r['positiveSeeds']}/{r['seeds']} = {r['positiveFraction']:.1%} "
+               f"| {r['recentRewardRateIQM']:+.5g} | {r['recentRewardRateMax']:+.4f} ")
         if has_flop:
             rg = r.get("rewardPerGFLOP")
             row += f"| {rg:+.4g} |" if rg is not None else "| n/a |"
@@ -507,19 +565,19 @@ def render_markdown(results: list[dict], meta: dict) -> str:
         lines.append(row)
     oak = next((r for r in results if r and r["policy"] == "oak"), None)
     if oak:
-        lines += ["", sota_gap_line(oak["bestLaneRate"], oak["iqmDeliveredAll"])]
+        lines += ["", sota_gap_line(oak["bestSeedRewardRate"], oak["rewardRateIQM"])]
     lines += [
         "",
-        "**Population progress (the whole population is the deliverable — never a single lane)**",
+        "**Population progress (the whole population is the deliverable — never a single seed)**",
         "",
-        "| policy | complete | rate P10/P50/P90 | %>0 | %>1 | %>5 | %>SOTA(10) | sustaining |",
+        "| policy | complete | reward rate P10/P50/P90 | %>0 | %>1 | %>5 | %>SOTA(10) | retention |",
         "|---|---|---|---:|---:|---:|---:|---:|",
     ]
     for r in results:
         if not r:
             continue
-        rd, tf = r.get("rateDistribution", {}), r.get("tierFractions", {})
-        sust = r.get("sustainingFraction")
+        rd, tf = r.get("rewardRatePercentiles", {}), r.get("thresholdFractions", {})
+        sust = r.get("retentionFraction")
         comp = ("yes" if r.get("complete", True)
                 else f"**NO {r.get('maxStep', 0) / max(meta['steps'], 1):.0%}**")
         lines.append(
@@ -529,34 +587,34 @@ def render_markdown(results: list[dict], meta: dict) -> str:
             f"| {tf.get('gt10', 0):.1%} | {'n/a' if sust is None else f'{sust:.1%}'} |")
     lines += [
         "",
-        "**Survival & robustness**",
+        "**Survival & robustness** (RMST = restricted mean survival time)",
         "",
-        "| policy | lanes | diverged (Wilson 95%) | RMST/horizon | IQM (survivors) |",
+        "| policy | seeds | numerically diverged (Wilson 95%) | RMST/horizon | IQM (non-diverged) |",
         "|---|---:|---|---:|---|",
     ]
     for r in results:
         if not r:
             continue
         d = r["divergence"]
-        surv = r.get("iqmDeliveredSurvivors")
+        surv = r.get("rewardRateIQMNonDiverged")
         lines.append(
-            f"| {r['policy']} | {r['lanes']} | {d['dead']}/{r['lanes']} = {d['rate']:.1%} "
+            f"| {r['policy']} | {r['seeds']} | {d['diverged']}/{r['seeds']} = {d['rate']:.1%} "
             f"[{d['wilsonLo']:.1%}, {d['wilsonHi']:.1%}] | {r['rmst'] / r['horizon']:.3f} "
             f"| {'n/a' if surv is None else f'{surv:.5g}'} |")
     for r in results:
-        if r and r.get("plasticity"):
-            p_ = r["plasticity"]
+        if r and r.get("peak"):
+            p_ = r["peak"]
             ec = r["entropyCollapse"]
             lines += [
                 "",
-                f"**{r['policy']} plasticity** (quartiles 25/50/75): zenith step {p_['zenithStepQ']}; "
-                f"zenith rate {p_['zenithRateQ']}; decay ratio {p_['decayRatioQ']}. "
-                f"Entropy collapse: {ec['count']}/{r['lanes']} = {ec['rate']:.1%} "
+                f"**{r['policy']} peak & retention** (quartiles 25/50/75): peak step {p_['peakStepQ']}; "
+                f"peak reward rate {p_['peakRewardRateQ']}; retention {p_['retentionQ']}. "
+                f"Entropy collapse: {ec['count']}/{r['seeds']} = {ec['rate']:.1%} "
                 f"[{ec['wilsonLo']:.1%}, {ec['wilsonHi']:.1%}].",
             ]
         if r and r["divergence"]["byDetector"]:
             dets = ", ".join(f"{k}: {v}" for k, v in r["divergence"]["byDetector"].items())
-            lines.append(f"**{r['policy']} death detectors**: {dets}.")
+            lines.append(f"**{r['policy']} divergence detectors**: {dets}.")
         if r:
             lines.append(
                 f"**{r['policy']} throughput**: {r.get('aggStepsPerSecond', 0):,.0f} agg steps/s"
@@ -564,29 +622,29 @@ def render_markdown(results: list[dict], meta: dict) -> str:
     return "\n".join(lines)
 
 def run_flops_str(r: dict) -> str:
-    return f"best-lane reward/GFLOP {r['bestRewardPerGFLOP']:+.4g} (OaK measured; SOTA est. only)"
+    return f"best-seed reward/GFLOP {r['bestSeedRewardPerGFLOP']:+.4g} (OaK measured; SOTA est. only)"
 
 def render_leaderboard(run: dict, result: dict, top: int) -> str:
     policy = result["policy"]
     fin = finals(run, policy)
-    delivered = result["deliveredBySeed"]
-    recents = result["recentRates"]
+    delivered = result["rewardRateBySeed"]
+    recents = result["recentRewardRateBySeed"]
     order = sorted(delivered, key=lambda s: delivered[s], reverse=True)[:top]
     lines = [
-        "", f"**{policy} leaderboard — top {len(order)} lanes by delivered rate**", "",
-        "| seed | rate/step | total reward | recent rate | zenith step | status |",
+        "", f"**{policy} leaderboard — top {len(order)} seeds by average reward rate**", "",
+        "| seed | reward rate/step | total reward | recent rate | peak step | status |",
         "|---:|---|---|---|---:|---|",
     ]
     window = max(result["horizon"] // 5, 1)
     for s in order:
         rows = run["lanes"][(policy, s)]
         pl = plasticity(rows, window)
-        zen = f"{pl['zenithStep']:,}" if pl else "n/a"
+        zen = f"{pl['peakStep']:,}" if pl else "n/a"
         rec, life = recents[s], delivered[s]
         nf = fin[s].get("firstNonFiniteStep") is not None
         if rec > max(life, 0) * 1.1 and rec > 0:
             status = "climbing"
-        elif pl and pl["zenithRate"] > 0 and rec < 0.5 * pl["zenithRate"]:
+        elif pl and pl["peakRewardRate"] > 0 and rec < 0.5 * pl["peakRewardRate"]:
             status = "decaying"
         else:
             status = "steady"
@@ -636,7 +694,7 @@ def build_organ_report(run: dict, slice_results: dict[str, list[dict]],
         env_ph = ENV_FLOPS.get(env_id)
         v1_fl = (agent_flops + env_ph) if env_ph is not None else None
         envs[env_id] = {
-            "lanes": r["lanes"],
+            "seeds": r["seeds"],
             "flopsPerLaneStep": fl,
             "envFlopsPerLaneStep": env_ph,
             "agentFlopsPerLaneStep": agent_flops,
@@ -645,12 +703,12 @@ def build_organ_report(run: dict, slice_results: dict[str, list[dict]],
             # above embeds the pre-organ agent model — use the v1 pair for any
             # cross-root ratio work (the caveat's version rule, applied).
             "v1FlopsPerLaneStep": v1_fl,
-            "iqmDeliveredAll": r["iqmDeliveredAll"],
+            "rewardRateIQM": r["rewardRateIQM"],
             "positiveFraction": r["positiveFraction"],
-            "sustainingFraction": r.get("sustainingFraction"),
+            "retentionFraction": r.get("retentionFraction"),
             "divergenceRate": r["divergence"]["rate"],
-            "rewardPerGFLOP": (r["iqmDeliveredAll"] / (fl / 1e9)) if fl else None,
-            "v1RewardPerGFLOP": (r["iqmDeliveredAll"] / (v1_fl / 1e9)) if v1_fl else None,
+            "rewardPerGFLOP": (r["rewardRateIQM"] / (fl / 1e9)) if fl else None,
+            "v1RewardPerGFLOP": (r["rewardRateIQM"] / (v1_fl / 1e9)) if v1_fl else None,
         }
     report = {
         "organCostVersion": version,
@@ -659,7 +717,7 @@ def build_organ_report(run: dict, slice_results: dict[str, list[dict]],
         "ablation": ablations,
         "ablationLabel": meta.get("ablationLabel", "none"),
         "agentFlopsPerLaneStep": agent_flops,
-        "envLanes": {e: len(s) for e, s in slices.items()},
+        "envSeeds": {e: len(s) for e, s in slices.items()},
         "organs": organs,
         "envs": envs,
     }
@@ -700,17 +758,17 @@ def render_organ_section(report: dict) -> str:
         lines += [
             "",
             "**Per-env reward/GFLOP** (per-env lane cost = agent + env physics; "
-            "IQM delivered over all lanes of the slice)",
+            "IQM average reward rate over all seeds of the slice)",
             "",
-            "| env | lanes | IQM delivered | %>0 | sustaining | divergence | reward/GFLOP |",
+            "| env | seeds | IQM reward rate | %>0 | retention | divergence | reward/GFLOP |",
             "|---|---:|---:|---:|---:|---:|---:|",
         ]
         for env_id, e in sorted(report["envs"].items()):
-            sust = e["sustainingFraction"]
+            sust = e["retentionFraction"]
             rpg = e["rewardPerGFLOP"]
             lines.append(
                 "| %s | %d | %+.4f | %.1f%% | %s | %.1f%% | %s |"
-                % (env_id, e["lanes"], e["iqmDeliveredAll"],
+                % (env_id, e["seeds"], e["rewardRateIQM"],
                    100.0 * e["positiveFraction"],
                    "n/a" if sust is None else f"{sust:.1%}",
                    100.0 * e["divergenceRate"],
@@ -758,19 +816,24 @@ def cmd_report(args) -> int:
         for r in results:
             if r:
                 print(render_leaderboard(run, r, args.top))
-    summary = {"meta": meta, "results": [
-        {k: v for k, v in r.items() if k not in ("recentRates", "deliveredBySeed")}
-        for r in results if r]}
+    # v2 persists the per-seed vectors (rewardRateBySeed / recentRewardRateBySeed /
+    # retentionBySeed) instead of stripping them: the population IS the deliverable,
+    # and a reader that only gets aggregates has to re-parse fleet.jsonl to draw the
+    # spread. Nothing is dropped on the way out any more.
+    summary = {
+        "summarySchemaVersion": SUMMARY_SCHEMA_VERSION,
+        "solvedThreshold": SOLVED_THRESHOLD,
+        "meta": meta,
+        "results": [r for r in results if r],
+    }
     if mixed:
-        summary["envSlices"] = {env: [
-            {k: v for k, v in r.items() if k not in ("recentRates", "deliveredBySeed")}
-            for r in sres if r] for env, sres in slice_results.items()}
+        summary["envSlices"] = {env: [r for r in sres if r]
+                                for env, sres in slice_results.items()}
     out = args.json or (args.root / "summary.json")
-    out.write_text(json.dumps(summary, indent=2, sort_keys=True))
+    write_json(out, summary)
     # Phase 8: per-organ reward/GFLOP artifact (the purge brief).
     organ_report = build_organ_report(run, slice_results, results, slices)
-    (args.root / "organ-report.json").write_text(
-        json.dumps(organ_report, indent=2, sort_keys=True))
+    write_json(args.root / "organ-report.json", organ_report)
     print(render_organ_section(organ_report))
     return 0
 
@@ -796,7 +859,7 @@ def gate_verdicts(keep_fin, cand_fin, keep_seeds, cand_seeds, n, horizon, args, 
     margin = args.rate_rel * abs(iqm_keep)
     improved = di5 > 0
     verdicts.append((
-        "iqmDelivered", di5 >= -margin,
+        "rewardRateIQM (was iqmDelivered)", di5 >= -margin,
         f"IQM keeper={iqm_keep:.5g} cand={iqm(c_del):.5g} ΔIQM5={di5:+.5g} "
         f"margin={-margin:.5g}{' IMPROVEMENT' if improved else ''}"))
 
@@ -840,10 +903,10 @@ def gate_verdicts(keep_fin, cand_fin, keep_seeds, cand_seeds, n, horizon, args, 
     # Ignition / walking-mode tail (Mark III audit law: Tier-M IQM alone approved a
     # mode-kill — the tail is a first-class BLOCKING gate axis). Four criteria,
     # paired by seed with the same machinery as the core gate:
-    #   igniters      — per-lane igniter indicator, non-inferiority at δ
-    #   sustainers    — per-lane sustained-igniter indicator, non-inferiority at δ
-    #   bestLaneClass — paired top-8-lane mean delivered rate, 5% relative band
-    #   positiveFrac  — per-lane rate>0 indicator, non-inferiority at δ
+    #   solvedSeeds   — per-seed solved indicator, non-inferiority at δ
+    #   retainedSeeds — per-seed retained-solved indicator, non-inferiority at δ
+    #   bestLaneClass — paired top-8-seed mean reward rate, 5% relative band
+    #   positiveFrac  — per-seed rate>0 indicator, non-inferiority at δ
     # Explicit absolute bars (--min-igniters/--min-best/--min-positive) ADD on top.
     def _ign_vec(run_, seeds_):
         run_lanes = run_["lanes"]
@@ -853,9 +916,9 @@ def gate_verdicts(keep_fin, cand_fin, keep_seeds, cand_seeds, n, horizon, args, 
         sus = np.zeros(len(seeds_))
         for j, s_ in enumerate(seeds_):
             pl = plasticity(run_lanes[(pol, s_)], window)
-            if pl and pl["zenithRate"] > 0.1:
+            if pl and pl["peakRewardRate"] > SOLVED_THRESHOLD:
                 ign[j] = 1.0
-                if math.isfinite(pl["decayRatio"]) and pl["decayRatio"] >= 0.5:
+                if math.isfinite(pl["retention"]) and pl["retention"] >= 0.5:
                     sus[j] = 1.0
         return ign, sus
     try:
@@ -865,8 +928,8 @@ def gate_verdicts(keep_fin, cand_fin, keep_seeds, cand_seeds, n, horizon, args, 
         c_ign_v, c_sus_v = _ign_vec(cand_run, cand_seeds)
         c_best = float(np.max(c_del))
         c_pos = float((c_del > 0).mean())
-        for name, kv, cv, seed_ in (("igniters", k_ign_v, c_ign_v, 30),
-                                    ("sustainers", k_sus_v, c_sus_v, 31)):
+        for name, kv, cv, seed_ in (("solvedSeeds (was igniters)", k_ign_v, c_ign_v, 30),
+                                    ("retainedSeeds (was sustainers)", k_sus_v, c_sus_v, 31)):
             d95 = float(np.percentile(
                 paired_bootstrap(cv, kv, np.mean, n_boot=args.boot, seed=seed_), 95))
             verdicts.append((name, d95 <= delta,
@@ -882,7 +945,7 @@ def gate_verdicts(keep_fin, cand_fin, keep_seeds, cand_seeds, n, horizon, args, 
         c_pos_v = (c_del > 0).astype(float)
         d_pos95 = float(np.percentile(
             paired_bootstrap(c_pos_v, k_pos_v, np.mean, n_boot=args.boot, seed=33), 95))
-        verdicts.append(("positiveFrac", d_pos95 <= delta,
+        verdicts.append(("positiveSeedFraction (was positiveFrac)", d_pos95 <= delta,
                          f"keeper={k_pos_v.mean():.1%} cand={c_pos:.1%} "
                          f"Δ95={d_pos95:+.4f} δ={delta:.4f}"))
         ign_ok = True
@@ -895,21 +958,73 @@ def gate_verdicts(keep_fin, cand_fin, keep_seeds, cand_seeds, n, horizon, args, 
         if args.min_positive is not None:
             ign_ok &= c_pos >= args.min_positive
         if bars_given:
-            verdicts.append(("ignitionBars", ign_ok,
-                             f"best={c_best:+.4f} pos={c_pos:.1%} bars[ign>={args.min_igniters} "
+            verdicts.append(("solvedBars (was ignitionBars)", ign_ok,
+                             f"best={c_best:+.4f} pos={c_pos:.1%} bars[solved>={args.min_igniters} "
                              f"best>={args.min_best} pos>={args.min_positive}]"))
     except Exception as e:  # tail metrics must never break the core gate
-        print(f"  [info] ignitionTail  (unavailable: {e})")
+        print(f"  [info] solvedTail  (unavailable: {e})")
 
-    hdr = f"fleet gate: N={n} horizon={horizon} policy={args.policy} boot={args.boot}"
+    hdr = f"fleet gate: N={n} seeds horizon={horizon} policy={args.policy} boot={args.boot}"
     if label:
         hdr += f" [{label}]"
     print(hdr)
     ok = True
+    # Criterion labels carry their pre-v2 name in parens; the tests, thresholds and
+    # PASS/FAIL semantics behind them are unchanged.
+    width = max((len(name) for name, _, _ in verdicts), default=14)
     for name, passed, detail in verdicts:
         ok &= passed
-        print(f"  [{'PASS' if passed else 'FAIL'}] {name:14s} {detail}")
+        print(f"  [{'PASS' if passed else 'FAIL'}] {name:{width}s} {detail}")
+    if keep_run is not None and cand_run is not None and label is None:
+        print_per_env_delta(keep_run, cand_run, keep_fin, cand_fin, keep_seeds, args)
     return ok
+
+def print_per_env_delta(keep_run, cand_run, keep_fin, cand_fin, seeds, args) -> None:
+    """DIAGNOSTIC per-env ΔIQM. Never blocking — it prints, it does not vote.
+
+    The pooled IQM is dominated by whichever env brings the most seeds and the
+    largest reward scale: under the default schedule HalfCheetah is 1024 of 1408
+    lanes with rewards ~100x the gridworlds', so an env can collapse without moving
+    the headline. That blindness is real, and a `perEnvNoRegression` criterion did
+    run against it in July 2026 (see .oak-benchmarks/boost-rhat-tierL-20260725.log:
+    "2/16 envs regressed: HighDimMaze-cont-v0 -94.20%, POMaze-cont-v0 -91.55%").
+    It was never committed — it lived only in an uncommitted working copy and was
+    lost — so this restores its INFORMATION, not its verdict.
+
+    Deliberately not revived as law: its recorded form rejected stepcap1M-20260724
+    for "Acrobot-cont-v0 -2.0%, Chain-cont-v0 -0.0%" while every other criterion
+    PASSED with an IQM IMPROVEMENT. A -0.0% point difference on a 64-seed slice is
+    noise, and it printed no interval, so it was an unpaired point test with a
+    ~zero threshold. Restoring that verbatim would reject almost everything; picking
+    a new threshold here would be inventing promotion law by guess. For a per-env
+    PROMOTE/REJECT use the real instrument that already exists:
+    `fleet.py gate --env-slice <envId>`, which runs EVERY criterion paired on that
+    env's own lanes with the same non-inferiority margins.
+    """
+    envs = lane_env_map(keep_run, args.policy)
+    by_env: dict[str, list[int]] = defaultdict(list)
+    for s in seeds:
+        e = envs.get(s)
+        if e is not None:
+            by_env[e].append(s)
+    if len(by_env) < 2:
+        return  # single-env root: the headline IQM already IS the per-env number
+    rows = []
+    for i, (env_id, e_seeds) in enumerate(sorted(by_env.items())):
+        k = delivered(keep_fin, e_seeds)
+        c = delivered(cand_fin, e_seeds)
+        k_iqm, c_iqm = iqm(k), iqm(c)
+        d5 = float(np.percentile(
+            paired_bootstrap(k, c, iqm, n_boot=args.boot, seed=40 + i), 5))
+        rel = (c_iqm - k_iqm) / abs(k_iqm) if k_iqm else float("nan")
+        rows.append((rel, env_id, len(e_seeds), k_iqm, c_iqm, d5))
+    rows.sort(key=lambda r: (math.isnan(r[0]), r[0]))  # worst first, undefined last
+    print(f"  [info] perEnvDelta  (diagnostic, NOT a criterion — "
+          f"per-env verdicts: gate --env-slice <envId>)")
+    for rel, env_id, m, k_iqm, c_iqm, d5 in rows:
+        rel_s = "  n/a" if math.isnan(rel) else f"{rel:+.1%}"
+        print(f"           {env_id:26s} n={m:<5d} IQM {k_iqm:+.5g} -> {c_iqm:+.5g} "
+              f"({rel_s})  ΔIQM5={d5:+.5g}")
 
 def equivalence_gate(keep_fin, cand_fin, keep_seeds, cand_seeds, n, horizon, args) -> int:
     k_t, k_e, _ = death_times(keep_fin, horizon)
@@ -941,7 +1056,7 @@ def equivalence_gate(keep_fin, cand_fin, keep_seeds, cand_seeds, n, horizon, arg
     band_p = args.delta if args.delta is not None else 0.03
     verdicts.append(tost("divergence", dp, band_p))
     di = unpaired_bootstrap(k_del, c_del, iqm, n_boot=args.boot, seed=12)
-    verdicts.append(tost("iqmDelivered", di, args.rate_rel * abs(iqm(k_del)), "{:+.5g}"))
+    verdicts.append(tost("rewardRateIQM", di, args.rate_rel * abs(iqm(k_del)), "{:+.5g}"))
     rng = np.random.default_rng(13)
     ik = rng.integers(0, n, size=(args.boot, n))
     ic = rng.integers(0, n, size=(args.boot, n))
@@ -1067,9 +1182,9 @@ def cmd_sota(args) -> int:
     if not roots:
         print(f"(no fleet roots with oak policy under {args.dir})")
         return 1
-    print("### OaK reward scoreboard — delivered rate across fleet runs")
+    print("### OaK reward scoreboard — average reward rate across fleet runs")
     print()
-    print("| run | date | B × steps | IQM delivered (all) | best lane | positive | "
+    print("| run | date | B × steps | IQM reward rate (all seeds) | best seed | positive | "
           "recent IQM | gap to TD7 (eval) | gap to SAC (delivered est.) |")
     print("|---|---|---|---|---|---:|---|---|---|")
     td7 = SOTA_EVAL["TD7"]
@@ -1083,12 +1198,12 @@ def cmd_sota(args) -> int:
             continue
         if not r:
             continue
-        best = r["bestLaneRate"]
+        best = r["bestSeedRewardRate"]
         g7 = f"{td7 / best:,.0f}x" if best > 0 else "n/a"
         gs = f"{sac / best:,.0f}x" if best > 0 else "n/a"
         print(f"| {d.name} | {started[:10]} | {meta['batch']}×{meta['steps']:,} "
-              f"| {r['iqmDeliveredAll']:+.5g} | seed {r['bestLaneSeed']}: {best:+.4f} "
-              f"| {r['positiveFraction']:.1%} | {r['iqmRecent']:+.5g} | {g7} | {gs} |")
+              f"| {r['rewardRateIQM']:+.5g} | seed {r['bestSeed']}: {best:+.4f} "
+              f"| {r['positiveFraction']:.1%} | {r['recentRewardRateIQM']:+.5g} | {g7} | {gs} |")
     print()
     print(f"Reference lines: " + ", ".join(f"{k} {v}/step" for k, v in SOTA_EVAL.items())
           + " (eval); " + ", ".join(f"{k} ~{v}/step" for k, v in SOTA_DELIVERED_EST.items()) + ".")
@@ -1113,10 +1228,10 @@ def render_watch(rows: dict[str, dict]) -> str:
     if not rows:
         return "(no aggregate.jsonl rows yet)"
     has_best = any("bestLaneSeed" in r for r in rows.values())
-    hdr = (f"{'policy':8s} {'step':>10s} {'alive':>11s} "
+    hdr = (f"{'policy':8s} {'step':>10s} {'nonDiv':>11s} "
            f"{'P10':>10s} {'P50':>10s} {'P90':>10s}")
     if has_best:
-        hdr += f" {'best lane':>16s} {'recentP50':>10s}"
+        hdr += f" {'best seed':>16s} {'recentP50':>10s}"
     hdr += f" {'agg sps':>10s} {'wall':>8s}"
     out = [hdr]
     for pol, r in sorted(rows.items()):
@@ -1151,17 +1266,17 @@ def main() -> int:
     rp.add_argument("root", type=Path)
     rp.add_argument("--policy", default=None, help="restrict to one policy")
     rp.add_argument("--window", type=int, default=None,
-                    help="rolling-rate window for plasticity (default: 2 heartbeats)")
+                    help="rolling-rate window for peak/retention (default: 2 heartbeats)")
     rp.add_argument("--json", type=Path, default=None,
                     help="summary.json path (default: <root>/summary.json)")
     rp.add_argument("--leaderboard", action="store_true",
-                    help="append top-N lanes by delivered rate")
+                    help="append top-N seeds by average reward rate")
     rp.add_argument("--top", type=int, default=10)
 
     sp = sub.add_parser("sota", help="reward scoreboard across all fleet roots vs SOTA lines")
     sp.add_argument("--dir", type=Path, default=Path(".oak-benchmarks"))
     sp.add_argument("--min-lanes", type=int, default=512,
-                    help="hide validation/debug roots below this population")
+                    help="hide validation/debug roots below this seed count")
     sp.add_argument("--min-steps", type=int, default=50_000)
 
     gp = sub.add_parser("gate", help="promotion law / instrument-swap equivalence")
@@ -1175,15 +1290,15 @@ def main() -> int:
     gp.add_argument("--rmst-rel", type=float, default=0.05)
     gp.add_argument("--boot", type=int, default=10_000)
     gp.add_argument("--min-igniters", type=int, default=None,
-                    help="blocking ignition bar: candidate lanes with peak windowed rate > 0.1")
+                    help="blocking solved bar: candidate seeds with peak windowed rate > 0.1")
     gp.add_argument("--min-best", type=float, default=None,
-                    help="blocking bar: candidate best-lane delivered rate")
+                    help="blocking bar: candidate best-seed average reward rate")
     gp.add_argument("--min-positive", type=float, default=None,
-                    help="blocking bar: candidate positive-lane fraction (0..1)")
+                    help="blocking bar: candidate positive-seed fraction (0..1)")
     gp.add_argument("--equivalence", action="store_true",
                     help="unpaired TOST instrument-swap gate (see module docstring)")
     gp.add_argument("--env-slice", default=None, metavar="ENV_ID",
-                    help="mixed-env fleets: restrict BOTH roots to lanes whose envId "
+                    help="mixed-env fleets: restrict BOTH roots to seeds whose envId "
                          "matches, paired by seed on the slice (hard error on empty or "
                          "asymmetric slices), then run the gate unchanged")
 
@@ -1192,18 +1307,68 @@ def main() -> int:
     wp.add_argument("--follow", action="store_true")
     wp.add_argument("--interval", type=float, default=5.0)
 
-    lp2 = sub.add_parser("lanes", help="per-lane forensics: pack health diff at a step")
+    lp2 = sub.add_parser("lanes", help="per-seed forensics: pack health diff at a step")
     lp2.add_argument("root", type=Path)
     lp2.add_argument("--at", type=int, required=True, help="heartbeat step to slice")
     lp2.add_argument("--policy", default="oak")
 
+    fp = sub.add_parser("floors", help="extract per-task normalization floors -> FLOORS.json")
+    fp.add_argument("root", type=Path, help="a zero/random-policy fleet root (run report first)")
+
     args = ap.parse_args()
     return {"report": cmd_report, "gate": cmd_gate, "watch": cmd_watch, "lanes": cmd_lanes,
-            "sota": cmd_sota}[args.cmd](args)
+            "sota": cmd_sota, "floors": cmd_floors}[args.cmd](args)
+
+
+def cmd_floors(args) -> int:
+    """Per-task normalization floors from a zero/random-policy sweep.
+
+    Reads the root's summary.json (v2) and writes <bench-root>/FLOORS.json:
+      { floorsSchemaVersion: 1, sourceRun, steps,
+        floors: { <envId>: { zero: rewardRateIQM, random: rewardRateIQM,
+                             floor: max(zero, random) } } }
+    `floor` is the normalization zero-point (the better trivial policy — the
+    convention rliable-style normalized scores expect).
+    """
+    root: Path = args.root
+    sp = root / "summary.json"
+    if not sp.exists():
+        print(f"FLOORS ERROR: {sp} missing — run `fleet.py report {root}` first")
+        return 1
+    summary = json.loads(sp.read_text())
+    if summary.get("summarySchemaVersion", 1) < 2:
+        print("FLOORS ERROR: summary is pre-v2 — regenerate with the current fleet.py report")
+        return 1
+    slices = summary.get("envSlices") or {}
+    floors: dict[str, dict] = {}
+    for env_id, results in sorted(slices.items()):
+        by_policy = {r.get("policy"): r.get("rewardRateIQM") for r in results}
+        zero, random_ = by_policy.get("zero"), by_policy.get("random")
+        if zero is None and random_ is None:
+            continue
+        candidates = [v for v in (zero, random_) if v is not None]
+        floors[env_id] = {"zero": zero, "random": random_, "floor": max(candidates)}
+    if not floors:
+        print("FLOORS ERROR: no zero/random envSlices in this summary — was the run "
+              "launched with OAK_BENCH_POLICIES=zero,random ?")
+        return 1
+    meta = summary.get("meta") or {}
+    out = {
+        "floorsSchemaVersion": 1,
+        "sourceRun": root.name,
+        "steps": meta.get("steps"),
+        "floors": floors,
+    }
+    dest = root.parent / "FLOORS.json"
+    dest.write_text(json.dumps(out, indent=1, sort_keys=True) + "\n")
+    print(f"wrote {dest} — {len(floors)} tasks (floor = max(zero, random) reward rate IQM)")
+    for env_id, f in sorted(floors.items()):
+        print(f"  {env_id:28s} zero {f['zero']!s:>12} random {f['random']!s:>12} -> floor {f['floor']}")
+    return 0
 
 
 def cmd_lanes(args) -> int:
-    """Per-lane forensics: crashed / near-zero / median / leader health diff."""
+    """Per-seed forensics: crashed / near-zero / median / leader health diff."""
     import statistics as _st
     root = Path(args.root)
     rows = [json.loads(l) for l in open(root / "fleet.jsonl")

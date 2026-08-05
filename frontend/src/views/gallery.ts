@@ -1,7 +1,12 @@
-// #/ — the run gallery.
+// #/runs — the run gallery.
+//
+// It used to be the home page; `#/` is the Wall now, and this is the index you
+// go to when you want the ~600 roots rather than one run playing. `GALLERY_PATH`
+// is the single constant every "back to the list" link in the app reads, so the
+// route can move again without leaving orphan links behind.
 //
 // The signature element is the env spectrum: a fixed-order strip of accent
-// cells, one per env in the run, widths proportional to lane share. It uses the
+// cells, one per env in the run, widths proportional to seed share. It uses the
 // same per-env accents the 3D scenes use (kit/tokens.ts), so a run's identity in
 // the gallery matches its identity in the theater. The strip is an accent, never
 // the only encoding — the env names are always printed beside it.
@@ -45,6 +50,9 @@ import {
 } from '../components/table';
 import { sparkline, type SparklineHandle } from '../components/sparkline';
 
+/** Where the gallery lives. The Wall owns `#/`. */
+export const GALLERY_PATH = '#/runs';
+
 export function accentCss(slug: string): string {
   const value = TOKENS.accents[slug];
   if (value === undefined) return '#5c6a80';
@@ -56,9 +64,9 @@ export function accentCss(slug: string): string {
  *
  * Two inputs, deliberately unequal in what they claim:
  *   * `EnvShare[]` — TRUE apportionment from `envShares(meta)` (i.e. from
- *     `meta.envSchedule`): cell widths are the real lane fractions and each cell
- *     names its lane count.
- *   * a run-index entry — IDENTITY ONLY: equal-width cells and no lane numbers,
+ *     `meta.envSchedule`): cell widths are the real seed fractions and each cell
+ *     names its seed count.
+ *   * a run-index entry — IDENTITY ONLY: equal-width cells and no seed numbers,
  *     because the index carries `envIds` and `batch` but never the split between
  *     them. Inventing `batch / envIds.length` there printed confident fiction on
  *     every mixed run (the default schedule is 1024/128/64/64/64/64, not 6×235).
@@ -88,7 +96,7 @@ export function envSpectrum(source: Pick<RunIndexEntry, 'envIds'> | readonly Env
     strip.append(
       el('span', {
         class: 'spectrum-cell',
-        title: share ? `${info.name} — ${formatCount(share.lanes)} lanes` : info.name,
+        title: share ? `${info.name} — ${formatCount(share.lanes)} seeds` : info.name,
         style: {
           flexGrow: String(share ? Math.max(0.05, share.fraction) : 1),
           background: accentCss(info.slug),
@@ -101,12 +109,17 @@ export function envSpectrum(source: Pick<RunIndexEntry, 'envIds'> | readonly Env
 
 function roleBadge(role: RunIndexEntry['role']): HTMLElement | null {
   if (!role) return null;
-  const titles: Record<string, string> = {
-    keeper: 'The current promoted baseline',
-    candidate: 'The run under evaluation',
-    parent: 'The keeper this lineage came from',
+  const labels: Record<string, string> = {
+    bestKernel: 'best kernel',
+    candidate: 'candidate',
+    parent: 'parent',
   };
-  return badge(role, role, titles[role] ?? role);
+  const titles: Record<string, string> = {
+    bestKernel: 'The current promoted best kernel',
+    candidate: 'The run under evaluation',
+    parent: 'The best kernel this lineage came from',
+  };
+  return badge(labels[role] ?? role, role, titles[role] ?? role);
 }
 
 function metaLine(entry: RunIndexEntry): HTMLElement {
@@ -191,9 +204,9 @@ function clearHydrationQueue(): void {
  * Where a run's "theater" affordance points.
  *
  * The run index knows THAT a root has recordings (`hasRecordings`) but not which
- * lane — env and seed only arrive with the detail fetch. So the link starts on
+ * seed — env and seed only arrive with the detail fetch. So the link starts on
  * the run's own recordings tab, which always resolves and always lists every
- * replayable lane, and is upgraded to the lane-level theater route the moment
+ * replayable seed, and is upgraded to the seed-level theater route the moment
  * hydration names one. It is never left pointing at a route that does not exist.
  */
 export function theaterHref(runId: string, recording?: { envId: string; seed: number }): string {
@@ -214,6 +227,10 @@ function buildCard(entry: RunIndexEntry): Card {
   if (!entry.complete && !entry.inFlight) {
     chips.append(badge('incomplete', 'warn', 'Stopped before its declared horizon — never gate on this'));
   }
+  // `hasSummary` is pure file existence (the index only stats the file). A root whose
+  // summary.json is PRESENT but unparseable would otherwise show no badge at all while
+  // every figure reads "n/a" — the card asserting the summary is fine and that it has
+  // no data. Hydration below knows the difference and adds the missing cue.
   if (!entry.hasSummary) chips.append(badge('no summary', 'quiet', 'fleet.py report has not been run on this root'));
 
   const envList = entry.envIds.map((id) => envName(id)).join(', ');
@@ -246,7 +263,7 @@ function buildCard(entry: RunIndexEntry): Card {
     ? el('a', {
         class: 'card-theater',
         href: theaterHref(entry.id),
-        title: 'Replay a recorded lane of this run in the theater',
+        title: 'Replay a recorded seed of this run in the theater',
       }, [el('span', { text: 'theater' }), el('span', { text: '↗' })])
     : null;
   if (theater) root.append(theater);
@@ -259,7 +276,7 @@ function buildCard(entry: RunIndexEntry): Card {
       hydrated = true;
       queueHydration(() => loadRunDetail(entry.id).then(
         (detail: RunDetail) => {
-          // The detail carries the real per-env lane split; upgrade the strip.
+          // The detail carries the real per-env seed split; upgrade the strip.
           const shares = envShares(detail.meta);
           if (shares.length > 0) {
             const next = envSpectrum(shares);
@@ -267,8 +284,8 @@ function buildCard(entry: RunIndexEntry): Card {
             spectrum = next;
           }
 
-          // …and the first recorded lane, which upgrades the theater link from
-          // "the list of replayable lanes" to "this lane, playing". The index and
+          // …and the first recorded seed, which upgrades the theater link from
+          // "the list of replayable seeds" to "this seed, playing". The index and
           // the detail run the same servable scan, so `hasRecordings` with an
           // empty list should be impossible — if it ever happens, withdraw the
           // affordance rather than advertise a replay that is not there.
@@ -276,14 +293,24 @@ function buildCard(entry: RunIndexEntry): Card {
           if (theater && first) {
             theater.setAttribute('href', theaterHref(entry.id, first));
             theater.title = `Replay ${envName(first.envId)} seed ${first.seed}`
-              + `${detail.recordings.length > 1 ? ` · ${detail.recordings.length} recorded lanes` : ''}`;
+              + `${detail.recordings.length > 1 ? ` · ${detail.recordings.length} recorded seeds` : ''}`;
           } else if (theater) {
             theater.remove();
             root.classList.remove('has-theater');
           }
 
+          // Present-but-rejected summary: say so on the card, next to the n/a it causes.
+          if (detail.summaryError === 'unreadable' && entry.hasSummary) {
+            chips.append(badge(
+              'summary unreadable',
+              'warn',
+              'summary.json exists on this root but is not valid JSON, so it was rejected — '
+                + 'the figures here are unavailable, not zero',
+            ));
+          }
+
           const result = primaryResult(detail.summary);
-          const iqm = result?.iqmDeliveredAll;
+          const iqm = result?.rewardRateIQM;
           if (typeof iqm === 'number') {
             iqmValue.textContent = (iqm > 0 ? '+' : '') + formatRate(iqm);
             iqmValue.classList.add(iqm > 0 ? 'tone-pos' : iqm < 0 ? 'tone-neg' : 'tone-dim');
@@ -305,7 +332,7 @@ function buildCard(entry: RunIndexEntry): Card {
             spark = sparkline({
               values: series.p50,
               height: 34,
-              ariaLabel: `Median delivered rate${policies.length > 1 && policy ? ` for policy ${policy}` : ''}`
+              ariaLabel: `Median reward rate${policies.length > 1 && policy ? ` for policy ${policy}` : ''}`
                 + ` over ${formatStep(series.steps[series.steps.length - 1])} steps`,
             });
             sparkHolder.replaceChildren(spark.root);
@@ -365,7 +392,7 @@ export const mount: ViewMount = (host) => {
       filter.completeOnly = v;
       paint();
     }),
-    recordingsOnly: toggle('recordings', 'Only runs with per-lane recordings for the theater', false, (v) => {
+    recordingsOnly: toggle('recordings', 'Only runs with per-seed recordings for the theater', false, (v) => {
       filter.recordingsOnly = v;
       paint();
     }),
@@ -373,7 +400,7 @@ export const mount: ViewMount = (host) => {
       filter.inFlightOnly = v;
       paint();
     }),
-    rolesOnly: toggle('roles', 'Only keeper, candidate and parent', false, (v) => {
+    rolesOnly: toggle('roles', 'Only the best kernel, candidate and parent', false, (v) => {
       filter.rolesOnly = v;
       paint();
     }),

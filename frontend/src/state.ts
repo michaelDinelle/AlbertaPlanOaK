@@ -122,7 +122,7 @@ export function loadRunDetail(id: string, force = false): Promise<RunDetail> {
 // ---------- formatters ----------
 
 /**
- * Delivered reward rates span 1e-5 (MountainCar) to 1e0 (CartPole) in one fleet,
+ * Average reward rates span 1e-5 (MountainCar) to 1e0 (CartPole) in one fleet,
  * so a fixed decimal count is useless. Pick a representation by magnitude.
  */
 export function formatRate(value: number | null | undefined, sig = 3): string {
@@ -264,7 +264,7 @@ export interface EnvShare {
 }
 
 /**
- * Lane apportionment per env, in the canonical ENV_IDS order (so two runs with
+ * Seed apportionment per env, in the canonical ENV_IDS order (so two runs with
  * the same envs always draw the same strip). Single-env runs report one share.
  */
 export function envShares(meta: Pick<RunMeta, 'envId' | 'batch' | 'envSchedule'>): EnvShare[] {
@@ -341,9 +341,9 @@ export function matchesFilter(entry: RunIndexEntry, filter: GalleryFilter): bool
   return true;
 }
 
-const ROLE_RANK: Record<string, number> = { keeper: 0, candidate: 1, parent: 2 };
+const ROLE_RANK: Record<string, number> = { bestKernel: 0, candidate: 1, parent: 2 };
 
-/** roles first (they are the runs that matter), then newest, then id. */
+/** roles first (best kernel, then candidate, then parent), then newest, then id. */
 export function sortRuns(entries: readonly RunIndexEntry[]): RunIndexEntry[] {
   return [...entries].sort((a, b) => {
     if (a.inFlight !== b.inFlight) return a.inFlight ? -1 : 1;
@@ -507,8 +507,62 @@ export function laneSeries(columnar: FleetColumnar, field: string, envId?: strin
 }
 
 /**
+ * Turn a cumulative `rewardSum` series into the MEASURED reward rate over each
+ * heartbeat window: (sum_i − sum_{i−1}) / (step_i − step_{i−1}).
+ *
+ * This is what "reward rate" means everywhere else in the lab — reward the
+ * environment actually paid, divided by steps. It is NOT `health.rewardRate`,
+ * which is the agent's own internal average-reward estimate ρ̄ (a learned
+ * parameter, and a divergence diagnostic): plotting ρ̄ under a "reward rate"
+ * label was the chart telling you what the agent BELIEVES it earns.
+ *
+ * The first window is measured from the origin (0 steps, 0 reward), which is
+ * exactly its cumulative rate. Nulls propagate — a missing endpoint means the
+ * window is unknown, never zero — and so does a zero-width step gap.
+ */
+export function windowRates(
+  steps: readonly number[],
+  values: readonly (number | null)[],
+): (number | null)[] {
+  const out: (number | null)[] = [];
+  for (let i = 0; i < steps.length; i++) {
+    const step = steps[i];
+    const value = values[i];
+    if (step === undefined || value === null || value === undefined || !Number.isFinite(value)) {
+      out.push(null);
+      continue;
+    }
+    const prevStep = i === 0 ? 0 : steps[i - 1] ?? 0;
+    const prevValue = i === 0 ? 0 : values[i - 1];
+    if (prevValue === null || prevValue === undefined || !Number.isFinite(prevValue)) {
+      out.push(null);
+      continue;
+    }
+    const span = step - prevStep;
+    out.push(span > 0 ? (value - prevValue) / span : null);
+  }
+  return out;
+}
+
+/** Apply `windowRates` to every seed's series in place of the cumulative one. */
+export function toWindowRates(steps: readonly number[], series: readonly LaneSeries[]): LaneSeries[] {
+  return series.map((entry) => {
+    const values = windowRates(steps, entry.values);
+    let last: number | null = null;
+    for (let i = values.length - 1; i >= 0; i--) {
+      const v = values[i];
+      if (v !== null && v !== undefined && Number.isFinite(v)) {
+        last = v;
+        break;
+      }
+    }
+    return { ...entry, values, last };
+  });
+}
+
+/**
  * Cap a spaghetti plot without lying about it: always keep the extremes and the
- * median lane, then fill with an even stride over the rank order. Deterministic.
+ * median seed, then fill with an even stride over the rank order. Deterministic.
  */
 export function capLanes(series: readonly LaneSeries[], cap: number): LaneSeries[] {
   if (series.length <= cap) return [...series];
@@ -522,7 +576,7 @@ export function capLanes(series: readonly LaneSeries[], cap: number): LaneSeries
   return picked.filter((entry): entry is LaneSeries => entry !== undefined);
 }
 
-/** Rank lanes by final value, descending — the lane table's default order. */
+/** Rank seeds by final value, descending — the seed ledger's default order. */
 export function rankLanes(series: readonly LaneSeries[]): LaneSeries[] {
   return [...series].sort((a, b) => (b.last ?? -Infinity) - (a.last ?? -Infinity));
 }

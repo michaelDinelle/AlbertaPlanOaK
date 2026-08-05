@@ -35,6 +35,8 @@ import {
   primaryResult,
   rankLanes,
   sortRuns,
+  toWindowRates,
+  windowRates,
 } from '../src/state';
 import { parseQuartiles } from '../src/components/bars';
 import type { AggregateRow, FleetColumnar, RunDetail, RunIndexEntry } from '@shared/types';
@@ -175,6 +177,19 @@ describe('apiUrl', () => {
     ).toBe('/api/runs/p93/fleet?fields=health.rewardRate&envId=DeepSea-cont-v0&policy=zero');
   });
 
+  test('the curves query is envId + policy, and the run id is escaped', () => {
+    // Same law as the fleet query: the curve is built from ONE policy's seeds, and
+    // envId is what keeps a mixed fleet's environments on their own scales.
+    expect(apiUrl('/runs/p93/curves', { envId: 'HalfCheetah-v4', policy: 'oak' })).toBe(
+      '/api/runs/p93/curves?envId=HalfCheetah-v4&policy=oak',
+    );
+    // an absent env means "every lane, pooled" — it must not appear as an empty filter
+    expect(apiUrl('/runs/p93/curves', { envId: undefined, policy: 'oak' })).toBe(
+      '/api/runs/p93/curves?policy=oak',
+    );
+    expect(apiUrl(`/runs/${encodeURIComponent('a/b')}/curves`)).toBe('/api/runs/a%2Fb/curves');
+  });
+
   test('live url escapes the run id', () => {
     expect(liveUrl('p93-tierL-20260721')).toBe('/api/runs/p93-tierL-20260721/live');
     expect(liveUrl('a/b')).toBe('/api/runs/a%2Fb/live');
@@ -301,21 +316,21 @@ describe('gallery filtering and ordering', () => {
   });
 
   test('search is an AND over whitespace-separated terms', () => {
-    const keeper = entry({ id: 'p93-tierL-20260721', role: 'keeper', ablationLabel: 'model-to-keyboard' });
-    expect(matchesFilter(keeper, { ...EMPTY_FILTER, search: 'p93 keeper' })).toBe(true);
-    expect(matchesFilter(keeper, { ...EMPTY_FILTER, search: 'p93 planning' })).toBe(false);
-    expect(matchesFilter(keeper, { ...EMPTY_FILTER, search: '  TIERL ' })).toBe(true);
+    const best = entry({ id: 'p93-tierL-20260721', role: 'bestKernel', ablationLabel: 'model-to-keyboard' });
+    expect(matchesFilter(best, { ...EMPTY_FILTER, search: 'p93 bestkernel' })).toBe(true);
+    expect(matchesFilter(best, { ...EMPTY_FILTER, search: 'p93 planning' })).toBe(false);
+    expect(matchesFilter(best, { ...EMPTY_FILTER, search: '  TIERL ' })).toBe(true);
   });
 
-  test('running first, then keeper/candidate/parent, then newest', () => {
+  test('running first, then bestKernel/candidate/parent, then newest', () => {
     const rows = [
       entry({ id: 'old', startedAt: '2026-01-01T00:00:00Z' }),
-      entry({ id: 'keeper', role: 'keeper', startedAt: '2026-02-01T00:00:00Z' }),
+      entry({ id: 'best', role: 'bestKernel', startedAt: '2026-02-01T00:00:00Z' }),
       entry({ id: 'new', startedAt: '2026-08-01T00:00:00Z' }),
       entry({ id: 'live', inFlight: true, startedAt: '2025-01-01T00:00:00Z' }),
       entry({ id: 'parent', role: 'parent', startedAt: '2026-02-01T00:00:00Z' }),
     ];
-    expect(sortRuns(rows).map((r) => r.id)).toEqual(['live', 'keeper', 'parent', 'new', 'old']);
+    expect(sortRuns(rows).map((r) => r.id)).toEqual(['live', 'best', 'parent', 'new', 'old']);
   });
 
   test('env filter options follow the canonical env order', () => {
@@ -402,8 +417,8 @@ describe('policyView (the run dashboard)', () => {
     },
     summary: {
       results: [
-        { policy: 'oak', iqmDeliveredAll: 0.387, positiveFraction: 0.995, complete: true },
-        { policy: 'zero', iqmDeliveredAll: -0.264, positiveFraction: 0.01, complete: false, maxStep: 300_000 },
+        { policy: 'oak', rewardRateIQM: 0.387, positiveFraction: 0.995, complete: true },
+        { policy: 'zero', rewardRateIQM: -0.264, positiveFraction: 0.01, complete: false, maxStep: 300_000 },
       ],
     },
     aggregate: [
@@ -415,8 +430,8 @@ describe('policyView (the run dashboard)', () => {
   test('every policy-dependent number comes from ITS OWN policy', () => {
     const oak = policyView(detail(), 'oak');
     const zero = policyView(detail(), 'zero');
-    expect(oak.result?.iqmDeliveredAll).toBe(0.387);
-    expect(zero.result?.iqmDeliveredAll).toBe(-0.264);
+    expect(oak.result?.rewardRateIQM).toBe(0.387);
+    expect(zero.result?.rewardRateIQM).toBe(-0.264);
     expect(oak.complete).toBe(true);
     expect(zero.complete).toBe(false);
     expect(zero.maxStep).toBe(300_000);
@@ -516,6 +531,51 @@ describe('fleet columnar reshaping', () => {
   });
 });
 
+// The rho-bar fix: the Seeds tab plots MEASURED reward per step, derived here from
+// the cumulative rewardSum column, instead of health.rewardRate (the agent's own
+// internal average-reward estimate rho-bar).
+describe('windowRates — measured reward rate per heartbeat window', () => {
+  test('differences the cumulative sum over each window', () => {
+    expect(windowRates([100, 200, 400], [10, 30, 30])).toEqual([0.1, 0.2, 0]);
+  });
+
+  test('measures the first window from the origin, so it equals the cumulative rate', () => {
+    expect(windowRates([250], [50])).toEqual([0.2]);
+  });
+
+  test('a negative window is reported, never clipped — reward can go backwards', () => {
+    expect(windowRates([100, 200], [10, 4])).toEqual([0.1, -0.06]);
+  });
+
+  test('nulls propagate both ways rather than reading as zero', () => {
+    expect(windowRates([100, 200, 300], [10, null, 40])).toEqual([0.1, null, null]);
+    expect(windowRates([100, 200], [null, 20])).toEqual([null, null]);
+  });
+
+  test('a zero-width or non-finite window is unknown, not infinite', () => {
+    expect(windowRates([100, 100], [10, 20])).toEqual([0.1, null]);
+    expect(windowRates([100, 200], [10, Number.NaN])).toEqual([0.1, null]);
+  });
+
+  test('toWindowRates keeps seed identity and re-derives `last` from the window series', () => {
+    const rows = toWindowRates(
+      [100, 200],
+      [{ lane: 3, seed: 3, envId: 'e', policy: 'oak', values: [10, 30], last: 30 }],
+    );
+    expect(rows[0]?.seed).toBe(3);
+    expect(rows[0]?.values).toEqual([0.1, 0.2]);
+    expect(rows[0]?.last).toBe(0.2); // the last WINDOW, not the cumulative total
+  });
+
+  test('a trailing null falls back to the last finite window', () => {
+    const rows = toWindowRates(
+      [100, 200, 300],
+      [{ lane: 0, seed: 0, envId: 'e', policy: 'oak', values: [10, 30, null], last: 30 }],
+    );
+    expect(rows[0]?.last).toBe(0.2);
+  });
+});
+
 describe('capLanes', () => {
   const make = (n: number) =>
     Array.from({ length: n }, (_, i) => ({
@@ -570,8 +630,8 @@ describe('parseQuartiles', () => {
 
 describe('primaryResult', () => {
   test('prefers the requested policy, falls back to the first', () => {
-    const summary = { results: [{ policy: 'oak', iqmDeliveredAll: 1 }, { policy: 'random', iqmDeliveredAll: 0 }] };
-    expect(primaryResult(summary, 'random')?.iqmDeliveredAll).toBe(0);
+    const summary = { results: [{ policy: 'oak', rewardRateIQM: 1 }, { policy: 'random', rewardRateIQM: 0 }] };
+    expect(primaryResult(summary, 'random')?.rewardRateIQM).toBe(0);
     expect(primaryResult(summary, 'missing')?.policy).toBe('oak');
     expect(primaryResult(null)).toBeNull();
     expect(primaryResult({ results: [] })).toBeNull();

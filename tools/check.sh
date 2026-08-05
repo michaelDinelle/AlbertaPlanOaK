@@ -15,6 +15,12 @@ import json, sys
 p = '.oak-benchmarks/ROLES.json'
 r = json.load(open(p))
 r['candidate'] = sys.argv[1]
+# ROLES.json v2: `keeper` became `bestKernel`. Read both (a v1 file on disk is
+# still legal for one migration cycle), always WRITE v2.
+if 'keeper' in r:
+    r.setdefault('bestKernel', r.pop('keeper'))
+    r.pop('keeper', None)
+r['rolesSchemaVersion'] = 2
 json.dump(r, open(p, 'w'), indent=1)
 PY
 fi

@@ -10,7 +10,7 @@
 # gate). Poll the log + .done — do NOT wrap this script in run_in_background (that reintroduces the
 # bug). caffeinate -dimsu is kept as cheap insurance (it is NOT the fix; sleep was never the cause).
 #
-# Usage:  tools/run_fleet.sh <steps> <out-name> [keeper-root]
+# Usage:  tools/run_fleet.sh <steps> <out-name> [best-kernel-root]
 # Check:  tail -f .oak-benchmarks/<out-name>.log   ;   ls .oak-benchmarks/<out-name>/.done
 # Env:    OAK_BENCH_ENVS, OAK_BENCH_POLICIES, OAK_BENCH_SEED_COUNT
 set -uo pipefail
@@ -38,7 +38,7 @@ if [ "${1:-}" = "--job" ]; then
     # is the SAME config as `none` — normalize before comparing.
     [ "$KABL" = "model-to-keyboard" ] && KABL="none"
     if [ "$KABL" != "$ABLATE" ] && [ "${OAK_ABLATE_FORCE:-0}" != "1" ]; then
-      echo "[run_fleet] CONFIG ERROR: candidate OAK_ABLATE='$ABLATE' != keeper ablation '$KABL'."
+      echo "[run_fleet] CONFIG ERROR: candidate OAK_ABLATE='$ABLATE' != best-kernel ablation '$KABL'."
       echo "[run_fleet] The gate would compare different configs. Set OAK_ABLATE='$KABL' or OAK_ABLATE_FORCE=1."
       exit 2
     fi
@@ -56,7 +56,7 @@ if [ "${1:-}" = "--job" ]; then
   echo "[run_fleet] ===== population report (flags silent death + whole-population view) ====="
   .venv/bin/python tools/fleet.py report "$ROOT" --policy oak || true
   if [ -n "$KEEPER" ]; then
-    echo "[run_fleet] ===== gate vs $KEEPER (REFUSES if either run is incomplete) ====="
+    echo "[run_fleet] ===== gate vs best kernel $KEEPER (REFUSES if either run is incomplete) ====="
     .venv/bin/python tools/fleet.py gate "$KEEPER" "$ROOT" --policy oak || true
   fi
   touch "$ROOT/.done"
@@ -65,8 +65,8 @@ if [ "${1:-}" = "--job" ]; then
 fi
 
 # ---- launcher: detach a copy of self into its own session and return immediately ----
-STEPS="${1:?usage: run_fleet.sh <steps> <out-name> [keeper-root]}"
-NAME="${2:?usage: run_fleet.sh <steps> <out-name> [keeper-root]}"
+STEPS="${1:?usage: run_fleet.sh <steps> <out-name> [best-kernel-root]}"
+NAME="${2:?usage: run_fleet.sh <steps> <out-name> [best-kernel-root]}"
 KEEPER="${3:-}"
 ROOT="$REPO/.oak-benchmarks/$NAME"
 LOG="$REPO/.oak-benchmarks/$NAME.log"

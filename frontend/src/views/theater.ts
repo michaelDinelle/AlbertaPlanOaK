@@ -3,7 +3,7 @@
 // Two modes behind one route, chosen by the URL and nothing else:
 //
 //   #/theater                        the picker — run, then env, then seed
-//   #/theater/:id/:envId/:seed       playback — one lane, full bleed
+//   #/theater/:id/:envId/:seed       playback — one seed, full bleed
 //
 // The URL is the source of truth. Picking a seed navigates; the router remounts;
 // `destroy()` disposes the scene, the composer, the renderer, the rAF loop and
@@ -272,12 +272,12 @@ function mountPicker(host: HTMLElement): ViewHandle {
   body.append(
     el('div', { class: 'view-head' }, [
       eyebrow('Theater'),
-      el('h1', { class: 'view-title', text: 'Replay a lane' }),
+      el('h1', { class: 'view-title', text: 'Replay a seed' }),
       el('p', {
         class: 'theater-lede',
         text:
-          'Every recorded lane is one continuous stream of real experience — one observation, one action, one reward per step. ' +
-          'Pick a run, an environment, and a seed; the scene plays that lane exactly as the fleet lived it.',
+          'Every recorded seed is one continuous stream of real experience — one observation, one action, one reward per step. ' +
+          'Pick a run, an environment, and a seed; the scene plays that stream exactly as the fleet lived it.',
       }),
     ]),
   );
@@ -490,7 +490,7 @@ function mountPlayback(host: HTMLElement, target: TheaterTarget): ViewHandle {
     el('b', { text: info.name }),
     el('span', { text: `${target.runId} · seed ${target.seed}` }),
   ]);
-  const coverTitle = el('div', { class: 'cover-title', text: 'Loading lane' });
+  const coverTitle = el('div', { class: 'cover-title', text: 'Loading seed' });
   const coverFill = el('div', { class: 'cover-fill' });
   const coverBar = el('div', { class: 'cover-bar' }, [coverFill]);
   const coverLabel = el('div', { class: 'cover-label', text: 'reading recording meta' });
@@ -566,7 +566,7 @@ function mountPlayback(host: HTMLElement, target: TheaterTarget): ViewHandle {
       stripLogline,
     ]),
     stripHealth,
-    el('div', { class: 'strip-block' }, [eyebrow('Lane'), stripFacts]),
+    el('div', { class: 'strip-block' }, [eyebrow('Seed'), stripFacts]),
     el('div', { class: 'strip-block' }, [eyebrow('Events'), tickerList]),
     el('div', { class: 'strip-block' }, [eyebrow('Frame'), stripStats]),
     el('div', { class: 'strip-block' }, [
@@ -606,7 +606,7 @@ function mountPlayback(host: HTMLElement, target: TheaterTarget): ViewHandle {
 
   function fail(message: string): void {
     cover.hidden = false;
-    coverTitle.textContent = 'Could not play this lane';
+    coverTitle.textContent = 'Could not play this seed';
     coverBar.hidden = true;
     coverLabel.hidden = true;
     cover.append(

@@ -156,13 +156,13 @@ describe('pickerRuns', () => {
 
   test('the 16-env demo run is pinned first, whatever the ranking says', () => {
     const runs = pickerRuns([
-      runEntry({ id: 'keeper', role: 'keeper', startedAt: '2026-08-03T00:00:00Z' }),
+      runEntry({ id: 'best', role: 'bestKernel', startedAt: '2026-08-03T00:00:00Z' }),
       runEntry({ id: DEFAULT_THEATER_RUN, startedAt: '2026-07-01T00:00:00Z' }),
       runEntry({ id: 'other', startedAt: '2026-08-02T00:00:00Z' }),
     ]);
     expect(runs[0]?.id).toBe(DEFAULT_THEATER_RUN);
     // the rest keep the gallery's own ordering (roles first, then newest)
-    expect(runs.slice(1).map((r) => r.id)).toEqual(['keeper', 'other']);
+    expect(runs.slice(1).map((r) => r.id)).toEqual(['best', 'other']);
   });
 
   test('a missing featured run is simply absent — never invented', () => {

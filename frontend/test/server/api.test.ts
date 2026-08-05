@@ -24,7 +24,7 @@ import {
   type FleetQuery,
 } from '../../server/fleetDerive';
 import { createLiveResponse } from '../../server/live';
-import { scanRecordings } from '../../server/recordings';
+import { clearV4StepsCache, scanRecordings } from '../../server/recordings';
 import { RunIndex, runCompleteness } from '../../server/runIndex';
 import { statOrNull } from '../../server/jsonl';
 
@@ -126,6 +126,108 @@ async function writeLane(
   await Bun.write(join(dir, 'actions.bin'), recordBytes(steps, seed));
 }
 
+// ---------- record v4 fixtures ----------
+//
+// The server NEVER inflates a v4 payload and never checks a crc — it walks chunk
+// HEADERS to count steps and serves bytes. (Inflating every lane on every rescan
+// would mean reading the whole store; validity is the client decoder's job, per
+// src/sim/RECORD_V4_SPEC.md.) So these files carry REAL framing and opaque filler
+// payloads, which is exactly the surface the server reads.
+
+const V4_FILE_HEADER = 16;
+const V4_CHUNK_HEADER = 32;
+const V4_FILE_MAGIC = 0x344b414f;
+const V4_CHUNK_MAGIC = 0x344b4843;
+
+/** compressed-payload size this fixture pretends each chunk has */
+const v4PayloadBytes = (steps: number): number => 8 + steps * 3;
+
+interface V4Options {
+  /** append a half-written trailing chunk header claiming a payload the file lacks */
+  tornTail?: boolean;
+}
+
+function recordBytesV4(
+  envKind: number,
+  chunkSteps: readonly number[],
+  opts: V4Options = {},
+): { bytes: Uint8Array; chunks: [number, number, number, number][]; steps: number } {
+  let size = V4_FILE_HEADER;
+  for (const steps of chunkSteps) size += V4_CHUNK_HEADER + v4PayloadBytes(steps);
+  if (opts.tornTail === true) size += V4_CHUNK_HEADER - 5;
+
+  const bytes = new Uint8Array(size);
+  const dv = new DataView(bytes.buffer);
+  dv.setUint32(0, V4_FILE_MAGIC, true);
+  dv.setUint32(4, 4, true);
+  dv.setUint32(8, envKind, true);
+  dv.setUint32(12, 1, true);
+
+  const chunks: [number, number, number, number][] = [];
+  let off = V4_FILE_HEADER;
+  let step = 0;
+  for (const steps of chunkSteps) {
+    const comp = v4PayloadBytes(steps);
+    dv.setUint32(off, V4_CHUNK_MAGIC, true);
+    dv.setUint32(off + 4, step, true);
+    dv.setUint32(off + 8, steps, true);
+    dv.setUint32(off + 12, steps * 16, true);
+    dv.setUint32(off + 16, comp, true);
+    dv.setUint32(off + 20, 0, true);
+    dv.setUint32(off + 24, 0, true);
+    dv.setFloat32(off + 28, Number.NaN, true);
+    for (let i = 0; i < comp; i++) bytes[off + V4_CHUNK_HEADER + i] = (step + i) & 0xff;
+    chunks.push([step, steps, off, V4_CHUNK_HEADER + comp]);
+    off += V4_CHUNK_HEADER + comp;
+    step += steps;
+  }
+  if (opts.tornTail === true) {
+    dv.setUint32(off, V4_CHUNK_MAGIC, true);
+    dv.setUint32(off + 4, step, true);
+    dv.setUint32(off + 8, 99, true);
+    dv.setUint32(off + 16, 4096, true); // a payload the file does not hold
+  }
+  return { bytes, chunks, steps: step };
+}
+
+/** the codec descriptors the two v4 fixture lanes carry, verbatim from the spec table */
+const V4_CODECS: Record<string, unknown> = {
+  'Chain-cont-v0': { category: 'grid', ctrl: 'index', poseFields: [{ idx: 0, enc: 'u8' }], poseConst: { 1: 15 } },
+  'Pendulum-cont-v0': {
+    category: 'classic',
+    ctrl: { kind: 'u8box', n: 1 },
+    poseFields: [
+      { idx: 0, enc: 'i16', scale: 1e-4, wrap: true },
+      { idx: 1, enc: 'i16', scale: 1e-3 },
+      { idx: 2, enc: 'i16', scale: 1e-3 },
+    ],
+  },
+};
+
+async function writeLaneV4(
+  runDir: string,
+  envId: string,
+  seed: number,
+  envKind: number,
+  actDim: number,
+  chunkSteps: readonly number[],
+  opts: V4Options & { finalized?: boolean } = {},
+): Promise<number> {
+  const dir = join(runDir, envId, `seed${seed}`);
+  await mkdir(dir, { recursive: true });
+  const built = recordBytesV4(envKind, chunkSteps, opts);
+  const meta: Record<string, unknown> = {
+    envId, seed, actDim, recordVersion: 4, codecVersion: 1, codec: V4_CODECS[envId],
+  };
+  if (opts.finalized !== false) {
+    meta['steps'] = built.steps;
+    meta['chunks'] = built.chunks;
+  }
+  await writeFile(join(dir, 'meta.json'), JSON.stringify(meta, null, 1));
+  await Bun.write(join(dir, 'actions.bin'), built.bytes);
+  return built.steps;
+}
+
 async function buildFixtures(): Promise<void> {
   await rm(BENCH, { recursive: true, force: true });
   await mkdir(BENCH, { recursive: true });
@@ -184,6 +286,11 @@ async function buildFixtures(): Promise<void> {
   await writeLane(alpha, 'HalfCheetah-v4', 0, 3, 4, 6);
   await writeLane(alpha, 'FourRooms-cont-v0', 1, 3, 3, 1);
   await writeLane(alpha, 'DeepSea-cont-v0', 2, 2, 5, 1); // recordVersion 2 -> never served
+  // v4, finalized: meta.json carries `steps` + the chunk table
+  await writeLaneV4(alpha, 'Chain-cont-v0', 5, 8, 1, [4, 3]);
+  // v4, still being written: no `steps`, no chunk table, and a torn trailing header
+  // -> the step count has to come from a walk of the chunk headers
+  await writeLaneV4(alpha, 'Pendulum-cont-v0', 6, 7, 1, [5, 6], { finalized: false, tornTail: true });
   await mkdir(join(alpha, 'NotAnEnv-v9', 'seed4'), { recursive: true }); // unknown env dir -> ignored
   await writeFile(join(alpha, 'NotAnEnv-v9', 'seed4', 'meta.json'), JSON.stringify({ recordVersion: 3 }));
 
@@ -447,7 +554,7 @@ describe('run index discovery', () => {
     expect(alpha.envIds).toEqual(['HalfCheetah-v4', 'FourRooms-cont-v0']);
     expect(alpha.hasSummary).toBe(true);
     expect(alpha.hasRecordings).toBe(true);
-    expect(alpha.role).toBe('keeper');
+    expect(alpha.role).toBe('bestKernel');
   });
 
   it('calls an interrupted run incomplete despite a .done marker, and in-flight while fresh', async () => {
@@ -534,16 +641,19 @@ describe('completeness against the real demo root', () => {
 // ---------- recordings ----------
 
 describe('recordings discovery', () => {
-  it('serves only recordVersion 3 and derives steps from byteLength/64', async () => {
+  it('serves recordVersion 3 and 4, in canonical env order', async () => {
     const recs = await scanRecordings(join(BENCH, 'alpha-complete'));
-    expect(recs.map((r) => `${r.envId}/${r.seed}`)).toEqual(['HalfCheetah-v4/0', 'FourRooms-cont-v0/1']);
+    expect(recs.map((r) => `${r.envId}/${r.seed}`)).toEqual([
+      'HalfCheetah-v4/0', 'FourRooms-cont-v0/1', 'Pendulum-cont-v0/6', 'Chain-cont-v0/5',
+    ]);
+    // v3: steps = byteLength / 64
     expect(recs[0]?.steps).toBe(4);
     expect(recs[0]?.bytes).toBe(4 * 64);
     expect(recs[0]?.actDim).toBe(6);
     expect(recs[1]?.steps).toBe(3);
     // recordVersion 2 and the unknown env directory are both absent
     expect(recs.some((r) => r.envId === 'DeepSea-cont-v0')).toBe(false);
-    expect(recs.length).toBe(2);
+    expect(recs.length).toBe(4);
   });
 
   it('answers empty for a run with no recordings', async () => {
@@ -555,6 +665,89 @@ describe('recordings discovery', () => {
     expect(recs.length).toBe(128);
     expect(new Set(recs.map((r) => r.envId)).size).toBe(16);
     for (const r of recs) expect(r.steps).toBe(100_000);
+  });
+});
+
+// ---------- record v4 discovery ----------
+
+describe('record v4 discovery', () => {
+  const find = async (envId: string, seed: number) => {
+    const recs = await scanRecordings(join(BENCH, 'alpha-complete'));
+    return recs.find((r) => r.envId === envId && r.seed === seed);
+  };
+
+  it('takes a finalized lane\'s step count and chunk table straight from meta.json', async () => {
+    const rec = await find('Chain-cont-v0', 5);
+    expect(rec).toBeDefined();
+    expect(rec?.recordVersion).toBe(4);
+    expect(rec?.steps).toBe(7); // 4 + 3, as declared
+    expect(rec?.codecVersion).toBe(1);
+    expect(rec?.codec).toEqual(V4_CODECS['Chain-cont-v0']);
+    expect(rec?.chunks).toEqual([
+      [0, 4, V4_FILE_HEADER, V4_CHUNK_HEADER + v4PayloadBytes(4)],
+      [4, 3, V4_FILE_HEADER + V4_CHUNK_HEADER + v4PayloadBytes(4), V4_CHUNK_HEADER + v4PayloadBytes(3)],
+    ]);
+    // bytes is still the file size, not a decoded size
+    expect(rec?.bytes).toBe(
+      V4_FILE_HEADER + 2 * V4_CHUNK_HEADER + v4PayloadBytes(4) + v4PayloadBytes(3),
+    );
+  });
+
+  it('walks the chunk headers when meta.json has no steps, and stops at the torn tail', async () => {
+    const rec = await find('Pendulum-cont-v0', 6);
+    expect(rec).toBeDefined();
+    // 5 + 6 whole chunks; the half-written trailing header contributes nothing
+    expect(rec?.steps).toBe(11);
+    expect(rec?.chunks).toBeUndefined();
+    // the codec descriptor is still carried — it is written at open, not at finalize
+    expect(rec?.codecVersion).toBe(1);
+    expect(rec?.codec).toEqual(V4_CODECS['Pendulum-cont-v0']);
+  });
+
+  it('re-walks a growing lane (the memo is keyed on mtime + size)', async () => {
+    const root = join(FIXTURE_ROOT, 'v4-growth');
+    await rm(root, { recursive: true, force: true });
+    try {
+      await mkdir(root, { recursive: true });
+      await writeLaneV4(root, 'Chain-cont-v0', 0, 8, 1, [10, 10], { finalized: false });
+      expect((await scanRecordings(root, { root }))[0]?.steps).toBe(20);
+
+      // the recorder drains two more chunks
+      await writeLaneV4(root, 'Chain-cont-v0', 0, 8, 1, [10, 10, 10, 5], { finalized: false });
+      expect((await scanRecordings(root, { root }))[0]?.steps).toBe(35);
+
+      // and a stale memo would keep answering 35 after finalize, so prove it does not
+      await writeLaneV4(root, 'Chain-cont-v0', 0, 8, 1, [10, 10, 10, 5, 1], { finalized: false });
+      expect((await scanRecordings(root, { root }))[0]?.steps).toBe(36);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+      clearV4StepsCache();
+    }
+  });
+
+  it('refuses a file whose header is not ours, and a truncated header', async () => {
+    const root = join(FIXTURE_ROOT, 'v4-bad');
+    await rm(root, { recursive: true, force: true });
+    try {
+      await mkdir(root, { recursive: true });
+      await writeLaneV4(root, 'Chain-cont-v0', 0, 8, 1, [10], { finalized: false });
+      const lane = join(root, 'Chain-cont-v0', 'seed0', 'actions.bin');
+      const good = new Uint8Array(await Bun.file(lane).arrayBuffer());
+
+      const foreign = good.slice();
+      new DataView(foreign.buffer).setUint32(0, 0xdeadbeef, true);
+      await Bun.write(lane, foreign);
+      clearV4StepsCache();
+      expect((await scanRecordings(root, { root }))[0]?.steps).toBe(0);
+
+      // shorter than the 16-byte file header -> not a servable lane at all
+      await Bun.write(lane, good.slice(0, 8));
+      clearV4StepsCache();
+      expect(await scanRecordings(root, { root })).toEqual([]);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+      clearV4StepsCache();
+    }
   });
 });
 
@@ -604,9 +797,16 @@ describe('http api (fixture bench root)', () => {
     expect(runs.some((r) => r.id === 'alpha-complete' && r.complete)).toBe(true);
   });
 
-  it('GET /api/roles reports the ROLES.json trio with nulls for absent roles', async () => {
+  it('GET /api/roles reads v1 `keeper` as v2 `bestKernel`, nulls for absent roles', async () => {
+    // The fixture ROLES.json is deliberately still the v1 shape: readers accept both
+    // spellings for one migration cycle, and this is the proof the fallback works.
     const roles = (await (await fetch(`${base}/api/roles`)).json()) as RolesResponse;
-    expect(roles).toEqual({ candidate: 'beta-incomplete', parent: null, keeper: 'alpha-complete' });
+    expect(roles).toEqual({
+      bestKernel: 'alpha-complete',
+      candidate: 'beta-incomplete',
+      parent: null,
+      featured: null,
+    });
   });
 
   it('GET /api/runs/:id returns meta + summary + aggregate + deaths + recordings', async () => {
@@ -623,6 +823,8 @@ describe('http api (fixture bench root)', () => {
     expect(detail.recordings).toEqual([
       { envId: 'HalfCheetah-v4', seed: 0, steps: 4 },
       { envId: 'FourRooms-cont-v0', seed: 1, steps: 3 },
+      { envId: 'Pendulum-cont-v0', seed: 6, steps: 11 },
+      { envId: 'Chain-cont-v0', seed: 5, steps: 7 },
     ]);
   });
 
@@ -698,6 +900,58 @@ describe('http api (fixture bench root)', () => {
     const meta = (await res.json()) as { recordVersion: number; seed: number };
     expect(meta.recordVersion).toBe(3);
     expect(meta.seed).toBe(1);
+  });
+
+  it('the lane descriptor carries the v4 codec, chunk table and step count', async () => {
+    interface Descriptor {
+      envId: string; seed: number; steps: number; actDim: number;
+      recordVersion: number; bytes: number;
+      codec?: unknown; codecVersion?: number; chunks?: [number, number, number, number][];
+    }
+    const v4 = (await (
+      await fetch(`${base}/api/runs/alpha-complete/recordings/Chain-cont-v0/5`)
+    ).json()) as Descriptor;
+    expect(v4.recordVersion).toBe(4);
+    expect(v4.steps).toBe(7);
+    expect(v4.codecVersion).toBe(1);
+    expect(v4.codec).toEqual(V4_CODECS['Chain-cont-v0']);
+    // this is what makes the theater's prefix fetch chunk-aware
+    expect(v4.chunks?.length).toBe(2);
+    expect(v4.chunks?.[0]?.[0]).toBe(0);
+    expect(v4.chunks?.[1]?.[1]).toBe(3);
+
+    // an in-flight v4 lane has a step count but no chunk table yet
+    const inFlight = (await (
+      await fetch(`${base}/api/runs/alpha-complete/recordings/Pendulum-cont-v0/6`)
+    ).json()) as Descriptor;
+    expect(inFlight.steps).toBe(11);
+    expect(inFlight.chunks).toBeUndefined();
+    expect(inFlight.codecVersion).toBe(1);
+
+    // a v3 lane's descriptor is unchanged — no v4 keys at all
+    const v3 = (await (
+      await fetch(`${base}/api/runs/alpha-complete/recordings/HalfCheetah-v4/0`)
+    ).json()) as Descriptor;
+    expect(Object.keys(v3).sort()).toEqual([
+      'actDim', 'bytes', 'envId', 'recordVersion', 'seed', 'steps',
+    ]);
+  });
+
+  it('serves a v4 actions.bin whole and by range, bytes untouched', async () => {
+    const url = `${base}/api/runs/alpha-complete/recordings/Chain-cont-v0/5/actions.bin`;
+    const whole = new Uint8Array(await (await fetch(url)).arrayBuffer());
+    const expected =
+      V4_FILE_HEADER + 2 * V4_CHUNK_HEADER + v4PayloadBytes(4) + v4PayloadBytes(3);
+    expect(whole.byteLength).toBe(expected);
+    expect(new DataView(whole.buffer).getUint32(0, true)).toBe(V4_FILE_MAGIC);
+
+    // the loader's chunk-aware prefix: chunk 0 only
+    const firstChunkEnd = V4_FILE_HEADER + V4_CHUNK_HEADER + v4PayloadBytes(4);
+    const ranged = await fetch(url, { headers: { range: `bytes=0-${firstChunkEnd - 1}` } });
+    expect(ranged.status).toBe(206);
+    const prefix = new Uint8Array(await ranged.arrayBuffer());
+    expect(prefix.byteLength).toBe(firstChunkEnd);
+    expect(prefix).toEqual(whole.subarray(0, firstChunkEnd));
   });
 
   it('never lets a request param reach the filesystem', async () => {

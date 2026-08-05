@@ -36,6 +36,8 @@ export interface SeriesSpec {
   fill?: string;
   dash?: number[];
   stepped?: boolean;
+  /** draw as columns rather than a line (per-seed totals) */
+  bars?: boolean;
   /** band edges and spaghetti lanes stay out of the legend and tooltip */
   quiet?: boolean;
   scale?: string;
@@ -49,6 +51,8 @@ export interface ChartSpec {
   bands?: readonly { hi: number; lo: number; fill: string }[];
   yFormat?: (value: number) => string;
   xFormat?: (value: number) => string;
+  /** axis ticks when they should read differently from the tooltip (rank vs seed) */
+  xAxisFormat?: (value: number) => string;
   /** shown under the y axis as a micro-caps unit label */
   yUnit?: string;
   xUnit?: string;
@@ -61,6 +65,12 @@ export interface ChartSpec {
   focus?: boolean;
   onFocus?(seriesIndex: number | null): void;
   yRange?: (min: number, max: number) => [number, number];
+  /**
+   * Pin the x domain. Only for axes whose meaningful range is a FIXED property of the
+   * quantity (a ratio that lives in [0,1]), never to hide inconvenient data — a chart
+   * that clips must say so in its own caption.
+   */
+  xRange?: (min: number, max: number) => [number, number];
 }
 
 export interface ChartHandle {
@@ -204,6 +214,9 @@ export function createChart(spec: ChartSpec): ChartHandle {
         if (s.fill) entry.fill = s.fill;
         if (s.dash) entry.dash = s.dash;
         if (s.stepped) entry.paths = uPlot.paths.stepped?.({ align: 1 });
+        // size: [factor, maxWidth] — factor 1 so a 250-column profile reads as a
+        // continuous distribution, capped so a 6-column one does not read as a blob.
+        if (s.bars) entry.paths = uPlot.paths.bars?.({ size: [1, 14], align: 0 });
         return entry;
       }),
     ];
@@ -222,7 +235,10 @@ export function createChart(spec: ChartSpec): ChartHandle {
       series,
       bands: spec.bands?.map((b) => ({ series: [b.hi, b.lo] as [number, number], fill: b.fill })),
       scales: {
-        x: { time: false },
+        x: {
+          time: false,
+          ...(spec.xRange ? { range: (_u, min, max) => spec.xRange!(min, max) } : {}),
+        },
         y: {
           range: spec.yRange
             ? (_u, min, max) => spec.yRange!(min, max)
@@ -236,7 +252,7 @@ export function createChart(spec: ChartSpec): ChartHandle {
           grid: { stroke: VIZ.grid, width: 1 },
           ticks: { show: false },
           size: 26,
-          values: (_u, splits) => splits.map((v) => xFormat(v)),
+          values: (_u, splits) => splits.map((v) => (spec.xAxisFormat ?? xFormat)(v)),
         },
         {
           stroke: VIZ.axis,
@@ -390,6 +406,126 @@ export function steppedLine(spec: SteppedSpec): ChartHandle {
     series: [{ label: spec.label ?? 'Surviving', stroke: spec.stroke ?? VIZ.series, width: 2, stepped: true }],
     data: [spec.steps as number[], spec.values as (number | null)[]] as unknown as uPlot.AlignedData,
     legend: spec.legend ?? false,
+  });
+}
+
+export interface LearningCurveSpec extends Omit<ChartSpec, 'series' | 'data' | 'bands'> {
+  steps: readonly number[];
+  iqm: readonly (number | null)[];
+  ciLo: readonly (number | null)[];
+  ciHi: readonly (number | null)[];
+  /** optional population spread drawn behind the CI, on the same scale */
+  p10?: readonly (number | null)[];
+  p90?: readonly (number | null)[];
+  label?: string;
+  stroke?: string;
+}
+
+/**
+ * The RL-paper learning curve: an IQM line inside its bootstrap 95% CI, optionally
+ * over the P10–P90 spread.
+ *
+ * The two bands are deliberately different weights. The CI says "where the population
+ * statistic is" and the spread says "how wide the population is" — drawing them at one
+ * alpha would invite reading a tight CI as a tight population, which at N=1024 it very
+ * much is not. Edge series stay in the tooltip (five honest numbers at a hovered step)
+ * but out of the legend, where two edges would read as two independent series.
+ */
+export function learningCurve(spec: LearningCurveSpec): ChartHandle {
+  const stroke = spec.stroke ?? VIZ.series;
+  const label = spec.label ?? 'IQM';
+  const ciFill = 'rgba(43, 152, 217, 0.22)';
+  const spreadFill = 'rgba(43, 152, 217, 0.08)';
+  const hasSpread = spec.p10 !== undefined && spec.p90 !== undefined;
+
+  const series: SeriesSpec[] = [];
+  const columnsData: (number | null)[][] = [];
+  const bands: { hi: number; lo: number; fill: string }[] = [];
+
+  if (hasSpread) {
+    series.push({ label: 'P90', stroke: 'rgba(43,152,217,0.22)', width: 1 });
+    series.push({ label: 'P10', stroke: 'rgba(43,152,217,0.22)', width: 1 });
+    columnsData.push(spec.p90 as (number | null)[], spec.p10 as (number | null)[]);
+    bands.push({ hi: 1, lo: 2, fill: spreadFill });
+  }
+  const ciIndex = columnsData.length + 1;
+  series.push({ label: '95% CI high', stroke: 'rgba(43,152,217,0.42)', width: 1 });
+  series.push({ label: '95% CI low', stroke: 'rgba(43,152,217,0.42)', width: 1 });
+  columnsData.push(spec.ciHi as (number | null)[], spec.ciLo as (number | null)[]);
+  bands.push({ hi: ciIndex, lo: ciIndex + 1, fill: ciFill });
+
+  series.push({ label, stroke, width: 2 });
+  columnsData.push(spec.iqm as (number | null)[]);
+
+  return createChart({
+    ...spec,
+    series,
+    bands,
+    legendItems: [
+      { label, color: stroke, shape: 'line' },
+      { label: '95% CI', color: ciFill, shape: 'area' },
+      ...(hasSpread ? [{ label: 'P10–P90', color: spreadFill, shape: 'area' as const }] : []),
+    ],
+    data: [spec.steps as number[], ...columnsData] as unknown as uPlot.AlignedData,
+    legend: spec.legend ?? true,
+  });
+}
+
+export interface ColumnsSpec extends Omit<ChartSpec, 'series' | 'data'> {
+  /** already in the order they should be drawn (rank order, usually) */
+  values: readonly number[];
+  /** per-column name for the tooltip header, e.g. "seed 312" */
+  labels?: readonly string[];
+  posLabel?: string;
+  negLabel?: string;
+}
+
+/**
+ * A sorted column profile — per-seed totals, one bar per seed.
+ *
+ * Split into two series by SIGN rather than tinted per bar: "which seeds paid and which
+ * cost" is the whole question a per-seed total answers, and a diverging pair states it
+ * without a legend lookup. The x axis is rank, so its tick labels are suppressed and
+ * the tooltip names the seed instead.
+ */
+export function columns(spec: ColumnsSpec): ChartHandle {
+  const labels = spec.labels;
+  const positive = spec.values.map((v) => (v >= 0 ? v : null));
+  const negative = spec.values.map((v) => (v < 0 ? v : null));
+  const hasPositive = positive.some((v) => v !== null);
+  const hasNegative = negative.some((v) => v !== null);
+  return createChart({
+    ...spec,
+    series: [
+      { label: spec.posLabel ?? 'above zero', stroke: VIZ.series, fill: VIZ.series, bars: true, width: 1 },
+      { label: spec.negLabel ?? 'below zero', stroke: VIZ.crit, fill: VIZ.crit, bars: true, width: 1 },
+    ],
+    legendItems: [
+      ...(hasPositive ? [{ label: spec.posLabel ?? 'above zero', color: VIZ.series, shape: 'area' as const }] : []),
+      ...(hasNegative ? [{ label: spec.negLabel ?? 'below zero', color: VIZ.crit, shape: 'area' as const }] : []),
+    ],
+    data: [
+      spec.values.map((_, i) => i),
+      positive,
+      negative,
+    ] as unknown as uPlot.AlignedData,
+    // rank is an ordering, not a quantity: the axis counts seeds, the tooltip names one.
+    // Only INTEGER splits get a label. uPlot picks tick positions on a continuous scale,
+    // so a short profile (8 seeds) lands ticks at 0, ⅓, ⅔, 1 … and rounding each one to
+    // a rank printed "#1 #1 #2 #2 #2 #3 …" — a real axis with a stutter. Blanking the
+    // fractional splits leaves each rank labelled exactly once.
+    xFormat: spec.xFormat ?? ((v: number) => labels?.[Math.round(v)] ?? `#${Math.round(v) + 1}`),
+    xAxisFormat:
+      spec.xAxisFormat
+      ?? ((v: number) => (Number.isInteger(v) && v >= 0 && v < spec.values.length ? `#${v + 1}` : '')),
+    yRange: spec.yRange ?? ((min, max) => {
+      const lo = Math.min(0, min);
+      const hi = Math.max(0, max);
+      const pad = (hi - lo) * 0.06 || 1;
+      return [lo - (lo < 0 ? pad : 0), hi + (hi > 0 ? pad : 0)];
+    }),
+    zeroLine: spec.zeroLine ?? true,
+    legend: spec.legend ?? true,
   });
 }
 

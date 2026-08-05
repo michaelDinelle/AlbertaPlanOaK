@@ -157,11 +157,14 @@ export function spinner(label = 'Loading'): HTMLElement {
 
 // ---------- app header ----------
 
-export type NavKey = 'gallery' | 'watch' | 'theater';
+export type NavKey = 'wall' | 'gallery' | 'watch' | 'theater';
 
 /**
- * The one persistent chrome element: identity on the left, three routes on the
+ * The one persistent chrome element: identity on the left, four routes on the
  * right. Each view mounts its own copy so views stay independently destroyable.
+ *
+ * `Wall` is `#/` — the home page — and the gallery lives at `#/runs` under the
+ * name it actually has for a reader: Runs.
  */
 export function appHeader(active: NavKey, trailing?: Node | null): HTMLElement {
   const link = (key: NavKey, label: string, href: string): HTMLElement => {
@@ -179,7 +182,8 @@ export function appHeader(active: NavKey, trailing?: Node | null): HTMLElement {
       el('span', { class: 'brand-sub', text: 'Preserve' }),
     ]),
     el('nav', { class: 'nav', ariaLabel: 'Primary' }, [
-      link('gallery', 'Gallery', '#/'),
+      link('wall', 'Wall', '#/'),
+      link('gallery', 'Runs', '#/runs'),
       link('watch', 'Watch', '#/watch'),
       link('theater', 'Theater', '#/theater'),
     ]),

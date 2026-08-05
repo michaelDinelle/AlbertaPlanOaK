@@ -3,7 +3,7 @@
 // House rule this view enforces in its layout: metrics are NEVER pooled across
 // environments. The overview shows the fleet-wide aggregate (which the fleet
 // itself computes) and the per-env tab gives every env its own section on its
-// own scale. The only cross-env chart is positivity, because "fraction of lanes
+// own scale. The only cross-env chart is positivity, because "fraction of seeds
 // above zero" is the one quantity that means the same thing in CartPole and in
 // HalfCheetah.
 
@@ -28,10 +28,10 @@ import {
   kmCurve,
   laneSeries,
   loadRunDetail,
-  pickField,
   policiesIn,
   policyView,
   rankLanes,
+  toWindowRates,
   type LaneSeries,
   type PolicyView,
 } from '../state';
@@ -49,9 +49,31 @@ import {
   viewShell,
   type TableHandle,
 } from '../components/table';
-import { VIZ, band, spaghetti, steppedLine, timeSeries, type ChartHandle } from '../components/chart';
+import {
+  VIZ,
+  band,
+  columns,
+  learningCurve,
+  spaghetti,
+  steppedLine,
+  timeSeries,
+  type ChartHandle,
+} from '../components/chart';
 import { bars, parseQuartiles, rangeBars, type RangeRow } from '../components/bars';
-import { accentCss, envSpectrum, theaterHref } from './gallery';
+import { GALLERY_PATH, accentCss, envSpectrum, theaterHref } from './gallery';
+
+/**
+ * The Wall link for this run — `#/?run=<id>&env=<envId>`.
+ *
+ * Built here rather than imported from `views/wall` on purpose: the wall module
+ * pulls the scene host (and Three) into whatever chunk imports it, and this is a
+ * two-parameter string. `wallHref` in `views/wall.ts` is the canonical builder
+ * and `parseWallParams` is what reads it back; keep the two in step.
+ */
+function wallLink(runId: string, envId?: string): string {
+  const run = `run=${encodeURIComponent(runId)}`;
+  return envId === undefined ? `#/?${run}` : `#/?${run}&env=${encodeURIComponent(envId)}`;
+}
 
 interface Disposable {
   destroy(): void;
@@ -66,6 +88,32 @@ function num(value: unknown): number | null {
 function tone(value: number | null): 'pos' | 'neg' | 'dim' {
   if (value === null) return 'dim';
   return value > 0 ? 'pos' : value < 0 ? 'neg' : 'dim';
+}
+
+/** the seed cap for the per-seed total-reward profile (one bar per column) */
+const COLUMN_CAP = 256;
+
+/**
+ * Reverse ECDF of a per-seed ratio: for every observed value x, the fraction of seeds
+ * at or above it. Stepped, it reads as "how much of the population kept how much of
+ * its peak" — and its height at x = ½ is exactly the retention-rate tile, which makes
+ * the two cross-check each other instead of being two unrelated numbers.
+ *
+ * Ties collapse onto one step (a value shared by 40 seeds is one drop, not 40).
+ */
+function retentionCurve(values: readonly number[]): { steps: number[]; fraction: number[] } {
+  const sorted = values.filter((v) => Number.isFinite(v)).sort((a, b) => a - b);
+  const n = sorted.length;
+  const steps: number[] = [];
+  const fraction: number[] = [];
+  for (let i = 0; i < n; i++) {
+    const value = sorted[i];
+    if (value === undefined) continue;
+    if (i > 0 && value === sorted[i - 1]) continue;
+    steps.push(value);
+    fraction.push((n - i) / n);
+  }
+  return { steps, fraction };
 }
 
 export const mount: ViewMount = (host, params) => {
@@ -86,7 +134,7 @@ export const mount: ViewMount = (host, params) => {
   // worth presenting, not a stack trace in a box.
   const head = el('div', { class: 'view-head' }, [
     el('div', { class: 'run-title-row' }, [
-      breadcrumb([{ label: 'Gallery', href: '#/' }], { trailing: true }),
+      breadcrumb([{ label: 'Runs', href: GALLERY_PATH }], { trailing: true }),
       el('h1', { class: 'run-title', text: id || 'run' }),
     ]),
   ]);
@@ -103,7 +151,7 @@ export const mount: ViewMount = (host, params) => {
           'Nothing under .oak-benchmarks answers to this id. It may have been renamed, moved or deleted; '
             + 'the gallery lists every root the server can see.',
           undefined,
-          { title: `No run named “${id}”`, actions: [linkButton('Back to the gallery', '#/')] },
+          { title: `No run named “${id}”`, actions: [linkButton('Back to all runs', GALLERY_PATH)] },
         ),
       );
       return;
@@ -127,7 +175,7 @@ export const mount: ViewMount = (host, params) => {
           : undefined,
         {
           title: 'Could not load this run',
-          actions: [linkButton('Back to the gallery', '#/')],
+          actions: [linkButton('Back to all runs', GALLERY_PATH)],
         },
       ),
     );
@@ -153,6 +201,21 @@ export const mount: ViewMount = (host, params) => {
     const horizon = meta.steps;
 
     /**
+     * `summary` is null for two OPPOSITE reasons and the advice differs. Missing =
+     * fleet.py report was never run here, so run it. Unreadable = the file is on
+     * disk and was REJECTED as invalid JSON — telling the user to re-run the tool
+     * that just wrote it is a doom loop, and claiming the file is absent (or that
+     * it "predates" a field it actually contains) is simply false. Every empty
+     * state below asks this first.
+     */
+    const summaryUnreadable = detail.summaryError === 'unreadable';
+    const SUMMARY_REJECTED =
+      'summary.json is present on this root but could not be parsed, so it was rejected as '
+      + 'invalid JSON — no figure below can be read from it. Usual causes: a torn or '
+      + 'half-flushed write, or a non-finite number serialized as bare NaN (JSON has no NaN). '
+      + 'Re-running tools/fleet.py report helps only once the writer emits valid JSON.';
+
+    /**
      * EVERY policy-dependent number resolves through this (see state.policyView).
      * A policy switch must RE-DERIVE the figures — redrawing the charts while the
      * hero IQM, positivity, survival and completeness still describe the previous
@@ -167,19 +230,31 @@ export const mount: ViewMount = (host, params) => {
     const policySlot = el('span', { class: 'slot' });
     const bannerSlot = el('div', { class: 'slot' });
 
-    // The one outbound link the dashboard owes the theater. It names the lane it
+    // The one outbound link the dashboard owes the theater. It names the seed it
     // will open rather than the route, because "theater" alone hides the fact
-    // that a 1408-lane run replays exactly the handful that were recorded.
+    // that a 1408-seed run replays exactly the handful that were recorded.
     const firstRecording = detail.recordings[0];
     const theaterAction = firstRecording
       ? linkButton(
           `Theater · ${envName(firstRecording.envId)} seed ${firstRecording.seed}`,
           theaterHref(detail.id, firstRecording),
           {
-            title: `${formatCount(detail.recordings.length)} recorded lane${detail.recordings.length === 1 ? '' : 's'}`
+            title: `${formatCount(detail.recordings.length)} recorded seed${detail.recordings.length === 1 ? '' : 's'}`
               + ' — the Recordings tab lists them all',
           },
         )
+      : null;
+
+    // …and the Wall, which is the same recordings seen the other way round: every
+    // recorded seed of ONE environment at once instead of one seed in full. It is
+    // offered only when there is something to replay — a wall with no ghosts and
+    // no hero is a page telling you what you cannot have.
+    // NOT `quiet`: this sits inside `.run-head`, whose surface IS --bg-raised, and a
+    // quiet button there is invisible (the caveat on `linkButton`).
+    const wallAction = firstRecording
+      ? linkButton(`Wall · ${envName(firstRecording.envId)}`, wallLink(detail.id, firstRecording.envId), {
+          title: `Play every recorded ${envName(firstRecording.envId)} seed of this run side by side`,
+        })
       : null;
 
     body.append(
@@ -187,17 +262,17 @@ export const mount: ViewMount = (host, params) => {
         envSpectrum(shares),
         el('div', { class: 'run-head-body' }, [
           el('div', { class: 'run-title-row' }, [
-            breadcrumb([{ label: 'Gallery', href: '#/' }], { trailing: true }),
+            breadcrumb([{ label: 'Runs', href: GALLERY_PATH }], { trailing: true }),
             el('h1', { class: 'run-title', text: detail.id }),
             completeSlot,
-            theaterAction ? el('div', { class: 'run-head-actions' }, [theaterAction]) : null,
+            theaterAction ? el('div', { class: 'run-head-actions' }, [wallAction, theaterAction]) : null,
           ]),
           el('div', {
             class: 'run-envs',
             text: shares.map((s) => `${envName(s.envId)} ×${Math.round(s.lanes)}`).join('   ·   '),
           }),
           el('div', { class: 'run-chips' }, [
-            badge(`B ${meta.batch}`, 'quiet', 'lanes in the fleet'),
+            badge(`B ${meta.batch}`, 'quiet', 'seeds in the fleet'),
             badge(`${formatStep(horizon)} steps`, 'quiet', 'declared horizon'),
             badge(
               `ablate ${meta.ablationLabel ?? 'none'}`,
@@ -235,9 +310,70 @@ export const mount: ViewMount = (host, params) => {
     }
     syncPolicyHeader();
 
-    // ---------------- lanes state (shared with the per-env tab) ----------------
+    // ---------------- seed-tab state (shared with the per-env tab) ----------------
     let selectedEnv: string = shares[0]?.envId ?? meta.envId;
     let requestLaneEnv: ((envId: string) => void) | null = null;
+
+    // ---------------- learning curves ----------------
+    /**
+     * A self-loading learning-curve block.
+     *
+     * The curve is derived server-side from fleet.jsonl (never summary.json), so it
+     * draws on legacy roots too, and it is asked for PER ENV: pooling a CartPole seed
+     * that caps at 1.0/step with a maze seed that caps at 0.002 would produce a
+     * confident line describing no environment at all. Every env panel of a 16-env
+     * fleet asks separately and the server answers them all from one parse.
+     *
+     * Returns immediately with a spinner; `stale` is the panel-rebuild guard, because a
+     * policy switch tears the panel down while these fetches are still in the air.
+     */
+    function learningCurveBlock(
+      scope: PanelScope,
+      options: { envId?: string; height?: number } = {},
+    ): HTMLElement {
+      const host = el('div', { class: 'view-status' }, [spinner('Deriving the learning curve')]);
+      let stale = false;
+      scope.hold({
+        destroy() {
+          stale = true;
+        },
+      });
+      api.curves(id, { policy, ...(options.envId === undefined ? {} : { envId: options.envId }) }).then(
+        (curve) => {
+          if (destroyed || stale) return;
+          if (curve.steps.length < 2) {
+            host.replaceChildren(
+              emptyState(
+                'Not enough heartbeats',
+                'A curve needs at least two heartbeats in fleet.jsonl; this selection has fewer.',
+              ),
+            );
+            return;
+          }
+          const handle = learningCurve({
+            steps: curve.steps,
+            iqm: curve.iqm,
+            ciLo: curve.ciLo,
+            ciHi: curve.ciHi,
+            p10: curve.p10,
+            p90: curve.p90,
+            label: `IQM · ${formatCount(curve.seeds)} seeds`,
+            height: options.height ?? 220,
+            zeroLine: true,
+            yUnit: 'reward / step',
+            xUnit: 'steps',
+          });
+          host.replaceChildren(scope.chart(handle));
+          host.className = '';
+          handle.refresh();
+        },
+        (error: unknown) => {
+          if (destroyed || stale) return;
+          host.replaceChildren(errorState(error instanceof Error ? error.message : String(error)));
+        },
+      );
+      return host;
+    }
 
     // ---------------- tab machinery ----------------
     /**
@@ -296,9 +432,13 @@ export const mount: ViewMount = (host, params) => {
     }
     track({ destroy: resetPanels });
 
+    /** retired tab keys still living in bookmarks and pasted links */
+    const TAB_ALIASES: Record<string, string> = { lanes: 'seeds' };
+
     function currentTab(): string {
       const query = window.location.hash.split('?')[1] ?? '';
-      const requested = new URLSearchParams(query).get('tab');
+      const raw = new URLSearchParams(query).get('tab');
+      const requested = raw === null ? null : TAB_ALIASES[raw] ?? raw;
       return requested && panels.has(requested) ? requested : tabs[0]?.key ?? 'overview';
     }
 
@@ -327,34 +467,52 @@ export const mount: ViewMount = (host, params) => {
       // derived HERE, not in render(): this closure re-runs on every policy switch
       const { result } = forPolicy(policy);
       const series = aggregateSeries(detail.aggregate, policy);
-      const iqm = num(result?.iqmDeliveredAll);
+      const iqm = num(result?.rewardRateIQM);
       const deaths = detail.deathsCount;
-      const divergence = num((result?.['divergence'] as { rate?: number } | undefined)?.rate);
-      const lanes = num(result?.lanes) ?? meta.batch;
+      const div = result?.divergence;
+      const divergence = num(div?.rate);
+      const divLo = num(div?.wilsonLo);
+      const divHi = num(div?.wilsonHi);
+      const seeds = num(result?.seeds) ?? meta.batch;
+      // The CI belongs next to the point estimate, not in a footnote: an IQM of
+      // +0.4433 [0.41, 0.47] and one of +0.4433 [-0.2, 1.1] are different claims.
+      const ci = result?.rewardRateIQMCI95;
+      const ciText = Array.isArray(ci) && ci.length === 2 && num(ci[0]) !== null && num(ci[1]) !== null
+        ? ` [${formatRate(ci[0], 3)}, ${formatRate(ci[1], 3)}]`
+        : '';
 
       panel.append(
         el('div', { class: 'hero' }, [
           el('div', { class: 'hero-figure' }, [
-            el('div', { class: 'hero-label', text: 'IQM delivered rate · all lanes' }),
-            el('div', { class: `hero-value tone-${tone(iqm)}`, text: iqm === null ? 'n/a' : formatSigned(iqm, 4) }),
+            el('div', { class: 'hero-label', text: 'Average reward rate — IQM ± 95% CI, all seeds' }),
+            el('div', {
+              class: `hero-value tone-${tone(iqm)}`,
+              text: iqm === null ? 'n/a' : `${formatSigned(iqm, 4)}${ciText}`,
+            }),
             el('div', {
               class: 'hero-hint',
               text: iqm === null
-                ? 'No summary.json on this root — run tools/fleet.py report.'
-                : `reward per step · interquartile mean over ${formatCount(lanes)} lanes`,
+                ? (summaryUnreadable
+                    ? 'summary.json is present but could not be parsed — it is not valid JSON.'
+                    : 'No summary.json on this root — run tools/fleet.py report.')
+                : `reward per step · interquartile mean over ${formatCount(seeds)} seeds`,
             }),
           ]),
           el('div', { class: 'hero-stats' }, [
-            statTile('positive lanes', formatPercent(num(result?.positiveFraction), 1), {
-              hint: `${formatCount(num(result?.['positiveLanes']))} above zero`,
+            statTile('% seeds > 0', formatPercent(num(result?.positiveFraction), 1), {
+              hint: `${formatCount(num(result?.positiveSeeds))} above zero`,
             }),
-            statTile('sustaining', formatPercent(num(result?.sustainingFraction), 1), { hint: 'holding ≥ ½ of zenith' }),
+            statTile('retention rate', formatPercent(num(result?.retentionFraction), 1), {
+              hint: 'seeds holding ≥ ½ peak reward rate',
+            }),
             statTile('divergence', divergence === null ? '—' : formatPercent(divergence, 2), {
-              hint: `${formatCount(deaths)} death ${deaths === 1 ? 'certificate' : 'certificates'}`,
+              hint: divLo !== null && divHi !== null
+                ? `numerically diverged seeds · 95% CI ${formatPercent(divLo, 2)}–${formatPercent(divHi, 2)}`
+                : `${formatCount(deaths)} numerically diverged ${deaths === 1 ? 'seed' : 'seeds'} (Wilson 95% CI shown)`,
               tone: deaths > 0 ? 'neg' : 'neutral',
             }),
-            statTile('best lane', formatRate(num(result?.bestLaneRate)), {
-              hint: `seed ${formatCount(num(result?.bestLaneSeed))}`,
+            statTile('best seed', formatRate(num(result?.bestSeedRewardRate)), {
+              hint: `seed ${formatCount(num(result?.bestSeed))}`,
             }),
             statTile('reward / GFLOP', formatRate(num(result?.rewardPerGFLOP)), { hint: 'the SOTA-target metric' }),
             statTile(
@@ -370,13 +528,13 @@ export const mount: ViewMount = (host, params) => {
         panel.append(
           el('p', {
             class: 'note',
-            text: `This fleet mixes ${shares.length} environments, so every rate below pools scales that are not comparable — a CartPole lane caps at 1.0/step and a maze lane at 0.002. Read them as the fleet's own aggregate; the Per env tab keeps each environment on its own scale.`,
+            text: `This fleet mixes ${shares.length} environments, so every rate below pools scales that are not comparable — a CartPole seed caps at 1.0/step and a maze seed at 0.002. Read them as the fleet's own aggregate; the Per env tab keeps each environment on its own scale.`,
           }),
         );
       }
 
       const bandBlock = el('section', { class: 'block' }, [
-        eyebrow('Population progress', el('span', { class: 'eyebrow-note', text: 'delivered reward rate · P10 · median · P90' })),
+        eyebrow('Population progress', el('span', { class: 'eyebrow-note', text: 'average reward rate · P10 · median · P90' })),
       ]);
       if (series.steps.length >= 2) {
         bandBlock.append(
@@ -396,31 +554,48 @@ export const mount: ViewMount = (host, params) => {
       }
       panel.append(bandBlock);
 
+      // The learning curve belongs to ONE scale. A mixed fleet gets one per env in the
+      // Per env tab instead of a pooled line that describes no environment.
+      if (!mixed) {
+        panel.append(
+          el('section', { class: 'block' }, [
+            eyebrow(
+              'Learning curve',
+              el('span', {
+                class: 'eyebrow-note',
+                text: 'measured reward rate per heartbeat window · IQM ± bootstrap 95% CI · P10–P90',
+              }),
+            ),
+            learningCurveBlock(scope, { height: 240 }),
+          ]),
+        );
+      }
+
       if (series.steps.length >= 2) {
         panel.append(
           el('div', { class: 'block-grid' }, [
             el('section', { class: 'block' }, [
-              eyebrow('Lanes above zero'),
+              eyebrow('Seeds above zero'),
               chart(timeSeries({
                 steps: series.steps,
                 lines: [{ label: 'positive fraction', values: series.positivity }],
                 height: 150,
                 yFormat: (v) => formatPercent(v, 0),
                 yRange: () => [0, 1],
-                yUnit: 'fraction of lanes',
+                yUnit: 'fraction of seeds',
               })),
             ]),
             el('section', { class: 'block' }, [
-              eyebrow('Alive vs dead lanes'),
+              eyebrow('Non-diverged seeds'),
               chart(timeSeries({
                 steps: series.steps,
                 lines: [
-                  { label: 'alive', values: series.alive, stroke: VIZ.series },
-                  { label: 'dead', values: series.dead, stroke: VIZ.crit },
+                  { label: 'non-diverged', values: series.alive, stroke: VIZ.series },
+                  { label: 'diverged', values: series.dead, stroke: VIZ.crit },
                 ],
                 height: 150,
                 yFormat: (v) => formatCount(v),
-                yUnit: 'lanes',
+                yUnit: 'seeds',
                 legend: true,
               })),
             ]),
@@ -430,7 +605,7 @@ export const mount: ViewMount = (host, params) => {
 
       const grid = el('div', { class: 'block-grid' });
 
-      const tiers = result?.tierFractions as Record<string, number> | undefined;
+      const tiers = result?.thresholdFractions as Record<string, number> | undefined;
       if (tiers) {
         const items = [
           { key: 'gt0', label: '> 0   walking' },
@@ -443,14 +618,14 @@ export const mount: ViewMount = (host, params) => {
         if (items.length > 0) {
           grid.append(
             el('section', { class: 'block' }, [
-              eyebrow('Reward tiers', el('span', { class: 'eyebrow-note', text: 'fraction of lanes' })),
+              eyebrow('Threshold fractions', el('span', { class: 'eyebrow-note', text: 'fraction of seeds' })),
               scope.hold(bars({ items, domain: [0, 1], ramp: true, format: (v) => formatPercent(v, 1), labelWidth: 130 })).root,
             ]),
           );
         }
       }
 
-      const distribution = result?.['rateDistribution'] as Record<string, number> | undefined;
+      const distribution = result?.rewardRatePercentiles as Record<string, number> | undefined;
       if (distribution) {
         const items = ['p10', 'p25', 'p50', 'p75', 'p90', 'p99']
           .filter((key) => typeof distribution[key] === 'number')
@@ -462,41 +637,41 @@ export const mount: ViewMount = (host, params) => {
         if (items.length > 0) {
           grid.append(
             el('section', { class: 'block' }, [
-              eyebrow('Rate distribution', el('span', { class: 'eyebrow-note', text: 'reward / step' })),
+              eyebrow('Reward-rate percentiles', el('span', { class: 'eyebrow-note', text: 'reward / step' })),
               scope.hold(bars({ items, labelWidth: 56, format: (v) => formatSigned(v) })).root,
             ]),
           );
         }
       }
 
-      const plasticity = result?.['plasticity'] as Record<string, unknown> | undefined;
-      if (plasticity) {
+      const peak = result?.peak as Record<string, unknown> | undefined;
+      if (peak) {
         const rows: RangeRow[] = [];
-        const zenithStep = parseQuartiles(plasticity['zenithStepQ']);
-        const zenithRate = parseQuartiles(plasticity['zenithRateQ']);
-        const decay = parseQuartiles(plasticity['decayRatioQ']);
-        if (zenithStep) {
+        const peakStep = parseQuartiles(peak['peakStepQ']);
+        const peakRate = parseQuartiles(peak['peakRewardRateQ']);
+        const retention = parseQuartiles(peak['retentionQ']);
+        if (peakStep) {
           rows.push({
-            label: 'zenith step', q1: zenithStep[0], q2: zenithStep[1], q3: zenithStep[2],
-            domain: [0, Math.max(horizon, zenithStep[2])], format: formatStep, hint: 'when each lane peaked',
+            label: 'peak step', q1: peakStep[0], q2: peakStep[1], q3: peakStep[2],
+            domain: [0, Math.max(horizon, peakStep[2])], format: formatStep, hint: 'when each seed peaked',
           });
         }
-        if (zenithRate) {
+        if (peakRate) {
           rows.push({
-            label: 'zenith rate', q1: zenithRate[0], q2: zenithRate[1], q3: zenithRate[2],
-            domain: [0, Math.max(zenithRate[2] * 1.15, 1e-9)], format: (v) => formatRate(v), hint: 'peak reward rate per lane',
+            label: 'peak reward rate', q1: peakRate[0], q2: peakRate[1], q3: peakRate[2],
+            domain: [0, Math.max(peakRate[2] * 1.15, 1e-9)], format: (v) => formatRate(v), hint: 'peak reward rate per seed',
           });
         }
-        if (decay) {
+        if (retention) {
           rows.push({
-            label: 'decay ratio', q1: decay[0], q2: decay[1], q3: decay[2],
-            domain: [0, 1], format: (v) => formatRate(v, 3), hint: 'final ÷ zenith — 1 means no post-zenith decay',
+            label: 'retention', q1: retention[0], q2: retention[1], q3: retention[2],
+            domain: [0, 1], format: (v) => formatRate(v, 3), hint: 'final ÷ peak — 1 means nothing was lost after the peak',
           });
         }
         if (rows.length > 0) {
           grid.append(
             el('section', { class: 'block' }, [
-              eyebrow('Plasticity', el('span', { class: 'eyebrow-note', text: 'quartiles · each row on its own scale' })),
+              eyebrow('Peak & retention', el('span', { class: 'eyebrow-note', text: 'quartiles · each row on its own scale' })),
               scope.hold(rangeBars({ rows })).root,
             ]),
           );
@@ -504,19 +679,84 @@ export const mount: ViewMount = (host, params) => {
       }
       if (grid.childElementCount > 0) panel.append(grid);
 
+      // Retention distribution. Retention is final ÷ peak — a RATIO, so unlike a reward
+      // rate it means the same thing in CartPole and HalfCheetah and can be shown for
+      // the whole fleet at once. The quartile strip above gives three numbers; this
+      // gives the shape, which is where a bimodal population (seeds that held their
+      // gait vs seeds that lost it) stops looking like a mediocre median.
+      const retentionBySeed = result?.retentionBySeed;
+      const retentionValues = retentionBySeed ? Object.values(retentionBySeed).filter((v) => typeof v === 'number') : [];
+      const retentionBlock = el('section', { class: 'block' }, [
+        eyebrow(
+          'Retention distribution',
+          el('span', { class: 'eyebrow-note', text: 'fraction of seeds holding at least x of their peak' }),
+        ),
+      ]);
+      if (retentionValues.length > 0) {
+        const curve = retentionCurve(retentionValues);
+        // The x domain is PINNED to [0, 1] because that is what the ratio can mean:
+        // peak is a max over the same heartbeats final is drawn from, so final ÷ peak
+        // tops out at 1, and 0 is "kept none of it". A seed whose final rate went
+        // negative lands below 0 — on p93 three of them sit near −17, and on a
+        // min/max domain those three outliers squeeze the entire informative range
+        // into the last 3% of the width, which is how a correct chart becomes an
+        // unreadable one. They are clipped from the axis and COUNTED in the caption;
+        // the curve still steps down through them, so the height at 0 is honest.
+        const belowZero = retentionValues.filter((v) => Number.isFinite(v) && v < 0).length;
+        const worst = retentionValues.filter((v) => Number.isFinite(v)).reduce((a, b) => Math.min(a, b), Infinity);
+        retentionBlock.append(
+          chart(steppedLine({
+            steps: curve.steps,
+            values: curve.fraction,
+            label: 'seeds at or above',
+            height: 170,
+            yFormat: (v) => formatPercent(v, 0),
+            xFormat: (v) => formatRate(v, 2),
+            yRange: () => [0, 1],
+            xRange: () => [0, 1],
+            yUnit: 'fraction of seeds',
+            xUnit: 'retention',
+          })),
+          el('p', {
+            class: 'note',
+            text: `Read at 0.5 it is the retention rate tile: ${formatPercent(num(result?.retentionFraction), 1)} of `
+              + `${formatCount(retentionValues.length)} seeds still hold ≥ ½ their peak reward rate.`
+              + (belowZero > 0
+                ? ` The axis stops at 0: ${formatCount(belowZero)} ${belowZero === 1 ? 'seed ended' : 'seeds ended'} `
+                  + `at a negative reward rate (lowest ${formatRate(worst, 3)}) and ${belowZero === 1 ? 'sits' : 'sit'} `
+                  + 'off the left edge, counted in the curve but not drawn.'
+                : ''),
+          }),
+        );
+      } else {
+        retentionBlock.append(
+          summaryUnreadable
+            ? emptyState('No per-seed retention on this root', SUMMARY_REJECTED)
+            : emptyState(
+                'No per-seed retention on this root',
+                'summary.json predates the per-seed vectors (summarySchemaVersion 2). '
+                  + 'Re-run tools/fleet.py report on this root to write retentionBySeed; nothing is derived from thin air here.',
+              ),
+        );
+      }
+      panel.append(retentionBlock);
+
       const survival = result?.survival;
       if (survival && Object.keys(survival).length > 0) {
         const curve = kmCurve(survival, horizon);
         panel.append(
           el('section', { class: 'block' }, [
-            eyebrow('Survival', el('span', { class: 'eyebrow-note', text: `Kaplan-Meier · RMST ${formatStep(num(result?.['rmst']))}` })),
+            eyebrow('Survival', el('span', {
+              class: 'eyebrow-note',
+              text: `Kaplan-Meier · restricted mean survival time (RMST) ${formatStep(num(result?.rmst))}`,
+            })),
             chart(steppedLine({
               steps: curve.steps,
               values: curve.fraction,
               height: 160,
               yFormat: (v) => formatPercent(v, 2),
               yRange: (min) => [Math.min(min, 0.98), 1],
-              yUnit: 'lanes surviving',
+              yUnit: 'seeds surviving',
             })),
           ]),
         );
@@ -524,7 +764,7 @@ export const mount: ViewMount = (host, params) => {
         panel.append(
           el('section', { class: 'block' }, [
             eyebrow('Survival'),
-            emptyState('No deaths', 'Every lane reached the horizon — there is no curve to draw.'),
+            emptyState('No divergence', 'Every seed reached the horizon — there is no curve to draw.'),
           ]),
         );
       }
@@ -543,39 +783,53 @@ export const mount: ViewMount = (host, params) => {
           }),
         );
 
+        // The env LIST comes from meta.json's envSchedule (via `shares`), never from
+        // summary.json. Only the stat tiles and the positivity comparison are summary-
+        // derived; the learning curve is computed from fleet.jsonl by /curves and needs
+        // no summary at all. Gating the whole tab on envSlices used to blank all 16
+        // curves on any root whose summary is missing or unreadable — which is most of
+        // them, since ~600 historical roots predate envSlices entirely.
         const withData = shares.filter((share) => sliceFor(share.envId));
-        if (withData.length === 0) {
-          panel.append(emptyState('No per-env slices', 'summary.json has no envSlices block for this root.'));
-          return;
+
+        if (withData.length > 0) {
+          panel.append(
+            el('section', { class: 'block' }, [
+              eyebrow('Positive seeds by environment', el('span', { class: 'eyebrow-note', text: 'the one comparable quantity' })),
+              scope.hold(bars({
+                items: withData.map((share) => {
+                  const slice = sliceFor(share.envId);
+                  return {
+                    label: envName(share.envId),
+                    value: num(slice?.positiveFraction) ?? 0,
+                    display: formatPercent(num(slice?.positiveFraction), 0),
+                    hint: `${formatCount(num(slice?.seeds))} seeds`,
+                    onClick: () => document.getElementById(`env-${envSlug(share.envId)}`)?.scrollIntoView({ behavior: 'smooth', block: 'start' }),
+                  };
+                }),
+                domain: [0, 1],
+                format: (v) => formatPercent(v, 0),
+              })).root,
+            ]),
+          );
+        } else {
+          panel.append(
+            el('p', {
+              class: 'note',
+              text: (summaryUnreadable
+                ? `${SUMMARY_REJECTED} The per-environment tiles below therefore read “—”. `
+                : 'No envSlices in this root’s summary.json, so the per-environment tiles below read “—”. ')
+                + 'The curves are unaffected: they are derived from fleet.jsonl, not from the summary.',
+            }),
+          );
         }
 
-        panel.append(
-          el('section', { class: 'block' }, [
-            eyebrow('Positive lanes by environment', el('span', { class: 'eyebrow-note', text: 'the one comparable quantity' })),
-            scope.hold(bars({
-              items: withData.map((share) => {
-                const slice = sliceFor(share.envId);
-                return {
-                  label: envName(share.envId),
-                  value: num(slice?.positiveFraction) ?? 0,
-                  display: formatPercent(num(slice?.positiveFraction), 0),
-                  hint: `${formatCount(num(slice?.lanes))} lanes`,
-                  onClick: () => document.getElementById(`env-${envSlug(share.envId)}`)?.scrollIntoView({ behavior: 'smooth', block: 'start' }),
-                };
-              }),
-              domain: [0, 1],
-              format: (v) => formatPercent(v, 0),
-            })).root,
-          ]),
-        );
-
-        for (const share of withData) {
+        for (const share of shares) {
           const slice = sliceFor(share.envId);
           const info = isEnvId(share.envId) ? ENVS[share.envId] : null;
-          const inspect = el('button', { class: 'btn btn-quiet', text: 'Inspect lanes' });
+          const inspect = el('button', { class: 'btn btn-quiet', text: 'Inspect seeds' });
           inspect.addEventListener('click', () => {
             selectedEnv = share.envId;
-            show('lanes');
+            show('seeds');
             requestLaneEnv?.(share.envId);
           });
           const section = el('section', { class: 'env-section' }, [
@@ -585,21 +839,29 @@ export const mount: ViewMount = (host, params) => {
               inspect,
             ]),
             el('div', { class: 'stat-row' }, [
-              statTile('IQM', formatSigned(num(slice?.iqmDeliveredAll), 4), {
-                tone: tone(num(slice?.iqmDeliveredAll)), hint: 'all lanes',
+              statTile('IQM', formatSigned(num(slice?.rewardRateIQM), 4), {
+                tone: tone(num(slice?.rewardRateIQM)), hint: 'all seeds',
               }),
-              statTile('recent IQM', formatSigned(num(slice?.['iqmRecent']), 4), { hint: 'last window' }),
+              statTile('recent IQM', formatSigned(num(slice?.recentRewardRateIQM), 4), { hint: 'last window' }),
               statTile('positive', formatPercent(num(slice?.positiveFraction), 0), {
-                hint: `${formatCount(num(slice?.lanes))} lanes`,
+                hint: `${formatCount(num(slice?.seeds))} seeds`,
               }),
-              statTile('best lane', formatRate(num(slice?.bestLaneRate)), {
-                hint: `seed ${formatCount(num(slice?.bestLaneSeed))}`,
+              statTile('best seed', formatRate(num(slice?.bestSeedRewardRate)), {
+                hint: `seed ${formatCount(num(slice?.bestSeed))}`,
               }),
-              statTile('igniters', formatCount(num(slice?.['igniters'])), {
-                hint: `${formatCount(num(slice?.['ignitersSustained']))} sustained`,
+              statTile('solved-threshold seeds', formatCount(num(slice?.solvedSeeds)), {
+                hint: `${formatCount(num(slice?.solvedSeedsRetained))} retained`,
               }),
-              statTile('reward / GFLOP', formatRate(num(slice?.['bestRewardPerGFLOP'])), { hint: 'best lane' }),
+              statTile('reward / GFLOP', formatRate(num(slice?.bestSeedRewardPerGFLOP)), { hint: 'best seed' }),
             ]),
+            eyebrow(
+              'Learning curve',
+              el('span', {
+                class: 'eyebrow-note',
+                text: 'measured reward rate · IQM ± bootstrap 95% CI · P10–P90 · this environment only',
+              }),
+            ),
+            learningCurveBlock(scope, { envId: share.envId, height: 200 }),
           ]);
           section.id = `env-${envSlug(share.envId)}`;
           section.style.setProperty('--section-accent', accentCss(envSlug(share.envId)));
@@ -608,10 +870,11 @@ export const mount: ViewMount = (host, params) => {
       });
     }
 
-    // ---------------- lanes ----------------
-    addTab('lanes', 'Lanes', (panel, scope) => {
+    // ---------------- seeds ----------------
+    addTab('seeds', 'Seeds', (panel, scope) => {
       let columnar: FleetColumnar | null = null;
       let laneChart: ChartHandle | null = null;
+      let totalsChart: ChartHandle | null = null;
       let laneTable: TableHandle<LaneSeries> | null = null;
       let shown: LaneSeries[] = [];
       let stale = false;
@@ -619,6 +882,7 @@ export const mount: ViewMount = (host, params) => {
         destroy() {
           stale = true; // a policy switch rebuilds this panel; drop the in-flight fetch
           laneChart?.destroy();
+          totalsChart?.destroy();
           laneTable?.destroy();
         },
       });
@@ -626,8 +890,35 @@ export const mount: ViewMount = (host, params) => {
       const controls = el('div', { class: 'controls controls-inline' });
       const laneStatus = el('div', { class: 'view-status' }, [spinner('Reading fleet.jsonl')]);
       const chartHost = el('section', { class: 'block' });
+      const totalsHost = el('section', { class: 'block' });
       const tableHost = el('section', { class: 'block' });
       let select: HTMLSelectElement | null = null;
+
+      /**
+       * The default series is MEASURED: rewardSum differenced over each heartbeat
+       * window. `health.rewardRate` is the agent's own internal average-reward
+       * estimate ρ̄ (Sources/Main.swift) — a learned parameter that is also a
+       * divergence diagnostic, not reward the environment paid. It used to be
+       * plotted here under a reward-rate label, which quietly showed the agent's
+       * self-assessment instead of its results; it now needs asking for by name.
+       */
+      const SERIES_MODES = {
+        measured: { field: 'rewardSum', label: 'measured reward rate (heartbeat window)', windowed: true },
+        rho: { field: 'health.rewardRate', label: 'agent estimated average reward (ρ̄)', windowed: false },
+      } as const;
+      type SeriesMode = keyof typeof SERIES_MODES;
+      let mode: SeriesMode = 'measured';
+
+      const seriesSelect = el('select', { class: 'input input-select', ariaLabel: 'Series' });
+      for (const key of Object.keys(SERIES_MODES) as SeriesMode[]) {
+        seriesSelect.append(el('option', { value: key, text: SERIES_MODES[key].label }));
+      }
+      seriesSelect.value = mode;
+      seriesSelect.addEventListener('change', () => {
+        mode = (seriesSelect.value as SeriesMode) in SERIES_MODES ? (seriesSelect.value as SeriesMode) : 'measured';
+        paintLanes();
+      });
+      controls.append(el('span', { class: 'control-label', text: 'series' }), seriesSelect);
 
       if (mixed) {
         select = el('select', { class: 'input input-select', ariaLabel: 'Environment' });
@@ -646,33 +937,76 @@ export const mount: ViewMount = (host, params) => {
         };
       }
 
-      panel.append(controls, laneStatus, chartHost, tableHost);
+      panel.append(controls, laneStatus, chartHost, totalsHost, tableHost);
+
+      /**
+       * Total reward by seed: the FINAL cumulative `rewardSum` of every seed, sorted.
+       *
+       * Same fetch as the curves above — no second request — and deliberately the total
+       * rather than a rate, because it is the population objective (`fleet total` in
+       * tools/table.py) and because sorting it exposes the shape the IQM hides: whether
+       * the fleet is one mode or a handful of rockets over a flat negative field.
+       */
+      function paintTotals(): void {
+        if (!columnar) return;
+        const finals = laneSeries(columnar, 'rewardSum', mixed ? selectedEnv : undefined)
+          .filter((lane) => lane.last !== null);
+        totalsChart?.destroy();
+        totalsChart = null;
+        if (finals.length === 0) {
+          totalsHost.replaceChildren();
+          return;
+        }
+        const picked = rankLanes(capLanes(finals, COLUMN_CAP));
+        const capped = picked.length < finals.length;
+        totalsChart = columns({
+          values: picked.map((lane) => lane.last ?? 0),
+          labels: picked.map((lane) => `seed ${lane.seed}`),
+          height: 170,
+          yFormat: (v) => formatSigned(v, 3),
+          yUnit: 'total reward',
+        });
+        totalsHost.replaceChildren(
+          eyebrow('Total reward by seed', el('span', {
+            class: 'eyebrow-note',
+            text: capped
+              ? `${picked.length} of ${finals.length} seeds · sorted · extremes and median always kept`
+              : `${finals.length} seeds · sorted`,
+          })),
+          totalsChart.root,
+        );
+        totalsChart.refresh();
+      }
 
       function paintLanes(): void {
         if (!columnar) return;
         laneStatus.hidden = false;
-        const field = pickField(columnar, ['health.rewardRate', 'rewardRate', 'rewardSum']);
-        if (!field) {
-          laneStatus.replaceChildren(emptyState('No lane series', 'The fleet endpoint returned no columnar fields.'));
-          return;
-        }
-        const all = laneSeries(columnar, field, mixed ? selectedEnv : undefined);
-        if (all.length === 0) {
-          laneStatus.replaceChildren(emptyState('No lanes for this environment'));
+        const { field, label, windowed } = SERIES_MODES[mode];
+        const raw = laneSeries(columnar, field, mixed ? selectedEnv : undefined);
+        if (raw.length === 0) {
+          laneStatus.replaceChildren(
+            emptyState(
+              mixed ? 'No seeds for this environment' : 'No seed series',
+              `The fleet endpoint returned no “${field}” column for this run.`,
+            ),
+          );
           chartHost.replaceChildren();
+          totalsChart?.destroy();
+          totalsChart = null;
+          totalsHost.replaceChildren();
           tableHost.replaceChildren();
           return;
         }
+        const all = windowed ? toWindowRates(columnar.steps, raw) : raw;
         laneStatus.replaceChildren();
         laneStatus.hidden = true;
         shown = capLanes(all, LANE_CAP);
         const capped = shown.length < all.length;
-        const label = field.split('.').pop() ?? field;
 
         laneChart?.destroy();
         laneChart = spaghetti({
           steps: columnar.steps,
-          lanes: shown.map((lane) => ({ key: String(lane.lane), label: `seed ${lane.seed}`, values: lane.values })),
+          lanes: shown.map((lane) => ({ key: String(lane.seed), label: `seed ${lane.seed}`, values: lane.values })),
           height: 280,
           zeroLine: true,
           yUnit: label,
@@ -680,15 +1014,17 @@ export const mount: ViewMount = (host, params) => {
           onLaneFocus: (key) => laneTable?.highlight(key),
         });
         chartHost.replaceChildren(
-          eyebrow('Per-lane trajectories', el('span', {
+          eyebrow('Per-seed reward-rate curves', el('span', {
             class: 'eyebrow-note',
             text: capped
-              ? `${shown.length} of ${all.length} lanes · extremes and median always kept`
-              : `${all.length} lanes`,
+              ? `${shown.length} of ${all.length} seeds · extremes and median always kept`
+              : `${all.length} seeds`,
           })),
           laneChart.root,
         );
         laneChart.refresh();
+
+        paintTotals();
 
         const recordedSeeds = new Set(
           detail.recordings.filter((r) => !mixed || r.envId === selectedEnv).map((r) => r.seed),
@@ -696,8 +1032,9 @@ export const mount: ViewMount = (host, params) => {
         laneTable?.destroy();
         laneTable = dataTable<LaneSeries>({
           columns: [
+            // No lane column: the seed IS the identity of a stream (seed b runs in
+            // lane b), and showing both invites the reader to treat them as two facts.
             { key: 'seed', label: 'seed', value: (row) => row.seed, align: 'left', render: (row) => String(row.seed) },
-            { key: 'lane', label: 'lane', value: (row) => row.lane },
             {
               key: 'rate',
               label,
@@ -720,28 +1057,28 @@ export const mount: ViewMount = (host, params) => {
           rows: rankLanes(all),
           sortKey: 'rate',
           sortDirection: 'desc',
-          rowKey: (row) => String(row.lane),
+          rowKey: (row) => String(row.seed),
           onRowHover: (row) => {
             if (!row) {
               laneChart?.focusSeries(null);
               return;
             }
-            const index = shown.findIndex((lane) => lane.lane === row.lane);
+            const index = shown.findIndex((lane) => lane.seed === row.seed);
             laneChart?.focusSeries(index >= 0 ? index : null);
           },
           pageSize: 24,
-          emptyLabel: 'No lanes',
+          emptyLabel: 'No seeds',
         });
         tableHost.replaceChildren(
-          eyebrow('Lane ledger', el('span', { class: 'eyebrow-note', text: 'sortable · hover to trace a lane above' })),
+          eyebrow('Seed ledger', el('span', { class: 'eyebrow-note', text: 'sortable · hover to trace a seed above' })),
           laneTable.root,
         );
       }
 
-      // The server filters fleet.jsonl by policy (defaulting to `oak`), so the
-      // selected policy has to travel with the request or a zero/random view
-      // silently reads oak's lanes.
-      api.fleet(id, { fields: ['health.rewardRate'], policy }).then(
+      // Both series arrive in ONE request so the toggle never refetches. The server
+      // filters fleet.jsonl by policy (defaulting to `oak`), so the selected policy
+      // has to travel with it or a zero/random view silently reads oak's seeds.
+      api.fleet(id, { fields: [SERIES_MODES.measured.field, SERIES_MODES.rho.field], policy }).then(
         (data) => {
           if (destroyed || stale) return;
           columnar = data;
@@ -763,9 +1100,9 @@ export const mount: ViewMount = (host, params) => {
             eyebrow('Recordings', el('span', { class: 'eyebrow-note', text: 'theater replay sources' })),
             emptyState(
               'No recordings on this root',
-              'The theater replays per-lane actions.bin streams (record v3) and this run wrote none. '
-                + 'Re-run the fleet with OAK_RECORD_ACTIONS=1 for every lane, or OAK_RECORD_SEEDS=3,8 for a couple.',
-              [linkButton('Find runs that have them', '#/', { title: 'The gallery has a “recordings” filter' })],
+              'The theater replays per-seed actions.bin streams and this run wrote none. '
+                + 'Re-run the fleet with OAK_RECORD_ACTIONS=1 for every seed, or OAK_RECORD_SEEDS=3,8 for a couple.',
+              [linkButton('Find runs that have them', GALLERY_PATH, { title: 'The run list has a “recordings” filter' })],
             ),
           ]),
         );
@@ -776,7 +1113,7 @@ export const mount: ViewMount = (host, params) => {
           'Recordings',
           el('span', {
             class: 'eyebrow-note',
-            text: `${formatCount(detail.recordings.length)} replayable lanes · pick one to open the theater`,
+            text: `${formatCount(detail.recordings.length)} replayable seeds · pick one to open the theater`,
           }),
         ),
       );
@@ -803,7 +1140,7 @@ export const mount: ViewMount = (host, params) => {
         const section = el('section', { class: 'env-section' }, [
           el('div', { class: 'env-head' }, [
             el('h2', { class: 'env-name', text: envName(envId) }),
-            el('span', { class: 'env-sub', text: `${list.length} lane${list.length === 1 ? '' : 's'}` }),
+            el('span', { class: 'env-sub', text: `${list.length} seed${list.length === 1 ? '' : 's'}` }),
           ]),
           seeds,
         ]);
