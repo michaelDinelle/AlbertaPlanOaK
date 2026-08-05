@@ -3,7 +3,7 @@
  "envId": "POMaze-cont-v0",
  "seed": 112,
  "steps": 200,
- "source": ".oak-benchmarks/frontend-demo-16env-20260803/POMaze-cont-v0/seed112/actions.bin",
+ "source": ".oak-benchmarks/frontend-demo-16env-20260805/POMaze-cont-v0/seed112/actions.bin",
  "note": "frames[0] is the synthesized init frame (step -1); frames[i+1] decodes record row i. events[i] fires on the transition INTO frames[i]; events[0] is always empty.",
  "eventCounts": {},
  "rewardSum": 0.0,
@@ -189,30 +189,6 @@
    "gy": 9
   },
   {
-   "x": 1,
-   "y": 2,
-   "gx": 9,
-   "gy": 9
-  },
-  {
-   "x": 2,
-   "y": 2,
-   "gx": 9,
-   "gy": 9
-  },
-  {
-   "x": 2,
-   "y": 2,
-   "gx": 9,
-   "gy": 9
-  },
-  {
-   "x": 3,
-   "y": 2,
-   "gx": 9,
-   "gy": 9
-  },
-  {
    "x": 2,
    "y": 2,
    "gx": 9,
@@ -226,18 +202,48 @@
   },
   {
    "x": 3,
-   "y": 1,
+   "y": 2,
+   "gx": 9,
+   "gy": 9
+  },
+  {
+   "x": 4,
+   "y": 2,
    "gx": 9,
    "gy": 9
   },
   {
    "x": 3,
+   "y": 2,
+   "gx": 9,
+   "gy": 9
+  },
+  {
+   "x": 4,
+   "y": 2,
+   "gx": 9,
+   "gy": 9
+  },
+  {
+   "x": 4,
    "y": 1,
    "gx": 9,
    "gy": 9
   },
   {
-   "x": 3,
+   "x": 4,
+   "y": 1,
+   "gx": 9,
+   "gy": 9
+  },
+  {
+   "x": 4,
+   "y": 1,
+   "gx": 9,
+   "gy": 9
+  },
+  {
+   "x": 4,
    "y": 1,
    "gx": 9,
    "gy": 9
@@ -250,12 +256,6 @@
   },
   {
    "x": 2,
-   "y": 1,
-   "gx": 9,
-   "gy": 9
-  },
-  {
-   "x": 1,
    "y": 1,
    "gx": 9,
    "gy": 9

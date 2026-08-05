@@ -14,9 +14,9 @@
 // is the SCENE's sun direction, shared with the sky dome and the key light, so the beam,
 // the sun disc and the shadows can never disagree about where the sun is.
 //
-// HONESTY: this marks the goal cell and only the goal cell. It says nothing about whether
-// the goal can be reached — ProceduralMaze really does respawn goals into sealed pockets
-// — so there is no trail, no arrow, no glow along the way, and nothing here ever reads
+// HONESTY: this marks the goal cell and only the goal cell. The maze is a perfect maze
+// (every free cell reachable), but the route is the agent's problem, not the art's —
+// so there is no trail, no arrow, no glow along the way, and nothing here ever reads
 // `carvedPath`.
 //
 // IDEMPOTENCE: `setState(grow)` and `setTime(t)` are pure. Nothing integrates, remembers

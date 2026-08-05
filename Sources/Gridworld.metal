@@ -521,15 +521,26 @@ inline float gw_mchain_step(thread uint *gw, uint laneSeed, uint action,
 }
 
 // --------------------------------------------------------- ProceduralMaze
-// 11x11 (border walls) whose 9x9 interior WALL LAYOUT is generated per lane
-// at reset from the lane's Philox chain (RESET stream) — deterministic per
-// lane, different across lanes, then fixed for the lane's lifetime: the
-// agent cannot memorize one maze. Gen runs ONCE at fleet init (amortized;
-// ~5 Philox calls): 81 wall bits in 3 words (bit idx = (x-1) + 9*(y-1),
-// 1=wall, 50% density; w2 masked to its low 17 bits), then a random monotone
-// path from (1,1) to (9,9) carved free (16 moves; move i, when not edge-
-// forced, uses Philox RESET ctr=(1+i/4,0,0,0) word i%4, u01 < 0.5 -> right
-// else down) — the carved path guarantees the goal is always reachable.
+// 11x11 (border walls) whose 9x9 interior WALL LAYOUT is a per-lane PERFECT
+// maze generated from the lane's Philox chain (RESET stream) — deterministic
+// per lane, different across lanes, then fixed for the lane's lifetime: the
+// agent cannot memorize one maze. Gen runs ONCE at fleet init (amortized):
+// start all-wall (81 bits in 3 words, bit idx = (x-1) + 9*(y-1), 1=wall;
+// w2 masked to its low 17 bits); clear the 25 room cells at odd interior
+// coords (2i+1, 2j+1), i,j in 0..4; then carve a randomized-DFS spanning
+// tree over the 5x5 room lattice: start at room 0 = (1,1); at each step
+// collect the current room's unvisited lattice neighbors in fixed order
+// right, down, left, up and descend into candidate `word % n`, carving the
+// between-cell free; backtrack (consuming no words) when none remain. Words
+// come from RESET-stream blocks ctr=(c,0,0,0), c = 0,1,2,..., 4 words per
+// block, consumed in order — INTEGER-ONLY (no u01), so gridworld_ref.py,
+// this file, and the frontend decoder are trivially bitwise identical. A
+// spanning tree over all 25 rooms makes every one of the exactly 49 free
+// cells (25 rooms + 24 carved edges) mutually reachable: the maze is
+// solvable from ANY respawn, by construction. (The pre-2026-08-05
+// generator — 50% random walls plus one carved monotone path — left
+// disconnected free pockets in 999/1024 lane seeds; respawns stranded the
+// agent or the goal and lanes went permanently unsolvable.)
 // Completion: +1, done=1, agent and goal rejection-redrawn to free cells
 // (stream 3, ctr=(respawnIdx, block,0,0); agent from blocks 0,2,4...,
 // goal from blocks 1,3,5... != agent cell; cell idx = trunc(u01(w)*81),
@@ -537,22 +548,50 @@ inline float gw_mchain_step(thread uint *gw, uint laneSeed, uint action,
 // Lane state in gw[10]: 0=x, 1=y, 2=gx, 3=gy, 4=sinceGoal, 5=respawnIdx,
 // 6..8 = wall words w0..w2.
 inline void gw_pmaze_gen(uint laneSeed, thread uint *w) {
-    uint4 raw = hc_philox4x32(uint2(laneSeed, HC_RNG_STREAM_RESET),
+    w[0] = 0xffffffffu; w[1] = 0xffffffffu; w[2] = 0x1ffffu;
+    for (uint j = 0u; j < 5u; j++)
+        for (uint i = 0u; i < 5u; i++) {
+            uint idx = 2u * i + 9u * (2u * j);      // room (2i+1, 2j+1)
+            w[idx >> 5u] &= ~(1u << (idx & 31u));
+        }
+    uint visited = 1u;
+    uint stack[25];
+    uint sp = 1u;
+    stack[0] = 0u;
+    uint ctr = 0u, bi = 0u;
+    uint4 buf = hc_philox4x32(uint2(laneSeed, HC_RNG_STREAM_RESET),
                               uint4(0u, 0u, 0u, 0u));
-    w[0] = raw.x; w[1] = raw.y; w[2] = raw.z & 0x1ffffu;
-    int x = 1, y = 1;
-    for (uint i = 0u; i < 16u; i++) {
-        uint idx = uint(x - 1) + 9u * uint(y - 1);
+    while (sp > 0u) {
+        uint cur = stack[sp - 1u];
+        int ci = int(cur % 5u), cj = int(cur / 5u);
+        uint cand = 0u, n = 0u;                     // 4 room ids, 8 bits each
+        const int dxs[4] = { 1, 0, -1, 0 };
+        const int dys[4] = { 0, 1, 0, -1 };
+        for (uint d = 0u; d < 4u; d++) {
+            int ni = ci + dxs[d], nj = cj + dys[d];
+            if (ni >= 0 && ni < 5 && nj >= 0 && nj < 5 &&
+                ((visited >> uint(ni + 5 * nj)) & 1u) == 0u) {
+                cand |= uint(ni + 5 * nj) << (8u * n);
+                n++;
+            }
+        }
+        if (n == 0u) { sp--; continue; }
+        if (bi == 4u) {
+            ctr++;
+            buf = hc_philox4x32(uint2(laneSeed, HC_RNG_STREAM_RESET),
+                                uint4(ctr, 0u, 0u, 0u));
+            bi = 0u;
+        }
+        uint words[4] = { buf.x, buf.y, buf.z, buf.w };
+        uint nxt = (cand >> (8u * (words[bi] % n))) & 0xffu;
+        bi++;
+        uint ni = nxt % 5u, nj = nxt / 5u;
+        uint idx = (uint(ci) + ni) + 9u * (uint(cj) + nj);  // the between-cell
         w[idx >> 5u] &= ~(1u << (idx & 31u));
-        if (x == 9) { y++; continue; }
-        if (y == 9) { x++; continue; }
-        uint4 c = hc_philox4x32(uint2(laneSeed, HC_RNG_STREAM_RESET),
-                                uint4(1u + (i >> 2u), 0u, 0u, 0u));
-        uint words[4] = { c.x, c.y, c.z, c.w };
-        if (hc_u01(words[i & 3u]) < 0.5f) x++; else y++;
+        visited |= 1u << nxt;
+        stack[sp] = nxt;
+        sp++;
     }
-    uint idx = 8u + 9u * 8u;   // (9,9)
-    w[idx >> 5u] &= ~(1u << (idx & 31u));
 }
 
 inline bool gw_pmaze_is_wall(uint w0, uint w1, uint w2, int x, int y) {

@@ -460,42 +460,64 @@ def mchain_step(lane_seed, pos, cue, last_a, respawn_idx, action):
     return reward, pos, cue, n_last, respawn_idx, done, mchain_obs(pos, cue, n_last)
 
 # --------------------------------------------------------- ProceduralMaze
-# 11x11 (border walls) whose 9x9 interior WALL LAYOUT is generated per lane
-# at reset from the lane's Philox chain (RESET stream) — deterministic per
-# lane, different across lanes, then fixed for the lane's lifetime. Gen (once
-# at fleet init, amortized; ~5 Philox calls): 81 wall bits in 3 words (bit
-# idx = (x-1) + 9*(y-1), 1=wall, 50% density; w2 masked to its low 17 bits),
-# then a random monotone path from (1,1) to (9,9) carved free (16 moves;
-# move i, when not edge-forced, uses Philox RESET ctr=(1+i//4,0,0,0) word
-# i%4, u01 < 0.5 -> right else down) — the carved path guarantees the goal is
-# always reachable. Completion: +1, done=1, agent and goal rejection-redrawn
-# to free cells (stream 3, ctr=(respawnIdx, block,0,0); agent from blocks
-# 0,2,4..., goal from blocks 1,3,5... != agent cell; cell idx =
-# trunc(u01(w)*81), cell (1 + idx%9, 1 + idx//9)). CONTINUING: the maze
-# itself never resets.
+# 11x11 (border walls) whose 9x9 interior WALL LAYOUT is a per-lane PERFECT
+# maze generated from the lane's Philox chain (RESET stream) — deterministic
+# per lane, different across lanes, then fixed for the lane's lifetime.
+# Gen (once at fleet init, amortized): start all-wall (81 bits in 3 words,
+# bit idx = (x-1) + 9*(y-1), 1=wall; w2 masked to its low 17 bits); clear the
+# 25 room cells at odd interior coords (2i+1, 2j+1), i,j in 0..4; then carve
+# a randomized-DFS spanning tree over the 5x5 room lattice: start at room 0
+# = (1,1); at each step collect the current room's unvisited lattice
+# neighbors in fixed order right, down, left, up and descend into candidate
+# `word % n`, carving the between-cell free; backtrack (consuming no words)
+# when none remain. Words come from RESET-stream blocks ctr=(c,0,0,0),
+# c = 0,1,2,..., 4 words per block, consumed in order — INTEGER-ONLY (no
+# u01), so all three oracles are trivially bitwise identical. A spanning
+# tree over all 25 rooms makes every one of the exactly 49 free cells
+# (25 rooms + 24 carved edges) mutually reachable: the maze is solvable from
+# ANY respawn, by construction. (The pre-2026-08-05 generator — 50% random
+# walls plus one carved monotone path — left disconnected free pockets in
+# 999/1024 lane seeds; ~17% of free cells were off the main component, so
+# respawns stranded the agent or the goal and lanes went permanently
+# unsolvable. That environment bug, not the agent, was the flat slice.)
+# Completion: +1, done=1, agent and goal rejection-redrawn to free cells
+# (stream 3, ctr=(respawnIdx, block,0,0); agent from blocks 0,2,4..., goal
+# from blocks 1,3,5... != agent cell; cell idx = trunc(u01(w)*81), cell
+# (1 + idx%9, 1 + idx//9)). CONTINUING: the maze itself never resets.
 PMAZE_FREE_CACHE = {}
 
 def pmaze_gen(lane_seed):
-    """Per-lane wall layout -> [w0, w1, w2] (w2 masked to 17 bits)."""
-    raw = _philox4x32_10(lane_seed, 0, [0, 0, 0, 0])  # RESET stream
-    w = [raw[0], raw[1], raw[2] & 0x1FFFF]
-    x, y = 1, 1
-    for i in range(16):
-        idx = (x - 1) + 9 * (y - 1)
+    """Per-lane perfect-maze wall layout -> [w0, w1, w2] (w2 low 17 bits)."""
+    w = [0xFFFFFFFF, 0xFFFFFFFF, 0x1FFFF]
+    for j in range(5):
+        for i in range(5):
+            idx = 2 * i + 9 * (2 * j)  # room (2i+1, 2j+1)
+            w[idx >> 5] &= 0xFFFFFFFF ^ (1 << (idx & 31))
+    visited = 1
+    stack = [0]
+    ctr, bi = 0, 0
+    buf = _philox4x32_10(lane_seed, 0, [0, 0, 0, 0])  # RESET stream
+    while stack:
+        cur = stack[-1]
+        ci, cj = cur % 5, cur // 5
+        cand = []
+        for di, dj in ((1, 0), (0, 1), (-1, 0), (0, -1)):
+            ni, nj = ci + di, cj + dj
+            if 0 <= ni < 5 and 0 <= nj < 5 and not (visited >> (ni + 5 * nj)) & 1:
+                cand.append((ni, nj))
+        if not cand:
+            stack.pop()
+            continue
+        if bi == 4:
+            ctr += 1
+            buf = _philox4x32_10(lane_seed, 0, [ctr, 0, 0, 0])
+            bi = 0
+        ni, nj = cand[buf[bi] % len(cand)]
+        bi += 1
+        idx = (ci + ni) + 9 * (cj + nj)  # the between-cell
         w[idx >> 5] &= 0xFFFFFFFF ^ (1 << (idx & 31))
-        if x == 9:
-            y += 1
-            continue
-        if y == 9:
-            x += 1
-            continue
-        c = _philox4x32_10(lane_seed, 0, [1 + i // 4, 0, 0, 0])
-        if _u01(c[i % 4]) < F32(0.5):
-            x += 1
-        else:
-            y += 1
-    idx = 8 + 9 * 8  # (9,9)
-    w[idx >> 5] &= 0xFFFFFFFF ^ (1 << (idx & 31))
+        visited |= 1 << (ni + 5 * nj)
+        stack.append(ni + 5 * nj)
     return w
 
 def pmaze_is_wall(w, x: int, y: int) -> bool:

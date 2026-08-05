@@ -436,6 +436,15 @@ def classic_tost(run_root: Path) -> int:
     k = len(dims)
     lane_dirs = sorted((run_root / env).glob("seed*/"), key=lambda p: int(p.name[4:]))
     assert lane_dirs, f"no recorded lanes under {run_root / env}"
+    # This gate's tolerances (1e-4 one-step parity) sit BELOW the record-v4
+    # quantization contract (poses 1e-4, ctrl 1/255), so certification runs
+    # must be recorded raw. The fleet default is v4 — cut certification runs
+    # with OAK_RECORD_FORMAT=3 explicitly.
+    for p in lane_dirs:
+        lm = json.loads((p / "meta.json").read_text())
+        assert lm.get("recordVersion") != 4, (
+            f"{p} is record v4 (quantized); --classic-tost needs the exact f32 "
+            f"stream — re-record this run with OAK_RECORD_FORMAT=3")
     fleet = [json.loads(x) for x in (run_root / "fleet.jsonl").read_text().splitlines()]
     finals = {r["seed"]: r for r in fleet if r.get("kind") == "final"}
 

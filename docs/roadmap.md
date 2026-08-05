@@ -1872,7 +1872,34 @@ archaeology, research gaps, compute). What changed, by FC-STOMP section:
 
 ## Current Baseline Decision
 
-**THE keeper: `.oak-benchmarks/mk8-tierL-20260705`** — Mark VIII (tanh-bounded
+**THE keeper: `.oak-benchmarks/pmaze-perfect-tierL-20260805`** — the
+ProceduralMaze perfect-maze ENV fix (agent untouched). PROMOTED 2026-08-05,
+all 7 gate criteria PASS vs `wall-reference-tierL-20260804` (balanced 16-task
+schedule, B=1024 × 1M, ablation none). The frontend theater exposed the bug:
+the old generator (50% random walls + one carved monotone path) left
+disconnected free pockets in **999/1024 lane seeds** (~17% of free cells off
+the main component), so goal-completion respawns stranded the agent or the
+goal and lanes went permanently unsolvable — the flat slice was the ENV, not
+the agent. New generator: 25 rooms on the odd 5×5 lattice + a randomized-DFS
+spanning tree carved from the lane's Philox RESET stream, integer-only (no
+u01) — exactly 49 free cells, all mutually reachable, every seed, by
+construction. Certified: Metal↔Python BITWISE PASS (4000 gen + 4000 step
+cases), TS decoder identical, 1570/1570 frontend tests. Verdict quality: the
+15 untouched env slices are **bit-identical** to the keeper at every 100k
+milestone (the one Pendulum-range paramExplosion death, lane 489 @497947,
+reproduced byte-for-byte); the ProceduralMaze slice moved IQM **2.8e-06 →
+4.1e-04 (+14,784%)**, slice gate PROMOTE + IMPROVEMENT, live positivity 85.9%
+vs 3.1% at 1M. Lesson (env law): a procedural env's solvability must be a
+STRUCTURAL property of the generator, never a probabilistic hope — and
+population-scale flatness on one env slice should be suspected as an env bug
+before an agent limitation. Frontier note: the env is now a clean instrument —
+median ~1 goal/2.5k steps with the usual late-horizon live-median erosion
+(0.0006 → 0.0002), i.e. the plasticity frontier, not stranding.
+
+Superseded keeper (`wall-reference-tierL-20260804`): the balanced 16-task
+schedule reference, itself the successor of the p93 lineage below.
+
+Superseded keeper: **`.oak-benchmarks/mk8-tierL-20260705`** — Mark VIII (tanh-bounded
 action means + exact score gradient — the zenith law: deaths, ceiling decay and
 the plateau were one unbounded-mean disease). PROMOTED 2026-07-05, 8/8 +
 IMPROVEMENT: IQM **+0.443**, positive lanes **98.1%**, divergence 1.4%,

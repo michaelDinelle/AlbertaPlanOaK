@@ -198,8 +198,8 @@ describe('procedural-maze / manifest + fixtures', () => {
   });
 
   test('the thumbFrame stands on the only cells legal on EVERY seed', () => {
-    // the generator carves a monotone path from (1,1) to (9,9) and clears both ends, so
-    // these two cells — and no others — are free on every maze the env can produce
+    // the generator clears the 25 room cells at odd interior coords on every seed, and
+    // (1,1) / (9,9) are the corner rooms — free on every maze the env can produce
     const p = manifest.thumbFrame.pose;
     expect(p[0]).toBe(PROCMAZE_START.x);
     expect(p[1]).toBe(PROCMAZE_START.y);
@@ -222,15 +222,15 @@ describe('procedural-maze / manifest + fixtures', () => {
     }
   });
 
-  test('the fixtures really do cover a sealed pocket and a doorway', () => {
+  test('the fixtures really do cover a dead end and a doorway', () => {
     const grid = gridOf(FIXTURE_SEED);
-    // sealed-pocket: the GOAL is a free cell walled on all four sides — the env respawns
-    // goals into these, and the art must not imply the agent can get there
-    const sealed = fixtureNamed('sealed-pocket');
-    const gx = sealed.pose[2] ?? -1;
-    const gy = sealed.pose[3] ?? -1;
+    // dead-end: the GOAL is a free cell walled on three sides — the deepest cul-de-sac
+    // shape a perfect maze produces; the art states the goal, never the route to it
+    const deadEnd = fixtureNamed('dead-end');
+    const gx = deadEnd.pose[2] ?? -1;
+    const gy = deadEnd.pose[3] ?? -1;
     expect(isWall(grid, gx, gy)).toBe(false);
-    expect(wallNeighbours(grid, gx, gy)).toBe(4);
+    expect(wallNeighbours(grid, gx, gy)).toBe(3);
     // under-the-arch: the AGENT stands on a doorway cell `archCells()` nominates
     const arch = fixtureNamed('under-the-arch');
     const ax = arch.pose[0] ?? -1;
@@ -835,11 +835,12 @@ describe('procedural-maze / alignment', () => {
     module.dispose();
   });
 
-  test('the sunbeam follows a respawning goal onto every free cell, sealed pockets included', async () => {
+  test('the sunbeam follows a respawning goal onto every free cell, dead ends included', async () => {
     const { module } = await live();
     const grid = gridOf(SEED);
     const truth: [number, number, number] = [0, 0, 0];
     let sealed = 0;
+    let deadEnds = 0;
     for (let y = 0; y < grid.h; y++) {
       for (let x = 0; x < grid.w; x++) {
         if (isWall(grid, x, y)) continue;
@@ -850,11 +851,14 @@ describe('procedural-maze / alignment', () => {
         expect(w.y).toBeCloseTo(0, 10);
         expect(w.z).toBeCloseTo(truth[2], 10);
         if (wallNeighbours(grid, x, y) === 4) sealed++;
+        if (wallNeighbours(grid, x, y) === 3) deadEnds++;
       }
     }
-    // this seed really does have unreachable goal cells, and the beam lands on them the
-    // same as anywhere else: the art states the goal, never its reachability
-    expect(sealed).toBeGreaterThan(0);
+    // the generator is a perfect maze: every free cell is reachable, so a sealed
+    // pocket (4 walls around a free cell) can never exist — but dead ends do, and
+    // the beam lands on them the same as anywhere else
+    expect(sealed).toBe(0);
+    expect(deadEnds).toBeGreaterThan(0);
     module.dispose();
   });
 });
@@ -1087,7 +1091,7 @@ describe('procedural-maze / honesty', () => {
   test('setDebug toggles the ground-truth overlay onto the scene camera', async () => {
     const { module } = await live();
     module.setDebug(true);
-    module.update(toFrameUpdate(fixtureNamed('sealed-pocket')));
+    module.update(toFrameUpdate(fixtureNamed('dead-end')));
     let overlayVisible = false;
     module.scene.traverse((o) => {
       if (o.name === 'ruinGroundTruth') overlayVisible = o.visible;

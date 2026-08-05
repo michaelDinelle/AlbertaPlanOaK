@@ -17,7 +17,7 @@ Emits, next to this file:
                                so every event type is exercised on every env
 
 The trace goldens are the end-to-end contract: the .bin is cut verbatim from
-.oak-benchmarks/frontend-demo-16env-20260803, and the .json is produced by
+.oak-benchmarks/frontend-demo-16env-20260805, and the .json is produced by
 replaying ctrl[0] through gridworld_ref — hidden state (DeepSea masks,
 ProceduralMaze walls, MultiKeyCorridor keys) included. The decoder is correct
 iff `decodeRecording` reproduces the .json from the .bin.
@@ -45,7 +45,7 @@ import gridworld_ref as gw  # noqa: E402
 
 VERSION = 1
 
-RUN_ROOT = _REPO / ".oak-benchmarks" / "frontend-demo-16env-20260803"
+RUN_ROOT = _REPO / ".oak-benchmarks" / "frontend-demo-16env-20260805"
 TRACE_STEPS = 200
 RECORD_FLOATS = 16
 SEED_SAMPLES = list(range(16))
@@ -183,28 +183,38 @@ def _static_layouts(outdir: Path) -> str:
 
 # ------------------------------------------------------- ProceduralMaze walls
 def _pmaze_path(lane_seed: int) -> list[dict]:
-    """The 17 cells `pmaze_gen` carves free, in order.
+    """The 24 between-cells the DFS spanning tree carves, in carve order.
 
-    Mirrors the generator's move sequence using the SAME oracle primitives
-    (`gw._philox4x32_10`, `gw._u01`); `_procmaze_layouts` asserts that clearing
-    exactly these cells reproduces `gw.pmaze_gen` bit for bit.
+    Mirrors the generator's DFS using the SAME oracle primitives
+    (`gw._philox4x32_10`, integer-only); `_procmaze_layouts` asserts that
+    starting from all-wall + the 25 room cells and clearing exactly these
+    cells reproduces `gw.pmaze_gen` bit for bit.
     """
     path: list[dict] = []
-    x, y = 1, 1
-    for i in range(16):
-        path.append({"x": x, "y": y})
-        if x == 9:
-            y += 1
+    visited = 1
+    stack = [0]
+    ctr, bi = 0, 0
+    buf = gw._philox4x32_10(lane_seed, 0, [0, 0, 0, 0])
+    while stack:
+        cur = stack[-1]
+        ci, cj = cur % 5, cur // 5
+        cand = []
+        for di, dj in ((1, 0), (0, 1), (-1, 0), (0, -1)):
+            ni, nj = ci + di, cj + dj
+            if 0 <= ni < 5 and 0 <= nj < 5 and not (visited >> (ni + 5 * nj)) & 1:
+                cand.append((ni, nj))
+        if not cand:
+            stack.pop()
             continue
-        if y == 9:
-            x += 1
-            continue
-        c = gw._philox4x32_10(lane_seed, 0, [1 + i // 4, 0, 0, 0])
-        if gw._u01(c[i % 4]) < gw.F32(0.5):
-            x += 1
-        else:
-            y += 1
-    path.append({"x": 9, "y": 9})
+        if bi == 4:
+            ctr += 1
+            buf = gw._philox4x32_10(lane_seed, 0, [ctr, 0, 0, 0])
+            bi = 0
+        ni, nj = cand[buf[bi] % len(cand)]
+        bi += 1
+        path.append({"x": ci + ni + 1, "y": cj + nj + 1})
+        visited |= 1 << (ni + 5 * nj)
+        stack.append(ni + 5 * nj)
     return path
 
 
@@ -213,14 +223,17 @@ def _procmaze_layouts(outdir: Path) -> str:
     for seed in SEED_SAMPLES:
         w = gw.pmaze_gen(seed)
         path = _pmaze_path(seed)
-        # independent check: raw words with exactly the path cells cleared
-        raw = gw._philox4x32_10(seed, 0, [0, 0, 0, 0])
-        check = [raw[0], raw[1], raw[2] & 0x1FFFF]
-        for cell in path:
+        # independent check: all-wall + 25 rooms + exactly the carved
+        # between-cells cleared
+        check = [0xFFFFFFFF, 0xFFFFFFFF, 0x1FFFF]
+        cells = ([{"x": 2 * i + 1, "y": 2 * j + 1} for j in range(5) for i in range(5)]
+                 + path)
+        for cell in cells:
             idx = (cell["x"] - 1) + 9 * (cell["y"] - 1)
             check[idx >> 5] &= 0xFFFFFFFF ^ (1 << (idx & 31))
         assert check == list(w), f"carved path disagrees with pmaze_gen at seed {seed}"
         assert all(not gw.pmaze_is_wall(w, c["x"], c["y"]) for c in path)
+        assert len(path) == 24 and len(gw.pmaze_free(w)) == 49
         cases.append({
             "seed": seed,
             "words": [int(v) for v in w],
@@ -232,8 +245,9 @@ def _procmaze_layouts(outdir: Path) -> str:
         "version": VERSION,
         "source": "tools/gridworld_ref.py:pmaze_gen / pmaze_is_wall",
         "note": "words = the 3 packed wall words (w2 masked to 17 bits); "
-                "walls = 11x11 row-major expansion; carvedPath = the 17 cells "
-                "cleared by the generator (debug overlay only).",
+                "walls = 11x11 row-major expansion; carvedPath = the 24 "
+                "between-cells the DFS carves, in carve order (debug overlay "
+                "only). Perfect maze: all 49 free cells mutually reachable.",
         "cases": cases,
     })
 
@@ -359,10 +373,14 @@ def _seed_starts() -> dict[str, int]:
 
 
 def _load_rows(env: str, seed: int) -> np.ndarray:
-    path = RUN_ROOT / env / f"seed{seed}" / "actions.bin"
-    rows = np.fromfile(path, dtype=np.float32, count=TRACE_STEPS * RECORD_FLOATS)
-    assert rows.size == TRACE_STEPS * RECORD_FLOATS, f"{path} too short"
-    return rows.reshape(TRACE_STEPS, RECORD_FLOATS)
+    # record4.load_rows dispatches on the lane's recordVersion (3 or 4).
+    # Gridworld data is BIT-EXACT in v4 (u8 integer poses, action indices,
+    # done bits), so either format is a legal fixture source here.
+    import record4
+    rows = record4.load_rows(RUN_ROOT / env / f"seed{seed}", TRACE_STEPS)
+    assert rows.shape[0] == TRACE_STEPS, \
+        f"{RUN_ROOT / env / f'seed{seed}'} too short ({rows.shape[0]} rows)"
+    return rows
 
 
 def _four_room(x: int, y: int) -> int:
@@ -924,10 +942,9 @@ def _case_memorychain(seed=88, rounds=4):
 
 
 def _case_procmaze(seed=96, goals=3):
-    """A per-lane maze can strand the redrawn goal in another free component
-    (only the carved (1,1)->(9,9) path is guaranteed), so the solve stops when
-    the goal becomes unreachable. `_pmaze_case_seed` picks a lane that reaches
-    the full `goals` count."""
+    """Perfect maze: every free cell is mutually reachable, so BFS always
+    finds the redrawn goal. `_pmaze_case_seed` keeps its search shape but
+    every candidate now reaches the full `goals` count by construction."""
     w = gw.pmaze_gen(seed)
     x, y, gx, gy, sg, ri = 1, 1, 9, 9, 0, 0
     rows, frames, events = [], [{"x": x, "y": y, "gx": gx, "gy": gy}], [[]]

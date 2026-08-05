@@ -49,6 +49,8 @@ if [ "${1:-}" = "--job" ]; then
   OAK_BENCH_POLICIES="${OAK_BENCH_POLICIES:-oak}" \
   OAK_BENCH_STEPS="$STEPS" \
   OAK_BENCH_SEED_COUNT="${OAK_BENCH_SEED_COUNT:-1408}" \
+  OAK_RECORD_ACTIONS="${OAK_RECORD_ACTIONS:-1}" \
+  OAK_RECORD_FORMAT="${OAK_RECORD_FORMAT:-4}" \
   OAK_FLEET_TIMING=1 \
   OAK_METRICS_STORAGE="$ROOT" \
   caffeinate -dimsu .build/release/OaK benchmark

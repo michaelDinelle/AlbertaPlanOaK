@@ -54,7 +54,7 @@ import gridworld_ref as gw  # noqa: E402
 VERSION = 1
 
 # The recording run every trace golden is cut from.
-RUN_ROOT = _REPO / ".oak-benchmarks" / "frontend-demo-16env-20260803"
+RUN_ROOT = _REPO / ".oak-benchmarks" / "frontend-demo-16env-20260805"
 TRACE_STEPS = 200
 RECORD_FLOATS = 16
 
@@ -157,6 +157,15 @@ def _read_rows(env: str, seed: int, steps: int | None = None) -> np.ndarray:
     p = RUN_ROOT / env / f"seed{seed}" / "actions.bin"
     if not p.exists():
         raise FileNotFoundError(f"missing recording {p}")
+    # This generator's validations run BELOW the v4 quantization contract
+    # (cheetah replay asserts 1e-6; v4 stores poses at 1e-4 and ctrl at
+    # 1/255), so the fixture source must be a v3 recording. The fleet default
+    # is v4 — cut fixture-source runs with OAK_RECORD_FORMAT=3 explicitly.
+    meta = json.loads((p.parent / "meta.json").read_text())
+    if meta.get("recordVersion") == 4:
+        raise ValueError(
+            f"{p} is record v4 (quantized); classic fixtures need the exact "
+            f"f32 stream — re-record the fixture run with OAK_RECORD_FORMAT=3")
     a = np.fromfile(p, dtype="<f4")
     if a.size % RECORD_FLOATS:
         raise ValueError(f"{p}: {a.size} floats is not a multiple of {RECORD_FLOATS}")

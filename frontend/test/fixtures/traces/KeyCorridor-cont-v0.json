@@ -3,7 +3,7 @@
  "envId": "KeyCorridor-cont-v0",
  "seed": 24,
  "steps": 200,
- "source": ".oak-benchmarks/frontend-demo-16env-20260803/KeyCorridor-cont-v0/seed24/actions.bin",
+ "source": ".oak-benchmarks/frontend-demo-16env-20260805/KeyCorridor-cont-v0/seed24/actions.bin",
  "note": "frames[0] is the synthesized init frame (step -1); frames[i+1] decodes record row i. events[i] fires on the transition INTO frames[i]; events[0] is always empty.",
  "eventCounts": {
   "key": 1,
@@ -1392,7 +1392,7 @@
    "doorOpen": true
   },
   {
-   "x": 6,
+   "x": 5,
    "y": 2,
    "gx": 7,
    "gy": 1,

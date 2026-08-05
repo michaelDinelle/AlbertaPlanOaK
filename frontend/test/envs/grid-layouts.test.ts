@@ -23,7 +23,12 @@ import { mkcIsWall, mkcRoomCells, multiKeyCorridorDecoder } from '@sim/envs/mult
 import { chainDecoder } from '@sim/envs/chain';
 import { memoryChainDecoder } from '@sim/envs/memorychain';
 import { delayedChainDecoder } from '@sim/envs/delayedchain';
-import { procMazeGen, proceduralMazeDecoder, procMazeWalls } from '@sim/envs/proceduralmaze';
+import {
+  procMazeGen,
+  proceduralMazeDecoder,
+  procMazeIsWall,
+  procMazeWalls,
+} from '@sim/envs/proceduralmaze';
 import { highDimMazeDecoder, highDimMazeIsWall } from '@sim/envs/highdimmaze';
 import { poMazeDecoder, poMazeIsWall, poMazeView } from '@sim/envs/pomaze';
 
@@ -186,21 +191,43 @@ describe('ProceduralMaze per-lane generation', () => {
     }
   });
 
-  test('11x11 bitmap and carved path match, and the path is free', () => {
+  test('11x11 bitmap and carved cells match, and the maze is perfect', () => {
     for (const c of procmaze.cases) {
       const { words, carvedPath } = procMazeGen(c.seed);
       expect(Array.from(procMazeWalls(words))).toEqual(c.walls);
       expect(carvedPath).toEqual(c.carvedPath);
-      expect(carvedPath.length).toBe(17);
-      for (const cell of carvedPath) expect(c.walls[cell.y * 11 + cell.x]).toBe(0);
-      // the path is monotone: every step advances x or y by exactly one
-      for (let i = 1; i < carvedPath.length; i++) {
-        const a = carvedPath[i - 1]!;
-        const b = carvedPath[i]!;
-        expect(b.x - a.x + (b.y - a.y)).toBe(1);
+      // a spanning tree over the 5x5 room lattice carves exactly 24 edges
+      expect(carvedPath.length).toBe(24);
+      for (const cell of carvedPath) {
+        expect(c.walls[cell.y * 11 + cell.x]).toBe(0);
+        // every carved cell is a between-cell: exactly one coordinate even
+        expect((cell.x % 2) + (cell.y % 2)).toBe(1);
       }
-      expect(carvedPath[0]).toEqual({ x: 1, y: 1 });
-      expect(carvedPath[16]).toEqual({ x: 9, y: 9 });
+      // perfect maze: exactly 49 free cells (25 rooms + 24 carved edges),
+      // all mutually reachable from the start room
+      const free: number[] = [];
+      for (let y = 1; y < 10; y++)
+        for (let x = 1; x < 10; x++) if (!procMazeIsWall(words, x, y)) free.push(y * 11 + x);
+      expect(free.length).toBe(49);
+      const seen = new Set([1 * 11 + 1]);
+      const queue = [[1, 1] as [number, number]];
+      while (queue.length > 0) {
+        const [x, y] = queue.pop()!;
+        for (const [dx, dy] of [
+          [1, 0],
+          [-1, 0],
+          [0, 1],
+          [0, -1],
+        ] as const) {
+          const nx = x + dx;
+          const ny = y + dy;
+          if (!procMazeIsWall(words, nx, ny) && !seen.has(ny * 11 + nx)) {
+            seen.add(ny * 11 + nx);
+            queue.push([nx, ny]);
+          }
+        }
+      }
+      expect(seen.size).toBe(49);
     }
   });
 

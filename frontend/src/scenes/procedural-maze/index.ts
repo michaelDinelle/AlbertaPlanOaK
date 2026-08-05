@@ -16,10 +16,11 @@
 //  * `done` IS NOT A FAILURE HERE. The decoder fires `goal`, `teleport` and `done`
 //    together on the same completion, so this scene celebrates and never sighs; a sigh on
 //    that batch would be the shared failure grammar firing on a success.
-//  * THE GOAL MAY BE UNREACHABLE. A respawn draws uniformly from the free cells, and a
-//    procedurally generated maze really does contain sealed pockets. The sunbeam marks
-//    the goal cell and says nothing else — no trail, no arrow, no glow along the way.
-//    `geometry.grid.carvedPath` exists, and it belongs to `kit/debug` alone.
+//  * THE ROUTE IS NEVER SHOWN. A respawn draws uniformly from the free cells of a
+//    perfect maze — always reachable, but the way there is the agent's problem. The
+//    sunbeam marks the goal cell and says nothing else — no trail, no arrow, no glow
+//    along the way. `geometry.grid.carvedPath` exists, and it belongs to `kit/debug`
+//    alone.
 //
 // Every flourish is measured on `ctx.time()` — the grow-in, the bloom, the beam's dust
 // banding, the ivy tremble, the wheeling birds — so a paused playback freezes the ruin

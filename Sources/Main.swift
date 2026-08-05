@@ -752,6 +752,11 @@ final class RecordV4Writer: @unchecked Sendable {
 }
 
 @main struct Main {
+  /// Set at launch when a multi-policy workload makes default-on recording
+  /// unsafe (all policies share one <envId>/seed<N>/actions.bin — the
+  /// truncation trap). An EXPLICIT OAK_RECORD_ACTIONS=1 request still throws.
+  nonisolated(unsafe) static var recordingDefaultSuppressed = false
+
   static func main() {
     _ = pthread_set_qos_class_self_np(QOS_CLASS_USER_INTERACTIVE, 0)
     do {
@@ -909,23 +914,27 @@ final class RecordV4Writer: @unchecked Sendable {
       try fm.createDirectory(at: dir, withIntermediateDirectories: true)
       return dir
     }
-    let recordAll = e["OAK_RECORD_ACTIONS"] == "1"
+    // RECORDING LAW (2026-08-05): every fleet run records every lane by
+    // default (v4). Opt out with OAK_RECORD_ACTIONS=0 (OAK_RECORD_SEEDS then
+    // still selects individual lanes); multi-policy workloads auto-suppress
+    // at the launch guard via recordingDefaultSuppressed.
+    let recordAll =
+      e["OAK_RECORD_ACTIONS"] != "0" && !Main.recordingDefaultSuppressed
     let recordSeeds = Set(
       (e["OAK_RECORD_SEEDS"] ?? "").split(separator: ",").compactMap {
         Int(String($0).trimmingCharacters(in: .whitespaces))
       })
-    // Recorded stream format: 3 = flat f32[16] rows (DEFAULT), 4 = the
-    // columnar/quantized codec (frontend/src/sim/RECORD_V4_SPEC.md).
-    //
-    // v4 is OPT-IN on purpose. `actions.bin` is read by consumers outside the
-    // frontend that assume the f32[16] shape — `tools/physics_parity.py`
-    // (`np.fromfile(...).reshape(-1, 16)`, the --classic-tost certification gate
-    // for Sources/ClassicControl.metal) and `tools/replay_render.py`. Defaulting
-    // this to 4 silently rewired those; a recording format is not something a
-    // gate should acquire by surprise. The frontend reads BOTH (the theater
-    // loader dispatches on meta.json `recordVersion`), so the opt-in costs it
-    // nothing but disk.
-    let recordFormat = e["OAK_RECORD_FORMAT"] ?? "3"
+    // Recorded stream format: 4 = the columnar/quantized codec (DEFAULT —
+    // frontend/src/sim/RECORD_V4_SPEC.md; RECORDING LAW 2026-08-05: ~22x
+    // smaller — 2.7 GiB vs 61 GiB for a 1024x1M fleet — at measured SPS
+    // parity), 3 = flat f32[16] rows, the EXPLICIT certification format for
+    // gates whose tolerances sit below the v4 quantization contract:
+    // `tools/physics_parity.py --classic-tost` (1e-4 one-step parity) and
+    // `frontend/test/fixtures/gen_classic.py` (1e-6 cheetah replay) REFUSE
+    // v4 lanes with a clear error. Every other Python consumer reads both
+    // via `tools/record4.py::load_rows` (dispatches on recordVersion); the
+    // frontend theater has always read both.
+    let recordFormat = e["OAK_RECORD_FORMAT"] ?? "4"
     guard recordFormat == "3" || recordFormat == "4" else {
       throw err("OAK_RECORD_FORMAT must be 3 or 4 (got '\(recordFormat)').")
     }
@@ -1825,6 +1834,14 @@ final class RecordV4Writer: @unchecked Sendable {
       || !(env["OAK_RECORD_SEEDS"] ?? "").trimmingCharacters(in: .whitespaces).isEmpty
     if recordingRequested, policies.count > 1 {
       throw err("Recording (OAK_RECORD_ACTIONS / OAK_RECORD_SEEDS) with \(policies.count) policies (\(policies.map(\.rawValue).joined(separator: ","))) would TRUNCATE: all policies share one <envId>/seed<N>/actions.bin, so each overwrites the last and meta.json ends up describing another policy's stream. Set OAK_BENCH_POLICIES=oak (the default is oak,zero,random).")
+    }
+    // RECORDING LAW (2026-08-05): recording is default-ON, but the default
+    // cannot apply to a multi-policy workload (the truncation trap above) —
+    // suppress with a visible line instead of throwing; an EXPLICIT request
+    // still throws.
+    if policies.count > 1, env["OAK_RECORD_ACTIONS"] == nil {
+      recordingDefaultSuppressed = true
+      print("[fleet] default recording disabled: \(policies.count) policies share lane dirs (set OAK_BENCH_POLICIES=oak to record)")
     }
     // Seed-deterministic env schedule (universal env contract). Multi-env is
     // the MANDATORY default (user law 2026-07-19): every run is a superset of

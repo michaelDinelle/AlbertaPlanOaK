@@ -8,12 +8,12 @@
 //
 // Between them they exercise every claim the scene makes:
 //   * the deterministic fleet init, (1,1) → (9,9);
-//   * a real mid-run respawn lifted straight out of lane 96's recording (step 1377);
-//   * a goal that has respawned into a SEALED POCKET — (6,6) on this seed is a free cell
-//     walled on all four sides, so the sunbeam is falling somewhere the agent physically
-//     cannot reach. That is a real property of this env, and the art must not pretend
-//     otherwise: no trail, no arrow, no hint that the beam is a promise;
-//   * the wisp standing inside a ruined doorway — (4,8) is walled east and west on this
+//   * a real mid-run respawn lifted straight out of lane 96's recording (step 1812);
+//   * a goal that has respawned into a DEAD END — (5,7) on this seed is a free cell
+//     walled on three sides. The maze is a perfect maze (every free cell reachable),
+//     but the art still states only the goal, never the route to it: no trail, no
+//     arrow, no hint that the beam is a promise;
+//   * the wisp standing inside a ruined doorway — (3,3) is walled east and west on this
 //     seed, which is exactly what `archCells()` looks for.
 
 import type { SceneFixture } from '@kit/types';
@@ -57,28 +57,28 @@ export const fixtures: SceneFixture[] = [
     step: 0,
   },
   {
-    // lane 96, step 1377: both agent and goal were redrawn two steps ago
+    // lane 96, step 1812: the first completion — agent and goal freshly redrawn
     name: 'after-respawn',
-    pose: pose(4, 3, 2, 5),
-    ctrl: ctrl(2),
-    derived: derived(4, 3, 2, 5),
-    step: 1377,
+    pose: pose(1, 9, 1, 6),
+    ctrl: ctrl(0),
+    derived: derived(1, 9, 1, 6),
+    step: 1812,
   },
   {
-    // the goal has respawned into a cell walled on all four sides — unreachable, and the
-    // scene must say nothing about that either way
-    name: 'sealed-pocket',
-    pose: pose(4, 9, 6, 6),
+    // the goal has respawned into a dead end — (5,7) is walled on three sides; the
+    // scene states the goal, never the route to it
+    name: 'dead-end',
+    pose: pose(7, 9, 5, 7),
     ctrl: ctrl(0),
-    derived: derived(4, 9, 6, 6),
+    derived: derived(7, 9, 5, 7),
     step: 4820,
   },
   {
-    // standing inside a ruined doorway: (4,8) is walled east and west on this seed
+    // standing inside a ruined doorway: (3,3) is walled east and west on this seed
     name: 'under-the-arch',
-    pose: pose(4, 8, 1, 9),
+    pose: pose(3, 3, 1, 9),
     ctrl: ctrl(1),
-    derived: derived(4, 8, 1, 9),
+    derived: derived(3, 3, 1, 9),
     step: 7314,
   },
 ];
