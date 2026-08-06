@@ -42,6 +42,7 @@ When a rule drifts from the cited research, fix the rule — never preserve folk
 7. **Greenfield.** No legacy paths, no compatibility fallbacks. Replace and delete.
 8. **Fleet lanes are independent agents.** One stream per seed, zero cross-lane coupling. Lane-disjointness is the acceptance test for every engine change.
 9. **Proof matches risk.** Changes that preserve every floating-point op ship on a bitwise A/B check. Changes that reorder arithmetic ship only on the paired population gate.
+10. **No commentary, only code.** No comments, no docstrings, no doc files of any kind. Names and structure carry all meaning; if code needs a comment to be understood, rewrite the code. Knowledge that can't live in code lives in git history, skills, or memory — never in the repo as prose.
 
 
 ## Performance: profiling (HEADLESS — verified 2026-07-04)
@@ -49,7 +50,7 @@ When a rule drifts from the cited research, fix the rule — never preserve folk
 The repo template records without the Instruments GUI. Never trace (or rebuild the metallib) while a fleet run is in flight.
 
 ```
-xctrace record --template tools/instruments/ShaderTemplate.tracetemplate \
+xctrace record --template ShaderTemplate.tracetemplate \
   --output out.trace --time-limit 15s \
   --env OAK_BENCH_ENV=HalfCheetah-v4 --env OAK_BENCH_POLICIES=oak \
   --env OAK_BENCH_STEPS=200000 --env OAK_BENCH_SEED_COUNT=1024 \
@@ -62,17 +63,17 @@ xctrace export --input out.trace \
 
 Useful schemas: `metal-gpu-intervals` (per-dispatch GPU times), `gpu-performance-state-intervals` (clock derating, "Minimum … due to active device conditions"), `device-thermal-state-intervals` (thermal axis for SPS-decay questions). Caveat: `metal-shader-profiler-*` and `gpu-counter-*` tables exist but record ZERO rows with this template (shader-profiler/counter profiles are unarmed); arming them needs a one-time GUI template edit — bare `--instrument 'Metal GPU Counters'` records nothing in attach OR launch mode.
 
-Complementary in-code instruments: `OAK_MEGA_STAGE_MASK` (per-stage timing; single-stage-only masks isolate cost but DEGENERATE the data — prefer `encode+X` pairs under live dynamics), `OAK_PROBE_FIXEDIDX=1` (fixed contiguous gather indices — separates memory-scatter cost from issue cost). Both are timing instruments; trajectories are garbage. The per-stage/falsification evidence log lives in docs/roadmap.md (SPS program).
+Complementary in-code instruments: `OAK_MEGA_STAGE_MASK` (per-stage timing; single-stage-only masks isolate cost but DEGENERATE the data — prefer `encode+X` pairs under live dynamics), `OAK_PROBE_FIXEDIDX=1` (fixed contiguous gather indices — separates memory-scatter cost from issue cost). Both are timing instruments; trajectories are garbage. The per-stage/falsification evidence log (SPS program) lives in git history: `git log --all -- docs/roadmap.md`.
 
-## Citations (all primary papers in `docs/papers/`)
+## Citations (arXiv; fetch on demand)
 
-- Alberta Plan: [2208.11173](docs/papers/AlbertaPlanForAIResearch_2208.11173.pdf)
-- Reward-Respecting Subtasks: [2202.03466](docs/papers/RewardRespectingSubtasks_ModelBasedRL_2202.03466.pdf)
-- Reward Centering: [2405.09999](docs/papers/RewardCentering_2405.09999.pdf)
-- Option Keyboard Basis: [2505.00787](docs/papers/OptionKeyboardBasis_2505.00787.pdf)
-- Generate-and-test: Mahmood-Sutton-Pilarski 2012 ([03-mahmood-sutton-autostep](docs/papers/03-mahmood-sutton-autostep-ICML-2012.pdf)), Rahman 2020 thesis, Samani 2022 thesis
-- MetaOptimize per-feature step sizes: Sharifnassab-Salehkaleybar-Sutton 2024 ([2402.02342](docs/papers/MetaOptimize_StepSizes_2402.02342.pdf)). Treat this as the controlling source for `alpha/beta/h/gradEnergy`; IDBD/Autostep are historical special cases, not the implementation target.
-- Big World Hypothesis: [2512.23419](docs/papers/WorldIsBigger_ComputationallyEmbeddedBWH_2512.23419.pdf)
-- Three Dogmas of RL: [2407.10583](docs/papers/ThreeDogmasRL_2407.10583.pdf)
-- Meta-gradient search control: [2406.19561](docs/papers/MetaGradientSearchControl_DynaPlanning_2406.19561.pdf)
+- Alberta Plan: [2208.11173](https://arxiv.org/abs/2208.11173)
+- Reward-Respecting Subtasks: [2202.03466](https://arxiv.org/abs/2202.03466)
+- Reward Centering: [2405.09999](https://arxiv.org/abs/2405.09999)
+- Option Keyboard Basis: [2505.00787](https://arxiv.org/abs/2505.00787)
+- Generate-and-test: Mahmood-Sutton 2012 Autostep (ICML), Rahman 2020 thesis, Samani 2022 thesis
+- MetaOptimize per-feature step sizes: Sharifnassab-Salehkaleybar-Sutton 2024 ([2402.02342](https://arxiv.org/abs/2402.02342)). Treat this as the controlling source for `alpha/beta/h/gradEnergy`; IDBD/Autostep are historical special cases, not the implementation target.
+- Big World Hypothesis: [2512.23419](https://arxiv.org/abs/2512.23419)
+- Three Dogmas of RL: [2407.10583](https://arxiv.org/abs/2407.10583)
+- Meta-gradient search control: [2406.19561](https://arxiv.org/abs/2406.19561)
 - Sutton-Barto 2nd ed: §2.6 (tracking-rate EMA), §6 (1-step TD stability), §8.4 (prioritized sweeping with Dyna), §9.5.4 (online normalization)

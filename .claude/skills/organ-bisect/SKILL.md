@@ -62,8 +62,11 @@ Estimated cost of theorizing first: ~6 hours. Cost of bisecting first: 10 min.
   integrator (2 full-system detonations by 300k, ρ̄ at −1e37). Its unbounded
   part is the PAYOFF: gauge it (predict v(stop) − valueGauge, add the gauge
   back at consumers).
-- tools/bisect.py is FORBIDDEN as a filename: it shadows stdlib `bisect` and
-  hijacks argparse across the repo (use ablate.py).
+- Ablation matrix = sequential `OAK_ABLATE=<organ,list> ./fleet.py run
+  <steps> ablate-<organ>-<depth>k --role probe` runs (one at a time, probe so
+  ROLES.json candidate is untouched); compare `fleet.py report` across runs.
+  Never create bisect.py at the repo root — it shadows stdlib `bisect` and hijacks
+  argparse repo-wide.
 
 ## Instruments
 

@@ -3,7 +3,7 @@
 ## An implementation of [the Alberta Plan for AI Research](https://arxiv.org/abs/2208.11173) (Sutton, Bowling & Pilarski, 2022)
 
 
-## Eyes on the Prize ([`EyesOnThePrize.pdf`](docs/papers/EyesOnThePrize.pdf))
+## Eyes on the Prize (Sutton, [incompleteideas.net](http://incompleteideas.net/))
 
 The Alberta Plan exists in service of a single long-term goal Sutton calls
 *the Prize*: understanding the principles of intelligence well enough to
@@ -39,13 +39,9 @@ OaK is a working bet on the four commitments that follow from that goal:
 
 ## The FC-STOMP cycle / OaK Architecture
 
-![Oak architecture diagram](media/OaK%20Architecture.png)
-
-Diagram source: [`docs/papers/AlbertaPlanSlides.pdf`](docs/papers/AlbertaPlanSlides.pdf)
-
 > *"Understanding intelligence is a grand scientific prize that may soon be
 > within reach; the glory will go to the bold."*
-> — [`AlbertaPlanSlides.pdf`](docs/papers/AlbertaPlanSlides.pdf), p. 12
+> — Sutton, Alberta Plan slides, p. 12
 
 The architecture for the Step-11 agent is the FC-STOMP cycle: the paper names
 the cycle STOMP and the architecture Oak; FC (Feature Construction) is
@@ -68,8 +64,6 @@ Please ask your agent to set this up. You must have an Apple silicon machine
 ## Wait? No PyTorch? Lets Talk about that.
 
 This repo is mostly maintained by agents, so we need to go **fast**. Why rely on an unoptimized framework when we can craft accelerated GPU kernels with Claude directly? We use Xcode traces and compare OaK's outputs bit for bit, so we can losslessly upgrade and optimize the kernel without large dependencies or frameworks getting in the way. The code is the algorithmic logic for OaK plus a thin launch script, and that's it.
-
-![PyTorch crossed out](media/pytorch%20crossed%20out.png)
 
 
 ## John Carmack: "AGI is likely tens of thousands of lines of code, not millions"
