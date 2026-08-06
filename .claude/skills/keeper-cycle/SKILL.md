@@ -15,23 +15,24 @@ description: The OaK keeper-promotion loop that produced three PROMOTEd keepers 
    metallib .build/OakKernel.air -o .build/OakKernel.metallib && swift build
    -c release`. Kernel arena and Swift `Arena` MUST stay mirrored (a mismatch
    = instant fleet-wide garbage; check both on any state addition).
-3. **Verify at 100k, visibly**: `tools/check.sh <mk-name>-check-100k 100000
-   planning`. Bars: 0 deaths, 0 NF, median ≥ keeper curve at 100k, SPS ≥
+3. **Verify at 100k, visibly**: `OAK_ABLATE=planning ./fleet.py run 100000
+   <mk-name>-check-100k` then read `.oak-benchmarks/<name>.log` on `.done`.
+   Bars: 0 deaths, 0 NF, median ≥ keeper curve at 100k, SPS ≥
    keeper. A 30k check cannot clear a horizon pathology.
-4. **ONE Tier-L**: `OAK_ABLATE=planning tools/run_fleet.sh 1000000
+4. **ONE Tier-L**: `OAK_ABLATE=planning ./fleet.py run 1000000
    <mk-name>-tierL-<date> .oak-benchmarks/<current-keeper>` + a Monitor on the
-   log grepping `step .* alive|PROMOTE|REJECT|FAIL\]|PASS\]`.
-5. **Heartbeat tables every 100k — ALWAYS via `tools/table.py <cand> <keeper>
-   <step>`** (the canonical 10-row table; hand-composed tables drift and drop
+   log grepping `PROMOTE|REJECT|FAIL\]|PASS\]`.
+5. **Heartbeats every 100k — ALWAYS via `./fleet.py report <cand-root>
+   --policy oak` (and the same on the keeper root for the side-by-side)**;
+   paste the rendered tables verbatim (hand-composed tables drift and drop
    rows). Report objectively — if the candidate is
    behind, say so with the gate arithmetic. Kill mid-run ONLY for a diagnosed
    defect with a causal fix verified at the pathology's own depth (the
    Mark V cycle pattern); never for one bad heartbeat.
 6. **Gate rules.** REJECT = the verdict IS data (mk6's REJECT proved the
    aux-task law). PROMOTE = commit everything (kernel + tools + docs + skills)
-   as ONE keeper commit, update `docs/roadmap.md` keeper record, update the
-   memory ledger, and write the next mk's ledger (what the run's own
-   forensics named).
+   as ONE keeper commit, update the memory ledger, and write the next mk's
+   ledger (what the run's own forensics named).
 
 ## Watch signatures (from the record)
 

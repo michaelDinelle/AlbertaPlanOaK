@@ -46,3 +46,8 @@ htmlcov/
 *.profraw
 .cursor/
 *.sample.txt
+
+# frontend (bun/vite)
+frontend/node_modules/
+frontend/dist/
+frontend/.cache/
