@@ -4,11 +4,6 @@
 #include <metal_stdlib>
 #include "HalfCheetahModel.metal"
 
-// Physics-scoped fast math (agent kernel math stays -fno-fast-math): the env
-// stage is a per-lane serial latency chain (~33% of step wall); relaxed fp
-// contraction/reassociation shortens it. Instrument change to the environment
-// — re-certified by the paired population gate at the M-8192 equivalence tier
-// (the F4 protocol). RNG helpers below are excluded (safe region).
 #pragma METAL fp math_mode(fast)
 using namespace metal;
 
@@ -1105,15 +1100,8 @@ inline void hc_forward(thread const HCState &s, thread HCWork &w) {
     hc_kinematics(s, w);
     HCContacts con;
     HCRefCoef ref;
-    // collision depends only on kinematics outputs (geom_xpos/geom_xaxis) and
-    // s.qpos; it is writes-disjoint with comPos/comVel/rne/makeM/factorI, so
-    // the Df contact chain issues ahead of them (ILP statement motion).
     hc_collision(s, w, con);
     hc_comPos(w);
-    // ILP reorder (writes-disjoint, bit-identical statement motion): comVel
-    // needs only comPos's cdof (+qvel) and writes cvel/cdofdot; rne consumes
-    // those plus comPos's cinert and writes only qfrc_bias. Neither touches
-    // M/con/efc_*, so both hoist above makeM/collision.
     hc_comVel(s, w);
     hc_rne(s, w);
     hc_makeM(w);

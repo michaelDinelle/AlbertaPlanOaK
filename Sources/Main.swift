@@ -2,6 +2,7 @@ import CryptoKit
 import Darwin
 import Foundation
 import Metal
+import zlib
 
 struct OakError: Error, CustomStringConvertible { let description: String }
 func err(_ s: String) -> OakError { OakError(description: s) }
@@ -15,12 +16,9 @@ struct KernelConfig {
   var invRank, invOptionCount, metaEta: Float
   var agentCount, paramStride, stateStride, uintStride: UInt32
   var nurseryCount: UInt32
-  // Host-precomputed constants (identical IEEE values — Float division is
-  // correctly rounded on both sides with fast-math off).
-  var keyboardSketchDim: UInt32  // max(1, min(D, K))
-  var sampleSigma: Float  // 1 / max(D, 1)
-  var sampleInv2S2: Float  // 1 / (2 * sampleSigma * sampleSigma)
-  var actorAlphaDenom: Float  // Float(max(D * 32, 1)) — divisor, NOT a reciprocal
+  var sampleSigma: Float
+  var sampleInv2S2: Float
+  var actorAlphaDenom: Float
 }
 struct KernelScalars {
   var stepCount: UInt32 = 0, stateSlot: UInt32 = 0
@@ -28,36 +26,28 @@ struct KernelScalars {
 }
 struct KernelStats {
   var encodeNonFiniteCount, learnNonFiniteCount, planNonFiniteCount, tdPsiNonFiniteCount: Float
-  var oakOptionReinitCount, oakFeatureReinitCount, terminationRate, optionDurationMean: Float
+  var oakOptionReinitCount, oakFeatureReinitCount, terminationRate: Float
   var importanceEss, actorUpdateNormMean, actorSupportEntropy, modelPriorityMax: Float
-  var selectedOptionAge, selectedOptionDuration, selectedOptionPriority, keyboardL1, actorAdvantageL1: Float
-  var selectedOptionIndex, keyboardOrigin: Float
-  var selectedOptionFeature, selectedContinuation, selectedKeyboardWeight, mainTd, planTdValue: Float
-  var keyboardSketchDim, keyboardEffectiveL1, searchControlUseMean, generateTestEligibleCount: Float
-  var learningMature: Float = 0
-  var dynaBackupMean: Float = 0
+  var selectedOptionAge, selectedOptionPriority, keyboardL1, actorAdvantageL1: Float
+  var selectedOptionIndex, selectedContinuation, selectedKeyboardWeight, mainTd, planTdValue: Float
+  var keyboardEffectiveL1, searchControlUseMean, generateTestEligibleCount: Float
 }
 
 struct FleetEnvCfg {
   var laneCount, episodeLen, policyMode, recordCapacity: UInt32
   var invObsFloor: Float
 }
-struct SnapInfo {
-  var count: UInt32 = 0, finiteCount: UInt32 = 0
-  var sum: Float = 0, sumC: Float = 0, first: Float = 0, last: Float = 0
-}
 struct LaneSnapshot {
   var scalars: KernelScalars
   var stats: KernelStats
   var paramAbsMax: Float
   var paramNonFinite: UInt32
-  var steps, doneCount, resets: UInt32
+  var steps, doneCount: UInt32
   var rewardSum, rho, deltaSum, deltaPeak: Float
   var deathStep, deathDetector: UInt32
   var deathRewardSum, deathRho: Float
-  var info0, info1, info2, info3: SnapInfo
 }
-let fleetLaneStride = 408
+let fleetLaneStride = 312
 
 struct AblationSpec {
   static let ordered = [
@@ -66,13 +56,6 @@ struct AblationSpec {
     "keyboard-to-policy", "search-control", "search-to-generate-test", "generate-and-test",
     "derived-core", "joint-geometry",
   ]
-  // Metal function-constant index per organ. The first seven map identity
-  // (0-6); the greedy-Q-selection organ ("model-to-keyboard", was index 7) is
-  // EXCISED (Phase 7.5, convicted toxic in Phase 6) — removed from the list, so
-  // the next four keep their original indices explicitly to avoid shifting.
-  // The Phase-7 representation-geometry organs take the free slots 26/27 —
-  // 12-25/28-31 are OAK_MEGA_G, OAK_SPEC_*, the stage mask, OAK_SPEC_NURSERY,
-  // and the probes (Sources/OakKernel.metal:16-40).
   static let functionConstantIndex = [
     "keyboard-to-policy": 8,
     "search-control": 9,
@@ -164,61 +147,61 @@ struct Arena {
       return at
     }
     obs = take(3 * o)
-    _ = take(2 * r)  // state slots
+    _ = take(2 * r)
     policy = take(d)
-    _ = take(d)  // policyMeanRaw (raw-acc blend for discrete logits)
-    _ = take(d)  // actionSignal
-    _ = take(k * d)  // optionActorCredit
-    options = take(k * d)  // optionPolicyMean
-    _ = take(k)  // importance
-    _ = take(3)  // reward, td, planTd
-    _ = take(k)  // tdPsi
-    _ = take(r)  // utilFeat
+    _ = take(d)
+    _ = take(d)
+    _ = take(k * d)
+    options = take(k * d)
+    _ = take(k)
+    _ = take(3)
+    _ = take(k)
+    _ = take(r)
     utilOpt = take(k)
-    _ = take(3 * r)  // bonusW, featureMean, featureSM
+    _ = take(3 * r)
     alpha = take(r)
     beta = take(r)
-    _ = take(2 * r)  // hMeta, gradEnergy
+    _ = take(2 * r)
     alphaPsi = take(r)
     betaPsi = take(r)
-    _ = take(2 * r)  // hPsi, gradEnergyPsi
+    _ = take(2 * r)
     alphaModel = take(r)
     betaModel = take(r)
-    _ = take(2 * r)  // hModel, gradEnergyModel
-    _ = take(5 * k)  // actorAdv, optRewardTd + 3 reserved (headDenom/durationTd/durationHat deleted)
-    _ = take(tl * max(o, 1))  // obsTraceMulti
-    _ = take(4 * k)  // prioOpt, continuation, keyboard + 1 reserved (modelDenom deleted)
-    _ = take(1)  // valueGauge
-    _ = take(2 * k)  // reserved (tdPsiFast/tdPsiPeak deleted)
-    _ = take(2 * k)  // headScale + 1 reserved (modelScale deleted)
-    _ = take(2)  // valueScale, xNormPrev
-    _ = take(5 * k)  // hDotPsi, psiAuxScale, psiRho, optRho, optFit
-    alphaAct = take(k)  // actor IDBD multiplier (init 1)
+    _ = take(2 * r)
+    _ = take(5 * k)
+    _ = take(tl * max(o, 1))
+    _ = take(4 * k)
+    _ = take(1)
+    _ = take(2 * k)
+    _ = take(2 * k)
+    _ = take(2)
+    _ = take(5 * k)
+    alphaAct = take(k)
     betaAct = take(k)
-    _ = take(2 * k)  // hAct, energyAct
-    _ = take(k)  // impStage (sample->next-step importance staging)
-    _ = take(k * d)  // creditStage (sample->next-step actor-credit staging)
-    _ = take(8)  // sampleScr
-    _ = take(4 * k)  // rHatC, lRawC, vsNextC, twinDis (encode->plan dot cache)
-    _ = take(4 * k)  // vsTd, vsDot, vsScale, vsAuxScale
-    _ = take(1)  // planScale
-    s = (s + 3) & ~3  // 16B-align nurStats/muRaw/polCoef (float4 access)
-    _ = take(4 * rn)  // nursery mean/SM/util/utilSM
-    _ = take(k * d)  // muRaw (emit blend scratch)
-    _ = take(k * d)  // polCoef (actor coefficient hoist)
-    _ = take(r)  // optUseByFeat (curation scan scatter)
-    _ = take(rn)  // lcbScr (parallel LCB precompute)
-    s = (s + 3) & ~3  // align pad
-    _ = take(4 * r)  // eligScr (parallel eligibility tuples)
-    _ = take(k)  // fcG (tg-diet: keyboard scores scratch)
-    _ = take(16)  // fcS (tg-diet: fc scalars + sample exchange)
-    _ = take(64 * r)  // ring values (R slots x 64 active tuples: core + gated)
-    _ = take(r)  // dynaTd (per-ring-slot backup priorities)
-    _ = take(32)  // dynaD (per-thread backup deltas)
-    _ = take(r)  // planU (planner-owned ring value table, reclaims dynaAcc)
-    _ = take(k)  // dynaC (copy-2 per-option update coefficients)
-    _ = take(4)  // planScr (reward snapshot; slot 2 = rsqrt(R) cache; 1/3 reserved)
-    _ = take(r)  // ringReward (outbound reward per ring slot, for the relay)
+    _ = take(2 * k)
+    _ = take(k)
+    _ = take(k * d)
+    _ = take(8)
+    _ = take(4 * k)
+    _ = take(4 * k)
+    _ = take(1)
+    s = (s + 3) & ~3
+    _ = take(4 * rn)
+    _ = take(k * d)
+    _ = take(k * d)
+    _ = take(r)
+    _ = take(rn)
+    s = (s + 3) & ~3
+    _ = take(4 * r)
+    _ = take(k)
+    _ = take(16)
+    _ = take(64 * r)
+    _ = take(r)
+    _ = take(32)
+    _ = take(r)
+    _ = take(k)
+    _ = take(4)
+    _ = take(r)
     total = s
   }
 }
@@ -254,28 +237,18 @@ final class Engine {
     precondition(b >= 1, "Engine batch must be >= 1")
     batch = b
     self.obsDim = obsDim
-    // Sparse-wide: capacity = smallest power of two >= 2x linear input width
-    // (stream-shape-derived, Inv-9); active width = 32 (execution width) via
-    // banked WTA; K = active width.
     let inputW = Arena.input(obsDim, dPolicy)
     var cap = 32
     while cap < 2 * inputW { cap *= 2 }
     rank = cap
     d = dPolicy
-    // Sutton-test instrument: scales the nursery capacity (canonical runs: 1).
     let nurseryMult = max(
       ProcessInfo.processInfo.environment["OAK_SUTTON_MULT"].flatMap(Int.init) ?? 1, 1)
     let rn = rank * nurseryMult
     let k = 32
     a = Arena(obsDim, rank, k, d, rn)
     paramTotal = rank + 8 * k * rank + k * (d / 2) * rank
-    // uints: 11 scalars + optFeature/optAge/lastStopAge (3k) + 5 rank arrays
-    // + 4 nursery arrays + actIdx (2*64) + dynaSlot (32) + ringIdx (32*rank)
-    // + planTree (rank, Phase 9.1 planning priority index)
-    // + parked (k, Phase 9.3 K-parking hibernation flags)
     uintTotal = 11 + 3 * k + 5 * rank + 4 * rn + 128 + 32 + 32 * rank + rank + k
-    // Core region: 17 std obs + 12 prev-action + reward + bias + spare = 32
-    // always-active slots (Mark III law: all raw inputs visible every step).
     let anchors = 32
     let sampleSigma = 1 / Float(max(d, 1))
     let cfgValue = KernelConfig(
@@ -286,7 +259,6 @@ final class Engine {
       agentCount: UInt32(batch), paramStride: UInt32(paramTotal),
       stateStride: UInt32(a.total), uintStride: UInt32(uintTotal),
       nurseryCount: UInt32(rn),
-      keyboardSketchDim: UInt32(max(1, min(d, k))),
       sampleSigma: sampleSigma,
       sampleInv2S2: 1 / (2 * sampleSigma * sampleSigma),
       actorAlphaDenom: Float(max(d * 32, 1)))
@@ -310,7 +282,6 @@ final class Engine {
     let psi = rank
     let inv = 1 / sqrt(Float(rank))
     let alpha0 = 1 / Float(max(obsDim, 1))
-    // uint layout offsets (mirror make_ctx)
     let uFeatAge = 7 + k
     let uParentA = 7 + 2 * k + rank
     let uParentB = 7 + 2 * k + 2 * rank
@@ -325,18 +296,14 @@ final class Engine {
       let lu = uints.p + lane * uintTotal
       lu[uExplStep] = UInt32.max
       lu[uExplStep + 1] = UInt32.max
-      let traceChannels = max((Arena.traces(obsDim) - 1) * obsDim, 1)  // 4 levels x 17
+      let traceChannels = max((Arena.traces(obsDim) - 1) * obsDim, 1)
       for n in 0..<rn {
-        // Generator seeds: kinds cycle product/sum/residual/trace; parents are
-        // core slots (always active) or trace channels for kind 3.
         lu[uNur + n] = UInt32(n % ((n % 4 == 3) ? traceChannels : anchors))
         lu[uNur + rn + n] = UInt32((n * 7 + 3) % anchors)
         lu[uNur + 2 * rn + n] = UInt32(n % 4)
       }
       for i in 0..<rank {
         if i >= anchors {
-          // Gated region: first 68 slots are the multi-timescale obs traces
-          // (kind 3); the rest are products/sums/residuals of core channels.
           let idx = i - anchors
           if idx < traceChannels {
             lu[uParentA + i] = UInt32(idx)
@@ -356,10 +323,6 @@ final class Engine {
         [a.beta, a.betaPsi, a.betaModel].forEach { ls[$0 + i] = log(alpha0) }
       }
       let basis = 1 / Float(max(d, 1))
-      // Ensemble copy-2 decorrelation: vStop2 gets a shifted diagonal (same
-      // magnitude as psi's diagonal, different index pattern); reward/duration
-      // copies start at zero like copy 1 and decorrelate through vStop2's
-      // different bootstrap plus the semi-gradient update geometry.
       let vStop2 = rank + 7 * k * rank + k * (d / 2) * rank
       for kk in 0..<k {
         lu[7 + kk] = UInt32(kk)
@@ -368,14 +331,9 @@ final class Engine {
         ls[a.utilOpt + kk] = Float(rank)
         ls[a.alphaAct + kk] = 1
         ls[a.betaAct + kk] = 0
-        // Per-lane init diversity: every lane previously started at the SAME
-        // symmetric near-zero saddle, making ignition a pure noise-stream
-        // lottery. A cheap integer hash permutes each option's seeded action
-        // slot and sign per lane (deterministic per (lane, option)).
         let h = UInt32(truncatingIfNeeded: lane &* 2_654_435_761 &+ kk &* 40_503 &+ 977)
         let slot = Int(h % UInt32(max(d / 2, 1)))
         let sign: Float = ((h >> 16) & 1) == 0 ? 1 : -1
-        // optPolicy offset: rank(value) + k*rank(psi); live-half stride d/2
         lp[rank + k * rank + kk * (d / 2) + slot] = sign * basis
       }
     }
@@ -428,7 +386,399 @@ func metricsRoot() -> URL {
     ".oak-benchmarks/\(id)", isDirectory: true)
 }
 
+
+enum V4Enc: String { case u8, i16, dx32 }
+
+struct V4Field {
+  let idx: Int
+  let enc: V4Enc
+  let scale: Double
+  let wrap: Bool
+  init(_ idx: Int, _ enc: V4Enc, _ scale: Double = 0, _ wrap: Bool = false) {
+    self.idx = idx
+    self.enc = enc
+    self.scale = scale
+    self.wrap = wrap
+  }
+  func bytes(_ n: Int) -> Int {
+    switch enc {
+    case .u8: return n
+    case .i16: return 2 * n
+    case .dx32: return 4 * n
+    }
+  }
+  var json: [String: Any] {
+    var o: [String: Any] = ["idx": idx, "enc": enc.rawValue]
+    if enc != .u8 { o["scale"] = scale }
+    if wrap { o["wrap"] = true }
+    return o
+  }
+}
+
+struct V4Codec {
+  let category: String
+  let ctrlBox: Int
+  let fields: [V4Field]
+  let poseConst: [Int: Double]
+  var hasDx: Bool { fields.contains { $0.enc == .dx32 } }
+  var json: [String: Any] {
+    var pc: [String: Any] = [:]
+    for (k, v) in poseConst { pc[String(k)] = v }
+    return [
+      "category": category,
+      "ctrl": ctrlBox == 0 ? "index" : ["kind": "u8box", "n": ctrlBox] as [String: Any],
+      "poseFields": fields.map(\.json),
+      "poseConst": pc,
+    ]
+  }
+  static func table(_ envKind: UInt32) throws -> V4Codec {
+    func grid(_ idxs: [Int], _ consts: [Int: Double] = [:]) -> V4Codec {
+      V4Codec(
+        category: "grid", ctrlBox: 0, fields: idxs.map { V4Field($0, .u8) },
+        poseConst: consts)
+    }
+    switch envKind {
+    case 0:
+      var f = [V4Field(0, .dx32, 0.01), V4Field(1, .i16, 1e-4)]
+      for i in 2...8 { f.append(V4Field(i, .i16, 1e-4, true)) }
+      return V4Codec(category: "cheetah", ctrlBox: 6, fields: f, poseConst: [:])
+    case 1: return grid([0, 1, 2, 3])
+    case 2: return grid([0, 1], [2: 7, 3: 7])
+    case 3: return grid([0, 1, 2, 3, 4, 5, 6, 7])
+    case 4:
+      return V4Codec(
+        category: "classic", ctrlBox: 0,
+        fields: [
+          V4Field(0, .i16, 1e-4, true), V4Field(1, .i16, 1e-4, true),
+          V4Field(2, .i16, 1e-3), V4Field(3, .i16, 1e-3),
+        ], poseConst: [:])
+    case 5:
+      return V4Codec(
+        category: "classic", ctrlBox: 0,
+        fields: [V4Field(0, .i16, 1e-4), V4Field(1, .i16, 1e-5)], poseConst: [2: 0.5])
+    case 6:
+      return V4Codec(
+        category: "classic", ctrlBox: 0,
+        fields: [
+          V4Field(0, .i16, 1e-4), V4Field(1, .i16, 1e-3),
+          V4Field(2, .i16, 1e-4, true), V4Field(3, .i16, 1e-3),
+        ], poseConst: [:])
+    case 7:
+      return V4Codec(
+        category: "classic", ctrlBox: 1,
+        fields: [
+          V4Field(0, .i16, 1e-4, true), V4Field(1, .i16, 1e-3), V4Field(2, .i16, 1e-3),
+        ], poseConst: [:])
+    case 8: return grid([0], [1: 15])
+    case 9: return grid([0, 1], [2: 15, 3: 15])
+    case 10: return grid([0, 1, 2, 3, 4, 5, 6, 7])
+    case 11: return grid([0, 2], [1: 31])
+    case 12: return grid([0, 1, 2, 3])
+    case 13: return grid([0, 1, 2, 3, 4])
+    case 14: return grid([0, 1, 2, 3])
+    case 15: return grid([0, 2], [1: 31])
+    default: throw err("No record-v4 codec for envKind \(envKind).")
+    }
+  }
+}
+
+final class RecordV4Writer: @unchecked Sendable {
+  static let fileMagic: UInt32 = 0x344B_414F
+  static let chunkMagic: UInt32 = 0x344B_4843
+  static let codecVersion = 1
+
+  let handle: FileHandle
+  let codec: V4Codec
+  let metaURL: URL
+  let envId: String
+  let seed: Int
+  let actDim: Int
+  private var buf: [UInt8] = []
+  private var chunks: [[Int]] = []
+  private var fileOffset = 0
+  private var totalSteps = 0
+  private var deflateVerified = false
+
+  init(
+    handle: FileHandle, envKind: UInt32, metaURL: URL, envId: String, seed: Int, actDim: Int
+  ) throws {
+    self.handle = handle
+    self.codec = try V4Codec.table(envKind)
+    self.metaURL = metaURL
+    self.envId = envId
+    self.seed = seed
+    self.actDim = actDim
+    var head = Data(capacity: 16)
+    for v: UInt32 in [Self.fileMagic, 4, envKind, UInt32(Self.codecVersion)] {
+      var x = v.littleEndian
+      withUnsafeBytes(of: &x) { head.append(contentsOf: $0) }
+    }
+    try handle.write(contentsOf: head)
+    fileOffset = head.count
+    try writeMeta(final: false)
+  }
+
+  func writeMeta(final: Bool) throws {
+    var meta: [String: Any] = [
+      "envId": envId, "seed": seed, "actDim": actDim, "recordVersion": 4,
+      "codecVersion": Self.codecVersion, "codec": codec.json,
+    ]
+    if final {
+      meta["steps"] = totalSteps
+      meta["chunks"] = chunks
+    }
+    try JSONSerialization.data(withJSONObject: meta, options: [.prettyPrinted, .sortedKeys])
+      .write(to: metaURL, options: .atomic)
+  }
+
+  func encodeChunk(
+    _ rp: UnsafePointer<Float>, slot: Int, capacity: Int, stepStart: Int, stepCount: Int,
+    rewardDelta: Float
+  ) throws {
+    guard stepCount > 0 else { return }
+    let nBox = codec.ctrlBox
+    let baseOff = stepCount * (1 + nBox)
+    var cursor = baseOff + (codec.hasDx ? 8 : 0)
+    var off: [Int] = []
+    off.reserveCapacity(codec.fields.count)
+    for f in codec.fields {
+      off.append(cursor)
+      cursor += f.bytes(stepCount)
+    }
+    let fixed = cursor + 4
+    if buf.count < fixed { buf = [UInt8](repeating: 0, count: fixed) }
+
+    var escRows: [Int] = []
+    var doneCount = 0
+    let fields = codec.fields
+    buf.withUnsafeMutableBufferPointer { bp in
+      let b = bp.baseAddress!
+      memset(b, 0, fixed)
+      var recon = 0.0
+      if codec.hasDx, let dxIdx = fields.first(where: { $0.enc == .dx32 })?.idx {
+        let r0 = (slot * capacity + (stepStart % capacity)) * 16
+        recon = Double(rp[r0 + 7 + dxIdx])
+        var bits = recon.bitPattern.littleEndian
+        withUnsafeBytes(of: &bits) { memcpy(b + baseOff, $0.baseAddress!, 8) }
+      }
+      for i in 0..<stepCount {
+        let base = (slot * capacity + ((stepStart + i) % capacity)) * 16
+        var esc = false
+        for u in 0..<16 where !rp[base + u].isFinite { esc = true }
+        var hdr: UInt8 = 0
+        let doneV = rp[base + 6]
+        if doneV == 1 {
+          hdr |= 0x10
+          doneCount += 1
+        } else if doneV != 0 {
+          esc = true
+        }
+        if nBox == 0 {
+          let a = Double(rp[base])
+          if a.isFinite, a == a.rounded(), a >= 0, a <= 15 {
+            hdr |= UInt8(a) & 0x0F
+          } else {
+            esc = true
+          }
+        } else {
+          for c in 0..<nBox {
+            let v = Double(rp[base + c])
+            let q = v.isFinite ? ((min(max(v, -1), 1) + 1) * 127.5).rounded() : 0
+            b[stepCount * (1 + c) + i] = UInt8(min(max(q, 0), 255))
+          }
+        }
+        for (j, f) in fields.enumerated() {
+          let v = Double(rp[base + 7 + f.idx])
+          switch f.enc {
+          case .u8:
+            if !(v.isFinite && v == v.rounded() && v >= 0 && v <= 255) { esc = true }
+            b[off[j] + i] = UInt8(v.isFinite ? min(max(v.rounded(), 0), 255) : 0)
+          case .i16:
+            var w = v
+            if f.wrap, w.isFinite {
+              w -= 2 * Double.pi * ((w + Double.pi) / (2 * Double.pi)).rounded(.down)
+            }
+            var q = w.isFinite ? (w / f.scale).rounded() : 0
+            if !(q >= -32767 && q <= 32767) { esc = true }
+            q = min(max(q, -32767), 32767)
+            var qi = Int16(q).littleEndian
+            withUnsafeBytes(of: &qi) { memcpy(b + off[j] + 2 * i, $0.baseAddress!, 2) }
+          case .dx32:
+            var q = 0.0
+            if v.isFinite, recon.isFinite {
+              q = ((v - recon) / f.scale).rounded()
+              if !(q >= -2_147_483_647 && q <= 2_147_483_647) { esc = true }
+              q = min(max(q, -2_147_483_647), 2_147_483_647)
+            } else {
+              esc = true
+            }
+            recon += q * f.scale
+            var qi = Int32(q).littleEndian
+            withUnsafeBytes(of: &qi) { memcpy(b + off[j] + 4 * i, $0.baseAddress!, 4) }
+          }
+        }
+        if esc {
+          hdr |= 0x20
+          escRows.append(i)
+        }
+        b[i] = hdr
+      }
+      var cnt = UInt32(escRows.count).littleEndian
+      withUnsafeBytes(of: &cnt) { memcpy(b + fixed - 4, $0.baseAddress!, 4) }
+    }
+
+    var payload = Data(capacity: fixed + escRows.count * 68)
+    buf.withUnsafeBufferPointer { payload.append($0.baseAddress!, count: fixed) }
+    for i in escRows {
+      var idx = UInt32(i).littleEndian
+      withUnsafeBytes(of: &idx) { payload.append(contentsOf: $0) }
+      let base = (slot * capacity + ((stepStart + i) % capacity)) * 16
+      payload.append(UnsafeRawPointer(rp + base).assumingMemoryBound(to: UInt8.self), count: 64)
+    }
+
+    let comp = try (payload as NSData).compressed(using: .zlib) as Data
+    if !deflateVerified {
+      deflateVerified = true
+      let wrapped = comp.count >= 2
+        && comp.withUnsafeBytes { p -> Bool in
+          let b0 = Int(p[0]), b1 = Int(p[1])
+          return b0 == 0x78 && ((b0 << 8) | b1) % 31 == 0
+        }
+      if wrapped {
+        throw err("record v4: Compression .zlib emitted a ZLIB-WRAPPED stream; the spec requires raw DEFLATE (frontend/src/sim/RECORD_V4_SPEC.md).")
+      }
+      let back = try (comp as NSData).decompressed(using: .zlib) as Data
+      guard back == payload else {
+        throw err("record v4: deflate round-trip mismatch (\(back.count) vs \(payload.count) bytes).")
+      }
+    }
+    let crc = comp.withUnsafeBytes { p in
+      UInt32(truncatingIfNeeded: crc32(0, p.bindMemory(to: UInt8.self).baseAddress, uInt(comp.count)))
+    }
+    var out = Data(capacity: 32 + comp.count)
+    for v: UInt32 in [
+      Self.chunkMagic, UInt32(stepStart), UInt32(stepCount), UInt32(payload.count),
+      UInt32(comp.count), crc, UInt32(doneCount), rewardDelta.bitPattern,
+    ] {
+      var x = v.littleEndian
+      withUnsafeBytes(of: &x) { out.append(contentsOf: $0) }
+    }
+    out.append(comp)
+    try handle.write(contentsOf: out)
+    chunks.append([stepStart, stepCount, fileOffset, 32 + comp.count])
+    fileOffset += 32 + comp.count
+    totalSteps += stepCount
+  }
+
+  var bytesWritten: Int { fileOffset }
+}
+
+final class MetricsTapeWriter {
+  static let fileMagic: UInt32 = 0x544B_414F
+  static let segMagic: UInt32 = 0x54_4745_53
+  static let fields: [String] = [
+    "rewardSum", "doneCount", "rewardRate", "kernelRho", "deltaSum",
+    "deltaPeak", "mainTd", "actorSupportEntropy", "terminationRate",
+    "keyboardEffectiveL1", "keyboardL1", "actorAdvantageL1",
+    "modelPriorityMax", "importanceEss", "actorUpdateNormMean",
+    "searchControlUseMean", "selectedOptionPriority", "selectedContinuation",
+    "generateTestEligibleCount", "featureReinitCount", "optionReinitCount",
+    "nfEncode", "nfLearn", "nfPlan", "nfTdPsi",
+    "paramAbsMax",
+  ]
+  private let handle: FileHandle
+  private let laneCount: Int
+  private var pending = Data()
+  private var pendingWindows = 0
+  private var deflateVerified = false
+
+  init(url: URL, laneCount: Int) throws {
+    FileManager.default.createFile(atPath: url.path, contents: nil)
+    self.handle = try FileHandle(forWritingTo: url)
+    self.laneCount = laneCount
+    let json = try JSONSerialization.data(withJSONObject: ["fields": Self.fields])
+    var head = Data()
+    for v: UInt32 in [Self.fileMagic, 1, UInt32(laneCount), UInt32(json.count)] {
+      var x = v.littleEndian
+      withUnsafeBytes(of: &x) { head.append(contentsOf: $0) }
+    }
+    head.append(json)
+    try handle.write(contentsOf: head)
+  }
+
+  func append(snap: UnsafeMutablePointer<LaneSnapshot>, half: Int,
+              stepStart: Int, stepCount: Int) {
+    for v: UInt32 in [UInt32(stepStart), UInt32(stepCount)] {
+      var x = v.littleEndian
+      withUnsafeBytes(of: &x) { pending.append(contentsOf: $0) }
+    }
+    var col = [Float](repeating: 0, count: laneCount)
+    func push(_ get: (LaneSnapshot) -> Float) {
+      for l in 0..<laneCount { col[l] = get(snap[half * laneCount + l]) }
+      col.withUnsafeBufferPointer {
+        pending.append(UnsafeRawPointer($0.baseAddress!).assumingMemoryBound(to: UInt8.self),
+                       count: laneCount * 4)
+      }
+    }
+    push { $0.rewardSum }
+    push { Float($0.doneCount) }
+    push { $0.rho }
+    push { $0.scalars.rho }
+    push { $0.deltaSum }
+    push { $0.deltaPeak }
+    push { $0.stats.mainTd }
+    push { $0.stats.actorSupportEntropy }
+    push { $0.stats.terminationRate }
+    push { $0.stats.keyboardEffectiveL1 }
+    push { $0.stats.keyboardL1 }
+    push { $0.stats.actorAdvantageL1 }
+    push { $0.stats.modelPriorityMax }
+    push { $0.stats.importanceEss }
+    push { $0.stats.actorUpdateNormMean }
+    push { $0.stats.searchControlUseMean }
+    push { $0.stats.selectedOptionPriority }
+    push { $0.stats.selectedContinuation }
+    push { $0.stats.generateTestEligibleCount }
+    push { $0.stats.oakFeatureReinitCount }
+    push { $0.stats.oakOptionReinitCount }
+    push { $0.stats.encodeNonFiniteCount }
+    push { $0.stats.learnNonFiniteCount }
+    push { $0.stats.planNonFiniteCount }
+    push { $0.stats.tdPsiNonFiniteCount }
+    push { $0.paramNonFinite != 0 ? Float.infinity : $0.paramAbsMax }
+    pendingWindows += 1
+  }
+
+  func flush() throws {
+    guard pendingWindows > 0 else { return }
+    let comp = try (pending as NSData).compressed(using: .zlib) as Data
+    if !deflateVerified {
+      deflateVerified = true
+      let back = try (comp as NSData).decompressed(using: .zlib) as Data
+      guard back == pending else {
+        throw err("metrics tape: deflate round-trip mismatch.")
+      }
+    }
+    let crc = comp.withUnsafeBytes { p in
+      UInt32(truncatingIfNeeded: crc32(0, p.bindMemory(to: UInt8.self).baseAddress, uInt(comp.count)))
+    }
+    var out = Data(capacity: 20 + comp.count)
+    for v: UInt32 in [
+      Self.segMagic, UInt32(pendingWindows), UInt32(pending.count), UInt32(comp.count), crc,
+    ] {
+      var x = v.littleEndian
+      withUnsafeBytes(of: &x) { out.append(contentsOf: $0) }
+    }
+    out.append(comp)
+    try handle.write(contentsOf: out)
+    pending = Data()
+    pendingWindows = 0
+  }
+}
+
 @main struct Main {
+  nonisolated(unsafe) static var recordingDefaultSuppressed = false
+
   static func main() {
     _ = pthread_set_qos_class_self_np(QOS_CLASS_USER_INTERACTIVE, 0)
     do {
@@ -436,6 +786,7 @@ func metricsRoot() -> URL {
       case "benchmark": try benchmark()
       case "physics-probe": try physicsProbe()
       case "gridworld-probe": try gridworldProbe()
+      case "record-v4-probe": try recordV4Probe()
       case "physics-rollout": try physicsRollout()
       default: throw err("Use `OaK benchmark`.")
       }
@@ -456,29 +807,23 @@ func metricsRoot() -> URL {
   ) throws {
     try fleetGPU(p, seeds, steps, root, laneEnvs, ablations)
   }
-  // Universal env contract: envId -> kernel envKind (the ONLY env-identity
-  // mapping; the agent kernel stays env-blind, Inv-1).
+  static let envIdsByKind: [String] = [
+    "HalfCheetah-v4", "FourRooms-cont-v0", "DeepSea-cont-v0", "KeyCorridor-cont-v0",
+    "Acrobot-cont-v0", "MountainCar-cont-v0", "CartPole-cont-v0", "Pendulum-cont-v0",
+    "Chain-cont-v0", "LargeDeepSea-cont-v0", "MultiKeyCorridor-cont-v0", "MemoryChain-cont-v0",
+    "ProceduralMaze-cont-v0", "HighDimMaze-cont-v0", "POMaze-cont-v0", "DelayedChain-cont-v0",
+  ]
   static func envKind(_ envId: String) throws -> UInt32 {
-    switch envId {
-    case "HalfCheetah-v4": return 0
-    case "FourRooms-cont-v0": return 1
-    case "DeepSea-cont-v0": return 2
-    case "KeyCorridor-cont-v0": return 3
-    case "Acrobot-cont-v0": return 4
-    case "MountainCar-cont-v0": return 5
-    case "CartPole-cont-v0": return 6
-    case "Pendulum-cont-v0": return 7
-    case "Chain-cont-v0": return 8
-    case "LargeDeepSea-cont-v0": return 9
-    case "MultiKeyCorridor-cont-v0": return 10
-    case "MemoryChain-cont-v0": return 11
-    case "ProceduralMaze-cont-v0": return 12
-    case "HighDimMaze-cont-v0": return 13
-    case "POMaze-cont-v0": return 14
-    case "DelayedChain-cont-v0": return 15
-    default:
-      throw err("Unknown env '\(envId)'. Known: HalfCheetah-v4, FourRooms-cont-v0, DeepSea-cont-v0, KeyCorridor-cont-v0, Acrobot-cont-v0, MountainCar-cont-v0, CartPole-cont-v0, Pendulum-cont-v0, Chain-cont-v0, LargeDeepSea-cont-v0, MultiKeyCorridor-cont-v0, MemoryChain-cont-v0, ProceduralMaze-cont-v0, HighDimMaze-cont-v0, POMaze-cont-v0, DelayedChain-cont-v0.")
+    guard let i = envIdsByKind.firstIndex(of: envId) else {
+      throw err("Unknown env '\(envId)'. Known: \(envIdsByKind.joined(separator: ", ")).")
     }
+    return UInt32(i)
+  }
+  static func envId(kind: UInt32) throws -> String {
+    guard Int(kind) < envIdsByKind.count else {
+      throw err("Unknown envKind \(kind) (0..\(envIdsByKind.count - 1)).")
+    }
+    return envIdsByKind[Int(kind)]
   }
   static func fleetGPU(
     _ p: Policy, _ seeds: [Int], _ steps: Int, _ root: URL, _ laneEnvs: [String],
@@ -508,12 +853,8 @@ func metricsRoot() -> URL {
     }
     let initPipe = try pipeline("oak_fleet_init")
     let snapPipe = try pipeline("oak_fleet_snapshot")
-    // G=32 with scalar env measured fastest at B=1024 (mk5 geometry sweep).
     let autoG = max(2, min(32, B / 32))
     let megaG = e["OAK_MEGA_LANES_PER_TG"].flatMap(Int.init) ?? autoG
-    // Scalar-env mode measured 3x faster than coop at high G (mk5 attribution);
-    // the coop simd-env path (OAK_MEGA_ENV_COOP, physRows/tgPhys) was deleted
-    // in the kernel-slimming pass.
     let megaW = 32 * megaG
     let megaConstants = MTLFunctionConstantValues()
     ablations.apply(to: megaConstants)
@@ -538,10 +879,6 @@ func metricsRoot() -> URL {
     }
     let megaPipe = try dev.makeComputePipelineState(
       function: lib.makeFunction(name: "oak_megastep", constantValues: megaConstants))
-    // tg: per lane, the K-wide continuation vector plus a 4K prev-dot stash
-    // (encode gathers plan's prev-dots; plan reads them gather-free) and a
-    // stash-dirty flag (feature replacement forces a plan re-gather).
-    // K = 32, Engine's hardcoded option count.
     let megaSlotBytes = (5 * 32 + 1) * megaG * MemoryLayout<Float>.stride
     guard megaG >= 1, megaW <= megaPipe.maxTotalThreadsPerThreadgroup,
       megaSlotBytes <= dev.maxThreadgroupMemoryLength
@@ -589,25 +926,40 @@ func metricsRoot() -> URL {
       try fm.createDirectory(at: dir, withIntermediateDirectories: true)
       return dir
     }
-    let recordAll = e["OAK_RECORD_ACTIONS"] == "1"
+    let recordAll =
+      e["OAK_RECORD_ACTIONS"] != "0" && !Main.recordingDefaultSuppressed
     let recordSeeds = Set(
       (e["OAK_RECORD_SEEDS"] ?? "").split(separator: ",").compactMap {
         Int(String($0).trimmingCharacters(in: .whitespaces))
       })
+    let recordFormat = e["OAK_RECORD_FORMAT"] ?? "4"
+    guard recordFormat == "3" || recordFormat == "4" else {
+      throw err("OAK_RECORD_FORMAT must be 3 or 4 (got '\(recordFormat)').")
+    }
     var recordLanes: [Int] = []
     var recordHandles: [FileHandle] = []
+    var recordV4: [RecordV4Writer] = []
     for (lane, s) in seeds.enumerated() where recordAll || recordSeeds.contains(s) {
       let dir = try seedDir(lane)
-      // Record v3: actions.bin records are 16 f32 — ctrl[6], done, pose[9].
-      let meta: [String: Any] = ["envId": laneEnvs[lane], "seed": s, "actDim": actDim, "recordVersion": 3]
-      try JSONSerialization.data(withJSONObject: meta, options: [.prettyPrinted, .sortedKeys])
-        .write(to: dir.appendingPathComponent("meta.json"), options: .atomic)
       let url = dir.appendingPathComponent("actions.bin")
+      let metaURL = dir.appendingPathComponent("meta.json")
       fm.createFile(atPath: url.path, contents: nil)
-      recordHandles.append(try FileHandle(forWritingTo: url))
+      let h = try FileHandle(forWritingTo: url)
+      if recordFormat == "4" {
+        recordV4.append(
+          try RecordV4Writer(
+            handle: h, envKind: laneEnvKinds[lane], metaURL: metaURL, envId: laneEnvs[lane],
+            seed: s, actDim: actDim))
+      } else {
+        let meta: [String: Any] = ["envId": laneEnvs[lane], "seed": s, "actDim": actDim, "recordVersion": 3]
+        try JSONSerialization.data(withJSONObject: meta, options: [.prettyPrinted, .sortedKeys])
+          .write(to: metaURL, options: .atomic)
+      }
+      recordHandles.append(h)
       recordLanes.append(lane)
     }
-    let recordCapacity = recordLanes.isEmpty ? 0 : 2 * hb
+    let drainEvery = max(e["OAK_RECORD_DRAIN_STEPS"].flatMap(Int.init) ?? hb, 1)
+    let recordCapacity = recordLanes.isEmpty ? 0 : 2 * drainEvery
     let recordSlotBuf = try makeBuf(B * 4)
     do {
       let rp = recordSlotBuf.contents().bindMemory(to: Int32.self, capacity: B)
@@ -616,7 +968,7 @@ func metricsRoot() -> URL {
     }
     let recordBuf = try makeBuf(recordLanes.count * recordCapacity * 16 * 4)
     let snapStride = MemoryLayout<LaneSnapshot>.stride
-    precondition(snapStride == 280, "LaneSnapshot layout drifted from OakLaneSnapshot")
+    precondition(snapStride == 152, "LaneSnapshot layout drifted from OakLaneSnapshot")
     let snapBuf = try makeBuf(2 * B * snapStride)
     let snapPtr = snapBuf.contents().bindMemory(to: LaneSnapshot.self, capacity: 2 * B)
     let dumpEvery = max(e["OAK_DUMP_STATE_EVERY"].flatMap(Int.init) ?? 0, 0)
@@ -638,6 +990,8 @@ func metricsRoot() -> URL {
     let fleetOut = try appender("fleet.jsonl")
     let deathsOut = try appender("deaths.jsonl")
     let aggOut = try appender("aggregate.jsonl")
+    let tape = try MetricsTapeWriter(
+      url: root.appendingPathComponent("metrics.\(p.rawValue).oakt"), laneCount: B)
     defer {
       hashHandles.forEach { try? $0?.close() }
       recordHandles.forEach { try? $0.close() }
@@ -693,35 +1047,26 @@ func metricsRoot() -> URL {
       var gpuSeconds = 0.0
       var prevRewardSum: [Double]
       var prevStep = 0
-      init(_ b: Int) {
+      var recPrevReward: [Double]
+      var recPrevStep = 0
+      init(_ b: Int, _ rec: Int) {
         deadStep = Array(repeating: nil, count: b)
         deadDetector = Array(repeating: nil, count: b)
         prevRewardSum = Array(repeating: 0, count: b)
+        recPrevReward = Array(repeating: 0, count: rec)
       }
     }
-    let st = WriterState(B)
+    let st = WriterState(B, recordLanes.count)
     let writer = DispatchQueue(label: "oak.fleet.gpu.writer")
     let detectorNames: [UInt32: String] = [1: "envReward", 2: "policyMean", 3: "envObs"]
     let wallStart = DispatchTime.now().uptimeNanoseconds
     func now() -> Double { Double(DispatchTime.now().uptimeNanoseconds - wallStart) / 1e9 }
-    func infoJSON(_ a: SnapInfo) -> [String: Any] {
-      let finite = Int(a.finiteCount)
-      return [
-        "count": Int(a.count), "finiteCount": finite,
-        "nonFiniteCount": Int(a.count) - finite,
-        "sum": finite > 0 ? Double(a.sum) : NSNull() as Any,
-        "mean": finite > 0 ? Double(a.sum) / Double(finite) : NSNull() as Any,
-        "last": finite > 0 ? Double(a.last) as Any : NSNull(),
-        "delta": finite > 0 ? (Double(a.last) - Double(a.first)) as Any : NSNull(),
-      ]
-    }
     func health(_ snap: LaneSnapshot, lane: Int) -> [String: Any] {
       let adm = Double(snap.deltaSum) / Double(max(Int(snap.steps), 1))
       var h: [String: Any] = [
         "rewardRate": snap.rho.isFinite ? Double(snap.rho) : NSNull(),
         "actionDeltaL2Mean": adm.isFinite ? adm : NSNull(),
         "actionDeltaPeak": snap.deltaPeak.isFinite ? Double(snap.deltaPeak) : NSNull(),
-        "continuingRestartCount": Double(snap.doneCount),
       ]
       if engine != nil {
         let s = snap.stats
@@ -733,68 +1078,104 @@ func metricsRoot() -> URL {
           "plan": Int(s.planNonFiniteCount), "tdPsi": Int(s.tdPsiNonFiniteCount),
         ]
         h["terminationRate"] = f(s.terminationRate)
-        h["optionDurationMean"] = f(s.optionDurationMean)
         h["importanceEss"] = f(s.importanceEss)
         h["actorUpdateNormMean"] = f(s.actorUpdateNormMean)
         h["actorSupportEntropy"] = f(s.actorSupportEntropy)
         h["modelPriorityMax"] = f(s.modelPriorityMax)
         h["selectedOptionAge"] = f(s.selectedOptionAge)
-        h["selectedOptionDuration"] = f(s.selectedOptionDuration)
         h["selectedOptionPriority"] = f(s.selectedOptionPriority)
         h["keyboardL1"] = f(s.keyboardL1)
         h["actorAdvantageL1"] = f(s.actorAdvantageL1)
         h["selectedOptionIndex"] = f(s.selectedOptionIndex)
-        h["keyboardOrigin"] = f(s.keyboardOrigin)
-        h["selectedOptionFeature"] = f(s.selectedOptionFeature)
         h["selectedContinuation"] = f(s.selectedContinuation)
         h["selectedKeyboardWeight"] = f(s.selectedKeyboardWeight)
         h["mainTd"] = f(s.mainTd)
         h["planTd"] = f(s.planTdValue)
-        h["keyboardSketchDim"] = f(s.keyboardSketchDim)
         h["keyboardEffectiveL1"] = f(s.keyboardEffectiveL1)
         h["searchControlUseMean"] = f(s.searchControlUseMean)
-        h["dynaBackupMean"] = f(s.dynaBackupMean)
         h["generateTestEligibleCount"] = f(s.generateTestEligibleCount)
-        h["learningMature"] = f(s.learningMature)
       }
-      // envInfo channel names are env-conditional (per lane's env): cheetah
-      // lanes keep the legacy MuJoCo names; gridworld lanes report their own.
-      let infoNames: [String]
-      switch laneEnvs[lane] {
-      case "FourRooms-cont-v0":
-        infoNames = ["info:goal", "info:x", "info:y", "info:since_goal"]
-      case "DeepSea-cont-v0":
-        infoNames = ["info:reward", "info:row", "info:col", "info:last_action"]
-      case "KeyCorridor-cont-v0":
-        infoNames = ["info:goal", "info:x", "info:y", "info:since_goal"]
-      case "Chain-cont-v0":
-        infoNames = ["info:reward", "info:pos", "info:done", "info:unused"]
-      case "LargeDeepSea-cont-v0":
-        infoNames = ["info:reward", "info:row", "info:col", "info:last_action"]
-      case "MultiKeyCorridor-cont-v0":
-        infoNames = ["info:goal", "info:x", "info:y", "info:since_goal"]
-      case "MemoryChain-cont-v0":
-        infoNames = ["info:reward", "info:pos", "info:done", "info:cue"]
-      case "ProceduralMaze-cont-v0", "HighDimMaze-cont-v0", "POMaze-cont-v0":
-        infoNames = ["info:goal", "info:x", "info:y", "info:since_goal"]
-      case "DelayedChain-cont-v0":
-        infoNames = ["info:reward", "info:pos", "info:done", "info:last_action"]
-      case "Acrobot-cont-v0":
-        infoNames = ["info:reward", "info:theta1", "info:theta2", "info:height"]
-      case "MountainCar-cont-v0":
-        infoNames = ["info:reward", "info:pos", "info:vel", "info:done"]
-      case "CartPole-cont-v0":
-        infoNames = ["info:reward", "info:x", "info:theta", "info:done"]
-      case "Pendulum-cont-v0":
-        infoNames = ["info:reward", "info:theta", "info:theta_dot", "info:torque"]
-      default:
-        infoNames = ["info:reward_run", "info:reward_ctrl", "info:x_position", "info:x_velocity"]
-      }
-      h["envInfo"] = [
-        infoNames[0]: infoJSON(snap.info0), infoNames[1]: infoJSON(snap.info1),
-        infoNames[2]: infoJSON(snap.info2), infoNames[3]: infoJSON(snap.info3),
-      ]
       return h
+    }
+    final class DrainErr: @unchecked Sendable {
+      private let lock = NSLock()
+      private var first: Error?
+      func record(_ e: Error) {
+        lock.lock()
+        if first == nil { first = e }
+        lock.unlock()
+      }
+      func take() -> Error? {
+        lock.lock()
+        defer { lock.unlock() }
+        return first
+      }
+    }
+    func drainRecords(step: Int, half: Int?) throws {
+      guard !recordLanes.isEmpty, step > st.lastDrainStep else { return }
+      let t0 = DispatchTime.now().uptimeNanoseconds
+      let start = st.lastDrainStep
+      let count = step - start
+      let rp = recordBuf.contents().bindMemory(
+        to: Float.self, capacity: recordLanes.count * recordCapacity * 16)
+      if recordV4.isEmpty {
+        for (slot, _) in recordLanes.enumerated() {
+          var data = Data(capacity: count * (16 * 4))
+          for r in start..<step {
+            let base = (slot * recordCapacity + (r % recordCapacity)) * 16
+            for u in 0..<16 {
+              var f = rp[base + u]
+              withUnsafeBytes(of: &f) { data.append(contentsOf: $0) }
+            }
+          }
+          try recordHandles[slot].write(contentsOf: data)
+        }
+        st.lastDrainStep = step
+        if timing {
+          let ms = Double(DispatchTime.now().uptimeNanoseconds - t0) / 1e6
+          fputs(
+            String(
+              format: "[record v3] step %d | %d lanes x %d rows | %.1f ms | %.2f MiB\n",
+              step, recordLanes.count, count, ms,
+              Double(recordLanes.count * count * 64) / 1_048_576), stderr)
+        }
+        return
+      }
+      var deltas = [Float](repeating: .nan, count: recordLanes.count)
+      if let half {
+        let exact = st.recPrevStep == start
+        for (slot, lane) in recordLanes.enumerated() {
+          let rs = Double(snapPtr[half * B + lane].rewardSum)
+          if exact { deltas[slot] = Float(rs - st.recPrevReward[slot]) }
+          st.recPrevReward[slot] = rs
+        }
+        st.recPrevStep = step
+      }
+      let before = recordV4.reduce(0) { $0 + $1.bytesWritten }
+      let box = DrainErr()
+      let writers = recordV4
+      let cap = recordCapacity
+      DispatchQueue.concurrentPerform(iterations: writers.count) { slot in
+        do {
+          try writers[slot].encodeChunk(
+            rp, slot: slot, capacity: cap, stepStart: start, stepCount: count,
+            rewardDelta: deltas[slot])
+        } catch {
+          box.record(error)
+        }
+      }
+      if let e = box.take() { throw e }
+      st.lastDrainStep = step
+      if timing {
+        let ms = Double(DispatchTime.now().uptimeNanoseconds - t0) / 1e6
+        let wrote = recordV4.reduce(0) { $0 + $1.bytesWritten } - before
+        let raw = recordLanes.count * count * 64
+        fputs(
+          String(
+            format: "[record v4] step %d | %d lanes x %d rows | %.1f ms | %.2f MiB -> %.2f MiB (%.1fx)\n",
+            step, recordLanes.count, count, ms, Double(raw) / 1_048_576,
+            Double(wrote) / 1_048_576, wrote > 0 ? Double(raw) / Double(wrote) : 0), stderr)
+      }
     }
     func writeSnapshot(half: Int, step: Int, kind: String) throws {
       let wall = now()
@@ -822,8 +1203,6 @@ func metricsRoot() -> URL {
             }
           }
           if let eng = engine, detector == "paramNonFinite" || detector == "paramExplosion" {
-            // Kernel-dated explosion step (rotating-stripe scan, exact to 32 steps)
-            // beats the heartbeat-cadence snapshot date.
             let ex = eng.uints.p[lane * eng.uintTotal + 9 + 2 * 32 + 5 * eng.rank]
             if ex != UInt32.max { dStep = Int(ex) }
           }
@@ -845,8 +1224,6 @@ func metricsRoot() -> URL {
                 s.actorSupportEntropy.isFinite ? Double(s.actorSupportEntropy) : NSNull()
               row["terminationRate"] =
                 s.terminationRate.isFinite ? Double(s.terminationRate) : NSNull()
-              row["optionDurationMean"] =
-                s.optionDurationMean.isFinite ? Double(s.optionDurationMean) : NSNull()
               row["rhoAtDeath"] =
                 snap.scalars.rho.isFinite ? Double(snap.scalars.rho) : NSNull()
               let pm = snap.paramNonFinite != 0 ? Double.infinity : Double(snap.paramAbsMax)
@@ -862,24 +1239,26 @@ func metricsRoot() -> URL {
             deathLines.append(try jsonLine(row))
           }
         }
-        var m: [String: Any] = [
-          "v": 1, "kind": kind, "envId": laneEnvs[lane], "policy": p.rawValue,
-          "ablationLabel": ablations.label, "lane": lane, "seed": seeds[lane],
-          "step": Int(snap.steps), "wallSeconds": wall, "rewardSum": Double(snap.rewardSum),
-          "doneCount": Int(snap.doneCount), "health": health(snap, lane: lane),
-          "firstNonFiniteStep": st.deadStep[lane] ?? NSNull(),
-          "firstNonFiniteDetector": st.deadDetector[lane] ?? NSNull(),
-        ]
-        if wall > 0 { m["stepsPerSecond"] = Double(snap.steps) / wall }
-        if engine != nil {
-          m["kernelRho"] = snap.scalars.rho.isFinite ? Double(snap.scalars.rho) : NSNull()
-          let pm = snap.paramNonFinite != 0 ? Double.infinity : Double(snap.paramAbsMax)
-          m["paramAbsMax"] = pm.isFinite ? pm : NSNull()
+        if kind == "final" {
+          var m: [String: Any] = [
+            "v": 1, "kind": kind, "envId": laneEnvs[lane], "policy": p.rawValue,
+            "ablationLabel": ablations.label, "lane": lane, "seed": seeds[lane],
+            "step": Int(snap.steps), "wallSeconds": wall, "rewardSum": Double(snap.rewardSum),
+            "doneCount": Int(snap.doneCount), "health": health(snap, lane: lane),
+            "firstNonFiniteStep": st.deadStep[lane] ?? NSNull(),
+            "firstNonFiniteDetector": st.deadDetector[lane] ?? NSNull(),
+          ]
+          if wall > 0 { m["stepsPerSecond"] = Double(snap.steps) / wall }
+          if engine != nil {
+            m["kernelRho"] = snap.scalars.rho.isFinite ? Double(snap.scalars.rho) : NSNull()
+            let pm = snap.paramNonFinite != 0 ? Double.infinity : Double(snap.paramAbsMax)
+            m["paramAbsMax"] = pm.isFinite ? pm : NSNull()
+          }
+          lines.append(try jsonLine(m))
         }
-        lines.append(try jsonLine(m))
       }
       if !deathLines.isEmpty { try deathsOut.write(contentsOf: deathLines) }
-      try fleetOut.write(contentsOf: lines)
+      if !lines.isEmpty { try fleetOut.write(contentsOf: lines) }
       let alive = st.deadStep.filter { $0 == nil }.count
       let unsorted = (0..<B).map { l -> Double in
         let sn = snapPtr[half * B + l]
@@ -914,22 +1293,8 @@ func metricsRoot() -> URL {
           "recentRateP90": quantile(recentSorted, 0.9),
           "recentRateMax": recentSorted[recentSorted.count - 1],
         ]))
-      if !recordLanes.isEmpty {
-        let rp = recordBuf.contents().bindMemory(
-          to: Float.self, capacity: recordLanes.count * recordCapacity * 16)
-        for (slot, _) in recordLanes.enumerated() {
-          var data = Data(capacity: (step - st.lastDrainStep) * (16 * 4))
-          for r in st.lastDrainStep..<step {
-            let base = (slot * recordCapacity + (r % recordCapacity)) * 16
-            for u in 0..<16 {
-              var f = rp[base + u]
-              withUnsafeBytes(of: &f) { data.append(contentsOf: $0) }
-            }
-          }
-          try recordHandles[slot].write(contentsOf: data)
-        }
-        st.lastDrainStep = step
-      }
+      try drainRecords(step: step, half: half)
+      try tape.flush()
       if timing {
         fputs(
           String(
@@ -964,14 +1329,13 @@ func metricsRoot() -> URL {
     let explicitN = e["OAK_STEPS_PER_CB"].flatMap(Int.init)
     let tuneLock = NSLock()
     var tunedN = max(explicitN ?? 32, 1)
-    // Untracked buffers disable automatic hazard ordering BETWEEN command
-    // buffers; with 2 chunks in flight the GPU may overlap them. An event
-    // chain restores strict chunk order (async submission preserved).
     guard let chunkOrder = dev.makeEvent() else { throw err("Failed to create Metal event.") }
     var chunkSeq: UInt64 = 0
     let inflight = DispatchSemaphore(value: 2)
     let snapSlots = DispatchSemaphore(value: (recordLanes.isEmpty && dumpEvery == 0) ? 2 : 1)
     var snapHalf = 0
+    let tapeWindow = max(e["OAK_TAPE_WINDOW_STEPS"].flatMap(Int.init) ?? 1024, 1)
+    var lastTapeStep = 0
     var step = 0
     while step < steps {
       tuneLock.lock()
@@ -980,12 +1344,17 @@ func metricsRoot() -> URL {
       let nextHb = min(((step / hb) + 1) * hb, steps)
       var boundary = nextHb
       if dumpEvery > 0 { boundary = min(boundary, ((step / dumpEvery) + 1) * dumpEvery) }
+      if !recordLanes.isEmpty {
+        boundary = min(boundary, ((step / drainEvery) + 1) * drainEvery)
+      }
       let target = min(boundary, step + n)
       let isSnap = target == nextHb
+      let isDrain = !recordLanes.isEmpty && !isSnap && target % drainEvery == 0
       let isDump = dumpEvery > 0 && target % dumpEvery == 0
+      let isTape = isSnap || target - lastTapeStep >= tapeWindow
       inflight.wait()
       if let err = writer.sync(execute: { st.error }) { throw err }
-      if isSnap { snapSlots.wait() }
+      if isTape || isDrain { snapSlots.wait() }
       guard let cb = q.makeCommandBuffer() else {
         throw err("Failed to encode Metal command.")
       }
@@ -994,23 +1363,25 @@ func metricsRoot() -> URL {
         throw err("Failed to encode Metal command.")
       }
       encodeMegastep(enc, target - step)
-      if isSnap {
+      if isTape {
         bindFleet(enc, snapPipe)
         enc.setBuffer(snapBuf, offset: 0, index: 9)
         var base = UInt32(snapHalf * B)
         enc.setBytes(&base, length: 4, index: 10)
-        // One threadgroup (= one simdgroup) per lane: the param scan is
-        // warp-parallel in-kernel.
+        var fullScan: UInt32 = isSnap ? 1 : 0
+        enc.setBytes(&fullScan, length: 4, index: 11)
         enc.dispatchThreadgroups(mtlSize(B), threadsPerThreadgroup: mtlSize(32))
       }
       enc.endEncoding()
       chunkSeq += 1
       cb.encodeSignalEvent(chunkOrder, value: chunkSeq)
       let thisHalf = snapHalf
-      if isSnap { snapHalf ^= 1 }
+      if isTape { snapHalf ^= 1 }
       let kind = target == steps ? "final" : "hb"
       let tStep = target
       let nSteps = target - step
+      let wStart = lastTapeStep
+      if isTape { lastTapeStep = target }
       cb.addCompletedHandler { cb in
         let gpuT = cb.gpuEndTime - cb.gpuStartTime
         if explicitN == nil, gpuT > 0, nSteps > 0 {
@@ -1025,14 +1396,21 @@ func metricsRoot() -> URL {
           if let cbError, st.error == nil {
             st.error = err("Metal command failed: \(cbError)")
           }
+          if isTape, st.error == nil {
+            tape.append(snap: snapPtr, half: thisHalf, stepStart: wStart, stepCount: tStep - wStart)
+          }
           if isSnap {
             if st.error == nil {
               do { try writeSnapshot(half: thisHalf, step: tStep, kind: kind) } catch {
                 st.error = error
               }
             }
-            snapSlots.signal()
+          } else if isDrain {
+            if st.error == nil {
+              do { try drainRecords(step: tStep, half: nil) } catch { st.error = error }
+            }
           }
+          if isTape || isDrain { snapSlots.signal() }
           inflight.signal()
         }
       }
@@ -1050,6 +1428,47 @@ func metricsRoot() -> URL {
     inflight.signal()
     inflight.signal()
     if let err = st.error { throw err }
+    for w in recordV4 { try w.writeMeta(final: true) }
+  }
+  static func recordV4Probe() throws {
+    let args = CommandLine.arguments
+    guard args.count >= 4 else {
+      throw err("Usage: OaK record-v4-probe <cases.bin> <out-dir>")
+    }
+    let data = try Data(contentsOf: URL(fileURLWithPath: args[2]))
+    guard data.count >= 12 else { throw err("record-v4-probe: case file too small.") }
+    let (kind, rowCount, chunkSteps): (UInt32, Int, Int) = data.withUnsafeBytes { raw in
+      (
+        raw.load(fromByteOffset: 0, as: UInt32.self),
+        Int(raw.load(fromByteOffset: 4, as: UInt32.self)),
+        Int(raw.load(fromByteOffset: 8, as: UInt32.self))
+      )
+    }
+    guard rowCount > 0, chunkSteps > 0, data.count == 12 + rowCount * 16 * 4 else {
+      throw err(
+        "record-v4-probe: case size mismatch — \(data.count) bytes for \(rowCount) rows (want \(12 + rowCount * 16 * 4)), chunkSteps \(chunkSteps).")
+    }
+    let envId = try envId(kind: kind)
+    let dir = URL(fileURLWithPath: args[3], isDirectory: true)
+    try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+    let url = dir.appendingPathComponent("actions.bin")
+    FileManager.default.createFile(atPath: url.path, contents: nil)
+    let h = try FileHandle(forWritingTo: url)
+    defer { try? h.close() }
+    let w = try RecordV4Writer(
+      handle: h, envKind: kind, metaURL: dir.appendingPathComponent("meta.json"),
+      envId: envId, seed: 0, actDim: 6)
+    try data.withUnsafeBytes { raw in
+      let rp = raw.baseAddress!.advanced(by: 12).assumingMemoryBound(to: Float.self)
+      var start = 0
+      while start < rowCount {
+        let n = min(chunkSteps, rowCount - start)
+        try w.encodeChunk(
+          rp, slot: 0, capacity: rowCount, stepStart: start, stepCount: n, rewardDelta: .nan)
+        start += n
+      }
+    }
+    try w.writeMeta(final: true)
   }
   static func physicsProbe() throws {
     let args = CommandLine.arguments
@@ -1097,11 +1516,6 @@ func metricsRoot() -> URL {
     try Data(bytes: outBuf.contents(), count: n * outStride * 4)
       .write(to: URL(fileURLWithPath: args[3]))
   }
-  // Case-gate probe for the gridworld env contract: reads a
-  // gridworld_ref.py case file (header uint32 x3 = n, inW, outW; then n in
-  // records, then n golden out records), runs the in-records through the
-  // Metal env step (the SAME functions the fleet env window calls), and
-  // writes n out records for `gridworld_ref.py --compare cases out`.
   static func gridworldProbe() throws {
     let args = CommandLine.arguments
     guard args.count >= 4 else {
@@ -1312,12 +1726,16 @@ func metricsRoot() -> URL {
     let policies = try (env["OAK_BENCH_POLICIES"] ?? "oak,zero,random").split(separator: ",").map {
       try pol(String($0))
     }
-    // Seed-deterministic env schedule (universal env contract). Multi-env is
-    // the MANDATORY default (user law 2026-07-19): every run is a superset of
-    // the keeper — 1024 cheetah lanes (same seeds as the keeper) plus
-    // FourRooms/DeepSea lanes riding free on the GPU's spare capacity.
-    // OAK_BENCH_ENVS overrides the schedule; OAK_BENCH_ENV single-env is a
-    // hard error (no opt-out of multi-env science).
+    let recordingRequested =
+      env["OAK_RECORD_ACTIONS"] == "1"
+      || !(env["OAK_RECORD_SEEDS"] ?? "").trimmingCharacters(in: .whitespaces).isEmpty
+    if recordingRequested, policies.count > 1 {
+      throw err("Recording (OAK_RECORD_ACTIONS / OAK_RECORD_SEEDS) with \(policies.count) policies (\(policies.map(\.rawValue).joined(separator: ","))) would TRUNCATE: all policies share one <envId>/seed<N>/actions.bin, so each overwrites the last and meta.json ends up describing another policy's stream. Set OAK_BENCH_POLICIES=oak (the default is oak,zero,random).")
+    }
+    if policies.count > 1, env["OAK_RECORD_ACTIONS"] == nil {
+      recordingDefaultSuppressed = true
+      print("[fleet] default recording disabled: \(policies.count) policies share lane dirs (set OAK_BENCH_POLICIES=oak to record)")
+    }
     let defaultSchedule = "HalfCheetah-v4:1024,KeyCorridor-cont-v0:128,FourRooms-cont-v0:64,DeepSea-cont-v0:64,Acrobot-cont-v0:64,MountainCar-cont-v0:64"
     var raw = env["OAK_BENCH_ENVS"] ?? defaultSchedule
     if raw.trimmingCharacters(in: .whitespaces).isEmpty { raw = defaultSchedule }
@@ -1372,40 +1790,7 @@ func metricsRoot() -> URL {
         isDirectory: true)
     }
     try fm.createDirectory(at: dir, withIntermediateDirectories: true)
-    // organFlops / flopsPerLaneStep (organCostVersion 1): honest per-lane-step
-    // multiply+add count (fma = 2 flops) of the post-slimming megakernel,
-    // binned by FC-STOMP ORGAN (not pipeline stage), computed from the real
-    // config — R = rank, K = 32 options, D = 12, DL = D/2 live dims, A = 64
-    // active rows, Rn nursery, traceLevels from Arena. Each organ maps to a
-    // set of (stage, loop, trip-count) terms; this is the old per-stage model
-    // re-binned, plus three corrections found by reading the actual loops
-    // (docs/research/allocation-and-instrument-design.md §1):
-    //   1. twin-dot undercount: the encode K-gather computes 11 dots/option-
-    //      step (psiPrev/psiNext/hDot = 3A; rHat/lRaw/vModel/vModel2 = 4A;
-    //      pdVs/pdVsA/pdR/pdL stash = 4A — OakKernel.metal:624-643); the stage
-    //      model counted 10KA — the second twin vModel2 dot was uncounted.
-    //      +KA lands in OptionModels.
-    //   2. FeatureConstruction was absent: obs stats + trace EMAs
-    //      (OakKernel.metal:877-888), core write (:920-959), gate/tile eval
-    //      (:962-987), gated-bank eval 32 banks x 7 slots (:988-1010).
-    //   3. ActionEmission (sample stage) was absent: Philox + Box-Muller per
-    //      dim (:2536-2546), behavior-credit staging ~3/(option,live-dim) +
-    //      importance ratio K (:2570-2586); Gumbel-max discrete (:2460-2515).
-    // Ablation-aware: each term is counted only when the corresponding
-    // function-constant-guarded loop actually compiles in (guard placement
-    // identical to the old stage model). Unguarded loops (value/psi/hDot
-    // dots, norms, polCoef, keyboard, utility scan, sample) run — and are
-    // counted — under every ablation. Canonical case: OAK_ABLATE=planning
-    // removes all of dyna (oak_dyna_backups early-returns and the dynaAcc
-    // apply compiles out). K-parking (Phase 9.3) is DYNAMIC — parked options
-    // skip their A-gathers at runtime; the static model counts full-width
-    // trip counts regardless (parking's refund shows up in wall-clock/SPS,
-    // not here).
-    // CONSUME AS RELATIVE SHARES (or per-organ deltas across ablations),
-    // NEVER ABSOLUTE SILICON FLOPS: static trip counts over-attribute ~3-5x
-    // vs measured wall (design §1 calibration). organCostVersion gates
-    // cross-version absolute comparisons (pre-organ roots are version 0).
-    let fObs = 17, fD = 12  // universal I/O contract (same constants fleetGPU uses)
+    let fObs = 17, fD = 12
     let fInputW = Arena.input(fObs, fD)
     var fR = 32
     while fR < 2 * fInputW { fR *= 2 }
@@ -1419,25 +1804,16 @@ func metricsRoot() -> URL {
       "OptionPolicies": 0, "OptionModels": 0, "Planning": 0, "OptionKeyboard": 0,
       "SearchControl": 0, "GenerateAndTest": 0, "ActionEmission": 0, "misc": 0,
     ]
-    // FeatureConstruction (encode): core write 32 slots + gate/tile eval 32
-    // banks run under every ablation; obs stats/traces and the gated-bank
-    // eval compile out under feature-construction.
     organFma["FeatureConstruction"]! += 16 + 3 * 32
     if !ablated.contains("feature-construction") {
       organFma["FeatureConstruction"]! += fObs * (2 + fTraceLevels) + 32 * 7 * 5
     }
-    // GVFPrediction: value dots 2A + norms 6A (encode, unguarded) + value
-    // banks 2A (learn).
     organFma["GVFPrediction"]! += 2 * fA + 6 * fA
     if !ablated.contains("gvf-prediction") { organFma["GVFPrediction"]! += 2 * fA }
-    // RewardRespectingSubtasks: encode psi dots 2KA + hDot KA (unguarded) +
-    // learn 2KA + headScale/psiRho K.
     organFma["RewardRespectingSubtasks"]! += 2 * fK * fA + fK * fA
     if !ablated.contains("rr-subtasks") {
       organFma["RewardRespectingSubtasks"]! += 2 * fK * fA + fK
     }
-    // OptionPolicies: polCoef K*DL (plan, unguarded) + learn apply KA*DL +
-    // emit option means KA*DL + consensus DL*K dir + DL*A apply (window).
     organFma["OptionPolicies"]! += fK * fDL
     if !ablated.contains("option-policies") {
       organFma["OptionPolicies"]! += 2 * fK * fA * fDL
@@ -1445,36 +1821,21 @@ func metricsRoot() -> URL {
         organFma["OptionPolicies"]! += fDL * fK + fDL * fA
       }
     }
-    // OptionModels (correction 1 — encode gather 4KA now includes the vModel2
-    // twin dot): encode 4KA + plan-stage prev-dot stash 4KA + learn 2KA +
-    // oak_plan_one scalars ~16/option (OakKernel.metal:1086-1126).
     if !ablated.contains("option-models") {
       organFma["OptionModels"]! += 4 * fK * fA + 4 * fK * fA + 2 * fK * fA + 16 * fK
     }
-    // Planning (dyna): ring vX+xNorm 2A per warp thread | 4 candidates x 3
-    // dots 12A per thread | copy-2 4KA | dynaAcc apply 2K per thread.
     if !ablated.contains("planning") {
       organFma["Planning"]! += 14 * fA * 32 + 4 * fK * fA + 2 * fK * 32
     }
-    // OptionKeyboard: softmax refresh K + chord blend D*K + GPI scans K.
     organFma["OptionKeyboard"]! += fK + fD * fK + fK
-    // SearchControl: window utility scan A*K + prioOpt K + ESS/entropy ~1/4-step.
     organFma["SearchControl"]! += fA * fK + fK + fK / 2
-    // GenerateAndTest: nursery Rn/2 + eligScr R + LCB scan K.
     if !ablated.contains("generate-and-test") {
       organFma["GenerateAndTest"]! += fRn / 2 + fR + fK
     }
-    // ActionEmission (correction 3, sample stage): Philox + Box-Muller ~5/dim
-    // + behavior-credit staging ~3 per (option, live dim) + importance ratio K.
     organFma["ActionEmission"]! += 5 * fD + 3 * fK * fDL + fK
-    // misc: serial scalar/keyboard/curation/stats loops (unattributed
-    // overhead no single organ owns).
     organFma["misc"]! += 4_000
     let organCostVersion = 1
     let organFlops = organFma.mapValues { 2 * $0 }
-    // Env-window flops are env-conditional per lane's env: the fp32
-    // HalfCheetah physics chain ~2e4 (F4-port family estimate); the integer
-    // gridworld steps are near-free (obs formulas dominate).
     let agentFlops = organFlops.values.reduce(0, +)
     let envFlops: [String: Int] = [
       "HalfCheetah-v4": 20_000, "FourRooms-cont-v0": 40, "DeepSea-cont-v0": 20,

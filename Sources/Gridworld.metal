@@ -4,32 +4,6 @@
 #include <metal_stdlib>
 using namespace metal;
 
-// Continuing gridworld envs (FourRooms-cont-v0, DeepSea-cont-v0,
-// KeyCorridor-cont-v0, Chain-cont-v0, LargeDeepSea-cont-v0,
-// MultiKeyCorridor-cont-v0, MemoryChain-cont-v0) — the Metal port of
-// tools/gridworld_ref.py, certified BITWISE by the case gate
-// (gridworld_ref.py --compare). All are CONTINUING (no reset: goal/treasure/
-// key/cue respawns inside the stream; done, where emitted, is a wrapper
-// metric only), integer-state, deterministic given the per-lane Philox
-// chain.
-//
-// Universal I/O contract (Inv-1): the AGENT stays env-blind — every env
-// emits OBS_W=17 float32 obs channels and consumes the first N of the
-// D_policy=12 policy coordinates as categorical logits (N=4 FourRooms,
-// N=2 DeepSea). envKind/actionKind are read ONLY in the env window, the
-// sample stage, fleet init, and the record path — never by agent stages.
-//
-// Bitwise rules (both sides obey):
-// - state is integer (uint32); obs channels are float32(int) OP
-//   float32(literal) with the exact op order of the reference;
-// - all randomness is Philox4x32-10, key=(laneSeed, stream), ctr=(idx,
-//   block, 0, 0) — the hc_philox4x32 chain (streams 0=RESET, 1=CTRL, 2=ACT
-//   are taken by physics/sampler; 3 = gridworld events);
-// - u01(x) = float32(x >> 8) * 2^-24 (exact); uniform index = trunc(u01 * 68).
-//
-// This file is included from OakKernel.metal (after OakPhysics.metal) and
-// compiled with -fno-fast-math; the explicit safe-mode pragma keeps the
-// obs-formula divisions correctly rounded even if the include order moves.
 #pragma METAL fp math_mode(safe)
 
 constant uint OAK_ENV_CHEETAH     = 0u;
@@ -49,37 +23,28 @@ constant uint OAK_ENV_HIGHDIMMAZE = 13u;
 constant uint OAK_ENV_POMAZE      = 14u;
 constant uint OAK_ENV_DELAYEDCHAIN = 15u;
 constant uint OAK_ENV_COUNT       = 16u;
-constant uint OAK_GW_STREAM       = 3u;  // philox stream: gridworld events
+constant uint OAK_GW_STREAM       = 3u;
 
-// Phase-3 multi-shape contract: envKind -> natural obs width, action kind
-// (0=Box, 1=Discrete), natural action count. The AGENT never reads this
-// (Inv-1); only the four sanctioned sites do (fleet init, sample stage, env
-// window, record path). Every env writes its natural obs channels and
-// zero-pads to OBS_W=17; discrete envs consume the first actionCount policy
-// coords as Gumbel-max logits, Box envs the first actionCount as means.
 struct OakEnvSpec { uint obsDimNatural; uint actionKind; uint actionCount; };
 constant OakEnvSpec OAK_ENV_SPECS[OAK_ENV_COUNT] = {
-    { 17u, 0u, 6u },  // OAK_ENV_CHEETAH: Box 6 (6 means + 6 reserved coords)
-    { 17u, 1u, 4u },  // OAK_ENV_FOURROOMS
-    {  8u, 1u, 2u },  // OAK_ENV_DEEPSEA
-    { 14u, 1u, 4u },  // OAK_ENV_KEYCORRIDOR
-    {  7u, 1u, 3u },  // OAK_ENV_ACROBOT
-    {  3u, 1u, 3u },  // OAK_ENV_MOUNTAINCAR
-    {  5u, 1u, 2u },  // OAK_ENV_CARTPOLE
-    {  4u, 0u, 1u },  // OAK_ENV_PENDULUM: Box 1
-    {  2u, 1u, 2u },  // OAK_ENV_CHAIN
-    {  8u, 1u, 2u },  // OAK_ENV_LARGEDEEPSEA (N=16)
-    { 17u, 1u, 4u },  // OAK_ENV_MULTIKEYCORRIDOR (3 keys/doors)
-    {  6u, 1u, 2u },  // OAK_ENV_MEMORYCHAIN (L=32)
-    { 17u, 1u, 4u },  // OAK_ENV_PROCEDURALMAZE (per-lane procedural walls)
-    { 16u, 1u, 6u },  // OAK_ENV_HIGHDIMMAZE (6 actions, 16-ch rich obs)
-    { 15u, 1u, 4u },  // OAK_ENV_POMAZE (view radius 1)
-    {  3u, 1u, 2u },  // OAK_ENV_DELAYEDCHAIN (L=32, reward only at far end)
+    { 17u, 0u, 6u },
+    { 17u, 1u, 4u },
+    {  8u, 1u, 2u },
+    { 14u, 1u, 4u },
+    {  7u, 1u, 3u },
+    {  3u, 1u, 3u },
+    {  5u, 1u, 2u },
+    {  4u, 0u, 1u },
+    {  2u, 1u, 2u },
+    {  8u, 1u, 2u },
+    { 17u, 1u, 4u },
+    {  6u, 1u, 2u },
+    { 17u, 1u, 4u },
+    { 16u, 1u, 6u },
+    { 15u, 1u, 4u },
+    {  3u, 1u, 2u },
 };
 
-// ---------------------------------------------------------------- FourRooms
-// 11x11, border walls; vertical wall col x=5 except hallways y in {2,8};
-// horizontal wall row y=5 except hallways x in {2,8}. Center (5,5) is wall.
 inline bool gw_four_is_wall(int x, int y) {
     if (x <= 0 || x >= 10 || y <= 0 || y >= 10) return true;
     if (x == 5 && y != 2 && y != 8) return true;
@@ -87,7 +52,6 @@ inline bool gw_four_is_wall(int x, int y) {
     return false;
 }
 
-// 68 free cells, y-major enumeration (identical to gridworld_ref.FOUR_FREE).
 constant uchar GW_FREE_X[68] = {
     1, 2, 3, 4, 6, 7, 8, 9, 1, 2, 3, 4, 5, 6, 7, 8, 9,
     1, 2, 3, 4, 6, 7, 8, 9, 1, 2, 3, 4, 6, 7, 8, 9,
@@ -101,7 +65,7 @@ constant uchar GW_FREE_Y[68] = {
     6, 6, 6, 6, 6, 6, 6, 6, 7, 7, 7, 7, 7, 7, 7, 7,
     8, 8, 8, 8, 8, 8, 8, 8, 8, 9, 9, 9, 9, 9, 9, 9, 9 };
 
-inline int gw_four_room(int x, int y) {  // 0=TL 1=TR 2=BL 3=BR ; -1 hallway
+inline int gw_four_room(int x, int y) {
     if (x < 5 && y < 5) return 0;
     if (x > 5 && y < 5) return 1;
     if (x < 5 && y > 5) return 2;
@@ -132,11 +96,6 @@ inline void gw_four_obs(uint x, uint y, uint gx, uint gy, uint sg,
     o[16] = 1.0f;
 }
 
-// FourRooms lane state in gw[6]: 0=x, 1=y, 2=gx, 3=gy, 4=sinceGoal,
-// 5=respawnIdx. action: 0=up 1=down 2=left 3=right. Wall bump = stay,
-// reward 0. Goal entry: reward +1, goal respawns to a uniformly drawn free
-// cell != agent cell (Philox stream 3, ctr=(respawnIdx, block,0,0), words
-// 0..3 then block++). Returns reward; obs written for the NEW state.
 inline float gw_four_step(thread uint *gw, uint laneSeed, uint action,
                           thread float *obs) {
     uint x = gw[0], y = gw[1], gx = gw[2], gy = gw[3], sg = gw[4], ri = gw[5];
@@ -182,13 +141,6 @@ inline float gw_four_step(thread uint *gw, uint laneSeed, uint action,
     return reward;
 }
 
-// ---------------------------------------------------------------- DeepSea
-// N=8. Hidden per-cell action map M[r][c] (bit r*8+c of the 64-bit mask,
-// fixed per lane at reset): M==1 -> action 1 moves c+1, action 0 moves c-1
-// (normal); M==0 -> inverted. c clamped to [0,N-1]; r += 1 every step.
-// Reward: -0.00125 if action==1 (the -0.01/N right-cost at N=8), +1 on
-// reaching (r=N-1, c=N-1); on reaching r==N-1 the agent resurfaces to (0,0),
-// mask kept. Lane state in gw[6]: 0=r, 1=c, 2=lastA, 3=maskLo, 4=maskHi.
 inline void gw_deep_obs(uint r, uint c, uint lastA, thread float *o) {
     float n1 = 7.0f;
     o[0] = float(r) / n1;
@@ -224,19 +176,6 @@ inline float gw_deep_step(thread uint *gw, uint action, thread float *o) {
     return reward;
 }
 
-// ------------------------------------------------------------ KeyCorridor
-// 9x7 (x 0..8, y 0..6), border walls; interior wall x=4 except the door cell
-// (4,3). Left room x 1..3, right room x 5..7, y 1..5 (15 cells each). Key
-// spawns in the left room, goal in the right room. Auto-pickup when the
-// agent is co-located with the key; entering the locked door cell opens it
-// iff the key is carried (locked + no key = blocked, stay). Goal entry:
-// reward +1, done=1, and the DeepSea-pattern respawn — agent + key redrawn
-// in the left room, goal redrawn in the right room, door re-locked (Philox
-// stream 3, ctr=(respawnIdx,0,0,0); words x=agent cell, y=key cell,
-// z=goal cell; cell idx = trunc(u01(word)*15), room cell (1 or 5) + idx%3,
-// 1 + idx/3). CONTINUING: no reset, the stream never breaks.
-// Lane state in gw[10]: 0=x, 1=y, 2=kx, 3=ky, 4=gx, 5=gy,
-// 6=flags (bit0 hasKey, bit1 doorOpen), 7=sinceGoal, 8=respawnIdx.
 inline bool gw_kc_is_wall(int x, int y) {
     if (x <= 0 || x >= 8 || y <= 0 || y >= 6) return true;
     if (x == 4 && y != 3) return true;
@@ -263,8 +202,6 @@ inline void gw_kc_obs(uint x, uint y, uint kx, uint ky, uint gx, uint gy,
     for (int i = 14; i < 17; i++) o[i] = 0.0f;
 }
 
-// action: 0=up 1=down 2=left 3=right (same convention as FourRooms).
-// Returns reward; obs written for the NEW state; *doneOut = 1 on completion.
 inline float gw_kc_step(thread uint *gw, uint laneSeed, uint action,
                         thread float *obs, thread uint *doneOut) {
     uint x = gw[0], y = gw[1], kx = gw[2], ky = gw[3], gx = gw[4], gy = gw[5];
@@ -279,8 +216,8 @@ inline float gw_kc_step(thread uint *gw, uint laneSeed, uint action,
     int nx = int(x) + dx, ny = int(y) + dy;
     if (gw_kc_is_wall(nx, ny)) { nx = int(x); ny = int(y); }
     else if (nx == 4 && ny == 3 && (flags & 2u) == 0u) {
-        if ((flags & 1u) != 0u) flags |= 2u;       // unlock and enter
-        else { nx = int(x); ny = int(y); }          // locked: blocked
+        if ((flags & 1u) != 0u) flags |= 2u;
+        else { nx = int(x); ny = int(y); }
     }
     if ((flags & 1u) == 0u && uint(nx) == kx && uint(ny) == ky) flags |= 1u;
     float reward = 0.0f;
@@ -307,10 +244,6 @@ inline float gw_kc_step(thread uint *gw, uint laneSeed, uint action,
     return reward;
 }
 
-// ------------------------------------------------------------------ Chain
-// bsuite-style chain, L=16: pos 0..15. action 1 moves pos+1, action 0 moves
-// pos-1 (clamp 0). Delayed +1 at the chain end (pos 15), wrap to 0, done=1.
-// Lane state in gw[10]: 0=pos.
 inline float gw_chain_step(thread uint *gw, uint action, thread float *obs,
                            thread uint *doneOut) {
     uint pos = gw[0];
@@ -330,16 +263,6 @@ inline float gw_chain_step(thread uint *gw, uint action, thread float *obs,
     return reward;
 }
 
-// ------------------------------------------------------------ LargeDeepSea
-// DeepSea scaled to N=16 (the canonical hard-exploration gridworld,
-// exponentially harder with size). Identical mechanics to N=8: a hidden
-// per-cell action map (bit r*16+c of the 256-bit mask, fixed per lane at
-// reset): M==1 -> action 1 moves c+1, action 0 moves c-1 (normal); M==0 ->
-// inverted. c clamped to [0,15]; r += 1 every step. Reward: -0.000625 if
-// action==1 (the -0.01/N right-cost at N=16), +1 on reaching (r=15, c=15);
-// on reaching r==15 the agent resurfaces to (0,0), mask kept. Lane state in
-// gw[10]: gw[0] = r | (c<<4) | (lastA<<8) (packed so the 8 mask words fit in
-// gw[1..8]).
 inline void gw_ldeep_obs(uint r, uint c, uint lastA, thread float *o) {
     float n1 = 15.0f;
     o[0] = float(r) / n1;
@@ -372,22 +295,6 @@ inline float gw_ldeep_step(thread uint *gw, uint action, thread float *o) {
     return reward;
 }
 
-// ------------------------------------------------------- MultiKeyCorridor
-// KeyCorridor extended to 3 sequential keys and doors. 17x7 (x 0..16,
-// y 0..6), border walls; interior walls x=4, x=8, x=12 except the door cells
-// (4,3), (8,3), (12,3). Four rooms x in {1..3, 5..7, 9..11, 13..15}, y 1..5
-// (15 cells each): key1 in room 0, key2 in room 1, key3 in room 2, goal in
-// room 3. Auto-pickup on co-location; entering locked door j opens it iff
-// key j is carried (locked + no key = blocked, stay). Goal entry: reward +1,
-// done=1, and the DeepSea-pattern respawn — agent redrawn in room 0, keys
-// redrawn in rooms 0/1/2, goal redrawn in room 3, doors re-locked (Philox
-// stream 3, ctr=(respawnIdx,0,0,0): words x=agent cell, y=key1, z=key2,
-// w=key3; then ctr=(respawnIdx,1,0,0) word x=goal; cell idx =
-// trunc(u01(word)*15), room base (1,5,9,13) + idx%3, 1 + idx/3).
-// CONTINUING: no reset, the stream never breaks.
-// Lane state in gw[10]: 0=x, 1=y, 2=key1 packed (kx | ky<<4), 3=key2,
-// 4=key3, 5=gx, 6=gy, 7=flags (bits0-2 hasKey1..3, bits3-5 doorOpen1..3),
-// 8=sinceGoal, 9=respawnIdx.
 inline bool gw_mkc_is_wall(int x, int y) {
     if (x <= 0 || x >= 16 || y <= 0 || y >= 6) return true;
     if ((x == 4 || x == 8 || x == 12) && y != 3) return true;
@@ -418,8 +325,6 @@ inline void gw_mkc_obs(uint x, uint y, uint k1p, uint k2p, uint k3p,
     o[16] = 1.0f;
 }
 
-// action: 0=up 1=down 2=left 3=right (same convention as FourRooms).
-// Returns reward; obs written for the NEW state; *doneOut = 1 on completion.
 inline float gw_mkc_step(thread uint *gw, uint laneSeed, uint action,
                          thread float *obs, thread uint *doneOut) {
     uint x = gw[0], y = gw[1], k1p = gw[2], k2p = gw[3], k3p = gw[4];
@@ -434,10 +339,10 @@ inline float gw_mkc_step(thread uint *gw, uint laneSeed, uint action,
     int nx = int(x) + dx, ny = int(y) + dy;
     if (gw_mkc_is_wall(nx, ny)) { nx = int(x); ny = int(y); }
     else if (ny == 3 && (nx == 4 || nx == 8 || nx == 12)) {
-        uint door = uint(nx >> 2);              // door index 1..3
-        if ((flags & (8u << (door - 1u))) == 0u) {      // door still locked
+        uint door = uint(nx >> 2);
+        if ((flags & (8u << (door - 1u))) == 0u) {
             if ((flags & (1u << (door - 1u))) != 0u) flags |= (8u << (door - 1u));
-            else { nx = int(x); ny = int(y); }           // locked: blocked
+            else { nx = int(x); ny = int(y); }
         }
     }
     if ((flags & 1u) == 0u && uint(nx) == (k1p & 15u) && uint(ny) == (k1p >> 4u))
@@ -476,15 +381,6 @@ inline float gw_mkc_step(thread uint *gw, uint laneSeed, uint action,
     return reward;
 }
 
-// ------------------------------------------------------------- MemoryChain
-// bsuite Memory Chain: corridor of length 32 (pos 0..31). The cue (0=left,
-// 1=right) is observable ONLY at pos==0; the agent must carry it across the
-// full corridor, and at the far end (pos==31) its action IS the choice:
-// reward +1 iff (action&1) == cue (0 otherwise), done=1, and the stream
-// respawns at pos 0 with a freshly drawn cue (Philox stream 3,
-// ctr=(respawnIdx,0,0,0), cue = raw.x & 1). Away from the end, action 1
-// walks pos+1 and action 0 walks pos-1 (clamp 0). CONTINUING: no reset.
-// Lane state in gw[10]: 0=pos, 1=cue, 2=lastA, 3=respawnIdx.
 inline void gw_mchain_obs(uint pos, uint cue, uint lastA, thread float *o) {
     o[0] = float(pos) / 32.0f;
     o[1] = (pos == 0u) ? float(cue) : 0.0f;
@@ -520,39 +416,51 @@ inline float gw_mchain_step(thread uint *gw, uint laneSeed, uint action,
     return reward;
 }
 
-// --------------------------------------------------------- ProceduralMaze
-// 11x11 (border walls) whose 9x9 interior WALL LAYOUT is generated per lane
-// at reset from the lane's Philox chain (RESET stream) — deterministic per
-// lane, different across lanes, then fixed for the lane's lifetime: the
-// agent cannot memorize one maze. Gen runs ONCE at fleet init (amortized;
-// ~5 Philox calls): 81 wall bits in 3 words (bit idx = (x-1) + 9*(y-1),
-// 1=wall, 50% density; w2 masked to its low 17 bits), then a random monotone
-// path from (1,1) to (9,9) carved free (16 moves; move i, when not edge-
-// forced, uses Philox RESET ctr=(1+i/4,0,0,0) word i%4, u01 < 0.5 -> right
-// else down) — the carved path guarantees the goal is always reachable.
-// Completion: +1, done=1, agent and goal rejection-redrawn to free cells
-// (stream 3, ctr=(respawnIdx, block,0,0); agent from blocks 0,2,4...,
-// goal from blocks 1,3,5... != agent cell; cell idx = trunc(u01(w)*81),
-// cell (1 + idx%9, 1 + idx/9)). CONTINUING: the maze itself never resets.
-// Lane state in gw[10]: 0=x, 1=y, 2=gx, 3=gy, 4=sinceGoal, 5=respawnIdx,
-// 6..8 = wall words w0..w2.
 inline void gw_pmaze_gen(uint laneSeed, thread uint *w) {
-    uint4 raw = hc_philox4x32(uint2(laneSeed, HC_RNG_STREAM_RESET),
+    w[0] = 0xffffffffu; w[1] = 0xffffffffu; w[2] = 0x1ffffu;
+    for (uint j = 0u; j < 5u; j++)
+        for (uint i = 0u; i < 5u; i++) {
+            uint idx = 2u * i + 9u * (2u * j);
+            w[idx >> 5u] &= ~(1u << (idx & 31u));
+        }
+    uint visited = 1u;
+    uint stack[25];
+    uint sp = 1u;
+    stack[0] = 0u;
+    uint ctr = 0u, bi = 0u;
+    uint4 buf = hc_philox4x32(uint2(laneSeed, HC_RNG_STREAM_RESET),
                               uint4(0u, 0u, 0u, 0u));
-    w[0] = raw.x; w[1] = raw.y; w[2] = raw.z & 0x1ffffu;
-    int x = 1, y = 1;
-    for (uint i = 0u; i < 16u; i++) {
-        uint idx = uint(x - 1) + 9u * uint(y - 1);
+    while (sp > 0u) {
+        uint cur = stack[sp - 1u];
+        int ci = int(cur % 5u), cj = int(cur / 5u);
+        uint cand = 0u, n = 0u;
+        const int dxs[4] = { 1, 0, -1, 0 };
+        const int dys[4] = { 0, 1, 0, -1 };
+        for (uint d = 0u; d < 4u; d++) {
+            int ni = ci + dxs[d], nj = cj + dys[d];
+            if (ni >= 0 && ni < 5 && nj >= 0 && nj < 5 &&
+                ((visited >> uint(ni + 5 * nj)) & 1u) == 0u) {
+                cand |= uint(ni + 5 * nj) << (8u * n);
+                n++;
+            }
+        }
+        if (n == 0u) { sp--; continue; }
+        if (bi == 4u) {
+            ctr++;
+            buf = hc_philox4x32(uint2(laneSeed, HC_RNG_STREAM_RESET),
+                                uint4(ctr, 0u, 0u, 0u));
+            bi = 0u;
+        }
+        uint words[4] = { buf.x, buf.y, buf.z, buf.w };
+        uint nxt = (cand >> (8u * (words[bi] % n))) & 0xffu;
+        bi++;
+        uint ni = nxt % 5u, nj = nxt / 5u;
+        uint idx = (uint(ci) + ni) + 9u * (uint(cj) + nj);
         w[idx >> 5u] &= ~(1u << (idx & 31u));
-        if (x == 9) { y++; continue; }
-        if (y == 9) { x++; continue; }
-        uint4 c = hc_philox4x32(uint2(laneSeed, HC_RNG_STREAM_RESET),
-                                uint4(1u + (i >> 2u), 0u, 0u, 0u));
-        uint words[4] = { c.x, c.y, c.z, c.w };
-        if (hc_u01(words[i & 3u]) < 0.5f) x++; else y++;
+        visited |= 1u << nxt;
+        stack[sp] = nxt;
+        sp++;
     }
-    uint idx = 8u + 9u * 8u;   // (9,9)
-    w[idx >> 5u] &= ~(1u << (idx & 31u));
 }
 
 inline bool gw_pmaze_is_wall(uint w0, uint w1, uint w2, int x, int y) {
@@ -584,8 +492,6 @@ inline void gw_pmaze_obs(uint x, uint y, uint gx, uint gy, uint sg,
     o[16] = 1.0f;
 }
 
-// action: 0=up 1=down 2=left 3=right (same convention as FourRooms).
-// Returns reward; obs written for the NEW state; *doneOut = 1 on completion.
 inline float gw_pmaze_step(thread uint *gw, uint laneSeed, uint action,
                            thread float *obs, thread uint *doneOut) {
     uint x = gw[0], y = gw[1], gx = gw[2], gy = gw[3], sg = gw[4], ri = gw[5];
@@ -607,7 +513,7 @@ inline float gw_pmaze_step(thread uint *gw, uint laneSeed, uint action,
         nsg = 0u;
         nri = ri + 1u;
         uint b = 0u;
-        for (;;) {                      // agent redraw: first free cell
+        for (;;) {
             uint4 raw = hc_philox4x32(uint2(laneSeed, OAK_GW_STREAM),
                                       uint4(ri, b, 0u, 0u));
             uint words[4] = { raw.x, raw.y, raw.z, raw.w };
@@ -623,7 +529,7 @@ inline float gw_pmaze_step(thread uint *gw, uint laneSeed, uint action,
             b += 2u;
         }
         b = 1u;
-        for (;;) {                      // goal redraw: free and != agent cell
+        for (;;) {
             uint4 raw = hc_philox4x32(uint2(laneSeed, OAK_GW_STREAM),
                                       uint4(ri, b, 0u, 0u));
             uint words[4] = { raw.x, raw.y, raw.z, raw.w };
@@ -647,18 +553,6 @@ inline float gw_pmaze_step(thread uint *gw, uint laneSeed, uint action,
     return reward;
 }
 
-// ------------------------------------------------------------ HighDimMaze
-// 11x11 serpentine maze (border walls; interior wall x=3 except the gap
-// (3,9), interior wall x=7 except the gap (7,1)): three corridors — down
-// x1..2, through (3,9), up x4..6, through (7,1), down x8..9 — a longer
-// horizon than FourRooms. SIX discrete actions: 0=up 1=down 2=left 3=right,
-// 4=stay, 5=dash (up to two cells in lastDir, stopping at walls; lastDir =
-// the last cardinal action, init down). Rich 16-channel observation:
-// position, 4 wall sensors, goal relative position, and an 8-bit binary
-// position code (the one-hot-ish encoding). +1 on goal entry, done=1,
-// agent+goal rejection-redrawn to free cells (same scheme as
-// ProceduralMaze). CONTINUING. Lane state in gw[10]: 0=x, 1=y, 2=gx, 3=gy,
-// 4=sinceGoal, 5=respawnIdx, 6=lastDir.
 inline bool gw_hdm_is_wall(int x, int y) {
     if (x <= 0 || x >= 10 || y <= 0 || y >= 10) return true;
     if (x == 3 && y != 9) return true;
@@ -683,8 +577,6 @@ inline void gw_hdm_obs(uint x, uint y, uint gx, uint gy, thread float *o) {
     o[16] = 0.0f;
 }
 
-// action: 0=up 1=down 2=left 3=right 4=stay 5=dash (2 cells in lastDir).
-// Returns reward; obs written for the NEW state; *doneOut = 1 on completion.
 inline float gw_hdm_step(thread uint *gw, uint laneSeed, uint action,
                          thread float *obs, thread uint *doneOut) {
     uint x = gw[0], y = gw[1], gx = gw[2], gy = gw[3], sg = gw[4], ri = gw[5];
@@ -722,7 +614,7 @@ inline float gw_hdm_step(thread uint *gw, uint laneSeed, uint action,
         nsg = 0u;
         nri = ri + 1u;
         uint b = 0u;
-        for (;;) {                      // agent redraw: first free cell
+        for (;;) {
             uint4 raw = hc_philox4x32(uint2(laneSeed, OAK_GW_STREAM),
                                       uint4(ri, b, 0u, 0u));
             uint words[4] = { raw.x, raw.y, raw.z, raw.w };
@@ -738,7 +630,7 @@ inline float gw_hdm_step(thread uint *gw, uint laneSeed, uint action,
             b += 2u;
         }
         b = 1u;
-        for (;;) {                      // goal redraw: free and != agent cell
+        for (;;) {
             uint4 raw = hc_philox4x32(uint2(laneSeed, OAK_GW_STREAM),
                                       uint4(ri, b, 0u, 0u));
             uint words[4] = { raw.x, raw.y, raw.z, raw.w };
@@ -761,15 +653,6 @@ inline float gw_hdm_step(thread uint *gw, uint laneSeed, uint action,
     return reward;
 }
 
-// ---------------------------------------------------------------- POMaze
-// 11x11 PARTIAL-OBSERVABILITY maze (border walls; interior wall y=3 except
-// the gap (8,3), interior wall y=7 except the gap (2,7)): three bands, a
-// serpentine route. The agent sees ONLY the 8 adjacent cells (wall bits
-// N,NE,E,SE,S,SW,W,NW), its own position, and the goal's compass direction
-// — never the map; explored structure must be carried in memory. +1 on goal
-// entry, done=1, agent+goal rejection-redrawn to free cells (same scheme as
-// ProceduralMaze). CONTINUING. Lane state in gw[10]: 0=x, 1=y, 2=gx, 3=gy,
-// 4=sinceGoal, 5=respawnIdx.
 inline bool gw_po_is_wall(int x, int y) {
     if (x <= 0 || x >= 10 || y <= 0 || y >= 10) return true;
     if (y == 3 && x != 8) return true;
@@ -779,14 +662,14 @@ inline bool gw_po_is_wall(int x, int y) {
 
 inline void gw_po_obs(uint x, uint y, uint gx, uint gy, thread float *o) {
     int ix = int(x), iy = int(y);
-    o[0] = gw_po_is_wall(ix + 0, iy - 1) ? 1.0f : 0.0f;   // N
-    o[1] = gw_po_is_wall(ix + 1, iy - 1) ? 1.0f : 0.0f;   // NE
-    o[2] = gw_po_is_wall(ix + 1, iy + 0) ? 1.0f : 0.0f;   // E
-    o[3] = gw_po_is_wall(ix + 1, iy + 1) ? 1.0f : 0.0f;   // SE
-    o[4] = gw_po_is_wall(ix + 0, iy + 1) ? 1.0f : 0.0f;   // S
-    o[5] = gw_po_is_wall(ix - 1, iy + 1) ? 1.0f : 0.0f;   // SW
-    o[6] = gw_po_is_wall(ix - 1, iy + 0) ? 1.0f : 0.0f;   // W
-    o[7] = gw_po_is_wall(ix - 1, iy - 1) ? 1.0f : 0.0f;   // NW
+    o[0] = gw_po_is_wall(ix + 0, iy - 1) ? 1.0f : 0.0f;
+    o[1] = gw_po_is_wall(ix + 1, iy - 1) ? 1.0f : 0.0f;
+    o[2] = gw_po_is_wall(ix + 1, iy + 0) ? 1.0f : 0.0f;
+    o[3] = gw_po_is_wall(ix + 1, iy + 1) ? 1.0f : 0.0f;
+    o[4] = gw_po_is_wall(ix + 0, iy + 1) ? 1.0f : 0.0f;
+    o[5] = gw_po_is_wall(ix - 1, iy + 1) ? 1.0f : 0.0f;
+    o[6] = gw_po_is_wall(ix - 1, iy + 0) ? 1.0f : 0.0f;
+    o[7] = gw_po_is_wall(ix - 1, iy - 1) ? 1.0f : 0.0f;
     o[8] = float(x) / 10.0f;
     o[9] = float(y) / 10.0f;
     o[10] = (gx > x) ? 1.0f : 0.0f;
@@ -798,8 +681,6 @@ inline void gw_po_obs(uint x, uint y, uint gx, uint gy, thread float *o) {
     o[16] = 0.0f;
 }
 
-// action: 0=up 1=down 2=left 3=right (same convention as FourRooms).
-// Returns reward; obs written for the NEW state; *doneOut = 1 on completion.
 inline float gw_po_step(thread uint *gw, uint laneSeed, uint action,
                         thread float *obs, thread uint *doneOut) {
     uint x = gw[0], y = gw[1], gx = gw[2], gy = gw[3], sg = gw[4], ri = gw[5];
@@ -820,7 +701,7 @@ inline float gw_po_step(thread uint *gw, uint laneSeed, uint action,
         nsg = 0u;
         nri = ri + 1u;
         uint b = 0u;
-        for (;;) {                      // agent redraw: first free cell
+        for (;;) {
             uint4 raw = hc_philox4x32(uint2(laneSeed, OAK_GW_STREAM),
                                       uint4(ri, b, 0u, 0u));
             uint words[4] = { raw.x, raw.y, raw.z, raw.w };
@@ -836,7 +717,7 @@ inline float gw_po_step(thread uint *gw, uint laneSeed, uint action,
             b += 2u;
         }
         b = 1u;
-        for (;;) {                      // goal redraw: free and != agent cell
+        for (;;) {
             uint4 raw = hc_philox4x32(uint2(laneSeed, OAK_GW_STREAM),
                                       uint4(ri, b, 0u, 0u));
             uint words[4] = { raw.x, raw.y, raw.z, raw.w };
@@ -859,11 +740,6 @@ inline float gw_po_step(thread uint *gw, uint laneSeed, uint action,
     return reward;
 }
 
-// ------------------------------------------------------------ DelayedChain
-// Bare corridor, L=32: pos 0..31. action 1 moves pos+1, action 0 moves pos-1
-// (clamp 0). Reward +1 ONLY at the far end (reaching pos 31), wrap to 0,
-// done=1 — the cleanest long bare credit chain. Lane state in gw[10]:
-// 0=pos, 1=lastA.
 inline float gw_dchain_step(thread uint *gw, uint action, thread float *obs,
                             thread uint *doneOut) {
     uint pos = gw[0];
@@ -886,14 +762,6 @@ inline float gw_dchain_step(thread uint *gw, uint action, thread float *obs,
     return reward;
 }
 
-// -------------------------------------------------- case-gate probe kernel
-// Reads a gridworld_ref.py case file's in-records (buffer 0), runs each
-// through the SAME env-step functions the fleet env window uses, and writes
-// out-records (buffer 1) in the case format. hdr = {count, inW, outW};
-// inW selects the case type (8=FourRooms, 6=DeepSea, 11=KeyCorridor,
-// 2=Chain, 12=LargeDeepSea, 15=MultiKeyCorridor, 7=MemoryChain,
-// 13=ProceduralMaze, 1=ProceduralMazeGen, 9=HighDimMaze, 10=POMaze,
-// 3=DelayedChain).
 kernel void oak_gridworld_probe(device const float *in  [[buffer(0)]],
                                 device float *out       [[buffer(1)]],
                                 constant uint *hdr      [[buffer(2)]],
@@ -903,7 +771,6 @@ kernel void oak_gridworld_probe(device const float *in  [[buffer(0)]],
     device const float *p = in + (ulong)gid * inW;
     device float *o = out + (ulong)gid * outW;
     if (inW == 8u) {
-        // FourRooms in: [laneSeed, respawnIdx, x, y, gx, gy, sinceGoal, action]
         uint gw[6] = { uint(p[2]), uint(p[3]), uint(p[4]),
                        uint(p[5]), uint(p[6]), uint(p[1]) };
         float obs[17];
@@ -912,8 +779,6 @@ kernel void oak_gridworld_probe(device const float *in  [[buffer(0)]],
         for (int i = 0; i < 6; i++) o[1 + i] = float(gw[i]);
         for (int i = 0; i < 17; i++) o[7 + i] = obs[i];
     } else if (inW == 6u) {
-        // DeepSea in: [maskLo, maskHi, r, c, lastA, action]; mask words are
-        // the uint32 bit pattern reinterpreted as float32.
         uint gw[6] = { uint(p[2]), uint(p[3]), uint(p[4]),
                        as_type<uint>(p[0]), as_type<uint>(p[1]), 0u };
         float obs[17];
@@ -922,8 +787,6 @@ kernel void oak_gridworld_probe(device const float *in  [[buffer(0)]],
         for (int i = 0; i < 3; i++) o[1 + i] = float(gw[i]);
         for (int i = 0; i < 17; i++) o[4 + i] = obs[i];
     } else if (inW == 11u) {
-        // KeyCorridor in: [laneSeed, respawnIdx, x, y, kx, ky, gx, gy, flags,
-        // sinceGoal, action] (11)
         uint gw[10] = { uint(p[2]), uint(p[3]), uint(p[4]), uint(p[5]),
                         uint(p[6]), uint(p[7]), uint(p[8]), uint(p[9]),
                         uint(p[1]), 0u };
@@ -935,8 +798,6 @@ kernel void oak_gridworld_probe(device const float *in  [[buffer(0)]],
         o[10] = float(done);
         for (int i = 0; i < 17; i++) o[11 + i] = obs[i];
     } else if (inW == 12u) {
-        // LargeDeepSea in: [mask0..mask7, r, c, lastA, action]; mask words
-        // are the uint32 bit pattern reinterpreted as float32.
         uint gw[10] = { 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u };
         gw[0] = uint(p[8]) | (uint(p[9]) << 4u) | (uint(p[10]) << 8u);
         for (int i = 0; i < 8; i++) gw[1 + i] = as_type<uint>(p[i]);
@@ -948,8 +809,6 @@ kernel void oak_gridworld_probe(device const float *in  [[buffer(0)]],
         o[3] = float((gw[0] >> 8u) & 1u);
         for (int i = 0; i < 17; i++) o[4 + i] = obs[i];
     } else if (inW == 15u) {
-        // MultiKeyCorridor in: [laneSeed, respawnIdx, x, y, k1x, k1y, k2x,
-        // k2y, k3x, k3y, gx, gy, flags, sinceGoal, action] (15)
         uint gw[10] = { uint(p[2]), uint(p[3]),
                         uint(p[4]) | (uint(p[5]) << 4u),
                         uint(p[6]) | (uint(p[7]) << 4u),
@@ -969,8 +828,6 @@ kernel void oak_gridworld_probe(device const float *in  [[buffer(0)]],
         o[14] = float(done);
         for (int i = 0; i < 17; i++) o[15 + i] = obs[i];
     } else if (inW == 7u) {
-        // MemoryChain in: [pos, cue, lastA, respawnIdx, laneSeed, action,
-        // pad] (7; the pad keeps inW distinct from DeepSea's 6)
         uint gw[10] = { uint(p[0]), uint(p[1]), uint(p[2]), uint(p[3]),
                         0u, 0u, 0u, 0u, 0u, 0u };
         float obs[17];
@@ -981,8 +838,6 @@ kernel void oak_gridworld_probe(device const float *in  [[buffer(0)]],
         o[4] = float(gw[3]); o[5] = float(done);
         for (int i = 0; i < 17; i++) o[6 + i] = obs[i];
     } else if (inW == 13u) {
-        // ProceduralMaze in: [laneSeed, respawnIdx, x, y, gx, gy, sinceGoal,
-        // w0, w1, w2, action, pad, pad] (wall words as f32 bit patterns)
         uint gw[10] = { uint(p[2]), uint(p[3]), uint(p[4]), uint(p[5]),
                         uint(p[6]), uint(p[1]),
                         as_type<uint>(p[7]), as_type<uint>(p[8]),
@@ -995,7 +850,6 @@ kernel void oak_gridworld_probe(device const float *in  [[buffer(0)]],
         o[7] = float(done);
         for (int i = 0; i < 17; i++) o[8 + i] = obs[i];
     } else if (inW == 1u) {
-        // ProceduralMazeGen in: [laneSeed] -> wall words as 16-bit halves
         uint w[3];
         gw_pmaze_gen(uint(p[0]), w);
         for (int i = 0; i < 3; i++) {
@@ -1003,8 +857,6 @@ kernel void oak_gridworld_probe(device const float *in  [[buffer(0)]],
             o[2 * i + 1] = float(w[i] >> 16u);
         }
     } else if (inW == 9u) {
-        // HighDimMaze in: [laneSeed, respawnIdx, x, y, gx, gy, sinceGoal,
-        // lastDir, action] (9)
         uint gw[10] = { uint(p[2]), uint(p[3]), uint(p[4]), uint(p[5]),
                         uint(p[6]), uint(p[1]), uint(p[7]), 0u, 0u, 0u };
         float obs[17];
@@ -1015,8 +867,6 @@ kernel void oak_gridworld_probe(device const float *in  [[buffer(0)]],
         o[8] = float(done);
         for (int i = 0; i < 17; i++) o[9 + i] = obs[i];
     } else if (inW == 10u) {
-        // POMaze in: [laneSeed, respawnIdx, x, y, gx, gy, sinceGoal, action,
-        // pad, pad] (10)
         uint gw[10] = { uint(p[2]), uint(p[3]), uint(p[4]), uint(p[5]),
                         uint(p[6]), uint(p[1]), 0u, 0u, 0u, 0u };
         float obs[17];
@@ -1027,7 +877,6 @@ kernel void oak_gridworld_probe(device const float *in  [[buffer(0)]],
         o[7] = float(done);
         for (int i = 0; i < 17; i++) o[8 + i] = obs[i];
     } else if (inW == 3u) {
-        // DelayedChain in: [pos, lastA, action] (3)
         uint gw[10] = { uint(p[0]), uint(p[1]), 0u, 0u, 0u,
                         0u, 0u, 0u, 0u, 0u };
         float obs[17];
@@ -1037,7 +886,6 @@ kernel void oak_gridworld_probe(device const float *in  [[buffer(0)]],
         o[1] = float(gw[0]); o[2] = float(gw[1]); o[3] = float(done);
         for (int i = 0; i < 17; i++) o[4 + i] = obs[i];
     } else {
-        // Chain in: [pos, action] (2)
         uint gw[10] = { uint(p[0]), 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u };
         float obs[17];
         uint done = 0u;

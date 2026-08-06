@@ -4,45 +4,16 @@
 #include <metal_stdlib>
 using namespace metal;
 
-// Continuing classic-control envs (Acrobot-cont-v0, MountainCar-cont-v0,
-// CartPole-cont-v0, Pendulum-cont-v0) — the Metal fp32 port of the fp64
-// Python reference in tools/physics_parity.py, certified by the
-// null-calibrated TOST population-equivalence gate (--classic-tost), the
-// same standard as the F4 cheetah verdict. All four are CONTINUING
-// (Inv-4/Inv-7): completion events respawn the state INSIDE the stream
-// (done=1 is a wrapper metric, never a reset signal to the agent).
-//
-// Universal I/O contract (Inv-1): every env writes its natural obs channels
-// and zero-pads to OBS_W=17; discrete envs consume the first N of the
-// D_policy=12 policy coords as Gumbel-max logits (N from OAK_ENV_SPECS),
-// Pendulum is Box 1 (ctrl[0] in [-1,1] -> torque [-2,2]).
-//
-// State is float32 stored as bit patterns in the lane's gw[10] uint slots
-// (as_type round-trip). Dynamics follow the gym classic-control equations;
-// angles are wrapped to [-pi, pi] once per step on both sides (a no-op
-// mathematically — every use is 2*pi-periodic — that keeps fp32 argument
-// reduction exact over million-step continuing streams).
-//
-// This file is included from OakKernel.metal (after Gridworld.metal) and
-// compiled with -fno-fast-math; the explicit safe-mode pragma keeps the
-// dynamics correctly rounded even if the include order moves.
 #pragma METAL fp math_mode(safe)
 
 inline float gw_wrap_pi(float x) {
-    // floor-mod into [-pi, pi); identical formula on the Python side.
     return x - 2.0f * M_PI_F * floor((x + M_PI_F) / (2.0f * M_PI_F));
 }
 
-// ---------------------------------------------------------------- Acrobot
-// gym acrobot (Spong 2-link), m1=m2=1, l1=l2=1, lc1=lc2=0.5, I1=I2=1,
-// g=9.8, dt=0.2, RK4 (the gym integrator) with constant torque per step,
-// velocity clips w1 in [-4pi, 4pi], w2 in [-9pi, 9pi]. D3 torque
-// {-1,0,+1}. Sparse +1 on swing-up height (-cos(th1)-cos(th1+th2) > 1),
-// reset to hang (all zeros), done=1. gw: 0..3 = th1,th2,w1,w2 bits.
 constant float AB_DT = 0.2f;
 constant float AB_G = 9.8f;
-constant float AB_W1MAX = 12.566371f;   // 4*pi
-constant float AB_W2MAX = 28.274334f;   // 9*pi
+constant float AB_W1MAX = 12.566371f;
+constant float AB_W2MAX = 28.274334f;
 
 inline void gw_acro_obs(float th1, float th2, float w1, float w2,
                         thread float *o) {
@@ -52,12 +23,11 @@ inline void gw_acro_obs(float th1, float th2, float w1, float w2,
     for (int i = 7; i < 17; i++) o[i] = 0.0f;
 }
 
-// ds/dt of (th1, th2, w1, w2) under constant torque (gym _dsdt, nips form).
 inline void gw_acro_dsdt(float th1, float th2, float w1, float w2, float tau,
                          thread float *d) {
     float c2 = cos(th2);
-    float d1 = 3.5f + c2;            // m1 lc1^2 + m2(l1^2+lc2^2+2 l1 lc2 c2) + I1+I2
-    float d2 = 1.25f + 0.5f * c2;    // m2(lc2^2 + l1 lc2 c2) + I2
+    float d1 = 3.5f + c2;
+    float d2 = 1.25f + 0.5f * c2;
     float phi2 = 4.9f * cos(th1 + th2 - M_PI_F / 2.0f);
     float s2 = sin(th2);
     float phi1 = -0.5f * w2 * w2 * s2 - w2 * w1 * s2
@@ -73,7 +43,6 @@ inline float gw_acro_step(thread uint *gw, uint action, thread float *obs,
     float th1 = as_type<float>(gw[0]), th2 = as_type<float>(gw[1]);
     float w1 = as_type<float>(gw[2]), w2 = as_type<float>(gw[3]);
     float tau = float(int(action % 3u)) - 1.0f;
-    // classic RK4, dt = 0.2 (gym acrobot integrator)
     float k1[4], k2[4], k3[4], k4[4];
     gw_acro_dsdt(th1, th2, w1, w2, tau, k1);
     float h = AB_DT / 2.0f;
@@ -91,10 +60,10 @@ inline float gw_acro_step(thread uint *gw, uint action, thread float *obs,
     th2 = gw_wrap_pi(th2);
     float reward = 0.0f;
     uint done = 0u;
-    if (-cos(th1) - cos(th1 + th2) > 1.0f) {   // free end one link above base
+    if (-cos(th1) - cos(th1 + th2) > 1.0f) {
         reward = 1.0f;
         done = 1u;
-        th1 = 0.0f; th2 = 0.0f; w1 = 0.0f; w2 = 0.0f;  // reset to hang
+        th1 = 0.0f; th2 = 0.0f; w1 = 0.0f; w2 = 0.0f;
     }
     gw[0] = as_type<uint>(th1); gw[1] = as_type<uint>(th2);
     gw[2] = as_type<uint>(w1);  gw[3] = as_type<uint>(w2);
@@ -103,11 +72,6 @@ inline float gw_acro_step(thread uint *gw, uint action, thread float *obs,
     return reward;
 }
 
-// ------------------------------------------------------------- MountainCar
-// gym MountainCar (discrete dynamics): force (a-1)*0.001, gravity 0.0025,
-// pos in [-1.2, 0.6], vel in [-0.07, 0.07], left wall zeroes negative vel.
-// Sparse +1 at the hilltop (pos >= 0.5), respawn at the valley (-0.5, 0),
-// done=1. D3 force {-1,0,+1}. gw: 0=pos bits, 1=vel bits.
 inline void gw_mcar_obs(float pos, float vel, thread float *o) {
     o[0] = pos; o[1] = vel; o[2] = 1.0f;
     for (int i = 3; i < 17; i++) o[i] = 0.0f;
@@ -127,7 +91,7 @@ inline float gw_mcar_step(thread uint *gw, uint action, thread float *obs,
     if (pos >= 0.5f) {
         reward = 1.0f;
         done = 1u;
-        pos = -0.5f; vel = 0.0f;   // respawn at the valley
+        pos = -0.5f; vel = 0.0f;
     }
     gw[0] = as_type<uint>(pos); gw[1] = as_type<uint>(vel);
     gw_mcar_obs(pos, vel, obs);
@@ -135,13 +99,8 @@ inline float gw_mcar_step(thread uint *gw, uint action, thread float *obs,
     return reward;
 }
 
-// --------------------------------------------------------------- CartPole
-// gym CartPole-v1 dynamics: g=9.8, mc=1.0, mp=0.1, length=0.5, tau=0.02,
-// force_mag=10, Euler kinematics. Dense +1 per step alive; fall
-// (|x| > 2.4 or |theta| > 12 deg) resets to the upright zero state,
-// done=1. D2 force {-10,+10}. gw: 0..3 = x, xdot, th, thdot bits.
 constant float CP_TAU = 0.02f;
-constant float CP_THETAMAX = 0.2094395f;   // 12 deg
+constant float CP_THETAMAX = 0.2094395f;
 
 inline void gw_pole_obs(float x, float xd, float th, float thd,
                         thread float *o) {
@@ -166,21 +125,15 @@ inline float gw_pole_step(thread uint *gw, uint action, thread float *obs,
     uint done = 0u;
     if (fabs(x) > 2.4f || fabs(th) > CP_THETAMAX) {
         done = 1u;
-        x = 0.0f; xd = 0.0f; th = 0.0f; thd = 0.0f;   // reset upright
+        x = 0.0f; xd = 0.0f; th = 0.0f; thd = 0.0f;
     }
     gw[0] = as_type<uint>(x);  gw[1] = as_type<uint>(xd);
     gw[2] = as_type<uint>(th); gw[3] = as_type<uint>(thd);
     gw_pole_obs(x, xd, th, thd, obs);
     *doneOut = done;
-    return 1.0f;   // dense +1 per step alive
+    return 1.0f;
 }
 
-// --------------------------------------------------------------- Pendulum
-// gym Pendulum: g=10, m=1, l=1, dt=0.05, max_speed=8, torque in [-2,2]
-// (ctrl[0] in [-1,1] * 2). Dense shaped reward -(th_norm^2 + 0.1 thdot^2 +
-// 0.001 u^2) with th_norm = angle from upright; cost uses the PRE-step
-// state (gym order). Truly continuing: never done. Box 1.
-// gw: 0=th bits, 1=thdot bits.
 inline void gw_pend_obs(float th, float thd, thread float *o) {
     o[0] = cos(th); o[1] = sin(th); o[2] = thd; o[3] = 1.0f;
     for (int i = 4; i < 17; i++) o[i] = 0.0f;
@@ -189,7 +142,7 @@ inline void gw_pend_obs(float th, float thd, thread float *o) {
 inline float gw_pend_step(thread uint *gw, float ctrl0, thread float *obs) {
     float th = as_type<float>(gw[0]), thd = as_type<float>(gw[1]);
     float u = clamp(2.0f * ctrl0, -2.0f, 2.0f);
-    float thn = gw_wrap_pi(th);   // angle from upright (gym th is 0 = up)
+    float thn = gw_wrap_pi(th);
     float cost = thn * thn + 0.1f * thd * thd + 0.001f * u * u;
     float nthd = thd + (15.0f * sin(th + M_PI_F) + 3.0f * u) * 0.05f;
     th = th + nthd * 0.05f;
@@ -200,13 +153,6 @@ inline float gw_pend_step(thread uint *gw, float ctrl0, thread float *obs) {
     return -cost;
 }
 
-// -------------------------------------------------- case-gate probe kernel
-// Single-step probe for the classic-control boundary gate: reads case
-// in-records (buffer 0), runs each through the SAME gw_*_step functions the
-// fleet env window uses, writes out-records (buffer 1). hdr = {count, inW,
-// outW}; inW selects the env (3=MountainCar, 5=Acrobot, 7=CartPole,
-// 4=Pendulum). Compared by physics_parity.py --classic-probe-compare at
-// fp32-vs-fp64 tolerance (state/reward 1e-4, done flag exact-counted).
 kernel void oak_classic_probe(device const float *in  [[buffer(0)]],
                               device float *out       [[buffer(1)]],
                               constant uint *hdr      [[buffer(2)]],
@@ -219,27 +165,23 @@ kernel void oak_classic_probe(device const float *in  [[buffer(0)]],
     float obs[17];
     uint done = 0u;
     if (inW == 3u) {
-        // MountainCar in: [pos, vel, action] -> [reward, npos, nvel, done]
         gw[0] = as_type<uint>(p[0]); gw[1] = as_type<uint>(p[1]);
         float r = gw_mcar_step(gw, uint(p[2]), obs, &done);
         o[0] = r; o[1] = as_type<float>(gw[0]); o[2] = as_type<float>(gw[1]);
         o[3] = float(done);
     } else if (inW == 5u) {
-        // Acrobot in: [th1, th2, w1, w2, action] -> [reward, st*4, done]
         for (int i = 0; i < 4; i++) gw[i] = as_type<uint>(p[i]);
         float r = gw_acro_step(gw, uint(p[4]), obs, &done);
         o[0] = r;
         for (int i = 0; i < 4; i++) o[1 + i] = as_type<float>(gw[i]);
         o[5] = float(done);
     } else if (inW == 7u) {
-        // CartPole in: [x, xd, th, thd, action, 0, 0] -> [reward, st*4, done]
         for (int i = 0; i < 4; i++) gw[i] = as_type<uint>(p[i]);
         float r = gw_pole_step(gw, uint(p[4]), obs, &done);
         o[0] = r;
         for (int i = 0; i < 4; i++) o[1 + i] = as_type<float>(gw[i]);
         o[5] = float(done);
     } else {
-        // Pendulum in: [th, thdot, ctrl, 0] -> [reward, nth, nthdot, 0]
         gw[0] = as_type<uint>(p[0]); gw[1] = as_type<uint>(p[1]);
         float r = gw_pend_step(gw, p[2], obs);
         o[0] = r; o[1] = as_type<float>(gw[0]); o[2] = as_type<float>(gw[1]);
