@@ -122,7 +122,6 @@ struct Ctx {
     device float *psiAux, *vStop, *vsAux;
     device float *observation, *observationMean, *obsSM;
     device float *obsAlpha, *obsBeta, *obsH, *obsE;
-    device float *rhoPrev;
     device float *state;
     device float *policyMean, *policyMeanRaw, *actionSignal, *optionActorCredit, *optionPolicyMean;
     device float *importance;
@@ -221,7 +220,6 @@ inline Ctx make_ctx(device float *params, device float *stateArena, device uint 
     c.obsBeta = stateArena + s; s += c.O;
     c.obsH = stateArena + s; s += c.O;
     c.obsE = stateArena + s; s += c.O;
-    c.rhoPrev = stateArena + s; s += 1u;
     c.state = stateArena + s; s += 2u * c.R;
     c.policyMean = stateArena + s; s += c.D;
     c.policyMeanRaw = stateArena + s; s += c.D;
@@ -819,21 +817,14 @@ inline void FeatureConstruction(Ctx ctx,
                                 uint tid,
                                 uint tgW) {
     uint nf = 0u;
-    bool rhoFalling = isfinite(ctx.rho) && isfinite(ctx.rhoPrev[0])
-        && ctx.rho < ctx.rhoPrev[0];
     if (!OAK_ABLATE_FEATURE_CONSTRUCTION) {
         for (uint o = tid; o < ctx.O; o += tgW) {
             float x = ctx.observation[o];
             if (!isfinite(x)) { nf += 1u; continue; }
             float mu = ctx.observationMean[o];
-            float betaOld = ctx.obsBeta[o];
-            float alphaOld = ctx.obsAlpha[o];
             metaopt_update_slot(ctx.obsAlpha, ctx.obsBeta, ctx.obsH, ctx.obsE,
-                                o, x - mu, 1.0f, ctx.stepCount, ctx.metaEta, ctx.invR);
-            if (rhoFalling && ctx.obsBeta[o] > betaOld) {
-                ctx.obsBeta[o] = betaOld;
-                ctx.obsAlpha[o] = alphaOld;
-            }
+                                o, x - mu, 1.0f, min(ctx.stepCount, ctx.R), ctx.metaEta,
+                                ctx.invR);
             float obsRate = max(1.0f / (float(ctx.stepCount) + 1.0f), ctx.obsAlpha[o]);
             ctx.observationMean[o] += obsRate * (x - mu);
             ctx.obsSM[o] += obsRate * (x * x - ctx.obsSM[o]);
@@ -883,7 +874,6 @@ inline void FeatureConstruction(Ctx ctx,
         if (ctx.featureAge[i] < 0xffffffffu && !OAK_ABLATE_FEATURE_CONSTRUCTION)
             ctx.featureAge[i] += 1u;
     }
-    if (tid == 0u) ctx.rhoPrev[0] = ctx.rho;
     simdgroup_barrier(mem_flags::mem_device);
 
     uint tile;
