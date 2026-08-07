@@ -25,24 +25,24 @@ constant uint OAK_ENV_DELAYEDCHAIN = 15u;
 constant uint OAK_ENV_COUNT       = 16u;
 constant uint OAK_GW_STREAM       = 3u;
 
-struct OakEnvSpec { uint obsDimNatural; uint actionKind; uint actionCount; };
+struct OakEnvSpec { uint nameHash; uint obsDimNatural; uint actionKind; uint actionCount; };
 constant OakEnvSpec OAK_ENV_SPECS[OAK_ENV_COUNT] = {
-    { 17u, 0u, 6u },
-    { 17u, 1u, 4u },
-    {  8u, 1u, 2u },
-    { 14u, 1u, 4u },
-    {  7u, 1u, 3u },
-    {  3u, 1u, 3u },
-    {  5u, 1u, 2u },
-    {  4u, 0u, 1u },
-    {  2u, 1u, 2u },
-    {  8u, 1u, 2u },
-    { 17u, 1u, 4u },
-    {  6u, 1u, 2u },
-    { 17u, 1u, 4u },
-    { 16u, 1u, 6u },
-    { 15u, 1u, 4u },
-    {  3u, 1u, 2u },
+    { 0x9d7fd44bu, 17u, 0u, 6u },
+    { 0x8014a187u, 17u, 1u, 4u },
+    { 0x56af5bf2u,  8u, 1u, 2u },
+    { 0xdd537ebau, 14u, 1u, 4u },
+    { 0x93531833u,  7u, 1u, 3u },
+    { 0xf5b3ddc8u,  3u, 1u, 3u },
+    { 0x41f9937du,  5u, 1u, 2u },
+    { 0x69bbbb73u,  4u, 0u, 1u },
+    { 0x7b267422u,  2u, 1u, 2u },
+    { 0xb96ddc3du,  8u, 1u, 2u },
+    { 0x4c3c2d3fu, 17u, 1u, 4u },
+    { 0xcf293fd7u,  6u, 1u, 2u },
+    { 0xd75dd5f9u, 17u, 1u, 4u },
+    { 0xbfeb2b7au, 16u, 1u, 6u },
+    { 0x0582e383u, 15u, 1u, 4u },
+    { 0x56184b96u,  3u, 1u, 2u },
 };
 
 inline bool gw_four_is_wall(int x, int y) {
