@@ -279,7 +279,7 @@ final class Engine {
       probeCache[r.kind] = sp
       let anchors = Int(sp.anchorCount)
       precondition(Int(sp.optionCount) == 32, "K must equal the simd width")
-      precondition(Int(sp.rank) == anchors + anchors * 7, "gate-bank identity broken")
+      precondition(Int(sp.rank) == anchors + anchors * 14, "gate-bank identity broken")
       precondition(anchors >= naturalO + dk + 2, "core slots cannot hold obs+action+reward+bias")
       precondition(Int(sp.stateStride) % 4 == 0, "stateStride must stay 16B-aligned")
       let cfgB = dev.makeBuffer(

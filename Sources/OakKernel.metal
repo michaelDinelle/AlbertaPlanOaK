@@ -311,7 +311,7 @@ inline Ctx make_ctx(device float *params, device float *stateArena, device uint 
     c.nurParentB = uintArena + u; u += c.Rn;
     c.nurKind = uintArena + u; u += c.Rn;
     c.nurAge = uintArena + u; u += c.Rn;
-    c.actIdx = uintArena + u; u += 2u * 64u;
+    c.actIdx = uintArena + u; u += 2u * 96u;
     c.dynaSlot = uintArena + u; u += 4u;
     c.parked = uintArena + u; u += c.K;
     c.scalars = scalars; c.stats = stats;
@@ -321,7 +321,7 @@ inline Ctx make_ctx(device float *params, device float *stateArena, device uint 
 inline device float *state_at(Ctx ctx, uint slot) { return ctx.state + slot * ctx.R; }
 
 constant uint OAK_CORE = 32u;
-constant uint OAK_ACT = 64u;
+constant uint OAK_ACT = 96u;
 constant uint OAK_GATE_BANK = 7u;
 
 constant uint OAK_SPEC_ENV_KIND [[function_constant(29)]];
@@ -341,14 +341,15 @@ inline KernelConfig oak_derive_cfg(uint obsDim, uint actionParams) {
     KernelConfig c;
     c.obsDim = obsDim;
     c.actionParamCount = actionParams;
-    c.rank = OAK_CORE + OAK_CORE * OAK_GATE_BANK;
+    c.rank = OAK_CORE + OAK_CORE * OAK_GATE_BANK * 2u;
     c.optionCount = OAK_CORE;
     c.linearAnchorCount = OAK_CORE;
-    c.obsTraceLevels = (OAK_CORE + OAK_CORE * OAK_GATE_BANK) / (2u * OAK_CORE);
+    c.obsTraceLevels = c.rank / (2u * OAK_CORE);
     c.nurseryCount = c.rank;
-    c.invRank = 1.0f / float(c.rank);
+    uint rTime = OAK_CORE + OAK_CORE * OAK_GATE_BANK;
+    c.invRank = 1.0f / float(rTime);
     c.invOptionCount = 1.0f / float(c.optionCount);
-    c.metaEta = 1.0f / float(c.rank) / float(max(c.rank + c.actionParamCount, 1u));
+    c.metaEta = 1.0f / float(rTime) / float(max(rTime + c.actionParamCount, 1u));
     c.sampleSigma = 1.0f / float(max(c.actionParamCount, 1u));
     c.sampleInv2S2 = 1.0f / (2.0f * c.sampleSigma * c.sampleSigma);
     c.actorAlphaDenom = float(max(c.actionParamCount * c.optionCount, 1u));
@@ -870,6 +871,7 @@ inline void FeatureConstruction(Ctx ctx,
     simdgroup_barrier(mem_flags::mem_device);
 
     uint tile;
+    uint tile2;
     {
         uint S = ctx.naturalO + ctx.naturalA + 1u;
         uint src = tid % S, occ = tid / S;
@@ -882,9 +884,12 @@ inline void FeatureConstruction(Ctx ctx,
             uint cb = (src + occ) % ctx.naturalO;
             tile = joint_cell(curr[ca], curr[cb], occ);
         }
+        tile2 = gate_tile_zoom(curr[gate_source_channel(ctx, src)], occ + 1u);
     }
-    uint lo = OAK_CORE + tid * OAK_GATE_BANK, hi = lo + OAK_GATE_BANK;
-    uint winner = lo + tile;
+    for (uint g = 0u; g < 2u; ++g) {
+    uint tileG = (g == 0u) ? tile : tile2;
+    uint lo = OAK_CORE + (tid + g * 32u) * OAK_GATE_BANK, hi = lo + OAK_GATE_BANK;
+    uint winner = lo + tileG;
     float winX = 0.0f;
     for (uint i = lo; i < hi; ++i) {
         float x = 0.0f;
@@ -916,9 +921,10 @@ inline void FeatureConstruction(Ctx ctx,
         if (i == winner) winX = x;
     }
     curr[winner] = winX;
-    actC[OAK_CORE + tid] = winner;
+    actC[OAK_CORE + tid + g * 32u] = winner;
     if (ctx.featureAge[winner] < 0xffffffffu && !OAK_ABLATE_FEATURE_CONSTRUCTION)
         ctx.featureAge[winner] += 1u;
+    }
     simdgroup_barrier(mem_flags::mem_device);
 }
 
