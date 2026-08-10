@@ -977,7 +977,7 @@ static inline void oak_plan_one(Ctx ctx, uint k,
         float rHat2 = rHat, lRaw2 = lRaw;
         float optRhoOld = ctx.optRho[k];
         if (!isfinite(optRhoOld)) optRhoOld = 0.0f;
-        float rTd = (ctx.planScr[0] - optRhoOld) + cont * rHat2 - rPrev;
+        float rTd = (k == 0u) ? 0.0f : ((ctx.planScr[0] - optRhoOld) + cont * rHat2 - rPrev);
         float rhoImp = ctx.importance[k];
         if (!isfinite(rhoImp) || rhoImp < 0.0f) rhoImp = 0.0f;
         if (isfinite(ctx.planScr[0]))
@@ -1074,6 +1074,13 @@ static inline void oak_learn_rows(Ctx ctx, device const float *prev,
     float rtd = ctx.optRewardTd[k], dtd = ctx.optDurationTd[k];
     float psiErr = td - hD, psc = ctx.psiAuxScale[k];
     float vErr = vtd - vD, vasc = ctx.vsAuxScale[k];
+    float rD = 0.0f;
+    for (uint a0 = 0u; a0 < A; ++a0) {
+        uint i0 = act_of(actP, a0);
+        rD = fma(ctx.vStop2[i0 * K + k], prev[i0], rD);
+    }
+    if (!isfinite(rD)) rD = 0.0f;
+    float rErr = rtd - rD;
     float cj[16];
     for (uint j = 0u; j < DL; ++j) cj[j] = ctx.polCoef[tid * DL + j];
     for (uint cb = 0u; cb < A; cb += 32u) {
@@ -1109,6 +1116,11 @@ static inline void oak_learn_rows(Ctx ctx, device const float *prev,
                 *h = safe_w(*h, *h + aM * rho * vErr * xp * vasc);
                 device float *lw = &ctx.optDuration[i * K + k];
                 *lw = safe_w(*lw, *lw + aM * rho * dtd * xp * vsc * 0.05f);
+                float gr = (cont > 0.0f) ? (rD * (xp - cont * xc)) : (rtd * xp);
+                device float *rw = &ctx.optReward[i * K + k];
+                *rw = safe_w(*rw, *rw + aM * rho * gr * vsc);
+                device float *rh = &ctx.vStop2[i * K + k];
+                *rh = safe_w(*rh, *rh + aM * rho * rErr * xp * vasc);
             }
         }
     }
@@ -1133,6 +1145,8 @@ static inline void oak_learn_rows(Ctx ctx, device const float *prev,
                 if (!OAK_ABLATE_OPTION_MODELS) {
                     device float *w = &ctx.vStop[i * K + k];
                     *w = safe_w(*w, *w + aM * rho * (-vD * cont * xc) * vsc);
+                    device float *rw = &ctx.optReward[i * K + k];
+                    *rw = safe_w(*rw, *rw + aM * rho * (-rD * cont * xc) * vsc);
                 }
             }
         }

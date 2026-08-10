@@ -371,7 +371,6 @@ final class Engine {
         for kk in 0..<k {
           lu[Int(sp.uOptFeature) + kk] = UInt32(kk)
           lp[psi + kk * k + kk] = inv
-          lp[Int(sp.pVStop2) + ((kk * 7 + 5) % rank) * k + kk] = inv
           ls[Int(sp.stUtilOpt) + kk] = Float(rank)
           ls[Int(sp.stAlphaAct) + kk] = 1
           ls[Int(sp.stBetaAct) + kk] = 0
@@ -1451,7 +1450,7 @@ final class MetricsTapeWriter {
     func writeHashes(step: Int) throws {
       guard let eng = engine else { return }
       if let rawDir = e["OAK_DEBUG_RAW"] {
-        for lane in 0..<min(8, B) {
+        for lane in 0..<min(64, B) {
           let kd = eng.kind(of: lane)
           let d = Data(
             bytes: eng.statePtr(lane), count: kd.stateTotal * MemoryLayout<Float>.stride)
