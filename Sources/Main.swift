@@ -56,11 +56,12 @@ let fleetLaneStride = 312
 struct AblationSpec {
   static let ordered = [
     "feature-construction", "gvf-prediction", "rr-subtasks", "option-policies",
-    "option-models", "planning", "option-keyboard",
+    "option-models", "option-keyboard",
     "keyboard-to-policy", "search-control", "search-to-generate-test", "generate-and-test",
     "derived-core", "joint-geometry",
   ]
   static let functionConstantIndex = [
+    "option-keyboard": 6,
     "keyboard-to-policy": 8,
     "search-control": 9,
     "search-to-generate-test": 10,
@@ -1960,7 +1961,7 @@ final class MetricsTapeWriter {
     let ablated = Set(ablations.names)
     var organFma: [String: Int] = [
       "FeatureConstruction": 0, "GVFPrediction": 0, "RewardRespectingSubtasks": 0,
-      "OptionPolicies": 0, "OptionModels": 0, "Planning": 0, "OptionKeyboard": 0,
+      "OptionPolicies": 0, "OptionModels": 0, "OptionKeyboard": 0,
       "SearchControl": 0, "GenerateAndTest": 0, "ActionEmission": 0, "misc": 0,
     ]
     organFma["FeatureConstruction"]! += 16 + 3 * 32
@@ -1982,9 +1983,6 @@ final class MetricsTapeWriter {
     }
     if !ablated.contains("option-models") {
       organFma["OptionModels"]! += 4 * fK * fA + 4 * fK * fA + 2 * fK * fA + 16 * fK
-    }
-    if !ablated.contains("planning") {
-      organFma["Planning"]! += 14 * fA * 32 + 4 * fK * fA + 2 * fK * 32
     }
     organFma["OptionKeyboard"]! += fK + fD * fK + fK
     organFma["SearchControl"]! += fA * fK + fK + fK / 2

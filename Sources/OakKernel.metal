@@ -18,7 +18,6 @@ constant bool OAK_ABLATE_GVF_PREDICTION [[function_constant(1)]];
 constant bool OAK_ABLATE_RR_SUBTASKS [[function_constant(2)]];
 constant bool OAK_ABLATE_OPTION_POLICIES [[function_constant(3)]];
 constant bool OAK_ABLATE_OPTION_MODELS [[function_constant(4)]];
-constant bool OAK_ABLATE_PLANNING [[function_constant(5)]];
 constant bool OAK_ABLATE_OPTION_KEYBOARD [[function_constant(6)]];
 constant bool OAK_ABLATE_KEYBOARD_TO_POLICY [[function_constant(8)]];
 constant bool OAK_ABLATE_SEARCH_CONTROL [[function_constant(9)]];
@@ -250,19 +249,13 @@ inline Ctx make_ctx(device float *params, device float *stateArena, device uint 
     c.actorAdv = stateArena + s; s += c.K;
     c.optRewardTd = stateArena + s; s += c.K;
 
-    s += c.K;
     c.optDurationTd = stateArena + s; s += c.K;
-    s += c.K;
     c.obsTraceMulti = stateArena + s; s += c.traceLevels * c.O;
     c.prioOpt = stateArena + s; s += c.K;
     c.continuation = stateArena + s; s += c.K;
     c.keyboard = stateArena + s; s += c.K;
-    s += c.K;
     c.valueGauge = stateArena + s; s += 1u;
-    s += c.K;
-    s += c.K;
     c.headScale = stateArena + s; s += c.K;
-    s += c.K;
     c.valueScale = stateArena + s; s += 1u;
     c.xNormPrev = stateArena + s; s += 1u;
     c.hDotPsi = stateArena + s; s += c.K;
@@ -290,7 +283,7 @@ inline Ctx make_ctx(device float *params, device float *stateArena, device uint 
 
     c.nurStats = stateArena + s; s += 4u * c.Rn;
     c.muRaw = stateArena + s; s += c.K * c.D;
-    c.polCoef = stateArena + s; s += c.K * c.D;
+    c.polCoef = stateArena + s; s += c.K * max(c.D / 2u, 1u);
     c.optUseByFeat = stateArena + s; s += c.R;
     c.lcbScr = stateArena + s; s += c.Rn;
     s += 3u;
@@ -319,7 +312,7 @@ inline Ctx make_ctx(device float *params, device float *stateArena, device uint 
     c.nurKind = uintArena + u; u += c.Rn;
     c.nurAge = uintArena + u; u += c.Rn;
     c.actIdx = uintArena + u; u += 2u * 64u;
-    c.dynaSlot = uintArena + u; u += 32u;
+    c.dynaSlot = uintArena + u; u += 4u;
     c.parked = uintArena + u; u += c.K;
     c.scalars = scalars; c.stats = stats;
     return c;
