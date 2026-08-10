@@ -269,7 +269,7 @@ final class Engine {
     var probeCache: [UInt32: ShapeProbe] = [:]
     var pBase = 0, sBase = 0, uBase = 0
     var laneIdx = [Int](repeating: 0, count: b)
-    let fleetD = 2 * runs.map { table[Int($0.kind)].actionCount }.max()!
+    let fleetD = 2 * table.map(\.actionCount).max()!
     for r in runs {
       let spec = table[Int(r.kind)]
       let naturalO = spec.naturalO
