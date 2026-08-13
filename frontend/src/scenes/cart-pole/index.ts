@@ -7,7 +7,6 @@ import {
   disposeCelebrations,
 } from '@kit/celebrate';
 import type {
-  AlignmentProbe,
   FrameState,
   FrameUpdate,
   SceneContext,
@@ -24,11 +23,8 @@ import {
   CAM_BASE_THUMB,
   CAM_LOOK,
   CAM_LOOK_THUMB,
-  DECK_Y,
-  GAUGE_Z,
   buildWorld,
   clampRange,
-  gaugeStation,
   poleLength,
   tiltLimit,
   trackLimit,
@@ -318,53 +314,6 @@ class BoardwalkScene implements SceneModule {
   setDebug(on: boolean): void {
     this.debugOn = on;
     if (this.overlay) this.overlay.visible = on;
-  }
-
-  probes(): AlignmentProbe[] {
-    const trolley = this.trolley;
-    const world = this.world;
-    const xLimit = this.xLimit;
-    const arm = this.armLength;
-    const root = trolley?.root ?? new THREE.Object3D();
-    const tip = trolley?.tip ?? new THREE.Object3D();
-    const endLeft = world?.endLeftRoot ?? new THREE.Object3D();
-    const endRight = world?.endRightRoot ?? new THREE.Object3D();
-    const gauge = world?.gaugeRoot ?? new THREE.Object3D();
-    const station = gaugeStation(
-      this.ctx?.tier === 'thumb' ? CAM_BASE_THUMB : CAM_BASE,
-      GAUGE_Z,
-    );
-    return [
-      {
-        name: 'trolley',
-        object: root,
-        expectWorldPos: (state) => [state.pose[0] ?? 0, DECK_Y, 0] as const,
-      },
-      {
-        name: 'pole-tip',
-        object: tip,
-        expectWorldPos: (state) => {
-          const x = state.pose[0] ?? 0;
-          const th = state.pose[2] ?? 0;
-          return [x + arm * Math.sin(th), arm * Math.cos(th), 0] as const;
-        },
-      },
-      {
-        name: 'deck-end-left',
-        object: endLeft,
-        expectWorldPos: () => [-xLimit, DECK_Y, 0] as const,
-      },
-      {
-        name: 'deck-end-right',
-        object: endRight,
-        expectWorldPos: () => [xLimit, DECK_Y, 0] as const,
-      },
-      {
-        name: 'tilt-gauge',
-        object: gauge,
-        expectWorldPos: () => [station.x, station.y, station.z] as const,
-      },
-    ];
   }
 
   dispose(): void {

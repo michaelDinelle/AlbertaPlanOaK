@@ -13,7 +13,6 @@ import { corsHeaders } from './cors';
 import { deriveCurves, parseCurvesQuery } from './curves';
 import { deriveFleetColumnar, parseFleetQuery } from './fleetDerive';
 import { statOrNull } from './jsonl';
-import { createLiveResponse } from './live';
 import { findRecording } from './recordings';
 import { RunIndex, buildRunDetail } from './runIndex';
 import { readKeeper } from './keeper';
@@ -166,16 +165,6 @@ export function createApp(opts: AppOptions = {}): App {
       return json(keeper);
     }
 
-    if (head === 'floors' && segs.length === 2) {
-      const floorsPath = resolve(benchRoot, 'FLOORS.json');
-      if ((await statOrNull(floorsPath)) === null) return fail(404, 'no floors extracted');
-      try {
-        return json(JSON.parse(await Bun.file(floorsPath).text()));
-      } catch {
-        return fail(500, 'internal error');
-      }
-    }
-
     if (head !== 'runs') return fail(404, 'unknown endpoint');
 
     if (segs.length === 2) {
@@ -245,10 +234,6 @@ export function createApp(opts: AppOptions = {}): App {
           'cache-control': run.entry.inFlight ? 'no-store' : 'private, max-age=30',
         },
       });
-    }
-
-    if (sub === 'live' && segs.length === 4) {
-      return createLiveResponse(req, { id: run.id, dir: run.dir, steps: run.entry.steps });
     }
 
     if (sub === 'recordings' && segs.length === 6) {

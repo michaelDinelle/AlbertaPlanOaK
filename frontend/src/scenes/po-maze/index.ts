@@ -1,12 +1,11 @@
 
 import { CelebrationPool, attachCelebrations, disposeCelebrations } from '@kit/celebrate';
 import { GroundTruthOverlay } from '@kit/debug';
-import { cellToWorld, cellToWorldVec, clampCell, type GridSize, type Vec3Tuple } from '@kit/grid';
+import { cellToWorldVec, clampCell, type GridSize } from '@kit/grid';
 import { hash1f } from '@kit/rng';
 import { makeOrbitRig, type OrbitRig } from '@kit/rigs';
 import { TOKENS } from '@kit/tokens';
 import type {
-  AlignmentProbe,
   FrameState,
   FrameUpdate,
   SceneContext,
@@ -436,54 +435,6 @@ class FogboundForestScene implements SceneModule {
   setDebug(on: boolean): void {
     this.debugOn = on;
     if (this.overlay) this.overlay.visible = on;
-  }
-
-  probes(): AlignmentProbe[] {
-    const grid = this.grid;
-    const wisp = this.wisp;
-    const flower = this.flower;
-    const world = this.world;
-
-    const wispCell: GridCell = { x: 0, y: 0 };
-    const wispGoal: GridCell = { x: 0, y: 0 };
-    const wispOut: Vec3Tuple = [0, 0, 0];
-    const goalCell: GridCell = { x: 0, y: 0 };
-    const goalGoal: GridCell = { x: 0, y: 0 };
-    const goalOut: Vec3Tuple = [0, 0, 0];
-
-    const probes: AlignmentProbe[] = [
-      {
-        name: 'wisp-anchor',
-        object: wisp?.avatar ?? new THREE.Object3D(),
-        expectWorldPos: (state) => {
-          readCells(state, grid, wispCell, wispGoal);
-          return cellToWorld(wispCell.x, wispCell.y, grid, wispOut);
-        },
-      },
-      {
-        name: 'goal-anchor',
-        object: flower?.root ?? new THREE.Object3D(),
-        expectWorldPos: (state) => {
-          readCells(state, grid, goalCell, goalGoal);
-          return cellToWorld(goalGoal.x, goalGoal.y, grid, goalOut);
-        },
-      },
-    ];
-
-    if (world) {
-      for (let i = 0; i < world.gates.length; i++) {
-        const gate = world.gates[i];
-        if (!gate) continue;
-        const out: Vec3Tuple = [0, 0, 0];
-        const cell = gate.cell;
-        probes.push({
-          name: `gap-gate${i}`,
-          object: gate.root,
-          expectWorldPos: () => cellToWorld(cell.x, cell.y, grid, out),
-        });
-      }
-    }
-    return probes;
   }
 
   dispose(): void {

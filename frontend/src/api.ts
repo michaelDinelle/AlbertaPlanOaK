@@ -1,11 +1,8 @@
 
 import type {
-  AggregateRow,
   CurvesResponse,
   FleetColumnar,
   KeeperResponse,
-  LiveHello,
-  LiveStatus,
   RunDetail,
   RunIndexEntry,
   WallResponse,
@@ -262,105 +259,3 @@ export async function fetchWall(
   return { header, lanes };
 }
 
-
-export interface LiveHandlers {
-  open?(): void;
-  hello?(payload: LiveHello): void;
-  row?(row: AggregateRow): void;
-  status?(status: LiveStatus): void;
-  done?(): void;
-  error?(error: Event): void;
-}
-
-export interface LiveConnection {
-  readonly url: string;
-  readonly closed: boolean;
-  close(): void;
-}
-
-const HELLO_EVENTS = ['hello', 'init', 'snapshot'] as const;
-const ROW_EVENTS = ['agg', 'aggregate', 'row', 'heartbeat', 'hb'] as const;
-const STATUS_EVENTS = ['status', 'state'] as const;
-const DONE_EVENTS = ['done', 'complete', 'end'] as const;
-
-function parse<T>(raw: string): T | null {
-  if (!raw) return null;
-  try {
-    return JSON.parse(raw) as T;
-  } catch {
-    return null;
-  }
-}
-
-export function liveUrl(id: string): string {
-  return apiUrl(`/runs/${encodeURIComponent(id)}/live`);
-}
-
-export function openLive(id: string, handlers: LiveHandlers): LiveConnection {
-  const url = liveUrl(id);
-  let closed = false;
-
-  const connection: LiveConnection = {
-    url,
-    get closed() {
-      return closed;
-    },
-    close() {
-      if (closed) return;
-      closed = true;
-      source?.close();
-    },
-  };
-
-  if (typeof EventSource === 'undefined') {
-    closed = true;
-    return connection;
-  }
-
-  const source = new EventSource(url);
-
-  const dispatch = (type: string, raw: string): void => {
-    if (closed) return;
-    if ((HELLO_EVENTS as readonly string[]).includes(type)) {
-      const payload = parse<LiveHello>(raw);
-      if (payload) handlers.hello?.(payload);
-    } else if ((ROW_EVENTS as readonly string[]).includes(type)) {
-      const payload = parse<AggregateRow | { rows?: AggregateRow[] }>(raw);
-      if (!payload) return;
-      const rows = 'rows' in payload && Array.isArray(payload.rows) ? payload.rows : [payload as AggregateRow];
-      for (const row of rows) if (row && typeof row.step === 'number') handlers.row?.(row);
-    } else if ((STATUS_EVENTS as readonly string[]).includes(type)) {
-      const payload = parse<LiveStatus>(raw);
-      if (payload) handlers.status?.(payload);
-    } else if ((DONE_EVENTS as readonly string[]).includes(type)) {
-      handlers.done?.();
-      connection.close();
-    }
-  };
-
-  source.addEventListener('open', () => handlers.open?.());
-  source.addEventListener('error', (event) => {
-    if (!closed) handlers.error?.(event);
-  });
-
-  for (const name of [...HELLO_EVENTS, ...ROW_EVENTS, ...STATUS_EVENTS, ...DONE_EVENTS]) {
-    source.addEventListener(name, (event) => dispatch(name, (event as MessageEvent<string>).data ?? ''));
-  }
-
-  source.addEventListener('message', (event) => {
-    const raw = (event as MessageEvent<string>).data ?? '';
-    const envelope = parse<{ type?: string; event?: string; data?: unknown; payload?: unknown }>(raw);
-    if (!envelope) return;
-    const type = envelope.type ?? envelope.event;
-    const inner = envelope.data ?? envelope.payload;
-    if (type && inner !== undefined) {
-      dispatch(type, JSON.stringify(inner));
-    } else if (type) {
-      dispatch(type, raw);
-    } else if (envelope && typeof (envelope as unknown as AggregateRow).step === 'number') {
-      handlers.row?.(envelope as unknown as AggregateRow);
-    }
-  });
-
-  return connection;
-}

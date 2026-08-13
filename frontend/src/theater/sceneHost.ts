@@ -1,7 +1,7 @@
 
 import * as THREE from 'three';
 import type { EnvId } from '@shared/envs';
-import { makePlaybackClock, sampleFrame, type HarnessSource, type PlaybackClock } from '@kit/harness';
+import { makePlaybackClock, sampleFrame, type PlaybackSource, type PlaybackClock } from '@kit/playback';
 import { celebrationPulse } from '@kit/celebrate';
 import type { GhostLayer } from '@kit/ghosts';
 import { configureRendererShadows } from '@kit/lighting';
@@ -48,7 +48,7 @@ export interface SceneHostGhosts {
 
 export interface SceneHostOptions {
   envId: EnvId;
-  source: HarnessSource;
+  source: PlaybackSource;
   tier?: QualityTier;
   debug?: boolean;
   paused?: boolean;

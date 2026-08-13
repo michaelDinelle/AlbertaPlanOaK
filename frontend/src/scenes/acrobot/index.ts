@@ -3,7 +3,6 @@ import { GroundTruthOverlay } from '@kit/debug';
 import { makeFrameRig, type FrameRig } from '@kit/rigs';
 import { CelebrationPool, attachCelebrations, disposeCelebrations } from '@kit/celebrate';
 import type {
-  AlignmentProbe,
   FrameState,
   FrameUpdate,
   SceneContext,
@@ -355,42 +354,6 @@ class WillowSwingScene implements SceneModule {
   setDebug(on: boolean): void {
     this.debugOn = on;
     if (this.overlay) this.overlay.visible = on;
-  }
-
-  probes(): AlignmentProbe[] {
-    const pivot = this.pivot;
-    const arm = this.arm;
-    const empty = new THREE.Object3D();
-    const points = this.points;
-    const success = this.success;
-    return [
-      {
-        name: 'pivot',
-        object: arm?.pivotRoot ?? empty,
-        expectWorldPos: () => [pivot[0], pivot[1], pivot[2]] as const,
-      },
-      {
-        name: 'elbow',
-        object: arm?.elbowRoot ?? empty,
-        expectWorldPos: (state) => {
-          acrobotPointsExact(state.pose[0] ?? 0, state.pose[1] ?? 0, points);
-          return [pivot[0] + (points[0] ?? 0), pivot[1] + (points[1] ?? 0), pivot[2]] as const;
-        },
-      },
-      {
-        name: 'lantern',
-        object: arm?.tipRoot ?? empty,
-        expectWorldPos: (state) => {
-          acrobotPointsExact(state.pose[0] ?? 0, state.pose[1] ?? 0, points);
-          return [pivot[0] + (points[2] ?? 0), pivot[1] + (points[3] ?? 0), pivot[2]] as const;
-        },
-      },
-      {
-        name: 'success-line',
-        object: this.world?.garlandRoot ?? empty,
-        expectWorldPos: () => [success[0], success[1], success[2]] as const,
-      },
-    ];
   }
 
   dispose(): void {

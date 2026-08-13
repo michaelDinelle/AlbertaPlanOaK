@@ -7,7 +7,6 @@ import {
   disposeCelebrations,
 } from '@kit/celebrate';
 import type {
-  AlignmentProbe,
   FrameState,
   FrameUpdate,
   SceneContext,
@@ -24,7 +23,7 @@ import {
 } from '@sim/envs/mountaincar';
 import { buildCart, type CartHandle } from './actors';
 import { manifest } from './manifest';
-import { buildWorld, heightResolver, TRAILHEAD_Z, type WorldHandle } from './world';
+import { buildWorld, heightResolver, type WorldHandle } from './world';
 
 
 const CAM_BASE: readonly [number, number, number] = [-0.16, 1.06, 2.56];
@@ -287,33 +286,6 @@ class AlpineValleyScene implements SceneModule {
   setDebug(on: boolean): void {
     this.debugOn = on;
     if (this.overlay) this.overlay.visible = on;
-  }
-
-  probes(): AlignmentProbe[] {
-    const heightAt = this.heightAt;
-    const cartRoot = this.cart?.root ?? new THREE.Object3D();
-    const cairn = this.world?.cairnRoot ?? new THREE.Object3D();
-    const trailhead = this.world?.trailheadRoot ?? new THREE.Object3D();
-    return [
-      {
-        name: 'cart',
-        object: cartRoot,
-        expectWorldPos: (state) => {
-          const x = state.pose[0] ?? 0;
-          return [x, heightAt(x), 0] as const;
-        },
-      },
-      {
-        name: 'summit-cairn',
-        object: cairn,
-        expectWorldPos: () => [MC_GOAL_POS, heightAt(MC_GOAL_POS), 0] as const,
-      },
-      {
-        name: 'trailhead',
-        object: trailhead,
-        expectWorldPos: () => [MC_START_POS, heightAt(MC_START_POS), TRAILHEAD_Z] as const,
-      },
-    ];
   }
 
   dispose(): void {

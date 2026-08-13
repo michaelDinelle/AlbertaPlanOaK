@@ -1,11 +1,10 @@
 
 import { CelebrationPool, attachCelebrations, disposeCelebrations } from '@kit/celebrate';
 import { GroundTruthOverlay } from '@kit/debug';
-import { cellToWorld, cellToWorldVec, type GridSize, type Vec3Tuple } from '@kit/grid';
+import { cellToWorldVec, type GridSize } from '@kit/grid';
 import { makeOrbitRig, type OrbitRig } from '@kit/rigs';
 import { TOKENS } from '@kit/tokens';
 import type {
-  AlignmentProbe,
   FrameState,
   FrameUpdate,
   SceneContext,
@@ -397,47 +396,6 @@ class SixteenStonesScene implements SceneModule {
   setDebug(on: boolean): void {
     this.debugOn = on;
     if (this.overlay) this.overlay.visible = on;
-  }
-
-  probes(): AlignmentProbe[] {
-    const grid = this.grid;
-    const wisp = this.wisp;
-    const tree = this.tree;
-    const lantern = this.lantern;
-    const height = this.ctx?.tokens.wispHeight ?? TOKENS.wispHeight;
-
-    const wispOut: Vec3Tuple = [0, 0, 0];
-    const anchorOut: Vec3Tuple = [0, 0, 0];
-    const treeOut: Vec3Tuple = [0, 0, 0];
-    const lanternOut: Vec3Tuple = [0, 0, 0];
-    const goal = this.goalCell;
-
-    return [
-      {
-        name: 'wisp',
-        object: wisp?.probeObject ?? new THREE.Object3D(),
-        expectWorldPos: (state) => {
-          cellToWorld(readPos(state, grid), 0, grid, wispOut);
-          wispOut[1] = height;
-          return wispOut;
-        },
-      },
-      {
-        name: 'wisp-anchor',
-        object: wisp?.avatar ?? new THREE.Object3D(),
-        expectWorldPos: (state) => cellToWorld(readPos(state, grid), 0, grid, anchorOut),
-      },
-      {
-        name: 'blossom-tree',
-        object: tree?.root ?? new THREE.Object3D(),
-        expectWorldPos: () => cellToWorld(goal.x, goal.y, grid, treeOut),
-      },
-      {
-        name: 'ford-lantern',
-        object: lantern?.root ?? new THREE.Object3D(),
-        expectWorldPos: () => cellToWorld(-1, 0, grid, lanternOut),
-      },
-    ];
   }
 
   dispose(): void {

@@ -5,7 +5,6 @@ import type { GridSize } from '@kit/grid';
 import { makeOrbitRig, type OrbitRig } from '@kit/rigs';
 import { TOKENS } from '@kit/tokens';
 import type {
-  AlignmentProbe,
   FrameUpdate,
   SceneContext,
   SceneFactory,
@@ -19,7 +18,6 @@ import { buildBubble, buildClam, type BubbleHandle, type ClamHandle } from './ac
 import { manifest } from './manifest';
 import {
   cellToReefVec,
-  cellToReefWorld,
   clamp01,
   envelope,
   isDiveStep,
@@ -342,63 +340,6 @@ class SunlitDescentScene implements SceneModule {
   setDebug(on: boolean): void {
     this.debugOn = on;
     if (this.overlay) this.overlay.visible = on;
-  }
-
-  probes(): AlignmentProbe[] {
-    const grid = this.grid;
-    const wisp = this.wisp;
-    const clam = this.clam;
-    const world = this.world;
-    const height = this.ctx?.tokens.wispHeight ?? TOKENS.wispHeight;
-    const treasure = this.treasure;
-
-    const orbDive: DiveCell = { r: 0, c: 0, lastA: 0 };
-    const orbOut: [number, number, number] = [0, 0, 0];
-    const anchorDive: DiveCell = { r: 0, c: 0, lastA: 0 };
-    const anchorOut: [number, number, number] = [0, 0, 0];
-    const siltDive: DiveCell = { r: 0, c: 0, lastA: 0 };
-    const siltOut: [number, number, number] = [0, 0, 0];
-    const clamOut: [number, number, number] = [0, 0, 0];
-
-    const probes: AlignmentProbe[] = [
-      {
-        name: 'wisp',
-        object: wisp?.probeObject ?? new THREE.Object3D(),
-        expectWorldPos: (state) => {
-          readDive(state, grid, orbDive);
-          cellToReefWorld(orbDive.c, orbDive.r, grid, orbOut);
-          orbOut[1] += height;
-          return orbOut;
-        },
-      },
-      {
-        name: 'wisp-anchor',
-        object: wisp?.avatar ?? new THREE.Object3D(),
-        expectWorldPos: (state) => {
-          readDive(state, grid, anchorDive);
-          return cellToReefWorld(anchorDive.c, anchorDive.r, grid, anchorOut);
-        },
-      },
-      {
-        name: 'clam',
-        object: clam?.root ?? new THREE.Object3D(),
-        expectWorldPos: () => cellToReefWorld(treasure.x, treasure.y, grid, clamOut),
-      },
-    ];
-
-    if (world) {
-      probes.push({
-        name: 'silt',
-        object: world.silt.points,
-        expectWorldPos: (state) => {
-          readDive(state, grid, siltDive);
-          cellToReefWorld(siltDive.c, siltDive.r, grid, siltOut);
-          siltOut[1] += height * 0.6;
-          return siltOut;
-        },
-      });
-    }
-    return probes;
   }
 
   dispose(): void {

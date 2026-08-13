@@ -12,90 +12,43 @@ import type {
 import { ENVS, ENV_IDS, isEnvId, type EnvId } from '@shared/envs';
 
 
-export interface Store<T> {
-  get(): T;
-  set(next: T | ((prev: T) => T)): void;
-  subscribe(listener: (value: T) => void): () => void;
-}
+const CACHE_TTL_MS = 60_000;
 
-export function createStore<T>(initial: T): Store<T> {
-  let value = initial;
-  const listeners = new Set<(value: T) => void>();
-  return {
-    get: () => value,
-    set(next) {
-      const resolved = typeof next === 'function' ? (next as (prev: T) => T)(value) : next;
-      if (Object.is(resolved, value)) return;
-      value = resolved;
-      for (const listener of [...listeners]) listener(value);
-    },
-    subscribe(listener) {
-      listeners.add(listener);
-      return () => {
-        listeners.delete(listener);
-      };
-    },
-  };
-}
-
-
-export type AsyncStatus = 'idle' | 'loading' | 'ready' | 'error';
-
-export interface AsyncState<T> {
-  status: AsyncStatus;
-  data: T | null;
-  error: string | null;
-  fetchedAt: number;
-}
-
-export interface Resource<T> {
-  store: Store<AsyncState<T>>;
+export interface CachedFeed<T> {
+  snapshot(): T | null;
   load(force?: boolean): Promise<T>;
-  invalidate(): void;
 }
 
-export function createResource<T>(
-  loader: () => Promise<T>,
-  ttlMs: number,
-  now: () => number = Date.now,
-): Resource<T> {
-  const store = createStore<AsyncState<T>>({ status: 'idle', data: null, error: null, fetchedAt: 0 });
+function cachedFeed<T>(loader: () => Promise<T>): CachedFeed<T> {
+  let data: T | null = null;
+  let fetchedAt = 0;
   let inflight: Promise<T> | null = null;
-
   return {
-    store,
+    snapshot: () => data,
     load(force = false) {
-      const state = store.get();
-      if (!force && state.status === 'ready' && state.data !== null && now() - state.fetchedAt < ttlMs) {
-        return Promise.resolve(state.data);
+      if (!force && data !== null && Date.now() - fetchedAt < CACHE_TTL_MS) {
+        return Promise.resolve(data);
       }
       if (inflight) return inflight;
-      store.set({ ...store.get(), status: 'loading', error: null });
       inflight = loader().then(
-        (data) => {
+        (value) => {
           inflight = null;
-          store.set({ status: 'ready', data, error: null, fetchedAt: now() });
-          return data;
+          data = value;
+          fetchedAt = Date.now();
+          return value;
         },
         (error: unknown) => {
           inflight = null;
-          const message = error instanceof Error ? error.message : String(error);
-          store.set({ status: 'error', data: store.get().data, error: message, fetchedAt: now() });
           throw error;
         },
       );
       return inflight;
     },
-    invalidate() {
-      store.set({ ...store.get(), status: 'idle', fetchedAt: 0 });
-    },
   };
 }
 
-export const RUN_INDEX_TTL_MS = 60_000;
-
-export const runIndex: Resource<RunIndexEntry[]> = createResource(() => api.runs(), RUN_INDEX_TTL_MS);
-export const keeper: Resource<KeeperResponse> = createResource(() => api.keeper(), RUN_INDEX_TTL_MS);
+export const runIndex: CachedFeed<RunIndexEntry[]> = cachedFeed(() => api.runs());
+export const keeper: CachedFeed<KeeperResponse> = cachedFeed(() => api.keeper());
 
 const detailCache = new Map<string, Promise<RunDetail>>();
 
@@ -149,17 +102,6 @@ function trimZero(value: number): string {
 export function formatPercent(fraction: number | null | undefined, decimals = 1): string {
   if (fraction === null || fraction === undefined || !Number.isFinite(fraction)) return '—';
   return `${(fraction * 100).toFixed(decimals)}%`;
-}
-
-export function formatWall(seconds: number | null | undefined): string {
-  if (seconds === null || seconds === undefined || !Number.isFinite(seconds) || seconds < 0) return '—';
-  const total = Math.round(seconds);
-  const h = Math.floor(total / 3600);
-  const m = Math.floor((total % 3600) / 60);
-  const s = total % 60;
-  if (h > 0) return `${h}h ${String(m).padStart(2, '0')}m`;
-  if (m > 0) return `${m}m ${String(s).padStart(2, '0')}s`;
-  return `${s}s`;
 }
 
 export function formatAgo(iso: string | null | undefined, now: number = Date.now()): string {
@@ -268,40 +210,6 @@ export function envSlug(envId: string): string {
 }
 
 
-export interface GalleryFilter {
-  search: string;
-  envId: string | null;
-  completeOnly: boolean;
-  recordingsOnly: boolean;
-  inFlightOnly: boolean;
-  keeperOnly: boolean;
-}
-
-export const EMPTY_FILTER: GalleryFilter = {
-  search: '',
-  envId: null,
-  completeOnly: false,
-  recordingsOnly: false,
-  inFlightOnly: false,
-  keeperOnly: false,
-};
-
-export function matchesFilter(entry: RunIndexEntry, filter: GalleryFilter): boolean {
-  if (filter.completeOnly && !entry.complete) return false;
-  if (filter.recordingsOnly && !entry.hasRecordings) return false;
-  if (filter.inFlightOnly && !entry.inFlight) return false;
-  if (filter.keeperOnly && entry.role === null) return false;
-  if (filter.envId && !entry.envIds.includes(filter.envId)) return false;
-  const search = filter.search.trim().toLowerCase();
-  if (search) {
-    const haystack = `${entry.id} ${entry.ablationLabel} ${entry.envIds.join(' ')} ${entry.role ?? ''}`.toLowerCase();
-    for (const term of search.split(/\s+/)) {
-      if (!haystack.includes(term)) return false;
-    }
-  }
-  return true;
-}
-
 export function sortRuns(entries: readonly RunIndexEntry[]): RunIndexEntry[] {
   return [...entries].sort((a, b) => {
     if (a.inFlight !== b.inFlight) return a.inFlight ? -1 : 1;
@@ -312,13 +220,6 @@ export function sortRuns(entries: readonly RunIndexEntry[]): RunIndexEntry[] {
     return a.id.localeCompare(b.id);
   });
 }
-
-export function envIdsInIndex(entries: readonly RunIndexEntry[]): EnvId[] {
-  const seen = new Set<string>();
-  for (const entry of entries) for (const id of entry.envIds) seen.add(id);
-  return ENV_IDS.filter((id) => seen.has(id));
-}
-
 
 export interface AggregateSeries {
   steps: number[];
@@ -370,39 +271,6 @@ export function policiesIn(rows: readonly AggregateRow[]): string[] {
   return [...seen].sort();
 }
 
-export function aggregateKey(row: Pick<AggregateRow, 'policy' | 'step'>): string {
-  return `${row.policy}:${row.step}`;
-}
-
-export function absorbAggregateRow(buffer: Map<string, AggregateRow>, row: AggregateRow): void {
-  const key = aggregateKey(row);
-  const existing = buffer.get(key);
-  if (!existing || row.kind === 'final') buffer.set(key, row);
-}
-
-
-export function kmCurve(
-  survival: Record<string, number> | undefined,
-  horizon: number,
-): { steps: number[]; fraction: number[] } {
-  const steps = [0];
-  const fraction = [1];
-  const entries = Object.entries(survival ?? {})
-    .map(([step, value]) => [Number(step), value] as const)
-    .filter(([step, value]) => Number.isFinite(step) && Number.isFinite(value))
-    .sort((a, b) => a[0] - b[0]);
-  for (const [step, value] of entries) {
-    steps.push(step);
-    fraction.push(value);
-  }
-  const last = fraction[fraction.length - 1] ?? 1;
-  if (horizon > (steps[steps.length - 1] ?? 0)) {
-    steps.push(horizon);
-    fraction.push(last);
-  }
-  return { steps, fraction };
-}
-
 
 export interface LaneSeries {
   lane: number;
@@ -411,14 +279,6 @@ export interface LaneSeries {
   policy: string;
   values: (number | null)[];
   last: number | null;
-}
-
-export function pickField(columnar: FleetColumnar, candidates: readonly string[]): string | null {
-  const keys = Object.keys(columnar.series ?? {});
-  for (const candidate of candidates) if (keys.includes(candidate)) return candidate;
-  const suffix = candidates.map((c) => c.split('.').pop() ?? c);
-  for (const key of keys) if (suffix.includes(key.split('.').pop() ?? key)) return key;
-  return keys[0] ?? null;
 }
 
 export function laneSeries(columnar: FleetColumnar, field: string, envId?: string): LaneSeries[] {

@@ -1,0 +1,84 @@
+
+import type { EnvId } from '@shared/envs';
+import type { EnvFrame, EnvGeometry, SimEvent } from '@sim/types';
+import type { FrameState, QualityTier } from './types';
+
+export const TIERS: readonly QualityTier[] = ['hero', 'medium', 'thumb'];
+
+export interface PlaybackClock {
+  time(): number;
+  position(): number;
+  playing: boolean;
+  speed: number;
+  advance(dtReal: number): number;
+  seek(position: number): void;
+  readonly duration: number;
+}
+
+export function makePlaybackClock(frameCount: number, controlHz: number): PlaybackClock {
+  const hz = controlHz > 0 ? controlHz : 8;
+  const last = Math.max(0, frameCount - 1);
+  let t = 0;
+  const clock: PlaybackClock = {
+    playing: true,
+    speed: 1,
+    duration: last / hz,
+    time: () => t,
+    position: () => t * hz,
+    advance(dtReal) {
+      if (clock.playing) {
+        t += dtReal * clock.speed;
+        if (t > clock.duration) t = clock.duration > 0 ? t % clock.duration : 0;
+        if (t < 0) t = 0;
+      }
+      return t * hz;
+    },
+    seek(position) {
+      const p = position < 0 ? 0 : position > last ? last : position;
+      t = p / hz;
+    },
+  };
+  return clock;
+}
+
+export interface PlaybackSource {
+  envId: EnvId;
+  seed: number;
+  controlHz: number;
+  discretePose: boolean;
+  geometry: EnvGeometry;
+  frameCount: number;
+  frameAt(i: number): EnvFrame<unknown>;
+  eventsAt(i: number): SimEvent[];
+  eventEntries(): IterableIterator<[number, SimEvent[]]>;
+  replay?: { firstDisagreeStep: number | null; disagreeCount: number };
+  nonFiniteRows?: number;
+}
+
+export function sampleFrame(source: PlaybackSource, position: number, out: FrameState): void {
+  const n = source.frameCount;
+  if (n === 0) return;
+  const last = n - 1;
+  const p = position < 0 ? 0 : position > last ? last : position;
+  const i = Math.min(last, Math.floor(p));
+  const frame = source.frameAt(i);
+  const next = source.frameAt(Math.min(last, i + 1));
+  const alpha = source.discretePose ? 0 : p - i;
+
+  if (alpha > 0 && next !== frame) {
+    for (let k = 0; k < 9; k++) {
+      const a = frame.pose[k] ?? 0;
+      const b = next.pose[k] ?? 0;
+      out.pose[k] = a + (b - a) * alpha;
+    }
+  } else {
+    out.pose.set(frame.pose.subarray(0, 9));
+  }
+  out.ctrl.set(frame.ctrl.subarray(0, 6));
+  out.done = frame.done !== 0;
+  out.step = frame.step;
+  out.simTime = frame.step / (source.controlHz > 0 ? source.controlHz : 1);
+  out.derived = frame.state;
+}
+
+export const MAX_CATCHUP_FRAMES = 12;

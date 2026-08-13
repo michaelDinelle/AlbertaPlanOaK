@@ -7,7 +7,6 @@ import {
 import { GroundTruthOverlay, defaultFkToWorld } from '@kit/debug';
 import { makeTrackRig, type TrackRig } from '@kit/rigs';
 import type {
-  AlignmentProbe,
   FrameState,
   FrameUpdate,
   SceneContext,
@@ -67,8 +66,6 @@ class GoldHourSavannaScene implements SceneModule {
   private fkSource: CheetahGeometry = cheetahGeometry;
 
   private readonly fkOut = new Float32Array(FK_FLOATS);
-  private readonly probeFk = new Float32Array(FK_FLOATS);
-  private readonly probeOut: [number, number, number] = [0, 0, 0];
   private readonly renderPose = new Float32Array(9);
   private readonly heldPose = new Float32Array(9);
 
@@ -254,29 +251,6 @@ class GoldHourSavannaScene implements SceneModule {
   setDebug(on: boolean): void {
     this.debugOn = on;
     if (this.overlay) this.overlay.visible = on;
-  }
-
-  probes(): AlignmentProbe[] {
-    const joints = this.cheetah?.joints ?? [];
-    const source = this.fkSource;
-    const buffer = this.probeFk;
-    const out = this.probeOut;
-    const at =
-      (index: number) =>
-      (state: FrameState): readonly [number, number, number] => {
-        source.fk(state.pose, buffer);
-        out[0] = buffer[index * 2] ?? 0;
-        out[1] = buffer[index * 2 + 1] ?? 0;
-        out[2] = 0;
-        return out;
-      };
-    const node = (index: number): THREE.Object3D => joints[index] ?? new THREE.Object3D();
-    return [
-      { name: 'torso', object: node(FK_POINT_INDEX.o1), expectWorldPos: at(FK_POINT_INDEX.o1) },
-      { name: 'toe-back', object: node(FK_POINT_INDEX.toe_b), expectWorldPos: at(FK_POINT_INDEX.toe_b) },
-      { name: 'toe-front', object: node(FK_POINT_INDEX.toe_f), expectWorldPos: at(FK_POINT_INDEX.toe_f) },
-      { name: 'head', object: node(FK_POINT_INDEX.head), expectWorldPos: at(FK_POINT_INDEX.head) },
-    ];
   }
 
   dispose(): void {

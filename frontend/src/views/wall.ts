@@ -10,7 +10,7 @@ import type {
   SummaryPolicyResult,
 } from '@shared/types';
 import { ENVS, ENV_IDS, isEnvId, type EnvCategory, type EnvId } from '@shared/envs';
-import { MAX_CATCHUP_FRAMES, type HarnessSource } from '@kit/harness';
+import { MAX_CATCHUP_FRAMES, type PlaybackSource } from '@kit/playback';
 import { makeGhostLayer, type GhostLayer } from '@kit/ghosts';
 import { TOKENS } from '@kit/tokens';
 import type { QualityTier } from '@kit/types';
@@ -658,8 +658,7 @@ export const mount: ViewMount = (host) => {
 
   function paintPicker(): void {
     const needle = pickerSearch.value.trim().toLowerCase();
-    const state = runIndex.store.get();
-    const all: RunIndexEntry[] = state.status === 'ready' && state.data !== null ? state.data : [];
+    const all: RunIndexEntry[] = runIndex.snapshot() ?? [];
     const entries = sortRuns(all.filter((entry) => !needle || entry.id.toLowerCase().includes(needle)))
       .slice(0, 40);
     pickerRows.replaceChildren(
@@ -731,7 +730,7 @@ export const mount: ViewMount = (host) => {
   let ghostSample = -1;
   let emphasised: number | null = null;
   let heroGeneration = 0;
-  let heroSource: HarnessSource | null = null;
+  let heroSource: PlaybackSource | null = null;
   let fieldLanes: WallLane[] = [];
   let fieldX = new Float64Array(0);
   let fieldMarks: HTMLElement[] = [];

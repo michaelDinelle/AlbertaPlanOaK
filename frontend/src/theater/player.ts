@@ -1,37 +1,8 @@
 
-import { MAX_CATCHUP_FRAMES, TIERS } from '@kit/harness';
+import { MAX_CATCHUP_FRAMES, TIERS } from '@kit/playback';
 import type { QualityTier } from '@kit/types';
 import type { SimEvent } from '@sim/types';
-import { describeEvent } from './loader';
 
-
-export const SPEEDS: readonly number[] = [0.25, 0.5, 1, 2, 4, 8];
-
-export function nearestSpeedIndex(speed: number): number {
-  let best = 0;
-  let bestError = Infinity;
-  for (let i = 0; i < SPEEDS.length; i++) {
-    const candidate = SPEEDS[i] ?? 1;
-    const error = Math.abs(Math.log(candidate) - Math.log(speed > 0 ? speed : 1));
-    if (error < bestError) {
-      bestError = error;
-      best = i;
-    }
-  }
-  return best;
-}
-
-export function nextSpeed(speed: number, direction: 1 | -1): number {
-  const index = nearestSpeedIndex(speed);
-  const next = Math.min(SPEEDS.length - 1, Math.max(0, index + direction));
-  return SPEEDS[next] ?? 1;
-}
-
-
-export function cycleTier(tier: QualityTier): QualityTier {
-  const index = TIERS.indexOf(tier);
-  return TIERS[(index + 1) % TIERS.length] ?? 'hero';
-}
 
 export function lowerTier(tier: QualityTier): QualityTier | null {
   const index = TIERS.indexOf(tier);
@@ -215,51 +186,6 @@ export function collectEvents(
 }
 
 
-export type TransportAction =
-  | { kind: 'toggle' }
-  | { kind: 'step'; frames: number }
-  | { kind: 'speed'; direction: 1 | -1 }
-  | { kind: 'debug' }
-  | { kind: 'tier' }
-  | { kind: 'seek'; position: 'start' | 'end' };
-
-export function keyAction(key: string, shift = false): TransportAction | null {
-  switch (key) {
-    case ' ':
-    case 'Spacebar':
-    case 'k':
-    case 'K':
-      return { kind: 'toggle' };
-    case 'ArrowRight':
-    case 'l':
-    case 'L':
-      return { kind: 'step', frames: shift ? 10 : 1 };
-    case 'ArrowLeft':
-    case 'j':
-    case 'J':
-      return { kind: 'step', frames: shift ? -10 : -1 };
-    case '[':
-    case '{':
-      return { kind: 'speed', direction: -1 };
-    case ']':
-    case '}':
-      return { kind: 'speed', direction: 1 };
-    case 'g':
-    case 'G':
-      return { kind: 'debug' };
-    case 't':
-    case 'T':
-      return { kind: 'tier' };
-    case 'Home':
-      return { kind: 'seek', position: 'start' };
-    case 'End':
-      return { kind: 'seek', position: 'end' };
-    default:
-      return null;
-  }
-}
-
-
 export function formatClock(seconds: number): string {
   if (!Number.isFinite(seconds) || seconds < 0) return '0:00.0';
   const whole = Math.floor(seconds);
@@ -283,28 +209,3 @@ export function stepPosition(position: number, frames: number, frameCount: numbe
   return clampPosition(base + frames, frameCount);
 }
 
-
-export interface TickerEntry {
-  step: number;
-  label: string;
-  type: SimEvent['type'];
-}
-
-export const TICKER_LIMIT = 8;
-
-export function pushTicker(
-  ticker: readonly TickerEntry[],
-  events: readonly SimEvent[],
-  steps: number | readonly number[],
-  limit: number = TICKER_LIMIT,
-): TickerEntry[] {
-  if (events.length === 0) return ticker as TickerEntry[];
-  const next = [...ticker];
-  for (let i = 0; i < events.length; i++) {
-    const event = events[i];
-    if (!event) continue;
-    const step = typeof steps === 'number' ? steps : steps[i] ?? -1;
-    next.push({ step, label: describeEvent(event), type: event.type });
-  }
-  return next.length > limit ? next.slice(next.length - limit) : next;
-}

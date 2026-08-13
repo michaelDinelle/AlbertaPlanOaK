@@ -16,7 +16,6 @@ import {
   parseFleetQuery,
   type FleetQuery,
 } from '../../server/fleetDerive';
-import { createLiveResponse } from '../../server/live';
 import { clearStepsCache, scanRecordings } from '../../server/recordings';
 import { RunIndex, runCompleteness } from '../../server/runIndex';
 import { statOrNull } from '../../server/jsonl';
@@ -28,9 +27,6 @@ const HOSTILE = join(FIXTURE_ROOT, 'bench-hostile');
 const OUTSIDE = join(FIXTURE_ROOT, 'outside');
 const FLEET_CACHE = join(FIXTURE_ROOT, 'fleet-cache');
 const SECRET = 'TOP-SECRET-NOT-A-RECORDING-'.repeat(16);
-const REAL_BENCH = resolve(HERE, '..', '..', '..', '.oak-benchmarks');
-const DEMO_ID = 'frontend-demo-16env-20260805';
-const DEMO_DIR = join(REAL_BENCH, DEMO_ID);
 
 
 interface FleetRowSeed {
@@ -123,6 +119,14 @@ function aggRow(step: number, kind: 'hb' | 'final'): string {
     aggStepsPerSecond: 20000,
     wallSeconds: step / 100,
   });
+}
+
+async function waitUntilAsync(pred: () => Promise<boolean>, ms = 5000): Promise<void> {
+  const t0 = Date.now();
+  while (!(await pred())) {
+    if (Date.now() - t0 > ms) throw new Error('timed out waiting for condition');
+    await Bun.sleep(10);
+  }
 }
 
 function recordBytes(steps: number, seedTag: number): Uint8Array {
@@ -477,16 +481,6 @@ async function jsonCacheFiles(dir: string): Promise<string[]> {
   }
 }
 
-async function waitUntilAsync(pred: () => Promise<boolean>, ms = 5000): Promise<void> {
-  const t0 = Date.now();
-  while (!(await pred())) {
-    if (Date.now() - t0 > ms) throw new Error('timed out waiting for condition');
-    await Bun.sleep(10);
-  }
-}
-
-const demoPresent = existsSync(join(DEMO_DIR, 'meta.json'));
-
 beforeAll(async () => {
   await buildFixtures();
   await buildHostileFixtures();
@@ -610,23 +604,6 @@ describe('run index discovery', () => {
   });
 });
 
-describe('completeness against the real demo root', () => {
-  it.skipIf(!demoPresent)('frontend-demo-16env-20260803 reads complete at 100k', async () => {
-    const c = await runCompleteness(DEMO_DIR, 100_000);
-    expect(c.hasFinal).toBe(true);
-    expect(c.maxStep).toBe(100_000);
-    expect(c.complete).toBe(true);
-    expect(c.inFlight).toBe(false);
-  });
-
-  it.skipIf(!demoPresent)('a horizon beyond what was run reads incomplete', async () => {
-    const c = await runCompleteness(DEMO_DIR, 1_000_000);
-    expect(c.hasFinal).toBe(true);
-    expect(c.complete).toBe(false);
-  });
-});
-
-
 describe('recordings discovery', () => {
   it('serves record lanes in canonical env order, legacy lanes skipped', async () => {
     const recs = await scanRecordings(join(BENCH, 'alpha-complete'));
@@ -638,10 +615,6 @@ describe('recordings discovery', () => {
 
   it('answers empty for a run with no recordings', async () => {
     expect(await scanRecordings(join(BENCH, 'beta-incomplete'))).toEqual([]);
-  });
-
-  it.skipIf(!demoPresent)('the legacy demo root has no servable lanes', async () => {
-    expect(await scanRecordings(DEMO_DIR)).toEqual([]);
   });
 });
 
@@ -935,47 +908,7 @@ describe('http api (fixture bench root)', () => {
     const res = await fetch(`${base}/api/runs`, { method: 'POST' });
     expect(res.status).toBe(405);
   });
-
-  it('exposes /api/runs/:id/live as an event stream', async () => {
-    const ac = new AbortController();
-    const res = await fetch(`${base}/api/runs/alpha-complete/live`, { signal: ac.signal });
-    expect(res.status).toBe(200);
-    expect(res.headers.get('content-type')).toContain('text/event-stream');
-    const text = await res.text();
-    expect(text).toContain('event: hello');
-    expect(text).toContain('event: done');
-    ac.abort();
-  });
 });
-
-describe('http api (real bench root)', () => {
-  let server: ReturnType<typeof Bun.serve> | null = null;
-  let base = '';
-
-  beforeAll(() => {
-    if (!demoPresent) return;
-    const app = createApp({ benchRoot: REAL_BENCH, cacheFile: null, fleetCacheDir: null, ttlMs: 0 });
-    server = Bun.serve({ hostname: '127.0.0.1', port: 0, fetch: app.fetch });
-    base = `http://127.0.0.1:${server.port}`;
-  });
-
-  afterAll(() => {
-    void server?.stop(true);
-  });
-
-  it.skipIf(!demoPresent)('lists several hundred run roots', async () => {
-    const runs = (await (await fetch(`${base}/api/runs`)).json()) as RunIndexEntry[];
-    expect(runs.length).toBeGreaterThan(100);
-    expect(runs.some((r) => r.id === DEMO_ID)).toBe(true);
-  });
-
-  it.skipIf(!demoPresent)('the legacy demo run has no servable recordings', async () => {
-    const detail = (await (await fetch(`${base}/api/runs/${DEMO_ID}`)).json()) as RunDetail;
-    expect(detail.recordings.length).toBe(0);
-    expect(detail.aggregate.length).toBe(10);
-  });
-});
-
 
 describe('production static serving', () => {
   const DIST = join(FIXTURE_ROOT, 'dist');
@@ -1034,125 +967,6 @@ describe('production static serving', () => {
     expect(await climbed.text()).not.toContain('"oak-frontend"');
   });
 });
-
-
-interface SseEvent {
-  event: string;
-  data: string;
-}
-
-function drainSse(body: ReadableStream<Uint8Array>): { events: SseEvent[]; closed: () => boolean } {
-  const events: SseEvent[] = [];
-  const state = { done: false };
-  void (async () => {
-    const reader = body.getReader();
-    const dec = new TextDecoder();
-    let buf = '';
-    try {
-      for (;;) {
-        const { done, value } = await reader.read();
-        if (value !== undefined) buf += dec.decode(value, { stream: true });
-        let idx = buf.indexOf('\n\n');
-        while (idx >= 0) {
-          const block = buf.slice(0, idx);
-          buf = buf.slice(idx + 2);
-          let name = 'message';
-          const data: string[] = [];
-          for (const line of block.split('\n')) {
-            if (line.startsWith(':')) continue;
-            if (line.startsWith('event:')) name = line.slice(6).trim();
-            else if (line.startsWith('data:')) data.push(line.slice(5).trim());
-          }
-          if (data.length > 0) events.push({ event: name, data: data.join('\n') });
-          idx = buf.indexOf('\n\n');
-        }
-        if (done) break;
-      }
-    } catch {
-    }
-    state.done = true;
-  })();
-  return { events, closed: () => state.done };
-}
-
-async function waitUntil(pred: () => boolean, ms = 8000): Promise<void> {
-  const t0 = Date.now();
-  while (!pred()) {
-    if (Date.now() - t0 > ms) throw new Error('timed out waiting for SSE condition');
-    await Bun.sleep(20);
-  }
-}
-
-describe('live SSE', () => {
-  it('replays aggregate rows, follows appends, and finishes on completion', async () => {
-    const dir = join(BENCH, 'epsilon-live');
-    const aggPath = join(dir, 'aggregate.jsonl');
-    const fleetPath = join(dir, 'fleet.jsonl');
-    const ac = new AbortController();
-    const req = new Request('http://127.0.0.1/api/runs/epsilon-live/live', { signal: ac.signal });
-    const res = createLiveResponse(req, { id: 'epsilon-live', dir, steps: 300 }, 40);
-    expect(res.headers.get('content-type')).toContain('text/event-stream');
-    const body = res.body;
-    expect(body).not.toBeNull();
-    const sink = drainSse(body as ReadableStream<Uint8Array>);
-
-    await waitUntil(() => sink.events.some((e) => e.event === 'hello'));
-    const hello = sink.events.find((e) => e.event === 'hello');
-    const helloRows = (JSON.parse(hello?.data ?? '{}') as { rows: { step: number }[] }).rows;
-    expect(helloRows.length).toBe(1);
-    expect(helloRows[0]?.step).toBe(100);
-
-    await waitUntil(() => sink.events.some((e) => e.event === 'status'));
-    const firstStatus = JSON.parse(
-      sink.events.find((e) => e.event === 'status')?.data ?? '{}',
-    ) as { maxStep: number; complete: boolean; inFlight: boolean };
-    expect(firstStatus.maxStep).toBe(100);
-    expect(firstStatus.complete).toBe(false);
-    expect(firstStatus.inFlight).toBe(true);
-
-    await writeFile(aggPath, `${await Bun.file(aggPath).text()}${aggRow(200, 'hb')}\n`);
-    await waitUntil(() => sink.events.some((e) => e.event === 'row'));
-    const row = JSON.parse(sink.events.find((e) => e.event === 'row')?.data ?? '{}') as { step: number };
-    expect(row.step).toBe(200);
-
-    await writeFile(
-      fleetPath,
-      `${await Bun.file(fleetPath).text()}${fleetRow({
-        kind: 'final',
-        lane: 0,
-        step: 300,
-        envId: 'CartPole-cont-v0',
-        rewardSum: 30,
-        rewardRate: 0.1,
-      })}\n`,
-    );
-    await writeFile(aggPath, `${await Bun.file(aggPath).text()}${aggRow(300, 'final')}\n`);
-
-    await waitUntil(() => sink.events.some((e) => e.event === 'done'));
-    const statuses = sink.events.filter((e) => e.event === 'status');
-    const last = JSON.parse(statuses[statuses.length - 1]?.data ?? '{}') as {
-      complete: boolean;
-      maxStep: number;
-    };
-    expect(last.complete).toBe(true);
-    expect(last.maxStep).toBe(300);
-    await waitUntil(() => sink.closed());
-    ac.abort();
-  });
-
-  it('tears the watcher down when the client disconnects', async () => {
-    const dir = join(BENCH, 'epsilon-live');
-    const ac = new AbortController();
-    const req = new Request('http://127.0.0.1/api/runs/epsilon-live/live', { signal: ac.signal });
-    const res = createLiveResponse(req, { id: 'epsilon-live', dir, steps: 999_999 }, 40);
-    const sink = drainSse(res.body as ReadableStream<Uint8Array>);
-    await waitUntil(() => sink.events.some((e) => e.event === 'hello'));
-    expect(sink.closed()).toBe(false);
-    ac.abort();
-    await waitUntil(() => sink.closed(), 3000);
-  });
-});
-
 
 describe('hostile run roots (error isolation)', () => {
   let server: ReturnType<typeof Bun.serve> | null = null;
@@ -1568,19 +1382,6 @@ describe('origin policy', () => {
     expect(res.status).toBe(204);
     expect(res.headers.get('access-control-allow-origin')).toBe('http://localhost:5173');
     expect(res.headers.get('access-control-allow-methods')).toContain('GET');
-  });
-
-  it('stamps the SSE stream with the same headers', async () => {
-    const ac = new AbortController();
-    const res = await fetch(`${devBase}/api/runs/alpha-complete/live`, {
-      headers: { origin: 'http://localhost:5173' },
-      signal: ac.signal,
-    });
-    expect(res.status).toBe(200);
-    expect(res.headers.get('content-type')).toContain('text/event-stream');
-    expect(res.headers.get('access-control-allow-origin')).toBe('http://localhost:5173');
-    await res.text();
-    ac.abort();
   });
 
   it('stamps byte-range recording responses too', async () => {

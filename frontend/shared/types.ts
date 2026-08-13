@@ -246,10 +246,6 @@ export interface KeeperResponse {
 }
 
 
-export interface LiveHello { rows: AggregateRow[] }
-export interface LiveStatus { maxStep: number; inFlight: boolean; complete: boolean }
-
-
 export interface WallLaneHeader {
   seed: number;
   steps: number;

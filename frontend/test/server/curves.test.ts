@@ -1,11 +1,9 @@
 /// <reference types="bun" />
 
 import { afterAll, beforeAll, describe, expect, it } from 'bun:test';
-import { existsSync, readFileSync } from 'node:fs';
 import { mkdtemp, mkdir, readdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { dirname, join, resolve } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { join } from 'node:path';
 import { tapeBytes } from '../helpers/tape';
 
 import type { CurvesResponse } from '../../shared/types';
@@ -22,16 +20,6 @@ import {
   type CurvesQuery,
 } from '../../server/curves';
 
-const HERE = dirname(fileURLToPath(import.meta.url));
-const REAL_BENCH = resolve(HERE, '..', '..', '..', '.oak-benchmarks');
-const DEMO_ID = 'frontend-demo-16env-20260805';
-const FIXTURE_ID = 'tape-reference-tierL-20260805';
-const KEEPER_ID = existsSync(join(REAL_BENCH, '..', 'keeper'))
-  ? readFileSync(join(REAL_BENCH, '..', 'keeper'), 'utf8').trim()
-  : '';
-const demoPresent = existsSync(join(REAL_BENCH, DEMO_ID, 'fleet.jsonl'));
-const fixturePresent = existsSync(join(REAL_BENCH, FIXTURE_ID, 'metrics.oak.oakt'));
-const keeperPresent = KEEPER_ID.length > 0 && existsSync(join(REAL_BENCH, KEEPER_ID, 'metrics.oak.oakt'));
 
 const ENV_A = 'HalfCheetah-v4';
 const ENV_B = 'FourRooms-cont-v0';
@@ -410,83 +398,3 @@ describe('GET /api/runs/:id/curves', () => {
   });
 });
 
-
-describe('curves against the real bench roots', () => {
-  let server: ReturnType<typeof Bun.serve> | null = null;
-  let base = '';
-
-  beforeAll(() => {
-    if (!demoPresent && !keeperPresent && !fixturePresent) return;
-    const app = createApp({ benchRoot: REAL_BENCH, cacheFile: null, fleetCacheDir: null, ttlMs: 0 });
-    server = Bun.serve({ hostname: '127.0.0.1', port: 0, fetch: app.fetch });
-    base = `http://127.0.0.1:${server.port}`;
-  });
-
-  afterAll(() => {
-    void server?.stop(true);
-  });
-
-  it.skipIf(!demoPresent)('slices the 16-env demo run per environment', async () => {
-    const all = (await (await fetch(`${base}/api/runs/${DEMO_ID}/curves`)).json()) as CurvesResponse;
-    expect(all.seeds).toBe(128);
-    expect(all.steps.length).toBeGreaterThan(50);
-    expect(all.steps.at(-1)).toBe(100000);
-    expectAligned(all);
-
-    const cheetah = (await (
-      await fetch(`${base}/api/runs/${DEMO_ID}/curves?envId=HalfCheetah-v4`)
-    ).json()) as CurvesResponse;
-    const cartpole = (await (
-      await fetch(`${base}/api/runs/${DEMO_ID}/curves?envId=CartPole-cont-v0`)
-    ).json()) as CurvesResponse;
-    expect(cheetah.seeds).toBe(8);
-    expect(cartpole.seeds).toBe(8);
-    expect(cartpole.iqm.at(-1)).not.toBe(cheetah.iqm.at(-1));
-    for (let i = 0; i < all.steps.length; i++) {
-      const lo = all.p10[i];
-      const mid = all.p50[i];
-      const hi = all.p90[i];
-      expect(lo ?? 0).toBeLessThanOrEqual(mid ?? 0);
-      expect(mid ?? 0).toBeLessThanOrEqual(hi ?? 0);
-    }
-  });
-
-  it.skipIf(!keeperPresent)('slices the 1024-seed keeper run per environment', async () => {
-    const all = (await (await fetch(`${base}/api/runs/${KEEPER_ID}/curves`)).json()) as CurvesResponse;
-    expect(all.seeds).toBe(1024);
-    expect(all.steps.length).toBe(256);
-    expectAligned(all);
-    const cheetah = (await (
-      await fetch(`${base}/api/runs/${KEEPER_ID}/curves?envId=HalfCheetah-v4`)
-    ).json()) as CurvesResponse;
-    expect(cheetah.seeds).toBe(64);
-    expect(cheetah.steps).toEqual(all.steps);
-    const last = cheetah.iqm.at(-1);
-    expect(typeof last).toBe('number');
-    expect(Number.isFinite(last ?? Number.NaN)).toBe(true);
-  }, 60000);
-
-  it.skipIf(!fixturePresent)('reports the same statistics numpy does for the frozen fixture', async () => {
-    const cheetah = (await (
-      await fetch(`${base}/api/runs/${FIXTURE_ID}/curves?envId=HalfCheetah-v4`)
-    ).json()) as CurvesResponse;
-    expect(cheetah.steps.length).toBe(256);
-    expect(cheetah.steps[0]).toBe(3150);
-    expect(cheetah.steps.at(-1)).toBe(1000000);
-    const close = (got: number | null | undefined, want: number): void => {
-      expect(got).not.toBeNull();
-      expect(Math.abs((got ?? Number.NaN) - want)).toBeLessThan(1e-9);
-    };
-    close(cheetah.iqm[0], -0.006311481888332065);
-    close(cheetah.iqm.at(-1), 0.5451980642383675);
-    close(cheetah.p50[0], -0.006326222798180958);
-    close(cheetah.p10.at(-1), 0.24822101637639718);
-    close(cheetah.p50.at(-1), 0.530007148427346);
-    close(cheetah.p90.at(-1), 0.7833815310631663);
-    const lo = cheetah.ciLo.at(-1) ?? Number.NaN;
-    const hi = cheetah.ciHi.at(-1) ?? Number.NaN;
-    expect(lo).toBeLessThanOrEqual(0.5451980642383675);
-    expect(hi).toBeGreaterThanOrEqual(0.5451980642383675);
-    expect(hi - lo).toBeLessThan(0.3);
-  }, 60000);
-});

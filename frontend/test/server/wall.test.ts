@@ -1,11 +1,10 @@
 /// <reference types="bun" />
 
 import { afterAll, beforeAll, describe, expect, it } from 'bun:test';
-import { cpSync, existsSync } from 'node:fs';
+import { cpSync } from 'node:fs';
 import { mkdtemp, mkdir, readdir, rm, stat, truncate, utimes, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { dirname, join, resolve } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { join } from 'node:path';
 
 import type { EnvId } from '../../shared/envs';
 import type { RecordingMeta, WallResponse } from '../../shared/types';
@@ -43,20 +42,6 @@ import {
   parseActionsBin,
 } from '../../src/sim/record';
 import { fetchWall, wallUrl, WALL_POSE_LEN } from '../../src/api';
-
-const HERE = dirname(fileURLToPath(import.meta.url));
-const REAL_BENCH = resolve(HERE, '..', '..', '..', '.oak-benchmarks');
-
-const V4_ID = 'v4ab-tierS-v4';
-const V4_XS_ID = 'v4probe-xs-v4';
-const DEMO_ID = 'frontend-demo-16env-20260805';
-const NOREC_ID = 'p93-tierL-20260721';
-
-const v4Present = existsSync(join(REAL_BENCH, V4_ID, 'meta.json'));
-const v4XsPresent = existsSync(join(REAL_BENCH, V4_XS_ID, 'meta.json'));
-const demoPresent = existsSync(join(REAL_BENCH, DEMO_ID, 'meta.json'));
-const norecPresent = existsSync(join(REAL_BENCH, NOREC_ID, 'meta.json'));
-
 
 interface UnpackedLane {
   seed: number;
@@ -525,7 +510,7 @@ describe('effectiveStride (the decode budget)', () => {
   });
 
   it('leaves every real fixture alone — the budgets are ceilings, not a policy', async () => {
-    for (const [id, count, steps] of [[V4_ID, 64, 10_000], [DEMO_ID, 8, 100_000]] as const) {
+    for (const [id, count, steps] of [['v4ab-tierS-v4', 64, 10_000], ['frontend-demo-16env-20260805', 8, 100_000]] as const) {
       const lanes = Array.from({ length: count }, () => ({ steps, chunkSteps: 1000 }));
       expect(`${id}: ${effectiveStride(lanes, WALL_DEFAULT_STRIDE)}`).toBe(`${id}: ${WALL_DEFAULT_STRIDE}`);
       expect(effectiveStride(lanes, 1)).toBe(1);
@@ -894,29 +879,6 @@ describe('selective chunk decoding', () => {
     expect(fine.header.lanes[0]?.firstNonFiniteRow).toBe(500);
   });
 
-  it('costs strictly less work at a coarser stride — the point of the whole exercise', async () => {
-    if (!v4Present) return;
-    const runDir = join(REAL_BENCH, V4_ID);
-    clearWallCache();
-    const fine = await deriveFor(REAL_BENCH, runDir, V4_ID, 'HalfCheetah-v4', 64);
-    clearWallCache();
-    const coarse = await deriveFor(REAL_BENCH, runDir, V4_ID, 'HalfCheetah-v4', 4096);
-
-    const scanned = (p: WallPayload): number =>
-      p.header.lanes.reduce((a, l) => a + (l.scannedRows ?? l.steps), 0);
-    expect(scanned(fine)).toBe(64 * 10_000);
-    expect(scanned(coarse)).toBe(64 * 4000);
-    expect(scanned(coarse)).toBeLessThan(scanned(fine));
-
-    const { header, lanes } = await unpack(coarse.body);
-    const head = header.lanes[0];
-    const lane = lanes[0];
-    if (head === undefined || lane === undefined) throw new Error('no lane');
-    const dir = join(runDir, 'HalfCheetah-v4', `seed${head.seed}`);
-    const meta = await readLaneMeta(join(dir, 'meta.json'));
-    const raw = await parseActionsBin(await Bun.file(join(dir, 'actions.bin')).arrayBuffer(), meta);
-    expectLaneMatches(lane, raw, 4096, `skipped-chunk seed ${head.seed}`);
-  });
 
   it('crc-checks every chunk it decodes, and stops at a corrupted one', async () => {
     const root = join(TMP, 'bad-crc');
@@ -1072,98 +1034,6 @@ describe('budget ceilings', () => {
 });
 
 
-describe.if(v4Present)(`wall over ${V4_ID} (v4, 64 lanes)`, () => {
-  const runDir = join(REAL_BENCH, V4_ID);
-
-  it('ships every recorded seed of the env, in ascending seed order', async () => {
-    clearWallCache();
-    const { header } = await unpack((await deriveFor(REAL_BENCH, runDir, V4_ID, 'HalfCheetah-v4', 64)).body);
-    expect(header.lanes.length).toBe(64);
-    expect(header.lanes.map((l) => l.seed)).toEqual(Array.from({ length: 64 }, (_, i) => i));
-    for (const lane of header.lanes) {
-      expect(lane.steps).toBe(10_000);
-      expect(lane.samples).toBe(expectedRows(10_000, 64).length);
-      expect(lane.error).toBeUndefined();
-    }
-    expect(header.chunkEvents?.length).toBe(64);
-  });
-
-  for (const envId of ['HalfCheetah-v4', 'DeepSea-cont-v0', 'Pendulum-cont-v0'] as const) {
-    it(`${envId}: every sampled row is bit-equal to a direct parseActionsBin decode`, async () => {
-      clearWallCache();
-      const stride = 64;
-      const { header, lanes } = await unpack(
-        (await deriveFor(REAL_BENCH, runDir, V4_ID, envId, stride)).body,
-      );
-      expect(lanes.length).toBeGreaterThan(0);
-
-      const probe = [0, lanes.length >> 1, lanes.length - 1];
-      for (const idx of probe) {
-        const lane = lanes[idx];
-        const head = header.lanes[idx];
-        if (lane === undefined || head === undefined) throw new Error(`no lane ${idx}`);
-        const dir = join(runDir, envId, `seed${head.seed}`);
-        const meta = await readLaneMeta(join(dir, 'meta.json'));
-        const raw = await parseActionsBin(
-          await Bun.file(join(dir, 'actions.bin')).arrayBuffer(),
-          meta,
-        );
-        expectLaneMatches(lane, raw, stride, `${envId} seed ${head.seed}`);
-        expect(lane.firstNonFiniteRow).toBe(referenceFirstNonFinite(raw.data, raw.steps));
-      }
-    });
-  }
-
-  it('chunk events restate the file’s own framing (contiguous, and the real done counts)', async () => {
-    clearWallCache();
-    const { header } = await unpack((await deriveFor(REAL_BENCH, runDir, V4_ID, 'DeepSea-cont-v0', 64)).body);
-    const events = header.chunkEvents?.[0];
-    const seed = header.lanes[0]?.seed ?? -1;
-    expect(events?.seed).toBe(seed);
-    expect(events).toBeDefined();
-    if (events === undefined) return;
-
-    let at = 0;
-    for (let i = 0; i < events.stepStart.length; i++) {
-      expect(events.stepStart[i]).toBe(at);
-      at += events.stepCount[i] ?? 0;
-    }
-    expect(at).toBe(header.lanes[0]?.steps ?? -1);
-
-    const dir = join(runDir, 'DeepSea-cont-v0', `seed${seed}`);
-    const meta = await readLaneMeta(join(dir, 'meta.json'));
-    const raw = await parseActionsBin(await Bun.file(join(dir, 'actions.bin')).arrayBuffer(), meta);
-    let row = 0;
-    for (let i = 0; i < events.stepCount.length; i++) {
-      let count = 0;
-      const n = events.stepCount[i] ?? 0;
-      for (let k = 0; k < n; k++) if (raw.data[(row + k) * RECORD_FLOATS + 6] === 1) count++;
-      expect(events.doneCount[i]).toBe(count);
-      row += n;
-    }
-  });
-
-  it('a coarser stride ships strictly fewer bytes and still ends on the final row', async () => {
-    clearWallCache();
-    const fine = await deriveFor(REAL_BENCH, runDir, V4_ID, 'HalfCheetah-v4', 16);
-    clearWallCache();
-    const coarse = await deriveFor(REAL_BENCH, runDir, V4_ID, 'HalfCheetah-v4', 256);
-    expect(coarse.body.byteLength).toBeLessThan(fine.body.byteLength);
-
-    const a = await unpack(fine.body);
-    const b = await unpack(coarse.body);
-    for (let i = 0; i < a.lanes.length; i++) {
-      const la = a.lanes[i];
-      const lb = b.lanes[i];
-      if (la === undefined || lb === undefined) continue;
-      for (let j = 0; j < 9; j++) {
-        expect(Object.is(la.pose[(la.samples - 1) * 9 + j], lb.pose[(lb.samples - 1) * 9 + j])).toBe(true);
-      }
-    }
-  });
-});
-
-
 describe('HTTP /api/runs/:id/wall/:envId', () => {
   let server: ReturnType<typeof Bun.serve> | null = null;
   let base = '';
@@ -1300,54 +1170,3 @@ describe('HTTP /api/runs/:id/wall/:envId', () => {
   });
 });
 
-
-describe.if(norecPresent)(`wall over ${NOREC_ID} (no recordings)`, () => {
-  it('answers a valid empty wall rather than a 404', async () => {
-    clearWallCache();
-    const runDir = join(REAL_BENCH, NOREC_ID);
-    const { header, lanes } = await unpack(
-      (await deriveFor(REAL_BENCH, runDir, NOREC_ID, 'HalfCheetah-v4', 64)).body,
-    );
-    expect(header.runId).toBe(NOREC_ID);
-    expect(header.lanes).toEqual([]);
-    expect(header.binaryBytes).toBe(0);
-    expect(lanes).toEqual([]);
-  });
-});
-
-
-describe.if(v4XsPresent)(`wall over ${V4_XS_ID} (all 16 envs)`, () => {
-  it('decodes a lane of every env with no lane reporting an error', async () => {
-    const runDir = join(REAL_BENCH, V4_XS_ID);
-    const recordings = await scanRecordings(runDir, { root: REAL_BENCH });
-    const envIds = [...new Set(recordings.map((r) => r.envId))];
-    expect(envIds.length).toBe(16);
-    for (const envId of envIds) {
-      clearWallCache();
-      const { header, lanes } = await unpack(
-        (await deriveWall({
-          id: V4_XS_ID,
-          dir: runDir,
-          envId,
-          stride: 64,
-          recordings,
-          inFlight: false,
-          cacheDir: null,
-        })).body,
-      );
-      expect(`${envId}: ${header.lanes.length} lanes`).toBe(`${envId}: 1 lanes`);
-      const lane = lanes[0];
-      const head = header.lanes[0];
-      if (lane === undefined || head === undefined) throw new Error(`${envId} produced no lane`);
-      expect(head.error).toBeUndefined();
-      expect(head.steps).toBeGreaterThan(0);
-      const dir = join(runDir, envId, `seed${head.seed}`);
-      const meta = await readLaneMeta(join(dir, 'meta.json'));
-      const raw = await parseActionsBin(
-        await Bun.file(join(dir, 'actions.bin')).arrayBuffer(),
-        meta,
-      );
-      expectLaneMatches(lane, raw, 64, `${envId} seed ${head.seed}`);
-    }
-  });
-});

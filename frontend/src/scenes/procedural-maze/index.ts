@@ -1,11 +1,10 @@
 
 import { CelebrationPool, attachCelebrations, disposeCelebrations } from '@kit/celebrate';
 import { GroundTruthOverlay } from '@kit/debug';
-import { cellToWorld, cellToWorldVec, clampCell, type GridSize, type Vec3Tuple } from '@kit/grid';
+import { cellToWorldVec, clampCell, type GridSize } from '@kit/grid';
 import { makeOrbitRig, type OrbitRig } from '@kit/rigs';
 import { TOKENS } from '@kit/tokens';
 import type {
-  AlignmentProbe,
   FrameState,
   FrameUpdate,
   SceneContext,
@@ -352,74 +351,6 @@ class OvergrownRuinsScene implements SceneModule {
   setDebug(on: boolean): void {
     this.debugOn = on;
     if (this.overlay) this.overlay.visible = on;
-  }
-
-  probes(): AlignmentProbe[] {
-    const grid = this.grid ?? resolveGrid({ kind: 'grid' }, this.ctx?.seed ?? 0);
-    const wisp = this.wisp;
-    const shaft = this.shaft;
-    const world = this.world;
-    const height = this.ctx?.tokens.wispHeight ?? TOKENS.wispHeight;
-
-    const wispCell: GridCell = { x: 0, y: 0 };
-    const wispGoal: GridCell = { x: 0, y: 0 };
-    const wispOut: Vec3Tuple = [0, 0, 0];
-    const anchorCell: GridCell = { x: 0, y: 0 };
-    const anchorGoal: GridCell = { x: 0, y: 0 };
-    const anchorOut: Vec3Tuple = [0, 0, 0];
-    const shaftCell: GridCell = { x: 0, y: 0 };
-    const shaftGoal: GridCell = { x: 0, y: 0 };
-    const shaftOut: Vec3Tuple = [0, 0, 0];
-    const towerOut: Vec3Tuple = [0, 0, 0];
-    const archOut: Vec3Tuple = [0, 0, 0];
-
-    const probes: AlignmentProbe[] = [
-      {
-        name: 'wisp',
-        object: wisp?.probeObject ?? new THREE.Object3D(),
-        expectWorldPos: (state) => {
-          readCells(state, grid, wispCell, wispGoal);
-          cellToWorld(wispCell.x, wispCell.y, grid, wispOut);
-          wispOut[1] = height;
-          return wispOut;
-        },
-      },
-      {
-        name: 'wisp-anchor',
-        object: wisp?.avatar ?? new THREE.Object3D(),
-        expectWorldPos: (state) => {
-          readCells(state, grid, anchorCell, anchorGoal);
-          return cellToWorld(anchorCell.x, anchorCell.y, grid, anchorOut);
-        },
-      },
-      {
-        name: 'sun-shaft',
-        object: shaft?.root ?? new THREE.Object3D(),
-        expectWorldPos: (state) => {
-          readCells(state, grid, shaftCell, shaftGoal);
-          return cellToWorld(shaftGoal.x, shaftGoal.y, grid, shaftOut);
-        },
-      },
-    ];
-
-    const tower = world?.towerRoots[0];
-    if (tower) {
-      probes.push({
-        name: 'corner-tower',
-        object: tower,
-        expectWorldPos: () => cellToWorld(0, 0, grid, towerOut),
-      });
-    }
-    const arch = world?.arches[0];
-    const archRoot = world?.archRoots[0];
-    if (arch && archRoot) {
-      probes.push({
-        name: 'ruin-arch',
-        object: archRoot,
-        expectWorldPos: () => cellToWorld(arch.cell.x, arch.cell.y, grid, archOut),
-      });
-    }
-    return probes;
   }
 
   dispose(): void {

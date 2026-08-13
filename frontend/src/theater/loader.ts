@@ -1,117 +1,19 @@
 
-import { ENVS, ENV_IDS, isEnvId, type EnvId } from '@shared/envs';
-import type { RecordingMeta, RecordingRef, RunIndexEntry } from '@shared/types';
-import { DEFAULT_HARNESS_RUN, type HarnessSource } from '@kit/harness';
-import type { QualityTier } from '@kit/types';
-import { eventTimeline, lensRecording, type RecordingLens } from '@sim/decode';
+import type { EnvId } from '@shared/envs';
+import type { RecordingMeta, RecordingRef } from '@shared/types';
+import type { PlaybackSource } from '@kit/playback';
+import { lensRecording, type RecordingLens } from '@sim/decode';
 import {
   FILE_HEADER_BYTES as RECORD_HEADER_BYTES,
   parseActionsBin,
 } from '@sim/record';
 import { decoders } from '@sim/registry';
 import type { DecodedRecording, EnvDecoder, SimEvent } from '@sim/types';
-import { sortRuns } from '../state';
-
-export const DEFAULT_THEATER_RUN = DEFAULT_HARNESS_RUN;
-
-
-const TIER_NAMES: readonly string[] = ['hero', 'medium', 'thumb'];
-
 
 export interface TheaterTarget {
   runId: string;
   envId: EnvId;
   seed: number;
-}
-
-export function parseTheaterParams(params: Readonly<Record<string, string>>): TheaterTarget | null {
-  const runId = params['id'];
-  const envId = params['envId'];
-  const rawSeed = params['seed'];
-  if (!runId || !envId || rawSeed === undefined) return null;
-  if (!isEnvId(envId)) return null;
-  if (!/^\d+$/.test(rawSeed.trim())) return null;
-  const seed = Number(rawSeed.trim());
-  if (!Number.isSafeInteger(seed) || seed < 0) return null;
-  return { runId, envId, seed };
-}
-
-export function theaterHref(target: TheaterTarget): string {
-  return `#/theater/${encodeURIComponent(target.runId)}/${encodeURIComponent(target.envId)}/${target.seed}`;
-}
-
-export interface TheaterQuery {
-  tier?: QualityTier;
-  steps?: number;
-  at?: number;
-  paused?: boolean;
-  debug?: boolean;
-  speed?: number;
-}
-
-export function parseTheaterQuery(hash: string): TheaterQuery {
-  const out: TheaterQuery = {};
-  const q = hash.indexOf('?');
-  if (q < 0) return out;
-  const params = new URLSearchParams(hash.slice(q + 1));
-
-  const tier = params.get('tier');
-  if (tier && TIER_NAMES.includes(tier)) out.tier = tier as QualityTier;
-
-  const steps = Number(params.get('steps'));
-  if (Number.isFinite(steps) && steps > 0) out.steps = Math.floor(steps);
-
-  const at = Number(params.get('at'));
-  if (Number.isFinite(at) && at >= 0) out.at = at;
-
-  const speed = Number(params.get('speed'));
-  if (Number.isFinite(speed) && speed > 0) out.speed = speed;
-
-  if (params.get('pause') === '1') out.paused = true;
-  if (params.get('debug') === '1') out.debug = true;
-  return out;
-}
-
-
-export function pickerRuns(
-  entries: readonly RunIndexEntry[],
-  featuredId: string = DEFAULT_THEATER_RUN,
-): RunIndexEntry[] {
-  const playable = entries.filter((entry) => entry.hasRecordings);
-  const ordered = sortRuns(playable);
-  const featured = ordered.filter((entry) => entry.id === featuredId);
-  if (featured.length === 0) return ordered;
-  return [...featured, ...ordered.filter((entry) => entry.id !== featuredId)];
-}
-
-export interface EnvChip {
-  envId: EnvId;
-  name: string;
-  slug: string;
-  count: number;
-  seeds: number[];
-}
-
-export function envChips(recordings: readonly RecordingRef[]): EnvChip[] {
-  const bySeed = new Map<EnvId, Set<number>>();
-  for (const rec of recordings) {
-    if (!isEnvId(rec.envId)) continue;
-    let set = bySeed.get(rec.envId);
-    if (!set) {
-      set = new Set<number>();
-      bySeed.set(rec.envId, set);
-    }
-    set.add(rec.seed);
-  }
-  const out: EnvChip[] = [];
-  for (const envId of ENV_IDS) {
-    const set = bySeed.get(envId);
-    if (!set || set.size === 0) continue;
-    const info = ENVS[envId];
-    const seeds = [...set].sort((a, b) => a - b);
-    out.push({ envId, name: info.name, slug: info.slug, count: seeds.length, seeds });
-  }
-  return out;
 }
 
 export function seedsFor(recordings: readonly RecordingRef[], envId: EnvId): number[] {
@@ -244,19 +146,6 @@ export function tickKindOf(event: SimEvent): TickKind | null {
   }
 }
 
-export function describeEvent(event: SimEvent): string {
-  switch (event.type) {
-    case 'key':
-      return `key ${event.index}`;
-    case 'door':
-      return `door ${event.index} ${event.open ? 'open' : 'shut'}`;
-    case 'cue':
-      return `cue ${event.value}`;
-    default:
-      return event.type;
-  }
-}
-
 export interface TimelineEntry {
   frame: number;
   step: number;
@@ -322,13 +211,6 @@ export function timelineTicks(
   return out;
 }
 
-export function ticksFromRecording(
-  decoded: DecodedRecording<unknown>,
-  options?: TimelineTickOptions,
-): TimelineTick[] {
-  return timelineTicks(eventTimeline(decoded), decoded.frames.length, options);
-}
-
 export function ticksFromLens(
   lens: Pick<RecordingLens, 'eventEntries' | 'frameCount'>,
   options?: TimelineTickOptions,
@@ -346,7 +228,7 @@ export function seekTargetForTick(tick: Pick<TimelineTick, 'frame'>, lead = 3): 
 
 
 export interface TheaterRecording {
-  source: HarnessSource;
+  source: PlaybackSource;
   health: ReplayHealth;
   ticks: TimelineTick[];
   bytes: number;
@@ -466,11 +348,9 @@ export async function loadTheaterRecording(options: LoadRecordingOptions): Promi
     throw new TheaterLoadError(`actions.bin for ${envId} seed ${seed} is empty`);
   }
   const lens = lensRecording(raw, decoder);
-  const info = ENVS[envId];
   const steps = lens.steps;
 
-  const source: HarnessSource = {
-    kind: 'recording',
+  const source: PlaybackSource = {
     envId,
     seed: lens.seed,
     controlHz: lens.controlHz,
@@ -480,7 +360,6 @@ export async function loadTheaterRecording(options: LoadRecordingOptions): Promi
     frameAt: lens.frameAt,
     eventsAt: lens.eventsAt,
     eventEntries: lens.eventEntries,
-    label: `${runId} · ${info.name} · seed ${lens.seed} · ${steps} steps`,
     ...(lens.replay ? { replay: lens.replay } : {}),
     nonFiniteRows: lens.nonFiniteRows,
   };

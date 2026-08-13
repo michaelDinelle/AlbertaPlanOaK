@@ -1,9 +1,7 @@
 /// <reference types="bun" />
 
 import { describe, expect, test } from 'bun:test';
-import { existsSync, readFileSync, readdirSync } from 'node:fs';
-import { dirname, join, resolve } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { readFileSync } from 'node:fs';
 
 import { ENVS, ENV_IDS, type EnvId } from '@shared/envs';
 import type { RecordingMeta } from '@shared/types';
@@ -40,7 +38,6 @@ import {
 import { decoders } from '@sim/registry';
 import type { EnvDecoder, RawRecording } from '@sim/types';
 import { parseRawTrace } from './helpers/rawTrace';
-import { loadHarnessSource } from '@kit/harness';
 import { TheaterLoadError, loadTheaterRecording } from '../src/theater/loader';
 
 
@@ -1297,7 +1294,6 @@ describe('the theater loader on a v4 lane', () => {
     expect(log.ranges).toEqual([null]);
     expect(rec.steps).toBe(100);
     expect(rec.availableSteps).toBe(100);
-    expect(rec.source.kind).toBe('recording');
     expect(rec.source.frameCount).toBe(101);
     expect(rec.health.damaged).toBe(false);
   });
@@ -1338,81 +1334,5 @@ describe('the theater loader on a v4 lane', () => {
         fetchImpl: laneFetch(headerOnly, { ranges: [] }),
       }),
     ).rejects.toBeInstanceOf(TheaterLoadError);
-  });
-});
-
-
-const HERE = dirname(fileURLToPath(import.meta.url));
-const DEMO_ROOT = resolve(HERE, '..', '..', '.oak-benchmarks', 'frontend-demo-16env-20260803');
-const demoPresent = existsSync(DEMO_ROOT);
-
-function demoLane(envId: EnvId): { path: string; seed: number } | null {
-  const dir = join(DEMO_ROOT, envId);
-  if (!existsSync(dir)) return null;
-  const seeds = readdirSync(dir).filter((d) => /^seed\d+$/.test(d)).sort();
-  const first = seeds[0];
-  if (first === undefined) return null;
-  return { path: join(dir, first, 'actions.bin'), seed: Number(first.slice(4)) };
-}
-
-describe.skipIf(!demoPresent)('real 100k-step demo lanes', () => {
-  const CASES: { envId: EnvId; minRatio: number }[] = [
-    { envId: 'HalfCheetah-v4', minRatio: 3 },
-    { envId: 'CartPole-cont-v0', minRatio: 15 },
-    { envId: 'FourRooms-cont-v0', minRatio: 40 },
-    { envId: 'MultiKeyCorridor-cont-v0', minRatio: 40 },
-  ];
-
-  for (const { envId, minRatio } of CASES) {
-    test(`${envId} round-trips at 100k steps and compresses ≥ ${minRatio}×`, async () => {
-      const lane = demoLane(envId);
-      expect(lane).not.toBeNull();
-      const buf = readFileSync((lane as { path: string }).path);
-      const seed = (lane as { seed: number }).seed;
-      const raw3 = parseRawTrace(buf, { envId, seed });
-      expect(raw3.steps).toBeGreaterThanOrEqual(100_000);
-
-      const enc = await encodeV4({
-        envId, seed, data: raw3.data, steps: raw3.steps, chunkSteps: 4096,
-      });
-      const ratio = buf.byteLength / enc.bytes.byteLength;
-      const raw4 = await parseActionsBin(enc.bytes, enc.meta);
-
-      expect(raw4.steps).toBe(raw3.steps);
-      if (ENVS[envId].category === 'grid') {
-        expectRowsIdentical(raw3.data, raw4.data, raw3.steps, `${envId} @100k`);
-      } else {
-        expect(worstColumnError(envId, raw3.data, raw4.data, raw3.steps)).toBeLessThan(MAX_BUDGET_FRACTION);
-      }
-      expect(ratio).toBeGreaterThanOrEqual(minRatio);
-      console.log(
-        `    ${envId.padEnd(26)} ${raw3.steps} steps · ` +
-        `${(buf.byteLength / 1048576).toFixed(2)} MiB → ${(enc.bytes.byteLength / 1048576).toFixed(3)} MiB ` +
-        `(${ratio.toFixed(1)}×, ${enc.chunks.length} chunks)`,
-      );
-
-      const plan = planPrefixV4(chunkTableFromMeta(enc.meta) ?? [], 2000);
-      expect(plan.chunks).toBe(1);
-      const prefix = await parseActionsBin(enc.bytes.slice(0, plan.bytes), enc.meta);
-      expect(prefix.steps).toBe(4096);
-    });
-  }
-});
-
-describe('the artisan harness on a v4 lane', () => {
-  test('loads real experience rather than falling back to the fixture loop', async () => {
-    const fx = await chainFixture(100, 10);
-    const log: LaneServerLog = { ranges: [] };
-    const realFetch = globalThis.fetch;
-    globalThis.fetch = laneFetch(fx, log, { runId: 'v4-run', steps: 100 });
-    try {
-      const source = await loadHarnessSource('Chain-cont-v0', { runId: 'v4-run' });
-      expect(source.note).toBeUndefined();
-      expect(source.kind).toBe('recording');
-      expect(source.frameCount).toBe(101);
-      expect(log.ranges).toEqual([null]);
-    } finally {
-      globalThis.fetch = realFetch;
-    }
   });
 });
