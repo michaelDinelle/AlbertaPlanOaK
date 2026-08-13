@@ -8,23 +8,23 @@ import { fileURLToPath } from 'node:url';
 import { ENVS, ENV_IDS, type EnvId } from '@shared/envs';
 import type { RecordingMeta } from '@shared/types';
 import { decodeRecording, eventTimeline } from '@sim/decode';
-import { RECORD_FLOATS, RecordParseError, parseActionsBin } from '@sim/record';
 import {
   CHUNK_HEADER_BYTES,
   CODEC_VERSION,
   ESCAPE_ENTRY_BYTES,
   FILE_HEADER_BYTES,
+  RECORD_FLOATS,
   RECORD_V4_CODECS,
   RECORD_V4_ENV_KINDS,
-  RECORD_V4_VERSION,
-  Record4ParseError,
+  RECORD_VERSION,
+  RecordParseError,
   chunkTableFromMeta,
   codecForEnv,
   codecMatches,
   crc32,
   dequantizeCtrlU8,
   envKindOf,
-  parseActionsBinV4,
+  parseActionsBin,
   planPrefixV4,
   quantizeCtrlU8,
   rangeHeaderForSteps,
@@ -36,9 +36,10 @@ import {
   type ChunkRowsV4,
   type CodecDescriptor,
   type PoseFieldSpec,
-} from '@sim/record4';
+} from '@sim/record';
 import { decoders } from '@sim/registry';
-import type { EnvDecoder } from '@sim/types';
+import type { EnvDecoder, RawRecording } from '@sim/types';
+import { parseRawTrace } from './helpers/rawTrace';
 import { loadHarnessSource } from '@kit/harness';
 import { TheaterLoadError, loadTheaterRecording } from '../src/theater/loader';
 
@@ -233,7 +234,7 @@ async function assembleV4(
   const header = new Uint8Array(FILE_HEADER_BYTES);
   const hv = new DataView(header.buffer);
   hv.setUint32(0, 0x344b414f, true);
-  hv.setUint32(4, RECORD_V4_VERSION, true);
+  hv.setUint32(4, RECORD_VERSION, true);
   hv.setUint32(8, envKind, true);
   hv.setUint32(12, CODEC_VERSION, true);
   parts.push(header);
@@ -283,7 +284,6 @@ async function encodeV4(opts: EncodeOptions): Promise<EncodedV4> {
     envId: opts.envId,
     seed,
     actDim: ENVS[opts.envId].action.n,
-    recordVersion: RECORD_V4_VERSION,
     codecVersion: CODEC_VERSION,
     codec: JSON.parse(JSON.stringify(desc)) as unknown,
   };
@@ -354,7 +354,7 @@ interface TraceCase {
   name: string;
   envId: EnvId;
   seed: number;
-  raw: ReturnType<typeof parseActionsBin>;
+  raw: RawRecording;
 }
 
 function fixtureUrl(name: string): URL {
@@ -365,12 +365,7 @@ function loadTrace(name: string): TraceCase {
   const envId = name.replace(/\.events$/, '') as EnvId;
   const doc = JSON.parse(readFileSync(fixtureUrl(`${name}.json`), 'utf8')) as { seed: number };
   const buf = readFileSync(fixtureUrl(`${name}.bin`));
-  const raw = parseActionsBin(buf, {
-    envId,
-    seed: doc.seed,
-    actDim: ENVS[envId].action.n,
-    recordVersion: 3,
-  });
+  const raw = parseRawTrace(buf, { envId, seed: doc.seed });
   return { name, envId, seed: doc.seed, raw };
 }
 
@@ -541,7 +536,7 @@ describe('v3 → v4 → v3 over every real trace fixture', () => {
         data: trace.raw.data,
         steps: trace.raw.steps,
       });
-      const raw4 = await parseActionsBinV4(enc.bytes, enc.meta);
+      const raw4 = await parseActionsBin(enc.bytes, enc.meta);
 
       expect(raw4.envId).toBe(trace.envId);
       expect(raw4.seed).toBe(trace.seed);
@@ -570,7 +565,7 @@ describe('v3 → v4 → v3 over every real trace fixture', () => {
         steps: trace.raw.steps,
         chunkSteps: 37,
       });
-      const raw4 = await parseActionsBinV4(enc.bytes, enc.meta);
+      const raw4 = await parseActionsBin(enc.bytes, enc.meta);
 
       const d3 = decodeRecording(trace.raw, decoder);
       const d4 = decodeRecording(raw4, decoder);
@@ -598,7 +593,7 @@ describe('v3 → v4 → v3 over every real trace fixture', () => {
         chunkSteps,
       });
       expect(enc.chunks.length).toBe(Math.ceil(200 / chunkSteps));
-      const raw4 = await parseActionsBinV4(enc.bytes, enc.meta);
+      const raw4 = await parseActionsBin(enc.bytes, enc.meta);
       outs.push(raw4.data.slice());
     }
     for (const out of outs) {
@@ -639,7 +634,7 @@ describe('synthetic extremes', () => {
     });
     for (const chunkSteps of [20, 40]) {
       const enc = await encodeV4({ envId: 'HalfCheetah-v4', data, steps, chunkSteps });
-      const raw4 = await parseActionsBinV4(enc.bytes, enc.meta);
+      const raw4 = await parseActionsBin(enc.bytes, enc.meta);
       expect(raw4.steps).toBe(steps);
       for (let i = 0; i < steps; i++) {
         const want = at(data, i * RECORD_FLOATS + 7);
@@ -664,7 +659,7 @@ describe('synthetic extremes', () => {
       row[9] = -0.5;
     });
     const enc = await encodeV4({ envId: 'Pendulum-cont-v0', data, steps });
-    const raw4 = await parseActionsBinV4(enc.bytes, enc.meta);
+    const raw4 = await parseActionsBin(enc.bytes, enc.meta);
     expect(raw4.steps).toBe(steps);
     for (let i = 0; i < steps; i++) {
       const want = at(data, i * RECORD_FLOATS + 7);
@@ -691,7 +686,7 @@ describe('synthetic extremes', () => {
     data[9 * RECORD_FLOATS + 9] = Number.NEGATIVE_INFINITY;
 
     const enc = await encodeV4({ envId: 'Pendulum-cont-v0', data, steps, chunkSteps: 4 });
-    const raw4 = await parseActionsBinV4(enc.bytes, enc.meta);
+    const raw4 = await parseActionsBin(enc.bytes, enc.meta);
     expect(raw4.steps).toBe(steps);
     for (const i of [3, 5, 9]) {
       for (let c = 0; c < RECORD_FLOATS; c++) {
@@ -702,8 +697,8 @@ describe('synthetic extremes', () => {
       }
     }
     const decoder = decoders['Pendulum-cont-v0'] as EnvDecoder<unknown, unknown>;
-    const d3 = decodeRecording(parseActionsBin(new Uint8Array(data.buffer), {
-      envId: 'Pendulum-cont-v0', seed: 0, actDim: 1, recordVersion: 3,
+    const d3 = decodeRecording(parseRawTrace(new Uint8Array(data.buffer), {
+      envId: 'Pendulum-cont-v0', seed: 0,
     }), decoder);
     expect(decodeRecording(raw4, decoder).nonFiniteRows).toBe(d3.nonFiniteRows);
     expect(d3.nonFiniteRows).toBe(3);
@@ -717,7 +712,7 @@ describe('synthetic extremes', () => {
     });
     data[1 * RECORD_FLOATS + 4] = Number.NaN;
     const enc = await encodeV4({ envId: 'Pendulum-cont-v0', data, steps });
-    const raw4 = await parseActionsBinV4(enc.bytes, enc.meta);
+    const raw4 = await parseActionsBin(enc.bytes, enc.meta);
     expectRowsIdentical(
       data.subarray(RECORD_FLOATS, 2 * RECORD_FLOATS),
       raw4.data.subarray(RECORD_FLOATS, 2 * RECORD_FLOATS),
@@ -739,7 +734,7 @@ describe('synthetic extremes', () => {
       row[15] = 9.75;
     });
     const enc = await encodeV4({ envId: 'Pendulum-cont-v0', data, steps });
-    const raw4 = await parseActionsBinV4(enc.bytes, enc.meta);
+    const raw4 = await parseActionsBin(enc.bytes, enc.meta);
     expect(at(raw4.data, 3)).toBe(0);
     expect(at(raw4.data, 13)).toBe(0);
     expect(at(raw4.data, 15)).toBe(0);
@@ -758,7 +753,7 @@ describe('synthetic extremes', () => {
       row[10] = i === 6 ? -12345.6 : 0.5;
     });
     const enc = await encodeV4({ envId: 'CartPole-cont-v0', data, steps });
-    const raw4 = await parseActionsBinV4(enc.bytes, enc.meta);
+    const raw4 = await parseActionsBin(enc.bytes, enc.meta);
     for (const i of [4, 6]) {
       expectRowsIdentical(
         data.subarray(i * RECORD_FLOATS, (i + 1) * RECORD_FLOATS),
@@ -808,7 +803,7 @@ describe('synthetic extremes', () => {
     expect(pv.getInt16(steps, true)).toBe(-32188);
     expect(payload[0]! & 0x20).toBe(0);
     const enc = await encodeV4({ envId: 'CartPole-cont-v0', data, steps });
-    const raw4 = await parseActionsBinV4(enc.bytes, enc.meta);
+    const raw4 = await parseActionsBin(enc.bytes, enc.meta);
     expect(at(raw4.data, 7)).toBeCloseTo(-3.2188, 6);
   });
 
@@ -828,7 +823,7 @@ describe('synthetic extremes', () => {
     expect(pv.getInt32(dxOff + 4, true)).toBe(2147483647);
     expect(pv.getInt32(dxOff + 8, true)).toBe(-2147483647);
     const enc = await encodeV4({ envId: 'HalfCheetah-v4', data, steps });
-    const raw4 = await parseActionsBinV4(enc.bytes, enc.meta);
+    const raw4 = await parseActionsBin(enc.bytes, enc.meta);
     for (const i of [1, 2]) {
       expect(at(raw4.data, i * RECORD_FLOATS + 7)).toBe(at(data, i * RECORD_FLOATS + 7));
     }
@@ -845,7 +840,7 @@ describe('synthetic extremes', () => {
       row[10] = 9;
     });
     const enc = await encodeV4({ envId: 'FourRooms-cont-v0', data, steps });
-    const raw4 = await parseActionsBinV4(enc.bytes, enc.meta);
+    const raw4 = await parseActionsBin(enc.bytes, enc.meta);
     expectRowsIdentical(data, raw4.data, steps, 'FourRooms with out-of-range pose');
   });
 
@@ -861,7 +856,7 @@ describe('synthetic extremes', () => {
     });
     data[13 * RECORD_FLOATS + 8] = Number.NaN;
     const enc = await encodeV4({ envId: 'FourRooms-cont-v0', data, steps, chunkSteps: 11 });
-    const raw4 = await parseActionsBinV4(enc.bytes, enc.meta);
+    const raw4 = await parseActionsBin(enc.bytes, enc.meta);
     expectRowsIdentical(data, raw4.data, steps, 'full action nibble');
     for (let i = 0; i < steps; i++) {
       if (i === 13) continue;
@@ -881,7 +876,7 @@ describe('synthetic extremes', () => {
       row[10] = 9;
     });
     const enc = await encodeV4({ envId: 'FourRooms-cont-v0', data, steps });
-    const raw4 = await parseActionsBinV4(enc.bytes, enc.meta);
+    const raw4 = await parseActionsBin(enc.bytes, enc.meta);
     expectRowsIdentical(data, raw4.data, steps, 'FourRooms with a bad action index');
   });
 
@@ -897,7 +892,7 @@ describe('synthetic extremes', () => {
       row[10] = 9;
     });
     const enc = await encodeV4({ envId: 'FourRooms-cont-v0', data, steps });
-    const raw4 = await parseActionsBinV4(enc.bytes, enc.meta);
+    const raw4 = await parseActionsBin(enc.bytes, enc.meta);
     expectRowsIdentical(data, raw4.data, steps, 'FourRooms with a non-binary done');
     const counted: number[] = [];
     await walkChunksV4(enc.bytes, enc.meta, (rows) => {
@@ -931,7 +926,7 @@ describe('torn tails, damage and truncation', () => {
       expect(scan.chunks.length).toBe(2);
       expect(scan.steps).toBe(40);
       expect(scan.truncatedReason).not.toBeNull();
-      const raw4 = await parseActionsBinV4(torn, fx.meta);
+      const raw4 = await parseActionsBin(torn, fx.meta);
       expect(raw4.steps).toBe(40);
       expect(raw4.data.length).toBe(40 * RECORD_FLOATS);
       expectRowsIdentical(fx.data, raw4.data, 40, 'torn Chain lane');
@@ -940,7 +935,7 @@ describe('torn tails, damage and truncation', () => {
 
   test('a header-only file is a zero-step lane, not an error', async () => {
     const fx = await chainFixture();
-    const raw4 = await parseActionsBinV4(fx.bytes.slice(0, FILE_HEADER_BYTES), fx.meta);
+    const raw4 = await parseActionsBin(fx.bytes.slice(0, FILE_HEADER_BYTES), fx.meta);
     expect(raw4.steps).toBe(0);
     expect(raw4.data.length).toBe(0);
   });
@@ -954,7 +949,7 @@ describe('torn tails, damage and truncation', () => {
     const scan = scanChunksV4(damaged);
     expect(scan.chunks.length).toBe(1);
     expect(scan.truncatedReason).toBe('chunk crc32 mismatch');
-    expect((await parseActionsBinV4(damaged, fx.meta)).steps).toBe(20);
+    expect((await parseActionsBin(damaged, fx.meta)).steps).toBe(20);
     expect(scanChunksV4(damaged, { verifyCrc: false }).steps).toBe(60);
   });
 
@@ -965,7 +960,7 @@ describe('torn tails, damage and truncation', () => {
     const dv = new DataView(damaged.buffer);
     dv.setUint32(second[2] + 12, 999999, true);
     expect(scanChunksV4(damaged).chunks.length).toBe(3);
-    expect((await parseActionsBinV4(damaged, fx.meta)).steps).toBe(20);
+    expect((await parseActionsBin(damaged, fx.meta)).steps).toBe(20);
   });
 
   test('a chunk whose stepStart does not continue the file is dropped', async () => {
@@ -989,7 +984,7 @@ describe('torn tails, damage and truncation', () => {
     const desc = codecForEnv('Chain-cont-v0');
     const { payload, doneCount } = buildChunkPayload(desc, data, 0, steps);
     const meta: RecordingMeta = {
-      envId: 'Chain-cont-v0', seed: 0, actDim: 2, recordVersion: 4, codecVersion: 1,
+      envId: 'Chain-cont-v0', seed: 0, actDim: 2, codecVersion: 1,
     };
 
     const overrun = payload.slice();
@@ -998,14 +993,14 @@ describe('torn tails, damage and truncation', () => {
       { payload: overrun, stepStart: 0, stepCount: steps, doneCount },
     ]);
     expect(scanChunksV4(a.bytes).chunks.length).toBe(1);
-    await expect(parseActionsBinV4(a.bytes, meta)).rejects.toThrow(/escape table/);
+    await expect(parseActionsBin(a.bytes, meta)).rejects.toThrow(/escape table/);
 
     const b = await assembleV4(envKindOf('Chain-cont-v0'), [
       { payload: payload.slice(), stepStart: 0, stepCount: steps + 40, doneCount },
     ]);
-    await expect(parseActionsBinV4(b.bytes, meta)).rejects.toThrow(Record4ParseError);
+    await expect(parseActionsBin(b.bytes, meta)).rejects.toThrow(RecordParseError);
 
-    await expect(walkChunksV4(a.bytes, meta, () => undefined)).rejects.toThrow(Record4ParseError);
+    await expect(walkChunksV4(a.bytes, meta, () => undefined)).rejects.toThrow(RecordParseError);
   });
 
   test('a foreign chunk magic ends the scan', async () => {
@@ -1021,7 +1016,7 @@ describe('torn tails, damage and truncation', () => {
 describe('header and meta validation', () => {
   test('rejects a short, foreign or future file header', async () => {
     const fx = await chainFixture();
-    expect(() => readFileHeaderV4(fx.bytes.slice(0, 12))).toThrow(Record4ParseError);
+    expect(() => readFileHeaderV4(fx.bytes.slice(0, 12))).toThrow(RecordParseError);
 
     const foreign = fx.bytes.slice();
     new DataView(foreign.buffer).setUint32(0, 0x12345678, true);
@@ -1036,19 +1031,16 @@ describe('header and meta validation', () => {
     expect(() => readFileHeaderV4(newCodec)).toThrow(/codecVersion/);
   });
 
-  test('a v4 parser refuses a v3 meta, and vice versa', async () => {
+  test('the parser refuses a non-record buffer', async () => {
     const fx = await chainFixture();
-    await expect(
-      parseActionsBinV4(fx.bytes, { ...fx.meta, recordVersion: 3 }),
-    ).rejects.toBeInstanceOf(Record4ParseError);
-    expect(() => parseActionsBin(new Uint8Array(64), { ...fx.meta, recordVersion: 3 } as RecordingMeta))
-      .not.toThrow();
+    await expect(parseActionsBin(new Uint8Array(64), fx.meta))
+      .rejects.toBeInstanceOf(RecordParseError);
   });
 
-  test('a v4 error is still a RecordParseError to a v3-era catch block', async () => {
+  test('an invalid seed is rejected', async () => {
     const fx = await chainFixture();
     await expect(
-      parseActionsBinV4(fx.bytes, { ...fx.meta, seed: -1 }),
+      parseActionsBin(fx.bytes, { ...fx.meta, seed: -1 }),
     ).rejects.toBeInstanceOf(RecordParseError);
   });
 
@@ -1056,7 +1048,7 @@ describe('header and meta validation', () => {
     const fx = await chainFixture();
     const relabelled = fx.bytes.slice();
     new DataView(relabelled.buffer).setUint32(8, 2, true);
-    await expect(parseActionsBinV4(relabelled, fx.meta)).rejects.toThrow(/contradicts meta envId/);
+    await expect(parseActionsBin(relabelled, fx.meta)).rejects.toThrow(/contradicts meta envId/);
   });
 
   test('a meta codec descriptor that disagrees with the built-in table is fatal', async () => {
@@ -1065,24 +1057,24 @@ describe('header and meta validation', () => {
       ...fx.meta,
       codec: { category: 'grid', ctrl: 'index', poseFields: [{ idx: 0, enc: 'u8' }], poseConst: { 1: 16 } },
     };
-    await expect(parseActionsBinV4(fx.bytes, wrong)).rejects.toThrow(/codec descriptor/);
+    await expect(parseActionsBin(fx.bytes, wrong)).rejects.toThrow(/codec descriptor/);
     const bare: RecordingMeta = {
-      envId: fx.meta.envId, seed: fx.meta.seed, actDim: fx.meta.actDim, recordVersion: 4,
+      envId: fx.meta.envId, seed: fx.meta.seed, actDim: fx.meta.actDim,
     };
-    expect((await parseActionsBinV4(fx.bytes, bare)).steps).toBe(60);
+    expect((await parseActionsBin(fx.bytes, bare)).steps).toBe(60);
   });
 
   test('a meta codecVersion from another codec revision is fatal', async () => {
     const fx = await chainFixture();
     await expect(
-      parseActionsBinV4(fx.bytes, { ...fx.meta, codecVersion: 2 }),
+      parseActionsBin(fx.bytes, { ...fx.meta, codecVersion: 2 }),
     ).rejects.toThrow(/codecVersion/);
   });
 
   test('an unknown envId or a negative seed is rejected before any byte is read', async () => {
     const fx = await chainFixture();
-    await expect(parseActionsBinV4(fx.bytes, { ...fx.meta, envId: 'Nope-v0' })).rejects.toThrow(/envId/);
-    await expect(parseActionsBinV4(fx.bytes, { ...fx.meta, seed: 1.5 })).rejects.toThrow(/seed/);
+    await expect(parseActionsBin(fx.bytes, { ...fx.meta, envId: 'Nope-v0' })).rejects.toThrow(/envId/);
+    await expect(parseActionsBin(fx.bytes, { ...fx.meta, seed: 1.5 })).rejects.toThrow(/seed/);
   });
 });
 
@@ -1095,23 +1087,23 @@ describe('buffer views', () => {
     padded.set(fx.bytes, 33);
     const view = padded.subarray(33, 33 + fx.bytes.byteLength);
 
-    const raw4 = await parseActionsBinV4(view, fx.meta);
+    const raw4 = await parseActionsBin(view, fx.meta);
     expect(raw4.steps).toBe(60);
     expectRowsIdentical(fx.data, raw4.data, 60, 'unaligned view');
-    expect((await parseActionsBinV4(fx.bytes.slice().buffer, fx.meta)).steps).toBe(60);
-    expect((await parseActionsBinV4(new DataView(padded.buffer, 33, fx.bytes.byteLength), fx.meta)).steps)
+    expect((await parseActionsBin(fx.bytes.slice().buffer, fx.meta)).steps).toBe(60);
+    expect((await parseActionsBin(new DataView(padded.buffer, 33, fx.bytes.byteLength), fx.meta)).steps)
       .toBe(60);
   });
 });
 
 
 describe('walkChunksV4', () => {
-  test('visits every chunk and reproduces parseActionsBinV4 exactly', async () => {
+  test('visits every chunk and reproduces parseActionsBin exactly', async () => {
     const trace = loadTrace('HalfCheetah-v4');
     const enc = await encodeV4({
       envId: trace.envId, seed: trace.seed, data: trace.raw.data, steps: trace.raw.steps, chunkSteps: 64,
     });
-    const whole = await parseActionsBinV4(enc.bytes, enc.meta);
+    const whole = await parseActionsBin(enc.bytes, enc.meta);
 
     const seen: ChunkRowsV4[] = [];
     const rebuilt = new Float32Array(trace.raw.steps * RECORD_FLOATS);
@@ -1209,7 +1201,7 @@ describe('chunk-table range planning', () => {
     const table = chunkTableFromMeta(fx.meta) ?? [];
     const plan = planPrefixV4(table, 25);
     const prefix = fx.bytes.slice(0, plan.bytes);
-    const raw4 = await parseActionsBinV4(prefix, fx.meta);
+    const raw4 = await parseActionsBin(prefix, fx.meta);
     expect(raw4.steps).toBe(plan.steps);
     expect(raw4.steps).toBeGreaterThanOrEqual(25);
     expectRowsIdentical(fx.data, raw4.data, raw4.steps, 'planned prefix');
@@ -1224,7 +1216,7 @@ describe('chunk-table range planning', () => {
     expect(bare.meta.steps).toBeUndefined();
     expect(chunkTableFromMeta(bare.meta)).toBeNull();
     expect(rangeHeaderForSteps(bare.meta, 20)).toBeNull();
-    expect((await parseActionsBinV4(bare.bytes, bare.meta)).steps).toBe(60);
+    expect((await parseActionsBin(bare.bytes, bare.meta)).steps).toBe(60);
 
     expect(chunkTableFromMeta({ chunks: [] })).toBeNull();
     expect(chunkTableFromMeta({ chunks: undefined })).toBeNull();
@@ -1235,9 +1227,9 @@ describe('chunk-table range planning', () => {
     expect(chunkTableFromMeta({ chunks: [[0, 10, FILE_HEADER_BYTES] as unknown as [number, number, number, number]] })).toBeNull();
   });
 
-  test('rangeHeaderForSteps answers a v3 lane with null (the caller keeps its own rule)', async () => {
+  test('rangeHeaderForSteps needs a chunk table', async () => {
     const fx = await chainFixture(60, 20);
-    expect(rangeHeaderForSteps({ ...fx.meta, recordVersion: 3 }, 10)).toBeNull();
+    expect(rangeHeaderForSteps({}, 10)).toBeNull();
     const header = rangeHeaderForSteps(fx.meta, 25);
     expect(header).toBe(`bytes=0-${planPrefixV4(chunkTableFromMeta(fx.meta) ?? [], 25).bytes - 1}`);
   });
@@ -1377,16 +1369,14 @@ describe.skipIf(!demoPresent)('real 100k-step demo lanes', () => {
       expect(lane).not.toBeNull();
       const buf = readFileSync((lane as { path: string }).path);
       const seed = (lane as { seed: number }).seed;
-      const raw3 = parseActionsBin(buf, {
-        envId, seed, actDim: ENVS[envId].action.n, recordVersion: 3,
-      });
+      const raw3 = parseRawTrace(buf, { envId, seed });
       expect(raw3.steps).toBeGreaterThanOrEqual(100_000);
 
       const enc = await encodeV4({
         envId, seed, data: raw3.data, steps: raw3.steps, chunkSteps: 4096,
       });
       const ratio = buf.byteLength / enc.bytes.byteLength;
-      const raw4 = await parseActionsBinV4(enc.bytes, enc.meta);
+      const raw4 = await parseActionsBin(enc.bytes, enc.meta);
 
       expect(raw4.steps).toBe(raw3.steps);
       if (ENVS[envId].category === 'grid') {
@@ -1403,7 +1393,7 @@ describe.skipIf(!demoPresent)('real 100k-step demo lanes', () => {
 
       const plan = planPrefixV4(chunkTableFromMeta(enc.meta) ?? [], 2000);
       expect(plan.chunks).toBe(1);
-      const prefix = await parseActionsBinV4(enc.bytes.slice(0, plan.bytes), enc.meta);
+      const prefix = await parseActionsBin(enc.bytes.slice(0, plan.bytes), enc.meta);
       expect(prefix.steps).toBe(4096);
     });
   }

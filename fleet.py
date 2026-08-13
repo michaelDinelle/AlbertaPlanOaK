@@ -422,7 +422,14 @@ def slice_verdicts(k: dict, c: dict, n: int, horizon: int,
     return verdicts, sup_lines
 
 def cmd_gate(args) -> int:
-    kr, cr = load(args.keeper, args.policy), load(args.candidate, args.policy)
+    kh = keeper_hash()
+    if kh is None:
+        print("GATE ERROR: no keeper file beside the benchmark directory.")
+        return 2
+    if not (BENCH / kh).is_dir():
+        print(f"GATE ERROR: keeper data {BENCH / kh} absent locally.")
+        return 2
+    kr, cr = load(BENCH / kh, args.policy), load(args.candidate, args.policy)
     for label, r in (("keeper", kr), ("candidate", cr)):
         if int(r["tape"]["ends"][-1]) < r["meta"]["steps"]:
             print(f"GATE ERROR: {label} run is INCOMPLETE "
@@ -505,27 +512,34 @@ def cmd_gate(args) -> int:
     print("PROMOTE" if ok else "REJECT")
     return 0 if ok else 1
 
+def keeper_hash() -> str | None:
+    try:
+        return (REPO / "keeper").read_text().strip()
+    except OSError:
+        return None
+
 def cmd_run(args) -> int:
-    root = BENCH / args.name
-    log = BENCH / f"{args.name}.log"
+    name = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=REPO).decode().strip()
+    root = BENCH / name
+    log = BENCH / f"{name}.log"
+    kh = keeper_hash()
+    if kh == name and root.exists():
+        print(f"REFUSED: {name} is the keeper — its data is not overwritten; "
+              f"delete .oak-benchmarks/{name} by hand if a re-run is truly meant.")
+        return 2
+    keeper = BENCH / kh if kh and kh != name and (BENCH / kh).is_dir() else None
     BENCH.mkdir(exist_ok=True)
-    if args.keeper and (args.keeper / "meta.json").exists():
-        kabl = json.loads((args.keeper / "meta.json").read_text()).get("ablationLabel") or "none"
+    if keeper and (keeper / "meta.json").exists():
+        kabl = json.loads((keeper / "meta.json").read_text()).get("ablationLabel") or "none"
         if kabl != os.environ.get("OAK_ABLATE", "none"):
             print(f"CONFIG ERROR: OAK_ABLATE={os.environ.get('OAK_ABLATE', 'none')} "
                   f"!= keeper ablation '{kabl}' — the gate would compare different configs.")
             return 2
-    if args.role == "candidate":
-        rp = BENCH / "ROLES.json"
-        roles = json.loads(rp.read_text()) if rp.exists() else {}
-        roles["candidate"] = args.name
-        roles["rolesSchemaVersion"] = 2
-        rp.write_text(json.dumps(roles, indent=1))
     import shutil
     shutil.rmtree(root, ignore_errors=True)
     log.unlink(missing_ok=True)
     cmd = [sys.executable, str(Path(__file__).resolve()), "job",
-           str(args.steps), args.name, str(args.keeper or "")]
+           str(args.steps), name, str(keeper or "")]
     with open(log, "w") as lf:
         p = subprocess.Popen(cmd, stdout=lf, stderr=subprocess.STDOUT,
                              stdin=subprocess.DEVNULL, start_new_session=True,
@@ -549,7 +563,7 @@ def cmd_job(args) -> int:
     print(f"[fleet] benchmark exit={rc}", flush=True)
     me = [sys.executable, str(Path(__file__).resolve())]
     subprocess.run(me + ["report", str(root)], cwd=REPO)
-    if args.keeper and args.keeper != "None":
+    if args.keeper:
         subprocess.run(me + ["gate", args.keeper, str(root)], cwd=REPO)
     (root / ".done").touch()
     print("[fleet] DONE — .done written.", flush=True)
@@ -561,9 +575,6 @@ def main() -> int:
 
     rp = sub.add_parser("run", help="detached benchmark -> report -> gate -> .done")
     rp.add_argument("steps", type=int)
-    rp.add_argument("name")
-    rp.add_argument("keeper", type=Path, nargs="?", default=None)
-    rp.add_argument("--role", default="candidate", choices=("candidate", "probe"))
 
     jp = sub.add_parser("job")
     jp.add_argument("steps", type=int)
@@ -575,7 +586,6 @@ def main() -> int:
     pp.add_argument("--policy", default="oak")
 
     gp = sub.add_parser("gate", help="paired promotion law: PROMOTE/REJECT")
-    gp.add_argument("keeper", type=Path)
     gp.add_argument("candidate", type=Path)
     gp.add_argument("--policy", default="oak")
     gp.add_argument("--boot", type=int, default=10_000)

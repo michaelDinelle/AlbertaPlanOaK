@@ -22,26 +22,16 @@ import { statOrNull } from './jsonl';
 import type { RecordingEntry } from './recordings';
 import { ensureCacheDir } from './runIndex';
 import {
+  CODEC_VERSION as RECORD_CODEC_VERSION,
   OFF_DONE,
   OFF_POSE,
   POSE_LEN,
   RECORD_BYTES,
   RECORD_FLOATS,
-  parseActionsBin,
-} from '@sim/record';
-import {
-  CODEC_VERSION as RECORD4_CODEC_VERSION,
-  RECORD_V4_ENV_KINDS,
-  RECORD_V4_VERSION,
-  Record4ParseError,
-  codecForEnvKind,
-  codecMatches,
   crc32 as crc32Reference,
   decodeChunkPayload,
-  scanChunksV4,
-  type ChunkRecordV4,
-  type CodecDescriptor,
-} from '@sim/record4';
+  prepareLane,
+} from '@sim/record';
 
 
 export const WALL_DEFAULT_STRIDE = 64;
@@ -387,7 +377,7 @@ export async function deriveWall(opts: WallOptions): Promise<WallPayload> {
     laneKeys.push(`${lane.seed}:${stamp(data)}:${stamp(meta)}`);
   }
   const key =
-    `${id}|${envId}|${stride}|${WALL_CODEC_VERSION}|${RECORD4_CODEC_VERSION}|${laneKeys.join(',')}`;
+    `${id}|${envId}|${stride}|${WALL_CODEC_VERSION}|${RECORD_CODEC_VERSION}|${laneKeys.join(',')}`;
   const memKey = `${dir}|${key}`;
 
   const memHit = lruGet(memKey);
@@ -464,7 +454,6 @@ function laneMeta(lane: RecordingEntry): RecordingMeta {
     envId: lane.envId,
     seed: lane.seed,
     actDim: lane.actDim,
-    recordVersion: lane.recordVersion,
   };
   if (lane.codec !== undefined) meta.codec = lane.codec;
   if (lane.codecVersion !== undefined) meta.codecVersion = lane.codecVersion;
@@ -575,44 +564,6 @@ class LaneSampler {
   }
 }
 
-function prepareLaneV4(
-  bytes: Uint8Array,
-  meta: RecordingMeta,
-): { desc: CodecDescriptor; chunks: readonly ChunkRecordV4[] } {
-  if (meta.recordVersion !== RECORD_V4_VERSION) {
-    throw new Record4ParseError(
-      `unsupported recordVersion ${meta.recordVersion} (this parser reads ${RECORD_V4_VERSION})`,
-    );
-  }
-  if (!isEnvId(meta.envId)) {
-    throw new Record4ParseError(`unknown envId ${JSON.stringify(meta.envId)}`);
-  }
-  if (!Number.isInteger(meta.seed) || meta.seed < 0) {
-    throw new Record4ParseError(`invalid seed ${String(meta.seed)}`);
-  }
-  if (meta.codecVersion !== undefined && meta.codecVersion !== RECORD4_CODEC_VERSION) {
-    throw new Record4ParseError(
-      `meta codecVersion ${meta.codecVersion} (this build implements ${RECORD4_CODEC_VERSION})`,
-    );
-  }
-  const scan = scanChunksV4(bytes, { verifyCrc: false });
-  const headerEnv = RECORD_V4_ENV_KINDS[scan.header.envKind];
-  if (headerEnv === undefined) {
-    throw new Record4ParseError(`file header envKind ${scan.header.envKind} is not a known env`);
-  }
-  if (headerEnv !== meta.envId) {
-    throw new Record4ParseError(
-      `file header envKind ${scan.header.envKind} (${headerEnv}) contradicts meta envId ${meta.envId}`,
-    );
-  }
-  const desc = codecForEnvKind(scan.header.envKind);
-  if (meta.codec !== undefined && meta.codec !== null && !codecMatches(desc, meta.codec)) {
-    throw new Record4ParseError(
-      `meta codec descriptor for ${meta.envId} does not match this build's codec table`,
-    );
-  }
-  return { desc, chunks: scan.chunks };
-}
 
 function yieldToLoop(): Promise<void> {
   return new Promise<void>((resolve) => {
@@ -620,14 +571,15 @@ function yieldToLoop(): Promise<void> {
   });
 }
 
-async function projectLaneV4(
+async function projectLaneEvents(
   lane: RecordingEntry,
   bytes: Uint8Array,
   meta: RecordingMeta,
   sampler: LaneSampler,
   caps: LaneCaps,
 ): Promise<WallChunkEvents> {
-  const { desc, chunks } = prepareLaneV4(bytes, meta);
+  const { desc, scan } = prepareLane(bytes, meta, { verifyCrc: false });
+  const chunks = scan.chunks;
   const ev: WallChunkEvents = {
     seed: lane.seed,
     stepStart: [],
@@ -706,17 +658,7 @@ async function projectLane(
 
   try {
     const bytes = new Uint8Array(await Bun.file(lane.actionsPath).arrayBuffer());
-    if (lane.recordVersion === 4) {
-      events = await projectLaneV4(lane, bytes, meta, sampler, caps);
-    } else {
-      const whole = bytes.byteLength - (bytes.byteLength % RECORD_BYTES);
-      const raw = parseActionsBin(bytes.subarray(0, whole), meta);
-      const rows = Math.min(raw.steps, caps.rows);
-      if (rows > 0) {
-        if (rows < raw.steps) sampler.truncated = true;
-        sampler.push(raw.data, 0, rows);
-      }
-    }
+    events = await projectLaneEvents(lane, bytes, meta, sampler, caps);
   } catch (err) {
     const head: WallLaneHeader = {
       seed: lane.seed,

@@ -4,22 +4,21 @@ import { join, sep } from 'node:path';
 import { ENV_IDS, isEnvId, type EnvId } from '@shared/envs';
 import type { RecordingMeta, RecordingRef } from '@shared/types';
 import {
-  RECORD_V3_BYTES_PER_STEP,
-  RECORD_V4_CHUNK_HEADER_BYTES,
-  RECORD_V4_CHUNK_MAGIC,
-  RECORD_V4_FILE_HEADER_BYTES,
-  RECORD_V4_FILE_MAGIC,
-  RECORD_V4_MAX_CHUNKS,
-  RECORD_VERSION_SERVABLE,
-} from './config';
+  CHUNK_HEADER_BYTES,
+  CHUNK_MAGIC,
+  FILE_HEADER_BYTES,
+  FILE_MAGIC,
+  RECORD_VERSION,
+} from '@sim/record';
 import { lstatOrNull, statOrNull, type FileStat } from './jsonl';
+
+const MAX_CHUNKS = 1_000_000;
 
 export interface RecordingEntry {
   envId: EnvId;
   seed: number;
   steps: number;
   actDim: number;
-  recordVersion: number;
   actionsPath: string;
   metaPath: string;
   bytes: number;
@@ -53,12 +52,11 @@ async function readLaneMeta(path: string): Promise<RecordingMeta | null> {
     const parsed: unknown = JSON.parse(await Bun.file(path).text());
     if (parsed === null || typeof parsed !== 'object') return null;
     const o = parsed as Record<string, unknown>;
-    if (typeof o['recordVersion'] !== 'number') return null;
+    if (o['recordVersion'] !== RECORD_VERSION) return null;
     const meta: RecordingMeta = {
       envId: typeof o['envId'] === 'string' ? o['envId'] : '',
       seed: typeof o['seed'] === 'number' ? o['seed'] : -1,
       actDim: typeof o['actDim'] === 'number' ? o['actDim'] : 0,
-      recordVersion: o['recordVersion'],
     };
     if (o['codec'] !== undefined) meta.codec = o['codec'];
     if (typeof o['codecVersion'] === 'number') meta.codecVersion = o['codecVersion'];
@@ -72,34 +70,34 @@ async function readLaneMeta(path: string): Promise<RecordingMeta | null> {
 }
 
 
-async function scanV4StepsUncached(path: string, size: number): Promise<number> {
-  if (size < RECORD_V4_FILE_HEADER_BYTES + RECORD_V4_CHUNK_HEADER_BYTES) return 0;
+async function scanStepsUncached(path: string, size: number): Promise<number> {
+  if (size < FILE_HEADER_BYTES + CHUNK_HEADER_BYTES) return 0;
   let handle: Awaited<ReturnType<typeof open>>;
   try {
     handle = await open(path, 'r');
   } catch {
     return 0;
   }
-  const header = Buffer.allocUnsafe(RECORD_V4_CHUNK_HEADER_BYTES);
+  const header = Buffer.allocUnsafe(CHUNK_HEADER_BYTES);
   try {
-    const first = await handle.read(header, 0, RECORD_V4_FILE_HEADER_BYTES, 0);
-    if (first.bytesRead < RECORD_V4_FILE_HEADER_BYTES) return 0;
-    if (header.readUInt32LE(0) !== RECORD_V4_FILE_MAGIC) return 0;
+    const first = await handle.read(header, 0, FILE_HEADER_BYTES, 0);
+    if (first.bytesRead < FILE_HEADER_BYTES) return 0;
+    if (header.readUInt32LE(0) !== FILE_MAGIC) return 0;
     if (header.readUInt32LE(4) !== 4) return 0;
 
     let steps = 0;
-    let offset = RECORD_V4_FILE_HEADER_BYTES;
-    for (let seen = 0; seen < RECORD_V4_MAX_CHUNKS; seen++) {
-      if (offset + RECORD_V4_CHUNK_HEADER_BYTES > size) break;
-      const got = await handle.read(header, 0, RECORD_V4_CHUNK_HEADER_BYTES, offset);
-      if (got.bytesRead < RECORD_V4_CHUNK_HEADER_BYTES) break;
-      if (header.readUInt32LE(0) !== RECORD_V4_CHUNK_MAGIC) break;
+    let offset = FILE_HEADER_BYTES;
+    for (let seen = 0; seen < MAX_CHUNKS; seen++) {
+      if (offset + CHUNK_HEADER_BYTES > size) break;
+      const got = await handle.read(header, 0, CHUNK_HEADER_BYTES, offset);
+      if (got.bytesRead < CHUNK_HEADER_BYTES) break;
+      if (header.readUInt32LE(0) !== CHUNK_MAGIC) break;
       const stepStart = header.readUInt32LE(4);
       const stepCount = header.readUInt32LE(8);
       const compBytes = header.readUInt32LE(16);
       if (stepCount === 0 || compBytes === 0) break;
       if (stepStart !== steps) break;
-      const next = offset + RECORD_V4_CHUNK_HEADER_BYTES + compBytes;
+      const next = offset + CHUNK_HEADER_BYTES + compBytes;
       if (next > size) break;
       steps += stepCount;
       offset = next;
@@ -112,21 +110,21 @@ async function scanV4StepsUncached(path: string, size: number): Promise<number> 
   }
 }
 
-const v4StepsMemo = new Map<string, { key: string; steps: number }>();
-const V4_STEPS_MEMO_MAX = 4096;
+const stepsMemo = new Map<string, { key: string; steps: number }>();
+const STEPS_MEMO_MAX = 4096;
 
-async function scanV4Steps(path: string, st: FileStat): Promise<number> {
+async function scanSteps(path: string, st: FileStat): Promise<number> {
   const key = `${Math.trunc(st.mtimeMs)}:${st.size}`;
-  const hit = v4StepsMemo.get(path);
+  const hit = stepsMemo.get(path);
   if (hit !== undefined && hit.key === key) return hit.steps;
-  const steps = await scanV4StepsUncached(path, st.size);
-  if (v4StepsMemo.size >= V4_STEPS_MEMO_MAX) v4StepsMemo.clear();
-  v4StepsMemo.set(path, { key, steps });
+  const steps = await scanStepsUncached(path, st.size);
+  if (stepsMemo.size >= STEPS_MEMO_MAX) stepsMemo.clear();
+  stepsMemo.set(path, { key, steps });
   return steps;
 }
 
-export function clearV4StepsCache(): void {
-  v4StepsMemo.clear();
+export function clearStepsCache(): void {
+  stepsMemo.clear();
 }
 
 async function envDirsOf(runDir: string): Promise<string[]> {
@@ -196,24 +194,20 @@ export async function scanRecordings(runDir: string, opts: ScanOptions = {}): Pr
       const metaStat = await lstatOrNull(metaPath);
       if (metaStat === null || metaStat.isSymbolicLink || !metaStat.isFile) continue;
       const laneMeta = await readLaneMeta(metaPath);
-      if (laneMeta === null || !RECORD_VERSION_SERVABLE.has(laneMeta.recordVersion)) continue;
+      if (laneMeta === null) continue;
       const st = await lstatOrNull(actionsPath);
       if (st === null || st.isSymbolicLink || !st.isFile) continue;
-
-      const v4 = laneMeta.recordVersion === 4;
-      if (st.size < (v4 ? RECORD_V4_FILE_HEADER_BYTES : RECORD_V3_BYTES_PER_STEP)) continue;
+      if (st.size < FILE_HEADER_BYTES) continue;
 
       let steps: number;
-      if (!v4) {
-        steps = Math.floor(st.size / RECORD_V3_BYTES_PER_STEP);
-      } else if (
+      if (
         typeof laneMeta.steps === 'number' &&
         Number.isSafeInteger(laneMeta.steps) &&
         laneMeta.steps > 0
       ) {
         steps = laneMeta.steps;
       } else {
-        steps = await scanV4Steps(actionsPath, st);
+        steps = await scanSteps(actionsPath, st);
       }
 
       out.push({
@@ -221,13 +215,12 @@ export async function scanRecordings(runDir: string, opts: ScanOptions = {}): Pr
         seed,
         steps,
         actDim: laneMeta.actDim,
-        recordVersion: laneMeta.recordVersion,
         actionsPath,
         metaPath,
         bytes: st.size,
-        ...(v4 && laneMeta.codec !== undefined ? { codec: laneMeta.codec } : {}),
-        ...(v4 && laneMeta.codecVersion !== undefined ? { codecVersion: laneMeta.codecVersion } : {}),
-        ...(v4 && laneMeta.chunks !== undefined ? { chunks: laneMeta.chunks } : {}),
+        ...(laneMeta.codec !== undefined ? { codec: laneMeta.codec } : {}),
+        ...(laneMeta.codecVersion !== undefined ? { codecVersion: laneMeta.codecVersion } : {}),
+        ...(laneMeta.chunks !== undefined ? { chunks: laneMeta.chunks } : {}),
       });
     }
   }

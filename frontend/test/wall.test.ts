@@ -2,7 +2,7 @@
 
 import { describe, expect, test } from 'bun:test';
 
-import type { FleetColumnar, RecordingRef, RolesResponse, RunIndexEntry, SummaryPolicyResult } from '@shared/types';
+import type { FleetColumnar, RecordingRef, RunIndexEntry, SummaryPolicyResult } from '@shared/types';
 import { ENVS } from '@shared/envs';
 import { makePlaybackClock } from '@kit/harness';
 import { TOKENS } from '@kit/tokens';
@@ -74,7 +74,6 @@ function entry(id: string, overrides: Partial<RunIndexEntry> = {}): RunIndexEntr
   };
 }
 
-const NO_ROLES: RolesResponse = { bestKernel: null, candidate: null, parent: null, featured: null };
 
 function recording(envId: RecordingRef['envId'], seed: number): RecordingRef {
   return { envId, seed, steps: 100_000 };
@@ -93,23 +92,20 @@ describe('featured-run resolution', () => {
     entry('no-recordings', { startedAt: '2026-08-05T00:00:00Z', hasRecordings: false }),
   ];
 
-  test('an explicit ?run= wins over every role, recordings or not', () => {
-    const roles: RolesResponse = { ...NO_ROLES, featured: 'newest-complete', bestKernel: 'newest-complete' };
-    expect(resolveFeaturedRun(entries, roles, 'no-recordings')).toEqual({
+  test('an explicit ?run= wins over the keeper, recordings or not', () => {
+    expect(resolveFeaturedRun(entries, 'newest-complete', 'no-recordings')).toEqual({
       runId: 'no-recordings',
       source: 'param',
     });
   });
 
   test('an unknown ?run= falls through instead of showing a run that is not there', () => {
-    expect(resolveFeaturedRun(entries, NO_ROLES, 'typo-run').runId).toBe('newest-complete');
+    expect(resolveFeaturedRun(entries, null, 'typo-run').runId).toBe('newest-complete');
   });
 
-  test('bestKernel is used only when it has recordings', () => {
-    const withRecs: RolesResponse = { ...NO_ROLES, bestKernel: 'older-with-recordings' };
-    expect(resolveFeaturedRun(entries, withRecs)).toEqual({ runId: 'older-with-recordings', source: 'bestKernel' });
-    const without: RolesResponse = { ...NO_ROLES, bestKernel: 'no-recordings' };
-    expect(resolveFeaturedRun(entries, without)).toEqual({ runId: 'newest-complete', source: 'newest' });
+  test('the keeper is used only when it has recordings', () => {
+    expect(resolveFeaturedRun(entries, 'older-with-recordings')).toEqual({ runId: 'older-with-recordings', source: 'keeper' });
+    expect(resolveFeaturedRun(entries, 'no-recordings')).toEqual({ runId: 'newest-complete', source: 'newest' });
   });
 
   test('otherwise the newest COMPLETE run with recordings, not the newest overall', () => {
@@ -122,7 +118,7 @@ describe('featured-run resolution', () => {
   });
 
   test('nothing playable and nothing asked for is the honest empty state', () => {
-    expect(resolveFeaturedRun([entry('a', { hasRecordings: false })], NO_ROLES)).toEqual({
+    expect(resolveFeaturedRun([entry('a', { hasRecordings: false })], null)).toEqual({
       runId: null,
       source: null,
     });

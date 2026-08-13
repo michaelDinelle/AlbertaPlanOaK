@@ -54,13 +54,5 @@ export const FLEET_LRU_MAX = 4;
 export const FLEET_COMPUTE_CONCURRENCY = 2;
 export const FLEET_CACHE_MAX_FILES = 64;
 export const FLEET_CACHE_MAX_BYTES = 128 * 1024 * 1024;
-export const RECORD_V3_BYTES_PER_STEP = 64;
-export const RECORD_VERSION_SERVABLE: ReadonlySet<number> = new Set([3, 4]);
 
-
-export const RECORD_V4_FILE_HEADER_BYTES = 16;
-export const RECORD_V4_CHUNK_HEADER_BYTES = 32;
-export const RECORD_V4_FILE_MAGIC = 0x344b414f;
-export const RECORD_V4_CHUNK_MAGIC = 0x344b4843;
-export const RECORD_V4_MAX_CHUNKS = 1_000_000;
 export const MAX_FLEET_FIELDS = 24;

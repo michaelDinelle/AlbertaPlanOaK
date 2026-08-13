@@ -7,8 +7,8 @@ import type { EnvId } from '@shared/envs';
 import { ENV_IDS } from '@shared/envs';
 import { DecodeError, decodeRecording, eventTimeline, walkRecording } from '@sim/decode';
 import { NO_EVENTS } from '@sim/events';
-import { RECORD_BYTES, RECORD_FLOATS, RecordParseError, parseActionsBin, rawRecordingFromFloats }
-  from '@sim/record';
+import { RECORD_BYTES, RECORD_FLOATS, RecordParseError } from '@sim/record';
+import { parseRawTrace, rawRecordingFromFloats } from './helpers/rawTrace';
 import { decoderFor } from '@sim/registry';
 import type { EnvDecoder, EnvFrame, RawRecording, SimEvent } from '@sim/types';
 
@@ -31,7 +31,6 @@ interface TraceDoc {
   version: number;
   envId: EnvId;
   seed: number;
-  recordVersion: number;
   kind: string;
   bin: string;
   windowStart: number;
@@ -55,12 +54,7 @@ function loadDoc(name: string): TraceDoc {
 function loadRaw(doc: TraceDoc): RawRecording {
   const buf = readFileSync(new URL(`./fixtures/traces/${doc.bin}`, import.meta.url));
   const ab = buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength) as ArrayBuffer;
-  return parseActionsBin(ab, {
-    envId: doc.envId,
-    seed: doc.seed,
-    actDim: 6,
-    recordVersion: doc.recordVersion,
-  });
+  return parseRawTrace(ab, { envId: doc.envId, seed: doc.seed });
 }
 
 function same(a: number, b: number): boolean {
@@ -338,8 +332,8 @@ describe('decode driver threads hidden replay state', () => {
 });
 
 
-describe('parseActionsBin accepts buffer VIEWS, not just bare ArrayBuffers', () => {
-  const META = { envId: 'CartPole-cont-v0', seed: 48, actDim: 6, recordVersion: 3 };
+describe('parseRawTrace accepts buffer VIEWS, not just bare ArrayBuffers', () => {
+  const META = { envId: 'CartPole-cont-v0', seed: 48 };
 
   function reference(): Float32Array {
     const doc = loadDoc('CartPole-cont-v0');
@@ -349,7 +343,7 @@ describe('parseActionsBin accepts buffer VIEWS, not just bare ArrayBuffers', () 
   test('a readFileSync Buffer decodes to the same floats as its slice', () => {
     const doc = loadDoc('CartPole-cont-v0');
     const b = readFileSync(new URL(`./fixtures/traces/${doc.bin}`, import.meta.url));
-    const pooled = parseActionsBin(b, META);
+    const pooled = parseRawTrace(b, META);
     const want = reference();
     expect(pooled.steps).toBe(doc.steps);
     expect(pooled.data.length).toBe(want.length);
@@ -366,7 +360,7 @@ describe('parseActionsBin accepts buffer VIEWS, not just bare ArrayBuffers', () 
         new Uint8Array(want.buffer, want.byteOffset, bytes),
       );
       const view = new Uint8Array(padded, pad, bytes);
-      const got = parseActionsBin(view, META);
+      const got = parseRawTrace(view, META);
       expect({ pad, steps: got.steps }).toEqual({ pad, steps: want.length / RECORD_FLOATS });
       expect({ pad, data: Array.from(got.data) }).toEqual({ pad, data: Array.from(want) });
     }
@@ -377,8 +371,8 @@ describe('parseActionsBin accepts buffer VIEWS, not just bare ArrayBuffers', () 
     const bytes = want.length * 4;
     const padded = new ArrayBuffer(16 + bytes);
     new Uint8Array(padded, 16, bytes).set(new Uint8Array(want.buffer, want.byteOffset, bytes));
-    const asDataView = parseActionsBin(new DataView(padded, 16, bytes), META);
-    const asF32 = parseActionsBin(new Float32Array(padded, 16, want.length), META);
+    const asDataView = parseRawTrace(new DataView(padded, 16, bytes), META);
+    const asF32 = parseRawTrace(new Float32Array(padded, 16, want.length), META);
     expect(Array.from(asDataView.data)).toEqual(Array.from(want));
     expect(Array.from(asF32.data)).toEqual(Array.from(want));
   });
@@ -386,7 +380,7 @@ describe('parseActionsBin accepts buffer VIEWS, not just bare ArrayBuffers', () 
   test('the row-alignment check uses the VIEW length, not the whole buffer', () => {
     const padded = new ArrayBuffer(RECORD_BYTES * 4);
     const view = new Uint8Array(padded, 0, RECORD_BYTES * 3 + 8);
-    expect(() => parseActionsBin(view, META)).toThrow(RecordParseError);
+    expect(() => parseRawTrace(view, META)).toThrow(RecordParseError);
   });
 });
 
@@ -463,7 +457,7 @@ describe('the empty event list is one shared frozen singleton', () => {
         readFileSync(new URL(`./fixtures/traces/${envId}.json`, import.meta.url), 'utf8'),
       ) as { seed: number };
       const b = readFileSync(new URL(`./fixtures/traces/${envId}.bin`, import.meta.url));
-      const raw = parseActionsBin(b, { envId, seed: doc.seed, actDim: 6, recordVersion: 3 });
+      const raw = parseRawTrace(b, { envId, seed: doc.seed });
       const dec = decodeRecording(raw, decoderFor(envId));
       let quiet = 0;
       for (let i = 0; i < dec.events.length; i++) {

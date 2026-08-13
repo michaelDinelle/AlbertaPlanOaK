@@ -4,14 +4,10 @@ import type { RecordingMeta, RecordingRef, RunIndexEntry } from '@shared/types';
 import { DEFAULT_HARNESS_RUN, type HarnessSource } from '@kit/harness';
 import type { QualityTier } from '@kit/types';
 import { eventTimeline, lensRecording, type RecordingLens } from '@sim/decode';
-import { RECORD_BYTES, parseActionsBin } from '@sim/record';
 import {
-  FILE_HEADER_BYTES as RECORD_V4_HEADER_BYTES,
-  RECORD_V4_VERSION,
-  chunkTableFromMeta,
-  parseActionsBinV4,
-  planPrefixV4,
-} from '@sim/record4';
+  FILE_HEADER_BYTES as RECORD_HEADER_BYTES,
+  parseActionsBin,
+} from '@sim/record';
 import { decoders } from '@sim/registry';
 import type { DecodedRecording, EnvDecoder, SimEvent } from '@sim/types';
 import { sortRuns } from '../state';
@@ -389,7 +385,7 @@ function joinBytes(chunks: readonly Uint8Array[], received: number, align: numbe
   return out;
 }
 
-export function expectedBytes(headers: Headers, fallbackSteps = 0): number {
+export function expectedBytes(headers: Headers): number {
   const range = headers.get('content-range');
   if (range) {
     const slash = range.lastIndexOf('/');
@@ -398,7 +394,7 @@ export function expectedBytes(headers: Headers, fallbackSteps = 0): number {
   }
   const length = Number(headers.get('content-length'));
   if (Number.isFinite(length) && length > 0) return length;
-  return fallbackSteps > 0 ? fallbackSteps * RECORD_BYTES : 0;
+  return 0;
 }
 
 export async function loadTheaterRecording(options: LoadRecordingOptions): Promise<TheaterRecording> {
@@ -422,20 +418,17 @@ export async function loadTheaterRecording(options: LoadRecordingOptions): Promi
   const meta = (await metaRes.json()) as RecordingMeta;
 
   const expected = Math.max(0, Math.floor(options.expectedSteps ?? 0));
-  const isV4 = meta.recordVersion === RECORD_V4_VERSION;
-  const wantBytes = isV4 ? 0 : Math.max(0, expected) * RECORD_BYTES;
 
-  report(makeProgress('download', 0, wantBytes));
+  report(makeProgress('download', 0, 0));
   const binRes = await doFetch(`${base}/actions.bin`, {
-    ...(wantBytes > 0 ? { headers: { range: `bytes=0-${wantBytes - 1}` } } : {}),
     ...(signal ? { signal } : {}),
   });
   if (!binRes.ok && binRes.status !== 206) {
     throw new TheaterLoadError(`${binRes.status} — actions.bin unavailable for ${envId} seed ${seed}`);
   }
 
-  const total = expectedBytes(binRes.headers, isV4 ? 0 : expected) || wantBytes;
-  const align = isV4 ? 1 : RECORD_BYTES;
+  const total = expectedBytes(binRes.headers);
+  const align = 1;
   let bytes: Uint8Array;
   const body = binRes.body;
   if (body && typeof body.getReader === 'function') {
@@ -463,12 +456,12 @@ export async function loadTheaterRecording(options: LoadRecordingOptions): Promi
     report(makeProgress('download', whole.byteLength, total || whole.byteLength));
   }
 
-  if (bytes.byteLength < (isV4 ? RECORD_V4_HEADER_BYTES : RECORD_BYTES)) {
+  if (bytes.byteLength < RECORD_HEADER_BYTES) {
     throw new TheaterLoadError(`actions.bin for ${envId} seed ${seed} is empty`);
   }
 
   report(makeProgress('decode', bytes.byteLength, total));
-  const raw = isV4 ? await parseActionsBinV4(bytes, meta) : parseActionsBin(bytes, meta);
+  const raw = await parseActionsBin(bytes, meta);
   if (raw.steps === 0) {
     throw new TheaterLoadError(`actions.bin for ${envId} seed ${seed} is empty`);
   }

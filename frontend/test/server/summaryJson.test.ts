@@ -139,13 +139,27 @@ describe('buildRunDetail — why the summary is missing', () => {
     expect(detail.summaryError).toBe('unreadable');
   });
 
-  it('a good summary reports no error and still adapts to v2', async () => {
+  it('a legacy summary reads as missing — no adaptation, no error', async () => {
     const detail = await withDir(async (dir) => {
       writeFileSync(join(dir, 'summary.json'), JSON.stringify({ results: [{ policy: 'oak', lanes: 4 }] }));
       return buildRunDetail(resolved(dir), []);
     });
     expect(detail.summaryError).toBeNull();
+    expect(detail.summary).toBeNull();
+  });
+
+  it('a current summary passes through whole', async () => {
+    const detail = await withDir(async (dir) => {
+      writeFileSync(
+        join(dir, 'summary.json'),
+        JSON.stringify({
+          envSlices: { 'Chain-cont-v0': [{ policy: 'oak', recentRewardRateIQM: 0.05, seeds: 4 }] },
+        }),
+      );
+      return buildRunDetail(resolved(dir), []);
+    });
+    expect(detail.summaryError).toBeNull();
     expect(detail.summary).not.toBeNull();
-    expect((detail.summary?.results ?? [])[0]?.seeds).toBe(4);
+    expect(detail.summary?.envSlices?.['Chain-cont-v0']?.[0]?.seeds).toBe(4);
   });
 });

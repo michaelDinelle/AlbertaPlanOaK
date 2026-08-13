@@ -3,8 +3,8 @@
 import { describe, expect, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import { decodeRecording, lensRecording, NO_EVENTS, LENS_BLOCK } from '../src/sim/decode';
-import { parseActionsBin } from '../src/sim/record';
 import { decoders } from '../src/sim/registry';
+import { parseRawTrace } from './helpers/rawTrace';
 import type { RecordingMeta } from '@shared/types';
 
 const ROOT = '/Users/studio/OaKMeta/.oak-benchmarks/frontend-demo-16env-20260803';
@@ -13,7 +13,7 @@ function load(envId: string, seed: number) {
   const dir = `${ROOT}/${envId}/seed${seed}`;
   const meta = JSON.parse(readFileSync(`${dir}/meta.json`, 'utf8')) as RecordingMeta;
   const buf = readFileSync(`${dir}/actions.bin`);
-  const raw = parseActionsBin(buf, meta);
+  const raw = parseRawTrace(buf, meta);
   const decoder = decoders[meta.envId as keyof typeof decoders]!;
   return { raw, decoder };
 }

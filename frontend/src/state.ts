@@ -3,7 +3,7 @@ import { api } from './api';
 import type {
   AggregateRow,
   FleetColumnar,
-  RolesResponse,
+  KeeperResponse,
   RunDetail,
   RunIndexEntry,
   RunMeta,
@@ -95,7 +95,7 @@ export function createResource<T>(
 export const RUN_INDEX_TTL_MS = 60_000;
 
 export const runIndex: Resource<RunIndexEntry[]> = createResource(() => api.runs(), RUN_INDEX_TTL_MS);
-export const roles: Resource<RolesResponse> = createResource(() => api.roles(), RUN_INDEX_TTL_MS);
+export const keeper: Resource<KeeperResponse> = createResource(() => api.keeper(), RUN_INDEX_TTL_MS);
 
 const detailCache = new Map<string, Promise<RunDetail>>();
 
@@ -274,7 +274,7 @@ export interface GalleryFilter {
   completeOnly: boolean;
   recordingsOnly: boolean;
   inFlightOnly: boolean;
-  rolesOnly: boolean;
+  keeperOnly: boolean;
 }
 
 export const EMPTY_FILTER: GalleryFilter = {
@@ -283,14 +283,14 @@ export const EMPTY_FILTER: GalleryFilter = {
   completeOnly: false,
   recordingsOnly: false,
   inFlightOnly: false,
-  rolesOnly: false,
+  keeperOnly: false,
 };
 
 export function matchesFilter(entry: RunIndexEntry, filter: GalleryFilter): boolean {
   if (filter.completeOnly && !entry.complete) return false;
   if (filter.recordingsOnly && !entry.hasRecordings) return false;
   if (filter.inFlightOnly && !entry.inFlight) return false;
-  if (filter.rolesOnly && entry.role === null) return false;
+  if (filter.keeperOnly && entry.role === null) return false;
   if (filter.envId && !entry.envIds.includes(filter.envId)) return false;
   const search = filter.search.trim().toLowerCase();
   if (search) {
@@ -302,14 +302,10 @@ export function matchesFilter(entry: RunIndexEntry, filter: GalleryFilter): bool
   return true;
 }
 
-const ROLE_RANK: Record<string, number> = { bestKernel: 0, candidate: 1, parent: 2 };
-
 export function sortRuns(entries: readonly RunIndexEntry[]): RunIndexEntry[] {
   return [...entries].sort((a, b) => {
     if (a.inFlight !== b.inFlight) return a.inFlight ? -1 : 1;
-    const ra = a.role ? ROLE_RANK[a.role] ?? 9 : 9;
-    const rb = b.role ? ROLE_RANK[b.role] ?? 9 : 9;
-    if (ra !== rb) return ra - rb;
+    if (a.role !== b.role) return a.role === 'keeper' ? -1 : 1;
     const ta = a.startedAt ? Date.parse(a.startedAt) : 0;
     const tb = b.startedAt ? Date.parse(b.startedAt) : 0;
     if (tb !== ta) return tb - ta;

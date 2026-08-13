@@ -291,28 +291,28 @@ describe('gallery filtering and ordering', () => {
     expect(matchesFilter(plain, EMPTY_FILTER)).toBe(true);
     expect(matchesFilter(plain, { ...EMPTY_FILTER, recordingsOnly: true })).toBe(false);
     expect(matchesFilter(plain, { ...EMPTY_FILTER, inFlightOnly: true })).toBe(false);
-    expect(matchesFilter(plain, { ...EMPTY_FILTER, rolesOnly: true })).toBe(false);
+    expect(matchesFilter(plain, { ...EMPTY_FILTER, keeperOnly: true })).toBe(false);
     expect(matchesFilter(entry({ complete: false }), { ...EMPTY_FILTER, completeOnly: true })).toBe(false);
     expect(matchesFilter(plain, { ...EMPTY_FILTER, envId: 'DeepSea-cont-v0' })).toBe(false);
     expect(matchesFilter(plain, { ...EMPTY_FILTER, envId: 'HalfCheetah-v4' })).toBe(true);
   });
 
   test('search is an AND over whitespace-separated terms', () => {
-    const best = entry({ id: 'p93-tierL-20260721', role: 'bestKernel', ablationLabel: 'model-to-keyboard' });
-    expect(matchesFilter(best, { ...EMPTY_FILTER, search: 'p93 bestkernel' })).toBe(true);
+    const best = entry({ id: 'p93-tierL-20260721', role: 'keeper', ablationLabel: 'model-to-keyboard' });
+    expect(matchesFilter(best, { ...EMPTY_FILTER, search: 'p93 keeper' })).toBe(true);
     expect(matchesFilter(best, { ...EMPTY_FILTER, search: 'p93 planning' })).toBe(false);
     expect(matchesFilter(best, { ...EMPTY_FILTER, search: '  TIERL ' })).toBe(true);
   });
 
-  test('running first, then bestKernel/candidate/parent, then newest', () => {
+  test('running first, then keeper, then newest', () => {
     const rows = [
       entry({ id: 'old', startedAt: '2026-01-01T00:00:00Z' }),
-      entry({ id: 'best', role: 'bestKernel', startedAt: '2026-02-01T00:00:00Z' }),
+      entry({ id: 'best', role: 'keeper', startedAt: '2026-02-01T00:00:00Z' }),
       entry({ id: 'new', startedAt: '2026-08-01T00:00:00Z' }),
       entry({ id: 'live', inFlight: true, startedAt: '2025-01-01T00:00:00Z' }),
-      entry({ id: 'parent', role: 'parent', startedAt: '2026-02-01T00:00:00Z' }),
+      entry({ id: 'peer', startedAt: '2026-02-01T00:00:00Z' }),
     ];
-    expect(sortRuns(rows).map((r) => r.id)).toEqual(['live', 'best', 'parent', 'new', 'old']);
+    expect(sortRuns(rows).map((r) => r.id)).toEqual(['live', 'best', 'new', 'peer', 'old']);
   });
 
   test('env filter options follow the canonical env order', () => {

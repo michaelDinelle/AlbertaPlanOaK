@@ -11,8 +11,7 @@ import type {
 } from '@shared/types';
 import { FLEET_TAIL_BYTES, INDEX_TTL_MS, IN_FLIGHT_MS } from './config';
 import { parseJsonl, parseJsonlDetailed, readTail, statOrNull } from './jsonl';
-import { roleMap, readRoles, type RunRole } from './roles';
-import { adaptSummary } from './summaryAdapter';
+import { readKeeper } from './keeper';
 import {
   recordingsSignature,
   scanRecordings,
@@ -185,7 +184,7 @@ export class RunIndex {
       dirNames = [];
     }
 
-    const roles = roleMap(await readRoles(this.benchRoot));
+    const keeper = await readKeeper(this.benchRoot);
     const now = Date.now();
     const nextRuns = new Map<string, ResolvedRun>();
     const nextCache = new Map<string, CachedRun>();
@@ -250,7 +249,7 @@ export class RunIndex {
         nextCache.set(id, derived);
         const inFlight =
           !derived.complete && fleetMtime > 0 && now - fleetMtime < IN_FLIGHT_MS;
-        const role: RunRole | null = roles.get(id) ?? null;
+        const role: RunIndexEntry['role'] = id === keeper ? 'keeper' : null;
         nextRuns.set(id, {
           id,
           dir,
@@ -372,9 +371,21 @@ async function readTextOrNull(path: string): Promise<string | null> {
   }
 }
 
+function currentSummary(raw: RunSummary | null): RunSummary | null {
+  if (raw === null || typeof raw !== 'object') return null;
+  const slices = (raw as { envSlices?: unknown }).envSlices;
+  if (slices === null || typeof slices !== 'object') return null;
+  for (const list of Object.values(slices)) {
+    const first: unknown = Array.isArray(list) ? list[0] : undefined;
+    if (first !== null && typeof first === 'object' && 'recentRewardRateIQM' in first) return raw;
+    return null;
+  }
+  return null;
+}
+
 export async function buildRunDetail(run: ResolvedRun, recs: RecordingEntry[]): Promise<RunDetail> {
   const summaryRead = await readJsonFile<RunSummary>(join(run.dir, 'summary.json'));
-  const summary = adaptSummary(summaryRead.value);
+  const summary = currentSummary(summaryRead.value);
   const summaryError = summaryRead.error === 'unreadable' ? 'unreadable' : null;
 
   const aggText = await readTextOrNull(join(run.dir, 'aggregate.jsonl'));

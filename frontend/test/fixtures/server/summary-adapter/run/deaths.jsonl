@@ -1,1 +1,0 @@
-{"detector": "paramExplosion", "lane": 5, "lastGoodRewardRate": 0.01, "nfByPhase": {"encode": 0, "learn": 0, "plan": 3, "tdPsi": 0}, "paramAbsMax": 1005.0, "policy": "oak", "rewardSumAtDeath": 111.103326, "rhoAtDeath": 0.004, "seed": 5, "step": 600}

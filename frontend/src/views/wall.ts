@@ -2,8 +2,8 @@
 import type { ViewHandle, ViewMount } from '../router';
 import type {
   FleetColumnar,
+  KeeperResponse,
   RecordingRef,
-  RolesResponse,
   RunDetail,
   RunIndexEntry,
   RunMeta,
@@ -42,7 +42,7 @@ import {
   loadRunDetail,
   policiesIn,
   primaryResult,
-  roles as rolesResource,
+  keeper as keeperResource,
   runIndex,
   sortRuns,
   windowMidpoints,
@@ -148,7 +148,7 @@ export function urlPosition(clockPosition: number | null, pending: number): numb
 }
 
 
-export type FeaturedSource = 'param' | 'bestKernel' | 'newest' | null;
+export type FeaturedSource = 'param' | 'keeper' | 'newest' | null;
 
 export interface FeaturedPick {
   runId: string | null;
@@ -157,7 +157,7 @@ export interface FeaturedPick {
 
 export function resolveFeaturedRun(
   entries: readonly RunIndexEntry[],
-  roles: RolesResponse | null,
+  keeper: string | null,
   requested?: string,
 ): FeaturedPick {
   const byId = new Map<string, RunIndexEntry>();
@@ -166,8 +166,7 @@ export function resolveFeaturedRun(
   if (requested !== undefined && byId.has(requested)) return { runId: requested, source: 'param' };
 
 
-  const best = roles?.bestKernel ?? null;
-  if (best !== null && byId.get(best)?.hasRecordings === true) return { runId: best, source: 'bestKernel' };
+  if (keeper !== null && byId.get(keeper)?.hasRecordings === true) return { runId: keeper, source: 'keeper' };
 
   const started = (entry: RunIndexEntry): number => (entry.startedAt ? Date.parse(entry.startedAt) : 0);
   const newest = (list: readonly RunIndexEntry[]): RunIndexEntry | null =>
@@ -668,7 +667,7 @@ export const mount: ViewMount = (host) => {
         const row = el('button', { class: 'wall-picker-row', type: 'button' }, [
           entry.inFlight ? el('span', { class: 'live-pip' }) : null,
           el('span', { class: 'wall-picker-id', text: entry.id }),
-          entry.role === 'bestKernel' ? badge('best kernel', 'keeper') : null,
+          entry.role === 'keeper' ? badge('keeper', 'keeper') : null,
           entry.hasRecordings ? badge('recordings', 'quiet') : null,
           entry.complete ? null : badge('incomplete', 'warn'),
           el('span', { class: 'wall-picker-meta', text: `${entry.envIds.length} envs · ${formatStep(entry.steps)}` }),
@@ -1805,7 +1804,7 @@ export const mount: ViewMount = (host) => {
     runMeta.textContent = `${runScheduleLine(next.meta)}${ago === '—' ? '' : ` · ${ago}`}`;
     const ablation = next.meta.ablationLabel ?? 'none';
     runBadges.replaceChildren(
-      ...(pick.source === 'bestKernel' ? [badge('best kernel', 'keeper', 'The current promoted best kernel')] : []),
+      ...(pick.source === 'keeper' ? [badge('keeper', 'keeper', 'The current promoted keeper')] : []),
       ...(ablation !== 'none' ? [badge(`ablate ${ablation}`, 'warn', 'OAK_ABLATE for this run')] : []),
       ...(next.recordings.length === 0 ? [badge('no recordings', 'warn', 'Nothing on this run can be replayed')] : []),
       ...(result?.complete === false ? [badge('incomplete', 'warn', 'Did not reach its declared horizon')] : []),
@@ -1845,10 +1844,10 @@ export const mount: ViewMount = (host) => {
   }
 
   function start(force: boolean): void {
-    Promise.all([runIndex.load(force), rolesResource.load(force).catch(() => null)]).then(
-      ([entries, roles]) => {
+    Promise.all([runIndex.load(force), keeperResource.load(force).catch(() => null)]).then(
+      ([entries, keeperDoc]) => {
         if (destroyed) return;
-        const pick = resolveFeaturedRun(entries, roles, query.run);
+        const pick = resolveFeaturedRun(entries, keeperDoc?.keeper ?? null, query.run);
         if (pick.runId === null) {
           status.replaceChildren(
             emptyState(

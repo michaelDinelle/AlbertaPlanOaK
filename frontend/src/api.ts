@@ -3,9 +3,9 @@ import type {
   AggregateRow,
   CurvesResponse,
   FleetColumnar,
+  KeeperResponse,
   LiveHello,
   LiveStatus,
-  RolesResponse,
   RunDetail,
   RunIndexEntry,
   WallResponse,
@@ -110,8 +110,8 @@ export const api = {
     );
   },
 
-  roles(options?: RequestOptions): Promise<RolesResponse> {
-    return getJson<RolesResponse>(apiUrl('/roles'), options);
+  keeper(options?: RequestOptions): Promise<KeeperResponse> {
+    return getJson<KeeperResponse>(apiUrl('/keeper'), options);
   },
 };
 

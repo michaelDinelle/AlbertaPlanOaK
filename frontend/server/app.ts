@@ -1,6 +1,6 @@
 
 import { normalize, resolve, sep } from 'node:path';
-import type { RolesResponse } from '@shared/types';
+import type { KeeperResponse } from '@shared/types';
 import {
   DIST_DIR,
   HOSTNAME,
@@ -16,7 +16,7 @@ import { statOrNull } from './jsonl';
 import { createLiveResponse } from './live';
 import { findRecording } from './recordings';
 import { RunIndex, buildRunDetail } from './runIndex';
-import { readRoles } from './roles';
+import { readKeeper } from './keeper';
 import { deriveWall, parseWallRequest, wallCacheFor } from './wall';
 
 export interface AppOptions {
@@ -161,9 +161,9 @@ export function createApp(opts: AppOptions = {}): App {
       return json({ ok: true, benchRoot, production });
     }
 
-    if (head === 'roles' && segs.length === 2) {
-      const roles: RolesResponse = await readRoles(benchRoot);
-      return json(roles);
+    if (head === 'keeper' && segs.length === 2) {
+      const keeper: KeeperResponse = { keeper: await readKeeper(benchRoot) };
+      return json(keeper);
     }
 
     if (head === 'floors' && segs.length === 2) {
@@ -264,7 +264,6 @@ export function createApp(opts: AppOptions = {}): App {
         seed: rec.seed,
         steps: rec.steps,
         actDim: rec.actDim,
-        recordVersion: rec.recordVersion,
         bytes: rec.bytes,
         ...(rec.codec !== undefined ? { codec: rec.codec } : {}),
         ...(rec.codecVersion !== undefined ? { codecVersion: rec.codecVersion } : {}),

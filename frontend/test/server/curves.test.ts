@@ -1,7 +1,7 @@
 /// <reference types="bun" />
 
 import { afterAll, beforeAll, describe, expect, it } from 'bun:test';
-import { existsSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { mkdtemp, mkdir, readdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
@@ -25,9 +25,13 @@ import {
 const HERE = dirname(fileURLToPath(import.meta.url));
 const REAL_BENCH = resolve(HERE, '..', '..', '..', '.oak-benchmarks');
 const DEMO_ID = 'frontend-demo-16env-20260805';
-const KEEPER_ID = 'tape-reference-tierL-20260805';
+const FIXTURE_ID = 'tape-reference-tierL-20260805';
+const KEEPER_ID = existsSync(join(REAL_BENCH, '..', 'keeper'))
+  ? readFileSync(join(REAL_BENCH, '..', 'keeper'), 'utf8').trim()
+  : '';
 const demoPresent = existsSync(join(REAL_BENCH, DEMO_ID, 'fleet.jsonl'));
-const keeperPresent = existsSync(join(REAL_BENCH, KEEPER_ID, 'metrics.oak.oakt'));
+const fixturePresent = existsSync(join(REAL_BENCH, FIXTURE_ID, 'metrics.oak.oakt'));
+const keeperPresent = KEEPER_ID.length > 0 && existsSync(join(REAL_BENCH, KEEPER_ID, 'metrics.oak.oakt'));
 
 const ENV_A = 'HalfCheetah-v4';
 const ENV_B = 'FourRooms-cont-v0';
@@ -412,7 +416,7 @@ describe('curves against the real bench roots', () => {
   let base = '';
 
   beforeAll(() => {
-    if (!demoPresent && !keeperPresent) return;
+    if (!demoPresent && !keeperPresent && !fixturePresent) return;
     const app = createApp({ benchRoot: REAL_BENCH, cacheFile: null, fleetCacheDir: null, ttlMs: 0 });
     server = Bun.serve({ hostname: '127.0.0.1', port: 0, fetch: app.fetch });
     base = `http://127.0.0.1:${server.port}`;
@@ -462,9 +466,9 @@ describe('curves against the real bench roots', () => {
     expect(Number.isFinite(last ?? Number.NaN)).toBe(true);
   }, 60000);
 
-  it.skipIf(!keeperPresent)('reports the same statistics numpy does for the keeper', async () => {
+  it.skipIf(!fixturePresent)('reports the same statistics numpy does for the frozen fixture', async () => {
     const cheetah = (await (
-      await fetch(`${base}/api/runs/${KEEPER_ID}/curves?envId=HalfCheetah-v4`)
+      await fetch(`${base}/api/runs/${FIXTURE_ID}/curves?envId=HalfCheetah-v4`)
     ).json()) as CurvesResponse;
     expect(cheetah.steps.length).toBe(256);
     expect(cheetah.steps[0]).toBe(3150);

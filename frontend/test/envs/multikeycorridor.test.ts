@@ -5,7 +5,8 @@ import { readFileSync } from 'node:fs';
 
 import type { EnvId } from '@shared/envs';
 import { decodeRecording, walkRecording } from '@sim/decode';
-import { RECORD_FLOATS, parseActionsBin } from '@sim/record';
+import { RECORD_FLOATS } from '@sim/record';
+import { parseRawTrace } from '../helpers/rawTrace';
 import type { DecodedRecording, GridCell, RawRecording } from '@sim/types';
 import {
   MKC_GOAL,
@@ -49,7 +50,7 @@ const MKC_ENV = 'MultiKeyCorridor-cont-v0' as EnvId;
 
 function mkcRaw(): RawRecording {
   const b = readFileSync(fixtureUrl(`traces/${MKC_ENV}.bin`));
-  const raw = parseActionsBin(b, { envId: MKC_ENV, seed: 80, actDim: 6, recordVersion: 3 });
+  const raw = parseRawTrace(b, { envId: MKC_ENV, seed: 80 });
   return { ...raw, data: Float32Array.from(raw.data) };
 }
 
@@ -147,7 +148,7 @@ describe('MultiKeyCorridor decoder', () => {
     const b = readFileSync(fixtureUrl(`traces/${envId}.bin`));
     const buf = b.buffer.slice(b.byteOffset, b.byteOffset + b.byteLength) as ArrayBuffer;
     expect(buf.byteLength).toBe(200 * RECORD_FLOATS * 4);
-    const raw = parseActionsBin(buf, { envId, seed: 80, actDim: 6, recordVersion: 3 });
+    const raw = parseRawTrace(buf, { envId, seed: 80 });
     const dec = decodeRecording(raw, multiKeyCorridorDecoder);
     expect(dec.frames.length).toBe(201);
     for (let i = 0; i < dec.frames.length; i++) {
@@ -167,7 +168,7 @@ describe('MultiKeyCorridor decoder', () => {
     const envId = 'MultiKeyCorridor-cont-v0';
     const b = readFileSync(fixtureUrl(`traces/${envId}.bin`));
     const buf = b.buffer.slice(b.byteOffset, b.byteOffset + b.byteLength) as ArrayBuffer;
-    const raw = parseActionsBin(buf, { envId, seed: 80, actDim: 6, recordVersion: 3 });
+    const raw = parseRawTrace(buf, { envId, seed: 80 });
     const data = Float32Array.from(raw.data);
     data[10 * RECORD_FLOATS + 7] = 99;
     const dec = decodeRecording(

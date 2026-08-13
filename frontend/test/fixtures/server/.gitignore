@@ -7,3 +7,5 @@ outside/
 fleet-cache/
 dist/
 dist-cors/
+keeper
+keeperless/

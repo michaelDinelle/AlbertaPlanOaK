@@ -10,8 +10,9 @@ import { inflateRawSync } from 'node:zlib';
 import { ENV_IDS, isEnvId } from '@shared/envs';
 import type { EnvId } from '@shared/envs';
 import { decodeRecording, eventTimeline } from '@sim/decode';
-import { parseActionsBin, rawRecordingFromFloats } from '@sim/record';
+import { parseActionsBin } from '@sim/record';
 import { decoderFor } from '@sim/registry';
+import { parseRawTrace, rawRecordingFromFloats } from '../test/helpers/rawTrace';
 import type { RawRecording, SimEvent } from '@sim/types';
 
 
@@ -543,13 +544,8 @@ async function escapeProbe(binary: string): Promise<number> {
     console.error(`no OaK binary at ${binary} — build it with \`swift build -c release\``);
     return 1;
   }
-  const parseV4 = await loadRecord4();
   console.log(`binary  : ${binary}`);
-  console.log(
-    parseV4
-      ? 'record4 : @sim/record4 parseActionsBinV4 found — cross-checking the decoder'
-      : 'record4 : @sim/record4 ABSENT — encoder verification only',
-  );
+  console.log('record  : @sim/record parseActionsBin — cross-checking the decoder');
   const work = mkdtempSync(join(tmpdir(), 'oak-v4-escape-'));
   const results: { envId: EnvId; rows: number; escapes: number; failures: string[] }[] = [];
   try {
@@ -642,20 +638,18 @@ async function escapeProbe(binary: string): Promise<number> {
         }
       }
 
-      if (parseV4) {
-        try {
-          const rawV4 = await parseV4(bin, meta);
-          const n = Math.min(rawV4.steps, v4.steps) * ROW_FLOATS;
-          if (rawV4.steps !== v4.steps) fail(`record4 steps ${rawV4.steps} != ${v4.steps}`);
-          for (let u = 0; u < n; u++) {
-            if (!sameBits(rawV4.data[u]!, v4.data[u]!)) {
-              fail(`record4 float ${u} = ${rawV4.data[u]} != independent decode ${v4.data[u]}`);
-              break;
-            }
+      try {
+        const rawV4 = await parseActionsBin(bin, meta);
+        const n = Math.min(rawV4.steps, v4.steps) * ROW_FLOATS;
+        if (rawV4.steps !== v4.steps) fail(`record steps ${rawV4.steps} != ${v4.steps}`);
+        for (let u = 0; u < n; u++) {
+          if (!sameBits(rawV4.data[u]!, v4.data[u]!)) {
+            fail(`record float ${u} = ${rawV4.data[u]} != independent decode ${v4.data[u]}`);
+            break;
           }
-        } catch (e) {
-          fail(`record4 parseActionsBinV4 threw: ${(e as Error).message}`);
         }
+      } catch (e) {
+        fail(`record parseActionsBin threw: ${(e as Error).message}`);
       }
 
       const escapes = v4.chunks.reduce((s, c) => s + c.escapes, 0);
@@ -712,20 +706,6 @@ function lanesOf(root: string): Map<string, LaneRef> {
   return out;
 }
 
-type ParseV4 = (
-  buf: ArrayBuffer | ArrayBufferView,
-  meta: unknown,
-) => RawRecording | Promise<RawRecording>;
-
-async function loadRecord4(): Promise<ParseV4 | null> {
-  try {
-    const mod = (await import('@sim/record4')) as Record<string, unknown>;
-    const fn = mod['parseActionsBinV4'];
-    return typeof fn === 'function' ? (fn as ParseV4) : null;
-  } catch {
-    return null;
-  }
-}
 
 const DEFAULT_OAK_BINARY = resolve(
   dirname(fileURLToPath(import.meta.url)),
@@ -744,15 +724,9 @@ async function main(): Promise<number> {
     );
     return 1;
   }
-  const parseV4 = await loadRecord4();
   console.log(`v3 root : ${v3Root}`);
   console.log(`v4 root : ${v4Root}`);
-  console.log(
-    parseV4
-      ? 'record4 : @sim/record4 parseActionsBinV4 found — cross-checking the decoder'
-      : 'record4 : @sim/record4 ABSENT — structural + contract verification only ' +
-        '(requires record4.ts for the decoder cross-check)',
-  );
+  console.log('record  : @sim/record parseActionsBin — cross-checking the decoder');
 
   const a = lanesOf(v3Root);
   const b = lanesOf(v4Root);
@@ -829,27 +803,25 @@ async function main(): Promise<number> {
       fail(`trailing bytes: last chunk ends at ${tail.byteOffset + tail.byteLength}, file is ${v4Buf.byteLength}`);
     }
 
-    const rawV3 = parseActionsBin(v3Buf, v3Meta);
+    const rawV3 = parseRawTrace(v3Buf, v3Meta);
     if (rawV3.steps !== v4.steps) fail(`step count ${v4.steps} != v3 ${rawV3.steps}`);
     const steps = Math.min(rawV3.steps, v4.steps);
     compareRows(rawV3.data, v4, codec, steps, fail);
 
-    if (parseV4) {
-      try {
-        const rawV4 = await parseV4(v4Buf, v4Meta);
-        if (rawV4.steps !== v4.steps) fail(`record4 steps ${rawV4.steps} != ${v4.steps}`);
-        if (rawV4.envId !== v3Ref.envId) fail(`record4 envId ${rawV4.envId} != ${v3Ref.envId}`);
-        if (rawV4.seed !== v3Ref.seed) fail(`record4 seed ${rawV4.seed} != ${v3Ref.seed}`);
-        const n = Math.min(rawV4.steps, v4.steps) * ROW_FLOATS;
-        for (let u = 0; u < n; u++) {
-          if (!sameBits(rawV4.data[u]!, v4.data[u]!)) {
-            fail(`record4 float ${u} = ${rawV4.data[u]} != independent decode ${v4.data[u]}`);
-            break;
-          }
+    try {
+      const rawV4 = await parseActionsBin(v4Buf, v4Meta);
+      if (rawV4.steps !== v4.steps) fail(`record steps ${rawV4.steps} != ${v4.steps}`);
+      if (rawV4.envId !== v3Ref.envId) fail(`record envId ${rawV4.envId} != ${v3Ref.envId}`);
+      if (rawV4.seed !== v3Ref.seed) fail(`record seed ${rawV4.seed} != ${v3Ref.seed}`);
+      const n = Math.min(rawV4.steps, v4.steps) * ROW_FLOATS;
+      for (let u = 0; u < n; u++) {
+        if (!sameBits(rawV4.data[u]!, v4.data[u]!)) {
+          fail(`record float ${u} = ${rawV4.data[u]} != independent decode ${v4.data[u]}`);
+          break;
         }
-      } catch (e) {
-        fail(`record4 parseActionsBinV4 threw: ${(e as Error).message}`);
       }
+    } catch (e) {
+      fail(`record parseActionsBin threw: ${(e as Error).message}`);
     }
 
     let events = 0;

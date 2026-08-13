@@ -4,7 +4,6 @@ import { ENVS, envBySlug, type EnvId } from '@shared/envs';
 import type { RecordingMeta, RecordingRef, RunDetail } from '@shared/types';
 import { NO_EVENTS, lensRecording } from '@sim/decode';
 import { parseActionsBin } from '@sim/record';
-import { RECORD_V4_VERSION, parseActionsBinV4 } from '@sim/record4';
 import { decoders } from '@sim/registry';
 import type { EnvDecoder, EnvFrame, EnvGeometry, SimEvent } from '@sim/types';
 import { sceneRegistry } from '../scenes/registry';
@@ -192,8 +191,7 @@ export async function loadHarnessSource(envId: EnvId, opts: LoadSourceOptions = 
     const res = await fetch(`${base}/actions.bin`, opts.signal ? { signal: opts.signal } : {});
     if (!res.ok) throw new Error(`${res.status} actions.bin`);
     const buffer = await res.arrayBuffer();
-    const isV4 = meta.recordVersion === RECORD_V4_VERSION;
-    const raw = isV4 ? await parseActionsBinV4(buffer, meta) : parseActionsBin(buffer, meta);
+    const raw = await parseActionsBin(buffer, meta);
     const lens = lensRecording(raw, decoder);
     return {
       kind: 'recording',

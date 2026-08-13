@@ -185,7 +185,6 @@ export interface RecordingMeta {
   envId: string;
   seed: number;
   actDim: number;
-  recordVersion: number;
   codec?: unknown;
   codecVersion?: number;
   chunks?: [number, number, number, number][];
@@ -206,7 +205,7 @@ export interface RunIndexEntry {
   inFlight: boolean;
   hasSummary: boolean;
   hasRecordings: boolean;
-  role: 'bestKernel' | 'candidate' | 'parent' | null;
+  role: 'keeper' | null;
 }
 
 export interface RecordingRef {
@@ -242,11 +241,8 @@ export interface CurvesResponse {
   seeds: number;
 }
 
-export interface RolesResponse {
-  bestKernel: string | null;
-  candidate: string | null;
-  parent: string | null;
-  featured: string | null;
+export interface KeeperResponse {
+  keeper: string | null;
 }
 
 

@@ -3,18 +3,15 @@
 import { describe, expect, test } from 'bun:test';
 
 import { ENVS } from '@shared/envs';
-import type { RecordingMeta, RecordingRef, RunIndexEntry } from '@shared/types';
+import type { RecordingRef, RunIndexEntry } from '@shared/types';
 import { MAX_CATCHUP_FRAMES } from '@kit/harness';
-import { RECORD_BYTES, RECORD_FLOATS, RECORD_VERSION } from '@sim/record';
 import type { SimEvent } from '@sim/types';
 import {
   DEFAULT_THEATER_RUN,
-  TheaterLoadError,
   describeEvent,
   envChips,
   expectedBytes,
   formatBytes,
-  loadTheaterRecording,
   makeProgress,
   parseTheaterParams,
   parseTheaterQuery,
@@ -142,7 +139,7 @@ describe('pickerRuns', () => {
 
   test('the 16-env demo run is pinned first, whatever the ranking says', () => {
     const runs = pickerRuns([
-      runEntry({ id: 'best', role: 'bestKernel', startedAt: '2026-08-03T00:00:00Z' }),
+      runEntry({ id: 'best', role: 'keeper', startedAt: '2026-08-03T00:00:00Z' }),
       runEntry({ id: DEFAULT_THEATER_RUN, startedAt: '2026-07-01T00:00:00Z' }),
       runEntry({ id: 'other', startedAt: '2026-08-02T00:00:00Z' }),
     ]);
@@ -234,10 +231,9 @@ describe('load progress', () => {
     expect(formatBytes(6_400_000)).toBe('6.1 MB');
   });
 
-  test('expectedBytes prefers content-range total, then content-length, then the row estimate', () => {
+  test('expectedBytes prefers content-range total, then content-length', () => {
     expect(expectedBytes(new Headers({ 'content-range': 'bytes 0-1023/6400000' }))).toBe(6_400_000);
     expect(expectedBytes(new Headers({ 'content-length': '1024' }))).toBe(1024);
-    expect(expectedBytes(new Headers(), 10)).toBe(10 * RECORD_BYTES);
     expect(expectedBytes(new Headers())).toBe(0);
   });
 });
@@ -685,211 +681,5 @@ describe('tier governor', () => {
     const drops = runGovernor(governor, 40, 100);
     expect(drops.findIndex((d) => d !== null)).toBeGreaterThanOrEqual(4);
     expect(governor.drops).toBeGreaterThan(0);
-  });
-});
-
-
-const META: RecordingMeta = {
-  envId: 'HalfCheetah-v4',
-  seed: 3,
-  actDim: 6,
-  recordVersion: RECORD_VERSION,
-};
-
-function makeActionsBin(rows: number, damageRow = -1): Uint8Array {
-  const floats = new Float32Array(rows * RECORD_FLOATS);
-  for (let i = 0; i < rows; i++) {
-    const base = i * RECORD_FLOATS;
-    for (let c = 0; c < 6; c++) floats[base + c] = Math.sin(i * 0.1 + c) * 0.5;
-    floats[base + 6] = 0;
-    floats[base + 7] = i * 0.01;
-    for (let p = 1; p < 9; p++) floats[base + 7 + p] = Math.cos(i * 0.05 + p) * 0.2;
-    if (i === damageRow) floats[base + 8] = Number.NaN;
-  }
-  return new Uint8Array(floats.buffer);
-}
-
-interface FakeFetchOptions {
-  bytes: Uint8Array;
-  chunk?: number;
-  noStream?: boolean;
-  metaStatus?: number;
-  binStatus?: number;
-  serve?: number;
-}
-
-function fakeFetch(options: FakeFetchOptions): typeof fetch {
-  const impl = async (input: unknown): Promise<Response> => {
-    const url = String(input);
-    if (url.endsWith('/meta.json')) {
-      const status = options.metaStatus ?? 200;
-      if (status !== 200) return new Response('nope', { status });
-      return new Response(JSON.stringify(META), { headers: { 'content-type': 'application/json' } });
-    }
-    const status = options.binStatus ?? 206;
-    if (status !== 200 && status !== 206) return new Response('nope', { status });
-    const window = options.bytes.subarray(0, options.serve ?? options.bytes.byteLength);
-    const served = new Uint8Array(window.byteLength);
-    served.set(window);
-    const headers = { 'content-length': String(served.byteLength) };
-    if (options.noStream) return new Response(served.buffer, { status, headers });
-    const chunk = options.chunk ?? 4096;
-    let offset = 0;
-    const stream = new ReadableStream<Uint8Array>({
-      pull(controller) {
-        if (offset >= served.byteLength) {
-          controller.close();
-          return;
-        }
-        const end = Math.min(served.byteLength, offset + chunk);
-        controller.enqueue(new Uint8Array(served.subarray(offset, end)));
-        offset = end;
-      },
-    });
-    return new Response(stream, { status, headers });
-  };
-  return impl as unknown as typeof fetch;
-}
-
-describe('loadTheaterRecording', () => {
-  test('streams, decodes, and hands back a kit/harness source', async () => {
-    const bytes = makeActionsBin(200);
-    const progress: LoadProgress[] = [];
-    const recording = await loadTheaterRecording({
-      runId: 'demo',
-      envId: 'HalfCheetah-v4',
-      seed: 3,
-      expectedSteps: 200,
-      fetchImpl: fakeFetch({ bytes, chunk: 512 }),
-      onProgress: (p) => progress.push(p),
-    });
-
-    expect(recording.steps).toBe(200);
-    expect(recording.bytes).toBe(200 * RECORD_BYTES);
-    expect(recording.source.kind).toBe('recording');
-    expect(recording.source.envId).toBe('HalfCheetah-v4');
-    expect(recording.source.seed).toBe(3);
-    expect(recording.source.controlHz).toBe(ENVS['HalfCheetah-v4'].controlHz);
-    expect(recording.source.discretePose).toBe(false);
-    expect(recording.source.frameCount).toBe(201);
-    expect(recording.source.frameAt(0).step).toBe(-1);
-    expect(recording.source.frameAt(200).step).toBe(199);
-    expect(recording.source.eventsAt(0)).toEqual([]);
-    expect(recording.source.label).toContain('seed 3');
-    expect(recording.health.damaged).toBe(false);
-  });
-
-  test('progress walks the phases in order and ends on a full download band', () => {
-    const bytes = makeActionsBin(64);
-    const progress: LoadProgress[] = [];
-    return loadTheaterRecording({
-      runId: 'demo',
-      envId: 'HalfCheetah-v4',
-      seed: 3,
-      expectedSteps: 64,
-      fetchImpl: fakeFetch({ bytes, chunk: 256 }),
-      onProgress: (p) => progress.push(p),
-    }).then(() => {
-      const phases = progress.map((p) => p.phase);
-      expect(phases[0]).toBe('meta');
-      expect(phases).toContain('download');
-      expect(phases[phases.length - 1]).toBe('decode');
-      const downloads = progress.filter((p) => p.phase === 'download');
-      expect(downloads.length).toBeGreaterThan(4);
-      for (let i = 1; i < downloads.length; i++) {
-        expect(downloads[i]?.received ?? 0).toBeGreaterThan(downloads[i - 1]?.received ?? 0);
-      }
-      expect(downloads[downloads.length - 1]?.fraction).toBeCloseTo(0.78, 6);
-      let last = -1;
-      for (const p of progress) {
-        expect(p.fraction).toBeGreaterThanOrEqual(last);
-        last = p.fraction;
-      }
-    });
-  });
-
-  test('the non-streaming fallback still decodes', async () => {
-    const recording = await loadTheaterRecording({
-      runId: 'demo',
-      envId: 'HalfCheetah-v4',
-      seed: 3,
-      expectedSteps: 32,
-      fetchImpl: fakeFetch({ bytes: makeActionsBin(32), noStream: true }),
-    });
-    expect(recording.steps).toBe(32);
-  });
-
-  test('the FULL lane decodes — there is no cap and no truncation note to write', async () => {
-    const recording = await loadTheaterRecording({
-      runId: 'demo',
-      envId: 'HalfCheetah-v4',
-      seed: 3,
-      expectedSteps: 500,
-      fetchImpl: fakeFetch({ bytes: makeActionsBin(500) }),
-    });
-    expect(recording.steps).toBe(500);
-    expect(recording.source.frameCount).toBe(501);
-    expect(recording.availableSteps).toBe(500);
-  });
-
-  test('a torn tail is truncated to whole record rows, never parsed as one', () => {
-    const bytes = makeActionsBin(10);
-    return loadTheaterRecording({
-      runId: 'demo',
-      envId: 'HalfCheetah-v4',
-      seed: 3,
-      expectedSteps: 10,
-      fetchImpl: fakeFetch({ bytes, serve: 9 * RECORD_BYTES + 17 }),
-    }).then((recording) => {
-      expect(recording.steps).toBe(9);
-      expect(recording.bytes).toBe(9 * RECORD_BYTES);
-    });
-  });
-
-  test('non-finite record rows surface as damage, not as plausible actions', async () => {
-    const recording = await loadTheaterRecording({
-      runId: 'demo',
-      envId: 'HalfCheetah-v4',
-      seed: 3,
-      expectedSteps: 50,
-      fetchImpl: fakeFetch({ bytes: makeActionsBin(50, 20) }),
-    });
-    expect(recording.health.damaged).toBe(true);
-    expect(recording.health.nonFiniteRows).toBe(1);
-    expect(recording.health.message).toContain('non-finite');
-  });
-
-  test('a missing lane is an error the view can show, never a fixture loop', async () => {
-    await expect(
-      loadTheaterRecording({
-        runId: 'demo',
-        envId: 'HalfCheetah-v4',
-        seed: 999,
-        fetchImpl: fakeFetch({ bytes: makeActionsBin(4), metaStatus: 404 }),
-      }),
-    ).rejects.toBeInstanceOf(TheaterLoadError);
-  });
-
-  test('an unreadable actions.bin is an error too', async () => {
-    await expect(
-      loadTheaterRecording({
-        runId: 'demo',
-        envId: 'HalfCheetah-v4',
-        seed: 3,
-        fetchImpl: fakeFetch({ bytes: makeActionsBin(4), binStatus: 500 }),
-      }),
-    ).rejects.toBeInstanceOf(TheaterLoadError);
-  });
-
-  test('an empty body is an error rather than a zero-frame scene', async () => {
-    await expect(
-      loadTheaterRecording({
-        runId: 'demo',
-        envId: 'HalfCheetah-v4',
-        seed: 3,
-        expectedSteps: 4,
-        fetchImpl: fakeFetch({ bytes: makeActionsBin(4), serve: 0 }),
-      }),
-    ).rejects.toBeInstanceOf(TheaterLoadError);
   });
 });

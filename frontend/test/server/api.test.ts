@@ -7,7 +7,7 @@ import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { crc32, deflateRawSync } from 'node:zlib';
 
-import type { FleetColumnar, RunDetail, RunIndexEntry, RolesResponse } from '../../shared/types';
+import type { FleetColumnar, KeeperResponse, RunDetail, RunIndexEntry } from '../../shared/types';
 import { createApp, parseRangeHeader } from '../../server/app';
 import { fleetCacheDir, runIndexCacheFile, CACHE_DIR } from '../../server/config';
 import {
@@ -17,7 +17,7 @@ import {
   type FleetQuery,
 } from '../../server/fleetDerive';
 import { createLiveResponse } from '../../server/live';
-import { clearV4StepsCache, scanRecordings } from '../../server/recordings';
+import { clearStepsCache, scanRecordings } from '../../server/recordings';
 import { RunIndex, runCompleteness } from '../../server/runIndex';
 import { statOrNull } from '../../server/jsonl';
 
@@ -244,10 +244,7 @@ async function buildFixtures(): Promise<void> {
   await rm(BENCH, { recursive: true, force: true });
   await mkdir(BENCH, { recursive: true });
 
-  await writeFile(
-    join(BENCH, 'ROLES.json'),
-    JSON.stringify({ candidate: 'beta-incomplete', keeper: 'alpha-complete', note: 'fixture' }, null, 1),
-  );
+  await writeFile(join(FIXTURE_ROOT, 'keeper'), 'alpha-complete\n');
 
   const alpha = join(BENCH, 'alpha-complete');
   await mkdir(alpha, { recursive: true });
@@ -301,7 +298,9 @@ async function buildFixtures(): Promise<void> {
       lastGoodRewardRate: 0.01,
     })}\n`,
   );
-  await writeFile(join(alpha, 'summary.json'), JSON.stringify({ results: [{ policy: 'oak', lanes: 2 }] }));
+  await writeFile(join(alpha, 'summary.json'), JSON.stringify({
+    envSlices: { 'HalfCheetah-v4': [{ policy: 'oak', recentRewardRateIQM: 0.01, seeds: 2 }] },
+  }));
   await writeLane(alpha, 'HalfCheetah-v4', 0, 3, 4, 6);
   await writeLane(alpha, 'FourRooms-cont-v0', 1, 3, 3, 1);
   await writeLane(alpha, 'DeepSea-cont-v0', 2, 2, 5, 1);
@@ -424,7 +423,7 @@ async function buildHostileFixtures(): Promise<void> {
   await Bun.write(join(OUTSIDE, 'lane', 'actions.bin'), recordBytes(4, 8));
 
   const good = await writeRunRoot(HOSTILE, 'good-run', 'HalfCheetah-v4', '2026-08-02T09:00:00Z');
-  await writeLane(good, 'HalfCheetah-v4', 0, 3, 4, 6);
+  await writeLaneV4(good, 'Pendulum-cont-v0', 0, 7, 1, [4]);
 
   const dirFleet = await writeRunRoot(HOSTILE, 'dir-fleet', 'DeepSea-cont-v0', '2026-08-02T08:00:00Z');
   await rm(join(dirFleet, 'fleet.jsonl'), { force: true });
@@ -438,7 +437,7 @@ async function buildHostileFixtures(): Promise<void> {
   await writeRunRoot(HOSTILE, 'stale-cache', 'Pendulum-cont-v0', '2026-08-02T06:00:00Z');
 
   const links = await writeRunRoot(HOSTILE, 'link-lanes', 'HalfCheetah-v4', '2026-08-02T05:00:00Z');
-  await writeLane(links, 'HalfCheetah-v4', 0, 3, 4, 6);
+  await writeLaneV4(links, 'Pendulum-cont-v0', 0, 7, 1, [4]);
 
   const linkedActions = join(links, 'HalfCheetah-v4', 'seed7');
   await mkdir(linkedActions, { recursive: true });
@@ -543,7 +542,7 @@ describe('run index discovery', () => {
     expect(alpha.envIds).toEqual(['HalfCheetah-v4', 'FourRooms-cont-v0']);
     expect(alpha.hasSummary).toBe(true);
     expect(alpha.hasRecordings).toBe(true);
-    expect(alpha.role).toBe('bestKernel');
+    expect(alpha.role).toBe('keeper');
   });
 
   it('calls an interrupted run incomplete despite a .done marker, and in-flight while fresh', async () => {
@@ -555,7 +554,7 @@ describe('run index discovery', () => {
     expect(beta.inFlight).toBe(true);
     expect(beta.hasSummary).toBe(false);
     expect(beta.hasRecordings).toBe(false);
-    expect(beta.role).toBe('candidate');
+    expect(beta.role).toBeNull();
   });
 
   it('requires the final row to reach the declared horizon', async () => {
@@ -629,33 +628,25 @@ describe('completeness against the real demo root', () => {
 
 
 describe('recordings discovery', () => {
-  it('serves recordVersion 3 and 4, in canonical env order', async () => {
+  it('serves record lanes in canonical env order, legacy lanes skipped', async () => {
     const recs = await scanRecordings(join(BENCH, 'alpha-complete'));
     expect(recs.map((r) => `${r.envId}/${r.seed}`)).toEqual([
-      'HalfCheetah-v4/0', 'FourRooms-cont-v0/1', 'Pendulum-cont-v0/6', 'Chain-cont-v0/5',
+      'Pendulum-cont-v0/6', 'Chain-cont-v0/5',
     ]);
-    expect(recs[0]?.steps).toBe(4);
-    expect(recs[0]?.bytes).toBe(4 * 64);
-    expect(recs[0]?.actDim).toBe(6);
-    expect(recs[1]?.steps).toBe(3);
-    expect(recs.some((r) => r.envId === 'DeepSea-cont-v0')).toBe(false);
-    expect(recs.length).toBe(4);
+    expect(recs.length).toBe(2);
   });
 
   it('answers empty for a run with no recordings', async () => {
     expect(await scanRecordings(join(BENCH, 'beta-incomplete'))).toEqual([]);
   });
 
-  it.skipIf(!demoPresent)('finds 128 lanes across all 16 envs in the demo root', async () => {
-    const recs = await scanRecordings(DEMO_DIR);
-    expect(recs.length).toBe(128);
-    expect(new Set(recs.map((r) => r.envId)).size).toBe(16);
-    for (const r of recs) expect(r.steps).toBe(100_000);
+  it.skipIf(!demoPresent)('the legacy demo root has no servable lanes', async () => {
+    expect(await scanRecordings(DEMO_DIR)).toEqual([]);
   });
 });
 
 
-describe('record v4 discovery', () => {
+describe('record discovery', () => {
   const find = async (envId: string, seed: number) => {
     const recs = await scanRecordings(join(BENCH, 'alpha-complete'));
     return recs.find((r) => r.envId === envId && r.seed === seed);
@@ -664,7 +655,6 @@ describe('record v4 discovery', () => {
   it('takes a finalized lane\'s step count and chunk table straight from meta.json', async () => {
     const rec = await find('Chain-cont-v0', 5);
     expect(rec).toBeDefined();
-    expect(rec?.recordVersion).toBe(4);
     expect(rec?.steps).toBe(7);
     expect(rec?.codecVersion).toBe(1);
     expect(rec?.codec).toEqual(V4_CODECS['Chain-cont-v0']);
@@ -701,7 +691,7 @@ describe('record v4 discovery', () => {
       expect((await scanRecordings(root, { root }))[0]?.steps).toBe(36);
     } finally {
       await rm(root, { recursive: true, force: true });
-      clearV4StepsCache();
+      clearStepsCache();
     }
   });
 
@@ -717,15 +707,15 @@ describe('record v4 discovery', () => {
       const foreign = good.slice();
       new DataView(foreign.buffer).setUint32(0, 0xdeadbeef, true);
       await Bun.write(lane, foreign);
-      clearV4StepsCache();
+      clearStepsCache();
       expect((await scanRecordings(root, { root }))[0]?.steps).toBe(0);
 
       await Bun.write(lane, good.slice(0, 8));
-      clearV4StepsCache();
+      clearStepsCache();
       expect(await scanRecordings(root, { root })).toEqual([]);
     } finally {
       await rm(root, { recursive: true, force: true });
-      clearV4StepsCache();
+      clearStepsCache();
     }
   });
 });
@@ -774,14 +764,20 @@ describe('http api (fixture bench root)', () => {
     expect(runs.some((r) => r.id === 'alpha-complete' && r.complete)).toBe(true);
   });
 
-  it('GET /api/roles reads v1 `keeper` as v2 `bestKernel`, nulls for absent roles', async () => {
-    const roles = (await (await fetch(`${base}/api/roles`)).json()) as RolesResponse;
-    expect(roles).toEqual({
-      bestKernel: 'alpha-complete',
-      candidate: 'beta-incomplete',
-      parent: null,
-      featured: null,
-    });
+  it('GET /api/keeper reads the keeper file, null when absent', async () => {
+    const doc = (await (await fetch(`${base}/api/keeper`)).json()) as KeeperResponse;
+    expect(doc).toEqual({ keeper: 'alpha-complete' });
+
+    const lone = join(FIXTURE_ROOT, 'keeperless');
+    await mkdir(join(lone, 'bench'), { recursive: true });
+    const loneApp = createApp({ benchRoot: join(lone, 'bench'), cacheFile: null, fleetCacheDir: null, ttlMs: 0 });
+    const loneServer = Bun.serve({ hostname: '127.0.0.1', port: 0, fetch: loneApp.fetch });
+    try {
+      const res = await fetch(`http://127.0.0.1:${loneServer.port}/api/keeper`);
+      expect((await res.json()) as KeeperResponse).toEqual({ keeper: null });
+    } finally {
+      void loneServer.stop(true);
+    }
   });
 
   it('GET /api/runs/:id returns meta + summary + aggregate + deaths + recordings', async () => {
@@ -796,8 +792,6 @@ describe('http api (fixture bench root)', () => {
     expect(detail.aggregate[1]?.kind).toBe('final');
     expect(detail.deathsCount).toBe(1);
     expect(detail.recordings).toEqual([
-      { envId: 'HalfCheetah-v4', seed: 0, steps: 4 },
-      { envId: 'FourRooms-cont-v0', seed: 1, steps: 3 },
       { envId: 'Pendulum-cont-v0', seed: 6, steps: 11 },
       { envId: 'Chain-cont-v0', seed: 5, steps: 7 },
     ]);
@@ -831,34 +825,32 @@ describe('http api (fixture bench root)', () => {
   });
 
   it('serves actions.bin whole, by range, and by suffix range', async () => {
-    const url = `${base}/api/runs/alpha-complete/recordings/HalfCheetah-v4/0/actions.bin`;
+    const url = `${base}/api/runs/alpha-complete/recordings/Chain-cont-v0/5/actions.bin`;
+    const size = V4_FILE_HEADER + 2 * V4_CHUNK_HEADER + v4PayloadBytes(4) + v4PayloadBytes(3);
     const whole = await fetch(url);
     expect(whole.status).toBe(200);
     expect(whole.headers.get('accept-ranges')).toBe('bytes');
     expect(whole.headers.get('content-type')).toBe('application/octet-stream');
     const wholeBuf = await whole.arrayBuffer();
-    expect(wholeBuf.byteLength).toBe(256);
+    expect(wholeBuf.byteLength).toBe(size);
 
     const ranged = await fetch(url, { headers: { range: 'bytes=64-127' } });
     expect(ranged.status).toBe(206);
-    expect(ranged.headers.get('content-range')).toBe('bytes 64-127/256');
-    const chunk = new Float32Array(await ranged.arrayBuffer());
-    expect(chunk.length).toBe(16);
-    expect(chunk[0]).toBe(16);
-    expect(chunk[6]).toBe(0);
-    expect(chunk[15]).toBe(31);
+    expect(ranged.headers.get('content-range')).toBe(`bytes 64-${size - 1}/${size}`);
+    expect((await ranged.arrayBuffer()).byteLength).toBe(size - 64);
 
     const suffix = await fetch(url, { headers: { range: 'bytes=-64' } });
     expect(suffix.status).toBe(206);
-    expect(suffix.headers.get('content-range')).toBe('bytes 192-255/256');
+    expect(suffix.headers.get('content-range')).toBe(`bytes ${size - 64}-${size - 1}/${size}`);
     expect((await suffix.arrayBuffer()).byteLength).toBe(64);
   });
 
   it('answers 416 for an unsatisfiable range and 304 for a matching ETag', async () => {
-    const url = `${base}/api/runs/alpha-complete/recordings/HalfCheetah-v4/0/actions.bin`;
+    const url = `${base}/api/runs/alpha-complete/recordings/Chain-cont-v0/5/actions.bin`;
+    const size = V4_FILE_HEADER + 2 * V4_CHUNK_HEADER + v4PayloadBytes(4) + v4PayloadBytes(3);
     const bad = await fetch(url, { headers: { range: 'bytes=99999-' } });
     expect(bad.status).toBe(416);
-    expect(bad.headers.get('content-range')).toBe('bytes */256');
+    expect(bad.headers.get('content-range')).toBe(`bytes */${size}`);
 
     const first = await fetch(url);
     const etag = first.headers.get('etag');
@@ -869,23 +861,25 @@ describe('http api (fixture bench root)', () => {
   });
 
   it('serves the sibling per-lane meta.json', async () => {
-    const res = await fetch(`${base}/api/runs/alpha-complete/recordings/FourRooms-cont-v0/1/meta.json`);
+    const res = await fetch(`${base}/api/runs/alpha-complete/recordings/Chain-cont-v0/5/meta.json`);
     expect(res.status).toBe(200);
     const meta = (await res.json()) as { recordVersion: number; seed: number };
-    expect(meta.recordVersion).toBe(3);
-    expect(meta.seed).toBe(1);
+    expect(meta.recordVersion).toBe(4);
+    expect(meta.seed).toBe(5);
   });
 
-  it('the lane descriptor carries the v4 codec, chunk table and step count', async () => {
+  it('the lane descriptor carries the codec, chunk table and step count', async () => {
     interface Descriptor {
       envId: string; seed: number; steps: number; actDim: number;
-      recordVersion: number; bytes: number;
+      bytes: number;
       codec?: unknown; codecVersion?: number; chunks?: [number, number, number, number][];
     }
     const v4 = (await (
       await fetch(`${base}/api/runs/alpha-complete/recordings/Chain-cont-v0/5`)
     ).json()) as Descriptor;
-    expect(v4.recordVersion).toBe(4);
+    expect(Object.keys(v4).sort()).toEqual([
+      'actDim', 'bytes', 'chunks', 'codec', 'codecVersion', 'envId', 'seed', 'steps',
+    ]);
     expect(v4.steps).toBe(7);
     expect(v4.codecVersion).toBe(1);
     expect(v4.codec).toEqual(V4_CODECS['Chain-cont-v0']);
@@ -899,13 +893,6 @@ describe('http api (fixture bench root)', () => {
     expect(inFlight.steps).toBe(11);
     expect(inFlight.chunks).toBeUndefined();
     expect(inFlight.codecVersion).toBe(1);
-
-    const v3 = (await (
-      await fetch(`${base}/api/runs/alpha-complete/recordings/HalfCheetah-v4/0`)
-    ).json()) as Descriptor;
-    expect(Object.keys(v3).sort()).toEqual([
-      'actDim', 'bytes', 'envId', 'recordVersion', 'seed', 'steps',
-    ]);
   });
 
   it('serves a v4 actions.bin whole and by range, bytes untouched', async () => {
@@ -982,24 +969,10 @@ describe('http api (real bench root)', () => {
     expect(runs.some((r) => r.id === DEMO_ID)).toBe(true);
   });
 
-  it.skipIf(!demoPresent)('reports 128 recordings over 16 envs for the demo run', async () => {
+  it.skipIf(!demoPresent)('the legacy demo run has no servable recordings', async () => {
     const detail = (await (await fetch(`${base}/api/runs/${DEMO_ID}`)).json()) as RunDetail;
-    expect(detail.recordings.length).toBe(128);
-    expect(new Set(detail.recordings.map((r) => r.envId)).size).toBe(16);
+    expect(detail.recordings.length).toBe(0);
     expect(detail.aggregate.length).toBe(10);
-  });
-
-  it.skipIf(!demoPresent)('serves 128 bytes of a real actions.bin via Range', async () => {
-    const url = `${base}/api/runs/${DEMO_ID}/recordings/HalfCheetah-v4/0/actions.bin`;
-    const res = await fetch(url, { headers: { range: 'bytes=0-127' } });
-    expect(res.status).toBe(206);
-    expect(res.headers.get('content-range')).toBe('bytes 0-127/6400000');
-    const buf = await res.arrayBuffer();
-    expect(buf.byteLength).toBe(128);
-    const f = new Float32Array(buf);
-    expect(f.length).toBe(32);
-    expect(Number.isFinite(f[0] ?? Number.NaN)).toBe(true);
-    expect(f[6]).toBe(0);
   });
 });
 
@@ -1267,7 +1240,7 @@ describe('recording symlink containment', () => {
 
   it('discovers only the real lane, never the three symlinked ones', async () => {
     const recs = await scanRecordings(join(HOSTILE, 'link-lanes'), { root: HOSTILE });
-    expect(recs.map((r) => `${r.envId}/${r.seed}`)).toEqual(['HalfCheetah-v4/0']);
+    expect(recs.map((r) => `${r.envId}/${r.seed}`)).toEqual(['Pendulum-cont-v0/0']);
     for (const r of recs) {
       expect(r.actionsPath.startsWith(HOSTILE)).toBe(true);
       expect(r.metaPath.startsWith(HOSTILE)).toBe(true);
@@ -1289,9 +1262,9 @@ describe('recording symlink containment', () => {
   });
 
   it('still serves the legitimate lane sitting next to them', async () => {
-    const res = await fetch(`${base}/api/runs/link-lanes/recordings/HalfCheetah-v4/0/actions.bin`);
+    const res = await fetch(`${base}/api/runs/link-lanes/recordings/Pendulum-cont-v0/0/actions.bin`);
     expect(res.status).toBe(200);
-    expect((await res.arrayBuffer()).byteLength).toBe(256);
+    expect((await res.arrayBuffer()).byteLength).toBe(V4_FILE_HEADER + V4_CHUNK_HEADER + v4PayloadBytes(4));
   });
 });
 
@@ -1310,7 +1283,7 @@ describe('run-index derived cache invalidation', () => {
     expect(withSummary.hasSummary).toBe(true);
     expect(withSummary.hasRecordings).toBe(false);
 
-    await writeLane(dir, 'Pendulum-cont-v0', 5, 3, 6, 1);
+    await writeLaneV4(dir, 'Pendulum-cont-v0', 5, 7, 1, [6]);
     const withRecs = (await index.list()).find((e) => e.id === 'stale-cache') as RunIndexEntry;
     expect(withRecs.hasSummary).toBe(true);
     expect(withRecs.hasRecordings).toBe(true);
@@ -1611,7 +1584,7 @@ describe('origin policy', () => {
   });
 
   it('stamps byte-range recording responses too', async () => {
-    const res = await fetch(`${devBase}/api/runs/alpha-complete/recordings/HalfCheetah-v4/0/actions.bin`, {
+    const res = await fetch(`${devBase}/api/runs/alpha-complete/recordings/Chain-cont-v0/5/actions.bin`, {
       headers: { origin: 'http://127.0.0.1:5173', range: 'bytes=0-63' },
     });
     expect(res.status).toBe(206);
@@ -1642,7 +1615,7 @@ describe('conditional requests', () => {
     void server?.stop(true);
   });
 
-  const url = (): string => `${base}/api/runs/alpha-complete/recordings/HalfCheetah-v4/0/actions.bin`;
+  const url = (): string => `${base}/api/runs/alpha-complete/recordings/Chain-cont-v0/5/actions.bin`;
 
   it('304s on If-None-Match: * when the representation exists (RFC 7232 §3.2)', async () => {
     const res = await fetch(url(), { headers: { 'if-none-match': '*' } });

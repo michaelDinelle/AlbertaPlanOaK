@@ -10,7 +10,7 @@ import { fileURLToPath } from 'node:url';
 import type { EnvId } from '../../shared/envs';
 import type { RecordingMeta, WallResponse } from '../../shared/types';
 import { createApp } from '../../server/app';
-import { scanRecordings, clearV4StepsCache } from '../../server/recordings';
+import { scanRecordings, clearStepsCache } from '../../server/recordings';
 import {
   WALL_CODEC_VERSION,
   WALL_DEFAULT_STRIDE,
@@ -29,18 +29,19 @@ import {
   wallCacheFor,
   type WallPayload,
 } from '../../server/wall';
-import { RECORD_BYTES, RECORD_FLOATS, parseActionsBin } from '../../src/sim/record';
 import {
   CHUNK_HEADER_BYTES,
   CODEC_VERSION,
   ESCAPE_ENTRY_BYTES,
   FILE_HEADER_BYTES,
-  RECORD_V4_VERSION,
+  RECORD_BYTES,
+  RECORD_FLOATS,
+  RECORD_VERSION,
   codecForEnv,
   crc32,
   envKindOf,
-  parseActionsBinV4,
-} from '../../src/sim/record4';
+  parseActionsBin,
+} from '../../src/sim/record';
 import { fetchWall, wallUrl, WALL_POSE_LEN } from '../../src/api';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -169,17 +170,6 @@ async function readLaneMeta(path: string): Promise<RecordingMeta> {
 }
 
 
-function v3Bytes(steps: number, fill: (row: Float32Array, i: number) => void): Uint8Array {
-  const f = new Float32Array(steps * RECORD_FLOATS);
-  const row = new Float32Array(RECORD_FLOATS);
-  for (let i = 0; i < steps; i++) {
-    row.fill(0);
-    fill(row, i);
-    f.set(row, i * RECORD_FLOATS);
-  }
-  return new Uint8Array(f.buffer);
-}
-
 async function deflateRawBytes(bytes: Uint8Array): Promise<Uint8Array> {
   const copy = new Uint8Array(bytes.byteLength);
   copy.set(bytes);
@@ -208,7 +198,7 @@ async function v4GridLane(
   const fileHeader = new Uint8Array(FILE_HEADER_BYTES);
   const fv = new DataView(fileHeader.buffer);
   fv.setUint32(0, 0x344b414f, true);
-  fv.setUint32(4, RECORD_V4_VERSION, true);
+  fv.setUint32(4, RECORD_VERSION, true);
   fv.setUint32(8, envKindOf(envId), true);
   fv.setUint32(12, CODEC_VERSION, true);
   parts.push(fileHeader);
@@ -307,7 +297,6 @@ let TMP = '';
 let SYN_BENCH = '';
 let SYN_RUN = '';
 const SYN_ID = 'wall-synthetic';
-const V3_NAN_ROW = 500;
 const V4_NAN_ROW = 137;
 const SYN_STEPS = 1200;
 
@@ -328,22 +317,6 @@ async function buildSynthetic(): Promise<void> {
     }),
   );
   await writeFile(join(SYN_RUN, 'fleet.jsonl'), '');
-
-  for (const seed of [0, 1]) {
-    const dir = join(SYN_RUN, 'HalfCheetah-v4', `seed${seed}`);
-    await mkdir(dir, { recursive: true });
-    await writeFile(
-      join(dir, 'meta.json'),
-      JSON.stringify({ envId: 'HalfCheetah-v4', seed, actDim: 6, recordVersion: 3 }),
-    );
-    const bytes = v3Bytes(SYN_STEPS, (row, i) => {
-      for (let c = 0; c < 6; c++) row[c] = (i % 17) / 16 - 0.5;
-      row[6] = i % 250 === 249 ? 1 : 0;
-      for (let p = 0; p < 9; p++) row[7 + p] = i * 0.01 + p;
-      if (seed === 1 && i >= V3_NAN_ROW) row[7 + 3] = Number.NaN;
-    });
-    await Bun.write(join(dir, 'actions.bin'), bytes);
-  }
 
   const gridFloats = new Float32Array(SYN_STEPS * RECORD_FLOATS);
   for (let i = 0; i < SYN_STEPS; i++) {
@@ -482,7 +455,7 @@ describe('effectiveStride (the payload budget)', () => {
 
   it('shows up in the header, so a client can map samples back to rows', async () => {
     clearWallCache();
-    const { header } = await unpack((await deriveFor(SYN_BENCH, SYN_RUN, SYN_ID, 'HalfCheetah-v4', 37)).body);
+    const { header } = await unpack((await deriveFor(SYN_BENCH, SYN_RUN, SYN_ID, 'FourRooms-cont-v0', 37)).body);
     expect(header.stride).toBe(37);
     expect(header.lanes[0]?.samples).toBe(expectedRows(SYN_STEPS, 37).length);
   });
@@ -574,53 +547,30 @@ describe('wallCacheFor', () => {
 
 
 describe('wall projection (synthetic bench root)', () => {
-  it('dates the first non-finite ROW of a v3 lane and leaves a finite one null', async () => {
-    clearWallCache();
-    const { body } = await deriveFor(SYN_BENCH, SYN_RUN, SYN_ID, 'HalfCheetah-v4', 64);
-    const { header, lanes } = await unpack(body);
-
-    expect(header.envId).toBe('HalfCheetah-v4');
-    expect(header.lanes.map((l) => l.seed)).toEqual([0, 1]);
-    expect(header.chunkEvents).toBeUndefined();
-
-    expect(lanes[0]?.firstNonFiniteRow).toBeNull();
-    expect(lanes[1]?.firstNonFiniteRow).toBe(V3_NAN_ROW);
-
-    const nanSample = expectedRows(SYN_STEPS, 64).indexOf(512);
-    expect(nanSample).toBeGreaterThanOrEqual(0);
-    expect(Number.isNaN(lanes[1]?.pose[nanSample * 9 + 3] ?? 0)).toBe(true);
-    expect(Number.isNaN(lanes[0]?.pose[nanSample * 9 + 3] ?? 0)).toBe(false);
-  });
-
   it('samples row 0, every stride, and the final row — for every stride', async () => {
     for (const stride of [1, 3, 64, 500, 4096]) {
       clearWallCache();
-      const { body } = await deriveFor(SYN_BENCH, SYN_RUN, SYN_ID, 'HalfCheetah-v4', stride);
+      const { body } = await deriveFor(SYN_BENCH, SYN_RUN, SYN_ID, 'FourRooms-cont-v0', stride);
       const { lanes } = await unpack(body);
       const rows = expectedRows(SYN_STEPS, stride);
       const lane = lanes[0];
       expect(lane?.samples).toBe(rows.length);
       for (let s = 0; s < rows.length; s++) {
-        expect(lane?.pose[s * 9]).toBeCloseTo((rows[s] ?? 0) * 0.01, 4);
+        expect(lane?.pose[s * 9]).toBe((rows[s] ?? 0) % 11);
       }
-      expect(lane?.pose[(rows.length - 1) * 9]).toBeCloseTo((SYN_STEPS - 1) * 0.01, 4);
+      expect(lane?.pose[(rows.length - 1) * 9]).toBe((SYN_STEPS - 1) % 11);
     }
   });
 
   it('never duplicates the final row when the stride already lands on it', async () => {
     clearWallCache();
-    const { body } = await deriveFor(SYN_BENCH, SYN_RUN, SYN_ID, 'HalfCheetah-v4', 1199);
+    const { body } = await deriveFor(SYN_BENCH, SYN_RUN, SYN_ID, 'FourRooms-cont-v0', 1199);
     const { lanes } = await unpack(body);
     expect(lanes[0]?.samples).toBe(2);
-    expect(lanes[0]?.pose[9]).toBeCloseTo(1199 * 0.01, 4);
+    expect(lanes[0]?.pose[9]).toBe(1199 % 11);
   });
 
-  it('carries the done bit through, chunked v4 and flat v3 alike', async () => {
-    clearWallCache();
-    const v3 = await unpack((await deriveFor(SYN_BENCH, SYN_RUN, SYN_ID, 'HalfCheetah-v4', 1)).body);
-    for (let r = 0; r < SYN_STEPS; r++) {
-      expect(v3.lanes[0]?.done[r]).toBe(r % 250 === 249 ? 1 : 0);
-    }
+  it('carries the done bit through the chunked record', async () => {
     clearWallCache();
     const v4 = await unpack((await deriveFor(SYN_BENCH, SYN_RUN, SYN_ID, 'FourRooms-cont-v0', 1)).body);
     for (let r = 0; r < SYN_STEPS; r++) {
@@ -644,10 +594,10 @@ describe('wall projection (synthetic bench root)', () => {
     expect(events?.rewardDelta).toEqual([1.5, null, null]);
   });
 
-  it('matches a full parseActionsBinV4 decode at every sampled row', async () => {
+  it('matches a full parseActionsBin decode at every sampled row', async () => {
     const dir = join(SYN_RUN, 'FourRooms-cont-v0', 'seed7');
     const meta = await readLaneMeta(join(dir, 'meta.json'));
-    const raw = await parseActionsBinV4(await Bun.file(join(dir, 'actions.bin')).arrayBuffer(), meta);
+    const raw = await parseActionsBin(await Bun.file(join(dir, 'actions.bin')).arrayBuffer(), meta);
     for (const stride of [1, 7, 64]) {
       clearWallCache();
       const { lanes } = await unpack(
@@ -657,19 +607,6 @@ describe('wall projection (synthetic bench root)', () => {
       expect(lane).toBeDefined();
       if (lane !== undefined) expectLaneMatches(lane, raw, stride, `synthetic v4 stride ${stride}`);
     }
-  });
-
-  it('keeps a lane whose file is cut mid-row: whole rows survive, the fragment does not', async () => {
-    const torn = join(TMP, 'torn');
-    cpSync(SYN_BENCH, torn, { recursive: true });
-    const runDir = join(torn, SYN_ID);
-    const lanePath = join(runDir, 'HalfCheetah-v4', 'seed0', 'actions.bin');
-    await truncate(lanePath, 900 * RECORD_BYTES + 40);
-    clearWallCache();
-    const { lanes } = await unpack((await deriveFor(torn, runDir, SYN_ID, 'HalfCheetah-v4', 64)).body);
-    expect(lanes[0]?.steps).toBe(900);
-    expect(lanes[0]?.samples).toBe(expectedRows(900, 64).length);
-    expect(lanes[0]?.pose[(lanes[0].samples - 1) * 9]).toBeCloseTo(899 * 0.01, 4);
   });
 
   it('answers a valid EMPTY wall for an env with no recorded seeds', async () => {
@@ -710,43 +647,48 @@ describe('wall caching', () => {
     const cacheDir = join(TMP, 'cache-store');
 
     clearWallCache();
-    const first = await deriveFor(root, runDir, SYN_ID, 'HalfCheetah-v4', 64, cacheDir);
+    const first = await deriveFor(root, runDir, SYN_ID, 'FourRooms-cont-v0', 64, cacheDir);
     const names = await waitForWallFiles(cacheDir, 1);
     expect(names.length).toBe(1);
 
-    const memHit = await deriveFor(root, runDir, SYN_ID, 'HalfCheetah-v4', 64, cacheDir);
+    const memHit = await deriveFor(root, runDir, SYN_ID, 'FourRooms-cont-v0', 64, cacheDir);
     expect(memHit.body).toBe(first.body);
 
     clearWallCache();
-    const diskHit = await deriveFor(root, runDir, SYN_ID, 'HalfCheetah-v4', 64, cacheDir);
+    const diskHit = await deriveFor(root, runDir, SYN_ID, 'FourRooms-cont-v0', 64, cacheDir);
     expect(diskHit.body).not.toBe(first.body);
     expect(Buffer.from(diskHit.body).equals(Buffer.from(first.body))).toBe(true);
     expect(await wallFiles(cacheDir)).toEqual(names);
 
-    const lanePath = join(runDir, 'HalfCheetah-v4', 'seed0', 'actions.bin');
+    const lanePath = join(runDir, 'FourRooms-cont-v0', 'seed7', 'actions.bin');
     const now = new Date(Date.now() + 5_000);
     await utimes(lanePath, now, now);
     clearWallCache();
-    clearV4StepsCache();
-    const afterTouch = await deriveFor(root, runDir, SYN_ID, 'HalfCheetah-v4', 64, cacheDir);
+    clearStepsCache();
+    const afterTouch = await deriveFor(root, runDir, SYN_ID, 'FourRooms-cont-v0', 64, cacheDir);
     expect(Buffer.from(afterTouch.body).equals(Buffer.from(first.body))).toBe(true);
     const names2 = await waitForWallFiles(cacheDir, 2);
     expect(names2.length).toBe(2);
 
-    await truncate(lanePath, 300 * RECORD_BYTES);
+    const meta = JSON.parse(await Bun.file(join(runDir, 'FourRooms-cont-v0', 'seed7', 'meta.json')).text()) as {
+      chunks: [number, number, number, number][];
+    };
+    const firstChunk = meta.chunks[0];
+    if (firstChunk === undefined) throw new Error('no chunk table');
+    await truncate(lanePath, firstChunk[2] + firstChunk[3]);
     clearWallCache();
-    clearV4StepsCache();
-    const afterEdit = await deriveFor(root, runDir, SYN_ID, 'HalfCheetah-v4', 64, cacheDir);
+    clearStepsCache();
+    const afterEdit = await deriveFor(root, runDir, SYN_ID, 'FourRooms-cont-v0', 64, cacheDir);
     const { lanes } = await unpack(afterEdit.body);
-    expect(lanes[0]?.steps).toBe(300);
+    expect(lanes[0]?.steps).toBe(firstChunk[1]);
     expect(Buffer.from(afterEdit.body).equals(Buffer.from(first.body))).toBe(false);
   });
 
   it('gives each stride its own entry — one stride never answers for another', async () => {
     const cacheDir = join(TMP, 'cache-stride');
     clearWallCache();
-    const a = await deriveFor(SYN_BENCH, SYN_RUN, SYN_ID, 'HalfCheetah-v4', 64, cacheDir);
-    const b = await deriveFor(SYN_BENCH, SYN_RUN, SYN_ID, 'HalfCheetah-v4', 16, cacheDir);
+    const a = await deriveFor(SYN_BENCH, SYN_RUN, SYN_ID, 'FourRooms-cont-v0', 64, cacheDir);
+    const b = await deriveFor(SYN_BENCH, SYN_RUN, SYN_ID, 'FourRooms-cont-v0', 16, cacheDir);
     expect(a.header.stride).toBe(64);
     expect(b.header.stride).toBe(16);
     expect(b.header.lanes[0]?.samples).toBeGreaterThan(a.header.lanes[0]?.samples ?? 0);
@@ -760,7 +702,7 @@ describe('wall caching', () => {
     const opts = {
       id: SYN_ID,
       dir: SYN_RUN,
-      envId: 'HalfCheetah-v4',
+      envId: 'FourRooms-cont-v0',
       stride: 64,
       recordings,
       inFlight: false,
@@ -786,13 +728,13 @@ describe('wall caching', () => {
     await waitForWallFiles(cacheDir, 1);
 
     const meta = JSON.parse(await Bun.file(metaPath).text()) as Record<string, unknown>;
-    await writeFile(metaPath, JSON.stringify({ ...meta, recordVersion: 3 }));
+    await writeFile(metaPath, JSON.stringify({ ...meta, steps: 400 }));
     const laneAfter = await stat(lanePath);
     expect(laneAfter.size).toBe(laneBefore.size);
     expect(laneAfter.mtimeMs).toBe(laneBefore.mtimeMs);
 
     clearWallCache();
-    clearV4StepsCache();
+    clearStepsCache();
     const second = await deriveFor(root, runDir, SYN_ID, 'FourRooms-cont-v0', 64, cacheDir);
     expect(Buffer.from(second.body).equals(Buffer.from(first.body))).toBe(false);
     const names = await waitForWallFiles(cacheDir, 2);
@@ -800,7 +742,7 @@ describe('wall caching', () => {
 
     await writeFile(metaPath, JSON.stringify(meta));
     clearWallCache();
-    clearV4StepsCache();
+    clearStepsCache();
     const third = await deriveFor(root, runDir, SYN_ID, 'FourRooms-cont-v0', 64, cacheDir);
     expect(Buffer.from(third.body).equals(Buffer.from(first.body))).toBe(true);
   });
@@ -827,7 +769,7 @@ describe('wall caching', () => {
     const cacheDir = join(TMP, 'corrupt-store');
 
     clearWallCache();
-    const first = await deriveFor(root, runDir, SYN_ID, 'HalfCheetah-v4', 64, cacheDir);
+    const first = await deriveFor(root, runDir, SYN_ID, 'FourRooms-cont-v0', 64, cacheDir);
     const names = await waitForWallFiles(cacheDir, 1);
     const cachePath = join(cacheDir, names[0] ?? '');
     const onDisk = new Uint8Array(await Bun.file(cachePath).arrayBuffer());
@@ -840,7 +782,7 @@ describe('wall caching', () => {
     expect((await stat(cachePath)).size).toBe(onDisk.byteLength);
 
     clearWallCache();
-    const second = await deriveFor(root, runDir, SYN_ID, 'HalfCheetah-v4', 64, cacheDir);
+    const second = await deriveFor(root, runDir, SYN_ID, 'FourRooms-cont-v0', 64, cacheDir);
     expect(Buffer.from(second.body).equals(Buffer.from(flipped.subarray(flipped.indexOf(0x0a) + 1)))).toBe(false);
     expect(Buffer.from(second.body).equals(Buffer.from(first.body))).toBe(true);
     const { lanes } = await unpack(second.body);
@@ -854,7 +796,7 @@ describe('wall caching', () => {
     await deriveWall({
       id: SYN_ID,
       dir: SYN_RUN,
-      envId: 'HalfCheetah-v4',
+      envId: 'FourRooms-cont-v0',
       stride: 64,
       recordings,
       inFlight: true,
@@ -879,7 +821,7 @@ describe('selective chunk decoding', () => {
 
     const dir = join(SYN_RUN, 'FourRooms-cont-v0', 'seed7');
     const meta = await readLaneMeta(join(dir, 'meta.json'));
-    const raw = await parseActionsBinV4(await Bun.file(join(dir, 'actions.bin')).arrayBuffer(), meta);
+    const raw = await parseActionsBin(await Bun.file(join(dir, 'actions.bin')).arrayBuffer(), meta);
     const lane = lanes[0];
     if (lane === undefined) throw new Error('no lane');
     expectLaneMatches(lane, raw, 1000, 'skipped-chunk lane');
@@ -972,7 +914,7 @@ describe('selective chunk decoding', () => {
     if (head === undefined || lane === undefined) throw new Error('no lane');
     const dir = join(runDir, 'HalfCheetah-v4', `seed${head.seed}`);
     const meta = await readLaneMeta(join(dir, 'meta.json'));
-    const raw = await parseActionsBinV4(await Bun.file(join(dir, 'actions.bin')).arrayBuffer(), meta);
+    const raw = await parseActionsBin(await Bun.file(join(dir, 'actions.bin')).arrayBuffer(), meta);
     expectLaneMatches(lane, raw, 4096, `skipped-chunk seed ${head.seed}`);
   });
 
@@ -994,7 +936,7 @@ describe('selective chunk decoding', () => {
     await Bun.write(lanePath, bytes);
 
     clearWallCache();
-    clearV4StepsCache();
+    clearStepsCache();
     const { header, lanes } = await unpack(
       (await deriveFor(root, runDir, SYN_ID, 'FourRooms-cont-v0', 64)).body,
     );
@@ -1006,7 +948,7 @@ describe('selective chunk decoding', () => {
     expect(lanes[0]?.pose[(lanes[0].samples - 1) * 9]).toBe(799 % 11);
   });
 
-  it('keeps @sim/record4’s own lane checks — a meta that contradicts the file is an error', async () => {
+  it('keeps @sim/record’s own lane checks — a meta that contradicts the file is an error', async () => {
     const root = join(TMP, 'meta-lies');
     cpSync(SYN_BENCH, root, { recursive: true });
     const runDir = join(root, SYN_ID);
@@ -1027,7 +969,7 @@ describe('selective chunk decoding', () => {
     for (const [label, meta] of cases) {
       await writeFile(metaPath, JSON.stringify(meta));
       clearWallCache();
-      clearV4StepsCache();
+      clearStepsCache();
       const { header } = await unpack((await deriveFor(root, runDir, SYN_ID, 'FourRooms-cont-v0', 64)).body);
       const head = header.lanes[0];
       expect(`${label}: ${head?.error === undefined ? 'decoded' : 'error'}`).toBe(`${label}: error`);
@@ -1035,7 +977,7 @@ describe('selective chunk decoding', () => {
     }
     await writeFile(metaPath, JSON.stringify(good));
     clearWallCache();
-    clearV4StepsCache();
+    clearStepsCache();
     const { header } = await unpack((await deriveFor(root, runDir, SYN_ID, 'FourRooms-cont-v0', 64)).body);
     expect(header.lanes[0]?.error).toBeUndefined();
     expect(header.lanes[0]?.steps).toBe(SYN_STEPS);
@@ -1050,33 +992,6 @@ describe('budget ceilings', () => {
     return root;
   }
 
-  it('cuts a v3 lane that grew behind a stale index, and says it cut it', async () => {
-    const root = await staleRoot('stale-v3');
-    const runDir = join(root, SYN_ID);
-    const lanePath = join(runDir, 'HalfCheetah-v4', 'seed0', 'actions.bin');
-    const recordings = await scanRecordings(runDir, { root });
-    expect(recordings.find((r) => r.seed === 0 && r.envId === 'HalfCheetah-v4')?.steps).toBe(SYN_STEPS);
-
-    const grown = v3Bytes(5000, (row, i) => {
-      for (let p = 0; p < 9; p++) row[7 + p] = i * 0.01 + p;
-    });
-    await Bun.write(lanePath, grown);
-
-    clearWallCache();
-    const { header, lanes } = await unpack(
-      (await deriveWall({
-        id: SYN_ID, dir: runDir, envId: 'HalfCheetah-v4', stride: 64,
-        recordings, inFlight: false, cacheDir: null,
-      })).body,
-    );
-    const head = header.lanes[0];
-    expect(head?.steps).toBe(SYN_STEPS * WALL_LANE_OVERSHOOT);
-    expect(head?.truncated).toBe(true);
-    expect(head?.samples).toBe(expectedRows(SYN_STEPS * WALL_LANE_OVERSHOOT, 64).length);
-    expect(lanes[0]?.pose[(lanes[0].samples - 1) * 9]).toBeCloseTo((SYN_STEPS * 2 - 1) * 0.01, 4);
-    expect(header.lanes[1]?.truncated).toBeUndefined();
-    expect(header.lanes[1]?.steps).toBe(SYN_STEPS);
-  });
 
   it('cuts a v4 lane at a CHUNK boundary, so the wall never ends mid-chunk', async () => {
     const root = join(TMP, 'stale-v4');
@@ -1125,7 +1040,7 @@ describe('budget ceilings', () => {
     expect((head?.steps ?? 0) % 400).toBe(0);
     expect(head?.samples).toBe(expectedRows(SYN_STEPS * WALL_LANE_OVERSHOOT, 64).length);
     expect(header.chunkEvents?.[0]?.stepStart).toEqual([0, 400, 800, 1200, 1600, 2000]);
-    const raw = await parseActionsBinV4(
+    const raw = await parseActionsBin(
       await Bun.file(join(dir, 'actions.bin')).arrayBuffer(),
       await readLaneMeta(join(dir, 'meta.json')),
     );
@@ -1174,7 +1089,7 @@ describe.if(v4Present)(`wall over ${V4_ID} (v4, 64 lanes)`, () => {
   });
 
   for (const envId of ['HalfCheetah-v4', 'DeepSea-cont-v0', 'Pendulum-cont-v0'] as const) {
-    it(`${envId}: every sampled row is bit-equal to a direct parseActionsBinV4 decode`, async () => {
+    it(`${envId}: every sampled row is bit-equal to a direct parseActionsBin decode`, async () => {
       clearWallCache();
       const stride = 64;
       const { header, lanes } = await unpack(
@@ -1189,7 +1104,7 @@ describe.if(v4Present)(`wall over ${V4_ID} (v4, 64 lanes)`, () => {
         if (lane === undefined || head === undefined) throw new Error(`no lane ${idx}`);
         const dir = join(runDir, envId, `seed${head.seed}`);
         const meta = await readLaneMeta(join(dir, 'meta.json'));
-        const raw = await parseActionsBinV4(
+        const raw = await parseActionsBin(
           await Bun.file(join(dir, 'actions.bin')).arrayBuffer(),
           meta,
         );
@@ -1217,7 +1132,7 @@ describe.if(v4Present)(`wall over ${V4_ID} (v4, 64 lanes)`, () => {
 
     const dir = join(runDir, 'DeepSea-cont-v0', `seed${seed}`);
     const meta = await readLaneMeta(join(dir, 'meta.json'));
-    const raw = await parseActionsBinV4(await Bun.file(join(dir, 'actions.bin')).arrayBuffer(), meta);
+    const raw = await parseActionsBin(await Bun.file(join(dir, 'actions.bin')).arrayBuffer(), meta);
     let row = 0;
     for (let i = 0; i < events.stepCount.length; i++) {
       let count = 0;
@@ -1246,38 +1161,6 @@ describe.if(v4Present)(`wall over ${V4_ID} (v4, 64 lanes)`, () => {
       }
     }
   });
-});
-
-
-describe.if(demoPresent)(`wall over ${DEMO_ID} (v3)`, () => {
-  const runDir = join(REAL_BENCH, DEMO_ID);
-
-  for (const envId of ['FourRooms-cont-v0', 'MountainCar-cont-v0'] as const) {
-    it(`${envId}: every sampled row is bit-equal to a direct parseActionsBin decode`, async () => {
-      clearWallCache();
-      const stride = 64;
-      const { header, lanes } = await unpack(
-        (await deriveFor(REAL_BENCH, runDir, DEMO_ID, envId, stride)).body,
-      );
-      expect(lanes.length).toBe(8);
-      expect(header.chunkEvents).toBeUndefined();
-
-      for (const idx of [0, lanes.length - 1]) {
-        const lane = lanes[idx];
-        const head = header.lanes[idx];
-        if (lane === undefined || head === undefined) throw new Error(`no lane ${idx}`);
-        const dir = join(runDir, envId, `seed${head.seed}`);
-        const meta = await readLaneMeta(join(dir, 'meta.json'));
-        const raw = parseActionsBin(
-          new Uint8Array(await Bun.file(join(dir, 'actions.bin')).arrayBuffer()),
-          meta,
-        );
-        expect(raw.steps).toBe((await stat(join(dir, 'actions.bin'))).size / RECORD_BYTES);
-        expectLaneMatches(lane, raw, stride, `${envId} seed ${head.seed}`);
-        expect(lane.firstNonFiniteRow).toBe(referenceFirstNonFinite(raw.data, raw.steps));
-      }
-    });
-  }
 });
 
 
@@ -1460,7 +1343,7 @@ describe.if(v4XsPresent)(`wall over ${V4_XS_ID} (all 16 envs)`, () => {
       expect(head.steps).toBeGreaterThan(0);
       const dir = join(runDir, envId, `seed${head.seed}`);
       const meta = await readLaneMeta(join(dir, 'meta.json'));
-      const raw = await parseActionsBinV4(
+      const raw = await parseActionsBin(
         await Bun.file(join(dir, 'actions.bin')).arrayBuffer(),
         meta,
       );
