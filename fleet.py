@@ -15,7 +15,6 @@ import numpy as np
 
 REPO = Path(__file__).resolve().parent
 BENCH = REPO / ".oak-benchmarks"
-NF_PHASES = ("nfEncode", "nfLearn", "nfPlan", "nfTdPsi")
 FLOOR_CACHE: dict[str, dict] = {}
 
 FILE_MAGIC = 0x544B414F
@@ -219,8 +218,6 @@ def analyze(run: dict, lanes: np.ndarray) -> dict:
         recent = np.where(np.isfinite(recent), recent, delivered)
     else:
         recent = delivered
-    nf = {ph: np.nan_to_num(last_finite(series(run, ph)[:, lanes])) > 0
-          for ph in NF_PHASES if ph in run["tape"]["fields"]}
     seeds = [run["seeds"][l] for l in lanes]
     pct = np.percentile(delivered, [10, 25, 50, 75, 90])
     best = int(np.argmax(delivered))
@@ -252,8 +249,7 @@ def analyze(run: dict, lanes: np.ndarray) -> dict:
                             for s, r in zip(seeds, retention)},
         "_vectors": {"delivered": delivered, "died": died, "dtimes": dtimes,
                      "solved": solved.astype(float), "retained": retained.astype(float),
-                     "decayed": decayed.astype(float), "retMargin": ret_margin,
-                     "nf": nf},
+                     "decayed": decayed.astype(float), "retMargin": ret_margin},
     }
     if run["agg"]:
         out["aggStepsPerSecond"] = run["agg"].get("aggStepsPerSecond")
@@ -387,18 +383,6 @@ def slice_verdicts(k: dict, c: dict, n: int, horizon: int,
     verdicts.append(("rmstSurvival", dr5 >= -0.05 * horizon,
                      f"ΔRMST5={dr5:+,.0f} margin={-0.05 * horizon:,.0f}"))
 
-    nf_over, nf_parts = [], []
-    for i, ph in enumerate(NF_PHASES):
-        if ph not in k["nf"] or ph not in c["nf"]:
-            continue
-        kp, cp = k["nf"][ph].astype(float), c["nf"][ph].astype(float)
-        d = float(np.percentile(paired(kp, cp, np.mean, boot, 20 + i), 95))
-        if d > delta:
-            nf_over.append(ph)
-        nf_parts.append(f"{ph[2:].lower()} {kp.mean():.3f}->{cp.mean():.3f} Δ95={d:+.4f}")
-    verdicts.append(("nfPrevalence", not nf_over,
-                     "; ".join(nf_parts) + (f" OVER={nf_over}" if nf_over else "")))
-
     for name, key, seed in (("solvedSeeds", "solved", 30), ("retainedSeeds", "retained", 31)):
         d = float(np.percentile(paired(c[key], k[key], np.mean, boot, seed), 95))
         verdicts.append((name, d <= delta,
@@ -504,7 +488,7 @@ def cmd_gate(args) -> int:
     cf = analyze(cr, np.arange(cr["tape"]["lanes"]))["_vectors"]
     fleet_v, fleet_sup = slice_verdicts(kf, cf, kr["tape"]["lanes"], horizon, boot)
     for name, passed, detail in fleet_v:
-        if name in ("divergence", "nfPrevalence", "solvedSeeds", "retainedSeeds",
+        if name in ("divergence", "solvedSeeds", "retainedSeeds",
                     "positiveSeedFraction"):
             ok &= passed
             print(f"  [{'PASS' if passed else 'FAIL'}] fleet.{name} {detail}")

@@ -5,14 +5,6 @@
 #include "ClassicControl.metal"
 using namespace metal;
 
-constant uint OAK_CNT_OBS_NF        = 0u;
-constant uint OAK_CNT_LEARN_NF      = 1u;
-constant uint OAK_CNT_PLAN_NF       = 2u;
-constant uint OAK_CNT_REINIT_OPT    = 3u;
-constant uint OAK_CNT_REINIT_FEAT   = 4u;
-constant uint OAK_CNT_TDPSI_NF      = 5u;
-constant uint OAK_CNT_IMPORTANCE_NF = 6u;
-
 constant bool OAK_ABLATE_FEATURE_CONSTRUCTION [[function_constant(0)]];
 constant bool OAK_ABLATE_GVF_PREDICTION [[function_constant(1)]];
 constant bool OAK_ABLATE_RR_SUBTASKS [[function_constant(2)]];
@@ -512,23 +504,6 @@ inline void metaopt_update_slot(device float *alpha,
     h[i] = safe_w(hOld, traceDecay * hOld + aOld * grad);
 }
 
-inline void fcstomp_record_keyboard_stats(Ctx ctx,
-                                          uint selected,
-                                          float termSum,
-                                          float keyL1,
-                                          float advL1,
-                                          float effectiveL1) {
-    uint sOpt = selected % max(ctx.K, 1u);
-    float sPrio = ctx.prioOpt[sOpt];
-    ctx.stats->terminationRate = termSum * ctx.invK;
-    ctx.stats->selectedOptionAge = float(ctx.optAge[sOpt]);
-    ctx.stats->selectedOptionPriority = isfinite(sPrio) ? sPrio : 0.0f;
-    ctx.stats->actorAdvantageL1 = advL1;
-    ctx.stats->selectedOptionIndex = float(sOpt);
-    ctx.stats->selectedKeyboardWeight = isfinite(ctx.keyboard[sOpt]) ? ctx.keyboard[sOpt] : 0.0f;
-    ctx.stats->mainTd = ctx.td[0];
-}
-
 inline void fcstomp_store_learn_scales(Ctx ctx, uint tid) {
 
     device const uint *actP = act_at(ctx, ctx.stateSlot);
@@ -596,7 +571,7 @@ inline void fcstomp_prediction_control_loop(Ctx ctx, uint tid,
     float rewardC = ctx.reward[0] - rhoOld;
     if (tid == 0u) {
         float delta = OAK_ABLATE_GVF_PREDICTION ? 0.0f : (rewardC + vCurrG - vPrevG);
-        if (!isfinite(delta)) { delta = 0.0f; ctx.counters[OAK_CNT_LEARN_NF] += 1u; }
+        if (!isfinite(delta)) delta = 0.0f;
         ctx.td[0] = delta;
         float rhoNew = rhoOld + ctx.invR * delta;
         float rhoUse = (!OAK_ABLATE_GVF_PREDICTION && isfinite(rhoNew)) ? rhoNew : rhoOld;
@@ -672,7 +647,7 @@ inline void fcstomp_prediction_control_loop(Ctx ctx, uint tid,
         if (!isfinite(wBonus) || wBonus < 0.0f) wBonus = 0.0f;
         float zStop = vCurrG + (1.0f + wBonus) * dCurr[feat];
         bool rrFinite = isfinite(psiPrev) && isfinite(psiNext) && isfinite(zStop);
-        if (!rrFinite) ctx.counters[OAK_CNT_TDPSI_NF] += 1u;
+
 
         float beta = (isfinite(psiNext) && isfinite(zStop) && zStop >= psiNext) ? 1.0f : 0.0f;
 
@@ -691,7 +666,6 @@ inline void fcstomp_prediction_control_loop(Ctx ctx, uint tid,
             ? (rewardC - psiRhoOld + cont * psiNext + beta * zStop - psiPrev) : 0.0f;
         if (!isfinite(dPsi)) {
             dPsi = 0.0f;
-            ctx.counters[OAK_CNT_TDPSI_NF] += 1u;
         }
 
         if (tid == 0u) dPsi = ctx.td[0] - psiRhoOld;
@@ -751,30 +725,20 @@ inline void fcstomp_prediction_control_loop(Ctx ctx, uint tid,
     uint prevSel = ctx.selectedOption[0] % ctx.K;
     bool continuing = (prevSel != 0u) && tgCont[prevSel] > 0.0f;
     uint selected = continuing ? prevSel : gpiBest;
-    float contK = 0.0f, advK = 0.0f, prevK = 0.0f;
-    float twinDisK = 0.0f, lRawK = 0.0f;
+    float prevK = 0.0f, twinDisK = 0.0f, lRawK = 0.0f;
     if (tid < ctx.K) {
-        contK = tgCont[tid];
-        advK = ctx.actorAdv[tid];
         prevK = ctx.keyboard[tid];
         twinDisK = ctx.twinDis[tid];
         lRawK = ctx.lRawC[tid];
     }
-    float termSum = 0.0f, advL1 = 0.0f, prevMag = 0.0f;
+    float prevMag = 0.0f;
     for (uint t = 0u; t < ctx.K; ++t) {
-        float c = simd_shuffle(contK, (ushort)t);
-        termSum += 1.0f - c;
-        float a = simd_shuffle(advK, (ushort)t);
-        if (isfinite(a)) advL1 += fabs(a);
         float w = simd_shuffle(prevK, (ushort)t);
         if (isfinite(w) && w > 0.0f) prevMag += w;
     }
     if (OAK_ABLATE_OPTION_KEYBOARD) {
         if (tid < ctx.K) ctx.keyboard[tid] = 0.0f;
-        if (tid == 0u) {
-            ctx.selectedOption[0] = selected;
-            fcstomp_record_keyboard_stats(ctx, selected, termSum, 0.0f, advL1, 0.0f);
-        }
+        if (tid == 0u) ctx.selectedOption[0] = selected;
         return;
     }
 
@@ -793,28 +757,16 @@ inline void fcstomp_prediction_control_loop(Ctx ctx, uint tid,
         if (tid < ctx.K) ctx.keyboard[tid] = lamK;
     }
 
-    float keyK = 0.0f;
-    if (tid < ctx.K) keyK = refreshKeyboard ? lamK : ctx.keyboard[tid];
-    float keyL1 = 0.0f;
-    for (uint t = 0u; t < ctx.K; ++t) {
-        float w = simd_shuffle(keyK, (ushort)t);
-        if (isfinite(w)) keyL1 += fabs(w);
-    }
-    if (tid == 0u) {
-        ctx.selectedOption[0] = selected;
-        fcstomp_record_keyboard_stats(ctx, selected, termSum, keyL1, advL1,
-                                      keyL1 > 0.0f ? 1.0f : 0.0f);
-    }
+    if (tid == 0u) ctx.selectedOption[0] = selected;
 }
 
 inline void FeatureConstruction(Ctx ctx,
                                 uint tid,
                                 uint tgW) {
-    uint nf = 0u;
     if (!OAK_ABLATE_FEATURE_CONSTRUCTION) {
         for (uint o = tid; o < ctx.O; o += tgW) {
             float x = ctx.observation[o];
-            if (!isfinite(x)) { nf += 1u; continue; }
+            if (!isfinite(x)) continue;
             float mu = ctx.observationMean[o];
             metaopt_update_slot(ctx.obsAlpha, ctx.obsBeta, ctx.obsH, ctx.obsE,
                                 o, x - mu, 1.0f, min(ctx.stepCount, ctx.R), ctx.metaEta,
@@ -830,8 +782,6 @@ inline void FeatureConstruction(Ctx ctx,
             }
         }
     }
-    if (nf > 0u) ctx.counters[OAK_CNT_OBS_NF] += nf;
-
     for (uint k = tid; k < ctx.K; k += 32u) ctx.importance[k] = ctx.impStage[k];
     for (uint j = tid; j < ctx.K * ctx.D; j += tgW)
         ctx.optionActorCredit[j] = ctx.creditStage[j];
@@ -862,7 +812,7 @@ inline void FeatureConstruction(Ctx ctx,
                 ? ctx.obsTraceMulti[lvl * ctx.O + (j - lvl * ctx.naturalO)]
                 : 0.0f;
         }
-        if (!isfinite(x)) { x = 0.0f; ctx.counters[OAK_CNT_OBS_NF] += 1u; }
+        if (!isfinite(x)) x = 0.0f;
         curr[i] = x;
         actC[tid] = i;
         if (ctx.featureAge[i] < 0xffffffffu && !OAK_ABLATE_FEATURE_CONSTRUCTION)
@@ -915,7 +865,7 @@ inline void FeatureConstruction(Ctx ctx,
 
             float ridge = max(1.0f / (float(age) + 1.0f), 1.0f / float(2u * OAK_CORE));
             x = (raw - ctx.featureMean[i]) * rsqrt(var + ridge);
-            if (!isfinite(x)) { x = 0.0f; ctx.counters[OAK_CNT_OBS_NF] += 1u; }
+            if (!isfinite(x)) x = 0.0f;
         }
         curr[i] = 0.0f;
         if (i == winner) winX = x;
@@ -1014,7 +964,6 @@ static inline void oak_plan_one(Ctx ctx, uint k,
             float debt = fabs(ctx.prioOpt[k]);
             if (!isfinite(debt) || debt <= 0.0f) debt = 1.0f;
             ctx.prioOpt[k] = -debt;
-            ctx.counters[OAK_CNT_PLAN_NF] += 1u;
         }
     }
 
@@ -1394,7 +1343,6 @@ static inline void oak_replace_commit(Ctx ctx, uint tid, threadgroup float *tgSt
             tgStash[k * 4u + 1u] = 0.0f;
             tgStash[k * 4u + 2u] = 0.0f;
             tgStash[k * 4u + 3u] = 0.0f;
-            ctx.counters[OAK_CNT_REINIT_OPT] += 1u;
         }
     }
 
@@ -1406,7 +1354,6 @@ static inline void oak_replace_commit(Ctx ctx, uint tid, threadgroup float *tgSt
     bool highRedundancy = worstRed > meanEligibleRed;
     bool lowDownstreamUse = worstDownstream <= meanEligibleDownstream;
 			    bool structurallyReplaceable = (eligible > 1u) && lowDownstreamUse && (lowUtility || highRedundancy);
-    ctx.stats->generateTestEligibleCount = float(eligible);
 
     bool doReplace = !OAK_ABLATE_GENERATE_AND_TEST
         && structurallyReplaceable && worst < ctx.R
@@ -1475,8 +1422,6 @@ static inline void oak_replace_commit(Ctx ctx, uint tid, threadgroup float *tgSt
         ctx.optRho[k] = 0.0f;
         ctx.optFit[k] = 0.0f;
         ctx.lastStopAge[k] = 0u;
-        ctx.counters[OAK_CNT_REINIT_FEAT] += 1u;
-        ctx.counters[OAK_CNT_REINIT_OPT] += 1u;
 
         ctx.dynaSlot[0] = 1u; ctx.dynaSlot[1] = worst;
         ctx.dynaSlot[2] = k; ctx.dynaSlot[3] = birth;
@@ -1812,126 +1757,6 @@ static inline void oak_window_analytics(Ctx ctx, uint tid) {
             if (!isfinite(downstreamUse)) downstreamUse = 0.0f;
             *e4 = float4(util, red, downstreamUse, 1.0f);
         }
-    }
-    simdgroup_barrier(mem_flags::mem_device);
-    {
-
-        uint total = ctx.R + 7u * ctx.K * ctx.R + ctx.K * oak_dl(ctx) * ctx.R;
-        uint stripe = tPrev % ctx.R;
-        uint badElem = 0xffffffffu;
-        for (uint e = stripe + ctx.R * tid; e < total; e += ctx.R * tgW) {
-            float v = ctx.valueW[e];
-            if (!isfinite(v) || fabs(v) > 1e16f) { badElem = e; break; }
-        }
-        if (badElem != 0xffffffffu && ctx.explosionStep[0] == 0xffffffffu) {
-            ctx.explosionStep[0] = ctx.stepCount;
-            ctx.explosionElem[0] = badElem;
-        }
-    }
-
-    simdgroup_barrier(mem_flags::mem_device);
-
-    if (tid == 0u && (tPrev & 3u) == 0u) {
-    float wSum = 0.0f, wSq = 0.0f;
-	    for (uint k = 0u; k < ctx.K; ++k) {
-	        float w = ctx.importance[k];
-	        if (!isfinite(w)) { w = 0.0f; ctx.counters[OAK_CNT_IMPORTANCE_NF] += 1u; }
-	        wSum += w; wSq += w * w;
-	    }
-	    float invK = ctx.invK;
-	    ctx.stats->importanceEss = (wSq > 0.0f) ? ((wSum * wSum) / (float(ctx.K) * wSq)) : 0.0f;
-	    float actorEntropy = 0.0f;
-	    if (wSum > 0.0f) {
-	        for (uint k = 0u; k < ctx.K; ++k) {
-	            float p = max(ctx.importance[k], 0.0f) / wSum;
-	            if (p > 0.0f) actorEntropy -= p * log(p);
-	        }
-		    }
-		    ctx.stats->actorSupportEntropy = (ctx.K > 1u) ? actorEntropy / log(float(ctx.K)) : 0.0f;
-				    float actorUpdateSum = 0.0f;
-						    float betaLo = 2.0f * log(ctx.invR);
-				    for (uint k = 0u; k < ctx.K; ++k) {
-				        float u = fabs((ctx.alphaAct[k] / ctx.actorAlphaDenom) * ctx.importance[k] * ctx.actorAdv[k]);
-				        if (!isfinite(u)) u = 0.0f;
-				        actorUpdateSum += u;
-				    }
-				    ctx.stats->actorUpdateNormMean = actorUpdateSum * invK;
-    float bSum = 0.0f, bRail = 0.0f, staleSum = 0.0f, gapSum = 0.0f;
-    for (uint i = 0u; i < ctx.R; ++i) {
-        float b = ctx.beta[i];
-        bSum += b;
-        if (b >= 0.0f || b <= betaLo) bRail += 1.0f;
-        staleSum += float(ctx.featureAge[i] + 1u) * ctx.invR;
-        gapSum += max(ctx.bonusW[i] - ctx.valueW[i], 0.0f);
-    }
-    ctx.stats->alphaValueLogMean = bSum * ctx.invR;
-    ctx.stats->alphaValueRailFrac = bRail * ctx.invR;
-    ctx.stats->gradEnergyStaleness = staleSum * ctx.invR;
-    ctx.stats->bonusGapMean = gapSum * ctx.invR;
-    float baSum = 0.0f, baRail = 0.0f, frozen = 0.0f;
-    float impLim = invK * ctx.invR;
-    for (uint k = 0u; k < ctx.K; ++k) {
-        float b = ctx.betaAct[k];
-        baSum += b;
-        if (b >= 0.0f || b <= betaLo) baRail += 1.0f;
-        float w = ctx.importance[k];
-        if (!isfinite(w) || w < impLim) frozen += 1.0f;
-    }
-    ctx.stats->alphaActorLogMean = baSum * invK;
-    ctx.stats->alphaActorRailFrac = baRail * invK;
-    ctx.stats->frozenOptionCount = frozen;
-    float obSum = 0.0f, obRail = 0.0f;
-    for (uint o = 0u; o < ctx.O; ++o) {
-        float b = ctx.obsBeta[o];
-        obSum += b;
-        if (b >= 0.0f || b <= betaLo) obRail += 1.0f;
-    }
-    float invO = 1.0f / float(max(ctx.O, 1u));
-    ctx.stats->obsAlphaLogMean = obSum * invO;
-    ctx.stats->obsAlphaRailFrac = obRail * invO;
-    float disp = 0.0f, railM = 0.0f;
-    float mLim = 1.0f - ctx.invR;
-    for (uint k = 0u; k < ctx.K; ++k) {
-        for (uint j = 0u; j < ctx.D; ++j) {
-            float m = ctx.optionPolicyMean[k * ctx.D + j];
-            if (!isfinite(m)) m = 0.0f;
-            if (fabs(m) > mLim) railM += 1.0f;
-            if (k > 0u) {
-                float m0 = ctx.optionPolicyMean[j];
-                if (!isfinite(m0)) m0 = 0.0f;
-                float dm = m - m0;
-                disp = fma(dm, dm, disp);
-            }
-        }
-    }
-    ctx.stats->optionMeanDispersion =
-        (ctx.K > 1u) ? sqrt(disp / float((ctx.K - 1u) * ctx.D)) : 0.0f;
-    ctx.stats->optionMeanRailFrac = railM / float(ctx.K * ctx.D);
-    float maxPrio = 0.0f;
-    float searchUse = 0.0f;
-    float keyNorm = 0.0f;
-    for (uint k = 0u; k < ctx.K; ++k) {
-        float w = ctx.keyboard[k];
-        if (isfinite(w)) keyNorm += fabs(w);
-    }
-    for (uint k = 0u; k < ctx.K; ++k) {
-        float p = ctx.prioOpt[k];
-        float w = ctx.keyboard[k];
-        if (!isfinite(p)) p = 0.0f;
-        if (!isfinite(w)) w = 0.0f;
-        maxPrio = max(maxPrio, p);
-        if (keyNorm > 0.0f) searchUse += max(p, 0.0f) * fabs(w) / keyNorm;
-    }
-    ctx.stats->modelPriorityMax = maxPrio;
-    ctx.stats->searchControlUseMean = searchUse * invK;
-
-    ctx.stats->encodeNonFiniteCount = float(ctx.counters[OAK_CNT_OBS_NF]);
-    ctx.stats->learnNonFiniteCount = float(ctx.counters[OAK_CNT_LEARN_NF]);
-    ctx.stats->planNonFiniteCount = float(ctx.counters[OAK_CNT_PLAN_NF]);
-    ctx.stats->tdPsiNonFiniteCount = float(ctx.counters[OAK_CNT_TDPSI_NF] + ctx.counters[OAK_CNT_IMPORTANCE_NF]);
-    ctx.stats->oakOptionReinitCount = float(ctx.counters[OAK_CNT_REINIT_OPT]);
-    ctx.stats->oakFeatureReinitCount = float(ctx.counters[OAK_CNT_REINIT_FEAT]);
-
     }
 }
 

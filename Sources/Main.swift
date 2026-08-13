@@ -146,6 +146,168 @@ struct ShapeProbe {
   var uOptFeature, uFeatureAge, uParentA, uParentB, uKind, uExplosionStep, uNurParentA: UInt32
   var invRank, invOptionCount, metaEta, sampleSigma, sampleInv2S2, actorAlphaDenom: Float
 }
+struct RewardSlices {
+  let state: [(Int, Int)]
+  let uints: [(Int, Int)]
+  init(_ sp: ShapeProbe, o: Int, d: Int) {
+    let R = Int(sp.rank), K = Int(sp.optionCount), Rn = Int(sp.nursery)
+    let T = Int(sp.traceLevels), O = o, D = d
+    var s = 0
+    var keepS: [(Int, Int)] = []
+    func keep(_ n: Int) -> Int {
+      let a = s
+      s += n
+      keepS.append((a, n))
+      return a
+    }
+    func drop(_ n: Int) -> Int {
+      let a = s
+      s += n
+      return a
+    }
+    let stObs = keep(O)
+    _ = keep(O)
+    _ = keep(O)
+    _ = keep(O)
+    _ = keep(O)
+    _ = keep(O)
+    _ = keep(O)
+    _ = keep(2 * R)
+    let stPolicyMean = keep(D)
+    _ = keep(D)
+    _ = keep(D)
+    _ = keep(K * D)
+    let stOptionPolicyMean = keep(K * D)
+    _ = keep(K)
+    _ = keep(1)
+    _ = keep(1)
+    _ = keep(K)
+    _ = keep(R)
+    let stUtilOpt = keep(K)
+    _ = keep(R)
+    _ = keep(R)
+    _ = keep(R)
+    let stAlpha = keep(R)
+    let stBeta = keep(R)
+    _ = keep(R)
+    _ = keep(R)
+    let stAlphaPsi = keep(R)
+    let stBetaPsi = keep(R)
+    _ = keep(R)
+    _ = keep(R)
+    let stAlphaModel = keep(R)
+    let stBetaModel = keep(R)
+    _ = keep(R)
+    _ = keep(R)
+    _ = keep(K)
+    _ = keep(K)
+    _ = keep(K)
+    _ = keep(T * O)
+    _ = keep(K)
+    _ = keep(K)
+    _ = keep(K)
+    _ = keep(1)
+    _ = keep(K)
+    _ = keep(1)
+    _ = keep(1)
+    _ = keep(K)
+    _ = keep(K)
+    _ = keep(K)
+    _ = keep(K)
+    _ = keep(K)
+    let stAlphaAct = keep(K)
+    let stBetaAct = keep(K)
+    _ = keep(K)
+    _ = keep(K)
+    _ = keep(K)
+    _ = keep(K * D)
+    _ = drop(8)
+    _ = drop(K)
+    _ = drop(K)
+    _ = drop(K)
+    _ = drop(K)
+    _ = drop(K)
+    _ = drop(K)
+    _ = drop(K)
+    _ = drop(K)
+    _ = drop(1)
+    s = (s + 3) & ~3
+    _ = keep(4 * Rn)
+    _ = drop(K * D)
+    _ = drop(K * max(D / 2, 1))
+    _ = drop(R)
+    s = (s + 3) & ~3
+    _ = drop(4 * R)
+    _ = drop(16)
+    _ = drop(4)
+    var u = 0
+    var keepU: [(Int, Int)] = []
+    func ukeep(_ n: Int) -> Int {
+      let a = u
+      u += n
+      keepU.append((a, n))
+      return a
+    }
+    func udrop(_ n: Int) -> Int {
+      let a = u
+      u += n
+      return a
+    }
+    _ = udrop(7)
+    let uOptFeature = ukeep(K)
+    let uFeatureAge = ukeep(R)
+    _ = ukeep(K)
+    let uParentA = ukeep(R)
+    let uParentB = ukeep(R)
+    let uKind = ukeep(R)
+    _ = ukeep(R)
+    _ = ukeep(1)
+    _ = ukeep(1)
+    let uExplosionStep = udrop(1)
+    _ = udrop(1)
+    _ = ukeep(K)
+    let uNurParentA = ukeep(Rn)
+    _ = ukeep(Rn)
+    _ = ukeep(Rn)
+    _ = ukeep(Rn)
+    _ = ukeep(2 * 96)
+    _ = ukeep(4)
+    _ = ukeep(K)
+    precondition(stObs == Int(sp.stObs), "stObs drift")
+    precondition(stPolicyMean == Int(sp.stPolicyMean), "stPolicyMean drift")
+    precondition(stOptionPolicyMean == Int(sp.stOptionPolicyMean), "stOptionPolicyMean drift")
+    precondition(stUtilOpt == Int(sp.stUtilOpt), "stUtilOpt drift")
+    precondition(stAlpha == Int(sp.stAlpha), "stAlpha drift")
+    precondition(stBeta == Int(sp.stBeta), "stBeta drift")
+    precondition(stAlphaPsi == Int(sp.stAlphaPsi), "stAlphaPsi drift")
+    precondition(stBetaPsi == Int(sp.stBetaPsi), "stBetaPsi drift")
+    precondition(stAlphaModel == Int(sp.stAlphaModel), "stAlphaModel drift")
+    precondition(stBetaModel == Int(sp.stBetaModel), "stBetaModel drift")
+    precondition(stAlphaAct == Int(sp.stAlphaAct), "stAlphaAct drift")
+    precondition(stBetaAct == Int(sp.stBetaAct), "stBetaAct drift")
+    precondition(uOptFeature == Int(sp.uOptFeature), "uOptFeature drift")
+    precondition(uFeatureAge == Int(sp.uFeatureAge), "uFeatureAge drift")
+    precondition(uParentA == Int(sp.uParentA), "uParentA drift")
+    precondition(uParentB == Int(sp.uParentB), "uParentB drift")
+    precondition(uKind == Int(sp.uKind), "uKind drift")
+    precondition(uExplosionStep == Int(sp.uExplosionStep), "uExplosionStep drift")
+    precondition(uNurParentA == Int(sp.uNurParentA), "uNurParentA drift")
+    func merge(_ xs: [(Int, Int)]) -> [(Int, Int)] {
+      let sorted = xs.sorted { $0.0 < $1.0 }
+      var out: [(Int, Int)] = []
+      for (a, n) in sorted {
+        if let last = out.last, last.0 + last.1 == a {
+          out[out.count - 1] = (last.0, last.1 + n)
+        } else {
+          out.append((a, n))
+        }
+      }
+      return out
+    }
+    state = merge(keepS)
+    uints = merge(keepU)
+  }
+}
 func flopTraces(_ o: Int) -> Int {
   Int(log2(Double(max(o, 1)))) + 1
 }
@@ -301,6 +463,7 @@ final class Engine {
         off: sp, paramTotal: Int(sp.paramStride), stateTotal: Int(sp.stateStride),
         uintTotal: Int(sp.uintStride), paramBase: pBase, stateBase: sBase, uintBase: uBase,
         configB: cfgB)
+      _ = RewardSlices(sp, o: naturalO, d: dk)
       built.append(kd)
       for l in r.firstLane..<(r.firstLane + r.count) { laneIdx[l] = built.count - 1 }
       pBase += r.count * kd.paramTotal
@@ -394,16 +557,28 @@ final class Engine {
     var nc = cfg.nurseryCount
     constants.setConstantValue(&nc, type: .uint, index: 28)
   }
-  func stateHashes(_ lane: Int) -> [String: String] {
+  func stateHashes(_ lane: Int, laneBytes: UnsafeRawPointer) -> [String: String] {
     func hex(_ base: UnsafeRawPointer, _ bytes: Int) -> String {
       sha256Hex(UnsafeRawBufferPointer(start: base, count: bytes))
     }
+    func hexSlices(_ base: UnsafeRawPointer, _ elem: Int, _ ranges: [(Int, Int)]) -> String {
+      var h = SHA256()
+      for (off, n) in ranges {
+        h.update(
+          bufferPointer: UnsafeRawBufferPointer(start: base + off * elem, count: n * elem))
+      }
+      return h.finalize().map { String(format: "%02x", $0) }.joined()
+    }
     let kd = kind(of: lane)
+    let slices = RewardSlices(kd.off, o: kd.naturalO, d: kd.d)
     return [
       "params": hex(paramPtr(lane), kd.paramTotal * MemoryLayout<Float>.stride),
       "state": hex(statePtr(lane), kd.stateTotal * MemoryLayout<Float>.stride),
       "uints": hex(uintPtr(lane), kd.uintTotal * MemoryLayout<UInt32>.stride),
       "scalars": hex(scalars + lane, MemoryLayout<KernelScalars>.stride),
+      "stateReward": hexSlices(statePtr(lane), MemoryLayout<Float>.stride, slices.state),
+      "uintsReward": hexSlices(uintPtr(lane), MemoryLayout<UInt32>.stride, slices.uints),
+      "lane": hex(laneBytes, fleetLaneStride),
     ]
   }
 }
@@ -718,16 +893,7 @@ final class MetricsTapeWriter {
   static let segMagic: UInt32 = 0x54_4745_53
   static let fields: [String] = [
     "rewardSum", "doneCount", "rewardRate", "kernelRho", "deltaSum",
-    "deltaPeak", "mainTd", "actorSupportEntropy", "terminationRate",
-    "alphaValueRailFrac", "alphaValueLogMean", "actorAdvantageL1",
-    "modelPriorityMax", "importanceEss", "actorUpdateNormMean",
-    "searchControlUseMean", "selectedOptionPriority", "gradEnergyStaleness",
-    "generateTestEligibleCount", "featureReinitCount", "optionReinitCount",
-    "nfEncode", "nfLearn", "nfPlan", "nfTdPsi",
-    "alphaActorLogMean", "alphaActorRailFrac", "optionMeanDispersion",
-    "optionMeanRailFrac", "bonusGapMean", "frozenOptionCount",
-    "obsAlphaLogMean", "obsAlphaRailFrac",
-    "paramAbsMax",
+    "deltaPeak", "paramAbsMax",
   ]
   private let handle: FileHandle
   private let laneCount: Int
@@ -769,33 +935,6 @@ final class MetricsTapeWriter {
     push { $0.scalars.rho }
     push { $0.deltaSum }
     push { $0.deltaPeak }
-    push { $0.stats.mainTd }
-    push { $0.stats.actorSupportEntropy }
-    push { $0.stats.terminationRate }
-    push { $0.stats.alphaValueRailFrac }
-    push { $0.stats.alphaValueLogMean }
-    push { $0.stats.actorAdvantageL1 }
-    push { $0.stats.modelPriorityMax }
-    push { $0.stats.importanceEss }
-    push { $0.stats.actorUpdateNormMean }
-    push { $0.stats.searchControlUseMean }
-    push { $0.stats.selectedOptionPriority }
-    push { $0.stats.gradEnergyStaleness }
-    push { $0.stats.generateTestEligibleCount }
-    push { $0.stats.oakFeatureReinitCount }
-    push { $0.stats.oakOptionReinitCount }
-    push { $0.stats.encodeNonFiniteCount }
-    push { $0.stats.learnNonFiniteCount }
-    push { $0.stats.planNonFiniteCount }
-    push { $0.stats.tdPsiNonFiniteCount }
-    push { $0.stats.alphaActorLogMean }
-    push { $0.stats.alphaActorRailFrac }
-    push { $0.stats.optionMeanDispersion }
-    push { $0.stats.optionMeanRailFrac }
-    push { $0.stats.bonusGapMean }
-    push { $0.stats.frozenOptionCount }
-    push { $0.stats.obsAlphaLogMean }
-    push { $0.stats.obsAlphaRailFrac }
     push { $0.paramNonFinite != 0 ? Float.infinity : $0.paramAbsMax }
     pendingWindows += 1
   }
@@ -835,6 +974,7 @@ final class MetricsTapeWriter {
     do {
       switch CommandLine.arguments.dropFirst().first {
       case "benchmark": try benchmark()
+      case "compare-hashes": try compareHashes()
       case "physics-probe": try physicsProbe()
       case "gridworld-probe": try gridworldProbe()
       case "record-v4-probe": try recordV4Probe()
@@ -1211,45 +1351,11 @@ final class MetricsTapeWriter {
     func now() -> Double { Double(DispatchTime.now().uptimeNanoseconds - wallStart) / 1e9 }
     func health(_ snap: LaneSnapshot, lane: Int) -> [String: Any] {
       let adm = Double(snap.deltaSum) / Double(max(Int(snap.steps), 1))
-      var h: [String: Any] = [
+      return [
         "rewardRate": snap.rho.isFinite ? Double(snap.rho) : NSNull(),
         "actionDeltaL2Mean": adm.isFinite ? adm : NSNull(),
         "actionDeltaPeak": snap.deltaPeak.isFinite ? Double(snap.deltaPeak) : NSNull(),
       ]
-      if engine != nil {
-        let s = snap.stats
-        func f(_ x: Float) -> Any { x.isFinite ? Double(x) : NSNull() }
-        h["oakOptionReinitCountFinal"] = Int(s.oakOptionReinitCount)
-        h["oakFeatureReinitCountFinal"] = Int(s.oakFeatureReinitCount)
-        h["nonFiniteByPhase"] = [
-          "encode": Int(s.encodeNonFiniteCount), "learn": Int(s.learnNonFiniteCount),
-          "plan": Int(s.planNonFiniteCount), "tdPsi": Int(s.tdPsiNonFiniteCount),
-        ]
-        h["terminationRate"] = f(s.terminationRate)
-        h["importanceEss"] = f(s.importanceEss)
-        h["actorUpdateNormMean"] = f(s.actorUpdateNormMean)
-        h["actorSupportEntropy"] = f(s.actorSupportEntropy)
-        h["modelPriorityMax"] = f(s.modelPriorityMax)
-        h["selectedOptionAge"] = f(s.selectedOptionAge)
-        h["selectedOptionPriority"] = f(s.selectedOptionPriority)
-        h["alphaValueLogMean"] = f(s.alphaValueLogMean)
-        h["actorAdvantageL1"] = f(s.actorAdvantageL1)
-        h["selectedOptionIndex"] = f(s.selectedOptionIndex)
-        h["gradEnergyStaleness"] = f(s.gradEnergyStaleness)
-        h["selectedKeyboardWeight"] = f(s.selectedKeyboardWeight)
-        h["mainTd"] = f(s.mainTd)
-        h["planTd"] = f(s.planTdValue)
-        h["alphaValueRailFrac"] = f(s.alphaValueRailFrac)
-        h["searchControlUseMean"] = f(s.searchControlUseMean)
-        h["generateTestEligibleCount"] = f(s.generateTestEligibleCount)
-        h["alphaActorLogMean"] = f(s.alphaActorLogMean)
-        h["alphaActorRailFrac"] = f(s.alphaActorRailFrac)
-        h["optionMeanDispersion"] = f(s.optionMeanDispersion)
-        h["optionMeanRailFrac"] = f(s.optionMeanRailFrac)
-        h["bonusGapMean"] = f(s.bonusGapMean)
-        h["frozenOptionCount"] = f(s.frozenOptionCount)
-      }
-      return h
     }
     final class DrainErr: @unchecked Sendable {
       private let lock = NSLock()
@@ -1346,10 +1452,6 @@ final class MetricsTapeWriter {
               detector = "kernelRho"
             }
           }
-          if let eng = engine, detector == "paramNonFinite" || detector == "paramExplosion" {
-            let ex = eng.uintPtr(lane)[Int(eng.kind(of: lane).off.uExplosionStep)]
-            if ex != UInt32.max { dStep = Int(ex) }
-          }
           if let det = detector {
             st.deadStep[lane] = dStep
             st.deadDetector[lane] = det
@@ -1359,26 +1461,10 @@ final class MetricsTapeWriter {
               "lastGoodRewardRate": dRho.isFinite ? dRho : NSNull(),
             ]
             if engine != nil {
-              let s = snap.stats
-              row["nfByPhase"] = [
-                "encode": Int(s.encodeNonFiniteCount), "learn": Int(s.learnNonFiniteCount),
-                "plan": Int(s.planNonFiniteCount), "tdPsi": Int(s.tdPsiNonFiniteCount),
-              ]
-              row["actorSupportEntropy"] =
-                s.actorSupportEntropy.isFinite ? Double(s.actorSupportEntropy) : NSNull()
-              row["terminationRate"] =
-                s.terminationRate.isFinite ? Double(s.terminationRate) : NSNull()
               row["rhoAtDeath"] =
                 snap.scalars.rho.isFinite ? Double(snap.scalars.rho) : NSNull()
               let pm = snap.paramNonFinite != 0 ? Double.infinity : Double(snap.paramAbsMax)
               row["paramAbsMax"] = pm.isFinite ? pm : NSNull()
-              if let eng = engine {
-                let up = eng.uintPtr(lane)
-                let ex = up[Int(eng.kind(of: lane).off.uExplosionStep)]
-                let el = up[Int(eng.kind(of: lane).off.uExplosionStep) + 1]
-                row["explosionStep"] = ex != UInt32.max ? Int(ex) : NSNull()
-                row["explosionElem"] = el != UInt32.max ? Int(el) : NSNull()
-              }
             }
             deathLines.append(try jsonLine(row))
           }
@@ -1465,10 +1551,12 @@ final class MetricsTapeWriter {
       }
       for lane in 0..<B {
         guard let h = hashHandles[lane] else { continue }
-        let hs = eng.stateHashes(lane)
-        let line =
-          "{\"seed\":\(seeds[lane]),\"step\":\(step),\"params\":\"\(hs["params"]!)\",\"state\":\"\(hs["state"]!)\",\"uints\":\"\(hs["uints"]!)\",\"scalars\":\"\(hs["scalars"]!)\"}\n"
-        try h.write(contentsOf: Data(line.utf8))
+        let laneBytes = laneBuf.contents() + lane * fleetLaneStride
+        let hs = eng.stateHashes(lane, laneBytes: laneBytes)
+        let keys = ["params", "state", "uints", "scalars", "stateReward", "uintsReward", "lane"]
+        var obj: [String: Any] = ["seed": seeds[lane], "step": step]
+        for k in keys { obj[k] = hs[k]! }
+        try h.write(contentsOf: jsonLine(obj))
       }
     }
     let explicitN = e["OAK_STEPS_PER_CB"].flatMap(Int.init)
@@ -1589,6 +1677,96 @@ final class MetricsTapeWriter {
     inflight.signal()
     if let err = st.error { throw err }
     for w in recordV4 { try w.writeMeta(final: true) }
+  }
+  static func compareHashes() throws {
+    let args = Array(CommandLine.arguments.dropFirst())
+    guard args.count == 3 else {
+      throw err("Usage: OaK compare-hashes <left.jsonl|dir> <right.jsonl|dir>")
+    }
+    func asInt(_ v: Any?) -> Int? {
+      if let i = v as? Int { return i }
+      if let n = v as? NSNumber { return n.intValue }
+      return nil
+    }
+    func files(_ path: String) throws -> [URL] {
+      var isDir: ObjCBool = false
+      guard FileManager.default.fileExists(atPath: path, isDirectory: &isDir) else {
+        throw err("compare-hashes: missing \(path)")
+      }
+      if !isDir.boolValue { return [URL(fileURLWithPath: path)] }
+      let it = FileManager.default.enumerator(atPath: path)
+      var urls: [URL] = []
+      while let rel = it?.nextObject() as? String {
+        if rel.hasSuffix("/state-hashes.jsonl") || rel == "state-hashes.jsonl" {
+          urls.append(URL(fileURLWithPath: path).appendingPathComponent(rel))
+        }
+      }
+      guard !urls.isEmpty else { throw err("compare-hashes: no state-hashes.jsonl under \(path)") }
+      return urls
+    }
+    func load(_ path: String) throws -> [String: [String: String]] {
+      var out: [String: [String: String]] = [:]
+      for url in try files(path) {
+        let text = try String(contentsOf: url, encoding: .utf8)
+        for line in text.split(whereSeparator: \.isNewline) {
+          guard let data = String(line).data(using: .utf8),
+            let obj = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+            let seed = asInt(obj["seed"]), let step = asInt(obj["step"])
+          else {
+            throw err("compare-hashes: bad line in \(url.path)")
+          }
+          var hashes: [String: String] = [:]
+          for (k, v) in obj where k != "seed" && k != "step" {
+            guard let s = v as? String else {
+              throw err("compare-hashes: non-string field '\(k)' in \(url.path)")
+            }
+            hashes[k] = s
+          }
+          out["\(seed)@\(step)"] = hashes
+        }
+      }
+      return out
+    }
+    let left = try load(args[1])
+    let right = try load(args[2])
+    let required = ["params", "scalars", "stateReward", "uintsReward", "lane"]
+    var missing = 0
+    var failed = 0
+    var extra = 0
+    let keys = Set(left.keys).union(right.keys).sorted()
+    for key in keys {
+      guard let l = left[key], let r = right[key] else {
+        missing += 1
+        fputs("missing \(key) left=\(left[key] != nil) right=\(right[key] != nil)\n", stderr)
+        continue
+      }
+      var bad: [String] = []
+      for field in required {
+        guard let lv = l[field], let rv = r[field] else {
+          bad.append("\(field):absent")
+          continue
+        }
+        if lv != rv { bad.append(field) }
+      }
+      let optional = Set(l.keys).union(r.keys).subtracting(required)
+      var optBad: [String] = []
+      for field in optional.sorted() {
+        if l[field] != r[field] { optBad.append(field) }
+      }
+      extra += optBad.count
+      if !bad.isEmpty {
+        failed += 1
+        fputs("FAIL \(key) reward=[\(bad.joined(separator: ","))] other=[\(optBad.joined(separator: ","))]\n", stderr)
+      } else if !optBad.isEmpty {
+        fputs("ok \(key) other=[\(optBad.joined(separator: ","))]\n", stderr)
+      }
+    }
+    if missing > 0 || failed > 0 {
+      throw err(
+        "compare-hashes: \(failed) reward-state mismatches, \(missing) missing rows, \(extra) whole-buffer diffs.")
+    }
+    print(
+      "compare-hashes: \(keys.count) rows match on \(required.joined(separator: ",")).")
   }
   static func recordV4Probe() throws {
     let args = CommandLine.arguments
