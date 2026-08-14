@@ -498,9 +498,13 @@ def cmd_gate(args) -> int:
 
 def keeper_hash() -> str | None:
     try:
-        return (REPO / "keeper").read_text().strip()
+        text = (REPO / "keeper").read_text().strip()
+        return text or None
     except OSError:
         return None
+
+def write_keeper(name: str) -> None:
+    (REPO / "keeper").write_text(name + "\n")
 
 def cmd_run(args) -> int:
     name = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=REPO).decode().strip()
@@ -523,7 +527,7 @@ def cmd_run(args) -> int:
     shutil.rmtree(root, ignore_errors=True)
     log.unlink(missing_ok=True)
     cmd = [sys.executable, str(Path(__file__).resolve()), "job",
-           str(args.steps), name, str(keeper or "")]
+           str(args.steps), name]
     with open(log, "w") as lf:
         p = subprocess.Popen(cmd, stdout=lf, stderr=subprocess.STDOUT,
                              stdin=subprocess.DEVNULL, start_new_session=True,
@@ -547,8 +551,16 @@ def cmd_job(args) -> int:
     print(f"[fleet] benchmark exit={rc}", flush=True)
     me = [sys.executable, str(Path(__file__).resolve())]
     subprocess.run(me + ["report", str(root)], cwd=REPO)
-    if args.keeper:
-        subprocess.run(me + ["gate", args.keeper, str(root)], cwd=REPO)
+    prior = keeper_hash()
+    if prior and prior != args.name and (BENCH / prior).is_dir():
+        if subprocess.run(me + ["gate", str(root)], cwd=REPO).returncode == 0:
+            write_keeper(args.name)
+            print(f"[fleet] keeper {args.name}", flush=True)
+        else:
+            print(f"[fleet] keeper stays {prior}", flush=True)
+    elif rc == 0:
+        write_keeper(args.name)
+        print(f"[fleet] keeper {args.name}", flush=True)
     (root / ".done").touch()
     print("[fleet] DONE — .done written.", flush=True)
     return 0
@@ -563,7 +575,6 @@ def main() -> int:
     jp = sub.add_parser("job")
     jp.add_argument("steps", type=int)
     jp.add_argument("name")
-    jp.add_argument("keeper", nargs="?", default="")
 
     pp = sub.add_parser("report", help="population view from the tape (in-flight OK)")
     pp.add_argument("root", type=Path)

@@ -7,7 +7,7 @@ import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { crc32, deflateRawSync } from 'node:zlib';
 
-import type { FleetColumnar, KeeperResponse, RunDetail, RunIndexEntry } from '../../shared/types';
+import type { FleetColumnar, RunDetail, RunIndexEntry } from '../../shared/types';
 import { createApp, parseRangeHeader } from '../../server/app';
 import { fleetCacheDir, runIndexCacheFile, CACHE_DIR } from '../../server/config';
 import {
@@ -735,22 +735,6 @@ describe('http api (fixture bench root)', () => {
     const runs = (await res.json()) as RunIndexEntry[];
     expect(runs.length).toBe(4);
     expect(runs.some((r) => r.id === 'alpha-complete' && r.complete)).toBe(true);
-  });
-
-  it('GET /api/keeper reads the keeper file, null when absent', async () => {
-    const doc = (await (await fetch(`${base}/api/keeper`)).json()) as KeeperResponse;
-    expect(doc).toEqual({ keeper: 'alpha-complete' });
-
-    const lone = join(FIXTURE_ROOT, 'keeperless');
-    await mkdir(join(lone, 'bench'), { recursive: true });
-    const loneApp = createApp({ benchRoot: join(lone, 'bench'), cacheFile: null, fleetCacheDir: null, ttlMs: 0 });
-    const loneServer = Bun.serve({ hostname: '127.0.0.1', port: 0, fetch: loneApp.fetch });
-    try {
-      const res = await fetch(`http://127.0.0.1:${loneServer.port}/api/keeper`);
-      expect((await res.json()) as KeeperResponse).toEqual({ keeper: null });
-    } finally {
-      void loneServer.stop(true);
-    }
   });
 
   it('GET /api/runs/:id returns meta + summary + aggregate + deaths + recordings', async () => {

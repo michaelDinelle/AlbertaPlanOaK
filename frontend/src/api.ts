@@ -1,7 +1,6 @@
 
 import type {
   FleetColumnar,
-  KeeperResponse,
   RunDetail,
   RunIndexEntry,
   WallResponse,
@@ -89,10 +88,6 @@ export const api = {
       }),
       options,
     );
-  },
-
-  keeper(options?: RequestOptions): Promise<KeeperResponse> {
-    return getJson<KeeperResponse>(apiUrl('/keeper'), options);
   },
 };
 

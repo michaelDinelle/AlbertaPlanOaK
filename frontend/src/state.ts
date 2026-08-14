@@ -3,7 +3,6 @@ import { api } from './api';
 import type {
   AggregateRow,
   FleetColumnar,
-  KeeperResponse,
   RunDetail,
   RunIndexEntry,
   RunMeta,
@@ -48,7 +47,6 @@ function cachedFeed<T>(loader: () => Promise<T>): CachedFeed<T> {
 }
 
 export const runIndex: CachedFeed<RunIndexEntry[]> = cachedFeed(() => api.runs());
-export const keeper: CachedFeed<KeeperResponse> = cachedFeed(() => api.keeper());
 
 const detailCache = new Map<string, Promise<RunDetail>>();
 

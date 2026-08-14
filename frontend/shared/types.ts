@@ -230,10 +230,6 @@ export interface FleetColumnar {
   series: Record<string, (number | null)[][]>;
 }
 
-export interface KeeperResponse {
-  keeper: string | null;
-}
-
 
 export interface WallLaneHeader {
   seed: number;

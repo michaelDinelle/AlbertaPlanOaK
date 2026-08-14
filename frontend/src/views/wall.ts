@@ -2,7 +2,6 @@
 import type { ViewHandle, ViewMount } from '../router';
 import type {
   FleetColumnar,
-  KeeperResponse,
   RecordingRef,
   RunDetail,
   RunIndexEntry,
@@ -42,7 +41,6 @@ import {
   loadRunDetail,
   policiesIn,
   primaryResult,
-  keeper as keeperResource,
   runIndex,
   sortRuns,
   windowMidpoints,
@@ -157,7 +155,6 @@ export interface FeaturedPick {
 
 export function resolveFeaturedRun(
   entries: readonly RunIndexEntry[],
-  keeper: string | null,
   requested?: string,
 ): FeaturedPick {
   const byId = new Map<string, RunIndexEntry>();
@@ -165,8 +162,8 @@ export function resolveFeaturedRun(
 
   if (requested !== undefined && byId.has(requested)) return { runId: requested, source: 'param' };
 
-
-  if (keeper !== null && byId.get(keeper)?.hasRecordings === true) return { runId: keeper, source: 'keeper' };
+  const keeper = entries.find((entry) => entry.role === 'keeper');
+  if (keeper?.hasRecordings === true) return { runId: keeper.id, source: 'keeper' };
 
   const started = (entry: RunIndexEntry): number => (entry.startedAt ? Date.parse(entry.startedAt) : 0);
   const newest = (list: readonly RunIndexEntry[]): RunIndexEntry | null =>
@@ -1844,10 +1841,10 @@ export const mount: ViewMount = (host) => {
   }
 
   function start(force: boolean): void {
-    Promise.all([runIndex.load(force), keeperResource.load(force).catch(() => null)]).then(
-      ([entries, keeperDoc]) => {
+    runIndex.load(force).then(
+      (entries) => {
         if (destroyed) return;
-        const pick = resolveFeaturedRun(entries, keeperDoc?.keeper ?? null, query.run);
+        const pick = resolveFeaturedRun(entries, query.run);
         if (pick.runId === null) {
           status.replaceChildren(
             emptyState(

@@ -1,6 +1,5 @@
 
 import { normalize, resolve, sep } from 'node:path';
-import type { KeeperResponse } from '@shared/types';
 import {
   DIST_DIR,
   HOSTNAME,
@@ -14,7 +13,6 @@ import { deriveFleetColumnar, parseFleetQuery } from './fleetDerive';
 import { statOrNull } from './jsonl';
 import { findRecording } from './recordings';
 import { RunIndex, buildRunDetail } from './runIndex';
-import { readKeeper } from './keeper';
 import { deriveWall, parseWallRequest, wallCacheFor } from './wall';
 
 export interface AppOptions {
@@ -157,11 +155,6 @@ export function createApp(opts: AppOptions = {}): App {
 
     if (head === 'health' && segs.length === 2) {
       return json({ ok: true, benchRoot, production });
-    }
-
-    if (head === 'keeper' && segs.length === 2) {
-      const keeper: KeeperResponse = { keeper: await readKeeper(benchRoot) };
-      return json(keeper);
     }
 
     if (head !== 'runs') return fail(404, 'unknown endpoint');
