@@ -153,40 +153,4 @@ inline float gw_pend_step(thread uint *gw, float ctrl0, thread float *obs) {
     return -cost;
 }
 
-kernel void oak_classic_probe(device const float *in  [[buffer(0)]],
-                              device float *out       [[buffer(1)]],
-                              constant uint *hdr      [[buffer(2)]],
-                              uint gid [[thread_position_in_grid]]) {
-    uint n = hdr[0], inW = hdr[1], outW = hdr[2];
-    if (gid >= n) return;
-    device const float *p = in + (ulong)gid * inW;
-    device float *o = out + (ulong)gid * outW;
-    uint gw[10] = { 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u };
-    float obs[17];
-    uint done = 0u;
-    if (inW == 3u) {
-        gw[0] = as_type<uint>(p[0]); gw[1] = as_type<uint>(p[1]);
-        float r = gw_mcar_step(gw, uint(p[2]), obs, &done);
-        o[0] = r; o[1] = as_type<float>(gw[0]); o[2] = as_type<float>(gw[1]);
-        o[3] = float(done);
-    } else if (inW == 5u) {
-        for (int i = 0; i < 4; i++) gw[i] = as_type<uint>(p[i]);
-        float r = gw_acro_step(gw, uint(p[4]), obs, &done);
-        o[0] = r;
-        for (int i = 0; i < 4; i++) o[1 + i] = as_type<float>(gw[i]);
-        o[5] = float(done);
-    } else if (inW == 7u) {
-        for (int i = 0; i < 4; i++) gw[i] = as_type<uint>(p[i]);
-        float r = gw_pole_step(gw, uint(p[4]), obs, &done);
-        o[0] = r;
-        for (int i = 0; i < 4; i++) o[1 + i] = as_type<float>(gw[i]);
-        o[5] = float(done);
-    } else {
-        gw[0] = as_type<uint>(p[0]); gw[1] = as_type<uint>(p[1]);
-        float r = gw_pend_step(gw, p[2], obs);
-        o[0] = r; o[1] = as_type<float>(gw[0]); o[2] = as_type<float>(gw[1]);
-        o[3] = 0.0f;
-    }
-}
-
 #endif

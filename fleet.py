@@ -540,11 +540,9 @@ def cmd_run(args) -> int:
 def cmd_job(args) -> int:
     root = BENCH / args.name
     env = dict(os.environ,
-               OAK_BENCH_POLICIES=os.environ.get("OAK_BENCH_POLICIES", "oak"),
                OAK_BENCH_STEPS=str(args.steps),
                OAK_BENCH_SEED_COUNT=os.environ.get("OAK_BENCH_SEED_COUNT", "1408"),
                OAK_RECORD_ACTIONS=os.environ.get("OAK_RECORD_ACTIONS", "1"),
-               OAK_RECORD_FORMAT=os.environ.get("OAK_RECORD_FORMAT", "4"),
                OAK_FLEET_TIMING="1", OAK_METRICS_STORAGE=str(root))
     rc = subprocess.run(["caffeinate", "-dimsu", str(REPO / ".build/release/OaK"),
                          "benchmark"], env=env, cwd=REPO).returncode

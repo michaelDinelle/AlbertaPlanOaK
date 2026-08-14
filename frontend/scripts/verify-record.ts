@@ -1,19 +1,15 @@
 #!/usr/bin/env bun
 
 import { spawnSync } from 'node:child_process';
-import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { inflateRawSync } from 'node:zlib';
 
-import { ENV_IDS, isEnvId } from '@shared/envs';
+import { ENV_IDS } from '@shared/envs';
 import type { EnvId } from '@shared/envs';
-import { decodeRecording, eventTimeline } from '@sim/decode';
 import { parseActionsBin } from '@sim/record';
-import { decoderFor } from '@sim/registry';
-import { parseRawTrace, rawRecordingFromFloats } from '../test/helpers/rawTrace';
-import type { RawRecording, SimEvent } from '@sim/types';
 
 
 type Enc = 'u8' | 'i16' | 'dx32';
@@ -307,17 +303,6 @@ function columnOffsets(codec: Codec, stepCount: number): number[] {
 }
 
 
-interface LaneResult {
-  envId: EnvId;
-  seed: number;
-  steps: number;
-  v3Bytes: number;
-  v4Bytes: number;
-  escapes: number;
-  events: number;
-  failures: string[];
-}
-
 function wrap(v: number): number {
   return v - 2 * Math.PI * Math.floor((v + Math.PI) / (2 * Math.PI));
 }
@@ -395,25 +380,6 @@ function compareRows(
     }
   }
 }
-
-function timelineKey(t: { frame: number; step: number; event: SimEvent }[]): string {
-  return t.map((e) => `${e.frame}:${e.step}:${JSON.stringify(e.event)}`).join('|');
-}
-
-function semantics(raw: RawRecording): { events: string; count: number; health: string } {
-  const dec = decodeRecording(raw, decoderFor(raw.envId));
-  const t = eventTimeline(dec);
-  return {
-    events: timelineKey(t),
-    count: t.length,
-    health: JSON.stringify({
-      nonFiniteRows: dec.nonFiniteRows,
-      replay: dec.replay ?? null,
-      frames: dec.frames.length,
-    }),
-  };
-}
-
 
 interface ZooRow {
   label: string;
@@ -546,7 +512,7 @@ async function escapeProbe(binary: string): Promise<number> {
   }
   console.log(`binary  : ${binary}`);
   console.log('record  : @sim/record parseActionsBin — cross-checking the decoder');
-  const work = mkdtempSync(join(tmpdir(), 'oak-v4-escape-'));
+  const work = mkdtempSync(join(tmpdir(), 'oak-record-escape-'));
   const results: { envId: EnvId; rows: number; escapes: number; failures: string[] }[] = [];
   try {
     for (const envId of ENV_IDS) {
@@ -558,9 +524,9 @@ async function escapeProbe(binary: string): Promise<number> {
       const casesPath = join(work, `${envId}.cases.bin`);
       const outDir = join(work, envId);
       writeCases(casesPath, codec.envKind, data, ESCAPE_PROBE_CHUNK_STEPS);
-      const run = spawnSync(binary, ['record-v4-probe', casesPath, outDir], { encoding: 'utf8' });
+      const run = spawnSync(binary, ['record-probe', casesPath, outDir], { encoding: 'utf8' });
       if (run.status !== 0) {
-        fail(`record-v4-probe exited ${run.status}: ${(run.stderr || run.stdout || '').trim()}`);
+        fail(`record-probe exited ${run.status}: ${(run.stderr || run.stdout || '').trim()}`);
         results.push({ envId, rows: steps, escapes: 0, failures });
         continue;
       }
@@ -682,31 +648,6 @@ async function escapeProbe(binary: string): Promise<number> {
 }
 
 
-interface LaneRef {
-  envId: EnvId;
-  seed: number;
-  dir: string;
-}
-
-function lanesOf(root: string): Map<string, LaneRef> {
-  const out = new Map<string, LaneRef>();
-  if (!existsSync(root)) throw new Error(`no such run root: ${root}`);
-  for (const envId of readdirSync(root)) {
-    if (!isEnvId(envId)) continue;
-    const envDir = join(root, envId);
-    if (!statSync(envDir).isDirectory()) continue;
-    for (const seedDir of readdirSync(envDir)) {
-      const m = /^seed(\d+)$/.exec(seedDir);
-      if (!m) continue;
-      const dir = join(envDir, seedDir);
-      if (!existsSync(join(dir, 'actions.bin')) || !existsSync(join(dir, 'meta.json'))) continue;
-      out.set(`${envId}/${seedDir}`, { envId, seed: Number(m[1]), dir });
-    }
-  }
-  return out;
-}
-
-
 const DEFAULT_OAK_BINARY = resolve(
   dirname(fileURLToPath(import.meta.url)),
   '../..',
@@ -716,167 +657,8 @@ const DEFAULT_OAK_BINARY = resolve(
 async function main(): Promise<number> {
   const argv = process.argv.slice(2);
   if (argv[0] === '--escape-probe') return escapeProbe(argv[1] ?? DEFAULT_OAK_BINARY);
-  const [v3Root, v4Root] = argv;
-  if (!v3Root || !v4Root) {
-    console.error(
-      'usage: bun scripts/verify-record-v4.ts <v3-run-root> <v4-run-root>\n' +
-        '       bun scripts/verify-record-v4.ts --escape-probe [<OaK binary>]',
-    );
-    return 1;
-  }
-  console.log(`v3 root : ${v3Root}`);
-  console.log(`v4 root : ${v4Root}`);
-  console.log('record  : @sim/record parseActionsBin — cross-checking the decoder');
-
-  const a = lanesOf(v3Root);
-  const b = lanesOf(v4Root);
-  const keys = [...a.keys()].filter((k) => b.has(k)).sort();
-  if (keys.length === 0) {
-    console.error('no lane appears in BOTH roots (expected <envId>/seed<N>/actions.bin)');
-    return 1;
-  }
-  const missing = ENV_IDS.filter((e) => !keys.some((k) => k.startsWith(`${e}/`)));
-
-  const results: LaneResult[] = [];
-  for (const key of keys) {
-    const v3Ref = a.get(key)!;
-    const v4Ref = b.get(key)!;
-    const failures: string[] = [];
-    const fail = (m: string) => failures.push(m);
-    const codec = CODECS[v3Ref.envId];
-
-    const v3Meta = JSON.parse(readFileSync(join(v3Ref.dir, 'meta.json'), 'utf8'));
-    const v4Meta = JSON.parse(readFileSync(join(v4Ref.dir, 'meta.json'), 'utf8'));
-    const v3Buf = readFileSync(join(v3Ref.dir, 'actions.bin'));
-    const v4Buf = readFileSync(join(v4Ref.dir, 'actions.bin'));
-
-    if (v3Meta.recordVersion !== 3) fail(`v3 meta recordVersion ${v3Meta.recordVersion} != 3`);
-    if (v4Meta.recordVersion !== 4) fail(`v4 meta recordVersion ${v4Meta.recordVersion} != 4`);
-    if (v4Meta.codecVersion !== 1) fail(`v4 meta codecVersion ${v4Meta.codecVersion} != 1`);
-    if (v4Meta.envId !== v3Meta.envId) fail(`envId ${v4Meta.envId} != ${v3Meta.envId}`);
-    if (v4Meta.seed !== v3Meta.seed) fail(`seed ${v4Meta.seed} != ${v3Meta.seed}`);
-    if (!v4Meta.codec || typeof v4Meta.codec !== 'object') fail('v4 meta has no codec descriptor');
-
-    const desc = v4Meta.codec ?? {};
-    if (desc.category !== codec.category) fail(`codec.category ${desc.category} != ${codec.category}`);
-    const ctrlOk =
-      codec.ctrlBox === 0
-        ? desc.ctrl === 'index'
-        : desc.ctrl?.kind === 'u8box' && desc.ctrl?.n === codec.ctrlBox;
-    if (!ctrlOk) fail(`codec.ctrl ${JSON.stringify(desc.ctrl)} != ${codec.ctrlBox || 'index'}`);
-    const descFields = Array.isArray(desc.poseFields) ? desc.poseFields : [];
-    if (descFields.length !== codec.fields.length) {
-      fail(`codec.poseFields length ${descFields.length} != ${codec.fields.length}`);
-    } else {
-      codec.fields.forEach((f, j) => {
-        const d = descFields[j];
-        if (d.idx !== f.idx || d.enc !== f.enc) fail(`poseFields[${j}] ${JSON.stringify(d)} != ${f.enc}@${f.idx}`);
-        if (f.enc !== 'u8' && Math.abs((d.scale ?? 0) / f.scale - 1) > 1e-9) {
-          fail(`poseFields[${j}] scale ${d.scale} != ${f.scale}`);
-        }
-        if (!!d.wrap !== f.wrap) fail(`poseFields[${j}] wrap ${d.wrap} != ${f.wrap}`);
-      });
-    }
-    for (const [idx, v] of codec.poseConst) {
-      if (Number(desc.poseConst?.[String(idx)]) !== v) {
-        fail(`codec.poseConst[${idx}] ${desc.poseConst?.[String(idx)]} != ${v}`);
-      }
-    }
-
-    const v4 = readV4(new Uint8Array(v4Buf.buffer, v4Buf.byteOffset, v4Buf.byteLength), codec);
-    v4.problems.forEach(fail);
-
-    const hint: [number, number, number, number][] = v4Meta.chunks ?? [];
-    if (hint.length !== v4.chunks.length) {
-      fail(`meta.chunks length ${hint.length} != walked ${v4.chunks.length}`);
-    } else {
-      v4.chunks.forEach((c, j) => {
-        const h = hint[j]!;
-        if (h[0] !== c.stepStart || h[1] !== c.stepCount || h[2] !== c.byteOffset || h[3] !== c.byteLength) {
-          fail(`meta.chunks[${j}] ${JSON.stringify(h)} != [${c.stepStart},${c.stepCount},${c.byteOffset},${c.byteLength}]`);
-        }
-      });
-    }
-    if (v4Meta.steps !== v4.steps) fail(`meta.steps ${v4Meta.steps} != walked ${v4.steps}`);
-    const tail = v4.chunks.length ? v4.chunks[v4.chunks.length - 1]! : null;
-    if (tail && tail.byteOffset + tail.byteLength !== v4Buf.byteLength) {
-      fail(`trailing bytes: last chunk ends at ${tail.byteOffset + tail.byteLength}, file is ${v4Buf.byteLength}`);
-    }
-
-    const rawV3 = parseRawTrace(v3Buf, v3Meta);
-    if (rawV3.steps !== v4.steps) fail(`step count ${v4.steps} != v3 ${rawV3.steps}`);
-    const steps = Math.min(rawV3.steps, v4.steps);
-    compareRows(rawV3.data, v4, codec, steps, fail);
-
-    try {
-      const rawV4 = await parseActionsBin(v4Buf, v4Meta);
-      if (rawV4.steps !== v4.steps) fail(`record steps ${rawV4.steps} != ${v4.steps}`);
-      if (rawV4.envId !== v3Ref.envId) fail(`record envId ${rawV4.envId} != ${v3Ref.envId}`);
-      if (rawV4.seed !== v3Ref.seed) fail(`record seed ${rawV4.seed} != ${v3Ref.seed}`);
-      const n = Math.min(rawV4.steps, v4.steps) * ROW_FLOATS;
-      for (let u = 0; u < n; u++) {
-        if (!sameBits(rawV4.data[u]!, v4.data[u]!)) {
-          fail(`record float ${u} = ${rawV4.data[u]} != independent decode ${v4.data[u]}`);
-          break;
-        }
-      }
-    } catch (e) {
-      fail(`record parseActionsBin threw: ${(e as Error).message}`);
-    }
-
-    let events = 0;
-    try {
-      const s3 = semantics(rawV3);
-      const s4 = semantics(
-        rawRecordingFromFloats(v3Ref.envId, v3Ref.seed, v4.data.subarray(0, steps * ROW_FLOATS)),
-      );
-      events = s3.count;
-      if (s3.events !== s4.events) {
-        fail(`event timelines differ (v3 ${s3.count} events, v4 ${s4.count})`);
-      }
-      if (s3.health !== s4.health) fail(`replay health differs: ${s3.health} vs ${s4.health}`);
-    } catch (e) {
-      fail(`decode failed: ${(e as Error).message}`);
-    }
-
-    results.push({
-      envId: v3Ref.envId, seed: v3Ref.seed, steps: v4.steps,
-      v3Bytes: v3Buf.byteLength, v4Bytes: v4Buf.byteLength,
-      escapes: v4.chunks.reduce((s, c) => s + c.escapes, 0),
-      events, failures,
-    });
-  }
-
-  const pad = (s: string, n: number) => s.padEnd(n);
-  console.log('');
-  console.log(
-    pad('env', 26) + pad('seed', 6) + pad('steps', 9) + pad('v3 B', 11) + pad('v4 B', 10) +
-      pad('ratio', 8) + pad('esc', 7) + pad('events', 8) + 'status',
-  );
-  let ok = true;
-  let t3 = 0;
-  let t4 = 0;
-  for (const r of results) {
-    t3 += r.v3Bytes;
-    t4 += r.v4Bytes;
-    if (r.failures.length) ok = false;
-    console.log(
-      pad(r.envId, 26) + pad(String(r.seed), 6) + pad(String(r.steps), 9) +
-        pad(String(r.v3Bytes), 11) + pad(String(r.v4Bytes), 10) +
-        pad(`${(r.v3Bytes / Math.max(r.v4Bytes, 1)).toFixed(2)}x`, 8) +
-        pad(String(r.escapes), 7) + pad(String(r.events), 8) +
-        (r.failures.length ? `FAIL (${r.failures.length})` : 'ok'),
-    );
-    for (const f of r.failures.slice(0, 6)) console.log(`    ! ${f}`);
-    if (r.failures.length > 6) console.log(`    ! ... ${r.failures.length - 6} more`);
-  }
-  console.log('');
-  console.log(
-    `lanes ${results.length} | v3 ${t3} B -> v4 ${t4} B (${(t3 / Math.max(t4, 1)).toFixed(2)}x smaller)`,
-  );
-  if (missing.length) console.log(`envs not covered by this run: ${missing.join(', ')}`);
-  console.log(ok ? 'VERIFIED — v4 agrees with v3 on every lane.' : 'FAILED');
-  return ok ? 0 : 1;
+  console.error('usage: bun scripts/verify-record.ts --escape-probe [<OaK binary>]');
+  return 1;
 }
 
 process.exit(await main());

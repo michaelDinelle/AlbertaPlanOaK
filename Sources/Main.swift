@@ -6,7 +6,6 @@ import zlib
 
 struct OakError: Error, CustomStringConvertible { let description: String }
 func err(_ s: String) -> OakError { OakError(description: s) }
-enum Policy: String { case oak, zero, random }
 let defaultEnv = "HalfCheetah-v4"
 let lockName = ".oak-benchmark.lock"
 typealias Raw = UnsafeMutableRawPointer
@@ -285,10 +284,6 @@ struct RewardSlices {
     uints = merge(keepU)
   }
 }
-func flopTraces(_ o: Int) -> Int {
-  Int(log2(Double(max(o, 1)))) + 1
-}
-func flopInput(_ o: Int, _ d: Int) -> Int { flopTraces(o) * max(o, 1) + max(d, 0) + 2 }
 final class Shared<T> {
   let b: MTLBuffer
   let p: UnsafeMutablePointer<T>
@@ -384,7 +379,7 @@ final class Engine {
       (Int(tbl[1 + i * 4 + 1]), Int(tbl[1 + i * 4 + 2]), Int(tbl[1 + i * 4 + 3]))
     }
   }
-  init(laneEnvs: [String], batch b: Int, dev: MTLDevice, ablations: AblationSpec) throws {
+  init(laneEnvs: [String], batch b: Int, dev: MTLDevice) throws {
     precondition(b >= 1 && laneEnvs.count == b, "Engine batch/laneEnvs mismatch")
     batch = b
     let lib = try dev.makeLibrary(URL: try requireFreshMetallib())
@@ -572,14 +567,14 @@ func metricsRoot() -> URL {
 }
 
 
-enum V4Enc: String { case u8, i16, dx32 }
+enum RecordEnc: String { case u8, i16, dx32 }
 
-struct V4Field {
+struct RecordField {
   let idx: Int
-  let enc: V4Enc
+  let enc: RecordEnc
   let scale: Double
   let wrap: Bool
-  init(_ idx: Int, _ enc: V4Enc, _ scale: Double = 0, _ wrap: Bool = false) {
+  init(_ idx: Int, _ enc: RecordEnc, _ scale: Double = 0, _ wrap: Bool = false) {
     self.idx = idx
     self.enc = enc
     self.scale = scale
@@ -600,10 +595,10 @@ struct V4Field {
   }
 }
 
-struct V4Codec {
+struct RecordCodec {
   let category: String
   let ctrlBox: Int
-  let fields: [V4Field]
+  let fields: [RecordField]
   let poseConst: [Int: Double]
   var hasDx: Bool { fields.contains { $0.enc == .dx32 } }
   var json: [String: Any] {
@@ -616,43 +611,43 @@ struct V4Codec {
       "poseConst": pc,
     ]
   }
-  static func table(_ envKind: UInt32) throws -> V4Codec {
-    func grid(_ idxs: [Int], _ consts: [Int: Double] = [:]) -> V4Codec {
-      V4Codec(
-        category: "grid", ctrlBox: 0, fields: idxs.map { V4Field($0, .u8) },
+  static func table(_ envKind: UInt32) throws -> RecordCodec {
+    func grid(_ idxs: [Int], _ consts: [Int: Double] = [:]) -> RecordCodec {
+      RecordCodec(
+        category: "grid", ctrlBox: 0, fields: idxs.map { RecordField($0, .u8) },
         poseConst: consts)
     }
     switch envKind {
     case 0:
-      var f = [V4Field(0, .dx32, 0.01), V4Field(1, .i16, 1e-4)]
-      for i in 2...8 { f.append(V4Field(i, .i16, 1e-4, true)) }
-      return V4Codec(category: "cheetah", ctrlBox: 6, fields: f, poseConst: [:])
+      var f = [RecordField(0, .dx32, 0.01), RecordField(1, .i16, 1e-4)]
+      for i in 2...8 { f.append(RecordField(i, .i16, 1e-4, true)) }
+      return RecordCodec(category: "cheetah", ctrlBox: 6, fields: f, poseConst: [:])
     case 1: return grid([0, 1, 2, 3])
     case 2: return grid([0, 1], [2: 7, 3: 7])
     case 3: return grid([0, 1, 2, 3, 4, 5, 6, 7])
     case 4:
-      return V4Codec(
+      return RecordCodec(
         category: "classic", ctrlBox: 0,
         fields: [
-          V4Field(0, .i16, 1e-4, true), V4Field(1, .i16, 1e-4, true),
-          V4Field(2, .i16, 1e-3), V4Field(3, .i16, 1e-3),
+          RecordField(0, .i16, 1e-4, true), RecordField(1, .i16, 1e-4, true),
+          RecordField(2, .i16, 1e-3), RecordField(3, .i16, 1e-3),
         ], poseConst: [:])
     case 5:
-      return V4Codec(
+      return RecordCodec(
         category: "classic", ctrlBox: 0,
-        fields: [V4Field(0, .i16, 1e-4), V4Field(1, .i16, 1e-5)], poseConst: [2: 0.5])
+        fields: [RecordField(0, .i16, 1e-4), RecordField(1, .i16, 1e-5)], poseConst: [2: 0.5])
     case 6:
-      return V4Codec(
+      return RecordCodec(
         category: "classic", ctrlBox: 0,
         fields: [
-          V4Field(0, .i16, 1e-4), V4Field(1, .i16, 1e-3),
-          V4Field(2, .i16, 1e-4, true), V4Field(3, .i16, 1e-3),
+          RecordField(0, .i16, 1e-4), RecordField(1, .i16, 1e-3),
+          RecordField(2, .i16, 1e-4, true), RecordField(3, .i16, 1e-3),
         ], poseConst: [:])
     case 7:
-      return V4Codec(
+      return RecordCodec(
         category: "classic", ctrlBox: 1,
         fields: [
-          V4Field(0, .i16, 1e-4, true), V4Field(1, .i16, 1e-3), V4Field(2, .i16, 1e-3),
+          RecordField(0, .i16, 1e-4, true), RecordField(1, .i16, 1e-3), RecordField(2, .i16, 1e-3),
         ], poseConst: [:])
     case 8: return grid([0], [1: 15])
     case 9: return grid([0, 1], [2: 15, 3: 15])
@@ -662,18 +657,18 @@ struct V4Codec {
     case 13: return grid([0, 1, 2, 3, 4])
     case 14: return grid([0, 1, 2, 3])
     case 15: return grid([0, 2], [1: 31])
-    default: throw err("No record-v4 codec for envKind \(envKind).")
+    default: throw err("No record codec for envKind \(envKind).")
     }
   }
 }
 
-final class RecordV4Writer: @unchecked Sendable {
+final class RecordWriter: @unchecked Sendable {
   static let fileMagic: UInt32 = 0x344B_414F
   static let chunkMagic: UInt32 = 0x344B_4843
   static let codecVersion = 1
 
   let handle: FileHandle
-  let codec: V4Codec
+  let codec: RecordCodec
   let metaURL: URL
   let envId: String
   let seed: Int
@@ -688,7 +683,7 @@ final class RecordV4Writer: @unchecked Sendable {
     handle: FileHandle, envKind: UInt32, metaURL: URL, envId: String, seed: Int, actDim: Int
   ) throws {
     self.handle = handle
-    self.codec = try V4Codec.table(envKind)
+    self.codec = try RecordCodec.table(envKind)
     self.metaURL = metaURL
     self.envId = envId
     self.seed = seed
@@ -830,11 +825,11 @@ final class RecordV4Writer: @unchecked Sendable {
           return b0 == 0x78 && ((b0 << 8) | b1) % 31 == 0
         }
       if wrapped {
-        throw err("record v4: Compression .zlib emitted a ZLIB-WRAPPED stream; the spec requires raw DEFLATE (frontend/src/sim/RECORD_V4_SPEC.md).")
+        throw err("record: Compression .zlib emitted a ZLIB-WRAPPED stream; the spec requires raw DEFLATE.")
       }
       let back = try (comp as NSData).decompressed(using: .zlib) as Data
       guard back == payload else {
-        throw err("record v4: deflate round-trip mismatch (\(back.count) vs \(payload.count) bytes).")
+        throw err("record: deflate round-trip mismatch (\(back.count) vs \(payload.count) bytes).")
       }
     }
     let crc = comp.withUnsafeBytes { p in
@@ -937,36 +932,19 @@ final class MetricsTapeWriter {
 }
 
 @main struct Main {
-  nonisolated(unsafe) static var recordingDefaultSuppressed = false
-
   static func main() {
     _ = pthread_set_qos_class_self_np(QOS_CLASS_USER_INTERACTIVE, 0)
     do {
       switch CommandLine.arguments.dropFirst().first {
       case "benchmark": try benchmark()
       case "compare-hashes": try compareHashes()
-      case "physics-probe": try physicsProbe()
-      case "gridworld-probe": try gridworldProbe()
-      case "record-v4-probe": try recordV4Probe()
-      case "physics-rollout": try physicsRollout()
+      case "record-probe": try recordProbe()
       default: throw err("Use `OaK benchmark`.")
       }
     } catch {
       fputs("\(error)\n", stderr)
       Foundation.exit(1)
     }
-  }
-  static func pol(_ s: String) throws -> Policy {
-    guard let p = Policy(rawValue: s.lowercased()) else {
-      throw err("Unknown policy '\(s)'.")
-    }
-    return p
-  }
-  static func fleet(
-    _ p: Policy, _ seeds: [Int], _ steps: Int, _ root: URL, _ laneEnvs: [String],
-    _ ablations: AblationSpec
-  ) throws {
-    try fleetGPU(p, seeds, steps, root, laneEnvs, ablations)
   }
   static let envIdsByKind: [String] = [
     "HalfCheetah-v4", "FourRooms-cont-v0", "DeepSea-cont-v0", "KeyCorridor-cont-v0",
@@ -987,7 +965,7 @@ final class MetricsTapeWriter {
     return envIdsByKind[Int(kind)]
   }
   static func fleetGPU(
-    _ p: Policy, _ seeds: [Int], _ steps: Int, _ root: URL, _ laneEnvs: [String],
+    _ seeds: [Int], _ steps: Int, _ root: URL, _ laneEnvs: [String],
     _ ablations: AblationSpec
   ) throws {
     guard laneEnvs.count == seeds.count else {
@@ -997,16 +975,10 @@ final class MetricsTapeWriter {
     let e = ProcessInfo.processInfo.environment
     let fm = FileManager.default
     let B = seeds.count
-    let obsDim = 17, actDim = 6, dPolicy = 12
+    let actDim = 6
     guard let dev = MTLCreateSystemDefaultDevice() else { throw err("Metal unavailable.") }
-    let engine =
-      p == .oak
-      ? try Engine(laneEnvs: laneEnvs, batch: B, dev: dev, ablations: ablations)
-      : nil
-
-    guard let q = engine?.q ?? dev.makeCommandQueue() else {
-      throw err("Metal command queue unavailable.")
-    }
+    let engine = try Engine(laneEnvs: laneEnvs, batch: B, dev: dev)
+    let q = engine.q
     let lib = try dev.makeLibrary(URL: try requireFreshMetallib())
     func pipeline(_ name: String) throws -> MTLComputePipelineState {
       let fn = try lib.makeFunction(name: name, constantValues: MTLFunctionConstantValues())
@@ -1079,24 +1051,22 @@ final class MetricsTapeWriter {
       function: lib.makeFunction(name: "oak_megastep", constantValues: baseConstants()))
     var envRuns: [(kindIdx: Int, kind: UInt32, tgStart: Int, tgCount: Int)] = []
     var variantPipes: [MTLComputePipelineState] = []
-    if let eng = engine {
-      guard eng.kinds.allSatisfy({ $0.firstLane % megaG == 0 }) else {
-        throw err(
-          "Env schedule block starts must be multiples of megaG=\(megaG) for variant dispatch.")
-      }
-      for (ki, kd) in eng.kinds.enumerated() {
-        let c = baseConstants()
-        Engine.applyShapeConstants(c, kd.cfg)
-        var k32 = kd.kind
-        c.setConstantValue(&k32, type: .uint, index: 29)
-        variantPipes.append(try dev.makeComputePipelineState(
-          function: lib.makeFunction(name: "oak_megastep", constantValues: c)))
-        envRuns.append((ki, kd.kind, kd.firstLane / megaG, (kd.count + megaG - 1) / megaG))
-      }
+    guard engine.kinds.allSatisfy({ $0.firstLane % megaG == 0 }) else {
+      throw err(
+        "Env schedule block starts must be multiples of megaG=\(megaG) for variant dispatch.")
+    }
+    for (ki, kd) in engine.kinds.enumerated() {
+      let c = baseConstants()
+      Engine.applyShapeConstants(c, kd.cfg)
+      var k32 = kd.kind
+      c.setConstantValue(&k32, type: .uint, index: 29)
+      variantPipes.append(try dev.makeComputePipelineState(
+        function: lib.makeFunction(name: "oak_megastep", constantValues: c)))
+      envRuns.append((ki, kd.kind, kd.firstLane / megaG, (kd.count + megaG - 1) / megaG))
     }
     let pipeMaxThreads = ([megaPipe] + variantPipes)
       .map(\.maxTotalThreadsPerThreadgroup).min() ?? 0
-    let tgOptionCount = engine.map { Int($0.kinds[0].off.optionCount) } ?? 32
+    let tgOptionCount = Int(engine.kinds[0].off.optionCount)
     let megaSlotBytes = (5 * tgOptionCount + 1) * megaG * MemoryLayout<Float>.stride
     guard megaG >= 2, megaW <= pipeMaxThreads,
       megaSlotBytes <= dev.maxThreadgroupMemoryLength
@@ -1123,56 +1093,33 @@ final class MetricsTapeWriter {
       let kp = envKindsBuf.contents().bindMemory(to: UInt32.self, capacity: B)
       for i in 0..<B { kp[i] = laneEnvKinds[i] }
     }
-    let res: [MTLBuffer]
-    if let eng = engine {
-      res = eng.res
-    } else {
-      let dummy = try makeBuf(16)
-      res = [dummy, dummy, dummy, dummy, try makeBuf(MemoryLayout<KernelConfig>.stride)]
-    }
+    let res = engine.res
     let episodeLen = max(e["OAK_EPISODE_STEPS"].flatMap(Int.init) ?? 0, 0)
     let hb = max(e["OAK_BENCH_HEARTBEAT_STEPS"].flatMap(Int.init) ?? steps / 10, 1)
-    if e["OAK_FLEET_FREEZE_DEAD"] == "1" {
-      fputs("OAK_FLEET_FREEZE_DEAD is CPU-backend only; GPU lanes always keep stepping.\n", stderr)
-    }
-    if (e["OAK_RECORD_STATS_EVERY"].flatMap(Int.init) ?? 0) > 0 {
-      throw err("OAK_RECORD_STATS_EVERY (stats.bin) is not supported by the GPU fleet.")
-    }
     func seedDir(_ lane: Int) throws -> URL {
       let dir = root.appendingPathComponent(laneEnvs[lane], isDirectory: true)
         .appendingPathComponent("seed\(seeds[lane])", isDirectory: true)
       try fm.createDirectory(at: dir, withIntermediateDirectories: true)
       return dir
     }
-    let recordAll =
-      e["OAK_RECORD_ACTIONS"] != "0" && !Main.recordingDefaultSuppressed
+    let recordAll = e["OAK_RECORD_ACTIONS"] != "0"
     let recordSeeds = Set(
       (e["OAK_RECORD_SEEDS"] ?? "").split(separator: ",").compactMap {
         Int(String($0).trimmingCharacters(in: .whitespaces))
       })
-    let recordFormat = e["OAK_RECORD_FORMAT"] ?? "4"
-    guard recordFormat == "3" || recordFormat == "4" else {
-      throw err("OAK_RECORD_FORMAT must be 3 or 4 (got '\(recordFormat)').")
-    }
     var recordLanes: [Int] = []
     var recordHandles: [FileHandle] = []
-    var recordV4: [RecordV4Writer] = []
+    var records: [RecordWriter] = []
     for (lane, s) in seeds.enumerated() where recordAll || recordSeeds.contains(s) {
       let dir = try seedDir(lane)
       let url = dir.appendingPathComponent("actions.bin")
       let metaURL = dir.appendingPathComponent("meta.json")
       fm.createFile(atPath: url.path, contents: nil)
       let h = try FileHandle(forWritingTo: url)
-      if recordFormat == "4" {
-        recordV4.append(
-          try RecordV4Writer(
-            handle: h, envKind: laneEnvKinds[lane], metaURL: metaURL, envId: laneEnvs[lane],
-            seed: s, actDim: actDim))
-      } else {
-        let meta: [String: Any] = ["envId": laneEnvs[lane], "seed": s, "actDim": actDim, "recordVersion": 3]
-        try JSONSerialization.data(withJSONObject: meta, options: [.prettyPrinted, .sortedKeys])
-          .write(to: metaURL, options: .atomic)
-      }
+      records.append(
+        try RecordWriter(
+          handle: h, envKind: laneEnvKinds[lane], metaURL: metaURL, envId: laneEnvs[lane],
+          seed: s, actDim: actDim))
       recordHandles.append(h)
       recordLanes.append(lane)
     }
@@ -1192,7 +1139,7 @@ final class MetricsTapeWriter {
     let snapPtr = snapBuf.contents().bindMemory(to: LaneSnapshot.self, capacity: 2 * B)
     let dumpEvery = max(e["OAK_DUMP_STATE_EVERY"].flatMap(Int.init) ?? 0, 0)
     var hashHandles: [FileHandle?] = Array(repeating: nil, count: B)
-    if dumpEvery > 0, engine != nil {
+    if dumpEvery > 0 {
       for (lane, _) in seeds.enumerated() {
         let url = try seedDir(lane).appendingPathComponent("state-hashes.jsonl")
         fm.createFile(atPath: url.path, contents: nil)
@@ -1210,7 +1157,7 @@ final class MetricsTapeWriter {
     let deathsOut = try appender("deaths.jsonl")
     let aggOut = try appender("aggregate.jsonl")
     let tape = try MetricsTapeWriter(
-      url: root.appendingPathComponent("metrics.\(p.rawValue).oakt"), laneCount: B)
+      url: root.appendingPathComponent("metrics.oak.oakt"), laneCount: B)
     defer {
       hashHandles.forEach { try? $0?.close() }
       recordHandles.forEach { try? $0.close() }
@@ -1221,7 +1168,7 @@ final class MetricsTapeWriter {
     let timing = e["OAK_FLEET_TIMING"] == "1"
     let ecfg = FleetEnvCfg(
       laneCount: UInt32(B), episodeLen: UInt32(episodeLen),
-      policyMode: p == .oak ? 0 : (p == .zero ? 1 : 2),
+      policyMode: 0,
       recordCapacity: UInt32(recordCapacity), invObsFloor: 1 / Float(64))
     let laneTG = mtlSize(
       min(64, initPipe.maxTotalThreadsPerThreadgroup, snapPipe.maxTotalThreadsPerThreadgroup))
@@ -1235,37 +1182,24 @@ final class MetricsTapeWriter {
     }
     let megaTGBytes = megaSlotBytes
     func encodeMegastep(_ enc: MTLComputeCommandEncoder, _ n: Int, _ base: Int) {
-      if envRuns.isEmpty {
-        bindFleet(enc, megaPipe)
+      for run in envRuns {
+        let kd = engine.kinds[run.kindIdx]
+        bindFleet(enc, variantPipes[run.kindIdx])
+        enc.setBuffer(engine.params.b, offset: kd.paramBase * 4, index: 0)
+        enc.setBuffer(engine.state.b, offset: kd.stateBase * 4, index: 1)
+        enc.setBuffer(engine.uints.b, offset: kd.uintBase * 4, index: 2)
+        enc.setBuffer(kd.configB, offset: 0, index: 4)
+        var ce = ecfg
+        ce.invObsFloor = 1 / Float(2 * Int(kd.off.anchorCount))
+        enc.setBytes(&ce, length: MemoryLayout<FleetEnvCfg>.stride, index: 8)
         enc.setBuffer(recordSlotBuf, offset: 0, index: 9)
         enc.setBuffer(recordBuf, offset: 0, index: 10)
-        var span = SIMD3<UInt32>(UInt32(n), UInt32(base), 0)
+        var span = SIMD3<UInt32>(UInt32(n), UInt32(base), UInt32(run.tgStart))
         enc.setBytes(&span, length: MemoryLayout<SIMD3<UInt32>>.stride, index: 11)
         enc.setThreadgroupMemoryLength(megaTGBytes, index: 0)
         enc.dispatchThreadgroups(
-          MTLSize(width: (B + megaG - 1) / megaG, height: 1, depth: 1),
+          MTLSize(width: run.tgCount, height: 1, depth: 1),
           threadsPerThreadgroup: mtlSize(megaW))
-      } else {
-        let eng = engine!
-        for run in envRuns {
-          let kd = eng.kinds[run.kindIdx]
-          bindFleet(enc, variantPipes[run.kindIdx])
-          enc.setBuffer(eng.params.b, offset: kd.paramBase * 4, index: 0)
-          enc.setBuffer(eng.state.b, offset: kd.stateBase * 4, index: 1)
-          enc.setBuffer(eng.uints.b, offset: kd.uintBase * 4, index: 2)
-          enc.setBuffer(kd.configB, offset: 0, index: 4)
-          var ce = ecfg
-          ce.invObsFloor = 1 / Float(2 * Int(kd.off.anchorCount))
-          enc.setBytes(&ce, length: MemoryLayout<FleetEnvCfg>.stride, index: 8)
-          enc.setBuffer(recordSlotBuf, offset: 0, index: 9)
-          enc.setBuffer(recordBuf, offset: 0, index: 10)
-          var span = SIMD3<UInt32>(UInt32(n), UInt32(base), UInt32(run.tgStart))
-          enc.setBytes(&span, length: MemoryLayout<SIMD3<UInt32>>.stride, index: 11)
-          enc.setThreadgroupMemoryLength(megaTGBytes, index: 0)
-          enc.dispatchThreadgroups(
-            MTLSize(width: run.tgCount, height: 1, depth: 1),
-            threadsPerThreadgroup: mtlSize(megaW))
-        }
       }
       enc.memoryBarrier(scope: [.buffers])
     }
@@ -1273,27 +1207,19 @@ final class MetricsTapeWriter {
       guard let cb = q.makeCommandBuffer(), let enc = cb.makeComputeCommandEncoder() else {
         throw err("Failed to encode Metal command.")
       }
-      if let eng = engine {
-        for kd in eng.kinds {
-          bindFleet(enc, initPipe)
-          enc.setBuffer(eng.params.b, offset: kd.paramBase * 4, index: 0)
-          enc.setBuffer(eng.state.b, offset: kd.stateBase * 4, index: 1)
-          enc.setBuffer(eng.uints.b, offset: kd.uintBase * 4, index: 2)
-          enc.setBuffer(kd.configB, offset: 0, index: 4)
-          var ce = ecfg
-          ce.invObsFloor = 1 / Float(2 * Int(kd.off.anchorCount))
-          enc.setBytes(&ce, length: MemoryLayout<FleetEnvCfg>.stride, index: 8)
-          enc.setBuffer(envKindsBuf, offset: 0, index: 9)
-          var off = UInt32(kd.firstLane)
-          enc.setBytes(&off, length: 4, index: 10)
-          enc.dispatchThreads(mtlSize(kd.count), threadsPerThreadgroup: laneTG)
-        }
-      } else {
+      for kd in engine.kinds {
         bindFleet(enc, initPipe)
+        enc.setBuffer(engine.params.b, offset: kd.paramBase * 4, index: 0)
+        enc.setBuffer(engine.state.b, offset: kd.stateBase * 4, index: 1)
+        enc.setBuffer(engine.uints.b, offset: kd.uintBase * 4, index: 2)
+        enc.setBuffer(kd.configB, offset: 0, index: 4)
+        var ce = ecfg
+        ce.invObsFloor = 1 / Float(2 * Int(kd.off.anchorCount))
+        enc.setBytes(&ce, length: MemoryLayout<FleetEnvCfg>.stride, index: 8)
         enc.setBuffer(envKindsBuf, offset: 0, index: 9)
-        var off: UInt32 = 0
+        var off = UInt32(kd.firstLane)
         enc.setBytes(&off, length: 4, index: 10)
-        enc.dispatchThreads(mtlSize(B), threadsPerThreadgroup: laneTG)
+        enc.dispatchThreads(mtlSize(kd.count), threadsPerThreadgroup: laneTG)
       }
       enc.endEncoding()
       cb.commit()
@@ -1348,32 +1274,9 @@ final class MetricsTapeWriter {
       let count = step - start
       let rp = recordBuf.contents().bindMemory(
         to: Float.self, capacity: recordLanes.count * recordCapacity * 16)
-      if recordV4.isEmpty {
-        for (slot, _) in recordLanes.enumerated() {
-          var data = Data(capacity: count * (16 * 4))
-          for r in start..<step {
-            let base = (slot * recordCapacity + (r % recordCapacity)) * 16
-            for u in 0..<16 {
-              var f = rp[base + u]
-              withUnsafeBytes(of: &f) { data.append(contentsOf: $0) }
-            }
-          }
-          try recordHandles[slot].write(contentsOf: data)
-        }
-        st.lastDrainStep = step
-        if timing {
-          let ms = Double(DispatchTime.now().uptimeNanoseconds - t0) / 1e6
-          fputs(
-            String(
-              format: "[record v3] step %d | %d lanes x %d rows | %.1f ms | %.2f MiB\n",
-              step, recordLanes.count, count, ms,
-              Double(recordLanes.count * count * 64) / 1_048_576), stderr)
-        }
-        return
-      }
-      let before = recordV4.reduce(0) { $0 + $1.bytesWritten }
+      let before = records.reduce(0) { $0 + $1.bytesWritten }
       let box = DrainErr()
-      let writers = recordV4
+      let writers = records
       let cap = recordCapacity
       DispatchQueue.concurrentPerform(iterations: writers.count) { slot in
         do {
@@ -1388,11 +1291,11 @@ final class MetricsTapeWriter {
       st.lastDrainStep = step
       if timing {
         let ms = Double(DispatchTime.now().uptimeNanoseconds - t0) / 1e6
-        let wrote = recordV4.reduce(0) { $0 + $1.bytesWritten } - before
+        let wrote = records.reduce(0) { $0 + $1.bytesWritten } - before
         let raw = recordLanes.count * count * 64
         fputs(
           String(
-            format: "[record v4] step %d | %d lanes x %d rows | %.1f ms | %.2f MiB -> %.2f MiB (%.1fx)\n",
+            format: "[record] step %d | %d lanes x %d rows | %.1f ms | %.2f MiB -> %.2f MiB (%.1fx)\n",
             step, recordLanes.count, count, ms, Double(raw) / 1_048_576,
             Double(wrote) / 1_048_576, wrote > 0 ? Double(raw) / Double(wrote) : 0), stderr)
       }
@@ -1413,7 +1316,7 @@ final class MetricsTapeWriter {
             dStep = Int(snap.deathStep)
             dRewardSum = Double(snap.deathRewardSum)
             dRho = Double(snap.deathRho)
-          } else if engine != nil {
+          } else {
             if snap.paramNonFinite != 0 {
               detector = "paramNonFinite"
             } else if Double(snap.paramAbsMax) > 1e16 {
@@ -1425,35 +1328,29 @@ final class MetricsTapeWriter {
           if let det = detector {
             st.deadStep[lane] = dStep
             st.deadDetector[lane] = det
-            var row: [String: Any] = [
+            let pm = snap.paramNonFinite != 0 ? Double.infinity : Double(snap.paramAbsMax)
+            deathLines.append(try jsonLine([
               "seed": seeds[lane], "lane": lane, "step": dStep, "detector": det,
-              "policy": p.rawValue, "rewardSumAtDeath": dRewardSum,
+              "policy": "oak", "rewardSumAtDeath": dRewardSum,
               "lastGoodRewardRate": dRho.isFinite ? dRho : NSNull(),
-            ]
-            if engine != nil {
-              row["rhoAtDeath"] =
-                snap.scalars.rho.isFinite ? Double(snap.scalars.rho) : NSNull()
-              let pm = snap.paramNonFinite != 0 ? Double.infinity : Double(snap.paramAbsMax)
-              row["paramAbsMax"] = pm.isFinite ? pm : NSNull()
-            }
-            deathLines.append(try jsonLine(row))
+              "rhoAtDeath": snap.scalars.rho.isFinite ? Double(snap.scalars.rho) : NSNull(),
+              "paramAbsMax": pm.isFinite ? pm : NSNull(),
+            ] as [String: Any]))
           }
         }
         if kind == "final" {
+          let pm = snap.paramNonFinite != 0 ? Double.infinity : Double(snap.paramAbsMax)
           var m: [String: Any] = [
-            "v": 1, "kind": kind, "envId": laneEnvs[lane], "policy": p.rawValue,
+            "v": 1, "kind": kind, "envId": laneEnvs[lane], "policy": "oak",
             "ablationLabel": ablations.label, "lane": lane, "seed": seeds[lane],
             "step": Int(snap.steps), "wallSeconds": wall, "rewardSum": Double(snap.rewardSum),
             "doneCount": Int(snap.doneCount), "health": health(snap, lane: lane),
             "firstNonFiniteStep": st.deadStep[lane] ?? NSNull(),
             "firstNonFiniteDetector": st.deadDetector[lane] ?? NSNull(),
+            "kernelRho": snap.scalars.rho.isFinite ? Double(snap.scalars.rho) : NSNull(),
+            "paramAbsMax": pm.isFinite ? pm : NSNull(),
           ]
           if wall > 0 { m["stepsPerSecond"] = Double(snap.steps) / wall }
-          if engine != nil {
-            m["kernelRho"] = snap.scalars.rho.isFinite ? Double(snap.scalars.rho) : NSNull()
-            let pm = snap.paramNonFinite != 0 ? Double.infinity : Double(snap.paramAbsMax)
-            m["paramAbsMax"] = pm.isFinite ? pm : NSNull()
-          }
           lines.append(try jsonLine(m))
         }
       }
@@ -1480,7 +1377,7 @@ final class MetricsTapeWriter {
       let bestLane = unsorted.indices.max(by: { unsorted[$0] < unsorted[$1] }) ?? 0
       try aggOut.write(
         contentsOf: jsonLine([
-          "step": step, "kind": kind, "policy": p.rawValue, "alive": alive, "dead": B - alive,
+          "step": step, "kind": kind, "policy": "oak", "alive": alive, "dead": B - alive,
           "deliveredRateP10": quantile(rates, 0.1), "deliveredRateP50": quantile(rates, 0.5),
           "deliveredRateP90": quantile(rates, 0.9), "wallSeconds": wall,
           "aggStepsPerSecond": wall > 0 ? Double(step) * Double(B) / wall : 0,
@@ -1498,31 +1395,30 @@ final class MetricsTapeWriter {
       if timing {
         fputs(
           String(
-            format: "[fleet %@ gpu] step %d alive %d/%d | gpu %.1fs wall %.1fs | %.0f agg steps/s\n",
-            p.rawValue, step, alive, B, st.gpuSeconds, wall,
+            format: "[fleet oak gpu] step %d alive %d/%d | gpu %.1fs wall %.1fs | %.0f agg steps/s\n",
+            step, alive, B, st.gpuSeconds, wall,
             wall > 0 ? Double(step) * Double(B) / wall : 0), stderr)
       }
     }
     func writeHashes(step: Int) throws {
-      guard let eng = engine else { return }
       if let rawDir = e["OAK_DEBUG_RAW"] {
         for lane in 0..<min(64, B) {
-          let kd = eng.kind(of: lane)
+          let kd = engine.kind(of: lane)
           let d = Data(
-            bytes: eng.statePtr(lane), count: kd.stateTotal * MemoryLayout<Float>.stride)
+            bytes: engine.statePtr(lane), count: kd.stateTotal * MemoryLayout<Float>.stride)
           try d.write(to: URL(fileURLWithPath: "\(rawDir)/state-l\(lane)-s\(step).bin"))
           let du = Data(
-            bytes: eng.uintPtr(lane), count: kd.uintTotal * MemoryLayout<UInt32>.stride)
+            bytes: engine.uintPtr(lane), count: kd.uintTotal * MemoryLayout<UInt32>.stride)
           try du.write(to: URL(fileURLWithPath: "\(rawDir)/uints-l\(lane)-s\(step).bin"))
           let dp = Data(
-            bytes: eng.paramPtr(lane), count: kd.paramTotal * MemoryLayout<Float>.stride)
+            bytes: engine.paramPtr(lane), count: kd.paramTotal * MemoryLayout<Float>.stride)
           try dp.write(to: URL(fileURLWithPath: "\(rawDir)/params-l\(lane)-s\(step).bin"))
         }
       }
       for lane in 0..<B {
         guard let h = hashHandles[lane] else { continue }
         let laneBytes = laneBuf.contents() + lane * fleetLaneStride
-        let hs = eng.stateHashes(lane, laneBytes: laneBytes)
+        let hs = engine.stateHashes(lane, laneBytes: laneBytes)
         let keys = ["params", "state", "uints", "scalars", "stateReward", "uintsReward", "lane"]
         var obj: [String: Any] = ["seed": seeds[lane], "step": step]
         for k in keys { obj[k] = hs[k]! }
@@ -1568,26 +1464,17 @@ final class MetricsTapeWriter {
       encodeMegastep(enc, target - step, step)
       if isTape {
         var fullScan: UInt32 = isSnap ? 1 : 0
-        if let eng = engine {
-          for kd in eng.kinds {
-            bindFleet(enc, snapPipe)
-            enc.setBuffer(eng.params.b, offset: kd.paramBase * 4, index: 0)
-            enc.setBuffer(eng.state.b, offset: kd.stateBase * 4, index: 1)
-            enc.setBuffer(eng.uints.b, offset: kd.uintBase * 4, index: 2)
-            enc.setBuffer(kd.configB, offset: 0, index: 4)
-            enc.setBuffer(snapBuf, offset: 0, index: 9)
-            var ctl = SIMD2<UInt32>(UInt32(snapHalf * B), UInt32(kd.firstLane))
-            enc.setBytes(&ctl, length: MemoryLayout<SIMD2<UInt32>>.stride, index: 10)
-            enc.setBytes(&fullScan, length: 4, index: 11)
-            enc.dispatchThreadgroups(mtlSize(kd.count), threadsPerThreadgroup: mtlSize(32))
-          }
-        } else {
+        for kd in engine.kinds {
           bindFleet(enc, snapPipe)
+          enc.setBuffer(engine.params.b, offset: kd.paramBase * 4, index: 0)
+          enc.setBuffer(engine.state.b, offset: kd.stateBase * 4, index: 1)
+          enc.setBuffer(engine.uints.b, offset: kd.uintBase * 4, index: 2)
+          enc.setBuffer(kd.configB, offset: 0, index: 4)
           enc.setBuffer(snapBuf, offset: 0, index: 9)
-          var ctl = SIMD2<UInt32>(UInt32(snapHalf * B), 0)
+          var ctl = SIMD2<UInt32>(UInt32(snapHalf * B), UInt32(kd.firstLane))
           enc.setBytes(&ctl, length: MemoryLayout<SIMD2<UInt32>>.stride, index: 10)
           enc.setBytes(&fullScan, length: 4, index: 11)
-          enc.dispatchThreadgroups(mtlSize(B), threadsPerThreadgroup: mtlSize(32))
+          enc.dispatchThreadgroups(mtlSize(kd.count), threadsPerThreadgroup: mtlSize(32))
         }
       }
       enc.endEncoding()
@@ -1646,7 +1533,7 @@ final class MetricsTapeWriter {
     inflight.signal()
     inflight.signal()
     if let err = st.error { throw err }
-    for w in recordV4 { try w.writeMeta(final: true) }
+    for w in records { try w.writeMeta(final: true) }
   }
   static func compareHashes() throws {
     let args = Array(CommandLine.arguments.dropFirst())
@@ -1738,13 +1625,13 @@ final class MetricsTapeWriter {
     print(
       "compare-hashes: \(keys.count) rows match on \(required.joined(separator: ",")).")
   }
-  static func recordV4Probe() throws {
+  static func recordProbe() throws {
     let args = CommandLine.arguments
     guard args.count >= 4 else {
-      throw err("Usage: OaK record-v4-probe <cases.bin> <out-dir>")
+      throw err("Usage: OaK record-probe <cases.bin> <out-dir>")
     }
     let data = try Data(contentsOf: URL(fileURLWithPath: args[2]))
-    guard data.count >= 12 else { throw err("record-v4-probe: case file too small.") }
+    guard data.count >= 12 else { throw err("record-probe: case file too small.") }
     let (kind, rowCount, chunkSteps): (UInt32, Int, Int) = data.withUnsafeBytes { raw in
       (
         raw.load(fromByteOffset: 0, as: UInt32.self),
@@ -1754,7 +1641,7 @@ final class MetricsTapeWriter {
     }
     guard rowCount > 0, chunkSteps > 0, data.count == 12 + rowCount * 16 * 4 else {
       throw err(
-        "record-v4-probe: case size mismatch — \(data.count) bytes for \(rowCount) rows (want \(12 + rowCount * 16 * 4)), chunkSteps \(chunkSteps).")
+        "record-probe: case size mismatch — \(data.count) bytes for \(rowCount) rows (want \(12 + rowCount * 16 * 4)), chunkSteps \(chunkSteps).")
     }
     let envId = try envId(kind: kind)
     let dir = URL(fileURLWithPath: args[3], isDirectory: true)
@@ -1763,7 +1650,7 @@ final class MetricsTapeWriter {
     FileManager.default.createFile(atPath: url.path, contents: nil)
     let h = try FileHandle(forWritingTo: url)
     defer { try? h.close() }
-    let w = try RecordV4Writer(
+    let w = try RecordWriter(
       handle: h, envKind: kind, metaURL: dir.appendingPathComponent("meta.json"),
       envId: envId, seed: 0, actDim: 6)
     try data.withUnsafeBytes { raw in
@@ -1778,246 +1665,10 @@ final class MetricsTapeWriter {
     }
     try w.writeMeta(final: true)
   }
-  static func physicsProbe() throws {
-    let args = CommandLine.arguments
-    guard args.count >= 4 else {
-      throw err("Usage: OaK physics-probe <input.bin> <output.bin>")
-    }
-    let data = try Data(contentsOf: URL(fileURLWithPath: args[2]))
-    guard data.count >= 4 else { throw err("Probe input too small.") }
-    let n = Int(data.withUnsafeBytes { $0.load(fromByteOffset: 0, as: UInt32.self) })
-    let inFloats = n * 33
-    guard n > 0, data.count == 4 + inFloats * 4 else {
-      throw err("Probe input size mismatch: \(data.count) bytes for \(n) cases.")
-    }
-    let debug = args.count > 4 && args[4] == "debug"
-    let outStride = debug ? 904 : 18
-    let kernelName = debug ? "oak_physics_probe_debug" : "oak_physics_probe"
-    guard let dev = MTLCreateSystemDefaultDevice(), let q = dev.makeCommandQueue() else {
-      throw err("Metal unavailable.")
-    }
-    let lib = try dev.makeLibrary(URL: requireFreshMetallib())
-    guard let fn = lib.makeFunction(name: kernelName) else {
-      throw err("Missing \(kernelName) kernel.")
-    }
-    let pipe = try dev.makeComputePipelineState(function: fn)
-    guard let inBuf = dev.makeBuffer(length: inFloats * 4, options: [.storageModeShared]),
-      let outBuf = dev.makeBuffer(length: n * outStride * 4, options: [.storageModeShared])
-    else { throw err("Metal buffer allocation failed.") }
-    data.withUnsafeBytes { raw in
-      memcpy(inBuf.contents(), raw.baseAddress!.advanced(by: 4), inFloats * 4)
-    }
-    guard let cb = q.makeCommandBuffer(), let enc = cb.makeComputeCommandEncoder() else {
-      throw err("Failed to encode Metal command.")
-    }
-    enc.setComputePipelineState(pipe)
-    enc.setBuffer(inBuf, offset: 0, index: 0)
-    enc.setBuffer(outBuf, offset: 0, index: 1)
-    var count = UInt32(n)
-    enc.setBytes(&count, length: MemoryLayout<UInt32>.stride, index: 2)
-    let tg = min(64, pipe.maxTotalThreadsPerThreadgroup)
-    enc.dispatchThreads(mtlSize(n), threadsPerThreadgroup: mtlSize(tg))
-    enc.endEncoding()
-    cb.commit()
-    cb.waitUntilCompleted()
-    if let e = cb.error { throw err("Metal command failed: \(e)") }
-    try Data(bytes: outBuf.contents(), count: n * outStride * 4)
-      .write(to: URL(fileURLWithPath: args[3]))
-  }
-  static func gridworldProbe() throws {
-    let args = CommandLine.arguments
-    guard args.count >= 4 else {
-      throw err("Usage: OaK gridworld-probe <cases.bin> <out.bin>")
-    }
-    let data = try Data(contentsOf: URL(fileURLWithPath: args[2]))
-    guard data.count >= 12 else { throw err("Case file too small.") }
-    let (n, wi, wo): (Int, Int, Int) = data.withUnsafeBytes { raw in
-      (
-        Int(raw.load(fromByteOffset: 0, as: UInt32.self)),
-        Int(raw.load(fromByteOffset: 4, as: UInt32.self)),
-        Int(raw.load(fromByteOffset: 8, as: UInt32.self))
-      )
-    }
-    let isGrid = (wi == 8 && wo == 24) || (wi == 6 && wo == 21) || (wi == 11 && wo == 28)
-      || (wi == 2 && wo == 20) || (wi == 12 && wo == 21) || (wi == 15 && wo == 32)
-      || (wi == 7 && wo == 23) || (wi == 13 && wo == 25) || (wi == 1 && wo == 6)
-      || (wi == 9 && wo == 26) || (wi == 10 && wo == 25) || (wi == 3 && wo == 21)
-    let isClassic = (wi == 3 && wo == 4) || (wi == 5 && wo == 6) || (wi == 7 && wo == 6)
-      || (wi == 4 && wo == 4)
-    guard n > 0, isGrid || isClassic else {
-      throw err(
-        "Bad case header: n=\(n) in=\(wi) out=\(wo) (expected FourRooms 8/24, DeepSea 6/21, KeyCorridor 11/28, Chain 2/20, LargeDeepSea 12/21, MultiKeyCorridor 15/32, MemoryChain 7/23, ProceduralMaze 13/25, ProceduralMazeGen 1/6, HighDimMaze 9/26, POMaze 10/25, DelayedChain 3/21, MountainCar 3/4, Acrobot 5/6, CartPole 7/6, or Pendulum 4/4).")
-    }
-    guard data.count == 12 + n * wi * 4 + n * wo * 4 else {
-      throw err("Case file size mismatch: \(data.count) bytes for n=\(n) in=\(wi) out=\(wo).")
-    }
-    guard let dev = MTLCreateSystemDefaultDevice(), let q = dev.makeCommandQueue() else {
-      throw err("Metal unavailable.")
-    }
-    let lib = try dev.makeLibrary(URL: requireFreshMetallib())
-    let probeName = isGrid ? "oak_gridworld_probe" : "oak_classic_probe"
-    guard let fn = lib.makeFunction(name: probeName) else {
-      throw err("Missing \(probeName) kernel.")
-    }
-    let pipe = try dev.makeComputePipelineState(function: fn)
-    guard let inBuf = dev.makeBuffer(length: n * wi * 4, options: [.storageModeShared]),
-      let outBuf = dev.makeBuffer(length: n * wo * 4, options: [.storageModeShared]),
-      let hdrBuf = dev.makeBuffer(length: 12, options: [.storageModeShared])
-    else { throw err("Metal buffer allocation failed.") }
-    data.withUnsafeBytes { raw in
-      memcpy(inBuf.contents(), raw.baseAddress!.advanced(by: 12), n * wi * 4)
-    }
-    do {
-      let hp = hdrBuf.contents().bindMemory(to: UInt32.self, capacity: 3)
-      hp[0] = UInt32(n)
-      hp[1] = UInt32(wi)
-      hp[2] = UInt32(wo)
-    }
-    guard let cb = q.makeCommandBuffer(), let enc = cb.makeComputeCommandEncoder() else {
-      throw err("Failed to encode Metal command.")
-    }
-    enc.setComputePipelineState(pipe)
-    enc.setBuffer(inBuf, offset: 0, index: 0)
-    enc.setBuffer(outBuf, offset: 0, index: 1)
-    enc.setBuffer(hdrBuf, offset: 0, index: 2)
-    let tg = min(64, pipe.maxTotalThreadsPerThreadgroup)
-    enc.dispatchThreads(mtlSize(n), threadsPerThreadgroup: mtlSize(tg))
-    enc.endEncoding()
-    cb.commit()
-    cb.waitUntilCompleted()
-    if let e = cb.error { throw err("Metal command failed: \(e)") }
-    try Data(bytes: outBuf.contents(), count: n * wo * 4)
-      .write(to: URL(fileURLWithPath: args[3]))
-  }
-  static let rolloutLaneStride = 35 * 4
-  static func physicsRollout() throws {
-    let args = CommandLine.arguments
-    let e = ProcessInfo.processInfo.environment
-    guard args.count >= 3 else {
-      throw err("Usage: OaK physics-rollout <input.bin> <output.bin> | --bench | --rng-probe <out.bin>")
-    }
-    if args[2] == "--bench" {
-      let lanes = e["OAK_ROLLOUT_LANES"].flatMap(Int.init) ?? 4096
-      let steps = e["OAK_ROLLOUT_STEPS"].flatMap(Int.init) ?? 2000
-      let seedBase = e["OAK_ROLLOUT_SEED_BASE"].flatMap(Int.init) ?? 0
-      let episodeLen = e["OAK_ROLLOUT_EPISODE_LEN"].flatMap(Int.init) ?? 1000
-      _ = try runRollout(
-        header: [UInt32(lanes), UInt32(steps), 2, UInt32(seedBase), UInt32(episodeLen)],
-        initStates: nil, ctrl: nil, outURL: nil, bench: true)
-      return
-    }
-    if args[2] == "--rng-probe" {
-      guard args.count >= 4 else { throw err("Usage: OaK physics-rollout --rng-probe <out.bin>") }
-      let lanes = e["OAK_RNG_LANES"].flatMap(Int.init) ?? 200_000
-      _ = try runRollout(
-        header: [UInt32(lanes), 1, 4, 0, 1000], initStates: nil, ctrl: nil,
-        outURL: URL(fileURLWithPath: args[3]), bench: false)
-      return
-    }
-    guard args.count >= 4 else { throw err("Usage: OaK physics-rollout <input.bin> <output.bin>") }
-    let data = try Data(contentsOf: URL(fileURLWithPath: args[2]))
-    guard data.count >= 20 else { throw err("Rollout input too small.") }
-    let header: [UInt32] = data.withUnsafeBytes { raw in
-      (0..<5).map { raw.load(fromByteOffset: $0 * 4, as: UInt32.self) }
-    }
-    let lanes = Int(header[0]), steps = Int(header[1]), mode = Int(header[2])
-    guard lanes > 0, steps > 0, [0, 1, 3].contains(mode) else {
-      throw err("Rollout header invalid: lanes=\(lanes) steps=\(steps) mode=\(mode).")
-    }
-    let initBytes = (mode == 0 || mode == 3) ? lanes * 18 * 4 : 0
-    let ctrlBytes = mode == 0 ? lanes * steps * 6 * 4 : 0
-    guard data.count == 20 + initBytes + ctrlBytes else {
-      throw err("Rollout input size mismatch: \(data.count) bytes, expected \(20 + initBytes + ctrlBytes).")
-    }
-    let initStates = initBytes > 0 ? data.subdata(in: 20..<(20 + initBytes)) : nil
-    let ctrl = ctrlBytes > 0 ? data.subdata(in: (20 + initBytes)..<data.count) : nil
-    _ = try runRollout(
-      header: header, initStates: initStates, ctrl: ctrl,
-      outURL: URL(fileURLWithPath: args[3]), bench: false)
-  }
-  @discardableResult
-  static func runRollout(
-    header: [UInt32], initStates: Data?, ctrl: Data?, outURL: URL?, bench: Bool
-  ) throws -> Double {
-    let lanes = Int(header[0]), steps = Int(header[1]), mode = Int(header[2])
-    let outFloats: Int
-    switch mode {
-    case 0, 1: outFloats = lanes * steps * 37
-    case 2: outFloats = lanes * 18
-    case 3: outFloats = lanes * steps * 2
-    case 4: outFloats = lanes * 24
-    default: throw err("Unknown rollout mode \(mode).")
-    }
-    guard let dev = MTLCreateSystemDefaultDevice(), let q = dev.makeCommandQueue() else {
-      throw err("Metal unavailable.")
-    }
-    let lib = try dev.makeLibrary(URL: requireFreshMetallib())
-    guard let fn = lib.makeFunction(name: "oak_physics_rollout") else {
-      throw err("Missing oak_physics_rollout kernel.")
-    }
-    let pipe = try dev.makeComputePipelineState(function: fn)
-    func buf(_ data: Data?, _ minBytes: Int, shared: Bool = true) throws -> MTLBuffer {
-      let n = max(data?.count ?? 0, max(minBytes, 16))
-      guard let b = dev.makeBuffer(length: n, options: shared ? [.storageModeShared] : [.storageModePrivate])
-      else { throw err("Metal buffer allocation failed (\(n) bytes).") }
-      if let d = data, shared {
-        d.withUnsafeBytes { memcpy(b.contents(), $0.baseAddress!, d.count) }
-      }
-      return b
-    }
-    var hdr = header
-    let hdrBuf = try buf(Data(bytes: &hdr, count: 20), 20)
-    let initBuf = try buf(initStates, 16)
-    let ctrlBuf = try buf(ctrl, 16)
-    let outBuf = try buf(nil, outFloats * 4)
-    let laneBuf = try buf(nil, lanes * rolloutLaneStride, shared: false)
-    let chunkSteps = mode == 4 ? 1 : (mode == 3 ? 500 : 100)
-    let tg = min(64, pipe.maxTotalThreadsPerThreadgroup)
-    var gpuSeconds = 0.0
-    var start = 0
-    while start < (mode == 4 ? 1 : steps) {
-      guard let cb = q.makeCommandBuffer(), let enc = cb.makeComputeCommandEncoder() else {
-        throw err("Failed to encode Metal command.")
-      }
-      enc.setComputePipelineState(pipe)
-      enc.setBuffer(hdrBuf, offset: 0, index: 0)
-      enc.setBuffer(initBuf, offset: 0, index: 1)
-      enc.setBuffer(ctrlBuf, offset: 0, index: 2)
-      enc.setBuffer(outBuf, offset: 0, index: 3)
-      enc.setBuffer(laneBuf, offset: 0, index: 4)
-      var chunk = SIMD2<UInt32>(UInt32(start), UInt32(chunkSteps))
-      enc.setBytes(&chunk, length: MemoryLayout<SIMD2<UInt32>>.stride, index: 5)
-      enc.dispatchThreads(mtlSize(lanes), threadsPerThreadgroup: mtlSize(tg))
-      enc.endEncoding()
-      cb.commit()
-      cb.waitUntilCompleted()
-      if let e = cb.error { throw err("Metal command failed: \(e)") }
-      gpuSeconds += cb.gpuEndTime - cb.gpuStartTime
-      start += chunkSteps
-    }
-    if let url = outURL {
-      try Data(bytes: outBuf.contents(), count: outFloats * 4).write(to: url)
-    }
-    if bench {
-      let p = outBuf.contents().bindMemory(to: Float.self, capacity: outFloats)
-      var sum = 0.0
-      for i in 0..<outFloats { sum += Double(p[i]) }
-      let sha = sha256Hex(UnsafeRawBufferPointer(start: outBuf.contents(), count: outFloats * 4))
-      let envSteps = Double(lanes) * Double(steps)
-      fputs(
-        String(
-          format:
-            "physics-rollout bench: B=%d steps=%d gpu %.3fs | %.0f env-steps/s | %.0f mj-steps/s | checksum sum=%.6e sha=%@\n",
-          lanes, steps, gpuSeconds, envSteps / gpuSeconds, 5 * envSteps / gpuSeconds, sum,
-          String(sha.prefix(16))), stderr)
-    }
-    return gpuSeconds
-  }
   static func benchmark() throws {
     let env = ProcessInfo.processInfo.environment
     let ablations = try AblationSpec.fromEnv(env)
     let fm = FileManager.default
-    let envId = env["OAK_BENCH_ENV"] ?? defaultEnv
     let seed0 = env["OAK_BENCH_SEED_START"].flatMap(Int.init) ?? 0
     let seedValues: [Int]
     if let explicitSeeds = env["OAK_BENCH_SEEDS"] {
@@ -2031,51 +1682,33 @@ final class MetricsTapeWriter {
       seedValues = Array(seed0..<(seed0 + (env["OAK_BENCH_SEED_COUNT"].flatMap(Int.init) ?? 1408)))
     }
     let steps = max(env["OAK_BENCH_STEPS"].flatMap(Int.init) ?? 500_000, 1)
-    let policies = try (env["OAK_BENCH_POLICIES"] ?? "oak,zero,random").split(separator: ",").map {
-      try pol(String($0))
-    }
-    let recordingRequested =
-      env["OAK_RECORD_ACTIONS"] == "1"
-      || !(env["OAK_RECORD_SEEDS"] ?? "").trimmingCharacters(in: .whitespaces).isEmpty
-    if recordingRequested, policies.count > 1 {
-      throw err("Recording (OAK_RECORD_ACTIONS / OAK_RECORD_SEEDS) with \(policies.count) policies (\(policies.map(\.rawValue).joined(separator: ","))) would TRUNCATE: all policies share one <envId>/seed<N>/actions.bin, so each overwrites the last and meta.json ends up describing another policy's stream. Set OAK_BENCH_POLICIES=oak (the default is oak,zero,random).")
-    }
-    if policies.count > 1, env["OAK_RECORD_ACTIONS"] == nil {
-      recordingDefaultSuppressed = true
-      print("[fleet] default recording disabled: \(policies.count) policies share lane dirs (set OAK_BENCH_POLICIES=oak to record)")
-    }
-    let defaultSchedule = "HalfCheetah-v4:1024,KeyCorridor-cont-v0:128,FourRooms-cont-v0:64,DeepSea-cont-v0:64,Acrobot-cont-v0:64,MountainCar-cont-v0:64"
+    let defaultSchedule =
+      "HalfCheetah-v4:1024,KeyCorridor-cont-v0:128,FourRooms-cont-v0:64,DeepSea-cont-v0:64,Acrobot-cont-v0:64,MountainCar-cont-v0:64"
     var raw = env["OAK_BENCH_ENVS"] ?? defaultSchedule
     if raw.trimmingCharacters(in: .whitespaces).isEmpty { raw = defaultSchedule }
-    if env["OAK_BENCH_ENV"] != nil {
-      throw err("OAK_BENCH_ENV single-env is deleted (user law 2026-07-19): every run is multi-env. Use OAK_BENCH_ENVS to change the schedule.")
+    var laneEnvs = [String](repeating: defaultEnv, count: seedValues.count)
+    var entries: [(envId: String, seedStart: Int, seedEnd: Int)] = []
+    var offset = 0
+    for item in raw.split(separator: ",") {
+      let parts = item.split(separator: ":")
+      guard parts.count == 2, let count = Int(parts[1].trimmingCharacters(in: .whitespaces)),
+        count > 0
+      else {
+        throw err("Bad OAK_BENCH_ENVS entry '\(item)' (expected EnvId:count).")
+      }
+      let name = String(parts[0]).trimmingCharacters(in: .whitespaces)
+      _ = try Main.envKind(name)
+      guard offset + count <= seedValues.count else {
+        throw err(
+          "OAK_BENCH_ENVS schedule overflows the fleet: \(offset + count) lanes > B=\(seedValues.count)."
+        )
+      }
+      for i in 0..<count { laneEnvs[offset + i] = name }
+      entries.append((name, seedValues[offset], seedValues[offset + count - 1]))
+      offset += count
     }
-    var laneEnvs = [String](repeating: envId, count: seedValues.count)
-    var envSchedule: [(envId: String, seedStart: Int, seedEnd: Int)]? = nil
-    if !raw.trimmingCharacters(in: .whitespaces).isEmpty {
-      var entries: [(String, Int, Int)] = []
-      var offset = 0
-      for item in raw.split(separator: ",") {
-        let parts = item.split(separator: ":")
-        guard parts.count == 2, let count = Int(parts[1].trimmingCharacters(in: .whitespaces)),
-          count > 0
-        else {
-          throw err("Bad OAK_BENCH_ENVS entry '\(item)' (expected EnvId:count).")
-        }
-        let name = String(parts[0]).trimmingCharacters(in: .whitespaces)
-        _ = try Main.envKind(name)
-        guard offset + count <= seedValues.count else {
-          throw err(
-            "OAK_BENCH_ENVS schedule overflows the fleet: \(offset + count) lanes > B=\(seedValues.count).")
-        }
-        for i in 0..<count { laneEnvs[offset + i] = name }
-        entries.append((name, seedValues[offset], seedValues[offset + count - 1]))
-        offset += count
-      }
-      guard offset == seedValues.count else {
-        throw err("OAK_BENCH_ENVS schedule covers \(offset) of B=\(seedValues.count) lanes.")
-      }
-      envSchedule = entries
+    guard offset == seedValues.count else {
+      throw err("OAK_BENCH_ENVS schedule covers \(offset) of B=\(seedValues.count) lanes.")
     }
     var dir = metricsRoot()
     let lockDir = URL(fileURLWithPath: fm.currentDirectoryPath).appendingPathComponent(
@@ -2098,88 +1731,24 @@ final class MetricsTapeWriter {
         isDirectory: true)
     }
     try fm.createDirectory(at: dir, withIntermediateDirectories: true)
-    let fObs = 17, fD = 12
-    let fInputW = flopInput(fObs, fD)
-    var fR = 32
-    while fR < 2 * fInputW { fR *= 2 }
-    let fK = 32, fA = 64, fDL = max(fD / 2, 1)
-    let fTraceLevels = max(flopTraces(fObs) - 1, 0)
-    let fRn = fR
-    let ablated = Set(ablations.names)
-    var organFma: [String: Int] = [
-      "FeatureConstruction": 0, "GVFPrediction": 0, "RewardRespectingSubtasks": 0,
-      "OptionPolicies": 0, "OptionModels": 0, "OptionKeyboard": 0,
-      "SearchControl": 0, "GenerateAndTest": 0, "ActionEmission": 0, "misc": 0,
-    ]
-    organFma["FeatureConstruction"]! += 16 + 3 * 32
-    if !ablated.contains("feature-construction") {
-      organFma["FeatureConstruction"]! += fObs * (2 + fTraceLevels) + 32 * 7 * 5
-    }
-    organFma["GVFPrediction"]! += 2 * fA + 6 * fA
-    if !ablated.contains("gvf-prediction") { organFma["GVFPrediction"]! += 2 * fA }
-    organFma["RewardRespectingSubtasks"]! += 2 * fK * fA + fK * fA
-    if !ablated.contains("rr-subtasks") {
-      organFma["RewardRespectingSubtasks"]! += 2 * fK * fA + fK
-    }
-    organFma["OptionPolicies"]! += fK * fDL
-    if !ablated.contains("option-policies") {
-      organFma["OptionPolicies"]! += 2 * fK * fA * fDL
-      if !ablated.contains("generate-and-test") {
-        organFma["OptionPolicies"]! += fDL * fK + fDL * fA
-      }
-    }
-    if !ablated.contains("option-models") {
-      organFma["OptionModels"]! += 4 * fK * fA + 4 * fK * fA + 2 * fK * fA + 16 * fK
-    }
-    organFma["OptionKeyboard"]! += fK + fD * fK + fK
-    organFma["SearchControl"]! += fA * fK + fK + fK / 2
-    if !ablated.contains("generate-and-test") {
-      organFma["GenerateAndTest"]! += fRn / 2 + fR + fK
-    }
-    organFma["ActionEmission"]! += 5 * fD + 3 * fK * fDL + fK
-    organFma["misc"]! += 4_000
-    let organCostVersion = 1
-    let organFlops = organFma.mapValues { 2 * $0 }
-    let agentFlops = organFlops.values.reduce(0, +)
-    let envFlops: [String: Int] = [
-      "HalfCheetah-v4": 20_000, "FourRooms-cont-v0": 40, "DeepSea-cont-v0": 20,
-      "KeyCorridor-cont-v0": 60, "Acrobot-cont-v0": 200, "MountainCar-cont-v0": 40,
-      "CartPole-cont-v0": 60, "Pendulum-cont-v0": 50, "Chain-cont-v0": 10,
-      "LargeDeepSea-cont-v0": 25, "MultiKeyCorridor-cont-v0": 60,
-      "MemoryChain-cont-v0": 15,
-      "ProceduralMaze-cont-v0": 50, "HighDimMaze-cont-v0": 55,
-      "POMaze-cont-v0": 55, "DelayedChain-cont-v0": 8,
-    ]
-    let flopsPerLaneStep = agentFlops + (envFlops[envId] ?? 20_000)
-    var runMeta: [String: Any] = [
-      "fleetSchemaVersion": 1, "command": "benchmark", "envId": envId,
+    let runMeta: [String: Any] = [
+      "fleetSchemaVersion": 1, "command": "benchmark", "envId": entries[0].envId,
       "batch": seedValues.count, "seeds": seedValues, "steps": steps,
-      "policies": policies.map(\.rawValue), "ablation": ablations.names,
+      "policies": ["oak"], "ablation": ablations.names,
       "ablationLabel": ablations.label,
-      "flopsPerLaneStep": flopsPerLaneStep,
-      "organFlops": organFlops,
-      "organCostVersion": organCostVersion,
       "startedAt": ISO8601DateFormatter().string(from: Date()),
+      "envSchedule": entries.map { e in
+        ["envId": e.envId, "seedStart": e.seedStart, "seedEnd": e.seedEnd] as [String: Any]
+      },
     ]
-    if let envSchedule {
-      runMeta["envSchedule"] = envSchedule.map { e in
-        [
-          "envId": e.envId, "seedStart": e.seedStart, "seedEnd": e.seedEnd,
-          "flopsPerLaneStep": agentFlops + (envFlops[e.envId] ?? 0),
-        ] as [String: Any]
-      }
-    }
     try JSONSerialization.data(
       withJSONObject: runMeta, options: [.prettyPrinted, .sortedKeys]
     ).write(to: dir.appendingPathComponent("meta.json"), options: .atomic)
-    let envDesc =
-      envSchedule?.map { "\($0.envId):\($0.seedEnd - $0.seedStart + 1)" }.joined(
-        separator: ",") ?? envId
+    let envDesc = entries.map { "\($0.envId):\($0.seedEnd - $0.seedStart + 1)" }.joined(
+      separator: ",")
     fputs(
-      "OaK fleet: B=\(seedValues.count) lanes × \(steps) steps × \(policies.count) policies on \(envDesc) (ablation=\(ablations.label), dir=\(dir.path))\n",
+      "OaK fleet: B=\(seedValues.count) lanes × \(steps) steps on \(envDesc) (ablation=\(ablations.label), dir=\(dir.path))\n",
       stderr)
-    for p in policies {
-      try fleet(p, seedValues, steps, dir, laneEnvs, ablations)
-    }
+    try fleetGPU(seedValues, steps, dir, laneEnvs, ablations)
   }
 }
