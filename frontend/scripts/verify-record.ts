@@ -1,15 +1,16 @@
 #!/usr/bin/env bun
 
 import { spawnSync } from 'node:child_process';
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
+import process from 'node:process';
 import { fileURLToPath } from 'node:url';
 import { inflateRawSync } from 'node:zlib';
 
 import { ENV_IDS } from '@shared/envs';
 import type { EnvId } from '@shared/envs';
-import { parseActionsBin } from '@sim/record';
+import { parseRecord } from '@sim/record';
 
 
 type Enc = 'u8' | 'i16' | 'dx32';
@@ -80,8 +81,10 @@ const CODECS: Record<EnvId, Codec> = {
   'DelayedChain-cont-v0': grid(15, [0, 2], { 1: 31 }),
 };
 
-const FILE_MAGIC = 0x344b414f;
-const CHUNK_MAGIC = 0x344b4843;
+const FILE_MAGIC = 0x524b414f;
+const CHUNK_MAGIC = 0x524b4843;
+const FILE_HEADER = 12;
+const CHUNK_HEADER = 24;
 const ROW_FLOATS = 16;
 const ROW_BYTES = 64;
 
@@ -106,50 +109,45 @@ function crc32(buf: Uint8Array): number {
 interface ChunkInfo {
   stepStart: number;
   stepCount: number;
-  byteOffset: number;
-  byteLength: number;
   rawBytes: number;
   compBytes: number;
-  doneCount: number;
-  rewardDelta: number;
   escapes: number;
 }
 
-interface V4Read {
+interface Decoded {
   envKind: number;
-  codecVersion: number;
   steps: number;
   chunks: ChunkInfo[];
   data: Float32Array;
   escaped: Uint8Array;
   hdrBits: Uint8Array;
   escBytes: Map<number, Uint8Array>;
-  payloads: Uint8Array[];
+  qCols: Int32Array[];
+  dCols: (Int32Array | null)[];
   problems: string[];
 }
 
-function readV4(bytes: Uint8Array, codec: Codec): V4Read {
+function readRecord(bytes: Uint8Array, codec: Codec): Decoded {
   const problems: string[] = [];
+  if (bytes.length < FILE_HEADER) {
+    throw new Error(`file shorter than the ${FILE_HEADER}-byte header (${bytes.length})`);
+  }
   const dv = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
-  if (bytes.length < 16) throw new Error(`file shorter than the 16-byte header (${bytes.length})`);
   const magic = dv.getUint32(0, true);
   if (magic !== FILE_MAGIC) {
     problems.push(`file magic 0x${magic.toString(16)} != 0x${FILE_MAGIC.toString(16)}`);
   }
-  const formatVersion = dv.getUint32(4, true);
-  if (formatVersion !== 4) problems.push(`formatVersion ${formatVersion} != 4`);
-  const envKind = dv.getUint32(8, true);
+  const envKind = dv.getUint32(4, true);
   if (envKind !== codec.envKind) problems.push(`header envKind ${envKind} != ${codec.envKind}`);
-  const codecVersion = dv.getUint32(12, true);
-  if (codecVersion !== 1) problems.push(`codecVersion ${codecVersion} != 1`);
+  const headerSteps = dv.getUint32(8, true);
 
   const chunks: ChunkInfo[] = [];
   const payloads: Uint8Array[] = [];
-  let off = 16;
+  let off = FILE_HEADER;
   let steps = 0;
   while (off < bytes.length) {
-    if (off + 32 > bytes.length) {
-      problems.push(`torn tail: ${bytes.length - off} bytes at ${off} < a 32-byte chunk header`);
+    if (off + CHUNK_HEADER > bytes.length) {
+      problems.push(`torn tail: ${bytes.length - off} bytes at ${off} < a ${CHUNK_HEADER}-byte chunk header`);
       break;
     }
     if (dv.getUint32(off, true) !== CHUNK_MAGIC) {
@@ -161,13 +159,11 @@ function readV4(bytes: Uint8Array, codec: Codec): V4Read {
     const rawBytes = dv.getUint32(off + 12, true);
     const compBytes = dv.getUint32(off + 16, true);
     const crc = dv.getUint32(off + 20, true);
-    const doneCount = dv.getUint32(off + 24, true);
-    const rewardDelta = dv.getFloat32(off + 28, true);
-    if (off + 32 + compBytes > bytes.length) {
-      problems.push(`torn tail: chunk at ${off} wants ${compBytes} bytes, file has ${bytes.length - off - 32}`);
+    if (off + CHUNK_HEADER + compBytes > bytes.length) {
+      problems.push(`torn tail: chunk at ${off} wants ${compBytes} bytes, file has ${bytes.length - off - CHUNK_HEADER}`);
       break;
     }
-    const comp = bytes.subarray(off + 32, off + 32 + compBytes);
+    const comp = bytes.subarray(off + CHUNK_HEADER, off + CHUNK_HEADER + compBytes);
     const got = crc32(comp);
     if (got !== crc) {
       problems.push(`chunk at ${off}: crc32 ${got.toString(16)} != header ${crc.toString(16)}`);
@@ -187,19 +183,21 @@ function readV4(bytes: Uint8Array, codec: Codec): V4Read {
     if (stepStart !== steps) {
       problems.push(`chunk at ${off}: stepStart ${stepStart} != running total ${steps}`);
     }
-    chunks.push({
-      stepStart, stepCount, byteOffset: off, byteLength: 32 + compBytes,
-      rawBytes, compBytes, doneCount, rewardDelta, escapes: 0,
-    });
+    chunks.push({ stepStart, stepCount, rawBytes, compBytes, escapes: 0 });
     payloads.push(payload);
     steps += stepCount;
-    off += 32 + compBytes;
+    off += CHUNK_HEADER + compBytes;
+  }
+  if (headerSteps !== steps) {
+    problems.push(`header steps ${headerSteps} != decoded steps ${steps}`);
   }
 
   const data = new Float32Array(steps * ROW_FLOATS);
   const escaped = new Uint8Array(steps);
   const hdrBits = new Uint8Array(steps);
   const escBytes = new Map<number, Uint8Array>();
+  const qCols = codec.fields.map(() => new Int32Array(steps));
+  const dCols = codec.fields.map((f) => (f.enc === 'i16' ? new Int32Array(steps) : null));
   const nBox = codec.ctrlBox;
   const hasDx = codec.fields.some((f) => f.enc === 'dx32');
   for (let ci = 0; ci < chunks.length; ci++) {
@@ -241,31 +239,36 @@ function readV4(bytes: Uint8Array, codec: Codec): V4Read {
     }
 
     let recon = hasDx ? p.getFloat64(baseOff, true) : 0;
-    let chainFinite = Number.isFinite(recon);
-    let doneSeen = 0;
+    const qAcc = new Int32Array(codec.fields.length);
     for (let i = 0; i < n; i++) {
       const row = (chunk.stepStart + i) * ROW_FLOATS;
       const hdr = payload[i]!;
       hdrBits[chunk.stepStart + i] = hdr;
       const isEsc = (hdr & 0x20) !== 0;
-      const done = (hdr >> 4) & 1;
-      if (done) doneSeen++;
+      if ((hdr & 0x10) !== 0) data[row + 6] = 1;
       if (nBox === 0) {
         data[row] = hdr & 0x0f;
       } else {
         for (let c = 0; c < nBox; c++) data[row + c] = payload[n * (1 + c) + i]! / 127.5 - 1;
       }
-      data[row + 6] = done;
       for (let j = 0; j < codec.fields.length; j++) {
         const f = codec.fields[j]!;
         const at = colOff[j]!;
         if (f.enc === 'u8') {
-          data[row + 7 + f.idx] = p.getUint8(at + i);
+          const b = p.getUint8(at + i);
+          qCols[j]![chunk.stepStart + i] = b;
+          data[row + 7 + f.idx] = b;
         } else if (f.enc === 'i16') {
-          data[row + 7 + f.idx] = p.getInt16(at + 2 * i, true) * f.scale;
+          const d = p.getInt16(at + 2 * i, true);
+          const q = i === 0 ? d : ((qAcc[j]! + d) << 16) >> 16;
+          qAcc[j] = q;
+          qCols[j]![chunk.stepStart + i] = q;
+          dCols[j]![chunk.stepStart + i] = d;
+          data[row + 7 + f.idx] = q * f.scale;
         } else {
-          recon += p.getInt32(at + 4 * i, true) * f.scale;
-          if (!Number.isFinite(recon)) chainFinite = false;
+          const d = p.getInt32(at + 4 * i, true);
+          recon += d * f.scale;
+          qCols[j]![chunk.stepStart + i] = d;
           data[row + 7 + f.idx] = recon;
         }
       }
@@ -283,23 +286,8 @@ function readV4(bytes: Uint8Array, codec: Codec): V4Read {
         problems.push(`chunk ${ci}: row ${i} is in the escape table but the hdr bit is clear`);
       }
     }
-    if (!chainFinite) problems.push(`chunk ${ci}: dx32 chain went non-finite`);
-    if (doneSeen !== chunk.doneCount) {
-      problems.push(`chunk ${ci}: header doneCount ${chunk.doneCount} != ${doneSeen} set bits`);
-    }
   }
-  return {
-    envKind, codecVersion, steps, chunks, data, escaped, hdrBits, escBytes, payloads, problems,
-  };
-}
-
-function columnOffsets(codec: Codec, stepCount: number): number[] {
-  let cursor = stepCount * (1 + codec.ctrlBox) + (codec.fields.some((f) => f.enc === 'dx32') ? 8 : 0);
-  return codec.fields.map((f) => {
-    const at = cursor;
-    cursor += (f.enc === 'u8' ? 1 : f.enc === 'i16' ? 2 : 4) * stepCount;
-    return at;
-  });
+  return { envKind, steps, chunks, data, escaped, hdrBits, escBytes, qCols, dCols, problems };
 }
 
 
@@ -313,8 +301,8 @@ function sameBits(a: number, b: number): boolean {
 }
 
 function compareRows(
-  v3: Float32Array,
-  v4: V4Read,
+  src: Float32Array,
+  dec: Decoded,
   codec: Codec,
   steps: number,
   fail: (m: string) => void,
@@ -330,35 +318,35 @@ function compareRows(
       bad++;
       fail(`row ${i}: ${m}`);
     };
-    if (v4.escaped[i]) {
+    if (dec.escaped[i]) {
       for (let u = 0; u < ROW_FLOATS; u++) {
-        if (!sameBits(v3[a + u]!, v4.data[a + u]!)) {
-          push(`escaped row not byte-identical at float ${u} (${v3[a + u]} vs ${v4.data[a + u]})`);
+        if (!sameBits(src[a + u]!, dec.data[a + u]!)) {
+          push(`escaped row not byte-identical at float ${u} (${src[a + u]} vs ${dec.data[a + u]})`);
           break;
         }
       }
       continue;
     }
-    if (v3[a + 6] !== v4.data[a + 6]) push(`done ${v3[a + 6]} != ${v4.data[a + 6]}`);
+    if (src[a + 6] !== dec.data[a + 6]) push(`done ${src[a + 6]} != ${dec.data[a + 6]}`);
     if (nBox === 0) {
-      if (v3[a] !== v4.data[a]) push(`action index ${v3[a]} != ${v4.data[a]}`);
+      if (src[a] !== dec.data[a]) push(`action index ${src[a]} != ${dec.data[a]}`);
     } else {
       const hq = 0.5 / 127.5;
       for (let c = 0; c < nBox; c++) {
-        const raw = v3[a + c]!;
-        if (!(raw >= -1 && raw <= 1)) push(`v3 ctrl[${c}] = ${raw} is outside [-1,1]; the codec clamps it`);
+        const raw = src[a + c]!;
+        if (!(raw >= -1 && raw <= 1)) push(`src ctrl[${c}] = ${raw} is outside [-1,1]; the codec clamps it`);
         const ref = Math.min(Math.max(raw, -1), 1);
-        const d = Math.abs(ref - v4.data[a + c]!);
+        const d = Math.abs(ref - dec.data[a + c]!);
         if (d > hq + slack(ref)) push(`ctrl[${c}] off by ${d} (> ${hq})`);
       }
     }
     for (let c = nBox === 0 ? 1 : nBox; c < 6; c++) {
-      if (v3[a + c] !== 0) push(`v3 ctrl[${c}] = ${v3[a + c]} but the codec drops it`);
-      if (v4.data[a + c] !== 0) push(`v4 ctrl[${c}] = ${v4.data[a + c]} (expected 0)`);
+      if (src[a + c] !== 0) push(`src ctrl[${c}] = ${src[a + c]} but the codec drops it`);
+      if (dec.data[a + c] !== 0) push(`decoded ctrl[${c}] = ${dec.data[a + c]} (expected 0)`);
     }
     for (const f of codec.fields) {
-      const want = v3[a + 7 + f.idx]!;
-      const got = v4.data[a + 7 + f.idx]!;
+      const want = src[a + 7 + f.idx]!;
+      const got = dec.data[a + 7 + f.idx]!;
       if (f.enc === 'u8') {
         if (want !== got) push(`pose[${f.idx}] u8 ${want} != ${got}`);
         continue;
@@ -370,13 +358,13 @@ function compareRows(
       }
     }
     for (const [idx, v] of codec.poseConst) {
-      if (v3[a + 7 + idx] !== v) push(`v3 pose[${idx}] = ${v3[a + 7 + idx]} != poseConst ${v}`);
-      if (v4.data[a + 7 + idx] !== v) push(`v4 pose[${idx}] = ${v4.data[a + 7 + idx]} != ${v}`);
+      if (src[a + 7 + idx] !== v) push(`src pose[${idx}] = ${src[a + 7 + idx]} != poseConst ${v}`);
+      if (dec.data[a + 7 + idx] !== v) push(`decoded pose[${idx}] = ${dec.data[a + 7 + idx]} != ${v}`);
     }
     for (let idx = 0; idx < 9; idx++) {
       if (carried.has(idx)) continue;
-      if (v3[a + 7 + idx] !== 0) push(`v3 pose[${idx}] = ${v3[a + 7 + idx]} but the codec drops it`);
-      if (v4.data[a + 7 + idx] !== 0) push(`v4 pose[${idx}] = ${v4.data[a + 7 + idx]} (expected 0)`);
+      if (src[a + 7 + idx] !== 0) push(`src pose[${idx}] = ${src[a + 7 + idx]} but the codec drops it`);
+      if (dec.data[a + 7 + idx] !== 0) push(`decoded pose[${idx}] = ${dec.data[a + 7 + idx]} (expected 0)`);
     }
   }
 }
@@ -384,7 +372,6 @@ function compareRows(
 interface ZooRow {
   label: string;
   values: number[];
-  bits?: [number, number][];
   mustEscape: boolean;
 }
 
@@ -393,7 +380,7 @@ function healthyValues(codec: Codec): number[] {
   if (codec.ctrlBox === 0) r[0] = 1;
   else for (let c = 0; c < codec.ctrlBox; c++) r[c] = 0.25 * (c % 3) - 0.25;
   for (const f of codec.fields) {
-    r[7 + f.idx] = f.enc === 'u8' ? 2 : f.enc === 'dx32' ? 0 : 12 * f.scale;
+    r[7 + f.idx] = f.enc === 'u8' ? 2 : f.enc === 'dx32' ? 0 : HEALTHY_Q * f.scale;
   }
   for (const [idx, v] of codec.poseConst) r[7 + idx] = v;
   return r;
@@ -407,24 +394,20 @@ function negativeHalfTie(scale: number): [number, number] | null {
   return null;
 }
 
+const HEALTHY_Q = 12;
+const WRAP_Q = -32760;
+
 function escapeZoo(codec: Codec): ZooRow[] {
   const base = () => healthyValues(codec);
   const rows: ZooRow[] = [];
-  const add = (label: string, mustEscape: boolean, mut: (v: number[]) => void, bits?: [number, number][]) => {
+  const add = (label: string, mustEscape: boolean, mut: (v: number[]) => void) => {
     const values = base();
     mut(values);
-    rows.push(bits ? { label, values, bits, mustEscape } : { label, values, mustEscape });
+    rows.push({ label, values, mustEscape });
   };
-  const firstField = codec.fields[0]!;
-
-  add('nan-ctrl0', true, (v) => { v[0] = Number.NaN; });
-  add('posinf-pose', true, (v) => { v[7 + firstField.idx] = Number.POSITIVE_INFINITY; });
-  add('neginf-pose', true, (v) => { v[7 + firstField.idx] = Number.NEGATIVE_INFINITY; });
-  add('nan-payload-pose8', true, () => {}, [[15, 0x7f800001]]);
 
   add('done-one', false, (v) => { v[6] = 1; });
   add('done-fractional', true, (v) => { v[6] = 0.5; });
-  add('done-nan', true, (v) => { v[6] = Number.NaN; });
 
   if (codec.ctrlBox === 0) {
     add('action-16', true, (v) => { v[0] = 16; });
@@ -449,6 +432,7 @@ function escapeZoo(codec: Codec): ZooRow[] {
   if (plain) {
     const tie = negativeHalfTie(plain.scale);
     if (tie) add('i16-negative-tie', false, (v) => { v[7 + plain.idx] = tie[0]; });
+    add('i16-delta-wrap', false, (v) => { v[7 + plain.idx] = WRAP_Q * plain.scale; });
   }
 
   const dx = codec.fields.find((f) => f.enc === 'dx32');
@@ -473,7 +457,6 @@ function zooRows(codec: Codec): { data: Float32Array; mustEscape: boolean[]; lab
   }
   const n = zoo.length * 2;
   const data = new Float32Array(n * ROW_FLOATS);
-  const dv = new DataView(data.buffer);
   const mustEscape: boolean[] = [];
   const labels: string[] = [];
   const healthy = healthyValues(codec);
@@ -483,13 +466,44 @@ function zooRows(codec: Codec): { data: Float32Array; mustEscape: boolean[]; lab
     mustEscape.push(false);
     labels.push('healthy');
     data.set(c.values, (2 * k + 1) * ROW_FLOATS);
-    for (const [idx, patternBits] of c.bits ?? []) {
-      dv.setUint32(((2 * k + 1) * ROW_FLOATS + idx) * 4, patternBits, true);
-    }
     mustEscape.push(c.mustEscape);
     labels.push(c.label);
   }
   return { data, mustEscape, labels };
+}
+
+interface TruncCase {
+  label: string;
+  at: number;
+  mut?: (v: number[]) => void;
+  bits?: [number, number][];
+}
+
+const TRUNC_ROWS = 9;
+
+function truncationCases(codec: Codec): TruncCase[] {
+  const first = codec.fields[0]!;
+  return [
+    { label: 'trunc-nan-ctrl0', at: 5, mut: (v) => { v[0] = Number.NaN; } },
+    { label: 'trunc-posinf-pose', at: 4, mut: (v) => { v[7 + first.idx] = Number.POSITIVE_INFINITY; } },
+    { label: 'trunc-neginf-pose', at: 7, mut: (v) => { v[7 + first.idx] = Number.NEGATIVE_INFINITY; } },
+    { label: 'trunc-nan-bits-tail', at: 0, bits: [[15, 0x7f800001]] },
+    { label: 'trunc-done-nan', at: 6, mut: (v) => { v[6] = Number.NaN; } },
+  ];
+}
+
+function truncationRows(codec: Codec, t: TruncCase): Float32Array {
+  const healthy = healthyValues(codec);
+  const data = new Float32Array(TRUNC_ROWS * ROW_FLOATS);
+  for (let i = 0; i < TRUNC_ROWS; i++) data.set(healthy, i * ROW_FLOATS);
+  const v = healthy.slice();
+  t.mut?.(v);
+  data.set(v, t.at * ROW_FLOATS);
+  if (t.bits) {
+    const dv = new DataView(data.buffer);
+    for (const [idx, bits] of t.bits) dv.setUint32((t.at * ROW_FLOATS + idx) * 4, bits, true);
+  }
+  return data;
 }
 
 const ESCAPE_PROBE_CHUNK_STEPS = 4;
@@ -505,122 +519,192 @@ function writeCases(path: string, envKind: number, data: Float32Array, chunkStep
   writeFileSync(path, buf);
 }
 
+function runProbe(
+  binary: string,
+  work: string,
+  tag: string,
+  envKind: number,
+  data: Float32Array,
+): { bin: Uint8Array } | { error: string } {
+  const casesPath = join(work, `${tag}.cases.bin`);
+  const outDir = join(work, tag);
+  writeCases(casesPath, envKind, data, ESCAPE_PROBE_CHUNK_STEPS);
+  const run = spawnSync(binary, ['record-probe', casesPath, outDir], { encoding: 'utf8' });
+  if (run.status !== 0) {
+    return { error: `record-probe exited ${run.status}: ${(run.stderr || run.stdout || '').trim()}` };
+  }
+  const listing = readdirSync(outDir).sort();
+  if (listing.length !== 1 || listing[0] !== 'actions.bin') {
+    return { error: `out-dir holds [${listing.join(', ')}] — expected only actions.bin` };
+  }
+  const raw = readFileSync(join(outDir, 'actions.bin'));
+  return { bin: new Uint8Array(raw.buffer, raw.byteOffset, raw.byteLength) };
+}
+
+async function crossCheckProduction(
+  bin: Uint8Array,
+  envId: EnvId,
+  dec: Decoded,
+  fail: (m: string) => void,
+): Promise<void> {
+  try {
+    const rec = await parseRecord(bin, 0);
+    if (rec.envId !== envId) fail(`record envId ${rec.envId} != ${envId}`);
+    if (rec.steps !== dec.steps) fail(`record steps ${rec.steps} != ${dec.steps}`);
+    const n = Math.min(rec.steps, dec.steps) * ROW_FLOATS;
+    for (let u = 0; u < n; u++) {
+      if (!sameBits(rec.data[u]!, dec.data[u]!)) {
+        fail(`record float ${u} = ${rec.data[u]} != independent decode ${dec.data[u]}`);
+        break;
+      }
+    }
+  } catch (e) {
+    fail(`record parseRecord threw: ${(e as Error).message}`);
+  }
+}
+
+interface EnvResult {
+  envId: EnvId;
+  rows: number;
+  escapes: number;
+  truncs: number;
+  failures: string[];
+}
+
+async function checkEnv(binary: string, work: string, envId: EnvId): Promise<EnvResult> {
+  const codec = CODECS[envId];
+  const failures: string[] = [];
+  const fail = (m: string) => failures.push(m);
+  const { data, mustEscape, labels } = zooRows(codec);
+  const steps = mustEscape.length;
+  let escapes = 0;
+  let truncs = 0;
+
+  const res = runProbe(binary, work, `${envId}-zoo`, codec.envKind, data);
+  if ('error' in res) {
+    fail(res.error);
+    return { envId, rows: steps, escapes, truncs, failures };
+  }
+  const dec = readRecord(res.bin, codec);
+  dec.problems.forEach(fail);
+  if (dec.steps !== steps) fail(`walked ${dec.steps} steps != ${steps} written`);
+
+  const rowBytes = new Uint8Array(data.buffer, data.byteOffset, data.byteLength);
+  const doneBits = new Uint32Array(data.buffer, data.byteOffset, data.length);
+  for (let i = 0; i < Math.min(steps, dec.steps); i++) {
+    const esc = dec.escaped[i] === 1;
+    if (mustEscape[i] !== esc) {
+      fail(`row ${i} (${labels[i]}) ${mustEscape[i] ? 'did NOT escape' : 'escaped unexpectedly'}`);
+    }
+    const hdr = dec.hdrBits[i]!;
+    if (((hdr >> 5) & 1) !== (esc ? 1 : 0)) fail(`row ${i}: hdr escape bit != escape table`);
+    const wantDone = doneBits[i * ROW_FLOATS + 6] === 0x3f800000 ? 1 : 0;
+    if (((hdr >> 4) & 1) !== wantDone) {
+      fail(`row ${i} (${labels[i]}): hdr done bit ${(hdr >> 4) & 1} != ${wantDone}`);
+    }
+    if (!esc) continue;
+    const got = dec.escBytes.get(i);
+    if (got === undefined) {
+      fail(`row ${i}: escaped but absent from the escape table`);
+      continue;
+    }
+    const want = rowBytes.subarray(i * ROW_BYTES, (i + 1) * ROW_BYTES);
+    for (let u = 0; u < ROW_BYTES; u++) {
+      if (got[u] !== want[u]) {
+        fail(`row ${i} (${labels[i]}): escape byte ${u} = ${got[u]} != ${want[u]}`);
+        break;
+      }
+    }
+  }
+  compareRows(data, dec, codec, Math.min(steps, dec.steps), fail);
+
+  const plainIdx = codec.fields.findIndex((f) => f.enc === 'i16' && !f.wrap);
+  const dxIdx = codec.fields.findIndex((f) => f.enc === 'dx32');
+  const plainQ = plainIdx >= 0 ? dec.qCols[plainIdx]! : null;
+  const plainD = plainIdx >= 0 ? dec.dCols[plainIdx]! : null;
+  const dxQ = dxIdx >= 0 ? dec.qCols[dxIdx]! : null;
+  for (let i = 0; i < Math.min(steps, dec.steps); i++) {
+    const label = labels[i]!;
+    if (plainQ !== null && label === 'i16-overflow' && plainQ[i] !== CLAMP_I16) {
+      fail(`row ${i} (${label}): i16 quantized ${plainQ[i]} != ${CLAMP_I16}`);
+    }
+    if (plainQ !== null && label === 'i16-underflow' && plainQ[i] !== -CLAMP_I16) {
+      fail(`row ${i} (${label}): i16 quantized ${plainQ[i]} != ${-CLAMP_I16}`);
+    }
+    if (plainQ !== null && label === 'i16-negative-tie') {
+      const tie = negativeHalfTie(codec.fields[plainIdx]!.scale);
+      if (tie && plainQ[i] !== tie[1]) {
+        fail(`row ${i} (${label}): i16 quantized ${plainQ[i]} != ${tie[1]} (half AWAY from zero)`);
+      }
+    }
+    if (plainQ !== null && plainD !== null && label === 'i16-delta-wrap') {
+      if (plainQ[i] !== WRAP_Q) fail(`row ${i} (${label}): i16 quantized ${plainQ[i]} != ${WRAP_Q}`);
+      const wrapDelta = ((WRAP_Q - HEALTHY_Q) << 16) >> 16;
+      if (plainD[i] !== wrapDelta) {
+        fail(`row ${i} (${label}): stored delta ${plainD[i]} != wrapped int16 ${wrapDelta}`);
+      }
+    }
+    if (dxQ !== null && label === 'dx32-overflow' && dxQ[i] !== CLAMP_I32) {
+      fail(`row ${i} (${label}): dx32 delta ${dxQ[i]} != ${CLAMP_I32}`);
+    }
+    if (dxQ !== null && label === 'dx32-underflow' && dxQ[i] !== -CLAMP_I32) {
+      fail(`row ${i} (${label}): dx32 delta ${dxQ[i]} != ${-CLAMP_I32}`);
+    }
+    if (dxQ !== null && label === 'dx32-negative-tie') {
+      if (i % ESCAPE_PROBE_CHUNK_STEPS !== 1) {
+        fail(`row ${i} (${label}) sits at chunk position ${i % ESCAPE_PROBE_CHUNK_STEPS}, not 1 — the zoo layout drifted`);
+      } else {
+        const tie = negativeHalfTie(codec.fields[dxIdx]!.scale);
+        if (tie && dxQ[i] !== tie[1]) {
+          fail(`row ${i} (${label}): dx32 delta ${dxQ[i]} != ${tie[1]} (half AWAY from zero)`);
+        }
+      }
+    }
+  }
+
+  await crossCheckProduction(res.bin, envId, dec, fail);
+
+  escapes = dec.chunks.reduce((s, c) => s + c.escapes, 0);
+  if (escapes === 0) fail('esc = 0 — the encoder escape branch never executed');
+
+  for (const t of truncationCases(codec)) {
+    const tfail = (m: string) => fail(`${t.label}: ${m}`);
+    const rows = truncationRows(codec, t);
+    const tres = runProbe(binary, work, `${envId}-${t.label}`, codec.envKind, rows);
+    if ('error' in tres) {
+      tfail(tres.error);
+      continue;
+    }
+    const tdec = readRecord(tres.bin, codec);
+    tdec.problems.forEach(tfail);
+    if (tdec.steps !== t.at) {
+      tfail(`decoded ${tdec.steps} steps — the writer must stop before non-finite row ${t.at}`);
+    }
+    if (t.at === 0 && tres.bin.length !== FILE_HEADER) {
+      tfail(`${tres.bin.length} bytes for zero steps, want the bare ${FILE_HEADER}-byte header`);
+    }
+    const tesc = tdec.chunks.reduce((s, c) => s + c.escapes, 0);
+    if (tesc !== 0) tfail(`${tesc} escapes in an all-healthy prefix`);
+    compareRows(rows, tdec, codec, Math.min(tdec.steps, t.at), tfail);
+    await crossCheckProduction(tres.bin, envId, tdec, tfail);
+    truncs++;
+  }
+
+  return { envId, rows: steps, escapes, truncs, failures };
+}
+
 async function escapeProbe(binary: string): Promise<number> {
   if (!existsSync(binary)) {
     console.error(`no OaK binary at ${binary} — build it with \`swift build -c release\``);
     return 1;
   }
   console.log(`binary  : ${binary}`);
-  console.log('record  : @sim/record parseActionsBin — cross-checking the decoder');
+  console.log('record  : @sim/record parseRecord — cross-checking the decoder');
   const work = mkdtempSync(join(tmpdir(), 'oak-record-escape-'));
-  const results: { envId: EnvId; rows: number; escapes: number; failures: string[] }[] = [];
+  const results: EnvResult[] = [];
   try {
     for (const envId of ENV_IDS) {
-      const codec = CODECS[envId];
-      const failures: string[] = [];
-      const fail = (m: string) => failures.push(m);
-      const { data, mustEscape, labels } = zooRows(codec);
-      const steps = mustEscape.length;
-      const casesPath = join(work, `${envId}.cases.bin`);
-      const outDir = join(work, envId);
-      writeCases(casesPath, codec.envKind, data, ESCAPE_PROBE_CHUNK_STEPS);
-      const run = spawnSync(binary, ['record-probe', casesPath, outDir], { encoding: 'utf8' });
-      if (run.status !== 0) {
-        fail(`record-probe exited ${run.status}: ${(run.stderr || run.stdout || '').trim()}`);
-        results.push({ envId, rows: steps, escapes: 0, failures });
-        continue;
-      }
-      const meta = JSON.parse(readFileSync(join(outDir, 'meta.json'), 'utf8'));
-      const bin = readFileSync(join(outDir, 'actions.bin'));
-      if (meta.recordVersion !== 4) fail(`meta recordVersion ${meta.recordVersion} != 4`);
-      if (meta.codecVersion !== 1) fail(`meta codecVersion ${meta.codecVersion} != 1`);
-      if (meta.envId !== envId) fail(`meta envId ${meta.envId} != ${envId}`);
-      const v4 = readV4(new Uint8Array(bin.buffer, bin.byteOffset, bin.byteLength), codec);
-      v4.problems.forEach(fail);
-      if (v4.steps !== steps) fail(`walked ${v4.steps} steps != ${steps} written`);
-      if (meta.steps !== steps) fail(`meta.steps ${meta.steps} != ${steps}`);
-
-      const rowBytes = new Uint8Array(data.buffer, data.byteOffset, data.byteLength);
-      const doneBits = new Uint32Array(data.buffer, data.byteOffset, data.length);
-      for (let i = 0; i < Math.min(steps, v4.steps); i++) {
-        const esc = v4.escaped[i] === 1;
-        if (mustEscape[i] === true && !esc) fail(`row ${i} (${labels[i]}) did NOT escape`);
-        const hdr = v4.hdrBits[i]!;
-        if (((hdr >> 5) & 1) !== (esc ? 1 : 0)) fail(`row ${i}: hdr escape bit != escape table`);
-        const wantDone = doneBits[i * ROW_FLOATS + 6] === 0x3f800000 ? 1 : 0;
-        if (((hdr >> 4) & 1) !== wantDone) {
-          fail(`row ${i} (${labels[i]}): hdr done bit ${(hdr >> 4) & 1} != ${wantDone}`);
-        }
-        if (!esc) continue;
-        const got = v4.escBytes.get(i);
-        if (got === undefined) {
-          fail(`row ${i}: escaped but absent from the escape table`);
-          continue;
-        }
-        const want = rowBytes.subarray(i * ROW_BYTES, (i + 1) * ROW_BYTES);
-        for (let u = 0; u < ROW_BYTES; u++) {
-          if (got[u] !== want[u]) {
-            fail(`row ${i} (${labels[i]}): escape byte ${u} = ${got[u]} != ${want[u]}`);
-            break;
-          }
-        }
-      }
-      compareRows(data, v4, codec, Math.min(steps, v4.steps), fail);
-
-      const plain = codec.fields.findIndex((f) => f.enc === 'i16' && !f.wrap);
-      const dx = codec.fields.findIndex((f) => f.enc === 'dx32');
-      for (let ci = 0; ci < v4.chunks.length; ci++) {
-        const chunk = v4.chunks[ci]!;
-        const payload = v4.payloads[ci];
-        if (payload === undefined) continue;
-        const pv = new DataView(payload.buffer, payload.byteOffset, payload.byteLength);
-        const colOff = columnOffsets(codec, chunk.stepCount);
-        for (let i = 0; i < chunk.stepCount; i++) {
-          const row = chunk.stepStart + i;
-          const label = labels[row];
-          const sign = label?.endsWith('-underflow') === true ? -1 : 1;
-          if (plain >= 0 && (label === 'i16-overflow' || label === 'i16-underflow')) {
-            const got = pv.getInt16(colOff[plain]! + 2 * i, true);
-            if (got !== sign * CLAMP_I16) fail(`row ${row} (${label}): i16 column ${got} != ${sign * CLAMP_I16}`);
-          }
-          if (dx >= 0 && (label === 'dx32-overflow' || label === 'dx32-underflow')) {
-            const got = pv.getInt32(colOff[dx]! + 4 * i, true);
-            if (got !== sign * CLAMP_I32) fail(`row ${row} (${label}): dx32 column ${got} != ${sign * CLAMP_I32}`);
-          }
-          if (plain >= 0 && label === 'i16-negative-tie') {
-            const tie = negativeHalfTie(codec.fields[plain]!.scale);
-            const got = pv.getInt16(colOff[plain]! + 2 * i, true);
-            if (tie && got !== tie[1]) fail(`row ${row} (${label}): i16 column ${got} != ${tie[1]} (half AWAY from zero)`);
-          }
-          if (dx >= 0 && label === 'dx32-negative-tie') {
-            const tie = negativeHalfTie(codec.fields[dx]!.scale);
-            if (i !== 1) {
-              fail(`row ${row} (${label}) sits at chunk position ${i}, not 1 — the zoo layout drifted`);
-            } else {
-              const got = pv.getInt32(colOff[dx]! + 4 * i, true);
-              if (tie && got !== tie[1]) fail(`row ${row} (${label}): dx32 column ${got} != ${tie[1]} (half AWAY from zero)`);
-            }
-          }
-        }
-      }
-
-      try {
-        const rawV4 = await parseActionsBin(bin, meta);
-        const n = Math.min(rawV4.steps, v4.steps) * ROW_FLOATS;
-        if (rawV4.steps !== v4.steps) fail(`record steps ${rawV4.steps} != ${v4.steps}`);
-        for (let u = 0; u < n; u++) {
-          if (!sameBits(rawV4.data[u]!, v4.data[u]!)) {
-            fail(`record float ${u} = ${rawV4.data[u]} != independent decode ${v4.data[u]}`);
-            break;
-          }
-        }
-      } catch (e) {
-        fail(`record parseActionsBin threw: ${(e as Error).message}`);
-      }
-
-      const escapes = v4.chunks.reduce((s, c) => s + c.escapes, 0);
-      if (escapes === 0) fail('esc = 0 — the encoder escape branch never executed');
-      results.push({ envId, rows: steps, escapes, failures });
+      results.push(await checkEnv(binary, work, envId));
     }
   } finally {
     rmSync(work, { recursive: true, force: true });
@@ -628,7 +712,7 @@ async function escapeProbe(binary: string): Promise<number> {
 
   const pad = (s: string, n: number) => s.padEnd(n);
   console.log('');
-  console.log(pad('env', 26) + pad('rows', 7) + pad('esc', 7) + 'status');
+  console.log(pad('env', 26) + pad('rows', 7) + pad('esc', 7) + pad('trunc', 7) + 'status');
   let ok = true;
   let totalEsc = 0;
   for (const r of results) {
@@ -636,14 +720,14 @@ async function escapeProbe(binary: string): Promise<number> {
     if (r.failures.length) ok = false;
     console.log(
       pad(r.envId, 26) + pad(String(r.rows), 7) + pad(String(r.escapes), 7) +
-        (r.failures.length ? `FAIL (${r.failures.length})` : 'ok'),
+        pad(String(r.truncs), 7) + (r.failures.length ? `FAIL (${r.failures.length})` : 'ok'),
     );
     for (const f of r.failures.slice(0, 6)) console.log(`    ! ${f}`);
     if (r.failures.length > 6) console.log(`    ! ... ${r.failures.length - 6} more`);
   }
   console.log('');
   console.log(`envs ${results.length} | ${totalEsc} escaped rows through the Swift encoder`);
-  console.log(ok ? 'VERIFIED — the Swift encoder escape path is exact.' : 'FAILED');
+  console.log(ok ? 'VERIFIED — the Swift encoder escape and truncation paths are exact.' : 'FAILED');
   return ok ? 0 : 1;
 }
 

@@ -99,7 +99,6 @@ function makeState(pose: Float32Array, ctrl0: number, applied: boolean): CartPol
 
 export const cartPoleDecoder: EnvDecoder<CartPoleState, CartPoleStatic> = {
   envId: 'CartPole-cont-v0',
-  needsReplay: false,
 
   initStatic(): CartPoleStatic {
     return STATIC;

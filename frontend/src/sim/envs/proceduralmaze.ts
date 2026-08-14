@@ -99,7 +99,6 @@ function state(x: number, y: number, gx: number, gy: number): ProceduralMazeStat
 
 export const proceduralMazeDecoder: EnvDecoder<ProceduralMazeState, ProceduralMazeStatic> = {
   envId: 'ProceduralMaze-cont-v0',
-  needsReplay: false,
 
   initStatic(seed: number): ProceduralMazeStatic {
     const { words, carvedPath } = procMazeGen(seed);

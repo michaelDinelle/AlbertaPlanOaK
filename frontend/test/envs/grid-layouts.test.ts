@@ -274,23 +274,6 @@ describe('DeepSea family action masks', () => {
 });
 
 describe('decoder wiring', () => {
-  test('only MultiKeyCorridor needs a ctrl replay', () => {
-    const all = [
-      fourRoomsDecoder,
-      deepSeaDecoder,
-      largeDeepSeaDecoder,
-      keyCorridorDecoder,
-      chainDecoder,
-      memoryChainDecoder,
-      delayedChainDecoder,
-      proceduralMazeDecoder,
-      highDimMazeDecoder,
-      poMazeDecoder,
-    ];
-    for (const d of all) expect(d.needsReplay).toBe(false);
-    expect(multiKeyCorridorDecoder.needsReplay).toBe(true);
-  });
-
   test('every decoder reports its own envId', () => {
     const pairs: [string, string][] = [
       [fourRoomsDecoder.envId, 'FourRooms-cont-v0'],

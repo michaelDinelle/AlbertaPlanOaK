@@ -166,7 +166,6 @@ function toReplay(st: MultiKeyCorridorState): Replay {
 
 export const multiKeyCorridorDecoder: EnvDecoder<MultiKeyCorridorState, MultiKeyCorridorStatic> = {
   envId: 'MultiKeyCorridor-cont-v0',
-  needsReplay: true,
 
   initStatic(seed: number): MultiKeyCorridorStatic {
     return { seed, walls: mkcWalls() };

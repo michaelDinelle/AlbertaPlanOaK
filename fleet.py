@@ -9,7 +9,6 @@ import shutil
 import struct
 import subprocess
 import sys
-import zlib
 from pathlib import Path
 
 import numpy as np
@@ -19,63 +18,41 @@ BENCH = REPO / ".oak-benchmarks"
 FLOOR_CACHE: dict[str, dict] = {}
 
 FILE_MAGIC = 0x544B414F
-SEG_MAGIC = 0x54474553
 
 
 def read_tape(path: Path) -> dict:
     data = path.read_bytes()
-    magic, version, lanes, json_len = struct.unpack_from("<4I", data, 0)
-    if magic != FILE_MAGIC or version != 1:
-        raise SystemExit(f"{path}: not an OAKT v1 tape")
-    fields = json.loads(data[16:16 + json_len])["fields"]
+    if len(data) < 12:
+        raise SystemExit(f"{path}: not an OAKT tape")
+    magic, lanes, json_len = struct.unpack_from("<3I", data, 0)
+    if magic != FILE_MAGIC:
+        raise SystemExit(f"{path}: not an OAKT tape")
+    fields = json.loads(data[12:12 + json_len])["fields"]
     n_f = len(fields)
-    row_bytes = 8 + n_f * lanes * 4
-    starts, counts, mats = [], [], []
-    off = 16 + json_len
-    while off + 20 <= len(data):
-        smagic, n_win, raw_bytes, comp_bytes, crc = struct.unpack_from("<5I", data, off)
-        comp = data[off + 20: off + 20 + comp_bytes]
-        if (smagic != SEG_MAGIC or off + 20 + comp_bytes > len(data)
-                or zlib.crc32(comp) != crc):
-            break
-        payload = zlib.decompress(comp, wbits=-15)
-        if len(payload) != raw_bytes or raw_bytes != n_win * row_bytes:
-            break
-        for p in range(0, raw_bytes, row_bytes):
-            s, c = struct.unpack_from("<2I", payload, p)
-            starts.append(s)
-            counts.append(c)
-            mats.append(np.frombuffer(payload, np.float32, n_f * lanes, p + 8)
-                        .reshape(n_f, lanes))
-        off += 20 + comp_bytes
-    if not mats:
-        raise SystemExit(f"{path}: no complete tape windows yet")
-    return {"fields": fields, "lanes": lanes,
-            "ends": np.array(starts, np.int64) + np.array(counts, np.int64),
-            "data": np.stack(mats)}
+    hdr = 12 + json_len
+    row = 12 + n_f * lanes * 4
+    n = (len(data) - hdr) // row
+    if n == 0:
+        raise SystemExit(f"{path}: no complete tape rows yet")
+    raw = np.frombuffer(data, np.uint8, n * row, hdr).reshape(n, row)
+    head = np.ascontiguousarray(raw[:, :12])
+    starts = head[:, 0:4].copy().view(np.uint32).ravel().astype(np.int64)
+    counts = head[:, 4:8].copy().view(np.uint32).ravel().astype(np.int64)
+    wall = head[:, 8:12].copy().view(np.float32).ravel().astype(np.float64)
+    mats = np.ascontiguousarray(raw[:, 12:]).view(np.float32).reshape(n, n_f, lanes)
+    return {"fields": fields, "lanes": lanes, "ends": starts + counts,
+            "wall": wall, "data": mats}
 
 
-def load(root: Path, policy: str) -> dict:
+def load(root: Path) -> dict:
     meta = json.loads((root / "meta.json").read_text())
-    tp = root / f"metrics.{policy}.oakt"
+    tp = root / "tape.bin"
     if not tp.exists():
-        raise SystemExit(f"{root}: no metrics.{policy}.oakt")
+        raise SystemExit(f"{root}: no tape.bin")
     tape = read_tape(tp)
-    deaths = {}
-    dp = root / "deaths.jsonl"
-    if dp.exists():
-        for line in dp.read_text().splitlines():
-            d = json.loads(line)
-            if d.get("policy", "oak") == policy:
-                deaths.setdefault(d["lane"], d)
-    agg = None
-    ap = root / "aggregate.jsonl"
-    if ap.exists():
-        for line in ap.read_text().splitlines():
-            r = json.loads(line)
-            if r.get("policy", "oak") == policy:
-                agg = r
-    return {"meta": meta, "tape": tape, "deaths": deaths, "agg": agg,
+    ds = tape["data"][-1, tape["fields"].index("deathStep"), :]
+    deaths = {int(l): int(ds[l]) for l in np.nonzero(np.isfinite(ds))[0]}
+    return {"meta": meta, "tape": tape, "deaths": deaths,
             "seeds": meta["seeds"], "root": root}
 
 
@@ -209,9 +186,8 @@ def analyze(run: dict, lanes: np.ndarray) -> dict:
     rs = series(run, "rewardSum")[:, lanes]
     delivered = last_finite(rs) / max_step
     delivered = np.nan_to_num(delivered, nan=0.0)
-    died = np.array([1.0 if l in run["deaths"] else 0.0 for l in lanes])
-    dtimes = np.array([run["deaths"][l]["step"] if l in run["deaths"] else horizon
-                       for l in lanes], dtype=float)
+    died = np.array([1.0 if int(l) in run["deaths"] else 0.0 for l in lanes])
+    dtimes = np.array([run["deaths"].get(int(l), horizon) for l in lanes], dtype=float)
     peak, end_rate = windowed_rates(run, lanes)
     with np.errstate(invalid="ignore", divide="ignore"):
         retention = np.where(peak > 0, end_rate / peak, np.nan)
@@ -261,8 +237,11 @@ def analyze(run: dict, lanes: np.ndarray) -> dict:
                      "solved": solved.astype(float), "retained": retained.astype(float),
                      "decayed": decayed.astype(float), "retMargin": ret_margin},
     }
-    if run["agg"]:
-        out["aggStepsPerSecond"] = run["agg"].get("aggStepsPerSecond")
+    wall = run["tape"]["wall"]
+    fin = np.isfinite(wall) & (wall > 0)
+    if fin.any():
+        out["aggStepsPerSecond"] = float(
+            ends[fin][-1] * run["tape"]["lanes"] / wall[fin][-1])
     return out
 
 
@@ -310,19 +289,17 @@ def json_safe(o):
 
 
 def cmd_report(args) -> int:
-    run = load(args.root, args.policy)
+    run = load(args.root)
     slices = env_slices(run)
     results = {env: analyze(run, lanes) for env, lanes in slices.items()}
     overall = (analyze(run, np.arange(run["tape"]["lanes"])) if len(results) > 1
                else next(iter(results.values())))
     summary = {
-        "summarySchemaVersion": 3,
         "solvedLaw": "peak > floor + nullPeakSpread(p95-p50)",
         "retainedLaw": "solved & retention >= own stationary-null p5",
         "meta": run["meta"],
-        "results": [{"policy": args.policy, **json_safe(overall)}],
-        "envSlices": {env: [{"policy": args.policy, **json_safe(r)}]
-                      for env, r in results.items()},
+        "overall": json_safe(overall),
+        "envSlices": {env: json_safe(r) for env, r in results.items()},
     }
     out = args.root / "summary.json"
     out.write_text(json.dumps(json_safe(summary), indent=2, sort_keys=True, allow_nan=False))
@@ -363,7 +340,7 @@ def cmd_gate(args) -> int:
     kh = keeper_hash()
     if kh is None or not (BENCH / kh).is_dir():
         return _fail("GATE ERROR: keeper missing")
-    kr, cr = load(BENCH / kh, args.policy), load(args.candidate, args.policy)
+    kr, cr = load(BENCH / kh), load(args.candidate)
     for label, r in (("keeper", kr), ("candidate", cr)):
         if int(r["tape"]["ends"][-1]) < r["meta"]["steps"]:
             return _fail(f"GATE ERROR: {label} incomplete")
@@ -471,7 +448,6 @@ def cmd_job(args) -> int:
                OAK_BENCH_SEED_COUNT=os.environ.get(
                    "OAK_BENCH_SEED_COUNT", str(km.get("batch", 1024))),
                OAK_BENCH_ENVS=envs,
-               OAK_RECORD_ACTIONS=os.environ.get("OAK_RECORD_ACTIONS", "1"),
                OAK_FLEET_TIMING="1", OAK_METRICS_STORAGE=str(root))
     rc = subprocess.run(["caffeinate", "-dimsu", str(REPO / ".build/release/OaK"),
                          "benchmark"], env=env, cwd=REPO).returncode
@@ -502,10 +478,8 @@ def main() -> int:
     jp.add_argument("name")
     pp = sub.add_parser("report")
     pp.add_argument("root", type=Path)
-    pp.add_argument("--policy", default="oak")
     gp = sub.add_parser("gate")
     gp.add_argument("candidate", type=Path)
-    gp.add_argument("--policy", default="oak")
     gp.add_argument("--boot", type=int, default=10_000)
     gp.add_argument("--env-slice", default=None)
     args = ap.parse_args()

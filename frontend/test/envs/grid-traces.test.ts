@@ -122,11 +122,16 @@ describe('real fleet-lane traces (200 steps each)', () => {
     });
   }
 
-  test('maxSteps decodes a prefix of the same stream', () => {
+  test('a truncated recording decodes a prefix of the same stream', () => {
     const envId = 'Chain-cont-v0';
     const fx = loadJson<TraceFixture>(`traces/${envId}.json`);
     const raw = parseRawTrace(loadBin(`traces/${envId}.bin`), { envId, seed: fx.seed });
-    const dec = decodeRecording(raw, decoderFor(envId), { maxSteps: 50 });
+    const head = {
+      ...raw,
+      data: raw.data.subarray(0, 50 * RECORD_FLOATS),
+      steps: 50,
+    };
+    const dec = decodeRecording(head, decoderFor(envId));
     expect(dec.frames.length).toBe(51);
     for (let i = 0; i < 51; i++) expect(dec.frames[i]?.state).toEqual(fx.frames[i]);
   });

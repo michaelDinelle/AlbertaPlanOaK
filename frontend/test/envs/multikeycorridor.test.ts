@@ -4,7 +4,7 @@ import { describe, expect, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
 
 import type { EnvId } from '@shared/envs';
-import { decodeRecording, walkRecording } from '@sim/decode';
+import { DecodeError, decodeRecording } from '@sim/decode';
 import { RECORD_FLOATS } from '@sim/record';
 import { parseRawTrace } from '../helpers/rawTrace';
 import type { DecodedRecording, GridCell, RawRecording } from '@sim/types';
@@ -180,18 +180,16 @@ describe('MultiKeyCorridor decoder', () => {
     expect(flags.filter((v) => v === false).length).toBe(1);
   });
 
-  describe('replay health is exposed on the DecodedRecording', () => {
+  describe('pose disagreement is tracked per frame', () => {
     test('a clean lane reports no disagreement at all', () => {
       const dec = decodeRecording(mkcRaw(), multiKeyCorridorDecoder);
-      expect(dec.replay).toEqual({ firstDisagreeStep: null, disagreeCount: 0 });
-      expect(dec.nonFiniteRows).toBe(0);
+      expect(disagreeFrames(dec)).toEqual([]);
     });
 
-    test('the corrupted pose row shows up as one disagreement at its own step', () => {
+    test('the corrupted pose row shows up as one disagreement at its own frame', () => {
       const raw = mkcRaw();
       raw.data[10 * RECORD_FLOATS + 7] = 99;
       const dec = decodeRecording(raw, multiKeyCorridorDecoder);
-      expect(dec.replay).toEqual({ firstDisagreeStep: 10, disagreeCount: 1 });
       expect(disagreeFrames(dec)).toEqual([11]);
     });
 
@@ -203,23 +201,23 @@ describe('MultiKeyCorridor decoder', () => {
         { envId: MKC_ENV, seed: 80, data, steps: src.steps - skip },
         multiKeyCorridorDecoder,
       );
-      const bad = disagreeFrames(dec);
-      expect(bad.length).toBeGreaterThan(0);
-      expect(dec.replay?.disagreeCount).toBe(bad.length);
-      expect(dec.replay?.firstDisagreeStep).toBe((bad[0] ?? 0) - 1);
+      expect(disagreeFrames(dec).length).toBeGreaterThan(0);
     });
 
-    test('a truncated window only reports the disagreements inside it', () => {
+    test('a truncated window only sees the disagreements inside it', () => {
       const raw = mkcRaw();
       raw.data[10 * RECORD_FLOATS + 7] = 99;
-      expect(decodeRecording(raw, multiKeyCorridorDecoder, { maxSteps: 10 }).replay)
-        .toEqual({ firstDisagreeStep: null, disagreeCount: 0 });
-      expect(decodeRecording(raw, multiKeyCorridorDecoder, { maxSteps: 11 }).replay)
-        .toEqual({ firstDisagreeStep: 10, disagreeCount: 1 });
+      const window = (steps: number) =>
+        decodeRecording(
+          { ...raw, data: raw.data.subarray(0, steps * RECORD_FLOATS), steps },
+          multiKeyCorridorDecoder,
+        );
+      expect(disagreeFrames(window(10))).toEqual([]);
+      expect(disagreeFrames(window(11))).toEqual([11]);
     });
   });
 
-  describe('a non-finite row freezes the replay instead of desyncing it', () => {
+  describe('a non-finite row aborts the decode', () => {
     const BAD_ROW = 10;
 
     function nanRaw(offset: number): RawRecording {
@@ -228,51 +226,26 @@ describe('MultiKeyCorridor decoder', () => {
       return raw;
     }
 
-    test('hidden state stops advancing at the damaged row', () => {
-      const dec = decodeRecording(nanRaw(0), multiKeyCorridorDecoder);
-      expect(dec.nonFiniteRows).toBe(1);
-      const held = dec.frames[BAD_ROW]!;
-      for (let i = BAD_ROW + 1; i < dec.frames.length; i++) {
-        const f = dec.frames[i]!;
-        expect({ i, step: f.step }).toEqual({ i, step: i - 1 });
-        expect({ i, state: { ...f.state, poseAgrees: true } })
-          .toEqual({ i, state: { ...held.state, poseAgrees: true } });
-        expect({ i, agrees: f.state.poseAgrees }).toEqual({ i, agrees: false });
-        expect({ i, pose: Array.from(f.pose) }).toEqual({ i, pose: Array.from(held.pose) });
-        expect({ i, done: f.done }).toEqual({ i, done: 0 });
-        expect({ i, events: dec.events[i]?.length }).toEqual({ i, events: 0 });
-      }
-      expect(dec.replay).toEqual({
-        firstDisagreeStep: BAD_ROW,
-        disagreeCount: dec.frames.length - 1 - BAD_ROW,
-      });
+    test('a non-finite ctrl throws DecodeError at the damaged row', () => {
+      expect(() => decodeRecording(nanRaw(0), multiKeyCorridorDecoder)).toThrow(DecodeError);
+      expect(() => decodeRecording(nanRaw(0), multiKeyCorridorDecoder))
+        .toThrow(new RegExp(`row ${BAD_ROW} `));
     });
 
-    test('the freeze fires for a non-finite POSE too, not just ctrl', () => {
-      const dec = decodeRecording(nanRaw(7), multiKeyCorridorDecoder);
-      expect(dec.nonFiniteRows).toBe(1);
-      expect(dec.replay?.firstDisagreeStep).toBe(BAD_ROW);
-      expect(dec.frames[BAD_ROW + 1]?.state.x).toBe(dec.frames[BAD_ROW]?.state.x);
-      expect(dec.frames[BAD_ROW + 1]?.state.y).toBe(dec.frames[BAD_ROW]?.state.y);
+    test('a non-finite POSE throws too, not just ctrl', () => {
+      expect(() => decodeRecording(nanRaw(7), multiKeyCorridorDecoder)).toThrow(DecodeError);
     });
 
-    test('the frozen tail never moves the agent again', () => {
-      const dec = decodeRecording(nanRaw(0), multiKeyCorridorDecoder);
-      const tail = dec.frames.slice(BAD_ROW + 1).map((f) => `${f.state.x},${f.state.y}`);
-      expect(new Set(tail).size).toBe(1);
-      expect(dec.frames.length).toBe(201);
-    });
-
-    test('walkRecording freezes on exactly the same frames', () => {
+    test('rows before the damage stay decodable when the window excludes it', () => {
       const raw = nanRaw(0);
-      const dec = decodeRecording(raw, multiKeyCorridorDecoder);
-      const seen: string[] = [];
-      walkRecording(raw, multiKeyCorridorDecoder, (f) => {
-        seen.push(`${f.step}:${f.state.x},${f.state.y},${f.state.flags},${f.state.poseAgrees}`);
-      });
-      expect(seen).toEqual(
-        dec.frames.map((f) => `${f.step}:${f.state.x},${f.state.y},${f.state.flags},${f.state.poseAgrees}`),
-      );
+      const head = {
+        ...raw,
+        data: raw.data.subarray(0, BAD_ROW * RECORD_FLOATS),
+        steps: BAD_ROW,
+      };
+      const dec = decodeRecording(head, multiKeyCorridorDecoder);
+      expect(dec.frames.length).toBe(BAD_ROW + 1);
+      expect(disagreeFrames(dec)).toEqual([]);
     });
   });
 

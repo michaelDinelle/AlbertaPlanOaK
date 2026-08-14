@@ -159,7 +159,6 @@ describe('wrapPi', () => {
 describe('decoder contract', () => {
   test('identity', () => {
     expect(pendulumDecoder.envId).toBe('Pendulum-cont-v0');
-    expect(pendulumDecoder.needsReplay).toBe(false);
   });
 
   test('init frame is the inverted start for every lane', () => {

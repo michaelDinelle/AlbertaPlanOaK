@@ -1,130 +1,38 @@
-
 import { open, readdir, realpath } from 'node:fs/promises';
 import { join, sep } from 'node:path';
 import { ENV_IDS, isEnvId, type EnvId } from '@shared/envs';
-import type { RecordingMeta, RecordingRef } from '@shared/types';
-import {
-  CHUNK_HEADER_BYTES,
-  CHUNK_MAGIC,
-  FILE_HEADER_BYTES,
-  FILE_MAGIC,
-  RECORD_VERSION,
-} from '@sim/record';
-import { lstatOrNull, statOrNull, type FileStat } from './jsonl';
-
-const MAX_CHUNKS = 1_000_000;
+import type { RecordingRef } from '@shared/types';
+import { FILE_HEADER_BYTES, FILE_MAGIC, RECORD_ENV_KINDS } from '@sim/record';
+import { lstatOrNull } from './fs';
 
 export interface RecordingEntry {
   envId: EnvId;
   seed: number;
   steps: number;
-  actDim: number;
-  actionsPath: string;
-  metaPath: string;
   bytes: number;
-  codec?: unknown;
-  codecVersion?: number;
-  chunks?: [number, number, number, number][];
+  actionsPath: string;
 }
 
 const SEED_DIR = /^seed(\d+)$/;
 const ENV_ORDER = new Map<string, number>(ENV_IDS.map((id, i) => [id, i]));
 
-function readChunkTable(value: unknown): [number, number, number, number][] | undefined {
-  if (!Array.isArray(value) || value.length === 0) return undefined;
-  const out: [number, number, number, number][] = [];
-  for (const row of value) {
-    if (!Array.isArray(row) || row.length < 4) return undefined;
-    const [a, b, c, d] = row;
-    if (
-      typeof a !== 'number' || typeof b !== 'number' ||
-      typeof c !== 'number' || typeof d !== 'number'
-    ) {
-      return undefined;
+async function laneSteps(path: string, envId: EnvId): Promise<number> {
+  const handle = await open(path, 'r');
+  const header = Buffer.allocUnsafe(FILE_HEADER_BYTES);
+  try {
+    const got = await handle.read(header, 0, FILE_HEADER_BYTES, 0);
+    if (got.bytesRead < FILE_HEADER_BYTES) return 0;
+    if (header.readUInt32LE(0) !== FILE_MAGIC) {
+      throw new Error(`${path}: not a recording (bad magic)`);
     }
-    out.push([a, b, c, d]);
-  }
-  return out;
-}
-
-async function readLaneMeta(path: string): Promise<RecordingMeta | null> {
-  try {
-    const parsed: unknown = JSON.parse(await Bun.file(path).text());
-    if (parsed === null || typeof parsed !== 'object') return null;
-    const o = parsed as Record<string, unknown>;
-    if (o['recordVersion'] !== RECORD_VERSION) return null;
-    const meta: RecordingMeta = {
-      envId: typeof o['envId'] === 'string' ? o['envId'] : '',
-      seed: typeof o['seed'] === 'number' ? o['seed'] : -1,
-      actDim: typeof o['actDim'] === 'number' ? o['actDim'] : 0,
-    };
-    if (o['codec'] !== undefined) meta.codec = o['codec'];
-    if (typeof o['codecVersion'] === 'number') meta.codecVersion = o['codecVersion'];
-    if (typeof o['steps'] === 'number') meta.steps = o['steps'];
-    const chunks = readChunkTable(o['chunks']);
-    if (chunks !== undefined) meta.chunks = chunks;
-    return meta;
-  } catch {
-    return null;
-  }
-}
-
-
-async function scanStepsUncached(path: string, size: number): Promise<number> {
-  if (size < FILE_HEADER_BYTES + CHUNK_HEADER_BYTES) return 0;
-  let handle: Awaited<ReturnType<typeof open>>;
-  try {
-    handle = await open(path, 'r');
-  } catch {
-    return 0;
-  }
-  const header = Buffer.allocUnsafe(CHUNK_HEADER_BYTES);
-  try {
-    const first = await handle.read(header, 0, FILE_HEADER_BYTES, 0);
-    if (first.bytesRead < FILE_HEADER_BYTES) return 0;
-    if (header.readUInt32LE(0) !== FILE_MAGIC) return 0;
-    if (header.readUInt32LE(4) !== 4) return 0;
-
-    let steps = 0;
-    let offset = FILE_HEADER_BYTES;
-    for (let seen = 0; seen < MAX_CHUNKS; seen++) {
-      if (offset + CHUNK_HEADER_BYTES > size) break;
-      const got = await handle.read(header, 0, CHUNK_HEADER_BYTES, offset);
-      if (got.bytesRead < CHUNK_HEADER_BYTES) break;
-      if (header.readUInt32LE(0) !== CHUNK_MAGIC) break;
-      const stepStart = header.readUInt32LE(4);
-      const stepCount = header.readUInt32LE(8);
-      const compBytes = header.readUInt32LE(16);
-      if (stepCount === 0 || compBytes === 0) break;
-      if (stepStart !== steps) break;
-      const next = offset + CHUNK_HEADER_BYTES + compBytes;
-      if (next > size) break;
-      steps += stepCount;
-      offset = next;
+    const envKind = header.readUInt32LE(4);
+    if (RECORD_ENV_KINDS[envKind] !== envId) {
+      throw new Error(`${path}: header envKind ${envKind} contradicts directory env ${envId}`);
     }
-    return steps;
-  } catch {
-    return 0;
+    return header.readUInt32LE(8);
   } finally {
     await handle.close().catch(() => undefined);
   }
-}
-
-const stepsMemo = new Map<string, { key: string; steps: number }>();
-const STEPS_MEMO_MAX = 4096;
-
-async function scanSteps(path: string, st: FileStat): Promise<number> {
-  const key = `${Math.trunc(st.mtimeMs)}:${st.size}`;
-  const hit = stepsMemo.get(path);
-  if (hit !== undefined && hit.key === key) return hit.steps;
-  const steps = await scanStepsUncached(path, st.size);
-  if (stepsMemo.size >= STEPS_MEMO_MAX) stepsMemo.clear();
-  stepsMemo.set(path, { key, steps });
-  return steps;
-}
-
-export function clearStepsCache(): void {
-  stepsMemo.clear();
 }
 
 async function envDirsOf(runDir: string): Promise<string[]> {
@@ -176,53 +84,35 @@ export async function scanRecordings(runDir: string, opts: ScanOptions = {}): Pr
     } catch {
       continue;
     }
-    for (const seedName of seedDirs) {
+    const scanned = await Promise.all(seedDirs.map(async (seedName): Promise<RecordingEntry | null> => {
       const m = SEED_DIR.exec(seedName);
-      if (m === null) continue;
-      const seedText = m[1];
-      if (seedText === undefined) continue;
+      const seedText = m?.[1];
+      if (seedText === undefined) return null;
       const seed = Number(seedText);
-      if (!Number.isInteger(seed) || seed < 0) continue;
+      if (!Number.isInteger(seed) || seed < 0) return null;
 
       const laneDir = join(envDir, seedName);
       const laneStat = await lstatOrNull(laneDir);
-      if (laneStat === null || laneStat.isSymbolicLink || !laneStat.isDirectory) continue;
-      if (!(await containedIn(laneDir, root))) continue;
+      if (laneStat === null || laneStat.isSymbolicLink || !laneStat.isDirectory) return null;
+      if (!(await containedIn(laneDir, root))) return null;
 
-      const metaPath = join(laneDir, 'meta.json');
       const actionsPath = join(laneDir, 'actions.bin');
-      const metaStat = await lstatOrNull(metaPath);
-      if (metaStat === null || metaStat.isSymbolicLink || !metaStat.isFile) continue;
-      const laneMeta = await readLaneMeta(metaPath);
-      if (laneMeta === null) continue;
       const st = await lstatOrNull(actionsPath);
-      if (st === null || st.isSymbolicLink || !st.isFile) continue;
-      if (st.size < FILE_HEADER_BYTES) continue;
+      if (st === null || st.isSymbolicLink || !st.isFile) return null;
+      if (st.size < FILE_HEADER_BYTES) return null;
 
       let steps: number;
-      if (
-        typeof laneMeta.steps === 'number' &&
-        Number.isSafeInteger(laneMeta.steps) &&
-        laneMeta.steps > 0
-      ) {
-        steps = laneMeta.steps;
-      } else {
-        steps = await scanSteps(actionsPath, st);
+      try {
+        steps = await laneSteps(actionsPath, envName);
+      } catch (err) {
+        console.warn(`[oak-frontend] ${err instanceof Error ? err.message : String(err)}`);
+        return null;
       }
+      if (steps === 0) return null;
 
-      out.push({
-        envId: envName,
-        seed,
-        steps,
-        actDim: laneMeta.actDim,
-        actionsPath,
-        metaPath,
-        bytes: st.size,
-        ...(laneMeta.codec !== undefined ? { codec: laneMeta.codec } : {}),
-        ...(laneMeta.codecVersion !== undefined ? { codecVersion: laneMeta.codecVersion } : {}),
-        ...(laneMeta.chunks !== undefined ? { chunks: laneMeta.chunks } : {}),
-      });
-    }
+      return { envId: envName, seed, steps, bytes: st.size, actionsPath };
+    }));
+    for (const entry of scanned) if (entry !== null) out.push(entry);
   }
 
   out.sort((a, b) => {
@@ -233,26 +123,13 @@ export async function scanRecordings(runDir: string, opts: ScanOptions = {}): Pr
   return out;
 }
 
-export async function recordingsSignature(runDir: string): Promise<string> {
-  const envDirs = await envDirsOf(runDir);
-  if (envDirs.length === 0) return '';
-  const parts: string[] = [];
-  for (const name of envDirs) {
-    const envDir = join(runDir, name);
-    const st = await statOrNull(envDir);
-    let seeds = 0;
-    try {
-      const ents = await readdir(envDir, { withFileTypes: true });
-      for (const e of ents) if (e.isDirectory() && SEED_DIR.test(e.name)) seeds++;
-    } catch {
-    }
-    parts.push(`${name}:${Math.trunc(st?.mtimeMs ?? 0)}:${seeds}`);
-  }
-  return parts.join(',');
-}
-
 export function toRecordingRefs(entries: readonly RecordingEntry[]): RecordingRef[] {
-  return entries.map((e) => ({ envId: e.envId, seed: e.seed, steps: e.steps }));
+  return entries.map((e) => ({
+    envId: e.envId,
+    seed: e.seed,
+    steps: e.steps,
+    bytes: e.bytes,
+  }));
 }
 
 export function findRecording(

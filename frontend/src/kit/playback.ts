@@ -1,4 +1,3 @@
-
 import type { EnvId } from '@shared/envs';
 import type { EnvFrame, EnvGeometry, SimEvent } from '@sim/types';
 import type { FrameState, QualityTier } from './types';
@@ -15,26 +14,37 @@ export interface PlaybackClock {
   readonly duration: number;
 }
 
-export function makePlaybackClock(frameCount: number, controlHz: number): PlaybackClock {
+export interface ClockSource {
+  readonly frameCount: number;
+  readonly loop: boolean;
+}
+
+export function makePlaybackClock(source: ClockSource, controlHz: number): PlaybackClock {
   const hz = controlHz > 0 ? controlHz : 8;
-  const last = Math.max(0, frameCount - 1);
+  const last = (): number => Math.max(0, source.frameCount - 1);
   let t = 0;
   const clock: PlaybackClock = {
     playing: true,
     speed: 1,
-    duration: last / hz,
+    get duration() {
+      return last() / hz;
+    },
     time: () => t,
     position: () => t * hz,
     advance(dtReal) {
       if (clock.playing) {
         t += dtReal * clock.speed;
-        if (t > clock.duration) t = clock.duration > 0 ? t % clock.duration : 0;
+        const duration = last() / hz;
+        if (t > duration) {
+          t = source.loop && duration > 0 ? t % duration : duration;
+        }
         if (t < 0) t = 0;
       }
       return t * hz;
     },
     seek(position) {
-      const p = position < 0 ? 0 : position > last ? last : position;
+      const l = last();
+      const p = position < 0 ? 0 : position > l ? l : position;
       t = p / hz;
     },
   };
@@ -47,12 +57,11 @@ export interface PlaybackSource {
   controlHz: number;
   discretePose: boolean;
   geometry: EnvGeometry;
-  frameCount: number;
+  readonly frameCount: number;
+  readonly complete: boolean;
   frameAt(i: number): EnvFrame<unknown>;
   eventsAt(i: number): SimEvent[];
   eventEntries(): IterableIterator<[number, SimEvent[]]>;
-  replay?: { firstDisagreeStep: number | null; disagreeCount: number };
-  nonFiniteRows?: number;
 }
 
 export function sampleFrame(source: PlaybackSource, position: number, out: FrameState): void {

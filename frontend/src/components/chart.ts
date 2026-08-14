@@ -492,8 +492,7 @@ export interface PopulationChartSpec extends Omit<ChartSpec, 'series' | 'data' |
   steps: readonly number[];
   band?: PopulationBand;
   lanes: readonly SpaghettiLane[];
-  highlightKey?: string | null;
-  highlightStroke?: string;
+  hero?: { label: string; stroke: string; values: readonly (number | null)[] };
   onLaneFocus?(key: string | null): void;
   onLaneClick?(key: string, step: number): void;
 }
@@ -501,7 +500,7 @@ export interface PopulationChartSpec extends Omit<ChartSpec, 'series' | 'data' |
 export function populationChart(spec: PopulationChartSpec): ChartHandle {
   const b = spec.band;
   const hasCi = b?.ciLo !== undefined && b?.ciHi !== undefined;
-  const laneOffset = b ? (hasCi ? 5 : 3) : 0;
+  const laneOffset = (b ? (hasCi ? 5 : 3) : 0) + (spec.hero ? 1 : 0);
   const spreadFill = 'rgba(43, 152, 217, 0.13)';
   const ciFill = 'rgba(43, 152, 217, 0.26)';
 
@@ -534,10 +533,9 @@ export function populationChart(spec: PopulationChartSpec): ChartHandle {
     focus: true,
     series: [
       ...bandSeries,
+      ...(spec.hero ? [{ label: spec.hero.label, stroke: spec.hero.stroke, width: 1.8 }] : []),
       ...spec.lanes.map((lane): SeriesSpec => (
-        lane.key === spec.highlightKey
-          ? { label: lane.label, stroke: spec.highlightStroke ?? '#ffd166', width: 1.8 }
-          : { label: lane.label, stroke: VIZ.lane, width: 1, quiet: true }
+        { label: lane.label, stroke: VIZ.lane, width: 1, quiet: true }
       )),
     ],
     bands: b
@@ -554,13 +552,14 @@ export function populationChart(spec: PopulationChartSpec): ChartHandle {
             { label: 'P10–P90', color: spreadFill, shape: 'area' as const },
           ]
         : []),
-      ...(spec.highlightKey
-        ? [{ label: `seed ${spec.highlightKey}`, color: spec.highlightStroke ?? '#ffd166', shape: 'line' as const }]
+      ...(spec.hero
+        ? [{ label: spec.hero.label, color: spec.hero.stroke, shape: 'line' as const }]
         : []),
     ],
     data: [
       spec.steps as number[],
       ...bandData,
+      ...(spec.hero ? [spec.hero.values as (number | null)[]] : []),
       ...spec.lanes.map((lane) => lane.values as (number | null)[]),
     ] as unknown as uPlot.AlignedData,
     legend: true,

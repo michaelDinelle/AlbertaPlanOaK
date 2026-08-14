@@ -22,7 +22,6 @@ function state(pos: number): ChainState {
 
 export const chainDecoder: EnvDecoder<ChainState, ChainStatic> = {
   envId: 'Chain-cont-v0',
-  needsReplay: false,
 
   initStatic(seed: number): ChainStatic {
     return { seed, walls: new Uint8Array(CHAIN_L) };

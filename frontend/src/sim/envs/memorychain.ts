@@ -24,7 +24,6 @@ function state(pos: number, cue: number, lastA: number): MemoryChainState {
 
 export const memoryChainDecoder: EnvDecoder<MemoryChainState, MemoryChainStatic> = {
   envId: 'MemoryChain-cont-v0',
-  needsReplay: false,
 
   initStatic(seed: number): MemoryChainStatic {
     return { seed, walls: new Uint8Array(MEMORYCHAIN_L) };

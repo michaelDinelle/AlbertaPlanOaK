@@ -5,7 +5,7 @@ import { readFileSync } from 'node:fs';
 
 import type { EnvId } from '@shared/envs';
 import { ENV_IDS } from '@shared/envs';
-import { DecodeError, decodeRecording, eventTimeline, walkRecording } from '@sim/decode';
+import { DecodeError, decodeRecording, eventTimeline, lensRecording } from '@sim/decode';
 import { NO_EVENTS } from '@sim/events';
 import { RECORD_BYTES, RECORD_FLOATS, RecordParseError } from '@sim/record';
 import { parseRawTrace, rawRecordingFromFloats } from './helpers/rawTrace';
@@ -211,42 +211,19 @@ describe('decode driver contract', () => {
     expect(() => decodeRecording({ ...raw, steps: 5 }, cartPoleDecoder)).toThrow(DecodeError);
   });
 
-  test('maxSteps truncates frames and events together', () => {
-    const doc = loadDoc('CartPole-cont-v0');
-    const raw = loadRaw(doc);
-    const dec = decodeRecording(raw, cartPoleDecoder, { maxSteps: 17 });
-    expect(dec.frames.length).toBe(18);
-    expect(dec.events.length).toBe(18);
-    expect(dec.frames[17]?.step).toBe(16);
-    expect(decodeRecording(raw, cartPoleDecoder, { maxSteps: 0 }).frames.length).toBe(1);
-  });
-
-  test('walkRecording visits the same frames as decodeRecording', () => {
+  test('lensRecording serves the same frames and events as decodeRecording', () => {
     const doc = loadDoc('MountainCar-cont-v0');
     const raw = loadRaw(doc);
     const dec = decodeRecording(raw, mountainCarDecoder);
-    const seen: number[] = [];
-    let events = 0;
-    walkRecording(raw, mountainCarDecoder, (frame, evs, index) => {
-      seen.push(frame.step);
-      events += evs.length;
-      expect(index).toBe(seen.length - 1);
-    });
-    expect(seen.length).toBe(dec.frames.length);
-    expect(seen[0]).toBe(-1);
-    expect(seen[seen.length - 1]).toBe(doc.steps - 1);
-    expect(events).toBe(dec.events.reduce((n, e) => n + e.length, 0));
-  });
-
-  test('walkRecording stops early on false', () => {
-    const doc = loadDoc('Pendulum-cont-v0');
-    const raw = loadRaw(doc);
-    let n = 0;
-    walkRecording(raw, pendulumDecoder, () => {
-      n++;
-      return n < 5;
-    });
-    expect(n).toBe(5);
+    const lens = lensRecording(raw, mountainCarDecoder);
+    expect(lens.frameCount).toBe(dec.frames.length);
+    expect(lens.steps).toBe(doc.steps);
+    for (let i = 0; i < dec.frames.length; i++) {
+      expect({ i, step: lens.frameAt(i).step }).toEqual({ i, step: dec.frames[i]?.step ?? NaN });
+      expect({ i, n: lens.eventsAt(i).length }).toEqual({ i, n: dec.events[i]?.length ?? -1 });
+    }
+    expect(lens.frameAt(0).step).toBe(-1);
+    expect(lens.frameAt(doc.steps).step).toBe(doc.steps - 1);
   });
 
   test('eventTimeline flattens to the done rows', () => {
@@ -280,57 +257,6 @@ describe('decode driver contract', () => {
     expect(dec.discretePose).toBe(false);
   });
 });
-
-describe('decode driver threads hidden replay state', () => {
-  interface ReplayState { pos: number; visits: number }
-  interface ReplayStatic { walls: Uint8Array }
-
-  const replayDecoder: EnvDecoder<ReplayState, ReplayStatic> = {
-    envId: 'FourRooms-cont-v0',
-    needsReplay: true,
-    initStatic: () => ({ walls: new Uint8Array([0, 1, 0, 0]) }),
-    geometry: (st) => ({
-      kind: 'grid',
-      grid: { w: 2, h: 2, walls: st.walls, goal: { x: 1, y: 1 } },
-    }),
-    initFrame: () => ({
-      step: -1,
-      ctrl: new Float32Array(6),
-      done: 0,
-      pose: new Float32Array(9),
-      state: { pos: 0, visits: 0 },
-    }),
-    decodeFrame: (i, raw16, _st, prev) => {
-      const pos = prev.state.pos + (raw16[0] ?? 0);
-      const pose = new Float32Array(9);
-      pose[0] = pos;
-      return {
-        step: i,
-        ctrl: raw16.subarray(0, 6),
-        done: raw16[6] ?? 0,
-        pose,
-        state: { pos, visits: prev.state.visits + 1 },
-      };
-    },
-    deriveEvents: (prev, next) => (next.state.pos !== prev.state.pos ? [{ type: 'goal' }] : []),
-  };
-
-  test('prev-threaded state accumulates across the whole pass', () => {
-    const n = 6;
-    const data = new Float32Array(RECORD_FLOATS * n);
-    for (let i = 0; i < n; i++) data[i * RECORD_FLOATS] = i % 2;
-    const raw = rawRecordingFromFloats('FourRooms-cont-v0', 8, data);
-    const dec = decodeRecording(raw, replayDecoder);
-
-    expect(dec.frames.length).toBe(n + 1);
-    expect(dec.frames.map((f) => f.state.pos)).toEqual([0, 0, 1, 1, 2, 2, 3]);
-    expect(dec.frames[n]?.state.visits).toBe(n);
-    expect(dec.geometry.kind).toBe('grid');
-    expect(Array.from(dec.geometry.grid?.walls ?? [])).toEqual([0, 1, 0, 0]);
-    expect(dec.events.map((e) => e.length)).toEqual([0, 0, 1, 0, 1, 0, 1]);
-  });
-});
-
 
 describe('parseRawTrace accepts buffer VIEWS, not just bare ArrayBuffers', () => {
   const META = { envId: 'CartPole-cont-v0', seed: 48 };
@@ -407,42 +333,6 @@ describe('unvalidated envIds are rejected with a typed error', () => {
   });
 });
 
-describe('walkRecording honours DecodeOptions', () => {
-  test('maxSteps clamps the walk exactly like decodeRecording', () => {
-    const doc = loadDoc('MountainCar-cont-v0');
-    const raw = loadRaw(doc);
-    for (const maxSteps of [0, 1, 7, doc.steps, doc.steps + 50, -3, 4.9]) {
-      const dec = decodeRecording(raw, mountainCarDecoder, { maxSteps });
-      const seen: number[] = [];
-      const evs: number[] = [];
-      walkRecording(
-        raw,
-        mountainCarDecoder,
-        (frame, events) => {
-          seen.push(frame.step);
-          evs.push(events.length);
-        },
-        { maxSteps },
-      );
-      expect({ maxSteps, n: seen.length }).toEqual({ maxSteps, n: dec.frames.length });
-      expect({ maxSteps, steps: seen }).toEqual({
-        maxSteps,
-        steps: dec.frames.map((f) => f.step),
-      });
-      expect({ maxSteps, evs }).toEqual({ maxSteps, evs: dec.events.map((e) => e.length) });
-    }
-  });
-
-  test('an omitted opts argument still walks the whole recording', () => {
-    const doc = loadDoc('Pendulum-cont-v0');
-    let n = 0;
-    walkRecording(loadRaw(doc), pendulumDecoder, () => {
-      n++;
-    });
-    expect(n).toBe(doc.steps + 1);
-  });
-});
-
 describe('the empty event list is one shared frozen singleton', () => {
   test('NO_EVENTS is frozen and empty', () => {
     expect(NO_EVENTS.length).toBe(0);
@@ -472,34 +362,37 @@ describe('the empty event list is one shared frozen singleton', () => {
   }
 });
 
-describe('non-finite record rows are counted, not silently decoded', () => {
+describe('non-finite record rows abort the decode', () => {
   function cartPoleRaw(): RawRecording {
     const doc = loadDoc('CartPole-cont-v0');
     const raw = loadRaw(doc);
     return { ...raw, data: Float32Array.from(raw.data) };
   }
 
-  test('a clean recording reports zero damaged rows and no replay block', () => {
-    const dec = decodeRecording(cartPoleRaw(), cartPoleDecoder);
-    expect(dec.nonFiniteRows).toBe(0);
-    expect(dec.replay).toBeUndefined();
-  });
-
-  test('NaN / Infinity anywhere in a row counts that row once', () => {
+  test('a clean recording decodes every row', () => {
     const raw = cartPoleRaw();
-    raw.data[3 * RECORD_FLOATS + 0] = NaN;
-    raw.data[9 * RECORD_FLOATS + 6] = Infinity;
-    raw.data[9 * RECORD_FLOATS + 8] = NaN;
-    raw.data[20 * RECORD_FLOATS + 15] = -Infinity;
     const dec = decodeRecording(raw, cartPoleDecoder);
-    expect(dec.nonFiniteRows).toBe(3);
     expect(dec.frames.length).toBe(raw.steps + 1);
   });
 
-  test('the count respects maxSteps', () => {
+  test('NaN / Infinity anywhere in a row throws DecodeError', () => {
+    for (const [row, slot, value] of [
+      [3, 0, NaN],
+      [9, 6, Infinity],
+      [9, 8, NaN],
+      [20, 15, -Infinity],
+    ] as const) {
+      const raw = cartPoleRaw();
+      raw.data[row * RECORD_FLOATS + slot] = value;
+      expect(() => decodeRecording(raw, cartPoleDecoder)).toThrow(DecodeError);
+      expect(() => decodeRecording(raw, cartPoleDecoder)).toThrow(new RegExp(`row ${row} `));
+    }
+  });
+
+  test('lensRecording rejects the damaged row too', () => {
     const raw = cartPoleRaw();
     raw.data[30 * RECORD_FLOATS] = NaN;
-    expect(decodeRecording(raw, cartPoleDecoder, { maxSteps: 30 }).nonFiniteRows).toBe(0);
-    expect(decodeRecording(raw, cartPoleDecoder, { maxSteps: 31 }).nonFiniteRows).toBe(1);
+    expect(() => lensRecording(raw, cartPoleDecoder)).toThrow(DecodeError);
+    expect(() => lensRecording(raw, cartPoleDecoder)).toThrow(/row 30 /);
   });
 });

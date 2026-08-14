@@ -1,7 +1,5 @@
-
-import { ENV_IDS, isEnvId } from '@shared/envs';
+import { ENV_IDS } from '@shared/envs';
 import type { EnvId } from '@shared/envs';
-import type { RecordingMeta } from '@shared/types';
 import type { RawRecording } from './types';
 
 export const RECORD_FLOATS = 16;
@@ -12,12 +10,10 @@ export const OFF_DONE = 6;
 export const OFF_POSE = 7;
 export const POSE_LEN = 9;
 
-export const RECORD_VERSION = 4;
-export const CODEC_VERSION = 1;
-export const FILE_MAGIC = 0x344b414f;
-export const CHUNK_MAGIC = 0x344b4843;
-export const FILE_HEADER_BYTES = 16;
-export const CHUNK_HEADER_BYTES = 32;
+export const FILE_MAGIC = 0x524b414f;
+export const CHUNK_MAGIC = 0x524b4843;
+export const FILE_HEADER_BYTES = 12;
+export const CHUNK_HEADER_BYTES = 24;
 export const ESCAPE_ENTRY_BYTES = 4 + RECORD_FLOATS * 4;
 
 const LITTLE_ENDIAN = (() => {
@@ -32,7 +28,6 @@ export class RecordParseError extends Error {
     this.name = 'RecordParseError';
   }
 }
-
 
 export type PoseEncoding = 'u8' | 'i16' | 'dx32';
 
@@ -66,26 +61,9 @@ const u8Range = (from: number, to: number): PoseFieldSpec[] => {
 const i16 = (idx: number, scale: number): PoseFieldSpec => ({ idx, enc: 'i16', scale });
 const i16w = (idx: number, scale: number): PoseFieldSpec => ({ idx, enc: 'i16', scale, wrap: true });
 
-export const RECORD_V4_ENV_KINDS: readonly EnvId[] = [
-  'HalfCheetah-v4',
-  'FourRooms-cont-v0',
-  'DeepSea-cont-v0',
-  'KeyCorridor-cont-v0',
-  'Acrobot-cont-v0',
-  'MountainCar-cont-v0',
-  'CartPole-cont-v0',
-  'Pendulum-cont-v0',
-  'Chain-cont-v0',
-  'LargeDeepSea-cont-v0',
-  'MultiKeyCorridor-cont-v0',
-  'MemoryChain-cont-v0',
-  'ProceduralMaze-cont-v0',
-  'HighDimMaze-cont-v0',
-  'POMaze-cont-v0',
-  'DelayedChain-cont-v0',
-];
+export const RECORD_ENV_KINDS: readonly EnvId[] = ENV_IDS;
 
-export const RECORD_V4_CODECS: readonly CodecDescriptor[] = [
+export const RECORD_CODECS: readonly CodecDescriptor[] = [
   {
     category: 'cheetah',
     ctrl: { kind: 'u8box', n: 6 },
@@ -136,92 +114,20 @@ export const RECORD_V4_CODECS: readonly CodecDescriptor[] = [
 ];
 
 export function envKindOf(envId: string): number {
-  return RECORD_V4_ENV_KINDS.indexOf(envId as EnvId);
+  return RECORD_ENV_KINDS.indexOf(envId as EnvId);
 }
 
 export function codecForEnvKind(envKind: number): CodecDescriptor {
-  const desc = RECORD_V4_CODECS[envKind];
+  const desc = RECORD_CODECS[envKind];
   if (desc === undefined) throw new RecordParseError(`unknown envKind ${envKind}`);
   return desc;
 }
 
 export function codecForEnv(envId: string): CodecDescriptor {
   const kind = envKindOf(envId);
-  if (kind < 0) throw new RecordParseError(`no v4 codec for envId ${JSON.stringify(envId)}`);
+  if (kind < 0) throw new RecordParseError(`no codec for envId ${JSON.stringify(envId)}`);
   return codecForEnvKind(kind);
 }
-
-
-function normalizeCodec(value: unknown): {
-  category: string;
-  ctrl: string;
-  poseFields: string;
-  poseConst: string;
-} | null {
-  if (value === null || typeof value !== 'object') return null;
-  const o = value as Record<string, unknown>;
-
-  const category = o['category'];
-  if (typeof category !== 'string') return null;
-
-  const rawCtrl = o['ctrl'];
-  let ctrl: string;
-  if (rawCtrl === 'index') {
-    ctrl = 'index';
-  } else if (rawCtrl !== null && typeof rawCtrl === 'object') {
-    const c = rawCtrl as Record<string, unknown>;
-    if (c['kind'] !== 'u8box' || typeof c['n'] !== 'number') return null;
-    ctrl = `u8box:${c['n']}`;
-  } else {
-    return null;
-  }
-
-  const rawFields = o['poseFields'];
-  if (!Array.isArray(rawFields)) return null;
-  const parts: string[] = [];
-  for (const entry of rawFields) {
-    if (entry === null || typeof entry !== 'object') return null;
-    const f = entry as Record<string, unknown>;
-    const idx = f['idx'];
-    const enc = f['enc'];
-    if (typeof idx !== 'number' || typeof enc !== 'string') return null;
-    const scale = f['scale'];
-    const scaleText = scale === undefined ? '-' : typeof scale === 'number' ? String(scale) : '?';
-    if (scaleText === '?') return null;
-    parts.push(`${idx}:${enc}:${scaleText}:${f['wrap'] === true ? 'w' : '-'}`);
-  }
-
-  const rawConst = o['poseConst'];
-  const constParts: string[] = [];
-  if (rawConst !== undefined && rawConst !== null) {
-    if (typeof rawConst !== 'object') return null;
-    for (const [k, v] of Object.entries(rawConst as Record<string, unknown>)) {
-      if (typeof v !== 'number') return null;
-      constParts.push(`${k}=${String(v)}`);
-    }
-    constParts.sort();
-  }
-
-  return {
-    category,
-    ctrl,
-    poseFields: parts.join('|'),
-    poseConst: constParts.join(','),
-  };
-}
-
-export function codecMatches(desc: CodecDescriptor, value: unknown): boolean {
-  const a = normalizeCodec(desc);
-  const b = normalizeCodec(value);
-  if (a === null || b === null) return false;
-  return (
-    a.category === b.category &&
-    a.ctrl === b.ctrl &&
-    a.poseFields === b.poseFields &&
-    a.poseConst === b.poseConst
-  );
-}
-
 
 const TWO_PI = Math.PI * 2;
 
@@ -261,40 +167,6 @@ const CRC_TABLE = (() => {
   return table;
 })();
 
-
-export interface FileHeaderV4 {
-  magic: number;
-  formatVersion: number;
-  envKind: number;
-  codecVersion: number;
-}
-
-export interface ChunkRecordV4 {
-  index: number;
-  stepStart: number;
-  stepCount: number;
-  rawBytes: number;
-  compBytes: number;
-  crc32: number;
-  doneCount: number;
-  rewardDelta: number;
-  byteOffset: number;
-  byteLength: number;
-  payloadOffset: number;
-}
-
-export interface ChunkScanV4 {
-  header: FileHeaderV4;
-  chunks: ChunkRecordV4[];
-  steps: number;
-  truncatedAt: number | null;
-  truncatedReason: string | null;
-}
-
-export interface ScanOptionsV4 {
-  verifyCrc?: boolean;
-}
-
 function asWindow(buf: ArrayBuffer | ArrayBufferView): Uint8Array {
   if (ArrayBuffer.isView(buf)) {
     return new Uint8Array(buf.buffer, buf.byteOffset, buf.byteLength);
@@ -302,192 +174,122 @@ function asWindow(buf: ArrayBuffer | ArrayBufferView): Uint8Array {
   return new Uint8Array(buf);
 }
 
-export function readFileHeaderV4(buf: ArrayBuffer | ArrayBufferView): FileHeaderV4 {
+export interface RecordHeader {
+  envKind: number;
+  envId: EnvId;
+  steps: number;
+  desc: CodecDescriptor;
+}
+
+export function readRecordHeader(buf: ArrayBuffer | ArrayBufferView): RecordHeader {
   const bytes = asWindow(buf);
   if (bytes.byteLength < FILE_HEADER_BYTES) {
     throw new RecordParseError(
-      `actions.bin is ${bytes.byteLength} bytes — shorter than the ${FILE_HEADER_BYTES}-byte v4 file header`,
+      `actions.bin is ${bytes.byteLength} bytes — shorter than the ${FILE_HEADER_BYTES}-byte header`,
     );
   }
   const dv = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
-  const header: FileHeaderV4 = {
-    magic: dv.getUint32(0, true),
-    formatVersion: dv.getUint32(4, true),
-    envKind: dv.getUint32(8, true),
-    codecVersion: dv.getUint32(12, true),
-  };
-  if (header.magic !== FILE_MAGIC) {
+  const magic = dv.getUint32(0, true);
+  if (magic !== FILE_MAGIC) {
     throw new RecordParseError(
-      `bad v4 file magic 0x${header.magic.toString(16)} (expected 0x${FILE_MAGIC.toString(16)})`,
+      `bad recording magic 0x${magic.toString(16)} (expected 0x${FILE_MAGIC.toString(16)})`,
     );
   }
-  if (header.formatVersion !== RECORD_VERSION) {
-    throw new RecordParseError(`unsupported v4 formatVersion ${header.formatVersion}`);
+  const envKind = dv.getUint32(4, true);
+  const envId = RECORD_ENV_KINDS[envKind];
+  if (envId === undefined) {
+    throw new RecordParseError(`recording envKind ${envKind} is not a known env`);
   }
-  if (header.codecVersion !== CODEC_VERSION) {
-    throw new RecordParseError(
-      `unsupported codecVersion ${header.codecVersion} (this build implements ${CODEC_VERSION})`,
-    );
-  }
-  return header;
+  return { envKind, envId, steps: dv.getUint32(8, true), desc: codecForEnvKind(envKind) };
 }
 
-export function scanChunksV4(
-  buf: ArrayBuffer | ArrayBufferView,
-  opts: ScanOptionsV4 = {},
-): ChunkScanV4 {
-  const bytes = asWindow(buf);
-  const header = readFileHeaderV4(bytes);
-  const verifyCrc = opts.verifyCrc ?? true;
-  const dv = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
-
-  const chunks: ChunkRecordV4[] = [];
-  let steps = 0;
-  let offset = FILE_HEADER_BYTES;
-  let truncatedAt: number | null = null;
-  let truncatedReason: string | null = null;
-
-  const stop = (reason: string): void => {
-    truncatedAt = offset;
-    truncatedReason = reason;
-  };
-
-  for (;;) {
-    if (offset === bytes.byteLength) break;
-    if (offset + CHUNK_HEADER_BYTES > bytes.byteLength) {
-      stop('short chunk header');
-      break;
-    }
-    const magic = dv.getUint32(offset, true);
-    if (magic !== CHUNK_MAGIC) {
-      stop(`bad chunk magic 0x${magic.toString(16)}`);
-      break;
-    }
-    const stepStart = dv.getUint32(offset + 4, true);
-    const stepCount = dv.getUint32(offset + 8, true);
-    const rawBytes = dv.getUint32(offset + 12, true);
-    const compBytes = dv.getUint32(offset + 16, true);
-    const crc = dv.getUint32(offset + 20, true);
-    const doneCount = dv.getUint32(offset + 24, true);
-    const rewardDelta = dv.getFloat32(offset + 28, true);
-
-    if (stepCount === 0 || rawBytes === 0 || compBytes === 0) {
-      stop('empty chunk');
-      break;
-    }
-    if (stepStart !== steps) {
-      stop(`chunk stepStart ${stepStart} does not continue at ${steps}`);
-      break;
-    }
-    const payloadOffset = offset + CHUNK_HEADER_BYTES;
-    if (payloadOffset + compBytes > bytes.byteLength) {
-      stop('chunk payload runs past the buffer');
-      break;
-    }
-    if (verifyCrc && crc32(bytes, payloadOffset, payloadOffset + compBytes) !== crc) {
-      stop('chunk crc32 mismatch');
-      break;
-    }
-
-    chunks.push({
-      index: chunks.length,
-      stepStart,
-      stepCount,
-      rawBytes,
-      compBytes,
-      crc32: crc,
-      doneCount,
-      rewardDelta,
-      byteOffset: offset,
-      byteLength: CHUNK_HEADER_BYTES + compBytes,
-      payloadOffset,
-    });
-    steps += stepCount;
-    offset = payloadOffset + compBytes;
-  }
-
-  return { header, chunks, steps, truncatedAt, truncatedReason };
-}
-
-
-export interface ChunkTableEntryV4 {
+export interface RecordChunk {
+  index: number;
   stepStart: number;
   stepCount: number;
+  rawBytes: number;
+  compBytes: number;
+  crc32: number;
   byteOffset: number;
   byteLength: number;
+  payloadOffset: number;
 }
 
-export function chunkTableFromMeta(meta: Pick<RecordingMeta, 'chunks'>): ChunkTableEntryV4[] | null {
-  const raw = meta.chunks;
-  if (!Array.isArray(raw) || raw.length === 0) return null;
-  const out: ChunkTableEntryV4[] = [];
-  let steps = 0;
-  let offset = FILE_HEADER_BYTES;
-  for (const row of raw) {
-    if (!Array.isArray(row) || row.length < 4) return null;
-    const [stepStart, stepCount, byteOffset, byteLength] = row;
-    if (
-      typeof stepStart !== 'number' || !Number.isSafeInteger(stepStart) ||
-      typeof stepCount !== 'number' || !Number.isSafeInteger(stepCount) ||
-      typeof byteOffset !== 'number' || !Number.isSafeInteger(byteOffset) ||
-      typeof byteLength !== 'number' || !Number.isSafeInteger(byteLength)
-    ) {
-      return null;
-    }
-    if (stepCount <= 0 || byteLength <= CHUNK_HEADER_BYTES) return null;
-    if (stepStart !== steps || byteOffset !== offset) return null;
-    out.push({ stepStart, stepCount, byteOffset, byteLength });
-    steps += stepCount;
-    offset = byteOffset + byteLength;
-  }
-  return out;
+export interface ScanOptions {
+  verifyCrc?: boolean;
 }
 
-export interface PrefixPlanV4 {
-  chunks: number;
+export function scanNextChunk(
+  bytes: Uint8Array,
+  offset: number,
+  expectStart: number,
+  index: number,
+): RecordChunk | null {
+  if (offset + CHUNK_HEADER_BYTES > bytes.byteLength) return null;
+  const dv = new DataView(bytes.buffer, bytes.byteOffset + offset, CHUNK_HEADER_BYTES);
+  if (dv.getUint32(0, true) !== CHUNK_MAGIC) return null;
+  const stepStart = dv.getUint32(4, true);
+  const stepCount = dv.getUint32(8, true);
+  const rawBytes = dv.getUint32(12, true);
+  const compBytes = dv.getUint32(16, true);
+  if (stepCount === 0 || compBytes === 0) return null;
+  if (stepStart !== expectStart) return null;
+  if (offset + CHUNK_HEADER_BYTES + compBytes > bytes.byteLength) return null;
+  return {
+    index,
+    stepStart,
+    stepCount,
+    rawBytes,
+    compBytes,
+    crc32: dv.getUint32(20, true),
+    byteOffset: offset,
+    byteLength: CHUNK_HEADER_BYTES + compBytes,
+    payloadOffset: offset + CHUNK_HEADER_BYTES,
+  };
+}
+
+export interface RecordScan {
+  header: RecordHeader;
+  desc: CodecDescriptor;
+  chunks: RecordChunk[];
   steps: number;
-  bytes: number;
 }
 
-export function planPrefixV4(
-  table: readonly ChunkTableEntryV4[],
-  wantSteps: number,
-): PrefixPlanV4 {
-  if (table.length === 0 || !(wantSteps > 0)) return { chunks: 0, steps: 0, bytes: 0 };
+export function scanRecord(buf: ArrayBuffer | ArrayBufferView, opts: ScanOptions = {}): RecordScan {
+  const bytes = asWindow(buf);
+  const header = readRecordHeader(bytes);
+  const verify = opts.verifyCrc !== false;
+  const chunks: RecordChunk[] = [];
+  let offset = FILE_HEADER_BYTES;
   let steps = 0;
-  let bytes = 0;
-  let chunks = 0;
-  for (const entry of table) {
-    chunks++;
-    steps += entry.stepCount;
-    bytes = entry.byteOffset + entry.byteLength;
-    if (steps >= wantSteps) break;
+  for (;;) {
+    const chunk = scanNextChunk(bytes, offset, steps, chunks.length);
+    if (chunk === null) break;
+    if (verify) {
+      const crc = crc32(bytes, chunk.payloadOffset, chunk.payloadOffset + chunk.compBytes);
+      if (crc !== chunk.crc32) break;
+    }
+    chunks.push(chunk);
+    steps += chunk.stepCount;
+    offset += chunk.byteLength;
   }
-  return { chunks, steps, bytes };
+  return { header, desc: header.desc, chunks, steps };
 }
 
-export function rangeHeaderForSteps(
-  meta: Pick<RecordingMeta, 'chunks'>,
-  wantSteps: number,
-): string | null {
-  const table = chunkTableFromMeta(meta);
-  if (table === null) return null;
-  const plan = planPrefixV4(table, wantSteps);
-  if (plan.bytes <= 0) return null;
-  return `bytes=0-${plan.bytes - 1}`;
-}
-
-
-async function inflateChunk(bytes: Uint8Array, chunk: ChunkRecordV4): Promise<Uint8Array> {
+export async function inflateChunk(bytes: Uint8Array, chunk: RecordChunk): Promise<Uint8Array> {
   const comp = bytes.slice(chunk.payloadOffset, chunk.payloadOffset + chunk.compBytes);
-  const source = new ReadableStream<BufferSource>({
+  const source = new ReadableStream<Uint8Array<ArrayBuffer>>({
     start(controller) {
-      controller.enqueue(comp);
+      controller.enqueue(comp as Uint8Array<ArrayBuffer>);
       controller.close();
     },
   });
+  const inflate = new DecompressionStream('deflate-raw') as unknown as ReadableWritablePair<
+    Uint8Array<ArrayBuffer>,
+    Uint8Array<ArrayBuffer>
+  >;
   const inflated = new Uint8Array(
-    await new Response(source.pipeThrough(new DecompressionStream('deflate-raw'))).arrayBuffer(),
+    await new Response(source.pipeThrough(inflate)).arrayBuffer(),
   );
   if (inflated.byteLength !== chunk.rawBytes) {
     throw new RecordParseError(
@@ -580,8 +382,11 @@ export function decodeChunkPayload(
       }
     } else if (field.enc === 'i16') {
       const scale = field.scale ?? 1;
+      let q = 0;
       for (let i = 0; i < stepCount; i++) {
-        out[base + i * RECORD_FLOATS + slot] = dv.getInt16(col + i * 2, true) * scale;
+        const d = dv.getInt16(col + i * 2, true);
+        q = i === 0 ? d : ((q + d + 0x8000) & 0xffff) - 0x8000;
+        out[base + i * RECORD_FLOATS + slot] = q * scale;
       }
     } else {
       const scale = field.scale ?? 1;
@@ -618,117 +423,18 @@ export function decodeChunkPayload(
   }
 }
 
-
-interface PreparedV4 {
-  bytes: Uint8Array;
-  envId: EnvId;
-  seed: number;
-  desc: CodecDescriptor;
-  scan: ChunkScanV4;
-}
-
-export function prepareLane(
+export async function parseRecord(
   buf: ArrayBuffer | ArrayBufferView,
-  meta: RecordingMeta,
-  opts: ScanOptionsV4 = {},
-): PreparedV4 {
-  if (!isEnvId(meta.envId)) {
-    throw new RecordParseError(`unknown envId ${JSON.stringify(meta.envId)}`);
-  }
-  if (!Number.isInteger(meta.seed) || meta.seed < 0) {
-    throw new RecordParseError(`invalid seed ${String(meta.seed)}`);
-  }
-  if (meta.codecVersion !== undefined && meta.codecVersion !== CODEC_VERSION) {
-    throw new RecordParseError(
-      `meta codecVersion ${meta.codecVersion} (this build implements ${CODEC_VERSION})`,
-    );
-  }
-
-  const bytes = asWindow(buf);
-  const scan = scanChunksV4(bytes, opts);
-  const headerEnv = RECORD_V4_ENV_KINDS[scan.header.envKind];
-  if (headerEnv === undefined) {
-    throw new RecordParseError(`file header envKind ${scan.header.envKind} is not a known env`);
-  }
-  if (headerEnv !== meta.envId) {
-    throw new RecordParseError(
-      `file header envKind ${scan.header.envKind} (${headerEnv}) contradicts meta envId ${meta.envId}`,
-    );
-  }
-
-  const desc = codecForEnvKind(scan.header.envKind);
-  if (meta.codec !== undefined && meta.codec !== null && !codecMatches(desc, meta.codec)) {
-    throw new RecordParseError(
-      `meta codec descriptor for ${meta.envId} does not match this build's codec table`,
-    );
-  }
-
-  return { bytes, envId: meta.envId, seed: meta.seed, desc, scan };
-}
-
-export async function parseActionsBin(
-  buf: ArrayBuffer | ArrayBufferView,
-  meta: RecordingMeta,
+  seed: number,
 ): Promise<RawRecording> {
-  const { bytes, envId, seed, desc, scan } = prepareLane(buf, meta);
+  const bytes = asWindow(buf);
+  const scan = scanRecord(bytes);
   const data = new Float32Array(scan.steps * RECORD_FLOATS);
-
   let steps = 0;
   for (const chunk of scan.chunks) {
-    let payload: Uint8Array;
-    try {
-      payload = await inflateChunk(bytes, chunk);
-    } catch {
-      break;
-    }
-    decodeChunkPayload(payload, desc, chunk.stepCount, data, steps * RECORD_FLOATS);
+    const payload = await inflateChunk(bytes, chunk);
+    decodeChunkPayload(payload, scan.desc, chunk.stepCount, data, steps * RECORD_FLOATS);
     steps += chunk.stepCount;
   }
-
-  return {
-    envId,
-    seed,
-    data: steps === scan.steps ? data : data.subarray(0, steps * RECORD_FLOATS),
-    steps,
-  };
-}
-
-export interface ChunkRowsV4 {
-  chunk: ChunkRecordV4;
-  stepStart: number;
-  stepCount: number;
-  data: Float32Array;
-}
-
-export type ChunkVisitorV4 = (rows: ChunkRowsV4) => boolean | void | Promise<boolean | void>;
-
-export async function walkChunksV4(
-  buf: ArrayBuffer | ArrayBufferView,
-  meta: RecordingMeta,
-  visit: ChunkVisitorV4,
-): Promise<number> {
-  const { bytes, desc, scan } = prepareLane(buf, meta);
-  let scratch = new Float32Array(0);
-  let steps = 0;
-
-  for (const chunk of scan.chunks) {
-    let payload: Uint8Array;
-    try {
-      payload = await inflateChunk(bytes, chunk);
-    } catch {
-      break;
-    }
-    const floats = chunk.stepCount * RECORD_FLOATS;
-    if (scratch.length < floats) scratch = new Float32Array(floats);
-    decodeChunkPayload(payload, desc, chunk.stepCount, scratch, 0);
-    steps += chunk.stepCount;
-    const stop = await visit({
-      chunk,
-      stepStart: chunk.stepStart,
-      stepCount: chunk.stepCount,
-      data: scratch.subarray(0, floats),
-    });
-    if (stop === false) break;
-  }
-  return steps;
+  return { envId: scan.header.envId, seed, data, steps };
 }
