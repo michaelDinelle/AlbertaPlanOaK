@@ -41,8 +41,9 @@ When a rule drifts from the cited research, fix the rule — never preserve folk
 6. **No caps on magnitudes.** The world is bigger than the agent, so magnitudes carry information (Big World Hypothesis). Never clamp; preserve on non-finite.
 7. **Greenfield.** No legacy paths, no compatibility fallbacks. Replace and delete.
 8. **Fleet lanes are independent agents.** One stream per seed, zero cross-lane coupling. Lane-disjointness is the acceptance test for every engine change.
-9. **Proof matches risk.** Changes that preserve every floating-point op ship on a bitwise A/B check. Changes that reorder arithmetic ship only on the paired population gate.
+9. **Proof matches risk.** Changes that preserve every floating-point op ship on a bitwise A/B check against the keeper fleet. Changes that reorder arithmetic ship only on the paired population gate against the keeper fleet.
 10. **No commentary, only code.** No comments, no docstrings, no doc files of any kind. Names and structure carry all meaning; if code needs a comment to be understood, rewrite the code. Knowledge that can't live in code lives in git history, skills, or memory — never in the repo as prose.
+11. **No environment cherry-picking under any circunstances** Use every environment and every seed the keeper uses. Using only some of them does not count. Do not write agent code that only works for one environment. To match the keeper, all of them have to match. It doesn't matter if you are doing an intermediate test or just a "quick check". Slicing arbitrary enviroment subsets are never acceptable. Every decision must be made holistically with all of the enviroments in mind. No matter the circumstances. 
 
 
 ## Performance: profiling (HEADLESS — verified 2026-07-04)
@@ -52,7 +53,7 @@ The repo template records without the Instruments GUI. Never trace (or rebuild t
 ```
 xctrace record --template ShaderTemplate.tracetemplate \
   --output out.trace --time-limit 15s \
-  --env OAK_BENCH_ENV=HalfCheetah-v4 --env OAK_BENCH_POLICIES=oak \
+  --env OAK_BENCH_POLICIES=oak \
   --env OAK_BENCH_STEPS=200000 --env OAK_BENCH_SEED_COUNT=1024 \
   --env OAK_METRICS_STORAGE=/tmp/trace-run \
   --launch -- .build/release/OaK benchmark
