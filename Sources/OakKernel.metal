@@ -82,7 +82,7 @@ inline float track_rate(uint step, uint cap) {
 }
 
 struct Ctx {
-    uint O, R, K, D, traceLevels, anchorCount, Rn, ringLen;
+    uint O, R, K, D, traceLevels, anchorCount, Rn;
     uint naturalO, naturalA;
     uint stepCount, stateSlot;
     float invR, invK, metaEta;
@@ -112,7 +112,6 @@ struct Ctx {
     device float *rHatC, *lRawC, *vsNextC;
     device float *twinDis;
     device float *vsTd, *vsDot, *vsScale, *vsAuxScale;
-    device float *planScale;
     device float *nurStats;
     device float *muRaw, *polCoef, *optUseByFeat, *lcbScr, *eligScr;
     device float *fcS;
@@ -155,7 +154,6 @@ inline Ctx make_ctx(device float *params, device float *stateArena, device uint 
     c.anchorCount = is_function_constant_defined(OAK_SPEC_ANCHOR_COUNT)
         ? OAK_SPEC_ANCHOR_COUNT : cfg.linearAnchorCount;
     c.Rn = is_function_constant_defined(OAK_SPEC_NURSERY) ? OAK_SPEC_NURSERY : cfg.nurseryCount;
-    c.ringLen = c.R;
     c.naturalO = (naturalO != 0u) ? naturalO : c.O;
     c.naturalA = (naturalA != 0u) ? naturalA : max(c.D / 2u, 1u);
     c.stepCount = scalars->stepCount; c.stateSlot = scalars->stateSlot;
@@ -244,7 +242,7 @@ inline Ctx make_ctx(device float *params, device float *stateArena, device uint 
     c.vsDot = stateArena + s; s += c.K;
     c.vsScale = stateArena + s; s += c.K;
     c.vsAuxScale = stateArena + s; s += c.K;
-    c.planScale = stateArena + s; s += 1u;
+    s += 1u;
     s = (s + 3u) & ~3u;
 
     c.nurStats = stateArena + s; s += 4u * c.Rn;
@@ -464,29 +462,22 @@ inline void metaopt_update_slot(device float *alpha,
 inline void fcstomp_store_learn_scales(Ctx ctx, uint tid) {
 
     device const uint *actP = act_at(ctx, ctx.stateSlot);
-    device const uint *actC = act_at(ctx, 1u - ctx.stateSlot);
     device const float *prevS = state_at(ctx, ctx.stateSlot);
-    device const float *currS = state_at(ctx, 1u - ctx.stateSlot);
-    float denomTd = 1.0f, denomPlan = 1.0f, xNorm = 0.0f;
+    float denomTd = 1.0f, xNorm = 0.0f;
     for (uint base = 0u; base < OAK_ACT; base += 32u) {
         uint a = base + tid;
-        uint ip = actP[a], ic = actC[a];
-        float xp = prevS[ip], xc = currS[ic];
+        uint ip = actP[a];
+        float xp = prevS[ip];
         float ap = ctx.alpha[ip];
-        float ac = ctx.alpha[ic];
         for (uint t = 0u; t < 32u; ++t) {
             float x = simd_shuffle(xp, (ushort)t);
             float aps = simd_shuffle(ap, (ushort)t);
             if (isfinite(aps) && aps > 0.0f) denomTd += aps * (x * x);
-            float xs = simd_shuffle(xc, (ushort)t);
-            float acs = simd_shuffle(ac, (ushort)t);
-            if (isfinite(acs) && acs > 0.0f) denomPlan += acs * (xs * xs);
             xNorm = fma(x, x, xNorm);
         }
     }
     if (tid == 0u) {
         ctx.valueScale[0] = (isfinite(denomTd) && denomTd > 0.0f) ? (1.0f / denomTd) : 0.0f;
-        ctx.planScale[0] = (isfinite(denomPlan) && denomPlan > 0.0f) ? (1.0f / denomPlan) : 0.0f;
         ctx.xNormPrev[0] = xNorm;
     }
 }
@@ -1071,7 +1062,6 @@ static inline void oak_learn_rows(Ctx ctx, device const float *prev,
             uint eH = cb + tid;
             uint iH = act_of(actP, eH);
             for (uint l = 0u; l < 32u; ++l) {
-                uint e = cb + l;
                 uint i = simd_shuffle(iH, (ushort)l);
                 if (i % tw != tid) continue;
                 float w = ctx.valueW[i];

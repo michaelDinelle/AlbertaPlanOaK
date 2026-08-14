@@ -309,6 +309,7 @@ final class Engine {
   let batch: Int
   let kinds: [Kind]
   let laneKindIdx: [Int]
+  let envTable: [(nameHash: UInt32, naturalO: Int, actionKind: Int, actionCount: Int)]
   let q: MTLCommandQueue, params, state: Shared<Float>,
     uints: Shared<UInt32>, res: [MTLBuffer]
   let scalarsB: MTLBuffer
@@ -354,7 +355,7 @@ final class Engine {
     return outB.contents().bindMemory(to: ShapeProbe.self, capacity: 1).pointee
   }
   static func runEnvTableProbe(_ dev: MTLDevice, _ lib: MTLLibrary)
-    throws -> [(naturalO: Int, actionKind: Int, actionCount: Int)]
+    throws -> [(nameHash: UInt32, naturalO: Int, actionKind: Int, actionCount: Int)]
   {
     let fn = lib.makeFunction(name: "oak_env_table_probe")!
     let pipe = try dev.makeComputePipelineState(function: fn)
@@ -375,7 +376,9 @@ final class Engine {
       throw err("Env table count drift: kernel \(tbl[0]) vs host \(Main.envIdsByKind.count).")
     }
     return (0..<Main.envIdsByKind.count).map { i in
-      (Int(tbl[1 + i * 4 + 1]), Int(tbl[1 + i * 4 + 2]), Int(tbl[1 + i * 4 + 3]))
+      (
+        tbl[1 + i * 4], Int(tbl[1 + i * 4 + 1]), Int(tbl[1 + i * 4 + 2]),
+        Int(tbl[1 + i * 4 + 3]))
     }
   }
   init(laneEnvs: [String], batch b: Int, dev: MTLDevice) throws {
@@ -442,6 +445,7 @@ final class Engine {
     }
     kinds = built
     laneKindIdx = laneIdx
+    envTable = table
     guard let cq = dev.makeCommandQueue() else {
       throw err("Metal command queue unavailable.")
     }
@@ -986,22 +990,6 @@ final class MetricsTapeWriter {
     let initPipe = try pipeline("oak_fleet_init")
     let snapPipe = try pipeline("oak_fleet_snapshot")
     do {
-      let tablePipe = try pipeline("oak_env_table_probe")
-      let words = 1 + Self.envIdsByKind.count * 4
-      guard let outB = dev.makeBuffer(length: words * 4, options: [.storageModeShared]),
-        let cb = q.makeCommandBuffer(), let enc = cb.makeComputeCommandEncoder()
-      else { throw err("Env table probe dispatch failed.") }
-      enc.setComputePipelineState(tablePipe)
-      enc.setBuffer(outB, offset: 0, index: 0)
-      enc.dispatchThreads(MTLSize(width: 1, height: 1, depth: 1),
-                          threadsPerThreadgroup: MTLSize(width: 1, height: 1, depth: 1))
-      enc.endEncoding()
-      cb.commit()
-      cb.waitUntilCompleted()
-      let tbl = outB.contents().bindMemory(to: UInt32.self, capacity: words)
-      guard tbl[0] == UInt32(Self.envIdsByKind.count) else {
-        throw err("Env table count drift: kernel \(tbl[0]) vs host \(Self.envIdsByKind.count).")
-      }
       func fnv1a(_ s: String) -> UInt32 {
         var h: UInt32 = 0x811c_9dc5
         for b in Array(s.utf8) { h = (h ^ UInt32(b)) &* 16_777_619 }
@@ -1009,12 +997,13 @@ final class MetricsTapeWriter {
       }
       var envsJson: [String: Any] = [:]
       for (i, name) in Self.envIdsByKind.enumerated() {
-        guard tbl[1 + i * 4] == fnv1a(name) else {
+        let row = engine.envTable[i]
+        guard row.nameHash == fnv1a(name) else {
           throw err("Env table drift at kind \(i): kernel hash != fnv1a(\(name)).")
         }
         envsJson[name] = [
-          "kind": i, "naturalO": Int(tbl[1 + i * 4 + 1]),
-          "actionKind": Int(tbl[1 + i * 4 + 2]), "actionCount": Int(tbl[1 + i * 4 + 3]),
+          "kind": i, "naturalO": row.naturalO,
+          "actionKind": row.actionKind, "actionCount": row.actionCount,
         ]
       }
       let ej = try JSONSerialization.data(
@@ -1046,8 +1035,6 @@ final class MetricsTapeWriter {
     for flag in ["OAK_PROBE_FTZ", "OAK_PROBE_FIXEDIDX", "OAK_MEGA_STAGE_MASK"] where e[flag] != nil {
       fputs("\(flag)=\(e[flag]!): timing instrument, trajectories are garbage\n", stderr)
     }
-    let megaPipe = try dev.makeComputePipelineState(
-      function: lib.makeFunction(name: "oak_megastep", constantValues: baseConstants()))
     var envRuns: [(kindIdx: Int, kind: UInt32, tgStart: Int, tgCount: Int)] = []
     var variantPipes: [MTLComputePipelineState] = []
     guard engine.kinds.allSatisfy({ $0.firstLane % megaG == 0 }) else {
@@ -1063,8 +1050,7 @@ final class MetricsTapeWriter {
         function: lib.makeFunction(name: "oak_megastep", constantValues: c)))
       envRuns.append((ki, kd.kind, kd.firstLane / megaG, (kd.count + megaG - 1) / megaG))
     }
-    let pipeMaxThreads = ([megaPipe] + variantPipes)
-      .map(\.maxTotalThreadsPerThreadgroup).min() ?? 0
+    let pipeMaxThreads = variantPipes.map(\.maxTotalThreadsPerThreadgroup).min() ?? 0
     let tgOptionCount = Int(engine.kinds[0].off.optionCount)
     let megaSlotBytes = (5 * tgOptionCount + 1) * megaG * MemoryLayout<Float>.stride
     guard megaG >= 2, megaW <= pipeMaxThreads,
@@ -1178,7 +1164,6 @@ final class MetricsTapeWriter {
       var c = ecfg
       enc.setBytes(&c, length: MemoryLayout<FleetEnvCfg>.stride, index: 8)
     }
-    let megaTGBytes = megaSlotBytes
     func encodeMegastep(_ enc: MTLComputeCommandEncoder, _ n: Int, _ base: Int) {
       for run in envRuns {
         let kd = engine.kinds[run.kindIdx]
@@ -1194,7 +1179,7 @@ final class MetricsTapeWriter {
         enc.setBuffer(recordBuf, offset: 0, index: 10)
         var span = SIMD3<UInt32>(UInt32(n), UInt32(base), UInt32(run.tgStart))
         enc.setBytes(&span, length: MemoryLayout<SIMD3<UInt32>>.stride, index: 11)
-        enc.setThreadgroupMemoryLength(megaTGBytes, index: 0)
+        enc.setThreadgroupMemoryLength(megaSlotBytes, index: 0)
         enc.dispatchThreadgroups(
           MTLSize(width: run.tgCount, height: 1, depth: 1),
           threadsPerThreadgroup: mtlSize(megaW))
@@ -1232,13 +1217,13 @@ final class MetricsTapeWriter {
       var gpuSeconds = 0.0
       var prevRewardSum: [Double]
       var prevStep = 0
-      init(_ b: Int, _ rec: Int) {
+      init(_ b: Int) {
         deadStep = Array(repeating: nil, count: b)
         deadDetector = Array(repeating: nil, count: b)
         prevRewardSum = Array(repeating: 0, count: b)
       }
     }
-    let st = WriterState(B, recordLanes.count)
+    let st = WriterState(B)
     let writer = DispatchQueue(label: "oak.fleet.gpu.writer")
     let detectorNames: [UInt32: String] = [1: "envReward", 2: "policyMean", 3: "envObs"]
     let wallStart = DispatchTime.now().uptimeNanoseconds
