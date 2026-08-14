@@ -60,7 +60,6 @@ export interface EnvGeometry {
 
 export interface EnvDecoder<S = unknown, St = unknown> {
   envId: EnvId;
-  needsReplay: boolean;
   initStatic(seed: number): St;
   geometry(st: St, seed: number): EnvGeometry;
   initFrame(seed: number, st: St): EnvFrame<S>;
@@ -77,8 +76,6 @@ export interface DecodedRecording<S = unknown> {
   geometry: EnvGeometry;
   frames: EnvFrame<S>[];
   events: SimEvent[][];
-  replay?: { firstDisagreeStep: number | null; disagreeCount: number };
-  nonFiniteRows?: number;
 }
 
 export interface RawRecording {

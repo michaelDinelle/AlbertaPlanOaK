@@ -1,51 +1,35 @@
+import { TAPE_FIELDS, TAPE_MAGIC } from '@shared/types';
 
-import { crc32, deflateRawSync } from 'node:zlib';
-
-export const DEFAULT_TAPE_FIELDS = [
-  'rewardSum',
-  'doneCount',
-  'rewardRate',
-  'kernelRho',
-  'deltaSum',
-  'deltaPeak',
-  'paramAbsMax',
-] as const;
-
-export interface TapeWindowSpec {
-  start: number;
-  count: number;
-  values: Record<string, number[]>;
+export interface TapeRowSpec {
+  stepStart: number;
+  stepCount: number;
+  wallSeconds?: number;
+  values: Record<string, readonly number[]>;
 }
 
-export function tapeBytes(
-  laneCount: number,
-  windows: TapeWindowSpec[],
-  fields: readonly string[] = DEFAULT_TAPE_FIELDS,
-): Buffer {
-  const rowBytes = 8 + fields.length * laneCount * 4;
-  const payload = Buffer.alloc(windows.length * rowBytes);
-  windows.forEach((w, wi) => {
-    const p = wi * rowBytes;
-    payload.writeUInt32LE(w.start, p);
-    payload.writeUInt32LE(w.count, p + 4);
-    fields.forEach((f, fi) => {
+export function tapeBytes(laneCount: number, rows: readonly TapeRowSpec[]): Uint8Array {
+  const fields = [...TAPE_FIELDS];
+  const json = new TextEncoder().encode(JSON.stringify({ fields }));
+  const rowBytes = 12 + fields.length * laneCount * 4;
+  const out = new Uint8Array(12 + json.byteLength + rows.length * rowBytes);
+  const dv = new DataView(out.buffer);
+  dv.setUint32(0, TAPE_MAGIC, true);
+  dv.setUint32(4, laneCount, true);
+  dv.setUint32(8, json.byteLength, true);
+  out.set(json, 12);
+  let at = 12 + json.byteLength;
+  for (const row of rows) {
+    dv.setUint32(at, row.stepStart, true);
+    dv.setUint32(at + 4, row.stepCount, true);
+    dv.setFloat32(at + 8, row.wallSeconds ?? NaN, true);
+    for (let f = 0; f < fields.length; f++) {
+      const name = fields[f] ?? '';
+      const col = row.values[name];
       for (let l = 0; l < laneCount; l++) {
-        payload.writeFloatLE(w.values[f]?.[l] ?? 0, p + 8 + (fi * laneCount + l) * 4);
+        dv.setFloat32(at + 12 + (f * laneCount + l) * 4, col?.[l] ?? NaN, true);
       }
-    });
-  });
-  const json = Buffer.from(JSON.stringify({ fields }), 'utf8');
-  const head = Buffer.alloc(16);
-  head.writeUInt32LE(0x544b414f, 0);
-  head.writeUInt32LE(1, 4);
-  head.writeUInt32LE(laneCount, 8);
-  head.writeUInt32LE(json.length, 12);
-  const comp = deflateRawSync(payload);
-  const seg = Buffer.alloc(20);
-  seg.writeUInt32LE(0x54474553, 0);
-  seg.writeUInt32LE(windows.length, 4);
-  seg.writeUInt32LE(payload.length, 8);
-  seg.writeUInt32LE(comp.length, 12);
-  seg.writeUInt32LE(crc32(comp) >>> 0, 16);
-  return Buffer.concat([head, json, seg, comp]);
+    }
+    at += rowBytes;
+  }
+  return out;
 }

@@ -1,6 +1,6 @@
 import './server/server.ts';
 
-const vite = Bun.spawn(['bunx', 'vite'], {
+const vite = Bun.spawn(['bunx', 'vite', '--host'], {
   cwd: import.meta.dir,
   stdout: 'inherit',
   stderr: 'inherit',

@@ -95,7 +95,6 @@ describe('kinematics', () => {
 describe('decoder contract', () => {
   test('identity', () => {
     expect(cartPoleDecoder.envId).toBe('CartPole-cont-v0');
-    expect(cartPoleDecoder.needsReplay).toBe(false);
   });
 
   test('init frame is the upright zero state for every lane', () => {

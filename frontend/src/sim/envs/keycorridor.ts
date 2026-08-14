@@ -67,7 +67,6 @@ function state(
 
 export const keyCorridorDecoder: EnvDecoder<KeyCorridorState, KeyCorridorStatic> = {
   envId: 'KeyCorridor-cont-v0',
-  needsReplay: false,
 
   initStatic(seed: number): KeyCorridorStatic {
     return { seed, walls: keyCorridorWalls() };

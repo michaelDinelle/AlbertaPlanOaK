@@ -1188,58 +1188,11 @@ inline void hc_mj_step(thread HCState &s) {
     for (int v = 0; v < 9; v++) s.qacc_warmstart[v] = w.qacc[v];
 }
 
-kernel void oak_physics_probe(device const float *in [[buffer(0)]],
-                              device float *out [[buffer(1)]],
-                              constant uint &count [[buffer(2)]],
-                              uint gid [[thread_position_in_grid]]) {
-    if (gid >= count) return;
-    device const float *p = in + gid*33;
-    HCState s;
-    for (int i = 0; i < 9; i++) s.qpos[i] = p[i];
-    for (int i = 0; i < 9; i++) s.qvel[i] = p[9 + i];
-    for (int i = 0; i < 6; i++) s.ctrl[i] = p[18 + i];
-    for (int i = 0; i < 9; i++) s.qacc_warmstart[i] = p[24 + i];
-    hc_mj_step(s);
-    device float *o = out + gid*18;
-    for (int i = 0; i < 9; i++) o[i] = s.qpos[i];
-    for (int i = 0; i < 9; i++) o[9 + i] = s.qvel[i];
-}
-
-kernel void oak_physics_probe_debug(device const float *in [[buffer(0)]],
-                                    device float *out [[buffer(1)]],
-                                    constant uint &count [[buffer(2)]],
-                                    uint gid [[thread_position_in_grid]]) {
-    if (gid >= count) return;
-    device const float *p = in + gid*33;
-    HCState s;
-    for (int i = 0; i < 9; i++) s.qpos[i] = p[i];
-    for (int i = 0; i < 9; i++) s.qvel[i] = p[9 + i];
-    for (int i = 0; i < 6; i++) s.ctrl[i] = p[18 + i];
-    for (int i = 0; i < 9; i++) s.qacc_warmstart[i] = p[24 + i];
-    HCWork w;
-    hc_forward(s, w);
-    device float *o = out + gid*904;
-    for (int i = 0; i < 904; i++) o[i] = 0.0f;
-    for (int i = 0; i < 9; i++) o[i] = w.qacc_smooth[i];
-    for (int i = 0; i < 9; i++) o[9 + i] = w.qacc[i];
-    for (int i = 0; i < 9; i++) o[18 + i] = w.qfrc_constraint[i];
-    for (int i = 0; i < 9; i++) o[27 + i] = w.qfrc_smooth[i];
-    for (int i = 0; i < 9; i++) o[36 + i] = w.qfrc_bias[i];
-    o[45] = (float)w.ncon;
-    o[46] = (float)w.nefc;
-    for (int i = 0; i < w.ncon; i++) o[48 + i] = w.con_dist[i];
-    for (int i = 0; i < w.nefc; i++) o[64 + i] = w.efc_pos[i];
-    for (int i = 0; i < w.nefc; i++) o[134 + i] = w.efc_D[i];
-    for (int i = 0; i < w.nefc; i++) o[204 + i] = w.efc_aref[i];
-    for (int i = 0; i < 9*w.nefc; i++) o[274 + i] = w.efc_J[i];
-}
-
 constant uint HC_PHILOX_M0 = 0xD2511F53u;
 constant uint HC_PHILOX_M1 = 0xCD9E8D57u;
 constant uint HC_PHILOX_W0 = 0x9E3779B9u;
 constant uint HC_PHILOX_W1 = 0xBB67AE85u;
 constant uint HC_RNG_STREAM_RESET = 0u;
-constant uint HC_RNG_STREAM_CTRL = 1u;
 
 #pragma METAL fp math_mode(safe)
 inline uint4 hc_philox4x32(uint2 key, uint4 ctr) {
@@ -1282,14 +1235,6 @@ inline void hc_rng_reset_noise(uint laneSeed, uint resetIdx,
     for (int i = 0; i < 9; i++) qvelNoise[i] = HC_RESET_NOISE * z[i];
 }
 
-inline void hc_rng_ctrl(uint laneSeed, uint stepIdx, thread float *ctrl) {
-    uint2 key = uint2(laneSeed, HC_RNG_STREAM_CTRL);
-    uint4 r0 = hc_philox4x32(key, uint4(stepIdx, 0u, 0u, 0u));
-    uint4 r1 = hc_philox4x32(key, uint4(stepIdx, 1u, 0u, 0u));
-    uint raw[6] = { r0.x, r0.y, r0.z, r0.w, r1.x, r1.y };
-    for (int u = 0; u < 6; u++) ctrl[u] = hc_uniform(raw[u], -1.0f, 1.0f);
-}
-
 inline void hc_env_reset(thread HCState &s, uint laneSeed,
                          thread uint &elapsed, thread uint &resets) {
     hc_resetData(s);
@@ -1301,134 +1246,6 @@ inline void hc_env_reset(thread HCState &s, uint laneSeed,
     }
     resets++;
     elapsed = 0u;
-}
-
-inline float hc_env_step(thread HCState &s, thread uint &elapsed, thread uint &resets,
-                         uint laneSeed, uint episodeLen,
-                         thread const float *ctrl, thread float *obs, thread uint &doneOut) {
-    float reward;
-    if (episodeLen != 0u && elapsed >= episodeLen) {
-        hc_env_reset(s, laneSeed, elapsed, resets);
-        reward = 0.0f;
-        doneOut = 0u;
-    } else {
-        float xBefore = s.qpos[0];
-        for (int u = 0; u < 6; u++) s.ctrl[u] = ctrl[u];
-        for (int k = 0; k < HC_FRAME_SKIP; k++) hc_mj_step(s);
-        float xv = (s.qpos[0] - xBefore) / (float(HC_FRAME_SKIP) * HC_TIMESTEP);
-        float ctrlCost = 0.0f;
-        for (int u = 0; u < 6; u++) ctrlCost += 0.1f * ctrl[u] * ctrl[u];
-        reward = xv * 1.0f - ctrlCost;
-        elapsed++;
-        doneOut = (episodeLen != 0u && elapsed >= episodeLen) ? 1u : 0u;
-    }
-    for (int i = 1; i < 9; i++) obs[i - 1] = s.qpos[i];
-    for (int i = 0; i < 9; i++) obs[8 + i] = s.qvel[i];
-    return reward;
-}
-
-inline float2 hc_energy(thread const HCState &s) {
-    HCWork w;
-    hc_kinematics(s, w);
-    hc_comPos(w);
-    hc_makeM(w);
-    float pot = 0.0f;
-    for (int i = 1; i < 8; i++)
-        pot += HC_BODY_MASS[i] * (-HC_GRAVITY_Z) * w.xipos[3*i + 2];
-    for (int j = 0; j < 9; j++) {
-        float dq = s.qpos[j] - HC_QPOS_SPRING[j];
-        pot += 0.5f * HC_JNT_STIFFNESS[j] * dq * dq;
-    }
-    float qv[9], Mv[9];
-    for (int v = 0; v < 9; v++) qv[v] = s.qvel[v];
-    hc_mulSymVecSparse(w.M, qv, Mv);
-    float kin = 0.5f * hc_dot9(qv, Mv);
-    return float2(pot, kin);
-}
-
-struct HCEnvLane {
-    HCState s;
-    uint elapsed;
-    uint resets;
-};
-
-kernel void oak_physics_rollout(device const uint *hdr        [[buffer(0)]],
-                                device const float *init      [[buffer(1)]],
-                                device const float *ctrlSeq   [[buffer(2)]],
-                                device float *out             [[buffer(3)]],
-                                device HCEnvLane *lanes       [[buffer(4)]],
-                                constant uint2 &chunk         [[buffer(5)]],
-                                uint gid [[thread_position_in_grid]]) {
-    uint laneCount = hdr[0], steps = hdr[1], mode = hdr[2];
-    uint seedBase = hdr[3], episodeLen = hdr[4];
-    if (gid >= laneCount) return;
-    uint laneSeed = seedBase + gid;
-    HCState s;
-    uint elapsed, resets;
-    if (chunk.x == 0u) {
-        if (mode == 0u || mode == 3u) {
-            hc_resetData(s);
-            device const float *p = init + gid*18;
-            for (int i = 0; i < 9; i++) s.qpos[i] = p[i];
-            for (int i = 0; i < 9; i++) s.qvel[i] = p[9 + i];
-            elapsed = 0u;
-            resets = 0u;
-        } else {
-            elapsed = 0u;
-            resets = 0u;
-            hc_env_reset(s, laneSeed, elapsed, resets);
-        }
-    } else {
-        s = lanes[gid].s;
-        elapsed = lanes[gid].elapsed;
-        resets = lanes[gid].resets;
-    }
-    if (mode == 4u) {
-        device float *o = out + (ulong)gid*24;
-        for (int i = 0; i < 9; i++) o[i] = s.qpos[i];
-        for (int i = 0; i < 9; i++) o[9 + i] = s.qvel[i];
-        float c[6];
-        hc_rng_ctrl(laneSeed, 0u, c);
-        for (int u = 0; u < 6; u++) o[18 + u] = c[u];
-        return;
-    }
-    uint tEnd = min(chunk.x + chunk.y, steps);
-    for (uint t = chunk.x; t < tEnd; t++) {
-        if (mode == 3u) {
-            float2 en = hc_energy(s);
-            device float *o = out + ((ulong)gid*steps + t)*2;
-            o[0] = en.x;
-            o[1] = en.y;
-            hc_mj_step(s);
-            continue;
-        }
-        float ctrl[6];
-        if (mode == 0u) {
-            device const float *c = ctrlSeq + ((ulong)gid*steps + t)*6;
-            for (int u = 0; u < 6; u++) ctrl[u] = c[u];
-        } else {
-            hc_rng_ctrl(laneSeed, t, ctrl);
-        }
-        float obs[17];
-        uint done;
-        float reward = hc_env_step(s, elapsed, resets, laneSeed, episodeLen, ctrl, obs, done);
-        if (mode != 2u) {
-            device float *o = out + ((ulong)gid*steps + t)*37;
-            for (int i = 0; i < 17; i++) o[i] = obs[i];
-            o[17] = reward;
-            o[18] = float(done);
-            for (int i = 0; i < 9; i++) o[19 + i] = s.qpos[i];
-            for (int i = 0; i < 9; i++) o[28 + i] = s.qvel[i];
-        }
-    }
-    if (mode == 2u && tEnd == steps) {
-        device float *o = out + (ulong)gid*18;
-        for (int i = 0; i < 9; i++) o[i] = s.qpos[i];
-        for (int i = 0; i < 9; i++) o[9 + i] = s.qvel[i];
-    }
-    lanes[gid].s = s;
-    lanes[gid].elapsed = elapsed;
-    lanes[gid].resets = resets;
 }
 
 #endif

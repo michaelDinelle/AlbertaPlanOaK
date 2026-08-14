@@ -1,101 +1,45 @@
-
 import { api } from './api';
-import type {
-  AggregateRow,
-  FleetColumnar,
-  RolesResponse,
-  RunDetail,
-  RunIndexEntry,
-  RunMeta,
-  SummaryPolicyResult,
-} from '@shared/types';
+import { fetchTape, fieldIndex, tapeValue, type Tape } from './tape';
+import type { RunDetail, RunIndexEntry, RunMeta } from '@shared/types';
+import { DEATH_DETECTORS } from '@shared/types';
 import { ENVS, ENV_IDS, isEnvId, type EnvId } from '@shared/envs';
 
+const CACHE_TTL_MS = 60_000;
 
-export interface Store<T> {
-  get(): T;
-  set(next: T | ((prev: T) => T)): void;
-  subscribe(listener: (value: T) => void): () => void;
-}
-
-export function createStore<T>(initial: T): Store<T> {
-  let value = initial;
-  const listeners = new Set<(value: T) => void>();
-  return {
-    get: () => value,
-    set(next) {
-      const resolved = typeof next === 'function' ? (next as (prev: T) => T)(value) : next;
-      if (Object.is(resolved, value)) return;
-      value = resolved;
-      for (const listener of [...listeners]) listener(value);
-    },
-    subscribe(listener) {
-      listeners.add(listener);
-      return () => {
-        listeners.delete(listener);
-      };
-    },
-  };
-}
-
-
-export type AsyncStatus = 'idle' | 'loading' | 'ready' | 'error';
-
-export interface AsyncState<T> {
-  status: AsyncStatus;
-  data: T | null;
-  error: string | null;
-  fetchedAt: number;
-}
-
-export interface Resource<T> {
-  store: Store<AsyncState<T>>;
+export interface CachedFeed<T> {
+  snapshot(): T | null;
   load(force?: boolean): Promise<T>;
-  invalidate(): void;
 }
 
-export function createResource<T>(
-  loader: () => Promise<T>,
-  ttlMs: number,
-  now: () => number = Date.now,
-): Resource<T> {
-  const store = createStore<AsyncState<T>>({ status: 'idle', data: null, error: null, fetchedAt: 0 });
+function cachedFeed<T>(loader: () => Promise<T>): CachedFeed<T> {
+  let data: T | null = null;
+  let fetchedAt = 0;
   let inflight: Promise<T> | null = null;
-
   return {
-    store,
+    snapshot: () => data,
     load(force = false) {
-      const state = store.get();
-      if (!force && state.status === 'ready' && state.data !== null && now() - state.fetchedAt < ttlMs) {
-        return Promise.resolve(state.data);
+      if (!force && data !== null && Date.now() - fetchedAt < CACHE_TTL_MS) {
+        return Promise.resolve(data);
       }
       if (inflight) return inflight;
-      store.set({ ...store.get(), status: 'loading', error: null });
       inflight = loader().then(
-        (data) => {
+        (value) => {
           inflight = null;
-          store.set({ status: 'ready', data, error: null, fetchedAt: now() });
-          return data;
+          data = value;
+          fetchedAt = Date.now();
+          return value;
         },
         (error: unknown) => {
           inflight = null;
-          const message = error instanceof Error ? error.message : String(error);
-          store.set({ status: 'error', data: store.get().data, error: message, fetchedAt: now() });
           throw error;
         },
       );
       return inflight;
     },
-    invalidate() {
-      store.set({ ...store.get(), status: 'idle', fetchedAt: 0 });
-    },
   };
 }
 
-export const RUN_INDEX_TTL_MS = 60_000;
-
-export const runIndex: Resource<RunIndexEntry[]> = createResource(() => api.runs(), RUN_INDEX_TTL_MS);
-export const roles: Resource<RolesResponse> = createResource(() => api.roles(), RUN_INDEX_TTL_MS);
+export const runIndex: CachedFeed<RunIndexEntry[]> = cachedFeed(() => api.runs());
 
 const detailCache = new Map<string, Promise<RunDetail>>();
 
@@ -111,6 +55,44 @@ export function loadRunDetail(id: string, force = false): Promise<RunDetail> {
   return promise;
 }
 
+const tapeCache = new Map<string, { tape: Tape | null; inflight: Promise<Tape> | null }>();
+
+export function loadTape(id: string, signal?: AbortSignal): Promise<Tape> {
+  let slot = tapeCache.get(id);
+  if (slot === undefined) {
+    slot = { tape: null, inflight: null };
+    tapeCache.set(id, slot);
+  }
+  if (slot.inflight !== null) return slot.inflight;
+  if (slot.tape !== null) return Promise.resolve(slot.tape);
+  return refreshTape(id, signal);
+}
+
+export function refreshTape(id: string, signal?: AbortSignal): Promise<Tape> {
+  let slot = tapeCache.get(id);
+  if (slot === undefined) {
+    slot = { tape: null, inflight: null };
+    tapeCache.set(id, slot);
+  }
+  if (slot.inflight !== null) return slot.inflight;
+  const s = slot;
+  s.inflight = fetchTape(id, s.tape, signal).then(
+    (tape) => {
+      s.tape = tape;
+      s.inflight = null;
+      return tape;
+    },
+    (error: unknown) => {
+      s.inflight = null;
+      throw error;
+    },
+  );
+  return s.inflight;
+}
+
+export function tapeSnapshot(id: string): Tape | null {
+  return tapeCache.get(id)?.tape ?? null;
+}
 
 export function formatRate(value: number | null | undefined, sig = 3): string {
   if (value === null || value === undefined || !Number.isFinite(value)) return '—';
@@ -151,17 +133,6 @@ export function formatPercent(fraction: number | null | undefined, decimals = 1)
   return `${(fraction * 100).toFixed(decimals)}%`;
 }
 
-export function formatWall(seconds: number | null | undefined): string {
-  if (seconds === null || seconds === undefined || !Number.isFinite(seconds) || seconds < 0) return '—';
-  const total = Math.round(seconds);
-  const h = Math.floor(total / 3600);
-  const m = Math.floor((total % 3600) / 60);
-  const s = total % 60;
-  if (h > 0) return `${h}h ${String(m).padStart(2, '0')}m`;
-  if (m > 0) return `${m}m ${String(s).padStart(2, '0')}s`;
-  return `${s}s`;
-}
-
 export function formatAgo(iso: string | null | undefined, now: number = Date.now()): string {
   if (!iso) return 'undated';
   const then = Date.parse(iso);
@@ -179,74 +150,18 @@ export function formatAgo(iso: string | null | undefined, now: number = Date.now
   return `${Math.round(days / 365.25)}y ago`;
 }
 
-
-export function primaryResult(summary: RunDetail['summary'], policy?: string): SummaryPolicyResult | null {
-  const results = summary?.results;
-  if (!results || results.length === 0) return null;
-  if (policy) {
-    const match = results.find((r) => r.policy === policy);
-    if (match) return match;
-  }
-  return results[0] ?? null;
-}
-
-export function envSliceResult(
-  summary: RunDetail['summary'],
-  envId: string,
-  policy?: string,
-): SummaryPolicyResult | null {
-  const slice = summary?.envSlices?.[envId];
-  if (!slice || slice.length === 0) return null;
-  if (policy) {
-    const match = slice.find((entry) => entry.policy === policy);
-    if (match) return match;
-  }
-  return slice[0] ?? null;
-}
-
-export interface PolicyView {
-  policy: string;
-  result: SummaryPolicyResult | null;
-  maxStep: number;
-  complete: boolean;
-}
-
-export function policyView(
-  detail: Pick<RunDetail, 'summary' | 'aggregate' | 'meta'>,
-  policy: string,
-): PolicyView {
-  const result = primaryResult(detail.summary, policy);
-  let policyStep = 0;
-  let anyStep = 0;
-  for (const row of detail.aggregate) {
-    if (row.step > anyStep) anyStep = row.step;
-    if (row.policy === policy && row.step > policyStep) policyStep = row.step;
-  }
-  const declared = typeof result?.['maxStep'] === 'number' && Number.isFinite(result['maxStep'])
-    ? (result['maxStep'] as number)
-    : null;
-  const maxStep = declared ?? (policyStep > 0 ? policyStep : anyStep);
-  const horizon = detail.meta.steps;
-  return { policy, result, maxStep, complete: result?.complete !== false && maxStep >= horizon };
-}
-
 export interface EnvShare {
   envId: EnvId;
   lanes: number;
   fraction: number;
 }
 
-export function envShares(meta: Pick<RunMeta, 'envId' | 'batch' | 'envSchedule'>): EnvShare[] {
+export function envShares(meta: Pick<RunMeta, 'envSchedule'>): EnvShare[] {
   const counts = new Map<EnvId, number>();
-  const schedule = meta.envSchedule;
-  if (schedule && schedule.length > 0) {
-    for (const entry of schedule) {
-      if (!isEnvId(entry.envId)) continue;
-      const lanes = Math.max(0, entry.seedEnd - entry.seedStart + 1);
-      counts.set(entry.envId, (counts.get(entry.envId) ?? 0) + lanes);
-    }
-  } else if (isEnvId(meta.envId)) {
-    counts.set(meta.envId, meta.batch);
+  for (const entry of meta.envSchedule) {
+    if (!isEnvId(entry.envId)) continue;
+    const lanes = Math.max(0, entry.seedEnd - entry.seedStart + 1);
+    counts.set(entry.envId, (counts.get(entry.envId) ?? 0) + lanes);
   }
   const total = [...counts.values()].reduce((sum, n) => sum + n, 0) || 1;
   return ENV_IDS.filter((id) => counts.has(id)).map((envId) => {
@@ -255,8 +170,27 @@ export function envShares(meta: Pick<RunMeta, 'envId' | 'batch' | 'envSchedule'>
   });
 }
 
-export function envIdsOf(entry: Pick<RunIndexEntry, 'envIds'>): EnvId[] {
-  return ENV_IDS.filter((id) => entry.envIds.includes(id));
+export interface EnvLanes {
+  lanes: number[];
+  seeds: number[];
+}
+
+export function envLanes(meta: Pick<RunMeta, 'envSchedule' | 'seeds'>, envId: string): EnvLanes {
+  const laneOfSeed = new Map<number, number>();
+  meta.seeds.forEach((seed, lane) => laneOfSeed.set(seed, lane));
+  const lanes: number[] = [];
+  const seeds: number[] = [];
+  for (const entry of meta.envSchedule) {
+    if (entry.envId !== envId) continue;
+    for (let seed = entry.seedStart; seed <= entry.seedEnd; seed++) {
+      const lane = laneOfSeed.get(seed);
+      if (lane !== undefined) {
+        lanes.push(lane);
+        seeds.push(seed);
+      }
+    }
+  }
+  return { lanes, seeds };
 }
 
 export function envName(envId: string): string {
@@ -267,49 +201,10 @@ export function envSlug(envId: string): string {
   return isEnvId(envId) ? ENVS[envId].slug : envId.toLowerCase();
 }
 
-
-export interface GalleryFilter {
-  search: string;
-  envId: string | null;
-  completeOnly: boolean;
-  recordingsOnly: boolean;
-  inFlightOnly: boolean;
-  rolesOnly: boolean;
-}
-
-export const EMPTY_FILTER: GalleryFilter = {
-  search: '',
-  envId: null,
-  completeOnly: false,
-  recordingsOnly: false,
-  inFlightOnly: false,
-  rolesOnly: false,
-};
-
-export function matchesFilter(entry: RunIndexEntry, filter: GalleryFilter): boolean {
-  if (filter.completeOnly && !entry.complete) return false;
-  if (filter.recordingsOnly && !entry.hasRecordings) return false;
-  if (filter.inFlightOnly && !entry.inFlight) return false;
-  if (filter.rolesOnly && entry.role === null) return false;
-  if (filter.envId && !entry.envIds.includes(filter.envId)) return false;
-  const search = filter.search.trim().toLowerCase();
-  if (search) {
-    const haystack = `${entry.id} ${entry.ablationLabel} ${entry.envIds.join(' ')} ${entry.role ?? ''}`.toLowerCase();
-    for (const term of search.split(/\s+/)) {
-      if (!haystack.includes(term)) return false;
-    }
-  }
-  return true;
-}
-
-const ROLE_RANK: Record<string, number> = { bestKernel: 0, candidate: 1, parent: 2 };
-
 export function sortRuns(entries: readonly RunIndexEntry[]): RunIndexEntry[] {
   return [...entries].sort((a, b) => {
     if (a.inFlight !== b.inFlight) return a.inFlight ? -1 : 1;
-    const ra = a.role ? ROLE_RANK[a.role] ?? 9 : 9;
-    const rb = b.role ? ROLE_RANK[b.role] ?? 9 : 9;
-    if (ra !== rb) return ra - rb;
+    if (a.role !== b.role) return a.role === 'keeper' ? -1 : 1;
     const ta = a.startedAt ? Date.parse(a.startedAt) : 0;
     const tb = b.startedAt ? Date.parse(b.startedAt) : 0;
     if (tb !== ta) return tb - ta;
@@ -317,205 +212,226 @@ export function sortRuns(entries: readonly RunIndexEntry[]): RunIndexEntry[] {
   });
 }
 
-export function envIdsInIndex(entries: readonly RunIndexEntry[]): EnvId[] {
-  const seen = new Set<string>();
-  for (const entry of entries) for (const id of entry.envIds) seen.add(id);
-  return ENV_IDS.filter((id) => seen.has(id));
+export function percentileSorted(sorted: readonly number[], q: number): number {
+  const n = sorted.length;
+  if (n === 0) return Number.NaN;
+  const pos = (q / 100) * (n - 1);
+  const lo = Math.floor(pos);
+  const hi = Math.ceil(pos);
+  const a = sorted[lo];
+  const b = sorted[hi];
+  if (a === undefined || b === undefined) return Number.NaN;
+  return lo === hi ? a : a + (b - a) * (pos - lo);
 }
 
-
-export interface AggregateSeries {
-  steps: number[];
-  p10: number[];
-  p50: number[];
-  p90: number[];
-  alive: number[];
-  dead: number[];
-  sps: number[];
-  positivity: number[];
-  bestLane: number[];
-  wallSeconds: number[];
-}
-
-const EMPTY_AGGREGATE: AggregateSeries = {
-  steps: [], p10: [], p50: [], p90: [], alive: [], dead: [], sps: [], positivity: [], bestLane: [], wallSeconds: [],
-};
-
-export function aggregateSeries(rows: readonly AggregateRow[], policy?: string): AggregateSeries {
-  const filtered = policy ? rows.filter((r) => r.policy === policy) : rows;
-  if (filtered.length === 0) return { ...EMPTY_AGGREGATE };
-  const byStep = new Map<number, AggregateRow>();
-  for (const row of filtered) {
-    const existing = byStep.get(row.step);
-    if (!existing || row.kind === 'final') byStep.set(row.step, row);
+export function iqmSorted(sorted: readonly number[]): number {
+  const n = sorted.length;
+  if (n === 0) return Number.NaN;
+  const drop = Math.floor(n / 4);
+  const lo = drop;
+  const hi = n - drop;
+  if (hi <= lo) {
+    let all = 0;
+    for (const v of sorted) all += v;
+    return all / n;
   }
-  const ordered = [...byStep.values()].sort((a, b) => a.step - b.step);
-  const out: AggregateSeries = {
-    steps: [], p10: [], p50: [], p90: [], alive: [], dead: [], sps: [], positivity: [], bestLane: [], wallSeconds: [],
-  };
-  for (const row of ordered) {
-    out.steps.push(row.step);
-    out.p10.push(row.deliveredRateP10);
-    out.p50.push(row.deliveredRateP50);
-    out.p90.push(row.deliveredRateP90);
-    out.alive.push(row.alive);
-    out.dead.push(row.dead);
-    out.sps.push(row.aggStepsPerSecond);
-    out.positivity.push(row.positiveRateFraction);
-    out.bestLane.push(row.bestLaneDeliveredRate);
-    out.wallSeconds.push(row.wallSeconds);
+  let sum = 0;
+  for (let i = lo; i < hi; i++) sum += sorted[i] ?? 0;
+  return sum / (hi - lo);
+}
+
+export function iqm(values: readonly number[]): number {
+  return iqmSorted([...values].sort((a, b) => a - b));
+}
+
+export interface LaneDeath {
+  step: number;
+  detector: string;
+}
+
+export function laneDeath(tape: Tape, lane: number): LaneDeath | null {
+  if (tape.rows === 0) return null;
+  const step = tapeValue(tape, fieldIndex(tape, 'deathStep'), tape.rows - 1, lane);
+  if (!Number.isFinite(step)) return null;
+  const code = tapeValue(tape, fieldIndex(tape, 'deathDetector'), tape.rows - 1, lane);
+  return { step, detector: DEATH_DETECTORS[code] ?? 'envError' };
+}
+
+export function lastFiniteReward(tape: Tape, lane: number): { value: number; step: number } | null {
+  const f = fieldIndex(tape, 'rewardSum');
+  for (let r = tape.rows - 1; r >= 0; r--) {
+    const v = tapeValue(tape, f, r, lane);
+    if (Number.isFinite(v)) return { value: v, step: tape.stepEnd[r] ?? 0 };
+  }
+  return null;
+}
+
+export function deliveredRate(tape: Tape, lane: number): number | null {
+  const last = lastFiniteReward(tape, lane);
+  if (last === null || last.step <= 0) return null;
+  return last.value / last.step;
+}
+
+export interface BinnedRates {
+  x: number[];
+  edges: number[];
+  perLane: (number | null)[][];
+  iqm: (number | null)[];
+  p10: (number | null)[];
+  p90: (number | null)[];
+}
+
+export function binEdgeRows(tape: Tape, bins: number): number[] {
+  const rows = tape.rows;
+  if (rows === 0) return [];
+  const want = Math.max(1, Math.min(bins, rows));
+  const out: number[] = [];
+  let prev = -1;
+  for (let b = 1; b <= want; b++) {
+    const r = Math.round((b * rows) / want) - 1;
+    if (r > prev) {
+      out.push(r);
+      prev = r;
+    }
   }
   return out;
 }
 
-export function policiesIn(rows: readonly AggregateRow[]): string[] {
-  const seen = new Set<string>();
-  for (const row of rows) seen.add(row.policy);
-  return [...seen].sort();
-}
-
-export function aggregateKey(row: Pick<AggregateRow, 'policy' | 'step'>): string {
-  return `${row.policy}:${row.step}`;
-}
-
-export function absorbAggregateRow(buffer: Map<string, AggregateRow>, row: AggregateRow): void {
-  const key = aggregateKey(row);
-  const existing = buffer.get(key);
-  if (!existing || row.kind === 'final') buffer.set(key, row);
-}
-
-
-export function kmCurve(
-  survival: Record<string, number> | undefined,
-  horizon: number,
-): { steps: number[]; fraction: number[] } {
-  const steps = [0];
-  const fraction = [1];
-  const entries = Object.entries(survival ?? {})
-    .map(([step, value]) => [Number(step), value] as const)
-    .filter(([step, value]) => Number.isFinite(step) && Number.isFinite(value))
-    .sort((a, b) => a[0] - b[0]);
-  for (const [step, value] of entries) {
-    steps.push(step);
-    fraction.push(value);
-  }
-  const last = fraction[fraction.length - 1] ?? 1;
-  if (horizon > (steps[steps.length - 1] ?? 0)) {
-    steps.push(horizon);
-    fraction.push(last);
-  }
-  return { steps, fraction };
-}
-
-
-export interface LaneSeries {
-  lane: number;
-  seed: number;
-  envId: string;
-  policy: string;
-  values: (number | null)[];
-  last: number | null;
-}
-
-export function pickField(columnar: FleetColumnar, candidates: readonly string[]): string | null {
-  const keys = Object.keys(columnar.series ?? {});
-  for (const candidate of candidates) if (keys.includes(candidate)) return candidate;
-  const suffix = candidates.map((c) => c.split('.').pop() ?? c);
-  for (const key of keys) if (suffix.includes(key.split('.').pop() ?? key)) return key;
-  return keys[0] ?? null;
-}
-
-export function laneSeries(columnar: FleetColumnar, field: string, envId?: string): LaneSeries[] {
-  const rows = columnar.series?.[field];
-  if (!rows) return [];
-  const out: LaneSeries[] = [];
-  for (let i = 0; i < columnar.lanes.length; i++) {
-    const lane = columnar.lanes[i];
-    if (!lane) continue;
-    if (envId && lane.envId !== envId) continue;
-    const values = rows[i] ?? [];
-    let last: number | null = null;
-    for (let j = values.length - 1; j >= 0; j--) {
-      const value = values[j];
-      if (value !== null && value !== undefined && Number.isFinite(value)) {
-        last = value;
-        break;
-      }
-    }
-    out.push({ lane: lane.lane, seed: lane.seed, envId: lane.envId, policy: lane.policy, values, last });
-  }
-  return out;
-}
-
-export function windowMidpoints(steps: readonly number[]): number[] {
-  return steps.map((step, i) => (i === 0 ? step / 2 : ((steps[i - 1] ?? 0) + step) / 2));
-}
-
-export function windowRates(
-  steps: readonly number[],
-  values: readonly (number | null)[],
-): (number | null)[] {
-  const out: (number | null)[] = [];
-  for (let i = 0; i < steps.length; i++) {
-    const step = steps[i];
-    const value = values[i];
-    if (step === undefined || value === null || value === undefined || !Number.isFinite(value)) {
-      out.push(null);
-      continue;
-    }
-    const prevStep = i === 0 ? 0 : steps[i - 1] ?? 0;
-    const prevValue = i === 0 ? 0 : values[i - 1];
-    if (prevValue === null || prevValue === undefined || !Number.isFinite(prevValue)) {
-      out.push(null);
-      continue;
-    }
+export function binnedRates(tape: Tape, lanes: readonly number[], bins: number): BinnedRates {
+  const edgeRows = binEdgeRows(tape, bins);
+  const f = fieldIndex(tape, 'rewardSum');
+  const x: number[] = [];
+  const edges: number[] = [0];
+  const perLane: (number | null)[][] = lanes.map(() => []);
+  const iqmOut: (number | null)[] = [];
+  const p10: (number | null)[] = [];
+  const p90: (number | null)[] = [];
+  let prevStep = 0;
+  let prevRow = -1;
+  const scratch: number[] = [];
+  for (const r of edgeRows) {
+    const step = tape.stepEnd[r] ?? 0;
     const span = step - prevStep;
-    out.push(span > 0 ? (value - prevValue) / span : null);
-  }
-  return out;
-}
-
-export function toWindowRates(steps: readonly number[], series: readonly LaneSeries[]): LaneSeries[] {
-  return series.map((entry) => {
-    const values = windowRates(steps, entry.values);
-    let last: number | null = null;
-    for (let i = values.length - 1; i >= 0; i--) {
-      const v = values[i];
-      if (v !== null && v !== undefined && Number.isFinite(v)) {
-        last = v;
-        break;
+    scratch.length = 0;
+    for (let li = 0; li < lanes.length; li++) {
+      const lane = lanes[li] ?? 0;
+      const s1 = tapeValue(tape, f, r, lane);
+      const s0 = prevRow < 0 ? 0 : tapeValue(tape, f, prevRow, lane);
+      const dst = perLane[li];
+      if (dst === undefined) continue;
+      if (span > 0 && Number.isFinite(s1) && Number.isFinite(s0)) {
+        const rate = (s1 - s0) / span;
+        dst.push(rate);
+        scratch.push(rate);
+      } else {
+        dst.push(null);
       }
     }
-    return { ...entry, values, last };
-  });
-}
-
-export function capLanes(series: readonly LaneSeries[], cap: number): LaneSeries[] {
-  if (series.length <= cap) return [...series];
-  const ranked = [...series].sort((a, b) => (a.last ?? -Infinity) - (b.last ?? -Infinity));
-  const keep = new Set<number>([0, ranked.length - 1, Math.floor(ranked.length / 2)]);
-  const stride = (ranked.length - 1) / Math.max(1, cap - keep.size);
-  for (let i = 0; keep.size < cap && i < ranked.length; i++) {
-    keep.add(Math.min(ranked.length - 1, Math.round(i * stride)));
+    scratch.sort((a, b) => a - b);
+    iqmOut.push(scratch.length > 0 ? iqmSorted(scratch) : null);
+    p10.push(scratch.length > 0 ? percentileSorted(scratch, 10) : null);
+    p90.push(scratch.length > 0 ? percentileSorted(scratch, 90) : null);
+    x.push((prevStep + step) / 2);
+    edges.push(step);
+    prevStep = step;
+    prevRow = r;
   }
-  const picked = [...keep].sort((a, b) => a - b).map((index) => ranked[index]);
-  return picked.filter((entry): entry is LaneSeries => entry !== undefined);
+  return { x, edges, perLane, iqm: iqmOut, p10, p90 };
 }
 
-export function rankLanes(series: readonly LaneSeries[]): LaneSeries[] {
-  return [...series].sort((a, b) => (b.last ?? -Infinity) - (a.last ?? -Infinity));
+export interface RetentionResult {
+  peak: number;
+  end: number;
+  retention: number;
 }
 
-export type SortDirection = 'asc' | 'desc';
+export function laneRetention(tape: Tape, lane: number, horizon: number): RetentionResult | null {
+  const f = fieldIndex(tape, 'rewardSum');
+  const win = Math.max(Math.floor(horizon / 5), 1);
+  let peak = -Infinity;
+  let end: number | null = null;
+  let j = 0;
+  for (let i = 0; i < tape.rows; i++) {
+    const endI = tape.stepEnd[i] ?? 0;
+    while (j < tape.rows && (tape.stepEnd[j] ?? 0) <= endI - win) j++;
+    const jj = j - 1;
+    if (jj < 0) continue;
+    const si = tapeValue(tape, f, i, lane);
+    const sj = tapeValue(tape, f, jj, lane);
+    const span = endI - (tape.stepEnd[jj] ?? 0);
+    if (!Number.isFinite(si) || !Number.isFinite(sj) || span <= 0) continue;
+    const rate = (si - sj) / span;
+    if (rate > peak) peak = rate;
+    end = rate;
+  }
+  if (end === null || !Number.isFinite(peak) || peak <= 0) return null;
+  return { peak, end, retention: end / peak };
+}
 
-export function compareValues(a: unknown, b: unknown, direction: SortDirection): number {
-  const nullA = a === null || a === undefined || (typeof a === 'number' && !Number.isFinite(a));
-  const nullB = b === null || b === undefined || (typeof b === 'number' && !Number.isFinite(b));
-  if (nullA && nullB) return 0;
-  if (nullA) return 1;
-  if (nullB) return -1;
-  let result: number;
-  if (typeof a === 'number' && typeof b === 'number') result = a - b;
-  else result = String(a).localeCompare(String(b), 'en', { numeric: true });
-  return direction === 'asc' ? result : -result;
+export interface ThroughputSeries {
+  x: number[];
+  stepsPerSecond: (number | null)[];
+}
+
+export function throughputSeries(tape: Tape, bins: number): ThroughputSeries {
+  const measured: number[] = [];
+  for (let r = 0; r < tape.rows; r++) {
+    if (Number.isFinite(tape.wallSeconds[r])) measured.push(r);
+  }
+  const want = Math.max(1, Math.min(bins, measured.length));
+  const picked: number[] = [];
+  let prev = -1;
+  for (let b = 1; b <= want; b++) {
+    const i = Math.round((b * measured.length) / want) - 1;
+    const r = measured[i] ?? 0;
+    if (r > prev) {
+      picked.push(r);
+      prev = r;
+    }
+  }
+  const x: number[] = [];
+  const out: (number | null)[] = [];
+  let prevStep = 0;
+  let prevWall = 0;
+  for (const r of picked) {
+    const step = tape.stepEnd[r] ?? 0;
+    const wall = tape.wallSeconds[r] ?? NaN;
+    const dWall = wall - prevWall;
+    const dStep = step - prevStep;
+    x.push((prevStep + step) / 2);
+    out.push(dWall > 0 && dStep > 0 ? (dStep * tape.laneCount) / dWall : null);
+    prevStep = step;
+    prevWall = wall;
+  }
+  return { x, stepsPerSecond: out };
+}
+
+export interface SurvivalSeries {
+  x: number[];
+  surviving: number[];
+  positive: number[];
+}
+
+export function survivalSeries(tape: Tape, lanes: readonly number[], bins: number): SurvivalSeries {
+  const edgeRows = binEdgeRows(tape, bins);
+  const f = fieldIndex(tape, 'rewardSum');
+  const deaths = lanes.map((lane) => laneDeath(tape, lane)?.step ?? Infinity);
+  const x: number[] = [];
+  const surviving: number[] = [];
+  const positive: number[] = [];
+  const n = Math.max(1, lanes.length);
+  for (const r of edgeRows) {
+    const step = tape.stepEnd[r] ?? 0;
+    let alive = 0;
+    let pos = 0;
+    for (let li = 0; li < lanes.length; li++) {
+      if ((deaths[li] ?? Infinity) > step) alive++;
+      const v = tapeValue(tape, f, r, lanes[li] ?? 0);
+      if (Number.isFinite(v) && v > 0) pos++;
+    }
+    x.push(step);
+    surviving.push(alive / n);
+    positive.push(pos / n);
+  }
+  return { x, surviving, positive };
 }

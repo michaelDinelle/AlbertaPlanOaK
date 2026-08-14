@@ -54,7 +54,6 @@ function state(r: number, c: number, lastA: number): LargeDeepSeaState {
 
 export const largeDeepSeaDecoder: EnvDecoder<LargeDeepSeaState, LargeDeepSeaStatic> = {
   envId: 'LargeDeepSea-cont-v0',
-  needsReplay: false,
 
   initStatic(seed: number): LargeDeepSeaStatic {
     const words = largeDeepSeaMaskWords(seed);

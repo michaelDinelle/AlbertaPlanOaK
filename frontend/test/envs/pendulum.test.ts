@@ -16,7 +16,8 @@ import {
   wrapPi,
 } from '@sim/envs/pendulum';
 import type { PendulumState, PendulumStatic } from '@sim/envs/pendulum';
-import { RECORD_FLOATS, parseActionsBin } from '@sim/record';
+import { RECORD_FLOATS } from '@sim/record';
+import { parseRawTrace } from '../helpers/rawTrace';
 import type { EnvFrame } from '@sim/types';
 
 interface InitDoc {
@@ -31,12 +32,7 @@ const STATIC: PendulumStatic = pendulumDecoder.initStatic(56);
 function loadTrace(): EnvFrame<PendulumState>[] {
   const buf = readFileSync(new URL('../fixtures/traces/Pendulum-cont-v0.bin', import.meta.url));
   const ab = buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength) as ArrayBuffer;
-  const raw = parseActionsBin(ab, {
-    envId: 'Pendulum-cont-v0',
-    seed: 56,
-    actDim: 6,
-    recordVersion: 3,
-  });
+  const raw = parseRawTrace(ab, { envId: 'Pendulum-cont-v0', seed: 56 });
   return decodeRecording(raw, pendulumDecoder).frames;
 }
 
@@ -163,7 +159,6 @@ describe('wrapPi', () => {
 describe('decoder contract', () => {
   test('identity', () => {
     expect(pendulumDecoder.envId).toBe('Pendulum-cont-v0');
-    expect(pendulumDecoder.needsReplay).toBe(false);
   });
 
   test('init frame is the inverted start for every lane', () => {
@@ -225,12 +220,7 @@ describe('events', () => {
   test('the whole trace is event-free', () => {
     const buf = readFileSync(new URL('../fixtures/traces/Pendulum-cont-v0.bin', import.meta.url));
     const ab = buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength) as ArrayBuffer;
-    const raw = parseActionsBin(ab, {
-      envId: 'Pendulum-cont-v0',
-      seed: 56,
-      actDim: 6,
-      recordVersion: 3,
-    });
+    const raw = parseRawTrace(ab, { envId: 'Pendulum-cont-v0', seed: 56 });
     const dec = decodeRecording(raw, pendulumDecoder);
     expect(dec.events.every((e) => e.length === 0)).toBe(true);
     expect(dec.frames.every((f) => f.done === 0)).toBe(true);

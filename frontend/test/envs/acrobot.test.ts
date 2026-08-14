@@ -101,7 +101,6 @@ describe('kinematics', () => {
 describe('decoder contract', () => {
   test('identity', () => {
     expect(acrobotDecoder.envId).toBe('Acrobot-cont-v0');
-    expect(acrobotDecoder.needsReplay).toBe(false);
   });
 
   test('init frame is the deterministic hang state for every lane', () => {

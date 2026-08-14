@@ -67,7 +67,6 @@ function state(x: number, y: number, gx: number, gy: number): POMazeState {
 
 export const poMazeDecoder: EnvDecoder<POMazeState, POMazeStatic> = {
   envId: 'POMaze-cont-v0',
-  needsReplay: false,
 
   initStatic(seed: number): POMazeStatic {
     return { seed, walls: poMazeWalls() };

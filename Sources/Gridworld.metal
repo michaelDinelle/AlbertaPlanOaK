@@ -25,24 +25,24 @@ constant uint OAK_ENV_DELAYEDCHAIN = 15u;
 constant uint OAK_ENV_COUNT       = 16u;
 constant uint OAK_GW_STREAM       = 3u;
 
-struct OakEnvSpec { uint obsDimNatural; uint actionKind; uint actionCount; };
+struct OakEnvSpec { uint nameHash; uint obsDimNatural; uint actionKind; uint actionCount; };
 constant OakEnvSpec OAK_ENV_SPECS[OAK_ENV_COUNT] = {
-    { 17u, 0u, 6u },
-    { 17u, 1u, 4u },
-    {  8u, 1u, 2u },
-    { 14u, 1u, 4u },
-    {  7u, 1u, 3u },
-    {  3u, 1u, 3u },
-    {  5u, 1u, 2u },
-    {  4u, 0u, 1u },
-    {  2u, 1u, 2u },
-    {  8u, 1u, 2u },
-    { 17u, 1u, 4u },
-    {  6u, 1u, 2u },
-    { 17u, 1u, 4u },
-    { 16u, 1u, 6u },
-    { 15u, 1u, 4u },
-    {  3u, 1u, 2u },
+    { 0x9d7fd44bu, 17u, 0u, 6u },
+    { 0x8014a187u, 17u, 1u, 4u },
+    { 0x56af5bf2u,  8u, 1u, 2u },
+    { 0xdd537ebau, 14u, 1u, 4u },
+    { 0x93531833u,  7u, 1u, 3u },
+    { 0xf5b3ddc8u,  3u, 1u, 3u },
+    { 0x41f9937du,  5u, 1u, 2u },
+    { 0x69bbbb73u,  4u, 0u, 1u },
+    { 0x7b267422u,  2u, 1u, 2u },
+    { 0xb96ddc3du,  8u, 1u, 2u },
+    { 0x4c3c2d3fu, 17u, 1u, 4u },
+    { 0xcf293fd7u,  6u, 1u, 2u },
+    { 0xd75dd5f9u, 17u, 1u, 4u },
+    { 0xbfeb2b7au, 16u, 1u, 6u },
+    { 0x0582e383u, 15u, 1u, 4u },
+    { 0x56184b96u,  3u, 1u, 2u },
 };
 
 inline bool gw_four_is_wall(int x, int y) {
@@ -760,141 +760,6 @@ inline float gw_dchain_step(thread uint *gw, uint action, thread float *obs,
     for (int i = 3; i < 17; i++) obs[i] = 0.0f;
     *doneOut = done;
     return reward;
-}
-
-kernel void oak_gridworld_probe(device const float *in  [[buffer(0)]],
-                                device float *out       [[buffer(1)]],
-                                constant uint *hdr      [[buffer(2)]],
-                                uint gid [[thread_position_in_grid]]) {
-    uint n = hdr[0], inW = hdr[1], outW = hdr[2];
-    if (gid >= n) return;
-    device const float *p = in + (ulong)gid * inW;
-    device float *o = out + (ulong)gid * outW;
-    if (inW == 8u) {
-        uint gw[6] = { uint(p[2]), uint(p[3]), uint(p[4]),
-                       uint(p[5]), uint(p[6]), uint(p[1]) };
-        float obs[17];
-        float r = gw_four_step(gw, uint(p[0]), uint(p[7]), obs);
-        o[0] = r;
-        for (int i = 0; i < 6; i++) o[1 + i] = float(gw[i]);
-        for (int i = 0; i < 17; i++) o[7 + i] = obs[i];
-    } else if (inW == 6u) {
-        uint gw[6] = { uint(p[2]), uint(p[3]), uint(p[4]),
-                       as_type<uint>(p[0]), as_type<uint>(p[1]), 0u };
-        float obs[17];
-        float r = gw_deep_step(gw, uint(p[5]), obs);
-        o[0] = r;
-        for (int i = 0; i < 3; i++) o[1 + i] = float(gw[i]);
-        for (int i = 0; i < 17; i++) o[4 + i] = obs[i];
-    } else if (inW == 11u) {
-        uint gw[10] = { uint(p[2]), uint(p[3]), uint(p[4]), uint(p[5]),
-                        uint(p[6]), uint(p[7]), uint(p[8]), uint(p[9]),
-                        uint(p[1]), 0u };
-        float obs[17];
-        uint done = 0u;
-        float r = gw_kc_step(gw, uint(p[0]), uint(p[10]), obs, &done);
-        o[0] = r;
-        for (int i = 0; i < 9; i++) o[1 + i] = float(gw[i]);
-        o[10] = float(done);
-        for (int i = 0; i < 17; i++) o[11 + i] = obs[i];
-    } else if (inW == 12u) {
-        uint gw[10] = { 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u };
-        gw[0] = uint(p[8]) | (uint(p[9]) << 4u) | (uint(p[10]) << 8u);
-        for (int i = 0; i < 8; i++) gw[1 + i] = as_type<uint>(p[i]);
-        float obs[17];
-        float r = gw_ldeep_step(gw, uint(p[11]), obs);
-        o[0] = r;
-        o[1] = float(gw[0] & 15u);
-        o[2] = float((gw[0] >> 4u) & 15u);
-        o[3] = float((gw[0] >> 8u) & 1u);
-        for (int i = 0; i < 17; i++) o[4 + i] = obs[i];
-    } else if (inW == 15u) {
-        uint gw[10] = { uint(p[2]), uint(p[3]),
-                        uint(p[4]) | (uint(p[5]) << 4u),
-                        uint(p[6]) | (uint(p[7]) << 4u),
-                        uint(p[8]) | (uint(p[9]) << 4u),
-                        uint(p[10]), uint(p[11]), uint(p[12]), uint(p[13]),
-                        uint(p[1]) };
-        float obs[17];
-        uint done = 0u;
-        float r = gw_mkc_step(gw, uint(p[0]), uint(p[14]), obs, &done);
-        o[0] = r;
-        o[1] = float(gw[0]); o[2] = float(gw[1]);
-        o[3] = float(gw[2] & 15u); o[4] = float(gw[2] >> 4u);
-        o[5] = float(gw[3] & 15u); o[6] = float(gw[3] >> 4u);
-        o[7] = float(gw[4] & 15u); o[8] = float(gw[4] >> 4u);
-        o[9] = float(gw[5]); o[10] = float(gw[6]);
-        o[11] = float(gw[7]); o[12] = float(gw[8]); o[13] = float(gw[9]);
-        o[14] = float(done);
-        for (int i = 0; i < 17; i++) o[15 + i] = obs[i];
-    } else if (inW == 7u) {
-        uint gw[10] = { uint(p[0]), uint(p[1]), uint(p[2]), uint(p[3]),
-                        0u, 0u, 0u, 0u, 0u, 0u };
-        float obs[17];
-        uint done = 0u;
-        float r = gw_mchain_step(gw, uint(p[4]), uint(p[5]), obs, &done);
-        o[0] = r;
-        o[1] = float(gw[0]); o[2] = float(gw[1]); o[3] = float(gw[2]);
-        o[4] = float(gw[3]); o[5] = float(done);
-        for (int i = 0; i < 17; i++) o[6 + i] = obs[i];
-    } else if (inW == 13u) {
-        uint gw[10] = { uint(p[2]), uint(p[3]), uint(p[4]), uint(p[5]),
-                        uint(p[6]), uint(p[1]),
-                        as_type<uint>(p[7]), as_type<uint>(p[8]),
-                        as_type<uint>(p[9]), 0u };
-        float obs[17];
-        uint done = 0u;
-        float r = gw_pmaze_step(gw, uint(p[0]), uint(p[10]), obs, &done);
-        o[0] = r;
-        for (int i = 0; i < 6; i++) o[1 + i] = float(gw[i]);
-        o[7] = float(done);
-        for (int i = 0; i < 17; i++) o[8 + i] = obs[i];
-    } else if (inW == 1u) {
-        uint w[3];
-        gw_pmaze_gen(uint(p[0]), w);
-        for (int i = 0; i < 3; i++) {
-            o[2 * i] = float(w[i] & 0xffffu);
-            o[2 * i + 1] = float(w[i] >> 16u);
-        }
-    } else if (inW == 9u) {
-        uint gw[10] = { uint(p[2]), uint(p[3]), uint(p[4]), uint(p[5]),
-                        uint(p[6]), uint(p[1]), uint(p[7]), 0u, 0u, 0u };
-        float obs[17];
-        uint done = 0u;
-        float r = gw_hdm_step(gw, uint(p[0]), uint(p[8]), obs, &done);
-        o[0] = r;
-        for (int i = 0; i < 7; i++) o[1 + i] = float(gw[i]);
-        o[8] = float(done);
-        for (int i = 0; i < 17; i++) o[9 + i] = obs[i];
-    } else if (inW == 10u) {
-        uint gw[10] = { uint(p[2]), uint(p[3]), uint(p[4]), uint(p[5]),
-                        uint(p[6]), uint(p[1]), 0u, 0u, 0u, 0u };
-        float obs[17];
-        uint done = 0u;
-        float r = gw_po_step(gw, uint(p[0]), uint(p[7]), obs, &done);
-        o[0] = r;
-        for (int i = 0; i < 6; i++) o[1 + i] = float(gw[i]);
-        o[7] = float(done);
-        for (int i = 0; i < 17; i++) o[8 + i] = obs[i];
-    } else if (inW == 3u) {
-        uint gw[10] = { uint(p[0]), uint(p[1]), 0u, 0u, 0u,
-                        0u, 0u, 0u, 0u, 0u };
-        float obs[17];
-        uint done = 0u;
-        float r = gw_dchain_step(gw, uint(p[2]), obs, &done);
-        o[0] = r;
-        o[1] = float(gw[0]); o[2] = float(gw[1]); o[3] = float(done);
-        for (int i = 0; i < 17; i++) o[4 + i] = obs[i];
-    } else {
-        uint gw[10] = { uint(p[0]), 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u };
-        float obs[17];
-        uint done = 0u;
-        float r = gw_chain_step(gw, uint(p[1]), obs, &done);
-        o[0] = r;
-        o[1] = float(gw[0]);
-        o[2] = float(done);
-        for (int i = 0; i < 17; i++) o[3 + i] = obs[i];
-    }
 }
 
 #endif

@@ -83,7 +83,6 @@ function makeState(pose: Float32Array, ctrl0: number, applied: boolean): Mountai
 
 export const mountainCarDecoder: EnvDecoder<MountainCarState, MountainCarStatic> = {
   envId: 'MountainCar-cont-v0',
-  needsReplay: false,
 
   initStatic(): MountainCarStatic {
     return STATIC;

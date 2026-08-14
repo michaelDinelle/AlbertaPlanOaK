@@ -23,7 +23,6 @@ function state(pos: number, lastA: number): DelayedChainState {
 
 export const delayedChainDecoder: EnvDecoder<DelayedChainState, DelayedChainStatic> = {
   envId: 'DelayedChain-cont-v0',
-  needsReplay: false,
 
   initStatic(seed: number): DelayedChainStatic {
     return { seed, walls: new Uint8Array(DELAYEDCHAIN_L) };

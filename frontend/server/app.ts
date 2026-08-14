@@ -1,28 +1,13 @@
-
 import { normalize, resolve, sep } from 'node:path';
-import type { RolesResponse } from '@shared/types';
-import {
-  DIST_DIR,
-  HOSTNAME,
-  benchRootFromEnv,
-  fleetCacheDir,
-  portFromEnv,
-  runIndexCacheFile,
-} from './config';
+import { join } from 'node:path';
+import { DIST_DIR, HOSTNAME, benchRootFromEnv, portFromEnv } from './config';
 import { corsHeaders } from './cors';
-import { deriveCurves, parseCurvesQuery } from './curves';
-import { deriveFleetColumnar, parseFleetQuery } from './fleetDerive';
-import { statOrNull } from './jsonl';
-import { createLiveResponse } from './live';
+import { statOrNull } from './fs';
 import { findRecording } from './recordings';
 import { RunIndex, buildRunDetail } from './runIndex';
-import { readRoles } from './roles';
-import { deriveWall, parseWallRequest, wallCacheFor } from './wall';
 
 export interface AppOptions {
   benchRoot?: string;
-  cacheFile?: string | null;
-  fleetCacheDir?: string | null;
   distDir?: string;
   production?: boolean;
   ttlMs?: number;
@@ -63,7 +48,6 @@ function decodeSegments(pathname: string): string[] | null {
   }
   return out;
 }
-
 
 type RangeSpec = { start: number; end: number } | 'unsatisfiable' | null;
 
@@ -119,7 +103,9 @@ async function serveStatic(
     }
   }
 
-  const range = parseRangeHeader(req.headers.get('range'), st.size);
+  const ifRange = req.headers.get('if-range');
+  const rangeValid = ifRange === null || ifRange.trim() === etag;
+  const range = rangeValid ? parseRangeHeader(req.headers.get('range'), st.size) : null;
   if (range === 'unsatisfiable') {
     return new Response(null, {
       status: 416,
@@ -143,16 +129,12 @@ async function serveStatic(
   return new Response(Bun.file(path), { status: 200, headers });
 }
 
-
 export function createApp(opts: AppOptions = {}): App {
   const benchRoot = opts.benchRoot ?? benchRootFromEnv();
-  const cacheFile = opts.cacheFile === undefined ? runIndexCacheFile(benchRoot) : opts.cacheFile;
-  const fleetCache = opts.fleetCacheDir === undefined ? fleetCacheDir(benchRoot) : opts.fleetCacheDir;
-  const wallCache = wallCacheFor(benchRoot, opts.fleetCacheDir);
   const distDir = resolve(opts.distDir ?? DIST_DIR);
   const production = opts.production ?? process.env['NODE_ENV'] === 'production';
 
-  const index = new RunIndex({ benchRoot, cacheFile, ttlMs: opts.ttlMs });
+  const index = new RunIndex({ benchRoot, ...(opts.ttlMs !== undefined ? { ttlMs: opts.ttlMs } : {}) });
 
   async function handleApi(req: Request, url: URL, segs: string[]): Promise<Response> {
     const head = segs[1];
@@ -161,25 +143,10 @@ export function createApp(opts: AppOptions = {}): App {
       return json({ ok: true, benchRoot, production });
     }
 
-    if (head === 'roles' && segs.length === 2) {
-      const roles: RolesResponse = await readRoles(benchRoot);
-      return json(roles);
-    }
-
-    if (head === 'floors' && segs.length === 2) {
-      const floorsPath = resolve(benchRoot, 'FLOORS.json');
-      if ((await statOrNull(floorsPath)) === null) return fail(404, 'no floors extracted');
-      try {
-        return json(JSON.parse(await Bun.file(floorsPath).text()));
-      } catch {
-        return fail(500, 'internal error');
-      }
-    }
-
     if (head !== 'runs') return fail(404, 'unknown endpoint');
 
     if (segs.length === 2) {
-      return json(await index.list(), { cache: 'no-store' });
+      return json(await index.list());
     }
 
     const id = segs[2];
@@ -189,106 +156,25 @@ export function createApp(opts: AppOptions = {}): App {
 
     if (segs.length === 3) {
       const recs = await index.recordingsFor(run.id);
-      return json(await buildRunDetail(run, recs), {
-        cache: run.entry.inFlight ? 'no-store' : 'private, max-age=5',
-      });
+      return json(await buildRunDetail(run, recs));
     }
 
     const sub = segs[3];
 
-    if (sub === 'fleet' && segs.length === 4) {
-      const parsed = parseFleetQuery(url);
-      if ('error' in parsed) return fail(400, parsed.error);
-      const data = await deriveFleetColumnar({
-        id: run.id,
-        dir: run.dir,
-        query: parsed.query,
-        inFlight: run.entry.inFlight,
-        cacheDir: fleetCache,
-      });
-      return json(data, { cache: run.entry.inFlight ? 'no-store' : 'private, max-age=30' });
-    }
-
-    if (sub === 'curves' && segs.length === 4) {
-      const parsed = parseCurvesQuery(url);
-      if ('error' in parsed) return fail(400, parsed.error);
-      const data = await deriveCurves({
-        id: run.id,
-        dir: run.dir,
-        query: parsed.query,
-        inFlight: run.entry.inFlight,
-        cacheDir: fleetCache,
-      });
-      return json(data, { cache: run.entry.inFlight ? 'no-store' : 'private, max-age=30' });
-    }
-
-    if (sub === 'wall' && segs.length === 5) {
-      const parsed = parseWallRequest(segs[4], url);
-      if ('error' in parsed) return fail(parsed.status, parsed.error);
-      const recs = await index.recordingsFor(run.id);
-      const { body, header } = await deriveWall({
-        id: run.id,
-        dir: run.dir,
-        envId: parsed.envId,
-        stride: parsed.stride,
-        recordings: recs,
-        inFlight: run.entry.inFlight,
-        cacheDir: wallCache,
-      });
-      return new Response(req.method === 'HEAD' ? null : body, {
-        status: 200,
-        headers: {
-          'content-type': 'application/octet-stream',
-          'content-length': String(body.byteLength),
-          'x-wall-header-bytes': String(header.headerBytes),
-          'x-wall-binary-bytes': String(header.binaryBytes),
-          'cache-control': run.entry.inFlight ? 'no-store' : 'private, max-age=30',
-        },
-      });
-    }
-
-    if (sub === 'live' && segs.length === 4) {
-      return createLiveResponse(req, { id: run.id, dir: run.dir, steps: run.entry.steps });
+    if (sub === 'tape' && segs.length === 4) {
+      return serveStatic(req, join(run.dir, 'tape.bin'), 'application/octet-stream');
     }
 
     if (sub === 'recordings' && segs.length === 6) {
       const envId = segs[4];
       const seedText = segs[5];
-      if (envId === undefined || seedText === undefined) return fail(404, 'not found');
-      if (!/^\d+$/.test(seedText)) return fail(404, 'unknown recording');
+      if (envId === undefined || seedText === undefined || !/^\d+$/.test(seedText)) {
+        return fail(404, 'unknown recording');
+      }
       const recs = await index.recordingsFor(run.id);
       const rec = findRecording(recs, envId, Number(seedText));
       if (rec === undefined) return fail(404, 'unknown recording');
-      return json({
-        envId: rec.envId,
-        seed: rec.seed,
-        steps: rec.steps,
-        actDim: rec.actDim,
-        recordVersion: rec.recordVersion,
-        bytes: rec.bytes,
-        ...(rec.codec !== undefined ? { codec: rec.codec } : {}),
-        ...(rec.codecVersion !== undefined ? { codecVersion: rec.codecVersion } : {}),
-        ...(rec.chunks !== undefined ? { chunks: rec.chunks } : {}),
-      });
-    }
-
-    if (sub === 'recordings' && segs.length === 7) {
-      const envId = segs[4];
-      const seedText = segs[5];
-      const file = segs[6];
-      if (envId === undefined || seedText === undefined || file === undefined) return fail(404, 'not found');
-      if (!/^\d+$/.test(seedText)) return fail(404, 'unknown recording');
-      const recs = await index.recordingsFor(run.id);
-      const rec = findRecording(recs, envId, Number(seedText));
-      if (rec === undefined) return fail(404, 'unknown recording');
-      if (file === 'actions.bin') return serveStatic(req, rec.actionsPath, 'application/octet-stream');
-      if (file === 'meta.json') return serveStatic(req, rec.metaPath, 'application/json; charset=utf-8');
-      return fail(404, 'not found');
-    }
-
-    if (sub === 'recordings' && segs.length === 4) {
-      const recs = await index.recordingsFor(run.id);
-      return json(recs.map((r) => ({ envId: r.envId, seed: r.seed, steps: r.steps })));
+      return serveStatic(req, rec.actionsPath, 'application/octet-stream');
     }
 
     return fail(404, 'unknown endpoint');

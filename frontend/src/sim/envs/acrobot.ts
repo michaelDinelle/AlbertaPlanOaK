@@ -91,7 +91,6 @@ function makeState(pose: Float32Array, ctrl0: number, applied: boolean): Acrobot
 
 export const acrobotDecoder: EnvDecoder<AcrobotState, AcrobotStatic> = {
   envId: 'Acrobot-cont-v0',
-  needsReplay: false,
 
   initStatic(): AcrobotStatic {
     return STATIC;

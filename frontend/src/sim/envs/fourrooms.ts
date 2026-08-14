@@ -71,7 +71,6 @@ function state(x: number, y: number, gx: number, gy: number): FourRoomsState {
 
 export const fourRoomsDecoder: EnvDecoder<FourRoomsState, FourRoomsStatic> = {
   envId: 'FourRooms-cont-v0',
-  needsReplay: false,
 
   initStatic(seed: number): FourRoomsStatic {
     return { seed, walls: fourRoomsWalls() };
