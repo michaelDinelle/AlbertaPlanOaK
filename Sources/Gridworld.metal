@@ -6,66 +6,37 @@ using namespace metal;
 
 #pragma METAL fp math_mode(safe)
 
-constant uint OAK_ENV_CHEETAH     = 0u;
-constant uint OAK_ENV_FOURROOMS   = 1u;
-constant uint OAK_ENV_DEEPSEA     = 2u;
-constant uint OAK_ENV_KEYCORRIDOR = 3u;
-constant uint OAK_ENV_ACROBOT     = 4u;
-constant uint OAK_ENV_MOUNTAINCAR = 5u;
-constant uint OAK_ENV_CARTPOLE    = 6u;
-constant uint OAK_ENV_PENDULUM    = 7u;
-constant uint OAK_ENV_CHAIN       = 8u;
-constant uint OAK_ENV_LARGEDEEPSEA = 9u;
-constant uint OAK_ENV_MULTIKEYCORRIDOR = 10u;
-constant uint OAK_ENV_MEMORYCHAIN = 11u;
-constant uint OAK_ENV_PROCEDURALMAZE = 12u;
-constant uint OAK_ENV_HIGHDIMMAZE = 13u;
-constant uint OAK_ENV_POMAZE      = 14u;
-constant uint OAK_ENV_DELAYEDCHAIN = 15u;
-constant uint OAK_ENV_COUNT       = 16u;
-constant uint OAK_GW_STREAM       = 3u;
+constant uint ENV_RNG_STREAM       = 3u;
+constant uint KEY_HELD             = 1u;
+constant uint DOOR_UNLOCKED        = 2u;
+constant uint KEY1_HELD            = 1u;
+constant uint KEY2_HELD            = 2u;
+constant uint KEY3_HELD            = 4u;
+constant uint DOOR1_UNLOCKED       = 8u;
+constant uint DOOR2_UNLOCKED       = 16u;
+constant uint DOOR3_UNLOCKED       = 32u;
 
-struct OakEnvSpec { uint nameHash; uint obsDimNatural; uint actionKind; uint actionCount; };
-constant OakEnvSpec OAK_ENV_SPECS[OAK_ENV_COUNT] = {
-    { 0x9d7fd44bu, 17u, 0u, 6u },
-    { 0x8014a187u, 17u, 1u, 4u },
-    { 0x56af5bf2u,  8u, 1u, 2u },
-    { 0xdd537ebau, 14u, 1u, 4u },
-    { 0x93531833u,  7u, 1u, 3u },
-    { 0xf5b3ddc8u,  3u, 1u, 3u },
-    { 0x41f9937du,  5u, 1u, 2u },
-    { 0x69bbbb73u,  4u, 0u, 1u },
-    { 0x7b267422u,  2u, 1u, 2u },
-    { 0xb96ddc3du,  8u, 1u, 2u },
-    { 0x4c3c2d3fu, 17u, 1u, 4u },
-    { 0xcf293fd7u,  6u, 1u, 2u },
-    { 0xd75dd5f9u, 17u, 1u, 4u },
-    { 0xbfeb2b7au, 16u, 1u, 6u },
-    { 0x0582e383u, 15u, 1u, 4u },
-    { 0x56184b96u,  3u, 1u, 2u },
-};
-
-inline bool gw_four_is_wall(int x, int y) {
+inline bool fourRooms_isWall(int x, int y) {
     if (x <= 0 || x >= 10 || y <= 0 || y >= 10) return true;
     if (x == 5 && y != 2 && y != 8) return true;
     if (y == 5 && x != 2 && x != 8) return true;
     return false;
 }
 
-constant uchar GW_FREE_X[68] = {
+constant uchar FOUR_ROOMS_FREE_X[68] = {
     1, 2, 3, 4, 6, 7, 8, 9, 1, 2, 3, 4, 5, 6, 7, 8, 9,
     1, 2, 3, 4, 6, 7, 8, 9, 1, 2, 3, 4, 6, 7, 8, 9,
     2, 8,
     1, 2, 3, 4, 6, 7, 8, 9, 1, 2, 3, 4, 6, 7, 8, 9,
     1, 2, 3, 4, 5, 6, 7, 8, 9, 1, 2, 3, 4, 6, 7, 8, 9 };
-constant uchar GW_FREE_Y[68] = {
+constant uchar FOUR_ROOMS_FREE_Y[68] = {
     1, 1, 1, 1, 1, 1, 1, 1, 2, 2, 2, 2, 2, 2, 2, 2, 2,
     3, 3, 3, 3, 3, 3, 3, 3, 4, 4, 4, 4, 4, 4, 4, 4,
     5, 5,
     6, 6, 6, 6, 6, 6, 6, 6, 7, 7, 7, 7, 7, 7, 7, 7,
     8, 8, 8, 8, 8, 8, 8, 8, 8, 9, 9, 9, 9, 9, 9, 9, 9 };
 
-inline int gw_four_room(int x, int y) {
+inline int fourRooms_room(int x, int y) {
     if (x < 5 && y < 5) return 0;
     if (x > 5 && y < 5) return 1;
     if (x < 5 && y > 5) return 2;
@@ -73,59 +44,59 @@ inline int gw_four_room(int x, int y) {
     return -1;
 }
 
-inline void gw_four_obs(uint x, uint y, uint gx, uint gy, uint sg,
-                        thread float *o) {
-    int room = gw_four_room(int(x), int(y));
-    int groom = gw_four_room(int(gx), int(gy));
-    o[0] = float(x) / 10.0f;
-    o[1] = float(y) / 10.0f;
-    o[2] = float(int(gx) - int(x)) / 10.0f;
-    o[3] = float(int(gy) - int(y)) / 10.0f;
-    o[4] = float(abs(int(gx) - int(x)) + abs(int(gy) - int(y))) / 20.0f;
-    o[5] = (room == 0) ? 1.0f : 0.0f;
-    o[6] = (room == 1) ? 1.0f : 0.0f;
-    o[7] = (room == 2) ? 1.0f : 0.0f;
-    o[8] = (room == 3) ? 1.0f : 0.0f;
-    o[9]  = gw_four_is_wall(int(x) + 0, int(y) - 1) ? 1.0f : 0.0f;
-    o[10] = gw_four_is_wall(int(x) + 0, int(y) + 1) ? 1.0f : 0.0f;
-    o[11] = gw_four_is_wall(int(x) - 1, int(y) + 0) ? 1.0f : 0.0f;
-    o[12] = gw_four_is_wall(int(x) + 1, int(y) + 0) ? 1.0f : 0.0f;
-    o[13] = (room == -1) ? 1.0f : 0.0f;
-    o[14] = (groom == room && room != -1) ? 1.0f : 0.0f;
-    o[15] = min(float(sg) / 256.0f, 1.0f);
-    o[16] = 1.0f;
+inline void fourRooms_obs(uint x, uint y, uint goalX, uint goalY, uint stepsSinceGoal,
+                        thread float *obs) {
+    int room = fourRooms_room(int(x), int(y));
+    int goalRoom = fourRooms_room(int(goalX), int(goalY));
+    obs[0] = float(x) / 10.0f;
+    obs[1] = float(y) / 10.0f;
+    obs[2] = float(int(goalX) - int(x)) / 10.0f;
+    obs[3] = float(int(goalY) - int(y)) / 10.0f;
+    obs[4] = float(abs(int(goalX) - int(x)) + abs(int(goalY) - int(y))) / 20.0f;
+    obs[5] = (room == 0) ? 1.0f : 0.0f;
+    obs[6] = (room == 1) ? 1.0f : 0.0f;
+    obs[7] = (room == 2) ? 1.0f : 0.0f;
+    obs[8] = (room == 3) ? 1.0f : 0.0f;
+    obs[9]  = fourRooms_isWall(int(x) + 0, int(y) - 1) ? 1.0f : 0.0f;
+    obs[10] = fourRooms_isWall(int(x) + 0, int(y) + 1) ? 1.0f : 0.0f;
+    obs[11] = fourRooms_isWall(int(x) - 1, int(y) + 0) ? 1.0f : 0.0f;
+    obs[12] = fourRooms_isWall(int(x) + 1, int(y) + 0) ? 1.0f : 0.0f;
+    obs[13] = (room == -1) ? 1.0f : 0.0f;
+    obs[14] = (goalRoom == room && room != -1) ? 1.0f : 0.0f;
+    obs[15] = min(float(stepsSinceGoal) / 256.0f, 1.0f);
+    obs[16] = 1.0f;
 }
 
-inline float gw_four_step(thread uint *gw, uint laneSeed, uint action,
+inline float fourRooms_step(thread uint *words, uint laneSeed, uint action,
                           thread float *obs) {
-    uint x = gw[0], y = gw[1], gx = gw[2], gy = gw[3], sg = gw[4], ri = gw[5];
-    int dx = 0, dy = 0;
+    uint x = words[0], y = words[1], goalX = words[2], goalY = words[3], stepsSinceGoal = words[4], resampleIndex = words[5];
+    int deltaX = 0, deltaY = 0;
     switch (action & 3u) {
-        case 0u: dy = -1; break;
-        case 1u: dy = 1; break;
-        case 2u: dx = -1; break;
-        default: dx = 1; break;
+        case 0u: deltaY = -1; break;
+        case 1u: deltaY = 1; break;
+        case 2u: deltaX = -1; break;
+        default: deltaX = 1; break;
     }
-    int nx = int(x) + dx, ny = int(y) + dy;
-    if (gw_four_is_wall(nx, ny)) { nx = int(x); ny = int(y); }
+    int nextX = int(x) + deltaX, nextY = int(y) + deltaY;
+    if (fourRooms_isWall(nextX, nextY)) { nextX = int(x); nextY = int(y); }
     float reward = 0.0f;
-    uint ngx = gx, ngy = gy, nsg = sg + 1u, nri = ri;
-    if (uint(nx) == gx && uint(ny) == gy) {
+    uint nextGoalX = goalX, nextGoalY = goalY, nextStepsSinceGoal = stepsSinceGoal + 1u, nextResampleIndex = resampleIndex;
+    if (uint(nextX) == goalX && uint(nextY) == goalY) {
         reward = 1.0f;
-        nsg = 0u;
-        nri = ri + 1u;
+        nextStepsSinceGoal = 0u;
+        nextResampleIndex = resampleIndex + 1u;
         uint block = 0u;
         for (;;) {
-            uint4 raw = hc_philox4x32(uint2(laneSeed, OAK_GW_STREAM),
-                                      uint4(ri, block, 0u, 0u));
-            uint words[4] = { raw.x, raw.y, raw.z, raw.w };
+            uint4 raw = hc_philox4x32(uint2(laneSeed, ENV_RNG_STREAM),
+                                      uint4(resampleIndex, block, 0u, 0u));
+            uint philoxWords[4] = { raw.x, raw.y, raw.z, raw.w };
             bool found = false;
             for (int wi = 0; wi < 4; wi++) {
-                int idx = int(hc_u01(words[wi]) * 68.0f);
+                int idx = int(hc_u01(philoxWords[wi]) * 68.0f);
                 if (idx < 68) {
-                    uint cx = uint(GW_FREE_X[idx]), cy = uint(GW_FREE_Y[idx]);
-                    if (cx != uint(nx) || cy != uint(ny)) {
-                        ngx = cx; ngy = cy;
+                    uint candidateX = uint(FOUR_ROOMS_FREE_X[idx]), candidateY = uint(FOUR_ROOMS_FREE_Y[idx]);
+                    if (candidateX != uint(nextX) || candidateY != uint(nextY)) {
+                        nextGoalX = candidateX; nextGoalY = candidateY;
                         found = true;
                         break;
                     }
@@ -135,118 +106,118 @@ inline float gw_four_step(thread uint *gw, uint laneSeed, uint action,
             block += 1u;
         }
     }
-    gw[0] = uint(nx); gw[1] = uint(ny); gw[2] = ngx; gw[3] = ngy;
-    gw[4] = nsg; gw[5] = nri;
-    gw_four_obs(uint(nx), uint(ny), ngx, ngy, nsg, obs);
+    words[0] = uint(nextX); words[1] = uint(nextY); words[2] = nextGoalX; words[3] = nextGoalY;
+    words[4] = nextStepsSinceGoal; words[5] = nextResampleIndex;
+    fourRooms_obs(uint(nextX), uint(nextY), nextGoalX, nextGoalY, nextStepsSinceGoal, obs);
     return reward;
 }
 
-inline void gw_deep_obs(uint r, uint c, uint lastA, thread float *o) {
-    float n1 = 7.0f;
-    o[0] = float(r) / n1;
-    o[1] = float(c) / n1;
-    o[2] = float(7 - int(c)) / n1;
-    o[3] = float(7 - int(r)) / n1;
-    o[4] = (c == 7u) ? 1.0f : 0.0f;
-    o[5] = (c == 0u) ? 1.0f : 0.0f;
-    o[6] = float(lastA);
-    o[7] = 1.0f;
-    for (int i = 8; i < 17; i++) o[i] = 0.0f;
+inline void deepSea_obs(uint row, uint column, uint lastAction, thread float *obs) {
+    float gridExtent = 7.0f;
+    obs[0] = float(row) / gridExtent;
+    obs[1] = float(column) / gridExtent;
+    obs[2] = float(7 - int(column)) / gridExtent;
+    obs[3] = float(7 - int(row)) / gridExtent;
+    obs[4] = (column == 7u) ? 1.0f : 0.0f;
+    obs[5] = (column == 0u) ? 1.0f : 0.0f;
+    obs[6] = float(lastAction);
+    obs[7] = 1.0f;
+    for (int i = 8; i < 17; i++) obs[i] = 0.0f;
 }
 
-inline float gw_deep_step(thread uint *gw, uint action, thread float *o) {
-    uint r = gw[0], c = gw[1];
-    uint bitIdx = r * 8u + c;
-    uint bit = (bitIdx < 32u) ? ((gw[3] >> bitIdx) & 1u)
-                              : ((gw[4] >> (bitIdx - 32u)) & 1u);
-    int dc = ((action & 1u) == bit) ? 1 : -1;
-    int nc = clamp(int(c) + dc, 0, 7);
-    uint nr = r + 1u;
+inline float deepSea_step(thread uint *words, uint action, thread float *obs) {
+    uint row = words[0], column = words[1];
+    uint mapBitIndex = row * 8u + column;
+    uint rightwardAction = (mapBitIndex < 32u) ? ((words[3] >> mapBitIndex) & 1u)
+                              : ((words[4] >> (mapBitIndex - 32u)) & 1u);
+    int columnDelta = ((action & 1u) == rightwardAction) ? 1 : -1;
+    int nextColumn = clamp(int(column) + columnDelta, 0, 7);
+    uint nextRow = row + 1u;
     float reward = ((action & 1u) != 0u) ? -0.00125f : 0.0f;
-    uint nLast = action & 1u;
-    if (nr >= 7u) {
-        if (nc == 7) reward = reward + 1.0f;
-        nr = 0u;
-        nc = 0;
+    uint nextLastAction = action & 1u;
+    if (nextRow >= 7u) {
+        if (nextColumn == 7) reward = reward + 1.0f;
+        nextRow = 0u;
+        nextColumn = 0;
     }
-    gw[0] = nr;
-    gw[1] = uint(nc);
-    gw[2] = nLast;
-    gw_deep_obs(nr, uint(nc), nLast, o);
+    words[0] = nextRow;
+    words[1] = uint(nextColumn);
+    words[2] = nextLastAction;
+    deepSea_obs(nextRow, uint(nextColumn), nextLastAction, obs);
     return reward;
 }
 
-inline bool gw_kc_is_wall(int x, int y) {
+inline bool keyCorridor_isWall(int x, int y) {
     if (x <= 0 || x >= 8 || y <= 0 || y >= 6) return true;
     if (x == 4 && y != 3) return true;
     return false;
 }
 
-inline void gw_kc_obs(uint x, uint y, uint kx, uint ky, uint gx, uint gy,
-                      uint flags, uint sg, thread float *o) {
-    bool hasKey = (flags & 1u) != 0u;
-    o[0] = float(x) / 8.0f;
-    o[1] = float(y) / 6.0f;
-    o[2] = hasKey ? 1.0f : 0.0f;
-    o[3] = ((flags & 2u) != 0u) ? 1.0f : 0.0f;
-    o[4] = hasKey ? 0.0f : 1.0f;
-    o[5] = hasKey ? 0.0f : float(int(kx) - int(x)) / 8.0f;
-    o[6] = hasKey ? 0.0f : float(int(ky) - int(y)) / 6.0f;
-    o[7] = float(4 - int(x)) / 8.0f;
-    o[8] = float(3 - int(y)) / 6.0f;
-    o[9] = float(int(gx) - int(x)) / 8.0f;
-    o[10] = float(int(gy) - int(y)) / 6.0f;
-    o[11] = (x == 4u && y == 3u) ? 1.0f : 0.0f;
-    o[12] = min(float(sg) / 256.0f, 1.0f);
-    o[13] = 1.0f;
-    for (int i = 14; i < 17; i++) o[i] = 0.0f;
+inline void keyCorridor_obs(uint x, uint y, uint keyX, uint keyY, uint goalX, uint goalY,
+                      uint keyDoorBits, uint stepsSinceGoal, thread float *obs) {
+    bool hasKey = (keyDoorBits & KEY_HELD) != 0u;
+    obs[0] = float(x) / 8.0f;
+    obs[1] = float(y) / 6.0f;
+    obs[2] = hasKey ? 1.0f : 0.0f;
+    obs[3] = ((keyDoorBits & DOOR_UNLOCKED) != 0u) ? 1.0f : 0.0f;
+    obs[4] = hasKey ? 0.0f : 1.0f;
+    obs[5] = hasKey ? 0.0f : float(int(keyX) - int(x)) / 8.0f;
+    obs[6] = hasKey ? 0.0f : float(int(keyY) - int(y)) / 6.0f;
+    obs[7] = float(4 - int(x)) / 8.0f;
+    obs[8] = float(3 - int(y)) / 6.0f;
+    obs[9] = float(int(goalX) - int(x)) / 8.0f;
+    obs[10] = float(int(goalY) - int(y)) / 6.0f;
+    obs[11] = (x == 4u && y == 3u) ? 1.0f : 0.0f;
+    obs[12] = min(float(stepsSinceGoal) / 256.0f, 1.0f);
+    obs[13] = 1.0f;
+    for (int i = 14; i < 17; i++) obs[i] = 0.0f;
 }
 
-inline float gw_kc_step(thread uint *gw, uint laneSeed, uint action,
+inline float keyCorridor_step(thread uint *words, uint laneSeed, uint action,
                         thread float *obs, thread uint *doneOut) {
-    uint x = gw[0], y = gw[1], kx = gw[2], ky = gw[3], gx = gw[4], gy = gw[5];
-    uint flags = gw[6], sg = gw[7], ri = gw[8];
-    int dx = 0, dy = 0;
+    uint x = words[0], y = words[1], keyX = words[2], keyY = words[3], goalX = words[4], goalY = words[5];
+    uint keyDoorBits = words[6], stepsSinceGoal = words[7], resampleIndex = words[8];
+    int deltaX = 0, deltaY = 0;
     switch (action & 3u) {
-        case 0u: dy = -1; break;
-        case 1u: dy = 1; break;
-        case 2u: dx = -1; break;
-        default: dx = 1; break;
+        case 0u: deltaY = -1; break;
+        case 1u: deltaY = 1; break;
+        case 2u: deltaX = -1; break;
+        default: deltaX = 1; break;
     }
-    int nx = int(x) + dx, ny = int(y) + dy;
-    if (gw_kc_is_wall(nx, ny)) { nx = int(x); ny = int(y); }
-    else if (nx == 4 && ny == 3 && (flags & 2u) == 0u) {
-        if ((flags & 1u) != 0u) flags |= 2u;
-        else { nx = int(x); ny = int(y); }
+    int nextX = int(x) + deltaX, nextY = int(y) + deltaY;
+    if (keyCorridor_isWall(nextX, nextY)) { nextX = int(x); nextY = int(y); }
+    else if (nextX == 4 && nextY == 3 && (keyDoorBits & DOOR_UNLOCKED) == 0u) {
+        if ((keyDoorBits & KEY_HELD) != 0u) keyDoorBits |= DOOR_UNLOCKED;
+        else { nextX = int(x); nextY = int(y); }
     }
-    if ((flags & 1u) == 0u && uint(nx) == kx && uint(ny) == ky) flags |= 1u;
+    if ((keyDoorBits & KEY_HELD) == 0u && uint(nextX) == keyX && uint(nextY) == keyY) keyDoorBits |= KEY_HELD;
     float reward = 0.0f;
-    uint done = 0u, nsg = sg + 1u, nri = ri;
-    if (uint(nx) == gx && uint(ny) == gy) {
+    uint done = 0u, nextStepsSinceGoal = stepsSinceGoal + 1u, nextResampleIndex = resampleIndex;
+    if (uint(nextX) == goalX && uint(nextY) == goalY) {
         reward = 1.0f;
         done = 1u;
-        nsg = 0u;
-        nri = ri + 1u;
-        uint4 raw = hc_philox4x32(uint2(laneSeed, OAK_GW_STREAM),
-                                  uint4(ri, 0u, 0u, 0u));
-        uint ai = uint(hc_u01(raw.x) * 15.0f);
-        uint ki = uint(hc_u01(raw.y) * 15.0f);
-        uint gi = uint(hc_u01(raw.z) * 15.0f);
-        nx = int(1u + ai % 3u); ny = int(1u + ai / 3u);
-        kx = 1u + ki % 3u; ky = 1u + ki / 3u;
-        gx = 5u + gi % 3u; gy = 1u + gi / 3u;
-        flags = 0u;
+        nextStepsSinceGoal = 0u;
+        nextResampleIndex = resampleIndex + 1u;
+        uint4 raw = hc_philox4x32(uint2(laneSeed, ENV_RNG_STREAM),
+                                  uint4(resampleIndex, 0u, 0u, 0u));
+        uint agentCellIndex = uint(hc_u01(raw.x) * 15.0f);
+        uint keyCellIndex = uint(hc_u01(raw.y) * 15.0f);
+        uint goalCellIndex = uint(hc_u01(raw.z) * 15.0f);
+        nextX = int(1u + agentCellIndex % 3u); nextY = int(1u + agentCellIndex / 3u);
+        keyX = 1u + keyCellIndex % 3u; keyY = 1u + keyCellIndex / 3u;
+        goalX = 5u + goalCellIndex % 3u; goalY = 1u + goalCellIndex / 3u;
+        keyDoorBits = 0u;
     }
-    gw[0] = uint(nx); gw[1] = uint(ny); gw[2] = kx; gw[3] = ky;
-    gw[4] = gx; gw[5] = gy; gw[6] = flags; gw[7] = nsg; gw[8] = nri;
-    gw_kc_obs(uint(nx), uint(ny), kx, ky, gx, gy, flags, nsg, obs);
+    words[0] = uint(nextX); words[1] = uint(nextY); words[2] = keyX; words[3] = keyY;
+    words[4] = goalX; words[5] = goalY; words[6] = keyDoorBits; words[7] = nextStepsSinceGoal; words[8] = nextResampleIndex;
+    keyCorridor_obs(uint(nextX), uint(nextY), keyX, keyY, goalX, goalY, keyDoorBits, nextStepsSinceGoal, obs);
     *doneOut = done;
     return reward;
 }
 
-inline float gw_chain_step(thread uint *gw, uint action, thread float *obs,
+inline float chain_step(thread uint *words, uint action, thread float *obs,
                            thread uint *doneOut) {
-    uint pos = gw[0];
+    uint pos = words[0];
     float reward = 0.0f;
     uint done = 0u;
     if ((action & 1u) != 0u) {
@@ -255,7 +226,7 @@ inline float gw_chain_step(thread uint *gw, uint action, thread float *obs,
     } else {
         pos = (pos > 0u) ? pos - 1u : 0u;
     }
-    gw[0] = pos;
+    words[0] = pos;
     obs[0] = float(pos) / 16.0f;
     obs[1] = 1.0f;
     for (int i = 2; i < 17; i++) obs[i] = 0.0f;
@@ -263,486 +234,488 @@ inline float gw_chain_step(thread uint *gw, uint action, thread float *obs,
     return reward;
 }
 
-inline void gw_ldeep_obs(uint r, uint c, uint lastA, thread float *o) {
-    float n1 = 15.0f;
-    o[0] = float(r) / n1;
-    o[1] = float(c) / n1;
-    o[2] = float(15 - int(c)) / n1;
-    o[3] = float(15 - int(r)) / n1;
-    o[4] = (c == 15u) ? 1.0f : 0.0f;
-    o[5] = (c == 0u) ? 1.0f : 0.0f;
-    o[6] = float(lastA);
-    o[7] = 1.0f;
-    for (int i = 8; i < 17; i++) o[i] = 0.0f;
+inline void largeDeepSea_obs(uint row, uint column, uint lastAction, thread float *obs) {
+    float gridExtent = 15.0f;
+    obs[0] = float(row) / gridExtent;
+    obs[1] = float(column) / gridExtent;
+    obs[2] = float(15 - int(column)) / gridExtent;
+    obs[3] = float(15 - int(row)) / gridExtent;
+    obs[4] = (column == 15u) ? 1.0f : 0.0f;
+    obs[5] = (column == 0u) ? 1.0f : 0.0f;
+    obs[6] = float(lastAction);
+    obs[7] = 1.0f;
+    for (int i = 8; i < 17; i++) obs[i] = 0.0f;
 }
 
-inline float gw_ldeep_step(thread uint *gw, uint action, thread float *o) {
-    uint r = gw[0] & 15u, c = (gw[0] >> 4u) & 15u;
-    uint bitIdx = r * 16u + c;
-    uint bit = (gw[1u + (bitIdx >> 5u)] >> (bitIdx & 31u)) & 1u;
-    int dc = ((action & 1u) == bit) ? 1 : -1;
-    int nc = clamp(int(c) + dc, 0, 15);
-    uint nr = r + 1u;
+inline float largeDeepSea_step(thread uint *words, uint action, thread float *obs) {
+    uint row = words[0] & 15u, column = (words[0] >> 4u) & 15u;
+    uint mapBitIndex = row * 16u + column;
+    uint rightwardAction = (words[1u + (mapBitIndex >> 5u)] >> (mapBitIndex & 31u)) & 1u;
+    int columnDelta = ((action & 1u) == rightwardAction) ? 1 : -1;
+    int nextColumn = clamp(int(column) + columnDelta, 0, 15);
+    uint nextRow = row + 1u;
     float reward = ((action & 1u) != 0u) ? -0.000625f : 0.0f;
-    uint nLast = action & 1u;
-    if (nr >= 15u) {
-        if (nc == 15) reward = reward + 1.0f;
-        nr = 0u;
-        nc = 0;
+    uint nextLastAction = action & 1u;
+    if (nextRow >= 15u) {
+        if (nextColumn == 15) reward = reward + 1.0f;
+        nextRow = 0u;
+        nextColumn = 0;
     }
-    gw[0] = nr | (uint(nc) << 4u) | (nLast << 8u);
-    gw_ldeep_obs(nr, uint(nc), nLast, o);
+    words[0] = nextRow | (uint(nextColumn) << 4u) | (nextLastAction << 8u);
+    largeDeepSea_obs(nextRow, uint(nextColumn), nextLastAction, obs);
     return reward;
 }
 
-inline bool gw_mkc_is_wall(int x, int y) {
+inline bool multiKeyCorridor_isWall(int x, int y) {
     if (x <= 0 || x >= 16 || y <= 0 || y >= 6) return true;
     if ((x == 4 || x == 8 || x == 12) && y != 3) return true;
     return false;
 }
 
-inline void gw_mkc_obs(uint x, uint y, uint k1p, uint k2p, uint k3p,
-                       uint gx, uint gy, uint flags, thread float *o) {
-    bool hk1 = (flags & 1u) != 0u;
-    bool hk2 = (flags & 2u) != 0u;
-    bool hk3 = (flags & 4u) != 0u;
-    o[0] = float(x) / 16.0f;
-    o[1] = float(y) / 6.0f;
-    o[2] = hk1 ? 1.0f : 0.0f;
-    o[3] = hk2 ? 1.0f : 0.0f;
-    o[4] = hk3 ? 1.0f : 0.0f;
-    o[5] = ((flags & 8u) != 0u) ? 1.0f : 0.0f;
-    o[6] = ((flags & 16u) != 0u) ? 1.0f : 0.0f;
-    o[7] = ((flags & 32u) != 0u) ? 1.0f : 0.0f;
-    o[8]  = hk1 ? 0.0f : float(int(k1p & 15u) - int(x)) / 16.0f;
-    o[9]  = hk1 ? 0.0f : float(int(k1p >> 4u) - int(y)) / 6.0f;
-    o[10] = hk2 ? 0.0f : float(int(k2p & 15u) - int(x)) / 16.0f;
-    o[11] = hk2 ? 0.0f : float(int(k2p >> 4u) - int(y)) / 6.0f;
-    o[12] = hk3 ? 0.0f : float(int(k3p & 15u) - int(x)) / 16.0f;
-    o[13] = hk3 ? 0.0f : float(int(k3p >> 4u) - int(y)) / 6.0f;
-    o[14] = float(int(gx) - int(x)) / 16.0f;
-    o[15] = float(int(gy) - int(y)) / 6.0f;
-    o[16] = 1.0f;
+inline void multiKeyCorridor_obs(uint x, uint y, uint key1Packed, uint key2Packed, uint key3Packed,
+                       uint goalX, uint goalY, uint keyDoorBits, thread float *obs) {
+    bool hasKey1 = (keyDoorBits & KEY1_HELD) != 0u;
+    bool hasKey2 = (keyDoorBits & KEY2_HELD) != 0u;
+    bool hasKey3 = (keyDoorBits & KEY3_HELD) != 0u;
+    obs[0] = float(x) / 16.0f;
+    obs[1] = float(y) / 6.0f;
+    obs[2] = hasKey1 ? 1.0f : 0.0f;
+    obs[3] = hasKey2 ? 1.0f : 0.0f;
+    obs[4] = hasKey3 ? 1.0f : 0.0f;
+    obs[5] = ((keyDoorBits & DOOR1_UNLOCKED) != 0u) ? 1.0f : 0.0f;
+    obs[6] = ((keyDoorBits & DOOR2_UNLOCKED) != 0u) ? 1.0f : 0.0f;
+    obs[7] = ((keyDoorBits & DOOR3_UNLOCKED) != 0u) ? 1.0f : 0.0f;
+    obs[8]  = hasKey1 ? 0.0f : float(int(key1Packed & 15u) - int(x)) / 16.0f;
+    obs[9]  = hasKey1 ? 0.0f : float(int(key1Packed >> 4u) - int(y)) / 6.0f;
+    obs[10] = hasKey2 ? 0.0f : float(int(key2Packed & 15u) - int(x)) / 16.0f;
+    obs[11] = hasKey2 ? 0.0f : float(int(key2Packed >> 4u) - int(y)) / 6.0f;
+    obs[12] = hasKey3 ? 0.0f : float(int(key3Packed & 15u) - int(x)) / 16.0f;
+    obs[13] = hasKey3 ? 0.0f : float(int(key3Packed >> 4u) - int(y)) / 6.0f;
+    obs[14] = float(int(goalX) - int(x)) / 16.0f;
+    obs[15] = float(int(goalY) - int(y)) / 6.0f;
+    obs[16] = 1.0f;
 }
 
-inline float gw_mkc_step(thread uint *gw, uint laneSeed, uint action,
+inline float multiKeyCorridor_step(thread uint *words, uint laneSeed, uint action,
                          thread float *obs, thread uint *doneOut) {
-    uint x = gw[0], y = gw[1], k1p = gw[2], k2p = gw[3], k3p = gw[4];
-    uint gx = gw[5], gy = gw[6], flags = gw[7], sg = gw[8], ri = gw[9];
-    int dx = 0, dy = 0;
+    uint x = words[0], y = words[1], key1Packed = words[2], key2Packed = words[3], key3Packed = words[4];
+    uint goalX = words[5], goalY = words[6], keyDoorBits = words[7], stepsSinceGoal = words[8], resampleIndex = words[9];
+    int deltaX = 0, deltaY = 0;
     switch (action & 3u) {
-        case 0u: dy = -1; break;
-        case 1u: dy = 1; break;
-        case 2u: dx = -1; break;
-        default: dx = 1; break;
+        case 0u: deltaY = -1; break;
+        case 1u: deltaY = 1; break;
+        case 2u: deltaX = -1; break;
+        default: deltaX = 1; break;
     }
-    int nx = int(x) + dx, ny = int(y) + dy;
-    if (gw_mkc_is_wall(nx, ny)) { nx = int(x); ny = int(y); }
-    else if (ny == 3 && (nx == 4 || nx == 8 || nx == 12)) {
-        uint door = uint(nx >> 2);
-        if ((flags & (8u << (door - 1u))) == 0u) {
-            if ((flags & (1u << (door - 1u))) != 0u) flags |= (8u << (door - 1u));
-            else { nx = int(x); ny = int(y); }
+    int nextX = int(x) + deltaX, nextY = int(y) + deltaY;
+    if (multiKeyCorridor_isWall(nextX, nextY)) { nextX = int(x); nextY = int(y); }
+    else if (nextY == 3 && (nextX == 4 || nextX == 8 || nextX == 12)) {
+        uint doorIndex = uint(nextX >> 2);
+        uint doorUnlockMask = DOOR1_UNLOCKED << (doorIndex - 1u);
+        uint doorKeyMask = KEY1_HELD << (doorIndex - 1u);
+        if ((keyDoorBits & doorUnlockMask) == 0u) {
+            if ((keyDoorBits & doorKeyMask) != 0u) keyDoorBits |= doorUnlockMask;
+            else { nextX = int(x); nextY = int(y); }
         }
     }
-    if ((flags & 1u) == 0u && uint(nx) == (k1p & 15u) && uint(ny) == (k1p >> 4u))
-        flags |= 1u;
-    if ((flags & 2u) == 0u && uint(nx) == (k2p & 15u) && uint(ny) == (k2p >> 4u))
-        flags |= 2u;
-    if ((flags & 4u) == 0u && uint(nx) == (k3p & 15u) && uint(ny) == (k3p >> 4u))
-        flags |= 4u;
+    if ((keyDoorBits & KEY1_HELD) == 0u && uint(nextX) == (key1Packed & 15u) && uint(nextY) == (key1Packed >> 4u))
+        keyDoorBits |= KEY1_HELD;
+    if ((keyDoorBits & KEY2_HELD) == 0u && uint(nextX) == (key2Packed & 15u) && uint(nextY) == (key2Packed >> 4u))
+        keyDoorBits |= KEY2_HELD;
+    if ((keyDoorBits & KEY3_HELD) == 0u && uint(nextX) == (key3Packed & 15u) && uint(nextY) == (key3Packed >> 4u))
+        keyDoorBits |= KEY3_HELD;
     float reward = 0.0f;
-    uint done = 0u, nsg = sg + 1u, nri = ri;
-    if (uint(nx) == gx && uint(ny) == gy) {
+    uint done = 0u, nextStepsSinceGoal = stepsSinceGoal + 1u, nextResampleIndex = resampleIndex;
+    if (uint(nextX) == goalX && uint(nextY) == goalY) {
         reward = 1.0f;
         done = 1u;
-        nsg = 0u;
-        nri = ri + 1u;
-        uint4 raw = hc_philox4x32(uint2(laneSeed, OAK_GW_STREAM),
-                                  uint4(ri, 0u, 0u, 0u));
-        uint4 raw2 = hc_philox4x32(uint2(laneSeed, OAK_GW_STREAM),
-                                   uint4(ri, 1u, 0u, 0u));
-        uint ai = uint(hc_u01(raw.x) * 15.0f);
-        uint k1i = uint(hc_u01(raw.y) * 15.0f);
-        uint k2i = uint(hc_u01(raw.z) * 15.0f);
-        uint k3i = uint(hc_u01(raw.w) * 15.0f);
-        uint gi = uint(hc_u01(raw2.x) * 15.0f);
-        nx = int(1u + ai % 3u); ny = int(1u + ai / 3u);
-        k1p = (1u + k1i % 3u) | ((1u + k1i / 3u) << 4u);
-        k2p = (5u + k2i % 3u) | ((1u + k2i / 3u) << 4u);
-        k3p = (9u + k3i % 3u) | ((1u + k3i / 3u) << 4u);
-        gx = 13u + gi % 3u; gy = 1u + gi / 3u;
-        flags = 0u;
+        nextStepsSinceGoal = 0u;
+        nextResampleIndex = resampleIndex + 1u;
+        uint4 raw = hc_philox4x32(uint2(laneSeed, ENV_RNG_STREAM),
+                                  uint4(resampleIndex, 0u, 0u, 0u));
+        uint4 raw2 = hc_philox4x32(uint2(laneSeed, ENV_RNG_STREAM),
+                                   uint4(resampleIndex, 1u, 0u, 0u));
+        uint agentCellIndex = uint(hc_u01(raw.x) * 15.0f);
+        uint key1CellIndex = uint(hc_u01(raw.y) * 15.0f);
+        uint key2CellIndex = uint(hc_u01(raw.z) * 15.0f);
+        uint key3CellIndex = uint(hc_u01(raw.w) * 15.0f);
+        uint goalCellIndex = uint(hc_u01(raw2.x) * 15.0f);
+        nextX = int(1u + agentCellIndex % 3u); nextY = int(1u + agentCellIndex / 3u);
+        key1Packed = (1u + key1CellIndex % 3u) | ((1u + key1CellIndex / 3u) << 4u);
+        key2Packed = (5u + key2CellIndex % 3u) | ((1u + key2CellIndex / 3u) << 4u);
+        key3Packed = (9u + key3CellIndex % 3u) | ((1u + key3CellIndex / 3u) << 4u);
+        goalX = 13u + goalCellIndex % 3u; goalY = 1u + goalCellIndex / 3u;
+        keyDoorBits = 0u;
     }
-    gw[0] = uint(nx); gw[1] = uint(ny); gw[2] = k1p; gw[3] = k2p; gw[4] = k3p;
-    gw[5] = gx; gw[6] = gy; gw[7] = flags; gw[8] = nsg; gw[9] = nri;
-    gw_mkc_obs(uint(nx), uint(ny), k1p, k2p, k3p, gx, gy, flags, obs);
+    words[0] = uint(nextX); words[1] = uint(nextY); words[2] = key1Packed; words[3] = key2Packed; words[4] = key3Packed;
+    words[5] = goalX; words[6] = goalY; words[7] = keyDoorBits; words[8] = nextStepsSinceGoal; words[9] = nextResampleIndex;
+    multiKeyCorridor_obs(uint(nextX), uint(nextY), key1Packed, key2Packed, key3Packed, goalX, goalY, keyDoorBits, obs);
     *doneOut = done;
     return reward;
 }
 
-inline void gw_mchain_obs(uint pos, uint cue, uint lastA, thread float *o) {
-    o[0] = float(pos) / 32.0f;
-    o[1] = (pos == 0u) ? float(cue) : 0.0f;
-    o[2] = (pos == 0u) ? 1.0f : 0.0f;
-    o[3] = (pos == 31u) ? 1.0f : 0.0f;
-    o[4] = float(lastA);
-    o[5] = 1.0f;
-    for (int i = 6; i < 17; i++) o[i] = 0.0f;
+inline void memoryChain_obs(uint pos, uint cue, uint lastAction, thread float *obs) {
+    obs[0] = float(pos) / 32.0f;
+    obs[1] = (pos == 0u) ? float(cue) : 0.0f;
+    obs[2] = (pos == 0u) ? 1.0f : 0.0f;
+    obs[3] = (pos == 31u) ? 1.0f : 0.0f;
+    obs[4] = float(lastAction);
+    obs[5] = 1.0f;
+    for (int i = 6; i < 17; i++) obs[i] = 0.0f;
 }
 
-inline float gw_mchain_step(thread uint *gw, uint laneSeed, uint action,
+inline float memoryChain_step(thread uint *words, uint laneSeed, uint action,
                             thread float *obs, thread uint *doneOut) {
-    uint pos = gw[0], cue = gw[1], ri = gw[3];
+    uint pos = words[0], cue = words[1], resampleIndex = words[3];
     float reward = 0.0f;
     uint done = 0u;
     if (pos >= 31u) {
         reward = ((action & 1u) == cue) ? 1.0f : 0.0f;
         done = 1u;
-        uint4 raw = hc_philox4x32(uint2(laneSeed, OAK_GW_STREAM),
-                                  uint4(ri, 0u, 0u, 0u));
+        uint4 raw = hc_philox4x32(uint2(laneSeed, ENV_RNG_STREAM),
+                                  uint4(resampleIndex, 0u, 0u, 0u));
         cue = raw.x & 1u;
-        ri = ri + 1u;
+        resampleIndex = resampleIndex + 1u;
         pos = 0u;
     } else if ((action & 1u) != 0u) {
         pos += 1u;
     } else {
         pos = (pos > 0u) ? pos - 1u : 0u;
     }
-    uint nLast = action & 1u;
-    gw[0] = pos; gw[1] = cue; gw[2] = nLast; gw[3] = ri;
-    gw_mchain_obs(pos, cue, nLast, obs);
+    uint nextLastAction = action & 1u;
+    words[0] = pos; words[1] = cue; words[2] = nextLastAction; words[3] = resampleIndex;
+    memoryChain_obs(pos, cue, nextLastAction, obs);
     *doneOut = done;
     return reward;
 }
 
-inline void gw_pmaze_gen(uint laneSeed, thread uint *w) {
-    w[0] = 0xffffffffu; w[1] = 0xffffffffu; w[2] = 0x1ffffu;
+inline void proceduralMaze_generate(uint laneSeed, thread uint *wallBits) {
+    wallBits[0] = 0xffffffffu; wallBits[1] = 0xffffffffu; wallBits[2] = 0x1ffffu;
     for (uint j = 0u; j < 5u; j++)
         for (uint i = 0u; i < 5u; i++) {
             uint idx = 2u * i + 9u * (2u * j);
-            w[idx >> 5u] &= ~(1u << (idx & 31u));
+            wallBits[idx >> 5u] &= ~(1u << (idx & 31u));
         }
     uint visited = 1u;
     uint stack[25];
-    uint sp = 1u;
+    uint stackSize = 1u;
     stack[0] = 0u;
-    uint ctr = 0u, bi = 0u;
-    uint4 buf = hc_philox4x32(uint2(laneSeed, HC_RNG_STREAM_RESET),
+    uint philoxCounter = 0u, philoxWordIndex = 0u;
+    uint4 philoxBlock = hc_philox4x32(uint2(laneSeed, HC_RNG_STREAM_RESET),
                               uint4(0u, 0u, 0u, 0u));
-    while (sp > 0u) {
-        uint cur = stack[sp - 1u];
-        int ci = int(cur % 5u), cj = int(cur / 5u);
-        uint cand = 0u, n = 0u;
+    while (stackSize > 0u) {
+        uint currentCell = stack[stackSize - 1u];
+        int cellI = int(currentCell % 5u), cellJ = int(currentCell / 5u);
+        uint neighborPacked = 0u, neighborCount = 0u;
         const int dxs[4] = { 1, 0, -1, 0 };
         const int dys[4] = { 0, 1, 0, -1 };
         for (uint d = 0u; d < 4u; d++) {
-            int ni = ci + dxs[d], nj = cj + dys[d];
-            if (ni >= 0 && ni < 5 && nj >= 0 && nj < 5 &&
-                ((visited >> uint(ni + 5 * nj)) & 1u) == 0u) {
-                cand |= uint(ni + 5 * nj) << (8u * n);
-                n++;
+            int nextI = cellI + dxs[d], nextJ = cellJ + dys[d];
+            if (nextI >= 0 && nextI < 5 && nextJ >= 0 && nextJ < 5 &&
+                ((visited >> uint(nextI + 5 * nextJ)) & 1u) == 0u) {
+                neighborPacked |= uint(nextI + 5 * nextJ) << (8u * neighborCount);
+                neighborCount++;
             }
         }
-        if (n == 0u) { sp--; continue; }
-        if (bi == 4u) {
-            ctr++;
-            buf = hc_philox4x32(uint2(laneSeed, HC_RNG_STREAM_RESET),
-                                uint4(ctr, 0u, 0u, 0u));
-            bi = 0u;
+        if (neighborCount == 0u) { stackSize--; continue; }
+        if (philoxWordIndex == 4u) {
+            philoxCounter++;
+            philoxBlock = hc_philox4x32(uint2(laneSeed, HC_RNG_STREAM_RESET),
+                                uint4(philoxCounter, 0u, 0u, 0u));
+            philoxWordIndex = 0u;
         }
-        uint words[4] = { buf.x, buf.y, buf.z, buf.w };
-        uint nxt = (cand >> (8u * (words[bi] % n))) & 0xffu;
-        bi++;
-        uint ni = nxt % 5u, nj = nxt / 5u;
-        uint idx = (uint(ci) + ni) + 9u * (uint(cj) + nj);
-        w[idx >> 5u] &= ~(1u << (idx & 31u));
-        visited |= 1u << nxt;
-        stack[sp] = nxt;
-        sp++;
+        uint philoxWords[4] = { philoxBlock.x, philoxBlock.y, philoxBlock.z, philoxBlock.w };
+        uint nextCell = (neighborPacked >> (8u * (philoxWords[philoxWordIndex] % neighborCount))) & 0xffu;
+        philoxWordIndex++;
+        uint nextI = nextCell % 5u, nextJ = nextCell / 5u;
+        uint idx = (uint(cellI) + nextI) + 9u * (uint(cellJ) + nextJ);
+        wallBits[idx >> 5u] &= ~(1u << (idx & 31u));
+        visited |= 1u << nextCell;
+        stack[stackSize] = nextCell;
+        stackSize++;
     }
 }
 
-inline bool gw_pmaze_is_wall(uint w0, uint w1, uint w2, int x, int y) {
+inline bool proceduralMaze_isWall(uint wallBits0, uint wallBits1, uint wallBits2, int x, int y) {
     if (x <= 0 || x >= 10 || y <= 0 || y >= 10) return true;
     uint idx = uint(x - 1) + 9u * uint(y - 1);
-    uint w = (idx < 32u) ? w0 : ((idx < 64u) ? w1 : w2);
-    return ((w >> (idx & 31u)) & 1u) != 0u;
+    uint wallBits = (idx < 32u) ? wallBits0 : ((idx < 64u) ? wallBits1 : wallBits2);
+    return ((wallBits >> (idx & 31u)) & 1u) != 0u;
 }
 
-inline void gw_pmaze_obs(uint x, uint y, uint gx, uint gy, uint sg,
-                         uint w0, uint w1, uint w2, thread float *o) {
+inline void proceduralMaze_obs(uint x, uint y, uint goalX, uint goalY, uint stepsSinceGoal,
+                         uint wallBits0, uint wallBits1, uint wallBits2, thread float *obs) {
     int ix = int(x), iy = int(y);
-    o[0] = float(x) / 10.0f;
-    o[1] = float(y) / 10.0f;
-    o[2] = float(int(gx) - ix) / 10.0f;
-    o[3] = float(int(gy) - iy) / 10.0f;
-    o[4] = float(abs(int(gx) - ix) + abs(int(gy) - iy)) / 16.0f;
-    o[5] = gw_pmaze_is_wall(w0, w1, w2, ix + 0, iy - 1) ? 1.0f : 0.0f;
-    o[6] = gw_pmaze_is_wall(w0, w1, w2, ix + 0, iy + 1) ? 1.0f : 0.0f;
-    o[7] = gw_pmaze_is_wall(w0, w1, w2, ix - 1, iy + 0) ? 1.0f : 0.0f;
-    o[8] = gw_pmaze_is_wall(w0, w1, w2, ix + 1, iy + 0) ? 1.0f : 0.0f;
-    o[9] = gw_pmaze_is_wall(w0, w1, w2, ix + 1, iy - 1) ? 1.0f : 0.0f;
-    o[10] = gw_pmaze_is_wall(w0, w1, w2, ix - 1, iy - 1) ? 1.0f : 0.0f;
-    o[11] = gw_pmaze_is_wall(w0, w1, w2, ix + 1, iy + 1) ? 1.0f : 0.0f;
-    o[12] = gw_pmaze_is_wall(w0, w1, w2, ix - 1, iy + 1) ? 1.0f : 0.0f;
-    o[13] = (4.0f - o[5] - o[6] - o[7] - o[8]) / 4.0f;
-    o[14] = min(float(sg) / 256.0f, 1.0f);
-    o[15] = (x == gx || y == gy) ? 1.0f : 0.0f;
-    o[16] = 1.0f;
+    obs[0] = float(x) / 10.0f;
+    obs[1] = float(y) / 10.0f;
+    obs[2] = float(int(goalX) - ix) / 10.0f;
+    obs[3] = float(int(goalY) - iy) / 10.0f;
+    obs[4] = float(abs(int(goalX) - ix) + abs(int(goalY) - iy)) / 16.0f;
+    obs[5] = proceduralMaze_isWall(wallBits0, wallBits1, wallBits2, ix + 0, iy - 1) ? 1.0f : 0.0f;
+    obs[6] = proceduralMaze_isWall(wallBits0, wallBits1, wallBits2, ix + 0, iy + 1) ? 1.0f : 0.0f;
+    obs[7] = proceduralMaze_isWall(wallBits0, wallBits1, wallBits2, ix - 1, iy + 0) ? 1.0f : 0.0f;
+    obs[8] = proceduralMaze_isWall(wallBits0, wallBits1, wallBits2, ix + 1, iy + 0) ? 1.0f : 0.0f;
+    obs[9] = proceduralMaze_isWall(wallBits0, wallBits1, wallBits2, ix + 1, iy - 1) ? 1.0f : 0.0f;
+    obs[10] = proceduralMaze_isWall(wallBits0, wallBits1, wallBits2, ix - 1, iy - 1) ? 1.0f : 0.0f;
+    obs[11] = proceduralMaze_isWall(wallBits0, wallBits1, wallBits2, ix + 1, iy + 1) ? 1.0f : 0.0f;
+    obs[12] = proceduralMaze_isWall(wallBits0, wallBits1, wallBits2, ix - 1, iy + 1) ? 1.0f : 0.0f;
+    obs[13] = (4.0f - obs[5] - obs[6] - obs[7] - obs[8]) / 4.0f;
+    obs[14] = min(float(stepsSinceGoal) / 256.0f, 1.0f);
+    obs[15] = (x == goalX || y == goalY) ? 1.0f : 0.0f;
+    obs[16] = 1.0f;
 }
 
-inline float gw_pmaze_step(thread uint *gw, uint laneSeed, uint action,
+inline float proceduralMaze_step(thread uint *words, uint laneSeed, uint action,
                            thread float *obs, thread uint *doneOut) {
-    uint x = gw[0], y = gw[1], gx = gw[2], gy = gw[3], sg = gw[4], ri = gw[5];
-    uint w0 = gw[6], w1 = gw[7], w2 = gw[8];
-    int dx = 0, dy = 0;
+    uint x = words[0], y = words[1], goalX = words[2], goalY = words[3], stepsSinceGoal = words[4], resampleIndex = words[5];
+    uint wallBits0 = words[6], wallBits1 = words[7], wallBits2 = words[8];
+    int deltaX = 0, deltaY = 0;
     switch (action & 3u) {
-        case 0u: dy = -1; break;
-        case 1u: dy = 1; break;
-        case 2u: dx = -1; break;
-        default: dx = 1; break;
+        case 0u: deltaY = -1; break;
+        case 1u: deltaY = 1; break;
+        case 2u: deltaX = -1; break;
+        default: deltaX = 1; break;
     }
-    int nx = int(x) + dx, ny = int(y) + dy;
-    if (gw_pmaze_is_wall(w0, w1, w2, nx, ny)) { nx = int(x); ny = int(y); }
+    int nextX = int(x) + deltaX, nextY = int(y) + deltaY;
+    if (proceduralMaze_isWall(wallBits0, wallBits1, wallBits2, nextX, nextY)) { nextX = int(x); nextY = int(y); }
     float reward = 0.0f;
-    uint done = 0u, nsg = sg + 1u, nri = ri;
-    if (uint(nx) == gx && uint(ny) == gy) {
+    uint done = 0u, nextStepsSinceGoal = stepsSinceGoal + 1u, nextResampleIndex = resampleIndex;
+    if (uint(nextX) == goalX && uint(nextY) == goalY) {
         reward = 1.0f;
         done = 1u;
-        nsg = 0u;
-        nri = ri + 1u;
-        uint b = 0u;
+        nextStepsSinceGoal = 0u;
+        nextResampleIndex = resampleIndex + 1u;
+        uint sampleBlock = 0u;
         for (;;) {
-            uint4 raw = hc_philox4x32(uint2(laneSeed, OAK_GW_STREAM),
-                                      uint4(ri, b, 0u, 0u));
-            uint words[4] = { raw.x, raw.y, raw.z, raw.w };
+            uint4 raw = hc_philox4x32(uint2(laneSeed, ENV_RNG_STREAM),
+                                      uint4(resampleIndex, sampleBlock, 0u, 0u));
+            uint philoxWords[4] = { raw.x, raw.y, raw.z, raw.w };
             bool found = false;
             for (int wi = 0; wi < 4; wi++) {
-                uint idx = uint(hc_u01(words[wi]) * 81.0f);
-                int cx = 1 + int(idx % 9u), cy = 1 + int(idx / 9u);
-                if (!gw_pmaze_is_wall(w0, w1, w2, cx, cy)) {
-                    nx = cx; ny = cy; found = true; break;
+                uint idx = uint(hc_u01(philoxWords[wi]) * 81.0f);
+                int candidateX = 1 + int(idx % 9u), candidateY = 1 + int(idx / 9u);
+                if (!proceduralMaze_isWall(wallBits0, wallBits1, wallBits2, candidateX, candidateY)) {
+                    nextX = candidateX; nextY = candidateY; found = true; break;
                 }
             }
             if (found) break;
-            b += 2u;
+            sampleBlock += 2u;
         }
-        b = 1u;
+        sampleBlock = 1u;
         for (;;) {
-            uint4 raw = hc_philox4x32(uint2(laneSeed, OAK_GW_STREAM),
-                                      uint4(ri, b, 0u, 0u));
-            uint words[4] = { raw.x, raw.y, raw.z, raw.w };
+            uint4 raw = hc_philox4x32(uint2(laneSeed, ENV_RNG_STREAM),
+                                      uint4(resampleIndex, sampleBlock, 0u, 0u));
+            uint philoxWords[4] = { raw.x, raw.y, raw.z, raw.w };
             bool found = false;
             for (int wi = 0; wi < 4; wi++) {
-                uint idx = uint(hc_u01(words[wi]) * 81.0f);
-                int cx = 1 + int(idx % 9u), cy = 1 + int(idx / 9u);
-                if (!gw_pmaze_is_wall(w0, w1, w2, cx, cy) &&
-                    (cx != nx || cy != ny)) {
-                    gx = uint(cx); gy = uint(cy); found = true; break;
+                uint idx = uint(hc_u01(philoxWords[wi]) * 81.0f);
+                int candidateX = 1 + int(idx % 9u), candidateY = 1 + int(idx / 9u);
+                if (!proceduralMaze_isWall(wallBits0, wallBits1, wallBits2, candidateX, candidateY) &&
+                    (candidateX != nextX || candidateY != nextY)) {
+                    goalX = uint(candidateX); goalY = uint(candidateY); found = true; break;
                 }
             }
             if (found) break;
-            b += 2u;
+            sampleBlock += 2u;
         }
     }
-    gw[0] = uint(nx); gw[1] = uint(ny); gw[2] = gx; gw[3] = gy;
-    gw[4] = nsg; gw[5] = nri;
-    gw_pmaze_obs(uint(nx), uint(ny), gx, gy, nsg, w0, w1, w2, obs);
+    words[0] = uint(nextX); words[1] = uint(nextY); words[2] = goalX; words[3] = goalY;
+    words[4] = nextStepsSinceGoal; words[5] = nextResampleIndex;
+    proceduralMaze_obs(uint(nextX), uint(nextY), goalX, goalY, nextStepsSinceGoal, wallBits0, wallBits1, wallBits2, obs);
     *doneOut = done;
     return reward;
 }
 
-inline bool gw_hdm_is_wall(int x, int y) {
+inline bool highDimMaze_isWall(int x, int y) {
     if (x <= 0 || x >= 10 || y <= 0 || y >= 10) return true;
     if (x == 3 && y != 9) return true;
     if (x == 7 && y != 1) return true;
     return false;
 }
 
-inline void gw_hdm_obs(uint x, uint y, uint gx, uint gy, thread float *o) {
+inline void highDimMaze_obs(uint x, uint y, uint goalX, uint goalY, thread float *obs) {
     int ix = int(x), iy = int(y);
-    o[0] = float(x) / 16.0f;
-    o[1] = float(y) / 16.0f;
-    o[2] = gw_hdm_is_wall(ix + 0, iy - 1) ? 1.0f : 0.0f;
-    o[3] = gw_hdm_is_wall(ix + 0, iy + 1) ? 1.0f : 0.0f;
-    o[4] = gw_hdm_is_wall(ix - 1, iy + 0) ? 1.0f : 0.0f;
-    o[5] = gw_hdm_is_wall(ix + 1, iy + 0) ? 1.0f : 0.0f;
-    o[6] = float(int(gx) - ix) / 16.0f;
-    o[7] = float(int(gy) - iy) / 16.0f;
-    for (uint b = 0u; b < 4u; b++) {
-        o[8 + b] = float((x >> b) & 1u);
-        o[12 + b] = float((y >> b) & 1u);
+    obs[0] = float(x) / 16.0f;
+    obs[1] = float(y) / 16.0f;
+    obs[2] = highDimMaze_isWall(ix + 0, iy - 1) ? 1.0f : 0.0f;
+    obs[3] = highDimMaze_isWall(ix + 0, iy + 1) ? 1.0f : 0.0f;
+    obs[4] = highDimMaze_isWall(ix - 1, iy + 0) ? 1.0f : 0.0f;
+    obs[5] = highDimMaze_isWall(ix + 1, iy + 0) ? 1.0f : 0.0f;
+    obs[6] = float(int(goalX) - ix) / 16.0f;
+    obs[7] = float(int(goalY) - iy) / 16.0f;
+    for (uint bit = 0u; bit < 4u; bit++) {
+        obs[8 + bit] = float((x >> bit) & 1u);
+        obs[12 + bit] = float((y >> bit) & 1u);
     }
-    o[16] = 0.0f;
+    obs[16] = 0.0f;
 }
 
-inline float gw_hdm_step(thread uint *gw, uint laneSeed, uint action,
+inline float highDimMaze_step(thread uint *words, uint laneSeed, uint action,
                          thread float *obs, thread uint *doneOut) {
-    uint x = gw[0], y = gw[1], gx = gw[2], gy = gw[3], sg = gw[4], ri = gw[5];
-    uint lastDir = gw[6];
-    uint a = action % 6u;
-    int nx = int(x), ny = int(y);
-    if (a < 4u) {
-        int dx = 0, dy = 0;
-        switch (a) {
-            case 0u: dy = -1; break;
-            case 1u: dy = 1; break;
-            case 2u: dx = -1; break;
-            default: dx = 1; break;
+    uint x = words[0], y = words[1], goalX = words[2], goalY = words[3], stepsSinceGoal = words[4], resampleIndex = words[5];
+    uint lastDirection = words[6];
+    uint actionIndex = action % 6u;
+    int nextX = int(x), nextY = int(y);
+    if (actionIndex < 4u) {
+        int deltaX = 0, deltaY = 0;
+        switch (actionIndex) {
+            case 0u: deltaY = -1; break;
+            case 1u: deltaY = 1; break;
+            case 2u: deltaX = -1; break;
+            default: deltaX = 1; break;
         }
-        lastDir = a;
-        if (!gw_hdm_is_wall(nx + dx, ny + dy)) { nx += dx; ny += dy; }
-    } else if (a == 5u) {
-        int dx = 0, dy = 0;
-        switch (lastDir & 3u) {
-            case 0u: dy = -1; break;
-            case 1u: dy = 1; break;
-            case 2u: dx = -1; break;
-            default: dx = 1; break;
+        lastDirection = actionIndex;
+        if (!highDimMaze_isWall(nextX + deltaX, nextY + deltaY)) { nextX += deltaX; nextY += deltaY; }
+    } else if (actionIndex == 5u) {
+        int deltaX = 0, deltaY = 0;
+        switch (lastDirection & 3u) {
+            case 0u: deltaY = -1; break;
+            case 1u: deltaY = 1; break;
+            case 2u: deltaX = -1; break;
+            default: deltaX = 1; break;
         }
-        if (!gw_hdm_is_wall(nx + dx, ny + dy)) {
-            nx += dx; ny += dy;
-            if (!gw_hdm_is_wall(nx + dx, ny + dy)) { nx += dx; ny += dy; }
+        if (!highDimMaze_isWall(nextX + deltaX, nextY + deltaY)) {
+            nextX += deltaX; nextY += deltaY;
+            if (!highDimMaze_isWall(nextX + deltaX, nextY + deltaY)) { nextX += deltaX; nextY += deltaY; }
         }
     }
     float reward = 0.0f;
-    uint done = 0u, nsg = sg + 1u, nri = ri;
-    if (uint(nx) == gx && uint(ny) == gy) {
+    uint done = 0u, nextStepsSinceGoal = stepsSinceGoal + 1u, nextResampleIndex = resampleIndex;
+    if (uint(nextX) == goalX && uint(nextY) == goalY) {
         reward = 1.0f;
         done = 1u;
-        nsg = 0u;
-        nri = ri + 1u;
-        uint b = 0u;
+        nextStepsSinceGoal = 0u;
+        nextResampleIndex = resampleIndex + 1u;
+        uint sampleBlock = 0u;
         for (;;) {
-            uint4 raw = hc_philox4x32(uint2(laneSeed, OAK_GW_STREAM),
-                                      uint4(ri, b, 0u, 0u));
-            uint words[4] = { raw.x, raw.y, raw.z, raw.w };
+            uint4 raw = hc_philox4x32(uint2(laneSeed, ENV_RNG_STREAM),
+                                      uint4(resampleIndex, sampleBlock, 0u, 0u));
+            uint philoxWords[4] = { raw.x, raw.y, raw.z, raw.w };
             bool found = false;
             for (int wi = 0; wi < 4; wi++) {
-                uint idx = uint(hc_u01(words[wi]) * 81.0f);
-                int cx = 1 + int(idx % 9u), cy = 1 + int(idx / 9u);
-                if (!gw_hdm_is_wall(cx, cy)) {
-                    nx = cx; ny = cy; found = true; break;
+                uint idx = uint(hc_u01(philoxWords[wi]) * 81.0f);
+                int candidateX = 1 + int(idx % 9u), candidateY = 1 + int(idx / 9u);
+                if (!highDimMaze_isWall(candidateX, candidateY)) {
+                    nextX = candidateX; nextY = candidateY; found = true; break;
                 }
             }
             if (found) break;
-            b += 2u;
+            sampleBlock += 2u;
         }
-        b = 1u;
+        sampleBlock = 1u;
         for (;;) {
-            uint4 raw = hc_philox4x32(uint2(laneSeed, OAK_GW_STREAM),
-                                      uint4(ri, b, 0u, 0u));
-            uint words[4] = { raw.x, raw.y, raw.z, raw.w };
+            uint4 raw = hc_philox4x32(uint2(laneSeed, ENV_RNG_STREAM),
+                                      uint4(resampleIndex, sampleBlock, 0u, 0u));
+            uint philoxWords[4] = { raw.x, raw.y, raw.z, raw.w };
             bool found = false;
             for (int wi = 0; wi < 4; wi++) {
-                uint idx = uint(hc_u01(words[wi]) * 81.0f);
-                int cx = 1 + int(idx % 9u), cy = 1 + int(idx / 9u);
-                if (!gw_hdm_is_wall(cx, cy) && (cx != nx || cy != ny)) {
-                    gx = uint(cx); gy = uint(cy); found = true; break;
+                uint idx = uint(hc_u01(philoxWords[wi]) * 81.0f);
+                int candidateX = 1 + int(idx % 9u), candidateY = 1 + int(idx / 9u);
+                if (!highDimMaze_isWall(candidateX, candidateY) && (candidateX != nextX || candidateY != nextY)) {
+                    goalX = uint(candidateX); goalY = uint(candidateY); found = true; break;
                 }
             }
             if (found) break;
-            b += 2u;
+            sampleBlock += 2u;
         }
     }
-    gw[0] = uint(nx); gw[1] = uint(ny); gw[2] = gx; gw[3] = gy;
-    gw[4] = nsg; gw[5] = nri; gw[6] = lastDir;
-    gw_hdm_obs(uint(nx), uint(ny), gx, gy, obs);
+    words[0] = uint(nextX); words[1] = uint(nextY); words[2] = goalX; words[3] = goalY;
+    words[4] = nextStepsSinceGoal; words[5] = nextResampleIndex; words[6] = lastDirection;
+    highDimMaze_obs(uint(nextX), uint(nextY), goalX, goalY, obs);
     *doneOut = done;
     return reward;
 }
 
-inline bool gw_po_is_wall(int x, int y) {
+inline bool poMaze_isWall(int x, int y) {
     if (x <= 0 || x >= 10 || y <= 0 || y >= 10) return true;
     if (y == 3 && x != 8) return true;
     if (y == 7 && x != 2) return true;
     return false;
 }
 
-inline void gw_po_obs(uint x, uint y, uint gx, uint gy, thread float *o) {
+inline void poMaze_obs(uint x, uint y, uint goalX, uint goalY, thread float *obs) {
     int ix = int(x), iy = int(y);
-    o[0] = gw_po_is_wall(ix + 0, iy - 1) ? 1.0f : 0.0f;
-    o[1] = gw_po_is_wall(ix + 1, iy - 1) ? 1.0f : 0.0f;
-    o[2] = gw_po_is_wall(ix + 1, iy + 0) ? 1.0f : 0.0f;
-    o[3] = gw_po_is_wall(ix + 1, iy + 1) ? 1.0f : 0.0f;
-    o[4] = gw_po_is_wall(ix + 0, iy + 1) ? 1.0f : 0.0f;
-    o[5] = gw_po_is_wall(ix - 1, iy + 1) ? 1.0f : 0.0f;
-    o[6] = gw_po_is_wall(ix - 1, iy + 0) ? 1.0f : 0.0f;
-    o[7] = gw_po_is_wall(ix - 1, iy - 1) ? 1.0f : 0.0f;
-    o[8] = float(x) / 10.0f;
-    o[9] = float(y) / 10.0f;
-    o[10] = (gx > x) ? 1.0f : 0.0f;
-    o[11] = (gx < x) ? 1.0f : 0.0f;
-    o[12] = (gy > y) ? 1.0f : 0.0f;
-    o[13] = (gy < y) ? 1.0f : 0.0f;
-    o[14] = 1.0f;
-    o[15] = 0.0f;
-    o[16] = 0.0f;
+    obs[0] = poMaze_isWall(ix + 0, iy - 1) ? 1.0f : 0.0f;
+    obs[1] = poMaze_isWall(ix + 1, iy - 1) ? 1.0f : 0.0f;
+    obs[2] = poMaze_isWall(ix + 1, iy + 0) ? 1.0f : 0.0f;
+    obs[3] = poMaze_isWall(ix + 1, iy + 1) ? 1.0f : 0.0f;
+    obs[4] = poMaze_isWall(ix + 0, iy + 1) ? 1.0f : 0.0f;
+    obs[5] = poMaze_isWall(ix - 1, iy + 1) ? 1.0f : 0.0f;
+    obs[6] = poMaze_isWall(ix - 1, iy + 0) ? 1.0f : 0.0f;
+    obs[7] = poMaze_isWall(ix - 1, iy - 1) ? 1.0f : 0.0f;
+    obs[8] = float(x) / 10.0f;
+    obs[9] = float(y) / 10.0f;
+    obs[10] = (goalX > x) ? 1.0f : 0.0f;
+    obs[11] = (goalX < x) ? 1.0f : 0.0f;
+    obs[12] = (goalY > y) ? 1.0f : 0.0f;
+    obs[13] = (goalY < y) ? 1.0f : 0.0f;
+    obs[14] = 1.0f;
+    obs[15] = 0.0f;
+    obs[16] = 0.0f;
 }
 
-inline float gw_po_step(thread uint *gw, uint laneSeed, uint action,
+inline float poMaze_step(thread uint *words, uint laneSeed, uint action,
                         thread float *obs, thread uint *doneOut) {
-    uint x = gw[0], y = gw[1], gx = gw[2], gy = gw[3], sg = gw[4], ri = gw[5];
-    int dx = 0, dy = 0;
+    uint x = words[0], y = words[1], goalX = words[2], goalY = words[3], stepsSinceGoal = words[4], resampleIndex = words[5];
+    int deltaX = 0, deltaY = 0;
     switch (action & 3u) {
-        case 0u: dy = -1; break;
-        case 1u: dy = 1; break;
-        case 2u: dx = -1; break;
-        default: dx = 1; break;
+        case 0u: deltaY = -1; break;
+        case 1u: deltaY = 1; break;
+        case 2u: deltaX = -1; break;
+        default: deltaX = 1; break;
     }
-    int nx = int(x) + dx, ny = int(y) + dy;
-    if (gw_po_is_wall(nx, ny)) { nx = int(x); ny = int(y); }
+    int nextX = int(x) + deltaX, nextY = int(y) + deltaY;
+    if (poMaze_isWall(nextX, nextY)) { nextX = int(x); nextY = int(y); }
     float reward = 0.0f;
-    uint done = 0u, nsg = sg + 1u, nri = ri;
-    if (uint(nx) == gx && uint(ny) == gy) {
+    uint done = 0u, nextStepsSinceGoal = stepsSinceGoal + 1u, nextResampleIndex = resampleIndex;
+    if (uint(nextX) == goalX && uint(nextY) == goalY) {
         reward = 1.0f;
         done = 1u;
-        nsg = 0u;
-        nri = ri + 1u;
-        uint b = 0u;
+        nextStepsSinceGoal = 0u;
+        nextResampleIndex = resampleIndex + 1u;
+        uint sampleBlock = 0u;
         for (;;) {
-            uint4 raw = hc_philox4x32(uint2(laneSeed, OAK_GW_STREAM),
-                                      uint4(ri, b, 0u, 0u));
-            uint words[4] = { raw.x, raw.y, raw.z, raw.w };
+            uint4 raw = hc_philox4x32(uint2(laneSeed, ENV_RNG_STREAM),
+                                      uint4(resampleIndex, sampleBlock, 0u, 0u));
+            uint philoxWords[4] = { raw.x, raw.y, raw.z, raw.w };
             bool found = false;
             for (int wi = 0; wi < 4; wi++) {
-                uint idx = uint(hc_u01(words[wi]) * 81.0f);
-                int cx = 1 + int(idx % 9u), cy = 1 + int(idx / 9u);
-                if (!gw_po_is_wall(cx, cy)) {
-                    nx = cx; ny = cy; found = true; break;
+                uint idx = uint(hc_u01(philoxWords[wi]) * 81.0f);
+                int candidateX = 1 + int(idx % 9u), candidateY = 1 + int(idx / 9u);
+                if (!poMaze_isWall(candidateX, candidateY)) {
+                    nextX = candidateX; nextY = candidateY; found = true; break;
                 }
             }
             if (found) break;
-            b += 2u;
+            sampleBlock += 2u;
         }
-        b = 1u;
+        sampleBlock = 1u;
         for (;;) {
-            uint4 raw = hc_philox4x32(uint2(laneSeed, OAK_GW_STREAM),
-                                      uint4(ri, b, 0u, 0u));
-            uint words[4] = { raw.x, raw.y, raw.z, raw.w };
+            uint4 raw = hc_philox4x32(uint2(laneSeed, ENV_RNG_STREAM),
+                                      uint4(resampleIndex, sampleBlock, 0u, 0u));
+            uint philoxWords[4] = { raw.x, raw.y, raw.z, raw.w };
             bool found = false;
             for (int wi = 0; wi < 4; wi++) {
-                uint idx = uint(hc_u01(words[wi]) * 81.0f);
-                int cx = 1 + int(idx % 9u), cy = 1 + int(idx / 9u);
-                if (!gw_po_is_wall(cx, cy) && (cx != nx || cy != ny)) {
-                    gx = uint(cx); gy = uint(cy); found = true; break;
+                uint idx = uint(hc_u01(philoxWords[wi]) * 81.0f);
+                int candidateX = 1 + int(idx % 9u), candidateY = 1 + int(idx / 9u);
+                if (!poMaze_isWall(candidateX, candidateY) && (candidateX != nextX || candidateY != nextY)) {
+                    goalX = uint(candidateX); goalY = uint(candidateY); found = true; break;
                 }
             }
             if (found) break;
-            b += 2u;
+            sampleBlock += 2u;
         }
     }
-    gw[0] = uint(nx); gw[1] = uint(ny); gw[2] = gx; gw[3] = gy;
-    gw[4] = nsg; gw[5] = nri;
-    gw_po_obs(uint(nx), uint(ny), gx, gy, obs);
+    words[0] = uint(nextX); words[1] = uint(nextY); words[2] = goalX; words[3] = goalY;
+    words[4] = nextStepsSinceGoal; words[5] = nextResampleIndex;
+    poMaze_obs(uint(nextX), uint(nextY), goalX, goalY, obs);
     *doneOut = done;
     return reward;
 }
 
-inline float gw_dchain_step(thread uint *gw, uint action, thread float *obs,
+inline float delayedChain_step(thread uint *words, uint action, thread float *obs,
                             thread uint *doneOut) {
-    uint pos = gw[0];
+    uint pos = words[0];
     float reward = 0.0f;
     uint done = 0u;
     if ((action & 1u) != 0u) {
@@ -751,11 +724,11 @@ inline float gw_dchain_step(thread uint *gw, uint action, thread float *obs,
     } else {
         pos = (pos > 0u) ? pos - 1u : 0u;
     }
-    uint nLast = action & 1u;
-    gw[0] = pos;
-    gw[1] = nLast;
+    uint nextLastAction = action & 1u;
+    words[0] = pos;
+    words[1] = nextLastAction;
     obs[0] = float(pos) / 32.0f;
-    obs[1] = float(nLast);
+    obs[1] = float(nextLastAction);
     obs[2] = 1.0f;
     for (int i = 3; i < 17; i++) obs[i] = 0.0f;
     *doneOut = done;
