@@ -1116,31 +1116,6 @@ inline void emit_all_options(Ctx ctx, uint tid) {
         }
         continue;
     }
-    if (DL == 6u) {
-        float acc0 = 0.0f, acc1 = 0.0f, acc2 = 0.0f;
-        float acc3 = 0.0f, acc4 = 0.0f, acc5 = 0.0f;
-        for (uint a = 0u; a < OAK_ACT; ++a) {
-            uint i = act_of(act, a);
-            float x = currS[i];
-            device const float *row = &ctx.optPolicy[i * KDL + k * 6u];
-            acc0 = fma(row[0], x, acc0);
-            acc1 = fma(row[1], x, acc1);
-            acc2 = fma(row[2], x, acc2);
-            acc3 = fma(row[3], x, acc3);
-            acc4 = fma(row[4], x, acc4);
-            acc5 = fma(row[5], x, acc5);
-        }
-        float accv[6] = {acc0, acc1, acc2, acc3, acc4, acc5};
-        for (uint j = 0u; j < ctx.D; ++j) {
-            uint kd = k * ctx.D + j;
-
-            float mu = (j < 6u) ? tanh(accv[j]) : 0.0f;
-            ctx.muRaw[kd] = (j < 6u) ? accv[j] : 0.0f;
-            if (!isfinite(mu)) mu = ctx.optionPolicyMean[kd];
-            ctx.optionPolicyMean[kd] = mu;
-        }
-        continue;
-    }
     float acc[16];
     for (uint j = 0u; j < DL; ++j) acc[j] = 0.0f;
     for (uint a = 0u; a < OAK_ACT; ++a) {
