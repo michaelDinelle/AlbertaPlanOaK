@@ -69,16 +69,14 @@ async function readRunMeta(path: string): Promise<RunMeta | null> {
 
 function envIdsOf(meta: RunMeta): string[] {
   const sched = meta.envSchedule;
-  if (Array.isArray(sched) && sched.length > 0) {
-    const seen: string[] = [];
-    for (const s of sched) {
-      if (s !== null && typeof s === 'object' && typeof s.envId === 'string' && !seen.includes(s.envId)) {
-        seen.push(s.envId);
-      }
+  if (!Array.isArray(sched) || sched.length === 0) return [];
+  const seen: string[] = [];
+  for (const s of sched) {
+    if (s !== null && typeof s === 'object' && typeof s.envId === 'string' && !seen.includes(s.envId)) {
+      seen.push(s.envId);
     }
-    if (seen.length > 0) return seen;
   }
-  return typeof meta.envId === 'string' && meta.envId.length > 0 ? [meta.envId] : [];
+  return seen;
 }
 
 function ablationLabelOf(meta: RunMeta): string {
@@ -385,8 +383,14 @@ function currentSummary(raw: RunSummary | null): RunSummary | null {
 
 export async function buildRunDetail(run: ResolvedRun, recs: RecordingEntry[]): Promise<RunDetail> {
   const summaryRead = await readJsonFile<RunSummary>(join(run.dir, 'summary.json'));
-  const summary = currentSummary(summaryRead.value);
-  const summaryError = summaryRead.error === 'unreadable' ? 'unreadable' : null;
+  let summary: RunSummary | null = null;
+  let summaryError: 'unreadable' | null = null;
+  if (summaryRead.error === 'unreadable') {
+    summaryError = 'unreadable';
+  } else if (summaryRead.error === null) {
+    summary = currentSummary(summaryRead.value);
+    if (summary === null) summaryError = 'unreadable';
+  }
 
   const aggText = await readTextOrNull(join(run.dir, 'aggregate.jsonl'));
   const aggregate: AggregateRow[] = aggText === null ? [] : parseJsonl<AggregateRow>(aggText);

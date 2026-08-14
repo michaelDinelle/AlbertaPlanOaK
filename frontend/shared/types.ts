@@ -6,22 +6,17 @@ export interface EnvScheduleEntry {
   envId: string;
   seedStart: number;
   seedEnd: number;
-  flopsPerLaneStep: number;
 }
 
 export interface RunMeta {
   fleetSchemaVersion: number;
   command?: string;
-  envId: string;
   batch: number;
   seeds: number[];
   steps: number;
   policies: string[];
   ablation?: string[];
   ablationLabel?: string;
-  flopsPerLaneStep?: number;
-  organFlops?: Record<string, number>;
-  organCostVersion?: number;
   startedAt?: string;
   envSchedule?: EnvScheduleEntry[];
 }

@@ -303,7 +303,7 @@ async function computeColumnar(fleetPath: string, query: FleetQuery): Promise<Fl
         for (const e of meta.envSchedule ?? []) {
           if (seed >= e.seedStart && seed <= e.seedEnd) return e.envId;
         }
-        return meta.envId ?? '';
+        return '';
       };
       const seeds = meta.seeds ?? Array.from({ length: tape.laneCount }, (_, i) => i);
       for (let w = 0; w < tape.data.length; w++) {

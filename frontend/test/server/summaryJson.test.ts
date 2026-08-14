@@ -33,11 +33,11 @@ describe('summary.json artifacts are strict JSON (file-level, from bytes)', () =
 
 const META: RunMeta = {
   fleetSchemaVersion: 1,
-  envId: 'HalfCheetah-v4',
   batch: 1,
   seeds: [0],
   steps: 1000,
   policies: ['oak'],
+  envSchedule: [{ envId: 'HalfCheetah-v4', seedStart: 0, seedEnd: 0 }],
 };
 
 function resolved(dir: string): ResolvedRun {
@@ -100,12 +100,12 @@ describe('buildRunDetail — why the summary is missing', () => {
     expect(detail.summaryError).toBe('unreadable');
   });
 
-  it('a legacy summary reads as missing — no adaptation, no error', async () => {
+  it('a present summary without envSlices is unreadable', async () => {
     const detail = await withDir(async (dir) => {
       writeFileSync(join(dir, 'summary.json'), JSON.stringify({ results: [{ policy: 'oak', lanes: 4 }] }));
       return buildRunDetail(resolved(dir), []);
     });
-    expect(detail.summaryError).toBeNull();
+    expect(detail.summaryError).toBe('unreadable');
     expect(detail.summary).toBeNull();
   });
 

@@ -181,7 +181,7 @@ export interface EnvShare {
   fraction: number;
 }
 
-export function envShares(meta: Pick<RunMeta, 'envId' | 'batch' | 'envSchedule'>): EnvShare[] {
+export function envShares(meta: Pick<RunMeta, 'envSchedule'>): EnvShare[] {
   const counts = new Map<EnvId, number>();
   const schedule = meta.envSchedule;
   if (schedule && schedule.length > 0) {
@@ -190,8 +190,6 @@ export function envShares(meta: Pick<RunMeta, 'envId' | 'batch' | 'envSchedule'>
       const lanes = Math.max(0, entry.seedEnd - entry.seedStart + 1);
       counts.set(entry.envId, (counts.get(entry.envId) ?? 0) + lanes);
     }
-  } else if (isEnvId(meta.envId)) {
-    counts.set(meta.envId, meta.batch);
   }
   const total = [...counts.values()].reduce((sum, n) => sum + n, 0) || 1;
   return ENV_IDS.filter((id) => counts.has(id)).map((envId) => {
@@ -267,13 +265,6 @@ export function aggregateSeries(rows: readonly AggregateRow[], policy?: string):
   }
   return out;
 }
-
-export function policiesIn(rows: readonly AggregateRow[]): string[] {
-  const seen = new Set<string>();
-  for (const row of rows) seen.add(row.policy);
-  return [...seen].sort();
-}
-
 
 export interface LaneSeries {
   lane: number;

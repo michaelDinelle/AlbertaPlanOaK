@@ -39,7 +39,6 @@ import {
   formatStep,
   laneSeries,
   loadRunDetail,
-  policiesIn,
   primaryResult,
   runIndex,
   sortRuns,
@@ -415,11 +414,12 @@ export function populationFigures(
   };
 }
 
-export function runScheduleLine(meta: Pick<RunMeta, 'envId' | 'batch' | 'steps' | 'envSchedule'>): string {
+export function runScheduleLine(meta: Pick<RunMeta, 'batch' | 'steps' | 'envSchedule'>): string {
   const shares = envShares(meta);
   const horizon = `${formatStep(meta.steps)} steps`;
-  if (shares.length <= 1) {
-    return `${envName(meta.envId)} · ${formatCount(meta.batch)} seeds · ${horizon}`;
+  if (shares.length === 0) return `${formatCount(meta.batch)} seeds · ${horizon}`;
+  if (shares.length === 1) {
+    return `${envName(shares[0]!.envId)} · ${formatCount(meta.batch)} seeds · ${horizon}`;
   }
   const counts = new Set(shares.map((share) => share.lanes));
   const perEnv = counts.size === 1 ? shares[0]?.lanes ?? meta.batch : null;
@@ -481,7 +481,7 @@ export function cycleEnv(list: readonly EnvId[], current: EnvId | null, directio
   return list[next] ?? null;
 }
 
-export function wallEnvs(meta: Pick<RunMeta, 'envId' | 'batch' | 'envSchedule'>, recordings: readonly RecordingRef[]): EnvId[] {
+export function wallEnvs(meta: Pick<RunMeta, 'envSchedule'>, recordings: readonly RecordingRef[]): EnvId[] {
   const seen = new Set<EnvId>();
   for (const share of envShares(meta)) seen.add(share.envId);
   for (const rec of recordings) if (isEnvId(rec.envId)) seen.add(rec.envId);
@@ -1790,7 +1790,7 @@ export const mount: ViewMount = (host) => {
 
   function renderRun(next: RunDetail, pick: FeaturedPick): void {
     detail = next;
-    policy = policiesIn(next.aggregate)[0] ?? next.meta.policies[0] ?? 'oak';
+    policy = 'oak';
     envList = wallEnvs(next.meta, next.recordings);
     status.remove();
     main.hidden = false;
@@ -1816,7 +1816,7 @@ export const mount: ViewMount = (host) => {
       body.append(
         emptyState(
           'This run declares no environments',
-          'meta.json carries neither an envSchedule nor a readable envId, so there is nothing to show.',
+          'meta.json has no envSchedule, so there is nothing to show.',
         ),
       );
       return;

@@ -326,6 +326,9 @@ async function buildFixtures(): Promise<void> {
       policies: ['oak'],
       ablationLabel: 'none',
       startedAt: '2026-08-01T10:00:00Z',
+      envSchedule: [
+        { envId: 'HalfCheetah-v4', seedStart: 0, seedEnd: 1 },
+      ],
     }),
   );
   await writeFile(
@@ -351,6 +354,9 @@ async function buildFixtures(): Promise<void> {
       steps: 1000,
       policies: ['oak'],
       startedAt: '2026-07-30T10:00:00Z',
+      envSchedule: [
+        { envId: 'DeepSea-cont-v0', seedStart: 0, seedEnd: 0 },
+      ],
     }),
   );
   await writeFile(
@@ -377,6 +383,9 @@ async function buildFixtures(): Promise<void> {
       steps: 300,
       policies: ['oak'],
       startedAt: '2026-08-03T10:00:00Z',
+      envSchedule: [
+        { envId: 'CartPole-cont-v0', seedStart: 0, seedEnd: 0 },
+      ],
     }),
   );
   await writeFile(
@@ -404,6 +413,7 @@ async function writeRunRoot(
       steps: 200,
       policies: ['oak'],
       startedAt,
+      envSchedule: [{ envId, seedStart: 0, seedEnd: 0 }],
     }),
   );
   await writeFile(
@@ -605,7 +615,7 @@ describe('run index discovery', () => {
 });
 
 describe('recordings discovery', () => {
-  it('serves record lanes in canonical env order, legacy lanes skipped', async () => {
+  it('serves record lanes in canonical env order and ignores non-v4 metas', async () => {
     const recs = await scanRecordings(join(BENCH, 'alpha-complete'));
     expect(recs.map((r) => `${r.envId}/${r.seed}`)).toEqual([
       'Pendulum-cont-v0/6', 'Chain-cont-v0/5',

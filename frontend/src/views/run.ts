@@ -15,7 +15,6 @@ import {
   formatStep,
   laneSeries,
   loadRunDetail,
-  policiesIn,
   policyView,
   populationBand,
   rankLanes,
@@ -154,8 +153,7 @@ export function mountRunScience(host: HTMLElement, opts: RunScienceOptions): Run
 
   function render(detail: RunDetail): void {
     const meta = detail.meta;
-    const policies = policiesIn(detail.aggregate);
-    let policy = policies[0] ?? meta.policies[0] ?? 'oak';
+    const policy = 'oak';
     const shares = envShares(meta);
     const mixed = shares.length > 1;
     const horizon = meta.steps;
@@ -192,7 +190,7 @@ export function mountRunScience(host: HTMLElement, opts: RunScienceOptions): Run
     let currentEnv: string =
       opts.envId !== null && shares.some((sh) => sh.envId === opts.envId)
         ? opts.envId
-        : shares[0]?.envId ?? meta.envId;
+        : shares[0]?.envId ?? '';
     let selectedEnv: string = currentEnv;
 
     interface Panel {
@@ -607,21 +605,6 @@ export function mountRunScience(host: HTMLElement, opts: RunScienceOptions): Run
       tabs.find((tab) => tab.key === 'env')?.build(panel.node, scopeFor(panel));
       for (const chart of panel.charts) chart.refresh();
     };
-
-    if (policies.length > 1) {
-      const policySelect = el('select', { class: 'input input-select', ariaLabel: 'Policy' });
-      for (const name of policies) policySelect.append(el('option', { value: name, text: name }));
-      policySelect.value = policy;
-      policySelect.addEventListener('change', () => {
-        policy = policySelect.value;
-        resetPanels();
-        syncBanner();
-        buildAll();
-      });
-      body.append(
-        el('div', { class: 'controls controls-inline' }, [el('span', { class: 'control-label', text: 'policy' }), policySelect]),
-      );
-    }
 
     body.append(panelHost);
     buildAll();

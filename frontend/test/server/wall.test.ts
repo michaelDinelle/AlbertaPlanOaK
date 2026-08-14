@@ -299,6 +299,9 @@ async function buildSynthetic(): Promise<void> {
       steps: SYN_STEPS,
       policies: ['oak'],
       startedAt: '2026-08-04T00:00:00Z',
+      envSchedule: [
+        { envId: 'HalfCheetah-v4', seedStart: 0, seedEnd: 2 },
+      ],
     }),
   );
   await writeFile(join(SYN_RUN, 'fleet.jsonl'), '');

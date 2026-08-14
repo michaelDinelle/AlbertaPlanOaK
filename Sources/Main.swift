@@ -6,7 +6,6 @@ import zlib
 
 struct OakError: Error, CustomStringConvertible { let description: String }
 func err(_ s: String) -> OakError { OakError(description: s) }
-let defaultEnv = "HalfCheetah-v4"
 let lockName = ".oak-benchmark.lock"
 typealias Raw = UnsafeMutableRawPointer
 
@@ -39,6 +38,52 @@ struct LaneSnapshot {
 }
 let fleetLaneStride = 312
 
+enum OakConst: Int {
+  case ablateFeatureConstruction = 0
+  case ablateGvfPrediction = 1
+  case ablateRrSubtasks = 2
+  case ablateOptionPolicies = 3
+  case ablateOptionModels = 4
+  case ablateOptionKeyboard = 6
+  case ablateKeyboardToPolicy = 8
+  case ablateSearchControl = 9
+  case ablateSearchToGenerateTest = 10
+  case ablateGenerateAndTest = 11
+  case megaG = 12
+  case specObsDim = 13
+  case specRank = 14
+  case specOptionCount = 15
+  case specActionParams = 16
+  case specTraceLevels = 17
+  case specAnchorCount = 18
+  case specParamStride = 19
+  case specStateStride = 20
+  case specUintStride = 21
+  case specInvRank = 22
+  case specInvOptionCount = 23
+  case specMetaEta = 24
+  case megaStageMask = 25
+  case ablateJointGeometry = 27
+  case specNursery = 28
+  case specEnvKind = 29
+  case probeFixedIdx = 30
+  case probeFtz = 31
+}
+
+enum OakBuf: Int {
+  case params = 0
+  case state = 1
+  case uints = 2
+  case scalars = 3
+  case config = 4
+  case lanes = 6
+  case seeds = 7
+  case envCfg = 8
+  case aux0 = 9
+  case aux1 = 10
+  case aux2 = 11
+}
+
 struct AblationSpec {
   static let ordered = [
     "feature-construction", "gvf-prediction", "rr-subtasks", "option-policies",
@@ -47,12 +92,17 @@ struct AblationSpec {
     "joint-geometry",
   ]
   static let functionConstantIndex = [
-    "option-keyboard": 6,
-    "keyboard-to-policy": 8,
-    "search-control": 9,
-    "search-to-generate-test": 10,
-    "generate-and-test": 11,
-    "joint-geometry": 27,
+    "feature-construction": OakConst.ablateFeatureConstruction.rawValue,
+    "gvf-prediction": OakConst.ablateGvfPrediction.rawValue,
+    "rr-subtasks": OakConst.ablateRrSubtasks.rawValue,
+    "option-policies": OakConst.ablateOptionPolicies.rawValue,
+    "option-models": OakConst.ablateOptionModels.rawValue,
+    "option-keyboard": OakConst.ablateOptionKeyboard.rawValue,
+    "keyboard-to-policy": OakConst.ablateKeyboardToPolicy.rawValue,
+    "search-control": OakConst.ablateSearchControl.rawValue,
+    "search-to-generate-test": OakConst.ablateSearchToGenerateTest.rawValue,
+    "generate-and-test": OakConst.ablateGenerateAndTest.rawValue,
+    "joint-geometry": OakConst.ablateJointGeometry.rawValue,
   ]
   let names: [String]
   var label: String { names.isEmpty ? "none" : names.joined(separator: ",") }
@@ -72,10 +122,10 @@ struct AblationSpec {
     return AblationSpec(names: Array(seen).sorted())
   }
   func apply(to constants: MTLFunctionConstantValues) {
-    for (idx, name) in Self.ordered.enumerated() {
+    for name in Self.ordered {
       var enabled = names.contains(name)
       constants.setConstantValue(
-        &enabled, type: .bool, index: Self.functionConstantIndex[name] ?? idx)
+        &enabled, type: .bool, index: Self.functionConstantIndex[name]!)
     }
   }
 }
@@ -124,163 +174,18 @@ func sha256Hex(_ buf: UnsafeRawBufferPointer) -> String {
 struct ShapeProbe {
   var rank, optionCount, nursery, traceLevels, anchorCount: UInt32
   var paramStride, stateStride, uintStride: UInt32
-  var pPsi, pOptPolicy, pVStop2: UInt32
-  var stObs, stPolicyMean, stOptionPolicyMean, stUtilOpt: UInt32
+  var pPsi, pOptPolicy, stUtilOpt: UInt32
   var stAlpha, stBeta, stAlphaPsi, stBetaPsi, stAlphaModel, stBetaModel: UInt32
-  var stAlphaAct, stBetaAct: UInt32
-  var uOptFeature, uFeatureAge, uParentA, uParentB, uKind, uNurParentA: UInt32
+  var stAlphaAct, stBetaAct, uOptFeature, uParentA, uParentB, uKind, uNurParentA: UInt32
   var invRank, invOptionCount, metaEta, sampleSigma, sampleInv2S2, actorAlphaDenom: Float
+  var stKeep0, stKeep0n, stKeep1, stKeep1n, uKeep0, uKeep0n: UInt32
 }
 struct RewardSlices {
   let state: [(Int, Int)]
   let uints: [(Int, Int)]
-  init(_ sp: ShapeProbe, o: Int, d: Int) {
-    let R = Int(sp.rank), K = Int(sp.optionCount), Rn = Int(sp.nursery)
-    let T = Int(sp.traceLevels), O = o, D = d
-    var s = 0
-    var keepS: [(Int, Int)] = []
-    func keep(_ n: Int) -> Int {
-      let a = s
-      s += n
-      keepS.append((a, n))
-      return a
-    }
-    func drop(_ n: Int) -> Int {
-      let a = s
-      s += n
-      return a
-    }
-    let stObs = keep(O)
-    _ = keep(O)
-    _ = keep(O)
-    _ = keep(O)
-    _ = keep(O)
-    _ = keep(O)
-    _ = keep(O)
-    _ = keep(2 * R)
-    let stPolicyMean = keep(D)
-    _ = keep(D)
-    _ = keep(D)
-    _ = keep(K * D)
-    let stOptionPolicyMean = keep(K * D)
-    _ = keep(K)
-    _ = keep(1)
-    _ = keep(1)
-    _ = keep(K)
-    _ = keep(R)
-    let stUtilOpt = keep(K)
-    _ = keep(R)
-    _ = keep(R)
-    _ = keep(R)
-    let stAlpha = keep(R)
-    let stBeta = keep(R)
-    _ = keep(R)
-    _ = keep(R)
-    let stAlphaPsi = keep(R)
-    let stBetaPsi = keep(R)
-    _ = keep(R)
-    _ = keep(R)
-    let stAlphaModel = keep(R)
-    let stBetaModel = keep(R)
-    _ = keep(R)
-    _ = keep(R)
-    _ = keep(K)
-    _ = keep(K)
-    _ = keep(K)
-    _ = keep(T * O)
-    _ = keep(K)
-    _ = keep(K)
-    _ = keep(K)
-    _ = keep(1)
-    _ = keep(K)
-    _ = keep(1)
-    _ = keep(1)
-    _ = keep(K)
-    _ = keep(K)
-    _ = keep(K)
-    _ = keep(K)
-    _ = keep(K)
-    let stAlphaAct = keep(K)
-    let stBetaAct = keep(K)
-    _ = keep(K)
-    _ = keep(K)
-    _ = keep(K)
-    _ = keep(K * D)
-    _ = drop(8)
-    _ = drop(K)
-    _ = drop(K)
-    _ = drop(K)
-    _ = drop(K)
-    _ = drop(K)
-    _ = drop(K)
-    _ = drop(K)
-    _ = drop(K)
-    _ = drop(1)
-    s = (s + 3) & ~3
-    _ = keep(4 * Rn)
-    _ = drop(K * D)
-    _ = drop(K * max(D / 2, 1))
-    _ = drop(R)
-    s = (s + 3) & ~3
-    _ = drop(4 * R)
-    _ = drop(16)
-    _ = drop(4)
-    var u = 0
-    var keepU: [(Int, Int)] = []
-    func ukeep(_ n: Int) -> Int {
-      let a = u
-      u += n
-      keepU.append((a, n))
-      return a
-    }
-    let uOptFeature = ukeep(K)
-    let uFeatureAge = ukeep(R)
-    _ = ukeep(K)
-    let uParentA = ukeep(R)
-    let uParentB = ukeep(R)
-    let uKind = ukeep(R)
-    _ = ukeep(R)
-    _ = ukeep(1)
-    _ = ukeep(K)
-    let uNurParentA = ukeep(Rn)
-    _ = ukeep(Rn)
-    _ = ukeep(Rn)
-    _ = ukeep(Rn)
-    _ = ukeep(2 * 96)
-    _ = ukeep(4)
-    _ = ukeep(K)
-    precondition(stObs == Int(sp.stObs), "stObs drift")
-    precondition(stPolicyMean == Int(sp.stPolicyMean), "stPolicyMean drift")
-    precondition(stOptionPolicyMean == Int(sp.stOptionPolicyMean), "stOptionPolicyMean drift")
-    precondition(stUtilOpt == Int(sp.stUtilOpt), "stUtilOpt drift")
-    precondition(stAlpha == Int(sp.stAlpha), "stAlpha drift")
-    precondition(stBeta == Int(sp.stBeta), "stBeta drift")
-    precondition(stAlphaPsi == Int(sp.stAlphaPsi), "stAlphaPsi drift")
-    precondition(stBetaPsi == Int(sp.stBetaPsi), "stBetaPsi drift")
-    precondition(stAlphaModel == Int(sp.stAlphaModel), "stAlphaModel drift")
-    precondition(stBetaModel == Int(sp.stBetaModel), "stBetaModel drift")
-    precondition(stAlphaAct == Int(sp.stAlphaAct), "stAlphaAct drift")
-    precondition(stBetaAct == Int(sp.stBetaAct), "stBetaAct drift")
-    precondition(uOptFeature == Int(sp.uOptFeature), "uOptFeature drift")
-    precondition(uFeatureAge == Int(sp.uFeatureAge), "uFeatureAge drift")
-    precondition(uParentA == Int(sp.uParentA), "uParentA drift")
-    precondition(uParentB == Int(sp.uParentB), "uParentB drift")
-    precondition(uKind == Int(sp.uKind), "uKind drift")
-    precondition(uNurParentA == Int(sp.uNurParentA), "uNurParentA drift")
-    func merge(_ xs: [(Int, Int)]) -> [(Int, Int)] {
-      let sorted = xs.sorted { $0.0 < $1.0 }
-      var out: [(Int, Int)] = []
-      for (a, n) in sorted {
-        if let last = out.last, last.0 + last.1 == a {
-          out[out.count - 1] = (last.0, last.1 + n)
-        } else {
-          out.append((a, n))
-        }
-      }
-      return out
-    }
-    state = merge(keepS)
-    uints = merge(keepU)
+  init(_ sp: ShapeProbe) {
+    state = [(Int(sp.stKeep0), Int(sp.stKeep0n)), (Int(sp.stKeep1), Int(sp.stKeep1n))]
+    uints = [(Int(sp.uKeep0), Int(sp.uKeep0n))]
   }
 }
 final class Shared<T> {
@@ -331,22 +236,24 @@ final class Engine {
     throws -> ShapeProbe
   {
     precondition(
-      MemoryLayout<ShapeProbe>.stride == 140, "ShapeProbe layout drifted from OakShapeProbe")
+      MemoryLayout<ShapeProbe>.stride == 144, "ShapeProbe layout drifted from OakShapeProbe")
     let constants = MTLFunctionConstantValues()
     var o32 = UInt32(obsDim)
-    constants.setConstantValue(&o32, type: .uint, index: 13)
+    constants.setConstantValue(&o32, type: .uint, index: OakConst.specObsDim.rawValue)
     var d32 = UInt32(dPolicy)
-    constants.setConstantValue(&d32, type: .uint, index: 16)
+    constants.setConstantValue(&d32, type: .uint, index: OakConst.specActionParams.rawValue)
     let fn = try lib.makeFunction(name: "oak_shape_probe", constantValues: constants)
     let pipe = try dev.makeComputePipelineState(function: fn)
-    guard let outB = dev.makeBuffer(length: 140, options: [.storageModeShared]),
+    guard let outB = dev.makeBuffer(length: 144, options: [.storageModeShared]),
       let dummy = dev.makeBuffer(length: 16, options: [.storageModeShared]),
       let pq = dev.makeCommandQueue(), let cb = pq.makeCommandBuffer(),
       let enc = cb.makeComputeCommandEncoder()
     else { throw err("Shape probe dispatch failed.") }
     enc.setComputePipelineState(pipe)
-    enc.setBuffer(outB, offset: 0, index: 0)
-    for j in 1...4 { enc.setBuffer(dummy, offset: 0, index: j) }
+    enc.setBuffer(outB, offset: 0, index: OakBuf.params.rawValue)
+    for j in OakBuf.state.rawValue...OakBuf.config.rawValue {
+      enc.setBuffer(dummy, offset: 0, index: j)
+    }
     enc.dispatchThreads(MTLSize(width: 1, height: 1, depth: 1),
                         threadsPerThreadgroup: MTLSize(width: 1, height: 1, depth: 1))
     enc.endEncoding()
@@ -365,7 +272,7 @@ final class Engine {
       let enc = cb.makeComputeCommandEncoder()
     else { throw err("Env table probe dispatch failed.") }
     enc.setComputePipelineState(pipe)
-    enc.setBuffer(outB, offset: 0, index: 0)
+    enc.setBuffer(outB, offset: 0, index: OakBuf.params.rawValue)
     enc.dispatchThreads(MTLSize(width: 1, height: 1, depth: 1),
                         threadsPerThreadgroup: MTLSize(width: 1, height: 1, depth: 1))
     enc.endEncoding()
@@ -413,7 +320,7 @@ final class Engine {
         dev, lib, obsDim: naturalO, dPolicy: dk)
       probeCache[r.kind] = sp
       let anchors = Int(sp.anchorCount)
-      precondition(Int(sp.optionCount) == 32, "K must equal the simd width")
+      precondition(Int(sp.optionCount) == anchors, "K equals core")
       precondition(Int(sp.rank) == anchors + anchors * 14, "gate-bank identity broken")
       precondition(anchors >= naturalO + dk + 2, "core slots cannot hold obs+action+reward+bias")
       precondition(Int(sp.stateStride) % 4 == 0, "stateStride must stay 16B-aligned")
@@ -436,7 +343,6 @@ final class Engine {
         off: sp, paramTotal: Int(sp.paramStride), stateTotal: Int(sp.stateStride),
         uintTotal: Int(sp.uintStride), paramBase: pBase, stateBase: sBase, uintBase: uBase,
         configB: cfgB)
-      _ = RewardSlices(sp, o: naturalO, d: dk)
       built.append(kd)
       for l in r.firstLane..<(r.firstLane + r.count) { laneIdx[l] = built.count - 1 }
       pBase += r.count * kd.paramTotal
@@ -514,16 +420,25 @@ final class Engine {
     }
   }
   static func applyShapeConstants(_ constants: MTLFunctionConstantValues, _ cfg: KernelConfig) {
-    var u: [UInt32] = [
-      cfg.obsDim, cfg.rank, cfg.optionCount, cfg.actionParamCount,
-      cfg.obsTraceLevels, cfg.linearAnchorCount,
-      cfg.paramStride, cfg.stateStride, cfg.uintStride,
+    let us: [(OakConst, UInt32)] = [
+      (.specObsDim, cfg.obsDim), (.specRank, cfg.rank), (.specOptionCount, cfg.optionCount),
+      (.specActionParams, cfg.actionParamCount), (.specTraceLevels, cfg.obsTraceLevels),
+      (.specAnchorCount, cfg.linearAnchorCount), (.specParamStride, cfg.paramStride),
+      (.specStateStride, cfg.stateStride), (.specUintStride, cfg.uintStride),
+      (.specNursery, cfg.nurseryCount),
     ]
-    for i in u.indices { constants.setConstantValue(&u[i], type: .uint, index: 13 + i) }
-    var f: [Float] = [cfg.invRank, cfg.invOptionCount, cfg.metaEta]
-    for i in f.indices { constants.setConstantValue(&f[i], type: .float, index: 22 + i) }
-    var nc = cfg.nurseryCount
-    constants.setConstantValue(&nc, type: .uint, index: 28)
+    for (fc, val) in us {
+      var v = val
+      constants.setConstantValue(&v, type: .uint, index: fc.rawValue)
+    }
+    let fs: [(OakConst, Float)] = [
+      (.specInvRank, cfg.invRank), (.specInvOptionCount, cfg.invOptionCount),
+      (.specMetaEta, cfg.metaEta),
+    ]
+    for (fc, val) in fs {
+      var v = val
+      constants.setConstantValue(&v, type: .float, index: fc.rawValue)
+    }
   }
   func stateHashes(_ lane: Int, laneBytes: UnsafeRawPointer) -> [String: String] {
     func hex(_ base: UnsafeRawPointer, _ bytes: Int) -> String {
@@ -538,7 +453,7 @@ final class Engine {
       return h.finalize().map { String(format: "%02x", $0) }.joined()
     }
     let kd = kind(of: lane)
-    let slices = RewardSlices(kd.off, o: kd.naturalO, d: kd.d)
+    let slices = RewardSlices(kd.off)
     return [
       "params": hex(paramPtr(lane), kd.paramTotal * MemoryLayout<Float>.stride),
       "state": hex(statePtr(lane), kd.stateTotal * MemoryLayout<Float>.stride),
@@ -1010,25 +925,26 @@ final class MetricsTapeWriter {
         withJSONObject: envsJson, options: [.prettyPrinted, .sortedKeys])
       try ej.write(to: root.appendingPathComponent("envs.json"))
     }
-    let autoG = max(2, min(32, B / 32))
+    let core = Int(engine.kinds[0].off.optionCount)
+    let autoG = max(2, min(core, B / max(core, 1)))
     let megaG = e["OAK_MEGA_LANES_PER_TG"].flatMap(Int.init) ?? autoG
-    let megaW = 32 * megaG
+    let megaW = core * megaG
     func baseConstants() -> MTLFunctionConstantValues {
       let c = MTLFunctionConstantValues()
       ablations.apply(to: c)
       var megaG32 = UInt32(megaG)
-      c.setConstantValue(&megaG32, type: .uint, index: 12)
+      c.setConstantValue(&megaG32, type: .uint, index: OakConst.megaG.rawValue)
       if e["OAK_PROBE_FTZ"] == "1" {
         var b = true
-        c.setConstantValue(&b, type: .bool, index: 31)
+        c.setConstantValue(&b, type: .bool, index: OakConst.probeFtz.rawValue)
       }
       if e["OAK_PROBE_FIXEDIDX"] == "1" {
         var b = true
-        c.setConstantValue(&b, type: .bool, index: 30)
+        c.setConstantValue(&b, type: .bool, index: OakConst.probeFixedIdx.rawValue)
       }
       if let mask = e["OAK_MEGA_STAGE_MASK"].flatMap(UInt32.init) {
         var m = mask
-        c.setConstantValue(&m, type: .uint, index: 25)
+        c.setConstantValue(&m, type: .uint, index: OakConst.megaStageMask.rawValue)
       }
       return c
     }
@@ -1045,10 +961,13 @@ final class MetricsTapeWriter {
       let c = baseConstants()
       Engine.applyShapeConstants(c, kd.cfg)
       var k32 = kd.kind
-      c.setConstantValue(&k32, type: .uint, index: 29)
+      c.setConstantValue(&k32, type: .uint, index: OakConst.specEnvKind.rawValue)
       variantPipes.append(try dev.makeComputePipelineState(
         function: lib.makeFunction(name: "oak_megastep", constantValues: c)))
       envRuns.append((ki, kd.kind, kd.firstLane / megaG, (kd.count + megaG - 1) / megaG))
+    }
+    guard variantPipes.allSatisfy({ $0.threadExecutionWidth == core }) else {
+      throw err("optionCount \(core) must equal simd width \(variantPipes[0].threadExecutionWidth).")
     }
     let pipeMaxThreads = variantPipes.map(\.maxTotalThreadsPerThreadgroup).min() ?? 0
     let tgOptionCount = Int(engine.kinds[0].off.optionCount)
@@ -1159,26 +1078,26 @@ final class MetricsTapeWriter {
     func bindFleet(_ enc: MTLComputeCommandEncoder, _ pipe: MTLComputePipelineState) {
       enc.setComputePipelineState(pipe)
       for j in res.indices { enc.setBuffer(res[j], offset: 0, index: j) }
-      enc.setBuffer(laneBuf, offset: 0, index: 6)
-      enc.setBuffer(seedsBuf, offset: 0, index: 7)
+      enc.setBuffer(laneBuf, offset: 0, index: OakBuf.lanes.rawValue)
+      enc.setBuffer(seedsBuf, offset: 0, index: OakBuf.seeds.rawValue)
       var c = ecfg
-      enc.setBytes(&c, length: MemoryLayout<FleetEnvCfg>.stride, index: 8)
+      enc.setBytes(&c, length: MemoryLayout<FleetEnvCfg>.stride, index: OakBuf.envCfg.rawValue)
     }
     func encodeMegastep(_ enc: MTLComputeCommandEncoder, _ n: Int, _ base: Int) {
       for run in envRuns {
         let kd = engine.kinds[run.kindIdx]
         bindFleet(enc, variantPipes[run.kindIdx])
-        enc.setBuffer(engine.params.b, offset: kd.paramBase * 4, index: 0)
-        enc.setBuffer(engine.state.b, offset: kd.stateBase * 4, index: 1)
-        enc.setBuffer(engine.uints.b, offset: kd.uintBase * 4, index: 2)
-        enc.setBuffer(kd.configB, offset: 0, index: 4)
+        enc.setBuffer(engine.params.b, offset: kd.paramBase * 4, index: OakBuf.params.rawValue)
+        enc.setBuffer(engine.state.b, offset: kd.stateBase * 4, index: OakBuf.state.rawValue)
+        enc.setBuffer(engine.uints.b, offset: kd.uintBase * 4, index: OakBuf.uints.rawValue)
+        enc.setBuffer(kd.configB, offset: 0, index: OakBuf.config.rawValue)
         var ce = ecfg
         ce.invObsFloor = 1 / Float(2 * Int(kd.off.anchorCount))
-        enc.setBytes(&ce, length: MemoryLayout<FleetEnvCfg>.stride, index: 8)
-        enc.setBuffer(recordSlotBuf, offset: 0, index: 9)
-        enc.setBuffer(recordBuf, offset: 0, index: 10)
+        enc.setBytes(&ce, length: MemoryLayout<FleetEnvCfg>.stride, index: OakBuf.envCfg.rawValue)
+        enc.setBuffer(recordSlotBuf, offset: 0, index: OakBuf.aux0.rawValue)
+        enc.setBuffer(recordBuf, offset: 0, index: OakBuf.aux1.rawValue)
         var span = SIMD3<UInt32>(UInt32(n), UInt32(base), UInt32(run.tgStart))
-        enc.setBytes(&span, length: MemoryLayout<SIMD3<UInt32>>.stride, index: 11)
+        enc.setBytes(&span, length: MemoryLayout<SIMD3<UInt32>>.stride, index: OakBuf.aux2.rawValue)
         enc.setThreadgroupMemoryLength(megaSlotBytes, index: 0)
         enc.dispatchThreadgroups(
           MTLSize(width: run.tgCount, height: 1, depth: 1),
@@ -1192,16 +1111,16 @@ final class MetricsTapeWriter {
       }
       for kd in engine.kinds {
         bindFleet(enc, initPipe)
-        enc.setBuffer(engine.params.b, offset: kd.paramBase * 4, index: 0)
-        enc.setBuffer(engine.state.b, offset: kd.stateBase * 4, index: 1)
-        enc.setBuffer(engine.uints.b, offset: kd.uintBase * 4, index: 2)
-        enc.setBuffer(kd.configB, offset: 0, index: 4)
+        enc.setBuffer(engine.params.b, offset: kd.paramBase * 4, index: OakBuf.params.rawValue)
+        enc.setBuffer(engine.state.b, offset: kd.stateBase * 4, index: OakBuf.state.rawValue)
+        enc.setBuffer(engine.uints.b, offset: kd.uintBase * 4, index: OakBuf.uints.rawValue)
+        enc.setBuffer(kd.configB, offset: 0, index: OakBuf.config.rawValue)
         var ce = ecfg
         ce.invObsFloor = 1 / Float(2 * Int(kd.off.anchorCount))
-        enc.setBytes(&ce, length: MemoryLayout<FleetEnvCfg>.stride, index: 8)
-        enc.setBuffer(envKindsBuf, offset: 0, index: 9)
+        enc.setBytes(&ce, length: MemoryLayout<FleetEnvCfg>.stride, index: OakBuf.envCfg.rawValue)
+        enc.setBuffer(envKindsBuf, offset: 0, index: OakBuf.aux0.rawValue)
         var off = UInt32(kd.firstLane)
-        enc.setBytes(&off, length: 4, index: 10)
+        enc.setBytes(&off, length: 4, index: OakBuf.aux1.rawValue)
         enc.dispatchThreads(mtlSize(kd.count), threadsPerThreadgroup: laneTG)
       }
       enc.endEncoding()
@@ -1449,15 +1368,15 @@ final class MetricsTapeWriter {
         var fullScan: UInt32 = isSnap ? 1 : 0
         for kd in engine.kinds {
           bindFleet(enc, snapPipe)
-          enc.setBuffer(engine.params.b, offset: kd.paramBase * 4, index: 0)
-          enc.setBuffer(engine.state.b, offset: kd.stateBase * 4, index: 1)
-          enc.setBuffer(engine.uints.b, offset: kd.uintBase * 4, index: 2)
-          enc.setBuffer(kd.configB, offset: 0, index: 4)
-          enc.setBuffer(snapBuf, offset: 0, index: 9)
+          enc.setBuffer(engine.params.b, offset: kd.paramBase * 4, index: OakBuf.params.rawValue)
+          enc.setBuffer(engine.state.b, offset: kd.stateBase * 4, index: OakBuf.state.rawValue)
+          enc.setBuffer(engine.uints.b, offset: kd.uintBase * 4, index: OakBuf.uints.rawValue)
+          enc.setBuffer(kd.configB, offset: 0, index: OakBuf.config.rawValue)
+          enc.setBuffer(snapBuf, offset: 0, index: OakBuf.aux0.rawValue)
           var ctl = SIMD2<UInt32>(UInt32(snapHalf * B), UInt32(kd.firstLane))
-          enc.setBytes(&ctl, length: MemoryLayout<SIMD2<UInt32>>.stride, index: 10)
-          enc.setBytes(&fullScan, length: 4, index: 11)
-          enc.dispatchThreadgroups(mtlSize(kd.count), threadsPerThreadgroup: mtlSize(32))
+          enc.setBytes(&ctl, length: MemoryLayout<SIMD2<UInt32>>.stride, index: OakBuf.aux1.rawValue)
+          enc.setBytes(&fullScan, length: 4, index: OakBuf.aux2.rawValue)
+          enc.dispatchThreadgroups(mtlSize(kd.count), threadsPerThreadgroup: mtlSize(core))
         }
       }
       enc.endEncoding()
@@ -1665,11 +1584,11 @@ final class MetricsTapeWriter {
       seedValues = Array(seed0..<(seed0 + (env["OAK_BENCH_SEED_COUNT"].flatMap(Int.init) ?? 1408)))
     }
     let steps = max(env["OAK_BENCH_STEPS"].flatMap(Int.init) ?? 500_000, 1)
-    let defaultSchedule =
-      "HalfCheetah-v4:1024,KeyCorridor-cont-v0:128,FourRooms-cont-v0:64,DeepSea-cont-v0:64,Acrobot-cont-v0:64,MountainCar-cont-v0:64"
-    var raw = env["OAK_BENCH_ENVS"] ?? defaultSchedule
-    if raw.trimmingCharacters(in: .whitespaces).isEmpty { raw = defaultSchedule }
-    var laneEnvs = [String](repeating: defaultEnv, count: seedValues.count)
+    let raw = (env["OAK_BENCH_ENVS"] ?? "").trimmingCharacters(in: .whitespaces)
+    guard !raw.isEmpty else {
+      throw err("OAK_BENCH_ENVS is required (EnvId:count,... covering every lane).")
+    }
+    var laneEnvs = [String](repeating: "", count: seedValues.count)
     var entries: [(envId: String, seedStart: Int, seedEnd: Int)] = []
     var offset = 0
     for item in raw.split(separator: ",") {
@@ -1715,7 +1634,7 @@ final class MetricsTapeWriter {
     }
     try fm.createDirectory(at: dir, withIntermediateDirectories: true)
     let runMeta: [String: Any] = [
-      "fleetSchemaVersion": 1, "command": "benchmark", "envId": entries[0].envId,
+      "fleetSchemaVersion": 1, "command": "benchmark",
       "batch": seedValues.count, "seeds": seedValues, "steps": steps,
       "policies": ["oak"], "ablation": ablations.names,
       "ablationLabel": ablations.label,
