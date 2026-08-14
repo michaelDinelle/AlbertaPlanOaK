@@ -24,18 +24,6 @@ struct KernelScalars {
   var stepCount: UInt32 = 0, stateSlot: UInt32 = 0
   var rho: Float = 0
 }
-struct KernelStats {
-  var encodeNonFiniteCount, learnNonFiniteCount, planNonFiniteCount, tdPsiNonFiniteCount: Float
-  var oakOptionReinitCount, oakFeatureReinitCount, terminationRate: Float
-  var importanceEss, actorUpdateNormMean, actorSupportEntropy, modelPriorityMax: Float
-  var selectedOptionAge, selectedOptionPriority, alphaValueLogMean, actorAdvantageL1: Float
-  var selectedOptionIndex, gradEnergyStaleness, selectedKeyboardWeight, mainTd, planTdValue: Float
-  var alphaValueRailFrac, searchControlUseMean, generateTestEligibleCount: Float
-  var alphaActorLogMean, alphaActorRailFrac: Float
-  var optionMeanDispersion, optionMeanRailFrac: Float
-  var bonusGapMean, frozenOptionCount: Float
-  var obsAlphaLogMean, obsAlphaRailFrac: Float
-}
 
 struct FleetEnvCfg {
   var laneCount, episodeLen, policyMode, recordCapacity: UInt32
@@ -43,7 +31,6 @@ struct FleetEnvCfg {
 }
 struct LaneSnapshot {
   var scalars: KernelScalars
-  var stats: KernelStats
   var paramAbsMax: Float
   var paramNonFinite: UInt32
   var steps, doneCount: UInt32
@@ -143,7 +130,7 @@ struct ShapeProbe {
   var stObs, stPolicyMean, stOptionPolicyMean, stUtilOpt: UInt32
   var stAlpha, stBeta, stAlphaPsi, stBetaPsi, stAlphaModel, stBetaModel: UInt32
   var stAlphaAct, stBetaAct: UInt32
-  var uOptFeature, uFeatureAge, uParentA, uParentB, uKind, uExplosionStep, uNurParentA: UInt32
+  var uOptFeature, uFeatureAge, uParentA, uParentB, uKind, uNurParentA: UInt32
   var invRank, invOptionCount, metaEta, sampleSigma, sampleInv2S2, actorAlphaDenom: Float
 }
 struct RewardSlices {
@@ -248,12 +235,6 @@ struct RewardSlices {
       keepU.append((a, n))
       return a
     }
-    func udrop(_ n: Int) -> Int {
-      let a = u
-      u += n
-      return a
-    }
-    _ = udrop(7)
     let uOptFeature = ukeep(K)
     let uFeatureAge = ukeep(R)
     _ = ukeep(K)
@@ -262,9 +243,6 @@ struct RewardSlices {
     let uKind = ukeep(R)
     _ = ukeep(R)
     _ = ukeep(1)
-    _ = ukeep(1)
-    let uExplosionStep = udrop(1)
-    _ = udrop(1)
     _ = ukeep(K)
     let uNurParentA = ukeep(Rn)
     _ = ukeep(Rn)
@@ -290,7 +268,6 @@ struct RewardSlices {
     precondition(uParentA == Int(sp.uParentA), "uParentA drift")
     precondition(uParentB == Int(sp.uParentB), "uParentB drift")
     precondition(uKind == Int(sp.uKind), "uKind drift")
-    precondition(uExplosionStep == Int(sp.uExplosionStep), "uExplosionStep drift")
     precondition(uNurParentA == Int(sp.uNurParentA), "uNurParentA drift")
     func merge(_ xs: [(Int, Int)]) -> [(Int, Int)] {
       let sorted = xs.sorted { $0.0 < $1.0 }
@@ -340,10 +317,9 @@ final class Engine {
   let laneKindIdx: [Int]
   let q: MTLCommandQueue, params, state: Shared<Float>,
     uints: Shared<UInt32>, res: [MTLBuffer]
-  let scalarsB, statsB: MTLBuffer
-  let scalars: UnsafeMutablePointer<KernelScalars>, stats: UnsafeMutablePointer<KernelStats>
+  let scalarsB: MTLBuffer
+  let scalars: UnsafeMutablePointer<KernelScalars>
   func kind(of lane: Int) -> Kind { kinds[laneKindIdx[lane]] }
-  func stats(_ lane: Int) -> KernelStats { stats[lane] }
   func paramPtr(_ lane: Int) -> UnsafeMutablePointer<Float> {
     let kd = kind(of: lane)
     return params.p + kd.paramBase + (lane - kd.firstLane) * kd.paramTotal
@@ -360,7 +336,7 @@ final class Engine {
     throws -> ShapeProbe
   {
     precondition(
-      MemoryLayout<ShapeProbe>.stride == 144, "ShapeProbe layout drifted from OakShapeProbe")
+      MemoryLayout<ShapeProbe>.stride == 140, "ShapeProbe layout drifted from OakShapeProbe")
     let constants = MTLFunctionConstantValues()
     var o32 = UInt32(obsDim)
     constants.setConstantValue(&o32, type: .uint, index: 13)
@@ -368,14 +344,14 @@ final class Engine {
     constants.setConstantValue(&d32, type: .uint, index: 16)
     let fn = try lib.makeFunction(name: "oak_shape_probe", constantValues: constants)
     let pipe = try dev.makeComputePipelineState(function: fn)
-    guard let outB = dev.makeBuffer(length: 144, options: [.storageModeShared]),
+    guard let outB = dev.makeBuffer(length: 140, options: [.storageModeShared]),
       let dummy = dev.makeBuffer(length: 16, options: [.storageModeShared]),
       let pq = dev.makeCommandQueue(), let cb = pq.makeCommandBuffer(),
       let enc = cb.makeComputeCommandEncoder()
     else { throw err("Shape probe dispatch failed.") }
     enc.setComputePipelineState(pipe)
     enc.setBuffer(outB, offset: 0, index: 0)
-    for j in 1...5 { enc.setBuffer(dummy, offset: 0, index: j) }
+    for j in 1...4 { enc.setBuffer(dummy, offset: 0, index: j) }
     enc.dispatchThreads(MTLSize(width: 1, height: 1, depth: 1),
                         threadsPerThreadgroup: MTLSize(width: 1, height: 1, depth: 1))
     enc.endEncoding()
@@ -481,12 +457,8 @@ final class Engine {
     uints = Shared(dev, uBase, 0)
     scalarsB = dev.makeBuffer(
       length: batch * MemoryLayout<KernelScalars>.stride, options: [.storageModeShared])!
-    statsB = dev.makeBuffer(
-      length: batch * MemoryLayout<KernelStats>.stride, options: [.storageModeShared])!
-    res = [params.b, state.b, uints.b, scalarsB, statsB, kinds[0].configB]
+    res = [params.b, state.b, uints.b, scalarsB, kinds[0].configB]
     scalars = scalarsB.contents().bindMemory(to: KernelScalars.self, capacity: batch)
-    stats = statsB.contents().bindMemory(to: KernelStats.self, capacity: batch)
-    memset(stats, 0, batch * MemoryLayout<KernelStats>.stride)
     for kd in kinds {
       let sp = kd.off
       let rank = Int(sp.rank)
@@ -504,8 +476,6 @@ final class Engine {
         let lp = params.p + kd.paramBase + local * kd.paramTotal
         let ls = state.p + kd.stateBase + local * kd.stateTotal
         let lu = uints.p + kd.uintBase + local * kd.uintTotal
-        lu[Int(sp.uExplosionStep)] = UInt32.max
-        lu[Int(sp.uExplosionStep) + 1] = UInt32.max
         for n in 0..<rn {
           lu[Int(sp.uNurParentA) + n] = UInt32(n % ((n % 4 == 3) ? traceChannels : anchors))
           lu[Int(sp.uNurParentA) + rn + n] = UInt32((n * 7 + 3) % anchors)
@@ -1158,7 +1128,7 @@ final class MetricsTapeWriter {
       res = eng.res
     } else {
       let dummy = try makeBuf(16)
-      res = [dummy, dummy, dummy, dummy, dummy, try makeBuf(MemoryLayout<KernelConfig>.stride)]
+      res = [dummy, dummy, dummy, dummy, try makeBuf(MemoryLayout<KernelConfig>.stride)]
     }
     let episodeLen = max(e["OAK_EPISODE_STEPS"].flatMap(Int.init) ?? 0, 0)
     let hb = max(e["OAK_BENCH_HEARTBEAT_STEPS"].flatMap(Int.init) ?? steps / 10, 1)
@@ -1217,7 +1187,7 @@ final class MetricsTapeWriter {
     }
     let recordBuf = try makeBuf(recordLanes.count * recordCapacity * 16 * 4)
     let snapStride = MemoryLayout<LaneSnapshot>.stride
-    precondition(snapStride == 184, "LaneSnapshot layout drifted from OakLaneSnapshot")
+    precondition(snapStride == 60, "LaneSnapshot layout drifted from OakLaneSnapshot")
     let snapBuf = try makeBuf(2 * B * snapStride)
     let snapPtr = snapBuf.contents().bindMemory(to: LaneSnapshot.self, capacity: 2 * B)
     let dumpEvery = max(e["OAK_DUMP_STATE_EVERY"].flatMap(Int.init) ?? 0, 0)
@@ -1283,7 +1253,7 @@ final class MetricsTapeWriter {
           enc.setBuffer(eng.params.b, offset: kd.paramBase * 4, index: 0)
           enc.setBuffer(eng.state.b, offset: kd.stateBase * 4, index: 1)
           enc.setBuffer(eng.uints.b, offset: kd.uintBase * 4, index: 2)
-          enc.setBuffer(kd.configB, offset: 0, index: 5)
+          enc.setBuffer(kd.configB, offset: 0, index: 4)
           var ce = ecfg
           ce.invObsFloor = 1 / Float(2 * Int(kd.off.anchorCount))
           enc.setBytes(&ce, length: MemoryLayout<FleetEnvCfg>.stride, index: 8)
@@ -1309,7 +1279,7 @@ final class MetricsTapeWriter {
           enc.setBuffer(eng.params.b, offset: kd.paramBase * 4, index: 0)
           enc.setBuffer(eng.state.b, offset: kd.stateBase * 4, index: 1)
           enc.setBuffer(eng.uints.b, offset: kd.uintBase * 4, index: 2)
-          enc.setBuffer(kd.configB, offset: 0, index: 5)
+          enc.setBuffer(kd.configB, offset: 0, index: 4)
           var ce = ecfg
           ce.invObsFloor = 1 / Float(2 * Int(kd.off.anchorCount))
           enc.setBytes(&ce, length: MemoryLayout<FleetEnvCfg>.stride, index: 8)
@@ -1604,7 +1574,7 @@ final class MetricsTapeWriter {
             enc.setBuffer(eng.params.b, offset: kd.paramBase * 4, index: 0)
             enc.setBuffer(eng.state.b, offset: kd.stateBase * 4, index: 1)
             enc.setBuffer(eng.uints.b, offset: kd.uintBase * 4, index: 2)
-            enc.setBuffer(kd.configB, offset: 0, index: 5)
+            enc.setBuffer(kd.configB, offset: 0, index: 4)
             enc.setBuffer(snapBuf, offset: 0, index: 9)
             var ctl = SIMD2<UInt32>(UInt32(snapHalf * B), UInt32(kd.firstLane))
             enc.setBytes(&ctl, length: MemoryLayout<SIMD2<UInt32>>.stride, index: 10)
