@@ -1,6 +1,5 @@
 
 import type {
-  CurvesResponse,
   FleetColumnar,
   KeeperResponse,
   RunDetail,
@@ -72,11 +71,6 @@ export interface FleetQuery {
   policy?: string;
 }
 
-export interface CurvesQuery {
-  envId?: string;
-  policy?: string;
-}
-
 export const api = {
   runs(options?: RequestOptions): Promise<RunIndexEntry[]> {
     return getJson<RunIndexEntry[]>(apiUrl('/runs'), options);
@@ -90,16 +84,6 @@ export const api = {
     return getJson<FleetColumnar>(
       apiUrl(`/runs/${encodeURIComponent(id)}/fleet`, {
         fields: query?.fields,
-        envId: query?.envId,
-        policy: query?.policy,
-      }),
-      options,
-    );
-  },
-
-  curves(id: string, query?: CurvesQuery, options?: RequestOptions): Promise<CurvesResponse> {
-    return getJson<CurvesResponse>(
-      apiUrl(`/runs/${encodeURIComponent(id)}/curves`, {
         envId: query?.envId,
         policy: query?.policy,
       }),

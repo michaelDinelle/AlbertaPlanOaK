@@ -154,7 +154,7 @@ export interface PolicyView {
 }
 
 export function policyView(
-  detail: Pick<RunDetail, 'summary' | 'aggregate' | 'meta'>,
+  detail: Pick<RunDetail, 'summary' | 'aggregate' | 'meta' | 'recordings'>,
   policy: string,
 ): PolicyView {
   const result = primaryResult(detail.summary, policy);
@@ -164,10 +164,15 @@ export function policyView(
     if (row.step > anyStep) anyStep = row.step;
     if (row.policy === policy && row.step > policyStep) policyStep = row.step;
   }
+  let recStep = 0;
+  for (const rec of detail.recordings) {
+    if (rec.steps > recStep) recStep = rec.steps;
+  }
   const declared = typeof result?.['maxStep'] === 'number' && Number.isFinite(result['maxStep'])
     ? (result['maxStep'] as number)
     : null;
-  const maxStep = declared ?? (policyStep > 0 ? policyStep : anyStep);
+  const reached = Math.max(policyStep, anyStep, recStep);
+  const maxStep = declared ?? reached;
   const horizon = detail.meta.steps;
   return { policy, result, maxStep, complete: result?.complete !== false && maxStep >= horizon };
 }
@@ -344,6 +349,71 @@ export function toWindowRates(steps: readonly number[], series: readonly LaneSer
     }
     return { ...entry, values, last };
   });
+}
+
+export function percentileSorted(sorted: readonly number[], q: number): number {
+  const n = sorted.length;
+  if (n === 0) return Number.NaN;
+  const pos = (q / 100) * (n - 1);
+  const lo = Math.floor(pos);
+  const hi = Math.ceil(pos);
+  const a = sorted[lo];
+  const b = sorted[hi];
+  if (a === undefined || b === undefined) return Number.NaN;
+  return lo === hi ? a : a + (b - a) * (pos - lo);
+}
+
+export function iqmSorted(sorted: readonly number[]): number {
+  const n = sorted.length;
+  if (n === 0) return Number.NaN;
+  const drop = Math.floor(n / 4);
+  const lo = drop;
+  const hi = n - drop;
+  if (hi <= lo) {
+    let all = 0;
+    for (const v of sorted) all += v;
+    return all / n;
+  }
+  let sum = 0;
+  for (let i = lo; i < hi; i++) sum += sorted[i] ?? 0;
+  return sum / (hi - lo);
+}
+
+export function iqm(values: readonly number[]): number {
+  return iqmSorted([...values].sort((a, b) => a - b));
+}
+
+export interface PopulationBandValues {
+  p10: (number | null)[];
+  p90: (number | null)[];
+  iqm: (number | null)[];
+}
+
+export function populationBand(
+  steps: readonly number[],
+  lanes: readonly LaneSeries[],
+): PopulationBandValues {
+  const p10: (number | null)[] = [];
+  const p90: (number | null)[] = [];
+  const mid: (number | null)[] = [];
+  for (let i = 0; i < steps.length; i++) {
+    const vals: number[] = [];
+    for (const lane of lanes) {
+      const v = lane.values[i];
+      if (v !== null && v !== undefined && Number.isFinite(v)) vals.push(v);
+    }
+    vals.sort((a, b) => a - b);
+    if (vals.length === 0) {
+      p10.push(null);
+      p90.push(null);
+      mid.push(null);
+    } else {
+      p10.push(percentileSorted(vals, 10));
+      p90.push(percentileSorted(vals, 90));
+      mid.push(iqmSorted(vals));
+    }
+  }
+  return { p10, p90, iqm: mid };
 }
 
 export function capLanes(series: readonly LaneSeries[], cap: number): LaneSeries[] {

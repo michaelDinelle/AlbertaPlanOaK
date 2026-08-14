@@ -2,7 +2,7 @@
 import { readFileSync } from 'node:fs';
 import { readdir, unlink, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
-import { readTape, sampleWindows, tapeValue } from './metricsTape';
+import { readTape, tapeValue } from './metricsTape';
 import { isEnvId } from '@shared/envs';
 import type { FleetColumnar, FleetRow } from '@shared/types';
 import {
@@ -17,8 +17,6 @@ import { parseFieldPath, pluckNumber, statOrNull, streamJsonl } from './jsonl';
 import { ensureCacheDir } from './runIndex';
 
 export const DEFAULT_FLEET_FIELDS = ['rewardSum', 'health.rewardRate'] as const;
-
-const MAX_TAPE_WINDOWS = 256;
 
 export interface FleetQuery {
   policy: string;
@@ -194,10 +192,10 @@ export async function deriveFleetColumnar(opts: DeriveOptions): Promise<FleetCol
   const live = opts.inFlight;
   const cacheDir = opts.cacheDir ?? null;
   const fleetPath = join(dir, 'fleet.jsonl');
+  const tapePath = join(dir, `metrics.${query.policy}.oakt`);
   const st = await statOrNull(fleetPath);
-  if (st === null) return { steps: [], lanes: [], series: emptySeries(query.fields) };
-
-  const fileKey = `${st.mtimeMs}:${st.size}`;
+  const tapeSt = await statOrNull(tapePath);
+  const fileKey = `${st?.mtimeMs ?? 0}:${st?.size ?? 0}:${tapeSt?.mtimeMs ?? 0}:${tapeSt?.size ?? 0}`;
   const memKey = `${dir}|${queryKey(query)}|${fileKey}`;
   const memHit = lruGet(memKey);
   if (memHit !== undefined) return memHit;
@@ -234,12 +232,6 @@ export async function deriveFleetColumnar(opts: DeriveOptions): Promise<FleetCol
 
   inFlight.set(memKey, task);
   return task;
-}
-
-function emptySeries(fields: readonly string[]): Record<string, (number | null)[][]> {
-  const out: Record<string, (number | null)[][]> = {};
-  for (const f of fields) out[f] = [];
-  return out;
 }
 
 interface LaneKeyed {
@@ -314,8 +306,7 @@ async function computeColumnar(fleetPath: string, query: FleetQuery): Promise<Fl
         return meta.envId ?? '';
       };
       const seeds = meta.seeds ?? Array.from({ length: tape.laneCount }, (_, i) => i);
-      const windows = sampleWindows(tape.data.length, MAX_TAPE_WINDOWS);
-      for (const w of windows) {
+      for (let w = 0; w < tape.data.length; w++) {
         const stepEnd = (tape.stepStart[w] ?? 0) + (tape.stepCount[w] ?? 0);
         if (stepSlot.has(stepEnd)) continue;
         let si: number | null = null;

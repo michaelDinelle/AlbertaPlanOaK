@@ -1,6 +1,6 @@
 
 import type { ViewMount } from '../router';
-import type { CurvesResponse, FleetColumnar, RunDetail } from '@shared/types';
+import type { FleetColumnar, RunDetail } from '@shared/types';
 import { api } from '../api';
 import {
   aggregateSeries,
@@ -17,6 +17,7 @@ import {
   loadRunDetail,
   policiesIn,
   policyView,
+  populationBand,
   rankLanes,
   toWindowRates,
   windowMidpoints,
@@ -252,10 +253,6 @@ export function mountRunScience(host: HTMLElement, opts: RunScienceOptions): Run
       buildSeedsDetail(panel, scope);
     });
 
-    addTab('env', 'Per-seed detail', (panel, scope) => {
-      buildSeedsDetail(panel, scope);
-    });
-
     const fleetCache = new Map<string, Promise<FleetColumnar>>();
     const fleetFor = (name: string): Promise<FleetColumnar> => {
       let hit = fleetCache.get(name);
@@ -265,20 +262,9 @@ export function mountRunScience(host: HTMLElement, opts: RunScienceOptions): Run
       }
       return hit;
     };
-    const curvesCache = new Map<string, Promise<CurvesResponse>>();
-    const curvesFor = (envId: string, name: string): Promise<CurvesResponse> => {
-      const key = `${name}|${envId}`;
-      let hit = curvesCache.get(key);
-      if (!hit) {
-        hit = api.curves(id, { policy: name, ...(mixed ? { envId } : {}) });
-        curvesCache.set(key, hit);
-      }
-      return hit;
-    };
 
     function buildSeedsDetail(panel: HTMLElement, scope: PanelScope): void {
       let columnar: FleetColumnar | null = null;
-      let curves: CurvesResponse | null = null;
       const recordedSeeds = new Set(
         detail.recordings.filter((r) => r.envId === selectedEnv).map((r) => r.seed),
       );
@@ -518,15 +504,7 @@ export function mountRunScience(host: HTMLElement, opts: RunScienceOptions): Run
         laneStatus.hidden = true;
         shown = capLanes(all, LANE_CAP);
         const capped = shown.length < all.length;
-
-        const grid = curves;
-        const sameGrid = grid !== null
-          && grid.steps.length === columnar.steps.length
-          && grid.steps[0] === columnar.steps[0]
-          && grid.steps.at(-1) === columnar.steps.at(-1);
-        const band = mode === 'measured' && grid !== null && sameGrid
-          ? { p10: grid.p10, p90: grid.p90, iqm: grid.iqm, ciLo: grid.ciLo, ciHi: grid.ciHi }
-          : undefined;
+        const band = mode === 'measured' ? populationBand(columnar.steps, all) : undefined;
 
         if (laneChart) playheadCharts.delete(laneChart);
         laneChart?.destroy();
@@ -543,8 +521,6 @@ export function mountRunScience(host: HTMLElement, opts: RunScienceOptions): Run
               p10: seriesOf(band.p10),
               p90: seriesOf(band.p90),
               iqm: seriesOf(band.iqm),
-              ciLo: seriesOf(band.ciLo ?? []),
-              ciHi: seriesOf(band.ciHi ?? []),
             }
           : undefined;
         laneChart = populationChart({
@@ -573,7 +549,7 @@ export function mountRunScience(host: HTMLElement, opts: RunScienceOptions): Run
             el('span', {
               class: 'eyebrow-note',
               text: (capped ? `${shown.length}/${all.length} seeds · ` : 'every seed · ') + 'drag to seek',
-              title: 'IQM ± bootstrap 95% CI and P10–P90 over every seed, each seed\u2019s own curve ghosted, the hero lifted in the env accent · click a highlighted curve to watch that seed at that step · press and drag to scrub playback',
+              title: 'IQM and P10–P90 over every seed, each seed\u2019s own curve ghosted, the hero lifted in the env accent · click a highlighted curve to watch that seed at that step · press and drag to scrub playback',
             }),
             seriesSelect,
           ])),
@@ -587,14 +563,10 @@ export function mountRunScience(host: HTMLElement, opts: RunScienceOptions): Run
       }
       repaintLanes = paintLanes;
 
-      Promise.all([
-        fleetFor(policy),
-        curvesFor(selectedEnv, policy).catch(() => null),
-      ]).then(
-        ([data, curve]) => {
+      fleetFor(policy).then(
+        (data) => {
           if (destroyed || stale) return;
           columnar = data;
-          curves = curve;
           paintLanes();
         },
         (error: unknown) => {

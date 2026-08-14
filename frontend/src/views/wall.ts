@@ -304,12 +304,14 @@ export function buildSeedRows(columnar: FleetColumnar, options: SeedRowOptions =
   for (const lane of laneSeries(columnar, divergenceField)) divergence.set(lane.seed, lane.values);
 
   const rows: SeedRow[] = [];
+  const seen = new Set<number>();
   for (const lane of cumulative) {
     const final = lastFinite(lane.values);
     const at = final === null ? undefined : steps[final.index];
     const rate = final !== null && at !== undefined && at > 0 ? final.value / at : null;
     const spark = windowRates(steps, lane.values);
     const death = lastFinite(divergence.get(lane.seed) ?? []);
+    seen.add(lane.seed);
     rows.push({
       seed: lane.seed,
       rate,
@@ -318,6 +320,18 @@ export function buildSeedRows(columnar: FleetColumnar, options: SeedRowOptions =
       spark,
       sparkXs,
       recorded: recorded.has(lane.seed),
+    });
+  }
+  for (const seed of recorded) {
+    if (seen.has(seed)) continue;
+    rows.push({
+      seed,
+      rate: null,
+      retention: null,
+      divergedAt: null,
+      spark: [],
+      sparkXs,
+      recorded: true,
     });
   }
   rows.sort((a, b) => a.seed - b.seed);
@@ -350,16 +364,6 @@ export function nextSort(sort: WallSort): WallSort {
   const index = WALL_SORTS.indexOf(sort);
   return WALL_SORTS[(index + 1) % WALL_SORTS.length] ?? 'rate';
 }
-
-export function leaderSeed(rows: readonly SeedRow[]): number | null {
-  let best: SeedRow | null = null;
-  for (const row of rows) {
-    if (!row.recorded || row.rate === null || !Number.isFinite(row.rate)) continue;
-    if (best === null || row.rate > (best.rate ?? -Infinity)) best = row;
-  }
-  return best?.seed ?? null;
-}
-
 
 export interface PopulationFigures {
   positive: string;
@@ -1162,7 +1166,7 @@ export const mount: ViewMount = (host) => {
     popNote.textContent = figures.source === 'summary'
       ? 'from summary.json — tools/fleet.py report'
       : figures.source === 'measured'
-        ? 'measured from fleet.jsonl — this root has no summary slice for this environment'
+        ? 'measured from this run’s tape — this root has no summary slice for this environment'
         : '';
   }
 
@@ -1175,7 +1179,7 @@ export const mount: ViewMount = (host) => {
 
     if (rows.length === 0) {
       railRows.replaceChildren(
-        el('div', { class: 'wall-row-empty', text: 'No seeds for this environment in fleet.jsonl.' }),
+        el('div', { class: 'wall-row-empty', text: 'No seeds for this environment.' }),
       );
       return;
     }
@@ -1728,8 +1732,7 @@ export const mount: ViewMount = (host) => {
     coverExtra.replaceChildren(
       emptyState(
         reason,
-        `The population on the right is real — it comes from fleet.jsonl. There is simply no recorded `
-          + `experience on this run, so there is no scene and there are no ghosts. ${RECORD_RECIPE}`,
+        RECORD_RECIPE,
         [
           detail ? linkButton('Open the run dashboard', `#/run/${encodeURIComponent(detail.id)}`, { quiet: true }) : null,
           linkButton('Find a run with recordings', '#/runs', { quiet: true }),
@@ -1765,27 +1768,25 @@ export const mount: ViewMount = (host) => {
     science?.setEnv(next);
     transport.classList.remove('is-idle');
     paintChips();
-    rows = [];
-    railRows.replaceChildren(spinner('Reading fleet.jsonl'));
+    const recorded = seedsFor(detail.recordings, next);
+    rows = buildSeedRows({ steps: [], lanes: [], series: {} }, { recorded: new Set(recorded) });
+    selection = setLeader(selection, recorded[0] ?? null, playable);
     paintPopulation();
+    paintRail();
+    void mountHero();
+    syncUrl();
 
     const run = detail;
     loadColumnar(run.id, next).then(
       (columnar) => {
         if (destroyed || envId !== next) return;
-        rows = buildSeedRows(columnar, { recorded: new Set(seedsFor(run.recordings, next)) });
-        selection = setLeader(selection, leaderSeed(rows), playable);
+        rows = buildSeedRows(columnar, { recorded: new Set(recorded) });
         paintPopulation();
         paintRail();
-        void mountHero();
-        syncUrl();
       },
       (error: unknown) => {
         if (destroyed || envId !== next) return;
         railRows.replaceChildren(errorState(error instanceof Error ? error.message : String(error)));
-        const fallback = seedsFor(run.recordings, next)[0] ?? null;
-        selection = setLeader(selection, fallback, playable);
-        void mountHero();
       },
     );
   }

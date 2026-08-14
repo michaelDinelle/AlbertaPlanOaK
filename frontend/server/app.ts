@@ -10,7 +10,6 @@ import {
   runIndexCacheFile,
 } from './config';
 import { corsHeaders } from './cors';
-import { deriveCurves, parseCurvesQuery } from './curves';
 import { deriveFleetColumnar, parseFleetQuery } from './fleetDerive';
 import { statOrNull } from './jsonl';
 import { findRecording } from './recordings';
@@ -189,19 +188,6 @@ export function createApp(opts: AppOptions = {}): App {
       const parsed = parseFleetQuery(url);
       if ('error' in parsed) return fail(400, parsed.error);
       const data = await deriveFleetColumnar({
-        id: run.id,
-        dir: run.dir,
-        query: parsed.query,
-        inFlight: run.entry.inFlight,
-        cacheDir: fleetCache,
-      });
-      return json(data, { cache: run.entry.inFlight ? 'no-store' : 'private, max-age=30' });
-    }
-
-    if (sub === 'curves' && segs.length === 4) {
-      const parsed = parseCurvesQuery(url);
-      if ('error' in parsed) return fail(400, parsed.error);
-      const data = await deriveCurves({
         id: run.id,
         dir: run.dir,
         query: parsed.query,

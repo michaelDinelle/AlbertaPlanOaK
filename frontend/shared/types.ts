@@ -230,17 +230,6 @@ export interface FleetColumnar {
   series: Record<string, (number | null)[][]>;
 }
 
-export interface CurvesResponse {
-  steps: number[];
-  iqm: (number | null)[];
-  ciLo: (number | null)[];
-  ciHi: (number | null)[];
-  p10: (number | null)[];
-  p50: (number | null)[];
-  p90: (number | null)[];
-  seeds: number;
-}
-
 export interface KeeperResponse {
   keeper: string | null;
 }

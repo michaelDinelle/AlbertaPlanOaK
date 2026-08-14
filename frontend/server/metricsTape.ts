@@ -102,10 +102,3 @@ export function tapeValue(
   const mapped = TAPE_FIELD_MAP[fieldPath];
   return mapped === undefined ? null : get(mapped);
 }
-
-export function sampleWindows(total: number, cap: number): number[] {
-  if (total <= cap) return Array.from({ length: total }, (_, i) => i);
-  const out: number[] = [];
-  for (let i = 0; i < cap; i++) out.push(Math.floor(((i + 1) * total) / cap) - 1);
-  return [...new Set(out)].sort((a, b) => a - b);
-}
