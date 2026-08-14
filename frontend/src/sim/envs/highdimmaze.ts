@@ -51,7 +51,6 @@ function state(x: number, y: number, gx: number, gy: number, lastDir: number): H
 
 export const highDimMazeDecoder: EnvDecoder<HighDimMazeState, HighDimMazeStatic> = {
   envId: 'HighDimMaze-cont-v0',
-  needsReplay: false,
 
   initStatic(seed: number): HighDimMazeStatic {
     return { seed, walls: highDimMazeWalls() };

@@ -3,7 +3,6 @@ import { GroundTruthOverlay } from '@kit/debug';
 import { makeFrameRig, type FrameRig } from '@kit/rigs';
 import { CelebrationPool, attachCelebrations, disposeCelebrations } from '@kit/celebrate';
 import type {
-  AlignmentProbe,
   FrameState,
   FrameUpdate,
   SceneContext,
@@ -19,9 +18,6 @@ import {
   buildWorld,
   clampRange,
   pivotOf,
-  REFLECT_LIFT,
-  REFLECT_Z,
-  WATER_LEVEL,
   type WorldHandle,
 } from './world';
 
@@ -258,40 +254,6 @@ class LanternBellScene implements SceneModule {
   setDebug(on: boolean): void {
     this.debugOn = on;
     if (this.overlay) this.overlay.visible = on;
-  }
-
-  probes(): AlignmentProbe[] {
-    const pivot = this.pivot;
-    const swing = this.lantern?.swingRoot ?? new THREE.Object3D();
-    const bob = this.lantern?.bobRoot ?? new THREE.Object3D();
-    const pivotRoot = this.world?.pivotRoot ?? new THREE.Object3D();
-    const reflection = this.world?.reflectionRoot ?? new THREE.Object3D();
-    return [
-      {
-        name: 'bob',
-        object: bob,
-        expectWorldPos: (state) => {
-          const th = state.pose[0] ?? 0;
-          return [pivot[0] + PD_L * Math.sin(th), pivot[1] - PD_L * Math.cos(th), pivot[2]] as const;
-        },
-      },
-      {
-        name: 'swing-root',
-        object: swing,
-        expectWorldPos: () => pivot,
-      },
-      {
-        name: 'pivot',
-        object: pivotRoot,
-        expectWorldPos: () => pivot,
-      },
-      {
-        name: 'lantern-reflection',
-        object: reflection,
-        expectWorldPos: (state) =>
-          [pivot[0] + PD_L * Math.sin(state.pose[0] ?? 0), WATER_LEVEL + REFLECT_LIFT, REFLECT_Z] as const,
-      },
-    ];
   }
 
   dispose(): void {

@@ -118,7 +118,6 @@ describe('constants mirror the kernel', () => {
 describe('decoder contract', () => {
   test('identity', () => {
     expect(halfCheetahDecoder.envId).toBe('HalfCheetah-v4');
-    expect(halfCheetahDecoder.needsReplay).toBe(false);
   });
 
   test('geometry exposes the frozen cheetah FK', () => {

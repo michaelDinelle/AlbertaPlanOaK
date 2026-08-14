@@ -49,7 +49,6 @@ function state(r: number, c: number, lastA: number): DeepSeaState {
 
 export const deepSeaDecoder: EnvDecoder<DeepSeaState, DeepSeaStatic> = {
   envId: 'DeepSea-cont-v0',
-  needsReplay: false,
 
   initStatic(seed: number): DeepSeaStatic {
     const [maskLo, maskHi] = deepSeaMaskWords(seed);

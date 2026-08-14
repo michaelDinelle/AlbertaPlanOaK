@@ -1,11 +1,10 @@
 
 import { CelebrationPool, attachCelebrations, disposeCelebrations } from '@kit/celebrate';
 import { GroundTruthOverlay } from '@kit/debug';
-import { cellToWorld, cellToWorldVec, clampCell, type GridSize, type Vec3Tuple } from '@kit/grid';
+import { cellToWorldVec, clampCell, type GridSize } from '@kit/grid';
 import { makeOrbitRig, type OrbitRig } from '@kit/rigs';
 import { TOKENS } from '@kit/tokens';
 import type {
-  AlignmentProbe,
   FrameState,
   FrameUpdate,
   SceneContext,
@@ -203,7 +202,6 @@ class TempleOfThreeGatesScene implements SceneModule {
   private readonly doorAt: number[] = [-Infinity, -Infinity, -Infinity];
 
   private readonly view = makeView();
-  private readonly probeView = makeView();
   private readonly prevGoal: GridCell = { x: 0, y: 0 };
   private readonly bloomPos = new THREE.Vector3();
   private readonly groundPos = new THREE.Vector3();
@@ -224,7 +222,6 @@ class TempleOfThreeGatesScene implements SceneModule {
     const doors = resolveDoors(grid);
     this.doors = doors;
     seedKeys(this.view, grid);
-    seedKeys(this.probeView, grid);
     const openingGoal = resolveGoal(grid);
 
     const palette = ctx.tokens.palettes.morning;
@@ -556,90 +553,6 @@ class TempleOfThreeGatesScene implements SceneModule {
   setDebug(on: boolean): void {
     this.debugOn = on;
     if (this.overlay) this.overlay.visible = on;
-  }
-
-  probes(): AlignmentProbe[] {
-    const grid = this.grid;
-    const wisp = this.wisp;
-    const shrine = this.shrine;
-    const world = this.world;
-    const height = this.ctx?.tokens.wispHeight ?? TOKENS.wispHeight;
-    const view = this.probeView;
-
-    const wispOut: Vec3Tuple = [0, 0, 0];
-    const anchorOut: Vec3Tuple = [0, 0, 0];
-    const shrineOut: Vec3Tuple = [0, 0, 0];
-
-    const probes: AlignmentProbe[] = [
-      {
-        name: 'wisp',
-        object: wisp?.probeObject ?? new THREE.Object3D(),
-        expectWorldPos: (state) => {
-          readState(state, grid, view);
-          cellToWorld(view.x, view.y, grid, wispOut);
-          wispOut[1] = height;
-          return wispOut;
-        },
-      },
-      {
-        name: 'wisp-anchor',
-        object: wisp?.avatar ?? new THREE.Object3D(),
-        expectWorldPos: (state) => {
-          readState(state, grid, view);
-          return cellToWorld(view.x, view.y, grid, anchorOut);
-        },
-      },
-      {
-        name: 'shrine',
-        object: shrine?.root ?? new THREE.Object3D(),
-        expectWorldPos: (state) => {
-          readState(state, grid, view);
-          return cellToWorld(view.gx, view.gy, grid, shrineOut);
-        },
-      },
-    ];
-
-    for (let j = 0; j < this.altars.length; j++) {
-      const altar = this.altars[j];
-      if (!altar) continue;
-      const out: Vec3Tuple = [0, 0, 0];
-      probes.push({
-        name: `key-altar-${j}`,
-        object: altar.root,
-        expectWorldPos: (state) => {
-          readState(state, grid, view);
-          const cell = view.keys[j] as GridCell;
-          return cellToWorld(cell.x, cell.y, grid, out);
-        },
-      });
-    }
-
-    for (let j = 0; j < this.gates.length; j++) {
-      const gate = this.gates[j];
-      const cell = this.doors[j];
-      if (!gate || !cell) continue;
-      const out: Vec3Tuple = [0, 0, 0];
-      probes.push({
-        name: `gate-${j}`,
-        object: gate.root,
-        expectWorldPos: () => cellToWorld(cell.x, cell.y, grid, out),
-      });
-    }
-    if (world) {
-      for (let j = 0; j < world.portalRoots.length; j++) {
-        const root = world.portalRoots[j];
-        const cell = this.doors[j];
-        if (!root || !cell) continue;
-        const out: Vec3Tuple = [0, 0, 0];
-        probes.push({
-          name: `portal-${j}`,
-          object: root,
-          expectWorldPos: () => cellToWorld(cell.x, cell.y, grid, out),
-        });
-      }
-    }
-
-    return probes;
   }
 
   dispose(): void {

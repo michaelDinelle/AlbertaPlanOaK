@@ -5,7 +5,8 @@ import { readFileSync } from 'node:fs';
 
 import type { EnvId } from '@shared/envs';
 import { decodeRecording } from '@sim/decode';
-import { RECORD_FLOATS, parseActionsBin, rawRecordingFromFloats } from '@sim/record';
+import { RECORD_FLOATS } from '@sim/record';
+import { parseRawTrace, rawRecordingFromFloats } from '../helpers/rawTrace';
 import type { EnvDecoder, SimEvent } from '@sim/types';
 import { fourRoomsDecoder } from '@sim/envs/fourrooms';
 import { deepSeaDecoder } from '@sim/envs/deepsea';
@@ -106,19 +107,14 @@ describe('real fleet-lane traces (200 steps each)', () => {
       expect(fx.steps).toBe(200);
       const buf = loadBin(`traces/${envId}.bin`);
       expect(buf.byteLength).toBe(200 * RECORD_FLOATS * 4);
-      const raw = parseActionsBin(buf, {
-        envId,
-        seed: fx.seed,
-        actDim: 6,
-        recordVersion: 3,
-      });
+      const raw = parseRawTrace(buf, { envId, seed: fx.seed });
       expect(raw.steps).toBe(200);
       expectGolden(envId, fx.seed, raw.data, fx.frames, fx.events);
     });
 
     test(`${envId}: event derivation matches the reference tally`, () => {
       const buf = loadBin(`traces/${envId}.bin`);
-      const raw = parseActionsBin(buf, { envId, seed: fx.seed, actDim: 6, recordVersion: 3 });
+      const raw = parseRawTrace(buf, { envId, seed: fx.seed });
       const dec = decodeRecording(raw, decoderFor(envId));
       const counts: Record<string, number> = {};
       for (const evs of dec.events) for (const e of evs) counts[e.type] = (counts[e.type] ?? 0) + 1;
@@ -126,16 +122,16 @@ describe('real fleet-lane traces (200 steps each)', () => {
     });
   }
 
-  test('maxSteps decodes a prefix of the same stream', () => {
+  test('a truncated recording decodes a prefix of the same stream', () => {
     const envId = 'Chain-cont-v0';
     const fx = loadJson<TraceFixture>(`traces/${envId}.json`);
-    const raw = parseActionsBin(loadBin(`traces/${envId}.bin`), {
-      envId,
-      seed: fx.seed,
-      actDim: 6,
-      recordVersion: 3,
-    });
-    const dec = decodeRecording(raw, decoderFor(envId), { maxSteps: 50 });
+    const raw = parseRawTrace(loadBin(`traces/${envId}.bin`), { envId, seed: fx.seed });
+    const head = {
+      ...raw,
+      data: raw.data.subarray(0, 50 * RECORD_FLOATS),
+      steps: 50,
+    };
+    const dec = decodeRecording(head, decoderFor(envId));
     expect(dec.frames.length).toBe(51);
     for (let i = 0; i < 51; i++) expect(dec.frames[i]?.state).toEqual(fx.frames[i]);
   });
@@ -253,12 +249,7 @@ describe('init frames', () => {
       const fx = loadJson<TraceFixture>(`traces/${envId}.json`);
       const d = decoderFor(envId);
       const init = d.initFrame(fx.seed, d.initStatic(fx.seed));
-      const raw = parseActionsBin(loadBin(`traces/${envId}.bin`), {
-        envId,
-        seed: fx.seed,
-        actDim: 6,
-        recordVersion: 3,
-      });
+      const raw = parseRawTrace(loadBin(`traces/${envId}.bin`), { envId, seed: fx.seed });
       const dec = decodeRecording(raw, d);
       expect(Array.from(dec.frames[0]?.pose ?? [])).toEqual(Array.from(init.pose));
     }

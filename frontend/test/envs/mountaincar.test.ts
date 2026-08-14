@@ -99,7 +99,6 @@ describe('terrain', () => {
 describe('decoder contract', () => {
   test('identity', () => {
     expect(mountainCarDecoder.envId).toBe('MountainCar-cont-v0');
-    expect(mountainCarDecoder.needsReplay).toBe(false);
   });
 
   test('init frame is the valley start for every lane', () => {

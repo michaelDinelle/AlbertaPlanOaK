@@ -1,11 +1,10 @@
 
 import { CelebrationPool, attachCelebrations, disposeCelebrations } from '@kit/celebrate';
 import { GroundTruthOverlay } from '@kit/debug';
-import { cellToWorld, cellToWorldVec, type GridSize, type Vec3Tuple } from '@kit/grid';
+import { cellToWorld, cellToWorldVec, type GridSize } from '@kit/grid';
 import { makeOrbitRig, type OrbitRig } from '@kit/rigs';
 import { TOKENS } from '@kit/tokens';
 import type {
-  AlignmentProbe,
   FrameState,
   FrameUpdate,
   SceneContext,
@@ -414,40 +413,6 @@ class LongNightRoadScene implements SceneModule {
   setDebug(on: boolean): void {
     this.debugOn = on;
     if (this.overlay) this.overlay.visible = on;
-  }
-
-  probes(): AlignmentProbe[] {
-    const grid = this.grid;
-    const wisp = this.wisp;
-    const road = this.road;
-    const milestone = this.milestone;
-    const goalCell = this.goalCell;
-
-    const wispCell: GridCell = { x: 0, y: 0 };
-    const wispOut: Vec3Tuple = [0, 0, 0];
-    const endOut: Vec3Tuple = [0, 0, 0];
-    const startOut: Vec3Tuple = [0, 0, 0];
-
-    return [
-      {
-        name: 'wisp',
-        object: wisp?.avatar ?? new THREE.Object3D(),
-        expectWorldPos: (state) => {
-          readState(state, grid, wispCell);
-          return cellToWorld(wispCell.x, 0, grid, wispOut);
-        },
-      },
-      {
-        name: 'end-lantern',
-        object: road?.endRoot ?? new THREE.Object3D(),
-        expectWorldPos: () => cellToWorld(goalCell, 0, grid, endOut),
-      },
-      {
-        name: 'start-milestone',
-        object: milestone?.root ?? new THREE.Object3D(),
-        expectWorldPos: () => cellToWorld(0, 0, grid, startOut),
-      },
-    ];
   }
 
   dispose(): void {

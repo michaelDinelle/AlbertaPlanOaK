@@ -1,11 +1,10 @@
 
 import { CelebrationPool, attachCelebrations, disposeCelebrations } from '@kit/celebrate';
 import { GroundTruthOverlay } from '@kit/debug';
-import { cellToWorld, cellToWorldVec, type GridSize, type Vec3Tuple } from '@kit/grid';
+import { cellToWorld, cellToWorldVec, type Vec3Tuple } from '@kit/grid';
 import { makeOrbitRig, type OrbitRig } from '@kit/rigs';
 import { TOKENS } from '@kit/tokens';
 import type {
-  AlignmentProbe,
   FrameState,
   FrameUpdate,
   SceneContext,
@@ -389,53 +388,6 @@ class FireflyCaveScene implements SceneModule {
   setDebug(on: boolean): void {
     this.debugOn = on;
     if (this.overlay) this.overlay.visible = on;
-  }
-
-  probes(): AlignmentProbe[] {
-    const grid: GridSize = this.grid;
-    const wisp = this.wisp;
-    const crystal = this.crystal;
-    const cyan = this.mouthCyan;
-    const magenta = this.mouthMagenta;
-    const height = this.ctx?.tokens.wispHeight ?? TOKENS.wispHeight;
-
-    const wispOut: Vec3Tuple = [0, 0, 0];
-    const anchorOut: Vec3Tuple = [0, 0, 0];
-    const crystalOut: Vec3Tuple = [0, 0, 0];
-    const cyanOut: Vec3Tuple = [0, 0, 0];
-    const magentaOut: Vec3Tuple = [0, 0, 0];
-
-    return [
-      {
-        name: 'wisp',
-        object: wisp?.probeObject ?? new THREE.Object3D(),
-        expectWorldPos: (state) => {
-          cellToWorld(readPos(state), 0, grid, wispOut);
-          wispOut[1] = height;
-          return wispOut;
-        },
-      },
-      {
-        name: 'wisp-anchor',
-        object: wisp?.avatar ?? new THREE.Object3D(),
-        expectWorldPos: (state) => cellToWorld(readPos(state), 0, grid, anchorOut),
-      },
-      {
-        name: 'cue-crystal',
-        object: crystal?.root ?? new THREE.Object3D(),
-        expectWorldPos: () => cellToWorld(CUE_CELL, 0, grid, crystalOut),
-      },
-      {
-        name: 'exit-cyan',
-        object: cyan?.root ?? new THREE.Object3D(),
-        expectWorldPos: () => cellToWorld(CHOICE_CELL, 0, grid, cyanOut),
-      },
-      {
-        name: 'exit-magenta',
-        object: magenta?.root ?? new THREE.Object3D(),
-        expectWorldPos: () => cellToWorld(CHOICE_CELL, 0, grid, magentaOut),
-      },
-    ];
   }
 
   dispose(): void {

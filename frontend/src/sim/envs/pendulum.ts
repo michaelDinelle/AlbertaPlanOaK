@@ -72,7 +72,6 @@ function makeState(pose: Float32Array, ctrl0: number): PendulumState {
 
 export const pendulumDecoder: EnvDecoder<PendulumState, PendulumStatic> = {
   envId: 'Pendulum-cont-v0',
-  needsReplay: false,
 
   initStatic(): PendulumStatic {
     return STATIC;

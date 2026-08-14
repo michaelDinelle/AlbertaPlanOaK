@@ -1,20 +1,11 @@
-
 import type { ViewHandle, ViewMount } from '../router';
-import type {
-  FleetColumnar,
-  RecordingRef,
-  RolesResponse,
-  RunDetail,
-  RunIndexEntry,
-  RunMeta,
-  SummaryPolicyResult,
-} from '@shared/types';
+import type { EnvResult, RecordingRef, RunDetail, RunIndexEntry, RunMeta } from '@shared/types';
 import { ENVS, ENV_IDS, isEnvId, type EnvCategory, type EnvId } from '@shared/envs';
-import { MAX_CATCHUP_FRAMES, type HarnessSource } from '@kit/harness';
+import type { PlaybackSource } from '@kit/playback';
 import { makeGhostLayer, type GhostLayer } from '@kit/ghosts';
 import { TOKENS } from '@kit/tokens';
 import type { QualityTier } from '@kit/types';
-import { api, fetchWall, type WallData, type WallLane } from '../api';
+import { fieldIndex, tapeValue, type Tape } from '../tape';
 import {
   accentCss,
   badge,
@@ -29,31 +20,32 @@ import {
 import { sparkline, type SparklineHandle } from '../components/sparkline';
 import { mountRunScience, type RunScienceHandle } from './run';
 import {
+  binnedRates,
+  deliveredRate,
+  envLanes,
   envName,
   envShares,
-  envSliceResult,
   formatAgo,
   formatCount,
   formatPercent,
   formatRate,
   formatSigned,
   formatStep,
-  laneSeries,
+  laneDeath,
+  laneRetention,
   loadRunDetail,
-  policiesIn,
-  primaryResult,
-  roles as rolesResource,
+  loadTape,
+  refreshTape,
   runIndex,
   sortRuns,
-  windowMidpoints,
-  windowRates,
 } from '../state';
 import {
-  loadTheaterRecording,
+  loadHero,
+  makeInitialSource,
   recordingRef,
   seedsFor,
   seekTargetForTick,
-  type TheaterRecording,
+  type HeroHandle,
   type TimelineTick,
 } from '../theater/loader';
 import { clampPosition, formatClock, stepPosition } from '../theater/player';
@@ -64,12 +56,15 @@ import {
   type SceneHostHandle,
 } from '../theater/sceneHost';
 
-
 export const WALL_SPEEDS: readonly number[] = [1, 4, 16, 64, 256, 1024];
 
-export const WALL_TARGET_SAMPLES = 2400;
-
 export const SPARK_ROW_BUDGET = 128;
+
+export const SPARK_BINS = 64;
+
+export const LIVE_POLL_MS = 2_000;
+
+export const DETAIL_POLL_MS = 10_000;
 
 export type WallSort = 'rate' | 'seed' | 'retention';
 export const WALL_SORTS: readonly WallSort[] = ['rate', 'seed', 'retention'];
@@ -79,7 +74,6 @@ const SORT_LABEL: Record<WallSort, string> = {
   seed: 'seed',
   retention: 'retention',
 };
-
 
 export interface WallParams {
   run?: string;
@@ -147,8 +141,7 @@ export function urlPosition(clockPosition: number | null, pending: number): numb
   return Math.floor(at);
 }
 
-
-export type FeaturedSource = 'param' | 'bestKernel' | 'newest' | null;
+export type FeaturedSource = 'param' | 'keeper' | 'newest' | null;
 
 export interface FeaturedPick {
   runId: string | null;
@@ -157,7 +150,6 @@ export interface FeaturedPick {
 
 export function resolveFeaturedRun(
   entries: readonly RunIndexEntry[],
-  roles: RolesResponse | null,
   requested?: string,
 ): FeaturedPick {
   const byId = new Map<string, RunIndexEntry>();
@@ -165,9 +157,8 @@ export function resolveFeaturedRun(
 
   if (requested !== undefined && byId.has(requested)) return { runId: requested, source: 'param' };
 
-
-  const best = roles?.bestKernel ?? null;
-  if (best !== null && byId.get(best)?.hasRecordings === true) return { runId: best, source: 'bestKernel' };
+  const keeper = entries.find((entry) => entry.role === 'keeper');
+  if (keeper?.hasRecordings === true) return { runId: keeper.id, source: 'keeper' };
 
   const started = (entry: RunIndexEntry): number => (entry.startedAt ? Date.parse(entry.startedAt) : 0);
   const newest = (list: readonly RunIndexEntry[]): RunIndexEntry | null =>
@@ -186,34 +177,10 @@ export function resolveFeaturedRun(
   return { runId: null, source: null };
 }
 
-
-export function isPrime(n: number): boolean {
-  if (!Number.isInteger(n) || n < 2) return false;
-  if (n % 2 === 0) return n === 2;
-  for (let d = 3; d * d <= n; d += 2) if (n % d === 0) return false;
-  return true;
-}
-
-export function nextPrime(n: number): number {
-  let candidate = Math.max(2, Math.ceil(Number.isFinite(n) ? n : 2));
-  while (!isPrime(candidate)) candidate++;
-  return candidate;
-}
-
-export function wallStride(steps: number, target: number = WALL_TARGET_SAMPLES): number {
-  if (!Number.isFinite(steps) || steps <= 0) return 1;
-  const want = Math.max(1, Math.floor(target));
-  const need = Math.ceil(steps / want);
-  return need <= 1 ? 1 : nextPrime(need);
-}
-
-
 export interface HeroSelection {
   leader: number | null;
   promoted: number | null;
 }
-
-export const EMPTY_SELECTION: HeroSelection = { leader: null, promoted: null };
 
 export function heroSeed(selection: HeroSelection): number | null {
   return selection.promoted ?? selection.leader;
@@ -243,7 +210,6 @@ export function setLeader(
   return { leader, promoted };
 }
 
-
 export function degradedReason(
   recordings: readonly RecordingRef[],
   envId: EnvId | null,
@@ -254,13 +220,11 @@ export function degradedReason(
   return null;
 }
 
-export const RECORD_RECIPE =
-  'Re-run the fleet with OAK_RECORD_ACTIONS=1 (every seed) or OAK_RECORD_SEEDS=3,8 (a couple) '
-  + 'to write the actions.bin streams the wall replays.';
-
+export const RECORD_RECIPE = 'This run has no recording for that selection.';
 
 export interface SeedRow {
   seed: number;
+  lane: number;
   rate: number | null;
   retention: number | null;
   divergedAt: number | null;
@@ -269,60 +233,26 @@ export interface SeedRow {
   recorded: boolean;
 }
 
-export interface SeedRowOptions {
-  recorded?: ReadonlySet<number>;
-  rateField?: string;
-  divergenceField?: string;
-}
-
-function lastFinite(values: readonly (number | null)[]): { value: number; index: number } | null {
-  for (let i = values.length - 1; i >= 0; i--) {
-    const value = values[i];
-    if (value !== null && value !== undefined && Number.isFinite(value)) return { value, index: i };
-  }
-  return null;
-}
-
-export function retentionOf(window: readonly (number | null)[]): number | null {
-  let peak = -Infinity;
-  for (const value of window) {
-    if (value !== null && value !== undefined && Number.isFinite(value) && value > peak) peak = value;
-  }
-  const final = lastFinite(window);
-  if (final === null || !Number.isFinite(peak) || peak <= 0) return null;
-  return final.value / peak;
-}
-
-export function buildSeedRows(columnar: FleetColumnar, options: SeedRowOptions = {}): SeedRow[] {
-  const rateField = options.rateField ?? 'rewardSum';
-  const divergenceField = options.divergenceField ?? 'firstNonFiniteStep';
-  const recorded = options.recorded ?? new Set<number>();
-  const steps = columnar.steps;
-  const lastStep = steps.length > 0 ? steps[steps.length - 1] ?? 0 : 0;
-  const sparkXs = windowMidpoints(steps).map((mid) => (lastStep > 0 ? mid / lastStep : 0));
-  const cumulative = laneSeries(columnar, rateField);
-  const divergence = new Map<number, (number | null)[]>();
-  for (const lane of laneSeries(columnar, divergenceField)) divergence.set(lane.seed, lane.values);
-
-  const rows: SeedRow[] = [];
-  for (const lane of cumulative) {
-    const final = lastFinite(lane.values);
-    const at = final === null ? undefined : steps[final.index];
-    const rate = final !== null && at !== undefined && at > 0 ? final.value / at : null;
-    const spark = windowRates(steps, lane.values);
-    const death = lastFinite(divergence.get(lane.seed) ?? []);
-    rows.push({
-      seed: lane.seed,
-      rate,
-      retention: retentionOf(spark),
-      divergedAt: death === null ? null : death.value,
-      spark,
-      sparkXs,
-      recorded: recorded.has(lane.seed),
-    });
-  }
-  rows.sort((a, b) => a.seed - b.seed);
-  return rows;
+export function buildSeedRows(
+  tape: Tape,
+  meta: Pick<RunMeta, 'envSchedule' | 'seeds' | 'steps'>,
+  envId: string,
+  recorded: ReadonlySet<number>,
+): SeedRow[] {
+  const { lanes, seeds } = envLanes(meta, envId);
+  const maxStep = tape.rows > 0 ? tape.stepEnd[tape.rows - 1] ?? 0 : 0;
+  const spark = binnedRates(tape, lanes, SPARK_BINS);
+  const sparkXs = spark.x.map((x) => (maxStep > 0 ? x / maxStep : 0));
+  return lanes.map((lane, li) => ({
+    seed: seeds[li] ?? 0,
+    lane,
+    rate: deliveredRate(tape, lane),
+    retention: laneRetention(tape, lane, meta.steps)?.retention ?? null,
+    divergedAt: laneDeath(tape, lane)?.step ?? null,
+    spark: spark.perLane[li] ?? [],
+    sparkXs,
+    recorded: recorded.has(seeds[li] ?? 0),
+  })).sort((a, b) => a.seed - b.seed);
 }
 
 export function sortPermutation(rows: readonly SeedRow[], sort: WallSort): number[] {
@@ -352,16 +282,6 @@ export function nextSort(sort: WallSort): WallSort {
   return WALL_SORTS[(index + 1) % WALL_SORTS.length] ?? 'rate';
 }
 
-export function leaderSeed(rows: readonly SeedRow[]): number | null {
-  let best: SeedRow | null = null;
-  for (const row of rows) {
-    if (!row.recorded || row.rate === null || !Number.isFinite(row.rate)) continue;
-    if (best === null || row.rate > (best.rate ?? -Infinity)) best = row;
-  }
-  return best?.seed ?? null;
-}
-
-
 export interface PopulationFigures {
   positive: string;
   nonDiverged: string;
@@ -376,7 +296,7 @@ function finite(value: unknown): number | null {
 }
 
 export function populationFigures(
-  slice: SummaryPolicyResult | null,
+  slice: EnvResult | null,
   rows: readonly SeedRow[],
 ): PopulationFigures {
   const rates = rows.map((row) => row.rate).filter((v): v is number => v !== null && Number.isFinite(v));
@@ -415,18 +335,18 @@ export function populationFigures(
   };
 }
 
-export function runScheduleLine(meta: Pick<RunMeta, 'envId' | 'batch' | 'steps' | 'envSchedule'>): string {
+export function runScheduleLine(meta: Pick<RunMeta, 'batch' | 'steps' | 'envSchedule'>): string {
   const shares = envShares(meta);
   const horizon = `${formatStep(meta.steps)} steps`;
-  if (shares.length <= 1) {
-    return `${envName(meta.envId)} · ${formatCount(meta.batch)} seeds · ${horizon}`;
+  if (shares.length === 0) return `${formatCount(meta.batch)} seeds · ${horizon}`;
+  if (shares.length === 1) {
+    return `${envName(shares[0]!.envId)} · ${formatCount(meta.batch)} seeds · ${horizon}`;
   }
   const counts = new Set(shares.map((share) => share.lanes));
   const perEnv = counts.size === 1 ? shares[0]?.lanes ?? meta.batch : null;
   const seeds = perEnv === null ? `${formatCount(meta.batch)} seeds total` : `${formatCount(perEnv)} seeds`;
   return `${shares.length} tasks × ${seeds} × ${horizon}`;
 }
-
 
 export type WallAction =
   | { kind: 'toggle' }
@@ -481,27 +401,40 @@ export function cycleEnv(list: readonly EnvId[], current: EnvId | null, directio
   return list[next] ?? null;
 }
 
-export function wallEnvs(meta: Pick<RunMeta, 'envId' | 'batch' | 'envSchedule'>, recordings: readonly RecordingRef[]): EnvId[] {
+export function wallEnvs(meta: Pick<RunMeta, 'envSchedule'>, recordings: readonly RecordingRef[]): EnvId[] {
   const seen = new Set<EnvId>();
   for (const share of envShares(meta)) seen.add(share.envId);
   for (const rec of recordings) if (isEnvId(rec.envId)) seen.add(rec.envId);
   return ENV_IDS.filter((id) => seen.has(id));
 }
 
-
 export const WALL_GHOST_CAP = 512;
 
-export const WALL_CACHE_ENVS = 3;
+export const POSE_FIELD_NAMES: readonly string[] = [
+  'pose0', 'pose1', 'pose2', 'pose3', 'pose4', 'pose5', 'pose6', 'pose7', 'pose8',
+];
 
-export function ghostSampleIndex(position: number, stride: number, samples: number): number {
-  if (samples <= 0) return 0;
-  if (!Number.isFinite(position) || position <= 0) return 0;
-  const index = Math.floor(position / Math.max(1, stride));
-  return index >= samples ? samples - 1 : index;
+export function tapeWindowSteps(tape: Pick<Tape, 'stepStart' | 'stepEnd'>): number {
+  const window = (tape.stepEnd[0] ?? 0) - (tape.stepStart[0] ?? 0);
+  return window > 0 ? window : 1;
 }
 
-export function ghostAlive(firstNonFiniteRow: number | null, row: number): boolean {
-  return firstNonFiniteRow === null || row < firstNonFiniteRow;
+export function ghostRowIndex(position: number, windowSteps: number, rows: number): number {
+  if (rows <= 0) return 0;
+  if (!Number.isFinite(position) || position <= 0) return 0;
+  const index = Math.ceil(position / Math.max(1, windowSteps)) - 1;
+  return index < 0 ? 0 : index >= rows ? rows - 1 : index;
+}
+
+export function aliveRowCount(tape: Pick<Tape, 'rows' | 'stepEnd'>, deathStep: number | null): number {
+  if (deathStep === null) return tape.rows;
+  let n = 0;
+  while (n < tape.rows && (tape.stepEnd[n] ?? Infinity) <= deathStep) n++;
+  return n;
+}
+
+export function ghostAlive(deathStep: number | null, stepEnd: number): boolean {
+  return deathStep === null || stepEnd <= deathStep;
 }
 
 export function rateQuantiles(rows: readonly SeedRow[]): Map<number, number> {
@@ -522,11 +455,19 @@ export function rateQuantiles(rows: readonly SeedRow[]): Map<number, number> {
   return out;
 }
 
-interface GhostView {
-  stride: number;
-  entries: { lane: WallLane; seed: number }[];
+export interface GhostEntry {
+  seed: number;
+  lane: number;
+  deathStep: number | null;
+  aliveRows: number;
 }
 
+interface GhostView {
+  tape: Tape;
+  windowSteps: number;
+  poseFields: number[];
+  entries: GhostEntry[];
+}
 
 export type StageFraming = 'track' | 'world';
 
@@ -553,11 +494,17 @@ export function trackWindow(aspect: number): TrackWindow {
   };
 }
 
-export function laneTrackX(lane: Pick<WallLane, 'pose' | 'samples'>, sample: number): number | null {
-  if (lane.samples <= 0) return null;
-  const at = sample < 0 ? 0 : sample >= lane.samples ? lane.samples - 1 : sample;
-  const x = lane.pose[at * 9];
-  return x === undefined || !Number.isFinite(x) ? null : x;
+export function laneTrackX(
+  tape: Tape,
+  pose0Field: number,
+  entry: Pick<GhostEntry, 'lane' | 'aliveRows'>,
+  row: number,
+): number | null {
+  if (entry.aliveRows <= 0) return null;
+  const bounded = row < 0 ? 0 : row;
+  const at = bounded < entry.aliveRows ? bounded : entry.aliveRows - 1;
+  const x = tapeValue(tape, pose0Field, at, entry.lane);
+  return Number.isFinite(x) ? x : null;
 }
 
 export function inFrameCount(
@@ -628,7 +575,6 @@ export function formatDistance(metres: number): string {
   return `${metres.toFixed(2)} m`;
 }
 
-
 const TIER_BY_LABEL = { low: 'thumb', medium: 'medium', high: 'hero' } as const;
 export type TierLabel = keyof typeof TIER_BY_LABEL;
 export const TIER_LABELS: readonly TierLabel[] = ['low', 'medium', 'high'];
@@ -659,8 +605,7 @@ export const mount: ViewMount = (host) => {
 
   function paintPicker(): void {
     const needle = pickerSearch.value.trim().toLowerCase();
-    const state = runIndex.store.get();
-    const all: RunIndexEntry[] = state.status === 'ready' && state.data !== null ? state.data : [];
+    const all: RunIndexEntry[] = runIndex.snapshot() ?? [];
     const entries = sortRuns(all.filter((entry) => !needle || entry.id.toLowerCase().includes(needle)))
       .slice(0, 40);
     pickerRows.replaceChildren(
@@ -668,7 +613,7 @@ export const mount: ViewMount = (host) => {
         const row = el('button', { class: 'wall-picker-row', type: 'button' }, [
           entry.inFlight ? el('span', { class: 'live-pip' }) : null,
           el('span', { class: 'wall-picker-id', text: entry.id }),
-          entry.role === 'bestKernel' ? badge('best kernel', 'keeper') : null,
+          entry.role === 'keeper' ? badge('keeper', 'keeper') : null,
           entry.hasRecordings ? badge('recordings', 'quiet') : null,
           entry.complete ? null : badge('incomplete', 'warn'),
           el('span', { class: 'wall-picker-meta', text: `${entry.envIds.length} envs · ${formatStep(entry.steps)}` }),
@@ -703,19 +648,18 @@ export const mount: ViewMount = (host) => {
   let destroyed = false;
   const abort = new AbortController();
 
+  let entry: RunIndexEntry | null = null;
   let detail: RunDetail | null = null;
+  let tape: Tape | null = null;
   let envList: EnvId[] = [];
   let envId: EnvId | null = query.env ?? null;
   let sort: WallSort = query.sort ?? 'rate';
   let speed: number = query.speed ?? 64;
   let selection: HeroSelection = { leader: null, promoted: query.seed ?? null };
   let rows: SeedRow[] = [];
-  let policy = 'oak';
   let stride = 1;
-  let heroSteps = 0;
-  let frameCount = 1;
-  let progress = 0;
   let frameAt = query.at ?? 0;
+  let pendingSeekFrame: number | null = query.at ?? null;
   let scrubbing = false;
   let statsAccum = 1000;
   let debugOn = false;
@@ -726,14 +670,20 @@ export const mount: ViewMount = (host) => {
   })();
 
   let sceneHost: SceneHostHandle | null = null;
+  let stageQueue: Promise<void> = Promise.resolve();
+  let hero: HeroHandle | null = null;
+  const heroCache = new Map<string, HeroHandle>();
+  const HERO_CACHE_MAX = 6;
+  let heroGeneration = 0;
+  let heroAttached = false;
   let ghostView: GhostView | null = null;
   let ghostLayer: GhostLayer | null = null;
-  let createdGhostLayer: GhostLayer | null = null;
+  let ghostKey = '';
   let ghostSample = -1;
   let emphasised: number | null = null;
-  let heroGeneration = 0;
-  let heroSource: HarnessSource | null = null;
-  let fieldLanes: WallLane[] = [];
+  let heroSource: PlaybackSource | null = null;
+  let fieldData: { tape: Tape; pose0: number } | null = null;
+  let fieldLanes: GhostEntry[] = [];
   let fieldX = new Float64Array(0);
   let fieldMarks: HTMLElement[] = [];
   let framing: StageFraming = 'world';
@@ -742,8 +692,8 @@ export const mount: ViewMount = (host) => {
   let fieldSample = -1;
   const ghostPose = new Float32Array(9);
   const sparks: SparklineHandle[] = [];
-  const columnarCache = new Map<string, Promise<FleetColumnar>>();
-  const wallCache = new Map<string, Promise<WallData>>();
+  let livePoll: ReturnType<typeof setInterval> | null = null;
+  let detailPollAt = 0;
 
   const chipStrip = el('div', { class: 'wall-envs', role: 'tablist', ariaLabel: 'Environment' });
   const envSelect = el('select', { class: 'input input-select wall-select', ariaLabel: 'Environment' });
@@ -757,13 +707,9 @@ export const mount: ViewMount = (host) => {
     el('b', { class: 'wall-tag-env', text: '' }),
     el('span', { class: 'wall-tag-sub', text: '' }),
   ]);
-  const coverTitle = el('div', { class: 'cover-title', text: 'Loading' });
-  const coverLabel = el('div', { class: 'cover-label', text: '' });
-  const coverFill = el('div', { class: 'cover-fill' });
-  const coverBar = el('div', { class: 'cover-bar' }, [coverFill]);
-  const coverExtra = el('div', { class: 'cover-extra' });
-  const cover = el('div', { class: 'wall-cover' }, [coverTitle, coverBar, coverLabel, coverExtra]);
-  stage.append(stageTag, cover);
+  const stageNote = el('div', { class: 'wall-cover' });
+  stageNote.hidden = true;
+  stage.append(stageTag, stageNote);
 
   const fieldNote = el('span', { class: 'wall-field-note', text: '' });
   const fieldMarkHolder = el('div', { class: 'wall-field-marks' });
@@ -798,11 +744,13 @@ export const mount: ViewMount = (host) => {
   scrubInput.value = '0';
   scrubInput.setAttribute('aria-label', 'Scrub the run');
   const scrubFill = el('div', { class: 'wall-scrub-fill' });
+  const scrubLoaded = el('div', { class: 'wall-scrub-loaded' });
   const scrubHead = el('div', { class: 'wall-scrub-head' });
   const scrubTicks = el('div', { class: 'wall-scrub-ticks' });
   const scrub = el('div', { class: 'wall-scrub' }, [
     scrubInput,
     el('div', { class: 'wall-scrub-track' }),
+    scrubLoaded,
     scrubFill,
     scrubTicks,
     scrubHead,
@@ -918,7 +866,6 @@ export const mount: ViewMount = (host) => {
   main.hidden = true;
   body.append(main);
 
-
   const vsplit = el('div', {
     class: 'wall-vsplit',
     role: 'separator',
@@ -1030,20 +977,37 @@ export const mount: ViewMount = (host) => {
   scrubInput.addEventListener('pointercancel', endScrub);
   scrubInput.addEventListener('blur', endScrub);
   scrubInput.addEventListener('input', () => {
-    sceneHost?.seek(clampPosition(Number(scrubInput.value), frameCount));
+    seekFrame(Number(scrubInput.value));
   });
 
+  function frameCount(): number {
+    return heroSource?.frameCount ?? 1;
+  }
+  function heroSteps(): number {
+    return hero?.totalSteps ?? Math.max(0, frameCount() - 1);
+  }
   function frameFromStep(step: number): number {
-    const scale = heroSteps > 0 ? frameCount / heroSteps : 1;
-    return clampPosition(step * scale, frameCount);
+    const steps = heroSteps();
+    const scale = steps > 0 ? (frameCount() - 1) / steps : 1;
+    return clampPosition(step * scale, frameCount());
   }
   function stepFromFrame(frame: number): number {
-    const scale = frameCount > 0 ? heroSteps / frameCount : 1;
-    return frame * scale;
+    const frames = frameCount() - 1;
+    return frames > 0 ? (frame * heroSteps()) / frames : 0;
+  }
+  function seekFrame(frame: number): void {
+    if (!sceneHost) return;
+    const loaded = frameCount() - 1;
+    if (frame > loaded) {
+      pendingSeekFrame = Math.floor(frame);
+      sceneHost.seek(loaded);
+      return;
+    }
+    pendingSeekFrame = null;
+    sceneHost.seek(clampPosition(frame, frameCount()));
   }
   function scrubToStep(step: number, commit: boolean): void {
-    if (!sceneHost) return;
-    sceneHost.seek(frameFromStep(step));
+    seekFrame(frameFromStep(step));
     if (commit) syncUrl();
   }
   function seekToStep(step: number): void {
@@ -1053,7 +1017,7 @@ export const mount: ViewMount = (host) => {
   function stepFrames(frames: number): void {
     if (!sceneHost) return;
     sceneHost.pause();
-    sceneHost.seek(stepPosition(sceneHost.clock.position(), frames, frameCount));
+    seekFrame(stepPosition(sceneHost.clock.position(), frames, frameCount()));
     syncPlay();
     syncUrl();
   }
@@ -1111,8 +1075,8 @@ export const mount: ViewMount = (host) => {
         const next = escapeSelection(selection);
         if (next !== selection) {
           selection = next;
-          paintRail();
-          void mountHero();
+          applyHero();
+          mountHero();
           syncUrl();
         }
         break;
@@ -1152,7 +1116,7 @@ export const mount: ViewMount = (host) => {
   }
 
   function paintPopulation(): void {
-    const slice = envId === null ? null : envSliceResult(detail?.summary ?? null, envId, policy);
+    const slice = envId === null ? null : detail?.summary?.envSlices[envId] ?? null;
     const figures = populationFigures(slice, rows);
     popLine.replaceChildren(
       figure('seeds > 0', figures.positive, 'Seeds whose average reward rate is above zero'),
@@ -1162,9 +1126,9 @@ export const mount: ViewMount = (host) => {
       figure('reward / GFLOP', figures.perGflop, 'Best seed’s reward rate per agent GFLOP — the SOTA-target metric'),
     );
     popNote.textContent = figures.source === 'summary'
-      ? 'from summary.json — tools/fleet.py report'
+      ? 'from summary.json — fleet.py report'
       : figures.source === 'measured'
-        ? 'measured from fleet.jsonl — this root has no summary slice for this environment'
+        ? 'measured live from this run’s tape'
         : '';
   }
 
@@ -1177,23 +1141,24 @@ export const mount: ViewMount = (host) => {
 
     if (rows.length === 0) {
       railRows.replaceChildren(
-        el('div', { class: 'wall-row-empty', text: 'No seeds for this environment in fleet.jsonl.' }),
+        el('div', { class: 'wall-row-empty', text: 'No seeds for this environment.' }),
       );
       return;
     }
 
     const order = sortPermutation(rows, sort);
-    const hero = heroSeed(selection);
+    const hero_ = heroSeed(selection);
     const withSparks = rows.length <= SPARK_ROW_BUDGET;
     const nodes: HTMLElement[] = [];
 
     order.forEach((index, rank) => {
       const row = rows[index];
       if (row === undefined) return;
-      const isHero = row.seed === hero;
+      const isHero = row.seed === hero_;
       const node = el('button', {
         class: `wall-row${isHero ? ' is-hero' : ''}${row.recorded ? '' : ' is-quiet'}${row.divergedAt !== null ? ' is-dead' : ''}`,
         type: 'button',
+        dataset: { seed: String(row.seed) },
         title: row.recorded
           ? `Promote seed ${row.seed} to the hero scene`
           : `Seed ${row.seed} has no recording in this run — it cannot be replayed`,
@@ -1229,7 +1194,7 @@ export const mount: ViewMount = (host) => {
         const fracStep = (ev: PointerEvent): number => {
           const rect = holder.getBoundingClientRect();
           const frac = Math.min(Math.max((ev.clientX - rect.left) / Math.max(1, rect.width), 0), 1);
-          return Math.round(frac * heroSteps);
+          return Math.round(frac * heroSteps());
         };
         holder.addEventListener('pointerdown', (ev) => {
           if (ev.button !== 0) return;
@@ -1294,35 +1259,33 @@ export const mount: ViewMount = (host) => {
   }
 
   function fieldSamples(): number {
-    let most = 0;
-    for (const lane of fieldLanes) if (lane.samples > most) most = lane.samples;
-    return most;
+    return fieldData?.tape.rows ?? 0;
   }
 
-  function buildField(lanes: readonly WallLane[], hero: number | null): void {
-    fieldLanes = [...lanes].sort((a, b) => a.seed - b.seed);
+  function buildField(entries: readonly GhostEntry[], hero_: number | null): void {
+    fieldLanes = [...entries].sort((a, b) => a.seed - b.seed);
     fieldX = new Float64Array(fieldLanes.length);
-    fieldMarks = fieldLanes.map((lane) => {
-      const isHero = lane.seed === hero;
+    fieldMarks = fieldLanes.map((entry, index) => {
+      const isHero = entry.seed === hero_;
       const mark = el('button', {
-        class: `wall-field-mark${isHero ? ' is-hero' : ''}${lane.firstNonFiniteRow !== null ? ' is-dead' : ''}`,
+        class: `wall-field-mark${isHero ? ' is-hero' : ''}${entry.deathStep !== null ? ' is-dead' : ''}`,
         type: 'button',
-        dataset: { seed: String(lane.seed) },
-        ariaLabel: `Seed ${lane.seed}`,
+        dataset: { seed: String(entry.seed) },
+        ariaLabel: `Seed ${entry.seed}`,
       });
       mark.addEventListener('mouseenter', () => {
-        const x = fieldX[fieldLanes.indexOf(lane)];
-        mark.title = `Seed ${lane.seed}${isHero ? ' — the hero' : ''}`
+        const x = fieldX[index];
+        mark.title = `Seed ${entry.seed}${isHero ? ' — the hero' : ''}`
           + (x !== undefined && Number.isFinite(x) ? ` · ${formatDistance(x)} down the track` : '');
-        emphasise(lane.seed);
+        emphasise(entry.seed);
       });
       mark.addEventListener('mouseleave', () => emphasise(null));
       mark.addEventListener('click', () => {
-        const next = promoteSeed(selection, lane.seed, playable);
+        const next = promoteSeed(selection, entry.seed, playable);
         if (next === selection) return;
         selection = next;
-        paintRail();
-        void mountHero();
+        applyHero();
+        mountHero();
         syncUrl();
       });
       return mark;
@@ -1338,12 +1301,12 @@ export const mount: ViewMount = (host) => {
     stageWindow = trackWindow(aspect);
 
     let heroIndex = -1;
-    const hero = heroSeed(selection);
+    const hero_ = heroSeed(selection);
     for (let i = 0; i < fieldLanes.length; i++) {
-      const lane = fieldLanes[i];
-      if (lane === undefined) continue;
-      if (lane.seed === hero) heroIndex = i;
-      const x = laneTrackX(lane, sample);
+      const entry = fieldLanes[i];
+      if (entry === undefined) continue;
+      if (entry.seed === hero_) heroIndex = i;
+      const x = fieldData === null ? null : laneTrackX(fieldData.tape, fieldData.pose0, entry, sample);
       fieldX[i] = x === null ? Number.NaN : x;
     }
     if (heroIndex >= 0 && heroX !== null) fieldX[heroIndex] = heroX;
@@ -1391,17 +1354,17 @@ export const mount: ViewMount = (host) => {
     return x === undefined || !Number.isFinite(x) ? null : x;
   }
 
-  function paintGhosts(layer: GhostLayer, view: GhostView, sample: number): void {
+  function paintGhosts(layer: GhostLayer, view: GhostView, row: number): void {
+    const stepEnd = view.tape.stepEnd[row] ?? 0;
     for (let index = 0; index < view.entries.length; index++) {
       const entry = view.entries[index];
-      if (entry === undefined) continue;
-      const lane = entry.lane;
-      if (lane.samples === 0) continue;
-      const at = sample >= lane.samples ? lane.samples - 1 : sample;
-      const offset = at * 9;
-      for (let k = 0; k < 9; k++) ghostPose[k] = lane.pose[offset + k] ?? 0;
-      const row = lane.rows[at] ?? at * view.stride;
-      layer.setGhostFrame(index, ghostPose, ghostAlive(lane.firstNonFiniteRow, row));
+      if (entry === undefined || entry.aliveRows <= 0) continue;
+      const at = row < entry.aliveRows ? row : entry.aliveRows - 1;
+      for (let k = 0; k < 9; k++) {
+        ghostPose[k] = tapeValue(view.tape, view.poseFields[k] ?? 0, at, entry.lane);
+      }
+      if (!Number.isFinite(ghostPose[0] ?? Number.NaN)) continue;
+      layer.setGhostFrame(index, ghostPose, ghostAlive(entry.deathStep, stepEnd));
     }
   }
 
@@ -1430,7 +1393,7 @@ export const mount: ViewMount = (host) => {
         });
         node.addEventListener('click', () => {
           if (!sceneHost) return;
-          sceneHost.seek(seekTargetForTick(tick));
+          seekFrame(seekTargetForTick(tick));
           sceneHost.play();
           syncPlay();
         });
@@ -1439,8 +1402,11 @@ export const mount: ViewMount = (host) => {
     );
   }
 
+  let lastMarkerAt = 0;
+
   function onFrame(info: HostFrameInfo): void {
-    progress = frameCount > 1 ? info.position / (frameCount - 1) : 0;
+    const frames = Math.max(1, frameCount() - 1);
+    const progress = info.position / frames;
     frameAt = info.position;
     const nowMs = performance.now();
     if (nowMs - lastMarkerAt > 100) {
@@ -1456,7 +1422,7 @@ export const mount: ViewMount = (host) => {
 
     const layer = sceneHost?.ghosts ?? null;
     if (layer && ghostView) {
-      const sample = ghostSampleIndex(info.position, ghostView.stride, ghostSamples(ghostView));
+      const sample = ghostRowIndex(info.position, ghostView.windowSteps, ghostView.tape.rows);
       if (sample !== ghostSample || layer !== ghostLayer) {
         ghostSample = sample;
         if (layer !== ghostLayer) {
@@ -1468,7 +1434,7 @@ export const mount: ViewMount = (host) => {
       }
     }
     if (!field.hidden && fieldLanes.length > 0) {
-      const sample = ghostSampleIndex(info.position, stride, fieldSamples());
+      const sample = ghostRowIndex(info.position, stride, fieldSamples());
       if (sample !== fieldSample) {
         fieldSample = sample;
         paintField(sample, heroTrackX(info.index));
@@ -1479,7 +1445,7 @@ export const mount: ViewMount = (host) => {
     if (statsAccum < 150) return;
     statsAccum = 0;
     readout.textContent =
-      `step ${info.step < 0 ? 'init' : formatCount(info.step)} / ${formatStep(heroSteps)}`
+      `step ${info.step < 0 ? 'init' : formatCount(info.step)} / ${formatStep(heroSteps())}`
       + ` · ${formatClock(info.simTime)}`;
     if (ghostView && info.ghostDraws > 0) ghostChip.textContent = ghostChipText(ghostView);
     syncPlay();
@@ -1492,52 +1458,6 @@ export const mount: ViewMount = (host) => {
     return `ghosts ${formatCount(total)} · ${inFrame} in frame`;
   }
 
-  let lastMarkerAt = 0;
-
-  function loadColumnar(id: string, env: EnvId): Promise<FleetColumnar> {
-    const key = `${id}|${env}|${policy}`;
-    const cached = columnarCache.get(key);
-    if (cached) return cached;
-    const promise = api.fleet(
-      id,
-      { fields: ['rewardSum', 'firstNonFiniteStep'], envId: env, policy },
-      { signal: abort.signal },
-    ).catch((error: unknown) => {
-      columnarCache.delete(key);
-      throw error;
-    });
-    columnarCache.set(key, promise);
-    return promise;
-  }
-
-  function loadWall(id: string, env: EnvId, at: number): Promise<WallData> {
-    const key = `${id}|${env}|${at}`;
-    const cached = wallCache.get(key);
-    if (cached) {
-      wallCache.delete(key);
-      wallCache.set(key, cached);
-      return cached;
-    }
-    const promise = fetchWall(id, env, { stride: at }, { signal: abort.signal })
-      .catch((error: unknown) => {
-        wallCache.delete(key);
-        throw error;
-      });
-    wallCache.set(key, promise);
-    while (wallCache.size > WALL_CACHE_ENVS) {
-      const oldest = wallCache.keys().next();
-      if (oldest.done === true) break;
-      wallCache.delete(oldest.value);
-    }
-    return promise;
-  }
-
-  function ghostSamples(view: GhostView): number {
-    let most = 0;
-    for (const entry of view.entries) if (entry.lane.samples > most) most = entry.lane.samples;
-    return most;
-  }
-
   function primeGhosts(layer: GhostLayer, view: GhostView): void {
     const quantiles = rateQuantiles(rows);
     view.entries.forEach((entry, index) => {
@@ -1546,45 +1466,59 @@ export const mount: ViewMount = (host) => {
     });
   }
 
-  function teardownStage(): void {
-    sceneHost?.destroy();
-    sceneHost = null;
-    createdGhostLayer?.dispose();
-    createdGhostLayer = null;
-    ghostLayer = null;
-    ghostView = null;
-    ghostSample = -1;
-    emphasised = null;
-    heroSource = null;
-    fieldLanes = [];
-    fieldMarks = [];
-    fieldMarkHolder.replaceChildren();
-    ghostsInFrame = 0;
-    fieldSample = -1;
-    field.hidden = true;
+  function showStageNote(title: string, children: (HTMLElement | null)[] = []): void {
+    stageNote.hidden = false;
+    stageNote.replaceChildren(el('div', { class: 'cover-title', text: title }), ...children.filter((c): c is HTMLElement => c !== null));
   }
 
-  async function mountHero(): Promise<void> {
+  function clearStageNote(): void {
+    stageNote.hidden = true;
+    stageNote.replaceChildren();
+  }
+
+  function queueStage(work: () => Promise<void>): void {
+    stageQueue = stageQueue.then(work).catch((error: unknown) => {
+      if (destroyed) return;
+      showStageNote('Could not play this seed', [
+        errorState(error instanceof Error ? error.message : String(error)),
+      ]);
+    });
+  }
+
+  function mountHero(): void {
     const generation = ++heroGeneration;
     const run = detail;
     const env = envId;
-    teardownStage();
+    if (hero !== null) {
+      hero.setCallbacks(null, null);
+      hero.setLive(false);
+    }
+    hero = null;
+    heroAttached = false;
+    heroSource = null;
+    ghostView = null;
+    ghostLayer = null;
+    ghostKey = '';
+    ghostSample = -1;
     scrubTicks.replaceChildren();
+    scrubLoaded.style.width = '0%';
     if (!run || env === null) return;
 
     const seed = heroSeed(selection);
     const reason = degradedReason(run.recordings, env);
     if (reason !== null || seed === null) {
-      showDegraded(reason ?? 'no seed to play');
+      showStageNote('Nothing to replay here', [
+        emptyState(reason ?? 'no seed to play', RECORD_RECIPE, [
+          linkButton('Find a run with recordings', '#/runs', { quiet: true }),
+        ]),
+      ]);
+      ghostChip.textContent = 'ghosts —';
+      readout.textContent = 'no recording';
+      transport.classList.add('is-idle');
       return;
     }
-
-    cover.hidden = false;
-    coverBar.hidden = false;
-    coverLabel.hidden = false;
-    coverExtra.replaceChildren();
-    coverTitle.textContent = `Loading ${ENVS[env].name} seed ${seed}`;
-    coverFill.style.width = '0%';
+    clearStageNote();
+    transport.classList.remove('is-idle');
 
     const info = ENVS[env];
     const tagEnv = stageTag.querySelector('.wall-tag-env');
@@ -1593,171 +1527,233 @@ export const mount: ViewMount = (host) => {
     if (tagSub) {
       tagSub.textContent = `seed ${seed}${selection.promoted === null ? ' · leader' : ' · promoted'}`;
     }
+    framing = stageFraming(info.category);
 
     const ref = recordingRef(run.recordings, env, seed);
-    stride = wallStride(ref?.steps ?? detail?.meta.steps ?? 0);
-    applySpeed();
-    const wallPromise = loadWall(run.id, env, stride);
+    const refSteps = ref?.steps ?? 0;
+    if (tape !== null && tape.rows > 0) stride = tapeWindowSteps(tape);
     ghostChip.textContent = 'ghosts …';
 
-    let recording: TheaterRecording;
-    try {
-      recording = await loadTheaterRecording({
+    const startAt = pendingSeekFrame ?? frameAt;
+    pendingSeekFrame = Number.isFinite(startAt) && startAt > 0 ? Math.floor(startAt) : null;
+
+    const key = `${run.id}|${env}|${seed}`;
+    let h = heroCache.get(key);
+    if (h === undefined) {
+      h = loadHero({
         runId: run.id,
         envId: env,
         seed,
-        ...(ref ? { expectedSteps: ref.steps } : {}),
-        signal: abort.signal,
-        onProgress: (p) => {
-          coverFill.style.width = `${(p.fraction * 100).toFixed(1)}%`;
-          coverLabel.textContent = p.label;
-        },
+        steps: refSteps,
+        horizonSteps: run.meta.steps,
+        live: entry?.inFlight === true,
       });
-    } catch (cause) {
-      if (destroyed || generation !== heroGeneration) return;
-      showStageError(cause instanceof Error ? cause.message : String(cause));
-      return;
-    }
-    if (destroyed || generation !== heroGeneration) return;
-
-    heroSteps = recording.steps;
-    frameCount = recording.source.frameCount;
-    heroSource = recording.source;
-    framing = stageFraming(info.category);
-    scrubInput.max = String(Math.max(1, frameCount - 1));
-    paintTicks(recording.ticks);
-
-    const at = query.at !== undefined && progress === 0
-      ? clampPosition(query.at, frameCount)
-      : progress * (frameCount - 1);
-    frameAt = at;
-
-    coverLabel.textContent = 'reading the population';
-    const wall = await wallPromise.catch(() => null);
-    if (destroyed || generation !== heroGeneration) return;
-
-    let ghosts: SceneHostGhosts | undefined;
-    if (wall !== null) {
-      const entries = wall.lanes
-        .filter((lane) => lane.seed !== seed && lane.samples > 0 && lane.error === undefined)
-        .slice(0, WALL_GHOST_CAP)
-        .map((lane) => ({ lane, seed: lane.seed }));
-      if (entries.length > 0) {
-        stride = wall.header.stride > 0 ? wall.header.stride : stride;
-        ghostView = { stride, entries };
-        const build = (tier: QualityTier): GhostLayer => makeGhostLayer({
-          category: info.category,
-          envId: env,
-          geometry: recording.source.geometry,
-          maxGhosts: entries.length,
-          tokens: TOKENS,
-          accent: accentCss(info.slug),
-          tier,
-        });
-        createdGhostLayer = build(TIER_BY_LABEL[tierLabel]);
-        ghosts = { layer: createdGhostLayer, rebuild: build };
+      heroCache.set(key, h);
+      for (const [oldKey, old] of heroCache) {
+        if (heroCache.size <= HERO_CACHE_MAX) break;
+        if (old === h) continue;
+        old.destroy();
+        heroCache.delete(oldKey);
       }
-      buildField(wall.lanes.filter((lane) => lane.samples > 0 && lane.error === undefined), seed);
-    }
-    applySpeed();
-
-    coverLabel.textContent = 'building the scene';
-    try {
-      sceneHost = await mountSceneHost(stage, {
-        envId: env,
-        source: recording.source,
-        tier: TIER_BY_LABEL[tierLabel],
-        at,
-        speed,
-        debug: debugOn,
-        ...(ghosts ? { ghosts } : {}),
-        onFrame,
-        onReady: (manifest) => {
-          if (tagEnv) tagEnv.textContent = manifest.title;
-        },
-      });
-    } catch (cause) {
-      if (destroyed || generation !== heroGeneration) return;
-      showStageError(cause instanceof Error ? cause.message : String(cause));
-      return;
-    }
-    if (destroyed || generation !== heroGeneration) {
-      sceneHost?.destroy();
-      sceneHost = null;
-      return;
-    }
-    stage.insertBefore(sceneHost.canvas, stageTag);
-    cover.hidden = true;
-    syncPlay();
-    statsAccum = 1000;
-
-    if (recording.health.message) {
-      coverExtra.replaceChildren();
-      stageTag.title = recording.health.message;
-    }
-
-    fieldSample = ghostSampleIndex(at, stride, fieldSamples());
-    paintField(fieldSample, heroTrackX(Math.round(at)));
-    const layer = sceneHost.ghosts;
-    if (layer && ghostView) {
-      ghostLayer = layer;
-      primeGhosts(layer, ghostView);
-      ghostSample = ghostSampleIndex(at, ghostView.stride, ghostSamples(ghostView));
-      paintGhosts(layer, ghostView, ghostSample);
-      ghostChip.textContent = ghostChipText(ghostView);
-      ghostChip.title =
-        `${formatCount(ghostView.entries.length)} recorded seeds of ${info.name}, `
-        + `one pose sample every ${formatCount(ghostView.stride)} steps, on the hero's own clock. `
-        + (framing === 'track'
-          ? `The stage frames about ${formatDistance(stageWindow.width)} of track around the hero, `
-            + 'so a seed that has walked away from it is off camera — the field strip under the stage '
-            + 'is where the whole population is. '
-          : 'This scene frames its whole world, so every seed is inside the picture. ')
-        + 'A seed that went non-finite freezes at its last finite pose and turns dark.';
     } else {
-      ghostChip.textContent = 'ghosts —';
-      ghostChip.title = wall === null
-        ? 'The population endpoint did not answer for this environment; the hero is playing alone.'
-        : 'This environment has no other recorded seed to ghost.';
+      heroCache.delete(key);
+      heroCache.set(key, h);
+      h.setLive(entry?.inFlight === true);
     }
-  }
+    hero = h;
+    const handle = h;
 
-  function showDegraded(reason: string): void {
-    cover.hidden = false;
-    coverBar.hidden = true;
-    coverLabel.hidden = true;
-    coverTitle.textContent = 'Nothing to replay here';
-    coverExtra.replaceChildren(
-      emptyState(
-        reason,
-        `The population on the right is real — it comes from fleet.jsonl. There is simply no recorded `
-          + `experience on this run, so there is no scene and there are no ghosts. ${RECORD_RECIPE}`,
-        [
-          detail ? linkButton('Open the run dashboard', `#/run/${encodeURIComponent(detail.id)}`, { quiet: true }) : null,
-          linkButton('Find a run with recordings', '#/runs', { quiet: true }),
-        ],
-      ),
+    handle.setCallbacks(
+      () => {
+        if (destroyed || generation !== heroGeneration || hero !== handle) return;
+        onHeroProgress();
+      },
+      (error) => {
+        if (destroyed || generation !== heroGeneration) return;
+        showStageNote('Could not play this seed', [errorState(error.message)]);
+      },
     );
-    ghostChip.textContent = 'ghosts —';
-    readout.textContent = 'no recording';
-    transport.classList.add('is-idle');
+
+    const attachSource = handle.source.frameCount > 1 ? handle.source : makeInitialSource(env, seed);
+    if (attachSource === handle.source) {
+      heroAttached = true;
+      heroSource = handle.source;
+    } else {
+      heroSource = attachSource;
+    }
+    const attachAt = pendingSeekFrame !== null
+      ? Math.min(pendingSeekFrame, attachSource.frameCount - 1)
+      : 0;
+    if (pendingSeekFrame !== null && pendingSeekFrame < attachSource.frameCount) pendingSeekFrame = null;
+
+    queueStage(async () => {
+      if (destroyed || generation !== heroGeneration) return;
+      if (sceneHost === null) {
+        sceneHost = await mountSceneHost(stage, {
+          envId: env,
+          source: attachSource,
+          tier: TIER_BY_LABEL[tierLabel],
+          at: attachAt,
+          speed,
+          debug: debugOn,
+          onFrame,
+          onReady: (manifest) => {
+            if (tagEnv) tagEnv.textContent = manifest.title;
+          },
+        });
+        if (destroyed) {
+          sceneHost.destroy();
+          sceneHost = null;
+          return;
+        }
+        stage.insertBefore(sceneHost.canvas, stageTag);
+      } else if (sceneHost.envId !== env) {
+        await sceneHost.setEnv(env, attachSource, null, { at: attachAt });
+      } else {
+        await sceneHost.setSource(attachSource, { at: attachAt });
+        sceneHost.setGhosts(null);
+      }
+      applySpeed();
+      syncPlay();
+      if (heroAttached) {
+        scrubInput.max = String(Math.max(1, handle.source.frameCount - 1));
+        paintTicks(handle.ticks());
+        const total = Math.max(1, handle.totalSteps);
+        scrubLoaded.style.width = `${Math.min(100, (handle.loadedSteps / total) * 100).toFixed(2)}%`;
+      }
+    });
+
+    function onHeroProgress(): void {
+      queueStage(async () => {
+        if (destroyed || generation !== heroGeneration || hero !== handle || sceneHost === null) return;
+        if (!heroAttached) {
+          heroAttached = true;
+          heroSource = handle.source;
+          await sceneHost.setSource(handle.source, {
+            at: pendingSeekFrame !== null ? Math.min(pendingSeekFrame, handle.source.frameCount - 1) : 0,
+          });
+          if (pendingSeekFrame !== null && pendingSeekFrame < handle.source.frameCount) {
+            pendingSeekFrame = null;
+          }
+        } else if (pendingSeekFrame !== null && pendingSeekFrame < handle.source.frameCount) {
+          sceneHost.seek(pendingSeekFrame);
+          pendingSeekFrame = null;
+        }
+        scrubInput.max = String(Math.max(1, handle.source.frameCount - 1));
+        const total = Math.max(1, handle.totalSteps);
+        scrubLoaded.style.width = `${Math.min(100, (handle.loadedSteps / total) * 100).toFixed(2)}%`;
+        paintTicks(handle.ticks());
+        statsAccum = 1000;
+      });
+    }
+
+    applyGhosts();
   }
 
-  function showStageError(message: string): void {
-    cover.hidden = false;
-    coverBar.hidden = true;
-    coverLabel.hidden = true;
-    coverTitle.textContent = 'Could not play this seed';
-    coverExtra.replaceChildren(errorState(message));
-    transport.classList.add('is-idle');
+  function applyGhosts(): void {
+    const run = detail;
+    const env = envId;
+    const t = tape;
+    if (!run || env === null || t === null || t.rows === 0) return;
+    const seed = heroSeed(selection);
+    const source = heroSource;
+    if (seed === null || source === null) return;
+    const generation = heroGeneration;
+    const info = ENVS[env];
+    stride = tapeWindowSteps(t);
+
+    const poseFields = POSE_FIELD_NAMES.map((name) => fieldIndex(t, name));
+    const { lanes, seeds } = envLanes(run.meta, env);
+    const laneOfSeed = new Map<number, number>();
+    seeds.forEach((s, i) => laneOfSeed.set(s, lanes[i] ?? 0));
+    const all: GhostEntry[] = [];
+    for (const s of seedsFor(run.recordings, env)) {
+      const lane = laneOfSeed.get(s);
+      if (lane === undefined) continue;
+      const deathStep = laneDeath(t, lane)?.step ?? null;
+      all.push({ seed: s, lane, deathStep, aliveRows: aliveRowCount(t, deathStep) });
+    }
+    fieldData = { tape: t, pose0: poseFields[0] ?? 0 };
+    buildField(all, seed);
+
+    const entries = all.filter((e) => e.seed !== seed).slice(0, WALL_GHOST_CAP);
+    if (entries.length === 0) {
+      ghostView = null;
+      ghostChip.textContent = 'ghosts —';
+      ghostChip.title = 'This environment has no other recorded seed to ghost.';
+      return;
+    }
+    const nextView: GhostView = { tape: t, windowSteps: stride, poseFields, entries };
+    const key = `${run.id}|${env}|${seed}|${entries.length}`;
+    if (key === ghostKey && ghostLayer !== null && sceneHost?.ghosts === ghostLayer) {
+      ghostView = nextView;
+      ghostSample = -1;
+      fieldSample = -1;
+      ghostChip.textContent = ghostChipText(nextView);
+      return;
+    }
+    ghostKey = key;
+    ghostView = nextView;
+    const build = (tier: QualityTier): GhostLayer => makeGhostLayer({
+      category: info.category,
+      envId: env,
+      geometry: source.geometry,
+      maxGhosts: entries.length,
+      tokens: TOKENS,
+      accent: accentCss(info.slug),
+      tier,
+    });
+    const ghosts: SceneHostGhosts = { layer: build(TIER_BY_LABEL[tierLabel]), rebuild: build };
+    queueStage(async () => {
+      if (destroyed || generation !== heroGeneration || sceneHost === null || ghostView === null) {
+        ghosts.layer.dispose();
+        return;
+      }
+      sceneHost.setGhosts(ghosts);
+      ghostLayer = sceneHost.ghosts;
+      if (ghostLayer !== null) {
+        primeGhosts(ghostLayer, ghostView);
+        ghostSample = ghostRowIndex(frameAt, ghostView.windowSteps, ghostView.tape.rows);
+        paintGhosts(ghostLayer, ghostView, ghostSample);
+        ghostChip.textContent = ghostChipText(ghostView);
+        ghostChip.title =
+          `${formatCount(ghostView.entries.length)} recorded seeds of ${info.name}, `
+          + `one window-end pose every ${formatCount(ghostView.windowSteps)} steps from the run's tape, `
+          + "on the hero's own clock. "
+          + (framing === 'track'
+            ? `The stage frames about ${formatDistance(stageWindow.width)} of track around the hero, `
+              + 'so a seed that has walked away from it is off camera — the field strip under the stage '
+              + 'is where the whole population is. '
+            : 'This scene frames its whole world, so every seed is inside the picture. ')
+          + 'A seed that went non-finite freezes at its last finite pose and turns dark.';
+      }
+      await Promise.resolve();
+    });
+  }
+
+  function rebuildRows(): void {
+    if (!detail || !tape || envId === null) {
+      rows = [];
+      return;
+    }
+    const recorded = new Set(seedsFor(detail.recordings, envId));
+    rows = buildSeedRows(tape, detail.meta, envId, recorded);
+  }
+
+  function applyHero(): void {
+    const hero_ = heroSeed(selection);
+    science?.setHighlight(hero_);
+    for (const node of railRows.querySelectorAll<HTMLElement>('.wall-row')) {
+      node.classList.toggle('is-hero', Number(node.dataset['seed']) === hero_);
+    }
   }
 
   function watchSeed(seed: number): void {
     const next = promoteSeed(selection, seed, playable);
     if (next === selection) return;
     selection = next;
-    paintRail();
-    void mountHero();
+    applyHero();
+    mountHero();
     syncUrl();
   }
 
@@ -1765,50 +1761,80 @@ export const mount: ViewMount = (host) => {
     if (!detail) return;
     envId = next;
     science?.setEnv(next);
-    transport.classList.remove('is-idle');
+    frameAt = 0;
+    pendingSeekFrame = null;
     paintChips();
-    rows = [];
-    railRows.replaceChildren(spinner('Reading fleet.jsonl'));
+    const recorded = seedsFor(detail.recordings, next);
+    rebuildRows();
+    selection = setLeader(selection, recorded[0] ?? null, playable);
     paintPopulation();
-
-    const run = detail;
-    loadColumnar(run.id, next).then(
-      (columnar) => {
-        if (destroyed || envId !== next) return;
-        rows = buildSeedRows(columnar, { recorded: new Set(seedsFor(run.recordings, next)) });
-        selection = setLeader(selection, leaderSeed(rows), playable);
-        paintPopulation();
-        paintRail();
-        void mountHero();
-        syncUrl();
-      },
-      (error: unknown) => {
-        if (destroyed || envId !== next) return;
-        railRows.replaceChildren(errorState(error instanceof Error ? error.message : String(error)));
-        const fallback = seedsFor(run.recordings, next)[0] ?? null;
-        selection = setLeader(selection, fallback, playable);
-        void mountHero();
-      },
-    );
+    paintRail();
+    mountHero();
+    syncUrl();
   }
 
-  function renderRun(next: RunDetail, pick: FeaturedPick): void {
+  function onTapeUpdate(next: Tape): void {
+    tape = next;
+    rebuildRows();
+    paintPopulation();
+    paintRail();
+    applyGhosts();
+    science?.setTape(next);
+  }
+
+  function startLivePoll(): void {
+    if (livePoll !== null) return;
+    livePoll = setInterval(() => {
+      if (destroyed || !detail) return;
+      if (entry?.inFlight !== true) return;
+      void refreshTape(detail.id, abort.signal).then(
+        (next) => {
+          if (destroyed) return;
+          if (tape === null || next.rows !== tape.rows) onTapeUpdate(next);
+        },
+        () => undefined,
+      );
+      const now = Date.now();
+      if (now - detailPollAt >= DETAIL_POLL_MS) {
+        detailPollAt = now;
+        void runIndex.load(true).then((entries) => {
+          if (destroyed || !detail) return;
+          const fresh = entries.find((e) => e.id === detail?.id);
+          if (fresh !== undefined) {
+            entry = fresh;
+            hero?.setLive(fresh.inFlight);
+          }
+          return loadRunDetail(detail.id, true).then((freshDetail) => {
+            if (destroyed) return;
+            detail = freshDetail;
+            paintChips();
+            rebuildRows();
+            paintRail();
+            applyGhosts();
+          });
+        }).catch(() => undefined);
+      }
+    }, LIVE_POLL_MS);
+  }
+
+  function renderRun(next: RunDetail, pick: FeaturedPick, indexEntry: RunIndexEntry | null): void {
     detail = next;
-    policy = policiesIn(next.aggregate)[0] ?? next.meta.policies[0] ?? 'oak';
+    entry = indexEntry;
     envList = wallEnvs(next.meta, next.recordings);
     status.remove();
     main.hidden = false;
 
     runName.textContent = next.id;
     const ago = formatAgo(next.meta.startedAt ?? null);
-    const result = primaryResult(next.summary, policy);
     runMeta.textContent = `${runScheduleLine(next.meta)}${ago === '—' ? '' : ` · ${ago}`}`;
-    const ablation = next.meta.ablationLabel ?? 'none';
+    const ablation = next.meta.ablationLabel;
+    const complete = indexEntry?.complete !== false;
     runBadges.replaceChildren(
-      ...(pick.source === 'bestKernel' ? [badge('best kernel', 'keeper', 'The current promoted best kernel')] : []),
+      ...(pick.source === 'keeper' ? [badge('keeper', 'keeper', 'The current promoted keeper')] : []),
+      ...(indexEntry?.inFlight === true ? [badge('live', 'keeper', 'This run is writing its tape right now')] : []),
       ...(ablation !== 'none' ? [badge(`ablate ${ablation}`, 'warn', 'OAK_ABLATE for this run')] : []),
       ...(next.recordings.length === 0 ? [badge('no recordings', 'warn', 'Nothing on this run can be replayed')] : []),
-      ...(result?.complete === false ? [badge('incomplete', 'warn', 'Did not reach its declared horizon')] : []),
+      ...(complete ? [] : [badge('incomplete', 'warn', 'Did not reach its declared horizon')]),
     );
 
     const first = envId !== null && envList.includes(envId)
@@ -1820,12 +1846,11 @@ export const mount: ViewMount = (host) => {
       body.append(
         emptyState(
           'This run declares no environments',
-          'meta.json carries neither an envSchedule nor a readable envId, so there is nothing to show.',
+          'meta.json has no envSchedule, so there is nothing to show.',
         ),
       );
       return;
     }
-    selectEnv(first);
 
     science?.destroy();
     science = null;
@@ -1835,35 +1860,53 @@ export const mount: ViewMount = (host) => {
       envId: first,
       onWatchSeed: (env, seed, step) => {
         if (isEnvId(env) && env !== envId) selectEnv(env);
-        if (step !== undefined) frameAt = frameFromStep(step);
+        if (step !== undefined) pendingSeekFrame = Math.floor(frameFromStep(step));
         watchSeed(seed);
         if (step !== undefined) seekToStep(step);
         window.scrollTo({ top: 0, behavior: 'smooth' });
       },
       onSeek: (step, commit) => scrubToStep(step, commit),
     });
+
+    selectEnv(first);
+    startLivePoll();
+    void loadTape(next.id, abort.signal).then(
+      (loaded) => {
+        if (destroyed) return;
+        onTapeUpdate(loaded);
+      },
+      (error: unknown) => {
+        if (destroyed) return;
+        body.append(
+          errorState(error instanceof Error ? error.message : String(error), undefined, {
+            title: `Could not read the tape for ${next.id}`,
+          }),
+        );
+      },
+    );
   }
 
   function start(force: boolean): void {
-    Promise.all([runIndex.load(force), rolesResource.load(force).catch(() => null)]).then(
-      ([entries, roles]) => {
+    runIndex.load(force).then(
+      (entries) => {
         if (destroyed) return;
-        const pick = resolveFeaturedRun(entries, roles, query.run);
+        const pick = resolveFeaturedRun(entries, query.run);
         if (pick.runId === null) {
           status.replaceChildren(
             emptyState(
               'No run to show yet',
-              'The wall plays a fleet’s recorded seeds and the server found no run with recordings under '
+              'The wall plays a fleet’s recorded seeds and the server found no run with a tape under '
                 + `.oak-benchmarks. ${RECORD_RECIPE}`,
               [linkButton('Browse every run', '#/runs', { quiet: true })],
             ),
           );
           return;
         }
+        const indexEntry = entries.find((e) => e.id === pick.runId) ?? null;
         loadRunDetail(pick.runId).then(
           (loaded) => {
             if (destroyed) return;
-            renderRun(loaded, pick);
+            renderRun(loaded, pick, indexEntry);
           },
           (error: unknown) => {
             if (destroyed) return;
@@ -1901,13 +1944,18 @@ export const mount: ViewMount = (host) => {
       if (destroyed) return;
       destroyed = true;
       abort.abort();
+      if (livePoll !== null) clearInterval(livePoll);
       if (typeof window !== 'undefined') window.removeEventListener('keydown', onKey);
       if (typeof document !== 'undefined') document.removeEventListener('fullscreenchange', onFullscreenChange);
       for (const spark of sparks) spark.destroy();
       sparks.length = 0;
       science?.destroy();
       science = null;
-      teardownStage();
+      for (const cached of heroCache.values()) cached.destroy();
+      heroCache.clear();
+      hero = null;
+      sceneHost?.destroy();
+      sceneHost = null;
       root.remove();
     },
   };

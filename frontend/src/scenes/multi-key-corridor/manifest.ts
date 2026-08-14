@@ -1,19 +1,22 @@
 
 import { TOKENS } from '@kit/tokens';
 import type { SceneManifest } from '@kit/types';
-import { TEMPLE_FORD } from './fixtures';
+import { MKC_GOAL, MKC_KEYS, type MultiKeyCorridorState } from '@sim/envs/multikeycorridor';
 
-const THUMB_POSE: number[] = [
-  TEMPLE_FORD.x,
-  TEMPLE_FORD.y,
-  TEMPLE_FORD.gx,
-  TEMPLE_FORD.gy,
-  TEMPLE_FORD.flags & 7,
-  (TEMPLE_FORD.flags >> 3) & 7,
-  0,
-  0,
-  0,
-];
+const THUMB_POSE: number[] = [8, 3, MKC_GOAL.x, MKC_GOAL.y, 3, 3, 0, 0, 0];
+
+const THUMB_DERIVED: MultiKeyCorridorState = {
+  x: 8,
+  y: 3,
+  gx: MKC_GOAL.x,
+  gy: MKC_GOAL.y,
+  keys: MKC_KEYS.map((k) => ({ ...k })),
+  hasKey: [true, true, true],
+  doorOpen: [true, true, false],
+  flags: 27,
+  respawnIdx: 0,
+  poseAgrees: true,
+};
 
 export const manifest: SceneManifest = {
   envId: 'MultiKeyCorridor-cont-v0',
@@ -28,7 +31,7 @@ export const manifest: SceneManifest = {
   tiers: ['hero', 'medium', 'thumb'],
   thumbFrame: {
     pose: THUMB_POSE,
-    derived: TEMPLE_FORD,
+    derived: THUMB_DERIVED,
   },
   postConfig: {
     bloomStrength: 0.42,

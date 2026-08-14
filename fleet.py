@@ -5,82 +5,60 @@ import argparse
 import json
 import math
 import os
+import shutil
 import struct
 import subprocess
 import sys
-import zlib
 from pathlib import Path
 
 import numpy as np
 
 REPO = Path(__file__).resolve().parent
 BENCH = REPO / ".oak-benchmarks"
-SOLVED_THRESHOLD = 0.1
-RETAINED_FRACTION = 0.5
-NF_PHASES = ("nfEncode", "nfLearn", "nfPlan", "nfTdPsi")
+FLOOR_CACHE: dict[str, dict] = {}
 
 FILE_MAGIC = 0x544B414F
-SEG_MAGIC = 0x54474553
+
 
 def read_tape(path: Path) -> dict:
     data = path.read_bytes()
-    magic, version, lanes, json_len = struct.unpack_from("<4I", data, 0)
-    if magic != FILE_MAGIC or version != 1:
-        raise SystemExit(f"{path}: not an OAKT v1 tape")
-    fields = json.loads(data[16:16 + json_len])["fields"]
+    if len(data) < 12:
+        raise SystemExit(f"{path}: not an OAKT tape")
+    magic, lanes, json_len = struct.unpack_from("<3I", data, 0)
+    if magic != FILE_MAGIC:
+        raise SystemExit(f"{path}: not an OAKT tape")
+    fields = json.loads(data[12:12 + json_len])["fields"]
     n_f = len(fields)
-    row_bytes = 8 + n_f * lanes * 4
-    starts, counts, mats = [], [], []
-    off = 16 + json_len
-    while off + 20 <= len(data):
-        smagic, n_win, raw_bytes, comp_bytes, crc = struct.unpack_from("<5I", data, off)
-        comp = data[off + 20: off + 20 + comp_bytes]
-        if (smagic != SEG_MAGIC or off + 20 + comp_bytes > len(data)
-                or zlib.crc32(comp) != crc):
-            break
-        payload = zlib.decompress(comp, wbits=-15)
-        if len(payload) != raw_bytes or raw_bytes != n_win * row_bytes:
-            break
-        for p in range(0, raw_bytes, row_bytes):
-            s, c = struct.unpack_from("<2I", payload, p)
-            starts.append(s)
-            counts.append(c)
-            mats.append(np.frombuffer(payload, np.float32, n_f * lanes, p + 8)
-                        .reshape(n_f, lanes))
-        off += 20 + comp_bytes
-    if not mats:
-        raise SystemExit(f"{path}: no complete tape windows yet")
-    return {"fields": fields, "lanes": lanes,
-            "ends": np.array(starts, np.int64) + np.array(counts, np.int64),
-            "data": np.stack(mats)}
+    hdr = 12 + json_len
+    row = 12 + n_f * lanes * 4
+    n = (len(data) - hdr) // row
+    if n == 0:
+        raise SystemExit(f"{path}: no complete tape rows yet")
+    raw = np.frombuffer(data, np.uint8, n * row, hdr).reshape(n, row)
+    head = np.ascontiguousarray(raw[:, :12])
+    starts = head[:, 0:4].copy().view(np.uint32).ravel().astype(np.int64)
+    counts = head[:, 4:8].copy().view(np.uint32).ravel().astype(np.int64)
+    wall = head[:, 8:12].copy().view(np.float32).ravel().astype(np.float64)
+    mats = np.ascontiguousarray(raw[:, 12:]).view(np.float32).reshape(n, n_f, lanes)
+    return {"fields": fields, "lanes": lanes, "ends": starts + counts,
+            "wall": wall, "data": mats}
 
-def load(root: Path, policy: str) -> dict:
+
+def load(root: Path) -> dict:
     meta = json.loads((root / "meta.json").read_text())
-    tp = root / f"metrics.{policy}.oakt"
+    tp = root / "tape.bin"
     if not tp.exists():
-        raise SystemExit(f"{root}: no metrics.{policy}.oakt (pre-tape roots are "
-                         f"archives — re-run on the current binary)")
+        raise SystemExit(f"{root}: no tape.bin")
     tape = read_tape(tp)
-    deaths = {}
-    dp = root / "deaths.jsonl"
-    if dp.exists():
-        for line in dp.read_text().splitlines():
-            d = json.loads(line)
-            if d.get("policy", "oak") == policy:
-                deaths.setdefault(d["lane"], d)
-    agg = None
-    ap = root / "aggregate.jsonl"
-    if ap.exists():
-        for line in ap.read_text().splitlines():
-            r = json.loads(line)
-            if r.get("policy", "oak") == policy:
-                agg = r
-    seeds = meta.get("seeds") or list(range(tape["lanes"]))
-    return {"meta": meta, "tape": tape, "deaths": deaths, "agg": agg,
-            "seeds": seeds, "root": root}
+    ds = tape["data"][-1, tape["fields"].index("deathStep"), :]
+    deaths = {int(l): int(ds[l]) for l in np.nonzero(np.isfinite(ds))[0]}
+    return {"meta": meta, "tape": tape, "deaths": deaths,
+            "seeds": meta["seeds"], "root": root}
+
 
 def series(run: dict, field: str) -> np.ndarray:
     return run["tape"]["data"][:, run["tape"]["fields"].index(field), :]
+
 
 def last_finite(mat: np.ndarray) -> np.ndarray:
     W, B = mat.shape
@@ -89,23 +67,117 @@ def last_finite(mat: np.ndarray) -> np.ndarray:
     v = mat[idx, np.arange(B)]
     return np.where(mask.any(axis=0), v, np.nan)
 
-def windowed_rates(run: dict, lanes: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+
+def floors() -> dict:
+    if "floors" not in FLOOR_CACHE:
+        fp = BENCH / "FLOORS.json"
+        FLOOR_CACHE["floors"] = (json.loads(fp.read_text()).get("floors", {})
+                                 if fp.exists() else {})
+    return FLOOR_CACHE["floors"]
+
+
+def env_slices(run: dict) -> dict[str, np.ndarray]:
+    seed_lane = {s: i for i, s in enumerate(run["seeds"])}
+    out: dict[str, list[int]] = {}
+    for e in run["meta"]["envSchedule"]:
+        for s in range(e["seedStart"], e["seedEnd"] + 1):
+            if s in seed_lane:
+                out.setdefault(e["envId"], []).append(seed_lane[s])
+    return {k: np.array(v) for k, v in sorted(out.items())}
+
+
+def lane_floor_vec(run: dict, lanes: np.ndarray) -> np.ndarray:
+    fl = floors()
+    ids = [""] * run["tape"]["lanes"]
+    for env, sl in env_slices(run).items():
+        for l in sl:
+            ids[int(l)] = env
+    return np.array([fl.get(ids[int(l)], {}).get("floor", 0.0) for l in lanes], float)
+
+
+def isotonic_fit(y: np.ndarray) -> np.ndarray:
+    vals: list[float] = []
+    wts: list[int] = []
+    for x in y:
+        v, w = float(x), 1
+        while vals and vals[-1] > v:
+            pv, pw = vals.pop(), wts.pop()
+            v = (v * w + pv * pw) / (w + pw)
+            w += pw
+        vals.append(v)
+        wts.append(w)
+    out = np.empty(len(y))
+    pos = 0
+    for v, w in zip(vals, wts):
+        out[pos:pos + w] = v
+        pos += w
+    return out
+
+
+def window_ctx(run: dict) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     ends = run["tape"]["ends"]
-    rs = series(run, "rewardSum")[:, lanes]
     win = max(run["meta"]["steps"] // 5, 1)
     j = np.searchsorted(ends, ends - win, side="right") - 1
-    valid = j >= 0
-    if not valid.any():
+    i = np.nonzero(j >= 0)[0]
+    return ends, i, j[i]
+
+
+def windowed_rates(run: dict, lanes: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    ends, i, j = window_ctx(run)
+    rs = series(run, "rewardSum")[:, lanes]
+    if i.size == 0:
         n = len(lanes)
         return np.full(n, np.nan), np.full(n, np.nan)
-    i = np.nonzero(valid)[0]
-    rates = (rs[i] - rs[j[i]]) / (ends[i] - ends[j[i]])[:, None]
+    rates = (rs[i] - rs[j]) / (ends[i] - ends[j])[:, None]
     peak = np.nanmax(np.where(np.isfinite(rates), rates, -np.inf), axis=0)
     peak[~np.isfinite(peak)] = np.nan
     fin_mask = np.isfinite(rates)
     li = rates.shape[0] - 1 - np.argmax(fin_mask[::-1], axis=0)
     end = np.where(fin_mask.any(axis=0), rates[li, np.arange(rates.shape[1])], np.nan)
     return peak, end
+
+
+def retention_null(run: dict, lanes: np.ndarray,
+                   boot: int = 200) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    ends, wi, wj = window_ctx(run)
+    rs_all = series(run, "rewardSum")[:, lanes]
+    n = len(lanes)
+    p5, p50, spread = (np.full(n, np.nan) for _ in range(3))
+    if wi.size == 0 or rs_all.shape[0] < 8:
+        return p5, p50, spread
+    dt = np.diff(ends).astype(float)
+    for li in range(n):
+        rs = rs_all[:, li]
+        fin = np.isfinite(rs)
+        m = int(np.argmax(~fin)) if (~fin).any() else len(rs)
+        if m < 8:
+            continue
+        dr = np.diff(rs[:m]) / dt[:m - 1]
+        fit = isotonic_fit(dr)
+        res = dr - fit
+        k = len(res)
+        blk = max(1, int(round(math.sqrt(k))))
+        nblk = -(-k // blk)
+        rng = np.random.default_rng(101 + int(lanes[li]))
+        starts = rng.integers(0, k - blk + 1, size=(boot, nblk))
+        idx = (starts[:, :, None] + np.arange(blk)).reshape(boot, nblk * blk)[:, :k]
+        synth = np.cumsum((fit + res[idx]) * dt[:k], axis=1) + rs[0]
+        synth = np.concatenate([np.full((boot, 1), rs[0]), synth], axis=1)
+        mask = wi < m
+        vi, vj = wi[mask], wj[mask]
+        if vi.size == 0:
+            continue
+        r = (synth[:, vi] - synth[:, vj]) / (ends[vi] - ends[vj])
+        pk = r.max(axis=1)
+        with np.errstate(invalid="ignore", divide="ignore"):
+            ret = np.where(pk > 0, r[:, -1] / pk, np.nan)
+        ok = np.isfinite(ret)
+        if ok.sum() >= boot // 2:
+            p5[li] = np.percentile(ret[ok], 5)
+            p50[li] = np.percentile(ret[ok], 50)
+        spread[li] = float(np.percentile(pk, 95) - np.percentile(pk, 50))
+    return p5, p50, spread
+
 
 def analyze(run: dict, lanes: np.ndarray) -> dict:
     meta, horizon = run["meta"], run["meta"]["steps"]
@@ -114,25 +186,27 @@ def analyze(run: dict, lanes: np.ndarray) -> dict:
     rs = series(run, "rewardSum")[:, lanes]
     delivered = last_finite(rs) / max_step
     delivered = np.nan_to_num(delivered, nan=0.0)
-    died = np.array([1.0 if l in run["deaths"] else 0.0 for l in lanes])
-    dtimes = np.array([run["deaths"][l]["step"] if l in run["deaths"] else horizon
-                       for l in lanes], dtype=float)
+    died = np.array([1.0 if int(l) in run["deaths"] else 0.0 for l in lanes])
+    dtimes = np.array([run["deaths"].get(int(l), horizon) for l in lanes], dtype=float)
     peak, end_rate = windowed_rates(run, lanes)
     with np.errstate(invalid="ignore", divide="ignore"):
         retention = np.where(peak > 0, end_rate / peak, np.nan)
-    solved = np.isfinite(peak) & (peak > SOLVED_THRESHOLD)
-    retained = solved & np.isfinite(retention) & (retention >= RETAINED_FRACTION)
+    null_p5, null_p50, peak_spread = retention_null(run, lanes)
+    floor = lane_floor_vec(run, lanes)
+    solved = (np.isfinite(peak) & (peak > floor)
+              & np.isfinite(peak_spread) & (peak - floor > peak_spread))
+    decayed = (solved & np.isfinite(retention) & np.isfinite(null_p5)
+               & (retention < null_p5))
+    retained = solved & ~decayed
+    ret_margin = retention - null_p50
     if rs.shape[0] >= 2:
         recent = (rs[-1] - rs[-2]) / float(ends[-1] - ends[-2])
         recent = np.where(np.isfinite(recent), recent, delivered)
     else:
         recent = delivered
-    nf = {ph: np.nan_to_num(last_finite(series(run, ph)[:, lanes])) > 0
-          for ph in NF_PHASES if ph in run["tape"]["fields"]}
     seeds = [run["seeds"][l] for l in lanes]
     pct = np.percentile(delivered, [10, 25, 50, 75, 90])
     best = int(np.argmax(delivered))
-    ret_ok = np.isfinite(retention)
     out = {
         "seeds": len(lanes), "horizon": horizon, "maxStep": max_step,
         "complete": max_step >= horizon,
@@ -150,36 +224,33 @@ def analyze(run: dict, lanes: np.ndarray) -> dict:
         "rmst": rmst(dtimes, died, horizon),
         "solvedSeeds": int(solved.sum()),
         "solvedSeedsRetained": int(retained.sum()),
-        "retentionFraction": float((retention[ret_ok] >= RETAINED_FRACTION).mean())
-                             if ret_ok.any() else None,
+        "decayedSeeds": int(decayed.sum()),
+        "decayFraction": float(decayed[solved].mean()) if solved.any() else None,
+        "retentionMarginP50": (float(np.nanmedian(ret_margin))
+                               if np.isfinite(ret_margin).any() else None),
+        "retentionFraction": (float(retained.sum() / solved.sum())
+                              if solved.any() else None),
         "rewardRateBySeed": {str(s): float(r) for s, r in zip(seeds, delivered)},
         "retentionBySeed": {str(s): (float(r) if math.isfinite(r) else None)
                             for s, r in zip(seeds, retention)},
         "_vectors": {"delivered": delivered, "died": died, "dtimes": dtimes,
                      "solved": solved.astype(float), "retained": retained.astype(float),
-                     "nf": nf},
+                     "decayed": decayed.astype(float), "retMargin": ret_margin},
     }
-    if run["agg"]:
-        out["aggStepsPerSecond"] = run["agg"].get("aggStepsPerSecond")
+    wall = run["tape"]["wall"]
+    fin = np.isfinite(wall) & (wall > 0)
+    if fin.any():
+        out["aggStepsPerSecond"] = float(
+            ends[fin][-1] * run["tape"]["lanes"] / wall[fin][-1])
     return out
 
-def env_slices(run: dict) -> dict[str, np.ndarray]:
-    sched = run["meta"].get("envSchedule") or []
-    if not sched:
-        return {run["meta"].get("envId", "env"): np.arange(run["tape"]["lanes"])}
-    seed_lane = {s: i for i, s in enumerate(run["seeds"])}
-    out: dict[str, list[int]] = {}
-    for e in sched:
-        for s in range(e["seedStart"], e["seedEnd"] + 1):
-            if s in seed_lane:
-                out.setdefault(e["envId"], []).append(seed_lane[s])
-    return {k: np.array(v) for k, v in sorted(out.items())}
 
 def iqm(v: np.ndarray) -> float:
     v = np.sort(np.asarray(v, float))
     n = len(v)
     lo, hi = n // 4, n - n // 4
     return float(v[lo:hi].mean()) if hi > lo else float(v.mean())
+
 
 def rmst(times: np.ndarray, events: np.ndarray, horizon: int) -> float:
     order = np.argsort(times)
@@ -200,38 +271,12 @@ def rmst(times: np.ndarray, events: np.ndarray, horizon: int) -> float:
         area += s * (horizon - prev_t)
     return area
 
+
 def paired(keeper: np.ndarray, cand: np.ndarray, stat, boot: int, seed: int) -> np.ndarray:
     rng = np.random.default_rng(seed)
     idx = rng.integers(0, len(keeper), size=(boot, len(keeper)))
     return np.array([stat(cand[row]) - stat(keeper[row]) for row in idx])
 
-def render(name: str, results: dict[str, dict], meta: dict) -> str:
-    lines = []
-    for env, r in results.items():
-        if not r["complete"]:
-            lines.append(f"> ⚠️ INCOMPLETE — step {r['maxStep']:,} of {r['horizon']:,} "
-                         f"({r['maxStep'] / r['horizon']:.0%}). Never gate on this.")
-    lines += [
-        f"### {name} — B={meta['batch']} × {meta['steps']:,} steps "
-        f"(ablation={meta.get('ablationLabel', 'none')})", "",
-        "| env | seeds | IQM rate | P10/P50/P90 | best | %>0 | %>1 | %>SOTA(10) "
-        "| recent IQM | solved | retained | dead | RMST/h | SPS |",
-        "|---|---:|---:|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
-    ]
-    for env, r in results.items():
-        p = r["rewardRatePercentiles"]
-        tf = r["thresholdFractions"]
-        sps = r.get("aggStepsPerSecond")
-        lines.append(
-            f"| {env} | {r['seeds']} | **{r['rewardRateIQM']:+.5g}** "
-            f"| {p['p10']:+.4f}/{p['p50']:+.4f}/{p['p90']:+.4f} "
-            f"| s{r['bestSeed']}:{r['bestSeedRewardRate']:+.4f} "
-            f"| {tf['gt0']:.1%} | {tf['gt1']:.1%} | {tf['gt10']:.1%} "
-            f"| {r['recentRewardRateIQM']:+.5g} "
-            f"| {r['solvedSeeds']} | {r['solvedSeedsRetained']} "
-            f"| {r['divergence']['diverged']} | {r['rmst'] / r['horizon']:.3f} "
-            f"| {'' if sps is None else format(sps, ',.0f')} |")
-    return "\n".join(lines)
 
 def json_safe(o):
     if isinstance(o, dict):
@@ -242,203 +287,205 @@ def json_safe(o):
         return None
     return o
 
+
 def cmd_report(args) -> int:
-    run = load(args.root, args.policy)
+    run = load(args.root)
     slices = env_slices(run)
     results = {env: analyze(run, lanes) for env, lanes in slices.items()}
-    if len(slices) > 1:
-        results["ALL (mixed scales — read slices)"] = analyze(
-            run, np.arange(run["tape"]["lanes"]))
-    print(render(args.root.name, results, run["meta"]))
-    overall = results.get("ALL (mixed scales — read slices)") or next(iter(results.values()))
+    overall = (analyze(run, np.arange(run["tape"]["lanes"])) if len(results) > 1
+               else next(iter(results.values())))
     summary = {
-        "summarySchemaVersion": 2, "solvedThreshold": SOLVED_THRESHOLD,
+        "solvedLaw": "peak > floor + nullPeakSpread(p95-p50)",
+        "retainedLaw": "solved & retention >= own stationary-null p5",
         "meta": run["meta"],
-        "results": [{"policy": args.policy, **json_safe(overall)}],
-        "envSlices": {env: [{"policy": args.policy, **json_safe(r)}]
-                      for env, r in results.items() if not env.startswith("ALL")},
+        "overall": json_safe(overall),
+        "envSlices": {env: json_safe(r) for env, r in results.items()},
     }
-    (args.root / "summary.json").write_text(
-        json.dumps(json_safe(summary), indent=2, sort_keys=True, allow_nan=False))
+    out = args.root / "summary.json"
+    out.write_text(json.dumps(json_safe(summary), indent=2, sort_keys=True, allow_nan=False))
+    print(out)
     return 0
 
+
+def slice_verdicts(k: dict, c: dict, n: int, horizon: int, boot: int) -> list[tuple[str, bool]]:
+    delta = 0.64 / math.sqrt(n)
+    d95 = float(np.percentile(paired(k["died"], c["died"], np.mean, boot, 11), 95))
+    di5 = float(np.percentile(paired(k["delivered"], c["delivered"], iqm, boot, 12), 5))
+    rng = np.random.default_rng(13)
+    idx = rng.integers(0, n, size=(boot, n))
+    dr5 = float(np.percentile(
+        [rmst(c["dtimes"][r], c["died"][r], horizon)
+         - rmst(k["dtimes"][r], k["died"][r], horizon) for r in idx], 5))
+    kpos = (k["delivered"] > 0).astype(float)
+    cpos = (c["delivered"] > 0).astype(float)
+    out = [
+        ("divergence", d95 <= delta),
+        ("rewardRateIQM", di5 >= -0.05 * abs(iqm(k["delivered"]))),
+        ("rmstSurvival", dr5 >= -0.05 * horizon),
+    ]
+    for name, key, seed in (("solvedSeeds", "solved", 30), ("retainedSeeds", "retained", 31)):
+        d = float(np.percentile(paired(c[key], k[key], np.mean, boot, seed), 95))
+        out.append((name, d <= delta))
+    d = float(np.percentile(paired(cpos, kpos, np.mean, boot, 33), 95))
+    out.append(("positiveSeedFraction", d <= delta))
+    return out
+
+
+def _fail(msg: str) -> int:
+    print(msg)
+    return 2
+
+
 def cmd_gate(args) -> int:
-    kr, cr = load(args.keeper, args.policy), load(args.candidate, args.policy)
+    kh = keeper_hash()
+    if kh is None or not (BENCH / kh).is_dir():
+        return _fail("GATE ERROR: keeper missing")
+    kr, cr = load(BENCH / kh), load(args.candidate)
     for label, r in (("keeper", kr), ("candidate", cr)):
         if int(r["tape"]["ends"][-1]) < r["meta"]["steps"]:
-            print(f"GATE ERROR: {label} run is INCOMPLETE "
-                  f"({int(r['tape']['ends'][-1]):,} of {r['meta']['steps']:,}).")
-            return 2
+            return _fail(f"GATE ERROR: {label} incomplete")
     if kr["meta"]["steps"] != cr["meta"]["steps"]:
-        print("GATE ERROR: horizons differ.")
-        return 2
+        return _fail("GATE ERROR: horizons differ")
     if (kr["meta"].get("ablationLabel") or "none") != (cr["meta"].get("ablationLabel") or "none"):
-        print(f"GATE ERROR: ablation differs (keeper "
-              f"{kr['meta'].get('ablationLabel')} vs {cr['meta'].get('ablationLabel')}).")
-        return 2
+        return _fail("GATE ERROR: ablation differs")
     k_sl, c_sl = env_slices(kr), env_slices(cr)
     if args.env_slice:
         if args.env_slice not in k_sl or args.env_slice not in c_sl:
-            print(f"GATE ERROR: --env-slice {args.env_slice} absent from a root.")
-            return 2
+            return _fail(f"GATE ERROR: missing slice {args.env_slice}")
         k_lanes, c_lanes = k_sl[args.env_slice], c_sl[args.env_slice]
     else:
         k_lanes = np.arange(kr["tape"]["lanes"])
         c_lanes = np.arange(cr["tape"]["lanes"])
-    k_seeds = [kr["seeds"][l] for l in k_lanes]
-    c_seeds = [cr["seeds"][l] for l in c_lanes]
-    if k_seeds != c_seeds:
-        print(f"GATE ERROR: seed sets differ ({len(k_seeds)} vs {len(c_seeds)}); "
-              f"the paired gate requires identical seeds.")
-        return 2
-    k, c = analyze(kr, k_lanes)["_vectors"], analyze(cr, c_lanes)["_vectors"]
-    n, horizon, boot = len(k_seeds), kr["meta"]["steps"], args.boot
-    delta = 0.64 / math.sqrt(n)
-    verdicts: list[tuple[str, bool, str]] = []
+    if [kr["seeds"][l] for l in k_lanes] != [cr["seeds"][l] for l in c_lanes]:
+        return _fail("GATE ERROR: seed sets differ")
+    n, horizon, boot = len(k_lanes), kr["meta"]["steps"], args.boot
 
-    d95 = float(np.percentile(paired(k["died"], c["died"], np.mean, boot, 11), 95))
-    verdicts.append(("divergence", d95 <= delta,
-                     f"p {k['died'].mean():.3f}->{c['died'].mean():.3f} "
-                     f"Δ95={d95:+.4f} δ={delta:.4f}"))
+    def apply(tag: str, verdicts: list[tuple[str, bool]]) -> bool:
+        ok = True
+        for name, passed in verdicts:
+            ok &= passed
+            print(f"  [{'PASS' if passed else 'FAIL'}] {tag}{name}")
+        return ok
 
-    di5 = float(np.percentile(paired(k["delivered"], c["delivered"], iqm, boot, 12), 5))
-    ik = iqm(k["delivered"])
-    margin = 0.05 * abs(ik)
-    verdicts.append(("rewardRateIQM", di5 >= -margin,
-                     f"IQM {ik:.5g}->{iqm(c['delivered']):.5g} ΔIQM5={di5:+.5g} "
-                     f"margin={-margin:.5g}{' IMPROVEMENT' if di5 > 0 else ''}"))
-
-    rng = np.random.default_rng(13)
-    idx = rng.integers(0, n, size=(boot, n))
-    dr = np.array([rmst(c["dtimes"][r_], c["died"][r_], horizon)
-                   - rmst(k["dtimes"][r_], k["died"][r_], horizon) for r_ in idx])
-    dr5 = float(np.percentile(dr, 5))
-    verdicts.append(("rmstSurvival", dr5 >= -0.05 * horizon,
-                     f"ΔRMST5={dr5:+,.0f} margin={-0.05 * horizon:,.0f}"))
-
-    nf_over, nf_parts = [], []
-    for i, ph in enumerate(NF_PHASES):
-        if ph not in k["nf"] or ph not in c["nf"]:
-            continue
-        kp, cp = k["nf"][ph].astype(float), c["nf"][ph].astype(float)
-        d = float(np.percentile(paired(kp, cp, np.mean, boot, 20 + i), 95))
-        if d > delta:
-            nf_over.append(ph)
-        nf_parts.append(f"{ph[2:].lower()} {kp.mean():.3f}->{cp.mean():.3f} Δ95={d:+.4f}")
-    verdicts.append(("nfPrevalence", not nf_over,
-                     "; ".join(nf_parts) + (f" OVER={nf_over}" if nf_over else "")))
-
-    for name, key, seed in (("solvedSeeds", "solved", 30), ("retainedSeeds", "retained", 31)):
-        d = float(np.percentile(paired(c[key], k[key], np.mean, boot, seed), 95))
-        verdicts.append((name, d <= delta,
-                         f"keeper={int(k[key].sum())} cand={int(c[key].sum())} "
-                         f"Δ95={d:+.4f} δ={delta:.4f}"))
-
-    kpos, cpos = (k["delivered"] > 0).astype(float), (c["delivered"] > 0).astype(float)
-    d = float(np.percentile(paired(cpos, kpos, np.mean, boot, 33), 95))
-    verdicts.append(("positiveSeedFraction", d <= delta,
-                     f"{kpos.mean():.1%}->{cpos.mean():.1%} Δ95={d:+.4f} δ={delta:.4f}"))
-
-    print(f"fleet gate: N={n} horizon={horizon:,} policy={args.policy} boot={boot}"
-          + (f" [env={args.env_slice}]" if args.env_slice else ""))
-    ok = True
-    width = max(len(v[0]) for v in verdicts)
-    for name, passed, detail in verdicts:
-        ok &= passed
-        print(f"  [{'PASS' if passed else 'FAIL'}] {name:{width}s} {detail}")
-    if not args.env_slice and len(k_sl) > 1:
-        print("  [info] per-env ΔIQM (diagnostic — verdicts via gate --env-slice):")
+    if args.env_slice or len(k_sl) <= 1:
+        ok = apply("", slice_verdicts(analyze(kr, k_lanes)["_vectors"],
+                                      analyze(cr, c_lanes)["_vectors"],
+                                      n, horizon, boot))
+    else:
+        ok = True
+        skip = {"solvedSeeds", "retainedSeeds", "positiveSeedFraction"}
         for env in k_sl:
-            if env not in c_sl or [kr["seeds"][l] for l in k_sl[env]] !=\
+            if env not in c_sl or [kr["seeds"][l] for l in k_sl[env]] != \
                                   [cr["seeds"][l] for l in c_sl[env]]:
+                print(f"  [FAIL] {env} seeds")
+                ok = False
                 continue
-            kd = analyze(kr, k_sl[env])["_vectors"]["delivered"]
-            cd = analyze(cr, c_sl[env])["_vectors"]["delivered"]
-            ki, ci = iqm(kd), iqm(cd)
-            rel = f"{(ci - ki) / abs(ki):+.1%}" if ki else "n/a"
-            print(f"         {env:28s} n={len(kd):<5d} IQM {ki:+.5g} -> {ci:+.5g} ({rel})")
+            v = [x for x in slice_verdicts(analyze(kr, k_sl[env])["_vectors"],
+                                           analyze(cr, c_sl[env])["_vectors"],
+                                           len(k_sl[env]), horizon, boot)
+                 if x[0] not in skip]
+            ok &= apply(f"{env} ", v)
+        fleet = {"divergence"} | skip
+        fv = slice_verdicts(analyze(kr, np.arange(kr["tape"]["lanes"]))["_vectors"],
+                            analyze(cr, np.arange(cr["tape"]["lanes"]))["_vectors"],
+                            kr["tape"]["lanes"], horizon, boot)
+        ok &= apply("fleet.", [x for x in fv if x[0] in fleet])
     print("PROMOTE" if ok else "REJECT")
     return 0 if ok else 1
 
+
+def keeper_hash() -> str | None:
+    try:
+        text = (REPO / "keeper").read_text().strip()
+        return text or None
+    except OSError:
+        return None
+
+
+def write_keeper(name: str) -> None:
+    (REPO / "keeper").write_text(name + "\n")
+
+
+def keeper_meta() -> dict:
+    kh = keeper_hash()
+    p = BENCH / kh / "meta.json" if kh else None
+    return json.loads(p.read_text()) if p and p.exists() else {}
+
+
 def cmd_run(args) -> int:
-    root = BENCH / args.name
-    log = BENCH / f"{args.name}.log"
+    name = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=REPO).decode().strip()
+    root, log = BENCH / name, BENCH / f"{name}.log"
+    kh = keeper_hash()
+    if kh == name and root.exists():
+        print(f"REFUSED: {name} is the keeper")
+        return 2
+    km = keeper_meta()
+    if km and (km.get("ablationLabel") or "none") != os.environ.get("OAK_ABLATE", "none"):
+        print("CONFIG ERROR: OAK_ABLATE != keeper ablation")
+        return 2
     BENCH.mkdir(exist_ok=True)
-    if args.keeper and (args.keeper / "meta.json").exists():
-        kabl = json.loads((args.keeper / "meta.json").read_text()).get("ablationLabel") or "none"
-        if kabl != os.environ.get("OAK_ABLATE", "none"):
-            print(f"CONFIG ERROR: OAK_ABLATE={os.environ.get('OAK_ABLATE', 'none')} "
-                  f"!= keeper ablation '{kabl}' — the gate would compare different configs.")
-            return 2
-    if args.role == "candidate":
-        rp = BENCH / "ROLES.json"
-        roles = json.loads(rp.read_text()) if rp.exists() else {}
-        roles["candidate"] = args.name
-        roles["rolesSchemaVersion"] = 2
-        rp.write_text(json.dumps(roles, indent=1))
-    import shutil
     shutil.rmtree(root, ignore_errors=True)
     log.unlink(missing_ok=True)
-    cmd = [sys.executable, str(Path(__file__).resolve()), "job",
-           str(args.steps), args.name, str(args.keeper or "")]
     with open(log, "w") as lf:
-        p = subprocess.Popen(cmd, stdout=lf, stderr=subprocess.STDOUT,
-                             stdin=subprocess.DEVNULL, start_new_session=True,
-                             cwd=REPO)
-    print(f"DETACHED PID {p.pid} (new session — survives harness compaction/idle)")
-    print(f"  log : {log}")
-    print(f"  done: {root}/.done")
+        p = subprocess.Popen(
+            [sys.executable, str(Path(__file__).resolve()), "job", str(args.steps), name],
+            stdout=lf, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
+            start_new_session=True, cwd=REPO)
+    print(f"DETACHED PID {p.pid}\n  {log}\n  {root}/.done")
     return 0
+
 
 def cmd_job(args) -> int:
     root = BENCH / args.name
+    km = keeper_meta()
+    envs = os.environ.get("OAK_BENCH_ENVS") or ",".join(
+        f"{e['envId']}:{e['seedEnd'] - e['seedStart'] + 1}"
+        for e in km.get("envSchedule") or ())
+    if not envs:
+        raise SystemExit("OAK_BENCH_ENVS required")
     env = dict(os.environ,
-               OAK_BENCH_POLICIES=os.environ.get("OAK_BENCH_POLICIES", "oak"),
                OAK_BENCH_STEPS=str(args.steps),
-               OAK_BENCH_SEED_COUNT=os.environ.get("OAK_BENCH_SEED_COUNT", "1408"),
-               OAK_RECORD_ACTIONS=os.environ.get("OAK_RECORD_ACTIONS", "1"),
-               OAK_RECORD_FORMAT=os.environ.get("OAK_RECORD_FORMAT", "4"),
+               OAK_BENCH_SEED_COUNT=os.environ.get(
+                   "OAK_BENCH_SEED_COUNT", str(km.get("batch", 1024))),
+               OAK_BENCH_ENVS=envs,
                OAK_FLEET_TIMING="1", OAK_METRICS_STORAGE=str(root))
     rc = subprocess.run(["caffeinate", "-dimsu", str(REPO / ".build/release/OaK"),
                          "benchmark"], env=env, cwd=REPO).returncode
     print(f"[fleet] benchmark exit={rc}", flush=True)
     me = [sys.executable, str(Path(__file__).resolve())]
     subprocess.run(me + ["report", str(root)], cwd=REPO)
-    if args.keeper and args.keeper != "None":
-        subprocess.run(me + ["gate", args.keeper, str(root)], cwd=REPO)
+    prior = keeper_hash()
+    if prior and prior != args.name and (BENCH / prior).is_dir():
+        if subprocess.run(me + ["gate", str(root)], cwd=REPO).returncode == 0:
+            write_keeper(args.name)
+            print(f"[fleet] keeper {args.name}", flush=True)
+        else:
+            print(f"[fleet] keeper stays {prior}", flush=True)
+    elif rc == 0:
+        write_keeper(args.name)
+        print(f"[fleet] keeper {args.name}", flush=True)
     (root / ".done").touch()
-    print("[fleet] DONE — .done written.", flush=True)
+    print("[fleet] DONE", flush=True)
     return 0
+
 
 def main() -> int:
     ap = argparse.ArgumentParser()
     sub = ap.add_subparsers(dest="cmd", required=True)
-
-    rp = sub.add_parser("run", help="detached benchmark -> report -> gate -> .done")
-    rp.add_argument("steps", type=int)
-    rp.add_argument("name")
-    rp.add_argument("keeper", type=Path, nargs="?", default=None)
-    rp.add_argument("--role", default="candidate", choices=("candidate", "probe"))
-
+    sub.add_parser("run").add_argument("steps", type=int)
     jp = sub.add_parser("job")
     jp.add_argument("steps", type=int)
     jp.add_argument("name")
-    jp.add_argument("keeper", nargs="?", default="")
-
-    pp = sub.add_parser("report", help="population view from the tape (in-flight OK)")
+    pp = sub.add_parser("report")
     pp.add_argument("root", type=Path)
-    pp.add_argument("--policy", default="oak")
-
-    gp = sub.add_parser("gate", help="paired promotion law: PROMOTE/REJECT")
-    gp.add_argument("keeper", type=Path)
+    gp = sub.add_parser("gate")
     gp.add_argument("candidate", type=Path)
-    gp.add_argument("--policy", default="oak")
     gp.add_argument("--boot", type=int, default=10_000)
-    gp.add_argument("--env-slice", default=None, metavar="ENV_ID")
-
+    gp.add_argument("--env-slice", default=None)
     args = ap.parse_args()
     return {"run": cmd_run, "job": cmd_job, "report": cmd_report,
             "gate": cmd_gate}[args.cmd](args)
+
 
 if __name__ == "__main__":
     sys.exit(main())

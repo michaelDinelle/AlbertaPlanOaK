@@ -1,11 +1,10 @@
 
 import { CelebrationPool, attachCelebrations, disposeCelebrations } from '@kit/celebrate';
 import { GroundTruthOverlay } from '@kit/debug';
-import { cellToWorld, cellToWorldVec, clampCell, type GridSize, type Vec3Tuple } from '@kit/grid';
+import { cellToWorldVec, clampCell, type GridSize } from '@kit/grid';
 import { makeOrbitRig, type OrbitRig } from '@kit/rigs';
 import { TOKENS } from '@kit/tokens';
 import type {
-  AlignmentProbe,
   FrameState,
   FrameUpdate,
   SceneContext,
@@ -448,68 +447,6 @@ class IvyGateScene implements SceneModule {
   setDebug(on: boolean): void {
     this.debugOn = on;
     if (this.overlay) this.overlay.visible = on;
-  }
-
-  probes(): AlignmentProbe[] {
-    const grid = this.grid;
-    const door = this.door;
-    const wisp = this.wisp;
-    const gate = this.gate;
-    const shrine = this.shrine;
-    const seed = this.seed;
-    const height = this.ctx?.tokens.wispHeight ?? TOKENS.wispHeight;
-
-    const wispState = makeGardenState();
-    const anchorState = makeGardenState();
-    const goalState = makeGardenState();
-    const keyState = makeGardenState();
-    const wispOut: Vec3Tuple = [0, 0, 0];
-    const anchorOut: Vec3Tuple = [0, 0, 0];
-    const goalOut: Vec3Tuple = [0, 0, 0];
-    const keyOut: Vec3Tuple = [0, 0, 0];
-    const gateOut: Vec3Tuple = [0, 0, 0];
-
-    return [
-      {
-        name: 'wisp',
-        object: wisp?.probeObject ?? new THREE.Object3D(),
-        expectWorldPos: (state) => {
-          const st = readState(state, grid, wispState);
-          cellToWorld(st.agent.x, st.agent.y, grid, wispOut);
-          wispOut[1] = height;
-          return wispOut;
-        },
-      },
-      {
-        name: 'wisp-anchor',
-        object: wisp?.avatar ?? new THREE.Object3D(),
-        expectWorldPos: (state) => {
-          const st = readState(state, grid, anchorState);
-          return cellToWorld(st.agent.x, st.agent.y, grid, anchorOut);
-        },
-      },
-      {
-        name: 'shrine',
-        object: shrine?.root ?? new THREE.Object3D(),
-        expectWorldPos: (state) => {
-          const st = readState(state, grid, goalState);
-          return cellToWorld(st.goal.x, st.goal.y, grid, goalOut);
-        },
-      },
-      {
-        name: 'seed-bed',
-        object: seed?.root ?? new THREE.Object3D(),
-        expectWorldPos: (state) => {
-          const st = readState(state, grid, keyState);
-          return cellToWorld(st.key.x, st.key.y, grid, keyOut);
-        },
-      },
-      {
-        name: 'gate',
-        object: gate?.root ?? new THREE.Object3D(),
-        expectWorldPos: () => cellToWorld(door.x, door.y, grid, gateOut),
-      },
-    ];
   }
 
   dispose(): void {

@@ -72,7 +72,6 @@ function makeState(pose: Float32Array, velX: number): CheetahState {
 
 export const halfCheetahDecoder: EnvDecoder<CheetahState, CheetahStatic> = {
   envId: 'HalfCheetah-v4',
-  needsReplay: false,
 
   initStatic(seed: number): CheetahStatic {
     const { qpos, qvel } = cheetahReset(seed, 0);

@@ -1,12 +1,11 @@
 
 import { CelebrationPool, attachCelebrations, disposeCelebrations } from '@kit/celebrate';
 import { GroundTruthOverlay } from '@kit/debug';
-import { CELL, cellToWorld, cellToWorldVec, clampCell, type GridSize, type Vec3Tuple } from '@kit/grid';
+import { CELL, cellToWorldVec, clampCell, type GridSize } from '@kit/grid';
 import { makeAmbientParticles, type AmbientParticlesHandle } from '@kit/particles';
 import { makeOrbitRig, type OrbitRig } from '@kit/rigs';
 import { TOKENS } from '@kit/tokens';
 import type {
-  AlignmentProbe,
   FrameState,
   FrameUpdate,
   SceneContext,
@@ -438,51 +437,6 @@ class SlotCanyonsScene implements SceneModule {
   setDebug(on: boolean): void {
     this.debugOn = on;
     if (this.overlay) this.overlay.visible = on;
-  }
-
-  probes(): AlignmentProbe[] {
-    const grid = this.grid;
-    const wisp = this.wisp;
-    const oasis = this.oasis;
-    const world = this.world;
-
-    const wispReading: Reading = { agent: { x: 0, y: 0 }, goal: { x: 0, y: 0 }, lastDir: 1, action: 0 };
-    const goalReading: Reading = { agent: { x: 0, y: 0 }, goal: { x: 0, y: 0 }, lastDir: 1, action: 0 };
-    const wispOut: Vec3Tuple = [0, 0, 0];
-    const goalOut: Vec3Tuple = [0, 0, 0];
-
-    const probes: AlignmentProbe[] = [
-      {
-        name: 'wisp',
-        object: wisp?.avatar ?? new THREE.Object3D(),
-        expectWorldPos: (state) => {
-          const r = read(state, grid, wispReading);
-          return cellToWorld(r.agent.x, r.agent.y, grid, wispOut);
-        },
-      },
-      {
-        name: 'oasis',
-        object: oasis?.root ?? new THREE.Object3D(),
-        expectWorldPos: (state) => {
-          const r = read(state, grid, goalReading);
-          return cellToWorld(r.goal.x, r.goal.y, grid, goalOut);
-        },
-      },
-    ];
-
-    const gaps = world?.gaps ?? [];
-    for (let i = 0; i < gaps.length; i++) {
-      const gap = gaps[i];
-      const root = world?.archRoots[i];
-      if (!gap || !root) continue;
-      const out: Vec3Tuple = [0, 0, 0];
-      probes.push({
-        name: `arch-${i}`,
-        object: root,
-        expectWorldPos: () => cellToWorld(gap.x, gap.y, grid, out),
-      });
-    }
-    return probes;
   }
 
   dispose(): void {

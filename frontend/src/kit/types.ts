@@ -53,21 +53,6 @@ export interface SceneContext {
   time(): number;
 }
 
-export interface AlignmentProbe {
-  name: string;
-  object: THREE.Object3D;
-  expectWorldPos(state: FrameState): readonly [number, number, number];
-  tolerance?: number;
-}
-
-export interface SceneFixture {
-  name: string;
-  pose: readonly number[];
-  ctrl?: readonly number[];
-  derived?: unknown;
-  step?: number;
-}
-
 export interface SceneModule {
   readonly manifest: SceneManifest;
   readonly scene: THREE.Scene;
@@ -76,9 +61,8 @@ export interface SceneModule {
   update(frame: FrameUpdate): void;
   resize(size: SceneSize): void;
   setDebug(on: boolean): void;
-  probes(): AlignmentProbe[];
   dispose(): void;
 }
 
 export type SceneFactory = () => SceneModule;
-export type SceneRegistry = Partial<Record<EnvId, () => Promise<{ default: SceneFactory }>>>;
+export type SceneRegistry = Record<EnvId, () => Promise<{ default: SceneFactory }>>;

@@ -1,11 +1,10 @@
 
 import { CelebrationPool, attachCelebrations, disposeCelebrations } from '@kit/celebrate';
 import { GroundTruthOverlay } from '@kit/debug';
-import { cellToWorld, cellToWorldVec, clampCell, type GridSize, type Vec3Tuple } from '@kit/grid';
+import { cellToWorldVec, clampCell, type GridSize } from '@kit/grid';
 import { makeOrbitRig, type OrbitRig } from '@kit/rigs';
 import { TOKENS } from '@kit/tokens';
 import type {
-  AlignmentProbe,
   FrameState,
   FrameUpdate,
   SceneContext,
@@ -404,95 +403,6 @@ class TheAbyssScene implements SceneModule {
   setDebug(on: boolean): void {
     this.debugOn = on;
     if (this.overlay) this.overlay.visible = on;
-  }
-
-  probes(): AlignmentProbe[] {
-    const grid = this.grid;
-    const wisp = this.wisp;
-    const wreck = this.wreck;
-    const height = this.ctx?.tokens.wispHeight ?? TOKENS.wispHeight;
-    const seed = this.ctx?.seed ?? 0;
-
-    const wispCell: GridCell = { x: 0, y: 0 };
-    const wispGoal: GridCell = { x: 0, y: 0 };
-    const wispOut: Vec3Tuple = [0, 0, 0];
-    const anchorCell: GridCell = { x: 0, y: 0 };
-    const anchorGoal: GridCell = { x: 0, y: 0 };
-    const anchorOut: Vec3Tuple = [0, 0, 0];
-    const wreckCell: GridCell = { x: 0, y: 0 };
-    const wreckGoal: GridCell = { x: 0, y: 0 };
-    const wreckOut: Vec3Tuple = [0, 0, 0];
-    const heartCell: GridCell = { x: 0, y: 0 };
-    const heartGoal: GridCell = { x: 0, y: 0 };
-    const heartOut: Vec3Tuple = [0, 0, 0];
-    const anglerOut: Vec3Tuple = [0, 0, 0];
-
-    const probes: AlignmentProbe[] = [
-      {
-        name: 'wisp',
-        object: wisp?.probeObject ?? new THREE.Object3D(),
-        expectWorldPos: (state) => {
-          readCells(state, grid, wispCell, wispGoal);
-          cellToWorld(wispCell.x, wispCell.y, grid, wispOut);
-          wispOut[1] = height;
-          return wispOut;
-        },
-      },
-      {
-        name: 'wisp-anchor',
-        object: wisp?.avatar ?? new THREE.Object3D(),
-        expectWorldPos: (state) => {
-          readCells(state, grid, anchorCell, anchorGoal);
-          return cellToWorld(anchorCell.x, anchorCell.y, grid, anchorOut);
-        },
-      },
-      {
-        name: 'wreck',
-        object: wreck?.root ?? new THREE.Object3D(),
-        expectWorldPos: (state) => {
-          readCells(state, grid, wreckCell, wreckGoal);
-          return cellToWorld(wreckGoal.x, wreckGoal.y, grid, wreckOut);
-        },
-      },
-      {
-        name: 'wreck-heart',
-        object: wreck?.heartAnchor ?? new THREE.Object3D(),
-        expectWorldPos: (state) => {
-          readCells(state, grid, heartCell, heartGoal);
-          cellToWorld(heartGoal.x, heartGoal.y, grid, heartOut);
-          heartOut[1] = HEART_Y;
-          return heartOut;
-        },
-      },
-    ];
-
-    const world = this.world;
-    if (world) {
-      const siltCell: GridCell = { x: 0, y: 0 };
-      const siltGoal: GridCell = { x: 0, y: 0 };
-      const siltOut: Vec3Tuple = [0, 0, 0];
-      probes.push({
-        name: 'silt',
-        object: world.silt.points,
-        expectWorldPos: (state) => {
-          readCells(state, grid, siltCell, siltGoal);
-          cellToWorld(siltCell.x, siltCell.y, grid, siltOut);
-          siltOut[1] += siltLift(height);
-          return siltOut;
-        },
-      });
-    }
-
-    const site = anglerSites(grid, seed)[0];
-    const angler = this.anglers[0];
-    if (site && angler) {
-      probes.push({
-        name: 'angler-site',
-        object: angler.root,
-        expectWorldPos: () => cellToWorld(site.x, site.y, grid, anglerOut),
-      });
-    }
-    return probes;
   }
 
   dispose(): void {

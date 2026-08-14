@@ -1,11 +1,10 @@
 
-import { cellToWorld, cellToWorldVec, clampCell, type GridSize, type Vec3Tuple } from '@kit/grid';
+import { cellToWorldVec, clampCell, type GridSize } from '@kit/grid';
 import { CelebrationPool, attachCelebrations, disposeCelebrations } from '@kit/celebrate';
 import { GroundTruthOverlay } from '@kit/debug';
 import { makeOrbitRig, type OrbitRig } from '@kit/rigs';
 import { TOKENS } from '@kit/tokens';
 import type {
-  AlignmentProbe,
   FrameState,
   FrameUpdate,
   SceneContext,
@@ -311,78 +310,6 @@ class FourSeasonsCourtyardScene implements SceneModule {
   setDebug(on: boolean): void {
     this.debugOn = on;
     if (this.overlay) this.overlay.visible = on;
-  }
-
-  probes(): AlignmentProbe[] {
-    const grid = this.grid;
-    const wisp = this.wisp;
-    const lantern = this.lantern;
-    const world = this.world;
-    const height = this.ctx?.tokens.wispHeight ?? TOKENS.wispHeight;
-
-    const cellFor = (state: FrameState, agent: GridCell, goal: GridCell): void => {
-      readCells(state, grid, agent, goal);
-    };
-
-    const wispCell: GridCell = { x: 0, y: 0 };
-    const wispGoal: GridCell = { x: 0, y: 0 };
-    const wispOut: Vec3Tuple = [0, 0, 0];
-    const anchorCell: GridCell = { x: 0, y: 0 };
-    const anchorGoal: GridCell = { x: 0, y: 0 };
-    const anchorOut: Vec3Tuple = [0, 0, 0];
-    const goalCell: GridCell = { x: 0, y: 0 };
-    const goalGoal: GridCell = { x: 0, y: 0 };
-    const goalOut: Vec3Tuple = [0, 0, 0];
-    const gateOut: Vec3Tuple = [0, 0, 0];
-    const sundialOut: Vec3Tuple = [0, 0, 0];
-
-    const probes: AlignmentProbe[] = [
-      {
-        name: 'wisp',
-        object: wisp?.probeObject ?? new THREE.Object3D(),
-        expectWorldPos: (state) => {
-          cellFor(state, wispCell, wispGoal);
-          cellToWorld(wispCell.x, wispCell.y, grid, wispOut);
-          wispOut[1] = height;
-          return wispOut;
-        },
-      },
-      {
-        name: 'wisp-anchor',
-        object: wisp?.avatar ?? new THREE.Object3D(),
-        expectWorldPos: (state) => {
-          cellFor(state, anchorCell, anchorGoal);
-          return cellToWorld(anchorCell.x, anchorCell.y, grid, anchorOut);
-        },
-      },
-      {
-        name: 'goal-lantern',
-        object: lantern?.root ?? new THREE.Object3D(),
-        expectWorldPos: (state) => {
-          cellFor(state, goalCell, goalGoal);
-          return cellToWorld(goalGoal.x, goalGoal.y, grid, goalOut);
-        },
-      },
-    ];
-
-    const hallway = world?.hallways[0];
-    const gateRoot = world?.gateRoots[0];
-    if (hallway && gateRoot) {
-      probes.push({
-        name: 'moon-gate',
-        object: gateRoot,
-        expectWorldPos: () => cellToWorld(hallway.x, hallway.y, grid, gateOut),
-      });
-    }
-    if (world) {
-      probes.push({
-        name: 'sundial',
-        object: world.sundialRoot,
-        expectWorldPos: () =>
-          cellToWorld((grid.w / 2) | 0, (grid.h / 2) | 0, grid, sundialOut),
-      });
-    }
-    return probes;
   }
 
   dispose(): void {
