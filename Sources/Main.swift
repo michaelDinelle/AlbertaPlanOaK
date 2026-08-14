@@ -25,7 +25,7 @@ struct KernelScalars {
 }
 
 struct FleetEnvCfg {
-  var laneCount, episodeLen, policyMode, recordCapacity: UInt32
+  var laneCount, episodeLen, recordCapacity: UInt32
   var invObsFloor: Float
 }
 struct LaneSnapshot {
@@ -44,7 +44,7 @@ struct AblationSpec {
     "feature-construction", "gvf-prediction", "rr-subtasks", "option-policies",
     "option-models", "option-keyboard",
     "keyboard-to-policy", "search-control", "search-to-generate-test", "generate-and-test",
-    "derived-core", "joint-geometry",
+    "joint-geometry",
   ]
   static let functionConstantIndex = [
     "option-keyboard": 6,
@@ -52,7 +52,6 @@ struct AblationSpec {
     "search-control": 9,
     "search-to-generate-test": 10,
     "generate-and-test": 11,
-    "derived-core": 26,
     "joint-geometry": 27,
   ]
   let names: [String]
@@ -1168,7 +1167,6 @@ final class MetricsTapeWriter {
     let timing = e["OAK_FLEET_TIMING"] == "1"
     let ecfg = FleetEnvCfg(
       laneCount: UInt32(B), episodeLen: UInt32(episodeLen),
-      policyMode: 0,
       recordCapacity: UInt32(recordCapacity), invObsFloor: 1 / Float(64))
     let laneTG = mtlSize(
       min(64, initPipe.maxTotalThreadsPerThreadgroup, snapPipe.maxTotalThreadsPerThreadgroup))

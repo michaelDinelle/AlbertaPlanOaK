@@ -1193,7 +1193,6 @@ constant uint HC_PHILOX_M1 = 0xCD9E8D57u;
 constant uint HC_PHILOX_W0 = 0x9E3779B9u;
 constant uint HC_PHILOX_W1 = 0xBB67AE85u;
 constant uint HC_RNG_STREAM_RESET = 0u;
-constant uint HC_RNG_STREAM_CTRL = 1u;
 
 #pragma METAL fp math_mode(safe)
 inline uint4 hc_philox4x32(uint2 key, uint4 ctr) {
@@ -1234,14 +1233,6 @@ inline void hc_rng_reset_noise(uint laneSeed, uint resetIdx,
         z[2*p + 1] = rad * sin(ang);
     }
     for (int i = 0; i < 9; i++) qvelNoise[i] = HC_RESET_NOISE * z[i];
-}
-
-inline void hc_rng_ctrl(uint laneSeed, uint stepIdx, thread float *ctrl) {
-    uint2 key = uint2(laneSeed, HC_RNG_STREAM_CTRL);
-    uint4 r0 = hc_philox4x32(key, uint4(stepIdx, 0u, 0u, 0u));
-    uint4 r1 = hc_philox4x32(key, uint4(stepIdx, 1u, 0u, 0u));
-    uint raw[6] = { r0.x, r0.y, r0.z, r0.w, r1.x, r1.y };
-    for (int u = 0; u < 6; u++) ctrl[u] = hc_uniform(raw[u], -1.0f, 1.0f);
 }
 
 inline void hc_env_reset(thread HCState &s, uint laneSeed,

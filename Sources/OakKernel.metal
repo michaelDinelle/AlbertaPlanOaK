@@ -292,13 +292,6 @@ inline uint oak_env_kind(uint stored) {
     return is_function_constant_defined(OAK_SPEC_ENV_KIND) ? OAK_SPEC_ENV_KIND : stored;
 }
 
-inline uint oak_log2floor(uint o) {
-    return o >= 32768u ? 15u : o >= 16384u ? 14u : o >= 8192u ? 13u : o >= 4096u ? 12u
-         : o >= 2048u ? 11u : o >= 1024u ? 10u : o >= 512u ? 9u : o >= 256u ? 8u
-         : o >= 128u ? 7u : o >= 64u ? 6u : o >= 32u ? 5u : o >= 16u ? 4u
-         : o >= 8u ? 3u : o >= 4u ? 2u : o >= 2u ? 1u : 0u;
-}
-
 inline KernelConfig oak_derive_cfg(uint obsDim, uint actionParams) {
     KernelConfig c;
     c.obsDim = obsDim;
@@ -428,10 +421,6 @@ inline bool oak_in_prev_active(device const uint *actP, uint i) {
     return i < OAK_CORE || actP[OAK_CORE + (i - OAK_CORE) / OAK_GATE_BANK] == i;
 }
 inline float decode_duration(float raw) { return isfinite(raw) ? max(1.0f, raw) : 1.0f; }
-inline bool usable_priority(float p) { return isfinite(p) && p >= 0.0f; }
-inline bool usable_duration(Ctx ctx, float d) {
-    return isfinite(d) && d > 0.0f;
-}
 
 inline float standardized_obs(Ctx ctx, uint o) {
     float mean = ctx.observationMean[o];
@@ -1713,7 +1702,6 @@ constant uint OAK_DET_ENV_OBS      = 3u;
 struct OakFleetEnvCfg {
     uint laneCount;
     uint episodeLen;
-    uint policyMode;
     uint recordCapacity;
     float invObsFloor;
 };
@@ -1748,21 +1736,6 @@ struct OakLaneSnapshot {
 static_assert(sizeof(OakLaneSnapshot) == 60, "OakLaneSnapshot layout drifted from the Swift mirror");
 
 inline float oak_safe(float x) { return isfinite(x) ? x : 0.0f; }
-
-inline void oak_rng_normal6(uint laneSeed, uint stepIdx, thread float *z) {
-    uint2 key = uint2(laneSeed, HC_RNG_STREAM_ACT);
-    uint4 r0 = hc_philox4x32(key, uint4(stepIdx, 0u, 0u, 0u));
-    uint4 r1 = hc_philox4x32(key, uint4(stepIdx, 1u, 0u, 0u));
-    uint raw[6] = { r0.x, r0.y, r0.z, r0.w, r1.x, r1.y };
-    for (int p = 0; p < 3; p++) {
-        float u1 = hc_u01open(raw[2*p]);
-        float u2 = hc_u01(raw[2*p + 1]);
-        float rad = sqrt(-2.0f * log(u1));
-        float ang = 2.0f * M_PI_F * u2;
-        z[2*p] = rad * cos(ang);
-        z[2*p + 1] = rad * sin(ang);
-    }
-}
 
 inline void oak_kahan_add(device float *sum, device float *comp, float x) {
     float y = x - *comp;
@@ -1871,7 +1844,7 @@ kernel void oak_fleet_init(device float *params [[buffer(0)]],
     lane->rewardSum = 0.0f; lane->rewardC = 0.0f; lane->rho = 0.0f;
     lane->deathStep = OAK_DEATH_NONE; lane->deathDetector = 0u;
     lane->deathRewardSum = 0.0f; lane->deathRho = 0.0f;
-    if (ecfg.policyMode == 0u) {
+    {
         Ctx ctx = make_ctx(params, stateArena, uintArena, scalars, cfg, gidLocal, gid,
                            lane->naturalO, lane->naturalA);
         for (uint o = 0u; o < ctx.O; ++o) {
@@ -1957,82 +1930,6 @@ kernel void oak_fleet_init(device float *params [[buffer(0)]],
         ctx.planScr[OAK_PLANSCR_INVSQRTR] = rsqrt(float(max(ctx.R, 1u)));
         for (uint k = 0u; k < ctx.K; ++k) ctx.parked[k] = 0u;
     }
-}
-
-static inline void oak_stage_sample_act(device float *params,
-                                        device float *stateArena,
-                                        device uint *uintArena,
-                                        device KernelScalars *scalars,
-                                        constant KernelConfig &cfg,
-                                        device OakFleetLane *lanes,
-                                        device const uint *laneSeeds,
-                                        constant OakFleetEnvCfg &ecfg,
-                                        uint gid, uint gidLocal) {
-    device OakFleetLane *lane = &lanes[gid];
-    uint stepIdx = lane->steps;
-    float desc[12];
-    float ctrl[6];
-    if (ecfg.policyMode != 0u && OAK_ENV_SPECS[oak_env_kind(lane->envKind)].actionKind == 1u) {
-
-        uint N = OAK_ENV_SPECS[oak_env_kind(lane->envKind)].actionCount;
-        uint4 rw = hc_philox4x32(uint2(laneSeeds[gid], HC_RNG_STREAM_ACT),
-                                 uint4(stepIdx, 0u, 0u, 0u));
-        uint a = uint(hc_u01(rw.x) * float(N));
-        if (a >= N) a = N - 1u;
-        for (int u = 0; u < 6; u++) ctrl[u] = 0.0f;
-        ctrl[0] = float(a);
-        for (int i = 0; i < 12; i++) desc[i] = 0.0f;
-        if (ecfg.policyMode == 2u) desc[a] = 1.0f;
-    } else if (ecfg.policyMode == 1u) {
-        for (int u = 0; u < 6; u++) ctrl[u] = 0.0f;
-        for (int i = 0; i < 12; i++) desc[i] = 0.0f;
-    } else if (ecfg.policyMode == 2u) {
-        hc_rng_ctrl(laneSeeds[gid], stepIdx, ctrl);
-        for (int d = 0; d < 6; d++) { desc[d] = ctrl[d]; desc[6 + d] = 0.0f; }
-    } else {
-        Ctx ctx = make_ctx(params, stateArena, uintArena, scalars, cfg, gidLocal, gid,
-                           lane->naturalO, lane->naturalA);
-        uint A = ctx.D / 2u;
-        float sd = ctx.sampleSigma;
-        for (uint i = 0u; i < ctx.D; ++i) desc[i] = oak_safe(ctx.policyMean[i]);
-        float z[6];
-        oak_rng_normal6(laneSeeds[gid], stepIdx, z);
-        for (uint o = 0u; o < ctx.K; ++o) ctx.impStage[o] = 0.0f;
-        for (uint d = 0u; d < A; ++d) {
-            float mu = desc[d];
-            float sample = oak_safe(mu + sd * z[d]);
-            float a = max(-1.0f, min(1.0f, sample));
-            ctrl[d] = a;
-            ctx.actionSignal[d] = a;
-            ctx.actionSignal[A + d] = 0.0f;
-            float diffB = sample - mu;
-            for (uint o = 0u; o < ctx.K; ++o) {
-                uint off = o * ctx.D;
-                float om = oak_safe(ctx.optionPolicyMean[off + d]);
-                ctx.creditStage[off + d] = (sample - om) * (1.0f - om * om);
-                ctx.creditStage[off + A + d] = 0.0f;
-                float diffO = sample - om;
-                ctx.impStage[o] += diffB * diffB - diffO * diffO;
-            }
-        }
-
-        float inv2s2 = ctx.sampleInv2S2;
-        for (uint o = 0u; o < ctx.K; ++o) {
-            float ratio = exp(ctx.impStage[o] * inv2s2);
-            ctx.impStage[o] = isfinite(ratio) ? min(ratio, float(ctx.K)) : 0.0f;
-        }
-    }
-    float d2 = 0.0f;
-    for (int i = 0; i < 12; i++) {
-        float v = desc[i] - lane->lastDesc[i];
-        d2 += v * v;
-        lane->lastDesc[i] = desc[i];
-    }
-    oak_kahan_add(&lane->deltaSum, &lane->deltaC, d2 / 12.0f);
-    lane->steps = stepIdx + 1u;
-    float adm = lane->deltaSum / float(lane->steps);
-    if (isfinite(adm) && adm > lane->deltaPeak) lane->deltaPeak = adm;
-    for (int u = 0; u < 6; u++) lane->ctrlPending[u] = ctrl[u];
 }
 
 static inline void oak_stage_sample_act_discrete(Ctx ctx,
@@ -2394,7 +2291,7 @@ static inline void oak_stage_fleet_env(device float *params,
         lane->deathRewardSum = lane->rewardSum;
         lane->deathRho = lane->rho;
     }
-    if (ecfg.policyMode == 0u) {
+    {
         Ctx ctx = make_ctx(params, stateArena, uintArena, scalars, cfg, gidLocal, gid,
                            lane->naturalO, lane->naturalA);
         if (lane->deathStep == OAK_DEATH_NONE) {
@@ -2470,39 +2367,34 @@ kernel void oak_megastep(device float *params [[buffer(0)]],
     threadgroup float *lDirty = tgCont + 5u * OAK_MEGA_G * tgK + laneSg;
     for (uint it = 0u; it < dispatchSpan.x; ++it) {
 
-        if (ecfg.policyMode == 0u) {
-            if (wideActive && (OAK_MEGA_STAGES & 1u) != 0u) {
-                Ctx ctx = make_ctx(params, stateArena, uintArena, scalars, cfg,
-                                   wideLane - laneShift, wideLane,
-                                   lanes[wideLane].naturalO, lanes[wideLane].naturalA);
-                oak_stage_encode(ctx, slane, 32u, lCont, lStash);
-            }
-            oak_lane_fence();
-            if (wideActive && (OAK_MEGA_STAGES & 8u) != 0u) {
-                Ctx ctx = make_ctx(params, stateArena, uintArena, scalars, cfg,
-                                   wideLane - laneShift, wideLane,
-                                   lanes[wideLane].naturalO, lanes[wideLane].naturalA);
-                oak_replace_commit(ctx, slane, lStash, lDirty);
-            }
-            oak_lane_fence();
-            if (wideActive && (OAK_MEGA_STAGES & 16u) != 0u) {
-                Ctx ctx = make_ctx(params, stateArena, uintArena, scalars, cfg,
-                                   wideLane - laneShift, wideLane,
-                                   lanes[wideLane].naturalO, lanes[wideLane].naturalA);
-                emit_all_options(ctx, slane);
-                simdgroup_barrier(mem_flags::mem_device);
-                emit_blend_grid(ctx, slane);
-            }
-            oak_lane_fence();
-            if (wideActive && (OAK_MEGA_STAGES & 32u) != 0u) {
-                Ctx ctx = make_ctx(params, stateArena, uintArena, scalars, cfg,
-                                   wideLane - laneShift, wideLane,
-                                   lanes[wideLane].naturalO, lanes[wideLane].naturalA);
-                oak_stage_sample_act_wide(ctx, lanes, laneSeeds, wideLane, slane);
-            }
-        } else if (packedActive && (OAK_MEGA_STAGES & 32u) != 0u) {
-            oak_stage_sample_act(params, stateArena, uintArena, scalars, cfg,
-                                 lanes, laneSeeds, ecfg, packedLane, packedLane - laneShift);
+        if (wideActive && (OAK_MEGA_STAGES & 1u) != 0u) {
+            Ctx ctx = make_ctx(params, stateArena, uintArena, scalars, cfg,
+                               wideLane - laneShift, wideLane,
+                               lanes[wideLane].naturalO, lanes[wideLane].naturalA);
+            oak_stage_encode(ctx, slane, 32u, lCont, lStash);
+        }
+        oak_lane_fence();
+        if (wideActive && (OAK_MEGA_STAGES & 8u) != 0u) {
+            Ctx ctx = make_ctx(params, stateArena, uintArena, scalars, cfg,
+                               wideLane - laneShift, wideLane,
+                               lanes[wideLane].naturalO, lanes[wideLane].naturalA);
+            oak_replace_commit(ctx, slane, lStash, lDirty);
+        }
+        oak_lane_fence();
+        if (wideActive && (OAK_MEGA_STAGES & 16u) != 0u) {
+            Ctx ctx = make_ctx(params, stateArena, uintArena, scalars, cfg,
+                               wideLane - laneShift, wideLane,
+                               lanes[wideLane].naturalO, lanes[wideLane].naturalA);
+            emit_all_options(ctx, slane);
+            simdgroup_barrier(mem_flags::mem_device);
+            emit_blend_grid(ctx, slane);
+        }
+        oak_lane_fence();
+        if (wideActive && (OAK_MEGA_STAGES & 32u) != 0u) {
+            Ctx ctx = make_ctx(params, stateArena, uintArena, scalars, cfg,
+                               wideLane - laneShift, wideLane,
+                               lanes[wideLane].naturalO, lanes[wideLane].naturalA);
+            oak_stage_sample_act_wide(ctx, lanes, laneSeeds, wideLane, slane);
         }
         threadgroup_barrier(mem_flags::mem_device_and_threadgroup);
 
@@ -2512,7 +2404,7 @@ kernel void oak_megastep(device float *params [[buffer(0)]],
                                     lanes, laneSeeds, ecfg, recordSlot, recordBuf, packedLane,
                                     packedLane - laneShift);
         }
-        if (ecfg.policyMode == 0u && sgrp > 0u && lanesThisTg > 0u) {
+        if (sgrp > 0u && lanesThisTg > 0u) {
             uint idx = sgrp - 1u;
             if (lanesThisTg > OAK_MEGA_G - 1u) {
 
@@ -2563,34 +2455,26 @@ kernel void oak_fleet_snapshot(device float *params [[buffer(0)]],
     if (sgid >= ecfg.laneCount) return;
     device OakFleetLane *lane = &lanes[sgid];
     device OakLaneSnapshot *o = &snap[snapCtl.x + sgid];
-    if (ecfg.policyMode == 0u) {
-        if (slane == 0u) o->scalars = scalars[sgid];
-        if (fullScan != 0u) {
-            device const float *lp = params + sgidL * cfg.paramStride;
+    if (slane == 0u) o->scalars = scalars[sgid];
+    if (fullScan != 0u) {
+        device const float *lp = params + sgidL * cfg.paramStride;
 
-            uint firstNF = 0xffffffffu;
-            for (uint i = slane; i < cfg.paramStride; i += 32u) {
-                if (!isfinite(lp[i])) { firstNF = i; break; }
-            }
-            firstNF = simd_min(firstNF);
-            uint lim = min(firstNF, cfg.paramStride);
-            float mx = 0.0f;
-            for (uint i = slane; i < lim; i += 32u) mx = max(mx, fabs(lp[i]));
-            mx = simd_max(mx);
-            if (slane == 0u) {
-                o->paramAbsMax = mx;
-                o->paramNonFinite = (firstNF == 0xffffffffu) ? 0u : 1u;
-            }
-        } else if (slane == 0u) {
-            o->paramAbsMax = -1.0f;
-            o->paramNonFinite = 0u;
+        uint firstNF = 0xffffffffu;
+        for (uint i = slane; i < cfg.paramStride; i += 32u) {
+            if (!isfinite(lp[i])) { firstNF = i; break; }
         }
-    } else {
+        firstNF = simd_min(firstNF);
+        uint lim = min(firstNF, cfg.paramStride);
+        float mx = 0.0f;
+        for (uint i = slane; i < lim; i += 32u) mx = max(mx, fabs(lp[i]));
+        mx = simd_max(mx);
         if (slane == 0u) {
-            o->scalars = KernelScalars{0u, 0u, 0.0f};
-            o->paramAbsMax = 0.0f;
-            o->paramNonFinite = 0u;
+            o->paramAbsMax = mx;
+            o->paramNonFinite = (firstNF == 0xffffffffu) ? 0u : 1u;
         }
+    } else if (slane == 0u) {
+        o->paramAbsMax = -1.0f;
+        o->paramNonFinite = 0u;
     }
     if (slane != 0u) return;
     o->steps = lane->steps;
