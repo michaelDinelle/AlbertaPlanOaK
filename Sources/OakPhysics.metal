@@ -36,7 +36,7 @@ constant float HC_MAXIMP = 0.9999f;
 constant float HC_CHOL_EPS = 1e-12f;
 constant int HC_NEFC_MAX = 70;
 
-struct HCState {
+struct HalfCheetahState {
     float qpos[9];
     float qvel[9];
     float ctrl[6];
@@ -318,7 +318,7 @@ inline void hc_mulSymVecSparse(thread const float *M, thread const float *x, thr
     for (int i = 0; i < 9; i++) res[i] = hc_accGet(acc[i]);
 }
 
-inline void hc_kinematics(thread const HCState &s, thread HCWork &w) {
+inline void hc_kinematics(thread const HalfCheetahState &s, thread HCWork &w) {
     float xpos[24];
     float xquat[32];
     float xmat[72];
@@ -524,7 +524,7 @@ inline void hc_dfRotRow3(thread const HCDf *q, thread HCDf *row) {
     row[2] = hc_dfAdd(hc_dfSub(hc_dfSub(hc_dfMul(q[0], q[0]), hc_dfMul(q[1], q[1])),
                                hc_dfMul(q[2], q[2])), hc_dfMul(q[3], q[3]));
 }
-inline void hc_capsuleDistsDf(thread const HCState &s, thread float *distOut) {
+inline void hc_capsuleDistsDf(thread const HalfCheetahState &s, thread float *distOut) {
     HCDf q[8][4];
     HCDf z[8];
     q[0][0] = hc_dfMake(1.0f); q[0][1] = hc_dfMake(0.0f);
@@ -599,7 +599,7 @@ inline void hc_capsuleDistsDf(thread const HCState &s, thread float *distOut) {
     }
 }
 
-inline void hc_collision(thread const HCState &s, thread HCWork &w,
+inline void hc_collision(thread const HalfCheetahState &s, thread HCWork &w,
                          thread HCContacts &con) {
     float distDf[16];
     hc_capsuleDistsDf(s, distDf);
@@ -653,7 +653,7 @@ inline float hc_getimpedance(float pos, float d0, float d1, float width, float m
     return d0 + y*(d1 - d0);
 }
 
-inline void hc_makeConstraint(thread const HCState &s, thread HCWork &w,
+inline void hc_makeConstraint(thread const HalfCheetahState &s, thread HCWork &w,
                               thread const HCContacts &con, thread HCRefCoef &ref) {
     int nefc = 0;
     for (int j = 0; j < 9; j++) {
@@ -747,7 +747,7 @@ inline void hc_makeConstraint(thread const HCState &s, thread HCWork &w,
     w.nefc = nefc;
 }
 
-inline void hc_comVel(thread const HCState &s, thread HCWork &w) {
+inline void hc_comVel(thread const HalfCheetahState &s, thread HCWork &w) {
     for (int k = 0; k < 6; k++) w.cvel[k] = 0.0f;
     for (int i = 1; i < 8; i++) {
         int p = HC_BODY_PARENT[i];
@@ -764,7 +764,7 @@ inline void hc_comVel(thread const HCState &s, thread HCWork &w) {
     }
 }
 
-inline void hc_rne(thread const HCState &s, thread HCWork &w) {
+inline void hc_rne(thread const HalfCheetahState &s, thread HCWork &w) {
     float cacc[48], cfrc[48];
     cacc[0] = 0.0f; cacc[1] = 0.0f; cacc[2] = 0.0f;
     cacc[3] = 0.0f; cacc[4] = 0.0f; cacc[5] = -HC_GRAVITY_Z;
@@ -1061,7 +1061,7 @@ inline void hc_newton(thread HCWork &w) {
     }
 }
 
-inline void hc_fwdConstraint(thread const HCState &s, thread HCWork &w) {
+inline void hc_fwdConstraint(thread const HalfCheetahState &s, thread HCWork &w) {
     for (int v = 0; v < 9; v++) w.qfrc_constraint[v] = 0.0f;
     if (w.nefc == 0) {
         for (int v = 0; v < 9; v++) w.qacc[v] = w.qacc_smooth[v];
@@ -1096,7 +1096,7 @@ inline void hc_fwdConstraint(thread const HCState &s, thread HCWork &w) {
     hc_newton(w);
 }
 
-inline void hc_forward(thread const HCState &s, thread HCWork &w) {
+inline void hc_forward(thread const HalfCheetahState &s, thread HCWork &w) {
     hc_kinematics(s, w);
     HCContacts con;
     HCRefCoef ref;
@@ -1152,7 +1152,7 @@ inline void hc_forward(thread const HCState &s, thread HCWork &w) {
     hc_fwdConstraint(s, w);
 }
 
-inline void hc_resetData(thread HCState &s) {
+inline void halfCheetah_clear(thread HalfCheetahState &s) {
     for (int v = 0; v < 9; v++) {
         s.qpos[v] = HC_QPOS0[v];
         s.qvel[v] = 0.0f;
@@ -1166,13 +1166,13 @@ inline bool hc_isBadVec9(thread const float *x) {
     return bad;
 }
 
-inline void hc_mj_step(thread HCState &s) {
-    if (hc_isBadVec9(s.qpos)) hc_resetData(s);
-    if (hc_isBadVec9(s.qvel)) hc_resetData(s);
+inline void halfCheetah_step(thread HalfCheetahState &s) {
+    if (hc_isBadVec9(s.qpos)) halfCheetah_clear(s);
+    if (hc_isBadVec9(s.qvel)) halfCheetah_clear(s);
     HCWork w;
     hc_forward(s, w);
     if (hc_isBadVec9(w.qacc)) {
-        hc_resetData(s);
+        halfCheetah_clear(s);
         hc_forward(s, w);
     }
     float qH[36], qHDiagInv[9];
@@ -1235,9 +1235,9 @@ inline void hc_rng_reset_noise(uint laneSeed, uint resetIdx,
     for (int i = 0; i < 9; i++) qvelNoise[i] = HC_RESET_NOISE * z[i];
 }
 
-inline void hc_env_reset(thread HCState &s, uint laneSeed,
+inline void halfCheetah_reset(thread HalfCheetahState &s, uint laneSeed,
                          thread uint &elapsed, thread uint &resets) {
-    hc_resetData(s);
+    halfCheetah_clear(s);
     float qn[9], vn[9];
     hc_rng_reset_noise(laneSeed, resets, qn, vn);
     for (int v = 0; v < 9; v++) {

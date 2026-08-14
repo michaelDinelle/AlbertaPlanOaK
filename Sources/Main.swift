@@ -20,7 +20,7 @@ struct KernelConfig {
 }
 struct KernelScalars {
   var stepCount: UInt32 = 0, stateSlot: UInt32 = 0
-  var rho: Float = 0
+  var averageReward: Float = 0
 }
 
 struct FleetEnvCfg {
@@ -148,6 +148,7 @@ func requireFreshMetallib() throws -> URL {
     "Sources/HalfCheetahModel.metal",
     "Sources/Gridworld.metal",
     "Sources/ClassicControl.metal",
+    "Sources/Env.metal",
   ].map(root)
   let fm = FileManager.default
   let libTime = try fm.attributesOfItem(atPath: lib.path)[.modificationDate] as? Date
@@ -512,52 +513,47 @@ struct RecordCodec {
   let ctrlBox: Int
   let fields: [RecordField]
   var hasDx: Bool { fields.contains { $0.enc == .dx32 } }
+  static func grid(_ idxs: [Int]) -> RecordCodec {
+    RecordCodec(category: "grid", ctrlBox: 0, fields: idxs.map { RecordField($0, .u8) })
+  }
+  static func classic(_ ctrlBox: Int, _ fields: [RecordField]) -> RecordCodec {
+    RecordCodec(category: "classic", ctrlBox: ctrlBox, fields: fields)
+  }
+  static let byKind: [RecordCodec] = {
+    var cheetah = [RecordField(0, .dx32, 0.01), RecordField(1, .i16, 1e-4)]
+    for i in 2...8 { cheetah.append(RecordField(i, .i16, 1e-4, true)) }
+    return [
+      RecordCodec(category: "cheetah", ctrlBox: 6, fields: cheetah),
+      grid([0, 1, 2, 3]),
+      grid([0, 1]),
+      grid([0, 1, 2, 3, 4, 5, 6, 7]),
+      classic(0, [
+        RecordField(0, .i16, 1e-4, true), RecordField(1, .i16, 1e-4, true),
+        RecordField(2, .i16, 1e-3), RecordField(3, .i16, 1e-3),
+      ]),
+      classic(0, [RecordField(0, .i16, 1e-4), RecordField(1, .i16, 1e-5)]),
+      classic(0, [
+        RecordField(0, .i16, 1e-4), RecordField(1, .i16, 1e-3),
+        RecordField(2, .i16, 1e-4, true), RecordField(3, .i16, 1e-3),
+      ]),
+      classic(1, [
+        RecordField(0, .i16, 1e-4, true), RecordField(1, .i16, 1e-3), RecordField(2, .i16, 1e-3),
+      ]),
+      grid([0]),
+      grid([0, 1]),
+      grid([0, 1, 2, 3, 4, 5, 6, 7]),
+      grid([0, 2]),
+      grid([0, 1, 2, 3]),
+      grid([0, 1, 2, 3, 4]),
+      grid([0, 1, 2, 3]),
+      grid([0, 2]),
+    ]
+  }()
   static func table(_ envKind: UInt32) throws -> RecordCodec {
-    func grid(_ idxs: [Int]) -> RecordCodec {
-      RecordCodec(category: "grid", ctrlBox: 0, fields: idxs.map { RecordField($0, .u8) })
+    guard Int(envKind) < byKind.count else {
+      throw err("No record codec for envKind \(envKind).")
     }
-    switch envKind {
-    case 0:
-      var f = [RecordField(0, .dx32, 0.01), RecordField(1, .i16, 1e-4)]
-      for i in 2...8 { f.append(RecordField(i, .i16, 1e-4, true)) }
-      return RecordCodec(category: "cheetah", ctrlBox: 6, fields: f)
-    case 1: return grid([0, 1, 2, 3])
-    case 2: return grid([0, 1])
-    case 3: return grid([0, 1, 2, 3, 4, 5, 6, 7])
-    case 4:
-      return RecordCodec(
-        category: "classic", ctrlBox: 0,
-        fields: [
-          RecordField(0, .i16, 1e-4, true), RecordField(1, .i16, 1e-4, true),
-          RecordField(2, .i16, 1e-3), RecordField(3, .i16, 1e-3),
-        ])
-    case 5:
-      return RecordCodec(
-        category: "classic", ctrlBox: 0,
-        fields: [RecordField(0, .i16, 1e-4), RecordField(1, .i16, 1e-5)])
-    case 6:
-      return RecordCodec(
-        category: "classic", ctrlBox: 0,
-        fields: [
-          RecordField(0, .i16, 1e-4), RecordField(1, .i16, 1e-3),
-          RecordField(2, .i16, 1e-4, true), RecordField(3, .i16, 1e-3),
-        ])
-    case 7:
-      return RecordCodec(
-        category: "classic", ctrlBox: 1,
-        fields: [
-          RecordField(0, .i16, 1e-4, true), RecordField(1, .i16, 1e-3), RecordField(2, .i16, 1e-3),
-        ])
-    case 8: return grid([0])
-    case 9: return grid([0, 1])
-    case 10: return grid([0, 1, 2, 3, 4, 5, 6, 7])
-    case 11: return grid([0, 2])
-    case 12: return grid([0, 1, 2, 3])
-    case 13: return grid([0, 1, 2, 3, 4])
-    case 14: return grid([0, 1, 2, 3])
-    case 15: return grid([0, 2])
-    default: throw err("No record codec for envKind \(envKind).")
-    }
+    return byKind[Int(envKind)]
   }
 }
 
@@ -1111,7 +1107,7 @@ final class TapeWriter {
           detector = 4
         } else if Double(snap.paramAbsMax) > 1e16 {
           detector = 5
-        } else if !snap.scalars.rho.isFinite {
+        } else if !snap.scalars.averageReward.isFinite {
           detector = 6
         }
         if let detector {
