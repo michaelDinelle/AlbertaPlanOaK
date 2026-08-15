@@ -2,7 +2,6 @@ import * as THREE from 'three';
 import type { EnvId } from '@shared/envs';
 import { makePlaybackClock, sampleFrame, type PlaybackSource, type PlaybackClock } from '@kit/playback';
 import { celebrationPulse } from '@kit/celebrate';
-import type { GhostLayer } from '@kit/ghosts';
 import { configureRendererShadows } from '@kit/lighting';
 import { buildComposer, type ComposerHandle } from '@kit/post';
 import { TOKENS } from '@kit/tokens';
@@ -16,10 +15,9 @@ import type {
   SceneSize,
 } from '@kit/types';
 import type { EnvGeometry, SimEvent } from '@sim/types';
-import type { EnvCatalog } from '@sim/catalog';
 import { sceneRegistry } from '../scenes/registry';
-import { specFactory } from '../specs/registry';
 import { advanceCursor, collectEvents, makeFrameCursor, makeTierGovernor, type TierGovernor } from './player';
+import { CTRL_LEN } from '@sim/record';
 
 export interface HostFrameInfo {
   position: number;
@@ -37,19 +35,12 @@ export interface HostFrameInfo {
   scrubbed: boolean;
 }
 
-export interface SceneHostGhosts {
-  layer: GhostLayer;
-  rebuild?(tier: QualityTier): GhostLayer;
-}
-
 export interface SceneHostOptions {
   envId: EnvId;
-  catalog?: EnvCatalog;
   source: PlaybackSource;
   tier?: QualityTier;
   debug?: boolean;
   paused?: boolean;
-  ghosts?: SceneHostGhosts;
   at?: number;
   speed?: number;
   onFrame?(info: HostFrameInfo): void;
@@ -64,7 +55,6 @@ export interface SceneHostHandle {
   readonly tier: QualityTier;
   readonly debug: boolean;
   readonly canvas: HTMLCanvasElement;
-  readonly ghosts: GhostLayer | null;
   readonly envId: EnvId;
   play(): void;
   pause(): void;
@@ -72,8 +62,7 @@ export interface SceneHostHandle {
   setSpeed(speed: number): void;
   seek(position: number): void;
   setSource(source: PlaybackSource, opts?: { at?: number }): Promise<void>;
-  setEnv(envId: EnvId, source: PlaybackSource, ghosts: SceneHostGhosts | null, opts?: { at?: number }): Promise<void>;
-  setGhosts(ghosts: SceneHostGhosts | null): void;
+  setEnv(envId: EnvId, source: PlaybackSource, opts?: { at?: number }): Promise<void>;
   setTier(tier: QualityTier): Promise<void>;
   setDebug(on: boolean): void;
   destroy(): void;
@@ -89,7 +78,7 @@ export class SceneHostError extends Error {
 function makeFrameState(): FrameState {
   return {
     pose: new Float32Array(9),
-    ctrl: new Float32Array(6),
+    ctrl: new Float32Array(CTRL_LEN),
     done: false,
     step: 0,
     simTime: 0,
@@ -168,10 +157,6 @@ export async function mountSceneHost(
 
   const governor: TierGovernor = makeTierGovernor({ tier: options.tier ?? 'hero' });
   let tier: QualityTier = options.tier ?? 'hero';
-  let ghostConfig = options.ghosts ?? null;
-  let ghostLayer: GhostLayer | null = ghostConfig?.layer ?? null;
-  let ghostTier: QualityTier = tier;
-  let ghostOwned = false;
   let debugOn = options.debug === true;
   let scene: SceneModule | null = null;
   let post: ComposerHandle | null = null;
@@ -235,7 +220,6 @@ export async function mountSceneHost(
   const buildScene = async (): Promise<void> => {
     const generation = ++buildGeneration;
     building = true;
-    ghostLayer?.group.removeFromParent();
     scene?.dispose();
     post?.dispose();
     scene = null;
@@ -245,8 +229,7 @@ export async function mountSceneHost(
     const size = sizeOf();
     const currentLoader = loader;
     if (!currentLoader) throw new SceneHostError(`no scene registered for ${envId}`);
-    const factory = (options.catalog ? await specFactory(envId, options.catalog) : null)
-      ?? (await currentLoader()).default;
+    const factory = (await currentLoader()).default;
     if (destroyed || generation !== buildGeneration) return;
     const module = factory();
     const context: SceneContext = {
@@ -266,18 +249,6 @@ export async function mountSceneHost(
     }
     scene = module;
     manifest = module.manifest;
-    if (ghostConfig?.rebuild && ghostTier !== tier) {
-      const next = ghostConfig.rebuild(tier);
-      if (destroyed || generation !== buildGeneration) {
-        next.dispose();
-      } else {
-        if (ghostOwned) ghostLayer?.dispose();
-        ghostLayer = next;
-        ghostOwned = true;
-        ghostTier = tier;
-      }
-    }
-    if (ghostLayer) module.scene.add(ghostLayer.group);
 
     post = buildComposer(renderer, module.scene, module.camera, module.manifest.postConfig, tier, size);
     module.setDebug(debugOn);
@@ -319,7 +290,6 @@ export async function mountSceneHost(
     frameUpdate.dtReal = dtReal;
     frameUpdate.scrubbed = !step.sequential;
     scene.update(frameUpdate);
-    ghostLayer?.update(dtReal, clock.time());
 
     post.setBloomPulse(celebrationPulse(scene.scene).bloom);
     post.render(dtReal);
@@ -359,16 +329,6 @@ export async function mountSceneHost(
   raf = requestAnimationFrame(tick);
   if (manifest !== null) options.onReady?.(manifest);
 
-  const adoptGhosts = (ghosts: SceneHostGhosts | null): void => {
-    ghostLayer?.group.removeFromParent();
-    if (ghostOwned) ghostLayer?.dispose();
-    ghostConfig = ghosts;
-    ghostLayer = ghosts?.layer ?? null;
-    ghostOwned = false;
-    ghostTier = tier;
-    if (ghostLayer && scene) scene.scene.add(ghostLayer.group);
-  };
-
   const swapSource = (next: PlaybackSource, at: number | undefined): void => {
     const speed = clock.speed;
     const playing = clock.playing;
@@ -392,9 +352,6 @@ export async function mountSceneHost(
     },
     get debug() {
       return debugOn;
-    },
-    get ghosts() {
-      return ghostLayer;
     },
     get envId() {
       return envId;
@@ -422,19 +379,14 @@ export async function mountSceneHost(
       swapSource(next, opts.at ?? clock.position());
       if (rebuild) await buildScene();
     },
-    async setEnv(nextEnv, nextSource, ghosts, opts = {}) {
+    async setEnv(nextEnv, nextSource, opts = {}) {
       const nextLoader = sceneRegistry[nextEnv];
       if (!nextLoader) throw new SceneHostError(`no scene registered for ${nextEnv}`);
       envId = nextEnv;
       loader = nextLoader;
-      adoptGhosts(null);
       swapSource(nextSource, opts.at ?? 0);
       await buildScene();
-      adoptGhosts(ghosts);
       if (!destroyed && manifest !== null) options.onReady?.(manifest);
-    },
-    setGhosts(ghosts) {
-      adoptGhosts(ghosts);
     },
     async setTier(next) {
       if (next === tier) return;
@@ -453,8 +405,6 @@ export async function mountSceneHost(
       cancelAnimationFrame(raf);
       observer?.disconnect();
       window.removeEventListener('resize', onWindowResize);
-      ghostLayer?.group.removeFromParent();
-      if (ghostOwned) ghostLayer?.dispose();
       scene?.dispose();
       post?.dispose();
       renderer.dispose();

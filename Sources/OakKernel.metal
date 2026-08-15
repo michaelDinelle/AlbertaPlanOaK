@@ -1711,31 +1711,25 @@ struct OakFleetEnvCfg {
 struct OakFleetLane {
     HalfCheetahState halfCheetah;
     uint elapsed, resets;
-    uint steps, doneCount;
+    uint steps;
     float pendingAction[6];
-    float lastPolicyDescriptor[12];
-    float deltaSum, deltaC, deltaPeak;
     float rewardSum, rewardSumCompensation, averageReward;
     uint deathStep, deathDetector;
-    float deathRewardSum, averageRewardAtDeath;
 
     uint envKind;
     uint envWords[10];
     uint envObservationCount, envActionCount;
 };
-static_assert(sizeof(OakFleetLane) == 312, "OakFleetLane layout drifted from the Swift mirror");
+static_assert(sizeof(OakFleetLane) == 240, "OakFleetLane layout drifted from the Swift mirror");
 
 struct OakLaneSnapshot {
     KernelScalars scalars;
     float paramAbsMax;
     uint paramNonFinite;
-    uint steps, doneCount;
     float rewardSum, rho;
-    float deltaSum, deltaPeak;
     uint deathStep, deathDetector;
-    float deathRewardSum, deathRho;
 };
-static_assert(sizeof(OakLaneSnapshot) == 60, "OakLaneSnapshot layout drifted from the Swift mirror");
+static_assert(sizeof(OakLaneSnapshot) == 36, "OakLaneSnapshot layout drifted from the Swift mirror");
 
 inline float finiteOrZero(float x) { return isfinite(x) ? x : 0.0f; }
 
@@ -1772,13 +1766,10 @@ kernel void oak_fleet_init(device float *params [[buffer(0)]],
     for (int i = 0; i < 10; i++) lane->envWords[i] = envWords[i];
     lane->halfCheetah = halfCheetah;
     lane->elapsed = elapsed; lane->resets = resets;
-    lane->steps = 0u; lane->doneCount = 0u;
+    lane->steps = 0u;
     for (int u = 0; u < 6; u++) lane->pendingAction[u] = 0.0f;
-    for (int i = 0; i < 12; i++) lane->lastPolicyDescriptor[i] = 0.0f;
-    lane->deltaSum = 0.0f; lane->deltaC = 0.0f; lane->deltaPeak = 0.0f;
     lane->rewardSum = 0.0f; lane->rewardSumCompensation = 0.0f; lane->averageReward = 0.0f;
     lane->deathStep = OAK_DEATH_NONE; lane->deathDetector = 0u;
-    lane->deathRewardSum = 0.0f; lane->averageRewardAtDeath = 0.0f;
     {
         Agent agent = make_agent(params, stateArena, uintArena, scalars, cfg, gidLocal, gid,
                            lane->envObservationCount, lane->envActionCount);
@@ -1836,20 +1827,7 @@ static inline void sampleDiscreteAction(Agent agent,
             actionSignal = ((tid == sampledAction) ? 1.0f : 0.0f) - exp(finiteOrZero(agent.policyMeanRaw[tid]) - behaviorLogitMax) / behaviorSoftmaxSum;
         agent.actionSignal[tid] = actionSignal;
     }
-    if (tid == 0u) {
-        float desc[12];
-        for (uint i = 0u; i < agent.actionCount; ++i) desc[i] = finiteOrZero(agent.policyMeanRaw[i]);
-        float d2 = 0.0f;
-        for (int i = 0; i < 12; i++) {
-            float v = desc[i] - lane->lastPolicyDescriptor[i];
-            d2 += v * v;
-            lane->lastPolicyDescriptor[i] = desc[i];
-        }
-        kahanAdd(&lane->deltaSum, &lane->deltaC, d2 / 12.0f);
-        lane->steps = stepIdx + 1u;
-        float averageDeltaMean = lane->deltaSum / float(lane->steps);
-        if (isfinite(averageDeltaMean) && averageDeltaMean > lane->deltaPeak) lane->deltaPeak = averageDeltaMean;
-    }
+    if (tid == 0u) lane->steps = stepIdx + 1u;
     if (tid < agent.optionCount) {
         uint off = tid * agent.actionCount;
         float optionLogitMax = -FLT_MAX;
@@ -1910,20 +1888,7 @@ static inline void sampleAction(Agent agent,
         scratch[d] = sample;
     }
     simdgroup_barrier(mem_flags::mem_device);
-    if (tid == 0u) {
-        float desc[12];
-        for (uint i = 0u; i < agent.actionCount; ++i) desc[i] = finiteOrZero(agent.policyMean[i]);
-        float d2 = 0.0f;
-        for (int i = 0; i < 12; i++) {
-            float v = desc[i] - lane->lastPolicyDescriptor[i];
-            d2 += v * v;
-            lane->lastPolicyDescriptor[i] = desc[i];
-        }
-        kahanAdd(&lane->deltaSum, &lane->deltaC, d2 / 12.0f);
-        lane->steps = stepIdx + 1u;
-        float averageDeltaMean = lane->deltaSum / float(lane->steps);
-        if (isfinite(averageDeltaMean) && averageDeltaMean > lane->deltaPeak) lane->deltaPeak = averageDeltaMean;
-    }
+    if (tid == 0u) lane->steps = stepIdx + 1u;
     if (tid < agent.optionCount) {
         uint off = tid * agent.actionCount;
         float logImportance = 0.0f;
@@ -1972,7 +1937,6 @@ static inline void stepEnvironment(device float *params,
     lane->elapsed = elapsed;
     lane->resets = resets;
     env_pose(envK, envWords, halfCheetah, ctrl, pose);
-    lane->doneCount += done;
     uint stepNum = lane->steps;
 
     if (isfinite(reward)) {
@@ -1982,8 +1946,6 @@ static inline void stepEnvironment(device float *params,
     } else if (lane->deathStep == OAK_DEATH_NONE) {
         lane->deathStep = stepNum;
         lane->deathDetector = OAK_DET_ENV_REWARD;
-        lane->deathRewardSum = lane->rewardSum;
-        lane->averageRewardAtDeath = lane->averageReward;
     }
     {
         Agent agent = make_agent(params, stateArena, uintArena, scalars, cfg, gidLocal, gid,
@@ -1993,8 +1955,6 @@ static inline void stepEnvironment(device float *params,
                 if (!isfinite(agent.policyMean[i])) {
                     lane->deathStep = stepNum;
                     lane->deathDetector = OAK_DET_POLICY_MEAN;
-                    lane->deathRewardSum = lane->rewardSum;
-                    lane->averageRewardAtDeath = lane->averageReward;
                     break;
                 }
             }
@@ -2008,19 +1968,17 @@ static inline void stepEnvironment(device float *params,
         if (obsBad) {
             lane->deathStep = stepNum;
             lane->deathDetector = OAK_DET_ENV_OBS;
-            lane->deathRewardSum = lane->rewardSum;
-            lane->averageRewardAtDeath = lane->averageReward;
         }
     }
     if (ecfg.recordCapacity != 0u) {
         int slot = recordSlot[gid];
         if (slot >= 0) {
-
-            ulong base = ((ulong)slot * ecfg.recordCapacity
-                          + ((stepNum - 1u) % ecfg.recordCapacity)) * 16ul;
-            for (int u = 0; u < 6; u++) recordBuf[base + u] = ctrl[u];
-            recordBuf[base + 6] = float(done);
-            for (int i = 0; i < 9; i++) recordBuf[base + 7 + i] = pose[i];
+            ulong lanes = (ulong)ecfg.laneCount;
+            device float *dst = recordBuf
+                + ((stepNum - 1u) % ecfg.recordCapacity) * (OAK_RECORD_FLOATS * lanes)
+                + (ulong)slot;
+            dst[0] = float(done);
+            for (uint i = 0u; i < OAK_POSE_LEN; i++) dst[(i + 1u) * lanes] = pose[i];
         }
     }
 }
@@ -2171,14 +2129,8 @@ kernel void oak_fleet_snapshot(device float *params [[buffer(0)]],
         o->paramNonFinite = 0u;
     }
     if (slane != 0u) return;
-    o->steps = lane->steps;
-    o->doneCount = lane->doneCount;
     o->rewardSum = lane->rewardSum;
     o->rho = lane->averageReward;
-    o->deltaSum = lane->deltaSum;
-    o->deltaPeak = lane->deltaPeak;
     o->deathStep = lane->deathStep;
     o->deathDetector = lane->deathDetector;
-    o->deathRewardSum = lane->deathRewardSum;
-    o->deathRho = lane->averageRewardAtDeath;
 }

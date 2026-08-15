@@ -1,5 +1,5 @@
 
-import { CTRL_LEN, OFF_CTRL, OFF_DONE, OFF_POSE, POSE_LEN } from '../record';
+import { CTRL_LEN, OFF_DONE, OFF_POSE, POSE_LEN, effortView } from '../record';
 import type { EnvDecoder, EnvFrame, EnvGeometry, GridCell, SimEvent } from '../types';
 import { NO_EVENTS } from '../events';
 
@@ -117,7 +117,7 @@ export const keyCorridorDecoder: EnvDecoder<KeyCorridorState, KeyCorridorStatic>
     const pose = raw16.subarray(OFF_POSE, OFF_POSE + POSE_LEN);
     return {
       step: i,
-      ctrl: raw16.subarray(OFF_CTRL, OFF_CTRL + CTRL_LEN),
+      ctrl: effortView(raw16, -1),
       done: raw16[OFF_DONE] ?? 0,
       pose,
       state: state(

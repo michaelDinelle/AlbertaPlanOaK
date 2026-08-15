@@ -1,6 +1,6 @@
 
 import { philoxDraw, STREAM_RESET } from '../philox';
-import { CTRL_LEN, OFF_CTRL, OFF_DONE, OFF_POSE, POSE_LEN } from '../record';
+import { CTRL_LEN, OFF_DONE, OFF_POSE, POSE_LEN, effortView } from '../record';
 import type { EnvDecoder, EnvFrame, EnvGeometry, SimEvent } from '../types';
 import { NO_EVENTS } from '../events';
 
@@ -83,7 +83,7 @@ export const deepSeaDecoder: EnvDecoder<DeepSeaState, DeepSeaStatic> = {
 
   decodeFrame(i: number, raw16: Float32Array): EnvFrame<DeepSeaState> {
     const pose = raw16.subarray(OFF_POSE, OFF_POSE + POSE_LEN);
-    const ctrl = raw16.subarray(OFF_CTRL, OFF_CTRL + CTRL_LEN);
+    const ctrl = effortView(raw16, 4);
     return {
       step: i,
       ctrl,

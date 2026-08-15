@@ -9,6 +9,7 @@ export interface Tape {
   stepEnd: Float64Array;
   wallSeconds: Float32Array;
   data: Float32Array;
+  bits: Uint32Array;
   headerBytes: number;
   rowBytes: number;
   byteLength: number;
@@ -23,6 +24,13 @@ export function fieldIndex(tape: Tape, field: string): number {
 
 export function tapeValue(tape: Tape, fieldIdx: number, row: number, lane: number): number {
   return tape.data[(row * tape.fields.length + fieldIdx) * tape.laneCount + lane] ?? NaN;
+}
+
+export function tapeStep(tape: Tape, fieldIdx: number, row: number, lane: number): number {
+  const at = (row * tape.fields.length + fieldIdx) * tape.laneCount + lane;
+  const marker = tape.data[at];
+  if (marker === undefined || Number.isNaN(marker)) return NaN;
+  return tape.bits[at] ?? NaN;
 }
 
 function parseHeader(bytes: Uint8Array): { laneCount: number; fields: string[]; headerBytes: number } {
@@ -52,6 +60,7 @@ export function parseTape(bytes: Uint8Array, etag: string | null = null): Tape {
     stepEnd: new Float64Array(0),
     wallSeconds: new Float32Array(0),
     data: new Float32Array(0),
+    bits: new Uint32Array(0),
     headerBytes,
     rowBytes,
     byteLength: headerBytes,
@@ -64,13 +73,15 @@ function appendRows(tape: Tape, more: Uint8Array, etag: string | null): Tape {
   const added = Math.floor(more.byteLength / tape.rowBytes);
   if (added <= 0) return { ...tape, etag };
   const rows = tape.rows + added;
+  const data = new Float32Array(rows * tape.fields.length * tape.laneCount);
   const next: Tape = {
     ...tape,
     rows,
     stepStart: new Float64Array(rows),
     stepEnd: new Float64Array(rows),
     wallSeconds: new Float32Array(rows),
-    data: new Float32Array(rows * tape.fields.length * tape.laneCount),
+    data,
+    bits: new Uint32Array(data.buffer),
     byteLength: tape.byteLength + added * tape.rowBytes,
     etag,
   };

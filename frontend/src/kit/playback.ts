@@ -1,6 +1,7 @@
 import type { EnvId } from '@shared/envs';
 import type { EnvFrame, EnvGeometry, SimEvent } from '@sim/types';
 import type { FrameState, QualityTier } from './types';
+import { CTRL_LEN } from '@sim/record';
 
 export const TIERS: readonly QualityTier[] = ['hero', 'medium', 'thumb'];
 
@@ -83,7 +84,7 @@ export function sampleFrame(source: PlaybackSource, position: number, out: Frame
   } else {
     out.pose.set(frame.pose.subarray(0, 9));
   }
-  out.ctrl.set(frame.ctrl.subarray(0, 6));
+  out.ctrl.set(frame.ctrl.subarray(0, CTRL_LEN));
   out.done = frame.done !== 0;
   out.step = frame.step;
   out.simTime = frame.step / (source.controlHz > 0 ? source.controlHz : 1);
