@@ -1,6 +1,6 @@
 
 import { GroundTruthOverlay } from '@kit/debug';
-import { makeFrameRig, type FrameRig } from '@kit/rigs';
+import { makeOrbitRig, orbitFromPose, type OrbitRig } from '@kit/rigs';
 import { CelebrationPool, attachCelebrations, disposeCelebrations } from '@kit/celebrate';
 import type {
   FrameState,
@@ -92,7 +92,7 @@ class WillowSwingScene implements SceneModule {
   private ctx: SceneContext | null = null;
   private world: WorldHandle | null = null;
   private arm: ArmHandle | null = null;
-  private rig: FrameRig | null = null;
+  private rig: OrbitRig | null = null;
   private pool: CelebrationPool | null = null;
   private overlay: GroundTruthOverlay | null = null;
   private accent = 0xf2a7c3;
@@ -153,18 +153,22 @@ class WillowSwingScene implements SceneModule {
     if (celebration) celebration.color.set(this.accent);
 
     const thumb = ctx.tier === 'thumb';
-    const rig = makeFrameRig({
-      position: thumb ? CAM_BASE_THUMB : CAM_BASE,
-      lookAt: thumb ? CAM_LOOK_THUMB : CAM_LOOK,
+    const home = orbitFromPose(
+      thumb ? CAM_BASE_THUMB : CAM_BASE,
+      thumb ? CAM_LOOK_THUMB : CAM_LOOK,
+    );
+    const rig = makeOrbitRig({
+      canvas: ctx.canvas,
+      target: thumb ? CAM_LOOK_THUMB : CAM_LOOK,
+      azimuth: home.azimuth,
+      polar: home.polar,
+      distance: home.distance,
       fov: ctx.tokens.fovHero,
       near: 0.05,
-      far: 400,
+      far: 420,
       aspect: ctx.size.height > 0 ? ctx.size.width / ctx.size.height : 16 / 9,
-      canvas: thumb ? null : ctx.canvas,
-      parallax: 0.12,
-      parallaxY: 0.5,
       damping: 2.4,
-      name: 'willowFrameRig',
+      name: 'willowOrbitRig',
     });
     this.rig = rig;
     this.camera = rig.camera;

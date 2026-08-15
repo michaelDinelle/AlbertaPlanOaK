@@ -3,6 +3,7 @@ import { join } from 'node:path';
 import { DIST_DIR, HOSTNAME, benchRootFromEnv, portFromEnv } from './config';
 import { corsHeaders } from './cors';
 import { statOrNull } from './fs';
+import { buildLaneBlock } from './lanes';
 import { findRecording } from './recordings';
 import { RunIndex, buildRunDetail } from './runIndex';
 
@@ -163,6 +164,24 @@ export function createApp(opts: AppOptions = {}): App {
 
     if (sub === 'tape' && segs.length === 4) {
       return serveStatic(req, join(run.dir, 'tape.bin'), 'application/octet-stream');
+    }
+
+    if (sub === 'lanes' && segs.length === 5) {
+      const envId = segs[4];
+      if (envId === undefined) return fail(404, 'unknown env');
+      const recs = await index.recordingsFor(run.id);
+      const lanes = recs.filter((r) => r.envId === envId).sort((a, b) => a.seed - b.seed);
+      if (lanes.length === 0) return fail(404, 'no recorded lanes for this env');
+      const from = Math.max(0, Number(url.searchParams.get('from') ?? '0') | 0);
+      const raw = Number(url.searchParams.get('count') ?? '0') | 0;
+      const count = raw > 0 ? raw : 4096;
+      const body = await buildLaneBlock(lanes, from, count);
+      return new Response(body, {
+        headers: {
+          'content-type': 'application/octet-stream',
+          'cache-control': 'no-cache',
+        },
+      });
     }
 
     if (sub === 'recordings' && segs.length === 6) {

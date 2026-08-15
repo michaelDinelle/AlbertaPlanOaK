@@ -153,7 +153,7 @@ class FourSeasonsCourtyardScene implements SceneModule {
 
     const thumb = ctx.tier === 'thumb';
     const rig = makeOrbitRig({
-      canvas: thumb ? null : ctx.canvas,
+      canvas: ctx.canvas,
       target: [0, CAM_TARGET_Y, 0],
       distance: thumb ? CAM_DISTANCE_THUMB : CAM_DISTANCE,
       azimuth: thumb ? CAM_AZIMUTH_THUMB : CAM_AZIMUTH,

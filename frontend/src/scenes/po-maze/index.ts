@@ -211,7 +211,7 @@ class FogboundForestScene implements SceneModule {
     }
     this.camAnchor.y = CAM_TARGET_Y;
     const rig = makeOrbitRig({
-      canvas: thumb ? null : ctx.canvas,
+      canvas: ctx.canvas,
       target: [this.camAnchor.x, CAM_TARGET_Y, this.camAnchor.z],
       distance: thumb ? CAM_DISTANCE_THUMB : CAM_DISTANCE,
       azimuth: thumb ? CAM_AZIMUTH_THUMB : CAM_AZIMUTH,

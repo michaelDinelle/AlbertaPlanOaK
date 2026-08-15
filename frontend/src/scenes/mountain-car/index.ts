@@ -1,6 +1,6 @@
 
 import { GroundTruthOverlay } from '@kit/debug';
-import { makeFrameRig, type FrameRig } from '@kit/rigs';
+import { makeOrbitRig, orbitFromPose, type OrbitRig } from '@kit/rigs';
 import {
   CelebrationPool,
   attachCelebrations,
@@ -66,7 +66,7 @@ class AlpineValleyScene implements SceneModule {
   private ctx: SceneContext | null = null;
   private world: WorldHandle | null = null;
   private cart: CartHandle | null = null;
-  private rig: FrameRig | null = null;
+  private rig: OrbitRig | null = null;
   private pool: CelebrationPool | null = null;
   private overlay: GroundTruthOverlay | null = null;
   private heightAt: (x: number) => number = () => 0;
@@ -121,18 +121,22 @@ class AlpineValleyScene implements SceneModule {
     this.scene.add(cart.group);
 
     const thumb = ctx.tier === 'thumb';
-    const rig = makeFrameRig({
-      position: thumb ? CAM_BASE_THUMB : CAM_BASE,
-      lookAt: thumb ? CAM_LOOK_THUMB : CAM_LOOK,
+    const home = orbitFromPose(
+      thumb ? CAM_BASE_THUMB : CAM_BASE,
+      thumb ? CAM_LOOK_THUMB : CAM_LOOK,
+    );
+    const rig = makeOrbitRig({
+      canvas: ctx.canvas,
+      target: thumb ? CAM_LOOK_THUMB : CAM_LOOK,
+      azimuth: home.azimuth,
+      polar: home.polar,
+      distance: home.distance,
       fov: ctx.tokens.fovHero,
       near: 0.05,
-      far: 400,
+      far: 420,
       aspect: ctx.size.height > 0 ? ctx.size.width / ctx.size.height : 16 / 9,
-      canvas: thumb ? null : ctx.canvas,
-      parallax: 0.06,
-      parallaxY: 0.45,
       damping: 2.6,
-      name: 'alpineFrameRig',
+      name: 'alpineOrbitRig',
     });
     this.rig = rig;
     this.camera = rig.camera;

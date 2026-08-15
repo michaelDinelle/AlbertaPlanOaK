@@ -1,3 +1,4 @@
+import type { EnvEntry } from '@sim/catalog';
 import { ENVS, type EnvId } from '@shared/envs';
 import type { RecordingRef } from '@shared/types';
 import type { PlaybackSource } from '@kit/playback';
@@ -8,6 +9,7 @@ import {
   RECORD_FLOATS,
   decodeChunkPayload,
   inflateChunk,
+  codecFromEntry,
   readRecordHeader,
   scanNextChunk,
   type CodecDescriptor,
@@ -145,6 +147,7 @@ const UPDATE_MIN_MS = 150;
 const LIVE_POLL_MS = 2_000;
 
 export interface HeroOptions extends TheaterTarget {
+  entry: EnvEntry;
   steps: number;
   horizonSteps: number;
   live: boolean;
@@ -267,7 +270,7 @@ export function loadHero(options: HeroOptions): HeroHandle {
           `recording header says ${header.envId}, expected ${envId}`,
         );
       }
-      desc = header.desc;
+      desc = codecFromEntry(options.entry);
     }
     if (desc === null) return;
 
@@ -364,6 +367,7 @@ export function loadHero(options: HeroOptions): HeroHandle {
     setCallbacks(update, error) {
       onUpdate = update;
       onError = error;
+      if (update !== null && lens !== null) update();
     },
     destroy() {
       destroyed = true;

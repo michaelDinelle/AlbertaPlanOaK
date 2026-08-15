@@ -223,6 +223,8 @@ export function buildCheetah(opts: CheetahOptions): CheetahHandle {
     joints.push(node);
   }
 
+  const spotColor = new THREE.Color(cSpot);
+
   const coatMaterial: OakMaterial = oakMaterial({
     color: TOKEN_WHITE,
     vertexColors: true,
@@ -233,25 +235,18 @@ export function buildCheetah(opts: CheetahOptions): CheetahHandle {
     toonSteps: 3,
     toonSoftness: 0.3,
     toonFloor: tier === 'thumb' ? 0.46 : 0.22,
+    spots: { color: cSpot, strength: 0.8, scale: 15, radius: 0.40, seed: (seed & 0xffff) / 64 },
     tier,
     name: 'cheetahCoat',
   });
 
   const scratchColor = new THREE.Color();
-  const spotColor = new THREE.Color(cSpot);
 
   const coatFor = (spec: CoatSpec, len: number, boneSeed: number): CoatColorFn => {
-    const nu = Math.max(2, Math.round(len * SPOT_DENSITY));
-    const nv = Math.max(3, Math.round(2 * Math.PI * spec.rMid * SPOT_DENSITY));
     return (t, theta, out) => {
       const ventral = Math.cos(theta * Math.PI * 2) * 0.5 + 0.5;
       out.copy(cBack).lerp(cCoat, smoothstep01(1 - Math.abs(ventral - 0.5) * 1.6));
       if (spec.belly > 0) out.lerp(cBelly, spec.belly * smoothstep01((ventral - 0.52) / 0.42));
-      if (spec.spots > 0) {
-        const mask = spotMask(t, theta, nu, nv, seed ^ boneSeed, 0.3);
-        const fade = smoothstep01((0.86 - ventral) / 0.3) * smoothstep01((1 - Math.abs(t * 2 - 1)) / 0.22);
-        out.lerp(spotColor, mask * spec.spots * fade);
-      }
       if (spec.sock > 0) out.lerp(cSock, spec.sock * smoothstep01((t - 0.42) / 0.5));
     };
   };
@@ -304,7 +299,6 @@ export function buildCheetah(opts: CheetahOptions): CheetahHandle {
         seed ^ 0x51a5,
         0.34,
       );
-      scratchColor.lerp(spotColor, mask * 0.5 * smoothstep01((y + 0.133) / 0.533));
       const tear = Math.abs(z) > 0.367 ? smoothstep01(1 - Math.abs((y + 0.133) - (x - 0.4) * 0.55) / 0.187) : 0;
       scratchColor.lerp(spotColor, tear * clampRange((x + 0.133) / 0.667, 0, 1) * 0.9);
       col.setXYZ(i, scratchColor.r, scratchColor.g, scratchColor.b);

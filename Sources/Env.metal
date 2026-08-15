@@ -24,25 +24,124 @@ constant uint OAK_ENV_POMAZE      = 14u;
 constant uint OAK_ENV_DELAYEDCHAIN = 15u;
 constant uint OAK_ENV_COUNT       = 16u;
 
-struct OakEnvSpec { uint nameHash; uint obsDimNatural; uint actionKind; uint actionCount; };
-constant OakEnvSpec OAK_ENV_SPECS[OAK_ENV_COUNT] = {
-    { 0x9d7fd44bu, 17u, 0u, 6u },
-    { 0x8014a187u, 17u, 1u, 4u },
-    { 0x56af5bf2u,  8u, 1u, 2u },
-    { 0xdd537ebau, 14u, 1u, 4u },
-    { 0x93531833u,  7u, 1u, 3u },
-    { 0xf5b3ddc8u,  3u, 1u, 3u },
-    { 0x41f9937du,  5u, 1u, 2u },
-    { 0x69bbbb73u,  4u, 0u, 1u },
-    { 0x7b267422u,  2u, 1u, 2u },
-    { 0xb96ddc3du,  8u, 1u, 2u },
-    { 0x4c3c2d3fu, 17u, 1u, 4u },
-    { 0xcf293fd7u,  6u, 1u, 2u },
-    { 0xd75dd5f9u, 17u, 1u, 4u },
-    { 0xbfeb2b7au, 16u, 1u, 6u },
-    { 0x0582e383u, 15u, 1u, 4u },
-    { 0x56184b96u,  3u, 1u, 2u },
+constant uint OAK_SLOT_NONE    =  0u;
+constant uint OAK_SLOT_X       =  1u;
+constant uint OAK_SLOT_Y       =  2u;
+constant uint OAK_SLOT_GOAL_X  =  3u;
+constant uint OAK_SLOT_GOAL_Y  =  4u;
+constant uint OAK_SLOT_KEY_X   =  5u;
+constant uint OAK_SLOT_KEY_Y   =  6u;
+constant uint OAK_SLOT_CARRY   =  7u;
+constant uint OAK_SLOT_GATES   =  8u;
+constant uint OAK_SLOT_TOKENS  =  9u;
+constant uint OAK_SLOT_CUE     = 10u;
+constant uint OAK_SLOT_HEADING = 11u;
+constant uint OAK_SLOT_EFFORT  = 12u;
+constant uint OAK_SLOT_Q       = 16u;
+
+constant uint OAK_POSE_LEN = 9u;
+constant uint OAK_ENV_GEOMETRY_WORDS = 19u;
+
+struct OakEnvSpec {
+    uint nameHash; uint obsDimNatural; uint actionKind; uint actionCount;
+    uint gridW; uint gridH; uint controlHz;
+    uint slots[OAK_POSE_LEN];
 };
+constant OakEnvSpec OAK_ENV_SPECS[OAK_ENV_COUNT] = {
+    { 0x9d7fd44bu, 17u, 0u, 6u,  0u,  0u, 20u,
+      { OAK_SLOT_Q + 0u, OAK_SLOT_Q + 1u, OAK_SLOT_Q + 2u, OAK_SLOT_Q + 3u, OAK_SLOT_Q + 4u,
+        OAK_SLOT_Q + 5u, OAK_SLOT_Q + 6u, OAK_SLOT_Q + 7u, OAK_SLOT_Q + 8u } },
+    { 0x8014a187u, 17u, 1u, 4u, 11u, 11u,  8u,
+      { OAK_SLOT_X, OAK_SLOT_Y, OAK_SLOT_GOAL_X, OAK_SLOT_GOAL_Y,
+        OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE } },
+    { 0x56af5bf2u,  8u, 1u, 2u,  8u,  8u,  8u,
+      { OAK_SLOT_Y, OAK_SLOT_X, OAK_SLOT_GOAL_Y, OAK_SLOT_GOAL_X,
+        OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE } },
+    { 0xdd537ebau, 14u, 1u, 4u,  9u,  7u,  8u,
+      { OAK_SLOT_X, OAK_SLOT_Y, OAK_SLOT_GOAL_X, OAK_SLOT_GOAL_Y, OAK_SLOT_KEY_X, OAK_SLOT_KEY_Y,
+        OAK_SLOT_CARRY, OAK_SLOT_GATES, OAK_SLOT_NONE } },
+    { 0x93531833u,  7u, 1u, 3u,  0u,  0u,  5u,
+      { OAK_SLOT_Q + 0u, OAK_SLOT_Q + 1u, OAK_SLOT_Q + 2u, OAK_SLOT_Q + 3u,
+        OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE } },
+    { 0xf5b3ddc8u,  3u, 1u, 3u,  0u,  0u, 30u,
+      { OAK_SLOT_Q + 0u, OAK_SLOT_Q + 1u, OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE,
+        OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE } },
+    { 0x41f9937du,  5u, 1u, 2u,  0u,  0u, 50u,
+      { OAK_SLOT_Q + 0u, OAK_SLOT_Q + 1u, OAK_SLOT_Q + 2u, OAK_SLOT_Q + 3u,
+        OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE } },
+    { 0x69bbbb73u,  4u, 0u, 1u,  0u,  0u, 20u,
+      { OAK_SLOT_Q + 0u, OAK_SLOT_Q + 1u, OAK_SLOT_EFFORT, OAK_SLOT_NONE, OAK_SLOT_NONE,
+        OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE } },
+    { 0x7b267422u,  2u, 1u, 2u, 16u,  1u,  8u,
+      { OAK_SLOT_X, OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE,
+        OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE } },
+    { 0xb96ddc3du,  8u, 1u, 2u, 16u, 16u,  8u,
+      { OAK_SLOT_Y, OAK_SLOT_X, OAK_SLOT_GOAL_Y, OAK_SLOT_GOAL_X,
+        OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE } },
+    { 0x4c3c2d3fu, 17u, 1u, 4u, 17u,  7u,  8u,
+      { OAK_SLOT_X, OAK_SLOT_Y, OAK_SLOT_GOAL_X, OAK_SLOT_GOAL_Y, OAK_SLOT_TOKENS, OAK_SLOT_GATES,
+        OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE } },
+    { 0xcf293fd7u,  6u, 1u, 2u, 32u,  1u,  8u,
+      { OAK_SLOT_X, OAK_SLOT_NONE, OAK_SLOT_CUE, OAK_SLOT_NONE, OAK_SLOT_NONE,
+        OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE } },
+    { 0xd75dd5f9u, 17u, 1u, 4u, 11u, 11u,  8u,
+      { OAK_SLOT_X, OAK_SLOT_Y, OAK_SLOT_GOAL_X, OAK_SLOT_GOAL_Y,
+        OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE } },
+    { 0xbfeb2b7au, 16u, 1u, 6u, 11u, 11u,  8u,
+      { OAK_SLOT_X, OAK_SLOT_Y, OAK_SLOT_GOAL_X, OAK_SLOT_GOAL_Y, OAK_SLOT_HEADING,
+        OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE } },
+    { 0x0582e383u, 15u, 1u, 4u, 11u, 11u,  8u,
+      { OAK_SLOT_X, OAK_SLOT_Y, OAK_SLOT_GOAL_X, OAK_SLOT_GOAL_Y,
+        OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE } },
+    { 0x56184b96u,  3u, 1u, 2u, 32u,  1u,  8u,
+      { OAK_SLOT_X, OAK_SLOT_NONE, OAK_SLOT_CUE, OAK_SLOT_NONE, OAK_SLOT_NONE,
+        OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE } },
+};
+
+inline bool env_isWall(uint envKind, thread const uint *words, int x, int y) {
+    if (envKind == OAK_ENV_FOURROOMS) return fourRooms_isWall(x, y);
+    if (envKind == OAK_ENV_KEYCORRIDOR) return keyCorridor_isWall(x, y);
+    if (envKind == OAK_ENV_MULTIKEYCORRIDOR) return multiKeyCorridor_isWall(x, y);
+    if (envKind == OAK_ENV_PROCEDURALMAZE) {
+        return proceduralMaze_isWall(words[6], words[7], words[8], x, y);
+    }
+    if (envKind == OAK_ENV_HIGHDIMMAZE) return highDimMaze_isWall(x, y);
+    if (envKind == OAK_ENV_POMAZE) return poMaze_isWall(x, y);
+    return false;
+}
+
+inline uint env_actionMaskBit(uint envKind, thread const uint *words, uint x, uint y) {
+    if (envKind == OAK_ENV_DEEPSEA) {
+        uint i = y * 8u + x;
+        return (i < 32u) ? ((words[3] >> i) & 1u) : ((words[4] >> (i - 32u)) & 1u);
+    }
+    if (envKind == OAK_ENV_LARGEDEEPSEA) {
+        uint i = y * 16u + x;
+        return (words[1u + (i >> 5u)] >> (i & 31u)) & 1u;
+    }
+    return 0u;
+}
+
+inline void env_geometry(uint envKind, thread const uint *words, device uint *out) {
+    uint w = OAK_ENV_SPECS[envKind].gridW;
+    uint h = OAK_ENV_SPECS[envKind].gridH;
+    uint cells = w * h;
+    uint maskWords = (OAK_ENV_GEOMETRY_WORDS - 3u) / 2u;
+    out[0] = w;
+    out[1] = h;
+    out[2] = maskWords;
+    for (uint k = 0u; k < 2u * maskWords; ++k) out[3u + k] = 0u;
+    for (uint i = 0u; i < cells; ++i) {
+        uint x = i % w;
+        uint y = i / w;
+        if (env_isWall(envKind, words, int(x), int(y))) {
+            out[3u + (i >> 5u)] |= 1u << (i & 31u);
+        }
+        if (env_actionMaskBit(envKind, words, x, y) != 0u) {
+            out[3u + maskWords + (i >> 5u)] |= 1u << (i & 31u);
+        }
+    }
+}
 
 inline void env_reset(uint envKind, uint seed,
                       thread uint *words, thread HalfCheetahState &cheetah,

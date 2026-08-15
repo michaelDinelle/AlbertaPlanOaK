@@ -13,6 +13,7 @@ export interface RunMeta {
   ablationLabel: string;
   startedAt?: string;
   envSchedule: EnvScheduleEntry[];
+  envCatalog: unknown[];
 }
 
 export const TAPE_MAGIC = 0x544b414f;

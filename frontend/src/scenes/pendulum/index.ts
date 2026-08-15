@@ -1,6 +1,6 @@
 
 import { GroundTruthOverlay } from '@kit/debug';
-import { makeFrameRig, type FrameRig } from '@kit/rigs';
+import { makeOrbitRig, orbitFromPose, type OrbitRig } from '@kit/rigs';
 import { CelebrationPool, attachCelebrations, disposeCelebrations } from '@kit/celebrate';
 import type {
   FrameState,
@@ -75,7 +75,7 @@ class LanternBellScene implements SceneModule {
   private ctx: SceneContext | null = null;
   private world: WorldHandle | null = null;
   private lantern: LanternRigHandle | null = null;
-  private rig: FrameRig | null = null;
+  private rig: OrbitRig | null = null;
   private pool: CelebrationPool | null = null;
   private overlay: GroundTruthOverlay | null = null;
   private pivot: readonly [number, number, number] = [0, 0, 0];
@@ -114,18 +114,22 @@ class LanternBellScene implements SceneModule {
     this.scene.add(lantern.group);
 
     const thumb = ctx.tier === 'thumb';
-    const rig = makeFrameRig({
-      position: thumb ? CAM_BASE_THUMB : CAM_BASE,
-      lookAt: thumb ? CAM_LOOK_THUMB : CAM_LOOK,
+    const home = orbitFromPose(
+      thumb ? CAM_BASE_THUMB : CAM_BASE,
+      thumb ? CAM_LOOK_THUMB : CAM_LOOK,
+    );
+    const rig = makeOrbitRig({
+      canvas: ctx.canvas,
+      target: thumb ? CAM_LOOK_THUMB : CAM_LOOK,
+      azimuth: home.azimuth,
+      polar: home.polar,
+      distance: home.distance,
       fov: ctx.tokens.fovHero,
       near: 0.05,
-      far: 400,
+      far: 420,
       aspect: ctx.size.height > 0 ? ctx.size.width / ctx.size.height : 16 / 9,
-      canvas: thumb ? null : ctx.canvas,
-      parallax: 0.09,
-      parallaxY: 0.5,
       damping: 2.6,
-      name: 'lanternFrameRig',
+      name: 'lanternOrbitRig',
     });
     this.rig = rig;
     this.camera = rig.camera;

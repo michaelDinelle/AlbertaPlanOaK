@@ -85,6 +85,7 @@ function readRunMeta(raw: string): RunMeta | null {
   if (typeof o['batch'] !== 'number' || typeof o['steps'] !== 'number') return null;
   if (!Array.isArray(o['seeds']) || !Array.isArray(o['envSchedule'])) return null;
   if (typeof o['ablationLabel'] !== 'string') return null;
+  if (!Array.isArray(o['envCatalog']) || o['envCatalog'].length === 0) return null;
   return parsed as RunMeta;
 }
 

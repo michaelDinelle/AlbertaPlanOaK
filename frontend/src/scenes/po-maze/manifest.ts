@@ -38,7 +38,6 @@ export const manifest: SceneManifest = {
     bloomThreshold: 0.85,
     fogTint: HAZE,
   },
-  budget: { drawCalls: 60, triangles: 300000 },
 };
 
 export default manifest;

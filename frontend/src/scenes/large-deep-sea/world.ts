@@ -1,3 +1,4 @@
+import { TERRACE_DESCENT, terraceShelves } from '@kit/terrace';
 
 import * as THREE from 'three';
 import {
@@ -33,8 +34,8 @@ export const BED_NORTH = -0.9;
 export const BED_SOUTH = -2.1;
 export const TERRAIN_SIZE = 88;
 export const TERRAIN_SEGMENTS = 160;
-export const WALL_RUN = 7;
-export const WALL_HEIGHT = 8;
+export const WALL_RUN = 15;
+export const WALL_HEIGHT = 3.4;
 export const ROCK_GAIN = 2.2;
 
 export const FOG_EXTENT = 68;
@@ -214,7 +215,7 @@ export function shelfTint(row: number, n: number, skin: AbyssSkin, out?: THREE.C
   return attenuate(c, t);
 }
 
-export const EXTINCTION: readonly [number, number, number] = [4.4, 3.9, 3.2];
+export const EXTINCTION: readonly [number, number, number] = [3.3, 2.9, 2.4];
 export const SURFACE_GAIN = 11;
 
 export function attenuate(c: THREE.Color, t: number): THREE.Color {
@@ -231,7 +232,7 @@ export function makeTrenchHeight(seed: number): (x: number, z: number) => number
     const outside = Math.max(Math.abs(x), Math.abs(z)) - TRENCH_HALF;
     const wall = smoothstep01(outside / WALL_RUN);
     const bedT = clamp01((z + TRENCH_HALF) / (2 * TRENCH_HALF));
-    const bed = BED_NORTH + (BED_SOUTH - BED_NORTH) * bedT;
+    const bed = BED_NORTH + (BED_SOUTH - BED_NORTH) * bedT - TERRACE_DESCENT * bedT;
     const n1 = valueNoise2(x * 0.062 + 3.1, z * 0.062 + 8.7, 64, seed) - 0.5;
     const n2 = valueNoise2(x * 0.173 + 1.7, z * 0.173 + 4.3, 64, seed ^ 0x51ed270b) - 0.5;
     const relief = n1 * 2.1 + n2 * 0.75;
@@ -244,7 +245,7 @@ export function makeTrenchColor(skin: AbyssSkin): (h: number, slope: number, x: 
   const climb = new THREE.Color();
   return (h, _slope, _x, z) => {
     const depthT = clamp01((z + TRENCH_HALF) / (2 * TRENCH_HALF));
-    const wallT = clamp01((h - BED_SOUTH) / (WALL_HEIGHT * 0.7));
+    const wallT = clamp01((h - (BED_SOUTH - TERRACE_DESCENT)) / (WALL_HEIGHT * 0.7));
     scratch.copy(skin.bed).lerp(skin.bedDeep, depthT * depthT * (1.4 - 0.4 * depthT));
     attenuate(scratch, depthT).multiplyScalar(0.62);
     if (wallT <= 0) return scratch;
@@ -810,6 +811,7 @@ export function buildWorld(
     },
     tier,
   );
+  terraceShelves(field, grid);
   group.add(field.group);
   owned.push(field);
   timed.push({ setTime: (t) => field.setTime(t) });

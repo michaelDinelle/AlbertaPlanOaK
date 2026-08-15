@@ -5,7 +5,7 @@ import {
   disposeCelebrations,
 } from '@kit/celebrate';
 import { GroundTruthOverlay, defaultFkToWorld } from '@kit/debug';
-import { makeTrackRig, type TrackRig } from '@kit/rigs';
+import { makeOrbitRig, orbitFromPose, type OrbitRig } from '@kit/rigs';
 import type {
   FrameState,
   FrameUpdate,
@@ -60,7 +60,7 @@ class GoldHourSavannaScene implements SceneModule {
   private ctx: SceneContext | null = null;
   private world: WorldHandle | null = null;
   private cheetah: CheetahHandle | null = null;
-  private rig: TrackRig | null = null;
+  private rig: OrbitRig | null = null;
   private pool: CelebrationPool | null = null;
   private overlay: GroundTruthOverlay | null = null;
   private fkSource: CheetahGeometry = cheetahGeometry;
@@ -105,20 +105,21 @@ class GoldHourSavannaScene implements SceneModule {
     this.scene.add(cheetah.group);
 
     const thumb = ctx.tier === 'thumb';
-    const rig = makeTrackRig({
-      canvas: thumb ? null : ctx.canvas,
-      offset: thumb ? CAM_OFFSET_THUMB : CAM_OFFSET,
-      lookOffset: thumb ? CAM_LOOK_THUMB : CAM_LOOK,
+    const offset = thumb ? CAM_OFFSET_THUMB : CAM_OFFSET;
+    const home = orbitFromPose(offset, [0, 0, 0]);
+    const rig = makeOrbitRig({
+      canvas: ctx.canvas,
+      target: [0, TRACK_Y, 0],
+      azimuth: home.azimuth,
+      polar: home.polar,
+      distance: home.distance,
       fov: ctx.tokens.fovHero,
       near: 0.08,
       far: 420,
       aspect: ctx.size.height > 0 ? ctx.size.width / ctx.size.height : 16 / 9,
-      lookAhead: thumb ? 0 : 0.34,
-      maxLookAhead: 1.1,
-      damping: 3.4,
-      lookDamping: 5,
-      velocityDamping: 2.6,
-      name: 'savannaTrackRig',
+      damping: 6,
+      follow: 3.4,
+      name: 'savannaOrbitRig',
     });
     this.rig = rig;
     this.camera = rig.camera;
@@ -232,9 +233,8 @@ class GoldHourSavannaScene implements SceneModule {
     world.setTime(time);
     cheetah.setTime(time);
 
-    rig.setTarget(rootX, TRACK_Y, 0);
-    rig.setVelocity(velX, 0, 0);
-    if (teleported || frame.scrubbed || ctx.tier === 'thumb') rig.snap();
+    rig.follow(rootX, TRACK_Y, 0);
+    if (teleported || frame.scrubbed) rig.snap();
     else rig.update(frame.dtReal);
 
     if (this.debugOn && this.overlay) this.overlay.setState(state);

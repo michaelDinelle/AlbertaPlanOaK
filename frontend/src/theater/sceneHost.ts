@@ -16,7 +16,9 @@ import type {
   SceneSize,
 } from '@kit/types';
 import type { EnvGeometry, SimEvent } from '@sim/types';
+import type { EnvCatalog } from '@sim/catalog';
 import { sceneRegistry } from '../scenes/registry';
+import { specFactory } from '../specs/registry';
 import { advanceCursor, collectEvents, makeFrameCursor, makeTierGovernor, type TierGovernor } from './player';
 
 export interface HostFrameInfo {
@@ -32,11 +34,6 @@ export interface HostFrameInfo {
   frameMs: number;
   p95: number;
   p95Threshold: number;
-  draws: number;
-  triangles: number;
-  ghostDraws: number;
-  ghostTriangles: number;
-  budget: { drawCalls: number; triangles: number };
   scrubbed: boolean;
 }
 
@@ -47,6 +44,7 @@ export interface SceneHostGhosts {
 
 export interface SceneHostOptions {
   envId: EnvId;
+  catalog?: EnvCatalog;
   source: PlaybackSource;
   tier?: QualityTier;
   debug?: boolean;
@@ -178,8 +176,6 @@ export async function mountSceneHost(
   let scene: SceneModule | null = null;
   let post: ComposerHandle | null = null;
   let manifest: SceneManifest | null = null;
-  let sceneCalls = 0;
-  let sceneTriangles = 0;
   let destroyed = false;
   let building = true;
 
@@ -210,11 +206,6 @@ export async function mountSceneHost(
     frameMs: 0,
     p95: 0,
     p95Threshold: 0,
-    draws: 0,
-    triangles: 0,
-    ghostDraws: 0,
-    ghostTriangles: 0,
-    budget: { drawCalls: 0, triangles: 0 },
     scrubbed: true,
   };
 
@@ -254,7 +245,8 @@ export async function mountSceneHost(
     const size = sizeOf();
     const currentLoader = loader;
     if (!currentLoader) throw new SceneHostError(`no scene registered for ${envId}`);
-    const factory = (await currentLoader()).default;
+    const factory = (options.catalog ? await specFactory(envId, options.catalog) : null)
+      ?? (await currentLoader()).default;
     if (destroyed || generation !== buildGeneration) return;
     const module = factory();
     const context: SceneContext = {
@@ -274,14 +266,6 @@ export async function mountSceneHost(
     }
     scene = module;
     manifest = module.manifest;
-    info.budget = module.manifest.budget;
-    type AfterRender = THREE.Scene['onAfterRender'];
-    const sceneHook: AfterRender = module.scene.onAfterRender;
-    module.scene.onAfterRender = function (this: THREE.Scene, ...args: Parameters<AfterRender>) {
-      sceneCalls = renderer.info.render.calls;
-      sceneTriangles = renderer.info.render.triangles;
-      sceneHook.apply(this, args);
-    };
     if (ghostConfig?.rebuild && ghostTier !== tier) {
       const next = ghostConfig.rebuild(tier);
       if (destroyed || generation !== buildGeneration) {
@@ -337,7 +321,6 @@ export async function mountSceneHost(
     scene.update(frameUpdate);
     ghostLayer?.update(dtReal, clock.time());
 
-    renderer.info.reset();
     post.setBloomPulse(celebrationPulse(scene.scene).bloom);
     post.render(dtReal);
 
@@ -370,10 +353,6 @@ export async function mountSceneHost(
     info.frameMs = frameMs;
     info.p95 = governor.p95;
     info.p95Threshold = governor.threshold;
-    info.draws = sceneCalls;
-    info.triangles = sceneTriangles;
-    info.ghostDraws = ghostLayer ? ghostLayer.draws() : 0;
-    info.ghostTriangles = ghostLayer ? ghostLayer.triangles() : 0;
     info.scrubbed = !step.sequential;
     options.onFrame?.(info);
   };
