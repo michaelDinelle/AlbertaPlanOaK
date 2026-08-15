@@ -111,7 +111,6 @@ export class RunIndex {
   private recordingsCache = new Map<string, { at: number; list: RecordingEntry[] }>();
   private lastScanAt = 0;
   private inFlightScan: Promise<void> | null = null;
-  private readonly loggedSkips = new Set<string>();
 
   constructor(opts: RunIndexOptions) {
     this.benchRoot = opts.benchRoot;
@@ -156,15 +155,9 @@ export class RunIndex {
     });
   }
 
-  private skip(id: string, why: string): void {
-    if (this.loggedSkips.has(id)) return;
-    this.loggedSkips.add(id);
-    console.warn(`[oak-frontend] skipping ${id}: ${why}`);
-  }
-
   private metaMemo = new Map<string, { mtimeMs: number; size: number; meta: RunMeta | null }>();
 
-  private async readMeta(id: string, path: string): Promise<RunMeta | null> {
+  private async readMeta(path: string): Promise<RunMeta | null> {
     const st = await statOrNull(path);
     if (st === null) return null;
     const hit = this.metaMemo.get(path);
@@ -174,7 +167,6 @@ export class RunIndex {
       meta = readRunMeta(await Bun.file(path).text());
     } catch {
     }
-    if (meta === null) this.skip(id, 'meta.json is not a run meta');
     this.metaMemo.set(path, { mtimeMs: st.mtimeMs, size: st.size, meta });
     return meta;
   }
@@ -194,13 +186,10 @@ export class RunIndex {
 
     for (const id of dirNames) {
       const dir = join(this.benchRoot, id);
-      const meta = await this.readMeta(id, join(dir, 'meta.json'));
+      const meta = await this.readMeta(join(dir, 'meta.json'));
       if (meta === null) continue;
       const tape = await readTapeShape(join(dir, 'tape.bin')).catch(() => null);
-      if (tape === null || tape.rows === 0) {
-        this.skip(id, 'no readable tape.bin');
-        continue;
-      }
+      if (tape === null || tape.rows === 0) continue;
       const hasRecordings = (await envDirCount(dir)) > 0;
       const summaryStat = await statOrNull(join(dir, 'summary.json'));
       const complete = tape.maxStep >= meta.steps && meta.steps > 0;
