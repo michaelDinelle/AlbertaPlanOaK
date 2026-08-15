@@ -61,8 +61,7 @@ export interface PlaybackSource {
   readonly frameCount: number;
   readonly complete: boolean;
   frameAt(i: number): EnvFrame<unknown>;
-  eventsAt(i: number): SimEvent[];
-  eventEntries(): IterableIterator<[number, SimEvent[]]>;
+  eventsAt(i: number): readonly SimEvent[];
 }
 
 export function sampleFrame(source: PlaybackSource, position: number, out: FrameState): void {
