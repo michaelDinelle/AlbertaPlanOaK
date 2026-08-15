@@ -120,6 +120,3 @@ export function isEnvId(s: string): s is EnvId {
   return (ENV_IDS as readonly string[]).includes(s);
 }
 
-export function envBySlug(slug: string): EnvInfo | undefined {
-  return Object.values(ENVS).find((e) => e.slug === slug);
-}

@@ -1,4 +1,5 @@
 
+import { FOURROOMS_GX, FOURROOMS_GY, FOURROOMS_X, FOURROOMS_Y } from '@sim/envs/fourrooms';
 import { cellToWorldVec, clampCell, type GridSize } from '@kit/grid';
 import { CelebrationPool, attachCelebrations, disposeCelebrations } from '@kit/celebrate';
 import { GroundTruthOverlay } from '@kit/debug';
@@ -32,10 +33,6 @@ const CAM_AZIMUTH = CAMERA_AZIMUTH;
 const CAM_POLAR = 0.75;
 const CAM_DISTANCE = 17.8;
 const CAM_TARGET_Y = 0.5;
-const CAM_YAW_RANGE = 0.6;
-const CAM_DISTANCE_THUMB = 21.5;
-const CAM_AZIMUTH_THUMB = 0.42;
-const CAM_POLAR_THUMB = 0.72;
 
 const BURST_SCALE = 0.85;
 const RIPPLE_SCALE = 0.5;
@@ -53,24 +50,11 @@ const OPEN_BREATH = 0.18;
 const OPEN_PROXIMITY = 0.4;
 const PROXIMITY_CELLS = 4;
 
-interface FourRoomsLike {
-  x?: unknown;
-  y?: unknown;
-  gx?: unknown;
-  gy?: unknown;
-}
-
 function readCells(state: FrameState, grid: GridSize, agent: GridCell, goal: GridCell): void {
-  const d = state.derived as FourRoomsLike | null | undefined;
-  const has = d !== null && typeof d === 'object';
-  const ax = has && typeof d.x === 'number' ? d.x : (state.pose[0] ?? 0);
-  const ay = has && typeof d.y === 'number' ? d.y : (state.pose[1] ?? 0);
-  const gx = has && typeof d.gx === 'number' ? d.gx : (state.pose[2] ?? 0);
-  const gy = has && typeof d.gy === 'number' ? d.gy : (state.pose[3] ?? 0);
-  agent.x = Number.isFinite(ax) ? Math.round(ax) : 0;
-  agent.y = Number.isFinite(ay) ? Math.round(ay) : 0;
-  goal.x = Number.isFinite(gx) ? Math.round(gx) : 0;
-  goal.y = Number.isFinite(gy) ? Math.round(gy) : 0;
+  agent.x = Math.round(state.pose[FOURROOMS_X] ?? 0);
+  agent.y = Math.round(state.pose[FOURROOMS_Y] ?? 0);
+  goal.x = Math.round(state.pose[FOURROOMS_GX] ?? 0);
+  goal.y = Math.round(state.pose[FOURROOMS_GY] ?? 0);
   clampCell(agent, grid);
   clampCell(goal, grid);
 }
@@ -130,7 +114,6 @@ class FourSeasonsCourtyardScene implements SceneModule {
     const wisp = new Wisp(
       {
         color: accent,
-        tier: ctx.tier,
         radius: 0.21,
         hop: { duration: HOP_SECONDS, height: HOP_HEIGHT },
         name: 'courtyardWisp',
@@ -141,7 +124,6 @@ class FourSeasonsCourtyardScene implements SceneModule {
     this.scene.add(wisp.group);
 
     const lantern = buildLantern({
-      tier: ctx.tier,
       palette,
       blossom: shade(blendTokens(this.blossom, palette.groundB, 0.12), 0.3),
       flame,
@@ -151,13 +133,12 @@ class FourSeasonsCourtyardScene implements SceneModule {
     this.lantern = lantern;
     this.scene.add(lantern.group);
 
-    const thumb = ctx.tier === 'thumb';
     const rig = makeOrbitRig({
       canvas: ctx.canvas,
       target: [0, CAM_TARGET_Y, 0],
-      distance: thumb ? CAM_DISTANCE_THUMB : CAM_DISTANCE,
-      azimuth: thumb ? CAM_AZIMUTH_THUMB : CAM_AZIMUTH,
-      polar: thumb ? CAM_POLAR_THUMB : CAM_POLAR,
+      distance: CAM_DISTANCE,
+      azimuth: CAM_AZIMUTH,
+      polar: CAM_POLAR,
       fov: ctx.tokens.fovHero,
       near: 0.1,
       far: 900,
@@ -172,7 +153,6 @@ class FourSeasonsCourtyardScene implements SceneModule {
     rig.snap();
 
     const pool = new CelebrationPool({
-      tier: ctx.tier,
       seed: ctx.seed,
       burstSize: BURST_PARTICLES,
       name: 'courtyardCelebrations',

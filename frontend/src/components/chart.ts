@@ -665,27 +665,3 @@ export interface SpaghettiSpec extends Omit<ChartSpec, 'series' | 'data' | 'tool
   onLaneClick?(key: string, step: number): void;
 }
 
-export function spaghetti(spec: SpaghettiSpec): ChartHandle {
-  let focused: string | null = null;
-  const handle = createChart({
-    ...spec,
-    tooltip: 'focus',
-    focus: true,
-    series: spec.lanes.map((lane) => ({ label: lane.label, stroke: VIZ.lane, width: 1, quiet: true })),
-    data: [
-      spec.steps as number[],
-      ...spec.lanes.map((lane) => lane.values as (number | null)[]),
-    ] as unknown as uPlot.AlignedData,
-    legend: false,
-    onFocus: (index) => {
-      focused = index === null ? null : spec.lanes[index]?.key ?? null;
-      spec.onLaneFocus?.(focused);
-      spec.onFocus?.(index);
-    },
-    onSeek: (x, phase) => {
-      if (phase === 'tap' && focused !== null && spec.onLaneClick) spec.onLaneClick(focused, x);
-      else spec.onSeek?.(x, phase);
-    },
-  });
-  return handle;
-}

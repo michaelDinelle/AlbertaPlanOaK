@@ -1,5 +1,5 @@
 
-import { GoalBeacon, KeyToken, cellFieldDetail } from '@kit/grid';
+import { GoalBeacon, KeyToken } from '@kit/grid';
 import {
   emissiveMaterial,
   oakMaterial,
@@ -10,7 +10,6 @@ import {
 } from '@kit/materials';
 import { hash1f } from '@kit/rng';
 import type { Palette } from '@kit/tokens';
-import type { QualityTier } from '@kit/types';
 import * as THREE from 'three';
 import {
   DIVIDER_CAP,
@@ -39,7 +38,6 @@ const IVY_BEAT: readonly [number, number] = [0.0, 0.32];
 const SWING_BEAT: readonly [number, number] = [0.06, 0.8];
 
 export interface GateOptions {
-  tier: QualityTier;
   palette: Palette;
   skin: GardenSkin;
   yaw: number;
@@ -107,9 +105,8 @@ function sampleVine(u: number, du: number, a: THREE.Vector3, b: THREE.Vector3, o
 }
 
 export function buildGate(opts: GateOptions): GateHandle {
-  const { tier, palette, skin, yaw, seed } = opts;
-  const detail = cellFieldDetail(tier);
-  const shadows = tier !== 'thumb';
+  const { palette, skin, yaw, seed } = opts;
+  const detail = 1;
 
   const group = new THREE.Group();
   group.name = opts.name ?? 'ivyGate';
@@ -123,7 +120,7 @@ export function buildGate(opts: GateOptions): GateHandle {
   frame.rotation.y = yaw;
   root.add(frame);
 
-  const stoneGeometry = makeGateStoneGeometry(skin, tier);
+  const stoneGeometry = makeGateStoneGeometry(skin);
   const stoneMaterial: OakMaterial = oakMaterial({
     vertexColors: true,
     flatShading: true,
@@ -133,13 +130,12 @@ export function buildGate(opts: GateOptions): GateHandle {
     toonSteps: 3,
     toonSoftness: 0.3,
     toonFloor: 0.22,
-    tier,
     name: 'ivyGateStoneMaterial',
   });
   const stone = new THREE.Mesh(stoneGeometry, stoneMaterial);
   stone.name = 'ivyGateStone';
-  stone.castShadow = shadows;
-  stone.receiveShadow = shadows;
+  stone.castShadow = true;
+  stone.receiveShadow = true;
   frame.add(stone);
 
   const pivot = new THREE.Object3D();
@@ -147,7 +143,7 @@ export function buildGate(opts: GateOptions): GateHandle {
   pivot.position.set(HINGE_X, 0.03, DOOR_FACE_Z);
   frame.add(pivot);
 
-  const doorGeometry = makeDoorGeometry(skin, tier);
+  const doorGeometry = makeDoorGeometry(skin);
   const doorMaterial: OakMaterial = oakMaterial({
     vertexColors: true,
     flatShading: true,
@@ -157,17 +153,16 @@ export function buildGate(opts: GateOptions): GateHandle {
     toonSteps: 3,
     toonSoftness: 0.32,
     toonFloor: 0.28,
-    tier,
     name: 'ivyGateDoorMaterial',
   });
   const door = new THREE.Mesh(doorGeometry, doorMaterial);
   door.name = 'ivyGateDoor';
-  door.castShadow = shadows;
-  door.receiveShadow = shadows;
+  door.castShadow = true;
+  door.receiveShadow = true;
   pivot.add(door);
 
   const sprigCount = Math.max(14, Math.round(64 * detail));
-  const sprigGeometry = makeIvySprigGeometry(skin, tier);
+  const sprigGeometry = makeIvySprigGeometry(skin);
   const ivyMaterial: OakMaterial = oakMaterial({
     vertexColors: true,
     flatShading: true,
@@ -178,7 +173,6 @@ export function buildGate(opts: GateOptions): GateHandle {
     toonSteps: 3,
     toonSoftness: 0.34,
     toonFloor: 0.3,
-    tier,
     name: 'ivyVineMaterial',
   });
   const vine = new THREE.InstancedMesh(sprigGeometry, ivyMaterial, sprigCount);
@@ -305,8 +299,8 @@ export const GATE_RIDGE = DIVIDER_HEIGHT + DIVIDER_CAP + 0.42;
 const JAMB_HEAD_Y = 0.66;
 const JAMB_HEAD_D = 0.4;
 
-export function makeGateStoneGeometry(skin: GardenSkin, tier: QualityTier): THREE.BufferGeometry {
-  const detail = cellFieldDetail(tier);
+export function makeGateStoneGeometry(skin: GardenSkin): THREE.BufferGeometry {
+  const detail = 1;
   const parts: ColoredPart[] = [];
   const jambW = 0.115;
   const jambD = DIVIDER_THICKNESS;
@@ -354,7 +348,7 @@ export function makeGateStoneGeometry(skin: GardenSkin, tier: QualityTier): THRE
   slab.translate(0, 0.028, 0);
   parts.push({ geometry: slab, color: skin.threshold });
 
-  const stones = tier === 'thumb' ? 0 : 2;
+  const stones = 2;
   for (let i = 0; i < stones; i++) {
     const s = new THREE.IcosahedronGeometry(0.1, Math.round(detail));
     s.scale(1, 0.7, 1.3);
@@ -365,10 +359,10 @@ export function makeGateStoneGeometry(skin: GardenSkin, tier: QualityTier): THRE
   return mergeColoredParts(parts, 'ivyGateStone');
 }
 
-export function makeDoorGeometry(skin: GardenSkin, tier: QualityTier): THREE.BufferGeometry {
-  const detail = cellFieldDetail(tier);
+export function makeDoorGeometry(skin: GardenSkin): THREE.BufferGeometry {
+  const detail = 1;
   const parts: ColoredPart[] = [];
-  const boards = tier === 'thumb' ? 3 : 5;
+  const boards = 5;
   const h = DOOR_HEIGHT - 0.06;
   const boardW = DOOR_WIDTH / boards;
 
@@ -393,7 +387,7 @@ export function makeDoorGeometry(skin: GardenSkin, tier: QualityTier): THREE.Buf
   return mergeColoredParts(parts, 'ivyGateDoor');
 }
 
-export function makeIvySprigGeometry(skin: GardenSkin, tier: QualityTier): THREE.BufferGeometry {
+export function makeIvySprigGeometry(skin: GardenSkin): THREE.BufferGeometry {
   const parts: ColoredPart[] = [];
   const stemLength = 0.13;
   const stem = new THREE.BoxGeometry(0.023, stemLength, 0.023);
@@ -401,7 +395,7 @@ export function makeIvySprigGeometry(skin: GardenSkin, tier: QualityTier): THREE
   parts.push({ geometry: stem, color: skin.ivyDark });
 
   const leaves: readonly { at: number; side: number }[] =
-    tier === 'thumb' ? [{ at: 0.5, side: 1 }] : [{ at: 0.3, side: -1 }, { at: 0.74, side: 1 }];
+    false ? [{ at: 0.5, side: 1 }] : [{ at: 0.3, side: -1 }, { at: 0.74, side: 1 }];
   for (const spec of leaves) {
     const leaf = ivyLeafGeometry();
     leaf.rotateZ(spec.side * 0.95);
@@ -418,7 +412,6 @@ const SHRINE_CROWN = 0.66;
 const EMBER_HDR = 1.3;
 
 export interface ShrineOptions {
-  tier: QualityTier;
   palette: Palette;
   skin: GardenSkin;
   name?: string;
@@ -436,8 +429,7 @@ export interface ShrineHandle {
 }
 
 export function buildShrine(opts: ShrineOptions): ShrineHandle {
-  const { tier, palette, skin } = opts;
-  const shadows = tier !== 'thumb';
+  const { palette, skin } = opts;
   const group = new THREE.Group();
   group.name = opts.name ?? 'goalShrine';
 
@@ -447,7 +439,6 @@ export function buildShrine(opts: ShrineOptions): ShrineHandle {
 
   const beacon = new GoalBeacon({
     color: skin.amber,
-    tier,
     height: 0.85,
     radius: 0.1,
     intensity: 0.34,
@@ -459,7 +450,7 @@ export function buildShrine(opts: ShrineOptions): ShrineHandle {
   body.name = 'shrineBody';
   root.add(body);
 
-  const stoneGeometry = makeShrineGeometry(skin, tier);
+  const stoneGeometry = makeShrineGeometry(skin);
   const stoneMaterial: OakMaterial = oakMaterial({
     vertexColors: true,
     flatShading: true,
@@ -469,16 +460,15 @@ export function buildShrine(opts: ShrineOptions): ShrineHandle {
     toonSteps: 3,
     toonSoftness: 0.3,
     toonFloor: 0.24,
-    tier,
     name: 'shrineStoneMaterial',
   });
   const stone = new THREE.Mesh(stoneGeometry, stoneMaterial);
   stone.name = 'shrineStone';
-  stone.castShadow = shadows;
-  stone.receiveShadow = shadows;
+  stone.castShadow = true;
+  stone.receiveShadow = true;
   body.add(stone);
 
-  const emberGeometry = new THREE.IcosahedronGeometry(0.075, tier === 'thumb' ? 0 : 1);
+  const emberGeometry = new THREE.IcosahedronGeometry(0.075, 1);
   const emberMaterial: EmissiveMaterial = emissiveMaterial(skin.amber, EMBER_HDR, { name: 'shrineEmber' });
   const ember = new THREE.Mesh(emberGeometry, emberMaterial);
   ember.name = 'shrineEmber';
@@ -525,8 +515,8 @@ export function buildShrine(opts: ShrineOptions): ShrineHandle {
   };
 }
 
-export function makeShrineGeometry(skin: GardenSkin, tier: QualityTier): THREE.BufferGeometry {
-  const detail = cellFieldDetail(tier);
+export function makeShrineGeometry(skin: GardenSkin): THREE.BufferGeometry {
+  const detail = 1;
   const radial = Math.max(5, Math.round(12 * detail));
   const parts: ColoredPart[] = [];
 
@@ -542,7 +532,7 @@ export function makeShrineGeometry(skin: GardenSkin, tier: QualityTier): THREE.B
   platform.translate(0, 0.5, 0);
   parts.push({ geometry: platform, color: skin.shrineDark });
 
-  const posts = tier === 'thumb' ? 4 : 6;
+  const posts = 6;
   for (let i = 0; i < posts; i++) {
     const a = (i / posts) * Math.PI * 2;
     const post = new THREE.BoxGeometry(0.045, 0.26, 0.045);
@@ -559,7 +549,7 @@ export function makeShrineGeometry(skin: GardenSkin, tier: QualityTier): THREE.B
   roof.translate(0, 0.905, 0);
   parts.push({ geometry: roof, color: skin.shrineStone });
 
-  const finial = new THREE.IcosahedronGeometry(0.048, tier === 'thumb' ? 0 : 1);
+  const finial = new THREE.IcosahedronGeometry(0.048, 1);
   finial.translate(0, 1.02, 0);
   parts.push({ geometry: finial, color: skin.shrineDark });
 
@@ -570,7 +560,6 @@ export function makeShrineGeometry(skin: GardenSkin, tier: QualityTier): THREE.B
 export const SEED_HOVER = 0.34;
 
 export interface SeedBedOptions {
-  tier: QualityTier;
   palette: Palette;
   skin: GardenSkin;
   name?: string;
@@ -588,7 +577,7 @@ export interface SeedBedHandle {
 }
 
 export function buildSeedBed(opts: SeedBedOptions): SeedBedHandle {
-  const { tier, palette, skin } = opts;
+  const { palette, skin } = opts;
   const group = new THREE.Group();
   group.name = opts.name ?? 'seedBed';
 
@@ -600,7 +589,7 @@ export function buildSeedBed(opts: SeedBedOptions): SeedBedHandle {
   bed.name = 'seedBedMoss';
   root.add(bed);
 
-  const bedGeometry = makeSeedBedGeometry(skin, tier);
+  const bedGeometry = makeSeedBedGeometry(skin);
   const bedMaterial: OakMaterial = oakMaterial({
     vertexColors: true,
     flatShading: true,
@@ -610,16 +599,15 @@ export function buildSeedBed(opts: SeedBedOptions): SeedBedHandle {
     toonSteps: 3,
     toonSoftness: 0.32,
     toonFloor: 0.28,
-    tier,
     name: 'seedBedMaterial',
   });
   const mesh = new THREE.Mesh(bedGeometry, bedMaterial);
   mesh.name = 'seedBedStone';
   mesh.castShadow = false;
-  mesh.receiveShadow = tier !== 'thumb';
+  mesh.receiveShadow = true;
   bed.add(mesh);
 
-  const poolGeometry = new THREE.CircleGeometry(0.2, tier === 'thumb' ? 8 : 20);
+  const poolGeometry = new THREE.CircleGeometry(0.2, 20);
   poolGeometry.rotateX(-Math.PI / 2);
   poolGeometry.name = 'seedBedPool';
   const poolMaterial: EmissiveMaterial = emissiveMaterial(skin.amber, 0.5, {
@@ -641,7 +629,6 @@ export function buildSeedBed(opts: SeedBedOptions): SeedBedHandle {
 
   const token = new KeyToken({
     color: skin.amber,
-    tier,
     radius: 0.105,
     hover: 0,
     intensity: 0.85,
@@ -686,16 +673,16 @@ export function buildSeedBed(opts: SeedBedOptions): SeedBedHandle {
   };
 }
 
-export function makeSeedBedGeometry(skin: GardenSkin, tier: QualityTier): THREE.BufferGeometry {
-  const detail = cellFieldDetail(tier);
+export function makeSeedBedGeometry(skin: GardenSkin): THREE.BufferGeometry {
+  const detail = 1;
   const parts: ColoredPart[] = [];
 
-  const cushion = new THREE.IcosahedronGeometry(0.19, tier === 'thumb' ? 0 : 1);
+  const cushion = new THREE.IcosahedronGeometry(0.19, 1);
   cushion.scale(1, 0.36, 1);
   cushion.translate(0, 0.045, 0);
   parts.push({ geometry: cushion, color: skin.ivy });
 
-  const stones = tier === 'thumb' ? 4 : 7;
+  const stones = 7;
   for (let i = 0; i < stones; i++) {
     const a = (i / stones) * Math.PI * 2;
     const s = new THREE.IcosahedronGeometry(0.062, Math.round(detail));

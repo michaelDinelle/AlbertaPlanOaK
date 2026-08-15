@@ -141,6 +141,3 @@ export function slotValue(entry: EnvEntry, pose: ArrayLike<number>, slot: NamedS
   return at === undefined ? Number.NaN : (pose[at] ?? Number.NaN);
 }
 
-export function hasSlot(entry: EnvEntry, slot: NamedSlot): boolean {
-  return entry.slotAt[slot] !== undefined;
-}

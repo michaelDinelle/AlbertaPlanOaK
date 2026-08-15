@@ -12,12 +12,10 @@ export type SimEvent =
   | { type: 'resurface' };
 
 
-export interface EnvFrame<S = unknown> {
+export interface EnvFrame {
   step: number;
-  ctrl: Float32Array;
   done: number;
   pose: Float32Array;
-  state: S;
 }
 
 
@@ -58,13 +56,12 @@ export interface EnvGeometry {
 }
 
 
-export interface EnvDecoder<S = unknown, St = unknown> {
+export interface EnvDecoder<St = unknown> {
   envId: EnvId;
   initStatic(seed: number): St;
   geometry(st: St, seed: number): EnvGeometry;
-  initFrame(seed: number, st: St): EnvFrame<S>;
-  decodeFrame(i: number, raw16: Float32Array, st: St, prev: EnvFrame<S>): EnvFrame<S>;
-  deriveEvents(prev: EnvFrame<S>, next: EnvFrame<S>, st: St): SimEvent[];
+  initFrame(seed: number, st: St): EnvFrame;
+  deriveEvents(prev: EnvFrame, next: EnvFrame, st: St): SimEvent[];
 }
 
 

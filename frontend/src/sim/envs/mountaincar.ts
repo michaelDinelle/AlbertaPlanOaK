@@ -1,7 +1,6 @@
 
 import type { EnvDecoder, EnvFrame, EnvGeometry, SimEvent } from '../types';
 import { NO_EVENTS } from '../events';
-import { OFF_POSE, effortView, POSE_LEN, OFF_DONE } from '../record';
 
 
 export const MC_MIN_POS = -1.2;
@@ -9,9 +8,16 @@ export const MC_MAX_POS = 0.6;
 export const MC_GOAL_POS = 0.5;
 export const MC_MAX_SPEED = 0.07;
 export const MC_START_POS = -0.5;
-export const MC_FORCE = 0.001;
-export const MC_GRAVITY = 0.0025;
 export const MC_ACTIONS = 3;
+
+export const MOUNTAINCAR_POS = 0;
+export const MOUNTAINCAR_VEL = 1;
+export const MOUNTAINCAR_GOAL = 2;
+export const MOUNTAINCAR_ACTION = 3;
+
+export function mountainCarForce(action: number): number {
+  return ((Math.trunc(action) >>> 0) % MC_ACTIONS) - 1;
+}
 export const MC_TROUGH_X = -Math.PI / 6;
 export const MC_CREST_X = Math.PI / 6;
 
@@ -22,15 +28,6 @@ export interface MountainCarStatic {
   goalPos: number;
   maxSpeed: number;
   startPos: number;
-}
-
-export interface MountainCarState {
-  pos: number;
-  vel: number;
-  goal: number;
-  height: number;
-  action: number;
-  force: number;
 }
 
 
@@ -66,23 +63,7 @@ const GEOMETRY: EnvGeometry = Object.freeze({
   classic: Object.freeze({ heightAt: mountainCarHeight, anchors: ANCHORS }),
 });
 
-function forceOf(ctrl0: number): number {
-  return ((Math.trunc(ctrl0) >>> 0) % MC_ACTIONS) - 1;
-}
-
-function makeState(pose: Float32Array, ctrl0: number, applied: boolean): MountainCarState {
-  const pos = pose[0] ?? 0;
-  return {
-    pos,
-    vel: pose[1] ?? 0,
-    goal: pose[2] ?? MC_GOAL_POS,
-    height: mountainCarHeight(pos),
-    action: ctrl0,
-    force: applied ? forceOf(ctrl0) : 0,
-  };
-}
-
-export const mountainCarDecoder: EnvDecoder<MountainCarState, MountainCarStatic> = {
+export const mountainCarDecoder: EnvDecoder<MountainCarStatic> = {
   envId: 'MountainCar-cont-v0',
 
   initStatic(): MountainCarStatic {
@@ -93,33 +74,21 @@ export const mountainCarDecoder: EnvDecoder<MountainCarState, MountainCarStatic>
     return GEOMETRY;
   },
 
-  initFrame(): EnvFrame<MountainCarState> {
+  initFrame(): EnvFrame {
     const pose = new Float32Array(9);
     pose[0] = MC_START_POS;
     pose[2] = MC_GOAL_POS;
     return {
       step: -1,
-      ctrl: new Float32Array(6),
       done: 0,
       pose,
-      state: makeState(pose, 0, false),
     };
   },
 
-  decodeFrame(i: number, raw16: Float32Array): EnvFrame<MountainCarState> {
-    const pose = raw16.subarray(OFF_POSE, OFF_POSE + POSE_LEN);
-    return {
-      step: i,
-      ctrl: effortView(raw16, 3),
-      done: raw16[OFF_DONE] ?? 0,
-      pose,
-      state: makeState(pose, raw16[OFF_POSE + 3] ?? 0, true),
-    };
-  },
 
   deriveEvents(
-    _prev: EnvFrame<MountainCarState>,
-    next: EnvFrame<MountainCarState>,
+    _prev: EnvFrame,
+    next: EnvFrame,
   ): SimEvent[] {
     if (next.done === 0) return NO_EVENTS;
     return [{ type: 'goal' }, { type: 'done' }, { type: 'teleport' }];

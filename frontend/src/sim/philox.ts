@@ -5,10 +5,6 @@ const W0 = 0x9e3779b9;
 const W1 = 0xbb67ae85;
 
 export const STREAM_RESET = 0;
-export const STREAM_CTRL = 1;
-export const STREAM_ACT = 2;
-export const STREAM_GRIDWORLD = 3;
-
 const TWO_POW_NEG24 = 5.9604644775390625e-8;
 
 export function mulhi(a: number, b: number): number {
@@ -77,10 +73,6 @@ export function u01open(x: number): number {
 export function uniform(x: number, lo: number, hi: number): number {
   const span = Math.fround(Math.fround(hi) - Math.fround(lo));
   return Math.fround(Math.fround(lo) + Math.fround(span * u01(x)));
-}
-
-export function uniformIndex(x: number, n: number): number {
-  return Math.trunc(Math.fround(u01(x) * Math.fround(n)));
 }
 
 export function boxMuller(a: number, b: number): [number, number] {

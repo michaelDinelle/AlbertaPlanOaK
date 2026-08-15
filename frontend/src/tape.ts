@@ -5,6 +5,7 @@ export interface Tape {
   laneCount: number;
   fields: string[];
   rows: number;
+  capacity: number;
   stepStart: Float64Array;
   stepEnd: Float64Array;
   wallSeconds: Float32Array;
@@ -56,6 +57,7 @@ export function parseTape(bytes: Uint8Array, etag: string | null = null): Tape {
     laneCount,
     fields,
     rows: 0,
+    capacity: 0,
     stepStart: new Float64Array(0),
     stepEnd: new Float64Array(0),
     wallSeconds: new Float32Array(0),
@@ -73,24 +75,33 @@ function appendRows(tape: Tape, more: Uint8Array, etag: string | null): Tape {
   const added = Math.floor(more.byteLength / tape.rowBytes);
   if (added <= 0) return { ...tape, etag };
   const rows = tape.rows + added;
-  const data = new Float32Array(rows * tape.fields.length * tape.laneCount);
-  const next: Tape = {
-    ...tape,
-    rows,
-    stepStart: new Float64Array(rows),
-    stepEnd: new Float64Array(rows),
-    wallSeconds: new Float32Array(rows),
-    data,
-    bits: new Uint32Array(data.buffer),
-    byteLength: tape.byteLength + added * tape.rowBytes,
-    etag,
-  };
-  next.stepStart.set(tape.stepStart);
-  next.stepEnd.set(tape.stepEnd);
-  next.wallSeconds.set(tape.wallSeconds);
-  next.data.set(tape.data);
+  const valuesPerRow = tape.fields.length * tape.laneCount;
+  let next: Tape;
+  if (rows <= tape.capacity) {
+    next = { ...tape, rows, byteLength: tape.byteLength + added * tape.rowBytes, etag };
+  } else {
+    let capacity = Math.max(tape.capacity, 1);
+    while (capacity < rows) capacity *= 2;
+    const data = new Float32Array(capacity * valuesPerRow);
+    next = {
+      ...tape,
+      rows,
+      capacity,
+      stepStart: new Float64Array(capacity),
+      stepEnd: new Float64Array(capacity),
+      wallSeconds: new Float32Array(capacity),
+      data,
+      bits: new Uint32Array(data.buffer),
+      byteLength: tape.byteLength + added * tape.rowBytes,
+      etag,
+    };
+    next.stepStart.set(tape.stepStart);
+    next.stepEnd.set(tape.stepEnd);
+    next.wallSeconds.set(tape.wallSeconds);
+    next.data.set(tape.data);
+  }
   const dv = new DataView(more.buffer, more.byteOffset, more.byteLength);
-  const valueFloats = next.fields.length * next.laneCount;
+  const valueFloats = valuesPerRow;
   for (let a = 0; a < added; a++) {
     const r = tape.rows + a;
     const at = a * next.rowBytes;

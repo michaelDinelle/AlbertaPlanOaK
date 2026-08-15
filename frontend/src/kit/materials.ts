@@ -1,6 +1,5 @@
 
 import * as THREE from 'three';
-import type { QualityTier } from './types';
 
 
 export interface NumberUniform {
@@ -110,7 +109,6 @@ export interface OakMaterialOptions {
 
   wind?: OakWindOptions | number;
 
-  tier?: QualityTier;
 }
 
 const DEFAULT_TOON_STEPS = 3;
@@ -118,17 +116,6 @@ const DEFAULT_TOON_SOFTNESS = 0.25;
 const DEFAULT_RIM_POWER = 3;
 const DEFAULT_WIND_FREQ = 1.1;
 const DEFAULT_WIND_HEIGHT = 1;
-
-export function tierEffectScale(tier: QualityTier | undefined): { rim: number; wind: number } {
-  switch (tier) {
-    case 'thumb':
-      return { rim: 0, wind: 0 };
-    case 'medium':
-      return { rim: 0.75, wind: 0.7 };
-    default:
-      return { rim: 1, wind: 1 };
-  }
-}
 
 const TOON_FN =  `
 uniform float uToonSteps;
@@ -256,10 +243,9 @@ function normalizeWind(wind: OakWindOptions | number | undefined): OakWindOption
 }
 
 export function oakMaterial(opts: OakMaterialOptions = {}): OakMaterial {
-  const scale = tierEffectScale(opts.tier);
   const wind = normalizeWind(opts.wind);
-  const windAmp = wind ? wind.amplitude * scale.wind : 0;
-  const rimStrength = (opts.rimStrength ?? 0) * scale.rim;
+  const windAmp = wind ? wind.amplitude : 0;
+  const rimStrength = opts.rimStrength ?? 0;
 
   const useToon = (opts.toonSteps ?? DEFAULT_TOON_STEPS) > 0;
   const useRim = rimStrength > 0;
@@ -291,7 +277,7 @@ export function oakMaterial(opts: OakMaterialOptions = {}): OakMaterial {
       uniforms.uTime.value = t;
     },
     setWind(amplitude: number, frequency?: number) {
-      uniforms.uWindAmp.value = amplitude * scale.wind;
+      uniforms.uWindAmp.value = amplitude;
       if (frequency !== undefined) uniforms.uWindFreq.value = frequency;
     },
     setRim(strength: number, color?: THREE.ColorRepresentation) {
@@ -428,7 +414,6 @@ export interface WispMaterialOptions {
   intensity?: number;
   rimPower?: number;
   breathe?: number;
-  tier?: QualityTier;
   name?: string;
 }
 
@@ -476,14 +461,13 @@ void main() {
 `;
 
 export function wispMaterial(color: THREE.ColorRepresentation, opts: WispMaterialOptions = {}): WispMaterial {
-  const scale = tierEffectScale(opts.tier);
   const uTime: NumberUniform = { value: 0 };
   const uPulse: NumberUniform = { value: 0 };
   const uniforms = {
     uColor: { value: new THREE.Color(color) },
     uIntensity: { value: opts.intensity ?? 1.8 },
     uRimPower: { value: opts.rimPower ?? 2.2 },
-    uBreathe: { value: (opts.breathe ?? 0.12) * (scale.rim > 0 ? 1 : 0) },
+    uBreathe: { value: opts.breathe ?? 0.12 },
     uTime,
     uPulse,
   };

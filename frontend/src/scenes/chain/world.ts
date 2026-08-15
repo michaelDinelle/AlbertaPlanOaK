@@ -16,7 +16,7 @@ import { skyFromPalette, type SkyHandle } from '@kit/sky';
 import { makeTerrain, type TerrainHandle } from '@kit/terrain';
 import { valueNoise2 } from '@kit/textures';
 import { TOKENS, type Palette } from '@kit/tokens';
-import type { QualityTier, SceneContext } from '@kit/types';
+import type { SceneContext } from '@kit/types';
 import {
   excludeAny,
   scatterFlowers,
@@ -246,10 +246,6 @@ export const CAP_HEIGHT = 0.5;
 export const CAP_SCALE_MIN = 0.9;
 export const CAP_SCALE_MAX = 1.08;
 
-export function capSides(tier: QualityTier): number {
-  return tier === 'thumb' ? 5 : tier === 'medium' ? 6 : 7;
-}
-
 export function capApothem(sides: number, xzScale: number): number {
   return CAP_R_TOP * xzScale * Math.cos(Math.PI / Math.max(3, sides));
 }
@@ -326,10 +322,9 @@ function buildStoneCaps(
   grid: GridGeometry,
   skin: CreekSkin,
   palette: Palette,
-  tier: QualityTier,
   seed: number,
 ): StoneCapsHandle {
-  const sides = capSides(tier);
+  const sides = 7;
   const geometry = stoneCapGeometry(sides, CAP_HEIGHT);
   const material = oakMaterial({
     color: 0xffffff,
@@ -341,14 +336,13 @@ function buildStoneCaps(
     toonSteps: 3,
     toonSoftness: 0.3,
     toonFloor: 0.22,
-    tier,
     name: 'chainStoneCapMaterial',
   });
 
   const count = grid.w;
   const mesh = new THREE.InstancedMesh(geometry, material, Math.max(1, count));
   mesh.name = 'chainStoneCaps';
-  mesh.castShadow = tier !== 'thumb';
+  mesh.castShadow = true;
   mesh.receiveShadow = false;
   mesh.instanceColor = new THREE.InstancedBufferAttribute(new Float32Array(Math.max(1, count) * 3), 3);
 
@@ -445,10 +439,9 @@ function dragonflyGeometry(skin: CreekSkin): THREE.BufferGeometry {
 function buildDragonflies(
   skin: CreekSkin,
   palette: Palette,
-  tier: QualityTier,
   seed: number,
 ): DragonfliesHandle {
-  const count = tier === 'thumb' ? 0 : 3;
+  const count = 3;
   const geometry = dragonflyGeometry(skin);
   const material = oakMaterial({
     vertexColors: true,
@@ -461,7 +454,6 @@ function buildDragonflies(
     toonSteps: 2,
     toonSoftness: 0.4,
     toonFloor: 0.4,
-    tier,
     name: 'chainDragonflyMaterial',
   });
   const mesh = new THREE.InstancedMesh(geometry, material, Math.max(1, count));
@@ -490,7 +482,6 @@ function buildDragonflies(
     mesh,
     count,
     setTime(t) {
-      if (count === 0) return;
       for (let i = 0; i < count; i++) {
         const p0 = phase[i * 4] ?? 0;
         const rate = phase[i * 4 + 1] ?? 0.5;
@@ -567,16 +558,14 @@ interface Timed {
 }
 
 export function buildWorld(ctx: SceneContext, scene: THREE.Scene, grid: GridGeometry): WorldHandle {
-  const tier: QualityTier = ctx.tier;
   const palette: Palette = ctx.tokens.palettes.afternoon;
   const skin = creekSkin(palette, ctx.tokens);
-  const shadows = tier !== 'thumb';
   const group = new THREE.Group();
   group.name = 'sixteenStonesWorld';
   const owned: Disposable[] = [];
   const timed: Timed[] = [];
 
-  const sky = skyFromPalette(palette, 'afternoon', tier, {
+  const sky = skyFromPalette(palette, 'afternoon', {
     sunDir: SUN_DIR,
     sunSize: 0.04,
     sunHdr: 5.2,
@@ -590,7 +579,7 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene, grid: GridGeom
   owned.push(sky);
   timed.push({ setTime: (t) => sky.setTime(t) });
 
-  const rig = makeLightRig(palette, tier, {
+  const rig = makeLightRig(palette, {
     sunDir: sky.sunDirection,
     pointCount: 3,
     pointDistance: 7.5,
@@ -605,7 +594,6 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene, grid: GridGeom
   const terrain = makeTerrain({
     size: TERRAIN_SIZE,
     segments: TERRAIN_SEGMENTS,
-    tier,
     seed: ctx.seed,
     heightFn: makeCreekHeight(ctx.seed),
     jitter: 0,
@@ -627,7 +615,7 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene, grid: GridGeom
       toonSoftness: 0.3,
       toonFloor: 0.24,
     },
-    receiveShadow: shadows,
+    receiveShadow: true,
     castShadow: false,
     name: 'creekBed',
   });
@@ -637,7 +625,6 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene, grid: GridGeom
   const water = makeWater({
     size: [TERRAIN_SIZE[0] + 8, TERRAIN_SIZE[1] + 10],
     palette,
-    tier,
     segments: 128,
     level: WATER_LEVEL,
     shallow: skin.waterShallow,
@@ -672,14 +659,13 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene, grid: GridGeom
       seed: ctx.seed,
       name: 'stonePlinths',
     },
-    tier,
   );
   field.group.position.y = -PLINTH_DROP;
   group.add(field.group);
   owned.push(field);
   timed.push({ setTime: (t) => field.setTime(t) });
 
-  const caps = buildStoneCaps(grid, skin, palette, tier, ctx.seed);
+  const caps = buildStoneCaps(grid, skin, palette, ctx.seed);
   group.add(caps.mesh);
   owned.push(caps);
 
@@ -696,7 +682,6 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene, grid: GridGeom
       count: 900,
       area: { x: side * 9.4, z: 0, halfX: 2.1, halfZ: 26 },
       seed: (ctx.seed ^ 0x4ee1) + (side > 0 ? 977 : 0),
-      tier,
       exclude: offCrossing,
       heightAt,
       color: skin.reed,
@@ -719,7 +704,6 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene, grid: GridGeom
     count: 220,
     area: { x: -5.6, z: 6.8, halfX: 4.2, halfZ: 4.2 },
     seed: ctx.seed ^ 0x1c93,
-    tier,
     exclude: excludeAny(excludeCrossing(grid, 2.2, 0.6), excludeCameraWedge(3.4, 3.4)),
     heightAt,
     color: skin.reed,
@@ -741,7 +725,6 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene, grid: GridGeom
     count: 1100,
     area: { x: 0, z: 0, halfX: 24, halfZ: 30 },
     seed: ctx.seed ^ 0x27a1,
-    tier,
     exclude: excludeAny(offCrossing, (x) => Math.abs(x) < 10.4),
     heightAt,
     color: skin.meadow,
@@ -762,7 +745,6 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene, grid: GridGeom
     count: 420,
     area: { x: 0, z: 0, halfX: 22, halfZ: 22 },
     seed: ctx.seed ^ 0x5b10,
-    tier,
     exclude: excludeAny(offCrossing, (x) => Math.abs(x) < 10.0),
     heightAt,
     color: skin.flower,
@@ -783,7 +765,6 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene, grid: GridGeom
     count: 260,
     area: { x: 0, z: 0, halfX: 21, halfZ: 20 },
     seed: ctx.seed ^ 0x3f77,
-    tier,
     exclude: excludeAny(excludeStones(grid, 0.95), excludeCameraWedge(2.6, 2.6)),
     heightAt,
     color: shade(blendTokens(skin.stoneWet, skin.bed, 0.3), 0.1),
@@ -804,7 +785,6 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene, grid: GridGeom
     count: 100,
     area: { x: 0, z: 0, halfX: 24, halfZ: 34 },
     seed: ctx.seed ^ 0x1a70,
-    tier,
     exclude: excludeAny(
       (x, z) => Math.abs(x) < 11.6 || (Math.abs(z) < 13 && Math.abs(x) < 16),
       excludeCameraWedge(7.5, 7.5),
@@ -832,7 +812,6 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene, grid: GridGeom
     count: 240,
     bounds: { x: 0, y: 0.95, z: 0, halfX: 11, halfY: 1.0, halfZ: 7 },
     seed: ctx.seed ^ 0x7d21,
-    tier,
     color: blendTokens(palette.sun, skin.motes, 0.3),
     size: 0.8,
     intensity: 1.15,
@@ -851,7 +830,6 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene, grid: GridGeom
     count: 220,
     bounds: { x: stoneX(CHAIN_END, grid) - 0.4, y: 1.5, z: 0, halfX: 2.4, halfY: 1.5, halfZ: 2.1 },
     seed: ctx.seed ^ 0x6c31,
-    tier,
     color: skin.blossom,
     size: 1.25,
     intensity: 1.5,
@@ -870,7 +848,6 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene, grid: GridGeom
     size: [50, 70],
     color: blendTokens(palette.fog, palette.sun, 0.25),
     seed: ctx.seed ^ 0x2c1b,
-    tier,
     layers: 2,
     baseY: 0.02,
     spread: 0.7,
@@ -884,7 +861,7 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene, grid: GridGeom
   owned.push(haze);
   timed.push(haze);
 
-  const dragonflies = buildDragonflies(skin, palette, tier, ctx.seed);
+  const dragonflies = buildDragonflies(skin, palette, ctx.seed);
   group.add(dragonflies.mesh);
   owned.push(dragonflies);
   timed.push(dragonflies);

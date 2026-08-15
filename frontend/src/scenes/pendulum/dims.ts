@@ -23,8 +23,6 @@ export const LANTERN_HALF_Z = LANTERN_R;
 
 
 export const SWING_REACH = ROD_LEN + LANTERN_REACH;
-export const SWING_INNER = ROD_LEN - LANTERN_REACH;
-
 
 export const STRAP_HALF = 0.008;
 export const STRAP_Z = LANTERN_HALF_Z + STRAP_HALF + 0.014;

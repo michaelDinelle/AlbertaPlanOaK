@@ -8,7 +8,6 @@ import {
   type OakMaterial,
 } from '@kit/materials';
 import type { Palette } from '@kit/tokens';
-import type { QualityTier } from '@kit/types';
 import * as THREE from 'three';
 import { blendTokens, clamp01, mergeColoredParts, type ColoredPart, type ReefSkin } from './reef';
 
@@ -22,7 +21,6 @@ const PEARL_Y = 0.24;
 const PEARL_HDR = 1.3;
 
 export interface ClamOptions {
-  tier: QualityTier;
   palette: Palette;
   skin: ReefSkin;
   facing: number;
@@ -39,8 +37,8 @@ export interface ClamHandle {
 }
 
 export function buildClam(opts: ClamOptions): ClamHandle {
-  const { tier, palette, skin } = opts;
-  const detail = tier === 'thumb' ? 0.4 : tier === 'medium' ? 0.7 : 1;
+  const { palette, skin } = opts;
+  const detail = 1;
   const group = new THREE.Group();
   group.name = opts.name ?? 'giantClam';
 
@@ -64,7 +62,6 @@ export function buildClam(opts: ClamOptions): ClamHandle {
     toonSteps: 3,
     toonSoftness: 0.32,
     toonFloor: 0.26,
-    tier,
     name: 'clamShellMaterial',
   });
 
@@ -74,7 +71,7 @@ export function buildClam(opts: ClamOptions): ClamHandle {
     const rock = new THREE.CylinderGeometry(0.36, 0.46, 0.15, radial, 1);
     rock.translate(0, 0.075, 0);
     baseParts.push({ geometry: rock, color: blendTokens(skin.shelfDeep, skin.coral, 0.22) });
-    for (let i = 0; i < (tier === 'thumb' ? 2 : 4); i++) {
+    for (let i = 0; i < (4); i++) {
       const a = (i / 4) * Math.PI * 2 + 0.6;
       const knob = new THREE.IcosahedronGeometry(0.06 + 0.025 * ((i % 3) / 2), 0);
       knob.scale(1, 0.7, 1);
@@ -85,8 +82,8 @@ export function buildClam(opts: ClamOptions): ClamHandle {
   const baseGeometry = mergeColoredParts(baseParts, 'clamBase');
   const baseMesh = new THREE.Mesh(baseGeometry, shellMaterial);
   baseMesh.name = 'clamBase';
-  baseMesh.castShadow = tier !== 'thumb';
-  baseMesh.receiveShadow = tier !== 'thumb';
+  baseMesh.castShadow = true;
+  baseMesh.receiveShadow = true;
   body.add(baseMesh);
 
   const mantleGeometry = makeMantleGeometry(detail, skin);
@@ -102,8 +99,8 @@ export function buildClam(opts: ClamOptions): ClamHandle {
   const upperShell = new THREE.Mesh(shellGeometry, shellMaterial);
   upperShell.name = 'clamShellUpper';
   upperShell.position.z = -HINGE_Z;
-  upperShell.castShadow = tier !== 'thumb';
-  upperShell.receiveShadow = tier !== 'thumb';
+  upperShell.castShadow = true;
+  upperShell.receiveShadow = true;
   upperHinge.add(upperShell);
   body.add(upperHinge);
 
@@ -114,19 +111,19 @@ export function buildClam(opts: ClamOptions): ClamHandle {
   lowerShell.name = 'clamShellLower';
   lowerShell.position.z = -HINGE_Z;
   lowerShell.rotation.z = Math.PI;
-  lowerShell.castShadow = tier !== 'thumb';
-  lowerShell.receiveShadow = tier !== 'thumb';
+  lowerShell.castShadow = true;
+  lowerShell.receiveShadow = true;
   lowerHinge.add(lowerShell);
   body.add(lowerHinge);
 
-  const pearlGeometry = new THREE.IcosahedronGeometry(0.115, tier === 'thumb' ? 1 : 2);
+  const pearlGeometry = new THREE.IcosahedronGeometry(0.115, 2);
   const pearlMaterial: EmissiveMaterial = emissiveMaterial(skin.pearl, PEARL_HDR, { name: 'clamPearl' });
   const pearl = new THREE.Mesh(pearlGeometry, pearlMaterial);
   pearl.name = 'clamPearl';
   pearl.position.y = PEARL_Y;
   body.add(pearl);
 
-  const haloGeometry = new THREE.IcosahedronGeometry(0.24, tier === 'thumb' ? 0 : 1);
+  const haloGeometry = new THREE.IcosahedronGeometry(0.24, 1);
   const haloMaterial: EmissiveMaterial = emissiveMaterial(skin.pearl, PEARL_HDR * 0.3, {
     transparent: true,
     opacity: 0.3,
@@ -248,7 +245,6 @@ export function makeMantleGeometry(detail: number, skin: ReefSkin): THREE.Buffer
 
 
 export interface BubbleOptions {
-  tier: QualityTier;
   palette: Palette;
   skin: ReefSkin;
   accent: THREE.ColorRepresentation;
@@ -264,8 +260,8 @@ export interface BubbleHandle {
 }
 
 export function buildBubble(opts: BubbleOptions): BubbleHandle {
-  const { tier, palette, skin } = opts;
-  const detail = tier === 'thumb' ? 1 : 2;
+  const { palette, skin } = opts;
+  const detail = 2;
   const group = new THREE.Group();
   group.name = opts.name ?? 'diverBubble';
   group.position.y = opts.height;
@@ -285,7 +281,6 @@ export function buildBubble(opts: BubbleOptions): BubbleHandle {
     toonSteps: 2,
     toonSoftness: 0.4,
     toonFloor: 0.4,
-    tier,
     name: 'diverBubbleShell',
   });
   const shell = new THREE.Mesh(shellGeometry, shellMaterial);

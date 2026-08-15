@@ -5,7 +5,6 @@ import { hash2f } from './rng';
 import { emissiveMaterial, oakMaterial, oakUniforms, setEmissiveIntensity } from './materials';
 import type { EmissiveMaterial, OakMaterial } from './materials';
 import { TOKENS } from './tokens';
-import type { QualityTier } from './types';
 
 
 export const CELL = TOKENS.cellSize;
@@ -29,13 +28,6 @@ export function cellToWorldVec(x: number, y: number, grid: GridSize, out: THREE.
   return out.set((x - (grid.w - 1) / 2) * CELL, 0, (y - (grid.h - 1) / 2) * CELL);
 }
 
-export function worldToCell(wx: number, wz: number, grid: GridSize, out?: GridCell): GridCell {
-  const c: GridCell = out ?? { x: 0, y: 0 };
-  c.x = Math.round(wx / CELL + (grid.w - 1) / 2);
-  c.y = Math.round(wz / CELL + (grid.h - 1) / 2);
-  return c;
-}
-
 export function clampCell(cell: GridCell, grid: GridSize): GridCell {
   cell.x = cell.x < 0 ? 0 : cell.x > grid.w - 1 ? grid.w - 1 : cell.x;
   cell.y = cell.y < 0 ? 0 : cell.y > grid.h - 1 ? grid.h - 1 : cell.y;
@@ -57,30 +49,6 @@ export function isWall(grid: Pick<GridGeometry, 'w' | 'h' | 'walls'>, x: number,
 
 export function gridExtent(grid: GridSize): { width: number; depth: number } {
   return { width: grid.w * CELL, depth: grid.h * CELL };
-}
-
-export function gridRadius(grid: GridSize): number {
-  const { width, depth } = gridExtent(grid);
-  return 0.5 * Math.sqrt(width * width + depth * depth);
-}
-
-export function wallCellCount(grid: Pick<GridGeometry, 'w' | 'h' | 'walls'>): number {
-  let n = 0;
-  const total = grid.w * grid.h;
-  for (let i = 0; i < total; i++) if ((grid.walls[i] ?? 0) !== 0) n++;
-  return n;
-}
-
-export function forEachCell(
-  grid: Pick<GridGeometry, 'w' | 'h' | 'walls'>,
-  visit: (x: number, y: number, wall: boolean, index: number) => void,
-): void {
-  for (let y = 0; y < grid.h; y++) {
-    for (let x = 0; x < grid.w; x++) {
-      const i = y * grid.w + x;
-      visit(x, y, (grid.walls[i] ?? 0) !== 0, i);
-    }
-  }
 }
 
 
@@ -125,12 +93,8 @@ export interface CellFieldHandle {
   dispose(): void;
 }
 
-export function cellFieldDetail(tier: QualityTier | undefined): number {
-  return tier === 'thumb' ? 0.3 : tier === 'medium' ? 0.6 : 1;
-}
-
-function wallGeometryFor(shape: WallShape, tier: QualityTier | undefined, size: number, height: number): THREE.BufferGeometry {
-  const detail = cellFieldDetail(tier);
+function wallGeometryFor(shape: WallShape, size: number, height: number): THREE.BufferGeometry {
+  const detail = 1;
   if (shape === 'pillar') {
     const radial = Math.max(5, Math.round(12 * detail));
     const g = new THREE.CylinderGeometry(size * 0.42, size * 0.5, height, radial, 1);
@@ -161,7 +125,6 @@ function wallGeometryFor(shape: WallShape, tier: QualityTier | undefined, size: 
 export function buildCellField(
   grid: Pick<GridGeometry, 'w' | 'h' | 'walls'>,
   style: CellFieldStyle,
-  tier?: QualityTier,
 ): CellFieldHandle {
   const group = new THREE.Group();
   group.name = style.name ?? 'oakCellField';
@@ -196,7 +159,6 @@ export function buildCellField(
     flatShading: true,
     ...(style.rimColor !== undefined ? { rimColor: style.rimColor } : {}),
     rimStrength: style.rimStrength ?? (style.rimColor !== undefined ? 0.18 : 0),
-    tier,
     name: 'oakCellFloor',
   });
   const wallMaterial = oakMaterial({
@@ -208,25 +170,24 @@ export function buildCellField(
     ...(style.wind !== undefined && style.wind > 0
       ? { wind: { amplitude: style.wind, frequency: 1.05, height: wallHeight } }
       : {}),
-    tier,
     name: 'oakCellWall',
   });
 
   const floorGeometry = new THREE.BoxGeometry(CELL - floorInset * 2, floorThickness, CELL - floorInset * 2);
   floorGeometry.translate(0, -floorThickness / 2, 0);
-  const wallGeometry = wallGeometryFor(shape, tier, CELL - wallInset * 2, wallHeight);
+  const wallGeometry = wallGeometryFor(shape, CELL - wallInset * 2, wallHeight);
 
   const floorMesh = new THREE.InstancedMesh(floorGeometry, floorMaterial, Math.max(1, floorCapacity));
   floorMesh.name = 'oakCellFloorMesh';
   floorMesh.castShadow = false;
-  floorMesh.receiveShadow = tier !== 'thumb';
+  floorMesh.receiveShadow = true;
   floorMesh.count = 0;
   floorMesh.instanceColor = new THREE.InstancedBufferAttribute(new Float32Array(Math.max(1, floorCapacity) * 3), 3);
 
   const wallMesh = new THREE.InstancedMesh(wallGeometry, wallMaterial, Math.max(1, wallCapacity));
   wallMesh.name = 'oakCellWallMesh';
-  wallMesh.castShadow = tier !== 'thumb';
-  wallMesh.receiveShadow = tier !== 'thumb';
+  wallMesh.castShadow = true;
+  wallMesh.receiveShadow = true;
   wallMesh.count = 0;
   wallMesh.instanceColor = new THREE.InstancedBufferAttribute(new Float32Array(Math.max(1, wallCapacity) * 3), 3);
 
@@ -355,7 +316,6 @@ interface CellPlaced {
 
 export interface GoalBeaconOptions {
   color: THREE.ColorRepresentation;
-  tier?: QualityTier;
   height?: number;
   radius?: number;
   intensity?: number;
@@ -374,8 +334,7 @@ export class GoalBeacon implements CellPlaced {
   private readonly height: number;
 
   constructor(opts: GoalBeaconOptions) {
-    const tier = opts.tier;
-    const detail = cellFieldDetail(tier);
+    const detail = 1;
     this.height = opts.height ?? 1.6;
     const radius = opts.radius ?? 0.16;
     this.baseIntensity = opts.intensity ?? 2.2;
@@ -448,7 +407,6 @@ export class GoalBeacon implements CellPlaced {
 
 export interface DoorGateOptions {
   color: THREE.ColorRepresentation;
-  tier?: QualityTier;
   height?: number;
   thickness?: number;
   duration?: number;
@@ -481,13 +439,12 @@ export class DoorGate implements CellPlaced {
       color: opts.color,
       roughness: 0.8,
       flatShading: true,
-      tier: opts.tier,
       name: 'oakDoorGate',
     });
     this.leaf = new THREE.Mesh(this.geometry, this.material);
     this.leaf.name = 'oakDoorLeaf';
-    this.leaf.castShadow = opts.tier !== 'thumb';
-    this.leaf.receiveShadow = opts.tier !== 'thumb';
+    this.leaf.castShadow = true;
+    this.leaf.receiveShadow = true;
     this.pivot.add(this.leaf);
     this.group.add(this.pivot);
   }
@@ -552,7 +509,6 @@ export class DoorGate implements CellPlaced {
 
 export interface KeyTokenOptions {
   color: THREE.ColorRepresentation;
-  tier?: QualityTier;
   radius?: number;
   hover?: number;
   intensity?: number;
@@ -570,13 +526,13 @@ export class KeyToken implements CellPlaced {
   private readonly baseIntensity: number;
 
   constructor(opts: KeyTokenOptions) {
-    const detail = cellFieldDetail(opts.tier);
+    const detail = 1;
     const radius = opts.radius ?? 0.11;
     this.hover = opts.hover ?? 0.42;
     this.baseIntensity = opts.intensity ?? 2;
     this.group.name = opts.name ?? 'oakKeyToken';
 
-    const core = new THREE.OctahedronGeometry(radius, opts.tier === 'thumb' ? 0 : Math.round(detail));
+    const core = new THREE.OctahedronGeometry(radius, Math.round(detail));
     const halo = new THREE.SphereGeometry(radius * 2.1, Math.max(6, Math.round(12 * detail)), Math.max(4, Math.round(8 * detail)));
     this.geometries.push(core, halo);
 

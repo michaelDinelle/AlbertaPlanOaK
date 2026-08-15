@@ -5,16 +5,12 @@ import type { EnvGeometry, SimEvent } from '@sim/types';
 import type { DesignTokens } from './tokens';
 
 export type SceneEvent = SimEvent;
-export type QualityTier = 'hero' | 'medium' | 'thumb';
 
 export interface SceneManifest {
   envId: EnvId;
   slug: string;
   title: string;
-  logline: string;
   accent: string;
-  tiers: readonly QualityTier[];
-  thumbFrame: { pose: readonly number[]; derived?: unknown };
   postConfig: {
     bloomStrength: number;
     bloomThreshold: number;
@@ -24,11 +20,9 @@ export interface SceneManifest {
 
 export interface FrameState {
   pose: Float32Array;
-  ctrl: Float32Array;
   done: boolean;
   step: number;
   simTime: number;
-  derived: unknown;
 }
 
 export interface FrameUpdate {
@@ -45,7 +39,6 @@ export interface SceneContext {
   renderer: THREE.WebGLRenderer;
   canvas: HTMLCanvasElement;
   size: SceneSize;
-  tier: QualityTier;
   tokens: DesignTokens;
   geometry: EnvGeometry;
   seed: number;

@@ -15,12 +15,7 @@ import type {
   SceneSize,
 } from '@kit/types';
 import * as THREE from 'three';
-import {
-  MC_GOAL_POS,
-  MC_MAX_SPEED,
-  MC_START_POS,
-  mountainCarSlope,
-} from '@sim/envs/mountaincar';
+import { MC_GOAL_POS, MC_MAX_SPEED, MC_START_POS, MOUNTAINCAR_ACTION, MOUNTAINCAR_POS, MOUNTAINCAR_VEL, mountainCarForce, mountainCarSlope } from '@sim/envs/mountaincar';
 import { buildCart, type CartHandle } from './actors';
 import { manifest } from './manifest';
 import { buildWorld, heightResolver, type WorldHandle } from './world';
@@ -28,8 +23,6 @@ import { buildWorld, heightResolver, type WorldHandle } from './world';
 
 const CAM_BASE: readonly [number, number, number] = [-0.16, 1.06, 2.56];
 const CAM_LOOK: readonly [number, number, number] = [-0.31, 0.75, -0.05];
-const CAM_BASE_THUMB: readonly [number, number, number] = [-0.28, 1.1, 3.05];
-const CAM_LOOK_THUMB: readonly [number, number, number] = [-0.3, 0.72, 0];
 
 const GUST_SECONDS = 3.2;
 const EAGLE_SECONDS = 6.5;
@@ -44,18 +37,8 @@ const PULSE_STRENGTH = 0.6;
 const SUPERLUMINAL_SLACK = 0.025;
 const MAX_HELD_FRAMES = 4;
 
-interface MountainCarLike {
-  pos?: unknown;
-  vel?: unknown;
-  force?: unknown;
-}
-
 function forceOf(state: FrameState): number {
-  const d = state.derived as MountainCarLike | null | undefined;
-  if (d && typeof d === 'object' && typeof d.force === 'number') return d.force;
-  const raw = state.ctrl[0] ?? 0;
-  if (!Number.isFinite(raw)) return 0;
-  return ((Math.trunc(raw) >>> 0) % 3) - 1;
+  return mountainCarForce(state.pose[MOUNTAINCAR_ACTION] ?? 0);
 }
 
 class AlpineValleyScene implements SceneModule {
@@ -110,7 +93,6 @@ class AlpineValleyScene implements SceneModule {
     }
 
     const cart = buildCart({
-      tier: ctx.tier,
       palette,
       accent,
       seed: ctx.seed,
@@ -120,14 +102,13 @@ class AlpineValleyScene implements SceneModule {
     this.cart = cart;
     this.scene.add(cart.group);
 
-    const thumb = ctx.tier === 'thumb';
     const home = orbitFromPose(
-      thumb ? CAM_BASE_THUMB : CAM_BASE,
-      thumb ? CAM_LOOK_THUMB : CAM_LOOK,
+      CAM_BASE,
+      CAM_LOOK,
     );
     const rig = makeOrbitRig({
       canvas: ctx.canvas,
-      target: thumb ? CAM_LOOK_THUMB : CAM_LOOK,
+      target: CAM_LOOK,
       azimuth: home.azimuth,
       polar: home.polar,
       distance: home.distance,
@@ -143,7 +124,6 @@ class AlpineValleyScene implements SceneModule {
     rig.snap();
 
     const pool = new CelebrationPool({
-      tier: ctx.tier,
       seed: ctx.seed,
       burstSize: BURST_PARTICLES,
       name: 'alpineCelebrations',
@@ -156,7 +136,7 @@ class AlpineValleyScene implements SceneModule {
       camera: this.camera,
       profileRange: [-1.2, 0.6],
       agentPos: (state) => {
-        const x = state.pose[0] ?? 0;
+        const x = state.pose[MOUNTAINCAR_POS] ?? 0;
         this.overlayPos[0] = x;
         this.overlayPos[1] = this.heightAt(x);
         this.overlayPos[2] = 0;
@@ -219,8 +199,8 @@ class AlpineValleyScene implements SceneModule {
       }
     }
 
-    const rawPos = state.pose[0] ?? 0;
-    const vel = state.pose[1] ?? 0;
+    const rawPos = state.pose[MOUNTAINCAR_POS] ?? 0;
+    const vel = state.pose[MOUNTAINCAR_VEL] ?? 0;
     let pos = rawPos;
     if (teleported || frame.scrubbed || !Number.isFinite(this.heldPos)) {
       this.heldFrames = 0;

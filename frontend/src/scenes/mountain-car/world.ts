@@ -13,7 +13,7 @@ import { skyFromPalette, type SkyHandle } from '@kit/sky';
 import { makeTerrain, type TerrainHandle } from '@kit/terrain';
 import { valueNoise2 } from '@kit/textures';
 import { TOKENS, type Palette } from '@kit/tokens';
-import type { QualityTier, SceneContext } from '@kit/types';
+import type { SceneContext } from '@kit/types';
 import {
   excludeAny,
   excludeBand,
@@ -156,7 +156,6 @@ interface Timed {
 }
 
 export function buildWorld(ctx: SceneContext, scene: THREE.Scene): WorldHandle {
-  const tier: QualityTier = ctx.tier;
   const palette: Palette = ctx.tokens.palettes.dusk;
   const accent = ctx.tokens.accents['mountain-car'] ?? ctx.tokens.celebrationGold;
   const heightAt = heightResolver(ctx.geometry);
@@ -164,7 +163,6 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene): WorldHandle {
   group.name = 'alpineValley';
   const owned: Disposable[] = [];
   const timed: Timed[] = [];
-  const shadows = tier !== 'thumb';
 
   const cValley = blendTokens(palette.groundA, palette.hemiGround, 0.55);
   const cMeadow = blendTokens(palette.groundA, TOKENS.palettes.noon.groundA, 0.5);
@@ -174,7 +172,7 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene): WorldHandle {
   const woodDark = blendTokens(palette.groundA, palette.hemiGround, 0.62);
   const stone = blendTokens(palette.hemiGround, palette.skyTop, 0.5);
 
-  const sky = skyFromPalette(palette, 'dusk', tier, {
+  const sky = skyFromPalette(palette, 'dusk', {
     sunDir: SUN_DIR,
     sunSize: 0.05,
     sunHdr: 7,
@@ -188,7 +186,7 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene): WorldHandle {
   owned.push(sky);
   timed.push({ setTime: (t) => sky.setTime(t) });
 
-  const rig = makeLightRig(palette, tier, {
+  const rig = makeLightRig(palette, {
     sunDir: sky.sunDirection,
     pointCount: 2,
     pointDistance: 2.6,
@@ -205,7 +203,6 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene): WorldHandle {
   const terrain = makeTerrain({
     size: [TERRAIN_W, TERRAIN_D],
     segments: [TERRAIN_SEG_X, TERRAIN_SEG_Z],
-    tier,
     seed: ctx.seed,
     heightFn: ridge,
     jitter: 0,
@@ -228,7 +225,7 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene): WorldHandle {
       toonSoftness: 0.32,
       toonFloor: 0.2,
     },
-    receiveShadow: shadows,
+    receiveShadow: true,
     castShadow: false,
     name: 'alpineRidge',
   });
@@ -244,7 +241,6 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene): WorldHandle {
     count: 190,
     area: { x: -0.4, z: -2.2, halfX: 3.6, halfZ: 2 },
     seed: ctx.seed,
-    tier,
     exclude: excludeAny(excludeBand(0, 1.2, 0.15), nearCamera, aboveSnow),
     heightAt: sampleAt,
     maxSlope: 0.62,
@@ -267,7 +263,6 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene): WorldHandle {
     count: 300,
     area: { x: -0.3, z: -0.9, halfX: 3.2, halfZ: 2.2 },
     seed: ctx.seed ^ 0x2b17,
-    tier,
     exclude: excludeAny(excludeBand(0, 0.26, 0.05), nearCamera),
     heightAt: sampleAt,
     color: cRock,
@@ -287,7 +282,6 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene): WorldHandle {
     count: 3200,
     area: { x: -0.35, z: -0.7, halfX: 2.8, halfZ: 2.1 },
     seed: ctx.seed ^ 0x7f19,
-    tier,
     exclude: excludeAny(excludeBand(0, 0.17, 0.03), nearCamera, aboveSnow),
     heightAt: sampleAt,
     maxSlope: 0.78,
@@ -338,13 +332,12 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene): WorldHandle {
     toonSteps: 3,
     toonSoftness: 0.3,
     toonFloor: 0.18,
-    tier,
     name: 'alpinePropMaterial',
   });
   const cairnMesh = new THREE.Mesh(cairnGeometry, propMaterial);
   cairnMesh.name = 'summitCairn';
-  cairnMesh.castShadow = shadows;
-  cairnMesh.receiveShadow = shadows;
+  cairnMesh.castShadow = true;
+  cairnMesh.receiveShadow = true;
   cairnRoot.add(cairnMesh);
   owned.push({
     dispose: () => {
@@ -421,7 +414,6 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene): WorldHandle {
     toonSoftness: 0.38,
     toonFloor: 0.34,
     wind: { amplitude: BASE_WIND, frequency: 2.4, height: FLAG_H },
-    tier,
     name: 'prayerFlagMaterial',
   });
   const FLAG_PALETTE: readonly THREE.ColorRepresentation[] = [
@@ -431,7 +423,7 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene): WorldHandle {
     ctx.tokens.accents['four-rooms'] ?? ctx.tokens.celebrationGold,
     ctx.tokens.celebrationGold,
   ];
-  const PER_STRING = tier === 'thumb' ? 6 : 11;
+  const PER_STRING = 11;
   const FLAG_COUNT = PER_STRING * guys.length;
   const flags = new THREE.InstancedMesh(flagGeometry, flagMaterial, FLAG_COUNT);
   flags.name = 'prayerFlags';
@@ -498,7 +490,7 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene): WorldHandle {
   const signGeometry = mergeColoredParts(signParts, 'trailheadSign');
   const signMesh = new THREE.Mesh(signGeometry, propMaterial);
   signMesh.name = 'trailheadSign';
-  signMesh.castShadow = shadows;
+  signMesh.castShadow = true;
   trailheadRoot.add(signMesh);
   owned.push({ dispose: () => signGeometry.dispose() });
 
@@ -506,7 +498,6 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene): WorldHandle {
     size: [4.6, 3.2],
     color: blendTokens(palette.fog, palette.hemiSky, 0.4),
     seed: ctx.seed,
-    tier,
     layers: 5,
     baseY: 0.11,
     spread: 0.34,
@@ -526,7 +517,6 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene): WorldHandle {
     count: 300,
     bounds: { x: -0.4, y: 0.5, z: -0.35, halfX: 1.7, halfY: 0.4, halfZ: 1 },
     seed: ctx.seed,
-    tier,
     color: blendTokens(palette.sun, palette.skyHorizon, 0.35),
     size: 0.16,
     intensity: 0.95,
@@ -543,7 +533,6 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene): WorldHandle {
     count: 420,
     bounds: { x: 0.45, y: 1.16, z: -1, halfX: 1.4, halfY: 0.4, halfZ: 1.5 },
     seed: ctx.seed ^ 0x51ab,
-    tier,
     color: blendTokens(TOKEN_WHITE, palette.hemiSky, 0.25),
     size: 0.22,
     intensity: 1.15,
@@ -574,7 +563,6 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene): WorldHandle {
     toonFloor: 0.05,
     side: THREE.DoubleSide,
     fog: false,
-    tier,
     name: 'eagleMaterial',
   });
   const eagleBody = new THREE.ConeGeometry(0.032, 0.34, 4);
@@ -623,7 +611,7 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene): WorldHandle {
       trees.setWind(0.02 * (1 + 1.0 * e), 0.9 + 0.35 * e);
     },
     setEagle(progress) {
-      if (progress === null || tier === 'thumb') {
+      if (progress === null || false) {
         eagle.visible = false;
         return;
       }

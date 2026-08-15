@@ -1,7 +1,6 @@
 
 import * as THREE from 'three';
 import type { Palette } from './tokens';
-import type { QualityTier } from './types';
 
 export interface WaterUniforms {
   uTime: { value: number };
@@ -23,7 +22,6 @@ export interface WaterUniforms {
 export interface WaterOptions {
   size: number | readonly [number, number];
   palette: Palette;
-  tier?: QualityTier;
   segments?: number;
   shallow?: THREE.ColorRepresentation;
   deep?: THREE.ColorRepresentation;
@@ -51,10 +49,6 @@ export interface WaterHandle {
   setSunDirection(x: number, y: number, z: number): void;
   sampleHeight(x: number, z: number, time: number): number;
   dispose(): void;
-}
-
-export function waterSegmentScale(tier: QualityTier | undefined): number {
-  return tier === 'thumb' ? 0.22 : tier === 'medium' ? 0.55 : 1;
 }
 
 const WAVES: readonly (readonly [number, number, number, number])[] = [
@@ -202,7 +196,7 @@ export function makeWater(opts: WaterOptions): WaterHandle {
   const sizeX = typeof opts.size === 'number' ? opts.size : opts.size[0];
   const sizeZ = typeof opts.size === 'number' ? opts.size : opts.size[1];
   const base = Math.max(2, Math.round(opts.segments ?? 96));
-  const seg = Math.max(2, Math.round(base * waterSegmentScale(opts.tier)));
+  const seg = Math.max(2, Math.round(base));
   const p = opts.palette;
 
   const amplitude = opts.amplitude ?? 0.035;
@@ -232,11 +226,11 @@ export function makeWater(opts: WaterOptions): WaterHandle {
     uWaveScale: { value: waveScale },
     uSpeed: { value: speed },
     uFresnel: { value: opts.fresnel ?? 0.55 },
-    uCausticStrength: { value: (opts.caustics ?? 0.35) * (opts.tier === 'thumb' ? 0 : 1) },
+    uCausticStrength: { value: opts.caustics ?? 0.35 },
     uDepthFalloff: { value: opts.depthFalloff ?? 9 },
     uOpacity: { value: opts.opacity ?? 0.86 },
     uSunDir: { value: sun },
-    uSpecular: { value: opts.tier === 'thumb' ? 0 : 1.6 },
+    uSpecular: { value: 1.6 },
   };
 
   const material = new THREE.ShaderMaterial({

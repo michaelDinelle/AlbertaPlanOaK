@@ -3,7 +3,6 @@ import { emissiveMaterial, oakMaterial, oakUniforms, setEmissiveIntensity } from
 import type { EmissiveMaterial, OakMaterial } from '@kit/materials';
 import { hash2f } from '@kit/rng';
 import type { Palette } from '@kit/tokens';
-import type { QualityTier } from '@kit/types';
 import * as THREE from 'three';
 import { blendTokens, clamp01, mergeColoredParts, smoothstep01, tubeGeometry, type ColoredPart } from './world';
 
@@ -82,7 +81,6 @@ export function blossomTreeCrownHeight(): number {
 
 
 export interface BlossomTreeOptions {
-  tier: QualityTier;
   palette: Palette;
   blossom: THREE.ColorRepresentation;
   bark: THREE.ColorRepresentation;
@@ -101,13 +99,9 @@ export interface BlossomTreeHandle {
   dispose(): void;
 }
 
-function blossomsPerTwig(tier: QualityTier): number {
-  return tier === 'thumb' ? 2 : tier === 'medium' ? 4 : 6;
-}
-
 export function buildBlossomTree(opts: BlossomTreeOptions): BlossomTreeHandle {
-  const { tier, palette, blossom, bark, moss, ember } = opts;
-  const detail = tier === 'thumb' ? 0.4 : tier === 'medium' ? 0.7 : 1;
+  const { palette, blossom, bark, moss, ember } = opts;
+  const detail = 1;
   const radial = Math.max(4, Math.round(7 * detail));
   const group = new THREE.Group();
   group.name = opts.name ?? 'blossomTree';
@@ -130,11 +124,11 @@ export function buildBlossomTree(opts: BlossomTreeOptions): BlossomTreeHandle {
     });
   }
   {
-    const boss = new THREE.IcosahedronGeometry(0.33, tier === 'thumb' ? 0 : 1);
+    const boss = new THREE.IcosahedronGeometry(0.33, 1);
     boss.scale(1.05, 0.44, 0.98);
     boss.translate(0.02, 0.06, 0);
     barkParts.push({ geometry: boss, color: moss });
-    for (let i = 0; i < (tier === 'thumb' ? 2 : 5); i++) {
+    for (let i = 0; i < (5); i++) {
       const a = (i / 5) * Math.PI * 2 + 0.4;
       const rootArm = tubeGeometry(
         [0.03, 0.2, 0],
@@ -156,19 +150,18 @@ export function buildBlossomTree(opts: BlossomTreeOptions): BlossomTreeHandle {
     toonSteps: 3,
     toonSoftness: 0.3,
     toonFloor: 0.22,
-    tier,
     name: 'blossomTreeBarkMaterial',
   });
   const barkMesh = new THREE.Mesh(barkGeometry, barkMaterial);
   barkMesh.name = 'blossomTreeBark';
-  barkMesh.castShadow = tier !== 'thumb';
-  barkMesh.receiveShadow = tier !== 'thumb';
+  barkMesh.castShadow = true;
+  barkMesh.receiveShadow = true;
   crown.add(barkMesh);
 
-  const perTwig = blossomsPerTwig(tier);
+  const perTwig = 6;
   const twigs = limbs.filter((l) => l.twig);
   const blossomCount = twigs.length * perTwig;
-  const blossomGeometry = blossomClusterGeometry(tier);
+  const blossomGeometry = blossomClusterGeometry();
   const blossomMaterial: OakMaterial = oakMaterial({
     color: blossom,
     vertexColors: true,
@@ -180,7 +173,6 @@ export function buildBlossomTree(opts: BlossomTreeOptions): BlossomTreeHandle {
     toonSteps: 2,
     toonSoftness: 0.38,
     toonFloor: 0.38,
-    tier,
     name: 'blossomTreePetalMaterial',
   });
   const blossoms = new THREE.InstancedMesh(blossomGeometry, blossomMaterial, Math.max(1, blossomCount));
@@ -229,7 +221,7 @@ export function buildBlossomTree(opts: BlossomTreeOptions): BlossomTreeHandle {
     if (blossoms.instanceColor) blossoms.instanceColor.needsUpdate = true;
   }
 
-  const emberGeometry = new THREE.IcosahedronGeometry(0.1, tier === 'thumb' ? 0 : 1);
+  const emberGeometry = new THREE.IcosahedronGeometry(0.1, 1);
   const emberMaterial: EmissiveMaterial = emissiveMaterial(ember, 0.0, { name: 'blossomTreeHeart' });
   const emberMesh = new THREE.Mesh(emberGeometry, emberMaterial);
   emberMesh.name = 'blossomTreeHeart';
@@ -290,10 +282,10 @@ export function buildBlossomTree(opts: BlossomTreeOptions): BlossomTreeHandle {
   };
 }
 
-export function blossomClusterGeometry(tier: QualityTier): THREE.BufferGeometry {
-  const petals = tier === 'thumb' ? 4 : 5;
+export function blossomClusterGeometry(): THREE.BufferGeometry {
+  const petals = 5;
   const heads: readonly { at: Vec3; tilt: number; yaw: number; scale: number }[] =
-    tier === 'thumb'
+    false
       ? [{ at: [0, 0, 0], tilt: 0, yaw: 0, scale: 1.15 }]
       : [
           { at: [0, 0, 0], tilt: 0, yaw: 0, scale: 1 },
@@ -360,7 +352,6 @@ export const FERRY_SECONDS = 1.55;
 export const FERRY_STAGGER = 0.42;
 
 export interface PetalFerryOptions {
-  tier: QualityTier;
   palette: Palette;
   blossom: THREE.ColorRepresentation;
   from: readonly [number, number, number];
@@ -379,8 +370,8 @@ export interface PetalFerryHandle {
 }
 
 export function buildPetalFerry(opts: PetalFerryOptions): PetalFerryHandle {
-  const { tier, palette, blossom, from, to } = opts;
-  const count = tier === 'thumb' ? 0 : tier === 'medium' ? 22 : 38;
+  const { palette, blossom, from, to } = opts;
+  const count = 38;
   const geometry = petalGeometry();
   const material: OakMaterial = oakMaterial({
     color: blossom,
@@ -393,7 +384,6 @@ export function buildPetalFerry(opts: PetalFerryOptions): PetalFerryHandle {
     toonSteps: 2,
     toonSoftness: 0.4,
     toonFloor: 0.45,
-    tier,
     name: 'petalFerryMaterial',
   });
   const mesh = new THREE.InstancedMesh(geometry, material, Math.max(1, count));
@@ -413,7 +403,6 @@ export function buildPetalFerry(opts: PetalFerryOptions): PetalFerryHandle {
   let firedAt = -Infinity;
 
   const hideAll = (): void => {
-    if (count === 0) return;
     scale.set(0, 0, 0);
     quaternion.set(0, 0, 0, 1);
     position.set(from[0], from[1], from[2]);
@@ -439,7 +428,6 @@ export function buildPetalFerry(opts: PetalFerryOptions): PetalFerryHandle {
       return 1 - age / FERRY_SECONDS;
     },
     setTime(time) {
-      if (count === 0) return;
       const age = time - firedAt;
       if (!(age >= 0) || age > FERRY_SECONDS + 0.001) {
         hideAll();
@@ -479,7 +467,6 @@ export function buildPetalFerry(opts: PetalFerryOptions): PetalFerryHandle {
 
 
 export interface FordLanternOptions {
-  tier: QualityTier;
   palette: Palette;
   stone: THREE.ColorRepresentation;
   moss: THREE.ColorRepresentation;
@@ -502,9 +489,9 @@ export interface FordLanternHandle {
 }
 
 export function buildFordLantern(opts: FordLanternOptions): FordLanternHandle {
-  const { tier, palette, stone, moss } = opts;
+  const { palette, stone, moss } = opts;
   const offset = opts.offset ?? LANTERN_OFFSET;
-  const detail = tier === 'thumb' ? 0.5 : tier === 'medium' ? 0.75 : 1;
+  const detail = 1;
   const sides = Math.max(5, Math.round(6 * detail));
   const group = new THREE.Group();
   group.name = opts.name ?? 'fordLantern';
@@ -533,7 +520,7 @@ export function buildFordLantern(opts: FordLanternOptions): FordLanternHandle {
   drum(0.2, 0.21, 0.3, 0.85, stone);
   drum(0.35, 0.05, 0.27, 1.15, dark);
   {
-    const finial = new THREE.IcosahedronGeometry(0.065, tier === 'thumb' ? 0 : 1);
+    const finial = new THREE.IcosahedronGeometry(0.065, 1);
     finial.translate(0, 1.46, 0);
     parts.push({ geometry: finial, color: stone });
     const collar = new THREE.CylinderGeometry(0.32, 0.34, 0.06, sides, 1);
@@ -551,13 +538,12 @@ export function buildFordLantern(opts: FordLanternOptions): FordLanternHandle {
     toonSteps: 3,
     toonSoftness: 0.3,
     toonFloor: 0.22,
-    tier,
     name: 'fordLanternMaterial',
   });
   const mesh = new THREE.Mesh(geometry, material);
   mesh.name = 'fordLanternMesh';
-  mesh.castShadow = tier !== 'thumb';
-  mesh.receiveShadow = tier !== 'thumb';
+  mesh.castShadow = true;
+  mesh.receiveShadow = true;
   body.add(mesh);
 
   return {

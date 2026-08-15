@@ -201,7 +201,6 @@ final class Shared<T> {
 struct EnvSpec {
   static let poseLen = 9
   static let stride = 7 + poseLen
-  static let geometryWords = 19
   static let slotNames = [
     "none", "x", "y", "gx", "gy", "kx", "ky", "carry", "gates", "tokens", "cue", "heading",
     "effort",
@@ -309,37 +308,6 @@ final class Engine {
         actionCount: Int(tbl[row + 3]), gridW: Int(tbl[row + 4]), gridH: Int(tbl[row + 5]),
         controlHz: Int(tbl[row + 6]),
         slots: (0..<EnvSpec.poseLen).map { Int(tbl[row + 7 + $0]) })
-    }
-  }
-  static func runEnvGeometryProbe(
-    _ dev: MTLDevice, _ lib: MTLLibrary, laneEnvKinds: [UInt32], laneSeeds: [UInt32]
-  ) throws -> [[UInt32]] {
-    let n = laneEnvKinds.count
-    let fn = lib.makeFunction(name: "oak_env_geometry_probe")!
-    let pipe = try dev.makeComputePipelineState(function: fn)
-    var count = UInt32(n)
-    guard
-      let outB = dev.makeBuffer(
-        length: n * EnvSpec.geometryWords * 4, options: [.storageModeShared]),
-      let kindsB = dev.makeBuffer(
-        bytes: laneEnvKinds, length: n * 4, options: [.storageModeShared]),
-      let seedsB = dev.makeBuffer(bytes: laneSeeds, length: n * 4, options: [.storageModeShared]),
-      let pq = dev.makeCommandQueue(), let cb = pq.makeCommandBuffer(),
-      let enc = cb.makeComputeCommandEncoder()
-    else { throw err("Env geometry probe dispatch failed.") }
-    enc.setComputePipelineState(pipe)
-    enc.setBuffer(outB, offset: 0, index: 0)
-    enc.setBuffer(kindsB, offset: 0, index: 1)
-    enc.setBuffer(seedsB, offset: 0, index: 2)
-    enc.setBytes(&count, length: 4, index: 3)
-    enc.dispatchThreads(
-      mtlSize(n), threadsPerThreadgroup: mtlSize(min(n, pipe.maxTotalThreadsPerThreadgroup)))
-    enc.endEncoding()
-    cb.commit()
-    cb.waitUntilCompleted()
-    let raw = outB.contents().bindMemory(to: UInt32.self, capacity: n * EnvSpec.geometryWords)
-    return (0..<n).map { lane in
-      (0..<EnvSpec.geometryWords).map { raw[lane * EnvSpec.geometryWords + $0] }
     }
   }
   init(laneEnvs: [String], batch b: Int, dev: MTLDevice) throws {
@@ -621,14 +589,11 @@ final class RecordWriter: @unchecked Sendable {
   private(set) var closed = false
   private var deflateVerified = false
 
-  init(handle: FileHandle, envKind: UInt32, geometry: [UInt32]) throws {
+  init(handle: FileHandle, envKind: UInt32) throws {
     self.handle = handle
     self.codec = try RecordCodec.table(envKind)
-    guard geometry.count == EnvSpec.geometryWords else {
-      throw err("Lane geometry is \(geometry.count) words, expected \(EnvSpec.geometryWords).")
-    }
-    var head = Data(capacity: 8 + geometry.count * 4)
-    for v: UInt32 in [Self.fileMagic, envKind] + geometry {
+    var head = Data(capacity: 8)
+    for v: UInt32 in [Self.fileMagic, envKind] {
       var x = v.littleEndian
       withUnsafeBytes(of: &x) { head.append(contentsOf: $0) }
     }
@@ -674,6 +639,8 @@ final class RecordWriter: @unchecked Sendable {
     buf.append(contentsOf: repeatElement(0, count: (live + 7) / 8))
     for i in 0..<live where cell(i, 0) != 0 { buf[i >> 3] |= UInt8(1 << (i & 7)) }
 
+    var predictorBits: UInt32 = 0
+    var column = 0
     for f in fields {
       if f.anchor {
         var recon = value(0, f)!
@@ -683,14 +650,29 @@ final class RecordWriter: @unchecked Sendable {
           recon += q * f.scale
           putVarint(&buf, Int64(q))
         }
+        column += 1
         continue
       }
+      var q = [Int64](repeating: 0, count: live)
+      for i in 0..<live { q[i] = quantized(i, f)! }
+      var first: [UInt8] = []
+      var second: [UInt8] = []
       var previous: Int64 = 0
+      var previousDelta: Int64 = 0
       for i in 0..<live {
-        let q = quantized(i, f)!
-        putVarint(&buf, i == 0 ? q : q &- previous)
-        previous = q
+        let delta = i == 0 ? q[i] : q[i] &- previous
+        putVarint(&first, delta)
+        putVarint(&second, i < 2 ? delta : delta &- previousDelta)
+        previous = q[i]
+        previousDelta = delta
       }
+      if second.count < first.count {
+        predictorBits |= UInt32(1) << UInt32(column)
+        buf.append(contentsOf: second)
+      } else {
+        buf.append(contentsOf: first)
+      }
+      column += 1
     }
 
     let payload = Data(buf)
@@ -710,20 +692,16 @@ final class RecordWriter: @unchecked Sendable {
         throw err("record: deflate round-trip mismatch (\(back.count) vs \(payload.count) bytes).")
       }
     }
-    let crc = comp.withUnsafeBytes { p in
-      UInt32(truncatingIfNeeded: crc32(0, p.bindMemory(to: UInt8.self).baseAddress, uInt(comp.count)))
-    }
-    var out = Data(capacity: 24 + comp.count)
+    var out = Data(capacity: 20 + comp.count)
     for v: UInt32 in [
-      Self.chunkMagic, UInt32(stepStart), UInt32(live), UInt32(payload.count),
-      UInt32(comp.count), crc,
+      Self.chunkMagic, UInt32(live), UInt32(payload.count), UInt32(comp.count), predictorBits,
     ] {
       var x = v.littleEndian
       withUnsafeBytes(of: &x) { out.append(contentsOf: $0) }
     }
     out.append(comp)
     try handle.write(contentsOf: out)
-    fileOffset += 24 + comp.count
+    fileOffset += 20 + comp.count
   }
 
   var bytesWritten: Int { fileOffset }
@@ -952,17 +930,14 @@ final class TapeWriter {
       try fm.createDirectory(at: dir, withIntermediateDirectories: true)
       return dir
     }
-    let laneGeometry = try Engine.runEnvGeometryProbe(
-      dev, lib, laneEnvKinds: laneEnvKinds, laneSeeds: seeds.map { UInt32(truncatingIfNeeded: $0) })
     var recordHandles: [FileHandle] = []
     var records: [RecordWriter] = []
     for lane in 0..<B {
       let dir = try seedDir(lane)
-      let url = dir.appendingPathComponent("actions.bin")
+      let url = dir.appendingPathComponent("pose.bin")
       fm.createFile(atPath: url.path, contents: nil)
       let h = try FileHandle(forWritingTo: url)
-      records.append(
-        try RecordWriter(handle: h, envKind: laneEnvKinds[lane], geometry: laneGeometry[lane]))
+      records.append(try RecordWriter(handle: h, envKind: laneEnvKinds[lane]))
       recordHandles.append(h)
     }
     let maxChunkSteps = 1024
@@ -1054,9 +1029,22 @@ final class TapeWriter {
     final class WriterState: @unchecked Sendable {
       var deadStep: [Int?]
       var deadDetector: [UInt32?]
+      var deadCount = 0
       var lastDrainStep = 0
-      var error: Error?
       var gpuSeconds = 0.0
+      private let errLock = NSLock()
+      private var failure: Error?
+      private var failed = false
+      var error: Error? {
+        get { errLock.lock(); defer { errLock.unlock() }; return failure }
+        set {
+          errLock.lock()
+          defer { errLock.unlock() }
+          if failure == nil { failure = newValue }
+          failed = newValue != nil
+        }
+      }
+      var didFail: Bool { errLock.lock(); defer { errLock.unlock() }; return failed }
       init(_ b: Int) {
         deadStep = Array(repeating: nil, count: b)
         deadDetector = Array(repeating: nil, count: b)
@@ -1087,7 +1075,7 @@ final class TapeWriter {
       let count = step - start
       let rp = recordBuf.contents().bindMemory(
         to: Float.self, capacity: B * recordCapacity * recordFloats)
-      let before = records.reduce(0) { $0 + $1.bytesWritten }
+      let before = timing ? records.reduce(0) { $0 + $1.bytesWritten } : 0
       let box = DrainErr()
       let writers = records
       let cap = recordCapacity
@@ -1105,7 +1093,7 @@ final class TapeWriter {
       if timing {
         let ms = Double(DispatchTime.now().uptimeNanoseconds - t0) / 1e6
         let wrote = records.reduce(0) { $0 + $1.bytesWritten } - before
-        let raw = B * count * 64
+        let raw = B * count * recordFloats * 4
         fputs(
           String(
             format: "[record] step %d | %d lanes x %d rows | %.1f ms | %.2f MiB -> %.2f MiB (%.1fx)\n",
@@ -1115,6 +1103,7 @@ final class TapeWriter {
     }
     func latchDeaths(half: Int, step: Int) {
       for lane in 0..<B where st.deadStep[lane] == nil {
+        defer { if st.deadStep[lane] != nil { st.deadCount += 1 } }
         let snap = snapPtr[half * B + lane]
         var detector: UInt32? = nil
         var dStep = step
@@ -1141,7 +1130,7 @@ final class TapeWriter {
         stepStart: stepStart, stepCount: step - stepStart, wallSeconds: now())
       try drainRecords(step: step)
       if timing {
-        let alive = st.deadStep.filter { $0 == nil }.count
+        let alive = B - st.deadCount
         let wall = now()
         fputs(
           String(
@@ -1195,7 +1184,7 @@ final class TapeWriter {
       let isWindow = target % windowSteps == 0 || target == steps
       let isDump = dumpEvery > 0 && target % dumpEvery == 0
       inflight.wait()
-      if let err = writer.sync(execute: { st.error }) { throw err }
+      if st.didFail, let err = st.error { throw err }
       if isWindow { windowSlots.wait() }
       guard let cb = q.makeCommandBuffer() else {
         throw err("Failed to encode Metal command.")

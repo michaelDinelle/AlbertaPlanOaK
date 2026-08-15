@@ -16,7 +16,7 @@ import {
   type CodecDescriptor,
 } from '@sim/record';
 import { decoders } from '@sim/registry';
-import type { EnvDecoder, EnvFrame, SimEvent } from '@sim/types';
+import type { EnvDecoder } from '@sim/types';
 
 export interface TheaterTarget {
   runId: string;
@@ -112,12 +112,9 @@ export class TheaterLoadError extends Error {
   }
 }
 
-const UPDATE_MIN_MS = 150;
-const LIVE_POLL_MS = 2_000;
 
 export interface HeroOptions extends TheaterTarget {
   entry: EnvEntry;
-  steps: number;
   horizonSteps: number;
   live: boolean;
   onUpdate?(): void;
@@ -136,7 +133,7 @@ export interface HeroHandle {
 }
 
 export function makeInitialSource(envId: EnvId, seed: number): PlaybackSource {
-  const decoder = decoders[envId] as EnvDecoder<unknown, unknown>;
+  const decoder = decoders[envId] as EnvDecoder;
   const st = decoder.initStatic(seed);
   const init = decoder.initFrame(seed, st);
   const info = ENVS[envId];
@@ -148,14 +145,14 @@ export function makeInitialSource(envId: EnvId, seed: number): PlaybackSource {
     geometry: decoder.geometry(st, seed),
     frameCount: 1,
     complete: false,
-    frameAt: () => init as EnvFrame<unknown>,
+    frameAt: () => init,
     eventsAt: () => NO_EVENTS,
   };
 }
 
 export function loadHero(options: HeroOptions): HeroHandle {
   const { runId, envId, seed } = options;
-  const decoder = decoders[envId] as EnvDecoder<unknown, unknown>;
+  const decoder = decoders[envId] as EnvDecoder;
   if (decoder === undefined) throw new TheaterLoadError(`no @sim decoder registered for ${envId}`);
   const info = ENVS[envId];
   const st = decoder.initStatic(seed);
@@ -163,7 +160,7 @@ export function loadHero(options: HeroOptions): HeroHandle {
   const initFrame = decoder.initFrame(seed, st);
 
   let live = options.live;
-  const capacitySteps = Math.max(options.steps, live ? options.horizonSteps : options.steps, 1);
+  const capacitySteps = Math.max(options.horizonSteps, 1);
   const raw = {
     envId,
     seed,
@@ -179,7 +176,7 @@ export function loadHero(options: HeroOptions): HeroHandle {
   let fullyFetched = false;
   let destroyed = false;
   let lens: RecordingLens | null = null;
-  let updateTimer: ReturnType<typeof setTimeout> | null = null;
+  let updateTimer: number | null = null;
   let onUpdate = options.onUpdate ?? null;
   let onError = options.onError ?? null;
   let etag: string | null = null;
@@ -211,10 +208,10 @@ export function loadHero(options: HeroOptions): HeroHandle {
     }
     lens.extend();
     if (updateTimer === null) {
-      updateTimer = setTimeout(() => {
+      updateTimer = requestAnimationFrame(() => {
         updateTimer = null;
         if (!destroyed) onUpdate?.();
-      }, UPDATE_MIN_MS);
+      });
     }
   };
 
@@ -251,7 +248,7 @@ export function loadHero(options: HeroOptions): HeroHandle {
         );
       }
       const payload = await inflateChunk(view, next);
-      decodeChunkPayload(payload, desc, next.stepCount, raw.data, decodedSteps * RECORD_FLOATS);
+      decodeChunkPayload(payload, desc, next.stepCount, next.predictorBits, raw.data, decodedSteps * RECORD_FLOATS);
       decodedSteps += next.stepCount;
       scanOffset = next.byteOffset + next.byteLength;
       decodedAny = true;
@@ -297,12 +294,27 @@ export function loadHero(options: HeroOptions): HeroHandle {
     await fetchFrom(0);
     fullyFetched = true;
     onUpdate?.();
+    let lastGrewAt = performance.now();
+    let intervalMs = 0;
+    let backoffMs = 0;
     while (live && !destroyed) {
-      await new Promise((res) => setTimeout(res, LIVE_POLL_MS));
+      const dueIn = intervalMs > 0
+        ? Math.max(0, lastGrewAt + intervalMs - performance.now())
+        : 0;
+      await new Promise((res) => setTimeout(res, Math.max(dueIn, backoffMs)));
       if (!live || destroyed) break;
+      const startedAt = performance.now();
       const result = await fetchFrom(byteLength);
       if (result === 'restart') {
         throw new TheaterLoadError('the recording was rewritten underneath the player — reload the run');
+      }
+      if (result === 'grew') {
+        const at = performance.now();
+        intervalMs = at - lastGrewAt;
+        lastGrewAt = at;
+        backoffMs = 0;
+      } else {
+        backoffMs = Math.max(performance.now() - startedAt, backoffMs * 2);
       }
     }
     onUpdate?.();
@@ -319,7 +331,7 @@ export function loadHero(options: HeroOptions): HeroHandle {
       return decodedSteps;
     },
     get totalSteps() {
-      return Math.max(options.steps, decodedSteps);
+      return Math.max(decodedSteps, 1);
     },
     get bytes() {
       return byteLength;
@@ -338,7 +350,7 @@ export function loadHero(options: HeroOptions): HeroHandle {
     destroy() {
       destroyed = true;
       abort.abort();
-      if (updateTimer !== null) clearTimeout(updateTimer);
+      if (updateTimer !== null) cancelAnimationFrame(updateTimer);
     },
   };
 }

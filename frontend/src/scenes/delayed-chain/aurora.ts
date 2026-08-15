@@ -1,11 +1,9 @@
 
 import * as THREE from 'three';
 import { TOKENS, type Palette } from '@kit/tokens';
-import type { QualityTier } from '@kit/types';
 import { blendTokens } from './world';
 
 export interface AuroraOptions {
-  tier: QualityTier;
   palette: Palette;
   tokens: typeof TOKENS;
   center: number;
@@ -136,7 +134,7 @@ function auroraGeometry(segments: number, rows: number): THREE.BufferGeometry {
 }
 
 export function buildAurora(opts: AuroraOptions): AuroraHandle {
-  const detail = opts.tier === 'thumb' ? 0.35 : opts.tier === 'medium' ? 0.6 : 1;
+  const detail = 1;
   const segments = Math.max(16, Math.round(112 * detail));
   const rows = Math.max(2, Math.round(9 * detail));
 

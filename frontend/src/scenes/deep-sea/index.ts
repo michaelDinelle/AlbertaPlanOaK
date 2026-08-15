@@ -35,10 +35,6 @@ const CAM_AZIMUTH = CAMERA_AZIMUTH;
 const CAM_POLAR = 0.82;
 const CAM_DISTANCE = 17.6;
 const CAM_TARGET: readonly [number, number, number] = [-0.85, -2.08, 1.05];
-const CAM_YAW_RANGE = 0.55;
-const CAM_DISTANCE_THUMB = 21.0;
-const CAM_AZIMUTH_THUMB = 0.74;
-const CAM_POLAR_THUMB = 0.82;
 
 const BURST_SCALE = 0.78;
 const RIPPLE_SCALE = 0.44;
@@ -119,7 +115,6 @@ class SunlitDescentScene implements SceneModule {
     const wisp = new Wisp(
       {
         color: accent,
-        tier: ctx.tier,
         radius: 0.19,
         hop: { duration: HOP_SECONDS, height: HOP_HEIGHT },
         ribbon: false,
@@ -133,7 +128,6 @@ class SunlitDescentScene implements SceneModule {
     this.scene.add(this.diver);
 
     const bubble = buildBubble({
-      tier: ctx.tier,
       palette,
       skin: world.skin,
       accent,
@@ -144,7 +138,6 @@ class SunlitDescentScene implements SceneModule {
     wisp.avatar.add(bubble.group);
 
     const clam = buildClam({
-      tier: ctx.tier,
       palette,
       skin: world.skin,
       facing: Math.PI * 0.26,
@@ -154,13 +147,12 @@ class SunlitDescentScene implements SceneModule {
     cellToReefVec(this.treasure.x, this.treasure.y, grid, clam.root.position);
     this.scene.add(clam.group);
 
-    const thumb = ctx.tier === 'thumb';
     const rig = makeOrbitRig({
       canvas: ctx.canvas,
       target: [CAM_TARGET[0], CAM_TARGET[1], CAM_TARGET[2]],
-      distance: thumb ? CAM_DISTANCE_THUMB : CAM_DISTANCE,
-      azimuth: thumb ? CAM_AZIMUTH_THUMB : CAM_AZIMUTH,
-      polar: thumb ? CAM_POLAR_THUMB : CAM_POLAR,
+      distance: CAM_DISTANCE,
+      azimuth: CAM_AZIMUTH,
+      polar: CAM_POLAR,
       fov: ctx.tokens.fovHero,
       near: 0.1,
       far: 900,
@@ -175,7 +167,6 @@ class SunlitDescentScene implements SceneModule {
     rig.snap();
 
     const pool = new CelebrationPool({
-      tier: ctx.tier,
       seed: ctx.seed,
       burstSize: BURST_PARTICLES,
       name: 'reefCelebrations',

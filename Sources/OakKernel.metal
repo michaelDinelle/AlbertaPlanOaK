@@ -388,19 +388,6 @@ kernel void oak_env_table_probe(device uint *out [[buffer(0)]],
     }
 }
 
-kernel void oak_env_geometry_probe(device uint *out [[buffer(0)]],
-                                   device const uint *laneEnvKinds [[buffer(1)]],
-                                   device const uint *laneSeeds [[buffer(2)]],
-                                   constant uint &laneCount [[buffer(3)]],
-                                   uint tid [[thread_position_in_grid]]) {
-    if (tid >= laneCount) return;
-    uint envKind = laneEnvKinds[tid];
-    uint words[10];
-    HalfCheetahState cheetah;
-    uint elapsed = 0u, resets = 0u;
-    env_reset(envKind, laneSeeds[tid], words, cheetah, elapsed, resets);
-    env_geometry(envKind, words, out + tid * OAK_ENV_GEOMETRY_WORDS);
-}
 inline device uint *activeFeatures(Agent agent, uint slot) { return agent.activeFeature + slot * OAK_ACT; }
 
 inline uint actionMeanCount(Agent agent) { return max(agent.actionCount / 2u, 1u); }
@@ -1928,15 +1915,16 @@ static inline void stepEnvironment(device float *params,
     float pose[9];
     uint envWords[10];
     for (int i = 0; i < 10; i++) envWords[i] = lane->envWords[i];
-    HalfCheetahState halfCheetah = lane->halfCheetah;
+    bool isCheetah = envK == OAK_ENV_CHEETAH;
+    HalfCheetahState halfCheetah;
+    if (isCheetah) halfCheetah = lane->halfCheetah;
     uint elapsed = lane->elapsed, resets = lane->resets;
     float reward = env_step(envK, laneSeeds[gid], ctrl, envWords, halfCheetah, elapsed, resets,
                             ecfg.episodeLen, obs, done);
     for (int i = 0; i < 10; i++) lane->envWords[i] = envWords[i];
-    lane->halfCheetah = halfCheetah;
+    if (isCheetah) lane->halfCheetah = halfCheetah;
     lane->elapsed = elapsed;
     lane->resets = resets;
-    env_pose(envK, envWords, halfCheetah, ctrl, pose);
     uint stepNum = lane->steps;
 
     if (isfinite(reward)) {
@@ -1963,16 +1951,18 @@ static inline void stepEnvironment(device float *params,
         agent.reward[0] = reward;
     }
     if (lane->deathStep == OAK_DEATH_NONE) {
+        uint obsCount = min(lane->envObservationCount, 17u);
         bool obsBad = false;
-        for (int i = 0; i < 17; i++) obsBad = obsBad || !isfinite(obs[i]);
+        for (uint i = 0u; i < obsCount; ++i) obsBad = obsBad || !isfinite(obs[i]);
         if (obsBad) {
             lane->deathStep = stepNum;
             lane->deathDetector = OAK_DET_ENV_OBS;
         }
     }
-    if (ecfg.recordCapacity != 0u) {
+    if (ecfg.recordCapacity != 0u && lane->deathStep == OAK_DEATH_NONE) {
         int slot = recordSlot[gid];
         if (slot >= 0) {
+            env_pose(envK, envWords, halfCheetah, ctrl, pose);
             ulong lanes = (ulong)ecfg.laneCount;
             device float *dst = recordBuf
                 + ((stepNum - 1u) % ecfg.recordCapacity) * (OAK_RECORD_FLOATS * lanes)

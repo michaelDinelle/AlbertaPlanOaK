@@ -1,27 +1,20 @@
 
-import { CTRL_LEN, OFF_DONE, OFF_POSE, POSE_LEN, effortView } from '../record';
+import { POSE_LEN } from '../record';
 import type { EnvDecoder, EnvFrame, EnvGeometry, SimEvent } from '../types';
 import { NO_EVENTS } from '../events';
 
 export const DELAYEDCHAIN_L = 32;
 export const DELAYEDCHAIN_END = DELAYEDCHAIN_L - 1;
 
-export interface DelayedChainState {
-  pos: number;
-  lastA: number;
-  len: number;
-}
+export const DELAYEDCHAIN_POS = 0;
+export const DELAYEDCHAIN_ACTION = 2;
 
 export interface DelayedChainStatic {
   seed: number;
   walls: Uint8Array;
 }
 
-function state(pos: number, lastA: number): DelayedChainState {
-  return { pos, lastA, len: DELAYEDCHAIN_L };
-}
-
-export const delayedChainDecoder: EnvDecoder<DelayedChainState, DelayedChainStatic> = {
+export const delayedChainDecoder: EnvDecoder<DelayedChainStatic> = {
   envId: 'DelayedChain-cont-v0',
 
   initStatic(seed: number): DelayedChainStatic {
@@ -35,30 +28,18 @@ export const delayedChainDecoder: EnvDecoder<DelayedChainState, DelayedChainStat
     };
   },
 
-  initFrame(): EnvFrame<DelayedChainState> {
+  initFrame(): EnvFrame {
     const pose = new Float32Array(POSE_LEN);
     pose[1] = DELAYEDCHAIN_END;
     return {
       step: -1,
-      ctrl: new Float32Array(CTRL_LEN),
       done: 0,
       pose,
-      state: state(0, 0),
     };
   },
 
-  decodeFrame(i: number, raw16: Float32Array): EnvFrame<DelayedChainState> {
-    const pose = raw16.subarray(OFF_POSE, OFF_POSE + POSE_LEN);
-    return {
-      step: i,
-      ctrl: effortView(raw16, -1),
-      done: raw16[OFF_DONE] ?? 0,
-      pose,
-      state: state(pose[0] ?? 0, pose[2] ?? 0),
-    };
-  },
 
-  deriveEvents(_prev: EnvFrame<DelayedChainState>, next: EnvFrame<DelayedChainState>): SimEvent[] {
+  deriveEvents(_prev: EnvFrame, next: EnvFrame): SimEvent[] {
     if (next.done === 0) return NO_EVENTS;
     return [{ type: 'goal' }, { type: 'teleport' }, { type: 'done' }];
   },

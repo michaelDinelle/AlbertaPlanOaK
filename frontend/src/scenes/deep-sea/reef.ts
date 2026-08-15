@@ -1,14 +1,9 @@
 
-import { CELL, cellToWorld, type GridSize, type Vec3Tuple } from '@kit/grid';
+import { CELL, type GridSize } from '@kit/grid';
 import { TOKENS, type Palette } from '@kit/tokens';
 import type { FrameState } from '@kit/types';
 import * as THREE from 'three';
-import {
-  DEEPSEA_N,
-  deepSeaDecoder,
-  deepSeaNextCol,
-  type DeepSeaStatic,
-} from '@sim/envs/deepsea';
+import { DEEPSEA_ACTION, DEEPSEA_COL, DEEPSEA_N, DEEPSEA_ROW, deepSeaDecoder, deepSeaNextCol, type DeepSeaStatic } from '@sim/envs/deepsea';
 import type { EnvGeometry, GridGeometry } from '@sim/types';
 
 
@@ -91,21 +86,10 @@ export interface DiveCell {
   lastA: number;
 }
 
-interface DeepSeaLike {
-  r?: unknown;
-  c?: unknown;
-  lastA?: unknown;
-}
-
 export function readDive(state: FrameState, grid: GridSize, out: DiveCell): DiveCell {
-  const d = state.derived as DeepSeaLike | null | undefined;
-  const has = d !== null && typeof d === 'object';
-  const r = has && typeof d.r === 'number' ? d.r : (state.pose[0] ?? 0);
-  const c = has && typeof d.c === 'number' ? d.c : (state.pose[1] ?? 0);
-  const rawA = has && typeof d.lastA === 'number' ? d.lastA : Math.trunc(state.ctrl[0] ?? 0);
-  out.r = clampInt(Number.isFinite(r) ? Math.round(r) : 0, grid.h - 1);
-  out.c = clampInt(Number.isFinite(c) ? Math.round(c) : 0, grid.w - 1);
-  out.lastA = (Number.isFinite(rawA) ? Math.trunc(rawA) : 0) & 1;
+  out.r = clampInt(Math.round(state.pose[DEEPSEA_ROW] ?? 0), grid.h - 1);
+  out.c = clampInt(Math.round(state.pose[DEEPSEA_COL] ?? 0), grid.w - 1);
+  out.lastA = Math.trunc(state.pose[DEEPSEA_ACTION] ?? 0) & 1;
   return out;
 }
 

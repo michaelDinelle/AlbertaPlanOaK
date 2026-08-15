@@ -71,53 +71,6 @@ function segments(count: number, material: THREE.LineBasicMaterial, name: string
   return { object, positions, attr };
 }
 
-function sniffAgentCell(state: FrameState): GridCell | null {
-  const d = state.derived as Record<string, unknown> | null | undefined;
-  if (d && typeof d === 'object') {
-    if (typeof d.x === 'number' && typeof d.y === 'number') return { x: d.x, y: d.y };
-    if (typeof d.c === 'number' && typeof d.r === 'number') return { x: d.c, y: d.r };
-    if (typeof d.pos === 'number') return { x: d.pos, y: 0 };
-  }
-  const px = state.pose[0];
-  const py = state.pose[1];
-  if (typeof px === 'number' && typeof py === 'number') return { x: Math.round(px), y: Math.round(py) };
-  return null;
-}
-
-function sniffGoalCell(state: FrameState, grid: GridGeometry | undefined): GridCell | null {
-  const d = state.derived as Record<string, unknown> | null | undefined;
-  if (d && typeof d === 'object' && typeof d.gx === 'number' && typeof d.gy === 'number') {
-    return { x: d.gx, y: d.gy };
-  }
-  return grid?.goal ?? null;
-}
-
-function sniffKeyCells(state: FrameState, grid: GridGeometry | undefined): readonly GridCell[] | null {
-  const d = state.derived as Record<string, unknown> | null | undefined;
-  if (d && typeof d === 'object') {
-    const keys = d.keys;
-    if (Array.isArray(keys)) {
-      const out: GridCell[] = [];
-      for (const k of keys as unknown[]) {
-        const c = k as { x?: unknown; y?: unknown };
-        if (typeof c.x === 'number' && typeof c.y === 'number') out.push({ x: c.x, y: c.y });
-      }
-      return out;
-    }
-    if (typeof d.kx === 'number' && typeof d.ky === 'number') return [{ x: d.kx, y: d.ky }];
-  }
-  return grid?.keys ?? null;
-}
-
-function sniffDoorStates(state: FrameState): readonly boolean[] | null {
-  const d = state.derived as Record<string, unknown> | null | undefined;
-  if (!d || typeof d !== 'object') return null;
-  const open = d.doorOpen;
-  if (typeof open === 'boolean') return [open];
-  if (Array.isArray(open)) return (open as unknown[]).map((v) => v === true);
-  return null;
-}
-
 export class GroundTruthOverlay {
   readonly group = new THREE.Group();
 
@@ -142,10 +95,8 @@ export class GroundTruthOverlay {
   private doorMarkerAttr: THREE.BufferAttribute | null = null;
   private readonly maxKeys: number;
 
-  private skeleton: THREE.LineSegments | null = null;
   private skeletonPos: Float32Array | null = null;
   private skeletonAttr: THREE.BufferAttribute | null = null;
-  private toes: THREE.LineSegments | null = null;
   private toesPos: Float32Array | null = null;
   private toesAttr: THREE.BufferAttribute | null = null;
   private readonly fkOut = new Float32Array(FK_FLOATS);
@@ -346,7 +297,7 @@ export class GroundTruthOverlay {
   private updateGrid(state: FrameState, grid: GridGeometry): void {
     const y = 0.03;
 
-    const cell = this.opts.agentCell ? this.opts.agentCell(state) : sniffAgentCell(state);
+    const cell = this.opts.agentCell?.(state) ?? null;
     const cp = this.agentCrossPos;
     if (cp && this.agentCross && this.agentCrossAttr) {
       if (cell) {
@@ -368,7 +319,7 @@ export class GroundTruthOverlay {
       this.agentCrossAttr.needsUpdate = true;
     }
 
-    const goal = this.opts.goalCell ? this.opts.goalCell(state) : sniffGoalCell(state, grid);
+    const goal = this.opts.goalCell?.(state) ?? grid?.goal ?? null;
     const gp = this.goalMarkerPos;
     if (gp && this.goalMarker && this.goalMarkerAttr) {
       if (goal) {
@@ -392,7 +343,7 @@ export class GroundTruthOverlay {
       this.goalMarkerAttr.needsUpdate = true;
     }
 
-    const keys = this.opts.keyCells ? this.opts.keyCells(state) : sniffKeyCells(state, grid);
+    const keys = this.opts.keyCells?.(state) ?? grid?.keys ?? null;
     const kp = this.keyMarkerPos;
     if (kp && this.keyMarker && this.keyMarkerAttr) {
       kp.fill(0);
@@ -422,7 +373,7 @@ export class GroundTruthOverlay {
     const dp = this.doorMarkerPos;
     if (dp && this.doorMarker && this.doorMarkerAttr) {
       dp.fill(0);
-      const states = this.opts.doorStates ? this.opts.doorStates(state) : sniffDoorStates(state);
+      const states = this.opts.doorStates?.(state) ?? null;
       const n = doors ? Math.min(doors.length, MAX_DOORS) : 0;
       let o = 0;
       for (let i = 0; i < n; i++) {
@@ -446,13 +397,11 @@ export class GroundTruthOverlay {
 
   private buildCheetah(main: THREE.LineBasicMaterial, goalMat: THREE.LineBasicMaterial): void {
     const bones = segments(CHEETAH_BONES.length, main, 'oakDebugSkeleton');
-    this.skeleton = bones.object;
     this.skeletonPos = bones.positions;
     this.skeletonAttr = bones.attr;
     this.add(bones.object);
 
     const toe = segments(4, goalMat, 'oakDebugToes');
-    this.toes = toe.object;
     this.toesPos = toe.positions;
     this.toesAttr = toe.attr;
     this.add(toe.object);
