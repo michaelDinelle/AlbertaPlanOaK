@@ -3,8 +3,6 @@ import { join, sep } from 'node:path';
 import { ENV_IDS, isEnvId, type EnvId } from '@shared/envs';
 import type { RecordingRef } from '@shared/types';
 import {
-  CHUNK_HEADER_BYTES,
-  CHUNK_MAGIC,
   FILE_HEADER_BYTES,
   FILE_MAGIC,
   RECORD_ENV_KINDS,
@@ -14,20 +12,21 @@ import { lstatOrNull } from './fs';
 export interface RecordingEntry {
   envId: EnvId;
   seed: number;
-  steps: number;
   bytes: number;
-  actionsPath: string;
+  posePath: string;
 }
 
 const SEED_DIR = /^seed(\d+)$/;
 const ENV_ORDER = new Map<string, number>(ENV_IDS.map((id, i) => [id, i]));
 
-async function laneSteps(path: string, envId: EnvId): Promise<number> {
+async function checkHeader(path: string, envId: EnvId): Promise<void> {
   const handle = await open(path, 'r');
   const header = Buffer.allocUnsafe(FILE_HEADER_BYTES);
   try {
     const got = await handle.read(header, 0, FILE_HEADER_BYTES, 0);
-    if (got.bytesRead < FILE_HEADER_BYTES) return 0;
+    if (got.bytesRead < FILE_HEADER_BYTES) {
+      throw new Error(`${path}: ${got.bytesRead} bytes — shorter than the ${FILE_HEADER_BYTES}-byte header`);
+    }
     if (header.readUInt32LE(0) !== FILE_MAGIC) {
       throw new Error(`${path}: not a recording (bad magic)`);
     }
@@ -35,17 +34,6 @@ async function laneSteps(path: string, envId: EnvId): Promise<number> {
     if (RECORD_ENV_KINDS[envKind] !== envId) {
       throw new Error(`${path}: header envKind ${envKind} contradicts directory env ${envId}`);
     }
-    const chunk = Buffer.allocUnsafe(CHUNK_HEADER_BYTES);
-    let offset = FILE_HEADER_BYTES;
-    let steps = 0;
-    for (;;) {
-      const read = await handle.read(chunk, 0, CHUNK_HEADER_BYTES, offset);
-      if (read.bytesRead < CHUNK_HEADER_BYTES) break;
-      if (chunk.readUInt32LE(0) !== CHUNK_MAGIC) break;
-      steps = chunk.readUInt32LE(4) + chunk.readUInt32LE(8);
-      offset += CHUNK_HEADER_BYTES + chunk.readUInt32LE(16);
-    }
-    return steps;
   } finally {
     await handle.close().catch(() => undefined);
   }
@@ -74,6 +62,10 @@ async function containedIn(path: string, root: string): Promise<boolean> {
 
 export interface ScanOptions {
   root?: string;
+}
+
+export async function envDirCount(runDir: string): Promise<number> {
+  return (await envDirsOf(runDir)).length;
 }
 
 export async function scanRecordings(runDir: string, opts: ScanOptions = {}): Promise<RecordingEntry[]> {
@@ -112,21 +104,14 @@ export async function scanRecordings(runDir: string, opts: ScanOptions = {}): Pr
       if (laneStat === null || laneStat.isSymbolicLink || !laneStat.isDirectory) return null;
       if (!(await containedIn(laneDir, root))) return null;
 
-      const actionsPath = join(laneDir, 'actions.bin');
-      const st = await lstatOrNull(actionsPath);
+      const posePath = join(laneDir, 'pose.bin');
+      const st = await lstatOrNull(posePath);
       if (st === null || st.isSymbolicLink || !st.isFile) return null;
       if (st.size < FILE_HEADER_BYTES) return null;
 
-      let steps: number;
-      try {
-        steps = await laneSteps(actionsPath, envName);
-      } catch (err) {
-        console.warn(`[oak-frontend] ${err instanceof Error ? err.message : String(err)}`);
-        return null;
-      }
-      if (steps === 0) return null;
+      await checkHeader(posePath, envName);
 
-      return { envId: envName, seed, steps, bytes: st.size, actionsPath };
+      return { envId: envName, seed, bytes: st.size, posePath };
     }));
     for (const entry of scanned) if (entry !== null) out.push(entry);
   }
@@ -140,12 +125,7 @@ export async function scanRecordings(runDir: string, opts: ScanOptions = {}): Pr
 }
 
 export function toRecordingRefs(entries: readonly RecordingEntry[]): RecordingRef[] {
-  return entries.map((e) => ({
-    envId: e.envId,
-    seed: e.seed,
-    steps: e.steps,
-    bytes: e.bytes,
-  }));
+  return entries.map((e) => ({ envId: e.envId, seed: e.seed, bytes: e.bytes }));
 }
 
 export function findRecording(

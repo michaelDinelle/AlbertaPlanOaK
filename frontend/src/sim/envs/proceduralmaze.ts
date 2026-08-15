@@ -1,6 +1,6 @@
 
 import { philoxDraw, STREAM_RESET } from '../philox';
-import { CTRL_LEN, OFF_DONE, OFF_POSE, POSE_LEN, effortView } from '../record';
+import { POSE_LEN } from '../record';
 import type { EnvDecoder, EnvFrame, EnvGeometry, GridCell, SimEvent } from '../types';
 import { NO_EVENTS } from '../events';
 
@@ -10,12 +10,10 @@ export const PROCMAZE_INTERIOR = 9;
 export const PROCMAZE_START: GridCell = Object.freeze({ x: 1, y: 1 });
 export const PROCMAZE_GOAL: GridCell = Object.freeze({ x: 9, y: 9 });
 
-export interface ProceduralMazeState {
-  x: number;
-  y: number;
-  gx: number;
-  gy: number;
-}
+export const PROCMAZE_X = 0;
+export const PROCMAZE_Y = 1;
+export const PROCMAZE_GX = 2;
+export const PROCMAZE_GY = 3;
 
 export interface ProceduralMazeStatic {
   seed: number;
@@ -93,11 +91,7 @@ export function procMazeWalls(words: ArrayLike<number>): Uint8Array {
   return walls;
 }
 
-function state(x: number, y: number, gx: number, gy: number): ProceduralMazeState {
-  return { x, y, gx, gy };
-}
-
-export const proceduralMazeDecoder: EnvDecoder<ProceduralMazeState, ProceduralMazeStatic> = {
+export const proceduralMazeDecoder: EnvDecoder<ProceduralMazeStatic> = {
   envId: 'ProceduralMaze-cont-v0',
 
   initStatic(seed: number): ProceduralMazeStatic {
@@ -118,7 +112,7 @@ export const proceduralMazeDecoder: EnvDecoder<ProceduralMazeState, ProceduralMa
     };
   },
 
-  initFrame(): EnvFrame<ProceduralMazeState> {
+  initFrame(): EnvFrame {
     const pose = new Float32Array(POSE_LEN);
     pose[0] = PROCMAZE_START.x;
     pose[1] = PROCMAZE_START.y;
@@ -126,27 +120,15 @@ export const proceduralMazeDecoder: EnvDecoder<ProceduralMazeState, ProceduralMa
     pose[3] = PROCMAZE_GOAL.y;
     return {
       step: -1,
-      ctrl: new Float32Array(CTRL_LEN),
       done: 0,
       pose,
-      state: state(PROCMAZE_START.x, PROCMAZE_START.y, PROCMAZE_GOAL.x, PROCMAZE_GOAL.y),
     };
   },
 
-  decodeFrame(i: number, raw16: Float32Array): EnvFrame<ProceduralMazeState> {
-    const pose = raw16.subarray(OFF_POSE, OFF_POSE + POSE_LEN);
-    return {
-      step: i,
-      ctrl: effortView(raw16, -1),
-      done: raw16[OFF_DONE] ?? 0,
-      pose,
-      state: state(pose[0] ?? 0, pose[1] ?? 0, pose[2] ?? 0, pose[3] ?? 0),
-    };
-  },
 
   deriveEvents(
-    _prev: EnvFrame<ProceduralMazeState>,
-    next: EnvFrame<ProceduralMazeState>,
+    _prev: EnvFrame,
+    next: EnvFrame,
   ): SimEvent[] {
     if (next.done === 0) return NO_EVENTS;
     return [{ type: 'goal' }, { type: 'teleport' }, { type: 'done' }];

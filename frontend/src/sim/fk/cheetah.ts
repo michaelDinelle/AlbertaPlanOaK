@@ -105,10 +105,6 @@ export function fk(qpos: ArrayLike<number>, out?: Float32Array): Float32Array {
   return fkInto(qpos, out ?? new Float32Array(FK_FLOATS));
 }
 
-export function fk64(qpos: ArrayLike<number>, out?: Float64Array): Float64Array {
-  return fkInto(qpos, out ?? new Float64Array(FK_FLOATS));
-}
-
 export const cheetahGeometry: CheetahGeometry = Object.freeze({
   fk,
   radius: CHEETAH_RADIUS,

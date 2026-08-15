@@ -4,8 +4,6 @@ import type { RunDetail, RunIndexEntry, RunMeta } from '@shared/types';
 import { DEATH_DETECTORS } from '@shared/types';
 import { ENVS, ENV_IDS, isEnvId, type EnvId } from '@shared/envs';
 
-const CACHE_TTL_MS = 60_000;
-
 export interface CachedFeed<T> {
   snapshot(): T | null;
   load(force?: boolean): Promise<T>;
@@ -13,20 +11,16 @@ export interface CachedFeed<T> {
 
 function cachedFeed<T>(loader: () => Promise<T>): CachedFeed<T> {
   let data: T | null = null;
-  let fetchedAt = 0;
   let inflight: Promise<T> | null = null;
   return {
     snapshot: () => data,
     load(force = false) {
-      if (!force && data !== null && Date.now() - fetchedAt < CACHE_TTL_MS) {
-        return Promise.resolve(data);
-      }
+      if (!force && data !== null) return Promise.resolve(data);
       if (inflight) return inflight;
       inflight = loader().then(
         (value) => {
           inflight = null;
           data = value;
-          fetchedAt = Date.now();
           return value;
         },
         (error: unknown) => {
@@ -297,8 +291,7 @@ export function binEdgeRows(tape: Tape, bins: number): number[] {
   return out;
 }
 
-export function binnedRates(tape: Tape, lanes: readonly number[], bins: number): BinnedRates {
-  const edgeRows = binEdgeRows(tape, bins);
+export function binnedRates(tape: Tape, lanes: readonly number[]): BinnedRates {
   const f = fieldIndex(tape, 'rewardSum');
   const x: number[] = [];
   const edges: number[] = [0];
@@ -309,7 +302,7 @@ export function binnedRates(tape: Tape, lanes: readonly number[], bins: number):
   let prevStep = 0;
   let prevRow = -1;
   const scratch: number[] = [];
-  for (const r of edgeRows) {
+  for (let r = 0; r < tape.rows; r++) {
     const step = tape.stepEnd[r] ?? 0;
     const span = step - prevStep;
     scratch.length = 0;
@@ -373,27 +366,13 @@ export interface ThroughputSeries {
   stepsPerSecond: (number | null)[];
 }
 
-export function throughputSeries(tape: Tape, bins: number): ThroughputSeries {
-  const measured: number[] = [];
-  for (let r = 0; r < tape.rows; r++) {
-    if (Number.isFinite(tape.wallSeconds[r])) measured.push(r);
-  }
-  const want = Math.max(1, Math.min(bins, measured.length));
-  const picked: number[] = [];
-  let prev = -1;
-  for (let b = 1; b <= want; b++) {
-    const i = Math.round((b * measured.length) / want) - 1;
-    const r = measured[i] ?? 0;
-    if (r > prev) {
-      picked.push(r);
-      prev = r;
-    }
-  }
+export function throughputSeries(tape: Tape): ThroughputSeries {
   const x: number[] = [];
   const out: (number | null)[] = [];
   let prevStep = 0;
   let prevWall = 0;
-  for (const r of picked) {
+  for (let r = 0; r < tape.rows; r++) {
+    if (!Number.isFinite(tape.wallSeconds[r])) continue;
     const step = tape.stepEnd[r] ?? 0;
     const wall = tape.wallSeconds[r] ?? NaN;
     const dWall = wall - prevWall;
@@ -412,15 +391,14 @@ export interface SurvivalSeries {
   positive: number[];
 }
 
-export function survivalSeries(tape: Tape, lanes: readonly number[], bins: number): SurvivalSeries {
-  const edgeRows = binEdgeRows(tape, bins);
+export function survivalSeries(tape: Tape, lanes: readonly number[]): SurvivalSeries {
   const f = fieldIndex(tape, 'rewardSum');
   const deaths = lanes.map((lane) => laneDeath(tape, lane)?.step ?? Infinity);
   const x: number[] = [];
   const surviving: number[] = [];
   const positive: number[] = [];
   const n = Math.max(1, lanes.length);
-  for (const r of edgeRows) {
+  for (let r = 0; r < tape.rows; r++) {
     const step = tape.stepEnd[r] ?? 0;
     let alive = 0;
     let pos = 0;

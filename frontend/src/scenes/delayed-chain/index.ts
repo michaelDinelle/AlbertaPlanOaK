@@ -1,4 +1,5 @@
 
+import { DELAYEDCHAIN_ACTION, DELAYEDCHAIN_POS } from '@sim/envs/delayedchain';
 import { CelebrationPool, attachCelebrations, disposeCelebrations } from '@kit/celebrate';
 import { GroundTruthOverlay } from '@kit/debug';
 import { cellToWorld, cellToWorldVec, type GridSize } from '@kit/grid';
@@ -41,10 +42,6 @@ const CAM_POLAR = 1.43;
 const CAM_TARGET_Y = 1.3;
 const CAM_LOOK_AHEAD = 0.9;
 const CAM_FOLLOW_RATE = 5.5;
-const CAM_DISTANCE_THUMB = 28;
-const CAM_AZIMUTH_THUMB = -1.12;
-const CAM_POLAR_THUMB = 1.38;
-const CAM_TARGET_THUMB: readonly [number, number, number] = [-4, 2, 0];
 
 export const WAVE_TRAVEL = 1.35;
 export const IGNITE_ATTACK = 0.14;
@@ -64,20 +61,11 @@ const HOP_SECONDS = 0.11;
 const HOP_HEIGHT = 0.15;
 const WISP_LEAN = 0.15;
 
-interface DelayedChainLike {
-  pos?: unknown;
-  lastA?: unknown;
-}
-
 function readState(state: FrameState, grid: GridSize, out: GridCell): number {
-  const d = state.derived as DelayedChainLike | null | undefined;
-  const has = d !== null && typeof d === 'object';
-  const raw = has && typeof d.pos === 'number' ? d.pos : (state.pose[0] ?? 0);
-  const lastA = has && typeof d.lastA === 'number' ? d.lastA : (state.pose[2] ?? 0);
-  const pos = Number.isFinite(raw) ? Math.round(raw) : 0;
+  const pos = Math.round(state.pose[DELAYEDCHAIN_POS] ?? 0);
   out.x = pos < 0 ? 0 : pos > grid.w - 1 ? grid.w - 1 : pos;
   out.y = 0;
-  return Number.isFinite(lastA) && lastA >= 0.5 ? 1 : 0;
+  return (state.pose[DELAYEDCHAIN_ACTION] ?? 0) >= 0.5 ? 1 : 0;
 }
 
 class LongNightRoadScene implements SceneModule {
@@ -111,7 +99,6 @@ class LongNightRoadScene implements SceneModule {
   private readonly shadowCenter = { x: 0, y: 0.3, z: 0 };
   private shadowCell = Number.NaN;
   private camX = 0;
-  private accent = 0x7fe0c4;
   private gold = 0xffd166;
   private flame = 0xffd166;
 
@@ -127,7 +114,6 @@ class LongNightRoadScene implements SceneModule {
 
     const palette = ctx.tokens.palettes.night;
     const accent = ctx.tokens.accents[manifest.accent] ?? ctx.tokens.uiCyan;
-    this.accent = accent;
     this.gold = ctx.tokens.celebrationGold;
 
     const world = buildWorld(ctx, this.scene, grid);
@@ -152,7 +138,6 @@ class LongNightRoadScene implements SceneModule {
     }
 
     const road = buildLanternRoad({
-      tier: ctx.tier,
       palette,
       skin: world.skin,
       grid,
@@ -167,7 +152,6 @@ class LongNightRoadScene implements SceneModule {
     road.commit();
 
     const milestone = buildMilestone({
-      tier: ctx.tier,
       palette,
       skin: world.skin,
       grid,
@@ -180,7 +164,6 @@ class LongNightRoadScene implements SceneModule {
     const wisp = new Wisp(
       {
         color: accent,
-        tier: ctx.tier,
         radius: 0.165,
         hop: { duration: HOP_SECONDS, height: HOP_HEIGHT },
         name: 'roadWisp',
@@ -195,31 +178,20 @@ class LongNightRoadScene implements SceneModule {
 
     const glow = buildWispGlow({
       color: accent,
-      tier: ctx.tier,
-      radius: ctx.tier === 'thumb' ? 0.8 : 1.05,
+      radius: 1.05,
       intensity: 0.72,
       name: 'wispGlow',
     });
     this.glow = glow;
     this.scene.add(glow.mesh);
 
-    const thumb = ctx.tier === 'thumb';
     const rig = makeOrbitRig({
       canvas: ctx.canvas,
-      target: thumb ? CAM_TARGET_THUMB : [0, CAM_TARGET_Y, 0],
-      distance: thumb ? CAM_DISTANCE_THUMB : CAM_DISTANCE,
-      azimuth: thumb ? CAM_AZIMUTH_THUMB : CAMERA_AZIMUTH,
-      polar: thumb ? CAM_POLAR_THUMB : CAM_POLAR,
-      limits: thumb
-        ? {
-            minPolar: CAM_POLAR_THUMB,
-            maxPolar: CAM_POLAR_THUMB,
-            minAzimuth: CAM_AZIMUTH_THUMB,
-            maxAzimuth: CAM_AZIMUTH_THUMB,
-            minDistance: CAM_DISTANCE_THUMB,
-            maxDistance: CAM_DISTANCE_THUMB,
-          }
-        : {
+      target: [0, CAM_TARGET_Y, 0],
+      distance: CAM_DISTANCE,
+      azimuth: CAMERA_AZIMUTH,
+      polar: CAM_POLAR,
+      limits: {
             minPolar: 1.15,
             maxPolar: 1.52,
             minAzimuth: CAMERA_AZIMUTH - 0.45,
@@ -241,7 +213,6 @@ class LongNightRoadScene implements SceneModule {
     rig.snap();
 
     const pool = new CelebrationPool({
-      tier: ctx.tier,
       seed: ctx.seed,
       burstSize: BURST_PARTICLES,
       name: 'roadCelebrations',
@@ -273,7 +244,7 @@ class LongNightRoadScene implements SceneModule {
     milestone.setTime(0);
     wisp.setCell(0, 0, grid);
     this.camX = wisp.position.x;
-    if (!thumb) rig.setTarget(this.camX + CAM_LOOK_AHEAD, CAM_TARGET_Y, 0);
+    rig.setTarget(this.camX + CAM_LOOK_AHEAD, CAM_TARGET_Y, 0);
     rig.snap();
     glow.mesh.position.copy(wisp.position);
     glow.mesh.position.y += ctx.tokens.wispHeight;
@@ -295,7 +266,6 @@ class LongNightRoadScene implements SceneModule {
     const state = frame.state;
     const grid = this.grid;
     const agent = this.agentCell;
-    const thumb = ctx.tier === 'thumb';
 
     pool.update(frame.dtReal, time);
 
@@ -390,7 +360,7 @@ class LongNightRoadScene implements SceneModule {
     road.update(frame.dtReal, time);
     this.milestone?.setTime(time);
 
-    if (!thumb) {
+    {
       const wispX = wisp.position.x;
       if (snapCamera) this.camX = wispX;
       else this.camX += (wispX - this.camX) * (1 - Math.exp(-CAM_FOLLOW_RATE * Math.max(0, frame.dtReal)));

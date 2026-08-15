@@ -16,7 +16,7 @@ import { skyFromPalette, type SkyHandle } from '@kit/sky';
 import { makeTerrain, type TerrainHandle } from '@kit/terrain';
 import { valueNoise2 } from '@kit/textures';
 import { TOKENS, type Palette } from '@kit/tokens';
-import type { QualityTier, SceneContext } from '@kit/types';
+import type { SceneContext } from '@kit/types';
 import {
   excludeAny,
   excludeBand,
@@ -26,7 +26,6 @@ import {
   scatterRocks,
   scatterTrees,
   type ExcludeFn,
-  type VegetationHandle,
 } from '@kit/vegetation';
 import { DELAYEDCHAIN_END, DELAYEDCHAIN_L, delayedChainDecoder } from '@sim/envs/delayedchain';
 import type { EnvGeometry, GridGeometry } from '@sim/types';
@@ -48,8 +47,6 @@ export const MOON_DIR: readonly [number, number, number] = [-0.52, 0.62, 0.59];
 export const SHADOW_RADIUS = 9;
 
 export const AURORA_RADIUS = 26;
-export const AURORA_FIRST_CELL = 24;
-
 export const CAMERA_AZIMUTH = -1.16;
 export const CAMERA_LANE_Z = 2.9;
 
@@ -261,16 +258,14 @@ interface Timed {
 }
 
 export function buildWorld(ctx: SceneContext, scene: THREE.Scene, grid: GridGeometry): WorldHandle {
-  const tier: QualityTier = ctx.tier;
   const palette: Palette = ctx.tokens.palettes.night;
   const skin = moorSkin(palette, ctx.tokens);
-  const shadows = tier !== 'thumb';
   const group = new THREE.Group();
   group.name = 'longNightRoad';
   const owned: Disposable[] = [];
   const timed: Timed[] = [];
 
-  const sky = skyFromPalette(palette, 'night', tier, {
+  const sky = skyFromPalette(palette, 'night', {
     sunDir: MOON_DIR,
     sunSize: 0.022,
     sunHdr: 3.2,
@@ -286,7 +281,7 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene, grid: GridGeom
   owned.push(sky);
   timed.push({ setTime: (t) => sky.setTime(t) });
 
-  const rig = makeLightRig(palette, tier, {
+  const rig = makeLightRig(palette, {
     sunDir: sky.sunDirection,
     pointCount: 4,
     pointDistance: 9,
@@ -301,7 +296,6 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene, grid: GridGeom
   const terrain = makeTerrain({
     size: TERRAIN_SIZE,
     segments: TERRAIN_SEGMENTS,
-    tier,
     seed: ctx.seed,
     heightFn: makeMoorHeight(ctx.seed),
     jitter: 0,
@@ -324,14 +318,14 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene, grid: GridGeom
       toonSoftness: 0.32,
       toonFloor: 0.16,
     },
-    receiveShadow: shadows,
+    receiveShadow: true,
     castShadow: false,
     name: 'moorTerrain',
   });
   group.add(terrain.mesh);
   owned.push(terrain);
 
-  const pools = moonPools(ctx.seed, tier === 'thumb' ? 3 : tier === 'medium' ? 4 : MOON_POOL_COUNT, grid.w);
+  const pools = moonPools(ctx.seed, MOON_POOL_COUNT, grid.w);
   const field = buildCellField(
     grid,
     {
@@ -351,7 +345,6 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene, grid: GridGeom
       seed: ctx.seed,
       name: 'roadFlagstones',
     },
-    tier,
   );
   group.add(field.group);
   owned.push(field);
@@ -375,12 +368,11 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene, grid: GridGeom
       toonSteps: 2,
       toonSoftness: 0.34,
       toonFloor: 0.2,
-      tier,
       name: 'roadVergeMaterial',
     });
     const mesh = new THREE.Mesh(geometry, material);
     mesh.name = 'roadVerge';
-    mesh.receiveShadow = shadows;
+    mesh.receiveShadow = true;
     group.add(mesh);
     owned.push({
       dispose: () => {
@@ -391,7 +383,6 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene, grid: GridGeom
   }
 
   const aurora = buildAurora({
-    tier,
     palette,
     tokens: ctx.tokens,
     center: cellToWorld(goalCellOf(grid), 0, grid)[0],
@@ -409,7 +400,6 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene, grid: GridGeom
     count: 2600,
     area: { x: 0, z: 0, halfX: ROAD_HALF + 14, halfZ: 22 },
     seed: ctx.seed ^ 0x5c3a,
-    tier,
     exclude: offRoad,
     heightAt: (x, z) => terrain.sampleHeight(x, z),
     maxSlope: 0.85,
@@ -432,7 +422,6 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene, grid: GridGeom
     count: 760,
     area: { x: 0, z: 0, halfX: ROAD_HALF + 10, halfZ: 15 },
     seed: ctx.seed ^ 0x71bd,
-    tier,
     exclude: offRoad,
     heightAt: (x, z) => terrain.sampleHeight(x, z),
     maxSlope: 0.8,
@@ -455,7 +444,6 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene, grid: GridGeom
     count: 260,
     area: { x: 0, z: 0, halfX: ROAD_HALF + 16, halfZ: 24 },
     seed: ctx.seed ^ 0x3e91,
-    tier,
     exclude: excludeAny(offRoad, nearCamera),
     heightAt: (x, z) => terrain.sampleHeight(x, z),
     maxSlope: 0.9,
@@ -465,7 +453,7 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene, grid: GridGeom
     hueJitter: 0.22,
     rimColor: palette.hemiSky,
     rimStrength: 0.36,
-    castShadow: shadows,
+    castShadow: true,
     name: 'moorStones',
   });
   group.add(stones.group);
@@ -477,7 +465,6 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene, grid: GridGeom
     count: 90,
     area: { x: 0, z: 0, halfX: ROAD_HALF + 22, halfZ: 30, innerRadius: 0 },
     seed: ctx.seed ^ 0x18f7,
-    tier,
     exclude: excludeAny(excludeBand(0, 7.5, 1.6), nearCamera),
     heightAt: (x, z) => terrain.sampleHeight(x, z),
     maxSlope: 0.7,
@@ -500,7 +487,6 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene, grid: GridGeom
     size: [110, 54],
     color: skin.mist,
     seed: ctx.seed ^ 0x2f18,
-    tier,
     layers: 5,
     baseY: 0.06,
     spread: 1.05,
@@ -519,7 +505,6 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene, grid: GridGeom
     count: 1200,
     bounds: { x: 0, y: 1.15, z: -1.5, halfX: ROAD_HALF + 6, halfY: 1.1, halfZ: 5.2 },
     seed: ctx.seed ^ 0x6a21,
-    tier,
     color: blendTokens(palette.accentLight, skin.mist, 0.4),
     size: 0.42,
     intensity: 0.95,
@@ -558,7 +543,7 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene, grid: GridGeom
 }
 
 
-export function propMaterial(palette: Palette, tier: QualityTier, name: string): OakMaterial {
+export function propMaterial(palette: Palette, name: string): OakMaterial {
   return oakMaterial({
     vertexColors: true,
     flatShading: true,
@@ -568,7 +553,6 @@ export function propMaterial(palette: Palette, tier: QualityTier, name: string):
     toonSteps: 3,
     toonSoftness: 0.3,
     toonFloor: 0.18,
-    tier,
     name,
   });
 }

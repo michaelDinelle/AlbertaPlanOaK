@@ -1,17 +1,16 @@
-import type { ViewHandle, ViewMount } from '../router';
 import type { EnvResult, RecordingRef, RunDetail, RunIndexEntry, RunMeta } from '@shared/types';
 import { ENVS, ENV_IDS, isEnvId, type EnvId } from '@shared/envs';
 import type { PlaybackSource } from '@kit/playback';
 import { entryFor, parseCatalog } from '@sim/catalog';
 import type { Tape } from '../tape';
 import {
+  actionButton,
   accentCss,
   badge,
   el,
   emptyState,
   errorState,
   eyebrow,
-  linkButton,
   spinner,
   viewShell,
 } from '../components/table';
@@ -26,7 +25,6 @@ import {
   formatAgo,
   formatCount,
   formatPercent,
-  formatRate,
   formatSigned,
   formatStep,
   laneDeath,
@@ -51,13 +49,7 @@ import { mountSceneHost, type HostFrameInfo, type SceneHostHandle } from '../the
 
 export const WALL_SPEEDS: readonly number[] = [1, 4, 16, 64, 256, 1024];
 
-export const SPARK_ROW_BUDGET = 128;
-
-export const SPARK_BINS = 64;
-
-export const LIVE_POLL_MS = 2_000;
-
-export const DETAIL_POLL_MS = 10_000;
+export const DEFAULT_SPEED = 1;
 
 export type WallSort = 'rate' | 'seed' | 'retention';
 export const WALL_SORTS: readonly WallSort[] = ['rate', 'seed', 'retention'];
@@ -123,7 +115,7 @@ export function wallHref(params: WallParams = {}): string {
   if (params.env !== undefined) push('env', params.env);
   if (params.seed !== undefined && Number.isFinite(params.seed)) push('seed', String(Math.floor(params.seed)));
   if (params.at !== undefined && Number.isFinite(params.at) && params.at > 0) push('at', String(Math.floor(params.at)));
-  if (params.speed !== undefined && params.speed !== 1) push('speed', String(params.speed));
+  if (params.speed !== undefined && params.speed !== DEFAULT_SPEED) push('speed', String(params.speed));
   if (params.sort !== undefined && params.sort !== 'rate') push('sort', params.sort);
   return parts.length > 0 ? `#/?${parts.join('&')}` : '#/';
 }
@@ -234,7 +226,7 @@ export function buildSeedRows(
 ): SeedRow[] {
   const { lanes, seeds } = envLanes(meta, envId);
   const maxStep = tape.rows > 0 ? tape.stepEnd[tape.rows - 1] ?? 0 : 0;
-  const spark = binnedRates(tape, lanes, SPARK_BINS);
+  const spark = binnedRates(tape, lanes);
   const sparkXs = spark.x.map((x) => (maxStep > 0 ? x / maxStep : 0));
   return lanes.map((lane, li) => ({
     seed: seeds[li] ?? 0,
@@ -280,7 +272,6 @@ export interface PopulationFigures {
   nonDiverged: string;
   retention: string;
   solved: string;
-  perGflop: string;
   source: 'summary' | 'measured' | 'none';
 }
 
@@ -302,19 +293,17 @@ export function populationFigures(
     const positive = finite(slice.positiveFraction);
     const retention = finite(slice.retentionFraction);
     const solved = finite(slice.solvedSeeds);
-    const perGflop = finite(slice.bestSeedRewardPerGFLOP);
     return {
       positive: positive === null ? '—' : formatPercent(positive, 0),
       nonDiverged: `${formatCount(seeds - dead)}/${formatCount(seeds)}`,
       retention: retention === null ? '—' : formatPercent(retention, 0),
       solved: solved === null ? '—' : formatCount(solved),
-      perGflop: perGflop === null ? '—' : formatRate(perGflop),
       source: 'summary',
     };
   }
 
   if (rows.length === 0) {
-    return { positive: '—', nonDiverged: '—', retention: '—', solved: '—', perGflop: '—', source: 'none' };
+    return { positive: '—', nonDiverged: '—', retention: '—', solved: '—', source: 'none' };
   }
   return {
     positive: rates.length === 0
@@ -323,7 +312,6 @@ export function populationFigures(
     nonDiverged: `${formatCount(rows.length - diverged)}/${formatCount(rows.length)}`,
     retention: formatPercent(retained / rows.length, 0),
     solved: '—',
-    perGflop: '—',
     source: 'measured',
   };
 }
@@ -348,7 +336,6 @@ export type WallAction =
   | { kind: 'sort' }
   | { kind: 'debug' }
   | { kind: 'fullscreen' }
-  | { kind: 'tier' }
   | { kind: 'escape' };
 
 export function wallKeyAction(key: string, shift = false): WallAction | null {
@@ -377,9 +364,6 @@ export function wallKeyAction(key: string, shift = false): WallAction | null {
     case 'f':
     case 'F':
       return { kind: 'fullscreen' };
-    case 't':
-    case 'T':
-      return { kind: 'tier' };
     case 'Escape':
       return { kind: 'escape' };
     default:
@@ -401,14 +385,20 @@ export function wallEnvs(meta: Pick<RunMeta, 'envSchedule'>, recordings: readonl
   return ENV_IDS.filter((id) => seen.has(id));
 }
 
+export function nextRowDueMs(tape: Pick<Tape, 'rows' | 'wallSeconds'> | null): number {
+  if (tape === null || tape.rows < 2) return 0;
+  const last = tape.wallSeconds[tape.rows - 1];
+  const prev = tape.wallSeconds[tape.rows - 2];
+  if (last === undefined || prev === undefined) return 0;
+  const perRow = (last - prev) * 1000;
+  return Number.isFinite(perRow) && perRow > 0 ? perRow : 0;
+}
+
 export function tapeWindowSteps(tape: Pick<Tape, 'stepStart' | 'stepEnd'>): number {
   const window = (tape.stepEnd[0] ?? 0) - (tape.stepStart[0] ?? 0);
   return window > 0 ? window : 1;
 }
 
-const TIER_BY_LABEL = { low: 'thumb', medium: 'medium', high: 'hero' } as const;
-export type TierLabel = keyof typeof TIER_BY_LABEL;
-export const TIER_LABELS: readonly TierLabel[] = ['low', 'medium', 'high'];
 
 function figure(label: string, value: string, title?: string): HTMLElement {
   return el('div', { class: 'pop-figure', ...(title ? { title } : {}) }, [
@@ -422,7 +412,9 @@ function tint<T extends HTMLElement>(node: T, color: string): T {
   return node;
 }
 
-export const mount: ViewMount = (host) => {
+export interface WallHandle { destroy(): void }
+
+export const mount = (host: HTMLElement): WallHandle => {
   const query = parseWallParams(typeof window === 'undefined' ? '' : window.location.hash);
 
   const runName = el('button', { class: 'wall-run', type: 'button', text: '—', title: 'Switch run' });
@@ -461,13 +453,15 @@ export const mount: ViewMount = (host) => {
     }
   }
   pickerSearch.addEventListener('input', paintPicker);
+  function openPicker(): void {
+    picker.hidden = false;
+    void runIndex.load(true).then(() => { if (!picker.hidden) paintPicker(); });
+    paintPicker();
+    pickerSearch.focus();
+  }
   runName.addEventListener('click', () => {
-    picker.hidden = !picker.hidden;
-    if (!picker.hidden) {
-      void runIndex.load(true).then(() => { if (!picker.hidden) paintPicker(); });
-      paintPicker();
-      pickerSearch.focus();
-    }
+    if (picker.hidden) openPicker();
+    else picker.hidden = true;
   });
 
   const head = el('div', { class: 'wall-head' }, [runName, runMeta, runBadges, picker]);
@@ -485,7 +479,7 @@ export const mount: ViewMount = (host) => {
   let envList: EnvId[] = [];
   let envId: EnvId | null = query.env ?? null;
   let sort: WallSort = query.sort ?? 'rate';
-  let speed: number = query.speed ?? 64;
+  let speed: number = query.speed ?? DEFAULT_SPEED;
   let selection: HeroSelection = { leader: null, promoted: query.seed ?? null };
   let rows: SeedRow[] = [];
   let stride = 1;
@@ -494,11 +488,6 @@ export const mount: ViewMount = (host) => {
   let scrubbing = false;
   let statsAccum = 1000;
   let debugOn = false;
-  const TIER_KEY = 'oakWallTier';
-  let tierLabel: TierLabel = (() => {
-    const saved = typeof localStorage === 'undefined' ? null : localStorage.getItem(TIER_KEY);
-    return saved !== null && saved in TIER_BY_LABEL ? (saved as TierLabel) : 'medium';
-  })();
 
   let sceneHost: SceneHostHandle | null = null;
   let stageQueue: Promise<void> = Promise.resolve();
@@ -509,8 +498,7 @@ export const mount: ViewMount = (host) => {
   let heroAttached = false;
   let heroSource: PlaybackSource | null = null;
   const sparks: SparklineHandle[] = [];
-  let livePoll: ReturnType<typeof setInterval> | null = null;
-  let detailPollAt = 0;
+  let livePoll: ReturnType<typeof setTimeout> | null = null;
 
   const chipStrip = el('div', { class: 'wall-envs', role: 'tablist', ariaLabel: 'Environment' });
   const envSelect = el('select', { class: 'input input-select wall-select', ariaLabel: 'Environment' });
@@ -552,31 +540,6 @@ export const mount: ViewMount = (host) => {
   const readout = el('div', { class: 'wall-readout', text: 'step — / —' });
   const speedRow = el('div', { class: 'wall-speeds' });
   const debugButton = el('button', { class: 'tbtn', type: 'button', text: 'g', title: 'Ground-truth overlay (g)' });
-  const tierRow = el('div', { class: 'wall-speeds' });
-  const tierButtons = new Map<TierLabel, HTMLButtonElement>();
-  for (const label of TIER_LABELS) {
-    const button = el('button', {
-      class: 'tbtn',
-      type: 'button',
-      text: label,
-      title: `Graphics quality: ${label} (t cycles)`,
-    });
-    tierButtons.set(label, button);
-    tierRow.append(button);
-  }
-  function paintTier(): void {
-    for (const [label, button] of tierButtons) button.classList.toggle('is-on', label === tierLabel);
-  }
-  paintTier();
-  function setTier(next: TierLabel): void {
-    tierLabel = next;
-    paintTier();
-    try { localStorage.setItem(TIER_KEY, next); } catch {  }
-    void sceneHost?.setTier(TIER_BY_LABEL[next]);
-  }
-  for (const [label, button] of tierButtons) {
-    button.addEventListener('click', () => setTier(label));
-  }
   const fullButton = el('button', { class: 'tbtn', type: 'button', text: '⛶', title: 'Fullscreen (f)' });
   const transport = el('div', { class: 'wall-transport' }, [
     playButton,
@@ -587,7 +550,6 @@ export const mount: ViewMount = (host) => {
     el('div', { class: 'tsep' }),
     speedRow,
     el('div', { class: 'tsep' }),
-    tierRow,
     debugButton,
     fullButton,
   ]);
@@ -702,7 +664,7 @@ export const mount: ViewMount = (host) => {
     if (selection.promoted !== null) params.seed = selection.promoted;
     const at = urlPosition(sceneHost?.clock.position() ?? null, frameAt);
     if (at !== null) params.at = at;
-    if (speed !== 1) params.speed = speed;
+    if (speed !== DEFAULT_SPEED) params.speed = speed;
     if (sort !== 'rate') params.sort = sort;
     history.replaceState(null, '', wallHref(params));
   }
@@ -857,11 +819,6 @@ export const mount: ViewMount = (host) => {
       case 'fullscreen':
         toggleFullscreen();
         break;
-      case 'tier': {
-        const index = TIER_LABELS.indexOf(tierLabel);
-        setTier(TIER_LABELS[(index + 1) % TIER_LABELS.length] ?? 'medium');
-        break;
-      }
       case 'escape': {
         const next = escapeSelection(selection);
         if (next !== selection) {
@@ -914,7 +871,6 @@ export const mount: ViewMount = (host) => {
       figure('non-diverged', figures.nonDiverged, 'Seeds whose stream never went non-finite'),
       figure('retention', figures.retention, 'Seeds still holding at least half their peak reward rate'),
       figure('solved', figures.solved, 'Seeds that crossed this environment’s solved threshold (fleet.py report)'),
-      figure('reward / GFLOP', figures.perGflop, 'Best seed’s reward rate per agent GFLOP — the SOTA-target metric'),
     );
     popNote.textContent = figures.source === 'summary'
       ? 'from summary.json — fleet.py report'
@@ -939,7 +895,6 @@ export const mount: ViewMount = (host) => {
 
     const order = sortPermutation(rows, sort);
     const hero_ = heroSeed(selection);
-    const withSparks = rows.length <= SPARK_ROW_BUDGET;
     const nodes: HTMLElement[] = [];
 
     order.forEach((index, rank) => {
@@ -966,7 +921,7 @@ export const mount: ViewMount = (host) => {
       ]);
 
       let sparkDragged = false;
-      if (withSparks) {
+      {
         const holder = el('span', { class: 'wall-spark' });
         const spark = sparkline({
           values: [0, ...row.spark, row.spark[row.spark.length - 1] ?? null],
@@ -1014,14 +969,6 @@ export const mount: ViewMount = (host) => {
     });
 
     railRows.replaceChildren(...nodes);
-    if (!withSparks) {
-      railRows.append(
-        el('div', {
-          class: 'wall-row-note',
-          text: `${formatCount(rows.length)} seeds — per-seed curves are drawn up to ${SPARK_ROW_BUDGET}.`,
-        }),
-      );
-    }
   }
 
   function playable(seed: number): boolean {
@@ -1153,7 +1100,7 @@ export const mount: ViewMount = (host) => {
     if (reason !== null || seed === null) {
       showStageNote('Nothing to replay here', [
         emptyState(reason ?? 'no seed to play', RECORD_RECIPE, [
-          linkButton('Find a run with recordings', '#/runs', { quiet: true }),
+          actionButton('Find a run with recordings', () => openPicker(), { quiet: true }),
         ]),
       ]);
       readout.textContent = 'no recording';
@@ -1171,8 +1118,6 @@ export const mount: ViewMount = (host) => {
       tagSub.textContent = `seed ${seed}${selection.promoted === null ? ' · leader' : ' · promoted'}`;
     }
 
-    const ref = recordingRef(run.recordings, env, seed);
-    const refSteps = ref?.steps ?? 0;
     if (tape !== null && tape.rows > 0) stride = tapeWindowSteps(tape);
 
     const startAt = pendingSeekFrame ?? frameAt;
@@ -1186,7 +1131,6 @@ export const mount: ViewMount = (host) => {
         runId: run.id,
         envId: env,
         seed,
-        steps: refSteps,
         horizonSteps: run.meta.steps,
         live: entry?.inFlight === true,
       });
@@ -1226,7 +1170,6 @@ export const mount: ViewMount = (host) => {
         sceneHost = await mountSceneHost(stage, {
           envId: env,
           source: attachSource,
-          tier: TIER_BY_LABEL[tierLabel],
           at: attachAt,
           speed,
           debug: debugOn,
@@ -1346,38 +1289,43 @@ export const mount: ViewMount = (host) => {
 
   function startLivePoll(): void {
     if (livePoll !== null) return;
-    livePoll = setInterval(() => {
+    let pollBackoffMs = 0;
+    const tick = (): void => {
+      livePoll = null;
       if (destroyed || !detail) return;
-      if (entry?.inFlight === true) {
-        void refreshTape(detail.id, abort.signal).then(
-          (next) => {
-            if (destroyed) return;
-            if (tape === null || next.rows !== tape.rows) onTapeUpdate(next);
-          },
-          () => undefined,
-        );
-      }
-      const now = Date.now();
-      if (now - detailPollAt >= DETAIL_POLL_MS) {
-        detailPollAt = now;
-        void runIndex.load(true).then((entries) => {
-          if (destroyed || !detail) return;
-          if (!picker.hidden) paintPicker();
-          const fresh = entries.find((e) => e.id === detail?.id);
-          if (fresh !== undefined) {
-            entry = fresh;
-            hero?.setLive(fresh.inFlight);
-          }
-          return loadRunDetail(detail.id, true).then((freshDetail) => {
-            if (destroyed) return;
-            detail = freshDetail;
-            paintChips();
-            rebuildRows();
-            paintRail();
-          });
-        }).catch(() => undefined);
-      }
-    }, LIVE_POLL_MS);
+      const rowsBefore = tape?.rows ?? 0;
+      const startedAt = performance.now();
+      const again = (): void => {
+        if (destroyed) return;
+        if ((tape?.rows ?? 0) > rowsBefore) pollBackoffMs = 0;
+        else pollBackoffMs = Math.max(performance.now() - startedAt, pollBackoffMs * 2);
+        livePoll = setTimeout(tick, Math.max(nextRowDueMs(tape), pollBackoffMs));
+      };
+      const refreshDetail = runIndex.load(true).then((entries) => {
+        if (destroyed || !detail) return;
+        if (!picker.hidden) paintPicker();
+        const fresh = entries.find((e) => e.id === detail?.id);
+        if (fresh !== undefined) {
+          entry = fresh;
+          hero?.setLive(fresh.inFlight);
+        }
+        return loadRunDetail(detail.id, true).then((freshDetail) => {
+          if (destroyed) return;
+          detail = freshDetail;
+          paintChips();
+          rebuildRows();
+          paintRail();
+        });
+      });
+      const refreshTapeIfLive = entry?.inFlight === true
+        ? refreshTape(detail.id, abort.signal).then((next) => {
+          if (destroyed) return;
+          if (tape === null || next.rows !== tape.rows) onTapeUpdate(next);
+        })
+        : Promise.resolve();
+      void Promise.allSettled([refreshDetail, refreshTapeIfLive]).then(again);
+    };
+    tick();
   }
 
   function renderRun(next: RunDetail, pick: FeaturedPick, indexEntry: RunIndexEntry | null): void {
@@ -1460,7 +1408,7 @@ export const mount: ViewMount = (host) => {
               'No run to show yet',
               'The wall plays a fleet’s recorded seeds and the server found no run with a tape under '
                 + `.oak-benchmarks. ${RECORD_RECIPE}`,
-              [linkButton('Browse every run', '#/runs', { quiet: true })],
+              [actionButton('Browse every run', () => openPicker(), { quiet: true })],
             ),
           );
           return;
@@ -1502,12 +1450,12 @@ export const mount: ViewMount = (host) => {
 
   start(false);
 
-  const handle: ViewHandle = {
+  const handle: WallHandle = {
     destroy() {
       if (destroyed) return;
       destroyed = true;
       abort.abort();
-      if (livePoll !== null) clearInterval(livePoll);
+      if (livePoll !== null) clearTimeout(livePoll);
       if (typeof window !== 'undefined') window.removeEventListener('keydown', onKey);
       if (typeof document !== 'undefined') document.removeEventListener('fullscreenchange', onFullscreenChange);
       for (const spark of sparks) spark.destroy();

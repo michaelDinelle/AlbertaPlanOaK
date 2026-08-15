@@ -9,7 +9,6 @@ import {
   type OakMaterial,
 } from '@kit/materials';
 import type { Palette } from '@kit/tokens';
-import type { QualityTier } from '@kit/types';
 import * as THREE from 'three';
 import { hash1f } from '@kit/rng';
 import { radialSprite } from '@kit/textures';
@@ -33,7 +32,6 @@ const HALO_HDR = 0.75;
 const POOL_HDR = 0.46;
 
 export interface LanternRoadOptions {
-  tier: QualityTier;
   palette: Palette;
   skin: MoorSkin;
   grid: GridSize;
@@ -57,8 +55,8 @@ export interface LanternRoadHandle {
   dispose(): void;
 }
 
-export function lanternGeometry(skin: MoorSkin, tier: QualityTier): THREE.BufferGeometry {
-  const detail = tier === 'thumb' ? 0.45 : tier === 'medium' ? 0.7 : 1;
+export function lanternGeometry(skin: MoorSkin): THREE.BufferGeometry {
+  const detail = 1;
   const radial = Math.max(4, Math.round(6 * detail));
   const parts: ColoredPart[] = [];
 
@@ -90,7 +88,7 @@ export function lanternGeometry(skin: MoorSkin, tier: QualityTier): THREE.Buffer
   tray.translate(0, LAMP_Y - 0.11, LAMP_REACH);
   parts.push({ geometry: tray, color: skin.ironLight });
 
-  const bars = tier === 'thumb' ? 2 : 4;
+  const bars = 4;
   for (let i = 0; i < bars; i++) {
     const a = (i / bars) * Math.PI * 2 + Math.PI / 4;
     const bar = new THREE.BoxGeometry(0.017, 0.23, 0.017);
@@ -101,7 +99,7 @@ export function lanternGeometry(skin: MoorSkin, tier: QualityTier): THREE.Buffer
   return mergeColoredParts(parts, 'lanternPost');
 }
 
-function cairnGeometry(skin: MoorSkin, tier: QualityTier, seed: number): THREE.BufferGeometry {
+function cairnGeometry(skin: MoorSkin, seed: number): THREE.BufferGeometry {
   const detail = 0;
   const parts: ColoredPart[] = [];
   const base = skin.stone;
@@ -142,8 +140,8 @@ function cairnGeometry(skin: MoorSkin, tier: QualityTier, seed: number): THREE.B
   return mergeColoredParts(parts, 'endCairn');
 }
 
-function milestoneGeometry(skin: MoorSkin, tier: QualityTier): THREE.BufferGeometry {
-  const detail = tier === 'thumb' ? 0.45 : tier === 'medium' ? 0.7 : 1;
+function milestoneGeometry(skin: MoorSkin): THREE.BufferGeometry {
+  const detail = 1;
   const radial = Math.max(5, Math.round(7 * detail));
   const parts: ColoredPart[] = [];
 
@@ -175,22 +173,21 @@ function milestoneGeometry(skin: MoorSkin, tier: QualityTier): THREE.BufferGeome
 }
 
 export function buildLanternRoad(opts: LanternRoadOptions): LanternRoadHandle {
-  const { tier, palette, skin, grid, goalCell, seed, accent: aurora } = opts;
-  const detail = tier === 'thumb' ? 0.45 : tier === 'medium' ? 0.7 : 1;
-  const shadows = tier !== 'thumb';
+  const { palette, skin, grid, goalCell, seed, accent: aurora } = opts;
+  const detail = 1;
   const group = new THREE.Group();
   group.name = opts.name ?? 'lanternRoad';
   const count = grid.w;
   const instanceCount = Math.max(1, count - 1);
 
-  const postGeometry = lanternGeometry(skin, tier);
-  const glassGeometry = new THREE.IcosahedronGeometry(0.058, tier === 'thumb' ? 0 : 1);
-  const haloGeometry = new THREE.IcosahedronGeometry(0.12, tier === 'thumb' ? 1 : 2);
+  const postGeometry = lanternGeometry(skin);
+  const glassGeometry = new THREE.IcosahedronGeometry(0.058, 1);
+  const haloGeometry = new THREE.IcosahedronGeometry(0.12, 2);
   const poolGeometry = new THREE.CircleGeometry(0.86, Math.max(10, Math.round(24 * detail)));
   poolGeometry.rotateX(-Math.PI / 2);
   const poolTexture = radialSprite(64, 1.7);
 
-  const postMaterial: OakMaterial = propMaterial(palette, tier, 'lanternIron');
+  const postMaterial: OakMaterial = propMaterial(palette, 'lanternIron');
   const glassMaterial: EmissiveMaterial = emissiveMaterial(skin.flame, LAMP_HDR, { name: 'lanternFlame' });
   const haloMaterial: EmissiveMaterial = emissiveMaterial(skin.flame, HALO_HDR, {
     transparent: true,
@@ -212,7 +209,7 @@ export function buildLanternRoad(opts: LanternRoadOptions): LanternRoadHandle {
   const posts = new THREE.InstancedMesh(postGeometry, postMaterial, instanceCount);
   posts.name = 'lanternPosts';
   posts.castShadow = false;
-  posts.receiveShadow = shadows;
+  posts.receiveShadow = true;
   posts.instanceColor = new THREE.InstancedBufferAttribute(new Float32Array(instanceCount * 3).fill(1), 3);
 
   const glass = new THREE.InstancedMesh(glassGeometry, glassMaterial, instanceCount);
@@ -291,7 +288,7 @@ export function buildLanternRoad(opts: LanternRoadOptions): LanternRoadHandle {
   endPost.name = 'endLanternPost';
   endPost.position.set(0, 0, LANTERN_Z);
   endPost.castShadow = false;
-  endPost.receiveShadow = shadows;
+  endPost.receiveShadow = true;
   endRoot.add(endPost);
 
   const endGlassMaterial: EmissiveMaterial = emissiveMaterial(skin.flame, LAMP_HDR, { name: 'endLanternFlame' });
@@ -325,7 +322,7 @@ export function buildLanternRoad(opts: LanternRoadOptions): LanternRoadHandle {
   endPool.position.copy(endPost.position);
   endRoot.add(endPool);
 
-  const cairnGeo = cairnGeometry(skin, tier, seed);
+  const cairnGeo = cairnGeometry(skin, seed);
   const cairnMaterial: OakMaterial = oakMaterial({
     vertexColors: true,
     flatShading: true,
@@ -335,20 +332,18 @@ export function buildLanternRoad(opts: LanternRoadOptions): LanternRoadHandle {
     toonSteps: 3,
     toonSoftness: 0.3,
     toonFloor: 0.2,
-    tier,
     name: 'endCairnStone',
   });
   const cairn = new THREE.Mesh(cairnGeo, cairnMaterial);
   cairn.name = 'endCairn';
   cairn.position.set(0.74, 0, -0.14);
   cairn.rotation.y = 0.42;
-  cairn.castShadow = shadows;
-  cairn.receiveShadow = shadows;
+  cairn.castShadow = true;
+  cairn.receiveShadow = true;
   endRoot.add(cairn);
 
   const beacon = new GoalBeacon({
     color: blendTokens(palette.accentLight, aurora, 0.55),
-    tier,
     height: 0.2,
     radius: 0.085,
     intensity: 0.3,
@@ -454,14 +449,13 @@ export interface WispGlowHandle {
 
 export function buildWispGlow(opts: {
   color: THREE.ColorRepresentation;
-  tier: QualityTier;
   radius?: number;
   intensity?: number;
   name?: string;
 }): WispGlowHandle {
   const radius = opts.radius ?? 0.95;
   const intensity = opts.intensity ?? 0.5;
-  const texture = radialSprite(opts.tier === 'thumb' ? 32 : 64, 2.6);
+  const texture = radialSprite(64, 2.6);
   const geometry = new THREE.PlaneGeometry(radius * 2, radius * 2);
   const material = emissiveMaterial(opts.color, intensity, {
     map: texture,
@@ -492,7 +486,6 @@ export function buildWispGlow(opts: {
 
 
 export interface MilestoneOptions {
-  tier: QualityTier;
   palette: Palette;
   skin: MoorSkin;
   grid: GridSize;
@@ -519,14 +512,14 @@ export function buildMilestone(opts: MilestoneOptions): MilestoneHandle {
   }
   group.add(root);
 
-  const geometry = milestoneGeometry(opts.skin, opts.tier);
-  const material = propMaterial(opts.palette, opts.tier, 'milestoneStone');
+  const geometry = milestoneGeometry(opts.skin);
+  const material = propMaterial(opts.palette, 'milestoneStone');
   const mesh = new THREE.Mesh(geometry, material);
   mesh.name = 'milestone';
   mesh.position.set(-0.34, 0, 1.32);
   mesh.rotation.y = 0.62;
-  mesh.castShadow = opts.tier !== 'thumb';
-  mesh.receiveShadow = opts.tier !== 'thumb';
+  mesh.castShadow = true;
+  mesh.receiveShadow = true;
   root.add(mesh);
 
   return {

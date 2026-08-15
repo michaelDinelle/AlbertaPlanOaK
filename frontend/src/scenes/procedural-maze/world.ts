@@ -17,7 +17,7 @@ import { skyFromPalette, type SkyHandle } from '@kit/sky';
 import { makeTerrain, type TerrainHandle } from '@kit/terrain';
 import { valueNoise2 } from '@kit/textures';
 import { TOKENS, type Palette } from '@kit/tokens';
-import type { QualityTier, SceneContext } from '@kit/types';
+import type { SceneContext } from '@kit/types';
 import {
   excludeAny,
   excludeRect,
@@ -26,7 +26,6 @@ import {
   scatterRocks,
   scatterTrees,
   type ExcludeFn,
-  type VegetationHandle,
 } from '@kit/vegetation';
 import { PROCMAZE_H, PROCMAZE_W, proceduralMazeDecoder } from '@sim/envs/proceduralmaze';
 import type { EnvGeometry, GridCell, GridGeometry } from '@sim/types';
@@ -49,8 +48,6 @@ export const CAMERA_DISTANCE = 19.0;
 export const CAMERA_STANDOFF = CAMERA_TARGET_BIAS + CAMERA_DISTANCE * Math.sin(CAMERA_POLAR);
 
 export const BASE_COURSE = 0.5;
-export const MAX_CROWN = BASE_COURSE + 0.46 + 0.22;
-
 export const BASE_INSET = 0.02;
 export const UPPER_INSET = 0.11;
 export const CAP_INSET = 0.21;
@@ -173,10 +170,6 @@ export function archCells(grid: GridGeometry): ArchCell[] {
   return out;
 }
 
-export function archBudget(tier: QualityTier | undefined): number {
-  return tier === 'thumb' ? 3 : tier === 'medium' ? 6 : 9;
-}
-
 
 export interface WallSkin {
   upper: number;
@@ -227,11 +220,6 @@ export function skinWallCell(grid: GridGeometry, x: number, y: number, seed: num
   const ivy = crown >= IVY_MIN_CROWN && ivyRoll < 0.5 ? 1 + (ivyRoll < 0.18 ? 1 : 0) : 0;
   const ivyFace = Math.min(3, Math.floor(r() * 4));
   return { upper, cap, crown, upperYaw, capYaw, capTilt, moss, cushion, ivy, ivyFace };
-}
-
-export function crownHeightAt(grid: GridGeometry, x: number, y: number, seed: number): number {
-  if (!isWall(grid, x, y)) return 0;
-  return skinWallCell(grid, x, y, seed).crown;
 }
 
 export function blockHalfWidthAt(skin: WallSkin, y: number): number {
@@ -372,13 +360,11 @@ export function buildCourses(
   seed: number,
   skin: RuinSkin,
   palette: Palette,
-  tier: QualityTier,
   skip: (x: number, y: number) => boolean,
 ): CoursesHandle {
   const group = new THREE.Group();
   group.name = 'ruinCourses';
-  const detail = tier === 'thumb' ? 0.35 : tier === 'medium' ? 0.7 : 1;
-  const shadows = tier !== 'thumb';
+  const detail = 1;
 
   const upperCells: GridCell[] = [];
   const capCells: GridCell[] = [];
@@ -411,7 +397,6 @@ export function buildCourses(
     toonSteps: 3,
     toonSoftness: 0.28,
     toonFloor: 0.42,
-    tier,
     name: 'ruinCourseStone',
   });
   const mossMaterial = oakMaterial({
@@ -423,7 +408,6 @@ export function buildCourses(
     toonSteps: 2,
     toonSoftness: 0.34,
     toonFloor: 0.44,
-    tier,
     name: 'ruinMossCushion',
   });
   const ivyMaterial = oakMaterial({
@@ -438,7 +422,6 @@ export function buildCourses(
     toonSoftness: 0.36,
     toonFloor: 0.58,
     wind: { amplitude: 0.045, frequency: 1.35, height: 0.62 },
-    tier,
     name: 'ruinIvy',
   });
 
@@ -446,7 +429,7 @@ export function buildCourses(
   upperGeometry.translate(0, 0.5, 0);
   upperGeometry.name = 'ruinUpperCourse';
   const capGeometry = brokenSlabGeometry(detail);
-  const cushionGeometry = new THREE.IcosahedronGeometry(0.34, tier === 'thumb' ? 0 : 1);
+  const cushionGeometry = new THREE.IcosahedronGeometry(0.34, 1);
   cushionGeometry.scale(1, 0.38, 1);
   cushionGeometry.name = 'ruinMossCushion';
   const ivyGeometry = ivyStrandGeometry(detail);
@@ -469,8 +452,8 @@ export function buildCourses(
     const mesh = new THREE.InstancedMesh(geometry, material, Math.max(1, count));
     mesh.name = name;
     mesh.count = count;
-    mesh.castShadow = cast && shadows;
-    mesh.receiveShadow = shadows;
+    mesh.castShadow = cast;
+    mesh.receiveShadow = true;
     mesh.instanceColor = new THREE.InstancedBufferAttribute(new Float32Array(Math.max(1, count) * 3), 3);
     return mesh;
   };
@@ -479,7 +462,7 @@ export function buildCourses(
   const capMesh = instanced(capGeometry, stoneMaterial, capCells.length, 'ruinCapstones', true);
   const cushionMesh = instanced(cushionGeometry, mossMaterial, cushionCells.length, 'ruinMossCushions', false);
   const ivyMesh =
-    tier === 'thumb' || ivyCells.length === 0
+    false || ivyCells.length === 0
       ? null
       : instanced(ivyGeometry, ivyMaterial, ivyCells.length, 'ruinIvy', false);
 
@@ -653,10 +636,8 @@ function ivyStrandGeometry(detail: number): THREE.BufferGeometry {
 
 export const TOWER_HEIGHT_MIN = 1.12;
 export const TOWER_HEIGHT_SPAN = 0.62;
-export const TOWER_HEIGHT_MAX = TOWER_HEIGHT_MIN + TOWER_HEIGHT_SPAN;
-
-export function towerGeometry(skin: RuinSkin, tier: QualityTier, height: number, lean: number): THREE.BufferGeometry {
-  const detail = tier === 'thumb' ? 0.45 : tier === 'medium' ? 0.7 : 1;
+export function towerGeometry(skin: RuinSkin, height: number, lean: number): THREE.BufferGeometry {
+  const detail = 1;
   const radial = Math.max(6, Math.round(14 * detail));
   const parts: ColoredPart[] = [];
 
@@ -685,8 +666,8 @@ export function towerGeometry(skin: RuinSkin, tier: QualityTier, height: number,
   return mergeColoredParts(parts, 'ruinTower');
 }
 
-export function archGeometry(skin: RuinSkin, tier: QualityTier): THREE.BufferGeometry {
-  const detail = tier === 'thumb' ? 0.45 : tier === 'medium' ? 0.7 : 1;
+export function archGeometry(skin: RuinSkin): THREE.BufferGeometry {
+  const detail = 1;
   const parts: ColoredPart[] = [];
   const JAMB_H = 0.7;
   const HALF = 0.47;
@@ -713,7 +694,7 @@ export function archGeometry(skin: RuinSkin, tier: QualityTier): THREE.BufferGeo
     parts.push({ geometry: voussoir, color: i === 1 ? skin.stoneLight : skin.stoneDark });
   }
 
-  const cushion = new THREE.IcosahedronGeometry(0.16, tier === 'thumb' ? 0 : 1);
+  const cushion = new THREE.IcosahedronGeometry(0.16, 1);
   cushion.scale(1.3, 0.4, 1.1);
   cushion.translate(0.02, 0.985, -0.14);
   parts.push({ geometry: cushion, color: skin.moss });
@@ -753,8 +734,8 @@ export interface BirdsHandle {
   dispose(): void;
 }
 
-export function makeBirds(seed: number, color: THREE.ColorRepresentation, tier: QualityTier): BirdsHandle {
-  const count = tier === 'thumb' ? 3 : BIRD_COUNT;
+export function makeBirds(seed: number, color: THREE.ColorRepresentation): BirdsHandle {
+  const count = BIRD_COUNT;
   const rng = streamFor(seed, 'ruin-birds');
   const geometry = birdGeometry();
   const material = oakMaterial({
@@ -764,7 +745,6 @@ export function makeBirds(seed: number, color: THREE.ColorRepresentation, tier: 
     side: THREE.DoubleSide,
     toonSteps: 2,
     toonFloor: 0.5,
-    tier,
     name: 'ruinBirds',
   });
   const mesh = new THREE.InstancedMesh(geometry, material, count);
@@ -861,17 +841,15 @@ interface Timed {
 }
 
 export function buildWorld(ctx: SceneContext, scene: THREE.Scene, grid: GridGeometry): WorldHandle {
-  const tier: QualityTier = ctx.tier;
   const palette: Palette = ctx.tokens.palettes.noon;
   const skin = ruinSkin(palette, ctx.tokens);
-  const shadows = tier !== 'thumb';
   const seed = ctx.seed;
   const group = new THREE.Group();
   group.name = 'overgrownRuins';
   const owned: Disposable[] = [];
   const timed: Timed[] = [];
 
-  const sky = skyFromPalette(palette, 'noon', tier, {
+  const sky = skyFromPalette(palette, 'noon', {
     sunDir: SUN_DIR,
     sunSize: 0.032,
     sunHdr: 5.2,
@@ -885,7 +863,7 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene, grid: GridGeom
   owned.push(sky);
   timed.push({ setTime: (t) => sky.setTime(t) });
 
-  const rig = makeLightRig(palette, tier, {
+  const rig = makeLightRig(palette, {
     sunDir: sky.sunDirection,
     pointCount: 3,
     pointDistance: 7,
@@ -900,7 +878,6 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene, grid: GridGeom
   const terrain = makeTerrain({
     size: [TERRAIN_SIZE, TERRAIN_SIZE],
     segments: [TERRAIN_SEGMENTS, TERRAIN_SEGMENTS],
-    tier,
     seed,
     heightFn: makeForestFloorHeight(seed),
     jitter: 0,
@@ -922,7 +899,7 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene, grid: GridGeom
       toonSoftness: 0.3,
       toonFloor: 0.24,
     },
-    receiveShadow: shadows,
+    receiveShadow: true,
     castShadow: false,
     name: 'ruinForestFloor',
   });
@@ -949,7 +926,6 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene, grid: GridGeom
       seed,
       name: 'ruinCells',
     },
-    tier,
   );
   const wallUniforms = oakUniforms(field.wallMaterial);
   if (wallUniforms) wallUniforms.uniforms.uToonFloor.value = 0.42;
@@ -963,7 +939,7 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene, grid: GridGeom
   const cornerKeys = new Set<number>();
   for (const c of corners) cornerKeys.add(c.y * grid.w + c.x);
 
-  const courses = buildCourses(grid, seed, skin, palette, tier, (x, y) => cornerKeys.has(y * grid.w + x));
+  const courses = buildCourses(grid, seed, skin, palette, (x, y) => cornerKeys.has(y * grid.w + x));
   group.add(courses.group);
   owned.push(courses);
   timed.push(courses);
@@ -980,7 +956,7 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene, grid: GridGeom
       root.position.set(world[0], 0, world[2]);
       const r = rngAt(c.x, c.y, seed ^ 0x70e2)();
       const r2 = rngAt(c.y, c.x, seed ^ 0x70e2)();
-      const geometry = towerGeometry(skin, tier, TOWER_HEIGHT_MIN + TOWER_HEIGHT_SPAN * r, (r2 - 0.5) * 0.32);
+      const geometry = towerGeometry(skin, TOWER_HEIGHT_MIN + TOWER_HEIGHT_SPAN * r, (r2 - 0.5) * 0.32);
       const material = oakMaterial({
         vertexColors: true,
         flatShading: true,
@@ -990,14 +966,13 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene, grid: GridGeom
         toonSteps: 3,
         toonSoftness: 0.28,
         toonFloor: 0.42,
-        tier,
         name: `ruinTowerMaterial${i}`,
       });
       const mesh = new THREE.Mesh(geometry, material);
       mesh.name = `ruinTower${i}`;
       mesh.rotation.y = r * Math.PI * 0.5;
-      mesh.castShadow = shadows;
-      mesh.receiveShadow = shadows;
+      mesh.castShadow = true;
+      mesh.receiveShadow = true;
       root.add(mesh);
       group.add(root);
       towerRoots.push(root);
@@ -1011,10 +986,10 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene, grid: GridGeom
   }
 
   const allArches = archCells(grid);
-  const arches = allArches.slice(0, archBudget(tier));
+  const arches = allArches.slice(0, 9);
   const archRoots: THREE.Object3D[] = [];
   if (arches.length > 0) {
-    const archGeo = archGeometry(skin, tier);
+    const archGeo = archGeometry(skin);
     const archMaterial = oakMaterial({
       vertexColors: true,
       flatShading: true,
@@ -1024,7 +999,6 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene, grid: GridGeom
       toonSteps: 3,
       toonSoftness: 0.28,
       toonFloor: 0.42,
-      tier,
       name: 'ruinArchMaterial',
     });
     owned.push({
@@ -1043,8 +1017,8 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene, grid: GridGeom
       const mesh = new THREE.Mesh(archGeo, archMaterial);
       mesh.name = `ruinArch${i}`;
       mesh.rotation.y = a.eastWest ? 0 : Math.PI / 2;
-      mesh.castShadow = shadows;
-      mesh.receiveShadow = shadows;
+      mesh.castShadow = true;
+      mesh.receiveShadow = true;
       root.add(mesh);
       group.add(root);
       archRoots.push(root);
@@ -1058,7 +1032,6 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene, grid: GridGeom
     count: 620,
     area: { x: 0, z: 0, halfX: RUIN_HALF - 0.4, halfZ: RUIN_HALF - 0.4 },
     seed: seed ^ 0x6a11,
-    tier,
     exclude: offWalls,
     color: skin.grass,
     scale: [0.26, 0.55],
@@ -1078,7 +1051,6 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene, grid: GridGeom
     count: 130,
     area: { x: 0, z: 0, halfX: RUIN_HALF - 0.5, halfZ: RUIN_HALF - 0.5 },
     seed: seed ^ 0x2f83,
-    tier,
     exclude: offWalls,
     color: skin.bloom,
     scale: [0.3, 0.6],
@@ -1098,7 +1070,6 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene, grid: GridGeom
     count: 340,
     area: { x: 0, z: 0, halfX: RUIN_HALF - 0.2, halfZ: RUIN_HALF - 0.2 },
     seed: seed ^ 0x51c7,
-    tier,
     exclude: clearCenters,
     color: skin.stoneDark,
     scale: [0.1, 0.26],
@@ -1126,7 +1097,6 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene, grid: GridGeom
     count: 74,
     area: { x: 0, z: 0, halfX: 18, halfZ: 18, innerRadius: RUIN_HALF + 1.6 },
     seed: seed ^ 0x1a70,
-    tier,
     exclude: excludeAny(offRuin, nearCamera),
     heightAt: (x, z) => terrain.sampleHeight(x, z),
     maxSlope: 0.72,
@@ -1150,7 +1120,6 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene, grid: GridGeom
     count: 26,
     area: { x: 0, z: 0, halfX: RUIN_HALF + 2.2, halfZ: RUIN_HALF + 2.2, innerRadius: RUIN_HALF + 0.35 },
     seed: seed ^ 0x3c19,
-    tier,
     exclude: excludeAny(offRuin, nearCamera),
     heightAt: (x, z) => terrain.sampleHeight(x, z),
     maxSlope: 1,
@@ -1175,7 +1144,6 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene, grid: GridGeom
     count: 420,
     bounds: { x: 0, y: 1.15, z: 0, halfX: RUIN_HALF, halfY: 1.05, halfZ: RUIN_HALF },
     seed: seed ^ 0x7d21,
-    tier,
     color: blendTokens(skin.sunWarm, palette.hemiSky, 0.3),
     size: 0.9,
     intensity: 1.05,
@@ -1194,7 +1162,6 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene, grid: GridGeom
     count: 150,
     bounds: { x: 0, y: 1.5, z: 0, halfX: 0.6, halfY: 1.45, halfZ: 0.6 },
     seed: seed ^ 0x2ba9,
-    tier,
     color: skin.sunWarm,
     size: 1.05,
     intensity: 0.9,
@@ -1213,7 +1180,6 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene, grid: GridGeom
     count: 300,
     bounds: { x: 0, y: 2.2, z: 0, halfX: 15, halfY: 2, halfZ: 15 },
     seed: seed ^ 0x11c4,
-    tier,
     color: blendTokens(palette.groundB, palette.sun, 0.35),
     size: 0.75,
     intensity: 1.35,
@@ -1227,7 +1193,7 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene, grid: GridGeom
   timed.push(pollen);
   motes.push(pollen);
 
-  const birds = makeBirds(seed, skin.bird, tier);
+  const birds = makeBirds(seed, skin.bird);
   group.add(birds.mesh);
   owned.push(birds);
   timed.push(birds);

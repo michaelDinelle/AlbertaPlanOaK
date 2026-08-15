@@ -2,7 +2,6 @@ import { terraceShelves } from '@kit/terrace';
 
 import {
   buildCellField,
-  cellFieldDetail,
   cellToWorld,
   type CellFieldHandle,
   type GridSize,
@@ -21,7 +20,7 @@ import { hash2f } from '@kit/rng';
 import { skyFromPalette, type SkyHandle } from '@kit/sky';
 import { makeDataTexture } from '@kit/textures';
 import type { Palette } from '@kit/tokens';
-import type { QualityTier, SceneContext } from '@kit/types';
+import type { SceneContext } from '@kit/types';
 import { excludeAny, scatterFlowers, scatterRocks, type ExcludeFn } from '@kit/vegetation';
 import * as THREE from 'three';
 import type { GridGeometry } from '@sim/types';
@@ -82,8 +81,8 @@ export function excludeCellCenters(grid: GridSize, radius: number): ExcludeFn {
 export const KELP_LEAN = 0.42;
 export const KELP_HEIGHT = 0.74;
 
-export function makeKelpGeometry(tier: QualityTier | undefined): THREE.BufferGeometry {
-  const detail = cellFieldDetail(tier);
+export function makeKelpGeometry(): THREE.BufferGeometry {
+  const detail = 1;
   const blades = Math.max(3, Math.round(5 * detail));
   const segments = Math.max(2, Math.round(4 * detail));
   const quads = blades * segments;
@@ -155,10 +154,9 @@ export function buildKelp(
   reach: Uint8Array,
   skin: ReefSkin,
   palette: Palette,
-  tier: QualityTier,
   seed: number,
 ): KelpHandle {
-  const geometry = makeKelpGeometry(tier);
+  const geometry = makeKelpGeometry();
   const material = oakMaterial({
     color: skin.kelp,
     vertexColors: true,
@@ -171,7 +169,6 @@ export function buildKelp(
     toonSoftness: 0.36,
     toonFloor: 0.3,
     wind: { amplitude: 0.05, frequency: 0.62, height: KELP_HEIGHT },
-    tier,
     name: 'reefKelp',
   });
 
@@ -182,7 +179,7 @@ export function buildKelp(
 
   const mesh = new THREE.InstancedMesh(geometry, material, Math.max(1, capacity));
   mesh.name = 'reefKelp';
-  mesh.castShadow = tier !== 'thumb';
+  mesh.castShadow = true;
   mesh.receiveShadow = false;
   mesh.count = 0;
   mesh.instanceColor = new THREE.InstancedBufferAttribute(new Float32Array(Math.max(1, capacity) * 3), 3);
@@ -301,7 +298,6 @@ export function buildCaustics(
   grid: GridSize,
   reach: Uint8Array,
   skin: ReefSkin,
-  tier: QualityTier,
 ): CausticHandle {
   const rows: { x0: number; x1: number; z: number; y: number }[] = [];
   const world: Vec3Tuple = [0, 0, 0];
@@ -356,7 +352,7 @@ export function buildCaustics(
     uniforms: {
       uTime: { value: 0 },
       uColor: { value: new THREE.Color(skin.caustic) },
-      uStrength: { value: tier === 'thumb' ? 1.1 : 1.55 },
+      uStrength: { value: 1.55 },
       uScale: { value: 0.62 },
       uSpeed: { value: 1.0 },
       uTop: { value: top },
@@ -427,12 +423,11 @@ export interface GodRayHandle {
 export function buildGodRays(
   sunDir: THREE.Vector3,
   skin: ReefSkin,
-  tier: QualityTier,
   seed: number,
 ): GodRayHandle {
   const group = new THREE.Group();
   group.name = 'reefGodRays';
-  const shafts = tier === 'medium' ? 6 : 9;
+  const shafts = 9;
   const planes = 3;
   const positions = new Float32Array(shafts * planes * 6 * 3);
   const uvs = new Float32Array(shafts * planes * 6 * 2);
@@ -543,18 +538,16 @@ export function buildWorld(
   grid: GridGeometry,
   reach: Uint8Array,
 ): WorldHandle {
-  const tier: QualityTier = ctx.tier;
   const ctxTokens = ctx.tokens;
   const palette: Palette = ctxTokens.palettes.underwater;
   const skin = reefSkin(palette, ctx.tokens);
-  const shadows = tier !== 'thumb';
   const group = new THREE.Group();
   group.name = 'sunlitDescent';
   const owned: Disposable[] = [];
   const timed: Timed[] = [];
   const pixelated: AmbientParticlesHandle[] = [];
 
-  const sky = skyFromPalette(palette, 'underwater', tier, {
+  const sky = skyFromPalette(palette, 'underwater', {
     topSpread: 0.34,
     bottomSpread: 0.88,
     dither: 0.012,
@@ -569,7 +562,7 @@ export function buildWorld(
   owned.push(sky);
   timed.push({ setTime: (t) => sky.setTime(t) });
 
-  const rig = makeLightRig(palette, tier, {
+  const rig = makeLightRig(palette, {
     sunDir: SUN_DIR,
     pointCount: 3,
     pointDistance: 9,
@@ -603,16 +596,15 @@ export function buildWorld(
       seed: ctx.seed,
       name: 'reefShelves',
     },
-    tier,
   );
   terraceShelves(field, grid);
   const floorMesh = field.floorMeshes[0];
-  if (floorMesh) floorMesh.castShadow = shadows;
+  if (floorMesh) floorMesh.castShadow = true;
   group.add(field.group);
   owned.push(field);
   timed.push({ setTime: (t) => field.setTime(t) });
 
-  const kelp = buildKelp(grid, reach, skin, palette, tier, ctx.seed);
+  const kelp = buildKelp(grid, reach, skin, palette, ctx.seed);
   group.add(kelp.mesh);
   owned.push(kelp);
   timed.push(kelp);
@@ -623,7 +615,6 @@ export function buildWorld(
     count: 220,
     area: reefArea,
     seed: ctx.seed ^ 0x51c0,
-    tier,
     exclude: offReef,
     heightAt: (x, z) => shelfHeightAt(x, z, grid),
     color: skin.coral,
@@ -643,7 +634,6 @@ export function buildWorld(
     count: 120,
     area: reefArea,
     seed: ctx.seed ^ 0x3a91,
-    tier,
     exclude: offReef,
     heightAt: (x, z) => shelfHeightAt(x, z, grid),
     color: skin.anemone,
@@ -661,14 +651,14 @@ export function buildWorld(
   owned.push(anemones);
   timed.push(anemones);
 
-  const caustics = buildCaustics(grid, reach, skin, tier);
+  const caustics = buildCaustics(grid, reach, skin);
   group.add(caustics.mesh);
   owned.push(caustics);
   timed.push(caustics);
 
   let godRays: GodRayHandle | null = null;
-  if (tier !== 'thumb') {
-    godRays = buildGodRays(rig.sunDirection, skin, tier, ctx.seed);
+  {
+    godRays = buildGodRays(rig.sunDirection, skin, ctx.seed);
     group.add(godRays.group);
     owned.push(godRays);
     timed.push(godRays);
@@ -678,7 +668,6 @@ export function buildWorld(
     size: [34, 34],
     color: skin.bubble,
     seed: ctx.seed ^ 0x1b7d,
-    tier,
     layers: 3,
     baseY: -4.6,
     spread: 9.4,
@@ -697,7 +686,6 @@ export function buildWorld(
     count: 150,
     bounds: { x: 0, y: -0.4, z: 0, halfX: 4.6, halfY: 4.4, halfZ: 4.6 },
     seed: ctx.seed ^ 0x6ec2,
-    tier,
     color: skin.bubble,
     size: 1.0,
     intensity: 1.25,
@@ -716,7 +704,6 @@ export function buildWorld(
     count: 110,
     bounds: { x: 0, y: 0, z: 0, halfX: 0.34, halfY: 0.2, halfZ: 0.34 },
     seed: ctx.seed ^ 0x77a3,
-    tier,
     color: skin.silt,
     size: 0.85,
     intensity: 1.1,
@@ -736,7 +723,6 @@ export function buildWorld(
     count: 220,
     bounds: { x: 0, y: 0, z: 0, halfX: 0.26, halfY: 3.6, halfZ: 0.26 },
     seed: ctx.seed ^ 0x2c58,
-    tier,
     color: skin.bubble,
     size: 1.5,
     intensity: 2.0,

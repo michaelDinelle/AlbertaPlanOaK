@@ -17,7 +17,7 @@ import { skyFromPalette, type SkyHandle } from '@kit/sky';
 import { makeTerrain, type TerrainHandle } from '@kit/terrain';
 import { valueNoise2 } from '@kit/textures';
 import { TOKENS, type Palette } from '@kit/tokens';
-import type { QualityTier, SceneContext } from '@kit/types';
+import type { SceneContext } from '@kit/types';
 import {
   excludeAny,
   excludeRect,
@@ -329,10 +329,8 @@ interface Timed {
 }
 
 export function buildWorld(ctx: SceneContext, scene: THREE.Scene, grid: GridGeometry): WorldHandle {
-  const tier: QualityTier = ctx.tier;
   const palette: Palette = ctx.tokens.palettes.morning;
   const skin = gardenSkin(palette, ctx.tokens);
-  const shadows = tier !== 'thumb';
   const group = new THREE.Group();
   group.name = 'ivyGateGarden';
   const owned: Disposable[] = [];
@@ -341,7 +339,7 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene, grid: GridGeom
   const door = resolveDoor(grid);
   const yaw = gateYaw(grid, door);
 
-  const sky = skyFromPalette(palette, 'morning', tier, {
+  const sky = skyFromPalette(palette, 'morning', {
     sunDir: SUN_DIR,
     sunSize: 0.04,
     sunHdr: 5,
@@ -355,7 +353,7 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene, grid: GridGeom
   owned.push(sky);
   timed.push({ setTime: (t) => sky.setTime(t) });
 
-  const rig = makeLightRig(palette, tier, {
+  const rig = makeLightRig(palette, {
     sunDir: sky.sunDirection,
     pointCount: 4,
     pointDistance: 5.5,
@@ -370,7 +368,6 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene, grid: GridGeom
   const terrain = makeTerrain({
     size: [TERRAIN_SIZE, TERRAIN_SIZE],
     segments: [TERRAIN_SEGMENTS, TERRAIN_SEGMENTS],
-    tier,
     seed: ctx.seed,
     heightFn: makeMeadowHeight(ctx.seed),
     jitter: 0,
@@ -393,7 +390,7 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene, grid: GridGeom
       toonSoftness: 0.3,
       toonFloor: 0.26,
     },
-    receiveShadow: shadows,
+    receiveShadow: true,
     castShadow: false,
     name: 'ivyGateMeadow',
   });
@@ -433,7 +430,6 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene, grid: GridGeom
       seed: ctx.seed,
       name: 'ivyGateCells',
     },
-    tier,
   );
   group.add(field.group);
   owned.push(field);
@@ -454,17 +450,16 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene, grid: GridGeom
     toonSteps: 3,
     toonSoftness: 0.3,
     toonFloor: 0.22,
-    tier,
     name: 'ivyGateDividerMaterial',
   });
   owned.push({ dispose: () => dividerMaterial.dispose() });
   if (dividerCells.length > 0) {
-    const geometry = makeDividerGeometry(skin, tier);
+    const geometry = makeDividerGeometry(skin);
     owned.push({ dispose: () => geometry.dispose() });
     const mesh = new THREE.InstancedMesh(geometry, dividerMaterial, dividerCells.length);
     mesh.name = 'ivyGateDivider';
-    mesh.castShadow = shadows;
-    mesh.receiveShadow = shadows;
+    mesh.castShadow = true;
+    mesh.receiveShadow = true;
     mesh.instanceColor = new THREE.InstancedBufferAttribute(
       new Float32Array(dividerCells.length * 3),
       3,
@@ -507,7 +502,6 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene, grid: GridGeom
     count: 420,
     area: { x: wild.cx, z: wild.cz, halfX: wild.halfX, halfZ: wild.halfZ },
     seed: ctx.seed ^ 0x4c17,
-    tier,
     exclude: noPlanting,
     color: skin.wildGrass,
     scale: [0.34, 0.7],
@@ -528,7 +522,6 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene, grid: GridGeom
     count: 74,
     area: { x: wild.cx, z: wild.cz, halfX: wild.halfX, halfZ: wild.halfZ },
     seed: ctx.seed ^ 0x2b93,
-    tier,
     exclude: noPlanting,
     color: skin.wildBloom,
     scale: [0.45, 0.9],
@@ -549,7 +542,6 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene, grid: GridGeom
     count: 130,
     area: { x: formal.cx, z: formal.cz, halfX: formal.halfX, halfZ: formal.halfZ },
     seed: ctx.seed ^ 0x7f41,
-    tier,
     exclude: noPlanting,
     color: shade(skin.gravel, 0.18),
     scale: [0.06, 0.13],
@@ -569,7 +561,6 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene, grid: GridGeom
     count: 26,
     area: { x: formal.cx, z: formal.cz, halfX: formal.halfX, halfZ: formal.halfZ },
     seed: ctx.seed ^ 0x39d5,
-    tier,
     exclude: noPlanting,
     color: skin.topiary,
     scale: [0.16, 0.34],
@@ -577,7 +568,7 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene, grid: GridGeom
     hueJitter: 0.16,
     rimColor: palette.skyHorizon,
     rimStrength: 0.34,
-    castShadow: shadows,
+    castShadow: true,
     name: 'formalTopiary',
   });
   group.add(topiary.group);
@@ -599,7 +590,6 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene, grid: GridGeom
     count: 380,
     area: { halfX: 17, halfZ: 17 },
     seed: ctx.seed ^ 0x6d0b,
-    tier,
     exclude: outside,
     heightAt: (x, z) => terrain.sampleHeight(x, z),
     maxSlope: 0.85,
@@ -623,7 +613,6 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene, grid: GridGeom
     count: 105,
     area: { halfX: GARDEN_HALF_X + 1.5, halfZ: GARDEN_HALF_Z + 1.5 },
     seed: ctx.seed ^ 0x58ba,
-    tier,
     exclude: excludeAny(excludeRect(0, 0, GARDEN_HALF_X, GARDEN_HALF_Z, 0.08), nearCamera),
     heightAt: (x, z) => terrain.sampleHeight(x, z),
     color: shade(blendTokens(skin.wildBloom, palette.groundB, 0.5), 0.2),
@@ -647,7 +636,6 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene, grid: GridGeom
     count: 58,
     area: { halfX: 17.5, halfZ: 17.5, innerRadius: 7.6 },
     seed: ctx.seed ^ 0x1a70,
-    tier,
     exclude: outside,
     heightAt: (x, z) => terrain.sampleHeight(x, z),
     maxSlope: 0.7,
@@ -673,7 +661,6 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene, grid: GridGeom
     count: 190,
     bounds: { x: wild.cx, y: 0.95, z: wild.cz, halfX: wild.halfX, halfY: 0.85, halfZ: wild.halfZ },
     seed: ctx.seed ^ 0x7d21,
-    tier,
     color: skin.motesWild,
     size: 1.05,
     intensity: 1.7,
@@ -692,7 +679,6 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene, grid: GridGeom
     count: 150,
     bounds: { x: formal.cx, y: 0.8, z: formal.cz, halfX: formal.halfX, halfY: 0.72, halfZ: formal.halfZ },
     seed: ctx.seed ^ 0x51c3,
-    tier,
     color: skin.motesFormal,
     size: 0.72,
     intensity: 1.3,
@@ -711,7 +697,6 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene, grid: GridGeom
     color: blendTokens(palette.fog, palette.sun, 0.3),
     seed: ctx.seed ^ 0x3ac1,
     layers: 2,
-    tier,
     baseY: 1.75,
     spread: 1.1,
     opacity: 0.05,
@@ -777,12 +762,12 @@ export function collapseWallInstance(field: CellFieldHandle, x: number, y: numbe
   mesh.instanceMatrix.needsUpdate = true;
 }
 
-export function makeDividerGeometry(skin: GardenSkin, tier: QualityTier): THREE.BufferGeometry {
-  const detail = tier === 'thumb' ? 0.35 : tier === 'medium' ? 0.7 : 1;
+export function makeDividerGeometry(skin: GardenSkin): THREE.BufferGeometry {
+  const detail = 1;
   const parts: ColoredPart[] = [];
   const size = CELL - 0.03;
 
-  const courses = tier === 'thumb' ? 2 : 3;
+  const courses = 3;
   for (let i = 0; i < courses; i++) {
     const y0 = (i / courses) * DIVIDER_HEIGHT;
     const y1 = ((i + 1) / courses) * DIVIDER_HEIGHT;
@@ -803,8 +788,8 @@ export function makeDividerGeometry(skin: GardenSkin, tier: QualityTier): THREE.
   footing.translate(0, 0.065, 0);
   parts.push({ geometry: footing, color: skin.dividerCap });
 
-  const rows = tier === 'thumb' ? 1 : 2;
-  const perRow = tier === 'thumb' ? 5 : Math.max(5, Math.round(9 * detail));
+  const rows = 2;
+  const perRow = Math.max(5, Math.round(9 * detail));
   for (let r = 0; r < rows; r++) {
     for (let i = 0; i < perRow; i++) {
       const t = (i + (r % 2) * 0.5) / perRow;
@@ -824,10 +809,10 @@ export function makeDividerGeometry(skin: GardenSkin, tier: QualityTier): THREE.
     }
   }
 
-  const runners = tier === 'thumb' ? 1 : 2;
+  const runners = 2;
   const leavesPer = Math.max(3, Math.round(8 * detail));
   for (let r = 0; r < runners; r++) {
-    const x0 = runners === 1 ? 0 : (r === 0 ? -0.24 : 0.26);
+    const x0 = r === 0 ? -0.24 : 0.26;
     for (let i = 0; i < leavesPer; i++) {
       const t = i / (leavesPer - 1 || 1);
       const y = DIVIDER_HEIGHT + DIVIDER_CAP - 0.1 - t * (DIVIDER_HEIGHT * 0.78);

@@ -3,11 +3,6 @@ import * as THREE from 'three';
 import { oakMaterial, oakUniforms } from './materials';
 import type { OakMaterial } from './materials';
 import { streamFor } from './rng';
-import type { QualityTier } from './types';
-
-export function vegetationTierScale(tier: QualityTier | undefined): number {
-  return tier === 'thumb' ? 0.15 : tier === 'medium' ? 0.5 : 1;
-}
 
 export interface ScatterArea {
   x?: number;
@@ -23,7 +18,6 @@ export interface ScatterOptions {
   count: number;
   area: ScatterArea;
   seed: number;
-  tier?: QualityTier;
   exclude?: ExcludeFn;
   heightAt?: (x: number, z: number) => number;
   maxSlope?: number;
@@ -65,8 +59,7 @@ interface Placement {
 }
 
 export function scatterPlacements(opts: ScatterOptions, streamName: string, variants = 1): Placement[] {
-  const scale = vegetationTierScale(opts.tier);
-  const wanted = Math.max(0, Math.round(opts.count * scale));
+  const wanted = Math.max(0, Math.round(opts.count));
   const rng = streamFor(opts.seed | 0, streamName);
   const cx = opts.area.x ?? 0;
   const cz = opts.area.z ?? 0;
@@ -153,7 +146,6 @@ function buildScatter(
       ...(windAmp > 0
         ? { wind: { amplitude: windAmp, frequency: opts.windFrequency ?? 1.3, height: spec.windHeight } }
         : {}),
-      tier: opts.tier,
       name: `${group.name}:${a}`,
     });
     materials.push(material);
@@ -161,8 +153,8 @@ function buildScatter(
     const mesh = new THREE.InstancedMesh(spec.geometry, material, Math.max(1, n));
     mesh.name = `${group.name}:mesh${a}`;
     mesh.count = 0;
-    mesh.castShadow = (opts.castShadow ?? defaults.castShadow) && opts.tier !== 'thumb';
-    mesh.receiveShadow = (opts.receiveShadow ?? false) && opts.tier !== 'thumb';
+    mesh.castShadow = opts.castShadow ?? defaults.castShadow;
+    mesh.receiveShadow = opts.receiveShadow ?? false;
     mesh.instanceColor = new THREE.InstancedBufferAttribute(new Float32Array(Math.max(1, n) * 3), 3);
     meshes.push(mesh);
   }
@@ -419,7 +411,7 @@ export function flowerGeometry(petals = 5): THREE.BufferGeometry {
 
 
 export function scatterGrass(opts: ScatterOptions): VegetationHandle {
-  const detail = opts.tier === 'thumb' ? 2 : opts.tier === 'medium' ? 3 : 4;
+  const detail = 4;
   return buildScatter(
     opts,
     'grass',
@@ -429,7 +421,7 @@ export function scatterGrass(opts: ScatterOptions): VegetationHandle {
 }
 
 export function scatterTrees(opts: ScatterOptions & { archetypes?: readonly TreeArchetype[] }): VegetationHandle {
-  const detail = opts.tier === 'thumb' ? 0 : opts.tier === 'medium' ? 0 : 1;
+  const detail = 1;
   const wanted = opts.archetypes ?? (['broadleaf', 'conifer', 'bare'] as const);
   const specs: ArchetypeSpec[] = wanted.map((kind) => ({
     geometry:
@@ -447,7 +439,7 @@ export function scatterTrees(opts: ScatterOptions & { archetypes?: readonly Tree
 export type TreeArchetype = 'broadleaf' | 'conifer' | 'bare';
 
 export function scatterRocks(opts: ScatterOptions): VegetationHandle {
-  const detail = opts.tier === 'hero' ? 1 : 0;
+  const detail = 1;
   return buildScatter(
     opts,
     'rocks',
@@ -463,7 +455,7 @@ export function scatterFlowers(opts: ScatterOptions): VegetationHandle {
   return buildScatter(
     opts,
     'flowers',
-    [{ geometry: flowerGeometry(opts.tier === 'thumb' ? 4 : 5), windHeight: 0.25, color: opts.color }],
+    [{ geometry: flowerGeometry(5), windHeight: 0.25, color: opts.color }],
     { wind: 0.045, castShadow: false },
   );
 }

@@ -10,7 +10,6 @@ import { makeAmbientParticles, type AmbientParticlesHandle } from '@kit/particle
 import { streamFor } from '@kit/rng';
 import { radialSprite } from '@kit/textures';
 import type { Palette } from '@kit/tokens';
-import type { QualityTier } from '@kit/types';
 import * as THREE from 'three';
 import {
   CP_CART_HEIGHT,
@@ -64,7 +63,6 @@ export interface TrolleyHandle {
 }
 
 export interface TrolleyOptions {
-  tier: QualityTier;
   palette: Palette;
   accent: THREE.ColorRepresentation;
   seed: number;
@@ -73,9 +71,8 @@ export interface TrolleyOptions {
 }
 
 export function buildTrolley(opts: TrolleyOptions): TrolleyHandle {
-  const { tier, palette, accent, seed, poleLength } = opts;
+  const { palette, accent, seed, poleLength } = opts;
   const tiltLimit = opts.tiltLimit > 1e-6 ? opts.tiltLimit : CP_TH_LIMIT;
-  const shadows = tier !== 'thumb';
   const group = new THREE.Group();
   group.name = 'trolleyRig';
 
@@ -159,24 +156,23 @@ export function buildTrolley(opts: TrolleyOptions): TrolleyHandle {
     toonSteps: 3,
     toonSoftness: 0.28,
     toonFloor: 0.4,
-    tier,
     name: 'trolleyBodyMaterial',
   });
   const bodyMesh = new THREE.Mesh(bodyGeometry, bodyMaterial);
   bodyMesh.name = 'trolleyBody';
-  bodyMesh.castShadow = shadows;
-  bodyMesh.receiveShadow = shadows;
+  bodyMesh.castShadow = true;
+  bodyMesh.receiveShadow = true;
   root.add(bodyMesh);
 
   const wheelGeometry = makeAxleGeometry(woodDark, iron);
   const wheelFront = new THREE.Mesh(wheelGeometry, bodyMaterial);
   wheelFront.name = 'trolleyAxleFront';
   wheelFront.position.set(AXLE_X, WHEEL_R, 0);
-  wheelFront.castShadow = shadows;
+  wheelFront.castShadow = true;
   const wheelRear = new THREE.Mesh(wheelGeometry, bodyMaterial);
   wheelRear.name = 'trolleyAxleRear';
   wheelRear.position.set(-AXLE_X, WHEEL_R, 0);
-  wheelRear.castShadow = shadows;
+  wheelRear.castShadow = true;
   root.add(wheelFront, wheelRear);
 
   const hinge = new THREE.Object3D();
@@ -195,7 +191,7 @@ export function buildTrolley(opts: TrolleyOptions): TrolleyHandle {
 
   const trunkParts: ColoredPart[] = [];
   {
-    const radial = tier === 'thumb' ? 5 : 7;
+    const radial = 7;
     const shaft = poleLength - BUD_HEIGHT * 0.6;
     const trunk = new THREE.CylinderGeometry(TRUNK_R_TIP, TRUNK_R_BASE, shaft, radial, 3);
     trunk.translate(0, shaft * 0.5, 0);
@@ -234,12 +230,11 @@ export function buildTrolley(opts: TrolleyOptions): TrolleyHandle {
     toonSteps: 3,
     toonSoftness: 0.3,
     toonFloor: 0.24,
-    tier,
     name: 'saplingTrunkMaterial',
   });
   const trunkMesh = new THREE.Mesh(trunkGeometry, trunkMaterial);
   trunkMesh.name = 'saplingTrunk';
-  trunkMesh.castShadow = shadows;
+  trunkMesh.castShadow = true;
   tilt.add(trunkMesh);
 
   const crown = new THREE.Object3D();
@@ -250,7 +245,7 @@ export function buildTrolley(opts: TrolleyOptions): TrolleyHandle {
   const leafParts: ColoredPart[] = [];
   {
     const rng = streamFor(seed, 'leaves');
-    const count = tier === 'thumb' ? 11 : tier === 'medium' ? 18 : 26;
+    const count = 26;
     const envelope = poleLength * WHORL_RADIUS;
     for (let i = 0; i < count; i++) {
       const k = i / (count - 1);
@@ -281,12 +276,11 @@ export function buildTrolley(opts: TrolleyOptions): TrolleyHandle {
     toonSoftness: 0.36,
     toonFloor: 0.32,
     wind: { amplitude: 0.009, frequency: 2.6, height: 0.32 },
-    tier,
     name: 'saplingLeafMaterial',
   });
   const leafMesh = new THREE.Mesh(leafGeo, leafMaterial);
   leafMesh.name = 'saplingLeaves';
-  leafMesh.castShadow = shadows;
+  leafMesh.castShadow = true;
   crown.add(leafMesh);
 
   const shimmerSprite = radialSprite(48, 2.6);
@@ -319,7 +313,6 @@ export function buildTrolley(opts: TrolleyOptions): TrolleyHandle {
     count: 120,
     bounds: { halfX: 0.3, halfY: 0.44, halfZ: 0.22 },
     seed: seed ^ 0x4d91,
-    tier,
     color: blendTokens(leafB, TOKEN_WHITE, 0.2),
     size: 0.5,
     intensity: 1.25,

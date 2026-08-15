@@ -1,12 +1,10 @@
 
-import { CTRL_LEN, OFF_DONE, OFF_POSE, POSE_LEN, effortView } from '../record';
+import { POSE_LEN } from '../record';
 import type { EnvDecoder, EnvFrame, EnvGeometry, GridCell, SimEvent } from '../types';
 import { NO_EVENTS } from '../events';
 
 export const FOURROOMS_W = 11;
 export const FOURROOMS_H = 11;
-export const FOURROOMS_FREE_CELLS = 68;
-
 export const FOURROOMS_HALLWAYS: readonly GridCell[] = Object.freeze([
   { x: 5, y: 2 },
   { x: 5, y: 8 },
@@ -14,16 +12,13 @@ export const FOURROOMS_HALLWAYS: readonly GridCell[] = Object.freeze([
   { x: 8, y: 5 },
 ]);
 
+export const FOURROOMS_X = 0;
+export const FOURROOMS_Y = 1;
+export const FOURROOMS_GX = 2;
+export const FOURROOMS_GY = 3;
+
 export const FOURROOMS_START: GridCell = Object.freeze({ x: 1, y: 1 });
 export const FOURROOMS_GOAL: GridCell = Object.freeze({ x: 9, y: 9 });
-
-export interface FourRoomsState {
-  x: number;
-  y: number;
-  gx: number;
-  gy: number;
-  room: number;
-}
 
 export interface FourRoomsStatic {
   seed: number;
@@ -55,21 +50,7 @@ export function fourRoomsWalls(): Uint8Array {
   return walls;
 }
 
-export function fourRoomsFreeCells(): GridCell[] {
-  const out: GridCell[] = [];
-  for (let y = 0; y < FOURROOMS_H; y++) {
-    for (let x = 0; x < FOURROOMS_W; x++) {
-      if (!fourRoomsIsWall(x, y)) out.push({ x, y });
-    }
-  }
-  return out;
-}
-
-function state(x: number, y: number, gx: number, gy: number): FourRoomsState {
-  return { x, y, gx, gy, room: fourRoomsRoom(x, y) };
-}
-
-export const fourRoomsDecoder: EnvDecoder<FourRoomsState, FourRoomsStatic> = {
+export const fourRoomsDecoder: EnvDecoder<FourRoomsStatic> = {
   envId: 'FourRooms-cont-v0',
 
   initStatic(seed: number): FourRoomsStatic {
@@ -89,7 +70,7 @@ export const fourRoomsDecoder: EnvDecoder<FourRoomsState, FourRoomsStatic> = {
     };
   },
 
-  initFrame(): EnvFrame<FourRoomsState> {
+  initFrame(): EnvFrame {
     const pose = new Float32Array(POSE_LEN);
     pose[0] = FOURROOMS_START.x;
     pose[1] = FOURROOMS_START.y;
@@ -97,26 +78,17 @@ export const fourRoomsDecoder: EnvDecoder<FourRoomsState, FourRoomsStatic> = {
     pose[3] = FOURROOMS_GOAL.y;
     return {
       step: -1,
-      ctrl: new Float32Array(CTRL_LEN),
       done: 0,
       pose,
-      state: state(FOURROOMS_START.x, FOURROOMS_START.y, FOURROOMS_GOAL.x, FOURROOMS_GOAL.y),
     };
   },
 
-  decodeFrame(i: number, raw16: Float32Array): EnvFrame<FourRoomsState> {
-    const pose = raw16.subarray(OFF_POSE, OFF_POSE + POSE_LEN);
-    return {
-      step: i,
-      ctrl: effortView(raw16, -1),
-      done: raw16[OFF_DONE] ?? 0,
-      pose,
-      state: state(pose[0] ?? 0, pose[1] ?? 0, pose[2] ?? 0, pose[3] ?? 0),
-    };
-  },
 
-  deriveEvents(prev: EnvFrame<FourRoomsState>, next: EnvFrame<FourRoomsState>): SimEvent[] {
-    if (next.state.x === prev.state.gx && next.state.y === prev.state.gy) {
+  deriveEvents(prev: EnvFrame, next: EnvFrame): SimEvent[] {
+    if (
+      next.pose[FOURROOMS_X] === prev.pose[FOURROOMS_GX]
+      && next.pose[FOURROOMS_Y] === prev.pose[FOURROOMS_GY]
+    ) {
       return [{ type: 'goal' }];
     }
     return NO_EVENTS;

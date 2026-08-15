@@ -2,13 +2,11 @@ import * as THREE from 'three';
 import type { EnvId } from '@shared/envs';
 import { makePlaybackClock, sampleFrame, type PlaybackSource, type PlaybackClock } from '@kit/playback';
 import { celebrationPulse } from '@kit/celebrate';
-import { configureRendererShadows } from '@kit/lighting';
 import { buildComposer, type ComposerHandle } from '@kit/post';
 import { TOKENS } from '@kit/tokens';
 import type {
   FrameState,
   FrameUpdate,
-  QualityTier,
   SceneContext,
   SceneManifest,
   SceneModule,
@@ -16,43 +14,30 @@ import type {
 } from '@kit/types';
 import type { EnvGeometry, SimEvent } from '@sim/types';
 import { sceneRegistry } from '../scenes/registry';
-import { advanceCursor, collectEvents, makeFrameCursor, makeTierGovernor, type TierGovernor } from './player';
-import { CTRL_LEN } from '@sim/record';
+import { advanceCursor, collectEvents, makeFrameCursor } from './player';
 
 export interface HostFrameInfo {
   position: number;
-  index: number;
   step: number;
   simTime: number;
-  frameCount: number;
-  playing: boolean;
-  speed: number;
-  tier: QualityTier;
-  fps: number;
   frameMs: number;
-  p95: number;
-  p95Threshold: number;
-  scrubbed: boolean;
 }
 
 export interface SceneHostOptions {
   envId: EnvId;
   source: PlaybackSource;
-  tier?: QualityTier;
   debug?: boolean;
   paused?: boolean;
   at?: number;
   speed?: number;
   onFrame?(info: HostFrameInfo): void;
   onEvents?(events: readonly SimEvent[], steps: readonly number[]): void;
-  onTier?(tier: QualityTier, reason: 'auto' | 'manual'): void;
   onReady?(manifest: SceneManifest): void;
 }
 
 export interface SceneHostHandle {
   readonly manifest: SceneManifest | null;
   readonly clock: PlaybackClock;
-  readonly tier: QualityTier;
   readonly debug: boolean;
   readonly canvas: HTMLCanvasElement;
   readonly envId: EnvId;
@@ -63,7 +48,6 @@ export interface SceneHostHandle {
   seek(position: number): void;
   setSource(source: PlaybackSource, opts?: { at?: number }): Promise<void>;
   setEnv(envId: EnvId, source: PlaybackSource, opts?: { at?: number }): Promise<void>;
-  setTier(tier: QualityTier): Promise<void>;
   setDebug(on: boolean): void;
   destroy(): void;
 }
@@ -78,25 +62,17 @@ export class SceneHostError extends Error {
 function makeFrameState(): FrameState {
   return {
     pose: new Float32Array(9),
-    ctrl: new Float32Array(CTRL_LEN),
     done: false,
     step: 0,
     simTime: 0,
-    derived: null,
   };
 }
 
 function copyFrameState(from: FrameState, to: FrameState): void {
   to.pose.set(from.pose);
-  to.ctrl.set(from.ctrl);
   to.done = from.done;
   to.step = from.step;
   to.simTime = from.simTime;
-  to.derived = from.derived;
-}
-
-function tierDpr(tier: QualityTier): number {
-  return tier === 'thumb' ? 1 : tier === 'medium' ? 1.5 : 2;
 }
 
 export function sameGeometry(a: EnvGeometry, b: EnvGeometry): boolean {
@@ -141,6 +117,8 @@ export async function mountSceneHost(
   }
   renderer.setClearColor(0x05070c, 1);
   renderer.info.autoReset = false;
+  renderer.shadowMap.enabled = true;
+  renderer.shadowMap.type = THREE.PCFShadowMap;
 
   const clockSource = {
     get frameCount() {
@@ -155,14 +133,11 @@ export async function mountSceneHost(
   if (options.at !== undefined && Number.isFinite(options.at)) clock.seek(options.at);
   if (options.paused) clock.playing = false;
 
-  const governor: TierGovernor = makeTierGovernor({ tier: options.tier ?? 'hero' });
-  let tier: QualityTier = options.tier ?? 'hero';
   let debugOn = options.debug === true;
   let scene: SceneModule | null = null;
   let post: ComposerHandle | null = null;
   let manifest: SceneManifest | null = null;
   let destroyed = false;
-  let building = true;
 
   const state = makeFrameState();
   const previous = makeFrameState();
@@ -180,24 +155,15 @@ export async function mountSceneHost(
 
   const info: HostFrameInfo = {
     position: 0,
-    index: 0,
     step: 0,
     simTime: 0,
-    frameCount: source.frameCount,
-    playing: clock.playing,
-    speed: clock.speed,
-    tier,
-    fps: 0,
     frameMs: 0,
-    p95: 0,
-    p95Threshold: 0,
-    scrubbed: true,
   };
 
   const sizeOf = (): SceneSize => ({
     width: Math.max(1, container.clientWidth || canvas.clientWidth || 1),
     height: Math.max(1, container.clientHeight || canvas.clientHeight || 1),
-    dpr: Math.min(tierDpr(tier), window.devicePixelRatio || 1),
+    dpr: window.devicePixelRatio || 1,
   });
 
   const applySize = (): void => {
@@ -219,13 +185,11 @@ export async function mountSceneHost(
 
   const buildScene = async (): Promise<void> => {
     const generation = ++buildGeneration;
-    building = true;
     scene?.dispose();
     post?.dispose();
     scene = null;
     post = null;
 
-    configureRendererShadows(renderer, tier);
     const size = sizeOf();
     const currentLoader = loader;
     if (!currentLoader) throw new SceneHostError(`no scene registered for ${envId}`);
@@ -236,7 +200,6 @@ export async function mountSceneHost(
       renderer,
       canvas,
       size,
-      tier,
       tokens: TOKENS,
       geometry: source.geometry,
       seed: source.seed,
@@ -250,12 +213,10 @@ export async function mountSceneHost(
     scene = module;
     manifest = module.manifest;
 
-    post = buildComposer(renderer, module.scene, module.camera, module.manifest.postConfig, tier, size);
+    post = buildComposer(renderer, module.scene, module.camera, module.manifest.postConfig, size);
     module.setDebug(debugOn);
     applySize();
     resetCursor();
-    governor.reset();
-    building = false;
   };
 
   await buildScene();
@@ -267,7 +228,6 @@ export async function mountSceneHost(
 
   let raf = 0;
   let lastWall = 0;
-  let fps = 0;
 
   const tick = (now: number): void => {
     raf = requestAnimationFrame(tick);
@@ -300,30 +260,10 @@ export async function mountSceneHost(
       options.onEvents(eventBuffer, eventSteps);
     }
 
-    if (!building && frameMs > 0) {
-      const drop = governor.sample(frameMs);
-      if (drop && drop !== tier) {
-        tier = drop;
-        void buildScene().then(() => {
-          if (!destroyed) options.onTier?.(tier, 'auto');
-        });
-      }
-    }
-
-    fps = dtReal > 0 ? (fps === 0 ? 1 / dtReal : fps * 0.9 + (1 / dtReal) * 0.1) : fps;
     info.position = position;
-    info.index = step.index;
     info.step = state.step;
     info.simTime = state.simTime;
-    info.frameCount = source.frameCount;
-    info.playing = clock.playing;
-    info.speed = clock.speed;
-    info.tier = tier;
-    info.fps = fps;
     info.frameMs = frameMs;
-    info.p95 = governor.p95;
-    info.p95Threshold = governor.threshold;
-    info.scrubbed = !step.sequential;
     options.onFrame?.(info);
   };
   raf = requestAnimationFrame(tick);
@@ -346,9 +286,6 @@ export async function mountSceneHost(
     },
     get clock() {
       return clock;
-    },
-    get tier() {
-      return tier;
     },
     get debug() {
       return debugOn;
@@ -387,13 +324,6 @@ export async function mountSceneHost(
       swapSource(nextSource, opts.at ?? 0);
       await buildScene();
       if (!destroyed && manifest !== null) options.onReady?.(manifest);
-    },
-    async setTier(next) {
-      if (next === tier) return;
-      tier = next;
-      governor.adopt(next);
-      await buildScene();
-      if (!destroyed) options.onTier?.(tier, 'manual');
     },
     setDebug(on) {
       debugOn = on;

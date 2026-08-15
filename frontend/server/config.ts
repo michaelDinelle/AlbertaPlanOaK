@@ -21,6 +21,3 @@ export function portFromEnv(env: Record<string, string | undefined> = process.en
 }
 
 export const HOSTNAME = '127.0.0.1';
-
-export const INDEX_TTL_MS = 1_500;
-export const IN_FLIGHT_MS = 120_000;

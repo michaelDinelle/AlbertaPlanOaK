@@ -220,15 +220,6 @@ export function rampData(stops: readonly RampStop[], width = 64): Uint8Array {
   return data;
 }
 
-export function rampTexture(stops: readonly RampStop[], width = 64): THREE.DataTexture {
-  const w = clampSize(width);
-  const tex = makeDataTexture(rampData(stops, w), w, 1, 'oak-ramp');
-  tex.colorSpace = THREE.SRGBColorSpace;
-  tex.wrapS = THREE.ClampToEdgeWrapping;
-  tex.wrapT = THREE.ClampToEdgeWrapping;
-  return tex;
-}
-
 
 export interface GrainOptions {
   size?: number;
@@ -292,30 +283,6 @@ export function makeDataTexture(data: Uint8Array, width: number, height: number,
 
 export function hasCanvas2D(): boolean {
   return typeof document !== 'undefined' && typeof document.createElement === 'function';
-}
-
-export function canvasTexture(
-  size: number,
-  draw: (ctx: CanvasRenderingContext2D, size: number) => void,
-  name = 'oak-canvas',
-): THREE.CanvasTexture | null {
-  if (!hasCanvas2D()) return null;
-  const s = clampSize(size);
-  const canvas = document.createElement('canvas');
-  canvas.width = s;
-  canvas.height = s;
-  const ctx = canvas.getContext('2d');
-  if (!ctx) return null;
-  draw(ctx, s);
-  const tex = new THREE.CanvasTexture(canvas);
-  tex.name = name;
-  tex.wrapS = THREE.ClampToEdgeWrapping;
-  tex.wrapT = THREE.ClampToEdgeWrapping;
-  tex.minFilter = THREE.LinearFilter;
-  tex.magFilter = THREE.LinearFilter;
-  tex.generateMipmaps = false;
-  tex.needsUpdate = true;
-  return tex;
 }
 
 export function radialSprite(size = 64, power = 2): THREE.DataTexture {

@@ -1,18 +1,17 @@
 
 import { philoxDraw, STREAM_RESET } from '../philox';
-import { CTRL_LEN, OFF_DONE, OFF_POSE, POSE_LEN, effortView } from '../record';
+import { POSE_LEN } from '../record';
 import type { EnvDecoder, EnvFrame, EnvGeometry, SimEvent } from '../types';
 import { NO_EVENTS } from '../events';
 
 export const LARGE_DEEPSEA_N = 16;
-export const LARGE_DEEPSEA_RIGHT_COST = -0.000625;
 export const LARGE_DEEPSEA_LAST_ROW = LARGE_DEEPSEA_N - 2;
 
-export interface LargeDeepSeaState {
-  r: number;
-  c: number;
-  lastA: number;
-}
+export const LARGE_DEEPSEA_ROW = 0;
+export const LARGE_DEEPSEA_COL = 1;
+export const LARGE_DEEPSEA_GX = 2;
+export const LARGE_DEEPSEA_GY = 3;
+export const LARGE_DEEPSEA_ACTION = 4;
 
 export interface LargeDeepSeaStatic {
   seed: number;
@@ -48,11 +47,7 @@ export function largeDeepSeaNextCol(
   return Math.min(Math.max(c + dc, 0), LARGE_DEEPSEA_N - 1);
 }
 
-function state(r: number, c: number, lastA: number): LargeDeepSeaState {
-  return { r, c, lastA };
-}
-
-export const largeDeepSeaDecoder: EnvDecoder<LargeDeepSeaState, LargeDeepSeaStatic> = {
+export const largeDeepSeaDecoder: EnvDecoder<LargeDeepSeaStatic> = {
   envId: 'LargeDeepSea-cont-v0',
 
   initStatic(seed: number): LargeDeepSeaStatic {
@@ -73,39 +68,27 @@ export const largeDeepSeaDecoder: EnvDecoder<LargeDeepSeaState, LargeDeepSeaStat
     };
   },
 
-  initFrame(): EnvFrame<LargeDeepSeaState> {
+  initFrame(): EnvFrame {
     const pose = new Float32Array(POSE_LEN);
     pose[2] = LARGE_DEEPSEA_N - 1;
     pose[3] = LARGE_DEEPSEA_N - 1;
     return {
       step: -1,
-      ctrl: new Float32Array(CTRL_LEN),
       done: 0,
       pose,
-      state: state(0, 0, 0),
     };
   },
 
-  decodeFrame(i: number, raw16: Float32Array): EnvFrame<LargeDeepSeaState> {
-    const pose = raw16.subarray(OFF_POSE, OFF_POSE + POSE_LEN);
-    const ctrl = effortView(raw16, 4);
-    return {
-      step: i,
-      ctrl,
-      done: raw16[OFF_DONE] ?? 0,
-      pose,
-      state: state(pose[0] ?? 0, pose[1] ?? 0, Math.trunc(ctrl[0] ?? 0) & 1),
-    };
-  },
 
   deriveEvents(
-    prev: EnvFrame<LargeDeepSeaState>,
-    next: EnvFrame<LargeDeepSeaState>,
+    prev: EnvFrame,
+    next: EnvFrame,
     st: LargeDeepSeaStatic,
   ): SimEvent[] {
-    if (prev.state.r !== LARGE_DEEPSEA_LAST_ROW) return NO_EVENTS;
-    const action = Math.trunc(next.ctrl[0] ?? 0);
-    const landed = largeDeepSeaNextCol(st, prev.state.r, prev.state.c, action);
+    const row = prev.pose[LARGE_DEEPSEA_ROW] ?? 0;
+    if (row !== LARGE_DEEPSEA_LAST_ROW) return NO_EVENTS;
+    const action = Math.trunc(next.pose[LARGE_DEEPSEA_ACTION] ?? 0);
+    const landed = largeDeepSeaNextCol(st, row, prev.pose[LARGE_DEEPSEA_COL] ?? 0, action);
     const out: SimEvent[] = [];
     if (landed === LARGE_DEEPSEA_N - 1) out.push({ type: 'goal' });
     out.push({ type: 'resurface' });

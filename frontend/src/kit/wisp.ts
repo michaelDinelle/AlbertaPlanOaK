@@ -1,12 +1,11 @@
 
 import * as THREE from 'three';
 import type { GridCell } from '@sim/types';
-import { HopMotion, cellToWorldVec, type GridSize, type HopMotionOptions } from './grid';
+import { HopMotion, type GridSize, type HopMotionOptions } from './grid';
 import { emissiveMaterial, oakMaterial, setEmissiveIntensity, wispMaterial } from './materials';
 import type { EmissiveMaterial, OakMaterial, WispMaterial } from './materials';
 import { radialSprite } from './textures';
 import { TOKENS } from './tokens';
-import type { QualityTier } from './types';
 
 export type FaceDir = number | { dx: number; dy: number };
 
@@ -17,7 +16,6 @@ export function yawFromGridDelta(dx: number, dy: number): number {
 
 export interface WispOptions {
   color: THREE.ColorRepresentation;
-  tier?: QualityTier;
   height?: number;
   radius?: number;
   skirt?: boolean;
@@ -83,19 +81,16 @@ export class Wisp {
   private shadeLift = 1;
 
   constructor(opts: WispOptions, grid: GridSize = { w: 1, h: 1 }) {
-    const tier = opts.tier;
-    const hero = tier !== 'thumb';
-    const detail = tier === 'thumb' ? 0.35 : tier === 'medium' ? 0.65 : 1;
     this.height = opts.height ?? TOKENS.wispHeight;
     const radius = opts.radius ?? 0.16;
     this.group.name = opts.name ?? 'oakWisp';
     this.motion = new HopMotion(grid, opts.hop);
 
-    const coreGeo = new THREE.IcosahedronGeometry(radius, tier === 'thumb' ? 1 : 2);
-    const haloGeo = new THREE.IcosahedronGeometry(radius * 2.4, tier === 'thumb' ? 0 : 1);
+    const coreGeo = new THREE.IcosahedronGeometry(radius, 2);
+    const haloGeo = new THREE.IcosahedronGeometry(radius * 2.4, 1);
     this.geometries.push(coreGeo, haloGeo);
 
-    this.coreMaterial = wispMaterial(opts.color, { intensity: 1.9, rimPower: 2.1, tier, name: 'oakWispCore' });
+    this.coreMaterial = wispMaterial(opts.color, { intensity: 1.9, rimPower: 2.1, name: 'oakWispCore' });
     this.baseIntensity = 0.7;
     this.haloMaterial = emissiveMaterial(opts.color, this.baseIntensity, {
       transparent: true,
@@ -117,7 +112,7 @@ export class Wisp {
 
     const wantsSilhouette = opts.silhouette ?? true;
     const wantsShade = opts.contactShade ?? true;
-    this.shadeSprite = wantsShade ? radialSprite(tier === 'thumb' ? 32 : 64, SHADE_FALLOFF) : null;
+    this.shadeSprite = wantsShade ? radialSprite(64, SHADE_FALLOFF) : null;
     const shadeColor = new THREE.Color(opts.color).lerp(new THREE.Color(TOKENS.palettes.night.skyTop), SHADE_BLEND);
     this.shadeSize = radius * SHADE_SIZE;
 
@@ -161,9 +156,9 @@ export class Wisp {
       this.shadeMaterial = null;
     }
 
-    const wantsSkirt = (opts.skirt ?? true) && hero;
+    const wantsSkirt = opts.skirt ?? true;
     if (wantsSkirt) {
-      const petals = Math.max(3, Math.round(6 * detail));
+      const petals = 6;
       const skirtGeo = buildSkirt(petals, radius);
       this.geometries.push(skirtGeo);
       this.skirtMaterial = oakMaterial({
@@ -178,7 +173,6 @@ export class Wisp {
         toonSteps: 2,
         rimColor: opts.color,
         rimStrength: 0.5,
-        tier,
         name: 'oakWispSkirt',
       });
       this.skirt = new THREE.Mesh(skirtGeo, this.skirtMaterial);
@@ -200,9 +194,9 @@ export class Wisp {
     this.avatar.add(this.body);
     this.group.add(this.avatar);
 
-    const wantsRibbon = (opts.ribbon ?? true) && hero;
+    const wantsRibbon = opts.ribbon ?? true;
     if (wantsRibbon) {
-      this.ribbonCount = Math.max(RIBBON_MIN, Math.round((opts.ribbonLength ?? 24) * detail));
+      this.ribbonCount = Math.max(RIBBON_MIN, Math.round(opts.ribbonLength ?? 24));
       this.ribbonPositions = new Float32Array(this.ribbonCount * 3);
       const geo = new THREE.BufferGeometry();
       this.ribbonAttr = new THREE.BufferAttribute(this.ribbonPositions, 3);
@@ -443,7 +437,3 @@ function buildSkirt(petals: number, radius: number): THREE.BufferGeometry {
   return g;
 }
 
-export function placeAtCell(object: THREE.Object3D, x: number, y: number, grid: GridSize, height = 0): void {
-  cellToWorldVec(x, y, grid, object.position);
-  object.position.y = height;
-}

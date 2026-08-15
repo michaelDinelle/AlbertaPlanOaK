@@ -38,10 +38,5 @@ const TABLE = {
   'DelayedChain-cont-v0': delayedChainDecoder,
 } satisfies Record<EnvId, unknown>;
 
-export const decoders = TABLE as Record<EnvId, EnvDecoder<unknown, unknown>>;
+export const decoders = TABLE as Record<EnvId, EnvDecoder>;
 
-export function decoderFor(envId: EnvId): EnvDecoder<unknown, unknown> {
-  const d = decoders[envId];
-  if (!d) throw new Error(`no decoder registered for ${envId}`);
-  return d;
-}

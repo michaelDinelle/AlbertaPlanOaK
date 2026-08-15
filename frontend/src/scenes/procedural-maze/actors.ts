@@ -3,7 +3,6 @@ import { emissiveMaterial, oakMaterial, oakUniforms, setEmissiveIntensity } from
 import type { EmissiveMaterial, OakMaterial } from '@kit/materials';
 import { radialSprite } from '@kit/textures';
 import type { Palette } from '@kit/tokens';
-import type { QualityTier } from '@kit/types';
 import * as THREE from 'three';
 import { clamp01, mergeColoredParts, type ColoredPart, type RuinSkin } from './world';
 
@@ -16,7 +15,6 @@ export const HALO_HDR = 0.34;
 const LIGHT_HEIGHT = 0.55;
 
 export interface SunShaftOptions {
-  tier: QualityTier;
   palette: Palette;
   skin: RuinSkin;
   sunDir: readonly [number, number, number];
@@ -80,8 +78,8 @@ void main() {
 `;
 
 export function buildSunShaft(opts: SunShaftOptions): SunShaftHandle {
-  const { tier, palette, skin, sunDir } = opts;
-  const detail = tier === 'thumb' ? 0.4 : tier === 'medium' ? 0.7 : 1;
+  const { palette, skin, sunDir } = opts;
+  const detail = 1;
   const group = new THREE.Group();
   group.name = opts.name ?? 'sunShaft';
 
@@ -165,7 +163,7 @@ export function buildSunShaft(opts: SunShaftOptions): SunShaftHandle {
   halo.renderOrder = 1;
   decor.add(halo);
 
-  const stubGeometry = atriumGeometry(skin, tier);
+  const stubGeometry = atriumGeometry(skin);
   const stubMaterial: OakMaterial = oakMaterial({
     vertexColors: true,
     flatShading: true,
@@ -175,13 +173,12 @@ export function buildSunShaft(opts: SunShaftOptions): SunShaftHandle {
     toonSteps: 3,
     toonSoftness: 0.28,
     toonFloor: 0.42,
-    tier,
     name: 'sunShaftStubMaterial',
   });
   const stubs = new THREE.Mesh(stubGeometry, stubMaterial);
   stubs.name = 'sunShaftStubs';
-  stubs.castShadow = tier !== 'thumb';
-  stubs.receiveShadow = tier !== 'thumb';
+  stubs.castShadow = true;
+  stubs.receiveShadow = true;
   decor.add(stubs);
 
   let flareAmount = 0;
@@ -242,8 +239,8 @@ export function buildSunShaft(opts: SunShaftOptions): SunShaftHandle {
   };
 }
 
-function atriumGeometry(skin: RuinSkin, tier: QualityTier): THREE.BufferGeometry {
-  const detail = tier === 'thumb' ? 0.45 : tier === 'medium' ? 0.7 : 1;
+function atriumGeometry(skin: RuinSkin): THREE.BufferGeometry {
+  const detail = 1;
   const radial = Math.max(5, Math.round(10 * detail));
   const parts: ColoredPart[] = [];
 

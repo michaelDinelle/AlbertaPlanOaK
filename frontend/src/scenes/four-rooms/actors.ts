@@ -9,7 +9,6 @@ import {
   type OakMaterial,
 } from '@kit/materials';
 import type { Palette } from '@kit/tokens';
-import type { QualityTier } from '@kit/types';
 import * as THREE from 'three';
 import { blendTokens, clamp01, type ColoredPart } from './world';
 
@@ -21,7 +20,6 @@ const PITCH_OPEN = 1.16;
 const PISTIL_HDR = 0.98;
 
 export interface LanternOptions {
-  tier: QualityTier;
   palette: Palette;
   blossom: THREE.ColorRepresentation;
   flame: THREE.ColorRepresentation;
@@ -41,8 +39,8 @@ export interface LanternHandle {
 }
 
 export function buildLantern(opts: LanternOptions): LanternHandle {
-  const { tier, palette, blossom, flame, stem } = opts;
-  const detail = tier === 'thumb' ? 0.4 : tier === 'medium' ? 0.7 : 1;
+  const { palette, blossom, flame, stem } = opts;
+  const detail = 1;
   const group = new THREE.Group();
   group.name = opts.name ?? 'lanternFlower';
 
@@ -52,7 +50,6 @@ export function buildLantern(opts: LanternOptions): LanternHandle {
 
   const beacon = new GoalBeacon({
     color: flame,
-    tier,
     height: 0.5,
     radius: 0.085,
     intensity: 0.3,
@@ -89,12 +86,11 @@ export function buildLantern(opts: LanternOptions): LanternHandle {
     toonSteps: 2,
     toonSoftness: 0.34,
     toonFloor: 0.28,
-    tier,
     name: 'lanternStemMaterial',
   });
   const stemMesh = new THREE.Mesh(stemGeometry, stemMaterial);
   stemMesh.name = 'lanternStem';
-  stemMesh.castShadow = tier !== 'thumb';
+  stemMesh.castShadow = true;
   bud.add(stemMesh);
 
   const petalGeometry = makePetalGeometry();
@@ -109,7 +105,6 @@ export function buildLantern(opts: LanternOptions): LanternHandle {
     toonSteps: 2,
     toonSoftness: 0.38,
     toonFloor: 0.35,
-    tier,
     name: 'lanternPetalMaterial',
   });
   const petals = new THREE.InstancedMesh(petalGeometry, petalMaterial, PETALS);
@@ -128,7 +123,7 @@ export function buildLantern(opts: LanternOptions): LanternHandle {
   }
   bud.add(petals);
 
-  const pistilGeometry = new THREE.IcosahedronGeometry(0.055, tier === 'thumb' ? 0 : 1);
+  const pistilGeometry = new THREE.IcosahedronGeometry(0.055, 1);
   const pistilMaterial: EmissiveMaterial = emissiveMaterial(flame, PISTIL_HDR, { name: 'lanternFlame' });
   const pistil = new THREE.Mesh(pistilGeometry, pistilMaterial);
   pistil.name = 'lanternFlame';

@@ -1,18 +1,19 @@
 
-import { cheetahGeometry, ROOT_Z0 } from '../fk/cheetah';
+import { cheetahGeometry } from '../fk/cheetah';
 import { STREAM_RESET, boxMuller, philoxWords, uniform } from '../philox';
 import type { EnvDecoder, EnvFrame, EnvGeometry, SimEvent } from '../types';
 import { NO_EVENTS } from '../events';
-import { OFF_POSE, effortView, POSE_LEN, OFF_DONE } from '../record';
 
 
-export const HC_TIMESTEP = 0.01;
-export const HC_FRAME_SKIP = 5;
 export const HC_RESET_NOISE = 0.1;
 export const CHEETAH_DT = 0.05;
 export const CHEETAH_TELEPORT_DX = 10;
 
 export const QPOS_LEN = 9;
+
+export const CHEETAH_ROOT_X = 0;
+export const CHEETAH_ROOT_Z = 1;
+export const CHEETAH_PITCH = 2;
 
 
 export interface CheetahStatic {
@@ -20,14 +21,6 @@ export interface CheetahStatic {
   resetIndex: number;
   initQpos: Float32Array;
   initQvel: Float32Array;
-}
-
-export interface CheetahState {
-  qpos: Float32Array;
-  rootX: number;
-  rootZ: number;
-  pitch: number;
-  velX: number;
 }
 
 
@@ -61,17 +54,7 @@ const GEOMETRY: EnvGeometry = Object.freeze({
   cheetah: cheetahGeometry,
 });
 
-function makeState(pose: Float32Array, velX: number): CheetahState {
-  return {
-    qpos: pose,
-    rootX: pose[0] ?? 0,
-    rootZ: ROOT_Z0 + (pose[1] ?? 0),
-    pitch: pose[2] ?? 0,
-    velX,
-  };
-}
-
-export const halfCheetahDecoder: EnvDecoder<CheetahState, CheetahStatic> = {
+export const halfCheetahDecoder: EnvDecoder<CheetahStatic> = {
   envId: 'HalfCheetah-v4',
 
   initStatic(seed: number): CheetahStatic {
@@ -83,38 +66,19 @@ export const halfCheetahDecoder: EnvDecoder<CheetahState, CheetahStatic> = {
     return GEOMETRY;
   },
 
-  initFrame(_seed: number, st: CheetahStatic): EnvFrame<CheetahState> {
+  initFrame(_seed: number, st: CheetahStatic): EnvFrame {
     const pose = Float32Array.from(st.initQpos);
     return {
       step: -1,
-      ctrl: new Float32Array(6),
       done: 0,
       pose,
-      state: makeState(pose, st.initQvel[0] ?? 0),
     };
   },
 
-  decodeFrame(
-    i: number,
-    raw16: Float32Array,
-    _st: CheetahStatic,
-    prev: EnvFrame<CheetahState>,
-  ): EnvFrame<CheetahState> {
-    const pose = raw16.subarray(OFF_POSE, OFF_POSE + POSE_LEN);
-    const dx = (pose[0] ?? 0) - (prev.pose[0] ?? 0);
-    const velX = Math.abs(dx) > CHEETAH_TELEPORT_DX ? 0 : dx / CHEETAH_DT;
-    return {
-      step: i,
-      ctrl: effortView(raw16, -1),
-      done: raw16[OFF_DONE] ?? 0,
-      pose,
-      state: makeState(pose, velX),
-    };
-  },
 
   deriveEvents(
-    prev: EnvFrame<CheetahState>,
-    next: EnvFrame<CheetahState>,
+    prev: EnvFrame,
+    next: EnvFrame,
   ): SimEvent[] {
     const teleport = Math.abs((next.pose[0] ?? 0) - (prev.pose[0] ?? 0)) > CHEETAH_TELEPORT_DX;
     if (next.done === 0 && !teleport) return NO_EVENTS;

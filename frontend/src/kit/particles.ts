@@ -2,7 +2,6 @@
 import * as THREE from 'three';
 import { fbm } from './textures';
 import { mulberry32 } from './rng';
-import type { QualityTier } from './types';
 
 export type ParticlePreset = 'fireflies' | 'pollen' | 'snow' | 'embers' | 'bubbles' | 'dust';
 
@@ -29,10 +28,6 @@ export const PARTICLE_PRESETS: Record<ParticlePreset, ParticlePresetSpec> = Obje
   dust: { count: 1100, size: 3, color: 0xffe0b8, intensity: 1.2, rise: 0.02, swirl: 0.18, swirlFreq: 0.22, twinkle: 0.2, softness: 1.8, additive: true, opacity: 0.6 },
 });
 
-export function particleTierScale(tier: QualityTier | undefined): number {
-  return tier === 'thumb' ? 0 : tier === 'medium' ? 0.5 : 1;
-}
-
 export interface ParticleBounds {
   x?: number;
   y?: number;
@@ -46,7 +41,6 @@ export interface AmbientParticlesOptions {
   preset: ParticlePreset;
   bounds: ParticleBounds;
   seed: number;
-  tier?: QualityTier;
   count?: number;
   color?: THREE.ColorRepresentation;
   size?: number;
@@ -125,8 +119,7 @@ void main() {
 
 export function makeAmbientParticles(opts: AmbientParticlesOptions): AmbientParticlesHandle {
   const spec = PARTICLE_PRESETS[opts.preset];
-  const scale = particleTierScale(opts.tier);
-  const count = Math.max(0, Math.round((opts.count ?? spec.count) * scale));
+  const count = Math.max(0, Math.round(opts.count ?? spec.count));
   const b = opts.bounds;
   const cx = b.x ?? 0;
   const cy = b.y ?? 0;
@@ -221,7 +214,6 @@ export interface MistPlanesOptions {
   size: number | readonly [number, number];
   color: THREE.ColorRepresentation;
   seed: number;
-  tier?: QualityTier;
   layers?: number;
   baseY?: number;
   spread?: number;
@@ -289,8 +281,7 @@ void main() {
 export function makeMistPlanes(opts: MistPlanesOptions): MistPlanesHandle {
   const group = new THREE.Group();
   group.name = opts.name ?? 'oakMist';
-  const scaleTier = particleTierScale(opts.tier);
-  const layers = Math.max(0, Math.round((opts.layers ?? 5) * (scaleTier > 0 ? (scaleTier < 1 ? 0.6 : 1) : 0)));
+  const layers = Math.max(0, Math.round(opts.layers ?? 5));
   const sizeX = typeof opts.size === 'number' ? opts.size : opts.size[0];
   const sizeZ = typeof opts.size === 'number' ? opts.size : opts.size[1];
   const baseY = opts.baseY ?? 0.15;

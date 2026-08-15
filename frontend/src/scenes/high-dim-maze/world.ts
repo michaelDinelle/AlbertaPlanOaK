@@ -17,7 +17,7 @@ import { skyFromPalette, type SkyHandle } from '@kit/sky';
 import { makeTerrain, type TerrainHandle } from '@kit/terrain';
 import { valueNoise2 } from '@kit/textures';
 import { TOKENS, type Palette } from '@kit/tokens';
-import type { QualityTier, SceneContext } from '@kit/types';
+import type { SceneContext } from '@kit/types';
 import {
   excludeAny,
   excludeRect,
@@ -345,16 +345,14 @@ interface Timed {
 }
 
 export function buildWorld(ctx: SceneContext, scene: THREE.Scene, grid: GridGeometry): WorldHandle {
-  const tier: QualityTier = ctx.tier;
   const palette: Palette = ctx.tokens.palettes.afternoon;
   const skin = canyonSkin(palette, ctx.tokens);
-  const shadows = tier !== 'thumb';
   const group = new THREE.Group();
   group.name = 'slotCanyons';
   const owned: Disposable[] = [];
   const timed: Timed[] = [];
 
-  const sky = skyFromPalette(palette, 'afternoon', tier, {
+  const sky = skyFromPalette(palette, 'afternoon', {
     sunDir: SUN_DIR,
     sunSize: 0.03,
     sunHdr: 5.2,
@@ -368,7 +366,7 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene, grid: GridGeom
   owned.push(sky);
   timed.push({ setTime: (t) => sky.setTime(t) });
 
-  const rig = makeLightRig(palette, tier, {
+  const rig = makeLightRig(palette, {
     sunDir: sky.sunDirection,
     pointCount: 3,
     pointDistance: 6,
@@ -384,7 +382,6 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene, grid: GridGeom
   const terrain = makeTerrain({
     size: [TERRAIN_SIZE, TERRAIN_SIZE],
     segments: [TERRAIN_SEGMENTS, TERRAIN_SEGMENTS],
-    tier,
     seed: ctx.seed,
     heightFn: makeMesaHeight(ctx.seed),
     jitter: 0,
@@ -406,7 +403,7 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene, grid: GridGeom
       toonSoftness: 0.32,
       toonFloor: 0.28,
     },
-    receiveShadow: shadows,
+    receiveShadow: true,
     castShadow: false,
     name: 'canyonDesert',
   });
@@ -437,7 +434,6 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene, grid: GridGeom
       seed: ctx.seed,
       name: 'canyonCells',
     },
-    tier,
   );
   group.add(field.group);
   owned.push(field);
@@ -445,7 +441,7 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene, grid: GridGeom
 
   const wallHeights = applyWallHeights(field, grid, ctx.seed);
 
-  const strataGeometry = makeStrataGeometry(skin, tier);
+  const strataGeometry = makeStrataGeometry(skin);
   const strataMaterial: OakMaterial = oakMaterial({
     color: white,
     vertexColors: true,
@@ -456,7 +452,6 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene, grid: GridGeom
     toonSteps: 3,
     toonSoftness: 0.3,
     toonFloor: 0.26,
-    tier,
     name: 'canyonStrataMaterial',
   });
   owned.push({ dispose: () => strataMaterial.dispose() });
@@ -467,7 +462,7 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene, grid: GridGeom
     const mesh = new THREE.InstancedMesh(strataGeometry, strataMaterial, Math.max(1, count));
     mesh.name = 'canyonStrata';
     mesh.castShadow = false;
-    mesh.receiveShadow = shadows;
+    mesh.receiveShadow = true;
     mesh.instanceColor = new THREE.InstancedBufferAttribute(new Float32Array(Math.max(1, count) * 3), 3);
     const matrix = new THREE.Matrix4();
     const position = new THREE.Vector3();
@@ -510,7 +505,6 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene, grid: GridGeom
     toonSteps: 3,
     toonSoftness: 0.32,
     toonFloor: 0.42,
-    tier,
     name: 'canyonArchMaterial',
   });
   owned.push({ dispose: () => archMaterial.dispose() });
@@ -527,7 +521,6 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene, grid: GridGeom
       const jambs = archJambs(grid, gap, wallHeights);
       const geometry = makeArchGeometry(
         skin,
-        tier,
         archHeight(grid, gap, wallHeights),
         jambs,
         ctx.seed + i * 7919,
@@ -535,8 +528,8 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene, grid: GridGeom
       const mesh = new THREE.Mesh(geometry, archMaterial);
       mesh.name = `canyonArch${i}`;
       mesh.rotation.y = archYaw(archAxis(grid, gap));
-      mesh.castShadow = shadows;
-      mesh.receiveShadow = shadows;
+      mesh.castShadow = true;
+      mesh.receiveShadow = true;
       root.add(mesh);
       group.add(root);
       archRoots.push(root);
@@ -545,7 +538,7 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene, grid: GridGeom
   }
 
   {
-    const geometry = makeMesaLineGeometry(skin, ctx.seed, tier);
+    const geometry = makeMesaLineGeometry(skin, ctx.seed);
     const material: OakMaterial = oakMaterial({
       color: white,
       vertexColors: true,
@@ -556,7 +549,6 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene, grid: GridGeom
       toonSteps: 2,
       toonSoftness: 0.4,
       toonFloor: 0.42,
-      tier,
       name: 'canyonMesaLineMaterial',
     });
     const mesh = new THREE.Mesh(geometry, material);
@@ -581,7 +573,6 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene, grid: GridGeom
     count: 1500,
     area: { x: 0, z: 0, halfX: 24, halfZ: 24, innerRadius: CANYON_HALF + 0.9 },
     seed: ctx.seed ^ 0x5c1a,
-    tier,
     exclude: outside,
     heightAt: (x, z) => terrain.sampleHeight(x, z),
     color: skin.scrub,
@@ -602,7 +593,6 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene, grid: GridGeom
     count: 340,
     area: { x: 0, z: 0, halfX: 28, halfZ: 28, innerRadius: CANYON_HALF + 1.1 },
     seed: ctx.seed ^ 0x77b3,
-    tier,
     exclude: outside,
     heightAt: (x, z) => terrain.sampleHeight(x, z),
     maxSlope: 0.75,
@@ -623,7 +613,6 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene, grid: GridGeom
     count: 30,
     area: { x: 0, z: 0, halfX: 19, halfZ: 19, innerRadius: CANYON_HALF + 4.2 },
     seed: ctx.seed ^ 0x18ce,
-    tier,
     exclude: outside,
     heightAt: (x, z) => terrain.sampleHeight(x, z),
     maxSlope: 0.62,
@@ -645,7 +634,6 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene, grid: GridGeom
     count: 26,
     area: { x: 0, z: 0, halfX: 22, halfZ: 22, innerRadius: CANYON_HALF + 2.4 },
     seed: ctx.seed ^ 0x31f7,
-    tier,
     exclude: outside,
     heightAt: (x, z) => terrain.sampleHeight(x, z),
     maxSlope: 0.6,
@@ -668,7 +656,6 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene, grid: GridGeom
     count: 120,
     area: { x: 0, z: 0, halfX: CANYON_HALF - 0.6, halfZ: CANYON_HALF - 0.6 },
     seed: ctx.seed ^ 0x2d41,
-    tier,
     exclude: excludeAny(excludeWallCells(grid), excludeCellCenters(grid, 0.36)),
     color: shade(skin.strata[2] ?? skin.stone, 0.1),
     scale: [0.07, 0.2],
@@ -689,7 +676,6 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene, grid: GridGeom
     count: 220,
     bounds: { x: 0, y: 1.25, z: 0, halfX: CANYON_HALF - 0.4, halfY: 0.55, halfZ: CANYON_HALF - 0.4 },
     seed: ctx.seed ^ 0x7d21,
-    tier,
     color: skin.dust,
     size: 0.34,
     intensity: 0.95,
@@ -703,13 +689,12 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene, grid: GridGeom
   timed.push(dust);
   motes.push(dust);
 
-  for (const spot of sandFallSpots(grid, ctx.seed, tier === 'hero' ? 4 : tier === 'medium' ? 2 : 0)) {
+  for (const spot of sandFallSpots(grid, ctx.seed, 4)) {
     const fall = makeAmbientParticles({
       preset: 'dust',
       count: 46,
       bounds: { x: spot.x, y: spot.top * 0.5, z: spot.z, halfX: 0.07, halfY: spot.top * 0.5, halfZ: 0.26 },
       seed: ctx.seed ^ (0x4a13 + spot.index * 977),
-      tier,
       color: blendTokens(skin.dust, skin.sandSun, 0.35),
       size: 0.42,
       intensity: 1.05,
@@ -728,7 +713,6 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene, grid: GridGeom
     size: [HIGHDIMMAZE_W * CELL, HIGHDIMMAZE_H * CELL],
     color: blendTokens(skin.dust, palette.sun, 0.4),
     seed: ctx.seed ^ 0x6b21,
-    tier,
     layers: 2,
     baseY: 0.1,
     spread: 0.34,
@@ -800,9 +784,9 @@ export function applyWallHeights(field: CellFieldHandle, grid: GridGeometry, see
   return heights;
 }
 
-export function makeStrataGeometry(skin: CanyonSkin, tier: QualityTier): THREE.BufferGeometry {
+export function makeStrataGeometry(skin: CanyonSkin): THREE.BufferGeometry {
   const beds: readonly (readonly [number, number, number])[] =
-    tier === 'thumb'
+    false
       ? [
           [0.46, 0.05, 1.03],
           [1.0, 0.032, 1.028],
@@ -820,7 +804,7 @@ export function makeStrataGeometry(skin: CanyonSkin, tier: QualityTier): THREE.B
     const [cy, half, spread] = bed;
     const g = new THREE.BoxGeometry(CELL * spread, half * 2, CELL * spread);
     g.translate(0, cy, 0);
-    const tone = tier === 'thumb' ? (i === 0 ? 0 : 3) : i;
+    const tone = false ? (i === 0 ? 0 : 3) : i;
     parts.push({ geometry: g, color: skin.strata[tone] ?? skin.stone });
   }
   return mergeColoredParts(parts, 'canyonStrata');
@@ -828,12 +812,11 @@ export function makeStrataGeometry(skin: CanyonSkin, tier: QualityTier): THREE.B
 
 export function makeArchGeometry(
   skin: CanyonSkin,
-  tier: QualityTier,
   height: number,
   jambs: readonly [number, number],
   seed: number,
 ): THREE.BufferGeometry {
-  const spans = tier === 'thumb' ? 8 : tier === 'medium' ? 12 : 20;
+  const spans = 20;
   const half = CELL * ARCH_SPAN_HALF;
   const depth = CELL * 0.5;
   const opening = Math.max(0.55, Math.min(ARCH_OPENING, height - ARCH_BAND));
@@ -935,9 +918,9 @@ export function makeArchGeometry(
   return g;
 }
 
-export function makeMesaLineGeometry(skin: CanyonSkin, seed: number, tier: QualityTier): THREE.BufferGeometry {
+export function makeMesaLineGeometry(skin: CanyonSkin, seed: number): THREE.BufferGeometry {
   const rng = mulberry32((seed | 0) ^ 0x1d3b7c51);
-  const count = tier === 'thumb' ? 6 : 10;
+  const count = 10;
   const parts: ColoredPart[] = [];
   for (let i = 0; i < count; i++) {
     const spread = Math.PI * 2 - 1.1;

@@ -7,7 +7,6 @@ import {
   type OakMaterial,
 } from '@kit/materials';
 import type { Palette } from '@kit/tokens';
-import type { QualityTier } from '@kit/types';
 import * as THREE from 'three';
 import {
   CAP_R,
@@ -46,7 +45,6 @@ export interface LanternRigHandle {
 }
 
 export interface LanternRigOptions {
-  tier: QualityTier;
   palette: Palette;
   accent: THREE.ColorRepresentation;
   pivot: readonly [number, number, number];
@@ -55,8 +53,7 @@ export interface LanternRigOptions {
 }
 
 export function buildLanternRig(opts: LanternRigOptions): LanternRigHandle {
-  const { tier, palette, accent, pivot, maxTorque, maxSpeed } = opts;
-  const shadows = tier !== 'thumb';
+  const { palette, accent, pivot, maxTorque, maxSpeed } = opts;
   const group = new THREE.Group();
   group.name = 'lanternRig';
 
@@ -96,12 +93,11 @@ export function buildLanternRig(opts: LanternRigOptions): LanternRigHandle {
     toonSteps: 3,
     toonSoftness: 0.3,
     toonFloor: 0.12,
-    tier,
     name: 'lanternIronMaterial',
   });
   const rodMesh = new THREE.Mesh(rodGeometry, ironMaterial);
   rodMesh.name = 'lanternRod';
-  rodMesh.castShadow = shadows;
+  rodMesh.castShadow = true;
   swingRoot.add(rodMesh);
 
   const bobRoot = new THREE.Object3D();
@@ -143,7 +139,7 @@ export function buildLanternRig(opts: LanternRigOptions): LanternRigHandle {
   const frameGeometry = mergeColoredParts(frameParts, 'lanternFrame');
   const frameMesh = new THREE.Mesh(frameGeometry, ironMaterial);
   frameMesh.name = 'lanternFrame';
-  frameMesh.castShadow = shadows;
+  frameMesh.castShadow = true;
   bobTilt.add(frameMesh);
 
   const paperGeometry = makePaperGeometry();
@@ -187,7 +183,7 @@ export function buildLanternRig(opts: LanternRigOptions): LanternRigHandle {
   );
   curlMaterial.vertexColors = true;
   curlMaterial.opacity = 0;
-  const curlTier = tier !== 'thumb';
+  const curlTier = true;
   const curlPos = new THREE.Mesh(curlGeometry, curlMaterial);
   curlPos.name = 'torqueCurlPositive';
   curlPos.renderOrder = 4;

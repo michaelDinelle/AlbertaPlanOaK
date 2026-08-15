@@ -1,7 +1,6 @@
 
 import { emissiveMaterial, oakMaterial, oakUniforms, setEmissiveIntensity } from '@kit/materials';
 import type { EmissiveMaterial, OakMaterial } from '@kit/materials';
-import type { QualityTier } from '@kit/types';
 import * as THREE from 'three';
 import { blendTokens, clamp01, mergeColoredParts, type AbyssSkin, type ColoredPart } from './world';
 
@@ -11,7 +10,6 @@ export const HEART_HDR = 2.6;
 export const WRECK_SCALE = 1.35;
 
 export interface WreckOptions {
-  tier: QualityTier;
   skin: AbyssSkin;
   accent: THREE.ColorRepresentation;
   name?: string;
@@ -27,8 +25,8 @@ export interface WreckHandle {
 }
 
 export function buildWreck(opts: WreckOptions): WreckHandle {
-  const { tier, skin } = opts;
-  const detail = tier === 'thumb' ? 0.4 : tier === 'medium' ? 0.7 : 1;
+  const { skin } = opts;
+  const detail = 1;
   const group = new THREE.Group();
   group.name = opts.name ?? 'sunkenWreck';
 
@@ -54,7 +52,7 @@ export function buildWreck(opts: WreckOptions): WreckHandle {
     parts.push({ geometry: spine, color: skin.timber });
   }
 
-  const RIBS = tier === 'thumb' ? 4 : 7;
+  const RIBS = 7;
   for (let i = 0; i < RIBS; i++) {
     const t = RIBS > 1 ? i / (RIBS - 1) : 0.5;
     const x = -0.62 + t * 1.24;
@@ -98,13 +96,12 @@ export function buildWreck(opts: WreckOptions): WreckHandle {
     toonSteps: 2,
     toonSoftness: 0.35,
     toonFloor: 0.32,
-    tier,
     name: 'wreckTimber',
   });
   const hullMesh = new THREE.Mesh(hullGeometry, hullMaterial);
   hullMesh.name = 'wreckTimberMesh';
-  hullMesh.castShadow = tier !== 'thumb';
-  hullMesh.receiveShadow = tier !== 'thumb';
+  hullMesh.castShadow = true;
+  hullMesh.receiveShadow = true;
   hull.add(hullMesh);
 
   const heartAnchor = new THREE.Object3D();
@@ -117,13 +114,13 @@ export function buildWreck(opts: WreckOptions): WreckHandle {
   heartDecor.scale.setScalar(WRECK_SCALE);
   heartAnchor.add(heartDecor);
 
-  const coreGeometry = new THREE.IcosahedronGeometry(0.11, tier === 'thumb' ? 0 : 1);
+  const coreGeometry = new THREE.IcosahedronGeometry(0.11, 1);
   const coreMaterial: EmissiveMaterial = emissiveMaterial(skin.heart, HEART_HDR, { name: 'wreckHeartCore' });
   const core = new THREE.Mesh(coreGeometry, coreMaterial);
   core.name = 'wreckHeartCore';
   heartDecor.add(core);
 
-  const haloGeometry = new THREE.IcosahedronGeometry(0.23, tier === 'thumb' ? 0 : 1);
+  const haloGeometry = new THREE.IcosahedronGeometry(0.23, 1);
   const haloMaterial: EmissiveMaterial = emissiveMaterial(blendTokens(skin.heart, opts.accent, 0.45), HEART_HDR * 0.24, {
     transparent: true,
     opacity: 0.26,
@@ -173,7 +170,6 @@ export function buildWreck(opts: WreckOptions): WreckHandle {
 export const LURE_HDR = 3.6;
 
 export interface AnglerOptions {
-  tier: QualityTier;
   skin: AbyssSkin;
   lure: THREE.ColorRepresentation;
   hover: number;
@@ -191,8 +187,8 @@ export interface AnglerHandle {
 }
 
 export function buildAngler(opts: AnglerOptions): AnglerHandle {
-  const { tier, skin } = opts;
-  const detail = tier === 'thumb' ? 0.45 : tier === 'medium' ? 0.7 : 1;
+  const { skin } = opts;
+  const detail = 1;
   const group = new THREE.Group();
   group.name = opts.name ?? 'anglerfish';
 
@@ -232,7 +228,7 @@ export function buildAngler(opts: AnglerOptions): AnglerHandle {
     rod.rotateZ(-0.72);
     rod.translate(0.06, 0.16, 0);
     parts.push({ geometry: rod, color: dark });
-    if (tier !== 'thumb') {
+    {
       for (let i = 0; i < 4; i++) {
         const tooth = new THREE.ConeGeometry(0.014, 0.06, 3);
         tooth.rotateX(Math.PI);
@@ -253,13 +249,12 @@ export function buildAngler(opts: AnglerOptions): AnglerHandle {
     toonSteps: 2,
     toonSoftness: 0.36,
     toonFloor: 0.22,
-    tier,
     name: 'anglerBodyMaterial',
   });
   const bodyMesh = new THREE.Mesh(bodyGeometry, bodyMaterial);
   bodyMesh.name = 'anglerBodyMesh';
   bodyMesh.castShadow = false;
-  bodyMesh.receiveShadow = tier !== 'thumb';
+  bodyMesh.receiveShadow = true;
   swim.add(bodyMesh);
 
   const lureAnchor = new THREE.Object3D();
@@ -267,13 +262,13 @@ export function buildAngler(opts: AnglerOptions): AnglerHandle {
   lureAnchor.position.set(0.42, 0.44, 0.01);
   swim.add(lureAnchor);
 
-  const escaGeometry = new THREE.IcosahedronGeometry(0.055, tier === 'thumb' ? 0 : 1);
+  const escaGeometry = new THREE.IcosahedronGeometry(0.055, 1);
   const escaMaterial: EmissiveMaterial = emissiveMaterial(opts.lure, LURE_HDR, { name: 'anglerEsca' });
   const esca = new THREE.Mesh(escaGeometry, escaMaterial);
   esca.name = 'anglerEsca';
   lureAnchor.add(esca);
 
-  const glowGeometry = new THREE.IcosahedronGeometry(0.16, tier === 'thumb' ? 0 : 1);
+  const glowGeometry = new THREE.IcosahedronGeometry(0.16, 1);
   const glowMaterial: EmissiveMaterial = emissiveMaterial(opts.lure, LURE_HDR * 0.22, {
     transparent: true,
     opacity: 0.3,
@@ -318,7 +313,6 @@ export function buildAngler(opts: AnglerOptions): AnglerHandle {
 
 
 export interface DiveBubbleOptions {
-  tier: QualityTier;
   accent: THREE.ColorRepresentation;
   water: THREE.ColorRepresentation;
   radius?: number;
@@ -333,7 +327,6 @@ export interface DiveBubbleHandle {
 }
 
 export function buildDiveBubble(opts: DiveBubbleOptions): DiveBubbleHandle {
-  const tier = opts.tier;
   const radius = opts.radius ?? 0.36;
   const group = new THREE.Group();
   group.name = opts.name ?? 'diveBubble';
@@ -342,7 +335,7 @@ export function buildDiveBubble(opts: DiveBubbleOptions): DiveBubbleHandle {
   decor.name = 'diveBubbleDecor';
   group.add(decor);
 
-  const shellGeometry = new THREE.IcosahedronGeometry(radius, tier === 'thumb' ? 1 : 2);
+  const shellGeometry = new THREE.IcosahedronGeometry(radius, 2);
   const shellMaterial: OakMaterial = oakMaterial({
     color: opts.water,
     roughness: 0.15,
@@ -355,7 +348,6 @@ export function buildDiveBubble(opts: DiveBubbleOptions): DiveBubbleHandle {
     rimColor: opts.accent,
     rimStrength: 1.5,
     rimPower: 2.4,
-    tier,
     name: 'diveBubbleShell',
   });
   const shell = new THREE.Mesh(shellGeometry, shellMaterial);
@@ -363,7 +355,7 @@ export function buildDiveBubble(opts: DiveBubbleOptions): DiveBubbleHandle {
   shell.renderOrder = 3;
   decor.add(shell);
 
-  const innerGeometry = new THREE.IcosahedronGeometry(radius * 0.82, tier === 'thumb' ? 0 : 1);
+  const innerGeometry = new THREE.IcosahedronGeometry(radius * 0.82, 1);
   const innerMaterial: EmissiveMaterial = emissiveMaterial(opts.accent, 0.5, {
     transparent: true,
     opacity: 0.13,

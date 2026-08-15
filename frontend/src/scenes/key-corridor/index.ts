@@ -1,4 +1,5 @@
 
+import { KEYCORRIDOR_CARRY, KEYCORRIDOR_GATE, KEYCORRIDOR_GX, KEYCORRIDOR_GY, KEYCORRIDOR_KX, KEYCORRIDOR_KY, KEYCORRIDOR_X, KEYCORRIDOR_Y } from '@sim/envs/keycorridor';
 import { CelebrationPool, attachCelebrations, disposeCelebrations } from '@kit/celebrate';
 import { GroundTruthOverlay } from '@kit/debug';
 import { cellToWorldVec, clampCell, type GridSize } from '@kit/grid';
@@ -45,10 +46,6 @@ const CAM_TARGET_Y = 0.5;
 const CAM_TARGET_BIAS = 1.2;
 const CAM_TARGET_X = CAM_TARGET_BIAS * Math.sin(CAM_AZIMUTH);
 const CAM_TARGET_Z = CAM_TARGET_BIAS * Math.cos(CAM_AZIMUTH);
-const CAM_YAW_RANGE = 0.55;
-const CAM_DISTANCE_THUMB = 15.4;
-const CAM_AZIMUTH_THUMB = CAM_AZIMUTH;
-const CAM_POLAR_THUMB = CAM_POLAR;
 
 const BURST_SCALE = 0.8;
 const RIPPLE_SCALE = 0.46;
@@ -74,17 +71,6 @@ const GLOW_BREATH = 0.16;
 const GLOW_PROXIMITY = 0.44;
 const PROXIMITY_CELLS = 4;
 
-interface KeyCorridorLike {
-  x?: unknown;
-  y?: unknown;
-  gx?: unknown;
-  gy?: unknown;
-  kx?: unknown;
-  ky?: unknown;
-  hasKey?: unknown;
-  doorOpen?: unknown;
-}
-
 export interface GardenState {
   agent: GridCell;
   goal: GridCell;
@@ -103,22 +89,16 @@ export function makeGardenState(): GardenState {
   };
 }
 
-function num(v: unknown, fallback: number): number {
-  return typeof v === 'number' && Number.isFinite(v) ? v : fallback;
-}
-
 export function readState(state: FrameState, grid: GridSize, out: GardenState): GardenState {
-  const d = state.derived as KeyCorridorLike | null | undefined;
-  const has = d !== null && typeof d === 'object';
   const p = state.pose;
-  out.agent.x = Math.round(num(has ? d.x : undefined, p[0] ?? 0));
-  out.agent.y = Math.round(num(has ? d.y : undefined, p[1] ?? 0));
-  out.goal.x = Math.round(num(has ? d.gx : undefined, p[2] ?? 0));
-  out.goal.y = Math.round(num(has ? d.gy : undefined, p[3] ?? 0));
-  out.key.x = Math.round(num(has ? d.kx : undefined, p[4] ?? 0));
-  out.key.y = Math.round(num(has ? d.ky : undefined, p[5] ?? 0));
-  out.hasKey = has && typeof d.hasKey === 'boolean' ? d.hasKey : (p[6] ?? 0) !== 0;
-  out.doorOpen = has && typeof d.doorOpen === 'boolean' ? d.doorOpen : (p[7] ?? 0) !== 0;
+  out.agent.x = Math.round(p[KEYCORRIDOR_X] ?? 0);
+  out.agent.y = Math.round(p[KEYCORRIDOR_Y] ?? 0);
+  out.goal.x = Math.round(p[KEYCORRIDOR_GX] ?? 0);
+  out.goal.y = Math.round(p[KEYCORRIDOR_GY] ?? 0);
+  out.key.x = Math.round(p[KEYCORRIDOR_KX] ?? 0);
+  out.key.y = Math.round(p[KEYCORRIDOR_KY] ?? 0);
+  out.hasKey = (p[KEYCORRIDOR_CARRY] ?? 0) !== 0;
+  out.doorOpen = (p[KEYCORRIDOR_GATE] ?? 0) !== 0;
   clampCell(out.agent, grid);
   clampCell(out.goal, grid);
   clampCell(out.key, grid);
@@ -189,7 +169,6 @@ class IvyGateScene implements SceneModule {
     const wisp = new Wisp(
       {
         color: accent,
-        tier: ctx.tier,
         radius: 0.17,
         hop: { duration: HOP_SECONDS, height: HOP_HEIGHT },
         name: 'gardenWisp',
@@ -199,26 +178,25 @@ class IvyGateScene implements SceneModule {
     this.wisp = wisp;
     this.scene.add(wisp.group);
 
-    const gate = buildGate({ tier: ctx.tier, palette, skin, yaw: world.gateYaw, seed: ctx.seed, name: 'ivyGate' });
+    const gate = buildGate({ palette, skin, yaw: world.gateYaw, seed: ctx.seed, name: 'ivyGate' });
     this.gate = gate;
     this.scene.add(gate.group);
     cellToWorldVec(this.door.x, this.door.y, grid, gate.root.position);
 
-    const shrine = buildShrine({ tier: ctx.tier, palette, skin, name: 'goalShrine' });
+    const shrine = buildShrine({ palette, skin, name: 'goalShrine' });
     this.shrine = shrine;
     this.scene.add(shrine.group);
 
-    const seed = buildSeedBed({ tier: ctx.tier, palette, skin, name: 'seedBed' });
+    const seed = buildSeedBed({ palette, skin, name: 'seedBed' });
     this.seed = seed;
     this.scene.add(seed.group);
 
-    const thumb = ctx.tier === 'thumb';
     const rig = makeOrbitRig({
       canvas: ctx.canvas,
       target: [CAM_TARGET_X, CAM_TARGET_Y, CAM_TARGET_Z],
-      distance: thumb ? CAM_DISTANCE_THUMB : CAM_DISTANCE,
-      azimuth: thumb ? CAM_AZIMUTH_THUMB : CAM_AZIMUTH,
-      polar: thumb ? CAM_POLAR_THUMB : CAM_POLAR,
+      distance: CAM_DISTANCE,
+      azimuth: CAM_AZIMUTH,
+      polar: CAM_POLAR,
       fov: ctx.tokens.fovHero,
       near: 0.1,
       far: 900,
@@ -233,7 +211,6 @@ class IvyGateScene implements SceneModule {
     rig.snap();
 
     const pool = new CelebrationPool({
-      tier: ctx.tier,
       seed: ctx.seed,
       burstSize: BURST_PARTICLES,
       name: 'gardenCelebrations',

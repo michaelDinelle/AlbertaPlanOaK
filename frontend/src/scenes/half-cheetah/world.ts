@@ -12,7 +12,7 @@ import { hash1f, hash2f, rngAt, streamFor, type Rng } from '@kit/rng';
 import { skyFromPalette, type SkyHandle } from '@kit/sky';
 import { makeTerrain, type TerrainHandle } from '@kit/terrain';
 import { TOKENS, type Palette } from '@kit/tokens';
-import type { QualityTier, SceneContext } from '@kit/types';
+import type { SceneContext } from '@kit/types';
 import { grassClumpGeometry, rockGeometry } from '@kit/vegetation';
 
 
@@ -414,14 +414,12 @@ interface Timed {
 const BIRDS = 4;
 
 export function buildWorld(ctx: SceneContext, scene: THREE.Scene): WorldHandle {
-  const tier: QualityTier = ctx.tier;
   const palette: Palette = ctx.tokens.palettes.dusk;
   const group = new THREE.Group();
   group.name = 'goldHourSavanna';
   const owned: Disposable[] = [];
   const timed: Timed[] = [];
-  const shadows = tier !== 'thumb';
-  const veg = tier === 'thumb' ? 0.24 : tier === 'medium' ? 0.5 : 1;
+  const veg = 1;
 
   const cDust = blendTokens(blendTokens(palette.groundA, palette.hemiGround, 0.72), TOKEN_BLACK, 0.4);
   const cStraw = blendTokens(blendTokens(palette.groundB, palette.hemiGround, 0.56), TOKEN_BLACK, 0.2);
@@ -434,7 +432,7 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene): WorldHandle {
   const cLeafLow = blendTokens(TOKENS.palettes.noon.groundA, TOKEN_BLACK, 0.8);
   const cLeafHigh = blendTokens(TOKENS.palettes.noon.groundA, TOKEN_BLACK, 0.6);
 
-  const sky = skyFromPalette(palette, 'dusk', tier, {
+  const sky = skyFromPalette(palette, 'dusk', {
     sunDir: SUN_DIR,
     sunSize: 0.05,
     sunHdr: 4.6,
@@ -448,7 +446,7 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene): WorldHandle {
   owned.push(sky);
   timed.push({ setTime: (t) => sky.setTime(t) });
 
-  const rig = makeLightRig(palette, tier, {
+  const rig = makeLightRig(palette, {
     sunDir: sky.sunDirection,
     pointCount: 2,
     pointDistance: 16,
@@ -465,7 +463,6 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene): WorldHandle {
   const terrain = makeTerrain({
     size: [GROUND_W, GROUND_D],
     segments: [GROUND_SEG_X, GROUND_SEG_Z],
-    tier,
     seed: ctx.seed,
     heightFn: savannaHeight,
     jitter: 0,
@@ -488,7 +485,7 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene): WorldHandle {
       toonSoftness: 0.34,
       toonFloor: 0.26,
     },
-    receiveShadow: shadows,
+    receiveShadow: true,
     castShadow: false,
     name: 'savannaGround',
   });
@@ -507,7 +504,6 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene): WorldHandle {
     toonFloor: 0.3,
     wind: { amplitude: 0.05, frequency: 1.5, height: 0.42 },
     side: THREE.DoubleSide,
-    tier,
     name: 'savannaGrassMaterial',
   });
   const treeMaterial: OakMaterial = oakMaterial({
@@ -520,7 +516,6 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene): WorldHandle {
     toonSoftness: 0.3,
     toonFloor: 0.14,
     wind: { amplitude: 0.05, frequency: 0.62, height: 3.1 },
-    tier,
     name: 'savannaAcaciaMaterial',
   });
   const stoneMaterial: OakMaterial = oakMaterial({
@@ -532,7 +527,6 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene): WorldHandle {
     toonSteps: 3,
     toonSoftness: 0.3,
     toonFloor: 0.2,
-    tier,
     name: 'savannaStoneMaterial',
   });
   const animated: OakMaterial[] = [grassMaterial, treeMaterial];
@@ -545,7 +539,7 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene): WorldHandle {
     },
   });
 
-  const grassGeometry = grassClumpGeometry(tier === 'thumb' ? 2 : 5, 0.42, 0.05);
+  const grassGeometry = grassClumpGeometry(5, 0.42, 0.05);
   owned.push({ dispose: () => grassGeometry.dispose() });
   const grassPerTile = Math.max(8, Math.round(520 * veg));
   const grassBank = makeTileBank({
@@ -588,7 +582,7 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene): WorldHandle {
   group.add(grassBank.mesh);
   owned.push(grassBank);
 
-  const acaciaGeo = acaciaGeometry(tier === 'thumb' ? 0 : 1, cBark, cLeafLow, cLeafHigh);
+  const acaciaGeo = acaciaGeometry(1, cBark, cLeafLow, cLeafHigh);
   owned.push({ dispose: () => acaciaGeo.dispose() });
   const acaciaBank = makeTileBank({
     geometry: acaciaGeo,
@@ -614,7 +608,7 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene): WorldHandle {
   group.add(acaciaBank.mesh);
   owned.push(acaciaBank);
 
-  const rockGeo = rockGeometry(1.7, tier === 'hero' ? 1 : 0);
+  const rockGeo = rockGeometry(1.7, 1);
   owned.push({ dispose: () => rockGeo.dispose() });
   const rockBank = makeTileBank({
     geometry: rockGeo,
@@ -624,7 +618,7 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene): WorldHandle {
     perTile: 3,
     colorA: cRock,
     colorB: blendTokens(cRock, palette.sun, 0.3),
-    castShadow: shadows,
+    castShadow: true,
     seed: ctx.seed,
     name: 'savannaRocks',
     fill: (tile, rng, write) => {
@@ -651,7 +645,7 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene): WorldHandle {
   const CAIRNS = 9;
   const cairns = new THREE.InstancedMesh(cairnGeo, stoneMaterial, CAIRNS);
   cairns.name = 'savannaCairns';
-  cairns.castShadow = shadows;
+  cairns.castShadow = true;
   cairns.frustumCulled = false;
   cairns.instanceColor = new THREE.InstancedBufferAttribute(new Float32Array(CAIRNS * 3), 3);
   {
@@ -681,7 +675,6 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene): WorldHandle {
     toonFloor: 0.55,
     rimStrength: 0,
     side: THREE.DoubleSide,
-    tier,
     name: 'savannaRidgeMaterial',
   });
   const ridge = new THREE.Mesh(ridgeGeo, ridgeMaterial);
@@ -718,7 +711,6 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene): WorldHandle {
     toonFloor: 0.34,
     side: THREE.DoubleSide,
     wind: { amplitude: 0.02, frequency: 2.6, height: 0.6 },
-    tier,
     name: 'savannaMarkerMaterial',
   });
   animated.push(clothMaterial);
@@ -747,7 +739,6 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene): WorldHandle {
     size: [96, 54],
     color: blendTokens(palette.fog, palette.sun, 0.35),
     seed: ctx.seed,
-    tier,
     layers: 5,
     baseY: 0.25,
     spread: 3.4,
@@ -767,7 +758,6 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene): WorldHandle {
     count: 460,
     bounds: { y: 1.25, halfX: 8, halfY: 1.5, halfZ: 6 },
     seed: ctx.seed,
-    tier,
     color: blendTokens(palette.sun, TOKEN_WHITE, 0.3),
     size: 0.75,
     intensity: 0.9,
@@ -791,14 +781,13 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene): WorldHandle {
     toonFloor: 0.12,
     side: THREE.DoubleSide,
     fog: false,
-    tier,
     name: 'savannaBirdMaterial',
   });
   const birdGroup = new THREE.Group();
   birdGroup.name = 'savannaBirds';
   const birds: THREE.Mesh[] = [];
   const birdWings: THREE.Object3D[] = [];
-  if (tier !== 'thumb') {
+  {
     for (let i = 0; i < BIRDS; i++) {
       const pivot = new THREE.Object3D();
       pivot.name = `savannaBirdPivot${i}`;
@@ -856,7 +845,7 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene): WorldHandle {
     if (markers.instanceColor) markers.instanceColor.needsUpdate = true;
   };
 
-  const shadowQuantum = (2 * SHADOW_RADIUS * 4) / Math.max(256, tier === 'hero' ? 2048 : 1024);
+  const shadowQuantum = (2 * SHADOW_RADIUS * 4) / Math.max(256, 2048);
   const shadowOffsetX = -sky.sunDirection.x * 1.1;
   const shadowOffsetZ = -sky.sunDirection.z * 1.1;
 

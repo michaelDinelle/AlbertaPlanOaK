@@ -16,7 +16,7 @@ import { skyFromPalette, type SkyHandle } from '@kit/sky';
 import { makeTerrain, type TerrainHandle } from '@kit/terrain';
 import { valueNoise2 } from '@kit/textures';
 import { TOKENS, type Palette } from '@kit/tokens';
-import type { QualityTier, SceneContext } from '@kit/types';
+import type { SceneContext } from '@kit/types';
 import {
   coniferTreeGeometry,
   scatterGrass,
@@ -155,29 +155,6 @@ export const MOTH_SWING = 0.34;
 export const MOTH_HEIGHT = 0.6;
 export const MOTH_BOB = 0.12;
 
-export function compassOffset(
-  sx: number,
-  sy: number,
-  time: number,
-  phase: number,
-  out: THREE.Vector3,
-): boolean {
-  const dx = Math.sign(sx);
-  const dz = Math.sign(sy);
-  if (dx === 0 && dz === 0) {
-    out.set(0, MOTH_HEIGHT, 0);
-    return false;
-  }
-  const bearing = Math.atan2(dz, dx) + MOTH_SWING * Math.sin(time * 1.31 + phase * 1.7);
-  const radius = MOTH_RIM + MOTH_BREATH * Math.sin(time * 0.9 + phase);
-  out.set(
-    Math.cos(bearing) * radius,
-    MOTH_HEIGHT + MOTH_BOB * Math.sin(time * 2.1 + phase),
-    Math.sin(bearing) * radius,
-  );
-  return true;
-}
-
 export function revealVisibility(rx: number, rz: number, cx: number, cz: number, radius: number): number {
   const d = Math.hypot(cx - rx, cz - rz);
   if (d >= radius) return 0;
@@ -250,7 +227,6 @@ export function makeForestHeight(seed: number): (x: number, z: number) => number
 
 export interface SpruceRanksOptions {
   grid: GridGeometry;
-  tier: QualityTier;
   seed: number;
   color: THREE.ColorRepresentation;
   rimColor: THREE.ColorRepresentation;
@@ -270,11 +246,11 @@ export interface SpruceRanksHandle {
 }
 
 export function buildSpruceRanks(opts: SpruceRanksOptions): SpruceRanksHandle {
-  const { grid, tier, seed } = opts;
+  const { grid, seed } = opts;
   const group = new THREE.Group();
   group.name = opts.name ?? 'spruceRanks';
-  const detail = tier === 'thumb' ? 0 : tier === 'medium' ? 1 : 2;
-  const treesPerCell = tier === 'thumb' ? 1 : tier === 'medium' ? 2 : 3;
+  const detail = 2;
+  const treesPerCell = 3;
 
   const total = grid.w * grid.h;
   const index = new Int32Array(total).fill(-1);
@@ -340,13 +316,12 @@ export function buildSpruceRanks(opts: SpruceRanksOptions): SpruceRanksHandle {
     toonSoftness: 0.34,
     toonFloor: 0.22,
     wind: { amplitude: 0.024, frequency: 0.75, height: 1.8 },
-    tier,
     name: 'spruceRankMaterial',
   });
 
   const mesh = new THREE.InstancedMesh(geometry, material, instances);
   mesh.name = 'spruceRankMesh';
-  mesh.castShadow = tier !== 'thumb';
+  mesh.castShadow = true;
   mesh.receiveShadow = false;
   mesh.frustumCulled = false;
   mesh.instanceColor = new THREE.InstancedBufferAttribute(colorAttr, 3);
@@ -433,9 +408,8 @@ export function buildGapGates(
   gaps: readonly GridCell[],
   material: THREE.Material,
   skin: ForestSkin,
-  tier: QualityTier,
 ): { handles: GapGateHandle[]; geometry: THREE.BufferGeometry } {
-  const geometry = makeGateStonesGeometry(skin, tier);
+  const geometry = makeGateStonesGeometry(skin);
   const handles: GapGateHandle[] = [];
   const world: Vec3Tuple = [0, 0, 0];
   for (let i = 0; i < gaps.length; i++) {
@@ -452,8 +426,8 @@ export function buildGapGates(
     body.scale.setScalar(0.0001);
     const mesh = new THREE.Mesh(geometry, material);
     mesh.name = `gapGateStones${i}`;
-    mesh.castShadow = tier !== 'thumb';
-    mesh.receiveShadow = tier !== 'thumb';
+    mesh.castShadow = true;
+    mesh.receiveShadow = true;
     body.add(mesh);
     root.add(body);
     handles.push({ root, body, cell: { x: g.x, y: g.y } });
@@ -461,9 +435,9 @@ export function buildGapGates(
   return { handles, geometry };
 }
 
-export function makeGateStonesGeometry(skin: ForestSkin, tier: QualityTier): THREE.BufferGeometry {
+export function makeGateStonesGeometry(skin: ForestSkin): THREE.BufferGeometry {
   const parts: ColoredPart[] = [];
-  const segments = tier === 'thumb' ? 4 : tier === 'medium' ? 5 : 6;
+  const segments = 6;
   for (const sx of [-1, 1]) {
     const stone = new THREE.CylinderGeometry(0.1, 0.17, 0.74, segments, 1);
     stone.translate(0, 0.37, 0);
@@ -506,16 +480,14 @@ interface Timed {
 }
 
 export function buildWorld(ctx: SceneContext, scene: THREE.Scene, grid: GridGeometry): WorldHandle {
-  const tier: QualityTier = ctx.tier;
   const palette: Palette = ctx.tokens.palettes.dawn;
   const skin = forestSkin(palette, ctx.tokens);
-  const shadows = tier !== 'thumb';
   const group = new THREE.Group();
   group.name = 'fogboundForest';
   const owned: Disposable[] = [];
   const timed: Timed[] = [];
 
-  const sky = skyFromPalette(palette, 'dawn', tier, {
+  const sky = skyFromPalette(palette, 'dawn', {
     sunDir: SUN_DIR,
     sunSize: 0.045,
     sunHdr: 3.4,
@@ -534,7 +506,7 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene, grid: GridGeom
   owned.push(sky);
   timed.push({ setTime: (t) => sky.setTime(t) });
 
-  const rig = makeLightRig(palette, tier, {
+  const rig = makeLightRig(palette, {
     sunDir: sky.sunDirection,
     pointCount: 4,
     pointDistance: 5.5,
@@ -551,7 +523,6 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene, grid: GridGeom
   const terrain = makeTerrain({
     size: [TERRAIN_SIZE, TERRAIN_SIZE],
     segments: [TERRAIN_SEGMENTS, TERRAIN_SEGMENTS],
-    tier,
     seed: ctx.seed,
     heightFn: makeForestHeight(ctx.seed),
     jitter: 0,
@@ -573,7 +544,7 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene, grid: GridGeom
       toonSoftness: 0.32,
       toonFloor: 0.26,
     },
-    receiveShadow: shadows,
+    receiveShadow: true,
     castShadow: false,
     name: 'forestFloor',
   });
@@ -603,7 +574,6 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene, grid: GridGeom
       seed: ctx.seed,
       name: 'forestFloorCells',
     },
-    tier,
   );
   group.add(field.group);
   owned.push(field);
@@ -613,7 +583,6 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene, grid: GridGeom
 
   const spruce = buildSpruceRanks({
     grid,
-    tier,
     seed: ctx.seed,
     color: skin.spruce,
     rimColor: skin.haze,
@@ -632,12 +601,11 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene, grid: GridGeom
     toonSteps: 3,
     toonSoftness: 0.3,
     toonFloor: 0.24,
-    tier,
     name: 'forestStone',
   });
   owned.push({ dispose: () => stoneMaterial.dispose() });
   const gaps = resolveGaps(grid);
-  const gates = buildGapGates(grid, gaps, stoneMaterial, skin, tier);
+  const gates = buildGapGates(grid, gaps, stoneMaterial, skin);
   owned.push({ dispose: () => gates.geometry.dispose() });
   for (const gate of gates.handles) group.add(gate.root);
 
@@ -646,7 +614,6 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene, grid: GridGeom
     count: 5200,
     area: { halfX: MAZE_HALF + 2.5, halfZ: MAZE_HALF + 2.5 },
     seed: ctx.seed ^ 0x1f4d,
-    tier,
     exclude: clearCenters,
     color: skin.fern,
     scale: [0.11, 0.27],
@@ -666,7 +633,6 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene, grid: GridGeom
     count: 240,
     area: { halfX: MAZE_HALF + 6, halfZ: MAZE_HALF + 6 },
     seed: ctx.seed ^ 0x6b23,
-    tier,
     exclude: clearCenters,
     heightAt: (x, z) => terrain.sampleHeight(x, z),
     color: skin.stone,
@@ -687,7 +653,6 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene, grid: GridGeom
     count: 1400,
     area: { halfX: OUTER_FOREST_OUTER, halfZ: OUTER_FOREST_OUTER, innerRadius: OUTER_FOREST_INNER },
     seed: ctx.seed ^ 0x77c1,
-    tier,
     exclude: excludeDisc(OUTER_FOREST_INNER),
     heightAt: (x, z) => terrain.sampleHeight(x, z),
     maxSlope: 0.8,
@@ -710,7 +675,6 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene, grid: GridGeom
     size: [18, 18],
     color: blendTokens(skin.haze, palette.sun, 0.28),
     seed: ctx.seed ^ 0x2ab7,
-    tier,
     layers: 3,
     baseY: 0.06,
     spread: 0.5,
@@ -730,7 +694,6 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene, grid: GridGeom
     count: 340,
     bounds: { x: 0, y: 0.85, z: 0, halfX: MAZE_HALF + 2, halfY: 0.8, halfZ: MAZE_HALF + 2 },
     seed: ctx.seed ^ 0x4e11,
-    tier,
     color: skin.motes,
     size: 0.5,
     intensity: 1.3,
@@ -749,7 +712,6 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene, grid: GridGeom
     count: 150,
     bounds: { x: 0, y: 1.9, z: 0, halfX: MAZE_HALF + 2, halfY: 1.1, halfZ: MAZE_HALF + 2 },
     seed: ctx.seed ^ 0x7d05,
-    tier,
     color: blendTokens(skin.motes, skin.bloom, 0.3),
     size: 0.7,
     intensity: 1.5,

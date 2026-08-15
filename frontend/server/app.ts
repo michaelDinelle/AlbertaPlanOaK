@@ -10,7 +10,6 @@ export interface AppOptions {
   benchRoot?: string;
   distDir?: string;
   production?: boolean;
-  ttlMs?: number;
 }
 
 export interface App {
@@ -134,7 +133,7 @@ export function createApp(opts: AppOptions = {}): App {
   const distDir = resolve(opts.distDir ?? DIST_DIR);
   const production = opts.production ?? process.env['NODE_ENV'] === 'production';
 
-  const index = new RunIndex({ benchRoot, ...(opts.ttlMs !== undefined ? { ttlMs: opts.ttlMs } : {}) });
+  const index = new RunIndex({ benchRoot });
 
   async function handleApi(req: Request, url: URL, segs: string[]): Promise<Response> {
     const head = segs[1];
@@ -175,7 +174,7 @@ export function createApp(opts: AppOptions = {}): App {
       const recs = await index.recordingsFor(run.id);
       const rec = findRecording(recs, envId, Number(seedText));
       if (rec === undefined) return fail(404, 'unknown recording');
-      return serveStatic(req, rec.actionsPath, 'application/octet-stream');
+      return serveStatic(req, rec.posePath, 'application/octet-stream');
     }
 
     return fail(404, 'unknown endpoint');

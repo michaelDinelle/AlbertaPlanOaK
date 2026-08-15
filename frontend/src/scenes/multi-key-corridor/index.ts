@@ -1,4 +1,5 @@
 
+import { MKC_CARRY, MKC_GATES, MKC_GX, MKC_GY, MKC_X, MKC_Y, mkcBit } from '@sim/envs/multikeycorridor';
 import { CelebrationPool, attachCelebrations, disposeCelebrations } from '@kit/celebrate';
 import { GroundTruthOverlay } from '@kit/debug';
 import { cellToWorldVec, clampCell, type GridSize } from '@kit/grid';
@@ -24,12 +25,10 @@ import {
   buildMistGate,
   buildRiverGate,
   buildShrine,
-  buildThumbGateBank,
   type CarryRackHandle,
   type GateHandle,
   type KeyAltarHandle,
   type ShrineHandle,
-  type ThumbGateBank,
 } from './actors';
 import { manifest } from './manifest';
 import {
@@ -50,10 +49,6 @@ const CAM_AZIMUTH = CAMERA_AZIMUTH;
 const CAM_POLAR = 0.58;
 const CAM_DISTANCE = 15.5;
 const CAM_TARGET_Y = 0.35;
-const CAM_YAW_RANGE = 0.55;
-const CAM_DISTANCE_THUMB = 20.0;
-const CAM_AZIMUTH_THUMB = 0.12;
-const CAM_POLAR_THUMB = 0.56;
 
 const BURST_SCALE = 0.85;
 const RIPPLE_SCALE = 0.55;
@@ -113,51 +108,19 @@ function seedKeys(view: TempleView, grid: GridGeometry): void {
   }
 }
 
-interface MkcLike {
-  x?: unknown;
-  y?: unknown;
-  gx?: unknown;
-  gy?: unknown;
-  hasKey?: unknown;
-  doorOpen?: unknown;
-  keys?: unknown;
-}
-
-function bit(mask: number, i: number): boolean {
-  return ((mask >> i) & 1) !== 0;
-}
-
-function cellOf(value: unknown, fallback: number): number {
-  return typeof value === 'number' && Number.isFinite(value) ? Math.round(value) : fallback;
-}
-
 function readState(state: FrameState, grid: GridSize, out: TempleView): void {
-  const d = state.derived as MkcLike | null | undefined;
-  const has = d !== null && typeof d === 'object';
-  out.x = cellOf(has ? d.x : undefined, Math.round(state.pose[0] ?? 0));
-  out.y = cellOf(has ? d.y : undefined, Math.round(state.pose[1] ?? 0));
-  out.gx = cellOf(has ? d.gx : undefined, Math.round(state.pose[2] ?? 0));
-  out.gy = cellOf(has ? d.gy : undefined, Math.round(state.pose[3] ?? 0));
+  out.x = Math.round(state.pose[MKC_X] ?? 0);
+  out.y = Math.round(state.pose[MKC_Y] ?? 0);
+  out.gx = Math.round(state.pose[MKC_GX] ?? 0);
+  out.gy = Math.round(state.pose[MKC_GY] ?? 0);
 
-  const keyMask = Math.round(state.pose[4] ?? 0);
-  const doorMask = Math.round(state.pose[5] ?? 0);
-  const hasKey = has && Array.isArray(d.hasKey) ? (d.hasKey as unknown[]) : null;
-  const doorOpen = has && Array.isArray(d.doorOpen) ? (d.doorOpen as unknown[]) : null;
+  const keyMask = Math.round(state.pose[MKC_CARRY] ?? 0);
+  const doorMask = Math.round(state.pose[MKC_GATES] ?? 0);
   for (let j = 0; j < KEYS; j++) {
-    out.hasKey[j] = hasKey ? hasKey[j] === true : bit(keyMask, j);
-    out.doorOpen[j] = doorOpen ? doorOpen[j] === true : bit(doorMask, j);
+    out.hasKey[j] = mkcBit(keyMask, j);
+    out.doorOpen[j] = mkcBit(doorMask, j);
   }
-
-  const keys = has && Array.isArray(d.keys) ? (d.keys as unknown[]) : null;
-  for (let j = 0; j < KEYS; j++) {
-    const cell = out.keys[j] as GridCell;
-    const source = keys ? (keys[j] as { x?: unknown; y?: unknown } | undefined) : undefined;
-    if (source) {
-      cell.x = cellOf(source.x, cell.x);
-      cell.y = cellOf(source.y, cell.y);
-    }
-    clampCell(cell, grid);
-  }
+  for (let j = 0; j < KEYS; j++) clampCell(out.keys[j] as GridCell, grid);
 
   out.x = clampInt(out.x, grid.w);
   out.y = clampInt(out.y, grid.h);
@@ -170,10 +133,8 @@ function clampInt(v: number, extent: number): number {
 }
 
 export function readGoalCell(state: FrameState, grid: GridSize, out: GridCell): void {
-  const d = state.derived as MkcLike | null | undefined;
-  const has = d !== null && typeof d === 'object';
-  out.x = cellOf(has ? d.gx : undefined, Math.round(state.pose[2] ?? 0));
-  out.y = cellOf(has ? d.gy : undefined, Math.round(state.pose[3] ?? 0));
+  out.x = Math.round(state.pose[MKC_GX] ?? 0);
+  out.y = Math.round(state.pose[MKC_GY] ?? 0);
   clampCell(out, grid);
 }
 
@@ -186,7 +147,6 @@ class TempleOfThreeGatesScene implements SceneModule {
   private world: WorldHandle | null = null;
   private wisp: Wisp | null = null;
   private gates: GateHandle[] = [];
-  private gateBank: ThumbGateBank | null = null;
   private altars: KeyAltarHandle[] = [];
   private rack: CarryRackHandle | null = null;
   private shrine: ShrineHandle | null = null;
@@ -237,25 +197,10 @@ class TempleOfThreeGatesScene implements SceneModule {
 
     const gateCount = Math.min(doors.length, 3);
     const builders = [buildBrambleGate, buildRiverGate, buildMistGate];
-    const bank =
-      ctx.tier === 'thumb'
-        ? buildThumbGateBank({
-            tier: ctx.tier,
-            skin,
-            facesX: doors.slice(0, gateCount).map((cell) => gateFacesX(grid, cell)),
-            count: gateCount,
-            name: 'thumbGateBank',
-          })
-        : null;
-    this.gateBank = bank;
-    if (bank) this.scene.add(bank.group);
     for (let j = 0; j < gateCount; j++) {
       const cell = doors[j] as GridCell;
       const build = builders[j] as (typeof builders)[number];
-      const gate =
-        bank?.gates[j] ??
-        build({
-          tier: ctx.tier,
+      const gate = build({
           palette,
           skin,
           facesX: gateFacesX(grid, cell),
@@ -270,7 +215,6 @@ class TempleOfThreeGatesScene implements SceneModule {
 
     for (let j = 0; j < KEYS; j++) {
       const altar = buildKeyAltar({
-        tier: ctx.tier,
         palette,
         skin,
         index: j,
@@ -283,7 +227,7 @@ class TempleOfThreeGatesScene implements SceneModule {
       this.altars.push(altar);
     }
 
-    const shrine = buildShrine({ tier: ctx.tier, palette, skin, stone: world.stoneMaterial });
+    const shrine = buildShrine({ palette, skin, stone: world.stoneMaterial });
     this.shrine = shrine;
     cellToWorldVec(openingGoal.x, openingGoal.y, grid, shrine.root.position);
     this.scene.add(shrine.group);
@@ -291,7 +235,6 @@ class TempleOfThreeGatesScene implements SceneModule {
     const wisp = new Wisp(
       {
         color: accent,
-        tier: ctx.tier,
         radius: 0.26,
         hop: { duration: HOP_SECONDS, height: HOP_HEIGHT },
         name: 'templeWisp',
@@ -301,7 +244,7 @@ class TempleOfThreeGatesScene implements SceneModule {
     this.wisp = wisp;
     this.scene.add(wisp.group);
 
-    const rack = buildCarryRack(skin, ctx.tier);
+    const rack = buildCarryRack(skin);
     this.rack = rack;
     wisp.carry(rack.group);
 
@@ -319,13 +262,12 @@ class TempleOfThreeGatesScene implements SceneModule {
       sanctumLight.intensity = 0.85;
     }
 
-    const thumb = ctx.tier === 'thumb';
     const rig = makeOrbitRig({
       canvas: ctx.canvas,
       target: [0, CAM_TARGET_Y, 0],
-      distance: thumb ? CAM_DISTANCE_THUMB : CAM_DISTANCE,
-      azimuth: thumb ? CAM_AZIMUTH_THUMB : CAM_AZIMUTH,
-      polar: thumb ? CAM_POLAR_THUMB : CAM_POLAR,
+      distance: CAM_DISTANCE,
+      azimuth: CAM_AZIMUTH,
+      polar: CAM_POLAR,
       fov: ctx.tokens.fovHero,
       near: 0.1,
       far: 900,
@@ -340,7 +282,6 @@ class TempleOfThreeGatesScene implements SceneModule {
     rig.snap();
 
     const pool = new CelebrationPool({
-      tier: ctx.tier,
       seed: ctx.seed,
       burstSize: BURST_PARTICLES,
       name: 'templeCelebrations',
@@ -562,8 +503,6 @@ class TempleOfThreeGatesScene implements SceneModule {
     this.shrine = null;
     for (const gate of this.gates) gate.dispose();
     this.gates = [];
-    this.gateBank?.dispose();
-    this.gateBank = null;
     for (const altar of this.altars) altar.dispose();
     this.altars = [];
     this.wisp?.carry(null);

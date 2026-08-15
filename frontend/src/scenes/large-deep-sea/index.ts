@@ -1,4 +1,5 @@
 
+import { LARGE_DEEPSEA_ACTION, LARGE_DEEPSEA_COL, LARGE_DEEPSEA_GX, LARGE_DEEPSEA_GY, LARGE_DEEPSEA_ROW } from '@sim/envs/largedeepsea';
 import { CelebrationPool, attachCelebrations, disposeCelebrations } from '@kit/celebrate';
 import { GroundTruthOverlay } from '@kit/debug';
 import { clampCell, type GridSize } from '@kit/grid';
@@ -34,9 +35,6 @@ const CAM_AZIMUTH = CAMERA_AZIMUTH;
 const CAM_POLAR = 0.74;
 const CAM_DISTANCE = 24;
 const CAM_TARGET: readonly [number, number, number] = [-1.2, -1.75, 1.1];
-const CAM_YAW_RANGE = 0.55;
-const CAM_DISTANCE_THUMB = 28;
-const CAM_POLAR_THUMB = 0.72;
 
 const BURST_SCALE = 0.8;
 const RIPPLE_SCALE = 0.55;
@@ -57,39 +55,22 @@ const SILT_RATE = 9;
 const SILT_IDLE = 0.04;
 const SILT_KICK = 0.85;
 
-interface LargeDeepSeaLike {
-  r?: unknown;
-  c?: unknown;
-  lastA?: unknown;
-}
-
 function readCells(
   state: FrameState,
   grid: GridGeometry,
   agent: GridCell,
   goal: GridCell,
 ): void {
-  const d = state.derived as LargeDeepSeaLike | null | undefined;
-  const has = d !== null && typeof d === 'object';
-  const r = has && typeof d.r === 'number' ? d.r : (state.pose[0] ?? 0);
-  const c = has && typeof d.c === 'number' ? d.c : (state.pose[1] ?? 0);
-  const gx = state.pose[2];
-  const gy = state.pose[3];
-  agent.x = Number.isFinite(c) ? Math.round(c) : 0;
-  agent.y = Number.isFinite(r) ? Math.round(r) : 0;
-  goal.x = typeof gx === 'number' && Number.isFinite(gx) ? Math.round(gx) : (grid.goal?.x ?? grid.w - 1);
-  goal.y = typeof gy === 'number' && Number.isFinite(gy) ? Math.round(gy) : (grid.goal?.y ?? grid.h - 1);
+  agent.x = Math.round(state.pose[LARGE_DEEPSEA_COL] ?? 0);
+  agent.y = Math.round(state.pose[LARGE_DEEPSEA_ROW] ?? 0);
+  goal.x = Math.round(state.pose[LARGE_DEEPSEA_GX] ?? 0);
+  goal.y = Math.round(state.pose[LARGE_DEEPSEA_GY] ?? 0);
   clampCell(agent, grid);
   clampCell(goal, grid);
 }
 
 export function readRightMove(state: FrameState): number {
-  const d = state.derived as LargeDeepSeaLike | null | undefined;
-  if (d !== null && typeof d === 'object' && typeof d.lastA === 'number' && Number.isFinite(d.lastA)) {
-    return Math.trunc(d.lastA) & 1;
-  }
-  const a = state.ctrl[0];
-  return typeof a === 'number' && Number.isFinite(a) ? Math.trunc(a) & 1 : 0;
+  return Math.trunc(state.pose[LARGE_DEEPSEA_ACTION] ?? 0) & 1;
 }
 
 export function isDiveStep(fromX: number, fromY: number, toX: number, toY: number): boolean {
@@ -158,7 +139,6 @@ class TheAbyssScene implements SceneModule {
     const wisp = new Wisp(
       {
         color: accent,
-        tier: ctx.tier,
         radius: 0.19,
         hop: { duration: HOP_SECONDS, height: HOP_HEIGHT },
         name: 'abyssWisp',
@@ -170,7 +150,6 @@ class TheAbyssScene implements SceneModule {
     this.scene.add(this.diver);
 
     const bubble = buildDiveBubble({
-      tier: ctx.tier,
       accent,
       water: blendTokens(water.groundA, ctx.tokens.palettes.abyss.skyTop, 0.5),
       name: 'diveBubble',
@@ -178,7 +157,7 @@ class TheAbyssScene implements SceneModule {
     this.bubble = bubble;
     this.scene.add(bubble.group);
 
-    const wreck = buildWreck({ tier: ctx.tier, skin, accent, name: 'sunkenWreck' });
+    const wreck = buildWreck({ skin, accent, name: 'sunkenWreck' });
     this.wreck = wreck;
     this.scene.add(wreck.group);
 
@@ -188,7 +167,6 @@ class TheAbyssScene implements SceneModule {
       const site = sites[i];
       if (!site) continue;
       const angler = buildAngler({
-        tier: ctx.tier,
         skin,
         lure: lureColors[i] ?? accent,
         hover: site.hover,
@@ -203,13 +181,12 @@ class TheAbyssScene implements SceneModule {
       if (light) light.color.set(lureColors[i] ?? accent);
     }
 
-    const thumb = ctx.tier === 'thumb';
     const rig = makeOrbitRig({
       canvas: ctx.canvas,
       target: [CAM_TARGET[0], CAM_TARGET[1], CAM_TARGET[2]],
-      distance: thumb ? CAM_DISTANCE_THUMB : CAM_DISTANCE,
+      distance: CAM_DISTANCE,
       azimuth: CAM_AZIMUTH,
-      polar: thumb ? CAM_POLAR_THUMB : CAM_POLAR,
+      polar: CAM_POLAR,
       fov: ctx.tokens.fovHero,
       near: 0.1,
       far: 900,
@@ -224,7 +201,6 @@ class TheAbyssScene implements SceneModule {
     rig.snap();
 
     const pool = new CelebrationPool({
-      tier: ctx.tier,
       seed: ctx.seed,
       burstSize: BURST_PARTICLES,
       name: 'abyssCelebrations',
