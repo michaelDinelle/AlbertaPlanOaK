@@ -1,6 +1,6 @@
 
 import { philoxDraw, STREAM_GRIDWORLD, uniformIndex } from '../philox';
-import { CTRL_LEN, OFF_CTRL, OFF_DONE, OFF_POSE, POSE_LEN } from '../record';
+import { CTRL_LEN, OFF_DONE, OFF_POSE, POSE_LEN, effortView } from '../record';
 import type { EnvDecoder, EnvFrame, EnvGeometry, GridCell, SimEvent } from '../types';
 import { NO_EVENTS } from '../events';
 
@@ -217,7 +217,7 @@ export const multiKeyCorridorDecoder: EnvDecoder<MultiKeyCorridorState, MultiKey
     prev: EnvFrame<MultiKeyCorridorState>,
   ): EnvFrame<MultiKeyCorridorState> {
     const pose = raw16.subarray(OFF_POSE, OFF_POSE + POSE_LEN);
-    const ctrl = raw16.subarray(OFF_CTRL, OFF_CTRL + CTRL_LEN);
+    const ctrl = effortView(raw16, 6);
     const s = toReplay(prev.state);
     mkcStep(st.seed, s, Math.trunc(ctrl[0] ?? 0));
     const agrees =

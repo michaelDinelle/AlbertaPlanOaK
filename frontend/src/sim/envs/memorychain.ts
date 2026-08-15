@@ -1,5 +1,5 @@
 
-import { CTRL_LEN, OFF_CTRL, OFF_DONE, OFF_POSE, POSE_LEN } from '../record';
+import { CTRL_LEN, OFF_DONE, OFF_POSE, POSE_LEN, effortView } from '../record';
 import type { EnvDecoder, EnvFrame, EnvGeometry, SimEvent } from '../types';
 import { NO_EVENTS } from '../events';
 
@@ -50,7 +50,7 @@ export const memoryChainDecoder: EnvDecoder<MemoryChainState, MemoryChainStatic>
 
   decodeFrame(i: number, raw16: Float32Array): EnvFrame<MemoryChainState> {
     const pose = raw16.subarray(OFF_POSE, OFF_POSE + POSE_LEN);
-    const ctrl = raw16.subarray(OFF_CTRL, OFF_CTRL + CTRL_LEN);
+    const ctrl = effortView(raw16, 3);
     return {
       step: i,
       ctrl,

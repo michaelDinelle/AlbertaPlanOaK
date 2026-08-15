@@ -1,6 +1,7 @@
 
 import type { EnvDecoder, EnvFrame, EnvGeometry, SimEvent } from '../types';
 import { NO_EVENTS } from '../events';
+import { OFF_POSE, effortView, POSE_LEN, OFF_DONE } from '../record';
 
 
 export const AB_DT = 0.2;
@@ -112,13 +113,13 @@ export const acrobotDecoder: EnvDecoder<AcrobotState, AcrobotStatic> = {
   },
 
   decodeFrame(i: number, raw16: Float32Array): EnvFrame<AcrobotState> {
-    const pose = raw16.subarray(7, 16);
+    const pose = raw16.subarray(OFF_POSE, OFF_POSE + POSE_LEN);
     return {
       step: i,
-      ctrl: raw16.subarray(0, 6),
-      done: raw16[6] ?? 0,
+      ctrl: effortView(raw16, 4),
+      done: raw16[OFF_DONE] ?? 0,
       pose,
-      state: makeState(pose, raw16[0] ?? 0, true),
+      state: makeState(pose, raw16[OFF_POSE + 4] ?? 0, true),
     };
   },
 

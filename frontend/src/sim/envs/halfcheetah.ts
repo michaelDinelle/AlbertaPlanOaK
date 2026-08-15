@@ -3,6 +3,7 @@ import { cheetahGeometry, ROOT_Z0 } from '../fk/cheetah';
 import { STREAM_RESET, boxMuller, philoxWords, uniform } from '../philox';
 import type { EnvDecoder, EnvFrame, EnvGeometry, SimEvent } from '../types';
 import { NO_EVENTS } from '../events';
+import { OFF_POSE, effortView, POSE_LEN, OFF_DONE } from '../record';
 
 
 export const HC_TIMESTEP = 0.01;
@@ -99,13 +100,13 @@ export const halfCheetahDecoder: EnvDecoder<CheetahState, CheetahStatic> = {
     _st: CheetahStatic,
     prev: EnvFrame<CheetahState>,
   ): EnvFrame<CheetahState> {
-    const pose = raw16.subarray(7, 16);
+    const pose = raw16.subarray(OFF_POSE, OFF_POSE + POSE_LEN);
     const dx = (pose[0] ?? 0) - (prev.pose[0] ?? 0);
     const velX = Math.abs(dx) > CHEETAH_TELEPORT_DX ? 0 : dx / CHEETAH_DT;
     return {
       step: i,
-      ctrl: raw16.subarray(0, 6),
-      done: raw16[6] ?? 0,
+      ctrl: effortView(raw16, -1),
+      done: raw16[OFF_DONE] ?? 0,
       pose,
       state: makeState(pose, velX),
     };

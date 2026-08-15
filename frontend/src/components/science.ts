@@ -1,4 +1,3 @@
-import type { ViewMount } from '../router';
 import type { RunDetail } from '@shared/types';
 import type { Tape } from '../tape';
 import {
@@ -19,14 +18,8 @@ import {
   survivalSeries,
   throughputSeries,
 } from '../state';
-import { accentCss, el, emptyState, errorState, eyebrow, spinner } from '../components/table';
-import {
-  columns,
-  populationChart,
-  steppedLine,
-  timeSeries,
-  type ChartHandle,
-} from '../components/chart';
+import { accentCss, el, emptyState, errorState, eyebrow, spinner } from './table';
+import { columns, populationChart, steppedLine, timeSeries, type ChartHandle } from './chart';
 
 interface Disposable {
   destroy(): void;
@@ -35,13 +28,6 @@ interface Disposable {
 export const LANE_CAP = 140;
 export const COLUMN_CAP = 256;
 export const CHART_BINS = 240;
-
-export const mount: ViewMount = (el_, params) => {
-  const id = params['id'];
-  window.location.replace(id ? `#/?run=${encodeURIComponent(id)}` : '#/');
-  void el_;
-  return { destroy() {} };
-};
 
 interface LaneSeries {
   seed: number;

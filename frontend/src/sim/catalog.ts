@@ -4,13 +4,11 @@ export const SLOT_NAMES = [
 
 export type NamedSlot = (typeof SLOT_NAMES)[number] | `q${number}`;
 
-export type RecordEnc = 'u8' | 'i16' | 'dx32';
-
 export interface RecordFieldSpec {
   slot: number;
-  enc: RecordEnc;
   scale: number;
   wrap: boolean;
+  anchor: boolean;
 }
 
 export interface EnvEntry {
@@ -22,7 +20,7 @@ export interface EnvEntry {
   gridW: number;
   gridH: number;
   slots: NamedSlot[];
-  ctrlBox: number;
+  category: 'grid' | 'classic' | 'cheetah';
   fields: RecordFieldSpec[];
   slotAt: Partial<Record<NamedSlot, number>>;
   isGrid: boolean;
@@ -66,16 +64,20 @@ function readSlot(v: unknown, what: string): NamedSlot {
 
 function readField(v: unknown, what: string): RecordFieldSpec {
   const o = v as Record<string, unknown>;
-  const enc = requireString(o?.['enc'], `${what}.enc`);
-  if (enc !== 'u8' && enc !== 'i16' && enc !== 'dx32') {
-    throw new CatalogError(`${what}.enc is ${JSON.stringify(enc)}`);
-  }
   return {
-    slot: requireNumber(o['slot'], `${what}.slot`),
-    enc,
+    slot: requireNumber(o?.['slot'], `${what}.slot`),
     scale: requireNumber(o['scale'], `${what}.scale`),
     wrap: o['wrap'] === true,
+    anchor: o['anchor'] === true,
   };
+}
+
+function readCategory(v: unknown, what: string): 'grid' | 'classic' | 'cheetah' {
+  const s = requireString(v, what);
+  if (s !== 'grid' && s !== 'classic' && s !== 'cheetah') {
+    throw new CatalogError(`${what} is ${JSON.stringify(s)}`);
+  }
+  return s;
 }
 
 function readEntry(v: unknown, at: number): EnvEntry {
@@ -105,7 +107,7 @@ function readEntry(v: unknown, at: number): EnvEntry {
     gridW,
     gridH,
     slots,
-    ctrlBox: requireNumber(o['ctrlBox'], `${what}.ctrlBox`),
+    category: readCategory(o['category'], `${what}.category`),
     fields: requireArray(o['fields'], `${what}.fields`).map((f, i) =>
       readField(f, `${what}.fields[${i}]`),
     ),

@@ -41,7 +41,7 @@ def read_tape(path: Path) -> dict:
     wall = head[:, 8:12].copy().view(np.float32).ravel().astype(np.float64)
     mats = np.ascontiguousarray(raw[:, 12:]).view(np.float32).reshape(n, n_f, lanes)
     return {"fields": fields, "lanes": lanes, "ends": starts + counts,
-            "wall": wall, "data": mats}
+            "wall": wall, "data": mats, "bits": mats.view(np.uint32)}
 
 
 def load(root: Path) -> dict:
@@ -50,8 +50,9 @@ def load(root: Path) -> dict:
     if not tp.exists():
         raise SystemExit(f"{root}: no tape.bin")
     tape = read_tape(tp)
-    ds = tape["data"][-1, tape["fields"].index("deathStep"), :]
-    deaths = {int(l): int(ds[l]) for l in np.nonzero(np.isfinite(ds))[0]}
+    di = tape["fields"].index("deathStep")
+    ds, db = tape["data"][-1, di, :], tape["bits"][-1, di, :]
+    deaths = {int(l): int(db[l]) for l in np.nonzero(np.isfinite(ds))[0]}
     return {"meta": meta, "tape": tape, "deaths": deaths,
             "seeds": meta["seeds"], "root": root}
 

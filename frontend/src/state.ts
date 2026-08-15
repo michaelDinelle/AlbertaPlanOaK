@@ -1,5 +1,5 @@
 import { api } from './api';
-import { fetchTape, fieldIndex, tapeValue, type Tape } from './tape';
+import { fetchTape, fieldIndex, tapeStep, tapeValue, type Tape } from './tape';
 import type { RunDetail, RunIndexEntry, RunMeta } from '@shared/types';
 import { DEATH_DETECTORS } from '@shared/types';
 import { ENVS, ENV_IDS, isEnvId, type EnvId } from '@shared/envs';
@@ -251,7 +251,7 @@ export interface LaneDeath {
 
 export function laneDeath(tape: Tape, lane: number): LaneDeath | null {
   if (tape.rows === 0) return null;
-  const step = tapeValue(tape, fieldIndex(tape, 'deathStep'), tape.rows - 1, lane);
+  const step = tapeStep(tape, fieldIndex(tape, 'deathStep'), tape.rows - 1, lane);
   if (!Number.isFinite(step)) return null;
   const code = tapeValue(tape, fieldIndex(tape, 'deathDetector'), tape.rows - 1, lane);
   return { step, detector: DEATH_DETECTORS[code] ?? 'envError' };

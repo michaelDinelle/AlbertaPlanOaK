@@ -4,26 +4,23 @@ import { ENV_IDS } from '@shared/envs';
 import type { EnvId } from '@shared/envs';
 import type { RawRecording } from './types';
 
-export const RECORD_FLOATS = 16;
-export const RECORD_BYTES = RECORD_FLOATS * 4;
-export const OFF_CTRL = 0;
-export const CTRL_LEN = 6;
-export const OFF_DONE = 6;
-export const OFF_POSE = 7;
 export const POSE_LEN = 9;
+export const OFF_DONE = 0;
+export const OFF_POSE = 1;
+export const RECORD_FLOATS = 1 + POSE_LEN;
+export const CTRL_LEN = 1;
+const NO_EFFORT = new Float32Array(CTRL_LEN);
+
+export function effortView(row: Float32Array, slot: number): Float32Array {
+  return slot < 0 ? NO_EFFORT : row.subarray(OFF_POSE + slot, OFF_POSE + slot + 1);
+}
+export const RECORD_BYTES = RECORD_FLOATS * 4;
 
 export const FILE_MAGIC = 0x524b414f;
 export { GEOMETRY_BYTES };
 export const CHUNK_MAGIC = 0x524b4843;
-export const FILE_HEADER_BYTES = 12 + GEOMETRY_BYTES;
+export const FILE_HEADER_BYTES = 8 + GEOMETRY_BYTES;
 export const CHUNK_HEADER_BYTES = 24;
-export const ESCAPE_ENTRY_BYTES = 4 + RECORD_FLOATS * 4;
-
-const LITTLE_ENDIAN = (() => {
-  const probe = new Uint8Array(4);
-  new Uint32Array(probe.buffer)[0] = 1;
-  return probe[0] === 1;
-})();
 
 export class RecordParseError extends Error {
   constructor(message: string) {
@@ -32,49 +29,28 @@ export class RecordParseError extends Error {
   }
 }
 
-export type PoseEncoding = 'u8' | 'i16' | 'dx32';
-
 export interface PoseFieldSpec {
   readonly idx: number;
-  readonly enc: PoseEncoding;
-  readonly scale?: number;
+  readonly scale: number;
   readonly wrap?: boolean;
+  readonly anchor?: boolean;
 }
-
-export interface CtrlBoxSpec {
-  readonly kind: 'u8box';
-  readonly n: number;
-}
-
-export type CtrlSpec = 'index' | CtrlBoxSpec;
 
 export interface CodecDescriptor {
   readonly category: 'grid' | 'classic' | 'cheetah';
-  readonly ctrl: CtrlSpec;
   readonly poseFields: readonly PoseFieldSpec[];
-  readonly poseConst?: Readonly<Record<string, number>>;
 }
-
-const u8 = (idx: number): PoseFieldSpec => ({ idx, enc: 'u8' });
-const u8Range = (from: number, to: number): PoseFieldSpec[] => {
-  const out: PoseFieldSpec[] = [];
-  for (let i = from; i <= to; i++) out.push(u8(i));
-  return out;
-};
-const i16 = (idx: number, scale: number): PoseFieldSpec => ({ idx, enc: 'i16', scale });
-const i16w = (idx: number, scale: number): PoseFieldSpec => ({ idx, enc: 'i16', scale, wrap: true });
 
 export const RECORD_ENV_KINDS: readonly EnvId[] = ENV_IDS;
 
 export function codecFromEntry(entry: EnvEntry): CodecDescriptor {
   return {
-    category: entry.gridW > 0 ? 'grid' : entry.slots[0] === 'q0' && entry.ctrlBox === 6 ? 'cheetah' : 'classic',
-    ctrl: entry.ctrlBox > 0 ? { kind: 'u8box', n: entry.ctrlBox } : 'index',
+    category: entry.category,
     poseFields: entry.fields.map((f) => ({
       idx: f.slot,
-      enc: f.enc === 'u8' ? 'u8' : f.enc === 'i16' ? 'i16' : 'dx32',
-      ...(f.enc === 'u8' ? {} : { scale: f.scale }),
+      scale: f.scale,
       ...(f.wrap ? { wrap: true } : {}),
+      ...(f.anchor ? { anchor: true } : {}),
     })),
   };
 }
@@ -88,15 +64,6 @@ const TWO_PI = Math.PI * 2;
 
 export function wrapAngle(v: number): number {
   return v - TWO_PI * Math.floor((v + Math.PI) / TWO_PI);
-}
-
-export function quantizeCtrlU8(v: number): number {
-  const clamped = v < -1 ? -1 : v > 1 ? 1 : v;
-  return roundHalfAwayFromZero((clamped + 1) * 127.5);
-}
-
-export function dequantizeCtrlU8(q: number): number {
-  return q / 127.5 - 1;
 }
 
 export function roundHalfAwayFromZero(v: number): number {
@@ -132,7 +99,6 @@ function asWindow(buf: ArrayBuffer | ArrayBufferView): Uint8Array {
 export interface RecordHeader {
   envKind: number;
   envId: EnvId;
-  steps: number;
 }
 
 export function readRecordHeader(buf: ArrayBuffer | ArrayBufferView): RecordHeader {
@@ -154,7 +120,7 @@ export function readRecordHeader(buf: ArrayBuffer | ArrayBufferView): RecordHead
   if (envId === undefined) {
     throw new RecordParseError(`recording envKind ${envKind} is not a known env`);
   }
-  return { envKind, envId, steps: dv.getUint32(8, true) };
+  return { envKind, envId };
 }
 
 export interface RecordChunk {
@@ -260,12 +226,11 @@ export function decodeChunkPayload(
   base: number,
 ): void {
   const limit = payload.byteLength;
-  const dv = new DataView(payload.buffer, payload.byteOffset, payload.byteLength);
   let off = 0;
   const take = (n: number, what: string): number => {
     if (off + n > limit) {
       throw new RecordParseError(
-        `chunk payload is ${limit} bytes — too short for ${what} at offset ${off} (+${n})`,
+        `chunk payload is ${limit} bytes \u2014 too short for ${what} at offset ${off} (+${n})`,
       );
     }
     const at = off;
@@ -273,106 +238,54 @@ export function decodeChunkPayload(
     return at;
   };
 
-  const hdrOff = take(stepCount, 'the hdr column');
-
-  const ctrlCount = desc.ctrl === 'index' ? 0 : desc.ctrl.n;
-  const ctrlOff = take(ctrlCount * stepCount, 'the ctrl columns');
-
-  let chunkBaseX = 0;
-  if (desc.category === 'cheetah') {
-    chunkBaseX = dv.getFloat64(take(8, 'chunkBaseX'), true);
-  }
-
-  const poseOff: number[] = [];
-  for (const field of desc.poseFields) {
-    const width = field.enc === 'u8' ? 1 : field.enc === 'i16' ? 2 : 4;
-    poseOff.push(take(width * stepCount, `pose column ${field.idx}`));
-  }
-
-  const escapeCount = dv.getUint32(take(4, 'the escape count'), true);
-  const escapeOff = take(escapeCount * ESCAPE_ENTRY_BYTES, 'the escape table');
+  const doneAt = take((stepCount + 7) >> 3, 'the done bitstream');
 
   const floats = stepCount * RECORD_FLOATS;
   out.fill(0, base, base + floats);
-
-  const indexCtrl = desc.ctrl === 'index';
-  let hdrEscapes = 0;
   for (let i = 0; i < stepCount; i++) {
-    const h = payload[hdrOff + i] ?? 0;
-    const row = base + i * RECORD_FLOATS;
-    if ((h & 0x10) !== 0) out[row + 6] = 1;
-    if ((h & 0x20) !== 0) hdrEscapes++;
-    if (indexCtrl) out[row] = h & 0x0f;
-  }
-  if (hdrEscapes !== escapeCount) {
-    throw new RecordParseError(
-      `chunk escape bits (${hdrEscapes}) disagree with the escape table (${escapeCount})`,
-    );
-  }
-
-  for (let c = 0; c < ctrlCount; c++) {
-    const col = ctrlOff + c * stepCount;
-    for (let i = 0; i < stepCount; i++) {
-      out[base + i * RECORD_FLOATS + c] = dequantizeCtrlU8(payload[col + i] ?? 0);
-    }
-  }
-
-  if (desc.poseConst !== undefined) {
-    for (const [key, value] of Object.entries(desc.poseConst)) {
-      const idx = Number(key);
-      for (let i = 0; i < stepCount; i++) out[base + i * RECORD_FLOATS + 7 + idx] = value;
-    }
+    const bit = (payload[doneAt + (i >> 3)] ?? 0) >> (i & 7);
+    if ((bit & 1) !== 0) out[base + i * RECORD_FLOATS + OFF_DONE] = 1;
   }
 
   for (let k = 0; k < desc.poseFields.length; k++) {
     const field = desc.poseFields[k];
     if (field === undefined) continue;
-    const col = poseOff[k] ?? 0;
-    const slot = 7 + field.idx;
-    if (field.enc === 'u8') {
-      for (let i = 0; i < stepCount; i++) {
-        out[base + i * RECORD_FLOATS + slot] = payload[col + i] ?? 0;
-      }
-    } else if (field.enc === 'i16') {
-      const scale = field.scale ?? 1;
-      let q = 0;
-      for (let i = 0; i < stepCount; i++) {
-        const d = dv.getInt16(col + i * 2, true);
-        q = i === 0 ? d : ((q + d + 0x8000) & 0xffff) - 0x8000;
-        out[base + i * RECORD_FLOATS + slot] = q * scale;
-      }
-    } else {
-      const scale = field.scale ?? 1;
-      let recon = chunkBaseX;
-      for (let i = 0; i < stepCount; i++) {
-        recon += dv.getInt32(col + i * 4, true) * scale;
-        out[base + i * RECORD_FLOATS + slot] = recon;
-      }
+    const slot = OFF_POSE + field.idx;
+    let cursor = off;
+    let anchored = 0;
+    if (field.anchor === true) {
+      const dv = new DataView(payload.buffer, payload.byteOffset, payload.byteLength);
+      anchored = dv.getFloat64(cursor, true);
+      cursor += 8;
     }
+    let value = 0;
+    for (let i = 0; i < stepCount; i++) {
+      let shift = 0;
+      let raw = 0;
+      for (;;) {
+        if (cursor >= limit) {
+          throw new RecordParseError(`pose column ${field.idx} ran past the payload`);
+        }
+        const byte = payload[cursor] ?? 0;
+        cursor += 1;
+        raw += (byte & 0x7f) * 2 ** shift;
+        if ((byte & 0x80) === 0) break;
+        shift += 7;
+      }
+      const delta = raw % 2 === 0 ? raw / 2 : -(raw + 1) / 2;
+      if (field.anchor === true) {
+        anchored += delta * field.scale;
+        out[base + i * RECORD_FLOATS + slot] = anchored;
+        continue;
+      }
+      value = i === 0 ? delta : value + delta;
+      out[base + i * RECORD_FLOATS + slot] = value * field.scale;
+    }
+    take(cursor - off, `pose column ${field.idx}`);
   }
 
-  if (escapeCount > 0) {
-    const outBytes = LITTLE_ENDIAN
-      ? new Uint8Array(out.buffer, out.byteOffset, out.byteLength)
-      : null;
-    for (let e = 0; e < escapeCount; e++) {
-      const at = escapeOff + e * ESCAPE_ENTRY_BYTES;
-      const rowIdx = dv.getUint32(at, true);
-      if (rowIdx >= stepCount) {
-        throw new RecordParseError(`escape row ${rowIdx} is outside a ${stepCount}-step chunk`);
-      }
-      if ((payload[hdrOff + rowIdx]! & 0x20) === 0) {
-        throw new RecordParseError(`escape row ${rowIdx} has no escape bit in the hdr column`);
-      }
-      const row = base + rowIdx * RECORD_FLOATS;
-      if (outBytes !== null) {
-        outBytes.set(payload.subarray(at + 4, at + ESCAPE_ENTRY_BYTES), row * 4);
-      } else {
-        for (let j = 0; j < RECORD_FLOATS; j++) {
-          out[row + j] = dv.getFloat32(at + 4 + j * 4, true);
-        }
-      }
-    }
+  if (off !== limit) {
+    throw new RecordParseError(`chunk payload has ${limit - off} trailing bytes`);
   }
 }
 

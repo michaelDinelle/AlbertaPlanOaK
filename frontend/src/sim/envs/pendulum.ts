@@ -1,6 +1,7 @@
 
 import type { EnvDecoder, EnvFrame, EnvGeometry, SimEvent } from '../types';
 import { NO_EVENTS } from '../events';
+import { OFF_POSE, effortView, POSE_LEN, OFF_DONE } from '../record';
 
 
 export const PD_DT = 0.05;
@@ -94,13 +95,13 @@ export const pendulumDecoder: EnvDecoder<PendulumState, PendulumStatic> = {
   },
 
   decodeFrame(i: number, raw16: Float32Array): EnvFrame<PendulumState> {
-    const pose = raw16.subarray(7, 16);
+    const pose = raw16.subarray(OFF_POSE, OFF_POSE + POSE_LEN);
     return {
       step: i,
-      ctrl: raw16.subarray(0, 6),
-      done: raw16[6] ?? 0,
+      ctrl: effortView(raw16, 2),
+      done: raw16[OFF_DONE] ?? 0,
       pose,
-      state: makeState(pose, raw16[0] ?? 0),
+      state: makeState(pose, raw16[OFF_POSE + 2] ?? 0),
     };
   },
 

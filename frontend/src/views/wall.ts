@@ -1,13 +1,9 @@
 import type { ViewHandle, ViewMount } from '../router';
 import type { EnvResult, RecordingRef, RunDetail, RunIndexEntry, RunMeta } from '@shared/types';
-import { ENVS, ENV_IDS, isEnvId, type EnvCategory, type EnvId } from '@shared/envs';
+import { ENVS, ENV_IDS, isEnvId, type EnvId } from '@shared/envs';
 import type { PlaybackSource } from '@kit/playback';
-import { makeGhostLayer, type GhostLayer } from '@kit/ghosts';
 import { entryFor, parseCatalog } from '@sim/catalog';
-import { makeLaneStream, type LaneStream } from '../theater/laneStream';
-import { TOKENS } from '@kit/tokens';
-import type { QualityTier } from '@kit/types';
-import { fieldIndex, tapeValue, type Tape } from '../tape';
+import type { Tape } from '../tape';
 import {
   accentCss,
   badge,
@@ -20,7 +16,7 @@ import {
   viewShell,
 } from '../components/table';
 import { sparkline, type SparklineHandle } from '../components/sparkline';
-import { mountRunScience, type RunScienceHandle } from './run';
+import { mountRunScience, type RunScienceHandle } from '../components/science';
 import {
   binnedRates,
   deliveredRate,
@@ -51,12 +47,7 @@ import {
   type TimelineTick,
 } from '../theater/loader';
 import { clampPosition, formatClock, stepPosition } from '../theater/player';
-import {
-  mountSceneHost,
-  type HostFrameInfo,
-  type SceneHostGhosts,
-  type SceneHostHandle,
-} from '../theater/sceneHost';
+import { mountSceneHost, type HostFrameInfo, type SceneHostHandle } from '../theater/sceneHost';
 
 export const WALL_SPEEDS: readonly number[] = [1, 4, 16, 64, 256, 1024];
 
@@ -410,171 +401,9 @@ export function wallEnvs(meta: Pick<RunMeta, 'envSchedule'>, recordings: readonl
   return ENV_IDS.filter((id) => seen.has(id));
 }
 
-export const WALL_GHOST_CAP = 512;
-
-export const POSE_FIELD_NAMES: readonly string[] = [
-  'pose0', 'pose1', 'pose2', 'pose3', 'pose4', 'pose5', 'pose6', 'pose7', 'pose8',
-];
-
 export function tapeWindowSteps(tape: Pick<Tape, 'stepStart' | 'stepEnd'>): number {
   const window = (tape.stepEnd[0] ?? 0) - (tape.stepStart[0] ?? 0);
   return window > 0 ? window : 1;
-}
-
-export function ghostRowIndex(position: number, windowSteps: number, rows: number): number {
-  if (rows <= 0) return 0;
-  if (!Number.isFinite(position) || position <= 0) return 0;
-  const index = Math.ceil(position / Math.max(1, windowSteps)) - 1;
-  return index < 0 ? 0 : index >= rows ? rows - 1 : index;
-}
-
-export function aliveRowCount(tape: Pick<Tape, 'rows' | 'stepEnd'>, deathStep: number | null): number {
-  if (deathStep === null) return tape.rows;
-  let n = 0;
-  while (n < tape.rows && (tape.stepEnd[n] ?? Infinity) <= deathStep) n++;
-  return n;
-}
-
-export function ghostAlive(deathStep: number | null, stepEnd: number): boolean {
-  return deathStep === null || stepEnd <= deathStep;
-}
-
-export function rateQuantiles(rows: readonly SeedRow[]): Map<number, number> {
-  const rated = rows.filter((row): row is SeedRow & { rate: number } =>
-    row.rate !== null && Number.isFinite(row.rate));
-  const out = new Map<number, number>();
-  for (const row of rows) out.set(row.seed, 0);
-  if (rated.length === 0) return out;
-  const sorted = [...rated].sort((a, b) => a.rate - b.rate);
-  const span = Math.max(1, sorted.length - 1);
-  let rank = 0;
-  for (let i = 0; i < sorted.length; i++) {
-    const row = sorted[i];
-    const previous = i > 0 ? sorted[i - 1] : undefined;
-    if (previous === undefined || row === undefined || row.rate !== previous.rate) rank = i;
-    if (row !== undefined) out.set(row.seed, rank / span);
-  }
-  return out;
-}
-
-export interface GhostEntry {
-  seed: number;
-  lane: number;
-  deathStep: number | null;
-  aliveRows: number;
-}
-
-interface GhostView {
-  tape: Tape;
-  windowSteps: number;
-  poseFields: number[];
-  entries: GhostEntry[];
-}
-
-export type StageFraming = 'track' | 'world';
-
-export function stageFraming(category: EnvCategory): StageFraming {
-  return category === 'cheetah' ? 'track' : 'world';
-}
-
-export const CHEETAH_CAM_DEPTH = 3.5;
-export const CHEETAH_CAM_LOOK_X = 0.68;
-
-export interface TrackWindow {
-  back: number;
-  ahead: number;
-  width: number;
-}
-
-export function trackWindow(aspect: number): TrackWindow {
-  const a = Number.isFinite(aspect) && aspect > 0 ? aspect : 16 / 9;
-  const half = CHEETAH_CAM_DEPTH * Math.tan((TOKENS.fovHero * Math.PI) / 360) * a;
-  return {
-    back: Math.max(0, half - CHEETAH_CAM_LOOK_X),
-    ahead: half + CHEETAH_CAM_LOOK_X,
-    width: 2 * half,
-  };
-}
-
-export function laneTrackX(
-  tape: Tape,
-  pose0Field: number,
-  entry: Pick<GhostEntry, 'lane' | 'aliveRows'>,
-  row: number,
-): number | null {
-  if (entry.aliveRows <= 0) return null;
-  const bounded = row < 0 ? 0 : row;
-  const at = bounded < entry.aliveRows ? bounded : entry.aliveRows - 1;
-  const x = tapeValue(tape, pose0Field, at, entry.lane);
-  return Number.isFinite(x) ? x : null;
-}
-
-export function inFrameCount(
-  values: ArrayLike<number>,
-  count: number,
-  heroX: number,
-  window: TrackWindow,
-): number {
-  if (!Number.isFinite(heroX)) return 0;
-  let n = 0;
-  for (let i = 0; i < count; i++) {
-    const x = values[i];
-    if (x === undefined || !Number.isFinite(x)) continue;
-    const dx = x - heroX;
-    if (dx >= -window.back && dx <= window.ahead) n++;
-  }
-  return n;
-}
-
-export interface FieldExtent {
-  min: number;
-  max: number;
-  span: number;
-}
-
-export function fieldExtent(values: ArrayLike<number>, count: number): FieldExtent | null {
-  let min = Infinity;
-  let max = -Infinity;
-  for (let i = 0; i < count; i++) {
-    const x = values[i];
-    if (x === undefined || !Number.isFinite(x)) continue;
-    if (x < min) min = x;
-    if (x > max) max = x;
-  }
-  if (!Number.isFinite(min) || !Number.isFinite(max)) return null;
-  return { min, max, span: max - min };
-}
-
-export function fieldScale(
-  extent: FieldExtent | null,
-  heroX: number | null,
-  window: TrackWindow,
-): { min: number; max: number } {
-  let min = extent ? extent.min : (heroX ?? 0);
-  let max = extent ? extent.max : (heroX ?? 0);
-  if (heroX !== null && Number.isFinite(heroX)) {
-    min = Math.min(min, heroX - window.back);
-    max = Math.max(max, heroX + window.ahead);
-  }
-  const span = max - min;
-  const pad = span > 0 ? span * 0.04 : Math.max(1, window.width * 0.5);
-  return { min: min - pad, max: max + pad };
-}
-
-export function fieldPercent(x: number, scale: { min: number; max: number }): number {
-  const span = scale.max - scale.min;
-  if (!Number.isFinite(x) || !(span > 0)) return 50;
-  const t = ((x - scale.min) / span) * 100;
-  return t < 0 ? 0 : t > 100 ? 100 : t;
-}
-
-export function formatDistance(metres: number): string {
-  if (!Number.isFinite(metres)) return '—';
-  const m = Math.abs(metres);
-  if (m >= 1000) return `${(metres / 1000).toFixed(m >= 10_000 ? 0 : 1)} km`;
-  if (m >= 10) return `${Math.round(metres)} m`;
-  if (m >= 1) return `${metres.toFixed(1)} m`;
-  return `${metres.toFixed(2)} m`;
 }
 
 const TIER_BY_LABEL = { low: 'thumb', medium: 'medium', high: 'hero' } as const;
@@ -635,7 +464,7 @@ export const mount: ViewMount = (host) => {
   runName.addEventListener('click', () => {
     picker.hidden = !picker.hidden;
     if (!picker.hidden) {
-      void runIndex.load(false).then(() => { if (!picker.hidden) paintPicker(); });
+      void runIndex.load(true).then(() => { if (!picker.hidden) paintPicker(); });
       paintPicker();
       pickerSearch.focus();
     }
@@ -678,24 +507,7 @@ export const mount: ViewMount = (host) => {
   const HERO_CACHE_MAX = 6;
   let heroGeneration = 0;
   let heroAttached = false;
-  let ghostView: GhostView | null = null;
-  let laneStream: LaneStream | null = null;
-  let laneGhosts: { lane: number; seed: number }[] = [];
-  let ghostLayer: GhostLayer | null = null;
-  let ghostKey = '';
-  let ghostSample = -1;
-  let ghostLayerStream: LaneStream | null = null;
-  let emphasised: number | null = null;
   let heroSource: PlaybackSource | null = null;
-  let fieldData: { tape: Tape; pose0: number } | null = null;
-  let fieldLanes: GhostEntry[] = [];
-  let fieldX = new Float64Array(0);
-  let fieldMarks: HTMLElement[] = [];
-  let framing: StageFraming = 'world';
-  let stageWindow: TrackWindow = trackWindow(16 / 9);
-  let ghostsInFrame = 0;
-  let fieldSample = -1;
-  const ghostPose = new Float32Array(9);
   const sparks: SparklineHandle[] = [];
   let livePoll: ReturnType<typeof setInterval> | null = null;
   let detailPollAt = 0;
@@ -715,29 +527,6 @@ export const mount: ViewMount = (host) => {
   const stageNote = el('div', { class: 'wall-cover' });
   stageNote.hidden = true;
   stage.append(stageTag, stageNote);
-
-  const fieldNote = el('span', { class: 'wall-field-note', text: '' });
-  const fieldMarkHolder = el('div', { class: 'wall-field-marks' });
-  const fieldWindow = el('div', {
-    class: 'wall-field-window',
-    title: 'The slice of track the stage can show, drawn at the field’s own scale',
-  });
-  const fieldTrack = el('div', { class: 'wall-field-track' }, [
-    el('div', { class: 'wall-field-axis' }),
-    fieldWindow,
-    fieldMarkHolder,
-  ]);
-  const fieldLo = el('span', { class: 'wall-field-end', text: '' });
-  const fieldHi = el('span', { class: 'wall-field-end', text: '' });
-  const field = el('div', { class: 'wall-field' }, [
-    el('div', { class: 'wall-field-head' }, [
-      el('span', { class: 'wall-field-label', text: 'the field' }),
-      fieldNote,
-    ]),
-    fieldTrack,
-    el('div', { class: 'wall-field-scale' }, [fieldLo, fieldHi]),
-  ]);
-  field.hidden = true;
 
   const playButton = el('button', { class: 'tbtn tbtn-play', type: 'button', text: 'pause' });
   const backButton = el('button', { class: 'tbtn', type: 'button', text: '‹', title: 'Back (←)' });
@@ -762,7 +551,6 @@ export const mount: ViewMount = (host) => {
   ]);
   const readout = el('div', { class: 'wall-readout', text: 'step — / —' });
   const speedRow = el('div', { class: 'wall-speeds' });
-  const ghostChip = el('span', { class: 'wall-ghosts', text: 'ghosts —' });
   const debugButton = el('button', { class: 'tbtn', type: 'button', text: 'g', title: 'Ground-truth overlay (g)' });
   const tierRow = el('div', { class: 'wall-speeds' });
   const tierButtons = new Map<TierLabel, HTMLButtonElement>();
@@ -799,8 +587,6 @@ export const mount: ViewMount = (host) => {
     el('div', { class: 'tsep' }),
     speedRow,
     el('div', { class: 'tsep' }),
-    ghostChip,
-    el('div', { class: 'tsep' }),
     tierRow,
     debugButton,
     fullButton,
@@ -820,7 +606,7 @@ export const mount: ViewMount = (host) => {
   const status = el('div', { class: 'view-status' }, [spinner('Reading .oak-benchmarks')]);
   body.append(chipStrip, envSelect, status);
 
-  const stageCol = el('div', { class: 'wall-stage-col' }, [stage, field, transport]);
+  const stageCol = el('div', { class: 'wall-stage-col' }, [stage, transport]);
   const splitter = el('div', {
     class: 'wall-split',
     role: 'separator',
@@ -1220,10 +1006,6 @@ export const mount: ViewMount = (host) => {
         holder.addEventListener('pointercancel', () => { down = false; });
       }
 
-      node.addEventListener('mouseenter', () => emphasise(row.seed));
-      node.addEventListener('mouseleave', () => emphasise(null));
-      node.addEventListener('focus', () => emphasise(row.seed));
-      node.addEventListener('blur', () => emphasise(null));
       node.addEventListener('click', () => {
         if (sparkDragged) { sparkDragged = false; return; }
         watchSeed(row.seed);
@@ -1239,149 +1021,6 @@ export const mount: ViewMount = (host) => {
           text: `${formatCount(rows.length)} seeds — per-seed curves are drawn up to ${SPARK_ROW_BUDGET}.`,
         }),
       );
-    }
-  }
-
-  function ghostEmphasis(seed: number | null): void {
-    const layer = sceneHost?.ghosts ?? null;
-    if (!layer || !ghostView) return;
-    if (emphasised === seed) return;
-    emphasised = seed;
-    ghostView.entries.forEach((entry, index) => {
-      layer.setEmphasis(index, entry.seed === seed ? 1 : 0);
-    });
-  }
-
-  function emphasise(seed: number | null): void {
-    ghostEmphasis(seed);
-    fieldEmphasis(seed);
-  }
-
-  function fieldEmphasis(seed: number | null): void {
-    for (const mark of fieldMarks) {
-      mark.classList.toggle('is-lit', seed !== null && Number(mark.dataset['seed']) === seed);
-    }
-  }
-
-  function fieldSamples(): number {
-    return fieldData?.tape.rows ?? 0;
-  }
-
-  function buildField(entries: readonly GhostEntry[], hero_: number | null): void {
-    fieldLanes = [...entries].sort((a, b) => a.seed - b.seed);
-    fieldX = new Float64Array(fieldLanes.length);
-    fieldMarks = fieldLanes.map((entry, index) => {
-      const isHero = entry.seed === hero_;
-      const mark = el('button', {
-        class: `wall-field-mark${isHero ? ' is-hero' : ''}${entry.deathStep !== null ? ' is-dead' : ''}`,
-        type: 'button',
-        dataset: { seed: String(entry.seed) },
-        ariaLabel: `Seed ${entry.seed}`,
-      });
-      mark.addEventListener('mouseenter', () => {
-        const x = fieldX[index];
-        mark.title = `Seed ${entry.seed}${isHero ? ' — the hero' : ''}`
-          + (x !== undefined && Number.isFinite(x) ? ` · ${formatDistance(x)} down the track` : '');
-        emphasise(entry.seed);
-      });
-      mark.addEventListener('mouseleave', () => emphasise(null));
-      mark.addEventListener('click', () => {
-        const next = promoteSeed(selection, entry.seed, playable);
-        if (next === selection) return;
-        selection = next;
-        applyHero();
-        mountHero();
-        syncUrl();
-      });
-      return mark;
-    });
-    fieldMarkHolder.replaceChildren(...fieldMarks);
-    field.hidden = framing !== 'track' || fieldLanes.length < 2;
-    fieldSample = -1;
-  }
-
-  function paintField(sample: number, heroX: number | null): void {
-    if (field.hidden || fieldLanes.length === 0) return;
-    const aspect = stage.clientHeight > 0 ? stage.clientWidth / stage.clientHeight : 16 / 9;
-    stageWindow = trackWindow(aspect);
-
-    let heroIndex = -1;
-    const hero_ = heroSeed(selection);
-    for (let i = 0; i < fieldLanes.length; i++) {
-      const entry = fieldLanes[i];
-      if (entry === undefined) continue;
-      if (entry.seed === hero_) heroIndex = i;
-      const x = fieldData === null ? null : laneTrackX(fieldData.tape, fieldData.pose0, entry, sample);
-      fieldX[i] = x === null ? Number.NaN : x;
-    }
-    if (heroIndex >= 0 && heroX !== null) fieldX[heroIndex] = heroX;
-
-    const extent = fieldExtent(fieldX, fieldLanes.length);
-    const centre = heroX ?? (heroIndex >= 0 ? fieldX[heroIndex] ?? null : null);
-    const scale = fieldScale(extent, centre, stageWindow);
-    for (let i = 0; i < fieldMarks.length; i++) {
-      const mark = fieldMarks[i];
-      const x = fieldX[i];
-      if (mark === undefined) continue;
-      if (x === undefined || !Number.isFinite(x)) {
-        mark.hidden = true;
-        continue;
-      }
-      mark.hidden = false;
-      mark.style.left = `${fieldPercent(x, scale).toFixed(3)}%`;
-    }
-
-    if (centre !== null && Number.isFinite(centre)) {
-      const left = fieldPercent(centre - stageWindow.back, scale);
-      const right = fieldPercent(centre + stageWindow.ahead, scale);
-      fieldWindow.hidden = false;
-      fieldWindow.style.left = `${left.toFixed(3)}%`;
-      fieldWindow.style.width = `${Math.max(0.6, right - left).toFixed(3)}%`;
-    } else {
-      fieldWindow.hidden = true;
-    }
-
-    const inFrame = centre === null ? 0 : inFrameCount(fieldX, fieldLanes.length, centre, stageWindow);
-    const heroCounted = heroIndex >= 0 && Number.isFinite(fieldX[heroIndex] ?? Number.NaN) ? 1 : 0;
-    ghostsInFrame = Math.max(0, inFrame - heroCounted);
-    fieldLo.textContent = extent === null ? '' : formatDistance(extent.min);
-    fieldHi.textContent = extent === null ? '' : formatDistance(extent.max);
-    fieldNote.textContent = extent === null
-      ? `${formatCount(fieldLanes.length)} seeds`
-      : `${formatCount(fieldLanes.length)} seeds · ${formatDistance(extent.span)} apart · `
-        + `the stage frames ${formatDistance(stageWindow.width)} of it`;
-  }
-
-  function heroTrackX(index: number): number | null {
-    if (heroSource === null || heroSource.frameCount === 0) return null;
-    const frame = heroSource.frameAt(Math.min(index, heroSource.frameCount - 1));
-    const x = frame.pose[0];
-    return x === undefined || !Number.isFinite(x) ? null : x;
-  }
-
-  function paintLaneGhosts(layer: GhostLayer, step: number): boolean {
-    const stream = laneStream;
-    if (stream === null || stream.window === null) return false;
-    for (let i = 0; i < laneGhosts.length; i++) {
-      const g = laneGhosts[i];
-      if (g === undefined) continue;
-      if (!stream.pose(g.lane, step, ghostPose)) continue;
-      layer.setGhostFrame(i, ghostPose, true);
-    }
-    return true;
-  }
-
-  function paintGhosts(layer: GhostLayer, view: GhostView, row: number): void {
-    const stepEnd = view.tape.stepEnd[row] ?? 0;
-    for (let index = 0; index < view.entries.length; index++) {
-      const entry = view.entries[index];
-      if (entry === undefined || entry.aliveRows <= 0) continue;
-      const at = row < entry.aliveRows ? row : entry.aliveRows - 1;
-      for (let k = 0; k < 9; k++) {
-        ghostPose[k] = tapeValue(view.tape, view.poseFields[k] ?? 0, at, entry.lane);
-      }
-      if (!Number.isFinite(ghostPose[0] ?? Number.NaN)) continue;
-      layer.setGhostFrame(index, ghostPose, ghostAlive(entry.deathStep, stepEnd));
     }
   }
 
@@ -1466,65 +1105,13 @@ export const mount: ViewMount = (host) => {
     scrubHead.style.left = `${percent}%`;
     if (!scrubbing) scrubInput.value = String(info.position);
 
-    const layer = sceneHost?.ghosts ?? null;
-    if (layer && laneStream !== null) {
-      const step = Math.max(0, stepFromFrame(info.position));
-      void laneStream.ensure(step);
-      if (laneStream !== ghostLayerStream) {
-        ghostLayerStream = laneStream;
-        primeLaneGhosts(layer);
-      }
-      paintLaneGhosts(layer, step);
-    } else if (layer && ghostView) {
-      const sample = ghostRowIndex(info.position, ghostView.windowSteps, ghostView.tape.rows);
-      if (sample !== ghostSample || layer !== ghostLayer) {
-        ghostSample = sample;
-        if (layer !== ghostLayer) {
-          ghostLayer = layer;
-          emphasised = null;
-          primeGhosts(layer, ghostView);
-        }
-        paintGhosts(layer, ghostView, sample);
-      }
-    }
-    if (!field.hidden && fieldLanes.length > 0) {
-      const sample = ghostRowIndex(info.position, stride, fieldSamples());
-      if (sample !== fieldSample) {
-        fieldSample = sample;
-        paintField(sample, heroTrackX(info.index));
-      }
-    }
-
     statsAccum += info.frameMs;
     if (statsAccum < 150) return;
     statsAccum = 0;
     readout.textContent =
       `step ${info.step < 0 ? 'init' : formatCount(info.step)} / ${formatStep(heroSteps())}`
       + ` · ${formatClock(info.simTime)}`;
-    if (ghostView) ghostChip.textContent = ghostChipText(ghostView);
     syncPlay();
-  }
-
-  function ghostChipText(view: GhostView): string {
-    const total = view.entries.length;
-    if (framing !== 'track') return `ghosts ${formatCount(total)} · all in frame`;
-    const inFrame = ghostsInFrame >= total ? 'all' : formatCount(ghostsInFrame);
-    return `ghosts ${formatCount(total)} · ${inFrame} in frame`;
-  }
-
-  function primeLaneGhosts(layer: GhostLayer): void {
-    for (let i = 0; i < laneGhosts.length; i++) {
-      layer.setRate(i, 0.5);
-      layer.setEmphasis(i, 0);
-    }
-  }
-
-  function primeGhosts(layer: GhostLayer, view: GhostView): void {
-    const quantiles = rateQuantiles(rows);
-    view.entries.forEach((entry, index) => {
-      layer.setRate(index, quantiles.get(entry.seed) ?? 0);
-      layer.setEmphasis(index, 0);
-    });
   }
 
   function showStageNote(title: string, children: (HTMLElement | null)[] = []): void {
@@ -1557,10 +1144,6 @@ export const mount: ViewMount = (host) => {
     hero = null;
     heroAttached = false;
     heroSource = null;
-    ghostView = null;
-    ghostLayer = null;
-    ghostKey = '';
-    ghostSample = -1;
     scrubTicks.replaceChildren();
     scrubLoaded.style.width = '0%';
     if (!run || env === null) return;
@@ -1573,7 +1156,6 @@ export const mount: ViewMount = (host) => {
           linkButton('Find a run with recordings', '#/runs', { quiet: true }),
         ]),
       ]);
-      ghostChip.textContent = 'ghosts —';
       readout.textContent = 'no recording';
       transport.classList.add('is-idle');
       return;
@@ -1588,12 +1170,10 @@ export const mount: ViewMount = (host) => {
     if (tagSub) {
       tagSub.textContent = `seed ${seed}${selection.promoted === null ? ' · leader' : ' · promoted'}`;
     }
-    framing = stageFraming(info.category);
 
     const ref = recordingRef(run.recordings, env, seed);
     const refSteps = ref?.steps ?? 0;
     if (tape !== null && tape.rows > 0) stride = tapeWindowSteps(tape);
-    ghostChip.textContent = 'ghosts …';
 
     const startAt = pendingSeekFrame ?? frameAt;
     pendingSeekFrame = Number.isFinite(startAt) && startAt > 0 ? Math.floor(startAt) : null;
@@ -1645,7 +1225,6 @@ export const mount: ViewMount = (host) => {
       if (sceneHost === null) {
         sceneHost = await mountSceneHost(stage, {
           envId: env,
-          catalog: parseCatalog(run.meta.envCatalog),
           source: attachSource,
           tier: TIER_BY_LABEL[tierLabel],
           at: attachAt,
@@ -1663,10 +1242,9 @@ export const mount: ViewMount = (host) => {
         }
         stage.insertBefore(sceneHost.canvas, stageTag);
       } else if (sceneHost.envId !== env) {
-        await sceneHost.setEnv(env, attachSource, null, { at: attachAt });
+        await sceneHost.setEnv(env, attachSource, { at: attachAt });
       } else {
         await sceneHost.setSource(attachSource, { at: attachAt });
-        sceneHost.setGhosts(null);
       }
       applySpeed();
       sceneHost.play();
@@ -1713,106 +1291,6 @@ export const mount: ViewMount = (host) => {
         showStageNote('Could not play this seed', [errorState(error.message)]);
       },
     );
-
-    applyGhosts();
-  }
-
-  function applyGhosts(): void {
-    const run = detail;
-    const env = envId;
-    const t = tape;
-    if (!run || env === null || t === null || t.rows === 0) return;
-    const seed = heroSeed(selection);
-    const source = heroSource;
-    if (seed === null || source === null) return;
-    const generation = heroGeneration;
-    const info = ENVS[env];
-    stride = tapeWindowSteps(t);
-
-    const poseFields = POSE_FIELD_NAMES.map((name) => fieldIndex(t, name));
-    const { lanes, seeds } = envLanes(run.meta, env);
-    const laneOfSeed = new Map<number, number>();
-    seeds.forEach((s, i) => laneOfSeed.set(s, lanes[i] ?? 0));
-    const all: GhostEntry[] = [];
-    for (const s of seedsFor(run.recordings, env)) {
-      const lane = laneOfSeed.get(s);
-      if (lane === undefined) continue;
-      const deathStep = laneDeath(t, lane)?.step ?? null;
-      all.push({ seed: s, lane, deathStep, aliveRows: aliveRowCount(t, deathStep) });
-    }
-    fieldData = { tape: t, pose0: poseFields[0] ?? 0 };
-    buildField(all, seed);
-
-    const entries = all.filter((e) => e.seed !== seed).slice(0, WALL_GHOST_CAP);
-    if (entries.length === 0) {
-      ghostView = null;
-      ghostChip.textContent = 'ghosts —';
-      ghostChip.title = 'This environment has no other recorded seed to ghost.';
-      return;
-    }
-    const nextView: GhostView = { tape: t, windowSteps: stride, poseFields, entries };
-    const key = `${run.id}|${env}|${seed}|${entries.length}`;
-    if (key === ghostKey && ghostLayer !== null && sceneHost?.ghosts === ghostLayer) {
-      ghostView = nextView;
-      ghostSample = -1;
-      fieldSample = -1;
-      ghostChip.textContent = ghostChipText(nextView);
-      return;
-    }
-    ghostKey = key;
-    ghostView = nextView;
-    const catalog = parseCatalog(run.meta.envCatalog);
-    laneStream?.destroy();
-    const stream = makeLaneStream({ runId: run.id, envId: env, catalog });
-    laneStream = stream;
-    ghostLayerStream = null;
-    laneGhosts = entries.map((e, i) => ({ lane: i, seed: e.seed }));
-    void stream.ensure(0).then(() => {
-      if (destroyed || stream !== laneStream) return;
-      const heroNow = heroSeed(selection);
-      laneGhosts = [];
-      for (let lane = 0; lane < stream.laneCount; lane++) {
-        const seed = stream.seedAt(lane);
-        if (seed === heroNow) continue;
-        laneGhosts.push({ lane, seed });
-      }
-    });
-    const build = (tier: QualityTier): GhostLayer => makeGhostLayer({
-      category: info.category,
-      envId: env,
-      entry: entryFor(catalog, env),
-      geometry: source.geometry,
-      maxGhosts: entries.length,
-      tokens: TOKENS,
-      accent: accentCss(info.slug),
-      tier,
-    });
-    const ghosts: SceneHostGhosts = { layer: build(TIER_BY_LABEL[tierLabel]), rebuild: build };
-    queueStage(async () => {
-      if (destroyed || generation !== heroGeneration || sceneHost === null || ghostView === null) {
-        ghosts.layer.dispose();
-        return;
-      }
-      sceneHost.setGhosts(ghosts);
-      ghostLayer = sceneHost.ghosts;
-      if (ghostLayer !== null) {
-        primeGhosts(ghostLayer, ghostView);
-        ghostSample = ghostRowIndex(frameAt, ghostView.windowSteps, ghostView.tape.rows);
-        paintGhosts(ghostLayer, ghostView, ghostSample);
-        ghostChip.textContent = ghostChipText(ghostView);
-        ghostChip.title =
-          `${formatCount(ghostView.entries.length)} recorded seeds of ${info.name}, `
-          + `one window-end pose every ${formatCount(ghostView.windowSteps)} steps from the run's tape, `
-          + "on the hero's own clock. "
-          + (framing === 'track'
-            ? `The stage frames about ${formatDistance(stageWindow.width)} of track around the hero, `
-              + 'so a seed that has walked away from it is off camera — the field strip under the stage '
-              + 'is where the whole population is. '
-            : 'This scene frames its whole world, so every seed is inside the picture. ')
-          + 'A seed that went non-finite freezes at its last finite pose and turns dark.';
-      }
-      await Promise.resolve();
-    });
   }
 
   function rebuildRows(): void {
@@ -1859,10 +1337,10 @@ export const mount: ViewMount = (host) => {
 
   function onTapeUpdate(next: Tape): void {
     tape = next;
+    stride = tapeWindowSteps(next);
     rebuildRows();
     paintPopulation();
     paintRail();
-    applyGhosts();
     science?.setTape(next);
   }
 
@@ -1870,19 +1348,21 @@ export const mount: ViewMount = (host) => {
     if (livePoll !== null) return;
     livePoll = setInterval(() => {
       if (destroyed || !detail) return;
-      if (entry?.inFlight !== true) return;
-      void refreshTape(detail.id, abort.signal).then(
-        (next) => {
-          if (destroyed) return;
-          if (tape === null || next.rows !== tape.rows) onTapeUpdate(next);
-        },
-        () => undefined,
-      );
+      if (entry?.inFlight === true) {
+        void refreshTape(detail.id, abort.signal).then(
+          (next) => {
+            if (destroyed) return;
+            if (tape === null || next.rows !== tape.rows) onTapeUpdate(next);
+          },
+          () => undefined,
+        );
+      }
       const now = Date.now();
       if (now - detailPollAt >= DETAIL_POLL_MS) {
         detailPollAt = now;
         void runIndex.load(true).then((entries) => {
           if (destroyed || !detail) return;
+          if (!picker.hidden) paintPicker();
           const fresh = entries.find((e) => e.id === detail?.id);
           if (fresh !== undefined) {
             entry = fresh;
@@ -1894,7 +1374,6 @@ export const mount: ViewMount = (host) => {
             paintChips();
             rebuildRows();
             paintRail();
-            applyGhosts();
           });
         }).catch(() => undefined);
       }

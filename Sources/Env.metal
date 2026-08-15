@@ -40,6 +40,7 @@ constant uint OAK_SLOT_EFFORT  = 12u;
 constant uint OAK_SLOT_Q       = 16u;
 
 constant uint OAK_POSE_LEN = 9u;
+constant uint OAK_RECORD_FLOATS = 1u + OAK_POSE_LEN;
 constant uint OAK_ENV_GEOMETRY_WORDS = 19u;
 
 struct OakEnvSpec {
@@ -56,19 +57,19 @@ constant OakEnvSpec OAK_ENV_SPECS[OAK_ENV_COUNT] = {
         OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE } },
     { 0x56af5bf2u,  8u, 1u, 2u,  8u,  8u,  8u,
       { OAK_SLOT_Y, OAK_SLOT_X, OAK_SLOT_GOAL_Y, OAK_SLOT_GOAL_X,
-        OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE } },
+        OAK_SLOT_EFFORT, OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE } },
     { 0xdd537ebau, 14u, 1u, 4u,  9u,  7u,  8u,
       { OAK_SLOT_X, OAK_SLOT_Y, OAK_SLOT_GOAL_X, OAK_SLOT_GOAL_Y, OAK_SLOT_KEY_X, OAK_SLOT_KEY_Y,
         OAK_SLOT_CARRY, OAK_SLOT_GATES, OAK_SLOT_NONE } },
     { 0x93531833u,  7u, 1u, 3u,  0u,  0u,  5u,
       { OAK_SLOT_Q + 0u, OAK_SLOT_Q + 1u, OAK_SLOT_Q + 2u, OAK_SLOT_Q + 3u,
-        OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE } },
+        OAK_SLOT_EFFORT, OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE } },
     { 0xf5b3ddc8u,  3u, 1u, 3u,  0u,  0u, 30u,
-      { OAK_SLOT_Q + 0u, OAK_SLOT_Q + 1u, OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE,
+      { OAK_SLOT_Q + 0u, OAK_SLOT_Q + 1u, OAK_SLOT_NONE, OAK_SLOT_EFFORT, OAK_SLOT_NONE,
         OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE } },
     { 0x41f9937du,  5u, 1u, 2u,  0u,  0u, 50u,
       { OAK_SLOT_Q + 0u, OAK_SLOT_Q + 1u, OAK_SLOT_Q + 2u, OAK_SLOT_Q + 3u,
-        OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE } },
+        OAK_SLOT_EFFORT, OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE } },
     { 0x69bbbb73u,  4u, 0u, 1u,  0u,  0u, 20u,
       { OAK_SLOT_Q + 0u, OAK_SLOT_Q + 1u, OAK_SLOT_EFFORT, OAK_SLOT_NONE, OAK_SLOT_NONE,
         OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE } },
@@ -77,19 +78,19 @@ constant OakEnvSpec OAK_ENV_SPECS[OAK_ENV_COUNT] = {
         OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE } },
     { 0xb96ddc3du,  8u, 1u, 2u, 16u, 16u,  8u,
       { OAK_SLOT_Y, OAK_SLOT_X, OAK_SLOT_GOAL_Y, OAK_SLOT_GOAL_X,
-        OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE } },
+        OAK_SLOT_EFFORT, OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE } },
     { 0x4c3c2d3fu, 17u, 1u, 4u, 17u,  7u,  8u,
       { OAK_SLOT_X, OAK_SLOT_Y, OAK_SLOT_GOAL_X, OAK_SLOT_GOAL_Y, OAK_SLOT_TOKENS, OAK_SLOT_GATES,
-        OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE } },
+        OAK_SLOT_EFFORT, OAK_SLOT_NONE, OAK_SLOT_NONE } },
     { 0xcf293fd7u,  6u, 1u, 2u, 32u,  1u,  8u,
-      { OAK_SLOT_X, OAK_SLOT_NONE, OAK_SLOT_CUE, OAK_SLOT_NONE, OAK_SLOT_NONE,
+      { OAK_SLOT_X, OAK_SLOT_NONE, OAK_SLOT_CUE, OAK_SLOT_EFFORT, OAK_SLOT_NONE,
         OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE } },
     { 0xd75dd5f9u, 17u, 1u, 4u, 11u, 11u,  8u,
       { OAK_SLOT_X, OAK_SLOT_Y, OAK_SLOT_GOAL_X, OAK_SLOT_GOAL_Y,
         OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE } },
     { 0xbfeb2b7au, 16u, 1u, 6u, 11u, 11u,  8u,
       { OAK_SLOT_X, OAK_SLOT_Y, OAK_SLOT_GOAL_X, OAK_SLOT_GOAL_Y, OAK_SLOT_HEADING,
-        OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE } },
+        OAK_SLOT_EFFORT, OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE } },
     { 0x0582e383u, 15u, 1u, 4u, 11u, 11u,  8u,
       { OAK_SLOT_X, OAK_SLOT_Y, OAK_SLOT_GOAL_X, OAK_SLOT_GOAL_Y,
         OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE } },
@@ -291,7 +292,8 @@ inline void env_pose(uint envKind, thread const uint *words, thread const HalfCh
     } else if (envKind == OAK_ENV_DEEPSEA) {
         pose[0] = float(words[0]); pose[1] = float(words[1]);
         pose[2] = 7.0f; pose[3] = 7.0f;
-        for (int i = 4; i < 9; i++) pose[i] = 0.0f;
+        pose[4] = ctrl[0];
+        for (int i = 5; i < 9; i++) pose[i] = 0.0f;
     } else if (envKind == OAK_ENV_KEYCORRIDOR) {
         pose[0] = float(words[0]); pose[1] = float(words[1]);
         pose[2] = float(words[4]); pose[3] = float(words[5]);
@@ -304,17 +306,19 @@ inline void env_pose(uint envKind, thread const uint *words, thread const HalfCh
     } else if (envKind == OAK_ENV_LARGEDEEPSEA) {
         pose[0] = float(words[0] & 15u); pose[1] = float((words[0] >> 4u) & 15u);
         pose[2] = 15.0f; pose[3] = 15.0f;
-        for (int i = 4; i < 9; i++) pose[i] = 0.0f;
+        pose[4] = ctrl[0];
+        for (int i = 5; i < 9; i++) pose[i] = 0.0f;
     } else if (envKind == OAK_ENV_MULTIKEYCORRIDOR) {
         pose[0] = float(words[0]); pose[1] = float(words[1]);
         pose[2] = float(words[5]); pose[3] = float(words[6]);
         pose[4] = float(words[7] & 7u);
         pose[5] = float((words[7] >> 3u) & 7u);
-        for (int i = 6; i < 9; i++) pose[i] = 0.0f;
+        pose[6] = ctrl[0];
+        for (int i = 7; i < 9; i++) pose[i] = 0.0f;
     } else if (envKind == OAK_ENV_MEMORYCHAIN) {
         pose[0] = float(words[0]); pose[1] = 31.0f;
-        pose[2] = float(words[1]);
-        for (int i = 3; i < 9; i++) pose[i] = 0.0f;
+        pose[2] = float(words[1]); pose[3] = ctrl[0];
+        for (int i = 4; i < 9; i++) pose[i] = 0.0f;
     } else if (envKind == OAK_ENV_PROCEDURALMAZE) {
         pose[0] = float(words[0]); pose[1] = float(words[1]);
         pose[2] = float(words[2]); pose[3] = float(words[3]);
@@ -322,8 +326,8 @@ inline void env_pose(uint envKind, thread const uint *words, thread const HalfCh
     } else if (envKind == OAK_ENV_HIGHDIMMAZE) {
         pose[0] = float(words[0]); pose[1] = float(words[1]);
         pose[2] = float(words[2]); pose[3] = float(words[3]);
-        pose[4] = float(words[6]);
-        for (int i = 5; i < 9; i++) pose[i] = 0.0f;
+        pose[4] = float(words[6]); pose[5] = ctrl[0];
+        for (int i = 6; i < 9; i++) pose[i] = 0.0f;
     } else if (envKind == OAK_ENV_POMAZE) {
         pose[0] = float(words[0]); pose[1] = float(words[1]);
         pose[2] = float(words[2]); pose[3] = float(words[3]);
@@ -336,15 +340,17 @@ inline void env_pose(uint envKind, thread const uint *words, thread const HalfCh
         float theta1 = as_type<float>(words[0]), theta2 = as_type<float>(words[1]);
         pose[0] = theta1; pose[1] = theta2;
         pose[2] = as_type<float>(words[2]); pose[3] = as_type<float>(words[3]);
-        for (int i = 4; i < 9; i++) pose[i] = 0.0f;
+        pose[4] = ctrl[0];
+        for (int i = 5; i < 9; i++) pose[i] = 0.0f;
     } else if (envKind == OAK_ENV_MOUNTAINCAR) {
         pose[0] = as_type<float>(words[0]); pose[1] = as_type<float>(words[1]);
-        pose[2] = 0.5f;
-        for (int i = 3; i < 9; i++) pose[i] = 0.0f;
+        pose[2] = 0.5f; pose[3] = ctrl[0];
+        for (int i = 4; i < 9; i++) pose[i] = 0.0f;
     } else if (envKind == OAK_ENV_CARTPOLE) {
         pose[0] = as_type<float>(words[0]); pose[1] = as_type<float>(words[1]);
         pose[2] = as_type<float>(words[2]); pose[3] = as_type<float>(words[3]);
-        for (int i = 4; i < 9; i++) pose[i] = 0.0f;
+        pose[4] = ctrl[0];
+        for (int i = 5; i < 9; i++) pose[i] = 0.0f;
     } else if (envKind == OAK_ENV_PENDULUM) {
         float theta = as_type<float>(words[0]), thetaDot = as_type<float>(words[1]);
         pose[0] = theta; pose[1] = thetaDot; pose[2] = clamp(2.0f * ctrl[0], -2.0f, 2.0f);
