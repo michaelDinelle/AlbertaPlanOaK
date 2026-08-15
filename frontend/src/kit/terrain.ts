@@ -2,7 +2,6 @@
 import * as THREE from 'three';
 import { hash2f } from './rng';
 import { oakMaterial, type OakMaterialOptions } from './materials';
-import type { QualityTier } from './types';
 
 export interface TerrainRampStop {
   t: number;
@@ -34,7 +33,6 @@ export interface TerrainOptions {
   flattenHeight?: number;
   seed?: number;
   jitter?: number;
-  tier?: QualityTier;
   material?: THREE.Material;
   materialOptions?: OakMaterialOptions;
   receiveShadow?: boolean;
@@ -56,10 +54,6 @@ export interface TerrainHandle {
   sampleHeight(x: number, z: number): number;
   sampleNormal(x: number, z: number, out: THREE.Vector3): THREE.Vector3;
   dispose(): void;
-}
-
-export function terrainSegmentScale(tier: QualityTier | undefined): number {
-  return tier === 'thumb' ? 0.3 : tier === 'medium' ? 0.6 : 1;
 }
 
 function pair(v: number | readonly [number, number] | undefined, fallback: number): [number, number] {
@@ -125,10 +119,9 @@ function sampleStops(stops: readonly LinearStop[], t: number, out: THREE.Color):
 
 export function makeTerrain(opts: TerrainOptions): TerrainHandle {
   const [width, depth] = pair(opts.size, 10);
-  const scale = terrainSegmentScale(opts.tier);
   const [baseSegX, baseSegZ] = pair(opts.segments, 64);
-  const segmentsX = Math.max(1, Math.round(baseSegX * scale));
-  const segmentsZ = Math.max(1, Math.round(baseSegZ * scale));
+  const segmentsX = Math.max(1, Math.round(baseSegX));
+  const segmentsZ = Math.max(1, Math.round(baseSegZ));
   const nx = segmentsX + 1;
   const nz = segmentsZ + 1;
   const dx = width / segmentsX;
@@ -267,14 +260,13 @@ export function makeTerrain(opts: TerrainOptions): TerrainHandle {
       flatShading: true,
       roughness: 0.95,
       metalness: 0,
-      tier: opts.tier,
       name: 'oakTerrainMaterial',
       ...opts.materialOptions,
     });
 
   const mesh = new THREE.Mesh(geometry, material);
   mesh.name = opts.name ?? 'oakTerrain';
-  mesh.receiveShadow = opts.receiveShadow ?? opts.tier !== 'thumb';
+  mesh.receiveShadow = opts.receiveShadow ?? true;
   mesh.castShadow = opts.castShadow ?? false;
 
   const ownsMaterial = opts.material === undefined;

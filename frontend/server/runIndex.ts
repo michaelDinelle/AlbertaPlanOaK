@@ -2,10 +2,8 @@ import { open, readdir } from 'node:fs/promises';
 import { join } from 'node:path';
 import { TAPE_MAGIC } from '@shared/types';
 import type { RunDetail, RunIndexEntry, RunMeta, RunSummary } from '@shared/types';
-import { INDEX_TTL_MS, IN_FLIGHT_MS } from './config';
 import { statOrNull } from './fs';
-import { readKeeper } from './keeper';
-import { scanRecordings, toRecordingRefs, type RecordingEntry } from './recordings';
+import { envDirCount, scanRecordings, toRecordingRefs, type RecordingEntry } from './recordings';
 
 export interface TapeShape {
   laneCount: number;
@@ -14,6 +12,7 @@ export interface TapeShape {
   rowBytes: number;
   rows: number;
   maxStep: number;
+  rowIntervalMs: number;
   mtimeMs: number;
   size: number;
 }
@@ -53,13 +52,25 @@ async function readTapeShapeUncached(path: string, st: { size: number; mtimeMs: 
     const rowBytes = 12 + fields.length * laneCount * 4;
     const rows = Math.floor((st.size - headerBytes) / rowBytes);
     let maxStep = 0;
+    let rowIntervalMs = 0;
     if (rows > 0) {
-      const tail = Buffer.allocUnsafe(8);
+      const tail = Buffer.allocUnsafe(12);
       const at = headerBytes + (rows - 1) * rowBytes;
-      const read = await handle.read(tail, 0, 8, at);
-      if (read.bytesRead === 8) maxStep = tail.readUInt32LE(0) + tail.readUInt32LE(4);
+      const read = await handle.read(tail, 0, 12, at);
+      if (read.bytesRead >= 8) maxStep = tail.readUInt32LE(0) + tail.readUInt32LE(4);
+      if (read.bytesRead === 12 && rows > 1) {
+        const prev = Buffer.allocUnsafe(12);
+        const back = await handle.read(prev, 0, 12, at - rowBytes);
+        if (back.bytesRead === 12) {
+          rowIntervalMs = (tail.readFloatLE(8) - prev.readFloatLE(8)) * 1000;
+        }
+      }
     }
-    return { laneCount, fields, headerBytes, rowBytes, rows, maxStep, mtimeMs: st.mtimeMs, size: st.size };
+    return {
+      laneCount, fields, headerBytes, rowBytes, rows, maxStep,
+      rowIntervalMs: Number.isFinite(rowIntervalMs) && rowIntervalMs > 0 ? rowIntervalMs : 0,
+      mtimeMs: st.mtimeMs, size: st.size,
+    };
   } finally {
     await handle.close().catch(() => undefined);
   }
@@ -99,22 +110,19 @@ function envIdsOf(meta: RunMeta): string[] {
 
 export interface RunIndexOptions {
   benchRoot: string;
-  ttlMs?: number;
 }
 
 export class RunIndex {
   readonly benchRoot: string;
-  private readonly ttlMs: number;
 
   private runs = new Map<string, ResolvedRun>();
   private order: string[] = [];
-  private recordingsCache = new Map<string, { at: number; list: RecordingEntry[] }>();
-  private lastScanAt = 0;
+  private recordingsCache = new Map<string, { mtimeMs: number; list: RecordingEntry[] }>();
+  private lastRejected = '';
   private inFlightScan: Promise<void> | null = null;
 
   constructor(opts: RunIndexOptions) {
     this.benchRoot = opts.benchRoot;
-    this.ttlMs = opts.ttlMs ?? INDEX_TTL_MS;
   }
 
   async list(): Promise<RunIndexEntry[]> {
@@ -132,27 +140,38 @@ export class RunIndex {
   async recordingsFor(id: string): Promise<RecordingEntry[]> {
     const run = await this.resolve(id);
     if (run === undefined) return [];
-    const now = Date.now();
+    const dirStat = await statOrNull(run.dir);
+    const mtimeMs = dirStat?.mtimeMs ?? 0;
     const hit = this.recordingsCache.get(id);
-    if (hit !== undefined && now - hit.at < this.ttlMs) return hit.list;
+    if (hit !== undefined && hit.mtimeMs === mtimeMs) return hit.list;
     const list = await scanRecordings(run.dir, { root: this.benchRoot });
-    this.recordingsCache.set(id, { at: Date.now(), list });
+    this.recordingsCache.set(id, { mtimeMs, list });
     return list;
   }
 
   private async ensureFresh(): Promise<void> {
-    if (this.runs.size === 0) {
-      if (this.inFlightScan === null) {
-        this.inFlightScan = this.scan().finally(() => {
-          this.inFlightScan = null;
-        });
-      }
-      return this.inFlightScan;
-    }
-    if (Date.now() - this.lastScanAt < this.ttlMs || this.inFlightScan !== null) return;
+    if (this.inFlightScan !== null) return this.inFlightScan;
     this.inFlightScan = this.scan().finally(() => {
       this.inFlightScan = null;
     });
+    return this.inFlightScan;
+  }
+
+  private keeperMemo: { mtimeMs: number; size: number; id: string | null } | null = null;
+
+  private async readKeeper(): Promise<string | null> {
+    const path = join(this.benchRoot, '..', 'keeper');
+    const st = await statOrNull(path);
+    if (st === null) return null;
+    const hit = this.keeperMemo;
+    if (hit !== null && hit.mtimeMs === st.mtimeMs && hit.size === st.size) return hit.id;
+    let id: string | null = null;
+    try {
+      id = (await Bun.file(path).text()).trim() || null;
+    } catch {
+    }
+    this.keeperMemo = { mtimeMs: st.mtimeMs, size: st.size, id };
+    return id;
   }
 
   private metaMemo = new Map<string, { mtimeMs: number; size: number; meta: RunMeta | null }>();
@@ -180,16 +199,24 @@ export class RunIndex {
       dirNames = [];
     }
 
-    const keeper = await readKeeper(this.benchRoot);
-    const now = Date.now();
+    const keeper = await this.readKeeper();
     const next = new Map<string, ResolvedRun>();
+    const rejected: string[] = [];
 
     for (const id of dirNames) {
       const dir = join(this.benchRoot, id);
+      const metaStat = await statOrNull(join(dir, 'meta.json'));
+      if (metaStat === null) continue;
       const meta = await this.readMeta(join(dir, 'meta.json'));
-      if (meta === null) continue;
+      if (meta === null) {
+        rejected.push(id);
+        continue;
+      }
       const tape = await readTapeShape(join(dir, 'tape.bin')).catch(() => null);
-      if (tape === null || tape.rows === 0) continue;
+      if (tape === null || tape.rows === 0) {
+        rejected.push(id);
+        continue;
+      }
       const hasRecordings = (await envDirCount(dir)) > 0;
       const summaryStat = await statOrNull(join(dir, 'summary.json'));
       const complete = tape.maxStep >= meta.steps && meta.steps > 0;
@@ -207,7 +234,9 @@ export class RunIndex {
           startedAt: typeof meta.startedAt === 'string' ? meta.startedAt : null,
           complete,
           maxStep: tape.maxStep,
-          inFlight: !complete && now - tape.mtimeMs < IN_FLIGHT_MS,
+          inFlight: !complete
+            && (tape.rowIntervalMs === 0
+              || Date.now() - tape.mtimeMs < 2 * tape.rowIntervalMs),
           hasSummary: summaryStat !== null,
           hasRecordings,
           role: id === keeper ? 'keeper' : null,
@@ -215,6 +244,15 @@ export class RunIndex {
       });
     }
 
+    const rejectedKey = rejected.join(',');
+    if (rejected.length > 0 && rejectedKey !== this.lastRejected) {
+      console.warn(
+        `[oak-frontend] ${rejected.length} of ${dirNames.length} directories under ${this.benchRoot}`
+        + ` carry a meta.json this build cannot read and are absent from the run list`
+        + ` (first: ${rejected.slice(0, 3).join(', ')})`,
+      );
+    }
+    this.lastRejected = rejectedKey;
     this.runs = next;
     this.order = [...next.keys()].sort((a, b) => {
       const sa = next.get(a)?.entry.startedAt ?? '';
@@ -222,16 +260,6 @@ export class RunIndex {
       if (sa !== sb) return sa < sb ? 1 : -1;
       return a < b ? 1 : a > b ? -1 : 0;
     });
-    this.lastScanAt = Date.now();
-  }
-}
-
-async function envDirCount(runDir: string): Promise<number> {
-  try {
-    const ents = await readdir(runDir, { withFileTypes: true });
-    return ents.filter((e) => e.isDirectory() && e.name.includes('-')).length;
-  } catch {
-    return 0;
   }
 }
 
@@ -244,20 +272,30 @@ function readRunSummary(raw: string): RunSummary | null {
   }
   if (parsed === null || typeof parsed !== 'object') return null;
   const o = parsed as Record<string, unknown>;
-  if (o['overall'] === null || typeof o['overall'] !== 'object') return null;
   if (o['envSlices'] === null || typeof o['envSlices'] !== 'object') return null;
   return parsed as RunSummary;
 }
 
+const summaryMemo = new Map<string, { mtimeMs: number; size: number; summary: RunSummary | null }>();
+
 export async function buildRunDetail(run: ResolvedRun, recs: RecordingEntry[]): Promise<RunDetail> {
+  const path = join(run.dir, 'summary.json');
+  const st = await statOrNull(path);
   let summary: RunSummary | null = null;
-  try {
-    const text = await Bun.file(join(run.dir, 'summary.json')).text();
-    summary = readRunSummary(text);
-    if (summary === null) {
-      console.warn(`[oak-frontend] ${run.id}: summary.json is not a run summary — ignoring it`);
+  if (st !== null) {
+    const hit = summaryMemo.get(run.id);
+    if (hit !== undefined && hit.mtimeMs === st.mtimeMs && hit.size === st.size) {
+      summary = hit.summary;
+    } else {
+      try {
+        summary = readRunSummary(await Bun.file(path).text());
+        if (summary === null) {
+          console.warn(`[oak-frontend] ${run.id}: summary.json is not a run summary — ignoring it`);
+        }
+      } catch {
+      }
+      summaryMemo.set(run.id, { mtimeMs: st.mtimeMs, size: st.size, summary });
     }
-  } catch {
   }
   return {
     id: run.id,

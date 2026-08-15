@@ -11,7 +11,7 @@ import type {
   SceneSize,
 } from '@kit/types';
 import * as THREE from 'three';
-import { PD_DT, PD_G, PD_L, PD_M, PD_MAX_SPEED, PD_MAX_TORQUE, wrapPi } from '@sim/envs/pendulum';
+import { PD_DT, PD_G, PD_L, PD_M, PD_MAX_SPEED, PD_MAX_TORQUE, PENDULUM_TH, PENDULUM_THDOT, PENDULUM_TORQUE, wrapPi } from '@sim/envs/pendulum';
 import { buildLanternRig, type LanternRigHandle } from './actors';
 import { manifest } from './manifest';
 import {
@@ -24,15 +24,10 @@ import {
 
 const CAM_BASE: readonly [number, number, number] = [0.62, 0.41, 6.55];
 const CAM_LOOK: readonly [number, number, number] = [0, -0.09, 0];
-const CAM_BASE_THUMB: readonly [number, number, number] = [0.34, 0.36, 6.95];
-const CAM_LOOK_THUMB: readonly [number, number, number] = [0, -0.24, 0];
 
 
 export const PD_MAX_DTHETADOT = ((1.5 * PD_G) / PD_L + (3 * PD_MAX_TORQUE) / (PD_M * PD_L * PD_L)) * PD_DT;
-export const PD_MAX_DTHETA = (PD_MAX_SPEED + PD_MAX_DTHETADOT) * PD_DT;
 const WRAP_SLACK = 0.02;
-export const MAX_HOLD_STEPS = 1;
-
 export function wrapReach(thetaDot: number, steps: number): number {
   const ramp = PD_MAX_DTHETADOT * ((steps * (steps + 1)) / 2 + steps);
   const travel = Math.min(
@@ -42,15 +37,8 @@ export function wrapReach(thetaDot: number, steps: number): number {
   return travel * PD_DT + WRAP_SLACK;
 }
 
-interface PendulumLike {
-  torque?: unknown;
-}
-
 function torqueOf(state: FrameState): number {
-  const d = state.derived as PendulumLike | null | undefined;
-  if (d && typeof d === 'object' && typeof d.torque === 'number') return d.torque;
-  const raw = state.pose[2] ?? 0;
-  return Number.isFinite(raw) ? raw : 0;
+  return state.pose[PENDULUM_TORQUE] ?? 0;
 }
 
 export function pendulumCost(theta: number, thetaDot: number, torque: number): number {
@@ -103,7 +91,6 @@ class LanternBellScene implements SceneModule {
     this.scene.add(world.group);
 
     const lantern = buildLanternRig({
-      tier: ctx.tier,
       palette,
       accent,
       pivot: this.pivot,
@@ -113,14 +100,13 @@ class LanternBellScene implements SceneModule {
     this.lantern = lantern;
     this.scene.add(lantern.group);
 
-    const thumb = ctx.tier === 'thumb';
     const home = orbitFromPose(
-      thumb ? CAM_BASE_THUMB : CAM_BASE,
-      thumb ? CAM_LOOK_THUMB : CAM_LOOK,
+      CAM_BASE,
+      CAM_LOOK,
     );
     const rig = makeOrbitRig({
       canvas: ctx.canvas,
-      target: thumb ? CAM_LOOK_THUMB : CAM_LOOK,
+      target: CAM_LOOK,
       azimuth: home.azimuth,
       polar: home.polar,
       distance: home.distance,
@@ -136,7 +122,6 @@ class LanternBellScene implements SceneModule {
     rig.snap();
 
     const pool = new CelebrationPool({
-      tier: ctx.tier,
       seed: ctx.seed,
       name: 'lanternBellCelebrations',
     });
@@ -147,7 +132,7 @@ class LanternBellScene implements SceneModule {
     this.overlay = new GroundTruthOverlay(ctx.geometry, {
       camera: this.camera,
       agentPos: (state) => {
-        const th = state.pose[0] ?? 0;
+        const th = state.pose[PENDULUM_TH] ?? 0;
         this.overlayPos[0] = this.pivot[0] + PD_L * Math.sin(th);
         this.overlayPos[1] = this.pivot[1] - PD_L * Math.cos(th);
         this.overlayPos[2] = this.pivot[2];
@@ -203,8 +188,8 @@ class LanternBellScene implements SceneModule {
     }
 
 
-    const rawTheta = state.pose[0] ?? 0;
-    const thetaDot = state.pose[1] ?? 0;
+    const rawTheta = state.pose[PENDULUM_TH] ?? 0;
+    const thetaDot = state.pose[PENDULUM_THDOT] ?? 0;
     let theta = rawTheta;
     this.wrapHeld = false;
     if (frame.scrubbed || !Number.isFinite(this.anchorTheta)) {

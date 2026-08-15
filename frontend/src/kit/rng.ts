@@ -15,19 +15,8 @@ export function range(rng: Rng, min: number, max: number): number {
   return min + (max - min) * rng();
 }
 
-export function rangeInt(rng: Rng, min: number, max: number): number {
-  const lo = Math.ceil(min);
-  const hi = Math.floor(max);
-  if (hi <= lo) return lo;
-  return lo + Math.min(hi - lo - 1, (rng() * (hi - lo)) | 0);
-}
-
 export function jitter(rng: Rng, amount = 1): number {
   return (rng() * 2 - 1) * amount;
-}
-
-export function chance(rng: Rng, p: number): boolean {
-  return rng() < p;
 }
 
 export function pick<T>(rng: Rng, items: readonly T[]): T {
@@ -51,38 +40,6 @@ export function pickWeighted<T>(rng: Rng, items: readonly T[], weights: readonly
   return items[n - 1] as T;
 }
 
-export function shuffle<T>(rng: Rng, items: T[]): T[] {
-  for (let i = items.length - 1; i > 0; i--) {
-    const j = Math.min(i, (rng() * (i + 1)) | 0);
-    const a = items[i] as T;
-    items[i] = items[j] as T;
-    items[j] = a;
-  }
-  return items;
-}
-
-export function gaussian(rng: Rng, mean = 0, sd = 1): number {
-  let u = rng();
-  if (u <= Number.MIN_VALUE) u = Number.MIN_VALUE;
-  const v = rng();
-  return mean + sd * Math.sqrt(-2 * Math.log(u)) * Math.cos(2 * Math.PI * v);
-}
-
-export function onCircle(rng: Rng, out: [number, number]): [number, number] {
-  const a = rng() * Math.PI * 2;
-  out[0] = Math.cos(a);
-  out[1] = Math.sin(a);
-  return out;
-}
-
-export function inDisk(rng: Rng, out: [number, number]): [number, number] {
-  const a = rng() * Math.PI * 2;
-  const r = Math.sqrt(rng());
-  out[0] = Math.cos(a) * r;
-  out[1] = Math.sin(a) * r;
-  return out;
-}
-
 
 export function hash1i(x: number, seed = 0): number {
   let h = Math.imul((x | 0) ^ (seed | 0), 0x85ebca6b);
@@ -101,10 +58,6 @@ export function hash2i(x: number, y: number, seed = 0): number {
   h = Math.imul(h, 0x27d4eb2f);
   h ^= h >>> 15;
   return h >>> 0;
-}
-
-export function hash3i(x: number, y: number, z: number, seed = 0): number {
-  return hash2i(hash2i(x, y, seed) | 0, z, seed ^ 0x7f4a7c15);
 }
 
 export function hash2f(x: number, y: number, seed = 0): number {

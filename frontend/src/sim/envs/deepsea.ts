@@ -1,18 +1,15 @@
 
 import { philoxDraw, STREAM_RESET } from '../philox';
-import { CTRL_LEN, OFF_DONE, OFF_POSE, POSE_LEN, effortView } from '../record';
+import { POSE_LEN } from '../record';
 import type { EnvDecoder, EnvFrame, EnvGeometry, SimEvent } from '../types';
 import { NO_EVENTS } from '../events';
 
 export const DEEPSEA_N = 8;
-export const DEEPSEA_RIGHT_COST = -0.00125;
 export const DEEPSEA_LAST_ROW = DEEPSEA_N - 2;
 
-export interface DeepSeaState {
-  r: number;
-  c: number;
-  lastA: number;
-}
+export const DEEPSEA_ROW = 0;
+export const DEEPSEA_COL = 1;
+export const DEEPSEA_ACTION = 4;
 
 export interface DeepSeaStatic {
   seed: number;
@@ -43,11 +40,7 @@ export function deepSeaNextCol(st: DeepSeaStatic, r: number, c: number, action: 
   return Math.min(Math.max(c + dc, 0), DEEPSEA_N - 1);
 }
 
-function state(r: number, c: number, lastA: number): DeepSeaState {
-  return { r, c, lastA };
-}
-
-export const deepSeaDecoder: EnvDecoder<DeepSeaState, DeepSeaStatic> = {
+export const deepSeaDecoder: EnvDecoder<DeepSeaStatic> = {
   envId: 'DeepSea-cont-v0',
 
   initStatic(seed: number): DeepSeaStatic {
@@ -68,39 +61,27 @@ export const deepSeaDecoder: EnvDecoder<DeepSeaState, DeepSeaStatic> = {
     };
   },
 
-  initFrame(): EnvFrame<DeepSeaState> {
+  initFrame(): EnvFrame {
     const pose = new Float32Array(POSE_LEN);
     pose[2] = DEEPSEA_N - 1;
     pose[3] = DEEPSEA_N - 1;
     return {
       step: -1,
-      ctrl: new Float32Array(CTRL_LEN),
       done: 0,
       pose,
-      state: state(0, 0, 0),
     };
   },
 
-  decodeFrame(i: number, raw16: Float32Array): EnvFrame<DeepSeaState> {
-    const pose = raw16.subarray(OFF_POSE, OFF_POSE + POSE_LEN);
-    const ctrl = effortView(raw16, 4);
-    return {
-      step: i,
-      ctrl,
-      done: raw16[OFF_DONE] ?? 0,
-      pose,
-      state: state(pose[0] ?? 0, pose[1] ?? 0, Math.trunc(ctrl[0] ?? 0) & 1),
-    };
-  },
 
   deriveEvents(
-    prev: EnvFrame<DeepSeaState>,
-    next: EnvFrame<DeepSeaState>,
+    prev: EnvFrame,
+    next: EnvFrame,
     st: DeepSeaStatic,
   ): SimEvent[] {
-    if (prev.state.r !== DEEPSEA_LAST_ROW) return NO_EVENTS;
-    const action = Math.trunc(next.ctrl[0] ?? 0);
-    const landed = deepSeaNextCol(st, prev.state.r, prev.state.c, action);
+    const row = prev.pose[DEEPSEA_ROW] ?? 0;
+    if (row !== DEEPSEA_LAST_ROW) return NO_EVENTS;
+    const action = Math.trunc(next.pose[DEEPSEA_ACTION] ?? 0);
+    const landed = deepSeaNextCol(st, row, prev.pose[DEEPSEA_COL] ?? 0, action);
     const out: SimEvent[] = [];
     if (landed === DEEPSEA_N - 1) out.push({ type: 'goal' });
     out.push({ type: 'resurface' });

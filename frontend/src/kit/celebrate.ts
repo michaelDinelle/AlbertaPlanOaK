@@ -3,7 +3,6 @@ import * as THREE from 'three';
 import { mulberry32 } from './rng';
 import { radialSprite } from './textures';
 import { TOKENS } from './tokens';
-import type { QualityTier } from './types';
 
 
 export const PULSE_SECONDS = 0.3;
@@ -42,19 +41,10 @@ export function makePulseChannel(): PulseChannel {
 export const pulseChannel: PulseChannel = makePulseChannel();
 
 
-export function celebrationCapacity(tier: QualityTier | undefined): { particles: number; ripples: number } {
-  switch (tier) {
-    case 'thumb':
-      return { particles: 0, ripples: 0 };
-    case 'medium':
-      return { particles: 384, ripples: 4 };
-    default:
-      return { particles: 768, ripples: 8 };
-  }
-}
+export const CELEBRATION_PARTICLE_CAPACITY = 768;
+export const CELEBRATION_RIPPLE_CAPACITY = 8;
 
 export interface CelebrationPoolOptions {
-  tier?: QualityTier;
   particleCapacity?: number;
   rippleCapacity?: number;
   burstSize?: number;
@@ -183,9 +173,8 @@ export class CelebrationPool {
   private readonly color = new THREE.Color();
 
   constructor(opts: CelebrationPoolOptions = {}) {
-    const cap = celebrationCapacity(opts.tier);
-    this.capacity = Math.max(0, opts.particleCapacity ?? cap.particles);
-    const rippleCapacity = Math.max(0, opts.rippleCapacity ?? cap.ripples);
+    this.capacity = Math.max(0, opts.particleCapacity ?? CELEBRATION_PARTICLE_CAPACITY);
+    const rippleCapacity = Math.max(0, opts.rippleCapacity ?? CELEBRATION_RIPPLE_CAPACITY);
     this.burstSize = Math.max(1, opts.burstSize ?? 48);
     this.sighSize = Math.max(1, opts.sighSize ?? 40);
     this.sighRadius = opts.sighRadius ?? 6;

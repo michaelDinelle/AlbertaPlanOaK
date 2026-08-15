@@ -18,8 +18,6 @@ export interface RunMeta {
 
 export const TAPE_MAGIC = 0x544b414f;
 export const TAPE_FIELDS = ['rewardSum', 'rewardRate', 'deathStep', 'deathDetector'] as const;
-export type TapeField = (typeof TAPE_FIELDS)[number];
-
 export const DEATH_DETECTORS: readonly string[] = [
   'alive', 'envReward', 'policyMean', 'envObs', 'paramNonFinite',
   'paramExplosion', 'kernelRho', 'envError',
@@ -31,34 +29,13 @@ export interface EnvResult {
   maxStep?: number;
   complete?: boolean;
   rewardRateIQM?: number;
-  recentRewardRateIQM?: number;
-  recentRewardRateMax?: number;
-  bestSeed?: number;
-  bestSeedRewardRate?: number;
-  bestSeedRewardPerGFLOP?: number;
-  positiveSeeds?: number;
   positiveFraction?: number;
-  rewardRatePercentiles?: Record<string, number>;
-  thresholdFractions?: Record<string, number>;
-  divergence?: { diverged?: number; rate?: number };
-  rmst?: number;
+  divergence?: { diverged?: number };
   solvedSeeds?: number;
-  solvedSeedsRetained?: number;
-  decayedSeeds?: number;
-  decayFraction?: number | null;
-  retentionMarginP50?: number | null;
   retentionFraction?: number | null;
-  rewardRateBySeed?: Record<string, number>;
-  retentionBySeed?: Record<string, number | null>;
-  aggStepsPerSecond?: number;
-  [key: string]: unknown;
 }
 
 export interface RunSummary {
-  solvedLaw?: string;
-  retainedLaw?: string;
-  meta?: Partial<RunMeta>;
-  overall: EnvResult;
   envSlices: Record<string, EnvResult>;
 }
 
@@ -80,7 +57,6 @@ export interface RunIndexEntry {
 export interface RecordingRef {
   envId: EnvId;
   seed: number;
-  steps: number;
   bytes: number;
 }
 

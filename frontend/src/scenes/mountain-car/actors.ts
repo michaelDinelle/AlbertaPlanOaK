@@ -9,7 +9,6 @@ import {
 import { makeAmbientParticles, type AmbientParticlesHandle } from '@kit/particles';
 import { radialSprite } from '@kit/textures';
 import type { Palette } from '@kit/tokens';
-import type { QualityTier } from '@kit/types';
 import * as THREE from 'three';
 import { MC_MAX_SPEED } from '@sim/envs/mountaincar';
 import { blendTokens, clampRange, mergeColoredParts, type ColoredPart } from './world';
@@ -45,7 +44,6 @@ export interface CartHandle {
 }
 
 export interface CartOptions {
-  tier: QualityTier;
   palette: Palette;
   accent: THREE.ColorRepresentation;
   seed: number;
@@ -54,8 +52,7 @@ export interface CartOptions {
 }
 
 export function buildCart(opts: CartOptions): CartHandle {
-  const { tier, palette, accent, seed, heightAt, slopeAt } = opts;
-  const shadows = tier !== 'thumb';
+  const { palette, accent, seed, heightAt, slopeAt } = opts;
   const group = new THREE.Group();
   group.name = 'cartRig';
 
@@ -128,23 +125,22 @@ export function buildCart(opts: CartOptions): CartHandle {
     toonSteps: 3,
     toonSoftness: 0.28,
     toonFloor: 0.22,
-    tier,
     name: 'cartBodyMaterial',
   });
   const bodyMesh = new THREE.Mesh(bodyGeometry, bodyMaterial);
   bodyMesh.name = 'cartBody';
-  bodyMesh.castShadow = shadows;
+  bodyMesh.castShadow = true;
   tilt.add(bodyMesh);
 
   const wheelGeometry = makeAxleGeometry(woodDark, iron);
   const wheelFront = new THREE.Mesh(wheelGeometry, bodyMaterial);
   wheelFront.name = 'cartAxleFront';
   wheelFront.position.set(AXLE_X, WHEEL_R, 0);
-  wheelFront.castShadow = shadows;
+  wheelFront.castShadow = true;
   const wheelRear = new THREE.Mesh(wheelGeometry, bodyMaterial);
   wheelRear.name = 'cartAxleRear';
   wheelRear.position.set(-AXLE_X, WHEEL_R, 0);
-  wheelRear.castShadow = shadows;
+  wheelRear.castShadow = true;
   tilt.add(wheelFront, wheelRear);
 
   const flameGeometry = new THREE.IcosahedronGeometry(0.013, 1);
@@ -222,7 +218,6 @@ export function buildCart(opts: CartOptions): CartHandle {
     count: 150,
     bounds: { halfX: 0.085, halfY: 0.05, halfZ: 0.055 },
     seed: seed ^ 0x3d91,
-    tier,
     color: blendTokens(palette.groundB, palette.sun, 0.3),
     size: 0.11,
     intensity: 0.95,

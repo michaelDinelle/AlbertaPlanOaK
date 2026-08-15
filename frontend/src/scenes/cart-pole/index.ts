@@ -15,14 +15,12 @@ import type {
   SceneSize,
 } from '@kit/types';
 import * as THREE from 'three';
-import { CP_TAU, cartPoleTip } from '@sim/envs/cartpole';
+import { CARTPOLE_ACTION, CARTPOLE_TH, CARTPOLE_THDOT, CARTPOLE_X, CARTPOLE_XDOT, CP_TAU, cartPoleForce, cartPoleTip } from '@sim/envs/cartpole';
 import { buildTrolley, type TrolleyHandle } from './actors';
 import { manifest } from './manifest';
 import {
   CAM_BASE,
-  CAM_BASE_THUMB,
   CAM_LOOK,
-  CAM_LOOK_THUMB,
   buildWorld,
   clampRange,
   poleLength,
@@ -67,16 +65,8 @@ export function unreachable(
   return d < CP_TAU * lo - POSE_EPS || d > CP_TAU * hi + POSE_EPS;
 }
 
-interface CartPoleLike {
-  force?: unknown;
-}
-
 function forceOf(state: FrameState): number {
-  const d = state.derived as CartPoleLike | null | undefined;
-  if (d && typeof d === 'object' && typeof d.force === 'number') return d.force;
-  const raw = state.ctrl[0] ?? 0;
-  if (!Number.isFinite(raw)) return 0;
-  return ((Math.trunc(raw) >>> 0) & 1) !== 0 ? 10 : -10;
+  return cartPoleForce(state.pose[CARTPOLE_ACTION] ?? 0);
 }
 
 class BoardwalkScene implements SceneModule {
@@ -130,7 +120,6 @@ class BoardwalkScene implements SceneModule {
     if (cool) cool.color.set(ctx.tokens.failureBlue);
 
     const trolley = buildTrolley({
-      tier: ctx.tier,
       palette,
       accent,
       seed: ctx.seed,
@@ -140,14 +129,13 @@ class BoardwalkScene implements SceneModule {
     this.trolley = trolley;
     this.scene.add(trolley.group);
 
-    const thumb = ctx.tier === 'thumb';
     const home = orbitFromPose(
-      thumb ? CAM_BASE_THUMB : CAM_BASE,
-      thumb ? CAM_LOOK_THUMB : CAM_LOOK,
+      CAM_BASE,
+      CAM_LOOK,
     );
     const rig = makeOrbitRig({
       canvas: ctx.canvas,
-      target: thumb ? CAM_LOOK_THUMB : CAM_LOOK,
+      target: CAM_LOOK,
       azimuth: home.azimuth,
       polar: home.polar,
       distance: home.distance,
@@ -163,7 +151,6 @@ class BoardwalkScene implements SceneModule {
     rig.snap();
 
     const pool = new CelebrationPool({
-      tier: ctx.tier,
       seed: ctx.seed,
       sighSize: SIGH_PARTICLES,
       sighRadius: 0.34,
@@ -177,7 +164,7 @@ class BoardwalkScene implements SceneModule {
     this.overlay = new GroundTruthOverlay(ctx.geometry, {
       camera: this.camera,
       agentPos: (state) => {
-        const t = cartPoleTip(state.pose[0] ?? 0, state.pose[2] ?? 0, this.tipScratch);
+        const t = cartPoleTip(state.pose[CARTPOLE_X] ?? 0, state.pose[CARTPOLE_TH] ?? 0, this.tipScratch);
         this.overlayPos[0] = t[0] ?? 0;
         this.overlayPos[1] = t[1] ?? 0;
         this.overlayPos[2] = 0;
@@ -233,10 +220,10 @@ class BoardwalkScene implements SceneModule {
       }
     }
 
-    const rawX = state.pose[0] ?? 0;
-    const rawXd = state.pose[1] ?? 0;
-    const rawTh = state.pose[2] ?? 0;
-    const rawThd = state.pose[3] ?? 0;
+    const rawX = state.pose[CARTPOLE_X] ?? 0;
+    const rawXd = state.pose[CARTPOLE_XDOT] ?? 0;
+    const rawTh = state.pose[CARTPOLE_TH] ?? 0;
+    const rawThd = state.pose[CARTPOLE_THDOT] ?? 0;
     let x = rawX;
     let th = rawTh;
     if (teleported || frame.scrubbed || !Number.isFinite(this.heldX)) {

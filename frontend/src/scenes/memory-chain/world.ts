@@ -15,10 +15,17 @@ import { makeAmbientParticles, type AmbientParticlesHandle } from '@kit/particle
 import { hash2f, streamFor } from '@kit/rng';
 import { skyFromPalette, type SkyHandle } from '@kit/sky';
 import { TOKENS, type Palette } from '@kit/tokens';
-import type { QualityTier, SceneContext } from '@kit/types';
+import type { SceneContext } from '@kit/types';
 import { excludeBand, scatterRocks } from '@kit/vegetation';
 import { makeWater, type WaterHandle } from '@kit/water';
-import { MEMORYCHAIN_END, MEMORYCHAIN_L, memoryChainDecoder } from '@sim/envs/memorychain';
+import {
+  MEMORYCHAIN_ACTION,
+  MEMORYCHAIN_CUE,
+  MEMORYCHAIN_END,
+  MEMORYCHAIN_L,
+  MEMORYCHAIN_POS,
+  memoryChainDecoder,
+} from '@sim/envs/memorychain';
 import type { EnvGeometry, GridGeometry } from '@sim/types';
 
 
@@ -133,22 +140,10 @@ export interface CaveSkin {
   rim: THREE.Color;
 }
 
-export function tierLift(tier: QualityTier | undefined): number {
-  return tier === 'thumb' ? 0.34 : tier === 'medium' ? 0.1 : 0;
-}
-
-export function tierToonFloor(tier: QualityTier | undefined, base: number): number {
-  return tier === 'thumb' ? Math.max(base, 0.62) : tier === 'medium' ? base + 0.06 : base;
-}
-
-export function tierBounce(tier: QualityTier | undefined): number {
-  return tier === 'thumb' ? 0.085 : tier === 'medium' ? 0.05 : 0.03;
-}
-
-export function caveSkin(palette: Palette, tokens: typeof TOKENS, tier?: QualityTier): CaveSkin {
+export function caveSkin(palette: Palette, tokens: typeof TOKENS): CaveSkin {
   const silver = tokens.accents['po-maze'] ?? palette.hemiSky;
   const firefly = tokens.accents['memory-chain'] ?? palette.accentLight;
-  const lift = tierLift(tier);
+  const lift = 0;
   const up = (c: THREE.Color): THREE.Color => (lift > 0 ? c.lerp(new THREE.Color(silver), lift) : c);
   return {
     stone: up(blendTokens(palette.groundB, silver, 0.64)),
@@ -163,14 +158,6 @@ export function caveSkin(palette: Palette, tokens: typeof TOKENS, tier?: Quality
   };
 }
 
-
-function archSamples(tier: QualityTier | undefined): number {
-  return tier === 'thumb' ? 7 : tier === 'medium' ? 13 : 19;
-}
-
-function sweepSamples(tier: QualityTier | undefined): number {
-  return tier === 'thumb' ? 24 : tier === 'medium' ? 56 : 96;
-}
 
 export function cavernWidthAt(x: number, seed: number): number {
   const n = hash2f(Math.floor(x * 0.5) + 97, 3, seed) - 0.5;
@@ -204,9 +191,9 @@ export function cavernSurface(
   out.ny = ny / len;
 }
 
-export function makeCavernGeometry(seed: number, tier: QualityTier, skin: CaveSkin): THREE.BufferGeometry {
-  const rings = archSamples(tier);
-  const sweeps = sweepSamples(tier);
+export function makeCavernGeometry(seed: number, skin: CaveSkin): THREE.BufferGeometry {
+  const rings = 19;
+  const sweeps = 96;
   const rowCount = rings + 2;
   const vertexCount = (sweeps + 1) * rowCount;
   const positions = new Float32Array(vertexCount * 3);
@@ -278,8 +265,8 @@ export function makeCavernGeometry(seed: number, tier: QualityTier, skin: CaveSk
 }
 
 
-function spikeGeometry(tier: QualityTier): THREE.BufferGeometry {
-  const radial = tier === 'thumb' ? 4 : tier === 'medium' ? 6 : 7;
+function spikeGeometry(): THREE.BufferGeometry {
+  const radial = 7;
   const g = new THREE.CylinderGeometry(0.02, 0.5, 1, radial, 2);
   g.rotateX(Math.PI);
   g.translate(0, -0.5, 0);
@@ -311,12 +298,11 @@ export interface StalactiteField {
 
 export function makeStalactites(
   seed: number,
-  tier: QualityTier,
   skin: CaveSkin,
   palette: Palette,
 ): StalactiteField {
-  const wanted = tier === 'thumb' ? 20 : tier === 'medium' ? 34 : 54;
-  const geometry = spikeGeometry(tier);
+  const wanted = 54;
+  const geometry = spikeGeometry();
   const material = oakMaterial({
     color: blendTokens(skin.rockLow, skin.mineral, 0.22),
     vertexColors: true,
@@ -325,16 +311,15 @@ export function makeStalactites(
     rimColor: skin.rim,
     rimStrength: 0.42,
     emissive: blendTokens(skin.rockLow, skin.mineral, 0.22),
-    emissiveIntensity: tierBounce(tier),
+    emissiveIntensity: 0.03,
     toonSteps: 2,
     toonSoftness: 0.34,
-    toonFloor: tierToonFloor(tier, 0.24),
-    tier,
+    toonFloor: 0.24,
     name: 'stalactiteMaterial',
   });
   const mesh = new THREE.InstancedMesh(geometry, material, wanted);
   mesh.name = 'stalactites';
-  mesh.castShadow = tier !== 'thumb';
+  mesh.castShadow = true;
   mesh.receiveShadow = false;
   mesh.frustumCulled = false;
   mesh.instanceColor = new THREE.InstancedBufferAttribute(new Float32Array(wanted * 3), 3);
@@ -407,17 +392,15 @@ interface Timed {
 }
 
 export function buildWorld(ctx: SceneContext, scene: THREE.Scene, grid: GridGeometry): WorldHandle {
-  const tier: QualityTier = ctx.tier;
   const palette: Palette = ctx.tokens.palettes.cave;
-  const skin = caveSkin(palette, ctx.tokens, tier);
-  const shadows = tier !== 'thumb';
+  const skin = caveSkin(palette, ctx.tokens);
   const group = new THREE.Group();
   group.name = 'fireflyCave';
   const owned: Disposable[] = [];
   const timed: Timed[] = [];
   const sized: { setPixelRatio(dpr: number): void }[] = [];
 
-  const sky = skyFromPalette(palette, 'cave', tier, {
+  const sky = skyFromPalette(palette, 'cave', {
     topSpread: 0.5,
     bottomSpread: 0.45,
     dither: 0.01,
@@ -427,7 +410,7 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene, grid: GridGeom
   owned.push(sky);
   timed.push({ setTime: (t) => sky.setTime(t) });
 
-  const rig = makeLightRig(palette, tier, {
+  const rig = makeLightRig(palette, {
     sunDir: SUN_DIR,
     pointCount: 4,
     pointDistance: 15,
@@ -440,7 +423,7 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene, grid: GridGeom
 
   applyFog(scene, palette, FOG_EXTENT);
 
-  const cavernGeometry = makeCavernGeometry(ctx.seed, tier, skin);
+  const cavernGeometry = makeCavernGeometry(ctx.seed, skin);
   const cavernMaterial: OakMaterial = oakMaterial({
     vertexColors: true,
     flatShading: true,
@@ -448,17 +431,16 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene, grid: GridGeom
     rimColor: skin.rim,
     rimStrength: 0.4,
     emissive: blendTokens(skin.rockLow, skin.rockHigh, 0.72),
-    emissiveIntensity: tierBounce(tier),
+    emissiveIntensity: 0.03,
     toonSteps: 3,
     toonSoftness: 0.32,
-    toonFloor: tierToonFloor(tier, 0.36),
+    toonFloor: 0.36,
     side: THREE.FrontSide,
-    tier,
     name: 'cavernMaterial',
   });
   const cavern = new THREE.Mesh(cavernGeometry, cavernMaterial);
   cavern.name = 'cavernShell';
-  cavern.receiveShadow = shadows;
+  cavern.receiveShadow = true;
   cavern.castShadow = false;
   group.add(cavern);
   owned.push({
@@ -472,7 +454,6 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene, grid: GridGeom
   const water = makeWater({
     size: [(CAVERN_X1 - CAVERN_X0) + 34, WATER_HALF_Z * 2],
     palette,
-    tier,
     segments: 96,
     shallow: skin.waterShallow,
     deep: skin.waterDeep,
@@ -512,13 +493,12 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene, grid: GridGeom
       seed: ctx.seed,
       name: 'walkwayStones',
     },
-    tier,
   );
   {
     const floor = oakUniforms(field.floorMaterial);
-    if (floor) floor.uniforms.uToonFloor.value = tierToonFloor(tier, 0.34);
+    if (floor) floor.uniforms.uToonFloor.value = 0.34;
     field.floorMaterial.emissive.copy(skin.stone);
-    field.floorMaterial.emissiveIntensity = tierBounce(tier);
+    field.floorMaterial.emissiveIntensity = 0.03;
   }
   group.add(field.group);
   owned.push(field);
@@ -526,10 +506,9 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene, grid: GridGeom
 
   const extent = gridExtent(grid);
   const banks = scatterRocks({
-    count: tier === 'thumb' ? 26 : 82,
+    count: 82,
     area: { x: 0, z: 0.3, halfX: extent.width * 0.5 + 4.5, halfZ: POOL_HALF_Z },
     seed: ctx.seed ^ 0x2f19,
-    tier,
     exclude: excludeBand(0, CELL * 0.5, 0.55),
     heightAt: () => WATER_LEVEL - 0.24,
     color: skin.mineral,
@@ -546,7 +525,7 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene, grid: GridGeom
   owned.push(banks);
   timed.push(banks);
 
-  const stalactites = makeStalactites(ctx.seed, tier, skin, palette);
+  const stalactites = makeStalactites(ctx.seed, skin, palette);
   group.add(stalactites.mesh);
   owned.push(stalactites);
 
@@ -555,7 +534,6 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene, grid: GridGeom
     count: 640,
     bounds: { x: 0, y: 1.4, z: -0.1, halfX: PASSAGE_HALF + 3, halfY: 1.7, halfZ: 3.5 },
     seed: ctx.seed ^ 0x11e5,
-    tier,
     color: skin.firefly,
     size: 2.35,
     intensity: 2.9,
@@ -574,7 +552,6 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene, grid: GridGeom
     count: 420,
     bounds: { x: 0, y: 4.6, z: -0.6, halfX: PASSAGE_HALF + 4, halfY: 3.1, halfZ: 3.4 },
     seed: ctx.seed ^ 0x7c03,
-    tier,
     color: blendTokens(palette.hemiSky, skin.mineral, 0.4),
     size: 1.5,
     intensity: 0.85,
@@ -593,7 +570,6 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene, grid: GridGeom
     count: 520,
     bounds: { x: 0, y: 1.15, z: 0, halfX: 2.4, halfY: 1.3, halfZ: 1.5 },
     seed: ctx.seed ^ 0x63b1,
-    tier,
     color: skin.firefly,
     size: 3.4,
     intensity: 3.4,
@@ -636,22 +612,17 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene, grid: GridGeom
 }
 
 
-export function readPos(state: { pose: Float32Array; derived: unknown }): number {
-  const d = state.derived as { pos?: unknown } | null | undefined;
-  const raw = d && typeof d === 'object' && typeof d.pos === 'number' ? d.pos : (state.pose[0] ?? 0);
-  const v = Number.isFinite(raw) ? Math.round(raw) : 0;
+export function readPos(state: { pose: Float32Array }): number {
+  const v = Math.round(state.pose[MEMORYCHAIN_POS] ?? 0);
   return v < 0 ? 0 : v > MEMORYCHAIN_END ? MEMORYCHAIN_END : v;
 }
 
-export function readCue(state: { pose: Float32Array; derived: unknown }): 0 | 1 {
-  const d = state.derived as { cue?: unknown } | null | undefined;
-  const raw = d && typeof d === 'object' && typeof d.cue === 'number' ? d.cue : (state.pose[2] ?? 0);
-  return Math.round(Number.isFinite(raw) ? raw : 0) === 1 ? 1 : 0;
+export function readCue(state: { pose: Float32Array }): 0 | 1 {
+  return Math.round(state.pose[MEMORYCHAIN_CUE] ?? 0) === 1 ? 1 : 0;
 }
 
-export function readChoice(state: { ctrl: Float32Array }): 0 | 1 {
-  const raw = state.ctrl[0] ?? 0;
-  return (Math.trunc(Number.isFinite(raw) ? raw : 0) & 1) === 1 ? 1 : 0;
+export function readChoice(state: { pose: Float32Array }): 0 | 1 {
+  return (Math.trunc(state.pose[MEMORYCHAIN_ACTION] ?? 0) & 1) === 1 ? 1 : 0;
 }
 
 export function cellX(cell: number, grid: GridSize, out: Vec3Tuple): number {

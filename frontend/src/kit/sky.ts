@@ -1,7 +1,6 @@
 
 import * as THREE from 'three';
 import type { Palette } from './tokens';
-import type { QualityTier } from './types';
 
 export interface SkyStarOptions {
   density?: number;
@@ -29,7 +28,6 @@ export interface GradientSkyOptions {
   stars?: boolean | SkyStarOptions;
   radius?: number;
   dither?: number;
-  tier?: QualityTier;
   name?: string;
 }
 
@@ -153,10 +151,6 @@ const FRAG_MAIN_CLOSE =  `
 }
 `;
 
-function detailForTier(tier: QualityTier | undefined): number {
-  return tier === 'thumb' ? 1 : 2;
-}
-
 function toVec3(v: THREE.Vector3 | readonly [number, number, number] | null | undefined, out: THREE.Vector3): THREE.Vector3 {
   if (!v) return out.set(0, 1, 0);
   const asVec = v as THREE.Vector3;
@@ -169,7 +163,7 @@ export function makeGradientSky(opts: GradientSkyOptions): SkyHandle {
   const hasSun = opts.sunDir !== null && opts.sunDir !== undefined;
   const stars = opts.stars;
   const starOpts: SkyStarOptions | null = stars === true ? {} : stars ? stars : null;
-  const hasStars = starOpts !== null && opts.tier !== 'thumb';
+  const hasStars = starOpts !== null;
 
   const sunDirection = new THREE.Vector3();
   toVec3(opts.sunDir ?? null, sunDirection);
@@ -218,7 +212,7 @@ export function makeGradientSky(opts: GradientSkyOptions): SkyHandle {
   });
   material.name = opts.name ?? 'oakSky';
 
-  const geometry = new THREE.IcosahedronGeometry(1, detailForTier(opts.tier));
+  const geometry = new THREE.IcosahedronGeometry(1, 2);
   const mesh = new THREE.Mesh(geometry, material);
   mesh.name = opts.name ?? 'oakSky';
   mesh.scale.setScalar(opts.radius ?? 400);
@@ -276,7 +270,6 @@ export interface PaletteSkyOptions extends Partial<Omit<GradientSkyOptions, 'top
 export function skyFromPalette(
   palette: Palette,
   paletteName: string,
-  tier: QualityTier,
   overrides: PaletteSkyOptions = {},
 ): SkyHandle {
   const depth = overrides.depthColumn ?? isDepthColumnPalette(paletteName);
@@ -290,7 +283,6 @@ export function skyFromPalette(
     bottom: palette.skyBottom,
     sunColor: palette.sun,
     sunHdr: night ? 2.5 : 6,
-    tier,
     ...rest,
     sunDir,
     stars,

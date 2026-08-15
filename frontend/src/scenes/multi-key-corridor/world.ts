@@ -16,7 +16,7 @@ import { skyFromPalette, type SkyHandle } from '@kit/sky';
 import { makeTerrain, type TerrainHandle } from '@kit/terrain';
 import { valueNoise2 } from '@kit/textures';
 import { TOKENS, type Palette } from '@kit/tokens';
-import type { QualityTier, SceneContext } from '@kit/types';
+import type { SceneContext } from '@kit/types';
 import {
   excludeAny,
   excludeRect,
@@ -53,8 +53,6 @@ export const CAMERA_AZIMUTH = 0.14;
 export const CAMERA_STANDOFF = 13.5;
 
 export const CHAMBERS = 4;
-export const CHAMBER_NAMES: readonly string[] = ['dawnwell', 'grove', 'ochre', 'sanctum'];
-
 
 export function smoothstep01(t: number): number {
   return t <= 0 ? 0 : t >= 1 ? 1 : t * t * (3 - 2 * t);
@@ -208,30 +206,6 @@ export function chamberBounds(grid: GridGeometry, chamber: number): ChamberBound
   };
 }
 
-export function unionBounds(all: readonly ChamberBounds[]): ChamberBounds {
-  let minX = Infinity;
-  let maxX = -Infinity;
-  let minZ = Infinity;
-  let maxZ = -Infinity;
-  let cells = 0;
-  for (const b of all) {
-    if (b.cells === 0) continue;
-    minX = Math.min(minX, b.cx - b.halfX);
-    maxX = Math.max(maxX, b.cx + b.halfX);
-    minZ = Math.min(minZ, b.cz - b.halfZ);
-    maxZ = Math.max(maxZ, b.cz + b.halfZ);
-    cells += b.cells;
-  }
-  if (cells === 0) return { cx: 0, cz: 0, halfX: 0, halfZ: 0, cells: 0 };
-  return {
-    cx: (minX + maxX) * 0.5,
-    cz: (minZ + maxZ) * 0.5,
-    halfX: (maxX - minX) * 0.5,
-    halfZ: (maxZ - minZ) * 0.5,
-    cells,
-  };
-}
-
 export function gateFacesX(grid: GridGeometry, cell: GridCell): boolean {
   return isWall(grid, cell.x, cell.y - 1) && isWall(grid, cell.x, cell.y + 1);
 }
@@ -381,17 +355,15 @@ interface Timed {
 }
 
 export function buildWorld(ctx: SceneContext, scene: THREE.Scene, grid: GridGeometry): WorldHandle {
-  const tier: QualityTier = ctx.tier;
   const palette: Palette = ctx.tokens.palettes.morning;
   const skin = templeSkin(palette, ctx.tokens);
-  const shadows = tier !== 'thumb';
   const group = new THREE.Group();
   group.name = 'templeOfThreeGates';
   const owned: Disposable[] = [];
   const timed: Timed[] = [];
   const doors = resolveDoors(grid);
 
-  const sky = skyFromPalette(palette, 'morning', tier, {
+  const sky = skyFromPalette(palette, 'morning', {
     sunDir: SUN_DIR,
     sunSize: 0.04,
     sunHdr: 5.2,
@@ -405,7 +377,7 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene, grid: GridGeom
   owned.push(sky);
   timed.push({ setTime: (t) => sky.setTime(t) });
 
-  const rig = makeLightRig(palette, tier, {
+  const rig = makeLightRig(palette, {
     sunDir: sky.sunDirection,
     pointCount: 4,
     pointDistance: 7.5,
@@ -420,7 +392,6 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene, grid: GridGeom
   const terrain = makeTerrain({
     size: [TERRAIN_SIZE, TERRAIN_SIZE],
     segments: [TERRAIN_SEGMENTS, TERRAIN_SEGMENTS],
-    tier,
     seed: ctx.seed,
     heightFn: makeGardenHeight(ctx.seed),
     jitter: 0,
@@ -442,7 +413,7 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene, grid: GridGeom
       toonSoftness: 0.3,
       toonFloor: 0.26,
     },
-    receiveShadow: shadows,
+    receiveShadow: true,
     castShadow: false,
     name: 'templeGarden',
   });
@@ -480,7 +451,6 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene, grid: GridGeom
       seed: ctx.seed,
       name: 'templeCells',
     },
-    tier,
   );
   group.add(field.group);
   owned.push(field);
@@ -495,19 +465,18 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene, grid: GridGeom
     toonSteps: 3,
     toonSoftness: 0.3,
     toonFloor: 0.26,
-    tier,
     name: 'templeStone',
   });
   owned.push({ dispose: () => stoneMaterial.dispose() });
 
-  const portalGeometry = makePortalGeometry(skin, tier);
+  const portalGeometry = makePortalGeometry(skin);
   owned.push({ dispose: () => portalGeometry.dispose() });
   const portalRoots: THREE.Object3D[] = [];
   {
     const portals = new THREE.InstancedMesh(portalGeometry, stoneMaterial, Math.max(1, doors.length));
     portals.name = 'templePortals';
-    portals.castShadow = shadows;
-    portals.receiveShadow = shadows;
+    portals.castShadow = true;
+    portals.receiveShadow = true;
     portals.count = 0;
     const matrix = new THREE.Matrix4();
     const position = new THREE.Vector3();
@@ -540,7 +509,7 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene, grid: GridGeom
     owned.push({ dispose: () => portals.dispose() });
   }
 
-  const lanternGeometry = makeLanternGeometry(skin, tier);
+  const lanternGeometry = makeLanternGeometry(skin);
   owned.push({ dispose: () => lanternGeometry.dispose() });
   const lanternSpots: { x: number; z: number }[] = [];
   {
@@ -557,8 +526,8 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene, grid: GridGeom
   {
     const lanterns = new THREE.InstancedMesh(lanternGeometry, stoneMaterial, Math.max(1, lanternSpots.length));
     lanterns.name = 'templeLanterns';
-    lanterns.castShadow = shadows;
-    lanterns.receiveShadow = shadows;
+    lanterns.castShadow = true;
+    lanterns.receiveShadow = true;
     const matrix = new THREE.Matrix4();
     const position = new THREE.Vector3();
     const quaternion = new THREE.Quaternion();
@@ -578,7 +547,7 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene, grid: GridGeom
     group.add(lanterns);
     owned.push({ dispose: () => lanterns.dispose() });
   }
-  if (tier !== 'thumb') {
+  {
     const flameGeometry = new THREE.IcosahedronGeometry(0.055, 1);
     const flameMaterial: EmissiveMaterial = emissiveMaterial(skin.flame, 1.35, { name: 'templeLanternFlame' });
     const flames = new THREE.InstancedMesh(flameGeometry, flameMaterial, Math.max(1, lanternSpots.length));
@@ -633,23 +602,15 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene, grid: GridGeom
     { chamber: 3, kind: 'flowers', count: 34, scale: [0.34, 0.64], stretch: [0.9, 1.25], wind: 0.026, name: 'sanctumGoldflowers' },
     { chamber: 3, kind: 'rocks', count: 26, scale: [0.09, 0.18], stretch: [0.22, 0.36], wind: 0, name: 'sanctumGoldDust' },
   ];
-  const gardenBounds = unionBounds(bounds);
-  const thumbSpecs: typeof plantSpecs = [
-    { chamber: 1, kind: 'grass', count: 293, scale: [0.28, 0.6], stretch: [0.75, 1.3], wind: 0.036, name: 'templeGroundcover' },
-    { chamber: 1, kind: 'flowers', count: 98, scale: [0.34, 0.68], stretch: [0.85, 1.25], wind: 0.028, name: 'templeBlossoms' },
-    { chamber: 2, kind: 'rocks', count: 78, scale: [0.1, 0.22], stretch: [0.23, 0.4], wind: 0, name: 'templeGravel' },
-  ];
-  const liveSpecs = tier === 'thumb' ? thumbSpecs : plantSpecs;
-  for (let i = 0; i < liveSpecs.length; i++) {
-    const spec = liveSpecs[i] as (typeof liveSpecs)[number];
-    const b = (tier === 'thumb' ? gardenBounds : bounds[spec.chamber]) as ChamberBounds;
+  for (let i = 0; i < plantSpecs.length; i++) {
+    const spec = plantSpecs[i] as (typeof plantSpecs)[number];
+    const b = (bounds[spec.chamber]) as ChamberBounds;
     const chamber = skin.chambers[spec.chamber] as ChamberSkin;
     const color = spec.kind === 'flowers' ? chamber.bloom : chamber.litter;
     const options = {
       count: spec.count,
       area: { x: b.cx, z: b.cz, halfX: b.halfX, halfZ: b.halfZ },
       seed: (ctx.seed ^ 0x5b10) + i * 977,
-      tier,
       exclude: noPlanting,
       color,
       scale: spec.scale,
@@ -713,13 +674,12 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene, grid: GridGeom
   ];
   for (let i = 0; i < treeSpecs.length; i++) {
     const spec = treeSpecs[i] as (typeof treeSpecs)[number];
-    if (tier === 'thumb' && spec.archetype === 'conifer') continue;
+    if (false && spec.archetype === 'conifer') continue;
     const handle = scatterTrees({
       archetypes: [spec.archetype],
       count: spec.count,
       area: spec.area,
       seed: (ctx.seed ^ 0x1a70) + i * 613,
-      tier,
       exclude: excludeAny(offTemple, nearCamera),
       heightAt: (x, z) => terrain.sampleHeight(x, z),
       maxSlope: 0.7,
@@ -765,7 +725,6 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene, grid: GridGeom
       count: spec.count,
       bounds: { x: b.cx, y: spec.y, z: b.cz, halfX: b.halfX, halfY: 0.95, halfZ: b.halfZ },
       seed: (ctx.seed ^ 0x7d21) + spec.chamber * 613,
-      tier,
       color: skin.chambers[spec.chamber]?.motes ?? white,
       size: spec.size,
       intensity: spec.intensity,
@@ -784,7 +743,6 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene, grid: GridGeom
     size: [TERRAIN_SIZE * 0.9, TERRAIN_SIZE * 0.9],
     color: blendTokens(palette.fog, palette.hemiSky, 0.3),
     seed: ctx.seed ^ 0x3c91,
-    tier,
     layers: 3,
     baseY: 1.1,
     spread: 1.6,
@@ -833,7 +791,7 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene, grid: GridGeom
 export const LANTERN_FLAME_Y = 0.575;
 export const PORTAL_LINTEL_Y = 1.42;
 
-export function makePortalGeometry(skin: TempleSkin, tier: QualityTier): THREE.BufferGeometry {
+export function makePortalGeometry(skin: TempleSkin): THREE.BufferGeometry {
   const parts: ColoredPart[] = [];
   const PIER_H = PORTAL_LINTEL_Y;
   const PIER_Z = 0.95;
@@ -848,7 +806,7 @@ export function makePortalGeometry(skin: TempleSkin, tier: QualityTier): THREE.B
     const capital = new THREE.BoxGeometry(0.56, 0.13, 0.5);
     capital.translate(0, PIER_H - 0.065, sz * PIER_Z);
     parts.push({ geometry: capital, color: skin.stoneDark });
-    const finial = new THREE.OctahedronGeometry(0.095, tier === 'thumb' ? 0 : 1);
+    const finial = new THREE.OctahedronGeometry(0.095, 1);
     finial.scale(1, 1.7, 1);
     finial.translate(0, PIER_H + 0.16, sz * PIER_Z);
     parts.push({ geometry: finial, color: skin.stoneLight });
@@ -865,8 +823,8 @@ export function makePortalGeometry(skin: TempleSkin, tier: QualityTier): THREE.B
   return mergeColoredParts(parts, 'templePortal');
 }
 
-export function makeLanternGeometry(skin: TempleSkin, tier: QualityTier): THREE.BufferGeometry {
-  const detail = tier === 'thumb' ? 0.45 : tier === 'medium' ? 0.7 : 1;
+export function makeLanternGeometry(skin: TempleSkin): THREE.BufferGeometry {
+  const detail = 1;
   const radial = Math.max(5, Math.round(8 * detail));
   const parts: ColoredPart[] = [];
 

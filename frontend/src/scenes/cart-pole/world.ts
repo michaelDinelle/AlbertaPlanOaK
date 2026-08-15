@@ -13,7 +13,7 @@ import { skyFromPalette, type SkyHandle } from '@kit/sky';
 import { makeTerrain, type TerrainHandle } from '@kit/terrain';
 import { valueNoise2 } from '@kit/textures';
 import { TOKENS, type Palette } from '@kit/tokens';
-import type { QualityTier, SceneContext } from '@kit/types';
+import type { SceneContext } from '@kit/types';
 import {
   excludeAny,
   scatterFlowers,
@@ -47,8 +47,6 @@ export const GAUGE_Z = -0.92;
 
 export const CAM_BASE: readonly [number, number, number] = [0.44, 1.16, 4.62];
 export const CAM_LOOK: readonly [number, number, number] = [0, 0.32, -0.06];
-export const CAM_BASE_THUMB: readonly [number, number, number] = [0, 1.02, 5.6];
-export const CAM_LOOK_THUMB: readonly [number, number, number] = [0, 0.32, 0];
 
 export function gaugeStation(
   camera: readonly [number, number, number],
@@ -223,7 +221,6 @@ const REED_WIND = 0.05;
 const TREE_WIND = 0.028;
 
 export function buildWorld(ctx: SceneContext, scene: THREE.Scene): WorldHandle {
-  const tier: QualityTier = ctx.tier;
   const palette: Palette = ctx.tokens.palettes.noon;
   const accent = ctx.tokens.accents['cart-pole'] ?? ctx.tokens.celebrationGold;
   const xLimit = trackLimit(ctx.geometry);
@@ -234,7 +231,6 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene): WorldHandle {
   group.name = 'boardwalkWorld';
   const owned: Disposable[] = [];
   const timed: Timed[] = [];
-  const shadows = tier !== 'thumb';
 
   const woodPale = blendTokens(palette.groundB, TOKEN_BLACK, 0.34);
   const woodMid = blendTokens(palette.groundA, TOKEN_BLACK, 0.24);
@@ -251,7 +247,7 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene): WorldHandle {
   const lakeShallow = blendTokens(blendTokens(palette.groundA, palette.skyTop, 0.35), TOKEN_BLACK, 0.42);
   const lakeDeep = blendTokens(TOKEN_BLACK, palette.skyTop, 0.14);
 
-  const sky = skyFromPalette(palette, 'noon', tier, {
+  const sky = skyFromPalette(palette, 'noon', {
     sunDir: SUN_DIR,
     sunSize: 0.038,
     sunHdr: 6.5,
@@ -265,7 +261,7 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene): WorldHandle {
   owned.push(sky);
   timed.push({ setTime: (t) => sky.setTime(t) });
 
-  const rig = makeLightRig(palette, tier, {
+  const rig = makeLightRig(palette, {
     sunDir: sky.sunDirection,
     pointCount: 2,
     pointDistance: 5,
@@ -282,7 +278,6 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene): WorldHandle {
   const terrain = makeTerrain({
     size: [TERRAIN_W, TERRAIN_D],
     segments: [TERRAIN_SEG_X, TERRAIN_SEG_Z],
-    tier,
     seed: ctx.seed,
     heightFn: shore,
     jitter: 0,
@@ -307,7 +302,7 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene): WorldHandle {
       toonSoftness: 0.3,
       toonFloor: 0.24,
     },
-    receiveShadow: shadows,
+    receiveShadow: true,
     castShadow: false,
     name: 'lakeBed',
   });
@@ -317,7 +312,6 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene): WorldHandle {
   const water = makeWater({
     size: [TERRAIN_W - 2, TERRAIN_D - 2],
     palette,
-    tier,
     segments: 108,
     level: WATER_Y,
     amplitude: 0.016,
@@ -380,13 +374,12 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene): WorldHandle {
     toonSteps: 3,
     toonSoftness: 0.3,
     toonFloor: 0.24,
-    tier,
     name: 'boardwalkTimber',
   });
   const deckMesh = new THREE.Mesh(deckGeometry, timberMaterial);
   deckMesh.name = 'boardwalkDeck';
-  deckMesh.castShadow = shadows;
-  deckMesh.receiveShadow = shadows;
+  deckMesh.castShadow = true;
+  deckMesh.receiveShadow = true;
   group.add(deckMesh);
   owned.push({
     dispose: () => {
@@ -421,8 +414,8 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene): WorldHandle {
     const geo = mergeColoredParts(parts, root.name);
     const mesh = new THREE.Mesh(geo, timberMaterial);
     mesh.name = sign < 0 ? 'deckEndLeft' : 'deckEndRight';
-    mesh.castShadow = shadows;
-    mesh.receiveShadow = shadows;
+    mesh.castShadow = true;
+    mesh.receiveShadow = true;
     root.add(mesh);
     owned.push({ dispose: () => geo.dispose() });
   }
@@ -459,7 +452,7 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene): WorldHandle {
 
   const gaugeRoot = new THREE.Object3D();
   gaugeRoot.name = 'tiltGaugeRoot';
-  const station = gaugeStation(tier === 'thumb' ? CAM_BASE_THUMB : CAM_BASE, GAUGE_Z);
+  const station = gaugeStation(CAM_BASE, GAUGE_Z);
   gaugeRoot.position.set(station.x, station.y, station.z);
   gaugeRoot.scale.setScalar(station.scale);
   group.add(gaugeRoot);
@@ -526,7 +519,7 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene): WorldHandle {
     const mesh = new THREE.Mesh(geo, timberMaterial);
     mesh.name = 'tiltGauge';
     mesh.castShadow = false;
-    mesh.receiveShadow = shadows;
+    mesh.receiveShadow = true;
     gaugeRoot.add(mesh);
     owned.push({ dispose: () => geo.dispose() });
   }
@@ -553,7 +546,7 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene): WorldHandle {
     }
   }
 
-  const padGeometry = new THREE.CircleGeometry(0.16, tier === 'thumb' ? 6 : 9, 0.35, Math.PI * 2 - 0.7);
+  const padGeometry = new THREE.CircleGeometry(0.16, 9, 0.35, Math.PI * 2 - 0.7);
   padGeometry.rotateX(-Math.PI / 2);
   const padMaterial = oakMaterial({
     color: blendTokens(palette.groundA, TOKEN_BLACK, 0.2),
@@ -565,10 +558,9 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene): WorldHandle {
     toonSteps: 2,
     toonSoftness: 0.35,
     toonFloor: 0.3,
-    tier,
     name: 'lilyPadMaterial',
   });
-  const PAD_COUNT = tier === 'thumb' ? 14 : tier === 'medium' ? 44 : 96;
+  const PAD_COUNT = 96;
   const pads = new THREE.InstancedMesh(padGeometry, padMaterial, PAD_COUNT);
   pads.name = 'lilyPads';
   pads.instanceColor = new THREE.InstancedBufferAttribute(new Float32Array(PAD_COUNT * 3), 3);
@@ -623,7 +615,6 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene): WorldHandle {
     count: 3400,
     area: { x: 0, z: -9, halfX: 12, halfZ: 3.6 },
     seed: ctx.seed ^ 0x7f19,
-    tier,
     exclude: excludeAny(underWater, overTheCrossing, inFront),
     heightAt: sampleAt,
     maxSlope: 0.8,
@@ -645,7 +636,6 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene): WorldHandle {
     count: 620,
     area: { x: 0, z: -7.4, halfX: 11, halfZ: 2.6 },
     seed: ctx.seed ^ 0x3d51,
-    tier,
     exclude: excludeAny(
       overTheCrossing,
       inFront,
@@ -673,7 +663,6 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene): WorldHandle {
     count: 150,
     area: { x: 0, z: 2.15, halfX: 3.1, halfZ: 0.55 },
     seed: ctx.seed ^ 0x9ab3,
-    tier,
     exclude: (x, z) => Math.abs(x) < 1.3 + (z - 1.6) * 0.7,
     heightAt: () => WATER_Y - 0.05,
     color: blendTokens(reedGreen, TOKEN_BLACK, 0.3),
@@ -694,7 +683,6 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene): WorldHandle {
     count: 340,
     area: { x: 0, z: -8.8, halfX: 11, halfZ: 3 },
     seed: ctx.seed ^ 0x2c71,
-    tier,
     exclude: excludeAny(underWater, overTheCrossing, inFront),
     heightAt: sampleAt,
     maxSlope: 0.7,
@@ -715,7 +703,6 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene): WorldHandle {
     count: 220,
     area: { x: 0, z: -7.2, halfX: 11, halfZ: 2.4 },
     seed: ctx.seed ^ 0x2b17,
-    tier,
     exclude: excludeAny(overTheCrossing, inFront, (x, z) => {
       const h = terrain.sampleHeight(x, z);
       return h < WATER_Y - 0.3 || h > WATER_Y + 0.7;
@@ -739,7 +726,6 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene): WorldHandle {
     count: 120,
     area: { x: 0, z: -16, halfX: 15, halfZ: 6 },
     seed: ctx.seed ^ 0x5133,
-    tier,
     exclude: excludeAny(underWater, (x, z) => z > -10.5),
     heightAt: sampleAt,
     maxSlope: 0.65,
@@ -763,7 +749,6 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene): WorldHandle {
     count: 190,
     bounds: { x: 0, y: 0.42, z: -1.1, halfX: 4.2, halfY: 1.05, halfZ: 3 },
     seed: ctx.seed,
-    tier,
     color: blendTokens(palette.sun, accent, 0.4),
     size: 0.5,
     intensity: 0.85,
@@ -781,7 +766,6 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene): WorldHandle {
     count: 130,
     bounds: { x: 0, y: WATER_Y + 0.22, z: -3.2, halfX: 7, halfY: 0.3, halfZ: 3.4 },
     seed: ctx.seed ^ 0x51ab,
-    tier,
     color: blendTokens(TOKEN_WHITE, palette.hemiSky, 0.3),
     size: 0.4,
     intensity: 0.9,
@@ -798,7 +782,6 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene): WorldHandle {
     size: [30, 14],
     color: blendTokens(palette.fog, palette.hemiSky, 0.45),
     seed: ctx.seed,
-    tier,
     layers: 4,
     baseY: WATER_Y + 0.16,
     spread: 0.85,
@@ -817,7 +800,6 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene): WorldHandle {
     size: [56, 20],
     color: blendTokens(TOKEN_WHITE, palette.skyHorizon, 0.12),
     seed: ctx.seed ^ 0x71c3,
-    tier,
     layers: 3,
     baseY: 3.2,
     spread: 1.9,

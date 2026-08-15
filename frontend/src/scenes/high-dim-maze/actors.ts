@@ -9,7 +9,6 @@ import {
   type OakMaterial,
 } from '@kit/materials';
 import type { Palette } from '@kit/tokens';
-import type { QualityTier } from '@kit/types';
 import { makeWater, type WaterHandle } from '@kit/water';
 import * as THREE from 'three';
 import { clamp01, mergeColoredParts, type CanyonSkin, type ColoredPart } from './world';
@@ -24,7 +23,6 @@ const SHAFT_HDR = 0.62;
 const GROW_CEILING = 1.2;
 
 export interface OasisOptions {
-  tier: QualityTier;
   palette: Palette;
   skin: CanyonSkin;
   name?: string;
@@ -42,8 +40,8 @@ export interface OasisHandle {
 }
 
 export function buildOasis(opts: OasisOptions): OasisHandle {
-  const { tier, palette, skin } = opts;
-  const detail = tier === 'thumb' ? 0.4 : tier === 'medium' ? 0.7 : 1;
+  const { palette, skin } = opts;
+  const detail = 1;
   const group = new THREE.Group();
   group.name = opts.name ?? 'oasisAlcove';
 
@@ -57,7 +55,6 @@ export function buildOasis(opts: OasisOptions): OasisHandle {
 
   const beacon = new GoalBeacon({
     color: skin.shaft,
-    tier,
     height: 0.46,
     radius: 0.08,
     intensity: 0.26,
@@ -67,7 +64,7 @@ export function buildOasis(opts: OasisOptions): OasisHandle {
 
   const basinParts: ColoredPart[] = [];
   {
-    const stones = tier === 'thumb' ? 6 : 11;
+    const stones = 11;
     for (let i = 0; i < stones; i++) {
       const a = (i / stones) * Math.PI * 2;
       const wobble = 0.86 + 0.3 * ((i * 5) % 7) / 7;
@@ -94,19 +91,17 @@ export function buildOasis(opts: OasisOptions): OasisHandle {
     toonSteps: 3,
     toonSoftness: 0.3,
     toonFloor: 0.28,
-    tier,
     name: 'oasisBasinMaterial',
   });
   const basin = new THREE.Mesh(basinGeometry, basinMaterial);
   basin.name = 'oasisBasin';
-  basin.castShadow = tier !== 'thumb';
-  basin.receiveShadow = tier !== 'thumb';
+  basin.castShadow = true;
+  basin.receiveShadow = true;
   alcove.add(basin);
 
   const water: WaterHandle = makeWater({
     size: POOL_R * 2,
     palette,
-    tier,
     segments: 18,
     shallow: skin.water,
     deep: skin.waterDeep,
@@ -125,7 +120,7 @@ export function buildOasis(opts: OasisOptions): OasisHandle {
   water.mesh.name = 'oasisWater';
   alcove.add(water.mesh);
 
-  const reedGeometry = makeReedGeometry(tier);
+  const reedGeometry = makeReedGeometry();
   const reedMaterial: OakMaterial = oakMaterial({
     color: skin.reed,
     vertexColors: true,
@@ -138,10 +133,9 @@ export function buildOasis(opts: OasisOptions): OasisHandle {
     toonSoftness: 0.36,
     toonFloor: 0.3,
     wind: { amplitude: 0.05, frequency: 1.7, height: 0.34 },
-    tier,
     name: 'oasisReedMaterial',
   });
-  const reedCount = tier === 'thumb' ? 5 : 10;
+  const reedCount = 10;
   const reeds = new THREE.InstancedMesh(reedGeometry, reedMaterial, reedCount);
   reeds.name = 'oasisReeds';
   reeds.castShadow = false;
@@ -244,8 +238,8 @@ export function buildOasis(opts: OasisOptions): OasisHandle {
   };
 }
 
-function makeReedGeometry(tier: QualityTier): THREE.BufferGeometry {
-  const blades = tier === 'thumb' ? 2 : 3;
+function makeReedGeometry(): THREE.BufferGeometry {
+  const blades = 3;
   const positions = new Float32Array(blades * 2 * 3 * 3);
   const colors = new Float32Array(blades * 2 * 3 * 3);
   let o = 0;
@@ -289,7 +283,6 @@ function makeReedGeometry(tier: QualityTier): THREE.BufferGeometry {
 
 
 export interface ScarfOptions {
-  tier: QualityTier;
   color: THREE.ColorRepresentation;
   height: number;
   name?: string;
@@ -305,21 +298,8 @@ export interface ScarfHandle {
 export function buildScarf(opts: ScarfOptions): ScarfHandle {
   const group = new THREE.Group();
   group.name = opts.name ?? 'wispScarf';
-  const segments = opts.tier === 'thumb' ? 0 : opts.tier === 'medium' ? 5 : 7;
+  const segments = 7;
   group.position.y = opts.height;
-
-  if (segments === 0) {
-    return {
-      group,
-      segments,
-      setState() {
-      },
-      dispose() {
-        group.removeFromParent();
-        group.clear();
-      },
-    };
-  }
 
   const SEG_LEN = 0.2;
   const geometry = makeScarfPanelGeometry(SEG_LEN);
@@ -337,7 +317,6 @@ export function buildScarf(opts: ScarfOptions): ScarfHandle {
     toonSteps: 2,
     toonSoftness: 0.4,
     toonFloor: 0.42,
-    tier: opts.tier,
     name: 'wispScarfMaterial',
   });
   const mesh = new THREE.InstancedMesh(geometry, material, segments);
@@ -441,7 +420,6 @@ function makeScarfPanelGeometry(length: number): THREE.BufferGeometry {
 
 
 export interface GustOptions {
-  tier: QualityTier;
   skin: CanyonSkin;
   color: THREE.ColorRepresentation;
   name?: string;
@@ -467,7 +445,7 @@ export interface GustHandle {
 export function buildGust(opts: GustOptions): GustHandle {
   const group = new THREE.Group();
   group.name = opts.name ?? 'wispGust';
-  const lines = opts.tier === 'thumb' ? 0 : opts.tier === 'medium' ? 4 : 6;
+  const lines = 6;
 
   const lineGeometry = new THREE.PlaneGeometry(1, 0.022);
   lineGeometry.rotateX(-Math.PI / 2);
@@ -498,7 +476,6 @@ export function buildGust(opts: GustOptions): GustHandle {
     toonSteps: 2,
     toonSoftness: 0.5,
     toonFloor: 0.6,
-    tier: opts.tier,
     name: 'wispSandWake',
   });
   const wake = new THREE.Mesh(wakeGeometry, wakeMaterial);
@@ -507,7 +484,7 @@ export function buildGust(opts: GustOptions): GustHandle {
   wake.renderOrder = 1;
   group.add(wake);
 
-  const ringGeometry = new THREE.RingGeometry(0.2, 0.36, opts.tier === 'thumb' ? 10 : 26);
+  const ringGeometry = new THREE.RingGeometry(0.2, 0.36, 26);
   ringGeometry.rotateX(-Math.PI / 2);
   const ringMaterial: EmissiveMaterial = emissiveMaterial(opts.skin.dust, 0.55, {
     transparent: true,
@@ -532,7 +509,7 @@ export function buildGust(opts: GustOptions): GustHandle {
   return {
     group,
     setLines(fromX, fromZ, toX, toZ, y, progress, amount) {
-      if (lines === 0 || amount <= 0.001) {
+      if (amount <= 0.001) {
         lineMesh.visible = false;
         return;
       }

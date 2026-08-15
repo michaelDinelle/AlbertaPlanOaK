@@ -16,7 +16,7 @@ import type {
 import { Wisp, yawFromGridDelta } from '@kit/wisp';
 import * as THREE from 'three';
 import type { GridCell, GridGeometry } from '@sim/types';
-import { HIGHDIMMAZE_DASH, HIGHDIMMAZE_STAY } from '@sim/envs/highdimmaze';
+import { HIGHDIMMAZE_ACTION, HIGHDIMMAZE_ACTIONS, HIGHDIMMAZE_DASH, HIGHDIMMAZE_GX, HIGHDIMMAZE_GY, HIGHDIMMAZE_HEADING, HIGHDIMMAZE_STAY, HIGHDIMMAZE_X, HIGHDIMMAZE_Y } from '@sim/envs/highdimmaze';
 import { buildGust, buildOasis, buildScarf, type GustHandle, type OasisHandle, type ScarfHandle } from './actors';
 import { manifest } from './manifest';
 import {
@@ -34,10 +34,6 @@ const CAM_AZIMUTH = CAMERA_AZIMUTH;
 const CAM_POLAR = 0.86;
 const CAM_DISTANCE = 17;
 const CAM_TARGET_Y = 0.62;
-const CAM_YAW_RANGE = 0.04;
-const CAM_DISTANCE_THUMB = 20;
-const CAM_AZIMUTH_THUMB = CAMERA_AZIMUTH;
-const CAM_POLAR_THUMB = 0.82;
 
 const BURST_SCALE = 0.84;
 const RIPPLE_SCALE = 0.52;
@@ -56,14 +52,6 @@ const FACE_RATE = 12;
 
 const PROXIMITY_CELLS = 4;
 
-interface HighDimMazeLike {
-  x?: unknown;
-  y?: unknown;
-  gx?: unknown;
-  gy?: unknown;
-  lastDir?: unknown;
-}
-
 interface Reading {
   agent: GridCell;
   goal: GridCell;
@@ -71,23 +59,17 @@ interface Reading {
   action: number;
 }
 
-function number(v: unknown, fallback: number): number {
-  return typeof v === 'number' && Number.isFinite(v) ? v : fallback;
-}
-
 function read(state: FrameState, grid: GridSize, out: Reading): Reading {
-  const d = state.derived as HighDimMazeLike | null | undefined;
-  const has = d !== null && typeof d === 'object';
-  out.agent.x = Math.round(number(has ? d.x : undefined, state.pose[0] ?? 0));
-  out.agent.y = Math.round(number(has ? d.y : undefined, state.pose[1] ?? 0));
-  out.goal.x = Math.round(number(has ? d.gx : undefined, state.pose[2] ?? 0));
-  out.goal.y = Math.round(number(has ? d.gy : undefined, state.pose[3] ?? 0));
+  out.agent.x = Math.round(state.pose[HIGHDIMMAZE_X] ?? 0);
+  out.agent.y = Math.round(state.pose[HIGHDIMMAZE_Y] ?? 0);
+  out.goal.x = Math.round(state.pose[HIGHDIMMAZE_GX] ?? 0);
+  out.goal.y = Math.round(state.pose[HIGHDIMMAZE_GY] ?? 0);
   clampCell(out.agent, grid);
   clampCell(out.goal, grid);
-  const dir = Math.round(number(has ? d.lastDir : undefined, state.pose[4] ?? 0));
+  const dir = Math.round(state.pose[HIGHDIMMAZE_HEADING] ?? 0);
   out.lastDir = ((dir % 4) + 4) % 4;
-  const a = Math.trunc(number(state.ctrl[0], 0));
-  out.action = ((a % 6) + 6) % 6;
+  const a = Math.trunc(state.pose[HIGHDIMMAZE_ACTION] ?? 0);
+  out.action = ((a % HIGHDIMMAZE_ACTIONS) + HIGHDIMMAZE_ACTIONS) % HIGHDIMMAZE_ACTIONS;
   return out;
 }
 
@@ -156,7 +138,6 @@ class SlotCanyonsScene implements SceneModule {
     const wisp = new Wisp(
       {
         color: ember,
-        tier: ctx.tier,
         radius: 0.165,
         hop: { duration: HOP_SECONDS, height: HOP_HEIGHT },
         name: 'canyonWisp',
@@ -167,7 +148,6 @@ class SlotCanyonsScene implements SceneModule {
     this.scene.add(wisp.group);
 
     const scarf = buildScarf({
-      tier: ctx.tier,
       color: blendTokens(accent, TOKENS.palettes.dusk.skyHorizon, 0.3),
       height: ctx.tokens.wispHeight * 0.92,
       name: 'canyonScarf',
@@ -176,7 +156,6 @@ class SlotCanyonsScene implements SceneModule {
     wisp.avatar.add(scarf.group);
 
     const gust = buildGust({
-      tier: ctx.tier,
       skin,
       color: blendTokens(accent, palette.sun, 0.5),
       name: 'canyonGust',
@@ -189,7 +168,6 @@ class SlotCanyonsScene implements SceneModule {
       count: 110,
       bounds: { x: 0, y: 0, z: 0, halfX: 0.4, halfY: 0.28, halfZ: 0.4 },
       seed: ctx.seed ^ 0x5e77,
-      tier: ctx.tier,
       color: skin.dust,
       size: 0.9,
       intensity: 1.4,
@@ -202,17 +180,16 @@ class SlotCanyonsScene implements SceneModule {
     this.settleDust = settleDust;
     this.scene.add(settleDust.points);
 
-    const oasis = buildOasis({ tier: ctx.tier, palette, skin, name: 'oasisAlcove' });
+    const oasis = buildOasis({ palette, skin, name: 'oasisAlcove' });
     this.oasis = oasis;
     this.scene.add(oasis.group);
 
-    const thumb = ctx.tier === 'thumb';
     const rig = makeOrbitRig({
       canvas: ctx.canvas,
       target: [0, CAM_TARGET_Y, 0],
-      distance: thumb ? CAM_DISTANCE_THUMB : CAM_DISTANCE,
-      azimuth: thumb ? CAM_AZIMUTH_THUMB : CAM_AZIMUTH,
-      polar: thumb ? CAM_POLAR_THUMB : CAM_POLAR,
+      distance: CAM_DISTANCE,
+      azimuth: CAM_AZIMUTH,
+      polar: CAM_POLAR,
       fov: ctx.tokens.fovHero,
       near: 0.1,
       far: 900,
@@ -227,7 +204,6 @@ class SlotCanyonsScene implements SceneModule {
     rig.snap();
 
     const pool = new CelebrationPool({
-      tier: ctx.tier,
       seed: ctx.seed,
       burstSize: BURST_PARTICLES,
       name: 'canyonCelebrations',

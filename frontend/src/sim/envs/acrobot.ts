@@ -1,7 +1,6 @@
 
 import type { EnvDecoder, EnvFrame, EnvGeometry, SimEvent } from '../types';
 import { NO_EVENTS } from '../events';
-import { OFF_POSE, effortView, POSE_LEN, OFF_DONE } from '../record';
 
 
 export const AB_DT = 0.2;
@@ -12,6 +11,16 @@ export const AB_W2MAX = Math.fround(28.274334);
 export const AB_SUCCESS_HEIGHT = 1;
 export const AB_ACTIONS = 3;
 
+export const ACROBOT_TH1 = 0;
+export const ACROBOT_TH2 = 1;
+export const ACROBOT_W1 = 2;
+export const ACROBOT_W2 = 3;
+export const ACROBOT_ACTION = 4;
+
+export function acrobotTorque(action: number): number {
+  return ((Math.trunc(action) >>> 0) % AB_ACTIONS) - 1;
+}
+
 
 export interface AcrobotStatic {
   l1: number;
@@ -21,33 +30,8 @@ export interface AcrobotStatic {
   w2Max: number;
 }
 
-export interface AcrobotState {
-  th1: number;
-  th2: number;
-  w1: number;
-  w2: number;
-  tipHeight: number;
-  action: number;
-  torque: number;
-}
-
 
 export const ACROBOT_POINT_FLOATS = 4;
-
-export function acrobotPoints(th1: number, th2: number, out?: Float32Array): Float32Array {
-  const o = out ?? new Float32Array(ACROBOT_POINT_FLOATS);
-  const ex = AB_L1 * Math.sin(th1);
-  const ey = -AB_L1 * Math.cos(th1);
-  o[0] = ex;
-  o[1] = ey;
-  o[2] = ex + AB_L2 * Math.sin(th1 + th2);
-  o[3] = ey - AB_L2 * Math.cos(th1 + th2);
-  return o;
-}
-
-export function acrobotTipHeight(th1: number, th2: number): number {
-  return -Math.cos(th1) - Math.cos(th1 + th2);
-}
 
 
 const STATIC: AcrobotStatic = Object.freeze({
@@ -72,25 +56,7 @@ const GEOMETRY: EnvGeometry = Object.freeze({
   classic: Object.freeze({ anchors: ANCHORS }),
 });
 
-function torqueOf(ctrl0: number): number {
-  return ((Math.trunc(ctrl0) >>> 0) % AB_ACTIONS) - 1;
-}
-
-function makeState(pose: Float32Array, ctrl0: number, applied: boolean): AcrobotState {
-  const th1 = pose[0] ?? 0;
-  const th2 = pose[1] ?? 0;
-  return {
-    th1,
-    th2,
-    w1: pose[2] ?? 0,
-    w2: pose[3] ?? 0,
-    tipHeight: acrobotTipHeight(th1, th2),
-    action: ctrl0,
-    torque: applied ? torqueOf(ctrl0) : 0,
-  };
-}
-
-export const acrobotDecoder: EnvDecoder<AcrobotState, AcrobotStatic> = {
+export const acrobotDecoder: EnvDecoder<AcrobotStatic> = {
   envId: 'Acrobot-cont-v0',
 
   initStatic(): AcrobotStatic {
@@ -101,29 +67,17 @@ export const acrobotDecoder: EnvDecoder<AcrobotState, AcrobotStatic> = {
     return GEOMETRY;
   },
 
-  initFrame(): EnvFrame<AcrobotState> {
+  initFrame(): EnvFrame {
     const pose = new Float32Array(9);
     return {
       step: -1,
-      ctrl: new Float32Array(6),
       done: 0,
       pose,
-      state: makeState(pose, 0, false),
     };
   },
 
-  decodeFrame(i: number, raw16: Float32Array): EnvFrame<AcrobotState> {
-    const pose = raw16.subarray(OFF_POSE, OFF_POSE + POSE_LEN);
-    return {
-      step: i,
-      ctrl: effortView(raw16, 4),
-      done: raw16[OFF_DONE] ?? 0,
-      pose,
-      state: makeState(pose, raw16[OFF_POSE + 4] ?? 0, true),
-    };
-  },
 
-  deriveEvents(_prev: EnvFrame<AcrobotState>, next: EnvFrame<AcrobotState>): SimEvent[] {
+  deriveEvents(_prev: EnvFrame, next: EnvFrame): SimEvent[] {
     if (next.done === 0) return NO_EVENTS;
     return [{ type: 'goal' }, { type: 'done' }, { type: 'teleport' }];
   },

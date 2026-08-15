@@ -1,19 +1,25 @@
 
 import type { EnvDecoder, EnvFrame, EnvGeometry, SimEvent } from '../types';
 import { NO_EVENTS } from '../events';
-import { OFF_POSE, effortView, POSE_LEN, OFF_DONE } from '../record';
 
 
 export const CP_TAU = 0.02;
 export const CP_X_LIMIT = Math.fround(2.4);
 export const CP_TH_LIMIT = Math.fround(0.2094395);
 export const CP_FORCE_MAG = 10;
-export const CP_POLE_HALF_LENGTH = 0.5;
 export const CP_POLE_LENGTH = 1;
 export const CP_CART_WIDTH = 0.4;
 export const CP_CART_HEIGHT = 0.24;
 export const CP_POLE_WIDTH = 0.08;
-export const CP_ACTIONS = 2;
+export const CARTPOLE_X = 0;
+export const CARTPOLE_XDOT = 1;
+export const CARTPOLE_TH = 2;
+export const CARTPOLE_THDOT = 3;
+export const CARTPOLE_ACTION = 4;
+
+export function cartPoleForce(action: number): number {
+  return (Math.trunc(action) & 1) === 1 ? CP_FORCE_MAG : -CP_FORCE_MAG;
+}
 
 
 export interface CartPoleStatic {
@@ -22,17 +28,6 @@ export interface CartPoleStatic {
   poleLength: number;
   cartWidth: number;
   cartHeight: number;
-}
-
-export interface CartPoleState {
-  x: number;
-  xDot: number;
-  th: number;
-  thDot: number;
-  action: number;
-  force: number;
-  xMargin: number;
-  thMargin: number;
 }
 
 
@@ -79,26 +74,7 @@ const GEOMETRY: EnvGeometry = Object.freeze({
   classic: Object.freeze({ anchors: ANCHORS }),
 });
 
-function forceOf(ctrl0: number): number {
-  return ((Math.trunc(ctrl0) >>> 0) & 1) !== 0 ? CP_FORCE_MAG : -CP_FORCE_MAG;
-}
-
-function makeState(pose: Float32Array, ctrl0: number, applied: boolean): CartPoleState {
-  const x = pose[0] ?? 0;
-  const th = pose[2] ?? 0;
-  return {
-    x,
-    xDot: pose[1] ?? 0,
-    th,
-    thDot: pose[3] ?? 0,
-    action: ctrl0,
-    force: applied ? forceOf(ctrl0) : 0,
-    xMargin: Math.min(1, Math.abs(x) / CP_X_LIMIT),
-    thMargin: Math.min(1, Math.abs(th) / CP_TH_LIMIT),
-  };
-}
-
-export const cartPoleDecoder: EnvDecoder<CartPoleState, CartPoleStatic> = {
+export const cartPoleDecoder: EnvDecoder<CartPoleStatic> = {
   envId: 'CartPole-cont-v0',
 
   initStatic(): CartPoleStatic {
@@ -109,29 +85,17 @@ export const cartPoleDecoder: EnvDecoder<CartPoleState, CartPoleStatic> = {
     return GEOMETRY;
   },
 
-  initFrame(): EnvFrame<CartPoleState> {
+  initFrame(): EnvFrame {
     const pose = new Float32Array(9);
     return {
       step: -1,
-      ctrl: new Float32Array(6),
       done: 0,
       pose,
-      state: makeState(pose, 0, false),
     };
   },
 
-  decodeFrame(i: number, raw16: Float32Array): EnvFrame<CartPoleState> {
-    const pose = raw16.subarray(OFF_POSE, OFF_POSE + POSE_LEN);
-    return {
-      step: i,
-      ctrl: effortView(raw16, 4),
-      done: raw16[OFF_DONE] ?? 0,
-      pose,
-      state: makeState(pose, raw16[OFF_POSE + 4] ?? 0, true),
-    };
-  },
 
-  deriveEvents(_prev: EnvFrame<CartPoleState>, next: EnvFrame<CartPoleState>): SimEvent[] {
+  deriveEvents(_prev: EnvFrame, next: EnvFrame): SimEvent[] {
     if (next.done === 0) return NO_EVENTS;
     return [{ type: 'done' }, { type: 'teleport' }];
   },

@@ -16,7 +16,7 @@ import { skyFromPalette, type SkyHandle } from '@kit/sky';
 import { makeTerrain, type TerrainHandle } from '@kit/terrain';
 import { valueNoise2 } from '@kit/textures';
 import { TOKENS, type Palette } from '@kit/tokens';
-import type { QualityTier, SceneContext } from '@kit/types';
+import type { SceneContext } from '@kit/types';
 import {
   excludeAny,
   excludeRect,
@@ -301,16 +301,14 @@ interface Timed {
 }
 
 export function buildWorld(ctx: SceneContext, scene: THREE.Scene, grid: GridGeometry): WorldHandle {
-  const tier: QualityTier = ctx.tier;
   const palette: Palette = ctx.tokens.palettes.noon;
   const skin = courtyardSkin(palette, ctx.tokens);
-  const shadows = tier !== 'thumb';
   const group = new THREE.Group();
   group.name = 'fourSeasonsCourtyard';
   const owned: Disposable[] = [];
   const timed: Timed[] = [];
 
-  const sky = skyFromPalette(palette, 'noon', tier, {
+  const sky = skyFromPalette(palette, 'noon', {
     sunDir: SUN_DIR,
     sunSize: 0.035,
     sunHdr: 5.5,
@@ -324,7 +322,7 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene, grid: GridGeom
   owned.push(sky);
   timed.push({ setTime: (t) => sky.setTime(t) });
 
-  const rig = makeLightRig(palette, tier, {
+  const rig = makeLightRig(palette, {
     sunDir: sky.sunDirection,
     pointCount: 3,
     pointDistance: 6.5,
@@ -339,7 +337,6 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene, grid: GridGeom
   const terrain = makeTerrain({
     size: [TERRAIN_SIZE, TERRAIN_SIZE],
     segments: [TERRAIN_SEGMENTS, TERRAIN_SEGMENTS],
-    tier,
     seed: ctx.seed,
     heightFn: makeMeadowHeight(ctx.seed),
     jitter: 0,
@@ -361,7 +358,7 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene, grid: GridGeom
       toonSoftness: 0.3,
       toonFloor: 0.24,
     },
-    receiveShadow: shadows,
+    receiveShadow: true,
     castShadow: false,
     name: 'courtyardMeadow',
   });
@@ -396,7 +393,6 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene, grid: GridGeom
       seed: ctx.seed,
       name: 'courtyardCells',
     },
-    tier,
   );
   group.add(field.group);
   owned.push(field);
@@ -411,13 +407,12 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene, grid: GridGeom
     toonSteps: 3,
     toonSoftness: 0.3,
     toonFloor: 0.24,
-    tier,
     name: 'courtyardStone',
   });
   owned.push({ dispose: () => stoneMaterial.dispose() });
 
   const hallways = resolveHallways(grid);
-  const gateGeometry = makeMoonGateGeometry(skin, tier);
+  const gateGeometry = makeMoonGateGeometry(skin);
   owned.push({ dispose: () => gateGeometry.dispose() });
   const gateRoots: THREE.Object3D[] = [];
   {
@@ -433,8 +428,8 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene, grid: GridGeom
       const mesh = new THREE.Mesh(gateGeometry, stoneMaterial);
       mesh.name = `moonGate${i}`;
       mesh.rotation.y = wallRunsAlongZ ? Math.PI / 2 : 0;
-      mesh.castShadow = shadows;
-      mesh.receiveShadow = shadows;
+      mesh.castShadow = true;
+      mesh.receiveShadow = true;
       root.add(mesh);
       group.add(root);
       gateRoots.push(root);
@@ -450,13 +445,13 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene, grid: GridGeom
     sundialRoot.position.set(world[0], 0, world[2]);
   }
   group.add(sundialRoot);
-  const sundialGeometry = makeSundialGeometry(skin, tier);
+  const sundialGeometry = makeSundialGeometry(skin);
   owned.push({ dispose: () => sundialGeometry.dispose() });
   {
     const mesh = new THREE.Mesh(sundialGeometry, stoneMaterial);
     mesh.name = 'sundial';
-    mesh.castShadow = shadows;
-    mesh.receiveShadow = shadows;
+    mesh.castShadow = true;
+    mesh.receiveShadow = true;
     sundialRoot.add(mesh);
   }
 
@@ -469,7 +464,6 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene, grid: GridGeom
     count: 150,
     area: { x: springArea.cx, z: springArea.cz, halfX: springArea.halfX, halfZ: springArea.halfZ },
     seed: ctx.seed ^ 0x5b10,
-    tier,
     exclude: noPlanting,
     color: skin.seasons[SEASON_SPRING]?.litter ?? white,
     scale: [0.45, 0.85],
@@ -490,7 +484,6 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene, grid: GridGeom
     count: 520,
     area: { x: summerArea.cx, z: summerArea.cz, halfX: summerArea.halfX, halfZ: summerArea.halfZ },
     seed: ctx.seed ^ 0x27a1,
-    tier,
     exclude: noPlanting,
     color: skin.seasons[SEASON_SUMMER]?.litter ?? white,
     scale: [0.3, 0.62],
@@ -511,7 +504,6 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene, grid: GridGeom
     count: 300,
     area: { x: autumnArea.cx, z: autumnArea.cz, halfX: autumnArea.halfX, halfZ: autumnArea.halfZ },
     seed: ctx.seed ^ 0x3f77,
-    tier,
     exclude: noPlanting,
     color: skin.seasons[SEASON_AUTUMN]?.litter ?? white,
     scale: [0.11, 0.26],
@@ -531,7 +523,6 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene, grid: GridGeom
     count: 190,
     area: { x: winterArea.cx, z: winterArea.cz, halfX: winterArea.halfX, halfZ: winterArea.halfZ },
     seed: ctx.seed ^ 0x6c31,
-    tier,
     exclude: noPlanting,
     color: skin.seasons[SEASON_WINTER]?.litter ?? white,
     scale: [0.08, 0.2],
@@ -570,7 +561,6 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene, grid: GridGeom
       count: spec.count,
       area: { x: dirX * 9.6, z: dirZ * 9.6, halfX: 6.4, halfZ: 6.4 },
       seed: (ctx.seed ^ 0x1a70) + spec.room * 977,
-      tier,
       exclude: excludeAny(offCourt, nearCamera),
       heightAt: (x, z) => terrain.sampleHeight(x, z),
       maxSlope: 0.7,
@@ -615,7 +605,6 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene, grid: GridGeom
       count: spec.count,
       bounds: { x: b.cx, y: 1.05, z: b.cz, halfX: b.halfX, halfY: 0.95, halfZ: b.halfZ },
       seed: (ctx.seed ^ 0x7d21) + spec.room * 613,
-      tier,
       color: skin.seasons[spec.room]?.motes ?? white,
       size: spec.size,
       intensity: spec.intensity,
@@ -673,8 +662,8 @@ export function collapseWallInstance(field: CellFieldHandle, x: number, y: numbe
   mesh.instanceMatrix.needsUpdate = true;
 }
 
-export function makeMoonGateGeometry(skin: CourtyardSkin, tier: QualityTier): THREE.BufferGeometry {
-  const detail = tier === 'thumb' ? 0.4 : tier === 'medium' ? 0.7 : 1;
+export function makeMoonGateGeometry(skin: CourtyardSkin): THREE.BufferGeometry {
+  const detail = 1;
   const tubular = Math.max(10, Math.round(26 * detail));
   const radial = Math.max(4, Math.round(7 * detail));
   const RING_R = 0.455;
@@ -702,8 +691,8 @@ export function makeMoonGateGeometry(skin: CourtyardSkin, tier: QualityTier): TH
   return mergeColoredParts(parts, 'moonGate');
 }
 
-export function makeSundialGeometry(skin: CourtyardSkin, tier: QualityTier): THREE.BufferGeometry {
-  const detail = tier === 'thumb' ? 0.45 : tier === 'medium' ? 0.7 : 1;
+export function makeSundialGeometry(skin: CourtyardSkin): THREE.BufferGeometry {
+  const detail = 1;
   const radial = Math.max(6, Math.round(14 * detail));
   const parts: ColoredPart[] = [];
 
@@ -719,7 +708,7 @@ export function makeSundialGeometry(skin: CourtyardSkin, tier: QualityTier): THR
   plate.translate(0, 0.66, 0);
   parts.push({ geometry: plate, color: skin.stoneDark });
 
-  const marks = tier === 'thumb' ? 4 : 12;
+  const marks = 12;
   for (let i = 0; i < marks; i++) {
     const a = (i / marks) * Math.PI * 2;
     const mark = new THREE.BoxGeometry(0.1, 0.016, 0.028);

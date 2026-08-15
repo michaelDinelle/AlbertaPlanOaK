@@ -25,10 +25,6 @@ interface Disposable {
   destroy(): void;
 }
 
-export const LANE_CAP = 140;
-export const COLUMN_CAP = 256;
-export const CHART_BINS = 240;
-
 interface LaneSeries {
   seed: number;
   values: (number | null)[];
@@ -41,19 +37,6 @@ function lastFinite(values: readonly (number | null)[]): number | null {
     if (v !== null && v !== undefined && Number.isFinite(v)) return v;
   }
   return null;
-}
-
-export function capSeries(series: readonly LaneSeries[], cap: number): LaneSeries[] {
-  if (series.length <= cap) return [...series];
-  const ranked = [...series].sort((a, b) => (a.last ?? -Infinity) - (b.last ?? -Infinity));
-  const keep = new Set<number>([0, ranked.length - 1, Math.floor(ranked.length / 2)]);
-  const stride = (ranked.length - 1) / Math.max(1, cap - keep.size);
-  for (let i = 0; keep.size < cap && i < ranked.length; i++) {
-    keep.add(Math.min(ranked.length - 1, Math.round(i * stride)));
-  }
-  return [...keep].sort((a, b) => a - b)
-    .map((index) => ranked[index])
-    .filter((entry): entry is LaneSeries => entry !== undefined);
 }
 
 function retentionCurve(values: readonly number[]): { steps: number[]; fraction: number[] } {
@@ -167,26 +150,20 @@ export function mountRunScience(host: HTMLElement, opts: RunScienceOptions): Run
     return handle;
   }
 
-  function rhoSeries(t: Tape, lanes: readonly number[], bins: number): {
+  function rhoSeries(t: Tape, lanes: readonly number[]): {
     x: number[]; perLane: (number | null)[][];
   } {
     const rateIdx = t.fields.indexOf('rewardRate');
-    const edgeRows: number[] = [];
-    const want = Math.max(1, Math.min(bins, t.rows));
-    let prev = -1;
-    for (let b = 1; b <= want; b++) {
-      const r = Math.round((b * t.rows) / want) - 1;
-      if (r > prev) {
-        edgeRows.push(r);
-        prev = r;
-      }
-    }
-    const x = edgeRows.map((r) => t.stepEnd[r] ?? 0);
-    const perLane = lanes.map((lane) =>
-      edgeRows.map((r) => {
+    const x: number[] = [];
+    for (let r = 0; r < t.rows; r++) x.push(t.stepEnd[r] ?? 0);
+    const perLane = lanes.map((lane) => {
+      const out: (number | null)[] = [];
+      for (let r = 0; r < t.rows; r++) {
         const v = t.data[(r * t.fields.length + rateIdx) * t.laneCount + lane] ?? NaN;
-        return Number.isFinite(v) ? v : null;
-      }));
+        out.push(Number.isFinite(v) ? v : null);
+      }
+      return out;
+    });
     return { x, perLane };
   }
 
@@ -234,8 +211,8 @@ export function mountRunScience(host: HTMLElement, opts: RunScienceOptions): Run
     recordedSeeds: ReadonlySet<number>,
   ): void {
     const isRho = mode === 'rho';
-    const binned = isRho ? null : binnedRates(t, lanes, CHART_BINS);
-    const rho = isRho ? rhoSeries(t, lanes, CHART_BINS) : null;
+    const binned = isRho ? null : binnedRates(t, lanes);
+    const rho = isRho ? rhoSeries(t, lanes) : null;
     const x = isRho ? rho?.x ?? [] : binned?.x ?? [];
     const perLane = isRho ? rho?.perLane ?? [] : binned?.perLane ?? [];
     const x0 = [0, ...x];
@@ -250,7 +227,6 @@ export function mountRunScience(host: HTMLElement, opts: RunScienceOptions): Run
       && reward.env === selectedEnv
       && reward.mode === mode
       && reward.seeds.length === seeds.length
-      && lanes.length <= LANE_CAP
     ) {
       reward.x0 = x0;
       reward.cols = cols;
@@ -264,22 +240,18 @@ export function mountRunScience(host: HTMLElement, opts: RunScienceOptions): Run
       values,
       last: lastFinite(values),
     }));
-    const shown = capSeries(series, LANE_CAP);
-    const capped = shown.length < series.length;
     const built: RewardBuilt = {
       env: selectedEnv ?? '',
       mode,
       chart: null as unknown as ChartHandle,
-      seeds: shown.map((lane) => lane.seed),
+      seeds: series.map((lane) => lane.seed),
       x0,
-      cols: capped
-        ? [...bandCols, ...shown.map((lane) => [null, ...lane.values] as (number | null)[])]
-        : cols,
+      cols,
       bandCount: bandCols.length,
     };
     built.chart = populationChart({
       steps: x0,
-      lanes: shown.map((lane) => ({
+      lanes: series.map((lane) => ({
         key: String(lane.seed),
         label: `seed ${lane.seed}`,
         values: [null, ...lane.values],
@@ -317,7 +289,7 @@ export function mountRunScience(host: HTMLElement, opts: RunScienceOptions): Run
       eyebrow('Reward rate', el('span', { class: 'slot' }, [
         el('span', {
           class: 'eyebrow-note',
-          text: (capped ? `${shown.length}/${series.length} seeds · ` : 'every seed · ') + 'drag to seek',
+          text: 'every seed · drag to seek',
           title: 'each point is the exact mean reward per step over its bin — IQM and P10–P90 across seeds, the hero lifted in the env accent',
         }),
         seriesSelect,
@@ -366,7 +338,7 @@ export function mountRunScience(host: HTMLElement, opts: RunScienceOptions): Run
     ensureReward(t, lanes, seeds, horizon, accent, recordedSeeds);
 
     {
-      const surv = survivalSeries(t, lanes, CHART_BINS);
+      const surv = survivalSeries(t, lanes);
       const diverged = lanes.filter((lane) => laneDeath(t, lane) !== null).length;
       const chart = trackChart(timeSeries({
         steps: [0, ...surv.x],
@@ -394,7 +366,7 @@ export function mountRunScience(host: HTMLElement, opts: RunScienceOptions): Run
     }
 
     {
-      const tp = throughputSeries(t, CHART_BINS);
+      const tp = throughputSeries(t);
       if (tp.x.some((_, i) => tp.stepsPerSecond[i] !== null)) {
         const chart = trackChart(timeSeries({
           steps: tp.x,
@@ -468,7 +440,7 @@ export function mountRunScience(host: HTMLElement, opts: RunScienceOptions): Run
         }))
         .filter((entry): entry is { seed: number; total: number } => entry.total !== null)
         .sort((a, b) => b.total - a.total)
-        .slice(0, COLUMN_CAP);
+
       if (totals.length === 0) {
         totalsHost.replaceChildren();
         return;

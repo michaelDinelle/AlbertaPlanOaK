@@ -10,7 +10,6 @@ import {
 } from '@kit/materials';
 import { fbmField, makeDataTexture } from '@kit/textures';
 import { TOKENS, type Palette } from '@kit/tokens';
-import type { QualityTier } from '@kit/types';
 import { makeWater, type WaterHandle } from '@kit/water';
 import * as THREE from 'three';
 import {
@@ -38,7 +37,6 @@ export interface GateHandle {
 }
 
 export interface GateOptions {
-  tier: QualityTier;
   palette: Palette;
   skin: TempleSkin;
   facesX: boolean;
@@ -53,7 +51,7 @@ function ease(t: number): number {
 
 
 export function buildBrambleGate(opts: GateOptions): GateHandle {
-  const { tier, palette, skin } = opts;
+  const { palette, skin } = opts;
   const group = new THREE.Group();
   group.name = opts.name ?? 'brambleGate';
   const root = new THREE.Object3D();
@@ -65,8 +63,8 @@ export function buildBrambleGate(opts: GateOptions): GateHandle {
   pivot.rotation.y = opts.facesX ? 0 : Math.PI / 2;
   root.add(pivot);
 
-  const canes = tier === 'thumb' ? 4 : tier === 'medium' ? 6 : 8;
-  const geometry = makeCaneGeometry(tier, skin.bramble, skin.brambleLeaf);
+  const canes = 8;
+  const geometry = makeCaneGeometry( skin.bramble, skin.brambleLeaf);
   const material: OakMaterial = oakMaterial({
     vertexColors: true,
     side: THREE.DoubleSide,
@@ -78,12 +76,11 @@ export function buildBrambleGate(opts: GateOptions): GateHandle {
     toonSoftness: 0.34,
     toonFloor: 0.3,
     wind: { amplitude: 0.012, frequency: 1.35, height: 1.1 },
-    tier,
     name: 'brambleCane',
   });
   const mesh = new THREE.InstancedMesh(geometry, material, canes);
   mesh.name = 'brambleCanes';
-  mesh.castShadow = tier !== 'thumb';
+  mesh.castShadow = true;
   mesh.receiveShadow = false;
   mesh.frustumCulled = false;
   pivot.add(mesh);
@@ -153,16 +150,15 @@ export function buildBrambleGate(opts: GateOptions): GateHandle {
 }
 
 function makeCaneGeometry(
-  tier: QualityTier,
   dark: THREE.ColorRepresentation,
   light: THREE.ColorRepresentation,
 ): THREE.BufferGeometry {
   const parts: ColoredPart[] = [];
-  const bar = new THREE.CylinderGeometry(0.03, 0.036, 0.94, tier === 'thumb' ? 4 : 6, 1);
+  const bar = new THREE.CylinderGeometry(0.03, 0.036, 0.94, 6, 1);
   bar.rotateX(Math.PI / 2);
   parts.push({ geometry: bar, color: dark });
 
-  const thorns = tier === 'thumb' ? 2 : 4;
+  const thorns = 4;
   for (let i = 0; i < thorns; i++) {
     const t = (i + 0.5) / thorns;
     const thorn = new THREE.ConeGeometry(0.022, 0.075, 4, 1);
@@ -172,7 +168,7 @@ function makeCaneGeometry(
     parts.push({ geometry: thorn, color: dark });
   }
 
-  const leaves = tier === 'thumb' ? 3 : 6;
+  const leaves = 6;
   for (let i = 0; i < leaves; i++) {
     const t = (i + 0.5) / leaves;
     const side = i % 2 === 0 ? 1 : -1;
@@ -188,7 +184,7 @@ function makeCaneGeometry(
 
 
 export function buildRiverGate(opts: GateOptions): GateHandle {
-  const { tier, palette, skin } = opts;
+  const { palette, skin } = opts;
   const underwater = TOKENS.palettes.underwater;
   const group = new THREE.Group();
   group.name = opts.name ?? 'riverGate';
@@ -201,20 +197,19 @@ export function buildRiverGate(opts: GateOptions): GateHandle {
   pivot.rotation.y = opts.facesX ? 0 : Math.PI / 2;
   root.add(pivot);
 
-  const CAUSTIC_IDLE = tier === 'thumb' ? 0 : 0.26;
-  const CAUSTIC_FLARE = tier === 'thumb' ? 0 : 1.4;
+  const CAUSTIC_IDLE = 0.26;
+  const CAUSTIC_FLARE = 1.4;
 
   const basinGeometry = makeBasinGeometry(skin);
   const basinMesh = new THREE.Mesh(basinGeometry, opts.stone);
   basinMesh.name = 'riverBasin';
   basinMesh.castShadow = false;
-  basinMesh.receiveShadow = tier !== 'thumb';
+  basinMesh.receiveShadow = true;
   pivot.add(basinMesh);
 
   const water: WaterHandle = makeWater({
     size: [0.99, 2.1],
     palette,
-    tier,
     segments: 26,
     sky: palette.skyHorizon,
     amplitude: 0.011,
@@ -235,7 +230,7 @@ export function buildRiverGate(opts: GateOptions): GateHandle {
   pivot.add(water.mesh);
 
   const stoneCount = 3;
-  const stoneGeometry = new THREE.CylinderGeometry(0.19, 0.22, 0.14, tier === 'thumb' ? 5 : 7, 1);
+  const stoneGeometry = new THREE.CylinderGeometry(0.19, 0.22, 0.14, 7, 1);
   const stoneMaterial: OakMaterial = oakMaterial({
     color: blendTokens(skin.stoneLight, skin.riverBed, 0.4),
     roughness: 0.95,
@@ -245,13 +240,12 @@ export function buildRiverGate(opts: GateOptions): GateHandle {
     toonSteps: 3,
     toonSoftness: 0.3,
     toonFloor: 0.28,
-    tier,
     name: 'riverSteppingStone',
   });
   const stones = new THREE.InstancedMesh(stoneGeometry, stoneMaterial, stoneCount);
   stones.name = 'riverSteppingStones';
-  stones.castShadow = tier !== 'thumb';
-  stones.receiveShadow = tier !== 'thumb';
+  stones.castShadow = true;
+  stones.receiveShadow = true;
   stones.frustumCulled = false;
   pivot.add(stones);
 
@@ -332,7 +326,7 @@ function makeBasinGeometry(skin: TempleSkin): THREE.BufferGeometry {
 
 
 export function buildMistGate(opts: GateOptions): GateHandle {
-  const { tier, palette, skin } = opts;
+  const { palette } = opts;
   const group = new THREE.Group();
   group.name = opts.name ?? 'mistGate';
   const root = new THREE.Object3D();
@@ -344,7 +338,7 @@ export function buildMistGate(opts: GateOptions): GateHandle {
   pivot.rotation.y = opts.facesX ? 0 : Math.PI / 2;
   root.add(pivot);
 
-  const layers = tier === 'thumb' ? 1 : 2;
+  const layers = 2;
   const halves = 2;
   const geometry = new THREE.PlaneGeometry(1.02, PORTAL_LINTEL_Y - 0.06);
   geometry.name = 'mistCurtain';
@@ -481,126 +475,9 @@ function makeMistTexture(seed: number): THREE.DataTexture {
 }
 
 
-export interface ThumbGateBankOptions {
-  tier: QualityTier;
-  skin: TempleSkin;
-  facesX: readonly boolean[];
-  count: number;
-  name?: string;
-}
-
-export interface ThumbGateBank {
-  group: THREE.Group;
-  gates: readonly GateHandle[];
-  dispose(): void;
-}
-
-const THUMB_LEAF_H = PORTAL_LINTEL_Y * 0.3;
-
-export function buildThumbGateBank(opts: ThumbGateBankOptions): ThumbGateBank {
-  const group = new THREE.Group();
-  group.name = opts.name ?? 'thumbGateBank';
-  const count = Math.max(1, opts.count);
-
-  const geometry = new THREE.BoxGeometry(0.84, THUMB_LEAF_H, 1.0);
-  geometry.translate(0, THUMB_LEAF_H / 2, 0);
-  geometry.name = 'thumbGateLeaf';
-  const material = oakMaterial({
-    color: 0xffffff,
-    roughness: 0.85,
-    flatShading: true,
-    toonSteps: 2,
-    tier: opts.tier,
-    name: 'thumbGateLeaf',
-  });
-  const mesh = new THREE.InstancedMesh(geometry, material, count);
-  mesh.name = 'thumbGateLeaves';
-  mesh.frustumCulled = false;
-  mesh.instanceColor = new THREE.InstancedBufferAttribute(new Float32Array(count * 3), 3);
-  group.add(mesh);
-
-  const tints: readonly THREE.Color[] = [
-    gateChapterTint(opts.skin, 0),
-    gateChapterTint(opts.skin, 1),
-    gateChapterTint(opts.skin, 2),
-  ];
-
-  const roots: THREE.Object3D[] = [];
-  const progresses = new Float32Array(count);
-  const matrix = new THREE.Matrix4();
-  const position = new THREE.Vector3();
-  const quaternion = new THREE.Quaternion();
-  const euler = new THREE.Euler();
-  const scale = new THREE.Vector3();
-
-  const apply = (j: number): void => {
-    const root = roots[j];
-    if (!root) return;
-    const shut = 1 - ease(progresses[j] ?? 0);
-    position.copy(root.position);
-    euler.set(0, opts.facesX[j] === true ? 0 : Math.PI / 2, 0);
-    quaternion.setFromEuler(euler);
-    scale.set(1, shut, 1);
-    matrix.compose(position, quaternion, scale);
-    mesh.setMatrixAt(j, matrix);
-    mesh.instanceMatrix.needsUpdate = true;
-  };
-
-  const gates: GateHandle[] = [];
-  for (let j = 0; j < count; j++) {
-    const gateGroup = new THREE.Group();
-    gateGroup.name = `gate${j}`;
-    const root = new THREE.Object3D();
-    root.name = `thumbGateRoot${j}`;
-    gateGroup.add(root);
-    roots.push(root);
-    const tint = tints[j] ?? tints[0] ?? new THREE.Color(0xffffff);
-    mesh.setColorAt(j, tint);
-    gates.push({
-      group: gateGroup,
-      root,
-      get progress(): number {
-        return progresses[j] ?? 0;
-      },
-      setProgress(progress01: number) {
-        progresses[j] = clamp01(progress01);
-        apply(j);
-      },
-      setFlare() {
-      },
-      setTime() {
-      },
-      dispose() {
-        gateGroup.removeFromParent();
-        gateGroup.clear();
-      },
-    });
-    apply(j);
-  }
-  if (mesh.instanceColor) mesh.instanceColor.needsUpdate = true;
-
-  return {
-    group,
-    gates,
-    dispose() {
-      mesh.dispose();
-      geometry.dispose();
-      material.dispose();
-      group.removeFromParent();
-      group.clear();
-    },
-  };
-}
-
-export function gateChapterTint(s: TempleSkin, j: number): THREE.Color {
-  if (j === 0) return blendTokens(s.brambleLeaf, s.bramble, 0.35);
-  if (j === 1) return blendTokens(s.riverBed, TOKENS.palettes.morning.hemiSky, 0.55);
-  return blendTokens(TOKENS.palettes.noon.sun, TOKENS.palettes.morning.hemiSky, 0.45);
-}
 
 
 export interface KeyAltarOptions {
-  tier: QualityTier;
   palette: Palette;
   skin: TempleSkin;
   index: number;
@@ -620,7 +497,7 @@ export interface KeyAltarHandle {
 }
 
 export function buildKeyAltar(opts: KeyAltarOptions): KeyAltarHandle {
-  const { tier, palette, skin, index } = opts;
+  const { skin, index } = opts;
   const group = new THREE.Group();
   group.name = opts.name ?? `keyAltar${index}`;
   const root = new THREE.Object3D();
@@ -635,22 +512,17 @@ export function buildKeyAltar(opts: KeyAltarOptions): KeyAltarHandle {
   const pedestalGeometry = makePedestalGeometry(skin);
   const pedestal = new THREE.Mesh(pedestalGeometry, opts.stone);
   pedestal.name = `keyPedestal${index}`;
-  pedestal.castShadow = tier !== 'thumb';
-  pedestal.receiveShadow = tier !== 'thumb';
+  pedestal.castShadow = true;
+  pedestal.receiveShadow = true;
   decor.add(pedestal);
 
   const token = new KeyToken({
     color,
-    tier,
     radius: 0.1,
     hover: 0.42,
     intensity: index === 1 ? 1.5 : 1.9,
     name: `keyToken${index}`,
   });
-  if (tier === 'thumb') {
-    const halo = token.group.getObjectByName('oakKeyTokenHalo');
-    if (halo) halo.visible = false;
-  }
   decor.add(token.group);
 
   let carried = false;
@@ -708,10 +580,10 @@ export interface CarryRackHandle {
   dispose(): void;
 }
 
-export function buildCarryRack(skin: TempleSkin, tier: QualityTier): CarryRackHandle {
+export function buildCarryRack(skin: TempleSkin): CarryRackHandle {
   const group = new THREE.Group();
   group.name = 'keyCarryRack';
-  const geometry = new THREE.OctahedronGeometry(0.062, tier === 'thumb' ? 0 : 1);
+  const geometry = new THREE.OctahedronGeometry(0.062, 1);
   const material = emissiveMaterial(0xffffff, 1, { name: 'carriedKeys' });
   const mesh = new THREE.InstancedMesh(geometry, material, 3);
   mesh.name = 'carriedKeys';
@@ -774,7 +646,6 @@ export function buildCarryRack(skin: TempleSkin, tier: QualityTier): CarryRackHa
 
 
 export interface ShrineOptions {
-  tier: QualityTier;
   palette: Palette;
   skin: TempleSkin;
   stone: OakMaterial;
@@ -793,7 +664,7 @@ export interface ShrineHandle {
 }
 
 export function buildShrine(opts: ShrineOptions): ShrineHandle {
-  const { tier, palette, skin } = opts;
+  const { palette, skin } = opts;
   const group = new THREE.Group();
   group.name = opts.name ?? 'sanctumShrine';
   const root = new THREE.Object3D();
@@ -803,16 +674,15 @@ export function buildShrine(opts: ShrineOptions): ShrineHandle {
   decor.name = 'shrineDecor';
   root.add(decor);
 
-  const plinthGeometry = makeShrineGeometry(skin, tier);
+  const plinthGeometry = makeShrineGeometry(skin);
   const plinth = new THREE.Mesh(plinthGeometry, opts.stone);
   plinth.name = 'shrinePlinth';
-  plinth.castShadow = tier !== 'thumb';
-  plinth.receiveShadow = tier !== 'thumb';
+  plinth.castShadow = true;
+  plinth.receiveShadow = true;
   decor.add(plinth);
 
   const beacon = new GoalBeacon({
     color: skin.relic,
-    tier,
     height: 1.0,
     radius: 0.11,
     intensity: 0.5,
@@ -821,7 +691,7 @@ export function buildShrine(opts: ShrineOptions): ShrineHandle {
   decor.add(beacon.group);
 
   const CROWN = 0.86;
-  const relicGeometry = new THREE.OctahedronGeometry(0.125, tier === 'thumb' ? 0 : 1);
+  const relicGeometry = new THREE.OctahedronGeometry(0.125, 1);
   const RELIC_HDR = 1.3;
   const relicMaterial: EmissiveMaterial = emissiveMaterial(skin.relic, RELIC_HDR, { name: 'shrineRelic' });
   const relic = new THREE.Mesh(relicGeometry, relicMaterial);
@@ -840,7 +710,6 @@ export function buildShrine(opts: ShrineOptions): ShrineHandle {
     toonSteps: 2,
     toonSoftness: 0.36,
     toonFloor: 0.34,
-    tier,
     name: 'shrineBlades',
   });
   const blades = new THREE.InstancedMesh(bladeGeometry, bladeMaterial, 4);
@@ -905,8 +774,8 @@ export function buildShrine(opts: ShrineOptions): ShrineHandle {
   };
 }
 
-function makeShrineGeometry(skin: TempleSkin, tier: QualityTier): THREE.BufferGeometry {
-  const radial = tier === 'thumb' ? 6 : 8;
+function makeShrineGeometry(skin: TempleSkin): THREE.BufferGeometry {
+  const radial = 8;
   const parts: ColoredPart[] = [];
   const step0 = new THREE.CylinderGeometry(0.33, 0.4, 0.11, radial, 1);
   step0.translate(0, 0.055, 0);

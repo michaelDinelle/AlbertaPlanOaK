@@ -1,5 +1,5 @@
 
-import { CTRL_LEN, OFF_DONE, OFF_POSE, POSE_LEN, effortView } from '../record';
+import { POSE_LEN } from '../record';
 import type { EnvDecoder, EnvFrame, EnvGeometry, GridCell, SimEvent } from '../types';
 import { NO_EVENTS } from '../events';
 
@@ -15,13 +15,12 @@ export const HIGHDIMMAZE_ACTIONS = 6;
 export const HIGHDIMMAZE_STAY = 4;
 export const HIGHDIMMAZE_DASH = 5;
 
-export interface HighDimMazeState {
-  x: number;
-  y: number;
-  gx: number;
-  gy: number;
-  lastDir: number;
-}
+export const HIGHDIMMAZE_X = 0;
+export const HIGHDIMMAZE_Y = 1;
+export const HIGHDIMMAZE_GX = 2;
+export const HIGHDIMMAZE_GY = 3;
+export const HIGHDIMMAZE_HEADING = 4;
+export const HIGHDIMMAZE_ACTION = 5;
 
 export interface HighDimMazeStatic {
   seed: number;
@@ -45,11 +44,7 @@ export function highDimMazeWalls(): Uint8Array {
   return walls;
 }
 
-function state(x: number, y: number, gx: number, gy: number, lastDir: number): HighDimMazeState {
-  return { x, y, gx, gy, lastDir };
-}
-
-export const highDimMazeDecoder: EnvDecoder<HighDimMazeState, HighDimMazeStatic> = {
+export const highDimMazeDecoder: EnvDecoder<HighDimMazeStatic> = {
   envId: 'HighDimMaze-cont-v0',
 
   initStatic(seed: number): HighDimMazeStatic {
@@ -69,7 +64,7 @@ export const highDimMazeDecoder: EnvDecoder<HighDimMazeState, HighDimMazeStatic>
     };
   },
 
-  initFrame(): EnvFrame<HighDimMazeState> {
+  initFrame(): EnvFrame {
     const pose = new Float32Array(POSE_LEN);
     pose[0] = HIGHDIMMAZE_START.x;
     pose[1] = HIGHDIMMAZE_START.y;
@@ -78,31 +73,13 @@ export const highDimMazeDecoder: EnvDecoder<HighDimMazeState, HighDimMazeStatic>
     pose[4] = 1;
     return {
       step: -1,
-      ctrl: new Float32Array(CTRL_LEN),
       done: 0,
       pose,
-      state: state(
-        HIGHDIMMAZE_START.x,
-        HIGHDIMMAZE_START.y,
-        HIGHDIMMAZE_GOAL.x,
-        HIGHDIMMAZE_GOAL.y,
-        1,
-      ),
     };
   },
 
-  decodeFrame(i: number, raw16: Float32Array): EnvFrame<HighDimMazeState> {
-    const pose = raw16.subarray(OFF_POSE, OFF_POSE + POSE_LEN);
-    return {
-      step: i,
-      ctrl: effortView(raw16, 5),
-      done: raw16[OFF_DONE] ?? 0,
-      pose,
-      state: state(pose[0] ?? 0, pose[1] ?? 0, pose[2] ?? 0, pose[3] ?? 0, pose[4] ?? 0),
-    };
-  },
 
-  deriveEvents(_prev: EnvFrame<HighDimMazeState>, next: EnvFrame<HighDimMazeState>): SimEvent[] {
+  deriveEvents(_prev: EnvFrame, next: EnvFrame): SimEvent[] {
     if (next.done === 0) return NO_EVENTS;
     return [{ type: 'goal' }, { type: 'teleport' }, { type: 'done' }];
   },

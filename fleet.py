@@ -200,50 +200,19 @@ def analyze(run: dict, lanes: np.ndarray) -> dict:
                & (retention < null_p5))
     retained = solved & ~decayed
     ret_margin = retention - null_p50
-    if rs.shape[0] >= 2:
-        recent = (rs[-1] - rs[-2]) / float(ends[-1] - ends[-2])
-        recent = np.where(np.isfinite(recent), recent, delivered)
-    else:
-        recent = delivered
-    seeds = [run["seeds"][l] for l in lanes]
-    pct = np.percentile(delivered, [10, 25, 50, 75, 90])
-    best = int(np.argmax(delivered))
-    out = {
+    return {
         "seeds": len(lanes), "horizon": horizon, "maxStep": max_step,
         "complete": max_step >= horizon,
         "rewardRateIQM": iqm(delivered),
-        "recentRewardRateIQM": iqm(recent),
-        "recentRewardRateMax": float(np.max(recent)),
-        "bestSeed": seeds[best], "bestSeedRewardRate": float(delivered[best]),
-        "positiveSeeds": int((delivered > 0).sum()),
         "positiveFraction": float((delivered > 0).mean()),
-        "rewardRatePercentiles": dict(zip(("p10", "p25", "p50", "p75", "p90"),
-                                          map(float, pct))),
-        "thresholdFractions": {f"gt{t}": float((delivered > t).mean())
-                               for t in (0, 1, 5, 10)},
-        "divergence": {"diverged": int(died.sum()), "rate": float(died.mean())},
-        "rmst": rmst(dtimes, died, horizon),
+        "divergence": {"diverged": int(died.sum())},
         "solvedSeeds": int(solved.sum()),
-        "solvedSeedsRetained": int(retained.sum()),
-        "decayedSeeds": int(decayed.sum()),
-        "decayFraction": float(decayed[solved].mean()) if solved.any() else None,
-        "retentionMarginP50": (float(np.nanmedian(ret_margin))
-                               if np.isfinite(ret_margin).any() else None),
         "retentionFraction": (float(retained.sum() / solved.sum())
                               if solved.any() else None),
-        "rewardRateBySeed": {str(s): float(r) for s, r in zip(seeds, delivered)},
-        "retentionBySeed": {str(s): (float(r) if math.isfinite(r) else None)
-                            for s, r in zip(seeds, retention)},
         "_vectors": {"delivered": delivered, "died": died, "dtimes": dtimes,
                      "solved": solved.astype(float), "retained": retained.astype(float),
                      "decayed": decayed.astype(float), "retMargin": ret_margin},
     }
-    wall = run["tape"]["wall"]
-    fin = np.isfinite(wall) & (wall > 0)
-    if fin.any():
-        out["aggStepsPerSecond"] = float(
-            ends[fin][-1] * run["tape"]["lanes"] / wall[fin][-1])
-    return out
 
 
 def iqm(v: np.ndarray) -> float:
@@ -293,15 +262,7 @@ def cmd_report(args) -> int:
     run = load(args.root)
     slices = env_slices(run)
     results = {env: analyze(run, lanes) for env, lanes in slices.items()}
-    overall = (analyze(run, np.arange(run["tape"]["lanes"])) if len(results) > 1
-               else next(iter(results.values())))
-    summary = {
-        "solvedLaw": "peak > floor + nullPeakSpread(p95-p50)",
-        "retainedLaw": "solved & retention >= own stationary-null p5",
-        "meta": run["meta"],
-        "overall": json_safe(overall),
-        "envSlices": {env: json_safe(r) for env, r in results.items()},
-    }
+    summary = {"envSlices": {env: json_safe(r) for env, r in results.items()}}
     out = args.root / "summary.json"
     out.write_text(json.dumps(json_safe(summary), indent=2, sort_keys=True, allow_nan=False))
     print(out)

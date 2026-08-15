@@ -19,7 +19,7 @@ import { skyFromPalette, type SkyHandle } from '@kit/sky';
 import { makeTerrain, type TerrainHandle } from '@kit/terrain';
 import { radialSprite } from '@kit/textures';
 import { TOKENS, type Palette } from '@kit/tokens';
-import type { QualityTier, SceneContext } from '@kit/types';
+import type { SceneContext } from '@kit/types';
 import { valueNoise2 } from '@kit/textures';
 import { excludeAny, scatterGrass, scatterRocks, type ExcludeFn } from '@kit/vegetation';
 import { makeWater, type WaterHandle } from '@kit/water';
@@ -174,11 +174,10 @@ interface Timed {
   setTime(t: number): void;
 }
 
-const KOI_COUNT: Record<QualityTier, number> = { hero: 9, medium: 6, thumb: 3 };
-const PAD_COUNT: Record<QualityTier, number> = { hero: 15, medium: 10, thumb: 5 };
+const KOI_COUNT = 9;
+const PAD_COUNT = 15;
 
 export function buildWorld(ctx: SceneContext, scene: THREE.Scene): WorldHandle {
-  const tier: QualityTier = ctx.tier;
   const palette: Palette = ctx.tokens.palettes.night;
   const accent = ctx.tokens.accents['pendulum'] ?? ctx.tokens.celebrationGold;
   const pivot = pivotOf(ctx.geometry);
@@ -186,7 +185,6 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene): WorldHandle {
   group.name = 'lanternBell';
   const owned: Disposable[] = [];
   const timed: Timed[] = [];
-  const shadows = tier !== 'thumb';
 
   const vermilion = blendTokens(TOKENS.palettes.dusk.skyBottom, palette.skyTop, 0.44);
   const vermilionDark = blendTokens(TOKENS.palettes.dusk.skyBottom, palette.skyTop, 0.62);
@@ -198,7 +196,7 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene): WorldHandle {
   const bankMoss = blendTokens(palette.groundA, TOKENS.accents['four-rooms'] ?? palette.groundB, 0.2);
   const bankStone = blendTokens(palette.groundB, palette.hemiSky, 0.3);
 
-  const sky = skyFromPalette(palette, 'night', tier, {
+  const sky = skyFromPalette(palette, 'night', {
     sunDir: MOON_DIR,
     sunSize: 0.038,
     sunHdr: 1.45,
@@ -220,7 +218,7 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene): WorldHandle {
   owned.push(sky);
   timed.push({ setTime: (t) => sky.setTime(t) });
 
-  const rig = makeLightRig(palette, tier, {
+  const rig = makeLightRig(palette, {
     sunDir: sky.sunDirection,
     pointCount: 3,
     pointDistance: 7,
@@ -237,7 +235,6 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene): WorldHandle {
   const terrain = makeTerrain({
     size: [TERRAIN_W, TERRAIN_D],
     segments: [TERRAIN_SEG_X, TERRAIN_SEG_Z],
-    tier,
     seed: ctx.seed,
     heightFn: bed,
     jitter: 0,
@@ -259,7 +256,7 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene): WorldHandle {
       toonSoftness: 0.34,
       toonFloor: 0.05,
     },
-    receiveShadow: shadows,
+    receiveShadow: true,
     castShadow: false,
     name: 'pondBed',
   });
@@ -355,13 +352,12 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene): WorldHandle {
     toonSteps: 3,
     toonSoftness: 0.32,
     toonFloor: 0.1,
-    tier,
     name: 'lanternBellPropMaterial',
   });
   const toriiMesh = new THREE.Mesh(toriiGeometry, propMaterial);
   toriiMesh.name = 'torii';
-  toriiMesh.castShadow = shadows;
-  toriiMesh.receiveShadow = shadows;
+  toriiMesh.castShadow = true;
+  toriiMesh.receiveShadow = true;
   group.add(toriiMesh);
   owned.push({
     dispose: () => {
@@ -374,17 +370,17 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene): WorldHandle {
   const shallowWarm = blendTokens(shallowCool, accent, 0.013);
   const deepCool = blendTokens(palette.skyTop, palette.fog, 0.35);
   const deepWarm = blendTokens(deepCool, accent, 0.006);
-  const pond = makeWaterSurface(tier, palette, sky.sunDirection, accent);
+  const pond = makeWaterSurface( palette, sky.sunDirection, accent);
   group.add(pond.handle.mesh);
   owned.push(pond.handle);
   const liveShallow = new THREE.Color();
   const liveDeep = new THREE.Color();
 
-  const koi = buildKoi(KOI_COUNT[tier], ctx.seed, tier, palette, accent);
+  const koi = buildKoi(KOI_COUNT, ctx.seed, palette, accent);
   group.add(koi.mesh);
   owned.push(koi);
 
-  const pads = buildLotusPads(PAD_COUNT[tier], ctx.seed, tier, palette, pond.handle.sampleHeight, bedAt);
+  const pads = buildLotusPads(PAD_COUNT, ctx.seed, palette, pond.handle.sampleHeight, bedAt);
   group.add(pads.mesh);
   owned.push(pads);
 
@@ -423,7 +419,6 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene): WorldHandle {
     count: 1700,
     area: { x: 0, z: -0.3, halfX: 5.4, halfZ: 4.1 },
     seed: ctx.seed ^ 0x51ab,
-    tier,
     exclude: excludeAny(submerged, nearCamera, underArch, (x, z) => bedAt(x, z) > WATER_LEVEL + 0.55),
     heightAt: bedAt,
     maxSlope: 0.95,
@@ -445,7 +440,6 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene): WorldHandle {
     count: 90,
     area: { x: 0, z: -0.4, halfX: 5.2, halfZ: 3.8 },
     seed: ctx.seed ^ 0x2b17,
-    tier,
     exclude: excludeAny(nearCamera, underArch, (x, z) => {
       const h = bedAt(x, z);
       return h < WATER_LEVEL - 0.5 || h > WATER_LEVEL + 0.85;
@@ -457,7 +451,7 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene): WorldHandle {
     hueJitter: 0.24,
     rimColor: palette.hemiSky,
     rimStrength: 0.4,
-    castShadow: shadows,
+    castShadow: true,
     name: 'pondStones',
   });
   group.add(rocks.group);
@@ -470,7 +464,6 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene): WorldHandle {
     count: 260,
     bounds: { x: 0, y: WATER_LEVEL + 0.92, z: -0.6, halfX: 4.9, halfY: 0.5, halfZ: 3.2 },
     seed: ctx.seed ^ 0x7f19,
-    tier,
     color: fireflyColor,
     size: 0.4,
     intensity: 2.3,
@@ -486,7 +479,6 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene): WorldHandle {
     size: [8.4, 6.4],
     color: blendTokens(palette.fog, palette.hemiSky, 0.45),
     seed: ctx.seed,
-    tier,
     layers: 4,
     baseY: WATER_LEVEL + 0.06,
     spread: 0.5,
@@ -506,7 +498,6 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene): WorldHandle {
     count: 90,
     bounds: { halfX: 0.24, halfY: 0.42, halfZ: 0.2 },
     seed: ctx.seed ^ 0x3d91,
-    tier,
     color: blendTokens(accent, palette.sun, 0.25),
     size: 0.24,
     intensity: 1.9,
@@ -602,16 +593,13 @@ interface PondHandle {
 }
 
 function makeWaterSurface(
-  tier: QualityTier,
   palette: Palette,
   sunDir: THREE.Vector3,
   accent: number,
 ): PondHandle {
-  const thumb = tier === 'thumb';
   const handle = makeWater({
     size: [WATER_W, WATER_D],
     palette,
-    tier,
     segments: 88,
     level: WATER_LEVEL,
     amplitude: 0.045,
@@ -629,8 +617,8 @@ function makeWaterSurface(
   return {
     handle,
     setGlow(s) {
-      handle.uniforms.uCausticStrength.value = thumb ? 0 : BASE_CAUSTIC * (0.08 + 0.92 * s);
-      handle.uniforms.uSpecular.value = thumb ? 0 : 0.45 + 0.85 * s;
+      handle.uniforms.uCausticStrength.value = BASE_CAUSTIC * (0.08 + 0.92 * s);
+      handle.uniforms.uSpecular.value = 0.45 + 0.85 * s;
     },
   };
 }
@@ -666,7 +654,6 @@ function koiGeometry(): THREE.BufferGeometry {
 function buildKoi(
   count: number,
   seed: number,
-  tier: QualityTier,
   palette: Palette,
   accent: number,
 ): KoiHandle {
@@ -680,7 +667,6 @@ function buildKoi(
     toonSteps: 2,
     toonSoftness: 0.45,
     toonFloor: 0.55,
-    tier,
     name: 'koiMaterial',
   });
   const mesh = new THREE.InstancedMesh(geometry, material, Math.max(1, count));
@@ -766,7 +752,6 @@ interface PadHandle extends Disposable {
 function buildLotusPads(
   count: number,
   seed: number,
-  tier: QualityTier,
   palette: Palette,
   waterHeight: (x: number, z: number, t: number) => number,
   bedAt: (x: number, z: number) => number,
@@ -784,7 +769,6 @@ function buildLotusPads(
     toonSteps: 2,
     toonSoftness: 0.4,
     toonFloor: 0.28,
-    tier,
     name: 'lotusPadMaterial',
   });
   const mesh = new THREE.InstancedMesh(geometry, material, Math.max(1, count));

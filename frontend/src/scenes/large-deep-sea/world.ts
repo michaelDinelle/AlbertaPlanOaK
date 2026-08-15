@@ -17,7 +17,7 @@ import { skyFromPalette, type SkyHandle } from '@kit/sky';
 import { makeTerrain, type TerrainHandle } from '@kit/terrain';
 import { valueNoise2 } from '@kit/textures';
 import { TOKENS, type Palette } from '@kit/tokens';
-import type { QualityTier, SceneContext } from '@kit/types';
+import type { SceneContext } from '@kit/types';
 import {
   LARGE_DEEPSEA_N,
   largeDeepSeaMask,
@@ -60,10 +60,6 @@ export function blendTokens(
   k: number,
 ): THREE.Color {
   return new THREE.Color(a).lerp(new THREE.Color(b), k);
-}
-
-export function sink(color: THREE.ColorRepresentation, k: number): THREE.Color {
-  return blendTokens(color, TOKENS.palettes.night.skyTop, k);
 }
 
 export const TOKEN_WHITE = TOKENS.palettes.noon.sun;
@@ -145,10 +141,6 @@ export function isShelfCell(x: number, y: number): boolean {
 
 export function shelfCellCount(n: number): number {
   return (n * (n + 1)) / 2;
-}
-
-export function isWalkableCell(x: number, y: number, n: number): boolean {
-  return isShelfCell(x, y) && y <= n - 2;
 }
 
 
@@ -411,7 +403,6 @@ export interface JellySwarmOptions {
   grid: GridSize;
   count: number;
   seed: number;
-  tier: QualityTier;
   bell: THREE.ColorRepresentation;
   trail: THREE.ColorRepresentation;
   intensity: number;
@@ -419,7 +410,7 @@ export interface JellySwarmOptions {
 }
 
 export function buildJellySwarm(opts: JellySwarmOptions): JellySwarmHandle {
-  const detail = opts.tier === 'thumb' ? 0.55 : opts.tier === 'medium' ? 0.8 : 1;
+  const detail = 1;
   const count = Math.max(1, opts.count);
   const geometry = makeJellyGeometry(detail);
 
@@ -587,13 +578,12 @@ export interface CoralFieldOptions {
   mask: Uint8Array;
   skin: AbyssSkin;
   seed: number;
-  tier: QualityTier;
   name?: string;
 }
 
 export function buildCoralField(opts: CoralFieldOptions): CoralFieldHandle {
   const { grid, mask, skin } = opts;
-  const detail = opts.tier === 'thumb' ? 0.5 : opts.tier === 'medium' ? 0.75 : 1;
+  const detail = 1;
   const geometry = makeCoralGeometry(detail);
   const capacity = shelfCellCount(Math.min(grid.w, grid.h));
 
@@ -609,14 +599,13 @@ export function buildCoralField(opts: CoralFieldOptions): CoralFieldHandle {
     toonSoftness: 0.34,
     toonFloor: 0.3,
     wind: { amplitude: 0.028, frequency: 0.62, height: 0.5 },
-    tier: opts.tier,
     name: 'abyssCoralMaterial',
   });
 
   const mesh = new THREE.InstancedMesh(geometry, material, Math.max(1, capacity));
   mesh.name = opts.name ?? 'abyssCoral';
   mesh.castShadow = false;
-  mesh.receiveShadow = opts.tier !== 'thumb';
+  mesh.receiveShadow = true;
   mesh.instanceColor = new THREE.InstancedBufferAttribute(new Float32Array(Math.max(1, capacity) * 3), 3);
 
   const matrix = new THREE.Matrix4();
@@ -672,11 +661,6 @@ export function buildCoralField(opts: CoralFieldOptions): CoralFieldHandle {
       mesh.removeFromParent();
     },
   };
-}
-
-export function coralLeanAt(mask: Uint8Array, grid: GridSize, x: number, y: number): number {
-  const bit = mask[y * grid.w + x] ?? 0;
-  return bit !== 0 ? CORAL_LEAN : -CORAL_LEAN;
 }
 
 
@@ -735,18 +719,16 @@ export function buildWorld(
   grid: GridGeometry,
   mask: Uint8Array,
 ): WorldHandle {
-  const tier: QualityTier = ctx.tier;
   const palette: Palette = ctx.tokens.palettes.abyss;
   const water: Palette = ctx.tokens.palettes.underwater;
   const skin = abyssSkin(ctx.tokens);
-  const shadows = tier !== 'thumb';
   const group = new THREE.Group();
   group.name = 'theAbyss';
   const owned: Disposable[] = [];
   const timed: Timed[] = [];
   const sized: AmbientParticlesHandle[] = [];
 
-  const sky = skyFromPalette(palette, 'abyss', tier, {
+  const sky = skyFromPalette(palette, 'abyss', {
     topSpread: 0.42,
     bottomSpread: 0.62,
     radius: 320,
@@ -756,7 +738,7 @@ export function buildWorld(
   owned.push(sky);
   timed.push({ setTime: (t) => sky.setTime(t) });
 
-  const rig = makeLightRig(palette, tier, {
+  const rig = makeLightRig(palette, {
     sunDir: SUN_DIR,
     pointCount: 4,
     pointDistance: 9,
@@ -771,7 +753,6 @@ export function buildWorld(
   const terrain = makeTerrain({
     size: [TERRAIN_SIZE, TERRAIN_SIZE],
     segments: [TERRAIN_SEGMENTS, TERRAIN_SEGMENTS],
-    tier,
     seed: ctx.seed,
     heightFn: makeTrenchHeight(ctx.seed),
     jitter: 0,
@@ -787,7 +768,7 @@ export function buildWorld(
       toonSoftness: 0.32,
       toonFloor: 0.3,
     },
-    receiveShadow: shadows,
+    receiveShadow: true,
     castShadow: false,
     name: 'trenchBed',
   });
@@ -809,27 +790,25 @@ export function buildWorld(
       seed: ctx.seed,
       name: 'abyssShelves',
     },
-    tier,
   );
   terraceShelves(field, grid);
   group.add(field.group);
   owned.push(field);
   timed.push({ setTime: (t) => field.setTime(t) });
 
-  const coral = buildCoralField({ grid, mask, skin, seed: ctx.seed, tier });
+  const coral = buildCoralField({ grid, mask, skin, seed: ctx.seed });
   group.add(coral.mesh);
   owned.push(coral);
   timed.push(coral);
 
-  const jellyCount = tier === 'thumb' ? 12 : tier === 'medium' ? 26 : 46;
+  const jellyCount = 46;
   const jellies = buildJellySwarm({
     grid,
     count: jellyCount,
     seed: ctx.seed,
-    tier,
     bell: skin.jellyBell,
     trail: skin.jellyTrail,
-    intensity: tier === 'thumb' ? 1.0 : 1.35,
+    intensity: 1.35,
     name: 'abyssJellies',
   });
   group.add(jellies.mesh);
@@ -841,7 +820,6 @@ export function buildWorld(
     count: 330,
     bounds: { x: 0, y: 2.1, z: 0, halfX: TRENCH_HALF, halfY: 3.0, halfZ: TRENCH_HALF },
     seed: ctx.seed ^ 0x5f0a,
-    tier,
     color: skin.snow,
     size: 0.8,
     intensity: 0.85,
@@ -860,7 +838,6 @@ export function buildWorld(
     count: 120,
     bounds: { x: -TRENCH_HALF * 0.45, y: 1.9, z: -TRENCH_HALF * 0.55, halfX: 3.4, halfY: 2.2, halfZ: 3.0 },
     seed: ctx.seed ^ 0x2b17,
-    tier,
     color: water.accentLight,
     size: 1.0,
     intensity: 1.35,
@@ -879,7 +856,6 @@ export function buildWorld(
     count: 120,
     bounds: { x: 0, y: 0, z: 0, halfX: 0.44, halfY: 0.13, halfZ: 0.44 },
     seed: ctx.seed ^ 0x1d5e,
-    tier,
     color: skin.silt,
     size: 1.1,
     intensity: 1.3,
@@ -899,7 +875,6 @@ export function buildWorld(
     count: 210,
     bounds: { x: 0, y: 0, z: 0, halfX: 0.32, halfY: 1.5, halfZ: 0.32 },
     seed: ctx.seed ^ 0x7a91,
-    tier,
     color: water.accentLight,
     size: 1.7,
     intensity: 2.4,
@@ -918,7 +893,6 @@ export function buildWorld(
     size: [TERRAIN_SIZE * 0.26, TERRAIN_SIZE * 0.26],
     color: blendTokens(water.skyHorizon, palette.skyTop, 0.45),
     seed: ctx.seed ^ 0x3c40,
-    tier,
     layers: 4,
     baseY: 2.4,
     spread: 4.4,

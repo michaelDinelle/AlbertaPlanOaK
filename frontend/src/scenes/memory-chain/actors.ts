@@ -5,18 +5,14 @@ import {
   oakUniforms,
   setEmissiveColor,
   setEmissiveIntensity,
-  tierEffectScale,
   type EmissiveMaterial,
   type OakMaterial,
 } from '@kit/materials';
-import type { QualityTier } from '@kit/types';
 import * as THREE from 'three';
 import {
   blendTokens,
   clamp01,
   mergeColoredParts,
-  tierBounce,
-  tierToonFloor,
   type CaveSkin,
   type ColoredPart,
 } from './world';
@@ -25,22 +21,6 @@ import {
 const CRYSTAL_OFFSET_Z = -0.82;
 export const CRYSTAL_HEIGHT = 1.62;
 const CRYSTAL_HDR = 1.7;
-
-export function emissiveTierGain(tier: QualityTier): number {
-  return tier === 'thumb' ? 0.72 : 1;
-}
-
-export function mouthTierGain(tier: QualityTier): number {
-  return tier === 'thumb' ? 1.12 : 1;
-}
-
-export function mouthStoneTint(tier: QualityTier): number {
-  return tier === 'thumb' ? 0.62 : 0;
-}
-
-export function mouthStoneEmissive(tier: QualityTier): number {
-  return tier === 'thumb' ? 0.7 : 0;
-}
 
 export const MOUTH_RIM = 0.5;
 
@@ -55,32 +35,7 @@ export interface MouthCarriers {
   total: number;
 }
 
-export function mouthCarriers(root: THREE.Object3D, name: string): MouthCarriers {
-  const frame = root.getObjectByName(`${name}Frame`) as THREE.Mesh | undefined;
-  const throat = root.getObjectByName(`${name}Throat`) as THREE.Mesh | undefined;
-  const frameMaterial = frame?.material as OakMaterial | undefined;
-  const throatMaterial = throat?.material as EmissiveMaterial | undefined;
-  const handle = oakUniforms(frameMaterial);
-  const rim = handle && handle.flags.rim ? handle.uniforms.uRimStrength.value : 0;
-  const throatColor = throatMaterial ? throatMaterial.color : new THREE.Color(0, 0, 0);
-  const drawn = throat?.visible === true;
-  return {
-    rim,
-    rimColor: handle ? handle.uniforms.uRimColor.value : new THREE.Color(0, 0, 0),
-    glow: drawn ? Math.max(throatColor.r, throatColor.g, throatColor.b) : 0,
-    glowColor: throatColor,
-    stone: frameMaterial ? frameMaterial.color : new THREE.Color(0, 0, 0),
-    stoneEmissive: frameMaterial ? frameMaterial.emissiveIntensity : 0,
-    stoneEmissiveColor: frameMaterial ? frameMaterial.emissive : new THREE.Color(0, 0, 0),
-    total:
-      rim +
-      (drawn ? Math.max(throatColor.r, throatColor.g, throatColor.b) : 0) +
-      (frameMaterial ? frameMaterial.emissiveIntensity : 0),
-  };
-}
-
 export interface CueCrystalOptions {
-  tier: QualityTier;
   skin: CaveSkin;
   cueColors: readonly [THREE.ColorRepresentation, THREE.ColorRepresentation];
   name?: string;
@@ -135,8 +90,8 @@ function clusterParts(detail: number, color: THREE.ColorRepresentation): Colored
 }
 
 export function buildCueCrystal(opts: CueCrystalOptions): CueCrystalHandle {
-  const { tier, skin } = opts;
-  const detail = tier === 'thumb' ? 0 : 1;
+  const { skin } = opts;
+  const detail = 1;
   const group = new THREE.Group();
   group.name = opts.name ?? 'cueCrystal';
 
@@ -151,13 +106,13 @@ export function buildCueCrystal(opts: CueCrystalOptions): CueCrystalHandle {
 
   const plinthParts: ColoredPart[] = [];
   {
-    const pier = new THREE.CylinderGeometry(0.66, 0.95, 1.5, tier === 'thumb' ? 6 : 9, 1);
+    const pier = new THREE.CylinderGeometry(0.66, 0.95, 1.5, 9, 1);
     pier.translate(0, -0.72, 0);
     plinthParts.push({ geometry: pier, color: blendTokens(skin.rockLow, skin.rockHigh, 0.5) });
-    const base = new THREE.CylinderGeometry(0.52, 0.66, 0.3, tier === 'thumb' ? 6 : 9, 1);
+    const base = new THREE.CylinderGeometry(0.52, 0.66, 0.3, 9, 1);
     base.translate(0, 0.13, 0);
     plinthParts.push({ geometry: base, color: skin.rockLow });
-    const lip = new THREE.CylinderGeometry(0.38, 0.5, 0.13, tier === 'thumb' ? 6 : 9, 1);
+    const lip = new THREE.CylinderGeometry(0.38, 0.5, 0.13, 9, 1);
     lip.translate(0, 0.31, 0);
     plinthParts.push({ geometry: lip, color: blendTokens(skin.rockLow, skin.mineral, 0.4) });
   }
@@ -169,17 +124,16 @@ export function buildCueCrystal(opts: CueCrystalOptions): CueCrystalHandle {
     rimColor: skin.rim,
     rimStrength: 0.7,
     emissive: skin.rockLow,
-    emissiveIntensity: tierBounce(tier),
+    emissiveIntensity: 0.03,
     toonSteps: 3,
     toonSoftness: 0.3,
-    toonFloor: tierToonFloor(tier, 0.34),
-    tier,
+    toonFloor: 0.34,
     name: 'cueCrystalRock',
   });
   const plinth = new THREE.Mesh(plinthGeometry, rockMaterial);
   plinth.name = 'cueCrystalPlinth';
-  plinth.castShadow = tier !== 'thumb';
-  plinth.receiveShadow = tier !== 'thumb';
+  plinth.castShadow = true;
+  plinth.receiveShadow = true;
   cluster.add(plinth);
 
   const quartzGeometry = mergeColoredParts(
@@ -196,18 +150,17 @@ export function buildCueCrystal(opts: CueCrystalOptions): CueCrystalHandle {
     rimPower: 2.1,
     toonSteps: 2,
     toonSoftness: 0.4,
-    toonFloor: tierToonFloor(tier, 0.42),
-    tier,
+    toonFloor: 0.42,
     name: 'cueCrystalQuartz',
   });
   const quartz = new THREE.Mesh(quartzGeometry, quartzMaterial);
   quartz.name = 'cueCrystalQuartz';
   quartz.position.y = 0.3;
-  quartz.castShadow = tier !== 'thumb';
+  quartz.castShadow = true;
   cluster.add(quartz);
 
   const glowGeometry = mergeColoredParts(clusterParts(detail, 0xffffff), 'cueCrystalGlow');
-  const glowGain = CRYSTAL_HDR * emissiveTierGain(tier);
+  const glowGain = CRYSTAL_HDR * 1;
   const glowMaterial: EmissiveMaterial = emissiveMaterial(opts.cueColors[0], glowGain, {
     transparent: true,
     opacity: 0.9,
@@ -222,7 +175,7 @@ export function buildCueCrystal(opts: CueCrystalOptions): CueCrystalHandle {
   glow.scale.setScalar(1.055);
   cluster.add(glow);
 
-  const haloGeometry = new THREE.IcosahedronGeometry(0.95, tier === 'thumb' ? 0 : 1);
+  const haloGeometry = new THREE.IcosahedronGeometry(0.95, 1);
   const haloMaterial: EmissiveMaterial = emissiveMaterial(opts.cueColors[0], glowGain * 0.24, {
     transparent: true,
     opacity: 0.22,
@@ -299,15 +252,14 @@ export const MOUTH_HEIGHT = 3.3;
 const MOUTH_HDR = 0.72;
 
 export interface ExitMouthOptions {
-  tier: QualityTier;
   skin: CaveSkin;
   color: THREE.ColorRepresentation;
   side: 1 | -1;
   name?: string;
 }
 
-function throatLensGeometry(tier: QualityTier, halfZ: number, halfY: number, depth: number): THREE.BufferGeometry {
-  const seg = tier === 'thumb' ? 12 : tier === 'medium' ? 18 : 26;
+function throatLensGeometry(halfZ: number, halfY: number, depth: number): THREE.BufferGeometry {
+  const seg = 26;
   const rings: readonly (readonly [number, number])[] = [
     [0, 1],
     [0.28, 0.8],
@@ -376,8 +328,8 @@ export interface ExitMouthHandle {
 }
 
 export function buildExitMouth(opts: ExitMouthOptions): ExitMouthHandle {
-  const { tier, skin, side } = opts;
-  const detail = tier === 'thumb' ? 0.4 : tier === 'medium' ? 0.7 : 1;
+  const { skin, side } = opts;
+  const detail = 1;
   const group = new THREE.Group();
   group.name = opts.name ?? 'exitMouth';
 
@@ -417,8 +369,8 @@ export function buildExitMouth(opts: ExitMouthOptions): ExitMouthHandle {
     parts.push({ geometry: pier, color: blendTokens(skin.rockLow, skin.rockHigh, 0.55) });
   }
   const frameGeometry = mergeColoredParts(parts, `${group.name}Frame`);
-  const stoneTint = mouthStoneTint(tier);
-  const emissiveTint = mouthStoneEmissive(tier);
+  const stoneTint = 0;
+  const emissiveTint = 0;
   const frameMaterial: OakMaterial = oakMaterial({
     color: stoneTint > 0 ? blendTokens(0xffffff, opts.color, stoneTint) : 0xffffff,
     vertexColors: true,
@@ -428,21 +380,20 @@ export function buildExitMouth(opts: ExitMouthOptions): ExitMouthHandle {
     rimStrength: MOUTH_RIM,
     emissive:
       emissiveTint > 0 ? blendTokens(skin.rockLow, opts.color, emissiveTint) : skin.rockLow,
-    emissiveIntensity: tierBounce(tier),
+    emissiveIntensity: 0.03,
     toonSteps: 3,
     toonSoftness: 0.3,
-    toonFloor: tierToonFloor(tier, 0.34),
-    tier,
+    toonFloor: 0.34,
     name: `${group.name}Frame`,
   });
   const frame = new THREE.Mesh(frameGeometry, frameMaterial);
   frame.name = `${group.name}Frame`;
-  frame.castShadow = tier !== 'thumb';
-  frame.receiveShadow = tier !== 'thumb';
+  frame.castShadow = true;
+  frame.receiveShadow = true;
   arch.add(frame);
 
-  const throatGeometry = throatLensGeometry(tier, ringR * 0.8, ringY * 0.55, 0.62);
-  const throatGain = MOUTH_HDR * mouthTierGain(tier);
+  const throatGeometry = throatLensGeometry( ringR * 0.8, ringY * 0.55, 0.62);
+  const throatGain = MOUTH_HDR * 1;
   const throatMaterial: EmissiveMaterial = emissiveMaterial(opts.color, throatGain, {
     transparent: true,
     opacity: 1,
@@ -458,9 +409,9 @@ export function buildExitMouth(opts: ExitMouthOptions): ExitMouthHandle {
   throat.renderOrder = 2;
   arch.add(throat);
 
-  const bounce = tierBounce(tier);
+  const bounce = 0.03;
   const bounceLift = emissiveTint > 0 ? 1.15 : 0;
-  const rimScale = tierEffectScale(tier).rim;
+  const rimScale = 1;
   let gain = 1;
 
   return {

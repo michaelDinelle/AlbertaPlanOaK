@@ -1,5 +1,5 @@
 
-import { CTRL_LEN, OFF_DONE, OFF_POSE, POSE_LEN, effortView } from '../record';
+import { POSE_LEN } from '../record';
 import type { EnvDecoder, EnvFrame, EnvGeometry, GridCell, SimEvent } from '../types';
 import { NO_EVENTS } from '../events';
 
@@ -11,14 +11,10 @@ export const POMAZE_GAPS: readonly GridCell[] = Object.freeze([
   { x: 8, y: 3 },
   { x: 2, y: 7 },
 ]);
-export const POMAZE_VIEW_RADIUS = 1;
-
-export interface POMazeState {
-  x: number;
-  y: number;
-  gx: number;
-  gy: number;
-}
+export const POMAZE_X = 0;
+export const POMAZE_Y = 1;
+export const POMAZE_GX = 2;
+export const POMAZE_GY = 3;
 
 export interface POMazeStatic {
   seed: number;
@@ -42,30 +38,7 @@ export function poMazeWalls(): Uint8Array {
   return walls;
 }
 
-export function poMazeView(x: number, y: number): Uint8Array {
-  const d: readonly (readonly [number, number])[] = [
-    [0, -1],
-    [1, -1],
-    [1, 0],
-    [1, 1],
-    [0, 1],
-    [-1, 1],
-    [-1, 0],
-    [-1, -1],
-  ];
-  const out = new Uint8Array(8);
-  for (let i = 0; i < 8; i++) {
-    const o = d[i]!;
-    out[i] = poMazeIsWall(x + o[0], y + o[1]) ? 1 : 0;
-  }
-  return out;
-}
-
-function state(x: number, y: number, gx: number, gy: number): POMazeState {
-  return { x, y, gx, gy };
-}
-
-export const poMazeDecoder: EnvDecoder<POMazeState, POMazeStatic> = {
+export const poMazeDecoder: EnvDecoder<POMazeStatic> = {
   envId: 'POMaze-cont-v0',
 
   initStatic(seed: number): POMazeStatic {
@@ -85,7 +58,7 @@ export const poMazeDecoder: EnvDecoder<POMazeState, POMazeStatic> = {
     };
   },
 
-  initFrame(): EnvFrame<POMazeState> {
+  initFrame(): EnvFrame {
     const pose = new Float32Array(POSE_LEN);
     pose[0] = POMAZE_START.x;
     pose[1] = POMAZE_START.y;
@@ -93,25 +66,13 @@ export const poMazeDecoder: EnvDecoder<POMazeState, POMazeStatic> = {
     pose[3] = POMAZE_GOAL.y;
     return {
       step: -1,
-      ctrl: new Float32Array(CTRL_LEN),
       done: 0,
       pose,
-      state: state(POMAZE_START.x, POMAZE_START.y, POMAZE_GOAL.x, POMAZE_GOAL.y),
     };
   },
 
-  decodeFrame(i: number, raw16: Float32Array): EnvFrame<POMazeState> {
-    const pose = raw16.subarray(OFF_POSE, OFF_POSE + POSE_LEN);
-    return {
-      step: i,
-      ctrl: effortView(raw16, -1),
-      done: raw16[OFF_DONE] ?? 0,
-      pose,
-      state: state(pose[0] ?? 0, pose[1] ?? 0, pose[2] ?? 0, pose[3] ?? 0),
-    };
-  },
 
-  deriveEvents(_prev: EnvFrame<POMazeState>, next: EnvFrame<POMazeState>): SimEvent[] {
+  deriveEvents(_prev: EnvFrame, next: EnvFrame): SimEvent[] {
     if (next.done === 0) return NO_EVENTS;
     return [{ type: 'goal' }, { type: 'teleport' }, { type: 'done' }];
   },

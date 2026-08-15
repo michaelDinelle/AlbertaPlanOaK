@@ -5,7 +5,6 @@ import { cellToWorld, cellToWorldVec, type Vec3Tuple } from '@kit/grid';
 import { makeOrbitRig, type OrbitRig } from '@kit/rigs';
 import { TOKENS } from '@kit/tokens';
 import type {
-  FrameState,
   FrameUpdate,
   SceneContext,
   SceneFactory,
@@ -39,11 +38,6 @@ import {
 const CAM_TARGET: readonly [number, number, number] = [-4, 1.0, 0];
 const CAM_DISTANCE = 24.8;
 const CAM_POLAR = 1.263;
-const CAM_YAW_RANGE = 0.55;
-const CAM_TARGET_THUMB: readonly [number, number, number] = [-2.6, 1.3, 0];
-const CAM_DISTANCE_THUMB = 29.5;
-const CAM_AZIMUTH_THUMB = -1.02;
-const CAM_POLAR_THUMB = 1.21;
 
 const HOP_SECONDS = 0.11;
 const HOP_HEIGHT = 0.14;
@@ -124,7 +118,6 @@ class FireflyCaveScene implements SceneModule {
     const wisp = new Wisp(
       {
         color: accent,
-        tier: ctx.tier,
         radius: 0.21,
         hop: { duration: HOP_SECONDS, height: HOP_HEIGHT },
         name: 'caveWisp',
@@ -135,7 +128,6 @@ class FireflyCaveScene implements SceneModule {
     this.scene.add(wisp.group);
 
     const crystal = buildCueCrystal({
-      tier: ctx.tier,
       skin: world.skin,
       cueColors: [ctx.tokens.cueCyan, ctx.tokens.cueMagenta],
       name: 'cueCrystal',
@@ -145,14 +137,12 @@ class FireflyCaveScene implements SceneModule {
     cellToWorldVec(CUE_CELL, 0, grid, crystal.root.position);
 
     const mouthCyan = buildExitMouth({
-      tier: ctx.tier,
       skin: world.skin,
       color: ctx.tokens.cueCyan,
       side: -1,
       name: 'exitMouthCyan',
     });
     const mouthMagenta = buildExitMouth({
-      tier: ctx.tier,
       skin: world.skin,
       color: ctx.tokens.cueMagenta,
       side: 1,
@@ -188,13 +178,12 @@ class FireflyCaveScene implements SceneModule {
       floodLight.position.set(this.choiceX, 1.2, 0);
     }
 
-    const thumb = ctx.tier === 'thumb';
     const rig = makeOrbitRig({
       canvas: ctx.canvas,
-      target: thumb ? CAM_TARGET_THUMB : CAM_TARGET,
-      distance: thumb ? CAM_DISTANCE_THUMB : CAM_DISTANCE,
-      azimuth: thumb ? CAM_AZIMUTH_THUMB : CAMERA_AZIMUTH,
-      polar: thumb ? CAM_POLAR_THUMB : CAM_POLAR,
+      target: CAM_TARGET,
+      distance: CAM_DISTANCE,
+      azimuth: CAMERA_AZIMUTH,
+      polar: CAM_POLAR,
       fov: ctx.tokens.fovHero,
       near: 0.1,
       far: 900,
@@ -209,7 +198,6 @@ class FireflyCaveScene implements SceneModule {
     rig.snap();
 
     const pool = new CelebrationPool({
-      tier: ctx.tier,
       seed: ctx.seed,
       burstSize: BURST_PARTICLES,
       sighRadius: 3.4,
@@ -431,18 +419,6 @@ export function floodRunning(age: number): boolean {
 export function floodProgress(age: number): number {
   if (!(age >= 0) || age >= FLOOD_SECONDS) return 0;
   return clamp01(age / FLOOD_SECONDS);
-}
-
-export function cueVisibleAt(pos: number): boolean {
-  return pos === CUE_CELL;
-}
-
-export function cueOf(state: FrameState): 0 | 1 {
-  return readCue(state);
-}
-
-export function posOf(state: FrameState): number {
-  return readPos(state);
 }
 
 const createScene: SceneFactory = () => new FireflyCaveScene();

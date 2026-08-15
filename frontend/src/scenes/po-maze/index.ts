@@ -1,8 +1,8 @@
 
+import { POMAZE_GX, POMAZE_GY, POMAZE_X, POMAZE_Y } from '@sim/envs/pomaze';
 import { CelebrationPool, attachCelebrations, disposeCelebrations } from '@kit/celebrate';
 import { GroundTruthOverlay } from '@kit/debug';
 import { cellToWorldVec, clampCell, type GridSize } from '@kit/grid';
-import { hash1f } from '@kit/rng';
 import { makeOrbitRig, type OrbitRig } from '@kit/rigs';
 import { TOKENS } from '@kit/tokens';
 import type {
@@ -34,7 +34,6 @@ import {
   bubbleVisibility,
   buildWorld,
   clamp01,
-  compassOffset,
   forestSkin,
   resolveGrid,
   revealVisibility,
@@ -47,14 +46,6 @@ const CAM_AZIMUTH = CAMERA_AZIMUTH;
 const CAM_POLAR = 1.32;
 const CAM_DISTANCE = 4.7;
 const CAM_TARGET_Y = 0.82;
-const CAM_DISTANCE_THUMB = 6.9;
-const CAM_AZIMUTH_THUMB = CAMERA_AZIMUTH + 0.22;
-const CAM_POLAR_THUMB = 1.25;
-const CAM_YAW_RANGE = 0.55;
-const CAM_MIN_POLAR = 1.04;
-const CAM_MAX_POLAR = 1.36;
-const CAM_MIN_DISTANCE = 3.6;
-const CAM_MAX_DISTANCE = 6.6;
 const CAM_FOLLOW_RATE = 2.2;
 
 const BURST_SCALE = 0.45;
@@ -71,24 +62,11 @@ const HOP_HEIGHT = 0.14;
 
 const DEFAULT_BLOOM = forestSkin(TOKENS.palettes.dawn, TOKENS).bloom.getHex();
 
-interface POMazeLike {
-  x?: unknown;
-  y?: unknown;
-  gx?: unknown;
-  gy?: unknown;
-}
-
 export function readCells(state: FrameState, grid: GridSize, agent: GridCell, goal: GridCell): void {
-  const d = state.derived as POMazeLike | null | undefined;
-  const has = d !== null && typeof d === 'object';
-  const ax = has && typeof d.x === 'number' ? d.x : (state.pose[0] ?? 0);
-  const ay = has && typeof d.y === 'number' ? d.y : (state.pose[1] ?? 0);
-  const gx = has && typeof d.gx === 'number' ? d.gx : (state.pose[2] ?? 0);
-  const gy = has && typeof d.gy === 'number' ? d.gy : (state.pose[3] ?? 0);
-  agent.x = Number.isFinite(ax) ? Math.round(ax) : 0;
-  agent.y = Number.isFinite(ay) ? Math.round(ay) : 0;
-  goal.x = Number.isFinite(gx) ? Math.round(gx) : 0;
-  goal.y = Number.isFinite(gy) ? Math.round(gy) : 0;
+  agent.x = Math.round(state.pose[POMAZE_X] ?? 0);
+  agent.y = Math.round(state.pose[POMAZE_Y] ?? 0);
+  goal.x = Math.round(state.pose[POMAZE_GX] ?? 0);
+  goal.y = Math.round(state.pose[POMAZE_GY] ?? 0);
   clampCell(agent, grid);
   clampCell(goal, grid);
 }
@@ -125,7 +103,6 @@ class FogboundForestScene implements SceneModule {
   private readonly camAnchor = new THREE.Vector3();
   private readonly lightPos = new THREE.Vector3();
   private camPrimed = false;
-  private camFixed = false;
   private lingering = false;
   private gold = TOKENS.celebrationGold;
   private bloomColor = DEFAULT_BLOOM;
@@ -159,7 +136,6 @@ class FogboundForestScene implements SceneModule {
     const wisp = new Wisp(
       {
         color: wispColor,
-        tier: ctx.tier,
         radius: 0.09,
         hop: { duration: HOP_SECONDS, height: HOP_HEIGHT },
         name: 'forestWisp',
@@ -172,17 +148,15 @@ class FogboundForestScene implements SceneModule {
     const lantern = buildLanternPool(
       blendTokens(accent, palette.accentLight, 0.55),
       BUBBLE_OUTER * 1.15,
-      ctx.tier,
     );
     this.lantern = lantern;
     this.scene.add(lantern.mesh);
 
-    const aura = buildWispAura(blendTokens(wispColor, palette.sun, 0.4), 1.05, ctx.tier);
+    const aura = buildWispAura(blendTokens(wispColor, palette.sun, 0.4), 1.05);
     this.aura = aura;
     this.scene.add(aura.mesh);
 
     const flower = buildMoonflower({
-      tier: ctx.tier,
       skin: world.skin,
       glow: world.skin.bloom,
       name: 'moonflowerRoot',
@@ -192,30 +166,19 @@ class FogboundForestScene implements SceneModule {
     this.scene.add(flower.bloom);
 
     const beacon = buildGoalBeacon({
-      tier: ctx.tier,
       glow: world.skin.bloom,
       name: 'goalBeacon',
     });
     this.beacon = beacon;
     this.scene.add(beacon.group);
 
-    const thumb = ctx.tier === 'thumb';
-    this.camFixed = thumb;
-    if (thumb) {
-      const thumbCell: GridCell = {
-        x: Math.round(manifest.thumbFrame.pose[0] ?? 0),
-        y: Math.round(manifest.thumbFrame.pose[1] ?? 0),
-      };
-      clampCell(thumbCell, grid);
-      cellToWorldVec(thumbCell.x, thumbCell.y, grid, this.camAnchor);
-    }
     this.camAnchor.y = CAM_TARGET_Y;
     const rig = makeOrbitRig({
       canvas: ctx.canvas,
       target: [this.camAnchor.x, CAM_TARGET_Y, this.camAnchor.z],
-      distance: thumb ? CAM_DISTANCE_THUMB : CAM_DISTANCE,
-      azimuth: thumb ? CAM_AZIMUTH_THUMB : CAM_AZIMUTH,
-      polar: thumb ? CAM_POLAR_THUMB : CAM_POLAR,
+      distance: CAM_DISTANCE,
+      azimuth: CAM_AZIMUTH,
+      polar: CAM_POLAR,
       fov: ctx.tokens.fovHero,
       near: 0.1,
       far: 900,
@@ -230,7 +193,6 @@ class FogboundForestScene implements SceneModule {
     rig.snap();
 
     const pool = new CelebrationPool({
-      tier: ctx.tier,
       seed: ctx.seed,
       burstSize: BURST_PARTICLES,
       name: 'forestCelebrations',
@@ -402,7 +364,7 @@ class FogboundForestScene implements SceneModule {
 
     world.setTime(time);
 
-    if (!this.camFixed) {
+    {
       const linger = time - this.lingerAt >= 0 && time - this.lingerAt < LINGER_SECONDS;
       const tx = linger ? this.revealX : wx;
       const tz = linger ? this.revealZ : wz;
@@ -462,7 +424,6 @@ class FogboundForestScene implements SceneModule {
     this.revealAt = -Infinity;
     this.lingerAt = -Infinity;
     this.camPrimed = false;
-    this.camFixed = false;
     this.lingering = false;
     this.camAnchor.set(0, 0, 0);
   }

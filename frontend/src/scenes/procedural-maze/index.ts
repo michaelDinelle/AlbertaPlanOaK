@@ -1,4 +1,5 @@
 
+import { PROCMAZE_GX, PROCMAZE_GY, PROCMAZE_X, PROCMAZE_Y } from '@sim/envs/proceduralmaze';
 import { CelebrationPool, attachCelebrations, disposeCelebrations } from '@kit/celebrate';
 import { GroundTruthOverlay } from '@kit/debug';
 import { cellToWorldVec, clampCell, type GridSize } from '@kit/grid';
@@ -39,10 +40,6 @@ const CAM_POLAR = CAMERA_POLAR;
 const CAM_DISTANCE = CAMERA_DISTANCE;
 const CAM_TARGET_Y = CAMERA_TARGET_Y;
 const CAM_TARGET_BIAS = CAMERA_TARGET_BIAS;
-const CAM_YAW_RANGE = 0.6;
-const CAM_DISTANCE_THUMB = 25.0;
-const CAM_AZIMUTH_THUMB = 0.5;
-const CAM_POLAR_THUMB = 0.66;
 
 const BURST_SCALE = 0.82;
 const RIPPLE_SCALE = 0.48;
@@ -55,35 +52,18 @@ const GROW_SECONDS = 0.8;
 const HOP_SECONDS = 0.11;
 const HOP_HEIGHT = 0.15;
 
-interface ProceduralMazeLike {
-  x?: unknown;
-  y?: unknown;
-  gx?: unknown;
-  gy?: unknown;
-}
-
 function readCells(state: FrameState, grid: GridSize, agent: GridCell, goal: GridCell): void {
-  const d = state.derived as ProceduralMazeLike | null | undefined;
-  const has = d !== null && typeof d === 'object';
-  const ax = has && typeof d.x === 'number' ? d.x : (state.pose[0] ?? 0);
-  const ay = has && typeof d.y === 'number' ? d.y : (state.pose[1] ?? 0);
-  const gx = has && typeof d.gx === 'number' ? d.gx : (state.pose[2] ?? 0);
-  const gy = has && typeof d.gy === 'number' ? d.gy : (state.pose[3] ?? 0);
-  agent.x = Number.isFinite(ax) ? Math.round(ax) : 0;
-  agent.y = Number.isFinite(ay) ? Math.round(ay) : 0;
-  goal.x = Number.isFinite(gx) ? Math.round(gx) : 0;
-  goal.y = Number.isFinite(gy) ? Math.round(gy) : 0;
+  agent.x = Math.round(state.pose[PROCMAZE_X] ?? 0);
+  agent.y = Math.round(state.pose[PROCMAZE_Y] ?? 0);
+  goal.x = Math.round(state.pose[PROCMAZE_GX] ?? 0);
+  goal.y = Math.round(state.pose[PROCMAZE_GY] ?? 0);
   clampCell(agent, grid);
   clampCell(goal, grid);
 }
 
 export function readGoalCell(state: FrameState, grid: GridSize, out: GridCell): GridCell {
-  const d = state.derived as ProceduralMazeLike | null | undefined;
-  const has = d !== null && typeof d === 'object';
-  const gx = has && typeof d.gx === 'number' ? d.gx : (state.pose[2] ?? 0);
-  const gy = has && typeof d.gy === 'number' ? d.gy : (state.pose[3] ?? 0);
-  out.x = Number.isFinite(gx) ? Math.round(gx) : 0;
-  out.y = Number.isFinite(gy) ? Math.round(gy) : 0;
+  out.x = Math.round(state.pose[PROCMAZE_GX] ?? 0);
+  out.y = Math.round(state.pose[PROCMAZE_GY] ?? 0);
   return clampCell(out, grid);
 }
 
@@ -155,7 +135,6 @@ class OvergrownRuinsScene implements SceneModule {
     const wisp = new Wisp(
       {
         color: accent,
-        tier: ctx.tier,
         radius: 0.22,
         hop: { duration: HOP_SECONDS, height: HOP_HEIGHT },
         name: 'ruinWisp',
@@ -166,7 +145,6 @@ class OvergrownRuinsScene implements SceneModule {
     this.scene.add(wisp.group);
 
     const shaft = buildSunShaft({
-      tier: ctx.tier,
       palette,
       skin,
       sunDir: SUN_DIR,
@@ -175,14 +153,13 @@ class OvergrownRuinsScene implements SceneModule {
     this.shaft = shaft;
     this.scene.add(shaft.group);
 
-    const thumb = ctx.tier === 'thumb';
-    const bias = thumb ? 0 : CAM_TARGET_BIAS;
+    const bias = CAM_TARGET_BIAS;
     const rig = makeOrbitRig({
       canvas: ctx.canvas,
       target: [Math.sin(CAM_AZIMUTH) * bias, CAM_TARGET_Y, Math.cos(CAM_AZIMUTH) * bias],
-      distance: thumb ? CAM_DISTANCE_THUMB : CAM_DISTANCE,
-      azimuth: thumb ? CAM_AZIMUTH_THUMB : CAM_AZIMUTH,
-      polar: thumb ? CAM_POLAR_THUMB : CAM_POLAR,
+      distance: CAM_DISTANCE,
+      azimuth: CAM_AZIMUTH,
+      polar: CAM_POLAR,
       fov: ctx.tokens.fovHero,
       near: 0.1,
       far: 900,
@@ -197,7 +174,6 @@ class OvergrownRuinsScene implements SceneModule {
     rig.snap();
 
     const pool = new CelebrationPool({
-      tier: ctx.tier,
       seed: ctx.seed,
       burstSize: BURST_PARTICLES,
       name: 'ruinCelebrations',

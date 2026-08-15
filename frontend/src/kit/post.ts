@@ -5,7 +5,7 @@ import { RenderPass } from 'three/examples/jsm/postprocessing/RenderPass.js';
 import { ShaderPass } from 'three/examples/jsm/postprocessing/ShaderPass.js';
 import { OutputPass } from 'three/examples/jsm/postprocessing/OutputPass.js';
 import { UnrealBloomPass } from 'three/examples/jsm/postprocessing/UnrealBloomPass.js';
-import type { QualityTier, SceneSize } from './types';
+import type { SceneSize } from './types';
 import { TOKENS } from './tokens';
 
 export interface PostConfig {
@@ -26,53 +26,18 @@ export interface GradeUniforms {
 }
 
 export interface ComposerHandle {
-  composer: EffectComposer | null;
-  bloom: UnrealBloomPass | null;
-  gradeUniforms: GradeUniforms | null;
-  bloomStrength: number;
   setBloomPulse(t01: number): void;
   render(deltaTime?: number): void;
   resize(width: number, height: number, dpr?: number): void;
   dispose(): void;
 }
 
-
-export function bloomResolutionScale(tier: QualityTier): number {
-  return tier === 'hero' ? 0.5 : tier === 'medium' ? 0.25 : 0;
-}
-
-export function msaaSamples(tier: QualityTier): number {
-  return tier === 'hero' ? 4 : 0;
-}
-
-export function usesPost(tier: QualityTier): boolean {
-  return tier !== 'thumb';
-}
+export const BLOOM_RESOLUTION_SCALE = 0.5;
+export const MSAA_SAMPLES = 4;
 
 export function pulsedBloomStrength(base: number, t01: number): number {
   const t = t01 < 0 ? 0 : t01 > 1 ? 1 : t01;
   return base * (1 + 1.2 * t);
-}
-
-export interface GradeSettings {
-  lift: number;
-  gamma: number;
-  tint: number;
-  tintStrength: number;
-  vignette: number;
-  grain: number;
-}
-
-export function gradeDefaults(config: PostConfig, tier: QualityTier): GradeSettings {
-  const hero = tier === 'hero';
-  return {
-    lift: hero ? 0.004 : 0.003,
-    gamma: 1.0,
-    tint: config.fogTint,
-    tintStrength: 0.14,
-    vignette: hero ? 0.34 : 0.26,
-    grain: hero ? 0.02 : 0.012,
-  };
 }
 
 
@@ -146,7 +111,6 @@ export function buildComposer(
   scene: THREE.Scene,
   camera: THREE.Camera,
   config: PostConfig,
-  tier: QualityTier,
   size: SceneSize,
 ): ComposerHandle {
   renderer.toneMapping = THREE.ACESFilmicToneMapping;
@@ -157,28 +121,9 @@ export function buildComposer(
   const dpr = size.dpr > 0 ? size.dpr : 1;
   const bloomStrength = config.bloomStrength;
 
-  if (!usesPost(tier)) {
-    return {
-      composer: null,
-      bloom: null,
-      gradeUniforms: null,
-      bloomStrength,
-      setBloomPulse() {
-      },
-      render() {
-        renderer.render(scene, camera);
-      },
-      resize() {
-      },
-      dispose() {
-      },
-    };
-  }
-
-  const samples = msaaSamples(tier);
   const target = new THREE.WebGLRenderTarget(width, height, {
     type: THREE.HalfFloatType,
-    samples,
+    samples: MSAA_SAMPLES,
     depthBuffer: true,
     stencilBuffer: false,
   });
@@ -191,27 +136,23 @@ export function buildComposer(
   const renderPass = new RenderPass(scene, camera);
   composer.addPass(renderPass);
 
-  const scale = bloomResolutionScale(tier);
-  let bloom: UnrealBloomPass | null = null;
-  if (scale > 0) {
-    bloom = new UnrealBloomPass(
-      new THREE.Vector2(Math.max(1, Math.round(width * dpr * scale)), Math.max(1, Math.round(height * dpr * scale))),
-      bloomStrength,
-      0.6,
-      config.bloomThreshold,
-    );
-    composer.addPass(bloom);
-  }
+  const scale = BLOOM_RESOLUTION_SCALE;
+  const bloom = new UnrealBloomPass(
+    new THREE.Vector2(Math.max(1, Math.round(width * dpr * scale)), Math.max(1, Math.round(height * dpr * scale))),
+    bloomStrength,
+    0.6,
+    config.bloomThreshold,
+  );
+  composer.addPass(bloom);
 
   const gradePass = new ShaderPass(OakGradeShader);
   const gradeUniforms = gradePass.uniforms as unknown as GradeUniforms;
-  const g = gradeDefaults(config, tier);
-  gradeUniforms.uLift.value.setScalar(g.lift);
-  gradeUniforms.uTint.value.set(g.tint);
-  gradeUniforms.uTintStrength.value = g.tintStrength;
-  gradeUniforms.uGamma.value = g.gamma;
-  gradeUniforms.uVignette.value = g.vignette;
-  gradeUniforms.uGrain.value = g.grain;
+  gradeUniforms.uLift.value.setScalar(0.004);
+  gradeUniforms.uTint.value.set(config.fogTint);
+  gradeUniforms.uTintStrength.value = 0.14;
+  gradeUniforms.uGamma.value = 1.0;
+  gradeUniforms.uVignette.value = 0.34;
+  gradeUniforms.uGrain.value = 0.02;
   gradeUniforms.uResolution.value.set(width * dpr, height * dpr);
   composer.addPass(gradePass);
 
@@ -219,7 +160,6 @@ export function buildComposer(
   composer.addPass(outputPass);
 
   const resizeBloom = (w: number, h: number, ratio: number) => {
-    if (!bloom) return;
     bloom.setSize(Math.max(1, Math.round(w * ratio * scale)), Math.max(1, Math.round(h * ratio * scale)));
   };
   resizeBloom(width, height, dpr);
@@ -227,12 +167,8 @@ export function buildComposer(
   let currentDpr = dpr;
 
   return {
-    composer,
-    bloom,
-    gradeUniforms,
-    bloomStrength,
     setBloomPulse(t01: number) {
-      if (bloom) bloom.strength = pulsedBloomStrength(bloomStrength, t01);
+      bloom.strength = pulsedBloomStrength(bloomStrength, t01);
     },
     render(deltaTime?: number) {
       composer.render(deltaTime);
@@ -248,11 +184,11 @@ export function buildComposer(
     },
     dispose() {
       composer.removePass(renderPass);
-      if (bloom) composer.removePass(bloom);
+      composer.removePass(bloom);
       composer.removePass(gradePass);
       composer.removePass(outputPass);
       renderPass.dispose();
-      bloom?.dispose();
+      bloom.dispose();
       gradePass.dispose();
       outputPass.dispose();
       composer.dispose();

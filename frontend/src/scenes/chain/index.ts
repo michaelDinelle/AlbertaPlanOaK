@@ -15,7 +15,7 @@ import type {
 import { Wisp } from '@kit/wisp';
 import * as THREE from 'three';
 import type { GridCell, GridGeometry } from '@sim/types';
-import { CHAIN_END } from '@sim/envs/chain';
+import { CHAIN_END, CHAIN_POS } from '@sim/envs/chain';
 import {
   LANTERN_BASE_HEIGHT,
   LANTERN_BASE_RADIUS,
@@ -44,11 +44,6 @@ const CAM_AZIMUTH = CAMERA_AZIMUTH;
 const CAM_POLAR = 1.17;
 const CAM_DISTANCE = 17.2;
 const CAM_TARGET: readonly [number, number, number] = [1.6, 0.45, 0];
-const CAM_YAW_RANGE = 0.5;
-const CAM_DISTANCE_THUMB = 26.5;
-const CAM_TARGET_THUMB: readonly [number, number, number] = [2.1, 0.45, 0];
-const CAM_AZIMUTH_THUMB = 0.32;
-const CAM_POLAR_THUMB = 1.12;
 
 const BURST_SCALE = 0.68;
 const RIPPLE_SCALE = 0.6;
@@ -105,16 +100,8 @@ export function groundedLanternOffset(
   return [bestDx, bestLow, LANTERN_Z];
 }
 
-interface ChainLike {
-  pos?: unknown;
-  len?: unknown;
-}
-
 export function readPos(state: FrameState, grid: GridSize): number {
-  const d = state.derived as ChainLike | null | undefined;
-  const has = d !== null && typeof d === 'object';
-  const raw = has && typeof d.pos === 'number' ? d.pos : (state.pose[0] ?? 0);
-  const p = Number.isFinite(raw) ? Math.round(raw) : 0;
+  const p = Math.round(state.pose[CHAIN_POS] ?? 0);
   return p < 0 ? 0 : p > grid.w - 1 ? grid.w - 1 : p;
 }
 
@@ -180,7 +167,6 @@ class SixteenStonesScene implements SceneModule {
     const wisp = new Wisp(
       {
         color: accent,
-        tier: ctx.tier,
         radius: 0.22,
         hop: { duration: HOP_SECONDS, height: HOP_HEIGHT },
         name: 'creekWisp',
@@ -191,7 +177,6 @@ class SixteenStonesScene implements SceneModule {
     this.scene.add(wisp.group);
 
     const tree = buildBlossomTree({
-      tier: ctx.tier,
       palette,
       blossom: shade(blendTokens(this.blossom, palette.groundB, 0.14), 0.24).getHex(),
       bark: skin.bark.getHex(),
@@ -204,7 +189,6 @@ class SixteenStonesScene implements SceneModule {
     this.scene.add(tree.group);
 
     const lantern = buildFordLantern({
-      tier: ctx.tier,
       palette,
       stone: skin.stoneDry.getHex(),
       moss: skin.moss.getHex(),
@@ -216,7 +200,6 @@ class SixteenStonesScene implements SceneModule {
     this.scene.add(lantern.group);
 
     const ferry = buildPetalFerry({
-      tier: ctx.tier,
       palette,
       blossom: shade(blendTokens(this.blossom, palette.sun, 0.12), 0.14).getHex(),
       from: [stoneX(this.goalCell.x, grid) + 0.24, tree.crownHeight * 0.72, 0],
@@ -226,15 +209,12 @@ class SixteenStonesScene implements SceneModule {
     this.ferry = ferry;
     this.scene.add(ferry.mesh);
 
-    const thumb = ctx.tier === 'thumb';
     const rig = makeOrbitRig({
       canvas: ctx.canvas,
-      target: thumb
-        ? [CAM_TARGET_THUMB[0], CAM_TARGET_THUMB[1], CAM_TARGET_THUMB[2]]
-        : [CAM_TARGET[0], CAM_TARGET[1], CAM_TARGET[2]],
-      distance: thumb ? CAM_DISTANCE_THUMB : CAM_DISTANCE,
-      azimuth: thumb ? CAM_AZIMUTH_THUMB : CAM_AZIMUTH,
-      polar: thumb ? CAM_POLAR_THUMB : CAM_POLAR,
+      target: [CAM_TARGET[0], CAM_TARGET[1], CAM_TARGET[2]],
+      distance: CAM_DISTANCE,
+      azimuth: CAM_AZIMUTH,
+      polar: CAM_POLAR,
       fov: ctx.tokens.fovHero,
       near: 0.1,
       far: 900,
@@ -249,7 +229,6 @@ class SixteenStonesScene implements SceneModule {
     rig.snap();
 
     const pool = new CelebrationPool({
-      tier: ctx.tier,
       seed: ctx.seed,
       burstSize: BURST_PARTICLES,
       name: 'creekCelebrations',

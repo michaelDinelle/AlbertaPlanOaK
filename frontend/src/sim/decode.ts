@@ -1,7 +1,7 @@
 import { ENVS, isEnvId } from '@shared/envs';
 import { NO_EVENTS } from './events';
-import { RECORD_FLOATS } from './record';
-import type { EnvDecoder, EnvFrame, RawRecording, SimEvent } from './types';
+import { OFF_DONE, OFF_POSE, POSE_LEN, RECORD_FLOATS } from './record';
+import type { EnvDecoder, EnvFrame, EnvGeometry, RawRecording, SimEvent } from './types';
 
 export { NO_EVENTS };
 
@@ -22,7 +22,7 @@ function checkRow(row: Float32Array, i: number): void {
   }
 }
 
-function checkIds<S, St>(raw: RawRecording, decoder: EnvDecoder<S, St>): void {
+function checkIds<St>(raw: RawRecording, decoder: EnvDecoder<St>): void {
   if (!isEnvId(raw.envId)) {
     throw new DecodeError(`unknown recording envId ${JSON.stringify(raw.envId)}`);
   }
@@ -39,8 +39,6 @@ function checkIds<S, St>(raw: RawRecording, decoder: EnvDecoder<S, St>): void {
   }
 }
 
-export const LENS_BLOCK = 4096;
-
 export interface EventStream {
   steps: Int32Array;
   kinds: Uint16Array;
@@ -48,23 +46,23 @@ export interface EventStream {
   count: number;
 }
 
-export interface RecordingLens<S = unknown> {
+export interface RecordingLens {
   envId: RawRecording['envId'];
   seed: number;
   controlHz: number;
   discretePose: boolean;
-  geometry: ReturnType<EnvDecoder<S, never>['geometry']>;
+  geometry: EnvGeometry;
   readonly frameCount: number;
-  frameAt(i: number): EnvFrame<S>;
+  frameAt(i: number): EnvFrame;
   eventsAt(i: number): readonly SimEvent[];
   readonly events: EventStream;
   extend(): boolean;
 }
 
-export function lensRecording<S, St>(
+export function lensRecording<St>(
   raw: RawRecording,
-  decoder: EnvDecoder<S, St>,
-): RecordingLens<S> {
+  decoder: EnvDecoder<St>,
+): RecordingLens {
   checkIds(raw, decoder);
   const info = ENVS[raw.envId as keyof typeof ENVS];
   const st = decoder.initStatic(raw.seed);
@@ -75,19 +73,29 @@ export function lensRecording<S, St>(
   let eventKinds = new Uint16Array(1024);
   let eventCount = 0;
   const typeIds = new Map<SimEvent['type'], number>();
-  const checkpoints: EnvFrame<S>[] = [];
   let processed = 0;
-  let prev = init;
+
+  const frameAt = (i: number): EnvFrame => {
+    const clamped = Math.max(0, Math.min(processed, Math.floor(i)));
+    if (clamped === 0) return init;
+    const at = (clamped - 1) * RECORD_FLOATS;
+    return {
+      step: clamped - 1,
+      done: raw.data[at + OFF_DONE] ?? 0,
+      pose: raw.data.subarray(at + OFF_POSE, at + OFF_POSE + POSE_LEN),
+    };
+  };
+
+  const eventsAt = (i: number): readonly SimEvent[] => {
+    const clamped = Math.floor(i);
+    if (clamped <= 0 || clamped > processed) return NO_EVENTS;
+    return decoder.deriveEvents(frameAt(clamped - 1), frameAt(clamped), st);
+  };
 
   const advance = (): void => {
-    const limit = raw.steps;
-    for (; processed < limit; processed++) {
-      if (processed % LENS_BLOCK === 0) checkpoints.push(prev);
-      const row = raw.data.subarray(processed * RECORD_FLOATS, (processed + 1) * RECORD_FLOATS);
-      checkRow(row, processed);
-      const frame = decoder.decodeFrame(processed, row, st, prev);
-      const events = decoder.deriveEvents(prev, frame, st);
-      for (const event of events) {
+    for (; processed < raw.steps; processed++) {
+      checkRow(raw.data.subarray(processed * RECORD_FLOATS, (processed + 1) * RECORD_FLOATS), processed);
+      for (const event of eventsAt(processed + 1)) {
         if (eventCount === eventSteps.length) {
           const steps = new Int32Array(eventCount * 2);
           const kinds = new Uint16Array(eventCount * 2);
@@ -105,58 +113,9 @@ export function lensRecording<S, St>(
         eventKinds[eventCount] = id;
         eventCount += 1;
       }
-      prev = frame;
     }
   };
   advance();
-
-  type Block = { count: number; frames: EnvFrame<S>[]; events: SimEvent[][] };
-  const cache = new Map<number, Block>();
-  const decodeBlock = (b: number): Block => {
-    const start = b * LENS_BLOCK;
-    const count = Math.min(LENS_BLOCK, processed - start);
-    const hit = cache.get(b);
-    if (hit !== undefined && hit.count === count) return hit;
-    const ck = checkpoints[b];
-    if (ck === undefined) throw new DecodeError(`lens block ${b} out of range`);
-    const frames: EnvFrame<S>[] = new Array<EnvFrame<S>>(count);
-    const events: SimEvent[][] = new Array<SimEvent[]>(count);
-    let p = ck;
-    for (let k = 0; k < count; k++) {
-      const i = start + k;
-      const row = raw.data.subarray(i * RECORD_FLOATS, (i + 1) * RECORD_FLOATS);
-      const next = decoder.decodeFrame(i, row, st, p);
-      events[k] = decoder.deriveEvents(p, next, st) as SimEvent[];
-      p = next;
-      frames[k] = p;
-    }
-    cache.set(b, { count, frames, events });
-    if (cache.size > 3) {
-      for (const key of cache.keys()) {
-        if (Math.abs(key - b) > 1) cache.delete(key);
-        if (cache.size <= 3) break;
-      }
-    }
-    return cache.get(b) as Block;
-  };
-
-  const frameAt = (i: number): EnvFrame<S> => {
-    const clamped = Math.max(0, Math.min(processed, Math.floor(i)));
-    if (clamped === 0) return init;
-    const row = clamped - 1;
-    const b = Math.floor(row / LENS_BLOCK);
-    const frame = decodeBlock(b).frames[row - b * LENS_BLOCK];
-    if (frame === undefined) throw new DecodeError(`lens frame ${clamped} missing`);
-    return frame;
-  };
-
-  const eventsAt = (i: number): readonly SimEvent[] => {
-    const clamped = Math.floor(i);
-    if (clamped <= 0 || clamped > processed) return NO_EVENTS;
-    const row = clamped - 1;
-    const b = Math.floor(row / LENS_BLOCK);
-    return decodeBlock(b).events[row - b * LENS_BLOCK] ?? NO_EVENTS;
-  };
 
   return {
     envId: raw.envId,

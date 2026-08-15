@@ -8,7 +8,6 @@ import {
 } from '@kit/materials';
 import { streamFor } from '@kit/rng';
 import type { Palette } from '@kit/tokens';
-import type { QualityTier } from '@kit/types';
 import * as THREE from 'three';
 import { AB_L1, AB_L2 } from '@sim/envs/acrobot';
 import {
@@ -56,7 +55,6 @@ export interface ArmHandle {
 }
 
 export interface ArmOptions {
-  tier: QualityTier;
   palette: Palette;
   accent: THREE.ColorRepresentation;
   gold: THREE.ColorRepresentation;
@@ -65,8 +63,7 @@ export interface ArmOptions {
 }
 
 export function buildArm(opts: ArmOptions): ArmHandle {
-  const { tier, palette, accent, gold, seed, pivot } = opts;
-  const shadows = tier !== 'thumb';
+  const { palette, accent, gold, seed, pivot } = opts;
   const group = new THREE.Group();
   group.name = 'trapezeRig';
 
@@ -107,20 +104,19 @@ export function buildArm(opts: ArmOptions): ArmHandle {
     toonSteps: 3,
     toonSoftness: 0.3,
     toonFloor: 0.24,
-    tier,
     name: 'trapezeVine',
   });
 
   const link1Geometry = makeVineGeometry(AB_L1, VINE_R1, seed ^ 0x11, vineDark, vineLit, leaf);
   const link1 = new THREE.Mesh(link1Geometry, vineMaterial);
   link1.name = 'link1';
-  link1.castShadow = shadows;
+  link1.castShadow = true;
   link1Node.add(link1);
 
   const link2Geometry = makeVineGeometry(AB_L2, VINE_R2, seed ^ 0x22, vineDark, vineLit, leaf);
   const link2 = new THREE.Mesh(link2Geometry, vineMaterial);
   link2.name = 'link2';
-  link2.castShadow = shadows;
+  link2.castShadow = true;
   link2Node.add(link2);
 
   const knotParts: ColoredPart[] = [];
@@ -138,7 +134,7 @@ export function buildArm(opts: ArmOptions): ArmHandle {
   const knotGeometry = mergeColoredParts(knotParts, 'elbowKnot');
   const knot = new THREE.Mesh(knotGeometry, vineMaterial);
   knot.name = 'elbowKnot';
-  knot.castShadow = shadows;
+  knot.castShadow = true;
   elbowRoot.add(knot);
 
   const curl = new THREE.Object3D();
@@ -196,7 +192,7 @@ export function buildArm(opts: ArmOptions): ArmHandle {
   const lanternFrameGeometry = mergeColoredParts(frameParts, 'lanternFrame');
   const lanternFrame = new THREE.Mesh(lanternFrameGeometry, vineMaterial);
   lanternFrame.name = 'lanternFrame';
-  lanternFrame.castShadow = shadows;
+  lanternFrame.castShadow = true;
   lantern.add(lanternFrame);
 
   const paperGeometry = new THREE.CylinderGeometry(LANTERN_R, LANTERN_R * 0.92, LANTERN_H, 8, 1, true);

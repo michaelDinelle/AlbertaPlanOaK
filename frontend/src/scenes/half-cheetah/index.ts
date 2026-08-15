@@ -15,7 +15,7 @@ import type {
   SceneSize,
 } from '@kit/types';
 import * as THREE from 'three';
-import { CHEETAH_DT, CHEETAH_TELEPORT_DX } from '@sim/envs/halfcheetah';
+import { CHEETAH_DT, CHEETAH_ROOT_X, CHEETAH_TELEPORT_DX } from '@sim/envs/halfcheetah';
 import { FK_FLOATS, FK_POINT_INDEX, cheetahGeometry } from '@sim/fk/cheetah';
 import type { CheetahGeometry } from '@sim/types';
 import { REFERENCE_SPEED, buildCheetah, type CheetahHandle } from './actors';
@@ -25,9 +25,6 @@ import { buildWorld, clampRange, type WorldHandle } from './world';
 
 export const TRACK_Y = 0.52;
 export const CAM_OFFSET: readonly [number, number, number] = [0.95, 0.33, 3.5];
-const CAM_LOOK: readonly [number, number, number] = [0.68, 0.06, 0];
-const CAM_OFFSET_THUMB: readonly [number, number, number] = [0.12, 0.42, 4.35];
-const CAM_LOOK_THUMB: readonly [number, number, number] = [0.22, 0.1, 0];
 
 const FLASH_SECONDS = 0.34;
 
@@ -35,18 +32,10 @@ const MAX_STEP_DX = 1.0;
 const SUPERLUMINAL_SLACK = 0.05;
 const MAX_HELD_FRAMES = 4;
 
-interface CheetahLike {
-  velX?: unknown;
-}
-
 function velocityOf(state: FrameState, prev: FrameState | null): number {
-  const d = state.derived as CheetahLike | null | undefined;
-  if (d && typeof d === 'object' && typeof d.velX === 'number' && Number.isFinite(d.velX)) {
-    return Math.abs(d.velX) > CHEETAH_TELEPORT_DX ? 0 : d.velX;
-  }
   if (prev) {
     const dSteps = state.step - prev.step;
-    const dx = (state.pose[0] ?? 0) - (prev.pose[0] ?? 0);
+    const dx = (state.pose[CHEETAH_ROOT_X] ?? 0) - (prev.pose[0] ?? 0);
     if (dSteps > 0 && Math.abs(dx) < CHEETAH_TELEPORT_DX) return dx / (dSteps * CHEETAH_DT);
   }
   return 0;
@@ -95,7 +84,6 @@ class GoldHourSavannaScene implements SceneModule {
     if (kicker) kicker.color.set(palette.sun);
 
     const cheetah = buildCheetah({
-      tier: ctx.tier,
       palette,
       accent,
       seed: ctx.seed,
@@ -104,8 +92,7 @@ class GoldHourSavannaScene implements SceneModule {
     this.cheetah = cheetah;
     this.scene.add(cheetah.group);
 
-    const thumb = ctx.tier === 'thumb';
-    const offset = thumb ? CAM_OFFSET_THUMB : CAM_OFFSET;
+    const offset = CAM_OFFSET;
     const home = orbitFromPose(offset, [0, 0, 0]);
     const rig = makeOrbitRig({
       canvas: ctx.canvas,
@@ -125,7 +112,6 @@ class GoldHourSavannaScene implements SceneModule {
     this.camera = rig.camera;
 
     const pool = new CelebrationPool({
-      tier: ctx.tier,
       seed: ctx.seed,
       name: 'savannaCelebrations',
     });
@@ -191,7 +177,7 @@ class GoldHourSavannaScene implements SceneModule {
       if (ev.type === 'teleport') teleported = true;
     }
 
-    const rawX = state.pose[0] ?? 0;
+    const rawX = state.pose[CHEETAH_ROOT_X] ?? 0;
     let held = false;
     if (!teleported && !frame.scrubbed && this.heldValid && this.heldFrames < MAX_HELD_FRAMES) {
       const dSteps = Math.max(1, Math.abs(state.step - this.heldStep));

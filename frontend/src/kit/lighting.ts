@@ -2,17 +2,11 @@
 import * as THREE from 'three';
 import { paletteSunDirection } from './sky';
 import type { Palette } from './tokens';
-import type { QualityTier } from './types';
 
 export { paletteSunDirection };
 
-export function maxPointLights(tier: QualityTier): number {
-  return tier === 'hero' ? 4 : tier === 'medium' ? 2 : 0;
-}
-
-export function shadowMapSize(tier: QualityTier): number {
-  return tier === 'hero' ? 2048 : tier === 'medium' ? 1024 : 0;
-}
+export const MAX_POINT_LIGHTS = 4;
+export const SHADOW_MAP_SIZE = 2048;
 
 export interface LightRigOptions {
   sunDir?: THREE.Vector3 | readonly [number, number, number];
@@ -36,7 +30,7 @@ export interface LightRig {
   dispose(): void;
 }
 
-export function makeLightRig(palette: Palette, tier: QualityTier, opts: LightRigOptions = {}): LightRig {
+export function makeLightRig(palette: Palette, opts: LightRigOptions = {}): LightRig {
   const group = new THREE.Group();
   group.name = opts.name ?? 'oakLightRig';
 
@@ -57,15 +51,12 @@ export function makeLightRig(palette: Palette, tier: QualityTier, opts: LightRig
 
   const sun = new THREE.DirectionalLight(palette.sun, palette.sunIntensity);
   sun.name = 'oakSun';
-  const mapSize = shadowMapSize(tier);
-  sun.castShadow = mapSize > 0;
-  if (sun.castShadow) {
-    sun.shadow.mapSize.set(mapSize, mapSize);
-    sun.shadow.bias = -0.0006;
-    sun.shadow.normalBias = 0.02;
-    sun.shadow.camera.near = 0.5;
-    sun.shadow.camera.far = 100;
-  }
+  sun.castShadow = true;
+  sun.shadow.mapSize.set(SHADOW_MAP_SIZE, SHADOW_MAP_SIZE);
+  sun.shadow.bias = -0.0006;
+  sun.shadow.normalBias = 0.02;
+  sun.shadow.camera.near = 0.5;
+  sun.shadow.camera.far = 100;
   group.add(sun);
   group.add(sun.target);
 
@@ -73,8 +64,7 @@ export function makeLightRig(palette: Palette, tier: QualityTier, opts: LightRig
   hemi.name = 'oakHemi';
   group.add(hemi);
 
-  const budget = maxPointLights(tier);
-  const count = Math.max(0, Math.min(budget, Math.floor(opts.pointCount ?? budget)));
+  const count = Math.max(0, Math.min(MAX_POINT_LIGHTS, Math.floor(opts.pointCount ?? MAX_POINT_LIGHTS)));
   const points: THREE.PointLight[] = [];
   for (let i = 0; i < count; i++) {
     const p = new THREE.PointLight(palette.accentLight, 0, opts.pointDistance ?? 12, opts.pointDecay ?? 2);
@@ -147,10 +137,4 @@ export function applyFog(scene: THREE.Scene, palette: Palette, extent: number): 
   const fog = makeFog(palette, extent);
   scene.fog = fog;
   return fog;
-}
-
-export function configureRendererShadows(renderer: THREE.WebGLRenderer, tier: QualityTier): void {
-  const on = shadowMapSize(tier) > 0;
-  renderer.shadowMap.enabled = on;
-  renderer.shadowMap.type = THREE.PCFShadowMap;
 }

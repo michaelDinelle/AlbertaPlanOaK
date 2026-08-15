@@ -11,7 +11,7 @@ import type {
   SceneSize,
 } from '@kit/types';
 import * as THREE from 'three';
-import { AB_DT, AB_L1, AB_L2 } from '@sim/envs/acrobot';
+import { AB_DT, AB_L1, AB_L2, ACROBOT_ACTION, ACROBOT_TH1, ACROBOT_TH2, ACROBOT_W1, ACROBOT_W2, acrobotTorque } from '@sim/envs/acrobot';
 import { buildArm, type ArmHandle } from './actors';
 import { manifest } from './manifest';
 import {
@@ -27,8 +27,6 @@ import {
 
 const CAM_BASE: readonly [number, number, number] = [0.58, -0.24, 5.7];
 const CAM_LOOK: readonly [number, number, number] = [-0.06, -0.5, 0];
-const CAM_BASE_THUMB: readonly [number, number, number] = [0.28, -0.34, 6.9];
-const CAM_LOOK_THUMB: readonly [number, number, number] = [-0.04, -0.55, 0];
 
 const FLARE_SECONDS = 1.9;
 const PETAL_SECONDS = 5;
@@ -64,24 +62,8 @@ export function envelope(age: number, span: number, rate: number): number {
   return e < 0 ? 0 : e > 1 ? 1 : e;
 }
 
-interface AcrobotLike {
-  th1?: unknown;
-  th2?: unknown;
-  w1?: unknown;
-  w2?: unknown;
-  torque?: unknown;
-}
-
-function num(v: unknown, fallback: number): number {
-  return typeof v === 'number' && Number.isFinite(v) ? v : fallback;
-}
-
 export function torqueOf(state: FrameState): number {
-  const d = state.derived as AcrobotLike | null | undefined;
-  if (d && typeof d === 'object' && typeof d.torque === 'number') return d.torque;
-  const raw = state.ctrl[0] ?? 0;
-  if (!Number.isFinite(raw)) return 0;
-  return ((Math.trunc(raw) >>> 0) % 3) - 1;
+  return acrobotTorque(state.pose[ACROBOT_ACTION] ?? 0);
 }
 
 class WillowSwingScene implements SceneModule {
@@ -132,7 +114,6 @@ class WillowSwingScene implements SceneModule {
     this.scene.add(world.group);
 
     const arm = buildArm({
-      tier: ctx.tier,
       palette,
       accent: this.accent,
       gold: this.gold,
@@ -152,14 +133,13 @@ class WillowSwingScene implements SceneModule {
     const celebration = world.rig.points[2];
     if (celebration) celebration.color.set(this.accent);
 
-    const thumb = ctx.tier === 'thumb';
     const home = orbitFromPose(
-      thumb ? CAM_BASE_THUMB : CAM_BASE,
-      thumb ? CAM_LOOK_THUMB : CAM_LOOK,
+      CAM_BASE,
+      CAM_LOOK,
     );
     const rig = makeOrbitRig({
       canvas: ctx.canvas,
-      target: thumb ? CAM_LOOK_THUMB : CAM_LOOK,
+      target: CAM_LOOK,
       azimuth: home.azimuth,
       polar: home.polar,
       distance: home.distance,
@@ -175,7 +155,6 @@ class WillowSwingScene implements SceneModule {
     rig.snap();
 
     const pool = new CelebrationPool({
-      tier: ctx.tier,
       seed: ctx.seed,
       burstSize: BURST_PARTICLES,
       name: 'willowCelebrations',
@@ -187,7 +166,7 @@ class WillowSwingScene implements SceneModule {
     this.overlay = new GroundTruthOverlay(ctx.geometry, {
       camera: this.camera,
       agentPos: (state) => {
-        acrobotPointsExact(state.pose[0] ?? 0, state.pose[1] ?? 0, this.points);
+        acrobotPointsExact(state.pose[ACROBOT_TH1] ?? 0, state.pose[ACROBOT_TH2] ?? 0, this.points);
         this.overlayPos[0] = this.pivot[0] + (this.points[2] ?? 0);
         this.overlayPos[1] = this.pivot[1] + (this.points[3] ?? 0);
         this.overlayPos[2] = this.pivot[2];
@@ -257,15 +236,14 @@ class WillowSwingScene implements SceneModule {
       }
     }
 
-    const rawTh1 = state.pose[0] ?? 0;
-    const rawTh2 = state.pose[1] ?? 0;
-    const wPose1 = state.pose[2] ?? 0;
-    const wPose2 = state.pose[3] ?? 0;
-    const d = state.derived as AcrobotLike | null | undefined;
-    const anchor1 = num(d?.th1, rawTh1);
-    const anchor2 = num(d?.th2, rawTh2);
-    const wAnchor1 = num(d?.w1, wPose1);
-    const wAnchor2 = num(d?.w2, wPose2);
+    const rawTh1 = state.pose[ACROBOT_TH1] ?? 0;
+    const rawTh2 = state.pose[ACROBOT_TH2] ?? 0;
+    const wPose1 = state.pose[ACROBOT_W1] ?? 0;
+    const wPose2 = state.pose[ACROBOT_W2] ?? 0;
+    const anchor1 = rawTh1;
+    const anchor2 = rawTh2;
+    const wAnchor1 = wPose1;
+    const wAnchor2 = wPose2;
 
     if (teleported || !this.primed) {
       this.render[0] = rawTh1;

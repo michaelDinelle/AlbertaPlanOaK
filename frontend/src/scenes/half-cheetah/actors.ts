@@ -9,7 +9,6 @@ import { makeAmbientParticles, type AmbientParticlesHandle } from '@kit/particle
 import { hash2f } from '@kit/rng';
 import { radialSprite } from '@kit/textures';
 import type { Palette } from '@kit/tokens';
-import type { QualityTier } from '@kit/types';
 import * as THREE from 'three';
 import { CHEETAH_BONES, FK_POINT_INDEX } from '@sim/fk/cheetah';
 import type { CheetahGeometry } from '@sim/types';
@@ -178,7 +177,6 @@ export interface CheetahHandle {
 }
 
 export interface CheetahOptions {
-  tier: QualityTier;
   palette: Palette;
   accent: THREE.ColorRepresentation;
   seed: number;
@@ -188,9 +186,8 @@ export interface CheetahOptions {
 const ZERO_POSE = new Float32Array(9);
 
 export function buildCheetah(opts: CheetahOptions): CheetahHandle {
-  const { tier, palette, seed, cheetah } = opts;
-  const shadows = tier !== 'thumb';
-  const lod = tier === 'hero' ? 1 : tier === 'medium' ? 0.7 : 0.45;
+  const { palette, seed, cheetah } = opts;
+  const lod = 1;
   const group = new THREE.Group();
   group.name = 'cheetahRig';
 
@@ -234,9 +231,8 @@ export function buildCheetah(opts: CheetahOptions): CheetahHandle {
     rimPower: 2.4,
     toonSteps: 3,
     toonSoftness: 0.3,
-    toonFloor: tier === 'thumb' ? 0.46 : 0.22,
+    toonFloor: 0.22,
     spots: { color: cSpot, strength: 0.8, scale: 15, radius: 0.40, seed: (seed & 0xffff) / 64 },
-    tier,
     name: 'cheetahCoat',
   });
 
@@ -265,7 +261,7 @@ export function buildCheetah(opts: CheetahOptions): CheetahHandle {
     boneGeometries.push(geo);
     const mesh = new THREE.Mesh(geo, coatMaterial);
     mesh.name = `cheetah_${BONE_NAMES[i] ?? i}`;
-    mesh.castShadow = shadows;
+    mesh.castShadow = true;
     group.add(mesh);
     boneMeshes.push(mesh);
   }
@@ -291,14 +287,6 @@ export function buildCheetah(opts: CheetahOptions): CheetahHandle {
       const up = clampRange((y / 0.933) * 0.5 + 0.5, 0, 1);
       scratchColor.copy(cBack).lerp(cCoat, up);
       scratchColor.lerp(cBelly, smoothstep01((-y - 0.133) / 0.667) * 0.75);
-      const mask = spotMask(
-        clampRange(x / 2.267 + 0.5, 0, 1),
-        clampRange(Math.atan2(z, y) / (Math.PI * 2) + 0.5, 0, 1),
-        4,
-        6,
-        seed ^ 0x51a5,
-        0.34,
-      );
       const tear = Math.abs(z) > 0.367 ? smoothstep01(1 - Math.abs((y + 0.133) - (x - 0.4) * 0.55) / 0.187) : 0;
       scratchColor.lerp(spotColor, tear * clampRange((x + 0.133) / 0.667, 0, 1) * 0.9);
       col.setXYZ(i, scratchColor.r, scratchColor.g, scratchColor.b);
@@ -307,7 +295,7 @@ export function buildCheetah(opts: CheetahOptions): CheetahHandle {
   }
   const headMesh = new THREE.Mesh(headGeometry, coatMaterial);
   headMesh.name = 'cheetahSkull';
-  headMesh.castShadow = shadows;
+  headMesh.castShadow = true;
   headNode.add(headMesh);
 
   const featureParts: ColoredPart[] = [];
@@ -334,7 +322,7 @@ export function buildCheetah(opts: CheetahOptions): CheetahHandle {
   const featureGeometry = mergeColoredParts(featureParts, 'cheetahFace');
   const featureMesh = new THREE.Mesh(featureGeometry, coatMaterial);
   featureMesh.name = 'cheetahFace';
-  featureMesh.castShadow = shadows;
+  featureMesh.castShadow = true;
   headNode.add(featureMesh);
 
   const tailRoot = new THREE.Object3D();
@@ -378,7 +366,7 @@ export function buildCheetah(opts: CheetahOptions): CheetahHandle {
       tailGeometries.push(geo);
       const mesh = new THREE.Mesh(geo, coatMaterial);
       mesh.name = `cheetahTailMesh${i}`;
-      mesh.castShadow = shadows;
+      mesh.castShadow = true;
       node.add(mesh);
       tailNodes.push(node);
       parent = node;
@@ -393,7 +381,6 @@ export function buildCheetah(opts: CheetahOptions): CheetahHandle {
       count: 130,
       bounds: { y: 0.08, halfX: 0.24, halfY: 0.11, halfZ: 0.13 },
       seed: seed ^ (0x3d91 + i * 977),
-      tier,
       color: dustColor,
       size: 1.5,
       intensity: 0.75,
