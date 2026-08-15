@@ -2,7 +2,13 @@ import { open, readdir, realpath } from 'node:fs/promises';
 import { join, sep } from 'node:path';
 import { ENV_IDS, isEnvId, type EnvId } from '@shared/envs';
 import type { RecordingRef } from '@shared/types';
-import { FILE_HEADER_BYTES, FILE_MAGIC, RECORD_ENV_KINDS } from '@sim/record';
+import {
+  CHUNK_HEADER_BYTES,
+  CHUNK_MAGIC,
+  FILE_HEADER_BYTES,
+  FILE_MAGIC,
+  RECORD_ENV_KINDS,
+} from '@sim/record';
 import { lstatOrNull } from './fs';
 
 export interface RecordingEntry {
@@ -29,7 +35,17 @@ async function laneSteps(path: string, envId: EnvId): Promise<number> {
     if (RECORD_ENV_KINDS[envKind] !== envId) {
       throw new Error(`${path}: header envKind ${envKind} contradicts directory env ${envId}`);
     }
-    return header.readUInt32LE(8);
+    const chunk = Buffer.allocUnsafe(CHUNK_HEADER_BYTES);
+    let offset = FILE_HEADER_BYTES;
+    let steps = 0;
+    for (;;) {
+      const read = await handle.read(chunk, 0, CHUNK_HEADER_BYTES, offset);
+      if (read.bytesRead < CHUNK_HEADER_BYTES) break;
+      if (chunk.readUInt32LE(0) !== CHUNK_MAGIC) break;
+      steps = chunk.readUInt32LE(4) + chunk.readUInt32LE(8);
+      offset += CHUNK_HEADER_BYTES + chunk.readUInt32LE(16);
+    }
+    return steps;
   } finally {
     await handle.close().catch(() => undefined);
   }

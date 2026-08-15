@@ -31,12 +31,10 @@ struct LaneSnapshot {
   var scalars: KernelScalars
   var paramAbsMax: Float
   var paramNonFinite: UInt32
-  var steps, doneCount: UInt32
-  var rewardSum, rho, deltaSum, deltaPeak: Float
+  var rewardSum, rho: Float
   var deathStep, deathDetector: UInt32
-  var deathRewardSum, deathRho: Float
 }
-let fleetLaneStride = 312
+let fleetLaneStride = 240
 
 enum OakConst: Int {
   case ablateFeatureConstruction = 0
@@ -541,65 +539,53 @@ func metricsRoot() -> URL {
 }
 
 
-enum RecordEnc: String { case u8, i16, dx32 }
-
 struct RecordField {
   let idx: Int
-  let enc: RecordEnc
   let scale: Double
   let wrap: Bool
-  init(_ idx: Int, _ enc: RecordEnc, _ scale: Double = 0, _ wrap: Bool = false) {
+  let anchor: Bool
+  init(_ idx: Int, _ scale: Double = 1, _ wrap: Bool = false, anchor: Bool = false) {
     self.idx = idx
-    self.enc = enc
     self.scale = scale
     self.wrap = wrap
-  }
-  func bytes(_ n: Int) -> Int {
-    switch enc {
-    case .u8: return n
-    case .i16: return 2 * n
-    case .dx32: return 4 * n
-    }
+    self.anchor = anchor
   }
 }
 
 struct RecordCodec {
   let category: String
-  let ctrlBox: Int
   let fields: [RecordField]
-  var hasDx: Bool { fields.contains { $0.enc == .dx32 } }
   static func grid(_ idxs: [Int]) -> RecordCodec {
-    RecordCodec(category: "grid", ctrlBox: 0, fields: idxs.map { RecordField($0, .u8) })
-  }
-  static func classic(_ ctrlBox: Int, _ fields: [RecordField]) -> RecordCodec {
-    RecordCodec(category: "classic", ctrlBox: ctrlBox, fields: fields)
+    RecordCodec(category: "grid", fields: idxs.map { RecordField($0) })
   }
   static let byKind: [RecordCodec] = {
-    var cheetah = [RecordField(0, .dx32, 0.01), RecordField(1, .i16, 1e-4)]
-    for i in 2...8 { cheetah.append(RecordField(i, .i16, 1e-4, true)) }
+    var cheetah = [RecordField(0, 0.01, false, anchor: true), RecordField(1, 1e-4)]
+    for i in 2...8 { cheetah.append(RecordField(i, 1e-4, true)) }
     return [
-      RecordCodec(category: "cheetah", ctrlBox: 6, fields: cheetah),
-      grid([0, 1, 2, 3]),
-      grid([0, 1, 2, 3]),
-      grid([0, 1, 2, 3, 4, 5, 6, 7]),
-      classic(0, [
-        RecordField(0, .i16, 1e-4, true), RecordField(1, .i16, 1e-4, true),
-        RecordField(2, .i16, 1e-3), RecordField(3, .i16, 1e-3),
-      ]),
-      classic(0, [RecordField(0, .i16, 1e-4), RecordField(1, .i16, 1e-5)]),
-      classic(0, [
-        RecordField(0, .i16, 1e-4), RecordField(1, .i16, 1e-3),
-        RecordField(2, .i16, 1e-4, true), RecordField(3, .i16, 1e-3),
-      ]),
-      classic(1, [
-        RecordField(0, .i16, 1e-4, true), RecordField(1, .i16, 1e-3), RecordField(2, .i16, 1e-3),
-      ]),
-      grid([0]),
-      grid([0, 1, 2, 3]),
-      grid([0, 1, 2, 3, 4, 5]),
-      grid([0, 2]),
+      RecordCodec(category: "cheetah", fields: cheetah),
       grid([0, 1, 2, 3]),
       grid([0, 1, 2, 3, 4]),
+      grid([0, 1, 2, 3, 4, 5, 6, 7]),
+      RecordCodec(category: "classic", fields: [
+        RecordField(0, 1e-4, true), RecordField(1, 1e-4, true),
+        RecordField(2, 1e-3), RecordField(3, 1e-3), RecordField(4),
+      ]),
+      RecordCodec(category: "classic", fields: [
+        RecordField(0, 1e-4), RecordField(1, 1e-5), RecordField(3),
+      ]),
+      RecordCodec(category: "classic", fields: [
+        RecordField(0, 1e-4), RecordField(1, 1e-3),
+        RecordField(2, 1e-4, true), RecordField(3, 1e-3), RecordField(4),
+      ]),
+      RecordCodec(category: "classic", fields: [
+        RecordField(0, 1e-4, true), RecordField(1, 1e-3), RecordField(2, 1e-3),
+      ]),
+      grid([0]),
+      grid([0, 1, 2, 3, 4]),
+      grid([0, 1, 2, 3, 4, 5, 6]),
+      grid([0, 2, 3]),
+      grid([0, 1, 2, 3]),
+      grid([0, 1, 2, 3, 4, 5]),
       grid([0, 1, 2, 3]),
       grid([0, 2]),
     ]
@@ -612,6 +598,18 @@ struct RecordCodec {
   }
 }
 
+let recordFloats = 1 + EnvSpec.poseLen
+let quantizeLimit = 4.6e18
+
+func putVarint(_ out: inout [UInt8], _ value: Int64) {
+  var z = UInt64(bitPattern: (value << 1) ^ (value >> 63))
+  while z >= 0x80 {
+    out.append(UInt8(z & 0x7F) | 0x80)
+    z >>= 7
+  }
+  out.append(UInt8(z))
+}
+
 final class RecordWriter: @unchecked Sendable {
   static let fileMagic: UInt32 = 0x524B_414F
   static let chunkMagic: UInt32 = 0x524B_4843
@@ -620,7 +618,6 @@ final class RecordWriter: @unchecked Sendable {
   let codec: RecordCodec
   private var buf: [UInt8] = []
   private var fileOffset = 0
-  private var totalSteps = 0
   private(set) var closed = false
   private var deflateVerified = false
 
@@ -630,8 +627,8 @@ final class RecordWriter: @unchecked Sendable {
     guard geometry.count == EnvSpec.geometryWords else {
       throw err("Lane geometry is \(geometry.count) words, expected \(EnvSpec.geometryWords).")
     }
-    var head = Data(capacity: 12 + geometry.count * 4)
-    for v: UInt32 in [Self.fileMagic, envKind, 0] + geometry {
+    var head = Data(capacity: 8 + geometry.count * 4)
+    for v: UInt32 in [Self.fileMagic, envKind] + geometry {
       var x = v.littleEndian
       withUnsafeBytes(of: &x) { head.append(contentsOf: $0) }
     }
@@ -640,13 +637,32 @@ final class RecordWriter: @unchecked Sendable {
   }
 
   func encodeChunk(
-    _ rp: UnsafePointer<Float>, slot: Int, capacity: Int, stepStart: Int, stepCount: Int
+    _ rp: UnsafePointer<Float>, slot: Int, capacity: Int, laneCount: Int,
+    stepStart: Int, stepCount: Int
   ) throws {
     guard !closed, stepCount > 0 else { return }
+    let fields = codec.fields
+    let rowStride = recordFloats * laneCount
+    func cell(_ i: Int, _ field: Int) -> Double {
+      Double(rp[((stepStart + i) % capacity) * rowStride + field * laneCount + slot])
+    }
+    func value(_ i: Int, _ f: RecordField) -> Double? {
+      var w = cell(i, 1 + f.idx)
+      guard w.isFinite else { return nil }
+      if f.wrap { w -= 2 * Double.pi * ((w + Double.pi) / (2 * Double.pi)).rounded(.down) }
+      return w
+    }
+    func quantized(_ i: Int, _ f: RecordField) -> Int64? {
+      guard let w = value(i, f) else { return nil }
+      let q = (w / f.scale).rounded()
+      guard q.magnitude < quantizeLimit else { return nil }
+      return Int64(q)
+    }
+
     var live = stepCount
     scan: for i in 0..<stepCount {
-      let base = (slot * capacity + ((stepStart + i) % capacity)) * 16
-      for u in 0..<16 where !rp[base + u].isFinite {
+      guard cell(i, 0).isFinite else { live = i; closed = true; break scan }
+      for f in fields where quantized(i, f) == nil {
         live = i
         closed = true
         break scan
@@ -654,101 +670,30 @@ final class RecordWriter: @unchecked Sendable {
     }
     guard live > 0 else { return }
 
-    let nBox = codec.ctrlBox
-    let baseOff = live * (1 + nBox)
-    var cursor = baseOff + (codec.hasDx ? 8 : 0)
-    var off: [Int] = []
-    off.reserveCapacity(codec.fields.count)
-    for f in codec.fields {
-      off.append(cursor)
-      cursor += f.bytes(live)
-    }
-    let fixed = cursor + 4
-    if buf.count < fixed { buf = [UInt8](repeating: 0, count: fixed) }
+    buf.removeAll(keepingCapacity: true)
+    buf.append(contentsOf: repeatElement(0, count: (live + 7) / 8))
+    for i in 0..<live where cell(i, 0) != 0 { buf[i >> 3] |= UInt8(1 << (i & 7)) }
 
-    var escRows: [Int] = []
-    let fields = codec.fields
-    buf.withUnsafeMutableBufferPointer { bp in
-      let b = bp.baseAddress!
-      memset(b, 0, fixed)
-      var recon = 0.0
-      var prevQ = [Int](repeating: 0, count: fields.count)
-      if codec.hasDx, let dxIdx = fields.first(where: { $0.enc == .dx32 })?.idx {
-        let r0 = (slot * capacity + (stepStart % capacity)) * 16
-        recon = Double(rp[r0 + 7 + dxIdx])
-        var bits = recon.bitPattern.littleEndian
-        withUnsafeBytes(of: &bits) { memcpy(b + baseOff, $0.baseAddress!, 8) }
+    for f in fields {
+      if f.anchor {
+        var recon = value(0, f)!
+        withUnsafeBytes(of: recon.bitPattern.littleEndian) { buf.append(contentsOf: $0) }
+        for i in 0..<live {
+          let q = ((value(i, f)! - recon) / f.scale).rounded()
+          recon += q * f.scale
+          putVarint(&buf, Int64(q))
+        }
+        continue
       }
+      var previous: Int64 = 0
       for i in 0..<live {
-        let base = (slot * capacity + ((stepStart + i) % capacity)) * 16
-        var esc = false
-        var hdr: UInt8 = 0
-        let doneV = rp[base + 6]
-        if doneV == 1 {
-          hdr |= 0x10
-        } else if doneV != 0 {
-          esc = true
-        }
-        if nBox == 0 {
-          let a = Double(rp[base])
-          if a == a.rounded(), a >= 0, a <= 15 {
-            hdr |= UInt8(a) & 0x0F
-          } else {
-            esc = true
-          }
-        } else {
-          for c in 0..<nBox {
-            let q = ((min(max(Double(rp[base + c]), -1), 1) + 1) * 127.5).rounded()
-            b[live * (1 + c) + i] = UInt8(min(max(q, 0), 255))
-          }
-        }
-        for (j, f) in fields.enumerated() {
-          let v = Double(rp[base + 7 + f.idx])
-          switch f.enc {
-          case .u8:
-            if !(v == v.rounded() && v >= 0 && v <= 255) { esc = true }
-            b[off[j] + i] = UInt8(min(max(v.rounded(), 0), 255))
-          case .i16:
-            var w = v
-            if f.wrap {
-              w -= 2 * Double.pi * ((w + Double.pi) / (2 * Double.pi)).rounded(.down)
-            }
-            var q = (w / f.scale).rounded()
-            if !(q >= -32767 && q <= 32767) { esc = true }
-            q = min(max(q, -32767), 32767)
-            let qi = Int(q)
-            let delta = i == 0 ? qi : qi - prevQ[j]
-            prevQ[j] = qi
-            var dw = Int16(truncatingIfNeeded: delta).littleEndian
-            withUnsafeBytes(of: &dw) { memcpy(b + off[j] + 2 * i, $0.baseAddress!, 2) }
-          case .dx32:
-            var q = ((v - recon) / f.scale).rounded()
-            if !(q >= -2_147_483_647 && q <= 2_147_483_647) { esc = true }
-            q = min(max(q, -2_147_483_647), 2_147_483_647)
-            recon += q * f.scale
-            var qi = Int32(q).littleEndian
-            withUnsafeBytes(of: &qi) { memcpy(b + off[j] + 4 * i, $0.baseAddress!, 4) }
-          }
-        }
-        if esc {
-          hdr |= 0x20
-          escRows.append(i)
-        }
-        b[i] = hdr
+        let q = quantized(i, f)!
+        putVarint(&buf, i == 0 ? q : q &- previous)
+        previous = q
       }
-      var cnt = UInt32(escRows.count).littleEndian
-      withUnsafeBytes(of: &cnt) { memcpy(b + fixed - 4, $0.baseAddress!, 4) }
     }
 
-    var payload = Data(capacity: fixed + escRows.count * 68)
-    buf.withUnsafeBufferPointer { payload.append($0.baseAddress!, count: fixed) }
-    for i in escRows {
-      var idx = UInt32(i).littleEndian
-      withUnsafeBytes(of: &idx) { payload.append(contentsOf: $0) }
-      let base = (slot * capacity + ((stepStart + i) % capacity)) * 16
-      payload.append(UnsafeRawPointer(rp + base).assumingMemoryBound(to: UInt8.self), count: 64)
-    }
-
+    let payload = Data(buf)
     let comp = try (payload as NSData).compressed(using: .zlib) as Data
     if !deflateVerified {
       deflateVerified = true
@@ -779,11 +724,6 @@ final class RecordWriter: @unchecked Sendable {
     out.append(comp)
     try handle.write(contentsOf: out)
     fileOffset += 24 + comp.count
-    totalSteps += live
-    var stepsWord = UInt32(totalSteps).littleEndian
-    try handle.seek(toOffset: 8)
-    try withUnsafeBytes(of: &stepsWord) { try handle.write(contentsOf: Data($0)) }
-    _ = try handle.seekToEnd()
   }
 
   var bytesWritten: Int { fileOffset }
@@ -791,10 +731,7 @@ final class RecordWriter: @unchecked Sendable {
 
 final class TapeWriter {
   static let fileMagic: UInt32 = 0x544B_414F
-  static let fields: [String] = [
-    "rewardSum", "doneCount", "rewardRate", "paramAbsMax", "deathStep", "deathDetector",
-    "done", "pose0", "pose1", "pose2", "pose3", "pose4", "pose5", "pose6", "pose7", "pose8",
-  ]
+  static let fields: [String] = ["rewardSum", "rewardRate", "deathStep", "deathDetector"]
   private let handle: FileHandle
   private let laneCount: Int
   private var col: [Float]
@@ -816,7 +753,6 @@ final class TapeWriter {
 
   func append(snap: UnsafeMutablePointer<LaneSnapshot>, half: Int,
               deadStep: [Int?], deadDetector: [UInt32?],
-              recordRows: UnsafePointer<Float>, recordCapacity: Int,
               stepStart: Int, stepCount: Int, wallSeconds: Double) throws {
     var out = Data(capacity: 12 + Self.fields.count * laneCount * 4)
     for v: UInt32 in [UInt32(stepStart), UInt32(stepCount)] {
@@ -833,17 +769,9 @@ final class TapeWriter {
       }
     }
     push { _, s in s.rewardSum }
-    push { _, s in Float(s.doneCount) }
     push { _, s in s.rho }
-    push { _, s in s.paramNonFinite != 0 ? Float.infinity : s.paramAbsMax }
-    push { l, _ in deadStep[l].map { Float($0) } ?? Float.nan }
+    push { l, _ in deadStep[l].map { Float(bitPattern: UInt32($0)) } ?? Float.nan }
     push { l, _ in deadDetector[l].map { Float($0) } ?? Float.nan }
-    let ringRow = (stepStart + stepCount - 1) % recordCapacity
-    func pushRing(_ offset: Int) {
-      push { l, _ in recordRows[(l * recordCapacity + ringRow) * 16 + offset] }
-    }
-    pushRing(6)
-    for k in 0..<9 { pushRing(7 + k) }
     try handle.write(contentsOf: out)
   }
 }
@@ -875,9 +803,9 @@ final class TapeWriter {
         "controlHz": spec.controlHz,
         "gridW": spec.gridW, "gridH": spec.gridH,
         "slots": spec.slots.map(EnvSpec.slotName),
-        "ctrlBox": codec.ctrlBox,
+        "category": codec.category,
         "fields": codec.fields.map { f in
-          ["slot": f.idx, "enc": f.enc.rawValue, "scale": f.scale, "wrap": f.wrap] as [String: Any]
+          ["slot": f.idx, "scale": f.scale, "wrap": f.wrap, "anchor": f.anchor] as [String: Any]
         },
       ]
     }
@@ -1045,11 +973,9 @@ final class TapeWriter {
       let rp = recordSlotBuf.contents().bindMemory(to: Int32.self, capacity: B)
       for i in 0..<B { rp[i] = Int32(i) }
     }
-    let recordBuf = try makeBuf(B * recordCapacity * 16 * 4)
-    let recordRows = recordBuf.contents().bindMemory(
-      to: Float.self, capacity: B * recordCapacity * 16)
+    let recordBuf = try makeBuf(B * recordCapacity * recordFloats * 4)
     let snapStride = MemoryLayout<LaneSnapshot>.stride
-    precondition(snapStride == 60, "LaneSnapshot layout drifted from OakLaneSnapshot")
+    precondition(snapStride == 36, "LaneSnapshot layout drifted from OakLaneSnapshot")
     let snapBuf = try makeBuf(2 * B * snapStride)
     let snapPtr = snapBuf.contents().bindMemory(to: LaneSnapshot.self, capacity: 2 * B)
     let dumpEvery = max(e["OAK_DUMP_STATE_EVERY"].flatMap(Int.init) ?? 0, 0)
@@ -1160,15 +1086,16 @@ final class TapeWriter {
       let start = st.lastDrainStep
       let count = step - start
       let rp = recordBuf.contents().bindMemory(
-        to: Float.self, capacity: B * recordCapacity * 16)
+        to: Float.self, capacity: B * recordCapacity * recordFloats)
       let before = records.reduce(0) { $0 + $1.bytesWritten }
       let box = DrainErr()
       let writers = records
       let cap = recordCapacity
+      let lanes = B
       DispatchQueue.concurrentPerform(iterations: writers.count) { slot in
         do {
           try writers[slot].encodeChunk(
-            rp, slot: slot, capacity: cap, stepStart: start, stepCount: count)
+            rp, slot: slot, capacity: cap, laneCount: lanes, stepStart: start, stepCount: count)
         } catch {
           box.record(error)
         }
@@ -1211,7 +1138,6 @@ final class TapeWriter {
       latchDeaths(half: half, step: step)
       try tape.append(
         snap: snapPtr, half: half, deadStep: st.deadStep, deadDetector: st.deadDetector,
-        recordRows: recordRows, recordCapacity: recordCapacity,
         stepStart: stepStart, stepCount: step - stepStart, wallSeconds: now())
       try drainRecords(step: step)
       if timing {

@@ -17,10 +17,7 @@ export interface RunMeta {
 }
 
 export const TAPE_MAGIC = 0x544b414f;
-export const TAPE_FIELDS = [
-  'rewardSum', 'doneCount', 'rewardRate', 'paramAbsMax', 'deathStep', 'deathDetector',
-  'done', 'pose0', 'pose1', 'pose2', 'pose3', 'pose4', 'pose5', 'pose6', 'pose7', 'pose8',
-] as const;
+export const TAPE_FIELDS = ['rewardSum', 'rewardRate', 'deathStep', 'deathDetector'] as const;
 export type TapeField = (typeof TAPE_FIELDS)[number];
 
 export const DEATH_DETECTORS: readonly string[] = [
