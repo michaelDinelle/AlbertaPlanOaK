@@ -63,7 +63,6 @@ export const manifest: SceneManifest = {
     bloomThreshold: 0.85,
     fogTint: TOKENS.palettes.morning.fog,
   },
-  budget: { drawCalls: 64, triangles: 120000 },
 };
 
 export default manifest;

@@ -66,8 +66,8 @@ export interface GradeSettings {
 export function gradeDefaults(config: PostConfig, tier: QualityTier): GradeSettings {
   const hero = tier === 'hero';
   return {
-    lift: hero ? 0.012 : 0.008,
-    gamma: 0.97,
+    lift: hero ? 0.004 : 0.003,
+    gamma: 1.0,
     tint: config.fogTint,
     tintStrength: 0.14,
     vignette: hero ? 0.34 : 0.26,

@@ -20,7 +20,6 @@ export interface SceneManifest {
     bloomThreshold: number;
     fogTint: number;
   };
-  budget: { drawCalls: number; triangles: number };
 }
 
 export interface FrameState {

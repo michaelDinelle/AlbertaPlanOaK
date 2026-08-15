@@ -200,6 +200,29 @@ final class Shared<T> {
     p.initialize(repeating: z, count: max(n, 1))
   }
 }
+struct EnvSpec {
+  static let poseLen = 9
+  static let stride = 7 + poseLen
+  static let geometryWords = 19
+  static let slotNames = [
+    "none", "x", "y", "gx", "gy", "kx", "ky", "carry", "gates", "tokens", "cue", "heading",
+    "effort",
+  ]
+  let nameHash: UInt32
+  let naturalO: Int
+  let actionKind: Int
+  let actionCount: Int
+  let gridW: Int
+  let gridH: Int
+  let controlHz: Int
+  let slots: [Int]
+  static func slotName(_ code: Int) -> String {
+    if code >= 16 { return "q\(code - 16)" }
+    guard code >= 0, code < slotNames.count else { return "none" }
+    return slotNames[code]
+  }
+}
+
 final class Engine {
   struct Kind {
     let kind: UInt32
@@ -215,7 +238,7 @@ final class Engine {
   let batch: Int
   let kinds: [Kind]
   let laneKindIdx: [Int]
-  let envTable: [(nameHash: UInt32, naturalO: Int, actionKind: Int, actionCount: Int)]
+  let envTable: [EnvSpec]
   let q: MTLCommandQueue, params, state: Shared<Float>,
     uints: Shared<UInt32>, res: [MTLBuffer]
   let scalarsB: MTLBuffer
@@ -262,12 +285,10 @@ final class Engine {
     cb.waitUntilCompleted()
     return outB.contents().bindMemory(to: ShapeProbe.self, capacity: 1).pointee
   }
-  static func runEnvTableProbe(_ dev: MTLDevice, _ lib: MTLLibrary)
-    throws -> [(nameHash: UInt32, naturalO: Int, actionKind: Int, actionCount: Int)]
-  {
+  static func runEnvTableProbe(_ dev: MTLDevice, _ lib: MTLLibrary) throws -> [EnvSpec] {
     let fn = lib.makeFunction(name: "oak_env_table_probe")!
     let pipe = try dev.makeComputePipelineState(function: fn)
-    let words = 1 + Main.envIdsByKind.count * 4
+    let words = 1 + Main.envIdsByKind.count * EnvSpec.stride
     guard let outB = dev.makeBuffer(length: words * 4, options: [.storageModeShared]),
       let pq = dev.makeCommandQueue(), let cb = pq.makeCommandBuffer(),
       let enc = cb.makeComputeCommandEncoder()
@@ -284,9 +305,43 @@ final class Engine {
       throw err("Env table count drift: kernel \(tbl[0]) vs host \(Main.envIdsByKind.count).")
     }
     return (0..<Main.envIdsByKind.count).map { i in
-      (
-        tbl[1 + i * 4], Int(tbl[1 + i * 4 + 1]), Int(tbl[1 + i * 4 + 2]),
-        Int(tbl[1 + i * 4 + 3]))
+      let row = 1 + i * EnvSpec.stride
+      return EnvSpec(
+        nameHash: tbl[row], naturalO: Int(tbl[row + 1]), actionKind: Int(tbl[row + 2]),
+        actionCount: Int(tbl[row + 3]), gridW: Int(tbl[row + 4]), gridH: Int(tbl[row + 5]),
+        controlHz: Int(tbl[row + 6]),
+        slots: (0..<EnvSpec.poseLen).map { Int(tbl[row + 7 + $0]) })
+    }
+  }
+  static func runEnvGeometryProbe(
+    _ dev: MTLDevice, _ lib: MTLLibrary, laneEnvKinds: [UInt32], laneSeeds: [UInt32]
+  ) throws -> [[UInt32]] {
+    let n = laneEnvKinds.count
+    let fn = lib.makeFunction(name: "oak_env_geometry_probe")!
+    let pipe = try dev.makeComputePipelineState(function: fn)
+    var count = UInt32(n)
+    guard
+      let outB = dev.makeBuffer(
+        length: n * EnvSpec.geometryWords * 4, options: [.storageModeShared]),
+      let kindsB = dev.makeBuffer(
+        bytes: laneEnvKinds, length: n * 4, options: [.storageModeShared]),
+      let seedsB = dev.makeBuffer(bytes: laneSeeds, length: n * 4, options: [.storageModeShared]),
+      let pq = dev.makeCommandQueue(), let cb = pq.makeCommandBuffer(),
+      let enc = cb.makeComputeCommandEncoder()
+    else { throw err("Env geometry probe dispatch failed.") }
+    enc.setComputePipelineState(pipe)
+    enc.setBuffer(outB, offset: 0, index: 0)
+    enc.setBuffer(kindsB, offset: 0, index: 1)
+    enc.setBuffer(seedsB, offset: 0, index: 2)
+    enc.setBytes(&count, length: 4, index: 3)
+    enc.dispatchThreads(
+      mtlSize(n), threadsPerThreadgroup: mtlSize(min(n, pipe.maxTotalThreadsPerThreadgroup)))
+    enc.endEncoding()
+    cb.commit()
+    cb.waitUntilCompleted()
+    let raw = outB.contents().bindMemory(to: UInt32.self, capacity: n * EnvSpec.geometryWords)
+    return (0..<n).map { lane in
+      (0..<EnvSpec.geometryWords).map { raw[lane * EnvSpec.geometryWords + $0] }
     }
   }
   init(laneEnvs: [String], batch b: Int, dev: MTLDevice) throws {
@@ -525,7 +580,7 @@ struct RecordCodec {
     return [
       RecordCodec(category: "cheetah", ctrlBox: 6, fields: cheetah),
       grid([0, 1, 2, 3]),
-      grid([0, 1]),
+      grid([0, 1, 2, 3]),
       grid([0, 1, 2, 3, 4, 5, 6, 7]),
       classic(0, [
         RecordField(0, .i16, 1e-4, true), RecordField(1, .i16, 1e-4, true),
@@ -540,8 +595,8 @@ struct RecordCodec {
         RecordField(0, .i16, 1e-4, true), RecordField(1, .i16, 1e-3), RecordField(2, .i16, 1e-3),
       ]),
       grid([0]),
-      grid([0, 1]),
-      grid([0, 1, 2, 3, 4, 5, 6, 7]),
+      grid([0, 1, 2, 3]),
+      grid([0, 1, 2, 3, 4, 5]),
       grid([0, 2]),
       grid([0, 1, 2, 3]),
       grid([0, 1, 2, 3, 4]),
@@ -569,11 +624,14 @@ final class RecordWriter: @unchecked Sendable {
   private(set) var closed = false
   private var deflateVerified = false
 
-  init(handle: FileHandle, envKind: UInt32) throws {
+  init(handle: FileHandle, envKind: UInt32, geometry: [UInt32]) throws {
     self.handle = handle
     self.codec = try RecordCodec.table(envKind)
-    var head = Data(capacity: 12)
-    for v: UInt32 in [Self.fileMagic, envKind, 0] {
+    guard geometry.count == EnvSpec.geometryWords else {
+      throw err("Lane geometry is \(geometry.count) words, expected \(EnvSpec.geometryWords).")
+    }
+    var head = Data(capacity: 12 + geometry.count * 4)
+    for v: UInt32 in [Self.fileMagic, envKind, 0] + geometry {
       var x = v.littleEndian
       withUnsafeBytes(of: &x) { head.append(contentsOf: $0) }
     }
@@ -797,13 +855,35 @@ final class TapeWriter {
       switch CommandLine.arguments.dropFirst().first {
       case "benchmark": try benchmark()
       case "compare-hashes": try compareHashes()
-      case "record-probe": try recordProbe()
       default: throw err("Use `OaK benchmark`.")
       }
     } catch {
       fputs("\(error)\n", stderr)
       Foundation.exit(1)
     }
+  }
+  nonisolated(unsafe) static var pendingMeta: [String: Any] = [:]
+  static func writeRunMeta(_ dir: URL, _ table: [EnvSpec]) throws {
+    var meta = pendingMeta
+    meta["envCatalog"] = envIdsByKind.enumerated().map { kind, envId -> [String: Any] in
+      let spec = table[kind]
+      let codec = RecordCodec.byKind[kind]
+      return [
+        "envId": envId, "kind": kind,
+        "actionKind": spec.actionKind == 0 ? "box" : "discrete",
+        "actionCount": spec.actionCount,
+        "controlHz": spec.controlHz,
+        "gridW": spec.gridW, "gridH": spec.gridH,
+        "slots": spec.slots.map(EnvSpec.slotName),
+        "ctrlBox": codec.ctrlBox,
+        "fields": codec.fields.map { f in
+          ["slot": f.idx, "enc": f.enc.rawValue, "scale": f.scale, "wrap": f.wrap] as [String: Any]
+        },
+      ]
+    }
+    try JSONSerialization.data(
+      withJSONObject: meta, options: [.prettyPrinted, .sortedKeys]
+    ).write(to: dir.appendingPathComponent("meta.json"), options: .atomic)
   }
   static let envIdsByKind: [String] = [
     "HalfCheetah-v4", "FourRooms-cont-v0", "DeepSea-cont-v0", "KeyCorridor-cont-v0",
@@ -854,8 +934,16 @@ final class TapeWriter {
         guard engine.envTable[i].nameHash == fnv1a(name) else {
           throw err("Env table drift at kind \(i): kernel hash != fnv1a(\(name)).")
         }
+        let declared = Set(engine.envTable[i].slots.indices.filter { engine.envTable[i].slots[$0] != 0 })
+        let recorded = Set(RecordCodec.byKind[i].fields.map(\.idx))
+        guard declared == recorded else {
+          throw err(
+            "\(name): kernel declares slots \(declared.sorted()) but the codec records \(recorded.sorted())."
+          )
+        }
       }
     }
+    try Self.writeRunMeta(root, engine.envTable)
     let core = Int(engine.kinds[0].off.optionCount)
     let autoG = max(2, min(core, B / max(core, 1)))
     let megaG = e["OAK_MEGA_LANES_PER_TG"].flatMap(Int.init) ?? autoG
@@ -936,6 +1024,8 @@ final class TapeWriter {
       try fm.createDirectory(at: dir, withIntermediateDirectories: true)
       return dir
     }
+    let laneGeometry = try Engine.runEnvGeometryProbe(
+      dev, lib, laneEnvKinds: laneEnvKinds, laneSeeds: seeds.map { UInt32(truncatingIfNeeded: $0) })
     var recordHandles: [FileHandle] = []
     var records: [RecordWriter] = []
     for lane in 0..<B {
@@ -943,7 +1033,8 @@ final class TapeWriter {
       let url = dir.appendingPathComponent("actions.bin")
       fm.createFile(atPath: url.path, contents: nil)
       let h = try FileHandle(forWritingTo: url)
-      records.append(try RecordWriter(handle: h, envKind: laneEnvKinds[lane]))
+      records.append(
+        try RecordWriter(handle: h, envKind: laneEnvKinds[lane], geometry: laneGeometry[lane]))
       recordHandles.append(h)
     }
     let maxChunkSteps = 1024
@@ -1340,42 +1431,6 @@ final class TapeWriter {
     print(
       "compare-hashes: \(keys.count) rows match on \(required.joined(separator: ",")).")
   }
-  static func recordProbe() throws {
-    let args = CommandLine.arguments
-    guard args.count >= 4 else {
-      throw err("Usage: OaK record-probe <cases.bin> <out-dir>")
-    }
-    let data = try Data(contentsOf: URL(fileURLWithPath: args[2]))
-    guard data.count >= 12 else { throw err("record-probe: case file too small.") }
-    let (kind, rowCount, chunkSteps): (UInt32, Int, Int) = data.withUnsafeBytes { raw in
-      (
-        raw.load(fromByteOffset: 0, as: UInt32.self),
-        Int(raw.load(fromByteOffset: 4, as: UInt32.self)),
-        Int(raw.load(fromByteOffset: 8, as: UInt32.self))
-      )
-    }
-    guard rowCount > 0, chunkSteps > 0, data.count == 12 + rowCount * 16 * 4 else {
-      throw err(
-        "record-probe: case size mismatch — \(data.count) bytes for \(rowCount) rows (want \(12 + rowCount * 16 * 4)), chunkSteps \(chunkSteps).")
-    }
-    _ = try envId(kind: kind)
-    let dir = URL(fileURLWithPath: args[3], isDirectory: true)
-    try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-    let url = dir.appendingPathComponent("actions.bin")
-    FileManager.default.createFile(atPath: url.path, contents: nil)
-    let h = try FileHandle(forWritingTo: url)
-    defer { try? h.close() }
-    let w = try RecordWriter(handle: h, envKind: kind)
-    try data.withUnsafeBytes { raw in
-      let rp = raw.baseAddress!.advanced(by: 12).assumingMemoryBound(to: Float.self)
-      var start = 0
-      while start < rowCount {
-        let n = min(chunkSteps, rowCount - start)
-        try w.encodeChunk(rp, slot: 0, capacity: rowCount, stepStart: start, stepCount: n)
-        start += n
-      }
-    }
-  }
   static func benchmark() throws {
     let env = ProcessInfo.processInfo.environment
     let ablations = try AblationSpec.fromEnv(env)
@@ -1442,7 +1497,7 @@ final class TapeWriter {
         isDirectory: true)
     }
     try fm.createDirectory(at: dir, withIntermediateDirectories: true)
-    let runMeta: [String: Any] = [
+    Self.pendingMeta = [
       "batch": seedValues.count, "seeds": seedValues, "steps": steps,
       "ablationLabel": ablations.label,
       "startedAt": ISO8601DateFormatter().string(from: Date()),
@@ -1450,9 +1505,6 @@ final class TapeWriter {
         ["envId": e.envId, "seedStart": e.seedStart, "seedEnd": e.seedEnd] as [String: Any]
       },
     ]
-    try JSONSerialization.data(
-      withJSONObject: runMeta, options: [.prettyPrinted, .sortedKeys]
-    ).write(to: dir.appendingPathComponent("meta.json"), options: .atomic)
     let envDesc = entries.map { "\($0.envId):\($0.seedEnd - $0.seedStart + 1)" }.joined(
       separator: ",")
     fputs(

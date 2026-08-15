@@ -1,3 +1,4 @@
+import { terraceShelves } from '@kit/terrace';
 
 import {
   buildCellField,
@@ -25,7 +26,7 @@ import { excludeAny, scatterFlowers, scatterRocks, type ExcludeFn } from '@kit/v
 import * as THREE from 'three';
 import type { GridGeometry } from '@sim/types';
 import {
-  ROW_DROP,
+  rowDrop,
   blendTokens,
   SHELF_THICKNESS,
   TREASURE_COL,
@@ -55,7 +56,7 @@ export const SHAFT_RADIUS_MAX = 8.0;
 
 
 export function shelfHeightAt(_x: number, z: number, grid: GridSize): number {
-  return reefDepthY(rowAtZ(z, grid));
+  return reefDepthY(rowAtZ(z, grid), grid);
 }
 
 export function excludeOpenWater(grid: GridSize, reach: Uint8Array): ExcludeFn {
@@ -76,27 +77,6 @@ export function excludeCellCenters(grid: GridSize, radius: number): ExcludeFn {
 }
 
 
-export function terraceShelves(field: CellFieldHandle, grid: GridSize): void {
-  const mesh = field.floorMeshes[0];
-  if (!mesh) return;
-  const matrix = new THREE.Matrix4();
-  const position = new THREE.Vector3();
-  const quaternion = new THREE.Quaternion();
-  const scale = new THREE.Vector3();
-  for (let r = 0; r < grid.h; r++) {
-    for (let c = 0; c < grid.w; c++) {
-      const id = field.floorInstanceAt(c, r);
-      if (id < 0) continue;
-      mesh.getMatrixAt(id, matrix);
-      matrix.decompose(position, quaternion, scale);
-      position.y = reefDepthY(r);
-      matrix.compose(position, quaternion, scale);
-      mesh.setMatrixAt(id, matrix);
-    }
-  }
-  mesh.instanceMatrix.needsUpdate = true;
-  mesh.computeBoundingSphere();
-}
 
 
 export const KELP_LEAN = 0.42;
@@ -338,7 +318,7 @@ export function buildCaustics(
     const x0 = world[0] - 0.5;
     const z = world[2];
     cellToWorld(hi, r, grid, world);
-    rows.push({ x0, x1: world[0] + 0.5, z, y: reefDepthY(r) + 0.016 });
+    rows.push({ x0, x1: world[0] + 0.5, z, y: reefDepthY(r, grid) + 0.016 });
   }
 
   const positions = new Float32Array(rows.length * 6 * 3);
@@ -371,7 +351,7 @@ export function buildCaustics(
   geometry.computeBoundingSphere();
   geometry.name = 'reefCaustics';
 
-  const top = reefDepthY(0);
+  const top = reefDepthY(0, grid);
   const material = new THREE.ShaderMaterial({
     uniforms: {
       uTime: { value: 0 },
@@ -380,7 +360,7 @@ export function buildCaustics(
       uScale: { value: 0.62 },
       uSpeed: { value: 1.0 },
       uTop: { value: top },
-      uRange: { value: ROW_DROP * Math.max(1, grid.h - 1) + 0.001 },
+      uRange: { value: rowDrop(grid) * Math.max(1, grid.h - 1) + 0.001 },
     },
     vertexShader: CAUSTIC_VERT,
     fragmentShader: CAUSTIC_FRAG,
@@ -597,7 +577,7 @@ export function buildWorld(
   });
   group.add(rig.group);
   owned.push(rig);
-  rig.setShadowFocus({ x: 0, y: reefDepthY((grid.h - 1) / 2), z: 0 }, SHADOW_RADIUS);
+  rig.setShadowFocus({ x: 0, y: reefDepthY((grid.h - 1) / 2, grid), z: 0 }, SHADOW_RADIUS);
 
   const fog = makeFog(palette, FOG_EXTENT);
   fog.color.set(blendTokens(palette.fog, palette.skyBottom, 0.62));

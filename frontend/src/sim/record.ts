@@ -1,3 +1,5 @@
+import { GEOMETRY_BYTES } from './geometry';
+import type { EnvEntry } from './catalog';
 import { ENV_IDS } from '@shared/envs';
 import type { EnvId } from '@shared/envs';
 import type { RawRecording } from './types';
@@ -11,8 +13,9 @@ export const OFF_POSE = 7;
 export const POSE_LEN = 9;
 
 export const FILE_MAGIC = 0x524b414f;
+export { GEOMETRY_BYTES };
 export const CHUNK_MAGIC = 0x524b4843;
-export const FILE_HEADER_BYTES = 12;
+export const FILE_HEADER_BYTES = 12 + GEOMETRY_BYTES;
 export const CHUNK_HEADER_BYTES = 24;
 export const ESCAPE_ENTRY_BYTES = 4 + RECORD_FLOATS * 4;
 
@@ -63,71 +66,23 @@ const i16w = (idx: number, scale: number): PoseFieldSpec => ({ idx, enc: 'i16', 
 
 export const RECORD_ENV_KINDS: readonly EnvId[] = ENV_IDS;
 
-export const RECORD_CODECS: readonly CodecDescriptor[] = [
-  {
-    category: 'cheetah',
-    ctrl: { kind: 'u8box', n: 6 },
-    poseFields: [
-      { idx: 0, enc: 'dx32', scale: 0.01 },
-      i16(1, 1e-4),
-      i16w(2, 1e-4),
-      i16w(3, 1e-4),
-      i16w(4, 1e-4),
-      i16w(5, 1e-4),
-      i16w(6, 1e-4),
-      i16w(7, 1e-4),
-      i16w(8, 1e-4),
-    ],
-  },
-  { category: 'grid', ctrl: 'index', poseFields: u8Range(0, 3) },
-  { category: 'grid', ctrl: 'index', poseFields: u8Range(0, 1), poseConst: { 2: 7, 3: 7 } },
-  { category: 'grid', ctrl: 'index', poseFields: u8Range(0, 7) },
-  {
-    category: 'classic',
-    ctrl: 'index',
-    poseFields: [i16w(0, 1e-4), i16w(1, 1e-4), i16(2, 1e-3), i16(3, 1e-3)],
-  },
-  {
-    category: 'classic',
-    ctrl: 'index',
-    poseFields: [i16(0, 1e-4), i16(1, 1e-5)],
-    poseConst: { 2: 0.5 },
-  },
-  {
-    category: 'classic',
-    ctrl: 'index',
-    poseFields: [i16(0, 1e-4), i16(1, 1e-3), i16w(2, 1e-4), i16(3, 1e-3)],
-  },
-  {
-    category: 'classic',
-    ctrl: { kind: 'u8box', n: 1 },
-    poseFields: [i16w(0, 1e-4), i16(1, 1e-3), i16(2, 1e-3)],
-  },
-  { category: 'grid', ctrl: 'index', poseFields: [u8(0)], poseConst: { 1: 15 } },
-  { category: 'grid', ctrl: 'index', poseFields: u8Range(0, 1), poseConst: { 2: 15, 3: 15 } },
-  { category: 'grid', ctrl: 'index', poseFields: u8Range(0, 7) },
-  { category: 'grid', ctrl: 'index', poseFields: [u8(0), u8(2)], poseConst: { 1: 31 } },
-  { category: 'grid', ctrl: 'index', poseFields: u8Range(0, 3) },
-  { category: 'grid', ctrl: 'index', poseFields: u8Range(0, 4) },
-  { category: 'grid', ctrl: 'index', poseFields: u8Range(0, 3) },
-  { category: 'grid', ctrl: 'index', poseFields: [u8(0), u8(2)], poseConst: { 1: 31 } },
-];
+export function codecFromEntry(entry: EnvEntry): CodecDescriptor {
+  return {
+    category: entry.gridW > 0 ? 'grid' : entry.slots[0] === 'q0' && entry.ctrlBox === 6 ? 'cheetah' : 'classic',
+    ctrl: entry.ctrlBox > 0 ? { kind: 'u8box', n: entry.ctrlBox } : 'index',
+    poseFields: entry.fields.map((f) => ({
+      idx: f.slot,
+      enc: f.enc === 'u8' ? 'u8' : f.enc === 'i16' ? 'i16' : 'dx32',
+      ...(f.enc === 'u8' ? {} : { scale: f.scale }),
+      ...(f.wrap ? { wrap: true } : {}),
+    })),
+  };
+}
 
 export function envKindOf(envId: string): number {
   return RECORD_ENV_KINDS.indexOf(envId as EnvId);
 }
 
-export function codecForEnvKind(envKind: number): CodecDescriptor {
-  const desc = RECORD_CODECS[envKind];
-  if (desc === undefined) throw new RecordParseError(`unknown envKind ${envKind}`);
-  return desc;
-}
-
-export function codecForEnv(envId: string): CodecDescriptor {
-  const kind = envKindOf(envId);
-  if (kind < 0) throw new RecordParseError(`no codec for envId ${JSON.stringify(envId)}`);
-  return codecForEnvKind(kind);
-}
 
 const TWO_PI = Math.PI * 2;
 
@@ -178,7 +133,6 @@ export interface RecordHeader {
   envKind: number;
   envId: EnvId;
   steps: number;
-  desc: CodecDescriptor;
 }
 
 export function readRecordHeader(buf: ArrayBuffer | ArrayBufferView): RecordHeader {
@@ -200,7 +154,7 @@ export function readRecordHeader(buf: ArrayBuffer | ArrayBufferView): RecordHead
   if (envId === undefined) {
     throw new RecordParseError(`recording envKind ${envKind} is not a known env`);
   }
-  return { envKind, envId, steps: dv.getUint32(8, true), desc: codecForEnvKind(envKind) };
+  return { envKind, envId, steps: dv.getUint32(8, true) };
 }
 
 export interface RecordChunk {
@@ -250,7 +204,6 @@ export function scanNextChunk(
 
 export interface RecordScan {
   header: RecordHeader;
-  desc: CodecDescriptor;
   chunks: RecordChunk[];
   steps: number;
 }
@@ -273,7 +226,7 @@ export function scanRecord(buf: ArrayBuffer | ArrayBufferView, opts: ScanOptions
     steps += chunk.stepCount;
     offset += chunk.byteLength;
   }
-  return { header, desc: header.desc, chunks, steps };
+  return { header, chunks, steps };
 }
 
 export async function inflateChunk(bytes: Uint8Array, chunk: RecordChunk): Promise<Uint8Array> {
@@ -426,14 +379,16 @@ export function decodeChunkPayload(
 export async function parseRecord(
   buf: ArrayBuffer | ArrayBufferView,
   seed: number,
+  entry: EnvEntry,
 ): Promise<RawRecording> {
   const bytes = asWindow(buf);
   const scan = scanRecord(bytes);
+  const desc = codecFromEntry(entry);
   const data = new Float32Array(scan.steps * RECORD_FLOATS);
   let steps = 0;
   for (const chunk of scan.chunks) {
     const payload = await inflateChunk(bytes, chunk);
-    decodeChunkPayload(payload, scan.desc, chunk.stepCount, data, steps * RECORD_FLOATS);
+    decodeChunkPayload(payload, desc, chunk.stepCount, data, steps * RECORD_FLOATS);
     steps += chunk.stepCount;
   }
   return { envId: scan.header.envId, seed, data, steps };

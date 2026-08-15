@@ -1,7 +1,8 @@
 
 import { CelebrationPool, attachCelebrations, disposeCelebrations } from '@kit/celebrate';
 import { GroundTruthOverlay } from '@kit/debug';
-import { cellToWorldVec, clampCell, type GridSize } from '@kit/grid';
+import { clampCell, type GridSize } from '@kit/grid';
+import { cellToTerraceVec as cellToWorldVec, terraceDepthAt } from '@kit/terrace';
 import { makeOrbitRig, type OrbitRig } from '@kit/rigs';
 import { TOKENS } from '@kit/tokens';
 import type {
@@ -31,10 +32,10 @@ import {
 
 const CAM_AZIMUTH = CAMERA_AZIMUTH;
 const CAM_POLAR = 0.74;
-const CAM_DISTANCE = 30;
-const CAM_TARGET: readonly [number, number, number] = [-3.6, -3.1, 3.3];
+const CAM_DISTANCE = 24;
+const CAM_TARGET: readonly [number, number, number] = [-1.2, -1.75, 1.1];
 const CAM_YAW_RANGE = 0.55;
-const CAM_DISTANCE_THUMB = 34;
+const CAM_DISTANCE_THUMB = 28;
 const CAM_POLAR_THUMB = 0.72;
 
 const BURST_SCALE = 0.8;
@@ -103,6 +104,7 @@ class TheAbyssScene implements SceneModule {
   private ctx: SceneContext | null = null;
   private world: WorldHandle | null = null;
   private wisp: Wisp | null = null;
+  private readonly diver = new THREE.Group();
   private bubble: DiveBubbleHandle | null = null;
   private wreck: WreckHandle | null = null;
   private anglers: AnglerHandle[] = [];
@@ -164,7 +166,8 @@ class TheAbyssScene implements SceneModule {
       grid,
     );
     this.wisp = wisp;
-    this.scene.add(wisp.group);
+    this.diver.add(wisp.group);
+    this.scene.add(this.diver);
 
     const bubble = buildDiveBubble({
       tier: ctx.tier,
@@ -202,7 +205,7 @@ class TheAbyssScene implements SceneModule {
 
     const thumb = ctx.tier === 'thumb';
     const rig = makeOrbitRig({
-      canvas: thumb ? null : ctx.canvas,
+      canvas: ctx.canvas,
       target: [CAM_TARGET[0], CAM_TARGET[1], CAM_TARGET[2]],
       distance: thumb ? CAM_DISTANCE_THUMB : CAM_DISTANCE,
       azimuth: CAM_AZIMUTH,
@@ -338,6 +341,7 @@ class TheAbyssScene implements SceneModule {
       }
     }
     wisp.update(frame.dtReal, time);
+    this.diver.position.y = terraceDepthAt(wisp.position.z, grid);
 
     this.bubblePos.copy(wisp.position);
     this.bubblePos.y += TOKENS.wispHeight;
