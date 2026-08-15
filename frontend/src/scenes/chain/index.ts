@@ -228,7 +228,7 @@ class SixteenStonesScene implements SceneModule {
 
     const thumb = ctx.tier === 'thumb';
     const rig = makeOrbitRig({
-      canvas: thumb ? null : ctx.canvas,
+      canvas: ctx.canvas,
       target: thumb
         ? [CAM_TARGET_THUMB[0], CAM_TARGET_THUMB[1], CAM_TARGET_THUMB[2]]
         : [CAM_TARGET[0], CAM_TARGET[1], CAM_TARGET[2]],

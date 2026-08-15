@@ -715,7 +715,7 @@ a.btn:hover { text-decoration: none; }
   border-top: 1px solid var(--border);
   background: var(--bg-raised);
 }
-.wall-field[hidden] { display: none; }
+.wall-field[hidden] { visibility: hidden; }
 .wall-field-head { display: flex; align-items: baseline; gap: 8px; margin-bottom: 6px; }
 .wall-field-label {
   font-family: var(--mono); font-size: 9.5px; letter-spacing: 0.14em;
@@ -724,6 +724,7 @@ a.btn:hover { text-decoration: none; }
 .wall-field-note {
   font-family: var(--mono); font-size: 10px; color: var(--text-dim);
   font-variant-numeric: tabular-nums; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  flex: 1 1 0; min-width: 0;
 }
 .wall-field-track { position: relative; height: 18px; }
 .wall-field-axis {
@@ -756,6 +757,8 @@ a.btn:hover { text-decoration: none; }
   font-family: var(--mono); font-size: 9px; color: var(--text-faint);
   font-variant-numeric: tabular-nums;
 }
+.wall-field-scale > * { flex: none; width: 9ch; overflow: hidden; }
+.wall-field-scale > *:last-child { text-align: right; }
 
 
 .wall-transport {
@@ -776,20 +779,23 @@ a.btn:hover { text-decoration: none; }
 }
 .wall-transport .tbtn:hover { color: var(--text); border-color: var(--border-strong); }
 .wall-transport .tbtn.is-on { color: var(--accent); border-color: color-mix(in srgb, var(--accent) 55%, transparent); }
-.wall-transport .tbtn-play { min-width: 54px; color: var(--text); }
+.wall-transport .tbtn-play { width: 58px; min-width: 58px; color: var(--text); }
 .wall-transport .tsep { width: 1px; align-self: stretch; background: var(--border); flex: none; }
 .wall-speeds { display: flex; gap: 3px; flex: none; }
 .wall-readout {
   font-family: var(--mono); font-size: 11px; color: var(--text-dim);
   font-variant-numeric: tabular-nums; white-space: nowrap; flex: none;
+  width: 30ch; overflow: hidden; text-overflow: ellipsis;
 }
 .wall-lapse {
   font-family: var(--mono); font-size: 10px; letter-spacing: 0.08em;
   color: var(--gold); white-space: nowrap; flex: none;
+  width: 14ch; overflow: hidden; text-overflow: ellipsis;
 }
 .wall-ghosts {
   font-family: var(--mono); font-size: 10px; letter-spacing: 0.08em;
   color: var(--text-faint); white-space: nowrap; flex: none;
+  width: 32ch; overflow: hidden; text-overflow: ellipsis;
 }
 
 .wall-scrub { position: relative; flex: 1; min-width: 120px; height: 24px; }

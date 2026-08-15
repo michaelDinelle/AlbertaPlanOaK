@@ -178,7 +178,7 @@ class OvergrownRuinsScene implements SceneModule {
     const thumb = ctx.tier === 'thumb';
     const bias = thumb ? 0 : CAM_TARGET_BIAS;
     const rig = makeOrbitRig({
-      canvas: thumb ? null : ctx.canvas,
+      canvas: ctx.canvas,
       target: [Math.sin(CAM_AZIMUTH) * bias, CAM_TARGET_Y, Math.cos(CAM_AZIMUTH) * bias],
       distance: thumb ? CAM_DISTANCE_THUMB : CAM_DISTANCE,
       azimuth: thumb ? CAM_AZIMUTH_THUMB : CAM_AZIMUTH,

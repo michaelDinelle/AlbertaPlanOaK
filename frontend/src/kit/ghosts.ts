@@ -2,13 +2,13 @@
 import * as THREE from 'three';
 import type { EnvId } from '@shared/envs';
 import type { EnvGeometry } from '@sim/types';
+import { slotValue, type EnvEntry } from '@sim/catalog';
 import { CHEETAH_BONES, FK_FLOATS, FK_POINT_INDEX, cheetahGeometry } from '@sim/fk/cheetah';
 import { acrobotPoints } from '@sim/envs/acrobot';
 import { cartPoleTip } from '@sim/envs/cartpole';
 import { pendulumTip } from '@sim/envs/pendulum';
 import { CELL } from './grid';
 import { emissiveMaterial, type EmissiveMaterial } from './materials';
-import { radialSprite } from './textures';
 import type { DesignTokens } from './tokens';
 import type { QualityTier } from './types';
 
@@ -21,13 +21,14 @@ export const GHOST_TRIANGLES_PER_GHOST: Readonly<
   Record<GhostCategory, Readonly<Record<QualityTier, number>>>
 > = {
   cheetah: { hero: 1188, medium: 668, thumb: 360 },
-  grid: { hero: 262, medium: 102, thumb: 102 },
+  grid: { hero: 180, medium: 82, thumb: 82 },
   classic: { hero: 204, medium: 104, thumb: 104 },
 };
 
 export interface GhostLayerOptions {
   category: GhostCategory;
   envId: EnvId;
+  entry: EnvEntry | null;
   geometry: EnvGeometry;
   maxGhosts: number;
   tokens: DesignTokens;
@@ -50,7 +51,7 @@ const GLINT_TAU = 0.12;
 const GLINT_BRIGHT = 1.1;
 const GLINT_SCALE = 0.45;
 
-export const GHOST_EMPHASIS_GAIN: readonly [number, number, number] = [0.18, 0.45, 0.92];
+export const GHOST_EMPHASIS_GAIN: readonly [number, number, number] = [0.55, 0.78, 1.05];
 const GHOST_SHADE_SCALE: readonly [number, number, number] = [0.55, 0.8, 1];
 
 export const GHOST_BLOOM_THRESHOLD = 0.85;
@@ -61,17 +62,14 @@ const GOLDEN_ANGLE = Math.PI * (3 - Math.sqrt(5));
 const RAMP_KNEE = 0.82;
 const RAMP_VALUE_MIN = 0.35;
 
-const GRID_GHOST_SCALE = 0.6;
+const GRID_GHOST_SCALE = 0.85;
 const WISP_CORE_RADIUS = 0.16;
 const SHELL_SIZE = 1.4;
-const SHADE_SIZE = 5.6;
-const SHADE_LIFT = 0.014;
 const SHADE_BLEND = 0.93;
 const DEAD_BLEND = 0.62;
 
 const EMITTER_OPACITY = 1;
 const SHELL_OPACITY = 0.55;
-const SHADE_OPACITY = 0.4;
 
 const CLASSIC_MARKER_RADIUS = 0.07;
 const CLASSIC_LINK_THICKNESS = 0.03;
@@ -95,10 +93,6 @@ function tierDetail(tier: QualityTier): number {
 
 function icoDetail(base: number, detail: number): number {
   return Math.max(0, Math.floor(base * detail));
-}
-
-function spriteSize(detail: number): number {
-  return detail <= 0.5 ? 32 : detail < 1 ? 48 : 64;
 }
 
 export function ghostCellOffset(i: number, n: number, out: Float32Array | number[]): void {
@@ -141,6 +135,7 @@ export class GhostLayer {
   readonly banks: readonly GhostBank[];
 
   private readonly geometry: EnvGeometry;
+  private readonly entry: EnvEntry | null;
   private readonly classicKind: ClassicKind;
   private readonly poseNeed: number;
 
@@ -189,7 +184,6 @@ export class GhostLayer {
   private readonly headRadius: number;
   private readonly gridRadiusScale: number;
   private readonly gridHeight: number;
-  private readonly gridShadeSize: number;
 
   private time = 0;
   private disposed = false;
@@ -199,6 +193,7 @@ export class GhostLayer {
     this.envId = opts.envId;
     this.tier = opts.tier;
     this.geometry = opts.geometry;
+    this.entry = opts.entry;
     this.classicKind = CLASSIC_KINDS[opts.envId] ?? 'mountain-car';
     this.poseNeed = poseNeedOf(opts.category, this.classicKind);
     const n = Math.max(0, Math.floor(opts.maxGhosts));
@@ -242,7 +237,6 @@ export class GhostLayer {
     this.headRadius = cheetah.headRadius;
     this.gridRadiusScale = WISP_CORE_RADIUS * GRID_GHOST_SCALE;
     this.gridHeight = tokens.wispHeight * GRID_GHOST_SCALE;
-    this.gridShadeSize = this.gridRadiusScale * SHADE_SIZE;
 
     const detail = tierDetail(opts.tier);
     if (opts.category === 'cheetah') this.buildCheetahBanks(capacity, detail);
@@ -514,8 +508,13 @@ export class GhostLayer {
     const w = grid?.w ?? 1;
     const h = grid?.h ?? 1;
     ghostCellOffset(i, this.maxGhosts, this.offsetOut);
-    const wx = ((this.poseScratch[0] ?? 0) - (w - 1) / 2) * CELL + (this.offsetOut[0] ?? 0) * CELL;
-    const wz = ((this.poseScratch[1] ?? 0) - (h - 1) / 2) * CELL + (this.offsetOut[1] ?? 0) * CELL;
+    const entry = this.entry;
+    const cx = entry === null ? (this.poseScratch[0] ?? 0) : slotValue(entry, this.poseScratch, 'x');
+    const cy = entry === null ? (this.poseScratch[1] ?? 0) : slotValue(entry, this.poseScratch, 'y');
+    const gx = Number.isFinite(cx) ? cx : 0;
+    const gy = Number.isFinite(cy) ? cy : 0;
+    const wx = (gx - (w - 1) / 2) * CELL + (this.offsetOut[0] ?? 0) * CELL;
+    const wz = (gy - (h - 1) / 2) * CELL + (this.offsetOut[1] ?? 0) * CELL;
     const emph = (this.emphasis[i] ?? 0) as 0 | 1 | 2;
     const dark = GHOST_SHADE_SCALE[emph] ?? GHOST_SHADE_SCALE[0];
 
@@ -525,15 +524,6 @@ export class GhostLayer {
     if (shell) {
       const ring = 1 + (SHELL_SIZE - 1) * dark;
       this.setOrb(shell, i, wx, this.gridHeight, wz, this.gridRadiusScale * ring * puff);
-    }
-    const shade = this.bankList[2]?.mesh;
-    if (shade) {
-      this.pos.set(wx, SHADE_LIFT, wz);
-      this.quat.identity();
-      const s = this.gridShadeSize * puff * dark;
-      this.scl.set(s, 1, s);
-      this.mat.compose(this.pos, this.quat, this.scl);
-      shade.setMatrixAt(i, this.mat);
     }
   }
 
@@ -713,20 +703,6 @@ export class GhostLayer {
     const shell = new THREE.IcosahedronGeometry(1, icoDetail(1, detail));
     shell.name = `${GHOST_GROUP_NAME}:shell`;
     this.addBank('shell', 'shade', shell, this.shadeMaterial('shell', SHELL_OPACITY), capacity, -3);
-
-    const sprite = radialSprite(spriteSize(detail), 1);
-    this.sprites.push(sprite);
-    const plane = new THREE.PlaneGeometry(1, 1);
-    plane.rotateX(-Math.PI / 2);
-    plane.name = `${GHOST_GROUP_NAME}:shade`;
-    this.addBank(
-      'shade',
-      'shade',
-      plane,
-      this.shadeMaterial('shade', SHADE_OPACITY, sprite),
-      capacity,
-      -3,
-    );
   }
 
   private buildClassicBanks(capacity: number, detail: number): void {

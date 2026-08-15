@@ -31,6 +31,8 @@ export interface WispOptions {
 
 const RIBBON_MIN = 6;
 
+export const AGENT_RENDER_ORDER = 3;
+
 const SHADE_BLEND = 0.93;
 const SILHOUETTE_SIZE = 1.4;
 const SHADE_SIZE = 5.6;
@@ -106,8 +108,10 @@ export class Wisp {
     this.decor.name = 'oakWispDecor';
     this.core = new THREE.Mesh(coreGeo, this.coreMaterial);
     this.core.name = 'oakWispCore';
+    this.core.renderOrder = AGENT_RENDER_ORDER;
     this.halo = new THREE.Mesh(haloGeo, this.haloMaterial);
     this.halo.name = 'oakWispHalo';
+    this.halo.renderOrder = AGENT_RENDER_ORDER;
     this.body.add(this.core, this.decor);
     this.decor.add(this.halo);
 
@@ -179,6 +183,7 @@ export class Wisp {
       });
       this.skirt = new THREE.Mesh(skirtGeo, this.skirtMaterial);
       this.skirt.name = 'oakWispSkirt';
+      this.skirt.renderOrder = AGENT_RENDER_ORDER;
       this.skirt.position.y = -radius * 0.7;
       this.decor.add(this.skirt);
     } else {
@@ -216,6 +221,7 @@ export class Wisp {
       this.ribbonMaterial.name = 'oakWispRibbon';
       this.ribbon = new THREE.Line(geo, this.ribbonMaterial);
       this.ribbon.name = 'oakWispRibbon';
+      this.ribbon.renderOrder = AGENT_RENDER_ORDER;
       this.ribbon.frustumCulled = false;
       this.group.add(this.ribbon);
     } else {

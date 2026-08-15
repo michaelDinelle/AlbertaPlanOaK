@@ -3,6 +3,8 @@ import type { EnvResult, RecordingRef, RunDetail, RunIndexEntry, RunMeta } from 
 import { ENVS, ENV_IDS, isEnvId, type EnvCategory, type EnvId } from '@shared/envs';
 import type { PlaybackSource } from '@kit/playback';
 import { makeGhostLayer, type GhostLayer } from '@kit/ghosts';
+import { entryFor, parseCatalog } from '@sim/catalog';
+import { makeLaneStream, type LaneStream } from '../theater/laneStream';
 import { TOKENS } from '@kit/tokens';
 import type { QualityTier } from '@kit/types';
 import { fieldIndex, tapeValue, type Tape } from '../tape';
@@ -677,9 +679,12 @@ export const mount: ViewMount = (host) => {
   let heroGeneration = 0;
   let heroAttached = false;
   let ghostView: GhostView | null = null;
+  let laneStream: LaneStream | null = null;
+  let laneGhosts: { lane: number; seed: number }[] = [];
   let ghostLayer: GhostLayer | null = null;
   let ghostKey = '';
   let ghostSample = -1;
+  let ghostLayerStream: LaneStream | null = null;
   let emphasised: number | null = null;
   let heroSource: PlaybackSource | null = null;
   let fieldData: { tape: Tape; pose0: number } | null = null;
@@ -1354,6 +1359,18 @@ export const mount: ViewMount = (host) => {
     return x === undefined || !Number.isFinite(x) ? null : x;
   }
 
+  function paintLaneGhosts(layer: GhostLayer, step: number): boolean {
+    const stream = laneStream;
+    if (stream === null || stream.window === null) return false;
+    for (let i = 0; i < laneGhosts.length; i++) {
+      const g = laneGhosts[i];
+      if (g === undefined) continue;
+      if (!stream.pose(g.lane, step, ghostPose)) continue;
+      layer.setGhostFrame(i, ghostPose, true);
+    }
+    return true;
+  }
+
   function paintGhosts(layer: GhostLayer, view: GhostView, row: number): void {
     const stepEnd = view.tape.stepEnd[row] ?? 0;
     for (let index = 0; index < view.entries.length; index++) {
@@ -1405,6 +1422,35 @@ export const mount: ViewMount = (host) => {
   let lastMarkerAt = 0;
 
   function onFrame(info: HostFrameInfo): void {
+    if (
+      !heroAttached
+      && hero !== null
+      && sceneHost !== null
+      && sceneHost.envId === hero.source.envId
+      && hero.source.frameCount > 1
+    ) {
+      heroAttached = true;
+      heroSource = hero.source;
+      const at = pendingSeekFrame !== null
+        ? Math.min(pendingSeekFrame, hero.source.frameCount - 1)
+        : 0;
+      pendingSeekFrame = null;
+      const host = sceneHost;
+      void host
+        .setSource(hero.source, { at })
+        .then(() => {
+          host.setSpeed(speed);
+          host.play();
+          syncPlay();
+        })
+        .catch((error: unknown) => {
+          heroAttached = false;
+          showStageNote('Could not play this seed', [
+            errorState(error instanceof Error ? error.message : String(error)),
+          ]);
+        });
+      scrubInput.max = String(Math.max(1, hero.source.frameCount - 1));
+    }
     const frames = Math.max(1, frameCount() - 1);
     const progress = info.position / frames;
     frameAt = info.position;
@@ -1421,7 +1467,15 @@ export const mount: ViewMount = (host) => {
     if (!scrubbing) scrubInput.value = String(info.position);
 
     const layer = sceneHost?.ghosts ?? null;
-    if (layer && ghostView) {
+    if (layer && laneStream !== null) {
+      const step = Math.max(0, stepFromFrame(info.position));
+      void laneStream.ensure(step);
+      if (laneStream !== ghostLayerStream) {
+        ghostLayerStream = laneStream;
+        primeLaneGhosts(layer);
+      }
+      paintLaneGhosts(layer, step);
+    } else if (layer && ghostView) {
       const sample = ghostRowIndex(info.position, ghostView.windowSteps, ghostView.tape.rows);
       if (sample !== ghostSample || layer !== ghostLayer) {
         ghostSample = sample;
@@ -1447,7 +1501,7 @@ export const mount: ViewMount = (host) => {
     readout.textContent =
       `step ${info.step < 0 ? 'init' : formatCount(info.step)} / ${formatStep(heroSteps())}`
       + ` · ${formatClock(info.simTime)}`;
-    if (ghostView && info.ghostDraws > 0) ghostChip.textContent = ghostChipText(ghostView);
+    if (ghostView) ghostChip.textContent = ghostChipText(ghostView);
     syncPlay();
   }
 
@@ -1456,6 +1510,13 @@ export const mount: ViewMount = (host) => {
     if (framing !== 'track') return `ghosts ${formatCount(total)} · all in frame`;
     const inFrame = ghostsInFrame >= total ? 'all' : formatCount(ghostsInFrame);
     return `ghosts ${formatCount(total)} · ${inFrame} in frame`;
+  }
+
+  function primeLaneGhosts(layer: GhostLayer): void {
+    for (let i = 0; i < laneGhosts.length; i++) {
+      layer.setRate(i, 0.5);
+      layer.setEmphasis(i, 0);
+    }
   }
 
   function primeGhosts(layer: GhostLayer, view: GhostView): void {
@@ -1541,6 +1602,7 @@ export const mount: ViewMount = (host) => {
     let h = heroCache.get(key);
     if (h === undefined) {
       h = loadHero({
+        entry: entryFor(parseCatalog(run.meta.envCatalog), env),
         runId: run.id,
         envId: env,
         seed,
@@ -1563,34 +1625,27 @@ export const mount: ViewMount = (host) => {
     hero = h;
     const handle = h;
 
-    handle.setCallbacks(
-      () => {
-        if (destroyed || generation !== heroGeneration || hero !== handle) return;
-        onHeroProgress();
-      },
-      (error) => {
-        if (destroyed || generation !== heroGeneration) return;
-        showStageNote('Could not play this seed', [errorState(error.message)]);
-      },
-    );
-
-    const attachSource = handle.source.frameCount > 1 ? handle.source : makeInitialSource(env, seed);
-    if (attachSource === handle.source) {
-      heroAttached = true;
-      heroSource = handle.source;
-    } else {
-      heroSource = attachSource;
-    }
-    const attachAt = pendingSeekFrame !== null
-      ? Math.min(pendingSeekFrame, attachSource.frameCount - 1)
-      : 0;
-    if (pendingSeekFrame !== null && pendingSeekFrame < attachSource.frameCount) pendingSeekFrame = null;
-
     queueStage(async () => {
       if (destroyed || generation !== heroGeneration) return;
+      const attachSource = handle.source.frameCount > 1
+        ? handle.source
+        : makeInitialSource(env, seed);
+      if (attachSource === handle.source) {
+        heroAttached = true;
+        heroSource = handle.source;
+      } else {
+        heroSource = attachSource;
+      }
+      const attachAt = pendingSeekFrame !== null
+        ? Math.min(pendingSeekFrame, attachSource.frameCount - 1)
+        : 0;
+      if (pendingSeekFrame !== null && pendingSeekFrame < attachSource.frameCount) {
+        pendingSeekFrame = null;
+      }
       if (sceneHost === null) {
         sceneHost = await mountSceneHost(stage, {
           envId: env,
+          catalog: parseCatalog(run.meta.envCatalog),
           source: attachSource,
           tier: TIER_BY_LABEL[tierLabel],
           at: attachAt,
@@ -1614,6 +1669,7 @@ export const mount: ViewMount = (host) => {
         sceneHost.setGhosts(null);
       }
       applySpeed();
+      sceneHost.play();
       syncPlay();
       if (heroAttached) {
         scrubInput.max = String(Math.max(1, handle.source.frameCount - 1));
@@ -1646,6 +1702,17 @@ export const mount: ViewMount = (host) => {
         statsAccum = 1000;
       });
     }
+
+    handle.setCallbacks(
+      () => {
+        if (destroyed || generation !== heroGeneration || hero !== handle) return;
+        onHeroProgress();
+      },
+      (error) => {
+        if (destroyed || generation !== heroGeneration) return;
+        showStageNote('Could not play this seed', [errorState(error.message)]);
+      },
+    );
 
     applyGhosts();
   }
@@ -1694,9 +1761,26 @@ export const mount: ViewMount = (host) => {
     }
     ghostKey = key;
     ghostView = nextView;
+    const catalog = parseCatalog(run.meta.envCatalog);
+    laneStream?.destroy();
+    const stream = makeLaneStream({ runId: run.id, envId: env, catalog });
+    laneStream = stream;
+    ghostLayerStream = null;
+    laneGhosts = entries.map((e, i) => ({ lane: i, seed: e.seed }));
+    void stream.ensure(0).then(() => {
+      if (destroyed || stream !== laneStream) return;
+      const heroNow = heroSeed(selection);
+      laneGhosts = [];
+      for (let lane = 0; lane < stream.laneCount; lane++) {
+        const seed = stream.seedAt(lane);
+        if (seed === heroNow) continue;
+        laneGhosts.push({ lane, seed });
+      }
+    });
     const build = (tier: QualityTier): GhostLayer => makeGhostLayer({
       category: info.category,
       envId: env,
+      entry: entryFor(catalog, env),
       geometry: source.geometry,
       maxGhosts: entries.length,
       tokens: TOKENS,

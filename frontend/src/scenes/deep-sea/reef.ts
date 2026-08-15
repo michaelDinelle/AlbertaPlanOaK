@@ -12,43 +12,18 @@ import {
 import type { EnvGeometry, GridGeometry } from '@sim/types';
 
 
-export const ROW_DROP = 0.5;
+export {
+  TERRACE_DESCENT,
+  rowDrop,
+  terraceDepth as reefDepthY,
+  terraceDepthAt as reefDepthYAt,
+  cellToTerraceWorld as cellToReefWorld,
+  cellToTerraceVec as cellToReefVec,
+  terraceShear as reefShear,
+  terraceShelves,
+} from '@kit/terrace';
 
 export const SHELF_THICKNESS = 1.35;
-
-export function reefDepthY(row: number): number {
-  return -ROW_DROP * row;
-}
-
-export function reefDepthYAt(z: number, grid: GridSize): number {
-  return reefDepthY(z / CELL + (grid.h - 1) / 2);
-}
-
-export function cellToReefWorld(c: number, r: number, grid: GridSize, out?: Vec3Tuple): Vec3Tuple {
-  const t = cellToWorld(c, r, grid, out);
-  t[1] = reefDepthY(r);
-  return t;
-}
-
-export function cellToReefVec(c: number, r: number, grid: GridSize, out: THREE.Vector3): THREE.Vector3 {
-  const w = cellToReefWorld(c, r, grid, SCRATCH);
-  return out.set(w[0], w[1], w[2]);
-}
-
-const SCRATCH: Vec3Tuple = [0, 0, 0];
-
-export function reefShear(grid: GridSize, out?: THREE.Matrix4): THREE.Matrix4 {
-  const m = out ?? new THREE.Matrix4();
-  const k = ROW_DROP / CELL;
-  const lift = -ROW_DROP * ((grid.h - 1) / 2);
-  return m.set(
-    1, 0, 0, 0,
-    0, 1, -k, lift,
-    0, 0, 1, 0,
-    0, 0, 0, 1,
-  );
-}
-
 
 export const TREASURE_ROW = DEEPSEA_N - 1;
 export const TREASURE_COL = DEEPSEA_N - 1;

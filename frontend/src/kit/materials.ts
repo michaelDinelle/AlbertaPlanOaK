@@ -11,6 +11,11 @@ export interface ColorUniform {
 }
 
 export interface OakUniforms {
+  uSpotColor: ColorUniform;
+  uSpotStrength: NumberUniform;
+  uSpotScale: NumberUniform;
+  uSpotRadius: NumberUniform;
+  uSpotSeed: NumberUniform;
   uTime: NumberUniform;
   uWindAmp: NumberUniform;
   uWindFreq: NumberUniform;
@@ -69,7 +74,16 @@ export interface OakWindOptions {
   height?: number;
 }
 
+export interface OakSpotOptions {
+  color: THREE.ColorRepresentation;
+  strength: number;
+  scale: number;
+  radius: number;
+  seed: number;
+}
+
 export interface OakMaterialOptions {
+  spots?: OakSpotOptions;
   color?: THREE.ColorRepresentation;
   roughness?: number;
   metalness?: number;
@@ -167,6 +181,54 @@ const WIND_APPLY =  `
 }
 `;
 
+
+const SPOT_VERT_DECL =  `
+varying vec3 vOakObj;
+`;
+
+const SPOT_VERT_APPLY =  `
+vOakObj = position;
+`;
+
+const SPOT_DECL =  `
+uniform vec3 uSpotColor;
+uniform float uSpotStrength;
+uniform float uSpotScale;
+uniform float uSpotRadius;
+uniform float uSpotSeed;
+varying vec3 vOakObj;
+
+vec3 oakSpotHash( vec3 c ) {
+	vec3 p = vec3( dot( c, vec3( 127.1, 311.7, 74.7 ) ),
+	               dot( c, vec3( 269.5, 183.3, 246.1 ) ),
+	               dot( c, vec3( 113.5, 271.9, 124.6 ) ) );
+	return fract( sin( p + uSpotSeed ) * 43758.5453 );
+}
+
+float oakSpots( vec3 p ) {
+	vec3 cell = floor( p );
+	vec3 f = fract( p );
+	float best = 1e9;
+	for ( int i = -1; i <= 1; i++ ) {
+		for ( int j = -1; j <= 1; j++ ) {
+			for ( int k = -1; k <= 1; k++ ) {
+				vec3 o = vec3( float( i ), float( j ), float( k ) );
+				vec3 site = o + oakSpotHash( cell + o ) - f;
+				best = min( best, dot( site, site ) );
+			}
+		}
+	}
+	return 1.0 - smoothstep( 0.0, uSpotRadius * uSpotRadius, best );
+}
+`;
+
+const SPOT_APPLY =  `
+{
+	float oakSpot = oakSpots( vOakObj * uSpotScale );
+	diffuseColor.rgb = mix( diffuseColor.rgb, uSpotColor, oakSpot * uSpotStrength );
+}
+`;
+
 const DIFFUSE_LINE = /reflectedLight\.directDiffuse\s*\+=\s*irradiance\s*\*\s*BRDF_Lambert\(\s*material\.(diffuseContribution|diffuseColor)\s*\);/;
 
 let warnedToon = false;
@@ -201,7 +263,8 @@ export function oakMaterial(opts: OakMaterialOptions = {}): OakMaterial {
 
   const useToon = (opts.toonSteps ?? DEFAULT_TOON_STEPS) > 0;
   const useRim = rimStrength > 0;
-  const useWind = windAmp > 0;
+  const useWind = wind !== null;
+  const useSpots = opts.spots !== undefined;
 
   const uniforms: OakUniforms = {
     uTime: { value: 0 },
@@ -214,6 +277,11 @@ export function oakMaterial(opts: OakMaterialOptions = {}): OakMaterial {
     uToonSteps: { value: opts.toonSteps ?? DEFAULT_TOON_STEPS },
     uToonSoftness: { value: opts.toonSoftness ?? DEFAULT_TOON_SOFTNESS },
     uToonFloor: { value: opts.toonFloor ?? 0 },
+    uSpotColor: { value: new THREE.Color(opts.spots?.color ?? 0xffffff) },
+    uSpotStrength: { value: opts.spots?.strength ?? 0 },
+    uSpotScale: { value: opts.spots?.scale ?? 1 },
+    uSpotRadius: { value: opts.spots?.radius ?? 0.5 },
+    uSpotSeed: { value: opts.spots?.seed ?? 0 },
   };
 
   const handle: OakHandle = {
@@ -223,7 +291,7 @@ export function oakMaterial(opts: OakMaterialOptions = {}): OakMaterial {
       uniforms.uTime.value = t;
     },
     setWind(amplitude: number, frequency?: number) {
-      uniforms.uWindAmp.value = amplitude;
+      uniforms.uWindAmp.value = amplitude * scale.wind;
       if (frequency !== undefined) uniforms.uWindFreq.value = frequency;
     },
     setRim(strength: number, color?: THREE.ColorRepresentation) {
@@ -275,6 +343,19 @@ export function oakMaterial(opts: OakMaterialOptions = {}): OakMaterial {
       shader.fragmentShader = shader.fragmentShader
         .replace('#include <common>', `#include <common>\n${RIM_DECL}`)
         .replace('#include <opaque_fragment>', `${RIM_APPLY}\n#include <opaque_fragment>`);
+    }
+    if (useSpots) {
+      shader.uniforms.uSpotColor = uniforms.uSpotColor;
+      shader.uniforms.uSpotStrength = uniforms.uSpotStrength;
+      shader.uniforms.uSpotScale = uniforms.uSpotScale;
+      shader.uniforms.uSpotRadius = uniforms.uSpotRadius;
+      shader.uniforms.uSpotSeed = uniforms.uSpotSeed;
+      shader.vertexShader = shader.vertexShader
+        .replace('#include <common>', `#include <common>\n${SPOT_VERT_DECL}`)
+        .replace('#include <begin_vertex>', `#include <begin_vertex>\n${SPOT_VERT_APPLY}`);
+      shader.fragmentShader = shader.fragmentShader
+        .replace('#include <common>', `#include <common>\n${SPOT_DECL}`)
+        .replace('#include <color_fragment>', `#include <color_fragment>\n${SPOT_APPLY}`);
     }
     if (useWind) {
       shader.uniforms.uTime = uniforms.uTime;
@@ -429,6 +510,11 @@ export function wispMaterial(color: THREE.ColorRepresentation, opts: WispMateria
     uToonSteps: { value: 0 },
     uToonSoftness: { value: 0 },
     uToonFloor: { value: 0 },
+    uSpotColor: { value: new THREE.Color(0xffffff) },
+    uSpotStrength: { value: 0 },
+    uSpotScale: { value: 1 },
+    uSpotRadius: { value: 0.5 },
+    uSpotSeed: { value: 0 },
   };
   const handle: OakHandle = {
     uniforms: oakUniformSet,

@@ -369,16 +369,37 @@ kernel void oak_shape_probe(device OakShapeProbe *out [[buffer(0)]],
     out->uKeep0n = uint(agent.parked - uintArena) + agent.optionCount;
 }
 
+constant uint OAK_ENV_TABLE_STRIDE = 7u + OAK_POSE_LEN;
+
 kernel void oak_env_table_probe(device uint *out [[buffer(0)]],
                                 uint tid [[thread_position_in_grid]]) {
     if (tid != 0u) return;
     out[0] = OAK_ENV_COUNT;
     for (uint i = 0u; i < OAK_ENV_COUNT; ++i) {
-        out[1u + i * 4u + 0u] = OAK_ENV_SPECS[i].nameHash;
-        out[1u + i * 4u + 1u] = OAK_ENV_SPECS[i].obsDimNatural;
-        out[1u + i * 4u + 2u] = OAK_ENV_SPECS[i].actionKind;
-        out[1u + i * 4u + 3u] = OAK_ENV_SPECS[i].actionCount;
+        device uint *row = out + 1u + i * OAK_ENV_TABLE_STRIDE;
+        row[0] = OAK_ENV_SPECS[i].nameHash;
+        row[1] = OAK_ENV_SPECS[i].obsDimNatural;
+        row[2] = OAK_ENV_SPECS[i].actionKind;
+        row[3] = OAK_ENV_SPECS[i].actionCount;
+        row[4] = OAK_ENV_SPECS[i].gridW;
+        row[5] = OAK_ENV_SPECS[i].gridH;
+        row[6] = OAK_ENV_SPECS[i].controlHz;
+        for (uint s = 0u; s < OAK_POSE_LEN; ++s) row[7u + s] = OAK_ENV_SPECS[i].slots[s];
     }
+}
+
+kernel void oak_env_geometry_probe(device uint *out [[buffer(0)]],
+                                   device const uint *laneEnvKinds [[buffer(1)]],
+                                   device const uint *laneSeeds [[buffer(2)]],
+                                   constant uint &laneCount [[buffer(3)]],
+                                   uint tid [[thread_position_in_grid]]) {
+    if (tid >= laneCount) return;
+    uint envKind = laneEnvKinds[tid];
+    uint words[10];
+    HalfCheetahState cheetah;
+    uint elapsed = 0u, resets = 0u;
+    env_reset(envKind, laneSeeds[tid], words, cheetah, elapsed, resets);
+    env_geometry(envKind, words, out + tid * OAK_ENV_GEOMETRY_WORDS);
 }
 inline device uint *activeFeatures(Agent agent, uint slot) { return agent.activeFeature + slot * OAK_ACT; }
 

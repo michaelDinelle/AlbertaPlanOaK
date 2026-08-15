@@ -37,7 +37,6 @@ export const manifest: SceneManifest = {
       .lerp(new THREE.Color(TOKENS.palettes.dusk.skyTop), 0.55)
       .getHex(),
   },
-  budget: { drawCalls: 72, triangles: 220000 },
 };
 
 export default manifest;
