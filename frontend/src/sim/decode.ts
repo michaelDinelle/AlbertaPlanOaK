@@ -1,7 +1,7 @@
 import { ENVS, isEnvId } from '@shared/envs';
 import { NO_EVENTS } from './events';
 import { RECORD_FLOATS } from './record';
-import type { DecodedRecording, EnvDecoder, EnvFrame, RawRecording, SimEvent } from './types';
+import type { EnvDecoder, EnvFrame, RawRecording, SimEvent } from './types';
 
 export { NO_EVENTS };
 
@@ -39,43 +39,14 @@ function checkIds<S, St>(raw: RawRecording, decoder: EnvDecoder<S, St>): void {
   }
 }
 
-export function decodeRecording<S, St>(
-  raw: RawRecording,
-  decoder: EnvDecoder<S, St>,
-): DecodedRecording<S> {
-  checkIds(raw, decoder);
-  const info = ENVS[raw.envId as keyof typeof ENVS];
-  const st = decoder.initStatic(raw.seed);
-  const geometry = decoder.geometry(st, raw.seed);
-
-  const frames: EnvFrame<S>[] = new Array<EnvFrame<S>>(raw.steps + 1);
-  const events: SimEvent[][] = new Array<SimEvent[]>(raw.steps + 1);
-  const init = decoder.initFrame(raw.seed, st);
-  frames[0] = init;
-  events[0] = NO_EVENTS;
-
-  let prev = init;
-  for (let i = 0; i < raw.steps; i++) {
-    const row = raw.data.subarray(i * RECORD_FLOATS, (i + 1) * RECORD_FLOATS);
-    checkRow(row, i);
-    const frame = decoder.decodeFrame(i, row, st, prev);
-    frames[i + 1] = frame;
-    events[i + 1] = decoder.deriveEvents(prev, frame, st);
-    prev = frame;
-  }
-
-  return {
-    envId: raw.envId,
-    seed: raw.seed,
-    controlHz: info.controlHz,
-    discretePose: info.discretePose,
-    geometry,
-    frames,
-    events,
-  };
-}
-
 export const LENS_BLOCK = 4096;
+
+export interface EventStream {
+  steps: Int32Array;
+  kinds: Uint16Array;
+  types: readonly SimEvent['type'][];
+  count: number;
+}
 
 export interface RecordingLens<S = unknown> {
   envId: RawRecording['envId'];
@@ -84,10 +55,9 @@ export interface RecordingLens<S = unknown> {
   discretePose: boolean;
   geometry: ReturnType<EnvDecoder<S, never>['geometry']>;
   readonly frameCount: number;
-  readonly steps: number;
   frameAt(i: number): EnvFrame<S>;
-  eventsAt(i: number): SimEvent[];
-  eventEntries(): IterableIterator<[number, SimEvent[]]>;
+  eventsAt(i: number): readonly SimEvent[];
+  readonly events: EventStream;
   extend(): boolean;
 }
 
@@ -101,8 +71,10 @@ export function lensRecording<S, St>(
   const geometry = decoder.geometry(st, raw.seed);
   const init = decoder.initFrame(raw.seed, st);
 
-  const eventsMap = new Map<number, SimEvent[]>();
-  const eventList: [number, SimEvent[]][] = [];
+  let eventSteps = new Int32Array(1024);
+  let eventKinds = new Uint16Array(1024);
+  let eventCount = 0;
+  const typeIds = new Map<SimEvent['type'], number>();
   const checkpoints: EnvFrame<S>[] = [];
   let processed = 0;
   let prev = init;
@@ -115,39 +87,57 @@ export function lensRecording<S, St>(
       checkRow(row, processed);
       const frame = decoder.decodeFrame(processed, row, st, prev);
       const events = decoder.deriveEvents(prev, frame, st);
-      if (events !== NO_EVENTS && events.length > 0) {
-        eventsMap.set(processed + 1, events);
-        eventList.push([processed + 1, events]);
+      for (const event of events) {
+        if (eventCount === eventSteps.length) {
+          const steps = new Int32Array(eventCount * 2);
+          const kinds = new Uint16Array(eventCount * 2);
+          steps.set(eventSteps);
+          kinds.set(eventKinds);
+          eventSteps = steps;
+          eventKinds = kinds;
+        }
+        let id = typeIds.get(event.type);
+        if (id === undefined) {
+          id = typeIds.size;
+          typeIds.set(event.type, id);
+        }
+        eventSteps[eventCount] = processed;
+        eventKinds[eventCount] = id;
+        eventCount += 1;
       }
       prev = frame;
     }
   };
   advance();
 
-  const cache = new Map<number, { count: number; frames: EnvFrame<S>[] }>();
-  const decodeBlock = (b: number): EnvFrame<S>[] => {
+  type Block = { count: number; frames: EnvFrame<S>[]; events: SimEvent[][] };
+  const cache = new Map<number, Block>();
+  const decodeBlock = (b: number): Block => {
     const start = b * LENS_BLOCK;
     const count = Math.min(LENS_BLOCK, processed - start);
     const hit = cache.get(b);
-    if (hit !== undefined && hit.count === count) return hit.frames;
+    if (hit !== undefined && hit.count === count) return hit;
     const ck = checkpoints[b];
     if (ck === undefined) throw new DecodeError(`lens block ${b} out of range`);
     const frames: EnvFrame<S>[] = new Array<EnvFrame<S>>(count);
+    const events: SimEvent[][] = new Array<SimEvent[]>(count);
     let p = ck;
     for (let k = 0; k < count; k++) {
       const i = start + k;
       const row = raw.data.subarray(i * RECORD_FLOATS, (i + 1) * RECORD_FLOATS);
-      p = decoder.decodeFrame(i, row, st, p);
+      const next = decoder.decodeFrame(i, row, st, p);
+      events[k] = decoder.deriveEvents(p, next, st) as SimEvent[];
+      p = next;
       frames[k] = p;
     }
-    cache.set(b, { count, frames });
+    cache.set(b, { count, frames, events });
     if (cache.size > 3) {
       for (const key of cache.keys()) {
         if (Math.abs(key - b) > 1) cache.delete(key);
         if (cache.size <= 3) break;
       }
     }
-    return frames;
+    return cache.get(b) as Block;
   };
 
   const frameAt = (i: number): EnvFrame<S> => {
@@ -155,10 +145,17 @@ export function lensRecording<S, St>(
     if (clamped === 0) return init;
     const row = clamped - 1;
     const b = Math.floor(row / LENS_BLOCK);
-    const block = decodeBlock(b);
-    const frame = block[row - b * LENS_BLOCK];
+    const frame = decodeBlock(b).frames[row - b * LENS_BLOCK];
     if (frame === undefined) throw new DecodeError(`lens frame ${clamped} missing`);
     return frame;
+  };
+
+  const eventsAt = (i: number): readonly SimEvent[] => {
+    const clamped = Math.floor(i);
+    if (clamped <= 0 || clamped > processed) return NO_EVENTS;
+    const row = clamped - 1;
+    const b = Math.floor(row / LENS_BLOCK);
+    return decodeBlock(b).events[row - b * LENS_BLOCK] ?? NO_EVENTS;
   };
 
   return {
@@ -170,29 +167,15 @@ export function lensRecording<S, St>(
     get frameCount() {
       return processed + 1;
     },
-    get steps() {
-      return processed;
-    },
     frameAt,
-    eventsAt: (i) => eventsMap.get(Math.floor(i)) ?? NO_EVENTS,
-    eventEntries: () => eventList.values(),
+    eventsAt,
+    get events() {
+      return { steps: eventSteps, kinds: eventKinds, types: [...typeIds.keys()], count: eventCount };
+    },
     extend() {
       const before = processed;
       advance();
       return processed > before;
     },
   };
-}
-
-export function eventTimeline<S>(
-  dec: DecodedRecording<S>,
-): { frame: number; step: number; event: SimEvent }[] {
-  const out: { frame: number; step: number; event: SimEvent }[] = [];
-  for (let i = 0; i < dec.events.length; i++) {
-    const evs = dec.events[i];
-    if (!evs || evs.length === 0) continue;
-    const step = dec.frames[i]?.step ?? i - 1;
-    for (const event of evs) out.push({ frame: i, step, event });
-  }
-  return out;
 }

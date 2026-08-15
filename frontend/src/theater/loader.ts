@@ -3,7 +3,8 @@ import { ENVS, type EnvId } from '@shared/envs';
 import type { RecordingRef } from '@shared/types';
 import type { PlaybackSource } from '@kit/playback';
 import { recordingUrl } from '../api';
-import { NO_EVENTS, lensRecording, type RecordingLens } from '@sim/decode';
+import { lensRecording, type RecordingLens } from '@sim/decode';
+import { NO_EVENTS } from '@sim/events';
 import {
   FILE_HEADER_BYTES,
   RECORD_FLOATS,
@@ -38,29 +39,8 @@ export function recordingRef(
   return null;
 }
 
-export const TICK_KINDS = ['goal', 'done', 'key', 'door', 'cue'] as const;
+export const TICK_KINDS = ['goal', 'door', 'key', 'cue', 'done'] as const;
 export type TickKind = (typeof TICK_KINDS)[number];
-
-const TICK_RANK: Record<TickKind, number> = { goal: 0, door: 1, key: 2, cue: 3, done: 4 };
-
-export function tickKindOf(event: SimEvent): TickKind | null {
-  switch (event.type) {
-    case 'goal':
-    case 'done':
-    case 'key':
-    case 'door':
-    case 'cue':
-      return event.type;
-    default:
-      return null;
-  }
-}
-
-export interface TimelineEntry {
-  frame: number;
-  step: number;
-  event: SimEvent;
-}
 
 export interface TimelineTick {
   kind: TickKind;
@@ -71,65 +51,54 @@ export interface TimelineTick {
   label: string;
 }
 
-export interface TimelineTickOptions {
-  maxTicks?: number;
-}
-
-export function timelineTicks(
-  timeline: readonly TimelineEntry[],
-  frameCount: number,
-  options: TimelineTickOptions = {},
+export function ticksFromLens(
+  lens: Pick<RecordingLens, 'events' | 'frameCount'>,
+  buckets = 180,
 ): TimelineTick[] {
-  const buckets = Math.max(1, Math.floor(options.maxTicks ?? 180));
-  const last = Math.max(1, frameCount - 1);
-  const byBucket = new Map<number, { frame: number; step: number; counts: Map<TickKind, number> }>();
+  const last = Math.max(1, lens.frameCount - 1);
+  const ranks = TICK_KINDS.length;
+  const first = new Int32Array(buckets).fill(-1);
+  const tally = new Int32Array(buckets * ranks);
+  const { steps, kinds, count } = lens.events;
+  const rankOf = lens.events.types.map((type) => TICK_KINDS.indexOf(type as TickKind));
 
-  for (const entry of timeline) {
-    const kind = tickKindOf(entry.event);
-    if (!kind) continue;
-    const position = entry.frame <= 0 ? 0 : entry.frame >= last ? 1 : entry.frame / last;
+  for (let i = 0; i < count; i++) {
+    const rank = rankOf[kinds[i] ?? 0] ?? -1;
+    if (rank < 0) continue;
+    const frame = (steps[i] ?? 0) + 1;
+    const position = frame >= last ? 1 : frame / last;
     const slot = Math.min(buckets - 1, Math.max(0, Math.round(position * (buckets - 1))));
-    let bucket = byBucket.get(slot);
-    if (!bucket) {
-      bucket = { frame: entry.frame, step: entry.step, counts: new Map<TickKind, number>() };
-      byBucket.set(slot, bucket);
-    } else if (entry.frame < bucket.frame) {
-      bucket.frame = entry.frame;
-      bucket.step = entry.step;
-    }
-    bucket.counts.set(kind, (bucket.counts.get(kind) ?? 0) + 1);
+    if (first[slot] === -1) first[slot] = frame;
+    const cell = slot * ranks + rank;
+    tally[cell] = (tally[cell] ?? 0) + 1;
   }
 
   const out: TimelineTick[] = [];
-  for (const [slot, bucket] of byBucket) {
-    const kinds = [...bucket.counts.entries()].sort((a, b) => TICK_RANK[a[0]] - TICK_RANK[b[0]]);
-    const head = kinds[0];
-    if (!head) continue;
+  for (let slot = 0; slot < buckets; slot++) {
+    const frame = first[slot] ?? -1;
+    if (frame < 0) continue;
+    const parts: string[] = [];
     let count = 0;
-    for (const [, n] of kinds) count += n;
-    const mix = kinds.map(([kind, n]) => (n > 1 ? `${n}× ${kind}` : kind)).join(' · ');
+    let head: TickKind | null = null;
+    for (let r = 0; r < ranks; r++) {
+      const n = tally[slot * ranks + r] ?? 0;
+      if (n === 0) continue;
+      const kind = TICK_KINDS[r] as TickKind;
+      if (head === null) head = kind;
+      count += n;
+      parts.push(n > 1 ? `${n}× ${kind}` : kind);
+    }
+    if (head === null) continue;
     out.push({
-      kind: head[0],
-      frame: bucket.frame,
-      step: bucket.step,
+      kind: head,
+      frame,
+      step: frame - 1,
       position: buckets === 1 ? 0 : slot / (buckets - 1),
       count,
-      label: `${mix} — step ${bucket.step}`,
+      label: `${parts.join(' · ')} — step ${frame - 1}`,
     });
   }
-  out.sort((a, b) => a.frame - b.frame);
   return out;
-}
-
-export function ticksFromLens(
-  lens: Pick<RecordingLens, 'eventEntries' | 'frameCount'>,
-  options?: TimelineTickOptions,
-): TimelineTick[] {
-  const timeline: { frame: number; step: number; event: SimEvent }[] = [];
-  for (const [frame, events] of lens.eventEntries()) {
-    for (const event of events) timeline.push({ frame, step: frame - 1, event });
-  }
-  return timelineTicks(timeline, lens.frameCount, options);
 }
 
 export function seekTargetForTick(tick: Pick<TimelineTick, 'frame'>, lead = 3): number {
@@ -181,7 +150,6 @@ export function makeInitialSource(envId: EnvId, seed: number): PlaybackSource {
     complete: false,
     frameAt: () => init as EnvFrame<unknown>,
     eventsAt: () => NO_EVENTS,
-    eventEntries: () => new Map<number, SimEvent[]>().entries(),
   };
 }
 
@@ -231,8 +199,6 @@ export function loadHero(options: HeroOptions): HeroHandle {
     },
     frameAt: (i) => (lens !== null ? lens.frameAt(i) : initFrame),
     eventsAt: (i) => (lens !== null ? lens.eventsAt(i) : NO_EVENTS),
-    eventEntries: () =>
-      lens !== null ? lens.eventEntries() : new Map<number, SimEvent[]>().entries(),
   };
 
   const grow = (): void => {

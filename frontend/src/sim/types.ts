@@ -68,15 +68,6 @@ export interface EnvDecoder<S = unknown, St = unknown> {
 }
 
 
-export interface DecodedRecording<S = unknown> {
-  envId: EnvId;
-  seed: number;
-  controlHz: number;
-  discretePose: boolean;
-  geometry: EnvGeometry;
-  frames: EnvFrame<S>[];
-  events: SimEvent[][];
-}
 
 export interface RawRecording {
   envId: EnvId;
