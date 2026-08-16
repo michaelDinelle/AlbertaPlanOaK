@@ -11,7 +11,6 @@ inline float wrapPi(float angle) {
 }
 
 constant float ACROBOT_DT = 0.2f;
-constant float ACROBOT_G = 9.8f;
 constant float ACROBOT_OMEGA1_MAX = 12.566371f;
 constant float ACROBOT_OMEGA2_MAX = 28.274334f;
 

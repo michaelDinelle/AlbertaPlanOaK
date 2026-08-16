@@ -41,7 +41,6 @@ constant uint OAK_SLOT_Q       = 16u;
 
 constant uint OAK_POSE_LEN = 9u;
 constant uint OAK_RECORD_FLOATS = 1u + OAK_POSE_LEN;
-constant uint OAK_ENV_GEOMETRY_WORDS = 19u;
 
 struct OakEnvSpec {
     uint nameHash; uint obsDimNatural; uint actionKind; uint actionCount;
@@ -98,51 +97,6 @@ constant OakEnvSpec OAK_ENV_SPECS[OAK_ENV_COUNT] = {
       { OAK_SLOT_X, OAK_SLOT_NONE, OAK_SLOT_CUE, OAK_SLOT_NONE, OAK_SLOT_NONE,
         OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE } },
 };
-
-inline bool env_isWall(uint envKind, thread const uint *words, int x, int y) {
-    if (envKind == OAK_ENV_FOURROOMS) return fourRooms_isWall(x, y);
-    if (envKind == OAK_ENV_KEYCORRIDOR) return keyCorridor_isWall(x, y);
-    if (envKind == OAK_ENV_MULTIKEYCORRIDOR) return multiKeyCorridor_isWall(x, y);
-    if (envKind == OAK_ENV_PROCEDURALMAZE) {
-        return proceduralMaze_isWall(words[6], words[7], words[8], x, y);
-    }
-    if (envKind == OAK_ENV_HIGHDIMMAZE) return highDimMaze_isWall(x, y);
-    if (envKind == OAK_ENV_POMAZE) return poMaze_isWall(x, y);
-    return false;
-}
-
-inline uint env_actionMaskBit(uint envKind, thread const uint *words, uint x, uint y) {
-    if (envKind == OAK_ENV_DEEPSEA) {
-        uint i = y * 8u + x;
-        return (i < 32u) ? ((words[3] >> i) & 1u) : ((words[4] >> (i - 32u)) & 1u);
-    }
-    if (envKind == OAK_ENV_LARGEDEEPSEA) {
-        uint i = y * 16u + x;
-        return (words[1u + (i >> 5u)] >> (i & 31u)) & 1u;
-    }
-    return 0u;
-}
-
-inline void env_geometry(uint envKind, thread const uint *words, device uint *out) {
-    uint w = OAK_ENV_SPECS[envKind].gridW;
-    uint h = OAK_ENV_SPECS[envKind].gridH;
-    uint cells = w * h;
-    uint maskWords = (OAK_ENV_GEOMETRY_WORDS - 3u) / 2u;
-    out[0] = w;
-    out[1] = h;
-    out[2] = maskWords;
-    for (uint k = 0u; k < 2u * maskWords; ++k) out[3u + k] = 0u;
-    for (uint i = 0u; i < cells; ++i) {
-        uint x = i % w;
-        uint y = i / w;
-        if (env_isWall(envKind, words, int(x), int(y))) {
-            out[3u + (i >> 5u)] |= 1u << (i & 31u);
-        }
-        if (env_actionMaskBit(envKind, words, x, y) != 0u) {
-            out[3u + maskWords + (i >> 5u)] |= 1u << (i & 31u);
-        }
-    }
-}
 
 inline void env_reset(uint envKind, uint seed,
                       thread uint *words, thread HalfCheetahState &cheetah,
