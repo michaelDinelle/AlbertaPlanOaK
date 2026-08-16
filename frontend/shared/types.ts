@@ -31,7 +31,7 @@ export interface EnvResult {
   rewardRateIQM?: number;
   positiveFraction?: number;
   divergence?: { diverged?: number };
-  solvedSeeds?: number;
+  learnedSeeds?: number;
   retentionFraction?: number | null;
 }
 
