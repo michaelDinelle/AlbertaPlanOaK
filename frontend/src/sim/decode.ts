@@ -93,9 +93,11 @@ export function lensRecording<St>(
   };
 
   const advance = (): void => {
-    for (; processed < raw.steps; processed++) {
-      checkRow(raw.data.subarray(processed * RECORD_FLOATS, (processed + 1) * RECORD_FLOATS), processed);
-      for (const event of eventsAt(processed + 1)) {
+    while (processed < raw.steps) {
+      const row = processed;
+      checkRow(raw.data.subarray(row * RECORD_FLOATS, (row + 1) * RECORD_FLOATS), row);
+      processed = row + 1;
+      for (const event of eventsAt(processed)) {
         if (eventCount === eventSteps.length) {
           const steps = new Int32Array(eventCount * 2);
           const kinds = new Uint16Array(eventCount * 2);
@@ -109,7 +111,7 @@ export function lensRecording<St>(
           id = typeIds.size;
           typeIds.set(event.type, id);
         }
-        eventSteps[eventCount] = processed;
+        eventSteps[eventCount] = row;
         eventKinds[eventCount] = id;
         eventCount += 1;
       }
