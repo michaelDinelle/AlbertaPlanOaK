@@ -1,4 +1,4 @@
-import { TERRACE_DESCENT, terraceShelves } from '@kit/terrace';
+import { TERRACE_DESCENT, cellToTerraceWorld, terraceShelves } from '@kit/terrace';
 
 import * as THREE from 'three';
 import {
@@ -10,7 +10,7 @@ import {
   type Vec3Tuple,
 } from '@kit/grid';
 import { applyFog, makeLightRig, type LightRig } from '@kit/lighting';
-import { oakMaterial, oakUniforms, type OakMaterial } from '@kit/materials';
+import { oakMaterial, oakUniforms } from '@kit/materials';
 import { makeAmbientParticles, makeMistPlanes, type AmbientParticlesHandle } from '@kit/particles';
 import { hash2f } from '@kit/rng';
 import { skyFromPalette, type SkyHandle } from '@kit/sky';
@@ -137,10 +137,6 @@ export function resolveMask(grid: GridGeometry, seed: number): Uint8Array {
 
 export function isShelfCell(x: number, y: number): boolean {
   return x <= y;
-}
-
-export function shelfCellCount(n: number): number {
-  return (n * (n + 1)) / 2;
 }
 
 
@@ -495,82 +491,54 @@ export function buildJellySwarm(opts: JellySwarmOptions): JellySwarmHandle {
 
 
 export const CORAL_LEAN = 0.32;
+export const CORAL_HEIGHT = 0.52;
 
 const LEAN_AXIS = new THREE.Vector3(0, 0, 1);
 
 export interface CoralFieldHandle {
   mesh: THREE.InstancedMesh;
-  material: OakMaterial;
-  count: number;
   setTime(t: number): void;
   dispose(): void;
 }
 
-export function makeCoralGeometry(detail: number): THREE.BufferGeometry {
-  const radial = Math.max(3, Math.round(5 * detail));
-  const parts: THREE.BufferGeometry[] = [];
+function coralWhip(
+  height: number,
+  base: number,
+  tip: number,
+  x: number,
+  z: number,
+  tilt: number,
+  yaw: number,
+): THREE.BufferGeometry {
+  const whip = new THREE.CylinderGeometry(tip, base, height, 5, 1, true);
+  whip.translate(0, height / 2, 0);
+  whip.rotateZ(tilt);
+  whip.rotateY(yaw);
+  whip.translate(x, 0.02, z);
+  return whip;
+}
 
-  const whip = (
-    height: number,
-    base: number,
-    tip: number,
-    tx: number,
-    tz: number,
-    tilt: number,
-    yaw: number,
-  ): THREE.BufferGeometry => {
-    const g = new THREE.CylinderGeometry(tip, base, height, radial, 1, true);
-    g.translate(0, height / 2, 0);
-    g.rotateZ(tilt);
-    g.rotateY(yaw);
-    g.translate(tx, 0.02, tz);
-    return g;
-  };
-
-  parts.push(whip(0.52, 0.022, 0.005, 0, 0, 0, 0));
-  parts.push(whip(0.33, 0.016, 0.004, 0.045, 0.02, 0.42, 0.7));
-  parts.push(whip(0.26, 0.014, 0.004, -0.04, -0.03, -0.5, -0.4));
-  const holdfast = new THREE.CylinderGeometry(0.045, 0.075, 0.05, Math.max(4, radial + 1), 1);
+export function makeCoralGeometry(): THREE.BufferGeometry {
+  const holdfast = new THREE.CylinderGeometry(0.045, 0.075, 0.05, 6, 1);
   holdfast.translate(0, 0.025, 0);
-  parts.push(holdfast);
+  const parts: THREE.BufferGeometry[] = [
+    coralWhip(CORAL_HEIGHT, 0.022, 0.005, 0, 0, 0, 0),
+    coralWhip(0.33, 0.016, 0.004, 0.045, 0.02, 0.42, 0.7),
+    coralWhip(0.26, 0.014, 0.004, -0.04, -0.03, -0.5, -0.4),
+    holdfast,
+  ];
 
-  let total = 0;
-  for (const p of parts) total += p.index ? p.index.count : p.getAttribute('position').count;
-  const positions = new Float32Array(total * 3);
-  const normals = new Float32Array(total * 3);
-  const colors = new Float32Array(total * 3);
-  let o = 0;
-  for (const geo of parts) {
-    const pos = geo.getAttribute('position');
-    const nor = geo.getAttribute('normal');
-    const index = geo.index;
-    const n = index ? index.count : pos.count;
-    for (let i = 0; i < n; i++) {
-      const vi = index ? index.getX(i) : i;
-      const y = pos.getY(vi);
-      positions[o * 3] = pos.getX(vi);
-      positions[o * 3 + 1] = y;
-      positions[o * 3 + 2] = pos.getZ(vi);
-      if (nor) {
-        normals[o * 3] = nor.getX(vi);
-        normals[o * 3 + 1] = nor.getY(vi);
-        normals[o * 3 + 2] = nor.getZ(vi);
-      }
-      const k = 0.45 + 1.25 * clamp01(y / 0.52);
-      colors[o * 3] = k;
-      colors[o * 3 + 1] = k;
-      colors[o * 3 + 2] = k;
-      o++;
-    }
+  const geometry = mergeColoredParts(
+    parts.map((part) => ({ geometry: part, color: TOKEN_WHITE })),
+    'abyssCoral',
+  );
+  const position = geometry.getAttribute('position');
+  const color = geometry.getAttribute('color');
+  for (let i = 0; i < position.count; i++) {
+    const k = 0.45 + 1.25 * clamp01(position.getY(i) / CORAL_HEIGHT);
+    color.setXYZ(i, k, k, k);
   }
-  for (const p of parts) p.dispose();
-  const g = new THREE.BufferGeometry();
-  g.setAttribute('position', new THREE.BufferAttribute(positions, 3));
-  g.setAttribute('normal', new THREE.BufferAttribute(normals, 3));
-  g.setAttribute('color', new THREE.BufferAttribute(colors, 3));
-  g.computeBoundingSphere();
-  g.name = 'abyssCoral';
-  return g;
+  return geometry;
 }
 
 export interface CoralFieldOptions {
@@ -583,9 +551,7 @@ export interface CoralFieldOptions {
 
 export function buildCoralField(opts: CoralFieldOptions): CoralFieldHandle {
   const { grid, mask, skin } = opts;
-  const detail = 1;
-  const geometry = makeCoralGeometry(detail);
-  const capacity = shelfCellCount(Math.min(grid.w, grid.h));
+  const geometry = makeCoralGeometry();
 
   const material = oakMaterial({
     color: skin.coral,
@@ -602,55 +568,55 @@ export function buildCoralField(opts: CoralFieldOptions): CoralFieldHandle {
     name: 'abyssCoralMaterial',
   });
 
-  const mesh = new THREE.InstancedMesh(geometry, material, Math.max(1, capacity));
+  let capacity = 0;
+  for (let y = 0; y < grid.h; y++) {
+    for (let x = 0; x < grid.w; x++) if (isShelfCell(x, y)) capacity++;
+  }
+
+  const mesh = new THREE.InstancedMesh(geometry, material, capacity);
   mesh.name = opts.name ?? 'abyssCoral';
   mesh.castShadow = false;
   mesh.receiveShadow = true;
-  mesh.instanceColor = new THREE.InstancedBufferAttribute(new Float32Array(Math.max(1, capacity) * 3), 3);
+  mesh.instanceColor = new THREE.InstancedBufferAttribute(new Float32Array(capacity * 3), 3);
 
   const matrix = new THREE.Matrix4();
   const position = new THREE.Vector3();
-  const quaternion = new THREE.Quaternion();
+  const lean = new THREE.Quaternion();
   const scale = new THREE.Vector3();
-  const world: Vec3Tuple = [0, 0, 0];
+  const shelf: Vec3Tuple = [0, 0, 0];
   const tint = new THREE.Color();
   const biolume = new THREE.Color();
-  const rowColor = new THREE.Color();
 
   let n = 0;
   for (let y = 0; y < grid.h; y++) {
-    shelfTint(y, grid.h, skin, rowColor);
+    const rowColor = shelfTint(y, grid.h, skin).multiplyScalar(0.8);
+    const rowGlow = 0.06 + 0.2 * clamp01(y / (grid.h - 1));
     for (let x = 0; x < grid.w; x++) {
       if (!isShelfCell(x, y)) continue;
-      const bit = mask[y * grid.w + x] ?? 0;
       const h = hash2f(x, y, opts.seed ^ 0x0c02a1);
       const h2 = hash2f(x, y, opts.seed ^ 0x5eaf00);
-      cellToWorld(x, y, grid, world);
-      const ox = (0.24 + 0.12 * h) * (h2 > 0.5 ? 1 : -1);
-      const oz = (0.22 + 0.13 * h2) * (h > 0.5 ? 1 : -1);
-      position.set(world[0] + ox, 0, world[2] + oz);
-      const dir = bit !== 0 ? 1 : -1;
-      quaternion.setFromAxisAngle(LEAN_AXIS, -dir * CORAL_LEAN * (0.8 + 0.4 * h));
+      cellToTerraceWorld(x, y, grid, shelf);
+      position.set(
+        shelf[0] + (0.24 + 0.12 * h) * (h2 > 0.5 ? 1 : -1),
+        shelf[1],
+        shelf[2] + (0.22 + 0.13 * h2) * (h > 0.5 ? 1 : -1),
+      );
+      const current = (mask[y * grid.w + x] ?? 0) !== 0 ? 1 : -1;
+      lean.setFromAxisAngle(LEAN_AXIS, -current * CORAL_LEAN * (0.8 + 0.4 * h));
       const s = 0.7 + 0.55 * h2;
       scale.set(s, s * (0.85 + 0.4 * h), s);
-      matrix.compose(position, quaternion, scale);
-      mesh.setMatrixAt(n, matrix);
-      tint.copy(rowColor).multiplyScalar(0.8);
-      biolume.copy(skin.coralTip).multiplyScalar(0.06 + 0.2 * clamp01(y / (grid.h - 1)));
-      tint.add(biolume);
-      mesh.setColorAt(n, tint);
+      mesh.setMatrixAt(n, matrix.compose(position, lean, scale));
+      biolume.copy(skin.coralTip).multiplyScalar(rowGlow);
+      mesh.setColorAt(n, tint.copy(rowColor).add(biolume));
       n++;
     }
   }
-  mesh.count = n;
   mesh.instanceMatrix.needsUpdate = true;
   if (mesh.instanceColor) mesh.instanceColor.needsUpdate = true;
   mesh.computeBoundingSphere();
 
   return {
     mesh,
-    material,
-    count: n,
     setTime(t) {
       oakUniforms(material)?.setTime(t);
     },
