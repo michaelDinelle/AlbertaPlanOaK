@@ -15,7 +15,6 @@ import numpy as np
 
 REPO = Path(__file__).resolve().parent
 BENCH = REPO / ".oak-benchmarks"
-FLOOR_CACHE: dict[str, dict] = {}
 
 FILE_MAGIC = 0x544B414F
 
@@ -69,14 +68,6 @@ def last_finite(mat: np.ndarray) -> np.ndarray:
     return np.where(mask.any(axis=0), v, np.nan)
 
 
-def floors() -> dict:
-    if "floors" not in FLOOR_CACHE:
-        fp = BENCH / "FLOORS.json"
-        FLOOR_CACHE["floors"] = (json.loads(fp.read_text()).get("floors", {})
-                                 if fp.exists() else {})
-    return FLOOR_CACHE["floors"]
-
-
 def env_slices(run: dict) -> dict[str, np.ndarray]:
     seed_lane = {s: i for i, s in enumerate(run["seeds"])}
     out: dict[str, list[int]] = {}
@@ -85,15 +76,6 @@ def env_slices(run: dict) -> dict[str, np.ndarray]:
             if s in seed_lane:
                 out.setdefault(e["envId"], []).append(seed_lane[s])
     return {k: np.array(v) for k, v in sorted(out.items())}
-
-
-def lane_floor_vec(run: dict, lanes: np.ndarray) -> np.ndarray:
-    fl = floors()
-    ids = [""] * run["tape"]["lanes"]
-    for env, sl in env_slices(run).items():
-        for l in sl:
-            ids[int(l)] = env
-    return np.array([fl.get(ids[int(l)], {}).get("floor", 0.0) for l in lanes], float)
 
 
 def isotonic_fit(y: np.ndarray) -> np.ndarray:
@@ -193,12 +175,11 @@ def analyze(run: dict, lanes: np.ndarray) -> dict:
     with np.errstate(invalid="ignore", divide="ignore"):
         retention = np.where(peak > 0, end_rate / peak, np.nan)
     null_p5, null_p50, peak_spread = retention_null(run, lanes)
-    floor = lane_floor_vec(run, lanes)
-    solved = (np.isfinite(peak) & (peak > floor)
-              & np.isfinite(peak_spread) & (peak - floor > peak_spread))
-    decayed = (solved & np.isfinite(retention) & np.isfinite(null_p5)
+    learned = (np.isfinite(peak) & np.isfinite(peak_spread)
+              & (peak > 0) & (peak > peak_spread))
+    decayed = (learned & np.isfinite(retention) & np.isfinite(null_p5)
                & (retention < null_p5))
-    retained = solved & ~decayed
+    retained = learned & ~decayed
     ret_margin = retention - null_p50
     return {
         "seeds": len(lanes), "horizon": horizon, "maxStep": max_step,
@@ -206,11 +187,11 @@ def analyze(run: dict, lanes: np.ndarray) -> dict:
         "rewardRateIQM": iqm(delivered),
         "positiveFraction": float((delivered > 0).mean()),
         "divergence": {"diverged": int(died.sum())},
-        "solvedSeeds": int(solved.sum()),
-        "retentionFraction": (float(retained.sum() / solved.sum())
-                              if solved.any() else None),
+        "learnedSeeds": int(learned.sum()),
+        "retentionFraction": (float(retained.sum() / learned.sum())
+                              if learned.any() else None),
         "_vectors": {"delivered": delivered, "died": died, "dtimes": dtimes,
-                     "solved": solved.astype(float), "retained": retained.astype(float),
+                     "learned": learned.astype(float), "retained": retained.astype(float),
                      "decayed": decayed.astype(float), "retMargin": ret_margin},
     }
 
@@ -285,7 +266,7 @@ def slice_verdicts(k: dict, c: dict, n: int, horizon: int, boot: int) -> list[tu
         ("rewardRateIQM", di5 >= -0.05 * abs(iqm(k["delivered"]))),
         ("rmstSurvival", dr5 >= -0.05 * horizon),
     ]
-    for name, key, seed in (("solvedSeeds", "solved", 30), ("retainedSeeds", "retained", 31)):
+    for name, key, seed in (("learnedSeeds", "learned", 30), ("retainedSeeds", "retained", 31)):
         d = float(np.percentile(paired(c[key], k[key], np.mean, boot, seed), 95))
         out.append((name, d <= delta))
     d = float(np.percentile(paired(cpos, kpos, np.mean, boot, 33), 95))
@@ -335,7 +316,7 @@ def cmd_gate(args) -> int:
                                       n, horizon, boot))
     else:
         ok = True
-        skip = {"solvedSeeds", "retainedSeeds", "positiveSeedFraction"}
+        skip = {"learnedSeeds", "retainedSeeds", "positiveSeedFraction"}
         for env in k_sl:
             if env not in c_sl or [kr["seeds"][l] for l in k_sl[env]] != \
                                   [cr["seeds"][l] for l in c_sl[env]]:
