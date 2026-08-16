@@ -271,7 +271,7 @@ export interface PopulationFigures {
   positive: string;
   nonDiverged: string;
   retention: string;
-  solved: string;
+  learned: string;
   source: 'summary' | 'measured' | 'none';
 }
 
@@ -292,18 +292,18 @@ export function populationFigures(
     const dead = finite(slice.divergence?.diverged) ?? diverged;
     const positive = finite(slice.positiveFraction);
     const retention = finite(slice.retentionFraction);
-    const solved = finite(slice.solvedSeeds);
+    const learned = finite(slice.learnedSeeds);
     return {
       positive: positive === null ? '—' : formatPercent(positive, 0),
       nonDiverged: `${formatCount(seeds - dead)}/${formatCount(seeds)}`,
       retention: retention === null ? '—' : formatPercent(retention, 0),
-      solved: solved === null ? '—' : formatCount(solved),
+      learned: learned === null ? '—' : formatCount(learned),
       source: 'summary',
     };
   }
 
   if (rows.length === 0) {
-    return { positive: '—', nonDiverged: '—', retention: '—', solved: '—', source: 'none' };
+    return { positive: '—', nonDiverged: '—', retention: '—', learned: '—', source: 'none' };
   }
   return {
     positive: rates.length === 0
@@ -311,7 +311,7 @@ export function populationFigures(
       : formatPercent(rates.filter((v) => v > 0).length / rates.length, 0),
     nonDiverged: `${formatCount(rows.length - diverged)}/${formatCount(rows.length)}`,
     retention: formatPercent(retained / rows.length, 0),
-    solved: '—',
+    learned: '—',
     source: 'measured',
   };
 }
@@ -870,7 +870,7 @@ export const mount = (host: HTMLElement): WallHandle => {
       figure('seeds > 0', figures.positive, 'Seeds whose average reward rate is above zero'),
       figure('non-diverged', figures.nonDiverged, 'Seeds whose stream never went non-finite'),
       figure('retention', figures.retention, 'Seeds still holding at least half their peak reward rate'),
-      figure('solved', figures.solved, 'Seeds that crossed this environment’s solved threshold (fleet.py report)'),
+      figure('learned', figures.learned, 'Seeds whose best windowed reward rate cleared their own noise — a null built from that lane’s residuals, not a task-completion test (fleet.py report)'),
     );
     popNote.textContent = figures.source === 'summary'
       ? 'from summary.json — fleet.py report'
