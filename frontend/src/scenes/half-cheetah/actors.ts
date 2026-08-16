@@ -314,8 +314,8 @@ export function buildCheetah(opts: CheetahOptions): CheetahHandle {
       ear.rotateX(-s * 0.26);
       ear.translate(-0.187 * headR, 0.833 * headR, s * 0.48 * headR);
       featureParts.push({ geometry: ear, color: cBack });
-      const eye = new THREE.SphereGeometry(0.127 * headR, 7, 5);
-      eye.translate(0.587 * headR, 0.187 * headR, s * 0.587 * headR);
+      const eye = new THREE.SphereGeometry(0.19 * headR, 10, 8);
+      eye.translate(0.828 * headR, 0.096 * headR, s * 0.443 * headR);
       featureParts.push({ geometry: eye, color: cNose });
     }
   }
