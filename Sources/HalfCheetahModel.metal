@@ -138,7 +138,6 @@ constant float HC_QPOS0[9] = {
 };
 constant int HC_DOF_PARENT[9] = { -1, 0, 1, 2, 3, 4, 2, 6, 7 };
 constant int HC_GEOM_BODY[9] = { 0, 1, 1, 2, 3, 4, 5, 6, 7 };
-constant int HC_GEOM_TYPE[9] = { 0, 3, 3, 3, 3, 3, 3, 3, 3 };
 constant float HC_GEOM_POS[27] = {
     0.0f, 0.0f, 0.0f,
     0.0f, 0.0f, 0.0f,
