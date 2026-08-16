@@ -1947,19 +1947,16 @@ static inline void stepEnvironment(device float *params,
                 }
             }
         }
-        for (uint i = 0u; i < agent.observationCount && i < 17u; ++i) agent.observation[i] = obs[i];
+        for (uint i = 0u; i < agent.observationCount && i < 17u; ++i) {
+            agent.observation[i] = obs[i];
+            if (!isfinite(obs[i]) && lane->deathStep == OAK_DEATH_NONE) {
+                lane->deathStep = stepNum;
+                lane->deathDetector = OAK_DET_ENV_OBS;
+            }
+        }
         agent.reward[0] = reward;
     }
-    if (lane->deathStep == OAK_DEATH_NONE) {
-        uint obsCount = min(lane->envObservationCount, 17u);
-        bool obsBad = false;
-        for (uint i = 0u; i < obsCount; ++i) obsBad = obsBad || !isfinite(obs[i]);
-        if (obsBad) {
-            lane->deathStep = stepNum;
-            lane->deathDetector = OAK_DET_ENV_OBS;
-        }
-    }
-    if (ecfg.recordCapacity != 0u && lane->deathStep == OAK_DEATH_NONE) {
+    if (ecfg.recordCapacity != 0u) {
         int slot = recordSlot[gid];
         if (slot >= 0) {
             env_pose(envK, envWords, halfCheetah, ctrl, pose);
