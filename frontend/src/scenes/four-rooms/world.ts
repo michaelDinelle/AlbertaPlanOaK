@@ -32,6 +32,7 @@ import {
   type ExcludeFn,
   type VegetationHandle,
 } from '@kit/vegetation';
+import { makeWorld, type WorldCore } from '@kit/world';
 import {
   FOURROOMS_H,
   FOURROOMS_HALLWAYS,
@@ -194,8 +195,7 @@ export function makeMeadowHeight(seed: number): (x: number, z: number) => number
 }
 
 
-export interface WorldHandle {
-  group: THREE.Group;
+export interface WorldHandle extends WorldCore {
   sky: SkyHandle;
   rig: LightRig;
   terrain: TerrainHandle;
@@ -203,26 +203,13 @@ export interface WorldHandle {
   sundialRoot: THREE.Object3D;
   gateRoots: THREE.Object3D[];
   hallways: readonly GridCell[];
-  setTime(t: number): void;
-  setPixelRatio(dpr: number): void;
-  dispose(): void;
 }
 
-interface Disposable {
-  dispose(): void;
-}
-
-interface Timed {
-  setTime(t: number): void;
-}
 
 export function buildWorld(ctx: SceneContext, scene: THREE.Scene, grid: GridGeometry): WorldHandle {
   const palette: Palette = ctx.tokens.palettes.noon;
   const skin = courtyardSkin(palette, ctx.tokens);
-  const group = new THREE.Group();
-  group.name = 'fourSeasonsCourtyard';
-  const owned: Disposable[] = [];
-  const timed: Timed[] = [];
+  const w = makeWorld('fourSeasonsCourtyard');
 
   const sky = skyFromPalette(palette, 'noon', {
     sunDir: SUN_DIR,
@@ -234,9 +221,9 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene, grid: GridGeom
     bottomSpread: 0.5,
     radius: 340,
   });
-  group.add(sky.mesh);
-  owned.push(sky);
-  timed.push({ setTime: (t) => sky.setTime(t) });
+  w.add(sky.mesh);
+  w.own(sky);
+  w.time({ setTime: (t) => sky.setTime(t) });
 
   const rig = makeLightRig(palette, {
     sunDir: sky.sunDirection,
@@ -244,8 +231,8 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene, grid: GridGeom
     pointDistance: 6.5,
     sunDistanceScale: 2.2,
   });
-  group.add(rig.group);
-  owned.push(rig);
+  w.add(rig.group);
+  w.own(rig);
   rig.setShadowFocus({ x: 0, y: 0.35, z: 0 }, SHADOW_RADIUS);
 
   applyFog(scene, palette, FOG_EXTENT);
@@ -278,8 +265,8 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene, grid: GridGeom
     castShadow: false,
     name: 'courtyardMeadow',
   });
-  group.add(terrain.mesh);
-  owned.push(terrain);
+  w.add(terrain.mesh);
+  w.own(terrain);
 
   const white = palette.sun;
   const field = buildCellField(
@@ -310,9 +297,9 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene, grid: GridGeom
       name: 'courtyardCells',
     },
   );
-  group.add(field.group);
-  owned.push(field);
-  timed.push({ setTime: (t) => field.setTime(t) });
+  w.add(field.group);
+  w.own(field);
+  w.time({ setTime: (t) => field.setTime(t) });
 
   const stoneMaterial: OakMaterial = oakMaterial({
     vertexColors: true,
@@ -325,11 +312,11 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene, grid: GridGeom
     toonFloor: 0.24,
     name: 'courtyardStone',
   });
-  owned.push({ dispose: () => stoneMaterial.dispose() });
+  w.own({ dispose: () => stoneMaterial.dispose() });
 
   const hallways = resolveHallways(grid);
   const gateGeometry = makeMoonGateGeometry(skin);
-  owned.push({ dispose: () => gateGeometry.dispose() });
+  w.own({ dispose: () => gateGeometry.dispose() });
   const gateRoots: THREE.Object3D[] = [];
   {
     const world: Vec3Tuple = [0, 0, 0];
@@ -347,7 +334,7 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene, grid: GridGeom
       mesh.castShadow = true;
       mesh.receiveShadow = true;
       root.add(mesh);
-      group.add(root);
+      w.add(root);
       gateRoots.push(root);
     }
   }
@@ -360,9 +347,9 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene, grid: GridGeom
     cellToWorld((grid.w / 2) | 0, (grid.h / 2) | 0, grid, world);
     sundialRoot.position.set(world[0], 0, world[2]);
   }
-  group.add(sundialRoot);
+  w.add(sundialRoot);
   const sundialGeometry = makeSundialGeometry(skin);
-  owned.push({ dispose: () => sundialGeometry.dispose() });
+  w.own({ dispose: () => sundialGeometry.dispose() });
   {
     const mesh = new THREE.Mesh(sundialGeometry, stoneMaterial);
     mesh.name = 'sundial';
@@ -391,9 +378,8 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene, grid: GridGeom
     rimStrength: 0.3,
     name: 'springBlossomBeds',
   });
-  group.add(blossomBeds.group);
-  owned.push(blossomBeds);
-  timed.push(blossomBeds);
+  w.add(blossomBeds.group);
+  w.time(w.own(blossomBeds));
 
   const summerArea = bounds[SEASON_SUMMER] as RoomBounds;
   const lawn = scatterGrass({
@@ -411,9 +397,8 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene, grid: GridGeom
     rimStrength: 0.34,
     name: 'summerLawn',
   });
-  group.add(lawn.group);
-  owned.push(lawn);
-  timed.push(lawn);
+  w.add(lawn.group);
+  w.time(w.own(lawn));
 
   const autumnArea = bounds[SEASON_AUTUMN] as RoomBounds;
   const leafDrifts = scatterRocks({
@@ -430,9 +415,8 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene, grid: GridGeom
     castShadow: false,
     name: 'autumnLeafDrifts',
   });
-  group.add(leafDrifts.group);
-  owned.push(leafDrifts);
-  timed.push(leafDrifts);
+  w.add(leafDrifts.group);
+  w.time(w.own(leafDrifts));
 
   const winterArea = bounds[SEASON_WINTER] as RoomBounds;
   const snowLumps = scatterRocks({
@@ -449,9 +433,8 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene, grid: GridGeom
     castShadow: false,
     name: 'winterSnowLumps',
   });
-  group.add(snowLumps.group);
-  owned.push(snowLumps);
-  timed.push(snowLumps);
+  w.add(snowLumps.group);
+  w.time(w.own(snowLumps));
 
   const offCourt = excludeRect(0, 0, COURT_HALF, COURT_HALF, 1.1);
   const nearCamera = excludeRect(
@@ -491,13 +474,11 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene, grid: GridGeom
       castShadow: true,
       name: `${SEASON_NAMES[spec.room] ?? 'season'}Trees`,
     });
-    group.add(handle.group);
-    owned.push(handle);
-    timed.push(handle);
+    w.add(handle.group);
+    w.time(w.own(handle));
     trees.push(handle);
   }
 
-  const motes: AmbientParticlesHandle[] = [];
   const moteSpecs: readonly {
     room: number;
     preset: 'pollen' | 'snow';
@@ -529,14 +510,11 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene, grid: GridGeom
       swirl: spec.swirl,
       name: spec.name,
     });
-    group.add(handle.points);
-    owned.push(handle);
-    timed.push(handle);
-    motes.push(handle);
+    w.add(handle.points);
+    w.size(w.time(w.own(handle)));
   }
 
-  return {
-    group,
+  return w.seal({
     sky,
     rig,
     terrain,
@@ -544,22 +522,11 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene, grid: GridGeom
     sundialRoot,
     gateRoots,
     hallways,
-    setTime(t) {
-      for (let i = 0; i < timed.length; i++) timed[i]?.setTime(t);
-    },
-    setPixelRatio(dpr) {
-      for (let i = 0; i < motes.length; i++) motes[i]?.setPixelRatio(dpr);
-    },
-    dispose() {
-      for (let i = owned.length - 1; i >= 0; i--) owned[i]?.dispose();
-      owned.length = 0;
-      timed.length = 0;
-      motes.length = 0;
+  }, {
+    drop: () => {
       trees.length = 0;
-      group.removeFromParent();
-      group.clear();
     },
-  };
+  });
 }
 
 
