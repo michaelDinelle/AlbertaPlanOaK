@@ -24,6 +24,7 @@ import type { Palette } from '@kit/tokens';
 import type { SceneContext } from '@kit/types';
 import { excludeAny, scatterGrass, scatterTrees, type ExcludeFn } from '@kit/vegetation';
 import { makeWater, type WaterHandle } from '@kit/water';
+import { makeWorld, type WorldCore } from '@kit/world';
 import { AB_L1, AB_L2, AB_SUCCESS_HEIGHT } from '@sim/envs/acrobot';
 import type { EnvGeometry } from '@sim/types';
 
@@ -111,39 +112,25 @@ export function makeBankHeight(seed: number): (x: number, z: number) => number {
 }
 
 
-export interface WorldHandle {
-  group: THREE.Group;
+export interface WorldHandle extends WorldCore {
   sky: SkyHandle;
   rig: LightRig;
   water: WaterHandle;
   terrain: TerrainHandle;
   garlandRoot: THREE.Object3D;
   waterY: number;
-  setTime(t: number): void;
   setDawn(k01: number): void;
   setFlare(progress: number): void;
   setPetals(env01: number): void;
   setGlint(x: number, z: number, gain: number): void;
-  setPixelRatio(dpr: number): void;
-  dispose(): void;
 }
 
-interface Disposable {
-  dispose(): void;
-}
-
-interface Timed {
-  setTime(t: number): void;
-}
 
 export function buildWorld(ctx: SceneContext, scene: THREE.Scene): WorldHandle {
   const palette: Palette = ctx.tokens.palettes.dawn;
   const accent = ctx.tokens.accents['acrobot'] ?? ctx.tokens.celebrationGold;
   const gold = ctx.tokens.celebrationGold;
-  const group = new THREE.Group();
-  group.name = 'willowSwing';
-  const owned: Disposable[] = [];
-  const timed: Timed[] = [];
+  const w = makeWorld('willowSwing');
   const animated: OakMaterial[] = [];
 
   const pivot = pivotAnchor(ctx.geometry);
@@ -167,9 +154,9 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene): WorldHandle {
     bottomSpread: 0.42,
     radius: 320,
   });
-  group.add(sky.mesh);
-  owned.push(sky);
-  timed.push({ setTime: (t) => sky.setTime(t) });
+  w.add(sky.mesh);
+  w.own(sky);
+  w.time({ setTime: (t) => sky.setTime(t) });
 
   const rig = makeLightRig(palette, {
     sunDir: sky.sunDirection,
@@ -177,8 +164,8 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene): WorldHandle {
     pointDistance: 7,
     sunDistanceScale: 3,
   });
-  group.add(rig.group);
-  owned.push(rig);
+  w.add(rig.group);
+  w.own(rig);
   rig.setShadowFocus({ x: 0, y: -0.45, z: -0.6 }, 4.2);
 
   applyFog(scene, palette, FOG_EXTENT);
@@ -214,8 +201,8 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene): WorldHandle {
     castShadow: false,
     name: 'pondBank',
   });
-  group.add(terrain.mesh);
-  owned.push(terrain);
+  w.add(terrain.mesh);
+  w.own(terrain);
 
   const pondShallow = blendTokens(palette.skyTop, TOKEN_BLACK, 0.86);
   const pondDeep = blendTokens(TOKEN_BLACK, palette.skyTop, 0.12);
@@ -240,9 +227,8 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene): WorldHandle {
   });
   water.setColors(pondShallow, pondDeep);
   water.uniforms.uSpecular.value = 1.15;
-  group.add(water.mesh);
-  owned.push(water);
-  timed.push(water);
+  w.add(water.mesh);
+  w.time(w.own(water));
 
   const boughPoints = willowBoughs();
   const willowParts: ColoredPart[] = [];
@@ -323,8 +309,8 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene): WorldHandle {
   willowMesh.name = 'willow';
   willowMesh.castShadow = true;
   willowMesh.receiveShadow = true;
-  group.add(willowMesh);
-  owned.push({
+  w.add(willowMesh);
+  w.own({
     dispose: () => {
       willowGeometry.dispose();
       woodMaterial.dispose();
@@ -356,8 +342,8 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene): WorldHandle {
     length: FROND_LEN,
     colors: [frondA, frondB, blendTokens(frondA, palette.groundB, 0.35)],
   });
-  group.add(fronds);
-  owned.push({
+  w.add(fronds);
+  w.own({
     dispose: () => {
       fronds.dispose();
       frondGeometry.dispose();
@@ -368,7 +354,7 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene): WorldHandle {
   const garlandRoot = new THREE.Object3D();
   garlandRoot.name = 'garlandRoot';
   garlandRoot.position.set(success[0], success[1], success[2]);
-  group.add(garlandRoot);
+  w.add(garlandRoot);
 
   const rigParts: ColoredPart[] = [];
   {
@@ -394,8 +380,8 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene): WorldHandle {
   const garlandMesh = new THREE.Mesh(garlandGeometry, woodMaterial);
   garlandMesh.name = 'garlandRig';
   garlandMesh.castShadow = false;
-  group.add(garlandMesh);
-  owned.push({ dispose: () => garlandGeometry.dispose() });
+  w.add(garlandMesh);
+  w.own({ dispose: () => garlandGeometry.dispose() });
 
   const BULB_BASE_HDR = 1.25;
   const bulbGeometry = new THREE.IcosahedronGeometry(0.05, 1);
@@ -431,8 +417,8 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene): WorldHandle {
     bulbs.instanceMatrix.needsUpdate = true;
     bulbs.computeBoundingSphere();
   }
-  group.add(bulbs);
-  owned.push({
+  w.add(bulbs);
+  w.own({
     dispose: () => {
       bulbs.dispose();
       bulbGeometry.dispose();
@@ -459,9 +445,8 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene): WorldHandle {
     rimStrength: 0.7,
     name: 'pondReeds',
   });
-  group.add(shallowReeds.group);
-  owned.push(shallowReeds);
-  timed.push(shallowReeds);
+  w.add(shallowReeds.group);
+  w.time(w.own(shallowReeds));
 
   const shoreGrass = scatterGrass({
     count: 4200,
@@ -480,9 +465,8 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene): WorldHandle {
     rimStrength: 0.5,
     name: 'shoreGrass',
   });
-  group.add(shoreGrass.group);
-  owned.push(shoreGrass);
-  timed.push(shoreGrass);
+  w.add(shoreGrass.group);
+  w.time(w.own(shoreGrass));
 
   const farTrees = scatterTrees({
     archetypes: ['broadleaf', 'conifer'],
@@ -503,9 +487,8 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene): WorldHandle {
     castShadow: false,
     name: 'farTrees',
   });
-  group.add(farTrees.group);
-  owned.push(farTrees);
-  timed.push(farTrees);
+  w.add(farTrees.group);
+  w.time(w.own(farTrees));
 
   const padGeometry = makePadGeometry();
   const padMaterial = oakMaterial({
@@ -531,8 +514,8 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene): WorldHandle {
     ],
     bankHeight,
   });
-  group.add(pads);
-  owned.push({
+  w.add(pads);
+  w.own({
     dispose: () => {
       pads.dispose();
       padGeometry.dispose();
@@ -556,8 +539,8 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene): WorldHandle {
   glint.position.set(0, WATER_Y + 0.015, 0);
   glint.renderOrder = 3;
   glint.visible = false;
-  group.add(glint);
-  owned.push({
+  w.add(glint);
+  w.own({
     dispose: () => {
       glintGeometry.dispose();
       glintMaterial.dispose();
@@ -579,9 +562,8 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene): WorldHandle {
     name: 'pondMist',
   });
   mist.group.position.set(0, 0, -6);
-  group.add(mist.group);
-  owned.push(mist);
-  timed.push(mist);
+  w.add(mist.group);
+  w.time(w.own(mist));
 
   const fireflies: AmbientParticlesHandle = makeAmbientParticles({
     preset: 'fireflies',
@@ -595,9 +577,8 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene): WorldHandle {
     swirl: 0.22,
     name: 'pondFireflies',
   });
-  group.add(fireflies.points);
-  owned.push(fireflies);
-  timed.push(fireflies);
+  w.add(fireflies.points);
+  w.size(w.time(w.own(fireflies)));
 
   const pollen: AmbientParticlesHandle = makeAmbientParticles({
     preset: 'pollen',
@@ -612,9 +593,8 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene): WorldHandle {
     swirl: 0.1,
     name: 'dawnPollen',
   });
-  group.add(pollen.points);
-  owned.push(pollen);
-  timed.push(pollen);
+  w.add(pollen.points);
+  w.size(w.time(w.own(pollen)));
 
   const petals: AmbientParticlesHandle = makeAmbientParticles({
     preset: 'snow',
@@ -630,27 +610,21 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene): WorldHandle {
     name: 'willowPetals',
   });
   petals.setDensity(0);
-  group.add(petals.points);
-  owned.push(petals);
-  timed.push(petals);
+  w.add(petals.points);
+  w.size(w.time(w.own(petals)));
 
-  timed.push({ setTime: (t) => setMaterialsTime(animated, t) });
+  w.time({ setTime: (t) => setMaterialsTime(animated, t) });
 
   const bulbAttr = bulbs.instanceColor;
   let flareIdle = false;
 
-  return {
-    group,
+  return w.seal({
     sky,
     rig,
     water,
     terrain,
     garlandRoot,
     waterY: WATER_Y,
-
-    setTime(t) {
-      for (let i = 0; i < timed.length; i++) timed[i]?.setTime(t);
-    },
 
     setDawn(k01) {
       const k = clampRange(k01, 0, 1);
@@ -691,21 +665,11 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene): WorldHandle {
       glint.scale.set(spread, 1, 0.75 + spread * 0.55);
     },
 
-    setPixelRatio(dpr) {
-      fireflies.setPixelRatio(dpr);
-      pollen.setPixelRatio(dpr);
-      petals.setPixelRatio(dpr);
-    },
-
-    dispose() {
-      for (let i = owned.length - 1; i >= 0; i--) owned[i]?.dispose();
-      owned.length = 0;
-      timed.length = 0;
+  }, {
+    drop: () => {
       animated.length = 0;
-      group.removeFromParent();
-      group.clear();
     },
-  };
+  });
 }
 
 

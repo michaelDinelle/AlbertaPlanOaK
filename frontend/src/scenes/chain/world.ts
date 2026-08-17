@@ -29,6 +29,7 @@ import {
   type VegetationHandle,
 } from '@kit/vegetation';
 import { makeWater, type WaterHandle } from '@kit/water';
+import { makeWorld, type WorldCore } from '@kit/world';
 import { CHAIN_END, CHAIN_L, chainDecoder } from '@sim/envs/chain';
 import type { EnvGeometry, GridGeometry } from '@sim/types';
 
@@ -469,8 +470,7 @@ export function excludeCameraWedge(halfX: number, halfZ: number): ExcludeFn {
 }
 
 
-export interface WorldHandle {
-  group: THREE.Group;
+export interface WorldHandle extends WorldCore {
   sky: SkyHandle;
   rig: LightRig;
   terrain: TerrainHandle;
@@ -478,26 +478,13 @@ export interface WorldHandle {
   field: CellFieldHandle;
   caps: StoneCapsHandle;
   petalMotes: AmbientParticlesHandle;
-  setTime(t: number): void;
-  setPixelRatio(dpr: number): void;
-  dispose(): void;
 }
 
-interface Disposable {
-  dispose(): void;
-}
-
-interface Timed {
-  setTime(t: number): void;
-}
 
 export function buildWorld(ctx: SceneContext, scene: THREE.Scene, grid: GridGeometry): WorldHandle {
   const palette: Palette = ctx.tokens.palettes.afternoon;
   const skin = creekSkin(palette, ctx.tokens);
-  const group = new THREE.Group();
-  group.name = 'sixteenStonesWorld';
-  const owned: Disposable[] = [];
-  const timed: Timed[] = [];
+  const w = makeWorld('sixteenStonesWorld');
 
   const sky = skyFromPalette(palette, 'afternoon', {
     sunDir: SUN_DIR,
@@ -509,9 +496,9 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene, grid: GridGeom
     bottomSpread: 0.46,
     radius: 340,
   });
-  group.add(sky.mesh);
-  owned.push(sky);
-  timed.push({ setTime: (t) => sky.setTime(t) });
+  w.add(sky.mesh);
+  w.own(sky);
+  w.time({ setTime: (t) => sky.setTime(t) });
 
   const rig = makeLightRig(palette, {
     sunDir: sky.sunDirection,
@@ -519,8 +506,8 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene, grid: GridGeom
     pointDistance: 7.5,
     sunDistanceScale: 2.1,
   });
-  group.add(rig.group);
-  owned.push(rig);
+  w.add(rig.group);
+  w.own(rig);
   rig.setShadowFocus({ x: 0, y: 0.1, z: 0 }, SHADOW_RADIUS);
 
   applyFog(scene, palette, FOG_EXTENT);
@@ -553,8 +540,8 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene, grid: GridGeom
     castShadow: false,
     name: 'creekBed',
   });
-  group.add(terrain.mesh);
-  owned.push(terrain);
+  w.add(terrain.mesh);
+  w.own(terrain);
 
   const water = makeWater({
     size: [TERRAIN_SIZE[0] + 8, TERRAIN_SIZE[1] + 10],
@@ -576,9 +563,9 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene, grid: GridGeom
     name: 'creekWater',
   });
   water.setColors(skin.waterShallow, skin.waterDeep);
-  group.add(water.mesh);
-  owned.push(water);
-  timed.push({ setTime: (t) => water.setTime(t) });
+  w.add(water.mesh);
+  w.own(water);
+  w.time({ setTime: (t) => water.setTime(t) });
 
   const field = buildCellField(
     grid,
@@ -595,13 +582,13 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene, grid: GridGeom
     },
   );
   field.group.position.y = -PLINTH_DROP;
-  group.add(field.group);
-  owned.push(field);
-  timed.push({ setTime: (t) => field.setTime(t) });
+  w.add(field.group);
+  w.own(field);
+  w.time({ setTime: (t) => field.setTime(t) });
 
   const caps = buildStoneCaps(grid, skin, palette, ctx.seed);
-  group.add(caps.mesh);
-  owned.push(caps);
+  w.add(caps.mesh);
+  w.own(caps);
 
   const offCrossing = excludeAny(
     excludeCrossing(grid, 1.15, 0.6),
@@ -628,9 +615,8 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene, grid: GridGeom
       rimStrength: 0.4,
       name: `creekReeds${side > 0 ? 'Far' : 'Near'}`,
     });
-    group.add(handle.group);
-    owned.push(handle);
-    timed.push(handle);
+    w.add(handle.group);
+    w.time(w.own(handle));
     reeds.push(handle);
   }
 
@@ -650,9 +636,8 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene, grid: GridGeom
     rimStrength: 0.42,
     name: 'shallowReeds',
   });
-  group.add(shallowTufts.group);
-  owned.push(shallowTufts);
-  timed.push(shallowTufts);
+  w.add(shallowTufts.group);
+  w.time(w.own(shallowTufts));
   reeds.push(shallowTufts);
 
   const meadow = scatterGrass({
@@ -671,9 +656,8 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene, grid: GridGeom
     rimStrength: 0.32,
     name: 'bankMeadow',
   });
-  group.add(meadow.group);
-  owned.push(meadow);
-  timed.push(meadow);
+  w.add(meadow.group);
+  w.time(w.own(meadow));
 
   const flowers = scatterFlowers({
     count: 420,
@@ -691,9 +675,8 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene, grid: GridGeom
     rimStrength: 0.34,
     name: 'bankFlowers',
   });
-  group.add(flowers.group);
-  owned.push(flowers);
-  timed.push(flowers);
+  w.add(flowers.group);
+  w.time(w.own(flowers));
 
   const rocks = scatterRocks({
     count: 260,
@@ -710,9 +693,8 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene, grid: GridGeom
     castShadow: false,
     name: 'creekRocks',
   });
-  group.add(rocks.group);
-  owned.push(rocks);
-  timed.push(rocks);
+  w.add(rocks.group);
+  w.time(w.own(rocks));
 
   const bankTrees = scatterTrees({
     archetypes: ['broadleaf', 'conifer'],
@@ -736,11 +718,9 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene, grid: GridGeom
     castShadow: true,
     name: 'bankTrees',
   });
-  group.add(bankTrees.group);
-  owned.push(bankTrees);
-  timed.push(bankTrees);
+  w.add(bankTrees.group);
+  w.time(w.own(bankTrees));
 
-  const motes: AmbientParticlesHandle[] = [];
   const pollen = makeAmbientParticles({
     preset: 'pollen',
     count: 240,
@@ -754,10 +734,8 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene, grid: GridGeom
     swirl: 0.3,
     name: 'creekPollen',
   });
-  group.add(pollen.points);
-  owned.push(pollen);
-  timed.push(pollen);
-  motes.push(pollen);
+  w.add(pollen.points);
+  w.size(w.time(w.own(pollen)));
 
   const petalMotes = makeAmbientParticles({
     preset: 'snow',
@@ -773,10 +751,8 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene, grid: GridGeom
     name: 'blossomPetalMotes',
   });
   petalMotes.setDensity(0);
-  group.add(petalMotes.points);
-  owned.push(petalMotes);
-  timed.push(petalMotes);
-  motes.push(petalMotes);
+  w.add(petalMotes.points);
+  w.size(w.time(w.own(petalMotes)));
 
   const haze = makeMistPlanes({
     size: [50, 70],
@@ -791,17 +767,14 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene, grid: GridGeom
     nearFade: 11,
     name: 'creekHaze',
   });
-  group.add(haze.group);
-  owned.push(haze);
-  timed.push(haze);
+  w.add(haze.group);
+  w.time(w.own(haze));
 
   const dragonflies = buildDragonflies(skin, palette, ctx.seed);
-  group.add(dragonflies.mesh);
-  owned.push(dragonflies);
-  timed.push(dragonflies);
+  w.add(dragonflies.mesh);
+  w.time(w.own(dragonflies));
 
-  return {
-    group,
+  return w.seal({
     sky,
     rig,
     terrain,
@@ -809,20 +782,9 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene, grid: GridGeom
     field,
     caps,
     petalMotes,
-    setTime(t) {
-      for (let i = 0; i < timed.length; i++) timed[i]?.setTime(t);
-    },
-    setPixelRatio(dpr) {
-      for (let i = 0; i < motes.length; i++) motes[i]?.setPixelRatio(dpr);
-    },
-    dispose() {
-      for (let i = owned.length - 1; i >= 0; i--) owned[i]?.dispose();
-      owned.length = 0;
-      timed.length = 0;
-      motes.length = 0;
+  }, {
+    drop: () => {
       reeds.length = 0;
-      group.removeFromParent();
-      group.clear();
     },
-  };
+  });
 }
