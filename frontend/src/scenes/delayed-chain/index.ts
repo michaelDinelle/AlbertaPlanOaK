@@ -1,19 +1,13 @@
 
 import { DELAYEDCHAIN_ACTION, DELAYEDCHAIN_POS } from '@sim/envs/delayedchain';
-import { CelebrationPool, attachCelebrations, disposeCelebrations } from '@kit/celebrate';
-import { GroundTruthOverlay } from '@kit/debug';
+import type { CelebrationPoolOptions } from '@kit/celebrate';
+import type { GroundTruthOptions } from '@kit/debug';
 import { cellToWorld, cellToWorldVec, type GridSize } from '@kit/grid';
 import { clamp01, envelope } from '@kit/mix';
-import { makeOrbitRig, type OrbitRig } from '@kit/rigs';
+import type { OrbitRigOptions } from '@kit/rigs';
+import { StageScene } from '@kit/stage';
 import { TOKENS } from '@kit/tokens';
-import type {
-  FrameState,
-  FrameUpdate,
-  SceneContext,
-  SceneFactory,
-  SceneModule,
-  SceneSize,
-} from '@kit/types';
+import type { FrameState, FrameUpdate, SceneContext, SceneFactory } from '@kit/types';
 import { Wisp } from '@kit/wisp';
 import * as THREE from 'three';
 import type { GridCell, GridGeometry } from '@sim/types';
@@ -68,20 +62,14 @@ function readState(state: FrameState, grid: GridSize, out: GridCell): number {
   return (state.pose[DELAYEDCHAIN_ACTION] ?? 0) >= 0.5 ? 1 : 0;
 }
 
-class LongNightRoadScene implements SceneModule {
+class LongNightRoadScene extends StageScene<WorldHandle> {
   readonly manifest = manifest;
-  scene = new THREE.Scene();
-  camera = new THREE.PerspectiveCamera(TOKENS.fovHero, 16 / 9, 0.1, 900);
+  protected readonly stageName = 'longNightRoad';
 
-  private ctx: SceneContext | null = null;
-  private world: WorldHandle | null = null;
   private road: LanternRoadHandle | null = null;
   private milestone: MilestoneHandle | null = null;
   private wisp: Wisp | null = null;
   private glow: WispGlowHandle | null = null;
-  private pool: CelebrationPool | null = null;
-  private rig: OrbitRig | null = null;
-  private overlay: GroundTruthOverlay | null = null;
   private grid: GridGeometry = resolveGrid({});
   private goalCell = 0;
 
@@ -102,23 +90,18 @@ class LongNightRoadScene implements SceneModule {
   private gold = 0xffd166;
   private flame = 0xffd166;
 
-  private debugOn = false;
-
-  async init(ctx: SceneContext): Promise<void> {
-    this.ctx = ctx;
-    this.scene.name = 'longNightRoadScene';
-
+  protected buildWorld(ctx: SceneContext): WorldHandle {
     const grid = resolveGrid(ctx.geometry);
     this.grid = grid;
     this.goalCell = goalCellOf(grid);
+    return buildWorld(ctx, this.scene, grid);
+  }
 
+  protected buildActors(ctx: SceneContext, world: WorldHandle): void {
+    const grid = this.grid;
     const palette = ctx.tokens.palettes.night;
     const accent = ctx.tokens.accents[manifest.accent] ?? ctx.tokens.uiCyan;
     this.gold = ctx.tokens.celebrationGold;
-
-    const world = buildWorld(ctx, this.scene, grid);
-    this.world = world;
-    this.scene.add(world.group);
     this.flame = world.skin.flame.getHex();
 
     const wispLight = world.rig.points[0];
@@ -184,8 +167,10 @@ class LongNightRoadScene implements SceneModule {
     });
     this.glow = glow;
     this.scene.add(glow.mesh);
+  }
 
-    const rig = makeOrbitRig({
+  protected rigOptions(ctx: SceneContext): OrbitRigOptions {
+    return {
       canvas: ctx.canvas,
       target: [0, CAM_TARGET_Y, 0],
       distance: CAM_DISTANCE,
@@ -207,21 +192,20 @@ class LongNightRoadScene implements SceneModule {
       rotateSpeed: 0.0035,
       zoomSpeed: 0.0012,
       name: 'roadOrbitRig',
-    });
-    this.rig = rig;
-    this.camera = rig.camera;
-    rig.snap();
+    };
+  }
 
-    const pool = new CelebrationPool({
+  protected poolOptions(ctx: SceneContext): CelebrationPoolOptions {
+    return {
       seed: ctx.seed,
       burstSize: BURST_PARTICLES,
       name: 'roadCelebrations',
-    });
-    attachCelebrations(this.scene, pool);
-    pool.setPixelRatio(ctx.size.dpr);
-    this.pool = pool;
+    };
+  }
 
-    this.overlay = new GroundTruthOverlay(ctx.geometry, {
+  protected overlayOptions(): GroundTruthOptions {
+    const grid = this.grid;
+    return {
       camera: this.camera,
       agentCell: (state) => {
         readState(state, grid, this.overlayCell);
@@ -233,16 +217,20 @@ class LongNightRoadScene implements SceneModule {
         return this.overlayGoal;
       },
       name: 'roadGroundTruth',
-    });
-    this.scene.add(this.overlay.group);
-    this.overlay.visible = this.debugOn;
+    };
+  }
 
-    world.setPixelRatio(ctx.size.dpr);
+  protected start(ctx: SceneContext, world: WorldHandle): void {
+    const road = this.road;
+    const wisp = this.wisp;
+    const glow = this.glow;
+    const rig = this.rig;
+    if (!road || !wisp || !glow || !rig) return;
     world.setTime(0);
     world.aurora.setGain(1);
     road.setTime(0);
-    milestone.setTime(0);
-    wisp.setCell(0, 0, grid);
+    this.milestone?.setTime(0);
+    wisp.setCell(0, 0, this.grid);
     this.camX = wisp.position.x;
     rig.setTarget(this.camX + CAM_LOOK_AHEAD, CAM_TARGET_Y, 0);
     rig.snap();
@@ -253,7 +241,7 @@ class LongNightRoadScene implements SceneModule {
     this.applyShadowFocus(wisp.position.x, world);
   }
 
-  update(frame: FrameUpdate): void {
+  protected tick(frame: FrameUpdate): void {
     const ctx = this.ctx;
     const world = this.world;
     const road = this.road;
@@ -369,25 +357,9 @@ class LongNightRoadScene implements SceneModule {
     if (snapCamera) rig.snap();
     else rig.update(frame.dtReal);
     this.applyShadowFocus(wisp.position.x, world);
-
-    if (this.debugOn && this.overlay) this.overlay.setState(state);
   }
 
-  resize(size: SceneSize): void {
-    const aspect = size.height > 0 ? size.width / size.height : 16 / 9;
-    this.rig?.resize(aspect);
-    this.world?.setPixelRatio(size.dpr);
-    this.pool?.setPixelRatio(size.dpr);
-  }
-
-  setDebug(on: boolean): void {
-    this.debugOn = on;
-    if (this.overlay) this.overlay.visible = on;
-  }
-
-  dispose(): void {
-    this.overlay?.dispose();
-    this.overlay = null;
+  protected drop(): void {
     this.milestone?.dispose();
     this.milestone = null;
     this.road?.dispose();
@@ -396,15 +368,6 @@ class LongNightRoadScene implements SceneModule {
     this.glow = null;
     this.wisp?.dispose();
     this.wisp = null;
-    this.world?.dispose();
-    this.world = null;
-    this.rig?.dispose();
-    this.rig = null;
-    disposeCelebrations(this.scene);
-    this.pool = null;
-    this.scene.clear();
-    this.scene.fog = null;
-    this.ctx = null;
     this.waveAt = -Infinity;
     this.surgeAt = -Infinity;
     this.burstAt = -Infinity;
