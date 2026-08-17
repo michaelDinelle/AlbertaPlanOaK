@@ -706,7 +706,7 @@ final class RecordWriter: @unchecked Sendable {
 
 final class TapeWriter {
   static let fileMagic: UInt32 = 0x544B_414F
-  static let fields: [String] = ["rewardSum", "rewardRate", "deathStep", "deathDetector"]
+  static let fields: [String] = ["rewardSum", "rho", "deathStep", "deathDetector"]
   private let handle: FileHandle
   private let laneCount: Int
   private var col: [Float]
@@ -1012,7 +1012,7 @@ final class TapeWriter {
     )
   }
   static func fleetGPU(
-    _ seeds: [Int], _ steps: Int, _ root: URL, _ laneEnvs: [String],
+    _ policy: String, _ seeds: [Int], _ steps: Int, _ root: URL, _ laneEnvs: [String],
     _ ablations: AblationSpec
   ) throws {
     guard laneEnvs.count == seeds.count else {
@@ -1021,9 +1021,21 @@ final class TapeWriter {
     let laneEnvKinds = try laneEnvs.map(envKind)
     let e = ProcessInfo.processInfo.environment
     guard let dev = MTLCreateSystemDefaultDevice() else { throw err("Metal unavailable.") }
-    let engine = try Engine(laneEnvs: laneEnvs, batch: seeds.count, dev: dev)
-    let q = engine.q
     let lib = try dev.makeLibrary(URL: try requireFreshMetallib())
+    let engine: Engine?
+    let q: MTLCommandQueue
+    let envTable: [EnvSpec]
+    if policy == "oak" {
+      let eng = try Engine(laneEnvs: laneEnvs, batch: seeds.count, dev: dev)
+      engine = eng
+      q = eng.q
+      envTable = eng.envTable
+    } else {
+      engine = nil
+      guard let queue = dev.makeCommandQueue() else { throw err("Metal unavailable.") }
+      q = queue
+      envTable = try Engine.runEnvTableProbe(dev, lib)
+    }
     do {
       func fnv1a(_ s: String) -> UInt32 {
         var h: UInt32 = 0x811c_9dc5
@@ -1031,10 +1043,10 @@ final class TapeWriter {
         return h
       }
       for (i, name) in Self.envIdsByKind.enumerated() {
-        guard engine.envTable[i].nameHash == fnv1a(name) else {
+        guard envTable[i].nameHash == fnv1a(name) else {
           throw err("Env table drift at kind \(i): kernel hash != fnv1a(\(name)).")
         }
-        let declared = Set(engine.envTable[i].slots.indices.filter { engine.envTable[i].slots[$0] != 0 })
+        let declared = Set(envTable[i].slots.indices.filter { envTable[i].slots[$0] != 0 })
         let recorded = Set(RecordCodec.byKind[i].fields.map(\.idx))
         guard declared == recorded else {
           throw err(
@@ -1043,14 +1055,71 @@ final class TapeWriter {
         }
       }
     }
-    try Self.writeRunMeta(root, engine.envTable)
+    try Self.writeRunMeta(root, envTable)
     for flag in ["OAK_PROBE_FTZ", "OAK_PROBE_FIXEDIDX", "OAK_MEGA_STAGE_MASK"] where e[flag] != nil {
       fputs("\(flag)=\(e[flag]!): timing instrument, trajectories are garbage\n", stderr)
     }
     let episodeLen = max(e["OAK_EPISODE_STEPS"].flatMap(Int.init) ?? 0, 0)
     let bufs = try FleetBuffers(dev, seeds: seeds, laneEnvKinds: laneEnvKinds, episodeLen: episodeLen)
-    let pipes = try oakPipes(engine, lib, dev, bufs, ablations, e)
+    let pipes: FleetPipes
+    if let engine {
+      pipes = try oakPipes(engine, lib, dev, bufs, ablations, e)
+    } else {
+      pipes = try baselinePipes(policy, lib, dev, bufs)
+    }
     try runFleetLoop(q, bufs, pipes, seeds: seeds, steps: steps, root: root, laneEnvs: laneEnvs, laneEnvKinds: laneEnvKinds)
+  }
+  static func baselinePipes(
+    _ policy: String, _ lib: MTLLibrary, _ dev: MTLDevice, _ bufs: FleetBuffers
+  ) throws -> FleetPipes {
+    func pipeline(_ name: String) throws -> MTLComputePipelineState {
+      let fn = try lib.makeFunction(name: name, constantValues: MTLFunctionConstantValues())
+      return try dev.makeComputePipelineState(function: fn)
+    }
+    let initPipe = try pipeline("baseline_fleet_init")
+    let stepPipe = try pipeline("\(policy)_megastep")
+    let snapPipe = try pipeline("baseline_fleet_snapshot")
+    let B = bufs.B
+    let ecfg = bufs.ecfg
+    func bindCommon(_ enc: MTLComputeCommandEncoder, _ pipe: MTLComputePipelineState) {
+      enc.setComputePipelineState(pipe)
+      enc.setBuffer(bufs.laneBuf, offset: 0, index: OakBuf.lanes.rawValue)
+      enc.setBuffer(bufs.seedsBuf, offset: 0, index: OakBuf.seeds.rawValue)
+      var c = ecfg
+      enc.setBytes(&c, length: MemoryLayout<FleetEnvCfg>.stride, index: OakBuf.envCfg.rawValue)
+    }
+    let laneTG = mtlSize(min(
+      64, initPipe.maxTotalThreadsPerThreadgroup, stepPipe.maxTotalThreadsPerThreadgroup,
+      snapPipe.maxTotalThreadsPerThreadgroup))
+    return FleetPipes(
+      label: policy,
+      laneTG: laneTG,
+      encodeInit: { enc in
+        bindCommon(enc, initPipe)
+        enc.setBuffer(bufs.envKindsBuf, offset: 0, index: OakBuf.aux0.rawValue)
+        enc.dispatchThreads(mtlSize(B), threadsPerThreadgroup: laneTG)
+      },
+      encodeMegastep: { enc, n, base in
+        bindCommon(enc, stepPipe)
+        enc.setBuffer(bufs.recordSlotBuf, offset: 0, index: OakBuf.aux0.rawValue)
+        enc.setBuffer(bufs.recordBuf, offset: 0, index: OakBuf.aux1.rawValue)
+        var span = SIMD3<UInt32>(UInt32(n), UInt32(base), 0)
+        enc.setBytes(&span, length: MemoryLayout<SIMD3<UInt32>>.stride, index: OakBuf.aux2.rawValue)
+        enc.dispatchThreads(mtlSize(B), threadsPerThreadgroup: laneTG)
+        enc.memoryBarrier(scope: [.buffers])
+      },
+      encodeSnapshot: { enc, half in
+        bindCommon(enc, snapPipe)
+        enc.setBuffer(bufs.snapBuf, offset: 0, index: OakBuf.aux0.rawValue)
+        var snapBase = UInt32(half * B)
+        enc.setBytes(&snapBase, length: 4, index: OakBuf.aux1.rawValue)
+        enc.dispatchThreads(mtlSize(B), threadsPerThreadgroup: laneTG)
+      },
+      writeDebugRaw: { _, _ in },
+      laneHashes: { _, laneBytes in
+        ["lane": sha256Hex(UnsafeRawBufferPointer(start: laneBytes, count: fleetLaneStride))]
+      }
+    )
   }
   static func runFleetLoop(
     _ q: MTLCommandQueue, _ bufs: FleetBuffers, _ pipes: FleetPipes,
@@ -1375,7 +1444,10 @@ final class TapeWriter {
       }
       var bad: [String] = []
       for field in required {
-        guard let lv = l[field], let rv = r[field] else {
+        let lv = l[field]
+        let rv = r[field]
+        if lv == nil, rv == nil { continue }
+        guard let lv, let rv else {
           bad.append("\(field):absent")
           continue
         }
@@ -1404,6 +1476,13 @@ final class TapeWriter {
   static func benchmark() throws {
     let env = ProcessInfo.processInfo.environment
     let ablations = try AblationSpec.fromEnv(env)
+    let policy = env["OAK_BENCH_POLICY"] ?? "oak"
+    guard ["oak", "random"].contains(policy) else {
+      throw err("OAK_BENCH_POLICY must be one of oak,random (got \(policy)).")
+    }
+    guard policy == "oak" || ablations.label == "none" else {
+      throw err("Ablations apply only to the oak policy.")
+    }
     let fm = FileManager.default
     let seed0 = env["OAK_BENCH_SEED_START"].flatMap(Int.init) ?? 0
     let seedValues: [Int]
@@ -1469,6 +1548,7 @@ final class TapeWriter {
     try fm.createDirectory(at: dir, withIntermediateDirectories: true)
     Self.pendingMeta = [
       "batch": seedValues.count, "seeds": seedValues, "steps": steps,
+      "policy": policy,
       "ablationLabel": ablations.label,
       "startedAt": ISO8601DateFormatter().string(from: Date()),
       "envSchedule": entries.map { e in
@@ -1478,8 +1558,8 @@ final class TapeWriter {
     let envDesc = entries.map { "\($0.envId):\($0.seedEnd - $0.seedStart + 1)" }.joined(
       separator: ",")
     fputs(
-      "OaK fleet: B=\(seedValues.count) lanes × \(steps) steps on \(envDesc) (ablation=\(ablations.label), dir=\(dir.path))\n",
+      "OaK fleet: policy=\(policy) B=\(seedValues.count) lanes × \(steps) steps on \(envDesc) (ablation=\(ablations.label), dir=\(dir.path))\n",
       stderr)
-    try fleetGPU(seedValues, steps, dir, laneEnvs, ablations)
+    try fleetGPU(policy, seedValues, steps, dir, laneEnvs, ablations)
   }
 }
