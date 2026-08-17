@@ -16,6 +16,7 @@ import numpy as np
 
 REPO = Path(__file__).resolve().parent
 BENCH = REPO / ".oak-benchmarks"
+BASELINES = REPO / ".oak-baselines"
 
 FILE_MAGIC = 0x544B414F
 
@@ -381,7 +382,7 @@ def baseline_fingerprint(policy: str, envs: str, steps: int, batch: int, seeds: 
 
 def baseline_pointer(policy: str) -> str | None:
     try:
-        text = (REPO / f"baseline-{policy}").read_text().strip()
+        text = (BASELINES / policy).read_text().strip()
         return text or None
     except OSError:
         return None
@@ -397,11 +398,11 @@ def cmd_baselines(args) -> int:
     if not km:
         raise SystemExit("baselines need a crowned keeper for the schedule")
     envs = keeper_envs(km)
-    BENCH.mkdir(exist_ok=True)
+    BASELINES.mkdir(exist_ok=True)
     me = [sys.executable, str(Path(__file__).resolve())]
     for policy in ("random", "ppo"):
         name = baseline_name(policy, km)
-        root = BENCH / name
+        root = BASELINES / name
         if baseline_pointer(policy) == name and (root / ".done").exists():
             print(f"[baselines] {policy} current: {name}", flush=True)
             continue
@@ -412,12 +413,16 @@ def cmd_baselines(args) -> int:
                    OAK_BENCH_SEED_COUNT=str(km["batch"]),
                    OAK_BENCH_ENVS=envs,
                    OAK_FLEET_TIMING="1", OAK_METRICS_STORAGE=str(root))
-        rc = subprocess.run(["caffeinate", "-dimsu", str(REPO / ".build/release/OaK"),
-                             "benchmark"], env=env, cwd=REPO).returncode
+        log = BASELINES / f"{name}.log"
+        log.unlink(missing_ok=True)
+        with open(log, "w") as lf:
+            rc = subprocess.run(["caffeinate", "-dimsu", str(REPO / ".build/release/OaK"),
+                                 "benchmark"], env=env, cwd=REPO,
+                                stdout=lf, stderr=subprocess.STDOUT).returncode
         if rc != 0:
-            raise SystemExit(f"[baselines] {policy} benchmark exit={rc}")
+            raise SystemExit(f"[baselines] {policy} benchmark exit={rc}; see {log}")
         subprocess.run(me + ["report", str(root)], cwd=REPO, check=True)
-        (REPO / f"baseline-{policy}").write_text(name + "\n")
+        (BASELINES / policy).write_text(name + "\n")
         (root / ".done").touch()
         print(f"[baselines] {policy} crowned: {name}", flush=True)
     return 0

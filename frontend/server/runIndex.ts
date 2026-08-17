@@ -81,6 +81,7 @@ async function readTapeShapeUncached(path: string, st: { size: number; mtimeMs: 
 export interface ResolvedRun {
   id: string;
   dir: string;
+  root: string;
   meta: RunMeta;
   tape: TapeShape;
   entry: RunIndexEntry;
@@ -114,10 +115,12 @@ function envIdsOf(meta: RunMeta): string[] {
 
 export interface RunIndexOptions {
   benchRoot: string;
+  baselinesRoot: string;
 }
 
 export class RunIndex {
   readonly benchRoot: string;
+  readonly baselinesRoot: string;
 
   private runs = new Map<string, ResolvedRun>();
   private order: string[] = [];
@@ -129,6 +132,7 @@ export class RunIndex {
 
   constructor(opts: RunIndexOptions) {
     this.benchRoot = opts.benchRoot;
+    this.baselinesRoot = opts.baselinesRoot;
   }
 
   async list(): Promise<RunIndexEntry[]> {
@@ -150,15 +154,15 @@ export class RunIndex {
   async recordingsFor(id: string): Promise<RecordingEntry[]> {
     const run = await this.resolve(id);
     if (run === undefined) return [];
-    return this.recordingsCached(id, run.dir);
+    return this.recordingsCached(id, run.dir, run.root);
   }
 
-  private async recordingsCached(id: string, dir: string): Promise<RecordingEntry[]> {
+  private async recordingsCached(id: string, dir: string, root: string): Promise<RecordingEntry[]> {
     const dirStat = await statOrNull(dir);
     const mtimeMs = dirStat?.mtimeMs ?? 0;
     const hit = this.recordingsCache.get(id);
     if (hit !== undefined && hit.mtimeMs === mtimeMs) return hit.list;
-    const list = await scanRecordings(dir, { root: this.benchRoot });
+    const list = await scanRecordings(dir, { root });
     this.recordingsCache.set(id, { mtimeMs, list });
     return list;
   }
@@ -173,18 +177,17 @@ export class RunIndex {
 
   private pointerMemo = new Map<string, { mtimeMs: number; size: number; id: string | null }>();
 
-  private async readPointer(name: string): Promise<string | null> {
-    const path = join(this.benchRoot, '..', name);
+  private async readPointer(path: string): Promise<string | null> {
     const st = await statOrNull(path);
     if (st === null) return null;
-    const hit = this.pointerMemo.get(name);
+    const hit = this.pointerMemo.get(path);
     if (hit !== undefined && hit.mtimeMs === st.mtimeMs && hit.size === st.size) return hit.id;
     let id: string | null = null;
     try {
       id = (await Bun.file(path).text()).trim() || null;
     } catch {
     }
-    this.pointerMemo.set(name, { mtimeMs: st.mtimeMs, size: st.size, id });
+    this.pointerMemo.set(path, { mtimeMs: st.mtimeMs, size: st.size, id });
     return id;
   }
 
@@ -204,6 +207,43 @@ export class RunIndex {
     return meta;
   }
 
+  private async loadRun(id: string, root: string, keeper: string | null): Promise<ResolvedRun | null> {
+    const dir = join(root, id);
+    const metaStat = await statOrNull(join(dir, 'meta.json'));
+    if (metaStat === null) return null;
+    const meta = await this.readMeta(join(dir, 'meta.json'));
+    if (meta === null) return null;
+    const tape = await readTapeShape(join(dir, 'tape.bin')).catch(() => null);
+    if (tape === null || tape.rows === 0) return null;
+    const hasRecordings = (await this.recordingsCached(id, dir, root).catch(() => [])).length > 0;
+    const summaryStat = await statOrNull(join(dir, 'summary.json'));
+    const complete = tape.maxStep >= meta.steps && meta.steps > 0;
+    return {
+      id,
+      dir,
+      root,
+      meta,
+      tape,
+      entry: {
+        id,
+        envIds: envIdsOf(meta),
+        batch: meta.batch,
+        steps: meta.steps,
+        ablationLabel: meta.ablationLabel,
+        startedAt: typeof meta.startedAt === 'string' ? meta.startedAt : null,
+        complete,
+        maxStep: tape.maxStep,
+        inFlight: !complete
+          && (tape.rowIntervalMs === 0
+            || Date.now() - tape.mtimeMs < 2 * tape.rowIntervalMs),
+        hasSummary: summaryStat !== null,
+        hasRecordings,
+        policy: meta.policy,
+        role: id === keeper ? 'keeper' : null,
+      },
+    };
+  }
+
   private async scan(): Promise<void> {
     let dirNames: string[];
     try {
@@ -214,53 +254,20 @@ export class RunIndex {
     }
 
     const [keeper, baselinePpo, baselineRandom] = await Promise.all([
-      this.readPointer('keeper'),
-      this.readPointer('baseline-ppo'),
-      this.readPointer('baseline-random'),
+      this.readPointer(join(this.benchRoot, '..', 'keeper')),
+      this.readPointer(join(this.baselinesRoot, 'ppo')),
+      this.readPointer(join(this.baselinesRoot, 'random')),
     ]);
     const next = new Map<string, ResolvedRun>();
     const rejected: string[] = [];
 
     for (const id of dirNames) {
-      const dir = join(this.benchRoot, id);
-      const metaStat = await statOrNull(join(dir, 'meta.json'));
-      if (metaStat === null) continue;
-      const meta = await this.readMeta(join(dir, 'meta.json'));
-      if (meta === null) {
-        rejected.push(id);
+      const run = await this.loadRun(id, this.benchRoot, keeper);
+      if (run === null) {
+        if ((await statOrNull(join(this.benchRoot, id, 'meta.json'))) !== null) rejected.push(id);
         continue;
       }
-      const tape = await readTapeShape(join(dir, 'tape.bin')).catch(() => null);
-      if (tape === null || tape.rows === 0) {
-        rejected.push(id);
-        continue;
-      }
-      const hasRecordings = (await this.recordingsCached(id, dir).catch(() => [])).length > 0;
-      const summaryStat = await statOrNull(join(dir, 'summary.json'));
-      const complete = tape.maxStep >= meta.steps && meta.steps > 0;
-      next.set(id, {
-        id,
-        dir,
-        meta,
-        tape,
-        entry: {
-          id,
-          envIds: envIdsOf(meta),
-          batch: meta.batch,
-          steps: meta.steps,
-          ablationLabel: meta.ablationLabel,
-          startedAt: typeof meta.startedAt === 'string' ? meta.startedAt : null,
-          complete,
-          maxStep: tape.maxStep,
-          inFlight: !complete
-            && (tape.rowIntervalMs === 0
-              || Date.now() - tape.mtimeMs < 2 * tape.rowIntervalMs),
-          hasSummary: summaryStat !== null,
-          hasRecordings,
-          policy: meta.policy,
-          role: id === keeper ? 'keeper' : null,
-        },
-      });
+      next.set(id, run);
     }
 
     const rejectedKey = rejected.join(',');
@@ -273,30 +280,36 @@ export class RunIndex {
     }
     this.lastRejected = rejectedKey;
 
-    const baselines: BaselineIds = {};
-    const dangling: string[] = [];
-    if (keeper !== null && !next.has(keeper)) dangling.push(`keeper → ${keeper}`);
-    for (const [name, id] of [['ppo', baselinePpo], ['random', baselineRandom]] as const) {
-      if (id === null) continue;
-      if (next.has(id)) baselines[name] = id;
-      else dangling.push(`baseline-${name} → ${id}`);
-    }
-    const danglingKey = dangling.join(',');
-    if (dangling.length > 0 && danglingKey !== this.lastDangling) {
-      console.warn(
-        `[oak-frontend] ${dangling.length} pointer file(s) beside ${this.benchRoot} name run directories`
-        + ` that are not in the scanned run list and count as absent (${dangling.join('; ')})`,
-      );
-    }
-    this.lastDangling = danglingKey;
-    this.baselinePointers = baselines;
-    this.runs = next;
     this.order = [...next.keys()].sort((a, b) => {
       const sa = next.get(a)?.entry.startedAt ?? '';
       const sb = next.get(b)?.entry.startedAt ?? '';
       if (sa !== sb) return sa < sb ? 1 : -1;
       return a < b ? 1 : a > b ? -1 : 0;
     });
+
+    const baselines: BaselineIds = {};
+    const dangling: string[] = [];
+    if (keeper !== null && !next.has(keeper)) dangling.push(`keeper → ${keeper}`);
+    for (const [name, id] of [['ppo', baselinePpo], ['random', baselineRandom]] as const) {
+      if (id === null) continue;
+      const run = next.get(id) ?? await this.loadRun(id, this.baselinesRoot, keeper);
+      if (run !== null && run !== undefined) {
+        next.set(id, run);
+        baselines[name] = id;
+      } else {
+        dangling.push(`${name} → ${id}`);
+      }
+    }
+    const danglingKey = dangling.join(',');
+    if (dangling.length > 0 && danglingKey !== this.lastDangling) {
+      console.warn(
+        `[oak-frontend] ${dangling.length} pointer file(s) name run directories`
+        + ` that could not be loaded and count as absent (${dangling.join('; ')})`,
+      );
+    }
+    this.lastDangling = danglingKey;
+    this.baselinePointers = baselines;
+    this.runs = next;
   }
 }
 

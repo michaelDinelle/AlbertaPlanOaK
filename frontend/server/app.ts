@@ -1,6 +1,6 @@
 import { normalize, resolve, sep } from 'node:path';
 import { join } from 'node:path';
-import { DIST_DIR, HOSTNAME, benchRootFromEnv, portFromEnv } from './config';
+import { DIST_DIR, HOSTNAME, baselinesRootFromEnv, benchRootFromEnv, portFromEnv } from './config';
 import { corsHeaders } from './cors';
 import { statOrNull } from './fs';
 import { findRecording } from './recordings';
@@ -8,6 +8,7 @@ import { RunIndex, buildRunDetail } from './runIndex';
 
 export interface AppOptions {
   benchRoot?: string;
+  baselinesRoot?: string;
   distDir?: string;
   production?: boolean;
 }
@@ -130,16 +131,17 @@ async function serveStatic(
 
 export function createApp(opts: AppOptions = {}): App {
   const benchRoot = opts.benchRoot ?? benchRootFromEnv();
+  const baselinesRoot = opts.baselinesRoot ?? baselinesRootFromEnv();
   const distDir = resolve(opts.distDir ?? DIST_DIR);
   const production = opts.production ?? process.env['NODE_ENV'] === 'production';
 
-  const index = new RunIndex({ benchRoot });
+  const index = new RunIndex({ benchRoot, baselinesRoot });
 
   async function handleApi(req: Request, url: URL, segs: string[]): Promise<Response> {
     const head = segs[1];
 
     if (head === 'health' && segs.length === 2) {
-      return json({ ok: true, benchRoot, production });
+      return json({ ok: true, benchRoot, baselinesRoot, production });
     }
 
     if (head !== 'runs') return fail(404, 'unknown endpoint');
