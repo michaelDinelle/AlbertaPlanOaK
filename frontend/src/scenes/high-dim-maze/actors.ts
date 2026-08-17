@@ -8,10 +8,12 @@ import {
   type EmissiveMaterial,
   type OakMaterial,
 } from '@kit/materials';
+import { clamp01 } from '@kit/mix';
+import { mergeColoredParts, type ColoredPart } from '@kit/parts';
 import type { Palette } from '@kit/tokens';
 import { makeWater, type WaterHandle } from '@kit/water';
 import * as THREE from 'three';
-import { clamp01, mergeColoredParts, type CanyonSkin, type ColoredPart } from './world';
+import type { CanyonSkin } from './world';
 
 
 const BASIN_R = 0.44;

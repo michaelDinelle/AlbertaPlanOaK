@@ -8,22 +8,13 @@ import {
   type EmissiveMaterial,
   type OakMaterial,
 } from '@kit/materials';
+import { blendTokens, clamp01, shade } from '@kit/mix';
+import { mergeColoredParts, type ColoredPart } from '@kit/parts';
 import type { Palette } from '@kit/tokens';
 import * as THREE from 'three';
 import { hash1f } from '@kit/rng';
 import { radialSprite } from '@kit/textures';
-import {
-  LAMP_REACH,
-  LANTERN_Z,
-  blendTokens,
-  clamp01,
-  mergeColoredParts,
-  propMaterial,
-  setPropTime,
-  shade,
-  type ColoredPart,
-  type MoorSkin,
-} from './world';
+import { LAMP_REACH, LANTERN_Z, propMaterial, setPropTime, type MoorSkin } from './world';
 
 export const POST_HEIGHT = 1.78;
 export const LAMP_Y = 1.5;

@@ -5,6 +5,7 @@ import {
   disposeCelebrations,
 } from '@kit/celebrate';
 import { GroundTruthOverlay, defaultFkToWorld } from '@kit/debug';
+import { clampRange, envelope } from '@kit/mix';
 import { makeOrbitRig, orbitFromPose, type OrbitRig } from '@kit/rigs';
 import type {
   FrameState,
@@ -20,7 +21,7 @@ import { FK_FLOATS, FK_POINT_INDEX, cheetahGeometry } from '@sim/fk/cheetah';
 import type { CheetahGeometry } from '@sim/types';
 import { REFERENCE_SPEED, buildCheetah, type CheetahHandle } from './actors';
 import { manifest } from './manifest';
-import { buildWorld, clampRange, type WorldHandle } from './world';
+import { buildWorld, type WorldHandle } from './world';
 
 
 export const TRACK_Y = 0.52;
@@ -228,12 +229,6 @@ class GoldHourSavannaScene implements SceneModule {
     this.ctx = null;
     this.flashAt = -Infinity;
   }
-}
-
-export function envelope(age: number, span: number, rate: number): number {
-  if (!(age >= 0) || age > span) return 0;
-  const e = Math.exp(-rate * age) * (1 - age / span);
-  return e < 0 ? 0 : e > 1 ? 1 : e;
 }
 
 const createScene: SceneFactory = () => new GoldHourSavannaScene();

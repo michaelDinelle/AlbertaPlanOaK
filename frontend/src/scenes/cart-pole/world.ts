@@ -2,17 +2,19 @@
 import * as THREE from 'three';
 import { applyFog, makeLightRig, type LightRig } from '@kit/lighting';
 import { oakMaterial, setMaterialsTime, type OakMaterial } from '@kit/materials';
+import { blendTokens, clampRange, smoothstep01, TOKEN_BLACK, TOKEN_WHITE } from '@kit/mix';
 import {
   makeAmbientParticles,
   makeMistPlanes,
   type AmbientParticlesHandle,
   type MistPlanesHandle,
 } from '@kit/particles';
+import { mergeColoredParts, type ColoredPart } from '@kit/parts';
 import { streamFor } from '@kit/rng';
 import { skyFromPalette, type SkyHandle } from '@kit/sky';
 import { makeTerrain, type TerrainHandle } from '@kit/terrain';
 import { valueNoise2 } from '@kit/textures';
-import { TOKENS, type Palette } from '@kit/tokens';
+import type { Palette } from '@kit/tokens';
 import type { SceneContext } from '@kit/types';
 import {
   excludeAny,
@@ -68,25 +70,6 @@ export const FOG_EXTENT = TERRAIN_W * 6.6;
 export const SUN_DIR: readonly [number, number, number] = [0.6, 0.7, 0.39];
 
 
-export function smoothstep01(t: number): number {
-  return t <= 0 ? 0 : t >= 1 ? 1 : t * t * (3 - 2 * t);
-}
-
-export function clampRange(v: number, lo: number, hi: number): number {
-  return v < lo ? lo : v > hi ? hi : v;
-}
-
-export function blendTokens(
-  a: THREE.ColorRepresentation,
-  b: THREE.ColorRepresentation,
-  k: number,
-): THREE.Color {
-  return new THREE.Color(a).lerp(new THREE.Color(b), k);
-}
-
-export const TOKEN_WHITE = TOKENS.palettes.noon.sun;
-export const TOKEN_BLACK = TOKENS.palettes.night.skyTop;
-
 export function unmixTokens(target: THREE.Color, pull: THREE.ColorRepresentation, k: number): THREE.Color {
   const p = new THREE.Color(pull);
   const inv = 1 / (1 - k);
@@ -96,55 +79,6 @@ export function unmixTokens(target: THREE.Color, pull: THREE.ColorRepresentation
     (target.b - k * p.b) * inv,
   );
 }
-
-export interface ColoredPart {
-  geometry: THREE.BufferGeometry;
-  color: THREE.ColorRepresentation;
-}
-
-export function mergeColoredParts(parts: readonly ColoredPart[], name: string): THREE.BufferGeometry {
-  let total = 0;
-  for (const p of parts) {
-    total += p.geometry.index ? p.geometry.index.count : p.geometry.getAttribute('position').count;
-  }
-  const positions = new Float32Array(total * 3);
-  const normals = new Float32Array(total * 3);
-  const colors = new Float32Array(total * 3);
-  const c = new THREE.Color();
-  let o = 0;
-  for (const part of parts) {
-    const geo = part.geometry;
-    const pos = geo.getAttribute('position');
-    const nor = geo.getAttribute('normal');
-    const index = geo.index;
-    const n = index ? index.count : pos.count;
-    c.set(part.color);
-    for (let i = 0; i < n; i++) {
-      const vi = index ? index.getX(i) : i;
-      positions[o * 3] = pos.getX(vi);
-      positions[o * 3 + 1] = pos.getY(vi);
-      positions[o * 3 + 2] = pos.getZ(vi);
-      if (nor) {
-        normals[o * 3] = nor.getX(vi);
-        normals[o * 3 + 1] = nor.getY(vi);
-        normals[o * 3 + 2] = nor.getZ(vi);
-      }
-      colors[o * 3] = c.r;
-      colors[o * 3 + 1] = c.g;
-      colors[o * 3 + 2] = c.b;
-      o++;
-    }
-  }
-  const g = new THREE.BufferGeometry();
-  g.setAttribute('position', new THREE.BufferAttribute(positions, 3));
-  g.setAttribute('normal', new THREE.BufferAttribute(normals, 3));
-  g.setAttribute('color', new THREE.BufferAttribute(colors, 3));
-  g.computeBoundingSphere();
-  g.name = name;
-  for (const p of parts) p.geometry.dispose();
-  return g;
-}
-
 
 function anchor(geometry: EnvGeometry, name: string): readonly [number, number, number] | null {
   const a = geometry.classic?.anchors[name];

@@ -8,18 +8,13 @@ import {
   type EmissiveMaterial,
   type OakMaterial,
 } from '@kit/materials';
+import { blendTokens, clamp01 } from '@kit/mix';
+import { mergeColoredParts, type ColoredPart } from '@kit/parts';
 import { fbmField, makeDataTexture } from '@kit/textures';
 import { TOKENS, type Palette } from '@kit/tokens';
 import { makeWater, type WaterHandle } from '@kit/water';
 import * as THREE from 'three';
-import {
-  PORTAL_LINTEL_Y,
-  blendTokens,
-  clamp01,
-  mergeColoredParts,
-  type ColoredPart,
-  type TempleSkin,
-} from './world';
+import { PORTAL_LINTEL_Y, type TempleSkin } from './world';
 
 export const GATE_SECONDS = 0.5;
 

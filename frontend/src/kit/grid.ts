@@ -5,6 +5,7 @@ import { hash2f } from './rng';
 import { emissiveMaterial, oakMaterial, oakUniforms, setEmissiveIntensity } from './materials';
 import type { EmissiveMaterial, OakMaterial } from './materials';
 import { TOKENS } from './tokens';
+import type { ExcludeFn } from './vegetation';
 
 
 export const CELL = TOKENS.cellSize;
@@ -678,4 +679,38 @@ export class HopMotion {
     this.position.y += this.height * 4 * t * (1 - t);
     if (t >= 1) this.position.copy(this.to);
   }
+}
+
+export function excludeCellCenters(grid: GridSize, radius: number): ExcludeFn {
+  const r2 = radius * radius;
+  const ox = (grid.w - 1) / 2;
+  const oz = (grid.h - 1) / 2;
+  return (x, z) => {
+    const cx = Math.round(x / CELL + ox);
+    const cz = Math.round(z / CELL + oz);
+    const dx = x - (cx - ox) * CELL;
+    const dz = z - (cz - oz) * CELL;
+    return dx * dx + dz * dz < r2;
+  };
+}
+
+export function excludeWallCells(grid: GridGeometry): ExcludeFn {
+  const ox = (grid.w - 1) / 2;
+  const oz = (grid.h - 1) / 2;
+  return (x, z) => isWall(grid, Math.round(x / CELL + ox), Math.round(z / CELL + oz));
+}
+
+export function collapseWallInstance(field: CellFieldHandle, x: number, y: number): void {
+  const mesh = field.wallMeshes[0];
+  const id = field.wallInstanceAt(x, y);
+  if (!mesh || id < 0) return;
+  const m = new THREE.Matrix4();
+  const p = new THREE.Vector3();
+  const q = new THREE.Quaternion();
+  const s = new THREE.Vector3();
+  mesh.getMatrixAt(id, m);
+  m.decompose(p, q, s);
+  m.compose(p, q, s.set(0, 0, 0));
+  mesh.setMatrixAt(id, m);
+  mesh.instanceMatrix.needsUpdate = true;
 }

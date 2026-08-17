@@ -1,9 +1,11 @@
 
 import * as THREE from 'three';
 import {
-  CELL,
   buildCellField,
+  CELL,
   cellToWorld,
+  excludeCellCenters,
+  excludeWallCells,
   isWall,
   type CellFieldHandle,
   type GridSize,
@@ -11,7 +13,9 @@ import {
 } from '@kit/grid';
 import { applyFog, makeLightRig, type LightRig } from '@kit/lighting';
 import { oakMaterial, type OakMaterial } from '@kit/materials';
+import { blendTokens, clamp01, shade, smoothstep01 } from '@kit/mix';
 import { makeAmbientParticles, makeMistPlanes, type AmbientParticlesHandle } from '@kit/particles';
+import { mergeColoredParts, type ColoredPart } from '@kit/parts';
 import { mulberry32, hash2f } from '@kit/rng';
 import { skyFromPalette, type SkyHandle } from '@kit/sky';
 import { makeTerrain, type TerrainHandle } from '@kit/terrain';
@@ -64,78 +68,9 @@ export const CAMERA_AZIMUTH = 0.25;
 export const CAMERA_STANDOFF = 15;
 
 
-export function smoothstep01(t: number): number {
-  return t <= 0 ? 0 : t >= 1 ? 1 : t * t * (3 - 2 * t);
-}
-
-export function clamp01(v: number): number {
-  return v < 0 ? 0 : v > 1 ? 1 : v;
-}
-
 export function lerp(a: number, b: number, t: number): number {
   return a + (b - a) * t;
 }
-
-export function blendTokens(
-  a: THREE.ColorRepresentation,
-  b: THREE.ColorRepresentation,
-  k: number,
-): THREE.Color {
-  return new THREE.Color(a).lerp(new THREE.Color(b), k);
-}
-
-export function shade(color: THREE.ColorRepresentation, k: number): THREE.Color {
-  return blendTokens(color, TOKENS.palettes.night.skyTop, k);
-}
-
-export interface ColoredPart {
-  geometry: THREE.BufferGeometry;
-  color: THREE.ColorRepresentation;
-}
-
-export function mergeColoredParts(parts: readonly ColoredPart[], name: string): THREE.BufferGeometry {
-  let total = 0;
-  for (const p of parts) {
-    total += p.geometry.index ? p.geometry.index.count : p.geometry.getAttribute('position').count;
-  }
-  const positions = new Float32Array(total * 3);
-  const normals = new Float32Array(total * 3);
-  const colors = new Float32Array(total * 3);
-  const c = new THREE.Color();
-  let o = 0;
-  for (const part of parts) {
-    const geo = part.geometry;
-    const pos = geo.getAttribute('position');
-    const nor = geo.getAttribute('normal');
-    const index = geo.index;
-    const n = index ? index.count : pos.count;
-    c.set(part.color);
-    for (let i = 0; i < n; i++) {
-      const vi = index ? index.getX(i) : i;
-      positions[o * 3] = pos.getX(vi);
-      positions[o * 3 + 1] = pos.getY(vi);
-      positions[o * 3 + 2] = pos.getZ(vi);
-      if (nor) {
-        normals[o * 3] = nor.getX(vi);
-        normals[o * 3 + 1] = nor.getY(vi);
-        normals[o * 3 + 2] = nor.getZ(vi);
-      }
-      colors[o * 3] = c.r;
-      colors[o * 3 + 1] = c.g;
-      colors[o * 3 + 2] = c.b;
-      o++;
-    }
-  }
-  const g = new THREE.BufferGeometry();
-  g.setAttribute('position', new THREE.BufferAttribute(positions, 3));
-  g.setAttribute('normal', new THREE.BufferAttribute(normals, 3));
-  g.setAttribute('color', new THREE.BufferAttribute(colors, 3));
-  g.computeBoundingSphere();
-  g.name = name;
-  for (const p of parts) p.geometry.dispose();
-  return g;
-}
-
 
 export function resolveGrid(geometry: EnvGeometry): GridGeometry {
   const g = geometry.grid;
@@ -279,26 +214,6 @@ export function canyonSkin(palette: Palette, tokens: typeof TOKENS): CanyonSkin 
     shaft: blendTokens(palette.sun, terracotta, 0.28),
     dust: blendTokens(blendTokens(terracotta, palette.sun, 0.55), palette.groundB, 0.2),
   };
-}
-
-
-export function excludeCellCenters(grid: GridSize, radius: number): ExcludeFn {
-  const r2 = radius * radius;
-  const ox = (grid.w - 1) / 2;
-  const oz = (grid.h - 1) / 2;
-  return (x, z) => {
-    const cx = Math.round(x / CELL + ox);
-    const cz = Math.round(z / CELL + oz);
-    const dx = x - (cx - ox) * CELL;
-    const dz = z - (cz - oz) * CELL;
-    return dx * dx + dz * dz < r2;
-  };
-}
-
-export function excludeWallCells(grid: GridGeometry): ExcludeFn {
-  const ox = (grid.w - 1) / 2;
-  const oz = (grid.h - 1) / 2;
-  return (x, z) => isWall(grid, Math.round(x / CELL + ox), Math.round(z / CELL + oz));
 }
 
 

@@ -5,14 +5,15 @@ import {
   type EmissiveMaterial,
   type OakMaterial,
 } from '@kit/materials';
+import { blendTokens, clampRange, smoothstep01, TOKEN_BLACK, TOKEN_WHITE } from '@kit/mix';
 import { makeAmbientParticles, type AmbientParticlesHandle } from '@kit/particles';
+import { mergeColoredParts, type ColoredPart } from '@kit/parts';
 import { hash2f } from '@kit/rng';
 import { radialSprite } from '@kit/textures';
 import type { Palette } from '@kit/tokens';
 import * as THREE from 'three';
 import { CHEETAH_BONES, FK_POINT_INDEX } from '@sim/fk/cheetah';
 import type { CheetahGeometry } from '@sim/types';
-import { blendTokens, clampRange, mergeColoredParts, smoothstep01, TOKEN_BLACK, TOKEN_WHITE, type ColoredPart } from './world';
 
 
 const SPOT_DENSITY = 7.5;

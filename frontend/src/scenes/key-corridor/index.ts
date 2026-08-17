@@ -3,6 +3,7 @@ import { KEYCORRIDOR_CARRY, KEYCORRIDOR_GATE, KEYCORRIDOR_GX, KEYCORRIDOR_GY, KE
 import { CelebrationPool, attachCelebrations, disposeCelebrations } from '@kit/celebrate';
 import { GroundTruthOverlay } from '@kit/debug';
 import { cellToWorldVec, clampCell, type GridSize } from '@kit/grid';
+import { clamp01, envelope, smoothstep01 } from '@kit/mix';
 import { makeOrbitRig, type OrbitRig } from '@kit/rigs';
 import { TOKENS } from '@kit/tokens';
 import type {
@@ -29,11 +30,9 @@ import { manifest } from './manifest';
 import {
   CAMERA_AZIMUTH,
   buildWorld,
-  clamp01,
   gardenSkin,
   resolveDoor,
   resolveGrid,
-  smoothstep01,
   type GardenSkin,
   type WorldHandle,
 } from './world';
@@ -458,12 +457,6 @@ class IvyGateScene implements SceneModule {
   }
 }
 
-
-export function envelope(age: number, span: number, rate: number): number {
-  if (!(age >= 0) || age > span) return 0;
-  const e = Math.exp(-rate * age) * (1 - age / span);
-  return e < 0 ? 0 : e > 1 ? 1 : e;
-}
 
 export function growth(age: number): number {
   if (!(age >= 0) || age >= GROW_SECONDS) return 1;

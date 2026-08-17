@@ -2,6 +2,7 @@
 import { GroundTruthOverlay } from '@kit/debug';
 import { makeOrbitRig, orbitFromPose, type OrbitRig } from '@kit/rigs';
 import { CelebrationPool, attachCelebrations, disposeCelebrations } from '@kit/celebrate';
+import { clampRange, envelope } from '@kit/mix';
 import type {
   FrameState,
   FrameUpdate,
@@ -18,7 +19,6 @@ import {
   EXACT_POINT_FLOATS,
   acrobotPointsExact,
   buildWorld,
-  clampRange,
   pivotAnchor,
   successAnchor,
   type WorldHandle,
@@ -39,12 +39,6 @@ const BURST_PARTICLES = 110;
 const PULSE_STRENGTH = 0.42;
 
 const TAU = Math.PI * 2;
-
-export function envelope(age: number, span: number, rate: number): number {
-  if (!(age >= 0) || age > span) return 0;
-  const e = Math.exp(-rate * age) * (1 - age / span);
-  return e < 0 ? 0 : e > 1 ? 1 : e;
-}
 
 export function torqueOf(state: FrameState): number {
   return acrobotTorque(state.pose[ACROBOT_ACTION] ?? 0);

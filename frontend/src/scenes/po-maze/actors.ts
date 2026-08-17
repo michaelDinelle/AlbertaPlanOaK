@@ -1,8 +1,10 @@
 
 import { emissiveMaterial, oakMaterial, setEmissiveIntensity, type EmissiveMaterial, type OakMaterial } from '@kit/materials';
+import { clamp01, smoothstep01 } from '@kit/mix';
+import { mergeColoredParts, type ColoredPart } from '@kit/parts';
 import { radialSprite } from '@kit/textures';
 import * as THREE from 'three';
-import { clamp01, mergeColoredParts, smoothstep01, type ColoredPart, type ForestSkin } from './world';
+import type { ForestSkin } from './world';
 
 
 export interface GoalBeaconOptions {

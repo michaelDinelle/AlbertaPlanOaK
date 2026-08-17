@@ -8,6 +8,8 @@ import {
   type EmissiveMaterial,
   type OakMaterial,
 } from '@kit/materials';
+import { clamp01 } from '@kit/mix';
+import { mergeColoredParts, type ColoredPart } from '@kit/parts';
 import { hash1f } from '@kit/rng';
 import type { Palette } from '@kit/tokens';
 import * as THREE from 'three';
@@ -15,11 +17,8 @@ import {
   DIVIDER_CAP,
   DIVIDER_HEIGHT,
   DIVIDER_THICKNESS,
-  clamp01,
   ivyLeafGeometry,
-  mergeColoredParts,
   smoothBand,
-  type ColoredPart,
   type GardenSkin,
 } from './world';
 

@@ -2,6 +2,7 @@
 import { CelebrationPool, attachCelebrations, disposeCelebrations } from '@kit/celebrate';
 import { GroundTruthOverlay } from '@kit/debug';
 import { cellToWorld, cellToWorldVec, type Vec3Tuple } from '@kit/grid';
+import { clamp01, envelope } from '@kit/mix';
 import { makeOrbitRig, type OrbitRig } from '@kit/rigs';
 import { TOKENS } from '@kit/tokens';
 import type {
@@ -26,7 +27,6 @@ import {
   CHOICE_CELL,
   CUE_CELL,
   buildWorld,
-  clamp01,
   readChoice,
   readCue,
   readPos,
@@ -405,12 +405,6 @@ class FireflyCaveScene implements SceneModule {
   }
 }
 
-
-export function envelope(age: number, span: number, rate: number): number {
-  if (!(age >= 0) || age > span) return 0;
-  const e = Math.exp(-rate * age) * (1 - age / span);
-  return e < 0 ? 0 : e > 1 ? 1 : e;
-}
 
 export function floodRunning(age: number): boolean {
   return age >= 0 && age < FLOOD_SECONDS;

@@ -2,6 +2,7 @@
 import { CelebrationPool, attachCelebrations, disposeCelebrations } from '@kit/celebrate';
 import { GroundTruthOverlay } from '@kit/debug';
 import type { GridSize } from '@kit/grid';
+import { clamp01, envelope } from '@kit/mix';
 import { makeOrbitRig, type OrbitRig } from '@kit/rigs';
 import { TOKENS } from '@kit/tokens';
 import type {
@@ -18,8 +19,6 @@ import { buildBubble, buildClam, type BubbleHandle, type ClamHandle } from './ac
 import { manifest } from './manifest';
 import {
   cellToReefVec,
-  clamp01,
-  envelope,
   isDiveStep,
   readDive,
   reefDepthYAt,

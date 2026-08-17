@@ -6,6 +6,7 @@ import {
   attachCelebrations,
   disposeCelebrations,
 } from '@kit/celebrate';
+import { envelope } from '@kit/mix';
 import type {
   FrameState,
   FrameUpdate,
@@ -268,12 +269,6 @@ class AlpineValleyScene implements SceneModule {
     this.flareAt = -Infinity;
     this.screeAt = -Infinity;
   }
-}
-
-function envelope(age: number, span: number, rate: number): number {
-  if (!(age >= 0) || age > span) return 0;
-  const e = Math.exp(-rate * age) * (1 - age / span);
-  return e < 0 ? 0 : e > 1 ? 1 : e;
 }
 
 const createScene: SceneFactory = () => new AlpineValleyScene();

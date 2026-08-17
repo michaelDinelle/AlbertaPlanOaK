@@ -6,6 +6,8 @@ import {
   type EmissiveMaterial,
   type OakMaterial,
 } from '@kit/materials';
+import { blendTokens, clampRange } from '@kit/mix';
+import { mergeColoredParts, type ColoredPart } from '@kit/parts';
 import type { Palette } from '@kit/tokens';
 import * as THREE from 'three';
 import {
@@ -26,7 +28,6 @@ import {
   TASSEL_WEIGHT_H,
   TASSEL_WEIGHT_R,
 } from './dims';
-import { blendTokens, clampRange, mergeColoredParts, type ColoredPart } from './world';
 
 
 const ROD_TOP = -0.05;

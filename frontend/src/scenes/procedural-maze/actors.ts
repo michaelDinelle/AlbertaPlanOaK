@@ -1,10 +1,12 @@
 
 import { emissiveMaterial, oakMaterial, oakUniforms, setEmissiveIntensity } from '@kit/materials';
 import type { EmissiveMaterial, OakMaterial } from '@kit/materials';
+import { clamp01 } from '@kit/mix';
+import { mergeColoredParts, type ColoredPart } from '@kit/parts';
 import { radialSprite } from '@kit/textures';
 import type { Palette } from '@kit/tokens';
 import * as THREE from 'three';
-import { clamp01, mergeColoredParts, type ColoredPart, type RuinSkin } from './world';
+import type { RuinSkin } from './world';
 
 export const BEAM_LENGTH = 4.4;
 export const BEAM_BASE_RADIUS = 0.4;

@@ -3,6 +3,7 @@ import { FOURROOMS_GX, FOURROOMS_GY, FOURROOMS_X, FOURROOMS_Y } from '@sim/envs/
 import { cellToWorldVec, clampCell, type GridSize } from '@kit/grid';
 import { CelebrationPool, attachCelebrations, disposeCelebrations } from '@kit/celebrate';
 import { GroundTruthOverlay } from '@kit/debug';
+import { blendTokens, envelope, shade } from '@kit/mix';
 import { makeOrbitRig, type OrbitRig } from '@kit/rigs';
 import { TOKENS } from '@kit/tokens';
 import type {
@@ -18,15 +19,7 @@ import * as THREE from 'three';
 import type { GridCell, GridGeometry } from '@sim/types';
 import { buildLantern, type LanternHandle } from './actors';
 import { manifest } from './manifest';
-import {
-  CAMERA_AZIMUTH,
-  blendTokens,
-  buildWorld,
-  courtyardSkin,
-  resolveGrid,
-  shade,
-  type WorldHandle,
-} from './world';
+import { CAMERA_AZIMUTH, buildWorld, courtyardSkin, resolveGrid, type WorldHandle } from './world';
 
 
 const CAM_AZIMUTH = CAMERA_AZIMUTH;
@@ -313,12 +306,6 @@ class FourSeasonsCourtyardScene implements SceneModule {
   }
 }
 
-
-export function envelope(age: number, span: number, rate: number): number {
-  if (!(age >= 0) || age > span) return 0;
-  const e = Math.exp(-rate * age) * (1 - age / span);
-  return e < 0 ? 0 : e > 1 ? 1 : e;
-}
 
 export function growth(age: number): number {
   if (!(age >= 0) || age >= GROW_SECONDS) return 1;

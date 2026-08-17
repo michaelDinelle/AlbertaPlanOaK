@@ -6,12 +6,13 @@ import {
   type EmissiveMaterial,
   type OakMaterial,
 } from '@kit/materials';
+import { blendTokens, clampRange } from '@kit/mix';
 import { makeAmbientParticles, type AmbientParticlesHandle } from '@kit/particles';
+import { mergeColoredParts, type ColoredPart } from '@kit/parts';
 import { radialSprite } from '@kit/textures';
 import type { Palette } from '@kit/tokens';
 import * as THREE from 'three';
 import { MC_MAX_SPEED } from '@sim/envs/mountaincar';
-import { blendTokens, clampRange, mergeColoredParts, type ColoredPart } from './world';
 
 
 const WHEEL_R = 0.034;
