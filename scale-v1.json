@@ -1,0 +1,123 @@
+{
+  "envSourcesHash": "cca21c5c7e28c119a8594241ce53183af61c706d305cec603936da58b087f039",
+  "envs": {
+    "Acrobot-cont-v0": {
+      "ceiling": 0.00909559375,
+      "ceilingSource": "ppo-iqm",
+      "derivation": "lifetime delivered-rate IQM of the crowned ppo baseline on this env's lanes",
+      "floor": 0.0003858125,
+      "floorSource": "random-iqm"
+    },
+    "CartPole-cont-v0": {
+      "ceiling": 1.0,
+      "ceilingSource": "closed-form",
+      "derivation": "reward is 1.0 every step for every policy; degenerate env, floor forced to analytic 0.0",
+      "floor": 0.0,
+      "floorSource": "analytic"
+    },
+    "Chain-cont-v0": {
+      "ceiling": 0.06666666666666667,
+      "ceilingSource": "closed-form",
+      "derivation": "press the advancing action every step; reward fires when pos reaches 15, a 15-step cycle",
+      "floor": 0.0041706875,
+      "floorSource": "random-iqm"
+    },
+    "DeepSea-cont-v0": {
+      "ceiling": 0.14223214285714286,
+      "ceilingSource": "closed-form",
+      "derivation": "dive right all 7 rows for the +1; the -0.00125 action-bit cost hits on E=3.5 of 7 diagonal cells over the per-seed philox map",
+      "floor": 0.0005001661291122437,
+      "floorSource": "random-iqm"
+    },
+    "DelayedChain-cont-v0": {
+      "ceiling": 0.03225806451612903,
+      "ceilingSource": "closed-form",
+      "derivation": "press the advancing action every step; reward fires when pos reaches 31, a 31-step cycle",
+      "floor": 0.0010126562499999999,
+      "floorSource": "random-iqm"
+    },
+    "FourRooms-cont-v0": {
+      "ceiling": 0.14103516592372461,
+      "ceilingSource": "enumerated",
+      "derivation": "1/E[BFS d(u,v)] = 1/7.090430 over ordered pairs of the 68 free cells; agent sits at the reached goal and the next goal is uniform over the other 67 cells, so episode starts are uniform over ordered pairs",
+      "floor": 0.0026214375,
+      "floorSource": "random-iqm"
+    },
+    "HalfCheetah-v4": {
+      "ceiling": 1.1912068515625,
+      "ceilingSource": "ppo-iqm",
+      "derivation": "lifetime delivered-rate IQM of the crowned ppo baseline on this env's lanes",
+      "floor": -0.260452974609375,
+      "floorSource": "random-iqm"
+    },
+    "HighDimMaze-cont-v0": {
+      "ceiling": 0.14612898693269635,
+      "ceilingSource": "enumerated",
+      "derivation": "1/E[BFS d(u,v)] = 1/6.843269 over ordered pairs of the 65 free cells, states (x,y,lastDir) with dash edges, initial lastDir chosen freely per episode: an upper bound since the carried-over lastDir may not be the best one",
+      "floor": 0.00205053125,
+      "floorSource": "random-iqm"
+    },
+    "KeyCorridor-cont-v0": {
+      "ceiling": 0.11149653121902874,
+      "ceilingSource": "enumerated",
+      "derivation": "1/E[episode] = 1/8.968889; exact BFS over (x,y,hasKey,doorUnlocked) for all 15^3 spawn triples: agent+key uniform in the left 3x5 room, goal uniform in the right 3x5 room, door at (4,3)",
+      "floor": 0.003697125,
+      "floorSource": "random-iqm"
+    },
+    "LargeDeepSea-cont-v0": {
+      "ceiling": 0.06635416666666667,
+      "ceilingSource": "closed-form",
+      "derivation": "dive right all 15 rows for the +1; the -0.000625 action-bit cost hits on E=7.5 of 15 diagonal cells over the per-seed philox map",
+      "floor": -0.0003101541318893433,
+      "floorSource": "random-iqm"
+    },
+    "MemoryChain-cont-v0": {
+      "ceiling": 0.03125,
+      "ceilingSource": "closed-form",
+      "derivation": "31 advancing steps to pos 31 plus the cue-answer step, a 32-step cycle at one reward",
+      "floor": 0.0005005000000000001,
+      "floorSource": "random-iqm"
+    },
+    "MountainCar-cont-v0": {
+      "ceiling": 0.0046679375,
+      "ceilingSource": "ppo-iqm",
+      "derivation": "lifetime delivered-rate IQM of the crowned ppo baseline on this env's lanes",
+      "floor": 2.4062499999999995e-05,
+      "floorSource": "random-iqm"
+    },
+    "MultiKeyCorridor-cont-v0": {
+      "ceiling": 0.045937117190690074,
+      "ceilingSource": "enumerated",
+      "derivation": "1/E[episode] = 1/21.768889; forced serial route key1-door1-key2-door2-key3-door3-goal with Manhattan segments (rooms are open 3x5 boxes), agent/keys/goal uniform per room; spawning on key1 costs 1 extra step beside a wall or locked door, else 2",
+      "floor": 0.00071753125,
+      "floorSource": "random-iqm"
+    },
+    "POMaze-cont-v0": {
+      "ceiling": 0.02680915625,
+      "ceilingSource": "ppo-iqm",
+      "derivation": "lifetime delivered-rate IQM of the crowned ppo baseline on this env's lanes",
+      "floor": 0.00153421875,
+      "floorSource": "random-iqm"
+    },
+    "Pendulum-cont-v0": {
+      "ceiling": 0.0,
+      "ceilingSource": "closed-form",
+      "derivation": "cost theta^2 + 0.1 thetaDot^2 + 0.001 torque^2 is nonnegative and the upright rest state is a zero-cost fixed point",
+      "floor": -3.8895074921875,
+      "floorSource": "random-iqm"
+    },
+    "ProceduralMaze-cont-v0": {
+      "ceiling": 0.0726966516640922,
+      "ceilingSource": "enumerated",
+      "derivation": "IQM over the 64 keeper-slice seeds of per-seed 1/E[BFS d(u,v)] on the exact philox+DFS maze (49 free cells each), spawn and goal uniform over free cells",
+      "floor": 0.00073478125,
+      "floorSource": "random-iqm"
+    }
+  },
+  "generatedAt": "2026-08-17T17:43:01Z",
+  "scale": "v1",
+  "sourceRunNames": {
+    "ppo": "baseline-ppo-94e6c6b450be",
+    "random": "baseline-random-66b8d7698f5a"
+  }
+}
