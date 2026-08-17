@@ -1,7 +1,7 @@
 import { useMemo } from 'react';
 import uPlot from 'uplot';
 import type { RunDetail } from '@shared/types';
-import { Card, CardHead, ChartNote, LegendChip } from '../../components/ui/card';
+import { Card, CardHead, ChartNote } from '../../components/ui/card';
 import { cssVar, monoFont, tooltipPlugin, withAlpha } from '../../charts/plugins';
 import { frontierOptions, type SeriesLine } from '../../charts/specs';
 import { useUPlot } from '../../charts/useUPlot';
