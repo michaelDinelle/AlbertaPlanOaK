@@ -3,6 +3,9 @@
 /Packages/
 
 .oak-benchmarks/
+/.oak-baselines/*
+!/.oak-baselines/ppo
+!/.oak-baselines/random
 
 media/*.mp4
 

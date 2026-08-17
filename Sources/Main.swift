@@ -1572,6 +1572,9 @@ final class TapeWriter {
     if fm.fileExists(atPath: dir.path),
       !(try fm.contentsOfDirectory(atPath: dir.path).filter { $0 != ".DS_Store" }).isEmpty
     {
+      if env["OAK_METRICS_STORAGE"] != nil {
+        throw err("OAK_METRICS_STORAGE points at non-empty \(dir.path); refusing to write beside existing data.")
+      }
       dir = URL(
         fileURLWithPath: "\(dir.path)-\(ProcessInfo.processInfo.processIdentifier)",
         isDirectory: true)
