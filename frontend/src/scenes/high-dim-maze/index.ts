@@ -1,19 +1,13 @@
 
-import { CelebrationPool, attachCelebrations, disposeCelebrations } from '@kit/celebrate';
-import { GroundTruthOverlay } from '@kit/debug';
+import type { CelebrationPoolOptions } from '@kit/celebrate';
+import type { GroundTruthOptions } from '@kit/debug';
 import { CELL, cellToWorldVec, clampCell, type GridSize } from '@kit/grid';
 import { blendTokens, clamp01, envelope } from '@kit/mix';
 import { makeAmbientParticles, type AmbientParticlesHandle } from '@kit/particles';
-import { makeOrbitRig, type OrbitRig } from '@kit/rigs';
+import type { OrbitRigOptions } from '@kit/rigs';
+import { StageScene } from '@kit/stage';
 import { TOKENS } from '@kit/tokens';
-import type {
-  FrameState,
-  FrameUpdate,
-  SceneContext,
-  SceneFactory,
-  SceneModule,
-  SceneSize,
-} from '@kit/types';
+import type { FrameState, FrameUpdate, SceneContext, SceneFactory, SceneSize } from '@kit/types';
 import { Wisp, yawFromGridDelta } from '@kit/wisp';
 import * as THREE from 'three';
 import type { GridCell, GridGeometry } from '@sim/types';
@@ -66,21 +60,15 @@ function read(state: FrameState, grid: GridSize, out: Reading): Reading {
   return out;
 }
 
-class SlotCanyonsScene implements SceneModule {
+class SlotCanyonsScene extends StageScene<WorldHandle> {
   readonly manifest = manifest;
-  scene = new THREE.Scene();
-  camera = new THREE.PerspectiveCamera(TOKENS.fovHero, 16 / 9, 0.1, 900);
+  protected readonly stageName = 'slotCanyons';
 
-  private ctx: SceneContext | null = null;
-  private world: WorldHandle | null = null;
   private wisp: Wisp | null = null;
   private scarf: ScarfHandle | null = null;
   private gust: GustHandle | null = null;
   private oasis: OasisHandle | null = null;
   private settleDust: AmbientParticlesHandle | null = null;
-  private pool: CelebrationPool | null = null;
-  private rig: OrbitRig | null = null;
-  private overlay: GroundTruthOverlay | null = null;
   private grid: GridGeometry = resolveGrid({});
 
   private growAt = -Infinity;
@@ -101,25 +89,20 @@ class SlotCanyonsScene implements SceneModule {
   private spray = 0x5ee0c8;
   private gold = 0xffd166;
 
-  private debugOn = false;
-
-  async init(ctx: SceneContext): Promise<void> {
-    this.ctx = ctx;
-    this.scene.name = 'slotCanyonsScene';
-
+  protected buildWorld(ctx: SceneContext): WorldHandle {
     const grid = resolveGrid(ctx.geometry);
     this.grid = grid;
+    return buildWorld(ctx, this.scene, grid);
+  }
 
+  protected buildActors(ctx: SceneContext, world: WorldHandle): void {
+    const grid = this.grid;
     const palette = ctx.tokens.palettes.afternoon;
     const skin = canyonSkin(palette, ctx.tokens);
     const accent = ctx.tokens.accents[manifest.accent] ?? ctx.tokens.celebrationGold;
     const ember = accent;
     this.spray = blendTokens(skin.water, skin.waterDeep, 0.4).getHex();
     this.gold = ctx.tokens.celebrationGold;
-
-    const world = buildWorld(ctx, this.scene, grid);
-    this.world = world;
-    this.scene.add(world.group);
 
     const oasisLight = world.rig.points[0];
     if (oasisLight) oasisLight.color.set(skin.shaft);
@@ -176,8 +159,10 @@ class SlotCanyonsScene implements SceneModule {
     const oasis = buildOasis({ palette, skin, name: 'oasisAlcove' });
     this.oasis = oasis;
     this.scene.add(oasis.group);
+  }
 
-    const rig = makeOrbitRig({
+  protected rigOptions(ctx: SceneContext): OrbitRigOptions {
+    return {
       canvas: ctx.canvas,
       target: [0, CAM_TARGET_Y, 0],
       distance: CAM_DISTANCE,
@@ -191,45 +176,43 @@ class SlotCanyonsScene implements SceneModule {
       rotateSpeed: 0.004,
       zoomSpeed: 0.0012,
       name: 'canyonOrbitRig',
-    });
-    this.rig = rig;
-    this.camera = rig.camera;
-    rig.snap();
+    };
+  }
 
-    const pool = new CelebrationPool({
+  protected poolOptions(ctx: SceneContext): CelebrationPoolOptions {
+    return {
       seed: ctx.seed,
       burstSize: BURST_PARTICLES,
       name: 'canyonCelebrations',
-    });
-    attachCelebrations(this.scene, pool);
-    pool.setPixelRatio(ctx.size.dpr);
-    this.pool = pool;
+    };
+  }
 
+  protected overlayOptions(): GroundTruthOptions {
+    const grid = this.grid;
     const overlayReading: Reading = {
       agent: { x: 0, y: 0 },
       goal: { x: 0, y: 0 },
       lastDir: 1,
       action: 0,
     };
-    this.overlay = new GroundTruthOverlay(ctx.geometry, {
+    return {
       camera: this.camera,
       agentCell: (state) => read(state, grid, overlayReading).agent,
       goalCell: (state) => read(state, grid, overlayReading).goal,
       name: 'canyonGroundTruth',
-    });
-    this.scene.add(this.overlay.group);
-    this.overlay.visible = this.debugOn;
-
-    world.setPixelRatio(ctx.size.dpr);
-    world.setTime(0);
-    wisp.setCell(0, 0, grid);
-    oasis.setState(1, 0);
-    oasis.setTime(0);
-    scarf.setState(0, 1, 0, 0);
-    gust.clear();
+    };
   }
 
-  update(frame: FrameUpdate): void {
+  protected start(_ctx: SceneContext, world: WorldHandle): void {
+    world.setTime(0);
+    this.wisp?.setCell(0, 0, this.grid);
+    this.oasis?.setState(1, 0);
+    this.oasis?.setTime(0);
+    this.scarf?.setState(0, 1, 0, 0);
+    this.gust?.clear();
+  }
+
+  protected tick(frame: FrameUpdate): void {
     const ctx = this.ctx;
     const world = this.world;
     const wisp = this.wisp;
@@ -369,8 +352,6 @@ class SlotCanyonsScene implements SceneModule {
 
     this.lastGoal.x = goal.x;
     this.lastGoal.y = goal.y;
-
-    if (this.debugOn && this.overlay) this.overlay.setState(frame.state);
   }
 
   private clearDash(agent: GridCell): void {
@@ -396,21 +377,11 @@ class SlotCanyonsScene implements SceneModule {
   }
 
   resize(size: SceneSize): void {
-    const aspect = size.height > 0 ? size.width / size.height : 16 / 9;
-    this.rig?.resize(aspect);
-    this.world?.setPixelRatio(size.dpr);
+    super.resize(size);
     this.settleDust?.setPixelRatio(size.dpr);
-    this.pool?.setPixelRatio(size.dpr);
   }
 
-  setDebug(on: boolean): void {
-    this.debugOn = on;
-    if (this.overlay) this.overlay.visible = on;
-  }
-
-  dispose(): void {
-    this.overlay?.dispose();
-    this.overlay = null;
+  protected drop(): void {
     this.oasis?.dispose();
     this.oasis = null;
     this.settleDust?.dispose();
@@ -421,15 +392,6 @@ class SlotCanyonsScene implements SceneModule {
     this.scarf = null;
     this.wisp?.dispose();
     this.wisp = null;
-    this.world?.dispose();
-    this.world = null;
-    this.rig?.dispose();
-    this.rig = null;
-    disposeCelebrations(this.scene);
-    this.pool = null;
-    this.scene.clear();
-    this.scene.fog = null;
-    this.ctx = null;
     this.growAt = -Infinity;
     this.bloomAt = -Infinity;
     this.dashAt = -Infinity;

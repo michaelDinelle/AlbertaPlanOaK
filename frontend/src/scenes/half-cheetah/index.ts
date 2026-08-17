@@ -1,21 +1,10 @@
 
-import {
-  CelebrationPool,
-  attachCelebrations,
-  disposeCelebrations,
-} from '@kit/celebrate';
-import { GroundTruthOverlay, defaultFkToWorld } from '@kit/debug';
+import type { CelebrationPoolOptions } from '@kit/celebrate';
+import { defaultFkToWorld, type GroundTruthOptions } from '@kit/debug';
 import { clampRange, envelope } from '@kit/mix';
-import { makeOrbitRig, orbitFromPose, type OrbitRig } from '@kit/rigs';
-import type {
-  FrameState,
-  FrameUpdate,
-  SceneContext,
-  SceneFactory,
-  SceneModule,
-  SceneSize,
-} from '@kit/types';
-import * as THREE from 'three';
+import { orbitFromPose, type OrbitRigOptions } from '@kit/rigs';
+import { StageScene } from '@kit/stage';
+import type { FrameState, FrameUpdate, SceneContext, SceneFactory, SceneSize } from '@kit/types';
 import { CHEETAH_DT, CHEETAH_ROOT_X } from '@sim/envs/halfcheetah';
 import { FK_FLOATS, FK_POINT_INDEX, cheetahGeometry } from '@sim/fk/cheetah';
 import type { CheetahGeometry } from '@sim/types';
@@ -38,17 +27,11 @@ function velocityOf(state: FrameState, prev: FrameState | null): number {
   return 0;
 }
 
-class GoldHourSavannaScene implements SceneModule {
+class GoldHourSavannaScene extends StageScene<WorldHandle> {
   readonly manifest = manifest;
-  scene = new THREE.Scene();
-  camera = new THREE.PerspectiveCamera(40, 16 / 9, 0.1, 500);
+  protected readonly stageName = 'goldHourSavanna';
 
-  private ctx: SceneContext | null = null;
-  private world: WorldHandle | null = null;
   private cheetah: CheetahHandle | null = null;
-  private rig: OrbitRig | null = null;
-  private pool: CelebrationPool | null = null;
-  private overlay: GroundTruthOverlay | null = null;
   private fkSource: CheetahGeometry = cheetahGeometry;
 
   private readonly fkOut = new Float32Array(FK_FLOATS);
@@ -56,19 +39,14 @@ class GoldHourSavannaScene implements SceneModule {
 
   private flashAt = -Infinity;
 
-  private debugOn = false;
-
-  async init(ctx: SceneContext): Promise<void> {
-    this.ctx = ctx;
-    this.scene.name = 'goldHourSavannaScene';
+  protected buildWorld(ctx: SceneContext): WorldHandle {
     this.fkSource = ctx.geometry.cheetah ?? cheetahGeometry;
+    return buildWorld(ctx, this.scene);
+  }
 
+  protected buildActors(ctx: SceneContext, world: WorldHandle): void {
     const palette = ctx.tokens.palettes.dusk;
     const accent = ctx.tokens.accents[manifest.accent] ?? ctx.tokens.celebrationGold;
-
-    const world = buildWorld(ctx, this.scene);
-    this.world = world;
-    this.scene.add(world.group);
 
     const bounce = world.rig.points[0];
     if (bounce) bounce.color.set(palette.accentLight);
@@ -83,10 +61,12 @@ class GoldHourSavannaScene implements SceneModule {
     });
     this.cheetah = cheetah;
     this.scene.add(cheetah.group);
+  }
 
+  protected rigOptions(ctx: SceneContext): OrbitRigOptions {
     const offset = CAM_OFFSET;
     const home = orbitFromPose(offset, [0, 0, 0]);
-    const rig = makeOrbitRig({
+    return {
       canvas: ctx.canvas,
       target: [0, TRACK_Y, 0],
       azimuth: home.azimuth,
@@ -99,35 +79,33 @@ class GoldHourSavannaScene implements SceneModule {
       damping: 6,
       follow: 3.4,
       name: 'savannaOrbitRig',
-    });
-    this.rig = rig;
-    this.camera = rig.camera;
+    };
+  }
 
-    const pool = new CelebrationPool({
+  protected poolOptions(ctx: SceneContext): CelebrationPoolOptions {
+    return {
       seed: ctx.seed,
       name: 'savannaCelebrations',
-    });
-    attachCelebrations(this.scene, pool);
-    pool.setPixelRatio(ctx.size.dpr);
-    this.pool = pool;
+    };
+  }
 
-    this.overlay = new GroundTruthOverlay(ctx.geometry, {
+  protected overlayOptions(): GroundTruthOptions {
+    return {
       camera: this.camera,
       fkToWorld: defaultFkToWorld,
       name: 'savannaGroundTruth',
-    });
-    this.scene.add(this.overlay.group);
-    this.overlay.visible = this.debugOn;
+    };
+  }
 
-    cheetah.setPixelRatio(ctx.size.dpr);
-    world.setPixelRatio(ctx.size.dpr);
+  protected start(ctx: SceneContext, world: WorldHandle): void {
+    this.cheetah?.setPixelRatio(ctx.size.dpr);
 
     this.applyPose(this.renderPose, 0);
     world.setTime(0);
-    cheetah.setTime(0);
-    cheetah.setGlow(1);
-    rig.setTarget(0, TRACK_Y, 0);
-    rig.snap();
+    this.cheetah?.setTime(0);
+    this.cheetah?.setGlow(1);
+    this.rig?.setTarget(0, TRACK_Y, 0);
+    this.rig?.snap();
   }
 
   private applyPose(pose: Float32Array, speed01: number): void {
@@ -142,7 +120,7 @@ class GoldHourSavannaScene implements SceneModule {
     world.setSpeed(speed01);
   }
 
-  update(frame: FrameUpdate): void {
+  protected tick(frame: FrameUpdate): void {
     const ctx = this.ctx;
     const world = this.world;
     const cheetah = this.cheetah;
@@ -196,37 +174,16 @@ class GoldHourSavannaScene implements SceneModule {
     rig.follow(rootX, TRACK_Y, 0);
     if (teleported || frame.scrubbed) rig.snap();
     else rig.update(frame.dtReal);
-
-    if (this.debugOn && this.overlay) this.overlay.setState(state);
   }
 
   resize(size: SceneSize): void {
-    const aspect = size.height > 0 ? size.width / size.height : 16 / 9;
-    this.rig?.resize(aspect);
+    super.resize(size);
     this.cheetah?.setPixelRatio(size.dpr);
-    this.world?.setPixelRatio(size.dpr);
-    this.pool?.setPixelRatio(size.dpr);
   }
 
-  setDebug(on: boolean): void {
-    this.debugOn = on;
-    if (this.overlay) this.overlay.visible = on;
-  }
-
-  dispose(): void {
-    this.overlay?.dispose();
-    this.overlay = null;
+  protected drop(): void {
     this.cheetah?.dispose();
     this.cheetah = null;
-    this.world?.dispose();
-    this.world = null;
-    this.rig?.dispose();
-    this.rig = null;
-    disposeCelebrations(this.scene);
-    this.pool = null;
-    this.scene.clear();
-    this.scene.fog = null;
-    this.ctx = null;
     this.flashAt = -Infinity;
   }
 }
