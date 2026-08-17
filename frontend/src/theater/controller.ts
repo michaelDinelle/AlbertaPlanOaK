@@ -478,11 +478,6 @@ export function stepBySteps(delta: number): void {
   scrubToStep(current + delta);
 }
 
-export function stageCanvas(): { envId: EnvId; canvas: HTMLCanvasElement } | null {
-  if (sceneHost === null) return null;
-  return { envId: sceneHost.envId, canvas: sceneHost.canvas };
-}
-
 export function currentStep(): number {
   if (sceneHost === null || hero === null || !attached) return selectionSnapshot().pendingSeekStep ?? 0;
   return stepFromFrame(sceneHost.clock.position(), hero.totalSteps, hero.source.frameCount);

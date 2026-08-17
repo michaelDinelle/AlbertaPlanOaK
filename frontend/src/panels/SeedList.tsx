@@ -15,11 +15,11 @@ import { cssVar, withAlpha } from './charts';
 
 function drawSpark(
   canvas: HTMLCanvasElement,
+  width: number,
   values: readonly (number | null)[],
   xs: readonly number[],
   stroke: string,
 ): void {
-  const width = Math.max(1, Math.floor(canvas.parentElement?.clientWidth ?? 0));
   const height = 16;
   if (width <= 1) return;
   const dpr = Math.min(3, globalThis.devicePixelRatio || 1);
@@ -106,13 +106,12 @@ function Spark({
     const holder = holderRef.current;
     if (canvas === null || holder === null) return;
     let frame = 0;
-    const draw = (): void => drawSpark(canvas, values, xs, stroke);
-    const observer = new ResizeObserver(() => {
+    const observer = new ResizeObserver((entries) => {
+      const width = Math.floor(entries[0]?.contentRect.width ?? 0);
       cancelAnimationFrame(frame);
-      frame = requestAnimationFrame(draw);
+      frame = requestAnimationFrame(() => drawSpark(canvas, width, values, xs, stroke));
     });
     observer.observe(holder);
-    draw();
     return () => {
       cancelAnimationFrame(frame);
       observer.disconnect();
@@ -131,6 +130,7 @@ function Spark({
     <span
       ref={holderRef}
       className="block min-w-0 flex-1 cursor-ew-resize"
+      title={STR.bar.scrub}
       onPointerDown={(event) => {
         if (event.button !== 0) return;
         down.current = true;

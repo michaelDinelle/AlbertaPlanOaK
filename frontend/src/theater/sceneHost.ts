@@ -199,6 +199,7 @@ export async function mountSceneHost(
     scene = module;
     manifest = module.manifest;
 
+    renderer.compile(module.scene, module.camera);
     post = buildComposer(renderer, module.scene, module.camera, module.manifest.postConfig, size);
     module.setDebug(debugOn);
     applySize();

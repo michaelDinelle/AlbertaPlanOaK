@@ -83,14 +83,14 @@ export function ComputeView({
             {ratioEntries.map(([threshold, ratio]) => {
               const n = ratio === null || ratio === 0 ? null : 1 / ratio;
               const share = `${Math.round(Number(threshold) * 100)}%`;
+              const times = n === null ? null : n >= 10 ? n.toFixed(0) : n.toFixed(1);
               return (
                 <span
                   key={threshold}
+                  title={times === null ? STR.compute.notReachedHint(share) : STR.compute.ratioHint(share, times)}
                   className="rounded-md border border-white/10 bg-white/5 px-1.5 py-0.5 font-mono text-2xs text-ink-dim"
                 >
-                  {n === null
-                    ? STR.compute.notReached(share)
-                    : STR.compute.ratioChip(share, n >= 10 ? n.toFixed(0) : n.toFixed(1))}
+                  {times === null ? STR.compute.notReached(share) : STR.compute.ratioChip(share, times)}
                 </span>
               );
             })}

@@ -27,11 +27,22 @@ function Shortcut({ children }: { children: string }) {
   );
 }
 
-function Item({ onPick, shortcut, children }: { onPick: () => void; shortcut?: string; children: ReactNode }) {
+function Item({
+  onPick,
+  hint,
+  shortcut,
+  children,
+}: {
+  onPick: () => void;
+  hint: string;
+  shortcut?: string;
+  children: ReactNode;
+}) {
   return (
     <Command.Item
       onSelect={onPick}
-      className="flex cursor-pointer items-center gap-2 rounded-md px-2.5 py-1.5 text-xs text-ink-dim data-[selected=true]:bg-white/10 data-[selected=true]:text-ink"
+      title={hint}
+      className="flex cursor-pointer items-center gap-2 rounded-md px-2.5 py-1.5 text-xs text-ink-dim transition-colors hover:bg-white/10 data-[selected=true]:bg-white/10 data-[selected=true]:text-ink"
     >
       {children}
       {shortcut !== undefined && <Shortcut>{shortcut}</Shortcut>}
@@ -84,6 +95,7 @@ export function CommandPalette({
             <Command.Input
               autoFocus
               placeholder={STR.palette.placeholder}
+              title={STR.palette.placeholder}
               className="w-full border-b border-white/10 bg-transparent px-3.5 py-3 text-sm text-ink outline-none placeholder:text-ink-faint"
             />
             <Command.List className={`max-h-[46vh] overflow-y-auto p-1.5 ${groupClass}`}>
@@ -92,7 +104,7 @@ export function CommandPalette({
               </Command.Empty>
               <Command.Group heading={STR.palette.environments}>
                 {envList.map((envId) => (
-                  <Item key={envId} onPick={done(() => selectEnv(envId))} shortcut="[ ]">
+                  <Item key={envId} onPick={done(() => selectEnv(envId))} hint={STR.wall.watchEnv(ENVS[envId].name)} shortcut="[ ]">
                     <span
                       className="size-2 rounded-full"
                       style={{ background: `var(--color-env-${ENVS[envId].slug})` }}
@@ -103,7 +115,7 @@ export function CommandPalette({
               </Command.Group>
               <Command.Group heading={STR.palette.runs}>
                 {runs.map((run) => (
-                  <Item key={run.id} onPick={done(() => selectRun(run.id))}>
+                  <Item key={run.id} onPick={done(() => selectRun(run.id))} hint={STR.wall.switchRun(runLabel(run))}>
                     {run.inFlight && <span className="size-1.5 animate-pulse rounded-full bg-good" />}
                     {runLabel(run)}
                   </Item>
@@ -111,28 +123,34 @@ export function CommandPalette({
               </Command.Group>
               <Command.Group heading={STR.palette.seeds}>
                 {seeds.map((seed) => (
-                  <Item key={seed} onPick={done(() => promote(seed, () => true))}>
+                  <Item key={seed} onPick={done(() => promote(seed, () => true))} hint={STR.seeds.promote(seed)}>
                     {STR.palette.seed(seed)}
                   </Item>
                 ))}
               </Command.Group>
               <Command.Group heading={STR.palette.policies}>
                 {policies.map((policy) => (
-                  <Item key={policy} onPick={done(() => selectPolicy(policy))} shortcut="p">
+                  <Item key={policy} onPick={done(() => selectPolicy(policy))} hint={STR.bar.watch(STR.policy[policy])} shortcut="p">
                     {STR.palette.watch(STR.policy[policy])}
                   </Item>
                 ))}
               </Command.Group>
               <Command.Group heading={STR.palette.panels}>
                 {(Object.keys(STR.panels) as PanelView[]).map((view) => (
-                  <Item key={view} onPick={done(() => setView(view))}>
+                  <Item key={view} onPick={done(() => setView(view))} hint={STR.palette.show(STR.panels[view])}>
                     {STR.palette.show(STR.panels[view])}
                   </Item>
                 ))}
-                <Item onPick={done(openWall)}>{STR.palette.wall}</Item>
+                <Item onPick={done(openWall)} hint={STR.tile.open}>
+                  {STR.palette.wall}
+                </Item>
               </Command.Group>
               <Command.Group heading={STR.palette.actions}>
-                <Item onPick={done(() => setTransport({ playing: !transportSnapshot().playing }))} shortcut="space">
+                <Item
+                  onPick={done(() => setTransport({ playing: !transportSnapshot().playing }))}
+                  hint={STR.palette.playPause}
+                  shortcut="space"
+                >
                   {STR.palette.playPause}
                 </Item>
                 <Item
@@ -140,13 +158,14 @@ export function CommandPalette({
                     const at = (SPEEDS as readonly number[]).indexOf(transportSnapshot().speed);
                     setTransport({ speed: SPEEDS[(at + 1) % SPEEDS.length] ?? 1 });
                   })}
+                  hint={STR.palette.nextSpeed}
                 >
                   {STR.palette.nextSpeed}
                 </Item>
-                <Item onPick={done(toggleDebug)} shortcut="g">
+                <Item onPick={done(toggleDebug)} hint={STR.bar.debug} shortcut="g">
                   {STR.palette.debug}
                 </Item>
-                <Item onPick={done(cycleSortMode)} shortcut="s">
+                <Item onPick={done(cycleSortMode)} hint={STR.seeds.sort} shortcut="s">
                   {STR.palette.sort}
                 </Item>
                 <Item
@@ -154,6 +173,7 @@ export function CommandPalette({
                     if (document.fullscreenElement !== null) void document.exitFullscreen();
                     else fullscreenTarget.current?.requestFullscreen().catch(() => {});
                   })}
+                  hint={STR.bar.fullscreen}
                   shortcut="f"
                 >
                   {STR.palette.fullscreen}
