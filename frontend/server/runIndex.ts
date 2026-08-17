@@ -102,6 +102,9 @@ function readRunMeta(raw: string): RunMeta | null {
   const policy = o['policy'];
   if (policy !== 'oak' && policy !== 'ppo' && policy !== 'random') return null;
   if (!Array.isArray(o['envCatalog']) || o['envCatalog'].length === 0) return null;
+  if (typeof o['flopsPerStep'] !== 'number') return null;
+  const envFlops = o['envFlopsPerStep'];
+  if (envFlops === null || typeof envFlops !== 'object' || Array.isArray(envFlops)) return null;
   return parsed as RunMeta;
 }
 
@@ -216,7 +219,7 @@ export class RunIndex {
     const tape = await readTapeShape(join(dir, 'tape.bin')).catch(() => null);
     if (tape === null || tape.rows === 0) return null;
     const hasRecordings = (await this.recordingsCached(id, dir, root).catch(() => [])).length > 0;
-    const summaryStat = await statOrNull(join(dir, 'summary.json'));
+    const summary = await readSummaryFile(join(dir, 'summary.json'), id);
     const complete = tape.maxStep >= meta.steps && meta.steps > 0;
     return {
       id,
@@ -236,7 +239,7 @@ export class RunIndex {
         inFlight: !complete
           && (tape.rowIntervalMs === 0
             || Date.now() - tape.mtimeMs < 2 * tape.rowIntervalMs),
-        hasSummary: summaryStat !== null,
+        hasSummary: summary !== null,
         hasRecordings,
         policy: meta.policy,
         role: id === keeper ? 'keeper' : null,
@@ -320,41 +323,47 @@ function readRunSummary(raw: string): RunSummary | null {
   } catch {
     return null;
   }
-  if (parsed === null || typeof parsed !== 'object') return null;
+  if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) return null;
   const o = parsed as Record<string, unknown>;
-  if (o['envSlices'] === null || typeof o['envSlices'] !== 'object') return null;
+  for (const key of ['envs', 'aggregate', 'compute', 'bootstrap'] as const) {
+    const v = o[key];
+    if (v === null || typeof v !== 'object' || Array.isArray(v)) return null;
+  }
+  if (!Array.isArray(o['curveSteps']) || !Array.isArray(o['plasticitySteps'])) return null;
+  if (typeof o['scale'] !== 'string' || typeof o['generatedAt'] !== 'string') return null;
+  if (typeof o['horizon'] !== 'number' || typeof o['maxStep'] !== 'number') return null;
+  if (typeof o['seedsPerEnv'] !== 'number' || typeof o['complete'] !== 'boolean') return null;
   return parsed as RunSummary;
 }
 
 const summaryMemo = new Map<string, { mtimeMs: number; size: number; summary: RunSummary | null }>();
+
+async function readSummaryFile(path: string, runId: string): Promise<RunSummary | null> {
+  const st = await statOrNull(path);
+  if (st === null) return null;
+  const hit = summaryMemo.get(path);
+  if (hit !== undefined && hit.mtimeMs === st.mtimeMs && hit.size === st.size) return hit.summary;
+  let summary: RunSummary | null = null;
+  try {
+    summary = readRunSummary(await Bun.file(path).text());
+  } catch {
+  }
+  if (summary === null) {
+    console.warn(`[oak-frontend] ${runId}: summary.json is not a run summary — ignoring it`);
+  }
+  summaryMemo.set(path, { mtimeMs: st.mtimeMs, size: st.size, summary });
+  return summary;
+}
 
 export async function buildRunDetail(
   run: ResolvedRun,
   recs: RecordingEntry[],
   baselines: BaselineIds,
 ): Promise<RunDetail> {
-  const path = join(run.dir, 'summary.json');
-  const st = await statOrNull(path);
-  let summary: RunSummary | null = null;
-  if (st !== null) {
-    const hit = summaryMemo.get(run.id);
-    if (hit !== undefined && hit.mtimeMs === st.mtimeMs && hit.size === st.size) {
-      summary = hit.summary;
-    } else {
-      try {
-        summary = readRunSummary(await Bun.file(path).text());
-        if (summary === null) {
-          console.warn(`[oak-frontend] ${run.id}: summary.json is not a run summary — ignoring it`);
-        }
-      } catch {
-      }
-      summaryMemo.set(run.id, { mtimeMs: st.mtimeMs, size: st.size, summary });
-    }
-  }
   return {
     id: run.id,
     meta: run.meta,
-    summary,
+    summary: await readSummaryFile(join(run.dir, 'summary.json'), run.id),
     recordings: toRecordingRefs(recs),
     baselines,
   };

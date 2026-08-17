@@ -63,7 +63,7 @@ export function tooltipPlugin(params: TooltipParams = {}): uPlot.Plugin {
         const rows: { value: number; node: HTMLElement }[] = [];
         for (let i = 1; i < u.series.length; i++) {
           const series = u.series[i];
-          if (!series || series.show === false) continue;
+          if (!series || series.show === false || series.width === 0) continue;
           const value = u.data[i]?.[idx];
           if (value === null || value === undefined) continue;
           const row = document.createElement('div');
