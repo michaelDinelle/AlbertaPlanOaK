@@ -62,6 +62,7 @@ export function mkcRoomCells(room: number): GridCell[] {
 
 export const multiKeyCorridorDecoder: EnvDecoder<MultiKeyCorridorStatic> = {
   envId: 'MultiKeyCorridor-cont-v0',
+  seedGeometry: false,
 
   initStatic(seed: number): MultiKeyCorridorStatic {
     return { seed, walls: mkcWalls() };
@@ -69,7 +70,6 @@ export const multiKeyCorridorDecoder: EnvDecoder<MultiKeyCorridorStatic> = {
 
   geometry(st: MultiKeyCorridorStatic): EnvGeometry {
     return {
-      kind: 'grid',
       grid: {
         w: MKC_W,
         h: MKC_H,

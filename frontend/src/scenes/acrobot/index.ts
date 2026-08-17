@@ -11,7 +11,7 @@ import type {
   SceneSize,
 } from '@kit/types';
 import * as THREE from 'three';
-import { AB_DT, AB_L1, AB_L2, ACROBOT_ACTION, ACROBOT_TH1, ACROBOT_TH2, ACROBOT_W1, ACROBOT_W2, acrobotTorque } from '@sim/envs/acrobot';
+import { AB_L1, AB_L2, ACROBOT_ACTION, ACROBOT_TH1, ACROBOT_TH2, ACROBOT_W1, ACROBOT_W2, acrobotTorque } from '@sim/envs/acrobot';
 import { buildArm, type ArmHandle } from './actors';
 import { manifest } from './manifest';
 import {
@@ -38,23 +38,7 @@ const RIPPLE_SCALE = 0.34;
 const BURST_PARTICLES = 110;
 const PULSE_STRENGTH = 0.42;
 
-const REACH_SLACK = 1.7;
-const REACH_FLOOR = 0.05;
-const BACKLASH = 0.05;
-
 const TAU = Math.PI * 2;
-
-export function wrapPi(a: number): number {
-  const t = (a + Math.PI) % TAU;
-  return (t < 0 ? t + TAU : t) - Math.PI;
-}
-
-export function arcCorrupt(drift: number, wAnchor: number, wPose: number): boolean {
-  const speed = Math.max(Math.abs(wAnchor), Math.abs(wPose));
-  const reach = speed * AB_DT * REACH_SLACK + REACH_FLOOR;
-  if (Math.abs(drift) > reach) return true;
-  return drift * wAnchor < 0 && Math.abs(drift) > BACKLASH;
-}
 
 export function envelope(age: number, span: number, rate: number): number {
   if (!(age >= 0) || age > span) return 0;
@@ -85,11 +69,6 @@ class WillowSwingScene implements SceneModule {
   private flareAt = -Infinity;
   private petalAt = -Infinity;
   private flashAt = -Infinity;
-
-  private readonly render = new Float32Array(2);
-  private readonly held = new Float32Array(2);
-  private lastTime = Number.NaN;
-  private primed = false;
 
   private readonly points = new Float64Array(EXACT_POINT_FLOATS);
   private readonly overlayPos: [number, number, number] = [0, 0, 0];
@@ -201,10 +180,6 @@ class WillowSwingScene implements SceneModule {
     const time = ctx.time();
     const state = frame.state;
 
-    const prevTime = this.lastTime;
-    const dtPlay = Number.isFinite(prevTime) && time > prevTime ? time - prevTime : 0;
-    this.lastTime = time;
-
     pool.update(frame.dtReal, time);
 
     if (frame.scrubbed) {
@@ -212,7 +187,6 @@ class WillowSwingScene implements SceneModule {
       this.flareAt = -Infinity;
       this.petalAt = -Infinity;
       this.flashAt = -Infinity;
-      this.primed = false;
       arm.clearTrail();
       rig.snap();
     }
@@ -236,35 +210,18 @@ class WillowSwingScene implements SceneModule {
       }
     }
 
-    const rawTh1 = state.pose[ACROBOT_TH1] ?? 0;
-    const rawTh2 = state.pose[ACROBOT_TH2] ?? 0;
-    const wPose1 = state.pose[ACROBOT_W1] ?? 0;
-    const wPose2 = state.pose[ACROBOT_W2] ?? 0;
-    const anchor1 = rawTh1;
-    const anchor2 = rawTh2;
-    const wAnchor1 = wPose1;
-    const wAnchor2 = wPose2;
-
-    if (teleported || !this.primed) {
-      this.render[0] = rawTh1;
-      this.render[1] = rawTh2;
-      this.held[0] = 0;
-      this.held[1] = 0;
-      this.primed = true;
-      arm.clearTrail();
-    } else {
-      this.follow(0, rawTh1, anchor1, wAnchor1, wPose1, dtPlay);
-      this.follow(1, rawTh2, anchor2, wAnchor2, wPose2, dtPlay);
-    }
-    const th1 = this.render[0] ?? 0;
-    const th2 = this.render[1] ?? 0;
+    const th1 = state.pose[ACROBOT_TH1] ?? 0;
+    const th2 = state.pose[ACROBOT_TH2] ?? 0;
+    const w1 = state.pose[ACROBOT_W1] ?? 0;
+    const w2 = state.pose[ACROBOT_W2] ?? 0;
+    if (teleported) arm.clearTrail();
 
     const flareAge = time - this.flareAt;
     const flare = flareAge >= 0 && flareAge <= FLARE_SECONDS ? flareAge / FLARE_SECONDS : -1;
     const petals = envelope(time - this.petalAt, PETAL_SECONDS, 0.9);
     const flash = envelope(time - this.flashAt, FLASH_SECONDS, 2.2);
 
-    const tipSpeed = acrobotTipSpeed(th1, th2, wPose1, wPose2);
+    const tipSpeed = acrobotTipSpeed(th1, th2, w1, w2);
     arm.setState(th1, th2, torqueOf(state), tipSpeed);
     arm.setLanternGain(1 + 2.4 * flash);
     if (!frame.scrubbed) arm.pushTrail(time);
@@ -302,29 +259,6 @@ class WillowSwingScene implements SceneModule {
     this.celebrateAt.copy(arm.tipWorld);
   }
 
-  private follow(
-    k: number,
-    raw: number,
-    anchor: number,
-    wAnchor: number,
-    wPose: number,
-    dt: number,
-  ): void {
-    if (arcCorrupt(raw - anchor, wAnchor, wPose)) {
-      if ((this.held[k] ?? 0) < AB_DT) {
-        if (dt > 0) {
-          this.held[k] = (this.held[k] ?? 0) + dt;
-          this.render[k] = wrapPi((this.render[k] ?? 0) + wPose * dt);
-        }
-        return;
-      }
-      this.render[k] = raw;
-      return;
-    }
-    this.held[k] = 0;
-    this.render[k] = raw;
-  }
-
   resize(size: SceneSize): void {
     const aspect = size.height > 0 ? size.width / size.height : 16 / 9;
     this.rig?.resize(aspect);
@@ -355,10 +289,6 @@ class WillowSwingScene implements SceneModule {
     this.flareAt = -Infinity;
     this.petalAt = -Infinity;
     this.flashAt = -Infinity;
-    this.primed = false;
-    this.lastTime = Number.NaN;
-    this.held[0] = 0;
-    this.held[1] = 0;
   }
 }
 

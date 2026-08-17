@@ -1,9 +1,3 @@
-export const SLOT_NAMES = [
-  'none', 'x', 'y', 'gx', 'gy', 'kx', 'ky', 'carry', 'gates', 'tokens', 'cue', 'heading', 'effort',
-] as const;
-
-export type NamedSlot = (typeof SLOT_NAMES)[number] | `q${number}`;
-
 export interface RecordFieldSpec {
   slot: number;
   scale: number;
@@ -13,18 +7,7 @@ export interface RecordFieldSpec {
 
 export interface EnvEntry {
   envId: string;
-  kind: number;
-  actionKind: 'box' | 'discrete';
-  actionCount: number;
-  controlHz: number;
-  gridW: number;
-  gridH: number;
-  slots: NamedSlot[];
-  category: 'grid' | 'classic' | 'cheetah';
   fields: RecordFieldSpec[];
-  slotAt: Partial<Record<NamedSlot, number>>;
-  isGrid: boolean;
-  discretePose: boolean;
 }
 
 export type EnvCatalog = ReadonlyMap<string, EnvEntry>;
@@ -55,13 +38,6 @@ function requireString(v: unknown, what: string): string {
   return v;
 }
 
-function readSlot(v: unknown, what: string): NamedSlot {
-  const s = requireString(v, what);
-  if ((SLOT_NAMES as readonly string[]).includes(s)) return s as NamedSlot;
-  if (/^q\d+$/.test(s)) return s as NamedSlot;
-  throw new CatalogError(`${what} names an unknown slot ${JSON.stringify(s)}`);
-}
-
 function readField(v: unknown, what: string): RecordFieldSpec {
   const o = v as Record<string, unknown>;
   return {
@@ -72,48 +48,20 @@ function readField(v: unknown, what: string): RecordFieldSpec {
   };
 }
 
-function readCategory(v: unknown, what: string): 'grid' | 'classic' | 'cheetah' {
-  const s = requireString(v, what);
-  if (s !== 'grid' && s !== 'classic' && s !== 'cheetah') {
-    throw new CatalogError(`${what} is ${JSON.stringify(s)}`);
-  }
-  return s;
-}
-
 function readEntry(v: unknown, at: number): EnvEntry {
   const o = v as Record<string, unknown>;
   const what = `envCatalog[${at}]`;
   const envId = requireString(o?.['envId'], `${what}.envId`);
-  const actionKind = requireString(o['actionKind'], `${what}.actionKind`);
-  if (actionKind !== 'box' && actionKind !== 'discrete') {
-    throw new CatalogError(`${what}.actionKind is ${JSON.stringify(actionKind)}`);
-  }
-  const slots = requireArray(o['slots'], `${what}.slots`).map((s, i) =>
-    readSlot(s, `${what}.slots[${i}]`),
-  );
-  const gridW = requireNumber(o['gridW'], `${what}.gridW`);
-  const gridH = requireNumber(o['gridH'], `${what}.gridH`);
-  const slotAt: Partial<Record<NamedSlot, number>> = {};
-  for (let i = 0; i < slots.length; i++) {
-    const name = slots[i];
-    if (name !== undefined && name !== 'none') slotAt[name] = i;
-  }
+  requireNumber(o['kind'], `${what}.kind`);
+  requireNumber(o['actionCount'], `${what}.actionCount`);
+  requireNumber(o['controlHz'], `${what}.controlHz`);
+  requireNumber(o['gridW'], `${what}.gridW`);
+  requireNumber(o['gridH'], `${what}.gridH`);
   return {
     envId,
-    kind: requireNumber(o['kind'], `${what}.kind`),
-    actionKind,
-    actionCount: requireNumber(o['actionCount'], `${what}.actionCount`),
-    controlHz: requireNumber(o['controlHz'], `${what}.controlHz`),
-    gridW,
-    gridH,
-    slots,
-    category: readCategory(o['category'], `${what}.category`),
     fields: requireArray(o['fields'], `${what}.fields`).map((f, i) =>
       readField(f, `${what}.fields[${i}]`),
     ),
-    slotAt,
-    isGrid: gridW > 0 && gridH > 0,
-    discretePose: gridW > 0 && gridH > 0,
   };
 }
 
@@ -135,9 +83,3 @@ export function entryFor(catalog: EnvCatalog, envId: string): EnvEntry {
   }
   return entry;
 }
-
-export function slotValue(entry: EnvEntry, pose: ArrayLike<number>, slot: NamedSlot): number {
-  const at = entry.slotAt[slot];
-  return at === undefined ? Number.NaN : (pose[at] ?? Number.NaN);
-}
-

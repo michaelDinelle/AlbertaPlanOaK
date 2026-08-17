@@ -20,103 +20,80 @@ export const ENV_IDS = [
 
 export type EnvId = (typeof ENV_IDS)[number];
 
-export type EnvCategory = 'cheetah' | 'classic' | 'grid';
-
 export interface EnvInfo {
-  envId: EnvId;
   slug: string;
   name: string;
-  category: EnvCategory;
-  action: { kind: 'box' | 'discrete'; n: number };
   controlHz: number;
   discretePose: boolean;
-  emitsDone: boolean;
 }
 
 export const ENVS: Record<EnvId, EnvInfo> = {
   'HalfCheetah-v4': {
-    envId: 'HalfCheetah-v4', slug: 'half-cheetah', name: 'HalfCheetah',
-    category: 'cheetah', action: { kind: 'box', n: 6 }, controlHz: 20,
-    discretePose: false, emitsDone: false,
+    slug: 'half-cheetah', name: 'HalfCheetah',
+    controlHz: 20, discretePose: false,
   },
   'FourRooms-cont-v0': {
-    envId: 'FourRooms-cont-v0', slug: 'four-rooms', name: 'FourRooms',
-    category: 'grid', action: { kind: 'discrete', n: 4 }, controlHz: 8,
-    discretePose: true, emitsDone: false,
+    slug: 'four-rooms', name: 'FourRooms',
+    controlHz: 8, discretePose: true,
   },
   'DeepSea-cont-v0': {
-    envId: 'DeepSea-cont-v0', slug: 'deep-sea', name: 'DeepSea',
-    category: 'grid', action: { kind: 'discrete', n: 2 }, controlHz: 8,
-    discretePose: true, emitsDone: false,
+    slug: 'deep-sea', name: 'DeepSea',
+    controlHz: 8, discretePose: true,
   },
   'KeyCorridor-cont-v0': {
-    envId: 'KeyCorridor-cont-v0', slug: 'key-corridor', name: 'KeyCorridor',
-    category: 'grid', action: { kind: 'discrete', n: 4 }, controlHz: 8,
-    discretePose: true, emitsDone: true,
+    slug: 'key-corridor', name: 'KeyCorridor',
+    controlHz: 8, discretePose: true,
   },
   'Acrobot-cont-v0': {
-    envId: 'Acrobot-cont-v0', slug: 'acrobot', name: 'Acrobot',
-    category: 'classic', action: { kind: 'discrete', n: 3 }, controlHz: 5,
-    discretePose: false, emitsDone: true,
+    slug: 'acrobot', name: 'Acrobot',
+    controlHz: 5, discretePose: false,
   },
   'MountainCar-cont-v0': {
-    envId: 'MountainCar-cont-v0', slug: 'mountain-car', name: 'MountainCar',
-    category: 'classic', action: { kind: 'discrete', n: 3 }, controlHz: 30,
-    discretePose: false, emitsDone: true,
+    slug: 'mountain-car', name: 'MountainCar',
+    controlHz: 30, discretePose: false,
   },
   'CartPole-cont-v0': {
-    envId: 'CartPole-cont-v0', slug: 'cart-pole', name: 'CartPole',
-    category: 'classic', action: { kind: 'discrete', n: 2 }, controlHz: 50,
-    discretePose: false, emitsDone: true,
+    slug: 'cart-pole', name: 'CartPole',
+    controlHz: 50, discretePose: false,
   },
   'Pendulum-cont-v0': {
-    envId: 'Pendulum-cont-v0', slug: 'pendulum', name: 'Pendulum',
-    category: 'classic', action: { kind: 'box', n: 1 }, controlHz: 20,
-    discretePose: false, emitsDone: false,
+    slug: 'pendulum', name: 'Pendulum',
+    controlHz: 20, discretePose: false,
   },
   'Chain-cont-v0': {
-    envId: 'Chain-cont-v0', slug: 'chain', name: 'Chain',
-    category: 'grid', action: { kind: 'discrete', n: 2 }, controlHz: 8,
-    discretePose: true, emitsDone: true,
+    slug: 'chain', name: 'Chain',
+    controlHz: 8, discretePose: true,
   },
   'LargeDeepSea-cont-v0': {
-    envId: 'LargeDeepSea-cont-v0', slug: 'large-deep-sea', name: 'LargeDeepSea',
-    category: 'grid', action: { kind: 'discrete', n: 2 }, controlHz: 8,
-    discretePose: true, emitsDone: false,
+    slug: 'large-deep-sea', name: 'LargeDeepSea',
+    controlHz: 8, discretePose: true,
   },
   'MultiKeyCorridor-cont-v0': {
-    envId: 'MultiKeyCorridor-cont-v0', slug: 'multi-key-corridor', name: 'MultiKeyCorridor',
-    category: 'grid', action: { kind: 'discrete', n: 4 }, controlHz: 8,
-    discretePose: true, emitsDone: true,
+    slug: 'multi-key-corridor', name: 'MultiKeyCorridor',
+    controlHz: 8, discretePose: true,
   },
   'MemoryChain-cont-v0': {
-    envId: 'MemoryChain-cont-v0', slug: 'memory-chain', name: 'MemoryChain',
-    category: 'grid', action: { kind: 'discrete', n: 2 }, controlHz: 8,
-    discretePose: true, emitsDone: true,
+    slug: 'memory-chain', name: 'MemoryChain',
+    controlHz: 8, discretePose: true,
   },
   'ProceduralMaze-cont-v0': {
-    envId: 'ProceduralMaze-cont-v0', slug: 'procedural-maze', name: 'ProceduralMaze',
-    category: 'grid', action: { kind: 'discrete', n: 4 }, controlHz: 8,
-    discretePose: true, emitsDone: true,
+    slug: 'procedural-maze', name: 'ProceduralMaze',
+    controlHz: 8, discretePose: true,
   },
   'HighDimMaze-cont-v0': {
-    envId: 'HighDimMaze-cont-v0', slug: 'high-dim-maze', name: 'HighDimMaze',
-    category: 'grid', action: { kind: 'discrete', n: 6 }, controlHz: 8,
-    discretePose: true, emitsDone: true,
+    slug: 'high-dim-maze', name: 'HighDimMaze',
+    controlHz: 8, discretePose: true,
   },
   'POMaze-cont-v0': {
-    envId: 'POMaze-cont-v0', slug: 'po-maze', name: 'POMaze',
-    category: 'grid', action: { kind: 'discrete', n: 4 }, controlHz: 8,
-    discretePose: true, emitsDone: true,
+    slug: 'po-maze', name: 'POMaze',
+    controlHz: 8, discretePose: true,
   },
   'DelayedChain-cont-v0': {
-    envId: 'DelayedChain-cont-v0', slug: 'delayed-chain', name: 'DelayedChain',
-    category: 'grid', action: { kind: 'discrete', n: 2 }, controlHz: 8,
-    discretePose: true, emitsDone: true,
+    slug: 'delayed-chain', name: 'DelayedChain',
+    controlHz: 8, discretePose: true,
   },
 };
 
 export function isEnvId(s: string): s is EnvId {
   return (ENV_IDS as readonly string[]).includes(s);
 }
-

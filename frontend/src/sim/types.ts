@@ -49,7 +49,6 @@ export interface ClassicGeometry {
 }
 
 export interface EnvGeometry {
-  kind: 'grid' | 'cheetah' | 'classic';
   grid?: GridGeometry;
   cheetah?: CheetahGeometry;
   classic?: ClassicGeometry;
@@ -58,6 +57,7 @@ export interface EnvGeometry {
 
 export interface EnvDecoder<St = unknown> {
   envId: EnvId;
+  seedGeometry: boolean;
   initStatic(seed: number): St;
   geometry(st: St, seed: number): EnvGeometry;
   initFrame(seed: number, st: St): EnvFrame;

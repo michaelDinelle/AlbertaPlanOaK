@@ -54,6 +54,7 @@ export interface PlaybackSource {
   seed: number;
   controlHz: number;
   discretePose: boolean;
+  wrapMask: number;
   geometry: EnvGeometry;
   readonly frameCount: number;
   readonly complete: boolean;
@@ -69,13 +70,15 @@ export function sampleFrame(source: PlaybackSource, position: number, out: Frame
   const i = Math.min(last, Math.floor(p));
   const frame = source.frameAt(i);
   const next = source.frameAt(Math.min(last, i + 1));
-  const alpha = source.discretePose ? 0 : p - i;
+  const alpha = source.discretePose || frame.done !== 0 ? 0 : p - i;
 
   if (alpha > 0 && next !== frame) {
     for (let k = 0; k < 9; k++) {
       const a = frame.pose[k] ?? 0;
       const b = next.pose[k] ?? 0;
-      out.pose[k] = a + (b - a) * alpha;
+      let d = b - a;
+      if (((source.wrapMask >>> k) & 1) !== 0) d -= 2 * Math.PI * Math.round(d / (2 * Math.PI));
+      out.pose[k] = a + d * alpha;
     }
   } else {
     out.pose.set(frame.pose.subarray(0, 9));

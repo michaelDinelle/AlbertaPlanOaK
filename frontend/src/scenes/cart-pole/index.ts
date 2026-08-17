@@ -15,7 +15,7 @@ import type {
   SceneSize,
 } from '@kit/types';
 import * as THREE from 'three';
-import { CARTPOLE_ACTION, CARTPOLE_TH, CARTPOLE_THDOT, CARTPOLE_X, CARTPOLE_XDOT, CP_TAU, cartPoleForce, cartPoleTip } from '@sim/envs/cartpole';
+import { CARTPOLE_ACTION, CARTPOLE_TH, CARTPOLE_X, CARTPOLE_XDOT, cartPoleForce, cartPoleTip } from '@sim/envs/cartpole';
 import { buildTrolley, type TrolleyHandle } from './actors';
 import { manifest } from './manifest';
 import {
@@ -35,35 +35,6 @@ const COOL_SECONDS = 0.58;
 const SIGH_STRENGTH = 0.5;
 const SIGH_PARTICLES = 34;
 const LIGHT_STANDOFF = 1.15;
-
-const TH_ACC = 0.4;
-const X_ACC = 0.25;
-const POSE_EPS = 0.003;
-const MAX_HELD_SECONDS = 2 * CP_TAU;
-
-function displacementBound(a: number, mean: number, curve: number): number {
-  return a * mean + 0.25 * curve * a * a;
-}
-
-export function unreachable(
-  d: number,
-  v0: number,
-  v1: number,
-  acc: number,
-  aLo: number,
-  aHi: number,
-): boolean {
-  const mean = 0.5 * (v0 + v1);
-  const lo = Math.min(
-    displacementBound(aLo, mean - acc, -acc),
-    displacementBound(aHi, mean - acc, -acc),
-  );
-  const hi = Math.max(
-    displacementBound(aLo, mean + acc, acc),
-    displacementBound(aHi, mean + acc, acc),
-  );
-  return d < CP_TAU * lo - POSE_EPS || d > CP_TAU * hi + POSE_EPS;
-}
 
 function forceOf(state: FrameState): number {
   return cartPoleForce(state.pose[CARTPOLE_ACTION] ?? 0);
@@ -87,14 +58,6 @@ class BoardwalkScene implements SceneModule {
 
   private fallAt = -Infinity;
   private fallDir = 1;
-
-  private heldX = Number.NaN;
-  private heldTh = 0;
-  private heldXd = 0;
-  private heldThd = 0;
-  private heldStep = Number.NaN;
-  private heldFrames = 0;
-  private heldAt = -Infinity;
 
   private debugOn = false;
   private readonly overlayPos: [number, number, number] = [0, 0, 0];
@@ -201,62 +164,28 @@ class BoardwalkScene implements SceneModule {
     if (frame.scrubbed) {
       pool.clear();
       this.fallAt = -Infinity;
-      this.heldX = Number.NaN;
-      this.heldFrames = 0;
-      this.heldAt = -Infinity;
       rig.snap();
     }
 
-    let teleported = false;
+    const x = state.pose[CARTPOLE_X] ?? 0;
+    const xd = state.pose[CARTPOLE_XDOT] ?? 0;
+    const th = state.pose[CARTPOLE_TH] ?? 0;
+
     for (let i = 0; i < frame.events.length; i++) {
       const ev = frame.events[i];
       if (!ev) continue;
       if (ev.type === 'done') {
         pool.sigh(SIGH_STRENGTH, trolley.crownWorld, time);
         this.fallAt = time;
-        this.fallDir = this.heldTh < 0 ? -1 : 1;
-      } else if (ev.type === 'teleport') {
-        teleported = true;
+        this.fallDir = th < 0 ? -1 : 1;
       }
-    }
-
-    const rawX = state.pose[CARTPOLE_X] ?? 0;
-    const rawXd = state.pose[CARTPOLE_XDOT] ?? 0;
-    const rawTh = state.pose[CARTPOLE_TH] ?? 0;
-    const rawThd = state.pose[CARTPOLE_THDOT] ?? 0;
-    let x = rawX;
-    let th = rawTh;
-    if (teleported || frame.scrubbed || !Number.isFinite(this.heldX)) {
-      this.heldFrames = 0;
-    } else {
-      const drift = Math.abs(state.step - this.heldStep);
-      const aLo = drift > 1 ? drift - 1 : 0;
-      const aHi = drift + 1;
-      const jumped =
-        unreachable(rawTh - this.heldTh, this.heldThd, rawThd, TH_ACC, aLo, aHi) ||
-        unreachable(rawX - this.heldX, this.heldXd, rawXd, X_ACC, aLo, aHi);
-      if (jumped && (this.heldFrames === 0 || time - this.heldAt <= MAX_HELD_SECONDS)) {
-        if (this.heldFrames === 0) this.heldAt = time;
-        x = this.heldX;
-        th = this.heldTh;
-        this.heldFrames++;
-      } else {
-        this.heldFrames = 0;
-      }
-    }
-    if (this.heldFrames === 0) {
-      this.heldX = rawX;
-      this.heldTh = rawTh;
-      this.heldXd = rawXd;
-      this.heldThd = rawThd;
-      this.heldStep = state.step;
     }
 
     const fall = envelope(time - this.fallAt, FALL_SECONDS, 3.4);
     const cool = envelope(time - this.fallAt, COOL_SECONDS, 2.6);
 
     trolley.setShed(fall, this.fallDir);
-    trolley.setState(x, th, rawXd, forceOf(state));
+    trolley.setState(x, th, xd, forceOf(state));
     world.setWind(clampRange(th / this.thLimit, -1, 1));
     world.setCool(cool);
 
@@ -322,9 +251,6 @@ class BoardwalkScene implements SceneModule {
     this.scene.fog = null;
     this.ctx = null;
     this.fallAt = -Infinity;
-    this.heldX = Number.NaN;
-    this.heldFrames = 0;
-    this.heldAt = -Infinity;
   }
 }
 

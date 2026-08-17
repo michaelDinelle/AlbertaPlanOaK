@@ -44,6 +44,7 @@ export function keyCorridorWalls(): Uint8Array {
 
 export const keyCorridorDecoder: EnvDecoder<KeyCorridorStatic> = {
   envId: 'KeyCorridor-cont-v0',
+  seedGeometry: false,
 
   initStatic(seed: number): KeyCorridorStatic {
     return { seed, walls: keyCorridorWalls() };
@@ -51,7 +52,6 @@ export const keyCorridorDecoder: EnvDecoder<KeyCorridorStatic> = {
 
   geometry(st: KeyCorridorStatic): EnvGeometry {
     return {
-      kind: 'grid',
       grid: {
         w: KEYCORRIDOR_W,
         h: KEYCORRIDOR_H,

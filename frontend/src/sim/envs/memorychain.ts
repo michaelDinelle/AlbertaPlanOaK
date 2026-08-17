@@ -17,6 +17,7 @@ export interface MemoryChainStatic {
 
 export const memoryChainDecoder: EnvDecoder<MemoryChainStatic> = {
   envId: 'MemoryChain-cont-v0',
+  seedGeometry: false,
 
   initStatic(seed: number): MemoryChainStatic {
     return { seed, walls: new Uint8Array(MEMORYCHAIN_L) };
@@ -24,7 +25,6 @@ export const memoryChainDecoder: EnvDecoder<MemoryChainStatic> = {
 
   geometry(st: MemoryChainStatic): EnvGeometry {
     return {
-      kind: 'grid',
       grid: { w: MEMORYCHAIN_L, h: 1, walls: st.walls, goal: { x: MEMORYCHAIN_END, y: 0 } },
     };
   },

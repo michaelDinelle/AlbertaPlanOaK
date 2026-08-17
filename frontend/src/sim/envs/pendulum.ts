@@ -3,11 +3,8 @@ import type { EnvDecoder, EnvFrame, EnvGeometry, SimEvent } from '../types';
 import { NO_EVENTS } from '../events';
 
 
-export const PD_DT = 0.05;
 export const PD_MAX_SPEED = 8;
 export const PD_MAX_TORQUE = 2;
-export const PD_G = 10;
-export const PD_M = 1;
 export const PD_L = 1;
 
 export const PENDULUM_TH = 0;
@@ -22,8 +19,6 @@ export interface PendulumStatic {
   initTheta: number;
 }
 
-
-export const PENDULUM_POINT_FLOATS = 2;
 
 export function wrapPi(x: number): number {
   return x - 2 * Math.PI * Math.floor((x + Math.PI) / (2 * Math.PI));
@@ -44,12 +39,12 @@ const ANCHORS: Record<string, readonly [number, number, number]> = Object.freeze
 });
 
 const GEOMETRY: EnvGeometry = Object.freeze({
-  kind: 'classic' as const,
   classic: Object.freeze({ anchors: ANCHORS }),
 });
 
 export const pendulumDecoder: EnvDecoder<PendulumStatic> = {
   envId: 'Pendulum-cont-v0',
+  seedGeometry: false,
 
   initStatic(): PendulumStatic {
     return STATIC;

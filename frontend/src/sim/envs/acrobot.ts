@@ -3,11 +3,8 @@ import type { EnvDecoder, EnvFrame, EnvGeometry, SimEvent } from '../types';
 import { NO_EVENTS } from '../events';
 
 
-export const AB_DT = 0.2;
 export const AB_L1 = 1;
 export const AB_L2 = 1;
-export const AB_W1MAX = Math.fround(12.566371);
-export const AB_W2MAX = Math.fround(28.274334);
 export const AB_SUCCESS_HEIGHT = 1;
 export const AB_ACTIONS = 3;
 
@@ -26,20 +23,13 @@ export interface AcrobotStatic {
   l1: number;
   l2: number;
   successHeight: number;
-  w1Max: number;
-  w2Max: number;
 }
-
-
-export const ACROBOT_POINT_FLOATS = 4;
 
 
 const STATIC: AcrobotStatic = Object.freeze({
   l1: AB_L1,
   l2: AB_L2,
   successHeight: AB_SUCCESS_HEIGHT,
-  w1Max: AB_W1MAX,
-  w2Max: AB_W2MAX,
 });
 
 const ANCHORS: Record<string, readonly [number, number, number]> = Object.freeze({
@@ -52,12 +42,12 @@ const ANCHORS: Record<string, readonly [number, number, number]> = Object.freeze
 });
 
 const GEOMETRY: EnvGeometry = Object.freeze({
-  kind: 'classic' as const,
   classic: Object.freeze({ anchors: ANCHORS }),
 });
 
 export const acrobotDecoder: EnvDecoder<AcrobotStatic> = {
   envId: 'Acrobot-cont-v0',
+  seedGeometry: false,
 
   initStatic(): AcrobotStatic {
     return STATIC;
@@ -77,8 +67,11 @@ export const acrobotDecoder: EnvDecoder<AcrobotStatic> = {
   },
 
 
-  deriveEvents(_prev: EnvFrame, next: EnvFrame): SimEvent[] {
-    if (next.done === 0) return NO_EVENTS;
-    return [{ type: 'goal' }, { type: 'done' }, { type: 'teleport' }];
+  deriveEvents(prev: EnvFrame, next: EnvFrame): SimEvent[] {
+    if (next.done === 0 && prev.done === 0) return NO_EVENTS;
+    const out: SimEvent[] = [];
+    if (next.done !== 0) out.push({ type: 'goal' }, { type: 'done' });
+    if (prev.done !== 0) out.push({ type: 'teleport' });
+    return out;
   },
 };

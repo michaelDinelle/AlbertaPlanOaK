@@ -40,6 +40,7 @@ export function poMazeWalls(): Uint8Array {
 
 export const poMazeDecoder: EnvDecoder<POMazeStatic> = {
   envId: 'POMaze-cont-v0',
+  seedGeometry: false,
 
   initStatic(seed: number): POMazeStatic {
     return { seed, walls: poMazeWalls() };
@@ -47,7 +48,6 @@ export const poMazeDecoder: EnvDecoder<POMazeStatic> = {
 
   geometry(st: POMazeStatic): EnvGeometry {
     return {
-      kind: 'grid',
       grid: {
         w: POMAZE_W,
         h: POMAZE_H,

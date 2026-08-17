@@ -67,7 +67,7 @@ class SunlitDescentScene implements SceneModule {
   private rig: OrbitRig | null = null;
   private overlay: GroundTruthOverlay | null = null;
   private readonly diver = new THREE.Group();
-  private grid: GridGeometry = resolveGrid({ kind: 'grid' });
+  private grid: GridGeometry = resolveGrid({});
   private reach: Uint8Array = new Uint8Array(0);
   private treasure: GridCell = { x: 0, y: 0 };
 

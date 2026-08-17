@@ -92,7 +92,7 @@ class TheAbyssScene implements SceneModule {
   private pool: CelebrationPool | null = null;
   private rig: OrbitRig | null = null;
   private overlay: GroundTruthOverlay | null = null;
-  private grid: GridGeometry = resolveGrid({ kind: 'grid' });
+  private grid: GridGeometry = resolveGrid({});
 
   private treasureAt = -Infinity;
   private rushAt = -Infinity;

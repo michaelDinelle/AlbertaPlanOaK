@@ -15,7 +15,7 @@ import type {
   SceneSize,
 } from '@kit/types';
 import * as THREE from 'three';
-import { CHEETAH_DT, CHEETAH_ROOT_X, CHEETAH_TELEPORT_DX } from '@sim/envs/halfcheetah';
+import { CHEETAH_DT, CHEETAH_ROOT_X } from '@sim/envs/halfcheetah';
 import { FK_FLOATS, FK_POINT_INDEX, cheetahGeometry } from '@sim/fk/cheetah';
 import type { CheetahGeometry } from '@sim/types';
 import { REFERENCE_SPEED, buildCheetah, type CheetahHandle } from './actors';
@@ -28,15 +28,11 @@ export const CAM_OFFSET: readonly [number, number, number] = [0.95, 0.33, 3.5];
 
 const FLASH_SECONDS = 0.34;
 
-const MAX_STEP_DX = 1.0;
-const SUPERLUMINAL_SLACK = 0.05;
-const MAX_HELD_FRAMES = 4;
-
 function velocityOf(state: FrameState, prev: FrameState | null): number {
-  if (prev) {
+  if (prev && !prev.done) {
     const dSteps = state.step - prev.step;
     const dx = (state.pose[CHEETAH_ROOT_X] ?? 0) - (prev.pose[0] ?? 0);
-    if (dSteps > 0 && Math.abs(dx) < CHEETAH_TELEPORT_DX) return dx / (dSteps * CHEETAH_DT);
+    if (dSteps > 0) return dx / (dSteps * CHEETAH_DT);
   }
   return 0;
 }
@@ -56,11 +52,6 @@ class GoldHourSavannaScene implements SceneModule {
 
   private readonly fkOut = new Float32Array(FK_FLOATS);
   private readonly renderPose = new Float32Array(9);
-  private readonly heldPose = new Float32Array(9);
-
-  private heldValid = false;
-  private heldStep = Number.NaN;
-  private heldFrames = 0;
 
   private flashAt = -Infinity;
 
@@ -166,8 +157,6 @@ class GoldHourSavannaScene implements SceneModule {
     if (frame.scrubbed) {
       pool.clear();
       this.flashAt = -Infinity;
-      this.heldValid = false;
-      this.heldFrames = 0;
     }
 
     let teleported = false;
@@ -177,26 +166,10 @@ class GoldHourSavannaScene implements SceneModule {
       if (ev.type === 'teleport') teleported = true;
     }
 
-    const rawX = state.pose[CHEETAH_ROOT_X] ?? 0;
-    let held = false;
-    if (!teleported && !frame.scrubbed && this.heldValid && this.heldFrames < MAX_HELD_FRAMES) {
-      const dSteps = Math.max(1, Math.abs(state.step - this.heldStep));
-      const reach = MAX_STEP_DX * dSteps + SUPERLUMINAL_SLACK;
-      if (Math.abs(rawX - (this.heldPose[0] ?? 0)) > reach) held = true;
-    }
-    if (held) {
-      this.renderPose.set(this.heldPose);
-      this.heldFrames++;
-    } else {
-      for (let i = 0; i < 9; i++) this.renderPose[i] = state.pose[i] ?? 0;
-      this.heldFrames = 0;
-    }
-    this.heldPose.set(this.renderPose);
-    this.heldStep = state.step;
-    this.heldValid = true;
+    for (let i = 0; i < 9; i++) this.renderPose[i] = state.pose[i] ?? 0;
     if (teleported) this.flashAt = time;
 
-    const velX = held ? 0 : velocityOf(state, frame.prev);
+    const velX = velocityOf(state, frame.prev);
     const speed01 = clampRange(Math.abs(velX) / REFERENCE_SPEED, 0, 1);
     this.applyPose(this.renderPose, speed01);
 
@@ -254,8 +227,6 @@ class GoldHourSavannaScene implements SceneModule {
     this.scene.fog = null;
     this.ctx = null;
     this.flashAt = -Infinity;
-    this.heldValid = false;
-    this.heldFrames = 0;
   }
 }
 

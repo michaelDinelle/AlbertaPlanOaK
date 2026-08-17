@@ -46,6 +46,7 @@ export function highDimMazeWalls(): Uint8Array {
 
 export const highDimMazeDecoder: EnvDecoder<HighDimMazeStatic> = {
   envId: 'HighDimMaze-cont-v0',
+  seedGeometry: false,
 
   initStatic(seed: number): HighDimMazeStatic {
     return { seed, walls: highDimMazeWalls() };
@@ -53,7 +54,6 @@ export const highDimMazeDecoder: EnvDecoder<HighDimMazeStatic> = {
 
   geometry(st: HighDimMazeStatic): EnvGeometry {
     return {
-      kind: 'grid',
       grid: {
         w: HIGHDIMMAZE_W,
         h: HIGHDIMMAZE_H,

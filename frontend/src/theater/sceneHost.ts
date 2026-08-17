@@ -12,7 +12,8 @@ import type {
   SceneModule,
   SceneSize,
 } from '@kit/types';
-import type { EnvGeometry, SimEvent } from '@sim/types';
+import type { SimEvent } from '@sim/types';
+import { decoders } from '@sim/registry';
 import { sceneRegistry } from '../scenes/registry';
 import { advanceCursor, collectEvents, makeFrameCursor } from './player';
 
@@ -73,21 +74,6 @@ function copyFrameState(from: FrameState, to: FrameState): void {
   to.done = from.done;
   to.step = from.step;
   to.simTime = from.simTime;
-}
-
-export function sameGeometry(a: EnvGeometry, b: EnvGeometry): boolean {
-  if (a === b) return true;
-  if (a.kind !== b.kind) return false;
-  if (a.kind !== 'grid') return true;
-  const ga = a.grid;
-  const gb = b.grid;
-  if (ga === undefined || gb === undefined) return ga === gb;
-  if (ga.w !== gb.w || ga.h !== gb.h) return false;
-  if (ga.walls.byteLength !== gb.walls.byteLength) return false;
-  for (let i = 0; i < ga.walls.byteLength; i++) {
-    if (ga.walls[i] !== gb.walls[i]) return false;
-  }
-  return ga.goal?.x === gb.goal?.x && ga.goal?.y === gb.goal?.y;
 }
 
 export async function mountSceneHost(
@@ -312,7 +298,7 @@ export async function mountSceneHost(
     },
     async setSource(next, opts = {}) {
       if (next.envId !== envId) throw new SceneHostError('setSource cannot change env — use setEnv');
-      const rebuild = !sameGeometry(source.geometry, next.geometry);
+      const rebuild = decoders[envId].seedGeometry && next.seed !== source.seed;
       swapSource(next, opts.at ?? clock.position());
       if (rebuild) await buildScene();
     },
