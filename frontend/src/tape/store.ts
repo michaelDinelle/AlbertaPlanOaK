@@ -29,6 +29,7 @@ export interface TapeProgress {
   byteLength: number;
   lastStep: number;
   nextRowDueMs: number;
+  windowSteps: number;
 }
 
 export type WorkerCall =

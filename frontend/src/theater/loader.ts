@@ -2,7 +2,7 @@ import type { EnvEntry } from '@sim/catalog';
 import { ENVS, type EnvId } from '@shared/envs';
 import type { RecordingRef } from '@shared/types';
 import type { PlaybackSource } from '@kit/playback';
-import { recordingUrl } from '../api';
+import { recordingUrl } from '../data/api';
 import { lensRecording, type RecordingLens } from '@sim/decode';
 import { NO_EVENTS } from '@sim/events';
 import {

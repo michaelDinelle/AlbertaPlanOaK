@@ -44,6 +44,16 @@ export function envLanes(meta: Pick<RunMeta, 'envSchedule' | 'seeds'>, envId: st
   return { lanes, seeds };
 }
 
+export function runEnvs(
+  meta: Pick<RunMeta, 'envSchedule'>,
+  recordings: readonly { envId: string }[],
+): EnvId[] {
+  const seen = new Set<EnvId>();
+  for (const share of envShares(meta)) seen.add(share.envId);
+  for (const rec of recordings) if (isEnvId(rec.envId)) seen.add(rec.envId);
+  return ENV_IDS.filter((id) => seen.has(id));
+}
+
 export function sortRuns(entries: readonly RunIndexEntry[]): RunIndexEntry[] {
   return [...entries].sort((a, b) => {
     if (a.inFlight !== b.inFlight) return a.inFlight ? -1 : 1;
