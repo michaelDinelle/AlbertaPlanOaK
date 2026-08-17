@@ -1,9 +1,3 @@
-#ifndef OAK_ENV_METAL_INCLUDED
-#define OAK_ENV_METAL_INCLUDED
-
-#include <metal_stdlib>
-using namespace metal;
-
 #pragma METAL fp math_mode(safe)
 
 constant uint OAK_ENV_CHEETAH     = 0u;
@@ -108,7 +102,7 @@ inline void env_reset(uint envKind, uint seed,
         words[2] = 9u; words[3] = 9u;
         words[4] = 0u; words[5] = 0u;
     } else if (envKind == OAK_ENV_DEEPSEA) {
-        uint4 rm = hc_philox4x32(uint2(seed, HC_RNG_STREAM_RESET),
+        uint4 rm = philox4x32(uint2(seed, RNG_STREAM_RESET),
                                  uint4(0u, 0u, 0u, 0u));
         words[0] = 0u; words[1] = 0u; words[2] = 0u;
         words[3] = rm.x; words[4] = rm.y; words[5] = 0u;
@@ -121,9 +115,9 @@ inline void env_reset(uint envKind, uint seed,
     } else if (envKind == OAK_ENV_PENDULUM) {
         words[0] = as_type<uint>(M_PI_F);
     } else if (envKind == OAK_ENV_LARGEDEEPSEA) {
-        uint4 rm0 = hc_philox4x32(uint2(seed, HC_RNG_STREAM_RESET),
+        uint4 rm0 = philox4x32(uint2(seed, RNG_STREAM_RESET),
                                   uint4(0u, 0u, 0u, 0u));
-        uint4 rm1 = hc_philox4x32(uint2(seed, HC_RNG_STREAM_RESET),
+        uint4 rm1 = philox4x32(uint2(seed, RNG_STREAM_RESET),
                                   uint4(1u, 0u, 0u, 0u));
         words[0] = 0u;
         words[1] = rm0.x; words[2] = rm0.y;
@@ -313,5 +307,3 @@ inline void env_pose(uint envKind, thread const uint *words, thread const HalfCh
         for (int i = 0; i < 9; i++) pose[i] = cheetah.qpos[i];
     }
 }
-
-#endif

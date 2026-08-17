@@ -1,10 +1,4 @@
-#include <metal_stdlib>
-#include <float.h>
-#include "OakPhysics.metal"
-#include "Gridworld.metal"
-#include "ClassicControl.metal"
-#include "Env.metal"
-using namespace metal;
+#pragma METAL fp math_mode(safe)
 
 constant bool OAK_ABLATE_FEATURE_CONSTRUCTION [[function_constant(0)]];
 constant bool OAK_ABLATE_GVF_PREDICTION [[function_constant(1)]];
@@ -1681,7 +1675,6 @@ static inline void updateUtilities(Agent agent, uint tid) {
     }
 }
 
-constant uint HC_RNG_STREAM_ACT = 2u;
 
 constant uint OAK_DEATH_NONE       = 0xffffffffu;
 constant uint OAK_DET_ENV_REWARD   = 1u;
@@ -1786,9 +1779,9 @@ static inline void sampleDiscreteAction(Agent agent,
                                                  uint gid, uint tid) {
     uint discreteActionCount = OAK_ENV_SPECS[envKind(lane->envKind)].actionCount;
     uint stepIdx = lane->steps;
-    uint4 rw = hc_philox4x32(uint2(laneSeeds[gid], HC_RNG_STREAM_ACT),
+    uint4 rw = philox4x32(uint2(laneSeeds[gid], RNG_STREAM_ACT),
                              uint4(stepIdx, 0u, 0u, 0u));
-    uint4 rw1 = hc_philox4x32(uint2(laneSeeds[gid], HC_RNG_STREAM_ACT),
+    uint4 rw1 = philox4x32(uint2(laneSeeds[gid], RNG_STREAM_ACT),
                               uint4(stepIdx, 1u, 0u, 0u));
     uint words[8] = { rw.x, rw.y, rw.z, rw.w, rw1.x, rw1.y, rw1.z, rw1.w };
 
@@ -1801,7 +1794,7 @@ static inline void sampleDiscreteAction(Agent agent,
     for (uint d = 0u; d < discreteActionCount; ++d) {
         float mu = finiteOrZero(agent.policyMeanRaw[d]);
 
-        float uniform = min(hc_u01open(words[d & 7u]), 0x1.fffffep-1f);
+        float uniform = min(u01open(words[d & 7u]), 0x1.fffffep-1f);
         float gumbelScore = mu - log(-log(uniform));
         if (gumbelScore > bestGumbelScore) { bestGumbelScore = gumbelScore; sampledAction = d; }
     }
@@ -1853,16 +1846,16 @@ static inline void sampleAction(Agent agent,
 
     if (tid < envActionCount) {
         uint d = tid;
-        uint2 key = uint2(laneSeeds[gid], HC_RNG_STREAM_ACT);
+        uint2 key = uint2(laneSeeds[gid], RNG_STREAM_ACT);
         uint pair = d >> 1u;
-        uint4 r = hc_philox4x32(key, uint4(stepIdx, pair >> 1u, 0u, 0u));
+        uint4 r = philox4x32(key, uint4(stepIdx, pair >> 1u, 0u, 0u));
 
         uint w0, w1;
         if (pair == 0u) { w0 = r.x; w1 = r.y; }
         else if (pair == 1u) { w0 = r.z; w1 = r.w; }
         else { w0 = r.x; w1 = r.y; }
-        float uniform1 = hc_u01open(w0);
-        float uniform2 = hc_u01(w1);
+        float uniform1 = u01open(w0);
+        float uniform2 = u01(w1);
         float boxMullerRadius = sqrt(-2.0f * log(uniform1));
         float boxMullerAngle = 2.0f * M_PI_F * uniform2;
         float standardNormal = ((d & 1u) == 0u) ? (boxMullerRadius * cos(boxMullerAngle)) : (boxMullerRadius * sin(boxMullerAngle));
