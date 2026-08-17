@@ -1,17 +1,11 @@
 
-import { CelebrationPool, attachCelebrations, disposeCelebrations } from '@kit/celebrate';
-import { GroundTruthOverlay } from '@kit/debug';
+import type { CelebrationPoolOptions } from '@kit/celebrate';
+import type { GroundTruthOptions } from '@kit/debug';
 import type { GridSize } from '@kit/grid';
 import { clamp01, envelope } from '@kit/mix';
-import { makeOrbitRig, type OrbitRig } from '@kit/rigs';
-import { TOKENS } from '@kit/tokens';
-import type {
-  FrameUpdate,
-  SceneContext,
-  SceneFactory,
-  SceneModule,
-  SceneSize,
-} from '@kit/types';
+import type { OrbitRigOptions } from '@kit/rigs';
+import { StageScene } from '@kit/stage';
+import type { FrameUpdate, SceneContext, SceneFactory } from '@kit/types';
 import { Wisp } from '@kit/wisp';
 import * as THREE from 'three';
 import type { GridCell, GridGeometry } from '@sim/types';
@@ -52,19 +46,13 @@ const GAPE_BREATH = 0.12;
 const GAPE_PROXIMITY = 0.52;
 const PROXIMITY_COLS = 3;
 
-class SunlitDescentScene implements SceneModule {
+class SunlitDescentScene extends StageScene<WorldHandle> {
   readonly manifest = manifest;
-  scene = new THREE.Scene();
-  camera = new THREE.PerspectiveCamera(TOKENS.fovHero, 16 / 9, 0.1, 900);
+  protected readonly stageName = 'sunlitDescent';
 
-  private ctx: SceneContext | null = null;
-  private world: WorldHandle | null = null;
   private wisp: Wisp | null = null;
   private bubble: BubbleHandle | null = null;
   private clam: ClamHandle | null = null;
-  private pool: CelebrationPool | null = null;
-  private rig: OrbitRig | null = null;
-  private overlay: GroundTruthOverlay | null = null;
   private readonly diver = new THREE.Group();
   private grid: GridGeometry = resolveGrid({});
   private reach: Uint8Array = new Uint8Array(0);
@@ -83,25 +71,20 @@ class SunlitDescentScene implements SceneModule {
   private pearlHue = 0xffd166;
   private gold = 0xffd166;
 
-  private debugOn = false;
-
-  async init(ctx: SceneContext): Promise<void> {
-    this.ctx = ctx;
-    this.scene.name = 'sunlitDescentScene';
-
+  protected buildWorld(ctx: SceneContext): WorldHandle {
     const grid = resolveGrid(ctx.geometry, ctx.seed);
     this.grid = grid;
     this.reach = reefReachable(grid);
     const goal = treasureCell(grid);
     this.treasure = { x: goal.c, y: goal.r };
+    return buildWorld(ctx, this.scene, grid, this.reach);
+  }
 
+  protected buildActors(ctx: SceneContext, world: WorldHandle): void {
+    const grid = this.grid;
     const palette = ctx.tokens.palettes.underwater;
     const accent = ctx.tokens.accents[manifest.accent] ?? ctx.tokens.uiCyan;
     this.gold = ctx.tokens.celebrationGold;
-
-    const world = buildWorld(ctx, this.scene, grid, this.reach);
-    this.world = world;
-    this.scene.add(world.group);
     this.pearlHue = world.skin.pearl.getHex();
 
     const pearlLight = world.rig.points[0];
@@ -145,8 +128,10 @@ class SunlitDescentScene implements SceneModule {
     this.clam = clam;
     cellToReefVec(this.treasure.x, this.treasure.y, grid, clam.root.position);
     this.scene.add(clam.group);
+  }
 
-    const rig = makeOrbitRig({
+  protected rigOptions(ctx: SceneContext): OrbitRigOptions {
+    return {
       canvas: ctx.canvas,
       target: [CAM_TARGET[0], CAM_TARGET[1], CAM_TARGET[2]],
       distance: CAM_DISTANCE,
@@ -160,24 +145,22 @@ class SunlitDescentScene implements SceneModule {
       rotateSpeed: 0.004,
       zoomSpeed: 0.0012,
       name: 'reefOrbitRig',
-    });
-    this.rig = rig;
-    this.camera = rig.camera;
-    rig.snap();
+    };
+  }
 
-    const pool = new CelebrationPool({
+  protected poolOptions(ctx: SceneContext): CelebrationPoolOptions {
+    return {
       seed: ctx.seed,
       burstSize: BURST_PARTICLES,
       name: 'reefCelebrations',
-    });
-    attachCelebrations(this.scene, pool);
-    pool.setPixelRatio(ctx.size.dpr);
-    this.pool = pool;
+    };
+  }
 
+  protected overlayOptions(): GroundTruthOptions {
     const overlayDive = this.overlayDive;
     const overlayCell = this.overlayCell;
-    const overlayGrid: GridSize = grid;
-    this.overlay = new GroundTruthOverlay(ctx.geometry, {
+    const overlayGrid: GridSize = this.grid;
+    return {
       camera: this.camera,
       agentCell: (state) => {
         readDive(state, overlayGrid, overlayDive);
@@ -187,24 +170,27 @@ class SunlitDescentScene implements SceneModule {
       },
       goalCell: () => this.treasure,
       name: 'reefGroundTruth',
-    });
-    reefShear(grid, this.overlay.group.matrix);
-    this.overlay.group.matrixAutoUpdate = false;
-    this.overlay.group.matrixWorldNeedsUpdate = true;
-    this.scene.add(this.overlay.group);
-    this.overlay.visible = this.debugOn;
-
-    world.setPixelRatio(ctx.size.dpr);
-    world.setTime(0);
-    wisp.setCell(0, 0, grid);
-    this.diver.position.y = reefDepthYAt(wisp.position.z, grid);
-    bubble.setTime(0);
-    bubble.setStress(0);
-    clam.setState(GAPE_BASE, 0);
-    clam.setTime(0);
+    };
   }
 
-  update(frame: FrameUpdate): void {
+  protected start(_ctx: SceneContext, world: WorldHandle): void {
+    const wisp = this.wisp;
+    const overlay = this.overlay;
+    if (!wisp || !overlay) return;
+    reefShear(this.grid, overlay.group.matrix);
+    overlay.group.matrixAutoUpdate = false;
+    overlay.group.matrixWorldNeedsUpdate = true;
+
+    world.setTime(0);
+    wisp.setCell(0, 0, this.grid);
+    this.diver.position.y = reefDepthYAt(wisp.position.z, this.grid);
+    this.bubble?.setTime(0);
+    this.bubble?.setStress(0);
+    this.clam?.setState(GAPE_BASE, 0);
+    this.clam?.setTime(0);
+  }
+
+  protected tick(frame: FrameUpdate): void {
     const ctx = this.ctx;
     const world = this.world;
     const wisp = this.wisp;
@@ -316,25 +302,9 @@ class SunlitDescentScene implements SceneModule {
     world.setTime(time);
 
     rig.update(frame.dtReal);
-
-    if (this.debugOn && this.overlay) this.overlay.setState(state);
   }
 
-  resize(size: SceneSize): void {
-    const aspect = size.height > 0 ? size.width / size.height : 16 / 9;
-    this.rig?.resize(aspect);
-    this.world?.setPixelRatio(size.dpr);
-    this.pool?.setPixelRatio(size.dpr);
-  }
-
-  setDebug(on: boolean): void {
-    this.debugOn = on;
-    if (this.overlay) this.overlay.visible = on;
-  }
-
-  dispose(): void {
-    this.overlay?.dispose();
-    this.overlay = null;
+  protected drop(): void {
     this.clam?.dispose();
     this.clam = null;
     this.bubble?.dispose();
@@ -343,15 +313,6 @@ class SunlitDescentScene implements SceneModule {
     this.wisp = null;
     this.diver.removeFromParent();
     this.diver.clear();
-    this.world?.dispose();
-    this.world = null;
-    this.rig?.dispose();
-    this.rig = null;
-    disposeCelebrations(this.scene);
-    this.pool = null;
-    this.scene.clear();
-    this.scene.fog = null;
-    this.ctx = null;
     this.goalAt = -Infinity;
     this.resurfaceAt = -Infinity;
     this.stir = 0;

@@ -1,16 +1,10 @@
 
-import { GroundTruthOverlay } from '@kit/debug';
-import { makeOrbitRig, orbitFromPose, type OrbitRig } from '@kit/rigs';
-import { CelebrationPool, attachCelebrations, disposeCelebrations } from '@kit/celebrate';
+import type { CelebrationPoolOptions } from '@kit/celebrate';
+import type { GroundTruthOptions } from '@kit/debug';
 import { clampRange, envelope } from '@kit/mix';
-import type {
-  FrameState,
-  FrameUpdate,
-  SceneContext,
-  SceneFactory,
-  SceneModule,
-  SceneSize,
-} from '@kit/types';
+import { orbitFromPose, type OrbitRigOptions } from '@kit/rigs';
+import { StageScene } from '@kit/stage';
+import type { FrameState, FrameUpdate, SceneContext, SceneFactory, SceneSize } from '@kit/types';
 import * as THREE from 'three';
 import { AB_L1, AB_L2, ACROBOT_ACTION, ACROBOT_TH1, ACROBOT_TH2, ACROBOT_W1, ACROBOT_W2, acrobotTorque } from '@sim/envs/acrobot';
 import { buildArm, type ArmHandle } from './actors';
@@ -44,17 +38,11 @@ export function torqueOf(state: FrameState): number {
   return acrobotTorque(state.pose[ACROBOT_ACTION] ?? 0);
 }
 
-class WillowSwingScene implements SceneModule {
+class WillowSwingScene extends StageScene<WorldHandle> {
   readonly manifest = manifest;
-  scene = new THREE.Scene();
-  camera = new THREE.PerspectiveCamera(40, 16 / 9, 0.1, 500);
+  protected readonly stageName = 'willowSwing';
 
-  private ctx: SceneContext | null = null;
-  private world: WorldHandle | null = null;
   private arm: ArmHandle | null = null;
-  private rig: OrbitRig | null = null;
-  private pool: CelebrationPool | null = null;
-  private overlay: GroundTruthOverlay | null = null;
   private accent = 0xf2a7c3;
   private gold = 0xffd166;
   private pivot: readonly [number, number, number] = [0, 0, 0];
@@ -69,22 +57,17 @@ class WillowSwingScene implements SceneModule {
   private readonly ripplePos = new THREE.Vector3();
   private readonly celebrateAt = new THREE.Vector3();
 
-  private debugOn = false;
-
-  async init(ctx: SceneContext): Promise<void> {
-    this.ctx = ctx;
-    this.scene.name = 'willowSwingScene';
-
-    const palette = ctx.tokens.palettes.dawn;
+  protected buildWorld(ctx: SceneContext): WorldHandle {
     this.accent = ctx.tokens.accents[manifest.accent] ?? ctx.tokens.celebrationGold;
     this.gold = ctx.tokens.celebrationGold;
     this.pivot = pivotAnchor(ctx.geometry);
     this.success = successAnchor(ctx.geometry);
-    const success = this.success;
+    return buildWorld(ctx, this.scene);
+  }
 
-    const world = buildWorld(ctx, this.scene);
-    this.world = world;
-    this.scene.add(world.group);
+  protected buildActors(ctx: SceneContext, world: WorldHandle): void {
+    const palette = ctx.tokens.palettes.dawn;
+    const success = this.success;
 
     const arm = buildArm({
       palette,
@@ -105,12 +88,14 @@ class WillowSwingScene implements SceneModule {
     }
     const celebration = world.rig.points[2];
     if (celebration) celebration.color.set(this.accent);
+  }
 
+  protected rigOptions(ctx: SceneContext): OrbitRigOptions {
     const home = orbitFromPose(
       CAM_BASE,
       CAM_LOOK,
     );
-    const rig = makeOrbitRig({
+    return {
       canvas: ctx.canvas,
       target: CAM_LOOK,
       azimuth: home.azimuth,
@@ -122,21 +107,19 @@ class WillowSwingScene implements SceneModule {
       aspect: ctx.size.height > 0 ? ctx.size.width / ctx.size.height : 16 / 9,
       damping: 2.4,
       name: 'willowOrbitRig',
-    });
-    this.rig = rig;
-    this.camera = rig.camera;
-    rig.snap();
+    };
+  }
 
-    const pool = new CelebrationPool({
+  protected poolOptions(ctx: SceneContext): CelebrationPoolOptions {
+    return {
       seed: ctx.seed,
       burstSize: BURST_PARTICLES,
       name: 'willowCelebrations',
-    });
-    attachCelebrations(this.scene, pool);
-    pool.setPixelRatio(ctx.size.dpr);
-    this.pool = pool;
+    };
+  }
 
-    this.overlay = new GroundTruthOverlay(ctx.geometry, {
+  protected overlayOptions(): GroundTruthOptions {
+    return {
       camera: this.camera,
       agentPos: (state) => {
         acrobotPointsExact(state.pose[ACROBOT_TH1] ?? 0, state.pose[ACROBOT_TH2] ?? 0, this.points);
@@ -146,12 +129,13 @@ class WillowSwingScene implements SceneModule {
         return this.overlayPos;
       },
       name: 'willowGroundTruth',
-    });
-    this.scene.add(this.overlay.group);
-    this.overlay.visible = this.debugOn;
+    };
+  }
 
+  protected start(ctx: SceneContext, world: WorldHandle): void {
+    const arm = this.arm;
+    if (!arm) return;
     arm.setPixelRatio(ctx.size.dpr);
-    world.setPixelRatio(ctx.size.dpr);
     world.setDawn(0.45);
     world.setFlare(-1);
     world.setPetals(0);
@@ -163,7 +147,7 @@ class WillowSwingScene implements SceneModule {
     this.celebrateAt.copy(arm.tipWorld);
   }
 
-  update(frame: FrameUpdate): void {
+  protected tick(frame: FrameUpdate): void {
     const ctx = this.ctx;
     const world = this.world;
     const arm = this.arm;
@@ -248,38 +232,17 @@ class WillowSwingScene implements SceneModule {
 
     rig.update(frame.dtReal);
 
-    if (this.debugOn && this.overlay) this.overlay.setState(state);
-
     this.celebrateAt.copy(arm.tipWorld);
   }
 
   resize(size: SceneSize): void {
-    const aspect = size.height > 0 ? size.width / size.height : 16 / 9;
-    this.rig?.resize(aspect);
+    super.resize(size);
     this.arm?.setPixelRatio(size.dpr);
-    this.world?.setPixelRatio(size.dpr);
-    this.pool?.setPixelRatio(size.dpr);
   }
 
-  setDebug(on: boolean): void {
-    this.debugOn = on;
-    if (this.overlay) this.overlay.visible = on;
-  }
-
-  dispose(): void {
-    this.overlay?.dispose();
-    this.overlay = null;
+  protected drop(): void {
     this.arm?.dispose();
     this.arm = null;
-    this.world?.dispose();
-    this.world = null;
-    this.rig?.dispose();
-    this.rig = null;
-    disposeCelebrations(this.scene);
-    this.pool = null;
-    this.scene.clear();
-    this.scene.fog = null;
-    this.ctx = null;
     this.flareAt = -Infinity;
     this.petalAt = -Infinity;
     this.flashAt = -Infinity;
