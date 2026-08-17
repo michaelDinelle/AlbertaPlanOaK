@@ -134,7 +134,7 @@ export function HealthView({ detail, ppo }: { detail: RunDetail | null; ppo: Run
           { swatch: 'var(--color-ink-dim)', label: STR.health.erank, dashed: true },
         ]}
       />
-      {capacity === null ? (
+      {capacity === null || !capacity.alive ? (
         <div className="py-3 text-center text-2xs text-ink-faint">{STR.health.noPlasticity}</div>
       ) : (
         <TimeChart height={110} xMax={horizon} yFormat={(v) => formatPercent(v, 0)} rightFormat={(v) => formatRate(v, 2)}>
