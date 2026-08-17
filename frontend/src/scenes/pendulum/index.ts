@@ -1,17 +1,10 @@
 
-import { GroundTruthOverlay } from '@kit/debug';
-import { makeOrbitRig, orbitFromPose, type OrbitRig } from '@kit/rigs';
-import { CelebrationPool, attachCelebrations, disposeCelebrations } from '@kit/celebrate';
+import type { CelebrationPoolOptions } from '@kit/celebrate';
+import type { GroundTruthOptions } from '@kit/debug';
 import { clampRange } from '@kit/mix';
-import type {
-  FrameState,
-  FrameUpdate,
-  SceneContext,
-  SceneFactory,
-  SceneModule,
-  SceneSize,
-} from '@kit/types';
-import * as THREE from 'three';
+import { orbitFromPose, type OrbitRigOptions } from '@kit/rigs';
+import { StageScene } from '@kit/stage';
+import type { FrameState, FrameUpdate, SceneContext, SceneFactory } from '@kit/types';
 import { PD_L, PD_MAX_SPEED, PD_MAX_TORQUE, PENDULUM_TH, PENDULUM_THDOT, PENDULUM_TORQUE, wrapPi } from '@sim/envs/pendulum';
 import { buildLanternRig, type LanternRigHandle } from './actors';
 import { manifest } from './manifest';
@@ -40,33 +33,22 @@ export function serenityOf(theta: number, thetaDot: number, torque = 0): number 
   return clampRange(reward, 0, 1) ** SERENITY_GAMMA;
 }
 
-class LanternBellScene implements SceneModule {
+class LanternBellScene extends StageScene<WorldHandle> {
   readonly manifest = manifest;
-  scene = new THREE.Scene();
-  camera = new THREE.PerspectiveCamera(40, 16 / 9, 0.1, 500);
+  protected readonly stageName = 'lanternBell';
 
-  private ctx: SceneContext | null = null;
-  private world: WorldHandle | null = null;
   private lantern: LanternRigHandle | null = null;
-  private rig: OrbitRig | null = null;
-  private pool: CelebrationPool | null = null;
-  private overlay: GroundTruthOverlay | null = null;
   private pivot: readonly [number, number, number] = [0, 0, 0];
-
-  private debugOn = false;
   private readonly overlayPos: [number, number, number] = [0, 0, 0];
 
-  async init(ctx: SceneContext): Promise<void> {
-    this.ctx = ctx;
-    this.scene.name = 'lanternBellScene';
+  protected buildWorld(ctx: SceneContext): WorldHandle {
     this.pivot = pivotOf(ctx.geometry);
+    return buildWorld(ctx, this.scene);
+  }
 
+  protected buildActors(ctx: SceneContext): void {
     const palette = ctx.tokens.palettes.night;
     const accent = ctx.tokens.accents[manifest.accent] ?? ctx.tokens.celebrationGold;
-
-    const world = buildWorld(ctx, this.scene);
-    this.world = world;
-    this.scene.add(world.group);
 
     const lantern = buildLanternRig({
       palette,
@@ -77,12 +59,14 @@ class LanternBellScene implements SceneModule {
     });
     this.lantern = lantern;
     this.scene.add(lantern.group);
+  }
 
+  protected rigOptions(ctx: SceneContext): OrbitRigOptions {
     const home = orbitFromPose(
       CAM_BASE,
       CAM_LOOK,
     );
-    const rig = makeOrbitRig({
+    return {
       canvas: ctx.canvas,
       target: CAM_LOOK,
       azimuth: home.azimuth,
@@ -94,20 +78,18 @@ class LanternBellScene implements SceneModule {
       aspect: ctx.size.height > 0 ? ctx.size.width / ctx.size.height : 16 / 9,
       damping: 2.6,
       name: 'lanternOrbitRig',
-    });
-    this.rig = rig;
-    this.camera = rig.camera;
-    rig.snap();
+    };
+  }
 
-    const pool = new CelebrationPool({
+  protected poolOptions(ctx: SceneContext): CelebrationPoolOptions {
+    return {
       seed: ctx.seed,
       name: 'lanternBellCelebrations',
-    });
-    attachCelebrations(this.scene, pool);
-    pool.setPixelRatio(ctx.size.dpr);
-    this.pool = pool;
+    };
+  }
 
-    this.overlay = new GroundTruthOverlay(ctx.geometry, {
+  protected overlayOptions(): GroundTruthOptions {
+    return {
       camera: this.camera,
       agentPos: (state) => {
         const th = state.pose[PENDULUM_TH] ?? 0;
@@ -117,14 +99,13 @@ class LanternBellScene implements SceneModule {
         return this.overlayPos;
       },
       name: 'lanternBellGroundTruth',
-    });
-    this.scene.add(this.overlay.group);
-    this.overlay.visible = this.debugOn;
+    };
+  }
 
-    world.setPixelRatio(ctx.size.dpr);
+  protected start(_ctx: SceneContext, world: WorldHandle): void {
     this.applyState(Math.PI, 0, 0, 0);
     world.setTime(0);
-    lantern.setTime(0);
+    this.lantern?.setTime(0);
   }
 
   private applyState(theta: number, thetaDot: number, torque: number, time: number): void {
@@ -143,7 +124,7 @@ class LanternBellScene implements SceneModule {
     if (light) light.position.copy(flame);
   }
 
-  update(frame: FrameUpdate): void {
+  protected tick(frame: FrameUpdate): void {
     const ctx = this.ctx;
     const world = this.world;
     const lantern = this.lantern;
@@ -170,36 +151,11 @@ class LanternBellScene implements SceneModule {
     lantern.setTime(time);
 
     rig.update(frame.dtReal);
-
-    if (this.debugOn && this.overlay) this.overlay.setState(state);
   }
 
-  resize(size: SceneSize): void {
-    const aspect = size.height > 0 ? size.width / size.height : 16 / 9;
-    this.rig?.resize(aspect);
-    this.world?.setPixelRatio(size.dpr);
-    this.pool?.setPixelRatio(size.dpr);
-  }
-
-  setDebug(on: boolean): void {
-    this.debugOn = on;
-    if (this.overlay) this.overlay.visible = on;
-  }
-
-  dispose(): void {
-    this.overlay?.dispose();
-    this.overlay = null;
+  protected drop(): void {
     this.lantern?.dispose();
     this.lantern = null;
-    this.world?.dispose();
-    this.world = null;
-    this.rig?.dispose();
-    this.rig = null;
-    disposeCelebrations(this.scene);
-    this.pool = null;
-    this.scene.clear();
-    this.scene.fog = null;
-    this.ctx = null;
   }
 }
 

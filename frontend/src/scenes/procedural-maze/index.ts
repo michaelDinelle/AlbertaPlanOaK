@@ -1,19 +1,13 @@
 
 import { PROCMAZE_GX, PROCMAZE_GY, PROCMAZE_X, PROCMAZE_Y } from '@sim/envs/proceduralmaze';
-import { CelebrationPool, attachCelebrations, disposeCelebrations } from '@kit/celebrate';
-import { GroundTruthOverlay } from '@kit/debug';
+import type { CelebrationPoolOptions } from '@kit/celebrate';
+import type { GroundTruthOptions } from '@kit/debug';
 import { cellToWorldVec, clampCell, type GridSize } from '@kit/grid';
 import { blendTokens, envelope } from '@kit/mix';
-import { makeOrbitRig, type OrbitRig } from '@kit/rigs';
+import type { OrbitRigOptions } from '@kit/rigs';
+import { StageScene } from '@kit/stage';
 import { TOKENS } from '@kit/tokens';
-import type {
-  FrameState,
-  FrameUpdate,
-  SceneContext,
-  SceneFactory,
-  SceneModule,
-  SceneSize,
-} from '@kit/types';
+import type { FrameState, FrameUpdate, SceneContext, SceneFactory } from '@kit/types';
 import { Wisp } from '@kit/wisp';
 import * as THREE from 'three';
 import type { GridCell, GridGeometry } from '@sim/types';
@@ -67,19 +61,13 @@ export function readGoalCell(state: FrameState, grid: GridSize, out: GridCell): 
   return clampCell(out, grid);
 }
 
-class OvergrownRuinsScene implements SceneModule {
+class OvergrownRuinsScene extends StageScene<WorldHandle> {
   readonly manifest = manifest;
-  scene = new THREE.Scene();
-  camera = new THREE.PerspectiveCamera(TOKENS.fovHero, 16 / 9, 0.1, 900);
+  protected readonly stageName = 'overgrownRuins';
 
-  private ctx: SceneContext | null = null;
-  private world: WorldHandle | null = null;
   private wisp: Wisp | null = null;
   private shaft: SunShaftHandle | null = null;
-  private pool: CelebrationPool | null = null;
-  private rig: OrbitRig | null = null;
-  private overlay: GroundTruthOverlay | null = null;
-  private grid: GridGeometry | null = null;
+  private gridGeom: GridGeometry | null = null;
   private skin: RuinSkin | null = null;
   private seed = 0;
 
@@ -99,16 +87,16 @@ class OvergrownRuinsScene implements SceneModule {
   private gold = TOKENS.celebrationGold;
   private moteColor = TOKENS.celebrationGold;
 
-  private debugOn = false;
-
-  async init(ctx: SceneContext): Promise<void> {
-    this.ctx = ctx;
-    this.scene.name = 'overgrownRuinsScene';
-
+  protected buildWorld(ctx: SceneContext): WorldHandle {
     const grid = resolveGrid(ctx.geometry, ctx.seed);
-    this.grid = grid;
+    this.gridGeom = grid;
     this.seed = ctx.seed;
+    return buildWorld(ctx, this.scene, grid);
+  }
 
+  protected buildActors(ctx: SceneContext, world: WorldHandle): void {
+    const grid = this.gridGeom;
+    if (!grid) return;
     const palette = ctx.tokens.palettes.noon;
     const skin = ruinSkin(palette, ctx.tokens);
     this.skin = skin;
@@ -120,10 +108,6 @@ class OvergrownRuinsScene implements SceneModule {
       0.3,
     ).getHex();
     this.litTint.copy(blendTokens(skin.flag, skin.sunWarm, 0.5));
-
-    const world = buildWorld(ctx, this.scene, grid);
-    this.world = world;
-    this.scene.add(world.group);
 
     const beamLight = world.rig.points[0];
     if (beamLight) beamLight.color.set(skin.sunWarm);
@@ -152,9 +136,11 @@ class OvergrownRuinsScene implements SceneModule {
     });
     this.shaft = shaft;
     this.scene.add(shaft.group);
+  }
 
+  protected rigOptions(ctx: SceneContext): OrbitRigOptions {
     const bias = CAM_TARGET_BIAS;
-    const rig = makeOrbitRig({
+    return {
       canvas: ctx.canvas,
       target: [Math.sin(CAM_AZIMUTH) * bias, CAM_TARGET_Y, Math.cos(CAM_AZIMUTH) * bias],
       distance: CAM_DISTANCE,
@@ -168,23 +154,22 @@ class OvergrownRuinsScene implements SceneModule {
       rotateSpeed: 0.004,
       zoomSpeed: 0.0012,
       name: 'ruinOrbitRig',
-    });
-    this.rig = rig;
-    this.camera = rig.camera;
-    rig.snap();
+    };
+  }
 
-    const pool = new CelebrationPool({
+  protected poolOptions(ctx: SceneContext): CelebrationPoolOptions {
+    return {
       seed: ctx.seed,
       burstSize: BURST_PARTICLES,
       name: 'ruinCelebrations',
-    });
-    attachCelebrations(this.scene, pool);
-    pool.setPixelRatio(ctx.size.dpr);
-    this.pool = pool;
+    };
+  }
 
+  protected overlayOptions(): GroundTruthOptions {
+    const grid = this.gridGeom ?? resolveGrid({}, 0);
     const overlayAgent: GridCell = { x: 0, y: 0 };
     const overlayGoal: GridCell = { x: 0, y: 0 };
-    this.overlay = new GroundTruthOverlay(ctx.geometry, {
+    return {
       camera: this.camera,
       agentCell: (state) => {
         readCells(state, grid, overlayAgent, overlayGoal);
@@ -195,25 +180,24 @@ class OvergrownRuinsScene implements SceneModule {
         return overlayGoal;
       },
       name: 'ruinGroundTruth',
-    });
-    this.scene.add(this.overlay.group);
-    this.overlay.visible = this.debugOn;
-
-    world.setPixelRatio(ctx.size.dpr);
-    world.setTime(0);
-    wisp.setCell(0, 0, grid);
-    shaft.setState(1);
-    shaft.setTime(0);
+    };
   }
 
-  update(frame: FrameUpdate): void {
+  protected start(_ctx: SceneContext, world: WorldHandle): void {
+    world.setTime(0);
+    this.wisp?.setCell(0, 0, this.gridGeom ?? resolveGrid({}, 0));
+    this.shaft?.setState(1);
+    this.shaft?.setTime(0);
+  }
+
+  protected tick(frame: FrameUpdate): void {
     const ctx = this.ctx;
     const world = this.world;
     const wisp = this.wisp;
     const shaft = this.shaft;
     const pool = this.pool;
     const rig = this.rig;
-    const grid = this.grid;
+    const grid = this.gridGeom;
     if (!ctx || !world || !wisp || !shaft || !pool || !rig || !grid) return;
 
     const time = ctx.time();
@@ -298,14 +282,12 @@ class OvergrownRuinsScene implements SceneModule {
     world.setTime(time);
 
     rig.update(frame.dtReal);
-
-    if (this.debugOn && this.overlay) this.overlay.setState(state);
   }
 
   private relightFloor(x: number, y: number): void {
     if (x === this.litX && y === this.litY) return;
     const world = this.world;
-    const grid = this.grid;
+    const grid = this.gridGeom;
     const skin = this.skin;
     if (!world || !grid || !skin) return;
     if (this.litX >= 0) {
@@ -317,35 +299,12 @@ class OvergrownRuinsScene implements SceneModule {
     this.litY = y;
   }
 
-  resize(size: SceneSize): void {
-    const aspect = size.height > 0 ? size.width / size.height : 16 / 9;
-    this.rig?.resize(aspect);
-    this.world?.setPixelRatio(size.dpr);
-    this.pool?.setPixelRatio(size.dpr);
-  }
-
-  setDebug(on: boolean): void {
-    this.debugOn = on;
-    if (this.overlay) this.overlay.visible = on;
-  }
-
-  dispose(): void {
-    this.overlay?.dispose();
-    this.overlay = null;
+  protected drop(): void {
     this.shaft?.dispose();
     this.shaft = null;
     this.wisp?.dispose();
     this.wisp = null;
-    this.world?.dispose();
-    this.world = null;
-    this.rig?.dispose();
-    this.rig = null;
-    disposeCelebrations(this.scene);
-    this.pool = null;
-    this.scene.clear();
-    this.scene.fog = null;
-    this.ctx = null;
-    this.grid = null;
+    this.gridGeom = null;
     this.skin = null;
     this.seed = 0;
     this.growAt = -Infinity;

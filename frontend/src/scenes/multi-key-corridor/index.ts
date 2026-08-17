@@ -1,19 +1,13 @@
 
 import { MKC_CARRY, MKC_GATES, MKC_GX, MKC_GY, MKC_X, MKC_Y, mkcBit } from '@sim/envs/multikeycorridor';
-import { CelebrationPool, attachCelebrations, disposeCelebrations } from '@kit/celebrate';
-import { GroundTruthOverlay } from '@kit/debug';
+import type { CelebrationPoolOptions } from '@kit/celebrate';
+import type { GroundTruthOptions } from '@kit/debug';
 import { cellToWorldVec, clampCell, type GridSize } from '@kit/grid';
 import { envelope } from '@kit/mix';
-import { makeOrbitRig, type OrbitRig } from '@kit/rigs';
+import type { OrbitRigOptions } from '@kit/rigs';
+import { StageScene } from '@kit/stage';
 import { TOKENS } from '@kit/tokens';
-import type {
-  FrameState,
-  FrameUpdate,
-  SceneContext,
-  SceneFactory,
-  SceneModule,
-  SceneSize,
-} from '@kit/types';
+import type { FrameState, FrameUpdate, SceneContext, SceneFactory } from '@kit/types';
 import { Wisp } from '@kit/wisp';
 import type { GridCell, GridGeometry } from '@sim/types';
 import * as THREE from 'three';
@@ -139,21 +133,15 @@ export function readGoalCell(state: FrameState, grid: GridSize, out: GridCell): 
   clampCell(out, grid);
 }
 
-class TempleOfThreeGatesScene implements SceneModule {
+class TempleOfThreeGatesScene extends StageScene<WorldHandle> {
   readonly manifest = manifest;
-  scene = new THREE.Scene();
-  camera = new THREE.PerspectiveCamera(TOKENS.fovHero, 16 / 9, 0.1, 900);
+  protected readonly stageName = 'templeOfThreeGates';
 
-  private ctx: SceneContext | null = null;
-  private world: WorldHandle | null = null;
   private wisp: Wisp | null = null;
   private gates: GateHandle[] = [];
   private altars: KeyAltarHandle[] = [];
   private rack: CarryRackHandle | null = null;
   private shrine: ShrineHandle | null = null;
-  private pool: CelebrationPool | null = null;
-  private rig: OrbitRig | null = null;
-  private overlay: GroundTruthOverlay | null = null;
   private grid: GridGeometry = resolveGrid({});
   private doors: readonly GridCell[] = [];
 
@@ -172,17 +160,17 @@ class TempleOfThreeGatesScene implements SceneModule {
   private relicColor = new THREE.Color(0xffd166);
   private accentColor = new THREE.Color(0xd9b36a);
 
-  private debugOn = false;
-
-  async init(ctx: SceneContext): Promise<void> {
-    this.ctx = ctx;
-    this.scene.name = 'templeOfThreeGatesScene';
-
+  protected buildWorld(ctx: SceneContext): WorldHandle {
     const grid = resolveGrid(ctx.geometry);
     this.grid = grid;
-    const doors = resolveDoors(grid);
-    this.doors = doors;
+    this.doors = resolveDoors(grid);
     seedKeys(this.view, grid);
+    return buildWorld(ctx, this.scene, grid);
+  }
+
+  protected buildActors(ctx: SceneContext, world: WorldHandle): void {
+    const grid = this.grid;
+    const doors = this.doors;
     const openingGoal = resolveGoal(grid);
 
     const palette = ctx.tokens.palettes.morning;
@@ -191,10 +179,6 @@ class TempleOfThreeGatesScene implements SceneModule {
     this.accentColor = new THREE.Color(accent);
     this.keyColors = skin.keys.map((c) => c.clone());
     this.relicColor = skin.relic.clone();
-
-    const world = buildWorld(ctx, this.scene, grid);
-    this.world = world;
-    this.scene.add(world.group);
 
     const gateCount = Math.min(doors.length, 3);
     const builders = [buildBrambleGate, buildRiverGate, buildMistGate];
@@ -262,8 +246,10 @@ class TempleOfThreeGatesScene implements SceneModule {
       sanctumLight.position.set(b.cx, 1.9, b.cz);
       sanctumLight.intensity = 0.85;
     }
+  }
 
-    const rig = makeOrbitRig({
+  protected rigOptions(ctx: SceneContext): OrbitRigOptions {
+    return {
       canvas: ctx.canvas,
       target: [0, CAM_TARGET_Y, 0],
       distance: CAM_DISTANCE,
@@ -277,27 +263,26 @@ class TempleOfThreeGatesScene implements SceneModule {
       rotateSpeed: 0.004,
       zoomSpeed: 0.0012,
       name: 'templeOrbitRig',
-    });
-    this.rig = rig;
-    this.camera = rig.camera;
-    rig.snap();
+    };
+  }
 
-    const pool = new CelebrationPool({
+  protected poolOptions(ctx: SceneContext): CelebrationPoolOptions {
+    return {
       seed: ctx.seed,
       burstSize: BURST_PARTICLES,
       name: 'templeCelebrations',
-    });
-    attachCelebrations(this.scene, pool);
-    pool.setPixelRatio(ctx.size.dpr);
-    this.pool = pool;
+    };
+  }
 
+  protected overlayOptions(): GroundTruthOptions {
+    const grid = this.grid;
     const overlayView = makeView();
     seedKeys(overlayView, grid);
     const readOverlay = (state: FrameState): TempleView => {
       readState(state, grid, overlayView);
       return overlayView;
     };
-    this.overlay = new GroundTruthOverlay(ctx.geometry, {
+    return {
       camera: this.camera,
       agentCell: (state) => {
         const v = readOverlay(state);
@@ -314,13 +299,12 @@ class TempleOfThreeGatesScene implements SceneModule {
       doorStates: (state) => readOverlay(state).doorOpen,
       maxKeys: KEYS,
       name: 'templeGroundTruth',
-    });
-    this.scene.add(this.overlay.group);
-    this.overlay.visible = this.debugOn;
+    };
+  }
 
-    world.setPixelRatio(ctx.size.dpr);
+  protected start(_ctx: SceneContext, world: WorldHandle): void {
     world.setTime(0);
-    wisp.setCell(0, 0, grid);
+    this.wisp?.setCell(0, 0, this.grid);
     for (const gate of this.gates) {
       gate.setProgress(0);
       gate.setFlare(0);
@@ -331,12 +315,12 @@ class TempleOfThreeGatesScene implements SceneModule {
       altar.setCarried(false);
       altar.setTime(0);
     }
-    rack.setTime(0);
-    shrine.setState(0, 1);
-    shrine.setTime(0);
+    this.rack?.setTime(0);
+    this.shrine?.setState(0, 1);
+    this.shrine?.setTime(0);
   }
 
-  update(frame: FrameUpdate): void {
+  protected tick(frame: FrameUpdate): void {
     const ctx = this.ctx;
     const world = this.world;
     const wisp = this.wisp;
@@ -481,25 +465,9 @@ class TempleOfThreeGatesScene implements SceneModule {
     world.setTime(time);
 
     rig.update(frame.dtReal);
-
-    if (this.debugOn && this.overlay) this.overlay.setState(state);
   }
 
-  resize(size: SceneSize): void {
-    const aspect = size.height > 0 ? size.width / size.height : 16 / 9;
-    this.rig?.resize(aspect);
-    this.world?.setPixelRatio(size.dpr);
-    this.pool?.setPixelRatio(size.dpr);
-  }
-
-  setDebug(on: boolean): void {
-    this.debugOn = on;
-    if (this.overlay) this.overlay.visible = on;
-  }
-
-  dispose(): void {
-    this.overlay?.dispose();
-    this.overlay = null;
+  protected drop(): void {
     this.shrine?.dispose();
     this.shrine = null;
     for (const gate of this.gates) gate.dispose();
@@ -511,15 +479,6 @@ class TempleOfThreeGatesScene implements SceneModule {
     this.rack = null;
     this.wisp?.dispose();
     this.wisp = null;
-    this.world?.dispose();
-    this.world = null;
-    this.rig?.dispose();
-    this.rig = null;
-    disposeCelebrations(this.scene);
-    this.pool = null;
-    this.scene.clear();
-    this.scene.fog = null;
-    this.ctx = null;
     this.doors = [];
     this.growAt = -Infinity;
     this.bloomAt = -Infinity;
