@@ -7,6 +7,7 @@ export type KeyAction =
   | { kind: 'sort' }
   | { kind: 'debug' }
   | { kind: 'fullscreen' }
+  | { kind: 'policy' }
   | { kind: 'escape' };
 
 export function keyAction(key: string, shift = false): KeyAction | null {
@@ -35,6 +36,9 @@ export function keyAction(key: string, shift = false): KeyAction | null {
     case 'f':
     case 'F':
       return { kind: 'fullscreen' };
+    case 'p':
+    case 'P':
+      return { kind: 'policy' };
     case 'Escape':
       return { kind: 'escape' };
     default:
