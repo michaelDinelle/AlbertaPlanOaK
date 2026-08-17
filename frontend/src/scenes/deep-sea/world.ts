@@ -23,6 +23,7 @@ import { makeDataTexture } from '@kit/textures';
 import type { Palette } from '@kit/tokens';
 import type { SceneContext } from '@kit/types';
 import { excludeAny, scatterFlowers, scatterRocks, type ExcludeFn } from '@kit/vegetation';
+import { makeWorld, type WorldCore } from '@kit/world';
 import * as THREE from 'three';
 import type { GridGeometry } from '@sim/types';
 import {
@@ -510,8 +511,7 @@ export function buildGodRays(
 }
 
 
-export interface WorldHandle {
-  group: THREE.Group;
+export interface WorldHandle extends WorldCore {
   sky: SkyHandle;
   rig: LightRig;
   field: CellFieldHandle;
@@ -519,18 +519,8 @@ export interface WorldHandle {
   skin: ReefSkin;
   silt: AmbientParticlesHandle;
   rush: AmbientParticlesHandle;
-  setTime(t: number): void;
-  setPixelRatio(dpr: number): void;
-  dispose(): void;
 }
 
-interface Disposable {
-  dispose(): void;
-}
-
-interface Timed {
-  setTime(t: number): void;
-}
 
 export function buildWorld(
   ctx: SceneContext,
@@ -541,11 +531,7 @@ export function buildWorld(
   const ctxTokens = ctx.tokens;
   const palette: Palette = ctxTokens.palettes.underwater;
   const skin = reefSkin(palette, ctx.tokens);
-  const group = new THREE.Group();
-  group.name = 'sunlitDescent';
-  const owned: Disposable[] = [];
-  const timed: Timed[] = [];
-  const pixelated: AmbientParticlesHandle[] = [];
+  const w = makeWorld('sunlitDescent');
 
   const sky = skyFromPalette(palette, 'underwater', {
     topSpread: 0.34,
@@ -558,9 +544,9 @@ export function buildWorld(
     blendTokens(palette.skyHorizon, palette.skyBottom, 0.62),
     blendTokens(palette.skyBottom, ctxTokens.palettes.abyss.skyBottom, 0.62),
   );
-  group.add(sky.mesh);
-  owned.push(sky);
-  timed.push({ setTime: (t) => sky.setTime(t) });
+  w.add(sky.mesh);
+  w.own(sky);
+  w.time({ setTime: (t) => sky.setTime(t) });
 
   const rig = makeLightRig(palette, {
     sunDir: SUN_DIR,
@@ -568,8 +554,8 @@ export function buildWorld(
     pointDistance: 9,
     sunDistanceScale: 2.4,
   });
-  group.add(rig.group);
-  owned.push(rig);
+  w.add(rig.group);
+  w.own(rig);
   rig.setShadowFocus({ x: 0, y: reefDepthY((grid.h - 1) / 2, grid), z: 0 }, SHADOW_RADIUS);
 
   const fog = makeFog(palette, FOG_EXTENT);
@@ -600,14 +586,13 @@ export function buildWorld(
   terraceShelves(field, grid);
   const floorMesh = field.floorMeshes[0];
   if (floorMesh) floorMesh.castShadow = true;
-  group.add(field.group);
-  owned.push(field);
-  timed.push({ setTime: (t) => field.setTime(t) });
+  w.add(field.group);
+  w.own(field);
+  w.time({ setTime: (t) => field.setTime(t) });
 
   const kelp = buildKelp(grid, reach, skin, palette, ctx.seed);
-  group.add(kelp.mesh);
-  owned.push(kelp);
-  timed.push(kelp);
+  w.add(kelp.mesh);
+  w.time(w.own(kelp));
 
   const offReef = excludeAny(excludeOpenWater(grid, reach), excludeCellCenters(grid, 0.34));
   const reefArea = { x: 0, z: 0, halfX: (grid.w * 0.5) - 0.1, halfZ: (grid.h * 0.5) - 0.1 };
@@ -626,9 +611,8 @@ export function buildWorld(
     castShadow: false,
     name: 'reefCoral',
   });
-  group.add(coral.group);
-  owned.push(coral);
-  timed.push(coral);
+  w.add(coral.group);
+  w.time(w.own(coral));
 
   const anemones = scatterFlowers({
     count: 120,
@@ -647,21 +631,18 @@ export function buildWorld(
     castShadow: false,
     name: 'reefAnemones',
   });
-  group.add(anemones.group);
-  owned.push(anemones);
-  timed.push(anemones);
+  w.add(anemones.group);
+  w.time(w.own(anemones));
 
   const caustics = buildCaustics(grid, reach, skin);
-  group.add(caustics.mesh);
-  owned.push(caustics);
-  timed.push(caustics);
+  w.add(caustics.mesh);
+  w.time(w.own(caustics));
 
   let godRays: GodRayHandle | null = null;
   {
     godRays = buildGodRays(rig.sunDirection, skin, ctx.seed);
-    group.add(godRays.group);
-    owned.push(godRays);
-    timed.push(godRays);
+    w.add(godRays.group);
+    w.time(w.own(godRays));
   }
 
   const haze: MistPlanesHandle = makeMistPlanes({
@@ -677,9 +658,8 @@ export function buildWorld(
     nearFade: 5,
     name: 'reefHaze',
   });
-  group.add(haze.group);
-  owned.push(haze);
-  timed.push(haze);
+  w.add(haze.group);
+  w.time(w.own(haze));
 
   const bubbles = makeAmbientParticles({
     preset: 'bubbles',
@@ -694,10 +674,8 @@ export function buildWorld(
     swirl: 0.14,
     name: 'reefBubbles',
   });
-  group.add(bubbles.points);
-  owned.push(bubbles);
-  timed.push(bubbles);
-  pixelated.push(bubbles);
+  w.add(bubbles.points);
+  w.size(w.time(w.own(bubbles)));
 
   const silt = makeAmbientParticles({
     preset: 'dust',
@@ -713,10 +691,8 @@ export function buildWorld(
     name: 'reefSilt',
   });
   silt.setDensity(0);
-  group.add(silt.points);
-  owned.push(silt);
-  timed.push(silt);
-  pixelated.push(silt);
+  w.add(silt.points);
+  w.size(w.time(w.own(silt)));
 
   const rush = makeAmbientParticles({
     preset: 'bubbles',
@@ -732,13 +708,10 @@ export function buildWorld(
     name: 'reefResurfaceRush',
   });
   rush.setDensity(0);
-  group.add(rush.points);
-  owned.push(rush);
-  timed.push(rush);
-  pixelated.push(rush);
+  w.add(rush.points);
+  w.size(w.time(w.own(rush)));
 
-  return {
-    group,
+  return w.seal({
     sky,
     rig,
     field,
@@ -746,21 +719,7 @@ export function buildWorld(
     skin,
     silt,
     rush,
-    setTime(t) {
-      for (let i = 0; i < timed.length; i++) timed[i]?.setTime(t);
-    },
-    setPixelRatio(dpr) {
-      for (let i = 0; i < pixelated.length; i++) pixelated[i]?.setPixelRatio(dpr);
-    },
-    dispose() {
-      for (let i = owned.length - 1; i >= 0; i--) owned[i]?.dispose();
-      owned.length = 0;
-      timed.length = 0;
-      pixelated.length = 0;
-      group.removeFromParent();
-      group.clear();
-    },
-  };
+  });
 }
 
 export function treasureCell(grid: GridGeometry): { c: number; r: number } {

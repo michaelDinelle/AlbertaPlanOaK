@@ -199,6 +199,15 @@ export async function mountSceneHost(
     scene = module;
     manifest = module.manifest;
 
+    if (import.meta.env.DEV) {
+      let descendants = 0;
+      module.scene.traverse(() => descendants++);
+      const two = module.scene.children
+        .map((c) => `${c.name || c.type}[${c.children.map((k) => k.name || k.type).join(',')}]`)
+        .join('|');
+      console.log(`[graph] ${envId} ${two} #${descendants}`);
+    }
+
     post = buildComposer(renderer, module.scene, module.camera, module.manifest.postConfig, size);
     module.setDebug(debugOn);
     applySize();

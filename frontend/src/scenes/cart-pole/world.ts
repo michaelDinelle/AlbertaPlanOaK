@@ -25,6 +25,7 @@ import {
   type ExcludeFn,
 } from '@kit/vegetation';
 import { makeWater, type WaterHandle } from '@kit/water';
+import { makeWorld, type WorldCore } from '@kit/world';
 import { CP_POLE_LENGTH, CP_TH_LIMIT, CP_X_LIMIT } from '@sim/envs/cartpole';
 import type { EnvGeometry } from '@sim/types';
 
@@ -126,8 +127,7 @@ export function makeShoreHeight(seed: number): (x: number, z: number) => number 
 }
 
 
-export interface WorldHandle {
-  group: THREE.Group;
+export interface WorldHandle extends WorldCore {
   sky: SkyHandle;
   rig: LightRig;
   water: WaterHandle;
@@ -135,20 +135,10 @@ export interface WorldHandle {
   endLeftRoot: THREE.Object3D;
   endRightRoot: THREE.Object3D;
   gaugeRoot: THREE.Object3D;
-  setTime(t: number): void;
   setWind(lean: number): void;
   setCool(env01: number): void;
-  setPixelRatio(dpr: number): void;
-  dispose(): void;
 }
 
-interface Disposable {
-  dispose(): void;
-}
-
-interface Timed {
-  setTime(t: number): void;
-}
 
 const GRASS_WIND = 0.075;
 const REED_WIND = 0.05;
@@ -161,10 +151,7 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene): WorldHandle {
   const cordY = tiltLineY(ctx.geometry);
   const coneHalf = tiltLimit(ctx.geometry);
   const armLength = poleLength(ctx.geometry);
-  const group = new THREE.Group();
-  group.name = 'boardwalkWorld';
-  const owned: Disposable[] = [];
-  const timed: Timed[] = [];
+  const w = makeWorld('boardwalkWorld');
 
   const woodPale = blendTokens(palette.groundB, TOKEN_BLACK, 0.34);
   const woodMid = blendTokens(palette.groundA, TOKEN_BLACK, 0.24);
@@ -191,9 +178,9 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene): WorldHandle {
     bottomSpread: 0.34,
     radius: 320,
   });
-  group.add(sky.mesh);
-  owned.push(sky);
-  timed.push({ setTime: (t) => sky.setTime(t) });
+  w.add(sky.mesh);
+  w.own(sky);
+  w.time({ setTime: (t) => sky.setTime(t) });
 
   const rig = makeLightRig(palette, {
     sunDir: sky.sunDirection,
@@ -201,8 +188,8 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene): WorldHandle {
     pointDistance: 5,
     sunDistanceScale: 2.6,
   });
-  group.add(rig.group);
-  owned.push(rig);
+  w.add(rig.group);
+  w.own(rig);
   rig.setShadowFocus({ x: 0, y: -0.3, z: -1.4 }, 5.5);
 
   applyFog(scene, palette, FOG_EXTENT);
@@ -240,8 +227,8 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene): WorldHandle {
     castShadow: false,
     name: 'lakeBed',
   });
-  group.add(terrain.mesh);
-  owned.push(terrain);
+  w.add(terrain.mesh);
+  w.own(terrain);
 
   const water = makeWater({
     size: [TERRAIN_W - 2, TERRAIN_D - 2],
@@ -260,9 +247,8 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene): WorldHandle {
     sunDir: sky.sunDirection,
     name: 'boardwalkLake',
   });
-  group.add(water.mesh);
-  owned.push(water);
-  timed.push(water);
+  w.add(water.mesh);
+  w.time(w.own(water));
 
   const deckParts: ColoredPart[] = [];
   const PLANK_PITCH = 0.126;
@@ -314,8 +300,8 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene): WorldHandle {
   deckMesh.name = 'boardwalkDeck';
   deckMesh.castShadow = true;
   deckMesh.receiveShadow = true;
-  group.add(deckMesh);
-  owned.push({
+  w.add(deckMesh);
+  w.own({
     dispose: () => {
       deckGeometry.dispose();
       timberMaterial.dispose();
@@ -327,7 +313,7 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene): WorldHandle {
     const root = new THREE.Object3D();
     root.name = sign < 0 ? 'deckEndLeftRoot' : 'deckEndRightRoot';
     root.position.set(sign * xLimit, DECK_Y, 0);
-    group.add(root);
+    w.add(root);
     endRoots.push(root);
 
     const parts: ColoredPart[] = [];
@@ -351,7 +337,7 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene): WorldHandle {
     mesh.castShadow = true;
     mesh.receiveShadow = true;
     root.add(mesh);
-    owned.push({ dispose: () => geo.dispose() });
+    w.own({ dispose: () => geo.dispose() });
   }
 
   const cordParts: ColoredPart[] = [];
@@ -381,15 +367,15 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene): WorldHandle {
   const cordMesh = new THREE.Mesh(cordGeometry, timberMaterial);
   cordMesh.name = 'tiltCord';
   cordMesh.castShadow = false;
-  group.add(cordMesh);
-  owned.push({ dispose: () => cordGeometry.dispose() });
+  w.add(cordMesh);
+  w.own({ dispose: () => cordGeometry.dispose() });
 
   const gaugeRoot = new THREE.Object3D();
   gaugeRoot.name = 'tiltGaugeRoot';
   const station = gaugeStation(CAM_BASE, GAUGE_Z);
   gaugeRoot.position.set(station.x, station.y, station.z);
   gaugeRoot.scale.setScalar(station.scale);
-  group.add(gaugeRoot);
+  w.add(gaugeRoot);
   {
     const parts: ColoredPart[] = [];
     const FACE_Z = 0;
@@ -455,7 +441,7 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene): WorldHandle {
     mesh.castShadow = false;
     mesh.receiveShadow = true;
     gaugeRoot.add(mesh);
-    owned.push({ dispose: () => geo.dispose() });
+    w.own({ dispose: () => geo.dispose() });
   }
 
   {
@@ -475,8 +461,8 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene): WorldHandle {
       const mesh = new THREE.Mesh(geo, timberMaterial);
       mesh.name = 'mooringPosts';
       mesh.castShadow = false;
-      group.add(mesh);
-      owned.push({ dispose: () => geo.dispose() });
+      w.add(mesh);
+      w.own({ dispose: () => geo.dispose() });
     }
   }
 
@@ -530,8 +516,8 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene): WorldHandle {
     if (pads.instanceColor) pads.instanceColor.needsUpdate = true;
     pads.computeBoundingSphere();
   }
-  group.add(pads);
-  owned.push({
+  w.add(pads);
+  w.own({
     dispose: () => {
       pads.dispose();
       padGeometry.dispose();
@@ -562,9 +548,8 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene): WorldHandle {
     rimStrength: 0.4,
     name: 'bankGrass',
   });
-  group.add(grass.group);
-  owned.push(grass);
-  timed.push(grass);
+  w.add(grass.group);
+  w.time(w.own(grass));
 
   const reeds = scatterGrass({
     count: 620,
@@ -589,9 +574,8 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene): WorldHandle {
     rimStrength: 0.5,
     name: 'lakeReeds',
   });
-  group.add(reeds.group);
-  owned.push(reeds);
-  timed.push(reeds);
+  w.add(reeds.group);
+  w.time(w.own(reeds));
 
   const fringe = scatterGrass({
     count: 150,
@@ -609,9 +593,8 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene): WorldHandle {
     rimStrength: 0.55,
     name: 'foregroundReeds',
   });
-  group.add(fringe.group);
-  owned.push(fringe);
-  timed.push(fringe);
+  w.add(fringe.group);
+  w.time(w.own(fringe));
 
   const flowers = scatterFlowers({
     count: 340,
@@ -629,9 +612,8 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene): WorldHandle {
     rimStrength: 0.4,
     name: 'bankFlowers',
   });
-  group.add(flowers.group);
-  owned.push(flowers);
-  timed.push(flowers);
+  w.add(flowers.group);
+  w.time(w.own(flowers));
 
   const rocks = scatterRocks({
     count: 220,
@@ -651,9 +633,8 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene): WorldHandle {
     castShadow: false,
     name: 'shoreStones',
   });
-  group.add(rocks.group);
-  owned.push(rocks);
-  timed.push(rocks);
+  w.add(rocks.group);
+  w.time(w.own(rocks));
 
   const trees = scatterTrees({
     archetypes: ['broadleaf', 'conifer'],
@@ -674,9 +655,8 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene): WorldHandle {
     castShadow: false,
     name: 'farShoreTrees',
   });
-  group.add(trees.group);
-  owned.push(trees);
-  timed.push(trees);
+  w.add(trees.group);
+  w.time(w.own(trees));
 
   const pollen: AmbientParticlesHandle = makeAmbientParticles({
     preset: 'pollen',
@@ -691,9 +671,8 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene): WorldHandle {
     swirl: 0.12,
     name: 'lakePollen',
   });
-  group.add(pollen.points);
-  owned.push(pollen);
-  timed.push(pollen);
+  w.add(pollen.points);
+  w.size(w.time(w.own(pollen)));
 
   const spray: AmbientParticlesHandle = makeAmbientParticles({
     preset: 'dust',
@@ -708,9 +687,8 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene): WorldHandle {
     swirl: 0.18,
     name: 'lakeSpray',
   });
-  group.add(spray.points);
-  owned.push(spray);
-  timed.push(spray);
+  w.add(spray.points);
+  w.size(w.time(w.own(spray)));
 
   const haze: MistPlanesHandle = makeMistPlanes({
     size: [30, 14],
@@ -726,9 +704,8 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene): WorldHandle {
     name: 'lakeHaze',
   });
   haze.group.position.set(0, 0, -12);
-  group.add(haze.group);
-  owned.push(haze);
-  timed.push(haze);
+  w.add(haze.group);
+  w.time(w.own(haze));
 
   const clouds: MistPlanesHandle = makeMistPlanes({
     size: [56, 20],
@@ -744,18 +721,16 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene): WorldHandle {
     name: 'noonClouds',
   });
   clouds.group.position.set(0, 0, -19);
-  group.add(clouds.group);
-  owned.push(clouds);
-  timed.push(clouds);
+  w.add(clouds.group);
+  w.time(w.own(clouds));
 
   const animated: OakMaterial[] = [padMaterial, timberMaterial];
-  timed.push({ setTime: (t) => setMaterialsTime(animated, t) });
+  w.time({ setTime: (t) => setMaterialsTime(animated, t) });
 
   const sunBase = rig.sun.intensity;
   const hemiBase = rig.hemi.intensity;
 
-  return {
-    group,
+  return w.seal({
     sky,
     rig,
     water,
@@ -763,9 +738,6 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene): WorldHandle {
     endLeftRoot: endRoots[0] as THREE.Object3D,
     endRightRoot: endRoots[1] as THREE.Object3D,
     gaugeRoot,
-    setTime(t) {
-      for (let i = 0; i < timed.length; i++) timed[i]?.setTime(t);
-    },
     setWind(lean) {
       const l = clampRange(lean, -1, 1);
       const k = 0.45 + 0.75 * l;
@@ -779,17 +751,9 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene): WorldHandle {
       rig.sun.intensity = sunBase * (1 - 0.13 * c);
       rig.hemi.intensity = hemiBase * (1 + 0.34 * c);
     },
-    setPixelRatio(dpr) {
-      pollen.setPixelRatio(dpr);
-      spray.setPixelRatio(dpr);
-    },
-    dispose() {
-      for (let i = owned.length - 1; i >= 0; i--) owned[i]?.dispose();
-      owned.length = 0;
-      timed.length = 0;
+  }, {
+    drop: () => {
       animated.length = 0;
-      group.removeFromParent();
-      group.clear();
     },
-  };
+  });
 }
