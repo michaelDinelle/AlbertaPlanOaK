@@ -1,11 +1,225 @@
-#ifndef OAK_PHYSICS_METAL_INCLUDED
-#define OAK_PHYSICS_METAL_INCLUDED
+#pragma METAL fp math_mode(safe)
 
-#include <metal_stdlib>
-#include "HalfCheetahModel.metal"
+constant float HC_TIMESTEP = 0.01f;
+constant float HC_GRAVITY_Z = -9.81f;
+constant float HC_SOLVER_TOL = 1e-5f;
+constant float HC_LS_TOL = 0.01f;
+constant int HC_SOLVER_ITER = 10;
+constant int HC_LS_ITER = 15;
+constant int HC_FRAME_SKIP = 5;
+constant float HC_RESET_NOISE = 0.1f;
+constant int HC_BODY_PARENT[8] = { 0, 0, 1, 2, 3, 1, 5, 6 };
+constant float HC_BODY_POS[24] = {
+    0.0f, 0.0f, 0.0f,
+    0.0f, 0.0f, 0.7f,
+    -0.5f, 0.0f, 0.0f,
+    0.16f, 0.0f, -0.25f,
+    -0.28f, 0.0f, -0.14f,
+    0.5f, 0.0f, 0.0f,
+    -0.14f, 0.0f, -0.24f,
+    0.13f, 0.0f, -0.18f
+};
+constant float HC_BODY_QUAT[32] = {
+    1.0f, 0.0f, 0.0f, 0.0f,
+    1.0f, 0.0f, 0.0f, 0.0f,
+    1.0f, 0.0f, 0.0f, 0.0f,
+    1.0f, 0.0f, 0.0f, 0.0f,
+    1.0f, 0.0f, 0.0f, 0.0f,
+    1.0f, 0.0f, 0.0f, 0.0f,
+    1.0f, 0.0f, 0.0f, 0.0f,
+    1.0f, 0.0f, 0.0f, 0.0f
+};
+constant float HC_BODY_IPOS[24] = {
+    0.0f, 0.0f, 0.0f,
+    0.152389878f, 0.0f, 0.025398313f,
+    0.1f, 0.0f, -0.13f,
+    -0.14f, 0.0f, -0.07f,
+    0.03f, 0.0f, -0.097f,
+    -0.07f, 0.0f, -0.12f,
+    0.065f, 0.0f, -0.09f,
+    0.045f, 0.0f, -0.07f
+};
+constant float HC_BODY_IQUAT[32] = {
+    1.0f, 0.0f, 0.0f, 0.0f,
+    0.522429792f, 0.476515596f, 0.476515596f, 0.522429792f,
+    -0.323289567f, -0.0f, -0.946300088f, -0.0f,
+    0.527619932f, -0.0f, -0.849480552f, -0.0f,
+    0.990901331f, -0.0f, -0.134590311f, -0.0f,
+    0.966389978f, 0.0f, 0.257080552f, 0.0f,
+    0.955336489f, -0.0f, -0.295520207f, -0.0f,
+    0.955336489f, -0.0f, -0.295520207f, -0.0f
+};
+constant float HC_BODY_MASS[8] = {
+    0.0f, 6.25020921f, 1.54351464f, 1.5874477f, 1.09539749f, 1.43807531f, 1.20083682f, 0.884518828f
+};
+constant float HC_BODY_INERTIA[24] = {
+    0.0f, 0.0f, 0.0f,
+    0.897117688f, 0.885655452f, 0.0179609234f,
+    0.0168443396f, 0.0168443396f, 0.00157602159f,
+    0.0182674191f, 0.0182674191f, 0.00162250276f,
+    0.00635242326f, 0.00635242326f, 0.00110191364f,
+    0.0137396433f, 0.0137396433f, 0.00146446678f,
+    0.00822210862f, 0.00822210862f, 0.00121346845f,
+    0.00352910946f, 0.00352910946f, 0.000878804017f
+};
+constant int HC_JNT_TYPE[9] = { 2, 2, 3, 3, 3, 3, 3, 3, 3 };
+constant int HC_JNT_BODY[9] = { 1, 1, 1, 2, 3, 4, 5, 6, 7 };
+constant float HC_JNT_POS[27] = {
+    0.0f, 0.0f, 0.0f,
+    0.0f, 0.0f, 0.0f,
+    0.0f, 0.0f, 0.0f,
+    0.0f, 0.0f, 0.0f,
+    0.0f, 0.0f, 0.0f,
+    0.0f, 0.0f, 0.0f,
+    0.0f, 0.0f, 0.0f,
+    0.0f, 0.0f, 0.0f,
+    0.0f, 0.0f, 0.0f
+};
+constant float HC_JNT_AXIS[27] = {
+    1.0f, 0.0f, 0.0f,
+    0.0f, 0.0f, 1.0f,
+    0.0f, 1.0f, 0.0f,
+    0.0f, 1.0f, 0.0f,
+    0.0f, 1.0f, 0.0f,
+    0.0f, 1.0f, 0.0f,
+    0.0f, 1.0f, 0.0f,
+    0.0f, 1.0f, 0.0f,
+    0.0f, 1.0f, 0.0f
+};
+constant int HC_JNT_LIMITED[9] = { 0, 0, 0, 1, 1, 1, 1, 1, 1 };
+constant float HC_JNT_RANGE[18] = {
+    0.0f, 0.0f,
+    0.0f, 0.0f,
+    0.0f, 0.0f,
+    -0.52f, 1.05f,
+    -0.785f, 0.785f,
+    -0.4f, 0.785f,
+    -1.0f, 0.7f,
+    -1.2f, 0.87f,
+    -0.5f, 0.5f
+};
+constant float HC_JNT_SOLREF[18] = {
+    0.02f, 1.0f,
+    0.02f, 1.0f,
+    0.02f, 1.0f,
+    0.02f, 1.0f,
+    0.02f, 1.0f,
+    0.02f, 1.0f,
+    0.02f, 1.0f,
+    0.02f, 1.0f,
+    0.02f, 1.0f
+};
+constant float HC_JNT_SOLIMP[45] = {
+    0.0f, 0.8f, 0.03f, 0.5f, 2.0f,
+    0.0f, 0.8f, 0.03f, 0.5f, 2.0f,
+    0.0f, 0.8f, 0.03f, 0.5f, 2.0f,
+    0.0f, 0.8f, 0.03f, 0.5f, 2.0f,
+    0.0f, 0.8f, 0.03f, 0.5f, 2.0f,
+    0.0f, 0.8f, 0.03f, 0.5f, 2.0f,
+    0.0f, 0.8f, 0.03f, 0.5f, 2.0f,
+    0.0f, 0.8f, 0.03f, 0.5f, 2.0f,
+    0.0f, 0.8f, 0.03f, 0.5f, 2.0f
+};
+constant float HC_JNT_MARGIN[9] = {
+    0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f
+};
+constant float HC_DOF_ARMATURE[9] = {
+    0.0f, 0.0f, 0.0f, 0.1f, 0.1f, 0.1f, 0.1f, 0.1f, 0.1f
+};
+constant float HC_DOF_DAMPING[9] = {
+    0.0f, 0.0f, 0.0f, 6.0f, 4.5f, 3.0f, 4.5f, 3.0f, 1.5f
+};
+constant float HC_JNT_STIFFNESS[9] = {
+    0.0f, 0.0f, 0.0f, 240.0f, 180.0f, 120.0f, 180.0f, 120.0f, 60.0f
+};
+constant float HC_QPOS_SPRING[9] = {
+    0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f
+};
+constant float HC_QPOS0[9] = {
+    0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f
+};
+constant int HC_DOF_PARENT[9] = { -1, 0, 1, 2, 3, 4, 2, 6, 7 };
+constant int HC_GEOM_BODY[9] = { 0, 1, 1, 2, 3, 4, 5, 6, 7 };
+constant float HC_GEOM_POS[27] = {
+    0.0f, 0.0f, 0.0f,
+    0.0f, 0.0f, 0.0f,
+    0.6f, 0.0f, 0.1f,
+    0.1f, 0.0f, -0.13f,
+    -0.14f, 0.0f, -0.07f,
+    0.03f, 0.0f, -0.097f,
+    -0.07f, 0.0f, -0.12f,
+    0.065f, 0.0f, -0.09f,
+    0.045f, 0.0f, -0.07f
+};
+constant float HC_GEOM_QUAT[36] = {
+    1.0f, 0.0f, 0.0f, 0.0f,
+    0.707106781f, 0.0f, -0.707106781f, 0.0f,
+    0.906870042f, 0.0f, 0.421410401f, 0.0f,
+    -0.323289567f, -0.0f, -0.946300088f, -0.0f,
+    0.527619932f, -0.0f, -0.849480552f, -0.0f,
+    0.990901331f, -0.0f, -0.134590311f, -0.0f,
+    0.966389978f, 0.0f, 0.257080552f, 0.0f,
+    0.955336489f, -0.0f, -0.295520207f, -0.0f,
+    0.955336489f, -0.0f, -0.295520207f, -0.0f
+};
+constant float HC_GEOM_SIZE[27] = {
+    40.0f, 40.0f, 40.0f,
+    0.046f, 0.5f, 0.0f,
+    0.046f, 0.15f, 0.0f,
+    0.046f, 0.145f, 0.0f,
+    0.046f, 0.15f, 0.0f,
+    0.046f, 0.094f, 0.0f,
+    0.046f, 0.133f, 0.0f,
+    0.046f, 0.106f, 0.0f,
+    0.046f, 0.07f, 0.0f
+};
+constant float HC_GEOM_FRICTION[27] = {
+    0.4f, 0.1f, 0.1f,
+    0.4f, 0.1f, 0.1f,
+    0.4f, 0.1f, 0.1f,
+    0.4f, 0.1f, 0.1f,
+    0.4f, 0.1f, 0.1f,
+    0.4f, 0.1f, 0.1f,
+    0.4f, 0.1f, 0.1f,
+    0.4f, 0.1f, 0.1f,
+    0.4f, 0.1f, 0.1f
+};
+constant float HC_GEOM_SOLREF[18] = {
+    0.02f, 1.0f,
+    0.02f, 1.0f,
+    0.02f, 1.0f,
+    0.02f, 1.0f,
+    0.02f, 1.0f,
+    0.02f, 1.0f,
+    0.02f, 1.0f,
+    0.02f, 1.0f,
+    0.02f, 1.0f
+};
+constant float HC_GEOM_SOLIMP[45] = {
+    0.0f, 0.8f, 0.01f, 0.5f, 2.0f,
+    0.0f, 0.8f, 0.01f, 0.5f, 2.0f,
+    0.0f, 0.8f, 0.01f, 0.5f, 2.0f,
+    0.0f, 0.8f, 0.01f, 0.5f, 2.0f,
+    0.0f, 0.8f, 0.01f, 0.5f, 2.0f,
+    0.0f, 0.8f, 0.01f, 0.5f, 2.0f,
+    0.0f, 0.8f, 0.01f, 0.5f, 2.0f,
+    0.0f, 0.8f, 0.01f, 0.5f, 2.0f,
+    0.0f, 0.8f, 0.01f, 0.5f, 2.0f
+};
+constant int HC_ACT_TRNID[6] = { 3, 4, 5, 6, 7, 8 };
+constant float HC_ACT_GEAR[6] = {
+    120.0f, 90.0f, 60.0f, 120.0f, 60.0f, 30.0f
+};
+constant float HC_ACT_CTRLRANGE[12] = {
+    -1.0f, 1.0f,
+    -1.0f, 1.0f,
+    -1.0f, 1.0f,
+    -1.0f, 1.0f,
+    -1.0f, 1.0f,
+    -1.0f, 1.0f
+};
 
 #pragma METAL fp math_mode(fast)
-using namespace metal;
 
 constant float HC_BODY_SUBTREEMASS[8] = { 14.0f, 14.0f, 4.22635983f, 2.68284519f, 1.09539749f, 3.52343096f, 2.08535565f, 0.884518828f };
 constant float HC_BODY_INVWEIGHT0[16] = { 0.0f, 0.0f, 0.0641575195f, 0.138782354f, 0.0969110156f, 1.00990763f, 0.127209225f, 1.47257736f, 0.243749283f, 3.77214058f, 0.0814837948f, 1.09180348f, 0.131996818f, 1.88718446f, 0.266144103f, 4.19715993f };
@@ -1188,45 +1402,26 @@ inline void halfCheetah_step(thread HalfCheetahState &s) {
     for (int v = 0; v < 9; v++) s.qacc_warmstart[v] = w.qacc[v];
 }
 
-constant uint HC_PHILOX_M0 = 0xD2511F53u;
-constant uint HC_PHILOX_M1 = 0xCD9E8D57u;
-constant uint HC_PHILOX_W0 = 0x9E3779B9u;
-constant uint HC_PHILOX_W1 = 0xBB67AE85u;
-constant uint HC_RNG_STREAM_RESET = 0u;
-
 #pragma METAL fp math_mode(safe)
-inline uint4 hc_philox4x32(uint2 key, uint4 ctr) {
-    for (int r = 0; r < 10; r++) {
-        if (r > 0) { key.x += HC_PHILOX_W0; key.y += HC_PHILOX_W1; }
-        uint hi0 = mulhi(HC_PHILOX_M0, ctr.x), lo0 = HC_PHILOX_M0 * ctr.x;
-        uint hi1 = mulhi(HC_PHILOX_M1, ctr.z), lo1 = HC_PHILOX_M1 * ctr.z;
-        ctr = uint4(hi1 ^ ctr.y ^ key.x, lo1, hi0 ^ ctr.w ^ key.y, lo0);
-    }
-    return ctr;
-}
-
-inline float hc_u01(uint x) { return float(x >> 8) * 0x1p-24f; }
-inline float hc_u01open(uint x) { return (float(x >> 8) + 1.0f) * 0x1p-24f; }
-inline float hc_uniform(uint x, float lo, float hi) { return lo + (hi - lo)*hc_u01(x); }
 
 inline void hc_rng_reset_noise(uint laneSeed, uint resetIdx,
                                thread float *qposNoise, thread float *qvelNoise) {
-    uint2 key = uint2(laneSeed, HC_RNG_STREAM_RESET);
+    uint2 key = uint2(laneSeed, RNG_STREAM_RESET);
     uint raw[12];
     for (uint b = 0; b < 3; b++) {
-        uint4 r = hc_philox4x32(key, uint4(resetIdx, b, 0u, 0u));
+        uint4 r = philox4x32(key, uint4(resetIdx, b, 0u, 0u));
         raw[4*b + 0] = r.x; raw[4*b + 1] = r.y; raw[4*b + 2] = r.z; raw[4*b + 3] = r.w;
     }
     for (int i = 0; i < 9; i++)
-        qposNoise[i] = hc_uniform(raw[i], -HC_RESET_NOISE, HC_RESET_NOISE);
+        qposNoise[i] = uniformRange(raw[i], -HC_RESET_NOISE, HC_RESET_NOISE);
     for (uint b = 0; b < 3; b++) {
-        uint4 r = hc_philox4x32(key, uint4(resetIdx, 3u + b, 0u, 0u));
+        uint4 r = philox4x32(key, uint4(resetIdx, 3u + b, 0u, 0u));
         raw[4*b + 0] = r.x; raw[4*b + 1] = r.y; raw[4*b + 2] = r.z; raw[4*b + 3] = r.w;
     }
     float z[12];
     for (int p = 0; p < 6; p++) {
-        float u1 = hc_u01open(raw[2*p]);
-        float u2 = hc_u01(raw[2*p + 1]);
+        float u1 = u01open(raw[2*p]);
+        float u2 = u01(raw[2*p + 1]);
         float rad = sqrt(-2.0f * log(u1));
         float ang = 2.0f * M_PI_F * u2;
         z[2*p] = rad * cos(ang);
@@ -1247,5 +1442,3 @@ inline void halfCheetah_reset(thread HalfCheetahState &s, uint laneSeed,
     resets++;
     elapsed = 0u;
 }
-
-#endif

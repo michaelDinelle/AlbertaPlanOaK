@@ -140,15 +140,12 @@ func require(_ p: String, _ what: String) throws -> URL {
 }
 func requireFreshMetallib() throws -> URL {
   let lib = try require(".build/OakKernel.metallib", "non-empty Metal library")
-  let sources = [
-    "Sources/OakKernel.metal",
-    "Sources/OakPhysics.metal",
-    "Sources/HalfCheetahModel.metal",
-    "Sources/Gridworld.metal",
-    "Sources/ClassicControl.metal",
-    "Sources/Env.metal",
-  ].map(root)
   let fm = FileManager.default
+  let sourcesDir = root("Sources")
+  let sources = try fm.subpathsOfDirectory(atPath: sourcesDir.path)
+    .filter { $0.hasSuffix(".metal") }
+    .map { sourcesDir.appendingPathComponent($0) }
+  guard !sources.isEmpty else { throw err("No .metal sources under \(sourcesDir.path).") }
   let libTime = try fm.attributesOfItem(atPath: lib.path)[.modificationDate] as? Date
   let staleSource = try sources.first { src in
     guard let libTime,
