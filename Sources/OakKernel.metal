@@ -72,12 +72,6 @@ constant uint FEATURE_NORMALIZED_SUM = 1u;
 constant uint FEATURE_RESIDUAL_PRODUCT = 2u;
 constant uint FEATURE_OBSERVATION_TIMESCALE = 3u;
 
-struct KernelScalars {
-    uint stepCount;
-    uint stateSlot;
-    float averageReward;
-};
-
 inline float keepFiniteRaw(float old_w, float new_w) { return isfinite(new_w) ? new_w : old_w; }
 #define keepFinite(o, n) ftz_probe(keepFiniteRaw((o), (n)))
 
@@ -1676,50 +1670,6 @@ static inline void updateUtilities(Agent agent, uint tid) {
 }
 
 
-constant uint OAK_DEATH_NONE       = 0xffffffffu;
-constant uint OAK_DET_ENV_REWARD   = 1u;
-constant uint OAK_DET_POLICY_MEAN  = 2u;
-constant uint OAK_DET_ENV_OBS      = 3u;
-
-struct OakFleetEnvCfg {
-    uint laneCount;
-    uint episodeLen;
-    uint recordCapacity;
-    float invObsFloor;
-};
-
-struct OakFleetLane {
-    HalfCheetahState halfCheetah;
-    uint elapsed, resets;
-    uint steps;
-    float pendingAction[6];
-    float rewardSum, rewardSumCompensation, averageReward;
-    uint deathStep, deathDetector;
-
-    uint envKind;
-    uint envWords[10];
-    uint envObservationCount, envActionCount;
-};
-static_assert(sizeof(OakFleetLane) == 240, "OakFleetLane layout drifted from the Swift mirror");
-
-struct OakLaneSnapshot {
-    KernelScalars scalars;
-    float paramAbsMax;
-    uint paramNonFinite;
-    float rewardSum, rho;
-    uint deathStep, deathDetector;
-};
-static_assert(sizeof(OakLaneSnapshot) == 36, "OakLaneSnapshot layout drifted from the Swift mirror");
-
-inline float finiteOrZero(float x) { return isfinite(x) ? x : 0.0f; }
-
-inline void kahanAdd(device float *sum, device float *comp, float x) {
-    float y = x - *comp;
-    float t = *sum + y;
-    *comp = (t - *sum) - y;
-    *sum = t;
-}
-
 kernel void oak_fleet_init(device float *params [[buffer(0)]],
                            device float *stateArena [[buffer(1)]],
                            device uint *uintArena [[buffer(2)]],
@@ -1736,20 +1686,9 @@ kernel void oak_fleet_init(device float *params [[buffer(0)]],
     if (gid >= ecfg.laneCount) return;
     device OakFleetLane *lane = &lanes[gid];
     uint storedEnvKind = laneEnvKinds[gid];
-    lane->envKind = storedEnvKind;
-    lane->envObservationCount = OAK_ENV_SPECS[storedEnvKind].obsDimNatural;
-    lane->envActionCount = OAK_ENV_SPECS[storedEnvKind].actionCount;
     HalfCheetahState halfCheetah;
-    uint elapsed = 0u, resets = 0u;
     uint envWords[10];
-    env_reset(storedEnvKind, laneSeeds[gid], envWords, halfCheetah, elapsed, resets);
-    for (int i = 0; i < 10; i++) lane->envWords[i] = envWords[i];
-    lane->halfCheetah = halfCheetah;
-    lane->elapsed = elapsed; lane->resets = resets;
-    lane->steps = 0u;
-    for (int u = 0; u < 6; u++) lane->pendingAction[u] = 0.0f;
-    lane->rewardSum = 0.0f; lane->rewardSumCompensation = 0.0f; lane->averageReward = 0.0f;
-    lane->deathStep = OAK_DEATH_NONE; lane->deathDetector = 0u;
+    resetLane(lane, storedEnvKind, laneSeeds[gid], envWords, halfCheetah);
     {
         Agent agent = make_agent(params, stateArena, uintArena, scalars, cfg, gidLocal, gid,
                            lane->envObservationCount, lane->envActionCount);
@@ -1902,32 +1841,14 @@ static inline void stepEnvironment(device float *params,
     device OakFleetLane *lane = &lanes[gid];
     uint envK = envKind(lane->envKind);
     float ctrl[6];
-    for (int u = 0; u < 6; u++) ctrl[u] = lane->pendingAction[u];
     uint done = 0u;
     float obs[17];
-    float pose[9];
     uint envWords[10];
-    for (int i = 0; i < 10; i++) envWords[i] = lane->envWords[i];
-    bool isCheetah = envK == OAK_ENV_CHEETAH;
     HalfCheetahState halfCheetah;
-    if (isCheetah) halfCheetah = lane->halfCheetah;
-    uint elapsed = lane->elapsed, resets = lane->resets;
-    float reward = env_step(envK, laneSeeds[gid], ctrl, envWords, halfCheetah, elapsed, resets,
-                            ecfg.episodeLen, obs, done);
-    for (int i = 0; i < 10; i++) lane->envWords[i] = envWords[i];
-    if (isCheetah) lane->halfCheetah = halfCheetah;
-    lane->elapsed = elapsed;
-    lane->resets = resets;
+    float reward = advanceEnvironment(lane, envK, laneSeeds[gid], ecfg, ctrl, obs,
+                                      envWords, halfCheetah, done);
     uint stepNum = lane->steps;
-
-    if (isfinite(reward)) {
-        kahanAdd(&lane->rewardSum, &lane->rewardSumCompensation, reward);
-        float rate = max(1.0f / float(stepNum), ecfg.invObsFloor);
-        lane->averageReward += rate * (reward - lane->averageReward);
-    } else if (lane->deathStep == OAK_DEATH_NONE) {
-        lane->deathStep = stepNum;
-        lane->deathDetector = OAK_DET_ENV_REWARD;
-    }
+    accumulateReward(lane, reward, stepNum, ecfg);
     {
         Agent agent = make_agent(params, stateArena, uintArena, scalars, cfg, gidLocal, gid,
                            lane->envObservationCount, lane->envActionCount);
@@ -1949,18 +1870,7 @@ static inline void stepEnvironment(device float *params,
         }
         agent.reward[0] = reward;
     }
-    if (ecfg.recordCapacity != 0u) {
-        int slot = recordSlot[gid];
-        if (slot >= 0) {
-            env_pose(envK, envWords, halfCheetah, ctrl, pose);
-            ulong lanes = (ulong)ecfg.laneCount;
-            device float *dst = recordBuf
-                + ((stepNum - 1u) % ecfg.recordCapacity) * (OAK_RECORD_FLOATS * lanes)
-                + (ulong)slot;
-            dst[0] = float(done);
-            for (uint i = 0u; i < OAK_POSE_LEN; i++) dst[(i + 1u) * lanes] = pose[i];
-        }
-    }
+    recordPose(envK, envWords, halfCheetah, ctrl, stepNum, done, ecfg, recordSlot, recordBuf, gid);
 }
 
 static inline void laneFence() {

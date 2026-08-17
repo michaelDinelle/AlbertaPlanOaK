@@ -20,4 +20,5 @@ using namespace metal;
 #include "envs/POMaze.metal"
 #include "envs/DelayedChain.metal"
 #include "Env.metal"
+#include "Fleet.metal"
 #include "OakKernel.metal"
