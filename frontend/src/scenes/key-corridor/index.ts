@@ -1,19 +1,13 @@
 
 import { KEYCORRIDOR_CARRY, KEYCORRIDOR_GATE, KEYCORRIDOR_GX, KEYCORRIDOR_GY, KEYCORRIDOR_KX, KEYCORRIDOR_KY, KEYCORRIDOR_X, KEYCORRIDOR_Y } from '@sim/envs/keycorridor';
-import { CelebrationPool, attachCelebrations, disposeCelebrations } from '@kit/celebrate';
-import { GroundTruthOverlay } from '@kit/debug';
+import type { CelebrationPoolOptions } from '@kit/celebrate';
+import type { GroundTruthOptions } from '@kit/debug';
 import { cellToWorldVec, clampCell, type GridSize } from '@kit/grid';
 import { clamp01, envelope, smoothstep01 } from '@kit/mix';
-import { makeOrbitRig, type OrbitRig } from '@kit/rigs';
+import type { OrbitRigOptions } from '@kit/rigs';
+import { StageScene } from '@kit/stage';
 import { TOKENS } from '@kit/tokens';
-import type {
-  FrameState,
-  FrameUpdate,
-  SceneContext,
-  SceneFactory,
-  SceneModule,
-  SceneSize,
-} from '@kit/types';
+import type { FrameState, FrameUpdate, SceneContext, SceneFactory } from '@kit/types';
 import { Wisp } from '@kit/wisp';
 import * as THREE from 'three';
 import type { GridCell, GridGeometry } from '@sim/types';
@@ -104,20 +98,14 @@ export function readState(state: FrameState, grid: GridSize, out: GardenState): 
   return out;
 }
 
-class IvyGateScene implements SceneModule {
+class IvyGateScene extends StageScene<WorldHandle> {
   readonly manifest = manifest;
-  scene = new THREE.Scene();
-  camera = new THREE.PerspectiveCamera(TOKENS.fovHero, 16 / 9, 0.1, 900);
+  protected readonly stageName = 'ivyGate';
 
-  private ctx: SceneContext | null = null;
-  private world: WorldHandle | null = null;
   private wisp: Wisp | null = null;
   private gate: GateHandle | null = null;
   private shrine: ShrineHandle | null = null;
   private seed: SeedBedHandle | null = null;
-  private pool: CelebrationPool | null = null;
-  private rig: OrbitRig | null = null;
-  private overlay: GroundTruthOverlay | null = null;
   private grid: GridGeometry = resolveGrid({});
   private door: GridCell = { x: 0, y: 0 };
   private skin: GardenSkin | null = null;
@@ -137,24 +125,19 @@ class IvyGateScene implements SceneModule {
   private readonly lightPos = new THREE.Vector3();
   private readonly bloomCell: GridCell = { x: 0, y: 0 };
 
-  private debugOn = false;
-
-  async init(ctx: SceneContext): Promise<void> {
-    this.ctx = ctx;
-    this.scene.name = 'ivyGateScene';
-
+  protected buildWorld(ctx: SceneContext): WorldHandle {
     const grid = resolveGrid(ctx.geometry);
     this.grid = grid;
     this.door = resolveDoor(grid);
+    return buildWorld(ctx, this.scene, grid);
+  }
 
+  protected buildActors(ctx: SceneContext, world: WorldHandle): void {
+    const grid = this.grid;
     const palette = ctx.tokens.palettes.morning;
     const skin = gardenSkin(palette, ctx.tokens);
     this.skin = skin;
     const accent = ctx.tokens.accents[manifest.accent] ?? ctx.tokens.celebrationGold;
-
-    const world = buildWorld(ctx, this.scene, grid);
-    this.world = world;
-    this.scene.add(world.group);
 
     const shrineLight = world.rig.points[0];
     if (shrineLight) shrineLight.color.set(skin.amber);
@@ -189,8 +172,10 @@ class IvyGateScene implements SceneModule {
     const seed = buildSeedBed({ palette, skin, name: 'seedBed' });
     this.seed = seed;
     this.scene.add(seed.group);
+  }
 
-    const rig = makeOrbitRig({
+  protected rigOptions(ctx: SceneContext): OrbitRigOptions {
+    return {
       canvas: ctx.canvas,
       target: [CAM_TARGET_X, CAM_TARGET_Y, CAM_TARGET_Z],
       distance: CAM_DISTANCE,
@@ -204,24 +189,23 @@ class IvyGateScene implements SceneModule {
       rotateSpeed: 0.004,
       zoomSpeed: 0.0012,
       name: 'gardenOrbitRig',
-    });
-    this.rig = rig;
-    this.camera = rig.camera;
-    rig.snap();
+    };
+  }
 
-    const pool = new CelebrationPool({
+  protected poolOptions(ctx: SceneContext): CelebrationPoolOptions {
+    return {
       seed: ctx.seed,
       burstSize: BURST_PARTICLES,
       name: 'gardenCelebrations',
-    });
-    attachCelebrations(this.scene, pool);
-    pool.setPixelRatio(ctx.size.dpr);
-    this.pool = pool;
+    };
+  }
 
+  protected overlayOptions(): GroundTruthOptions {
+    const grid = this.grid;
     const overlayState = makeGardenState();
     const overlayKeys: GridCell[] = [{ x: 0, y: 0 }];
     const overlayDoors: boolean[] = [false];
-    this.overlay = new GroundTruthOverlay(ctx.geometry, {
+    return {
       camera: this.camera,
       agentCell: (state) => readState(state, grid, overlayState).agent,
       goalCell: (state) => readState(state, grid, overlayState).goal,
@@ -239,22 +223,21 @@ class IvyGateScene implements SceneModule {
         return overlayDoors;
       },
       name: 'gardenGroundTruth',
-    });
-    this.scene.add(this.overlay.group);
-    this.overlay.visible = this.debugOn;
-
-    world.setPixelRatio(ctx.size.dpr);
-    world.setTime(0);
-    wisp.setCell(0, 0, grid);
-    gate.setState(0, 0);
-    gate.setTime(0);
-    shrine.setState(1, GLOW_BASE);
-    shrine.setTime(0);
-    seed.setState(1, 1);
-    seed.setTime(0);
+    };
   }
 
-  update(frame: FrameUpdate): void {
+  protected start(_ctx: SceneContext, world: WorldHandle): void {
+    world.setTime(0);
+    this.wisp?.setCell(0, 0, this.grid);
+    this.gate?.setState(0, 0);
+    this.gate?.setTime(0);
+    this.shrine?.setState(1, GLOW_BASE);
+    this.shrine?.setTime(0);
+    this.seed?.setState(1, 1);
+    this.seed?.setTime(0);
+  }
+
+  protected tick(frame: FrameUpdate): void {
     const ctx = this.ctx;
     const world = this.world;
     const wisp = this.wisp;
@@ -397,8 +380,6 @@ class IvyGateScene implements SceneModule {
     world.setTime(time);
 
     rig.update(frame.dtReal);
-
-    if (this.debugOn && this.overlay) this.overlay.setState(frame.state);
   }
 
   private readBloomCell(frame: FrameUpdate, wisp: Wisp): void {
@@ -413,23 +394,9 @@ class IvyGateScene implements SceneModule {
     this.bloomCell.y = wisp.cellY;
   }
 
-  resize(size: SceneSize): void {
-    const aspect = size.height > 0 ? size.width / size.height : 16 / 9;
-    this.rig?.resize(aspect);
-    this.world?.setPixelRatio(size.dpr);
-    this.pool?.setPixelRatio(size.dpr);
-  }
-
-  setDebug(on: boolean): void {
-    this.debugOn = on;
-    if (this.overlay) this.overlay.visible = on;
-  }
-
-  dispose(): void {
+  protected drop(): void {
     this.wisp?.carry(null);
     this.carried = false;
-    this.overlay?.dispose();
-    this.overlay = null;
     this.seed?.dispose();
     this.seed = null;
     this.shrine?.dispose();
@@ -438,15 +405,6 @@ class IvyGateScene implements SceneModule {
     this.gate = null;
     this.wisp?.dispose();
     this.wisp = null;
-    this.world?.dispose();
-    this.world = null;
-    this.rig?.dispose();
-    this.rig = null;
-    disposeCelebrations(this.scene);
-    this.pool = null;
-    this.scene.clear();
-    this.scene.fog = null;
-    this.ctx = null;
     this.skin = null;
     this.gateAt = -Infinity;
     this.shrineGrowAt = -Infinity;

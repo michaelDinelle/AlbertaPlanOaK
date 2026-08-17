@@ -1,21 +1,10 @@
 
-import { GroundTruthOverlay } from '@kit/debug';
-import { makeOrbitRig, orbitFromPose, type OrbitRig } from '@kit/rigs';
-import {
-  CelebrationPool,
-  attachCelebrations,
-  disposeCelebrations,
-} from '@kit/celebrate';
+import type { CelebrationPoolOptions } from '@kit/celebrate';
+import type { GroundTruthOptions } from '@kit/debug';
 import { envelope } from '@kit/mix';
-import type {
-  FrameState,
-  FrameUpdate,
-  SceneContext,
-  SceneFactory,
-  SceneModule,
-  SceneSize,
-} from '@kit/types';
-import * as THREE from 'three';
+import { orbitFromPose, type OrbitRigOptions } from '@kit/rigs';
+import { StageScene } from '@kit/stage';
+import type { FrameState, FrameUpdate, SceneContext, SceneFactory, SceneSize } from '@kit/types';
 import { MC_GOAL_POS, MC_START_POS, MOUNTAINCAR_ACTION, MOUNTAINCAR_POS, MOUNTAINCAR_VEL, mountainCarForce, mountainCarSlope } from '@sim/envs/mountaincar';
 import { buildCart, type CartHandle } from './actors';
 import { manifest } from './manifest';
@@ -39,17 +28,11 @@ function forceOf(state: FrameState): number {
   return mountainCarForce(state.pose[MOUNTAINCAR_ACTION] ?? 0);
 }
 
-class AlpineValleyScene implements SceneModule {
+class AlpineValleyScene extends StageScene<WorldHandle> {
   readonly manifest = manifest;
-  scene = new THREE.Scene();
-  camera = new THREE.PerspectiveCamera(40, 16 / 9, 0.1, 500);
+  protected readonly stageName = 'alpineValley';
 
-  private ctx: SceneContext | null = null;
-  private world: WorldHandle | null = null;
   private cart: CartHandle | null = null;
-  private rig: OrbitRig | null = null;
-  private pool: CelebrationPool | null = null;
-  private overlay: GroundTruthOverlay | null = null;
   private heightAt: (x: number) => number = () => 0;
   private accent: number = 0xe86e4d;
   private gold: number = 0xffd166;
@@ -61,22 +44,18 @@ class AlpineValleyScene implements SceneModule {
   private screeAt = -Infinity;
   private screeStep = Number.NaN;
 
-  private debugOn = false;
   private readonly overlayPos: [number, number, number] = [0, 0, 0];
 
-  async init(ctx: SceneContext): Promise<void> {
-    this.ctx = ctx;
-    this.scene.name = 'alpineValleyScene';
+  protected buildWorld(ctx: SceneContext): WorldHandle {
     this.heightAt = heightResolver(ctx.geometry);
+    return buildWorld(ctx, this.scene);
+  }
 
+  protected buildActors(ctx: SceneContext, world: WorldHandle): void {
     const palette = ctx.tokens.palettes.dusk;
     const accent = ctx.tokens.accents[manifest.accent] ?? ctx.tokens.celebrationGold;
     this.accent = accent;
     this.gold = ctx.tokens.celebrationGold;
-
-    const world = buildWorld(ctx, this.scene);
-    this.world = world;
-    this.scene.add(world.group);
 
     const lanternLight = world.rig.points[0];
     if (lanternLight) lanternLight.color.set(palette.accentLight);
@@ -95,12 +74,14 @@ class AlpineValleyScene implements SceneModule {
     });
     this.cart = cart;
     this.scene.add(cart.group);
+  }
 
+  protected rigOptions(ctx: SceneContext): OrbitRigOptions {
     const home = orbitFromPose(
       CAM_BASE,
       CAM_LOOK,
     );
-    const rig = makeOrbitRig({
+    return {
       canvas: ctx.canvas,
       target: CAM_LOOK,
       azimuth: home.azimuth,
@@ -112,21 +93,19 @@ class AlpineValleyScene implements SceneModule {
       aspect: ctx.size.height > 0 ? ctx.size.width / ctx.size.height : 16 / 9,
       damping: 2.6,
       name: 'alpineOrbitRig',
-    });
-    this.rig = rig;
-    this.camera = rig.camera;
-    rig.snap();
+    };
+  }
 
-    const pool = new CelebrationPool({
+  protected poolOptions(ctx: SceneContext): CelebrationPoolOptions {
+    return {
       seed: ctx.seed,
       burstSize: BURST_PARTICLES,
       name: 'alpineCelebrations',
-    });
-    attachCelebrations(this.scene, pool);
-    pool.setPixelRatio(ctx.size.dpr);
-    this.pool = pool;
+    };
+  }
 
-    this.overlay = new GroundTruthOverlay(ctx.geometry, {
+  protected overlayOptions(): GroundTruthOptions {
+    return {
       camera: this.camera,
       profileRange: [-1.2, 0.6],
       agentPos: (state) => {
@@ -137,12 +116,13 @@ class AlpineValleyScene implements SceneModule {
         return this.overlayPos;
       },
       name: 'alpineGroundTruth',
-    });
-    this.scene.add(this.overlay.group);
-    this.overlay.visible = this.debugOn;
+    };
+  }
 
+  protected start(ctx: SceneContext, world: WorldHandle): void {
+    const cart = this.cart;
+    if (!cart) return;
     cart.setPixelRatio(ctx.size.dpr);
-    world.setPixelRatio(ctx.size.dpr);
     world.setGust(0);
     world.setEagle(null);
     cart.setLanternGain(1);
@@ -151,7 +131,7 @@ class AlpineValleyScene implements SceneModule {
     cart.setTime(0);
   }
 
-  update(frame: FrameUpdate): void {
+  protected tick(frame: FrameUpdate): void {
     const ctx = this.ctx;
     const world = this.world;
     const cart = this.cart;
@@ -232,37 +212,16 @@ class AlpineValleyScene implements SceneModule {
     cart.setTime(time);
 
     rig.update(frame.dtReal);
-
-    if (this.debugOn && this.overlay) this.overlay.setState(state);
   }
 
   resize(size: SceneSize): void {
-    const aspect = size.height > 0 ? size.width / size.height : 16 / 9;
-    this.rig?.resize(aspect);
+    super.resize(size);
     this.cart?.setPixelRatio(size.dpr);
-    this.world?.setPixelRatio(size.dpr);
-    this.pool?.setPixelRatio(size.dpr);
   }
 
-  setDebug(on: boolean): void {
-    this.debugOn = on;
-    if (this.overlay) this.overlay.visible = on;
-  }
-
-  dispose(): void {
-    this.overlay?.dispose();
-    this.overlay = null;
+  protected drop(): void {
     this.cart?.dispose();
     this.cart = null;
-    this.world?.dispose();
-    this.world = null;
-    this.rig?.dispose();
-    this.rig = null;
-    disposeCelebrations(this.scene);
-    this.pool = null;
-    this.scene.clear();
-    this.scene.fog = null;
-    this.ctx = null;
     this.gustAt = -Infinity;
     this.eagleAt = -Infinity;
     this.flashAt = -Infinity;
