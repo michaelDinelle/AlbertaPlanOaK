@@ -1,17 +1,12 @@
 
-import { CelebrationPool, attachCelebrations, disposeCelebrations } from '@kit/celebrate';
-import { GroundTruthOverlay } from '@kit/debug';
+import type { CelebrationPoolOptions } from '@kit/celebrate';
+import type { GroundTruthOptions } from '@kit/debug';
 import { cellToWorld, cellToWorldVec, type Vec3Tuple } from '@kit/grid';
 import { clamp01, envelope } from '@kit/mix';
-import { makeOrbitRig, type OrbitRig } from '@kit/rigs';
+import type { OrbitRigOptions } from '@kit/rigs';
+import { StageScene } from '@kit/stage';
 import { TOKENS } from '@kit/tokens';
-import type {
-  FrameUpdate,
-  SceneContext,
-  SceneFactory,
-  SceneModule,
-  SceneSize,
-} from '@kit/types';
+import type { FrameUpdate, SceneContext, SceneFactory } from '@kit/types';
 import { Wisp } from '@kit/wisp';
 import * as THREE from 'three';
 import type { GridCell, GridGeometry } from '@sim/types';
@@ -58,20 +53,14 @@ const FLOOD_SECONDS = 1.9;
 const MOUTH_REST = 1;
 const MOUTH_FLARE = 3.4;
 
-class FireflyCaveScene implements SceneModule {
+class FireflyCaveScene extends StageScene<WorldHandle> {
   readonly manifest = manifest;
-  scene = new THREE.Scene();
-  camera = new THREE.PerspectiveCamera(TOKENS.fovHero, 16 / 9, 0.1, 900);
+  protected readonly stageName = 'fireflyCave';
 
-  private ctx: SceneContext | null = null;
-  private world: WorldHandle | null = null;
   private wisp: Wisp | null = null;
   private crystal: CueCrystalHandle | null = null;
   private mouthCyan: ExitMouthHandle | null = null;
   private mouthMagenta: ExitMouthHandle | null = null;
-  private pool: CelebrationPool | null = null;
-  private rig: OrbitRig | null = null;
-  private overlay: GroundTruthOverlay | null = null;
   private grid: GridGeometry = resolveGrid({});
 
   private kindleAt = -Infinity;
@@ -93,22 +82,17 @@ class FireflyCaveScene implements SceneModule {
   private cueX = 0;
   private choiceX = 0;
 
-  private debugOn = false;
-
-  async init(ctx: SceneContext): Promise<void> {
-    this.ctx = ctx;
-    this.scene.name = 'fireflyCaveScene';
-
+  protected buildWorld(ctx: SceneContext): WorldHandle {
     const grid = resolveGrid(ctx.geometry);
     this.grid = grid;
     this.cueColors[0].set(ctx.tokens.cueCyan);
     this.cueColors[1].set(ctx.tokens.cueMagenta);
+    return buildWorld(ctx, this.scene, grid);
+  }
 
+  protected buildActors(ctx: SceneContext, world: WorldHandle): void {
+    const grid = this.grid;
     const accent = ctx.tokens.accents[manifest.accent] ?? ctx.tokens.celebrationGold;
-
-    const world = buildWorld(ctx, this.scene, grid);
-    this.world = world;
-    this.scene.add(world.group);
 
     const anchor: Vec3Tuple = [0, 0, 0];
     this.cueX = cellToWorld(CUE_CELL, 0, grid, anchor)[0];
@@ -177,8 +161,10 @@ class FireflyCaveScene implements SceneModule {
       floodLight.intensity = 0;
       floodLight.position.set(this.choiceX, 1.2, 0);
     }
+  }
 
-    const rig = makeOrbitRig({
+  protected rigOptions(ctx: SceneContext): OrbitRigOptions {
+    return {
       canvas: ctx.canvas,
       target: CAM_TARGET,
       distance: CAM_DISTANCE,
@@ -192,25 +178,23 @@ class FireflyCaveScene implements SceneModule {
       rotateSpeed: 0.004,
       zoomSpeed: 0.0014,
       name: 'caveOrbitRig',
-    });
-    this.rig = rig;
-    this.camera = rig.camera;
-    rig.snap();
+    };
+  }
 
-    const pool = new CelebrationPool({
+  protected poolOptions(ctx: SceneContext): CelebrationPoolOptions {
+    return {
       seed: ctx.seed,
       burstSize: BURST_PARTICLES,
       sighRadius: 3.4,
       sighHeight: 4,
       name: 'caveCelebrations',
-    });
-    attachCelebrations(this.scene, pool);
-    pool.setPixelRatio(ctx.size.dpr);
-    this.pool = pool;
+    };
+  }
 
+  protected overlayOptions(): GroundTruthOptions {
     const overlayCell = this.overlayCell;
     const goalCell = this.goalCell;
-    this.overlay = new GroundTruthOverlay(ctx.geometry, {
+    return {
       camera: this.camera,
       agentCell: (state) => {
         overlayCell.x = readPos(state);
@@ -219,23 +203,22 @@ class FireflyCaveScene implements SceneModule {
       },
       goalCell: () => goalCell,
       name: 'caveGroundTruth',
-    });
-    this.scene.add(this.overlay.group);
-    this.overlay.visible = this.debugOn;
-
-    world.setPixelRatio(ctx.size.dpr);
-    world.setTime(0);
-    wisp.setCell(CUE_CELL, 0, grid);
-    crystal.setCue(0);
-    crystal.setGlow(1);
-    crystal.setTime(0);
-    mouthCyan.setGlow(MOUTH_REST);
-    mouthMagenta.setGlow(MOUTH_REST);
-    mouthCyan.setTime(0);
-    mouthMagenta.setTime(0);
+    };
   }
 
-  update(frame: FrameUpdate): void {
+  protected start(_ctx: SceneContext, world: WorldHandle): void {
+    world.setTime(0);
+    this.wisp?.setCell(CUE_CELL, 0, this.grid);
+    this.crystal?.setCue(0);
+    this.crystal?.setGlow(1);
+    this.crystal?.setTime(0);
+    this.mouthCyan?.setGlow(MOUTH_REST);
+    this.mouthMagenta?.setGlow(MOUTH_REST);
+    this.mouthCyan?.setTime(0);
+    this.mouthMagenta?.setTime(0);
+  }
+
+  protected tick(frame: FrameUpdate): void {
     const ctx = this.ctx;
     const world = this.world;
     const wisp = this.wisp;
@@ -362,25 +345,9 @@ class FireflyCaveScene implements SceneModule {
     world.setTime(time);
 
     rig.update(frame.dtReal);
-
-    if (this.debugOn && this.overlay) this.overlay.setState(state);
   }
 
-  resize(size: SceneSize): void {
-    const aspect = size.height > 0 ? size.width / size.height : 16 / 9;
-    this.rig?.resize(aspect);
-    this.world?.setPixelRatio(size.dpr);
-    this.pool?.setPixelRatio(size.dpr);
-  }
-
-  setDebug(on: boolean): void {
-    this.debugOn = on;
-    if (this.overlay) this.overlay.visible = on;
-  }
-
-  dispose(): void {
-    this.overlay?.dispose();
-    this.overlay = null;
+  protected drop(): void {
     this.mouthCyan?.dispose();
     this.mouthCyan = null;
     this.mouthMagenta?.dispose();
@@ -389,15 +356,6 @@ class FireflyCaveScene implements SceneModule {
     this.crystal = null;
     this.wisp?.dispose();
     this.wisp = null;
-    this.world?.dispose();
-    this.world = null;
-    this.rig?.dispose();
-    this.rig = null;
-    disposeCelebrations(this.scene);
-    this.pool = null;
-    this.scene.clear();
-    this.scene.fog = null;
-    this.ctx = null;
     this.kindleAt = -Infinity;
     this.flareAt = -Infinity;
     this.douseAt = -Infinity;

@@ -1,20 +1,14 @@
 
 import { LARGE_DEEPSEA_ACTION, LARGE_DEEPSEA_COL, LARGE_DEEPSEA_GX, LARGE_DEEPSEA_GY, LARGE_DEEPSEA_ROW } from '@sim/envs/largedeepsea';
-import { CelebrationPool, attachCelebrations, disposeCelebrations } from '@kit/celebrate';
-import { GroundTruthOverlay } from '@kit/debug';
+import type { CelebrationPoolOptions } from '@kit/celebrate';
+import type { GroundTruthOptions } from '@kit/debug';
 import { clampCell, type GridSize } from '@kit/grid';
 import { blendTokens, clamp01, envelope } from '@kit/mix';
 import { cellToTerraceVec as cellToWorldVec, terraceDepthAt } from '@kit/terrace';
-import { makeOrbitRig, type OrbitRig } from '@kit/rigs';
+import type { OrbitRigOptions } from '@kit/rigs';
+import { StageScene } from '@kit/stage';
 import { TOKENS } from '@kit/tokens';
-import type {
-  FrameState,
-  FrameUpdate,
-  SceneContext,
-  SceneFactory,
-  SceneModule,
-  SceneSize,
-} from '@kit/types';
+import type { FrameState, FrameUpdate, SceneContext, SceneFactory } from '@kit/types';
 import { Wisp } from '@kit/wisp';
 import * as THREE from 'three';
 import type { GridCell, GridGeometry } from '@sim/types';
@@ -69,21 +63,15 @@ export function isDiveStep(fromX: number, fromY: number, toX: number, toY: numbe
   return toY === fromY + 1 && Math.abs(toX - fromX) <= 1;
 }
 
-class TheAbyssScene implements SceneModule {
+class TheAbyssScene extends StageScene<WorldHandle> {
   readonly manifest = manifest;
-  scene = new THREE.Scene();
-  camera = new THREE.PerspectiveCamera(TOKENS.fovHero, 16 / 9, 0.1, 900);
+  protected readonly stageName = 'theAbyss';
 
-  private ctx: SceneContext | null = null;
-  private world: WorldHandle | null = null;
   private wisp: Wisp | null = null;
   private readonly diver = new THREE.Group();
   private bubble: DiveBubbleHandle | null = null;
   private wreck: WreckHandle | null = null;
   private anglers: AnglerHandle[] = [];
-  private pool: CelebrationPool | null = null;
-  private rig: OrbitRig | null = null;
-  private overlay: GroundTruthOverlay | null = null;
   private grid: GridGeometry = resolveGrid({});
 
   private treasureAt = -Infinity;
@@ -103,24 +91,19 @@ class TheAbyssScene implements SceneModule {
   private accent = 0x7fd4e8;
   private gold = 0xffd166;
 
-  private debugOn = false;
-
-  async init(ctx: SceneContext): Promise<void> {
-    this.ctx = ctx;
-    this.scene.name = 'theAbyssScene';
-
+  protected buildWorld(ctx: SceneContext): WorldHandle {
     const grid = resolveGrid(ctx.geometry);
     this.grid = grid;
     const mask = resolveMask(grid, ctx.seed);
+    return buildWorld(ctx, this.scene, grid, mask);
+  }
 
+  protected buildActors(ctx: SceneContext, world: WorldHandle): void {
+    const grid = this.grid;
     const accent = ctx.tokens.accents[manifest.accent] ?? ctx.tokens.uiCyan;
     this.accent = accent;
     this.gold = ctx.tokens.celebrationGold;
     const water = ctx.tokens.palettes.underwater;
-
-    const world = buildWorld(ctx, this.scene, grid, mask);
-    this.world = world;
-    this.scene.add(world.group);
     const skin = world.skin;
 
     const wispLight = world.rig.points[0];
@@ -172,8 +155,10 @@ class TheAbyssScene implements SceneModule {
       const light = world.rig.points[2 + i];
       if (light) light.color.set(lureColors[i] ?? accent);
     }
+  }
 
-    const rig = makeOrbitRig({
+  protected rigOptions(ctx: SceneContext): OrbitRigOptions {
+    return {
       canvas: ctx.canvas,
       target: [CAM_TARGET[0], CAM_TARGET[1], CAM_TARGET[2]],
       distance: CAM_DISTANCE,
@@ -187,23 +172,22 @@ class TheAbyssScene implements SceneModule {
       rotateSpeed: 0.004,
       zoomSpeed: 0.0012,
       name: 'abyssOrbitRig',
-    });
-    this.rig = rig;
-    this.camera = rig.camera;
-    rig.snap();
+    };
+  }
 
-    const pool = new CelebrationPool({
+  protected poolOptions(ctx: SceneContext): CelebrationPoolOptions {
+    return {
       seed: ctx.seed,
       burstSize: BURST_PARTICLES,
       name: 'abyssCelebrations',
-    });
-    attachCelebrations(this.scene, pool);
-    pool.setPixelRatio(ctx.size.dpr);
-    this.pool = pool;
+    };
+  }
 
+  protected overlayOptions(): GroundTruthOptions {
+    const grid = this.grid;
     const overlayAgent: GridCell = { x: 0, y: 0 };
     const overlayGoal: GridCell = { x: 0, y: 0 };
-    this.overlay = new GroundTruthOverlay(ctx.geometry, {
+    return {
       camera: this.camera,
       agentCell: (state) => {
         readCells(state, grid, overlayAgent, overlayGoal);
@@ -214,11 +198,15 @@ class TheAbyssScene implements SceneModule {
         return overlayGoal;
       },
       name: 'abyssGroundTruth',
-    });
-    this.scene.add(this.overlay.group);
-    this.overlay.visible = this.debugOn;
+    };
+  }
 
-    world.setPixelRatio(ctx.size.dpr);
+  protected start(ctx: SceneContext, world: WorldHandle): void {
+    const grid = this.grid;
+    const wisp = this.wisp;
+    const wreck = this.wreck;
+    const bubble = this.bubble;
+    if (!wisp || !wreck || !bubble) return;
     world.setTime(0);
     wisp.setCell(0, 0, grid);
     cellToWorldVec(grid.goal?.x ?? grid.w - 1, grid.goal?.y ?? grid.h - 1, grid, wreck.root.position);
@@ -235,7 +223,7 @@ class TheAbyssScene implements SceneModule {
     for (const angler of this.anglers) angler.setTime(0);
   }
 
-  update(frame: FrameUpdate): void {
+  protected tick(frame: FrameUpdate): void {
     const ctx = this.ctx;
     const world = this.world;
     const wisp = this.wisp;
@@ -361,25 +349,9 @@ class TheAbyssScene implements SceneModule {
     world.setTime(time);
 
     rig.update(frame.dtReal);
-
-    if (this.debugOn && this.overlay) this.overlay.setState(state);
   }
 
-  resize(size: SceneSize): void {
-    const aspect = size.height > 0 ? size.width / size.height : 16 / 9;
-    this.rig?.resize(aspect);
-    this.world?.setPixelRatio(size.dpr);
-    this.pool?.setPixelRatio(size.dpr);
-  }
-
-  setDebug(on: boolean): void {
-    this.debugOn = on;
-    if (this.overlay) this.overlay.visible = on;
-  }
-
-  dispose(): void {
-    this.overlay?.dispose();
-    this.overlay = null;
+  protected drop(): void {
     for (const angler of this.anglers) angler.dispose();
     this.anglers.length = 0;
     this.wreck?.dispose();
@@ -388,15 +360,6 @@ class TheAbyssScene implements SceneModule {
     this.bubble = null;
     this.wisp?.dispose();
     this.wisp = null;
-    this.world?.dispose();
-    this.world = null;
-    this.rig?.dispose();
-    this.rig = null;
-    disposeCelebrations(this.scene);
-    this.pool = null;
-    this.scene.clear();
-    this.scene.fog = null;
-    this.ctx = null;
     this.treasureAt = -Infinity;
     this.rushAt = -Infinity;
     this.stir = 0;
