@@ -20,6 +20,7 @@ import { makeTerrain, type TerrainHandle } from '@kit/terrain';
 import { valueNoise2 } from '@kit/textures';
 import { TOKENS, type Palette } from '@kit/tokens';
 import type { SceneContext } from '@kit/types';
+import { makeWorld, type WorldCore } from '@kit/world';
 import {
   LARGE_DEEPSEA_N,
   largeDeepSeaMask,
@@ -590,8 +591,7 @@ export function anglerSites(grid: GridSize, seed: number): AnglerSite[] {
 }
 
 
-export interface WorldHandle {
-  group: THREE.Group;
+export interface WorldHandle extends WorldCore {
   sky: SkyHandle;
   rig: LightRig;
   terrain: TerrainHandle;
@@ -601,18 +601,8 @@ export interface WorldHandle {
   rush: AmbientParticlesHandle;
   silt: AmbientParticlesHandle;
   skin: AbyssSkin;
-  setTime(t: number): void;
-  setPixelRatio(dpr: number): void;
-  dispose(): void;
 }
 
-interface Disposable {
-  dispose(): void;
-}
-
-interface Timed {
-  setTime(t: number): void;
-}
 
 export function buildWorld(
   ctx: SceneContext,
@@ -623,11 +613,7 @@ export function buildWorld(
   const palette: Palette = ctx.tokens.palettes.abyss;
   const water: Palette = ctx.tokens.palettes.underwater;
   const skin = abyssSkin(ctx.tokens);
-  const group = new THREE.Group();
-  group.name = 'theAbyss';
-  const owned: Disposable[] = [];
-  const timed: Timed[] = [];
-  const sized: AmbientParticlesHandle[] = [];
+  const w = makeWorld('theAbyss');
 
   const sky = skyFromPalette(palette, 'abyss', {
     topSpread: 0.42,
@@ -635,9 +621,9 @@ export function buildWorld(
     radius: 320,
     dither: 0.01,
   });
-  group.add(sky.mesh);
-  owned.push(sky);
-  timed.push({ setTime: (t) => sky.setTime(t) });
+  w.add(sky.mesh);
+  w.own(sky);
+  w.time({ setTime: (t) => sky.setTime(t) });
 
   const rig = makeLightRig(palette, {
     sunDir: SUN_DIR,
@@ -645,8 +631,8 @@ export function buildWorld(
     pointDistance: 9,
     sunDistanceScale: 2.4,
   });
-  group.add(rig.group);
-  owned.push(rig);
+  w.add(rig.group);
+  w.own(rig);
   rig.setShadowFocus({ x: 0, y: -0.3, z: 0 }, SHADOW_RADIUS);
 
   applyFog(scene, palette, FOG_EXTENT);
@@ -673,8 +659,8 @@ export function buildWorld(
     castShadow: false,
     name: 'trenchBed',
   });
-  group.add(terrain.mesh);
-  owned.push(terrain);
+  w.add(terrain.mesh);
+  w.own(terrain);
 
   const field = buildCellField(
     grid,
@@ -693,14 +679,13 @@ export function buildWorld(
     },
   );
   terraceShelves(field, grid);
-  group.add(field.group);
-  owned.push(field);
-  timed.push({ setTime: (t) => field.setTime(t) });
+  w.add(field.group);
+  w.own(field);
+  w.time({ setTime: (t) => field.setTime(t) });
 
   const coral = buildCoralField({ grid, mask, skin, seed: ctx.seed });
-  group.add(coral.mesh);
-  owned.push(coral);
-  timed.push(coral);
+  w.add(coral.mesh);
+  w.time(w.own(coral));
 
   const jellyCount = 46;
   const jellies = buildJellySwarm({
@@ -712,9 +697,8 @@ export function buildWorld(
     intensity: 1.35,
     name: 'abyssJellies',
   });
-  group.add(jellies.mesh);
-  owned.push(jellies);
-  timed.push(jellies);
+  w.add(jellies.mesh);
+  w.time(w.own(jellies));
 
   const snow = makeAmbientParticles({
     preset: 'snow',
@@ -729,10 +713,8 @@ export function buildWorld(
     swirl: 0.12,
     name: 'marineSnow',
   });
-  group.add(snow.points);
-  owned.push(snow);
-  timed.push(snow);
-  sized.push(snow);
+  w.add(snow.points);
+  w.size(w.time(w.own(snow)));
 
   const bubbles = makeAmbientParticles({
     preset: 'bubbles',
@@ -747,10 +729,8 @@ export function buildWorld(
     swirl: 0.1,
     name: 'shelfBubbles',
   });
-  group.add(bubbles.points);
-  owned.push(bubbles);
-  timed.push(bubbles);
-  sized.push(bubbles);
+  w.add(bubbles.points);
+  w.size(w.time(w.own(bubbles)));
 
   const silt = makeAmbientParticles({
     preset: 'dust',
@@ -766,10 +746,8 @@ export function buildWorld(
     name: 'diveSilt',
   });
   silt.setDensity(0);
-  group.add(silt.points);
-  owned.push(silt);
-  timed.push(silt);
-  sized.push(silt);
+  w.add(silt.points);
+  w.size(w.time(w.own(silt)));
 
   const rush = makeAmbientParticles({
     preset: 'bubbles',
@@ -785,10 +763,8 @@ export function buildWorld(
     name: 'resurfaceRush',
   });
   rush.setDensity(0);
-  group.add(rush.points);
-  owned.push(rush);
-  timed.push(rush);
-  sized.push(rush);
+  w.add(rush.points);
+  w.size(w.time(w.own(rush)));
 
   const haze = makeMistPlanes({
     size: [TERRAIN_SIZE * 0.26, TERRAIN_SIZE * 0.26],
@@ -804,12 +780,10 @@ export function buildWorld(
     name: 'abyssHaze',
   });
   haze.group.position.set(-TRENCH_HALF * 0.55, 0, -TRENCH_HALF * 0.55);
-  group.add(haze.group);
-  owned.push(haze);
-  timed.push(haze);
+  w.add(haze.group);
+  w.time(w.own(haze));
 
-  return {
-    group,
+  return w.seal({
     sky,
     rig,
     terrain,
@@ -819,19 +793,5 @@ export function buildWorld(
     rush,
     silt,
     skin,
-    setTime(t) {
-      for (let i = 0; i < timed.length; i++) timed[i]?.setTime(t);
-    },
-    setPixelRatio(dpr) {
-      for (let i = 0; i < sized.length; i++) sized[i]?.setPixelRatio(dpr);
-    },
-    dispose() {
-      for (let i = owned.length - 1; i >= 0; i--) owned[i]?.dispose();
-      owned.length = 0;
-      timed.length = 0;
-      sized.length = 0;
-      group.removeFromParent();
-      group.clear();
-    },
-  };
+  });
 }

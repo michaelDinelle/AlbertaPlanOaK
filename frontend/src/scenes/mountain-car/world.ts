@@ -24,6 +24,7 @@ import {
   scatterTrees,
   type ExcludeFn,
 } from '@kit/vegetation';
+import { makeWorld, type WorldCore } from '@kit/world';
 import type { EnvGeometry } from '@sim/types';
 import { MC_GOAL_POS, MC_MAX_POS, MC_MIN_POS, MC_START_POS, mountainCarHeight } from '@sim/envs/mountaincar';
 
@@ -72,37 +73,23 @@ export function makeRidgeHeight(
 }
 
 
-export interface WorldHandle {
-  group: THREE.Group;
+export interface WorldHandle extends WorldCore {
   sky: SkyHandle;
   rig: LightRig;
   terrain: TerrainHandle;
   cairnRoot: THREE.Object3D;
   trailheadRoot: THREE.Object3D;
   summitBurst: THREE.Vector3;
-  setTime(t: number): void;
   setGust(env01: number): void;
   setEagle(progress: number | null): void;
-  setPixelRatio(dpr: number): void;
-  dispose(): void;
 }
 
-interface Disposable {
-  dispose(): void;
-}
-
-interface Timed {
-  setTime(t: number): void;
-}
 
 export function buildWorld(ctx: SceneContext, scene: THREE.Scene): WorldHandle {
   const palette: Palette = ctx.tokens.palettes.dusk;
   const accent = ctx.tokens.accents['mountain-car'] ?? ctx.tokens.celebrationGold;
   const heightAt = heightResolver(ctx.geometry);
-  const group = new THREE.Group();
-  group.name = 'alpineValley';
-  const owned: Disposable[] = [];
-  const timed: Timed[] = [];
+  const w = makeWorld('alpineValley');
 
   const cValley = blendTokens(palette.groundA, palette.hemiGround, 0.55);
   const cMeadow = blendTokens(palette.groundA, TOKENS.palettes.noon.groundA, 0.5);
@@ -122,9 +109,9 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene): WorldHandle {
     bottomSpread: 0.3,
     radius: 320,
   });
-  group.add(sky.mesh);
-  owned.push(sky);
-  timed.push({ setTime: (t) => sky.setTime(t) });
+  w.add(sky.mesh);
+  w.own(sky);
+  w.time({ setTime: (t) => sky.setTime(t) });
 
   const rig = makeLightRig(palette, {
     sunDir: sky.sunDirection,
@@ -132,8 +119,8 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene): WorldHandle {
     pointDistance: 2.6,
     sunDistanceScale: 3,
   });
-  group.add(rig.group);
-  owned.push(rig);
+  w.add(rig.group);
+  w.own(rig);
   rig.setShadowFocus({ x: -0.1, y: 0.5, z: -0.6 }, 5.5);
 
   applyFog(scene, palette, FOG_EXTENT);
@@ -169,8 +156,8 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene): WorldHandle {
     castShadow: false,
     name: 'alpineRidge',
   });
-  group.add(terrain.mesh);
-  owned.push(terrain);
+  w.add(terrain.mesh);
+  w.own(terrain);
 
   const aboveSnow: ExcludeFn = (x, z) => terrain.sampleHeight(x, z) > SNOW_LINE + 0.02;
   const nearCamera: ExcludeFn = (_x, z) => z > 0.62;
@@ -195,9 +182,8 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene): WorldHandle {
     castShadow: true,
     name: 'alpineConifers',
   });
-  group.add(trees.group);
-  owned.push(trees);
-  timed.push(trees);
+  w.add(trees.group);
+  w.time(w.own(trees));
 
   const rocks = scatterRocks({
     count: 300,
@@ -214,9 +200,8 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene): WorldHandle {
     castShadow: true,
     name: 'alpineScree',
   });
-  group.add(rocks.group);
-  owned.push(rocks);
-  timed.push(rocks);
+  w.add(rocks.group);
+  w.time(w.own(rocks));
 
   const grass = scatterGrass({
     count: 3200,
@@ -235,14 +220,13 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene): WorldHandle {
     rimStrength: 0.38,
     name: 'alpineMeadow',
   });
-  group.add(grass.group);
-  owned.push(grass);
-  timed.push(grass);
+  w.add(grass.group);
+  w.time(w.own(grass));
 
   const cairnRoot = new THREE.Object3D();
   cairnRoot.name = 'summitCairnRoot';
   cairnRoot.position.set(MC_GOAL_POS, heightAt(MC_GOAL_POS), 0);
-  group.add(cairnRoot);
+  w.add(cairnRoot);
 
   const cairnParts: ColoredPart[] = [];
   let cairnStack = 0;
@@ -279,7 +263,7 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene): WorldHandle {
   cairnMesh.castShadow = true;
   cairnMesh.receiveShadow = true;
   cairnRoot.add(cairnMesh);
-  owned.push({
+  w.own({
     dispose: () => {
       cairnGeometry.dispose();
       propMaterial.dispose();
@@ -324,8 +308,8 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene): WorldHandle {
   const buntingMesh = new THREE.Mesh(buntingGeometry, propMaterial);
   buntingMesh.name = 'buntingRig';
   buntingMesh.castShadow = false;
-  group.add(buntingMesh);
-  owned.push({ dispose: () => buntingGeometry.dispose() });
+  w.add(buntingMesh);
+  w.own({ dispose: () => buntingGeometry.dispose() });
 
   const FLAG_W = 0.038;
   const FLAG_H = 0.052;
@@ -398,8 +382,8 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene): WorldHandle {
     if (flags.instanceColor) flags.instanceColor.needsUpdate = true;
     flags.computeBoundingSphere();
   }
-  group.add(flags);
-  owned.push({
+  w.add(flags);
+  w.own({
     dispose: () => {
       flags.dispose();
       flagGeometry.dispose();
@@ -407,12 +391,12 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene): WorldHandle {
     },
   });
   const animated: OakMaterial[] = [flagMaterial];
-  timed.push({ setTime: (t) => setMaterialsTime(animated, t) });
+  w.time({ setTime: (t) => setMaterialsTime(animated, t) });
 
   const trailheadRoot = new THREE.Object3D();
   trailheadRoot.name = 'trailheadRoot';
   trailheadRoot.position.set(MC_START_POS, heightAt(MC_START_POS), TRAILHEAD_Z);
-  group.add(trailheadRoot);
+  w.add(trailheadRoot);
   const signParts: ColoredPart[] = [];
   {
     const post = new THREE.CylinderGeometry(0.006, 0.009, 0.17, 5);
@@ -432,7 +416,7 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene): WorldHandle {
   signMesh.name = 'trailheadSign';
   signMesh.castShadow = true;
   trailheadRoot.add(signMesh);
-  owned.push({ dispose: () => signGeometry.dispose() });
+  w.own({ dispose: () => signGeometry.dispose() });
 
   const mist: MistPlanesHandle = makeMistPlanes({
     size: [4.6, 3.2],
@@ -448,9 +432,8 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene): WorldHandle {
     name: 'valleyMist',
   });
   mist.group.position.set(-0.52, 0, -0.25);
-  group.add(mist.group);
-  owned.push(mist);
-  timed.push(mist);
+  w.add(mist.group);
+  w.time(w.own(mist));
 
   const pollen: AmbientParticlesHandle = makeAmbientParticles({
     preset: 'pollen',
@@ -464,9 +447,8 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene): WorldHandle {
     swirl: 0.08,
     name: 'meadowPollen',
   });
-  group.add(pollen.points);
-  owned.push(pollen);
-  timed.push(pollen);
+  w.add(pollen.points);
+  w.size(w.time(w.own(pollen)));
 
   const glitter: AmbientParticlesHandle = makeAmbientParticles({
     preset: 'snow',
@@ -481,9 +463,8 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene): WorldHandle {
     swirl: 0.05,
     name: 'snowGlitter',
   });
-  group.add(glitter.points);
-  owned.push(glitter);
-  timed.push(glitter);
+  w.add(glitter.points);
+  w.size(w.time(w.own(glitter)));
 
   const eagle = new THREE.Group();
   eagle.name = 'eagle';
@@ -523,8 +504,8 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene): WorldHandle {
   const eagleDir = new THREE.Vector3(EAGLE_DIR[0], EAGLE_DIR[1], EAGLE_DIR[2]).normalize();
   const eagleTangent = new THREE.Vector3(EAGLE_TRAVEL[0], EAGLE_TRAVEL[1], EAGLE_TRAVEL[2]).normalize();
   eagle.rotation.y = Math.atan2(-eagleTangent.z, eagleTangent.x);
-  group.add(eagle);
-  owned.push({
+  w.add(eagle);
+  w.own({
     dispose: () => {
       eagleBody.dispose();
       tailGeometry.dispose();
@@ -533,17 +514,13 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene): WorldHandle {
     },
   });
 
-  return {
-    group,
+  return w.seal({
     sky,
     rig,
     terrain,
     cairnRoot,
     trailheadRoot,
     summitBurst,
-    setTime(t) {
-      for (let i = 0; i < timed.length; i++) timed[i]?.setTime(t);
-    },
     setGust(env01) {
       const e = env01 < 0 ? 0 : env01 > 1 ? 1 : env01;
       oakUniforms(flagMaterial)?.setWind(BASE_WIND * (1 + 1.1 * e), 2.4 + 0.35 * e);
@@ -567,18 +544,7 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene): WorldHandle {
       eagleBank.rotation.x = -0.24 + 0.18 * Math.sin(progress * Math.PI);
       eagle.visible = true;
     },
-    setPixelRatio(dpr) {
-      pollen.setPixelRatio(dpr);
-      glitter.setPixelRatio(dpr);
-    },
-    dispose() {
-      for (let i = owned.length - 1; i >= 0; i--) owned[i]?.dispose();
-      owned.length = 0;
-      timed.length = 0;
-      group.removeFromParent();
-      group.clear();
-    },
-  };
+  });
 }
 
 function makeWingGeometry(): THREE.BufferGeometry {
