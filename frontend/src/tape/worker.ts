@@ -5,6 +5,7 @@ import {
   nextRowDueMs,
   rhoBinned,
   survivalSeries,
+  tapeWindowSteps,
   throughputSeries,
 } from './derive';
 import type { DeriveMode, DeriveResults, DeriveSpec, TapeProgress, WorkerRequest, WorkerResponse } from './store';
@@ -18,6 +19,7 @@ function progressOf(tape: Tape): TapeProgress {
     byteLength: tape.byteLength,
     lastStep: tape.rows > 0 ? tape.stepEnd[tape.rows - 1] ?? 0 : 0,
     nextRowDueMs: nextRowDueMs(tape),
+    windowSteps: tapeWindowSteps(tape),
   };
 }
 
