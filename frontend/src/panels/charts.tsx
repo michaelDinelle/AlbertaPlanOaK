@@ -95,7 +95,7 @@ export function TimeChart({
   children: ReactNode;
 }) {
   return (
-    <div className="relative" style={{ height }}>
+    <div className="relative shrink-0" style={{ height }}>
       <ResponsiveContainer width="100%" height="100%">
         <ComposedChart margin={CHART_MARGIN}>
           <CartesianGrid stroke="var(--color-line)" strokeOpacity={0.45} vertical={false} />
@@ -106,6 +106,7 @@ export function TimeChart({
             domain={[xMin, xMax]}
             allowDataOverflow
             height={X_AXIS_HEIGHT}
+            minTickGap={28}
             tickFormatter={xFormat ?? formatStep}
             tick={TICK}
             axisLine={false}
