@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import math
 import os
@@ -45,6 +46,8 @@ def read_tape(path: Path) -> dict:
 
 def load(root: Path) -> dict:
     meta = json.loads((root / "meta.json").read_text())
+    if "policy" not in meta:
+        raise SystemExit(f"{root}: meta.json has no policy")
     tp = root / "tape.bin"
     if not tp.exists():
         raise SystemExit(f"{root}: no tape.bin")
@@ -285,6 +288,8 @@ def cmd_gate(args) -> int:
         return _fail("GATE ERROR: keeper missing")
     kr, cr = load(BENCH / kh), load(args.candidate)
     for label, r in (("keeper", kr), ("candidate", cr)):
+        if r["meta"]["policy"] != "oak":
+            return _fail(f"GATE ERROR: {label} policy is {r['meta']['policy']}")
         if int(r["tape"]["ends"][-1]) < r["meta"]["steps"]:
             return _fail(f"GATE ERROR: {label} incomplete")
     if kr["meta"]["steps"] != cr["meta"]["steps"]:
@@ -355,7 +360,71 @@ def keeper_meta() -> dict:
     return json.loads(p.read_text()) if p and p.exists() else {}
 
 
+def keeper_envs(km: dict) -> str:
+    return ",".join(
+        f"{e['envId']}:{e['seedEnd'] - e['seedStart'] + 1}"
+        for e in km.get("envSchedule") or ())
+
+
+def baseline_fingerprint(policy: str, envs: str, steps: int, batch: int, seeds: list[int]) -> str:
+    h = hashlib.sha256()
+    for rel in ("EnvCore.metal", "Env.metal", "Fleet.metal", "Baseline.metal"):
+        h.update((REPO / "Sources" / rel).read_bytes())
+    for p in sorted((REPO / "Sources" / "envs").glob("*.metal")):
+        h.update(p.read_bytes())
+    h.update(f"{policy}\n{envs}\n{steps}\n{batch}\n".encode())
+    h.update(",".join(map(str, seeds)).encode())
+    return h.hexdigest()
+
+
+def baseline_pointer(policy: str) -> str | None:
+    try:
+        text = (REPO / f"baseline-{policy}").read_text().strip()
+        return text or None
+    except OSError:
+        return None
+
+
+def baseline_name(policy: str, km: dict) -> str:
+    fp = baseline_fingerprint(policy, keeper_envs(km), km["steps"], km["batch"], km["seeds"])
+    return f"baseline-{policy}-{fp[:12]}"
+
+
+def cmd_baselines(args) -> int:
+    km = keeper_meta()
+    if not km:
+        raise SystemExit("baselines need a crowned keeper for the schedule")
+    envs = keeper_envs(km)
+    BENCH.mkdir(exist_ok=True)
+    me = [sys.executable, str(Path(__file__).resolve())]
+    for policy in ("random", "ppo"):
+        name = baseline_name(policy, km)
+        root = BENCH / name
+        if baseline_pointer(policy) == name and (root / ".done").exists():
+            print(f"[baselines] {policy} current: {name}", flush=True)
+            continue
+        shutil.rmtree(root, ignore_errors=True)
+        env = dict(os.environ,
+                   OAK_BENCH_POLICY=policy,
+                   OAK_BENCH_STEPS=str(km["steps"]),
+                   OAK_BENCH_SEED_COUNT=str(km["batch"]),
+                   OAK_BENCH_ENVS=envs,
+                   OAK_FLEET_TIMING="1", OAK_METRICS_STORAGE=str(root))
+        rc = subprocess.run(["caffeinate", "-dimsu", str(REPO / ".build/release/OaK"),
+                             "benchmark"], env=env, cwd=REPO).returncode
+        if rc != 0:
+            raise SystemExit(f"[baselines] {policy} benchmark exit={rc}")
+        subprocess.run(me + ["report", str(root)], cwd=REPO, check=True)
+        (REPO / f"baseline-{policy}").write_text(name + "\n")
+        (root / ".done").touch()
+        print(f"[baselines] {policy} crowned: {name}", flush=True)
+    return 0
+
+
 def cmd_run(args) -> int:
+    if os.environ.get("OAK_BENCH_POLICY", "oak") != "oak":
+        print("CONFIG ERROR: science runs are oak; use ./fleet.py baselines")
+        return 2
     name = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=REPO).decode().strip()
     root, log = BENCH / name, BENCH / f"{name}.log"
     kh = keeper_hash()
@@ -407,6 +476,11 @@ def cmd_job(args) -> int:
     elif rc == 0:
         write_keeper(args.name)
         print(f"[fleet] keeper {args.name}", flush=True)
+    km_now = keeper_meta()
+    if km_now:
+        for policy in ("random", "ppo"):
+            if baseline_pointer(policy) != baseline_name(policy, km_now):
+                print(f"[fleet] baseline {policy} stale; run ./fleet.py baselines", flush=True)
     (root / ".done").touch()
     print("[fleet] DONE", flush=True)
     return 0
@@ -425,9 +499,10 @@ def main() -> int:
     gp.add_argument("candidate", type=Path)
     gp.add_argument("--boot", type=int, default=10_000)
     gp.add_argument("--env-slice", default=None)
+    sub.add_parser("baselines")
     args = ap.parse_args()
     return {"run": cmd_run, "job": cmd_job, "report": cmd_report,
-            "gate": cmd_gate}[args.cmd](args)
+            "gate": cmd_gate, "baselines": cmd_baselines}[args.cmd](args)
 
 
 if __name__ == "__main__":
