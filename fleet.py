@@ -171,7 +171,9 @@ def analyze(run: dict, lanes: np.ndarray) -> dict:
     max_step = int(ends[-1])
     rs = series(run, "rewardSum")[:, lanes]
     delivered = last_finite(rs) / max_step
-    delivered = np.nan_to_num(delivered, nan=0.0)
+    blind = ~np.isfinite(delivered)
+    worst = min(0.0, float(np.min(delivered[~blind]))) if (~blind).any() else 0.0
+    delivered = np.where(blind, worst, delivered)
     died = np.array([1.0 if int(l) in run["deaths"] else 0.0 for l in lanes])
     dtimes = np.array([run["deaths"].get(int(l), horizon) for l in lanes], dtype=float)
     peak, end_rate = windowed_rates(run, lanes)
