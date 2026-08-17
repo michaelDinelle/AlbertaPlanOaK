@@ -1,22 +1,14 @@
-import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
-import { ENVS } from '@shared/envs';
+import { ENV_IDS } from '@shared/envs';
+import type { Policy } from '@shared/types';
 import { baselineDetailQuery, runDetailQuery, runsQuery } from './data/queries';
-import { DiagnosticsStrip } from './features/aggregate/DiagnosticsStrip';
-import { ForestPlot } from './features/aggregate/ForestPlot';
-import { Frontier } from './features/aggregate/Frontier';
-import { Profiles } from './features/aggregate/Profiles';
-import { EnvDiagnostics } from './features/env/EnvDiagnostics';
-import { EnvStrip } from './features/env/EnvStrip';
-import { RewardChart } from './features/env/RewardChart';
-import { Scoreboard } from './features/env/Scoreboard';
-import { SeedRail } from './features/stage/SeedRail';
-import { Stage } from './features/stage/Stage';
-import { Transport } from './features/stage/Transport';
-import { TopBar } from './features/topbar/TopBar';
+import { Frost } from './glass/Panel';
 import { cycleEnv, keyAction } from './lib/keymap';
 import { resolveFeaturedRun, runEnvs } from './lib/run';
-import { setTransport, transportSnapshot } from './playback/store';
+import { CommandPalette } from './panels/CommandPalette';
+import { PlaybackBar } from './panels/PlaybackBar';
+import type { PanelView } from './panels/views';
 import {
   adoptDefaultEnv,
   adoptFromUrl,
@@ -24,48 +16,37 @@ import {
   electLeader,
   resolveRun,
   selectEnv,
+  selectPolicy,
   selectionSnapshot,
   toggleDebug,
   unpromote,
   useSelection,
 } from './state/selectionStore';
+import { STR } from './strings';
 import { setLive, useTapeProgress } from './tape/store';
-import { setTheaterInputs, stepBySteps } from './theater/controller';
+import { setTransport, transportSnapshot } from './playback/store';
+import { setTheaterInputs, stageCanvas, stepBySteps, useStageMeta } from './theater/controller';
 import { seedsFor } from './theater/loader';
+import { TheaterStage } from './theater/TheaterStage';
+import { capturePoster } from './wall/posters';
+import { EnvTileButton } from './wall/EnvTileButton';
+import { EnvWall } from './wall/EnvWall';
+import { watchRuns } from './toasts';
 import { urlState } from './url/useUrlState';
 
-function readPane(key: string, fallback: number): number {
-  const raw = Number(typeof localStorage === 'undefined' ? NaN : localStorage.getItem(key));
-  return Number.isFinite(raw) && raw > 0 ? raw : fallback;
-}
-
-function savePane(key: string, value: number): void {
-  try {
-    localStorage.setItem(key, String(value));
-  } catch {}
-}
-
-function SectionHead({ label, accent }: { label: string; accent?: string }) {
+function Notice({ title, detail, pulse }: { title: string; detail: string | null; pulse?: boolean }) {
   return (
-    <div className="mb-2.5 flex items-center gap-2">
-      {accent !== undefined && <span className="size-2 rounded-full" style={{ background: accent }} />}
-      <h2 className="text-2xs uppercase tracking-[0.2em] text-ink-dim">{label}</h2>
-      <div className="h-px flex-1 bg-line" />
-    </div>
-  );
-}
-
-function NoticeCard({ title, children }: { title: string; children?: ReactNode }) {
-  return (
-    <div className="rounded-md border border-line bg-raised/60 px-5 py-4">
-      <div className="font-mono text-sm">{title}</div>
-      {children !== undefined && <div className="mt-1 text-xs text-ink-dim">{children}</div>}
-    </div>
+    <Frost className="flex max-w-md flex-col gap-1.5 px-5 py-4">
+      <div className="font-mono text-sm text-ink">{title}</div>
+      {detail !== null && <div className="text-xs text-ink-dim">{detail}</div>}
+      {pulse === true && <span className="mt-1 size-1.5 animate-pulse rounded-full bg-accent" />}
+    </Frost>
   );
 }
 
 export function App() {
   const sel = useSelection();
+  const meta = useStageMeta();
   const runsQ = useQuery(runsQuery());
   const entries = runsQ.data;
   const entry = useMemo(() => entries?.find((run) => run.id === sel.runId) ?? null, [entries, sel.runId]);
@@ -94,16 +75,23 @@ export function App() {
       : pointer !== undefined && (sel.policy === 'ppo' ? ppoQ : randomQ).isPending);
 
   const envList = useMemo(() => (detail === null ? [] : runEnvs(detail.meta, detail.recordings)), [detail]);
+  const wallEnvs = envList.length > 0 ? envList : ENV_IDS;
   const progress = useTapeProgress(sel.runId);
   const stride = Math.max(1, progress?.windowSteps ?? 1);
+  const live = entry?.inFlight === true;
+
+  const [view, setView] = useState<PanelView>('reward');
+  const [wallOpen, setWallOpen] = useState(false);
+  const [paletteOpen, setPaletteOpen] = useState(false);
+  const rootRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
     const onPop = (): void => adoptFromUrl(urlState());
     window.addEventListener('popstate', onPop);
-    return () => {
-      window.removeEventListener('popstate', onPop);
-    };
+    return () => window.removeEventListener('popstate', onPop);
   }, []);
+
+  useEffect(() => watchRuns(entries), [entries]);
 
   useEffect(() => {
     if (sel.runId !== null || entries === undefined) return;
@@ -128,27 +116,39 @@ export function App() {
       policy: sel.policy,
       baselinePointer: pointer,
       baselinePending,
-      live: sel.policy === 'oak' && entry?.inFlight === true,
+      live: sel.policy === 'oak' && live,
     });
-  }, [active, sel.policy, pointer, baselinePending, entry]);
+  }, [active, sel.policy, pointer, baselinePending, live]);
 
-  const inFlight = entry?.inFlight === true;
   useEffect(() => {
     const runId = sel.runId;
     if (runId === null) return;
-    setLive(runId, inFlight);
-    return () => {
-      setLive(runId, false);
-    };
-  }, [sel.runId, inFlight]);
+    setLive(runId, live);
+    return () => setLive(runId, false);
+  }, [sel.runId, live]);
 
-  const stageColRef = useRef<HTMLDivElement | null>(null);
-  const stageRowRef = useRef<HTMLDivElement | null>(null);
-  const keyContext = useRef({ envList, stride });
-  keyContext.current = { envList, stride };
+  useEffect(() => {
+    if (meta.status !== 'ready') return;
+    capturePoster(stageCanvas);
+  }, [meta.status, meta.envName, meta.seed, meta.policy]);
+
+  const keyContext = useRef({ envList, stride, wallOpen, paletteOpen, policies: ['oak'] as Policy[] });
+  keyContext.current = {
+    envList,
+    stride,
+    wallOpen,
+    paletteOpen,
+    policies: ['oak', ...(['ppo', 'random'] as const).filter((p) => detail?.baselines[p] !== undefined)],
+  };
 
   useEffect(() => {
     const onKey = (event: KeyboardEvent): void => {
+      if ((event.metaKey || event.ctrlKey) && (event.key === 'k' || event.key === 'K')) {
+        event.preventDefault();
+        setPaletteOpen((open) => !open);
+        return;
+      }
+      if (event.metaKey || event.ctrlKey || event.altKey || keyContext.current.paletteOpen) return;
       const node = event.target;
       if (
         node instanceof HTMLInputElement
@@ -178,143 +178,78 @@ export function App() {
         case 'debug':
           toggleDebug();
           break;
+        case 'policy': {
+          const order = keyContext.current.policies;
+          const at = order.indexOf(selectionSnapshot().policy);
+          const next = order[(at + 1) % order.length];
+          if (next !== undefined) selectPolicy(next);
+          break;
+        }
         case 'fullscreen':
           if (document.fullscreenElement !== null) void document.exitFullscreen();
-          else stageColRef.current?.requestFullscreen().catch(() => {});
+          else rootRef.current?.requestFullscreen().catch(() => {});
           break;
         case 'escape':
-          unpromote();
+          if (keyContext.current.wallOpen) setWallOpen(false);
+          else unpromote();
           break;
       }
     };
     window.addEventListener('keydown', onKey);
-    return () => {
-      window.removeEventListener('keydown', onKey);
-    };
+    return () => window.removeEventListener('keydown', onKey);
   }, []);
 
-  const [railW, setRailW] = useState(() => readPane('oakWallRailW', 380));
-  const railWRef = useRef(railW);
-  railWRef.current = railW;
-  const railDragging = useRef(false);
-
-  const [chartsH, setChartsH] = useState(() => readPane('oakWallScienceH', 210));
-  const chartsHRef = useRef(chartsH);
-  chartsHRef.current = chartsH;
-  const chartsDrag = useRef<{ startY: number; startH: number } | null>(null);
-
-  const envName = sel.envId === null ? null : ENVS[sel.envId].name;
-  const envAccent = sel.envId === null ? undefined : `var(--color-env-${ENVS[sel.envId].slug})`;
+  const notice = runsQ.isError
+    ? {
+        title: STR.notices.apiDown,
+        detail: `${runsQ.error instanceof Error ? runsQ.error.message : String(runsQ.error)} — ${STR.notices.apiHint}`,
+      }
+    : sel.runId !== null && detailQ.isError
+      ? {
+          title: STR.notices.loadFailed(sel.runId),
+          detail: detailQ.error instanceof Error ? detailQ.error.message : String(detailQ.error),
+        }
+      : entries !== undefined && sel.runId === null
+        ? { title: STR.notices.noRun, detail: STR.notices.noRunHint }
+        : meta.note !== null
+          ? { title: meta.note, detail: meta.noteDetail, pulse: meta.status === 'loading' }
+          : null;
 
   return (
-    <div className="min-h-screen">
-      <TopBar entries={entries} entry={entry} />
-      <EnvStrip detail={detail} envList={envList} />
-      <main className="flex flex-col px-4 pb-12 pt-1">
-        {runsQ.isError && (
-          <NoticeCard title="Could not reach the API">
-            {runsQ.error instanceof Error ? runsQ.error.message : String(runsQ.error)} — the dev server proxies
-            /api to the frontend server; start it with `bun run dev`.
-          </NoticeCard>
-        )}
-        {!runsQ.isError && entries !== undefined && sel.runId === null && (
-          <NoticeCard title="No run to show yet">
-            The stage plays a fleet's recorded seeds and the server found no science run with a tape.
-          </NoticeCard>
-        )}
-        {sel.runId !== null && detailQ.isError && (
-          <NoticeCard title={`Could not load ${sel.runId}`}>
-            {detailQ.error instanceof Error ? detailQ.error.message : String(detailQ.error)}
-          </NoticeCard>
-        )}
-
-        <section ref={stageRowRef} className="flex h-[62vh] min-h-96">
-          <div ref={stageColRef} className="flex min-w-0 flex-1 flex-col bg-ground">
-            <Stage />
-            <Transport detail={detail} stride={stride} fullscreenTarget={stageColRef} />
-          </div>
-          <div
-            role="separator"
-            aria-label="Resize the seed panel"
-            title="Drag to resize the seed panel"
-            className="mx-1.5 w-1 cursor-col-resize self-stretch rounded-full bg-line/40 hover:bg-line-strong"
-            onPointerDown={(event) => {
-              railDragging.current = true;
-              try {
-                event.currentTarget.setPointerCapture(event.pointerId);
-              } catch {}
-            }}
-            onPointerMove={(event) => {
-              if (!railDragging.current || stageRowRef.current === null) return;
-              const rect = stageRowRef.current.getBoundingClientRect();
-              const width = rect.right - event.clientX;
-              setRailW(Math.min(Math.max(Math.round(width), 260), Math.round(rect.width * 0.55)));
-            }}
-            onPointerUp={() => {
-              if (!railDragging.current) return;
-              railDragging.current = false;
-              savePane('oakWallRailW', railWRef.current);
-            }}
-            onPointerCancel={() => {
-              railDragging.current = false;
-            }}
-          />
-          <aside className="flex min-h-0 flex-col gap-2" style={{ width: railW }}>
-            <Scoreboard detail={detail} ppo={ppoDetail} random={randomDetail} />
-            <SeedRail detail={detail} active={active} />
-          </aside>
-        </section>
-
-        <div
-          role="separator"
-          aria-label="Resize the chart row"
-          title="Drag to resize the charts"
-          className="my-3 h-1 cursor-row-resize rounded-full bg-line/40 hover:bg-line-strong"
-          onPointerDown={(event) => {
-            chartsDrag.current = { startY: event.clientY, startH: chartsHRef.current };
-            try {
-              event.currentTarget.setPointerCapture(event.pointerId);
-            } catch {}
-          }}
-          onPointerMove={(event) => {
-            const drag = chartsDrag.current;
-            if (drag === null) return;
-            setChartsH(Math.min(Math.max(Math.round(drag.startH + event.clientY - drag.startY), 140), 460));
-          }}
-          onPointerUp={() => {
-            if (chartsDrag.current === null) return;
-            chartsDrag.current = null;
-            savePane('oakWallScienceH', chartsHRef.current);
-          }}
-          onPointerCancel={() => {
-            chartsDrag.current = null;
-          }}
+    <div ref={rootRef} className="fixed inset-0 overflow-hidden bg-ground">
+      <TheaterStage />
+      {notice !== null && (
+        <div className="pointer-events-none absolute inset-0 z-20 flex items-center justify-center p-6">
+          <Notice title={notice.title} detail={notice.detail ?? null} pulse={notice.pulse} />
+        </div>
+      )}
+      <div className="pointer-events-none absolute inset-x-0 bottom-4 z-30 grid grid-cols-[1fr_minmax(0,760px)_1fr] items-end gap-3 px-4">
+        <div className="justify-self-start">
+          <EnvTileButton onOpen={() => setWallOpen(true)} />
+        </div>
+        <PlaybackBar detail={detail} stride={stride} live={live} fullscreenTarget={rootRef} />
+        <div />
+      </div>
+      {wallOpen && (
+        <EnvWall
+          entries={entries}
+          entry={entry}
+          detail={detail}
+          envList={wallEnvs}
+          onClose={() => setWallOpen(false)}
         />
-
-        <section id="env-analytics" className="scroll-mt-24">
-          <SectionHead label={envName === null ? 'This environment' : `${envName} — this environment`} accent={envAccent} />
-          <div className="grid gap-3 lg:grid-cols-4">
-            <RewardChart
-              detail={detail}
-              ppo={ppoDetail}
-              random={randomDetail}
-              height={chartsH}
-              className="lg:col-span-4"
-            />
-            <EnvDiagnostics detail={detail} ppo={ppoDetail} random={randomDetail} />
-          </div>
-        </section>
-
-        <section className="mt-6">
-          <SectionHead label="Across the suite" />
-          <div className="grid gap-3 lg:grid-cols-4">
-            <ForestPlot detail={detail} ppo={ppoDetail} random={randomDetail} className="lg:col-span-2 lg:row-span-2" />
-            <Profiles detail={detail} ppo={ppoDetail} random={randomDetail} className="lg:col-span-2" />
-            <Frontier detail={detail} ppo={ppoDetail} random={randomDetail} className="lg:col-span-2" />
-            <DiagnosticsStrip detail={detail} ppo={ppoDetail} random={randomDetail} />
-          </div>
-        </section>
-      </main>
+      )}
+      {paletteOpen && (
+        <CommandPalette
+          entries={entries}
+          detail={detail}
+          envList={wallEnvs}
+          setView={setView}
+          openWall={() => setWallOpen(true)}
+          fullscreenTarget={rootRef}
+          onClose={() => setPaletteOpen(false)}
+        />
+      )}
     </div>
   );
 }

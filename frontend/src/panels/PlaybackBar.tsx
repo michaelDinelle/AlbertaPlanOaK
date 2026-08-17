@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type ReactNode, type RefObject } from 'react';
+import { useEffect, useRef, useState, type ReactNode } from 'react';
 import { clsx } from 'clsx';
 import {
   ChevronLeft,
@@ -12,9 +12,11 @@ import {
   ScanEye,
 } from 'lucide-react';
 import type { Policy, RunDetail } from '@shared/types';
-import { formatCount, formatStep } from '../../lib/format';
-import { setTransport, useTransport } from '../../playback/store';
-import { selectPolicy, toggleDebug, useSelection } from '../../state/selectionStore';
+import { Lens } from '../glass/Panel';
+import { formatCount, formatStep } from '../lib/format';
+import { setTransport, useTransport } from '../playback/store';
+import { selectPolicy, toggleDebug, useSelection } from '../state/selectionStore';
+import { STR } from '../strings';
 import {
   currentStep,
   scrubToFrame,
@@ -22,14 +24,12 @@ import {
   stepBySteps,
   subscribeStageFrame,
   useStageMeta,
-} from '../../theater/controller';
-import { formatClock } from '../../theater/player';
-import { SPEEDS } from '../../url/codec';
-import { navigate } from '../../url/useUrlState';
+} from '../theater/controller';
+import { formatClock } from '../theater/player';
+import { SPEEDS } from '../url/codec';
+import { navigate } from '../url/useUrlState';
 
-const POLICY_LABEL: Record<Policy, string> = { oak: 'oak', ppo: 'ppo', random: 'rand' };
-
-function TBtn({
+function BarButton({
   on,
   disabled,
   title,
@@ -49,8 +49,8 @@ function TBtn({
       title={title}
       onClick={onClick}
       className={clsx(
-        'flex h-7 min-w-7 items-center justify-center rounded-sm px-1.5 font-mono text-2xs transition-colors',
-        on ? 'bg-accent/15 text-accent' : 'text-ink-dim hover:bg-hover hover:text-ink',
+        'flex h-7 min-w-7 items-center justify-center rounded-md px-1.5 font-mono text-2xs transition-colors',
+        on === true ? 'bg-accent/20 text-accent' : 'text-ink-dim hover:bg-white/10 hover:text-ink',
         disabled === true && 'pointer-events-none opacity-35',
       )}
     >
@@ -59,18 +59,20 @@ function TBtn({
   );
 }
 
-function Sep() {
-  return <div className="mx-0.5 h-5 w-px bg-line" />;
+function Divider() {
+  return <div className="mx-0.5 h-5 w-px bg-white/10" />;
 }
 
-export function Transport({
+export function PlaybackBar({
   detail,
   stride,
+  live,
   fullscreenTarget,
 }: {
   detail: RunDetail | null;
   stride: number;
-  fullscreenTarget: RefObject<HTMLElement | null>;
+  live: boolean;
+  fullscreenTarget: { current: HTMLElement | null };
 }) {
   const meta = useStageMeta();
   const transport = useTransport();
@@ -94,28 +96,26 @@ export function Transport({
         const now = performance.now();
         if (now - lastReadoutAt.current < 150 || readoutRef.current === null) return;
         lastReadoutAt.current = now;
-        readoutRef.current.textContent =
-          `step ${frame.step < 0 ? 'init' : formatCount(frame.step)} / ${formatStep(frame.totalSteps)}`
-          + ` · ${formatClock(frame.simTime)}`;
+        readoutRef.current.textContent = STR.bar.readout(
+          frame.step < 0 ? STR.bar.start : formatCount(frame.step),
+          formatStep(frame.totalSteps),
+          formatClock(frame.simTime),
+        );
       }),
     [],
   );
 
   useEffect(() => {
-    const onChange = (): void => {
-      setFullscreen(document.fullscreenElement !== null);
-    };
+    const onChange = (): void => setFullscreen(document.fullscreenElement !== null);
     document.addEventListener('fullscreenchange', onChange);
-    return () => {
-      document.removeEventListener('fullscreenchange', onChange);
-    };
+    return () => document.removeEventListener('fullscreenchange', onChange);
   }, []);
 
   const idle = meta.status !== 'ready';
   const frames = Math.max(1, meta.frameCount - 1);
   const loadedPct = meta.totalSteps > 0 ? Math.min(100, (meta.loadedSteps / meta.totalSteps) * 100) : 0;
   const jump = Math.max(1, stride);
-  const baselines = (['ppo', 'random'] as const).filter((p) => detail?.baselines[p] !== undefined);
+  const policies: Policy[] = ['oak', ...(['ppo', 'random'] as const).filter((p) => detail?.baselines[p] !== undefined)];
   let busiest = 1;
   for (const tick of meta.ticks) if (tick.count > busiest) busiest = tick.count;
 
@@ -125,35 +125,37 @@ export function Transport({
     navigate({ at: Math.floor(currentStep()) });
   };
 
-  const toggleFullscreen = (): void => {
-    if (document.fullscreenElement !== null) void document.exitFullscreen();
-    else fullscreenTarget.current?.requestFullscreen().catch(() => {});
+  const cycleSpeed = (): void => {
+    const at = SPEEDS.indexOf(transport.speed as (typeof SPEEDS)[number]);
+    const speed = SPEEDS[(at + 1) % SPEEDS.length] ?? 1;
+    setTransport({ speed });
+    navigate({ speed });
   };
 
   return (
-    <div className={clsx('glass mt-2 flex items-center gap-1 rounded-md px-2 py-1.5', idle && 'opacity-80')}>
-      <TBtn
-        title={transport.playing ? 'Pause (space)' : 'Play (space)'}
+    <Lens className={clsx('flex h-12 items-center gap-1 px-2', idle && 'opacity-80')}>
+      <BarButton
+        title={transport.playing ? STR.bar.pause : STR.bar.play}
         disabled={idle}
         onClick={() => setTransport({ playing: !transport.playing })}
       >
         {transport.playing ? <Pause className="size-3.5" /> : <Play className="size-3.5" />}
-      </TBtn>
-      <TBtn title="Back 200 windows (shift+←)" disabled={idle} onClick={() => stepBySteps(-200 * jump)}>
+      </BarButton>
+      <BarButton title={STR.bar.farBack} disabled={idle} onClick={() => stepBySteps(-200 * jump)}>
         <ChevronsLeft className="size-3.5" />
-      </TBtn>
-      <TBtn title="Back 20 windows (←)" disabled={idle} onClick={() => stepBySteps(-20 * jump)}>
+      </BarButton>
+      <BarButton title={STR.bar.back} disabled={idle} onClick={() => stepBySteps(-20 * jump)}>
         <ChevronLeft className="size-3.5" />
-      </TBtn>
-      <TBtn title="Forward 20 windows (→)" disabled={idle} onClick={() => stepBySteps(20 * jump)}>
+      </BarButton>
+      <BarButton title={STR.bar.ahead} disabled={idle} onClick={() => stepBySteps(20 * jump)}>
         <ChevronRight className="size-3.5" />
-      </TBtn>
-      <TBtn title="Forward 200 windows (shift+→)" disabled={idle} onClick={() => stepBySteps(200 * jump)}>
+      </BarButton>
+      <BarButton title={STR.bar.farAhead} disabled={idle} onClick={() => stepBySteps(200 * jump)}>
         <ChevronsRight className="size-3.5" />
-      </TBtn>
+      </BarButton>
 
-      <div className="relative mx-2 h-7 min-w-24 flex-1">
-        <div className="absolute inset-x-0 top-1/2 h-[3px] -translate-y-1/2 rounded-full bg-line" />
+      <div className="relative mx-2 h-7 min-w-32 flex-1" title={STR.bar.scrub}>
+        <div className="absolute inset-x-0 top-1/2 h-[3px] -translate-y-1/2 rounded-full bg-white/15" />
         <div
           className="absolute left-0 top-1/2 h-[3px] -translate-y-1/2 rounded-full bg-ink-faint/40"
           style={{ width: `${loadedPct.toFixed(2)}%` }}
@@ -172,7 +174,7 @@ export function Transport({
                 key={`${tick.kind}-${tick.frame}`}
                 type="button"
                 title={tick.label}
-                aria-label={`Seek to ${tick.label}`}
+                aria-label={STR.bar.seekTo(tick.label)}
                 onClick={() => seekToTick(tick)}
                 className="pointer-events-auto absolute top-1/2 w-px -translate-x-1/2 bg-seed"
                 style={{
@@ -198,7 +200,7 @@ export function Transport({
           step="any"
           defaultValue="0"
           disabled={idle}
-          aria-label="Scrub the run"
+          aria-label={STR.bar.scrub}
           className="absolute inset-0 w-full cursor-pointer appearance-none opacity-0"
           onPointerDown={() => {
             scrubbing.current = true;
@@ -211,53 +213,40 @@ export function Transport({
       </div>
 
       <div ref={readoutRef} className="whitespace-nowrap font-mono text-2xs text-ink-dim">
-        {idle ? 'no recording' : 'step — / —'}
+        {STR.bar.idle}
       </div>
 
-      <Sep />
-      <div className="hidden items-center lg:flex">
-        {SPEEDS.map((preset) => (
-          <TBtn
-            key={preset}
-            on={transport.speed === preset}
-            title={`×${preset} real time (${preset} × the environment's own clock)`}
-            onClick={() => {
-              setTransport({ speed: preset });
-              navigate({ speed: preset });
-            }}
-          >
-            ×{preset}
-          </TBtn>
-        ))}
-      </div>
+      <Divider />
+      <BarButton title={STR.bar.speed(transport.speed)} onClick={cycleSpeed}>
+        ×{transport.speed}
+      </BarButton>
 
-      {baselines.length > 0 && (
+      {policies.length > 1 && (
         <>
-          <Sep />
-          {(['oak' as Policy, ...baselines]).map((p) => (
-            <TBtn
-              key={p}
-              on={sel.policy === p}
-              title={p === 'oak' ? 'The OaK fleet' : `The ${p} baseline fleet`}
-              onClick={() => selectPolicy(p)}
-            >
-              {POLICY_LABEL[p]}
-            </TBtn>
+          <Divider />
+          {policies.map((p) => (
+            <BarButton key={p} on={sel.policy === p} title={STR.bar.watch(STR.policy[p])} onClick={() => selectPolicy(p)}>
+              {STR.policy[p]}
+            </BarButton>
           ))}
         </>
       )}
 
-      <Sep />
-      <TBtn on={sel.debug} title="Ground-truth overlay (g)" onClick={toggleDebug}>
+      <Divider />
+      <BarButton on={sel.debug} title={STR.bar.debug} onClick={toggleDebug}>
         <ScanEye className="size-3.5" />
-      </TBtn>
-      <TBtn
+      </BarButton>
+      <BarButton
         on={fullscreen}
-        title={fullscreen ? 'Exit fullscreen (f or Esc)' : 'Fullscreen (f)'}
-        onClick={toggleFullscreen}
+        title={fullscreen ? STR.bar.windowed : STR.bar.fullscreen}
+        onClick={() => {
+          if (document.fullscreenElement !== null) void document.exitFullscreen();
+          else fullscreenTarget.current?.requestFullscreen().catch(() => {});
+        }}
       >
         {fullscreen ? <Minimize className="size-3.5" /> : <Maximize className="size-3.5" />}
-      </TBtn>
-    </div>
+      </BarButton>
+      {live && <span className="mx-1 size-1.5 animate-pulse rounded-full bg-good" title={STR.bar.live} />}
+    </Lens>
   );
 }
