@@ -12,7 +12,19 @@ createRoot(host).render(
   <StrictMode>
     <QueryClientProvider client={new QueryClient()}>
       <App />
-      <Toaster theme="dark" position="top-right" />
+      <Toaster
+        theme="dark"
+        position="top-left"
+        toastOptions={{
+          style: {
+            background: 'var(--glass-tint)',
+            border: '1px solid var(--glass-line)',
+            color: 'var(--color-ink)',
+            backdropFilter: 'var(--glass-frost-filter)',
+            WebkitBackdropFilter: 'var(--glass-frost-filter)',
+          },
+        }}
+      />
     </QueryClientProvider>
   </StrictMode>,
 );

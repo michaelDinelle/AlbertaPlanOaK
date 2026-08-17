@@ -235,7 +235,7 @@ export function SeedList({ detail, active }: { detail: RunDetail | null; active:
   return (
     <div className="flex min-h-0 flex-1 flex-col">
       <div className="flex items-center gap-2 px-2 pb-1.5">
-        <span className="text-2xs uppercase tracking-[0.16em] text-ink-faint">{STR.seeds.title}</span>
+        <span className="text-2xs uppercase tracking-label text-ink-faint">{STR.seeds.title}</span>
         <span className="font-mono text-2xs text-ink-faint">
           {rows !== null && rows.length > 0 ? formatCount(rows.length) : ''}
         </span>

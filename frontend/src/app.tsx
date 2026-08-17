@@ -40,7 +40,7 @@ function Notice({ title, detail, pulse }: { title: string; detail: string | null
     <Frost className="flex max-w-md flex-col gap-1.5 px-5 py-4">
       <div className="font-mono text-sm text-ink">{title}</div>
       {detail !== null && <div className="text-xs text-ink-dim">{detail}</div>}
-      {pulse === true && <span className="mt-1 size-1.5 animate-pulse rounded-full bg-accent" />}
+      {pulse === true && <span className="mt-1 size-1.5 motion-safe:animate-pulse rounded-full bg-accent" />}
     </Frost>
   );
 }

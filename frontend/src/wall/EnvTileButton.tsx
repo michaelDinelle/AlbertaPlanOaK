@@ -5,7 +5,7 @@ import { STR } from '../strings';
 import { useStageMeta } from '../theater/controller';
 
 export function envGradient(slug: string): string {
-  return `linear-gradient(140deg, color-mix(in oklab, var(--color-env-${slug}) 45%, #070b13) 0%, #070b13 85%)`;
+  return `linear-gradient(140deg, color-mix(in oklab, var(--color-env-${slug}) 45%, var(--color-poster-base)) 0%, var(--color-poster-base) 85%)`;
 }
 
 export function posterUrl(slug: string): string {

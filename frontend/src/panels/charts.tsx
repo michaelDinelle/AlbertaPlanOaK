@@ -74,6 +74,7 @@ export function bandProps(fill: string, opacity = 0.12) {
 const TICK = { fill: 'var(--color-ink-faint)', fontSize: 10, fontFamily: 'var(--font-mono)' } as const;
 
 export function TimeChart({
+  label,
   height,
   xMin = 0,
   xMax,
@@ -84,6 +85,7 @@ export function TimeChart({
   overlay,
   children,
 }: {
+  label: string;
   height: number;
   xMin?: number;
   xMax: number;
@@ -95,7 +97,7 @@ export function TimeChart({
   children: ReactNode;
 }) {
   return (
-    <div className="relative shrink-0" style={{ height }}>
+    <div role="img" aria-label={label} className="relative shrink-0" style={{ height }}>
       <ResponsiveContainer width="100%" height="100%">
         <ComposedChart margin={CHART_MARGIN}>
           <CartesianGrid stroke="var(--color-line)" strokeOpacity={0.45} vertical={false} />

@@ -3,14 +3,10 @@
 @theme static {
   --color-*: initial;
   --color-ground: oklch(16.3% 0.012 260.6);
-  --color-raised: oklch(20.5% 0.023 265.5);
-  --color-sunken: oklch(15.3% 0.012 260.4);
-  --color-hover: oklch(24.8% 0.037 263.6);
   --color-line: oklch(29.3% 0.034 262.8);
-  --color-line-strong: oklch(37.4% 0.047 261.7);
   --color-ink: oklch(90.1% 0.019 258.4);
   --color-ink-dim: oklch(66.2% 0.039 257.4);
-  --color-ink-faint: oklch(52.1% 0.039 259.4);
+  --color-ink-faint: oklch(58% 0.039 259.4);
   --color-accent: oklch(77.7% 0.128 238.9);
   --color-seed: oklch(88% 0.135 86.1);
   --color-good: oklch(79.4% 0.149 142.9);
@@ -19,10 +15,9 @@
   --color-ppo: oklch(64.4% 0.146 288.5);
   --color-random: oklch(66.2% 0.039 257.4);
   --color-crit: oklch(64.8% 0.162 30.2);
-  --color-ramp-1: oklch(44.1% 0.08 239.8);
   --color-ramp-2: oklch(56.1% 0.109 240.1);
-  --color-ramp-3: oklch(65.8% 0.138 241.9);
   --color-ramp-4: oklch(80% 0.098 232.1);
+  --color-poster-base: #070b13;
   --color-env-half-cheetah: oklch(82.1% 0.149 72.1);
   --color-env-four-rooms: oklch(80.3% 0.14 138.7);
   --color-env-deep-sea: oklch(82.8% 0.12 179);
@@ -45,6 +40,8 @@
 
   --font-sans: ui-sans-serif, -apple-system, 'SF Pro Text', 'Segoe UI', sans-serif;
   --font-mono: ui-monospace, 'SF Mono', Menlo, monospace;
+
+  --tracking-label: 0.16em;
 
   --radius-xs: 3px;
   --radius-sm: 6px;
@@ -95,6 +92,13 @@
     font-size: 13px;
     line-height: 1.5;
     -webkit-font-smoothing: antialiased;
+    caret-color: var(--color-accent);
+    scrollbar-width: thin;
+    scrollbar-color: var(--color-line) transparent;
+  }
+
+  ::selection {
+    background: color-mix(in oklab, var(--color-accent) 30%, transparent);
   }
 
   :focus-visible {

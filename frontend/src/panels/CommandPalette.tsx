@@ -79,7 +79,7 @@ export function CommandPalette({
     onClose();
   };
   const groupClass =
-    '[&_[cmdk-group-heading]]:px-2.5 [&_[cmdk-group-heading]]:pb-1 [&_[cmdk-group-heading]]:pt-2.5 [&_[cmdk-group-heading]]:text-2xs [&_[cmdk-group-heading]]:uppercase [&_[cmdk-group-heading]]:tracking-[0.16em] [&_[cmdk-group-heading]]:text-ink-faint';
+    '[&_[cmdk-group-heading]]:px-2.5 [&_[cmdk-group-heading]]:pb-1 [&_[cmdk-group-heading]]:pt-2.5 [&_[cmdk-group-heading]]:text-2xs [&_[cmdk-group-heading]]:uppercase [&_[cmdk-group-heading]]:tracking-label [&_[cmdk-group-heading]]:text-ink-faint';
 
   return (
     <div
@@ -116,7 +116,7 @@ export function CommandPalette({
               <Command.Group heading={STR.palette.runs}>
                 {runs.map((run) => (
                   <Item key={run.id} onPick={done(() => selectRun(run.id))} hint={STR.wall.switchRun(runLabel(run))}>
-                    {run.inFlight && <span className="size-1.5 animate-pulse rounded-full bg-good" />}
+                    {run.inFlight && <span className="size-1.5 motion-safe:animate-pulse rounded-full bg-good" />}
                     {runLabel(run)}
                   </Item>
                 ))}
