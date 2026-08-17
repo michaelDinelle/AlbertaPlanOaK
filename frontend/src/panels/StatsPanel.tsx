@@ -33,7 +33,7 @@ export function StatsPanel({
             onClick={() => setView(id)}
             title={STR.palette.show(STR.panels[id])}
             className={clsx(
-              'rounded-md px-2.5 py-1 text-xs transition-colors',
+              'rounded-md px-2.5 py-1 text-xs transition-colors active:bg-white/15',
               view === id ? 'bg-accent/20 text-accent' : 'text-ink-dim hover:bg-white/10 hover:text-ink',
             )}
           >

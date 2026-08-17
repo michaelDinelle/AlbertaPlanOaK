@@ -49,7 +49,7 @@ function BarButton({
       title={title}
       onClick={onClick}
       className={clsx(
-        'flex h-7 min-w-7 items-center justify-center rounded-md px-1.5 font-mono text-2xs transition-colors',
+        'flex h-7 min-w-7 items-center justify-center rounded-md px-1.5 font-mono text-2xs transition-colors active:bg-white/15',
         on === true ? 'bg-accent/20 text-accent' : 'text-ink hover:bg-white/10',
         disabled === true && 'pointer-events-none opacity-35',
       )}
@@ -154,7 +154,10 @@ export function PlaybackBar({
         <ChevronsRight className="size-3.5" />
       </BarButton>
 
-      <div className="relative mx-2 h-7 min-w-32 flex-1 rounded-md transition-colors hover:bg-white/5" title={STR.bar.scrub}>
+      <div
+        className="relative mx-2 h-7 min-w-32 flex-1 rounded-md transition-colors hover:bg-white/5 has-[:focus-visible]:ring-1 has-[:focus-visible]:ring-accent"
+        title={STR.bar.scrub}
+      >
         <div className="absolute inset-x-0 top-1/2 h-[3px] -translate-y-1/2 rounded-full bg-white/15" />
         <div
           className="absolute left-0 top-1/2 h-[3px] -translate-y-1/2 rounded-full bg-ink-faint/40"
@@ -245,7 +248,7 @@ export function PlaybackBar({
       >
         {fullscreen ? <Minimize className="size-3.5" /> : <Maximize className="size-3.5" />}
       </BarButton>
-      {live && <span className="mx-1 size-1.5 animate-pulse rounded-full bg-good" title={STR.bar.live} />}
+      {live && <span className="mx-1 size-1.5 motion-safe:animate-pulse rounded-full bg-good" title={STR.bar.live} />}
     </Lens>
   );
 }

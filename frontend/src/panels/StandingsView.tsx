@@ -95,15 +95,16 @@ export function StandingsView({
 
   return (
     <div className="flex min-h-0 flex-1 flex-col gap-2 overflow-y-auto">
-      <div className="px-2 text-sm text-ink">{STR.standings.headline(wins, total)}</div>
+      <div className="px-2 text-sm font-medium text-ink">{STR.standings.headline(wins, total)}</div>
       <div className="flex items-center gap-2.5 px-2">
-        <span className="text-2xs uppercase tracking-[0.16em] text-ink-faint">{STR.standings.profile}</span>
+        <span className="text-2xs uppercase tracking-label text-ink-faint">{STR.standings.profile}</span>
         {POLICIES.map((p) => (
           <Chip key={p.key} swatch={p.token} label={STR.policy[p.key]} />
         ))}
       </div>
       {profile !== null && (
         <TimeChart
+          label={STR.standings.profile}
           height={150}
           xMin={profile.min}
           xMax={profile.max}
@@ -132,7 +133,7 @@ export function StandingsView({
           ))}
         </TimeChart>
       )}
-      <div className="px-2 text-2xs uppercase tracking-[0.16em] text-ink-faint">{STR.standings.perEnv}</div>
+      <div className="px-2 text-2xs uppercase tracking-label text-ink-faint">{STR.standings.perEnv}</div>
       <div className="flex flex-col gap-px">
         {rows.map((row) => {
           const on = sel.envId === row.envId;

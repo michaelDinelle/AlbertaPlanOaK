@@ -86,7 +86,7 @@ export function EnvWall({
             <span className="text-2xs text-ink-faint">{STR.wall.hint}</span>
           </div>
           <div className="flex items-center gap-1.5 overflow-x-auto pb-1">
-            <span className="mr-1 text-2xs uppercase tracking-[0.16em] text-ink-faint">{STR.wall.runs}</span>
+            <span className="mr-1 text-2xs uppercase tracking-label text-ink-faint">{STR.wall.runs}</span>
             {runs.map((run) => (
               <button
                 key={run.id}
@@ -100,7 +100,7 @@ export function EnvWall({
                     : 'border-white/10 text-ink-dim hover:border-white/25 hover:text-ink',
                 )}
               >
-                {run.inFlight && <span className="size-1.5 animate-pulse rounded-full bg-good" title={STR.wall.live} />}
+                {run.inFlight && <span className="size-1.5 motion-safe:animate-pulse rounded-full bg-good" title={STR.wall.live} />}
                 {runLabel(run)}
               </button>
             ))}

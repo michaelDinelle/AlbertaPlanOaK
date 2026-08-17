@@ -1,5 +1,5 @@
 import { clsx } from 'clsx';
-import { motion } from 'motion/react';
+import { motion, useReducedMotion } from 'motion/react';
 import type { CSSProperties, ReactNode } from 'react';
 import { useLiquidGlass } from './useLiquidGlass';
 
@@ -21,10 +21,11 @@ export interface PanelProps {
 
 export function Lens({ className, style, children, glass }: PanelProps & { glass?: GlassOptions }) {
   const ref = useLiquidGlass<HTMLDivElement>({ ...LENS_OPTICS, ...glass });
+  const enter = useReducedMotion() === true ? undefined : ENTER;
   return (
     <motion.div
       ref={ref}
-      {...ENTER}
+      {...enter}
       className={clsx('glass pointer-events-auto rounded-lg', className)}
       style={{ ...CONTAIN, ...style }}
     >
@@ -34,9 +35,10 @@ export function Lens({ className, style, children, glass }: PanelProps & { glass
 }
 
 export function Frost({ className, style, children }: PanelProps) {
+  const enter = useReducedMotion() === true ? undefined : ENTER;
   return (
     <motion.div
-      {...ENTER}
+      {...enter}
       className={clsx('glass glass-frost pointer-events-auto rounded-lg', className)}
       style={{ ...CONTAIN, ...style }}
     >

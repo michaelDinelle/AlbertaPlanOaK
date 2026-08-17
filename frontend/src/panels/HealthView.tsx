@@ -20,7 +20,7 @@ function Stat({ label, value }: { label: string; value: string }) {
 function Head({ label, chips }: { label: string; chips?: { swatch: string; label: string; dashed?: boolean }[] }) {
   return (
     <div className="flex items-center gap-2.5 pt-1">
-      <span className="text-2xs uppercase tracking-[0.16em] text-ink-faint">{label}</span>
+      <span className="text-2xs uppercase tracking-label text-ink-faint">{label}</span>
       {chips?.map((chip) => <Chip key={chip.label} {...chip} />)}
     </div>
   );
@@ -118,12 +118,12 @@ export function HealthView({ detail, ppo }: { detail: RunDetail | null; ppo: Run
           { swatch: 'var(--color-ramp-2)', label: STR.health.positive },
         ]}
       />
-      <TimeChart height={110} xMax={horizon} yFormat={(v) => formatPercent(v, 0)}>
+      <TimeChart label={STR.health.survival} height={110} xMax={horizon} yFormat={(v) => formatPercent(v, 0)}>
         {survival !== null && <Line {...lineProps('var(--color-good)', 1.5)} data={seriesRows(survival.x, survival.surviving)} />}
         {survival !== null && <Line {...lineProps('var(--color-ramp-2)', 1)} data={seriesRows(survival.x, survival.positive)} />}
       </TimeChart>
       <Head label={STR.health.fade} chips={[{ swatch: 'var(--color-crit)', label: STR.health.faded }]} />
-      <TimeChart height={110} xMax={horizon}>
+      <TimeChart label={STR.health.fade} height={110} xMax={horizon}>
         <Line {...lineProps('var(--color-crit)', 1.4)} data={fade} />
       </TimeChart>
       <Head
@@ -137,7 +137,7 @@ export function HealthView({ detail, ppo }: { detail: RunDetail | null; ppo: Run
       {capacity === null || !capacity.alive ? (
         <div className="py-3 text-center text-2xs text-ink-faint">{STR.health.noPlasticity}</div>
       ) : (
-        <TimeChart height={110} xMax={horizon} yFormat={(v) => formatPercent(v, 0)} rightFormat={(v) => formatRate(v, 2)}>
+        <TimeChart label={STR.health.capacity} height={110} xMax={horizon} yFormat={(v) => formatPercent(v, 0)} rightFormat={(v) => formatRate(v, 2)}>
           <Line {...lineProps('var(--color-oak)', 1.5)} data={capacity.oakDormant} />
           <Line {...lineProps('var(--color-ppo)', 1.5)} data={capacity.ppoDormant} />
           <Line {...lineProps('var(--color-oak)', 1, '4 3', 'r')} data={capacity.oakErank} />
@@ -151,7 +151,7 @@ export function HealthView({ detail, ppo }: { detail: RunDetail | null; ppo: Run
           { swatch: 'var(--color-ramp-4)', label: STR.health.believed, dashed: true },
         ]}
       />
-      <TimeChart height={110} xMax={horizon}>
+      <TimeChart label={STR.health.know} height={110} xMax={horizon}>
         {know !== null && <Line {...lineProps('var(--color-oak)', 1.5)} data={know.measured} />}
         {know !== null && <Line {...lineProps('var(--color-ramp-4)', 1.1, '4 3')} data={know.believed} />}
       </TimeChart>

@@ -86,7 +86,7 @@ export function RewardView({
   return (
     <div className="flex min-h-0 flex-1 flex-col gap-2">
       <div className="flex flex-wrap items-center gap-x-2.5 gap-y-1 px-2">
-        <span className="text-2xs uppercase tracking-[0.16em] text-ink-faint">{STR.reward.title}</span>
+        <span className="text-2xs uppercase tracking-label text-ink-faint">{STR.reward.title}</span>
         <Chip swatch="var(--color-oak)" label={STR.reward.oak} />
         <Chip swatch="var(--color-seed)" label={STR.reward.hero} />
         <span className="flex items-center gap-1 font-mono text-2xs text-ink-dim">
@@ -97,7 +97,7 @@ export function RewardView({
         {randomPts !== null && <Chip swatch="var(--color-random)" label={STR.reward.average(STR.policy.random)} />}
       </div>
       <div
-        className="relative cursor-ew-resize touch-none select-none rounded-md transition-colors hover:bg-white/4"
+        className="relative cursor-ew-resize touch-none select-none rounded-md transition-colors hover:bg-white/5"
         title={STR.bar.scrub}
         onPointerDown={(event) => {
           dragging.current = true;
@@ -120,7 +120,12 @@ export function RewardView({
           dragging.current = false;
         }}
       >
-        <TimeChart height={188} xMax={Math.max(1, horizon)} overlay={<Playhead total={Math.max(1, horizon)} />}>
+        <TimeChart
+          label={STR.reward.title}
+          height={188}
+          xMax={Math.max(1, horizon)}
+          overlay={<Playhead total={Math.max(1, horizon)} />}
+        >
           <Area {...bandProps('var(--color-oak)')} data={band} />
           <Line {...lineProps('var(--color-oak)', 1.6)} data={oakPts} />
           <Line {...lineProps('var(--color-seed)', 1.2)} data={heroPts} />

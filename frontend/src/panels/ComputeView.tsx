@@ -55,7 +55,7 @@ export function ComputeView({
   return (
     <div className="flex min-h-0 flex-1 flex-col gap-2.5 overflow-y-auto px-2">
       <div>
-        <div className="text-2xs uppercase tracking-[0.16em] text-ink-faint">{STR.compute.efficiency}</div>
+        <div className="text-2xs uppercase tracking-label text-ink-faint">{STR.compute.efficiency}</div>
         {POLICIES.map((policy, i) => (
           <div key={policy.key} className="mt-1 flex items-baseline gap-2">
             <Chip swatch={policy.token} label={STR.policy[policy.key]} />
@@ -66,7 +66,7 @@ export function ComputeView({
         ))}
       </div>
       <div>
-        <div className="text-2xs uppercase tracking-[0.16em] text-ink-faint">{STR.compute.perStep}</div>
+        <div className="text-2xs uppercase tracking-label text-ink-faint">{STR.compute.perStep}</div>
         {POLICIES.map((policy, i) => (
           <div key={policy.key} className="mt-1 flex items-baseline gap-2">
             <Chip swatch={policy.token} label={STR.policy[policy.key]} />
@@ -78,7 +78,7 @@ export function ComputeView({
       </div>
       {ratioEntries.length > 0 && (
         <div>
-          <div className="text-2xs uppercase tracking-[0.16em] text-ink-faint">{STR.compute.ratios}</div>
+          <div className="text-2xs uppercase tracking-label text-ink-faint">{STR.compute.ratios}</div>
           <div className="mt-1.5 flex flex-wrap gap-1.5">
             {ratioEntries.map(([threshold, ratio]) => {
               const n = ratio === null || ratio === 0 ? null : 1 / ratio;
@@ -100,12 +100,13 @@ export function ComputeView({
       {frontier !== null && (
         <div>
           <div className="flex items-center gap-2.5">
-            <span className="text-2xs uppercase tracking-[0.16em] text-ink-faint">{STR.compute.frontier}</span>
+            <span className="text-2xs uppercase tracking-label text-ink-faint">{STR.compute.frontier}</span>
             {frontier.traces.map((trace) => (
               <Chip key={trace.key} swatch={trace.token} label={STR.policy[trace.key as 'oak' | 'ppo' | 'random']} />
             ))}
           </div>
           <TimeChart
+            label={STR.compute.frontier}
             height={170}
             xScale="log"
             xMin={frontier.min}
