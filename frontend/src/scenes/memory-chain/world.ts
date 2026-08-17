@@ -19,6 +19,7 @@ import { TOKENS, type Palette } from '@kit/tokens';
 import type { SceneContext } from '@kit/types';
 import { excludeBand, scatterRocks } from '@kit/vegetation';
 import { makeWater, type WaterHandle } from '@kit/water';
+import { makeWorld, type WorldCore } from '@kit/world';
 import {
   MEMORYCHAIN_ACTION,
   MEMORYCHAIN_CUE,
@@ -301,8 +302,7 @@ export function makeStalactites(
 }
 
 
-export interface WorldHandle {
-  group: THREE.Group;
+export interface WorldHandle extends WorldCore {
   sky: SkyHandle;
   rig: LightRig;
   field: CellFieldHandle;
@@ -310,27 +310,13 @@ export interface WorldHandle {
   skin: CaveSkin;
   fireflies: AmbientParticlesHandle;
   flood: AmbientParticlesHandle;
-  setTime(t: number): void;
-  setPixelRatio(dpr: number): void;
-  dispose(): void;
 }
 
-interface Disposable {
-  dispose(): void;
-}
-
-interface Timed {
-  setTime(t: number): void;
-}
 
 export function buildWorld(ctx: SceneContext, scene: THREE.Scene, grid: GridGeometry): WorldHandle {
   const palette: Palette = ctx.tokens.palettes.cave;
   const skin = caveSkin(palette, ctx.tokens);
-  const group = new THREE.Group();
-  group.name = 'fireflyCave';
-  const owned: Disposable[] = [];
-  const timed: Timed[] = [];
-  const sized: { setPixelRatio(dpr: number): void }[] = [];
+  const w = makeWorld('fireflyCave');
 
   const sky = skyFromPalette(palette, 'cave', {
     topSpread: 0.5,
@@ -338,9 +324,9 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene, grid: GridGeom
     dither: 0.01,
     radius: 320,
   });
-  group.add(sky.mesh);
-  owned.push(sky);
-  timed.push({ setTime: (t) => sky.setTime(t) });
+  w.add(sky.mesh);
+  w.own(sky);
+  w.time({ setTime: (t) => sky.setTime(t) });
 
   const rig = makeLightRig(palette, {
     sunDir: SUN_DIR,
@@ -349,8 +335,8 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene, grid: GridGeom
     pointDecay: 1.45,
     sunDistanceScale: 2.4,
   });
-  group.add(rig.group);
-  owned.push(rig);
+  w.add(rig.group);
+  w.own(rig);
   rig.setShadowFocus({ x: SHADOW_CENTER[0], y: SHADOW_CENTER[1], z: SHADOW_CENTER[2] }, SHADOW_RADIUS);
 
   applyFog(scene, palette, FOG_EXTENT);
@@ -374,8 +360,8 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene, grid: GridGeom
   cavern.name = 'cavernShell';
   cavern.receiveShadow = true;
   cavern.castShadow = false;
-  group.add(cavern);
-  owned.push({
+  w.add(cavern);
+  w.own({
     dispose() {
       cavernGeometry.dispose();
       cavernMaterial.dispose();
@@ -404,9 +390,8 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene, grid: GridGeom
   });
   water.mesh.position.x = (CAVERN_X0 + CAVERN_X1) * 0.5;
   water.mesh.position.z = 4;
-  group.add(water.mesh);
-  owned.push(water);
-  timed.push(water);
+  w.add(water.mesh);
+  w.time(w.own(water));
 
   const field = buildCellField(
     grid,
@@ -432,9 +417,9 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene, grid: GridGeom
     field.floorMaterial.emissive.copy(skin.stone);
     field.floorMaterial.emissiveIntensity = 0.03;
   }
-  group.add(field.group);
-  owned.push(field);
-  timed.push({ setTime: (t) => field.setTime(t) });
+  w.add(field.group);
+  w.own(field);
+  w.time({ setTime: (t) => field.setTime(t) });
 
   const extent = gridExtent(grid);
   const banks = scatterRocks({
@@ -453,13 +438,12 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene, grid: GridGeom
     receiveShadow: false,
     name: 'stalagmites',
   });
-  group.add(banks.group);
-  owned.push(banks);
-  timed.push(banks);
+  w.add(banks.group);
+  w.time(w.own(banks));
 
   const stalactites = makeStalactites(ctx.seed, skin, palette);
-  group.add(stalactites.mesh);
-  owned.push(stalactites);
+  w.add(stalactites.mesh);
+  w.own(stalactites);
 
   const fireflies = makeAmbientParticles({
     preset: 'fireflies',
@@ -474,10 +458,8 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene, grid: GridGeom
     swirl: 0.5,
     name: 'passageFireflies',
   });
-  group.add(fireflies.points);
-  owned.push(fireflies);
-  timed.push(fireflies);
-  sized.push(fireflies);
+  w.add(fireflies.points);
+  w.size(w.time(w.own(fireflies)));
 
   const vaultDust = makeAmbientParticles({
     preset: 'dust',
@@ -492,10 +474,8 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene, grid: GridGeom
     swirl: 0.24,
     name: 'vaultDust',
   });
-  group.add(vaultDust.points);
-  owned.push(vaultDust);
-  timed.push(vaultDust);
-  sized.push(vaultDust);
+  w.add(vaultDust.points);
+  w.size(w.time(w.own(vaultDust)));
 
   const flood = makeAmbientParticles({
     preset: 'fireflies',
@@ -511,13 +491,10 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene, grid: GridGeom
     name: 'choiceFlood',
   });
   flood.setDensity(0);
-  group.add(flood.points);
-  owned.push(flood);
-  timed.push(flood);
-  sized.push(flood);
+  w.add(flood.points);
+  w.size(w.time(w.own(flood)));
 
-  return {
-    group,
+  return w.seal({
     sky,
     rig,
     field,
@@ -525,22 +502,11 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene, grid: GridGeom
     skin,
     fireflies,
     flood,
-    setTime(t) {
-      for (let i = 0; i < timed.length; i++) timed[i]?.setTime(t);
+  }, {
+    time: (t) => {
       oakUniforms(cavernMaterial)?.setTime(t);
     },
-    setPixelRatio(dpr) {
-      for (let i = 0; i < sized.length; i++) sized[i]?.setPixelRatio(dpr);
-    },
-    dispose() {
-      for (let i = owned.length - 1; i >= 0; i--) owned[i]?.dispose();
-      owned.length = 0;
-      timed.length = 0;
-      sized.length = 0;
-      group.removeFromParent();
-      group.clear();
-    },
-  };
+  });
 }
 
 

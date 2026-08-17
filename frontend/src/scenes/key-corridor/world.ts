@@ -33,6 +33,7 @@ import {
   type ExcludeFn,
   type VegetationHandle,
 } from '@kit/vegetation';
+import { makeWorld, type WorldCore } from '@kit/world';
 import {
   KEYCORRIDOR_DOOR,
   KEYCORRIDOR_H,
@@ -220,8 +221,7 @@ export function makeMeadowHeight(seed: number): (x: number, z: number) => number
 }
 
 
-export interface WorldHandle {
-  group: THREE.Group;
+export interface WorldHandle extends WorldCore {
   sky: SkyHandle;
   rig: LightRig;
   terrain: TerrainHandle;
@@ -231,26 +231,13 @@ export interface WorldHandle {
   dividerCells: readonly GridCell[];
   paintFloor(x: number, y: number, color: THREE.ColorRepresentation): void;
   restoreFloorTint(x: number, y: number): void;
-  setTime(t: number): void;
-  setPixelRatio(dpr: number): void;
-  dispose(): void;
 }
 
-interface Disposable {
-  dispose(): void;
-}
-
-interface Timed {
-  setTime(t: number): void;
-}
 
 export function buildWorld(ctx: SceneContext, scene: THREE.Scene, grid: GridGeometry): WorldHandle {
   const palette: Palette = ctx.tokens.palettes.morning;
   const skin = gardenSkin(palette, ctx.tokens);
-  const group = new THREE.Group();
-  group.name = 'ivyGateGarden';
-  const owned: Disposable[] = [];
-  const timed: Timed[] = [];
+  const w = makeWorld('ivyGateGarden');
 
   const door = resolveDoor(grid);
   const yaw = gateYaw(grid, door);
@@ -265,9 +252,9 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene, grid: GridGeom
     bottomSpread: 0.56,
     radius: 340,
   });
-  group.add(sky.mesh);
-  owned.push(sky);
-  timed.push({ setTime: (t) => sky.setTime(t) });
+  w.add(sky.mesh);
+  w.own(sky);
+  w.time({ setTime: (t) => sky.setTime(t) });
 
   const rig = makeLightRig(palette, {
     sunDir: sky.sunDirection,
@@ -275,8 +262,8 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene, grid: GridGeom
     pointDistance: 5.5,
     sunDistanceScale: 2.4,
   });
-  group.add(rig.group);
-  owned.push(rig);
+  w.add(rig.group);
+  w.own(rig);
   rig.setShadowFocus({ x: 0, y: 0.3, z: 0 }, SHADOW_RADIUS);
 
   applyFog(scene, palette, FOG_EXTENT);
@@ -310,8 +297,8 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene, grid: GridGeom
     castShadow: false,
     name: 'ivyGateMeadow',
   });
-  group.add(terrain.mesh);
-  owned.push(terrain);
+  w.add(terrain.mesh);
+  w.own(terrain);
 
   const FLOOR_JITTER = 0.17;
   const TINT_WILD_A = skin.wildFloor;
@@ -347,9 +334,9 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene, grid: GridGeom
       name: 'ivyGateCells',
     },
   );
-  group.add(field.group);
-  owned.push(field);
-  timed.push({ setTime: (t) => field.setTime(t) });
+  w.add(field.group);
+  w.own(field);
+  w.time({ setTime: (t) => field.setTime(t) });
 
   const dividerCells: GridCell[] = [];
   for (let y = 0; y < grid.h; y++) {
@@ -368,10 +355,10 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene, grid: GridGeom
     toonFloor: 0.22,
     name: 'ivyGateDividerMaterial',
   });
-  owned.push({ dispose: () => dividerMaterial.dispose() });
+  w.own({ dispose: () => dividerMaterial.dispose() });
   if (dividerCells.length > 0) {
     const geometry = makeDividerGeometry(skin);
-    owned.push({ dispose: () => geometry.dispose() });
+    w.own({ dispose: () => geometry.dispose() });
     const mesh = new THREE.InstancedMesh(geometry, dividerMaterial, dividerCells.length);
     mesh.name = 'ivyGateDivider';
     mesh.castShadow = true;
@@ -405,8 +392,8 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene, grid: GridGeom
     mesh.instanceMatrix.needsUpdate = true;
     if (mesh.instanceColor) mesh.instanceColor.needsUpdate = true;
     mesh.computeBoundingSphere();
-    group.add(mesh);
-    owned.push({ dispose: () => mesh.dispose() });
+    w.add(mesh);
+    w.own({ dispose: () => mesh.dispose() });
   }
 
   const noPlanting = excludeAny(excludeWallCells(grid), excludeCellCenters(grid, 0.3));
@@ -429,9 +416,8 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene, grid: GridGeom
     rimStrength: 0.34,
     name: 'wildGrass',
   });
-  group.add(wildGrass.group);
-  owned.push(wildGrass);
-  timed.push(wildGrass);
+  w.add(wildGrass.group);
+  w.time(w.own(wildGrass));
   planting.push(wildGrass);
 
   const wildBlooms = scatterFlowers({
@@ -449,9 +435,8 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene, grid: GridGeom
     rimStrength: 0.3,
     name: 'wildBlooms',
   });
-  group.add(wildBlooms.group);
-  owned.push(wildBlooms);
-  timed.push(wildBlooms);
+  w.add(wildBlooms.group);
+  w.time(w.own(wildBlooms));
   planting.push(wildBlooms);
 
   const gravel = scatterRocks({
@@ -468,9 +453,8 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene, grid: GridGeom
     castShadow: false,
     name: 'formalGravel',
   });
-  group.add(gravel.group);
-  owned.push(gravel);
-  timed.push(gravel);
+  w.add(gravel.group);
+  w.time(w.own(gravel));
   planting.push(gravel);
 
   const topiary = scatterRocks({
@@ -487,9 +471,8 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene, grid: GridGeom
     castShadow: true,
     name: 'formalTopiary',
   });
-  group.add(topiary.group);
-  owned.push(topiary);
-  timed.push(topiary);
+  w.add(topiary.group);
+  w.time(w.own(topiary));
   planting.push(topiary);
 
   const offGarden = excludeRect(0, 0, GARDEN_HALF_X, GARDEN_HALF_Z, 0.9);
@@ -520,9 +503,8 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene, grid: GridGeom
     castShadow: false,
     name: 'meadowGrass',
   });
-  group.add(meadowGrass.group);
-  owned.push(meadowGrass);
-  timed.push(meadowGrass);
+  w.add(meadowGrass.group);
+  w.time(w.own(meadowGrass));
   planting.push(meadowGrass);
 
   const verge = scatterFlowers({
@@ -542,9 +524,8 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene, grid: GridGeom
     castShadow: false,
     name: 'wallVerge',
   });
-  group.add(verge.group);
-  owned.push(verge);
-  timed.push(verge);
+  w.add(verge.group);
+  w.time(w.own(verge));
   planting.push(verge);
 
   const treeLine = scatterTrees({
@@ -566,12 +547,10 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene, grid: GridGeom
     castShadow: true,
     name: 'treeLine',
   });
-  group.add(treeLine.group);
-  owned.push(treeLine);
-  timed.push(treeLine);
+  w.add(treeLine.group);
+  w.time(w.own(treeLine));
   planting.push(treeLine);
 
-  const motes: AmbientParticlesHandle[] = [];
   const wildMotes = makeAmbientParticles({
     preset: 'pollen',
     count: 190,
@@ -585,10 +564,8 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene, grid: GridGeom
     swirl: 0.26,
     name: 'wildPollen',
   });
-  group.add(wildMotes.points);
-  owned.push(wildMotes);
-  timed.push(wildMotes);
-  motes.push(wildMotes);
+  w.add(wildMotes.points);
+  w.size(w.time(w.own(wildMotes)));
 
   const formalMotes = makeAmbientParticles({
     preset: 'dust',
@@ -603,10 +580,8 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene, grid: GridGeom
     swirl: 0.16,
     name: 'formalDust',
   });
-  group.add(formalMotes.points);
-  owned.push(formalMotes);
-  timed.push(formalMotes);
-  motes.push(formalMotes);
+  w.add(formalMotes.points);
+  w.size(w.time(w.own(formalMotes)));
 
   const mist = makeMistPlanes({
     size: [38, 36],
@@ -621,14 +596,12 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene, grid: GridGeom
     nearFade: 9,
     name: 'morningAir',
   });
-  group.add(mist.group);
-  owned.push(mist);
-  timed.push(mist);
+  w.add(mist.group);
+  w.time(w.own(mist));
 
   const restoreColor = new THREE.Color();
 
-  return {
-    group,
+  return w.seal({
     sky,
     rig,
     terrain,
@@ -644,22 +617,11 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene, grid: GridGeom
       restoreColor.copy(floorTintFor(x, y)).multiplyScalar(1 + (n - 0.5) * FLOOR_JITTER);
       field.setFloorColor(x, y, restoreColor);
     },
-    setTime(t) {
-      for (let i = 0; i < timed.length; i++) timed[i]?.setTime(t);
-    },
-    setPixelRatio(dpr) {
-      for (let i = 0; i < motes.length; i++) motes[i]?.setPixelRatio(dpr);
-    },
-    dispose() {
-      for (let i = owned.length - 1; i >= 0; i--) owned[i]?.dispose();
-      owned.length = 0;
-      timed.length = 0;
-      motes.length = 0;
+  }, {
+    drop: () => {
       planting.length = 0;
-      group.removeFromParent();
-      group.clear();
     },
-  };
+  });
 }
 
 
