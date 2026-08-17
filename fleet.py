@@ -25,6 +25,14 @@ BOOT_REPS = 4000
 CURVE_REPS = 2000
 BOOT_BASE_SEED = 20260817
 TAU_GRID = [round(-0.25 + 0.025 * k, 6) for k in range(61)]
+PLASTICITY_FIELDS = {
+    "oak": ["dormantFraction", "utilityDormantFraction", "featureBirths", "weightAbsMean",
+            "weightAbsMeanValue", "erank", "logAlphaValueP10", "logAlphaValueP50",
+            "logAlphaValueP90", "logAlphaOptionValueP50", "logAlphaModelP50"],
+    "ppo": ["dormantFraction", "dormantFractionCritic", "weightAbsMean", "erank",
+            "logStepP10", "logStepP50", "logStepP90"],
+    "random": [],
+}
 Z_THRESHOLDS = ("0.25", "0.5", "0.8")
 
 FILE_MAGIC = 0x544B414F
@@ -757,6 +765,12 @@ def cmd_report(args) -> int:
         peak_rate = np.nanmax(np.where(fin_mask, rates, -np.inf), axis=0)
     peak_rate[~np.isfinite(peak_rate)] = np.nan
     env_ids = sorted(slices)
+    plast_fields = PLASTICITY_FIELDS[meta["policy"]]
+    missing = [f for f in plast_fields if f not in run["tape"]["fields"]]
+    if missing:
+        raise SystemExit(f"{args.root}: tape lacks plasticity fields {missing}")
+    plast_rows = np.unique(np.linspace(0, len(ends) - 1, 100).astype(int))
+    plast_series = {f: series(run, f) for f in plast_fields}
     floor_lane = np.empty(n_lanes)
     span_lane = np.empty(n_lanes)
     for env, lanes in slices.items():
@@ -797,6 +811,12 @@ def cmd_report(args) -> int:
             "curves": {"percentileSeeds": pick,
                        "rateZ": {q: fl_list(z_rates[:, lane_of[s]]) for q, s in pick.items()}},
         }
+        if plast_fields:
+            envs_out[env]["plasticity"] = {
+                f: {"final": fl(finite_iqm(plast_series[f][-1, lanes])),
+                    "iqm": [fl(finite_iqm(plast_series[f][r][lanes])) for r in plast_rows]}
+                for f in plast_fields
+            }
     z_final_mat = np.stack([z_final[slices[env]] for env in env_ids])
     z_life_mat = np.stack([z_life[slices[env]] for env in env_ids])
     phi_mat = np.stack([phi[slices[env]] for env in env_ids])
@@ -849,6 +869,7 @@ def cmd_report(args) -> int:
         "bootstrap": {"reps": BOOT_REPS, "curveReps": CURVE_REPS,
                       "baseSeed": BOOT_BASE_SEED, "method": "percentile"},
         "curveSteps": [int(s) for s in ends],
+        "plasticitySteps": [int(ends[r]) for r in plast_rows] if plast_fields else [],
         "compute": compute,
         "envs": envs_out,
         "aggregate": aggregate,
