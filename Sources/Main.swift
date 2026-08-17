@@ -808,7 +808,6 @@ final class TapeWriter {
   }
   struct FleetPipes {
     let label: String
-    let laneTG: MTLSize
     let encodeInit: (MTLComputeCommandEncoder) -> Void
     let encodeMegastep: (MTLComputeCommandEncoder, Int, Int) -> Void
     let encodeSnapshot: (MTLComputeCommandEncoder, Int) -> Void
@@ -940,7 +939,6 @@ final class TapeWriter {
       min(64, initPipe.maxTotalThreadsPerThreadgroup, snapPipe.maxTotalThreadsPerThreadgroup))
     return FleetPipes(
       label: "oak",
-      laneTG: laneTG,
       encodeInit: { enc in
         for kd in engine.kinds {
           bindFleet(enc, initPipe)
@@ -1069,6 +1067,10 @@ final class TapeWriter {
     }
     try runFleetLoop(q, bufs, pipes, seeds: seeds, steps: steps, root: root, laneEnvs: laneEnvs, laneEnvKinds: laneEnvKinds)
   }
+  static let ppoParamStride = 2768
+  static let ppoRollStride = 3744
+  static let ppoScratchStride = 12064
+  static let ppoStateStride = 48
   static func baselinePipes(
     _ policy: String, _ lib: MTLLibrary, _ dev: MTLDevice, _ bufs: FleetBuffers
   ) throws -> FleetPipes {
@@ -1076,13 +1078,36 @@ final class TapeWriter {
       let fn = try lib.makeFunction(name: name, constantValues: MTLFunctionConstantValues())
       return try dev.makeComputePipelineState(function: fn)
     }
-    let initPipe = try pipeline("baseline_fleet_init")
+    func makeBuf(_ len: Int) throws -> MTLBuffer {
+      guard let b = dev.makeBuffer(length: max(len, 16), options: [.storageModeShared]) else {
+        throw err("Metal buffer allocation failed (\(len) bytes).")
+      }
+      return b
+    }
+    let isPpo = policy == "ppo"
+    let initPipe = try pipeline(isPpo ? "ppo_fleet_init" : "baseline_fleet_init")
     let stepPipe = try pipeline("\(policy)_megastep")
-    let snapPipe = try pipeline("baseline_fleet_snapshot")
+    let snapPipe = try pipeline(isPpo ? "ppo_fleet_snapshot" : "baseline_fleet_snapshot")
     let B = bufs.B
     let ecfg = bufs.ecfg
+    let ppoBufs: [MTLBuffer]
+    if isPpo {
+      guard stepPipe.maxTotalThreadsPerThreadgroup >= 32 else {
+        throw err("ppo_megastep supports only \(stepPipe.maxTotalThreadsPerThreadgroup) threads/threadgroup.")
+      }
+      ppoBufs = [
+        try makeBuf(B * ppoParamStride * 4),
+        try makeBuf(B * 2 * ppoParamStride * 4),
+        try makeBuf(B * ppoRollStride * 4),
+        try makeBuf(B * ppoScratchStride * 4),
+        try makeBuf(B * ppoStateStride * 4),
+      ]
+    } else {
+      ppoBufs = []
+    }
     func bindCommon(_ enc: MTLComputeCommandEncoder, _ pipe: MTLComputePipelineState) {
       enc.setComputePipelineState(pipe)
+      for (j, b) in ppoBufs.enumerated() { enc.setBuffer(b, offset: 0, index: j) }
       enc.setBuffer(bufs.laneBuf, offset: 0, index: OakBuf.lanes.rawValue)
       enc.setBuffer(bufs.seedsBuf, offset: 0, index: OakBuf.seeds.rawValue)
       var c = ecfg
@@ -1091,13 +1116,14 @@ final class TapeWriter {
     let laneTG = mtlSize(min(
       64, initPipe.maxTotalThreadsPerThreadgroup, stepPipe.maxTotalThreadsPerThreadgroup,
       snapPipe.maxTotalThreadsPerThreadgroup))
+    let stepThreads = isPpo ? B * 32 : B
+    let stepTG = isPpo ? mtlSize(32) : laneTG
     return FleetPipes(
       label: policy,
-      laneTG: laneTG,
       encodeInit: { enc in
         bindCommon(enc, initPipe)
         enc.setBuffer(bufs.envKindsBuf, offset: 0, index: OakBuf.aux0.rawValue)
-        enc.dispatchThreads(mtlSize(B), threadsPerThreadgroup: laneTG)
+        enc.dispatchThreads(mtlSize(stepThreads), threadsPerThreadgroup: stepTG)
       },
       encodeMegastep: { enc, n, base in
         bindCommon(enc, stepPipe)
@@ -1105,7 +1131,7 @@ final class TapeWriter {
         enc.setBuffer(bufs.recordBuf, offset: 0, index: OakBuf.aux1.rawValue)
         var span = SIMD3<UInt32>(UInt32(n), UInt32(base), 0)
         enc.setBytes(&span, length: MemoryLayout<SIMD3<UInt32>>.stride, index: OakBuf.aux2.rawValue)
-        enc.dispatchThreads(mtlSize(B), threadsPerThreadgroup: laneTG)
+        enc.dispatchThreads(mtlSize(stepThreads), threadsPerThreadgroup: stepTG)
         enc.memoryBarrier(scope: [.buffers])
       },
       encodeSnapshot: { enc, half in
@@ -1116,8 +1142,13 @@ final class TapeWriter {
         enc.dispatchThreads(mtlSize(B), threadsPerThreadgroup: laneTG)
       },
       writeDebugRaw: { _, _ in },
-      laneHashes: { _, laneBytes in
-        ["lane": sha256Hex(UnsafeRawBufferPointer(start: laneBytes, count: fleetLaneStride))]
+      laneHashes: { lane, laneBytes in
+        var hs = ["lane": sha256Hex(UnsafeRawBufferPointer(start: laneBytes, count: fleetLaneStride))]
+        if isPpo {
+          let base = ppoBufs[0].contents() + lane * ppoParamStride * 4
+          hs["params"] = sha256Hex(UnsafeRawBufferPointer(start: base, count: ppoParamStride * 4))
+        }
+        return hs
       }
     )
   }
@@ -1477,8 +1508,8 @@ final class TapeWriter {
     let env = ProcessInfo.processInfo.environment
     let ablations = try AblationSpec.fromEnv(env)
     let policy = env["OAK_BENCH_POLICY"] ?? "oak"
-    guard ["oak", "random"].contains(policy) else {
-      throw err("OAK_BENCH_POLICY must be one of oak,random (got \(policy)).")
+    guard ["oak", "random", "ppo"].contains(policy) else {
+      throw err("OAK_BENCH_POLICY must be one of oak,random,ppo (got \(policy)).")
     }
     guard policy == "oak" || ablations.label == "none" else {
       throw err("Ablations apply only to the oak policy.")

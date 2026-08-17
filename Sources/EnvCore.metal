@@ -3,6 +3,9 @@
 constant uint ENV_RNG_STREAM       = 3u;
 constant uint RNG_STREAM_ACT = 2u;
 constant uint RNG_STREAM_RANDOM_ACT = 4u;
+constant uint RNG_STREAM_PPO_INIT = 5u;
+constant uint RNG_STREAM_PPO_ACT = 6u;
+constant uint RNG_STREAM_PPO_SHUFFLE = 7u;
 constant uint PHILOX_M0 = 0xD2511F53u;
 constant uint PHILOX_M1 = 0xCD9E8D57u;
 constant uint PHILOX_W0 = 0x9E3779B9u;
