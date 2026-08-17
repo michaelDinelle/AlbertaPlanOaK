@@ -316,6 +316,36 @@ export function binnedRates(tape: Tape, lanes: readonly number[]): BinnedRates {
   return { x, edges, perLane, iqm: iqmOut, p10, p90 };
 }
 
+export function rhoBinned(tape: Tape, lanes: readonly number[]): Omit<BinnedRates, 'edges'> {
+  const f = fieldIndex(tape, 'rho');
+  const x: number[] = [];
+  const perLane: (number | null)[][] = lanes.map(() => []);
+  const iqmOut: (number | null)[] = [];
+  const p10: (number | null)[] = [];
+  const p90: (number | null)[] = [];
+  const scratch: number[] = [];
+  for (let r = 0; r < tape.rows; r++) {
+    scratch.length = 0;
+    for (let li = 0; li < lanes.length; li++) {
+      const v = tapeValue(tape, f, r, lanes[li] ?? 0);
+      const dst = perLane[li];
+      if (dst === undefined) continue;
+      if (Number.isFinite(v)) {
+        dst.push(v);
+        scratch.push(v);
+      } else {
+        dst.push(null);
+      }
+    }
+    scratch.sort((a, b) => a - b);
+    iqmOut.push(scratch.length > 0 ? iqmSorted(scratch) : null);
+    p10.push(scratch.length > 0 ? percentileSorted(scratch, 10) : null);
+    p90.push(scratch.length > 0 ? percentileSorted(scratch, 90) : null);
+    x.push(tape.stepEnd[r] ?? 0);
+  }
+  return { x, perLane, iqm: iqmOut, p10, p90 };
+}
+
 export interface RetentionResult {
   peak: number;
   end: number;

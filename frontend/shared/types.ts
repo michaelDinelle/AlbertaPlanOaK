@@ -6,11 +6,14 @@ export interface EnvScheduleEntry {
   seedEnd: number;
 }
 
+export type Policy = 'oak' | 'ppo' | 'random';
+
 export interface RunMeta {
   batch: number;
   seeds: number[];
   steps: number;
   ablationLabel: string;
+  policy: Policy;
   startedAt?: string;
   envSchedule: EnvScheduleEntry[];
   envCatalog: unknown[];
@@ -50,6 +53,7 @@ export interface RunIndexEntry {
   inFlight: boolean;
   hasSummary: boolean;
   hasRecordings: boolean;
+  policy: Policy;
   role: 'keeper' | null;
 }
 
@@ -64,5 +68,6 @@ export interface RunDetail {
   meta: RunMeta;
   summary: RunSummary | null;
   recordings: RecordingRef[];
+  baselines: Partial<Record<'ppo' | 'random', string>>;
 }
 

@@ -155,7 +155,7 @@ export function createApp(opts: AppOptions = {}): App {
 
     if (segs.length === 3) {
       const recs = await index.recordingsFor(run.id);
-      return json(await buildRunDetail(run, recs));
+      return json(await buildRunDetail(run, recs, index.baselines()));
     }
 
     const sub = segs[3];

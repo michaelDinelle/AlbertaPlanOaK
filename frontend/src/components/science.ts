@@ -1,4 +1,4 @@
-import type { RunDetail } from '@shared/types';
+import type { Policy, RunDetail } from '@shared/types';
 import type { Tape } from '../tape';
 import {
   binnedRates,
@@ -15,6 +15,7 @@ import {
   laneRetention,
   loadRunDetail,
   loadTape,
+  rhoBinned,
   survivalSeries,
   throughputSeries,
 } from '../state';
@@ -23,20 +24,6 @@ import { columns, populationChart, steppedLine, timeSeries, type ChartHandle } f
 
 interface Disposable {
   destroy(): void;
-}
-
-interface LaneSeries {
-  seed: number;
-  values: (number | null)[];
-  last: number | null;
-}
-
-function lastFinite(values: readonly (number | null)[]): number | null {
-  for (let i = values.length - 1; i >= 0; i--) {
-    const v = values[i];
-    if (v !== null && v !== undefined && Number.isFinite(v)) return v;
-  }
-  return null;
 }
 
 function retentionCurve(values: readonly number[]): { steps: number[]; fraction: number[] } {
@@ -77,6 +64,7 @@ export interface RunScienceHandle {
   setTape(tape: Tape): void;
   setPlayhead(step: number | null): void;
   setHighlight(seed: number | null): void;
+  setPolicy(policy: Policy): void;
 }
 
 export function mountRunScience(host: HTMLElement, opts: RunScienceOptions): RunScienceHandle {
@@ -150,46 +138,53 @@ export function mountRunScience(host: HTMLElement, opts: RunScienceOptions): Run
     return handle;
   }
 
-  function rhoSeries(t: Tape, lanes: readonly number[]): {
-    x: number[]; perLane: (number | null)[][];
-  } {
-    const rateIdx = t.fields.indexOf('rho');
-    const x: number[] = [];
-    for (let r = 0; r < t.rows; r++) x.push(t.stepEnd[r] ?? 0);
-    const perLane = lanes.map((lane) => {
-      const out: (number | null)[] = [];
-      for (let r = 0; r < t.rows; r++) {
-        const v = t.data[(r * t.fields.length + rateIdx) * t.laneCount + lane] ?? NaN;
-        out.push(Number.isFinite(v) ? v : null);
-      }
-      return out;
-    });
-    return { x, perLane };
-  }
-
   interface RewardBuilt {
     env: string;
     mode: SeriesMode;
     chart: ChartHandle;
     seeds: number[];
     x0: number[];
-    cols: (number | null)[][];
-    bandCount: number;
+    p90: (number | null)[];
+    p10: (number | null)[];
+    iqm: (number | null)[];
+    perLane: (number | null)[][];
   }
   let reward: RewardBuilt | null = null;
 
+  let barValues: { ppo: number | null; random: number | null } = { ppo: null, random: null };
+  let activePolicy: Policy = 'oak';
+  let barsGeneration = 0;
+
+  function refreshBars(): void {
+    const run = detail;
+    const env = selectedEnv;
+    const generation = ++barsGeneration;
+    barValues = { ppo: null, random: null };
+    if (run === null || env === null) return;
+    void Promise.all((['ppo', 'random'] as const).map(async (name) => {
+      const id = run.baselines[name];
+      if (id === undefined) return null;
+      const baseline = await loadRunDetail(id).catch(() => null);
+      return baseline?.summary?.envSlices?.[env]?.rewardRateIQM ?? null;
+    })).then(([ppo, random]) => {
+      if (destroyed || generation !== barsGeneration) return;
+      barValues = { ppo: ppo ?? null, random: random ?? null };
+      if (reward !== null) reward.chart.setData(rewardData(reward));
+    });
+  }
+
   function heroColumn(built: RewardBuilt): (number | null)[] {
     const li = heroSeed === null ? -1 : built.seeds.indexOf(heroSeed);
-    if (li < 0) return built.x0.map(() => null);
-    return built.cols[built.bandCount + li] ?? built.x0.map(() => null);
+    return (li < 0 ? undefined : built.perLane[li]) ?? built.x0.map(() => null);
   }
 
   function rewardData(built: RewardBuilt): Parameters<ChartHandle['setData']>[0] {
     return [
       built.x0,
-      ...built.cols.slice(0, built.bandCount),
+      built.p90,
+      built.p10,
+      built.iqm,
       heroColumn(built),
-      ...built.cols.slice(built.bandCount),
     ] as unknown as Parameters<ChartHandle['setData']>[0];
   }
 
@@ -207,20 +202,13 @@ export function mountRunScience(host: HTMLElement, opts: RunScienceOptions): Run
     lanes: readonly number[],
     seeds: readonly number[],
     horizon: number,
-    accent: string,
-    recordedSeeds: ReadonlySet<number>,
   ): void {
-    const isRho = mode === 'rho';
-    const binned = isRho ? null : binnedRates(t, lanes);
-    const rho = isRho ? rhoSeries(t, lanes) : null;
-    const x = isRho ? rho?.x ?? [] : binned?.x ?? [];
-    const perLane = isRho ? rho?.perLane ?? [] : binned?.perLane ?? [];
-    const x0 = [0, ...x];
-    const bandCols: (number | null)[][] = binned !== null
-      ? [[null, ...binned.p90], [null, ...binned.p10], [null, ...binned.iqm]]
-      : [];
-    const laneCols = perLane.map((values) => [null, ...values]);
-    const cols = [...bandCols, ...laneCols];
+    const binned = mode === 'rho' ? rhoBinned(t, lanes) : binnedRates(t, lanes);
+    const x0 = [0, ...binned.x];
+    const p90 = [null, ...binned.p90];
+    const p10 = [null, ...binned.p10];
+    const iqm = [null, ...binned.iqm];
+    const perLane = binned.perLane.map((values) => [null, ...values]);
 
     if (
       reward !== null
@@ -229,68 +217,54 @@ export function mountRunScience(host: HTMLElement, opts: RunScienceOptions): Run
       && reward.seeds.length === seeds.length
     ) {
       reward.x0 = x0;
-      reward.cols = cols;
+      reward.p90 = p90;
+      reward.p10 = p10;
+      reward.iqm = iqm;
+      reward.perLane = perLane;
       reward.chart.setData(rewardData(reward));
       return;
     }
 
     dropReward();
-    const series: LaneSeries[] = perLane.map((values, li) => ({
-      seed: seeds[li] ?? 0,
-      values,
-      last: lastFinite(values),
-    }));
     const built: RewardBuilt = {
       env: selectedEnv ?? '',
       mode,
       chart: null as unknown as ChartHandle,
-      seeds: series.map((lane) => lane.seed),
+      seeds: [...seeds],
       x0,
-      cols,
-      bandCount: bandCols.length,
+      p90,
+      p10,
+      iqm,
+      perLane,
     };
+    const builtMode = mode;
     built.chart = populationChart({
       steps: x0,
-      lanes: series.map((lane) => ({
-        key: String(lane.seed),
-        label: `seed ${lane.seed}`,
-        values: [null, ...lane.values],
-      })),
-      ...(binned !== null
-        ? {
-            band: {
-              p10: [null, ...binned.p10],
-              p90: [null, ...binned.p90],
-              iqm: [null, ...binned.iqm],
-            },
-          }
-        : {}),
-      hero: { label: 'hero seed', stroke: accent, values: heroColumn(built) },
+      p90,
+      p10,
+      iqm,
+      hero: heroColumn(built),
+      getBars: () => ({
+        ppo: builtMode === 'rho' ? null : barValues.ppo,
+        random: builtMode === 'rho' ? null : barValues.random,
+        active: activePolicy,
+      }),
       fillHeight: true,
       zeroLine: true,
       xRange: () => [0, horizon],
       yUnit: SERIES_MODES[mode].label,
       xUnit: 'steps',
-      onLaneClick: (key, step) => {
-        const seed = Number(key);
-        if (recordedSeeds.has(seed) && selectedEnv !== null) {
-          opts.onWatchSeed?.(selectedEnv, seed, Math.round(step));
-        } else {
-          opts.onSeek?.(Math.round(step), true);
-        }
-      },
       onSeek: scrubStep,
     });
     reward = built;
     playheadCharts.add(built.chart);
     built.chart.setMarker(playheadStep);
-    built.chart.setData(rewardData(built));
     rateHost.replaceChildren(
       eyebrow('Reward rate', el('span', { class: 'slot' }, [
         el('span', {
           class: 'eyebrow-note',
-          text: 'every seed · drag to seek',
-          title: 'each point is the exact mean reward per step over its bin — IQM and P10–P90 across seeds, the hero lifted in the env accent',
+          text: 'IQM · P10–P90 · drag to seek',
+          title: 'each point aggregates every seed over its bin — IQM and P10–P90 across seeds, the hero seed in gold; the right gutter bars are the ppo and random baseline IQMs',
         }),
         seriesSelect,
       ])),
@@ -335,7 +309,8 @@ export function mountRunScience(host: HTMLElement, opts: RunScienceOptions): Run
     );
     const accent = accentCss(envSlug(selectedEnv));
 
-    ensureReward(t, lanes, seeds, horizon, accent, recordedSeeds);
+    ensureReward(t, lanes, seeds, horizon);
+    refreshBars();
 
     {
       const surv = survivalSeries(t, lanes);
@@ -516,6 +491,11 @@ export function mountRunScience(host: HTMLElement, opts: RunScienceOptions): Run
       heroSeed = seed;
       if (reward !== null) reward.chart.setData(rewardData(reward));
       repaintTotals?.();
+    },
+    setPolicy(policy: Policy) {
+      if (policy === activePolicy) return;
+      activePolicy = policy;
+      reward?.chart.redraw();
     },
     destroy() {
       destroyed = true;
