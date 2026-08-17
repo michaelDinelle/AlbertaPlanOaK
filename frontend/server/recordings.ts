@@ -64,10 +64,6 @@ export interface ScanOptions {
   root?: string;
 }
 
-export async function envDirCount(runDir: string): Promise<number> {
-  return (await envDirsOf(runDir)).length;
-}
-
 export async function scanRecordings(runDir: string, opts: ScanOptions = {}): Promise<RecordingEntry[]> {
   const top = await envDirsOf(runDir);
   if (top.length === 0) return [];

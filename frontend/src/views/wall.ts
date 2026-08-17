@@ -1,4 +1,4 @@
-import type { EnvResult, RecordingRef, RunDetail, RunIndexEntry, RunMeta } from '@shared/types';
+import type { EnvResult, Policy, RecordingRef, RunDetail, RunIndexEntry, RunMeta } from '@shared/types';
 import { ENVS, ENV_IDS, isEnvId, type EnvId } from '@shared/envs';
 import type { PlaybackSource } from '@kit/playback';
 import { entryFor, parseCatalog } from '@sim/catalog';
@@ -60,6 +60,12 @@ const SORT_LABEL: Record<WallSort, string> = {
   retention: 'retention',
 };
 
+const POLICY_LABEL: Record<Policy, string> = {
+  oak: 'oak',
+  ppo: 'ppo',
+  random: 'rand',
+};
+
 interface WallParams {
   run?: string;
   env?: EnvId;
@@ -67,6 +73,7 @@ interface WallParams {
   at?: number;
   speed?: number;
   sort?: WallSort;
+  policy?: Policy;
 }
 
 function parseWallParams(hash: string): WallParams {
@@ -103,6 +110,11 @@ function parseWallParams(hash: string): WallParams {
   if (sort !== null && (WALL_SORTS as readonly string[]).includes(sort.trim())) {
     out.sort = sort.trim() as WallSort;
   }
+
+  const policy = params.get('policy');
+  if (policy !== null && (policy.trim() === 'ppo' || policy.trim() === 'random')) {
+    out.policy = policy.trim() as Policy;
+  }
   return out;
 }
 
@@ -117,6 +129,7 @@ function wallHref(params: WallParams = {}): string {
   if (params.at !== undefined && Number.isFinite(params.at) && params.at > 0) push('at', String(Math.floor(params.at)));
   if (params.speed !== undefined && params.speed !== DEFAULT_SPEED) push('speed', String(params.speed));
   if (params.sort !== undefined && params.sort !== 'rate') push('sort', params.sort);
+  if (params.policy !== undefined && params.policy !== 'oak') push('policy', params.policy);
   return parts.length > 0 ? `#/?${parts.join('&')}` : '#/';
 }
 
@@ -154,7 +167,7 @@ function resolveFeaturedRun(
       return a.id.localeCompare(b.id);
     })[0] ?? null;
 
-  const playable = entries.filter((entry) => entry.hasRecordings);
+  const playable = entries.filter((entry) => entry.policy === 'oak' && entry.hasRecordings);
   const complete = newest(playable.filter((entry) => entry.complete));
   if (complete) return { runId: complete.id, source: 'newest' };
   const any = newest(playable);
@@ -202,6 +215,20 @@ function degradedReason(
   if (recordings.length === 0) return 'no recordings on this run';
   if (envId === null) return 'no environment selected';
   if (seedsFor(recordings, envId).length === 0) return `no recordings for ${ENVS[envId].name} in this run`;
+  return null;
+}
+
+function baselineReason(
+  recordings: readonly RecordingRef[],
+  envId: EnvId,
+  seed: number | null,
+  policy: 'ppo' | 'random',
+): string | null {
+  if (recordings.length === 0) return `no ${policy} recordings on this baseline`;
+  if (seedsFor(recordings, envId).length === 0) return `no ${policy} recordings for ${ENVS[envId].name}`;
+  if (seed !== null && recordingRef(recordings, envId, seed) === null) {
+    return `no ${policy} recording for ${ENVS[envId].name} seed ${seed}`;
+  }
   return null;
 }
 
@@ -437,6 +464,7 @@ export const mount = (host: HTMLElement): WallHandle => {
           entry.inFlight ? el('span', { class: 'live-pip' }) : null,
           el('span', { class: 'wall-picker-id', text: entry.id }),
           entry.role === 'keeper' ? badge('keeper', 'keeper') : null,
+          entry.policy !== 'oak' ? badge(entry.policy, 'quiet') : null,
           entry.hasRecordings ? badge('recordings', 'quiet') : null,
           entry.complete ? null : badge('incomplete', 'warn'),
           el('span', { class: 'wall-picker-meta', text: `${entry.envIds.length} envs · ${formatStep(entry.steps)}` }),
@@ -480,6 +508,8 @@ export const mount = (host: HTMLElement): WallHandle => {
   let envId: EnvId | null = query.env ?? null;
   let sort: WallSort = query.sort ?? 'rate';
   let speed: number = query.speed ?? DEFAULT_SPEED;
+  let policy: Policy = query.policy ?? 'oak';
+  const baselineDetails: Partial<Record<'ppo' | 'random', RunDetail | null>> = {};
   let selection: HeroSelection = { leader: null, promoted: query.seed ?? null };
   let rows: SeedRow[] = [];
   let stride = 1;
@@ -539,6 +569,10 @@ export const mount = (host: HTMLElement): WallHandle => {
   ]);
   const readout = el('div', { class: 'wall-readout', text: 'step — / —' });
   const speedRow = el('div', { class: 'wall-speeds' });
+  const policySep = el('div', { class: 'tsep' });
+  const policyRow = el('div', { class: 'wall-speeds' });
+  policySep.hidden = true;
+  policyRow.hidden = true;
   const debugButton = el('button', { class: 'tbtn', type: 'button', text: 'g', title: 'Ground-truth overlay (g)' });
   const fullButton = el('button', { class: 'tbtn', type: 'button', text: '⛶', title: 'Fullscreen (f)' });
   const transport = el('div', { class: 'wall-transport' }, [
@@ -549,6 +583,8 @@ export const mount = (host: HTMLElement): WallHandle => {
     readout,
     el('div', { class: 'tsep' }),
     speedRow,
+    policySep,
+    policyRow,
     el('div', { class: 'tsep' }),
     debugButton,
     fullButton,
@@ -666,6 +702,7 @@ export const mount = (host: HTMLElement): WallHandle => {
     if (at !== null) params.at = at;
     if (speed !== DEFAULT_SPEED) params.speed = speed;
     if (sort !== 'rate') params.sort = sort;
+    if (policy !== 'oak') params.policy = policy;
     history.replaceState(null, '', wallHref(params));
   }
 
@@ -694,6 +731,84 @@ export const mount = (host: HTMLElement): WallHandle => {
       syncUrl();
     });
     speedRow.append(button);
+  }
+
+  function activeDetail(): RunDetail | null {
+    return policy === 'oak' ? detail : baselineDetails[policy] ?? null;
+  }
+
+  function applyPolicy(): void {
+    for (const button of policyRow.querySelectorAll('button')) {
+      button.classList.toggle('is-on', button.dataset['policy'] === policy);
+    }
+  }
+
+  function paintPolicies(): void {
+    const baselines = detail?.baselines ?? {};
+    const names = (['ppo', 'random'] as const).filter((p) => baselines[p] !== undefined);
+    const empty = names.length === 0;
+    policySep.hidden = empty;
+    policyRow.hidden = empty;
+    if (empty) {
+      policyRow.replaceChildren();
+      return;
+    }
+    policyRow.replaceChildren(
+      ...(['oak' as Policy, ...names]).map((p) => {
+        const button = el('button', {
+          class: 'tbtn',
+          type: 'button',
+          text: POLICY_LABEL[p],
+          dataset: { policy: p },
+          title: p === 'oak' ? 'The OaK fleet' : `The ${p} baseline fleet`,
+        });
+        button.addEventListener('click', () => selectPolicy(p));
+        return button;
+      }),
+    );
+    applyPolicy();
+  }
+
+  function ensureBaselineDetail(p: 'ppo' | 'random'): void {
+    if (!detail || baselineDetails[p] !== undefined) return;
+    const id = detail.baselines[p];
+    if (id === undefined) return;
+    void loadRunDetail(id).then(
+      (loaded) => {
+        if (destroyed) return;
+        baselineDetails[p] = loaded;
+        if (policy === p) refreshPolicyView();
+      },
+      () => {
+        if (destroyed) return;
+        baselineDetails[p] = null;
+        if (policy === p) refreshPolicyView();
+      },
+    );
+  }
+
+  function refreshPolicyView(): void {
+    const run = activeDetail();
+    if (run !== null && envId !== null && selection.leader === null) {
+      selection = { ...selection, leader: seedsFor(run.recordings, envId)[0] ?? null };
+    }
+    rebuildRows();
+    paintRail();
+    mountHero();
+  }
+
+  function selectPolicy(p: Policy): void {
+    if (policy === p) return;
+    const at = sceneHost?.clock.position();
+    if (at !== undefined && Number.isFinite(at) && at > 0) pendingSeekFrame = Math.floor(at);
+    policy = p;
+    if (p !== 'oak') ensureBaselineDetail(p);
+    science?.setPolicy(p);
+    applyPolicy();
+    rebuildRows();
+    paintRail();
+    mountHero();
+    syncUrl();
   }
 
   playButton.addEventListener('click', () => {
@@ -972,8 +1087,9 @@ export const mount = (host: HTMLElement): WallHandle => {
   }
 
   function playable(seed: number): boolean {
-    if (!detail || envId === null) return false;
-    return recordingRef(detail.recordings, envId, seed) !== null;
+    const run = activeDetail();
+    if (!run || envId === null) return false;
+    return recordingRef(run.recordings, envId, seed) !== null;
   }
 
   function paintTicks(ticks: readonly TimelineTick[]): void {
@@ -1082,7 +1198,7 @@ export const mount = (host: HTMLElement): WallHandle => {
 
   function mountHero(): void {
     const generation = ++heroGeneration;
-    const run = detail;
+    const run = activeDetail();
     const env = envId;
     if (hero !== null) {
       hero.setCallbacks(null, null);
@@ -1093,14 +1209,37 @@ export const mount = (host: HTMLElement): WallHandle => {
     heroSource = null;
     scrubTicks.replaceChildren();
     scrubLoaded.style.width = '0%';
-    if (!run || env === null) return;
+    if (!detail || env === null) return;
+    if (run === null) {
+      if (policy === 'oak') return;
+      const pointer = detail.baselines[policy];
+      const failed = pointer === undefined || baselineDetails[policy] === null;
+      showStageNote(failed ? `No ${policy} baseline to play` : `Loading the ${policy} baseline`, [
+        failed
+          ? emptyState(
+              pointer === undefined
+                ? `no ${policy} baseline pointer for this fleet`
+                : `could not load the ${policy} baseline run ${pointer}`,
+              RECORD_RECIPE,
+              [actionButton('Back to OaK', () => selectPolicy('oak'), { quiet: true })],
+            )
+          : spinner(`Loading ${pointer}`),
+      ]);
+      readout.textContent = 'no recording';
+      transport.classList.add('is-idle');
+      return;
+    }
 
     const seed = heroSeed(selection);
-    const reason = degradedReason(run.recordings, env);
+    const reason = policy === 'oak'
+      ? degradedReason(run.recordings, env)
+      : baselineReason(run.recordings, env, seed, policy);
     if (reason !== null || seed === null) {
       showStageNote('Nothing to replay here', [
         emptyState(reason ?? 'no seed to play', RECORD_RECIPE, [
-          actionButton('Find a run with recordings', () => openPicker(), { quiet: true }),
+          policy === 'oak'
+            ? actionButton('Find a run with recordings', () => openPicker(), { quiet: true })
+            : actionButton('Back to OaK', () => selectPolicy('oak'), { quiet: true }),
         ]),
       ]);
       readout.textContent = 'no recording';
@@ -1115,7 +1254,8 @@ export const mount = (host: HTMLElement): WallHandle => {
     const tagSub = stageTag.querySelector('.wall-tag-sub');
     if (tagEnv) tagEnv.textContent = info.name;
     if (tagSub) {
-      tagSub.textContent = `seed ${seed}${selection.promoted === null ? ' · leader' : ' · promoted'}`;
+      tagSub.textContent = `seed ${seed}${selection.promoted === null ? ' · leader' : ' · promoted'}`
+        + (policy === 'oak' ? '' : ` · ${policy}`);
     }
 
     if (tape !== null && tape.rows > 0) stride = tapeWindowSteps(tape);
@@ -1132,7 +1272,7 @@ export const mount = (host: HTMLElement): WallHandle => {
         envId: env,
         seed,
         horizonSteps: run.meta.steps,
-        live: entry?.inFlight === true,
+        live: policy === 'oak' && entry?.inFlight === true,
       });
       heroCache.set(key, h);
       for (const [oldKey, old] of heroCache) {
@@ -1144,7 +1284,7 @@ export const mount = (host: HTMLElement): WallHandle => {
     } else {
       heroCache.delete(key);
       heroCache.set(key, h);
-      h.setLive(entry?.inFlight === true);
+      h.setLive(policy === 'oak' && entry?.inFlight === true);
     }
     hero = h;
     const handle = h;
@@ -1241,7 +1381,7 @@ export const mount = (host: HTMLElement): WallHandle => {
       rows = [];
       return;
     }
-    const recorded = new Set(seedsFor(detail.recordings, envId));
+    const recorded = new Set(seedsFor(activeDetail()?.recordings ?? [], envId));
     rows = buildSeedRows(tape, detail.meta, envId, recorded);
   }
 
@@ -1269,7 +1409,7 @@ export const mount = (host: HTMLElement): WallHandle => {
     frameAt = 0;
     pendingSeekFrame = null;
     paintChips();
-    const recorded = seedsFor(detail.recordings, next);
+    const recorded = seedsFor(activeDetail()?.recordings ?? [], next);
     rebuildRows();
     selection = setLeader(selection, recorded[0] ?? null, playable);
     paintPopulation();
@@ -1307,12 +1447,13 @@ export const mount = (host: HTMLElement): WallHandle => {
         const fresh = entries.find((e) => e.id === detail?.id);
         if (fresh !== undefined) {
           entry = fresh;
-          hero?.setLive(fresh.inFlight);
+          if (policy === 'oak') hero?.setLive(fresh.inFlight);
         }
         return loadRunDetail(detail.id, true).then((freshDetail) => {
           if (destroyed) return;
           detail = freshDetail;
           paintChips();
+          paintPolicies();
           rebuildRows();
           paintRail();
         });
@@ -1334,6 +1475,9 @@ export const mount = (host: HTMLElement): WallHandle => {
     envList = wallEnvs(next.meta, next.recordings);
     status.remove();
     main.hidden = false;
+
+    paintPolicies();
+    if (policy !== 'oak') ensureBaselineDetail(policy);
 
     runName.textContent = next.id;
     const ago = formatAgo(next.meta.startedAt ?? null);
@@ -1378,6 +1522,7 @@ export const mount = (host: HTMLElement): WallHandle => {
       },
       onSeek: (step, commit) => scrubToStep(step, commit),
     });
+    science.setPolicy(policy);
 
     selectEnv(first);
     startLivePoll();

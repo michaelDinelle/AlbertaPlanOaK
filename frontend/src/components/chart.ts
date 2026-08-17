@@ -5,15 +5,11 @@ import { formatRate, formatStep } from '../state';
 
 export const VIZ = {
   series: '#2b98d9',
-  seriesSoft: 'rgba(43, 152, 217, 0.16)',
-  seriesLight: '#79c9f2',
   crit: '#e0614f',
-  critSoft: 'rgba(224, 97, 79, 0.18)',
+  ppo: '#8b7ce0',
   ramp: ['#22587a', '#2a7cae', '#2f9ade', '#79c9f2'] as const,
   grid: 'rgba(132, 148, 171, 0.13)',
   axis: '#5c6a80',
-  lane: 'rgba(132, 148, 171, 0.26)',
-  laneFocus: '#79c9f2',
   zero: 'rgba(215, 223, 235, 0.28)',
 } as const;
 
@@ -27,7 +23,6 @@ export interface SeriesSpec {
   dash?: number[];
   stepped?: boolean;
   bars?: boolean;
-  quiet?: boolean;
   scale?: string;
 }
 
@@ -44,12 +39,11 @@ export interface ChartSpec {
   xUnit?: string;
   zeroLine?: boolean;
   legend?: boolean;
-  tooltip?: 'all' | 'focus' | 'none';
+  tooltip?: 'all' | 'none';
   legendItems?: readonly { label: string; color: string; shape?: 'line' | 'area' }[];
-  focus?: boolean;
-  onFocus?(seriesIndex: number | null): void;
   onSeek?(x: number, phase: 'drag' | 'end' | 'tap'): void;
   fillHeight?: boolean;
+  padRight?: number;
   yRange?: (min: number, max: number) => [number, number];
   xRange?: (min: number, max: number) => [number, number];
 }
@@ -58,7 +52,7 @@ export interface ChartHandle {
   root: HTMLElement;
   setData(data: uPlot.AlignedData): void;
   refresh(): void;
-  focusSeries(index: number | null): void;
+  redraw(): void;
   setMarker(x: number | null): void;
   destroy(): void;
 }
@@ -66,7 +60,6 @@ export interface ChartHandle {
 function tooltipPlugin(spec: ChartSpec, tip: HTMLElement): uPlot.Plugin {
   const yFormat = spec.yFormat ?? ((v: number) => formatRate(v));
   const xFormat = spec.xFormat ?? formatStep;
-  const mode = spec.tooltip ?? 'all';
   return {
     hooks: {
       setCursor: (u: uPlot) => {
@@ -86,8 +79,6 @@ function tooltipPlugin(spec: ChartSpec, tip: HTMLElement): uPlot.Plugin {
           const series = u.series[i];
           if (!series || series.show === false) continue;
           const meta = spec.series[i - 1];
-          if (meta?.quiet && mode !== 'focus') continue;
-          if (mode === 'focus' && !(series as { _focus?: boolean })._focus) continue;
           const value = u.data[i]?.[idx];
           if (value === null || value === undefined) continue;
           rows.push({
@@ -151,7 +142,7 @@ export function createChart(spec: ChartSpec): ChartHandle {
 
   if (legend) {
     const items = spec.legendItems
-      ?? spec.series.filter((s) => !s.quiet).map((s) => ({ label: s.label, color: s.stroke, shape: 'line' as const }));
+      ?? spec.series.map((s) => ({ label: s.label, color: s.stroke, shape: 'line' as const }));
     for (const item of items) {
       legend.append(
         el('span', { class: 'legend-item' }, [
@@ -275,13 +266,11 @@ export function createChart(spec: ChartSpec): ChartHandle {
     const options: uPlot.Options = {
       width,
       height: lastHeight,
-      padding: [10, 12, 0, 0],
+      padding: [10, spec.padRight ?? 12, 0, 0],
       cursor: {
         y: false,
         drag: { x: false, y: false, setScale: false },
-        ...(spec.focus ? { focus: { prox: 20 } } : {}),
       },
-      ...(spec.focus ? { focus: { alpha: 0.16 } } : {}),
       legend: { show: false },
       series,
       bands: spec.bands?.map((b) => ({ series: [b.hi, b.lo] as [number, number], fill: b.fill })),
@@ -315,18 +304,6 @@ export function createChart(spec: ChartSpec): ChartHandle {
         },
       ],
       plugins,
-      hooks: spec.onFocus
-        ? {
-            setSeries: [
-              (u: uPlot, index: number | null) => {
-                for (let i = 1; i < u.series.length; i++) {
-                  (u.series[i] as { _focus?: boolean })._focus = i === index;
-                }
-                spec.onFocus?.(index === null ? null : index - 1);
-              },
-            ],
-          }
-        : {},
     };
 
     plot = new uPlot(options, data, holder);
@@ -373,8 +350,8 @@ export function createChart(spec: ChartSpec): ChartHandle {
       else measure();
     },
     refresh: measure,
-    focusSeries(index) {
-      plot?.setSeries(index === null ? null : index + 1, { focus: true });
+    redraw() {
+      plot?.redraw(false, false);
     },
     destroy() {
       destroyed = true;
@@ -410,60 +387,6 @@ export function timeSeries(spec: TimeSeriesSpec): ChartHandle {
   });
 }
 
-export interface BandSpec extends Omit<ChartSpec, 'series' | 'data' | 'bands'> {
-  steps: readonly number[];
-  p10: readonly (number | null)[];
-  p50: readonly (number | null)[];
-  p90: readonly (number | null)[];
-  labels?: { low: string; mid: string; high: string };
-  stroke?: string;
-  fill?: string;
-  extra?: { label: string; values: readonly (number | null)[]; stroke: string; width?: number }[];
-  ci?: { lo: readonly (number | null)[]; hi: readonly (number | null)[] };
-}
-
-export function band(spec: BandSpec): ChartHandle {
-  const labels = spec.labels ?? { low: 'P10', mid: 'Median', high: 'P90' };
-  const stroke = spec.stroke ?? VIZ.series;
-  const fill = spec.fill ?? VIZ.seriesSoft;
-  return createChart({
-    ...spec,
-    series: [
-      { label: labels.high, stroke: 'rgba(43,152,217,0.45)', width: 1 },
-      { label: labels.low, stroke: 'rgba(43,152,217,0.45)', width: 1 },
-      ...(spec.ci
-        ? [
-            { label: 'CI hi', stroke: 'rgba(43,152,217,0.35)', width: 0.5 },
-            { label: 'CI lo', stroke: 'rgba(43,152,217,0.35)', width: 0.5 },
-          ]
-        : []),
-      { label: labels.mid, stroke, width: 2 },
-      ...(spec.extra ?? []).map((x) => ({ label: x.label, stroke: x.stroke, width: x.width ?? 1.5 })),
-    ],
-    legendItems: [
-      { label: `${labels.low}–${labels.high}`, color: fill, shape: 'area' },
-      ...(spec.ci ? [{ label: '95% CI', color: 'rgba(43,152,217,0.34)', shape: 'area' as const }] : []),
-      { label: labels.mid, color: stroke, shape: 'line' },
-      ...(spec.extra ?? []).map((x) => ({ label: x.label, color: x.stroke, shape: 'line' as const })),
-    ],
-    bands: spec.ci
-      ? [
-          { hi: 1, lo: 2, fill },
-          { hi: 3, lo: 4, fill: 'rgba(43,152,217,0.24)' },
-        ]
-      : [{ hi: 1, lo: 2, fill }],
-    data: [
-      spec.steps as number[],
-      spec.p90 as (number | null)[],
-      spec.p10 as (number | null)[],
-      ...(spec.ci ? [spec.ci.hi as (number | null)[], spec.ci.lo as (number | null)[]] : []),
-      spec.p50 as (number | null)[],
-      ...(spec.extra ?? []).map((x) => x.values as (number | null)[]),
-    ] as unknown as uPlot.AlignedData,
-    legend: spec.legend ?? true,
-  });
-}
-
 export interface SteppedSpec extends Omit<ChartSpec, 'series' | 'data'> {
   steps: readonly number[];
   values: readonly (number | null)[];
@@ -480,100 +403,102 @@ export function steppedLine(spec: SteppedSpec): ChartHandle {
   });
 }
 
-export interface PopulationBand {
-  p10: readonly (number | null)[];
-  p90: readonly (number | null)[];
-  iqm: readonly (number | null)[];
-  ciLo?: readonly (number | null)[];
-  ciHi?: readonly (number | null)[];
+export interface BaselineBars {
+  ppo: number | null;
+  random: number | null;
+  active: 'oak' | 'ppo' | 'random';
+}
+
+function baselineGutterPlugin(getBars: () => BaselineBars): uPlot.Plugin {
+  const bar = (
+    u: uPlot,
+    value: number | null,
+    offset: number,
+    fill: string,
+    cap: string,
+    capWidth: number,
+    alpha: number,
+  ): void => {
+    if (value === null || !Number.isFinite(value)) return;
+    const scale = u.scales['y'];
+    if (!scale || scale.min === undefined || scale.max === undefined || scale.min === null || scale.max === null) return;
+    const x = u.bbox.left + u.bbox.width + offset;
+    const base = u.valToPos(Math.max(0, scale.min), 'y', true);
+    const top = u.valToPos(value, 'y', true);
+    if (!Number.isFinite(base) || !Number.isFinite(top)) return;
+    const ctx = u.ctx;
+    ctx.save();
+    ctx.globalAlpha = alpha;
+    ctx.fillStyle = fill;
+    ctx.fillRect(x, Math.min(base, top), 12, Math.max(1, Math.abs(base - top)));
+    ctx.strokeStyle = cap;
+    ctx.lineWidth = capWidth;
+    ctx.beginPath();
+    ctx.moveTo(x, top);
+    ctx.lineTo(x + 12, top);
+    ctx.stroke();
+    ctx.restore();
+  };
+  return {
+    hooks: {
+      draw: (u) => {
+        const bars = getBars();
+        const alpha = (p: 'ppo' | 'random'): number => (bars.active === 'oak' || bars.active === p ? 1 : 0.45);
+        bar(u, bars.ppo, 8, 'rgba(139, 124, 224, 0.55)', VIZ.ppo, 2, alpha('ppo'));
+        bar(u, bars.random, 26, 'rgba(132, 148, 171, 0.5)', '#8494ab', 1, alpha('random'));
+      },
+    },
+  };
 }
 
 export interface PopulationChartSpec extends Omit<ChartSpec, 'series' | 'data' | 'bands' | 'tooltip'> {
   steps: readonly number[];
-  band?: PopulationBand;
-  lanes: readonly SpaghettiLane[];
-  hero?: { label: string; stroke: string; values: readonly (number | null)[] };
-  onLaneFocus?(key: string | null): void;
-  onLaneClick?(key: string, step: number): void;
+  p90: readonly (number | null)[];
+  p10: readonly (number | null)[];
+  iqm: readonly (number | null)[];
+  hero: readonly (number | null)[];
+  getBars(): BaselineBars;
 }
 
 export function populationChart(spec: PopulationChartSpec): ChartHandle {
-  const b = spec.band;
-  const hasCi = b?.ciLo !== undefined && b?.ciHi !== undefined;
-  const laneOffset = (b ? (hasCi ? 5 : 3) : 0) + (spec.hero ? 1 : 0);
   const spreadFill = 'rgba(43, 152, 217, 0.13)';
-  const ciFill = 'rgba(43, 152, 217, 0.26)';
-
-  const bandSeries: SeriesSpec[] = b
-    ? [
-        { label: 'P90', stroke: 'rgba(43,152,217,0.4)', width: 1 },
-        { label: 'P10', stroke: 'rgba(43,152,217,0.4)', width: 1 },
-        ...(hasCi
-          ? [
-              { label: 'CI hi', stroke: 'rgba(43,152,217,0.3)', width: 0.5 },
-              { label: 'CI lo', stroke: 'rgba(43,152,217,0.3)', width: 0.5 },
-            ]
-          : []),
-        { label: 'IQM', stroke: VIZ.series, width: 2 },
-      ]
-    : [];
-  const bandData: (number | null)[][] = b
-    ? [
-        b.p90 as (number | null)[],
-        b.p10 as (number | null)[],
-        ...(hasCi ? [b.ciHi as (number | null)[], b.ciLo as (number | null)[]] : []),
-        b.iqm as (number | null)[],
-      ]
-    : [];
-
-  let focused: string | null = null;
-  const handle = createChart({
+  return createChart({
     ...spec,
-    tooltip: 'focus',
-    focus: true,
+    padRight: 56,
+    plugins: [...(spec.plugins ?? []), baselineGutterPlugin(spec.getBars)],
     series: [
-      ...bandSeries,
-      ...(spec.hero ? [{ label: spec.hero.label, stroke: spec.hero.stroke, width: 1.8 }] : []),
-      ...spec.lanes.map((lane): SeriesSpec => (
-        { label: lane.label, stroke: VIZ.lane, width: 1, quiet: true }
-      )),
+      { label: 'P90', stroke: 'rgba(43,152,217,0.4)', width: 1 },
+      { label: 'P10', stroke: 'rgba(43,152,217,0.4)', width: 1 },
+      { label: 'IQM', stroke: VIZ.series, width: 2 },
+      { label: 'hero seed', stroke: '#ffd166', width: 1.8 },
     ],
-    bands: b
-      ? [
-          { hi: 1, lo: 2, fill: spreadFill },
-          ...(hasCi ? [{ hi: 3, lo: 4, fill: ciFill }] : []),
-        ]
-      : [],
+    bands: [{ hi: 1, lo: 2, fill: spreadFill }],
     legendItems: [
-      ...(b
-        ? [
-            { label: 'IQM', color: VIZ.series, shape: 'line' as const },
-            ...(hasCi ? [{ label: '95% CI', color: ciFill, shape: 'area' as const }] : []),
-            { label: 'P10–P90', color: spreadFill, shape: 'area' as const },
-          ]
-        : []),
-      ...(spec.hero
-        ? [{ label: spec.hero.label, color: spec.hero.stroke, shape: 'line' as const }]
-        : []),
+      { label: 'IQM', color: VIZ.series, shape: 'line' },
+      { label: 'P10–P90', color: spreadFill, shape: 'area' },
+      { label: 'hero seed', color: '#ffd166', shape: 'line' },
     ],
     data: [
       spec.steps as number[],
-      ...bandData,
-      ...(spec.hero ? [spec.hero.values as (number | null)[]] : []),
-      ...spec.lanes.map((lane) => lane.values as (number | null)[]),
+      spec.p90 as (number | null)[],
+      spec.p10 as (number | null)[],
+      spec.iqm as (number | null)[],
+      spec.hero as (number | null)[],
     ] as unknown as uPlot.AlignedData,
     legend: true,
-    onFocus: (index) => {
-      focused = index === null || index < laneOffset ? null : spec.lanes[index - laneOffset]?.key ?? null;
-      spec.onLaneFocus?.(focused);
-      spec.onFocus?.(index);
-    },
-    onSeek: (x, phase) => {
-      if (phase === 'tap' && focused !== null && spec.onLaneClick) spec.onLaneClick(focused, x);
-      else spec.onSeek?.(x, phase);
+    yRange: (min, max) => {
+      const bars = spec.getBars();
+      let lo = min;
+      let hi = max;
+      for (const value of [bars.ppo, bars.random]) {
+        if (value === null || !Number.isFinite(value)) continue;
+        if (value < lo) lo = value;
+        if (value > hi) hi = value;
+      }
+      const range = uPlot.rangeNum(lo, hi, 0.12, true);
+      return [range[0] ?? lo, range[1] ?? hi];
     },
   });
-  return handle;
 }
 
 export interface ColumnsSpec extends Omit<ChartSpec, 'series' | 'data'> {
@@ -650,18 +575,5 @@ export function columns(spec: ColumnsSpec): ChartHandle {
     zeroLine: spec.zeroLine ?? true,
     legend: spec.legend ?? true,
   });
-}
-
-export interface SpaghettiLane {
-  key: string;
-  label: string;
-  values: readonly (number | null)[];
-}
-
-export interface SpaghettiSpec extends Omit<ChartSpec, 'series' | 'data' | 'tooltip'> {
-  steps: readonly number[];
-  lanes: readonly SpaghettiLane[];
-  onLaneFocus?(key: string | null): void;
-  onLaneClick?(key: string, step: number): void;
 }
 
