@@ -58,6 +58,7 @@ export interface DivergenceSummary {
 
 export interface PercentileCurves {
   percentileSeeds: { p5: number; p50: number; p95: number };
+  iqmZ?: (number | null)[];
   rateZ: { p5: (number | null)[]; p50: (number | null)[]; p95: (number | null)[] };
 }
 

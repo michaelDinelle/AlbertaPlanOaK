@@ -14,12 +14,17 @@
     "@base-ui/react": "^1.7.0",
     "@tanstack/react-query": "5",
     "clsx": "^2.1.1",
+    "cmdk": "^1.1.1",
     "lucide-react": "^1.31.0",
     "motion": "^13.1.0",
     "react": "19",
     "react-dom": "19",
+    "recharts": "^3.10.1",
+    "sonner": "^2.0.8",
     "three": "^0.185.1",
-    "uplot": "^1.6.32"
+    "uplot": "^1.6.32",
+    "virtua": "^0.50.1",
+    "zod": "^4.4.3"
   },
   "devDependencies": {
     "@babel/core": "7",
