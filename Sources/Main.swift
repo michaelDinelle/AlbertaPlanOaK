@@ -794,6 +794,39 @@ final class TapeWriter {
     "Chain-cont-v0", "LargeDeepSea-cont-v0", "MultiKeyCorridor-cont-v0", "MemoryChain-cont-v0",
     "ProceduralMaze-cont-v0", "HighDimMaze-cont-v0", "POMaze-cont-v0", "DelayedChain-cont-v0",
   ]
+  static let envStepFlops: [Double] = [
+    150_000, 60, 30, 70, 400, 40, 60, 60,
+    25, 30, 80, 40, 90, 70, 70, 30,
+  ]
+  static func policyFlopsPerStep(
+    _ policy: String, kind: Int, spec: EnvSpec, off: ShapeProbe?, d: Int
+  ) -> Double {
+    let env = envStepFlops[kind]
+    let obs = Double(spec.naturalO)
+    let actions = Double(spec.actionCount)
+    switch policy {
+    case "oak":
+      let sp = off!
+      let rank = Double(sp.rank)
+      let options = Double(sp.optionCount)
+      let anchors = Double(sp.anchorCount)
+      let levels = Double(sp.traceLevels)
+      let gateGroups = (rank / anchors - 1) / levels
+      let active = anchors * (1 + gateGroups)
+      let nursery = Double(sp.nursery)
+      let policyN = Double(max(d / 2, 1))
+      return options * active * (56 + 2 * policyN) + active * 256 + 16 * (rank - options)
+        + 13 * nursery + 4 * policyN * active + obs * (3 * levels + 10) + env
+    case "ppo":
+      let hidden = 64.0
+      let forward = 2 * (2 * obs * hidden + hidden * actions + hidden)
+      let params = 2 * obs * hidden + 3 * hidden + hidden * actions + actions + 1
+        + (spec.actionKind == 0 ? actions : 0)
+      return 5 * forward + 8 * hidden * actions + 9.6 * params + 11 * obs + env
+    default:
+      return 120 + 2 * actions + env
+    }
+  }
   static func envKind(_ envId: String) throws -> UInt32 {
     guard let i = envIdsByKind.firstIndex(of: envId) else {
       throw err("Unknown env '\(envId)'. Known: \(envIdsByKind.joined(separator: ", ")).")
@@ -1035,6 +1068,8 @@ final class TapeWriter {
       envTable = try Engine.runEnvTableProbe(dev, lib)
     }
     do {
+      precondition(
+        envStepFlops.count == envIdsByKind.count, "envStepFlops drifted from envIdsByKind")
       func fnv1a(_ s: String) -> UInt32 {
         var h: UInt32 = 0x811c_9dc5
         for b in Array(s.utf8) { h = (h ^ UInt32(b)) &* 16_777_619 }
@@ -1053,6 +1088,21 @@ final class TapeWriter {
         }
       }
     }
+    var offByKind: [UInt32: ShapeProbe] = [:]
+    engine?.kinds.forEach { offByKind[$0.kind] = $0.off }
+    let fleetD = engine?.kinds.first?.d ?? 0
+    var envFlopsPerStep: [String: Double] = [:]
+    var flopsSum = 0.0
+    for kindU in laneEnvKinds {
+      let kind = Int(kindU)
+      let envId = envIdsByKind[kind]
+      let flops = envFlopsPerStep[envId] ?? policyFlopsPerStep(
+        policy, kind: kind, spec: envTable[kind], off: offByKind[kindU], d: fleetD)
+      envFlopsPerStep[envId] = flops
+      flopsSum += flops
+    }
+    Self.pendingMeta["envFlopsPerStep"] = envFlopsPerStep
+    Self.pendingMeta["flopsPerStep"] = flopsSum / Double(laneEnvKinds.count)
     try Self.writeRunMeta(root, envTable)
     for flag in ["OAK_PROBE_FTZ", "OAK_PROBE_FIXEDIDX", "OAK_MEGA_STAGE_MASK"] where e[flag] != nil {
       fputs("\(flag)=\(e[flag]!): timing instrument, trajectories are garbage\n", stderr)
@@ -1065,7 +1115,12 @@ final class TapeWriter {
     } else {
       pipes = try baselinePipes(policy, lib, dev, bufs)
     }
-    try runFleetLoop(q, bufs, pipes, seeds: seeds, steps: steps, root: root, laneEnvs: laneEnvs, laneEnvKinds: laneEnvKinds)
+    let gpuSeconds = try runFleetLoop(
+      q, bufs, pipes, seeds: seeds, steps: steps, root: root, laneEnvs: laneEnvs,
+      laneEnvKinds: laneEnvKinds)
+    Self.pendingMeta["gpuSeconds"] = gpuSeconds
+    Self.pendingMeta["finishedAt"] = ISO8601DateFormatter().string(from: Date())
+    try Self.writeRunMeta(root, envTable)
   }
   static let ppoParamStride = 2768
   static let ppoRollStride = 3744
@@ -1155,7 +1210,7 @@ final class TapeWriter {
   static func runFleetLoop(
     _ q: MTLCommandQueue, _ bufs: FleetBuffers, _ pipes: FleetPipes,
     seeds: [Int], steps: Int, root: URL, laneEnvs: [String], laneEnvKinds: [UInt32]
-  ) throws {
+  ) throws -> Double {
     let e = ProcessInfo.processInfo.environment
     let fm = FileManager.default
     let B = bufs.B
@@ -1410,6 +1465,7 @@ final class TapeWriter {
     inflight.signal()
     inflight.signal()
     if let err = st.error { throw err }
+    return st.gpuSeconds
   }
   static func compareHashes() throws {
     let args = Array(CommandLine.arguments.dropFirst())
