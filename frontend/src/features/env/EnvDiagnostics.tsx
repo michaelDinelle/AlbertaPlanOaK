@@ -6,7 +6,7 @@ import { cssVar, monoFont, tooltipPlugin, withAlpha, zeroLinePlugin } from '../.
 import { timeSeriesOptions, type OptionsBuilder, type SeriesLine } from '../../charts/specs';
 import { ENV_SYNC_KEY } from '../../charts/sync';
 import { useUPlot } from '../../charts/useUPlot';
-import { formatPercent, formatRate, formatStep } from '../../lib/format';
+import { formatPercent, formatRate } from '../../lib/format';
 import { envLanes } from '../../lib/run';
 import { useSelection } from '../../state/selectionStore';
 import { useTapeSnapshot, type DeriveSpec } from '../../tape/store';
