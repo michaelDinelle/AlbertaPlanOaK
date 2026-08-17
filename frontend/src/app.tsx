@@ -26,10 +26,10 @@ import {
 import { STR } from './strings';
 import { setLive, useTapeProgress } from './tape/store';
 import { setTransport, transportSnapshot } from './playback/store';
-import { setTheaterInputs, stageCanvas, stepBySteps, useStageMeta } from './theater/controller';
+import { setTheaterInputs, stepBySteps, useStageMeta } from './theater/controller';
 import { seedsFor } from './theater/loader';
 import { TheaterStage } from './theater/TheaterStage';
-import { capturePoster } from './wall/posters';
+import { sceneRegistry } from './scenes/registry';
 import { EnvTileButton } from './wall/EnvTileButton';
 import { EnvWall } from './wall/EnvWall';
 import { watchRuns } from './toasts';
@@ -87,6 +87,7 @@ export function App() {
   const rootRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
+    adoptFromUrl(urlState());
     const onPop = (): void => adoptFromUrl(urlState());
     window.addEventListener('popstate', onPop);
     return () => window.removeEventListener('popstate', onPop);
@@ -129,9 +130,8 @@ export function App() {
   }, [sel.runId, live]);
 
   useEffect(() => {
-    if (meta.status !== 'ready') return;
-    capturePoster(stageCanvas);
-  }, [meta.status, meta.envName, meta.seed, meta.policy]);
+    if (sel.envId !== null) void sceneRegistry[sel.envId]?.();
+  }, [sel.envId]);
 
   const keyContext = useRef({ envList, stride, wallOpen, paletteOpen, policies: ['oak'] as Policy[] });
   keyContext.current = {

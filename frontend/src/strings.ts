@@ -36,6 +36,8 @@ export const STR = {
     live: 'recording',
     seeds: (n: number) => (n === 1 ? '1 recorded seed' : `${n} recorded seeds`),
     none: 'nothing recorded in this run',
+    switchRun: (label: string) => `Watch this run: ${label}`,
+    watchEnv: (name: string) => `Watch ${name}`,
   },
   palette: {
     placeholder: 'Search environments, runs, seeds, anything…',
@@ -94,6 +96,9 @@ export const STR = {
     ratios: 'Computing OaK needs next to PPO to reach a share of the best possible',
     ratioChip: (share: string, n: string) => `${share}: ${n}× PPO`,
     notReached: (share: string) => `${share}: never reached`,
+    ratioHint: (share: string, n: string) =>
+      `To reach ${share} of the best possible score, OaK spends ${n}× the computing PPO does`,
+    notReachedHint: (share: string) => `OaK never reached ${share} of the best possible score in this run`,
     frontier: 'Score as computing accumulates',
   },
   health: {

@@ -8,8 +8,7 @@ import { runLabel, sortRuns } from '../lib/run';
 import { selectEnv, selectRun, useSelection } from '../state/selectionStore';
 import { STR } from '../strings';
 import { seedsFor } from '../theater/loader';
-import { envGradient } from './EnvTileButton';
-import { usePosterUrl } from './posters';
+import { envGradient, posterUrl } from './EnvTileButton';
 
 const COLUMNS = 4;
 
@@ -25,12 +24,11 @@ function Tile({
   onPick: (envId: EnvId) => void;
 }) {
   const info = ENVS[envId];
-  const url = usePosterUrl(envId);
   return (
     <button
       type="button"
       onClick={() => onPick(envId)}
-      title={seedCount > 0 ? `${info.name} — ${STR.wall.seeds(seedCount)}` : `${info.name} — ${STR.wall.none}`}
+      title={`${STR.wall.watchEnv(info.name)} — ${seedCount > 0 ? STR.wall.seeds(seedCount) : STR.wall.none}`}
       className={clsx(
         'group relative aspect-video overflow-hidden rounded-lg text-left transition-transform hover:scale-[1.02]',
         current && 'ring-2 ring-accent',
@@ -38,7 +36,12 @@ function Tile({
       )}
       style={{ background: envGradient(info.slug) }}
     >
-      {url !== null && <img src={url} alt="" draggable={false} className="absolute inset-0 h-full w-full object-cover" />}
+      <img
+        src={posterUrl(info.slug)}
+        alt=""
+        draggable={false}
+        className="absolute inset-0 h-full w-full object-cover"
+      />
       <span className="absolute inset-x-0 bottom-0 flex items-baseline gap-2 bg-gradient-to-t from-black/75 to-transparent px-2.5 pb-1.5 pt-5">
         <span className="text-xs font-medium text-white">{info.name}</span>
         <span className="ml-auto font-mono text-2xs text-white/60">{STR.wall.seeds(seedCount)}</span>
@@ -89,6 +92,7 @@ export function EnvWall({
                 key={run.id}
                 type="button"
                 onClick={() => selectRun(run.id)}
+                title={STR.wall.switchRun(runLabel(run))}
                 className={clsx(
                   'flex shrink-0 items-center gap-1.5 rounded-md border px-2 py-0.5 font-mono text-2xs transition-colors',
                   run.id === entry?.id

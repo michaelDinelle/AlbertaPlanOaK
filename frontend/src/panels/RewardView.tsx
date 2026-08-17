@@ -97,7 +97,8 @@ export function RewardView({
         {randomPts !== null && <Chip swatch="var(--color-random)" label={STR.reward.average(STR.policy.random)} />}
       </div>
       <div
-        className="relative cursor-ew-resize touch-none select-none"
+        className="relative cursor-ew-resize touch-none select-none rounded-md transition-colors hover:bg-white/4"
+        title={STR.bar.scrub}
         onPointerDown={(event) => {
           dragging.current = true;
           try {
