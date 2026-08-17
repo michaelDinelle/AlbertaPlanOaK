@@ -41,6 +41,45 @@ struct OakLaneSnapshot {
 };
 static_assert(sizeof(OakLaneSnapshot) == 36, "OakLaneSnapshot layout drifted from the Swift mirror");
 
+constant uint OAK_DIAG_RANK = 480u;
+constant uint OAK_DIAG_K = 64u;
+constant uint OAK_DIAG_GRAM = OAK_DIAG_K * OAK_DIAG_K;
+constant uint OAK_DIAG_PPO_PARAMS = 2768u;
+
+struct OakDiagAccum {
+    float gram[OAK_DIAG_GRAM];
+    float sumAbsHiddenActor[OAK_DIAG_K];
+    float sumAbsHiddenCritic[OAK_DIAG_K];
+};
+static_assert(sizeof(OakDiagAccum) == 16896, "OakDiagAccum layout drifted from the Swift mirror");
+
+struct OakDiagRecord {
+    float featureAge[OAK_DIAG_RANK];
+    float featureUtility[OAK_DIAG_RANK];
+    float valueAlpha[OAK_DIAG_RANK];
+    float optionValueAlpha[OAK_DIAG_RANK];
+    float modelAlpha[OAK_DIAG_RANK];
+    float featureBirths;
+    float weightAbsMean;
+    float weightAbsMeanValue;
+    float gram[OAK_DIAG_GRAM];
+};
+static_assert(sizeof(OakDiagRecord) == 25996, "OakDiagRecord layout drifted from the Swift mirror");
+
+struct PpoDiagRecord {
+    float sumAbsHiddenActor[OAK_DIAG_K];
+    float sumAbsHiddenCritic[OAK_DIAG_K];
+    float weightAbsMean;
+    float adamT;
+    float adamV[OAK_DIAG_PPO_PARAMS];
+    float gram[OAK_DIAG_GRAM];
+};
+static_assert(sizeof(PpoDiagRecord) == 27976, "PpoDiagRecord layout drifted from the Swift mirror");
+static_assert(sizeof(OakDiagRecord) <= sizeof(PpoDiagRecord), "diagOut stride is sized by PpoDiagRecord");
+
+constant uint OAK_DIAG_ACCUM_FLOATS = sizeof(OakDiagAccum) / 4u;
+constant uint OAK_DIAG_OUT_FLOATS = sizeof(PpoDiagRecord) / 4u;
+
 inline float finiteOrZero(float x) { return isfinite(x) ? x : 0.0f; }
 
 inline void kahanAdd(device float *sum, device float *comp, float x) {

@@ -1,3 +1,4 @@
+import Accelerate
 import CryptoKit
 import Darwin
 import Foundation
@@ -80,6 +81,37 @@ enum OakBuf: Int {
   case aux0 = 9
   case aux1 = 10
   case aux2 = 11
+  case diagAccum = 12
+  case diagOut = 13
+}
+
+enum Diag {
+  static let rank = 480
+  static let k = 64
+  static let gram = k * k
+  static let ppoParams = 2768
+  static let accumGram = 0
+  static let accumSumAbsHiddenActor = accumGram + gram
+  static let accumSumAbsHiddenCritic = accumSumAbsHiddenActor + k
+  static let accumFloats = accumSumAbsHiddenCritic + k
+  static let oakFeatureAge = 0
+  static let oakFeatureUtility = oakFeatureAge + rank
+  static let oakValueAlpha = oakFeatureUtility + rank
+  static let oakOptionValueAlpha = oakValueAlpha + rank
+  static let oakModelAlpha = oakOptionValueAlpha + rank
+  static let oakFeatureBirths = oakModelAlpha + rank
+  static let oakWeightAbsMean = oakFeatureBirths + 1
+  static let oakWeightAbsMeanValue = oakWeightAbsMean + 1
+  static let oakGram = oakWeightAbsMeanValue + 1
+  static let oakFloats = oakGram + gram
+  static let ppoSumAbsHiddenActor = 0
+  static let ppoSumAbsHiddenCritic = ppoSumAbsHiddenActor + k
+  static let ppoWeightAbsMean = ppoSumAbsHiddenCritic + k
+  static let ppoAdamT = ppoWeightAbsMean + 1
+  static let ppoAdamV = ppoAdamT + 1
+  static let ppoGram = ppoAdamV + ppoParams
+  static let ppoFloats = ppoGram + gram
+  static let outFloats = ppoFloats
 }
 
 struct AblationSpec {
@@ -704,19 +736,98 @@ final class RecordWriter: @unchecked Sendable {
   var bytesWritten: Int { fileOffset }
 }
 
+enum DiagMath {
+  static func quantile(_ sorted: [Double], _ p: Double) -> Double {
+    let n = sorted.count
+    guard n > 0 else { return .nan }
+    let pos = p * Double(n - 1)
+    let lo = Int(pos.rounded(.down))
+    let hi = min(lo + 1, n - 1)
+    let frac = pos - Double(lo)
+    return sorted[lo] * (1 - frac) + sorted[hi] * frac
+  }
+  static func logQuantiles(_ values: [Double], _ ps: [Double]) -> [Float] {
+    guard !values.isEmpty, values.allSatisfy({ $0.isFinite && $0 > 0 }) else {
+      return ps.map { _ in Float.nan }
+    }
+    let sorted = values.map { log10($0) }.sorted()
+    return ps.map { Float(quantile(sorted, $0)) }
+  }
+  static let dormantTau = 0.025
+  static func dormantFraction(_ activity: [Double]) -> Float {
+    let finite = activity.filter(\.isFinite)
+    let mean = finite.isEmpty ? 0 : finite.reduce(0, +) / Double(finite.count)
+    guard mean > 0, mean.isFinite else { return .nan }
+    var dormant = 0
+    for a in activity where a.isFinite && a / mean < dormantTau { dormant += 1 }
+    return Float(dormant) / Float(activity.count)
+  }
+  static func erank(_ gram: UnsafePointer<Float>) -> Float {
+    var a = [Float](repeating: 0, count: Diag.gram)
+    for i in 0..<Diag.gram {
+      let v = gram[i]
+      guard v.isFinite else { return .nan }
+      a[i] = v
+    }
+    var jobz = CChar(UInt8(ascii: "N"))
+    var uplo = CChar(UInt8(ascii: "U"))
+    var n = __LAPACK_int(Diag.k)
+    var lda = __LAPACK_int(Diag.k)
+    var eig = [Float](repeating: 0, count: Diag.k)
+    var lwork = __LAPACK_int(64 * Diag.k)
+    var work = [Float](repeating: 0, count: Int(lwork))
+    var info: __LAPACK_int = 0
+    a.withUnsafeMutableBufferPointer { ap in
+      eig.withUnsafeMutableBufferPointer { wp in
+        work.withUnsafeMutableBufferPointer { kp in
+          ssyev_(&jobz, &uplo, &n, ap.baseAddress!, &lda, wp.baseAddress!, kp.baseAddress!, &lwork, &info)
+        }
+      }
+    }
+    guard info == 0 else { return .nan }
+    let sigma = eig.map { Double(max($0, 0)).squareRoot() }
+    let total = sigma.reduce(0, +)
+    guard total > 0, total.isFinite else { return .nan }
+    var entropy = 0.0
+    for s in sigma where s > 0 {
+      let p = s / total
+      entropy -= p * log(p)
+    }
+    return Float(exp(entropy))
+  }
+}
+
+final class OakDiagHost: @unchecked Sendable {
+  let prevAge: UnsafeMutablePointer<UInt32>
+  let prevBirths: UnsafeMutablePointer<Float>
+  let hasPrev: UnsafeMutablePointer<Bool>
+  init(_ laneCount: Int) {
+    prevAge = .allocate(capacity: laneCount * Diag.rank)
+    prevAge.initialize(repeating: 0, count: laneCount * Diag.rank)
+    prevBirths = .allocate(capacity: laneCount)
+    prevBirths.initialize(repeating: 0, count: laneCount)
+    hasPrev = .allocate(capacity: laneCount)
+    hasPrev.initialize(repeating: false, count: laneCount)
+  }
+}
+
 final class TapeWriter {
   static let fileMagic: UInt32 = 0x544B_414F
-  static let fields: [String] = ["rewardSum", "rho", "deathStep", "deathDetector"]
+  static let baseFields = ["rewardSum", "rho", "deathStep", "deathDetector"]
+  let fields: [String]
   private let handle: FileHandle
   private let laneCount: Int
+  private let diagCount: Int
   private var col: [Float]
 
-  init(url: URL, laneCount: Int) throws {
+  init(url: URL, laneCount: Int, diagFields: [String]) throws {
     FileManager.default.createFile(atPath: url.path, contents: nil)
     self.handle = try FileHandle(forWritingTo: url)
     self.laneCount = laneCount
+    self.diagCount = diagFields.count
+    self.fields = Self.baseFields + diagFields
     self.col = [Float](repeating: 0, count: laneCount)
-    let json = try JSONSerialization.data(withJSONObject: ["fields": Self.fields])
+    let json = try JSONSerialization.data(withJSONObject: ["fields": fields])
     var head = Data()
     for v: UInt32 in [Self.fileMagic, UInt32(laneCount), UInt32(json.count)] {
       var x = v.littleEndian
@@ -727,9 +838,10 @@ final class TapeWriter {
   }
 
   func append(snap: UnsafeMutablePointer<LaneSnapshot>, half: Int,
-              deadStep: [Int?], deadDetector: [UInt32?],
+              deadStep: [Int?], deadDetector: [UInt32?], diag: [Float],
               stepStart: Int, stepCount: Int, wallSeconds: Double) throws {
-    var out = Data(capacity: 12 + Self.fields.count * laneCount * 4)
+    precondition(diag.count == diagCount * laneCount, "diag matrix shape drifted from the field list")
+    var out = Data(capacity: 12 + fields.count * laneCount * 4)
     for v: UInt32 in [UInt32(stepStart), UInt32(stepCount)] {
       var x = v.littleEndian
       withUnsafeBytes(of: &x) { out.append(contentsOf: $0) }
@@ -747,6 +859,9 @@ final class TapeWriter {
     push { _, s in s.rho }
     push { l, _ in deadStep[l].map { Float(bitPattern: UInt32($0)) } ?? Float.nan }
     push { l, _ in deadDetector[l].map { Float($0) } ?? Float.nan }
+    for f in 0..<diagCount {
+      push { l, _ in diag[l * diagCount + f] }
+    }
     try handle.write(contentsOf: out)
   }
 }
@@ -846,6 +961,8 @@ final class TapeWriter {
     let encodeSnapshot: (MTLComputeCommandEncoder, Int) -> Void
     let writeDebugRaw: (String, Int) throws -> Void
     let laneHashes: (Int, UnsafeRawPointer) -> [String: String]
+    let diagFields: [String]
+    let diagValues: (Int, Int, Int) -> [Float]
   }
   struct FleetBuffers {
     let B: Int
@@ -858,6 +975,8 @@ final class TapeWriter {
     let recordSlotBuf: MTLBuffer
     let recordBuf: MTLBuffer
     let snapBuf: MTLBuffer
+    let diagAccumBuf: MTLBuffer
+    let diagOutBuf: MTLBuffer
     let ecfg: FleetEnvCfg
     init(_ dev: MTLDevice, seeds: [Int], laneEnvKinds: [UInt32], episodeLen: Int) throws {
       func makeBuf(_ len: Int) throws -> MTLBuffer {
@@ -892,6 +1011,10 @@ final class TapeWriter {
       let snapStride = MemoryLayout<LaneSnapshot>.stride
       precondition(snapStride == 36, "LaneSnapshot layout drifted from OakLaneSnapshot")
       snapBuf = try makeBuf(2 * B * snapStride)
+      diagAccumBuf = try makeBuf(B * Diag.accumFloats * 4)
+      diagOutBuf = try makeBuf(2 * B * Diag.outFloats * 4)
+      memset(diagAccumBuf.contents(), 0, diagAccumBuf.length)
+      memset(diagOutBuf.contents(), 0, diagOutBuf.length)
       ecfg = FleetEnvCfg(
         laneCount: UInt32(B), episodeLen: UInt32(episodeLen),
         recordCapacity: UInt32(recordCapacity), invObsFloor: 1 / Float(64))
@@ -970,6 +1093,9 @@ final class TapeWriter {
     }
     let laneTG = mtlSize(
       min(64, initPipe.maxTotalThreadsPerThreadgroup, snapPipe.maxTotalThreadsPerThreadgroup))
+    let diagHost = OakDiagHost(B)
+    let diagPtr = bufs.diagOutBuf.contents().bindMemory(
+      to: Float.self, capacity: 2 * B * Diag.outFloats)
     return FleetPipes(
       label: "oak",
       encodeInit: { enc in
@@ -1003,6 +1129,7 @@ final class TapeWriter {
           enc.setBuffer(bufs.recordBuf, offset: 0, index: OakBuf.aux1.rawValue)
           var span = SIMD3<UInt32>(UInt32(n), UInt32(base), UInt32(run.tgStart))
           enc.setBytes(&span, length: MemoryLayout<SIMD3<UInt32>>.stride, index: OakBuf.aux2.rawValue)
+          enc.setBuffer(bufs.diagAccumBuf, offset: 0, index: OakBuf.diagAccum.rawValue)
           enc.setThreadgroupMemoryLength(megaSlotBytes, index: 0)
           enc.dispatchThreadgroups(
             MTLSize(width: run.tgCount, height: 1, depth: 1),
@@ -1022,6 +1149,8 @@ final class TapeWriter {
           var ctl = SIMD2<UInt32>(UInt32(half * B), UInt32(kd.firstLane))
           enc.setBytes(&ctl, length: MemoryLayout<SIMD2<UInt32>>.stride, index: OakBuf.aux1.rawValue)
           enc.setBytes(&fullScan, length: 4, index: OakBuf.aux2.rawValue)
+          enc.setBuffer(bufs.diagAccumBuf, offset: 0, index: OakBuf.diagAccum.rawValue)
+          enc.setBuffer(bufs.diagOutBuf, offset: 0, index: OakBuf.diagOut.rawValue)
           enc.dispatchThreadgroups(mtlSize(kd.count), threadsPerThreadgroup: mtlSize(core))
         }
       },
@@ -1039,7 +1168,58 @@ final class TapeWriter {
           try dp.write(to: URL(fileURLWithPath: "\(rawDir)/params-l\(lane)-s\(step).bin"))
         }
       },
-      laneHashes: { lane, laneBytes in engine.stateHashes(lane, laneBytes: laneBytes) }
+      laneHashes: { lane, laneBytes in engine.stateHashes(lane, laneBytes: laneBytes) },
+      diagFields: [
+        "dormantFraction", "utilityDormantFraction", "featureBirths",
+        "weightAbsMean", "weightAbsMeanValue", "erank",
+        "logAlphaValueP10", "logAlphaValueP50", "logAlphaValueP90",
+        "logAlphaOptionValueP50", "logAlphaModelP50",
+      ],
+      diagValues: { half, lane, stepCount in
+        let rec = diagPtr + (half * B + lane) * Diag.outFloats
+        let prevAge = diagHost.prevAge + lane * Diag.rank
+        var ages = [UInt32](repeating: 0, count: Diag.rank)
+        for i in 0..<Diag.rank { ages[i] = rec[Diag.oakFeatureAge + i].bitPattern }
+        var dormantFraction = Float.nan
+        if diagHost.hasPrev[lane] {
+          var delta = [Double](repeating: .nan, count: Diag.rank)
+          var sum = 0.0
+          var validCount = 0
+          for i in 0..<Diag.rank {
+            let d = ages[i] &- prevAge[i]
+            if d <= UInt32(stepCount) {
+              delta[i] = Double(d)
+              sum += Double(d)
+              validCount += 1
+            }
+          }
+          let mean = validCount > 0 ? sum / Double(validCount) : 0
+          if mean > 0 {
+            var dormant = 0
+            for i in 0..<Diag.rank where delta[i].isFinite && delta[i] / mean < DiagMath.dormantTau {
+              dormant += 1
+            }
+            dormantFraction = Float(dormant) / Float(Diag.rank)
+          }
+        }
+        let utility = (0..<Diag.rank).map { Double(abs(rec[Diag.oakFeatureUtility + $0])) }
+        let births = rec[Diag.oakFeatureBirths]
+        let birthsPerStep: Float = diagHost.hasPrev[lane] && stepCount > 0
+          ? (births - diagHost.prevBirths[lane]) / Float(stepCount) : .nan
+        func alphas(_ off: Int) -> [Double] { (0..<Diag.rank).map { Double(rec[off + $0]) } }
+        let valueQ = DiagMath.logQuantiles(alphas(Diag.oakValueAlpha), [0.1, 0.5, 0.9])
+        let optionQ = DiagMath.logQuantiles(alphas(Diag.oakOptionValueAlpha), [0.5])
+        let modelQ = DiagMath.logQuantiles(alphas(Diag.oakModelAlpha), [0.5])
+        for i in 0..<Diag.rank { prevAge[i] = ages[i] }
+        diagHost.prevBirths[lane] = births
+        diagHost.hasPrev[lane] = true
+        return [
+          dormantFraction, DiagMath.dormantFraction(utility), birthsPerStep,
+          rec[Diag.oakWeightAbsMean], rec[Diag.oakWeightAbsMeanValue],
+          DiagMath.erank(rec + Diag.oakGram),
+          valueQ[0], valueQ[1], valueQ[2], optionQ[0], modelQ[0],
+        ]
+      }
     )
   }
   static func fleetGPU(
@@ -1113,7 +1293,7 @@ final class TapeWriter {
     if let engine {
       pipes = try oakPipes(engine, lib, dev, bufs, ablations, e)
     } else {
-      pipes = try baselinePipes(policy, lib, dev, bufs)
+      pipes = try baselinePipes(policy, lib, dev, bufs, envTable, laneEnvKinds, e)
     }
     let gpuSeconds = try runFleetLoop(
       q, bufs, pipes, seeds: seeds, steps: steps, root: root, laneEnvs: laneEnvs,
@@ -1126,11 +1306,20 @@ final class TapeWriter {
   static let ppoRollStride = 3744
   static let ppoScratchStride = 12064
   static let ppoStateStride = 48
+  static let ppoLR = 3e-4
+  static let ppoAdamB2 = 0.999
+  static let ppoAdamEps = 1e-5
   static func baselinePipes(
-    _ policy: String, _ lib: MTLLibrary, _ dev: MTLDevice, _ bufs: FleetBuffers
+    _ policy: String, _ lib: MTLLibrary, _ dev: MTLDevice, _ bufs: FleetBuffers,
+    _ envTable: [EnvSpec], _ laneEnvKinds: [UInt32], _ e: [String: String]
   ) throws -> FleetPipes {
     func pipeline(_ name: String) throws -> MTLComputePipelineState {
-      let fn = try lib.makeFunction(name: name, constantValues: MTLFunctionConstantValues())
+      let constants = MTLFunctionConstantValues()
+      if let mask = e["OAK_MEGA_STAGE_MASK"].flatMap(UInt32.init) {
+        var m = mask
+        constants.setConstantValue(&m, type: .uint, index: OakConst.megaStageMask.rawValue)
+      }
+      let fn = try lib.makeFunction(name: name, constantValues: constants)
       return try dev.makeComputePipelineState(function: fn)
     }
     func makeBuf(_ len: Int) throws -> MTLBuffer {
@@ -1173,6 +1362,14 @@ final class TapeWriter {
       snapPipe.maxTotalThreadsPerThreadgroup))
     let stepThreads = isPpo ? B * 32 : B
     let stepTG = isPpo ? mtlSize(32) : laneTG
+    let diagPtr = bufs.diagOutBuf.contents().bindMemory(
+      to: Float.self, capacity: 2 * B * Diag.outFloats)
+    let ppoParamCounts: [Int] = laneEnvKinds.map { kind in
+      let spec = envTable[Int(kind)]
+      let box = spec.actionKind == 0
+      return 2 * spec.naturalO * Diag.k + 3 * Diag.k + Diag.k * spec.actionCount
+        + spec.actionCount + 1 + (box ? spec.actionCount : 0)
+    }
     return FleetPipes(
       label: policy,
       encodeInit: { enc in
@@ -1186,6 +1383,9 @@ final class TapeWriter {
         enc.setBuffer(bufs.recordBuf, offset: 0, index: OakBuf.aux1.rawValue)
         var span = SIMD3<UInt32>(UInt32(n), UInt32(base), 0)
         enc.setBytes(&span, length: MemoryLayout<SIMD3<UInt32>>.stride, index: OakBuf.aux2.rawValue)
+        if isPpo {
+          enc.setBuffer(bufs.diagAccumBuf, offset: 0, index: OakBuf.diagAccum.rawValue)
+        }
         enc.dispatchThreads(mtlSize(stepThreads), threadsPerThreadgroup: stepTG)
         enc.memoryBarrier(scope: [.buffers])
       },
@@ -1194,6 +1394,10 @@ final class TapeWriter {
         enc.setBuffer(bufs.snapBuf, offset: 0, index: OakBuf.aux0.rawValue)
         var snapBase = UInt32(half * B)
         enc.setBytes(&snapBase, length: 4, index: OakBuf.aux1.rawValue)
+        if isPpo {
+          enc.setBuffer(bufs.diagAccumBuf, offset: 0, index: OakBuf.diagAccum.rawValue)
+          enc.setBuffer(bufs.diagOutBuf, offset: 0, index: OakBuf.diagOut.rawValue)
+        }
         enc.dispatchThreads(mtlSize(B), threadsPerThreadgroup: laneTG)
       },
       writeDebugRaw: { _, _ in },
@@ -1204,6 +1408,31 @@ final class TapeWriter {
           hs["params"] = sha256Hex(UnsafeRawBufferPointer(start: base, count: ppoParamStride * 4))
         }
         return hs
+      },
+      diagFields: isPpo
+        ? [
+          "dormantFraction", "dormantFractionCritic", "weightAbsMean", "erank",
+          "logStepP10", "logStepP50", "logStepP90",
+        ] : [],
+      diagValues: { half, lane, _ in
+        guard isPpo else { return [] }
+        let rec = diagPtr + (half * B + lane) * Diag.outFloats
+        let actor = (0..<Diag.k).map { Double(rec[Diag.ppoSumAbsHiddenActor + $0]) }
+        let critic = (0..<Diag.k).map { Double(rec[Diag.ppoSumAbsHiddenCritic + $0]) }
+        let adamT = Double(rec[Diag.ppoAdamT])
+        var stepQ: [Float] = [.nan, .nan, .nan]
+        if adamT > 0 {
+          let bc2 = 1 - pow(ppoAdamB2, adamT)
+          let effs = (0..<ppoParamCounts[lane]).map { p in
+            ppoLR / ((Double(rec[Diag.ppoAdamV + p]) / bc2).squareRoot() + ppoAdamEps)
+          }
+          stepQ = DiagMath.logQuantiles(effs, [0.1, 0.5, 0.9])
+        }
+        return [
+          DiagMath.dormantFraction(actor), DiagMath.dormantFraction(critic),
+          rec[Diag.ppoWeightAbsMean], DiagMath.erank(rec + Diag.ppoGram),
+          stepQ[0], stepQ[1], stepQ[2],
+        ]
       }
     )
   }
@@ -1244,7 +1473,8 @@ final class TapeWriter {
         hashHandles[lane] = try FileHandle(forWritingTo: url)
       }
     }
-    let tape = try TapeWriter(url: root.appendingPathComponent("tape.bin"), laneCount: B)
+    let tape = try TapeWriter(
+      url: root.appendingPathComponent("tape.bin"), laneCount: B, diagFields: pipes.diagFields)
     defer {
       hashHandles.forEach { try? $0?.close() }
       recordHandles.forEach { try? $0.close() }
@@ -1359,9 +1589,21 @@ final class TapeWriter {
     }
     func writeWindow(half: Int, stepStart: Int, step: Int) throws {
       latchDeaths(half: half, step: step)
+      let diagCount = pipes.diagFields.count
+      var diag = [Float](repeating: .nan, count: B * diagCount)
+      if diagCount > 0 {
+        let stepCount = step - stepStart
+        diag.withUnsafeMutableBufferPointer { buf in
+          let base = buf.baseAddress!
+          DispatchQueue.concurrentPerform(iterations: B) { lane in
+            let values = pipes.diagValues(half, lane, stepCount)
+            for f in 0..<diagCount { base[lane * diagCount + f] = values[f] }
+          }
+        }
+      }
       try tape.append(
         snap: snapPtr, half: half, deadStep: st.deadStep, deadDetector: st.deadDetector,
-        stepStart: stepStart, stepCount: step - stepStart, wallSeconds: now())
+        diag: diag, stepStart: stepStart, stepCount: step - stepStart, wallSeconds: now())
       try drainRecords(step: step)
       if timing {
         let alive = B - st.deadCount

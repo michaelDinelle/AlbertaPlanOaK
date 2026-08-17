@@ -66,6 +66,9 @@ constant uint OAK_GATE_BANK = 7u;
 constant uint OAK_GATE_GROUPS = 2u;
 constant uint OAK_ACT = OAK_CORE * (1u + OAK_GATE_GROUPS);
 constant uint PLAN_INV_SQRT_FEATURES = 2u;
+static_assert(OAK_DIAG_RANK == OAK_CORE + OAK_CORE * OAK_GATE_BANK * OAK_GATE_GROUPS,
+              "OakDiagRecord rank drifted from the derived feature count");
+static_assert(OAK_DIAG_K == 2u * OAK_CORE, "sketch width is two sign words per feature");
 
 constant uint FEATURE_PRODUCT = 0u;
 constant uint FEATURE_NORMALIZED_SUM = 1u;
@@ -1877,6 +1880,41 @@ static inline void laneFence() {
     simdgroup_barrier(mem_flags::mem_device);
 }
 
+inline uint2 diagSketchBits(uint featureIndex) {
+    uint2 h = uint2(featureIndex * 0x9E3779B9u, (featureIndex + 0x632BE59Bu) * 0x85EBCA6Bu);
+    h ^= h >> 16u;
+    h *= 0x21F0AAADu;
+    h ^= h >> 15u;
+    h *= 0x735A2D97u;
+    h ^= h >> 15u;
+    return h;
+}
+
+inline float diagSketchSign(uint2 bits, uint j) {
+    uint word = j < OAK_CORE ? bits.x : bits.y;
+    return ((word >> (j % OAK_CORE)) & 1u) == 0u ? 1.0f : -1.0f;
+}
+
+static inline void accumulateFeatureSketch(Agent agent, uint tid, device OakDiagAccum *acc) {
+    device const float *curr = state_at(agent, 1u - agent.stateSlot);
+    device const uint *currentActive = activeFeatures(agent, 1u - agent.stateSlot);
+    float zLo = 0.0f, zHi = 0.0f;
+    for (uint a = 0u; a < OAK_ACT; ++a) {
+        uint i = currentActive[a];
+        float x = curr[i];
+        uint2 bits = diagSketchBits(i);
+        zLo = fma(diagSketchSign(bits, tid), x, zLo);
+        zHi = fma(diagSketchSign(bits, tid + OAK_CORE), x, zHi);
+    }
+    device float *rowLo = acc->gram + tid * OAK_DIAG_K;
+    device float *rowHi = acc->gram + (tid + OAK_CORE) * OAK_DIAG_K;
+    for (uint c = 0u; c < OAK_DIAG_K; ++c) {
+        float zc = simd_shuffle(c < OAK_CORE ? zLo : zHi, (ushort)(c % OAK_CORE));
+        rowLo[c] += zLo * zc;
+        rowHi[c] += zHi * zc;
+    }
+}
+
 kernel void oak_megastep(device float *params [[buffer(0)]],
                          device float *stateArena [[buffer(1)]],
                          device uint *uintArena [[buffer(2)]],
@@ -1888,6 +1926,7 @@ kernel void oak_megastep(device float *params [[buffer(0)]],
                          device const int *recordSlot [[buffer(9)]],
                          device float *recordBuf [[buffer(10)]],
                          constant uint3 &dispatchSpan [[buffer(11)]],
+                         device OakDiagAccum *diagAccum [[buffer(12)]],
                          threadgroup float *tgCont [[threadgroup(0)]],
                          uint tgIdx [[threadgroup_position_in_grid]],
                          uint tid [[thread_position_in_threadgroup]],
@@ -1916,6 +1955,12 @@ kernel void oak_megastep(device float *params [[buffer(0)]],
             encodeObservation(agent, slane, OAK_CORE, lCont, lStash);
         }
         laneFence();
+        if (wideActive && (OAK_MEGA_STAGES & 128u) != 0u) {
+            Agent agent = make_agent(params, stateArena, uintArena, scalars, cfg,
+                               wideLane - laneShift, wideLane,
+                               lanes[wideLane].envObservationCount, lanes[wideLane].envActionCount);
+            accumulateFeatureSketch(agent, slane, &diagAccum[wideLane]);
+        }
         if (wideActive && (OAK_MEGA_STAGES & 8u) != 0u) {
             Agent agent = make_agent(params, stateArena, uintArena, scalars, cfg,
                                wideLane - laneShift, wideLane,
@@ -1989,6 +2034,8 @@ kernel void oak_fleet_snapshot(device float *params [[buffer(0)]],
                                device OakLaneSnapshot *snap [[buffer(9)]],
                                constant uint2 &snapCtl [[buffer(10)]],
                                constant uint &fullScan [[buffer(11)]],
+                               device OakDiagAccum *diagAccum [[buffer(12)]],
+                               device float *diagOut [[buffer(13)]],
                                uint slane [[thread_index_in_simdgroup]],
                                uint sgid [[threadgroup_position_in_grid]]) {
 
@@ -1997,7 +2044,9 @@ kernel void oak_fleet_snapshot(device float *params [[buffer(0)]],
     if (sgid >= ecfg.laneCount) return;
     device OakFleetLane *lane = &lanes[sgid];
     device OakLaneSnapshot *o = &snap[snapCtl.x + sgid];
+    device OakDiagRecord *rec = (device OakDiagRecord *)(diagOut + ulong(snapCtl.x + sgid) * OAK_DIAG_OUT_FLOATS);
     if (slane == 0u) o->scalars = scalars[sgid];
+    float weightAbsMean = NAN, weightAbsMeanValue = NAN;
     if (fullScan != 0u) {
         device const float *lp = params + sgidL * cfg.paramStride;
 
@@ -2007,9 +2056,20 @@ kernel void oak_fleet_snapshot(device float *params [[buffer(0)]],
         }
         firstNF = simd_min(firstNF);
         uint lim = min(firstNF, cfg.paramStride);
-        float mx = 0.0f;
-        for (uint i = slane; i < lim; i += OAK_CORE) mx = max(mx, fabs(lp[i]));
+        float mx = 0.0f, sumAbs = 0.0f, sumAbsValue = 0.0f;
+        for (uint i = slane; i < lim; i += OAK_CORE) {
+            float a = fabs(lp[i]);
+            mx = max(mx, a);
+            sumAbs += a;
+            if (i < cfg.rank) sumAbsValue += a;
+        }
         mx = simd_max(mx);
+        sumAbs = simd_sum(sumAbs);
+        sumAbsValue = simd_sum(sumAbsValue);
+        if (firstNF == 0xffffffffu) {
+            weightAbsMean = sumAbs / float(cfg.paramStride);
+            weightAbsMeanValue = sumAbsValue / float(cfg.rank);
+        }
         if (slane == 0u) {
             o->paramAbsMax = mx;
             o->paramNonFinite = (firstNF == 0xffffffffu) ? 0u : 1u;
@@ -2017,6 +2077,29 @@ kernel void oak_fleet_snapshot(device float *params [[buffer(0)]],
     } else if (slane == 0u) {
         o->paramAbsMax = -1.0f;
         o->paramNonFinite = 0u;
+    }
+    {
+        Agent agent = make_agent(params, stateArena, uintArena, scalars, cfg, sgidL, sgid, 0u, 0u);
+        device OakDiagAccum *acc = &diagAccum[sgid];
+        uint births = 0u;
+        for (uint i = slane; i < cfg.rank; i += OAK_CORE) {
+            rec->featureAge[i] = as_type<float>(agent.featureAge[i]);
+            rec->featureUtility[i] = agent.featureUtility[i];
+            rec->valueAlpha[i] = agent.valueAlpha[i];
+            rec->optionValueAlpha[i] = agent.optionValueAlpha[i];
+            rec->modelAlpha[i] = agent.modelAlpha[i];
+            births += agent.featureBirthCount[i];
+        }
+        births = simd_sum(births);
+        for (uint g = slane; g < OAK_DIAG_GRAM; g += OAK_CORE) {
+            rec->gram[g] = acc->gram[g];
+            acc->gram[g] = 0.0f;
+        }
+        if (slane == 0u) {
+            rec->featureBirths = float(births);
+            rec->weightAbsMean = weightAbsMean;
+            rec->weightAbsMeanValue = weightAbsMeanValue;
+        }
     }
     if (slane != 0u) return;
     o->rewardSum = lane->rewardSum;
