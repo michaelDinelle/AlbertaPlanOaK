@@ -53,7 +53,7 @@ The repo template records without the Instruments GUI. Never trace (or rebuild t
 ```
 xctrace record --template ShaderTemplate.tracetemplate \
   --output out.trace --time-limit 15s \
-  --env OAK_BENCH_POLICIES=oak \
+  --env OAK_BENCH_POLICY=oak \
   --env OAK_BENCH_STEPS=200000 --env OAK_BENCH_SEED_COUNT=1024 \
   --env OAK_METRICS_STORAGE=/tmp/trace-run \
   --launch -- .build/release/OaK benchmark
