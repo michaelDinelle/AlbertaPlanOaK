@@ -3,6 +3,7 @@ import { DELAYEDCHAIN_ACTION, DELAYEDCHAIN_POS } from '@sim/envs/delayedchain';
 import { CelebrationPool, attachCelebrations, disposeCelebrations } from '@kit/celebrate';
 import { GroundTruthOverlay } from '@kit/debug';
 import { cellToWorld, cellToWorldVec, type GridSize } from '@kit/grid';
+import { clamp01, envelope } from '@kit/mix';
 import { makeOrbitRig, type OrbitRig } from '@kit/rigs';
 import { TOKENS } from '@kit/tokens';
 import type {
@@ -30,7 +31,6 @@ import {
   CAMERA_AZIMUTH,
   SHADOW_RADIUS,
   buildWorld,
-  clamp01,
   goalCellOf,
   resolveGrid,
   type WorldHandle,
@@ -421,12 +421,6 @@ class LongNightRoadScene implements SceneModule {
   }
 }
 
-
-export function envelope(age: number, span: number, rate: number): number {
-  if (!(age >= 0) || age > span) return 0;
-  const e = Math.exp(-rate * age) * (1 - age / span);
-  return e < 0 ? 0 : e > 1 ? 1 : e;
-}
 
 export function lanternGlow(age: number, index: number, count: number): number {
   if (!(age >= 0)) return 0;

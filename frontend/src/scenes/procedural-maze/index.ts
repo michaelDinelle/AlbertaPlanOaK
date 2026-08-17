@@ -3,6 +3,7 @@ import { PROCMAZE_GX, PROCMAZE_GY, PROCMAZE_X, PROCMAZE_Y } from '@sim/envs/proc
 import { CelebrationPool, attachCelebrations, disposeCelebrations } from '@kit/celebrate';
 import { GroundTruthOverlay } from '@kit/debug';
 import { cellToWorldVec, clampCell, type GridSize } from '@kit/grid';
+import { blendTokens, envelope } from '@kit/mix';
 import { makeOrbitRig, type OrbitRig } from '@kit/rigs';
 import { TOKENS } from '@kit/tokens';
 import type {
@@ -25,7 +26,6 @@ import {
   CAMERA_TARGET_BIAS,
   CAMERA_TARGET_Y,
   SUN_DIR,
-  blendTokens,
   buildWorld,
   floorTintFor,
   resolveGrid,
@@ -355,12 +355,6 @@ class OvergrownRuinsScene implements SceneModule {
   }
 }
 
-
-export function envelope(age: number, span: number, rate: number): number {
-  if (!(age >= 0) || age > span) return 0;
-  const e = Math.exp(-rate * age) * (1 - age / span);
-  return e < 0 ? 0 : e > 1 ? 1 : e;
-}
 
 export function growth(age: number): number {
   if (!(age >= 0) || age >= GROW_SECONDS) return 1;

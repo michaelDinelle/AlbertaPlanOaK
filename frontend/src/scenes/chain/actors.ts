@@ -1,10 +1,12 @@
 
 import { emissiveMaterial, oakMaterial, oakUniforms, setEmissiveIntensity } from '@kit/materials';
 import type { EmissiveMaterial, OakMaterial } from '@kit/materials';
+import { blendTokens, clamp01, smoothstep01 } from '@kit/mix';
+import { mergeColoredParts, type ColoredPart } from '@kit/parts';
 import { hash2f } from '@kit/rng';
 import type { Palette } from '@kit/tokens';
 import * as THREE from 'three';
-import { blendTokens, clamp01, mergeColoredParts, smoothstep01, tubeGeometry, type ColoredPart } from './world';
+import { tubeGeometry } from './world';
 
 type Vec3 = readonly [number, number, number];
 

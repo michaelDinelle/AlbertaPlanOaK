@@ -3,6 +3,7 @@ import { POMAZE_GX, POMAZE_GY, POMAZE_X, POMAZE_Y } from '@sim/envs/pomaze';
 import { CelebrationPool, attachCelebrations, disposeCelebrations } from '@kit/celebrate';
 import { GroundTruthOverlay } from '@kit/debug';
 import { cellToWorldVec, clampCell, type GridSize } from '@kit/grid';
+import { blendTokens, clamp01, envelope } from '@kit/mix';
 import { makeOrbitRig, type OrbitRig } from '@kit/rigs';
 import { TOKENS } from '@kit/tokens';
 import type {
@@ -30,10 +31,8 @@ import { manifest } from './manifest';
 import {
   BUBBLE_OUTER,
   CAMERA_AZIMUTH,
-  blendTokens,
   bubbleVisibility,
   buildWorld,
-  clamp01,
   forestSkin,
   resolveGrid,
   revealVisibility,
@@ -429,12 +428,6 @@ class FogboundForestScene implements SceneModule {
   }
 }
 
-
-export function envelope(age: number, span: number, rate: number): number {
-  if (!(age >= 0) || age > span) return 0;
-  const e = Math.exp(-rate * age) * (1 - age / span);
-  return e < 0 ? 0 : e > 1 ? 1 : e;
-}
 
 const createScene: SceneFactory = () => new FogboundForestScene();
 export default createScene;

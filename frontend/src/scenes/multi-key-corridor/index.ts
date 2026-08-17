@@ -3,6 +3,7 @@ import { MKC_CARRY, MKC_GATES, MKC_GX, MKC_GY, MKC_X, MKC_Y, mkcBit } from '@sim
 import { CelebrationPool, attachCelebrations, disposeCelebrations } from '@kit/celebrate';
 import { GroundTruthOverlay } from '@kit/debug';
 import { cellToWorldVec, clampCell, type GridSize } from '@kit/grid';
+import { envelope } from '@kit/mix';
 import { makeOrbitRig, type OrbitRig } from '@kit/rigs';
 import { TOKENS } from '@kit/tokens';
 import type {
@@ -527,12 +528,6 @@ class TempleOfThreeGatesScene implements SceneModule {
   }
 }
 
-
-export function envelope(age: number, span: number, rate: number): number {
-  if (!(age >= 0) || age > span) return 0;
-  const e = Math.exp(-rate * age) * (1 - age / span);
-  return e < 0 ? 0 : e > 1 ? 1 : e;
-}
 
 export function gatePhase(open: boolean, age: number): number {
   const p = !(age >= 0) || age >= GATE_SECONDS ? 1 : age / GATE_SECONDS;

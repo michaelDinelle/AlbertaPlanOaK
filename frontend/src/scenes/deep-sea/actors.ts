@@ -7,9 +7,11 @@ import {
   type EmissiveMaterial,
   type OakMaterial,
 } from '@kit/materials';
+import { blendTokens, clamp01 } from '@kit/mix';
+import { mergeColoredParts, type ColoredPart } from '@kit/parts';
 import type { Palette } from '@kit/tokens';
 import * as THREE from 'three';
-import { blendTokens, clamp01, mergeColoredParts, type ColoredPart, type ReefSkin } from './reef';
+import type { ReefSkin } from './reef';
 
 
 const SHELL_R = 0.5;

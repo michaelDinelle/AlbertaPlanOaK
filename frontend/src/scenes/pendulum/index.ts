@@ -2,6 +2,7 @@
 import { GroundTruthOverlay } from '@kit/debug';
 import { makeOrbitRig, orbitFromPose, type OrbitRig } from '@kit/rigs';
 import { CelebrationPool, attachCelebrations, disposeCelebrations } from '@kit/celebrate';
+import { clampRange } from '@kit/mix';
 import type {
   FrameState,
   FrameUpdate,
@@ -14,12 +15,7 @@ import * as THREE from 'three';
 import { PD_L, PD_MAX_SPEED, PD_MAX_TORQUE, PENDULUM_TH, PENDULUM_THDOT, PENDULUM_TORQUE, wrapPi } from '@sim/envs/pendulum';
 import { buildLanternRig, type LanternRigHandle } from './actors';
 import { manifest } from './manifest';
-import {
-  buildWorld,
-  clampRange,
-  pivotOf,
-  type WorldHandle,
-} from './world';
+import { buildWorld, pivotOf, type WorldHandle } from './world';
 
 
 const CAM_BASE: readonly [number, number, number] = [0.62, 0.41, 6.55];

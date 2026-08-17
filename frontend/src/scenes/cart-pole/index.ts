@@ -6,6 +6,7 @@ import {
   attachCelebrations,
   disposeCelebrations,
 } from '@kit/celebrate';
+import { clampRange, envelope } from '@kit/mix';
 import type {
   FrameState,
   FrameUpdate,
@@ -18,16 +19,7 @@ import * as THREE from 'three';
 import { CARTPOLE_ACTION, CARTPOLE_TH, CARTPOLE_X, CARTPOLE_XDOT, cartPoleForce, cartPoleTip } from '@sim/envs/cartpole';
 import { buildTrolley, type TrolleyHandle } from './actors';
 import { manifest } from './manifest';
-import {
-  CAM_BASE,
-  CAM_LOOK,
-  buildWorld,
-  clampRange,
-  poleLength,
-  tiltLimit,
-  trackLimit,
-  type WorldHandle,
-} from './world';
+import { CAM_BASE, CAM_LOOK, buildWorld, poleLength, tiltLimit, trackLimit, type WorldHandle } from './world';
 
 
 const FALL_SECONDS = 0.42;
@@ -252,12 +244,6 @@ class BoardwalkScene implements SceneModule {
     this.ctx = null;
     this.fallAt = -Infinity;
   }
-}
-
-export function envelope(age: number, span: number, rate: number): number {
-  if (!(age >= 0) || age > span) return 0;
-  const e = Math.exp(-rate * age) * (1 - age / span);
-  return e < 0 ? 0 : e > 1 ? 1 : e;
 }
 
 const createScene: SceneFactory = () => new BoardwalkScene();

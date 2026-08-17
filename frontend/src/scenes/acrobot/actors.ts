@@ -6,19 +6,13 @@ import {
   type EmissiveMaterial,
   type OakMaterial,
 } from '@kit/materials';
+import { blendTokens, clampRange, TOKEN_BLACK } from '@kit/mix';
+import { mergeColoredParts, type ColoredPart } from '@kit/parts';
 import { streamFor } from '@kit/rng';
 import type { Palette } from '@kit/tokens';
 import * as THREE from 'three';
 import { AB_L1, AB_L2 } from '@sim/envs/acrobot';
-import {
-  EXACT_POINT_FLOATS,
-  TOKEN_BLACK,
-  acrobotPointsExact,
-  blendTokens,
-  clampRange,
-  mergeColoredParts,
-  type ColoredPart,
-} from './world';
+import { EXACT_POINT_FLOATS, acrobotPointsExact } from './world';
 
 
 const VINE_R1 = 0.055;

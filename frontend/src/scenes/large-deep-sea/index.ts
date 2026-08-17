@@ -3,6 +3,7 @@ import { LARGE_DEEPSEA_ACTION, LARGE_DEEPSEA_COL, LARGE_DEEPSEA_GX, LARGE_DEEPSE
 import { CelebrationPool, attachCelebrations, disposeCelebrations } from '@kit/celebrate';
 import { GroundTruthOverlay } from '@kit/debug';
 import { clampCell, type GridSize } from '@kit/grid';
+import { blendTokens, clamp01, envelope } from '@kit/mix';
 import { cellToTerraceVec as cellToWorldVec, terraceDepthAt } from '@kit/terrace';
 import { makeOrbitRig, type OrbitRig } from '@kit/rigs';
 import { TOKENS } from '@kit/tokens';
@@ -19,16 +20,7 @@ import * as THREE from 'three';
 import type { GridCell, GridGeometry } from '@sim/types';
 import { HEART_Y, buildAngler, buildDiveBubble, buildWreck, type AnglerHandle, type DiveBubbleHandle, type WreckHandle } from './actors';
 import { manifest } from './manifest';
-import {
-  CAMERA_AZIMUTH,
-  anglerSites,
-  blendTokens,
-  buildWorld,
-  clamp01,
-  resolveGrid,
-  resolveMask,
-  type WorldHandle,
-} from './world';
+import { CAMERA_AZIMUTH, anglerSites, buildWorld, resolveGrid, resolveMask, type WorldHandle } from './world';
 
 
 const CAM_AZIMUTH = CAMERA_AZIMUTH;
@@ -411,12 +403,6 @@ class TheAbyssScene implements SceneModule {
   }
 }
 
-
-export function envelope(age: number, span: number, rate: number): number {
-  if (!(age >= 0) || age > span) return 0;
-  const e = Math.exp(-rate * age) * (1 - age / span);
-  return e < 0 ? 0 : e > 1 ? 1 : e;
-}
 
 export function bubbleGain(row: number, grid: GridSize): number {
   return clamp01(row / Math.max(1, grid.h - 2));

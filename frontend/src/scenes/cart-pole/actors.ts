@@ -6,7 +6,9 @@ import {
   type EmissiveMaterial,
   type OakMaterial,
 } from '@kit/materials';
+import { blendTokens, clampRange, envelope, TOKEN_BLACK, TOKEN_WHITE } from '@kit/mix';
 import { makeAmbientParticles, type AmbientParticlesHandle } from '@kit/particles';
+import { mergeColoredParts, type ColoredPart } from '@kit/parts';
 import { streamFor } from '@kit/rng';
 import { radialSprite } from '@kit/textures';
 import type { Palette } from '@kit/tokens';
@@ -17,15 +19,7 @@ import {
   CP_POLE_WIDTH,
   CP_TH_LIMIT,
 } from '@sim/envs/cartpole';
-import {
-  blendTokens,
-  clampRange,
-  DECK_Y,
-  mergeColoredParts,
-  TOKEN_BLACK,
-  TOKEN_WHITE,
-  type ColoredPart,
-} from './world';
+import { DECK_Y } from './world';
 
 
 export const HINGE_LOCAL_Y = -DECK_Y;

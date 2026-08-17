@@ -1,8 +1,10 @@
 
 import { emissiveMaterial, oakMaterial, oakUniforms, setEmissiveIntensity } from '@kit/materials';
 import type { EmissiveMaterial, OakMaterial } from '@kit/materials';
+import { blendTokens, clamp01 } from '@kit/mix';
+import { mergeColoredParts, type ColoredPart } from '@kit/parts';
 import * as THREE from 'three';
-import { blendTokens, clamp01, mergeColoredParts, type AbyssSkin, type ColoredPart } from './world';
+import type { AbyssSkin } from './world';
 
 
 export const HEART_Y = 0.62;

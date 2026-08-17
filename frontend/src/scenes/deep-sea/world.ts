@@ -15,6 +15,7 @@ import {
   type EmissiveMaterial,
   type OakMaterial,
 } from '@kit/materials';
+import { blendTokens } from '@kit/mix';
 import { makeAmbientParticles, makeMistPlanes, type AmbientParticlesHandle, type MistPlanesHandle } from '@kit/particles';
 import { hash2f } from '@kit/rng';
 import { skyFromPalette, type SkyHandle } from '@kit/sky';
@@ -26,7 +27,6 @@ import * as THREE from 'three';
 import type { GridGeometry } from '@sim/types';
 import {
   rowDrop,
-  blendTokens,
   SHELF_THICKNESS,
   TREASURE_COL,
   TREASURE_ROW,

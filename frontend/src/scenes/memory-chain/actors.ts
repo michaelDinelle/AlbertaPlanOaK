@@ -8,14 +8,10 @@ import {
   type EmissiveMaterial,
   type OakMaterial,
 } from '@kit/materials';
+import { blendTokens, clamp01 } from '@kit/mix';
+import { mergeColoredParts, type ColoredPart } from '@kit/parts';
 import * as THREE from 'three';
-import {
-  blendTokens,
-  clamp01,
-  mergeColoredParts,
-  type CaveSkin,
-  type ColoredPart,
-} from './world';
+import type { CaveSkin } from './world';
 
 
 const CRYSTAL_OFFSET_Z = -0.82;

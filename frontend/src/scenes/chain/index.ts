@@ -2,6 +2,7 @@
 import { CelebrationPool, attachCelebrations, disposeCelebrations } from '@kit/celebrate';
 import { GroundTruthOverlay } from '@kit/debug';
 import { cellToWorldVec, type GridSize } from '@kit/grid';
+import { blendTokens, shade } from '@kit/mix';
 import { makeOrbitRig, type OrbitRig } from '@kit/rigs';
 import { TOKENS } from '@kit/tokens';
 import type {
@@ -30,11 +31,9 @@ import { manifest } from './manifest';
 import {
   CAMERA_AZIMUTH,
   WATER_LEVEL,
-  blendTokens,
   buildWorld,
   creekSkin,
   resolveGrid,
-  shade,
   stoneX,
   type WorldHandle,
 } from './world';

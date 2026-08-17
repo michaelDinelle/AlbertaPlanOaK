@@ -2,6 +2,7 @@
 import { CelebrationPool, attachCelebrations, disposeCelebrations } from '@kit/celebrate';
 import { GroundTruthOverlay } from '@kit/debug';
 import { CELL, cellToWorldVec, clampCell, type GridSize } from '@kit/grid';
+import { blendTokens, clamp01, envelope } from '@kit/mix';
 import { makeAmbientParticles, type AmbientParticlesHandle } from '@kit/particles';
 import { makeOrbitRig, type OrbitRig } from '@kit/rigs';
 import { TOKENS } from '@kit/tokens';
@@ -19,15 +20,7 @@ import type { GridCell, GridGeometry } from '@sim/types';
 import { HIGHDIMMAZE_ACTION, HIGHDIMMAZE_ACTIONS, HIGHDIMMAZE_DASH, HIGHDIMMAZE_GX, HIGHDIMMAZE_GY, HIGHDIMMAZE_HEADING, HIGHDIMMAZE_STAY, HIGHDIMMAZE_X, HIGHDIMMAZE_Y } from '@sim/envs/highdimmaze';
 import { buildGust, buildOasis, buildScarf, type GustHandle, type OasisHandle, type ScarfHandle } from './actors';
 import { manifest } from './manifest';
-import {
-  CAMERA_AZIMUTH,
-  blendTokens,
-  buildWorld,
-  canyonSkin,
-  clamp01,
-  resolveGrid,
-  type WorldHandle,
-} from './world';
+import { CAMERA_AZIMUTH, buildWorld, canyonSkin, resolveGrid, type WorldHandle } from './world';
 
 
 const CAM_AZIMUTH = CAMERA_AZIMUTH;
@@ -478,12 +471,6 @@ export function dampAngle(current: number, target: number, dt: number): number {
   while (d > Math.PI) d -= Math.PI * 2;
   while (d < -Math.PI) d += Math.PI * 2;
   return current + d * k;
-}
-
-export function envelope(age: number, span: number, rate: number): number {
-  if (!(age >= 0) || age > span) return 0;
-  const e = Math.exp(-rate * age) * (1 - age / span);
-  return e < 0 ? 0 : e > 1 ? 1 : e;
 }
 
 export function growth(age: number): number {

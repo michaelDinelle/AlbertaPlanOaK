@@ -8,9 +8,10 @@ import {
   type EmissiveMaterial,
   type OakMaterial,
 } from '@kit/materials';
+import { blendTokens, clamp01 } from '@kit/mix';
+import type { ColoredPart } from '@kit/parts';
 import type { Palette } from '@kit/tokens';
 import * as THREE from 'three';
-import { blendTokens, clamp01, type ColoredPart } from './world';
 
 const BUD_Y = 0.44;
 const PETAL_SCALE = 1.55;

@@ -1,7 +1,7 @@
 
 import * as THREE from 'three';
+import { blendTokens } from '@kit/mix';
 import { TOKENS, type Palette } from '@kit/tokens';
-import { blendTokens } from './world';
 
 export interface AuroraOptions {
   palette: Palette;

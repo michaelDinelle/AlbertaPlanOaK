@@ -11,7 +11,9 @@ import {
 } from '@kit/grid';
 import { applyFog, makeLightRig, type LightRig } from '@kit/lighting';
 import { oakMaterial, oakUniforms } from '@kit/materials';
+import { blendTokens, clamp01, smoothstep01, TOKEN_WHITE } from '@kit/mix';
 import { makeAmbientParticles, makeMistPlanes, type AmbientParticlesHandle } from '@kit/particles';
+import { mergeColoredParts } from '@kit/parts';
 import { hash2f } from '@kit/rng';
 import { skyFromPalette, type SkyHandle } from '@kit/sky';
 import { makeTerrain, type TerrainHandle } from '@kit/terrain';
@@ -46,77 +48,10 @@ export const SHADOW_RADIUS = 13.5;
 export const CAMERA_AZIMUTH = -2.52;
 
 
-export function smoothstep01(t: number): number {
-  return t <= 0 ? 0 : t >= 1 ? 1 : t * t * (3 - 2 * t);
-}
-
-export function clamp01(v: number): number {
-  return v < 0 ? 0 : v > 1 ? 1 : v;
-}
-
-export function blendTokens(
-  a: THREE.ColorRepresentation,
-  b: THREE.ColorRepresentation,
-  k: number,
-): THREE.Color {
-  return new THREE.Color(a).lerp(new THREE.Color(b), k);
-}
-
-export const TOKEN_WHITE = TOKENS.palettes.noon.sun;
-
 export function hue(c: THREE.Color): THREE.Color {
   const m = Math.max(c.r, c.g, c.b, 1e-6);
   return c.multiplyScalar(1 / m);
 }
-
-export interface ColoredPart {
-  geometry: THREE.BufferGeometry;
-  color: THREE.ColorRepresentation;
-}
-
-export function mergeColoredParts(parts: readonly ColoredPart[], name: string): THREE.BufferGeometry {
-  let total = 0;
-  for (const p of parts) {
-    total += p.geometry.index ? p.geometry.index.count : p.geometry.getAttribute('position').count;
-  }
-  const positions = new Float32Array(total * 3);
-  const normals = new Float32Array(total * 3);
-  const colors = new Float32Array(total * 3);
-  const c = new THREE.Color();
-  let o = 0;
-  for (const part of parts) {
-    const geo = part.geometry;
-    const pos = geo.getAttribute('position');
-    const nor = geo.getAttribute('normal');
-    const index = geo.index;
-    const n = index ? index.count : pos.count;
-    c.set(part.color);
-    for (let i = 0; i < n; i++) {
-      const vi = index ? index.getX(i) : i;
-      positions[o * 3] = pos.getX(vi);
-      positions[o * 3 + 1] = pos.getY(vi);
-      positions[o * 3 + 2] = pos.getZ(vi);
-      if (nor) {
-        normals[o * 3] = nor.getX(vi);
-        normals[o * 3 + 1] = nor.getY(vi);
-        normals[o * 3 + 2] = nor.getZ(vi);
-      }
-      colors[o * 3] = c.r;
-      colors[o * 3 + 1] = c.g;
-      colors[o * 3 + 2] = c.b;
-      o++;
-    }
-  }
-  const g = new THREE.BufferGeometry();
-  g.setAttribute('position', new THREE.BufferAttribute(positions, 3));
-  g.setAttribute('normal', new THREE.BufferAttribute(normals, 3));
-  g.setAttribute('color', new THREE.BufferAttribute(colors, 3));
-  g.computeBoundingSphere();
-  g.name = name;
-  for (const p of parts) p.geometry.dispose();
-  return g;
-}
-
 
 export function resolveGrid(geometry: EnvGeometry): GridGeometry {
   const g = geometry.grid;
