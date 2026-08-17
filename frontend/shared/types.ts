@@ -17,7 +17,6 @@ export interface RunMeta {
 }
 
 export const TAPE_MAGIC = 0x544b414f;
-export const TAPE_FIELDS = ['rewardSum', 'rewardRate', 'deathStep', 'deathDetector'] as const;
 export const DEATH_DETECTORS: readonly string[] = [
   'alive', 'envReward', 'policyMean', 'envObs', 'paramNonFinite',
   'paramExplosion', 'kernelRho', 'envError',

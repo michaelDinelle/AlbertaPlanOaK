@@ -153,7 +153,7 @@ export function mountRunScience(host: HTMLElement, opts: RunScienceOptions): Run
   function rhoSeries(t: Tape, lanes: readonly number[]): {
     x: number[]; perLane: (number | null)[][];
   } {
-    const rateIdx = t.fields.indexOf('rewardRate');
+    const rateIdx = t.fields.indexOf('rho');
     const x: number[] = [];
     for (let r = 0; r < t.rows; r++) x.push(t.stepEnd[r] ?? 0);
     const perLane = lanes.map((lane) => {
