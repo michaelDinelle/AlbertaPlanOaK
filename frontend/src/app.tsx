@@ -8,6 +8,7 @@ import { cycleEnv, keyAction } from './lib/keymap';
 import { resolveFeaturedRun, runEnvs } from './lib/run';
 import { CommandPalette } from './panels/CommandPalette';
 import { PlaybackBar } from './panels/PlaybackBar';
+import { StatsPanel } from './panels/StatsPanel';
 import type { PanelView } from './panels/views';
 import {
   adoptDefaultEnv,
@@ -223,6 +224,9 @@ export function App() {
           <Notice title={notice.title} detail={notice.detail ?? null} pulse={notice.pulse} />
         </div>
       )}
+      <div className="pointer-events-none absolute bottom-20 right-4 top-4 z-20 w-[400px] max-w-[calc(100vw-2rem)]">
+        <StatsPanel view={view} setView={setView} detail={detail} ppo={ppoDetail} random={randomDetail} active={active} />
+      </div>
       <div className="pointer-events-none absolute inset-x-0 bottom-4 z-30 grid grid-cols-[1fr_minmax(0,760px)_1fr] items-end gap-3 px-4">
         <div className="justify-self-start">
           <EnvTileButton onOpen={() => setWallOpen(true)} />
