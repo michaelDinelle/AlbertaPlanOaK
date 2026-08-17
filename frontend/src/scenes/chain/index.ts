@@ -1,18 +1,12 @@
 
-import { CelebrationPool, attachCelebrations, disposeCelebrations } from '@kit/celebrate';
-import { GroundTruthOverlay } from '@kit/debug';
+import type { CelebrationPoolOptions } from '@kit/celebrate';
+import type { GroundTruthOptions } from '@kit/debug';
 import { cellToWorldVec, type GridSize } from '@kit/grid';
 import { blendTokens, shade } from '@kit/mix';
-import { makeOrbitRig, type OrbitRig } from '@kit/rigs';
+import type { OrbitRigOptions } from '@kit/rigs';
+import { StageScene } from '@kit/stage';
 import { TOKENS } from '@kit/tokens';
-import type {
-  FrameState,
-  FrameUpdate,
-  SceneContext,
-  SceneFactory,
-  SceneModule,
-  SceneSize,
-} from '@kit/types';
+import type { FrameState, FrameUpdate, SceneContext, SceneFactory } from '@kit/types';
 import { Wisp } from '@kit/wisp';
 import * as THREE from 'three';
 import type { GridCell, GridGeometry } from '@sim/types';
@@ -104,20 +98,14 @@ export function readPos(state: FrameState, grid: GridSize): number {
   return p < 0 ? 0 : p > grid.w - 1 ? grid.w - 1 : p;
 }
 
-class SixteenStonesScene implements SceneModule {
+class SixteenStonesScene extends StageScene<WorldHandle> {
   readonly manifest = manifest;
-  scene = new THREE.Scene();
-  camera = new THREE.PerspectiveCamera(TOKENS.fovHero, 16 / 9, 0.1, 900);
+  protected readonly stageName = 'sixteenStones';
 
-  private ctx: SceneContext | null = null;
-  private world: WorldHandle | null = null;
   private wisp: Wisp | null = null;
   private tree: BlossomTreeHandle | null = null;
   private lantern: FordLanternHandle | null = null;
   private ferry: PetalFerryHandle | null = null;
-  private pool: CelebrationPool | null = null;
-  private rig: OrbitRig | null = null;
-  private overlay: GroundTruthOverlay | null = null;
   private grid: GridGeometry = resolveGrid({});
 
   private goalAt = -Infinity;
@@ -132,29 +120,24 @@ class SixteenStonesScene implements SceneModule {
   private blossom = 0xf7a8b8;
   private gold = 0xffd166;
 
-  private debugOn = false;
-
-  async init(ctx: SceneContext): Promise<void> {
-    this.ctx = ctx;
-    this.scene.name = 'sixteenStonesScene';
-
+  protected buildWorld(ctx: SceneContext): WorldHandle {
     const grid = resolveGrid(ctx.geometry);
     this.grid = grid;
     this.visitedAt = new Float32Array(grid.w).fill(-Infinity);
     this.lastPos = -1;
     this.goalCell.x = grid.goal?.x ?? grid.w - 1;
     this.goalCell.y = grid.goal?.y ?? 0;
+    return buildWorld(ctx, this.scene, grid);
+  }
 
+  protected buildActors(ctx: SceneContext, world: WorldHandle): void {
+    const grid = this.grid;
     const palette = ctx.tokens.palettes.afternoon;
     const skin = creekSkin(palette, ctx.tokens);
     const accent = ctx.tokens.accents[manifest.accent] ?? ctx.tokens.celebrationGold;
     this.blossom = skin.blossom.getHex();
     this.gold = ctx.tokens.celebrationGold;
     const ember = blendTokens(ctx.tokens.celebrationGold, accent, 0.4).getHex();
-
-    const world = buildWorld(ctx, this.scene, grid);
-    this.world = world;
-    this.scene.add(world.group);
 
     const treeLight = world.rig.points[0];
     if (treeLight) treeLight.color.set(ember);
@@ -207,8 +190,10 @@ class SixteenStonesScene implements SceneModule {
     });
     this.ferry = ferry;
     this.scene.add(ferry.mesh);
+  }
 
-    const rig = makeOrbitRig({
+  protected rigOptions(ctx: SceneContext): OrbitRigOptions {
+    return {
       canvas: ctx.canvas,
       target: [CAM_TARGET[0], CAM_TARGET[1], CAM_TARGET[2]],
       distance: CAM_DISTANCE,
@@ -222,23 +207,22 @@ class SixteenStonesScene implements SceneModule {
       rotateSpeed: 0.004,
       zoomSpeed: 0.0012,
       name: 'creekOrbitRig',
-    });
-    this.rig = rig;
-    this.camera = rig.camera;
-    rig.snap();
+    };
+  }
 
-    const pool = new CelebrationPool({
+  protected poolOptions(ctx: SceneContext): CelebrationPoolOptions {
+    return {
       seed: ctx.seed,
       burstSize: BURST_PARTICLES,
       name: 'creekCelebrations',
-    });
-    attachCelebrations(this.scene, pool);
-    pool.setPixelRatio(ctx.size.dpr);
-    this.pool = pool;
+    };
+  }
 
+  protected overlayOptions(): GroundTruthOptions {
+    const grid = this.grid;
     const overlayCell: GridCell = { x: 0, y: 0 };
     const goalCell = this.goalCell;
-    this.overlay = new GroundTruthOverlay(ctx.geometry, {
+    return {
       camera: this.camera,
       agentCell: (state) => {
         overlayCell.x = readPos(state, grid);
@@ -247,22 +231,21 @@ class SixteenStonesScene implements SceneModule {
       },
       goalCell: () => goalCell,
       name: 'creekGroundTruth',
-    });
-    this.scene.add(this.overlay.group);
-    this.overlay.visible = this.debugOn;
+    };
+  }
 
-    world.setPixelRatio(ctx.size.dpr);
+  protected start(_ctx: SceneContext, world: WorldHandle): void {
     world.setTime(0);
     world.caps.clearGlow();
     world.petalMotes.setDensity(0);
-    wisp.setCell(0, 0, grid);
-    tree.setState(0, 0);
-    tree.setTime(0);
-    lantern.setTime(0);
-    ferry.clear();
+    this.wisp?.setCell(0, 0, this.grid);
+    this.tree?.setState(0, 0);
+    this.tree?.setTime(0);
+    this.lantern?.setTime(0);
+    this.ferry?.clear();
   }
 
-  update(frame: FrameUpdate): void {
+  protected tick(frame: FrameUpdate): void {
     const ctx = this.ctx;
     const world = this.world;
     const wisp = this.wisp;
@@ -360,25 +343,9 @@ class SixteenStonesScene implements SceneModule {
     world.setTime(time);
 
     rig.update(frame.dtReal);
-
-    if (this.debugOn && this.overlay) this.overlay.setState(state);
   }
 
-  resize(size: SceneSize): void {
-    const aspect = size.height > 0 ? size.width / size.height : 16 / 9;
-    this.rig?.resize(aspect);
-    this.world?.setPixelRatio(size.dpr);
-    this.pool?.setPixelRatio(size.dpr);
-  }
-
-  setDebug(on: boolean): void {
-    this.debugOn = on;
-    if (this.overlay) this.overlay.visible = on;
-  }
-
-  dispose(): void {
-    this.overlay?.dispose();
-    this.overlay = null;
+  protected drop(): void {
     this.ferry?.dispose();
     this.ferry = null;
     this.lantern?.dispose();
@@ -387,15 +354,6 @@ class SixteenStonesScene implements SceneModule {
     this.tree = null;
     this.wisp?.dispose();
     this.wisp = null;
-    this.world?.dispose();
-    this.world = null;
-    this.rig?.dispose();
-    this.rig = null;
-    disposeCelebrations(this.scene);
-    this.pool = null;
-    this.scene.clear();
-    this.scene.fog = null;
-    this.ctx = null;
     this.goalAt = -Infinity;
     this.visitedAt = new Float32Array(0);
     this.lastPos = -1;

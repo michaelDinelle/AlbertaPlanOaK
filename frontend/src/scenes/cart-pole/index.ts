@@ -1,21 +1,10 @@
 
-import { GroundTruthOverlay } from '@kit/debug';
-import { makeOrbitRig, orbitFromPose, type OrbitRig } from '@kit/rigs';
-import {
-  CelebrationPool,
-  attachCelebrations,
-  disposeCelebrations,
-} from '@kit/celebrate';
+import type { CelebrationPoolOptions } from '@kit/celebrate';
+import type { GroundTruthOptions } from '@kit/debug';
 import { clampRange, envelope } from '@kit/mix';
-import type {
-  FrameState,
-  FrameUpdate,
-  SceneContext,
-  SceneFactory,
-  SceneModule,
-  SceneSize,
-} from '@kit/types';
-import * as THREE from 'three';
+import { orbitFromPose, type OrbitRigOptions } from '@kit/rigs';
+import { StageScene } from '@kit/stage';
+import type { FrameState, FrameUpdate, SceneContext, SceneFactory, SceneSize } from '@kit/types';
 import { CARTPOLE_ACTION, CARTPOLE_TH, CARTPOLE_X, CARTPOLE_XDOT, cartPoleForce, cartPoleTip } from '@sim/envs/cartpole';
 import { buildTrolley, type TrolleyHandle } from './actors';
 import { manifest } from './manifest';
@@ -32,17 +21,11 @@ function forceOf(state: FrameState): number {
   return cartPoleForce(state.pose[CARTPOLE_ACTION] ?? 0);
 }
 
-class BoardwalkScene implements SceneModule {
+class BoardwalkScene extends StageScene<WorldHandle> {
   readonly manifest = manifest;
-  scene = new THREE.Scene();
-  camera = new THREE.PerspectiveCamera(40, 16 / 9, 0.1, 500);
+  protected readonly stageName = 'boardwalk';
 
-  private ctx: SceneContext | null = null;
-  private world: WorldHandle | null = null;
   private trolley: TrolleyHandle | null = null;
-  private rig: OrbitRig | null = null;
-  private pool: CelebrationPool | null = null;
-  private overlay: GroundTruthOverlay | null = null;
 
   private xLimit = 2.4;
   private thLimit = 0.2094395;
@@ -51,23 +34,19 @@ class BoardwalkScene implements SceneModule {
   private fallAt = -Infinity;
   private fallDir = 1;
 
-  private debugOn = false;
   private readonly overlayPos: [number, number, number] = [0, 0, 0];
   private readonly tipScratch = new Float32Array(2);
 
-  async init(ctx: SceneContext): Promise<void> {
-    this.ctx = ctx;
-    this.scene.name = 'boardwalkScene';
-
-    const palette = ctx.tokens.palettes.noon;
-    const accent = ctx.tokens.accents[manifest.accent] ?? ctx.tokens.celebrationGold;
+  protected buildWorld(ctx: SceneContext): WorldHandle {
     this.xLimit = trackLimit(ctx.geometry);
     this.thLimit = tiltLimit(ctx.geometry);
     this.armLength = poleLength(ctx.geometry);
+    return buildWorld(ctx, this.scene);
+  }
 
-    const world = buildWorld(ctx, this.scene);
-    this.world = world;
-    this.scene.add(world.group);
+  protected buildActors(ctx: SceneContext, world: WorldHandle): void {
+    const palette = ctx.tokens.palettes.noon;
+    const accent = ctx.tokens.accents[manifest.accent] ?? ctx.tokens.celebrationGold;
 
     const warm = world.rig.points[0];
     if (warm) warm.color.set(palette.accentLight);
@@ -83,12 +62,14 @@ class BoardwalkScene implements SceneModule {
     });
     this.trolley = trolley;
     this.scene.add(trolley.group);
+  }
 
+  protected rigOptions(ctx: SceneContext): OrbitRigOptions {
     const home = orbitFromPose(
       CAM_BASE,
       CAM_LOOK,
     );
-    const rig = makeOrbitRig({
+    return {
       canvas: ctx.canvas,
       target: CAM_LOOK,
       azimuth: home.azimuth,
@@ -100,23 +81,21 @@ class BoardwalkScene implements SceneModule {
       aspect: ctx.size.height > 0 ? ctx.size.width / ctx.size.height : 16 / 9,
       damping: 2.4,
       name: 'boardwalkOrbitRig',
-    });
-    this.rig = rig;
-    this.camera = rig.camera;
-    rig.snap();
+    };
+  }
 
-    const pool = new CelebrationPool({
+  protected poolOptions(ctx: SceneContext): CelebrationPoolOptions {
+    return {
       seed: ctx.seed,
       sighSize: SIGH_PARTICLES,
       sighRadius: 0.34,
       sighHeight: 0.9,
       name: 'boardwalkCelebrations',
-    });
-    attachCelebrations(this.scene, pool);
-    pool.setPixelRatio(ctx.size.dpr);
-    this.pool = pool;
+    };
+  }
 
-    this.overlay = new GroundTruthOverlay(ctx.geometry, {
+  protected overlayOptions(): GroundTruthOptions {
+    return {
       camera: this.camera,
       agentPos: (state) => {
         const t = cartPoleTip(state.pose[CARTPOLE_X] ?? 0, state.pose[CARTPOLE_TH] ?? 0, this.tipScratch);
@@ -126,12 +105,13 @@ class BoardwalkScene implements SceneModule {
         return this.overlayPos;
       },
       name: 'boardwalkGroundTruth',
-    });
-    this.scene.add(this.overlay.group);
-    this.overlay.visible = this.debugOn;
+    };
+  }
 
+  protected start(ctx: SceneContext, world: WorldHandle): void {
+    const trolley = this.trolley;
+    if (!trolley) return;
     trolley.setPixelRatio(ctx.size.dpr);
-    world.setPixelRatio(ctx.size.dpr);
     trolley.setShed(0, 1);
     trolley.setState(0, 0, 0, 0);
     world.setWind(0);
@@ -140,7 +120,7 @@ class BoardwalkScene implements SceneModule {
     trolley.setTime(0);
   }
 
-  update(frame: FrameUpdate): void {
+  protected tick(frame: FrameUpdate): void {
     const ctx = this.ctx;
     const world = this.world;
     const trolley = this.trolley;
@@ -211,37 +191,16 @@ class BoardwalkScene implements SceneModule {
     trolley.setTime(time);
 
     rig.update(frame.dtReal);
-
-    if (this.debugOn && this.overlay) this.overlay.setState(state);
   }
 
   resize(size: SceneSize): void {
-    const aspect = size.height > 0 ? size.width / size.height : 16 / 9;
-    this.rig?.resize(aspect);
+    super.resize(size);
     this.trolley?.setPixelRatio(size.dpr);
-    this.world?.setPixelRatio(size.dpr);
-    this.pool?.setPixelRatio(size.dpr);
   }
 
-  setDebug(on: boolean): void {
-    this.debugOn = on;
-    if (this.overlay) this.overlay.visible = on;
-  }
-
-  dispose(): void {
-    this.overlay?.dispose();
-    this.overlay = null;
+  protected drop(): void {
     this.trolley?.dispose();
     this.trolley = null;
-    this.world?.dispose();
-    this.world = null;
-    this.rig?.dispose();
-    this.rig = null;
-    disposeCelebrations(this.scene);
-    this.pool = null;
-    this.scene.clear();
-    this.scene.fog = null;
-    this.ctx = null;
     this.fallAt = -Infinity;
   }
 }
