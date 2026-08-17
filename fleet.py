@@ -809,6 +809,7 @@ def cmd_report(args) -> int:
                         "phi": fl_list(phi[lanes]),
                         "deathStep": [run["deaths"].get(int(l)) for l in lanes]},
             "curves": {"percentileSeeds": pick,
+                       "iqmZ": fl_list(row_iqm(z_rates[:, lanes])),
                        "rateZ": {q: fl_list(z_rates[:, lane_of[s]]) for q, s in pick.items()}},
         }
         if plast_fields:
