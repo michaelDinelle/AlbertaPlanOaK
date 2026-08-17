@@ -29,6 +29,7 @@ import {
   scatterTrees,
   type ExcludeFn,
 } from '@kit/vegetation';
+import { makeWorld, type WorldCore } from '@kit/world';
 import { DELAYEDCHAIN_END, DELAYEDCHAIN_L, delayedChainDecoder } from '@sim/envs/delayedchain';
 import type { EnvGeometry, GridGeometry } from '@sim/types';
 import { buildAurora, type AuroraHandle } from './aurora';
@@ -168,8 +169,7 @@ export function makeMoorHeight(seed: number): (x: number, z: number) => number {
 }
 
 
-export interface WorldHandle {
-  group: THREE.Group;
+export interface WorldHandle extends WorldCore {
   sky: SkyHandle;
   rig: LightRig;
   terrain: TerrainHandle;
@@ -177,26 +177,13 @@ export interface WorldHandle {
   aurora: AuroraHandle;
   skin: MoorSkin;
   pools: readonly MoonPool[];
-  setTime(t: number): void;
-  setPixelRatio(dpr: number): void;
-  dispose(): void;
 }
 
-interface Disposable {
-  dispose(): void;
-}
-
-interface Timed {
-  setTime(t: number): void;
-}
 
 export function buildWorld(ctx: SceneContext, scene: THREE.Scene, grid: GridGeometry): WorldHandle {
   const palette: Palette = ctx.tokens.palettes.night;
   const skin = moorSkin(palette, ctx.tokens);
-  const group = new THREE.Group();
-  group.name = 'longNightRoad';
-  const owned: Disposable[] = [];
-  const timed: Timed[] = [];
+  const w = makeWorld('longNightRoad');
 
   const sky = skyFromPalette(palette, 'night', {
     sunDir: MOON_DIR,
@@ -210,9 +197,9 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene, grid: GridGeom
     radius: 420,
     name: 'nightSky',
   });
-  group.add(sky.mesh);
-  owned.push(sky);
-  timed.push({ setTime: (t) => sky.setTime(t) });
+  w.add(sky.mesh);
+  w.own(sky);
+  w.time({ setTime: (t) => sky.setTime(t) });
 
   const rig = makeLightRig(palette, {
     sunDir: sky.sunDirection,
@@ -220,8 +207,8 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene, grid: GridGeom
     pointDistance: 9,
     sunDistanceScale: 2.2,
   });
-  group.add(rig.group);
-  owned.push(rig);
+  w.add(rig.group);
+  w.own(rig);
   rig.setShadowFocus({ x: 0, y: 0.3, z: 0 }, SHADOW_RADIUS);
 
   applyFog(scene, palette, FOG_EXTENT);
@@ -255,8 +242,8 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene, grid: GridGeom
     castShadow: false,
     name: 'moorTerrain',
   });
-  group.add(terrain.mesh);
-  owned.push(terrain);
+  w.add(terrain.mesh);
+  w.own(terrain);
 
   const pools = moonPools(ctx.seed, MOON_POOL_COUNT, grid.w);
   const field = buildCellField(
@@ -279,9 +266,9 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene, grid: GridGeom
       name: 'roadFlagstones',
     },
   );
-  group.add(field.group);
-  owned.push(field);
-  timed.push({ setTime: (t) => field.setTime(t) });
+  w.add(field.group);
+  w.own(field);
+  w.time({ setTime: (t) => field.setTime(t) });
 
   {
     const parts: ColoredPart[] = [];
@@ -306,8 +293,8 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene, grid: GridGeom
     const mesh = new THREE.Mesh(geometry, material);
     mesh.name = 'roadVerge';
     mesh.receiveShadow = true;
-    group.add(mesh);
-    owned.push({
+    w.add(mesh);
+    w.own({
       dispose: () => {
         geometry.dispose();
         material.dispose();
@@ -322,9 +309,9 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene, grid: GridGeom
     radius: AURORA_RADIUS,
     name: 'endAurora',
   });
-  group.add(aurora.group);
-  owned.push(aurora);
-  timed.push({ setTime: (t) => aurora.setTime(t) });
+  w.add(aurora.group);
+  w.own(aurora);
+  w.time({ setTime: (t) => aurora.setTime(t) });
 
   const offRoad: ExcludeFn = excludeBand(0, ROAD_HALF_Z + 0.42, 0.24);
   const nearCamera: ExcludeFn = excludeRect(0, CAMERA_LANE_Z, ROAD_HALF + 12, 1.9, 0.4);
@@ -347,9 +334,8 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene, grid: GridGeom
     castShadow: false,
     name: 'moorGrass',
   });
-  group.add(grassField.group);
-  owned.push(grassField);
-  timed.push(grassField);
+  w.add(grassField.group);
+  w.time(w.own(grassField));
 
   const heather = scatterFlowers({
     count: 760,
@@ -369,9 +355,8 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene, grid: GridGeom
     castShadow: false,
     name: 'moorHeather',
   });
-  group.add(heather.group);
-  owned.push(heather);
-  timed.push(heather);
+  w.add(heather.group);
+  w.time(w.own(heather));
 
   const stones = scatterRocks({
     count: 260,
@@ -389,9 +374,8 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene, grid: GridGeom
     castShadow: true,
     name: 'moorStones',
   });
-  group.add(stones.group);
-  owned.push(stones);
-  timed.push(stones);
+  w.add(stones.group);
+  w.time(w.own(stones));
 
   const thorns = scatterTrees({
     archetypes: ['bare'],
@@ -412,9 +396,8 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene, grid: GridGeom
     castShadow: false,
     name: 'moorThorns',
   });
-  group.add(thorns.group);
-  owned.push(thorns);
-  timed.push(thorns);
+  w.add(thorns.group);
+  w.time(w.own(thorns));
 
   const mist: MistPlanesHandle = makeMistPlanes({
     size: [110, 54],
@@ -429,9 +412,8 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene, grid: GridGeom
     nearFade: 6,
     name: 'moorMist',
   });
-  group.add(mist.group);
-  owned.push(mist);
-  timed.push(mist);
+  w.add(mist.group);
+  w.time(w.own(mist));
 
   const motes: AmbientParticlesHandle = makeAmbientParticles({
     preset: 'dust',
@@ -446,12 +428,10 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene, grid: GridGeom
     swirl: 0.24,
     name: 'moorMotes',
   });
-  group.add(motes.points);
-  owned.push(motes);
-  timed.push(motes);
+  w.add(motes.points);
+  w.size(w.time(w.own(motes)));
 
-  return {
-    group,
+  return w.seal({
     sky,
     rig,
     terrain,
@@ -459,20 +439,7 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene, grid: GridGeom
     aurora,
     skin,
     pools,
-    setTime(t) {
-      for (let i = 0; i < timed.length; i++) timed[i]?.setTime(t);
-    },
-    setPixelRatio(dpr) {
-      motes.setPixelRatio(dpr);
-    },
-    dispose() {
-      for (let i = owned.length - 1; i >= 0; i--) owned[i]?.dispose();
-      owned.length = 0;
-      timed.length = 0;
-      group.removeFromParent();
-      group.clear();
-    },
-  };
+  });
 }
 
 

@@ -30,6 +30,7 @@ import {
   scatterTrees,
   type ExcludeFn,
 } from '@kit/vegetation';
+import { makeWorld, type WorldCore } from '@kit/world';
 import {
   HIGHDIMMAZE_GAPS,
   HIGHDIMMAZE_H,
@@ -237,8 +238,7 @@ export function makeMesaHeight(seed: number): (x: number, z: number) => number {
 }
 
 
-export interface WorldHandle {
-  group: THREE.Group;
+export interface WorldHandle extends WorldCore {
   sky: SkyHandle;
   rig: LightRig;
   terrain: TerrainHandle;
@@ -246,26 +246,13 @@ export interface WorldHandle {
   archRoots: THREE.Object3D[];
   gaps: readonly GridCell[];
   wallHeights: Float32Array;
-  setTime(t: number): void;
-  setPixelRatio(dpr: number): void;
-  dispose(): void;
 }
 
-interface Disposable {
-  dispose(): void;
-}
-
-interface Timed {
-  setTime(t: number): void;
-}
 
 export function buildWorld(ctx: SceneContext, scene: THREE.Scene, grid: GridGeometry): WorldHandle {
   const palette: Palette = ctx.tokens.palettes.afternoon;
   const skin = canyonSkin(palette, ctx.tokens);
-  const group = new THREE.Group();
-  group.name = 'slotCanyons';
-  const owned: Disposable[] = [];
-  const timed: Timed[] = [];
+  const w = makeWorld('slotCanyons');
 
   const sky = skyFromPalette(palette, 'afternoon', {
     sunDir: SUN_DIR,
@@ -277,9 +264,9 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene, grid: GridGeom
     bottomSpread: 0.42,
     radius: 340,
   });
-  group.add(sky.mesh);
-  owned.push(sky);
-  timed.push({ setTime: (t) => sky.setTime(t) });
+  w.add(sky.mesh);
+  w.own(sky);
+  w.time({ setTime: (t) => sky.setTime(t) });
 
   const rig = makeLightRig(palette, {
     sunDir: sky.sunDirection,
@@ -287,8 +274,8 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene, grid: GridGeom
     pointDistance: 6,
     sunDistanceScale: 2.4,
   });
-  group.add(rig.group);
-  owned.push(rig);
+  w.add(rig.group);
+  w.own(rig);
   rig.hemi.intensity = palette.hemiIntensity * 1.35;
   rig.setShadowFocus({ x: 0, y: 0.5, z: 0 }, SHADOW_RADIUS);
 
@@ -322,8 +309,8 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene, grid: GridGeom
     castShadow: false,
     name: 'canyonDesert',
   });
-  group.add(terrain.mesh);
-  owned.push(terrain);
+  w.add(terrain.mesh);
+  w.own(terrain);
 
   const white = palette.sun;
   const field = buildCellField(
@@ -350,9 +337,9 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene, grid: GridGeom
       name: 'canyonCells',
     },
   );
-  group.add(field.group);
-  owned.push(field);
-  timed.push({ setTime: (t) => field.setTime(t) });
+  w.add(field.group);
+  w.own(field);
+  w.time({ setTime: (t) => field.setTime(t) });
 
   const wallHeights = applyWallHeights(field, grid, ctx.seed);
 
@@ -369,8 +356,8 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene, grid: GridGeom
     toonFloor: 0.26,
     name: 'canyonStrataMaterial',
   });
-  owned.push({ dispose: () => strataMaterial.dispose() });
-  owned.push({ dispose: () => strataGeometry.dispose() });
+  w.own({ dispose: () => strataMaterial.dispose() });
+  w.own({ dispose: () => strataGeometry.dispose() });
   {
     let count = 0;
     for (let i = 0; i < wallHeights.length; i++) if ((wallHeights[i] ?? 0) > 0) count++;
@@ -405,8 +392,8 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene, grid: GridGeom
     mesh.instanceMatrix.needsUpdate = true;
     if (mesh.instanceColor) mesh.instanceColor.needsUpdate = true;
     mesh.computeBoundingSphere();
-    group.add(mesh);
-    owned.push({ dispose: () => mesh.dispose() });
+    w.add(mesh);
+    w.own({ dispose: () => mesh.dispose() });
   }
 
   const gaps = resolveGaps(grid);
@@ -422,7 +409,7 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene, grid: GridGeom
     toonFloor: 0.42,
     name: 'canyonArchMaterial',
   });
-  owned.push({ dispose: () => archMaterial.dispose() });
+  w.own({ dispose: () => archMaterial.dispose() });
   const archRoots: THREE.Object3D[] = [];
   {
     const world: Vec3Tuple = [0, 0, 0];
@@ -446,9 +433,9 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene, grid: GridGeom
       mesh.castShadow = true;
       mesh.receiveShadow = true;
       root.add(mesh);
-      group.add(root);
+      w.add(root);
       archRoots.push(root);
-      owned.push({ dispose: () => geometry.dispose() });
+      w.own({ dispose: () => geometry.dispose() });
     }
   }
 
@@ -470,8 +457,8 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene, grid: GridGeom
     mesh.name = 'canyonMesaLine';
     mesh.castShadow = false;
     mesh.receiveShadow = false;
-    group.add(mesh);
-    owned.push({ dispose: () => { geometry.dispose(); material.dispose(); } });
+    w.add(mesh);
+    w.own({ dispose: () => { geometry.dispose(); material.dispose(); } });
   }
 
   const offCanyon = excludeRect(0, 0, CANYON_HALF, CANYON_HALF, 0.7);
@@ -500,9 +487,8 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene, grid: GridGeom
     rimStrength: 0.36,
     name: 'desertScrub',
   });
-  group.add(scrub.group);
-  owned.push(scrub);
-  timed.push(scrub);
+  w.add(scrub.group);
+  w.time(w.own(scrub));
 
   const boulders = scatterRocks({
     count: 340,
@@ -520,9 +506,8 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene, grid: GridGeom
     castShadow: true,
     name: 'desertBoulders',
   });
-  group.add(boulders.group);
-  owned.push(boulders);
-  timed.push(boulders);
+  w.add(boulders.group);
+  w.time(w.own(boulders));
 
   const outcrops = scatterRocks({
     count: 30,
@@ -540,9 +525,8 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene, grid: GridGeom
     castShadow: true,
     name: 'desertOutcrops',
   });
-  group.add(outcrops.group);
-  owned.push(outcrops);
-  timed.push(outcrops);
+  w.add(outcrops.group);
+  w.time(w.own(outcrops));
 
   const junipers = scatterTrees({
     archetypes: ['bare'],
@@ -563,9 +547,8 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene, grid: GridGeom
     castShadow: true,
     name: 'deadJunipers',
   });
-  group.add(junipers.group);
-  owned.push(junipers);
-  timed.push(junipers);
+  w.add(junipers.group);
+  w.time(w.own(junipers));
 
   const scree = scatterRocks({
     count: 120,
@@ -581,11 +564,9 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene, grid: GridGeom
     castShadow: false,
     name: 'canyonScree',
   });
-  group.add(scree.group);
-  owned.push(scree);
-  timed.push(scree);
+  w.add(scree.group);
+  w.time(w.own(scree));
 
-  const motes: AmbientParticlesHandle[] = [];
   const dust = makeAmbientParticles({
     preset: 'dust',
     count: 220,
@@ -599,10 +580,8 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene, grid: GridGeom
     swirl: 0.16,
     name: 'canyonDust',
   });
-  group.add(dust.points);
-  owned.push(dust);
-  timed.push(dust);
-  motes.push(dust);
+  w.add(dust.points);
+  w.size(w.time(w.own(dust)));
 
   for (const spot of sandFallSpots(grid, ctx.seed, 4)) {
     const fall = makeAmbientParticles({
@@ -618,10 +597,8 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene, grid: GridGeom
       swirl: 0.05,
       name: `canyonSandFall${spot.index}`,
     });
-    group.add(fall.points);
-    owned.push(fall);
-    timed.push(fall);
-    motes.push(fall);
+    w.add(fall.points);
+    w.size(w.time(w.own(fall)));
   }
 
   const shimmer = makeMistPlanes({
@@ -637,12 +614,10 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene, grid: GridGeom
     nearFade: 2,
     name: 'canyonHeatShimmer',
   });
-  group.add(shimmer.group);
-  owned.push(shimmer);
-  timed.push(shimmer);
+  w.add(shimmer.group);
+  w.time(w.own(shimmer));
 
-  return {
-    group,
+  return w.seal({
     sky,
     rig,
     terrain,
@@ -650,21 +625,7 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene, grid: GridGeom
     archRoots,
     gaps,
     wallHeights,
-    setTime(t) {
-      for (let i = 0; i < timed.length; i++) timed[i]?.setTime(t);
-    },
-    setPixelRatio(dpr) {
-      for (let i = 0; i < motes.length; i++) motes[i]?.setPixelRatio(dpr);
-    },
-    dispose() {
-      for (let i = owned.length - 1; i >= 0; i--) owned[i]?.dispose();
-      owned.length = 0;
-      timed.length = 0;
-      motes.length = 0;
-      group.removeFromParent();
-      group.clear();
-    },
-  };
+  });
 }
 
 

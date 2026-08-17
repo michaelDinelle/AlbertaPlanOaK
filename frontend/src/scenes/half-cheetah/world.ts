@@ -16,6 +16,7 @@ import { makeTerrain, type TerrainHandle } from '@kit/terrain';
 import { TOKENS, type Palette } from '@kit/tokens';
 import type { SceneContext } from '@kit/types';
 import { grassClumpGeometry, rockGeometry } from '@kit/vegetation';
+import { makeWorld, type WorldCore } from '@kit/world';
 
 
 export const LANE_HALF_Z = 0.62;
@@ -328,35 +329,21 @@ function birdGeometry(): THREE.BufferGeometry {
 }
 
 
-export interface WorldHandle {
-  group: THREE.Group;
+export interface WorldHandle extends WorldCore {
   sky: SkyHandle;
   rig: LightRig;
   terrain: TerrainHandle;
   setOrigin(rootX: number): void;
-  setTime(t: number): void;
   setSpeed(speed01: number): void;
   setShadowTarget(x: number): void;
-  setPixelRatio(dpr: number): void;
-  dispose(): void;
 }
 
-interface Disposable {
-  dispose(): void;
-}
-
-interface Timed {
-  setTime(t: number): void;
-}
 
 const BIRDS = 4;
 
 export function buildWorld(ctx: SceneContext, scene: THREE.Scene): WorldHandle {
   const palette: Palette = ctx.tokens.palettes.dusk;
-  const group = new THREE.Group();
-  group.name = 'goldHourSavanna';
-  const owned: Disposable[] = [];
-  const timed: Timed[] = [];
+  const w = makeWorld('goldHourSavanna');
   const veg = 1;
 
   const cDust = blendTokens(blendTokens(palette.groundA, palette.hemiGround, 0.72), TOKEN_BLACK, 0.4);
@@ -380,9 +367,9 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene): WorldHandle {
     bottomSpread: 0.3,
     radius: 320,
   });
-  group.add(sky.mesh);
-  owned.push(sky);
-  timed.push({ setTime: (t) => sky.setTime(t) });
+  w.add(sky.mesh);
+  w.own(sky);
+  w.time({ setTime: (t) => sky.setTime(t) });
 
   const rig = makeLightRig(palette, {
     sunDir: sky.sunDirection,
@@ -390,8 +377,8 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene): WorldHandle {
     pointDistance: 16,
     sunDistanceScale: 3.2,
   });
-  group.add(rig.group);
-  owned.push(rig);
+  w.add(rig.group);
+  w.own(rig);
   rig.setShadowFocus({ x: 0, y: 0.35, z: 0 }, SHADOW_RADIUS);
 
   const fog = applyFog(scene, palette, FOG_EXTENT);
@@ -427,8 +414,8 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene): WorldHandle {
     castShadow: false,
     name: 'savannaGround',
   });
-  group.add(terrain.mesh);
-  owned.push(terrain);
+  w.add(terrain.mesh);
+  w.own(terrain);
 
   const grassMaterial: OakMaterial = oakMaterial({
     color: TOKEN_WHITE,
@@ -468,8 +455,8 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene): WorldHandle {
     name: 'savannaStoneMaterial',
   });
   const animated: OakMaterial[] = [grassMaterial, treeMaterial];
-  timed.push({ setTime: (t) => setMaterialsTime(animated, t) });
-  owned.push({
+  w.time({ setTime: (t) => setMaterialsTime(animated, t) });
+  w.own({
     dispose: () => {
       grassMaterial.dispose();
       treeMaterial.dispose();
@@ -478,7 +465,7 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene): WorldHandle {
   });
 
   const grassGeometry = grassClumpGeometry(5, 0.42, 0.05);
-  owned.push({ dispose: () => grassGeometry.dispose() });
+  w.own({ dispose: () => grassGeometry.dispose() });
   const grassPerTile = Math.max(8, Math.round(520 * veg));
   const grassBank = makeTileBank({
     geometry: grassGeometry,
@@ -517,11 +504,11 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene): WorldHandle {
       }
     },
   });
-  group.add(grassBank.mesh);
-  owned.push(grassBank);
+  w.add(grassBank.mesh);
+  w.own(grassBank);
 
   const acaciaGeo = acaciaGeometry(1, cBark, cLeafLow, cLeafHigh);
-  owned.push({ dispose: () => acaciaGeo.dispose() });
+  w.own({ dispose: () => acaciaGeo.dispose() });
   const acaciaBank = makeTileBank({
     geometry: acaciaGeo,
     material: treeMaterial,
@@ -543,11 +530,11 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene): WorldHandle {
       }
     },
   });
-  group.add(acaciaBank.mesh);
-  owned.push(acaciaBank);
+  w.add(acaciaBank.mesh);
+  w.own(acaciaBank);
 
   const rockGeo = rockGeometry(1.7, 1);
-  owned.push({ dispose: () => rockGeo.dispose() });
+  w.own({ dispose: () => rockGeo.dispose() });
   const rockBank = makeTileBank({
     geometry: rockGeo,
     material: stoneMaterial,
@@ -575,11 +562,11 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene): WorldHandle {
       }
     },
   });
-  group.add(rockBank.mesh);
-  owned.push(rockBank);
+  w.add(rockBank.mesh);
+  w.own(rockBank);
 
   const cairnGeo = cairnGeometry(ctx.seed, cStone, cStoneLight);
-  owned.push({ dispose: () => cairnGeo.dispose() });
+  w.own({ dispose: () => cairnGeo.dispose() });
   const CAIRNS = 9;
   const cairns = new THREE.InstancedMesh(cairnGeo, stoneMaterial, CAIRNS);
   cairns.name = 'savannaCairns';
@@ -593,8 +580,8 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene): WorldHandle {
       cairns.setColorAt(i, c);
     }
   }
-  group.add(cairns);
-  owned.push({
+  w.add(cairns);
+  w.own({
     dispose: () => {
       cairns.dispose();
       cairns.removeFromParent();
@@ -619,8 +606,8 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene): WorldHandle {
   ridge.name = 'savannaRidge';
   ridge.position.z = RIDGE_Z;
   ridge.frustumCulled = false;
-  group.add(ridge);
-  owned.push({
+  w.add(ridge);
+  w.own({
     dispose: () => {
       ridgeGeo.dispose();
       ridgeMaterial.dispose();
@@ -656,8 +643,8 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene): WorldHandle {
   markers.name = 'savannaMarkers';
   markers.frustumCulled = false;
   markers.instanceColor = new THREE.InstancedBufferAttribute(new Float32Array(CAIRNS * 3), 3);
-  group.add(markers);
-  owned.push({
+  w.add(markers);
+  w.own({
     dispose: () => {
       markers.dispose();
       clothGeo.dispose();
@@ -687,9 +674,8 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene): WorldHandle {
     name: 'savannaHaze',
   });
   haze.group.position.z = -38;
-  group.add(haze.group);
-  owned.push(haze);
-  timed.push(haze);
+  w.add(haze.group);
+  w.time(w.own(haze));
 
   const pollen: AmbientParticlesHandle = makeAmbientParticles({
     preset: 'pollen',
@@ -704,9 +690,8 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene): WorldHandle {
     swirl: 0.22,
     name: 'savannaPollen',
   });
-  group.add(pollen.points);
-  owned.push(pollen);
-  timed.push(pollen);
+  w.add(pollen.points);
+  w.size(w.time(w.own(pollen)));
 
   const birdGeo = birdGeometry();
   const birdMaterial = oakMaterial({
@@ -737,8 +722,8 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene): WorldHandle {
       birdWings.push(pivot);
     }
   }
-  group.add(birdGroup);
-  owned.push({
+  w.add(birdGroup);
+  w.own({
     dispose: () => {
       birdGeo.dispose();
       birdMaterial.dispose();
@@ -787,8 +772,7 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene): WorldHandle {
   const shadowOffsetX = -sky.sunDirection.x * 1.1;
   const shadowOffsetZ = -sky.sunDirection.z * 1.1;
 
-  const world: WorldHandle = {
-    group,
+  const world: WorldHandle = w.seal({
     sky,
     rig,
     terrain,
@@ -822,8 +806,8 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene): WorldHandle {
       pollen.setDensity(0.45 + 0.55 * s);
     },
 
-    setTime(t) {
-      for (let i = 0; i < timed.length; i++) timed[i]?.setTime(t);
+  }, {
+    time: (t) => {
       for (let i = 0; i < birdWings.length; i++) {
         const pivot = birdWings[i];
         const mesh = birds[i];
@@ -837,21 +821,11 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene): WorldHandle {
         mesh.scale.set(1.6 + 0.35 * i, 1 + 0.28 * flap, 1);
       }
     },
-
-    setPixelRatio(dpr) {
-      pollen.setPixelRatio(dpr);
-    },
-
-    dispose() {
-      for (let i = owned.length - 1; i >= 0; i--) owned[i]?.dispose();
-      owned.length = 0;
-      timed.length = 0;
+    drop: () => {
       birds.length = 0;
       birdWings.length = 0;
-      group.removeFromParent();
-      group.clear();
     },
-  };
+  });
 
   world.setOrigin(0);
   world.setShadowTarget(0);
