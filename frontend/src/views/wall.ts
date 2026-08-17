@@ -47,12 +47,12 @@ import {
 import { clampPosition, formatClock, stepPosition } from '../theater/player';
 import { mountSceneHost, type HostFrameInfo, type SceneHostHandle } from '../theater/sceneHost';
 
-export const WALL_SPEEDS: readonly number[] = [1, 4, 16, 64, 256, 1024];
+const WALL_SPEEDS: readonly number[] = [1, 4, 16, 64, 256, 1024];
 
-export const DEFAULT_SPEED = 1;
+const DEFAULT_SPEED = 1;
 
-export type WallSort = 'rate' | 'seed' | 'retention';
-export const WALL_SORTS: readonly WallSort[] = ['rate', 'seed', 'retention'];
+type WallSort = 'rate' | 'seed' | 'retention';
+const WALL_SORTS: readonly WallSort[] = ['rate', 'seed', 'retention'];
 
 const SORT_LABEL: Record<WallSort, string> = {
   rate: 'reward rate',
@@ -60,7 +60,7 @@ const SORT_LABEL: Record<WallSort, string> = {
   retention: 'retention',
 };
 
-export interface WallParams {
+interface WallParams {
   run?: string;
   env?: EnvId;
   seed?: number;
@@ -69,7 +69,7 @@ export interface WallParams {
   sort?: WallSort;
 }
 
-export function parseWallParams(hash: string): WallParams {
+function parseWallParams(hash: string): WallParams {
   const out: WallParams = {};
   const q = hash.indexOf('?');
   if (q < 0) return out;
@@ -106,7 +106,7 @@ export function parseWallParams(hash: string): WallParams {
   return out;
 }
 
-export function wallHref(params: WallParams = {}): string {
+function wallHref(params: WallParams = {}): string {
   const parts: string[] = [];
   const push = (key: string, value: string): void => {
     parts.push(`${key}=${encodeURIComponent(value)}`);
@@ -120,20 +120,20 @@ export function wallHref(params: WallParams = {}): string {
   return parts.length > 0 ? `#/?${parts.join('&')}` : '#/';
 }
 
-export function urlPosition(clockPosition: number | null, pending: number): number | null {
+function urlPosition(clockPosition: number | null, pending: number): number | null {
   const at = clockPosition !== null && Number.isFinite(clockPosition) ? clockPosition : pending;
   if (!Number.isFinite(at) || at <= 0) return null;
   return Math.floor(at);
 }
 
-export type FeaturedSource = 'param' | 'keeper' | 'newest' | null;
+type FeaturedSource = 'param' | 'keeper' | 'newest' | null;
 
-export interface FeaturedPick {
+interface FeaturedPick {
   runId: string | null;
   source: FeaturedSource;
 }
 
-export function resolveFeaturedRun(
+function resolveFeaturedRun(
   entries: readonly RunIndexEntry[],
   requested?: string,
 ): FeaturedPick {
@@ -162,16 +162,16 @@ export function resolveFeaturedRun(
   return { runId: null, source: null };
 }
 
-export interface HeroSelection {
+interface HeroSelection {
   leader: number | null;
   promoted: number | null;
 }
 
-export function heroSeed(selection: HeroSelection): number | null {
+function heroSeed(selection: HeroSelection): number | null {
   return selection.promoted ?? selection.leader;
 }
 
-export function promoteSeed(
+function promoteSeed(
   selection: HeroSelection,
   seed: number,
   playable: (seed: number) => boolean,
@@ -181,12 +181,12 @@ export function promoteSeed(
   return { ...selection, promoted: seed };
 }
 
-export function escapeSelection(selection: HeroSelection): HeroSelection {
+function escapeSelection(selection: HeroSelection): HeroSelection {
   if (selection.promoted === null) return selection;
   return { ...selection, promoted: null };
 }
 
-export function setLeader(
+function setLeader(
   selection: HeroSelection,
   leader: number | null,
   playable: (seed: number) => boolean,
@@ -195,7 +195,7 @@ export function setLeader(
   return { leader, promoted };
 }
 
-export function degradedReason(
+function degradedReason(
   recordings: readonly RecordingRef[],
   envId: EnvId | null,
 ): string | null {
@@ -205,9 +205,9 @@ export function degradedReason(
   return null;
 }
 
-export const RECORD_RECIPE = 'This run has no recording for that selection.';
+const RECORD_RECIPE = 'This run has no recording for that selection.';
 
-export interface SeedRow {
+interface SeedRow {
   seed: number;
   lane: number;
   rate: number | null;
@@ -218,7 +218,7 @@ export interface SeedRow {
   recorded: boolean;
 }
 
-export function buildSeedRows(
+function buildSeedRows(
   tape: Tape,
   meta: Pick<RunMeta, 'envSchedule' | 'seeds' | 'steps'>,
   envId: string,
@@ -240,7 +240,7 @@ export function buildSeedRows(
   })).sort((a, b) => a.seed - b.seed);
 }
 
-export function sortPermutation(rows: readonly SeedRow[], sort: WallSort): number[] {
+function sortPermutation(rows: readonly SeedRow[], sort: WallSort): number[] {
   const order = rows.map((_, index) => index);
   const direction = sort === 'seed' ? 1 : -1;
   const keyOf = (row: SeedRow): number | null =>
@@ -262,12 +262,12 @@ export function sortPermutation(rows: readonly SeedRow[], sort: WallSort): numbe
   return order;
 }
 
-export function nextSort(sort: WallSort): WallSort {
+function nextSort(sort: WallSort): WallSort {
   const index = WALL_SORTS.indexOf(sort);
   return WALL_SORTS[(index + 1) % WALL_SORTS.length] ?? 'rate';
 }
 
-export interface PopulationFigures {
+interface PopulationFigures {
   positive: string;
   nonDiverged: string;
   retention: string;
@@ -279,7 +279,7 @@ function finite(value: unknown): number | null {
   return typeof value === 'number' && Number.isFinite(value) ? value : null;
 }
 
-export function populationFigures(
+function populationFigures(
   slice: EnvResult | null,
   rows: readonly SeedRow[],
 ): PopulationFigures {
@@ -316,7 +316,7 @@ export function populationFigures(
   };
 }
 
-export function runScheduleLine(meta: Pick<RunMeta, 'batch' | 'steps' | 'envSchedule'>): string {
+function runScheduleLine(meta: Pick<RunMeta, 'batch' | 'steps' | 'envSchedule'>): string {
   const shares = envShares(meta);
   const horizon = `${formatStep(meta.steps)} steps`;
   if (shares.length === 0) return `${formatCount(meta.batch)} seeds · ${horizon}`;
@@ -329,7 +329,7 @@ export function runScheduleLine(meta: Pick<RunMeta, 'batch' | 'steps' | 'envSche
   return `${shares.length} tasks × ${seeds} × ${horizon}`;
 }
 
-export type WallAction =
+type WallAction =
   | { kind: 'toggle' }
   | { kind: 'step'; frames: number }
   | { kind: 'env'; direction: 1 | -1 }
@@ -338,7 +338,7 @@ export type WallAction =
   | { kind: 'fullscreen' }
   | { kind: 'escape' };
 
-export function wallKeyAction(key: string, shift = false): WallAction | null {
+function wallKeyAction(key: string, shift = false): WallAction | null {
   switch (key) {
     case ' ':
     case 'Spacebar':
@@ -371,21 +371,21 @@ export function wallKeyAction(key: string, shift = false): WallAction | null {
   }
 }
 
-export function cycleEnv(list: readonly EnvId[], current: EnvId | null, direction: 1 | -1): EnvId | null {
+function cycleEnv(list: readonly EnvId[], current: EnvId | null, direction: 1 | -1): EnvId | null {
   if (list.length === 0) return null;
   const index = current === null ? -1 : list.indexOf(current);
   const next = index < 0 ? (direction > 0 ? 0 : list.length - 1) : (index + direction + list.length) % list.length;
   return list[next] ?? null;
 }
 
-export function wallEnvs(meta: Pick<RunMeta, 'envSchedule'>, recordings: readonly RecordingRef[]): EnvId[] {
+function wallEnvs(meta: Pick<RunMeta, 'envSchedule'>, recordings: readonly RecordingRef[]): EnvId[] {
   const seen = new Set<EnvId>();
   for (const share of envShares(meta)) seen.add(share.envId);
   for (const rec of recordings) if (isEnvId(rec.envId)) seen.add(rec.envId);
   return ENV_IDS.filter((id) => seen.has(id));
 }
 
-export function nextRowDueMs(tape: Pick<Tape, 'rows' | 'wallSeconds'> | null): number {
+function nextRowDueMs(tape: Pick<Tape, 'rows' | 'wallSeconds'> | null): number {
   if (tape === null || tape.rows < 2) return 0;
   const last = tape.wallSeconds[tape.rows - 1];
   const prev = tape.wallSeconds[tape.rows - 2];
@@ -394,7 +394,7 @@ export function nextRowDueMs(tape: Pick<Tape, 'rows' | 'wallSeconds'> | null): n
   return Number.isFinite(perRow) && perRow > 0 ? perRow : 0;
 }
 
-export function tapeWindowSteps(tape: Pick<Tape, 'stepStart' | 'stepEnd'>): number {
+function tapeWindowSteps(tape: Pick<Tape, 'stepStart' | 'stepEnd'>): number {
   const window = (tape.stepEnd[0] ?? 0) - (tape.stepStart[0] ?? 0);
   return window > 0 ? window : 1;
 }

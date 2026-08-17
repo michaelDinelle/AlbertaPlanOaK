@@ -49,6 +49,7 @@ export function largeDeepSeaNextCol(
 
 export const largeDeepSeaDecoder: EnvDecoder<LargeDeepSeaStatic> = {
   envId: 'LargeDeepSea-cont-v0',
+  seedGeometry: true,
 
   initStatic(seed: number): LargeDeepSeaStatic {
     const words = largeDeepSeaMaskWords(seed);
@@ -57,7 +58,6 @@ export const largeDeepSeaDecoder: EnvDecoder<LargeDeepSeaStatic> = {
 
   geometry(st: LargeDeepSeaStatic): EnvGeometry {
     return {
-      kind: 'grid',
       grid: {
         w: LARGE_DEEPSEA_N,
         h: LARGE_DEEPSEA_N,

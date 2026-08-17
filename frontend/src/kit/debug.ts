@@ -123,8 +123,8 @@ export class GroundTruthOverlay {
     this.materials.push(main, wall, goal);
 
     if (this.grid) this.buildGrid(this.grid, main, wall, goal);
-    if (geometry.kind === 'cheetah' && geometry.cheetah) this.buildCheetah(main, goal);
-    if (geometry.kind === 'classic' && geometry.classic) this.buildClassic(main, goal);
+    if (geometry.cheetah) this.buildCheetah(main, goal);
+    if (geometry.classic) this.buildClassic(main, goal);
 
     applyDebugLayer(this.group);
     this.group.visible = false;
@@ -145,8 +145,8 @@ export class GroundTruthOverlay {
 
   setState(state: FrameState): void {
     if (this.grid) this.updateGrid(state, this.grid);
-    if (this.geometry.kind === 'cheetah') this.updateCheetah(state);
-    if (this.geometry.kind === 'classic') this.updateClassic(state);
+    if (this.skeletonPos) this.updateCheetah(state);
+    if (this.classicMarker) this.updateClassic(state);
   }
 
   dispose(): void {

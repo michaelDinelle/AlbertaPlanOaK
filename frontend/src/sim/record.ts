@@ -27,7 +27,6 @@ export interface PoseFieldSpec {
 }
 
 export interface CodecDescriptor {
-  readonly category: 'grid' | 'classic' | 'cheetah';
   readonly poseFields: readonly PoseFieldSpec[];
 }
 
@@ -35,7 +34,6 @@ export const RECORD_ENV_KINDS: readonly EnvId[] = ENV_IDS;
 
 export function codecFromEntry(entry: EnvEntry): CodecDescriptor {
   return {
-    category: entry.category,
     poseFields: entry.fields.map((f) => ({
       idx: f.slot,
       scale: f.scale,

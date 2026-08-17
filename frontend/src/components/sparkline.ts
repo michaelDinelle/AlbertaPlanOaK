@@ -15,7 +15,6 @@ export interface SparklineSpec {
 
 export interface SparklineHandle {
   root: HTMLElement;
-  update(values: readonly (number | null)[]): void;
   destroy(): void;
 }
 
@@ -25,7 +24,7 @@ const SURFACE = '#121722';
 
 export function sparkline(spec: SparklineSpec): SparklineHandle {
   const height = spec.height ?? 32;
-  let values = [...spec.values];
+  const values = spec.values;
 
   const canvas = el('canvas', { class: 'spark-canvas' });
   const root = el('div', {
@@ -143,10 +142,6 @@ export function sparkline(spec: SparklineSpec): SparklineHandle {
 
   return {
     root,
-    update(next) {
-      values = [...next];
-      draw();
-    },
     destroy() {
       destroyed = true;
       cancelAnimationFrame(frame);

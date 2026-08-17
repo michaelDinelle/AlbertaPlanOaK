@@ -52,6 +52,7 @@ export function fourRoomsWalls(): Uint8Array {
 
 export const fourRoomsDecoder: EnvDecoder<FourRoomsStatic> = {
   envId: 'FourRooms-cont-v0',
+  seedGeometry: false,
 
   initStatic(seed: number): FourRoomsStatic {
     return { seed, walls: fourRoomsWalls() };
@@ -59,7 +60,6 @@ export const fourRoomsDecoder: EnvDecoder<FourRoomsStatic> = {
 
   geometry(st: FourRoomsStatic): EnvGeometry {
     return {
-      kind: 'grid',
       grid: {
         w: FOURROOMS_W,
         h: FOURROOMS_H,

@@ -15,6 +15,7 @@ export interface ChainStatic {
 
 export const chainDecoder: EnvDecoder<ChainStatic> = {
   envId: 'Chain-cont-v0',
+  seedGeometry: false,
 
   initStatic(seed: number): ChainStatic {
     return { seed, walls: new Uint8Array(CHAIN_L) };
@@ -22,7 +23,6 @@ export const chainDecoder: EnvDecoder<ChainStatic> = {
 
   geometry(st: ChainStatic): EnvGeometry {
     return {
-      kind: 'grid',
       grid: { w: CHAIN_L, h: 1, walls: st.walls, goal: { x: CHAIN_END, y: 0 } },
     };
   },

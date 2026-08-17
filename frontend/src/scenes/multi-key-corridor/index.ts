@@ -153,7 +153,7 @@ class TempleOfThreeGatesScene implements SceneModule {
   private pool: CelebrationPool | null = null;
   private rig: OrbitRig | null = null;
   private overlay: GroundTruthOverlay | null = null;
-  private grid: GridGeometry = resolveGrid({ kind: 'grid' });
+  private grid: GridGeometry = resolveGrid({});
   private doors: readonly GridCell[] = [];
 
   private growAt = -Infinity;

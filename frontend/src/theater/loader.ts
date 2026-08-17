@@ -142,6 +142,7 @@ export function makeInitialSource(envId: EnvId, seed: number): PlaybackSource {
     seed,
     controlHz: info.controlHz,
     discretePose: info.discretePose,
+    wrapMask: 0,
     geometry: decoder.geometry(st, seed),
     frameCount: 1,
     complete: false,
@@ -182,11 +183,17 @@ export function loadHero(options: HeroOptions): HeroHandle {
   let etag: string | null = null;
   const abort = new AbortController();
 
+  const wrapMask = options.entry.fields.reduce(
+    (mask, field) => (field.wrap ? mask | (1 << field.slot) : mask),
+    0,
+  );
+
   const source: PlaybackSource = {
     envId,
     seed,
     controlHz: info.controlHz,
     discretePose: info.discretePose,
+    wrapMask,
     geometry,
     get frameCount() {
       return lens !== null ? lens.frameCount : 1;

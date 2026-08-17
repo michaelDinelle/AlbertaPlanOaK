@@ -42,6 +42,7 @@ export function deepSeaNextCol(st: DeepSeaStatic, r: number, c: number, action: 
 
 export const deepSeaDecoder: EnvDecoder<DeepSeaStatic> = {
   envId: 'DeepSea-cont-v0',
+  seedGeometry: true,
 
   initStatic(seed: number): DeepSeaStatic {
     const [maskLo, maskHi] = deepSeaMaskWords(seed);
@@ -50,7 +51,6 @@ export const deepSeaDecoder: EnvDecoder<DeepSeaStatic> = {
 
   geometry(st: DeepSeaStatic): EnvGeometry {
     return {
-      kind: 'grid',
       grid: {
         w: DEEPSEA_N,
         h: DEEPSEA_N,

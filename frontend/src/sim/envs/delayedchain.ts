@@ -16,6 +16,7 @@ export interface DelayedChainStatic {
 
 export const delayedChainDecoder: EnvDecoder<DelayedChainStatic> = {
   envId: 'DelayedChain-cont-v0',
+  seedGeometry: false,
 
   initStatic(seed: number): DelayedChainStatic {
     return { seed, walls: new Uint8Array(DELAYEDCHAIN_L) };
@@ -23,7 +24,6 @@ export const delayedChainDecoder: EnvDecoder<DelayedChainStatic> = {
 
   geometry(st: DelayedChainStatic): EnvGeometry {
     return {
-      kind: 'grid',
       grid: { w: DELAYEDCHAIN_L, h: 1, walls: st.walls, goal: { x: DELAYEDCHAIN_END, y: 0 } },
     };
   },

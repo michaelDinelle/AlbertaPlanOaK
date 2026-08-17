@@ -11,7 +11,7 @@ import type {
   SceneSize,
 } from '@kit/types';
 import * as THREE from 'three';
-import { PD_DT, PD_G, PD_L, PD_M, PD_MAX_SPEED, PD_MAX_TORQUE, PENDULUM_TH, PENDULUM_THDOT, PENDULUM_TORQUE, wrapPi } from '@sim/envs/pendulum';
+import { PD_L, PD_MAX_SPEED, PD_MAX_TORQUE, PENDULUM_TH, PENDULUM_THDOT, PENDULUM_TORQUE, wrapPi } from '@sim/envs/pendulum';
 import { buildLanternRig, type LanternRigHandle } from './actors';
 import { manifest } from './manifest';
 import {
@@ -25,17 +25,6 @@ import {
 const CAM_BASE: readonly [number, number, number] = [0.62, 0.41, 6.55];
 const CAM_LOOK: readonly [number, number, number] = [0, -0.09, 0];
 
-
-export const PD_MAX_DTHETADOT = ((1.5 * PD_G) / PD_L + (3 * PD_MAX_TORQUE) / (PD_M * PD_L * PD_L)) * PD_DT;
-const WRAP_SLACK = 0.02;
-export function wrapReach(thetaDot: number, steps: number): number {
-  const ramp = PD_MAX_DTHETADOT * ((steps * (steps + 1)) / 2 + steps);
-  const travel = Math.min(
-    steps * Math.abs(thetaDot) + ramp,
-    steps * (PD_MAX_SPEED + PD_MAX_DTHETADOT),
-  );
-  return travel * PD_DT + WRAP_SLACK;
-}
 
 function torqueOf(state: FrameState): number {
   return state.pose[PENDULUM_TORQUE] ?? 0;
@@ -67,13 +56,6 @@ class LanternBellScene implements SceneModule {
   private pool: CelebrationPool | null = null;
   private overlay: GroundTruthOverlay | null = null;
   private pivot: readonly [number, number, number] = [0, 0, 0];
-
-  private anchorTheta = Number.NaN;
-  private anchorStep = 0;
-  private prevRaw = Number.NaN;
-  private prevStep = 0;
-  private holdStep = Number.NaN;
-  wrapHeld = false;
 
   private debugOn = false;
   private readonly overlayPos: [number, number, number] = [0, 0, 0];
@@ -165,11 +147,6 @@ class LanternBellScene implements SceneModule {
     if (light) light.position.copy(flame);
   }
 
-  private opposes(delta: number, thetaDot: number, steps: number): boolean {
-    if (!Number.isFinite(delta)) return false;
-    return Math.abs(thetaDot) > PD_MAX_DTHETADOT * steps && delta * thetaDot < 0;
-  }
-
   update(frame: FrameUpdate): void {
     const ctx = this.ctx;
     const world = this.world;
@@ -188,40 +165,8 @@ class LanternBellScene implements SceneModule {
     }
 
 
-    const rawTheta = state.pose[PENDULUM_TH] ?? 0;
+    const theta = state.pose[PENDULUM_TH] ?? 0;
     const thetaDot = state.pose[PENDULUM_THDOT] ?? 0;
-    let theta = rawTheta;
-    this.wrapHeld = false;
-    if (frame.scrubbed || !Number.isFinite(this.anchorTheta)) {
-      this.anchorTheta = rawTheta;
-      this.anchorStep = state.step;
-      this.holdStep = Number.NaN;
-    } else {
-      const steps = Math.max(0, state.step - this.anchorStep) + 1;
-      const delta = wrapPi(rawTheta - this.anchorTheta);
-      const unreachable = Math.abs(delta) > wrapReach(thetaDot, steps);
-      const backwards =
-        this.opposes(delta, thetaDot, steps) ||
-        this.opposes(
-          wrapPi(rawTheta - this.prevRaw),
-          thetaDot,
-          Math.max(0, state.step - this.prevStep) + 1,
-        );
-      const mayHold = !Number.isFinite(this.holdStep) || this.holdStep === state.step;
-      if ((unreachable || backwards) && mayHold) {
-        theta = this.anchorTheta;
-        this.wrapHeld = true;
-        this.holdStep = state.step;
-      } else {
-        this.holdStep = Number.NaN;
-        if (state.step !== this.anchorStep) {
-          this.anchorTheta = rawTheta;
-          this.anchorStep = state.step;
-        }
-      }
-    }
-    this.prevRaw = rawTheta;
-    this.prevStep = state.step;
 
     this.applyState(theta, thetaDot, torqueOf(state), time);
 
@@ -259,12 +204,6 @@ class LanternBellScene implements SceneModule {
     this.scene.clear();
     this.scene.fog = null;
     this.ctx = null;
-    this.anchorTheta = Number.NaN;
-    this.anchorStep = 0;
-    this.prevRaw = Number.NaN;
-    this.prevStep = 0;
-    this.holdStep = Number.NaN;
-    this.wrapHeld = false;
   }
 }
 

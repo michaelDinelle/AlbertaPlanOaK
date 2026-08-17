@@ -15,7 +15,7 @@ import type {
   SceneSize,
 } from '@kit/types';
 import * as THREE from 'three';
-import { MC_GOAL_POS, MC_MAX_SPEED, MC_START_POS, MOUNTAINCAR_ACTION, MOUNTAINCAR_POS, MOUNTAINCAR_VEL, mountainCarForce, mountainCarSlope } from '@sim/envs/mountaincar';
+import { MC_GOAL_POS, MC_START_POS, MOUNTAINCAR_ACTION, MOUNTAINCAR_POS, MOUNTAINCAR_VEL, mountainCarForce, mountainCarSlope } from '@sim/envs/mountaincar';
 import { buildCart, type CartHandle } from './actors';
 import { manifest } from './manifest';
 import { buildWorld, heightResolver, type WorldHandle } from './world';
@@ -33,9 +33,6 @@ const BURST_SCALE = 0.38;
 const RIPPLE_SCALE = 0.22;
 const BURST_PARTICLES = 84;
 const PULSE_STRENGTH = 0.6;
-
-const SUPERLUMINAL_SLACK = 0.025;
-const MAX_HELD_FRAMES = 4;
 
 function forceOf(state: FrameState): number {
   return mountainCarForce(state.pose[MOUNTAINCAR_ACTION] ?? 0);
@@ -62,10 +59,6 @@ class AlpineValleyScene implements SceneModule {
   private flareAt = -Infinity;
   private screeAt = -Infinity;
   private screeStep = Number.NaN;
-
-  private heldPos = Number.NaN;
-  private heldStep = Number.NaN;
-  private heldFrames = 0;
 
   private debugOn = false;
   private readonly overlayPos: [number, number, number] = [0, 0, 0];
@@ -178,8 +171,6 @@ class AlpineValleyScene implements SceneModule {
       this.flareAt = -Infinity;
       this.screeAt = -Infinity;
       this.screeStep = Number.NaN;
-      this.heldPos = Number.NaN;
-      this.heldFrames = 0;
       rig.snap();
     }
 
@@ -199,24 +190,9 @@ class AlpineValleyScene implements SceneModule {
       }
     }
 
-    const rawPos = state.pose[MOUNTAINCAR_POS] ?? 0;
+    const pos = state.pose[MOUNTAINCAR_POS] ?? 0;
     const vel = state.pose[MOUNTAINCAR_VEL] ?? 0;
-    let pos = rawPos;
-    if (teleported || frame.scrubbed || !Number.isFinite(this.heldPos)) {
-      this.heldFrames = 0;
-    } else {
-      const dSteps = Math.max(1, Math.abs(state.step - this.heldStep));
-      const reach = MC_MAX_SPEED * dSteps + SUPERLUMINAL_SLACK;
-      if (Math.abs(rawPos - this.heldPos) > reach && this.heldFrames < MAX_HELD_FRAMES) {
-        pos = this.heldPos;
-        this.heldFrames++;
-      } else {
-        this.heldFrames = 0;
-      }
-    }
     if (teleported) this.flashAt = time;
-    this.heldPos = pos;
-    this.heldStep = state.step;
 
     const prev = frame.prev;
     if (!frame.scrubbed && !teleported && prev) {
@@ -291,8 +267,6 @@ class AlpineValleyScene implements SceneModule {
     this.flashAt = -Infinity;
     this.flareAt = -Infinity;
     this.screeAt = -Infinity;
-    this.heldPos = Number.NaN;
-    this.heldFrames = 0;
   }
 }
 

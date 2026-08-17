@@ -93,6 +93,7 @@ export function procMazeWalls(words: ArrayLike<number>): Uint8Array {
 
 export const proceduralMazeDecoder: EnvDecoder<ProceduralMazeStatic> = {
   envId: 'ProceduralMaze-cont-v0',
+  seedGeometry: true,
 
   initStatic(seed: number): ProceduralMazeStatic {
     const { words, carvedPath } = procMazeGen(seed);
@@ -101,7 +102,6 @@ export const proceduralMazeDecoder: EnvDecoder<ProceduralMazeStatic> = {
 
   geometry(st: ProceduralMazeStatic): EnvGeometry {
     return {
-      kind: 'grid',
       grid: {
         w: PROCMAZE_W,
         h: PROCMAZE_H,

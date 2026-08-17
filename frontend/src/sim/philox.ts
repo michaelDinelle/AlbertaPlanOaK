@@ -5,7 +5,6 @@ const W0 = 0x9e3779b9;
 const W1 = 0xbb67ae85;
 
 export const STREAM_RESET = 0;
-const TWO_POW_NEG24 = 5.9604644775390625e-8;
 
 export function mulhi(a: number, b: number): number {
   const ah = a >>> 16;
@@ -60,43 +59,4 @@ export function philoxDraw(
   block = 0,
 ): [number, number, number, number] {
   return philox4x32_10(laneSeed, stream, idx, block, 0, 0);
-}
-
-export function u01(x: number): number {
-  return Math.fround((x >>> 8) * TWO_POW_NEG24);
-}
-
-export function u01open(x: number): number {
-  return Math.fround(((x >>> 8) + 1) * TWO_POW_NEG24);
-}
-
-export function uniform(x: number, lo: number, hi: number): number {
-  const span = Math.fround(Math.fround(hi) - Math.fround(lo));
-  return Math.fround(Math.fround(lo) + Math.fround(span * u01(x)));
-}
-
-export function boxMuller(a: number, b: number): [number, number] {
-  const u1 = u01open(a);
-  const u2 = u01(b);
-  const rad = Math.fround(Math.sqrt(Math.fround(-2 * Math.log(u1))));
-  const ang = Math.fround(Math.fround(2 * Math.PI) * u2);
-  return [Math.fround(rad * Math.cos(ang)), Math.fround(rad * Math.sin(ang))];
-}
-
-export function philoxWords(
-  laneSeed: number,
-  stream: number,
-  idx: number,
-  count: number,
-  blockStart = 0,
-  out: Uint32Array = new Uint32Array(count),
-): Uint32Array {
-  for (let w = 0; w < count; w += 4) {
-    const [a, b, c, d] = philoxDraw(laneSeed, stream, idx, blockStart + (w >>> 2));
-    out[w] = a;
-    if (w + 1 < count) out[w + 1] = b;
-    if (w + 2 < count) out[w + 2] = c;
-    if (w + 3 < count) out[w + 3] = d;
-  }
-  return out;
 }

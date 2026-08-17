@@ -59,12 +59,12 @@ const ANCHORS: Record<string, readonly [number, number, number]> = Object.freeze
 });
 
 const GEOMETRY: EnvGeometry = Object.freeze({
-  kind: 'classic' as const,
   classic: Object.freeze({ heightAt: mountainCarHeight, anchors: ANCHORS }),
 });
 
 export const mountainCarDecoder: EnvDecoder<MountainCarStatic> = {
   envId: 'MountainCar-cont-v0',
+  seedGeometry: false,
 
   initStatic(): MountainCarStatic {
     return STATIC;
@@ -87,10 +87,13 @@ export const mountainCarDecoder: EnvDecoder<MountainCarStatic> = {
 
 
   deriveEvents(
-    _prev: EnvFrame,
+    prev: EnvFrame,
     next: EnvFrame,
   ): SimEvent[] {
-    if (next.done === 0) return NO_EVENTS;
-    return [{ type: 'goal' }, { type: 'done' }, { type: 'teleport' }];
+    if (next.done === 0 && prev.done === 0) return NO_EVENTS;
+    const out: SimEvent[] = [];
+    if (next.done !== 0) out.push({ type: 'goal' }, { type: 'done' });
+    if (prev.done !== 0) out.push({ type: 'teleport' });
+    return out;
   },
 };

@@ -62,15 +62,6 @@ export function badge(text: string, kind = 'neutral', title?: string): HTMLEleme
   return el('span', { class: `badge badge-${kind}`, text, ...(title ? { title } : {}) });
 }
 
-export function linkButton(label: string, href: string, options: { quiet?: boolean; title?: string } = {}): HTMLElement {
-  return el('a', {
-    class: `btn${options.quiet ? ' btn-quiet' : ''}`,
-    href,
-    text: label,
-    ...(options.title ? { title: options.title } : {}),
-  });
-}
-
 export function actionButton(label: string, onClick: () => void, options: { quiet?: boolean } = {}): HTMLElement {
   const button = el('button', { class: `btn${options.quiet ? ' btn-quiet' : ''}`, text: label, type: 'button' });
   button.addEventListener('click', onClick);

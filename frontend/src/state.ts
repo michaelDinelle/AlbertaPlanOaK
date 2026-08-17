@@ -275,22 +275,6 @@ export interface BinnedRates {
   p90: (number | null)[];
 }
 
-export function binEdgeRows(tape: Tape, bins: number): number[] {
-  const rows = tape.rows;
-  if (rows === 0) return [];
-  const want = Math.max(1, Math.min(bins, rows));
-  const out: number[] = [];
-  let prev = -1;
-  for (let b = 1; b <= want; b++) {
-    const r = Math.round((b * rows) / want) - 1;
-    if (r > prev) {
-      out.push(r);
-      prev = r;
-    }
-  }
-  return out;
-}
-
 export function binnedRates(tape: Tape, lanes: readonly number[]): BinnedRates {
   const f = fieldIndex(tape, 'rewardSum');
   const x: number[] = [];
