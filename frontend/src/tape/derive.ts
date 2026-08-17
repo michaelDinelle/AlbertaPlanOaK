@@ -1,7 +1,6 @@
-import type { EnvResult, RunMeta } from '@shared/types';
+import type { RunMeta } from '@shared/types';
 import { DEATH_DETECTORS } from '@shared/types';
 import { envLanes } from '../lib/run';
-import { formatCount, formatPercent } from '../lib/format';
 import { fieldIndex, tapeStep, tapeValue, type Tape } from './parse';
 
 export function percentileSorted(sorted: readonly number[], q: number): number {
@@ -259,55 +258,6 @@ export function buildSeedRows(
     sparkXs,
     recorded: recorded.has(seeds[li] ?? 0),
   })).sort((a, b) => a.seed - b.seed);
-}
-
-export interface PopulationFigures {
-  positive: string;
-  nonDiverged: string;
-  retention: string;
-  learned: string;
-  source: 'summary' | 'measured' | 'none';
-}
-
-function finite(value: unknown): number | null {
-  return typeof value === 'number' && Number.isFinite(value) ? value : null;
-}
-
-export function populationFigures(
-  slice: EnvResult | null,
-  rows: readonly SeedRow[],
-): PopulationFigures {
-  const rates = rows.map((row) => row.rate).filter((v): v is number => v !== null && Number.isFinite(v));
-  const diverged = rows.filter((row) => row.divergedAt !== null).length;
-  const retained = rows.filter((row) => row.retention !== null && row.retention >= 0.5).length;
-
-  if (slice !== null && finite(slice.rewardRateIQM) !== null) {
-    const seeds = finite(slice.seeds) ?? rows.length;
-    const dead = finite(slice.divergence?.diverged) ?? diverged;
-    const positive = finite(slice.positiveFraction);
-    const retention = finite(slice.retentionFraction);
-    const learned = finite(slice.learnedSeeds);
-    return {
-      positive: positive === null ? '—' : formatPercent(positive, 0),
-      nonDiverged: `${formatCount(seeds - dead)}/${formatCount(seeds)}`,
-      retention: retention === null ? '—' : formatPercent(retention, 0),
-      learned: learned === null ? '—' : formatCount(learned),
-      source: 'summary',
-    };
-  }
-
-  if (rows.length === 0) {
-    return { positive: '—', nonDiverged: '—', retention: '—', learned: '—', source: 'none' };
-  }
-  return {
-    positive: rates.length === 0
-      ? '—'
-      : formatPercent(rates.filter((v) => v > 0).length / rates.length, 0),
-    nonDiverged: `${formatCount(rows.length - diverged)}/${formatCount(rows.length)}`,
-    retention: formatPercent(retained / rows.length, 0),
-    learned: '—',
-    source: 'measured',
-  };
 }
 
 export function tapeWindowSteps(tape: Pick<Tape, 'stepStart' | 'stepEnd'>): number {

@@ -17,14 +17,15 @@ export interface SeriesLine {
   dash?: number[];
   stepped?: boolean;
   scale?: string;
+  span?: boolean;
 }
 
-function toSeries(line: SeriesLine): uPlot.Series {
+export function toSeries(line: SeriesLine): uPlot.Series {
   const series: uPlot.Series = {
     label: line.label,
     stroke: line.stroke,
     width: line.width ?? 1.5,
-    spanGaps: false,
+    spanGaps: line.span ?? false,
     points: { show: false },
     scale: line.scale ?? 'y',
   };
@@ -100,19 +101,6 @@ export function timeSeriesOptions(params: TimeSeriesParams): OptionsBuilder {
   });
 }
 
-export interface SteppedParams extends AxesParams {
-  label: string;
-  stroke: string;
-  plugins?: uPlot.Plugin[];
-}
-
-export function steppedOptions(params: SteppedParams): OptionsBuilder {
-  return timeSeriesOptions({
-    ...params,
-    lines: [{ label: params.label, stroke: params.stroke, width: 2, stepped: true }],
-  });
-}
-
 export interface PopulationParams extends AxesParams {
   getBars(): BaselineBars;
   plugins?: uPlot.Plugin[];
@@ -159,104 +147,10 @@ export function populationOptions(params: PopulationParams): OptionsBuilder {
   });
 }
 
-const FOREST_COLUMNS = [
-  { value: 1, lo: 2, hi: 3, token: '--color-oak', shift: -6 },
-  { value: 4, lo: 5, hi: 6, token: '--color-ppo', shift: 0 },
-  { value: 7, lo: 8, hi: 9, token: '--color-random', shift: 6 },
-] as const;
-
-function forestPlugin(): uPlot.Plugin {
-  return {
-    hooks: {
-      draw: (u) => {
-        const xs = u.data[0];
-        if (!xs) return;
-        const pr = devicePixelRatio;
-        const ctx = u.ctx;
-        ctx.save();
-        for (const column of FOREST_COLUMNS) {
-          const color = cssVar(column.token);
-          const values = u.data[column.value];
-          const lows = u.data[column.lo];
-          const highs = u.data[column.hi];
-          if (!values) continue;
-          ctx.strokeStyle = color;
-          ctx.fillStyle = color;
-          ctx.lineWidth = pr;
-          for (let i = 0; i < xs.length; i++) {
-            const value = values[i];
-            if (value === null || value === undefined) continue;
-            const x = u.valToPos(xs[i] ?? i, 'x', true) + column.shift * pr;
-            const lo = lows?.[i];
-            const hi = highs?.[i];
-            if (lo !== null && lo !== undefined && hi !== null && hi !== undefined) {
-              const yLo = u.valToPos(lo, 'y', true);
-              const yHi = u.valToPos(hi, 'y', true);
-              ctx.beginPath();
-              ctx.moveTo(x, yLo);
-              ctx.lineTo(x, yHi);
-              ctx.stroke();
-            }
-            const y = u.valToPos(value, 'y', true);
-            ctx.beginPath();
-            ctx.arc(x, y, 2.5 * pr, 0, Math.PI * 2);
-            ctx.fill();
-          }
-        }
-        ctx.restore();
-      },
-    },
-  };
-}
-
-export interface ForestParams {
-  envLabels: readonly string[];
-  yFormat?: (value: number) => string;
-  plugins?: uPlot.Plugin[];
-}
-
-export function forestOptions(params: ForestParams): OptionsBuilder {
-  const labels = params.envLabels;
-  const carrier = (label: string, token: string): uPlot.Series => ({
-    label,
-    stroke: cssVar(token),
-    paths: () => null,
-    points: { show: false },
-  });
-  const hidden = (label: string): uPlot.Series => ({ label, show: false, points: { show: false } });
-  return (size) => ({
-    width: size.width,
-    height: size.height,
-    padding: padDefault,
-    cursor: quietCursor(),
-    legend: { show: false },
-    series: [
-      { label: 'env' },
-      carrier('oak', '--color-oak'),
-      hidden('oak lo'),
-      hidden('oak hi'),
-      carrier('ppo', '--color-ppo'),
-      hidden('ppo lo'),
-      hidden('ppo hi'),
-      carrier('random', '--color-random'),
-      hidden('random lo'),
-      hidden('random hi'),
-    ],
-    scales: {
-      x: { time: false, range: () => [-0.5, labels.length - 0.5] },
-      y: { range: (_u, min, max) => uPlot.rangeNum(min, max, 0.12, true) },
-    },
-    axes: chartAxes({
-      ...(params.yFormat ? { yFormat: params.yFormat } : {}),
-      xFormat: (v) => (Number.isInteger(v) ? labels[v] ?? '' : ''),
-    }),
-    plugins: [forestPlugin(), ...(params.plugins ?? [])],
-  });
-}
-
 export interface ProfileParams {
   lines: SeriesLine[];
   plugins?: uPlot.Plugin[];
+  bands?: uPlot.Band[];
   xFormat?: (value: number) => string;
 }
 
@@ -264,9 +158,10 @@ export function profileOptions(params: ProfileParams): OptionsBuilder {
   return timeSeriesOptions({
     lines: params.lines,
     ...(params.plugins ? { plugins: params.plugins } : {}),
+    ...(params.bands ? { bands: params.bands } : {}),
     yFormat: (v) => formatPercent(v, 0),
     xFormat: params.xFormat ?? ((v) => formatRate(v, 2)),
-    yRange: () => [0, 1],
+    yRange: () => [0, 1.02],
   });
 }
 
@@ -274,6 +169,8 @@ export interface FrontierParams {
   lines: SeriesLine[];
   plugins?: uPlot.Plugin[];
   yFormat?: (value: number) => string;
+  xRange?: () => [number, number];
+  yRange?: (min: number, max: number) => [number, number];
 }
 
 export function frontierOptions(params: FrontierParams): OptionsBuilder {
@@ -285,8 +182,17 @@ export function frontierOptions(params: FrontierParams): OptionsBuilder {
     legend: { show: false },
     series: [{ label: 'flops' }, ...params.lines.map(toSeries)],
     scales: {
-      x: { time: false, distr: 3, log: 10 },
-      y: { range: (_u, min, max) => uPlot.rangeNum(min, max, 0.12, true) },
+      x: {
+        time: false,
+        distr: 3,
+        log: 10,
+        ...(params.xRange ? { range: () => params.xRange!() } : {}),
+      },
+      y: {
+        range: params.yRange
+          ? (_u, min, max) => params.yRange!(min, max)
+          : (_u, min, max) => uPlot.rangeNum(min, max, 0.12, true),
+      },
     },
     axes: chartAxes({
       ...(params.yFormat ? { yFormat: params.yFormat } : {}),

@@ -1,10 +1,15 @@
-import { useEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from 'react';
+import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { useQuery } from '@tanstack/react-query';
-import { clsx } from 'clsx';
 import { ENVS } from '@shared/envs';
 import { baselineDetailQuery, runDetailQuery, runsQuery } from './data/queries';
+import { DiagnosticsStrip } from './features/aggregate/DiagnosticsStrip';
+import { ForestPlot } from './features/aggregate/ForestPlot';
+import { Frontier } from './features/aggregate/Frontier';
+import { Profiles } from './features/aggregate/Profiles';
+import { EnvDiagnostics } from './features/env/EnvDiagnostics';
 import { EnvStrip } from './features/env/EnvStrip';
-import { Scoreboard } from './features/stage/Scoreboard';
+import { RewardChart } from './features/env/RewardChart';
+import { Scoreboard } from './features/env/Scoreboard';
 import { SeedRail } from './features/stage/SeedRail';
 import { Stage } from './features/stage/Stage';
 import { Transport } from './features/stage/Transport';
@@ -50,28 +55,6 @@ function SectionHead({ label, accent }: { label: string; accent?: string }) {
   );
 }
 
-function PlaceholderCard({
-  title,
-  className,
-  style,
-}: {
-  title: string;
-  className?: string;
-  style?: CSSProperties;
-}) {
-  return (
-    <div
-      className={clsx('flex flex-col rounded-md border border-dashed border-line bg-raised/40 px-4 py-3', className)}
-      style={style}
-    >
-      <div className="text-2xs uppercase tracking-[0.16em] text-ink-faint">{title}</div>
-      <div className="flex flex-1 items-center justify-center py-5 font-mono text-2xs text-ink-faint">
-        statistics land with summary v2
-      </div>
-    </div>
-  );
-}
-
 function NoticeCard({ title, children }: { title: string; children?: ReactNode }) {
   return (
     <div className="rounded-md border border-line bg-raised/60 px-5 py-4">
@@ -93,11 +76,22 @@ export function App() {
   });
   const detail = detailQ.data ?? null;
 
+  const ppoPointer = detail?.baselines.ppo;
+  const randomPointer = detail?.baselines.random;
+  const ppoQ = useQuery({ ...baselineDetailQuery(ppoPointer ?? ''), enabled: ppoPointer !== undefined });
+  const randomQ = useQuery({ ...baselineDetailQuery(randomPointer ?? ''), enabled: randomPointer !== undefined });
+  const ppoDetail = ppoQ.data ?? null;
+  const randomDetail = randomQ.data ?? null;
+
   const pointer = sel.policy === 'oak' ? undefined : detail?.baselines[sel.policy];
-  const baselineQ = useQuery({ ...baselineDetailQuery(pointer ?? ''), enabled: pointer !== undefined });
-  const active = sel.policy === 'oak' ? detail : pointer === undefined ? null : baselineQ.data ?? null;
+  const active = sel.policy === 'oak'
+    ? detail
+    : pointer === undefined ? null : sel.policy === 'ppo' ? ppoDetail : randomDetail;
   const baselinePending =
-    sel.policy !== 'oak' && (detail === null ? detailQ.isPending : pointer !== undefined && baselineQ.isPending);
+    sel.policy !== 'oak'
+    && (detail === null
+      ? detailQ.isPending
+      : pointer !== undefined && (sel.policy === 'ppo' ? ppoQ : randomQ).isPending);
 
   const envList = useMemo(() => (detail === null ? [] : runEnvs(detail.meta, detail.recordings)), [detail]);
   const progress = useTapeProgress(sel.runId);
@@ -266,7 +260,7 @@ export function App() {
             }}
           />
           <aside className="flex min-h-0 flex-col gap-2" style={{ width: railW }}>
-            <Scoreboard detail={detail} />
+            <Scoreboard detail={detail} ppo={ppoDetail} random={randomDetail} />
             <SeedRail detail={detail} active={active} />
           </aside>
         </section>
@@ -297,24 +291,27 @@ export function App() {
           }}
         />
 
-        <section>
+        <section id="env-analytics" className="scroll-mt-24">
           <SectionHead label={envName === null ? 'This environment' : `${envName} — this environment`} accent={envAccent} />
           <div className="grid gap-3 lg:grid-cols-4">
-            <PlaceholderCard title="Reward rate" className="lg:col-span-4" style={{ height: chartsH }} />
-            <PlaceholderCard title="Reward per head" />
-            <PlaceholderCard title="ρ̄ vs measured" />
-            <PlaceholderCard title="Survival" />
-            <PlaceholderCard title="Forgetting" />
+            <RewardChart
+              detail={detail}
+              ppo={ppoDetail}
+              random={randomDetail}
+              height={chartsH}
+              className="lg:col-span-4"
+            />
+            <EnvDiagnostics detail={detail} ppo={ppoDetail} random={randomDetail} />
           </div>
         </section>
 
         <section className="mt-6">
           <SectionHead label="Across the suite" />
           <div className="grid gap-3 lg:grid-cols-4">
-            <PlaceholderCard title="Forest plot" className="lg:col-span-2" />
-            <PlaceholderCard title="Performance profiles" />
-            <PlaceholderCard title="Compute frontier" />
-            <PlaceholderCard title="Diagnostics" className="lg:col-span-4" />
+            <ForestPlot detail={detail} ppo={ppoDetail} random={randomDetail} className="lg:col-span-2 lg:row-span-2" />
+            <Profiles detail={detail} ppo={ppoDetail} random={randomDetail} className="lg:col-span-2" />
+            <Frontier detail={detail} ppo={ppoDetail} random={randomDetail} className="lg:col-span-2" />
+            <DiagnosticsStrip detail={detail} ppo={ppoDetail} random={randomDetail} />
           </div>
         </section>
       </main>
