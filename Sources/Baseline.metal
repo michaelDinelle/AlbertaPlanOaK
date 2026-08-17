@@ -121,6 +121,8 @@ constant uint PPO_ST_RETMEAN = 36u;
 constant uint PPO_ST_RETM2 = 37u;
 constant uint PPO_ST_RETCOUNT = 38u;
 constant uint PPO_ST_ADAMT = 39u;
+static_assert(OAK_DIAG_K == PPO_H && OAK_DIAG_PPO_PARAMS == PPO_PARAM_STRIDE,
+              "PpoDiagRecord drifted from the PPO layout");
 
 struct PpoLayout {
     uint O, A;
@@ -208,6 +210,34 @@ inline void ppoForwardWide(device const float *P, PpoLayout L, thread const floa
     value = simd_sum(partV) + P[L.b2c];
 }
 
+__attribute__((noinline))
+static void ppoAccumulateHidden(device const float *P, PpoLayout L, thread const float *obsn,
+                                uint tid, device OakDiagAccum *acc) {
+    float hh[2], hc[2];
+    for (uint k = 0u; k < 2u; ++k) {
+        uint hu = tid + 32u * k;
+        float accA = P[L.b1a + hu];
+        float accC = P[L.b1c + hu];
+        for (uint o = 0u; o < L.O; ++o) {
+            accA += P[L.w1a + o * PPO_H + hu] * obsn[o];
+            accC += P[L.w1c + o * PPO_H + hu] * obsn[o];
+        }
+        hh[k] = tanh(accA);
+        hc[k] = tanh(accC);
+    }
+    acc->sumAbsHiddenActor[tid] += fabs(hh[0]);
+    acc->sumAbsHiddenActor[tid + 32u] += fabs(hh[1]);
+    acc->sumAbsHiddenCritic[tid] += fabs(hc[0]);
+    acc->sumAbsHiddenCritic[tid + 32u] += fabs(hc[1]);
+    device float *rowLo = acc->gram + tid * OAK_DIAG_K;
+    device float *rowHi = acc->gram + (tid + 32u) * OAK_DIAG_K;
+    for (uint c = 0u; c < OAK_DIAG_K; ++c) {
+        float hcol = simd_shuffle(c < 32u ? hh[0] : hh[1], (ushort)(c % 32u));
+        rowLo[c] += hh[0] * hcol;
+        rowHi[c] += hh[1] * hcol;
+    }
+}
+
 inline float ppoForwardSample(device const float *P, PpoLayout L, thread const float *obsn,
                               device float *haOut, device float *hcOut, thread float *logits) {
     for (uint hu = 0u; hu < PPO_H; ++hu) {
@@ -271,22 +301,46 @@ kernel void ppo_fleet_init(device float *params [[buffer(0)]],
 }
 
 kernel void ppo_fleet_snapshot(device const float *params [[buffer(0)]],
+                               device const float *adam [[buffer(1)]],
+                               device const float *ppoState [[buffer(4)]],
                                device OakFleetLane *lanes [[buffer(6)]],
                                constant OakFleetEnvCfg &ecfg [[buffer(8)]],
                                device OakLaneSnapshot *snaps [[buffer(9)]],
                                constant uint &snapBase [[buffer(10)]],
+                               device OakDiagAccum *diagAccum [[buffer(12)]],
+                               device float *diagOut [[buffer(13)]],
                                uint gid [[thread_position_in_grid]]) {
     if (gid >= ecfg.laneCount) return;
     device OakFleetLane *lane = &lanes[gid];
     device OakLaneSnapshot *snap = &snaps[snapBase + gid];
     PpoLayout L = ppoLayout(lane->envKind);
     device const float *P = params + gid * PPO_PARAM_STRIDE;
-    float absMax = 0.0f;
+    float absMax = 0.0f, absSum = 0.0f;
     uint nonFinite = 0u;
     for (uint p = 0u; p < L.count; ++p) {
         float v = P[p];
         if (!isfinite(v)) nonFinite += 1u;
         else absMax = max(absMax, fabs(v));
+        absSum += fabs(v);
+    }
+    {
+        device PpoDiagRecord *rec = (device PpoDiagRecord *)(diagOut + ulong(snapBase + gid) * OAK_DIAG_OUT_FLOATS);
+        device OakDiagAccum *acc = &diagAccum[gid];
+        device const float *V = adam + gid * 2u * PPO_PARAM_STRIDE + PPO_PARAM_STRIDE;
+        device const float *S = ppoState + gid * PPO_STATE_STRIDE;
+        rec->weightAbsMean = absSum / float(L.count);
+        rec->adamT = S[PPO_ST_ADAMT];
+        for (uint p = 0u; p < OAK_DIAG_PPO_PARAMS; ++p) rec->adamV[p] = (p < L.count) ? V[p] : NAN;
+        for (uint j = 0u; j < OAK_DIAG_K; ++j) {
+            rec->sumAbsHiddenActor[j] = acc->sumAbsHiddenActor[j];
+            acc->sumAbsHiddenActor[j] = 0.0f;
+            rec->sumAbsHiddenCritic[j] = acc->sumAbsHiddenCritic[j];
+            acc->sumAbsHiddenCritic[j] = 0.0f;
+        }
+        for (uint g = 0u; g < OAK_DIAG_GRAM; ++g) {
+            rec->gram[g] = acc->gram[g];
+            acc->gram[g] = 0.0f;
+        }
     }
     snap->scalars.stepCount = lane->steps;
     snap->scalars.stateSlot = 0u;
@@ -310,6 +364,7 @@ kernel void ppo_megastep(device float *params [[buffer(0)]],
                          device const int *recordSlot [[buffer(9)]],
                          device float *recordBuf [[buffer(10)]],
                          constant uint3 &dispatchSpan [[buffer(11)]],
+                         device OakDiagAccum *diagAccum [[buffer(12)]],
                          uint gid [[thread_position_in_grid]],
                          uint tid [[thread_index_in_simdgroup]]) {
     uint laneIdx = gid / 32u;
@@ -334,6 +389,8 @@ kernel void ppo_megastep(device float *params [[buffer(0)]],
         float logits[6];
         float value;
         ppoForwardWide(P, L, obsn, tid, logits, value);
+        if ((OAK_MEGA_STAGES & 128u) != 0u)
+            ppoAccumulateHidden(P, L, obsn, tid, &diagAccum[laneIdx]);
         if (tid == 0u) {
             float logp;
             if (L.box) {

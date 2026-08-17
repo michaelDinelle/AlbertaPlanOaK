@@ -8,7 +8,8 @@ let package = Package(
     .executableTarget(
       name: "OaK",
       path: "Sources",
-      exclude: ["OakKernel.metal", "OakPhysics.metal", "HalfCheetahModel.metal", "Gridworld.metal", "ClassicControl.metal", "Env.metal"]
+      exclude: ["OakKernel.metal", "OakPhysics.metal", "HalfCheetahModel.metal", "Gridworld.metal", "ClassicControl.metal", "Env.metal"],
+      swiftSettings: [.unsafeFlags(["-Xcc", "-DACCELERATE_NEW_LAPACK"])]
     )
   ]
 )
