@@ -1,5 +1,5 @@
 
-import { MAX_CATCHUP_FRAMES } from '@kit/playback';
+import { MAX_CATCHUP_FRAMES } from './playbackSource';
 import type { SimEvent } from '@sim/types';
 
 

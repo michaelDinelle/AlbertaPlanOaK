@@ -1,7 +1,7 @@
 import { useSyncExternalStore } from 'react';
 import { ENVS, type EnvId } from '@shared/envs';
 import type { Policy, RecordingRef, RunDetail } from '@shared/types';
-import type { PlaybackSource } from '@kit/playback';
+import type { PlaybackSource } from './playbackSource';
 import { entryFor, parseCatalog } from '@sim/catalog';
 import { frameFromStep, heroSeed, stepFromFrame } from '../lib/selection';
 import { publishPosition, setTransport, subscribeTransport, transportSnapshot } from '../playback/store';

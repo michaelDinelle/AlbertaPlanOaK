@@ -1,6 +1,6 @@
 import type { EnvId } from '@shared/envs';
 import type { EnvFrame, EnvGeometry, SimEvent } from '@sim/types';
-import type { FrameState } from './types';
+import type { FrameState } from '@kit/types';
 
 export interface PlaybackClock {
   time(): number;

@@ -1,6 +1,6 @@
 import * as THREE from 'three';
 import type { EnvId } from '@shared/envs';
-import { makePlaybackClock, sampleFrame, type PlaybackSource, type PlaybackClock } from '@kit/playback';
+import { makePlaybackClock, sampleFrame, type PlaybackSource, type PlaybackClock } from './playbackSource';
 import { celebrationPulse } from '@kit/celebrate';
 import { buildComposer, type ComposerHandle } from '@kit/post';
 import { TOKENS } from '@kit/tokens';
