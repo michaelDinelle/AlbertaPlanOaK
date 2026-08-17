@@ -32,6 +32,7 @@ import {
   scatterTrees,
   type ExcludeFn,
 } from '@kit/vegetation';
+import { makeWorld, type WorldCore } from '@kit/world';
 import { PROCMAZE_H, PROCMAZE_W, proceduralMazeDecoder } from '@sim/envs/proceduralmaze';
 import type { EnvGeometry, GridCell, GridGeometry } from '@sim/types';
 
@@ -716,8 +717,7 @@ function birdGeometry(): THREE.BufferGeometry {
 }
 
 
-export interface WorldHandle {
-  group: THREE.Group;
+export interface WorldHandle extends WorldCore {
   sky: SkyHandle;
   rig: LightRig;
   terrain: TerrainHandle;
@@ -727,27 +727,14 @@ export interface WorldHandle {
   archRoots: THREE.Object3D[];
   arches: ArchCell[];
   setGoalPosition(x: number, y: number, z: number): void;
-  setTime(t: number): void;
-  setPixelRatio(dpr: number): void;
-  dispose(): void;
 }
 
-interface Disposable {
-  dispose(): void;
-}
-
-interface Timed {
-  setTime(t: number): void;
-}
 
 export function buildWorld(ctx: SceneContext, scene: THREE.Scene, grid: GridGeometry): WorldHandle {
   const palette: Palette = ctx.tokens.palettes.noon;
   const skin = ruinSkin(palette, ctx.tokens);
   const seed = ctx.seed;
-  const group = new THREE.Group();
-  group.name = 'overgrownRuins';
-  const owned: Disposable[] = [];
-  const timed: Timed[] = [];
+  const w = makeWorld('overgrownRuins');
 
   const sky = skyFromPalette(palette, 'noon', {
     sunDir: SUN_DIR,
@@ -759,9 +746,9 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene, grid: GridGeom
     bottomSpread: 0.52,
     radius: 340,
   });
-  group.add(sky.mesh);
-  owned.push(sky);
-  timed.push({ setTime: (t) => sky.setTime(t) });
+  w.add(sky.mesh);
+  w.own(sky);
+  w.time({ setTime: (t) => sky.setTime(t) });
 
   const rig = makeLightRig(palette, {
     sunDir: sky.sunDirection,
@@ -769,8 +756,8 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene, grid: GridGeom
     pointDistance: 7,
     sunDistanceScale: 2.2,
   });
-  group.add(rig.group);
-  owned.push(rig);
+  w.add(rig.group);
+  w.own(rig);
   rig.setShadowFocus({ x: 0, y: 0.4, z: 0 }, SHADOW_RADIUS);
 
   applyFog(scene, palette, FOG_EXTENT);
@@ -803,8 +790,8 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene, grid: GridGeom
     castShadow: false,
     name: 'ruinForestFloor',
   });
-  group.add(terrain.mesh);
-  owned.push(terrain);
+  w.add(terrain.mesh);
+  w.own(terrain);
 
   const white = palette.sun;
   const field = buildCellField(
@@ -831,18 +818,17 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene, grid: GridGeom
   if (wallUniforms) wallUniforms.uniforms.uToonFloor.value = 0.42;
   const floorUniforms = oakUniforms(field.floorMaterial);
   if (floorUniforms) floorUniforms.uniforms.uToonFloor.value = 0.4;
-  group.add(field.group);
-  owned.push(field);
-  timed.push({ setTime: (t) => field.setTime(t) });
+  w.add(field.group);
+  w.own(field);
+  w.time({ setTime: (t) => field.setTime(t) });
 
   const corners = cornerCells(grid);
   const cornerKeys = new Set<number>();
   for (const c of corners) cornerKeys.add(c.y * grid.w + c.x);
 
   const courses = buildCourses(grid, seed, skin, palette, (x, y) => cornerKeys.has(y * grid.w + x));
-  group.add(courses.group);
-  owned.push(courses);
-  timed.push(courses);
+  w.add(courses.group);
+  w.time(w.own(courses));
 
   const towerRoots: THREE.Object3D[] = [];
   {
@@ -874,9 +860,9 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene, grid: GridGeom
       mesh.castShadow = true;
       mesh.receiveShadow = true;
       root.add(mesh);
-      group.add(root);
+      w.add(root);
       towerRoots.push(root);
-      owned.push({
+      w.own({
         dispose: () => {
           geometry.dispose();
           material.dispose();
@@ -901,7 +887,7 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene, grid: GridGeom
       toonFloor: 0.42,
       name: 'ruinArchMaterial',
     });
-    owned.push({
+    w.own({
       dispose: () => {
         archGeo.dispose();
         archMaterial.dispose();
@@ -920,7 +906,7 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene, grid: GridGeom
       mesh.castShadow = true;
       mesh.receiveShadow = true;
       root.add(mesh);
-      group.add(root);
+      w.add(root);
       archRoots.push(root);
     }
   }
@@ -943,9 +929,8 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene, grid: GridGeom
     rimStrength: 0.34,
     name: 'ruinGrassTufts',
   });
-  group.add(tufts.group);
-  owned.push(tufts);
-  timed.push(tufts);
+  w.add(tufts.group);
+  w.time(w.own(tufts));
 
   const wildflowers = scatterFlowers({
     count: 130,
@@ -962,9 +947,8 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene, grid: GridGeom
     rimStrength: 0.3,
     name: 'ruinWildflowers',
   });
-  group.add(wildflowers.group);
-  owned.push(wildflowers);
-  timed.push(wildflowers);
+  w.add(wildflowers.group);
+  w.time(w.own(wildflowers));
 
   const rubble = scatterRocks({
     count: 340,
@@ -980,9 +964,8 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene, grid: GridGeom
     castShadow: false,
     name: 'ruinRubble',
   });
-  group.add(rubble.group);
-  owned.push(rubble);
-  timed.push(rubble);
+  w.add(rubble.group);
+  w.time(w.own(rubble));
 
   const offRuin = excludeRect(0, 0, RUIN_HALF, RUIN_HALF, 1.4);
   const nearCamera = excludeRect(
@@ -1011,9 +994,8 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene, grid: GridGeom
     castShadow: true,
     name: 'ruinForest',
   });
-  group.add(forest.group);
-  owned.push(forest);
-  timed.push(forest);
+  w.add(forest.group);
+  w.time(w.own(forest));
 
   const saplings = scatterTrees({
     archetypes: ['broadleaf'],
@@ -1034,11 +1016,9 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene, grid: GridGeom
     castShadow: false,
     name: 'ruinSaplings',
   });
-  group.add(saplings.group);
-  owned.push(saplings);
-  timed.push(saplings);
+  w.add(saplings.group);
+  w.time(w.own(saplings));
 
-  const motes: AmbientParticlesHandle[] = [];
   const haze = makeAmbientParticles({
     preset: 'dust',
     count: 420,
@@ -1052,10 +1032,8 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene, grid: GridGeom
     swirl: 0.2,
     name: 'ruinDustHaze',
   });
-  group.add(haze.points);
-  owned.push(haze);
-  timed.push(haze);
-  motes.push(haze);
+  w.add(haze.points);
+  w.size(w.time(w.own(haze)));
 
   const shaftDust = makeAmbientParticles({
     preset: 'dust',
@@ -1070,10 +1048,8 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene, grid: GridGeom
     swirl: 0.1,
     name: 'ruinShaftDust',
   });
-  group.add(shaftDust.points);
-  owned.push(shaftDust);
-  timed.push(shaftDust);
-  motes.push(shaftDust);
+  w.add(shaftDust.points);
+  w.size(w.time(w.own(shaftDust)));
 
   const pollen = makeAmbientParticles({
     preset: 'pollen',
@@ -1088,20 +1064,16 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene, grid: GridGeom
     swirl: 0.26,
     name: 'ruinPollen',
   });
-  group.add(pollen.points);
-  owned.push(pollen);
-  timed.push(pollen);
-  motes.push(pollen);
+  w.add(pollen.points);
+  w.size(w.time(w.own(pollen)));
 
   const birds = makeBirds(seed, skin.bird);
-  group.add(birds.mesh);
-  owned.push(birds);
-  timed.push(birds);
+  w.add(birds.mesh);
+  w.time(w.own(birds));
 
   const shaftDustPoints = shaftDust.points;
 
-  return {
-    group,
+  return w.seal({
     sky,
     rig,
     terrain,
@@ -1113,21 +1085,10 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene, grid: GridGeom
     setGoalPosition(x, y, z) {
       shaftDustPoints.position.set(x, y, z);
     },
-    setTime(t) {
-      for (let i = 0; i < timed.length; i++) timed[i]?.setTime(t);
-    },
-    setPixelRatio(dpr) {
-      for (let i = 0; i < motes.length; i++) motes[i]?.setPixelRatio(dpr);
-    },
-    dispose() {
-      for (let i = owned.length - 1; i >= 0; i--) owned[i]?.dispose();
-      owned.length = 0;
-      timed.length = 0;
-      motes.length = 0;
+  }, {
+    drop: () => {
       towerRoots.length = 0;
       archRoots.length = 0;
-      group.removeFromParent();
-      group.clear();
     },
-  };
+  });
 }

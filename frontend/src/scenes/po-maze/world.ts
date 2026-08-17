@@ -26,6 +26,7 @@ import {
   scatterTrees,
   type ExcludeFn,
 } from '@kit/vegetation';
+import { makeWorld, type WorldCore } from '@kit/world';
 import {
   POMAZE_GAPS,
   POMAZE_H,
@@ -386,8 +387,7 @@ export function makeGateStonesGeometry(skin: ForestSkin): THREE.BufferGeometry {
 }
 
 
-export interface WorldHandle {
-  group: THREE.Group;
+export interface WorldHandle extends WorldCore {
   sky: SkyHandle;
   rig: LightRig;
   fog: THREE.FogExp2;
@@ -397,28 +397,15 @@ export interface WorldHandle {
   gates: GapGateHandle[];
   gaps: readonly GridCell[];
   skin: ForestSkin;
-  setTime(t: number): void;
-  setPixelRatio(dpr: number): void;
   setShadowFocus(x: number, z: number): void;
   setFogLift(amount: number): void;
-  dispose(): void;
 }
 
-interface Disposable {
-  dispose(): void;
-}
-
-interface Timed {
-  setTime(t: number): void;
-}
 
 export function buildWorld(ctx: SceneContext, scene: THREE.Scene, grid: GridGeometry): WorldHandle {
   const palette: Palette = ctx.tokens.palettes.dawn;
   const skin = forestSkin(palette, ctx.tokens);
-  const group = new THREE.Group();
-  group.name = 'fogboundForest';
-  const owned: Disposable[] = [];
-  const timed: Timed[] = [];
+  const w = makeWorld('fogboundForest');
 
   const sky = skyFromPalette(palette, 'dawn', {
     sunDir: SUN_DIR,
@@ -435,9 +422,9 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene, grid: GridGeom
     blendTokens(palette.skyHorizon, skin.haze, 0.34),
     skin.haze,
   );
-  group.add(sky.mesh);
-  owned.push(sky);
-  timed.push({ setTime: (t) => sky.setTime(t) });
+  w.add(sky.mesh);
+  w.own(sky);
+  w.time({ setTime: (t) => sky.setTime(t) });
 
   const rig = makeLightRig(palette, {
     sunDir: sky.sunDirection,
@@ -445,8 +432,8 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene, grid: GridGeom
     pointDistance: 5.5,
     sunDistanceScale: 2.6,
   });
-  group.add(rig.group);
-  owned.push(rig);
+  w.add(rig.group);
+  w.own(rig);
   rig.setShadowFocus({ x: 0, y: 0.3, z: 0 }, SHADOW_RADIUS);
 
   const fog = applyFog(scene, palette, FOG_EXTENT);
@@ -481,8 +468,8 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene, grid: GridGeom
     castShadow: false,
     name: 'forestFloor',
   });
-  group.add(terrain.mesh);
-  owned.push(terrain);
+  w.add(terrain.mesh);
+  w.own(terrain);
 
   const white = palette.sun;
   const field = buildCellField(
@@ -508,9 +495,9 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene, grid: GridGeom
       name: 'forestFloorCells',
     },
   );
-  group.add(field.group);
-  owned.push(field);
-  timed.push({ setTime: (t) => field.setTime(t) });
+  w.add(field.group);
+  w.own(field);
+  w.time({ setTime: (t) => field.setTime(t) });
 
   collapseAllWalls(field, grid);
 
@@ -521,9 +508,8 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene, grid: GridGeom
     rimColor: skin.haze,
     name: 'spruceRanks',
   });
-  group.add(spruce.group);
-  owned.push(spruce);
-  timed.push(spruce);
+  w.add(spruce.group);
+  w.time(w.own(spruce));
 
   const stoneMaterial: OakMaterial = oakMaterial({
     vertexColors: true,
@@ -536,11 +522,11 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene, grid: GridGeom
     toonFloor: 0.24,
     name: 'forestStone',
   });
-  owned.push({ dispose: () => stoneMaterial.dispose() });
+  w.own({ dispose: () => stoneMaterial.dispose() });
   const gaps = resolveGaps(grid);
   const gates = buildGapGates(grid, gaps, stoneMaterial, skin);
-  owned.push({ dispose: () => gates.geometry.dispose() });
-  for (const gate of gates.handles) group.add(gate.root);
+  w.own({ dispose: () => gates.geometry.dispose() });
+  for (const gate of gates.handles) w.add(gate.root);
 
   const clearCenters = excludeCellCenters(0.34);
   const ferns = scatterGrass({
@@ -558,9 +544,8 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene, grid: GridGeom
     rimStrength: 0.34,
     name: 'forestFerns',
   });
-  group.add(ferns.group);
-  owned.push(ferns);
-  timed.push(ferns);
+  w.add(ferns.group);
+  w.time(w.own(ferns));
 
   const stones = scatterRocks({
     count: 240,
@@ -577,9 +562,8 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene, grid: GridGeom
     castShadow: false,
     name: 'forestStones',
   });
-  group.add(stones.group);
-  owned.push(stones);
-  timed.push(stones);
+  w.add(stones.group);
+  w.time(w.own(stones));
 
   const outer = scatterTrees({
     archetypes: ['conifer'],
@@ -600,9 +584,8 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene, grid: GridGeom
     castShadow: false,
     name: 'outerForest',
   });
-  group.add(outer.group);
-  owned.push(outer);
-  timed.push(outer);
+  w.add(outer.group);
+  w.time(w.own(outer));
 
   const mist = makeMistPlanes({
     size: [18, 18],
@@ -617,11 +600,9 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene, grid: GridGeom
     nearFade: 2.6,
     name: 'forestMist',
   });
-  group.add(mist.group);
-  owned.push(mist);
-  timed.push(mist);
+  w.add(mist.group);
+  w.time(w.own(mist));
 
-  const motes: AmbientParticlesHandle[] = [];
   const dust = makeAmbientParticles({
     preset: 'dust',
     count: 340,
@@ -635,10 +616,8 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene, grid: GridGeom
     swirl: 0.16,
     name: 'forestDust',
   });
-  group.add(dust.points);
-  owned.push(dust);
-  timed.push(dust);
-  motes.push(dust);
+  w.add(dust.points);
+  w.size(w.time(w.own(dust)));
 
   const spores = makeAmbientParticles({
     preset: 'pollen',
@@ -653,13 +632,10 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene, grid: GridGeom
     swirl: 0.24,
     name: 'forestSpores',
   });
-  group.add(spores.points);
-  owned.push(spores);
-  timed.push(spores);
-  motes.push(spores);
+  w.add(spores.points);
+  w.size(w.time(w.own(spores)));
 
-  return {
-    group,
+  return w.seal({
     sky,
     rig,
     fog,
@@ -669,12 +645,6 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene, grid: GridGeom
     gates: gates.handles,
     gaps,
     skin,
-    setTime(t) {
-      for (let i = 0; i < timed.length; i++) timed[i]?.setTime(t);
-    },
-    setPixelRatio(dpr) {
-      for (let i = 0; i < motes.length; i++) motes[i]?.setPixelRatio(dpr);
-    },
     setShadowFocus(x, z) {
       rig.setShadowFocus({ x, y: 0.3, z }, SHADOW_RADIUS);
     },
@@ -682,15 +652,7 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene, grid: GridGeom
       const a = clamp01(amount);
       fog.density = baseDensity * (1 - FOG_LIFT * a);
     },
-    dispose() {
-      for (let i = owned.length - 1; i >= 0; i--) owned[i]?.dispose();
-      owned.length = 0;
-      timed.length = 0;
-      motes.length = 0;
-      group.removeFromParent();
-      group.clear();
-    },
-  };
+  });
 }
 
 export function collapseAllWalls(field: CellFieldHandle, grid: GridGeometry): void {

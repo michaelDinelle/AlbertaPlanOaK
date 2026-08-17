@@ -31,6 +31,7 @@ import {
   type ExcludeFn,
   type VegetationHandle,
 } from '@kit/vegetation';
+import { makeWorld, type WorldCore } from '@kit/world';
 import {
   MKC_DOORS,
   MKC_GOAL,
@@ -248,8 +249,7 @@ export function makeGardenHeight(seed: number): (x: number, z: number) => number
 }
 
 
-export interface WorldHandle {
-  group: THREE.Group;
+export interface WorldHandle extends WorldCore {
   sky: SkyHandle;
   rig: LightRig;
   terrain: TerrainHandle;
@@ -257,26 +257,13 @@ export interface WorldHandle {
   portalRoots: THREE.Object3D[];
   doors: readonly GridCell[];
   stoneMaterial: OakMaterial;
-  setTime(t: number): void;
-  setPixelRatio(dpr: number): void;
-  dispose(): void;
 }
 
-interface Disposable {
-  dispose(): void;
-}
-
-interface Timed {
-  setTime(t: number): void;
-}
 
 export function buildWorld(ctx: SceneContext, scene: THREE.Scene, grid: GridGeometry): WorldHandle {
   const palette: Palette = ctx.tokens.palettes.morning;
   const skin = templeSkin(palette, ctx.tokens);
-  const group = new THREE.Group();
-  group.name = 'templeOfThreeGates';
-  const owned: Disposable[] = [];
-  const timed: Timed[] = [];
+  const w = makeWorld('templeOfThreeGates');
   const doors = resolveDoors(grid);
 
   const sky = skyFromPalette(palette, 'morning', {
@@ -289,9 +276,9 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene, grid: GridGeom
     bottomSpread: 0.46,
     radius: 340,
   });
-  group.add(sky.mesh);
-  owned.push(sky);
-  timed.push({ setTime: (t) => sky.setTime(t) });
+  w.add(sky.mesh);
+  w.own(sky);
+  w.time({ setTime: (t) => sky.setTime(t) });
 
   const rig = makeLightRig(palette, {
     sunDir: sky.sunDirection,
@@ -299,8 +286,8 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene, grid: GridGeom
     pointDistance: 7.5,
     sunDistanceScale: 2.1,
   });
-  group.add(rig.group);
-  owned.push(rig);
+  w.add(rig.group);
+  w.own(rig);
   rig.setShadowFocus({ x: 0.5, y: 0.35, z: 0 }, SHADOW_RADIUS);
 
   applyFog(scene, palette, FOG_EXTENT);
@@ -333,8 +320,8 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene, grid: GridGeom
     castShadow: false,
     name: 'templeGarden',
   });
-  group.add(terrain.mesh);
-  owned.push(terrain);
+  w.add(terrain.mesh);
+  w.own(terrain);
 
   const white = palette.sun;
   const field = buildCellField(
@@ -368,9 +355,9 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene, grid: GridGeom
       name: 'templeCells',
     },
   );
-  group.add(field.group);
-  owned.push(field);
-  timed.push({ setTime: (t) => field.setTime(t) });
+  w.add(field.group);
+  w.own(field);
+  w.time({ setTime: (t) => field.setTime(t) });
 
   const stoneMaterial: OakMaterial = oakMaterial({
     vertexColors: true,
@@ -383,10 +370,10 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene, grid: GridGeom
     toonFloor: 0.26,
     name: 'templeStone',
   });
-  owned.push({ dispose: () => stoneMaterial.dispose() });
+  w.own({ dispose: () => stoneMaterial.dispose() });
 
   const portalGeometry = makePortalGeometry(skin);
-  owned.push({ dispose: () => portalGeometry.dispose() });
+  w.own({ dispose: () => portalGeometry.dispose() });
   const portalRoots: THREE.Object3D[] = [];
   {
     const portals = new THREE.InstancedMesh(portalGeometry, stoneMaterial, Math.max(1, doors.length));
@@ -408,7 +395,7 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene, grid: GridGeom
       root.name = `portalRoot${i}`;
       cellToWorld(cell.x, cell.y, grid, world);
       root.position.set(world[0], 0, world[2]);
-      group.add(root);
+      w.add(root);
       portalRoots.push(root);
 
       position.set(world[0], 0, world[2]);
@@ -421,12 +408,12 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene, grid: GridGeom
     portals.count = n;
     portals.instanceMatrix.needsUpdate = true;
     portals.computeBoundingSphere();
-    if (n > 0) group.add(portals);
-    owned.push({ dispose: () => portals.dispose() });
+    if (n > 0) w.add(portals);
+    w.own({ dispose: () => portals.dispose() });
   }
 
   const lanternGeometry = makeLanternGeometry(skin);
-  owned.push({ dispose: () => lanternGeometry.dispose() });
+  w.own({ dispose: () => lanternGeometry.dispose() });
   const lanternSpots: { x: number; z: number }[] = [];
   {
     const world: Vec3Tuple = [0, 0, 0];
@@ -460,8 +447,8 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene, grid: GridGeom
     lanterns.count = lanternSpots.length;
     lanterns.instanceMatrix.needsUpdate = true;
     lanterns.computeBoundingSphere();
-    group.add(lanterns);
-    owned.push({ dispose: () => lanterns.dispose() });
+    w.add(lanterns);
+    w.own({ dispose: () => lanterns.dispose() });
   }
   {
     const flameGeometry = new THREE.IcosahedronGeometry(0.055, 1);
@@ -481,8 +468,8 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene, grid: GridGeom
     flames.count = lanternSpots.length;
     flames.instanceMatrix.needsUpdate = true;
     flames.computeBoundingSphere();
-    group.add(flames);
-    owned.push({
+    w.add(flames);
+    w.own({
       dispose: () => {
         flames.dispose();
         flameGeometry.dispose();
@@ -544,9 +531,8 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene, grid: GridGeom
         : spec.kind === 'flowers'
           ? scatterFlowers(options)
           : scatterRocks(options);
-    group.add(handle.group);
-    owned.push(handle);
-    timed.push(handle);
+    w.add(handle.group);
+    w.time(w.own(handle));
     planted.push(handle);
   }
 
@@ -610,13 +596,11 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene, grid: GridGeom
       castShadow: true,
       name: spec.name,
     });
-    group.add(handle.group);
-    owned.push(handle);
-    timed.push(handle);
+    w.add(handle.group);
+    w.time(w.own(handle));
     trees.push(handle);
   }
 
-  const motes: AmbientParticlesHandle[] = [];
   const moteSpecs: readonly {
     chamber: number;
     preset: 'pollen' | 'dust' | 'snow';
@@ -649,10 +633,8 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene, grid: GridGeom
       swirl: spec.swirl,
       name: spec.name,
     });
-    group.add(handle.points);
-    owned.push(handle);
-    timed.push(handle);
-    motes.push(handle);
+    w.add(handle.points);
+    w.size(w.time(w.own(handle)));
   }
 
   const haze = makeMistPlanes({
@@ -668,12 +650,10 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene, grid: GridGeom
     nearFade: 8,
     name: 'gardenHaze',
   });
-  group.add(haze.group);
-  owned.push(haze);
-  timed.push(haze);
+  w.add(haze.group);
+  w.time(w.own(haze));
 
-  return {
-    group,
+  return w.seal({
     sky,
     rig,
     terrain,
@@ -681,26 +661,17 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene, grid: GridGeom
     portalRoots,
     doors,
     stoneMaterial,
-    setTime(t) {
-      for (let i = 0; i < timed.length; i++) timed[i]?.setTime(t);
+  }, {
+    time: (t) => {
       oakUniforms(stoneMaterial)?.setTime(t);
     },
-    setPixelRatio(dpr) {
-      for (let i = 0; i < motes.length; i++) motes[i]?.setPixelRatio(dpr);
-    },
-    dispose() {
-      for (let i = owned.length - 1; i >= 0; i--) owned[i]?.dispose();
-      owned.length = 0;
-      timed.length = 0;
-      motes.length = 0;
+    drop: () => {
       planted.length = 0;
       trees.length = 0;
       lanternSpots.length = 0;
       portalRoots.length = 0;
-      group.removeFromParent();
-      group.clear();
     },
-  };
+  });
 }
 
 

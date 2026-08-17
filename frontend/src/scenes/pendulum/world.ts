@@ -25,6 +25,7 @@ import type { SceneContext } from '@kit/types';
 import { valueNoise2 } from '@kit/textures';
 import { excludeAny, scatterGrass, scatterRocks, type ExcludeFn } from '@kit/vegetation';
 import { makeWater, type WaterHandle } from '@kit/water';
+import { makeWorld, type Disposable, type WorldCore } from '@kit/world';
 import type { EnvGeometry } from '@sim/types';
 import {
   HANGER_PLATE_DROP,
@@ -91,8 +92,7 @@ export function makePondBed(seed: number): (x: number, z: number) => number {
 }
 
 
-export interface WorldHandle {
-  group: THREE.Group;
+export interface WorldHandle extends WorldCore {
   sky: SkyHandle;
   rig: LightRig;
   terrain: TerrainHandle;
@@ -100,19 +100,9 @@ export interface WorldHandle {
   reflectionRoot: THREE.Object3D;
   motes: THREE.Points;
   lanternLight: THREE.PointLight | undefined;
-  setTime(t: number): void;
   setLight(serenity: number, lanternX: number, time: number): void;
-  setPixelRatio(dpr: number): void;
-  dispose(): void;
 }
 
-interface Disposable {
-  dispose(): void;
-}
-
-interface Timed {
-  setTime(t: number): void;
-}
 
 const KOI_COUNT = 9;
 const PAD_COUNT = 15;
@@ -121,10 +111,7 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene): WorldHandle {
   const palette: Palette = ctx.tokens.palettes.night;
   const accent = ctx.tokens.accents['pendulum'] ?? ctx.tokens.celebrationGold;
   const pivot = pivotOf(ctx.geometry);
-  const group = new THREE.Group();
-  group.name = 'lanternBell';
-  const owned: Disposable[] = [];
-  const timed: Timed[] = [];
+  const w = makeWorld('lanternBell');
 
   const vermilion = blendTokens(TOKENS.palettes.dusk.skyBottom, palette.skyTop, 0.44);
   const vermilionDark = blendTokens(TOKENS.palettes.dusk.skyBottom, palette.skyTop, 0.62);
@@ -154,9 +141,9 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene): WorldHandle {
     },
     radius: 300,
   });
-  group.add(sky.mesh);
-  owned.push(sky);
-  timed.push({ setTime: (t) => sky.setTime(t) });
+  w.add(sky.mesh);
+  w.own(sky);
+  w.time({ setTime: (t) => sky.setTime(t) });
 
   const rig = makeLightRig(palette, {
     sunDir: sky.sunDirection,
@@ -164,8 +151,8 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene): WorldHandle {
     pointDistance: 7,
     sunDistanceScale: 2.6,
   });
-  group.add(rig.group);
-  owned.push(rig);
+  w.add(rig.group);
+  w.own(rig);
   rig.setShadowFocus({ x: 0, y: -0.9, z: -0.2 }, 5.6);
 
   applyFog(scene, palette, FOG_EXTENT);
@@ -200,15 +187,15 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene): WorldHandle {
     castShadow: false,
     name: 'pondBed',
   });
-  group.add(terrain.mesh);
-  owned.push(terrain);
+  w.add(terrain.mesh);
+  w.own(terrain);
 
   const bedAt = (x: number, z: number): number => terrain.sampleHeight(x, z);
 
   const pivotRoot = new THREE.Object3D();
   pivotRoot.name = 'toriiPivotRoot';
   pivotRoot.position.set(pivot[0], pivot[1], pivot[2]);
-  group.add(pivotRoot);
+  w.add(pivotRoot);
 
   const toriiParts: ColoredPart[] = [];
   {
@@ -298,8 +285,8 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene): WorldHandle {
   toriiMesh.name = 'torii';
   toriiMesh.castShadow = true;
   toriiMesh.receiveShadow = true;
-  group.add(toriiMesh);
-  owned.push({
+  w.add(toriiMesh);
+  w.own({
     dispose: () => {
       toriiGeometry.dispose();
       propMaterial.dispose();
@@ -311,18 +298,18 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene): WorldHandle {
   const deepCool = blendTokens(palette.skyTop, palette.fog, 0.35);
   const deepWarm = blendTokens(deepCool, accent, 0.006);
   const pond = makeWaterSurface( palette, sky.sunDirection, accent);
-  group.add(pond.handle.mesh);
-  owned.push(pond.handle);
+  w.add(pond.handle.mesh);
+  w.own(pond.handle);
   const liveShallow = new THREE.Color();
   const liveDeep = new THREE.Color();
 
   const koi = buildKoi(KOI_COUNT, ctx.seed, palette, accent);
-  group.add(koi.mesh);
-  owned.push(koi);
+  w.add(koi.mesh);
+  w.own(koi);
 
   const pads = buildLotusPads(PAD_COUNT, ctx.seed, palette, pond.handle.sampleHeight, bedAt);
-  group.add(pads.mesh);
-  owned.push(pads);
+  w.add(pads.mesh);
+  w.own(pads);
 
   const reflectSprite = radialSprite(64, 1.7);
   const reflectMaterial: EmissiveMaterial = emissiveMaterial(blendTokens(accent, palette.sun, 0.18), 1.5, {
@@ -342,8 +329,8 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene): WorldHandle {
   reflectMesh.name = 'lanternReflection';
   reflectMesh.renderOrder = 3;
   reflectionRoot.add(reflectMesh);
-  group.add(reflectionRoot);
-  owned.push({
+  w.add(reflectionRoot);
+  w.own({
     dispose: () => {
       reflectGeometry.dispose();
       reflectMaterial.dispose();
@@ -372,9 +359,8 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene): WorldHandle {
     rimStrength: 0.75,
     name: 'pondReeds',
   });
-  group.add(reeds.group);
-  owned.push(reeds);
-  timed.push(reeds);
+  w.add(reeds.group);
+  w.time(w.own(reeds));
 
   const rocks = scatterRocks({
     count: 90,
@@ -394,9 +380,8 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene): WorldHandle {
     castShadow: true,
     name: 'pondStones',
   });
-  group.add(rocks.group);
-  owned.push(rocks);
-  timed.push(rocks);
+  w.add(rocks.group);
+  w.time(w.own(rocks));
 
   const fireflyColor = blendTokens(accent, TOKENS.accents['memory-chain'] ?? accent, 0.42);
   const fireflies: AmbientParticlesHandle = makeAmbientParticles({
@@ -411,9 +396,8 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene): WorldHandle {
     swirl: 0.3,
     name: 'reedFireflies',
   });
-  group.add(fireflies.points);
-  owned.push(fireflies);
-  timed.push(fireflies);
+  w.add(fireflies.points);
+  w.size(w.time(w.own(fireflies)));
 
   const mist: MistPlanesHandle = makeMistPlanes({
     size: [8.4, 6.4],
@@ -429,9 +413,8 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene): WorldHandle {
     name: 'pondMist',
   });
   mist.group.position.set(0, 0, -0.5);
-  group.add(mist.group);
-  owned.push(mist);
-  timed.push(mist);
+  w.add(mist.group);
+  w.time(w.own(mist));
 
   const embers: AmbientParticlesHandle = makeAmbientParticles({
     preset: 'embers',
@@ -447,8 +430,8 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene): WorldHandle {
     name: 'lanternMotes',
   });
   embers.setDensity(0);
-  group.add(embers.points);
-  owned.push(embers);
+  w.add(embers.points);
+  w.size(w.own(embers));
 
   const lanternLight = rig.points[0];
   if (lanternLight) {
@@ -468,8 +451,7 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene): WorldHandle {
     archLight.distance = 4;
   }
 
-  return {
-    group,
+  return w.seal({
     sky,
     rig,
     terrain,
@@ -477,13 +459,6 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene): WorldHandle {
     reflectionRoot,
     motes: embers.points,
     lanternLight,
-
-    setTime(t) {
-      for (let i = 0; i < timed.length; i++) timed[i]?.setTime(t);
-      pond.handle.setTime(t);
-      pads.setTime(t);
-      embers.setTime(t);
-    },
 
     setLight(serenity, lanternX, time) {
       const s = clampRange(serenity, 0, 1);
@@ -509,19 +484,13 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene): WorldHandle {
       reeds.setWind(0.045 * (1 + 0.5 * (1 - s)), 0.85);
     },
 
-    setPixelRatio(dpr) {
-      fireflies.setPixelRatio(dpr);
-      embers.setPixelRatio(dpr);
+  }, {
+    time: (t) => {
+      pond.handle.setTime(t);
+      pads.setTime(t);
+      embers.setTime(t);
     },
-
-    dispose() {
-      for (let i = owned.length - 1; i >= 0; i--) owned[i]?.dispose();
-      owned.length = 0;
-      timed.length = 0;
-      group.removeFromParent();
-      group.clear();
-    },
-  };
+  });
 }
 
 
