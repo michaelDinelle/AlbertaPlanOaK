@@ -14,16 +14,25 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import numpy as np
-from scipy.stats import mannwhitneyu
+from arch.bootstrap import MovingBlockBootstrap
+from lifelines import KaplanMeierFitter
+from lifelines.utils import restricted_mean_survival_time
+from rliable import library as rly
+from rliable import metrics as rl_metrics
+from scipy.optimize import isotonic_regression
+from statsmodels.stats.proportion import proportion_confint
 
 REPO = Path(__file__).resolve().parent
 BENCH = REPO / ".oak-benchmarks"
 BASELINES = Path(os.environ.get("OAK_BASELINES_DIR") or REPO / ".oak-baselines")
 SCALE_PATH = REPO / "scale-v1.json"
 
-BOOT_REPS = 4000
+BOOT_REPS = 50_000
 CURVE_REPS = 2000
 BOOT_BASE_SEED = 20260817
+BOOT_METHOD = ("rliable stratified percentile bootstrap over runs; "
+               "independent x/y resampling for probImprovement; "
+               "Wilson interval for divergence rate; Greenwood variance for RMST")
 TAU_GRID = [round(-0.25 + 0.025 * k, 6) for k in range(61)]
 PLASTICITY_FIELDS = {
     "oak": ["dormantFraction", "utilityDormantFraction", "featureBirths", "weightAbsMean",
@@ -33,7 +42,6 @@ PLASTICITY_FIELDS = {
             "logStepP10", "logStepP50", "logStepP90"],
     "random": [],
 }
-Z_THRESHOLDS = ("0.25", "0.5", "0.8")
 
 FILE_MAGIC = 0x544B414F
 
@@ -99,35 +107,17 @@ def env_slices(run: dict) -> dict[str, np.ndarray]:
     return {k: np.array(v) for k, v in sorted(out.items())}
 
 
-def isotonic_fit(y: np.ndarray) -> np.ndarray:
-    vals: list[float] = []
-    wts: list[int] = []
-    for x in y:
-        v, w = float(x), 1
-        while vals and vals[-1] > v:
-            pv, pw = vals.pop(), wts.pop()
-            v = (v * w + pv * pw) / (w + pw)
-            w += pw
-        vals.append(v)
-        wts.append(w)
-    out = np.empty(len(y))
-    pos = 0
-    for v, w in zip(vals, wts):
-        out[pos:pos + w] = v
-        pos += w
-    return out
-
-
-def window_ctx(run: dict) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+def window_ctx(run: dict) -> tuple[np.ndarray, np.ndarray]:
     ends = run["tape"]["ends"]
     win = max(run["meta"]["steps"] // 5, 1)
     j = np.searchsorted(ends, ends - win, side="right") - 1
-    i = np.nonzero(j >= 0)[0]
-    return ends, i, j[i]
+    return ends, j
 
 
 def windowed_rates(run: dict, lanes: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
-    ends, i, j = window_ctx(run)
+    ends, jr = window_ctx(run)
+    i = np.nonzero(jr >= 0)[0]
+    j = jr[i]
     rs = series(run, "rewardSum")[:, lanes]
     if i.size == 0:
         n = len(lanes)
@@ -143,11 +133,11 @@ def windowed_rates(run: dict, lanes: np.ndarray) -> tuple[np.ndarray, np.ndarray
 
 def retention_null(run: dict, lanes: np.ndarray,
                    boot: int = 200) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    ends, wi, wj = window_ctx(run)
+    ends, jr = window_ctx(run)
     rs_all = series(run, "rewardSum")[:, lanes]
     n = len(lanes)
     p5, p50, spread = (np.full(n, np.nan) for _ in range(3))
-    if wi.size == 0 or rs_all.shape[0] < 8:
+    if not (jr >= 0).any() or rs_all.shape[0] < 8:
         return p5, p50, spread
     dt = np.diff(ends).astype(float)
     for li in range(n):
@@ -157,15 +147,13 @@ def retention_null(run: dict, lanes: np.ndarray,
         if m < 8:
             continue
         dr = np.diff(rs[:m]) / dt[:m - 1]
-        fit = isotonic_fit(dr)
+        fit = isotonic_regression(dr).x
         res = dr - fit
         k = len(res)
         blk = max(1, int(round(math.sqrt(k))))
-        nblk = -(-k // blk)
-        rng = np.random.default_rng(101 + int(lanes[li]))
-        starts = rng.integers(0, k - blk + 1, size=(boot, nblk))
-        idx = (starts[:, :, None] + np.arange(blk)).reshape(boot, nblk * blk)[:, :k]
-        synth = np.cumsum((fit + res[idx]) * dt[:k], axis=1) + rs[0]
+        mbb = MovingBlockBootstrap(blk, res, seed=101 + int(lanes[li]))
+        res_star = np.stack([d[0] for d, _ in mbb.bootstrap(boot)])
+        synth = np.cumsum((fit + res_star) * dt[:k], axis=1) + rs[0]
         synth = np.concatenate([np.full((boot, 1), rs[0]), synth], axis=1)
         mask = wi < m
         vi, vj = wi[mask], wj[mask]
@@ -220,30 +208,23 @@ def analyze(run: dict, lanes: np.ndarray) -> dict:
 
 
 def iqm(v: np.ndarray) -> float:
-    v = np.sort(np.asarray(v, float))
-    n = len(v)
-    lo, hi = n // 4, n - n // 4
-    return float(v[lo:hi].mean()) if hi > lo else float(v.mean())
+    return float(rl_metrics.aggregate_iqm(np.asarray(v, float)))
+
+
+def impute_worst(v: np.ndarray, high_is_worst: bool = False) -> np.ndarray:
+    v = np.asarray(v, float)
+    fin = np.isfinite(v)
+    if fin.all() or not fin.any():
+        return v
+    worst = float(v[fin].max()) if high_is_worst else float(v[fin].min())
+    return np.where(fin, v, worst)
 
 
 def rmst(times: np.ndarray, events: np.ndarray, horizon: int) -> float:
-    order = np.argsort(times)
-    t_s, e_s = times[order], events[order]
-    area, prev_t, s = 0.0, 0.0, 1.0
-    n = len(times)
-    for t in np.unique(t_s[e_s == 1]):
-        t = min(float(t), float(horizon))
-        area += s * (t - prev_t)
-        at_risk = n - np.searchsorted(t_s, t, side="left")
-        deaths = int(((t_s == t) & (e_s == 1)).sum())
-        if at_risk > 0:
-            s *= 1.0 - deaths / at_risk
-        prev_t = t
-        if prev_t >= horizon:
-            break
-    if prev_t < horizon:
-        area += s * (horizon - prev_t)
-    return area
+    if not events.any():
+        return float(horizon)
+    km = KaplanMeierFitter().fit(np.minimum(times, horizon), event_observed=events)
+    return float(restricted_mean_survival_time(km, t=float(horizon)))
 
 
 def paired(keeper: np.ndarray, cand: np.ndarray, stat, boot: int, seed: int) -> np.ndarray:
@@ -623,80 +604,83 @@ def fl_list(v) -> list:
 
 
 def row_iqm(mat: np.ndarray) -> np.ndarray:
-    s = np.sort(mat, axis=1)
-    n = np.isfinite(s).sum(axis=1)
-    sums = np.concatenate(
-        [np.zeros((len(s), 1)), np.cumsum(np.where(np.isfinite(s), s, 0.0), axis=1)], axis=1)
-    lo, hi = n // 4, n - n // 4
-    rows = np.arange(len(s))
-    width = hi - lo
-    with np.errstate(invalid="ignore"):
-        return np.where(width > 0, (sums[rows, hi] - sums[rows, lo]) / np.maximum(width, 1), np.nan)
+    return np.array([iqm(impute_worst(row)) for row in mat])
 
 
-def finite_iqm(v: np.ndarray) -> float:
+def diag_iqm(v: np.ndarray) -> float | None:
     fin = v[np.isfinite(v)]
-    return iqm(fin) if fin.size else float("nan")
+    return fl(iqm(fin)) if fin.size else None
 
 
-def percentile_ci(stats: np.ndarray) -> list:
-    fin = stats[np.isfinite(stats)]
-    if fin.size == 0:
-        return [None, None]
-    return [fl(np.percentile(fin, 2.5)), fl(np.percentile(fin, 97.5))]
+def agg_iqm(scores: np.ndarray) -> np.ndarray:
+    return np.array([iqm(scores)])
 
 
-def iqm_ci(values: np.ndarray, seed: int) -> list:
-    rng = np.random.default_rng(seed)
-    idx = rng.integers(0, len(values), size=(BOOT_REPS, len(values)))
-    return percentile_ci(row_iqm(values[idx]))
+def agg_gap(scores: np.ndarray) -> np.ndarray:
+    return np.array([rl_metrics.aggregate_optimality_gap(scores)])
 
 
-def stratified_resample(zmat: np.ndarray, reps: int, seed: int) -> np.ndarray:
-    rng = np.random.default_rng(seed)
-    idx = rng.integers(0, zmat.shape[1], size=(reps, zmat.shape[0], zmat.shape[1]))
-    return zmat[np.arange(zmat.shape[0])[None, :, None], idx].reshape(reps, -1)
+def agg_prob_improvement(x: np.ndarray, y: np.ndarray) -> np.ndarray:
+    return np.array([rl_metrics.probability_of_improvement(x, y)])
+
+
+def ci_pair(ci: np.ndarray) -> list:
+    return [fl(float(ci[0][0])), fl(float(ci[1][0]))]
+
+
+def interval_estimate(scores: np.ndarray, func, seed: int) -> tuple[float, list]:
+    np.random.seed(seed)
+    point, ci = rly.get_interval_estimates({"s": scores}, func, reps=BOOT_REPS)
+    return float(point["s"][0]), ci_pair(ci["s"])
 
 
 def rate_stats(rates: np.ndarray, floor: float, span: float, seed: int) -> dict:
-    ci = iqm_ci(rates, seed)
-    point = finite_iqm(rates)
+    point, ci = interval_estimate(impute_worst(rates)[:, None], agg_iqm, seed)
     return {"iqm": fl(point), "ci95": ci,
             "iqmZ": fl((point - floor) / span),
             "ci95Z": [None if v is None else (v - floor) / span for v in ci]}
 
 
-def rank_seed(seeds: list[int], final_z: np.ndarray, q: float) -> int:
-    order = np.argsort(np.where(np.isfinite(final_z), final_z, -np.inf), kind="stable")
-    return seeds[int(order[int(round(q * (len(seeds) - 1)))])]
-
-
-def divergence_block(run: dict, lanes: np.ndarray, horizon: int) -> dict:
+def divergence_block(run: dict, lanes: np.ndarray, max_step: int) -> dict:
     died = np.array([1.0 if int(l) in run["deaths"] else 0.0 for l in lanes])
-    dtimes = np.array([run["deaths"].get(int(l), horizon) for l in lanes], dtype=float)
-    return {"diverged": int(died.sum()), "rate": fl(died.mean()),
-            "expectedAliveSteps": fl(rmst(dtimes, died, horizon))}
+    dtimes = np.minimum(
+        np.array([run["deaths"].get(int(l), max_step) for l in lanes], dtype=float), max_step)
+    diverged = int(died.sum())
+    lo, hi = proportion_confint(diverged, len(lanes), method="wilson")
+    km = KaplanMeierFitter().fit(dtimes, event_observed=died)
+    alive, alive_var = restricted_mean_survival_time(km, t=float(max_step), return_variance=True)
+    half = 1.96 * math.sqrt(alive_var) if alive_var >= 0 else float("nan")
+    sf = km.survival_function_.iloc[:, 0]
+    sf_ci = km.confidence_interval_survival_function_
+    return {"diverged": diverged, "rate": fl(died.mean()),
+            "rateCi95": [fl(float(lo)), fl(float(hi))],
+            "expectedAliveSteps": fl(float(alive)),
+            "expectedAliveCi95": [fl(float(alive) - half), fl(float(alive) + half)],
+            "km": {"steps": [int(t) for t in sf.index],
+                   "survival": fl_list(sf.to_numpy()),
+                   "ci95": [fl_list(sf_ci.iloc[:, 0].to_numpy()),
+                            fl_list(sf_ci.iloc[:, 1].to_numpy())]}}
 
 
 def full_window_rates(run: dict) -> np.ndarray:
-    ends, wi, wj = window_ctx(run)
+    ends, j = window_ctx(run)
     rs = series(run, "rewardSum")
-    rates = np.full(rs.shape, np.nan)
-    if wi.size:
-        with np.errstate(invalid="ignore"):
-            rates[wi] = (rs[wi] - rs[wj]) / (ends[wi] - ends[wj])[:, None]
-    return rates
+    jc = np.maximum(j, 0)
+    start = np.where(j >= 0, ends[jc], 0.0)
+    base = np.where(j[:, None] >= 0, rs[jc], 0.0)
+    with np.errstate(invalid="ignore"):
+        return (rs - base) / (ends - start)[:, None]
 
 
-def prob_improvement(x: np.ndarray, y: np.ndarray, seed: int) -> dict:
-    xs = np.where(np.isfinite(x), x, -np.inf)
-    ys = np.where(np.isfinite(y), y, -np.inf)
-    p = float(mannwhitneyu(xs, ys).statistic) / (len(xs) * len(ys))
-    grid = (xs[:, None] > ys[None, :]) + 0.5 * (xs[:, None] == ys[None, :])
-    rng = np.random.default_rng(seed)
-    idx = rng.integers(0, len(xs), size=(BOOT_REPS, len(xs)))
-    stats = grid[idx[:, :, None], idx[:, None, :]].mean(axis=(1, 2))
-    return {"p": fl(p), "ci95": percentile_ci(stats)}
+def runs_matrix(cols: list, high_is_worst: bool = False) -> np.ndarray:
+    return np.column_stack([impute_worst(c, high_is_worst) for c in cols])
+
+
+def prob_improvement(x: np.ndarray, y: np.ndarray, seed: int) -> tuple[float, list]:
+    np.random.seed(seed)
+    point, ci = rly.get_interval_estimates(
+        {"x,y": [x, y]}, agg_prob_improvement, reps=BOOT_REPS)
+    return fl(float(point["x,y"][0])), ci_pair(ci["x,y"])
 
 
 def final_z_by_env(run: dict, slices: dict, scale_envs: dict) -> dict[str, np.ndarray]:
@@ -711,8 +695,7 @@ def final_z_by_env(run: dict, slices: dict, scale_envs: dict) -> dict[str, np.nd
     return out
 
 
-def vs_baseline(policy: str, seed_base: int, run: dict, slices: dict, scale_envs: dict,
-                own_thresholds: dict) -> dict | None:
+def vs_baseline(policy: str, seed_base: int, run: dict, slices: dict, scale_envs: dict) -> dict | None:
     name = baseline_pointer(policy)
     if name is None:
         return None
@@ -720,20 +703,19 @@ def vs_baseline(policy: str, seed_base: int, run: dict, slices: dict, scale_envs
     if (base["meta"]["envSchedule"] != run["meta"]["envSchedule"]
             or base["seeds"] != run["seeds"]):
         raise SystemExit(f"{policy} baseline schedule differs from {run['root']}")
-    base_summary = json.loads((BASELINES / name / "summary.json").read_text())
-    base_thresholds = base_summary["aggregate"]["computeToThreshold"]
     own_z = final_z_by_env(run, slices, scale_envs)
     base_z = final_z_by_env(base, slices, scale_envs)
-    per_env = {env: prob_improvement(own_z[env], base_z[env], seed_base + e)
-               for e, env in enumerate(sorted(slices))}
-    ratios = {}
-    for t in Z_THRESHOLDS:
-        b, o = base_thresholds[t], own_thresholds[t]
-        ratios[t] = b / o if b is not None and o is not None else None
+    env_ids = sorted(slices)
+    per_env = {}
+    for e, env in enumerate(env_ids):
+        p, ci = prob_improvement(runs_matrix([own_z[env]]), runs_matrix([base_z[env]]),
+                                 seed_base + e)
+        per_env[env] = {"p": p, "ci95": ci}
+    mean_p, mean_ci = prob_improvement(runs_matrix([own_z[e] for e in env_ids]),
+                                       runs_matrix([base_z[e] for e in env_ids]),
+                                       seed_base + len(env_ids))
     return {"run": name,
-            "probImprovement": {"mean": fl(np.mean([per_env[e]["p"] for e in per_env])),
-                                "envs": per_env},
-            "computeRatioAt": ratios}
+            "probImprovement": {"mean": mean_p, "ci95": mean_ci, "envs": per_env}}
 
 
 def cmd_report(args) -> int:
@@ -785,79 +767,44 @@ def cmd_report(args) -> int:
         lanes = slices[env]
         floor, ceiling = scale_envs[env]["floor"], scale_envs[env]["ceiling"]
         span = ceiling - floor
-        seeds = [int(run["seeds"][l]) for l in lanes]
-        zf = z_final[lanes]
-        zf_fin = zf[np.isfinite(zf)]
-        pick = {q: rank_seed(seeds, zf, p)
-                for q, p in (("p5", 0.05), ("p50", 0.5), ("p95", 0.95))}
-        lane_of = {s: l for s, l in zip(seeds, lanes)}
         envs_out[env] = {
             "floor": fl(floor), "ceiling": fl(ceiling),
-            "ceilingSource": scale_envs[env]["ceilingSource"],
-            "lifetimeRate": rate_stats(delivered[lanes], floor, span,
-                                       BOOT_BASE_SEED + 100 + e * 10),
             "finalRate": rate_stats(final_rate[lanes], floor, span,
                                     BOOT_BASE_SEED + 101 + e * 10),
-            "forgetting": {"phiIQM": fl(finite_iqm(phi[lanes])),
-                           "ci95": iqm_ci(phi[lanes], BOOT_BASE_SEED + 102 + e * 10)},
-            "iprZ90": fl(np.percentile(zf_fin, 95) - np.percentile(zf_fin, 5))
-                      if zf_fin.size else None,
-            "divergence": divergence_block(run, lanes, horizon),
-            "perLane": {"seeds": seeds,
-                        "lifetimeZ": fl_list(z_life[lanes]),
-                        "finalZ": fl_list(zf),
-                        "phi": fl_list(phi[lanes]),
-                        "deathStep": [run["deaths"].get(int(l)) for l in lanes]},
-            "curves": {"percentileSeeds": pick,
-                       "iqmZ": fl_list(row_iqm(z_rates[:, lanes])),
-                       "rateZ": {q: fl_list(z_rates[:, lane_of[s]]) for q, s in pick.items()}},
+            "divergence": divergence_block(run, lanes, max_step),
+            "curves": {"iqmZ": fl_list(row_iqm(z_rates[:, lanes]))},
         }
         if plast_fields:
             envs_out[env]["plasticity"] = {
-                f: {"final": fl(finite_iqm(plast_series[f][-1, lanes])),
-                    "iqm": [fl(finite_iqm(plast_series[f][r][lanes])) for r in plast_rows]}
+                f: {"final": diag_iqm(plast_series[f][-1, lanes]),
+                    "iqm": [diag_iqm(plast_series[f][r][lanes]) for r in plast_rows]}
                 for f in plast_fields
             }
-    z_final_mat = np.stack([z_final[slices[env]] for env in env_ids])
-    z_life_mat = np.stack([z_life[slices[env]] for env in env_ids])
-    phi_mat = np.stack([phi[slices[env]] for env in env_ids])
-    pool_final = z_final_mat.ravel()
-    pool_fin = pool_final[np.isfinite(pool_final)]
-    strat_final = stratified_resample(z_final_mat, BOOT_REPS, BOOT_BASE_SEED + 1)
-    strat_life = stratified_resample(z_life_mat, BOOT_REPS, BOOT_BASE_SEED + 2)
-    strat_phi = stratified_resample(phi_mat, BOOT_REPS, BOOT_BASE_SEED + 3)
-    with np.errstate(invalid="ignore"):
-        gap_pool = np.maximum(0.0, 1.0 - strat_final)
-    gap_ci = percentile_ci(np.nanmean(np.where(np.isfinite(gap_pool), gap_pool, np.nan), axis=1))
-    strat_profile = stratified_resample(z_final_mat, CURVE_REPS, BOOT_BASE_SEED + 4)
-    profile_n = np.isfinite(strat_profile).sum(axis=1)
-    fraction = [fl((pool_fin > t).mean()) for t in TAU_GRID]
-    with np.errstate(invalid="ignore"):
-        bands = [percentile_ci(np.where(strat_profile > t, 1.0, 0.0)
-                               .sum(axis=1) / profile_n) for t in TAU_GRID]
-    final_z_iqm = finite_iqm(pool_final)
+    z_final_runs = runs_matrix([z_final[slices[env]] for env in env_ids])
+    z_life_runs = runs_matrix([z_life[slices[env]] for env in env_ids])
+    phi_runs = runs_matrix([phi[slices[env]] for env in env_ids], high_is_worst=True)
+    final_z_iqm, final_z_ci = interval_estimate(z_final_runs, agg_iqm, BOOT_BASE_SEED + 1)
+    life_z_iqm, life_z_ci = interval_estimate(z_life_runs, agg_iqm, BOOT_BASE_SEED + 2)
+    phi_iqm, phi_agg_ci = interval_estimate(phi_runs, agg_iqm, BOOT_BASE_SEED + 3)
+    gap_mean, gap_ci = interval_estimate(z_final_runs, agg_gap, BOOT_BASE_SEED + 1)
+    np.random.seed(BOOT_BASE_SEED + 4)
+    profile, profile_ci = rly.create_performance_profile(
+        {"s": z_final_runs}, TAU_GRID, reps=CURVE_REPS)
     z_curve = row_iqm(z_rates)
     cum_flops = [flops_per_step * int(s) for s in ends]
-    thresholds = {}
-    for t in Z_THRESHOLDS:
-        crossing = next((i for i, v in enumerate(z_curve)
-                         if math.isfinite(v) and v >= float(t)), None)
-        thresholds[t] = None if crossing is None else cum_flops[crossing]
     aggregate = {
-        "lifetimeZ": {"iqm": fl(finite_iqm(z_life)), "ci95": percentile_ci(row_iqm(strat_life))},
-        "finalZ": {"iqm": fl(final_z_iqm), "ci95": percentile_ci(row_iqm(strat_final))},
-        "optimalityGap": {"mean": fl(np.maximum(0.0, 1.0 - pool_fin).mean()), "ci95": gap_ci},
-        "forgetting": {"phiIQM": fl(finite_iqm(phi)), "ci95": percentile_ci(row_iqm(strat_phi))},
-        "iprZ90": fl(np.percentile(pool_fin, 95) - np.percentile(pool_fin, 5))
-                  if pool_fin.size else None,
-        "divergence": divergence_block(run, np.arange(n_lanes), horizon),
-        "profile": {"tau": TAU_GRID, "fraction": fraction,
-                    "ci95": [[b[0] for b in bands], [b[1] for b in bands]]},
+        "lifetimeZ": {"iqm": fl(life_z_iqm), "ci95": life_z_ci},
+        "finalZ": {"iqm": fl(final_z_iqm), "ci95": final_z_ci},
+        "optimalityGap": {"mean": fl(gap_mean), "ci95": gap_ci},
+        "forgetting": {"phiIQM": fl(phi_iqm), "ci95": phi_agg_ci},
+        "iprZ90": fl(np.percentile(z_final_runs, 95) - np.percentile(z_final_runs, 5))
+                  if np.isfinite(z_final_runs).all() else None,
+        "divergence": divergence_block(run, np.arange(n_lanes), max_step),
+        "profile": {"tau": TAU_GRID, "fraction": fl_list(profile["s"]),
+                    "ci95": [fl_list(profile_ci["s"][0]), fl_list(profile_ci["s"][1])]},
         "frontier": {"cumFlopsPerLane": cum_flops, "zIQM": fl_list(z_curve)},
-        "computeToThreshold": thresholds,
     }
-    compute = {"flopsPerStep": flops_per_step, "envFlopsPerStep": env_flops_per_step,
-               "omega": fl(final_z_iqm / flops_per_step)}
+    compute = {"flopsPerStep": flops_per_step, "envFlopsPerStep": env_flops_per_step}
     if "gpuSeconds" in meta:
         compute["gpuSeconds"] = meta["gpuSeconds"]
     summary = {
@@ -868,7 +815,7 @@ def cmd_report(args) -> int:
         "complete": max_step >= horizon,
         "seedsPerEnv": per_env_counts.pop(),
         "bootstrap": {"reps": BOOT_REPS, "curveReps": CURVE_REPS,
-                      "baseSeed": BOOT_BASE_SEED, "method": "percentile"},
+                      "baseSeed": BOOT_BASE_SEED, "method": BOOT_METHOD},
         "curveSteps": [int(s) for s in ends],
         "plasticitySteps": [int(ends[r]) for r in plast_rows] if plast_fields else [],
         "compute": compute,
@@ -876,8 +823,7 @@ def cmd_report(args) -> int:
         "aggregate": aggregate,
     }
     if meta["policy"] == "oak":
-        vs = {p: vs_baseline(p, BOOT_BASE_SEED + 3000 + b * 1000, run, slices, scale_envs,
-                             thresholds)
+        vs = {p: vs_baseline(p, BOOT_BASE_SEED + 3000 + b * 1000, run, slices, scale_envs)
               for b, p in enumerate(("ppo", "random"))}
         if all(v is not None for v in vs.values()):
             summary["vsBaselines"] = vs

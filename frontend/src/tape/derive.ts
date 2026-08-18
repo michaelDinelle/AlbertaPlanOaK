@@ -65,36 +65,38 @@ export function deliveredRate(tape: Tape, lane: number): number | null {
 
 export interface BinnedRates {
   x: number[];
-  edges: number[];
   perLane: (number | null)[][];
   iqm: (number | null)[];
   p10: (number | null)[];
   p90: (number | null)[];
 }
 
-export function binnedRates(tape: Tape, lanes: readonly number[]): BinnedRates {
+export const retentionWindow = (steps: number): number => Math.max(Math.floor(steps / 5), 1);
+
+export function windowedRates(tape: Tape, lanes: readonly number[], win: number): BinnedRates {
   const f = fieldIndex(tape, 'rewardSum');
   const x: number[] = [];
-  const edges: number[] = [0];
   const perLane: (number | null)[][] = lanes.map(() => []);
   const iqmOut: (number | null)[] = [];
   const p10: (number | null)[] = [];
   const p90: (number | null)[] = [];
-  let prevStep = 0;
-  let prevRow = -1;
   const scratch: number[] = [];
-  for (let r = 0; r < tape.rows; r++) {
-    const step = tape.stepEnd[r] ?? 0;
-    const span = step - prevStep;
+  let j = 0;
+  for (let i = 0; i < tape.rows; i++) {
+    const endI = tape.stepEnd[i] ?? 0;
+    while (j < tape.rows && (tape.stepEnd[j] ?? 0) <= endI - win) j++;
+    const jj = j - 1;
+    const startStep = jj < 0 ? 0 : tape.stepEnd[jj] ?? 0;
+    const span = endI - startStep;
     scratch.length = 0;
     for (let li = 0; li < lanes.length; li++) {
       const lane = lanes[li] ?? 0;
-      const s1 = tapeValue(tape, f, r, lane);
-      const s0 = prevRow < 0 ? 0 : tapeValue(tape, f, prevRow, lane);
       const dst = perLane[li];
       if (dst === undefined) continue;
-      if (span > 0 && Number.isFinite(s1) && Number.isFinite(s0)) {
-        const rate = (s1 - s0) / span;
+      const si = tapeValue(tape, f, i, lane);
+      const sj = jj < 0 ? 0 : tapeValue(tape, f, jj, lane);
+      if (span > 0 && Number.isFinite(si) && Number.isFinite(sj)) {
+        const rate = (si - sj) / span;
         dst.push(rate);
         scratch.push(rate);
       } else {
@@ -105,17 +107,12 @@ export function binnedRates(tape: Tape, lanes: readonly number[]): BinnedRates {
     iqmOut.push(scratch.length > 0 ? iqmSorted(scratch) : null);
     p10.push(scratch.length > 0 ? percentileSorted(scratch, 10) : null);
     p90.push(scratch.length > 0 ? percentileSorted(scratch, 90) : null);
-    x.push((prevStep + step) / 2);
-    edges.push(step);
-    prevStep = step;
-    prevRow = r;
+    x.push(endI);
   }
-  return { x, edges, perLane, iqm: iqmOut, p10, p90 };
+  return { x, perLane, iqm: iqmOut, p10, p90 };
 }
 
-export type RhoBinned = Omit<BinnedRates, 'edges'>;
-
-export function rhoBinned(tape: Tape, lanes: readonly number[]): RhoBinned {
+export function rhoBinned(tape: Tape, lanes: readonly number[]): BinnedRates {
   const f = fieldIndex(tape, 'rho');
   const x: number[] = [];
   const perLane: (number | null)[][] = lanes.map(() => []);
@@ -153,7 +150,7 @@ export interface RetentionResult {
 
 export function laneRetention(tape: Tape, lane: number, horizon: number): RetentionResult | null {
   const f = fieldIndex(tape, 'rewardSum');
-  const win = Math.max(Math.floor(horizon / 5), 1);
+  const win = retentionWindow(horizon);
   let peak = -Infinity;
   let end: number | null = null;
   let j = 0;
@@ -172,30 +169,6 @@ export function laneRetention(tape: Tape, lane: number, horizon: number): Retent
   }
   if (end === null || !Number.isFinite(peak) || peak <= 0) return null;
   return { peak, end, retention: end / peak };
-}
-
-export interface ThroughputSeries {
-  x: number[];
-  stepsPerSecond: (number | null)[];
-}
-
-export function throughputSeries(tape: Tape): ThroughputSeries {
-  const x: number[] = [];
-  const out: (number | null)[] = [];
-  let prevStep = 0;
-  let prevWall = 0;
-  for (let r = 0; r < tape.rows; r++) {
-    if (!Number.isFinite(tape.wallSeconds[r])) continue;
-    const step = tape.stepEnd[r] ?? 0;
-    const wall = tape.wallSeconds[r] ?? NaN;
-    const dWall = wall - prevWall;
-    const dStep = step - prevStep;
-    x.push((prevStep + step) / 2);
-    out.push(dWall > 0 && dStep > 0 ? (dStep * tape.laneCount) / dWall : null);
-    prevStep = step;
-    prevWall = wall;
-  }
-  return { x, stepsPerSecond: out };
 }
 
 export interface SurvivalSeries {
@@ -246,7 +219,7 @@ export function buildSeedRows(
 ): SeedRow[] {
   const { lanes, seeds } = envLanes(meta, envId);
   const maxStep = tape.rows > 0 ? tape.stepEnd[tape.rows - 1] ?? 0 : 0;
-  const spark = binnedRates(tape, lanes);
+  const spark = windowedRates(tape, lanes, 1);
   const sparkXs = spark.x.map((x) => (maxStep > 0 ? x / maxStep : 0));
   return lanes.map((lane, li) => ({
     seed: seeds[li] ?? 0,

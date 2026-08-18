@@ -1,4 +1,4 @@
-import type { RunIndexEntry, RunMeta } from '@shared/types';
+import type { RunDetail, RunIndexEntry, RunMeta } from '@shared/types';
 import { ENV_IDS, isEnvId, type EnvId } from '@shared/envs';
 
 export interface EnvShare {
@@ -101,14 +101,43 @@ export function resolveFeaturedRun(
   return { runId: null, source: null };
 }
 
-export type RunLabelSource = Pick<RunIndexEntry, 'startedAt' | 'role' | 'ablationLabel' | 'policy'>;
+export type RunLabelSource = Pick<RunIndexEntry, 'id' | 'startedAt' | 'role' | 'ablationLabel' | 'policy'>;
+
+export function runShortId(id: string): string {
+  return id.slice(id.lastIndexOf('-') + 1).slice(0, 7);
+}
+
+export function runLabelSource(
+  id: string,
+  meta: Pick<RunMeta, 'startedAt' | 'ablationLabel' | 'policy'>,
+): RunLabelSource {
+  return {
+    id,
+    startedAt: meta.startedAt ?? null,
+    role: null,
+    ablationLabel: meta.ablationLabel,
+    policy: meta.policy,
+  };
+}
 
 export function runLabel(entry: RunLabelSource): string {
   const parts = [runDateLabel(entry.startedAt)];
   if (entry.role === 'keeper') parts.push('keeper');
   if (entry.policy !== 'oak') parts.push(entry.policy);
   if (entry.ablationLabel !== 'none') parts.push(entry.ablationLabel);
+  parts.push(runShortId(entry.id));
   return parts.join(' · ');
+}
+
+export function runLabelFor(
+  id: string,
+  entries: readonly RunIndexEntry[] | undefined,
+  loaded: RunDetail | null,
+): string {
+  const entry = entries?.find((run) => run.id === id);
+  if (entry !== undefined) return runLabel(entry);
+  if (loaded !== null && loaded.id === id) return runLabel(runLabelSource(loaded.id, loaded.meta));
+  return runShortId(id);
 }
 
 export function runDateLabel(iso: string | null, now: Date = new Date()): string {

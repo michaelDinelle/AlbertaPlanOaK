@@ -8,6 +8,7 @@ export type KeyAction =
   | { kind: 'debug' }
   | { kind: 'fullscreen' }
   | { kind: 'policy' }
+  | { kind: 'panel' }
   | { kind: 'escape' };
 
 export function keyAction(key: string, shift = false): KeyAction | null {
@@ -39,6 +40,9 @@ export function keyAction(key: string, shift = false): KeyAction | null {
     case 'p':
     case 'P':
       return { kind: 'policy' };
+    case 'h':
+    case 'H':
+      return { kind: 'panel' };
     case 'Escape':
       return { kind: 'escape' };
     default:

@@ -1,11 +1,22 @@
-import { useEffect, useRef, type ReactNode } from 'react';
-import { CartesianGrid, ComposedChart, ResponsiveContainer, XAxis, YAxis } from 'recharts';
+import { useCallback, useEffect, useRef, type ReactNode } from 'react';
+import { clsx } from 'clsx';
+import { CartesianGrid, ComposedChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts';
+import type { TooltipPayload } from 'recharts/types/state/tooltipSlice';
+import type { Policy } from '@shared/types';
 import { formatRate, formatStep } from '../lib/format';
 import { subscribePosition, throttled } from '../playback/store';
 
 export const CHART_MARGIN = { top: 6, right: 10, bottom: 0, left: 0 } as const;
 export const AXIS_WIDTH = 42;
 export const X_AXIS_HEIGHT = 18;
+
+export const POLICY_TOKENS: Record<Policy, string> = {
+  oak: 'var(--color-oak)',
+  ppo: 'var(--color-ppo)',
+  random: 'var(--color-random)',
+};
+
+export const POLICY_ORDER = Object.keys(POLICY_TOKENS) as readonly Policy[];
 
 export interface XY {
   x: number;
@@ -54,9 +65,10 @@ export function lineProps(stroke: string, width = 1.4, dash?: string, axis: 'y' 
     strokeWidth: width,
     strokeDasharray: dash,
     dot: false,
-    activeDot: false,
+    activeDot: { r: 2.5, fill: stroke, strokeWidth: 0 },
     isAnimationActive: false,
     yAxisId: axis,
+    unit: axis,
   } as const;
 }
 
@@ -68,10 +80,63 @@ export function bandProps(fill: string, opacity = 0.12) {
     fillOpacity: opacity,
     isAnimationActive: false,
     yAxisId: 'y',
+    tooltipType: 'none',
   } as const;
 }
 
-const TICK = { fill: 'var(--color-ink-faint)', fontSize: 10, fontFamily: 'var(--font-mono)' } as const;
+const TICK = { fill: 'var(--color-ink-dim)', fontSize: 10, fontFamily: 'var(--font-mono)' } as const;
+
+const TIP_CURSOR = { stroke: 'var(--color-ink-faint)', strokeOpacity: 0.6, strokeDasharray: '3 3' } as const;
+
+function TipCard({
+  active,
+  payload,
+  label,
+  xFormat,
+  yFormat,
+  rightFormat,
+}: {
+  active: boolean;
+  payload: TooltipPayload;
+  label: string | number | undefined;
+  xFormat: (value: number) => string;
+  yFormat: (value: number) => string;
+  rightFormat?: (value: number) => string;
+}) {
+  if (!active || typeof label !== 'number') return null;
+  const rows = payload.filter(
+    (entry) =>
+      entry.type !== 'none'
+      && typeof entry.value === 'number'
+      && Number.isFinite(entry.value)
+      && (entry.payload as { x?: number } | undefined)?.x === label,
+  );
+  if (rows.length === 0) return null;
+  return (
+    <div
+      className="rounded-md px-2.5 py-1.5 text-xs text-ink"
+      style={{
+        background: 'var(--glass-tint)',
+        border: '1px solid var(--glass-line)',
+        backdropFilter: 'var(--glass-frost-filter)',
+        WebkitBackdropFilter: 'var(--glass-frost-filter)',
+      }}
+    >
+      <div className="font-mono tabular-nums text-ink-dim">{xFormat(label)}</div>
+      {rows.map((entry, i) => (
+        <div key={i} className="mt-0.5 flex items-center gap-1.5">
+          <span className="h-0.5 w-3 shrink-0 rounded-full" style={{ background: entry.color ?? 'var(--color-ink)' }} />
+          <span className="font-mono tabular-nums">
+            {(entry.unit === 'r' && rightFormat !== undefined ? rightFormat : yFormat)(entry.value as number)}
+          </span>
+          {typeof entry.name === 'string' && entry.name !== 'y' && (
+            <span className="text-ink-dim">{entry.name}</span>
+          )}
+        </div>
+      ))}
+    </div>
+  );
+}
 
 export function TimeChart({
   label,
@@ -133,6 +198,20 @@ export function TimeChart({
               tickLine={false}
             />
           )}
+          <Tooltip
+            isAnimationActive={false}
+            cursor={TIP_CURSOR}
+            content={({ active, payload, label }) => (
+              <TipCard
+                active={active}
+                payload={payload}
+                label={label}
+                xFormat={xFormat ?? formatStep}
+                yFormat={yFormat ?? ((value: number) => formatRate(value))}
+                rightFormat={rightFormat}
+              />
+            )}
+          />
           {children}
         </ComposedChart>
       </ResponsiveContainer>
@@ -166,11 +245,27 @@ export function Playhead({ total }: { total: number }) {
   );
 }
 
-export function Chip({ swatch, label, dashed }: { swatch: string; label: string; dashed?: boolean }) {
+export const TXT = {
+  label: 'text-2xs uppercase tracking-label text-ink',
+  body: 'text-xs text-ink',
+  bodyDim: 'text-xs text-ink-dim',
+  data: 'font-mono text-xs tabular-nums text-ink',
+  dataDim: 'font-mono text-xs tabular-nums text-ink-dim',
+} as const;
+
+export function Label({ children, hint }: { children: ReactNode; hint?: string }) {
   return (
-    <span className="flex items-center gap-1 font-mono text-2xs text-ink-dim">
+    <span className={clsx(TXT.label, hint !== undefined && 'cursor-help')} title={hint}>
+      {children}
+    </span>
+  );
+}
+
+export function Chip({ swatch, label, dashed, block }: { swatch: string; label: string; dashed?: boolean; block?: boolean }) {
+  return (
+    <span className={clsx('flex items-center gap-1', TXT.bodyDim)}>
       <span
-        className="h-0.5 w-3 rounded-full"
+        className={block === true ? 'h-2 w-3 rounded-sm opacity-40' : 'h-0.5 w-3 rounded-full'}
         style={
           dashed === true
             ? { backgroundImage: `repeating-linear-gradient(90deg, ${swatch} 0 3px, transparent 3px 5px)` }

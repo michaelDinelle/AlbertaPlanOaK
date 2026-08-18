@@ -934,10 +934,17 @@ final class TapeWriter {
         + 13 * nursery + 4 * policyN * active + obs * (3 * levels + 10) + env
     case "ppo":
       let hidden = 64.0
-      let forward = 2 * (2 * obs * hidden + hidden * actions + hidden)
+      let rolloutSteps = 128.0
+      let epochs = 4.0
+      let minibatch = 32.0
+      let adamFlopsPerParam = 11.0
       let params = 2 * obs * hidden + 3 * hidden + hidden * actions + actions + 1
         + (spec.actionKind == 0 ? actions : 0)
-      return 5 * forward + 8 * hidden * actions + 9.6 * params + 11 * obs + env
+      let forward = 2 * params
+      let backward = 2 * forward
+      let updatesPerStep = epochs / minibatch
+      return forward + epochs * (forward + backward) + forward / rolloutSteps
+        + adamFlopsPerParam * params * updatesPerStep + env
     default:
       return 120 + 2 * actions + env
     }

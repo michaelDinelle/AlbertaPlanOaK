@@ -11,7 +11,7 @@ import type { SeedRow } from '../tape/derive';
 import { scrubToStep, stageMetaSnapshot } from '../theater/controller';
 import { seedsFor } from '../theater/loader';
 import { navigate } from '../url/useUrlState';
-import { cssVar, withAlpha } from './charts';
+import { Label, TXT, cssVar, withAlpha } from './charts';
 
 function drawSpark(
   canvas: HTMLCanvasElement,
@@ -162,10 +162,22 @@ function Spark({
   );
 }
 
-function Row({ row, rank, isHero, playable }: { row: SeedRow; rank: number; isHero: boolean; playable: boolean }) {
+function Row({
+  row,
+  rank,
+  isHero,
+  playable,
+  tone,
+}: {
+  row: SeedRow;
+  rank: number;
+  isHero: boolean;
+  playable: boolean;
+  tone: string;
+}) {
   const draggedRef = useRef(false);
   const dead = row.divergedAt !== null;
-  const stroke = dead ? cssVar('--color-crit') : isHero ? cssVar('--color-seed') : cssVar('--color-oak');
+  const stroke = dead ? cssVar('--color-crit') : isHero ? cssVar('--color-seed') : tone;
   return (
     <button
       type="button"
@@ -180,14 +192,13 @@ function Row({ row, rank, isHero, playable }: { row: SeedRow; rank: number; isHe
       className={clsx(
         'flex h-7 w-full items-center gap-2 rounded-md px-2 text-left transition-colors',
         isHero ? 'bg-seed/10 ring-1 ring-inset ring-seed/40' : 'hover:bg-white/5',
-        !playable && 'opacity-45',
       )}
     >
-      <span className="w-6 text-right font-mono text-2xs text-ink-faint">{rank}</span>
-      <span className={clsx('w-10 font-mono text-xs', isHero && 'text-seed')}>{row.seed}</span>
+      <span className={clsx('w-6 text-right', TXT.dataDim)}>{rank}</span>
+      <span className={clsx('w-10 font-mono text-xs', isHero && 'text-seed', !isHero && !playable && 'text-ink-faint')}>{row.seed}</span>
       <span
         className={clsx(
-          'w-14 text-right font-mono text-2xs tabular-nums',
+          'w-14 text-right font-mono text-xs tabular-nums',
           row.rate === null ? 'text-ink-faint' : row.rate > 0 ? 'text-good' : 'text-bad',
         )}
       >
@@ -211,48 +222,49 @@ function Row({ row, rank, isHero, playable }: { row: SeedRow; rank: number; isHe
   );
 }
 
-export function SeedList({ detail, active }: { detail: RunDetail | null; active: RunDetail | null }) {
+export function SeedList({ active }: { active: RunDetail | null }) {
   const sel = useSelection();
   const spec = useMemo<(DeriveSpec & { mode: 'rows' }) | null>(() => {
-    if (detail === null || sel.envId === null) return null;
+    if (active === null || sel.envId === null) return null;
     return {
       mode: 'rows',
       envId: sel.envId,
-      envSchedule: detail.meta.envSchedule,
-      seeds: detail.meta.seeds,
-      steps: detail.meta.steps,
-      recorded: seedsFor(detail.recordings, sel.envId),
+      envSchedule: active.meta.envSchedule,
+      seeds: active.meta.seeds,
+      steps: active.meta.steps,
+      recorded: seedsFor(active.recordings, sel.envId),
     };
-  }, [detail, sel.envId]);
-  const rows = useTapeSnapshot(sel.runId, sel.envId, 'rows', spec);
+  }, [active, sel.envId]);
+  const rows = useTapeSnapshot(active?.id ?? null, sel.envId, 'rows', spec);
   const playableSeeds = useMemo(
     () => new Set(sel.envId === null ? [] : seedsFor(active?.recordings ?? [], sel.envId)),
     [active, sel.envId],
   );
   const order = rows === null ? [] : sortPermutation(rows, sel.sort);
+  const tone = cssVar(`--color-${sel.policy}`);
   const hero = heroSeed(sel.selection);
 
   return (
     <div className="flex min-h-0 flex-1 flex-col">
-      <div className="flex items-center gap-2 px-2 pb-1.5">
-        <span className="text-2xs uppercase tracking-label text-ink-faint">{STR.seeds.title}</span>
-        <span className="font-mono text-2xs text-ink-faint">
+      <div className="flex items-center gap-2 px-2">
+        <Label hint={STR.seeds.titleHint}>{STR.seeds.title}</Label>
+        <span className={TXT.dataDim}>
           {rows !== null && rows.length > 0 ? formatCount(rows.length) : ''}
         </span>
         <button
           type="button"
           onClick={cycleSortMode}
           title={STR.seeds.sort}
-          className="ml-auto flex items-center gap-1 rounded-md border border-white/10 px-1.5 py-0.5 font-mono text-2xs text-ink-dim hover:border-white/25 hover:text-ink"
+          className={clsx('ml-auto flex items-center gap-1 rounded-md border border-white/10 px-1.5 py-0.5 hover:border-white/25 hover:text-ink', TXT.bodyDim)}
         >
           <ArrowUpDown className="size-2.5" />
           {STR.seeds.sortBy[sel.sort]}
         </button>
       </div>
       <div className="min-h-0 flex-1 overflow-y-auto pr-1">
-        {rows === null && <div className="px-2 py-3 font-mono text-2xs text-ink-faint">{STR.reward.reading}</div>}
+        {rows === null && <div className={clsx('px-2 py-3', TXT.bodyDim)}>{STR.reward.reading}</div>}
         {rows !== null && rows.length === 0 && (
-          <div className="px-2 py-3 text-2xs text-ink-faint">{STR.seeds.empty}</div>
+          <div className={clsx('px-2 py-3', TXT.bodyDim)}>{STR.seeds.empty}</div>
         )}
         {rows !== null &&
           order.map((index, rank) => {
@@ -265,6 +277,7 @@ export function SeedList({ detail, active }: { detail: RunDetail | null; active:
                 rank={rank + 1}
                 isHero={row.seed === hero}
                 playable={playableSeeds.has(row.seed)}
+                tone={tone}
               />
             );
           })}

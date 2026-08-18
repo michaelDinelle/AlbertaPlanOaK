@@ -1,40 +1,57 @@
 import { useMemo } from 'react';
-import { Line } from 'recharts';
-import type { RunDetail } from '@shared/types';
+import { clsx } from 'clsx';
+import { Area, Line } from 'recharts';
+import type { Policy, RunDetail } from '@shared/types';
 import { formatCount, formatPercent, formatRate, formatStep } from '../lib/format';
 import { envLanes } from '../lib/run';
 import { useSelection } from '../state/selectionStore';
 import { STR } from '../strings';
 import { useTapeSnapshot, type DeriveSpec } from '../tape/store';
-import { Chip, TimeChart, lineProps, seriesRows } from './charts';
+import { Chip, Label, TXT, TimeChart, bandProps, bandRows, lineProps, seriesRows } from './charts';
 
-function Stat({ label, value }: { label: string; value: string }) {
+function Stat({ label, value, title }: { label: string; value: string; title?: string }) {
   return (
-    <div className="flex min-w-0 flex-1 flex-col">
-      <span className="font-mono text-sm text-ink">{value}</span>
-      <span className="text-2xs text-ink-dim">{label}</span>
+    <div className="flex min-w-0 flex-1 flex-col" title={title}>
+      <span className={TXT.data}>{value}</span>
+      <span className={TXT.bodyDim}>{label}</span>
     </div>
   );
 }
 
-function Head({ label, chips }: { label: string; chips?: { swatch: string; label: string; dashed?: boolean }[] }) {
+interface HeadChip {
+  swatch: string;
+  label: string;
+  dashed?: boolean;
+  block?: boolean;
+}
+
+function Head({ label, hint, chips }: { label: string; hint: string; chips?: HeadChip[] }) {
   return (
-    <div className="flex items-center gap-2.5 pt-1">
-      <span className="text-2xs uppercase tracking-label text-ink-faint">{label}</span>
-      {chips?.map((chip) => <Chip key={chip.label} {...chip} />)}
+    <div className="flex items-center gap-2.5">
+      <Label hint={hint}>{label}</Label>
+      {chips?.map((chip) => (
+        <Chip key={chip.label} {...chip} />
+      ))}
     </div>
   );
 }
 
-export function HealthView({ detail, ppo }: { detail: RunDetail | null; ppo: RunDetail | null }) {
+export function HealthView({
+  runs,
+  active,
+}: {
+  runs: Record<Policy, RunDetail | null>;
+  active: RunDetail | null;
+}) {
   const sel = useSelection();
-  const keeper = detail?.summary ?? null;
+  const summary = active?.summary ?? null;
+  const keeper = runs.oak?.summary ?? null;
   const lanes = useMemo(
-    () => (detail === null || sel.envId === null ? null : envLanes(detail.meta, sel.envId)),
-    [detail, sel.envId],
+    () => (active === null || sel.envId === null ? null : envLanes(active.meta, sel.envId)),
+    [active, sel.envId],
   );
   const ratesSpec = useMemo<(DeriveSpec & { mode: 'rates' }) | null>(
-    () => (lanes === null ? null : { mode: 'rates', lanes: lanes.lanes }),
+    () => (lanes === null ? null : { mode: 'rates', lanes: lanes.lanes, win: 1 }),
     [lanes],
   );
   const rhoSpec = useMemo<(DeriveSpec & { mode: 'rho' }) | null>(
@@ -45,9 +62,9 @@ export function HealthView({ detail, ppo }: { detail: RunDetail | null; ppo: Run
     () => (lanes === null ? null : { mode: 'survival', lanes: lanes.lanes }),
     [lanes],
   );
-  const rates = useTapeSnapshot(sel.runId, sel.envId, 'rates', ratesSpec);
-  const rho = useTapeSnapshot(sel.runId, sel.envId, 'rho', rhoSpec);
-  const survival = useTapeSnapshot(sel.runId, sel.envId, 'survival', survivalSpec);
+  const rates = useTapeSnapshot(active?.id ?? null, sel.envId, 'rates', ratesSpec);
+  const rho = useTapeSnapshot(active?.id ?? null, sel.envId, 'rho', rhoSpec);
+  const survival = useTapeSnapshot(active?.id ?? null, sel.envId, 'survival', survivalSpec);
 
   const fade = useMemo(() => {
     if (rates === null) return [];
@@ -64,16 +81,16 @@ export function HealthView({ detail, ppo }: { detail: RunDetail | null; ppo: Run
     const steps = keeper?.plasticitySteps ?? [];
     if (steps.length === 0 || sel.envId === null) return null;
     const pull = (
-      summary: typeof keeper,
+      summaryOf: typeof keeper,
       field: string,
     ): (number | null)[] | null => {
-      const track = summary?.envs[sel.envId ?? '']?.plasticity?.[field];
+      const track = summaryOf?.envs[sel.envId ?? '']?.plasticity?.[field];
       return track !== undefined && track.iqm.length === steps.length ? track.iqm : null;
     };
     const oakDormant = pull(keeper, 'dormantFraction');
-    const ppoDormant = pull(ppo?.summary ?? null, 'dormantFraction');
+    const ppoDormant = pull(runs.ppo?.summary ?? null, 'dormantFraction');
     const oakErank = pull(keeper, 'erank');
-    const ppoErank = pull(ppo?.summary ?? null, 'erank');
+    const ppoErank = pull(runs.ppo?.summary ?? null, 'erank');
     const tracks = [oakDormant, ppoDormant, oakErank, ppoErank];
     if (tracks.every((t) => t === null)) return null;
     const alive = tracks.some((t) => t !== null && t.some((v) => v !== null && Number.isFinite(v)));
@@ -84,7 +101,7 @@ export function HealthView({ detail, ppo }: { detail: RunDetail | null; ppo: Run
       oakErank: oakErank === null ? [] : seriesRows(steps, oakErank),
       ppoErank: ppoErank === null ? [] : seriesRows(steps, ppoErank),
     };
-  }, [keeper, ppo, sel.envId]);
+  }, [keeper, runs.ppo, sel.envId]);
 
   const know = useMemo(() => {
     if (rates === null || rho === null) return null;
@@ -95,39 +112,72 @@ export function HealthView({ detail, ppo }: { detail: RunDetail | null; ppo: Run
     };
   }, [rates, rho]);
 
-  const horizon = Math.max(1, detail?.meta.steps ?? 1);
-  const lanesTotal = keeper === null ? 0 : keeper.seedsPerEnv * Object.keys(keeper.envs).length;
+  const kmBand = useMemo(() => {
+    const km = sel.envId === null ? undefined : summary?.envs[sel.envId]?.divergence.km;
+    if (km === undefined || km.steps.length === 0) return null;
+    return bandRows(km.steps, km.ci95[0], km.ci95[1]);
+  }, [summary, sel.envId]);
+
+  const horizon = Math.max(1, active?.meta.steps ?? 1);
+  const lanesTotal = summary === null ? 0 : summary.seedsPerEnv * Object.keys(summary.envs).length;
+  const divergence = summary?.aggregate.divergence ?? null;
 
   return (
-    <div className="flex min-h-0 flex-1 flex-col gap-2 overflow-y-auto px-2">
+    <div className="flex min-h-0 flex-1 flex-col gap-1.5 overflow-y-auto px-2 pb-1">
       <div className="flex gap-3">
         <Stat
           label={STR.health.diverged}
-          value={keeper === null ? '—' : `${formatCount(keeper.aggregate.divergence.diverged)} / ${formatCount(lanesTotal)}`}
+          value={divergence === null ? '—' : `${formatCount(divergence.diverged)} / ${formatCount(lanesTotal)}`}
+          title={divergence === null ? undefined : STR.health.divergedTitle(formatPercent(divergence.rate, 2), formatPercent(divergence.rateCi95[0], 2), formatPercent(divergence.rateCi95[1], 2))}
         />
         <Stat
           label={STR.health.alive}
-          value={keeper === null ? '—' : formatStep(keeper.aggregate.divergence.expectedAliveSteps)}
+          value={divergence === null ? '—' : formatStep(divergence.expectedAliveSteps)}
+          title={divergence === null ? undefined : STR.health.aliveTitle(formatStep(divergence.expectedAliveCi95[0]), formatStep(divergence.expectedAliveCi95[1]))}
         />
-        <Stat label={STR.health.faded} value={keeper === null ? '—' : formatRate(keeper.aggregate.forgetting.phiIQM)} />
+        <Stat
+          label={STR.health.faded}
+          value={summary === null ? '—' : formatRate(summary.aggregate.forgetting.phiIQM)}
+          title={summary === null ? undefined : STR.health.fadedTitle(formatRate(summary.aggregate.forgetting.ci95[0]), formatRate(summary.aggregate.forgetting.ci95[1]))}
+        />
       </div>
       <Head
         label={STR.health.survival}
+        hint={STR.health.survivalHint}
         chips={[
-          { swatch: 'var(--color-good)', label: STR.health.survival },
+          { swatch: 'var(--color-good)', label: STR.health.surviving },
+          { swatch: 'var(--color-good)', label: STR.health.kmBand, block: true },
           { swatch: 'var(--color-ramp-2)', label: STR.health.positive },
         ]}
       />
-      <TimeChart label={STR.health.survival} height={110} xMax={horizon} yFormat={(v) => formatPercent(v, 0)}>
-        {survival !== null && <Line {...lineProps('var(--color-good)', 1.5)} data={seriesRows(survival.x, survival.surviving)} />}
-        {survival !== null && <Line {...lineProps('var(--color-ramp-2)', 1)} data={seriesRows(survival.x, survival.positive)} />}
+      <TimeChart label={STR.health.survival} height={100} xMax={horizon} yFormat={(v) => formatPercent(v, 0)}>
+        {kmBand !== null && <Area {...bandProps('var(--color-good)')} type="stepAfter" data={kmBand} />}
+        {survival !== null && (
+          <Line
+            {...lineProps('var(--color-good)', 1.5)}
+            name={STR.health.surviving}
+            data={seriesRows(survival.x, survival.surviving)}
+          />
+        )}
+        {survival !== null && (
+          <Line
+            {...lineProps('var(--color-ramp-2)', 1)}
+            name={STR.health.positive}
+            data={seriesRows(survival.x, survival.positive)}
+          />
+        )}
       </TimeChart>
-      <Head label={STR.health.fade} chips={[{ swatch: 'var(--color-crit)', label: STR.health.faded }]} />
-      <TimeChart label={STR.health.fade} height={110} xMax={horizon}>
-        <Line {...lineProps('var(--color-crit)', 1.4)} data={fade} />
+      <Head
+        label={STR.health.retention}
+        hint={STR.health.retentionHint}
+        chips={[{ swatch: 'var(--color-crit)', label: STR.health.faded }]}
+      />
+      <TimeChart label={STR.health.retention} height={100} xMax={horizon}>
+        <Line {...lineProps('var(--color-crit)', 1.4)} name={STR.health.faded} data={fade} />
       </TimeChart>
       <Head
         label={STR.health.capacity}
+        hint={STR.health.capacityHint}
         chips={[
           { swatch: 'var(--color-oak)', label: STR.policy.oak },
           { swatch: 'var(--color-ppo)', label: STR.policy.ppo },
@@ -135,25 +185,42 @@ export function HealthView({ detail, ppo }: { detail: RunDetail | null; ppo: Run
         ]}
       />
       {capacity === null || !capacity.alive ? (
-        <div className="py-3 text-center text-2xs text-ink-faint">{STR.health.noPlasticity}</div>
+        <div className={clsx('py-3 text-center', TXT.bodyDim)}>{STR.health.noPlasticity}</div>
       ) : (
-        <TimeChart label={STR.health.capacity} height={110} xMax={horizon} yFormat={(v) => formatPercent(v, 0)} rightFormat={(v) => formatRate(v, 2)}>
-          <Line {...lineProps('var(--color-oak)', 1.5)} data={capacity.oakDormant} />
-          <Line {...lineProps('var(--color-ppo)', 1.5)} data={capacity.ppoDormant} />
-          <Line {...lineProps('var(--color-oak)', 1, '4 3', 'r')} data={capacity.oakErank} />
-          <Line {...lineProps('var(--color-ppo)', 1, '4 3', 'r')} data={capacity.ppoErank} />
+        <TimeChart label={STR.health.capacity} height={100} xMax={horizon} yFormat={(v) => formatPercent(v, 0)} rightFormat={(v) => formatRate(v, 2)}>
+          <Line
+            {...lineProps('var(--color-oak)', 1.5)}
+            name={`${STR.policy.oak} ${STR.health.dormant}`}
+            data={capacity.oakDormant}
+          />
+          <Line
+            {...lineProps('var(--color-ppo)', 1.5)}
+            name={`${STR.policy.ppo} ${STR.health.dormant}`}
+            data={capacity.ppoDormant}
+          />
+          <Line
+            {...lineProps('var(--color-oak)', 1, '4 3', 'r')}
+            name={`${STR.policy.oak} ${STR.health.erank}`}
+            data={capacity.oakErank}
+          />
+          <Line
+            {...lineProps('var(--color-ppo)', 1, '4 3', 'r')}
+            name={`${STR.policy.ppo} ${STR.health.erank}`}
+            data={capacity.ppoErank}
+          />
         </TimeChart>
       )}
       <Head
         label={STR.health.know}
+        hint={STR.health.knowHint}
         chips={[
           { swatch: 'var(--color-oak)', label: STR.health.measured },
           { swatch: 'var(--color-ramp-4)', label: STR.health.believed, dashed: true },
         ]}
       />
-      <TimeChart label={STR.health.know} height={110} xMax={horizon}>
-        {know !== null && <Line {...lineProps('var(--color-oak)', 1.5)} data={know.measured} />}
-        {know !== null && <Line {...lineProps('var(--color-ramp-4)', 1.1, '4 3')} data={know.believed} />}
+      <TimeChart label={STR.health.know} height={100} xMax={horizon}>
+        {know !== null && <Line {...lineProps('var(--color-oak)', 1.5)} name={STR.health.measured} data={know.measured} />}
+        {know !== null && <Line {...lineProps('var(--color-ramp-4)', 1.1, '4 3')} name={STR.health.believed} data={know.believed} />}
       </TimeChart>
     </div>
   );
