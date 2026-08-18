@@ -44,7 +44,7 @@
       "floorSource": "random-iqm"
     },
     "HalfCheetah-v4": {
-      "ceiling": 1.1912068515625,
+      "ceiling": 1.1820475859375,
       "ceilingSource": "ppo-iqm",
       "derivation": "lifetime delivered-rate IQM of the crowned ppo baseline on this env's lanes",
       "floor": -0.260452974609375,
@@ -114,10 +114,10 @@
       "floorSource": "random-iqm"
     }
   },
-  "generatedAt": "2026-08-17T18:23:25Z",
+  "generatedAt": "2026-08-17T23:59:53Z",
   "scale": "v1",
   "sourceRunNames": {
-    "ppo": "baseline-ppo-94e6c6b450be",
-    "random": "baseline-random-66b8d7698f5a"
+    "ppo": "baseline-ppo-c1a93e857229",
+    "random": "baseline-random-a10b24342826"
   }
 }
