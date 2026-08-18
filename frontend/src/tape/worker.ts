@@ -1,12 +1,11 @@
 import { fetchTape, type Tape } from './parse';
 import {
-  binnedRates,
   buildSeedRows,
   nextRowDueMs,
   rhoBinned,
   survivalSeries,
   tapeWindowSteps,
-  throughputSeries,
+  windowedRates,
 } from './derive';
 import type { DeriveMode, DeriveResults, DeriveSpec, TapeProgress, WorkerRequest, WorkerResponse } from './store';
 
@@ -50,7 +49,8 @@ function ensureTape(runId: string): Promise<Tape> {
 function derive(tape: Tape, spec: DeriveSpec): DeriveResults[DeriveMode] {
   switch (spec.mode) {
     case 'rates':
-      return binnedRates(tape, spec.lanes);
+    case 'windowedRates':
+      return windowedRates(tape, spec.lanes, spec.win);
     case 'rho':
       return rhoBinned(tape, spec.lanes);
     case 'survival':
@@ -62,8 +62,6 @@ function derive(tape: Tape, spec: DeriveSpec): DeriveResults[DeriveMode] {
         spec.envId,
         new Set(spec.recorded),
       );
-    case 'throughput':
-      return throughputSeries(tape);
   }
 }
 

@@ -50,24 +50,23 @@ export interface ForgettingSummary {
   ci95: Ci95;
 }
 
+export interface KmCurve {
+  steps: number[];
+  survival: number[];
+  ci95: [(number | null)[], (number | null)[]];
+}
+
 export interface DivergenceSummary {
   diverged: number;
   rate: number;
+  rateCi95: Ci95;
   expectedAliveSteps: number;
+  expectedAliveCi95: Ci95;
+  km: KmCurve;
 }
 
-export interface PercentileCurves {
-  percentileSeeds: { p5: number; p50: number; p95: number };
-  iqmZ?: (number | null)[];
-  rateZ: { p5: (number | null)[]; p50: (number | null)[]; p95: (number | null)[] };
-}
-
-export interface EnvPerLane {
-  seeds: number[];
-  finalZ: number[];
-  lifetimeZ: number[];
-  phi: number[];
-  deathStep: (number | null)[];
+export interface EnvCurves {
+  iqmZ: (number | null)[];
 }
 
 export interface PlasticityTrack {
@@ -78,14 +77,9 @@ export interface PlasticityTrack {
 export interface EnvSummary {
   floor: number;
   ceiling: number;
-  ceilingSource: string;
   finalRate: RateSummary;
-  lifetimeRate: RateSummary;
-  forgetting: ForgettingSummary;
   divergence: DivergenceSummary;
-  iprZ90: number;
-  curves: PercentileCurves;
-  perLane: EnvPerLane;
+  curves: EnvCurves;
   plasticity?: Record<string, PlasticityTrack>;
 }
 
@@ -109,25 +103,23 @@ export interface AggregateSummary {
   divergence: DivergenceSummary;
   profile: ProfileSummary;
   frontier: FrontierSummary;
-  computeToThreshold: Record<string, number | null>;
 }
 
 export interface ComputeSummary {
   flopsPerStep: number;
   envFlopsPerStep: Record<string, number>;
   gpuSeconds?: number;
-  omega: number;
 }
 
 export interface ProbImprovement {
   mean: number;
+  ci95: Ci95;
   envs: Record<string, { p: number; ci95: Ci95 }>;
 }
 
 export interface BaselineComparison {
   run: string;
   probImprovement: ProbImprovement;
-  computeRatioAt: Record<string, number | null>;
 }
 
 export interface BootstrapSpec {

@@ -1,124 +1,69 @@
 import { useMemo } from 'react';
+import { clsx } from 'clsx';
 import { Line } from 'recharts';
-import type { RunDetail } from '@shared/types';
+import type { Policy, RunDetail } from '@shared/types';
 import { STR } from '../strings';
-import { Chip, TimeChart, lineProps, seriesRows } from './charts';
-
-const POLICIES = [
-  { key: 'oak', token: 'var(--color-oak)' },
-  { key: 'ppo', token: 'var(--color-ppo)' },
-  { key: 'random', token: 'var(--color-random)' },
-] as const;
+import { Chip, Label, POLICY_ORDER, POLICY_TOKENS, TXT, TimeChart, lineProps, seriesRows } from './charts';
 
 function exp(value: number | null | undefined): string {
   if (value === null || value === undefined || !Number.isFinite(value)) return '—';
   return value.toExponential(1);
 }
 
-export function ComputeView({
-  detail,
-  ppo,
-  random,
-}: {
-  detail: RunDetail | null;
-  ppo: RunDetail | null;
-  random: RunDetail | null;
-}) {
-  const summaries = useMemo(
-    () => [detail?.summary ?? null, ppo?.summary ?? null, random?.summary ?? null],
-    [detail, ppo, random],
-  );
+export function ComputeView({ runs }: { runs: Record<Policy, RunDetail | null> }) {
+  const summaries = useMemo(() => POLICY_ORDER.map((policy) => runs[policy]?.summary ?? null), [runs]);
   const keeper = summaries[0] ?? null;
 
   const frontier = useMemo(() => {
     let min = Infinity;
     let max = 1;
-    const traces = POLICIES.flatMap((policy, i) => {
+    const traces = POLICY_ORDER.flatMap((policy, i) => {
       const f = summaries[i]?.aggregate.frontier;
       if (f === undefined || f.cumFlopsPerLane.length === 0) return [];
-      for (const x of f.cumFlopsPerLane) {
-        if (x > 0 && x < min) min = x;
-        if (x > max) max = x;
+      const firstIdx = f.zIQM.findIndex((v) => v !== null);
+      if (firstIdx >= 0) {
+        const firstX = f.cumFlopsPerLane[firstIdx];
+        if (firstX !== undefined && firstX > 0 && firstX < min) min = firstX;
       }
-      return [{ key: policy.key, token: policy.token, line: seriesRows(f.cumFlopsPerLane, f.zIQM) }];
+      const lastX = f.cumFlopsPerLane[f.cumFlopsPerLane.length - 1];
+      if (lastX !== undefined && lastX > max) max = lastX;
+      return [{ key: policy, token: POLICY_TOKENS[policy], line: seriesRows(f.cumFlopsPerLane, f.zIQM) }];
     });
     return Number.isFinite(min) && traces.length > 0 ? { min, max, traces } : null;
   }, [summaries]);
 
-  const ratios = keeper?.vsBaselines?.ppo?.computeRatioAt;
-  const ratioEntries = ratios === undefined ? [] : Object.entries(ratios).sort(([a], [b]) => Number(a) - Number(b));
-
   if (keeper === null) {
-    return <div className="px-2 py-6 text-center text-2xs text-ink-faint">{STR.standings.needsSummary}</div>;
+    return <div className={clsx('px-2 py-6 text-center', TXT.bodyDim)}>{STR.compute.needsSummary}</div>;
   }
 
   return (
-    <div className="flex min-h-0 flex-1 flex-col gap-2.5 overflow-y-auto px-2">
-      <div>
-        <div className="text-2xs uppercase tracking-label text-ink-faint">{STR.compute.efficiency}</div>
-        {POLICIES.map((policy, i) => (
-          <div key={policy.key} className="mt-1 flex items-baseline gap-2">
-            <Chip swatch={policy.token} label={STR.policy[policy.key]} />
-            <span className="ml-auto font-mono text-xs tabular-nums text-ink">
-              {summaries[i] === null ? '—' : summaries[i]?.compute.omega.toExponential(2)}
-            </span>
-          </div>
+    <div className="flex min-h-0 flex-1 flex-col gap-2 overflow-y-auto px-2 pb-1">
+      <div className="flex flex-wrap items-center gap-x-2.5 gap-y-1">
+        <Label hint={STR.compute.titleHint}>{STR.compute.efficiency}</Label>
+        {frontier?.traces.map((trace) => (
+          <Chip key={trace.key} swatch={trace.token} label={STR.policy[trace.key]} />
         ))}
       </div>
-      <div>
-        <div className="text-2xs uppercase tracking-label text-ink-faint">{STR.compute.perStep}</div>
-        {POLICIES.map((policy, i) => (
-          <div key={policy.key} className="mt-1 flex items-baseline gap-2">
-            <Chip swatch={policy.token} label={STR.policy[policy.key]} />
-            <span className="ml-auto font-mono text-xs tabular-nums text-ink">
-              {exp(summaries[i]?.compute.flopsPerStep)}
-            </span>
-          </div>
-        ))}
-      </div>
-      {ratioEntries.length > 0 && (
-        <div>
-          <div className="text-2xs uppercase tracking-label text-ink-faint">{STR.compute.ratios}</div>
-          <div className="mt-1.5 flex flex-wrap gap-1.5">
-            {ratioEntries.map(([threshold, ratio]) => {
-              const n = ratio === null || ratio === 0 ? null : 1 / ratio;
-              const share = `${Math.round(Number(threshold) * 100)}%`;
-              const times = n === null ? null : n >= 10 ? n.toFixed(0) : n.toFixed(1);
-              return (
-                <span
-                  key={threshold}
-                  title={times === null ? STR.compute.notReachedHint(share) : STR.compute.ratioHint(share, times)}
-                  className="rounded-md border border-white/10 bg-white/5 px-1.5 py-0.5 font-mono text-2xs text-ink-dim"
-                >
-                  {times === null ? STR.compute.notReached(share) : STR.compute.ratioChip(share, times)}
-                </span>
-              );
-            })}
-          </div>
-        </div>
-      )}
       {frontier !== null && (
-        <div>
-          <div className="flex items-center gap-2.5">
-            <span className="text-2xs uppercase tracking-label text-ink-faint">{STR.compute.frontier}</span>
-            {frontier.traces.map((trace) => (
-              <Chip key={trace.key} swatch={trace.token} label={STR.policy[trace.key as 'oak' | 'ppo' | 'random']} />
-            ))}
-          </div>
-          <TimeChart
-            label={STR.compute.frontier}
-            height={170}
-            xScale="log"
-            xMin={frontier.min}
-            xMax={frontier.max}
-            xFormat={exp}
-            yFormat={(v) => v.toFixed(2)}
-          >
-            {frontier.traces.map((trace) => (
-              <Line key={trace.key} {...lineProps(trace.token, 1.4)} data={trace.line} connectNulls />
-            ))}
-          </TimeChart>
-        </div>
+        <TimeChart
+          label={STR.compute.efficiency}
+          height={190}
+          xScale="log"
+          xMin={frontier.min}
+          xMax={frontier.max}
+          xFormat={exp}
+          yFormat={(v) => v.toFixed(2)}
+        >
+          {frontier.traces.map((trace) => (
+            <Line
+              key={trace.key}
+              {...lineProps(trace.token, 1.4)}
+              name={STR.policy[trace.key]}
+              data={trace.line}
+              connectNulls
+            />
+          ))}
+        </TimeChart>
       )}
     </div>
   );

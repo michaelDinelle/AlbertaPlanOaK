@@ -14,7 +14,7 @@ createRoot(host).render(
       <App />
       <Toaster
         theme="dark"
-        position="top-left"
+        position="top-center"
         toastOptions={{
           style: {
             background: 'var(--glass-tint)',

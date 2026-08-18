@@ -1,2 +1,6 @@
 numpy
 scipy
+arch
+statsmodels
+lifelines
+rliable

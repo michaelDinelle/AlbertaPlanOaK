@@ -1,9 +1,6 @@
-import { useSyncExternalStore } from 'react';
 import { mergeUrlState, parseUrlState, serializeUrlState, type UrlState } from './codec';
 
 let cached: { search: string; state: UrlState } | null = null;
-
-const listeners = new Set<() => void>();
 
 function read(): UrlState {
   const search = window.location.search;
@@ -27,26 +24,4 @@ export function navigate(patch: Partial<UrlState>): void {
   if (runChanged) history.pushState(null, '', url);
   else history.replaceState(null, '', url);
   cached = { search: window.location.search, state: next };
-  emit();
-}
-
-function emit(): void {
-  for (const listener of listeners) listener();
-}
-
-function onPop(): void {
-  emit();
-}
-
-function subscribe(listener: () => void): () => void {
-  if (listeners.size === 0) window.addEventListener('popstate', onPop);
-  listeners.add(listener);
-  return () => {
-    listeners.delete(listener);
-    if (listeners.size === 0) window.removeEventListener('popstate', onPop);
-  };
-}
-
-export function useUrlState(): UrlState {
-  return useSyncExternalStore(subscribe, read);
 }

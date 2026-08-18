@@ -4,6 +4,7 @@ import { VList } from 'virtua';
 import { ENVS, type EnvId } from '@shared/envs';
 import type { RunDetail, RunIndexEntry } from '@shared/types';
 import { Frost } from '../glass/Panel';
+import { Label, TXT } from '../panels/charts';
 import { runLabel, sortRuns } from '../lib/run';
 import { selectEnv, selectRun, useSelection } from '../state/selectionStore';
 import { STR } from '../strings';
@@ -32,7 +33,6 @@ function Tile({
       className={clsx(
         'group relative aspect-video overflow-hidden rounded-lg text-left transition-transform hover:scale-[1.02]',
         current && 'ring-2 ring-accent',
-        seedCount === 0 && 'opacity-45',
       )}
       style={{ background: envGradient(info.slug) }}
     >
@@ -40,11 +40,11 @@ function Tile({
         src={posterUrl(info.slug)}
         alt=""
         draggable={false}
-        className="absolute inset-0 h-full w-full object-cover"
+        className={clsx('absolute inset-0 h-full w-full object-cover', seedCount === 0 && 'opacity-45')}
       />
       <span className="absolute inset-x-0 bottom-0 flex items-baseline gap-2 bg-gradient-to-t from-black/75 to-transparent px-2.5 pb-1.5 pt-5">
-        <span className="text-xs font-medium text-white">{info.name}</span>
-        <span className="ml-auto font-mono text-2xs text-white/60">{STR.wall.seeds(seedCount)}</span>
+        <span className="text-xs font-medium text-ink">{info.name}</span>
+        <span className={clsx('ml-auto', TXT.dataDim)}>{STR.wall.seeds(seedCount)}</span>
       </span>
     </button>
   );
@@ -82,11 +82,11 @@ export function EnvWall({
       <Frost className="absolute inset-5 flex flex-col overflow-hidden">
         <div className="flex flex-col gap-2 px-5 pb-3 pt-4" onPointerDown={(event) => event.stopPropagation()}>
           <div className="flex items-baseline gap-3">
-            <h2 className="text-sm font-semibold text-ink">{STR.wall.title}</h2>
-            <span className="text-2xs text-ink-faint">{STR.wall.hint}</span>
+            <h2><Label>{STR.wall.title}</Label></h2>
+            <span className={TXT.bodyDim}>{STR.wall.hint}</span>
           </div>
           <div className="flex items-center gap-1.5 overflow-x-auto pb-1">
-            <span className="mr-1 text-2xs uppercase tracking-label text-ink-faint">{STR.wall.runs}</span>
+            <span className="mr-1"><Label>{STR.wall.runs}</Label></span>
             {runs.map((run) => (
               <button
                 key={run.id}

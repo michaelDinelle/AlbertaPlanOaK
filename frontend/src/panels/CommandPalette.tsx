@@ -56,6 +56,8 @@ export function CommandPalette({
   envList,
   setView,
   openWall,
+  panelHidden,
+  togglePanel,
   fullscreenTarget,
   onClose,
 }: {
@@ -64,6 +66,8 @@ export function CommandPalette({
   envList: readonly EnvId[];
   setView: (view: PanelView) => void;
   openWall: () => void;
+  panelHidden: boolean;
+  togglePanel: () => void;
   fullscreenTarget: { current: HTMLElement | null };
   onClose: () => void;
 }) {
@@ -167,6 +171,13 @@ export function CommandPalette({
                 </Item>
                 <Item onPick={done(cycleSortMode)} hint={STR.seeds.sort} shortcut="s">
                   {STR.palette.sort}
+                </Item>
+                <Item
+                  onPick={done(togglePanel)}
+                  hint={panelHidden ? STR.bar.showPanel : STR.bar.hidePanel}
+                  shortcut="h"
+                >
+                  {panelHidden ? STR.palette.showPanel : STR.palette.hidePanel}
                 </Item>
                 <Item
                   onPick={done(() => {

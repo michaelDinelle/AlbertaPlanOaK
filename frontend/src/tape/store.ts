@@ -1,19 +1,20 @@
 import { useMemo, useSyncExternalStore } from 'react';
 import type { EnvScheduleEntry } from '@shared/types';
-import type { BinnedRates, RhoBinned, SeedRow, SurvivalSeries, ThroughputSeries } from './derive';
+import type { BinnedRates, SeedRow, SurvivalSeries } from './derive';
 
 export interface DeriveResults {
   rates: BinnedRates;
-  rho: RhoBinned;
+  windowedRates: BinnedRates;
+  rho: BinnedRates;
   survival: SurvivalSeries;
   rows: SeedRow[];
-  throughput: ThroughputSeries;
 }
 
 export type DeriveMode = keyof DeriveResults;
 
 export type DeriveSpec =
-  | { mode: 'rates' | 'rho' | 'survival'; lanes: number[] }
+  | { mode: 'rho' | 'survival'; lanes: number[] }
+  | { mode: 'rates' | 'windowedRates'; lanes: number[]; win: number }
   | {
       mode: 'rows';
       envId: string;
@@ -21,8 +22,7 @@ export type DeriveSpec =
       seeds: number[];
       steps: number;
       recorded: number[];
-    }
-  | { mode: 'throughput' };
+    };
 
 export interface TapeProgress {
   rows: number;

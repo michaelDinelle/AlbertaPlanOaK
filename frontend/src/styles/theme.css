@@ -2,11 +2,11 @@
 
 @theme static {
   --color-*: initial;
-  --color-ground: oklch(16.3% 0.012 260.6);
-  --color-line: oklch(29.3% 0.034 262.8);
-  --color-ink: oklch(90.1% 0.019 258.4);
-  --color-ink-dim: oklch(66.2% 0.039 257.4);
-  --color-ink-faint: oklch(58% 0.039 259.4);
+  --color-ground: oklch(16.3% 0 0);
+  --color-line: oklch(29.3% 0 0);
+  --color-ink: oklch(96% 0 0);
+  --color-ink-dim: oklch(78% 0 0);
+  --color-ink-faint: oklch(62% 0 0);
   --color-accent: oklch(77.7% 0.128 238.9);
   --color-seed: oklch(88% 0.135 86.1);
   --color-good: oklch(79.4% 0.149 142.9);
@@ -56,8 +56,9 @@
   background: var(--glass-tint);
   border: 1px solid var(--glass-line);
   box-shadow:
-    inset 0 1px 0 var(--glass-highlight),
-    0 18px 44px var(--glass-shadow);
+    0 24px 60px var(--glass-shadow),
+    inset 0 1px 1px var(--glass-highlight),
+    inset 0 -8px 20px var(--glass-glow);
 }
 
 @utility glass-frost {
@@ -78,11 +79,14 @@
 
 @layer base {
   :root {
-    --glass-tint: oklch(16% 0.006 260 / 0.72);
+    --glass-tint-floor: oklch(13% 0 0 / 0.52);
+    --glass-tint-ceil: oklch(13% 0 0 / 0.66);
+    --glass-tint: linear-gradient(180deg, var(--glass-tint-floor), var(--glass-tint-ceil));
     --glass-line: oklch(100% 0 0 / 0.13);
-    --glass-highlight: oklch(100% 0 0 / 0.09);
-    --glass-shadow: oklch(0% 0 0 / 0.5);
-    --glass-frost-filter: blur(20px) saturate(1.35);
+    --glass-highlight: oklch(100% 0 0 / 0.5);
+    --glass-glow: oklch(100% 0 0 / 0.06);
+    --glass-shadow: oklch(0% 0 0 / 0.45);
+    --glass-frost-filter: blur(16px);
   }
 
   body {
@@ -106,4 +110,8 @@
     outline-offset: 2px;
     border-radius: var(--radius-xs);
   }
+}
+
+.lg-fallback {
+  background: var(--glass-tint-ceil);
 }

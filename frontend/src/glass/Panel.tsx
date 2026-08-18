@@ -11,7 +11,7 @@ const ENTER = {
   transition: { type: 'spring', stiffness: 420, damping: 34 },
 } as const;
 
-const LENS_OPTICS: GlassOptions = { blur: 10, saturate: 1.35 };
+const LENS_OPTICS: GlassOptions = { saturate: 1 };
 
 export interface PanelProps {
   className?: string;

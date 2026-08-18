@@ -1,5 +1,6 @@
 import { clsx } from 'clsx';
-import type { RunDetail } from '@shared/types';
+import { PanelRightClose } from 'lucide-react';
+import type { Policy, RunDetail } from '@shared/types';
 import { Frost } from '../glass/Panel';
 import { STR } from '../strings';
 import { ComputeView } from './ComputeView';
@@ -11,20 +12,18 @@ import type { PanelView } from './views';
 export function StatsPanel({
   view,
   setView,
-  detail,
-  ppo,
-  random,
+  runs,
   active,
+  onHide,
 }: {
   view: PanelView;
   setView: (view: PanelView) => void;
-  detail: RunDetail | null;
-  ppo: RunDetail | null;
-  random: RunDetail | null;
+  runs: Record<Policy, RunDetail | null>;
   active: RunDetail | null;
+  onHide: () => void;
 }) {
   return (
-    <Frost className="flex h-full w-full flex-col overflow-hidden py-2.5">
+    <Frost className="flex max-h-full w-full flex-col overflow-hidden py-2.5">
       <div className="flex items-center gap-1 px-2 pb-2">
         {(Object.keys(STR.panels) as PanelView[]).map((id) => (
           <button
@@ -40,11 +39,19 @@ export function StatsPanel({
             {STR.panels[id]}
           </button>
         ))}
+        <button
+          type="button"
+          onClick={onHide}
+          title={STR.bar.hidePanel}
+          className="ml-auto flex size-6 shrink-0 items-center justify-center rounded-md text-ink-faint transition-colors hover:bg-white/10 hover:text-ink active:bg-white/15"
+        >
+          <PanelRightClose className="size-3.5" />
+        </button>
       </div>
-      {view === 'reward' && <RewardView detail={detail} ppo={ppo} random={random} active={active} />}
-      {view === 'standings' && <StandingsView detail={detail} ppo={ppo} random={random} />}
-      {view === 'compute' && <ComputeView detail={detail} ppo={ppo} random={random} />}
-      {view === 'health' && <HealthView detail={detail} ppo={ppo} />}
+      {view === 'reward' && <RewardView runs={runs} active={active} />}
+      {view === 'standings' && <StandingsView runs={runs} />}
+      {view === 'compute' && <ComputeView runs={runs} />}
+      {view === 'health' && <HealthView runs={runs} active={active} />}
     </Frost>
   );
 }

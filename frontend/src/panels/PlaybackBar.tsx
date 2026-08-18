@@ -11,9 +11,11 @@ import {
   Play,
   ScanEye,
 } from 'lucide-react';
-import type { Policy, RunDetail } from '@shared/types';
+import type { Policy, RunDetail, RunIndexEntry } from '@shared/types';
 import { Lens } from '../glass/Panel';
+import { Label, POLICY_ORDER } from './charts';
 import { formatCount, formatStep } from '../lib/format';
+import { runLabelFor } from '../lib/run';
 import { setTransport, useTransport } from '../playback/store';
 import { selectPolicy, toggleDebug, useSelection } from '../state/selectionStore';
 import { STR } from '../strings';
@@ -50,8 +52,7 @@ function BarButton({
       onClick={onClick}
       className={clsx(
         'flex h-7 min-w-7 items-center justify-center rounded-md px-1.5 font-mono text-2xs transition-colors active:bg-white/15',
-        on === true ? 'bg-accent/20 text-accent' : 'text-ink hover:bg-white/10',
-        disabled === true && 'pointer-events-none opacity-35',
+        disabled === true ? 'pointer-events-none text-ink-faint' : on === true ? 'bg-accent/20 text-accent' : 'text-ink hover:bg-white/10',
       )}
     >
       {children}
@@ -63,13 +64,65 @@ function Divider() {
   return <div className="mx-0.5 h-5 w-px bg-white/10" />;
 }
 
+const POLICY_ACTIVE: Record<Policy, string> = {
+  oak: 'bg-oak/25 text-ink ring-1 ring-inset ring-oak/50',
+  ppo: 'bg-ppo/25 text-ink ring-1 ring-inset ring-ppo/50',
+  random: 'bg-random/25 text-ink ring-1 ring-inset ring-random/50',
+};
+
+export function PolicySwitch({
+  runs,
+  entries,
+}: {
+  runs: Record<Policy, RunDetail | null>;
+  entries: readonly RunIndexEntry[] | undefined;
+}) {
+  const sel = useSelection();
+  const labelOf = (policy: Policy): string | null => {
+    const id = policy === 'oak' ? runs.oak?.id : runs.oak?.baselines[policy];
+    return id === undefined ? null : runLabelFor(id, entries, runs[policy]);
+  };
+  return (
+    <Lens className="flex h-12 items-center gap-1 px-2">
+      <span className="px-1.5"><Label>{STR.bar.policyLabel}</Label></span>
+      {POLICY_ORDER.map((policy) => {
+        const run = labelOf(policy);
+        const absent = run === null;
+        const on = sel.policy === policy;
+        return (
+          <button
+            key={policy}
+            type="button"
+            aria-disabled={absent}
+            aria-pressed={on}
+            title={
+              absent
+                ? policy === 'oak' ? STR.notices.noRun : STR.bar.noBaseline(STR.policy[policy])
+                : STR.bar.watchRun(STR.policy[policy], run)
+            }
+            onClick={absent ? undefined : () => selectPolicy(policy)}
+            className={clsx(
+              'flex h-8 items-center rounded-md px-3 text-xs font-medium transition-colors',
+              absent
+                ? 'cursor-default text-ink-faint'
+                : on
+                  ? POLICY_ACTIVE[policy]
+                  : 'text-ink-dim hover:bg-white/10 hover:text-ink active:bg-white/15',
+            )}
+          >
+            {STR.policy[policy]}
+          </button>
+        );
+      })}
+    </Lens>
+  );
+}
+
 export function PlaybackBar({
-  detail,
   stride,
   live,
   fullscreenTarget,
 }: {
-  detail: RunDetail | null;
   stride: number;
   live: boolean;
   fullscreenTarget: { current: HTMLElement | null };
@@ -115,7 +168,6 @@ export function PlaybackBar({
   const frames = Math.max(1, meta.frameCount - 1);
   const loadedPct = meta.totalSteps > 0 ? Math.min(100, (meta.loadedSteps / meta.totalSteps) * 100) : 0;
   const jump = Math.max(1, stride);
-  const policies: Policy[] = ['oak', ...(['ppo', 'random'] as const).filter((p) => detail?.baselines[p] !== undefined)];
   let busiest = 1;
   for (const tick of meta.ticks) if (tick.count > busiest) busiest = tick.count;
 
@@ -222,17 +274,6 @@ export function PlaybackBar({
       <BarButton title={STR.bar.speed(transport.speed)} onClick={cycleSpeed}>
         ×{transport.speed}
       </BarButton>
-
-      {policies.length > 1 && (
-        <>
-          <Divider />
-          {policies.map((p) => (
-            <BarButton key={p} on={sel.policy === p} title={STR.bar.watch(STR.policy[p])} onClick={() => selectPolicy(p)}>
-              {STR.policy[p]}
-            </BarButton>
-          ))}
-        </>
-      )}
 
       <Divider />
       <BarButton on={sel.debug} title={STR.bar.debug} onClick={toggleDebug}>

@@ -73,8 +73,3 @@ export function clampPosition(position: number, frameCount: number): number {
   return position < 0 ? 0 : position > last ? last : position;
 }
 
-export function stepPosition(position: number, frames: number, frameCount: number): number {
-  const base = Math.floor(clampPosition(position, frameCount));
-  return clampPosition(base + frames, frameCount);
-}
-
