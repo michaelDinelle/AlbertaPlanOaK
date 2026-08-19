@@ -1,4 +1,4 @@
-import { ENVS } from '@shared/envs';
+import { SCENES, nameOf } from '../scenes/table';
 import { Lens } from '../glass/Panel';
 import { useSelection } from '../state/selectionStore';
 import { STR } from '../strings';
@@ -15,7 +15,7 @@ export function posterUrl(slug: string): string {
 export function EnvTileButton({ onOpen }: { onOpen: () => void }) {
   const sel = useSelection();
   const meta = useStageMeta();
-  const info = sel.envId === null ? null : ENVS[sel.envId];
+  const info = sel.envId === null ? null : SCENES[sel.envId];
   return (
     <Lens>
       <button
@@ -38,7 +38,7 @@ export function EnvTileButton({ onOpen }: { onOpen: () => void }) {
           )}
         </span>
         <span className="flex flex-col items-start">
-          <span className="text-xs font-medium text-ink">{info?.name ?? STR.tile.none}</span>
+          <span className="text-xs font-medium text-ink">{sel.envId === null ? STR.tile.none : nameOf(sel.envId)}</span>
           <span className="font-mono text-2xs text-ink-dim">
             {meta.seed !== null
               ? `${STR.tile.seed(meta.seed)} · ${meta.promoted ? STR.tile.yourPick : STR.tile.bestSeed}`

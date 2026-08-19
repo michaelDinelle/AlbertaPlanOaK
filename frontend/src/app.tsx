@@ -12,8 +12,7 @@ import { envShares, resolveFeaturedRun, runDateLabel, runEnvs, runLabel, runLabe
 import { CommandPalette } from './panels/CommandPalette';
 import { POLICY_TOKENS } from './panels/charts';
 import { PlaybackBar, PolicySwitch } from './panels/PlaybackBar';
-import { StatsPanel } from './panels/StatsPanel';
-import type { PanelView } from './panels/views';
+import { StatsPanel, type PanelView } from './panels/StatsPanel';
 import {
   adoptDefaultEnv,
   adoptFromUrl,
@@ -220,14 +219,10 @@ export function App() {
     if (sel.envId !== null) void sceneRegistry[sel.envId]?.();
   }, [sel.envId]);
 
-  const keyContext = useRef({ envList, stride, wallOpen, paletteOpen, policies: ['oak'] as Policy[] });
-  keyContext.current = {
-    envList,
-    stride,
-    wallOpen,
-    paletteOpen,
-    policies: ['oak', ...(['ppo', 'random'] as const).filter((p) => detail?.baselines[p] !== undefined)],
-  };
+  const policies = useMemo<Policy[]>(
+    () => ['oak', ...(['ppo', 'random'] as const).filter((p) => detail?.baselines[p] !== undefined)],
+    [detail],
+  );
 
   useEffect(() => {
     const onKey = (event: KeyboardEvent): void => {
@@ -236,7 +231,7 @@ export function App() {
         setPaletteOpen((open) => !open);
         return;
       }
-      if (event.metaKey || event.ctrlKey || event.altKey || keyContext.current.paletteOpen) return;
+      if (event.metaKey || event.ctrlKey || event.altKey || paletteOpen) return;
       const node = event.target;
       if (
         node instanceof HTMLInputElement
@@ -253,10 +248,10 @@ export function App() {
           setTransport({ playing: !transportSnapshot().playing });
           break;
         case 'step':
-          stepBySteps(action.frames * keyContext.current.stride);
+          stepBySteps(action.frames * stride);
           break;
         case 'env': {
-          const next = cycleEnv(keyContext.current.envList, selectionSnapshot().envId, action.direction);
+          const next = cycleEnv(envList, selectionSnapshot().envId, action.direction);
           if (next !== null) selectEnv(next);
           break;
         }
@@ -267,7 +262,7 @@ export function App() {
           toggleDebug();
           break;
         case 'policy': {
-          const order = keyContext.current.policies;
+          const order = policies;
           const at = order.indexOf(selectionSnapshot().policy);
           const next = order[(at + 1) % order.length];
           if (next !== undefined) selectPolicy(next);
@@ -281,14 +276,14 @@ export function App() {
           setPanelHidden((hidden) => !hidden);
           break;
         case 'escape':
-          if (keyContext.current.wallOpen) setWallOpen(false);
+          if (wallOpen) setWallOpen(false);
           else unpromote();
           break;
       }
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, []);
+  }, [envList, stride, wallOpen, paletteOpen, policies]);
 
   const notice = runsQ.isError
     ? {

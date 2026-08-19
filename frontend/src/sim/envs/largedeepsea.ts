@@ -1,8 +1,6 @@
-
 import { philoxDraw, STREAM_RESET } from '../philox';
 import { POSE_LEN } from '../record';
-import type { EnvDecoder, EnvFrame, EnvGeometry, SimEvent } from '../types';
-import { NO_EVENTS } from '../events';
+import { NO_EVENTS, type EnvDecoder, type EnvFrame, type EnvGeometry, type SimEvent } from '../types';
 
 export const LARGE_DEEPSEA_N = 16;
 export const LARGE_DEEPSEA_LAST_ROW = LARGE_DEEPSEA_N - 2;
@@ -78,7 +76,6 @@ export const largeDeepSeaDecoder: EnvDecoder<LargeDeepSeaStatic> = {
       pose,
     };
   },
-
 
   deriveEvents(
     prev: EnvFrame,

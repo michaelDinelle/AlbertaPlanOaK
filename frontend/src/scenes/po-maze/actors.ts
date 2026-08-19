@@ -1,11 +1,9 @@
-
 import { emissiveMaterial, oakMaterial, setEmissiveIntensity, type EmissiveMaterial, type OakMaterial } from '@kit/materials';
 import { clamp01, smoothstep01 } from '@kit/mix';
 import { mergeColoredParts, type ColoredPart } from '@kit/parts';
 import { radialSprite } from '@kit/textures';
 import * as THREE from 'three';
 import type { ForestSkin } from './world';
-
 
 export interface GoalBeaconOptions {
   glow: THREE.ColorRepresentation;
@@ -85,7 +83,6 @@ export function buildGoalBeacon(opts: GoalBeaconOptions): GoalBeaconHandle {
     },
   };
 }
-
 
 export interface MoonflowerOptions {
   skin: ForestSkin;
@@ -231,23 +228,6 @@ export function buildMoonflower(opts: MoonflowerOptions): MoonflowerHandle {
     },
   };
 }
-
-
-export interface MothOptions {
-  color: THREE.ColorRepresentation;
-  name?: string;
-}
-
-export interface MothHandle {
-  group: THREE.Group;
-  readonly position: THREE.Vector3;
-  setVisibility(v: number): void;
-  setTime(time: number): void;
-  flare(strength?: number): void;
-  update(dt: number, time: number): void;
-  dispose(): void;
-}
-
 
 export interface WispAuraHandle {
   mesh: THREE.Mesh;

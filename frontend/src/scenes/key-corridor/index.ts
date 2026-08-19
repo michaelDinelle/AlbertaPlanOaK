@@ -1,11 +1,9 @@
-
 import { KEYCORRIDOR_CARRY, KEYCORRIDOR_GATE, KEYCORRIDOR_GX, KEYCORRIDOR_GY, KEYCORRIDOR_KX, KEYCORRIDOR_KY, KEYCORRIDOR_X, KEYCORRIDOR_Y } from '@sim/envs/keycorridor';
-import type { CelebrationPoolOptions } from '@kit/celebrate';
 import type { GroundTruthOptions } from '@kit/debug';
 import { cellToWorldVec, clampCell, type GridSize } from '@kit/grid';
 import { clamp01, envelope, smoothstep01 } from '@kit/mix';
 import type { OrbitRigOptions } from '@kit/rigs';
-import { StageScene } from '@kit/stage';
+import { StageScene, type Stage } from '@kit/stage';
 import { TOKENS } from '@kit/tokens';
 import type { FrameState, FrameUpdate, SceneContext, SceneFactory } from '@kit/types';
 import { Wisp } from '@kit/wisp';
@@ -20,7 +18,6 @@ import {
   type SeedBedHandle,
   type ShrineHandle,
 } from './actors';
-import { manifest } from './manifest';
 import {
   CAMERA_AZIMUTH,
   buildWorld,
@@ -31,18 +28,15 @@ import {
   type WorldHandle,
 } from './world';
 
-
-const CAM_AZIMUTH = CAMERA_AZIMUTH;
 const CAM_POLAR = 0.62;
 const CAM_DISTANCE = 13.0;
 const CAM_TARGET_Y = 0.5;
 const CAM_TARGET_BIAS = 1.2;
-const CAM_TARGET_X = CAM_TARGET_BIAS * Math.sin(CAM_AZIMUTH);
-const CAM_TARGET_Z = CAM_TARGET_BIAS * Math.cos(CAM_AZIMUTH);
+const CAM_TARGET_X = CAM_TARGET_BIAS * Math.sin(CAMERA_AZIMUTH);
+const CAM_TARGET_Z = CAM_TARGET_BIAS * Math.cos(CAMERA_AZIMUTH);
 
 const BURST_SCALE = 0.8;
 const RIPPLE_SCALE = 0.46;
-const BURST_PARTICLES = 110;
 const PULSE_STRENGTH = 0.5;
 const BLOOM_Y = 0.6;
 const BLOOM_SECONDS = 1.5;
@@ -99,7 +93,6 @@ export function readState(state: FrameState, grid: GridSize, out: GardenState): 
 }
 
 class IvyGateScene extends StageScene<WorldHandle> {
-  readonly manifest = manifest;
   protected readonly stageName = 'ivyGate';
 
   private wisp: Wisp | null = null;
@@ -137,7 +130,7 @@ class IvyGateScene extends StageScene<WorldHandle> {
     const palette = ctx.tokens.palettes.morning;
     const skin = gardenSkin(palette, ctx.tokens);
     this.skin = skin;
-    const accent = ctx.tokens.accents[manifest.accent] ?? ctx.tokens.celebrationGold;
+    const accent = this.accentOf(ctx);
 
     const shrineLight = world.rig.points[0];
     if (shrineLight) shrineLight.color.set(skin.amber);
@@ -176,27 +169,10 @@ class IvyGateScene extends StageScene<WorldHandle> {
 
   protected rigOptions(ctx: SceneContext): OrbitRigOptions {
     return {
-      canvas: ctx.canvas,
       target: [CAM_TARGET_X, CAM_TARGET_Y, CAM_TARGET_Z],
       distance: CAM_DISTANCE,
-      azimuth: CAM_AZIMUTH,
+      azimuth: CAMERA_AZIMUTH,
       polar: CAM_POLAR,
-      fov: ctx.tokens.fovHero,
-      near: 0.1,
-      far: 900,
-      aspect: ctx.size.height > 0 ? ctx.size.width / ctx.size.height : 16 / 9,
-      damping: 5,
-      rotateSpeed: 0.004,
-      zoomSpeed: 0.0012,
-      name: 'gardenOrbitRig',
-    };
-  }
-
-  protected poolOptions(ctx: SceneContext): CelebrationPoolOptions {
-    return {
-      seed: ctx.seed,
-      burstSize: BURST_PARTICLES,
-      name: 'gardenCelebrations',
     };
   }
 
@@ -206,7 +182,6 @@ class IvyGateScene extends StageScene<WorldHandle> {
     const overlayKeys: GridCell[] = [{ x: 0, y: 0 }];
     const overlayDoors: boolean[] = [false];
     return {
-      camera: this.camera,
       agentCell: (state) => readState(state, grid, overlayState).agent,
       goalCell: (state) => readState(state, grid, overlayState).goal,
       keyCells: (state) => {
@@ -222,7 +197,6 @@ class IvyGateScene extends StageScene<WorldHandle> {
         overlayDoors[0] = readState(state, grid, overlayState).doorOpen;
         return overlayDoors;
       },
-      name: 'gardenGroundTruth',
     };
   }
 
@@ -237,18 +211,13 @@ class IvyGateScene extends StageScene<WorldHandle> {
     this.seed?.setTime(0);
   }
 
-  protected tick(frame: FrameUpdate): void {
-    const ctx = this.ctx;
-    const world = this.world;
+  protected tick(frame: FrameUpdate, { ctx, world, pool, rig, time }: Stage<WorldHandle>): void {
     const wisp = this.wisp;
     const gate = this.gate;
     const shrine = this.shrine;
     const seed = this.seed;
-    const pool = this.pool;
-    const rig = this.rig;
-    if (!ctx || !world || !wisp || !gate || !shrine || !seed || !pool || !rig) return;
+    if (!wisp || !gate || !shrine || !seed) return;
 
-    const time = ctx.time();
     const grid = this.grid;
     const s = readState(frame.state, grid, this.cur);
 
@@ -415,7 +384,6 @@ class IvyGateScene extends StageScene<WorldHandle> {
   }
 }
 
-
 export function growth(age: number): number {
   if (!(age >= 0) || age >= GROW_SECONDS) return 1;
   const t = age / GROW_SECONDS;
@@ -437,5 +405,4 @@ export function shrineGlow(time: number, agent: GridCell, goal: GridCell): numbe
   return clamp01(GLOW_BASE + GLOW_BREATH * breath + GLOW_PROXIMITY * near);
 }
 
-const createScene: SceneFactory = () => new IvyGateScene();
-export default createScene;
+export default ((() => new IvyGateScene()) satisfies SceneFactory);

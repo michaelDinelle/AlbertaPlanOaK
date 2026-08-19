@@ -1,11 +1,9 @@
-
 import { MKC_CARRY, MKC_GATES, MKC_GX, MKC_GY, MKC_X, MKC_Y, mkcBit } from '@sim/envs/multikeycorridor';
-import type { CelebrationPoolOptions } from '@kit/celebrate';
 import type { GroundTruthOptions } from '@kit/debug';
 import { cellToWorldVec, clampCell, type GridSize } from '@kit/grid';
 import { envelope } from '@kit/mix';
 import type { OrbitRigOptions } from '@kit/rigs';
-import { StageScene } from '@kit/stage';
+import { StageScene, type Stage } from '@kit/stage';
 import { TOKENS } from '@kit/tokens';
 import type { FrameState, FrameUpdate, SceneContext, SceneFactory } from '@kit/types';
 import { Wisp } from '@kit/wisp';
@@ -25,7 +23,6 @@ import {
   type KeyAltarHandle,
   type ShrineHandle,
 } from './actors';
-import { manifest } from './manifest';
 import {
   CAMERA_AZIMUTH,
   buildWorld,
@@ -39,15 +36,12 @@ import {
   type WorldHandle,
 } from './world';
 
-
-const CAM_AZIMUTH = CAMERA_AZIMUTH;
 const CAM_POLAR = 0.58;
 const CAM_DISTANCE = 15.5;
 const CAM_TARGET_Y = 0.35;
 
 const BURST_SCALE = 0.85;
 const RIPPLE_SCALE = 0.55;
-const BURST_PARTICLES = 120;
 const PULSE_STRENGTH = 0.5;
 const BLOOM_Y = 0.62;
 const BLOOM_SECONDS = 1.5;
@@ -134,7 +128,6 @@ export function readGoalCell(state: FrameState, grid: GridSize, out: GridCell): 
 }
 
 class TempleOfThreeGatesScene extends StageScene<WorldHandle> {
-  readonly manifest = manifest;
   protected readonly stageName = 'templeOfThreeGates';
 
   private wisp: Wisp | null = null;
@@ -175,7 +168,7 @@ class TempleOfThreeGatesScene extends StageScene<WorldHandle> {
 
     const palette = ctx.tokens.palettes.morning;
     const skin = templeSkin(palette, ctx.tokens);
-    const accent = ctx.tokens.accents[manifest.accent] ?? ctx.tokens.celebrationGold;
+    const accent = this.accentOf(ctx);
     this.accentColor = new THREE.Color(accent);
     this.keyColors = skin.keys.map((c) => c.clone());
     this.relicColor = skin.relic.clone();
@@ -250,27 +243,10 @@ class TempleOfThreeGatesScene extends StageScene<WorldHandle> {
 
   protected rigOptions(ctx: SceneContext): OrbitRigOptions {
     return {
-      canvas: ctx.canvas,
       target: [0, CAM_TARGET_Y, 0],
       distance: CAM_DISTANCE,
-      azimuth: CAM_AZIMUTH,
+      azimuth: CAMERA_AZIMUTH,
       polar: CAM_POLAR,
-      fov: ctx.tokens.fovHero,
-      near: 0.1,
-      far: 900,
-      aspect: ctx.size.height > 0 ? ctx.size.width / ctx.size.height : 16 / 9,
-      damping: 5,
-      rotateSpeed: 0.004,
-      zoomSpeed: 0.0012,
-      name: 'templeOrbitRig',
-    };
-  }
-
-  protected poolOptions(ctx: SceneContext): CelebrationPoolOptions {
-    return {
-      seed: ctx.seed,
-      burstSize: BURST_PARTICLES,
-      name: 'templeCelebrations',
     };
   }
 
@@ -283,7 +259,6 @@ class TempleOfThreeGatesScene extends StageScene<WorldHandle> {
       return overlayView;
     };
     return {
-      camera: this.camera,
       agentCell: (state) => {
         const v = readOverlay(state);
         return { x: v.x, y: v.y };
@@ -298,7 +273,6 @@ class TempleOfThreeGatesScene extends StageScene<WorldHandle> {
       },
       doorStates: (state) => readOverlay(state).doorOpen,
       maxKeys: KEYS,
-      name: 'templeGroundTruth',
     };
   }
 
@@ -320,17 +294,12 @@ class TempleOfThreeGatesScene extends StageScene<WorldHandle> {
     this.shrine?.setTime(0);
   }
 
-  protected tick(frame: FrameUpdate): void {
-    const ctx = this.ctx;
-    const world = this.world;
+  protected tick(frame: FrameUpdate, { ctx, world, pool, rig, time }: Stage<WorldHandle>): void {
     const wisp = this.wisp;
     const shrine = this.shrine;
     const rack = this.rack;
-    const pool = this.pool;
-    const rig = this.rig;
-    if (!ctx || !world || !wisp || !shrine || !rack || !pool || !rig) return;
+    if (!wisp || !shrine || !rack) return;
 
-    const time = ctx.time();
     const state = frame.state;
     const grid = this.grid;
     const view = this.view;
@@ -487,7 +456,6 @@ class TempleOfThreeGatesScene extends StageScene<WorldHandle> {
   }
 }
 
-
 export function gatePhase(open: boolean, age: number): number {
   const p = !(age >= 0) || age >= GATE_SECONDS ? 1 : age / GATE_SECONDS;
   return open ? p : 1 - p;
@@ -505,5 +473,4 @@ export function proximity(view: { x: number; y: number; gx: number; gy: number }
   return d >= PROXIMITY_CELLS ? 0 : 1 - d / PROXIMITY_CELLS;
 }
 
-const createScene: SceneFactory = () => new TempleOfThreeGatesScene();
-export default createScene;
+export default ((() => new TempleOfThreeGatesScene()) satisfies SceneFactory);

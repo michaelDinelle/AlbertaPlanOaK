@@ -1,7 +1,5 @@
-
 import { POSE_LEN } from '../record';
-import type { EnvDecoder, EnvFrame, EnvGeometry, GridCell, SimEvent } from '../types';
-import { NO_EVENTS } from '../events';
+import { NO_EVENTS, type EnvDecoder, type EnvFrame, type EnvGeometry, type GridCell, type SimEvent } from '../types';
 
 export const MKC_W = 17;
 export const MKC_H = 7;
@@ -26,7 +24,6 @@ export const MKC_GX = 2;
 export const MKC_GY = 3;
 export const MKC_CARRY = 4;
 export const MKC_GATES = 5;
-export const MKC_ACTION = 6;
 
 export function mkcBit(bits: number, index: number): boolean {
   return ((Math.trunc(bits) >> index) & 1) !== 0;
@@ -94,7 +91,6 @@ export const multiKeyCorridorDecoder: EnvDecoder<MultiKeyCorridorStatic> = {
       pose,
     };
   },
-
 
   deriveEvents(prev: EnvFrame, next: EnvFrame): SimEvent[] {
     const out: SimEvent[] = [];

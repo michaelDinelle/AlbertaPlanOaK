@@ -1,18 +1,15 @@
-
 import { PROCMAZE_GX, PROCMAZE_GY, PROCMAZE_X, PROCMAZE_Y } from '@sim/envs/proceduralmaze';
-import type { CelebrationPoolOptions } from '@kit/celebrate';
 import type { GroundTruthOptions } from '@kit/debug';
 import { cellToWorldVec, clampCell, type GridSize } from '@kit/grid';
 import { blendTokens, envelope } from '@kit/mix';
 import type { OrbitRigOptions } from '@kit/rigs';
-import { StageScene } from '@kit/stage';
+import { StageScene, type Stage } from '@kit/stage';
 import { TOKENS } from '@kit/tokens';
 import type { FrameState, FrameUpdate, SceneContext, SceneFactory } from '@kit/types';
 import { Wisp } from '@kit/wisp';
 import * as THREE from 'three';
 import type { GridCell, GridGeometry } from '@sim/types';
 import { buildSunShaft, type SunShaftHandle } from './actors';
-import { manifest } from './manifest';
 import {
   CAMERA_AZIMUTH,
   CAMERA_DISTANCE,
@@ -28,16 +25,8 @@ import {
   type WorldHandle,
 } from './world';
 
-
-const CAM_AZIMUTH = CAMERA_AZIMUTH;
-const CAM_POLAR = CAMERA_POLAR;
-const CAM_DISTANCE = CAMERA_DISTANCE;
-const CAM_TARGET_Y = CAMERA_TARGET_Y;
-const CAM_TARGET_BIAS = CAMERA_TARGET_BIAS;
-
 const BURST_SCALE = 0.82;
 const RIPPLE_SCALE = 0.48;
-const BURST_PARTICLES = 110;
 const PULSE_STRENGTH = 0.5;
 const BLOOM_Y = 0.46;
 const BLOOM_SECONDS = 1.5;
@@ -62,7 +51,6 @@ export function readGoalCell(state: FrameState, grid: GridSize, out: GridCell): 
 }
 
 class OvergrownRuinsScene extends StageScene<WorldHandle> {
-  readonly manifest = manifest;
   protected readonly stageName = 'overgrownRuins';
 
   private wisp: Wisp | null = null;
@@ -100,7 +88,7 @@ class OvergrownRuinsScene extends StageScene<WorldHandle> {
     const palette = ctx.tokens.palettes.noon;
     const skin = ruinSkin(palette, ctx.tokens);
     this.skin = skin;
-    const accent = ctx.tokens.accents[manifest.accent] ?? ctx.tokens.celebrationGold;
+    const accent = this.accentOf(ctx);
     this.gold = ctx.tokens.celebrationGold;
     this.moteColor = blendTokens(
       ctx.tokens.celebrationGold,
@@ -139,29 +127,12 @@ class OvergrownRuinsScene extends StageScene<WorldHandle> {
   }
 
   protected rigOptions(ctx: SceneContext): OrbitRigOptions {
-    const bias = CAM_TARGET_BIAS;
+    const bias = CAMERA_TARGET_BIAS;
     return {
-      canvas: ctx.canvas,
-      target: [Math.sin(CAM_AZIMUTH) * bias, CAM_TARGET_Y, Math.cos(CAM_AZIMUTH) * bias],
-      distance: CAM_DISTANCE,
-      azimuth: CAM_AZIMUTH,
-      polar: CAM_POLAR,
-      fov: ctx.tokens.fovHero,
-      near: 0.1,
-      far: 900,
-      aspect: ctx.size.height > 0 ? ctx.size.width / ctx.size.height : 16 / 9,
-      damping: 5,
-      rotateSpeed: 0.004,
-      zoomSpeed: 0.0012,
-      name: 'ruinOrbitRig',
-    };
-  }
-
-  protected poolOptions(ctx: SceneContext): CelebrationPoolOptions {
-    return {
-      seed: ctx.seed,
-      burstSize: BURST_PARTICLES,
-      name: 'ruinCelebrations',
+      target: [Math.sin(CAMERA_AZIMUTH) * bias, CAMERA_TARGET_Y, Math.cos(CAMERA_AZIMUTH) * bias],
+      distance: CAMERA_DISTANCE,
+      azimuth: CAMERA_AZIMUTH,
+      polar: CAMERA_POLAR,
     };
   }
 
@@ -170,7 +141,6 @@ class OvergrownRuinsScene extends StageScene<WorldHandle> {
     const overlayAgent: GridCell = { x: 0, y: 0 };
     const overlayGoal: GridCell = { x: 0, y: 0 };
     return {
-      camera: this.camera,
       agentCell: (state) => {
         readCells(state, grid, overlayAgent, overlayGoal);
         return overlayAgent;
@@ -179,7 +149,6 @@ class OvergrownRuinsScene extends StageScene<WorldHandle> {
         readCells(state, grid, overlayAgent, overlayGoal);
         return overlayGoal;
       },
-      name: 'ruinGroundTruth',
     };
   }
 
@@ -190,17 +159,12 @@ class OvergrownRuinsScene extends StageScene<WorldHandle> {
     this.shaft?.setTime(0);
   }
 
-  protected tick(frame: FrameUpdate): void {
-    const ctx = this.ctx;
-    const world = this.world;
+  protected tick(frame: FrameUpdate, { world, pool, rig, time }: Stage<WorldHandle>): void {
     const wisp = this.wisp;
     const shaft = this.shaft;
-    const pool = this.pool;
-    const rig = this.rig;
     const grid = this.gridGeom;
-    if (!ctx || !world || !wisp || !shaft || !pool || !rig || !grid) return;
+    if (!wisp || !shaft || !grid) return;
 
-    const time = ctx.time();
     const state = frame.state;
     const agent = this.agentCell;
     const goal = this.goalCell;
@@ -314,7 +278,6 @@ class OvergrownRuinsScene extends StageScene<WorldHandle> {
   }
 }
 
-
 export function growth(age: number): number {
   if (!(age >= 0) || age >= GROW_SECONDS) return 1;
   const t = age / GROW_SECONDS;
@@ -322,5 +285,4 @@ export function growth(age: number): number {
   return e * (1 + 0.13 * Math.sin(Math.PI * t) * (1 - t));
 }
 
-const createScene: SceneFactory = () => new OvergrownRuinsScene();
-export default createScene;
+export default ((() => new OvergrownRuinsScene()) satisfies SceneFactory);

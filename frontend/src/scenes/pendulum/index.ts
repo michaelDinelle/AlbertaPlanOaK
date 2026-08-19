@@ -1,19 +1,14 @@
-
-import type { CelebrationPoolOptions } from '@kit/celebrate';
 import type { GroundTruthOptions } from '@kit/debug';
 import { clampRange } from '@kit/mix';
 import { orbitFromPose, type OrbitRigOptions } from '@kit/rigs';
-import { StageScene } from '@kit/stage';
+import { StageScene, type Stage } from '@kit/stage';
 import type { FrameState, FrameUpdate, SceneContext, SceneFactory } from '@kit/types';
 import { PD_L, PD_MAX_SPEED, PD_MAX_TORQUE, PENDULUM_TH, PENDULUM_THDOT, PENDULUM_TORQUE, wrapPi } from '@sim/envs/pendulum';
 import { buildLanternRig, type LanternRigHandle } from './actors';
-import { manifest } from './manifest';
 import { buildWorld, pivotOf, type WorldHandle } from './world';
-
 
 const CAM_BASE: readonly [number, number, number] = [0.62, 0.41, 6.55];
 const CAM_LOOK: readonly [number, number, number] = [0, -0.09, 0];
-
 
 function torqueOf(state: FrameState): number {
   return state.pose[PENDULUM_TORQUE] ?? 0;
@@ -34,7 +29,6 @@ export function serenityOf(theta: number, thetaDot: number, torque = 0): number 
 }
 
 class LanternBellScene extends StageScene<WorldHandle> {
-  readonly manifest = manifest;
   protected readonly stageName = 'lanternBell';
 
   private lantern: LanternRigHandle | null = null;
@@ -48,7 +42,7 @@ class LanternBellScene extends StageScene<WorldHandle> {
 
   protected buildActors(ctx: SceneContext): void {
     const palette = ctx.tokens.palettes.night;
-    const accent = ctx.tokens.accents[manifest.accent] ?? ctx.tokens.celebrationGold;
+    const accent = this.accentOf(ctx);
 
     const lantern = buildLanternRig({
       palette,
@@ -67,30 +61,20 @@ class LanternBellScene extends StageScene<WorldHandle> {
       CAM_LOOK,
     );
     return {
-      canvas: ctx.canvas,
       target: CAM_LOOK,
       azimuth: home.azimuth,
       polar: home.polar,
       distance: home.distance,
-      fov: ctx.tokens.fovHero,
       near: 0.05,
       far: 420,
-      aspect: ctx.size.height > 0 ? ctx.size.width / ctx.size.height : 16 / 9,
+      rotateSpeed: 0.006,
+      zoomSpeed: 0.0016,
       damping: 2.6,
-      name: 'lanternOrbitRig',
     };
   }
 
-  protected poolOptions(ctx: SceneContext): CelebrationPoolOptions {
+    protected overlayOptions(): GroundTruthOptions {
     return {
-      seed: ctx.seed,
-      name: 'lanternBellCelebrations',
-    };
-  }
-
-  protected overlayOptions(): GroundTruthOptions {
-    return {
-      camera: this.camera,
       agentPos: (state) => {
         const th = state.pose[PENDULUM_TH] ?? 0;
         this.overlayPos[0] = this.pivot[0] + PD_L * Math.sin(th);
@@ -98,7 +82,6 @@ class LanternBellScene extends StageScene<WorldHandle> {
         this.overlayPos[2] = this.pivot[2];
         return this.overlayPos;
       },
-      name: 'lanternBellGroundTruth',
     };
   }
 
@@ -124,15 +107,10 @@ class LanternBellScene extends StageScene<WorldHandle> {
     if (light) light.position.copy(flame);
   }
 
-  protected tick(frame: FrameUpdate): void {
-    const ctx = this.ctx;
-    const world = this.world;
+  protected tick(frame: FrameUpdate, { world, pool, rig, time }: Stage<WorldHandle>): void {
     const lantern = this.lantern;
-    const pool = this.pool;
-    const rig = this.rig;
-    if (!ctx || !world || !lantern || !pool || !rig) return;
+    if (!lantern) return;
 
-    const time = ctx.time();
     const state = frame.state;
 
     pool.update(frame.dtReal, time);
@@ -140,7 +118,6 @@ class LanternBellScene extends StageScene<WorldHandle> {
       pool.clear();
       rig.snap();
     }
-
 
     const theta = state.pose[PENDULUM_TH] ?? 0;
     const thetaDot = state.pose[PENDULUM_THDOT] ?? 0;
@@ -159,5 +136,4 @@ class LanternBellScene extends StageScene<WorldHandle> {
   }
 }
 
-const createScene: SceneFactory = () => new LanternBellScene();
-export default createScene;
+export default ((() => new LanternBellScene()) satisfies SceneFactory);

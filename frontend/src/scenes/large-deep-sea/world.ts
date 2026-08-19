@@ -28,7 +28,6 @@ import {
 } from '@sim/envs/largedeepsea';
 import type { EnvGeometry, GridGeometry } from '@sim/types';
 
-
 export const ABYSS_N = LARGE_DEEPSEA_N;
 export const TRENCH_HALF = (ABYSS_N * CELL) / 2;
 
@@ -47,7 +46,6 @@ export const SUN_DIR: readonly [number, number, number] = [-0.3, 0.93, -0.22];
 export const SHADOW_RADIUS = 13.5;
 
 export const CAMERA_AZIMUTH = -2.52;
-
 
 export function hue(c: THREE.Color): THREE.Color {
   const m = Math.max(c.r, c.g, c.b, 1e-6);
@@ -74,7 +72,6 @@ export function resolveMask(grid: GridGeometry, seed: number): Uint8Array {
 export function isShelfCell(x: number, y: number): boolean {
   return x <= y;
 }
-
 
 export interface AbyssSkin {
   shelfLit: THREE.Color;
@@ -150,7 +147,6 @@ export function attenuate(c: THREE.Color, t: number): THREE.Color {
   return c;
 }
 
-
 export function makeTrenchHeight(seed: number): (x: number, z: number) => number {
   return (x, z) => {
     const outside = Math.max(Math.abs(x), Math.abs(z)) - TRENCH_HALF;
@@ -181,7 +177,6 @@ export function makeTrenchColor(skin: AbyssSkin): (h: number, slope: number, x: 
   };
 }
 
-
 const JELLY_VERT =  `
 #include <common>
 uniform float uTime;
@@ -200,10 +195,8 @@ void main() {
 
 	vec3 p = position;
 	float ribbon = 1.0 - aGrade;
-	// the bell: squash vertically, swell radially, and inversely on the relax
 	p.y *= 1.0 + uPulse * stroke * aGrade;
 	p.xz *= 1.0 - uPulse * 0.55 * stroke * aGrade;
-	// the ribbons: they follow, they never lead
 	p.x += ribbon * ribbon * lag * 0.11;
 	p.z += ribbon * ribbon * cos( uTime * speed * 0.73 + phase ) * 0.085;
 
@@ -425,7 +418,6 @@ export function buildJellySwarm(opts: JellySwarmOptions): JellySwarmHandle {
   };
 }
 
-
 export const CORAL_LEAN = 0.32;
 export const CORAL_HEIGHT = 0.52;
 
@@ -565,7 +557,6 @@ export function buildCoralField(opts: CoralFieldOptions): CoralFieldHandle {
   };
 }
 
-
 export interface AnglerSite {
   x: number;
   y: number;
@@ -590,7 +581,6 @@ export function anglerSites(grid: GridSize, seed: number): AnglerSite[] {
   ];
 }
 
-
 export interface WorldHandle extends WorldCore {
   sky: SkyHandle;
   rig: LightRig;
@@ -602,7 +592,6 @@ export interface WorldHandle extends WorldCore {
   silt: AmbientParticlesHandle;
   skin: AbyssSkin;
 }
-
 
 export function buildWorld(
   ctx: SceneContext,

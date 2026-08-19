@@ -1,4 +1,3 @@
-
 import * as THREE from 'three';
 import { applyFog, makeLightRig, type LightRig } from '@kit/lighting';
 import { oakMaterial, oakUniforms, setMaterialsTime, type OakMaterial } from '@kit/materials';
@@ -28,7 +27,6 @@ import { makeWorld, type WorldCore } from '@kit/world';
 import type { EnvGeometry } from '@sim/types';
 import { MC_GOAL_POS, MC_MAX_POS, MC_MIN_POS, MC_START_POS, mountainCarHeight } from '@sim/envs/mountaincar';
 
-
 export const TERRAIN_W = 10.24;
 export const TERRAIN_D = 8;
 export const TERRAIN_SEG_X = 416;
@@ -44,11 +42,9 @@ const EAGLE_RADIUS = 6.86;
 const EAGLE_TRAVEL: readonly [number, number, number] = [0.35, -0.06, -0.935];
 const EAGLE_SWEEP = 2;
 
-
 export function heightResolver(geometry: EnvGeometry): (x: number) => number {
   return geometry.classic?.heightAt ?? mountainCarHeight;
 }
-
 
 export function makeRidgeHeight(
   heightAt: (x: number) => number,
@@ -72,7 +68,6 @@ export function makeRidgeHeight(
   };
 }
 
-
 export interface WorldHandle extends WorldCore {
   sky: SkyHandle;
   rig: LightRig;
@@ -83,7 +78,6 @@ export interface WorldHandle extends WorldCore {
   setGust(env01: number): void;
   setEagle(progress: number | null): void;
 }
-
 
 export function buildWorld(ctx: SceneContext, scene: THREE.Scene): WorldHandle {
   const palette: Palette = ctx.tokens.palettes.dusk;

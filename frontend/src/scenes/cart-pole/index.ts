@@ -1,15 +1,12 @@
-
 import type { CelebrationPoolOptions } from '@kit/celebrate';
 import type { GroundTruthOptions } from '@kit/debug';
 import { clampRange, envelope } from '@kit/mix';
 import { orbitFromPose, type OrbitRigOptions } from '@kit/rigs';
-import { StageScene } from '@kit/stage';
+import { StageScene, type Stage } from '@kit/stage';
 import type { FrameState, FrameUpdate, SceneContext, SceneFactory, SceneSize } from '@kit/types';
 import { CARTPOLE_ACTION, CARTPOLE_TH, CARTPOLE_X, CARTPOLE_XDOT, cartPoleForce, cartPoleTip } from '@sim/envs/cartpole';
 import { buildTrolley, type TrolleyHandle } from './actors';
-import { manifest } from './manifest';
 import { CAM_BASE, CAM_LOOK, buildWorld, poleLength, tiltLimit, trackLimit, type WorldHandle } from './world';
-
 
 const FALL_SECONDS = 0.42;
 const COOL_SECONDS = 0.58;
@@ -22,7 +19,6 @@ function forceOf(state: FrameState): number {
 }
 
 class BoardwalkScene extends StageScene<WorldHandle> {
-  readonly manifest = manifest;
   protected readonly stageName = 'boardwalk';
 
   private trolley: TrolleyHandle | null = null;
@@ -46,7 +42,7 @@ class BoardwalkScene extends StageScene<WorldHandle> {
 
   protected buildActors(ctx: SceneContext, world: WorldHandle): void {
     const palette = ctx.tokens.palettes.noon;
-    const accent = ctx.tokens.accents[manifest.accent] ?? ctx.tokens.celebrationGold;
+    const accent = this.accentOf(ctx);
 
     const warm = world.rig.points[0];
     if (warm) warm.color.set(palette.accentLight);
@@ -70,33 +66,28 @@ class BoardwalkScene extends StageScene<WorldHandle> {
       CAM_LOOK,
     );
     return {
-      canvas: ctx.canvas,
       target: CAM_LOOK,
       azimuth: home.azimuth,
       polar: home.polar,
       distance: home.distance,
-      fov: ctx.tokens.fovHero,
       near: 0.05,
       far: 420,
-      aspect: ctx.size.height > 0 ? ctx.size.width / ctx.size.height : 16 / 9,
+      rotateSpeed: 0.006,
+      zoomSpeed: 0.0016,
       damping: 2.4,
-      name: 'boardwalkOrbitRig',
     };
   }
 
   protected poolOptions(ctx: SceneContext): CelebrationPoolOptions {
     return {
-      seed: ctx.seed,
       sighSize: SIGH_PARTICLES,
       sighRadius: 0.34,
       sighHeight: 0.9,
-      name: 'boardwalkCelebrations',
     };
   }
 
   protected overlayOptions(): GroundTruthOptions {
     return {
-      camera: this.camera,
       agentPos: (state) => {
         const t = cartPoleTip(state.pose[CARTPOLE_X] ?? 0, state.pose[CARTPOLE_TH] ?? 0, this.tipScratch);
         this.overlayPos[0] = t[0] ?? 0;
@@ -104,7 +95,6 @@ class BoardwalkScene extends StageScene<WorldHandle> {
         this.overlayPos[2] = 0;
         return this.overlayPos;
       },
-      name: 'boardwalkGroundTruth',
     };
   }
 
@@ -120,15 +110,10 @@ class BoardwalkScene extends StageScene<WorldHandle> {
     trolley.setTime(0);
   }
 
-  protected tick(frame: FrameUpdate): void {
-    const ctx = this.ctx;
-    const world = this.world;
+  protected tick(frame: FrameUpdate, { world, pool, rig, time }: Stage<WorldHandle>): void {
     const trolley = this.trolley;
-    const pool = this.pool;
-    const rig = this.rig;
-    if (!ctx || !world || !trolley || !pool || !rig) return;
+    if (!trolley) return;
 
-    const time = ctx.time();
     const state = frame.state;
 
     pool.update(frame.dtReal, time);
@@ -205,5 +190,4 @@ class BoardwalkScene extends StageScene<WorldHandle> {
   }
 }
 
-const createScene: SceneFactory = () => new BoardwalkScene();
-export default createScene;
+export default ((() => new BoardwalkScene()) satisfies SceneFactory);

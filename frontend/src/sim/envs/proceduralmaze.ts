@@ -1,8 +1,6 @@
-
 import { philoxDraw, STREAM_RESET } from '../philox';
 import { POSE_LEN } from '../record';
-import type { EnvDecoder, EnvFrame, EnvGeometry, GridCell, SimEvent } from '../types';
-import { NO_EVENTS } from '../events';
+import { NO_EVENTS, type EnvDecoder, type EnvFrame, type EnvGeometry, type GridCell, type SimEvent } from '../types';
 
 export const PROCMAZE_W = 11;
 export const PROCMAZE_H = 11;
@@ -124,7 +122,6 @@ export const proceduralMazeDecoder: EnvDecoder<ProceduralMazeStatic> = {
       pose,
     };
   },
-
 
   deriveEvents(
     _prev: EnvFrame,

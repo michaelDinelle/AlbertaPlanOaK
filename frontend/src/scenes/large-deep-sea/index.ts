@@ -1,30 +1,24 @@
-
 import { LARGE_DEEPSEA_ACTION, LARGE_DEEPSEA_COL, LARGE_DEEPSEA_GX, LARGE_DEEPSEA_GY, LARGE_DEEPSEA_ROW } from '@sim/envs/largedeepsea';
-import type { CelebrationPoolOptions } from '@kit/celebrate';
 import type { GroundTruthOptions } from '@kit/debug';
 import { clampCell, type GridSize } from '@kit/grid';
 import { blendTokens, clamp01, envelope } from '@kit/mix';
 import { cellToTerraceVec as cellToWorldVec, terraceDepthAt } from '@kit/terrace';
 import type { OrbitRigOptions } from '@kit/rigs';
-import { StageScene } from '@kit/stage';
+import { StageScene, type Stage } from '@kit/stage';
 import { TOKENS } from '@kit/tokens';
 import type { FrameState, FrameUpdate, SceneContext, SceneFactory } from '@kit/types';
 import { Wisp } from '@kit/wisp';
 import * as THREE from 'three';
 import type { GridCell, GridGeometry } from '@sim/types';
 import { HEART_Y, buildAngler, buildDiveBubble, buildWreck, type AnglerHandle, type DiveBubbleHandle, type WreckHandle } from './actors';
-import { manifest } from './manifest';
 import { CAMERA_AZIMUTH, anglerSites, buildWorld, resolveGrid, resolveMask, type WorldHandle } from './world';
 
-
-const CAM_AZIMUTH = CAMERA_AZIMUTH;
 const CAM_POLAR = 0.74;
 const CAM_DISTANCE = 24;
 const CAM_TARGET: readonly [number, number, number] = [-1.2, -1.75, 1.1];
 
 const BURST_SCALE = 0.8;
 const RIPPLE_SCALE = 0.55;
-const BURST_PARTICLES = 130;
 const PULSE_STRENGTH = 0.62;
 const TREASURE_SECONDS = 2.2;
 
@@ -64,7 +58,6 @@ export function isDiveStep(fromX: number, fromY: number, toX: number, toY: numbe
 }
 
 class TheAbyssScene extends StageScene<WorldHandle> {
-  readonly manifest = manifest;
   protected readonly stageName = 'theAbyss';
 
   private wisp: Wisp | null = null;
@@ -100,7 +93,7 @@ class TheAbyssScene extends StageScene<WorldHandle> {
 
   protected buildActors(ctx: SceneContext, world: WorldHandle): void {
     const grid = this.grid;
-    const accent = ctx.tokens.accents[manifest.accent] ?? ctx.tokens.uiCyan;
+    const accent = this.accentOf(ctx);
     this.accent = accent;
     this.gold = ctx.tokens.celebrationGold;
     const water = ctx.tokens.palettes.underwater;
@@ -159,27 +152,10 @@ class TheAbyssScene extends StageScene<WorldHandle> {
 
   protected rigOptions(ctx: SceneContext): OrbitRigOptions {
     return {
-      canvas: ctx.canvas,
       target: [CAM_TARGET[0], CAM_TARGET[1], CAM_TARGET[2]],
       distance: CAM_DISTANCE,
-      azimuth: CAM_AZIMUTH,
+      azimuth: CAMERA_AZIMUTH,
       polar: CAM_POLAR,
-      fov: ctx.tokens.fovHero,
-      near: 0.1,
-      far: 900,
-      aspect: ctx.size.height > 0 ? ctx.size.width / ctx.size.height : 16 / 9,
-      damping: 5,
-      rotateSpeed: 0.004,
-      zoomSpeed: 0.0012,
-      name: 'abyssOrbitRig',
-    };
-  }
-
-  protected poolOptions(ctx: SceneContext): CelebrationPoolOptions {
-    return {
-      seed: ctx.seed,
-      burstSize: BURST_PARTICLES,
-      name: 'abyssCelebrations',
     };
   }
 
@@ -188,7 +164,6 @@ class TheAbyssScene extends StageScene<WorldHandle> {
     const overlayAgent: GridCell = { x: 0, y: 0 };
     const overlayGoal: GridCell = { x: 0, y: 0 };
     return {
-      camera: this.camera,
       agentCell: (state) => {
         readCells(state, grid, overlayAgent, overlayGoal);
         return overlayAgent;
@@ -197,7 +172,6 @@ class TheAbyssScene extends StageScene<WorldHandle> {
         readCells(state, grid, overlayAgent, overlayGoal);
         return overlayGoal;
       },
-      name: 'abyssGroundTruth',
     };
   }
 
@@ -223,17 +197,12 @@ class TheAbyssScene extends StageScene<WorldHandle> {
     for (const angler of this.anglers) angler.setTime(0);
   }
 
-  protected tick(frame: FrameUpdate): void {
-    const ctx = this.ctx;
-    const world = this.world;
+  protected tick(frame: FrameUpdate, { ctx, world, pool, rig, time }: Stage<WorldHandle>): void {
     const wisp = this.wisp;
     const bubble = this.bubble;
     const wreck = this.wreck;
-    const pool = this.pool;
-    const rig = this.rig;
-    if (!ctx || !world || !wisp || !bubble || !wreck || !pool || !rig) return;
+    if (!wisp || !bubble || !wreck) return;
 
-    const time = ctx.time();
     const state = frame.state;
     const grid = this.grid;
     const agent = this.agentCell;
@@ -366,7 +335,6 @@ class TheAbyssScene extends StageScene<WorldHandle> {
   }
 }
 
-
 export function bubbleGain(row: number, grid: GridSize): number {
   return clamp01(row / Math.max(1, grid.h - 2));
 }
@@ -375,5 +343,4 @@ export function siltLift(wispHeight: number): number {
   return wispHeight * SILT_LIFT;
 }
 
-const createScene: SceneFactory = () => new TheAbyssScene();
-export default createScene;
+export default ((() => new TheAbyssScene()) satisfies SceneFactory);

@@ -1,4 +1,3 @@
-
 import * as THREE from 'three';
 import { EffectComposer } from 'three/examples/jsm/postprocessing/EffectComposer.js';
 import { RenderPass } from 'three/examples/jsm/postprocessing/RenderPass.js';
@@ -7,11 +6,21 @@ import { OutputPass } from 'three/examples/jsm/postprocessing/OutputPass.js';
 import { UnrealBloomPass } from 'three/examples/jsm/postprocessing/UnrealBloomPass.js';
 import type { SceneSize } from './types';
 import { TOKENS } from './tokens';
+import type { FogRecipe } from '../scenes/table';
 
-export interface PostConfig {
-  bloomStrength: number;
-  bloomThreshold: number;
-  fogTint: number;
+const BLOOM_THRESHOLD = 0.85;
+
+export interface ScenePost {
+  bloom: number;
+  fog: FogRecipe;
+}
+
+function resolveFog(recipe: FogRecipe): number {
+  const color = new THREE.Color(TOKENS.palettes[recipe.from[0]][recipe.from[1]]);
+  for (const [token, k] of recipe.blend ?? []) {
+    color.lerp(new THREE.Color(TOKENS.palettes[token[0]][token[1]]), k);
+  }
+  return color.getHex();
 }
 
 export interface GradeUniforms {
@@ -39,7 +48,6 @@ export function pulsedBloomStrength(base: number, t01: number): number {
   const t = t01 < 0 ? 0 : t01 > 1 ? 1 : t01;
   return base * (1 + 1.2 * t);
 }
-
 
 const GRADE_VERT =  `
 varying vec2 vUv;
@@ -72,10 +80,8 @@ void main() {
 	vec4 texel = texture2D( tDiffuse, vUv );
 	vec3 col = max( texel.rgb, 0.0 );
 
-	// lift the shadows only — highlights and HDR bloom stay untouched
 	col += uLift * ( 1.0 - smoothstep( 0.0, 0.35, col ) );
 
-	// token tint (the scene's fogTint) pulls the whole frame into one palette
 	col = mix( col, col * uTint, uTintStrength );
 
 	col = pow( col, vec3( uGamma ) );
@@ -105,12 +111,11 @@ export const OakGradeShader = {
   fragmentShader: GRADE_FRAG,
 };
 
-
 export function buildComposer(
   renderer: THREE.WebGLRenderer,
   scene: THREE.Scene,
   camera: THREE.Camera,
-  config: PostConfig,
+  post: ScenePost,
   size: SceneSize,
 ): ComposerHandle {
   renderer.toneMapping = THREE.ACESFilmicToneMapping;
@@ -119,7 +124,7 @@ export function buildComposer(
   const width = Math.max(1, Math.floor(size.width));
   const height = Math.max(1, Math.floor(size.height));
   const dpr = size.dpr > 0 ? size.dpr : 1;
-  const bloomStrength = config.bloomStrength;
+  const bloomStrength = post.bloom;
 
   const target = new THREE.WebGLRenderTarget(width, height, {
     type: THREE.HalfFloatType,
@@ -141,14 +146,14 @@ export function buildComposer(
     new THREE.Vector2(Math.max(1, Math.round(width * dpr * scale)), Math.max(1, Math.round(height * dpr * scale))),
     bloomStrength,
     0.6,
-    config.bloomThreshold,
+    BLOOM_THRESHOLD,
   );
   composer.addPass(bloom);
 
   const gradePass = new ShaderPass(OakGradeShader);
   const gradeUniforms = gradePass.uniforms as unknown as GradeUniforms;
   gradeUniforms.uLift.value.setScalar(0.004);
-  gradeUniforms.uTint.value.set(config.fogTint);
+  gradeUniforms.uTint.value.set(resolveFog(post.fog));
   gradeUniforms.uTintStrength.value = 0.14;
   gradeUniforms.uGamma.value = 1.0;
   gradeUniforms.uVignette.value = 0.34;

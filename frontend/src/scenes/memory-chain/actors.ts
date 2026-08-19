@@ -1,4 +1,3 @@
-
 import {
   emissiveMaterial,
   oakMaterial,
@@ -13,23 +12,11 @@ import { mergeColoredParts, type ColoredPart } from '@kit/parts';
 import * as THREE from 'three';
 import type { CaveSkin } from './world';
 
-
 const CRYSTAL_OFFSET_Z = -0.82;
 export const CRYSTAL_HEIGHT = 1.62;
 const CRYSTAL_HDR = 1.7;
 
 export const MOUTH_RIM = 0.5;
-
-export interface MouthCarriers {
-  rim: number;
-  rimColor: THREE.Color;
-  glow: number;
-  glowColor: THREE.Color;
-  stone: THREE.Color;
-  stoneEmissive: number;
-  stoneEmissiveColor: THREE.Color;
-  total: number;
-}
 
 export interface CueCrystalOptions {
   skin: CaveSkin;
@@ -240,7 +227,6 @@ export function buildCueCrystal(opts: CueCrystalOptions): CueCrystalHandle {
     },
   };
 }
-
 
 const MOUTH_OFFSET_Z = 1.42;
 const MOUTH_OFFSET_X = 1.15;

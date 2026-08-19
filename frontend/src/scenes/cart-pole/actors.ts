@@ -1,4 +1,3 @@
-
 import {
   emissiveMaterial,
   oakMaterial,
@@ -21,14 +20,12 @@ import {
 } from '@sim/envs/cartpole';
 import { DECK_Y } from './world';
 
-
 export const HINGE_LOCAL_Y = -DECK_Y;
 const WHEEL_R = 0.06;
 const WHEEL_T = 0.028;
 const WHEEL_Z = 0.115;
 const AXLE_X = 0.132;
-const BOX_TOP = HINGE_LOCAL_Y;
-const BOX_BOTTOM = BOX_TOP - CP_CART_HEIGHT;
+const BOX_BOTTOM = HINGE_LOCAL_Y - CP_CART_HEIGHT;
 const BOX_HALF_Z = 0.15;
 export const CROWN_Y = 0.78;
 
@@ -108,7 +105,7 @@ export function buildTrolley(opts: TrolleyOptions): TrolleyHandle {
         bodyParts.push({ geometry: end, color: i % 2 === 0 ? woodMid : woodPale });
       }
     }
-    for (const y of [BOX_BOTTOM + 0.045, BOX_TOP - 0.04]) {
+    for (const y of [BOX_BOTTOM + 0.045, HINGE_LOCAL_Y - 0.04]) {
       for (const z of [-BOX_HALF_Z - 0.006, BOX_HALF_Z + 0.006]) {
         const band = new THREE.BoxGeometry(CP_CART_WIDTH + 0.018, 0.02, 0.012);
         band.translate(0, y, z);
@@ -129,15 +126,15 @@ export function buildTrolley(opts: TrolleyOptions): TrolleyHandle {
       bodyParts.push({ geometry: bracket, color: iron });
     }
     const soilTop = new THREE.BoxGeometry(CP_CART_WIDTH - 0.03, 0.03, BOX_HALF_Z * 2 - 0.03);
-    soilTop.translate(0, BOX_TOP - 0.016, 0);
+    soilTop.translate(0, HINGE_LOCAL_Y - 0.016, 0);
     bodyParts.push({ geometry: soilTop, color: soil });
     const mound = new THREE.IcosahedronGeometry(0.11, 1);
     mound.scale(1.5, 0.34, 1.05);
-    mound.translate(0, BOX_TOP - 0.006, 0);
+    mound.translate(0, HINGE_LOCAL_Y - 0.006, 0);
     bodyParts.push({ geometry: mound, color: soil });
     const mossCap = new THREE.IcosahedronGeometry(0.062, 1);
     mossCap.scale(1.35, 0.3, 1.15);
-    mossCap.translate(0, BOX_TOP + 0.006, 0);
+    mossCap.translate(0, HINGE_LOCAL_Y + 0.006, 0);
     bodyParts.push({ geometry: mossCap, color: moss });
   }
   const bodyGeometry = mergeColoredParts(bodyParts, 'trolleyBody');

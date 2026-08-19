@@ -1,4 +1,3 @@
-
 import { emissiveMaterial, oakMaterial, oakUniforms, setEmissiveIntensity } from '@kit/materials';
 import type { EmissiveMaterial, OakMaterial } from '@kit/materials';
 import { blendTokens, clamp01, smoothstep01 } from '@kit/mix';
@@ -9,7 +8,6 @@ import * as THREE from 'three';
 import { tubeGeometry } from './world';
 
 type Vec3 = readonly [number, number, number];
-
 
 interface Limb {
   a: Vec3;
@@ -80,7 +78,6 @@ export function blossomTreeCrownHeight(): number {
   }
   return top;
 }
-
 
 export interface BlossomTreeOptions {
   palette: Palette;
@@ -349,7 +346,6 @@ export function blossomClusterGeometry(): THREE.BufferGeometry {
   return g;
 }
 
-
 export const FERRY_SECONDS = 1.55;
 export const FERRY_STAGGER = 0.42;
 
@@ -466,7 +462,6 @@ export function buildPetalFerry(opts: PetalFerryOptions): PetalFerryHandle {
     },
   };
 }
-
 
 export interface FordLanternOptions {
   palette: Palette;

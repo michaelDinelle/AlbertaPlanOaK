@@ -1,7 +1,5 @@
-
 import { POSE_LEN } from '../record';
-import type { EnvDecoder, EnvFrame, EnvGeometry, SimEvent } from '../types';
-import { NO_EVENTS } from '../events';
+import { NO_EVENTS, type EnvDecoder, type EnvFrame, type EnvGeometry, type SimEvent } from '../types';
 
 export const MEMORYCHAIN_L = 32;
 export const MEMORYCHAIN_END = MEMORYCHAIN_L - 1;
@@ -38,7 +36,6 @@ export const memoryChainDecoder: EnvDecoder<MemoryChainStatic> = {
       pose,
     };
   },
-
 
   deriveEvents(
     prev: EnvFrame,

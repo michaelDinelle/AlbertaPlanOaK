@@ -1,13 +1,9 @@
-
 import { cheetahGeometry } from '../fk/cheetah';
-import type { EnvDecoder, EnvFrame, EnvGeometry, SimEvent } from '../types';
-import { NO_EVENTS } from '../events';
-
+import { NO_EVENTS, type EnvDecoder, type EnvFrame, type EnvGeometry, type SimEvent } from '../types';
 
 export const CHEETAH_DT = 0.05;
 
 export const CHEETAH_ROOT_X = 0;
-
 
 const GEOMETRY: EnvGeometry = Object.freeze({
   cheetah: cheetahGeometry,
@@ -33,7 +29,6 @@ export const halfCheetahDecoder: EnvDecoder<null> = {
       pose,
     };
   },
-
 
   deriveEvents(
     prev: EnvFrame,

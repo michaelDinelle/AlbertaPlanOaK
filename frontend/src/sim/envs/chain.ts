@@ -1,7 +1,5 @@
-
 import { POSE_LEN } from '../record';
-import type { EnvDecoder, EnvFrame, EnvGeometry, SimEvent } from '../types';
-import { NO_EVENTS } from '../events';
+import { NO_EVENTS, type EnvDecoder, type EnvFrame, type EnvGeometry, type SimEvent } from '../types';
 
 export const CHAIN_L = 16;
 export const CHAIN_END = CHAIN_L - 1;
@@ -36,7 +34,6 @@ export const chainDecoder: EnvDecoder<ChainStatic> = {
       pose,
     };
   },
-
 
   deriveEvents(_prev: EnvFrame, next: EnvFrame): SimEvent[] {
     if (next.done === 0) return NO_EVENTS;

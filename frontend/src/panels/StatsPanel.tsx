@@ -7,7 +7,8 @@ import { ComputeView } from './ComputeView';
 import { HealthView } from './HealthView';
 import { RewardView } from './RewardView';
 import { StandingsView } from './StandingsView';
-import type { PanelView } from './views';
+
+export type PanelView = keyof typeof STR.panels;
 
 export function StatsPanel({
   view,

@@ -1,14 +1,11 @@
-
-import type { CelebrationPoolOptions } from '@kit/celebrate';
 import type { GroundTruthOptions } from '@kit/debug';
 import { clampRange, envelope } from '@kit/mix';
 import { orbitFromPose, type OrbitRigOptions } from '@kit/rigs';
-import { StageScene } from '@kit/stage';
+import { StageScene, type Stage } from '@kit/stage';
 import type { FrameState, FrameUpdate, SceneContext, SceneFactory, SceneSize } from '@kit/types';
 import * as THREE from 'three';
 import { AB_L1, AB_L2, ACROBOT_ACTION, ACROBOT_TH1, ACROBOT_TH2, ACROBOT_W1, ACROBOT_W2, acrobotTorque } from '@sim/envs/acrobot';
 import { buildArm, type ArmHandle } from './actors';
-import { manifest } from './manifest';
 import {
   EXACT_POINT_FLOATS,
   acrobotPointsExact,
@@ -17,7 +14,6 @@ import {
   successAnchor,
   type WorldHandle,
 } from './world';
-
 
 const CAM_BASE: readonly [number, number, number] = [0.58, -0.24, 5.7];
 const CAM_LOOK: readonly [number, number, number] = [-0.06, -0.5, 0];
@@ -29,7 +25,6 @@ const DAWN_PERIOD = 96;
 
 const BURST_SCALE = 0.5;
 const RIPPLE_SCALE = 0.34;
-const BURST_PARTICLES = 110;
 const PULSE_STRENGTH = 0.42;
 
 const TAU = Math.PI * 2;
@@ -39,7 +34,6 @@ export function torqueOf(state: FrameState): number {
 }
 
 class WillowSwingScene extends StageScene<WorldHandle> {
-  readonly manifest = manifest;
   protected readonly stageName = 'willowSwing';
 
   private arm: ArmHandle | null = null;
@@ -58,7 +52,7 @@ class WillowSwingScene extends StageScene<WorldHandle> {
   private readonly celebrateAt = new THREE.Vector3();
 
   protected buildWorld(ctx: SceneContext): WorldHandle {
-    this.accent = ctx.tokens.accents[manifest.accent] ?? ctx.tokens.celebrationGold;
+    this.accent = this.accentOf(ctx);
     this.gold = ctx.tokens.celebrationGold;
     this.pivot = pivotAnchor(ctx.geometry);
     this.success = successAnchor(ctx.geometry);
@@ -96,31 +90,20 @@ class WillowSwingScene extends StageScene<WorldHandle> {
       CAM_LOOK,
     );
     return {
-      canvas: ctx.canvas,
       target: CAM_LOOK,
       azimuth: home.azimuth,
       polar: home.polar,
       distance: home.distance,
-      fov: ctx.tokens.fovHero,
       near: 0.05,
       far: 420,
-      aspect: ctx.size.height > 0 ? ctx.size.width / ctx.size.height : 16 / 9,
+      rotateSpeed: 0.006,
+      zoomSpeed: 0.0016,
       damping: 2.4,
-      name: 'willowOrbitRig',
-    };
-  }
-
-  protected poolOptions(ctx: SceneContext): CelebrationPoolOptions {
-    return {
-      seed: ctx.seed,
-      burstSize: BURST_PARTICLES,
-      name: 'willowCelebrations',
     };
   }
 
   protected overlayOptions(): GroundTruthOptions {
     return {
-      camera: this.camera,
       agentPos: (state) => {
         acrobotPointsExact(state.pose[ACROBOT_TH1] ?? 0, state.pose[ACROBOT_TH2] ?? 0, this.points);
         this.overlayPos[0] = this.pivot[0] + (this.points[2] ?? 0);
@@ -128,7 +111,6 @@ class WillowSwingScene extends StageScene<WorldHandle> {
         this.overlayPos[2] = this.pivot[2];
         return this.overlayPos;
       },
-      name: 'willowGroundTruth',
     };
   }
 
@@ -147,15 +129,10 @@ class WillowSwingScene extends StageScene<WorldHandle> {
     this.celebrateAt.copy(arm.tipWorld);
   }
 
-  protected tick(frame: FrameUpdate): void {
-    const ctx = this.ctx;
-    const world = this.world;
+  protected tick(frame: FrameUpdate, { world, pool, rig, time }: Stage<WorldHandle>): void {
     const arm = this.arm;
-    const pool = this.pool;
-    const rig = this.rig;
-    if (!ctx || !world || !arm || !pool || !rig) return;
+    if (!arm) return;
 
-    const time = ctx.time();
     const state = frame.state;
 
     pool.update(frame.dtReal, time);
@@ -258,5 +235,4 @@ export function acrobotTipSpeed(th1: number, th2: number, w1: number, w2: number
   return Math.hypot(vx, vy);
 }
 
-const createScene: SceneFactory = () => new WillowSwingScene();
-export default createScene;
+export default ((() => new WillowSwingScene()) satisfies SceneFactory);

@@ -7,6 +7,8 @@ export interface RecordFieldSpec {
 
 export interface EnvEntry {
   envId: string;
+  controlHz: number;
+  discretePose: boolean;
   fields: RecordFieldSpec[];
 }
 
@@ -52,13 +54,10 @@ function readEntry(v: unknown, at: number): EnvEntry {
   const o = v as Record<string, unknown>;
   const what = `envCatalog[${at}]`;
   const envId = requireString(o?.['envId'], `${what}.envId`);
-  requireNumber(o['kind'], `${what}.kind`);
-  requireNumber(o['actionCount'], `${what}.actionCount`);
-  requireNumber(o['controlHz'], `${what}.controlHz`);
-  requireNumber(o['gridW'], `${what}.gridW`);
-  requireNumber(o['gridH'], `${what}.gridH`);
   return {
     envId,
+    controlHz: requireNumber(o['controlHz'], `${what}.controlHz`),
+    discretePose: requireString(o['category'], `${what}.category`) === 'grid',
     fields: requireArray(o['fields'], `${what}.fields`).map((f, i) =>
       readField(f, `${what}.fields[${i}]`),
     ),

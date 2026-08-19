@@ -1,4 +1,3 @@
-
 import * as THREE from 'three';
 import {
   buildCellField,
@@ -15,7 +14,7 @@ import {
 import { applyFog, makeLightRig, type LightRig } from '@kit/lighting';
 import { oakMaterial, type OakMaterial } from '@kit/materials';
 import { blendTokens, shade, smoothstep01 } from '@kit/mix';
-import { makeAmbientParticles, makeMistPlanes, type AmbientParticlesHandle } from '@kit/particles';
+import { makeAmbientParticles, makeMistPlanes } from '@kit/particles';
 import { mergeColoredParts, type ColoredPart } from '@kit/parts';
 import { hash2f } from '@kit/rng';
 import { skyFromPalette, type SkyHandle } from '@kit/sky';
@@ -42,7 +41,6 @@ import {
 } from '@sim/envs/keycorridor';
 import type { EnvGeometry, GridCell, GridGeometry } from '@sim/types';
 
-
 export const GARDEN_HALF_X = (KEYCORRIDOR_W * CELL) / 2;
 export const GARDEN_HALF_Z = (KEYCORRIDOR_H * CELL) / 2;
 export const TERRAIN_SIZE = 40;
@@ -61,7 +59,6 @@ export const SHADOW_RADIUS = 9.5;
 
 export const CAMERA_AZIMUTH = -0.72;
 export const CAMERA_STANDOFF = 12;
-
 
 export function smoothBand(edge0: number, edge1: number, x: number): number {
   if (edge1 <= edge0) return x >= edge1 ? 1 : 0;
@@ -143,7 +140,6 @@ export function sideBounds(grid: GridGeometry, door: GridCell, side: number): Si
   };
 }
 
-
 export interface GardenSkin {
   wildFloor: THREE.Color;
   formalFloor: THREE.Color;
@@ -208,7 +204,6 @@ export function gardenSkin(palette: Palette, tokens: typeof TOKENS): GardenSkin 
   };
 }
 
-
 export function makeMeadowHeight(seed: number): (x: number, z: number) => number {
   return (x, z) => {
     const out = Math.max(Math.abs(x) - GARDEN_HALF_X, Math.abs(z) - GARDEN_HALF_Z);
@@ -219,7 +214,6 @@ export function makeMeadowHeight(seed: number): (x: number, z: number) => number
     return w * (n1 * 3.4 + n2 * 1.1);
   };
 }
-
 
 export interface WorldHandle extends WorldCore {
   sky: SkyHandle;
@@ -232,7 +226,6 @@ export interface WorldHandle extends WorldCore {
   paintFloor(x: number, y: number, color: THREE.ColorRepresentation): void;
   restoreFloorTint(x: number, y: number): void;
 }
-
 
 export function buildWorld(ctx: SceneContext, scene: THREE.Scene, grid: GridGeometry): WorldHandle {
   const palette: Palette = ctx.tokens.palettes.morning;
@@ -623,7 +616,6 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene, grid: GridGeom
     },
   });
 }
-
 
 export function makeDividerGeometry(skin: GardenSkin): THREE.BufferGeometry {
   const detail = 1;

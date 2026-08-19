@@ -1,4 +1,3 @@
-
 import { GoalBeacon, KeyToken } from '@kit/grid';
 import {
   emissiveMaterial,
@@ -19,7 +18,6 @@ import { PORTAL_LINTEL_Y, type TempleSkin } from './world';
 export const GATE_SECONDS = 0.5;
 
 export const GATE_FLARE_SECONDS = 0.6;
-
 
 export interface GateHandle {
   group: THREE.Group;
@@ -43,7 +41,6 @@ function ease(t: number): number {
   const c = clamp01(t);
   return c * c * (3 - 2 * c);
 }
-
 
 export function buildBrambleGate(opts: GateOptions): GateHandle {
   const { palette, skin } = opts;
@@ -176,7 +173,6 @@ function makeCaneGeometry(
   }
   return mergeColoredParts(parts, 'brambleCane');
 }
-
 
 export function buildRiverGate(opts: GateOptions): GateHandle {
   const { palette, skin } = opts;
@@ -318,7 +314,6 @@ function makeBasinGeometry(skin: TempleSkin): THREE.BufferGeometry {
   parts.push({ geometry: bed, color: skin.riverBed });
   return mergeColoredParts(parts, 'riverBasin');
 }
-
 
 export function buildMistGate(opts: GateOptions): GateHandle {
   const { palette } = opts;
@@ -469,9 +464,6 @@ function makeMistTexture(seed: number): THREE.DataTexture {
   return texture;
 }
 
-
-
-
 export interface KeyAltarOptions {
   palette: Palette;
   skin: TempleSkin;
@@ -567,7 +559,6 @@ function makePedestalGeometry(skin: TempleSkin): THREE.BufferGeometry {
   return mergeColoredParts(parts, 'keyPedestal');
 }
 
-
 export interface CarryRackHandle {
   group: THREE.Group;
   setCarried(index: number, carried: boolean): void;
@@ -638,7 +629,6 @@ export function buildCarryRack(skin: TempleSkin): CarryRackHandle {
     },
   };
 }
-
 
 export interface ShrineOptions {
   palette: Palette;
@@ -794,4 +784,3 @@ function makeShrineGeometry(skin: TempleSkin): THREE.BufferGeometry {
   }
   return mergeColoredParts(parts, 'shrinePlinth');
 }
-

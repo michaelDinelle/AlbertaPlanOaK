@@ -1,4 +1,3 @@
-
 import * as THREE from 'three';
 import {
   buildCellField,
@@ -15,7 +14,7 @@ import {
 import { applyFog, makeLightRig, type LightRig } from '@kit/lighting';
 import { oakMaterial, type OakMaterial } from '@kit/materials';
 import { blendTokens, shade, smoothstep01 } from '@kit/mix';
-import { makeAmbientParticles, type AmbientParticlesHandle } from '@kit/particles';
+import { makeAmbientParticles } from '@kit/particles';
 import { mergeColoredParts, type ColoredPart } from '@kit/parts';
 import { skyFromPalette, type SkyHandle } from '@kit/sky';
 import { makeTerrain, type TerrainHandle } from '@kit/terrain';
@@ -42,7 +41,6 @@ import {
 } from '@sim/envs/fourrooms';
 import type { EnvGeometry, GridCell, GridGeometry } from '@sim/types';
 
-
 export const COURT_HALF = (FOURROOMS_W * CELL) / 2;
 export const TERRAIN_SIZE = 40;
 export const TERRAIN_SEGMENTS = 128;
@@ -53,7 +51,6 @@ export const SUN_DIR: readonly [number, number, number] = [-0.4, 0.866, -0.3];
 export const SHADOW_RADIUS = 11.5;
 export const CAMERA_AZIMUTH = 0.55;
 export const CAMERA_STANDOFF = 12.5;
-
 
 export function resolveGrid(geometry: EnvGeometry): GridGeometry {
   const g = geometry.grid;
@@ -114,7 +111,6 @@ export function roomBounds(grid: GridGeometry, room: number): RoomBounds {
     cells,
   };
 }
-
 
 export interface SeasonSkin {
   floor: THREE.Color;
@@ -182,7 +178,6 @@ export function courtyardSkin(palette: Palette, tokens: typeof TOKENS): Courtyar
   };
 }
 
-
 export function makeMeadowHeight(seed: number): (x: number, z: number) => number {
   return (x, z) => {
     const out = Math.max(Math.abs(x), Math.abs(z)) - COURT_HALF;
@@ -194,7 +189,6 @@ export function makeMeadowHeight(seed: number): (x: number, z: number) => number
   };
 }
 
-
 export interface WorldHandle extends WorldCore {
   sky: SkyHandle;
   rig: LightRig;
@@ -204,7 +198,6 @@ export interface WorldHandle extends WorldCore {
   gateRoots: THREE.Object3D[];
   hallways: readonly GridCell[];
 }
-
 
 export function buildWorld(ctx: SceneContext, scene: THREE.Scene, grid: GridGeometry): WorldHandle {
   const palette: Palette = ctx.tokens.palettes.noon;
@@ -528,7 +521,6 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene, grid: GridGeom
     },
   });
 }
-
 
 export function makeMoonGateGeometry(skin: CourtyardSkin): THREE.BufferGeometry {
   const detail = 1;

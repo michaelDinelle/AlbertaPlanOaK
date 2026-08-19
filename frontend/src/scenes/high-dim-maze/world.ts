@@ -1,4 +1,3 @@
-
 import * as THREE from 'three';
 import {
   buildCellField,
@@ -14,7 +13,7 @@ import {
 import { applyFog, makeLightRig, type LightRig } from '@kit/lighting';
 import { oakMaterial, type OakMaterial } from '@kit/materials';
 import { blendTokens, clamp01, shade, smoothstep01 } from '@kit/mix';
-import { makeAmbientParticles, makeMistPlanes, type AmbientParticlesHandle } from '@kit/particles';
+import { makeAmbientParticles, makeMistPlanes } from '@kit/particles';
 import { mergeColoredParts, type ColoredPart } from '@kit/parts';
 import { mulberry32, hash2f } from '@kit/rng';
 import { skyFromPalette, type SkyHandle } from '@kit/sky';
@@ -38,7 +37,6 @@ import {
   highDimMazeWalls,
 } from '@sim/envs/highdimmaze';
 import type { EnvGeometry, GridCell, GridGeometry } from '@sim/types';
-
 
 export const CANYON_HALF = (HIGHDIMMAZE_W * CELL) / 2;
 export const TERRAIN_SIZE = 76;
@@ -67,7 +65,6 @@ export const SHADOW_RADIUS = 12.5;
 
 export const CAMERA_AZIMUTH = 0.25;
 export const CAMERA_STANDOFF = 15;
-
 
 export function lerp(a: number, b: number, t: number): number {
   return a + (b - a) * t;
@@ -170,7 +167,6 @@ export function archHeight(grid: GridGeometry, gap: GridCell, _heights?: Float32
   return Math.max(a, b) + ARCH_RISE;
 }
 
-
 export interface CanyonSkin {
   sandSun: THREE.Color;
   sandShade: THREE.Color;
@@ -217,7 +213,6 @@ export function canyonSkin(palette: Palette, tokens: typeof TOKENS): CanyonSkin 
   };
 }
 
-
 export const MESA_EDGE = 8.5;
 export const MESA_EDGE_WIDTH = 3.5;
 export const MESA_DROP = 10.5;
@@ -237,7 +232,6 @@ export function makeMesaHeight(seed: number): (x: number, z: number) => number {
   };
 }
 
-
 export interface WorldHandle extends WorldCore {
   sky: SkyHandle;
   rig: LightRig;
@@ -247,7 +241,6 @@ export interface WorldHandle extends WorldCore {
   gaps: readonly GridCell[];
   wallHeights: Float32Array;
 }
-
 
 export function buildWorld(ctx: SceneContext, scene: THREE.Scene, grid: GridGeometry): WorldHandle {
   const palette: Palette = ctx.tokens.palettes.afternoon;
@@ -627,7 +620,6 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene, grid: GridGeom
     wallHeights,
   });
 }
-
 
 export function applyWallHeights(field: CellFieldHandle, grid: GridGeometry, seed: number): Float32Array {
   const heights = new Float32Array(grid.w * grid.h);

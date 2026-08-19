@@ -1,7 +1,4 @@
-
-import type { EnvDecoder, EnvFrame, EnvGeometry, SimEvent } from '../types';
-import { NO_EVENTS } from '../events';
-
+import { NO_EVENTS, type EnvDecoder, type EnvFrame, type EnvGeometry, type SimEvent } from '../types';
 
 export const MC_MIN_POS = -1.2;
 export const MC_MAX_POS = 0.6;
@@ -12,7 +9,6 @@ export const MC_ACTIONS = 3;
 
 export const MOUNTAINCAR_POS = 0;
 export const MOUNTAINCAR_VEL = 1;
-export const MOUNTAINCAR_GOAL = 2;
 export const MOUNTAINCAR_ACTION = 3;
 
 export function mountainCarForce(action: number): number {
@@ -20,7 +16,6 @@ export function mountainCarForce(action: number): number {
 }
 export const MC_TROUGH_X = -Math.PI / 6;
 export const MC_CREST_X = Math.PI / 6;
-
 
 export interface MountainCarStatic {
   minPos: number;
@@ -30,7 +25,6 @@ export interface MountainCarStatic {
   startPos: number;
 }
 
-
 export function mountainCarHeight(x: number): number {
   return Math.sin(3 * x) * 0.45 + 0.55;
 }
@@ -38,7 +32,6 @@ export function mountainCarHeight(x: number): number {
 export function mountainCarSlope(x: number): number {
   return 1.35 * Math.cos(3 * x);
 }
-
 
 const STATIC: MountainCarStatic = Object.freeze({
   minPos: MC_MIN_POS,
@@ -84,7 +77,6 @@ export const mountainCarDecoder: EnvDecoder<MountainCarStatic> = {
       pose,
     };
   },
-
 
   deriveEvents(
     prev: EnvFrame,

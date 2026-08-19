@@ -1,11 +1,9 @@
-
-import type { CelebrationPoolOptions } from '@kit/celebrate';
 import type { GroundTruthOptions } from '@kit/debug';
 import { CELL, cellToWorldVec, clampCell, type GridSize } from '@kit/grid';
 import { blendTokens, clamp01, envelope } from '@kit/mix';
 import { makeAmbientParticles, type AmbientParticlesHandle } from '@kit/particles';
 import type { OrbitRigOptions } from '@kit/rigs';
-import { StageScene } from '@kit/stage';
+import { StageScene, type Stage } from '@kit/stage';
 import { TOKENS } from '@kit/tokens';
 import type { FrameState, FrameUpdate, SceneContext, SceneFactory, SceneSize } from '@kit/types';
 import { Wisp, yawFromGridDelta } from '@kit/wisp';
@@ -13,18 +11,14 @@ import * as THREE from 'three';
 import type { GridCell, GridGeometry } from '@sim/types';
 import { HIGHDIMMAZE_ACTION, HIGHDIMMAZE_ACTIONS, HIGHDIMMAZE_DASH, HIGHDIMMAZE_GX, HIGHDIMMAZE_GY, HIGHDIMMAZE_HEADING, HIGHDIMMAZE_STAY, HIGHDIMMAZE_X, HIGHDIMMAZE_Y } from '@sim/envs/highdimmaze';
 import { buildGust, buildOasis, buildScarf, type GustHandle, type OasisHandle, type ScarfHandle } from './actors';
-import { manifest } from './manifest';
 import { CAMERA_AZIMUTH, buildWorld, canyonSkin, resolveGrid, type WorldHandle } from './world';
 
-
-const CAM_AZIMUTH = CAMERA_AZIMUTH;
 const CAM_POLAR = 0.86;
 const CAM_DISTANCE = 17;
 const CAM_TARGET_Y = 0.62;
 
 const BURST_SCALE = 0.84;
 const RIPPLE_SCALE = 0.52;
-const BURST_PARTICLES = 110;
 const PULSE_STRENGTH = 0.5;
 const BLOOM_Y = 0.34;
 const BLOOM_SECONDS = 1.5;
@@ -61,7 +55,6 @@ function read(state: FrameState, grid: GridSize, out: Reading): Reading {
 }
 
 class SlotCanyonsScene extends StageScene<WorldHandle> {
-  readonly manifest = manifest;
   protected readonly stageName = 'slotCanyons';
 
   private wisp: Wisp | null = null;
@@ -99,7 +92,7 @@ class SlotCanyonsScene extends StageScene<WorldHandle> {
     const grid = this.grid;
     const palette = ctx.tokens.palettes.afternoon;
     const skin = canyonSkin(palette, ctx.tokens);
-    const accent = ctx.tokens.accents[manifest.accent] ?? ctx.tokens.celebrationGold;
+    const accent = this.accentOf(ctx);
     const ember = accent;
     this.spray = blendTokens(skin.water, skin.waterDeep, 0.4).getHex();
     this.gold = ctx.tokens.celebrationGold;
@@ -163,27 +156,10 @@ class SlotCanyonsScene extends StageScene<WorldHandle> {
 
   protected rigOptions(ctx: SceneContext): OrbitRigOptions {
     return {
-      canvas: ctx.canvas,
       target: [0, CAM_TARGET_Y, 0],
       distance: CAM_DISTANCE,
-      azimuth: CAM_AZIMUTH,
+      azimuth: CAMERA_AZIMUTH,
       polar: CAM_POLAR,
-      fov: ctx.tokens.fovHero,
-      near: 0.1,
-      far: 900,
-      aspect: ctx.size.height > 0 ? ctx.size.width / ctx.size.height : 16 / 9,
-      damping: 5,
-      rotateSpeed: 0.004,
-      zoomSpeed: 0.0012,
-      name: 'canyonOrbitRig',
-    };
-  }
-
-  protected poolOptions(ctx: SceneContext): CelebrationPoolOptions {
-    return {
-      seed: ctx.seed,
-      burstSize: BURST_PARTICLES,
-      name: 'canyonCelebrations',
     };
   }
 
@@ -196,10 +172,8 @@ class SlotCanyonsScene extends StageScene<WorldHandle> {
       action: 0,
     };
     return {
-      camera: this.camera,
       agentCell: (state) => read(state, grid, overlayReading).agent,
       goalCell: (state) => read(state, grid, overlayReading).goal,
-      name: 'canyonGroundTruth',
     };
   }
 
@@ -212,18 +186,13 @@ class SlotCanyonsScene extends StageScene<WorldHandle> {
     this.gust?.clear();
   }
 
-  protected tick(frame: FrameUpdate): void {
-    const ctx = this.ctx;
-    const world = this.world;
+  protected tick(frame: FrameUpdate, { ctx, world, pool, rig, time }: Stage<WorldHandle>): void {
     const wisp = this.wisp;
     const scarf = this.scarf;
     const gust = this.gust;
     const oasis = this.oasis;
-    const pool = this.pool;
-    const rig = this.rig;
-    if (!ctx || !world || !wisp || !scarf || !gust || !oasis || !pool || !rig) return;
+    if (!wisp || !scarf || !gust || !oasis) return;
 
-    const time = ctx.time();
     const grid = this.grid;
     const now = read(frame.state, grid, this.now);
     const agent = now.agent;
@@ -401,7 +370,6 @@ class SlotCanyonsScene extends StageScene<WorldHandle> {
   }
 }
 
-
 const FACING: readonly { dx: number; dy: number }[] = Object.freeze([
   { dx: 0, dy: -1 },
   { dx: 0, dy: 1 },
@@ -446,5 +414,4 @@ export function nearness(agent: GridCell, goal: GridCell): number {
   return d >= PROXIMITY_CELLS ? 0 : 1 - d / PROXIMITY_CELLS;
 }
 
-const createScene: SceneFactory = () => new SlotCanyonsScene();
-export default createScene;
+export default ((() => new SlotCanyonsScene()) satisfies SceneFactory);

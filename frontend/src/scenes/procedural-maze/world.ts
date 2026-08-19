@@ -1,4 +1,3 @@
-
 import * as THREE from 'three';
 import {
   buildCellField,
@@ -15,7 +14,7 @@ import {
 import { applyFog, makeLightRig, type LightRig } from '@kit/lighting';
 import { oakMaterial, oakUniforms, type OakMaterial } from '@kit/materials';
 import { blendTokens, clamp01, shade, smoothstep01 } from '@kit/mix';
-import { makeAmbientParticles, type AmbientParticlesHandle } from '@kit/particles';
+import { makeAmbientParticles } from '@kit/particles';
 import { mergeColoredParts, type ColoredPart } from '@kit/parts';
 import { hash2f, rngAt, streamFor } from '@kit/rng';
 import { skyFromPalette, type SkyHandle } from '@kit/sky';
@@ -36,7 +35,6 @@ import { makeWorld, type WorldCore } from '@kit/world';
 import { PROCMAZE_H, PROCMAZE_W, proceduralMazeDecoder } from '@sim/envs/proceduralmaze';
 import type { EnvGeometry, GridCell, GridGeometry } from '@sim/types';
 
-
 export const RUIN_HALF = (PROCMAZE_W * CELL) / 2;
 export const TERRAIN_SIZE = 44;
 export const TERRAIN_SEGMENTS = 128;
@@ -44,7 +42,6 @@ export const RUIN_SINK = -0.07;
 export const FOG_EXTENT = TERRAIN_SIZE * 12;
 export const SUN_DIR: readonly [number, number, number] = [-0.36, 0.874, -0.325];
 export const SHADOW_RADIUS = 12;
-
 
 export const CAMERA_AZIMUTH = 0.62;
 export const CAMERA_POLAR = 0.73;
@@ -57,7 +54,6 @@ export const BASE_COURSE = 0.5;
 export const BASE_INSET = 0.02;
 export const UPPER_INSET = 0.11;
 export const CAP_INSET = 0.21;
-
 
 export function resolveGrid(geometry: EnvGeometry, seed: number): GridGeometry {
   const g = geometry.grid;
@@ -106,7 +102,6 @@ export function archCells(grid: GridGeometry): ArchCell[] {
   }
   return out;
 }
-
 
 export interface WallSkin {
   upper: number;
@@ -165,7 +160,6 @@ export function blockHalfWidthAt(skin: WallSkin, y: number): number {
   if (y <= skin.crown) return CELL / 2 - CAP_INSET;
   return 0;
 }
-
 
 export interface RuinSkin {
   stoneLight: THREE.Color;
@@ -241,7 +235,6 @@ export function wallTintFor(
     .multiplyScalar(toneJitter(x, y, seed ^ 0x51ed270b));
 }
 
-
 export function makeForestFloorHeight(seed: number): (x: number, z: number) => number {
   return (x, z) => {
     const out = Math.max(Math.abs(x), Math.abs(z)) - RUIN_HALF;
@@ -252,7 +245,6 @@ export function makeForestFloorHeight(seed: number): (x: number, z: number) => n
     return w * (n1 * 2.6 + n2 * 0.7);
   };
 }
-
 
 export interface IvyStrand {
   cell: GridCell;
@@ -550,7 +542,6 @@ function ivyStrandGeometry(detail: number): THREE.BufferGeometry {
   return g;
 }
 
-
 export const TOWER_HEIGHT_MIN = 1.12;
 export const TOWER_HEIGHT_SPAN = 0.62;
 export function towerGeometry(skin: RuinSkin, height: number, lean: number): THREE.BufferGeometry {
@@ -716,7 +707,6 @@ function birdGeometry(): THREE.BufferGeometry {
   return g;
 }
 
-
 export interface WorldHandle extends WorldCore {
   sky: SkyHandle;
   rig: LightRig;
@@ -728,7 +718,6 @@ export interface WorldHandle extends WorldCore {
   arches: ArchCell[];
   setGoalPosition(x: number, y: number, z: number): void;
 }
-
 
 export function buildWorld(ctx: SceneContext, scene: THREE.Scene, grid: GridGeometry): WorldHandle {
   const palette: Palette = ctx.tokens.palettes.noon;

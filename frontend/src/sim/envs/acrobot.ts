@@ -1,7 +1,4 @@
-
-import type { EnvDecoder, EnvFrame, EnvGeometry, SimEvent } from '../types';
-import { NO_EVENTS } from '../events';
-
+import { NO_EVENTS, type EnvDecoder, type EnvFrame, type EnvGeometry, type SimEvent } from '../types';
 
 export const AB_L1 = 1;
 export const AB_L2 = 1;
@@ -18,13 +15,11 @@ export function acrobotTorque(action: number): number {
   return ((Math.trunc(action) >>> 0) % AB_ACTIONS) - 1;
 }
 
-
 export interface AcrobotStatic {
   l1: number;
   l2: number;
   successHeight: number;
 }
-
 
 const STATIC: AcrobotStatic = Object.freeze({
   l1: AB_L1,
@@ -65,7 +60,6 @@ export const acrobotDecoder: EnvDecoder<AcrobotStatic> = {
       pose,
     };
   },
-
 
   deriveEvents(prev: EnvFrame, next: EnvFrame): SimEvent[] {
     if (next.done === 0 && prev.done === 0) return NO_EVENTS;

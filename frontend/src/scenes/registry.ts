@@ -1,4 +1,3 @@
-
 import type { SceneRegistry } from '@kit/types';
 
 export const sceneRegistry: SceneRegistry = {

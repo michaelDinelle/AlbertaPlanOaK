@@ -1,4 +1,3 @@
-
 import * as THREE from 'three';
 import { applyFog, makeLightRig, type LightRig } from '@kit/lighting';
 import {
@@ -28,7 +27,6 @@ import { makeWorld, type WorldCore } from '@kit/world';
 import { AB_L1, AB_L2, AB_SUCCESS_HEIGHT } from '@sim/envs/acrobot';
 import type { EnvGeometry } from '@sim/types';
 
-
 export const REACH = AB_L1 + AB_L2;
 export const SWING_CLEARANCE = 0.3;
 
@@ -49,7 +47,6 @@ export const BOUGH_Z = -0.36;
 export const FOG_EXTENT = 210;
 
 export const SUN_DIR: readonly [number, number, number] = [-0.578, 0.458, -0.677];
-
 
 export function boneGeometry(
   ax: number,
@@ -97,7 +94,6 @@ export function successAnchor(geometry: EnvGeometry): readonly [number, number, 
   return anchorOf(geometry, 'successLine', [0, AB_SUCCESS_HEIGHT, 0]);
 }
 
-
 export function makeBankHeight(seed: number): (x: number, z: number) => number {
   const floor = WATER_Y - 1.05;
   return (x, z) => {
@@ -111,7 +107,6 @@ export function makeBankHeight(seed: number): (x: number, z: number) => number {
   };
 }
 
-
 export interface WorldHandle extends WorldCore {
   sky: SkyHandle;
   rig: LightRig;
@@ -124,7 +119,6 @@ export interface WorldHandle extends WorldCore {
   setPetals(env01: number): void;
   setGlint(x: number, z: number, gain: number): void;
 }
-
 
 export function buildWorld(ctx: SceneContext, scene: THREE.Scene): WorldHandle {
   const palette: Palette = ctx.tokens.palettes.dawn;
@@ -672,7 +666,6 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene): WorldHandle {
   });
 }
 
-
 export function willowBoughs(): readonly (readonly (readonly [number, number, number])[])[] {
   const trunkTop: readonly [number, number, number] = [WILLOW_X + 0.95, 1.72, WILLOW_Z];
   const main: (readonly [number, number, number])[] = [
@@ -811,7 +804,6 @@ function buildFronds(opts: FrondOptions): THREE.InstancedMesh & { dispose(): voi
   mesh.computeBoundingSphere();
   return mesh as THREE.InstancedMesh & { dispose(): void };
 }
-
 
 export function makePadGeometry(): THREE.BufferGeometry {
   const seg = 9;

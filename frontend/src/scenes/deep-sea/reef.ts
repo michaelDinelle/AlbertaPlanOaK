@@ -1,4 +1,3 @@
-
 import { CELL, type GridSize } from '@kit/grid';
 import { blendTokens, clamp01, shade } from '@kit/mix';
 import { TOKENS, type Palette } from '@kit/tokens';
@@ -6,7 +5,6 @@ import type { FrameState } from '@kit/types';
 import * as THREE from 'three';
 import { DEEPSEA_ACTION, DEEPSEA_COL, DEEPSEA_N, DEEPSEA_ROW, deepSeaDecoder, deepSeaNextCol, type DeepSeaStatic } from '@sim/envs/deepsea';
 import type { EnvGeometry, GridGeometry } from '@sim/types';
-
 
 export {
   TERRACE_DESCENT,
@@ -80,7 +78,6 @@ export function colAtX(x: number, grid: GridSize): number {
   return Math.round(x / CELL + (grid.w - 1) / 2);
 }
 
-
 export interface DiveCell {
   r: number;
   c: number;
@@ -101,7 +98,6 @@ function clampInt(v: number, hi: number): number {
 export function isDiveStep(prevC: number, prevR: number, next: DiveCell): boolean {
   return next.r === prevR + 1 && Math.abs(next.c - prevC) <= 1;
 }
-
 
 export interface ReefSkin {
   shelfShallow: THREE.Color;
@@ -156,4 +152,3 @@ export function shelfTint(skin: ReefSkin, grid: GridSize, c: number, r: number, 
   if (r === TREASURE_ROW && c === TREASURE_COL) return out.lerp(skin.shelfTreasure, 0.75);
   return out;
 }
-

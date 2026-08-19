@@ -43,7 +43,6 @@ import {
   type ReefSkin,
 } from './reef';
 
-
 export const SUN_DIR: readonly [number, number, number] = [-0.46, 0.83, 0.32];
 export const SHADOW_RADIUS = 7.6;
 export const FOG_EXTENT = 96;
@@ -53,7 +52,6 @@ export const SURFACE_Y = 7.2;
 export const SHAFT_LENGTH = 9.5;
 export const SHAFT_RADIUS_MIN = 2.0;
 export const SHAFT_RADIUS_MAX = 8.0;
-
 
 export function shelfHeightAt(_x: number, z: number, grid: GridSize): number {
   return reefDepthY(rowAtZ(z, grid), grid);
@@ -75,9 +73,6 @@ export function excludeCellCenters(grid: GridSize, radius: number): ExcludeFn {
     return dx * dx + dz * dz < r2;
   };
 }
-
-
-
 
 export const KELP_LEAN = 0.42;
 export const KELP_HEIGHT = 0.74;
@@ -236,7 +231,6 @@ export function buildKelp(
   };
 }
 
-
 const CAUSTIC_VERT =  `
 #include <common>
 varying vec3 vReefWorld;
@@ -272,12 +266,7 @@ float reefCaustic( vec2 p, float t ) {
 
 void main() {
 	float web = reefCaustic( vReefWorld.xz * uScale, uTime * uSpeed );
-	// The surface light thins with depth, and it has to thin FAST. This decal is additive,
-	// so a lazy falloff re-lights the deep shelves in surface-teal and erases the whole
-	// depth ramp the rock is tinted with — the reef went flat for three passes on exactly
-	// this. Cubed, the bottom terrace keeps ~4% of the web and the top keeps all of it.
 	float depth = clamp( ( vReefWorld.y - ( uTop - uRange ) ) / max( uRange, 0.001 ), 0.0, 1.0 );
-	// feather each shelf quad so its silhouette never shows as a bright rectangle
 	vec2 e = abs( vReefUv - 0.5 ) * 2.0;
 	float edge = ( 1.0 - smoothstep( 0.62, 1.0, e.x ) ) * ( 1.0 - smoothstep( 0.62, 1.0, e.y ) );
 	float a = web * uStrength * ( 0.04 + 0.96 * depth * depth * depth ) * edge;
@@ -387,7 +376,6 @@ export function buildCaustics(
     },
   };
 }
-
 
 export function makeShaftSprite(size = 64): THREE.DataTexture {
   const s = Math.max(8, size);
@@ -510,7 +498,6 @@ export function buildGodRays(
   };
 }
 
-
 export interface WorldHandle extends WorldCore {
   sky: SkyHandle;
   rig: LightRig;
@@ -520,7 +507,6 @@ export interface WorldHandle extends WorldCore {
   silt: AmbientParticlesHandle;
   rush: AmbientParticlesHandle;
 }
-
 
 export function buildWorld(
   ctx: SceneContext,

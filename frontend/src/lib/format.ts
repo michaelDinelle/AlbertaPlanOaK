@@ -36,20 +36,3 @@ export function formatPercent(fraction: number | null | undefined, decimals = 1)
   if (fraction === null || fraction === undefined || !Number.isFinite(fraction)) return '—';
   return `${(fraction * 100).toFixed(decimals)}%`;
 }
-
-export function formatAgo(iso: string | null | undefined, now: number = Date.now()): string {
-  if (!iso) return 'undated';
-  const then = Date.parse(iso);
-  if (!Number.isFinite(then)) return 'undated';
-  const seconds = Math.max(0, (now - then) / 1000);
-  if (seconds < 90) return 'just now';
-  const minutes = seconds / 60;
-  if (minutes < 90) return `${Math.round(minutes)}m ago`;
-  const hours = minutes / 60;
-  if (hours < 36) return `${Math.round(hours)}h ago`;
-  const days = hours / 24;
-  if (days < 30) return `${Math.round(days)}d ago`;
-  const months = days / 30.44;
-  if (months < 18) return `${Math.round(months)}mo ago`;
-  return `${Math.round(days / 365.25)}y ago`;
-}

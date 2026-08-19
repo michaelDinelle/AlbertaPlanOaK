@@ -1,4 +1,3 @@
-
 import type { EnvId } from '@shared/envs';
 import type { EnvDecoder } from './types';
 
@@ -39,4 +38,3 @@ const TABLE = {
 } satisfies Record<EnvId, unknown>;
 
 export const decoders = TABLE as Record<EnvId, EnvDecoder>;
-

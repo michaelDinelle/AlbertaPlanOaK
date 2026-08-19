@@ -1,9 +1,7 @@
-
 import * as THREE from 'three';
 import { mulberry32 } from './rng';
 import { radialSprite } from './textures';
 import { TOKENS } from './tokens';
-
 
 export const PULSE_SECONDS = 0.3;
 export const SIGH_SECONDS = 0.9;
@@ -40,13 +38,10 @@ export function makePulseChannel(): PulseChannel {
 
 export const pulseChannel: PulseChannel = makePulseChannel();
 
-
-export const CELEBRATION_PARTICLE_CAPACITY = 768;
-export const CELEBRATION_RIPPLE_CAPACITY = 8;
+const PARTICLE_CAPACITY = 768;
+const RIPPLE_CAPACITY = 8;
 
 export interface CelebrationPoolOptions {
-  particleCapacity?: number;
-  rippleCapacity?: number;
   burstSize?: number;
   sighSize?: number;
   sighRadius?: number;
@@ -73,7 +68,6 @@ void main() {
 	float age = uTime - aStart;
 	float live = step( 0.0, aStart ) * step( 0.0, age ) * step( age, aLife );
 	float t = clamp( age / max( aLife, 0.0001 ), 0.0, 1.0 );
-	// ease-out travel: fast bloom, slow settle
 	float travel = 1.0 - pow( 1.0 - t, 2.4 );
 	vec3 p = position + aDir * ( aScale * travel );
 	p.y -= aGravity * aScale * t * t;
@@ -116,7 +110,6 @@ uniform float uProgress;
 uniform float uIntensity;
 varying vec2 vUvR;
 void main() {
-	// a soft annulus that thins as it expands
 	float r = length( vUvR - vec2( 0.5 ) ) * 2.0;
 	float width = mix( 0.42, 0.08, uProgress );
 	float band = 1.0 - smoothstep( 0.0, width, abs( r - 1.0 ) );
@@ -173,8 +166,7 @@ export class CelebrationPool {
   private readonly color = new THREE.Color();
 
   constructor(opts: CelebrationPoolOptions = {}) {
-    this.capacity = Math.max(0, opts.particleCapacity ?? CELEBRATION_PARTICLE_CAPACITY);
-    const rippleCapacity = Math.max(0, opts.rippleCapacity ?? CELEBRATION_RIPPLE_CAPACITY);
+    this.capacity = PARTICLE_CAPACITY;
     this.burstSize = Math.max(1, opts.burstSize ?? 48);
     this.sighSize = Math.max(1, opts.sighSize ?? 40);
     this.sighRadius = opts.sighRadius ?? 6;
@@ -250,36 +242,33 @@ export class CelebrationPool {
       this.sprite = null;
     }
 
-    if (rippleCapacity > 0) {
-      this.rippleGeometry = new THREE.PlaneGeometry(1, 1);
-      this.rippleGeometry.rotateX(-Math.PI / 2);
-      for (let i = 0; i < rippleCapacity; i++) {
-        const material = new THREE.ShaderMaterial({
-          uniforms: {
-            uColor: { value: new THREE.Color(TOKENS.celebrationGold) },
-            uProgress: { value: 1 },
-            uIntensity: { value: 1.8 },
-          },
-          vertexShader: RIPPLE_VERT,
-          fragmentShader: RIPPLE_FRAG,
-          transparent: true,
-          depthWrite: false,
-          side: THREE.DoubleSide,
-          blending: THREE.AdditiveBlending,
-          fog: false,
-        });
-        material.name = 'oakCelebrationRipple';
-        const mesh = new THREE.Mesh(this.rippleGeometry, material);
-        mesh.name = `oakCelebrationRipple${i}`;
-        mesh.visible = false;
-        mesh.frustumCulled = false;
-        mesh.renderOrder = 2;
-        this.group.add(mesh);
-        this.ripples.push({ mesh, material, start: -1, life: 1, scale: 1 });
-      }
-    } else {
-      this.rippleGeometry = null;
+    this.rippleGeometry = new THREE.PlaneGeometry(1, 1);
+    this.rippleGeometry.rotateX(-Math.PI / 2);
+    for (let i = 0; i < RIPPLE_CAPACITY; i++) {
+      const material = new THREE.ShaderMaterial({
+        uniforms: {
+          uColor: { value: new THREE.Color(TOKENS.celebrationGold) },
+          uProgress: { value: 1 },
+          uIntensity: { value: 1.8 },
+        },
+        vertexShader: RIPPLE_VERT,
+        fragmentShader: RIPPLE_FRAG,
+        transparent: true,
+        depthWrite: false,
+        side: THREE.DoubleSide,
+        blending: THREE.AdditiveBlending,
+        fog: false,
+      });
+      material.name = 'oakCelebrationRipple';
+      const mesh = new THREE.Mesh(this.rippleGeometry, material);
+      mesh.name = `oakCelebrationRipple${i}`;
+      mesh.visible = false;
+      mesh.frustumCulled = false;
+      mesh.renderOrder = 2;
+      this.group.add(mesh);
+      this.ripples.push({ mesh, material, start: -1, life: 1, scale: 1 });
     }
+  
   }
 
   get stats(): { bursts: number; ripples: number; particles: number; cursor: number } {
@@ -418,7 +407,6 @@ export class CelebrationPool {
     for (const attr of this.attrs) attr.needsUpdate = true;
   }
 }
-
 
 const POOL_KEY = 'oakCelebrations';
 

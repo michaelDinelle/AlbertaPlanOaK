@@ -1,4 +1,3 @@
-
 import * as THREE from 'three';
 import { blendTokens } from '@kit/mix';
 import { TOKENS, type Palette } from '@kit/tokens';
@@ -69,15 +68,12 @@ void main() {
 	for ( int i = 0; i < ${RIBBONS}; i ++ ) {
 		float fi = float( i );
 		float phase = fi * 2.3994;
-		// each curtain drifts on its own slow beat and leans with height
 		float c = 0.5 + 0.29 * sin( t * 0.043 + phase ) + 0.11 * sin( t * 0.107 + phase * 2.1 );
 		c += 0.055 * sin( v * 3.1 + t * 0.13 + phase ) + 0.028 * sin( v * 7.3 - t * 0.08 + phase * 1.7 );
 		float w = 0.026 + 0.055 * v + 0.012 * sin( t * 0.061 + phase );
 		float d = ( u - c ) / max( w, 0.001 );
 		float band = exp( - d * d );
-		// bright lower edge, dissolving upward; nothing at the very hem
 		float vert = smoothstep( 1.0, 0.18, v ) * smoothstep( 0.0, 0.09, v );
-		// vertical striations: the thing that makes a gradient read as a curtain
 		float streak = 0.62 + 0.38 * aurNoise( u * 128.0 + fi * 21.0 + t * 0.04 );
 		float a = band * vert * streak;
 		col += mix( uBase, uCrown, clamp( v * 1.25, 0.0, 1.0 ) ) * a;

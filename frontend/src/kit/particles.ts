@@ -1,4 +1,3 @@
-
 import * as THREE from 'three';
 import { fbm } from './textures';
 import { mulberry32 } from './rng';
@@ -81,7 +80,6 @@ varying float vAlpha;
 void main() {
 	vec3 p = position;
 
-	// vertical drift with a wrap: the field is a torus in y, so it never drains
 	float span = max( uHalf.y * 2.0, 0.0001 );
 	float y = mod( ( p.y + uHalf.y ) + uRise * uTime, span ) - uHalf.y;
 
@@ -209,7 +207,6 @@ export function makeAmbientParticles(opts: AmbientParticlesOptions): AmbientPart
   };
 }
 
-
 export interface MistPlanesOptions {
   size: number | readonly [number, number];
   color: THREE.ColorRepresentation;
@@ -263,11 +260,9 @@ void main() {
 	float b = texture2D( uNoise, uv * 1.7 - vec2( uTime * uSpeed * 0.8, 0.0 ) ).r;
 	float n = clamp( a * 0.65 + b * 0.55 - 0.28, 0.0, 1.0 );
 
-	// feather the plane edges so the quad silhouette never shows
 	vec2 e = abs( vMistUv - 0.5 ) * 2.0;
 	float edge = ( 1.0 - smoothstep( 0.55, 1.0, e.x ) ) * ( 1.0 - smoothstep( 0.55, 1.0, e.y ) );
 
-	// depth fade: planes very close to the camera dissolve instead of clipping
 	float near = smoothstep( 0.0, max( uNearFade, 0.001 ), vDepth );
 
 	float alpha = n * edge * near * uOpacity;

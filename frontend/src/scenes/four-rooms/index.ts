@@ -1,29 +1,23 @@
-
 import { FOURROOMS_GX, FOURROOMS_GY, FOURROOMS_X, FOURROOMS_Y } from '@sim/envs/fourrooms';
 import { cellToWorldVec, clampCell, type GridSize } from '@kit/grid';
-import type { CelebrationPoolOptions } from '@kit/celebrate';
 import type { GroundTruthOptions } from '@kit/debug';
 import { blendTokens, envelope, shade } from '@kit/mix';
 import type { OrbitRigOptions } from '@kit/rigs';
-import { StageScene } from '@kit/stage';
+import { StageScene, type Stage } from '@kit/stage';
 import { TOKENS } from '@kit/tokens';
 import type { FrameState, FrameUpdate, SceneContext, SceneFactory } from '@kit/types';
 import { Wisp } from '@kit/wisp';
 import * as THREE from 'three';
 import type { GridCell, GridGeometry } from '@sim/types';
 import { buildLantern, type LanternHandle } from './actors';
-import { manifest } from './manifest';
 import { CAMERA_AZIMUTH, buildWorld, courtyardSkin, resolveGrid, type WorldHandle } from './world';
 
-
-const CAM_AZIMUTH = CAMERA_AZIMUTH;
 const CAM_POLAR = 0.75;
 const CAM_DISTANCE = 17.8;
 const CAM_TARGET_Y = 0.5;
 
 const BURST_SCALE = 0.85;
 const RIPPLE_SCALE = 0.5;
-const BURST_PARTICLES = 110;
 const PULSE_STRENGTH = 0.5;
 const BLOOM_Y = 0.42;
 const BLOOM_SECONDS = 1.5;
@@ -47,7 +41,6 @@ function readCells(state: FrameState, grid: GridSize, agent: GridCell, goal: Gri
 }
 
 class FourSeasonsCourtyardScene extends StageScene<WorldHandle> {
-  readonly manifest = manifest;
   protected readonly stageName = 'fourSeasonsCourtyard';
 
   private wisp: Wisp | null = null;
@@ -75,7 +68,7 @@ class FourSeasonsCourtyardScene extends StageScene<WorldHandle> {
     const grid = this.grid;
     const palette = ctx.tokens.palettes.noon;
     const skin = courtyardSkin(palette, ctx.tokens);
-    const accent = ctx.tokens.accents[manifest.accent] ?? ctx.tokens.celebrationGold;
+    const accent = this.accentOf(ctx);
     this.blossom = ctx.tokens.accents['chain'] ?? ctx.tokens.celebrationGold;
     this.gold = ctx.tokens.celebrationGold;
     const flame = blendTokens(ctx.tokens.celebrationGold, palette.sun, 0.22).getHex();
@@ -112,27 +105,10 @@ class FourSeasonsCourtyardScene extends StageScene<WorldHandle> {
 
   protected rigOptions(ctx: SceneContext): OrbitRigOptions {
     return {
-      canvas: ctx.canvas,
       target: [0, CAM_TARGET_Y, 0],
       distance: CAM_DISTANCE,
-      azimuth: CAM_AZIMUTH,
+      azimuth: CAMERA_AZIMUTH,
       polar: CAM_POLAR,
-      fov: ctx.tokens.fovHero,
-      near: 0.1,
-      far: 900,
-      aspect: ctx.size.height > 0 ? ctx.size.width / ctx.size.height : 16 / 9,
-      damping: 5,
-      rotateSpeed: 0.004,
-      zoomSpeed: 0.0012,
-      name: 'courtyardOrbitRig',
-    };
-  }
-
-  protected poolOptions(ctx: SceneContext): CelebrationPoolOptions {
-    return {
-      seed: ctx.seed,
-      burstSize: BURST_PARTICLES,
-      name: 'courtyardCelebrations',
     };
   }
 
@@ -141,7 +117,6 @@ class FourSeasonsCourtyardScene extends StageScene<WorldHandle> {
     const overlayAgent: GridCell = { x: 0, y: 0 };
     const overlayGoal: GridCell = { x: 0, y: 0 };
     return {
-      camera: this.camera,
       agentCell: (state) => {
         readCells(state, grid, overlayAgent, overlayGoal);
         return overlayAgent;
@@ -150,7 +125,6 @@ class FourSeasonsCourtyardScene extends StageScene<WorldHandle> {
         readCells(state, grid, overlayAgent, overlayGoal);
         return overlayGoal;
       },
-      name: 'courtyardGroundTruth',
     };
   }
 
@@ -161,16 +135,11 @@ class FourSeasonsCourtyardScene extends StageScene<WorldHandle> {
     this.lantern?.setTime(0);
   }
 
-  protected tick(frame: FrameUpdate): void {
-    const ctx = this.ctx;
-    const world = this.world;
+  protected tick(frame: FrameUpdate, { world, pool, rig, time }: Stage<WorldHandle>): void {
     const wisp = this.wisp;
     const lantern = this.lantern;
-    const pool = this.pool;
-    const rig = this.rig;
-    if (!ctx || !world || !wisp || !lantern || !pool || !rig) return;
+    if (!wisp || !lantern) return;
 
-    const time = ctx.time();
     const state = frame.state;
     const grid = this.grid;
     const agent = this.agentCell;
@@ -264,7 +233,6 @@ class FourSeasonsCourtyardScene extends StageScene<WorldHandle> {
   }
 }
 
-
 export function growth(age: number): number {
   if (!(age >= 0) || age >= GROW_SECONDS) return 1;
   const t = age / GROW_SECONDS;
@@ -280,5 +248,4 @@ export function opening(time: number, agent: GridCell, goal: GridCell): number {
   return v < 0 ? 0 : v > 1 ? 1 : v;
 }
 
-const createScene: SceneFactory = () => new FourSeasonsCourtyardScene();
-export default createScene;
+export default ((() => new FourSeasonsCourtyardScene()) satisfies SceneFactory);

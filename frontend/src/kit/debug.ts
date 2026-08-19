@@ -1,4 +1,3 @@
-
 import * as THREE from 'three';
 import { CHEETAH_BONES, FK_FLOATS, FK_POINT_INDEX } from '@sim/fk/cheetah';
 import type { EnvGeometry, GridCell, GridGeometry } from '@sim/types';
@@ -22,7 +21,6 @@ export function applyDebugLayer(object: THREE.Object3D): void {
 
 export interface GroundTruthOptions {
   color?: THREE.ColorRepresentation;
-  goalColor?: THREE.ColorRepresentation;
   wallColor?: THREE.ColorRepresentation;
   camera?: THREE.Camera | null;
   agentCell?(state: FrameState): GridCell | null;
@@ -119,7 +117,7 @@ export class GroundTruthOverlay {
 
     const main = lineMaterial(opts.color ?? TOKENS.uiCyan, 0.85);
     const wall = lineMaterial(opts.wallColor ?? 0x8fa6c4, 0.55);
-    const goal = lineMaterial(opts.goalColor ?? TOKENS.celebrationGold, 0.95);
+    const goal = lineMaterial(TOKENS.celebrationGold, 0.95);
     this.materials.push(main, wall, goal);
 
     if (this.grid) this.buildGrid(this.grid, main, wall, goal);
@@ -157,7 +155,6 @@ export class GroundTruthOverlay {
     this.group.removeFromParent();
     this.group.clear();
   }
-
 
   private buildGrid(
     grid: GridGeometry,
@@ -394,7 +391,6 @@ export class GroundTruthOverlay {
     }
   }
 
-
   private buildCheetah(main: THREE.LineBasicMaterial, goalMat: THREE.LineBasicMaterial): void {
     const bones = segments(CHEETAH_BONES.length, main, 'oakDebugSkeleton');
     this.skeletonPos = bones.positions;
@@ -443,7 +439,6 @@ export class GroundTruthOverlay {
       this.toesAttr.needsUpdate = true;
     }
   }
-
 
   private buildClassic(main: THREE.LineBasicMaterial, goalMat: THREE.LineBasicMaterial): void {
     const classic = this.geometry.classic;

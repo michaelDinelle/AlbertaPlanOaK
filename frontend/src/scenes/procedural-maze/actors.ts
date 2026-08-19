@@ -1,4 +1,3 @@
-
 import { emissiveMaterial, oakMaterial, oakUniforms, setEmissiveIntensity } from '@kit/materials';
 import type { EmissiveMaterial, OakMaterial } from '@kit/materials';
 import { clamp01 } from '@kit/mix';
@@ -40,7 +39,6 @@ varying vec3 vBeamNormal;
 varying vec3 vBeamView;
 varying float vAxial;
 void main() {
-	// uv.y runs 0 at the base to 1 at the top of a CylinderGeometry
 	vAxial = uv.y;
 	vec4 wp = modelMatrix * vec4( position, 1.0 );
 	vBeamNormal = normalize( mat3( modelMatrix ) * normal );
@@ -59,17 +57,10 @@ varying vec3 vBeamNormal;
 varying vec3 vBeamView;
 varying float vAxial;
 void main() {
-	// A SHELL THAT READS AS A VOLUME: brightest where the cone faces the camera (through
-	// the middle of the beam), gone at its own silhouette. The inverse of a fresnel.
 	float facing = abs( dot( normalize( vBeamNormal ), normalize( vBeamView ) ) );
 	float body = pow( facing, 1.35 );
-	// Brighter toward the SUN, not toward the floor: the pool below is already a hot
-	// sprite, and piling the beam's own maximum on top of it is what blew the first pass
-	// out. Multiplied by the top fade, the beam peaks in its upper middle — bright air
-	// hanging over the atrium — and arrives at the flagstones as a soft edge.
 	float fall = mix( 0.6, 1.0, vAxial );
 	float capFade = 1.0 - smoothstep( 0.5, 1.0, vAxial );
-	// dust drifting up the shaft, on the playback clock: a paused frame holds it
 	float bands = 0.87 + 0.13 * sin( vAxial * 11.0 - uTime * 0.55 );
 	float a = body * fall * capFade * bands * uOpacity;
 	if ( a <= 0.004 ) discard;

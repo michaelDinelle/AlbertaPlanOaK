@@ -8,13 +8,13 @@ import type {
   FrameState,
   FrameUpdate,
   SceneContext,
-  SceneManifest,
   SceneModule,
   SceneSize,
 } from '@kit/types';
 import type { SimEvent } from '@sim/types';
 import { decoders } from '@sim/registry';
 import { sceneRegistry } from '../scenes/registry';
+import { SCENES } from '../scenes/table';
 import { advanceCursor, collectEvents, makeFrameCursor } from './player';
 
 export interface HostFrameInfo {
@@ -33,11 +33,9 @@ export interface SceneHostOptions {
   speed?: number;
   onFrame?(info: HostFrameInfo): void;
   onEvents?(events: readonly SimEvent[], steps: readonly number[]): void;
-  onReady?(manifest: SceneManifest): void;
 }
 
 export interface SceneHostHandle {
-  readonly manifest: SceneManifest | null;
   readonly clock: PlaybackClock;
   readonly debug: boolean;
   readonly canvas: HTMLCanvasElement;
@@ -122,7 +120,6 @@ export async function mountSceneHost(
   let debugOn = options.debug === true;
   let scene: SceneModule | null = null;
   let post: ComposerHandle | null = null;
-  let manifest: SceneManifest | null = null;
   let destroyed = false;
 
   const state = makeFrameState();
@@ -187,6 +184,7 @@ export async function mountSceneHost(
       canvas,
       size,
       tokens: TOKENS,
+      envId,
       geometry: source.geometry,
       seed: source.seed,
       time: () => clock.time(),
@@ -197,10 +195,9 @@ export async function mountSceneHost(
       return;
     }
     scene = module;
-    manifest = module.manifest;
 
     renderer.compile(module.scene, module.camera);
-    post = buildComposer(renderer, module.scene, module.camera, module.manifest.postConfig, size);
+    post = buildComposer(renderer, module.scene, module.camera, SCENES[envId], size);
     module.setDebug(debugOn);
     applySize();
     resetCursor();
@@ -254,7 +251,6 @@ export async function mountSceneHost(
     options.onFrame?.(info);
   };
   raf = requestAnimationFrame(tick);
-  if (manifest !== null) options.onReady?.(manifest);
 
   const swapSource = (next: PlaybackSource, at: number | undefined): void => {
     const speed = clock.speed;
@@ -268,9 +264,6 @@ export async function mountSceneHost(
   };
 
   const handle: SceneHostHandle = {
-    get manifest() {
-      return manifest;
-    },
     get clock() {
       return clock;
     },
@@ -310,7 +303,6 @@ export async function mountSceneHost(
       loader = nextLoader;
       swapSource(nextSource, opts.at ?? 0);
       await buildScene();
-      if (!destroyed && manifest !== null) options.onReady?.(manifest);
     },
     setDebug(on) {
       debugOn = on;

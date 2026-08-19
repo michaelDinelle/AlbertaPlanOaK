@@ -1,4 +1,3 @@
-
 import * as THREE from 'three';
 import type { GridCell, GridGeometry } from '@sim/types';
 import { hash2f } from './rng';
@@ -6,7 +5,6 @@ import { emissiveMaterial, oakMaterial, oakUniforms, setEmissiveIntensity } from
 import type { EmissiveMaterial, OakMaterial } from './materials';
 import { TOKENS } from './tokens';
 import type { ExcludeFn } from './vegetation';
-
 
 export const CELL = TOKENS.cellSize;
 
@@ -51,7 +49,6 @@ export function isWall(grid: Pick<GridGeometry, 'w' | 'h' | 'walls'>, x: number,
 export function gridExtent(grid: GridSize): { width: number; depth: number } {
   return { width: grid.w * CELL, depth: grid.h * CELL };
 }
-
 
 export type CellTintFn = (x: number, y: number) => THREE.ColorRepresentation | null | undefined;
 export type CellFilterFn = (x: number, y: number) => boolean;
@@ -306,7 +303,6 @@ export function buildCellField(
   };
 }
 
-
 interface CellPlaced {
   readonly group: THREE.Group;
   setCell(x: number, y: number, grid: GridSize): void;
@@ -406,108 +402,6 @@ export class GoalBeacon implements CellPlaced {
   }
 }
 
-export interface DoorGateOptions {
-  color: THREE.ColorRepresentation;
-  height?: number;
-  thickness?: number;
-  duration?: number;
-  motion?: 'slide' | 'swing';
-  name?: string;
-}
-
-export class DoorGate implements CellPlaced {
-  readonly group = new THREE.Group();
-  private readonly leaf: THREE.Mesh;
-  private readonly pivot = new THREE.Group();
-  private readonly material: OakMaterial;
-  private readonly geometry: THREE.BufferGeometry;
-  private readonly duration: number;
-  private readonly motion: 'slide' | 'swing';
-  private readonly height: number;
-  private openness = 0;
-  private targetOpenness = 0;
-
-  constructor(opts: DoorGateOptions) {
-    this.height = opts.height ?? 0.95;
-    const thickness = opts.thickness ?? 0.18;
-    this.duration = Math.max(0.001, opts.duration ?? 0.55);
-    this.motion = opts.motion ?? 'slide';
-    this.group.name = opts.name ?? 'oakDoorGate';
-
-    this.geometry = new THREE.BoxGeometry(CELL * 0.96, this.height, thickness);
-    this.geometry.translate(0, this.height / 2, 0);
-    this.material = oakMaterial({
-      color: opts.color,
-      roughness: 0.8,
-      flatShading: true,
-      name: 'oakDoorGate',
-    });
-    this.leaf = new THREE.Mesh(this.geometry, this.material);
-    this.leaf.name = 'oakDoorLeaf';
-    this.leaf.castShadow = true;
-    this.leaf.receiveShadow = true;
-    this.pivot.add(this.leaf);
-    this.group.add(this.pivot);
-  }
-
-  setCell(x: number, y: number, grid: GridSize): void {
-    cellToWorldVec(x, y, grid, this.group.position);
-  }
-
-  setVisible(v: boolean): void {
-    this.group.visible = v;
-  }
-
-  setOpen(open: boolean, immediate = false): void {
-    this.targetOpenness = open ? 1 : 0;
-    if (immediate) {
-      this.openness = this.targetOpenness;
-      this.apply();
-    }
-  }
-
-  get open(): boolean {
-    return this.targetOpenness >= 0.5;
-  }
-
-  get progress(): number {
-    return this.openness;
-  }
-
-  snap(): void {
-    this.openness = this.targetOpenness;
-    this.apply();
-  }
-
-  update(dt: number, _time: number): void {
-    if (this.openness !== this.targetOpenness) {
-      const step = dt / this.duration;
-      const d = this.targetOpenness - this.openness;
-      this.openness += Math.sign(d) * Math.min(Math.abs(d), step);
-      this.apply();
-    }
-  }
-
-  private apply(): void {
-    const t = this.openness;
-    const eased = t * t * (3 - 2 * t);
-    if (this.motion === 'swing') {
-      this.pivot.rotation.y = eased * Math.PI * 0.5;
-      this.leaf.position.x = CELL * 0.48 * eased;
-    } else {
-      this.leaf.position.y = -this.height * eased;
-    }
-    this.leaf.visible = eased < 0.999;
-  }
-
-  dispose(): void {
-    this.geometry.dispose();
-    this.material.dispose();
-    this.group.removeFromParent();
-    this.group.clear();
-  }
-}
-
 export interface KeyTokenOptions {
   color: THREE.ColorRepresentation;
   radius?: number;
@@ -580,7 +474,6 @@ export class KeyToken implements CellPlaced {
     this.group.clear();
   }
 }
-
 
 export interface HopMotionOptions {
   duration?: number;

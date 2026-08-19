@@ -1,4 +1,3 @@
-
 export type Rng = () => number;
 
 export function mulberry32(seed: number): Rng {
@@ -39,7 +38,6 @@ export function pickWeighted<T>(rng: Rng, items: readonly T[], weights: readonly
   }
   return items[n - 1] as T;
 }
-
 
 export function hash1i(x: number, seed = 0): number {
   let h = Math.imul((x | 0) ^ (seed | 0), 0x85ebca6b);
