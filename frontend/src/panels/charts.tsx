@@ -6,7 +6,7 @@ import type { Policy } from '@shared/types';
 import { formatRate, formatStep } from '../lib/format';
 import { subscribePosition, throttled } from '../playback/store';
 
-export const CHART_MARGIN = { top: 6, right: 10, bottom: 0, left: 0 } as const;
+export const CHART_MARGIN = { top: 22, right: 30, bottom: 0, left: 0 } as const;
 export const AXIS_WIDTH = 42;
 export const X_AXIS_HEIGHT = 18;
 
@@ -84,9 +84,20 @@ export function bandProps(fill: string, opacity = 0.12) {
   } as const;
 }
 
-const TICK = { fill: 'var(--color-ink-dim)', fontSize: 10, fontFamily: 'var(--font-mono)' } as const;
+const TICK = { fill: 'var(--color-ink-dim)', fontSize: 11, fontFamily: 'var(--font-mono)' } as const;
 
 const TIP_CURSOR = { stroke: 'var(--color-ink-faint)', strokeOpacity: 0.6, strokeDasharray: '3 3' } as const;
+
+function logTicks(min: number, max: number): number[] {
+  const lo = Math.log10(Math.max(min, 1));
+  const hi = Math.log10(Math.max(max, 1));
+  const out = [Math.max(min, 1)];
+  for (let e = Math.ceil(lo); e <= Math.floor(hi); e++) {
+    if (e - lo > 0.25 && hi - e > 0.25) out.push(10 ** e);
+  }
+  out.push(Math.max(max, 1));
+  return out;
+}
 
 function TipCard({
   active,
@@ -147,6 +158,9 @@ export function TimeChart({
   xFormat,
   yFormat,
   rightFormat,
+  xLabel,
+  yLabel,
+  rightLabel,
   overlay,
   children,
 }: {
@@ -158,11 +172,25 @@ export function TimeChart({
   xFormat?: (value: number) => string;
   yFormat?: (value: number) => string;
   rightFormat?: (value: number) => string;
+  xLabel?: string;
+  yLabel?: string;
+  rightLabel?: string;
   overlay?: ReactNode;
   children: ReactNode;
 }) {
   return (
-    <div role="img" aria-label={label} className="relative shrink-0" style={{ height }}>
+    <div role="img" aria-label={label} className="relative shrink-0">
+      {yLabel !== undefined && (
+        <span className="pointer-events-none absolute top-0 font-mono text-2xs text-ink-dim" style={{ left: 2 }}>
+          {yLabel}
+        </span>
+      )}
+      {rightLabel !== undefined && (
+        <span className="pointer-events-none absolute right-0 top-0 font-mono text-2xs text-ink-dim">
+          {rightLabel}
+        </span>
+      )}
+      <div className="relative" style={{ height }}>
       <ResponsiveContainer width="100%" height="100%">
         <ComposedChart margin={CHART_MARGIN}>
           <CartesianGrid stroke="var(--color-line)" strokeOpacity={0.45} vertical={false} />
@@ -174,6 +202,7 @@ export function TimeChart({
             allowDataOverflow
             height={X_AXIS_HEIGHT}
             minTickGap={28}
+            ticks={xScale === 'log' ? logTicks(xMin, xMax) : undefined}
             tickFormatter={xFormat ?? formatStep}
             tick={TICK}
             axisLine={false}
@@ -216,6 +245,10 @@ export function TimeChart({
         </ComposedChart>
       </ResponsiveContainer>
       {overlay}
+      </div>
+      {xLabel !== undefined && (
+        <div className="pr-1 text-right font-mono text-2xs text-ink-dim">{xLabel}</div>
+      )}
     </div>
   );
 }

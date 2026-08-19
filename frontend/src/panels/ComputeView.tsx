@@ -1,16 +1,20 @@
 import { useMemo } from 'react';
 import { clsx } from 'clsx';
 import { Line } from 'recharts';
+import { ENVS, isEnvId } from '@shared/envs';
 import type { Policy, RunDetail } from '@shared/types';
+import { useSelection } from '../state/selectionStore';
 import { STR } from '../strings';
 import { Chip, Label, POLICY_ORDER, POLICY_TOKENS, TXT, TimeChart, lineProps, seriesRows } from './charts';
 
 function exp(value: number | null | undefined): string {
   if (value === null || value === undefined || !Number.isFinite(value)) return '—';
-  return value.toExponential(1);
+  const e = Math.log10(value);
+  return Number.isInteger(e) ? `1e${e}` : value.toExponential(1);
 }
 
 export function ComputeView({ runs }: { runs: Record<Policy, RunDetail | null> }) {
+  const sel = useSelection();
   const summaries = useMemo(() => POLICY_ORDER.map((policy) => runs[policy]?.summary ?? null), [runs]);
   const keeper = summaries[0] ?? null;
 
@@ -32,6 +36,27 @@ export function ComputeView({ runs }: { runs: Record<Policy, RunDetail | null> }
     return Number.isFinite(min) && traces.length > 0 ? { min, max, traces } : null;
   }, [summaries]);
 
+  const envFrontier = useMemo(() => {
+    const envId = sel.envId;
+    if (envId === null) return null;
+    let min = Infinity;
+    let max = 1;
+    const traces = POLICY_ORDER.flatMap((policy, i) => {
+      const summary = summaries[i] ?? null;
+      const z = summary?.envs[envId]?.curves.iqmZ;
+      const perStep = summary?.compute.envFlopsPerStep[envId];
+      if (summary === null || z === undefined || perStep === undefined) return [];
+      const flops = summary.curveSteps.map((step) => perStep * step);
+      const firstIdx = z.findIndex((v) => v !== null);
+      const firstX = firstIdx < 0 ? undefined : flops[firstIdx];
+      if (firstX !== undefined && firstX > 0 && firstX < min) min = firstX;
+      const lastX = flops[flops.length - 1];
+      if (lastX !== undefined && lastX > max) max = lastX;
+      return [{ key: policy, token: POLICY_TOKENS[policy], line: seriesRows(flops, z) }];
+    });
+    return Number.isFinite(min) && traces.length > 0 ? { min, max, traces } : null;
+  }, [summaries, sel.envId]);
+
   if (keeper === null) {
     return <div className={clsx('px-2 py-6 text-center', TXT.bodyDim)}>{STR.compute.needsSummary}</div>;
   }
@@ -47,12 +72,14 @@ export function ComputeView({ runs }: { runs: Record<Policy, RunDetail | null> }
       {frontier !== null && (
         <TimeChart
           label={STR.compute.efficiency}
-          height={190}
+          height={160}
           xScale="log"
           xMin={frontier.min}
           xMax={frontier.max}
           xFormat={exp}
           yFormat={(v) => v.toFixed(2)}
+          xLabel={STR.axis.flops}
+          yLabel={STR.axis.z}
         >
           {frontier.traces.map((trace) => (
             <Line
@@ -64,6 +91,36 @@ export function ComputeView({ runs }: { runs: Record<Policy, RunDetail | null> }
             />
           ))}
         </TimeChart>
+      )}
+      {envFrontier !== null && sel.envId !== null && (
+        <>
+          <div className="pt-1">
+            <Label hint={STR.compute.titleHint}>
+              {STR.compute.efficiencyEnv(isEnvId(sel.envId) ? ENVS[sel.envId].name : sel.envId)}
+            </Label>
+          </div>
+          <TimeChart
+            label={STR.compute.efficiencyEnv(sel.envId)}
+            height={160}
+            xScale="log"
+            xMin={envFrontier.min}
+            xMax={envFrontier.max}
+            xFormat={exp}
+            yFormat={(v) => v.toFixed(2)}
+            xLabel={STR.axis.flops}
+            yLabel={STR.axis.z}
+          >
+            {envFrontier.traces.map((trace) => (
+              <Line
+                key={trace.key}
+                {...lineProps(trace.token, 1.4)}
+                name={STR.policy[trace.key]}
+                data={trace.line}
+                connectNulls
+              />
+            ))}
+          </TimeChart>
+        </>
       )}
     </div>
   );

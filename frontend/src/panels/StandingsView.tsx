@@ -13,6 +13,17 @@ const POLICIES = POLICY_ORDER.map((key, i) => ({ key, token: POLICY_TOKENS[key],
 const RAIL_LO = -0.1;
 const RAIL_HI = 1.5;
 
+function ProbLabel({ suffix }: { suffix?: string }) {
+  return (
+    <>
+      P(<span style={{ color: POLICY_TOKENS.oak }}>{STR.policy.oak}</span>
+      {'>'}
+      <span style={{ color: POLICY_TOKENS.ppo }}>{STR.policy.ppo}</span>)
+      {suffix !== undefined && ` ${suffix}`}
+    </>
+  );
+}
+
 function railPos(z: number): number {
   return ((Math.min(RAIL_HI, Math.max(RAIL_LO, z)) - RAIL_LO) / (RAIL_HI - RAIL_LO)) * 100;
 }
@@ -152,7 +163,7 @@ export function StandingsView({ runs }: { runs: Record<Policy, RunDetail | null>
               <Label hint={STR.standings.railHint(String(RAIL_LO), String(RAIL_HI))}>{STR.standings.colRail}</Label>
             </th>
             <th scope="col" className="w-22 whitespace-nowrap pb-1 pl-1 pr-2 text-right font-normal">
-              <Label hint={STR.standings.probHint}>{STR.standings.colProb}</Label>
+              <Label hint={STR.standings.probHint}><ProbLabel /></Label>
             </th>
           </tr>
         </thead>
@@ -209,12 +220,12 @@ export function StandingsView({ runs }: { runs: Record<Policy, RunDetail | null>
         </tbody>
       </table>
       {prob !== null && (
-        <div className={clsx('px-2', TXT.dataDim)} title={STR.standings.probHint}>
-          {STR.standings.probMean(
-            formatPercent(prob.mean, 1),
-            formatPercent(prob.ci95[0], 1),
-            formatPercent(prob.ci95[1], 1),
-          )}
+        <div className="flex items-baseline gap-2 px-2">
+          <Label hint={STR.standings.probHint}><ProbLabel suffix={STR.standings.mean} /></Label>
+          <span className={TXT.data}>{formatPercent(prob.mean, 1)}</span>
+          <span className={TXT.dataDim}>
+            {STR.standings.ci(formatPercent(prob.ci95[0], 1), formatPercent(prob.ci95[1], 1))}
+          </span>
         </div>
       )}
       {profile !== null && (
@@ -232,6 +243,8 @@ export function StandingsView({ runs }: { runs: Record<Policy, RunDetail | null>
             xMax={profile.max}
             xFormat={(v) => v.toFixed(1)}
             yFormat={(v) => formatPercent(v, 0)}
+            xLabel={STR.axis.tau}
+            yLabel={STR.axis.runShare}
           >
             <ReferenceLine
               x={0}

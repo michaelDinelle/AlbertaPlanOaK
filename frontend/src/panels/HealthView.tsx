@@ -150,7 +150,7 @@ export function HealthView({
           { swatch: 'var(--color-ramp-2)', label: STR.health.positive },
         ]}
       />
-      <TimeChart label={STR.health.survival} height={100} xMax={horizon} yFormat={(v) => formatPercent(v, 0)}>
+      <TimeChart label={STR.health.survival} height={100} xMax={horizon} yFormat={(v) => formatPercent(v, 0)} xLabel={STR.axis.steps} yLabel={STR.axis.seedShare}>
         {kmBand !== null && <Area {...bandProps('var(--color-good)')} type="stepAfter" data={kmBand} />}
         {survival !== null && (
           <Line
@@ -172,7 +172,7 @@ export function HealthView({
         hint={STR.health.retentionHint}
         chips={[{ swatch: 'var(--color-crit)', label: STR.health.faded }]}
       />
-      <TimeChart label={STR.health.retention} height={100} xMax={horizon}>
+      <TimeChart label={STR.health.retention} height={100} xMax={horizon} xLabel={STR.axis.steps} yLabel={STR.axis.phi}>
         <Line {...lineProps('var(--color-crit)', 1.4)} name={STR.health.faded} data={fade} />
       </TimeChart>
       <Head
@@ -187,7 +187,7 @@ export function HealthView({
       {capacity === null || !capacity.alive ? (
         <div className={clsx('py-3 text-center', TXT.bodyDim)}>{STR.health.noPlasticity}</div>
       ) : (
-        <TimeChart label={STR.health.capacity} height={100} xMax={horizon} yFormat={(v) => formatPercent(v, 0)} rightFormat={(v) => formatRate(v, 2)}>
+        <TimeChart label={STR.health.capacity} height={100} xMax={horizon} yFormat={(v) => formatPercent(v, 0)} rightFormat={(v) => formatRate(v, 2)} xLabel={STR.axis.steps} yLabel={STR.axis.dormant} rightLabel={STR.axis.erank}>
           <Line
             {...lineProps('var(--color-oak)', 1.5)}
             name={`${STR.policy.oak} ${STR.health.dormant}`}
@@ -218,7 +218,7 @@ export function HealthView({
           { swatch: 'var(--color-ramp-4)', label: STR.health.believed, dashed: true },
         ]}
       />
-      <TimeChart label={STR.health.know} height={100} xMax={horizon}>
+      <TimeChart label={STR.health.know} height={100} xMax={horizon} xLabel={STR.axis.steps} yLabel={STR.axis.rewardRate}>
         {know !== null && <Line {...lineProps('var(--color-oak)', 1.5)} name={STR.health.measured} data={know.measured} />}
         {know !== null && <Line {...lineProps('var(--color-ramp-4)', 1.1, '4 3')} name={STR.health.believed} data={know.believed} />}
       </TimeChart>
