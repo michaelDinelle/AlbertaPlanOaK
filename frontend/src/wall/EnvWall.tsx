@@ -1,17 +1,21 @@
-import { useMemo } from 'react';
+import { useMemo, useState } from 'react';
 import { clsx } from 'clsx';
+import { ArrowUpDown, X } from 'lucide-react';
 import { VList } from 'virtua';
 import { ENVS, type EnvId } from '@shared/envs';
-import type { RunDetail, RunIndexEntry } from '@shared/types';
+import type { RunDetail } from '@shared/types';
 import { Frost } from '../glass/Panel';
 import { Label, TXT } from '../panels/charts';
-import { runLabel, sortRuns } from '../lib/run';
-import { selectEnv, selectRun, useSelection } from '../state/selectionStore';
+import { selectEnv, useSelection } from '../state/selectionStore';
 import { STR } from '../strings';
 import { seedsFor } from '../theater/loader';
 import { envGradient, posterUrl } from './EnvTileButton';
 
 const COLUMNS = 4;
+
+const WALL_SORTS = ['name', 'seeds', 'reward'] as const;
+
+type WallSort = (typeof WALL_SORTS)[number];
 
 function Tile({
   envId,
@@ -51,26 +55,35 @@ function Tile({
 }
 
 export function EnvWall({
-  entries,
-  entry,
   detail,
   envList,
   onClose,
 }: {
-  entries: readonly RunIndexEntry[] | undefined;
-  entry: RunIndexEntry | null;
   detail: RunDetail | null;
   envList: readonly EnvId[];
   onClose: () => void;
 }) {
   const sel = useSelection();
-  const runs = useMemo(() => sortRuns(entries ?? []).slice(0, 16), [entries]);
+  const [query, setQuery] = useState('');
+  const [sort, setSort] = useState<WallSort>('name');
   const recordings = detail?.recordings ?? [];
+
   const rows = useMemo(() => {
+    const q = query.trim().toLowerCase();
+    const shown = envList.filter((id) => q === '' || ENVS[id].name.toLowerCase().includes(q));
+    const seedCount = (id: EnvId): number => seedsFor(recordings, id).length;
+    const reward = (id: EnvId): number => detail?.summary?.envs[id]?.finalRate.iqmZ ?? -Infinity;
+    const sorted = [...shown].sort((a, b) =>
+      sort === 'name'
+        ? ENVS[a].name.localeCompare(ENVS[b].name)
+        : sort === 'seeds'
+          ? seedCount(b) - seedCount(a)
+          : reward(b) - reward(a),
+    );
     const out: EnvId[][] = [];
-    for (let i = 0; i < envList.length; i += COLUMNS) out.push(envList.slice(i, i + COLUMNS));
+    for (let i = 0; i < sorted.length; i += COLUMNS) out.push(sorted.slice(i, i + COLUMNS));
     return out;
-  }, [envList]);
+  }, [envList, query, sort, detail, recordings]);
 
   const pick = (envId: EnvId): void => {
     selectEnv(envId);
@@ -80,48 +93,57 @@ export function EnvWall({
   return (
     <div className="absolute inset-0 z-40 bg-black/50" onPointerDown={onClose}>
       <Frost className="absolute inset-5 flex flex-col overflow-hidden">
-        <div className="flex flex-col gap-2 px-5 pb-3 pt-4" onPointerDown={(event) => event.stopPropagation()}>
-          <div className="flex items-baseline gap-3">
-            <h2><Label>{STR.wall.title}</Label></h2>
-            <span className={TXT.bodyDim}>{STR.wall.hint}</span>
-          </div>
-          <div className="flex items-center gap-1.5 overflow-x-auto pb-1">
-            <span className="mr-1"><Label>{STR.wall.runs}</Label></span>
-            {runs.map((run) => (
-              <button
-                key={run.id}
-                type="button"
-                onClick={() => selectRun(run.id)}
-                title={STR.wall.switchRun(runLabel(run))}
-                className={clsx(
-                  'flex shrink-0 items-center gap-1.5 rounded-md border px-2 py-0.5 font-mono text-2xs transition-colors',
-                  run.id === entry?.id
-                    ? 'border-accent/50 bg-accent/15 text-accent'
-                    : 'border-white/10 text-ink-dim hover:border-white/25 hover:text-ink',
-                )}
-              >
-                {run.inFlight && <span className="size-1.5 motion-safe:animate-pulse rounded-full bg-good" title={STR.wall.live} />}
-                {runLabel(run)}
-              </button>
-            ))}
-          </div>
+        <div
+          className="flex items-center gap-3 px-5 pb-3 pt-4"
+          onPointerDown={(event) => event.stopPropagation()}
+        >
+          <h2><Label>{STR.wall.title}</Label></h2>
+          <input
+            type="search"
+            autoFocus
+            value={query}
+            onChange={(event) => setQuery(event.target.value)}
+            placeholder={STR.wall.search}
+            className="w-64 rounded-md border border-white/10 bg-white/5 px-2.5 py-1 text-xs text-ink outline-none transition-colors placeholder:text-ink-faint hover:border-white/25 focus:border-accent/50"
+          />
+          <button
+            type="button"
+            onClick={() => setSort(WALL_SORTS[(WALL_SORTS.indexOf(sort) + 1) % WALL_SORTS.length] ?? 'name')}
+            title={STR.wall.sort}
+            className={clsx('flex items-center gap-1 rounded-md border border-white/10 px-1.5 py-1 hover:border-white/25 hover:text-ink', TXT.bodyDim)}
+          >
+            <ArrowUpDown className="size-2.5" />
+            {STR.wall.sortBy[sort]}
+          </button>
+          <button
+            type="button"
+            onClick={onClose}
+            title={STR.wall.close}
+            className="ml-auto flex size-7 items-center justify-center rounded-md text-ink-dim transition-colors hover:bg-white/10 hover:text-ink active:bg-white/15"
+          >
+            <X className="size-4" />
+          </button>
         </div>
         <div className="min-h-0 flex-1 px-5 pb-5" onPointerDown={(event) => event.stopPropagation()}>
-          <VList style={{ height: '100%' }}>
-            {rows.map((row) => (
-              <div key={row[0] ?? 'row'} className="grid grid-cols-4 gap-3 pb-3">
-                {row.map((envId) => (
-                  <Tile
-                    key={envId}
-                    envId={envId}
-                    seedCount={seedsFor(recordings, envId).length}
-                    current={envId === sel.envId}
-                    onPick={pick}
-                  />
-                ))}
-              </div>
-            ))}
-          </VList>
+          {rows.length === 0 ? (
+            <div className={clsx('py-8 text-center', TXT.bodyDim)}>{STR.wall.noMatch(query.trim())}</div>
+          ) : (
+            <VList style={{ height: '100%' }}>
+              {rows.map((row) => (
+                <div key={row[0] ?? 'row'} className="grid grid-cols-4 gap-3 pb-3">
+                  {row.map((envId) => (
+                    <Tile
+                      key={envId}
+                      envId={envId}
+                      seedCount={seedsFor(recordings, envId).length}
+                      current={envId === sel.envId}
+                      onPick={pick}
+                    />
+                  ))}
+                </div>
+              ))}
+            </VList>
+          )}
         </div>
       </Frost>
     </div>
