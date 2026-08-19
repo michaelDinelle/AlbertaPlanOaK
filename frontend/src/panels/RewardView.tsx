@@ -136,6 +136,8 @@ export function RewardView({
           label={STR.reward.title}
           height={188}
           xMax={Math.max(1, horizon)}
+          xLabel={STR.axis.steps}
+          yLabel={STR.axis.rewardRate}
           overlay={<Playhead total={Math.max(1, horizon)} />}
         >
           <Area {...bandProps(tone)} data={band} />

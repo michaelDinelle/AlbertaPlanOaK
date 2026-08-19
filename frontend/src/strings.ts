@@ -72,6 +72,18 @@ export const STR = {
     switchTo: (label: string) => `Watch this run: ${label}`,
   },
   panels: { reward: 'Reward', standings: 'Standings', compute: 'Compute', health: 'Health' },
+  axis: {
+    steps: 'steps',
+    flops: 'cumulative FLOPs',
+    rewardRate: 'reward / step',
+    z: 'normalized reward',
+    tau: 'score τ',
+    runShare: '% of runs',
+    seedShare: '% of seeds',
+    phi: 'Φ',
+    dormant: '% dormant',
+    erank: 'erank',
+  },
   reward: {
     title: 'Reward per step',
     titleHint: (win: string) => `trailing ${win}-step mean · IQM of seeds · band 10–90th percentile`,
@@ -105,21 +117,22 @@ export const STR = {
     colEnv: 'Environment',
     colRail: 'normalized reward',
     railHint: (lo: string, hi: string) => `0 = random · 1 = best known (analytic, else PPO IQM) · shown window ${lo}…${hi}`,
-    colProb: 'P(OaK>PPO)',
     probHint: 'P(random OaK seed beats random PPO seed) · independent bootstrap',
     zCell: (name: string, z: string, lo: string, hi: string) =>
       `${name} final normalized reward ${z} — 95% CI [${lo}, ${hi}]`,
     beyond: (name: string, z: string) => `${name} ${z} — beyond the display window`,
     probCell: (pct: string, lo: string, hi: string) => `P(OaK > PPO) = ${pct} — 95% CI [${lo}, ${hi}]`,
-    probMean: (pct: string, lo: string, hi: string) =>
-      `P(OaK > PPO) mean across environments ${pct} — 95% CI [${lo}, ${hi}]`,
+    mean: 'mean',
+    ci: (lo: string, hi: string) => `95% CI [${lo}, ${hi}]`,
     rowHint: (env: string) => `Watch ${env}`,
     spread: 'Seed spread — p95 − p5 of normalized reward',
     needsSummary: 'Standings appear once this run is scored.',
   },
   compute: {
-    efficiency: 'Reward per FLOP',
-    titleHint: 'normalized reward IQM vs cumulative FLOPs · log x · analytic estimates',
+    efficiency: 'Reward per FLOP — all environments',
+    efficiencyEnv: (name: string) => `Reward per FLOP — ${name}`,
+    titleHint:
+      'normalized reward IQM vs cumulative FLOPs per lane · log x · analytic estimates · each line ends at that policy\'s lifetime FLOP total',
     needsSummary: 'Compute appears once this run is scored.',
   },
   health: {
