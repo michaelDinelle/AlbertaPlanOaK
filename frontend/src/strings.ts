@@ -36,12 +36,13 @@ export const STR = {
   },
   wall: {
     title: 'Environments',
-    hint: 'Click a tile to switch · Esc closes',
-    runs: 'Runs',
-    live: 'recording',
+    search: 'Search environments…',
+    sort: 'Change the sort',
+    sortBy: { name: 'by name', seeds: 'by seeds', reward: 'by reward' },
+    close: 'Close (esc)',
+    noMatch: (q: string) => `No environment matches “${q}”`,
     seeds: (n: number) => (n === 1 ? '1 recorded seed' : `${n} recorded seeds`),
     none: 'nothing recorded in this run',
-    switchRun: (label: string) => `Watch this run: ${label}`,
     watchEnv: (name: string) => `Watch ${name}`,
   },
   palette: {
@@ -66,8 +67,9 @@ export const STR = {
     showPanel: 'Show the side panel',
   },
   run: {
-    commit: (id: string) => `commit ${id}`,
+    commit: (id: string) => `commit ${id} — click to choose a run`,
     facts: (envs: number, steps: string) => `${envs} envs · ${steps} steps`,
+    switchTo: (label: string) => `Watch this run: ${label}`,
   },
   panels: { reward: 'Reward', standings: 'Standings', compute: 'Compute', health: 'Health' },
   reward: {

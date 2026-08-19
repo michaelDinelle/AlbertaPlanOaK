@@ -1,15 +1,16 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { clsx } from 'clsx';
-import { PanelRightOpen } from 'lucide-react';
+import { ChevronDown, PanelRightOpen } from 'lucide-react';
 import { ENV_IDS } from '@shared/envs';
 import type { Policy, RunDetail, RunIndexEntry } from '@shared/types';
 import { baselineDetailQuery, runDetailQuery, runsQuery } from './data/queries';
 import { Frost, Lens } from './glass/Panel';
 import { formatStep } from './lib/format';
 import { cycleEnv, keyAction } from './lib/keymap';
-import { envShares, resolveFeaturedRun, runEnvs, runLabelFor } from './lib/run';
+import { envShares, resolveFeaturedRun, runDateLabel, runEnvs, runLabel, runLabelFor, runShortId, sortRuns } from './lib/run';
 import { CommandPalette } from './panels/CommandPalette';
+import { POLICY_TOKENS } from './panels/charts';
 import { PlaybackBar, PolicySwitch } from './panels/PlaybackBar';
 import { StatsPanel } from './panels/StatsPanel';
 import type { PanelView } from './panels/views';
@@ -21,6 +22,7 @@ import {
   resolveRun,
   selectEnv,
   selectPolicy,
+  selectRun,
   selectionSnapshot,
   toggleDebug,
   unpromote,
@@ -55,22 +57,63 @@ function RunChip({
   entries: readonly RunIndexEntry[] | undefined;
   active: RunDetail | null;
 }) {
+  const [open, setOpen] = useState(false);
   if (active === null) return null;
   const entry = entries?.find((run) => run.id === active.id);
+  const runs = sortRuns(entries ?? []).slice(0, 16);
   return (
-    <Lens className="px-3 py-1.5">
-      <div className="flex items-center gap-2.5" title={STR.run.commit(active.id)}>
-        <div className="flex flex-col">
-          <span className="font-mono text-xs text-ink">{runLabelFor(active.id, entries, active)}</span>
-          <span className="font-mono text-2xs text-ink-dim">
-            {STR.run.facts(envShares(active.meta).length, formatStep(active.meta.steps))}
-          </span>
-        </div>
-        {entry?.inFlight === true && (
-          <span className="size-1.5 motion-safe:animate-pulse rounded-full bg-good" title={STR.bar.live} />
-        )}
-      </div>
-    </Lens>
+    <div className="pointer-events-auto relative" onKeyDown={(event) => { if (event.key === 'Escape') setOpen(false); }}>
+      {open && <button type="button" aria-hidden className="fixed inset-0 cursor-default" onClick={() => setOpen(false)} />}
+      <Lens className="relative px-3 py-1.5">
+        <button
+          type="button"
+          onClick={() => setOpen((o) => !o)}
+          title={STR.run.commit(active.id)}
+          className="flex items-center gap-2.5 text-left"
+        >
+          <div className="flex flex-col">
+            <span className="font-mono text-xs text-ink">{runLabelFor(active.id, entries, active)}</span>
+            <span className="font-mono text-2xs text-ink-dim">
+              {STR.run.facts(envShares(active.meta).length, formatStep(active.meta.steps))}
+            </span>
+          </div>
+          {entry?.inFlight === true && (
+            <span className="size-1.5 motion-safe:animate-pulse rounded-full bg-good" title={STR.bar.live} />
+          )}
+          <ChevronDown className={clsx('size-3 text-ink-faint transition-transform', open && 'rotate-180')} />
+        </button>
+      </Lens>
+      {open && (
+        <Lens className="absolute left-0 top-full mt-1.5 flex min-w-56 flex-col gap-0.5 p-1.5">
+          {runs.map((run) => (
+            <button
+              key={run.id}
+              type="button"
+              onClick={() => {
+                selectRun(run.id);
+                setOpen(false);
+              }}
+              title={STR.run.switchTo(runLabel(run))}
+              className={clsx(
+                'flex flex-col gap-0.5 whitespace-nowrap rounded-md px-2.5 py-1.5 text-left transition-colors',
+                run.id === active.id ? 'bg-accent/15' : 'hover:bg-white/10',
+              )}
+            >
+              <span className="flex items-center gap-2 text-xs text-ink">
+                {runDateLabel(run.startedAt)}
+                {run.role === 'keeper' && <span className="text-accent">keeper</span>}
+                {run.policy !== 'oak' && <span style={{ color: POLICY_TOKENS[run.policy] }}>{STR.policy[run.policy]}</span>}
+                {run.ablationLabel !== 'none' && <span className="text-ink-dim">{run.ablationLabel}</span>}
+                {run.inFlight && <span className="size-1.5 motion-safe:animate-pulse rounded-full bg-good" title={STR.bar.live} />}
+              </span>
+              <span className="font-mono text-2xs tabular-nums text-ink-dim">
+                {runShortId(run.id)} · {STR.run.facts(run.envIds.length, formatStep(run.steps))}
+              </span>
+            </button>
+          ))}
+        </Lens>
+      )}
+    </div>
   );
 }
 
@@ -314,13 +357,7 @@ export function App() {
         </div>
       </div>
       {wallOpen && (
-        <EnvWall
-          entries={entries}
-          entry={entry}
-          detail={detail}
-          envList={wallEnvs}
-          onClose={() => setWallOpen(false)}
-        />
+        <EnvWall detail={detail} envList={wallEnvs} onClose={() => setWallOpen(false)} />
       )}
       {paletteOpen && (
         <CommandPalette

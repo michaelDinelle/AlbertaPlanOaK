@@ -48,8 +48,8 @@
   --radius-md: 10px;
   --radius-lg: 14px;
 
-  --text-2xs: 10px;
-  --text-2xs--line-height: 14px;
+  --text-2xs: 11px;
+  --text-2xs--line-height: 15px;
 }
 
 @utility glass {
@@ -59,6 +59,7 @@
     0 24px 60px var(--glass-shadow),
     inset 0 1px 1px var(--glass-highlight),
     inset 0 -8px 20px var(--glass-glow);
+  text-shadow: 0 1px 2px oklch(0% 0 0 / 0.55);
 }
 
 @utility glass-frost {
@@ -94,6 +95,7 @@
     color: var(--color-ink);
     font-family: var(--font-sans);
     font-size: 13px;
+    font-weight: 450;
     line-height: 1.5;
     -webkit-font-smoothing: antialiased;
     caret-color: var(--color-accent);

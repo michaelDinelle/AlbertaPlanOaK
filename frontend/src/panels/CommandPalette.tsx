@@ -119,7 +119,7 @@ export function CommandPalette({
               </Command.Group>
               <Command.Group heading={STR.palette.runs}>
                 {runs.map((run) => (
-                  <Item key={run.id} onPick={done(() => selectRun(run.id))} hint={STR.wall.switchRun(runLabel(run))}>
+                  <Item key={run.id} onPick={done(() => selectRun(run.id))} hint={STR.run.switchTo(runLabel(run))}>
                     {run.inFlight && <span className="size-1.5 motion-safe:animate-pulse rounded-full bg-good" />}
                     {runLabel(run)}
                   </Item>
