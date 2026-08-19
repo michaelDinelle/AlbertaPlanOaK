@@ -1,4 +1,3 @@
-
 import * as THREE from 'three';
 import { TOKENS } from './tokens';
 
@@ -23,7 +22,7 @@ function makeCamera(opts: BaseCameraOptions, name: string): THREE.PerspectiveCam
     opts.fov ?? TOKENS.fovHero,
     opts.aspect ?? 16 / 9,
     opts.near ?? 0.1,
-    opts.far ?? 500,
+    opts.far ?? 900,
   );
   camera.name = opts.name ?? name;
   return camera;
@@ -33,7 +32,6 @@ export function damp(rate: number, dt: number): number {
   if (!(rate > 0) || !(dt > 0)) return rate > 0 ? 0 : 1;
   return 1 - Math.exp(-rate * dt);
 }
-
 
 export interface OrbitState {
   azimuth: number;
@@ -135,9 +133,9 @@ export function makeOrbitRig(opts: OrbitRigOptions = {}): OrbitRig {
     limits,
   );
   const state: OrbitState = { ...desired };
-  const rate = opts.damping ?? 8;
-  const rotateSpeed = opts.rotateSpeed ?? 0.006;
-  const zoomSpeed = opts.zoomSpeed ?? 0.0016;
+  const rate = opts.damping ?? 5;
+  const rotateSpeed = opts.rotateSpeed ?? 0.004;
+  const zoomSpeed = opts.zoomSpeed ?? 0.0012;
   const panSpeed = opts.panSpeed ?? 0.0022;
   const followRate = opts.follow ?? 0;
   const scratch = new THREE.Vector3();
@@ -282,4 +280,3 @@ export function makeOrbitRig(opts: OrbitRigOptions = {}): OrbitRig {
 
   return rig;
 }
-

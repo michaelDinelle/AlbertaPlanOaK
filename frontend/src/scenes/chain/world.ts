@@ -1,4 +1,3 @@
-
 import * as THREE from 'three';
 import {
   CELL,
@@ -33,7 +32,6 @@ import { makeWorld, type WorldCore } from '@kit/world';
 import { CHAIN_END, CHAIN_L, chainDecoder } from '@sim/envs/chain';
 import type { EnvGeometry, GridGeometry } from '@sim/types';
 
-
 export const WATER_LEVEL = -0.17;
 export const BED_Y = -1.05;
 export const BANK_Y = 0.62;
@@ -49,7 +47,6 @@ export const SHADOW_RADIUS = 12.5;
 
 export const CAMERA_AZIMUTH = 0.35;
 export const CAMERA_STANDOFF = 13.5;
-
 
 export function tubeGeometry(
   a: readonly [number, number, number],
@@ -73,7 +70,6 @@ export function tubeGeometry(
   return g;
 }
 
-
 export function resolveGrid(geometry: EnvGeometry): GridGeometry {
   const g = geometry.grid;
   if (g && g.w === CHAIN_L && g.h === 1) return g;
@@ -86,7 +82,6 @@ export function stoneX(index: number, grid: GridSize): number {
   const out: Vec3Tuple = [0, 0, 0];
   return cellToWorld(index, 0, grid, out)[0];
 }
-
 
 export interface CreekSkin {
   stoneDry: THREE.Color;
@@ -145,7 +140,6 @@ export function creekSkin(palette: Palette, tokens: typeof TOKENS): CreekSkin {
   };
 }
 
-
 export function makeCreekHeight(seed: number): (x: number, z: number) => number {
   const span = BANK_Y - BED_Y;
   return (x, z) => {
@@ -162,7 +156,6 @@ export function makeCreekHeight(seed: number): (x: number, z: number) => number 
     return base + w * (n1 * 0.9 + n2 * 0.34);
   };
 }
-
 
 export interface StoneCapsHandle {
   mesh: THREE.InstancedMesh;
@@ -343,7 +336,6 @@ function buildStoneCaps(
   };
 }
 
-
 export interface DragonfliesHandle {
   mesh: THREE.InstancedMesh;
   count: number;
@@ -446,7 +438,6 @@ function buildDragonflies(
   };
 }
 
-
 export function excludeCrossing(grid: GridSize, halfZ: number, margin: number): ExcludeFn {
   const halfX = ((grid.w - 1) / 2) * CELL + 0.5 + margin;
   return (x, z) => Math.abs(z) <= halfZ && Math.abs(x) <= halfX;
@@ -469,7 +460,6 @@ export function excludeCameraWedge(halfX: number, halfZ: number): ExcludeFn {
   return (x, z) => Math.abs(x - cx) <= halfX && Math.abs(z - cz) <= halfZ;
 }
 
-
 export interface WorldHandle extends WorldCore {
   sky: SkyHandle;
   rig: LightRig;
@@ -479,7 +469,6 @@ export interface WorldHandle extends WorldCore {
   caps: StoneCapsHandle;
   petalMotes: AmbientParticlesHandle;
 }
-
 
 export function buildWorld(ctx: SceneContext, scene: THREE.Scene, grid: GridGeometry): WorldHandle {
   const palette: Palette = ctx.tokens.palettes.afternoon;

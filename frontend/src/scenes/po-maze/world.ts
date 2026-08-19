@@ -1,4 +1,3 @@
-
 import * as THREE from 'three';
 import {
   CELL,
@@ -11,7 +10,7 @@ import {
 import { applyFog, makeLightRig, type LightRig } from '@kit/lighting';
 import { oakMaterial, oakUniforms, type OakMaterial } from '@kit/materials';
 import { blendTokens, clamp01, shade, smoothstep01 } from '@kit/mix';
-import { makeAmbientParticles, makeMistPlanes, type AmbientParticlesHandle } from '@kit/particles';
+import { makeAmbientParticles, makeMistPlanes } from '@kit/particles';
 import { mergeColoredParts, type ColoredPart } from '@kit/parts';
 import { hash2f } from '@kit/rng';
 import { skyFromPalette, type SkyHandle } from '@kit/sky';
@@ -35,7 +34,6 @@ import {
 } from '@sim/envs/pomaze';
 import type { EnvGeometry, GridCell, GridGeometry } from '@sim/types';
 
-
 export const MAZE_HALF = (POMAZE_W * CELL) / 2;
 export const TERRAIN_SIZE = 84;
 export const TERRAIN_SEGMENTS = 120;
@@ -57,7 +55,6 @@ export const FOG_LIFT = 0.55;
 export const OUTER_FOREST_INNER = 14;
 export const OUTER_FOREST_OUTER = 21;
 
-
 export function resolveGrid(geometry: EnvGeometry): GridGeometry {
   const g = geometry.grid;
   if (g && g.w === POMAZE_W && g.h === POMAZE_H) return g;
@@ -74,7 +71,6 @@ export function resolveGaps(grid: GridGeometry): readonly GridCell[] {
   return h && h.length > 0 ? h : POMAZE_GAPS;
 }
 
-
 export function bubbleVisibility(wx: number, wz: number, cx: number, cz: number): number {
   const d = Math.max(Math.abs(cx - wx), Math.abs(cz - wz));
   if (d <= BUBBLE_INNER) return 1;
@@ -82,19 +78,11 @@ export function bubbleVisibility(wx: number, wz: number, cx: number, cz: number)
   return 1 - smoothstep01((d - BUBBLE_INNER) / (BUBBLE_OUTER - BUBBLE_INNER));
 }
 
-
-export const MOTH_RIM = BUBBLE_OUTER * 0.88;
-export const MOTH_BREATH = 0.16;
-export const MOTH_SWING = 0.34;
-export const MOTH_HEIGHT = 0.6;
-export const MOTH_BOB = 0.12;
-
 export function revealVisibility(rx: number, rz: number, cx: number, cz: number, radius: number): number {
   const d = Math.hypot(cx - rx, cz - rz);
   if (d >= radius) return 0;
   return 1 - smoothstep01((d - radius * 0.45) / (radius * 0.55));
 }
-
 
 export interface ForestSkin {
   litterA: THREE.Color;
@@ -129,7 +117,6 @@ export function forestSkin(palette: Palette, tokens: typeof TOKENS): ForestSkin 
   };
 }
 
-
 export function excludeCellCenters(radius: number): ExcludeFn {
   const r2 = radius * radius;
   return (x, z) => {
@@ -146,7 +133,6 @@ export function excludeDisc(radius: number): ExcludeFn {
   return (x, z) => x * x + z * z < r2;
 }
 
-
 export function makeForestHeight(seed: number): (x: number, z: number) => number {
   return (x, z) => {
     const out = Math.max(Math.abs(x), Math.abs(z)) - MAZE_HALF;
@@ -157,7 +143,6 @@ export function makeForestHeight(seed: number): (x: number, z: number) => number
     return w * (n1 * 1.5 + n2 * 0.5);
   };
 }
-
 
 export interface SpruceRanksOptions {
   grid: GridGeometry;
@@ -330,7 +315,6 @@ export function buildSpruceRanks(opts: SpruceRanksOptions): SpruceRanksHandle {
   };
 }
 
-
 export interface GapGateHandle {
   root: THREE.Object3D;
   body: THREE.Object3D;
@@ -386,7 +370,6 @@ export function makeGateStonesGeometry(skin: ForestSkin): THREE.BufferGeometry {
   return mergeColoredParts(parts, 'gapGateStones');
 }
 
-
 export interface WorldHandle extends WorldCore {
   sky: SkyHandle;
   rig: LightRig;
@@ -400,7 +383,6 @@ export interface WorldHandle extends WorldCore {
   setShadowFocus(x: number, z: number): void;
   setFogLift(amount: number): void;
 }
-
 
 export function buildWorld(ctx: SceneContext, scene: THREE.Scene, grid: GridGeometry): WorldHandle {
   const palette: Palette = ctx.tokens.palettes.dawn;

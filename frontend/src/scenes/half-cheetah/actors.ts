@@ -1,4 +1,3 @@
-
 import {
   emissiveMaterial,
   oakMaterial,
@@ -14,7 +13,6 @@ import type { Palette } from '@kit/tokens';
 import * as THREE from 'three';
 import { CHEETAH_BONES, FK_POINT_INDEX } from '@sim/fk/cheetah';
 import type { CheetahGeometry } from '@sim/types';
-
 
 const SPOT_DENSITY = 7.5;
 const CONTACT_HIGH = 0.1;
@@ -42,7 +40,6 @@ const FOOT: CoatSpec = { r0: 0.036, rMid: 0.032, r1: 0.028, belly: 0, sock: 1, s
 const COATS: readonly CoatSpec[] = [TORSO, THIGH, SHIN, FOOT, THIGH, SHIN, FOOT];
 const BONE_NAMES: readonly string[] = ['torso', 'thighBack', 'shinBack', 'footBack', 'thighFront', 'shinFront', 'footFront'];
 
-
 const TAIL_LEN: readonly number[] = [0.26, 0.23, 0.2, 0.17];
 const TAIL_R: readonly number[] = [0.062, 0.055, 0.047, 0.04, 0.022];
 const TAIL_DROOP: readonly number[] = [0.17, 0.2, 0.22, 0.2];
@@ -50,7 +47,6 @@ const TAIL_SWING: readonly number[] = [0.14, 0.18, 0.22, 0.26];
 const TAIL_STREAM = 0.72;
 const TAIL_HANG = 0.13;
 const TAIL_RUN_LIFT = 0.4;
-
 
 export type CoatColorFn = (t: number, theta: number, out: THREE.Color) => void;
 
@@ -165,7 +161,6 @@ export function spotMask(u: number, v: number, nu: number, nv: number, seed: num
   }
   return 1 - smoothstep01(best / Math.max(1e-4, radius));
 }
-
 
 export interface CheetahHandle {
   group: THREE.Group;

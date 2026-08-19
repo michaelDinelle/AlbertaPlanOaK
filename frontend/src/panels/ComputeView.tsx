@@ -1,7 +1,8 @@
 import { useMemo } from 'react';
 import { clsx } from 'clsx';
 import { Line } from 'recharts';
-import { ENVS, isEnvId } from '@shared/envs';
+import { isEnvId } from '@shared/envs';
+import { nameOf } from '../scenes/table';
 import type { Policy, RunDetail } from '@shared/types';
 import { useSelection } from '../state/selectionStore';
 import { STR } from '../strings';
@@ -96,7 +97,7 @@ export function ComputeView({ runs }: { runs: Record<Policy, RunDetail | null> }
         <>
           <div className="pt-1">
             <Label hint={STR.compute.titleHint}>
-              {STR.compute.efficiencyEnv(isEnvId(sel.envId) ? ENVS[sel.envId].name : sel.envId)}
+              {STR.compute.efficiencyEnv(isEnvId(sel.envId) ? nameOf(sel.envId) : sel.envId)}
             </Label>
           </div>
           <TimeChart

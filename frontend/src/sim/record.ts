@@ -43,7 +43,6 @@ export function codecFromEntry(entry: EnvEntry): CodecDescriptor {
   };
 }
 
-
 function asWindow(buf: ArrayBuffer | ArrayBufferView): Uint8Array {
   if (ArrayBuffer.isView(buf)) {
     return new Uint8Array(buf.buffer, buf.byteOffset, buf.byteLength);
@@ -222,4 +221,3 @@ export function decodeChunkPayload(
     throw new RecordParseError(`chunk payload has ${limit - off} trailing bytes`);
   }
 }
-

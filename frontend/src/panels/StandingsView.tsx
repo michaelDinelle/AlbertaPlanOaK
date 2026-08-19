@@ -1,7 +1,8 @@
 import { useMemo } from 'react';
 import { clsx } from 'clsx';
 import { Area, Line, ReferenceLine } from 'recharts';
-import { ENVS, isEnvId } from '@shared/envs';
+import { isEnvId } from '@shared/envs';
+import { nameOf } from '../scenes/table';
 import type { Ci95, Policy, RunDetail, RunSummary } from '@shared/types';
 import { formatPercent, formatRate } from '../lib/format';
 import { selectEnv, useSelection } from '../state/selectionStore';
@@ -107,7 +108,7 @@ export function StandingsView({ runs }: { runs: Record<Policy, RunDetail | null>
         else if (ppoMark.ci[0] > oak.ci[1]) ppoAhead++;
         else close++;
       }
-      return { envId, name: isEnvId(envId) ? ENVS[envId].name : envId, oakZ: oak?.z ?? null, marks };
+      return { envId, name: isEnvId(envId) ? nameOf(envId) : envId, oakZ: oak?.z ?? null, marks };
     });
     rows.sort((a, b) => (b.oakZ ?? -Infinity) - (a.oakZ ?? -Infinity));
     return { rows, oakAhead, ppoAhead, close };

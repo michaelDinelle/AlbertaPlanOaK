@@ -1,4 +1,3 @@
-
 import {
   emissiveMaterial,
   oakMaterial,
@@ -13,7 +12,6 @@ import type { Palette } from '@kit/tokens';
 import * as THREE from 'three';
 import { AB_L1, AB_L2 } from '@sim/envs/acrobot';
 import { EXACT_POINT_FLOATS, acrobotPointsExact } from './world';
-
 
 const VINE_R1 = 0.055;
 const VINE_R2 = 0.042;
@@ -419,7 +417,6 @@ export function buildArm(opts: ArmOptions): ArmHandle {
     },
   };
 }
-
 
 export function makeVineGeometry(
   length: number,

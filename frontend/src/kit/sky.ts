@@ -1,4 +1,3 @@
-
 import * as THREE from 'three';
 import type { Palette } from './tokens';
 
@@ -113,7 +112,6 @@ void main() {
 	vec3 dir = normalize( vOakDir );
 	float h = clamp( dir.y, -1.0, 1.0 );
 	vec3 col = uHorizon;
-	// NOTE: every smoothstep here keeps edge0 < edge1 — reversed edges are undefined in GLSL.
 	col = mix( col, uTop, smoothstep( 0.0, max( uTopSpread, 0.001 ), h ) );
 	col = mix( col, uBottom, smoothstep( 0.0, max( uBottomSpread, 0.001 ), -h ) );
 `;

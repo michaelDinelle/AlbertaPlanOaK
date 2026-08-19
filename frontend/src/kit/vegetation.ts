@@ -1,4 +1,3 @@
-
 import * as THREE from 'three';
 import { oakMaterial, oakUniforms } from './materials';
 import type { OakMaterial } from './materials';
@@ -31,7 +30,6 @@ export interface ScatterOptions {
   rimStrength?: number;
   castShadow?: boolean;
   receiveShadow?: boolean;
-  maxTries?: number;
   name?: string;
 }
 
@@ -45,7 +43,6 @@ export interface VegetationHandle {
   setWind(amplitude: number, frequency?: number): void;
   dispose(): void;
 }
-
 
 interface Placement {
   x: number;
@@ -64,7 +61,6 @@ export function scatterPlacements(opts: ScatterOptions, streamName: string, vari
   const cx = opts.area.x ?? 0;
   const cz = opts.area.z ?? 0;
   const inner = opts.area.innerRadius ?? 0;
-  const maxTries = Math.max(1, opts.maxTries ?? 12);
   const [sMin, sMax] = opts.scale ?? [0.8, 1.25];
   const [tMin, tMax] = opts.stretch ?? [1, 1];
   const heightAt = opts.heightAt;
@@ -73,7 +69,7 @@ export function scatterPlacements(opts: ScatterOptions, streamName: string, vari
 
   for (let i = 0; i < wanted; i++) {
     let placed = false;
-    for (let attempt = 0; attempt < maxTries && !placed; attempt++) {
+    for (let attempt = 0; attempt < 12 && !placed; attempt++) {
       const x = cx + (rng() * 2 - 1) * opts.area.halfX;
       const z = cz + (rng() * 2 - 1) * opts.area.halfZ;
       const s = sMin + rng() * (sMax - sMin);
@@ -224,7 +220,6 @@ function buildScatter(
     },
   };
 }
-
 
 function gradeByHeight(geometry: THREE.BufferGeometry, low = 0.55, high = 1.15): THREE.BufferGeometry {
   const pos = geometry.getAttribute('position');
@@ -408,7 +403,6 @@ export function flowerGeometry(petals = 5): THREE.BufferGeometry {
   for (const p of parts) p.dispose();
   return gradeByHeight(merged, 0.5, 1.25);
 }
-
 
 export function scatterGrass(opts: ScatterOptions): VegetationHandle {
   const detail = 4;

@@ -1,4 +1,3 @@
-
 import { GoalBeacon, KeyToken } from '@kit/grid';
 import {
   emissiveMaterial,
@@ -21,7 +20,6 @@ import {
   smoothBand,
   type GardenSkin,
 } from './world';
-
 
 const DOOR_HEIGHT = DIVIDER_HEIGHT - 0.02;
 const DOOR_WIDTH = 0.9;
@@ -406,7 +404,6 @@ export function makeIvySprigGeometry(skin: GardenSkin): THREE.BufferGeometry {
   return mergeColoredParts(parts, 'ivySprig');
 }
 
-
 const SHRINE_CROWN = 0.66;
 const EMBER_HDR = 1.3;
 
@@ -554,7 +551,6 @@ export function makeShrineGeometry(skin: GardenSkin): THREE.BufferGeometry {
 
   return mergeColoredParts(parts, 'goalShrine');
 }
-
 
 export const SEED_HOVER = 0.34;
 

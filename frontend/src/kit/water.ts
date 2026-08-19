@@ -1,4 +1,3 @@
-
 import * as THREE from 'three';
 import type { Palette } from './tokens';
 
@@ -152,7 +151,6 @@ varying vec3 vNormalW;
 varying float vHeight;
 varying float vDepth;
 
-// two counter-scrolling triangle lattices -> the classic pool-caustic web, no texture
 float oakCaustic( vec2 p, float t ) {
 	vec2 a = p * 1.7 + vec2( t * 0.09, t * 0.06 );
 	vec2 b = p * 2.3 - vec2( t * 0.07, t * 0.11 );
@@ -166,20 +164,16 @@ void main() {
 	vec3 n = normalize( vNormalW );
 	vec3 viewDir = normalize( cameraPosition - vWorld );
 
-	// depth gradient: distance from the eye AND the wave trough both push toward uDeep
 	float byDepth = 1.0 - exp( -vDepth / max( uDepthFalloff, 0.001 ) );
 	float byTrough = clamp( 0.5 - vHeight * 6.0, 0.0, 1.0 );
 	vec3 col = mix( uShallow, uDeep, clamp( byDepth * 0.75 + byTrough * 0.35, 0.0, 1.0 ) );
 
-	// caustic shimmer, strongest in the shallows
 	float caustic = oakCaustic( vWorld.xz * uWaveScale, uTime * uSpeed );
 	col += uCaustic * ( caustic * uCausticStrength * ( 1.0 - byDepth * 0.7 ) );
 
-	// sky-tinted fresnel rim
 	float f = pow( clamp( 1.0 - dot( n, viewDir ), 0.0, 1.0 ), 3.0 );
 	col = mix( col, uSky, f * uFresnel );
 
-	// a single specular glint along the sun direction (HDR: this is what blooms)
 	vec3 halfV = normalize( normalize( uSunDir ) + viewDir );
 	float spec = pow( clamp( dot( n, halfV ), 0.0, 1.0 ), 96.0 );
 	col += uSky * ( spec * uSpecular );

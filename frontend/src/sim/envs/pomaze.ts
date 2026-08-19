@@ -1,7 +1,5 @@
-
 import { POSE_LEN } from '../record';
-import type { EnvDecoder, EnvFrame, EnvGeometry, GridCell, SimEvent } from '../types';
-import { NO_EVENTS } from '../events';
+import { NO_EVENTS, type EnvDecoder, type EnvFrame, type EnvGeometry, type GridCell, type SimEvent } from '../types';
 
 export const POMAZE_W = 11;
 export const POMAZE_H = 11;
@@ -70,7 +68,6 @@ export const poMazeDecoder: EnvDecoder<POMazeStatic> = {
       pose,
     };
   },
-
 
   deriveEvents(_prev: EnvFrame, next: EnvFrame): SimEvent[] {
     if (next.done === 0) return NO_EVENTS;

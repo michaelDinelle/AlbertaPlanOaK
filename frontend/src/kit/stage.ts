@@ -7,11 +7,19 @@ import {
 } from './celebrate';
 import { GroundTruthOverlay, type GroundTruthOptions } from './debug';
 import { makeOrbitRig, type OrbitRig, type OrbitRigOptions } from './rigs';
-import type { FrameUpdate, SceneContext, SceneManifest, SceneModule, SceneSize } from './types';
+import type { FrameUpdate, SceneContext, SceneModule, SceneSize } from './types';
 import type { WorldCore } from './world';
+import { SCENES } from '../scenes/table';
+
+export interface Stage<W extends WorldCore> {
+  ctx: SceneContext;
+  world: W;
+  pool: CelebrationPool;
+  rig: OrbitRig;
+  time: number;
+}
 
 export abstract class StageScene<W extends WorldCore> implements SceneModule {
-  abstract readonly manifest: SceneManifest;
   scene = new THREE.Scene();
   camera = new THREE.PerspectiveCamera(40, 16 / 9, 0.1, 500);
 
@@ -26,11 +34,18 @@ export abstract class StageScene<W extends WorldCore> implements SceneModule {
   protected abstract buildWorld(ctx: SceneContext): W;
   protected abstract buildActors(ctx: SceneContext, world: W): void;
   protected abstract rigOptions(ctx: SceneContext): OrbitRigOptions;
-  protected abstract poolOptions(ctx: SceneContext): CelebrationPoolOptions;
   protected abstract overlayOptions(ctx: SceneContext): GroundTruthOptions;
   protected abstract start(ctx: SceneContext, world: W): void;
-  protected abstract tick(frame: FrameUpdate): void;
+  protected abstract tick(frame: FrameUpdate, stage: Stage<W>): void;
   protected abstract drop(): void;
+
+  protected poolOptions(_ctx: SceneContext): CelebrationPoolOptions {
+    return {};
+  }
+
+  protected accentOf(ctx: SceneContext): number {
+    return ctx.tokens.accents[SCENES[ctx.envId].slug] ?? ctx.tokens.celebrationGold;
+  }
 
   async init(ctx: SceneContext): Promise<void> {
     this.ctx = ctx;
@@ -39,15 +54,30 @@ export abstract class StageScene<W extends WorldCore> implements SceneModule {
     this.world = world;
     this.scene.add(world.group);
     this.buildActors(ctx, world);
-    const rig = makeOrbitRig(this.rigOptions(ctx));
+    const rig = makeOrbitRig({
+      canvas: ctx.canvas,
+      aspect: ctx.size.height > 0 ? ctx.size.width / ctx.size.height : 16 / 9,
+      fov: ctx.tokens.fovHero,
+      name: `${this.stageName}OrbitRig`,
+      ...this.rigOptions(ctx),
+    });
     this.rig = rig;
     this.camera = rig.camera;
     rig.snap();
-    const pool = new CelebrationPool(this.poolOptions(ctx));
+    const pool = new CelebrationPool({
+      seed: ctx.seed,
+      name: `${this.stageName}Celebrations`,
+      burstSize: SCENES[ctx.envId].burst,
+      ...this.poolOptions(ctx),
+    });
     attachCelebrations(this.scene, pool);
     pool.setPixelRatio(ctx.size.dpr);
     this.pool = pool;
-    const overlay = new GroundTruthOverlay(ctx.geometry, this.overlayOptions(ctx));
+    const overlay = new GroundTruthOverlay(ctx.geometry, {
+      camera: this.camera,
+      name: `${this.stageName}GroundTruth`,
+      ...this.overlayOptions(ctx),
+    });
     this.scene.add(overlay.group);
     overlay.visible = this.debugOn;
     this.overlay = overlay;
@@ -56,8 +86,12 @@ export abstract class StageScene<W extends WorldCore> implements SceneModule {
   }
 
   update(frame: FrameUpdate): void {
-    if (!this.ctx) return;
-    this.tick(frame);
+    const ctx = this.ctx;
+    const world = this.world;
+    const pool = this.pool;
+    const rig = this.rig;
+    if (!ctx || !world || !pool || !rig) return;
+    this.tick(frame, { ctx, world, pool, rig, time: ctx.time() });
     if (this.debugOn && this.overlay) this.overlay.setState(frame.state);
   }
 

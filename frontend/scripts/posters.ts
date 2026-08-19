@@ -1,7 +1,8 @@
 import { mkdir, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
-import { ENV_IDS, ENVS } from '../shared/envs';
+import { ENV_IDS } from '../shared/envs';
+import { SCENES, nameOf } from '../src/scenes/table';
 
 const HELP = [
   'Regenerates the 16 environment poster images the app ships as static files.',
@@ -119,9 +120,9 @@ try {
   await cdp.send('Page.enable');
   await mkdir(outDir, { recursive: true });
   for (const envId of ENV_IDS) {
-    const info = ENVS[envId];
+    const info = SCENES[envId];
     await cdp.send('Page.navigate', { url: `${origin}/?env=${envId}&at=${CAPTURE_AT_STEP}` });
-    await waitForStage(cdp, info.name);
+    await waitForStage(cdp, nameOf(envId));
     await new Promise((res) => setTimeout(res, SETTLE_MS));
     await evaluate(
       cdp,

@@ -2,7 +2,8 @@ import { useMemo, useState } from 'react';
 import { clsx } from 'clsx';
 import { ArrowUpDown, X } from 'lucide-react';
 import { VList } from 'virtua';
-import { ENVS, type EnvId } from '@shared/envs';
+import type { EnvId } from '@shared/envs';
+import { SCENES, nameOf } from '../scenes/table';
 import type { RunDetail } from '@shared/types';
 import { Frost } from '../glass/Panel';
 import { Label, TXT } from '../panels/charts';
@@ -28,12 +29,12 @@ function Tile({
   current: boolean;
   onPick: (envId: EnvId) => void;
 }) {
-  const info = ENVS[envId];
+  const info = SCENES[envId];
   return (
     <button
       type="button"
       onClick={() => onPick(envId)}
-      title={`${STR.wall.watchEnv(info.name)} — ${seedCount > 0 ? STR.wall.seeds(seedCount) : STR.wall.none}`}
+      title={`${STR.wall.watchEnv(nameOf(envId))} — ${seedCount > 0 ? STR.wall.seeds(seedCount) : STR.wall.none}`}
       className={clsx(
         'group relative aspect-video overflow-hidden rounded-lg text-left transition-transform hover:scale-[1.02]',
         current && 'ring-2 ring-accent',
@@ -47,7 +48,7 @@ function Tile({
         className={clsx('absolute inset-0 h-full w-full object-cover', seedCount === 0 && 'opacity-45')}
       />
       <span className="absolute inset-x-0 bottom-0 flex items-baseline gap-2 bg-gradient-to-t from-black/75 to-transparent px-2.5 pb-1.5 pt-5">
-        <span className="text-xs font-medium text-ink">{info.name}</span>
+        <span className="text-xs font-medium text-ink">{nameOf(envId)}</span>
         <span className={clsx('ml-auto', TXT.dataDim)}>{STR.wall.seeds(seedCount)}</span>
       </span>
     </button>
@@ -70,12 +71,12 @@ export function EnvWall({
 
   const rows = useMemo(() => {
     const q = query.trim().toLowerCase();
-    const shown = envList.filter((id) => q === '' || ENVS[id].name.toLowerCase().includes(q));
+    const shown = envList.filter((id) => q === '' || nameOf(id).toLowerCase().includes(q));
     const seedCount = (id: EnvId): number => seedsFor(recordings, id).length;
     const reward = (id: EnvId): number => detail?.summary?.envs[id]?.finalRate.iqmZ ?? -Infinity;
     const sorted = [...shown].sort((a, b) =>
       sort === 'name'
-        ? ENVS[a].name.localeCompare(ENVS[b].name)
+        ? nameOf(a).localeCompare(nameOf(b))
         : sort === 'seeds'
           ? seedCount(b) - seedCount(a)
           : reward(b) - reward(a),

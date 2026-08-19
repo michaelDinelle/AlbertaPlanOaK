@@ -141,10 +141,6 @@ export function snapshot<M extends DeriveMode>(
   return (slot?.data as DeriveResults[M] | null | undefined) ?? null;
 }
 
-export function snapshotError(runId: string, envId: string | null, mode: DeriveMode): string | null {
-  return slots.get(snapshotKey(runId, envId, mode))?.error ?? null;
-}
-
 export function refreshRun(runId: string): void {
   for (const [key, slot] of slots) {
     if (slot.runId === runId) runDerive(key);

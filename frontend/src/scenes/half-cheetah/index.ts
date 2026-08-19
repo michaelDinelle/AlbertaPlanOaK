@@ -1,17 +1,13 @@
-
-import type { CelebrationPoolOptions } from '@kit/celebrate';
 import { defaultFkToWorld, type GroundTruthOptions } from '@kit/debug';
 import { clampRange, envelope } from '@kit/mix';
 import { orbitFromPose, type OrbitRigOptions } from '@kit/rigs';
-import { StageScene } from '@kit/stage';
+import { StageScene, type Stage } from '@kit/stage';
 import type { FrameState, FrameUpdate, SceneContext, SceneFactory, SceneSize } from '@kit/types';
 import { CHEETAH_DT, CHEETAH_ROOT_X } from '@sim/envs/halfcheetah';
 import { FK_FLOATS, FK_POINT_INDEX, cheetahGeometry } from '@sim/fk/cheetah';
 import type { CheetahGeometry } from '@sim/types';
 import { REFERENCE_SPEED, buildCheetah, type CheetahHandle } from './actors';
-import { manifest } from './manifest';
 import { buildWorld, type WorldHandle } from './world';
-
 
 export const TRACK_Y = 0.52;
 export const CAM_OFFSET: readonly [number, number, number] = [0.95, 0.33, 3.5];
@@ -28,7 +24,6 @@ function velocityOf(state: FrameState, prev: FrameState | null): number {
 }
 
 class GoldHourSavannaScene extends StageScene<WorldHandle> {
-  readonly manifest = manifest;
   protected readonly stageName = 'goldHourSavanna';
 
   private cheetah: CheetahHandle | null = null;
@@ -46,7 +41,7 @@ class GoldHourSavannaScene extends StageScene<WorldHandle> {
 
   protected buildActors(ctx: SceneContext, world: WorldHandle): void {
     const palette = ctx.tokens.palettes.dusk;
-    const accent = ctx.tokens.accents[manifest.accent] ?? ctx.tokens.celebrationGold;
+    const accent = this.accentOf(ctx);
 
     const bounce = world.rig.points[0];
     if (bounce) bounce.color.set(palette.accentLight);
@@ -67,33 +62,22 @@ class GoldHourSavannaScene extends StageScene<WorldHandle> {
     const offset = CAM_OFFSET;
     const home = orbitFromPose(offset, [0, 0, 0]);
     return {
-      canvas: ctx.canvas,
       target: [0, TRACK_Y, 0],
       azimuth: home.azimuth,
       polar: home.polar,
       distance: home.distance,
-      fov: ctx.tokens.fovHero,
       near: 0.08,
       far: 420,
-      aspect: ctx.size.height > 0 ? ctx.size.width / ctx.size.height : 16 / 9,
+      rotateSpeed: 0.006,
+      zoomSpeed: 0.0016,
       damping: 6,
       follow: 3.4,
-      name: 'savannaOrbitRig',
     };
   }
 
-  protected poolOptions(ctx: SceneContext): CelebrationPoolOptions {
+    protected overlayOptions(): GroundTruthOptions {
     return {
-      seed: ctx.seed,
-      name: 'savannaCelebrations',
-    };
-  }
-
-  protected overlayOptions(): GroundTruthOptions {
-    return {
-      camera: this.camera,
       fkToWorld: defaultFkToWorld,
-      name: 'savannaGroundTruth',
     };
   }
 
@@ -120,15 +104,10 @@ class GoldHourSavannaScene extends StageScene<WorldHandle> {
     world.setSpeed(speed01);
   }
 
-  protected tick(frame: FrameUpdate): void {
-    const ctx = this.ctx;
-    const world = this.world;
+  protected tick(frame: FrameUpdate, { world, pool, rig, time }: Stage<WorldHandle>): void {
     const cheetah = this.cheetah;
-    const pool = this.pool;
-    const rig = this.rig;
-    if (!ctx || !world || !cheetah || !pool || !rig) return;
+    if (!cheetah) return;
 
-    const time = ctx.time();
     const state = frame.state;
 
     pool.update(frame.dtReal, time);
@@ -188,5 +167,4 @@ class GoldHourSavannaScene extends StageScene<WorldHandle> {
   }
 }
 
-const createScene: SceneFactory = () => new GoldHourSavannaScene();
-export default createScene;
+export default ((() => new GoldHourSavannaScene()) satisfies SceneFactory);

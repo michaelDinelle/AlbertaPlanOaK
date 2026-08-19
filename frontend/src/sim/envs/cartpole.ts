@@ -1,7 +1,4 @@
-
-import type { EnvDecoder, EnvFrame, EnvGeometry, SimEvent } from '../types';
-import { NO_EVENTS } from '../events';
-
+import { NO_EVENTS, type EnvDecoder, type EnvFrame, type EnvGeometry, type SimEvent } from '../types';
 
 export const CP_X_LIMIT = Math.fround(2.4);
 export const CP_TH_LIMIT = Math.fround(0.2094395);
@@ -19,14 +16,12 @@ export function cartPoleForce(action: number): number {
   return (Math.trunc(action) & 1) === 1 ? CP_FORCE_MAG : -CP_FORCE_MAG;
 }
 
-
 export function cartPoleTip(x: number, th: number, out?: Float32Array): Float32Array {
   const o = out ?? new Float32Array(2);
   o[0] = x + CP_POLE_LENGTH * Math.sin(th);
   o[1] = CP_POLE_LENGTH * Math.cos(th);
   return o;
 }
-
 
 const ANCHORS: Record<string, readonly [number, number, number]> = Object.freeze({
   pivot: [0, 0, 0],
@@ -72,7 +67,6 @@ export const cartPoleDecoder: EnvDecoder<null> = {
       pose,
     };
   },
-
 
   deriveEvents(prev: EnvFrame, next: EnvFrame): SimEvent[] {
     if (next.done === 0 && prev.done === 0) return NO_EVENTS;

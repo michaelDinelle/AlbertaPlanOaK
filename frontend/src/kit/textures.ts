@@ -1,4 +1,3 @@
-
 import * as THREE from 'three';
 import { hash2f, hash2i, mulberry32 } from './rng';
 
@@ -25,7 +24,6 @@ function wrapIndex(i: number, period: number): number {
   return ((i % period) + period) % period;
 }
 
-
 export function valueNoise2(x: number, y: number, period: number, seed: number): number {
   const ix = Math.floor(x);
   const iy = Math.floor(y);
@@ -47,9 +45,6 @@ export interface FbmOptions {
   frequency?: number;
   octaves?: number;
   gain?: number;
-  lacunarity?: number;
-  ridged?: boolean;
-  contrast?: number;
 }
 
 export function fbmField(seed: number, opts: FbmOptions = {}): { size: number; data: Float32Array } {
@@ -57,9 +52,6 @@ export function fbmField(seed: number, opts: FbmOptions = {}): { size: number; d
   const frequency = Math.max(1, Math.floor(opts.frequency ?? 4));
   const octaves = Math.max(1, Math.min(8, Math.floor(opts.octaves ?? 4)));
   const gain = opts.gain ?? 0.5;
-  const lacunarity = Math.max(1, Math.floor(opts.lacunarity ?? 2));
-  const ridged = opts.ridged === true;
-  const contrast = opts.contrast ?? 1;
 
   const data = new Float32Array(size * size);
   let norm = 0;
@@ -79,13 +71,11 @@ export function fbmField(seed: number, opts: FbmOptions = {}): { size: number; d
       let sum = 0;
       for (let o = 0; o < octaves; o++) {
         const n = valueNoise2((px / size) * freq, (py / size) * freq, freq, seed + o * 7919);
-        sum += amp * (ridged ? 1 - Math.abs(2 * n - 1) : n);
+        sum += amp * n;
         amp *= gain;
-        freq *= lacunarity;
+        freq *= 2;
       }
-      let v = clamp01(sum * invNorm);
-      if (contrast !== 1) v = Math.pow(v, contrast);
-      data[py * size + px] = v;
+      data[py * size + px] = clamp01(sum * invNorm);
     }
   }
   return { size, data };
@@ -95,7 +85,6 @@ export function fbm(seed: number, opts: FbmOptions = {}): THREE.DataTexture {
   const { size, data } = fbmField(seed, opts);
   return grayTexture(data, size, 'oak-fbm');
 }
-
 
 export interface VoronoiOptions {
   size?: number;
@@ -166,61 +155,6 @@ export function voronoi(seed: number, opts: VoronoiOptions = {}): THREE.DataText
   return makeDataTexture(rgba, size, size, 'oak-voronoi');
 }
 
-
-export interface RampStop {
-  t: number;
-  color: number;
-  alpha?: number;
-}
-
-export function sampleRamp(stops: readonly RampStop[], t: number, out: Uint8Array, offset = 0): void {
-  const n = stops.length;
-  if (n === 0) {
-    out[offset] = 255;
-    out[offset + 1] = 0;
-    out[offset + 2] = 255;
-    out[offset + 3] = 255;
-    return;
-  }
-  const x = clamp01(t);
-  let lo = stops[0] as RampStop;
-  let hi = stops[n - 1] as RampStop;
-  if (x <= lo.t) {
-    hi = lo;
-  } else if (x >= hi.t) {
-    lo = hi;
-  } else {
-    for (let i = 0; i < n - 1; i++) {
-      const a = stops[i] as RampStop;
-      const b = stops[i + 1] as RampStop;
-      if (x >= a.t && x <= b.t) {
-        lo = a;
-        hi = b;
-        break;
-      }
-    }
-  }
-  const span = hi.t - lo.t;
-  const k = span > 1e-9 ? (x - lo.t) / span : 0;
-  const la = lo.alpha ?? 1;
-  const ha = hi.alpha ?? 1;
-  out[offset] = Math.round(lerp((lo.color >> 16) & 0xff, (hi.color >> 16) & 0xff, k));
-  out[offset + 1] = Math.round(lerp((lo.color >> 8) & 0xff, (hi.color >> 8) & 0xff, k));
-  out[offset + 2] = Math.round(lerp(lo.color & 0xff, hi.color & 0xff, k));
-  out[offset + 3] = Math.round(clamp01(lerp(la, ha, k)) * 255);
-}
-
-export function rampData(stops: readonly RampStop[], width = 64): Uint8Array {
-  const w = clampSize(width);
-  const sorted = [...stops].sort((a, b) => a.t - b.t);
-  const data = new Uint8Array(w * 4);
-  for (let i = 0; i < w; i++) {
-    sampleRamp(sorted, (i + 0.5) / w, data, i * 4);
-  }
-  return data;
-}
-
-
 export interface GrainOptions {
   size?: number;
   strength?: number;
@@ -250,7 +184,6 @@ export function grain(seed: number, opts: GrainOptions = {}): THREE.DataTexture 
   return grayTexture(data, size, 'oak-grain');
 }
 
-
 export function fieldToRGBA(field: Float32Array): Uint8Array {
   const rgba = new Uint8Array(field.length * 4);
   for (let i = 0; i < field.length; i++) {
@@ -279,10 +212,6 @@ export function makeDataTexture(data: Uint8Array, width: number, height: number,
   tex.anisotropy = 1;
   tex.needsUpdate = true;
   return tex;
-}
-
-export function hasCanvas2D(): boolean {
-  return typeof document !== 'undefined' && typeof document.createElement === 'function';
 }
 
 export function radialSprite(size = 64, power = 2): THREE.DataTexture {

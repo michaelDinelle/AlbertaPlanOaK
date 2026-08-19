@@ -1,4 +1,3 @@
-
 import {
   emissiveMaterial,
   oakMaterial,
@@ -12,7 +11,6 @@ import { mergeColoredParts, type ColoredPart } from '@kit/parts';
 import type { Palette } from '@kit/tokens';
 import * as THREE from 'three';
 import type { ReefSkin } from './reef';
-
 
 const SHELL_R = 0.5;
 const GAPE_UPPER = 0.95;
@@ -244,7 +242,6 @@ export function makeMantleGeometry(detail: number, skin: ReefSkin): THREE.Buffer
   g.name = 'clamMantle';
   return g;
 }
-
 
 export interface BubbleOptions {
   palette: Palette;

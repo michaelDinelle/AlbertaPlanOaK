@@ -1,8 +1,9 @@
-import { useSyncExternalStore } from 'react';
-import { ENVS, type EnvId } from '@shared/envs';
+import type { EnvId } from '@shared/envs';
 import type { Policy, RecordingRef, RunDetail } from '@shared/types';
 import type { PlaybackSource } from './playbackSource';
 import { entryFor, parseCatalog } from '@sim/catalog';
+import { nameOf } from '../scenes/table';
+import { createStore } from '../state/store';
 import { frameFromStep, heroSeed, stepFromFrame } from '../lib/selection';
 import { publishPosition, setTransport, subscribeTransport, transportSnapshot } from '../playback/store';
 import {
@@ -63,30 +64,12 @@ const EMPTY_META: StageMeta = {
   ticks: [],
 };
 
-let stageMeta: StageMeta = EMPTY_META;
+const meta = createStore<StageMeta>(EMPTY_META);
 
-const metaListeners = new Set<() => void>();
+export const stageMetaSnapshot = meta.get;
+export const useStageMeta = meta.use;
 
-function setStageMeta(patch: Partial<StageMeta>): void {
-  stageMeta = { ...stageMeta, ...patch };
-  for (const listener of metaListeners) listener();
-}
-
-export function stageMetaSnapshot(): StageMeta {
-  return stageMeta;
-}
-
-export function useStageMeta(): StageMeta {
-  return useSyncExternalStore(
-    (listener) => {
-      metaListeners.add(listener);
-      return () => {
-        metaListeners.delete(listener);
-      };
-    },
-    stageMetaSnapshot,
-  );
-}
+const setStageMeta = meta.patch;
 
 export interface StageFrame {
   position: number;
@@ -125,7 +108,7 @@ let appliedDebug = false;
 
 function degradedReason(recordings: readonly RecordingRef[], envId: EnvId): string | null {
   if (recordings.length === 0) return 'no recordings on this run';
-  if (seedsFor(recordings, envId).length === 0) return `no recordings for ${ENVS[envId].name} in this run`;
+  if (seedsFor(recordings, envId).length === 0) return `no recordings for ${nameOf(envId)} in this run`;
   return null;
 }
 
@@ -136,9 +119,9 @@ function baselineReason(
   policy: 'ppo' | 'random',
 ): string | null {
   if (recordings.length === 0) return `no ${policy} recordings on this baseline`;
-  if (seedsFor(recordings, envId).length === 0) return `no ${policy} recordings for ${ENVS[envId].name}`;
+  if (seedsFor(recordings, envId).length === 0) return `no ${policy} recordings for ${nameOf(envId)}`;
   if (seed !== null && recordingRef(recordings, envId, seed) === null) {
-    return `no ${policy} recording for ${ENVS[envId].name} seed ${seed}`;
+    return `no ${policy} recording for ${nameOf(envId)} seed ${seed}`;
   }
   return null;
 }
@@ -296,7 +279,7 @@ function mountHero(): void {
       status: 'error',
       note: 'Nothing to replay here',
       noteDetail: reason ?? 'no seed to play',
-      envName: ENVS[env].name,
+      envName: nameOf(env),
       seed,
       policy: sel.policy,
       ticks: [],
@@ -308,7 +291,7 @@ function mountHero(): void {
     status: 'ready',
     note: null,
     noteDetail: null,
-    envName: ENVS[env].name,
+    envName: nameOf(env),
     seed,
     promoted: sel.selection.promoted !== null,
     policy: sel.policy,
@@ -319,11 +302,12 @@ function mountHero(): void {
     ticks: [],
   });
 
+  const entry = entryFor(parseCatalog(run.meta.envCatalog), env);
   const cacheKey = `${run.id}|${env}|${seed}`;
   let handle = heroCache.get(cacheKey);
   if (handle === undefined) {
     handle = loadHero({
-      entry: entryFor(parseCatalog(run.meta.envCatalog), env),
+      entry,
       runId: run.id,
       envId: env,
       seed,
@@ -347,7 +331,7 @@ function mountHero(): void {
 
   queueStage(async () => {
     if (container === null || gen !== generation) return;
-    const attachSource = heroHandle.source.frameCount > 1 ? heroHandle.source : makeInitialSource(env, seed);
+    const attachSource = heroHandle.source.frameCount > 1 ? heroHandle.source : makeInitialSource(entry, env, seed);
     if (attachSource === heroHandle.source) attached = true;
     const at = resolvePendingFrame(heroHandle, attachSource);
     if (sceneHost === null) {
@@ -450,8 +434,7 @@ function hardDetach(): void {
   attached = false;
   container = null;
   targetKey = '';
-  stageMeta = EMPTY_META;
-  for (const listener of metaListeners) listener();
+  meta.set(EMPTY_META);
 }
 
 export function scrubToStep(step: number): void {

@@ -1,6 +1,4 @@
-
 import type { EnvId } from '@shared/envs';
-
 
 export type SimEvent =
   | { type: 'goal' }
@@ -11,13 +9,13 @@ export type SimEvent =
   | { type: 'teleport' }
   | { type: 'resurface' };
 
+export const NO_EVENTS: SimEvent[] = Object.freeze([]) as unknown as SimEvent[];
 
 export interface EnvFrame {
   step: number;
   done: number;
   pose: Float32Array;
 }
-
 
 export interface GridCell { x: number; y: number }
 
@@ -54,7 +52,6 @@ export interface EnvGeometry {
   classic?: ClassicGeometry;
 }
 
-
 export interface EnvDecoder<St = unknown> {
   envId: EnvId;
   seedGeometry: boolean;
@@ -63,8 +60,6 @@ export interface EnvDecoder<St = unknown> {
   initFrame(seed: number, st: St): EnvFrame;
   deriveEvents(prev: EnvFrame, next: EnvFrame, st: St): SimEvent[];
 }
-
-
 
 export interface RawRecording {
   envId: EnvId;

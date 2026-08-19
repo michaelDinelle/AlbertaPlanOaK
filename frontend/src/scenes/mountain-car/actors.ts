@@ -1,4 +1,3 @@
-
 import {
   emissiveMaterial,
   oakMaterial,
@@ -13,7 +12,6 @@ import { radialSprite } from '@kit/textures';
 import type { Palette } from '@kit/tokens';
 import * as THREE from 'three';
 import { MC_MAX_SPEED } from '@sim/envs/mountaincar';
-
 
 const WHEEL_R = 0.034;
 const WHEEL_T = 0.012;

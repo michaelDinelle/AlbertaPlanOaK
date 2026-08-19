@@ -1,4 +1,3 @@
-
 import {
   emissiveMaterial,
   oakMaterial,
@@ -28,7 +27,6 @@ import {
   TASSEL_WEIGHT_H,
   TASSEL_WEIGHT_R,
 } from './dims';
-
 
 const ROD_TOP = -0.05;
 const ROD_BOTTOM = -(ROD_LEN - 0.15);

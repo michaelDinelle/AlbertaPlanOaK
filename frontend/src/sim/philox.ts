@@ -1,4 +1,3 @@
-
 const M0 = 0xd2511f53;
 const M1 = 0xcd9e8d57;
 const W0 = 0x9e3779b9;

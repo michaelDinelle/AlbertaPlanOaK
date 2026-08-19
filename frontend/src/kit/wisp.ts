@@ -1,4 +1,3 @@
-
 import * as THREE from 'three';
 import type { GridCell } from '@sim/types';
 import { HopMotion, type GridSize, type HopMotionOptions } from './grid';
@@ -20,14 +19,10 @@ export interface WispOptions {
   radius?: number;
   skirt?: boolean;
   ribbon?: boolean;
-  ribbonLength?: number;
   silhouette?: boolean;
-  contactShade?: boolean;
   hop?: HopMotionOptions;
   name?: string;
 }
-
-const RIBBON_MIN = 6;
 
 export const AGENT_RENDER_ORDER = 3;
 
@@ -66,7 +61,7 @@ export class Wisp {
   private readonly silhouetteMaterial: EmissiveMaterial | null;
   private readonly shade: THREE.Mesh | null;
   private readonly shadeMaterial: EmissiveMaterial | null;
-  private readonly shadeSprite: THREE.Texture | null;
+  private readonly shadeSprite: THREE.Texture;
   private readonly shadeSize: number;
 
   private readonly height: number;
@@ -111,8 +106,7 @@ export class Wisp {
     this.decor.add(this.halo);
 
     const wantsSilhouette = opts.silhouette ?? true;
-    const wantsShade = opts.contactShade ?? true;
-    this.shadeSprite = wantsShade ? radialSprite(64, SHADE_FALLOFF) : null;
+    this.shadeSprite = radialSprite(64, SHADE_FALLOFF);
     const shadeColor = new THREE.Color(opts.color).lerp(new THREE.Color(TOKENS.palettes.night.skyTop), SHADE_BLEND);
     this.shadeSize = radius * SHADE_SIZE;
 
@@ -133,28 +127,23 @@ export class Wisp {
       this.silhouetteMaterial = null;
     }
 
-    if (wantsShade && this.shadeSprite) {
-      const geo = new THREE.PlaneGeometry(1, 1);
-      geo.rotateX(-Math.PI / 2);
-      geo.name = 'oakWispShade';
-      this.geometries.push(geo);
-      this.shadeMaterial = emissiveMaterial(shadeColor, 1, {
-        transparent: true,
-        opacity: SHADE_OPACITY,
-        depthWrite: false,
-        map: this.shadeSprite,
-        name: 'oakWispShade',
-      });
-      this.shade = new THREE.Mesh(geo, this.shadeMaterial);
-      this.shade.name = 'oakWispShade';
-      this.shade.renderOrder = -1;
-      this.shade.position.y = SHADE_LIFT;
-      this.shade.scale.setScalar(this.shadeSize);
-      this.group.add(this.shade);
-    } else {
-      this.shade = null;
-      this.shadeMaterial = null;
-    }
+    const geo = new THREE.PlaneGeometry(1, 1);
+    geo.rotateX(-Math.PI / 2);
+    geo.name = 'oakWispShade';
+    this.geometries.push(geo);
+    this.shadeMaterial = emissiveMaterial(shadeColor, 1, {
+      transparent: true,
+      opacity: SHADE_OPACITY,
+      depthWrite: false,
+      map: this.shadeSprite,
+      name: 'oakWispShade',
+    });
+    this.shade = new THREE.Mesh(geo, this.shadeMaterial);
+    this.shade.name = 'oakWispShade';
+    this.shade.renderOrder = -1;
+    this.shade.position.y = SHADE_LIFT;
+    this.shade.scale.setScalar(this.shadeSize);
+    this.group.add(this.shade);
 
     const wantsSkirt = opts.skirt ?? true;
     if (wantsSkirt) {
@@ -196,7 +185,7 @@ export class Wisp {
 
     const wantsRibbon = opts.ribbon ?? true;
     if (wantsRibbon) {
-      this.ribbonCount = Math.max(RIBBON_MIN, Math.round(opts.ribbonLength ?? 24));
+      this.ribbonCount = 24;
       this.ribbonPositions = new Float32Array(this.ribbonCount * 3);
       const geo = new THREE.BufferGeometry();
       this.ribbonAttr = new THREE.BufferAttribute(this.ribbonPositions, 3);
@@ -347,11 +336,10 @@ export class Wisp {
     this.ribbonMaterial?.dispose();
     this.silhouetteMaterial?.dispose();
     this.shadeMaterial?.dispose();
-    this.shadeSprite?.dispose();
+    this.shadeSprite.dispose();
     this.group.removeFromParent();
     this.group.clear();
   }
-
 
   private applyBrightness(): void {
     const gain = this.brightness * (1 + 1.8 * this.flareAmount);
@@ -436,4 +424,3 @@ function buildSkirt(petals: number, radius: number): THREE.BufferGeometry {
   g.name = 'oakWispSkirt';
   return g;
 }
-

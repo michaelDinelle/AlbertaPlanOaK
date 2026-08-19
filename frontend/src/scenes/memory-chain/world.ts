@@ -1,4 +1,3 @@
-
 import * as THREE from 'three';
 import {
   CELL,
@@ -30,7 +29,6 @@ import {
 } from '@sim/envs/memorychain';
 import type { EnvGeometry, GridGeometry } from '@sim/types';
 
-
 export const PASSAGE_HALF = (MEMORYCHAIN_L * CELL) / 2;
 export const CAVERN_X0 = -PASSAGE_HALF - 6.5;
 export const CAVERN_X1 = PASSAGE_HALF + 5.5;
@@ -49,7 +47,6 @@ export const SHADOW_RADIUS = 13;
 
 export const CAMERA_AZIMUTH = -0.935;
 
-
 export function resolveGrid(geometry: EnvGeometry): GridGeometry {
   const g = geometry.grid;
   if (g && g.w === MEMORYCHAIN_L && g.h === 1) return g;
@@ -59,7 +56,6 @@ export function resolveGrid(geometry: EnvGeometry): GridGeometry {
 
 export const CUE_CELL = 0;
 export const CHOICE_CELL = MEMORYCHAIN_END;
-
 
 export interface CaveSkin {
   stone: THREE.Color;
@@ -90,7 +86,6 @@ export function caveSkin(palette: Palette, tokens: typeof TOKENS): CaveSkin {
     rim: blendTokens(palette.hemiSky, silver, 0.55),
   };
 }
-
 
 export function cavernWidthAt(x: number, seed: number): number {
   const n = hash2f(Math.floor(x * 0.5) + 97, 3, seed) - 0.5;
@@ -197,7 +192,6 @@ export function makeCavernGeometry(seed: number, skin: CaveSkin): THREE.BufferGe
   return g;
 }
 
-
 function spikeGeometry(): THREE.BufferGeometry {
   const radial = 7;
   const g = new THREE.CylinderGeometry(0.02, 0.5, 1, radial, 2);
@@ -301,7 +295,6 @@ export function makeStalactites(
   };
 }
 
-
 export interface WorldHandle extends WorldCore {
   sky: SkyHandle;
   rig: LightRig;
@@ -311,7 +304,6 @@ export interface WorldHandle extends WorldCore {
   fireflies: AmbientParticlesHandle;
   flood: AmbientParticlesHandle;
 }
-
 
 export function buildWorld(ctx: SceneContext, scene: THREE.Scene, grid: GridGeometry): WorldHandle {
   const palette: Palette = ctx.tokens.palettes.cave;
@@ -508,7 +500,6 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene, grid: GridGeom
     },
   });
 }
-
 
 export function readPos(state: { pose: Float32Array }): number {
   const v = Math.round(state.pose[MEMORYCHAIN_POS] ?? 0);

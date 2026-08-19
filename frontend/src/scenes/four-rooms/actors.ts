@@ -1,4 +1,3 @@
-
 import { GoalBeacon } from '@kit/grid';
 import {
   emissiveMaterial,

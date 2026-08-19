@@ -1,7 +1,5 @@
-
 import { POSE_LEN } from '../record';
-import type { EnvDecoder, EnvFrame, EnvGeometry, GridCell, SimEvent } from '../types';
-import { NO_EVENTS } from '../events';
+import { NO_EVENTS, type EnvDecoder, type EnvFrame, type EnvGeometry, type GridCell, type SimEvent } from '../types';
 
 export const FOURROOMS_W = 11;
 export const FOURROOMS_H = 11;
@@ -82,7 +80,6 @@ export const fourRoomsDecoder: EnvDecoder<FourRoomsStatic> = {
       pose,
     };
   },
-
 
   deriveEvents(prev: EnvFrame, next: EnvFrame): SimEvent[] {
     if (

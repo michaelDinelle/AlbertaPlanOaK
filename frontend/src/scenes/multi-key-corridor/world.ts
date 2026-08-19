@@ -1,4 +1,3 @@
-
 import * as THREE from 'three';
 import {
   buildCellField,
@@ -14,7 +13,7 @@ import {
 import { applyFog, makeLightRig, type LightRig } from '@kit/lighting';
 import { emissiveMaterial, oakMaterial, oakUniforms, type EmissiveMaterial, type OakMaterial } from '@kit/materials';
 import { blendTokens, clamp01, shade, smoothstep01 } from '@kit/mix';
-import { makeAmbientParticles, makeMistPlanes, type AmbientParticlesHandle } from '@kit/particles';
+import { makeAmbientParticles, makeMistPlanes } from '@kit/particles';
 import { mergeColoredParts, type ColoredPart } from '@kit/parts';
 import { skyFromPalette, type SkyHandle } from '@kit/sky';
 import { makeTerrain, type TerrainHandle } from '@kit/terrain';
@@ -43,7 +42,6 @@ import {
   mkcWalls,
 } from '@sim/envs/multikeycorridor';
 import type { EnvGeometry, GridCell, GridGeometry } from '@sim/types';
-
 
 export const TEMPLE_HALF_X = (MKC_W * CELL) / 2;
 export const TEMPLE_HALF_Z = (MKC_H * CELL) / 2;
@@ -146,7 +144,6 @@ export function gateFacesX(grid: GridGeometry, cell: GridCell): boolean {
   return isWall(grid, cell.x, cell.y - 1) && isWall(grid, cell.x, cell.y + 1);
 }
 
-
 export interface ChamberSkin {
   floor: THREE.Color;
   wall: THREE.Color;
@@ -228,14 +225,12 @@ export function templeSkin(palette: Palette, tokens: typeof TOKENS): TempleSkin 
   };
 }
 
-
 export function excludeProcession(grid: GridGeometry, doors: readonly GridCell[], halfWidth: number): ExcludeFn {
   const row = doors[0]?.y ?? (grid.h - 1) / 2;
   const oz = (grid.h - 1) / 2;
   const zWorld = (row - oz) * CELL;
   return (_x, z) => Math.abs(z - zWorld) < halfWidth;
 }
-
 
 export function makeGardenHeight(seed: number): (x: number, z: number) => number {
   return (x, z) => {
@@ -248,7 +243,6 @@ export function makeGardenHeight(seed: number): (x: number, z: number) => number
   };
 }
 
-
 export interface WorldHandle extends WorldCore {
   sky: SkyHandle;
   rig: LightRig;
@@ -258,7 +252,6 @@ export interface WorldHandle extends WorldCore {
   doors: readonly GridCell[];
   stoneMaterial: OakMaterial;
 }
-
 
 export function buildWorld(ctx: SceneContext, scene: THREE.Scene, grid: GridGeometry): WorldHandle {
   const palette: Palette = ctx.tokens.palettes.morning;
@@ -674,7 +667,6 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene, grid: GridGeom
   });
 }
 
-
 export const LANTERN_FLAME_Y = 0.575;
 export const PORTAL_LINTEL_Y = 1.42;
 
@@ -705,7 +697,6 @@ export function makePortalGeometry(skin: TempleSkin): THREE.BufferGeometry {
   const band = new THREE.BoxGeometry(0.34, 0.05, 1.7);
   band.translate(0, PIER_H + 0.005, 0);
   parts.push({ geometry: band, color: skin.stoneDark });
-
 
   return mergeColoredParts(parts, 'templePortal');
 }

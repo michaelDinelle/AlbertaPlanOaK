@@ -1,4 +1,3 @@
-
 import * as THREE from 'three';
 import { applyFog, makeLightRig, type LightRig } from '@kit/lighting';
 import { oakMaterial, setMaterialsTime, type OakMaterial } from '@kit/materials';
@@ -29,7 +28,6 @@ import { makeWorld, type WorldCore } from '@kit/world';
 import { CP_POLE_LENGTH, CP_TH_LIMIT, CP_X_LIMIT } from '@sim/envs/cartpole';
 import type { EnvGeometry } from '@sim/types';
 
-
 export const DECK_Y = -0.36;
 export const DECK_T = 0.052;
 export const DECK_HALF_Z = 0.46;
@@ -46,7 +44,6 @@ export const BANK_FEATHER = 2.6;
 export const CORD_Z = -0.03;
 export const STAKE_Z = -0.34;
 export const GAUGE_Z = -0.92;
-
 
 export const CAM_BASE: readonly [number, number, number] = [0.44, 1.16, 4.62];
 export const CAM_LOOK: readonly [number, number, number] = [0, 0.32, -0.06];
@@ -69,7 +66,6 @@ export const TERRAIN_SEG_Z = 190;
 export const FOG_EXTENT = TERRAIN_W * 6.6;
 
 export const SUN_DIR: readonly [number, number, number] = [0.6, 0.7, 0.39];
-
 
 export function unmixTokens(target: THREE.Color, pull: THREE.ColorRepresentation, k: number): THREE.Color {
   const p = new THREE.Color(pull);
@@ -107,7 +103,6 @@ export function tiltLimit(geometry: EnvGeometry): number {
   return a && a[1] > 0 ? Math.atan2(a[0], a[1]) : CP_TH_LIMIT;
 }
 
-
 export function makeShoreHeight(seed: number): (x: number, z: number) => number {
   const bed = WATER_Y - LAKE_DEPTH;
   return (x, z) => {
@@ -126,7 +121,6 @@ export function makeShoreHeight(seed: number): (x: number, z: number) => number 
   };
 }
 
-
 export interface WorldHandle extends WorldCore {
   sky: SkyHandle;
   rig: LightRig;
@@ -138,7 +132,6 @@ export interface WorldHandle extends WorldCore {
   setWind(lean: number): void;
   setCool(env01: number): void;
 }
-
 
 const GRASS_WIND = 0.075;
 const REED_WIND = 0.05;

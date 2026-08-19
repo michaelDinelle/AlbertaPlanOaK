@@ -1,6 +1,7 @@
 import { useMemo, type ReactNode } from 'react';
 import { Command } from 'cmdk';
-import { ENVS, type EnvId } from '@shared/envs';
+import type { EnvId } from '@shared/envs';
+import { nameOf, slugOf } from '../scenes/table';
 import type { Policy, RunDetail, RunIndexEntry } from '@shared/types';
 import { Lens } from '../glass/Panel';
 import { runLabel, sortRuns } from '../lib/run';
@@ -17,7 +18,7 @@ import {
 import { STR } from '../strings';
 import { seedsFor } from '../theater/loader';
 import { SPEEDS } from '../url/codec';
-import type { PanelView } from './views';
+import type { PanelView } from './StatsPanel';
 
 function Shortcut({ children }: { children: string }) {
   return (
@@ -108,12 +109,12 @@ export function CommandPalette({
               </Command.Empty>
               <Command.Group heading={STR.palette.environments}>
                 {envList.map((envId) => (
-                  <Item key={envId} onPick={done(() => selectEnv(envId))} hint={STR.wall.watchEnv(ENVS[envId].name)} shortcut="[ ]">
+                  <Item key={envId} onPick={done(() => selectEnv(envId))} hint={STR.wall.watchEnv(nameOf(envId))} shortcut="[ ]">
                     <span
                       className="size-2 rounded-full"
-                      style={{ background: `var(--color-env-${ENVS[envId].slug})` }}
+                      style={{ background: `var(--color-env-${slugOf(envId)})` }}
                     />
-                    {ENVS[envId].name}
+                    {nameOf(envId)}
                   </Item>
                 ))}
               </Command.Group>

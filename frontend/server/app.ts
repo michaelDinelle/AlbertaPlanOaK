@@ -166,7 +166,6 @@ export function createApp(opts: AppOptions = {}): App {
       return serveStatic(req, join(run.dir, 'tape.bin'), 'application/octet-stream');
     }
 
-
     if (sub === 'recordings' && segs.length === 6) {
       const envId = segs[4];
       const seedText = segs[5];

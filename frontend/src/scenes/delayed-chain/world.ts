@@ -1,4 +1,3 @@
-
 import * as THREE from 'three';
 import {
   CELL,
@@ -34,7 +33,6 @@ import { DELAYEDCHAIN_END, DELAYEDCHAIN_L, delayedChainDecoder } from '@sim/envs
 import type { EnvGeometry, GridGeometry } from '@sim/types';
 import { buildAurora, type AuroraHandle } from './aurora';
 
-
 export const ROAD_HALF = (DELAYEDCHAIN_L * CELL) / 2;
 export const LANTERN_Z = -0.62;
 export const LAMP_REACH = 0.3;
@@ -52,7 +50,6 @@ export const SHADOW_RADIUS = 9;
 export const AURORA_RADIUS = 26;
 export const CAMERA_AZIMUTH = -1.16;
 export const CAMERA_LANE_Z = 2.9;
-
 
 export function resolveGrid(geometry: EnvGeometry): GridGeometry {
   const g = geometry.grid;
@@ -72,7 +69,6 @@ export function goalCellOf(grid: GridGeometry): number {
   const g = grid.goal;
   return g ? g.x : grid.w - 1;
 }
-
 
 export interface MoorSkin {
   peat: THREE.Color;
@@ -116,7 +112,6 @@ export function moorSkin(palette: Palette, tokens: typeof TOKENS): MoorSkin {
   };
 }
 
-
 export interface MoonPool {
   cell: number;
   radius: number;
@@ -152,7 +147,6 @@ export function moonlightAt(cell: number, pools: readonly MoonPool[]): number {
   return clamp01(m);
 }
 
-
 export function makeMoorHeight(seed: number): (x: number, z: number) => number {
   return (x, z) => {
     const out = Math.abs(z) - (ROAD_HALF_Z + 0.55);
@@ -168,7 +162,6 @@ export function makeMoorHeight(seed: number): (x: number, z: number) => number {
   };
 }
 
-
 export interface WorldHandle extends WorldCore {
   sky: SkyHandle;
   rig: LightRig;
@@ -178,7 +171,6 @@ export interface WorldHandle extends WorldCore {
   skin: MoorSkin;
   pools: readonly MoonPool[];
 }
-
 
 export function buildWorld(ctx: SceneContext, scene: THREE.Scene, grid: GridGeometry): WorldHandle {
   const palette: Palette = ctx.tokens.palettes.night;
@@ -441,7 +433,6 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene, grid: GridGeom
     pools,
   });
 }
-
 
 export function propMaterial(palette: Palette, name: string): OakMaterial {
   return oakMaterial({

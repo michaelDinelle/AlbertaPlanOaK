@@ -1,7 +1,6 @@
-import { ENVS, isEnvId } from '@shared/envs';
-import { NO_EVENTS } from './events';
+import { isEnvId } from '@shared/envs';
 import { OFF_DONE, OFF_POSE, POSE_LEN, RECORD_FLOATS } from './record';
-import type { EnvDecoder, EnvFrame, EnvGeometry, RawRecording, SimEvent } from './types';
+import { NO_EVENTS, type EnvDecoder, type EnvFrame, type RawRecording, type SimEvent } from './types';
 
 export { NO_EVENTS };
 
@@ -47,11 +46,6 @@ export interface EventStream {
 }
 
 export interface RecordingLens {
-  envId: RawRecording['envId'];
-  seed: number;
-  controlHz: number;
-  discretePose: boolean;
-  geometry: EnvGeometry;
   readonly frameCount: number;
   frameAt(i: number): EnvFrame;
   eventsAt(i: number): readonly SimEvent[];
@@ -64,9 +58,7 @@ export function lensRecording<St>(
   decoder: EnvDecoder<St>,
 ): RecordingLens {
   checkIds(raw, decoder);
-  const info = ENVS[raw.envId as keyof typeof ENVS];
   const st = decoder.initStatic(raw.seed);
-  const geometry = decoder.geometry(st, raw.seed);
   const init = decoder.initFrame(raw.seed, st);
 
   let eventSteps = new Int32Array(1024);
@@ -120,11 +112,6 @@ export function lensRecording<St>(
   advance();
 
   return {
-    envId: raw.envId,
-    seed: raw.seed,
-    controlHz: info.controlHz,
-    discretePose: info.discretePose,
-    geometry,
     get frameCount() {
       return processed + 1;
     },

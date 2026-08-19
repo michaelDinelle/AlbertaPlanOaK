@@ -1,6 +1,4 @@
-
 import * as THREE from 'three';
-
 
 export interface NumberUniform {
   value: number;
@@ -66,7 +64,6 @@ export function setMaterialsTime(materials: readonly (THREE.Material | null | un
   for (let i = 0; i < materials.length; i++) setMaterialTime(materials[i], t);
 }
 
-
 export interface OakWindOptions {
   amplitude: number;
   frequency?: number;
@@ -90,7 +87,6 @@ export interface OakMaterialOptions {
   vertexColors?: boolean;
   transparent?: boolean;
   opacity?: number;
-  alphaTest?: number;
   side?: THREE.Side;
   depthWrite?: boolean;
   emissive?: THREE.ColorRepresentation;
@@ -167,7 +163,6 @@ const WIND_APPLY =  `
 	transformed.z += cos( oakPhase * 0.83 ) * uWindAmp * 0.6 * oakSway;
 }
 `;
-
 
 const SPOT_VERT_DECL =  `
 varying vec3 vOakObj;
@@ -305,7 +300,6 @@ export function oakMaterial(opts: OakMaterialOptions = {}): OakMaterial {
     fog: opts.fog ?? true,
   }) as OakMaterial;
 
-  if (opts.alphaTest !== undefined) material.alphaTest = opts.alphaTest;
   if (opts.depthWrite !== undefined) material.depthWrite = opts.depthWrite;
   material.name = opts.name ?? 'oakMaterial';
 
@@ -359,7 +353,6 @@ export function oakMaterial(opts: OakMaterialOptions = {}): OakMaterial {
   return material;
 }
 
-
 export interface EmissiveMaterialOptions {
   transparent?: boolean;
   opacity?: number;
@@ -409,11 +402,9 @@ export function setEmissiveColor(material: EmissiveMaterial, color: THREE.ColorR
   material.color.copy(material.baseColor).multiplyScalar(Math.max(0, i));
 }
 
-
 export interface WispMaterialOptions {
   intensity?: number;
   rimPower?: number;
-  breathe?: number;
   name?: string;
 }
 
@@ -467,7 +458,7 @@ export function wispMaterial(color: THREE.ColorRepresentation, opts: WispMateria
     uColor: { value: new THREE.Color(color) },
     uIntensity: { value: opts.intensity ?? 1.8 },
     uRimPower: { value: opts.rimPower ?? 2.2 },
-    uBreathe: { value: opts.breathe ?? 0.12 },
+    uBreathe: { value: 0.12 },
     uTime,
     uPulse,
   };

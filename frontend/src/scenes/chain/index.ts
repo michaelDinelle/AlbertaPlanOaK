@@ -1,10 +1,8 @@
-
-import type { CelebrationPoolOptions } from '@kit/celebrate';
 import type { GroundTruthOptions } from '@kit/debug';
 import { cellToWorldVec, type GridSize } from '@kit/grid';
 import { blendTokens, shade } from '@kit/mix';
 import type { OrbitRigOptions } from '@kit/rigs';
-import { StageScene } from '@kit/stage';
+import { StageScene, type Stage } from '@kit/stage';
 import { TOKENS } from '@kit/tokens';
 import type { FrameState, FrameUpdate, SceneContext, SceneFactory } from '@kit/types';
 import { Wisp } from '@kit/wisp';
@@ -21,7 +19,6 @@ import {
   type FordLanternHandle,
   type PetalFerryHandle,
 } from './actors';
-import { manifest } from './manifest';
 import {
   CAMERA_AZIMUTH,
   WATER_LEVEL,
@@ -32,15 +29,12 @@ import {
   type WorldHandle,
 } from './world';
 
-
-const CAM_AZIMUTH = CAMERA_AZIMUTH;
 const CAM_POLAR = 1.17;
 const CAM_DISTANCE = 17.2;
 const CAM_TARGET: readonly [number, number, number] = [1.6, 0.45, 0];
 
 const BURST_SCALE = 0.68;
 const RIPPLE_SCALE = 0.6;
-const BURST_PARTICLES = 120;
 const PULSE_STRENGTH = 0.32;
 const FLASH_SECONDS = 1.25;
 
@@ -50,7 +44,6 @@ const HOP_HEIGHT = 0.2;
 const BLOOM_TAU = 2.35;
 const GLOW_SPAN = 2.2;
 const GLOW_TAU = 0.8;
-
 
 export const LANTERN_Z = -2.35;
 export const LANTERN_DX_NEAR = -0.45;
@@ -99,7 +92,6 @@ export function readPos(state: FrameState, grid: GridSize): number {
 }
 
 class SixteenStonesScene extends StageScene<WorldHandle> {
-  readonly manifest = manifest;
   protected readonly stageName = 'sixteenStones';
 
   private wisp: Wisp | null = null;
@@ -134,7 +126,7 @@ class SixteenStonesScene extends StageScene<WorldHandle> {
     const grid = this.grid;
     const palette = ctx.tokens.palettes.afternoon;
     const skin = creekSkin(palette, ctx.tokens);
-    const accent = ctx.tokens.accents[manifest.accent] ?? ctx.tokens.celebrationGold;
+    const accent = this.accentOf(ctx);
     this.blossom = skin.blossom.getHex();
     this.gold = ctx.tokens.celebrationGold;
     const ember = blendTokens(ctx.tokens.celebrationGold, accent, 0.4).getHex();
@@ -194,27 +186,10 @@ class SixteenStonesScene extends StageScene<WorldHandle> {
 
   protected rigOptions(ctx: SceneContext): OrbitRigOptions {
     return {
-      canvas: ctx.canvas,
       target: [CAM_TARGET[0], CAM_TARGET[1], CAM_TARGET[2]],
       distance: CAM_DISTANCE,
-      azimuth: CAM_AZIMUTH,
+      azimuth: CAMERA_AZIMUTH,
       polar: CAM_POLAR,
-      fov: ctx.tokens.fovHero,
-      near: 0.1,
-      far: 900,
-      aspect: ctx.size.height > 0 ? ctx.size.width / ctx.size.height : 16 / 9,
-      damping: 5,
-      rotateSpeed: 0.004,
-      zoomSpeed: 0.0012,
-      name: 'creekOrbitRig',
-    };
-  }
-
-  protected poolOptions(ctx: SceneContext): CelebrationPoolOptions {
-    return {
-      seed: ctx.seed,
-      burstSize: BURST_PARTICLES,
-      name: 'creekCelebrations',
     };
   }
 
@@ -223,14 +198,12 @@ class SixteenStonesScene extends StageScene<WorldHandle> {
     const overlayCell: GridCell = { x: 0, y: 0 };
     const goalCell = this.goalCell;
     return {
-      camera: this.camera,
       agentCell: (state) => {
         overlayCell.x = readPos(state, grid);
         overlayCell.y = 0;
         return overlayCell;
       },
       goalCell: () => goalCell,
-      name: 'creekGroundTruth',
     };
   }
 
@@ -245,18 +218,13 @@ class SixteenStonesScene extends StageScene<WorldHandle> {
     this.ferry?.clear();
   }
 
-  protected tick(frame: FrameUpdate): void {
-    const ctx = this.ctx;
-    const world = this.world;
+  protected tick(frame: FrameUpdate, { world, pool, rig, time }: Stage<WorldHandle>): void {
     const wisp = this.wisp;
     const tree = this.tree;
     const lantern = this.lantern;
     const ferry = this.ferry;
-    const pool = this.pool;
-    const rig = this.rig;
-    if (!ctx || !world || !wisp || !tree || !lantern || !ferry || !pool || !rig) return;
+    if (!wisp || !tree || !lantern || !ferry) return;
 
-    const time = ctx.time();
     const state = frame.state;
     const grid = this.grid;
 
@@ -366,7 +334,6 @@ class SixteenStonesScene extends StageScene<WorldHandle> {
   }
 }
 
-
 export function treeBloom(age: number): number {
   if (!(age >= 0)) return 0;
   const v = Math.exp(-age / BLOOM_TAU);
@@ -385,5 +352,4 @@ export function flashEnvelope(age: number): number {
   return v < 0 ? 0 : v > 1 ? 1 : v;
 }
 
-const createScene: SceneFactory = () => new SixteenStonesScene();
-export default createScene;
+export default ((() => new SixteenStonesScene()) satisfies SceneFactory);

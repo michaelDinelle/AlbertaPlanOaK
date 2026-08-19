@@ -1,11 +1,9 @@
-
 import { DELAYEDCHAIN_ACTION, DELAYEDCHAIN_POS } from '@sim/envs/delayedchain';
-import type { CelebrationPoolOptions } from '@kit/celebrate';
 import type { GroundTruthOptions } from '@kit/debug';
 import { cellToWorld, cellToWorldVec, type GridSize } from '@kit/grid';
 import { clamp01, envelope } from '@kit/mix';
 import type { OrbitRigOptions } from '@kit/rigs';
-import { StageScene } from '@kit/stage';
+import { StageScene, type Stage } from '@kit/stage';
 import { TOKENS } from '@kit/tokens';
 import type { FrameState, FrameUpdate, SceneContext, SceneFactory } from '@kit/types';
 import { Wisp } from '@kit/wisp';
@@ -20,7 +18,6 @@ import {
   type MilestoneHandle,
   type WispGlowHandle,
 } from './actors';
-import { manifest } from './manifest';
 import {
   CAMERA_AZIMUTH,
   SHADOW_RADIUS,
@@ -29,7 +26,6 @@ import {
   resolveGrid,
   type WorldHandle,
 } from './world';
-
 
 const CAM_DISTANCE = 8.4;
 const CAM_POLAR = 1.43;
@@ -46,7 +42,6 @@ export const WAVE_SPAN = WAVE_TRAVEL + LANTERN_SPAN;
 
 const BURST_SCALE = 1.25;
 const RIPPLE_SCALE = 0.9;
-const BURST_PARTICLES = 150;
 export const PULSE_STRENGTH = 0.6;
 const SURGE_SECONDS = 2.6;
 const WISP_FLARE = 0.32;
@@ -63,7 +58,6 @@ function readState(state: FrameState, grid: GridSize, out: GridCell): number {
 }
 
 class LongNightRoadScene extends StageScene<WorldHandle> {
-  readonly manifest = manifest;
   protected readonly stageName = 'longNightRoad';
 
   private road: LanternRoadHandle | null = null;
@@ -100,7 +94,7 @@ class LongNightRoadScene extends StageScene<WorldHandle> {
   protected buildActors(ctx: SceneContext, world: WorldHandle): void {
     const grid = this.grid;
     const palette = ctx.tokens.palettes.night;
-    const accent = ctx.tokens.accents[manifest.accent] ?? ctx.tokens.uiCyan;
+    const accent = this.accentOf(ctx);
     this.gold = ctx.tokens.celebrationGold;
     this.flame = world.skin.flame.getHex();
 
@@ -171,7 +165,6 @@ class LongNightRoadScene extends StageScene<WorldHandle> {
 
   protected rigOptions(ctx: SceneContext): OrbitRigOptions {
     return {
-      canvas: ctx.canvas,
       target: [0, CAM_TARGET_Y, 0],
       distance: CAM_DISTANCE,
       azimuth: CAMERA_AZIMUTH,
@@ -184,29 +177,13 @@ class LongNightRoadScene extends StageScene<WorldHandle> {
             minDistance: 4.5,
             maxDistance: 16,
           },
-      fov: ctx.tokens.fovHero,
-      near: 0.1,
-      far: 900,
-      aspect: ctx.size.height > 0 ? ctx.size.width / ctx.size.height : 16 / 9,
-      damping: 5,
       rotateSpeed: 0.0035,
-      zoomSpeed: 0.0012,
-      name: 'roadOrbitRig',
-    };
-  }
-
-  protected poolOptions(ctx: SceneContext): CelebrationPoolOptions {
-    return {
-      seed: ctx.seed,
-      burstSize: BURST_PARTICLES,
-      name: 'roadCelebrations',
     };
   }
 
   protected overlayOptions(): GroundTruthOptions {
     const grid = this.grid;
     return {
-      camera: this.camera,
       agentCell: (state) => {
         readState(state, grid, this.overlayCell);
         return this.overlayCell;
@@ -216,7 +193,6 @@ class LongNightRoadScene extends StageScene<WorldHandle> {
         this.overlayGoal.y = 0;
         return this.overlayGoal;
       },
-      name: 'roadGroundTruth',
     };
   }
 
@@ -241,16 +217,11 @@ class LongNightRoadScene extends StageScene<WorldHandle> {
     this.applyShadowFocus(wisp.position.x, world);
   }
 
-  protected tick(frame: FrameUpdate): void {
-    const ctx = this.ctx;
-    const world = this.world;
+  protected tick(frame: FrameUpdate, { world, pool, rig, time }: Stage<WorldHandle>): void {
     const road = this.road;
     const wisp = this.wisp;
-    const pool = this.pool;
-    const rig = this.rig;
-    if (!ctx || !world || !road || !wisp || !pool || !rig) return;
+    if (!road || !wisp) return;
 
-    const time = ctx.time();
     const state = frame.state;
     const grid = this.grid;
     const agent = this.agentCell;
@@ -384,7 +355,6 @@ class LongNightRoadScene extends StageScene<WorldHandle> {
   }
 }
 
-
 export function lanternGlow(age: number, index: number, count: number): number {
   if (!(age >= 0)) return 0;
   const n = Math.max(1, count - 1);
@@ -407,5 +377,4 @@ export function flicker(time: number, index: number): number {
   return 0.87 + 0.13 * Math.sin(time * 9.3 + index * 2.3994);
 }
 
-const createScene: SceneFactory = () => new LongNightRoadScene();
-export default createScene;
+export default ((() => new LongNightRoadScene()) satisfies SceneFactory);

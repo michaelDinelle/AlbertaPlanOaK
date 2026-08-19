@@ -1,35 +1,22 @@
-import { useSyncExternalStore } from 'react';
 import { DEFAULT_SPEED } from '../url/codec';
+import { createStore } from '../state/store';
 
 export interface TransportState {
   playing: boolean;
   speed: number;
 }
 
-let transport: TransportState = { playing: true, speed: DEFAULT_SPEED };
+const transport = createStore<TransportState>({ playing: true, speed: DEFAULT_SPEED });
 
-const transportListeners = new Set<() => void>();
-
-export function transportSnapshot(): TransportState {
-  return transport;
-}
+export const transportSnapshot = transport.get;
+export const subscribeTransport = transport.subscribe;
+export const useTransport = transport.use;
 
 export function setTransport(patch: Partial<TransportState>): void {
-  const next = { ...transport, ...patch };
-  if (next.playing === transport.playing && next.speed === transport.speed) return;
-  transport = next;
-  for (const listener of transportListeners) listener();
-}
-
-export function subscribeTransport(listener: () => void): () => void {
-  transportListeners.add(listener);
-  return () => {
-    transportListeners.delete(listener);
-  };
-}
-
-export function useTransport(): TransportState {
-  return useSyncExternalStore(subscribeTransport, transportSnapshot);
+  const now = transport.get();
+  const next = { ...now, ...patch };
+  if (next.playing === now.playing && next.speed === now.speed) return;
+  transport.set(next);
 }
 
 export type PositionListener = (step: number) => void;

@@ -1,11 +1,9 @@
-
 import { POMAZE_GX, POMAZE_GY, POMAZE_X, POMAZE_Y } from '@sim/envs/pomaze';
-import type { CelebrationPoolOptions } from '@kit/celebrate';
 import type { GroundTruthOptions } from '@kit/debug';
 import { cellToWorldVec, clampCell, type GridSize } from '@kit/grid';
 import { blendTokens, clamp01, envelope } from '@kit/mix';
 import type { OrbitRigOptions } from '@kit/rigs';
-import { StageScene } from '@kit/stage';
+import { StageScene, type Stage } from '@kit/stage';
 import { TOKENS } from '@kit/tokens';
 import type { FrameState, FrameUpdate, SceneContext, SceneFactory } from '@kit/types';
 import { Wisp } from '@kit/wisp';
@@ -21,7 +19,6 @@ import {
   type MoonflowerHandle,
   type WispAuraHandle,
 } from './actors';
-import { manifest } from './manifest';
 import {
   BUBBLE_OUTER,
   CAMERA_AZIMUTH,
@@ -34,8 +31,6 @@ import {
   type WorldHandle,
 } from './world';
 
-
-const CAM_AZIMUTH = CAMERA_AZIMUTH;
 const CAM_POLAR = 1.32;
 const CAM_DISTANCE = 4.7;
 const CAM_TARGET_Y = 0.82;
@@ -43,7 +38,6 @@ const CAM_FOLLOW_RATE = 2.2;
 
 const BURST_SCALE = 0.45;
 const RIPPLE_SCALE = 0.52;
-const BURST_PARTICLES = 120;
 const PULSE_STRENGTH = 0.5;
 const BLOOM_Y = 0.55;
 
@@ -65,7 +59,6 @@ export function readCells(state: FrameState, grid: GridSize, agent: GridCell, go
 }
 
 class FogboundForestScene extends StageScene<WorldHandle> {
-  readonly manifest = manifest;
   protected readonly stageName = 'fogboundForest';
 
   private wisp: Wisp | null = null;
@@ -103,7 +96,7 @@ class FogboundForestScene extends StageScene<WorldHandle> {
   protected buildActors(ctx: SceneContext, world: WorldHandle): void {
     const grid = this.grid;
     const palette = ctx.tokens.palettes.dawn;
-    const accent = ctx.tokens.accents[manifest.accent] ?? ctx.tokens.celebrationGold;
+    const accent = this.accentOf(ctx);
     this.gold = ctx.tokens.celebrationGold;
     this.bloomColor = world.skin.bloom.getHex();
 
@@ -158,27 +151,10 @@ class FogboundForestScene extends StageScene<WorldHandle> {
   protected rigOptions(ctx: SceneContext): OrbitRigOptions {
     this.camAnchor.y = CAM_TARGET_Y;
     return {
-      canvas: ctx.canvas,
       target: [this.camAnchor.x, CAM_TARGET_Y, this.camAnchor.z],
       distance: CAM_DISTANCE,
-      azimuth: CAM_AZIMUTH,
+      azimuth: CAMERA_AZIMUTH,
       polar: CAM_POLAR,
-      fov: ctx.tokens.fovHero,
-      near: 0.1,
-      far: 900,
-      aspect: ctx.size.height > 0 ? ctx.size.width / ctx.size.height : 16 / 9,
-      damping: 5,
-      rotateSpeed: 0.004,
-      zoomSpeed: 0.0012,
-      name: 'forestOrbitRig',
-    };
-  }
-
-  protected poolOptions(ctx: SceneContext): CelebrationPoolOptions {
-    return {
-      seed: ctx.seed,
-      burstSize: BURST_PARTICLES,
-      name: 'forestCelebrations',
     };
   }
 
@@ -187,7 +163,6 @@ class FogboundForestScene extends StageScene<WorldHandle> {
     const overlayAgent: GridCell = { x: 0, y: 0 };
     const overlayGoal: GridCell = { x: 0, y: 0 };
     return {
-      camera: this.camera,
       agentCell: (state) => {
         readCells(state, grid, overlayAgent, overlayGoal);
         return overlayAgent;
@@ -196,7 +171,6 @@ class FogboundForestScene extends StageScene<WorldHandle> {
         readCells(state, grid, overlayAgent, overlayGoal);
         return overlayGoal;
       },
-      name: 'forestGroundTruth',
     };
   }
 
@@ -209,18 +183,13 @@ class FogboundForestScene extends StageScene<WorldHandle> {
     this.lantern?.setGain(1);
   }
 
-  protected tick(frame: FrameUpdate): void {
-    const ctx = this.ctx;
-    const world = this.world;
+  protected tick(frame: FrameUpdate, { world, pool, rig, time }: Stage<WorldHandle>): void {
     const wisp = this.wisp;
     const flower = this.flower;
     const lantern = this.lantern;
     const aura = this.aura;
-    const pool = this.pool;
-    const rig = this.rig;
-    if (!ctx || !world || !wisp || !flower || !lantern || !aura || !pool || !rig) return;
+    if (!wisp || !flower || !lantern || !aura) return;
 
-    const time = ctx.time();
     const state = frame.state;
     const grid = this.grid;
     const agent = this.agentCell;
@@ -313,7 +282,6 @@ class FogboundForestScene extends StageScene<WorldHandle> {
       beacon.setTime(time);
     }
 
-
     lantern.mesh.position.set(wx, 0.015, wz);
     lantern.setGain(1 + 0.55 * reveal);
     aura.mesh.position.set(wx, wisp.position.y + TOKENS.wispHeight, wz);
@@ -386,6 +354,4 @@ class FogboundForestScene extends StageScene<WorldHandle> {
   }
 }
 
-
-const createScene: SceneFactory = () => new FogboundForestScene();
-export default createScene;
+export default ((() => new FogboundForestScene()) satisfies SceneFactory);

@@ -1,7 +1,5 @@
-
 import { MAX_CATCHUP_FRAMES } from './playbackSource';
 import type { SimEvent } from '@sim/types';
-
 
 export interface FrameCursor {
   lastIndex: number;
@@ -54,7 +52,6 @@ export function collectEvents(
   return out;
 }
 
-
 export function formatClock(seconds: number): string {
   if (!Number.isFinite(seconds) || seconds < 0) return '0:00.0';
   const whole = Math.floor(seconds);
@@ -72,4 +69,3 @@ export function clampPosition(position: number, frameCount: number): number {
   if (!Number.isFinite(position)) return 0;
   return position < 0 ? 0 : position > last ? last : position;
 }
-

@@ -1,4 +1,3 @@
-
 import { GoalBeacon } from '@kit/grid';
 import { cellToWorld, type GridSize } from '@kit/grid';
 import {
@@ -431,7 +430,6 @@ export function buildLanternRoad(opts: LanternRoadOptions): LanternRoadHandle {
   };
 }
 
-
 export interface WispGlowHandle {
   mesh: THREE.Mesh;
   setGain(g: number): void;
@@ -474,7 +472,6 @@ export function buildWispGlow(opts: {
     },
   };
 }
-
 
 export interface MilestoneOptions {
   palette: Palette;

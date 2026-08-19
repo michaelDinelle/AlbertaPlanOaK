@@ -1,15 +1,11 @@
-
-import type { CelebrationPoolOptions } from '@kit/celebrate';
 import type { GroundTruthOptions } from '@kit/debug';
 import { envelope } from '@kit/mix';
 import { orbitFromPose, type OrbitRigOptions } from '@kit/rigs';
-import { StageScene } from '@kit/stage';
+import { StageScene, type Stage } from '@kit/stage';
 import type { FrameState, FrameUpdate, SceneContext, SceneFactory, SceneSize } from '@kit/types';
 import { MC_GOAL_POS, MC_START_POS, MOUNTAINCAR_ACTION, MOUNTAINCAR_POS, MOUNTAINCAR_VEL, mountainCarForce, mountainCarSlope } from '@sim/envs/mountaincar';
 import { buildCart, type CartHandle } from './actors';
-import { manifest } from './manifest';
 import { buildWorld, heightResolver, type WorldHandle } from './world';
-
 
 const CAM_BASE: readonly [number, number, number] = [-0.16, 1.06, 2.56];
 const CAM_LOOK: readonly [number, number, number] = [-0.31, 0.75, -0.05];
@@ -21,7 +17,6 @@ const SUMMIT_FLARE_SECONDS = 1.3;
 const SCREE_SECONDS = 0.85;
 const BURST_SCALE = 0.38;
 const RIPPLE_SCALE = 0.22;
-const BURST_PARTICLES = 84;
 const PULSE_STRENGTH = 0.6;
 
 function forceOf(state: FrameState): number {
@@ -29,7 +24,6 @@ function forceOf(state: FrameState): number {
 }
 
 class AlpineValleyScene extends StageScene<WorldHandle> {
-  readonly manifest = manifest;
   protected readonly stageName = 'alpineValley';
 
   private cart: CartHandle | null = null;
@@ -53,7 +47,7 @@ class AlpineValleyScene extends StageScene<WorldHandle> {
 
   protected buildActors(ctx: SceneContext, world: WorldHandle): void {
     const palette = ctx.tokens.palettes.dusk;
-    const accent = ctx.tokens.accents[manifest.accent] ?? ctx.tokens.celebrationGold;
+    const accent = this.accentOf(ctx);
     this.accent = accent;
     this.gold = ctx.tokens.celebrationGold;
 
@@ -82,31 +76,20 @@ class AlpineValleyScene extends StageScene<WorldHandle> {
       CAM_LOOK,
     );
     return {
-      canvas: ctx.canvas,
       target: CAM_LOOK,
       azimuth: home.azimuth,
       polar: home.polar,
       distance: home.distance,
-      fov: ctx.tokens.fovHero,
       near: 0.05,
       far: 420,
-      aspect: ctx.size.height > 0 ? ctx.size.width / ctx.size.height : 16 / 9,
+      rotateSpeed: 0.006,
+      zoomSpeed: 0.0016,
       damping: 2.6,
-      name: 'alpineOrbitRig',
-    };
-  }
-
-  protected poolOptions(ctx: SceneContext): CelebrationPoolOptions {
-    return {
-      seed: ctx.seed,
-      burstSize: BURST_PARTICLES,
-      name: 'alpineCelebrations',
     };
   }
 
   protected overlayOptions(): GroundTruthOptions {
     return {
-      camera: this.camera,
       profileRange: [-1.2, 0.6],
       agentPos: (state) => {
         const x = state.pose[MOUNTAINCAR_POS] ?? 0;
@@ -115,7 +98,6 @@ class AlpineValleyScene extends StageScene<WorldHandle> {
         this.overlayPos[2] = 0;
         return this.overlayPos;
       },
-      name: 'alpineGroundTruth',
     };
   }
 
@@ -131,15 +113,10 @@ class AlpineValleyScene extends StageScene<WorldHandle> {
     cart.setTime(0);
   }
 
-  protected tick(frame: FrameUpdate): void {
-    const ctx = this.ctx;
-    const world = this.world;
+  protected tick(frame: FrameUpdate, { world, pool, rig, time }: Stage<WorldHandle>): void {
     const cart = this.cart;
-    const pool = this.pool;
-    const rig = this.rig;
-    if (!ctx || !world || !cart || !pool || !rig) return;
+    if (!cart) return;
 
-    const time = ctx.time();
     const state = frame.state;
 
     pool.update(frame.dtReal, time);
@@ -230,5 +207,4 @@ class AlpineValleyScene extends StageScene<WorldHandle> {
   }
 }
 
-const createScene: SceneFactory = () => new AlpineValleyScene();
-export default createScene;
+export default ((() => new AlpineValleyScene()) satisfies SceneFactory);

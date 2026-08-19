@@ -1,22 +1,9 @@
-
 import type * as THREE from 'three';
 import type { EnvId } from '@shared/envs';
 import type { EnvGeometry, SimEvent } from '@sim/types';
 import type { DesignTokens } from './tokens';
 
 export type SceneEvent = SimEvent;
-
-export interface SceneManifest {
-  envId: EnvId;
-  slug: string;
-  title: string;
-  accent: string;
-  postConfig: {
-    bloomStrength: number;
-    bloomThreshold: number;
-    fogTint: number;
-  };
-}
 
 export interface FrameState {
   pose: Float32Array;
@@ -38,6 +25,7 @@ export interface SceneSize { width: number; height: number; dpr: number }
 export interface SceneContext {
   renderer: THREE.WebGLRenderer;
   canvas: HTMLCanvasElement;
+  envId: EnvId;
   size: SceneSize;
   tokens: DesignTokens;
   geometry: EnvGeometry;
@@ -46,7 +34,6 @@ export interface SceneContext {
 }
 
 export interface SceneModule {
-  readonly manifest: SceneManifest;
   readonly scene: THREE.Scene;
   readonly camera: THREE.PerspectiveCamera;
   init(ctx: SceneContext): Promise<void>;

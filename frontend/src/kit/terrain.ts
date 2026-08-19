@@ -1,4 +1,3 @@
-
 import * as THREE from 'three';
 import { hash2f } from './rng';
 import { oakMaterial, type OakMaterialOptions } from './materials';

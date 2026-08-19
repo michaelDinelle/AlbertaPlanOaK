@@ -1,10 +1,9 @@
-
 import type { CelebrationPoolOptions } from '@kit/celebrate';
 import type { GroundTruthOptions } from '@kit/debug';
 import { cellToWorld, cellToWorldVec, type Vec3Tuple } from '@kit/grid';
 import { clamp01, envelope } from '@kit/mix';
 import type { OrbitRigOptions } from '@kit/rigs';
-import { StageScene } from '@kit/stage';
+import { StageScene, type Stage } from '@kit/stage';
 import { TOKENS } from '@kit/tokens';
 import type { FrameUpdate, SceneContext, SceneFactory } from '@kit/types';
 import { Wisp } from '@kit/wisp';
@@ -16,7 +15,6 @@ import {
   type CueCrystalHandle,
   type ExitMouthHandle,
 } from './actors';
-import { manifest } from './manifest';
 import {
   CAMERA_AZIMUTH,
   CHOICE_CELL,
@@ -29,7 +27,6 @@ import {
   type WorldHandle,
 } from './world';
 
-
 const CAM_TARGET: readonly [number, number, number] = [-4, 1.0, 0];
 const CAM_DISTANCE = 24.8;
 const CAM_POLAR = 1.263;
@@ -39,7 +36,6 @@ const HOP_HEIGHT = 0.14;
 
 const BURST_SCALE = 0.72;
 const RIPPLE_SCALE = 0.62;
-const BURST_PARTICLES = 130;
 const PULSE_STRENGTH = 0.3;
 const SIGH_STRENGTH = 0.85;
 
@@ -54,7 +50,6 @@ const MOUTH_REST = 1;
 const MOUTH_FLARE = 3.4;
 
 class FireflyCaveScene extends StageScene<WorldHandle> {
-  readonly manifest = manifest;
   protected readonly stageName = 'fireflyCave';
 
   private wisp: Wisp | null = null;
@@ -92,7 +87,7 @@ class FireflyCaveScene extends StageScene<WorldHandle> {
 
   protected buildActors(ctx: SceneContext, world: WorldHandle): void {
     const grid = this.grid;
-    const accent = ctx.tokens.accents[manifest.accent] ?? ctx.tokens.celebrationGold;
+    const accent = this.accentOf(ctx);
 
     const anchor: Vec3Tuple = [0, 0, 0];
     this.cueX = cellToWorld(CUE_CELL, 0, grid, anchor)[0];
@@ -165,29 +160,18 @@ class FireflyCaveScene extends StageScene<WorldHandle> {
 
   protected rigOptions(ctx: SceneContext): OrbitRigOptions {
     return {
-      canvas: ctx.canvas,
       target: CAM_TARGET,
       distance: CAM_DISTANCE,
       azimuth: CAMERA_AZIMUTH,
       polar: CAM_POLAR,
-      fov: ctx.tokens.fovHero,
-      near: 0.1,
-      far: 900,
-      aspect: ctx.size.height > 0 ? ctx.size.width / ctx.size.height : 16 / 9,
-      damping: 5,
-      rotateSpeed: 0.004,
       zoomSpeed: 0.0014,
-      name: 'caveOrbitRig',
     };
   }
 
   protected poolOptions(ctx: SceneContext): CelebrationPoolOptions {
     return {
-      seed: ctx.seed,
-      burstSize: BURST_PARTICLES,
       sighRadius: 3.4,
       sighHeight: 4,
-      name: 'caveCelebrations',
     };
   }
 
@@ -195,14 +179,12 @@ class FireflyCaveScene extends StageScene<WorldHandle> {
     const overlayCell = this.overlayCell;
     const goalCell = this.goalCell;
     return {
-      camera: this.camera,
       agentCell: (state) => {
         overlayCell.x = readPos(state);
         overlayCell.y = 0;
         return overlayCell;
       },
       goalCell: () => goalCell,
-      name: 'caveGroundTruth',
     };
   }
 
@@ -218,18 +200,13 @@ class FireflyCaveScene extends StageScene<WorldHandle> {
     this.mouthMagenta?.setTime(0);
   }
 
-  protected tick(frame: FrameUpdate): void {
-    const ctx = this.ctx;
-    const world = this.world;
+  protected tick(frame: FrameUpdate, { ctx, world, pool, rig, time }: Stage<WorldHandle>): void {
     const wisp = this.wisp;
     const crystal = this.crystal;
     const cyan = this.mouthCyan;
     const magenta = this.mouthMagenta;
-    const pool = this.pool;
-    const rig = this.rig;
-    if (!ctx || !world || !wisp || !crystal || !cyan || !magenta || !pool || !rig) return;
+    if (!wisp || !crystal || !cyan || !magenta) return;
 
-    const time = ctx.time();
     const state = frame.state;
     const grid = this.grid;
 
@@ -363,7 +340,6 @@ class FireflyCaveScene extends StageScene<WorldHandle> {
   }
 }
 
-
 export function floodRunning(age: number): boolean {
   return age >= 0 && age < FLOOD_SECONDS;
 }
@@ -373,5 +349,4 @@ export function floodProgress(age: number): number {
   return clamp01(age / FLOOD_SECONDS);
 }
 
-const createScene: SceneFactory = () => new FireflyCaveScene();
-export default createScene;
+export default ((() => new FireflyCaveScene()) satisfies SceneFactory);

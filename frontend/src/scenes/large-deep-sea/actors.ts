@@ -1,11 +1,9 @@
-
 import { emissiveMaterial, oakMaterial, oakUniforms, setEmissiveIntensity } from '@kit/materials';
 import type { EmissiveMaterial, OakMaterial } from '@kit/materials';
 import { blendTokens, clamp01 } from '@kit/mix';
 import { mergeColoredParts, type ColoredPart } from '@kit/parts';
 import * as THREE from 'three';
 import type { AbyssSkin } from './world';
-
 
 export const HEART_Y = 0.62;
 export const HEART_HDR = 2.6;
@@ -168,7 +166,6 @@ export function buildWreck(opts: WreckOptions): WreckHandle {
   };
 }
 
-
 export const LURE_HDR = 3.6;
 
 export interface AnglerOptions {
@@ -312,7 +309,6 @@ export function buildAngler(opts: AnglerOptions): AnglerHandle {
     },
   };
 }
-
 
 export interface DiveBubbleOptions {
   accent: THREE.ColorRepresentation;

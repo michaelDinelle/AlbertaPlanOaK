@@ -1,11 +1,8 @@
-
 import { POSE_LEN } from '../record';
-import type { EnvDecoder, EnvFrame, EnvGeometry, GridCell, SimEvent } from '../types';
-import { NO_EVENTS } from '../events';
+import { NO_EVENTS, type EnvDecoder, type EnvFrame, type EnvGeometry, type GridCell, type SimEvent } from '../types';
 
 export const KEYCORRIDOR_W = 9;
 export const KEYCORRIDOR_H = 7;
-export const KEYCORRIDOR_ROOM_CELLS = 15;
 
 export const KEYCORRIDOR_X = 0;
 export const KEYCORRIDOR_Y = 1;
@@ -78,7 +75,6 @@ export const keyCorridorDecoder: EnvDecoder<KeyCorridorStatic> = {
       pose,
     };
   },
-
 
   deriveEvents(prev: EnvFrame, next: EnvFrame): SimEvent[] {
     const out: SimEvent[] = [];

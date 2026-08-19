@@ -1,4 +1,3 @@
-
 export type PaletteName = 'dawn' | 'morning' | 'noon' | 'afternoon' | 'dusk' | 'night' | 'underwater' | 'abyss' | 'cave';
 
 export interface Palette {

@@ -1,10 +1,9 @@
 import type { EnvEntry } from '@sim/catalog';
-import { ENVS, type EnvId } from '@shared/envs';
+import type { EnvId } from '@shared/envs';
 import type { RecordingRef } from '@shared/types';
 import type { PlaybackSource } from './playbackSource';
 import { recordingUrl } from '../data/api';
 import { lensRecording, type RecordingLens } from '@sim/decode';
-import { NO_EVENTS } from '@sim/events';
 import {
   FILE_HEADER_BYTES,
   RECORD_FLOATS,
@@ -16,7 +15,7 @@ import {
   type CodecDescriptor,
 } from '@sim/record';
 import { decoders } from '@sim/registry';
-import type { EnvDecoder } from '@sim/types';
+import { NO_EVENTS, type EnvDecoder } from '@sim/types';
 
 export interface TheaterTarget {
   runId: string;
@@ -112,7 +111,6 @@ export class TheaterLoadError extends Error {
   }
 }
 
-
 export interface HeroOptions extends TheaterTarget {
   entry: EnvEntry;
   horizonSteps: number;
@@ -132,16 +130,15 @@ export interface HeroHandle {
   destroy(): void;
 }
 
-export function makeInitialSource(envId: EnvId, seed: number): PlaybackSource {
+export function makeInitialSource(entry: EnvEntry, envId: EnvId, seed: number): PlaybackSource {
   const decoder = decoders[envId] as EnvDecoder;
   const st = decoder.initStatic(seed);
   const init = decoder.initFrame(seed, st);
-  const info = ENVS[envId];
   return {
     envId,
     seed,
-    controlHz: info.controlHz,
-    discretePose: info.discretePose,
+    controlHz: entry.controlHz,
+    discretePose: entry.discretePose,
     wrapMask: 0,
     geometry: decoder.geometry(st, seed),
     frameCount: 1,
@@ -155,7 +152,6 @@ export function loadHero(options: HeroOptions): HeroHandle {
   const { runId, envId, seed } = options;
   const decoder = decoders[envId] as EnvDecoder;
   if (decoder === undefined) throw new TheaterLoadError(`no @sim decoder registered for ${envId}`);
-  const info = ENVS[envId];
   const st = decoder.initStatic(seed);
   const geometry = decoder.geometry(st, seed);
   const initFrame = decoder.initFrame(seed, st);
@@ -191,8 +187,8 @@ export function loadHero(options: HeroOptions): HeroHandle {
   const source: PlaybackSource = {
     envId,
     seed,
-    controlHz: info.controlHz,
-    discretePose: info.discretePose,
+    controlHz: options.entry.controlHz,
+    discretePose: options.entry.discretePose,
     wrapMask,
     geometry,
     get frameCount() {

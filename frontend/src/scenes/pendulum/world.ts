@@ -1,4 +1,3 @@
-
 import * as THREE from 'three';
 import { applyFog, makeLightRig, type LightRig } from '@kit/lighting';
 import {
@@ -39,7 +38,6 @@ import {
   SWING_REACH,
 } from './dims';
 
-
 export const WATER_LEVEL = -1.62;
 export const REFLECT_Z = 0.92;
 export const REFLECT_LIFT = 0.014;
@@ -72,11 +70,9 @@ const NUKI_HALF = PILLAR_X + 0.33;
 const NUKI_HALF_Z = STRAP_Z + 0.018;
 const HANGER_PLATE_Z = STRAP_Z * 2 + 0.028;
 
-
 export function pivotOf(geometry: EnvGeometry): readonly [number, number, number] {
   return geometry.classic?.anchors.pivot ?? [0, 0, 0];
 }
-
 
 export function makePondBed(seed: number): (x: number, z: number) => number {
   return (x, z) => {
@@ -91,7 +87,6 @@ export function makePondBed(seed: number): (x: number, z: number) => number {
   };
 }
 
-
 export interface WorldHandle extends WorldCore {
   sky: SkyHandle;
   rig: LightRig;
@@ -102,7 +97,6 @@ export interface WorldHandle extends WorldCore {
   lanternLight: THREE.PointLight | undefined;
   setLight(serenity: number, lanternX: number, time: number): void;
 }
-
 
 const KOI_COUNT = 9;
 const PAD_COUNT = 15;
@@ -493,7 +487,6 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene): WorldHandle {
   });
 }
 
-
 const BASE_CAUSTIC = 0.07;
 
 interface PondHandle {
@@ -531,7 +524,6 @@ function makeWaterSurface(
     },
   };
 }
-
 
 interface KoiHandle extends Disposable {
   mesh: THREE.InstancedMesh;
@@ -651,7 +643,6 @@ function buildKoi(
     },
   };
 }
-
 
 interface PadHandle extends Disposable {
   mesh: THREE.InstancedMesh;

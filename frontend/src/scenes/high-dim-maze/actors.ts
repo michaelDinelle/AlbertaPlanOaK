@@ -1,4 +1,3 @@
-
 import { GoalBeacon } from '@kit/grid';
 import {
   emissiveMaterial,
@@ -14,7 +13,6 @@ import type { Palette } from '@kit/tokens';
 import { makeWater, type WaterHandle } from '@kit/water';
 import * as THREE from 'three';
 import type { CanyonSkin } from './world';
-
 
 const BASIN_R = 0.44;
 const BASIN_RIM_Y = 0.13;
@@ -283,7 +281,6 @@ function makeReedGeometry(): THREE.BufferGeometry {
   return g;
 }
 
-
 export interface ScarfOptions {
   color: THREE.ColorRepresentation;
   height: number;
@@ -419,7 +416,6 @@ function makeScarfPanelGeometry(length: number): THREE.BufferGeometry {
   g.name = 'wispScarfPanel';
   return g;
 }
-
 
 export interface GustOptions {
   skin: CanyonSkin;

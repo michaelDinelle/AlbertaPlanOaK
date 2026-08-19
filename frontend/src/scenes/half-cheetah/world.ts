@@ -1,4 +1,3 @@
-
 import * as THREE from 'three';
 import { applyFog, makeLightRig, type LightRig } from '@kit/lighting';
 import { oakMaterial, oakUniforms, setMaterialsTime, type OakMaterial } from '@kit/materials';
@@ -18,7 +17,6 @@ import type { SceneContext } from '@kit/types';
 import { grassClumpGeometry, rockGeometry } from '@kit/vegetation';
 import { makeWorld, type WorldCore } from '@kit/world';
 
-
 export const LANE_HALF_Z = 0.62;
 export const LANE_FEATHER = 3.1;
 export const GROUND_PERIOD = 48;
@@ -36,7 +34,6 @@ const ROLL_RAMP = 22;
 const RIDGE_Z = -72;
 const RIDGE_PERIOD = 96;
 const RIDGE_SEGMENTS = 288;
-
 
 const TWO_PI_OVER_PERIOD = (Math.PI * 2) / GROUND_PERIOD;
 
@@ -82,7 +79,6 @@ function noiseTiled(u: number, v: number, period: number, seed: number): number 
 function fade(t: number): number {
   return t * t * (3 - 2 * t);
 }
-
 
 export type TileWriter = (
   x: number,
@@ -198,7 +194,6 @@ export function makeTileBank(opts: TileBankOptions): TileBankHandle {
     },
   };
 }
-
 
 export function acaciaGeometry(detail: number, bark: THREE.Color, leafLow: THREE.Color, leafHigh: THREE.Color): THREE.BufferGeometry {
   const parts: ColoredPart[] = [];
@@ -328,7 +323,6 @@ function birdGeometry(): THREE.BufferGeometry {
   return g;
 }
 
-
 export interface WorldHandle extends WorldCore {
   sky: SkyHandle;
   rig: LightRig;
@@ -337,7 +331,6 @@ export interface WorldHandle extends WorldCore {
   setSpeed(speed01: number): void;
   setShadowTarget(x: number): void;
 }
-
 
 const BIRDS = 4;
 

@@ -1,16 +1,13 @@
-
-import type { CelebrationPoolOptions } from '@kit/celebrate';
 import type { GroundTruthOptions } from '@kit/debug';
 import type { GridSize } from '@kit/grid';
 import { clamp01, envelope } from '@kit/mix';
 import type { OrbitRigOptions } from '@kit/rigs';
-import { StageScene } from '@kit/stage';
+import { StageScene, type Stage } from '@kit/stage';
 import type { FrameUpdate, SceneContext, SceneFactory } from '@kit/types';
 import { Wisp } from '@kit/wisp';
 import * as THREE from 'three';
 import type { GridCell, GridGeometry } from '@sim/types';
 import { buildBubble, buildClam, type BubbleHandle, type ClamHandle } from './actors';
-import { manifest } from './manifest';
 import {
   cellToReefVec,
   isDiveStep,
@@ -23,15 +20,12 @@ import {
 } from './reef';
 import { CAMERA_AZIMUTH, buildWorld, treasureCell, type WorldHandle } from './world';
 
-
-const CAM_AZIMUTH = CAMERA_AZIMUTH;
 const CAM_POLAR = 0.82;
 const CAM_DISTANCE = 17.6;
 const CAM_TARGET: readonly [number, number, number] = [-0.85, -2.08, 1.05];
 
 const BURST_SCALE = 0.78;
 const RIPPLE_SCALE = 0.44;
-const BURST_PARTICLES = 96;
 const PULSE_STRENGTH = 0.52;
 const FLARE_SECONDS = 1.5;
 const GAPE_SECONDS = 2.8;
@@ -47,7 +41,6 @@ const GAPE_PROXIMITY = 0.52;
 const PROXIMITY_COLS = 3;
 
 class SunlitDescentScene extends StageScene<WorldHandle> {
-  readonly manifest = manifest;
   protected readonly stageName = 'sunlitDescent';
 
   private wisp: Wisp | null = null;
@@ -83,7 +76,7 @@ class SunlitDescentScene extends StageScene<WorldHandle> {
   protected buildActors(ctx: SceneContext, world: WorldHandle): void {
     const grid = this.grid;
     const palette = ctx.tokens.palettes.underwater;
-    const accent = ctx.tokens.accents[manifest.accent] ?? ctx.tokens.uiCyan;
+    const accent = this.accentOf(ctx);
     this.gold = ctx.tokens.celebrationGold;
     this.pearlHue = world.skin.pearl.getHex();
 
@@ -132,27 +125,10 @@ class SunlitDescentScene extends StageScene<WorldHandle> {
 
   protected rigOptions(ctx: SceneContext): OrbitRigOptions {
     return {
-      canvas: ctx.canvas,
       target: [CAM_TARGET[0], CAM_TARGET[1], CAM_TARGET[2]],
       distance: CAM_DISTANCE,
-      azimuth: CAM_AZIMUTH,
+      azimuth: CAMERA_AZIMUTH,
       polar: CAM_POLAR,
-      fov: ctx.tokens.fovHero,
-      near: 0.1,
-      far: 900,
-      aspect: ctx.size.height > 0 ? ctx.size.width / ctx.size.height : 16 / 9,
-      damping: 5,
-      rotateSpeed: 0.004,
-      zoomSpeed: 0.0012,
-      name: 'reefOrbitRig',
-    };
-  }
-
-  protected poolOptions(ctx: SceneContext): CelebrationPoolOptions {
-    return {
-      seed: ctx.seed,
-      burstSize: BURST_PARTICLES,
-      name: 'reefCelebrations',
     };
   }
 
@@ -161,7 +137,6 @@ class SunlitDescentScene extends StageScene<WorldHandle> {
     const overlayCell = this.overlayCell;
     const overlayGrid: GridSize = this.grid;
     return {
-      camera: this.camera,
       agentCell: (state) => {
         readDive(state, overlayGrid, overlayDive);
         overlayCell.x = overlayDive.c;
@@ -169,7 +144,6 @@ class SunlitDescentScene extends StageScene<WorldHandle> {
         return overlayCell;
       },
       goalCell: () => this.treasure,
-      name: 'reefGroundTruth',
     };
   }
 
@@ -190,17 +164,12 @@ class SunlitDescentScene extends StageScene<WorldHandle> {
     this.clam?.setTime(0);
   }
 
-  protected tick(frame: FrameUpdate): void {
-    const ctx = this.ctx;
-    const world = this.world;
+  protected tick(frame: FrameUpdate, { ctx, world, pool, rig, time }: Stage<WorldHandle>): void {
     const wisp = this.wisp;
     const bubble = this.bubble;
     const clam = this.clam;
-    const pool = this.pool;
-    const rig = this.rig;
-    if (!ctx || !world || !wisp || !bubble || !clam || !pool || !rig) return;
+    if (!wisp || !bubble || !clam) return;
 
-    const time = ctx.time();
     const state = frame.state;
     const grid = this.grid;
     const dive = this.dive;
@@ -319,7 +288,6 @@ class SunlitDescentScene extends StageScene<WorldHandle> {
   }
 }
 
-
 export function gape(time: number, dive: DiveCell, grid: GridSize): number {
   const depth = grid.h > 1 ? clamp01(dive.r / (grid.h - 1)) : 0;
   const away = Math.abs(dive.c - (grid.w - 1));
@@ -328,5 +296,4 @@ export function gape(time: number, dive: DiveCell, grid: GridSize): number {
   return clamp01(GAPE_BASE + GAPE_BREATH * breath + GAPE_PROXIMITY * depth * near);
 }
 
-const createScene: SceneFactory = () => new SunlitDescentScene();
-export default createScene;
+export default ((() => new SunlitDescentScene()) satisfies SceneFactory);

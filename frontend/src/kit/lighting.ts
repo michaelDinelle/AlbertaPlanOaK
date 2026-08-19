@@ -1,4 +1,3 @@
-
 import * as THREE from 'three';
 import { paletteSunDirection } from './sky';
 import type { Palette } from './tokens';
@@ -13,8 +12,6 @@ export interface LightRigOptions {
   pointCount?: number;
   pointDistance?: number;
   pointDecay?: number;
-  shadowRadius?: number;
-  shadowCenter?: readonly [number, number, number];
   sunDistanceScale?: number;
   name?: string;
 }
@@ -121,11 +118,9 @@ export function makeLightRig(palette: Palette, opts: LightRigOptions = {}): Ligh
     },
   };
 
-  const c = opts.shadowCenter;
-  rig.setShadowFocus(c ? { x: c[0], y: c[1], z: c[2] } : { x: 0, y: 0, z: 0 }, opts.shadowRadius ?? 10);
+  rig.setShadowFocus({ x: 0, y: 0, z: 0 }, 10);
   return rig;
 }
-
 
 export function makeFog(palette: Palette, extent: number): THREE.FogExp2 {
   const reach = Math.max(0.001, palette.fogDensityHint * Math.max(0.001, extent));

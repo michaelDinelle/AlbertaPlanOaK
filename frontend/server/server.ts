@@ -1,4 +1,3 @@
-
 import { createServer } from './app';
 
 const { server, app } = createServer();

@@ -1,18 +1,3 @@
-/*!
- * liquid-glass.js — Apple-style liquid glass refraction for any element.
- *
- * Usage:
- *   <script src="liquid-glass.js"></script>
- *   const glass = liquidGlass(document.querySelector('.my-card'), { scale: -112 });
- *
- * The module owns the SVG filter, displacement map, backdrop-filter wiring,
- * resize handling, and the frosted-blur fallback for browsers that can't do
- * SVG-filtered backdrops (Safari, Firefox). Visual dressing (tint, inner
- * highlight, glare, shadows) stays in your CSS — see GLASS.md for the recipe.
- *
- * Technique per https://aave.com/design/building-glass-for-the-web and
- * https://github.com/rizroze/liquid-glass
- */
 (function (global) {
   "use strict";
 
@@ -20,8 +5,6 @@
   let uid = 0;
   let svgDefs = null;
 
-  // Chromium can apply SVG filters via backdrop-filter; Safari and Firefox
-  // silently no-op, so they get the frosted fallback instead.
   const supported = (() => {
     const ua = navigator.userAgent;
     const isSafari = /Safari/.test(ua) && !/Chrome|Chromium|Edg/.test(ua);
@@ -41,7 +24,6 @@
   function ensureDefs() {
     if (svgDefs) return svgDefs;
     const svg = document.createElementNS(SVG_NS, "svg");
-    // width/height 0 keeps it renderable (display:none would break feImage)
     svg.setAttribute("width", "0");
     svg.setAttribute("height", "0");
     svg.setAttribute("aria-hidden", "true");
@@ -52,11 +34,6 @@
     return svgDefs;
   }
 
-  // Displacement map, gradient-difference method: a red left->right ramp
-  // encodes X displacement, a blue top->bottom ramp encodes Y ("difference"
-  // keeps both since the channels are disjoint). A blurred, inset 50%-gray
-  // rounded rect neutralizes the interior, confining the refraction bulge to
-  // an edge band whose curvature is set by the blur radius.
   function makeMap(w, h, radius, border, mapBlur) {
     const canvas = document.createElement("canvas");
     canvas.width = w;
@@ -88,9 +65,6 @@
     return canvas.toDataURL();
   }
 
-  // Three displacement passes at staggered scales (R strongest), channels
-  // isolated with feColorMatrix and recombined with screen blends — the
-  // faint prism fringe at the rim.
   function buildFilter(id, scales) {
     const filter = document.createElementNS(SVG_NS, "filter");
     filter.setAttribute("id", id);
@@ -98,8 +72,6 @@
     filter.setAttribute("y", "0");
     filter.setAttribute("width", "100%");
     filter.setAttribute("height", "100%");
-    // Load-bearing: filters default to linearRGB, which re-maps the map's
-    // neutral gray 128 to ~0.216 and injects a constant phantom displacement.
     filter.setAttribute("color-interpolation-filters", "sRGB");
 
     const feImage = document.createElementNS(SVG_NS, "feImage");
@@ -158,21 +130,6 @@
     return raw.trim().endsWith("%") ? (v / 100) * Math.min(w, h) : v;
   }
 
-  /**
-   * Apply liquid glass to an element.
-   *
-   * @param {Element} el
-   * @param {Object} [opts]
-   * @param {number} [opts.scale=-112]     Displacement strength (negative = magnifying bulge).
-   * @param {number} [opts.chroma=6]       Per-channel scale stagger; 0 disables the prism fringe.
-   * @param {number} [opts.border=0.07]    Neutral inset as a fraction of the smaller side.
-   * @param {number} [opts.mapBlur=12]     Edge-curvature softness (px) of the map's gray inset.
-   * @param {number} [opts.blur=3]         Backdrop blur (px) behind the glass interior.
-   * @param {number} [opts.saturate=1.5]   Backdrop saturation boost.
-   * @param {number} [opts.radius]         Corner radius override (px); default reads border-radius.
-   * @param {number} [opts.fallbackBlur=16] Frosted blur (px) where refraction is unsupported.
-   * @returns {{supported: boolean, refresh: Function, destroy: Function}}
-   */
   function liquidGlass(el, opts) {
     const o = Object.assign(
       { scale: -112, chroma: 6, border: 0.07, mapBlur: 12,

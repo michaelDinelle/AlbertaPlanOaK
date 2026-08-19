@@ -1,8 +1,6 @@
-
 import { PD_L } from '@sim/envs/pendulum';
 
 export const ROD_LEN = PD_L;
-
 
 export const LANTERN_R = 0.135;
 export const LANTERN_H = 0.23;
@@ -21,7 +19,6 @@ export const LANTERN_REACH = LANTERN_H * 0.5 + TASSEL_DROP + TASSEL_WEIGHT_H * 0
 
 export const LANTERN_HALF_Z = LANTERN_R;
 
-
 export const SWING_REACH = ROD_LEN + LANTERN_REACH;
 
 export const STRAP_HALF = 0.008;
@@ -30,7 +27,6 @@ export const HANGER_PLATE_H = 0.03;
 export const HANGER_PLATE_W = 0.24;
 export const HANGER_PLATE_DROP = 0.062;
 export const SWING_CLEARANCE = 0.055;
-
 
 export const PIN_R = 0.019;
 export const EYE_TUBE = 0.011;

@@ -1,4 +1,3 @@
-
 import { CHEETAH_FK_POINTS } from '../types';
 import type { CheetahGeometry } from '../types';
 
