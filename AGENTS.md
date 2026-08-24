@@ -44,6 +44,7 @@ When a rule drifts from the cited research, fix the rule — never preserve folk
 9. **Proof matches risk.** Changes that preserve every floating-point op ship on a bitwise A/B check against the keeper fleet. Changes that reorder arithmetic ship only on the paired population gate against the keeper fleet.
 10. **No commentary, only code.** No comments, no docstrings, no doc files of any kind. Names and structure carry all meaning; if code needs a comment to be understood, rewrite the code. Knowledge that can't live in code lives in git history, skills, or memory — never in the repo as prose.
 11. **No environment cherry-picking under any circunstances** Use every environment and every seed the keeper uses. Using only some of them does not count. Do not write agent code that only works for one environment. To match the keeper, all of them have to match. It doesn't matter if you are doing an intermediate test or just a "quick check". Slicing arbitrary enviroment subsets are never acceptable. Every decision must be made holistically with all of the enviroments in mind. No matter the circumstances. 
+12. **No branches or commits without explicit user authorization.** Work only in the single current working tree so the user can skim it live in VS Code. Never create a branch, never commit, and never propose a plan that contains branch or commit stages. Only branch or commit when the user has explicitly authorized it in that turn.
 
 
 ## Performance: profiling (HEADLESS — verified 2026-07-04)
