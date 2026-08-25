@@ -234,7 +234,7 @@ export function buildCheetah(opts: CheetahOptions): CheetahHandle {
 
   const scratchColor = new THREE.Color();
 
-  const coatFor = (spec: CoatSpec, len: number, boneSeed: number): CoatColorFn => {
+  const coatFor = (spec: CoatSpec): CoatColorFn => {
     return (t, theta, out) => {
       const ventral = Math.cos(theta * Math.PI * 2) * 0.5 + 0.5;
       out.copy(cBack).lerp(cCoat, smoothstep01(1 - Math.abs(ventral - 0.5) * 1.6));
@@ -253,7 +253,7 @@ export function buildCheetah(opts: CheetahOptions): CheetahHandle {
       radial: Math.max(6, Math.round(base.radial * lod)),
     };
     const len = boneLen[i] ?? 0.2;
-    const geo = limbGeometry(len, spec, coatFor(spec, len, i * 0x9e37), `cheetah_${BONE_NAMES[i] ?? i}`, boneR);
+    const geo = limbGeometry(len, spec, coatFor(spec), `cheetah_${BONE_NAMES[i] ?? i}`, boneR);
     boneGeometries.push(geo);
     const mesh = new THREE.Mesh(geo, coatMaterial);
     mesh.name = `cheetah_${BONE_NAMES[i] ?? i}`;

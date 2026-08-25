@@ -15,32 +15,31 @@ const LENS_OPTICS: GlassOptions = { saturate: 1 };
 
 export interface PanelProps {
   className?: string;
-  style?: CSSProperties;
   children: ReactNode;
 }
 
-export function Lens({ className, style, children, glass }: PanelProps & { glass?: GlassOptions }) {
-  const ref = useLiquidGlass<HTMLDivElement>({ ...LENS_OPTICS, ...glass });
+export function Lens({ className, children }: PanelProps) {
+  const ref = useLiquidGlass<HTMLDivElement>(LENS_OPTICS);
   const enter = useReducedMotion() === true ? undefined : ENTER;
   return (
     <motion.div
       ref={ref}
       {...enter}
       className={clsx('glass pointer-events-auto rounded-lg', className)}
-      style={{ ...CONTAIN, ...style }}
+      style={CONTAIN}
     >
       {children}
     </motion.div>
   );
 }
 
-export function Frost({ className, style, children }: PanelProps) {
+export function Frost({ className, children }: PanelProps) {
   const enter = useReducedMotion() === true ? undefined : ENTER;
   return (
     <motion.div
       {...enter}
       className={clsx('glass glass-frost pointer-events-auto rounded-lg', className)}
-      style={{ ...CONTAIN, ...style }}
+      style={CONTAIN}
     >
       {children}
     </motion.div>

@@ -1,9 +1,9 @@
-import { normalize, resolve, sep } from 'node:path';
-import { join } from 'node:path';
+import { open } from 'node:fs/promises';
+import { join, normalize, resolve, sep } from 'node:path';
 import { DIST_DIR, HOSTNAME, baselinesRootFromEnv, benchRootFromEnv, portFromEnv } from './config';
 import { corsHeaders } from './cors';
 import { statOrNull } from './fs';
-import { findRecording } from './recordings';
+import { findRecording, type PoseIndex } from './recordings';
 import { RunIndex, buildRunDetail } from './runIndex';
 
 export interface AppOptions {
@@ -79,54 +79,81 @@ export function parseRangeHeader(header: string | null, size: number): RangeSpec
   return { start, end };
 }
 
-async function serveStatic(
-  req: Request,
-  path: string,
-  contentType: string,
-): Promise<Response> {
-  const st = await statOrNull(path);
-  if (st === null) return fail(404, 'not found');
-
-  const etag = `"${Math.trunc(st.mtimeMs).toString(36)}-${st.size.toString(36)}"`;
+function conditional(
+  req: Request, etag: string | null, size: number, contentType: string,
+): { done: Response } | { status: 200 | 206; start: number; end: number; headers: Record<string, string> } {
   const base: Record<string, string> = {
     'content-type': contentType,
     'accept-ranges': 'bytes',
-    etag,
     'cache-control': 'private, max-age=0, must-revalidate',
   };
-
-  const inm = req.headers.get('if-none-match');
-  if (inm !== null) {
-    const tokens = inm.split(',').map((t) => t.trim());
-    if (tokens.includes('*') || tokens.some((t) => t.replace(/^W\//, '') === etag)) {
-      return new Response(null, { status: 304, headers: base });
+  if (etag !== null) {
+    base['etag'] = etag;
+    const inm = req.headers.get('if-none-match');
+    if (inm !== null) {
+      const tokens = inm.split(',').map((t) => t.trim());
+      if (tokens.includes('*') || tokens.some((t) => t.replace(/^W\//, '') === etag)) {
+        return { done: new Response(null, { status: 304, headers: base }) };
+      }
     }
   }
-
   const ifRange = req.headers.get('if-range');
-  const rangeValid = ifRange === null || ifRange.trim() === etag;
-  const range = rangeValid ? parseRangeHeader(req.headers.get('range'), st.size) : null;
+  const rangeValid = ifRange === null || (etag !== null && ifRange.trim() === etag);
+  const range = rangeValid ? parseRangeHeader(req.headers.get('range'), size) : null;
   if (range === 'unsatisfiable') {
-    return new Response(null, {
-      status: 416,
-      headers: { ...base, 'content-range': `bytes */${st.size}` },
-    });
-  }
-
-  if (range !== null) {
-    const length = range.end - range.start + 1;
-    const headers = {
-      ...base,
-      'content-range': `bytes ${range.start}-${range.end}/${st.size}`,
-      'content-length': String(length),
+    return {
+      done: new Response(null, { status: 416, headers: { ...base, 'content-range': `bytes */${size}` } }),
     };
-    if (req.method === 'HEAD') return new Response(null, { status: 206, headers });
-    return new Response(Bun.file(path).slice(range.start, range.end + 1), { status: 206, headers });
   }
+  const start = range?.start ?? 0;
+  const end = range?.end ?? size - 1;
+  const headers: Record<string, string> = { ...base, 'content-length': String(end - start + 1) };
+  if (range !== null) headers['content-range'] = `bytes ${start}-${end}/${size}`;
+  const status = range !== null ? 206 as const : 200 as const;
+  if (req.method === 'HEAD') return { done: new Response(null, { status, headers }) };
+  return { status, start, end, headers };
+}
 
-  const headers = { ...base, 'content-length': String(st.size) };
-  if (req.method === 'HEAD') return new Response(null, { status: 200, headers });
-  return new Response(Bun.file(path), { status: 200, headers });
+async function serveStatic(req: Request, path: string, contentType: string): Promise<Response> {
+  const st = await statOrNull(path);
+  if (st === null) return fail(404, 'not found');
+  const etag = `"${Math.trunc(st.mtimeMs).toString(36)}-${st.size.toString(36)}"`;
+  const cond = conditional(req, etag, st.size, contentType);
+  if ('done' in cond) return cond.done;
+  const body = cond.status === 206 ? Bun.file(path).slice(cond.start, cond.end + 1) : Bun.file(path);
+  return new Response(body, { status: cond.status, headers: cond.headers });
+}
+
+async function servePose(req: Request, index: PoseIndex, lane: number): Promise<Response> {
+  const segments = index.segments[lane];
+  if (segments === undefined) return fail(404, 'unknown recording');
+  const size = segments.reduce((n, s) => n + s.len, 0);
+  const cond = conditional(req, null, size, 'application/octet-stream');
+  if ('done' in cond) return cond.done;
+  const { start, end } = cond;
+  const length = end - start + 1;
+  const out = Buffer.allocUnsafe(length);
+  let wrote = 0;
+  const handle = await open(index.packPath, 'r');
+  try {
+    let virt = 0;
+    for (const seg of segments) {
+      const from = Math.max(start, virt);
+      const to = Math.min(end, virt + seg.len - 1);
+      if (to >= from) {
+        const got = await handle.read(out, wrote, to - from + 1, seg.off + (from - virt));
+        if (got.bytesRead !== to - from + 1) {
+          throw new Error(`${index.packPath}: short read at ${seg.off + (from - virt)}`);
+        }
+        wrote += got.bytesRead;
+      }
+      virt += seg.len;
+      if (virt > end) break;
+    }
+  } finally {
+    await handle.close().catch(() => undefined);
+  }
+  return new Response(out, { status: cond.status, headers: cond.headers });
 }
 
 export function createApp(opts: AppOptions = {}): App {
@@ -137,7 +164,7 @@ export function createApp(opts: AppOptions = {}): App {
 
   const index = new RunIndex({ benchRoot, baselinesRoot });
 
-  async function handleApi(req: Request, url: URL, segs: string[]): Promise<Response> {
+  async function handleApi(req: Request, segs: string[]): Promise<Response> {
     const head = segs[1];
 
     if (head === 'health' && segs.length === 2) {
@@ -172,10 +199,11 @@ export function createApp(opts: AppOptions = {}): App {
       if (envId === undefined || seedText === undefined || !/^\d+$/.test(seedText)) {
         return fail(404, 'unknown recording');
       }
-      const recs = await index.recordingsFor(run.id);
-      const rec = findRecording(recs, envId, Number(seedText));
+      const pose = await index.poseIndexFor(run.id);
+      if (pose === null) return fail(404, 'unknown recording');
+      const rec = findRecording(pose.entries, envId, Number(seedText));
       if (rec === undefined) return fail(404, 'unknown recording');
-      return serveStatic(req, rec.posePath, 'application/octet-stream');
+      return servePose(req, pose, rec.lane);
     }
 
     return fail(404, 'unknown endpoint');
@@ -253,7 +281,7 @@ export function createApp(opts: AppOptions = {}): App {
 
     if (segs[0] === 'api') {
       try {
-        return await handleApi(req, url, segs);
+        return await handleApi(req, segs);
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
         console.error(`[oak-frontend] ${url.pathname}: ${message}`);

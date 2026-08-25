@@ -16,41 +16,65 @@ import { Label, TXT, cssVar, withAlpha } from './charts';
 function drawSpark(
   canvas: HTMLCanvasElement,
   width: number,
-  values: readonly (number | null)[],
-  xs: readonly number[],
+  values: Float64Array,
+  xs: Float64Array,
   stroke: string,
 ): void {
   const height = 16;
   if (width <= 1) return;
   const dpr = Math.min(3, globalThis.devicePixelRatio || 1);
-  canvas.width = Math.round(width * dpr);
-  canvas.height = Math.round(height * dpr);
-  canvas.style.width = `${width}px`;
-  canvas.style.height = `${height}px`;
+  const bw = Math.round(width * dpr);
+  const bh = Math.round(height * dpr);
+  if (canvas.width !== bw || canvas.height !== bh) {
+    canvas.width = bw;
+    canvas.height = bh;
+    canvas.style.width = `${width}px`;
+    canvas.style.height = `${height}px`;
+  }
   const ctx = canvas.getContext('2d');
   if (ctx === null) return;
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
   ctx.clearRect(0, 0, width, height);
 
-  const finite = values.filter((v): v is number => v !== null && Number.isFinite(v));
-  if (finite.length < 2) return;
-  const pad = 3;
-  let min = Math.min(...finite);
-  let max = Math.max(...finite);
+  let min = 0;
+  let max = 0;
+  let finiteCount = 0;
+  for (let i = 0; i < values.length; i++) {
+    const v = values[i]!;
+    if (!Number.isFinite(v)) continue;
+    finiteCount++;
+    if (v < min) min = v;
+    if (v > max) max = v;
+  }
+  if (finiteCount < 1) return;
   if (min === max) {
     min -= Math.abs(min) * 0.1 + 1e-6;
     max += Math.abs(max) * 0.1 + 1e-6;
   }
   const span = max - min;
-  const xAt = (i: number): number => Math.min(Math.max(xs[i] ?? 0, 0), 1) * width;
+  const pad = 3;
   const yAt = (v: number): number => height - pad - ((v - min) / span) * (height - pad * 2);
+  const zeroLine = min < 0 && max > 0;
 
-  if (min < 0 && max > 0) {
+  const line = new Path2D();
+  const y0 = yAt(0);
+  line.moveTo(0, y0);
+  let lastY = y0;
+  for (let i = 0; i < values.length; i++) {
+    const v = values[i]!;
+    if (!Number.isFinite(v)) continue;
+    const x = Math.min(Math.max(xs[i] ?? 0, 0), 1) * width;
+    lastY = yAt(v);
+    line.lineTo(x, lastY);
+  }
+  line.lineTo(width, lastY);
+
+  if (zeroLine) {
     ctx.save();
     ctx.strokeStyle = withAlpha(cssVar('--color-ink'), 0.22);
     ctx.lineWidth = 1;
     ctx.setLineDash([2, 3]);
-    const y = Math.round(yAt(0)) + 0.5;
+    const y = Math.round(y0) + 0.5;
     ctx.beginPath();
     ctx.moveTo(0, y);
     ctx.lineTo(width, y);
@@ -58,31 +82,19 @@ function drawSpark(
     ctx.restore();
   }
 
-  const points: [number, number][] = [];
-  for (let i = 0; i < values.length; i++) {
-    const v = values[i];
-    if (v === null || v === undefined || !Number.isFinite(v)) continue;
-    points.push([xAt(i), yAt(v)]);
-  }
-  if (points.length < 2) return;
-
-  const baseY = min < 0 && max > 0 ? yAt(0) : height - pad;
-  ctx.beginPath();
-  ctx.moveTo(points[0]![0], baseY);
-  for (const [x, y] of points) ctx.lineTo(x, y);
-  ctx.lineTo(points[points.length - 1]![0], baseY);
-  ctx.closePath();
+  const fill = new Path2D(line);
+  const baseY = zeroLine ? y0 : height - pad;
+  fill.lineTo(width, baseY);
+  fill.lineTo(0, baseY);
+  fill.closePath();
   ctx.fillStyle = withAlpha(stroke, 0.13);
-  ctx.fill();
+  ctx.fill(fill);
 
-  ctx.beginPath();
-  ctx.moveTo(points[0]![0], points[0]![1]);
-  for (const [x, y] of points.slice(1)) ctx.lineTo(x, y);
   ctx.strokeStyle = stroke;
   ctx.lineWidth = 1.25;
   ctx.lineJoin = 'round';
   ctx.lineCap = 'round';
-  ctx.stroke();
+  ctx.stroke(line);
 }
 
 function Spark({
@@ -91,8 +103,8 @@ function Spark({
   stroke,
   draggedRef,
 }: {
-  values: readonly (number | null)[];
-  xs: readonly number[];
+  values: Float64Array;
+  xs: Float64Array;
   stroke: string;
   draggedRef: { current: boolean };
 }) {
@@ -100,22 +112,35 @@ function Spark({
   const holderRef = useRef<HTMLSpanElement | null>(null);
   const down = useRef(false);
   const startX = useRef(0);
+  const state = useRef({ width: 0, values, xs, stroke, schedule: () => {} });
+  Object.assign(state.current, { values, xs, stroke });
 
   useEffect(() => {
     const canvas = canvasRef.current;
     const holder = holderRef.current;
     if (canvas === null || holder === null) return;
     let frame = 0;
+    const draw = (): void => {
+      frame = 0;
+      const st = state.current;
+      drawSpark(canvas, st.width, st.values, st.xs, st.stroke);
+    };
+    state.current.schedule = () => {
+      if (frame === 0) frame = requestAnimationFrame(draw);
+    };
     const observer = new ResizeObserver((entries) => {
-      const width = Math.floor(entries[0]?.contentRect.width ?? 0);
-      cancelAnimationFrame(frame);
-      frame = requestAnimationFrame(() => drawSpark(canvas, width, values, xs, stroke));
+      state.current.width = Math.floor(entries[0]?.contentRect.width ?? 0);
+      state.current.schedule();
     });
     observer.observe(holder);
     return () => {
       cancelAnimationFrame(frame);
       observer.disconnect();
     };
+  }, []);
+
+  useEffect(() => {
+    state.current.schedule();
   }, [values, xs, stroke]);
 
   const fracStep = (event: React.PointerEvent): number => {
@@ -204,12 +229,7 @@ function Row({
       >
         {row.rate === null ? '—' : formatSigned(row.rate, 3)}
       </span>
-      <Spark
-        values={[0, ...row.spark, row.spark[row.spark.length - 1] ?? null]}
-        xs={[0, ...row.sparkXs, 1]}
-        stroke={stroke}
-        draggedRef={draggedRef}
-      />
+      <Spark values={row.spark} xs={row.sparkXs} stroke={stroke} draggedRef={draggedRef} />
       {dead && (
         <span
           className="rounded-sm border border-crit/40 bg-crit/10 px-1 font-mono text-2xs leading-4 text-crit"

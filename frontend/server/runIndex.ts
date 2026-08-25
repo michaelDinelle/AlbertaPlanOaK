@@ -3,36 +3,38 @@ import { join } from 'node:path';
 import { TAPE_MAGIC } from '@shared/types';
 import type { RunDetail, RunIndexEntry, RunMeta, RunSummary } from '@shared/types';
 import { statOrNull } from './fs';
-import { scanRecordings, toRecordingRefs, type RecordingEntry } from './recordings';
+import { readPoseIndex, toRecordingRefs, type PoseIndex, type RecordingEntry } from './recordings';
 
 export type BaselineIds = Partial<Record<'ppo' | 'random', string>>;
 
 export interface TapeShape {
   laneCount: number;
   fields: string[];
-  headerBytes: number;
-  rowBytes: number;
   rows: number;
   maxStep: number;
   rowIntervalMs: number;
   mtimeMs: number;
-  size: number;
 }
 
-const tapeMemo = new Map<string, { mtimeMs: number; size: number; shape: TapeShape | null }>();
+interface FileStamp { size: number; mtimeMs: number }
 
-export async function readTapeShape(path: string): Promise<TapeShape | null> {
-  const st = await statOrNull(path);
-  if (st === null || st.size < 12) return null;
-  const hit = tapeMemo.get(path);
-  if (hit !== undefined && hit.mtimeMs === st.mtimeMs && hit.size === st.size) return hit.shape;
-  const shape = await readTapeShapeUncached(path, st);
-  if (tapeMemo.size >= 4096) tapeMemo.clear();
-  tapeMemo.set(path, { mtimeMs: st.mtimeMs, size: st.size, shape });
-  return shape;
+function statMemo<T>(compute: (path: string, st: FileStamp) => Promise<T>) {
+  const memo = new Map<string, { mtimeMs: number; size: number; value: T }>();
+  return async (path: string): Promise<T | null> => {
+    const st = await statOrNull(path);
+    if (st === null) return null;
+    const hit = memo.get(path);
+    if (hit !== undefined && hit.mtimeMs === st.mtimeMs && hit.size === st.size) return hit.value;
+    const value = await compute(path, st);
+    if (memo.size >= 4096) memo.clear();
+    memo.set(path, { mtimeMs: st.mtimeMs, size: st.size, value });
+    return value;
+  };
 }
 
-async function readTapeShapeUncached(path: string, st: { size: number; mtimeMs: number }): Promise<TapeShape | null> {
+export const readTapeShape = statMemo(readTapeShapeUncached);
+
+async function readTapeShapeUncached(path: string, st: FileStamp): Promise<TapeShape | null> {
   const handle = await open(path, 'r');
   try {
     const head = Buffer.allocUnsafe(Math.min(4096, st.size));
@@ -51,27 +53,29 @@ async function readTapeShapeUncached(path: string, st: { size: number; mtimeMs: 
       return null;
     }
     const headerBytes = 12 + jsonLen;
-    const rowBytes = 12 + fields.length * laneCount * 4;
-    const rows = Math.floor((st.size - headerBytes) / rowBytes);
+    let rows = 0;
     let maxStep = 0;
     let rowIntervalMs = 0;
-    if (rows > 0) {
-      const tail = Buffer.allocUnsafe(12);
-      const at = headerBytes + (rows - 1) * rowBytes;
-      const read = await handle.read(tail, 0, 12, at);
-      if (read.bytesRead >= 8) maxStep = tail.readUInt32LE(0) + tail.readUInt32LE(4);
-      if (read.bytesRead === 12 && rows > 1) {
-        const prev = Buffer.allocUnsafe(12);
-        const back = await handle.read(prev, 0, 12, at - rowBytes);
-        if (back.bytesRead === 12) {
-          rowIntervalMs = (tail.readFloatLE(8) - prev.readFloatLE(8)) * 1000;
-        }
-      }
+    let at = headerBytes;
+    let lastWall = 0;
+    let prevWall = 0;
+    const rowHead = Buffer.allocUnsafe(16);
+    while (at + 16 <= st.size) {
+      const read = await handle.read(rowHead, 0, 16, at);
+      if (read.bytesRead < 16) break;
+      const compLen = rowHead.readUInt32LE(12);
+      if (at + 16 + compLen > st.size) break;
+      rows += 1;
+      maxStep = rowHead.readUInt32LE(0) + rowHead.readUInt32LE(4);
+      prevWall = lastWall;
+      lastWall = rowHead.readFloatLE(8);
+      at += 16 + compLen;
     }
+    if (rows > 1) rowIntervalMs = (lastWall - prevWall) * 1000;
     return {
-      laneCount, fields, headerBytes, rowBytes, rows, maxStep,
+      laneCount, fields, rows, maxStep,
       rowIntervalMs: Number.isFinite(rowIntervalMs) && rowIntervalMs > 0 ? rowIntervalMs : 0,
-      mtimeMs: st.mtimeMs, size: st.size,
+      mtimeMs: st.mtimeMs,
     };
   } finally {
     await handle.close().catch(() => undefined);
@@ -81,7 +85,6 @@ async function readTapeShapeUncached(path: string, st: { size: number; mtimeMs: 
 export interface ResolvedRun {
   id: string;
   dir: string;
-  root: string;
   meta: RunMeta;
   tape: TapeShape;
   entry: RunIndexEntry;
@@ -127,7 +130,7 @@ export class RunIndex {
 
   private runs = new Map<string, ResolvedRun>();
   private order: string[] = [];
-  private recordingsCache = new Map<string, { mtimeMs: number; list: RecordingEntry[] }>();
+  private recordingsCache = new Map<string, { index: PoseIndex | null }>();
   private baselinePointers: BaselineIds = {};
   private lastRejected = '';
   private lastDangling = '';
@@ -157,17 +160,25 @@ export class RunIndex {
   async recordingsFor(id: string): Promise<RecordingEntry[]> {
     const run = await this.resolve(id);
     if (run === undefined) return [];
-    return this.recordingsCached(id, run.dir, run.root);
+    return (await this.poseIndexCached(id, run.dir))?.entries ?? [];
   }
 
-  private async recordingsCached(id: string, dir: string, root: string): Promise<RecordingEntry[]> {
-    const dirStat = await statOrNull(dir);
-    const mtimeMs = dirStat?.mtimeMs ?? 0;
+  async poseIndexFor(id: string): Promise<PoseIndex | null> {
+    const run = await this.resolve(id);
+    if (run === undefined) return null;
+    return this.poseIndexCached(id, run.dir);
+  }
+
+  private async poseIndexCached(id: string, dir: string): Promise<PoseIndex | null> {
+    const idxStat = await statOrNull(join(dir, 'pose.idx'));
     const hit = this.recordingsCache.get(id);
-    if (hit !== undefined && hit.mtimeMs === mtimeMs) return hit.list;
-    const list = await scanRecordings(dir, { root });
-    this.recordingsCache.set(id, { mtimeMs, list });
-    return list;
+    if (hit !== undefined && idxStat !== null && hit.index !== null
+      && hit.index.idxMtimeMs === idxStat.mtimeMs && hit.index.idxSize === idxStat.size) {
+      return hit.index;
+    }
+    const index = await readPoseIndex(dir);
+    this.recordingsCache.set(id, { index });
+    return index;
   }
 
   private async ensureFresh(): Promise<void> {
@@ -178,37 +189,21 @@ export class RunIndex {
     return this.inFlightScan;
   }
 
-  private pointerMemo = new Map<string, { mtimeMs: number; size: number; id: string | null }>();
-
-  private async readPointer(path: string): Promise<string | null> {
-    const st = await statOrNull(path);
-    if (st === null) return null;
-    const hit = this.pointerMemo.get(path);
-    if (hit !== undefined && hit.mtimeMs === st.mtimeMs && hit.size === st.size) return hit.id;
-    let id: string | null = null;
+  private readPointer = statMemo(async (path: string) => {
     try {
-      id = (await Bun.file(path).text()).trim() || null;
+      return (await Bun.file(path).text()).trim() || null;
     } catch {
+      return null;
     }
-    this.pointerMemo.set(path, { mtimeMs: st.mtimeMs, size: st.size, id });
-    return id;
-  }
+  });
 
-  private metaMemo = new Map<string, { mtimeMs: number; size: number; meta: RunMeta | null }>();
-
-  private async readMeta(path: string): Promise<RunMeta | null> {
-    const st = await statOrNull(path);
-    if (st === null) return null;
-    const hit = this.metaMemo.get(path);
-    if (hit !== undefined && hit.mtimeMs === st.mtimeMs && hit.size === st.size) return hit.meta;
-    let meta: RunMeta | null = null;
+  private readMeta = statMemo(async (path: string) => {
     try {
-      meta = readRunMeta(await Bun.file(path).text());
+      return readRunMeta(await Bun.file(path).text());
     } catch {
+      return null;
     }
-    this.metaMemo.set(path, { mtimeMs: st.mtimeMs, size: st.size, meta });
-    return meta;
-  }
+  });
 
   private async loadRun(id: string, root: string, keeper: string | null): Promise<ResolvedRun | null> {
     const dir = join(root, id);
@@ -218,13 +213,12 @@ export class RunIndex {
     if (meta === null) return null;
     const tape = await readTapeShape(join(dir, 'tape.bin')).catch(() => null);
     if (tape === null || tape.rows === 0) return null;
-    const hasRecordings = (await this.recordingsCached(id, dir, root).catch(() => [])).length > 0;
+    const hasRecordings = ((await this.poseIndexCached(id, dir).catch(() => null))?.entries.length ?? 0) > 0;
     const summary = await readSummaryFile(join(dir, 'summary.json'), id);
     const complete = tape.maxStep >= meta.steps && meta.steps > 0;
     return {
       id,
       dir,
-      root,
       meta,
       tape,
       entry: {
@@ -336,22 +330,19 @@ function readRunSummary(raw: string): RunSummary | null {
   return parsed as RunSummary;
 }
 
-const summaryMemo = new Map<string, { mtimeMs: number; size: number; summary: RunSummary | null }>();
+const readSummaryMemo = statMemo(async (path: string) => {
+  try {
+    return readRunSummary(await Bun.file(path).text());
+  } catch {
+    return null;
+  }
+});
 
 async function readSummaryFile(path: string, runId: string): Promise<RunSummary | null> {
-  const st = await statOrNull(path);
-  if (st === null) return null;
-  const hit = summaryMemo.get(path);
-  if (hit !== undefined && hit.mtimeMs === st.mtimeMs && hit.size === st.size) return hit.summary;
-  let summary: RunSummary | null = null;
-  try {
-    summary = readRunSummary(await Bun.file(path).text());
-  } catch {
-  }
-  if (summary === null) {
+  const summary = await readSummaryMemo(path);
+  if (summary === null && (await statOrNull(path)) !== null) {
     console.warn(`[oak-frontend] ${runId}: summary.json is not a run summary — ignoring it`);
   }
-  summaryMemo.set(path, { mtimeMs: st.mtimeMs, size: st.size, summary });
   return summary;
 }
 

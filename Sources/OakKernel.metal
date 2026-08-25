@@ -1910,8 +1910,8 @@ static inline void accumulateFeatureSketch(Agent agent, uint tid, device OakDiag
     device float *rowHi = acc->gram + (tid + OAK_CORE) * OAK_DIAG_K;
     for (uint c = 0u; c < OAK_DIAG_K; ++c) {
         float zc = simd_shuffle(c < OAK_CORE ? zLo : zHi, (ushort)(c % OAK_CORE));
-        rowLo[c] += zLo * zc;
-        rowHi[c] += zHi * zc;
+        if (c <= tid) rowLo[c] += zLo * zc;
+        if (c < OAK_CORE || c - OAK_CORE <= tid) rowHi[c] += zHi * zc;
     }
 }
 

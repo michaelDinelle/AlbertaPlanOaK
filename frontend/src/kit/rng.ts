@@ -10,34 +10,9 @@ export function mulberry32(seed: number): Rng {
   };
 }
 
-export function range(rng: Rng, min: number, max: number): number {
-  return min + (max - min) * rng();
-}
 
-export function jitter(rng: Rng, amount = 1): number {
-  return (rng() * 2 - 1) * amount;
-}
 
-export function pick<T>(rng: Rng, items: readonly T[]): T {
-  const n = items.length;
-  if (n === 0) throw new Error('kit/rng: pick() on an empty list');
-  const i = Math.min(n - 1, (rng() * n) | 0);
-  return items[i] as T;
-}
 
-export function pickWeighted<T>(rng: Rng, items: readonly T[], weights: readonly number[]): T {
-  const n = Math.min(items.length, weights.length);
-  if (n === 0) throw new Error('kit/rng: pickWeighted() on an empty list');
-  let total = 0;
-  for (let i = 0; i < n; i++) total += Math.max(0, weights[i] as number);
-  if (total <= 0) return items[0] as T;
-  let r = rng() * total;
-  for (let i = 0; i < n; i++) {
-    r -= Math.max(0, weights[i] as number);
-    if (r <= 0) return items[i] as T;
-  }
-  return items[n - 1] as T;
-}
 
 export function hash1i(x: number, seed = 0): number {
   let h = Math.imul((x | 0) ^ (seed | 0), 0x85ebca6b);

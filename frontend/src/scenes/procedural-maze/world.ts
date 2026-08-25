@@ -29,7 +29,6 @@ import {
   scatterGrass,
   scatterRocks,
   scatterTrees,
-  type ExcludeFn,
 } from '@kit/vegetation';
 import { makeWorld, type WorldCore } from '@kit/world';
 import { PROCMAZE_H, PROCMAZE_W, proceduralMazeDecoder } from '@sim/envs/proceduralmaze';

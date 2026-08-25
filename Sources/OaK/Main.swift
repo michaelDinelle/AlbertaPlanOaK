@@ -607,34 +607,28 @@ func putVarint(_ out: inout [UInt8], _ value: Int64) {
   out.append(UInt8(z))
 }
 
+extension Data {
+  mutating func appendLE<T: FixedWidthInteger>(_ v: T) {
+    Swift.withUnsafeBytes(of: v.littleEndian) { append(contentsOf: $0) }
+  }
+}
+
 final class RecordWriter: @unchecked Sendable {
-  static let fileMagic: UInt32 = 0x524B_414F
   static let chunkMagic: UInt32 = 0x524B_4843
 
-  let handle: FileHandle
   let codec: RecordCodec
   private var buf: [UInt8] = []
-  private var fileOffset = 0
   private(set) var closed = false
-  private var deflateVerified = false
 
-  init(handle: FileHandle, envKind: UInt32) throws {
-    self.handle = handle
+  init(envKind: UInt32) throws {
     self.codec = try RecordCodec.table(envKind)
-    var head = Data(capacity: 8)
-    for v: UInt32 in [Self.fileMagic, envKind] {
-      var x = v.littleEndian
-      withUnsafeBytes(of: &x) { head.append(contentsOf: $0) }
-    }
-    try handle.write(contentsOf: head)
-    fileOffset = head.count
   }
 
   func encodeChunk(
     _ rp: UnsafePointer<Float>, slot: Int, capacity: Int, laneCount: Int,
     stepStart: Int, stepCount: Int
-  ) throws {
-    guard !closed, stepCount > 0 else { return }
+  ) throws -> Data? {
+    guard !closed, stepCount > 0 else { return nil }
     let fields = codec.fields
     let rowStride = recordFloats * laneCount
     func cell(_ i: Int, _ field: Int) -> Double {
@@ -662,78 +656,274 @@ final class RecordWriter: @unchecked Sendable {
         break scan
       }
     }
-    guard live > 0 else { return }
+    guard live > 0 else { return nil }
 
     buf.removeAll(keepingCapacity: true)
     buf.append(contentsOf: repeatElement(0, count: (live + 7) / 8))
     for i in 0..<live where cell(i, 0) != 0 { buf[i >> 3] |= UInt8(1 << (i & 7)) }
 
-    var predictorBits: UInt32 = 0
+    var bitsA: UInt32 = 0
+    var bitsB: UInt32 = 0
+    var bufA = buf
+    var bufB = buf
     var column = 0
     for f in fields {
+      var q = [Int64](repeating: 0, count: live)
+      var seed: UInt64? = nil
       if f.anchor {
         var recon = value(0, f)!
-        withUnsafeBytes(of: recon.bitPattern.littleEndian) { buf.append(contentsOf: $0) }
+        seed = recon.bitPattern
+        var total: Int64 = 0
         for i in 0..<live {
-          let q = ((value(i, f)! - recon) / f.scale).rounded()
-          recon += q * f.scale
-          putVarint(&buf, Int64(q))
+          let d = Int64(((value(i, f)! - recon) / f.scale).rounded())
+          recon += Double(d) * f.scale
+          total &+= d
+          q[i] = total
         }
-        column += 1
-        continue
-      }
-      var q = [Int64](repeating: 0, count: live)
-      for i in 0..<live { q[i] = quantized(i, f)! }
-      var first: [UInt8] = []
-      var second: [UInt8] = []
-      var previous: Int64 = 0
-      var previousDelta: Int64 = 0
-      for i in 0..<live {
-        let delta = i == 0 ? q[i] : q[i] &- previous
-        putVarint(&first, delta)
-        putVarint(&second, i < 2 ? delta : delta &- previousDelta)
-        previous = q[i]
-        previousDelta = delta
-      }
-      if second.count < first.count {
-        predictorBits |= UInt32(1) << UInt32(column)
-        buf.append(contentsOf: second)
       } else {
-        buf.append(contentsOf: first)
+        for i in 0..<live { q[i] = quantized(i, f)! }
       }
+      let (varint, full) = Self.encodeColumn(q)
+      bitsA |= (varint.pred & 1) << UInt32(column)
+      bitsA |= (varint.pred >> 1) << UInt32(10 + column)
+      bitsB |= (full.pred & 1) << UInt32(column)
+      bitsB |= (full.pred >> 1) << UInt32(10 + column)
+      bitsB |= full.coder << UInt32(20 + column)
+      if let seed {
+        withUnsafeBytes(of: seed.littleEndian) { bufA.append(contentsOf: $0) }
+        withUnsafeBytes(of: seed.littleEndian) { bufB.append(contentsOf: $0) }
+      }
+      bufA.append(contentsOf: varint.bytes)
+      bufB.append(contentsOf: full.bytes)
       column += 1
     }
-
-    let payload = Data(buf)
-    let comp = try (payload as NSData).compressed(using: .zlib) as Data
-    if !deflateVerified {
-      deflateVerified = true
-      let wrapped = comp.count >= 2
-        && comp.withUnsafeBytes { p -> Bool in
-          let b0 = Int(p[0]), b1 = Int(p[1])
-          return b0 == 0x78 && ((b0 << 8) | b1) % 31 == 0
-        }
-      if wrapped {
-        throw err("record: Compression .zlib emitted a ZLIB-WRAPPED stream; the spec requires raw DEFLATE.")
-      }
-      let back = try (comp as NSData).decompressed(using: .zlib) as Data
-      guard back == payload else {
-        throw err("record: deflate round-trip mismatch (\(back.count) vs \(payload.count) bytes).")
-      }
-    }
-    var out = Data(capacity: 20 + comp.count)
+    let payloadA = Data(bufA)
+    let payloadB = Data(bufB)
+    let compA = try (payloadA as NSData).compressed(using: .zlib) as Data
+    let compB = try (payloadB as NSData).compressed(using: .zlib) as Data
+    let optionA: (payload: Data, stored: Data, bits: UInt32) = (
+      payloadA, compA.count < payloadA.count ? compA : payloadA,
+      bitsA | (compA.count < payloadA.count ? 1 << 31 : 0))
+    let optionB: (payload: Data, stored: Data, bits: UInt32) = (
+      payloadB, compB.count < payloadB.count ? compB : payloadB,
+      bitsB | (compB.count < payloadB.count ? 1 << 31 : 0))
+    let pick = optionB.stored.count < optionA.stored.count ? optionB : optionA
+    var out = Data(capacity: 20 + pick.stored.count)
     for v: UInt32 in [
-      Self.chunkMagic, UInt32(live), UInt32(payload.count), UInt32(comp.count), predictorBits,
-    ] {
-      var x = v.littleEndian
-      withUnsafeBytes(of: &x) { out.append(contentsOf: $0) }
-    }
-    out.append(comp)
-    try handle.write(contentsOf: out)
-    fileOffset += 20 + comp.count
+      Self.chunkMagic, UInt32(live), UInt32(pick.payload.count), UInt32(pick.stored.count), pick.bits,
+    ] { out.appendLE(v) }
+    out.append(pick.stored)
+    return out
   }
 
-  var bytesWritten: Int { fileOffset }
+  static let lpcOrder = 8
+  static let lpcShift = 14
+
+  static func lpcResiduals(_ q: [Int64], _ d1: [Int64]) -> (coefs: [Int32], res: [Int64])? {
+    let n = q.count
+    let m = lpcOrder
+    guard n > 4 * m, q.allSatisfy({ $0.magnitude < 1 << 24 }) else { return nil }
+    var ata = [Double](repeating: 0, count: m * m)
+    var atb = [Double](repeating: 0, count: m)
+    for i in m..<n {
+      let y = Double(q[i])
+      for j in 0..<m {
+        let xj = Double(q[i - 1 - j])
+        atb[j] += xj * y
+        for l in j..<m { ata[j * m + l] += xj * Double(q[i - 1 - l]) }
+      }
+    }
+    for j in 0..<m {
+      for l in 0..<j { ata[j * m + l] = ata[l * m + j] }
+      ata[j * m + j] += 1e-6
+    }
+    var c = atb
+    for p in 0..<m {
+      let pivot = ata[p * m + p]
+      guard pivot.magnitude > 1e-12 else { return nil }
+      for r in (p + 1)..<m {
+        let factor = ata[r * m + p] / pivot
+        for l in p..<m { ata[r * m + l] -= factor * ata[p * m + l] }
+        c[r] -= factor * c[p]
+      }
+    }
+    for p in stride(from: m - 1, through: 0, by: -1) {
+      var acc = c[p]
+      for l in (p + 1)..<m { acc -= ata[p * m + l] * c[l] }
+      c[p] = acc / ata[p * m + p]
+    }
+    let limit = Double(1 << 20)
+    let coefs = c.map { Int32(max(-limit, min(limit, ($0 * Double(1 << lpcShift)).rounded()))) }
+    var res = [Int64](repeating: 0, count: n)
+    for i in 0..<m { res[i] = d1[i] }
+    for i in m..<n {
+      var acc: Int64 = 0
+      for j in 0..<m { acc &+= Int64(coefs[j]) &* q[i - 1 - j] }
+      res[i] = q[i] &- (acc >> Int64(lpcShift))
+    }
+    return (coefs, res)
+  }
+
+  static func zig(_ v: Int64) -> UInt64 { UInt64(bitPattern: (v << 1) ^ (v >> 63)) }
+
+  static func varintSize(_ res: [Int64]) -> Int {
+    var total = 0
+    for v in res {
+      var z = zig(v)
+      repeat { total += 1; z >>= 7 } while z != 0
+    }
+    return total
+  }
+
+  static func riceSize(_ res: [Int64]) -> (k: Int, bits: Int) {
+    var best = (k: 0, bits: Int.max)
+    for k in 0..<20 {
+      var bits = 0
+      for v in res { bits += Int(zig(v) >> UInt64(k)) + 1 + k }
+      if bits < best.bits { best = (k, bits) }
+    }
+    return best
+  }
+
+  static func riceBytes(_ res: [Int64], _ k: Int) -> [UInt8] {
+    var out: [UInt8] = [UInt8(k)]
+    var acc: UInt64 = 0
+    var nbits = 0
+    func push(_ value: UInt64, _ count: Int) {
+      var value = value
+      var count = count
+      while count > 0 {
+        let take = min(count, 64 - nbits)
+        acc |= (value & ((take == 64 ? 0 : 1 << UInt64(take)) &- 1)) << UInt64(nbits)
+        nbits += take
+        value >>= UInt64(take)
+        count -= take
+        while nbits >= 8 {
+          out.append(UInt8(acc & 0xFF))
+          acc >>= 8
+          nbits -= 8
+        }
+      }
+    }
+    for v in res {
+      let z = zig(v)
+      var unary = Int(z >> UInt64(k))
+      while unary >= 32 { push(0, 32); unary -= 32 }
+      push(1 << UInt64(unary), unary + 1)
+      if k > 0 { push(z & ((1 << UInt64(k)) - 1), k) }
+    }
+    if nbits > 0 { out.append(UInt8(acc & 0xFF)) }
+    return out
+  }
+
+  typealias ColumnPlan = (pred: UInt32, coder: UInt32, bytes: [UInt8])
+
+  static func encodeColumn(_ q: [Int64]) -> (varint: ColumnPlan, full: ColumnPlan) {
+    var d1 = q
+    for i in stride(from: q.count - 1, through: 1, by: -1) { d1[i] &-= d1[i - 1] }
+    var d2 = d1
+    for i in stride(from: d2.count - 1, through: 2, by: -1) { d2[i] &-= d2[i - 1] }
+    var candidates: [(pred: UInt32, extra: [UInt8], res: [Int64])] = [(0, [], d1), (1, [], d2)]
+    if let lpc = lpcResiduals(q, d1) {
+      var extra: [UInt8] = []
+      for c in lpc.coefs {
+        withUnsafeBytes(of: c.littleEndian) { extra.append(contentsOf: $0) }
+      }
+      candidates.append((2, extra, lpc.res))
+    }
+    var bestVarint: (plan: ColumnPlan, size: Int)? = nil
+    var best: (plan: ColumnPlan, size: Int)? = nil
+    for cand in candidates {
+      let vs = cand.extra.count + varintSize(cand.res)
+      if bestVarint == nil || vs < bestVarint!.size {
+        var b = cand.extra
+        for v in cand.res { putVarint(&b, v) }
+        if cand.pred < 2 { bestVarint = ((cand.pred, 0, b), vs) }
+        if best == nil || vs < best!.size { best = ((cand.pred, 0, b), vs) }
+      } else if best == nil || vs < best!.size {
+        var b = cand.extra
+        for v in cand.res { putVarint(&b, v) }
+        best = ((cand.pred, 0, b), vs)
+      }
+      let rice = riceSize(cand.res)
+      let rs = cand.extra.count + 1 + (rice.bits + 7) / 8
+      if rs < best!.size {
+        best = ((cand.pred, 1, cand.extra + riceBytes(cand.res, rice.k)), rs)
+      }
+    }
+    return (bestVarint!.plan, best!.plan)
+  }
+}
+
+final class PoseTapeWriter {
+  static let packMagic: UInt32 = 0x504B_414F
+  static let idxMagic: UInt32 = 0x494B_414F
+  private let pack: FileHandle
+  private let idx: FileHandle
+  private let encoders: [RecordWriter]
+  private(set) var bytesWritten: Int
+
+  init(root: URL, laneEnvKinds: [UInt32], seeds: [Int]) throws {
+    encoders = try laneEnvKinds.map { try RecordWriter(envKind: $0) }
+    let packURL = root.appendingPathComponent("pose.pack")
+    let idxURL = root.appendingPathComponent("pose.idx")
+    FileManager.default.createFile(atPath: packURL.path, contents: nil)
+    FileManager.default.createFile(atPath: idxURL.path, contents: nil)
+    pack = try FileHandle(forWritingTo: packURL)
+    idx = try FileHandle(forWritingTo: idxURL)
+    var head = Data()
+    for v: UInt32 in [Self.packMagic, UInt32(laneEnvKinds.count)] { head.appendLE(v) }
+    for lane in 0..<laneEnvKinds.count {
+      head.appendLE(laneEnvKinds[lane])
+      head.appendLE(Int64(seeds[lane]))
+    }
+    try pack.write(contentsOf: head)
+    bytesWritten = head.count
+    var ih = Data()
+    for v: UInt32 in [Self.idxMagic, UInt32(laneEnvKinds.count)] { ih.appendLE(v) }
+    try idx.write(contentsOf: ih)
+  }
+
+  func encodeWindow(
+    _ rp: UnsafePointer<Float>, capacity: Int, stepStart: Int, stepCount: Int,
+    onError: (Error) -> Void
+  ) throws {
+    let lanes = encoders.count
+    var chunks: [Data?] = Array(repeating: nil, count: lanes)
+    chunks.withUnsafeMutableBufferPointer { out in
+      let base = out.baseAddress!
+      DispatchQueue.concurrentPerform(iterations: lanes) { slot in
+        do {
+          base[slot] = try encoders[slot].encodeChunk(
+            rp, slot: slot, capacity: capacity, laneCount: lanes,
+            stepStart: stepStart, stepCount: stepCount)
+        } catch {
+          onError(error)
+        }
+      }
+    }
+    var body = Data()
+    var rows = Data()
+    var chunkCount: UInt32 = 0
+    for lane in 0..<chunks.count {
+      guard let c = chunks[lane] else { continue }
+      chunkCount += 1
+      body.append(c)
+      for v: UInt32 in [UInt32(lane), UInt32(c.count)] { rows.appendLE(v) }
+    }
+    var head = Data()
+    for v: UInt32 in [UInt32(stepStart), chunkCount] { head.appendLE(v) }
+    head.appendLE(UInt64(bytesWritten))
+    head.append(rows)
+    try pack.write(contentsOf: body)
+    bytesWritten += body.count
+    try idx.write(contentsOf: head)
+  }
+
+  func close() throws {
+    try pack.close()
+    try idx.close()
+  }
 }
 
 enum DiagMath {
@@ -818,7 +1008,7 @@ final class TapeWriter {
   private let handle: FileHandle
   private let laneCount: Int
   private let diagCount: Int
-  private var col: [Float]
+  private var block: [Float]
 
   init(url: URL, laneCount: Int, diagFields: [String]) throws {
     FileManager.default.createFile(atPath: url.path, contents: nil)
@@ -826,13 +1016,10 @@ final class TapeWriter {
     self.laneCount = laneCount
     self.diagCount = diagFields.count
     self.fields = Self.baseFields + diagFields
-    self.col = [Float](repeating: 0, count: laneCount)
+    self.block = [Float](repeating: 0, count: (Self.baseFields.count + diagCount) * laneCount)
     let json = try JSONSerialization.data(withJSONObject: ["fields": fields])
     var head = Data()
-    for v: UInt32 in [Self.fileMagic, UInt32(laneCount), UInt32(json.count)] {
-      var x = v.littleEndian
-      withUnsafeBytes(of: &x) { head.append(contentsOf: $0) }
-    }
+    for v: UInt32 in [Self.fileMagic, UInt32(laneCount), UInt32(json.count)] { head.appendLE(v) }
     head.append(json)
     try handle.write(contentsOf: head)
   }
@@ -842,18 +1029,12 @@ final class TapeWriter {
               stepStart: Int, stepCount: Int, wallSeconds: Double) throws {
     precondition(diag.count == diagCount * laneCount, "diag matrix shape drifted from the field list")
     var out = Data(capacity: 12 + fields.count * laneCount * 4)
-    for v: UInt32 in [UInt32(stepStart), UInt32(stepCount)] {
-      var x = v.littleEndian
-      withUnsafeBytes(of: &x) { out.append(contentsOf: $0) }
-    }
-    var w = Float(wallSeconds).bitPattern.littleEndian
-    withUnsafeBytes(of: &w) { out.append(contentsOf: $0) }
+    for v: UInt32 in [UInt32(stepStart), UInt32(stepCount)] { out.appendLE(v) }
+    out.appendLE(Float(wallSeconds).bitPattern)
+    var field = 0
     func push(_ get: (Int, LaneSnapshot) -> Float) {
-      for l in 0..<laneCount { col[l] = get(l, snap[half * laneCount + l]) }
-      col.withUnsafeBufferPointer {
-        out.append(UnsafeRawPointer($0.baseAddress!).assumingMemoryBound(to: UInt8.self),
-                   count: laneCount * 4)
-      }
+      for l in 0..<laneCount { block[field * laneCount + l] = get(l, snap[half * laneCount + l]) }
+      field += 1
     }
     push { _, s in s.rewardSum }
     push { _, s in s.rho }
@@ -862,6 +1043,11 @@ final class TapeWriter {
     for f in 0..<diagCount {
       push { l, _ in diag[l * diagCount + f] }
     }
+    let comp = try block.withUnsafeBufferPointer {
+      try (Data(buffer: $0) as NSData).compressed(using: .zlib) as Data
+    }
+    out.appendLE(UInt32(comp.count))
+    out.append(comp)
     try handle.write(contentsOf: out)
   }
 }
@@ -995,8 +1181,8 @@ final class TapeWriter {
         return b
       }
       B = seeds.count
-      maxChunkSteps = 1024
-      windowSteps = maxChunkSteps
+      windowSteps = 1024
+      maxChunkSteps = windowSteps / 4
       recordCapacity = 2 * maxChunkSteps
       laneBuf = try makeBuf(B * fleetLaneStride)
       seedsBuf = try makeBuf(B * 4)
@@ -1303,7 +1489,7 @@ final class TapeWriter {
       pipes = try baselinePipes(policy, lib, dev, bufs, envTable, laneEnvKinds, e)
     }
     let gpuSeconds = try runFleetLoop(
-      q, bufs, pipes, seeds: seeds, steps: steps, root: root, laneEnvs: laneEnvs,
+      q, bufs, pipes, seeds: seeds, steps: steps, root: root,
       laneEnvKinds: laneEnvKinds)
     Self.pendingMeta["gpuSeconds"] = gpuSeconds
     Self.pendingMeta["finishedAt"] = ISO8601DateFormatter().string(from: Date())
@@ -1445,46 +1631,31 @@ final class TapeWriter {
   }
   static func runFleetLoop(
     _ q: MTLCommandQueue, _ bufs: FleetBuffers, _ pipes: FleetPipes,
-    seeds: [Int], steps: Int, root: URL, laneEnvs: [String], laneEnvKinds: [UInt32]
+    seeds: [Int], steps: Int, root: URL, laneEnvKinds: [UInt32]
   ) throws -> Double {
     let e = ProcessInfo.processInfo.environment
     let fm = FileManager.default
     let B = bufs.B
     let dev = q.device
-    func seedDir(_ lane: Int) throws -> URL {
-      let dir = root.appendingPathComponent(laneEnvs[lane], isDirectory: true)
-        .appendingPathComponent("seed\(seeds[lane])", isDirectory: true)
-      try fm.createDirectory(at: dir, withIntermediateDirectories: true)
-      return dir
-    }
-    var recordHandles: [FileHandle] = []
-    var records: [RecordWriter] = []
-    for lane in 0..<B {
-      let dir = try seedDir(lane)
-      let url = dir.appendingPathComponent("pose.bin")
-      fm.createFile(atPath: url.path, contents: nil)
-      let h = try FileHandle(forWritingTo: url)
-      records.append(try RecordWriter(handle: h, envKind: laneEnvKinds[lane]))
-      recordHandles.append(h)
-    }
+    let poseTape = try PoseTapeWriter(root: root, laneEnvKinds: laneEnvKinds, seeds: seeds)
     let maxChunkSteps = bufs.maxChunkSteps
     let windowSteps = bufs.windowSteps
     let recordCapacity = bufs.recordCapacity
+    let staging = UnsafeMutablePointer<Float>.allocate(capacity: windowSteps * recordFloats * B)
     let snapPtr = bufs.snapBuf.contents().bindMemory(to: LaneSnapshot.self, capacity: 2 * B)
     let dumpEvery = max(e["OAK_DUMP_STATE_EVERY"].flatMap(Int.init) ?? 0, 0)
-    var hashHandles: [FileHandle?] = Array(repeating: nil, count: B)
+    var hashHandle: FileHandle? = nil
     if dumpEvery > 0 {
-      for (lane, _) in seeds.enumerated() {
-        let url = try seedDir(lane).appendingPathComponent("state-hashes.jsonl")
-        fm.createFile(atPath: url.path, contents: nil)
-        hashHandles[lane] = try FileHandle(forWritingTo: url)
-      }
+      let url = root.appendingPathComponent("state-hashes.jsonl")
+      fm.createFile(atPath: url.path, contents: nil)
+      hashHandle = try FileHandle(forWritingTo: url)
     }
     let tape = try TapeWriter(
       url: root.appendingPathComponent("tape.bin"), laneCount: B, diagFields: pipes.diagFields)
     defer {
-      hashHandles.forEach { try? $0?.close() }
-      recordHandles.forEach { try? $0.close() }
+      try? hashHandle?.close()
+      try? poseTape.close()
+      staging.deallocate()
     }
     let timing = e["OAK_FLEET_TIMING"] == "1"
     do {
@@ -1505,17 +1676,15 @@ final class TapeWriter {
       var gpuSeconds = 0.0
       private let errLock = NSLock()
       private var failure: Error?
-      private var failed = false
       var error: Error? {
         get { errLock.lock(); defer { errLock.unlock() }; return failure }
         set {
           errLock.lock()
           defer { errLock.unlock() }
           if failure == nil { failure = newValue }
-          failed = newValue != nil
         }
       }
-      var didFail: Bool { errLock.lock(); defer { errLock.unlock() }; return failed }
+      var didFail: Bool { errLock.lock(); defer { errLock.unlock() }; return failure != nil }
       init(_ b: Int) {
         deadStep = Array(repeating: nil, count: b)
         deadDetector = Array(repeating: nil, count: b)
@@ -1525,18 +1694,15 @@ final class TapeWriter {
     let writer = DispatchQueue(label: "oak.fleet.gpu.writer")
     let wallStart = DispatchTime.now().uptimeNanoseconds
     func now() -> Double { Double(DispatchTime.now().uptimeNanoseconds - wallStart) / 1e9 }
-    final class DrainErr: @unchecked Sendable {
-      private let lock = NSLock()
-      private var first: Error?
-      func record(_ e: Error) {
-        lock.lock()
-        if first == nil { first = e }
-        lock.unlock()
-      }
-      func take() -> Error? {
-        lock.lock()
-        defer { lock.unlock() }
-        return first
+    func stageRecords(stepStart: Int, stepCount: Int) {
+      let rp = bufs.recordBuf.contents().bindMemory(
+        to: Float.self, capacity: B * recordCapacity * recordFloats)
+      let rowStride = recordFloats * B
+      for r in stepStart..<(stepStart + stepCount) {
+        memcpy(
+          staging + (r % windowSteps) * rowStride,
+          rp + (r % recordCapacity) * rowStride,
+          rowStride * 4)
       }
     }
     func drainRecords(step: Int) throws {
@@ -1544,26 +1710,15 @@ final class TapeWriter {
       let t0 = DispatchTime.now().uptimeNanoseconds
       let start = st.lastDrainStep
       let count = step - start
-      let rp = bufs.recordBuf.contents().bindMemory(
-        to: Float.self, capacity: B * recordCapacity * recordFloats)
-      let before = timing ? records.reduce(0) { $0 + $1.bytesWritten } : 0
-      let box = DrainErr()
-      let writers = records
-      let cap = recordCapacity
-      let lanes = B
-      DispatchQueue.concurrentPerform(iterations: writers.count) { slot in
-        do {
-          try writers[slot].encodeChunk(
-            rp, slot: slot, capacity: cap, laneCount: lanes, stepStart: start, stepCount: count)
-        } catch {
-          box.record(error)
-        }
-      }
-      if let e = box.take() { throw e }
+      let before = timing ? poseTape.bytesWritten : 0
+      try poseTape.encodeWindow(
+        UnsafePointer(staging), capacity: windowSteps, stepStart: start, stepCount: count
+      ) { st.error = $0 }
+      if st.didFail, let e = st.error { throw e }
       st.lastDrainStep = step
       if timing {
         let ms = Double(DispatchTime.now().uptimeNanoseconds - t0) / 1e6
-        let wrote = records.reduce(0) { $0 + $1.bytesWritten } - before
+        let wrote = poseTape.bytesWritten - before
         let raw = B * count * recordFloats * 4
         fputs(
           String(
@@ -1626,8 +1781,8 @@ final class TapeWriter {
       if let rawDir = e["OAK_DEBUG_RAW"] {
         try pipes.writeDebugRaw(rawDir, step)
       }
+      guard let h = hashHandle else { return }
       for lane in 0..<B {
-        guard let h = hashHandles[lane] else { continue }
         let laneBytes = bufs.laneBuf.contents() + lane * fleetLaneStride
         let hs = pipes.laneHashes(lane, laneBytes)
         var obj: [String: Any] = ["seed": seeds[lane], "step": step]
@@ -1636,6 +1791,9 @@ final class TapeWriter {
       }
     }
     let explicitN = e["OAK_STEPS_PER_CB"].flatMap(Int.init)
+    if let n = explicitN, n > maxChunkSteps {
+      throw err("OAK_STEPS_PER_CB \(n) exceeds the record ring span \(maxChunkSteps).")
+    }
     let tuneLock = NSLock()
     var tunedN = max(explicitN ?? 32, 1)
     guard let chunkOrder = dev.makeEvent() else { throw err("Failed to create Metal event.") }
@@ -1691,6 +1849,9 @@ final class TapeWriter {
           if let cbError, st.error == nil {
             st.error = err("Metal command failed: \(cbError)")
           }
+          if st.error == nil {
+            stageRecords(stepStart: tStep - nSteps, stepCount: nSteps)
+          }
           if isWindow, st.error == nil {
             do { try writeWindow(half: thisHalf, stepStart: wStart, step: tStep) } catch {
               st.error = error
@@ -1719,49 +1880,32 @@ final class TapeWriter {
   static func compareHashes() throws {
     let args = Array(CommandLine.arguments.dropFirst())
     guard args.count == 3 else {
-      throw err("Usage: OaK compare-hashes <left.jsonl|dir> <right.jsonl|dir>")
+      throw err("Usage: OaK compare-hashes <left.jsonl> <right.jsonl>")
     }
     func asInt(_ v: Any?) -> Int? {
       if let i = v as? Int { return i }
       if let n = v as? NSNumber { return n.intValue }
       return nil
     }
-    func files(_ path: String) throws -> [URL] {
-      var isDir: ObjCBool = false
-      guard FileManager.default.fileExists(atPath: path, isDirectory: &isDir) else {
-        throw err("compare-hashes: missing \(path)")
-      }
-      if !isDir.boolValue { return [URL(fileURLWithPath: path)] }
-      let it = FileManager.default.enumerator(atPath: path)
-      var urls: [URL] = []
-      while let rel = it?.nextObject() as? String {
-        if rel.hasSuffix("/state-hashes.jsonl") || rel == "state-hashes.jsonl" {
-          urls.append(URL(fileURLWithPath: path).appendingPathComponent(rel))
-        }
-      }
-      guard !urls.isEmpty else { throw err("compare-hashes: no state-hashes.jsonl under \(path)") }
-      return urls
-    }
     func load(_ path: String) throws -> [String: [String: String]] {
+      let url = URL(fileURLWithPath: path)
       var out: [String: [String: String]] = [:]
-      for url in try files(path) {
-        let text = try String(contentsOf: url, encoding: .utf8)
-        for line in text.split(whereSeparator: \.isNewline) {
-          guard let data = String(line).data(using: .utf8),
-            let obj = try JSONSerialization.jsonObject(with: data) as? [String: Any],
-            let seed = asInt(obj["seed"]), let step = asInt(obj["step"])
-          else {
-            throw err("compare-hashes: bad line in \(url.path)")
-          }
-          var hashes: [String: String] = [:]
-          for (k, v) in obj where k != "seed" && k != "step" {
-            guard let s = v as? String else {
-              throw err("compare-hashes: non-string field '\(k)' in \(url.path)")
-            }
-            hashes[k] = s
-          }
-          out["\(seed)@\(step)"] = hashes
+      let text = try String(contentsOf: url, encoding: .utf8)
+      for line in text.split(whereSeparator: \.isNewline) {
+        guard let data = String(line).data(using: .utf8),
+          let obj = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+          let seed = asInt(obj["seed"]), let step = asInt(obj["step"])
+        else {
+          throw err("compare-hashes: bad line in \(url.path)")
         }
+        var hashes: [String: String] = [:]
+        for (k, v) in obj where k != "seed" && k != "step" {
+          guard let s = v as? String else {
+            throw err("compare-hashes: non-string field '\(k)' in \(url.path)")
+          }
+          hashes[k] = s
+        }
+        out["\(seed)@\(step)"] = hashes
       }
       return out
     }

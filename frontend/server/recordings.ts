@@ -1,123 +1,88 @@
-import { open, readdir, realpath } from 'node:fs/promises';
-import { join, sep } from 'node:path';
+import { join } from 'node:path';
 import { ENV_IDS, isEnvId, type EnvId } from '@shared/envs';
 import type { RecordingRef } from '@shared/types';
-import {
-  FILE_HEADER_BYTES,
-  FILE_MAGIC,
-  RECORD_ENV_KINDS,
-} from '@sim/record';
+import { RECORD_ENV_KINDS } from '@sim/record';
 import { lstatOrNull } from './fs';
+
+const PACK_MAGIC = 0x504b_414f;
+const IDX_MAGIC = 0x494b_414f;
 
 export interface RecordingEntry {
   envId: EnvId;
   seed: number;
   bytes: number;
-  posePath: string;
+  lane: number;
 }
 
-const SEED_DIR = /^seed(\d+)$/;
+export interface PoseIndex {
+  packPath: string;
+  segments: { off: number; len: number }[][];
+  entries: RecordingEntry[];
+  idxMtimeMs: number;
+  idxSize: number;
+}
+
 const ENV_ORDER = new Map<string, number>(ENV_IDS.map((id, i) => [id, i]));
 
-async function checkHeader(path: string, envId: EnvId): Promise<void> {
-  const handle = await open(path, 'r');
-  const header = Buffer.allocUnsafe(FILE_HEADER_BYTES);
-  try {
-    const got = await handle.read(header, 0, FILE_HEADER_BYTES, 0);
-    if (got.bytesRead < FILE_HEADER_BYTES) {
-      throw new Error(`${path}: ${got.bytesRead} bytes — shorter than the ${FILE_HEADER_BYTES}-byte header`);
+export async function readPoseIndex(runDir: string): Promise<PoseIndex | null> {
+  const packPath = join(runDir, 'pose.pack');
+  const idxPath = join(runDir, 'pose.idx');
+  const packStat = await lstatOrNull(packPath);
+  const idxStat = await lstatOrNull(idxPath);
+  if (packStat === null || packStat.isSymbolicLink || !packStat.isFile) return null;
+  if (idxStat === null || idxStat.isSymbolicLink || !idxStat.isFile) return null;
+
+  const packHead = Buffer.from(await Bun.file(packPath).slice(0, 8).arrayBuffer());
+  if (packHead.byteLength < 8) return null;
+  if (packHead.readUInt32LE(0) !== PACK_MAGIC) {
+    throw new Error(`${packPath}: not a pose pack (bad magic)`);
+  }
+  const laneCount = packHead.readUInt32LE(4);
+  const laneTable = Buffer.from(await Bun.file(packPath).slice(8, 8 + laneCount * 12).arrayBuffer());
+  if (laneTable.byteLength < laneCount * 12) return null;
+
+  const idx = Buffer.from(await Bun.file(idxPath).arrayBuffer());
+  if (idx.byteLength < 8 || idx.readUInt32LE(0) !== IDX_MAGIC) {
+    throw new Error(`${idxPath}: not a pose index (bad magic)`);
+  }
+  if (idx.readUInt32LE(4) !== laneCount) {
+    throw new Error(`${idxPath}: lane count contradicts ${packPath}`);
+  }
+  const segments: { off: number; len: number }[][] = Array.from({ length: laneCount }, () => []);
+  let at = 8;
+  while (at + 16 <= idx.byteLength) {
+    const chunkCount = idx.readUInt32LE(at + 4);
+    let off = Number(idx.readBigUInt64LE(at + 8));
+    at += 16;
+    if (at + chunkCount * 8 > idx.byteLength) break;
+    for (let c = 0; c < chunkCount; c++) {
+      const lane = idx.readUInt32LE(at);
+      const len = idx.readUInt32LE(at + 4);
+      at += 8;
+      const perLane = segments[lane];
+      if (perLane === undefined) throw new Error(`${idxPath}: lane ${lane} out of range`);
+      perLane.push({ off, len });
+      off += len;
     }
-    if (header.readUInt32LE(0) !== FILE_MAGIC) {
-      throw new Error(`${path}: not a recording (bad magic)`);
+  }
+
+  const entries: RecordingEntry[] = [];
+  for (let l = 0; l < laneCount; l++) {
+    const envKind = laneTable.readUInt32LE(l * 12);
+    const envId = RECORD_ENV_KINDS[envKind];
+    if (envId === undefined || !isEnvId(envId)) {
+      throw new Error(`${packPath}: lane ${l} has unknown envKind ${envKind}`);
     }
-    const envKind = header.readUInt32LE(4);
-    if (RECORD_ENV_KINDS[envKind] !== envId) {
-      throw new Error(`${path}: header envKind ${envKind} contradicts directory env ${envId}`);
-    }
-  } finally {
-    await handle.close().catch(() => undefined);
+    const body = segments[l]!.reduce((n, s) => n + s.len, 0);
+    entries.push({ envId, seed: Number(laneTable.readBigInt64LE(l * 12 + 4)), bytes: body, lane: l });
   }
-}
-
-async function envDirsOf(runDir: string): Promise<string[]> {
-  try {
-    const ents = await readdir(runDir, { withFileTypes: true });
-    return ents
-      .filter((e) => e.isDirectory() && !e.isSymbolicLink() && isEnvId(e.name))
-      .map((e) => e.name)
-      .sort();
-  } catch {
-    return [];
-  }
-}
-
-async function containedIn(path: string, root: string): Promise<boolean> {
-  try {
-    const real = await realpath(path);
-    return real === root || real.startsWith(root + sep);
-  } catch {
-    return false;
-  }
-}
-
-export interface ScanOptions {
-  root?: string;
-}
-
-export async function scanRecordings(runDir: string, opts: ScanOptions = {}): Promise<RecordingEntry[]> {
-  const top = await envDirsOf(runDir);
-  if (top.length === 0) return [];
-
-  let root: string;
-  try {
-    root = await realpath(opts.root ?? runDir);
-  } catch {
-    return [];
-  }
-
-  const out: RecordingEntry[] = [];
-  for (const envName of top) {
-    if (!isEnvId(envName)) continue;
-    const envDir = join(runDir, envName);
-    let seedDirs: string[];
-    try {
-      const ents = await readdir(envDir, { withFileTypes: true });
-      seedDirs = ents
-        .filter((e) => e.isDirectory() && !e.isSymbolicLink() && SEED_DIR.test(e.name))
-        .map((e) => e.name);
-    } catch {
-      continue;
-    }
-    const scanned = await Promise.all(seedDirs.map(async (seedName): Promise<RecordingEntry | null> => {
-      const m = SEED_DIR.exec(seedName);
-      const seedText = m?.[1];
-      if (seedText === undefined) return null;
-      const seed = Number(seedText);
-      if (!Number.isInteger(seed) || seed < 0) return null;
-
-      const laneDir = join(envDir, seedName);
-      const laneStat = await lstatOrNull(laneDir);
-      if (laneStat === null || laneStat.isSymbolicLink || !laneStat.isDirectory) return null;
-      if (!(await containedIn(laneDir, root))) return null;
-
-      const posePath = join(laneDir, 'pose.bin');
-      const st = await lstatOrNull(posePath);
-      if (st === null || st.isSymbolicLink || !st.isFile) return null;
-      if (st.size < FILE_HEADER_BYTES) return null;
-
-      await checkHeader(posePath, envName);
-
-      return { envId: envName, seed, bytes: st.size, posePath };
-    }));
-    for (const entry of scanned) if (entry !== null) out.push(entry);
-  }
-
-  out.sort((a, b) => {
+  entries.sort((a, b) => {
     const ea = ENV_ORDER.get(a.envId) ?? 999;
     const eb = ENV_ORDER.get(b.envId) ?? 999;
     return ea === eb ? a.seed - b.seed : ea - eb;
   });
-  return out;
+
+  return { packPath, segments, entries, idxMtimeMs: idxStat.mtimeMs, idxSize: idxStat.size };
 }
 
 export function toRecordingRefs(entries: readonly RecordingEntry[]): RecordingRef[] {

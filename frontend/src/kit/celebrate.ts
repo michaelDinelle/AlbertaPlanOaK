@@ -420,11 +420,6 @@ export function attachCelebrations(scene: THREE.Scene, pool: CelebrationPool): C
   return pool;
 }
 
-export function celebrationsFor(scene: THREE.Scene, opts?: CelebrationPoolOptions): CelebrationPool {
-  const existing = (scene as unknown as PoolCarrier).userData[POOL_KEY];
-  if (existing instanceof CelebrationPool) return existing;
-  return attachCelebrations(scene, new CelebrationPool(opts));
-}
 
 export function existingCelebrations(scene: THREE.Scene): CelebrationPool | null {
   const existing = (scene as unknown as PoolCarrier).userData[POOL_KEY];
@@ -435,29 +430,8 @@ export function celebrationPulse(scene: THREE.Scene): PulseChannel {
   return existingCelebrations(scene)?.pulse ?? pulseChannel;
 }
 
-export function burst(
-  scene: THREE.Scene,
-  pos: { x: number; y: number; z: number },
-  color: THREE.ColorRepresentation,
-  scale = 1,
-  now?: number,
-): void {
-  celebrationsFor(scene).burst(pos, color, scale, now);
-}
 
-export function ripple(
-  scene: THREE.Scene,
-  groundPos: { x: number; y: number; z: number },
-  color: THREE.ColorRepresentation,
-  scale = 1,
-  now?: number,
-): void {
-  celebrationsFor(scene).ripple(groundPos, color, scale, now);
-}
 
-export function sigh(scene: THREE.Scene, strength = 1, now?: number): void {
-  celebrationsFor(scene).sigh(strength, undefined, now);
-}
 
 export function disposeCelebrations(scene: THREE.Scene): void {
   const existing = (scene as unknown as PoolCarrier).userData[POOL_KEY];
@@ -465,14 +439,3 @@ export function disposeCelebrations(scene: THREE.Scene): void {
   delete (scene as unknown as PoolCarrier).userData[POOL_KEY];
 }
 
-export function celebrate(
-  pool: CelebrationPool,
-  pos: { x: number; y: number; z: number },
-  groundY: number,
-  color: THREE.ColorRepresentation,
-  scale = 1,
-  now?: number,
-): void {
-  pool.burst(pos, color, scale, now);
-  pool.ripple({ x: pos.x, y: groundY, z: pos.z }, color, scale, now);
-}

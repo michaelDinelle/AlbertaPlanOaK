@@ -100,7 +100,6 @@ export async function mountSceneHost(
     throw new SceneHostError(`WebGL unavailable: ${String(cause)}`);
   }
   renderer.setClearColor(0x05070c, 1);
-  renderer.info.autoReset = false;
   renderer.shadowMap.enabled = true;
   renderer.shadowMap.type = THREE.PCFShadowMap;
 
@@ -205,9 +204,17 @@ export async function mountSceneHost(
 
   await buildScene();
 
-  const observer = typeof ResizeObserver === 'undefined' ? null : new ResizeObserver(() => applySize());
+  let sizeFrame = 0;
+  const scheduleSize = (): void => {
+    if (sizeFrame !== 0) return;
+    sizeFrame = requestAnimationFrame(() => {
+      sizeFrame = 0;
+      applySize();
+    });
+  };
+  const observer = typeof ResizeObserver === 'undefined' ? null : new ResizeObserver(scheduleSize);
   observer?.observe(container);
-  const onWindowResize = (): void => applySize();
+  const onWindowResize = (): void => scheduleSize();
   window.addEventListener('resize', onWindowResize);
 
   let raf = 0;

@@ -10,6 +10,7 @@ import shutil
 import struct
 import subprocess
 import sys
+import zlib
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -55,19 +56,23 @@ def read_tape(path: Path) -> dict:
         raise SystemExit(f"{path}: not an OAKT tape")
     fields = json.loads(data[12:12 + json_len])["fields"]
     n_f = len(fields)
-    hdr = 12 + json_len
-    row = 12 + n_f * lanes * 4
-    n = (len(data) - hdr) // row
-    if n == 0:
+    off = 12 + json_len
+    rows = []
+    while off + 16 <= len(data):
+        ss, sc, ws, cl = struct.unpack_from("<IIfI", data, off)
+        if off + 16 + cl > len(data):
+            break
+        block = zlib.decompress(data[off + 16:off + 16 + cl], -15)
+        off += 16 + cl
+        if len(block) != n_f * lanes * 4:
+            raise SystemExit(f"{path}: tape row block size {len(block)} != {n_f * lanes * 4}")
+        rows.append((ss + sc, ws, np.frombuffer(block, np.float32).reshape(n_f, lanes)))
+    if not rows:
         raise SystemExit(f"{path}: no complete tape rows yet")
-    raw = np.frombuffer(data, np.uint8, n * row, hdr).reshape(n, row)
-    head = np.ascontiguousarray(raw[:, :12])
-    starts = head[:, 0:4].copy().view(np.uint32).ravel().astype(np.int64)
-    counts = head[:, 4:8].copy().view(np.uint32).ravel().astype(np.int64)
-    wall = head[:, 8:12].copy().view(np.float32).ravel().astype(np.float64)
-    mats = np.ascontiguousarray(raw[:, 12:]).view(np.float32).reshape(n, n_f, lanes)
-    return {"fields": fields, "lanes": lanes, "ends": starts + counts,
-            "wall": wall, "data": mats, "bits": mats.view(np.uint32)}
+    ends, wall, blocks = zip(*rows)
+    mats = np.stack(blocks)
+    return {"fields": fields, "lanes": lanes, "ends": np.asarray(ends, np.int64),
+            "wall": np.asarray(wall, np.float64), "data": mats, "bits": mats.view(np.uint32)}
 
 
 def load(root: Path) -> dict:
@@ -140,6 +145,8 @@ def retention_null(run: dict, lanes: np.ndarray,
     if not (jr >= 0).any() or rs_all.shape[0] < 8:
         return p5, p50, spread
     dt = np.diff(ends).astype(float)
+    wi = np.nonzero(jr >= 0)[0]
+    wj = jr[wi]
     for li in range(n):
         rs = rs_all[:, li]
         fin = np.isfinite(rs)

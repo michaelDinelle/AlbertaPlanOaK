@@ -28,8 +28,14 @@ export interface XBand {
   band: [number | null, number | null];
 }
 
+const cssVarCache = new Map<string, string>();
+
 export function cssVar(name: string): string {
-  return getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+  const hit = cssVarCache.get(name);
+  if (hit !== undefined) return hit;
+  const value = getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+  cssVarCache.set(name, value);
+  return value;
 }
 
 export function withAlpha(color: string, alpha: number): string {
@@ -259,15 +265,24 @@ export function Playhead({ total }: { total: number }) {
   totalRef.current = total;
   useEffect(() => {
     const el = ref.current;
-    if (el === null) return;
+    const parent = el?.parentElement;
+    if (el == null || parent == null) return;
+    let width = parent.clientWidth;
+    const observer = new ResizeObserver((entries) => {
+      width = entries[0]?.contentRect.width ?? width;
+    });
+    observer.observe(parent);
     const move = throttled((step: number) => {
-      const width = el.parentElement?.clientWidth ?? 0;
       const inner = width - CHART_MARGIN.left - CHART_MARGIN.right - AXIS_WIDTH;
       if (inner <= 0 || totalRef.current <= 0) return;
       const frac = Math.min(1, Math.max(0, step / totalRef.current));
       el.style.transform = `translateX(${(CHART_MARGIN.left + AXIS_WIDTH + frac * inner).toFixed(1)}px)`;
     });
-    return subscribePosition(move);
+    const unsubscribe = subscribePosition(move);
+    return () => {
+      observer.disconnect();
+      unsubscribe();
+    };
   }, []);
   return (
     <div

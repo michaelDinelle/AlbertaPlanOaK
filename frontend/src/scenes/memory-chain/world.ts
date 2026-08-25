@@ -226,7 +226,6 @@ export interface StalactiteField {
 export function makeStalactites(
   seed: number,
   skin: CaveSkin,
-  palette: Palette,
 ): StalactiteField {
   const wanted = 54;
   const geometry = spikeGeometry();
@@ -433,7 +432,7 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene, grid: GridGeom
   w.add(banks.group);
   w.time(w.own(banks));
 
-  const stalactites = makeStalactites(ctx.seed, skin, palette);
+  const stalactites = makeStalactites(ctx.seed, skin);
   w.add(stalactites.mesh);
   w.own(stalactites);
 
@@ -514,7 +513,3 @@ export function readChoice(state: { pose: Float32Array }): 0 | 1 {
   return (Math.trunc(state.pose[MEMORYCHAIN_ACTION] ?? 0) & 1) === 1 ? 1 : 0;
 }
 
-export function cellX(cell: number, grid: GridSize, out: Vec3Tuple): number {
-  cellToWorld(cell, 0, grid, out);
-  return out[0];
-}

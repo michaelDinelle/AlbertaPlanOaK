@@ -206,8 +206,8 @@ export interface SeedRow {
   rate: number | null;
   retention: number | null;
   divergedAt: number | null;
-  spark: (number | null)[];
-  sparkXs: number[];
+  spark: Float64Array;
+  sparkXs: Float64Array;
   recorded: boolean;
 }
 
@@ -220,14 +220,14 @@ export function buildSeedRows(
   const { lanes, seeds } = envLanes(meta, envId);
   const maxStep = tape.rows > 0 ? tape.stepEnd[tape.rows - 1] ?? 0 : 0;
   const spark = windowedRates(tape, lanes, 1);
-  const sparkXs = spark.x.map((x) => (maxStep > 0 ? x / maxStep : 0));
+  const sparkXs = Float64Array.from(spark.x, (x) => (maxStep > 0 ? x / maxStep : 0));
   return lanes.map((lane, li) => ({
     seed: seeds[li] ?? 0,
     lane,
     rate: deliveredRate(tape, lane),
     retention: laneRetention(tape, lane, meta.steps)?.retention ?? null,
     divergedAt: laneDeath(tape, lane)?.step ?? null,
-    spark: spark.perLane[li] ?? [],
+    spark: Float64Array.from(spark.perLane[li] ?? [], (v) => v ?? NaN),
     sparkXs,
     recorded: recorded.has(seeds[li] ?? 0),
   })).sort((a, b) => a.seed - b.seed);

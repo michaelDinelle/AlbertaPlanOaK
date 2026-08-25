@@ -8,7 +8,6 @@ import {
   excludeWallCells,
   isWall,
   type CellFieldHandle,
-  type GridSize,
   type Vec3Tuple,
 } from '@kit/grid';
 import { applyFog, makeLightRig, type LightRig } from '@kit/lighting';
@@ -29,7 +28,6 @@ import {
   scatterGrass,
   scatterRocks,
   scatterTrees,
-  type ExcludeFn,
   type VegetationHandle,
 } from '@kit/vegetation';
 import { makeWorld, type WorldCore } from '@kit/world';

@@ -5,7 +5,7 @@ import { syntheticTapeBytes } from './synthetic';
 
 const FIELDS = ['rewardSum', 'rho', 'deathStep', 'deathDetector'];
 
-const tape = parseTape(syntheticTapeBytes(2, FIELDS, [
+const tape = await parseTape(await syntheticTapeBytes(2, FIELDS, [
   {
     start: 0,
     count: 100,

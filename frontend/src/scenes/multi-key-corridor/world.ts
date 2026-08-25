@@ -7,7 +7,6 @@ import {
   excludeWallCells,
   isWall,
   type CellFieldHandle,
-  type GridSize,
   type Vec3Tuple,
 } from '@kit/grid';
 import { applyFog, makeLightRig, type LightRig } from '@kit/lighting';
@@ -569,7 +568,6 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene, grid: GridGeom
   ];
   for (let i = 0; i < treeSpecs.length; i++) {
     const spec = treeSpecs[i] as (typeof treeSpecs)[number];
-    if (false && spec.archetype === 'conifer') continue;
     const handle = scatterTrees({
       archetypes: [spec.archetype],
       count: spec.count,

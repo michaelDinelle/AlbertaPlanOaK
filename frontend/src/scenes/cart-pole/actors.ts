@@ -5,7 +5,7 @@ import {
   type EmissiveMaterial,
   type OakMaterial,
 } from '@kit/materials';
-import { blendTokens, clampRange, envelope, TOKEN_BLACK, TOKEN_WHITE } from '@kit/mix';
+import { blendTokens, clampRange, TOKEN_BLACK, TOKEN_WHITE } from '@kit/mix';
 import { makeAmbientParticles, type AmbientParticlesHandle } from '@kit/particles';
 import { mergeColoredParts, type ColoredPart } from '@kit/parts';
 import { streamFor } from '@kit/rng';

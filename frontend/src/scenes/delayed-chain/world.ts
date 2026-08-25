@@ -452,6 +452,3 @@ export function setPropTime(material: THREE.Material | null, t: number): void {
   oakUniforms(material)?.setTime(t);
 }
 
-export function cellX(cell: number, grid: GridSize, out?: Vec3Tuple): number {
-  return cellToWorld(cell, 0, grid, out)[0];
-}

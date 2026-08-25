@@ -5,14 +5,11 @@ import type { PlaybackSource } from './playbackSource';
 import { recordingUrl } from '../data/api';
 import { lensRecording, type RecordingLens } from '@sim/decode';
 import {
-  FILE_HEADER_BYTES,
   RECORD_FLOATS,
   decodeChunkPayload,
   inflateChunk,
   codecFromEntry,
-  readRecordHeader,
   scanNextChunk,
-  type CodecDescriptor,
 } from '@sim/record';
 import { decoders } from '@sim/registry';
 import { NO_EVENTS, type EnvDecoder } from '@sim/types';
@@ -167,16 +164,15 @@ export function loadHero(options: HeroOptions): HeroHandle {
 
   let bytes = new Uint8Array(64 * 1024);
   let byteLength = 0;
-  let scanOffset = FILE_HEADER_BYTES;
+  let scanOffset = 0;
   let decodedSteps = 0;
-  let desc: CodecDescriptor | null = null;
+  const desc = codecFromEntry(options.entry);
   let fullyFetched = false;
   let destroyed = false;
   let lens: RecordingLens | null = null;
   let updateTimer: number | null = null;
   let onUpdate = options.onUpdate ?? null;
   let onError = options.onError ?? null;
-  let etag: string | null = null;
   const abort = new AbortController();
 
   const wrapMask = options.entry.fields.reduce(
@@ -229,17 +225,6 @@ export function loadHero(options: HeroOptions): HeroHandle {
     bytes.set(chunk, byteLength);
     byteLength += chunk.byteLength;
 
-    if (desc === null && byteLength >= FILE_HEADER_BYTES) {
-      const header = readRecordHeader(bytes.subarray(0, byteLength));
-      if (header.envId !== envId) {
-        throw new TheaterLoadError(
-          `recording header says ${header.envId}, expected ${envId}`,
-        );
-      }
-      desc = codecFromEntry(options.entry);
-    }
-    if (desc === null) return;
-
     let decodedAny = false;
     for (;;) {
       const view = bytes.subarray(0, byteLength);
@@ -251,7 +236,7 @@ export function loadHero(options: HeroOptions): HeroHandle {
         );
       }
       const payload = await inflateChunk(view, next);
-      decodeChunkPayload(payload, desc, next.stepCount, next.predictorBits, raw.data, decodedSteps * RECORD_FLOATS);
+      decodeChunkPayload(payload, desc, next.stepCount, next.bits, raw.data, decodedSteps * RECORD_FLOATS);
       decodedSteps += next.stepCount;
       scanOffset = next.byteOffset + next.byteLength;
       decodedAny = true;
@@ -259,12 +244,9 @@ export function loadHero(options: HeroOptions): HeroHandle {
     if (decodedAny) grow();
   };
 
-  const fetchFrom = async (offset: number): Promise<'grew' | 'restart' | 'done'> => {
+  const fetchFrom = async (offset: number): Promise<'grew' | 'done'> => {
     const headers: Record<string, string> = {};
-    if (offset > 0) {
-      headers['range'] = `bytes=${offset}-`;
-      if (etag !== null) headers['if-range'] = etag;
-    }
+    if (offset > 0) headers['range'] = `bytes=${offset}-`;
     const res = await fetch(recordingUrl(runId, envId, seed), {
       headers,
       signal: abort.signal,
@@ -273,8 +255,9 @@ export function loadHero(options: HeroOptions): HeroHandle {
     if (!res.ok && res.status !== 206) {
       throw new TheaterLoadError(`${res.status} — recording unavailable for ${envId} seed ${seed}`);
     }
-    if (offset > 0 && res.status === 200) return 'restart';
-    etag = res.headers.get('etag');
+    if (offset > 0 && res.status === 200) {
+      throw new TheaterLoadError(`the server ignored a range request for ${envId} seed ${seed}`);
+    }
     const body = res.body;
     if (body === null) {
       await append(new Uint8Array(await res.arrayBuffer()));
@@ -308,9 +291,6 @@ export function loadHero(options: HeroOptions): HeroHandle {
       if (!live || destroyed) break;
       const startedAt = performance.now();
       const result = await fetchFrom(byteLength);
-      if (result === 'restart') {
-        throw new TheaterLoadError('the recording was rewritten underneath the player — reload the run');
-      }
       if (result === 'grew') {
         const at = performance.now();
         intervalMs = at - lastGrewAt;

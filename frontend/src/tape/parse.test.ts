@@ -15,7 +15,6 @@ function logicalRegion(tape: Tape) {
   return {
     rows: tape.rows,
     byteLength: tape.byteLength,
-    etag: tape.etag,
     stepStart: [...tape.stepStart.subarray(0, tape.rows)],
     stepEnd: [...tape.stepEnd.subarray(0, tape.rows)],
     wallSeconds: [...tape.wallSeconds.subarray(0, tape.rows)],
@@ -23,33 +22,34 @@ function logicalRegion(tape: Tape) {
   };
 }
 
-test('a whole-buffer parse equals split-feed appends', () => {
-  const bytes = syntheticTapeBytes(2, FIELDS, rows);
-  const whole = parseTape(bytes, 'etag-final');
+test('a whole-buffer parse equals split-feed appends', async () => {
+  const bytes = await syntheticTapeBytes(2, FIELDS, rows);
+  const whole = await parseTape(bytes);
 
   const headerEnd = whole.headerBytes;
-  const rowBytes = whole.rowBytes;
-  let split = parseTape(bytes.subarray(0, headerEnd + rowBytes), null);
-  split = appendRows(split, bytes.subarray(headerEnd + rowBytes, headerEnd + 2 * rowBytes), null);
-  split = appendRows(split, bytes.subarray(headerEnd + 2 * rowBytes), 'etag-final');
+  const dv = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  const row1End = headerEnd + 16 + dv.getUint32(headerEnd + 12, true);
+  const row2End = row1End + 16 + dv.getUint32(row1End + 12, true);
+  let split = await parseTape(bytes.subarray(0, row1End));
+  split = await appendRows(split, bytes.subarray(row1End, row2End));
+  split = await appendRows(split, bytes.subarray(row2End));
 
   expect(logicalRegion(split)).toEqual(logicalRegion(whole));
   expect(split.fields).toEqual(whole.fields);
   expect(split.laneCount).toBe(whole.laneCount);
 });
 
-test('an append shorter than one row changes nothing but the etag', () => {
-  const bytes = syntheticTapeBytes(2, FIELDS, rows);
-  const whole = parseTape(bytes, 'a');
-  const nudged = appendRows(whole, new Uint8Array(5), 'b');
+test('an append shorter than one row changes nothing', async () => {
+  const bytes = await syntheticTapeBytes(2, FIELDS, rows);
+  const whole = await parseTape(bytes);
+  const nudged = await appendRows(whole, new Uint8Array(5));
   expect(nudged.rows).toBe(whole.rows);
   expect(nudged.byteLength).toBe(whole.byteLength);
-  expect(nudged.etag).toBe('b');
 });
 
-test('parsing a header-only tape yields zero rows', () => {
-  const bytes = syntheticTapeBytes(2, FIELDS, []);
-  const empty = parseTape(bytes, null);
+test('parsing a header-only tape yields zero rows', async () => {
+  const bytes = await syntheticTapeBytes(2, FIELDS, []);
+  const empty = await parseTape(bytes);
   expect(empty.rows).toBe(0);
   expect(empty.byteLength).toBe(empty.headerBytes);
 });

@@ -2,7 +2,6 @@ import { isEnvId } from '@shared/envs';
 import { OFF_DONE, OFF_POSE, POSE_LEN, RECORD_FLOATS } from './record';
 import { NO_EVENTS, type EnvDecoder, type EnvFrame, type RawRecording, type SimEvent } from './types';
 
-export { NO_EVENTS };
 
 export class DecodeError extends Error {
   constructor(message: string) {

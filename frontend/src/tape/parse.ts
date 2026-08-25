@@ -5,16 +5,13 @@ export interface Tape {
   laneCount: number;
   fields: string[];
   rows: number;
-  capacity: number;
   stepStart: Float64Array;
   stepEnd: Float64Array;
   wallSeconds: Float32Array;
   data: Float32Array;
   bits: Uint32Array;
   headerBytes: number;
-  rowBytes: number;
   byteLength: number;
-  etag: string | null;
 }
 
 export function fieldIndex(tape: Tape, field: string): number {
@@ -50,83 +47,82 @@ function parseHeader(bytes: Uint8Array): { laneCount: number; fields: string[]; 
   return { laneCount, fields: parsed.fields as string[], headerBytes: 12 + jsonLen };
 }
 
-export function parseTape(bytes: Uint8Array, etag: string | null = null): Tape {
+export async function inflateRaw(bytes: Uint8Array): Promise<Uint8Array> {
+  const stream = new Blob([bytes as BlobPart]).stream().pipeThrough(new DecompressionStream('deflate-raw'));
+  return new Uint8Array(await new Response(stream).arrayBuffer());
+}
+
+export async function parseTape(bytes: Uint8Array): Promise<Tape> {
   const { laneCount, fields, headerBytes } = parseHeader(bytes);
-  const rowBytes = 12 + fields.length * laneCount * 4;
   const empty: Tape = {
     laneCount,
     fields,
     rows: 0,
-    capacity: 0,
     stepStart: new Float64Array(0),
     stepEnd: new Float64Array(0),
     wallSeconds: new Float32Array(0),
     data: new Float32Array(0),
     bits: new Uint32Array(0),
     headerBytes,
-    rowBytes,
     byteLength: headerBytes,
-    etag,
   };
-  return appendRows(empty, bytes.subarray(headerBytes), etag);
+  return appendRows(empty, bytes.subarray(headerBytes));
 }
 
-export function appendRows(tape: Tape, more: Uint8Array, etag: string | null): Tape {
-  const added = Math.floor(more.byteLength / tape.rowBytes);
-  if (added <= 0) return { ...tape, etag };
-  const rows = tape.rows + added;
-  const valuesPerRow = tape.fields.length * tape.laneCount;
-  let next: Tape;
-  if (rows <= tape.capacity) {
-    next = { ...tape, rows, byteLength: tape.byteLength + added * tape.rowBytes, etag };
-  } else {
-    let capacity = Math.max(tape.capacity, 1);
-    while (capacity < rows) capacity *= 2;
-    const data = new Float32Array(capacity * valuesPerRow);
-    next = {
-      ...tape,
-      rows,
-      capacity,
-      stepStart: new Float64Array(capacity),
-      stepEnd: new Float64Array(capacity),
-      wallSeconds: new Float32Array(capacity),
-      data,
-      bits: new Uint32Array(data.buffer),
-      byteLength: tape.byteLength + added * tape.rowBytes,
-      etag,
-    };
-    next.stepStart.set(tape.stepStart);
-    next.stepEnd.set(tape.stepEnd);
-    next.wallSeconds.set(tape.wallSeconds);
-    next.data.set(tape.data);
-  }
+export async function appendRows(tape: Tape, more: Uint8Array): Promise<Tape> {
   const dv = new DataView(more.buffer, more.byteOffset, more.byteLength);
-  const valueFloats = valuesPerRow;
-  for (let a = 0; a < added; a++) {
-    const r = tape.rows + a;
-    const at = a * next.rowBytes;
-    const start = dv.getUint32(at, true);
-    const count = dv.getUint32(at + 4, true);
-    next.stepStart[r] = start;
-    next.stepEnd[r] = start + count;
-    next.wallSeconds[r] = dv.getFloat32(at + 8, true);
-    for (let i = 0; i < valueFloats; i++) {
-      next.data[r * valueFloats + i] = dv.getFloat32(at + 12 + i * 4, true);
-    }
+  const valuesPerRow = tape.fields.length * tape.laneCount;
+  const blockBytes = valuesPerRow * 4;
+  const heads: { start: number; count: number; wall: number }[] = [];
+  const blocks: Promise<Uint8Array>[] = [];
+  let at = 0;
+  while (at + 16 <= more.byteLength) {
+    const compLen = dv.getUint32(at + 12, true);
+    if (at + 16 + compLen > more.byteLength) break;
+    heads.push({
+      start: dv.getUint32(at, true),
+      count: dv.getUint32(at + 4, true),
+      wall: dv.getFloat32(at + 8, true),
+    });
+    blocks.push(inflateRaw(more.subarray(at + 16, at + 16 + compLen)));
+    at += 16 + compLen;
   }
+  if (heads.length === 0) return tape;
+  const inflated = await Promise.all(blocks);
+  const rows = tape.rows + heads.length;
+  const data = new Float32Array(rows * valuesPerRow);
+  data.set(tape.data.subarray(0, tape.rows * valuesPerRow));
+  const next: Tape = {
+    ...tape,
+    rows,
+    stepStart: new Float64Array(rows),
+    stepEnd: new Float64Array(rows),
+    wallSeconds: new Float32Array(rows),
+    data,
+    bits: new Uint32Array(data.buffer),
+    byteLength: tape.byteLength + at,
+  };
+  next.stepStart.set(tape.stepStart.subarray(0, tape.rows));
+  next.stepEnd.set(tape.stepEnd.subarray(0, tape.rows));
+  next.wallSeconds.set(tape.wallSeconds.subarray(0, tape.rows));
+  heads.forEach((head, a) => {
+    const r = tape.rows + a;
+    next.stepStart[r] = head.start;
+    next.stepEnd[r] = head.start + head.count;
+    next.wallSeconds[r] = head.wall;
+    const block = inflated[a]!;
+    if (block.byteLength !== blockBytes) {
+      throw new Error(`tape row block is ${block.byteLength} bytes, expected ${blockBytes}`);
+    }
+    next.data.set(new Float32Array(block.buffer, 0, valuesPerRow), r * valuesPerRow);
+  });
   return next;
 }
 
 export async function fetchTape(runId: string, prev: Tape | null, signal?: AbortSignal): Promise<Tape> {
   const url = tapeUrl(runId);
   const headers: Record<string, string> = { accept: 'application/octet-stream' };
-  if (prev !== null) {
-    headers['range'] = `bytes=${prev.byteLength}-`;
-    if (prev.etag !== null) {
-      headers['if-range'] = prev.etag;
-      headers['if-none-match'] = prev.etag;
-    }
-  }
+  if (prev !== null) headers['range'] = `bytes=${prev.byteLength}-`;
   let response: Response;
   try {
     response = await fetch(url, { headers, ...(signal ? { signal } : {}) });
@@ -134,17 +130,21 @@ export async function fetchTape(runId: string, prev: Tape | null, signal?: Abort
     if (cause instanceof DOMException && cause.name === 'AbortError') throw cause;
     throw new ApiError(0, url, cause instanceof Error ? cause.message : String(cause));
   }
-  if (response.status === 304 || response.status === 416) {
+  if (response.status === 416) {
     if (prev !== null) return prev;
     throw new ApiError(response.status, url, 'empty tape');
   }
   if (!response.ok && response.status !== 206) {
     throw new ApiError(response.status, url, await response.text().catch(() => ''));
   }
-  const etag = response.headers.get('etag');
   const bytes = new Uint8Array(await response.arrayBuffer());
   if (response.status === 206 && prev !== null) {
-    return appendRows(prev, bytes, etag);
+    const next = await appendRows(prev, bytes);
+    if (next.rows > prev.rows
+      && next.stepStart[prev.rows] !== (prev.rows > 0 ? prev.stepEnd[prev.rows - 1] : 0)) {
+      return fetchTape(runId, null, signal);
+    }
+    return next;
   }
-  return parseTape(bytes, etag);
+  return parseTape(bytes);
 }

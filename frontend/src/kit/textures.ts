@@ -1,5 +1,5 @@
 import * as THREE from 'three';
-import { hash2f, hash2i, mulberry32 } from './rng';
+import { hash2f } from './rng';
 
 export const MAX_TEXTURE_SIZE = 1024;
 
@@ -86,103 +86,6 @@ export function fbm(seed: number, opts: FbmOptions = {}): THREE.DataTexture {
   return grayTexture(data, size, 'oak-fbm');
 }
 
-export interface VoronoiOptions {
-  size?: number;
-  cells?: number;
-  jitter?: number;
-}
-
-export function voronoiField(
-  seed: number,
-  opts: VoronoiOptions = {},
-): { size: number; f1: Float32Array; edge: Float32Array; cell: Float32Array } {
-  const size = clampSize(opts.size ?? 256);
-  const cells = Math.max(1, Math.floor(opts.cells ?? 8));
-  const jit = clamp01(opts.jitter ?? 1);
-  const f1 = new Float32Array(size * size);
-  const edge = new Float32Array(size * size);
-  const cell = new Float32Array(size * size);
-
-  for (let py = 0; py < size; py++) {
-    const y = (py / size) * cells;
-    const gy = Math.floor(y);
-    for (let px = 0; px < size; px++) {
-      const x = (px / size) * cells;
-      const gx = Math.floor(x);
-      let best = Infinity;
-      let second = Infinity;
-      let bestCell = 0;
-      for (let oy = -1; oy <= 1; oy++) {
-        for (let ox = -1; ox <= 1; ox++) {
-          const cx = gx + ox;
-          const cy = gy + oy;
-          const wx = wrapIndex(cx, cells);
-          const wy = wrapIndex(cy, cells);
-          const h = hash2i(wx, wy, seed);
-          const jx = ((h & 0xffff) / 65536 - 0.5) * jit + 0.5;
-          const jy = (((h >>> 16) & 0xffff) / 65536 - 0.5) * jit + 0.5;
-          const dx = cx + jx - x;
-          const dy = cy + jy - y;
-          const d = Math.sqrt(dx * dx + dy * dy);
-          if (d < best) {
-            second = best;
-            best = d;
-            bestCell = h;
-          } else if (d < second) {
-            second = d;
-          }
-        }
-      }
-      const i = py * size + px;
-      f1[i] = clamp01(best);
-      edge[i] = clamp01(second - best);
-      cell[i] = (bestCell >>> 8) / 16777216;
-    }
-  }
-  return { size, f1, edge, cell };
-}
-
-export function voronoi(seed: number, opts: VoronoiOptions = {}): THREE.DataTexture {
-  const { size, f1, edge, cell } = voronoiField(seed, opts);
-  const rgba = new Uint8Array(size * size * 4);
-  for (let i = 0; i < size * size; i++) {
-    const o = i * 4;
-    rgba[o] = (clamp01(f1[i] as number) * 255) | 0;
-    rgba[o + 1] = (clamp01(edge[i] as number) * 255) | 0;
-    rgba[o + 2] = (clamp01(cell[i] as number) * 255) | 0;
-    rgba[o + 3] = 255;
-  }
-  return makeDataTexture(rgba, size, size, 'oak-voronoi');
-}
-
-export interface GrainOptions {
-  size?: number;
-  strength?: number;
-  softness?: number;
-}
-
-export function grainField(seed: number, opts: GrainOptions = {}): { size: number; data: Float32Array } {
-  const size = clampSize(opts.size ?? 256);
-  const strength = clamp01(opts.strength ?? 1);
-  const softness = clamp01(opts.softness ?? 0);
-  const rng = mulberry32(seed | 0);
-  const data = new Float32Array(size * size);
-  for (let py = 0; py < size; py++) {
-    for (let px = 0; px < size; px++) {
-      let n = rng();
-      if (softness > 0) {
-        n = lerp(n, valueNoise2((px / size) * 32, (py / size) * 32, 32, seed ^ 0x5bf03635), softness);
-      }
-      data[py * size + px] = clamp01(0.5 + (n - 0.5) * strength);
-    }
-  }
-  return { size, data };
-}
-
-export function grain(seed: number, opts: GrainOptions = {}): THREE.DataTexture {
-  const { size, data } = grainField(seed, opts);
-  return grayTexture(data, size, 'oak-grain');
-}
 
 export function fieldToRGBA(field: Float32Array): Uint8Array {
   const rgba = new Uint8Array(field.length * 4);
