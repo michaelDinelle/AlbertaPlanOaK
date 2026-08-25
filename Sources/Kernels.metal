@@ -4,6 +4,7 @@ using namespace metal;
 
 #include "EnvCore.metal"
 #include "envs/HalfCheetah.metal"
+#include "envs/MuJoCo.metal"
 #include "envs/FourRooms.metal"
 #include "envs/DeepSea.metal"
 #include "envs/KeyCorridor.metal"

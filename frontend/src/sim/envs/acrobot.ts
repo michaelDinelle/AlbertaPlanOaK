@@ -1,3 +1,4 @@
+import { POSE_LEN } from '../record';
 import { NO_EVENTS, type EnvDecoder, type EnvFrame, type EnvGeometry, type SimEvent } from '../types';
 
 export const AB_L1 = 1;
@@ -53,7 +54,7 @@ export const acrobotDecoder: EnvDecoder<AcrobotStatic> = {
   },
 
   initFrame(): EnvFrame {
-    const pose = new Float32Array(9);
+    const pose = new Float32Array(POSE_LEN);
     return {
       step: -1,
       done: 0,

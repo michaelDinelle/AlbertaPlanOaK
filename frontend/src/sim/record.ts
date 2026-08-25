@@ -2,7 +2,7 @@ import type { EnvEntry } from './catalog';
 import { ENV_IDS } from '@shared/envs';
 import type { EnvId } from '@shared/envs';
 
-export const POSE_LEN = 9;
+export const POSE_LEN = 24;
 export const OFF_DONE = 0;
 export const OFF_POSE = 1;
 export const RECORD_FLOATS = 1 + POSE_LEN;
@@ -133,7 +133,6 @@ export function decodeChunkPayload(
   payload: Uint8Array,
   desc: CodecDescriptor,
   stepCount: number,
-  bits: number,
   out: Float32Array,
   base: number,
 ): void {
@@ -160,12 +159,14 @@ export function decodeChunkPayload(
     if ((bit & 1) !== 0) out[base + i * RECORD_FLOATS + OFF_DONE] = 1;
   }
 
+  const metaAt = take(desc.poseFields.length, 'the column meta bytes');
   for (let k = 0; k < desc.poseFields.length; k++) {
     const field = desc.poseFields[k];
     if (field === undefined) continue;
     const slot = OFF_POSE + field.idx;
-    const pred = ((bits >>> k) & 1) | (((bits >>> (10 + k)) & 1) << 1);
-    const rice = ((bits >>> (20 + k)) & 1) !== 0;
+    const meta = payload[metaAt + k] ?? 0;
+    const pred = meta & 3;
+    const rice = (meta & 4) !== 0;
     let anchored = 0;
     if (field.anchor === true) {
       anchored = dv.getFloat64(take(8, `anchor seed of column ${field.idx}`), true);

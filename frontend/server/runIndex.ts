@@ -1,4 +1,4 @@
-import { open, readdir } from 'node:fs/promises';
+import { open, readdir, stat } from 'node:fs/promises';
 import { join } from 'node:path';
 import { TAPE_MAGIC } from '@shared/types';
 import type { RunDetail, RunIndexEntry, RunMeta, RunSummary } from '@shared/types';
@@ -245,7 +245,18 @@ export class RunIndex {
     let dirNames: string[];
     try {
       const ents = await readdir(this.benchRoot, { withFileTypes: true });
-      dirNames = ents.filter((e) => e.isDirectory()).map((e) => e.name);
+      dirNames = [];
+      for (const e of ents) {
+        if (e.isDirectory()) {
+          dirNames.push(e.name);
+        } else if (e.isSymbolicLink()) {
+          try {
+            if ((await stat(join(this.benchRoot, e.name))).isDirectory()) dirNames.push(e.name);
+          } catch {
+            continue;
+          }
+        }
+      }
     } catch {
       dirNames = [];
     }

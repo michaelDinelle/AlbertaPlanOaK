@@ -8,6 +8,7 @@ let package = Package(
     .executableTarget(
       name: "OaK",
       path: "Sources/OaK",
+      resources: [.copy("Resources/mjmodels.bin")],
       swiftSettings: [.unsafeFlags(["-Xcc", "-DACCELERATE_NEW_LAPACK"])]
     )
   ]

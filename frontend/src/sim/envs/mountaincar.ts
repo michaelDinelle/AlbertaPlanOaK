@@ -1,3 +1,4 @@
+import { POSE_LEN } from '../record';
 import { NO_EVENTS, type EnvDecoder, type EnvFrame, type EnvGeometry, type SimEvent } from '../types';
 
 export const MC_MIN_POS = -1.2;
@@ -68,7 +69,7 @@ export const mountainCarDecoder: EnvDecoder<MountainCarStatic> = {
   },
 
   initFrame(): EnvFrame {
-    const pose = new Float32Array(9);
+    const pose = new Float32Array(POSE_LEN);
     pose[0] = MC_START_POS;
     pose[2] = MC_GOAL_POS;
     return {

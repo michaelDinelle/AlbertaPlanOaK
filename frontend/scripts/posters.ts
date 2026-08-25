@@ -5,7 +5,7 @@ import { ENV_IDS } from '../shared/envs';
 import { SCENES, nameOf } from '../src/scenes/table';
 
 const HELP = [
-  'Regenerates the 16 environment poster images the app ships as static files.',
+  'Regenerates the environment poster images the app ships as static files.',
   'Start the dev stack first (bun run dev), then run:',
   '  bun scripts/posters.ts [origin]',
   'origin defaults to http://localhost:5173. Posters land in frontend/public/posters/<slug>.webp;',

@@ -236,7 +236,7 @@ export function loadHero(options: HeroOptions): HeroHandle {
         );
       }
       const payload = await inflateChunk(view, next);
-      decodeChunkPayload(payload, desc, next.stepCount, next.bits, raw.data, decodedSteps * RECORD_FLOATS);
+      decodeChunkPayload(payload, desc, next.stepCount, raw.data, decodedSteps * RECORD_FLOATS);
       decodedSteps += next.stepCount;
       scanOffset = next.byteOffset + next.byteLength;
       decodedAny = true;

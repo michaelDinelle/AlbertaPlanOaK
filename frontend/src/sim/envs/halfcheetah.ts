@@ -1,4 +1,5 @@
 import { cheetahGeometry } from '../fk/cheetah';
+import { POSE_LEN } from '../record';
 import { NO_EVENTS, type EnvDecoder, type EnvFrame, type EnvGeometry, type SimEvent } from '../types';
 
 export const CHEETAH_DT = 0.05;
@@ -22,7 +23,7 @@ export const halfCheetahDecoder: EnvDecoder<null> = {
   },
 
   initFrame(): EnvFrame {
-    const pose = new Float32Array(9);
+    const pose = new Float32Array(POSE_LEN);
     return {
       step: -1,
       done: 0,

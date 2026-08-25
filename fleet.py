@@ -552,8 +552,10 @@ def cmd_scale(args) -> int:
                 or runs[policy]["seeds"] != keeper["seeds"]):
             raise SystemExit(f"{policy} baseline schedule differs from keeper")
     slices = env_slices(keeper)
-    if len(slices) != 16:
-        raise SystemExit(f"keeper schedule has {len(slices)} envs, expected 16")
+    catalog_count = len(keeper["meta"]["envCatalog"])
+    if len(slices) != catalog_count:
+        raise SystemExit(
+            f"keeper schedule has {len(slices)} envs, catalog declares {catalog_count}")
     proc_seeds = [keeper["seeds"][l] for l in slices["ProceduralMaze-cont-v0"]]
     analytic = closed_form_ceilings()
     enumerated = {

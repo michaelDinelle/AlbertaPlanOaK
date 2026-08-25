@@ -15,6 +15,16 @@ export const ENV_IDS = [
   'HighDimMaze-cont-v0',
   'POMaze-cont-v0',
   'DelayedChain-cont-v0',
+  'InvertedPendulum-v5',
+  'InvertedDoublePendulum-v5',
+  'Reacher-v5',
+  'Swimmer-v5',
+  'Hopper-v5',
+  'Walker2d-v5',
+  'Pusher-v5',
+  'Ant-v5',
+  'Humanoid-v5',
+  'HumanoidStandup-v5',
 ] as const;
 
 export type EnvId = (typeof ENV_IDS)[number];

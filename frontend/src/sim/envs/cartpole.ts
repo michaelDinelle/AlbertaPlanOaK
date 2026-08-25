@@ -1,3 +1,4 @@
+import { POSE_LEN } from '../record';
 import { NO_EVENTS, type EnvDecoder, type EnvFrame, type EnvGeometry, type SimEvent } from '../types';
 
 export const CP_X_LIMIT = Math.fround(2.4);
@@ -60,7 +61,7 @@ export const cartPoleDecoder: EnvDecoder<null> = {
   },
 
   initFrame(): EnvFrame {
-    const pose = new Float32Array(9);
+    const pose = new Float32Array(POSE_LEN);
     return {
       step: -1,
       done: 0,

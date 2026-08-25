@@ -10,7 +10,7 @@ export interface EnvShare {
 export function envShares(meta: Pick<RunMeta, 'envSchedule'>): EnvShare[] {
   const counts = new Map<EnvId, number>();
   for (const entry of meta.envSchedule) {
-    if (!isEnvId(entry.envId)) continue;
+    if (!isEnvId(entry.envId)) throw new Error(`run schedule names unknown env ${entry.envId}`);
     const lanes = Math.max(0, entry.seedEnd - entry.seedStart + 1);
     counts.set(entry.envId, (counts.get(entry.envId) ?? 0) + lanes);
   }
@@ -50,7 +50,10 @@ export function runEnvs(
 ): EnvId[] {
   const seen = new Set<EnvId>();
   for (const share of envShares(meta)) seen.add(share.envId);
-  for (const rec of recordings) if (isEnvId(rec.envId)) seen.add(rec.envId);
+  for (const rec of recordings) {
+    if (!isEnvId(rec.envId)) throw new Error(`recording names unknown env ${rec.envId}`);
+    seen.add(rec.envId);
+  }
   return ENV_IDS.filter((id) => seen.has(id));
 }
 

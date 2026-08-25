@@ -1,3 +1,4 @@
+import { POSE_LEN } from '../record';
 import { NO_EVENTS, type EnvDecoder, type EnvFrame, type EnvGeometry, type SimEvent } from '../types';
 
 export const PD_MAX_SPEED = 8;
@@ -49,7 +50,7 @@ export const pendulumDecoder: EnvDecoder<PendulumStatic> = {
   },
 
   initFrame(): EnvFrame {
-    const pose = new Float32Array(9);
+    const pose = new Float32Array(POSE_LEN);
     pose[0] = Math.PI;
     return {
       step: -1,

@@ -32,6 +32,16 @@ export const SCENES: Record<EnvId, SceneRow> = {
   'HighDimMaze-cont-v0': { slug: 'high-dim-maze', bloom: 0.42, burst: 110, fog: { from: ['afternoon', 'fog'] } },
   'POMaze-cont-v0': { slug: 'po-maze', bloom: 0.38, burst: 120, fog: { from: ['dawn', 'fog'], blend: [[['dawn', 'skyTop'], 0.62], [['night', 'skyTop'], 0.62]] } },
   'DelayedChain-cont-v0': { slug: 'delayed-chain', bloom: 0.62, burst: 150, fog: { from: ['night', 'fog'] } },
+  'InvertedPendulum-v5': { slug: 'inverted-pendulum', bloom: 0.36, fog: { from: ['noon', 'fog'] } },
+  'InvertedDoublePendulum-v5': { slug: 'inverted-double-pendulum', bloom: 0.38, fog: { from: ['afternoon', 'fog'] } },
+  'Reacher-v5': { slug: 'reacher', bloom: 0.5, fog: { from: ['night', 'fog'] } },
+  'Swimmer-v5': { slug: 'swimmer', bloom: 0.46, fog: { from: ['underwater', 'fog'] } },
+  'Hopper-v5': { slug: 'hopper', bloom: 0.4, fog: { from: ['morning', 'fog'] } },
+  'Walker2d-v5': { slug: 'walker2d', bloom: 0.42, fog: { from: ['dusk', 'fog'] } },
+  'Pusher-v5': { slug: 'pusher', bloom: 0.38, fog: { from: ['afternoon', 'fog'] } },
+  'Ant-v5': { slug: 'ant', bloom: 0.42, fog: { from: ['dawn', 'fog'] } },
+  'Humanoid-v5': { slug: 'humanoid', bloom: 0.44, fog: { from: ['noon', 'fog'] } },
+  'HumanoidStandup-v5': { slug: 'humanoid-standup', bloom: 0.46, fog: { from: ['dawn', 'fog'] } },
 };
 
 export function slugOf(envId: EnvId): string {

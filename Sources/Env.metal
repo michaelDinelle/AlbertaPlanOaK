@@ -16,7 +16,13 @@ constant uint OAK_ENV_PROCEDURALMAZE = 12u;
 constant uint OAK_ENV_HIGHDIMMAZE = 13u;
 constant uint OAK_ENV_POMAZE      = 14u;
 constant uint OAK_ENV_DELAYEDCHAIN = 15u;
-constant uint OAK_ENV_COUNT       = 16u;
+constant uint OAK_ENV_COUNT       = 26u;
+
+constant uint OAK_ENV_OBS_MAX   = 348u;
+constant uint OAK_ENV_CLASSIC_OBS_MAX = 17u;
+constant uint OAK_ENV_ACT_MAX   = 17u;
+constant uint OAK_ENV_WORDS_MAX = 10u;
+constant uint OAK_SAMPLE_SCRATCH = ((OAK_ENV_ACT_MAX + 3u) / 4u) * 4u;
 
 constant uint OAK_SLOT_NONE    =  0u;
 constant uint OAK_SLOT_X       =  1u;
@@ -33,70 +39,186 @@ constant uint OAK_SLOT_HEADING = 11u;
 constant uint OAK_SLOT_EFFORT  = 12u;
 constant uint OAK_SLOT_Q       = 16u;
 
-constant uint OAK_POSE_LEN = 9u;
+constant uint OAK_POSE_LEN = 24u;
 constant uint OAK_RECORD_FLOATS = 1u + OAK_POSE_LEN;
 
 struct OakEnvSpec {
-    uint nameHash; uint obsDimNatural; uint actionKind; uint actionCount;
-    uint gridW; uint gridH; uint controlHz;
+    uint nameHash; uint obsDimNatural; uint actionKind; uint actionCount; uint actionParams;
+    uint gridW; uint gridH; uint controlHz; uint stepFlops; uint envStateWords; uint mjIndex;
     uint slots[OAK_POSE_LEN];
 };
 constant OakEnvSpec OAK_ENV_SPECS[OAK_ENV_COUNT] = {
-    { 0x9d7fd44bu, 17u, 0u, 6u,  0u,  0u, 20u,
+    { 0x9d7fd44bu, 17u, 0u, 6u, 12u,  0u,  0u, 20u, 150000u, 33u, 0u,
       { OAK_SLOT_Q + 0u, OAK_SLOT_Q + 1u, OAK_SLOT_Q + 2u, OAK_SLOT_Q + 3u, OAK_SLOT_Q + 4u,
-        OAK_SLOT_Q + 5u, OAK_SLOT_Q + 6u, OAK_SLOT_Q + 7u, OAK_SLOT_Q + 8u } },
-    { 0x8014a187u, 17u, 1u, 4u, 11u, 11u,  8u,
-      { OAK_SLOT_X, OAK_SLOT_Y, OAK_SLOT_GOAL_X, OAK_SLOT_GOAL_Y,
-        OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE } },
-    { 0x56af5bf2u,  8u, 1u, 2u,  8u,  8u,  8u,
-      { OAK_SLOT_Y, OAK_SLOT_X, OAK_SLOT_GOAL_Y, OAK_SLOT_GOAL_X,
-        OAK_SLOT_EFFORT, OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE } },
-    { 0xdd537ebau, 14u, 1u, 4u,  9u,  7u,  8u,
-      { OAK_SLOT_X, OAK_SLOT_Y, OAK_SLOT_GOAL_X, OAK_SLOT_GOAL_Y, OAK_SLOT_KEY_X, OAK_SLOT_KEY_Y,
-        OAK_SLOT_CARRY, OAK_SLOT_GATES, OAK_SLOT_NONE } },
-    { 0x93531833u,  7u, 1u, 3u,  0u,  0u,  5u,
-      { OAK_SLOT_Q + 0u, OAK_SLOT_Q + 1u, OAK_SLOT_Q + 2u, OAK_SLOT_Q + 3u,
-        OAK_SLOT_EFFORT, OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE } },
-    { 0xf5b3ddc8u,  3u, 1u, 3u,  0u,  0u, 30u,
+        OAK_SLOT_Q + 5u, OAK_SLOT_Q + 6u, OAK_SLOT_Q + 7u, OAK_SLOT_Q + 8u, OAK_SLOT_NONE,
+        OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE,
+        OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE,
+        OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE } },
+    { 0x8014a187u, 17u, 1u, 4u, 12u, 11u, 11u,  8u, 60u, 10u, 0xffffffffu,
+      { OAK_SLOT_X, OAK_SLOT_Y, OAK_SLOT_GOAL_X, OAK_SLOT_GOAL_Y, OAK_SLOT_NONE,
+        OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE,
+        OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE,
+        OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE,
+        OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE } },
+    { 0x56af5bf2u,  8u, 1u, 2u, 12u,  8u,  8u,  8u, 30u, 10u, 0xffffffffu,
+      { OAK_SLOT_Y, OAK_SLOT_X, OAK_SLOT_GOAL_Y, OAK_SLOT_GOAL_X, OAK_SLOT_EFFORT,
+        OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE,
+        OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE,
+        OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE,
+        OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE } },
+    { 0xdd537ebau, 14u, 1u, 4u, 12u,  9u,  7u,  8u, 70u, 10u, 0xffffffffu,
+      { OAK_SLOT_X, OAK_SLOT_Y, OAK_SLOT_GOAL_X, OAK_SLOT_GOAL_Y, OAK_SLOT_KEY_X,
+        OAK_SLOT_KEY_Y, OAK_SLOT_CARRY, OAK_SLOT_GATES, OAK_SLOT_NONE, OAK_SLOT_NONE,
+        OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE,
+        OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE,
+        OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE } },
+    { 0x93531833u,  7u, 1u, 3u, 12u,  0u,  0u,  5u, 400u, 10u, 0xffffffffu,
+      { OAK_SLOT_Q + 0u, OAK_SLOT_Q + 1u, OAK_SLOT_Q + 2u, OAK_SLOT_Q + 3u, OAK_SLOT_EFFORT,
+        OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE,
+        OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE,
+        OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE,
+        OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE } },
+    { 0xf5b3ddc8u,  3u, 1u, 3u, 12u,  0u,  0u, 30u, 40u, 10u, 0xffffffffu,
       { OAK_SLOT_Q + 0u, OAK_SLOT_Q + 1u, OAK_SLOT_NONE, OAK_SLOT_EFFORT, OAK_SLOT_NONE,
+        OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE,
+        OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE,
+        OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE,
         OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE } },
-    { 0x41f9937du,  5u, 1u, 2u,  0u,  0u, 50u,
-      { OAK_SLOT_Q + 0u, OAK_SLOT_Q + 1u, OAK_SLOT_Q + 2u, OAK_SLOT_Q + 3u,
-        OAK_SLOT_EFFORT, OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE } },
-    { 0x69bbbb73u,  4u, 0u, 1u,  0u,  0u, 20u,
+    { 0x41f9937du,  5u, 1u, 2u, 12u,  0u,  0u, 50u, 60u, 10u, 0xffffffffu,
+      { OAK_SLOT_Q + 0u, OAK_SLOT_Q + 1u, OAK_SLOT_Q + 2u, OAK_SLOT_Q + 3u, OAK_SLOT_EFFORT,
+        OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE,
+        OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE,
+        OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE,
+        OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE } },
+    { 0x69bbbb73u,  4u, 0u, 1u, 12u,  0u,  0u, 20u, 60u, 10u, 0xffffffffu,
       { OAK_SLOT_Q + 0u, OAK_SLOT_Q + 1u, OAK_SLOT_EFFORT, OAK_SLOT_NONE, OAK_SLOT_NONE,
+        OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE,
+        OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE,
+        OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE,
         OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE } },
-    { 0x7b267422u,  2u, 1u, 2u, 16u,  1u,  8u,
+    { 0x7b267422u,  2u, 1u, 2u, 12u, 16u,  1u,  8u, 25u, 10u, 0xffffffffu,
       { OAK_SLOT_X, OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE,
+        OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE,
+        OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE,
+        OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE,
         OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE } },
-    { 0xb96ddc3du,  8u, 1u, 2u, 16u, 16u,  8u,
-      { OAK_SLOT_Y, OAK_SLOT_X, OAK_SLOT_GOAL_Y, OAK_SLOT_GOAL_X,
-        OAK_SLOT_EFFORT, OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE } },
-    { 0x4c3c2d3fu, 17u, 1u, 4u, 17u,  7u,  8u,
-      { OAK_SLOT_X, OAK_SLOT_Y, OAK_SLOT_GOAL_X, OAK_SLOT_GOAL_Y, OAK_SLOT_TOKENS, OAK_SLOT_GATES,
-        OAK_SLOT_EFFORT, OAK_SLOT_NONE, OAK_SLOT_NONE } },
-    { 0xcf293fd7u,  6u, 1u, 2u, 32u,  1u,  8u,
+    { 0xb96ddc3du,  8u, 1u, 2u, 12u, 16u, 16u,  8u, 30u, 10u, 0xffffffffu,
+      { OAK_SLOT_Y, OAK_SLOT_X, OAK_SLOT_GOAL_Y, OAK_SLOT_GOAL_X, OAK_SLOT_EFFORT,
+        OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE,
+        OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE,
+        OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE,
+        OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE } },
+    { 0x4c3c2d3fu, 17u, 1u, 4u, 12u, 17u,  7u,  8u, 80u, 10u, 0xffffffffu,
+      { OAK_SLOT_X, OAK_SLOT_Y, OAK_SLOT_GOAL_X, OAK_SLOT_GOAL_Y, OAK_SLOT_TOKENS,
+        OAK_SLOT_GATES, OAK_SLOT_EFFORT, OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE,
+        OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE,
+        OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE,
+        OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE } },
+    { 0xcf293fd7u,  6u, 1u, 2u, 12u, 32u,  1u,  8u, 40u, 10u, 0xffffffffu,
       { OAK_SLOT_X, OAK_SLOT_NONE, OAK_SLOT_CUE, OAK_SLOT_EFFORT, OAK_SLOT_NONE,
+        OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE,
+        OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE,
+        OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE,
         OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE } },
-    { 0xd75dd5f9u, 17u, 1u, 4u, 11u, 11u,  8u,
-      { OAK_SLOT_X, OAK_SLOT_Y, OAK_SLOT_GOAL_X, OAK_SLOT_GOAL_Y,
-        OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE } },
-    { 0xbfeb2b7au, 16u, 1u, 6u, 11u, 11u,  8u,
+    { 0xd75dd5f9u, 17u, 1u, 4u, 12u, 11u, 11u,  8u, 90u, 10u, 0xffffffffu,
+      { OAK_SLOT_X, OAK_SLOT_Y, OAK_SLOT_GOAL_X, OAK_SLOT_GOAL_Y, OAK_SLOT_NONE,
+        OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE,
+        OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE,
+        OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE,
+        OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE } },
+    { 0xbfeb2b7au, 16u, 1u, 6u, 12u, 11u, 11u,  8u, 70u, 10u, 0xffffffffu,
       { OAK_SLOT_X, OAK_SLOT_Y, OAK_SLOT_GOAL_X, OAK_SLOT_GOAL_Y, OAK_SLOT_HEADING,
-        OAK_SLOT_EFFORT, OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE } },
-    { 0x0582e383u, 15u, 1u, 4u, 11u, 11u,  8u,
-      { OAK_SLOT_X, OAK_SLOT_Y, OAK_SLOT_GOAL_X, OAK_SLOT_GOAL_Y,
-        OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE } },
-    { 0x56184b96u,  3u, 1u, 2u, 32u,  1u,  8u,
-      { OAK_SLOT_X, OAK_SLOT_NONE, OAK_SLOT_CUE, OAK_SLOT_NONE, OAK_SLOT_NONE,
+        OAK_SLOT_EFFORT, OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE,
+        OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE,
+        OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE,
         OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE } },
+    { 0x0582e383u, 15u, 1u, 4u, 12u, 11u, 11u,  8u, 70u, 10u, 0xffffffffu,
+      { OAK_SLOT_X, OAK_SLOT_Y, OAK_SLOT_GOAL_X, OAK_SLOT_GOAL_Y, OAK_SLOT_NONE,
+        OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE,
+        OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE,
+        OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE,
+        OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE } },
+    { 0x56184b96u,  3u, 1u, 2u, 12u, 32u,  1u,  8u, 30u, 10u, 0xffffffffu,
+      { OAK_SLOT_X, OAK_SLOT_NONE, OAK_SLOT_CUE, OAK_SLOT_NONE, OAK_SLOT_NONE,
+        OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE,
+        OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE,
+        OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE,
+        OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE } },
+    { 0x934afb1cu, 4u, 0u, 1u, 2u, 0u, 0u, 25u, 423u, 7u, 1u,
+      { OAK_SLOT_Q + 0u, OAK_SLOT_Q + 1u, OAK_SLOT_NONE, OAK_SLOT_NONE,
+        OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE,
+        OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE,
+        OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE,
+        OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE,
+        OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE } },
+    { 0x7db1edd7u, 9u, 0u, 1u, 2u, 0u, 0u, 20u, 2380u, 10u, 2u,
+      { OAK_SLOT_Q + 0u, OAK_SLOT_Q + 1u, OAK_SLOT_Q + 2u, OAK_SLOT_NONE,
+        OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE,
+        OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE,
+        OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE,
+        OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE,
+        OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE } },
+    { 0x8cb879dfu, 10u, 0u, 2u, 4u, 0u, 0u, 50u, 1693u, 14u, 3u,
+      { OAK_SLOT_Q + 0u, OAK_SLOT_Q + 1u, OAK_SLOT_Q + 2u, OAK_SLOT_Q + 3u,
+        OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE,
+        OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE,
+        OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE,
+        OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE,
+        OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE } },
+    { 0xc3212447u, 8u, 0u, 2u, 4u, 0u, 0u, 25u, 5291u, 17u, 4u,
+      { OAK_SLOT_Q + 0u, OAK_SLOT_Q + 1u, OAK_SLOT_Q + 2u, OAK_SLOT_Q + 3u,
+        OAK_SLOT_Q + 4u, OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE,
+        OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE,
+        OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE,
+        OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE,
+        OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE } },
+    { 0x1546028fu, 11u, 0u, 3u, 6u, 0u, 0u, 125u, 35809u, 21u, 5u,
+      { OAK_SLOT_Q + 0u, OAK_SLOT_Q + 1u, OAK_SLOT_Q + 2u, OAK_SLOT_Q + 3u,
+        OAK_SLOT_Q + 4u, OAK_SLOT_Q + 5u, OAK_SLOT_NONE, OAK_SLOT_NONE,
+        OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE,
+        OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE,
+        OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE,
+        OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE } },
+    { 0xb41030a9u, 17u, 0u, 6u, 12u, 0u, 0u, 125u, 106285u, 33u, 6u,
+      { OAK_SLOT_Q + 0u, OAK_SLOT_Q + 1u, OAK_SLOT_Q + 2u, OAK_SLOT_Q + 3u,
+        OAK_SLOT_Q + 4u, OAK_SLOT_Q + 5u, OAK_SLOT_Q + 6u, OAK_SLOT_Q + 7u,
+        OAK_SLOT_Q + 8u, OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE,
+        OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE,
+        OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE,
+        OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE } },
+    { 0x1101b258u, 23u, 0u, 7u, 14u, 0u, 0u, 20u, 163253u, 40u, 7u,
+      { OAK_SLOT_Q + 0u, OAK_SLOT_Q + 1u, OAK_SLOT_Q + 2u, OAK_SLOT_Q + 3u,
+        OAK_SLOT_Q + 4u, OAK_SLOT_Q + 5u, OAK_SLOT_Q + 6u, OAK_SLOT_Q + 7u,
+        OAK_SLOT_Q + 8u, OAK_SLOT_Q + 9u, OAK_SLOT_Q + 10u, OAK_SLOT_NONE,
+        OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE,
+        OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE,
+        OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE } },
+    { 0x956ec6e0u, 105u, 0u, 8u, 16u, 0u, 0u, 20u, 560000u, 51u, 8u,
+      { OAK_SLOT_Q + 0u, OAK_SLOT_Q + 1u, OAK_SLOT_Q + 2u, OAK_SLOT_Q + 3u,
+        OAK_SLOT_Q + 4u, OAK_SLOT_Q + 5u, OAK_SLOT_Q + 6u, OAK_SLOT_Q + 7u,
+        OAK_SLOT_Q + 8u, OAK_SLOT_Q + 9u, OAK_SLOT_Q + 10u, OAK_SLOT_Q + 11u,
+        OAK_SLOT_Q + 12u, OAK_SLOT_Q + 13u, OAK_SLOT_Q + 14u, OAK_SLOT_NONE,
+        OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE,
+        OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE } },
+    { 0x8d2e84ccu, 348u, 0u, 17u, 34u, 0u, 0u, 67u, 7962989u, 87u, 9u,
+      { OAK_SLOT_Q + 0u, OAK_SLOT_Q + 1u, OAK_SLOT_Q + 2u, OAK_SLOT_Q + 3u,
+        OAK_SLOT_Q + 4u, OAK_SLOT_Q + 5u, OAK_SLOT_Q + 6u, OAK_SLOT_Q + 7u,
+        OAK_SLOT_Q + 8u, OAK_SLOT_Q + 9u, OAK_SLOT_Q + 10u, OAK_SLOT_Q + 11u,
+        OAK_SLOT_Q + 12u, OAK_SLOT_Q + 13u, OAK_SLOT_Q + 14u, OAK_SLOT_Q + 15u,
+        OAK_SLOT_Q + 16u, OAK_SLOT_Q + 17u, OAK_SLOT_Q + 18u, OAK_SLOT_Q + 19u,
+        OAK_SLOT_Q + 20u, OAK_SLOT_Q + 21u, OAK_SLOT_Q + 22u, OAK_SLOT_Q + 23u } },
+    { 0xb3aa307bu, 348u, 0u, 17u, 34u, 0u, 0u, 67u, 7962989u, 87u, 10u,
+      { OAK_SLOT_Q + 0u, OAK_SLOT_Q + 1u, OAK_SLOT_Q + 2u, OAK_SLOT_Q + 3u,
+        OAK_SLOT_Q + 4u, OAK_SLOT_Q + 5u, OAK_SLOT_Q + 6u, OAK_SLOT_Q + 7u,
+        OAK_SLOT_Q + 8u, OAK_SLOT_Q + 9u, OAK_SLOT_Q + 10u, OAK_SLOT_Q + 11u,
+        OAK_SLOT_Q + 12u, OAK_SLOT_Q + 13u, OAK_SLOT_Q + 14u, OAK_SLOT_Q + 15u,
+        OAK_SLOT_Q + 16u, OAK_SLOT_Q + 17u, OAK_SLOT_Q + 18u, OAK_SLOT_Q + 19u,
+        OAK_SLOT_Q + 20u, OAK_SLOT_Q + 21u, OAK_SLOT_Q + 22u, OAK_SLOT_Q + 23u } },
 };
 
 inline void env_reset(uint envKind, uint seed,
-                      thread uint *words, thread HalfCheetahState &cheetah,
-                      thread uint &elapsed, thread uint &resets) {
-    for (int i = 0; i < 10; i++) words[i] = 0u;
-    if (envKind != OAK_ENV_CHEETAH) halfCheetah_clear(cheetah);
+                      thread uint *words, thread uint &elapsed, thread uint &resets) {
+    for (uint i = 0u; i < OAK_ENV_WORDS_MAX; i++) words[i] = 0u;
     if (envKind == OAK_ENV_FOURROOMS) {
         words[0] = 1u; words[1] = 1u;
         words[2] = 9u; words[3] = 9u;
@@ -140,13 +262,10 @@ inline void env_reset(uint envKind, uint seed,
         words[0] = 1u; words[1] = 1u;
         words[2] = 9u; words[3] = 9u;
         words[6] = 1u;
-    } else if (envKind == OAK_ENV_CHEETAH) {
-        halfCheetah_reset(cheetah, seed, elapsed, resets);
     }
 }
 
-inline void env_observe(uint envKind, thread const uint *words, thread const HalfCheetahState &cheetah,
-                        thread float *obs) {
+inline void env_observe(uint envKind, thread const uint *words, thread float *obs) {
     if (envKind == OAK_ENV_FOURROOMS) {
         fourRooms_obs(1u, 1u, 9u, 9u, 0u, obs);
     } else if (envKind == OAK_ENV_DEEPSEA) {
@@ -163,7 +282,7 @@ inline void env_observe(uint envKind, thread const uint *words, thread const Hal
         pendulum_obs(M_PI_F, 0.0f, obs);
     } else if (envKind == OAK_ENV_CHAIN) {
         obs[0] = 0.0f; obs[1] = 1.0f;
-        for (int i = 2; i < 17; i++) obs[i] = 0.0f;
+        for (uint i = 2u; i < OAK_ENV_OBS_MAX; i++) obs[i] = 0.0f;
     } else if (envKind == OAK_ENV_LARGEDEEPSEA) {
         largeDeepSea_obs(0u, 0u, 0u, obs);
     } else if (envKind == OAK_ENV_MULTIKEYCORRIDOR) {
@@ -177,42 +296,16 @@ inline void env_observe(uint envKind, thread const uint *words, thread const Hal
         highDimMaze_obs(1u, 1u, 9u, 9u, obs);
     } else if (envKind == OAK_ENV_POMAZE) {
         poMaze_obs(1u, 1u, 9u, 9u, obs);
-    } else if (envKind == OAK_ENV_DELAYEDCHAIN) {
-        obs[0] = 0.0f; obs[1] = 0.0f; obs[2] = 1.0f;
-        for (int i = 3; i < 17; i++) obs[i] = 0.0f;
     } else {
-        for (uint i = 0u; i + 1u < 9u; ++i) obs[i] = cheetah.qpos[i + 1u];
-        for (uint i = 0u; i < 9u; ++i) obs[8u + i] = cheetah.qvel[i];
+        obs[0] = 0.0f; obs[1] = 0.0f; obs[2] = 1.0f;
+        for (uint i = 3u; i < OAK_ENV_OBS_MAX; i++) obs[i] = 0.0f;
     }
 }
 
 inline float env_step(uint envKind, uint seed, thread const float *ctrl,
-                      thread uint *words, thread HalfCheetahState &cheetah,
-                      thread uint &elapsed, thread uint &resets,
-                      uint episodeLen,
+                      thread uint *words,
                       thread float *obs, thread uint &done) {
     done = 0u;
-    if (envKind == OAK_ENV_CHEETAH) {
-        float reward;
-        if (episodeLen != 0u && elapsed >= episodeLen) {
-            halfCheetah_reset(cheetah, seed, elapsed, resets);
-            reward = 0.0f;
-            done = 0u;
-        } else {
-            float xBefore = cheetah.qpos[0];
-            for (int u = 0; u < 6; u++) cheetah.ctrl[u] = ctrl[u];
-            for (int k = 0; k < HC_FRAME_SKIP; k++) halfCheetah_step(cheetah);
-            float forwardVelocity = (cheetah.qpos[0] - xBefore) / (float(HC_FRAME_SKIP) * HC_TIMESTEP);
-            float ctrlCost = 0.0f;
-            for (int u = 0; u < 6; u++) ctrlCost += 0.1f * ctrl[u] * ctrl[u];
-            reward = forwardVelocity * 1.0f - ctrlCost;
-            elapsed++;
-            done = (episodeLen != 0u && elapsed >= episodeLen) ? 1u : 0u;
-        }
-        for (int i = 1; i < 9; i++) obs[i - 1] = cheetah.qpos[i];
-        for (int i = 0; i < 9; i++) obs[8 + i] = cheetah.qvel[i];
-        return reward;
-    }
     uint discreteAction = uint(ctrl[0]);
     if (envKind == OAK_ENV_FOURROOMS) return fourRooms_step(words, seed, discreteAction, obs);
     if (envKind == OAK_ENV_DEEPSEA) return deepSea_step(words, discreteAction, obs);
@@ -231,7 +324,7 @@ inline float env_step(uint envKind, uint seed, thread const float *ctrl,
     return pendulum_step(words, ctrl[0], obs);
 }
 
-inline void env_pose(uint envKind, thread const uint *words, thread const HalfCheetahState &cheetah,
+inline void env_pose(uint envKind, thread const uint *words,
                      thread const float *ctrl, thread float *pose) {
     if (envKind == OAK_ENV_FOURROOMS) {
         pose[0] = float(words[0]); pose[1] = float(words[1]);
@@ -304,6 +397,6 @@ inline void env_pose(uint envKind, thread const uint *words, thread const HalfCh
         pose[0] = theta; pose[1] = thetaDot; pose[2] = clamp(2.0f * ctrl[0], -2.0f, 2.0f);
         for (int i = 3; i < 9; i++) pose[i] = 0.0f;
     } else {
-        for (int i = 0; i < 9; i++) pose[i] = cheetah.qpos[i];
+        for (int i = 0; i < 9; i++) pose[i] = 0.0f;
     }
 }

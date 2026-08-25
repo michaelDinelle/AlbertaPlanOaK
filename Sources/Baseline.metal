@@ -1,14 +1,22 @@
 #pragma METAL fp math_mode(safe)
 
+inline uint baselineWord(uint seed, uint stream, uint stepIdx, uint i) {
+    uint4 r = philox4x32(uint2(seed, stream), uint4(stepIdx, i >> 2u, 0u, 0u));
+    uint w = i & 3u;
+    return w == 0u ? r.x : w == 1u ? r.y : w == 2u ? r.z : r.w;
+}
+
 kernel void baseline_fleet_init(device OakFleetLane *lanes [[buffer(6)]],
                                 device const uint *laneSeeds [[buffer(7)]],
                                 constant OakFleetEnvCfg &ecfg [[buffer(8)]],
                                 device const uint *laneEnvKinds [[buffer(9)]],
+                                device uint *envArena [[buffer(14)]],
+                                device const uint *envOff [[buffer(15)]],
+                                constant uint *mjModels [[buffer(16)]],
                                 uint gid [[thread_position_in_grid]]) {
     if (gid >= ecfg.laneCount) return;
-    HalfCheetahState halfCheetah;
-    uint envWords[10];
-    resetLane(&lanes[gid], laneEnvKinds[gid], laneSeeds[gid], envWords, halfCheetah);
+    resetLane(&lanes[gid], laneEnvState(envArena, envOff, gid), mjModels,
+              laneEnvKinds[gid], laneSeeds[gid]);
 }
 
 kernel void baseline_fleet_snapshot(device OakFleetLane *lanes [[buffer(6)]],
@@ -36,37 +44,48 @@ kernel void random_megastep(device OakFleetLane *lanes [[buffer(6)]],
                             device const int *recordSlot [[buffer(9)]],
                             device float *recordBuf [[buffer(10)]],
                             constant uint3 &dispatchSpan [[buffer(11)]],
-                            uint gid [[thread_position_in_grid]]) {
-    if (gid >= ecfg.laneCount) return;
-    device OakFleetLane *lane = &lanes[gid];
+                            device uint *envArena [[buffer(14)]],
+                            device const uint *envOff [[buffer(15)]],
+                            constant uint *mjModels [[buffer(16)]],
+                            device float *mjScratch [[buffer(17)]],
+                            device const uint *mjScratchOff [[buffer(18)]],
+                            uint gid [[thread_position_in_grid]],
+                            uint slane [[thread_index_in_simdgroup]]) {
+    uint laneIdx = gid / 32u;
+    if (laneIdx >= ecfg.laneCount) return;
+    device OakFleetLane *lane = &lanes[laneIdx];
+    device uint *envState = laneEnvState(envArena, envOff, laneIdx);
+    device float *pending = lanePendingAction(envState);
     uint envK = lane->envKind;
-    uint seed = laneSeeds[gid];
+    uint seed = laneSeeds[laneIdx];
     uint actionKind = OAK_ENV_SPECS[envK].actionKind;
     uint actionCount = OAK_ENV_SPECS[envK].actionCount;
     for (uint it = 0u; it < dispatchSpan.x; ++it) {
         uint stepIdx = lane->steps;
-        uint4 rw = philox4x32(uint2(seed, RNG_STREAM_RANDOM_ACT), uint4(stepIdx, 0u, 0u, 0u));
-        uint4 rw1 = philox4x32(uint2(seed, RNG_STREAM_RANDOM_ACT), uint4(stepIdx, 1u, 0u, 0u));
-        uint words[8] = { rw.x, rw.y, rw.z, rw.w, rw1.x, rw1.y, rw1.z, rw1.w };
-        if (actionKind == 1u) {
-            uint a = min(uint(u01(words[0]) * float(actionCount)), actionCount - 1u);
-            lane->pendingAction[0] = float(a);
-            for (int d = 1; d < 6; d++) lane->pendingAction[d] = 0.0f;
-        } else {
-            for (uint d = 0u; d < 6u; d++)
-                lane->pendingAction[d] = (d < actionCount) ? (2.0f * u01(words[d]) - 1.0f) : 0.0f;
+        if (slane == 0u) {
+            if (actionKind == 1u) {
+                uint w0 = baselineWord(seed, RNG_STREAM_RANDOM_ACT, stepIdx, 0u);
+                uint a = min(uint(u01(w0) * float(actionCount)), actionCount - 1u);
+                pending[0] = float(a);
+                for (uint d = 1u; d < actionCount; d++) pending[d] = 0.0f;
+            } else {
+                for (uint d = 0u; d < actionCount; d++)
+                    pending[d] = 2.0f * u01(baselineWord(seed, RNG_STREAM_RANDOM_ACT, stepIdx, d)) - 1.0f;
+            }
+            lane->steps = stepIdx + 1u;
         }
-        lane->steps = stepIdx + 1u;
-        float ctrl[6];
-        float obs[17];
-        uint envWords[10];
+        simdgroup_barrier(mem_flags::mem_device);
+        float ctrl[OAK_ENV_ACT_MAX];
         uint done = 0u;
-        HalfCheetahState halfCheetah;
-        float reward = advanceEnvironment(lane, envK, seed, ecfg, ctrl, obs,
-                                          envWords, halfCheetah, done);
-        uint stepNum = lane->steps;
-        accumulateReward(lane, reward, stepNum, ecfg);
-        recordPose(envK, envWords, halfCheetah, ctrl, stepNum, done, ecfg, recordSlot, recordBuf, gid);
+        float reward = advanceEnvironment(lane, envState, mjModels, mjScratch + mjScratchOff[laneIdx],
+                                          envK, seed, ecfg, ctrl, laneEnvObs(envState, envK),
+                                          done, slane, true);
+        if (slane == 0u) {
+            uint stepNum = lane->steps;
+            accumulateReward(lane, reward, stepNum, ecfg);
+            recordPose(envK, mjModels, envState, ctrl, stepNum, done, ecfg, recordSlot, recordBuf, laneIdx);
+        }
+        simdgroup_barrier(mem_flags::mem_device);
     }
 }
 
@@ -74,12 +93,9 @@ constant uint PPO_H = 64u;
 constant uint PPO_T = 128u;
 constant uint PPO_EPOCHS = 4u;
 constant uint PPO_MB = 32u;
-constant uint PPO_OMAX = 17u;
-constant uint PPO_AMAX = 6u;
-constant uint PPO_PARAM_STRIDE = 2768u;
-constant uint PPO_ROLL_STRIDE = 3744u;
-constant uint PPO_SCRATCH_STRIDE = 12064u;
-constant uint PPO_STATE_STRIDE = 48u;
+constant uint PPO_OMAX = OAK_ENV_OBS_MAX;
+constant uint PPO_AMAX = OAK_ENV_ACT_MAX;
+constant uint PPO_PARAM_STRIDE = OAK_DIAG_PPO_PARAMS;
 constant float PPO_LR = 3e-4f;
 constant float PPO_GAMMA = 0.99f;
 constant float PPO_LAMBDA = 0.95f;
@@ -94,33 +110,36 @@ constant float PPO_NORM_EPS = 1e-8f;
 constant float PPO_NORM_CLIP = 10.0f;
 
 constant uint PPO_ROLL_OBS = 0u;
-constant uint PPO_ROLL_ACT = 2193u;
-constant uint PPO_ROLL_LOGP = 2961u;
-constant uint PPO_ROLL_VAL = 3089u;
-constant uint PPO_ROLL_REW = 3217u;
-constant uint PPO_ROLL_DONE = 3345u;
-constant uint PPO_ROLL_ADV = 3473u;
-constant uint PPO_ROLL_RET = 3601u;
+constant uint PPO_ROLL_ACT = (PPO_T + 1u) * PPO_OMAX;
+constant uint PPO_ROLL_LOGP = PPO_ROLL_ACT + PPO_T * PPO_AMAX;
+constant uint PPO_ROLL_VAL = PPO_ROLL_LOGP + PPO_T;
+constant uint PPO_ROLL_REW = PPO_ROLL_VAL + PPO_T;
+constant uint PPO_ROLL_DONE = PPO_ROLL_REW + PPO_T;
+constant uint PPO_ROLL_ADV = PPO_ROLL_DONE + PPO_T;
+constant uint PPO_ROLL_RET = PPO_ROLL_ADV + PPO_T;
+constant uint PPO_ROLL_STRIDE = ((PPO_ROLL_RET + PPO_T) + 15u) & ~15u;
 
 constant uint PPO_SCR_OBSN = 0u;
-constant uint PPO_SCR_HA = 544u;
-constant uint PPO_SCR_HC = 2592u;
-constant uint PPO_SCR_DHA = 4640u;
-constant uint PPO_SCR_DHC = 6688u;
-constant uint PPO_SCR_DLG = 8736u;
-constant uint PPO_SCR_DLS = 8928u;
-constant uint PPO_SCR_DV = 9120u;
-constant uint PPO_SCR_IDX = 9152u;
-constant uint PPO_SCR_GRAD = 9280u;
+constant uint PPO_SCR_HA = PPO_MB * PPO_OMAX;
+constant uint PPO_SCR_HC = PPO_SCR_HA + PPO_MB * PPO_H;
+constant uint PPO_SCR_DHA = PPO_SCR_HC + PPO_MB * PPO_H;
+constant uint PPO_SCR_DHC = PPO_SCR_DHA + PPO_MB * PPO_H;
+constant uint PPO_SCR_DLG = PPO_SCR_DHC + PPO_MB * PPO_H;
+constant uint PPO_SCR_DLS = PPO_SCR_DLG + PPO_MB * PPO_AMAX;
+constant uint PPO_SCR_DV = PPO_SCR_DLS + PPO_MB * PPO_AMAX;
+constant uint PPO_SCR_IDX = PPO_SCR_DV + PPO_MB;
+constant uint PPO_SCR_GRAD = PPO_SCR_IDX + PPO_T;
+constant uint PPO_SCRATCH_STRIDE = (((PPO_SCR_GRAD + PPO_PARAM_STRIDE) + 15u) & ~15u) + 16u;
 
 constant uint PPO_ST_OBSMEAN = 0u;
-constant uint PPO_ST_OBSM2 = 17u;
-constant uint PPO_ST_OBSCOUNT = 34u;
-constant uint PPO_ST_RETTRACE = 35u;
-constant uint PPO_ST_RETMEAN = 36u;
-constant uint PPO_ST_RETM2 = 37u;
-constant uint PPO_ST_RETCOUNT = 38u;
-constant uint PPO_ST_ADAMT = 39u;
+constant uint PPO_ST_OBSM2 = PPO_OMAX;
+constant uint PPO_ST_OBSCOUNT = 2u * PPO_OMAX;
+constant uint PPO_ST_RETTRACE = 2u * PPO_OMAX + 1u;
+constant uint PPO_ST_RETMEAN = 2u * PPO_OMAX + 2u;
+constant uint PPO_ST_RETM2 = 2u * PPO_OMAX + 3u;
+constant uint PPO_ST_RETCOUNT = 2u * PPO_OMAX + 4u;
+constant uint PPO_ST_ADAMT = 2u * PPO_OMAX + 5u;
+constant uint PPO_STATE_STRIDE = ((2u * PPO_OMAX + 6u) + 15u) & ~15u;
 static_assert(OAK_DIAG_K == PPO_H && OAK_DIAG_PPO_PARAMS == PPO_PARAM_STRIDE,
               "PpoDiagRecord drifted from the PPO layout");
 
@@ -164,7 +183,7 @@ inline void ppoNormObs(device const float *S, uint O, thread const float *raw, t
     }
 }
 
-inline void ppoWelfordObs(device float *S, uint O, thread const float *raw) {
+inline void ppoWelfordObs(device float *S, uint O, device const float *raw) {
     float count = S[PPO_ST_OBSCOUNT] + 1.0f;
     S[PPO_ST_OBSCOUNT] = count;
     for (uint d = 0u; d < O; ++d) {
@@ -267,6 +286,9 @@ kernel void ppo_fleet_init(device float *params [[buffer(0)]],
                            constant OakFleetEnvCfg &ecfg [[buffer(8)]],
                            device const uint *laneEnvKinds [[buffer(9)]],
                            device float *rollout [[buffer(2)]],
+                           device uint *envArena [[buffer(14)]],
+                           device const uint *envOff [[buffer(15)]],
+                           constant uint *mjModels [[buffer(16)]],
                            uint gid [[thread_position_in_grid]],
                            uint tid [[thread_index_in_simdgroup]]) {
     uint laneIdx = gid / 32u;
@@ -289,14 +311,13 @@ kernel void ppo_fleet_init(device float *params [[buffer(0)]],
     device float *S = ppoState + laneIdx * PPO_STATE_STRIDE;
     for (uint i = tid; i < PPO_STATE_STRIDE; i += 32u) S[i] = 0.0f;
     if (tid == 0u) {
-        HalfCheetahState halfCheetah;
-        uint envWords[10];
-        resetLane(lane, laneEnvKinds[laneIdx], seed, envWords, halfCheetah);
-        float obs[17];
-        env_observe(lane->envKind, envWords, halfCheetah, obs);
+        device uint *envState = laneEnvState(envArena, envOff, laneIdx);
+        resetLane(lane, envState, mjModels, laneEnvKinds[laneIdx], seed);
+        device float *obsOut = laneEnvObs(envState, lane->envKind);
+        observeLane(lane->envKind, mjModels, envState, obsOut);
         device float *R = rollout + laneIdx * PPO_ROLL_STRIDE;
-        for (uint d = 0u; d < L.O; ++d) R[PPO_ROLL_OBS + d] = obs[d];
-        ppoWelfordObs(S, L.O, obs);
+        for (uint d = 0u; d < L.O; ++d) R[PPO_ROLL_OBS + d] = obsOut[d];
+        ppoWelfordObs(S, L.O, obsOut);
     }
 }
 
@@ -365,6 +386,11 @@ kernel void ppo_megastep(device float *params [[buffer(0)]],
                          device float *recordBuf [[buffer(10)]],
                          constant uint3 &dispatchSpan [[buffer(11)]],
                          device OakDiagAccum *diagAccum [[buffer(12)]],
+                         device uint *envArena [[buffer(14)]],
+                         device const uint *envOff [[buffer(15)]],
+                         constant uint *mjModels [[buffer(16)]],
+                         device float *mjScratch [[buffer(17)]],
+                         device const uint *mjScratchOff [[buffer(18)]],
                          uint gid [[thread_position_in_grid]],
                          uint tid [[thread_index_in_simdgroup]]) {
     uint laneIdx = gid / 32u;
@@ -382,11 +408,11 @@ kernel void ppo_megastep(device float *params [[buffer(0)]],
     for (uint it = 0u; it < dispatchSpan.x; ++it) {
         uint stepIdx = lane->steps;
         uint t = stepIdx % PPO_T;
-        float obsRaw[17];
+        float obsRaw[PPO_OMAX];
         for (uint d = 0u; d < L.O; ++d) obsRaw[d] = R[PPO_ROLL_OBS + t * PPO_OMAX + d];
-        float obsn[17];
+        float obsn[PPO_OMAX];
         ppoNormObs(S, L.O, obsRaw, obsn);
-        float logits[6];
+        float logits[PPO_AMAX];
         float value;
         ppoForwardWide(P, L, obsn, tid, logits, value);
         if ((OAK_MEGA_STAGES & 128u) != 0u)
@@ -394,28 +420,23 @@ kernel void ppo_megastep(device float *params [[buffer(0)]],
         if (tid == 0u) {
             float logp;
             if (L.box) {
-                uint4 r0 = philox4x32(uint2(seed, RNG_STREAM_PPO_ACT), uint4(stepIdx, 0u, 0u, 0u));
-                uint4 r1 = philox4x32(uint2(seed, RNG_STREAM_PPO_ACT), uint4(stepIdx, 1u, 0u, 0u));
-                uint words[8] = { r0.x, r0.y, r0.z, r0.w, r1.x, r1.y, r1.z, r1.w };
                 logp = 0.0f;
                 for (uint d = 0u; d < L.A; ++d) {
-                    float u1 = u01open(words[d]);
-                    float u2 = u01(words[(d + L.A) & 7u]);
+                    float u1 = u01open(baselineWord(seed, RNG_STREAM_PPO_ACT, stepIdx, 2u * d));
+                    float u2 = u01(baselineWord(seed, RNG_STREAM_PPO_ACT, stepIdx, 2u * d + 1u));
                     float z = sqrt(-2.0f * log(u1)) * cos(2.0f * M_PI_F * u2);
                     float ls = P[L.logstd + d];
                     float sample = logits[d] + exp(ls) * z;
                     R[PPO_ROLL_ACT + t * PPO_AMAX + d] = sample;
-                    lane->pendingAction[d] = clamp(sample, -1.0f, 1.0f);
+                    lanePendingAction(laneEnvState(envArena, envOff, laneIdx))[d] = clamp(sample, -1.0f, 1.0f);
                     logp += -0.5f * z * z - ls - 0.9189385332f;
                 }
-                for (uint d = L.A; d < 6u; ++d) lane->pendingAction[d] = 0.0f;
             } else {
                 float mx = logits[0];
                 for (uint a = 1u; a < L.A; ++a) mx = max(mx, logits[a]);
                 float denom = 0.0f;
                 for (uint a = 0u; a < L.A; ++a) denom += exp(logits[a] - mx);
-                uint4 r0 = philox4x32(uint2(seed, RNG_STREAM_PPO_ACT), uint4(stepIdx, 0u, 0u, 0u));
-                float u = u01(r0.x);
+                float u = u01(baselineWord(seed, RNG_STREAM_PPO_ACT, stepIdx, 0u));
                 float cdf = 0.0f;
                 uint act = L.A - 1u;
                 for (uint a = 0u; a < L.A; ++a) {
@@ -424,38 +445,44 @@ kernel void ppo_megastep(device float *params [[buffer(0)]],
                 }
                 logp = logits[act] - mx - log(denom);
                 R[PPO_ROLL_ACT + t * PPO_AMAX] = float(act);
-                lane->pendingAction[0] = float(act);
-                for (int d = 1; d < 6; d++) lane->pendingAction[d] = 0.0f;
+                device float *pending = lanePendingAction(laneEnvState(envArena, envOff, laneIdx));
+                pending[0] = float(act);
+                for (uint d = 1u; d < L.A; d++) pending[d] = 0.0f;
             }
             R[PPO_ROLL_LOGP + t] = logp;
             R[PPO_ROLL_VAL + t] = value;
             lane->steps = stepIdx + 1u;
-            float ctrl[6];
-            float obs[17];
-            uint envWords[10];
+        }
+        laneFence();
+        {
+            float ctrl[OAK_ENV_ACT_MAX];
             uint done = 0u;
-            HalfCheetahState halfCheetah;
-            float reward = advanceEnvironment(lane, envK, seed, ecfg, ctrl, obs,
-                                              envWords, halfCheetah, done);
-            uint stepNum = lane->steps;
-            accumulateReward(lane, reward, stepNum, ecfg);
-            recordPose(envK, envWords, halfCheetah, ctrl, stepNum, done, ecfg,
-                       recordSlot, recordBuf, laneIdx);
-            float safeReward = isfinite(reward) ? reward : 0.0f;
-            R[PPO_ROLL_REW + t] = ppoScaleReward(S, safeReward, done);
-            R[PPO_ROLL_DONE + t] = float(done);
-            for (uint d = 0u; d < L.O; ++d) R[PPO_ROLL_OBS + (t + 1u) * PPO_OMAX + d] = obs[d];
-            ppoWelfordObs(S, L.O, obs);
+            device uint *envState = laneEnvState(envArena, envOff, laneIdx);
+            device float *obsOut = laneEnvObs(envState, envK);
+            float reward = advanceEnvironment(lane, envState, mjModels,
+                                              mjScratch + mjScratchOff[laneIdx],
+                                              envK, seed, ecfg, ctrl, obsOut, done, tid, true);
+            if (tid == 0u) {
+                uint stepNum = lane->steps;
+                accumulateReward(lane, reward, stepNum, ecfg);
+                recordPose(envK, mjModels, envState, ctrl, stepNum, done, ecfg,
+                           recordSlot, recordBuf, laneIdx);
+                float safeReward = isfinite(reward) ? reward : 0.0f;
+                R[PPO_ROLL_REW + t] = ppoScaleReward(S, safeReward, done);
+                R[PPO_ROLL_DONE + t] = float(done);
+                for (uint d = 0u; d < L.O; ++d) R[PPO_ROLL_OBS + (t + 1u) * PPO_OMAX + d] = obsOut[d];
+                ppoWelfordObs(S, L.O, obsOut);
+            }
         }
         laneFence();
         if ((lane->steps % PPO_T) != 0u) continue;
         uint updateIdx = lane->steps / PPO_T;
         {
-            float bootObsRaw[17];
+            float bootObsRaw[PPO_OMAX];
             for (uint d = 0u; d < L.O; ++d) bootObsRaw[d] = R[PPO_ROLL_OBS + PPO_T * PPO_OMAX + d];
-            float bootObsn[17];
+            float bootObsn[PPO_OMAX];
             ppoNormObs(S, L.O, bootObsRaw, bootObsn);
-            float bootLogits[6];
+            float bootLogits[PPO_AMAX];
             float bootV;
             ppoForwardWide(P, L, bootObsn, tid, bootLogits, bootV);
             if (tid == 0u) {
@@ -500,20 +527,20 @@ kernel void ppo_megastep(device float *params [[buffer(0)]],
                 float dev = advS - mbMean;
                 float mbStd = sqrt(simd_sum(dev * dev) / float(PPO_MB));
                 float an = dev / (mbStd + PPO_NORM_EPS);
-                float sObsRaw[17];
+                float sObsRaw[PPO_OMAX];
                 for (uint d = 0u; d < L.O; ++d) sObsRaw[d] = R[PPO_ROLL_OBS + s * PPO_OMAX + d];
-                float sObsn[17];
+                float sObsn[PPO_OMAX];
                 ppoNormObs(S, L.O, sObsRaw, sObsn);
                 device float *obsnRow = W + PPO_SCR_OBSN + tid * PPO_OMAX;
                 for (uint d = 0u; d < L.O; ++d) obsnRow[d] = sObsn[d];
                 device float *haRow = W + PPO_SCR_HA + tid * PPO_H;
                 device float *hcRow = W + PPO_SCR_HC + tid * PPO_H;
-                float sLogits[6];
+                float sLogits[PPO_AMAX];
                 float v = ppoForwardSample(P, L, sObsn, haRow, hcRow, sLogits);
                 float oldLogp = R[PPO_ROLL_LOGP + s];
                 float newLogp;
-                float dlg[6];
-                float dls[6];
+                float dlg[PPO_AMAX];
+                float dls[PPO_AMAX];
                 if (L.box) {
                     newLogp = 0.0f;
                     for (uint d = 0u; d < L.A; ++d) {

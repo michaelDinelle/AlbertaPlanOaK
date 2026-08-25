@@ -35,7 +35,7 @@ struct LaneSnapshot {
   var rewardSum, rho: Float
   var deathStep, deathDetector: UInt32
 }
-let fleetLaneStride = 240
+let fleetLaneStride = 44
 
 enum OakConst: Int {
   case ablateFeatureConstruction = 0
@@ -86,32 +86,27 @@ enum OakBuf: Int {
 }
 
 enum Diag {
-  static let rank = 480
   static let k = 64
   static let gram = k * k
-  static let ppoParams = 2768
   static let accumGram = 0
   static let accumSumAbsHiddenActor = accumGram + gram
   static let accumSumAbsHiddenCritic = accumSumAbsHiddenActor + k
   static let accumFloats = accumSumAbsHiddenCritic + k
-  static let oakFeatureAge = 0
-  static let oakFeatureUtility = oakFeatureAge + rank
-  static let oakValueAlpha = oakFeatureUtility + rank
-  static let oakOptionValueAlpha = oakValueAlpha + rank
-  static let oakModelAlpha = oakOptionValueAlpha + rank
-  static let oakFeatureBirths = oakModelAlpha + rank
-  static let oakWeightAbsMean = oakFeatureBirths + 1
-  static let oakWeightAbsMeanValue = oakWeightAbsMean + 1
-  static let oakGram = oakWeightAbsMeanValue + 1
-  static let oakFloats = oakGram + gram
+  static func oakFloats(_ rank: Int) -> Int { 5 * rank + 3 + gram }
+  static func ppoParams(obsMax: Int, actMax: Int) -> Int {
+    (2 * obsMax * k + 2 * k + k * actMax + 2 * actMax + k + 1 + 3) & ~3
+  }
   static let ppoSumAbsHiddenActor = 0
   static let ppoSumAbsHiddenCritic = ppoSumAbsHiddenActor + k
   static let ppoWeightAbsMean = ppoSumAbsHiddenCritic + k
   static let ppoAdamT = ppoWeightAbsMean + 1
   static let ppoAdamV = ppoAdamT + 1
-  static let ppoGram = ppoAdamV + ppoParams
-  static let ppoFloats = ppoGram + gram
-  static let outFloats = ppoFloats
+  static func ppoGram(_ params: Int) -> Int { ppoAdamV + params }
+  static func ppoFloats(_ params: Int) -> Int { ppoAdamV + params + gram }
+  static func oakRank(_ spec: EnvSpec) -> Int {
+    let anchors = max(32, (spec.naturalO + spec.actionParams + 2 + 31) / 32 * 32)
+    return anchors * 15
+  }
 }
 
 struct AblationSpec {
@@ -228,8 +223,8 @@ final class Shared<T> {
   }
 }
 struct EnvSpec {
-  static let poseLen = 9
-  static let stride = 7 + poseLen
+  static let poseLen = 24
+  static let stride = 11 + poseLen
   static let slotNames = [
     "none", "x", "y", "gx", "gy", "kx", "ky", "carry", "gates", "tokens", "cue", "heading",
     "effort",
@@ -238,9 +233,13 @@ struct EnvSpec {
   let naturalO: Int
   let actionKind: Int
   let actionCount: Int
+  let actionParams: Int
   let gridW: Int
   let gridH: Int
   let controlHz: Int
+  let stepFlops: Double
+  let envStateWords: Int
+  let mjIndex: Int
   let slots: [Int]
   static func slotName(_ code: Int) -> String {
     if code >= 16 { return "q\(code - 16)" }
@@ -314,7 +313,7 @@ final class Engine {
   static func runEnvTableProbe(_ dev: MTLDevice, _ lib: MTLLibrary) throws -> [EnvSpec] {
     let fn = lib.makeFunction(name: "oak_env_table_probe")!
     let pipe = try dev.makeComputePipelineState(function: fn)
-    let words = 1 + Main.envIdsByKind.count * EnvSpec.stride
+    let words = 5 + Main.envIdsByKind.count * EnvSpec.stride
     guard let outB = dev.makeBuffer(length: words * 4, options: [.storageModeShared]),
       let pq = dev.makeCommandQueue(), let cb = pq.makeCommandBuffer(),
       let enc = cb.makeComputeCommandEncoder()
@@ -330,14 +329,26 @@ final class Engine {
     guard tbl[0] == UInt32(Main.envIdsByKind.count) else {
       throw err("Env table count drift: kernel \(tbl[0]) vs host \(Main.envIdsByKind.count).")
     }
-    return (0..<Main.envIdsByKind.count).map { i in
-      let row = 1 + i * EnvSpec.stride
+    let specs = (0..<Main.envIdsByKind.count).map { i in
+      let row = 5 + i * EnvSpec.stride
       return EnvSpec(
         nameHash: tbl[row], naturalO: Int(tbl[row + 1]), actionKind: Int(tbl[row + 2]),
-        actionCount: Int(tbl[row + 3]), gridW: Int(tbl[row + 4]), gridH: Int(tbl[row + 5]),
-        controlHz: Int(tbl[row + 6]),
-        slots: (0..<EnvSpec.poseLen).map { Int(tbl[row + 7 + $0]) })
+        actionCount: Int(tbl[row + 3]), actionParams: Int(tbl[row + 4]),
+        gridW: Int(tbl[row + 5]), gridH: Int(tbl[row + 6]),
+        controlHz: Int(tbl[row + 7]), stepFlops: Double(tbl[row + 8]),
+        envStateWords: Int(tbl[row + 9]),
+        mjIndex: tbl[row + 10] == 0xffff_ffff ? -1 : Int(tbl[row + 10]),
+        slots: (0..<EnvSpec.poseLen).map { Int(tbl[row + 11 + $0]) })
     }
+    guard tbl[1] == UInt32(specs.map(\.naturalO).max()!),
+      tbl[2] == UInt32(specs.map(\.actionCount).max()!),
+      tbl[4] == UInt32(specs.filter { $0.mjIndex <= 0 }.map(\.naturalO).max()!)
+    else {
+      throw err(
+        "Env maxima drift: kernel obs/act max \(tbl[1])/\(tbl[2]) vs table "
+          + "\(specs.map(\.naturalO).max()!)/\(specs.map(\.actionCount).max()!).")
+    }
+    return specs
   }
   init(laneEnvs: [String], batch b: Int, dev: MTLDevice) throws {
     precondition(b >= 1 && laneEnvs.count == b, "Engine batch/laneEnvs mismatch")
@@ -362,16 +373,15 @@ final class Engine {
     var probeCache: [UInt32: ShapeProbe] = [:]
     var pBase = 0, sBase = 0, uBase = 0
     var laneIdx = [Int](repeating: 0, count: b)
-    let fleetD = 2 * table.map(\.actionCount).max()!
     for r in runs {
       let spec = table[Int(r.kind)]
       let naturalO = spec.naturalO
-      let dk = fleetD
+      let dk = spec.actionParams
       let sp = try probeCache[r.kind] ?? Engine.runShapeProbe(
         dev, lib, obsDim: naturalO, dPolicy: dk)
       probeCache[r.kind] = sp
       let anchors = Int(sp.anchorCount)
-      precondition(Int(sp.optionCount) == anchors, "K equals core")
+      precondition(anchors % Int(sp.optionCount) == 0, "anchors must tile the core")
       precondition(Int(sp.rank) == anchors + anchors * 14, "gate-bank identity broken")
       precondition(anchors >= naturalO + dk + 2, "core slots cannot hold obs+action+reward+bias")
       precondition(Int(sp.stateStride) % 4 == 0, "stateStride must stay 16B-aligned")
@@ -491,7 +501,9 @@ final class Engine {
       constants.setConstantValue(&v, type: .float, index: fc.rawValue)
     }
   }
-  func stateHashes(_ lane: Int, laneBytes: UnsafeRawPointer) -> [String: String] {
+  func stateHashes(_ lane: Int, laneBytes: UnsafeRawPointer, laneByteCount: Int)
+    -> [String: String]
+  {
     func hex(_ base: UnsafeRawPointer, _ bytes: Int) -> String {
       sha256Hex(UnsafeRawBufferPointer(start: base, count: bytes))
     }
@@ -512,7 +524,7 @@ final class Engine {
       "scalars": hex(scalars + lane, MemoryLayout<KernelScalars>.stride),
       "stateReward": hexSlices(statePtr(lane), MemoryLayout<Float>.stride, slices.state),
       "uintsReward": hexSlices(uintPtr(lane), MemoryLayout<UInt32>.stride, slices.uints),
-      "lane": hex(laneBytes, fleetLaneStride),
+      "lane": hex(laneBytes, laneByteCount),
     ]
   }
 }
@@ -585,6 +597,67 @@ struct RecordCodec {
       grid([0, 1, 2, 3, 4, 5]),
       grid([0, 1, 2, 3]),
       grid([0, 2]),
+      RecordCodec(category: "mujoco", fields: [
+        RecordField(0, 1e-4), RecordField(1, 1e-4),
+      ]),
+      RecordCodec(category: "mujoco", fields: [
+        RecordField(0, 1e-4), RecordField(1, 1e-4, true), RecordField(2, 1e-4, true),
+      ]),
+      RecordCodec(category: "mujoco", fields: [
+        RecordField(0, 1e-4, true), RecordField(1, 1e-4, true),
+        RecordField(2, 1e-5), RecordField(3, 1e-5),
+      ]),
+      RecordCodec(category: "mujoco", fields: [
+        RecordField(0, 0.01, false, anchor: true), RecordField(1, 0.01, false, anchor: true),
+        RecordField(2, 1e-4, true), RecordField(3, 1e-4, true), RecordField(4, 1e-4, true),
+      ]),
+      RecordCodec(category: "mujoco", fields: [
+        RecordField(0, 0.01, false, anchor: true), RecordField(1, 1e-4),
+        RecordField(2, 1e-4, true), RecordField(3, 1e-4, true), RecordField(4, 1e-4, true),
+        RecordField(5, 1e-4, true),
+      ]),
+      RecordCodec(category: "mujoco", fields: [
+        RecordField(0, 0.01, false, anchor: true), RecordField(1, 1e-4),
+        RecordField(2, 1e-4, true), RecordField(3, 1e-4, true), RecordField(4, 1e-4, true),
+        RecordField(5, 1e-4, true), RecordField(6, 1e-4, true), RecordField(7, 1e-4, true),
+        RecordField(8, 1e-4, true),
+      ]),
+      RecordCodec(category: "mujoco", fields: [
+        RecordField(0, 1e-4, true), RecordField(1, 1e-4, true), RecordField(2, 1e-4, true),
+        RecordField(3, 1e-4, true), RecordField(4, 1e-4, true), RecordField(5, 1e-4, true),
+        RecordField(6, 1e-4, true), RecordField(7, 1e-5), RecordField(8, 1e-5),
+        RecordField(9, 1e-5), RecordField(10, 1e-5),
+      ]),
+      RecordCodec(category: "mujoco", fields: [
+        RecordField(0, 0.01, false, anchor: true), RecordField(1, 0.01, false, anchor: true),
+        RecordField(2, 1e-4), RecordField(3, 1e-5), RecordField(4, 1e-5),
+        RecordField(5, 1e-5), RecordField(6, 1e-5), RecordField(7, 1e-4, true),
+        RecordField(8, 1e-4, true), RecordField(9, 1e-4, true), RecordField(10, 1e-4, true),
+        RecordField(11, 1e-4, true), RecordField(12, 1e-4, true), RecordField(13, 1e-4, true),
+        RecordField(14, 1e-4, true),
+      ]),
+      RecordCodec(category: "mujoco", fields: [
+        RecordField(0, 0.01, false, anchor: true), RecordField(1, 0.01, false, anchor: true),
+        RecordField(2, 1e-4), RecordField(3, 1e-5), RecordField(4, 1e-5),
+        RecordField(5, 1e-5), RecordField(6, 1e-5), RecordField(7, 1e-4, true),
+        RecordField(8, 1e-4, true), RecordField(9, 1e-4, true), RecordField(10, 1e-4, true),
+        RecordField(11, 1e-4, true), RecordField(12, 1e-4, true), RecordField(13, 1e-4, true),
+        RecordField(14, 1e-4, true), RecordField(15, 1e-4, true), RecordField(16, 1e-4, true),
+        RecordField(17, 1e-4, true), RecordField(18, 1e-4, true), RecordField(19, 1e-4, true),
+        RecordField(20, 1e-4, true), RecordField(21, 1e-4, true), RecordField(22, 1e-4, true),
+        RecordField(23, 1e-4, true),
+      ]),
+      RecordCodec(category: "mujoco", fields: [
+        RecordField(0, 0.01, false, anchor: true), RecordField(1, 0.01, false, anchor: true),
+        RecordField(2, 1e-4), RecordField(3, 1e-5), RecordField(4, 1e-5),
+        RecordField(5, 1e-5), RecordField(6, 1e-5), RecordField(7, 1e-4, true),
+        RecordField(8, 1e-4, true), RecordField(9, 1e-4, true), RecordField(10, 1e-4, true),
+        RecordField(11, 1e-4, true), RecordField(12, 1e-4, true), RecordField(13, 1e-4, true),
+        RecordField(14, 1e-4, true), RecordField(15, 1e-4, true), RecordField(16, 1e-4, true),
+        RecordField(17, 1e-4, true), RecordField(18, 1e-4, true), RecordField(19, 1e-4, true),
+        RecordField(20, 1e-4, true), RecordField(21, 1e-4, true), RecordField(22, 1e-4, true),
+        RecordField(23, 1e-4, true),
+      ]),
     ]
   }()
   static func table(_ envKind: UInt32) throws -> RecordCodec {
@@ -662,11 +735,7 @@ final class RecordWriter: @unchecked Sendable {
     buf.append(contentsOf: repeatElement(0, count: (live + 7) / 8))
     for i in 0..<live where cell(i, 0) != 0 { buf[i >> 3] |= UInt8(1 << (i & 7)) }
 
-    var bitsA: UInt32 = 0
-    var bitsB: UInt32 = 0
-    var bufA = buf
-    var bufB = buf
-    var column = 0
+    var plans: [(varint: ColumnPlan, full: ColumnPlan, seed: UInt64?)] = []
     for f in fields {
       var q = [Int64](repeating: 0, count: live)
       var seed: UInt64? = nil
@@ -684,33 +753,37 @@ final class RecordWriter: @unchecked Sendable {
         for i in 0..<live { q[i] = quantized(i, f)! }
       }
       let (varint, full) = Self.encodeColumn(q)
-      bitsA |= (varint.pred & 1) << UInt32(column)
-      bitsA |= (varint.pred >> 1) << UInt32(10 + column)
-      bitsB |= (full.pred & 1) << UInt32(column)
-      bitsB |= (full.pred >> 1) << UInt32(10 + column)
-      bitsB |= full.coder << UInt32(20 + column)
-      if let seed {
-        withUnsafeBytes(of: seed.littleEndian) { bufA.append(contentsOf: $0) }
-        withUnsafeBytes(of: seed.littleEndian) { bufB.append(contentsOf: $0) }
-      }
-      bufA.append(contentsOf: varint.bytes)
-      bufB.append(contentsOf: full.bytes)
-      column += 1
+      plans.append((varint, full, seed))
     }
-    let payloadA = Data(bufA)
-    let payloadB = Data(bufB)
+    func assemble(_ pick: (ColumnPlan, ColumnPlan, UInt64?) -> ColumnPlan) -> [UInt8] {
+      var out = buf
+      for plan in plans {
+        let chosen = pick(plan.varint, plan.full, plan.seed)
+        out.append(UInt8(chosen.pred | (chosen.coder << 2)))
+      }
+      for plan in plans {
+        let chosen = pick(plan.varint, plan.full, plan.seed)
+        if let seed = plan.seed {
+          withUnsafeBytes(of: seed.littleEndian) { out.append(contentsOf: $0) }
+        }
+        out.append(contentsOf: chosen.bytes)
+      }
+      return out
+    }
+    let payloadA = Data(assemble { varint, _, _ in varint })
+    let payloadB = Data(assemble { _, full, _ in full })
     let compA = try (payloadA as NSData).compressed(using: .zlib) as Data
     let compB = try (payloadB as NSData).compressed(using: .zlib) as Data
-    let optionA: (payload: Data, stored: Data, bits: UInt32) = (
+    let optionA: (payload: Data, stored: Data, flags: UInt32) = (
       payloadA, compA.count < payloadA.count ? compA : payloadA,
-      bitsA | (compA.count < payloadA.count ? 1 << 31 : 0))
-    let optionB: (payload: Data, stored: Data, bits: UInt32) = (
+      compA.count < payloadA.count ? 1 << 31 : 0)
+    let optionB: (payload: Data, stored: Data, flags: UInt32) = (
       payloadB, compB.count < payloadB.count ? compB : payloadB,
-      bitsB | (compB.count < payloadB.count ? 1 << 31 : 0))
+      compB.count < payloadB.count ? 1 << 31 : 0)
     let pick = optionB.stored.count < optionA.stored.count ? optionB : optionA
     var out = Data(capacity: 20 + pick.stored.count)
     for v: UInt32 in [
-      Self.chunkMagic, UInt32(live), UInt32(pick.payload.count), UInt32(pick.stored.count), pick.bits,
+      Self.chunkMagic, UInt32(live), UInt32(pick.payload.count), UInt32(pick.stored.count), pick.flags,
     ] { out.appendLE(v) }
     out.append(pick.stored)
     return out
@@ -991,13 +1064,21 @@ final class OakDiagHost: @unchecked Sendable {
   let prevAge: UnsafeMutablePointer<UInt32>
   let prevBirths: UnsafeMutablePointer<Float>
   let hasPrev: UnsafeMutablePointer<Bool>
-  init(_ laneCount: Int) {
-    prevAge = .allocate(capacity: laneCount * Diag.rank)
-    prevAge.initialize(repeating: 0, count: laneCount * Diag.rank)
-    prevBirths = .allocate(capacity: laneCount)
-    prevBirths.initialize(repeating: 0, count: laneCount)
-    hasPrev = .allocate(capacity: laneCount)
-    hasPrev.initialize(repeating: false, count: laneCount)
+  let ageOffsets: [Int]
+  init(laneRanks: [Int]) {
+    var offsets: [Int] = []
+    var cursor = 0
+    for rank in laneRanks {
+      offsets.append(cursor)
+      cursor += rank
+    }
+    ageOffsets = offsets
+    prevAge = .allocate(capacity: max(cursor, 1))
+    prevAge.initialize(repeating: 0, count: max(cursor, 1))
+    prevBirths = .allocate(capacity: laneRanks.count)
+    prevBirths.initialize(repeating: 0, count: laneRanks.count)
+    hasPrev = .allocate(capacity: laneRanks.count)
+    hasPrev.initialize(repeating: false, count: laneRanks.count)
   }
 }
 
@@ -1094,15 +1175,13 @@ final class TapeWriter {
     "Acrobot-cont-v0", "MountainCar-cont-v0", "CartPole-cont-v0", "Pendulum-cont-v0",
     "Chain-cont-v0", "LargeDeepSea-cont-v0", "MultiKeyCorridor-cont-v0", "MemoryChain-cont-v0",
     "ProceduralMaze-cont-v0", "HighDimMaze-cont-v0", "POMaze-cont-v0", "DelayedChain-cont-v0",
-  ]
-  static let envStepFlops: [Double] = [
-    150_000, 60, 30, 70, 400, 40, 60, 60,
-    25, 30, 80, 40, 90, 70, 70, 30,
+    "InvertedPendulum-v5", "InvertedDoublePendulum-v5", "Reacher-v5", "Swimmer-v5",
+    "Hopper-v5", "Walker2d-v5", "Pusher-v5", "Ant-v5", "Humanoid-v5", "HumanoidStandup-v5",
   ]
   static func policyFlopsPerStep(
     _ policy: String, kind: Int, spec: EnvSpec, off: ShapeProbe?, d: Int
   ) -> Double {
-    let env = envStepFlops[kind]
+    let env = spec.stepFlops
     let obs = Double(spec.naturalO)
     let actions = Double(spec.actionCount)
     switch policy {
@@ -1170,8 +1249,19 @@ final class TapeWriter {
     let snapBuf: MTLBuffer
     let diagAccumBuf: MTLBuffer
     let diagOutBuf: MTLBuffer
+    let envStateBuf: MTLBuffer
+    let envOffBuf: MTLBuffer
+    let envOffsets: [Int]
+    let mjModelsBuf: MTLBuffer
+    let mjScratchBuf: MTLBuffer
+    let mjScratchOffBuf: MTLBuffer
+    let mjScratchOffsets: [Int]
+    let mjScratchDeclared: [Int]
     let ecfg: FleetEnvCfg
-    init(_ dev: MTLDevice, seeds: [Int], laneEnvKinds: [UInt32], episodeLen: Int) throws {
+    init(
+      _ dev: MTLDevice, seeds: [Int], laneEnvKinds: [UInt32], envTable: [EnvSpec],
+      episodeLen: Int
+    ) throws {
       func makeBuf(_ len: Int) throws -> MTLBuffer {
         guard let b = dev.makeBuffer(
           length: max(len, 16), options: [.storageModeShared])
@@ -1205,9 +1295,78 @@ final class TapeWriter {
       precondition(snapStride == 36, "LaneSnapshot layout drifted from OakLaneSnapshot")
       snapBuf = try makeBuf(2 * B * snapStride)
       diagAccumBuf = try makeBuf(B * Diag.accumFloats * 4)
-      diagOutBuf = try makeBuf(2 * B * Diag.outFloats * 4)
+      var diagFloats = 0
+      let ppoP = Diag.ppoParams(
+        obsMax: envTable.map(\.naturalO).max()!, actMax: envTable.map(\.actionCount).max()!)
+      for kind in laneEnvKinds {
+        diagFloats += max(Diag.oakFloats(Diag.oakRank(envTable[Int(kind)])), Diag.ppoFloats(ppoP))
+      }
+      diagOutBuf = try makeBuf(2 * diagFloats * 4)
       memset(diagAccumBuf.contents(), 0, diagAccumBuf.length)
       memset(diagOutBuf.contents(), 0, diagOutBuf.length)
+      var offsets: [Int] = []
+      var envCursor = 0
+      for kind in laneEnvKinds {
+        let spec = envTable[Int(kind)]
+        offsets.append(envCursor)
+        envCursor += (spec.actionCount + spec.envStateWords + spec.naturalO + 3) / 4 * 4
+      }
+      envOffsets = offsets
+      envStateBuf = try makeBuf(envCursor * 4)
+      memset(envStateBuf.contents(), 0, envStateBuf.length)
+      envOffBuf = try makeBuf(B * 4)
+      do {
+        let op = envOffBuf.contents().bindMemory(to: UInt32.self, capacity: B)
+        for i in 0..<B { op[i] = UInt32(offsets[i]) }
+      }
+      let blob = try MjBlob.load()
+      func fnv1a(_ s: String) -> UInt32 {
+        var h: UInt32 = 0x811c_9dc5
+        for b in Array(s.utf8) { h = (h ^ UInt32(b)) &* 16_777_619 }
+        return h
+      }
+      var mjEntryByKind: [Int: MjEntry] = [:]
+      for (kind, spec) in envTable.enumerated() where spec.mjIndex >= 0 {
+        let envId = Main.envIdsByKind[kind]
+        guard spec.mjIndex < blob.entries.count,
+          blob.entries[spec.mjIndex].nameHash == fnv1a(envId)
+        else { throw err("\(envId): mjIndex \(spec.mjIndex) does not match mjmodels.bin.") }
+        let entry = blob.entries[spec.mjIndex]
+        guard entry.stateWords == spec.envStateWords else {
+          throw err(
+            "\(envId): blob state words \(entry.stateWords) != spec envStateWords \(spec.envStateWords)."
+          )
+        }
+        mjEntryByKind[kind] = entry
+      }
+      let modelsBuf = try makeBuf(blob.data.count)
+      blob.data.withUnsafeBytes { raw in
+        modelsBuf.contents().copyMemory(from: raw.baseAddress!, byteCount: raw.count)
+      }
+      mjModelsBuf = modelsBuf
+      var scratchOffsets = [UInt32](repeating: 0, count: B)
+      var scratchCursor = 0
+      let scratchPad = ProcessInfo.processInfo.environment["OAK_SCRATCH_PAD"].flatMap(Int.init) ?? 0
+      var declared = [Int](repeating: 0, count: B)
+      for i in 0..<B {
+        if let entry = mjEntryByKind[Int(laneEnvKinds[i])] {
+          scratchOffsets[i] = UInt32(scratchCursor)
+          declared[i] = entry.scratchWords
+          scratchCursor += entry.scratchWords + scratchPad
+        }
+      }
+      mjScratchOffsets = scratchOffsets.map(Int.init)
+      mjScratchDeclared = declared
+      mjScratchBuf = try makeBuf(max(scratchCursor, 1) * 4)
+      if scratchPad > 0 {
+        let sp = mjScratchBuf.contents().bindMemory(to: UInt32.self, capacity: scratchCursor)
+        for i in 0..<scratchCursor { sp[i] = 0xCAFE_BABE }
+      }
+      mjScratchOffBuf = try makeBuf(B * 4)
+      do {
+        let sp = mjScratchOffBuf.contents().bindMemory(to: UInt32.self, capacity: B)
+        for i in 0..<B { sp[i] = scratchOffsets[i] }
+      }
       ecfg = FleetEnvCfg(
         laneCount: UInt32(B), episodeLen: UInt32(episodeLen),
         recordCapacity: UInt32(recordCapacity), invObsFloor: 1 / Float(64))
@@ -1249,30 +1408,54 @@ final class TapeWriter {
     }
     var envRuns: [(kindIdx: Int, kind: UInt32, tgStart: Int, tgCount: Int)] = []
     var variantPipes: [MTLComputePipelineState] = []
-    guard engine.kinds.allSatisfy({ $0.firstLane % megaG == 0 }) else {
-      throw err(
-        "Env schedule block starts must be multiples of megaG=\(megaG) for variant dispatch.")
-    }
+    var kindMegaG: [Int] = []
+    let tgOptionCount = Int(engine.kinds[0].off.optionCount)
     for (ki, kd) in engine.kinds.enumerated() {
+      var gk = megaG
+      while gk > 1, gk * Int(kd.off.anchorCount) > core * core { gk /= 2 }
+      guard kd.firstLane % gk == 0 else {
+        throw err(
+          "Env schedule block start \(kd.firstLane) must be a multiple of megaG=\(gk) for variant dispatch."
+        )
+      }
       let c = baseConstants()
       Engine.applyShapeConstants(c, kd.cfg)
       var k32 = kd.kind
       c.setConstantValue(&k32, type: .uint, index: OakConst.specEnvKind.rawValue)
-      variantPipes.append(try dev.makeComputePipelineState(
-        function: lib.makeFunction(name: "oak_megastep", constantValues: c)))
-      envRuns.append((ki, kd.kind, kd.firstLane / megaG, (kd.count + megaG - 1) / megaG))
+      var g32 = UInt32(gk)
+      c.setConstantValue(&g32, type: .uint, index: OakConst.megaG.rawValue)
+      var spl32 = UInt32(min(
+        32 / gk, e["OAK_SPL_CAP"].flatMap(Int.init) ?? max(1, Int(kd.off.anchorCount) / 32)))
+      c.setConstantValue(&spl32, type: .uint, index: 26)
+      let desc = MTLComputePipelineDescriptor()
+      desc.computeFunction = try lib.makeFunction(name: "oak_megastep", constantValues: c)
+      desc.label = "oak_megastep \(Main.envIdsByKind[Int(kd.kind)])"
+      let pipeState = try dev.makeComputePipelineState(descriptor: desc, options: []).0
+      fputs(
+        "[pipe] \(Main.envIdsByKind[Int(kd.kind)]) maxThreads=\(pipeState.maxTotalThreadsPerThreadgroup) regs~=\(pipeState.staticThreadgroupMemoryLength)\n",
+        stderr)
+      variantPipes.append(pipeState)
+      kindMegaG.append(gk)
+      envRuns.append((ki, kd.kind, kd.firstLane / gk, (kd.count + gk - 1) / gk))
     }
     guard variantPipes.allSatisfy({ $0.threadExecutionWidth == core }) else {
       throw err("optionCount \(core) must equal simd width \(variantPipes[0].threadExecutionWidth).")
     }
-    let pipeMaxThreads = variantPipes.map(\.maxTotalThreadsPerThreadgroup).min() ?? 0
-    let tgOptionCount = Int(engine.kinds[0].off.optionCount)
-    let megaSlotBytes = (5 * tgOptionCount + 1) * megaG * MemoryLayout<Float>.stride
-    guard megaG >= 2, megaW <= pipeMaxThreads,
-      megaSlotBytes <= dev.maxThreadgroupMemoryLength
-    else {
-      throw err(
-        "OAK_MEGA_LANES_PER_TG=\(megaG) needs \(megaW) threads/threadgroup (pipeline max \(pipeMaxThreads)) and \(megaSlotBytes) tg bytes (device max \(dev.maxThreadgroupMemoryLength)).")
+    for (ki, pipe) in variantPipes.enumerated() {
+      let gk = kindMegaG[ki]
+      let slotBytes =
+        (5 * tgOptionCount + 1) * gk * MemoryLayout<Float>.stride
+        + 32 * 32 * MemoryLayout<Float>.stride
+      let spl = min(
+        32 / gk, e["OAK_SPL_CAP"].flatMap(Int.init)
+          ?? max(1, Int(engine.kinds[ki].off.anchorCount) / 32))
+      guard gk >= 1, core * gk * spl <= pipe.maxTotalThreadsPerThreadgroup,
+        slotBytes <= dev.maxThreadgroupMemoryLength
+      else {
+        throw err(
+          "megaG=\(gk) needs \(core * 32) threads/threadgroup (pipeline max \(pipe.maxTotalThreadsPerThreadgroup)) and \(slotBytes) tg bytes (device max \(dev.maxThreadgroupMemoryLength))."
+        )
+      }
     }
     let res = engine.res
     let ecfg = bufs.ecfg
@@ -1281,14 +1464,26 @@ final class TapeWriter {
       for j in res.indices { enc.setBuffer(res[j], offset: 0, index: j) }
       enc.setBuffer(bufs.laneBuf, offset: 0, index: OakBuf.lanes.rawValue)
       enc.setBuffer(bufs.seedsBuf, offset: 0, index: OakBuf.seeds.rawValue)
+      enc.setBuffer(bufs.envStateBuf, offset: 0, index: 14)
+      enc.setBuffer(bufs.envOffBuf, offset: 0, index: 15)
+      enc.setBuffer(bufs.mjModelsBuf, offset: 0, index: 16)
+      enc.setBuffer(bufs.mjScratchBuf, offset: 0, index: 17)
+      enc.setBuffer(bufs.mjScratchOffBuf, offset: 0, index: 18)
       var c = ecfg
       enc.setBytes(&c, length: MemoryLayout<FleetEnvCfg>.stride, index: OakBuf.envCfg.rawValue)
     }
     let laneTG = mtlSize(
       min(64, initPipe.maxTotalThreadsPerThreadgroup, snapPipe.maxTotalThreadsPerThreadgroup))
-    let diagHost = OakDiagHost(B)
-    let diagPtr = bufs.diagOutBuf.contents().bindMemory(
-      to: Float.self, capacity: 2 * B * Diag.outFloats)
+    let laneRanks = engine.laneKindIdx.map { Int(engine.kinds[$0].off.rank) }
+    let diagHost = OakDiagHost(laneRanks: laneRanks)
+    var diagBase: [Int] = []
+    var diagHalf = 0
+    for kd in engine.kinds {
+      diagBase.append(diagHalf)
+      diagHalf += kd.count * Diag.oakFloats(Int(kd.off.rank))
+    }
+    precondition(2 * diagHalf * 4 <= bufs.diagOutBuf.length, "diagOut arena undersized")
+    let diagPtr = bufs.diagOutBuf.contents().bindMemory(to: Float.self, capacity: 2 * diagHalf)
     return FleetPipes(
       label: "oak",
       encodeInit: { enc in
@@ -1323,10 +1518,16 @@ final class TapeWriter {
           var span = SIMD3<UInt32>(UInt32(n), UInt32(base), UInt32(run.tgStart))
           enc.setBytes(&span, length: MemoryLayout<SIMD3<UInt32>>.stride, index: OakBuf.aux2.rawValue)
           enc.setBuffer(bufs.diagAccumBuf, offset: 0, index: OakBuf.diagAccum.rawValue)
-          enc.setThreadgroupMemoryLength(megaSlotBytes, index: 0)
+          let gk = kindMegaG[run.kindIdx]
+          let spl = min(
+            32 / gk, e["OAK_SPL_CAP"].flatMap(Int.init)
+              ?? max(1, Int(kd.off.anchorCount) / 32))
+          enc.setThreadgroupMemoryLength(
+            (5 * tgOptionCount + 1) * gk * MemoryLayout<Float>.stride
+              + 32 * 32 * MemoryLayout<Float>.stride, index: 0)
           enc.dispatchThreadgroups(
             MTLSize(width: run.tgCount, height: 1, depth: 1),
-            threadsPerThreadgroup: mtlSize(megaW))
+            threadsPerThreadgroup: mtlSize(core * gk * spl))
         }
         enc.memoryBarrier(scope: [.buffers])
       },
@@ -1339,8 +1540,12 @@ final class TapeWriter {
           enc.setBuffer(engine.uints.b, offset: kd.uintBase * 4, index: OakBuf.uints.rawValue)
           enc.setBuffer(kd.configB, offset: 0, index: OakBuf.config.rawValue)
           enc.setBuffer(bufs.snapBuf, offset: 0, index: OakBuf.aux0.rawValue)
-          var ctl = SIMD2<UInt32>(UInt32(half * B), UInt32(kd.firstLane))
-          enc.setBytes(&ctl, length: MemoryLayout<SIMD2<UInt32>>.stride, index: OakBuf.aux1.rawValue)
+          let ki = engine.kinds.firstIndex { $0.kind == kd.kind }!
+          var ctl = SIMD4<UInt32>(
+            UInt32(half * B), UInt32(kd.firstLane),
+            UInt32(half * diagHalf + diagBase[ki]),
+            UInt32(Diag.oakFloats(Int(kd.off.rank))))
+          enc.setBytes(&ctl, length: MemoryLayout<SIMD4<UInt32>>.stride, index: OakBuf.aux1.rawValue)
           enc.setBytes(&fullScan, length: 4, index: OakBuf.aux2.rawValue)
           enc.setBuffer(bufs.diagAccumBuf, offset: 0, index: OakBuf.diagAccum.rawValue)
           enc.setBuffer(bufs.diagOutBuf, offset: 0, index: OakBuf.diagOut.rawValue)
@@ -1361,7 +1566,31 @@ final class TapeWriter {
           try dp.write(to: URL(fileURLWithPath: "\(rawDir)/params-l\(lane)-s\(step).bin"))
         }
       },
-      laneHashes: { lane, laneBytes in engine.stateHashes(lane, laneBytes: laneBytes) },
+      laneHashes: { lane, laneBytes in
+        let spec = engine.envTable[Int(engine.kind(of: lane).kind)]
+        let envState = bufs.envStateBuf.contents().bindMemory(
+          to: UInt32.self, capacity: bufs.envStateBuf.length / 4) + bufs.envOffsets[lane]
+        let laneWords = laneBytes.bindMemory(to: UInt32.self, capacity: fleetLaneStride / 4)
+        let isCheetah = engine.kind(of: lane).kind == 0
+        var canonical = [UInt32](repeating: 0, count: 60)
+        if isCheetah {
+          for i in 0..<33 { canonical[i] = envState[spec.actionCount + i] }
+        }
+        canonical[33] = laneWords[0]
+        canonical[34] = laneWords[1]
+        canonical[35] = laneWords[2]
+        for d in 0..<spec.actionCount { canonical[36 + d] = envState[d] }
+        for i in 0..<5 { canonical[42 + i] = laneWords[3 + i] }
+        canonical[47] = laneWords[8]
+        if !isCheetah {
+          for i in 0..<10 { canonical[48 + i] = envState[spec.actionCount + i] }
+        }
+        canonical[58] = laneWords[9]
+        canonical[59] = laneWords[10]
+        return canonical.withUnsafeBytes { raw in
+          engine.stateHashes(lane, laneBytes: raw.baseAddress!, laneByteCount: raw.count)
+        }
+      },
       diagFields: [
         "dormantFraction", "utilityDormantFraction", "featureBirths",
         "weightAbsMean", "weightAbsMeanValue", "erank",
@@ -1369,16 +1598,20 @@ final class TapeWriter {
         "logAlphaOptionValueP50", "logAlphaModelP50",
       ],
       diagValues: { half, lane, stepCount in
-        let rec = diagPtr + (half * B + lane) * Diag.outFloats
-        let prevAge = diagHost.prevAge + lane * Diag.rank
-        var ages = [UInt32](repeating: 0, count: Diag.rank)
-        for i in 0..<Diag.rank { ages[i] = rec[Diag.oakFeatureAge + i].bitPattern }
+        let ki = engine.laneKindIdx[lane]
+        let kd = engine.kinds[ki]
+        let rank = Int(kd.off.rank)
+        let floats = Diag.oakFloats(rank)
+        let rec = diagPtr + half * diagHalf + diagBase[ki] + (lane - kd.firstLane) * floats
+        let prevAge = diagHost.prevAge + diagHost.ageOffsets[lane]
+        var ages = [UInt32](repeating: 0, count: rank)
+        for i in 0..<rank { ages[i] = rec[i].bitPattern }
         var dormantFraction = Float.nan
         if diagHost.hasPrev[lane] {
-          var delta = [Double](repeating: .nan, count: Diag.rank)
+          var delta = [Double](repeating: .nan, count: rank)
           var sum = 0.0
           var validCount = 0
-          for i in 0..<Diag.rank {
+          for i in 0..<rank {
             let d = ages[i] &- prevAge[i]
             if d <= UInt32(stepCount) {
               delta[i] = Double(d)
@@ -1389,27 +1622,27 @@ final class TapeWriter {
           let mean = validCount > 0 ? sum / Double(validCount) : 0
           if mean > 0 {
             var dormant = 0
-            for i in 0..<Diag.rank where delta[i].isFinite && delta[i] / mean < DiagMath.dormantTau {
+            for i in 0..<rank where delta[i].isFinite && delta[i] / mean < DiagMath.dormantTau {
               dormant += 1
             }
-            dormantFraction = Float(dormant) / Float(Diag.rank)
+            dormantFraction = Float(dormant) / Float(rank)
           }
         }
-        let utility = (0..<Diag.rank).map { Double(abs(rec[Diag.oakFeatureUtility + $0])) }
-        let births = rec[Diag.oakFeatureBirths]
+        let utility = (0..<rank).map { Double(abs(rec[rank + $0])) }
+        let births = rec[5 * rank]
         let birthsPerStep: Float = diagHost.hasPrev[lane] && stepCount > 0
           ? (births - diagHost.prevBirths[lane]) / Float(stepCount) : .nan
-        func alphas(_ off: Int) -> [Double] { (0..<Diag.rank).map { Double(rec[off + $0]) } }
-        let valueQ = DiagMath.logQuantiles(alphas(Diag.oakValueAlpha), [0.1, 0.5, 0.9])
-        let optionQ = DiagMath.logQuantiles(alphas(Diag.oakOptionValueAlpha), [0.5])
-        let modelQ = DiagMath.logQuantiles(alphas(Diag.oakModelAlpha), [0.5])
-        for i in 0..<Diag.rank { prevAge[i] = ages[i] }
+        func alphas(_ off: Int) -> [Double] { (0..<rank).map { Double(rec[off + $0]) } }
+        let valueQ = DiagMath.logQuantiles(alphas(2 * rank), [0.1, 0.5, 0.9])
+        let optionQ = DiagMath.logQuantiles(alphas(3 * rank), [0.5])
+        let modelQ = DiagMath.logQuantiles(alphas(4 * rank), [0.5])
+        for i in 0..<rank { prevAge[i] = ages[i] }
         diagHost.prevBirths[lane] = births
         diagHost.hasPrev[lane] = true
         return [
           dormantFraction, DiagMath.dormantFraction(utility), birthsPerStep,
-          rec[Diag.oakWeightAbsMean], rec[Diag.oakWeightAbsMeanValue],
-          DiagMath.erank(rec + Diag.oakGram),
+          rec[5 * rank + 1], rec[5 * rank + 2],
+          DiagMath.erank(rec + 5 * rank + 3),
           valueQ[0], valueQ[1], valueQ[2], optionQ[0], modelQ[0],
         ]
       }
@@ -1441,8 +1674,6 @@ final class TapeWriter {
       envTable = try Engine.runEnvTableProbe(dev, lib)
     }
     do {
-      precondition(
-        envStepFlops.count == envIdsByKind.count, "envStepFlops drifted from envIdsByKind")
       func fnv1a(_ s: String) -> UInt32 {
         var h: UInt32 = 0x811c_9dc5
         for b in Array(s.utf8) { h = (h ^ UInt32(b)) &* 16_777_619 }
@@ -1462,15 +1693,19 @@ final class TapeWriter {
       }
     }
     var offByKind: [UInt32: ShapeProbe] = [:]
-    engine?.kinds.forEach { offByKind[$0.kind] = $0.off }
-    let fleetD = engine?.kinds.first?.d ?? 0
+    var dByKind: [UInt32: Int] = [:]
+    engine?.kinds.forEach {
+      offByKind[$0.kind] = $0.off
+      dByKind[$0.kind] = $0.d
+    }
     var envFlopsPerStep: [String: Double] = [:]
     var flopsSum = 0.0
     for kindU in laneEnvKinds {
       let kind = Int(kindU)
       let envId = envIdsByKind[kind]
       let flops = envFlopsPerStep[envId] ?? policyFlopsPerStep(
-        policy, kind: kind, spec: envTable[kind], off: offByKind[kindU], d: fleetD)
+        policy, kind: kind, spec: envTable[kind], off: offByKind[kindU],
+        d: dByKind[kindU] ?? envTable[kind].actionParams)
       envFlopsPerStep[envId] = flops
       flopsSum += flops
     }
@@ -1481,7 +1716,8 @@ final class TapeWriter {
       fputs("\(flag)=\(e[flag]!): timing instrument, trajectories are garbage\n", stderr)
     }
     let episodeLen = max(e["OAK_EPISODE_STEPS"].flatMap(Int.init) ?? 0, 0)
-    let bufs = try FleetBuffers(dev, seeds: seeds, laneEnvKinds: laneEnvKinds, episodeLen: episodeLen)
+    let bufs = try FleetBuffers(
+      dev, seeds: seeds, laneEnvKinds: laneEnvKinds, envTable: envTable, episodeLen: episodeLen)
     let pipes: FleetPipes
     if let engine {
       pipes = try oakPipes(engine, lib, dev, bufs, ablations, e)
@@ -1491,14 +1727,33 @@ final class TapeWriter {
     let gpuSeconds = try runFleetLoop(
       q, bufs, pipes, seeds: seeds, steps: steps, root: root,
       laneEnvKinds: laneEnvKinds)
+    if let padStr = e["OAK_SCRATCH_PAD"], let pad = Int(padStr), pad > 0 {
+      let sp = bufs.mjScratchBuf.contents().bindMemory(
+        to: UInt32.self, capacity: bufs.mjScratchBuf.length / 4)
+      var worstByKind: [UInt32: (touched: Int, declared: Int)] = [:]
+      for lane in 0..<bufs.B where bufs.mjScratchDeclared[lane] > 0 {
+        let base = bufs.mjScratchOffsets[lane]
+        let total = bufs.mjScratchDeclared[lane] + pad
+        var touched = 0
+        for w in stride(from: total - 1, through: 0, by: -1)
+        where sp[base + w] != 0xCAFE_BABE {
+          touched = w + 1
+          break
+        }
+        let kind = laneEnvKinds[lane]
+        let prior = worstByKind[kind]?.touched ?? 0
+        worstByKind[kind] = (max(prior, touched), bufs.mjScratchDeclared[lane])
+      }
+      for (kind, v) in worstByKind.sorted(by: { $0.key < $1.key }) {
+        fputs(
+          "[scratch] \(envIdsByKind[Int(kind)]) touched=\(v.touched) declared=\(v.declared)\n",
+          stderr)
+      }
+    }
     Self.pendingMeta["gpuSeconds"] = gpuSeconds
     Self.pendingMeta["finishedAt"] = ISO8601DateFormatter().string(from: Date())
     try Self.writeRunMeta(root, envTable)
   }
-  static let ppoParamStride = 2768
-  static let ppoRollStride = 3744
-  static let ppoScratchStride = 12064
-  static let ppoStateStride = 48
   static let ppoLR = 3e-4
   static let ppoAdamB2 = 0.999
   static let ppoAdamEps = 1e-5
@@ -1522,6 +1777,18 @@ final class TapeWriter {
       return b
     }
     let isPpo = policy == "ppo"
+    let obsMax = envTable.map(\.naturalO).max()!
+    let actMax = envTable.map(\.actionCount).max()!
+    let ppoH = Diag.k
+    let ppoT = 128
+    let ppoMB = 32
+    let ppoParamStride = Diag.ppoParams(obsMax: obsMax, actMax: actMax)
+    let ppoRollStride = ((ppoT + 1) * obsMax + ppoT * actMax + 6 * ppoT + 15) & ~15
+    let ppoScratchStride =
+      ((ppoMB * obsMax + 4 * ppoMB * ppoH + 2 * ppoMB * actMax + ppoMB + ppoT
+        + ppoParamStride + 15) & ~15) + 16
+    let ppoStateStride = (2 * obsMax + 6 + 15) & ~15
+    let ppoFloats = Diag.ppoFloats(ppoParamStride)
     let initPipe = try pipeline(isPpo ? "ppo_fleet_init" : "baseline_fleet_init")
     let stepPipe = try pipeline("\(policy)_megastep")
     let snapPipe = try pipeline(isPpo ? "ppo_fleet_snapshot" : "baseline_fleet_snapshot")
@@ -1547,16 +1814,21 @@ final class TapeWriter {
       for (j, b) in ppoBufs.enumerated() { enc.setBuffer(b, offset: 0, index: j) }
       enc.setBuffer(bufs.laneBuf, offset: 0, index: OakBuf.lanes.rawValue)
       enc.setBuffer(bufs.seedsBuf, offset: 0, index: OakBuf.seeds.rawValue)
+      enc.setBuffer(bufs.envStateBuf, offset: 0, index: 14)
+      enc.setBuffer(bufs.envOffBuf, offset: 0, index: 15)
+      enc.setBuffer(bufs.mjModelsBuf, offset: 0, index: 16)
+      enc.setBuffer(bufs.mjScratchBuf, offset: 0, index: 17)
+      enc.setBuffer(bufs.mjScratchOffBuf, offset: 0, index: 18)
       var c = ecfg
       enc.setBytes(&c, length: MemoryLayout<FleetEnvCfg>.stride, index: OakBuf.envCfg.rawValue)
     }
     let laneTG = mtlSize(min(
       64, initPipe.maxTotalThreadsPerThreadgroup, stepPipe.maxTotalThreadsPerThreadgroup,
       snapPipe.maxTotalThreadsPerThreadgroup))
-    let stepThreads = isPpo ? B * 32 : B
-    let stepTG = isPpo ? mtlSize(32) : laneTG
+    let stepThreads = B * 32
+    let stepTG = mtlSize(32)
     let diagPtr = bufs.diagOutBuf.contents().bindMemory(
-      to: Float.self, capacity: 2 * B * Diag.outFloats)
+      to: Float.self, capacity: 2 * B * ppoFloats)
     let ppoParamCounts: [Int] = laneEnvKinds.map { kind in
       let spec = envTable[Int(kind)]
       let box = spec.actionKind == 0
@@ -1609,7 +1881,7 @@ final class TapeWriter {
         ] : [],
       diagValues: { half, lane, _ in
         guard isPpo else { return [] }
-        let rec = diagPtr + (half * B + lane) * Diag.outFloats
+        let rec = diagPtr + (half * B + lane) * ppoFloats
         let actor = (0..<Diag.k).map { Double(rec[Diag.ppoSumAbsHiddenActor + $0]) }
         let critic = (0..<Diag.k).map { Double(rec[Diag.ppoSumAbsHiddenCritic + $0]) }
         let adamT = Double(rec[Diag.ppoAdamT])
@@ -1623,7 +1895,7 @@ final class TapeWriter {
         }
         return [
           DiagMath.dormantFraction(actor), DiagMath.dormantFraction(critic),
-          rec[Diag.ppoWeightAbsMean], DiagMath.erank(rec + Diag.ppoGram),
+          rec[Diag.ppoWeightAbsMean], DiagMath.erank(rec + Diag.ppoGram(ppoParamStride)),
           stepQ[0], stepQ[1], stepQ[2],
         ]
       }
