@@ -62,25 +62,9 @@ inline void laneSyncTg() {
     else threadgroup_barrier(mem_flags::mem_device | mem_flags::mem_threadgroup);
 }
 
-inline float laneScalarSum(threadgroup float *laneRed, uint q, uint slane, uint subSg, float value) {
-    if (OAK_SPL == 1u) return value;
-    if (slane == 0u) laneRed[q * OAK_SPL + subSg] = value;
-    threadgroup_barrier(mem_flags::mem_threadgroup);
-    float total = 0.0f;
-    for (uint s = 0u; s < OAK_SPL; ++s) total += laneRed[q * OAK_SPL + s];
-    threadgroup_barrier(mem_flags::mem_threadgroup);
-    return total;
-}
+inline void simdSyncDev() { simdgroup_barrier(mem_flags::mem_device); }
 
-inline float laneOptionSum(threadgroup float *laneRed, uint slane, uint subSg, float partial) {
-    if (OAK_SPL == 1u) return partial;
-    laneRed[slane * OAK_SPL + subSg] = partial;
-    threadgroup_barrier(mem_flags::mem_threadgroup);
-    float total = 0.0f;
-    for (uint s = 0u; s < OAK_SPL; ++s) total += laneRed[slane * OAK_SPL + s];
-    threadgroup_barrier(mem_flags::mem_threadgroup);
-    return total;
-}
+inline void simdSyncTg() { simdgroup_barrier(mem_flags::mem_threadgroup); }
 
 struct KernelConfig {
     uint obsDim, rank, optionCount, actionParamCount;
@@ -95,15 +79,59 @@ struct KernelConfig {
     float actorAlphaDenom;
 };
 
-constant uint OAK_CORE = 32u;
-constant uint OAK_GATE_BANK = 7u;
+constant uint OAK_SIMD_WIDTH = 32u;
+constant uint OAK_SHAPE_PLAN_PERIOD [[function_constant(32)]];
+constant uint OAK_PLAN_PERIOD = is_function_constant_defined(OAK_SHAPE_PLAN_PERIOD)
+    ? OAK_SHAPE_PLAN_PERIOD : 32u;
+constant uint OAK_SHAPE_PERCEPT_BUDGET [[function_constant(33)]];
+constant uint OAK_PERCEPT_BUDGET = is_function_constant_defined(OAK_SHAPE_PERCEPT_BUDGET)
+    ? OAK_SHAPE_PERCEPT_BUDGET : 32u;
+
+inline uint2 diagSketchBits(uint featureIndex) {
+    uint2 h = uint2(featureIndex * 0x9E3779B9u, (featureIndex + 0x632BE59Bu) * 0x85EBCA6Bu);
+    h ^= h >> 16u;
+    h *= 0x21F0AAADu;
+    h ^= h >> 15u;
+    h *= 0x735A2D97u;
+    h ^= h >> 15u;
+    return h;
+}
+
+constant uint OAK_SHAPE_GATE_BANK [[function_constant(34)]];
+constant uint OAK_GATE_BANK = is_function_constant_defined(OAK_SHAPE_GATE_BANK)
+    ? OAK_SHAPE_GATE_BANK : 7u;
+constant uint OAK_SHAPE_OPTION_COUNT [[function_constant(35)]];
+constant uint OAK_OPTION_COUNT = is_function_constant_defined(OAK_SHAPE_OPTION_COUNT)
+    ? OAK_SHAPE_OPTION_COUNT : 32u;
 constant uint OAK_GATE_GROUPS = 2u;
 constant uint OAK_ANCHORS_MAX =
-    ((OAK_ENV_OBS_MAX + 2u * OAK_ENV_ACT_MAX + 2u + OAK_CORE - 1u) / OAK_CORE) * OAK_CORE;
-constant uint OAK_ACTIVE_SLOTS_MAX = OAK_ANCHORS_MAX * (1u + OAK_GATE_GROUPS) / OAK_CORE;
+    ((OAK_ENV_OBS_MAX + 2u * OAK_ENV_ACT_MAX + 2u + OAK_SIMD_WIDTH - 1u) / OAK_SIMD_WIDTH) * OAK_SIMD_WIDTH;
+constant uint OAK_ACTIVE_SLOTS_MAX = OAK_ANCHORS_MAX * (1u + OAK_GATE_GROUPS) / OAK_SIMD_WIDTH;
 constant uint OAK_POLICY_MAX = OAK_ENV_ACT_MAX;
 constant uint PLAN_INV_SQRT_FEATURES = 2u;
-static_assert(OAK_DIAG_K == 2u * OAK_CORE, "sketch width is two sign words per feature");
+static_assert(OAK_DIAG_K == 2u * OAK_SIMD_WIDTH, "sketch width is two sign words per feature");
+
+constant uint OAK_RED_WIDTH = (OAK_SPL == 1u) ? 1u : 3u;
+
+inline void laneScalarPut(threadgroup float *laneRed, uint slot, uint slane, uint subSg, float value) {
+    if (slane == 0u) laneRed[slot * OAK_SPL + subSg] = value;
+}
+
+inline float laneScalarTake(threadgroup float *laneRed, uint slot) {
+    float total = 0.0f;
+    for (uint s = 0u; s < OAK_SPL; ++s) total += laneRed[slot * OAK_SPL + s];
+    return total;
+}
+
+inline void laneOptionPut(threadgroup float *laneRed, uint slot, uint slane, uint subSg, float value) {
+    laneRed[(slot * OAK_SIMD_WIDTH + slane) * OAK_SPL + subSg] = value;
+}
+
+inline float laneOptionTake(threadgroup float *laneRed, uint slot, uint slane) {
+    float total = 0.0f;
+    for (uint s = 0u; s < OAK_SPL; ++s) total += laneRed[(slot * OAK_SIMD_WIDTH + slane) * OAK_SPL + s];
+    return total;
+}
 
 constant uint FEATURE_PRODUCT = 0u;
 constant uint FEATURE_NORMALIZED_SUM = 1u;
@@ -311,6 +339,21 @@ inline Agent make_agent(device float *params, device float *stateArena, device u
 
 inline device float *state_at(Agent agent, uint slot) { return agent.state + slot * agent.featureCount; }
 
+inline bool perceptIsIdentity(Agent agent) {
+    return agent.observationCount + agent.actionCount + 2u <= agent.anchorCount;
+}
+
+inline uint perceptSketchSlots(Agent agent) { return agent.anchorCount - 2u; }
+
+inline uint perceptSourceCount(Agent agent) {
+    return perceptIsIdentity(agent) ? (agent.envObservationCount + agent.envActionCount + 1u)
+                                    : (perceptSketchSlots(agent) + 1u);
+}
+
+inline uint perceptChannelCount(Agent agent) {
+    return perceptIsIdentity(agent) ? agent.envObservationCount : perceptSketchSlots(agent);
+}
+
 constant uint OAK_SPEC_ENV_KIND [[function_constant(29)]];
 
 inline uint envKind(uint stored) {
@@ -321,10 +364,9 @@ inline KernelConfig deriveConfig(uint obsDim, uint actionParams) {
     KernelConfig cfgOut;
     cfgOut.obsDim = obsDim;
     cfgOut.actionParamCount = actionParams;
-    uint anchors = max(OAK_CORE,
-        ((obsDim + actionParams + 2u + OAK_CORE - 1u) / OAK_CORE) * OAK_CORE);
+    uint anchors = OAK_PERCEPT_BUDGET;
     cfgOut.rank = anchors + anchors * OAK_GATE_BANK * 2u;
-    cfgOut.optionCount = OAK_CORE;
+    cfgOut.optionCount = OAK_OPTION_COUNT;
     cfgOut.linearAnchorCount = anchors;
     cfgOut.obsTraceLevels = cfgOut.rank / (2u * anchors);
     cfgOut.nurseryCount = cfgOut.rank;
@@ -437,6 +479,7 @@ inline uint featureTile(float activation) {
 }
 
 inline uint tileSourceIndex(Agent agent, uint source) {
+    if (!perceptIsIdentity(agent)) return source;
     return (source < agent.envObservationCount) ? source
          : (source < agent.envObservationCount + agent.envActionCount) ? agent.observationCount + (source - agent.envObservationCount)
                                               : agent.observationCount + agent.actionCount;
@@ -506,20 +549,25 @@ inline void storeLearnScales(Agent agent, uint tid, uint subSg, bool liveLane, t
     device const float *previousFeatures = state_at(agent, agent.stateSlot);
     float valueStepDenominator = (subSg == 0u) ? 1.0f : 0.0f;
     float previousFeatureNormSq = 0.0f;
-    for (uint base = subSg * OAK_CORE; base < activeCount(agent.anchorCount); base += OAK_SPL * OAK_CORE) {
+    for (uint base = subSg * OAK_SIMD_WIDTH; base < activeCount(agent.anchorCount); base += OAK_SPL * OAK_SIMD_WIDTH) {
         uint a = base + tid;
         uint ip = previousActive[a];
         float previousFeature = previousFeatures[ip];
         float previousAlpha = agent.valueAlpha[ip];
-        for (uint t = 0u; t < OAK_CORE; ++t) {
+        for (uint t = 0u; t < OAK_SIMD_WIDTH; ++t) {
             float x = simd_shuffle(previousFeature, (ushort)t);
             float previousAlphaBroadcast = simd_shuffle(previousAlpha, (ushort)t);
             if (isfinite(previousAlphaBroadcast) && previousAlphaBroadcast > 0.0f) valueStepDenominator += previousAlphaBroadcast * (x * x);
             previousFeatureNormSq = fma(x, x, previousFeatureNormSq);
         }
     }
-    valueStepDenominator = laneScalarSum(laneRed, 0u, tid, subSg, valueStepDenominator);
-    previousFeatureNormSq = laneScalarSum(laneRed, 1u, tid, subSg, previousFeatureNormSq);
+    if (OAK_SPL > 1u) {
+        laneScalarPut(laneRed, 0u, tid, subSg, valueStepDenominator);
+        laneScalarPut(laneRed, 1u, tid, subSg, previousFeatureNormSq);
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        valueStepDenominator = laneScalarTake(laneRed, 0u);
+        previousFeatureNormSq = laneScalarTake(laneRed, 1u);
+    }
     if (tid == 0u && subSg == 0u && liveLane) {
         agent.valueScale[0] = (isfinite(valueStepDenominator) && valueStepDenominator > 0.0f) ? (1.0f / valueStepDenominator) : 0.0f;
         agent.previousFeatureNormSq[0] = previousFeatureNormSq;
@@ -540,13 +588,20 @@ inline void predictAndControl(Agent agent, uint tid, uint subSg, bool liveLane,
     {
 
         float previousValuePartial = 0.0f, currentValuePartial = 0.0f;
-        for (uint a = subSg * OAK_CORE + tid; a < activeCount(agent.anchorCount); a += OAK_CORE * OAK_SPL) {
+        for (uint a = subSg * OAK_SIMD_WIDTH + tid; a < activeCount(agent.anchorCount); a += OAK_SIMD_WIDTH * OAK_SPL) {
             uint ip = activeIndex(previousActive, a), ic = activeIndex(currentActive, a);
             previousValuePartial = fma(agent.valueWeight[ip], previousFeatures[ip], previousValuePartial);
             currentValuePartial = fma(agent.valueWeight[ic], currentFeatures[ic], currentValuePartial);
         }
-        previousValue = laneScalarSum(laneRed, 0u, tid, subSg, simd_sum(previousValuePartial));
-        currentValue = laneScalarSum(laneRed, 1u, tid, subSg, simd_sum(currentValuePartial));
+        previousValue = simd_sum(previousValuePartial);
+        currentValue = simd_sum(currentValuePartial);
+        if (OAK_SPL > 1u) {
+            laneScalarPut(laneRed, 0u, tid, subSg, previousValue);
+            laneScalarPut(laneRed, 1u, tid, subSg, currentValue);
+            threadgroup_barrier(mem_flags::mem_threadgroup);
+            previousValue = laneScalarTake(laneRed, 0u);
+            currentValue = laneScalarTake(laneRed, 1u);
+        }
         if (OAK_ABLATE_GVF_PREDICTION) {
             previousValue = 0.0f;
             currentValue = 0.0f;
@@ -555,7 +610,7 @@ inline void predictAndControl(Agent agent, uint tid, uint subSg, bool liveLane,
             stageScalars[1] = currentValue;
         }
     }
-    laneSyncTg();
+    simdSyncTg();
     float gauge = isfinite(agent.rewardCenter[0]) ? agent.rewardCenter[0] : 0.0f;
     float previousDifferentialValue = previousValue - gauge;
     float currentDifferentialValue = currentValue - gauge;
@@ -574,7 +629,7 @@ inline void predictAndControl(Agent agent, uint tid, uint subSg, bool liveLane,
     {
         float optionValuePrevEnergyPartial = 0.0f, optionValueCrossEnergyPartial = 0.0f, optionValueNextEnergyPartial = 0.0f;
         float modelPrevEnergyPartial = 0.0f, modelCrossEnergyPartial = 0.0f, modelNextEnergyPartial = 0.0f;
-        for (uint a = subSg * OAK_CORE + tid; a < activeCount(agent.anchorCount); a += OAK_CORE * OAK_SPL) {
+        for (uint a = subSg * OAK_SIMD_WIDTH + tid; a < activeCount(agent.anchorCount); a += OAK_SIMD_WIDTH * OAK_SPL) {
             uint ip = activeIndex(previousActive, a), ic = activeIndex(currentActive, a);
             float xp = previousFeatures[ip], xc = currentFeatures[ic];
             float ap = agent.optionValueAlpha[ip];
@@ -592,12 +647,27 @@ inline void predictAndControl(Agent agent, uint tid, uint subSg, bool liveLane,
             float amc = agent.modelAlpha[ic];
             if (isfinite(amc) && amc > 0.0f) modelNextEnergyPartial = fma(amc * xc, xc, modelNextEnergyPartial);
         }
-        float optionValuePrevEnergy = laneScalarSum(laneRed, 2u, tid, subSg, simd_sum(optionValuePrevEnergyPartial));
-        float optionValueCrossEnergy = laneScalarSum(laneRed, 3u, tid, subSg, simd_sum(optionValueCrossEnergyPartial));
-        float optionValueNextEnergy = laneScalarSum(laneRed, 4u, tid, subSg, simd_sum(optionValueNextEnergyPartial));
-        float modelPrevEnergy = laneScalarSum(laneRed, 5u, tid, subSg, simd_sum(modelPrevEnergyPartial));
-        float modelCrossEnergy = laneScalarSum(laneRed, 6u, tid, subSg, simd_sum(modelCrossEnergyPartial));
-        float modelNextEnergy = laneScalarSum(laneRed, 7u, tid, subSg, simd_sum(modelNextEnergyPartial));
+        float optionValuePrevEnergy = simd_sum(optionValuePrevEnergyPartial);
+        float optionValueCrossEnergy = simd_sum(optionValueCrossEnergyPartial);
+        float optionValueNextEnergy = simd_sum(optionValueNextEnergyPartial);
+        float modelPrevEnergy = simd_sum(modelPrevEnergyPartial);
+        float modelCrossEnergy = simd_sum(modelCrossEnergyPartial);
+        float modelNextEnergy = simd_sum(modelNextEnergyPartial);
+        if (OAK_SPL > 1u) {
+            laneScalarPut(laneRed, 2u, tid, subSg, optionValuePrevEnergy);
+            laneScalarPut(laneRed, 3u, tid, subSg, optionValueCrossEnergy);
+            laneScalarPut(laneRed, 4u, tid, subSg, optionValueNextEnergy);
+            laneScalarPut(laneRed, 5u, tid, subSg, modelPrevEnergy);
+            laneScalarPut(laneRed, 6u, tid, subSg, modelCrossEnergy);
+            laneScalarPut(laneRed, 7u, tid, subSg, modelNextEnergy);
+            threadgroup_barrier(mem_flags::mem_threadgroup);
+            optionValuePrevEnergy = laneScalarTake(laneRed, 2u);
+            optionValueCrossEnergy = laneScalarTake(laneRed, 3u);
+            optionValueNextEnergy = laneScalarTake(laneRed, 4u);
+            modelPrevEnergy = laneScalarTake(laneRed, 5u);
+            modelCrossEnergy = laneScalarTake(laneRed, 6u);
+            modelNextEnergy = laneScalarTake(laneRed, 7u);
+        }
         if (liveLane) {
             stageScalars[5] = optionValuePrevEnergy;
             stageScalars[6] = optionValueCrossEnergy;
@@ -633,17 +703,37 @@ inline void predictAndControl(Agent agent, uint tid, uint subSg, bool liveLane,
             previousDurationHat = fma(agent.optionDuration[idxP], xp, previousDurationHat);
         }
     }
-    optionValuePrev = laneOptionSum(laneRed, tid, subSg, optionValuePrev);
-    optionValueNext = laneOptionSum(laneRed, tid, subSg, optionValueNext);
-    optionValueAuxDot = laneOptionSum(laneRed, tid, subSg, optionValueAuxDot);
-    rewardHat = laneOptionSum(laneRed, tid, subSg, rewardHat);
-    durationHat = laneOptionSum(laneRed, tid, subSg, durationHat);
-    nextValueHat = laneOptionSum(laneRed, tid, subSg, nextValueHat);
-    twinNextValueHat = laneOptionSum(laneRed, tid, subSg, twinNextValueHat);
-    previousNextValue = laneOptionSum(laneRed, tid, subSg, previousNextValue);
-    previousNextValueAuxDot = laneOptionSum(laneRed, tid, subSg, previousNextValueAuxDot);
-    previousRewardHat = laneOptionSum(laneRed, tid, subSg, previousRewardHat);
-    previousDurationHat = laneOptionSum(laneRed, tid, subSg, previousDurationHat);
+    if (OAK_SPL > 1u) {
+        laneOptionPut(laneRed, 0u, tid, subSg, optionValuePrev);
+        laneOptionPut(laneRed, 1u, tid, subSg, optionValueNext);
+        laneOptionPut(laneRed, 2u, tid, subSg, optionValueAuxDot);
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        optionValuePrev = laneOptionTake(laneRed, 0u, tid);
+        optionValueNext = laneOptionTake(laneRed, 1u, tid);
+        optionValueAuxDot = laneOptionTake(laneRed, 2u, tid);
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        laneOptionPut(laneRed, 0u, tid, subSg, rewardHat);
+        laneOptionPut(laneRed, 1u, tid, subSg, durationHat);
+        laneOptionPut(laneRed, 2u, tid, subSg, nextValueHat);
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        rewardHat = laneOptionTake(laneRed, 0u, tid);
+        durationHat = laneOptionTake(laneRed, 1u, tid);
+        nextValueHat = laneOptionTake(laneRed, 2u, tid);
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        laneOptionPut(laneRed, 0u, tid, subSg, twinNextValueHat);
+        laneOptionPut(laneRed, 1u, tid, subSg, previousNextValue);
+        laneOptionPut(laneRed, 2u, tid, subSg, previousNextValueAuxDot);
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        twinNextValueHat = laneOptionTake(laneRed, 0u, tid);
+        previousNextValue = laneOptionTake(laneRed, 1u, tid);
+        previousNextValueAuxDot = laneOptionTake(laneRed, 2u, tid);
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        laneOptionPut(laneRed, 0u, tid, subSg, previousRewardHat);
+        laneOptionPut(laneRed, 1u, tid, subSg, previousDurationHat);
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        previousRewardHat = laneOptionTake(laneRed, 0u, tid);
+        previousDurationHat = laneOptionTake(laneRed, 1u, tid);
+    }
     if (tid < agent.optionCount && agent.parked[tid] != 0u && subSg == 0u && liveLane) {
         agent.continuation[tid] = 0.0f;
         agent.optionTd[tid] = 0.0f;
@@ -721,7 +811,7 @@ inline void predictAndControl(Agent agent, uint tid, uint subSg, bool liveLane,
 
         if (tid == 0u) nextValueHat = currentValue;
     }
-    laneSyncTg();
+    simdSyncTg();
     if (tid == 0u && subSg == 0u && liveLane) {
         float gaugeRate = track_rate(agent.stepCount, agent.featureCount);
         float gaugeNew = agent.rewardCenter[0] + gaugeRate * (currentValue - agent.rewardCenter[0]);
@@ -800,7 +890,7 @@ inline void constructFeatures(Agent agent,
         }
     }
     if (liveLane) {
-        for (uint k = subSg * OAK_CORE + tid; k < agent.optionCount; k += OAK_CORE * OAK_SPL) agent.importance[k] = agent.importanceStaging[k];
+        for (uint k = subSg * OAK_SIMD_WIDTH + tid; k < agent.optionCount; k += OAK_SIMD_WIDTH * OAK_SPL) agent.importance[k] = agent.importanceStaging[k];
         for (uint j = subSg * tgW + tid; j < agent.optionCount * agent.actionCount; j += tgW * OAK_SPL)
             agent.optionActorCredit[j] = agent.actorCreditStaging[j];
     }
@@ -812,11 +902,30 @@ inline void constructFeatures(Agent agent,
     laneSyncDev();
 
     if (liveLane)
-    for (uint ablk = subSg * OAK_CORE; ablk < agent.anchorCount; ablk += OAK_SPL * OAK_CORE) {
+    for (uint ablk = subSg * OAK_SIMD_WIDTH; ablk < agent.anchorCount; ablk += OAK_SPL * OAK_SIMD_WIDTH) {
         uint i = ablk + tid;
         float x;
         if (OAK_ABLATE_FEATURE_CONSTRUCTION) {
             x = (i == 0u) ? 1.0f : 0.0f;
+        } else if (!perceptIsIdentity(agent)) {
+            uint slots = perceptSketchSlots(agent);
+            if (i < slots) {
+                uint inputs = agent.observationCount + agent.actionCount;
+                float acc = 0.0f;
+                for (uint j = 0u; j < inputs; ++j) {
+                    uint2 h = diagSketchBits(j);
+                    if (h.x % slots != i) continue;
+                    float v = (j < agent.observationCount)
+                        ? normalizedObservation(agent, j)
+                        : agent.actionSignal[j - agent.observationCount];
+                    acc += ((h.y & 1u) != 0u) ? -v : v;
+                }
+                x = acc;
+            } else if (i == slots) {
+                x = agent.reward[0];
+            } else {
+                x = 1.0f;
+            }
         } else if (i < agent.observationCount) {
             x = normalizedObservation(agent, i);
         } else if (i < agent.observationCount + agent.actionCount) {
@@ -841,12 +950,12 @@ inline void constructFeatures(Agent agent,
     laneSyncDev();
 
     if (liveLane)
-    for (uint ablk = subSg * OAK_CORE; ablk < agent.anchorCount; ablk += OAK_SPL * OAK_CORE) {
+    for (uint ablk = subSg * OAK_SIMD_WIDTH; ablk < agent.anchorCount; ablk += OAK_SPL * OAK_SIMD_WIDTH) {
     uint ai = ablk + tid;
     uint tile;
     uint tile2;
     {
-        uint sourceCount = agent.envObservationCount + agent.envActionCount + 1u;
+        uint sourceCount = perceptSourceCount(agent);
         uint sourceIndex = ai % sourceCount, occupancy = ai / sourceCount;
         if (occupancy == 0u || OAK_ABLATE_JOINT_GEOMETRY) {
             tile = featureTile(curr[tileSourceIndex(agent, sourceIndex)]);
@@ -854,7 +963,7 @@ inline void constructFeatures(Agent agent,
             tile = zoomedFeatureTile(curr[tileSourceIndex(agent, sourceIndex)], occupancy);
         } else {
             uint channelA = tileSourceIndex(agent, sourceIndex);
-            uint channelB = (sourceIndex + occupancy) % agent.envObservationCount;
+            uint channelB = (sourceIndex + occupancy) % perceptChannelCount(agent);
             tile = jointFeatureTile(curr[channelA], curr[channelB], occupancy);
         }
         tile2 = zoomedFeatureTile(curr[tileSourceIndex(agent, sourceIndex)], occupancy + 1u);
@@ -977,7 +1086,7 @@ static inline void planAllOptions(Agent agent, uint tid, uint subSg, bool liveLa
                                       threadgroup float *laneRed) {
     device const uint *previousActive = activeFeatures(agent, pSlot);
     device const float *prev = state_at(agent, pSlot);
-    for (uint kk = tid; kk < agent.optionCount; kk += OAK_CORE) {
+    for (uint kk = tid; kk < agent.optionCount; kk += OAK_SIMD_WIDTH) {
     bool kParked = agent.parked[kk] != 0u;
     float p0 = 0.0f, p1 = 0.0f, p2 = 0.0f, p3 = 0.0f;
     if (stashDirty && !kParked && !OAK_ABLATE_OPTION_MODELS) {
@@ -991,10 +1100,23 @@ static inline void planAllOptions(Agent agent, uint tid, uint subSg, bool liveLa
             p3 = fma(agent.optionDuration[idxP], xp, p3);
         }
     }
-    float previousNextValueDot = laneOptionSum(laneRed, tid, subSg, p0);
-    float optionNextValueDot = laneOptionSum(laneRed, tid, subSg, p1);
-    float previousRewardHat = laneOptionSum(laneRed, tid, subSg, p2);
-    float previousDurationHat = laneOptionSum(laneRed, tid, subSg, p3);
+    if (OAK_SPL > 1u) {
+        laneOptionPut(laneRed, 0u, tid, subSg, p0);
+        laneOptionPut(laneRed, 1u, tid, subSg, p1);
+        laneOptionPut(laneRed, 2u, tid, subSg, p2);
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        p0 = laneOptionTake(laneRed, 0u, tid);
+        p1 = laneOptionTake(laneRed, 1u, tid);
+        p2 = laneOptionTake(laneRed, 2u, tid);
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        laneOptionPut(laneRed, 0u, tid, subSg, p3);
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        p3 = laneOptionTake(laneRed, 0u, tid);
+    }
+    float previousNextValueDot = p0;
+    float optionNextValueDot = p1;
+    float previousRewardHat = p2;
+    float previousDurationHat = p3;
     if (!stashDirty) {
         previousNextValueDot = stash[kk * 4u + 0u];
         optionNextValueDot = stash[kk * 4u + 1u];
@@ -1065,17 +1187,22 @@ static inline void learnFromTransition(Agent agent, device const float *prev,
         uint i0 = activeIndex(previousActive, a0);
         twinPrevDot = fma(agent.optionNextValueTwin[i0 * optionN + k], prev[i0], twinPrevDot);
     }
-    twinPrevDot = laneOptionSum(laneRed, tid, subSg, twinPrevDot);
+    if (OAK_SPL > 1u) {
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        laneOptionPut(laneRed, 0u, tid, subSg, twinPrevDot);
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        twinPrevDot = laneOptionTake(laneRed, 0u, tid);
+    }
     if (!isfinite(twinPrevDot)) twinPrevDot = 0.0f;
     float twinResidual = rewardModelTdError - twinPrevDot;
     float actorCoefficient[OAK_POLICY_MAX];
     for (uint j = 0u; j < policyN; ++j) actorCoefficient[j] = agent.optionPolicyCoef[tid * policyN + j];
-    for (uint cb = subSg * OAK_CORE; cb < activeFeatureCount; cb += OAK_SPL * OAK_CORE) {
+    for (uint cb = subSg * OAK_SIMD_WIDTH; cb < activeFeatureCount; cb += OAK_SPL * OAK_SIMD_WIDTH) {
         uint aH = cb + tid;
         uint iH = activeIndex(previousActive, aH);
         float xpH = prev[iH], xcH = curr[iH];
         float aPH = agent.optionValueAlpha[iH], aMH = agent.modelAlpha[iH];
-        uint lEnd = min(OAK_CORE, activeFeatureCount - cb);
+        uint lEnd = min(OAK_SIMD_WIDTH, activeFeatureCount - cb);
         for (uint l = 0u; l < lEnd; ++l) {
             uint i = simd_shuffle(iH, (ushort)l);
             float xp = simd_shuffle(xpH, (ushort)l);
@@ -1112,12 +1239,12 @@ static inline void learnFromTransition(Agent agent, device const float *prev,
         }
     }
 
-    for (uint wb = subSg * OAK_CORE; wb < agent.anchorCount; wb += OAK_SPL * OAK_CORE) {
+    for (uint wb = subSg * OAK_SIMD_WIDTH; wb < agent.anchorCount; wb += OAK_SPL * OAK_SIMD_WIDTH) {
         uint newFeatureH = activeIndex(currentActive, agent.anchorCount + wb + tid);
         uint wasPreviouslyActiveH = wasActive(previousActive, agent.anchorCount, newFeatureH) ? 1u : 0u;
         float newFeatureValueH = curr[newFeatureH];
         float newOptionAlphaH = agent.optionValueAlpha[newFeatureH], newModelAlphaH = agent.modelAlpha[newFeatureH];
-        for (uint l = 0u; l < OAK_CORE; ++l) {
+        for (uint l = 0u; l < OAK_SIMD_WIDTH; ++l) {
             uint i = simd_shuffle(newFeatureH, (ushort)l);
             uint wasPreviouslyActive = simd_shuffle(wasPreviouslyActiveH, (ushort)l);
             float xc = simd_shuffle(newFeatureValueH, (ushort)l);
@@ -1142,10 +1269,10 @@ static inline void learnFromTransition(Agent agent, device const float *prev,
     if (!OAK_ABLATE_GVF_PREDICTION && liveLane) {
         float valueTdError = agent.td[0];
         float valueStepScale = agent.valueScale[0];
-        for (uint cb = subSg * OAK_CORE; cb < activeFeatureCount; cb += OAK_SPL * OAK_CORE) {
+        for (uint cb = subSg * OAK_SIMD_WIDTH; cb < activeFeatureCount; cb += OAK_SPL * OAK_SIMD_WIDTH) {
             uint eH = cb + tid;
             uint iH = activeIndex(previousActive, eH);
-            for (uint l = 0u; l < OAK_CORE; ++l) {
+            for (uint l = 0u; l < OAK_SIMD_WIDTH; ++l) {
                 uint i = simd_shuffle(iH, (ushort)l);
                 if (i % tw != tid) continue;
                 float w = agent.valueWeight[i];
@@ -1163,8 +1290,8 @@ inline void emitOptionActions(Agent agent, uint tid, uint subSg) {
     device const uint *active = activeFeatures(agent, agent.stateSlot);
     device const float *currS = state_at(agent, agent.stateSlot);
     if (OAK_SPL > 1u) {
-        uint laneTid = subSg * OAK_CORE + tid;
-        uint laneW = OAK_CORE * OAK_SPL;
+        uint laneTid = subSg * OAK_SIMD_WIDTH + tid;
+        uint laneW = OAK_SIMD_WIDTH * OAK_SPL;
         if (OAK_ABLATE_OPTION_POLICIES) {
             for (uint p = laneTid; p < agent.optionCount * agent.actionCount; p += laneW) {
                 agent.optionPolicyMean[p] = 0.0f;
@@ -1197,7 +1324,7 @@ inline void emitOptionActions(Agent agent, uint tid, uint subSg) {
         return;
     }
     if (OAK_ABLATE_OPTION_POLICIES) {
-        for (uint k = tid; k < agent.optionCount; k += OAK_CORE)
+        for (uint k = tid; k < agent.optionCount; k += OAK_SIMD_WIDTH)
             for (uint j = 0u; j < agent.actionCount; ++j) {
                 agent.optionPolicyMean[k * agent.actionCount + j] = 0.0f;
                 agent.optionLogit[k * agent.actionCount + j] = 0.0f;
@@ -1205,7 +1332,7 @@ inline void emitOptionActions(Agent agent, uint tid, uint subSg) {
         if (tid < agent.actionCount) agent.policyMean[tid] = 0.0f;
         return;
     }
-    for (uint k = tid; k < agent.optionCount; k += OAK_CORE) {
+    for (uint k = tid; k < agent.optionCount; k += OAK_SIMD_WIDTH) {
     if (agent.parked[k] != 0u) {
         for (uint j = 0u; j < agent.actionCount; ++j) {
             agent.optionPolicyMean[k * agent.actionCount + j] = 0.0f;
@@ -1276,7 +1403,7 @@ static inline void replaceWorstFeature(Agent agent, uint tid, threadgroup float 
     {
         float bestBound = -FLT_MAX;
         uint bestIndex = 0xffffffffu;
-        for (uint n = tid; n < agent.nurseryCount; n += OAK_CORE) {
+        for (uint n = tid; n < agent.nurseryCount; n += OAK_SIMD_WIDTH) {
             float lowerConfidenceBound = agent.nurseryScore[n];
             if (lowerConfidenceBound > bestBound) { bestBound = lowerConfidenceBound; bestIndex = n; }
         }
@@ -1286,7 +1413,7 @@ static inline void replaceWorstFeature(Agent agent, uint tid, threadgroup float 
 
     uint haveWorst = 0u, worstFeature = 0u, worstAge = 0u;
     float worstUtility = 0.0f, worstRedundancy = 0.0f, worstDownstream = 0.0f;
-    for (uint i = agent.anchorCount + tid; i < agent.featureCount; i += OAK_CORE) {
+    for (uint i = agent.anchorCount + tid; i < agent.featureCount; i += OAK_SIMD_WIDTH) {
         float4 e = *(device const float4 *)&agent.replaceScore[i * 4u];
         if (e.w <= 0.0f) continue;
         float util = e.x, redundancy = e.y, downstream = e.z;
@@ -1304,7 +1431,7 @@ static inline void replaceWorstFeature(Agent agent, uint tid, threadgroup float 
         }
     }
 
-    for (uint t = 1u; t < OAK_CORE; ++t) {
+    for (uint t = 1u; t < OAK_SIMD_WIDTH; ++t) {
         uint otherHave = simd_shuffle(haveWorst, (ushort)t);
         if (otherHave == 0u) continue;
         uint otherWorst = simd_shuffle(worstFeature, (ushort)t);
@@ -1325,7 +1452,7 @@ static inline void replaceWorstFeature(Agent agent, uint tid, threadgroup float 
         }
     }
 
-    for (uint k = tid; k < agent.optionCount; k += OAK_CORE) {
+    for (uint k = tid; k < agent.optionCount; k += OAK_SIMD_WIDTH) {
         if (agent.optionAge[k] < 0xffffffffu) agent.optionAge[k] += 1u;
         if (agent.lastStopAge[k] < 0xffffffffu) agent.lastStopAge[k] += 1u;
     }
@@ -1511,7 +1638,7 @@ static inline void replaceWorstFeature(Agent agent, uint tid, threadgroup float 
             if (agent.replaceSlot[0] == 1u) tgDirty[0] = 1.0f;
         }
 
-        for (uint i = tid; i < agent.featureCount; i += OAK_CORE) {
+        for (uint i = tid; i < agent.featureCount; i += OAK_SIMD_WIDTH) {
             agent.optionValue[(i) * agent.optionCount + k] = 0.0f;
             agent.optionValueAux[(i) * agent.optionCount + k] = 0.0f;
             agent.optionReward[(i) * agent.optionCount + k] = 0.0f;
@@ -1554,24 +1681,24 @@ static inline void replaceWorstFeature(Agent agent, uint tid, threadgroup float 
 }
 
 static inline void updateUtilities(Agent agent, uint tid, uint subSg, bool liveLane) {
-    const uint tgW = OAK_CORE * OAK_SPL;
-    const uint ltid = subSg * OAK_CORE + tid;
+    const uint tgW = OAK_SIMD_WIDTH * OAK_SPL;
+    const uint ltid = subSg * OAK_SIMD_WIDTH + tid;
     uint tPrev = agent.stepCount - 1u;
     device const float *prev = state_at(agent, 1u - agent.stateSlot);
     device const float *curr = state_at(agent, agent.stateSlot);
     device const uint *previousActive = activeFeatures(agent, 1u - agent.stateSlot);
     float trackingRate = track_rate(tPrev, agent.featureCount);
 
-    const uint activeSlotsPerThread = activeCount(agent.anchorCount) / OAK_CORE;
+    const uint activeSlotsPerThread = activeCount(agent.anchorCount) / OAK_SIMD_WIDTH;
     uint iS[OAK_ACTIVE_SLOTS_MAX];
     float optionTdMagnitude[OAK_ACTIVE_SLOTS_MAX], keyboardSearchSignal[OAK_ACTIVE_SLOTS_MAX];
     if (liveLane) {
     for (uint s = subSg; s < activeSlotsPerThread; s += OAK_SPL) {
-        iS[s] = previousActive[tid + s * OAK_CORE];
+        iS[s] = previousActive[tid + s * OAK_SIMD_WIDTH];
         optionTdMagnitude[s] = 0.0f; keyboardSearchSignal[s] = 0.0f;
     }
     float valueTdError = agent.td[0];
-    for (uint m = 0u; m < agent.optionCount; m += OAK_CORE) {
+    for (uint m = 0u; m < agent.optionCount; m += OAK_SIMD_WIDTH) {
         uint kH = m + tid;
         bool kLive = kH < agent.optionCount;
         uint   ofH = kLive ? agent.optionFeature[kH] : 0u;
@@ -1579,7 +1706,7 @@ static inline void updateUtilities(Agent agent, uint tid, uint subSg, bool liveL
         float kbH = kLive ? agent.keyboard[kH] : 0.0f;
         float aaH = kLive ? agent.actorAdvantage[kH] : 0.0f;
         float imH = kLive ? agent.importance[kH] : 0.0f;
-        uint kEnd = min(OAK_CORE, agent.optionCount - m);
+        uint kEnd = min(OAK_SIMD_WIDTH, agent.optionCount - m);
         for (uint l = 0u; l < kEnd; ++l) {
             uint   ofV = simd_shuffle(ofH, (ushort)l);
             float tdV = simd_shuffle(tdH, (ushort)l);
@@ -1599,7 +1726,7 @@ static inline void updateUtilities(Agent agent, uint tid, uint subSg, bool liveL
     }
     uint sel = agent.selectedOption[0] % agent.optionCount;
     for (uint s = subSg; s < activeSlotsPerThread; s += OAK_SPL) {
-        uint activeSlot = tid + s * OAK_CORE;
+        uint activeSlot = tid + s * OAK_SIMD_WIDTH;
         uint i = iS[s];
         float optionValueSignal = optionTdMagnitude[s], keyboardSignal = keyboardSearchSignal[s];
         float planningSignal = fabs(valueTdError);
@@ -1623,7 +1750,7 @@ static inline void updateUtilities(Agent agent, uint tid, uint subSg, bool liveL
         uint age = agent.featureAge[i];
         metaOptimizeUpdate(agent.valueAlpha, agent.valueBeta, agent.valueH, agent.valueGradEnergy,
                             i, valueTdError, prev[i], age, agent.metaEta, agent.invFeatureCount);
-        uint metaOptimizeSlot = tPrev % OAK_CORE;
+        uint metaOptimizeSlot = tPrev % OAK_SIMD_WIDTH;
         if (activeSlot == metaOptimizeSlot) {
 
             uint metaOptimizeOption = tPrev % max(agent.optionCount, 1u);
@@ -2021,19 +2148,10 @@ static inline void laneFence() {
     simdgroup_barrier(mem_flags::mem_device);
 }
 
-inline uint2 diagSketchBits(uint featureIndex) {
-    uint2 h = uint2(featureIndex * 0x9E3779B9u, (featureIndex + 0x632BE59Bu) * 0x85EBCA6Bu);
-    h ^= h >> 16u;
-    h *= 0x21F0AAADu;
-    h ^= h >> 15u;
-    h *= 0x735A2D97u;
-    h ^= h >> 15u;
-    return h;
-}
 
 inline float diagSketchSign(uint2 bits, uint j) {
-    uint word = j < OAK_CORE ? bits.x : bits.y;
-    return ((word >> (j % OAK_CORE)) & 1u) == 0u ? 1.0f : -1.0f;
+    uint word = j < OAK_SIMD_WIDTH ? bits.x : bits.y;
+    return ((word >> (j % OAK_SIMD_WIDTH)) & 1u) == 0u ? 1.0f : -1.0f;
 }
 
 static inline void accumulateFeatureSketch(Agent agent, uint tid, device OakDiagAccum *acc) {
@@ -2045,14 +2163,14 @@ static inline void accumulateFeatureSketch(Agent agent, uint tid, device OakDiag
         float x = curr[i];
         uint2 bits = diagSketchBits(i);
         zLo = fma(diagSketchSign(bits, tid), x, zLo);
-        zHi = fma(diagSketchSign(bits, tid + OAK_CORE), x, zHi);
+        zHi = fma(diagSketchSign(bits, tid + OAK_SIMD_WIDTH), x, zHi);
     }
     device float *rowLo = acc->gram + tid * OAK_DIAG_K;
-    device float *rowHi = acc->gram + (tid + OAK_CORE) * OAK_DIAG_K;
+    device float *rowHi = acc->gram + (tid + OAK_SIMD_WIDTH) * OAK_DIAG_K;
     for (uint c = 0u; c < OAK_DIAG_K; ++c) {
-        float zc = simd_shuffle(c < OAK_CORE ? zLo : zHi, (ushort)(c % OAK_CORE));
+        float zc = simd_shuffle(c < OAK_SIMD_WIDTH ? zLo : zHi, (ushort)(c % OAK_SIMD_WIDTH));
         if (c <= tid) rowLo[c] += zLo * zc;
-        if (c < OAK_CORE || c - OAK_CORE <= tid) rowHi[c] += zHi * zc;
+        if (c < OAK_SIMD_WIDTH || c - OAK_SIMD_WIDTH <= tid) rowHi[c] += zHi * zc;
     }
 }
 
@@ -2094,7 +2212,8 @@ kernel void oak_megastep(device float *params [[buffer(0)]],
     threadgroup float *lCont = tgCont + laneSg * tgK;
     threadgroup float *lStash = tgCont + OAK_MEGA_G * tgK + laneSg * 4u * tgK;
     threadgroup float *lDirty = tgCont + 5u * OAK_MEGA_G * tgK + laneSg;
-    threadgroup float *laneRed = tgCont + 5u * OAK_MEGA_G * tgK + OAK_MEGA_G + laneSg * OAK_CORE * OAK_SPL;
+    threadgroup float *laneRed =
+        tgCont + 5u * OAK_MEGA_G * tgK + OAK_MEGA_G + laneSg * OAK_RED_WIDTH * OAK_SIMD_WIDTH * OAK_SPL;
     for (uint it = 0u; it < dispatchSpan.x; ++it) {
 
         if ((OAK_MEGA_STAGES & 1u) != 0u) {
@@ -2103,13 +2222,13 @@ kernel void oak_megastep(device float *params [[buffer(0)]],
                     Agent agent = make_agent(params, stateArena, uintArena, scalars, cfg,
                                        wideLane - laneShift, wideLane,
                                        lanes[wideLane].envObservationCount, lanes[wideLane].envActionCount);
-                    encodeObservation(agent, slane, 0u, true, OAK_CORE, lCont, lStash, laneRed);
+                    encodeObservation(agent, slane, 0u, true, OAK_SIMD_WIDTH, lCont, lStash, laneRed);
                 }
             } else {
                 Agent agent = make_agent(params, stateArena, uintArena, scalars, cfg,
                                    stageLane - laneShift, stageLane,
                                    lanes[stageLane].envObservationCount, lanes[stageLane].envActionCount);
-                encodeObservation(agent, slane, subSg, wideActive, OAK_CORE, lCont, lStash, laneRed);
+                encodeObservation(agent, slane, subSg, wideActive, OAK_SIMD_WIDTH, lCont, lStash, laneRed);
             }
         }
         laneSyncDev();
@@ -2152,7 +2271,7 @@ kernel void oak_megastep(device float *params [[buffer(0)]],
                 }
             }
         }
-        laneSyncDev();
+        simdSyncDev();
         if (wideActive && subSg == 0u && (OAK_MEGA_STAGES & 32u) != 0u) {
             Agent agent = make_agent(params, stateArena, uintArena, scalars, cfg,
                                wideLane - laneShift, wideLane,
@@ -2163,7 +2282,7 @@ kernel void oak_megastep(device float *params [[buffer(0)]],
 
         if ((OAK_MEGA_STAGES & 64u) != 0u) {
             bool wideStep = is_function_constant_defined(OAK_SPEC_ENV_KIND)
-                && laneIsMjEngine(OAK_SPEC_ENV_KIND);
+                && laneIsMj(OAK_SPEC_ENV_KIND);
             if (wideStep) {
                 if (wideActive && subSg == 0u)
                     stepEnvironment(params, stateArena, uintArena, scalars, cfg,
@@ -2177,15 +2296,15 @@ kernel void oak_megastep(device float *params [[buffer(0)]],
                                     packedLane - laneShift, 0u, false);
             }
         }
+        uint planStep = dispatchSpan.y + it + 1u;
+        uint planSkipPos = (OAK_PLAN_PERIOD == 0u) ? OAK_MEGA_G
+            : ((planStep % OAK_PLAN_PERIOD) + OAK_PLAN_PERIOD
+               - (laneBase % OAK_PLAN_PERIOD)) % OAK_PLAN_PERIOD;
+        bool skipInThisGroup = planSkipPos < lanesThisTg;
         if (OAK_SPL == 1u) {
-            if (sgrp > 0u && lanesThisTg > 0u) {
-                uint idx = sgrp - 1u;
-                if (lanesThisTg > OAK_MEGA_G - 1u) {
-
-                    uint T = dispatchSpan.y + it + 1u;
-                    uint skip = T % lanesThisTg;
-                    if (idx >= skip) idx += 1u;
-                }
+            if ((skipInThisGroup ? (sgrp > 0u) : wideActive) && lanesThisTg > 0u) {
+                uint idx = skipInThisGroup ? (sgrp - 1u) : laneSg;
+                if (skipInThisGroup && idx >= planSkipPos) idx += 1u;
                 if (idx < lanesThisTg) {
                     uint wLane = laneBase + idx;
                     Agent planAgent = make_agent(params, stateArena, uintArena, scalars, cfg,
@@ -2199,14 +2318,14 @@ kernel void oak_megastep(device float *params [[buffer(0)]],
                     if ((OAK_MEGA_STAGES & 4u) != 0u) {
                         device const float *prevS = state_at(planAgent, pSlot);
                         device const float *currS = state_at(planAgent, 1u - pSlot);
-                        learnFromTransition(planAgent, prevS, currS, slane, 0u, true, OAK_CORE, pSlot, laneRed);
+                        learnFromTransition(planAgent, prevS, currS, slane, 0u, true, OAK_SIMD_WIDTH, pSlot, laneRed);
                     }
                     simdgroup_barrier(mem_flags::mem_device);
                     if ((OAK_MEGA_STAGES & 8u) != 0u)
                         updateUtilities(planAgent, slane, 0u, true);
                 }
             }
-        } else {
+        } else if (!skipInThisGroup || laneSg != planSkipPos) {
             Agent planAgent = make_agent(params, stateArena, uintArena, scalars, cfg,
                                 stageLane - laneShift, stageLane,
                                 lanes[stageLane].envObservationCount, lanes[stageLane].envActionCount);
@@ -2218,13 +2337,13 @@ kernel void oak_megastep(device float *params [[buffer(0)]],
             if ((OAK_MEGA_STAGES & 4u) != 0u) {
                 device const float *prevS = state_at(planAgent, pSlot);
                 device const float *currS = state_at(planAgent, 1u - pSlot);
-                learnFromTransition(planAgent, prevS, currS, slane, subSg, wideActive, OAK_CORE, pSlot, laneRed);
+                learnFromTransition(planAgent, prevS, currS, slane, subSg, wideActive, OAK_SIMD_WIDTH, pSlot, laneRed);
             }
             laneSyncDev();
             if ((OAK_MEGA_STAGES & 8u) != 0u)
                 updateUtilities(planAgent, slane, subSg, wideActive);
         }
-        threadgroup_barrier(mem_flags::mem_device);
+        threadgroup_barrier(mem_flags::mem_device | mem_flags::mem_threadgroup);
     }
 }
 
@@ -2257,13 +2376,13 @@ kernel void oak_fleet_snapshot(device float *params [[buffer(0)]],
         device const float *lp = params + sgidL * cfg.paramStride;
 
         uint firstNF = 0xffffffffu;
-        for (uint i = slane; i < cfg.paramStride; i += OAK_CORE) {
+        for (uint i = slane; i < cfg.paramStride; i += OAK_SIMD_WIDTH) {
             if (!isfinite(lp[i])) { firstNF = i; break; }
         }
         firstNF = simd_min(firstNF);
         uint lim = min(firstNF, cfg.paramStride);
         float mx = 0.0f, sumAbs = 0.0f, sumAbsValue = 0.0f;
-        for (uint i = slane; i < lim; i += OAK_CORE) {
+        for (uint i = slane; i < lim; i += OAK_SIMD_WIDTH) {
             float a = fabs(lp[i]);
             mx = max(mx, a);
             sumAbs += a;
@@ -2288,7 +2407,7 @@ kernel void oak_fleet_snapshot(device float *params [[buffer(0)]],
         Agent agent = make_agent(params, stateArena, uintArena, scalars, cfg, sgidL, sgid, 0u, 0u);
         device OakDiagAccum *acc = &diagAccum[sgid];
         uint births = 0u;
-        for (uint i = slane; i < diagRank; i += OAK_CORE) {
+        for (uint i = slane; i < diagRank; i += OAK_SIMD_WIDTH) {
             rec[i] = as_type<float>(agent.featureAge[i]);
             rec[diagRank + i] = agent.featureUtility[i];
             rec[2u * diagRank + i] = agent.valueAlpha[i];
@@ -2297,7 +2416,7 @@ kernel void oak_fleet_snapshot(device float *params [[buffer(0)]],
             births += agent.featureBirthCount[i];
         }
         births = simd_sum(births);
-        for (uint g = slane; g < OAK_DIAG_GRAM; g += OAK_CORE) {
+        for (uint g = slane; g < OAK_DIAG_GRAM; g += OAK_SIMD_WIDTH) {
             rec[5u * diagRank + 3u + g] = acc->gram[g];
             acc->gram[g] = 0.0f;
         }

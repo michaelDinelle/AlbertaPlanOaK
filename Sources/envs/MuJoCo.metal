@@ -12,13 +12,20 @@ constant int MJ_SOLVER_ITER = 10;
 constant int MJ_LS_ITER = 15;
 
 inline uint mjScratchWords(uint nv, uint nbody, uint ngeom, uint nconMax, uint nefcMax, uint nM) {
-    return 76u*nbody + 34u*nv + 6u*ngeom + 43u + 2u*nM + 26u*nconMax + nefcMax*(nv + 3u);
+    return 60u*nbody + 28u*nv + 6u*ngeom + 40u + 2u*nM + 27u*max(nconMax, 1u) + nefcMax*(nv + 3u);
 }
 
 #pragma METAL fp math_mode(fast)
 
 inline bool mj_isBad(float x) {
     return (x != x) || (x > MJ_MAXVAL) || (x < -MJ_MAXVAL);
+}
+
+inline float mj_peerSum(device const float *store, float v) {
+    return simd_sum(v);
+}
+inline float mj_peerSum(thread const float *store, float v) {
+    return v;
 }
 
 template<typename PA, typename PB>
@@ -639,6 +646,7 @@ struct MjEngine {
         constant float *spec;
         float timestep;
         float gravityZ;
+        int maxDepth;
         int body_rootid[NBODY];
     };
 
@@ -657,10 +665,8 @@ struct MjEngine {
         PF xaxis;
         PF geom_xpos;
         PF geom_xaxis;
-        PF com1;
         PF cinert;
         PF cdof;
-        PF cdofdot;
         PF cvel;
         PF M;
         PF qLD;
@@ -670,7 +676,6 @@ struct MjEngine {
         PF efc_D;
         PF efc_aref;
         PF qfrc_bias;
-        PF qfrc_passive;
         PF qfrc_smooth;
         PF qacc_smooth;
         PF qacc;
@@ -679,13 +684,12 @@ struct MjEngine {
         PF stageXquat;
         PF stageXmat;
         PF subCom;
-        PF rneCacc;
         PF rneCfrc;
-        PF crb;
         PF cfrcOut;
         PF rkQ0;
         PF rkXv;
         PF rkFa;
+        PF rkVel;
         PF pcbuf;
         PF conPos;
         PF conFrame;
@@ -704,7 +708,7 @@ struct MjEngine {
     };
     using Work = WorkT<device float *>;
     using TWork = WorkT<thread float *>;
-    enum : uint { KINWORK_WORDS = 59u*NBODY + 18u*NV + 6u*NGEOM + 3u };
+    enum : uint { KINWORK_WORDS = 53u*NBODY + 13u*NV + 6u*NGEOM };
 
 
 
@@ -769,10 +773,13 @@ struct MjEngine {
         m.timestep = m.opt[0];
         m.gravityZ = m.opt[1];
         m.body_rootid[0] = 0;
+        m.maxDepth = 0;
         for (int i = 1; i < int(NBODY); i++) {
             int r = i;
-            while (m.body_parentid[r] != 0) r = m.body_parentid[r];
+            int d = 1;
+            while (m.body_parentid[r] != 0) { r = m.body_parentid[r]; d++; }
             m.body_rootid[i] = r;
+            m.maxDepth = max(m.maxDepth, d);
         }
         return m;
     }
@@ -795,10 +802,8 @@ struct MjEngine {
         w.xaxis = p; p += 3u*NV;
         w.geom_xpos = p; p += 3u*NGEOM;
         w.geom_xaxis = p; p += 3u*NGEOM;
-        w.com1 = p; p += 3u;
         w.cinert = p; p += 10u*NBODY;
         w.cdof = p; p += 6u*NV;
-        w.cdofdot = p; p += 6u*NV;
         w.cvel = p; p += 6u*NBODY;
         w.M = p; p += NM;
         w.qLD = p; p += NM;
@@ -808,7 +813,6 @@ struct MjEngine {
         w.efc_D = p; p += NEFC;
         w.efc_aref = p; p += NEFC;
         w.qfrc_bias = p; p += NV;
-        w.qfrc_passive = p; p += NV;
         w.qfrc_smooth = p; p += NV;
         w.qacc_smooth = p; p += NV;
         w.qacc = p; p += NV;
@@ -817,13 +821,12 @@ struct MjEngine {
         w.stageXquat = p; p += 4u*NBODY;
         w.stageXmat = p; p += 9u*NBODY;
         w.subCom = p; p += 3u*NBODY;
-        w.rneCacc = p; p += 6u*NBODY;
         w.rneCfrc = p; p += 6u*NBODY;
-        w.crb = p; p += 10u*NBODY;
         w.cfrcOut = p; p += 6u*NBODY;
         w.rkQ0 = p; p += NV + NBODY;
         w.rkXv = p; p += 4u*NV;
         w.rkFa = p; p += 4u*NV;
+        w.rkVel = p; p += NV;
         w.pcbuf = p; p += 40u;
         w.conPos = p; p += 3u*(NCON == 0u ? 1u : NCON);
         w.conFrame = p; p += 9u*(NCON == 0u ? 1u : NCON);
@@ -851,16 +854,14 @@ struct MjEngine {
         w.xaxis = p; p += 3u*NV;
         w.geom_xpos = p; p += 3u*NGEOM;
         w.geom_xaxis = p; p += 3u*NGEOM;
-        w.com1 = p; p += 3u;
         w.cinert = p; p += 10u*NBODY;
         w.cdof = p; p += 6u*NV;
-        w.cdofdot = p; p += 6u*NV;
         w.cvel = p; p += 6u*NBODY;
+        w.qfrc_bias = p; p += NV;
         w.stageXpos = p; p += 3u*NBODY;
         w.stageXquat = p; p += 4u*NBODY;
         w.stageXmat = p; p += 9u*NBODY;
         w.subCom = p; p += 3u*NBODY;
-        w.rneCacc = p; p += 6u*NBODY;
         w.rneCfrc = p; p += 6u*NBODY;
         w.M = buf;
         w.qLD = buf;
@@ -869,17 +870,15 @@ struct MjEngine {
         w.efc_pos = buf;
         w.efc_D = buf;
         w.efc_aref = buf;
-        w.qfrc_bias = buf;
-        w.qfrc_passive = buf;
         w.qfrc_smooth = buf;
         w.qacc_smooth = buf;
         w.qacc = buf;
         w.qfrc_constraint = buf;
-        w.crb = buf;
         w.cfrcOut = buf;
         w.rkQ0 = buf;
         w.rkXv = buf;
         w.rkFa = buf;
+        w.rkVel = buf;
         w.pcbuf = buf;
         w.conPos = buf;
         w.conFrame = buf;
@@ -917,92 +916,119 @@ struct MjEngine {
         }
     }
 
+    static int bodyDepth(thread const Model &m, int i) {
+        int d = 0;
+        while (i != 0) { i = m.body_parentid[i]; d++; }
+        return d;
+    }
+
+    static int bodyAncestor(thread const Model &m, int i, int depth, int level) {
+        for (int u = depth; u > level; u--) i = m.body_parentid[i];
+        return i;
+    }
+
+    static bool bodyUnder(thread const Model &m, int root, int i) {
+        for (int a = m.body_parentid[i]; a != 0; a = m.body_parentid[a])
+            if (a == root) return true;
+        return false;
+    }
+
     template<typename W>
     static void kinematics(thread const Model &m, State s, thread W &w,
                            uint slane, uint snum) {
         auto xpos = w.stageXpos;
         auto xquat = w.stageXquat;
         auto xmat = w.stageXmat;
-        for (int k = 0; k < 3; k++) { xpos[k] = 0.0f; w.xipos[k] = 0.0f; }
-        xquat[0] = 1.0f; xquat[1] = 0.0f; xquat[2] = 0.0f; xquat[3] = 0.0f;
-        for (int k = 0; k < 9; k++) {
-            xmat[k] = (k % 4 == 0) ? 1.0f : 0.0f;
-            w.ximat[k] = (k % 4 == 0) ? 1.0f : 0.0f;
-        }
-        for (int i = 1; i < int(NBODY); i++) {
-            int firstJ = -1;
-            for (int j = 0; j < int(NJNT); j++) {
-                if (m.jnt_bodyid[j] == i) { firstJ = j; break; }
+        if (slane == 0u) {
+            for (int k = 0; k < 3; k++) { xpos[k] = 0.0f; w.xipos[k] = 0.0f; }
+            for (int k = 0; k < 4; k++) xquat[k] = (k == 0) ? 1.0f : 0.0f;
+            for (int k = 0; k < 9; k++) {
+                xmat[k] = (k % 4 == 0) ? 1.0f : 0.0f;
+                w.ximat[k] = (k % 4 == 0) ? 1.0f : 0.0f;
             }
-            float pos[3], quat[4];
-            if (firstJ >= 0 && m.jnt_type[firstJ] == 0) {
-                int qadr = m.jnt_qposadr[firstJ];
-                pos[0] = s.qpos[qadr]; pos[1] = s.qpos[qadr + 1]; pos[2] = s.qpos[qadr + 2];
-                quat[0] = s.qpos[qadr + 3]; quat[1] = s.qpos[qadr + 4];
-                quat[2] = s.qpos[qadr + 5]; quat[3] = s.qpos[qadr + 6];
-                mj_normalize4(quat);
-                w.xanchor[3*firstJ] = pos[0]; w.xanchor[3*firstJ + 1] = pos[1]; w.xanchor[3*firstJ + 2] = pos[2];
-                w.xaxis[3*firstJ] = m.jnt_axis[3*firstJ];
-                w.xaxis[3*firstJ + 1] = m.jnt_axis[3*firstJ + 1];
-                w.xaxis[3*firstJ + 2] = m.jnt_axis[3*firstJ + 2];
-            } else {
-                int pid = m.body_parentid[i];
-                float bpos[3] = { m.body_pos[3*i], m.body_pos[3*i + 1], m.body_pos[3*i + 2] };
-                float bquat[4] = { m.body_quat[4*i], m.body_quat[4*i + 1], m.body_quat[4*i + 2], m.body_quat[4*i + 3] };
-                if (pid == 0) {
-                    pos[0] = bpos[0]; pos[1] = bpos[1]; pos[2] = bpos[2];
-                    quat[0] = bquat[0]; quat[1] = bquat[1]; quat[2] = bquat[2]; quat[3] = bquat[3];
-                } else {
-                    auto pm = xmat + 9*pid;
-                    pos[0] = pm[0]*bpos[0] + pm[1]*bpos[1] + pm[2]*bpos[2] + xpos[3*pid + 0];
-                    pos[1] = pm[3]*bpos[0] + pm[4]*bpos[1] + pm[5]*bpos[2] + xpos[3*pid + 1];
-                    pos[2] = pm[6]*bpos[0] + pm[7]*bpos[1] + pm[8]*bpos[2] + xpos[3*pid + 2];
-                    float pq[4] = { xquat[4*pid], xquat[4*pid + 1], xquat[4*pid + 2], xquat[4*pid + 3] };
-                    mj_mulQuat(quat, pq, bquat);
-                }
-                for (int j = 0; j < int(NJNT); j++) {
-                    if (m.jnt_bodyid[j] != i) continue;
-                    float axisLocal[3] = { m.jnt_axis[3*j], m.jnt_axis[3*j + 1], m.jnt_axis[3*j + 2] };
-                    float jp[3] = { m.jnt_pos[3*j], m.jnt_pos[3*j + 1], m.jnt_pos[3*j + 2] };
-                    float xax[3], anc[3];
-                    mj_rotVecQuat(xax, axisLocal, quat);
-                    mj_rotVecQuat(anc, jp, quat);
-                    anc[0] += pos[0]; anc[1] += pos[1]; anc[2] += pos[2];
-                    int qadr = m.jnt_qposadr[j];
-                    if (m.jnt_type[j] == 2) {
-                        float dq = s.qpos[qadr] - m.qpos0[qadr];
-                        pos[0] += xax[0]*dq; pos[1] += xax[1]*dq; pos[2] += xax[2]*dq;
-                    } else {
-                        float qloc[4], qn[4];
-                        mj_axisAngle2Quat(qloc, axisLocal, s.qpos[qadr] - m.qpos0[qadr]);
-                        mj_mulQuat(qn, quat, qloc);
-                        quat[0] = qn[0]; quat[1] = qn[1]; quat[2] = qn[2]; quat[3] = qn[3];
-                        float off[3];
-                        mj_rotVecQuat(off, jp, quat);
-                        pos[0] = anc[0] - off[0]; pos[1] = anc[1] - off[1]; pos[2] = anc[2] - off[2];
+        }
+        for (int b0 = 0; b0 < int(NBODY); b0 += int(snum)) {
+            int i = b0 + int(slane);
+            if (i < 1 || i >= int(NBODY)) continue;
+            int depth = bodyDepth(m, i);
+            float pos[3] = { 0.0f, 0.0f, 0.0f };
+            float quat[4] = { 1.0f, 0.0f, 0.0f, 0.0f };
+            float mat[9] = { 1.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 0.0f, 1.0f };
+            for (int level = 1; level <= depth; level++) {
+                int b = bodyAncestor(m, i, depth, level);
+                bool owner = (b == i);
+                int firstJ = (m.body_dofnum[b] > 0) ? m.dof_jntid[m.body_dofadr[b]] : -1;
+                if (firstJ >= 0 && m.jnt_type[firstJ] == 0) {
+                    int qadr = m.jnt_qposadr[firstJ];
+                    pos[0] = s.qpos[qadr]; pos[1] = s.qpos[qadr + 1]; pos[2] = s.qpos[qadr + 2];
+                    quat[0] = s.qpos[qadr + 3]; quat[1] = s.qpos[qadr + 4];
+                    quat[2] = s.qpos[qadr + 5]; quat[3] = s.qpos[qadr + 6];
+                    mj_normalize4(quat);
+                    if (owner) {
+                        w.xanchor[3*firstJ] = pos[0]; w.xanchor[3*firstJ + 1] = pos[1]; w.xanchor[3*firstJ + 2] = pos[2];
+                        w.xaxis[3*firstJ] = m.jnt_axis[3*firstJ];
+                        w.xaxis[3*firstJ + 1] = m.jnt_axis[3*firstJ + 1];
+                        w.xaxis[3*firstJ + 2] = m.jnt_axis[3*firstJ + 2];
                     }
-                    w.xanchor[3*j] = anc[0]; w.xanchor[3*j + 1] = anc[1]; w.xanchor[3*j + 2] = anc[2];
-                    w.xaxis[3*j] = xax[0]; w.xaxis[3*j + 1] = xax[1]; w.xaxis[3*j + 2] = xax[2];
+                } else {
+                    float bpos[3] = { m.body_pos[3*b], m.body_pos[3*b + 1], m.body_pos[3*b + 2] };
+                    float bquat[4] = { m.body_quat[4*b], m.body_quat[4*b + 1], m.body_quat[4*b + 2], m.body_quat[4*b + 3] };
+                    if (m.body_parentid[b] == 0) {
+                        pos[0] = bpos[0]; pos[1] = bpos[1]; pos[2] = bpos[2];
+                        quat[0] = bquat[0]; quat[1] = bquat[1]; quat[2] = bquat[2]; quat[3] = bquat[3];
+                    } else {
+                        float px = mat[0]*bpos[0] + mat[1]*bpos[1] + mat[2]*bpos[2] + pos[0];
+                        float py = mat[3]*bpos[0] + mat[4]*bpos[1] + mat[5]*bpos[2] + pos[1];
+                        float pz = mat[6]*bpos[0] + mat[7]*bpos[1] + mat[8]*bpos[2] + pos[2];
+                        float pq[4] = { quat[0], quat[1], quat[2], quat[3] };
+                        mj_mulQuat(quat, pq, bquat);
+                        pos[0] = px; pos[1] = py; pos[2] = pz;
+                    }
+                    for (int j = firstJ; j >= 0 && j < int(NJNT) && m.jnt_bodyid[j] == b; j++) {
+                        float axisLocal[3] = { m.jnt_axis[3*j], m.jnt_axis[3*j + 1], m.jnt_axis[3*j + 2] };
+                        float jp[3] = { m.jnt_pos[3*j], m.jnt_pos[3*j + 1], m.jnt_pos[3*j + 2] };
+                        float xax[3], anc[3];
+                        mj_rotVecQuat(xax, axisLocal, quat);
+                        mj_rotVecQuat(anc, jp, quat);
+                        anc[0] += pos[0]; anc[1] += pos[1]; anc[2] += pos[2];
+                        int qadr = m.jnt_qposadr[j];
+                        if (m.jnt_type[j] == 2) {
+                            float dq = s.qpos[qadr] - m.qpos0[qadr];
+                            pos[0] += xax[0]*dq; pos[1] += xax[1]*dq; pos[2] += xax[2]*dq;
+                        } else {
+                            float qloc[4], qn[4];
+                            mj_axisAngle2Quat(qloc, axisLocal, s.qpos[qadr] - m.qpos0[qadr]);
+                            mj_mulQuat(qn, quat, qloc);
+                            quat[0] = qn[0]; quat[1] = qn[1]; quat[2] = qn[2]; quat[3] = qn[3];
+                            float off[3];
+                            mj_rotVecQuat(off, jp, quat);
+                            pos[0] = anc[0] - off[0]; pos[1] = anc[1] - off[1]; pos[2] = anc[2] - off[2];
+                        }
+                        if (owner) {
+                            w.xanchor[3*j] = anc[0]; w.xanchor[3*j + 1] = anc[1]; w.xanchor[3*j + 2] = anc[2];
+                            w.xaxis[3*j] = xax[0]; w.xaxis[3*j + 1] = xax[1]; w.xaxis[3*j + 2] = xax[2];
+                        }
+                    }
+                    mj_normalize4(quat);
                 }
-                mj_normalize4(quat);
+                mj_quat2Mat(mat, quat);
             }
-            xpos[3*i] = pos[0]; xpos[3*i + 1] = pos[1]; xpos[3*i + 2] = pos[2];
-            xquat[4*i] = quat[0]; xquat[4*i + 1] = quat[1]; xquat[4*i + 2] = quat[2]; xquat[4*i + 3] = quat[3];
-            mj_quat2Mat(xmat + 9*i, quat);
-        }
-        for (int i = 1 + int(slane); i < int(NBODY); i += int(snum)) {
-            auto bm = xmat + 9*i;
+            for (int k = 0; k < 3; k++) xpos[3*i + k] = pos[k];
+            for (int k = 0; k < 4; k++) xquat[4*i + k] = quat[k];
+            for (int k = 0; k < 9; k++) xmat[9*i + k] = mat[k];
             float ip[3] = { m.body_ipos[3*i], m.body_ipos[3*i + 1], m.body_ipos[3*i + 2] };
-            w.xipos[3*i + 0] = bm[0]*ip[0] + bm[1]*ip[1] + bm[2]*ip[2] + xpos[3*i + 0];
-            w.xipos[3*i + 1] = bm[3]*ip[0] + bm[4]*ip[1] + bm[5]*ip[2] + xpos[3*i + 1];
-            w.xipos[3*i + 2] = bm[6]*ip[0] + bm[7]*ip[1] + bm[8]*ip[2] + xpos[3*i + 2];
+            w.xipos[3*i + 0] = mat[0]*ip[0] + mat[1]*ip[1] + mat[2]*ip[2] + pos[0];
+            w.xipos[3*i + 1] = mat[3]*ip[0] + mat[4]*ip[1] + mat[5]*ip[2] + pos[1];
+            w.xipos[3*i + 2] = mat[6]*ip[0] + mat[7]*ip[1] + mat[8]*ip[2] + pos[2];
             float iq[4] = { m.body_iquat[4*i], m.body_iquat[4*i + 1], m.body_iquat[4*i + 2], m.body_iquat[4*i + 3] };
-            float bq[4] = { xquat[4*i], xquat[4*i + 1], xquat[4*i + 2], xquat[4*i + 3] };
             float q[4];
-            mj_mulQuat(q, bq, iq);
+            mj_mulQuat(q, quat, iq);
             mj_quat2Mat(w.ximat + 9*i, q);
         }
-        for (int g = int(slane); g < int(NGEOM); g += int(snum)) {
+        if (snum == 32u) simdgroup_barrier(mem_flags::mem_device);
+        for (int g0 = 0; g0 < int(NGEOM); g0 += int(snum)) {
+            int g = g0 + int(slane);
+            if (g >= int(NGEOM)) continue;
             int b = m.geom_bodyid[g];
             auto bm = xmat + 9*b;
             float gp[3] = { m.geom_pos[3*g], m.geom_pos[3*g + 1], m.geom_pos[3*g + 2] };
@@ -1025,25 +1051,30 @@ struct MjEngine {
     static void comPos(thread const Model &m, State s, thread W &w,
                        uint slane, uint snum) {
         auto subCom = w.subCom;
-        if (slane == 0u) {
-            for (int i = 0; i < int(NBODY); i++)
-                for (int k = 0; k < 3; k++)
-                    subCom[3*i + k] = w.xipos[3*i + k] * m.body_mass[i];
-            for (int i = int(NBODY) - 1; i >= 1; i--) {
-                int p = m.body_parentid[i];
-                for (int k = 0; k < 3; k++) subCom[3*p + k] += subCom[3*i + k];
+        for (int r = 1; r < int(NBODY); r++) {
+            if (m.body_parentid[r] != 0) continue;
+            float cx = 0.0f, cy = 0.0f, cz = 0.0f;
+            for (int b0 = 0; b0 < int(NBODY); b0 += int(snum)) {
+                int j = b0 + int(slane);
+                bool inSub = (j > 0 && j < int(NBODY)) && (m.body_rootid[j] == r);
+                int src = inSub ? j : 0;
+                float mass = inSub ? m.body_mass[src] : 0.0f;
+                cx += w.xipos[3*src + 0]*mass;
+                cy += w.xipos[3*src + 1]*mass;
+                cz += w.xipos[3*src + 2]*mass;
             }
-            for (int i = 0; i < int(NBODY); i++) {
-                if (m.body_subtreemass[i] < MJ_MINVAL) {
-                    for (int k = 0; k < 3; k++) subCom[3*i + k] = w.xipos[3*i + k];
-                } else {
-                    float inv = 1.0f / m.body_subtreemass[i];
-                    for (int k = 0; k < 3; k++) subCom[3*i + k] *= inv;
-                }
+            cx = mj_peerSum(subCom, cx);
+            cy = mj_peerSum(subCom, cy);
+            cz = mj_peerSum(subCom, cz);
+            if (m.body_subtreemass[r] < MJ_MINVAL) {
+                cx = w.xipos[3*r + 0]; cy = w.xipos[3*r + 1]; cz = w.xipos[3*r + 2];
+            } else {
+                float inv = 1.0f / m.body_subtreemass[r];
+                cx *= inv; cy *= inv; cz *= inv;
             }
+            if (slane == 0u) { subCom[3*r + 0] = cx; subCom[3*r + 1] = cy; subCom[3*r + 2] = cz; }
         }
         if (snum == 32u) simdgroup_barrier(mem_flags::mem_device);
-        w.com1[0] = subCom[3]; w.com1[1] = subCom[4]; w.com1[2] = subCom[5];
         for (int k = 0; k < 10; k++) w.cinert[k] = 0.0f;
         for (int i = 1 + int(slane); i < int(NBODY); i += int(snum)) {
             int r = m.body_rootid[i];
@@ -1087,21 +1118,18 @@ struct MjEngine {
     }
 
     static void makeM(thread const Model &m, thread Work &w, thread float *mrow, uint slane) {
-        auto crb = w.crb;
-        if (slane == 0u) {
-            for (int k = 0; k < int(10*NBODY); k++) crb[k] = w.cinert[k];
-            for (int i = int(NBODY) - 1; i >= 1; i--) {
-                int p = m.body_parentid[i];
-                if (p > 0)
-                    for (int k = 0; k < 10; k++) crb[10*p + k] += crb[10*i + k];
-            }
-        }
-        simdgroup_barrier(mem_flags::mem_device);
         int i = int(slane);
         for (int c = 0; c < int(NV); c++) mrow[c] = 0.0f;
         if (i < int(NV)) {
+            int b = m.dof_bodyid[i];
+            float crbBody[10];
+            for (int k = 0; k < 10; k++) crbBody[k] = w.cinert[10*b + k];
+            for (int j = b + 1; j < int(NBODY); j++) {
+                if (!bodyUnder(m, b, j)) continue;
+                for (int k = 0; k < 10; k++) crbBody[k] += w.cinert[10*j + k];
+            }
             float buf[6];
-            mj_mulInertVec(buf, crb + 10*m.dof_bodyid[i], w.cdof + 6*i);
+            mj_mulInertVec(buf, crbBody, w.cdof + 6*i);
             mrow[i] = m.dof_armature[i] + mj_dot6(w.cdof + 6*i, buf);
             int j = m.dof_parentid[i];
             while (j >= 0) {
@@ -1150,13 +1178,12 @@ struct MjEngine {
                                   uint slane) {
         int i = int(slane);
         float yv[NV];
-        for (int k = 0; k < int(NV); k++) {
-            float sv = 0.0f;
-            if (i == k) {
-                for (int j = 0; j < k; j++) sv = fma(row[j], yv[j], sv);
-                sv = (rhs[k] - sv)/row[k];
-            }
-            yv[k] = simd_shuffle(sv, ushort(k));
+        float yOwn = (i < int(NV)) ? rhs[i] : 0.0f;
+        for (int j = 0; j < int(NV); j++) {
+            float djj = simd_shuffle(row[j], ushort(j));
+            float yj = simd_shuffle(yOwn, ushort(j))/djj;
+            yv[j] = yj;
+            if (i > j && i < int(NV)) yOwn = fma(-row[j], yj, yOwn);
         }
         float xOwn = 0.0f;
         for (int k = int(NV) - 1; k >= 0; k--) {
@@ -1438,67 +1465,71 @@ struct MjEngine {
     static void comVelRne(thread const Model &m, State s, thread W &w, thread float *qfrcBiasT,
                           uint slane, uint snum) {
         auto cfrc = w.rneCfrc;
-        auto caccAll = w.rneCacc;
-        auto cvelAll = w.cvel;
-        auto cdofdotT = w.cdofdot;
+        auto cvel = w.cvel;
         if (slane == 0u) {
-            for (int k = 0; k < 6; k++) {
-                cvelAll[k] = 0.0f;
-                cfrc[k] = 0.0f;
-                caccAll[k] = 0.0f;
-            }
-            caccAll[5] = -m.gravityZ;
-            for (int i = 1; i < int(NBODY); i++) {
-                int p = m.body_parentid[i];
-                float v6[6], acc[6];
-                for (int k = 0; k < 6; k++) v6[k] = cvelAll[6*p + k];
-                for (int k = 0; k < 6; k++) acc[k] = caccAll[6*p + k];
-                int bda = m.body_dofadr[i];
-                int nn = m.body_dofnum[i];
+            for (int k = 0; k < 6; k++) { cvel[k] = 0.0f; cfrc[k] = 0.0f; }
+        }
+        for (int b0 = 0; b0 < int(NBODY); b0 += int(snum)) {
+            int i = b0 + int(slane);
+            if (i < 1 || i >= int(NBODY)) continue;
+            int depth = bodyDepth(m, i);
+            float v6[6] = { 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f };
+            float acc[6] = { 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, -m.gravityZ };
+            for (int level = 1; level <= depth; level++) {
+                int b = bodyAncestor(m, i, depth, level);
+                int bda = m.body_dofadr[b];
+                int nn = m.body_dofnum[b];
                 int k = 0;
                 while (k < nn) {
                     int j = bda + k;
                     if (m.jnt_type[m.dof_jntid[j]] == 0) {
                         for (int t = 0; t < 3; t++)
-                            for (int c = 0; c < 6; c++) cdofdotT[6*(j + t) + c] = 0.0f;
-                        for (int t = 0; t < 3; t++)
                             for (int c = 0; c < 6; c++) v6[c] += w.cdof[6*(j + t) + c] * s.qvel[j + t];
-                        for (int t = 3; t < 6; t++)
-                            mj_crossMotion(cdofdotT + 6*(j + t), v6, w.cdof + 6*(j + t));
+                        for (int t = 3; t < 6; t++) {
+                            float dd[6];
+                            mj_crossMotion(dd, v6, w.cdof + 6*(j + t));
+                            for (int c = 0; c < 6; c++) acc[c] += dd[c] * s.qvel[j + t];
+                        }
                         float tmp[6] = { 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f };
                         for (int t = 3; t < 6; t++)
                             for (int c = 0; c < 6; c++) tmp[c] += w.cdof[6*(j + t) + c] * s.qvel[j + t];
                         for (int c = 0; c < 6; c++) v6[c] += tmp[c];
                         k += 6;
                     } else {
-                        mj_crossMotion(cdofdotT + 6*j, v6, w.cdof + 6*j);
+                        float dd[6];
+                        mj_crossMotion(dd, v6, w.cdof + 6*j);
+                        for (int c = 0; c < 6; c++) acc[c] += dd[c] * s.qvel[j];
                         for (int t = 0; t < 6; t++) v6[t] += w.cdof[6*j + t] * s.qvel[j];
                         k++;
                     }
                 }
-                for (int c = 0; c < 6; c++) cvelAll[6*i + c] = v6[c];
-                for (int kk = 0; kk < nn; kk++) {
-                    int j = bda + kk;
-                    for (int t = 0; t < 6; t++) acc[t] += cdofdotT[6*j + t] * s.qvel[j];
-                }
-                for (int c = 0; c < 6; c++) caccAll[6*i + c] = acc[c];
-                float ci[10];
-                for (int t = 0; t < 10; t++) ci[t] = w.cinert[10*i + t];
-                float tmp[6], tmp1[6], cf[6];
-                mj_mulInertVec(tmp, ci, acc);
-                mj_mulInertVec(tmp1, ci, v6);
-                mj_crossForce(cf, v6, tmp1);
-                for (int c = 0; c < 6; c++) cfrc[6*i + c] = tmp[c] + cf[c];
             }
-            for (int i = int(NBODY) - 1; i >= 1; i--) {
-                int p = m.body_parentid[i];
-                if (p != 0)
-                    for (int k = 0; k < 6; k++) cfrc[6*p + k] += cfrc[6*i + k];
+            float ci[10];
+            for (int t = 0; t < 10; t++) ci[t] = w.cinert[10*i + t];
+            float tmp[6], tmp1[6], cf[6];
+            mj_mulInertVec(tmp, ci, acc);
+            mj_mulInertVec(tmp1, ci, v6);
+            mj_crossForce(cf, v6, tmp1);
+            for (int c = 0; c < 6; c++) {
+                cvel[6*i + c] = v6[c];
+                cfrc[6*i + c] = tmp[c] + cf[c];
             }
         }
         if (snum == 32u) simdgroup_barrier(mem_flags::mem_device);
-        for (int v = 0; v < int(NV); v++)
-            qfrcBiasT[v] = mj_dot6(w.cdof + 6*v, cfrc + 6*m.dof_bodyid[v]);
+        for (int d0 = 0; d0 < int(NV); d0 += int(snum)) {
+            int v = d0 + int(slane);
+            if (v >= int(NV)) continue;
+            int b = m.dof_bodyid[v];
+            float fb[6];
+            for (int c = 0; c < 6; c++) fb[c] = cfrc[6*b + c];
+            for (int j = b + 1; j < int(NBODY); j++) {
+                if (!bodyUnder(m, b, j)) continue;
+                for (int c = 0; c < 6; c++) fb[c] += cfrc[6*j + c];
+            }
+            w.qfrc_bias[v] = mj_dot6(w.cdof + 6*v, fb);
+        }
+        if (snum == 32u) simdgroup_barrier(mem_flags::mem_device);
+        for (int v = 0; v < int(NV); v++) qfrcBiasT[v] = w.qfrc_bias[v];
     }
 
     template<typename PX, typename PL, typename PD>
@@ -1536,16 +1567,17 @@ struct MjEngine {
     static void jtForce(thread const Model &m, thread Work &w, device const float *Jar,
                         thread float *qfc, uint slane) {
         int nefc = w.nefc;
-        float acc = 0.0f;
-        int v = int(slane);
-        if (v < int(NV)) {
-            for (int r = 0; r < nefc; r++) {
-                float jar = Jar[r];
-                if (jar < 0.0f) acc = fma(w.efc_J[int(NV)*r + v], -w.efc_D[r]*jar, acc);
-            }
-            w.qfrc_constraint[v] = acc;
+        float part[NV];
+        for (int k = 0; k < int(NV); k++) part[k] = 0.0f;
+        for (int r = int(slane); r < nefc; r += 32) {
+            float jar = Jar[r];
+            if (jar >= 0.0f) continue;
+            float t = -w.efc_D[r]*jar;
+            device const float *row = w.efc_J + int(NV)*r;
+            for (int k = 0; k < int(NV); k++) part[k] = fma(row[k], t, part[k]);
         }
-        for (int k = 0; k < int(NV); k++) qfc[k] = simd_shuffle(acc, ushort(k));
+        for (int k = 0; k < int(NV); k++) qfc[k] = simd_sum(part[k]);
+        if (int(slane) < int(NV)) w.qfrc_constraint[int(slane)] = qfc[int(slane)];
     }
 
     static void hessFactorRows(thread const Model &m, thread Work &w, device const float *Jar,
@@ -1793,19 +1825,6 @@ struct MjEngine {
         w.scale = 1.0f / simd_sum((int(slane) < int(NV)) ? mrow[int(slane)] : 0.0f);
         float qf[NV];
         addFluid(m, w, qf);
-        for (int v = 0; v < int(NV); v++) {
-            int j = m.dof_jntid[v];
-            int jt = m.jnt_type[j];
-            float spring = 0.0f;
-            if (jt == 2 || jt == 3) {
-                int qadr = m.jnt_qposadr[j];
-                spring = -m.jnt_stiffness[j]*(s.qpos[qadr] - m.qpos_spring[qadr]);
-            }
-            float damper = -m.dof_damping[v]*s.qvel[v];
-            w.qfrc_passive[v] = spring + damper + qf[v];
-        }
-        makeConstraint(m, s, w, slane);
-
         float qfrcAct[NV];
         for (int v = 0; v < int(NV); v++) qfrcAct[v] = 0.0f;
         {
@@ -1820,13 +1839,22 @@ struct MjEngine {
             for (int u = 0; u < int(NU); u++)
                 qfrcAct[m.jnt_dofadr[m.actuator_trnid[u]]] += m.actuator_gear[u]*cl[u];
         }
-
-        float rhs[NV];
-        for (int v = 0; v < int(NV); v++) {
-            float f = w.qfrc_passive[v] - qfrcBiasT[v] + qfrcAct[v];
-            w.qfrc_smooth[v] = f;
-            rhs[v] = f;
+        for (int d0 = 0; d0 < int(NV); d0 += 32) {
+            int v = d0 + int(slane);
+            if (v >= int(NV)) continue;
+            int j = m.dof_jntid[v];
+            int jt = m.jnt_type[j];
+            float spring = 0.0f;
+            if (jt == 2 || jt == 3) {
+                int qadr = m.jnt_qposadr[j];
+                spring = -m.jnt_stiffness[j]*(s.qpos[qadr] - m.qpos_spring[qadr]);
+            }
+            float damper = -m.dof_damping[v]*s.qvel[v];
+            w.qfrc_smooth[v] = spring + damper + qf[v] - qfrcBiasT[v] + qfrcAct[v];
         }
+        makeConstraint(m, s, w, slane);
+        float rhs[NV];
+        for (int v = 0; v < int(NV); v++) rhs[v] = w.qfrc_smooth[v];
         float lrow[NV];
         for (int c = 0; c < int(NV); c++) lrow[c] = (int(slane) < int(NV) && c <= int(slane)) ? mrow[c] : 0.0f;
         cholFactorRowsDist(lrow, slane);
@@ -2074,6 +2102,7 @@ inline void mj_rngNSet(uint seed, uint resetIdx, uint ctrBase, float scale, devi
     }
 }
 
+using E0 = MjEngine<9, 9, 6, 8, 9, 9, 8, 16, 70, 36>;
 using E16 = MjEngine<2, 2, 1, 3, 3, 2, 0, 0, 2, 3>;
 using E17 = MjEngine<3, 3, 1, 4, 5, 3, 0, 0, 1, 6>;
 using E18 = MjEngine<4, 4, 2, 5, 10, 4, 0, 0, 3, 6>;
@@ -2083,6 +2112,15 @@ using E21 = MjEngine<9, 9, 6, 8, 8, 9, 7, 14, 62, 36>;
 using E22 = MjEngine<11, 11, 7, 13, 20, 11, 7, 10, 51, 34>;
 using E23 = MjEngine<15, 14, 8, 14, 14, 9, 13, 25, 108, 81>;
 using E24 = MjEngine<24, 23, 17, 14, 18, 18, 126, 138, 569, 185>;
+
+inline void mjR_cheetah(thread const E0::Model &m, E0::State s, uint seed,
+                        thread uint &elapsed, thread uint &resets) {
+    E0::clearState(m, s);
+    mj_rngUAdd<9>(seed, resets, 0u, -m.spec[21], m.spec[21], m.qpos0, s.qpos);
+    mj_rngNSet<9>(seed, resets, 8u, m.spec[21], s.qvel);
+    resets++;
+    elapsed = 0u;
+}
 
 inline void mjR_ip(thread const E16::Model &m, E16::State s, uint seed,
                         thread uint &elapsed, thread uint &resets) {
@@ -2192,6 +2230,26 @@ inline void mjR_humanoid(thread const E24::Model &m, E24::State s, uint seed,
 
 inline float mj_norm3v(float x, float y, float z) {
     return sqrt(x*x + y*y + z*z);
+}
+
+inline void mjObs_cheetah(E0::State s, device float *obs) {
+    for (int i = 1; i < 9; i++) obs[i - 1] = s.qpos[i];
+    for (int i = 0; i < 9; i++) obs[8 + i] = s.qvel[i];
+}
+
+inline float mjStep_cheetah(thread const E0::Model &m, E0::State s, thread E0::Work &w,
+                        thread const float *ctrl, device float *obs, thread uint &term, uint slane) {
+    float xb = s.qpos[0];
+    for (int u = 0; u < 6; u++) s.ctrl[u] = ctrl[u];
+    int fs = int(m.spec[7]);
+    for (int k = 0; k < fs; k++) E0::stepPhysics(m, s, w, slane);
+    float dt = m.spec[7] * m.timestep;
+    float xv = (s.qpos[0] - xb) / dt;
+    float ctrlCost = 0.0f;
+    for (int u = 0; u < 6; u++) ctrlCost += m.spec[4]*ctrl[u]*ctrl[u];
+    mjObs_cheetah(s, obs);
+    term = 0u;
+    return m.spec[6]*xv - ctrlCost;
 }
 
 inline uint mjHealthy_ip(thread const E16::Model &m, E16::State s) {
@@ -2477,28 +2535,13 @@ inline float mjStep_hum(thread const E24::Model &m, E24::State s, thread E24::Wo
     return reward;
 }
 
-inline void mj_loadCheetahState(device const uint *envState, thread HalfCheetahState &s) {
-    device const float *st = (device const float *)envState;
-    for (int i = 0; i < 9; i++) s.qpos[i] = st[i];
-    for (int i = 0; i < 9; i++) s.qvel[i] = st[9 + i];
-    for (int u = 0; u < 6; u++) s.ctrl[u] = st[18 + u];
-    for (int i = 0; i < 9; i++) s.qacc_warmstart[i] = st[24 + i];
-}
-inline void mj_storeCheetahState(thread const HalfCheetahState &s, device uint *envState) {
-    device float *st = (device float *)envState;
-    for (int i = 0; i < 9; i++) st[i] = s.qpos[i];
-    for (int i = 0; i < 9; i++) st[9 + i] = s.qvel[i];
-    for (int u = 0; u < 6; u++) st[18 + u] = s.ctrl[u];
-    for (int i = 0; i < 9; i++) st[24 + i] = s.qacc_warmstart[i];
-}
-
 inline void mj_reset(uint envKind, constant uint *mjModels, device uint *envState,
                      uint seed, thread uint &elapsed, thread uint &resets, uint slane) {
     switch (envKind) {
     case 0u: {
-        thread HalfCheetahState s;
-        halfCheetah_reset(s, seed, elapsed, resets);
-        mj_storeCheetahState(s, envState);
+        E0::Model m = E0::loadModel(mjModels, 0u);
+        E0::State s = E0::bindState(envState);
+        mjR_cheetah(m, s, seed, elapsed, resets);
         break;
     }
     case 16u: {
@@ -2571,10 +2614,8 @@ inline void mj_observe(uint envKind, constant uint *mjModels, device const uint 
                        device float *obs, uint slane) {
     switch (envKind) {
     case 0u: {
-        device const float *qpos = (device const float *)envState;
-        device const float *qvel = qpos + 9;
-        for (int i = 1; i < 9; i++) obs[i - 1] = qpos[i];
-        for (int i = 0; i < 9; i++) obs[8 + i] = qvel[i];
+        E0::State s = E0::bindState((device uint *)envState);
+        mjObs_cheetah(s, obs);
         break;
     }
     case 16u: {
@@ -2652,30 +2693,33 @@ inline float mj_step_env(uint envKind, constant uint *mjModels, device uint *env
     done = 0u;
     switch (envKind) {
     case 0u: {
-        using E = MjEngine<9, 9, 6, 8, 9, 9, 8, 16, 70, 36>;
-        E::Model m = E::loadModel(mjModels, 0u);
-        thread HalfCheetahState s;
-        mj_loadCheetahState(envState, s);
+        E0::Model m = E0::loadModel(mjModels, 0u);
+        E0::State s = E0::bindState(envState);
+        E0::Work w = E0::bindWork(scratch);
+        bool entryTerm = false;
         float reward;
-        if (episodeLen != 0u && elapsed >= episodeLen) {
-            halfCheetah_reset(s, seed, elapsed, resets);
+        if ((episodeLen != 0u && elapsed >= episodeLen) || entryTerm) {
+            if (slane == 0u) mjR_cheetah(m, s, seed, elapsed, resets);
+            simdgroup_barrier(mem_flags::mem_device);
+            elapsed = simd_broadcast_first(elapsed);
+            resets = simd_broadcast_first(resets);
+            E0::kinematics(m, s, w, slane, 32u);
+            E0::comPos(m, s, w, slane, 32u);
+            float qfb[9];
+            E0::comVelRne(m, s, w, qfb, slane, 32u);
             reward = 0.0f;
             done = 0u;
+            mjObs_cheetah(s, obs);
         } else {
-            float xBefore = s.qpos[0];
-            for (int u = 0; u < 6; u++) s.ctrl[u] = ctrl[u];
-            int frameSkip = int(m.spec[7]);
-            for (int k = 0; k < frameSkip; k++) halfCheetah_step(s);
-            float forwardVelocity = (s.qpos[0] - xBefore) / (m.spec[7] * m.timestep);
-            float ctrlCost = 0.0f;
-            for (int u = 0; u < 6; u++) ctrlCost += m.spec[4] * ctrl[u] * ctrl[u];
-            reward = forwardVelocity * m.spec[6] - ctrlCost;
+            uint term = 0u;
+            reward = mjStep_cheetah(m, s, w, ctrl, obs, term, slane);
             elapsed++;
-            done = (episodeLen != 0u && elapsed >= episodeLen) ? 1u : 0u;
+            done = (term != 0u || (episodeLen != 0u && elapsed >= episodeLen)) ? 1u : 0u;
         }
-        mj_storeCheetahState(s, envState);
-        for (int i = 1; i < 9; i++) obs[i - 1] = s.qpos[i];
-        for (int i = 0; i < 9; i++) obs[8 + i] = s.qvel[i];
+        reward = simd_broadcast_first(reward);
+        done = simd_broadcast_first(done);
+        elapsed = simd_broadcast_first(elapsed);
+        resets = simd_broadcast_first(resets);
         return reward;
     }
     case 16u: {

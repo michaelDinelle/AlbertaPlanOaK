@@ -48,10 +48,6 @@ inline device float *laneEnvObs(device uint *envState, uint envK) {
 
 inline bool laneIsMj(uint envK) { return OAK_ENV_SPECS[envK].mjIndex != 0xffffffffu; }
 
-inline bool laneIsMjEngine(uint envK) {
-    return OAK_ENV_SPECS[envK].mjIndex != 0xffffffffu && envK != OAK_ENV_CHEETAH;
-}
-
 struct OakLaneSnapshot {
     KernelScalars scalars;
     float paramAbsMax;
@@ -145,34 +141,25 @@ inline float advanceEnvironment(device OakFleetLane *lane, device uint *envState
     device const float *pending = lanePendingAction(envState);
     for (uint u = 0u; u < OAK_ENV_ACT_MAX; u++) ctrl[u] = (u < actionCount) ? pending[u] : 0.0f;
     device uint *stateWords = laneEnvWords(envState, envK);
-    if (laneIsMjEngine(envK)) {
+    if (laneIsMj(envK)) {
         uint elapsed = lane->elapsed, resets = lane->resets;
         done = 0u;
-        float reward = mj_step_env(envK, mjModels, stateWords, mjScratch, laneSeed, ctrl,
-                                   elapsed, resets, ecfg.episodeLen, obsOut, done, slane);
+        float mjReward = mj_step_env(envK, mjModels, stateWords, mjScratch, laneSeed, ctrl,
+                                     elapsed, resets, ecfg.episodeLen, obsOut, done, slane);
         if (slane == 0u) {
             lane->elapsed = elapsed;
             lane->resets = resets;
         }
-        return reward;
+        return mjReward;
     }
     float reward = 0.0f;
     if (slane == 0u) {
-        if (laneIsMj(envK)) {
-            uint elapsed = lane->elapsed, resets = lane->resets;
-            done = 0u;
-            reward = mj_step_env(envK, mjModels, stateWords, mjScratch, laneSeed, ctrl,
-                                 elapsed, resets, ecfg.episodeLen, obsOut, done, 0u);
-            lane->elapsed = elapsed;
-            lane->resets = resets;
-        } else {
-            uint envWords[OAK_ENV_WORDS_MAX];
-            for (uint i = 0u; i < OAK_ENV_WORDS_MAX; i++) envWords[i] = stateWords[i];
-            float obs[OAK_ENV_CLASSIC_OBS_MAX];
-            reward = env_step(envK, laneSeed, ctrl, envWords, obs, done);
-            for (uint i = 0u; i < OAK_ENV_WORDS_MAX; i++) stateWords[i] = envWords[i];
-            for (uint i = 0u; i < OAK_ENV_SPECS[envK].obsDimNatural; i++) obsOut[i] = obs[i];
-        }
+        uint envWords[OAK_ENV_WORDS_MAX];
+        for (uint i = 0u; i < OAK_ENV_WORDS_MAX; i++) envWords[i] = stateWords[i];
+        float obs[OAK_ENV_CLASSIC_OBS_MAX];
+        reward = env_step(envK, laneSeed, ctrl, envWords, obs, done);
+        for (uint i = 0u; i < OAK_ENV_WORDS_MAX; i++) stateWords[i] = envWords[i];
+        for (uint i = 0u; i < OAK_ENV_SPECS[envK].obsDimNatural; i++) obsOut[i] = obs[i];
     }
     if (wide) {
         reward = simd_broadcast_first(reward);

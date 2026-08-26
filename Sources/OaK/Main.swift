@@ -281,12 +281,21 @@ final class Engine {
     let kd = kind(of: lane)
     return uints.p + kd.uintBase + (lane - kd.firstLane) * kd.uintTotal
   }
-  static func runShapeProbe(_ dev: MTLDevice, _ lib: MTLLibrary, obsDim: Int, dPolicy: Int)
-    throws -> ShapeProbe
-  {
+  static let simdWidth = 32
+  static let saturatingThreadgroups = 256
+  static func applyAgentShape(_ constants: MTLFunctionConstantValues, _ shape: Main.AgentShape) {
+    for (index, value) in shape.functionConstants {
+      var v = UInt32(value)
+      constants.setConstantValue(&v, type: .uint, index: index)
+    }
+  }
+  static func runShapeProbe(
+    _ dev: MTLDevice, _ lib: MTLLibrary, obsDim: Int, dPolicy: Int, shape: Main.AgentShape
+  ) throws -> ShapeProbe {
     precondition(
       MemoryLayout<ShapeProbe>.stride == 144, "ShapeProbe layout drifted from OakShapeProbe")
     let constants = MTLFunctionConstantValues()
+    applyAgentShape(constants, shape)
     var o32 = UInt32(obsDim)
     constants.setConstantValue(&o32, type: .uint, index: OakConst.specObsDim.rawValue)
     var d32 = UInt32(dPolicy)
@@ -350,7 +359,9 @@ final class Engine {
     }
     return specs
   }
-  init(laneEnvs: [String], batch b: Int, dev: MTLDevice) throws {
+  let shape: Main.AgentShape
+  init(laneEnvs: [String], batch b: Int, dev: MTLDevice, shape: Main.AgentShape) throws {
+    self.shape = shape
     precondition(b >= 1 && laneEnvs.count == b, "Engine batch/laneEnvs mismatch")
     batch = b
     let lib = try dev.makeLibrary(URL: try requireFreshMetallib())
@@ -378,12 +389,12 @@ final class Engine {
       let naturalO = spec.naturalO
       let dk = spec.actionParams
       let sp = try probeCache[r.kind] ?? Engine.runShapeProbe(
-        dev, lib, obsDim: naturalO, dPolicy: dk)
+        dev, lib, obsDim: naturalO, dPolicy: dk, shape: shape)
       probeCache[r.kind] = sp
       let anchors = Int(sp.anchorCount)
-      precondition(anchors % Int(sp.optionCount) == 0, "anchors must tile the core")
-      precondition(Int(sp.rank) == anchors + anchors * 14, "gate-bank identity broken")
-      precondition(anchors >= naturalO + dk + 2, "core slots cannot hold obs+action+reward+bias")
+      precondition(anchors % Engine.simdWidth == 0, "perception budget must tile the simd width")
+      precondition(
+        Int(sp.rank) == anchors + anchors * 2 * shape.gates, "gate-bank identity broken")
       precondition(Int(sp.stateStride) % 4 == 0, "stateStride must stay 16B-aligned")
       let cfgB = dev.makeBuffer(
         length: MemoryLayout<KernelConfig>.stride, options: [.storageModeShared])!
@@ -852,7 +863,16 @@ final class RecordWriter: @unchecked Sendable {
     var best = (k: 0, bits: Int.max)
     for k in 0..<20 {
       var bits = 0
-      for v in res { bits += Int(zig(v) >> UInt64(k)) + 1 + k }
+      for v in res {
+        let unary = Int(clamping: zig(v) >> UInt64(k))
+        let (step, stepOver) = unary.addingReportingOverflow(1 + k)
+        let (sum, sumOver) = bits.addingReportingOverflow(step)
+        if stepOver || sumOver {
+          bits = Int.max
+          break
+        }
+        bits = sum
+      }
       if bits < best.bits { best = (k, bits) }
     }
     return best
@@ -919,9 +939,11 @@ final class RecordWriter: @unchecked Sendable {
         best = ((cand.pred, 0, b), vs)
       }
       let rice = riceSize(cand.res)
-      let rs = cand.extra.count + 1 + (rice.bits + 7) / 8
-      if rs < best!.size {
-        best = ((cand.pred, 1, cand.extra + riceBytes(cand.res, rice.k)), rs)
+      if rice.bits <= Int.max - 7 {
+        let rs = cand.extra.count + 1 + (rice.bits + 7) / 8
+        if rs < best!.size {
+          best = ((cand.pred, 1, cand.extra + riceBytes(cand.res, rice.k)), rs)
+        }
       }
     }
     return (bestVarint!.plan, best!.plan)
@@ -1170,6 +1192,82 @@ final class TapeWriter {
       withJSONObject: meta, options: [.prettyPrinted, .sortedKeys]
     ).write(to: dir.appendingPathComponent("meta.json"), options: .atomic)
   }
+  static func sysctlString(_ name: String) -> String {
+    var size = 0
+    guard sysctlbyname(name, nil, &size, nil, 0) == 0, size > 0 else { return "" }
+    var buf = [CChar](repeating: 0, count: size)
+    guard sysctlbyname(name, &buf, &size, nil, 0) == 0 else { return "" }
+    return String(cString: buf)
+  }
+  static func hardwareInfo(_ dev: MTLDevice) -> [String: Any] {
+    [
+      "gpu": dev.name,
+      "machine": sysctlString("hw.model"),
+      "cpuCores": ProcessInfo.processInfo.processorCount,
+      "memoryBytes": ProcessInfo.processInfo.physicalMemory,
+      "os": ProcessInfo.processInfo.operatingSystemVersionString,
+    ]
+  }
+  static func hardwareKey(_ dev: MTLDevice) -> String {
+    let parts = "\(sysctlString("hw.model"))|\(dev.name)|\(ProcessInfo.processInfo.processorCount)"
+    return String(sha256Hex(Array(parts.utf8).withUnsafeBytes { UnsafeRawBufferPointer($0) }).prefix(16))
+  }
+  struct AgentShape {
+    var perception = 32
+    var planning = "rotating"
+    var gates = 7
+    var options = 32
+
+    static let fields = ["perception", "planning", "gates", "options"]
+
+    static func parse(_ spec: String?) throws -> AgentShape {
+      var shape = AgentShape()
+      guard let spec, !spec.trimmingCharacters(in: .whitespaces).isEmpty else { return shape }
+      for field in spec.split(separator: ",") {
+        let parts = field.split(separator: "=", maxSplits: 1)
+        guard parts.count == 2 else {
+          throw err("Agent shape field '\(field)' is not key=value; fields: \(fields.joined(separator: ", ")).")
+        }
+        let key = parts[0].trimmingCharacters(in: .whitespaces)
+        let value = parts[1].trimmingCharacters(in: .whitespaces)
+        func positive() throws -> Int {
+          guard let n = Int(value), n > 0 else {
+            throw err("Agent shape '\(key)' needs a positive integer, got '\(value)'.")
+          }
+          return n
+        }
+        switch key {
+        case "perception": shape.perception = try positive()
+        case "gates": shape.gates = try positive()
+        case "options": shape.options = try positive()
+        case "planning":
+          guard ["rotating", "every-step"].contains(value) else {
+            throw err("Agent shape 'planning' is rotating or every-step, got '\(value)'.")
+          }
+          shape.planning = value
+        default:
+          throw err("Unknown agent shape field '\(key)'; fields: \(Self.fields.joined(separator: ", ")).")
+        }
+      }
+      return shape
+    }
+
+    var planPeriod: Int { planning == "every-step" ? 0 : 32 }
+    var functionConstants: [(Int, Int)] {
+      [(32, planPeriod), (33, perception), (34, gates), (35, options)]
+    }
+    var isKeeper: Bool {
+      perception == 32 && planning == "rotating" && gates == 7 && options == 32
+    }
+    var name: String {
+      isKeeper ? "keeper"
+        : "perception=\(perception),planning=\(planning),gates=\(gates),options=\(options)"
+    }
+    var meta: [String: Any] {
+      ["name": name, "perception": perception, "planning": planning,
+       "gates": gates, "options": options]
+    }
+  }
   static let envIdsByKind: [String] = [
     "HalfCheetah-v4", "FourRooms-cont-v0", "DeepSea-cont-v0", "KeyCorridor-cont-v0",
     "Acrobot-cont-v0", "MountainCar-cont-v0", "CartPole-cont-v0", "Pendulum-cont-v0",
@@ -1255,8 +1353,6 @@ final class TapeWriter {
     let mjModelsBuf: MTLBuffer
     let mjScratchBuf: MTLBuffer
     let mjScratchOffBuf: MTLBuffer
-    let mjScratchOffsets: [Int]
-    let mjScratchDeclared: [Int]
     let ecfg: FleetEnvCfg
     init(
       _ dev: MTLDevice, seeds: [Int], laneEnvKinds: [UInt32], envTable: [EnvSpec],
@@ -1346,22 +1442,13 @@ final class TapeWriter {
       mjModelsBuf = modelsBuf
       var scratchOffsets = [UInt32](repeating: 0, count: B)
       var scratchCursor = 0
-      let scratchPad = ProcessInfo.processInfo.environment["OAK_SCRATCH_PAD"].flatMap(Int.init) ?? 0
-      var declared = [Int](repeating: 0, count: B)
       for i in 0..<B {
         if let entry = mjEntryByKind[Int(laneEnvKinds[i])] {
           scratchOffsets[i] = UInt32(scratchCursor)
-          declared[i] = entry.scratchWords
-          scratchCursor += entry.scratchWords + scratchPad
+          scratchCursor += entry.scratchWords
         }
       }
-      mjScratchOffsets = scratchOffsets.map(Int.init)
-      mjScratchDeclared = declared
       mjScratchBuf = try makeBuf(max(scratchCursor, 1) * 4)
-      if scratchPad > 0 {
-        let sp = mjScratchBuf.contents().bindMemory(to: UInt32.self, capacity: scratchCursor)
-        for i in 0..<scratchCursor { sp[i] = 0xCAFE_BABE }
-      }
       mjScratchOffBuf = try makeBuf(B * 4)
       do {
         let sp = mjScratchOffBuf.contents().bindMemory(to: UInt32.self, capacity: B)
@@ -1383,8 +1470,21 @@ final class TapeWriter {
     let initPipe = try pipeline("oak_fleet_init")
     let snapPipe = try pipeline("oak_fleet_snapshot")
     let B = bufs.B
-    let core = Int(engine.kinds[0].off.optionCount)
-    let autoG = max(2, min(core, B / max(core, 1)))
+    let core = snapPipe.threadExecutionWidth
+    guard core == Engine.simdWidth else {
+      throw err("simd width \(core) is not the \(Engine.simdWidth) the kernel is compiled for.")
+    }
+    func threadgroupCount(_ g: Int) -> Int {
+      engine.kinds.reduce(0) { $0 + ($1.count + g - 1) / g }
+    }
+    var autoG = 2
+    for candidate in [32, 16, 8, 4, 2]
+    where engine.kinds.allSatisfy({ $0.count % candidate == 0 && $0.firstLane % candidate == 0 })
+      && threadgroupCount(candidate) >= Engine.saturatingThreadgroups
+    {
+      autoG = candidate
+      break
+    }
     let megaG = e["OAK_MEGA_LANES_PER_TG"].flatMap(Int.init) ?? autoG
     let megaW = core * megaG
     func baseConstants() -> MTLFunctionConstantValues {
@@ -1413,13 +1513,14 @@ final class TapeWriter {
     for (ki, kd) in engine.kinds.enumerated() {
       var gk = megaG
       while gk > 1, gk * Int(kd.off.anchorCount) > core * core { gk /= 2 }
-      guard kd.firstLane % gk == 0 else {
+      guard kd.firstLane % gk == 0, kd.count % gk == 0 else {
         throw err(
-          "Env schedule block start \(kd.firstLane) must be a multiple of megaG=\(gk) for variant dispatch."
+          "Env block [\(kd.firstLane), +\(kd.count)) must start and size on multiples of megaG=\(gk)."
         )
       }
       let c = baseConstants()
       Engine.applyShapeConstants(c, kd.cfg)
+      Engine.applyAgentShape(c, engine.shape)
       var k32 = kd.kind
       c.setConstantValue(&k32, type: .uint, index: OakConst.specEnvKind.rawValue)
       var g32 = UInt32(gk)
@@ -1430,30 +1531,28 @@ final class TapeWriter {
       let desc = MTLComputePipelineDescriptor()
       desc.computeFunction = try lib.makeFunction(name: "oak_megastep", constantValues: c)
       desc.label = "oak_megastep \(Main.envIdsByKind[Int(kd.kind)])"
-      let pipeState = try dev.makeComputePipelineState(descriptor: desc, options: []).0
-      fputs(
-        "[pipe] \(Main.envIdsByKind[Int(kd.kind)]) maxThreads=\(pipeState.maxTotalThreadsPerThreadgroup) regs~=\(pipeState.staticThreadgroupMemoryLength)\n",
-        stderr)
-      variantPipes.append(pipeState)
+      variantPipes.append(try dev.makeComputePipelineState(descriptor: desc, options: []).0)
       kindMegaG.append(gk)
       envRuns.append((ki, kd.kind, kd.firstLane / gk, (kd.count + gk - 1) / gk))
     }
     guard variantPipes.allSatisfy({ $0.threadExecutionWidth == core }) else {
-      throw err("optionCount \(core) must equal simd width \(variantPipes[0].threadExecutionWidth).")
+      throw err("simd width \(core) differs across specialized pipelines.")
+    }
+    func laneSlotBytes(_ gk: Int, _ spl: Int) -> Int {
+      (5 * tgOptionCount + 1) * gk * MemoryLayout<Float>.stride
+        + (spl > 1 ? 3 * gk * 32 * spl * MemoryLayout<Float>.stride : 0)
     }
     for (ki, pipe) in variantPipes.enumerated() {
       let gk = kindMegaG[ki]
-      let slotBytes =
-        (5 * tgOptionCount + 1) * gk * MemoryLayout<Float>.stride
-        + 32 * 32 * MemoryLayout<Float>.stride
       let spl = min(
         32 / gk, e["OAK_SPL_CAP"].flatMap(Int.init)
           ?? max(1, Int(engine.kinds[ki].off.anchorCount) / 32))
+      let slotBytes = laneSlotBytes(gk, spl)
       guard gk >= 1, core * gk * spl <= pipe.maxTotalThreadsPerThreadgroup,
         slotBytes <= dev.maxThreadgroupMemoryLength
       else {
         throw err(
-          "megaG=\(gk) needs \(core * 32) threads/threadgroup (pipeline max \(pipe.maxTotalThreadsPerThreadgroup)) and \(slotBytes) tg bytes (device max \(dev.maxThreadgroupMemoryLength))."
+          "megaG=\(gk) spl=\(spl) needs \(core * gk * spl) threads/threadgroup (pipeline max \(pipe.maxTotalThreadsPerThreadgroup)) and \(slotBytes) tg bytes (device max \(dev.maxThreadgroupMemoryLength))."
         )
       }
     }
@@ -1522,9 +1621,7 @@ final class TapeWriter {
           let spl = min(
             32 / gk, e["OAK_SPL_CAP"].flatMap(Int.init)
               ?? max(1, Int(kd.off.anchorCount) / 32))
-          enc.setThreadgroupMemoryLength(
-            (5 * tgOptionCount + 1) * gk * MemoryLayout<Float>.stride
-              + 32 * 32 * MemoryLayout<Float>.stride, index: 0)
+          enc.setThreadgroupMemoryLength(laneSlotBytes(gk, spl), index: 0)
           enc.dispatchThreadgroups(
             MTLSize(width: run.tgCount, height: 1, depth: 1),
             threadsPerThreadgroup: mtlSize(core * gk * spl))
@@ -1650,7 +1747,7 @@ final class TapeWriter {
   }
   static func fleetGPU(
     _ policy: String, _ seeds: [Int], _ steps: Int, _ root: URL, _ laneEnvs: [String],
-    _ ablations: AblationSpec
+    _ ablations: AblationSpec, _ shape: AgentShape
   ) throws {
     guard laneEnvs.count == seeds.count else {
       throw err("laneEnvs (\(laneEnvs.count)) must match seed count (\(seeds.count)).")
@@ -1663,7 +1760,7 @@ final class TapeWriter {
     let q: MTLCommandQueue
     let envTable: [EnvSpec]
     if policy == "oak" {
-      let eng = try Engine(laneEnvs: laneEnvs, batch: seeds.count, dev: dev)
+      let eng = try Engine(laneEnvs: laneEnvs, batch: seeds.count, dev: dev, shape: shape)
       engine = eng
       q = eng.q
       envTable = eng.envTable
@@ -1709,6 +1806,9 @@ final class TapeWriter {
       envFlopsPerStep[envId] = flops
       flopsSum += flops
     }
+    Self.pendingMeta["agentShape"] = shape.meta
+    Self.pendingMeta["hardware"] = Self.hardwareInfo(dev)
+    Self.pendingMeta["hardwareKey"] = Self.hardwareKey(dev)
     Self.pendingMeta["envFlopsPerStep"] = envFlopsPerStep
     Self.pendingMeta["flopsPerStep"] = flopsSum / Double(laneEnvKinds.count)
     try Self.writeRunMeta(root, envTable)
@@ -1727,30 +1827,9 @@ final class TapeWriter {
     let gpuSeconds = try runFleetLoop(
       q, bufs, pipes, seeds: seeds, steps: steps, root: root,
       laneEnvKinds: laneEnvKinds)
-    if let padStr = e["OAK_SCRATCH_PAD"], let pad = Int(padStr), pad > 0 {
-      let sp = bufs.mjScratchBuf.contents().bindMemory(
-        to: UInt32.self, capacity: bufs.mjScratchBuf.length / 4)
-      var worstByKind: [UInt32: (touched: Int, declared: Int)] = [:]
-      for lane in 0..<bufs.B where bufs.mjScratchDeclared[lane] > 0 {
-        let base = bufs.mjScratchOffsets[lane]
-        let total = bufs.mjScratchDeclared[lane] + pad
-        var touched = 0
-        for w in stride(from: total - 1, through: 0, by: -1)
-        where sp[base + w] != 0xCAFE_BABE {
-          touched = w + 1
-          break
-        }
-        let kind = laneEnvKinds[lane]
-        let prior = worstByKind[kind]?.touched ?? 0
-        worstByKind[kind] = (max(prior, touched), bufs.mjScratchDeclared[lane])
-      }
-      for (kind, v) in worstByKind.sorted(by: { $0.key < $1.key }) {
-        fputs(
-          "[scratch] \(envIdsByKind[Int(kind)]) touched=\(v.touched) declared=\(v.declared)\n",
-          stderr)
-      }
-    }
     Self.pendingMeta["gpuSeconds"] = gpuSeconds
+    Self.pendingMeta["stepsPerSecond"] = gpuSeconds > 0
+      ? Double(steps) * Double(seeds.count) / gpuSeconds : 0
     Self.pendingMeta["finishedAt"] = ISO8601DateFormatter().string(from: Date())
     try Self.writeRunMeta(root, envTable)
   }
@@ -2315,6 +2394,7 @@ final class TapeWriter {
     fputs(
       "OaK fleet: policy=\(policy) B=\(seedValues.count) lanes × \(steps) steps on \(envDesc) (ablation=\(ablations.label), dir=\(dir.path))\n",
       stderr)
-    try fleetGPU(policy, seedValues, steps, dir, laneEnvs, ablations)
+    let shape = try AgentShape.parse(env["OAK_AGENT_SHAPE"])
+    try fleetGPU(policy, seedValues, steps, dir, laneEnvs, ablations, shape)
   }
 }

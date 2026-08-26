@@ -1,6 +1,5 @@
 #pragma METAL fp math_mode(safe)
 
-constant uint OAK_ENV_CHEETAH     = 0u;
 constant uint OAK_ENV_FOURROOMS   = 1u;
 constant uint OAK_ENV_DEEPSEA     = 2u;
 constant uint OAK_ENV_KEYCORRIDOR = 3u;
@@ -48,7 +47,7 @@ struct OakEnvSpec {
     uint slots[OAK_POSE_LEN];
 };
 constant OakEnvSpec OAK_ENV_SPECS[OAK_ENV_COUNT] = {
-    { 0x9d7fd44bu, 17u, 0u, 6u, 12u,  0u,  0u, 20u, 150000u, 33u, 0u,
+    { 0x9d7fd44bu, 17u, 0u, 6u, 12u,  0u,  0u, 20u, 33214u, 33u, 0u,
       { OAK_SLOT_Q + 0u, OAK_SLOT_Q + 1u, OAK_SLOT_Q + 2u, OAK_SLOT_Q + 3u, OAK_SLOT_Q + 4u,
         OAK_SLOT_Q + 5u, OAK_SLOT_Q + 6u, OAK_SLOT_Q + 7u, OAK_SLOT_Q + 8u, OAK_SLOT_NONE,
         OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE,

@@ -178,12 +178,11 @@ def retention_null(run: dict, lanes: np.ndarray,
     return p5, p50, spread
 
 
-def analyze(run: dict, lanes: np.ndarray) -> dict:
-    meta, horizon = run["meta"], run["meta"]["steps"]
-    ends = run["tape"]["ends"]
-    max_step = int(ends[-1])
-    rs = series(run, "rewardSum")[:, lanes]
-    delivered = last_finite(rs) / max_step
+def lane_vectors(run: dict) -> dict[str, np.ndarray]:
+    horizon = run["meta"]["steps"]
+    max_step = int(run["tape"]["ends"][-1])
+    lanes = np.arange(run["tape"]["lanes"])
+    delivered = last_finite(series(run, "rewardSum")) / max_step
     blind = ~np.isfinite(delivered)
     worst = min(0.0, float(np.min(delivered[~blind]))) if (~blind).any() else 0.0
     delivered = np.where(blind, worst, delivered)
@@ -192,26 +191,19 @@ def analyze(run: dict, lanes: np.ndarray) -> dict:
     peak, end_rate = windowed_rates(run, lanes)
     with np.errstate(invalid="ignore", divide="ignore"):
         retention = np.where(peak > 0, end_rate / peak, np.nan)
-    null_p5, null_p50, peak_spread = retention_null(run, lanes)
+    null_p5, _, peak_spread = retention_null(run, lanes)
     learned = (np.isfinite(peak) & np.isfinite(peak_spread)
-              & (peak > 0) & (peak > peak_spread))
+               & (peak > 0) & (peak > peak_spread))
     decayed = (learned & np.isfinite(retention) & np.isfinite(null_p5)
                & (retention < null_p5))
-    retained = learned & ~decayed
-    ret_margin = retention - null_p50
-    return {
-        "seeds": len(lanes), "horizon": horizon, "maxStep": max_step,
-        "complete": max_step >= horizon,
-        "rewardRateIQM": iqm(delivered),
-        "positiveFraction": float((delivered > 0).mean()),
-        "divergence": {"diverged": int(died.sum())},
-        "learnedSeeds": int(learned.sum()),
-        "retentionFraction": (float(retained.sum() / learned.sum())
-                              if learned.any() else None),
-        "_vectors": {"delivered": delivered, "died": died, "dtimes": dtimes,
-                     "learned": learned.astype(float), "retained": retained.astype(float),
-                     "decayed": decayed.astype(float), "retMargin": ret_margin},
-    }
+    return {"delivered": delivered, "died": died, "dtimes": dtimes,
+            "positive": (delivered > 0).astype(float),
+            "learned": learned.astype(float),
+            "retained": (learned & ~decayed).astype(float)}
+
+
+def take(vectors: dict[str, np.ndarray], lanes: np.ndarray) -> dict[str, np.ndarray]:
+    return {name: v[lanes] for name, v in vectors.items()}
 
 
 def iqm(v: np.ndarray) -> float:
@@ -504,11 +496,19 @@ def closed_form_ceilings() -> dict[str, tuple[float, str]]:
     }
 
 
+def keeper_env_ids() -> list[str]:
+    catalog = keeper_meta().get("envCatalog")
+    if not catalog:
+        raise SystemExit("env source hash needs a crowned keeper carrying an envCatalog")
+    return [e["envId"] for e in catalog]
+
+
 def hash_env_sources(h) -> None:
     for rel in ("EnvCore.metal", "Env.metal", "Fleet.metal", "Baseline.metal"):
         h.update((REPO / "Sources" / rel).read_bytes())
     for p in sorted((REPO / "Sources" / "envs").glob("*.metal")):
         h.update(p.read_bytes())
+    h.update("\n".join(keeper_env_ids()).encode())
 
 
 def env_sources_hash() -> str:
@@ -552,18 +552,18 @@ def cmd_scale(args) -> int:
                 or runs[policy]["seeds"] != keeper["seeds"]):
             raise SystemExit(f"{policy} baseline schedule differs from keeper")
     slices = env_slices(keeper)
-    catalog_count = len(keeper["meta"]["envCatalog"])
-    if len(slices) != catalog_count:
+    scheduled = sorted({e["envId"] for e in keeper["meta"]["envSchedule"]})
+    if sorted(slices) != scheduled:
         raise SystemExit(
-            f"keeper schedule has {len(slices)} envs, catalog declares {catalog_count}")
-    proc_seeds = [keeper["seeds"][l] for l in slices["ProceduralMaze-cont-v0"]]
+            f"keeper lane slices {sorted(slices)} differ from schedule {scheduled}")
     analytic = closed_form_ceilings()
     enumerated = {
         "FourRooms-cont-v0": four_rooms_ceiling,
         "KeyCorridor-cont-v0": key_corridor_ceiling,
         "MultiKeyCorridor-cont-v0": multi_key_corridor_ceiling,
         "HighDimMaze-cont-v0": high_dim_maze_ceiling,
-        "ProceduralMaze-cont-v0": lambda: procedural_maze_ceiling(proc_seeds),
+        "ProceduralMaze-cont-v0": lambda: procedural_maze_ceiling(
+            [keeper["seeds"][l] for l in slices["ProceduralMaze-cont-v0"]]),
     }
     envs = {}
     for env, lanes in slices.items():
@@ -842,28 +842,109 @@ def cmd_report(args) -> int:
     return 0
 
 
-def slice_verdicts(k: dict, c: dict, n: int, horizon: int, boot: int) -> list[tuple[str, bool]]:
-    delta = 0.64 / math.sqrt(n)
-    d95 = float(np.percentile(paired(k["died"], c["died"], np.mean, boot, 11), 95))
-    di5 = float(np.percentile(paired(k["delivered"], c["delivered"], iqm, boot, 12), 5))
-    rng = np.random.default_rng(13)
-    idx = rng.integers(0, n, size=(boot, n))
-    dr5 = float(np.percentile(
-        [rmst(c["dtimes"][r], c["died"][r], horizon)
-         - rmst(k["dtimes"][r], k["died"][r], horizon) for r in idx], 5))
-    kpos = (k["delivered"] > 0).astype(float)
-    cpos = (c["delivered"] > 0).astype(float)
-    out = [
-        ("divergence", d95 <= delta),
-        ("rewardRateIQM", di5 >= -0.05 * abs(iqm(k["delivered"]))),
-        ("rmstSurvival", dr5 >= -0.05 * horizon),
-    ]
-    for name, key, seed in (("learnedSeeds", "learned", 30), ("retainedSeeds", "retained", 31)):
-        d = float(np.percentile(paired(c[key], k[key], np.mean, boot, seed), 95))
-        out.append((name, d <= delta))
-    d = float(np.percentile(paired(cpos, kpos, np.mean, boot, 33), 95))
-    out.append(("positiveSeedFraction", d <= delta))
+GATE_ENV_CATEGORIES = ("divergence", "rewardRateIQM", "rmstSurvival")
+GATE_FLEET_CATEGORIES = ("divergence", "rewardRateIQM", "learnedSeeds", "retainedSeeds",
+                         "positiveSeedFraction")
+WIN_CATEGORY = "rewardRateIQM"
+
+
+def boot_seed(tag: str, offset: int) -> int:
+    return (BOOT_BASE_SEED + offset
+            + int.from_bytes(hashlib.sha256(tag.encode()).digest()[:4], "little"))
+
+
+def divergence_diffs(k: dict, c: dict, horizon: int, boot: int, seed: int) -> tuple:
+    return -paired(k["died"], c["died"], np.mean, boot, seed), "deaths avoided"
+
+
+def reward_rate_diffs(k: dict, c: dict, horizon: int, boot: int, seed: int) -> tuple:
+    return paired(k["delivered"], c["delivered"], iqm, boot, seed), "delivered IQM"
+
+
+def rmst_diffs(k: dict, c: dict, horizon: int, boot: int, seed: int) -> tuple:
+    n = len(k["died"])
+    idx = np.random.default_rng(seed).integers(0, n, size=(boot, n))
+    return (np.array([rmst(c["dtimes"][r], c["died"][r], horizon)
+                      - rmst(k["dtimes"][r], k["died"][r], horizon) for r in idx]),
+            "RMST steps")
+
+
+def fraction_diffs(key: str):
+    def diffs(k: dict, c: dict, horizon: int, boot: int, seed: int) -> tuple:
+        return paired(k[key], c[key], np.mean, boot, seed), f"{key} fraction"
+    return diffs
+
+
+GATE_MARGINS = {
+    "divergence": (11, divergence_diffs),
+    "rewardRateIQM": (12, reward_rate_diffs),
+    "rmstSurvival": (13, rmst_diffs),
+    "learnedSeeds": (30, fraction_diffs("learned")),
+    "retainedSeeds": (31, fraction_diffs("retained")),
+    "positiveSeedFraction": (33, fraction_diffs("positive")),
+}
+
+
+def slice_verdicts(tag: str, k: dict, c: dict, horizon: int, boot: int,
+                   categories: tuple[str, ...]) -> list[tuple[str, str, str, bool]]:
+    out = []
+    for name in categories:
+        offset, diffs_of = GATE_MARGINS[name]
+        d, label = diffs_of(k, c, horizon, boot, boot_seed(tag, offset))
+        lo, hi = float(np.percentile(d, 5)), float(np.percentile(d, 95))
+        out.append((name, "PASS" if hi >= 0.0 else "FAIL",
+                    f"{label} [{lo + 0.0:+.6g}, {hi + 0.0:+.6g}]",
+                    name == WIN_CATEGORY and lo > 0.0))
     return out
+
+
+def steps_per_second(run: dict) -> float | None:
+    meta = run["meta"]
+    rate = float(meta.get("stepsPerSecond") or 0.0)
+    if rate <= 0.0:
+        gpu = float(meta.get("gpuSeconds") or 0.0)
+        rate = float(meta["batch"]) * float(meta["steps"]) / gpu if gpu > 0.0 else 0.0
+    return rate if rate > 0.0 else None
+
+
+def schedule(run: dict) -> tuple:
+    return tuple(sorted((env, len(lanes)) for env, lanes in env_slices(run).items()))
+
+
+def throughput_verdict(kr: dict, cr: dict) -> tuple[str, str, str, bool]:
+    ks = steps_per_second(kr)
+    if ks is None:
+        return ("throughput", "FAIL", "keeper steps/s unrecorded, no bar to meet", False)
+    wr, ksched = cr, schedule(kr)
+    if schedule(cr) != ksched:
+        w = cr["root"] / "throughput"
+        if not (w / "meta.json").exists():
+            return ("throughput", "FAIL", "candidate schedule differs from the keeper and "
+                    f"there is no keeper-schedule witness at {w}", False)
+        wr = load(w)
+        if schedule(wr) != ksched:
+            return ("throughput", "FAIL", f"witness at {w} does not run the keeper schedule", False)
+        if wr["meta"]["steps"] != kr["meta"]["steps"]:
+            return ("throughput", "FAIL", f"witness horizon {wr['meta']['steps']:,} "
+                    f"differs from keeper {kr['meta']['steps']:,}", False)
+    cs = steps_per_second(wr)
+    if cs is None:
+        return ("throughput", "FAIL", "candidate steps/s unrecorded", False)
+    kk, ck = kr["meta"].get("hardwareKey"), wr["meta"].get("hardwareKey")
+    if kk and ck and kk != ck:
+        return ("throughput", "FAIL",
+                f"measured on different hardware, keeper {kk} candidate {ck}", False)
+    d = cs - ks
+    return ("throughput", "PASS" if d >= 0.0 else "FAIL",
+            f"steps/s candidate {cs:,.0f} keeper {ks:,.0f} d {d:+,.0f}"
+            + (f" on {ck}" if ck else "")
+            + ("" if (kk and ck) else "  [keeper hardware unrecorded]"),
+            d > 0.0)
+
+
+def lane_index(run: dict) -> dict[tuple[str, int], int]:
+    return {(env, int(run["seeds"][int(l)])): int(l)
+            for env, lanes in env_slices(run).items() for l in lanes}
 
 
 def _fail(msg: str) -> int:
@@ -871,11 +952,7 @@ def _fail(msg: str) -> int:
     return 2
 
 
-def cmd_gate(args) -> int:
-    kh = keeper_hash()
-    if kh is None or not (BENCH / kh).is_dir():
-        return _fail("GATE ERROR: keeper missing")
-    kr, cr = load(BENCH / kh), load(args.candidate)
+def gate(kr: dict, cr: dict, boot: int, env_slice: str | None) -> int:
     for label, r in (("keeper", kr), ("candidate", cr)):
         if r["meta"]["policy"] != "oak":
             return _fail(f"GATE ERROR: {label} policy is {r['meta']['policy']}")
@@ -886,49 +963,81 @@ def cmd_gate(args) -> int:
     if (kr["meta"].get("ablationLabel") or "none") != (cr["meta"].get("ablationLabel") or "none"):
         return _fail("GATE ERROR: ablation differs")
     k_sl, c_sl = env_slices(kr), env_slices(cr)
-    if args.env_slice:
-        if args.env_slice not in k_sl or args.env_slice not in c_sl:
-            return _fail(f"GATE ERROR: missing slice {args.env_slice}")
-        k_lanes, c_lanes = k_sl[args.env_slice], c_sl[args.env_slice]
-    else:
-        k_lanes = np.arange(kr["tape"]["lanes"])
-        c_lanes = np.arange(cr["tape"]["lanes"])
-    if [kr["seeds"][l] for l in k_lanes] != [cr["seeds"][l] for l in c_lanes]:
-        return _fail("GATE ERROR: seed sets differ")
-    n, horizon, boot = len(k_lanes), kr["meta"]["steps"], args.boot
+    shared = sorted(set(k_sl) & set(c_sl))
+    keeper_only = sorted(set(k_sl) - set(c_sl))
+    cand_only = sorted(set(c_sl) - set(k_sl))
+    print(f"  shared envs ({len(shared)}): {', '.join(shared) or 'none'}")
+    print(f"  keeper-only envs ({len(keeper_only)}): {', '.join(keeper_only) or 'none'}")
+    print(f"  candidate-only envs ({len(cand_only)}): {', '.join(cand_only) or 'none'}"
+          + (" not gated, no keeper reference" if cand_only else ""))
+    if keeper_only and not env_slice:
+        return _fail("GATE ERROR: keeper envs absent from candidate, not comparable: "
+                     + ", ".join(keeper_only))
+    if env_slice:
+        if env_slice not in shared:
+            return _fail(f"GATE ERROR: missing slice {env_slice}")
+        shared = [env_slice]
+    if not shared:
+        return _fail("GATE ERROR: no shared env slices")
+    k_index, c_index = lane_index(kr), lane_index(cr)
+    k_lanes, c_lanes, absent, ungated = {}, {}, [], []
+    for env in shared:
+        seeds = sorted(int(kr["seeds"][int(l)]) for l in k_sl[env])
+        gone = [s for s in seeds if (env, s) not in c_index]
+        if gone:
+            absent.append(f"{env} {len(gone)} of {len(seeds)} seeds, first {gone[:8]}")
+            continue
+        k_lanes[env] = np.array([k_index[(env, s)] for s in seeds])
+        c_lanes[env] = np.array([c_index[(env, s)] for s in seeds])
+        if len(c_sl[env]) > len(seeds):
+            ungated.append(f"{env} +{len(c_sl[env]) - len(seeds)}")
+    if absent:
+        return _fail("GATE ERROR: keeper lanes absent from candidate, not comparable: "
+                     + "; ".join(absent))
+    if ungated:
+        print(f"  ungated candidate lanes in shared envs: {', '.join(ungated)}")
+    horizon = kr["meta"]["steps"]
+    kv, cv = lane_vectors(kr), lane_vectors(cr)
+    rows, wins, regressions = [], [], []
 
-    def apply(tag: str, verdicts: list[tuple[str, bool]]) -> bool:
-        ok = True
-        for name, passed in verdicts:
-            ok &= passed
-            print(f"  [{'PASS' if passed else 'FAIL'}] {tag}{name}")
-        return ok
+    def record(scope: str, verdicts: list[tuple[str, str, str, bool]]) -> None:
+        for name, status, detail, win in verdicts:
+            rows.append((status, scope, name, detail, win))
+            if status == "FAIL":
+                regressions.append(f"{scope} {name}")
+            if win:
+                wins.append(f"{scope} {name} [{detail}]")
 
-    if args.env_slice or len(k_sl) <= 1:
-        ok = apply("", slice_verdicts(analyze(kr, k_lanes)["_vectors"],
-                                      analyze(cr, c_lanes)["_vectors"],
-                                      n, horizon, boot))
-    else:
-        ok = True
-        skip = {"learnedSeeds", "retainedSeeds", "positiveSeedFraction"}
-        for env in k_sl:
-            if env not in c_sl or [kr["seeds"][l] for l in k_sl[env]] != \
-                                  [cr["seeds"][l] for l in c_sl[env]]:
-                print(f"  [FAIL] {env} seeds")
-                ok = False
-                continue
-            v = [x for x in slice_verdicts(analyze(kr, k_sl[env])["_vectors"],
-                                           analyze(cr, c_sl[env])["_vectors"],
-                                           len(k_sl[env]), horizon, boot)
-                 if x[0] not in skip]
-            ok &= apply(f"{env} ", v)
-        fleet = {"divergence"} | skip
-        fv = slice_verdicts(analyze(kr, np.arange(kr["tape"]["lanes"]))["_vectors"],
-                            analyze(cr, np.arange(cr["tape"]["lanes"]))["_vectors"],
-                            kr["tape"]["lanes"], horizon, boot)
-        ok &= apply("fleet.", [x for x in fv if x[0] in fleet])
-    print("PROMOTE" if ok else "REJECT")
-    return 0 if ok else 1
+    for env in shared:
+        record(env, slice_verdicts(env, take(kv, k_lanes[env]), take(cv, c_lanes[env]),
+                                   horizon, boot, GATE_ENV_CATEGORIES))
+    record("fleet", slice_verdicts(
+        "fleet", take(kv, np.concatenate([k_lanes[e] for e in shared])),
+        take(cv, np.concatenate([c_lanes[e] for e in shared])),
+        horizon, boot, GATE_FLEET_CATEGORIES))
+    record("fleet", [throughput_verdict(kr, cr)])
+    scope_w = max(len(r[1]) for r in rows)
+    cat_w = max(len(r[2]) for r in rows)
+    for status, scope, name, detail, win in rows:
+        print(f"  {status:<7} {scope:<{scope_w}}  {name:<{cat_w}}  {detail}"
+              + ("  WIN" if win else ""))
+    if regressions:
+        print("REJECT: regression in " + ", ".join(regressions))
+        return 1
+    if cand_only:
+        wins.append("adds " + ", ".join(cand_only))
+    if not wins:
+        print("REJECT: no strict win, the candidate only ties the keeper")
+        return 1
+    print("PROMOTE: strict win " + ", ".join(wins))
+    return 0
+
+
+def cmd_gate(args) -> int:
+    kh = keeper_hash()
+    if kh is None or not (BENCH / kh).is_dir():
+        return _fail("GATE ERROR: keeper missing")
+    return gate(load(BENCH / kh), load(args.candidate), args.boot, args.env_slice)
 
 
 def keeper_hash() -> str | None:
@@ -1004,9 +1113,9 @@ def cmd_baselines(args) -> int:
                                 stdout=lf, stderr=subprocess.STDOUT).returncode
         if rc != 0:
             raise SystemExit(f"[baselines] {policy} benchmark exit={rc}; see {log}")
-        subprocess.run(me + ["report", str(root)], cwd=REPO, check=True)
         (BASELINES / policy).write_text(name + "\n")
         (root / ".done").touch()
+        subprocess.run(me + ["report", str(root)], cwd=REPO)
         print(f"[baselines] {policy} crowned: {name}", flush=True)
     return 0
 

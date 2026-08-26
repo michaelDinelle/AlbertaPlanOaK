@@ -15,10 +15,11 @@ struct MjBlob {
   let data: Data
   let entries: [MjEntry]
 
-  static func scratchWords(nv: Int, nbody: Int, ngeom: Int, nconMax: Int, nefcMax: Int, nM: Int)
-    -> Int
-  {
-    return 76 * nbody + 34 * nv + 6 * ngeom + 43 + 2 * nM + 26 * max(nconMax, 1) + nefcMax * (nv + 3)
+  static func scratchWords(
+    nv: Int, nbody: Int, ngeom: Int, nconMax: Int, nefcMax: Int, nM: Int
+  ) -> Int {
+    return 60 * nbody + 28 * nv + 6 * ngeom + 40 + 2 * nM + 27 * max(nconMax, 1)
+      + nefcMax * (nv + 3)
   }
 
   static func load() throws -> MjBlob {
