@@ -1,325 +1,491 @@
 import * as THREE from 'three';
-import { applyDebugLayer, type GroundTruthOptions } from '@kit/debug';
-import { applyFog, makeLightRig, type LightRig } from '@kit/lighting';
-import { oakMaterial } from '@kit/materials';
+import type { CelebrationPoolOptions } from '@kit/celebrate';
+import type { GroundTruthOptions } from '@kit/debug';
+import { clamp01, envelope, smoothstep01 } from '@kit/mix';
 import type { OrbitRigOptions } from '@kit/rigs';
-import { skyFromPalette } from '@kit/sky';
 import { StageScene, type Stage } from '@kit/stage';
+import { TOKENS } from '@kit/tokens';
 import type { FrameUpdate, SceneContext, SceneFactory } from '@kit/types';
-import { makeWorld, type WorldCore } from '@kit/world';
+import { Wisp } from '@kit/wisp';
+import { clearOrchardReadout, publishOrchardReadout } from '../../state/orchard';
+import type { GridSize } from '@kit/grid';
+import type { GridCell } from '@sim/types';
 import {
-  JBW_BANANA,
+  jbwCandidate,
+  jbwItemAt,
+  jbwPolarity,
+  jbwWallLine,
+  JBW_BANANAS,
+  JBW_BLOCK,
   JBW_EMPTY,
   JBW_HEADING,
-  JBW_JELLY,
-  JBW_ONION,
-  JBW_TREE,
-  JBW_TRUFFLE,
+  JBW_JELLIES,
+  JBW_ONIONS,
+  JBW_TRUFFLES,
   JBW_WALL,
   JBW_X,
   JBW_Y,
-  jbwDepleted,
-  jbwItemAt,
+  jbwCollectible,
+  jbwEnergy,
+  jbwBlocks,
 } from '@sim/envs/jellybeanworld';
+import { AGENT_SPAN, ITEM_KINDS } from './actors';
+import { buildScentKernel, ScentField } from './scent';
+import {
+  buildWorld,
+  CAM_AZIMUTH,
+  CAM_DISTANCE,
+  CAM_FOLLOW,
+  CAM_FAR,
+  CAM_MAX_DISTANCE,
+  MAP_FULL,
+  MAP_START,
+  CAM_NEAR,
+  CAM_POLAR,
+  OCCLUDER_LIMIT,
+  orchardHeight,
+  DRAW_RADIUS,
+  type OrchardWorld,
+} from './world';
 
-const colors = [0x000000, 0xf5d44b, 0x9b63d4, 0xee776b, 0x4a86b8, 0x4f9a64, 0x7a4a2d];
-const scents = [
-  [0, 0, 0], [1.92, 1.76, 0.4], [0.68, 0.01, 0.99], [1.64, 0.54, 0.4],
-  [0, 0, 0], [0, 0.47, 0.06], [8.4, 4.8, 2.6],
-] as const;
-const scentColors = [0xffba68, 0x8c6ed8, 0x73c98b];
+const UNIT_GRID: GridSize = { w: 1, h: 1 };
 
-interface JellyWorld extends WorldCore {
-  rig: LightRig;
-  items: THREE.InstancedMesh[];
-  agent: THREE.Group;
-  sensed: THREE.Group;
-  scentLights: THREE.PointLight[];
-  scentLabel: THREE.Sprite;
-  negative: THREE.Mesh;
-}
+const HOP_SECONDS = 0.11;
+const HOP_HEIGHT = 0.16;
 
-function geometry(item: number): THREE.BufferGeometry {
-  if (item === JBW_BANANA) {
-    const g = new THREE.TorusGeometry(0.19, 0.055, 5, 10, Math.PI * 1.35);
-    g.rotateX(Math.PI / 2);
-    g.rotateZ(-0.65);
-    return g;
-  }
-  if (item === JBW_ONION) return new THREE.IcosahedronGeometry(0.18, 1);
-  if (item === JBW_JELLY) return new THREE.SphereGeometry(0.19, 8, 5);
-  if (item === JBW_WALL) return new THREE.BoxGeometry(0.94, 0.62, 0.94);
-  if (item === JBW_TREE) return new THREE.ConeGeometry(0.3, 0.82, 7);
-  return new THREE.DodecahedronGeometry(0.16, 0);
-}
+const BURST_SCALE = 0.92;
+const RIPPLE_SCALE = 0.62;
+const PULSE_STRENGTH = 0.6;
+const BLOOM_Y = 0.62;
+const BLOOM_SECONDS = 1.4;
+const SIGH_STRENGTH = 0.85;
 
-function itemHeight(item: number): number {
-  if (item === JBW_WALL) return 0.31;
-  if (item === JBW_TREE) return 0.41;
-  return 0.18;
-}
+const HARVEST_TAU = 4096;
+const HARVEST_FULL = HARVEST_TAU / 512;
+const HARVEST_CHASE = 0.9;
 
-function scentAt(seed: number, x: number, y: number, pose: ArrayLike<number>): [number, number, number] {
-  const out: [number, number, number] = [0, 0, 0];
-  for (let dy = -3; dy <= 3; dy++) {
-    for (let dx = -3; dx <= 3; dx++) {
-      if (dx === 0 && dy === 0) continue;
-      const item = jbwItemAt(seed, x + dx, y + dy);
-      if (item === JBW_EMPTY || item === JBW_WALL || jbwDepleted(pose, dx, dy)) continue;
-      const response = Math.exp(-0.42 * Math.hypot(dx, dy));
-      const source = scents[item] ?? scents[0];
-      out[0] += (source[0] ?? 0) * response;
-      out[1] += (source[1] ?? 0) * response;
-      out[2] += (source[2] ?? 0) * response;
-    }
-  }
-  return out;
-}
+const FRONT_SECONDS = 1.35;
+const FRONT_SPAN = 220;
+const BLOCK_BIAS = 1 << 18;
+const BLOCK_SPAN = 1 << 19;
+const BLOCK_CACHE_LIMIT = 40000;
+const DEBUG_CELLS = 33;
 
-function labelSprite(): THREE.Sprite {
-  const canvas = document.createElement('canvas');
-  canvas.width = 512;
-  canvas.height = 64;
-  const texture = new THREE.CanvasTexture(canvas);
-  texture.colorSpace = THREE.SRGBColorSpace;
-  const material = new THREE.SpriteMaterial({ map: texture, transparent: true, depthTest: false });
-  const sprite = new THREE.Sprite(material);
-  sprite.userData['canvas'] = canvas;
-  sprite.scale.set(3.8, 0.48, 1);
-  sprite.position.set(0, 1.25, -2.9);
-  return sprite;
-}
+const INVENTORY_SLOTS: readonly number[] = [JBW_BANANAS, JBW_ONIONS, JBW_JELLIES, JBW_TRUFFLES];
 
-function setLabel(sprite: THREE.Sprite, values: readonly number[]): void {
-  const canvas = sprite.userData['canvas'] as HTMLCanvasElement;
-  const context = canvas.getContext('2d');
-  if (!context) return;
-  context.clearRect(0, 0, canvas.width, canvas.height);
-  context.fillStyle = 'rgba(7, 12, 18, 0.72)';
-  context.roundRect(20, 7, 472, 50, 18);
-  context.fill();
-  context.font = '500 22px ui-monospace, SFMono-Regular, monospace';
-  context.textAlign = 'center';
-  context.fillStyle = '#eaf4ef';
-  context.fillText(values.map((v) => v.toFixed(3)).join('    '), 256, 40);
-  const material = sprite.material as THREE.SpriteMaterial;
-  if (material.map) material.map.needsUpdate = true;
-}
+const READOUT_SECONDS = 1 / 15;
 
-function buildWorld(ctx: SceneContext, scene: THREE.Scene): JellyWorld {
-  const palette = ctx.tokens.palettes.afternoon;
-  const w = makeWorld('jellyBeanWorld');
-  const sky = w.own(skyFromPalette(palette, 'afternoon', { radius: 180, sunSize: 0.028 }));
-  w.add(sky.mesh);
-  w.time(sky);
-  const rig = w.own(makeLightRig(palette, { pointCount: 4, pointDistance: 7 }));
-  rig.setShadowFocus({ x: 0, y: 0, z: 0 }, 5.2);
-  w.add(rig.group);
-  applyFog(scene, palette, 28);
+const FORWARD: readonly (readonly [number, number])[] = [
+  [0, -1],
+  [1, 0],
+  [0, 1],
+  [-1, 0],
+];
 
-  const groundGeometry = w.own(new THREE.PlaneGeometry(7, 7));
-  const groundMaterial = w.own(oakMaterial({
-    color: 0x56684f, roughness: 0.94, flatShading: true, toonSteps: 3,
-    rimColor: palette.skyHorizon, rimStrength: 0.12, name: 'jellyGround',
-  }));
-  const ground = new THREE.Mesh(groundGeometry, groundMaterial);
-  ground.rotation.x = -Math.PI / 2;
-  ground.receiveShadow = true;
-  w.add(ground);
-  const lattice = new THREE.GridHelper(7, 7, 0x7f9273, 0x65765e);
-  lattice.position.y = 0.006;
-  const latticeMaterials = Array.isArray(lattice.material) ? lattice.material : [lattice.material];
-  for (const material of latticeMaterials) {
-    material.transparent = true;
-    material.opacity = 0.24;
-    w.own(material);
-  }
-  w.own(lattice.geometry);
-  w.add(lattice);
+const SENSE_DIRS: readonly (readonly [number, number])[] = [
+  [0, -1],
+  [1, -1],
+  [1, 0],
+  [1, 1],
+  [0, 1],
+  [-1, 1],
+  [-1, 0],
+  [-1, -1],
+];
 
-  const items: THREE.InstancedMesh[] = [];
-  for (let item = JBW_BANANA; item <= JBW_TRUFFLE; item++) {
-    const g = w.own(geometry(item));
-    const m = w.own(oakMaterial({
-      color: colors[item], roughness: item === JBW_JELLY ? 0.58 : 0.86,
-      flatShading: true, toonSteps: 3, rimColor: palette.skyHorizon, rimStrength: 0.22,
-      name: `jellyRole${item}`,
-    }));
-    const mesh = new THREE.InstancedMesh(g, m, 49);
-    mesh.name = `jellyRole${item}`;
-    mesh.castShadow = true;
-    mesh.receiveShadow = item === JBW_WALL;
-    mesh.frustumCulled = false;
-    mesh.count = 0;
-    items[item] = mesh;
-    w.add(mesh);
-  }
+class WindfallOrchardScene extends StageScene<OrchardWorld> {
+  protected readonly stageName = 'windfallOrchard';
 
-  const agent = new THREE.Group();
-  agent.name = 'jellyExplorer';
-  const bodyGeometry = w.own(new THREE.OctahedronGeometry(0.24, 1));
-  const bodyMaterial = w.own(oakMaterial({ color: 0xf3eee1, roughness: 0.7, flatShading: true }));
-  const body = new THREE.Mesh(bodyGeometry, bodyMaterial);
-  body.position.y = 0.29;
-  body.castShadow = true;
-  agent.add(body);
-  const noseGeometry = w.own(new THREE.ConeGeometry(0.09, 0.28, 5));
-  noseGeometry.rotateX(-Math.PI / 2);
-  noseGeometry.translate(0, 0.28, -0.25);
-  const nose = new THREE.Mesh(noseGeometry, bodyMaterial);
-  nose.castShadow = true;
-  agent.add(nose);
-  w.add(agent);
-
-  const sensed = new THREE.Group();
-  sensed.name = 'jellySensedCells';
-  const ringGeometry = w.own(new THREE.RingGeometry(0.36, 0.43, 24));
-  const ringMaterial = w.own(new THREE.MeshBasicMaterial({
-    color: ctx.tokens.uiCyan, transparent: true, opacity: 0.72, side: THREE.DoubleSide,
-    depthWrite: false, toneMapped: false,
-  }));
-  for (let i = 0; i < 8; i++) {
-    const ring = new THREE.Mesh(ringGeometry, ringMaterial);
-    ring.rotation.x = -Math.PI / 2;
-    ring.position.y = 0.025;
-    sensed.add(ring);
-  }
-  applyDebugLayer(sensed);
-  sensed.visible = false;
-  w.add(sensed);
-
-  const scentLights = rig.points.slice(0, 3);
-  for (let i = 0; i < scentLights.length; i++) {
-    const light = scentLights[i];
-    if (!light) continue;
-    light.color.setHex(scentColors[i] ?? 0xffffff);
-    light.position.set((i - 1) * 1.25, 0.12, 0.6);
-  }
-  const scentLabel = labelSprite();
-  applyDebugLayer(scentLabel);
-  scentLabel.visible = false;
-  w.add(scentLabel);
-
-  const negativeGeometry = w.own(new THREE.RingGeometry(0.34, 0.48, 40));
-  const negativeMaterial = w.own(new THREE.MeshBasicMaterial({
-    color: 0x17202a, transparent: true, opacity: 0, side: THREE.DoubleSide,
-    depthWrite: false, toneMapped: false,
-  }));
-  const negative = new THREE.Mesh(negativeGeometry, negativeMaterial);
-  negative.rotation.x = -Math.PI / 2;
-  negative.position.y = 0.018;
-  negative.visible = false;
-  w.add(negative);
-
-  return w.seal<JellyWorld>({ rig, items, agent, sensed, scentLights, scentLabel, negative });
-}
-
-class JellyBeanWorldScene extends StageScene<JellyWorld> {
-  protected readonly stageName = 'jellyBeanWorld';
+  private wisp: Wisp | null = null;
+  private field: ScentField | null = null;
   private seed = 0;
-  private debug = false;
-  private negativeAt = -Infinity;
+
+  private readonly inventory = new Float32Array(INVENTORY_SLOTS.length);
+  private inventoryReady = false;
+  private rate = 0;
+  private rateStep = 0;
+  private harvest = 0.35;
+  private polarity: 1 | -1 = 1;
+  private ripeness = 1;
+  private frontAt = -Infinity;
+  private frontFrom = 1;
+  private bloomAt = -Infinity;
+
+  private readonly cell: GridCell = { x: 0, y: 0 };
   private readonly matrix = new THREE.Matrix4();
-  private readonly position = new THREE.Vector3();
-  private readonly rotation = new THREE.Quaternion();
-  private readonly scale = new THREE.Vector3(1, 1, 1);
+  private readonly place = new THREE.Vector3();
+  private readonly spin = new THREE.Quaternion();
+  private readonly tilt = new THREE.Euler();
+  private readonly unit = new THREE.Vector3(1, 1, 1);
+  private readonly bloomPos = new THREE.Vector3();
+  private readonly groundPos = new THREE.Vector3();
+  private readonly counts = new Map<number, number>();
+  private sightX = Number.NaN;
+  private sightY = Number.NaN;
+  private sightHeading = -1;
+  private readonly blocks = new Map<number, Int32Array>();
+  private blockX = Number.NaN;
+  private blockY = Number.NaN;
+  private itemsDirty = true;
+  private readonly debugWalls = new Uint8Array(DEBUG_CELLS * DEBUG_CELLS);
+  private readonly debugCell: GridCell = { x: 0, y: 0 };
+  private readonly sensed = new Float32Array(8);
+  private readonly scentOut = new Float32Array(3);
+  private readonly sight = new Float32Array(OCCLUDER_LIMIT * 3);
+  private readoutAt = -Infinity;
+  private moved = false;
+  private accent = TOKENS.celebrationGold;
+  private gold = TOKENS.celebrationGold;
 
-  protected buildWorld(ctx: SceneContext): JellyWorld {
+  protected buildWorld(ctx: SceneContext): OrchardWorld {
     this.seed = ctx.seed;
-    return buildWorld(ctx, this.scene);
+    const field = new ScentField(
+      ctx.seed,
+      buildScentKernel(),
+      ctx.renderer.capabilities.getMaxAnisotropy(),
+    );
+    this.field = field;
+    return buildWorld(ctx, this.scene, field);
   }
-  protected buildActors(): void {}
+
+  protected buildActors(ctx: SceneContext, world: OrchardWorld): void {
+    this.accent = this.accentOf(ctx);
+    this.gold = ctx.tokens.celebrationGold;
+    const wisp = new Wisp(
+      {
+        color: this.accent,
+        radius: AGENT_SPAN / 4.8,
+        height: AGENT_SPAN * 0.24,
+        hop: { duration: HOP_SECONDS, height: HOP_HEIGHT },
+        name: 'orchardWisp',
+      },
+      UNIT_GRID,
+    );
+    this.wisp = wisp;
+    this.scene.add(wisp.group);
+    const agentLight = world.rig.points[0];
+    if (agentLight) agentLight.color.set(this.accent);
+    const bloomLight = world.rig.points[1];
+    if (bloomLight) bloomLight.color.set(this.gold);
+  }
+
   protected rigOptions(): OrbitRigOptions {
-    return { target: [0, 0.2, 0], distance: 8.8, azimuth: 0.72, polar: 0.72, follow: 10 };
+    return {
+      target: [0, 0.4, 0],
+      distance: CAM_DISTANCE,
+      azimuth: CAM_AZIMUTH,
+      polar: CAM_POLAR,
+      follow: CAM_FOLLOW,
+      limits: { maxDistance: CAM_MAX_DISTANCE },
+    };
   }
-  protected overlayOptions(): GroundTruthOptions { return {}; }
-  protected start(_ctx: SceneContext, world: JellyWorld): void {
+
+  protected override poolOptions(): CelebrationPoolOptions {
+    return { burstSize: 108, sighSize: 96 };
+  }
+
+  protected overlayOptions(): GroundTruthOptions {
+    return {
+      windowCells: DEBUG_CELLS,
+      gridWindow: (state) => {
+        const ax = Math.round(state.pose[JBW_X] ?? 0);
+        const ay = Math.round(state.pose[JBW_Y] ?? 0);
+        const half = (DEBUG_CELLS - 1) / 2;
+        const walls = this.debugWalls;
+        walls.fill(0);
+        for (let j = 0; j < DEBUG_CELLS; j++) {
+          for (let i = 0; i < DEBUG_CELLS; i++) {
+            const wx = ax - half + i;
+            const wy = ay - half + j;
+            if (jbwItemAt(this.seed, wx, wy) === JBW_WALL) walls[j * DEBUG_CELLS + i] = 1;
+          }
+        }
+        return { walls, originX: ax - half, originY: ay - half, height: orchardHeight(this.seed, ax, ay) };
+      },
+      agentCell: () => {
+        this.debugCell.x = (DEBUG_CELLS - 1) / 2;
+        this.debugCell.y = (DEBUG_CELLS - 1) / 2;
+        return this.debugCell;
+      },
+    };
+  }
+
+  protected start(_ctx: SceneContext, world: OrchardWorld): void {
+    this.camera.near = CAM_NEAR;
+    this.camera.far = CAM_FAR;
+    this.camera.updateProjectionMatrix();
     world.setTime(0);
+    world.setOrigin(0, 0);
+    this.wisp?.setCell(0, 0, UNIT_GRID);
   }
-  protected poolOptions() { return { burstSize: 36 }; }
 
-  override setDebug(on: boolean): void {
-    super.setDebug(on);
-    this.debug = on;
-    if (this.world) {
-      this.world.sensed.visible = on;
-      this.world.scentLabel.visible = on;
+  private readInventory(pose: Float32Array): number {
+    let gained = 0;
+    for (let i = 0; i < INVENTORY_SLOTS.length; i++) {
+      const slot = INVENTORY_SLOTS[i] ?? 0;
+      const now = pose[slot] ?? 0;
+      const was = this.inventory[i] ?? 0;
+      if (this.inventoryReady && now > was) gained += now - was;
+      this.inventory[i] = now;
     }
+    this.inventoryReady = true;
+    return gained;
   }
 
-  protected tick(frame: FrameUpdate, { world, pool, rig, time }: Stage<JellyWorld>): void {
-    const pose = frame.state.pose;
-    const x = Math.trunc(pose[JBW_X] ?? 0);
-    const y = Math.trunc(pose[JBW_Y] ?? 0);
-    const counts = new Uint8Array(7);
-    for (let dy = -3; dy <= 3; dy++) {
-      for (let dx = -3; dx <= 3; dx++) {
-        if (dx === 0 && dy === 0) continue;
-        const item = jbwItemAt(this.seed, x + dx, y + dy);
-        if (item === JBW_EMPTY || (item !== JBW_WALL && item !== JBW_TREE && jbwDepleted(pose, dx, dy))) continue;
-        const mesh = world.items[item];
-        if (!mesh) continue;
-        this.position.set(dx, itemHeight(item), dy);
-        this.rotation.setFromAxisAngle(new THREE.Vector3(0, 1, 0), ((x + dx) * 0.71 + (y + dy) * 1.13));
-        this.matrix.compose(this.position, this.rotation, this.scale);
-        mesh.setMatrixAt(counts[item] ?? 0, this.matrix);
-        counts[item] = (counts[item] ?? 0) + 1;
+  private advanceRate(step: number, credit: number): void {
+    const elapsed = step - this.rateStep;
+    if (elapsed > 0) {
+      this.rate *= Math.exp(-elapsed / HARVEST_TAU);
+      this.rateStep = step;
+    }
+    this.rate += credit;
+    if (this.rate < 0) this.rate = 0;
+  }
+
+  private blockAt(bx: number, by: number): Int32Array {
+    const key = (bx + BLOCK_BIAS) * BLOCK_SPAN + (by + BLOCK_BIAS);
+    const cached = this.blocks.get(key);
+    if (cached) return cached;
+    const out: number[] = [];
+    const line = jbwWallLine(this.seed, bx, by);
+    if (line) {
+      for (let i = 0; i < JBW_BLOCK; i++) {
+        out.push(
+          line[0] ? bx * JBW_BLOCK + i : line[1],
+          line[0] ? line[1] : by * JBW_BLOCK + i,
+          JBW_WALL,
+        );
       }
     }
-    for (let item = JBW_BANANA; item <= JBW_TRUFFLE; item++) {
-      const mesh = world.items[item];
+    const at = jbwCandidate(this.seed, bx, by);
+    const item = jbwItemAt(this.seed, at[0], at[1]);
+    if (item !== JBW_EMPTY && item !== JBW_WALL) out.push(at[0], at[1], item);
+    const packed = Int32Array.from(out);
+    if (this.blocks.size >= BLOCK_CACHE_LIMIT) this.blocks.clear();
+    this.blocks.set(key, packed);
+    return packed;
+  }
+
+  private rebuildItems(world: OrchardWorld, ax: number, ay: number, field: ScentField): void {
+    const counts = this.counts;
+    for (const kind of ITEM_KINDS) counts.set(kind, 0);
+    const firstX = Math.floor((ax - DRAW_RADIUS) / JBW_BLOCK);
+    const lastX = Math.floor((ax + DRAW_RADIUS) / JBW_BLOCK);
+    const firstY = Math.floor((ay - DRAW_RADIUS) / JBW_BLOCK);
+    const lastY = Math.floor((ay + DRAW_RADIUS) / JBW_BLOCK);
+    for (let by = firstY; by <= lastY; by++) {
+      for (let bx = firstX; bx <= lastX; bx++) {
+        const packed = this.blockAt(bx, by);
+        for (let i = 0; i < packed.length; i += 3) {
+          const wx = packed[i] ?? 0;
+          const wy = packed[i + 1] ?? 0;
+          const item = packed[i + 2] ?? 0;
+          if (jbwCollectible(item) && field.depleted(wx, wy)) continue;
+          this.write(world, counts, item, wx, wy);
+        }
+      }
+    }
+    for (const kind of ITEM_KINDS) {
+      const mesh = world.items.get(kind);
       if (!mesh) continue;
-      mesh.count = counts[item] ?? 0;
+      mesh.count = counts.get(kind) ?? 0;
       mesh.instanceMatrix.needsUpdate = true;
     }
+  }
 
-    world.agent.rotation.y = -(pose[JBW_HEADING] ?? 0) * Math.PI * 0.5;
-    world.agent.position.y = 0.025 + Math.sin(time * 2.2) * 0.018;
-    const scent = scentAt(this.seed, x, y, pose);
-    for (let i = 0; i < world.scentLights.length; i++) {
-      const light = world.scentLights[i];
-      if (light) light.intensity = 0.08 * Math.log1p(scent[i] ?? 0);
+  private write(
+    world: OrchardWorld,
+    counts: Map<number, number>,
+    item: number,
+    wx: number,
+    wy: number,
+  ): void {
+    const mesh = world.items.get(item);
+    if (!mesh) throw new Error(`no orchard mesh for item ${item}`);
+    const used = counts.get(item) ?? 0;
+    if (used >= mesh.instanceMatrix.count) {
+      throw new Error(`orchard item ${item} exceeded capacity ${mesh.instanceMatrix.count}`);
     }
-    if (this.debug) setLabel(world.scentLabel, scent);
+    this.place.set(wx, orchardHeight(this.seed, wx, wy), wy);
+    this.tilt.set(0, wx * 0.71 + wy * 1.13, 0);
+    this.spin.setFromEuler(this.tilt);
+    this.matrix.compose(this.place, this.spin, this.unit);
+    mesh.setMatrixAt(used, this.matrix);
+    counts.set(item, used + 1);
+  }
 
-    const sensed = world.sensed.children;
-    let k = 0;
-    for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) {
-      if (dx === 0 && dy === 0) continue;
-      sensed[k++]?.position.set(dx, 0.025, dy);
+  private publish(field: ScentField, ax: number, ay: number, heading: number, step: number): void {
+    for (let i = 0; i < 8; i++) {
+      const d = SENSE_DIRS[(2 * heading + i) & 7];
+      if (!d) continue;
+      const wx = ax + d[0];
+      const wy = ay + d[1];
+      const item = jbwItemAt(this.seed, wx, wy);
+      const absent = !jbwBlocks(item) && field.depleted(wx, wy);
+      this.sensed[i] = absent ? 0 : jbwEnergy(item);
     }
+    field.sample(ax, ay, step, this.scentOut);
+    publishOrchardReadout({
+      live: true,
+      sensed: Array.from(this.sensed),
+      scent: [this.scentOut[0] ?? 0, this.scentOut[1] ?? 0, this.scentOut[2] ?? 0],
+      inventory: [
+        this.inventory[0] ?? 0,
+        this.inventory[1] ?? 0,
+        this.inventory[2] ?? 0,
+        this.inventory[3] ?? 0,
+      ],
+      moved: this.moved,
+      polarity: this.polarity,
+      harvest: this.harvest,
+    });
+  }
+
+  protected tick(frame: FrameUpdate, { world, pool, rig, time }: Stage<OrchardWorld>): void {
+    const wisp = this.wisp;
+    const field = this.field;
+    if (!wisp || !field) return;
+
+    const pose = frame.state.pose;
+    const step = frame.state.step;
+    const ax = Math.round(pose[JBW_X] ?? 0);
+    const ay = Math.round(pose[JBW_Y] ?? 0);
+    const heading = Math.round(pose[JBW_HEADING] ?? 0) & 3;
+
+    pool.update(frame.dtReal, time);
 
     if (frame.scrubbed) {
       pool.clear();
-      this.negativeAt = -Infinity;
-      world.negative.visible = false;
+      this.bloomAt = -Infinity;
+      this.frontAt = -Infinity;
+      this.rate = 0;
+      this.rateStep = step;
+      this.sightX = Number.NaN;
+      this.itemsDirty = true;
+      this.inventoryReady = false;
+      this.harvest = 0.35;
+      field.resetScars();
+      wisp.setCell(ax, ay, UNIT_GRID);
+      wisp.snap();
       rig.snap();
     }
-    for (const event of frame.events) {
-      if (event.type !== 'collection') continue;
-      if (event.reward > 0) {
-        pool.ripple(this.position.set(0, 0.02, 0), 0xffc46b, 0.72, time);
-        pool.pulse.fire(0.72);
-      } else if (event.reward < 0) {
-        this.negativeAt = time;
-        world.negative.visible = true;
+
+    const gained = this.readInventory(pose);
+    const polarity = jbwPolarity(step);
+    if (polarity !== this.polarity) {
+      this.polarity = polarity;
+      this.frontFrom = this.ripeness;
+      this.frontAt = time;
+    }
+
+    let credit = 0;
+    for (let i = 0; i < frame.events.length; i++) {
+      const ev = frame.events[i];
+      if (!ev || ev.type !== 'collection') continue;
+      credit += ev.reward;
+      this.bloomPos.set(ax, orchardHeight(this.seed, ax, ay) + BLOOM_Y, ay);
+      this.groundPos.set(this.bloomPos.x, this.bloomPos.y - BLOOM_Y, this.bloomPos.z);
+      if (ev.reward >= 0) {
+        pool.burst(this.bloomPos, this.accent, BURST_SCALE, time);
+        pool.ripple(this.groundPos, this.gold, RIPPLE_SCALE, time);
+        pool.pulse.fire(PULSE_STRENGTH);
+        wisp.flare(1);
+        this.bloomAt = time;
+      } else {
+        pool.sigh(SIGH_STRENGTH, this.bloomPos, time);
       }
     }
-    const negativeAge = time - this.negativeAt;
-    if (negativeAge >= 0 && negativeAge < 0.8) {
-      const fade = 1 - negativeAge / 0.8;
-      world.negative.visible = true;
-      world.negative.scale.setScalar(0.28 + 1.45 * fade);
-      (world.negative.material as THREE.MeshBasicMaterial).opacity = 0.62 * fade;
-    } else world.negative.visible = false;
+    if (gained > 0) {
+      field.scar(ax, ay, step);
+      this.itemsDirty = true;
+    }
 
-    pool.update(frame.dtReal, time);
+    this.advanceRate(step, credit);
+    const target = clamp01(this.rate / HARVEST_FULL);
+    this.harvest += (target - this.harvest) * (1 - Math.exp(-HARVEST_CHASE * frame.dtReal));
+
+    const frontAge = time - this.frontAt;
+    const frontT = frontAge >= 0 && frontAge <= FRONT_SECONDS ? frontAge / FRONT_SECONDS : 1;
+    const wanted = polarity > 0 ? 1 : 0;
+    this.ripeness = this.frontFrom + (wanted - this.frontFrom) * smoothstep01(frontT);
+    world.setRipeness(this.ripeness);
+    world.setFront(
+      ax + ay + (frontT * 2 - 1) * FRONT_SPAN,
+      envelope(frontAge, FRONT_SECONDS, 1.4) * 1.6,
+    );
+
+    field.update(ax, ay, step);
+    const origin = field.origin;
+    world.setScentOrigin(origin[0], origin[1]);
+    if (ax !== this.sightX || ay !== this.sightY || heading !== this.sightHeading) {
+      this.sightX = ax;
+      this.sightY = ay;
+      this.sightHeading = heading;
+      const forward = FORWARD[heading] ?? FORWARD[0];
+      const count = field.occluders(ax, ay, this.sight);
+      world.paint.uOccluders.value.set(this.sight);
+      world.setSight(ax, ay, Math.atan2(forward?.[1] ?? 0, forward?.[0] ?? 1), count);
+    }
+
+    world.setOrigin(ax, ay);
+    world.setHour(this.harvest);
+    const zoom = rig.state.distance;
+    world.setMap(smoothstep01((zoom - MAP_START) / (MAP_FULL - MAP_START)), zoom);
+    world.setBreeze(0.25 + 0.75 * this.harvest);
+    const blockX = Math.floor(ax / JBW_BLOCK);
+    const blockY = Math.floor(ay / JBW_BLOCK);
+    if (this.itemsDirty || blockX !== this.blockX || blockY !== this.blockY) {
+      this.itemsDirty = false;
+      this.blockX = blockX;
+      this.blockY = blockY;
+      this.rebuildItems(world, ax, ay, field);
+    }
+
+    this.moved = ax !== wisp.cellX || ay !== wisp.cellY;
+    if (this.moved) {
+      this.cell.x = ax;
+      this.cell.y = ay;
+      wisp.hopTo(this.cell, time);
+    }
+    wisp.face(heading === 0 ? { dx: 0, dy: -1 } : heading === 1 ? { dx: 1, dy: 0 } : heading === 2 ? { dx: 0, dy: 1 } : { dx: -1, dy: 0 });
+    wisp.update(frame.dtReal, time);
+    wisp.group.position.y = orchardHeight(this.seed, ax, ay);
+
+    const bloom = envelope(time - this.bloomAt, BLOOM_SECONDS, 2.2);
+    const agentLight = world.rig.points[0];
+    if (agentLight) {
+      agentLight.position.set(wisp.position.x, wisp.position.y + TOKENS.wispHeight + 0.6, wisp.position.z);
+      agentLight.intensity = 1.15 + 1.4 * bloom + 0.5 * this.harvest;
+    }
+    const bloomLight = world.rig.points[1];
+    if (bloomLight) {
+      bloomLight.position.copy(this.bloomPos);
+      bloomLight.intensity = 2.4 * bloom;
+    }
+
+    if (time - this.readoutAt >= READOUT_SECONDS) {
+      this.readoutAt = time;
+      this.publish(field, ax, ay, heading, step);
+    }
+
     world.setTime(time);
-    rig.follow(0, 0.2, 0);
+    rig.follow(wisp.position.x, wisp.position.y + 0.4, wisp.position.z);
     rig.update(frame.dtReal);
   }
-  protected drop(): void {}
+
+  protected drop(): void {
+    clearOrchardReadout();
+    this.readoutAt = -Infinity;
+    this.wisp?.dispose();
+    this.wisp = null;
+    this.field?.dispose();
+    this.field = null;
+    this.counts.clear();
+    this.blocks.clear();
+    this.inventoryReady = false;
+    this.bloomAt = -Infinity;
+    this.frontAt = -Infinity;
+  }
 }
 
-const create: SceneFactory = () => new JellyBeanWorldScene();
-export default create;
+export default ((() => new WindfallOrchardScene()) satisfies SceneFactory);

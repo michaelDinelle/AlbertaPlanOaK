@@ -86,12 +86,21 @@ inline void jbw_destroy(device uint *history, uint mask, int x, int y, uint step
     }
 }
 
+inline bool jbw_blocks(uint item) {
+    return item == JBW_WALL || item == JBW_TREE;
+}
+
+inline bool jbw_collectible(uint item) {
+    return item == JBW_BANANA || item == JBW_ONION
+        || item == JBW_JELLY || item == JBW_TRUFFLE;
+}
+
 inline float jbw_energy(uint item) {
     switch (item) {
         case JBW_BANANA: return 2.04f;
         case JBW_ONION: return 1.68f;
         case JBW_JELLY: return 1.29f;
-        case JBW_WALL: return 0.87f;
+        case JBW_WALL: return 1.34f;
         case JBW_TREE: return 0.53f;
         case JBW_TRUFFLE: return 0.79f;
         default: return 0.0f;
@@ -150,9 +159,8 @@ inline void jbw_masks(uint seed, int x, int y, device const uint *history, uint 
         for (int dx = -3; dx <= 3; dx++) {
             if (dx == 0 && dy == 0) continue;
             uint item = jbw_itemAt(seed, x + dx, y + dy);
-            bool collectible = item == JBW_BANANA || item == JBW_ONION
-                || item == JBW_JELLY || item == JBW_TRUFFLE;
-            if (collectible && jbw_destroyedAt(history, historyMask, x + dx, y + dy) != 0u) {
+            if (jbw_collectible(item)
+                && jbw_destroyedAt(history, historyMask, x + dx, y + dy) != 0u) {
                 if (bit < 24u) lo |= 1u << bit;
                 else hi |= 1u << (bit - 24u);
             }
@@ -173,7 +181,7 @@ inline void jbw_observe(uint seed, device uint *words, device const uint *histor
     for (uint i = 0u; i < 8u; i++) {
         int2 d = directions[(2u * heading + i) & 7u];
         uint item = jbw_itemAt(seed, x + d.x, y + d.y);
-        bool absent = item != JBW_WALL && item != JBW_TREE
+        bool absent = !jbw_blocks(item)
             && jbw_destroyedAt(history, historyMask, x + d.x, y + d.y) != 0u;
         obs[i] = absent ? 0.0f : jbw_energy(item);
     }
@@ -194,11 +202,10 @@ inline float jbw_step(uint seed, uint action, device uint *words, device uint *h
         int2 forward[4] = { int2(0, -1), int2(1, 0), int2(0, 1), int2(-1, 0) };
         int2 p = int2(as_type<int>(words[0]), as_type<int>(words[1])) + forward[words[2] & 3u];
         uint item = jbw_itemAt(seed, p.x, p.y);
-        if (item != JBW_WALL) {
+        if (!jbw_blocks(item)) {
             words[0] = as_type<uint>(p.x); words[1] = as_type<uint>(p.y); words[3] = 1u;
-            bool collectible = item == JBW_BANANA || item == JBW_ONION
-                || item == JBW_JELLY || item == JBW_TRUFFLE;
-            if (collectible && jbw_destroyedAt(history, historyMask, p.x, p.y) == 0u) {
+            if (jbw_collectible(item)
+                && jbw_destroyedAt(history, historyMask, p.x, p.y) == 0u) {
                 uint inventory = item == JBW_BANANA ? 4u : item == JBW_ONION ? 5u
                     : item == JBW_JELLY ? 6u : 7u;
                 words[inventory]++;

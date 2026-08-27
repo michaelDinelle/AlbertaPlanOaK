@@ -1499,7 +1499,7 @@ final class TapeWriter {
       }
       return v
     }
-    let megaG = uintEnv("OAK_MEGA_LANES_PER_TG").flatMap { Int($0) } ?? autoG
+    let megaG = try uintEnv("OAK_MEGA_LANES_PER_TG").flatMap { Int($0) } ?? autoG
     let stageMask = try uintEnv("OAK_MEGA_STAGE_MASK")
     let splCapRaw = try uintEnv("OAK_SPL_CAP")
     let megaW = core * megaG

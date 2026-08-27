@@ -4,10 +4,10 @@ import { CartesianGrid, ComposedChart, ResponsiveContainer, Tooltip, XAxis, YAxi
 import type { TooltipPayload } from 'recharts/types/state/tooltipSlice';
 import type { Policy } from '@shared/types';
 import { formatRate, formatStep } from '../lib/format';
-import { subscribePosition, throttled } from '../playback/store';
+import { currentPosition, subscribePosition, throttled } from '../playback/store';
 
 export const CHART_MARGIN = { top: 22, right: 30, bottom: 0, left: 0 } as const;
-export const AXIS_WIDTH = 42;
+export const AXIS_WIDTH = 62;
 export const X_AXIS_HEIGHT = 18;
 
 export const POLICY_TOKENS: Record<Policy, string> = {
@@ -278,6 +278,7 @@ export function Playhead({ total }: { total: number }) {
       const frac = Math.min(1, Math.max(0, step / totalRef.current));
       el.style.transform = `translateX(${(CHART_MARGIN.left + AXIS_WIDTH + frac * inner).toFixed(1)}px)`;
     });
+    move(currentPosition());
     const unsubscribe = subscribePosition(move);
     return () => {
       observer.disconnect();

@@ -31,7 +31,16 @@ export interface GroundTruthOptions {
   profileRange?: readonly [number, number];
   fkToWorld?(x: number, z: number, out: Vec3Tuple): Vec3Tuple;
   maxKeys?: number;
+  gridWindow?(state: FrameState): GridWindow | null;
+  windowCells?: number;
   name?: string;
+}
+
+export interface GridWindow {
+  walls: Uint8Array;
+  originX: number;
+  originY: number;
+  height?: number;
 }
 
 const MAX_DOORS = 8;
@@ -79,6 +88,10 @@ export class GroundTruthOverlay {
   private readonly opts: GroundTruthOptions;
 
   private readonly grid: GridGeometry | null;
+  private readonly windowGrid: GridGeometry | null;
+  private wallBoxes: THREE.LineSegments | null = null;
+  private wallBoxPos: Float32Array | null = null;
+  private wallBoxAttr: THREE.BufferAttribute | null = null;
   private agentCross: THREE.LineSegments | null = null;
   private agentCrossPos: Float32Array | null = null;
   private agentCrossAttr: THREE.BufferAttribute | null = null;
@@ -113,7 +126,11 @@ export class GroundTruthOverlay {
     this.camera = opts.camera ?? null;
     this.maxKeys = Math.max(1, opts.maxKeys ?? 4);
     this.group.name = opts.name ?? 'oakGroundTruth';
-    this.grid = geometry.grid ?? null;
+    const cells = Math.max(3, Math.round(opts.windowCells ?? 33));
+    this.windowGrid = opts.gridWindow
+      ? { w: cells, h: cells, walls: new Uint8Array(cells * cells).fill(1) }
+      : null;
+    this.grid = this.windowGrid ?? geometry.grid ?? null;
 
     const main = lineMaterial(opts.color ?? TOKENS.uiCyan, 0.85);
     const wall = lineMaterial(opts.wallColor ?? 0x8fa6c4, 0.55);
@@ -141,7 +158,52 @@ export class GroundTruthOverlay {
     }
   }
 
+  private fillWindow(state: FrameState): void {
+    const grid = this.windowGrid;
+    const p = this.wallBoxPos;
+    if (!grid || !p) return;
+    const win = this.opts.gridWindow?.(state) ?? null;
+    if (!win) return;
+    grid.walls.set(win.walls);
+    this.group.position.set(
+      win.originX + (grid.w - 1) / 2,
+      win.height ?? 0,
+      win.originY + (grid.h - 1) / 2,
+    );
+    let o = 0;
+    const h = 0.9;
+    for (let gy = 0; gy < grid.h; gy++) {
+      for (let gx = 0; gx < grid.w; gx++) {
+        if ((grid.walls[gy * grid.w + gx] ?? 0) === 0) continue;
+        cellToWorld(gx, gy, grid, this.scratch);
+        const x0 = this.scratch[0] - 0.5;
+        const x1 = this.scratch[0] + 0.5;
+        const z0 = this.scratch[2] - 0.5;
+        const z1 = this.scratch[2] + 0.5;
+        const edge = (ax: number, ay: number, az: number, bx: number, by: number, bz: number): void => {
+          p[o++] = ax; p[o++] = ay; p[o++] = az;
+          p[o++] = bx; p[o++] = by; p[o++] = bz;
+        };
+        edge(x0, 0, z0, x1, 0, z0);
+        edge(x1, 0, z0, x1, 0, z1);
+        edge(x1, 0, z1, x0, 0, z1);
+        edge(x0, 0, z1, x0, 0, z0);
+        edge(x0, h, z0, x1, h, z0);
+        edge(x1, h, z0, x1, h, z1);
+        edge(x1, h, z1, x0, h, z1);
+        edge(x0, h, z1, x0, h, z0);
+        edge(x0, 0, z0, x0, h, z0);
+        edge(x1, 0, z0, x1, h, z0);
+        edge(x1, 0, z1, x1, h, z1);
+        edge(x0, 0, z1, x0, h, z1);
+      }
+    }
+    while (o < p.length) p[o++] = 0;
+    if (this.wallBoxAttr) this.wallBoxAttr.needsUpdate = true;
+  }
+
   setState(state: FrameState): void {
+    if (this.windowGrid) this.fillWindow(state);
     if (this.grid) this.updateGrid(state, this.grid);
     if (this.skeletonPos) this.updateCheetah(state);
     if (this.classicMarker) this.updateClassic(state);
@@ -190,6 +252,9 @@ export class GroundTruthOverlay {
     for (let i = 0; i < grid.w * grid.h; i++) if ((grid.walls[i] ?? 0) !== 0) walls++;
     if (walls > 0) {
       const boxes = segments(walls * 12, wallMat, 'oakDebugWalls');
+      this.wallBoxes = boxes.object;
+      this.wallBoxPos = boxes.positions;
+      this.wallBoxAttr = boxes.attr;
       const p = boxes.positions;
       let o = 0;
       const h = 0.9;

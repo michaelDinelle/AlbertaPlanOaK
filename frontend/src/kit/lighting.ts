@@ -6,6 +6,15 @@ export { paletteSunDirection };
 
 export const MAX_POINT_LIGHTS = 4;
 export const SHADOW_MAP_SIZE = 2048;
+const SHADOW_BIAS = -0.0006;
+const SHADOW_BIAS_RANGE = 104;
+
+interface ShadowExtent {
+  halfX: number;
+  halfY: number;
+  reach: number;
+  depth: number;
+}
 
 export interface LightRigOptions {
   sunDir?: THREE.Vector3 | readonly [number, number, number];
@@ -23,6 +32,13 @@ export interface LightRig {
   points: THREE.PointLight[];
   sunDirection: THREE.Vector3;
   setShadowFocus(center: { x: number; y: number; z: number }, radius: number): void;
+  setShadowExtent(
+    center: { x: number; y: number; z: number },
+    halfX: number,
+    halfY: number,
+    reach: number,
+    depth: number,
+  ): void;
   setSunDirection(x: number, y: number, z: number): void;
   dispose(): void;
 }
@@ -50,7 +66,7 @@ export function makeLightRig(palette: Palette, opts: LightRigOptions = {}): Ligh
   sun.name = 'oakSun';
   sun.castShadow = true;
   sun.shadow.mapSize.set(SHADOW_MAP_SIZE, SHADOW_MAP_SIZE);
-  sun.shadow.bias = -0.0006;
+  sun.shadow.bias = SHADOW_BIAS;
   sun.shadow.normalBias = 0.02;
   sun.shadow.camera.near = 0.5;
   sun.shadow.camera.far = 100;
@@ -72,6 +88,7 @@ export function makeLightRig(palette: Palette, opts: LightRigOptions = {}): Ligh
   }
 
   const sunDistanceScale = opts.sunDistanceScale ?? 2.5;
+  let extent: ShadowExtent | null = null;
   const focus = new THREE.Vector3();
 
   const rig: LightRig = {
@@ -80,7 +97,25 @@ export function makeLightRig(palette: Palette, opts: LightRigOptions = {}): Ligh
     hemi,
     points,
     sunDirection,
+    setShadowExtent(center, halfX, halfY, reach, depth) {
+      extent = { halfX, halfY, reach, depth };
+      focus.set(center.x, center.y, center.z);
+      sun.target.position.copy(focus);
+      sun.target.updateMatrixWorld();
+      sun.position.copy(focus).addScaledVector(sunDirection, reach);
+      const cam = sun.shadow.camera;
+      cam.left = -halfX;
+      cam.right = halfX;
+      cam.top = halfY;
+      cam.bottom = -halfY;
+      cam.near = Math.max(0.05, reach - depth);
+      cam.far = reach + depth;
+      cam.updateProjectionMatrix();
+      sun.shadow.bias = SHADOW_BIAS * (SHADOW_BIAS_RANGE / Math.max(1, cam.far - cam.near));
+    },
     setShadowFocus(center, radius) {
+      extent = null;
+      sun.shadow.bias = SHADOW_BIAS;
       const r = Math.max(0.5, radius);
       focus.set(center.x, center.y, center.z);
       sun.target.position.copy(focus);
@@ -100,6 +135,16 @@ export function makeLightRig(palette: Palette, opts: LightRigOptions = {}): Ligh
       sunDirection.set(x, y, z);
       if (sunDirection.lengthSq() < 1e-12) sunDirection.set(0, 1, 0);
       sunDirection.normalize();
+      if (extent) {
+        rig.setShadowExtent(
+          sun.target.position,
+          extent.halfX,
+          extent.halfY,
+          extent.reach,
+          extent.depth,
+        );
+        return;
+      }
       rig.setShadowFocus(sun.target.position, sun.shadow.camera.right);
     },
     dispose() {

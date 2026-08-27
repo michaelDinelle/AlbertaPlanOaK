@@ -173,4 +173,16 @@ export const STR = {
     noRunHint: 'The stage plays recorded seeds and none were found.',
     loadFailed: (id: string) => `Could not load ${id}`,
   },
+  orchard: {
+    senses: 'what it senses',
+    scent: 'scent',
+    gathered: 'gathered',
+    paying: 'now paying',
+    harvest: 'Reward per step, over a moving window',
+    agent: 'The agent stands here',
+    banana: 'banana',
+    onion: 'onion',
+    jelly: 'jelly bean',
+    truffle: 'truffle',
+  },
 } as const;

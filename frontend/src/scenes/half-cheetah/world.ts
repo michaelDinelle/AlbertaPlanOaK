@@ -9,8 +9,9 @@ import {
   type MistPlanesHandle,
 } from '@kit/particles';
 import { mergeColoredParts, type ColoredPart } from '@kit/parts';
-import { hash1f, hash2f, rngAt, streamFor, type Rng } from '@kit/rng';
+import { hash1f, hash2f, streamFor } from '@kit/rng';
 import { skyFromPalette, type SkyHandle } from '@kit/sky';
+import { makeTileBank } from '@kit/tiles';
 import { makeTerrain, type TerrainHandle } from '@kit/terrain';
 import { TOKENS, type Palette } from '@kit/tokens';
 import type { SceneContext } from '@kit/types';
@@ -78,121 +79,6 @@ function noiseTiled(u: number, v: number, period: number, seed: number): number 
 
 function fade(t: number): number {
   return t * t * (3 - 2 * t);
-}
-
-export type TileWriter = (
-  x: number,
-  y: number,
-  z: number,
-  yaw: number,
-  scale: number,
-  stretch: number,
-  mix01: number,
-) => void;
-
-export type TileFill = (tile: number, rng: Rng, write: TileWriter) => void;
-
-export function bankKey(name: string): number {
-  let h = 0x811c9dc5 | 0;
-  for (let i = 0; i < name.length; i++) h = Math.imul(h ^ name.charCodeAt(i), 0x01000193) | 0;
-  return h;
-}
-
-export interface TileBankHandle {
-  mesh: THREE.InstancedMesh;
-  setOrigin(tile: number): void;
-  dispose(): void;
-}
-
-export interface TileBankOptions {
-  geometry: THREE.BufferGeometry;
-  material: THREE.Material;
-  tiles: number;
-  back: number;
-  perTile: number;
-  colorA: THREE.ColorRepresentation;
-  colorB: THREE.ColorRepresentation;
-  fill: TileFill;
-  castShadow?: boolean;
-  receiveShadow?: boolean;
-  seed: number;
-  name: string;
-}
-
-export function makeTileBank(opts: TileBankOptions): TileBankHandle {
-  const capacity = Math.max(1, opts.tiles * opts.perTile);
-  const mesh = new THREE.InstancedMesh(opts.geometry, opts.material, capacity);
-  mesh.name = opts.name;
-  mesh.castShadow = opts.castShadow ?? false;
-  mesh.receiveShadow = opts.receiveShadow ?? false;
-  mesh.frustumCulled = false;
-  mesh.instanceColor = new THREE.InstancedBufferAttribute(new Float32Array(capacity * 3), 3);
-
-  const matrix = new THREE.Matrix4();
-  const position = new THREE.Vector3();
-  const quaternion = new THREE.Quaternion();
-  const euler = new THREE.Euler();
-  const scaleVec = new THREE.Vector3();
-  const colorA = new THREE.Color(opts.colorA);
-  const colorB = new THREE.Color(opts.colorB);
-  const color = new THREE.Color();
-  const zero = new THREE.Matrix4().makeScale(0, 0, 0);
-
-  let origin = Number.NaN;
-  let cursor = 0;
-  let limit = 0;
-
-  const write: TileWriter = (x, y, z, yaw, scale, stretch, mix01) => {
-    if (cursor >= limit) return;
-    position.set(x, y, z);
-    euler.set(0, yaw, 0);
-    quaternion.setFromEuler(euler);
-    scaleVec.set(scale, scale * stretch, scale);
-    matrix.compose(position, quaternion, scaleVec);
-    mesh.setMatrixAt(cursor, matrix);
-    color.copy(colorA).lerp(colorB, mix01 < 0 ? 0 : mix01 > 1 ? 1 : mix01);
-    mesh.setColorAt(cursor, color);
-    cursor++;
-  };
-
-  const slotTile = new Int32Array(opts.tiles).fill(0x7fffffff);
-  const bank = bankKey(opts.name);
-
-  const fillSlot = (slot: number, index: number): void => {
-    cursor = slot * opts.perTile;
-    limit = cursor + opts.perTile;
-    opts.fill(index, rngAt(index, bank, opts.seed), write);
-    for (let i = cursor; i < limit; i++) mesh.setMatrixAt(i, zero);
-    slotTile[slot] = index;
-  };
-
-  const rebuild = (tile: number): void => {
-    const first = tile - opts.back;
-    let touched = false;
-    for (let t = 0; t < opts.tiles; t++) {
-      const index = first + t;
-      const slot = ((index % opts.tiles) + opts.tiles) % opts.tiles;
-      if (slotTile[slot] === index) continue;
-      fillSlot(slot, index);
-      touched = true;
-    }
-    if (!touched) return;
-    mesh.instanceMatrix.needsUpdate = true;
-    if (mesh.instanceColor) mesh.instanceColor.needsUpdate = true;
-  };
-
-  return {
-    mesh,
-    setOrigin(tile) {
-      if (tile === origin) return;
-      origin = tile;
-      rebuild(tile);
-    },
-    dispose() {
-      mesh.dispose();
-      mesh.removeFromParent();
-    },
-  };
 }
 
 export function acaciaGeometry(detail: number, bark: THREE.Color, leafLow: THREE.Color, leafHigh: THREE.Color): THREE.BufferGeometry {
@@ -463,14 +349,16 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene): WorldHandle {
   const grassBank = makeTileBank({
     geometry: grassGeometry,
     material: grassMaterial,
-    tiles: 15,
-    back: 5,
+    tilesX: 15,
+    tilesZ: 1,
+    backX: 5,
+    backZ: 0,
     perTile: grassPerTile,
     colorA: cGrassLow,
     colorB: cGrassHigh,
     seed: ctx.seed,
     name: 'savannaGrass',
-    fill: (tile, rng, write) => {
+    fill: (tile, _tileZ, rng, write) => {
       const x0 = tile * TILE;
       for (let i = 0; i < grassPerTile; i++) {
         const x = x0 + rng() * TILE;
@@ -505,14 +393,16 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene): WorldHandle {
   const acaciaBank = makeTileBank({
     geometry: acaciaGeo,
     material: treeMaterial,
-    tiles: 15,
-    back: 5,
+    tilesX: 15,
+    tilesZ: 1,
+    backX: 5,
+    backZ: 0,
     perTile: 4,
     colorA: new THREE.Color(1, 1, 1),
     colorB: blendTokens(TOKEN_WHITE, palette.sun, 0.35),
     seed: ctx.seed,
     name: 'savannaAcacias',
-    fill: (tile, rng, write) => {
+    fill: (tile, _tileZ, rng, write) => {
       const x0 = tile * TILE;
       for (let i = 0; i < 4; i++) {
         if (rng() > 0.5) continue;
@@ -531,15 +421,17 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene): WorldHandle {
   const rockBank = makeTileBank({
     geometry: rockGeo,
     material: stoneMaterial,
-    tiles: 15,
-    back: 5,
+    tilesX: 15,
+    tilesZ: 1,
+    backX: 5,
+    backZ: 0,
     perTile: 3,
     colorA: cRock,
     colorB: blendTokens(cRock, palette.sun, 0.3),
     castShadow: true,
     seed: ctx.seed,
     name: 'savannaRocks',
-    fill: (tile, rng, write) => {
+    fill: (tile, _tileZ, rng, write) => {
       const x0 = tile * TILE;
       for (let i = 0; i < 3; i++) {
         if (rng() > 0.62) continue;
@@ -773,9 +665,9 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene): WorldHandle {
     setOrigin(rootX) {
       terrain.mesh.position.x = Math.round(rootX / GROUND_PERIOD) * GROUND_PERIOD;
       const tile = Math.floor(rootX / TILE);
-      grassBank.setOrigin(tile);
-      acaciaBank.setOrigin(tile);
-      rockBank.setOrigin(tile);
+      grassBank.setOrigin(tile, 0);
+      acaciaBank.setOrigin(tile, 0);
+      rockBank.setOrigin(tile, 0);
       const cairnCentre = Math.round(rootX / CAIRN_SPACING);
       if (cairnCentre !== cairnOrigin) {
         cairnOrigin = cairnCentre;

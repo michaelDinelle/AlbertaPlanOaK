@@ -12,6 +12,7 @@ import { envShares, resolveFeaturedRun, runDateLabel, runEnvs, runLabel, runLabe
 import { CommandPalette } from './panels/CommandPalette';
 import { POLICY_TOKENS } from './panels/charts';
 import { PlaybackBar, PolicySwitch } from './panels/PlaybackBar';
+import { OrchardReadout } from './panels/OrchardReadout';
 import { StatsPanel, type PanelView } from './panels/StatsPanel';
 import {
   adoptDefaultEnv,
@@ -343,7 +344,8 @@ export function App() {
         </div>
       )}
       <div className="pointer-events-none absolute inset-x-0 bottom-4 z-30 grid grid-cols-[1fr_minmax(0,760px)_1fr] items-end gap-3 px-4">
-        <div className="justify-self-start">
+        <div className="flex flex-col items-start gap-3 justify-self-start">
+          <OrchardReadout />
           <EnvTileButton onOpen={() => setWallOpen(true)} />
         </div>
         <PlaybackBar stride={stride} live={live} fullscreenTarget={rootRef} />
