@@ -217,7 +217,7 @@ varying vec3 vOrchard;
 
 float orchardLattice( const in vec2 p ) {
 	vec2 w = fwidth( p );
-	vec2 edge = abs( fract( p + 0.5 ) - 0.5 ) / max( w, vec2( 1e-4 ) );
+	vec2 edge = abs( fract( p ) - 0.5 ) / max( w, vec2( 1e-4 ) );
 	vec2 line = vec2( 1.0 ) - smoothstep( vec2( 0.4 ), vec2( 1.4 ), edge );
 	vec2 att = vec2( 1.0 ) / ( vec2( 1.0 ) + 4.0 * w );
 	return max( line.x * att.x, line.y * att.y );
