@@ -1,5 +1,5 @@
 import { SCENES, nameOf } from '../scenes/table';
-import { Lens } from '../glass/Panel';
+import { Panel } from '../glass/Panel';
 import { useSelection } from '../state/selectionStore';
 import { STR } from '../strings';
 import { useStageMeta } from '../theater/controller';
@@ -17,7 +17,7 @@ export function EnvTileButton({ onOpen }: { onOpen: () => void }) {
   const meta = useStageMeta();
   const info = sel.envId === null ? null : SCENES[sel.envId];
   return (
-    <Lens>
+    <Panel>
       <button
         type="button"
         onClick={onOpen}
@@ -46,6 +46,6 @@ export function EnvTileButton({ onOpen }: { onOpen: () => void }) {
           </span>
         </span>
       </button>
-    </Lens>
+    </Panel>
   );
 }

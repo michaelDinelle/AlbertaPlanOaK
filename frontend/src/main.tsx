@@ -23,15 +23,7 @@ createRoot(host).render(
       <Toaster
         theme="dark"
         position="top-center"
-        toastOptions={{
-          style: {
-            background: 'var(--glass-tint)',
-            border: '1px solid var(--glass-line)',
-            color: 'var(--color-ink)',
-            backdropFilter: 'var(--glass-frost-filter)',
-            WebkitBackdropFilter: 'var(--glass-frost-filter)',
-          },
-        }}
+        toastOptions={{ className: 'glass', style: { color: 'var(--color-ink)' } }}
       />
     </QueryClientProvider>
   </StrictMode>,

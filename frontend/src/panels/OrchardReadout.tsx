@@ -1,4 +1,4 @@
-import { Lens } from '../glass/Panel';
+import { Panel } from '../glass/Panel';
 import { useOrchardReadout } from '../state/orchard';
 import { STR } from '../strings';
 import { TXT } from './charts';
@@ -19,7 +19,7 @@ export function OrchardReadout() {
   const paying = readout.polarity > 0 ? STR.orchard.jelly : STR.orchard.onion;
   const costing = readout.polarity > 0 ? STR.orchard.onion : STR.orchard.jelly;
   return (
-    <Lens className="w-[232px] px-3 py-2.5">
+    <Panel className="w-[232px] px-3 py-2.5">
       <div className={TXT.label}>{STR.orchard.senses}</div>
       <div className="mt-2 flex items-start gap-3">
         <div className="grid grid-cols-3 gap-0.5">
@@ -88,6 +88,6 @@ export function OrchardReadout() {
           />
         </div>
       </div>
-    </Lens>
+    </Panel>
   );
 }

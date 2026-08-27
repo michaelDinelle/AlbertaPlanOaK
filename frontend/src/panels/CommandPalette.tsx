@@ -3,7 +3,7 @@ import { Command } from 'cmdk';
 import type { EnvId } from '@shared/envs';
 import { nameOf, slugOf } from '../scenes/table';
 import type { Policy, RunDetail, RunIndexEntry } from '@shared/types';
-import { Lens } from '../glass/Panel';
+import { Panel } from '../glass/Panel';
 import { runLabel, sortRuns } from '../lib/run';
 import { setTransport, transportSnapshot } from '../playback/store';
 import {
@@ -95,7 +95,7 @@ export function CommandPalette({
       }}
     >
       <div className="h-fit w-[600px] max-w-[calc(100vw-2rem)]" onPointerDown={(event) => event.stopPropagation()}>
-        <Lens className="overflow-hidden">
+        <Panel className="overflow-hidden">
           <Command label={STR.app}>
             <Command.Input
               autoFocus
@@ -193,7 +193,7 @@ export function CommandPalette({
               </Command.Group>
             </Command.List>
           </Command>
-        </Lens>
+        </Panel>
       </div>
     </div>
   );

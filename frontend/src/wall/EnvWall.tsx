@@ -5,7 +5,7 @@ import { VList } from 'virtua';
 import type { EnvId } from '@shared/envs';
 import { SCENES, nameOf } from '../scenes/table';
 import type { RunDetail } from '@shared/types';
-import { Frost } from '../glass/Panel';
+import { Panel } from '../glass/Panel';
 import { Label, TXT } from '../panels/charts';
 import { selectEnv, useSelection } from '../state/selectionStore';
 import { STR } from '../strings';
@@ -93,7 +93,7 @@ export function EnvWall({
 
   return (
     <div className="absolute inset-0 z-40 bg-black/50" onPointerDown={onClose}>
-      <Frost className="absolute inset-5 flex flex-col overflow-hidden">
+      <Panel className="absolute inset-5 flex flex-col overflow-hidden">
         <div
           className="flex items-center gap-3 px-5 pb-3 pt-4"
           onPointerDown={(event) => event.stopPropagation()}
@@ -146,7 +146,7 @@ export function EnvWall({
             </VList>
           )}
         </div>
-      </Frost>
+      </Panel>
     </div>
   );
 }

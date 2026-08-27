@@ -12,7 +12,7 @@ import {
   ScanEye,
 } from 'lucide-react';
 import type { Policy, RunDetail, RunIndexEntry } from '@shared/types';
-import { Lens } from '../glass/Panel';
+import { Panel } from '../glass/Panel';
 import { Label, POLICY_ORDER } from './charts';
 import { formatCount, formatStep } from '../lib/format';
 import { runLabelFor } from '../lib/run';
@@ -83,7 +83,7 @@ export function PolicySwitch({
     return id === undefined ? null : runLabelFor(id, entries, runs[policy]);
   };
   return (
-    <Lens className="flex h-12 items-center gap-1 px-2">
+    <Panel className="flex h-12 items-center gap-1 px-2">
       <span className="px-1.5"><Label>{STR.bar.policyLabel}</Label></span>
       {POLICY_ORDER.map((policy) => {
         const run = labelOf(policy);
@@ -114,7 +114,7 @@ export function PolicySwitch({
           </button>
         );
       })}
-    </Lens>
+    </Panel>
   );
 }
 
@@ -185,7 +185,7 @@ export function PlaybackBar({
   };
 
   return (
-    <Lens className={clsx('flex h-12 items-center gap-1 px-2', idle && 'opacity-80')}>
+    <Panel className={clsx('flex h-12 items-center gap-1 px-2', idle && 'opacity-80')}>
       <BarButton
         title={transport.playing ? STR.bar.pause : STR.bar.play}
         disabled={idle}
@@ -290,6 +290,6 @@ export function PlaybackBar({
         {fullscreen ? <Minimize className="size-3.5" /> : <Maximize className="size-3.5" />}
       </BarButton>
       {live && <span className="mx-1 size-1.5 motion-safe:animate-pulse rounded-full bg-good" title={STR.bar.live} />}
-    </Lens>
+    </Panel>
   );
 }

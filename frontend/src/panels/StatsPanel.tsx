@@ -1,7 +1,7 @@
 import { clsx } from 'clsx';
 import { PanelRightClose } from 'lucide-react';
 import type { Policy, RunDetail } from '@shared/types';
-import { Frost } from '../glass/Panel';
+import { Panel } from '../glass/Panel';
 import { STR } from '../strings';
 import { ComputeView } from './ComputeView';
 import { HealthView } from './HealthView';
@@ -24,7 +24,7 @@ export function StatsPanel({
   onHide: () => void;
 }) {
   return (
-    <Frost className="flex max-h-full w-full flex-col overflow-hidden py-2.5">
+    <Panel className="flex max-h-full w-full flex-col overflow-hidden py-2.5">
       <div className="flex items-center gap-1 px-2 pb-2">
         {(Object.keys(STR.panels) as PanelView[]).map((id) => (
           <button
@@ -53,6 +53,6 @@ export function StatsPanel({
       {view === 'standings' && <StandingsView runs={runs} />}
       {view === 'compute' && <ComputeView runs={runs} />}
       {view === 'health' && <HealthView runs={runs} active={active} />}
-    </Frost>
+    </Panel>
   );
 }

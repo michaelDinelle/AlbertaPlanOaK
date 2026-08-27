@@ -5,7 +5,7 @@ import { ChevronDown, PanelRightOpen } from 'lucide-react';
 import { ENV_IDS } from '@shared/envs';
 import type { Policy, RunDetail, RunIndexEntry } from '@shared/types';
 import { baselineDetailQuery, runDetailQuery, runsQuery } from './data/queries';
-import { Frost, Lens } from './glass/Panel';
+import { Panel } from './glass/Panel';
 import { formatStep } from './lib/format';
 import { cycleEnv, keyAction } from './lib/keymap';
 import { envShares, resolveFeaturedRun, runDateLabel, runEnvs, runLabel, runLabelFor, runShortId, sortRuns } from './lib/run';
@@ -42,11 +42,11 @@ import { urlState } from './url/useUrlState';
 
 function Notice({ title, detail, pulse }: { title: string; detail: string | null; pulse?: boolean }) {
   return (
-    <Frost className="flex max-w-md flex-col gap-1.5 px-5 py-4">
+    <Panel className="flex max-w-md flex-col gap-1.5 px-5 py-4">
       <div className="font-mono text-sm text-ink">{title}</div>
       {detail !== null && <div className="text-xs text-ink-dim">{detail}</div>}
       {pulse === true && <span className="mt-1 size-1.5 motion-safe:animate-pulse rounded-full bg-accent" />}
-    </Frost>
+    </Panel>
   );
 }
 
@@ -64,7 +64,7 @@ function RunChip({
   return (
     <div className="pointer-events-auto relative" onKeyDown={(event) => { if (event.key === 'Escape') setOpen(false); }}>
       {open && <button type="button" aria-hidden className="fixed inset-0 cursor-default" onClick={() => setOpen(false)} />}
-      <Lens className="relative px-3 py-1.5">
+      <Panel className="relative px-3 py-1.5">
         <button
           type="button"
           onClick={() => setOpen((o) => !o)}
@@ -82,9 +82,9 @@ function RunChip({
           )}
           <ChevronDown className={clsx('size-3 text-ink-faint transition-transform', open && 'rotate-180')} />
         </button>
-      </Lens>
+      </Panel>
       {open && (
-        <Lens className="absolute left-0 top-full mt-1.5 flex min-w-56 flex-col gap-0.5 p-1.5">
+        <Panel className="absolute left-0 top-full mt-1.5 flex min-w-56 flex-col gap-0.5 p-1.5">
           {runs.map((run) => (
             <button
               key={run.id}
@@ -111,7 +111,7 @@ function RunChip({
               </span>
             </button>
           ))}
-        </Lens>
+        </Panel>
       )}
     </div>
   );
@@ -331,7 +331,7 @@ export function App() {
       </div>
       {panelHidden && panelSettled && (
         <div className="absolute right-4 top-4 z-20">
-          <Lens>
+          <Panel>
             <button
               type="button"
               title={STR.bar.showPanel}
@@ -340,7 +340,7 @@ export function App() {
             >
               <PanelRightOpen className="size-4" />
             </button>
-          </Lens>
+          </Panel>
         </div>
       )}
       <div className="pointer-events-none absolute inset-x-0 bottom-4 z-30 grid grid-cols-[1fr_minmax(0,760px)_1fr] items-end gap-3 px-4">

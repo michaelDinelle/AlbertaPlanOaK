@@ -18,7 +18,7 @@ export interface PanelProps {
   children: ReactNode;
 }
 
-export function Lens({ className, children }: PanelProps) {
+export function Panel({ className, children }: PanelProps) {
   const ref = useLiquidGlass<HTMLDivElement>(LENS_OPTICS);
   const enter = useReducedMotion() === true ? undefined : ENTER;
   return (
@@ -26,19 +26,6 @@ export function Lens({ className, children }: PanelProps) {
       ref={ref}
       {...enter}
       className={clsx('glass pointer-events-auto rounded-lg', className)}
-      style={CONTAIN}
-    >
-      {children}
-    </motion.div>
-  );
-}
-
-export function Frost({ className, children }: PanelProps) {
-  const enter = useReducedMotion() === true ? undefined : ENTER;
-  return (
-    <motion.div
-      {...enter}
-      className={clsx('glass glass-frost pointer-events-auto rounded-lg', className)}
       style={CONTAIN}
     >
       {children}

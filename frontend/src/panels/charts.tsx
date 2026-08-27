@@ -130,15 +130,7 @@ function TipCard({
   );
   if (rows.length === 0) return null;
   return (
-    <div
-      className="rounded-md px-2.5 py-1.5 text-xs text-ink"
-      style={{
-        background: 'var(--glass-tint)',
-        border: '1px solid var(--glass-line)',
-        backdropFilter: 'var(--glass-frost-filter)',
-        WebkitBackdropFilter: 'var(--glass-frost-filter)',
-      }}
-    >
+    <div className="glass rounded-md px-2.5 py-1.5 text-xs text-ink">
       <div className="font-mono tabular-nums text-ink-dim">{xFormat(label)}</div>
       {rows.map((entry, i) => (
         <div key={i} className="mt-0.5 flex items-center gap-1.5">
