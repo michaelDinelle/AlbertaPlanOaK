@@ -135,7 +135,7 @@ inline void observeLane(uint envK, uint laneSeed, constant uint *mjModels,
                         device uint *envState, device float *obsOut) {
     if (envK == OAK_ENV_JELLYBEANWORLD) {
         jbw_observe(laneSeed, laneEnvWords(envState, envK), lanePersistent(envState, envK),
-                    lanePersistentMask(ecfg), envConstants, 0u, obsOut);
+                    lanePersistentMask(ecfg), envConstants, 0u, 0u, 1u, obsOut);
         return;
     }
     if (laneIsMj(envK)) {
@@ -159,14 +159,10 @@ inline float advanceEnvironment(device OakFleetLane *lane, device uint *envState
     for (uint u = 0u; u < OAK_ENV_ACT_MAX; u++) ctrl[u] = (u < actionCount) ? pending[u] : 0.0f;
     device uint *stateWords = laneEnvWords(envState, envK);
     if (envK == OAK_ENV_JELLYBEANWORLD) {
-        float reward = 0.0f;
         done = 0u;
-        if (slane == 0u) {
-            reward = jbw_step(laneSeed, uint(ctrl[0]), stateWords, lanePersistent(envState, envK),
-                              lanePersistentMask(ecfg), envConstants, lane->steps, obsOut);
-        }
-        if (wide) reward = simd_broadcast_first(reward);
-        return reward;
+        return jbw_step(laneSeed, uint(ctrl[0]), stateWords, lanePersistent(envState, envK),
+                        lanePersistentMask(ecfg), envConstants, lane->steps,
+                        slane, wide ? 32u : 1u, obsOut);
     }
     if (laneIsMj(envK)) {
         uint elapsed = lane->elapsed, resets = lane->resets;

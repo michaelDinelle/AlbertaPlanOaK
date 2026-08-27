@@ -2215,7 +2215,7 @@ final class TapeWriter {
       cb.addCompletedHandler { cb in
         let gpuT = cb.gpuEndTime - cb.gpuStartTime
         if explicitN == nil, gpuT > 0, nSteps > 0 {
-          let fit = max(1, min(Int(0.08 / (gpuT / Double(nSteps))), maxChunkSteps))
+          let fit = max(1, min(Int(0.016 / (gpuT / Double(nSteps))), maxChunkSteps))
           tuneLock.lock()
           tunedN = max(1, min(fit, tunedN * 4))
           tuneLock.unlock()

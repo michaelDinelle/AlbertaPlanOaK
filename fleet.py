@@ -940,6 +940,27 @@ def throughput_verdict(kr: dict, cr: dict) -> tuple[str, str, str, bool]:
             d > 0.0)
 
 
+def baseline_verdict(cr: dict) -> tuple[str, str, str, bool]:
+    faults = []
+    for policy in ("random", "ppo"):
+        want = baseline_name(policy, cr["meta"])
+        have = baseline_pointer(policy)
+        if have != want:
+            faults.append(f"{policy} pointer {have or 'unset'} != {want}")
+            continue
+        root = BASELINES / want
+        if not (root / ".done").exists():
+            faults.append(f"{policy} {want} not on disk")
+            continue
+        b = load(root)
+        if b["meta"]["envSchedule"] != cr["meta"]["envSchedule"] or b["seeds"] != cr["seeds"]:
+            faults.append(f"{policy} {want} schedule differs from the candidate")
+    if faults:
+        return ("baselines", "FAIL",
+                "; ".join(faults) + f"  record them with ./fleet.py baselines {cr['root']}", False)
+    return ("baselines", "PASS", "random and ppo recorded on the candidate schedule", False)
+
+
 def lane_index(run: dict) -> dict[tuple[str, int], int]:
     return {(env, int(run["seeds"][int(l)])): int(l)
             for env, lanes in env_slices(run).items() for l in lanes}
@@ -1010,6 +1031,7 @@ def gate(kr: dict, cr: dict, boot: int) -> int:
         take(cv, np.concatenate([c_lanes[e] for e in shared])),
         horizon, boot, GATE_FLEET_CATEGORIES))
     record("fleet", [throughput_verdict(kr, cr)])
+    record("fleet", [baseline_verdict(cr)])
     scope_w = max(len(r[1]) for r in rows)
     cat_w = max(len(r[2]) for r in rows)
     for status, scope, name, detail, win in rows:
@@ -1080,9 +1102,33 @@ def baseline_name(policy: str, km: dict) -> str:
 
 
 def cmd_baselines(args) -> int:
-    km = keeper_meta()
-    if not km:
-        raise SystemExit("baselines need a crowned keeper for the schedule")
+    record_baselines(json.loads((args.run / "meta.json").read_text()))
+    return 0
+
+
+def record_witness(root: Path, km: dict) -> None:
+    w = root / "throughput"
+    if (w / "meta.json").exists():
+        return
+    shutil.rmtree(w, ignore_errors=True)
+    env = dict(os.environ,
+               OAK_BENCH_POLICY="oak",
+               OAK_BENCH_STEPS=str(km["steps"]),
+               OAK_BENCH_SEED_COUNT=str(km["batch"]),
+               OAK_BENCH_ENVS=keeper_envs(km),
+               OAK_FLEET_TIMING="1", OAK_METRICS_STORAGE=str(w))
+    log = root / "throughput.log"
+    log.unlink(missing_ok=True)
+    print(f"[witness] recording the keeper schedule at {w}", flush=True)
+    with open(log, "w") as lf:
+        rc = subprocess.run(["caffeinate", "-dimsu", str(REPO / ".build/release/OaK"),
+                             "benchmark"], env=env, cwd=REPO,
+                            stdout=lf, stderr=subprocess.STDOUT).returncode
+    if rc != 0:
+        raise SystemExit(f"[witness] benchmark exit={rc}; see {log}")
+
+
+def record_baselines(km: dict) -> None:
     envs = keeper_envs(km)
     BASELINES.mkdir(exist_ok=True)
     me = [sys.executable, str(Path(__file__).resolve())]
@@ -1111,7 +1157,6 @@ def cmd_baselines(args) -> int:
         (root / ".done").touch()
         subprocess.run(me + ["report", str(root)], cwd=REPO)
         print(f"[baselines] {policy} crowned: {name}", flush=True)
-    return 0
 
 
 def cmd_run(args) -> int:
@@ -1159,6 +1204,11 @@ def cmd_job(args) -> int:
     print(f"[fleet] benchmark exit={rc}", flush=True)
     me = [sys.executable, str(Path(__file__).resolve())]
     subprocess.run(me + ["report", str(root)], cwd=REPO)
+    if rc == 0:
+        cm = json.loads((root / "meta.json").read_text())
+        record_baselines(cm)
+        if km and schedule(load(root)) != schedule(load(BENCH / keeper_hash())):
+            record_witness(root, km)
     prior = keeper_hash()
     if prior and prior != args.name and (BENCH / prior).is_dir():
         if subprocess.run(me + ["gate", str(root)], cwd=REPO).returncode == 0:
@@ -1169,11 +1219,6 @@ def cmd_job(args) -> int:
     elif rc == 0:
         write_keeper(args.name)
         print(f"[fleet] keeper {args.name}", flush=True)
-    km_now = keeper_meta()
-    if km_now:
-        for policy in ("random", "ppo"):
-            if baseline_pointer(policy) != baseline_name(policy, km_now):
-                print(f"[fleet] baseline {policy} stale; run ./fleet.py baselines", flush=True)
     (root / ".done").touch()
     print("[fleet] DONE", flush=True)
     return 0
@@ -1191,7 +1236,8 @@ def main() -> int:
     gp = sub.add_parser("gate")
     gp.add_argument("candidate", type=Path)
     gp.add_argument("--boot", type=int, default=10_000)
-    sub.add_parser("baselines")
+    bp = sub.add_parser("baselines")
+    bp.add_argument("run", type=Path)
     sub.add_parser("scale")
     args = ap.parse_args()
     return {"run": cmd_run, "job": cmd_job, "report": cmd_report,

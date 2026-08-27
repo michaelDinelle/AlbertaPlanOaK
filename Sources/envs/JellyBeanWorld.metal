@@ -126,12 +126,18 @@ inline float jbw_response(device const float *table, uint time, int dx, int dy) 
 
 inline float3 jbw_scentAt(uint seed, int x, int y, uint step,
                           device const uint *history, uint historyMask,
-                          device const float *response) {
+                          device const float *response, uint slane, uint width) {
     float3 scent = float3(0.0f);
     int bx0 = jbw_floorDiv(x - 32, 16), bx1 = jbw_floorDiv(x + 32, 16);
     int by0 = jbw_floorDiv(y - 32, 16), by1 = jbw_floorDiv(y + 32, 16);
-    for (int by = by0; by <= by1; by++) {
-        for (int bx = bx0; bx <= bx1; bx++) {
+    uint span = uint(bx1 - bx0 + 1);
+    uint blocks = span * uint(by1 - by0 + 1);
+    for (uint base = 0u; base < blocks; base += width) {
+        uint k = base + slane;
+        float3 share = float3(0.0f);
+        uint carries = 0u;
+        if (k < blocks) {
+            int by = by0 + int(k / span), bx = bx0 + int(k % span);
             int2 p = jbw_candidate(seed, bx, by, 0u);
             int dx = p.x - x, dy = p.y - y;
             uint item = jbw_itemAt(seed, p.x, p.y);
@@ -144,85 +150,107 @@ inline float3 jbw_scentAt(uint seed, int x, int y, uint step,
                     if (age >= JBW_DESTRUCTION_LIFETIME) value = 0.0f;
                     else value -= jbw_response(response, age, dx, dy);
                 }
-                scent += jbw_scent(item) * value;
+                share = jbw_scent(item) * value;
+                carries = 1u;
             }
+        }
+        for (uint j = 0u; j < width && base + j < blocks; j++) {
+            ushort src = ushort(j);
+            bool add = width > 1u ? simd_shuffle(carries, src) != 0u : carries != 0u;
+            float3 term = width > 1u
+                ? float3(simd_shuffle(share.x, src), simd_shuffle(share.y, src),
+                         simd_shuffle(share.z, src))
+                : share;
+            if (add) scent += term;
         }
     }
     return scent;
 }
 
 inline void jbw_masks(uint seed, int x, int y, device const uint *history, uint historyMask,
-                      device uint &lo, device uint &hi) {
+                      uint slane, uint width, thread uint &lo, thread uint &hi) {
     lo = 0u; hi = 0u;
-    uint bit = 0u;
-    for (int dy = -3; dy <= 3; dy++) {
-        for (int dx = -3; dx <= 3; dx++) {
-            if (dx == 0 && dy == 0) continue;
-            uint item = jbw_itemAt(seed, x + dx, y + dy);
-            if (jbw_collectible(item)
-                && jbw_destroyedAt(history, historyMask, x + dx, y + dy) != 0u) {
-                if (bit < 24u) lo |= 1u << bit;
-                else hi |= 1u << (bit - 24u);
-            }
-            bit++;
+    for (uint bit = slane; bit < 48u; bit += width) {
+        uint cell = bit < 24u ? bit : bit + 1u;
+        int dy = int(cell / 7u) - 3, dx = int(cell % 7u) - 3;
+        uint item = jbw_itemAt(seed, x + dx, y + dy);
+        if (jbw_collectible(item)
+            && jbw_destroyedAt(history, historyMask, x + dx, y + dy) != 0u) {
+            if (bit < 24u) lo |= 1u << bit;
+            else hi |= 1u << (bit - 24u);
         }
+    }
+    if (width > 1u) {
+        lo = simd_sum(lo);
+        hi = simd_sum(hi);
     }
 }
 
 inline void jbw_observe(uint seed, device uint *words, device const uint *history,
                         uint historyMask, device const float *response, uint step,
-                        device float *obs) {
+                        uint slane, uint width, device float *obs) {
     int x = as_type<int>(words[0]), y = as_type<int>(words[1]);
     uint heading = words[2] & 3u;
     int2 directions[8] = {
         int2(0, -1), int2(1, -1), int2(1, 0), int2(1, 1),
         int2(0, 1), int2(-1, 1), int2(-1, 0), int2(-1, -1)
     };
-    for (uint i = 0u; i < 8u; i++) {
+    for (uint i = slane; i < 8u; i += width) {
         int2 d = directions[(2u * heading + i) & 7u];
         uint item = jbw_itemAt(seed, x + d.x, y + d.y);
         bool absent = !jbw_blocks(item)
             && jbw_destroyedAt(history, historyMask, x + d.x, y + d.y) != 0u;
         obs[i] = absent ? 0.0f : jbw_energy(item);
     }
-    float3 scent = jbw_scentAt(seed, x, y, step, history, historyMask, response);
+    float3 scent = jbw_scentAt(seed, x, y, step, history, historyMask, response, slane, width);
+    uint lo, hi;
+    jbw_masks(seed, x, y, history, historyMask, slane, width, lo, hi);
+    if (width > 1u) simdgroup_barrier(mem_flags::mem_device);
+    if (slane != 0u) return;
     obs[8] = scent.x; obs[9] = scent.y; obs[10] = scent.z;
     obs[11] = float(words[3]);
     for (uint i = 0u; i < 4u; i++) obs[12u + i] = float(words[4u + i]);
-    jbw_masks(seed, x, y, history, historyMask, words[8], words[9]);
+    words[8] = lo;
+    words[9] = hi;
 }
 
 inline float jbw_step(uint seed, uint action, device uint *words, device uint *history,
                       uint historyMask, device const float *response, uint step,
-                      device float *obs) {
-    words[3] = 0u;
-    if (action == 1u) words[2] = (words[2] + 3u) & 3u;
-    else if (action == 2u) words[2] = (words[2] + 1u) & 3u;
-    else {
-        int2 forward[4] = { int2(0, -1), int2(1, 0), int2(0, 1), int2(-1, 0) };
-        int2 p = int2(as_type<int>(words[0]), as_type<int>(words[1])) + forward[words[2] & 3u];
-        uint item = jbw_itemAt(seed, p.x, p.y);
-        if (!jbw_blocks(item)) {
-            words[0] = as_type<uint>(p.x); words[1] = as_type<uint>(p.y); words[3] = 1u;
-            if (jbw_collectible(item)
-                && jbw_destroyedAt(history, historyMask, p.x, p.y) == 0u) {
-                uint inventory = item == JBW_BANANA ? 4u : item == JBW_ONION ? 5u
-                    : item == JBW_JELLY ? 6u : 7u;
-                words[inventory]++;
-                jbw_destroy(history, historyMask, p.x, p.y, step);
+                      uint slane, uint width, device float *obs) {
+    float reward = 0.0f;
+    if (slane == 0u) {
+        words[3] = 0u;
+        if (action == 1u) words[2] = (words[2] + 3u) & 3u;
+        else if (action == 2u) words[2] = (words[2] + 1u) & 3u;
+        else {
+            int2 forward[4] = { int2(0, -1), int2(1, 0), int2(0, 1), int2(-1, 0) };
+            int2 p = int2(as_type<int>(words[0]), as_type<int>(words[1])) + forward[words[2] & 3u];
+            uint item = jbw_itemAt(seed, p.x, p.y);
+            if (!jbw_blocks(item)) {
+                words[0] = as_type<uint>(p.x); words[1] = as_type<uint>(p.y); words[3] = 1u;
+                if (jbw_collectible(item)
+                    && jbw_destroyedAt(history, historyMask, p.x, p.y) == 0u) {
+                    uint inventory = item == JBW_BANANA ? 4u : item == JBW_ONION ? 5u
+                        : item == JBW_JELLY ? 6u : 7u;
+                    words[inventory]++;
+                    jbw_destroy(history, historyMask, p.x, p.y, step);
+                }
+            }
+        }
+        if (action == 0u && words[3] != 0u) {
+            int x = as_type<int>(words[0]), y = as_type<int>(words[1]);
+            uint item = jbw_itemAt(seed, x, y);
+            if (jbw_destroyedAt(history, historyMask, x, y) == step) {
+                float sign = (step / 100000u & 1u) == 0u ? 1.0f : -1.0f;
+                if (item == JBW_JELLY) reward = sign;
+                else if (item == JBW_ONION) reward = -sign;
             }
         }
     }
-    float reward = 0.0f;
-    if (action == 0u && words[3] != 0u) {
-        int x = as_type<int>(words[0]), y = as_type<int>(words[1]);
-        uint item = jbw_itemAt(seed, x, y);
-        if (jbw_destroyedAt(history, historyMask, x, y) == step) {
-            float sign = (step / 100000u & 1u) == 0u ? 1.0f : -1.0f;
-            if (item == JBW_JELLY) reward = sign;
-            else if (item == JBW_ONION) reward = -sign;
-        }
+    if (width > 1u) {
+        simdgroup_barrier(mem_flags::mem_device);
+        reward = simd_broadcast_first(reward);
     }
-    jbw_observe(seed, words, history, historyMask, response, step, obs);
+    jbw_observe(seed, words, history, historyMask, response, step, slane, width, obs);
     return reward;
 }
