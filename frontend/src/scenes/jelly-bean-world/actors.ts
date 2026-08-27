@@ -3,6 +3,8 @@ import { blendTokens, shade } from '@kit/mix';
 import { mergeColoredParts, type ColoredPart } from '@kit/parts';
 import { hash2f } from '@kit/rng';
 import { rockGeometry } from '@kit/vegetation';
+import { emissiveMaterial, setEmissiveIntensity } from '@kit/materials';
+import { radialSprite } from '@kit/textures';
 import {
   JBW_BANANA,
   JBW_JELLY,
@@ -23,6 +25,28 @@ export const ITEM_KINDS: readonly number[] = [
 ];
 
 export const AGENT_SPAN = 2;
+const BEACON_HEIGHT = 34;
+const BEACON_BASE = 0.62;
+const BEACON_TOP = 0.2;
+const BEACON_POOL = 6.4;
+const BEACON_LIFT = 1.6;
+
+export const ITEM_MOTION: Record<number, { hover: number; bob: number; spin: number }> = {
+  [JBW_BANANA]: { hover: AGENT_SPAN * 0.52, bob: AGENT_SPAN * 0.11, spin: 1.4 },
+  [JBW_ONION]: { hover: AGENT_SPAN * 0.52, bob: AGENT_SPAN * 0.11, spin: 1.25 },
+  [JBW_JELLY]: { hover: AGENT_SPAN * 0.52, bob: AGENT_SPAN * 0.11, spin: 1.35 },
+  [JBW_WALL]: { hover: 0, bob: 0, spin: 0 },
+  [JBW_TREE]: { hover: 0, bob: 0, spin: 0 },
+  [JBW_TRUFFLE]: { hover: AGENT_SPAN * 0.62, bob: AGENT_SPAN * 0.13, spin: 1.15 },
+};
+
+export const ITEM_GLOW = 0.72;
+export const HALO_GLOW = 0.3;
+
+export const HALO_WHITEN = 0.16;
+export const HALO_SPAN = AGENT_SPAN * 1.28;
+export const HALO_HOVER = AGENT_SPAN * 0.52;
+export const HALO_BOB = AGENT_SPAN * 0.11;
 
 const ITEM_SPAN: Record<number, number> = {
   [JBW_BANANA]: AGENT_SPAN,
@@ -152,6 +176,124 @@ function rawItemGeometry(item: number, skin: OrchardSkin): THREE.BufferGeometry 
   if (item === JBW_TREE) return treeGeometry(skin);
   if (item === JBW_TRUFFLE) return truffleGeometry(skin);
   throw new Error(`no orchard geometry for item ${item}`);
+}
+
+
+export interface BeaconHandle {
+  mesh: THREE.InstancedMesh;
+  pool: THREE.InstancedMesh;
+  setTime(t: number): void;
+  dispose(): void;
+}
+
+const BEAM_VERT = `
+#include <common>
+varying vec3 vBeamNormal;
+varying vec3 vBeamView;
+varying float vAxial;
+void main() {
+	vAxial = uv.y;
+	vec4 wp = modelMatrix * instanceMatrix * vec4( position, 1.0 );
+	vBeamNormal = normalize( mat3( modelMatrix ) * mat3( instanceMatrix ) * normal );
+	vBeamView = normalize( cameraPosition - wp.xyz );
+	gl_Position = projectionMatrix * viewMatrix * wp;
+}
+`;
+
+const BEAM_FRAG = `
+#include <common>
+uniform vec3 uColor;
+uniform float uIntensity;
+uniform float uOpacity;
+uniform float uTime;
+varying vec3 vBeamNormal;
+varying vec3 vBeamView;
+varying float vAxial;
+void main() {
+	float facing = abs( dot( normalize( vBeamNormal ), normalize( vBeamView ) ) );
+	float body = pow( facing, 1.35 );
+	float fall = mix( 1.0, 0.45, vAxial );
+	float capFade = ( 1.0 - smoothstep( 0.3, 1.0, vAxial ) ) * smoothstep( 0.0, 0.14, vAxial );
+	float bands = 0.87 + 0.13 * sin( vAxial * 11.0 - uTime * 0.55 );
+	float a = body * fall * capFade * bands * uOpacity;
+	if ( a <= 0.004 ) discard;
+	gl_FragColor = vec4( uColor * uIntensity, a );
+	#include <colorspace_fragment>
+}
+`;
+
+export function buildBeacon(color: THREE.ColorRepresentation, capacity: number): BeaconHandle {
+  const geometry = new THREE.CylinderGeometry(
+    BEACON_TOP,
+    BEACON_BASE,
+    BEACON_HEIGHT,
+    9,
+    1,
+    true,
+  );
+  geometry.translate(0, BEACON_HEIGHT / 2 + BEACON_LIFT, 0);
+  const uniforms = {
+    uColor: { value: new THREE.Color(color) },
+    uIntensity: { value: 1.5 },
+    uOpacity: { value: 0.52 },
+    uTime: { value: 0 },
+  };
+  const material = new THREE.ShaderMaterial({
+    uniforms,
+    vertexShader: BEAM_VERT,
+    fragmentShader: BEAM_FRAG,
+    transparent: true,
+    depthWrite: false,
+    side: THREE.DoubleSide,
+    blending: THREE.AdditiveBlending,
+    fog: false,
+    name: 'orchardBeacon',
+  });
+  const mesh = new THREE.InstancedMesh(geometry, material, capacity);
+  mesh.name = 'orchardBeacons';
+  mesh.castShadow = false;
+  mesh.receiveShadow = false;
+  mesh.frustumCulled = false;
+  mesh.renderOrder = 3;
+  mesh.count = 0;
+
+  const poolGeometry = new THREE.PlaneGeometry(BEACON_POOL, BEACON_POOL);
+  poolGeometry.rotateX(-Math.PI / 2);
+  const poolMaterial = emissiveMaterial(color, 1.25, {
+    map: radialSprite(64, 2.1),
+    transparent: true,
+    opacity: 0.42,
+    depthWrite: false,
+    blending: THREE.AdditiveBlending,
+    name: 'orchardBeaconPool',
+  });
+  const pool = new THREE.InstancedMesh(poolGeometry, poolMaterial, capacity);
+  pool.name = 'orchardBeaconPools';
+  pool.castShadow = false;
+  pool.receiveShadow = false;
+  pool.frustumCulled = false;
+  pool.renderOrder = 2;
+  pool.count = 0;
+
+  return {
+    mesh,
+    pool,
+    setTime(t) {
+      uniforms.uTime.value = t;
+      const breath = 1 + 0.09 * Math.sin(t * 0.73) + 0.05 * Math.sin(t * 1.9 + 1.1);
+      uniforms.uIntensity.value = 1.5 * breath;
+      setEmissiveIntensity(poolMaterial, 1.25 * breath);
+    },
+    dispose() {
+      mesh.dispose();
+      pool.dispose();
+      geometry.dispose();
+      poolGeometry.dispose();
+      material.dispose();
+      poolMaterial.dispose();
+      if (poolMaterial.map) poolMaterial.map.dispose();
+    },
+  };
 }
 
 export function orchardItemGeometry(item: number, skin: OrchardSkin): THREE.BufferGeometry {

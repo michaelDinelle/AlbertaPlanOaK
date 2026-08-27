@@ -259,10 +259,12 @@ export function TimeChart({
   );
 }
 
-export function Playhead({ total }: { total: number }) {
+export function Playhead({ total, from = 0 }: { total: number; from?: number }) {
   const ref = useRef<HTMLDivElement | null>(null);
   const totalRef = useRef(total);
   totalRef.current = total;
+  const fromRef = useRef(from);
+  fromRef.current = from;
   useEffect(() => {
     const el = ref.current;
     const parent = el?.parentElement;
@@ -275,7 +277,9 @@ export function Playhead({ total }: { total: number }) {
     const move = throttled((step: number) => {
       const inner = width - CHART_MARGIN.left - CHART_MARGIN.right - AXIS_WIDTH;
       if (inner <= 0 || totalRef.current <= 0) return;
-      const frac = Math.min(1, Math.max(0, step / totalRef.current));
+      const span = totalRef.current - fromRef.current;
+      if (span <= 0) return;
+      const frac = Math.min(1, Math.max(0, (step - fromRef.current) / span));
       el.style.transform = `translateX(${(CHART_MARGIN.left + AXIS_WIDTH + frac * inner).toFixed(1)}px)`;
     });
     move(currentPosition());

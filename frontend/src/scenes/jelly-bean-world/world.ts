@@ -1,7 +1,7 @@
 import * as THREE from 'three';
 import { applyFog, makeLightRig, type LightRig } from '@kit/lighting';
-import { oakMaterial, type OakMaterial } from '@kit/materials';
-import { blendTokens, clamp01, shade } from '@kit/mix';
+import { emissiveMaterial, oakMaterial, type OakMaterial } from '@kit/materials';
+import { blendTokens, clamp01, luminance, shade } from '@kit/mix';
 import {
   makeAmbientParticles,
   makeMistPlanes,
@@ -16,8 +16,19 @@ import { valueNoise2 } from '@kit/textures';
 import { TOKENS, type Palette } from '@kit/tokens';
 import type { SceneContext } from '@kit/types';
 import { flowerGeometry, grassClumpGeometry } from '@kit/vegetation';
+import { radialSprite } from '@kit/textures';
 import { makeWorld, type WorldCore } from '@kit/world';
-import { ITEM_CAPACITY, ITEM_KINDS, orchardItemGeometry } from './actors';
+import {
+  buildBeacon,
+  HALO_GLOW,
+  HALO_WHITEN,
+  ITEM_CAPACITY,
+  ITEM_GLOW,
+  ITEM_KINDS,
+  ITEM_MOTION,
+  orchardItemGeometry,
+  type BeaconHandle,
+} from './actors';
 import {
   JBW_BANANA,
   JBW_COLOR,
@@ -28,29 +39,36 @@ import {
   JBW_TRUFFLE,
   JBW_VISUAL_RANGE,
   JBW_WALL,
+  jbwCollectible,
 } from '@sim/envs/jellybeanworld';
 import { FIELD_SIZE, type ScentField } from './scent';
 
 export const DRAW_RADIUS = 520;
 export const GROUND_PERIOD = 256;
-export const GROUND_EXTENT = 1400;
-export const GROUND_SEGMENTS = 512;
-export const FOG_EXTENT = 1320;
+export const GROUND_EXTENT = 1900;
+export const GROUND_SEGMENTS = 560;
+export const FOG_EXTENT = 1980;
 export const RELIEF = 6.2;
 export const SCATTER_TILE = 24;
 export const SCATTER_SPAN = 33;
 export const SCATTER_BACK = 16;
 export const SHADOW_REACH = 300;
-export const SHADOW_SPAN = 260;
+export const SHADOW_SPAN = 108;
 const SLAB_LOW = -10;
 const SLAB_HIGH = 15;
-const SHADOW_MAP = 2048;
+const SHADOW_MAP_X = 4096;
+const SHADOW_MAP_Y = 1365;
 const MAP_MARK = 0.42;
+const ZERO_MOTION = { hover: 0, bob: 0, spin: 0 };
+export const DECAL_CAPACITY = 8192;
+const DECAL_DIM = 0.22;
+const BEACON_CAPACITY = 512;
+const SHELL_SCALE = 1.06;
 
 export const CAM_DISTANCE = 78;
-export const CAM_MAX_DISTANCE = 620;
+export const CAM_MAX_DISTANCE = 460;
 export const MAP_START = 190;
-export const MAP_FULL = 540;
+export const MAP_FULL = 420;
 export const CAM_NEAR = 0.6;
 export const CAM_FAR = 3600;
 export const CAM_AZIMUTH = 0.68;
@@ -84,6 +102,23 @@ export interface OrchardSkin {
   spoiled: THREE.Color;
   front: THREE.Color;
   mapGround: THREE.Color;
+  legendary: THREE.Color;
+}
+
+function itemGlow(item: number, skin: OrchardSkin, target: number): number {
+  if (!jbwCollectible(item)) return 0;
+  const luma = luminance(itemHue(item, skin));
+  if (!(luma > 0)) throw new Error(`orchard hue ${item} has no luminance`);
+  return target / luma;
+}
+
+function itemHue(item: number, skin: OrchardSkin): THREE.Color {
+  if (item === JBW_BANANA) return skin.banana;
+  if (item === JBW_ONION) return skin.onion;
+  if (item === JBW_JELLY) return skin.jelly;
+  if (item === JBW_TRUFFLE) return skin.truffle;
+  if (item === JBW_TREE) return skin.canopyLow;
+  return skin.stone;
 }
 
 function paperHue(item: number, palette: Palette, k: number): THREE.Color {
@@ -120,6 +155,7 @@ export function orchardSkin(palette: Palette, accent: THREE.ColorRepresentation)
     spoiled: blendTokens(TOKEN_ONE, palette.hemiSky, 0.62),
     front: blendTokens(palette.hemiSky, palette.skyTop, 0.4),
     mapGround: shade(blendTokens(palette.groundA, leaf, 0.5), 0.42),
+    legendary: blendTokens(TOKENS.celebrationGold, ember, 0.42),
   };
 }
 
@@ -148,6 +184,8 @@ export interface ScentPaint {
   uOccluders: { value: Float32Array };
   uMapBlend: { value: number };
   uMapGround: { value: THREE.Color };
+  uGridGain: { value: number };
+  uGridColor: { value: THREE.Color };
 }
 
 const PAINT_DECL = `
@@ -173,7 +211,17 @@ uniform int uOccluderCount;
 uniform vec3 uOccluders[ 64 ];
 uniform float uMapBlend;
 uniform vec3 uMapGround;
+uniform float uGridGain;
+uniform vec3 uGridColor;
 varying vec3 vOrchard;
+
+float orchardLattice( const in vec2 p ) {
+	vec2 w = fwidth( p );
+	vec2 edge = abs( fract( p + 0.5 ) - 0.5 ) / max( w, vec2( 1e-4 ) );
+	vec2 line = vec2( 1.0 ) - smoothstep( vec2( 0.4 ), vec2( 1.4 ), edge );
+	vec2 att = vec2( 1.0 ) / ( vec2( 1.0 ) + 4.0 * w );
+	return max( line.x * att.x, line.y * att.y );
+}
 
 float orchardWrap( const in float a ) {
 	return a - 6.2831853 * floor( ( a + 3.1415927 ) / 6.2831853 );
@@ -226,16 +274,58 @@ totalEmissiveRadiance += uShaftColor * orchardVisibility( vOrchard.xz ) * uShaft
 totalEmissiveRadiance += orchardTint * orchardMass * uScentGlow;
 `;
 
-export function scaleItems(material: OakMaterial, zoom: { value: number }): void {
+export interface ItemMotion {
+  hover: number;
+  bob: number;
+  spin: number;
+}
+
+const FLOAT_DECL = `
+uniform float uItemZoom;
+uniform float uItemTime;
+uniform float uItemHover;
+uniform float uItemBob;
+uniform float uItemSpin;
+`;
+
+const FLOAT_APPLY = `
+transformed *= uItemZoom;
+{
+	vec3 orchardOrigin = instanceMatrix[ 3 ].xyz;
+	float orchardPhase = orchardOrigin.x * 0.7 + orchardOrigin.z * 1.3;
+	float orchardAngle = uItemTime * uItemSpin + orchardPhase;
+	float orchardCos = cos( orchardAngle );
+	float orchardSin = sin( orchardAngle );
+	transformed.xz = vec2(
+		orchardCos * transformed.x - orchardSin * transformed.z,
+		orchardSin * transformed.x + orchardCos * transformed.z
+	);
+	transformed.y += uItemZoom * ( uItemHover + sin( uItemTime * 2.1 + orchardPhase ) * uItemBob );
+}
+`;
+
+export function animateItems(
+  material: OakMaterial,
+  zoom: { value: number },
+  time: { value: number },
+  motion: ItemMotion,
+): void {
   const base = material.onBeforeCompile;
   const baseKey = material.customProgramCacheKey;
-  material.customProgramCacheKey = () => `${baseKey ? baseKey.call(material) : ''}|zoom`;
+  material.customProgramCacheKey = () => `${baseKey ? baseKey.call(material) : ''}|float`;
+  const hover = { value: motion.hover };
+  const bob = { value: motion.bob };
+  const spin = { value: motion.spin };
   material.onBeforeCompile = (shader, renderer) => {
     base.call(material, shader, renderer);
     shader.uniforms.uItemZoom = zoom;
+    shader.uniforms.uItemTime = time;
+    shader.uniforms.uItemHover = hover;
+    shader.uniforms.uItemBob = bob;
+    shader.uniforms.uItemSpin = spin;
     shader.vertexShader = shader.vertexShader
-      .replace('#include <common>', '#include <common>\nuniform float uItemZoom;')
-      .replace('#include <begin_vertex>', '#include <begin_vertex>\ntransformed *= uItemZoom;');
+      .replace('#include <common>', `#include <common>\n${FLOAT_DECL}`)
+      .replace('#include <begin_vertex>', `#include <begin_vertex>\n${FLOAT_APPLY}`);
   };
 }
 
@@ -267,6 +357,8 @@ export function paintScent(material: OakMaterial, paint: ScentPaint): void {
     shader.uniforms.uOccluders = paint.uOccluders;
     shader.uniforms.uMapBlend = paint.uMapBlend;
     shader.uniforms.uMapGround = paint.uMapGround;
+    shader.uniforms.uGridGain = paint.uGridGain;
+    shader.uniforms.uGridColor = paint.uGridColor;
     shader.vertexShader = shader.vertexShader
       .replace('#include <common>', '#include <common>\nvarying vec3 vOrchard;')
       .replace(
@@ -279,16 +371,15 @@ export function paintScent(material: OakMaterial, paint: ScentPaint): void {
       .replace('#include <emissivemap_fragment>', `#include <emissivemap_fragment>\n${PAINT_SHAFT}`)
       .replace(
         '#include <opaque_fragment>',
-        'outgoingLight = mix( outgoingLight, orchardFlat, uMapBlend );\n#include <opaque_fragment>',
+        'outgoingLight = mix( outgoingLight, orchardFlat, uMapBlend );\noutgoingLight += uGridColor * orchardLattice( vOrchard.xz ) * uGridGain;\n#include <opaque_fragment>',
       );
   };
 }
 
 export function orchardHeight(seed: number, x: number, z: number): number {
   const a = valueNoise2(x / 32, z / 32, GROUND_PERIOD / 32, seed);
-  const b = valueNoise2(x / 8, z / 8, GROUND_PERIOD / 8, seed ^ 0x51ed);
-  const c = valueNoise2(x / 3, z / 3, GROUND_PERIOD / 3, seed ^ 0x2b17);
-  return (a - 0.5) * RELIEF * 2 + (b - 0.5) * RELIEF * 0.42 + (c - 0.5) * RELIEF * 0.06;
+  const b = valueNoise2(x / 16, z / 16, GROUND_PERIOD / 16, seed ^ 0x51ed);
+  return (a - 0.5) * RELIEF * 2 + (b - 0.5) * RELIEF * 0.44;
 }
 
 export interface OrchardWorld extends WorldCore {
@@ -297,14 +388,19 @@ export interface OrchardWorld extends WorldCore {
   terrain: TerrainHandle;
   paint: ScentPaint;
   items: Map<number, THREE.InstancedMesh>;
-  itemMaterials: Map<number, OakMaterial>;
+  decals: THREE.InstancedMesh;
+  shells: Map<number, THREE.InstancedMesh>;
+  cellColor: Float32Array;
+  beacon: BeaconHandle;
   setOrigin(x: number, z: number): void;
   setHour(hour: number): void;
   setRipeness(jellyRipe: number): void;
+  decalTint(item: number, out: THREE.Color): THREE.Color;
   setFront(edge: number, mix: number): void;
   setScentOrigin(x: number, y: number): void;
   setSight(x: number, y: number, facing: number, count: number): void;
   setBreeze(amount: number): void;
+  heightAt(x: number, z: number): number;
   setMap(blend: number, distance: number): void;
 }
 
@@ -324,7 +420,10 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene, field: ScentFi
     pointCount: 2,
     pointDistance: 14,
     sunDistanceScale: 3.2,
+    shadowMapSize: [SHADOW_MAP_X, SHADOW_MAP_Y],
   });
+  rig.sun.shadow.normalBias = 0.4;
+  rig.sun.shadow.radius = 2.4;
   w.add(rig.group);
   w.own(rig);
 
@@ -353,6 +452,8 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene, field: ScentFi
     uOccluders: { value: new Float32Array(OCCLUDER_LIMIT * 3) },
     uMapBlend: { value: 0 },
     uMapGround: { value: skin.mapGround.clone() },
+    uGridGain: { value: 0 },
+    uGridColor: { value: new THREE.Color(TOKENS.uiCyan) },
   };
 
   const terrain = makeTerrain({
@@ -386,9 +487,12 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene, field: ScentFi
   paintScent(terrain.material as OakMaterial, paint);
 
   const itemZoom = { value: 1 };
+  const itemTime = { value: 0 };
+  let groundX = 0;
+  let groundZ = 0;
+  const surfaceAt = (x: number, z: number): number => terrain.sampleHeight(x - groundX, z - groundZ);
   let hourNow = 0;
   const items = new Map<number, THREE.InstancedMesh>();
-  const itemMaterials = new Map<number, OakMaterial>();
   for (const kind of ITEM_KINDS) {
     const geometry = orchardItemGeometry(kind, skin);
     w.own({ dispose: () => geometry.dispose() });
@@ -401,21 +505,90 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene, field: ScentFi
       toonSteps: 3,
       toonSoftness: 0.4,
       toonFloor: 0.3,
+      emissive: itemHue(kind, skin),
+      emissiveIntensity: itemGlow(kind, skin, ITEM_GLOW),
       name: `orchardItem${kind}`,
     });
     w.own(material);
-    scaleItems(material, itemZoom);
+    animateItems(material, itemZoom, itemTime, ITEM_MOTION[kind] ?? ZERO_MOTION);
     const mesh = new THREE.InstancedMesh(geometry, material, ITEM_CAPACITY[kind] ?? 128);
     mesh.name = `orchardItems${kind}`;
-    mesh.castShadow = true;
+    mesh.castShadow = (ITEM_MOTION[kind]?.hover ?? 0) === 0;
     mesh.receiveShadow = true;
     mesh.frustumCulled = false;
     mesh.count = 0;
     w.add(mesh);
     w.own({ dispose: () => mesh.dispose() });
     items.set(kind, mesh);
-    itemMaterials.set(kind, material);
   }
+
+  const decalGeometry = new THREE.PlaneGeometry(1, 1);
+  decalGeometry.rotateX(-Math.PI / 2);
+  w.own({ dispose: () => decalGeometry.dispose() });
+  const decalMaterial = emissiveMaterial(TOKEN_ONE, 0.9, {
+    map: w.own(radialSprite(64, 2.2)),
+    transparent: true,
+    opacity: 0.5,
+    depthWrite: false,
+    blending: THREE.AdditiveBlending,
+    name: 'orchardDecal',
+  });
+  w.own(decalMaterial);
+  const decals = new THREE.InstancedMesh(decalGeometry, decalMaterial, DECAL_CAPACITY);
+  decals.name = 'orchardDecals';
+  decals.instanceColor = new THREE.InstancedBufferAttribute(new Float32Array(DECAL_CAPACITY * 3), 3);
+  decals.castShadow = false;
+  decals.receiveShadow = false;
+  decals.frustumCulled = false;
+  decals.renderOrder = 2;
+  decals.count = 0;
+  w.add(decals);
+  w.own({ dispose: () => decals.dispose() });
+
+  const shells = new Map<number, THREE.InstancedMesh>();
+  for (const kind of ITEM_KINDS) {
+    const motion = ITEM_MOTION[kind] ?? ZERO_MOTION;
+    if (motion.hover <= 0) continue;
+    const source = items.get(kind);
+    if (!source) continue;
+    const shellGeometry = source.geometry.clone();
+    shellGeometry.scale(SHELL_SCALE, SHELL_SCALE, SHELL_SCALE);
+    w.own({ dispose: () => shellGeometry.dispose() });
+    const tint = blendTokens(itemHue(kind, skin), TOKEN_ONE, HALO_WHITEN);
+    const shellMaterial = emissiveMaterial(tint, HALO_GLOW / luminance(tint), {
+      transparent: true,
+      opacity: 0.42,
+      depthWrite: false,
+      side: THREE.DoubleSide,
+      blending: THREE.AdditiveBlending,
+      name: `orchardShell${kind}`,
+    });
+    w.own(shellMaterial);
+    animateItems(shellMaterial as unknown as OakMaterial, itemZoom, itemTime, motion);
+    const shell = new THREE.InstancedMesh(shellGeometry, shellMaterial, ITEM_CAPACITY[kind] ?? 128);
+    shell.name = `orchardShells${kind}`;
+    shell.castShadow = false;
+    shell.receiveShadow = false;
+    shell.frustumCulled = false;
+    shell.renderOrder = 4;
+    shell.count = 0;
+    w.add(shell);
+    w.own({ dispose: () => shell.dispose() });
+    shells.set(kind, shell);
+  }
+
+  const cellColor = new Float32Array((Math.max(...ITEM_KINDS) + 1) * 3);
+  for (const kind of ITEM_KINDS) {
+    const hue = itemHue(kind, skin);
+    cellColor[kind * 3] = hue.r;
+    cellColor[kind * 3 + 1] = hue.g;
+    cellColor[kind * 3 + 2] = hue.b;
+  }
+
+  const beacon = w.time(buildBeacon(skin.legendary, BEACON_CAPACITY));
+  w.add(beacon.mesh);
+  w.add(beacon.pool);
+  w.own(beacon);
 
   const grassGeometry = grassClumpGeometry(4, 0.4, 0.05);
   w.own({ dispose: () => grassGeometry.dispose() });
@@ -452,7 +625,7 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene, field: ScentFi
         const z = z0 + rng() * SCATTER_TILE;
         write(
           x,
-          orchardHeight(ctx.seed, x, z),
+          surfaceAt(x, z),
           z,
           rng() * Math.PI,
           0.52 + rng() * 0.66,
@@ -501,7 +674,7 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene, field: ScentFi
         const z = z0 + rng() * SCATTER_TILE;
         write(
           x,
-          orchardHeight(ctx.seed, x, z),
+          surfaceAt(x, z),
           z,
           rng() * Math.PI * 2,
           0.42 + rng() * 0.4,
@@ -540,49 +713,33 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene, field: ScentFi
   w.own(mist);
 
   const sunDir = new THREE.Vector3();
+  const baseAzimuth = SUN_AZIMUTH;
+  const fogBase = fog.density;
+  const grassWind = grassMaterial.oak;
+  const flowerWind = flowerMaterial.oak;
   const lightProbe = new THREE.Object3D();
   const probePoint = new THREE.Vector3();
   const shadowCentre = new THREE.Vector3();
 
   const fitShadow = (cx: number, cz: number): void => {
+    const elevation = Math.max(0.02, Math.min(1, rig.sunDirection.y));
+    const horizon = Math.sqrt(Math.max(1e-6, 1 - elevation * elevation));
+    const halfSlab = (SLAB_HIGH - SLAB_LOW) / 2;
+    const halfX = SHADOW_SPAN;
+    const halfY = SHADOW_SPAN * elevation + halfSlab * horizon;
+    const depth = SHADOW_SPAN * horizon + halfSlab * elevation;
     shadowCentre.set(cx, (SLAB_LOW + SLAB_HIGH) / 2, cz);
     lightProbe.position.copy(shadowCentre).addScaledVector(rig.sunDirection, SHADOW_REACH);
     lightProbe.lookAt(shadowCentre);
     lightProbe.updateMatrixWorld();
-    lightProbe.matrixWorld.invert();
-    let halfX = 1;
-    let halfY = 1;
-    let depth = 1;
-    for (let i = 0; i < 12; i++) {
-      const a = (i / 12) * Math.PI * 2;
-      const px = cx + Math.cos(a) * SHADOW_SPAN;
-      const pz = cz + Math.sin(a) * SHADOW_SPAN;
-      for (let h = 0; h < 2; h++) {
-        probePoint.set(px, h === 0 ? SLAB_LOW : SLAB_HIGH, pz);
-        probePoint.applyMatrix4(lightProbe.matrixWorld);
-        halfX = Math.max(halfX, Math.abs(probePoint.x));
-        halfY = Math.max(halfY, Math.abs(probePoint.y));
-        depth = Math.max(depth, Math.abs(probePoint.z + SHADOW_REACH));
-      }
-    }
-    const qx = (2 * halfX) / SHADOW_MAP;
-    const qy = (2 * halfY) / SHADOW_MAP;
-    rig.setShadowExtent(
-      {
-        x: Math.round(shadowCentre.x / qx) * qx,
-        y: shadowCentre.y,
-        z: Math.round(shadowCentre.z / qy) * qy,
-      },
-      halfX,
-      halfY,
-      SHADOW_REACH,
-      depth + 4,
-    );
+    probePoint.copy(shadowCentre).applyMatrix4(lightProbe.matrixWorld.clone().invert());
+    const qx = (2 * halfX) / SHADOW_MAP_X;
+    const qy = (2 * halfY) / SHADOW_MAP_Y;
+    probePoint.x = Math.round(probePoint.x / qx) * qx;
+    probePoint.y = Math.round(probePoint.y / qy) * qy;
+    probePoint.applyMatrix4(lightProbe.matrixWorld);
+    rig.setShadowExtent(probePoint, halfX, halfY, SHADOW_REACH, depth + halfSlab);
   };
-  const baseAzimuth = SUN_AZIMUTH;
-  const grassWind = grassMaterial.oak;
-  const flowerWind = flowerMaterial.oak;
-  const fogBase = fog.density;
 
   const setHour = (hour: number): void => {
     const t = 0.7 + 0.3 * clamp01(hour);
@@ -615,20 +772,11 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene, field: ScentFi
   };
 
   const ripeColor = new THREE.Color();
+  const ripeness = new Float32Array(cellColor.length / 3).fill(1);
   const setRipeness = (jellyRipe: number): void => {
     const k = clamp01(jellyRipe);
-    const jellyMaterial = itemMaterials.get(3);
-    const onionMaterial = itemMaterials.get(2);
-    if (jellyMaterial) {
-      ripeColor.copy(skin.spoiled).lerp(skin.ripe, k);
-      jellyMaterial.color.copy(ripeColor);
-      jellyMaterial.emissive.copy(skin.jelly).multiplyScalar(0.16 * k);
-    }
-    if (onionMaterial) {
-      ripeColor.copy(skin.ripe).lerp(skin.spoiled, k);
-      onionMaterial.color.copy(ripeColor);
-      onionMaterial.emissive.copy(skin.onion).multiplyScalar(0.16 * (1 - k));
-    }
+    ripeness[JBW_JELLY] = k;
+    ripeness[JBW_ONION] = 1 - k;
   };
 
   setHour(0.4);
@@ -641,10 +789,15 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene, field: ScentFi
       terrain,
       paint,
       items,
-      itemMaterials,
+      decals,
+      shells,
+      cellColor,
+      beacon,
       setOrigin(x, z) {
         const sx = Math.round(x / GROUND_PERIOD) * GROUND_PERIOD;
         const sz = Math.round(z / GROUND_PERIOD) * GROUND_PERIOD;
+        groundX = sx;
+        groundZ = sz;
         terrain.mesh.position.set(sx, 0, sz);
         grassBank.setOrigin(Math.floor(x / SCATTER_TILE), Math.floor(z / SCATTER_TILE));
         flowerBank.setOrigin(Math.floor(x / SCATTER_TILE), Math.floor(z / SCATTER_TILE));
@@ -655,6 +808,15 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene, field: ScentFi
       },
       setHour,
       setRipeness,
+      decalTint(item, out) {
+        const t = item * 3;
+        const ripe = ripeness[item] ?? 1;
+        ripeColor.copy(skin.spoiled).lerp(skin.ripe, ripe);
+        return out
+          .setRGB(cellColor[t] ?? 1, cellColor[t + 1] ?? 1, cellColor[t + 2] ?? 1)
+          .multiply(ripeColor)
+          .multiplyScalar(DECAL_DIM + (1 - DECAL_DIM) * ripe);
+      },
       setFront(edge, mix) {
         paint.uFrontEdge.value = edge;
         paint.uFrontMix.value = clamp01(mix);
@@ -671,9 +833,11 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene, field: ScentFi
         const k = clamp01(blend);
         paint.uMapBlend.value = k;
         fog.density = fogBase * (1 - 0.08 * hourNow) * (1 - k);
-        sky.mesh.visible = k < 0.995;
         itemZoom.value = 1 + (Math.max(distance, MAP_START) / MAP_START - 1) * k * MAP_MARK;
+        paint.uScentGain.value = (0.42 + 0.28 * hourNow) * (1 - 0.72 * k);
+        paint.uScentGlow.value = (0.04 + 0.09 * hourNow) * (1 - 0.85 * k);
       },
+      heightAt: surfaceAt,
       setBreeze(amount) {
         grassWind.setWind(0.016 + 0.028 * clamp01(amount));
         flowerWind.setWind(0.02 + 0.03 * clamp01(amount));
@@ -681,6 +845,7 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene, field: ScentFi
     },
     {
       time(t) {
+        itemTime.value = t;
         const drift = hash2f(1, 2, ctx.seed) * 0.4;
         pollen.points.rotation.y = Math.sin(t * 0.02 + drift) * 0.05;
       },

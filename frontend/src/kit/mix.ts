@@ -29,3 +29,7 @@ export function blendTokens(a: THREE.ColorRepresentation, b: THREE.ColorRepresen
 export function shade(color: THREE.ColorRepresentation, k: number): THREE.Color {
   return blendTokens(color, TOKENS.palettes.night.skyTop, k);
 }
+
+export function luminance(color: THREE.Color): number {
+  return 0.2126 * color.r + 0.7152 * color.g + 0.0722 * color.b;
+}

@@ -42,6 +42,14 @@ function summaryPoints(run: RunDetail | null, envId: string | null): XY[] | null
   );
 }
 
+const SPARSE_SAMPLES = 4;
+
+function sparseOrigin(points: readonly { x: number }[], horizon: number): number {
+  if (points.length === 0 || points.length >= SPARSE_SAMPLES) return 0;
+  const first = points[0]?.x ?? 0;
+  return first >= horizon ? 0 : first;
+}
+
 export function RewardView({
   runs,
   active,
@@ -135,10 +143,11 @@ export function RewardView({
         <TimeChart
           label={STR.reward.title}
           height={188}
+          xMin={sparseOrigin(avgPts, horizon)}
           xMax={Math.max(1, horizon)}
           xLabel={STR.axis.steps}
           yLabel={STR.axis.rewardRate}
-          overlay={<Playhead total={Math.max(1, horizon)} />}
+          overlay={<Playhead total={Math.max(1, horizon)} from={sparseOrigin(avgPts, horizon)} />}
         >
           <Area {...bandProps(tone)} data={band} />
           <Line {...lineProps(tone, 1.6)} name={STR.reward.average(STR.policy[sel.policy])} data={avgPts} />

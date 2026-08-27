@@ -22,6 +22,7 @@ export interface LightRigOptions {
   pointDistance?: number;
   pointDecay?: number;
   sunDistanceScale?: number;
+  shadowMapSize?: number | readonly [number, number];
   name?: string;
 }
 
@@ -65,7 +66,9 @@ export function makeLightRig(palette: Palette, opts: LightRigOptions = {}): Ligh
   const sun = new THREE.DirectionalLight(palette.sun, palette.sunIntensity);
   sun.name = 'oakSun';
   sun.castShadow = true;
-  sun.shadow.mapSize.set(SHADOW_MAP_SIZE, SHADOW_MAP_SIZE);
+  const mapSize = opts.shadowMapSize ?? SHADOW_MAP_SIZE;
+  if (typeof mapSize === 'number') sun.shadow.mapSize.set(mapSize, mapSize);
+  else sun.shadow.mapSize.set(mapSize[0], mapSize[1]);
   sun.shadow.bias = SHADOW_BIAS;
   sun.shadow.normalBias = 0.02;
   sun.shadow.camera.near = 0.5;

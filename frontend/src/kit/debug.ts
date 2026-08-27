@@ -31,19 +31,22 @@ export interface GroundTruthOptions {
   profileRange?: readonly [number, number];
   fkToWorld?(x: number, z: number, out: Vec3Tuple): Vec3Tuple;
   maxKeys?: number;
-  gridWindow?(state: FrameState): GridWindow | null;
-  windowCells?: number;
+  frame?(state: FrameState): DebugFrame | null;
+  cellCapacity?: number;
   name?: string;
 }
 
-export interface GridWindow {
-  walls: Uint8Array;
+export interface DebugFrame {
   originX: number;
   originY: number;
-  height?: number;
+  originZ: number;
+  agent: Vec3Tuple;
+  cone: Float32Array;
+  coneCount: number;
 }
 
 const MAX_DOORS = 8;
+const MAX_CONE = 512;
 const PROFILE_SAMPLES = 160;
 
 function lineMaterial(color: THREE.ColorRepresentation, opacity = 0.9): THREE.LineBasicMaterial {
@@ -58,6 +61,95 @@ function lineMaterial(color: THREE.ColorRepresentation, opacity = 0.9): THREE.Li
   });
   m.name = 'oakDebugLine';
   return m;
+}
+
+const CELL_TOP = 0.9;
+
+export class CellBoxes {
+  readonly object: THREE.LineSegments;
+
+  private readonly pos: Float32Array;
+  private readonly col: Float32Array;
+  private readonly posAttr: THREE.BufferAttribute;
+  private readonly colAttr: THREE.BufferAttribute;
+  private readonly limit: number;
+  private o = 0;
+
+  constructor(capacity: number, name: string, material: THREE.LineBasicMaterial) {
+    this.limit = capacity * 24;
+    this.pos = new Float32Array(this.limit * 3);
+    this.col = new Float32Array(this.limit * 3);
+    this.posAttr = new THREE.BufferAttribute(this.pos, 3);
+    this.colAttr = new THREE.BufferAttribute(this.col, 3);
+    this.posAttr.setUsage(THREE.DynamicDrawUsage);
+    this.colAttr.setUsage(THREE.DynamicDrawUsage);
+    const geometry = new THREE.BufferGeometry();
+    geometry.setAttribute('position', this.posAttr);
+    geometry.setAttribute('color', this.colAttr);
+    geometry.boundingSphere = new THREE.Sphere(new THREE.Vector3(), 1e5);
+    this.object = new THREE.LineSegments(geometry, material);
+    this.object.name = name;
+    this.object.frustumCulled = false;
+    this.object.renderOrder = 999;
+  }
+
+  get geometry(): THREE.BufferGeometry {
+    return this.object.geometry;
+  }
+
+  begin(): void {
+    this.o = 0;
+  }
+
+  box(
+    x: number,
+    z: number,
+    y00: number,
+    y10: number,
+    y01: number,
+    y11: number,
+    r: number,
+    g: number,
+    b: number,
+  ): void {
+    if (this.o + 24 > this.limit) throw new Error('debug cell capacity exceeded');
+    const p = this.pos;
+    const c = this.col;
+    const x0 = x - 0.5;
+    const x1 = x + 0.5;
+    const z0 = z - 0.5;
+    const z1 = z + 0.5;
+    const t = CELL_TOP;
+    let o = this.o * 3;
+    const vert = (vx: number, vy: number, vz: number): void => {
+      p[o] = vx; p[o + 1] = vy; p[o + 2] = vz;
+      c[o] = r; c[o + 1] = g; c[o + 2] = b;
+      o += 3;
+    };
+    const edge = (ax: number, ay: number, az: number, bx: number, by: number, bz: number): void => {
+      vert(ax, ay, az);
+      vert(bx, by, bz);
+    };
+    edge(x0, y00, z0, x1, y10, z0);
+    edge(x1, y10, z0, x1, y11, z1);
+    edge(x1, y11, z1, x0, y01, z1);
+    edge(x0, y01, z1, x0, y00, z0);
+    edge(x0, y00 + t, z0, x1, y10 + t, z0);
+    edge(x1, y10 + t, z0, x1, y11 + t, z1);
+    edge(x1, y11 + t, z1, x0, y01 + t, z1);
+    edge(x0, y01 + t, z1, x0, y00 + t, z0);
+    edge(x0, y00, z0, x0, y00 + t, z0);
+    edge(x1, y10, z0, x1, y10 + t, z0);
+    edge(x1, y11, z1, x1, y11 + t, z1);
+    edge(x0, y01, z1, x0, y01 + t, z1);
+    this.o += 24;
+  }
+
+  commit(): void {
+    this.pos.fill(0, this.o * 3);
+    this.posAttr.needsUpdate = true;
+    this.colAttr.needsUpdate = true;
+  }
 }
 
 function segments(count: number, material: THREE.LineBasicMaterial, name: string): {
@@ -88,10 +180,10 @@ export class GroundTruthOverlay {
   private readonly opts: GroundTruthOptions;
 
   private readonly grid: GridGeometry | null;
-  private readonly windowGrid: GridGeometry | null;
-  private wallBoxes: THREE.LineSegments | null = null;
-  private wallBoxPos: Float32Array | null = null;
-  private wallBoxAttr: THREE.BufferAttribute | null = null;
+  private readonly anchored: boolean;
+  private cells: CellBoxes | null = null;
+  private conePos: Float32Array | null = null;
+  private coneAttr: THREE.BufferAttribute | null = null;
   private agentCross: THREE.LineSegments | null = null;
   private agentCrossPos: Float32Array | null = null;
   private agentCrossAttr: THREE.BufferAttribute | null = null;
@@ -126,17 +218,22 @@ export class GroundTruthOverlay {
     this.camera = opts.camera ?? null;
     this.maxKeys = Math.max(1, opts.maxKeys ?? 4);
     this.group.name = opts.name ?? 'oakGroundTruth';
-    const cells = Math.max(3, Math.round(opts.windowCells ?? 33));
-    this.windowGrid = opts.gridWindow
-      ? { w: cells, h: cells, walls: new Uint8Array(cells * cells).fill(1) }
-      : null;
-    this.grid = this.windowGrid ?? geometry.grid ?? null;
+    this.anchored = opts.frame !== undefined;
+    this.grid = this.anchored ? null : (geometry.grid ?? null);
 
     const main = lineMaterial(opts.color ?? TOKENS.uiCyan, 0.85);
     const wall = lineMaterial(opts.wallColor ?? 0x8fa6c4, 0.55);
     const goal = lineMaterial(TOKENS.celebrationGold, 0.95);
     this.materials.push(main, wall, goal);
 
+    if (this.anchored) {
+      this.cells = this.addCells(opts.cellCapacity ?? 1, 'oakDebugCells', wall);
+      const cone = segments(MAX_CONE, main, 'oakDebugCone');
+      this.conePos = cone.positions;
+      this.coneAttr = cone.attr;
+      this.add(cone.object);
+      this.buildMarkers(main, goal);
+    }
     if (this.grid) this.buildGrid(this.grid, main, wall, goal);
     if (geometry.cheetah) this.buildCheetah(main, goal);
     if (geometry.classic) this.buildClassic(main, goal);
@@ -158,52 +255,40 @@ export class GroundTruthOverlay {
     }
   }
 
-  private fillWindow(state: FrameState): void {
-    const grid = this.windowGrid;
-    const p = this.wallBoxPos;
-    if (!grid || !p) return;
-    const win = this.opts.gridWindow?.(state) ?? null;
-    if (!win) return;
-    grid.walls.set(win.walls);
-    this.group.position.set(
-      win.originX + (grid.w - 1) / 2,
-      win.height ?? 0,
-      win.originY + (grid.h - 1) / 2,
-    );
+  private addCells(capacity: number, name: string, wall: THREE.LineBasicMaterial): CellBoxes {
+    const material = lineMaterial(0xffffff, wall.opacity);
+    material.vertexColors = true;
+    this.materials.push(material);
+    const boxes = new CellBoxes(capacity, name, material);
+    this.geometries.push(boxes.geometry);
+    this.group.add(boxes.object);
+    return boxes;
+  }
+
+  private updateFrame(state: FrameState): void {
+    const frame = this.opts.frame?.(state) ?? null;
+    const p = this.conePos;
+    if (!frame || !p) return;
+    this.group.position.set(frame.originX, frame.originY, frame.originZ);
     let o = 0;
-    const h = 0.9;
-    for (let gy = 0; gy < grid.h; gy++) {
-      for (let gx = 0; gx < grid.w; gx++) {
-        if ((grid.walls[gy * grid.w + gx] ?? 0) === 0) continue;
-        cellToWorld(gx, gy, grid, this.scratch);
-        const x0 = this.scratch[0] - 0.5;
-        const x1 = this.scratch[0] + 0.5;
-        const z0 = this.scratch[2] - 0.5;
-        const z1 = this.scratch[2] + 0.5;
-        const edge = (ax: number, ay: number, az: number, bx: number, by: number, bz: number): void => {
-          p[o++] = ax; p[o++] = ay; p[o++] = az;
-          p[o++] = bx; p[o++] = by; p[o++] = bz;
-        };
-        edge(x0, 0, z0, x1, 0, z0);
-        edge(x1, 0, z0, x1, 0, z1);
-        edge(x1, 0, z1, x0, 0, z1);
-        edge(x0, 0, z1, x0, 0, z0);
-        edge(x0, h, z0, x1, h, z0);
-        edge(x1, h, z0, x1, h, z1);
-        edge(x1, h, z1, x0, h, z1);
-        edge(x0, h, z1, x0, h, z0);
-        edge(x0, 0, z0, x0, h, z0);
-        edge(x1, 0, z0, x1, h, z0);
-        edge(x1, 0, z1, x1, h, z1);
-        edge(x0, 0, z1, x0, h, z1);
-      }
+    const n = Math.min(frame.coneCount, Math.floor(frame.cone.length / 3), Math.floor(p.length / 3));
+    for (let i = 0; i < n; i++) {
+      p[o++] = frame.cone[i * 3] ?? 0;
+      p[o++] = frame.cone[i * 3 + 1] ?? 0;
+      p[o++] = frame.cone[i * 3 + 2] ?? 0;
     }
     while (o < p.length) p[o++] = 0;
-    if (this.wallBoxAttr) this.wallBoxAttr.needsUpdate = true;
+    if (this.coneAttr) this.coneAttr.needsUpdate = true;
+    this.updateCross(null, null, frame.agent);
+  }
+
+  cellBoxes(): CellBoxes {
+    if (!this.cells) throw new Error('overlay has no cell boxes');
+    return this.cells;
   }
 
   setState(state: FrameState): void {
-    if (this.windowGrid) this.fillWindow(state);
+    if (this.anchored) this.updateFrame(state);
     if (this.grid) this.updateGrid(state, this.grid);
     if (this.skeletonPos) this.updateCheetah(state);
     if (this.classicMarker) this.updateClassic(state);
@@ -225,10 +310,7 @@ export class GroundTruthOverlay {
     goalMat: THREE.LineBasicMaterial,
   ): void {
     const y = 0.02;
-    const half = 0.5;
-
-    const latticeCount = grid.w + 1 + grid.h + 1;
-    const lattice = segments(latticeCount, wallMat, 'oakDebugLattice');
+    const lattice = segments(grid.w + 1 + grid.h + 1, wallMat, 'oakDebugLattice');
     {
       const p = lattice.positions;
       let o = 0;
@@ -251,43 +333,17 @@ export class GroundTruthOverlay {
     let walls = 0;
     for (let i = 0; i < grid.w * grid.h; i++) if ((grid.walls[i] ?? 0) !== 0) walls++;
     if (walls > 0) {
-      const boxes = segments(walls * 12, wallMat, 'oakDebugWalls');
-      this.wallBoxes = boxes.object;
-      this.wallBoxPos = boxes.positions;
-      this.wallBoxAttr = boxes.attr;
-      const p = boxes.positions;
-      let o = 0;
-      const h = 0.9;
+      const boxes = this.addCells(walls, 'oakDebugWalls', wallMat);
+      const tint = new THREE.Color(this.opts.wallColor ?? 0x8fa6c4);
+      boxes.begin();
       for (let gy = 0; gy < grid.h; gy++) {
         for (let gx = 0; gx < grid.w; gx++) {
           if ((grid.walls[gy * grid.w + gx] ?? 0) === 0) continue;
           cellToWorld(gx, gy, grid, this.scratch);
-          const cx = this.scratch[0];
-          const cz = this.scratch[2];
-          const x0 = cx - half;
-          const x1 = cx + half;
-          const z0 = cz - half;
-          const z1 = cz + half;
-          const edge = (ax: number, ay: number, az: number, bx: number, by: number, bz: number): void => {
-            p[o++] = ax; p[o++] = ay; p[o++] = az;
-            p[o++] = bx; p[o++] = by; p[o++] = bz;
-          };
-          edge(x0, 0, z0, x1, 0, z0);
-          edge(x1, 0, z0, x1, 0, z1);
-          edge(x1, 0, z1, x0, 0, z1);
-          edge(x0, 0, z1, x0, 0, z0);
-          edge(x0, h, z0, x1, h, z0);
-          edge(x1, h, z0, x1, h, z1);
-          edge(x1, h, z1, x0, h, z1);
-          edge(x0, h, z1, x0, h, z0);
-          edge(x0, 0, z0, x0, h, z0);
-          edge(x1, 0, z0, x1, h, z0);
-          edge(x1, 0, z1, x1, h, z1);
-          edge(x0, 0, z1, x0, h, z1);
+          boxes.box(this.scratch[0], this.scratch[2], 0, 0, 0, 0, tint.r, tint.g, tint.b);
         }
       }
-      boxes.attr.needsUpdate = true;
-      this.add(boxes.object);
+      boxes.commit();
     }
 
     const mask = grid.actionMask;
@@ -331,6 +387,10 @@ export class GroundTruthOverlay {
       this.add(path.object);
     }
 
+    this.buildMarkers(main, goalMat);
+  }
+
+  private buildMarkers(main: THREE.LineBasicMaterial, goalMat: THREE.LineBasicMaterial): void {
     const cross = segments(3, main, 'oakDebugAgentCross');
     this.agentCross = cross.object;
     this.agentCrossPos = cross.positions;
@@ -356,30 +416,38 @@ export class GroundTruthOverlay {
     this.add(doors.object);
   }
 
+  private updateCross(grid: GridGeometry | null, cell: GridCell | null, at: Vec3Tuple | null): void {
+    const cp = this.agentCrossPos;
+    if (!cp || !this.agentCross || !this.agentCrossAttr) return;
+    if (grid && !cell) {
+      this.agentCross.visible = false;
+      this.agentCrossAttr.needsUpdate = true;
+      return;
+    }
+    let cx = at ? at[0] : 0;
+    let cz = at ? at[2] : 0;
+    if (grid && cell) {
+      cellToWorld(cell.x, cell.y, grid, this.scratch);
+      cx = this.scratch[0];
+      cz = this.scratch[2];
+    }
+    const y = (at ? at[1] : 0) + 0.03;
+    const r = 0.38;
+    let o = 0;
+    cp[o++] = cx - r; cp[o++] = y; cp[o++] = cz - r;
+    cp[o++] = cx + r; cp[o++] = y; cp[o++] = cz + r;
+    cp[o++] = cx - r; cp[o++] = y; cp[o++] = cz + r;
+    cp[o++] = cx + r; cp[o++] = y; cp[o++] = cz - r;
+    cp[o++] = cx; cp[o++] = y; cp[o++] = cz;
+    cp[o++] = cx; cp[o++] = y + 0.9; cp[o++] = cz;
+    this.agentCross.visible = true;
+    this.agentCrossAttr.needsUpdate = true;
+  }
+
   private updateGrid(state: FrameState, grid: GridGeometry): void {
     const y = 0.03;
 
-    const cell = this.opts.agentCell?.(state) ?? null;
-    const cp = this.agentCrossPos;
-    if (cp && this.agentCross && this.agentCrossAttr) {
-      if (cell) {
-        cellToWorld(cell.x, cell.y, grid, this.scratch);
-        const cx = this.scratch[0];
-        const cz = this.scratch[2];
-        const r = 0.38;
-        let o = 0;
-        cp[o++] = cx - r; cp[o++] = y; cp[o++] = cz - r;
-        cp[o++] = cx + r; cp[o++] = y; cp[o++] = cz + r;
-        cp[o++] = cx - r; cp[o++] = y; cp[o++] = cz + r;
-        cp[o++] = cx + r; cp[o++] = y; cp[o++] = cz - r;
-        cp[o++] = cx; cp[o++] = y; cp[o++] = cz;
-        cp[o++] = cx; cp[o++] = y + 0.9; cp[o++] = cz;
-        this.agentCross.visible = true;
-      } else {
-        this.agentCross.visible = false;
-      }
-      this.agentCrossAttr.needsUpdate = true;
-    }
+    this.updateCross(grid, this.opts.agentCell?.(state) ?? null, null);
 
     const goal = this.opts.goalCell?.(state) ?? grid?.goal ?? null;
     const gp = this.goalMarkerPos;
