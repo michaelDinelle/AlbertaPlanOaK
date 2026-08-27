@@ -29,3 +29,34 @@ inline float uniformRange(uint x, float lo, float hi) { return lo + (hi - lo)*u0
 inline float wrapPi(float angle) {
     return angle - 2.0f * M_PI_F * floor((angle + M_PI_F) / (2.0f * M_PI_F));
 }
+
+constant uint OAK_POSE_LEN = 9u;
+constant uint OAK_RECORD_FLOATS = 1u + OAK_POSE_LEN;
+
+inline int2 gridDelta(uint direction) {
+    switch (direction & 3u) {
+        case 0u: return int2(0, -1);
+        case 1u: return int2(0, 1);
+        case 2u: return int2(-1, 0);
+        default: return int2(1, 0);
+    }
+}
+
+template<typename WallFn>
+inline int2 sampleFreeCell(uint laneSeed, uint resampleIndex, uint sampleBlock,
+                           thread const WallFn &isWall, int excludeX, int excludeY) {
+    for (;;) {
+        uint4 raw = philox4x32(uint2(laneSeed, ENV_RNG_STREAM),
+                                  uint4(resampleIndex, sampleBlock, 0u, 0u));
+        uint philoxWords[4] = { raw.x, raw.y, raw.z, raw.w };
+        for (int wi = 0; wi < 4; wi++) {
+            uint idx = uint(u01(philoxWords[wi]) * 81.0f);
+            int candidateX = 1 + int(idx % 9u), candidateY = 1 + int(idx / 9u);
+            if (!isWall(candidateX, candidateY)
+                && (candidateX != excludeX || candidateY != excludeY)) {
+                return int2(candidateX, candidateY);
+            }
+        }
+        sampleBlock += 2u;
+    }
+}

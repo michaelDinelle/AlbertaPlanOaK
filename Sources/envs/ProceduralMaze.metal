@@ -54,6 +54,11 @@ inline bool proceduralMaze_isWall(uint wallBits0, uint wallBits1, uint wallBits2
     return ((wallBits >> (idx & 31u)) & 1u) != 0u;
 }
 
+struct ProcMazeWall {
+    uint b0, b1, b2;
+    bool operator()(int x, int y) const { return proceduralMaze_isWall(b0, b1, b2, x, y); }
+};
+
 inline void proceduralMaze_obs(uint x, uint y, uint goalX, uint goalY, uint stepsSinceGoal,
                          uint wallBits0, uint wallBits1, uint wallBits2, thread float *obs) {
     int ix = int(x), iy = int(y);
@@ -80,13 +85,8 @@ inline float proceduralMaze_step(thread uint *words, uint laneSeed, uint action,
                            thread float *obs, thread uint *doneOut) {
     uint x = words[0], y = words[1], goalX = words[2], goalY = words[3], stepsSinceGoal = words[4], resampleIndex = words[5];
     uint wallBits0 = words[6], wallBits1 = words[7], wallBits2 = words[8];
-    int deltaX = 0, deltaY = 0;
-    switch (action & 3u) {
-        case 0u: deltaY = -1; break;
-        case 1u: deltaY = 1; break;
-        case 2u: deltaX = -1; break;
-        default: deltaX = 1; break;
-    }
+    int2 delta = gridDelta(action & 3u);
+    int deltaX = delta.x, deltaY = delta.y;
     int nextX = int(x) + deltaX, nextY = int(y) + deltaY;
     if (proceduralMaze_isWall(wallBits0, wallBits1, wallBits2, nextX, nextY)) { nextX = int(x); nextY = int(y); }
     float reward = 0.0f;
@@ -96,39 +96,11 @@ inline float proceduralMaze_step(thread uint *words, uint laneSeed, uint action,
         done = 1u;
         nextStepsSinceGoal = 0u;
         nextResampleIndex = resampleIndex + 1u;
-        uint sampleBlock = 0u;
-        for (;;) {
-            uint4 raw = philox4x32(uint2(laneSeed, ENV_RNG_STREAM),
-                                      uint4(resampleIndex, sampleBlock, 0u, 0u));
-            uint philoxWords[4] = { raw.x, raw.y, raw.z, raw.w };
-            bool found = false;
-            for (int wi = 0; wi < 4; wi++) {
-                uint idx = uint(u01(philoxWords[wi]) * 81.0f);
-                int candidateX = 1 + int(idx % 9u), candidateY = 1 + int(idx / 9u);
-                if (!proceduralMaze_isWall(wallBits0, wallBits1, wallBits2, candidateX, candidateY)) {
-                    nextX = candidateX; nextY = candidateY; found = true; break;
-                }
-            }
-            if (found) break;
-            sampleBlock += 2u;
-        }
-        sampleBlock = 1u;
-        for (;;) {
-            uint4 raw = philox4x32(uint2(laneSeed, ENV_RNG_STREAM),
-                                      uint4(resampleIndex, sampleBlock, 0u, 0u));
-            uint philoxWords[4] = { raw.x, raw.y, raw.z, raw.w };
-            bool found = false;
-            for (int wi = 0; wi < 4; wi++) {
-                uint idx = uint(u01(philoxWords[wi]) * 81.0f);
-                int candidateX = 1 + int(idx % 9u), candidateY = 1 + int(idx / 9u);
-                if (!proceduralMaze_isWall(wallBits0, wallBits1, wallBits2, candidateX, candidateY) &&
-                    (candidateX != nextX || candidateY != nextY)) {
-                    goalX = uint(candidateX); goalY = uint(candidateY); found = true; break;
-                }
-            }
-            if (found) break;
-            sampleBlock += 2u;
-        }
+        ProcMazeWall wall = { wallBits0, wallBits1, wallBits2 };
+        int2 agentCell = sampleFreeCell(laneSeed, resampleIndex, 0u, wall, 0, 0);
+        nextX = agentCell.x; nextY = agentCell.y;
+        int2 goalCell = sampleFreeCell(laneSeed, resampleIndex, 1u, wall, nextX, nextY);
+        goalX = uint(goalCell.x); goalY = uint(goalCell.y);
     }
     words[0] = uint(nextX); words[1] = uint(nextY); words[2] = goalX; words[3] = goalY;
     words[4] = nextStepsSinceGoal; words[5] = nextResampleIndex;

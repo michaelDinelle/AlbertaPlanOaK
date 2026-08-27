@@ -7,6 +7,8 @@ inline bool highDimMaze_isWall(int x, int y) {
     return false;
 }
 
+struct HighDimWall { bool operator()(int x, int y) const { return highDimMaze_isWall(x, y); } };
+
 inline void highDimMaze_obs(uint x, uint y, uint goalX, uint goalY, thread float *obs) {
     int ix = int(x), iy = int(y);
     obs[0] = float(x) / 16.0f;
@@ -31,23 +33,13 @@ inline float highDimMaze_step(thread uint *words, uint laneSeed, uint action,
     uint actionIndex = action % 6u;
     int nextX = int(x), nextY = int(y);
     if (actionIndex < 4u) {
-        int deltaX = 0, deltaY = 0;
-        switch (actionIndex) {
-            case 0u: deltaY = -1; break;
-            case 1u: deltaY = 1; break;
-            case 2u: deltaX = -1; break;
-            default: deltaX = 1; break;
-        }
+        int2 delta = gridDelta(actionIndex);
+        int deltaX = delta.x, deltaY = delta.y;
         lastDirection = actionIndex;
         if (!highDimMaze_isWall(nextX + deltaX, nextY + deltaY)) { nextX += deltaX; nextY += deltaY; }
     } else if (actionIndex == 5u) {
-        int deltaX = 0, deltaY = 0;
-        switch (lastDirection & 3u) {
-            case 0u: deltaY = -1; break;
-            case 1u: deltaY = 1; break;
-            case 2u: deltaX = -1; break;
-            default: deltaX = 1; break;
-        }
+        int2 delta = gridDelta(lastDirection & 3u);
+        int deltaX = delta.x, deltaY = delta.y;
         if (!highDimMaze_isWall(nextX + deltaX, nextY + deltaY)) {
             nextX += deltaX; nextY += deltaY;
             if (!highDimMaze_isWall(nextX + deltaX, nextY + deltaY)) { nextX += deltaX; nextY += deltaY; }
@@ -60,38 +52,11 @@ inline float highDimMaze_step(thread uint *words, uint laneSeed, uint action,
         done = 1u;
         nextStepsSinceGoal = 0u;
         nextResampleIndex = resampleIndex + 1u;
-        uint sampleBlock = 0u;
-        for (;;) {
-            uint4 raw = philox4x32(uint2(laneSeed, ENV_RNG_STREAM),
-                                      uint4(resampleIndex, sampleBlock, 0u, 0u));
-            uint philoxWords[4] = { raw.x, raw.y, raw.z, raw.w };
-            bool found = false;
-            for (int wi = 0; wi < 4; wi++) {
-                uint idx = uint(u01(philoxWords[wi]) * 81.0f);
-                int candidateX = 1 + int(idx % 9u), candidateY = 1 + int(idx / 9u);
-                if (!highDimMaze_isWall(candidateX, candidateY)) {
-                    nextX = candidateX; nextY = candidateY; found = true; break;
-                }
-            }
-            if (found) break;
-            sampleBlock += 2u;
-        }
-        sampleBlock = 1u;
-        for (;;) {
-            uint4 raw = philox4x32(uint2(laneSeed, ENV_RNG_STREAM),
-                                      uint4(resampleIndex, sampleBlock, 0u, 0u));
-            uint philoxWords[4] = { raw.x, raw.y, raw.z, raw.w };
-            bool found = false;
-            for (int wi = 0; wi < 4; wi++) {
-                uint idx = uint(u01(philoxWords[wi]) * 81.0f);
-                int candidateX = 1 + int(idx % 9u), candidateY = 1 + int(idx / 9u);
-                if (!highDimMaze_isWall(candidateX, candidateY) && (candidateX != nextX || candidateY != nextY)) {
-                    goalX = uint(candidateX); goalY = uint(candidateY); found = true; break;
-                }
-            }
-            if (found) break;
-            sampleBlock += 2u;
-        }
+        HighDimWall wall;
+        int2 agentCell = sampleFreeCell(laneSeed, resampleIndex, 0u, wall, 0, 0);
+        nextX = agentCell.x; nextY = agentCell.y;
+        int2 goalCell = sampleFreeCell(laneSeed, resampleIndex, 1u, wall, nextX, nextY);
+        goalX = uint(goalCell.x); goalY = uint(goalCell.y);
     }
     words[0] = uint(nextX); words[1] = uint(nextY); words[2] = goalX; words[3] = goalY;
     words[4] = nextStepsSinceGoal; words[5] = nextResampleIndex; words[6] = lastDirection;

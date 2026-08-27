@@ -7,7 +7,6 @@ inline void memoryChain_obs(uint pos, uint cue, uint lastAction, thread float *o
     obs[3] = (pos == 31u) ? 1.0f : 0.0f;
     obs[4] = float(lastAction);
     obs[5] = 1.0f;
-    for (int i = 6; i < 17; i++) obs[i] = 0.0f;
 }
 
 inline float memoryChain_step(thread uint *words, uint laneSeed, uint action,

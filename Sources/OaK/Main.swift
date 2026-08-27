@@ -223,8 +223,8 @@ final class Shared<T> {
   }
 }
 struct EnvSpec {
-  static let poseLen = 24
-  static let stride = 11 + poseLen
+  static let poseLen = 9
+  static let stride = 12 + poseLen
   static let slotNames = [
     "none", "x", "y", "gx", "gy", "kx", "ky", "carry", "gates", "tokens", "cue", "heading",
     "effort",
@@ -240,6 +240,7 @@ struct EnvSpec {
   let stepFlops: Double
   let envStateWords: Int
   let mjIndex: Int
+  let laneThreads: Int
   let slots: [Int]
   static func slotName(_ code: Int) -> String {
     if code >= 16 { return "q\(code - 16)" }
@@ -347,11 +348,21 @@ final class Engine {
         controlHz: Int(tbl[row + 7]), stepFlops: Double(tbl[row + 8]),
         envStateWords: Int(tbl[row + 9]),
         mjIndex: tbl[row + 10] == 0xffff_ffff ? -1 : Int(tbl[row + 10]),
-        slots: (0..<EnvSpec.poseLen).map { Int(tbl[row + 11 + $0]) })
+        laneThreads: Int(tbl[row + 11]),
+        slots: (0..<EnvSpec.poseLen).map { Int(tbl[row + 12 + $0]) })
+    }
+    if let bad = specs.first(where: { $0.mjIndex >= 0 && $0.laneThreads <= 1 }) {
+      throw err(
+        "Env \(bad.nameHash) uses the physics engine but declares laneThreads "
+          + "\(bad.laneThreads); the engine requires a full simdgroup per lane.")
+    }
+    if let bad = specs.first(where: { $0.laneThreads != 1 && $0.laneThreads != 32 }) {
+      throw err("Env \(bad.nameHash) declares laneThreads \(bad.laneThreads); expected 1 or 32.")
     }
     guard tbl[1] == UInt32(specs.map(\.naturalO).max()!),
       tbl[2] == UInt32(specs.map(\.actionCount).max()!),
-      tbl[4] == UInt32(specs.filter { $0.mjIndex <= 0 }.map(\.naturalO).max()!)
+      tbl[3] >= UInt32(specs.filter { $0.mjIndex < 0 }.map(\.envStateWords).max() ?? 0),
+      tbl[4] == UInt32(specs.filter { $0.mjIndex < 0 }.map(\.naturalO).max()!)
     else {
       throw err(
         "Env maxima drift: kernel obs/act max \(tbl[1])/\(tbl[2]) vs table "
@@ -1273,8 +1284,6 @@ final class TapeWriter {
     "Acrobot-cont-v0", "MountainCar-cont-v0", "CartPole-cont-v0", "Pendulum-cont-v0",
     "Chain-cont-v0", "LargeDeepSea-cont-v0", "MultiKeyCorridor-cont-v0", "MemoryChain-cont-v0",
     "ProceduralMaze-cont-v0", "HighDimMaze-cont-v0", "POMaze-cont-v0", "DelayedChain-cont-v0",
-    "InvertedPendulum-v5", "InvertedDoublePendulum-v5", "Reacher-v5", "Swimmer-v5",
-    "Hopper-v5", "Walker2d-v5", "Pusher-v5", "Ant-v5", "Humanoid-v5", "HumanoidStandup-v5",
   ]
   static func policyFlopsPerStep(
     _ policy: String, kind: Int, spec: EnvSpec, off: ShapeProbe?, d: Int

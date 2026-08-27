@@ -10,7 +10,6 @@ inline void deepSea_obs(uint row, uint column, uint lastAction, thread float *ob
     obs[5] = (column == 0u) ? 1.0f : 0.0f;
     obs[6] = float(lastAction);
     obs[7] = 1.0f;
-    for (int i = 8; i < 17; i++) obs[i] = 0.0f;
 }
 
 inline float deepSea_step(thread uint *words, uint action, thread float *obs) {

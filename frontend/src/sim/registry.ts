@@ -17,16 +17,6 @@ import { proceduralMazeDecoder } from './envs/proceduralmaze';
 import { highDimMazeDecoder } from './envs/highdimmaze';
 import { poMazeDecoder } from './envs/pomaze';
 import { delayedChainDecoder } from './envs/delayedchain';
-import { invertedPendulumDecoder } from './envs/invertedpendulum';
-import { invertedDoublePendulumDecoder } from './envs/inverteddoublependulum';
-import { reacherDecoder } from './envs/reacher';
-import { swimmerDecoder } from './envs/swimmer';
-import { hopperDecoder } from './envs/hopper';
-import { walker2dDecoder } from './envs/walker2d';
-import { pusherDecoder } from './envs/pusher';
-import { antDecoder } from './envs/ant';
-import { humanoidDecoder } from './envs/humanoid';
-import { humanoidStandupDecoder } from './envs/humanoidstandup';
 
 const TABLE = {
   'HalfCheetah-v4': halfCheetahDecoder,
@@ -45,16 +35,6 @@ const TABLE = {
   'HighDimMaze-cont-v0': highDimMazeDecoder,
   'POMaze-cont-v0': poMazeDecoder,
   'DelayedChain-cont-v0': delayedChainDecoder,
-  'InvertedPendulum-v5': invertedPendulumDecoder,
-  'InvertedDoublePendulum-v5': invertedDoublePendulumDecoder,
-  'Reacher-v5': reacherDecoder,
-  'Swimmer-v5': swimmerDecoder,
-  'Hopper-v5': hopperDecoder,
-  'Walker2d-v5': walker2dDecoder,
-  'Pusher-v5': pusherDecoder,
-  'Ant-v5': antDecoder,
-  'Humanoid-v5': humanoidDecoder,
-  'HumanoidStandup-v5': humanoidStandupDecoder,
 } satisfies Record<EnvId, unknown>;
 
 export const decoders = TABLE as Record<EnvId, EnvDecoder>;

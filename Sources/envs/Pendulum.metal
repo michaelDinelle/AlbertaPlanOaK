@@ -2,7 +2,6 @@
 
 inline void pendulum_obs(float theta, float thetaDot, thread float *obs) {
     obs[0] = cos(theta); obs[1] = sin(theta); obs[2] = thetaDot; obs[3] = 1.0f;
-    for (int i = 4; i < 17; i++) obs[i] = 0.0f;
 }
 
 inline float pendulum_step(thread uint *words, float control, thread float *obs) {

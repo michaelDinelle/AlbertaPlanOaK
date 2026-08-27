@@ -41,13 +41,8 @@ inline float multiKeyCorridor_step(thread uint *words, uint laneSeed, uint actio
                          thread float *obs, thread uint *doneOut) {
     uint x = words[0], y = words[1], key1Packed = words[2], key2Packed = words[3], key3Packed = words[4];
     uint goalX = words[5], goalY = words[6], keyDoorBits = words[7], stepsSinceGoal = words[8], resampleIndex = words[9];
-    int deltaX = 0, deltaY = 0;
-    switch (action & 3u) {
-        case 0u: deltaY = -1; break;
-        case 1u: deltaY = 1; break;
-        case 2u: deltaX = -1; break;
-        default: deltaX = 1; break;
-    }
+    int2 delta = gridDelta(action & 3u);
+    int deltaX = delta.x, deltaY = delta.y;
     int nextX = int(x) + deltaX, nextY = int(y) + deltaY;
     if (multiKeyCorridor_isWall(nextX, nextY)) { nextX = int(x); nextY = int(y); }
     else if (nextY == 3 && (nextX == 4 || nextX == 8 || nextX == 12)) {

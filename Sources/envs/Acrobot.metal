@@ -9,7 +9,6 @@ inline void acrobot_obs(float theta1, float theta2, float omega1, float omega2,
     obs[0] = cos(theta1); obs[1] = sin(theta1);
     obs[2] = cos(theta2); obs[3] = sin(theta2);
     obs[4] = omega1; obs[5] = omega2; obs[6] = 1.0f;
-    for (int i = 7; i < 17; i++) obs[i] = 0.0f;
 }
 
 inline void acrobot_dynamics(float theta1, float theta2, float omega1, float omega2, float tau,

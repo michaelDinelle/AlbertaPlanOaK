@@ -6,7 +6,6 @@ constant float CARTPOLE_THETA_MAX = 0.2094395f;
 inline void cartPole_obs(float cartPosition, float cartVelocity, float poleAngle, float poleAngularVelocity,
                         thread float *obs) {
     obs[0] = cartPosition; obs[1] = cartVelocity; obs[2] = poleAngle; obs[3] = poleAngularVelocity; obs[4] = 1.0f;
-    for (int i = 5; i < 17; i++) obs[i] = 0.0f;
 }
 
 inline float cartPole_step(thread uint *words, uint action, thread float *obs,

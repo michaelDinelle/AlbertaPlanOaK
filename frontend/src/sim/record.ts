@@ -2,7 +2,7 @@ import type { EnvEntry } from './catalog';
 import { ENV_IDS } from '@shared/envs';
 import type { EnvId } from '@shared/envs';
 
-export const POSE_LEN = 24;
+export const POSE_LEN = 9;
 export const OFF_DONE = 0;
 export const OFF_POSE = 1;
 export const RECORD_FLOATS = 1 + POSE_LEN;

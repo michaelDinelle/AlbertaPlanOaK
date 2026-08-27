@@ -442,7 +442,7 @@ kernel void oak_shape_probe(device OakShapeProbe *out [[buffer(0)]],
     out->uKeep0n = uint(agent.parked - uintArena) + agent.optionCount;
 }
 
-constant uint OAK_ENV_TABLE_STRIDE = 11u + OAK_POSE_LEN;
+constant uint OAK_ENV_TABLE_STRIDE = 12u + OAK_POSE_LEN;
 
 kernel void oak_env_table_probe(device uint *out [[buffer(0)]],
                                 uint tid [[thread_position_in_grid]]) {
@@ -465,7 +465,8 @@ kernel void oak_env_table_probe(device uint *out [[buffer(0)]],
         row[8] = OAK_ENV_SPECS[i].stepFlops;
         row[9] = OAK_ENV_SPECS[i].envStateWords;
         row[10] = OAK_ENV_SPECS[i].mjIndex;
-        for (uint s = 0u; s < OAK_POSE_LEN; ++s) row[11u + s] = OAK_ENV_SPECS[i].slots[s];
+        row[11] = OAK_ENV_SPECS[i].laneThreads;
+        for (uint s = 0u; s < OAK_POSE_LEN; ++s) row[12u + s] = OAK_ENV_SPECS[i].slots[s];
     }
 }
 
@@ -2282,7 +2283,7 @@ kernel void oak_megastep(device float *params [[buffer(0)]],
 
         if ((OAK_MEGA_STAGES & 64u) != 0u) {
             bool wideStep = is_function_constant_defined(OAK_SPEC_ENV_KIND)
-                && laneIsMj(OAK_SPEC_ENV_KIND);
+                && OAK_ENV_SPECS[OAK_SPEC_ENV_KIND].laneThreads > 1u;
             if (wideStep) {
                 if (wideActive && subSg == 0u)
                     stepEnvironment(params, stateArena, uintArena, scalars, cfg,

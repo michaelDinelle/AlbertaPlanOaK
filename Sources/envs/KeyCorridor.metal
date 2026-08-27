@@ -26,20 +26,14 @@ inline void keyCorridor_obs(uint x, uint y, uint keyX, uint keyY, uint goalX, ui
     obs[11] = (x == 4u && y == 3u) ? 1.0f : 0.0f;
     obs[12] = min(float(stepsSinceGoal) / 256.0f, 1.0f);
     obs[13] = 1.0f;
-    for (int i = 14; i < 17; i++) obs[i] = 0.0f;
 }
 
 inline float keyCorridor_step(thread uint *words, uint laneSeed, uint action,
                         thread float *obs, thread uint *doneOut) {
     uint x = words[0], y = words[1], keyX = words[2], keyY = words[3], goalX = words[4], goalY = words[5];
     uint keyDoorBits = words[6], stepsSinceGoal = words[7], resampleIndex = words[8];
-    int deltaX = 0, deltaY = 0;
-    switch (action & 3u) {
-        case 0u: deltaY = -1; break;
-        case 1u: deltaY = 1; break;
-        case 2u: deltaX = -1; break;
-        default: deltaX = 1; break;
-    }
+    int2 delta = gridDelta(action & 3u);
+    int deltaX = delta.x, deltaY = delta.y;
     int nextX = int(x) + deltaX, nextY = int(y) + deltaY;
     if (keyCorridor_isWall(nextX, nextY)) { nextX = int(x); nextY = int(y); }
     else if (nextX == 4 && nextY == 3 && (keyDoorBits & DOOR_UNLOCKED) == 0u) {

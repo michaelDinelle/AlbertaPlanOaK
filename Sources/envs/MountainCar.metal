@@ -2,7 +2,6 @@
 
 inline void mountainCar_obs(float pos, float vel, thread float *obs) {
     obs[0] = pos; obs[1] = vel; obs[2] = 1.0f;
-    for (int i = 3; i < 17; i++) obs[i] = 0.0f;
 }
 
 inline float mountainCar_step(thread uint *words, uint action, thread float *obs,

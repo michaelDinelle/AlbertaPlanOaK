@@ -54,13 +54,8 @@ inline void fourRooms_obs(uint x, uint y, uint goalX, uint goalY, uint stepsSinc
 inline float fourRooms_step(thread uint *words, uint laneSeed, uint action,
                           thread float *obs) {
     uint x = words[0], y = words[1], goalX = words[2], goalY = words[3], stepsSinceGoal = words[4], resampleIndex = words[5];
-    int deltaX = 0, deltaY = 0;
-    switch (action & 3u) {
-        case 0u: deltaY = -1; break;
-        case 1u: deltaY = 1; break;
-        case 2u: deltaX = -1; break;
-        default: deltaX = 1; break;
-    }
+    int2 delta = gridDelta(action & 3u);
+    int deltaX = delta.x, deltaY = delta.y;
     int nextX = int(x) + deltaX, nextY = int(y) + deltaY;
     if (fourRooms_isWall(nextX, nextY)) { nextX = int(x); nextY = int(y); }
     float reward = 0.0f;

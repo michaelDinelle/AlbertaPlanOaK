@@ -17,7 +17,6 @@ inline float delayedChain_step(thread uint *words, uint action, thread float *ob
     obs[0] = float(pos) / 32.0f;
     obs[1] = float(nextLastAction);
     obs[2] = 1.0f;
-    for (int i = 3; i < 17; i++) obs[i] = 0.0f;
     *doneOut = done;
     return reward;
 }

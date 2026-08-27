@@ -14,7 +14,6 @@ inline float chain_step(thread uint *words, uint action, thread float *obs,
     words[0] = pos;
     obs[0] = float(pos) / 16.0f;
     obs[1] = 1.0f;
-    for (int i = 2; i < 17; i++) obs[i] = 0.0f;
     *doneOut = done;
     return reward;
 }
