@@ -32,6 +32,7 @@ export const SCENES: Record<EnvId, SceneRow> = {
   'HighDimMaze-cont-v0': { slug: 'high-dim-maze', bloom: 0.42, burst: 110, fog: { from: ['afternoon', 'fog'] } },
   'POMaze-cont-v0': { slug: 'po-maze', bloom: 0.38, burst: 120, fog: { from: ['dawn', 'fog'], blend: [[['dawn', 'skyTop'], 0.62], [['night', 'skyTop'], 0.62]] } },
   'DelayedChain-cont-v0': { slug: 'delayed-chain', bloom: 0.62, burst: 150, fog: { from: ['night', 'fog'] } },
+  'JellyBeanWorld-cont-v0': { slug: 'jelly-bean-world', bloom: 0.38, burst: 36, fog: { from: ['afternoon', 'fog'] } },
 };
 
 export function slugOf(envId: EnvId): string {

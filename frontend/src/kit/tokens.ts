@@ -71,6 +71,7 @@ export const TOKENS: DesignTokens = {
     'high-dim-maze':      0xe8975e,
     'po-maze':            0xb8cfe0,
     'delayed-chain':      0x7fe0c4,
+    'jelly-bean-world':   0xee776b,
     'inverted-pendulum':  0x7fd0ff,
     'inverted-double-pendulum': 0xc9a6ff,
     'reacher':            0xff8fa3,

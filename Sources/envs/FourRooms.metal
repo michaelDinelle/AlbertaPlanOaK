@@ -51,7 +51,7 @@ inline void fourRooms_obs(uint x, uint y, uint goalX, uint goalY, uint stepsSinc
     obs[16] = 1.0f;
 }
 
-inline float fourRooms_step(thread uint *words, uint laneSeed, uint action,
+inline float fourRooms_step(device uint *words, uint laneSeed, uint action,
                           thread float *obs) {
     uint x = words[0], y = words[1], goalX = words[2], goalY = words[3], stepsSinceGoal = words[4], resampleIndex = words[5];
     int2 delta = gridDelta(action & 3u);

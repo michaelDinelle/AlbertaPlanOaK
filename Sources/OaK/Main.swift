@@ -25,7 +25,7 @@ struct KernelScalars {
 }
 
 struct FleetEnvCfg {
-  var laneCount, episodeLen, recordCapacity: UInt32
+  var laneCount, episodeLen, recordCapacity, runHorizon: UInt32
   var invObsFloor: Float
 }
 struct LaneSnapshot {
@@ -224,10 +224,10 @@ final class Shared<T> {
 }
 struct EnvSpec {
   static let poseLen = 9
-  static let stride = 12 + poseLen
+  static let stride = 13 + poseLen
   static let slotNames = [
     "none", "x", "y", "gx", "gy", "kx", "ky", "carry", "gates", "tokens", "cue", "heading",
-    "effort",
+    "effort", "banana", "onion", "jellyBean", "truffle", "depletionLo", "depletionHi",
   ]
   let nameHash: UInt32
   let naturalO: Int
@@ -242,8 +242,9 @@ struct EnvSpec {
   let mjIndex: Int
   let laneThreads: Int
   let slots: [Int]
+  let persistentEntryWords: Int
   static func slotName(_ code: Int) -> String {
-    if code >= 16 { return "q\(code - 16)" }
+    if code >= 32 { return "q\(code - 32)" }
     guard code >= 0, code < slotNames.count else { return "none" }
     return slotNames[code]
   }
@@ -349,7 +350,8 @@ final class Engine {
         envStateWords: Int(tbl[row + 9]),
         mjIndex: tbl[row + 10] == 0xffff_ffff ? -1 : Int(tbl[row + 10]),
         laneThreads: Int(tbl[row + 11]),
-        slots: (0..<EnvSpec.poseLen).map { Int(tbl[row + 12 + $0]) })
+        slots: (0..<EnvSpec.poseLen).map { Int(tbl[row + 12 + $0]) },
+        persistentEntryWords: Int(tbl[row + 12 + EnvSpec.poseLen]))
     }
     if let bad = specs.first(where: { $0.mjIndex >= 0 && $0.laneThreads <= 1 }) {
       throw err(
@@ -619,67 +621,7 @@ struct RecordCodec {
       grid([0, 1, 2, 3, 4, 5]),
       grid([0, 1, 2, 3]),
       grid([0, 2]),
-      RecordCodec(category: "mujoco", fields: [
-        RecordField(0, 1e-4), RecordField(1, 1e-4),
-      ]),
-      RecordCodec(category: "mujoco", fields: [
-        RecordField(0, 1e-4), RecordField(1, 1e-4, true), RecordField(2, 1e-4, true),
-      ]),
-      RecordCodec(category: "mujoco", fields: [
-        RecordField(0, 1e-4, true), RecordField(1, 1e-4, true),
-        RecordField(2, 1e-5), RecordField(3, 1e-5),
-      ]),
-      RecordCodec(category: "mujoco", fields: [
-        RecordField(0, 0.01, false, anchor: true), RecordField(1, 0.01, false, anchor: true),
-        RecordField(2, 1e-4, true), RecordField(3, 1e-4, true), RecordField(4, 1e-4, true),
-      ]),
-      RecordCodec(category: "mujoco", fields: [
-        RecordField(0, 0.01, false, anchor: true), RecordField(1, 1e-4),
-        RecordField(2, 1e-4, true), RecordField(3, 1e-4, true), RecordField(4, 1e-4, true),
-        RecordField(5, 1e-4, true),
-      ]),
-      RecordCodec(category: "mujoco", fields: [
-        RecordField(0, 0.01, false, anchor: true), RecordField(1, 1e-4),
-        RecordField(2, 1e-4, true), RecordField(3, 1e-4, true), RecordField(4, 1e-4, true),
-        RecordField(5, 1e-4, true), RecordField(6, 1e-4, true), RecordField(7, 1e-4, true),
-        RecordField(8, 1e-4, true),
-      ]),
-      RecordCodec(category: "mujoco", fields: [
-        RecordField(0, 1e-4, true), RecordField(1, 1e-4, true), RecordField(2, 1e-4, true),
-        RecordField(3, 1e-4, true), RecordField(4, 1e-4, true), RecordField(5, 1e-4, true),
-        RecordField(6, 1e-4, true), RecordField(7, 1e-5), RecordField(8, 1e-5),
-        RecordField(9, 1e-5), RecordField(10, 1e-5),
-      ]),
-      RecordCodec(category: "mujoco", fields: [
-        RecordField(0, 0.01, false, anchor: true), RecordField(1, 0.01, false, anchor: true),
-        RecordField(2, 1e-4), RecordField(3, 1e-5), RecordField(4, 1e-5),
-        RecordField(5, 1e-5), RecordField(6, 1e-5), RecordField(7, 1e-4, true),
-        RecordField(8, 1e-4, true), RecordField(9, 1e-4, true), RecordField(10, 1e-4, true),
-        RecordField(11, 1e-4, true), RecordField(12, 1e-4, true), RecordField(13, 1e-4, true),
-        RecordField(14, 1e-4, true),
-      ]),
-      RecordCodec(category: "mujoco", fields: [
-        RecordField(0, 0.01, false, anchor: true), RecordField(1, 0.01, false, anchor: true),
-        RecordField(2, 1e-4), RecordField(3, 1e-5), RecordField(4, 1e-5),
-        RecordField(5, 1e-5), RecordField(6, 1e-5), RecordField(7, 1e-4, true),
-        RecordField(8, 1e-4, true), RecordField(9, 1e-4, true), RecordField(10, 1e-4, true),
-        RecordField(11, 1e-4, true), RecordField(12, 1e-4, true), RecordField(13, 1e-4, true),
-        RecordField(14, 1e-4, true), RecordField(15, 1e-4, true), RecordField(16, 1e-4, true),
-        RecordField(17, 1e-4, true), RecordField(18, 1e-4, true), RecordField(19, 1e-4, true),
-        RecordField(20, 1e-4, true), RecordField(21, 1e-4, true), RecordField(22, 1e-4, true),
-        RecordField(23, 1e-4, true),
-      ]),
-      RecordCodec(category: "mujoco", fields: [
-        RecordField(0, 0.01, false, anchor: true), RecordField(1, 0.01, false, anchor: true),
-        RecordField(2, 1e-4), RecordField(3, 1e-5), RecordField(4, 1e-5),
-        RecordField(5, 1e-5), RecordField(6, 1e-5), RecordField(7, 1e-4, true),
-        RecordField(8, 1e-4, true), RecordField(9, 1e-4, true), RecordField(10, 1e-4, true),
-        RecordField(11, 1e-4, true), RecordField(12, 1e-4, true), RecordField(13, 1e-4, true),
-        RecordField(14, 1e-4, true), RecordField(15, 1e-4, true), RecordField(16, 1e-4, true),
-        RecordField(17, 1e-4, true), RecordField(18, 1e-4, true), RecordField(19, 1e-4, true),
-        RecordField(20, 1e-4, true), RecordField(21, 1e-4, true), RecordField(22, 1e-4, true),
-        RecordField(23, 1e-4, true),
-      ]),
+      RecordCodec(category: "jellyBean", fields: (0..<9).map { RecordField($0) }),
     ]
   }()
   static func table(_ envKind: UInt32) throws -> RecordCodec {
@@ -1284,6 +1226,7 @@ final class TapeWriter {
     "Acrobot-cont-v0", "MountainCar-cont-v0", "CartPole-cont-v0", "Pendulum-cont-v0",
     "Chain-cont-v0", "LargeDeepSea-cont-v0", "MultiKeyCorridor-cont-v0", "MemoryChain-cont-v0",
     "ProceduralMaze-cont-v0", "HighDimMaze-cont-v0", "POMaze-cont-v0", "DelayedChain-cont-v0",
+    "JellyBeanWorld-cont-v0",
   ]
   static func policyFlopsPerStep(
     _ policy: String, kind: Int, spec: EnvSpec, off: ShapeProbe?, d: Int
@@ -1362,10 +1305,11 @@ final class TapeWriter {
     let mjModelsBuf: MTLBuffer
     let mjScratchBuf: MTLBuffer
     let mjScratchOffBuf: MTLBuffer
+    let envConstantsBuf: MTLBuffer
     let ecfg: FleetEnvCfg
     init(
       _ dev: MTLDevice, seeds: [Int], laneEnvKinds: [UInt32], envTable: [EnvSpec],
-      episodeLen: Int
+      episodeLen: Int, steps: Int
     ) throws {
       func makeBuf(_ len: Int) throws -> MTLBuffer {
         guard let b = dev.makeBuffer(
@@ -1376,6 +1320,16 @@ final class TapeWriter {
         return b
       }
       B = seeds.count
+      guard steps > 0, steps <= Int(UInt32.max), steps <= Int.max / 2 else {
+        throw err("Declared run horizon \(steps) cannot be represented exactly.")
+      }
+      var persistentSlots = 2
+      while persistentSlots < 2 * steps {
+        guard persistentSlots <= Int(UInt32.max) / 2 else {
+          throw err("Declared run horizon \(steps) exceeds persistent coordinate capacity.")
+        }
+        persistentSlots *= 2
+      }
       windowSteps = 1024
       maxChunkSteps = windowSteps / 4
       recordCapacity = 2 * maxChunkSteps
@@ -1414,7 +1368,14 @@ final class TapeWriter {
       for kind in laneEnvKinds {
         let spec = envTable[Int(kind)]
         offsets.append(envCursor)
-        envCursor += (spec.actionCount + spec.envStateWords + spec.naturalO + 3) / 4 * 4
+        let fixed = (spec.actionCount + spec.envStateWords + spec.naturalO + 3) / 4 * 4
+        let (persistent, persistentOverflow) = spec.persistentEntryWords.multipliedReportingOverflow(
+          by: persistentSlots)
+        let (next, cursorOverflow) = envCursor.addingReportingOverflow(fixed + persistent)
+        guard !persistentOverflow, !cursorOverflow else {
+          throw err("Declared run horizon \(steps) overflows the environment arena.")
+        }
+        envCursor = next
       }
       envOffsets = offsets
       envStateBuf = try makeBuf(envCursor * 4)
@@ -1463,9 +1424,46 @@ final class TapeWriter {
         let sp = mjScratchOffBuf.contents().bindMemory(to: UInt32.self, capacity: B)
         for i in 0..<B { sp[i] = scratchOffsets[i] }
       }
+      if laneEnvKinds.contains(16) {
+        let radius = 33, cells = 561, lifetime = 2000
+        var response = [Float](repeating: 0, count: cells * lifetime)
+        func index(_ x0: Int, _ y0: Int) -> Int {
+          var x = abs(x0), y = abs(y0)
+          if y > x { swap(&x, &y) }
+          return x * (x + 1) / 2 + y
+        }
+        response[0] = 1
+        for t in 1..<lifetime {
+          let prev = (t - 1) * cells, curr = t * cells
+          for i in 0..<cells { response[curr + i] = 0.4 * response[prev + i] }
+          response[curr] += 1
+          response[curr + cells - 1] += 0.28 * response[prev + cells - 2]
+          for y in 0..<(radius - 1) {
+            response[curr + cells - radius + y] += 0.14 * (
+              response[prev + index(radius - 2, y)]
+                + response[prev + index(radius - 1, y + 1)]
+                + response[prev + index(radius - 1, y - 1)])
+          }
+          for x in 0..<(radius - 1) {
+            for y in 0...x {
+              response[curr + index(x, y)] += 0.14 * (
+                response[prev + index(x + 1, y)] + response[prev + index(x - 1, y)]
+                  + response[prev + index(x, y + 1)] + response[prev + index(x, y - 1)])
+            }
+          }
+        }
+        let constants = try makeBuf(response.count * 4)
+        response.withUnsafeBytes {
+          constants.contents().copyMemory(from: $0.baseAddress!, byteCount: $0.count)
+        }
+        envConstantsBuf = constants
+      } else {
+        envConstantsBuf = try makeBuf(16)
+      }
       ecfg = FleetEnvCfg(
         laneCount: UInt32(B), episodeLen: UInt32(episodeLen),
-        recordCapacity: UInt32(recordCapacity), invObsFloor: 1 / Float(64))
+        recordCapacity: UInt32(recordCapacity), runHorizon: UInt32(steps),
+        invObsFloor: 1 / Float(64))
     }
   }
   static func oakPipes(
@@ -1494,7 +1492,16 @@ final class TapeWriter {
       autoG = candidate
       break
     }
-    let megaG = e["OAK_MEGA_LANES_PER_TG"].flatMap(Int.init) ?? autoG
+    func uintEnv(_ name: String) throws -> UInt32? {
+      guard let raw = e[name] else { return nil }
+      guard let v = UInt32(raw.trimmingCharacters(in: .whitespaces)) else {
+        throw err("\(name)='\(raw)' is not an unsigned decimal integer.")
+      }
+      return v
+    }
+    let megaG = uintEnv("OAK_MEGA_LANES_PER_TG").flatMap { Int($0) } ?? autoG
+    let stageMask = try uintEnv("OAK_MEGA_STAGE_MASK")
+    let splCapRaw = try uintEnv("OAK_SPL_CAP")
     let megaW = core * megaG
     func baseConstants() -> MTLFunctionConstantValues {
       let c = MTLFunctionConstantValues()
@@ -1509,7 +1516,7 @@ final class TapeWriter {
         var b = true
         c.setConstantValue(&b, type: .bool, index: OakConst.probeFixedIdx.rawValue)
       }
-      if let mask = e["OAK_MEGA_STAGE_MASK"].flatMap(UInt32.init) {
+      if let mask = stageMask {
         var m = mask
         c.setConstantValue(&m, type: .uint, index: OakConst.megaStageMask.rawValue)
       }
@@ -1535,7 +1542,7 @@ final class TapeWriter {
       var g32 = UInt32(gk)
       c.setConstantValue(&g32, type: .uint, index: OakConst.megaG.rawValue)
       var spl32 = UInt32(min(
-        32 / gk, e["OAK_SPL_CAP"].flatMap(Int.init) ?? max(1, Int(kd.off.anchorCount) / 32)))
+        32 / gk, splCapRaw.flatMap { Int($0) } ?? max(1, Int(kd.off.anchorCount) / 32)))
       c.setConstantValue(&spl32, type: .uint, index: 26)
       let desc = MTLComputePipelineDescriptor()
       desc.computeFunction = try lib.makeFunction(name: "oak_megastep", constantValues: c)
@@ -1554,7 +1561,7 @@ final class TapeWriter {
     for (ki, pipe) in variantPipes.enumerated() {
       let gk = kindMegaG[ki]
       let spl = min(
-        32 / gk, e["OAK_SPL_CAP"].flatMap(Int.init)
+        32 / gk, splCapRaw.flatMap { Int($0) }
           ?? max(1, Int(engine.kinds[ki].off.anchorCount) / 32))
       let slotBytes = laneSlotBytes(gk, spl)
       guard gk >= 1, core * gk * spl <= pipe.maxTotalThreadsPerThreadgroup,
@@ -1577,6 +1584,7 @@ final class TapeWriter {
       enc.setBuffer(bufs.mjModelsBuf, offset: 0, index: 16)
       enc.setBuffer(bufs.mjScratchBuf, offset: 0, index: 17)
       enc.setBuffer(bufs.mjScratchOffBuf, offset: 0, index: 18)
+      enc.setBuffer(bufs.envConstantsBuf, offset: 0, index: 19)
       var c = ecfg
       enc.setBytes(&c, length: MemoryLayout<FleetEnvCfg>.stride, index: OakBuf.envCfg.rawValue)
     }
@@ -1628,7 +1636,7 @@ final class TapeWriter {
           enc.setBuffer(bufs.diagAccumBuf, offset: 0, index: OakBuf.diagAccum.rawValue)
           let gk = kindMegaG[run.kindIdx]
           let spl = min(
-            32 / gk, e["OAK_SPL_CAP"].flatMap(Int.init)
+            32 / gk, splCapRaw.flatMap { Int($0) }
               ?? max(1, Int(kd.off.anchorCount) / 32))
           enc.setThreadgroupMemoryLength(laneSlotBytes(gk, spl), index: 0)
           enc.dispatchThreadgroups(
@@ -1826,7 +1834,8 @@ final class TapeWriter {
     }
     let episodeLen = max(e["OAK_EPISODE_STEPS"].flatMap(Int.init) ?? 0, 0)
     let bufs = try FleetBuffers(
-      dev, seeds: seeds, laneEnvKinds: laneEnvKinds, envTable: envTable, episodeLen: episodeLen)
+      dev, seeds: seeds, laneEnvKinds: laneEnvKinds, envTable: envTable,
+      episodeLen: episodeLen, steps: steps)
     let pipes: FleetPipes
     if let engine {
       pipes = try oakPipes(engine, lib, dev, bufs, ablations, e)
@@ -1845,13 +1854,20 @@ final class TapeWriter {
   static let ppoLR = 3e-4
   static let ppoAdamB2 = 0.999
   static let ppoAdamEps = 1e-5
+  static func baselineMask(_ e: [String: String]) throws -> UInt32? {
+    guard let raw = e["OAK_MEGA_STAGE_MASK"] else { return nil }
+    guard let v = UInt32(raw.trimmingCharacters(in: .whitespaces)) else {
+      throw err("OAK_MEGA_STAGE_MASK='\(raw)' is not an unsigned decimal integer.")
+    }
+    return v
+  }
   static func baselinePipes(
     _ policy: String, _ lib: MTLLibrary, _ dev: MTLDevice, _ bufs: FleetBuffers,
     _ envTable: [EnvSpec], _ laneEnvKinds: [UInt32], _ e: [String: String]
   ) throws -> FleetPipes {
     func pipeline(_ name: String) throws -> MTLComputePipelineState {
       let constants = MTLFunctionConstantValues()
-      if let mask = e["OAK_MEGA_STAGE_MASK"].flatMap(UInt32.init) {
+      if let mask = try baselineMask(e) {
         var m = mask
         constants.setConstantValue(&m, type: .uint, index: OakConst.megaStageMask.rawValue)
       }
@@ -1907,6 +1923,7 @@ final class TapeWriter {
       enc.setBuffer(bufs.mjModelsBuf, offset: 0, index: 16)
       enc.setBuffer(bufs.mjScratchBuf, offset: 0, index: 17)
       enc.setBuffer(bufs.mjScratchOffBuf, offset: 0, index: 18)
+      enc.setBuffer(bufs.envConstantsBuf, offset: 0, index: 19)
       var c = ecfg
       enc.setBytes(&c, length: MemoryLayout<FleetEnvCfg>.stride, index: OakBuf.envCfg.rawValue)
     }

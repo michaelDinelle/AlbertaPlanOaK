@@ -26,7 +26,7 @@ inline void acrobot_dynamics(float theta1, float theta2, float omega1, float ome
     derivative[0] = omega1; derivative[1] = omega2; derivative[2] = alpha1; derivative[3] = alpha2;
 }
 
-inline float acrobot_step(thread uint *words, uint action, thread float *obs,
+inline float acrobot_step(device uint *words, uint action, thread float *obs,
                           thread uint *doneOut) {
     float theta1 = as_type<float>(words[0]), theta2 = as_type<float>(words[1]);
     float omega1 = as_type<float>(words[2]), omega2 = as_type<float>(words[3]);

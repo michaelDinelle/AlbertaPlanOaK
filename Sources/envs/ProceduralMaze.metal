@@ -81,7 +81,7 @@ inline void proceduralMaze_obs(uint x, uint y, uint goalX, uint goalY, uint step
     obs[16] = 1.0f;
 }
 
-inline float proceduralMaze_step(thread uint *words, uint laneSeed, uint action,
+inline float proceduralMaze_step(device uint *words, uint laneSeed, uint action,
                            thread float *obs, thread uint *doneOut) {
     uint x = words[0], y = words[1], goalX = words[2], goalY = words[3], stepsSinceGoal = words[4], resampleIndex = words[5];
     uint wallBits0 = words[6], wallBits1 = words[7], wallBits2 = words[8];

@@ -17,4 +17,5 @@ export const sceneRegistry: SceneRegistry = {
   'HighDimMaze-cont-v0': () => import('./high-dim-maze/index'),
   'POMaze-cont-v0': () => import('./po-maze/index'),
   'DelayedChain-cont-v0': () => import('./delayed-chain/index'),
+  'JellyBeanWorld-cont-v0': () => import('./jelly-bean-world/index'),
 };

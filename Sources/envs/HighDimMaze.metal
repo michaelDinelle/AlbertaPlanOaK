@@ -26,7 +26,7 @@ inline void highDimMaze_obs(uint x, uint y, uint goalX, uint goalY, thread float
     obs[16] = 0.0f;
 }
 
-inline float highDimMaze_step(thread uint *words, uint laneSeed, uint action,
+inline float highDimMaze_step(device uint *words, uint laneSeed, uint action,
                          thread float *obs, thread uint *doneOut) {
     uint x = words[0], y = words[1], goalX = words[2], goalY = words[3], stepsSinceGoal = words[4], resampleIndex = words[5];
     uint lastDirection = words[6];

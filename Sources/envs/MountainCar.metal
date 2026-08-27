@@ -4,7 +4,7 @@ inline void mountainCar_obs(float pos, float vel, thread float *obs) {
     obs[0] = pos; obs[1] = vel; obs[2] = 1.0f;
 }
 
-inline float mountainCar_step(thread uint *words, uint action, thread float *obs,
+inline float mountainCar_step(device uint *words, uint action, thread float *obs,
                           thread uint *doneOut) {
     float pos = as_type<float>(words[0]), vel = as_type<float>(words[1]);
     float force = float(int(action % 3u)) - 1.0f;

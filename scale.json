@@ -115,7 +115,6 @@
     }
   },
   "generatedAt": "2026-08-17T23:59:53Z",
-  "scale": "v1",
   "sourceRunNames": {
     "ppo": "baseline-ppo-c1a93e857229",
     "random": "baseline-random-a10b24342826"

@@ -17,6 +17,7 @@ import { proceduralMazeDecoder } from './envs/proceduralmaze';
 import { highDimMazeDecoder } from './envs/highdimmaze';
 import { poMazeDecoder } from './envs/pomaze';
 import { delayedChainDecoder } from './envs/delayedchain';
+import { jellyBeanWorldDecoder } from './envs/jellybeanworld';
 
 const TABLE = {
   'HalfCheetah-v4': halfCheetahDecoder,
@@ -35,6 +36,7 @@ const TABLE = {
   'HighDimMaze-cont-v0': highDimMazeDecoder,
   'POMaze-cont-v0': poMazeDecoder,
   'DelayedChain-cont-v0': delayedChainDecoder,
+  'JellyBeanWorld-cont-v0': jellyBeanWorldDecoder,
 } satisfies Record<EnvId, unknown>;
 
 export const decoders = TABLE as Record<EnvId, EnvDecoder>;

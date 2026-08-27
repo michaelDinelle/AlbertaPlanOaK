@@ -1,6 +1,6 @@
 #pragma METAL fp math_mode(safe)
 
-inline float delayedChain_step(thread uint *words, uint action, thread float *obs,
+inline float delayedChain_step(device uint *words, uint action, thread float *obs,
                             thread uint *doneOut) {
     uint pos = words[0];
     float reward = 0.0f;

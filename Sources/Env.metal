@@ -16,7 +16,8 @@ constant uint OAK_ENV_PROCEDURALMAZE = 12u;
 constant uint OAK_ENV_HIGHDIMMAZE = 13u;
 constant uint OAK_ENV_POMAZE = 14u;
 constant uint OAK_ENV_DELAYEDCHAIN = 15u;
-constant uint OAK_ENV_COUNT = 16u;
+constant uint OAK_ENV_JELLYBEANWORLD = 16u;
+constant uint OAK_ENV_COUNT = 17u;
 
 constant uint OAK_ENV_OBS_MAX   = 17u;
 constant uint OAK_ENV_CLASSIC_OBS_MAX = 17u;
@@ -37,7 +38,13 @@ constant uint OAK_SLOT_TOKENS  =  9u;
 constant uint OAK_SLOT_CUE     = 10u;
 constant uint OAK_SLOT_HEADING = 11u;
 constant uint OAK_SLOT_EFFORT  = 12u;
-constant uint OAK_SLOT_Q       = 16u;
+constant uint OAK_SLOT_BANANA  = 13u;
+constant uint OAK_SLOT_ONION   = 14u;
+constant uint OAK_SLOT_JELLY   = 15u;
+constant uint OAK_SLOT_TRUFFLE = 16u;
+constant uint OAK_SLOT_DEPLETION_LO = 17u;
+constant uint OAK_SLOT_DEPLETION_HI = 18u;
+constant uint OAK_SLOT_Q       = 32u;
 
 
 struct OakEnvSpec {
@@ -45,6 +52,7 @@ struct OakEnvSpec {
     uint gridW; uint gridH; uint controlHz; uint stepFlops; uint envStateWords; uint mjIndex;
     uint laneThreads;
     uint slots[OAK_POSE_LEN];
+    uint persistentEntryWords;
 };
 
 constant OakEnvSpec OAK_ENV_SPECS[OAK_ENV_COUNT] = {
@@ -80,10 +88,13 @@ constant OakEnvSpec OAK_ENV_SPECS[OAK_ENV_COUNT] = {
       { OAK_SLOT_X, OAK_SLOT_Y, OAK_SLOT_GOAL_X, OAK_SLOT_GOAL_Y, OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE } },
     { 0x56184b96u, 3u, 1u, 2u, 12u, 32u, 1u, 8u, 30u, 10u, 0xffffffffu, 1u,
       { OAK_SLOT_X, OAK_SLOT_NONE, OAK_SLOT_CUE, OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE } },
+    { 0x194be817u, 16u, 1u, 3u, 12u, 0u, 0u, 8u, 12000u, 10u, 0xffffffffu, 1u,
+      { OAK_SLOT_X, OAK_SLOT_Y, OAK_SLOT_HEADING, OAK_SLOT_BANANA, OAK_SLOT_ONION,
+        OAK_SLOT_JELLY, OAK_SLOT_TRUFFLE, OAK_SLOT_DEPLETION_LO, OAK_SLOT_DEPLETION_HI }, 3u },
 };
 
 inline float env_step(uint envKind, uint seed, thread const float *ctrl,
-                      thread uint *words,
+                      device uint *words,
                       thread float *obs, thread uint &done) {
     done = 0u;
     uint discreteAction = uint(ctrl[0]);
@@ -108,7 +119,7 @@ inline float env_step(uint envKind, uint seed, thread const float *ctrl,
 }
 
 inline void env_reset(uint envKind, uint seed,
-                      thread uint *words, thread uint &elapsed, thread uint &resets) {
+                      device uint *words, thread uint &elapsed, thread uint &resets) {
     for (uint i = 0u; i < OAK_ENV_WORDS_MAX; i++) words[i] = 0u;
     if (envKind == OAK_ENV_FOURROOMS) {
         words[0] = 1u; words[1] = 1u;
@@ -156,7 +167,7 @@ inline void env_reset(uint envKind, uint seed,
     }
 }
 
-inline void env_observe(uint envKind, thread const uint *words, thread float *obs) {
+inline void env_observe(uint envKind, device const uint *words, thread float *obs) {
     if (envKind == OAK_ENV_FOURROOMS) {
         fourRooms_obs(1u, 1u, 9u, 9u, 0u, obs);
     } else if (envKind == OAK_ENV_DEEPSEA) {
@@ -194,7 +205,7 @@ inline void env_observe(uint envKind, thread const uint *words, thread float *ob
 }
 
 
-inline void env_pose(uint envKind, thread const uint *words,
+inline void env_pose(uint envKind, device const uint *words,
                      thread const float *ctrl, thread float *pose) {
     if (envKind == OAK_ENV_FOURROOMS) {
         pose[0] = float(words[0]); pose[1] = float(words[1]);

@@ -15,6 +15,7 @@ struct OakFleetEnvCfg {
     uint laneCount;
     uint episodeLen;
     uint recordCapacity;
+    uint runHorizon;
     float invObsFloor;
 };
 
@@ -44,6 +45,18 @@ inline device uint *laneEnvWords(device uint *envState, uint envK) {
 inline device float *laneEnvObs(device uint *envState, uint envK) {
     return (device float *)(envState + OAK_ENV_SPECS[envK].actionCount
                             + OAK_ENV_SPECS[envK].envStateWords);
+}
+
+inline device uint *lanePersistent(device uint *envState, uint envK) {
+    uint words = OAK_ENV_SPECS[envK].actionCount + OAK_ENV_SPECS[envK].envStateWords
+        + OAK_ENV_SPECS[envK].obsDimNatural;
+    return envState + ((words + 3u) & ~3u);
+}
+
+inline uint lanePersistentMask(constant OakFleetEnvCfg &ecfg) {
+    uint slots = 2u;
+    while (slots < 2u * ecfg.runHorizon) slots <<= 1u;
+    return slots - 1u;
 }
 
 inline bool laneIsMj(uint envK) { return OAK_ENV_SPECS[envK].mjIndex != 0xffffffffu; }
@@ -104,12 +117,12 @@ inline void resetLane(device OakFleetLane *lane, device uint *envState,
     device float *pending = lanePendingAction(envState);
     for (uint u = 0u; u < actionCount; u++) pending[u] = 0.0f;
     device uint *stateWords = laneEnvWords(envState, storedEnvKind);
-    if (laneIsMj(storedEnvKind)) {
+    if (storedEnvKind == OAK_ENV_JELLYBEANWORLD) {
+        for (uint i = 0u; i < OAK_ENV_SPECS[storedEnvKind].envStateWords; i++) stateWords[i] = 0u;
+    } else if (laneIsMj(storedEnvKind)) {
         mj_reset(storedEnvKind, mjModels, stateWords, laneSeed, elapsed, resets, 0u);
     } else {
-        uint envWords[OAK_ENV_WORDS_MAX];
-        env_reset(storedEnvKind, laneSeed, envWords, elapsed, resets);
-        for (uint i = 0u; i < OAK_ENV_WORDS_MAX; i++) stateWords[i] = envWords[i];
+        env_reset(storedEnvKind, laneSeed, stateWords, elapsed, resets);
     }
     lane->elapsed = elapsed; lane->resets = resets;
     lane->steps = 0u;
@@ -117,22 +130,26 @@ inline void resetLane(device OakFleetLane *lane, device uint *envState,
     lane->deathStep = OAK_DEATH_NONE; lane->deathDetector = 0u;
 }
 
-inline void observeLane(uint envK, constant uint *mjModels, device uint *envState,
-                        device float *obsOut) {
+inline void observeLane(uint envK, uint laneSeed, constant uint *mjModels,
+                        device const float *envConstants, constant OakFleetEnvCfg &ecfg,
+                        device uint *envState, device float *obsOut) {
+    if (envK == OAK_ENV_JELLYBEANWORLD) {
+        jbw_observe(laneSeed, laneEnvWords(envState, envK), lanePersistent(envState, envK),
+                    lanePersistentMask(ecfg), envConstants, 0u, obsOut);
+        return;
+    }
     if (laneIsMj(envK)) {
         mj_observe(envK, mjModels, laneEnvWords(envState, envK), obsOut, 0u);
         return;
     }
-    uint envWords[OAK_ENV_WORDS_MAX];
-    device const uint *stateWords = laneEnvWords(envState, envK);
-    for (uint i = 0u; i < OAK_ENV_WORDS_MAX; i++) envWords[i] = stateWords[i];
     float obs[OAK_ENV_CLASSIC_OBS_MAX];
-    env_observe(envK, envWords, obs);
+    env_observe(envK, laneEnvWords(envState, envK), obs);
     for (uint i = 0u; i < OAK_ENV_SPECS[envK].obsDimNatural; i++) obsOut[i] = obs[i];
 }
 
 inline float advanceEnvironment(device OakFleetLane *lane, device uint *envState,
                                 constant uint *mjModels, device float *mjScratch,
+                                device const float *envConstants,
                                 uint envK, uint laneSeed,
                                 constant OakFleetEnvCfg &ecfg,
                                 thread float *ctrl, device float *obsOut,
@@ -141,6 +158,16 @@ inline float advanceEnvironment(device OakFleetLane *lane, device uint *envState
     device const float *pending = lanePendingAction(envState);
     for (uint u = 0u; u < OAK_ENV_ACT_MAX; u++) ctrl[u] = (u < actionCount) ? pending[u] : 0.0f;
     device uint *stateWords = laneEnvWords(envState, envK);
+    if (envK == OAK_ENV_JELLYBEANWORLD) {
+        float reward = 0.0f;
+        done = 0u;
+        if (slane == 0u) {
+            reward = jbw_step(laneSeed, uint(ctrl[0]), stateWords, lanePersistent(envState, envK),
+                              lanePersistentMask(ecfg), envConstants, lane->steps, obsOut);
+        }
+        if (wide) reward = simd_broadcast_first(reward);
+        return reward;
+    }
     if (laneIsMj(envK)) {
         uint elapsed = lane->elapsed, resets = lane->resets;
         done = 0u;
@@ -154,11 +181,8 @@ inline float advanceEnvironment(device OakFleetLane *lane, device uint *envState
     }
     float reward = 0.0f;
     if (slane == 0u) {
-        uint envWords[OAK_ENV_WORDS_MAX];
-        for (uint i = 0u; i < OAK_ENV_WORDS_MAX; i++) envWords[i] = stateWords[i];
         float obs[OAK_ENV_CLASSIC_OBS_MAX];
-        reward = env_step(envK, laneSeed, ctrl, envWords, obs, done);
-        for (uint i = 0u; i < OAK_ENV_WORDS_MAX; i++) stateWords[i] = envWords[i];
+        reward = env_step(envK, laneSeed, ctrl, stateWords, obs, done);
         for (uint i = 0u; i < OAK_ENV_SPECS[envK].obsDimNatural; i++) obsOut[i] = obs[i];
     }
     if (wide) {
@@ -188,13 +212,17 @@ inline void recordPose(uint envK, constant uint *mjModels, device uint *envState
         int slot = recordSlot[gid];
         if (slot >= 0) {
             float pose[OAK_POSE_LEN];
-            if (laneIsMj(envK)) {
+            if (envK == OAK_ENV_JELLYBEANWORLD) {
+                device const uint *words = laneEnvWords(envState, envK);
+                pose[0] = float(as_type<int>(words[0]));
+                pose[1] = float(as_type<int>(words[1]));
+                pose[2] = float(words[2]);
+                for (uint i = 0u; i < 4u; i++) pose[3u + i] = float(words[4u + i]);
+                pose[7] = float(words[8]); pose[8] = float(words[9]);
+            } else if (laneIsMj(envK)) {
                 mj_pose(envK, mjModels, laneEnvWords(envState, envK), ctrl, pose, 0u);
             } else {
-                uint envWords[OAK_ENV_WORDS_MAX];
-                device const uint *stateWords = laneEnvWords(envState, envK);
-                for (uint i = 0u; i < OAK_ENV_WORDS_MAX; i++) envWords[i] = stateWords[i];
-                env_pose(envK, envWords, ctrl, pose);
+                env_pose(envK, laneEnvWords(envState, envK), ctrl, pose);
             }
             ulong lanes = (ulong)ecfg.laneCount;
             device float *dst = recordBuf

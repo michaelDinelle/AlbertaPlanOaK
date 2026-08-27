@@ -12,7 +12,7 @@ inline void largeDeepSea_obs(uint row, uint column, uint lastAction, thread floa
     obs[7] = 1.0f;
 }
 
-inline float largeDeepSea_step(thread uint *words, uint action, thread float *obs) {
+inline float largeDeepSea_step(device uint *words, uint action, thread float *obs) {
     uint row = words[0] & 15u, column = (words[0] >> 4u) & 15u;
     uint mapBitIndex = row * 16u + column;
     uint rightwardAction = (words[1u + (mapBitIndex >> 5u)] >> (mapBitIndex & 31u)) & 1u;

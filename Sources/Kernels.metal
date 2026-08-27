@@ -19,6 +19,7 @@ using namespace metal;
 #include "envs/HighDimMaze.metal"
 #include "envs/POMaze.metal"
 #include "envs/DelayedChain.metal"
+#include "envs/JellyBeanWorld.metal"
 #include "Env.metal"
 #include "Fleet.metal"
 #include "OakKernel.metal"

@@ -335,7 +335,7 @@ function readRunSummary(raw: string): RunSummary | null {
     if (v === null || typeof v !== 'object' || Array.isArray(v)) return null;
   }
   if (!Array.isArray(o['curveSteps']) || !Array.isArray(o['plasticitySteps'])) return null;
-  if (typeof o['scale'] !== 'string' || typeof o['generatedAt'] !== 'string') return null;
+  if (typeof o['generatedAt'] !== 'string') return null;
   if (typeof o['horizon'] !== 'number' || typeof o['maxStep'] !== 'number') return null;
   if (typeof o['seedsPerEnv'] !== 'number' || typeof o['complete'] !== 'boolean') return null;
   return parsed as RunSummary;

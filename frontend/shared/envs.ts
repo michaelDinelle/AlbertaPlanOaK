@@ -15,6 +15,7 @@ export const ENV_IDS = [
   'HighDimMaze-cont-v0',
   'POMaze-cont-v0',
   'DelayedChain-cont-v0',
+  'JellyBeanWorld-cont-v0',
 ] as const;
 
 export type EnvId = (typeof ENV_IDS)[number];

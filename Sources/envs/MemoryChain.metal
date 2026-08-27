@@ -9,7 +9,7 @@ inline void memoryChain_obs(uint pos, uint cue, uint lastAction, thread float *o
     obs[5] = 1.0f;
 }
 
-inline float memoryChain_step(thread uint *words, uint laneSeed, uint action,
+inline float memoryChain_step(device uint *words, uint laneSeed, uint action,
                             thread float *obs, thread uint *doneOut) {
     uint pos = words[0], cue = words[1], resampleIndex = words[3];
     float reward = 0.0f;

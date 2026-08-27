@@ -37,7 +37,7 @@ inline void multiKeyCorridor_obs(uint x, uint y, uint key1Packed, uint key2Packe
     obs[16] = 1.0f;
 }
 
-inline float multiKeyCorridor_step(thread uint *words, uint laneSeed, uint action,
+inline float multiKeyCorridor_step(device uint *words, uint laneSeed, uint action,
                          thread float *obs, thread uint *doneOut) {
     uint x = words[0], y = words[1], key1Packed = words[2], key2Packed = words[3], key3Packed = words[4];
     uint goalX = words[5], goalY = words[6], keyDoorBits = words[7], stepsSinceGoal = words[8], resampleIndex = words[9];

@@ -28,7 +28,7 @@ inline void keyCorridor_obs(uint x, uint y, uint keyX, uint keyY, uint goalX, ui
     obs[13] = 1.0f;
 }
 
-inline float keyCorridor_step(thread uint *words, uint laneSeed, uint action,
+inline float keyCorridor_step(device uint *words, uint laneSeed, uint action,
                         thread float *obs, thread uint *doneOut) {
     uint x = words[0], y = words[1], keyX = words[2], keyY = words[3], goalX = words[4], goalY = words[5];
     uint keyDoorBits = words[6], stepsSinceGoal = words[7], resampleIndex = words[8];

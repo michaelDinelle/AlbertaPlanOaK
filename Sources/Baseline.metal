@@ -49,6 +49,7 @@ kernel void random_megastep(device OakFleetLane *lanes [[buffer(6)]],
                             constant uint *mjModels [[buffer(16)]],
                             device float *mjScratch [[buffer(17)]],
                             device const uint *mjScratchOff [[buffer(18)]],
+                            device const float *envConstants [[buffer(19)]],
                             uint gid [[thread_position_in_grid]],
                             uint slane [[thread_index_in_simdgroup]]) {
     uint laneIdx = gid / 32u;
@@ -77,7 +78,7 @@ kernel void random_megastep(device OakFleetLane *lanes [[buffer(6)]],
         simdgroup_barrier(mem_flags::mem_device);
         float ctrl[OAK_ENV_ACT_MAX];
         uint done = 0u;
-        float reward = advanceEnvironment(lane, envState, mjModels, mjScratch + mjScratchOff[laneIdx],
+        float reward = advanceEnvironment(lane, envState, mjModels, mjScratch + mjScratchOff[laneIdx], envConstants,
                                           envK, seed, ecfg, ctrl, laneEnvObs(envState, envK),
                                           done, slane, true);
         if (slane == 0u) {
@@ -289,6 +290,7 @@ kernel void ppo_fleet_init(device float *params [[buffer(0)]],
                            device uint *envArena [[buffer(14)]],
                            device const uint *envOff [[buffer(15)]],
                            constant uint *mjModels [[buffer(16)]],
+                           device const float *envConstants [[buffer(19)]],
                            uint gid [[thread_position_in_grid]],
                            uint tid [[thread_index_in_simdgroup]]) {
     uint laneIdx = gid / 32u;
@@ -314,7 +316,7 @@ kernel void ppo_fleet_init(device float *params [[buffer(0)]],
         device uint *envState = laneEnvState(envArena, envOff, laneIdx);
         resetLane(lane, envState, mjModels, laneEnvKinds[laneIdx], seed);
         device float *obsOut = laneEnvObs(envState, lane->envKind);
-        observeLane(lane->envKind, mjModels, envState, obsOut);
+        observeLane(lane->envKind, seed, mjModels, envConstants, ecfg, envState, obsOut);
         device float *R = rollout + laneIdx * PPO_ROLL_STRIDE;
         for (uint d = 0u; d < L.O; ++d) R[PPO_ROLL_OBS + d] = obsOut[d];
         ppoWelfordObs(S, L.O, obsOut);
@@ -391,6 +393,7 @@ kernel void ppo_megastep(device float *params [[buffer(0)]],
                          constant uint *mjModels [[buffer(16)]],
                          device float *mjScratch [[buffer(17)]],
                          device const uint *mjScratchOff [[buffer(18)]],
+                         device const float *envConstants [[buffer(19)]],
                          uint gid [[thread_position_in_grid]],
                          uint tid [[thread_index_in_simdgroup]]) {
     uint laneIdx = gid / 32u;
@@ -460,7 +463,7 @@ kernel void ppo_megastep(device float *params [[buffer(0)]],
             device uint *envState = laneEnvState(envArena, envOff, laneIdx);
             device float *obsOut = laneEnvObs(envState, envK);
             float reward = advanceEnvironment(lane, envState, mjModels,
-                                              mjScratch + mjScratchOff[laneIdx],
+                                              mjScratch + mjScratchOff[laneIdx], envConstants,
                                               envK, seed, ecfg, ctrl, obsOut, done, tid, true);
             if (tid == 0u) {
                 uint stepNum = lane->steps;

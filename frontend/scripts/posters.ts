@@ -12,15 +12,19 @@ const HELP = [
   'commit the changed files. Set CHROME to use a different Chrome binary.',
 ].join('\n');
 
+const origin = process.argv[2] ?? 'http://localhost:5173';
+const only = process.argv[3] ?? '';
+const run = process.argv[4] ?? '';
+const captureAtStep = Number(process.argv[5] ?? '200000');
+
 const CDP_PORT = 9411;
 const VIEW_W = 1280;
 const VIEW_H = 720;
 const POSTER_W = 320;
-const CAPTURE_AT_STEP = 200000;
+const CAPTURE_AT_STEP = captureAtStep;
 const SETTLE_MS = 3000;
 const READY_TIMEOUT_MS = 30000;
 
-const origin = process.argv[2] ?? 'http://localhost:5173';
 if (origin === '--help' || origin === '-h') {
   console.log(HELP);
   process.exit(0);
@@ -120,8 +124,10 @@ try {
   await cdp.send('Page.enable');
   await mkdir(outDir, { recursive: true });
   for (const envId of ENV_IDS) {
+    if (only !== '' && envId !== only) continue;
     const info = SCENES[envId];
-    await cdp.send('Page.navigate', { url: `${origin}/?env=${envId}&at=${CAPTURE_AT_STEP}` });
+    const runQuery = run !== '' ? `run=${run}&` : '';
+    await cdp.send('Page.navigate', { url: `${origin}/?${runQuery}env=${envId}&at=${CAPTURE_AT_STEP}` });
     await waitForStage(cdp, nameOf(envId));
     await new Promise((res) => setTimeout(res, SETTLE_MS));
     await evaluate(

@@ -30,7 +30,7 @@ inline void poMaze_obs(uint x, uint y, uint goalX, uint goalY, thread float *obs
     obs[16] = 0.0f;
 }
 
-inline float poMaze_step(thread uint *words, uint laneSeed, uint action,
+inline float poMaze_step(device uint *words, uint laneSeed, uint action,
                         thread float *obs, thread uint *doneOut) {
     uint x = words[0], y = words[1], goalX = words[2], goalY = words[3], stepsSinceGoal = words[4], resampleIndex = words[5];
     int2 delta = gridDelta(action & 3u);

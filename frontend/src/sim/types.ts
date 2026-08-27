@@ -7,7 +7,8 @@ export type SimEvent =
   | { type: 'door'; index: number; open: boolean }
   | { type: 'cue'; value: 0 | 1 }
   | { type: 'teleport' }
-  | { type: 'resurface' };
+  | { type: 'resurface' }
+  | { type: 'collection'; item: 'banana' | 'onion' | 'jellyBean' | 'truffle'; reward: -1 | 0 | 1 };
 
 export const NO_EVENTS: SimEvent[] = Object.freeze([]) as unknown as SimEvent[];
 

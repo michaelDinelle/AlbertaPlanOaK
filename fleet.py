@@ -26,7 +26,7 @@ from statsmodels.stats.proportion import proportion_confint
 REPO = Path(__file__).resolve().parent
 BENCH = REPO / ".oak-benchmarks"
 BASELINES = Path(os.environ.get("OAK_BASELINES_DIR") or REPO / ".oak-baselines")
-SCALE_PATH = REPO / "scale-v1.json"
+SCALE_PATH = REPO / "scale.json"
 
 BOOT_REPS = 50_000
 CURVE_REPS = 2000
@@ -593,8 +593,7 @@ def cmd_scale(args) -> int:
         print(f"{env:26} floor {floor:+.6f} ({floor_source})  "
               f"ceiling {ceiling:+.6f} ({source})  ppo {ppo_measured:+.6f}  "
               f"keeper {keeper_measured:+.6f}", flush=True)
-    table = {"scale": "v1",
-             "generatedAt": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+    table = {"generatedAt": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
              "sourceRunNames": {p: runs[p]["root"].name for p in ("ppo", "random")},
              "envSourcesHash": env_sources_hash(),
              "envs": envs}
@@ -817,7 +816,6 @@ def cmd_report(args) -> int:
     if "gpuSeconds" in meta:
         compute["gpuSeconds"] = meta["gpuSeconds"]
     summary = {
-        "scale": scale_table["scale"],
         "generatedAt": generated_at,
         "horizon": horizon,
         "maxStep": max_step,
@@ -952,7 +950,7 @@ def _fail(msg: str) -> int:
     return 2
 
 
-def gate(kr: dict, cr: dict, boot: int, env_slice: str | None) -> int:
+def gate(kr: dict, cr: dict, boot: int) -> int:
     for label, r in (("keeper", kr), ("candidate", cr)):
         if r["meta"]["policy"] != "oak":
             return _fail(f"GATE ERROR: {label} policy is {r['meta']['policy']}")
@@ -970,13 +968,9 @@ def gate(kr: dict, cr: dict, boot: int, env_slice: str | None) -> int:
     print(f"  keeper-only envs ({len(keeper_only)}): {', '.join(keeper_only) or 'none'}")
     print(f"  candidate-only envs ({len(cand_only)}): {', '.join(cand_only) or 'none'}"
           + (" not gated, no keeper reference" if cand_only else ""))
-    if keeper_only and not env_slice:
+    if keeper_only:
         return _fail("GATE ERROR: keeper envs absent from candidate, not comparable: "
                      + ", ".join(keeper_only))
-    if env_slice:
-        if env_slice not in shared:
-            return _fail(f"GATE ERROR: missing slice {env_slice}")
-        shared = [env_slice]
     if not shared:
         return _fail("GATE ERROR: no shared env slices")
     k_index, c_index = lane_index(kr), lane_index(cr)
@@ -1037,7 +1031,7 @@ def cmd_gate(args) -> int:
     kh = keeper_hash()
     if kh is None or not (BENCH / kh).is_dir():
         return _fail("GATE ERROR: keeper missing")
-    return gate(load(BENCH / kh), load(args.candidate), args.boot, args.env_slice)
+    return gate(load(BENCH / kh), load(args.candidate), args.boot)
 
 
 def keeper_hash() -> str | None:
@@ -1197,7 +1191,6 @@ def main() -> int:
     gp = sub.add_parser("gate")
     gp.add_argument("candidate", type=Path)
     gp.add_argument("--boot", type=int, default=10_000)
-    gp.add_argument("--env-slice", default=None)
     sub.add_parser("baselines")
     sub.add_parser("scale")
     args = ap.parse_args()

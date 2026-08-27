@@ -442,7 +442,7 @@ kernel void oak_shape_probe(device OakShapeProbe *out [[buffer(0)]],
     out->uKeep0n = uint(agent.parked - uintArena) + agent.optionCount;
 }
 
-constant uint OAK_ENV_TABLE_STRIDE = 12u + OAK_POSE_LEN;
+constant uint OAK_ENV_TABLE_STRIDE = 13u + OAK_POSE_LEN;
 
 kernel void oak_env_table_probe(device uint *out [[buffer(0)]],
                                 uint tid [[thread_position_in_grid]]) {
@@ -467,6 +467,7 @@ kernel void oak_env_table_probe(device uint *out [[buffer(0)]],
         row[10] = OAK_ENV_SPECS[i].mjIndex;
         row[11] = OAK_ENV_SPECS[i].laneThreads;
         for (uint s = 0u; s < OAK_POSE_LEN; ++s) row[12u + s] = OAK_ENV_SPECS[i].slots[s];
+        row[12u + OAK_POSE_LEN] = OAK_ENV_SPECS[i].persistentEntryWords;
     }
 }
 
@@ -1948,6 +1949,7 @@ kernel void oak_fleet_init(device float *params [[buffer(0)]],
                            device uint *envArena [[buffer(14)]],
                            device const uint *envOff [[buffer(15)]],
                            constant uint *mjModels [[buffer(16)]],
+                           device const float *envConstants [[buffer(19)]],
                            uint gid [[thread_position_in_grid]]) {
     uint gidLocal = gid;
     gid += laneOffset;
@@ -1963,7 +1965,8 @@ kernel void oak_fleet_init(device float *params [[buffer(0)]],
             agent.observationAlpha[o] = 1.0f / float(2u * agent.anchorCount);
             agent.observationBeta[o] = log(1.0f / float(2u * agent.anchorCount));
         }
-        observeLane(storedEnvKind, mjModels, envState, agent.observation);
+        observeLane(storedEnvKind, laneSeeds[gid], mjModels, envConstants, ecfg,
+                    envState, agent.observation);
         agent.reward[0] = 0.0f;
         for (uint d = 0u; d < agent.actionCount; ++d) agent.actionSignal[d] = 0.0f;
         for (uint i = 0u; i < agent.optionCount * agent.actionCount; ++i) agent.optionActorCredit[i] = 0.0f;
@@ -2105,6 +2108,7 @@ static inline void stepEnvironment(device float *params,
                                        constant uint *mjModels,
                                        device float *mjScratch,
                                        device const uint *mjScratchOff,
+                                       device const float *envConstants,
                                        device const uint *laneSeeds,
                                        constant OakFleetEnvCfg &ecfg,
                                        device const int *recordSlot,
@@ -2116,7 +2120,7 @@ static inline void stepEnvironment(device float *params,
     uint done = 0u;
     device uint *envState = laneEnvState(envArena, envOff, gid);
     device float *obsOut = laneEnvObs(envState, envK);
-    float reward = advanceEnvironment(lane, envState, mjModels, mjScratch + mjScratchOff[gid],
+    float reward = advanceEnvironment(lane, envState, mjModels, mjScratch + mjScratchOff[gid], envConstants,
                                       envK, laneSeeds[gid], ecfg, ctrl, obsOut, done, slane, wide);
     if (slane != 0u) return;
     uint stepNum = lane->steps;
@@ -2192,6 +2196,7 @@ kernel void oak_megastep(device float *params [[buffer(0)]],
                          constant uint *mjModels [[buffer(16)]],
                          device float *mjScratch [[buffer(17)]],
                          device const uint *mjScratchOff [[buffer(18)]],
+                         device const float *envConstants [[buffer(19)]],
                          threadgroup float *tgCont [[threadgroup(0)]],
                          uint tgIdx [[threadgroup_position_in_grid]],
                          uint tid [[thread_position_in_threadgroup]],
@@ -2287,12 +2292,12 @@ kernel void oak_megastep(device float *params [[buffer(0)]],
             if (wideStep) {
                 if (wideActive && subSg == 0u)
                     stepEnvironment(params, stateArena, uintArena, scalars, cfg,
-                                        lanes, envArena, envOff, mjModels, mjScratch, mjScratchOff,
+                                        lanes, envArena, envOff, mjModels, mjScratch, mjScratchOff, envConstants,
                                         laneSeeds, ecfg, recordSlot, recordBuf, wideLane,
                                         wideLane - laneShift, slane, true);
             } else if (packedActive && sgrp == 0u) {
                 stepEnvironment(params, stateArena, uintArena, scalars, cfg,
-                                    lanes, envArena, envOff, mjModels, mjScratch, mjScratchOff,
+                                    lanes, envArena, envOff, mjModels, mjScratch, mjScratchOff, envConstants,
                                     laneSeeds, ecfg, recordSlot, recordBuf, packedLane,
                                     packedLane - laneShift, 0u, false);
             }

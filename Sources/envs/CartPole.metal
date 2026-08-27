@@ -8,7 +8,7 @@ inline void cartPole_obs(float cartPosition, float cartVelocity, float poleAngle
     obs[0] = cartPosition; obs[1] = cartVelocity; obs[2] = poleAngle; obs[3] = poleAngularVelocity; obs[4] = 1.0f;
 }
 
-inline float cartPole_step(thread uint *words, uint action, thread float *obs,
+inline float cartPole_step(device uint *words, uint action, thread float *obs,
                           thread uint *doneOut) {
     float cartPosition = as_type<float>(words[0]), cartVelocity = as_type<float>(words[1]);
     float poleAngle = as_type<float>(words[2]), poleAngularVelocity = as_type<float>(words[3]);
