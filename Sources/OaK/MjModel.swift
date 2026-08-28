@@ -13,7 +13,7 @@ struct MjBlob {
   static func scratchWords(
     nv: Int, nbody: Int, ngeom: Int, nconMax: Int, nefcMax: Int, nM: Int
   ) -> Int {
-    return 60 * nbody + 28 * nv + 6 * ngeom + 40 + 2 * nM + 27 * max(nconMax, 1)
+    return 53 * nbody + 18 * nv + 6 * ngeom + 40 + 2 * nM + 26 * max(nconMax, 1)
       + nefcMax * (nv + 3)
   }
 

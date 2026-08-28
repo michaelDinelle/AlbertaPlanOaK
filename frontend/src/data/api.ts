@@ -1,7 +1,5 @@
 import type { RunDetail, RunIndexEntry } from '@shared/types';
 
-export const API_BASE = '/api';
-
 export class ApiError extends Error {
   readonly status: number;
   readonly url: string;
@@ -17,8 +15,7 @@ export class ApiError extends Error {
 }
 
 export function apiUrl(path: string): string {
-  const rel = path.startsWith('/') ? path : `/${path}`;
-  return rel.startsWith(`${API_BASE}/`) || rel === API_BASE ? rel : `${API_BASE}${rel}`;
+  return `/api${path.startsWith('/') ? path : `/${path}`}`;
 }
 
 async function getJson<T>(url: string, signal?: AbortSignal): Promise<T> {

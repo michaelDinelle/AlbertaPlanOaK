@@ -6,18 +6,6 @@ import { statOrNull } from './fs';
 import { findRecording, type PoseIndex } from './recordings';
 import { RunIndex, buildRunDetail } from './runIndex';
 
-export interface AppOptions {
-  benchRoot?: string;
-  distDir?: string;
-  production?: boolean;
-}
-
-export interface App {
-  fetch: (req: Request) => Promise<Response>;
-  index: RunIndex;
-  benchRoot: string;
-}
-
 function json(body: unknown, init: { status?: number; cache?: string } = {}): Response {
   return new Response(JSON.stringify(body), {
     status: init.status ?? 200,
@@ -61,13 +49,6 @@ export function parseRangeHeader(header: string | null, size: number): RangeSpec
   const rawStart = spec.slice(0, dash).trim();
   const rawEnd = spec.slice(dash + 1).trim();
 
-  if (rawStart.length === 0) {
-    if (!/^\d+$/.test(rawEnd)) return null;
-    const n = Number(rawEnd);
-    if (n === 0) return 'unsatisfiable';
-    const start = Math.max(0, size - n);
-    return { start, end: size - 1 };
-  }
   if (!/^\d+$/.test(rawStart)) return null;
   const start = Number(rawStart);
   if (start >= size) return 'unsatisfiable';
@@ -155,10 +136,10 @@ async function servePose(req: Request, index: PoseIndex, lane: number): Promise<
   return new Response(out, { status: cond.status, headers: cond.headers });
 }
 
-export function createApp(opts: AppOptions = {}): App {
-  const benchRoot = opts.benchRoot ?? benchRootFromEnv();
-  const distDir = resolve(opts.distDir ?? DIST_DIR);
-  const production = opts.production ?? process.env['NODE_ENV'] === 'production';
+export function createServer() {
+  const benchRoot = benchRootFromEnv();
+  const distDir = resolve(DIST_DIR);
+  const production = process.env['NODE_ENV'] === 'production';
 
   const index = new RunIndex({ benchRoot });
 
@@ -210,22 +191,14 @@ export function createApp(opts: AppOptions = {}): App {
   const CONTENT_TYPES: Record<string, string> = {
     html: 'text/html; charset=utf-8',
     js: 'text/javascript; charset=utf-8',
-    mjs: 'text/javascript; charset=utf-8',
     css: 'text/css; charset=utf-8',
     json: 'application/json; charset=utf-8',
     svg: 'image/svg+xml',
     png: 'image/png',
-    jpg: 'image/jpeg',
-    jpeg: 'image/jpeg',
     webp: 'image/webp',
     ico: 'image/x-icon',
-    woff: 'font/woff',
     woff2: 'font/woff2',
     map: 'application/json; charset=utf-8',
-    bin: 'application/octet-stream',
-    glb: 'model/gltf-binary',
-    ktx2: 'image/ktx2',
-    wasm: 'application/wasm',
   };
 
   function contentTypeFor(path: string): string {
@@ -293,21 +266,11 @@ export function createApp(opts: AppOptions = {}): App {
     return withCors(req, await route(req));
   }
 
-  return { fetch: fetchHandler, index, benchRoot };
-}
-
-export interface ServeOptions extends AppOptions {
-  port?: number;
-  hostname?: string;
-}
-
-export function createServer(opts: ServeOptions = {}) {
-  const app = createApp(opts);
   const server = Bun.serve({
-    hostname: opts.hostname ?? HOSTNAME,
-    port: opts.port ?? portFromEnv(),
+    hostname: HOSTNAME,
+    port: portFromEnv(),
     idleTimeout: 0,
-    fetch: app.fetch,
+    fetch: fetchHandler,
   });
-  return { server, app };
+  return { server, benchRoot };
 }

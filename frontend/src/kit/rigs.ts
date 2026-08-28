@@ -1,4 +1,5 @@
 import * as THREE from 'three';
+import { clampRange } from './mix';
 import { TOKENS } from './tokens';
 
 export interface RigHandle {
@@ -57,14 +58,12 @@ export const DEFAULT_ORBIT_LIMITS: OrbitLimits = Object.freeze({
   maxDistance: 140,
 });
 
-export function clamp(v: number, lo: number, hi: number): number {
-  return v < lo ? lo : v > hi ? hi : v;
-}
+const PAN_SPEED = 0.0022;
 
 export function clampOrbit(state: OrbitState, limits: OrbitLimits): OrbitState {
-  state.polar = clamp(state.polar, limits.minPolar, limits.maxPolar);
-  state.azimuth = clamp(state.azimuth, limits.minAzimuth, limits.maxAzimuth);
-  state.distance = clamp(state.distance, limits.minDistance, limits.maxDistance);
+  state.polar = clampRange(state.polar, limits.minPolar, limits.maxPolar);
+  state.azimuth = clampRange(state.azimuth, limits.minAzimuth, limits.maxAzimuth);
+  state.distance = clampRange(state.distance, limits.minDistance, limits.maxDistance);
   return state;
 }
 
@@ -87,9 +86,7 @@ export interface OrbitRigOptions extends BaseCameraOptions {
   damping?: number;
   rotateSpeed?: number;
   zoomSpeed?: number;
-  panSpeed?: number;
   follow?: number;
-  lookAhead?: number;
 }
 
 export interface OrbitRig extends RigHandle {
@@ -136,7 +133,6 @@ export function makeOrbitRig(opts: OrbitRigOptions = {}): OrbitRig {
   const rate = opts.damping ?? 5;
   const rotateSpeed = opts.rotateSpeed ?? 0.004;
   const zoomSpeed = opts.zoomSpeed ?? 0.0012;
-  const panSpeed = opts.panSpeed ?? 0.0022;
   const followRate = opts.follow ?? 0;
   const scratch = new THREE.Vector3();
   const panOffset = new THREE.Vector3();
@@ -213,7 +209,7 @@ export function makeOrbitRig(opts: OrbitRigOptions = {}): OrbitRig {
       if (right.lengthSq() < 1e-12) right.set(1, 0, 0);
       right.normalize();
       up.crossVectors(forward, right).normalize();
-      const k = panSpeed * state.distance;
+      const k = PAN_SPEED * state.distance;
       panOffset.addScaledVector(right, dx * k).addScaledVector(up, dy * k);
     },
     follow(x, y, z) {

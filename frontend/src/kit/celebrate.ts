@@ -36,8 +36,6 @@ export function makePulseChannel(): PulseChannel {
   };
 }
 
-export const pulseChannel: PulseChannel = makePulseChannel();
-
 const PARTICLE_CAPACITY = 768;
 const RIPPLE_CAPACITY = 8;
 
@@ -47,7 +45,6 @@ export interface CelebrationPoolOptions {
   sighRadius?: number;
   sighHeight?: number;
   seed?: number;
-  pulse?: PulseChannel;
   name?: string;
 }
 
@@ -171,7 +168,7 @@ export class CelebrationPool {
     this.sighSize = Math.max(1, opts.sighSize ?? 40);
     this.sighRadius = opts.sighRadius ?? 6;
     this.sighHeight = opts.sighHeight ?? 3.2;
-    this.pulse = opts.pulse ?? makePulseChannel();
+    this.pulse = makePulseChannel();
     this.group.name = opts.name ?? 'oakCelebrations';
 
     const n = this.capacity;
@@ -421,13 +418,10 @@ export function attachCelebrations(scene: THREE.Scene, pool: CelebrationPool): C
 }
 
 
-export function existingCelebrations(scene: THREE.Scene): CelebrationPool | null {
-  const existing = (scene as unknown as PoolCarrier).userData[POOL_KEY];
-  return existing instanceof CelebrationPool ? existing : null;
-}
-
 export function celebrationPulse(scene: THREE.Scene): PulseChannel {
-  return existingCelebrations(scene)?.pulse ?? pulseChannel;
+  const pool = (scene as unknown as PoolCarrier).userData[POOL_KEY];
+  if (!(pool instanceof CelebrationPool)) throw new Error(`${scene.name} has no celebration pool`);
+  return pool.pulse;
 }
 
 

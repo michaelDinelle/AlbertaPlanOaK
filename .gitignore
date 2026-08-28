@@ -1,53 +1,27 @@
 /.build/
 /.swiftpm/
-/Packages/
 
 .oak-benchmarks/
 
 media/*.mp4
 
-/DerivedData/
-*.xcodeproj/xcuserdata/
-*.xcworkspace/xcuserdata/
-*.xcuserstate
-*.xcscmblueprint
-
 __pycache__/
 *.py[cod]
 *.pyo
 *.pyd
-.pytest_cache/
 .mypy_cache/
 .ruff_cache/
-.pyre/
-.hypothesis/
-.tox/
-.nox/
-.coverage
-.coverage.*
-htmlcov/
-.ipynb_checkpoints/
 /.venv/
 /.oak-setup-cache/
-/venv/
-/env/
-/ENV/
-.python-version
 
 .env
 .env.*
-!.env.example
 
 .DS_Store
 
 /.tmp/
-/tools/physics/.m3a/
 *.trace/
-*.profraw
-.cursor/
-*.sample.txt
 
-# frontend (bun/vite)
 frontend/node_modules/
 frontend/dist/
 frontend/.cache/

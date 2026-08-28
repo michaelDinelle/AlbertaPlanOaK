@@ -41,10 +41,10 @@ export function subscribePosition(listener: PositionListener): () => void {
   };
 }
 
-export const POSITION_HZ = 10;
+const POSITION_HZ = 10;
 
-export function throttled<A extends unknown[]>(fn: (...args: A) => void, hz = POSITION_HZ): (...args: A) => void {
-  const intervalMs = 1000 / hz;
+export function throttled<A extends unknown[]>(fn: (...args: A) => void): (...args: A) => void {
+  const intervalMs = 1000 / POSITION_HZ;
   let last = -Infinity;
   return (...args: A) => {
     const now = performance.now();

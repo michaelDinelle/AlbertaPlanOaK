@@ -66,7 +66,6 @@ enum OakConst: Int {
   case specNursery = 28
   case specEnvKind = 29
   case probeFixedIdx = 30
-  case probeFtz = 31
 }
 
 enum OakBuf: Int {
@@ -320,7 +319,7 @@ final class Engine {
   static func runEnvTableProbe(_ dev: MTLDevice, _ lib: MTLLibrary) throws -> EnvTable {
     let fn = lib.makeFunction(name: "oak_env_table_probe")!
     let pipe = try dev.makeComputePipelineState(function: fn)
-    let words = 6 + Main.envIdsByKind.count * EnvSpec.stride
+    let words = 5 + Main.envIdsByKind.count * EnvSpec.stride
     guard let outB = dev.makeBuffer(length: words * 4, options: [.storageModeShared]),
       let pq = dev.makeCommandQueue(), let cb = pq.makeCommandBuffer(),
       let enc = cb.makeComputeCommandEncoder()
@@ -337,7 +336,7 @@ final class Engine {
       throw err("Env table count drift: kernel \(tbl[0]) vs host \(Main.envIdsByKind.count).")
     }
     let specs = (0..<Main.envIdsByKind.count).map { i in
-      let row = 6 + i * EnvSpec.stride
+      let row = 5 + i * EnvSpec.stride
       return EnvSpec(
         nameHash: tbl[row], naturalO: Int(tbl[row + 1]), actionKind: Int(tbl[row + 2]),
         actionCount: Int(tbl[row + 3]), actionParams: Int(tbl[row + 4]),
@@ -358,14 +357,13 @@ final class Engine {
     }
     guard tbl[1] == UInt32(specs.map(\.naturalO).max()!),
       tbl[2] == UInt32(specs.map(\.actionCount).max()!),
-      tbl[3] >= UInt32(specs.filter { $0.mjIndex < 0 }.map(\.envStateWords).max() ?? 0),
-      tbl[4] == UInt32(specs.filter { $0.mjIndex < 0 }.map(\.naturalO).max()!)
+      tbl[3] >= UInt32(specs.filter { $0.mjIndex < 0 }.map(\.envStateWords).max() ?? 0)
     else {
       throw err(
         "Env maxima drift: kernel obs/act max \(tbl[1])/\(tbl[2]) vs table "
           + "\(specs.map(\.naturalO).max()!)/\(specs.map(\.actionCount).max()!).")
     }
-    return EnvTable(specs: specs, constantWords: Int(tbl[5]))
+    return EnvTable(specs: specs, constantWords: Int(tbl[4]))
   }
   init(
     laneEnvs: [String], batch b: Int, dev: MTLDevice, lib: MTLLibrary,
@@ -400,7 +398,7 @@ final class Engine {
       probeCache[r.kind] = sp
       let anchors = Int(sp.anchorCount)
       precondition(anchors % Engine.simdWidth == 0, "perception budget must tile the simd width")
-      precondition(Int(sp.rank) == anchors * 3, "gate-bank identity broken")
+      precondition(Int(sp.rank) == anchors * 15, "gate-bank identity broken")
       precondition(Int(sp.stateStride) % 4 == 0, "stateStride must stay 16B-aligned")
       let cfgB = dev.makeBuffer(
         length: MemoryLayout<KernelConfig>.stride, options: [.storageModeShared])!
@@ -1165,6 +1163,11 @@ final class TapeWriter {
     "ProceduralMaze-cont-v0", "HighDimMaze-cont-v0", "POMaze-cont-v0", "DelayedChain-cont-v0",
     "JellyBeanWorld-cont-v0",
   ]
+  static func fnv1a(_ s: String) -> UInt32 {
+    var h: UInt32 = 0x811c_9dc5
+    for b in Array(s.utf8) { h = (h ^ UInt32(b)) &* 16_777_619 }
+    return h
+  }
   static func envKind(_ envId: String) throws -> UInt32 {
     guard let i = envIdsByKind.firstIndex(of: envId) else {
       throw err("Unknown env '\(envId)'. Known: \(envIdsByKind.joined(separator: ", ")).")
@@ -1182,7 +1185,6 @@ final class TapeWriter {
     let encodeInit: (MTLComputeCommandEncoder) -> Void
     let encodeMegastep: (MTLComputeCommandEncoder, Int, Int) -> Void
     let encodeSnapshot: (MTLComputeCommandEncoder, Int) -> Void
-    let writeDebugRaw: (String, Int) throws -> Void
     let laneHashes: (Int, UnsafeRawPointer) -> [String: String]
     let diagFields: [String]
     let diagValues: (Int, Int, Int) -> [Float]
@@ -1287,16 +1289,11 @@ final class TapeWriter {
         for i in 0..<B { op[i] = UInt32(offsets[i]) }
       }
       let blob = try MjBlob.load()
-      func fnv1a(_ s: String) -> UInt32 {
-        var h: UInt32 = 0x811c_9dc5
-        for b in Array(s.utf8) { h = (h ^ UInt32(b)) &* 16_777_619 }
-        return h
-      }
       var mjEntryByKind: [Int: MjEntry] = [:]
       for (kind, spec) in envTable.enumerated() where spec.mjIndex >= 0 {
         let envId = Main.envIdsByKind[kind]
         guard spec.mjIndex < blob.entries.count,
-          blob.entries[spec.mjIndex].nameHash == fnv1a(envId)
+          blob.entries[spec.mjIndex].nameHash == Main.fnv1a(envId)
         else { throw err("\(envId): mjIndex \(spec.mjIndex) does not match mjmodels.bin.") }
         let entry = blob.entries[spec.mjIndex]
         guard entry.stateWords == spec.envStateWords else {
@@ -1369,23 +1366,12 @@ final class TapeWriter {
         $0.count % candidate == 0 && $0.firstLane % candidate == 0
       }
     }!
-    func uintEnv(_ name: String) throws -> UInt32? {
-      guard let raw = e[name] else { return nil }
-      guard let v = UInt32(raw.trimmingCharacters(in: .whitespaces)) else {
-        throw err("\(name)='\(raw)' is not an unsigned decimal integer.")
-      }
-      return v
-    }
-    let stageMask = try uintEnv("OAK_MEGA_STAGE_MASK")
+    let stageMask = try stageMaskEnv(e)
     func baseConstants() -> MTLFunctionConstantValues {
       let c = MTLFunctionConstantValues()
       ablations.apply(to: c)
       var megaG32 = UInt32(megaG)
       c.setConstantValue(&megaG32, type: .uint, index: OakConst.megaG.rawValue)
-      if e["OAK_PROBE_FTZ"] == "1" {
-        var b = true
-        c.setConstantValue(&b, type: .bool, index: OakConst.probeFtz.rawValue)
-      }
       if e["OAK_PROBE_FIXEDIDX"] == "1" {
         var b = true
         c.setConstantValue(&b, type: .bool, index: OakConst.probeFixedIdx.rawValue)
@@ -1424,19 +1410,17 @@ final class TapeWriter {
     guard variantPipes.allSatisfy({ $0.threadExecutionWidth == core }) else {
       throw err("simd width \(core) differs across specialized pipelines.")
     }
-    func laneSlotBytes(_ gk: Int, _ spl: Int) -> Int {
+    func laneSlotBytes(_ gk: Int) -> Int {
       (5 * tgOptionCount + 1) * gk * MemoryLayout<Float>.stride
-        + (spl > 1 ? 3 * gk * 32 * spl * MemoryLayout<Float>.stride : 0)
     }
     for (ki, pipe) in variantPipes.enumerated() {
       let gk = kindMegaG[ki]
-      let spl = min(32 / gk, max(1, Int(engine.kinds[ki].off.anchorCount) / 32))
-      let slotBytes = laneSlotBytes(gk, spl)
-      guard gk >= 1, core * gk * spl <= pipe.maxTotalThreadsPerThreadgroup,
+      let slotBytes = laneSlotBytes(gk)
+      guard gk >= 1, core * gk <= pipe.maxTotalThreadsPerThreadgroup,
         slotBytes <= dev.maxThreadgroupMemoryLength
       else {
         throw err(
-          "megaG=\(gk) spl=\(spl) needs \(core * gk * spl) threads/threadgroup (pipeline max \(pipe.maxTotalThreadsPerThreadgroup)) and \(slotBytes) tg bytes (device max \(dev.maxThreadgroupMemoryLength))."
+          "megaG=\(gk) needs \(core * gk) threads/threadgroup (pipeline max \(pipe.maxTotalThreadsPerThreadgroup)) and \(slotBytes) tg bytes (device max \(dev.maxThreadgroupMemoryLength))."
         )
       }
     }
@@ -1503,11 +1487,10 @@ final class TapeWriter {
           enc.setBytes(&span, length: MemoryLayout<SIMD3<UInt32>>.stride, index: OakBuf.aux2.rawValue)
           enc.setBuffer(bufs.diagAccumBuf, offset: 0, index: OakBuf.diagAccum.rawValue)
           let gk = kindMegaG[run.kindIdx]
-          let spl = min(32 / gk, max(1, Int(kd.off.anchorCount) / 32))
-          enc.setThreadgroupMemoryLength(laneSlotBytes(gk, spl), index: 0)
+          enc.setThreadgroupMemoryLength(laneSlotBytes(gk), index: 0)
           enc.dispatchThreadgroups(
             MTLSize(width: run.tgCount, height: 1, depth: 1),
-            threadsPerThreadgroup: mtlSize(core * gk * spl))
+            threadsPerThreadgroup: mtlSize(core * gk))
         }
         enc.memoryBarrier(scope: [.buffers])
       },
@@ -1530,20 +1513,6 @@ final class TapeWriter {
           enc.setBuffer(bufs.diagAccumBuf, offset: 0, index: OakBuf.diagAccum.rawValue)
           enc.setBuffer(bufs.diagOutBuf, offset: 0, index: OakBuf.diagOut.rawValue)
           enc.dispatchThreadgroups(mtlSize(kd.count), threadsPerThreadgroup: mtlSize(core))
-        }
-      },
-      writeDebugRaw: { rawDir, step in
-        for lane in 0..<min(64, B) {
-          let kd = engine.kind(of: lane)
-          let d = Data(
-            bytes: engine.statePtr(lane), count: kd.stateTotal * MemoryLayout<Float>.stride)
-          try d.write(to: URL(fileURLWithPath: "\(rawDir)/state-l\(lane)-s\(step).bin"))
-          let du = Data(
-            bytes: engine.uintPtr(lane), count: kd.uintTotal * MemoryLayout<UInt32>.stride)
-          try du.write(to: URL(fileURLWithPath: "\(rawDir)/uints-l\(lane)-s\(step).bin"))
-          let dp = Data(
-            bytes: engine.paramPtr(lane), count: kd.paramTotal * MemoryLayout<Float>.stride)
-          try dp.write(to: URL(fileURLWithPath: "\(rawDir)/params-l\(lane)-s\(step).bin"))
         }
       },
       laneHashes: { lane, laneBytes in
@@ -1654,11 +1623,6 @@ final class TapeWriter {
       q = queue
     }
     do {
-      func fnv1a(_ s: String) -> UInt32 {
-        var h: UInt32 = 0x811c_9dc5
-        for b in Array(s.utf8) { h = (h ^ UInt32(b)) &* 16_777_619 }
-        return h
-      }
       for (i, name) in Self.envIdsByKind.enumerated() {
         guard envTable[i].nameHash == fnv1a(name) else {
           throw err("Env table drift at kind \(i): kernel hash != fnv1a(\(name)).")
@@ -1675,7 +1639,7 @@ final class TapeWriter {
     Self.pendingMeta["hardware"] = Self.hardwareInfo(dev)
     Self.pendingMeta["hardwareKey"] = Self.hardwareKey(dev)
     try Self.writeRunMeta(root, envTable)
-    for flag in ["OAK_PROBE_FTZ", "OAK_PROBE_FIXEDIDX", "OAK_MEGA_STAGE_MASK"] where e[flag] != nil {
+    for flag in ["OAK_PROBE_FIXEDIDX", "OAK_MEGA_STAGE_MASK"] where e[flag] != nil {
       fputs("\(flag)=\(e[flag]!): timing instrument, trajectories are garbage\n", stderr)
     }
     let bufs = try FleetBuffers(
@@ -1699,7 +1663,7 @@ final class TapeWriter {
   static let ppoLR = 3e-4
   static let ppoAdamB2 = 0.999
   static let ppoAdamEps = 1e-5
-  static func baselineMask(_ e: [String: String]) throws -> UInt32? {
+  static func stageMaskEnv(_ e: [String: String]) throws -> UInt32? {
     guard let raw = e["OAK_MEGA_STAGE_MASK"] else { return nil }
     guard let v = UInt32(raw.trimmingCharacters(in: .whitespaces)) else {
       throw err("OAK_MEGA_STAGE_MASK='\(raw)' is not an unsigned decimal integer.")
@@ -1712,7 +1676,7 @@ final class TapeWriter {
   ) throws -> FleetPipes {
     func pipeline(_ name: String) throws -> MTLComputePipelineState {
       let constants = MTLFunctionConstantValues()
-      if let mask = try baselineMask(e) {
+      if let mask = try stageMaskEnv(e) {
         var m = mask
         constants.setConstantValue(&m, type: .uint, index: OakConst.megaStageMask.rawValue)
       }
@@ -1815,7 +1779,6 @@ final class TapeWriter {
         }
         enc.dispatchThreads(mtlSize(B), threadsPerThreadgroup: laneTG)
       },
-      writeDebugRaw: { _, _ in },
       laneHashes: { lane, laneBytes in
         var hs = ["lane": sha256Hex(UnsafeRawBufferPointer(start: laneBytes, count: fleetLaneStride))]
         if isPpo {
@@ -2000,9 +1963,6 @@ final class TapeWriter {
       }
     }
     func writeHashes(step: Int) throws {
-      if let rawDir = e["OAK_DEBUG_RAW"] {
-        try pipes.writeDebugRaw(rawDir, step)
-      }
       guard let h = hashHandle else { return }
       for lane in 0..<B {
         let laneBytes = bufs.laneBuf.contents() + lane * fleetLaneStride

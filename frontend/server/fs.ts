@@ -1,11 +1,6 @@
 import { lstat, stat } from 'node:fs/promises';
 
-export interface FileStat {
-  size: number;
-  mtimeMs: number;
-}
-
-export async function statOrNull(path: string): Promise<FileStat | null> {
+export async function statOrNull(path: string): Promise<{ size: number; mtimeMs: number } | null> {
   try {
     const st = await stat(path);
     return { size: st.size, mtimeMs: st.mtimeMs };
@@ -14,13 +9,9 @@ export async function statOrNull(path: string): Promise<FileStat | null> {
   }
 }
 
-export interface LinkStat extends FileStat {
-  isSymbolicLink: boolean;
-  isDirectory: boolean;
-  isFile: boolean;
-}
-
-export async function lstatOrNull(path: string): Promise<LinkStat | null> {
+export async function lstatOrNull(
+  path: string,
+): Promise<{ size: number; mtimeMs: number; isSymbolicLink: boolean; isDirectory: boolean; isFile: boolean } | null> {
   try {
     const st = await lstat(path);
     return {

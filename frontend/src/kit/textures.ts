@@ -1,9 +1,9 @@
 import * as THREE from 'three';
 import { hash2f } from './rng';
 
-export const MAX_TEXTURE_SIZE = 1024;
+const MAX_TEXTURE_SIZE = 1024;
 
-export function clampSize(size: number): number {
+function clampSize(size: number): number {
   const s = Math.max(4, Math.min(MAX_TEXTURE_SIZE, Math.floor(size) || 4));
   return 1 << Math.floor(Math.log2(s));
 }
@@ -87,7 +87,7 @@ export function fbm(seed: number, opts: FbmOptions = {}): THREE.DataTexture {
 }
 
 
-export function fieldToRGBA(field: Float32Array): Uint8Array {
+function fieldToRGBA(field: Float32Array): Uint8Array {
   const rgba = new Uint8Array(field.length * 4);
   for (let i = 0; i < field.length; i++) {
     const v = (clamp01(field[i] as number) * 255) | 0;

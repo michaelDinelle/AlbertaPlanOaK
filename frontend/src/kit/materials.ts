@@ -55,13 +55,11 @@ export function oakUniforms(material: THREE.Material | null | undefined): OakHan
   return isOakHandle(ud) ? ud : null;
 }
 
-export function setMaterialTime(material: THREE.Material | null | undefined, t: number): void {
-  const h = oakUniforms(material);
-  if (h) h.uniforms.uTime.value = t;
-}
-
 export function setMaterialsTime(materials: readonly (THREE.Material | null | undefined)[], t: number): void {
-  for (let i = 0; i < materials.length; i++) setMaterialTime(materials[i], t);
+  for (let i = 0; i < materials.length; i++) {
+    const h = oakUniforms(materials[i]);
+    if (h) h.uniforms.uTime.value = t;
+  }
 }
 
 export interface OakWindOptions {

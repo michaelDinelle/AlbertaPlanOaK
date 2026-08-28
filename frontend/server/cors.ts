@@ -1,4 +1,4 @@
-export const DEV_ORIGINS: readonly string[] = [
+const DEV_ORIGINS: readonly string[] = [
   'http://localhost:5173',
   'http://127.0.0.1:5173',
 ] as const;

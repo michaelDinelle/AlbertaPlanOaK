@@ -1,15 +1,11 @@
 import { open, readdir, stat } from 'node:fs/promises';
 import { join } from 'node:path';
 import { TAPE_MAGIC } from '@shared/types';
-import type { RunDetail, RunIndexEntry, RunMeta, RunSummary } from '@shared/types';
+import type { BaselinePolicy, RunDetail, RunIndexEntry, RunMeta, RunSummary } from '@shared/types';
 import { statOrNull } from './fs';
 import { readPoseIndex, toRecordingRefs, type PoseIndex, type RecordingEntry } from './recordings';
 
-export type BaselineIds = Partial<Record<'ppo' | 'random', string>>;
-
 export interface TapeShape {
-  laneCount: number;
-  fields: string[];
   rows: number;
   maxStep: number;
   rowIntervalMs: number;
@@ -41,17 +37,8 @@ async function readTapeShapeUncached(path: string, st: FileStamp): Promise<TapeS
     const got = await handle.read(head, 0, head.byteLength, 0);
     if (got.bytesRead < 12) return null;
     if (head.readUInt32LE(0) !== TAPE_MAGIC) return null;
-    const laneCount = head.readUInt32LE(4);
     const jsonLen = head.readUInt32LE(8);
     if (12 + jsonLen > got.bytesRead) return null;
-    let fields: string[];
-    try {
-      const parsed = JSON.parse(head.subarray(12, 12 + jsonLen).toString('utf8')) as { fields?: unknown };
-      if (!Array.isArray(parsed.fields)) return null;
-      fields = parsed.fields.filter((f): f is string => typeof f === 'string');
-    } catch {
-      return null;
-    }
     const headerBytes = 12 + jsonLen;
     let rows = 0;
     let maxStep = 0;
@@ -73,7 +60,7 @@ async function readTapeShapeUncached(path: string, st: FileStamp): Promise<TapeS
     }
     if (rows > 1) rowIntervalMs = (lastWall - prevWall) * 1000;
     return {
-      laneCount, fields, rows, maxStep,
+      rows, maxStep,
       rowIntervalMs: Number.isFinite(rowIntervalMs) && rowIntervalMs > 0 ? rowIntervalMs : 0,
       mtimeMs: st.mtimeMs,
     };
@@ -88,7 +75,7 @@ export interface ResolvedRun {
   meta: RunMeta;
   tape: TapeShape;
   entry: RunIndexEntry;
-  baselines: BaselineIds;
+  baselines: Partial<Record<BaselinePolicy, string>>;
 }
 
 function readRunMeta(raw: string): RunMeta | null {
@@ -117,10 +104,6 @@ function envIdsOf(meta: RunMeta): string[] {
   return seen;
 }
 
-export interface RunIndexOptions {
-  benchRoot: string;
-}
-
 export class RunIndex {
   readonly benchRoot: string;
 
@@ -130,7 +113,7 @@ export class RunIndex {
   private lastRejected = '';
   private inFlightScan: Promise<void> | null = null;
 
-  constructor(opts: RunIndexOptions) {
+  constructor(opts: { benchRoot: string }) {
     this.benchRoot = opts.benchRoot;
   }
 
@@ -213,7 +196,6 @@ export class RunIndex {
       entry: {
         id,
         envIds: envIdsOf(meta),
-        batch: meta.batch,
         steps: meta.steps,
         ablationLabel: meta.ablationLabel,
         startedAt: typeof meta.startedAt === 'string' ? meta.startedAt : null,
@@ -309,16 +291,14 @@ function readRunSummary(raw: string): RunSummary | null {
   }
   if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) return null;
   const o = parsed as Record<string, unknown>;
-  for (const key of ['envs', 'aggregate', 'bootstrap'] as const) {
+  for (const key of ['envs', 'aggregate'] as const) {
     const v = o[key];
     if (v === null || typeof v !== 'object' || Array.isArray(v)) return null;
   }
   if (!Array.isArray(o['curveSteps']) || !Array.isArray(o['curveSeconds'])
     || o['curveSteps'].length !== o['curveSeconds'].length
     || !Array.isArray(o['plasticitySteps'])) return null;
-  if (typeof o['generatedAt'] !== 'string') return null;
-  if (typeof o['horizon'] !== 'number' || typeof o['maxStep'] !== 'number') return null;
-  if (typeof o['seedsPerEnv'] !== 'number' || typeof o['complete'] !== 'boolean') return null;
+  if (typeof o['seedsPerEnv'] !== 'number') return null;
   return parsed as RunSummary;
 }
 

@@ -5,7 +5,6 @@ constant float MJ_MAXVAL = 1e10f;
 constant float MJ_MINMU = 1e-5f;
 constant float MJ_MINIMP = 0.0001f;
 constant float MJ_MAXIMP = 0.9999f;
-constant float MJ_CHOL_EPS = 1e-12f;
 constant float MJ_SOLVER_TOL = 1e-5f;
 constant float MJ_LS_TOL = 0.01f;
 constant int MJ_SOLVER_ITER = 10;
@@ -532,56 +531,6 @@ inline float mj_gaussCost(PS qfrc_smooth, PAS qacc_smooth, PM Ma, PQ qacc) {
         g = fma(0.5f*(Ma[i] - qfrc_smooth[i]), qacc[i] - qacc_smooth[i], g);
     return g;
 }
-template<uint NV>
-inline void mj_cholFactor(thread float *L) {
-    for (int j = 0; j < int(NV); j++) {
-        float t = L[j*int(NV) + j];
-        for (int k = 0; k < j; k++) t -= L[j*int(NV) + k]*L[j*int(NV) + k];
-        if (t < MJ_MINVAL) t = MJ_MINVAL;
-        L[j*int(NV) + j] = sqrt(t);
-        float inv = 1.0f / L[j*int(NV) + j];
-        for (int i = j + 1; i < int(NV); i++) {
-            float v = L[i*int(NV) + j];
-            for (int k = 0; k < j; k++) v -= L[i*int(NV) + k]*L[j*int(NV) + k];
-            L[i*int(NV) + j] = v*inv;
-        }
-    }
-}
-template<uint NV>
-inline void mj_cholSolve(thread const float *L, thread const float *x, thread float *res) {
-    for (int i = 0; i < int(NV); i++) {
-        float t = x[i];
-        for (int j = 0; j < i; j++) t -= L[i*int(NV) + j]*res[j];
-        res[i] = t / L[i*int(NV) + i];
-    }
-    for (int i = int(NV) - 1; i >= 0; i--) {
-        float t = res[i];
-        for (int j = i + 1; j < int(NV); j++) t -= L[j*int(NV) + i]*res[j];
-        res[i] = t / L[i*int(NV) + i];
-    }
-}
-template<uint NV>
-inline int mj_cholUpdate(thread float *L, thread float *vec, int flgPlus) {
-    int rank = int(NV);
-    for (int i = 0; i < int(NV); i++) {
-        if (vec[i] != 0.0f) {
-            float Lii = L[i*int(NV) + i];
-            float t = Lii*Lii + (flgPlus ? vec[i]*vec[i] : -(vec[i]*vec[i]));
-            if (t < MJ_CHOL_EPS) { t = MJ_CHOL_EPS; rank--; }
-            float r = sqrt(t);
-            float c = r / Lii;
-            float sf = vec[i] / Lii;
-            L[i*int(NV) + i] = r;
-            if (flgPlus) {
-                for (int j = i + 1; j < int(NV); j++) L[j*int(NV) + i] = (L[j*int(NV) + i] + sf*vec[j]) / c;
-            } else {
-                for (int j = i + 1; j < int(NV); j++) L[j*int(NV) + i] = (L[j*int(NV) + i] - sf*vec[j]) / c;
-            }
-            for (int j = i + 1; j < int(NV); j++) vec[j] = c*vec[j] - sf*L[j*int(NV) + i];
-        }
-    }
-    return rank;
-}
 
 template<uint NQ, uint NV, uint NU, uint NBODY, uint NGEOM, uint NJNT, uint NPAIR, uint NCON, uint NEFC, uint NM>
 struct MjEngine {
@@ -681,11 +630,6 @@ struct MjEngine {
         PF stageXmat;
         PF subCom;
         PF rneCfrc;
-        PF cfrcOut;
-        PF rkQ0;
-        PF rkXv;
-        PF rkFa;
-        PF rkVel;
         PF pcbuf;
         PF conPos;
         PF conFrame;
@@ -703,8 +647,6 @@ struct MjEngine {
         int nefc;
     };
     using Work = WorkT<device float *>;
-    using TWork = WorkT<thread float *>;
-    enum : uint { KINWORK_WORDS = 53u*NBODY + 13u*NV + 6u*NGEOM };
 
 
 
@@ -818,11 +760,6 @@ struct MjEngine {
         w.stageXmat = p; p += 9u*NBODY;
         w.subCom = p; p += 3u*NBODY;
         w.rneCfrc = p; p += 6u*NBODY;
-        w.cfrcOut = p; p += 6u*NBODY;
-        w.rkQ0 = p; p += NV + NBODY;
-        w.rkXv = p; p += 4u*NV;
-        w.rkFa = p; p += 4u*NV;
-        w.rkVel = p; p += NV;
         w.pcbuf = p; p += 40u;
         w.conPos = p; p += 3u*(NCON == 0u ? 1u : NCON);
         w.conFrame = p; p += 9u*(NCON == 0u ? 1u : NCON);
@@ -835,58 +772,6 @@ struct MjEngine {
         w.conB2 = (device int *)p; p += (NCON == 0u ? 1u : NCON);
         w.conDim = (device int *)p; p += (NCON == 0u ? 1u : NCON);
         w.conRows = (device int *)p; p += (NCON == 0u ? 1u : NCON);
-        w.scale = 0.0f;
-        w.ncon = 0;
-        w.nefc = 0;
-        return w;
-    }
-
-    static TWork bindKinWork(thread float *buf) {
-        TWork w;
-        thread float *p = buf;
-        w.xipos = p; p += 3u*NBODY;
-        w.ximat = p; p += 9u*NBODY;
-        w.xanchor = p; p += 3u*NV;
-        w.xaxis = p; p += 3u*NV;
-        w.geom_xpos = p; p += 3u*NGEOM;
-        w.geom_xaxis = p; p += 3u*NGEOM;
-        w.cinert = p; p += 10u*NBODY;
-        w.cdof = p; p += 6u*NV;
-        w.cvel = p; p += 6u*NBODY;
-        w.qfrc_bias = p; p += NV;
-        w.stageXpos = p; p += 3u*NBODY;
-        w.stageXquat = p; p += 4u*NBODY;
-        w.stageXmat = p; p += 9u*NBODY;
-        w.subCom = p; p += 3u*NBODY;
-        w.rneCfrc = p; p += 6u*NBODY;
-        w.M = buf;
-        w.qLD = buf;
-        w.qLDiagInv = buf;
-        w.efc_J = buf;
-        w.efc_pos = buf;
-        w.efc_D = buf;
-        w.efc_aref = buf;
-        w.qfrc_smooth = buf;
-        w.qacc_smooth = buf;
-        w.qacc = buf;
-        w.qfrc_constraint = buf;
-        w.cfrcOut = buf;
-        w.rkQ0 = buf;
-        w.rkXv = buf;
-        w.rkFa = buf;
-        w.rkVel = buf;
-        w.pcbuf = buf;
-        w.conPos = buf;
-        w.conFrame = buf;
-        w.conMu = buf;
-        w.conSolref = buf;
-        w.conSolimp = buf;
-        w.conMargin = buf;
-        w.conDist = buf;
-        w.conB1 = (device int *)0;
-        w.conB2 = (device int *)0;
-        w.conDim = (device int *)0;
-        w.conRows = (device int *)0;
         w.scale = 0.0f;
         w.ncon = 0;
         w.nefc = 0;
@@ -1881,116 +1766,6 @@ struct MjEngine {
         }
     }
 
-    static void stepPhysicsRK(thread const Model &m, State s, thread Work &w, uint slane) {
-        bool bad = isBadVecQ(s.qpos) || isBadVecV(s.qvel);
-        if (bad) {
-            if (slane == 0u) clearState(m, s);
-            simdgroup_barrier(mem_flags::mem_device);
-        }
-        forward(m, s, w, slane);
-        if (isBadVecV(w.qacc)) {
-            if (slane == 0u) clearState(m, s);
-            simdgroup_barrier(mem_flags::mem_device);
-            forward(m, s, w, slane);
-        }
-        float h = m.timestep;
-        float v0[NV];
-        for (int i = 0; i < int(NV); i++) v0[i] = s.qvel[i];
-        for (int i = int(slane); i < int(NQ); i += 32) w.rkQ0[i] = s.qpos[i];
-        for (int i = int(slane); i < int(NV); i += 32) {
-            w.rkXv[i] = v0[i];
-            w.rkFa[i] = w.qacc[i];
-            s.qacc_warmstart[i] = w.qacc[i];
-        }
-        simdgroup_barrier(mem_flags::mem_device);
-        for (int st = 1; st < 4; st++) {
-            float a = (st == 3) ? 1.0f : 0.5f;
-            float dXv[NV], dXa[NV];
-            for (int i = 0; i < int(NV); i++) {
-                dXv[i] = a*w.rkXv[int(NV)*(st - 1) + i];
-                dXa[i] = a*w.rkFa[int(NV)*(st - 1) + i];
-            }
-            for (int i = int(slane); i < int(NQ); i += 32) s.qpos[i] = w.rkQ0[i];
-            simdgroup_barrier(mem_flags::mem_device);
-            integratePos(m, s, (thread const float *)dXv, h, slane, 32u);
-            for (int i = int(slane); i < int(NV); i += 32) s.qvel[i] = v0[i] + h*dXa[i];
-            simdgroup_barrier(mem_flags::mem_device);
-            forward(m, s, w, slane);
-            for (int i = int(slane); i < int(NV); i += 32) {
-                w.rkXv[int(NV)*st + i] = s.qvel[i];
-                w.rkFa[int(NV)*st + i] = w.qacc[i];
-                s.qacc_warmstart[i] = w.qacc[i];
-            }
-            simdgroup_barrier(mem_flags::mem_device);
-        }
-        float dXv[NV], dXa[NV];
-        for (int i = 0; i < int(NV); i++) {
-            dXv[i] = (w.rkXv[i] + 2.0f*w.rkXv[int(NV) + i] + 2.0f*w.rkXv[2*int(NV) + i] + w.rkXv[3*int(NV) + i]) * (1.0f/6.0f);
-            dXa[i] = (w.rkFa[i] + 2.0f*w.rkFa[int(NV) + i] + 2.0f*w.rkFa[2*int(NV) + i] + w.rkFa[3*int(NV) + i]) * (1.0f/6.0f);
-        }
-        for (int i = int(slane); i < int(NQ); i += 32) s.qpos[i] = w.rkQ0[i];
-        for (int i = int(slane); i < int(NV); i += 32) s.qvel[i] = v0[i] + h*dXa[i];
-        simdgroup_barrier(mem_flags::mem_device);
-        integratePos(m, s, (thread const float *)dXv, h, slane, 32u);
-        simdgroup_barrier(mem_flags::mem_device);
-    }
-
-    static void cfrcExt(thread const Model &m, thread Work &w, uint slane) {
-        float qacc[NV];
-        for (int v = 0; v < int(NV); v++) qacc[v] = w.qacc[v];
-        if (slane == 0u)
-            for (int k = 0; k < int(6*NBODY); k++) w.cfrcOut[k] = 0.0f;
-        simdgroup_barrier(mem_flags::mem_device);
-        int totalRows = 0;
-        for (int c = 0; c < w.ncon; c++) totalRows += w.conRows[c];
-        int adr = w.nefc - totalRows;
-        for (int c = 0; c < w.ncon; c++) {
-            int rows = w.conRows[c];
-            if (rows == 0) continue;
-            int myadr = adr;
-            adr += rows;
-            int dim = w.conDim[c];
-            float lfrc[3] = { 0.0f, 0.0f, 0.0f };
-            if (dim == 1) {
-                float jar = mj_dotDevRow<NV>(w.efc_J + int(NV)*myadr, (thread const float *)qacc, -w.efc_aref[myadr]);
-                lfrc[0] = (jar < 0.0f) ? -w.efc_D[myadr]*jar : 0.0f;
-            } else {
-                float pyr[4];
-                for (int r = 0; r < 4; r++) {
-                    float jar = mj_dotDevRow<NV>(w.efc_J + int(NV)*(myadr + r), (thread const float *)qacc, -w.efc_aref[myadr + r]);
-                    pyr[r] = (jar < 0.0f) ? -w.efc_D[myadr + r]*jar : 0.0f;
-                }
-                lfrc[0] = pyr[0] + pyr[1] + pyr[2] + pyr[3];
-                lfrc[1] = (pyr[0] - pyr[1]) * w.conMu[c];
-                lfrc[2] = (pyr[2] - pyr[3]) * w.conMu[c];
-            }
-            float force[3];
-            for (int k = 0; k < 3; k++)
-                force[k] = w.conFrame[9*c + 0*3 + k]*lfrc[0] + w.conFrame[9*c + 1*3 + k]*lfrc[1]
-                         + w.conFrame[9*c + 2*3 + k]*lfrc[2];
-            if (slane == 0u) {
-                for (int side = 0; side < 2; side++) {
-                    int b = (side == 0) ? w.conB1[c] : w.conB2[c];
-                    if (b == 0) continue;
-                    float sg = (side == 0) ? -1.0f : 1.0f;
-                    int r = m.body_rootid[b];
-                    float dif[3] = { w.subCom[3*r] - w.conPos[3*c],
-                                     w.subCom[3*r + 1] - w.conPos[3*c + 1],
-                                     w.subCom[3*r + 2] - w.conPos[3*c + 2] };
-                    float cr[3];
-                    mj_cross(cr, dif, force);
-                    w.cfrcOut[6*b + 0] += sg*(-cr[0]);
-                    w.cfrcOut[6*b + 1] += sg*(-cr[1]);
-                    w.cfrcOut[6*b + 2] += sg*(-cr[2]);
-                    w.cfrcOut[6*b + 3] += sg*force[0];
-                    w.cfrcOut[6*b + 4] += sg*force[1];
-                    w.cfrcOut[6*b + 5] += sg*force[2];
-                }
-            }
-        }
-        simdgroup_barrier(mem_flags::mem_device);
-    }
-
     static void clearState(thread const Model &m, State s) {
         for (int v = 0; v < int(NQ); v++) s.qpos[v] = m.qpos0[v];
         for (int v = 0; v < int(NV); v++) {
@@ -2057,20 +1832,6 @@ inline void mj_rngUAdd(uint seed, uint resetIdx, uint ctrBase, float lo, float h
         for (uint t = 0u; t < 4u; t++) {
             uint idx = 4u*b + t;
             if (idx < N) dst[idx] = base[idx] + uniformRange(raw[t], lo, hi);
-        }
-    }
-}
-
-template<uint N>
-inline void mj_rngUSet(uint seed, uint resetIdx, uint ctrBase, float lo, float hi, device float *dst) {
-    uint2 key = uint2(seed, RNG_STREAM_RESET);
-    constexpr uint NB4 = (N + 3u) / 4u;
-    for (uint b = 0u; b < NB4; b++) {
-        uint4 r = philox4x32(key, uint4(resetIdx, ctrBase + b, 0u, 0u));
-        uint raw[4] = { r.x, r.y, r.z, r.w };
-        for (uint t = 0u; t < 4u; t++) {
-            uint idx = 4u*b + t;
-            if (idx < N) dst[idx] = uniformRange(raw[t], lo, hi);
         }
     }
 }
@@ -2168,26 +1929,11 @@ inline float mj_step_env(uint envKind, constant uint *mjModels, device uint *env
         E0::Model m = E0::loadModel(mjModels, 0u);
         E0::State s = E0::bindState(envState);
         E0::Work w = E0::bindWork(scratch);
-        bool entryTerm = false;
         float reward;
-        if (entryTerm) {
-            if (slane == 0u) mjR_cheetah(m, s, seed, elapsed, resets);
-            simdgroup_barrier(mem_flags::mem_device);
-            elapsed = simd_broadcast_first(elapsed);
-            resets = simd_broadcast_first(resets);
-            E0::kinematics(m, s, w, slane, 32u);
-            E0::comPos(m, s, w, slane, 32u);
-            float qfb[9];
-            E0::comVelRne(m, s, w, qfb, slane, 32u);
-            reward = 0.0f;
-            done = 0u;
-            mjObs_cheetah(s, obs);
-        } else {
-            uint term = 0u;
-            reward = mjStep_cheetah(m, s, w, ctrl, obs, term, slane);
-            elapsed++;
-            done = term != 0u ? 1u : 0u;
-        }
+        uint term = 0u;
+        reward = mjStep_cheetah(m, s, w, ctrl, obs, term, slane);
+        elapsed++;
+        done = term != 0u ? 1u : 0u;
         reward = simd_broadcast_first(reward);
         done = simd_broadcast_first(done);
         elapsed = simd_broadcast_first(elapsed);

@@ -52,10 +52,6 @@ inline device uint *lanePersistent(device uint *envState, uint envK) {
     return envState + ((words + 3u) & ~3u);
 }
 
-inline uint lanePersistentMask(constant OakFleetEnvCfg &ecfg) {
-    return ecfg.persistentMask;
-}
-
 inline bool laneIsMj(uint envK) { return OAK_ENV_SPECS[envK].mjIndex != 0xffffffffu; }
 
 struct OakLaneSnapshot {
@@ -73,8 +69,6 @@ constant uint OAK_DIAG_PPO_PARAMS =
     ((2u * OAK_ENV_OBS_MAX * OAK_DIAG_K + 2u * OAK_DIAG_K + OAK_DIAG_K * OAK_ENV_ACT_MAX
       + 2u * OAK_ENV_ACT_MAX + OAK_DIAG_K + 1u) + 3u) & ~3u;
 
-inline uint oakDiagFloats(uint rank) { return 5u * rank + 3u + OAK_DIAG_GRAM; }
-
 struct OakDiagAccum {
     float gram[OAK_DIAG_GRAM];
     float sumAbsHiddenActor[OAK_DIAG_K];
@@ -91,7 +85,6 @@ struct PpoDiagRecord {
     float gram[OAK_DIAG_GRAM];
 };
 
-constant uint OAK_DIAG_ACCUM_FLOATS = sizeof(OakDiagAccum) / 4u;
 constant uint OAK_DIAG_OUT_FLOATS = sizeof(PpoDiagRecord) / 4u;
 
 inline float finiteOrZero(float x) { return isfinite(x) ? x : 0.0f; }
@@ -132,14 +125,14 @@ inline void observeLane(uint envK, uint laneSeed, constant uint *mjModels,
                         device uint *envState, device float *obsOut) {
     if (envK == OAK_ENV_JELLYBEANWORLD) {
         jbw_observe(laneSeed, laneEnvWords(envState, envK), lanePersistent(envState, envK),
-                    lanePersistentMask(ecfg), envConstants, 0u, 0u, 1u, obsOut);
+                    ecfg.persistentMask, envConstants, 0u, 0u, 1u, obsOut);
         return;
     }
     if (laneIsMj(envK)) {
         mj_observe(envK, mjModels, laneEnvWords(envState, envK), obsOut, 0u);
         return;
     }
-    float obs[OAK_ENV_CLASSIC_OBS_MAX];
+    float obs[OAK_ENV_OBS_MAX];
     env_observe(envK, laneEnvWords(envState, envK), obs);
     for (uint i = 0u; i < OAK_ENV_SPECS[envK].obsDimNatural; i++) obsOut[i] = obs[i];
 }
@@ -158,7 +151,7 @@ inline float advanceEnvironment(device OakFleetLane *lane, device uint *envState
     if (envK == OAK_ENV_JELLYBEANWORLD) {
         done = 0u;
         return jbw_step(laneSeed, uint(ctrl[0]), stateWords, lanePersistent(envState, envK),
-                        lanePersistentMask(ecfg), envConstants, lane->steps,
+                        ecfg.persistentMask, envConstants, lane->steps,
                         slane, wide ? 32u : 1u, obsOut);
     }
     if (laneIsMj(envK)) {
@@ -174,7 +167,7 @@ inline float advanceEnvironment(device OakFleetLane *lane, device uint *envState
     }
     float reward = 0.0f;
     if (slane == 0u) {
-        float obs[OAK_ENV_CLASSIC_OBS_MAX];
+        float obs[OAK_ENV_OBS_MAX];
         reward = env_step(envK, laneSeed, ctrl, stateWords, obs, done);
         for (uint i = 0u; i < OAK_ENV_SPECS[envK].obsDimNatural; i++) obsOut[i] = obs[i];
     }

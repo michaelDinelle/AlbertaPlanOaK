@@ -22,10 +22,8 @@ inline float memoryChain_step(device uint *words, uint laneSeed, uint action,
         cue = raw.x & 1u;
         resampleIndex = resampleIndex + 1u;
         pos = 0u;
-    } else if ((action & 1u) != 0u) {
-        pos += 1u;
     } else {
-        pos = (pos > 0u) ? pos - 1u : 0u;
+        pos = chainWalk_move(pos, action);
     }
     uint nextLastAction = action & 1u;
     words[0] = pos; words[1] = cue; words[2] = nextLastAction; words[3] = resampleIndex;

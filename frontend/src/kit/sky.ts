@@ -257,31 +257,24 @@ export function paletteSunDirection(palette: Palette, out?: THREE.Vector3): THRE
   return v.set(Math.cos(azimuth) * horiz, elevation, Math.sin(azimuth) * horiz).normalize();
 }
 
-export function isDepthColumnPalette(name: string): boolean {
-  return name === 'underwater' || name === 'abyss' || name === 'cave';
-}
-
-export interface PaletteSkyOptions extends Partial<Omit<GradientSkyOptions, 'top' | 'horizon' | 'bottom'>> {
-  depthColumn?: boolean;
-}
+export type PaletteSkyOptions = Partial<Omit<GradientSkyOptions, 'top' | 'horizon' | 'bottom'>>;
 
 export function skyFromPalette(
   palette: Palette,
   paletteName: string,
   overrides: PaletteSkyOptions = {},
 ): SkyHandle {
-  const depth = overrides.depthColumn ?? isDepthColumnPalette(paletteName);
+  const depth = paletteName === 'underwater' || paletteName === 'abyss' || paletteName === 'cave';
   const night = paletteName === 'night';
   const sunDir = depth ? null : (overrides.sunDir ?? paletteSunDirection(palette));
-  const stars = overrides.stars ?? (night ? { intensity: 2.4 } : paletteName === 'abyss' ? false : false);
-  const { depthColumn: _ignored, ...rest } = overrides;
+  const stars = overrides.stars ?? (night ? { intensity: 2.4 } : false);
   return makeGradientSky({
     top: palette.skyTop,
     horizon: palette.skyHorizon,
     bottom: palette.skyBottom,
     sunColor: palette.sun,
     sunHdr: night ? 2.5 : 6,
-    ...rest,
+    ...overrides,
     sunDir,
     stars,
   });

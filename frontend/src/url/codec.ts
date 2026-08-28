@@ -81,13 +81,7 @@ export function serializeUrlState(state: UrlState): string {
 }
 
 export function mergeUrlState(state: UrlState, patch: Partial<UrlState>): UrlState {
-  const next: UrlState = { ...state };
-  if (patch.run !== undefined) next.run = patch.run;
-  if (patch.env !== undefined) next.env = patch.env;
-  if (patch.seed !== undefined) next.seed = patch.seed;
+  const next: UrlState = { ...state, ...patch };
   if (patch.at !== undefined) next.at = Number.isFinite(patch.at) && patch.at > 0 ? Math.floor(patch.at) : 0;
-  if (patch.speed !== undefined) next.speed = patch.speed;
-  if (patch.sort !== undefined) next.sort = patch.sort;
-  if (patch.policy !== undefined) next.policy = patch.policy;
   return next;
 }

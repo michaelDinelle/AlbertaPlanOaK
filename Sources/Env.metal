@@ -20,7 +20,6 @@ constant uint OAK_ENV_JELLYBEANWORLD = 16u;
 constant uint OAK_ENV_COUNT = 17u;
 
 constant uint OAK_ENV_OBS_MAX   = 17u;
-constant uint OAK_ENV_CLASSIC_OBS_MAX = 17u;
 constant uint OAK_ENV_ACT_MAX   = 6u;
 constant uint OAK_ENV_WORDS_MAX = 10u;
 constant uint OAK_SAMPLE_SCRATCH = ((OAK_ENV_ACT_MAX + 3u) / 4u) * 4u;
@@ -115,7 +114,7 @@ inline float env_step(uint envKind, uint seed, thread const float *ctrl,
     if (envKind == OAK_ENV_POMAZE) return poMaze_step(words, seed, discreteAction, obs, &done);
     if (envKind == OAK_ENV_DELAYEDCHAIN) return delayedChain_step(words, discreteAction, obs, &done);
     done = 1u;
-    for (uint i = 0u; i < OAK_ENV_CLASSIC_OBS_MAX; i++) obs[i] = NAN;
+    for (uint i = 0u; i < OAK_ENV_OBS_MAX; i++) obs[i] = NAN;
     return NAN;
 }
 
@@ -170,62 +169,94 @@ inline void env_reset(uint envKind, uint seed,
 
 inline void env_observe(uint envKind, device const uint *words, thread float *obs) {
     if (envKind == OAK_ENV_FOURROOMS) {
-        fourRooms_obs(1u, 1u, 9u, 9u, 0u, obs);
+        fourRooms_obs(words[0], words[1], words[2], words[3], words[4], obs);
     } else if (envKind == OAK_ENV_DEEPSEA) {
-        deepSea_obs(0u, 0u, 0u, obs);
+        deepSea_obs(words[0], words[1], words[2], obs);
     } else if (envKind == OAK_ENV_KEYCORRIDOR) {
-        keyCorridor_obs(1u, 1u, 3u, 5u, 7u, 1u, 0u, 0u, obs);
+        keyCorridor_obs(words[0], words[1], words[2], words[3], words[4], words[5],
+                   words[6], words[7], obs);
     } else if (envKind == OAK_ENV_ACROBOT) {
-        acrobot_obs(0.0f, 0.0f, 0.0f, 0.0f, obs);
+        acrobot_obs(as_type<float>(words[0]), as_type<float>(words[1]),
+                    as_type<float>(words[2]), as_type<float>(words[3]), obs);
     } else if (envKind == OAK_ENV_MOUNTAINCAR) {
-        mountainCar_obs(-0.5f, 0.0f, obs);
+        mountainCar_obs(as_type<float>(words[0]), as_type<float>(words[1]), obs);
     } else if (envKind == OAK_ENV_CARTPOLE) {
-        cartPole_obs(0.0f, 0.0f, 0.0f, 0.0f, obs);
+        cartPole_obs(as_type<float>(words[0]), as_type<float>(words[1]),
+                     as_type<float>(words[2]), as_type<float>(words[3]), obs);
     } else if (envKind == OAK_ENV_PENDULUM) {
-        pendulum_obs(M_PI_F, 0.0f, obs);
+        pendulum_obs(as_type<float>(words[0]), as_type<float>(words[1]), obs);
     } else if (envKind == OAK_ENV_CHAIN) {
-        obs[0] = 0.0f; obs[1] = 1.0f;
+        obs[0] = float(words[0]) / 16.0f; obs[1] = 1.0f;
         for (uint i = 2u; i < OAK_ENV_OBS_MAX; i++) obs[i] = 0.0f;
     } else if (envKind == OAK_ENV_LARGEDEEPSEA) {
-        largeDeepSea_obs(0u, 0u, 0u, obs);
+        largeDeepSea_obs(words[0] & 15u, (words[0] >> 4u) & 15u, (words[0] >> 8u) & 1u, obs);
     } else if (envKind == OAK_ENV_MULTIKEYCORRIDOR) {
-        multiKeyCorridor_obs(1u, 1u, 3u | (5u << 4u), 7u | (5u << 4u), 11u | (5u << 4u),
-                   15u, 1u, 0u, obs);
+        multiKeyCorridor_obs(words[0], words[1], words[2], words[3], words[4],
+                   words[5], words[6], words[7], obs);
     } else if (envKind == OAK_ENV_MEMORYCHAIN) {
-        memoryChain_obs(0u, 0u, 0u, obs);
+        memoryChain_obs(words[0], words[1], words[2], obs);
     } else if (envKind == OAK_ENV_PROCEDURALMAZE) {
-        proceduralMaze_obs(1u, 1u, 9u, 9u, 0u, words[6], words[7], words[8], obs);
+        proceduralMaze_obs(words[0], words[1], words[2], words[3], words[4],
+                   words[6], words[7], words[8], obs);
     } else if (envKind == OAK_ENV_HIGHDIMMAZE) {
-        highDimMaze_obs(1u, 1u, 9u, 9u, obs);
+        highDimMaze_obs(words[0], words[1], words[2], words[3], obs);
     } else if (envKind == OAK_ENV_POMAZE) {
-        poMaze_obs(1u, 1u, 9u, 9u, obs);
+        poMaze_obs(words[0], words[1], words[2], words[3], obs);
     } else {
-        obs[0] = 0.0f; obs[1] = 0.0f; obs[2] = 1.0f;
+        obs[0] = float(words[0]) / 32.0f; obs[1] = float(words[1]); obs[2] = 1.0f;
         for (uint i = 3u; i < OAK_ENV_OBS_MAX; i++) obs[i] = 0.0f;
     }
 }
 
 
+constant uint OAK_POSE_SOURCE_CONTROL = 0xffffffffu;
+constant uint OAK_POSE_SOURCE_GOAL    = 0xfffffffeu;
+
+struct OakPosePlan {
+    uint slotCount;
+    uint wordsAreFloatBits;
+    float goal;
+    uint source[7];
+};
+
+constant OakPosePlan OAK_POSE_PLANS[OAK_ENV_COUNT] = {
+    { 0u, 0u,  0.0f, { 0u } },
+    { 4u, 0u,  0.0f, { 0u, 1u, 2u, 3u } },
+    { 5u, 0u,  7.0f, { 0u, 1u, OAK_POSE_SOURCE_GOAL, OAK_POSE_SOURCE_GOAL, OAK_POSE_SOURCE_CONTROL } },
+    { 0u, 0u,  0.0f, { 0u } },
+    { 5u, 1u,  0.0f, { 0u, 1u, 2u, 3u, OAK_POSE_SOURCE_CONTROL } },
+    { 4u, 1u,  0.5f, { 0u, 1u, OAK_POSE_SOURCE_GOAL, OAK_POSE_SOURCE_CONTROL } },
+    { 5u, 1u,  0.0f, { 0u, 1u, 2u, 3u, OAK_POSE_SOURCE_CONTROL } },
+    { 0u, 0u,  0.0f, { 0u } },
+    { 2u, 0u, 15.0f, { 0u, OAK_POSE_SOURCE_GOAL } },
+    { 0u, 0u,  0.0f, { 0u } },
+    { 0u, 0u,  0.0f, { 0u } },
+    { 4u, 0u, 31.0f, { 0u, OAK_POSE_SOURCE_GOAL, 1u, OAK_POSE_SOURCE_CONTROL } },
+    { 4u, 0u,  0.0f, { 0u, 1u, 2u, 3u } },
+    { 6u, 0u,  0.0f, { 0u, 1u, 2u, 3u, 6u, OAK_POSE_SOURCE_CONTROL } },
+    { 4u, 0u,  0.0f, { 0u, 1u, 2u, 3u } },
+    { 3u, 0u, 31.0f, { 0u, OAK_POSE_SOURCE_GOAL, 1u } },
+    { 0u, 0u,  0.0f, { 0u } },
+};
+
 inline void env_pose(uint envKind, device const uint *words,
                      thread const float *ctrl, thread float *pose) {
-    if (envKind == OAK_ENV_FOURROOMS) {
-        pose[0] = float(words[0]); pose[1] = float(words[1]);
-        pose[2] = float(words[2]); pose[3] = float(words[3]);
-        for (int i = 4; i < int(OAK_POSE_LEN); i++) pose[i] = 0.0f;
-    } else if (envKind == OAK_ENV_DEEPSEA) {
-        pose[0] = float(words[0]); pose[1] = float(words[1]);
-        pose[2] = 7.0f; pose[3] = 7.0f;
-        pose[4] = ctrl[0];
-        for (int i = 5; i < int(OAK_POSE_LEN); i++) pose[i] = 0.0f;
+    OakPosePlan plan = OAK_POSE_PLANS[envKind];
+    if (plan.slotCount != 0u) {
+        for (uint i = 0u; i < plan.slotCount; i++) {
+            uint source = plan.source[i];
+            if (source == OAK_POSE_SOURCE_CONTROL) pose[i] = ctrl[0];
+            else if (source == OAK_POSE_SOURCE_GOAL) pose[i] = plan.goal;
+            else if (plan.wordsAreFloatBits != 0u) pose[i] = as_type<float>(words[source]);
+            else pose[i] = float(words[source]);
+        }
+        for (uint i = plan.slotCount; i < OAK_POSE_LEN; i++) pose[i] = 0.0f;
     } else if (envKind == OAK_ENV_KEYCORRIDOR) {
         pose[0] = float(words[0]); pose[1] = float(words[1]);
         pose[2] = float(words[4]); pose[3] = float(words[5]);
         pose[4] = float(words[2]); pose[5] = float(words[3]);
         pose[6] = float(words[6] & 1u); pose[7] = float((words[6] >> 1u) & 1u);
         pose[8] = 0.0f;
-    } else if (envKind == OAK_ENV_CHAIN) {
-        pose[0] = float(words[0]); pose[1] = 15.0f;
-        for (int i = 2; i < int(OAK_POSE_LEN); i++) pose[i] = 0.0f;
     } else if (envKind == OAK_ENV_LARGEDEEPSEA) {
         pose[0] = float(words[0] & 15u); pose[1] = float((words[0] >> 4u) & 15u);
         pose[2] = 15.0f; pose[3] = 15.0f;
@@ -238,42 +269,6 @@ inline void env_pose(uint envKind, device const uint *words,
         pose[5] = float((words[7] >> 3u) & 7u);
         pose[6] = ctrl[0];
         for (int i = 7; i < int(OAK_POSE_LEN); i++) pose[i] = 0.0f;
-    } else if (envKind == OAK_ENV_MEMORYCHAIN) {
-        pose[0] = float(words[0]); pose[1] = 31.0f;
-        pose[2] = float(words[1]); pose[3] = ctrl[0];
-        for (int i = 4; i < int(OAK_POSE_LEN); i++) pose[i] = 0.0f;
-    } else if (envKind == OAK_ENV_PROCEDURALMAZE) {
-        pose[0] = float(words[0]); pose[1] = float(words[1]);
-        pose[2] = float(words[2]); pose[3] = float(words[3]);
-        for (int i = 4; i < int(OAK_POSE_LEN); i++) pose[i] = 0.0f;
-    } else if (envKind == OAK_ENV_HIGHDIMMAZE) {
-        pose[0] = float(words[0]); pose[1] = float(words[1]);
-        pose[2] = float(words[2]); pose[3] = float(words[3]);
-        pose[4] = float(words[6]); pose[5] = ctrl[0];
-        for (int i = 6; i < int(OAK_POSE_LEN); i++) pose[i] = 0.0f;
-    } else if (envKind == OAK_ENV_POMAZE) {
-        pose[0] = float(words[0]); pose[1] = float(words[1]);
-        pose[2] = float(words[2]); pose[3] = float(words[3]);
-        for (int i = 4; i < int(OAK_POSE_LEN); i++) pose[i] = 0.0f;
-    } else if (envKind == OAK_ENV_DELAYEDCHAIN) {
-        pose[0] = float(words[0]); pose[1] = 31.0f;
-        pose[2] = float(words[1]);
-        for (int i = 3; i < int(OAK_POSE_LEN); i++) pose[i] = 0.0f;
-    } else if (envKind == OAK_ENV_ACROBOT) {
-        float theta1 = as_type<float>(words[0]), theta2 = as_type<float>(words[1]);
-        pose[0] = theta1; pose[1] = theta2;
-        pose[2] = as_type<float>(words[2]); pose[3] = as_type<float>(words[3]);
-        pose[4] = ctrl[0];
-        for (int i = 5; i < int(OAK_POSE_LEN); i++) pose[i] = 0.0f;
-    } else if (envKind == OAK_ENV_MOUNTAINCAR) {
-        pose[0] = as_type<float>(words[0]); pose[1] = as_type<float>(words[1]);
-        pose[2] = 0.5f; pose[3] = ctrl[0];
-        for (int i = 4; i < int(OAK_POSE_LEN); i++) pose[i] = 0.0f;
-    } else if (envKind == OAK_ENV_CARTPOLE) {
-        pose[0] = as_type<float>(words[0]); pose[1] = as_type<float>(words[1]);
-        pose[2] = as_type<float>(words[2]); pose[3] = as_type<float>(words[3]);
-        pose[4] = ctrl[0];
-        for (int i = 5; i < int(OAK_POSE_LEN); i++) pose[i] = 0.0f;
     } else if (envKind == OAK_ENV_PENDULUM) {
         float theta = as_type<float>(words[0]), thetaDot = as_type<float>(words[1]);
         pose[0] = theta; pose[1] = thetaDot; pose[2] = clamp(2.0f * ctrl[0], -2.0f, 2.0f);

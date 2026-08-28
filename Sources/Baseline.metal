@@ -1,5 +1,18 @@
 #pragma METAL fp math_mode(safe)
 
+inline void writeLaneSnapshot(device OakLaneSnapshot *snap, device const OakFleetLane *lane,
+                              float paramAbsMax, uint paramNonFinite) {
+    snap->scalars.stepCount = lane->steps;
+    snap->scalars.stateSlot = 0u;
+    snap->scalars.averageReward = lane->averageReward;
+    snap->paramAbsMax = paramAbsMax;
+    snap->paramNonFinite = paramNonFinite;
+    snap->rewardSum = lane->rewardSum;
+    snap->rho = lane->averageReward;
+    snap->deathStep = lane->deathStep;
+    snap->deathDetector = lane->deathDetector;
+}
+
 inline uint baselineWord(uint seed, uint stream, uint stepIdx, uint i) {
     uint4 r = philox4x32(uint2(seed, stream), uint4(stepIdx, i >> 2u, 0u, 0u));
     uint w = i & 3u;
@@ -27,15 +40,7 @@ kernel void baseline_fleet_snapshot(device OakFleetLane *lanes [[buffer(6)]],
     if (gid >= ecfg.laneCount) return;
     device OakFleetLane *lane = &lanes[gid];
     device OakLaneSnapshot *snap = &snaps[snapBase + gid];
-    snap->scalars.stepCount = lane->steps;
-    snap->scalars.stateSlot = 0u;
-    snap->scalars.averageReward = lane->averageReward;
-    snap->paramAbsMax = -1.0f;
-    snap->paramNonFinite = 0u;
-    snap->rewardSum = lane->rewardSum;
-    snap->rho = lane->averageReward;
-    snap->deathStep = lane->deathStep;
-    snap->deathDetector = lane->deathDetector;
+    writeLaneSnapshot(snap, lane, -1.0f, 0u);
 }
 
 kernel void random_megastep(device OakFleetLane *lanes [[buffer(6)]],
@@ -365,15 +370,7 @@ kernel void ppo_fleet_snapshot(device const float *params [[buffer(0)]],
             acc->gram[g] = 0.0f;
         }
     }
-    snap->scalars.stepCount = lane->steps;
-    snap->scalars.stateSlot = 0u;
-    snap->scalars.averageReward = lane->averageReward;
-    snap->paramAbsMax = absMax;
-    snap->paramNonFinite = nonFinite;
-    snap->rewardSum = lane->rewardSum;
-    snap->rho = lane->averageReward;
-    snap->deathStep = lane->deathStep;
-    snap->deathDetector = lane->deathDetector;
+    writeLaneSnapshot(snap, lane, absMax, nonFinite);
 }
 
 kernel void ppo_megastep(device float *params [[buffer(0)]],

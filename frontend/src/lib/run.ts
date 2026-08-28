@@ -68,24 +68,9 @@ export function sortRuns(entries: readonly RunIndexEntry[]): RunIndexEntry[] {
   });
 }
 
-export type FeaturedSource = 'param' | 'keeper' | 'newest' | null;
-
-export interface FeaturedPick {
-  runId: string | null;
-  source: FeaturedSource;
-}
-
-export function resolveFeaturedRun(
-  entries: readonly RunIndexEntry[],
-  requested?: string,
-): FeaturedPick {
-  const byId = new Map<string, RunIndexEntry>();
-  for (const entry of entries) byId.set(entry.id, entry);
-
-  if (requested !== undefined && byId.has(requested)) return { runId: requested, source: 'param' };
-
+export function resolveFeaturedRun(entries: readonly RunIndexEntry[]): { runId: string | null } {
   const keeper = entries.find((entry) => entry.role === 'keeper');
-  if (keeper?.hasRecordings === true) return { runId: keeper.id, source: 'keeper' };
+  if (keeper?.hasRecordings === true) return { runId: keeper.id };
 
   const started = (entry: RunIndexEntry): number => (entry.startedAt ? Date.parse(entry.startedAt) : 0);
   const newest = (list: readonly RunIndexEntry[]): RunIndexEntry | null =>
@@ -98,10 +83,8 @@ export function resolveFeaturedRun(
 
   const playable = entries.filter((entry) => entry.policy === 'oak' && entry.hasRecordings);
   const complete = newest(playable.filter((entry) => entry.complete));
-  if (complete) return { runId: complete.id, source: 'newest' };
-  const any = newest(playable);
-  if (any) return { runId: any.id, source: 'newest' };
-  return { runId: null, source: null };
+  if (complete) return { runId: complete.id };
+  return { runId: newest(playable)?.id ?? null };
 }
 
 export type RunLabelSource = Pick<RunIndexEntry, 'id' | 'startedAt' | 'role' | 'ablationLabel' | 'policy'>;

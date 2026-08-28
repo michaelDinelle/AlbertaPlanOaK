@@ -17,10 +17,8 @@ export interface RunMeta {
   ablationLabel: string;
   policy: Policy;
   startedAt?: string;
-  finishedAt?: string;
   envSchedule: EnvScheduleEntry[];
   envCatalog: unknown[];
-  gpuSeconds?: number;
 }
 
 export const TAPE_MAGIC = 0x544b414f;
@@ -82,31 +80,19 @@ export interface BaselineComparison {
   probImprovement: ProbImprovement;
 }
 
-export interface BootstrapSpec {
-  baseSeed: number;
-  reps: number;
-  method: string;
-}
-
 export interface RunSummary {
-  complete: boolean;
-  generatedAt: string;
-  horizon: number;
-  maxStep: number;
   seedsPerEnv: number;
   curveSteps: number[];
   curveSeconds: number[];
   plasticitySteps: number[];
   envs: Record<string, EnvSummary>;
   aggregate: AggregateSummary;
-  bootstrap: BootstrapSpec;
   vsBaselines?: Partial<Record<BaselinePolicy, BaselineComparison>>;
 }
 
 export interface RunIndexEntry {
   id: string;
   envIds: string[];
-  batch: number;
   steps: number;
   ablationLabel: string;
   startedAt: string | null;
@@ -122,7 +108,6 @@ export interface RunIndexEntry {
 export interface RecordingRef {
   envId: EnvId;
   seed: number;
-  bytes: number;
 }
 
 export interface RunDetail {

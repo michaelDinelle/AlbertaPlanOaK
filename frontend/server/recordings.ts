@@ -10,7 +10,6 @@ const IDX_MAGIC = 0x494b_414f;
 export interface RecordingEntry {
   envId: EnvId;
   seed: number;
-  bytes: number;
   lane: number;
 }
 
@@ -73,8 +72,7 @@ export async function readPoseIndex(runDir: string): Promise<PoseIndex | null> {
     if (envId === undefined || !isEnvId(envId)) {
       throw new Error(`${packPath}: lane ${l} has unknown envKind ${envKind}`);
     }
-    const body = segments[l]!.reduce((n, s) => n + s.len, 0);
-    entries.push({ envId, seed: Number(laneTable.readBigInt64LE(l * 12 + 4)), bytes: body, lane: l });
+    entries.push({ envId, seed: Number(laneTable.readBigInt64LE(l * 12 + 4)), lane: l });
   }
   entries.sort((a, b) => {
     const ea = ENV_ORDER.get(a.envId) ?? 999;
@@ -86,7 +84,7 @@ export async function readPoseIndex(runDir: string): Promise<PoseIndex | null> {
 }
 
 export function toRecordingRefs(entries: readonly RecordingEntry[]): RecordingRef[] {
-  return entries.map((e) => ({ envId: e.envId, seed: e.seed, bytes: e.bytes }));
+  return entries.map((e) => ({ envId: e.envId, seed: e.seed }));
 }
 
 export function findRecording(

@@ -4,31 +4,17 @@ import { join, resolve } from 'node:path';
 import { ENV_IDS } from '../shared/envs';
 import { SCENES, nameOf } from '../src/scenes/table';
 
-const HELP = [
-  'Regenerates the environment poster images the app ships as static files.',
-  'Start the dev stack first (bun run dev), then run:',
-  '  bun scripts/posters.ts [origin]',
-  'origin defaults to http://localhost:5173. Posters land in frontend/public/posters/<slug>.webp;',
-  'commit the changed files. Set CHROME to use a different Chrome binary.',
-].join('\n');
-
 const origin = process.argv[2] ?? 'http://localhost:5173';
 const only = process.argv[3] ?? '';
 const run = process.argv[4] ?? '';
-const captureAtStep = Number(process.argv[5] ?? '200000');
 
 const CDP_PORT = 9411;
 const VIEW_W = 1280;
 const VIEW_H = 720;
 const POSTER_W = 320;
-const CAPTURE_AT_STEP = captureAtStep;
+const CAPTURE_AT_STEP = Number(process.argv[5] ?? '200000');
 const SETTLE_MS = 3000;
 const READY_TIMEOUT_MS = 30000;
-
-if (origin === '--help' || origin === '-h') {
-  console.log(HELP);
-  process.exit(0);
-}
 
 const chromeBin = process.env['CHROME'] ?? '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome';
 const profileDir = join(tmpdir(), 'oak-posters-chrome');

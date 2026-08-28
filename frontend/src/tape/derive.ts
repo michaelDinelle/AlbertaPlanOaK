@@ -31,10 +31,6 @@ export function iqmSorted(sorted: readonly number[]): number {
   return sum / (hi - lo);
 }
 
-export function iqm(values: readonly number[]): number {
-  return iqmSorted([...values].sort((a, b) => a - b));
-}
-
 export interface LaneDeath {
   step: number;
   detector: string;
@@ -73,47 +69,11 @@ export interface BinnedRates {
 
 export const retentionWindow = (steps: number): number => Math.max(Math.floor(steps / 5), 1);
 
-export function windowedRates(tape: Tape, lanes: readonly number[], win: number): BinnedRates {
-  const f = fieldIndex(tape, 'rewardSum');
-  const x: number[] = [];
-  const perLane: (number | null)[][] = lanes.map(() => []);
-  const iqmOut: (number | null)[] = [];
-  const p10: (number | null)[] = [];
-  const p90: (number | null)[] = [];
-  const scratch: number[] = [];
-  let j = 0;
-  for (let i = 0; i < tape.rows; i++) {
-    const endI = tape.stepEnd[i] ?? 0;
-    while (j < tape.rows && (tape.stepEnd[j] ?? 0) <= endI - win) j++;
-    const jj = j - 1;
-    const startStep = jj < 0 ? 0 : tape.stepEnd[jj] ?? 0;
-    const span = endI - startStep;
-    scratch.length = 0;
-    for (let li = 0; li < lanes.length; li++) {
-      const lane = lanes[li] ?? 0;
-      const dst = perLane[li];
-      if (dst === undefined) continue;
-      const si = tapeValue(tape, f, i, lane);
-      const sj = jj < 0 ? 0 : tapeValue(tape, f, jj, lane);
-      if (span > 0 && Number.isFinite(si) && Number.isFinite(sj)) {
-        const rate = (si - sj) / span;
-        dst.push(rate);
-        scratch.push(rate);
-      } else {
-        dst.push(null);
-      }
-    }
-    scratch.sort((a, b) => a - b);
-    iqmOut.push(scratch.length > 0 ? iqmSorted(scratch) : null);
-    p10.push(scratch.length > 0 ? percentileSorted(scratch, 10) : null);
-    p90.push(scratch.length > 0 ? percentileSorted(scratch, 90) : null);
-    x.push(endI);
-  }
-  return { x, perLane, iqm: iqmOut, p10, p90 };
-}
-
-export function rhoBinned(tape: Tape, lanes: readonly number[]): BinnedRates {
-  const f = fieldIndex(tape, 'rho');
+function binnedRates(
+  tape: Tape,
+  lanes: readonly number[],
+  rowValue: (row: number, lane: number) => number,
+): BinnedRates {
   const x: number[] = [];
   const perLane: (number | null)[][] = lanes.map(() => []);
   const iqmOut: (number | null)[] = [];
@@ -123,9 +83,9 @@ export function rhoBinned(tape: Tape, lanes: readonly number[]): BinnedRates {
   for (let r = 0; r < tape.rows; r++) {
     scratch.length = 0;
     for (let li = 0; li < lanes.length; li++) {
-      const v = tapeValue(tape, f, r, lanes[li] ?? 0);
       const dst = perLane[li];
       if (dst === undefined) continue;
+      const v = rowValue(r, lanes[li] ?? 0);
       if (Number.isFinite(v)) {
         dst.push(v);
         scratch.push(v);
@@ -140,6 +100,32 @@ export function rhoBinned(tape: Tape, lanes: readonly number[]): BinnedRates {
     x.push(tape.stepEnd[r] ?? 0);
   }
   return { x, perLane, iqm: iqmOut, p10, p90 };
+}
+
+export function windowedRates(tape: Tape, lanes: readonly number[], win: number): BinnedRates {
+  const f = fieldIndex(tape, 'rewardSum');
+  const priorRow = new Int32Array(tape.rows);
+  const spans = new Float64Array(tape.rows);
+  let j = 0;
+  for (let i = 0; i < tape.rows; i++) {
+    const endI = tape.stepEnd[i] ?? 0;
+    while (j < tape.rows && (tape.stepEnd[j] ?? 0) <= endI - win) j++;
+    const jj = j - 1;
+    priorRow[i] = jj;
+    spans[i] = endI - (jj < 0 ? 0 : tape.stepEnd[jj] ?? 0);
+  }
+  return binnedRates(tape, lanes, (row, lane) => {
+    const jj = priorRow[row] ?? -1;
+    const span = spans[row] ?? 0;
+    const si = tapeValue(tape, f, row, lane);
+    const sj = jj < 0 ? 0 : tapeValue(tape, f, jj, lane);
+    return span > 0 && Number.isFinite(si) && Number.isFinite(sj) ? (si - sj) / span : NaN;
+  });
+}
+
+export function rhoBinned(tape: Tape, lanes: readonly number[]): BinnedRates {
+  const f = fieldIndex(tape, 'rho');
+  return binnedRates(tape, lanes, (row, lane) => tapeValue(tape, f, row, lane));
 }
 
 export interface RetentionResult {

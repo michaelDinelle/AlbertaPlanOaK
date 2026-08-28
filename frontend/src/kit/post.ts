@@ -36,8 +36,8 @@ export interface GradeUniforms {
 
 export interface ComposerHandle {
   setBloomPulse(t01: number): void;
-  render(deltaTime?: number): void;
-  resize(width: number, height: number, dpr?: number): void;
+  render(deltaTime: number): void;
+  resize(width: number, height: number, dpr: number): void;
   dispose(): void;
 }
 
@@ -99,10 +99,10 @@ export const OakGradeShader = {
   name: 'OakGradeShader',
   uniforms: {
     tDiffuse: { value: null as THREE.Texture | null },
-    uLift: { value: new THREE.Vector3(0.012, 0.012, 0.012) },
+    uLift: { value: new THREE.Vector3(0.004, 0.004, 0.004) },
     uTint: { value: new THREE.Color(0xffffff) },
     uTintStrength: { value: 0.14 },
-    uGamma: { value: 0.97 },
+    uGamma: { value: 1.0 },
     uVignette: { value: 0.34 },
     uGrain: { value: 0.02 },
     uResolution: { value: new THREE.Vector2(1, 1) },
@@ -141,9 +141,11 @@ export function buildComposer(
   const renderPass = new RenderPass(scene, camera);
   composer.addPass(renderPass);
 
-  const scale = BLOOM_RESOLUTION_SCALE;
   const bloom = new UnrealBloomPass(
-    new THREE.Vector2(Math.max(1, Math.round(width * dpr * scale)), Math.max(1, Math.round(height * dpr * scale))),
+    new THREE.Vector2(
+      Math.max(1, Math.round(width * dpr * BLOOM_RESOLUTION_SCALE)),
+      Math.max(1, Math.round(height * dpr * BLOOM_RESOLUTION_SCALE)),
+    ),
     bloomStrength,
     0.6,
     BLOOM_THRESHOLD,
@@ -152,12 +154,7 @@ export function buildComposer(
 
   const gradePass = new ShaderPass(OakGradeShader);
   const gradeUniforms = gradePass.uniforms as unknown as GradeUniforms;
-  gradeUniforms.uLift.value.setScalar(0.004);
   gradeUniforms.uTint.value.set(resolveFog(post.fog));
-  gradeUniforms.uTintStrength.value = 0.14;
-  gradeUniforms.uGamma.value = 1.0;
-  gradeUniforms.uVignette.value = 0.34;
-  gradeUniforms.uGrain.value = 0.02;
   gradeUniforms.uResolution.value.set(width * dpr, height * dpr);
   composer.addPass(gradePass);
 
@@ -165,27 +162,27 @@ export function buildComposer(
   composer.addPass(outputPass);
 
   const resizeBloom = (w: number, h: number, ratio: number) => {
-    bloom.setSize(Math.max(1, Math.round(w * ratio * scale)), Math.max(1, Math.round(h * ratio * scale)));
+    bloom.setSize(
+      Math.max(1, Math.round(w * ratio * BLOOM_RESOLUTION_SCALE)),
+      Math.max(1, Math.round(h * ratio * BLOOM_RESOLUTION_SCALE)),
+    );
   };
   resizeBloom(width, height, dpr);
-
-  let currentDpr = dpr;
 
   return {
     setBloomPulse(t01: number) {
       bloom.strength = pulsedBloomStrength(bloomStrength, t01);
     },
-    render(deltaTime?: number) {
+    render(deltaTime: number) {
       composer.render(deltaTime);
     },
-    resize(w: number, h: number, ratio?: number) {
+    resize(w: number, h: number, ratio: number) {
       const rw = Math.max(1, Math.floor(w));
       const rh = Math.max(1, Math.floor(h));
-      currentDpr = ratio !== undefined && ratio > 0 ? ratio : currentDpr;
-      composer.setPixelRatio(currentDpr);
+      composer.setPixelRatio(ratio);
       composer.setSize(rw, rh);
-      resizeBloom(rw, rh, currentDpr);
-      gradeUniforms.uResolution.value.set(rw * currentDpr, rh * currentDpr);
+      resizeBloom(rw, rh, ratio);
+      gradeUniforms.uResolution.value.set(rw * ratio, rh * ratio);
     },
     dispose() {
       composer.removePass(renderPass);
