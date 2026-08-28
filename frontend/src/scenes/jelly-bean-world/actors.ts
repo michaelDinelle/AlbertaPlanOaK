@@ -7,6 +7,8 @@ import { emissiveMaterial, setEmissiveIntensity } from '@kit/materials';
 import { radialSprite } from '@kit/textures';
 import {
   JBW_BANANA,
+  JBW_BLOCK,
+  JBW_BLOCK_ITEMS,
   JBW_JELLY,
   JBW_ONION,
   JBW_TREE,
@@ -40,8 +42,8 @@ export const ITEM_MOTION: Record<number, { hover: number; bob: number; spin: num
   [JBW_TRUFFLE]: { hover: AGENT_SPAN * 0.62, bob: AGENT_SPAN * 0.13, spin: 1.15 },
 };
 
-export const ITEM_GLOW = 0.72;
-export const HALO_GLOW = 0.3;
+export const ITEM_GLOW = 0.34;
+export const HALO_GLOW = 0.08;
 
 export const HALO_WHITEN = 0.16;
 export const HALO_SPAN = AGENT_SPAN * 1.28;
@@ -57,14 +59,21 @@ const ITEM_SPAN: Record<number, number> = {
   [JBW_TRUFFLE]: AGENT_SPAN,
 };
 
+export const DRAW_RADIUS = 520;
+
+const DRAW_BLOCKS = ((2 * DRAW_RADIUS) / JBW_BLOCK + 2) ** 2;
+const CANDIDATES = DRAW_BLOCKS * JBW_BLOCK_ITEMS;
+
 export const ITEM_CAPACITY: Record<number, number> = {
-  [JBW_BANANA]: 4096,
-  [JBW_ONION]: 4096,
-  [JBW_JELLY]: 4096,
-  [JBW_WALL]: 16384,
-  [JBW_TREE]: 4096,
-  [JBW_TRUFFLE]: 1024,
+  [JBW_BANANA]: CANDIDATES,
+  [JBW_ONION]: CANDIDATES,
+  [JBW_JELLY]: CANDIDATES,
+  [JBW_WALL]: CANDIDATES,
+  [JBW_TREE]: CANDIDATES,
+  [JBW_TRUFFLE]: CANDIDATES,
 };
+
+export const DECAL_CAPACITY = CANDIDATES;
 
 function bananaGeometry(skin: OrchardSkin): THREE.BufferGeometry {
   const parts: ColoredPart[] = [];

@@ -121,6 +121,7 @@ export function HealthView({
   const horizon = Math.max(1, active?.meta.steps ?? 1);
   const lanesTotal = summary === null ? 0 : summary.seedsPerEnv * Object.keys(summary.envs).length;
   const divergence = summary?.aggregate.divergence ?? null;
+  const forgetting = sel.envId === null ? null : summary?.envs[sel.envId]?.forgetting ?? null;
 
   return (
     <div className="flex min-h-0 flex-1 flex-col gap-1.5 overflow-y-auto px-2 pb-1">
@@ -137,8 +138,8 @@ export function HealthView({
         />
         <Stat
           label={STR.health.faded}
-          value={summary === null ? '—' : formatRate(summary.aggregate.forgetting.phiIQM)}
-          title={summary === null ? undefined : STR.health.fadedTitle(formatRate(summary.aggregate.forgetting.ci95[0]), formatRate(summary.aggregate.forgetting.ci95[1]))}
+          value={forgetting === null ? '—' : formatRate(forgetting.iqm)}
+          title={forgetting === null ? undefined : STR.health.fadedTitle(formatRate(forgetting.ci95[0]), formatRate(forgetting.ci95[1]))}
         />
       </div>
       <Head

@@ -13,9 +13,8 @@ struct KernelScalars {
 
 struct OakFleetEnvCfg {
     uint laneCount;
-    uint episodeLen;
     uint recordCapacity;
-    uint runHorizon;
+    uint persistentMask;
     float invObsFloor;
 };
 
@@ -54,9 +53,7 @@ inline device uint *lanePersistent(device uint *envState, uint envK) {
 }
 
 inline uint lanePersistentMask(constant OakFleetEnvCfg &ecfg) {
-    uint slots = 2u;
-    while (slots < 2u * ecfg.runHorizon) slots <<= 1u;
-    return slots - 1u;
+    return ecfg.persistentMask;
 }
 
 inline bool laneIsMj(uint envK) { return OAK_ENV_SPECS[envK].mjIndex != 0xffffffffu; }
@@ -168,7 +165,7 @@ inline float advanceEnvironment(device OakFleetLane *lane, device uint *envState
         uint elapsed = lane->elapsed, resets = lane->resets;
         done = 0u;
         float mjReward = mj_step_env(envK, mjModels, stateWords, mjScratch, laneSeed, ctrl,
-                                     elapsed, resets, ecfg.episodeLen, obsOut, done, slane);
+                                     elapsed, resets, obsOut, done, slane);
         if (slane == 0u) {
             lane->elapsed = elapsed;
             lane->resets = resets;
@@ -214,7 +211,7 @@ inline void recordPose(uint envK, constant uint *mjModels, device uint *envState
                 pose[1] = float(as_type<int>(words[1]));
                 pose[2] = float(words[2]);
                 for (uint i = 0u; i < 4u; i++) pose[3u + i] = float(words[4u + i]);
-                pose[7] = float(words[8]); pose[8] = float(words[9]);
+                pose[7] = 0.0f; pose[8] = 0.0f;
             } else if (laneIsMj(envK)) {
                 mj_pose(envK, mjModels, laneEnvWords(envState, envK), ctrl, pose, 0u);
             } else {

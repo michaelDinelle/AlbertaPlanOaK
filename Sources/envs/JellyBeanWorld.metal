@@ -7,9 +7,11 @@ constant uint JBW_JELLY = 3u;
 constant uint JBW_WALL = 4u;
 constant uint JBW_TREE = 5u;
 constant uint JBW_TRUFFLE = 6u;
-constant uint JBW_RESPONSE_RADIUS = 33u;
-constant uint JBW_RESPONSE_CELLS = 561u;
+constant uint JBW_RESPONSE_RADIUS = 17u;
+constant uint JBW_RESPONSE_CELLS = 153u;
 constant uint JBW_DESTRUCTION_LIFETIME = 2000u;
+constant uint JBW_RESPONSE_WORDS = JBW_RESPONSE_CELLS * JBW_DESTRUCTION_LIFETIME;
+constant uint JBW_BLOCK_ITEMS = 4u;
 
 inline int jbw_floorDiv(int x, int d) {
     int q = x / d;
@@ -21,29 +23,39 @@ inline uint4 jbw_field(uint seed, int x, int y, uint stream) {
                      uint4(as_type<uint>(x), as_type<uint>(y), stream, 0u));
 }
 
-inline int2 jbw_candidate(uint seed, int bx, int by, uint item) {
-    uint4 r = jbw_field(seed, bx, by, 16u);
-    return int2(bx * 16 + int(r.x & 15u), by * 16 + int(r.y & 15u));
+inline int2 jbw_candidate(uint4 block, int bx, int by, uint slot) {
+    uint bits = (block.x >> (8u * slot)) & 255u;
+    return int2(bx * 16 + int(bits & 15u), by * 16 + int((bits >> 4u) & 15u));
+}
+
+inline uint jbw_typeOf(uint4 block, uint4 ecology, uint slot) {
+    uint roll = (block.y >> (8u * slot)) & 255u;
+    if ((ecology.y & 3u) == 0u) return (roll & 31u) == 0u ? JBW_TRUFFLE : JBW_TREE;
+    uint pick = roll % 3u;
+    return pick == 0u ? JBW_BANANA : pick == 1u ? JBW_JELLY : JBW_ONION;
+}
+
+inline bool jbw_wallHit(uint4 w, int bx, int by, int x, int y) {
+    if ((w.z & 7u) != 0u) return false;
+    return (w.w & 1u) == 0u ? y == by * 16 + int(w.y & 15u)
+                            : x == bx * 16 + int(w.x & 15u);
 }
 
 inline bool jbw_wallAt(uint seed, int x, int y) {
     int bx = jbw_floorDiv(x, 16), by = jbw_floorDiv(y, 16);
-    uint4 r = jbw_field(seed, bx, by, 80u);
-    if ((r.z & 7u) != 0u) return false;
-    return (r.w & 1u) == 0u ? y == by * 16 + int(r.y & 15u)
-                            : x == bx * 16 + int(r.x & 15u);
+    return jbw_wallHit(jbw_field(seed, bx, by, 80u), bx, by, x, y);
 }
 
 inline uint jbw_itemAt(uint seed, int x, int y) {
     if (jbw_wallAt(seed, x, y)) return JBW_WALL;
     int bx = jbw_floorDiv(x, 16), by = jbw_floorDiv(y, 16);
-    int2 p = jbw_candidate(seed, bx, by, 0u);
-    if (!all(p == int2(x, y))) return JBW_EMPTY;
-    uint4 r = jbw_field(seed, bx, by, 16u);
-    uint4 ecology = jbw_field(seed, jbw_floorDiv(x, 64), jbw_floorDiv(y, 64), 64u);
-    if ((ecology.y & 3u) == 0u) return (r.w & 31u) == 0u ? JBW_TRUFFLE : JBW_TREE;
-    if ((ecology.x & 3u) == 0u) return (r.z & 1u) == 0u ? JBW_BANANA : JBW_JELLY;
-    return (r.z & 3u) == 0u ? JBW_ONION : JBW_EMPTY;
+    uint4 block = jbw_field(seed, bx, by, 16u);
+    for (uint slot = 0u; slot < JBW_BLOCK_ITEMS; slot++) {
+        if (!all(jbw_candidate(block, bx, by, slot) == int2(x, y))) continue;
+        uint4 ecology = jbw_field(seed, jbw_floorDiv(x, 64), jbw_floorDiv(y, 64), 64u);
+        return jbw_typeOf(block, ecology, slot);
+    }
+    return JBW_EMPTY;
 }
 
 inline ulong jbw_key(int x, int y) {
@@ -78,7 +90,7 @@ inline void jbw_destroy(device uint *history, uint mask, int x, int y, uint step
         if (entry[2] == 0u) {
             entry[0] = uint(key >> 32u);
             entry[1] = uint(key);
-            entry[2] = step;
+            entry[2] = step + 1u;
             return;
         }
         if (entry[0] == uint(key >> 32u) && entry[1] == uint(key)) return;
@@ -124,12 +136,44 @@ inline float jbw_response(device const float *table, uint time, int dx, int dy) 
     return table[time * JBW_RESPONSE_CELLS + x * (x + 1u) / 2u + y];
 }
 
+inline void jbw_buildResponse(device float *response) {
+    for (uint i = 0u; i < JBW_RESPONSE_WORDS; i++) response[i] = 0.0f;
+    response[0] = 1.0f;
+    for (uint time = 1u; time < JBW_DESTRUCTION_LIFETIME; time++) {
+        uint previous = (time - 1u) * JBW_RESPONSE_CELLS;
+        uint current = time * JBW_RESPONSE_CELLS;
+        for (uint i = 0u; i < JBW_RESPONSE_CELLS; i++) {
+            response[current + i] = 0.4f * response[previous + i];
+        }
+        response[current] += 1.0f;
+        response[current + JBW_RESPONSE_CELLS - 1u] +=
+            0.28f * response[previous + JBW_RESPONSE_CELLS - 2u];
+        for (int y = 0; y < int(JBW_RESPONSE_RADIUS) - 1; y++) {
+            response[current + JBW_RESPONSE_CELLS - JBW_RESPONSE_RADIUS + uint(y)] += 0.14f * (
+                jbw_response(response, time - 1u, int(JBW_RESPONSE_RADIUS) - 2, y)
+                + jbw_response(response, time - 1u, int(JBW_RESPONSE_RADIUS) - 1, y + 1)
+                + jbw_response(response, time - 1u, int(JBW_RESPONSE_RADIUS) - 1, y - 1));
+        }
+        for (int x = 0; x < int(JBW_RESPONSE_RADIUS) - 1; x++) {
+            for (int y = 0; y <= x; y++) {
+                uint index = uint(x * (x + 1) / 2 + y);
+                response[current + index] += 0.14f * (
+                    jbw_response(response, time - 1u, x + 1, y)
+                    + jbw_response(response, time - 1u, x - 1, y)
+                    + jbw_response(response, time - 1u, x, y + 1)
+                    + jbw_response(response, time - 1u, x, y - 1));
+            }
+        }
+    }
+}
+
 inline float3 jbw_scentAt(uint seed, int x, int y, uint step,
                           device const uint *history, uint historyMask,
                           device const float *response, uint slane, uint width) {
     float3 scent = float3(0.0f);
-    int bx0 = jbw_floorDiv(x - 32, 16), bx1 = jbw_floorDiv(x + 32, 16);
-    int by0 = jbw_floorDiv(y - 32, 16), by1 = jbw_floorDiv(y + 32, 16);
+    int reach = int(JBW_RESPONSE_RADIUS) - 1;
+    int bx0 = jbw_floorDiv(x - reach, 16), bx1 = jbw_floorDiv(x + reach, 16);
+    int by0 = jbw_floorDiv(y - reach, 16), by1 = jbw_floorDiv(y + reach, 16);
     uint span = uint(bx1 - bx0 + 1);
     uint blocks = span * uint(by1 - by0 + 1);
     for (uint base = 0u; base < blocks; base += width) {
@@ -138,19 +182,24 @@ inline float3 jbw_scentAt(uint seed, int x, int y, uint step,
         uint carries = 0u;
         if (k < blocks) {
             int by = by0 + int(k / span), bx = bx0 + int(k % span);
-            int2 p = jbw_candidate(seed, bx, by, 0u);
-            int dx = p.x - x, dy = p.y - y;
-            uint item = jbw_itemAt(seed, p.x, p.y);
-            if (item != JBW_EMPTY && item != JBW_WALL
-                && abs(dx) < int(JBW_RESPONSE_RADIUS) && abs(dy) < int(JBW_RESPONSE_RADIUS)) {
-                uint deletion = jbw_destroyedAt(history, historyMask, p.x, p.y);
+            uint4 block = jbw_field(seed, bx, by, 16u);
+            uint4 wall = jbw_field(seed, bx, by, 80u);
+            uint4 ecology = jbw_field(seed, jbw_floorDiv(bx * 16, 64), jbw_floorDiv(by * 16, 64), 64u);
+            for (uint slot = 0u; slot < JBW_BLOCK_ITEMS; slot++) {
+                int2 p = jbw_candidate(block, bx, by, slot);
+                int dx = p.x - x, dy = p.y - y;
+                if (abs(dx) >= int(JBW_RESPONSE_RADIUS) || abs(dy) >= int(JBW_RESPONSE_RADIUS)) continue;
+                if (jbw_wallHit(wall, bx, by, p.x, p.y)) continue;
+                uint item = jbw_typeOf(block, ecology, slot);
+                uint deletion = jbw_collectible(item)
+                    ? jbw_destroyedAt(history, historyMask, p.x, p.y) : 0u;
                 float value = jbw_response(response, JBW_DESTRUCTION_LIFETIME - 1u, dx, dy);
                 if (deletion != 0u) {
-                    uint age = step - deletion;
+                    uint age = step - (deletion - 1u);
                     if (age >= JBW_DESTRUCTION_LIFETIME) value = 0.0f;
                     else value -= jbw_response(response, age, dx, dy);
                 }
-                share = jbw_scent(item) * value;
+                share += jbw_scent(item) * value;
                 carries = 1u;
             }
         }
@@ -165,25 +214,6 @@ inline float3 jbw_scentAt(uint seed, int x, int y, uint step,
         }
     }
     return scent;
-}
-
-inline void jbw_masks(uint seed, int x, int y, device const uint *history, uint historyMask,
-                      uint slane, uint width, thread uint &lo, thread uint &hi) {
-    lo = 0u; hi = 0u;
-    for (uint bit = slane; bit < 48u; bit += width) {
-        uint cell = bit < 24u ? bit : bit + 1u;
-        int dy = int(cell / 7u) - 3, dx = int(cell % 7u) - 3;
-        uint item = jbw_itemAt(seed, x + dx, y + dy);
-        if (jbw_collectible(item)
-            && jbw_destroyedAt(history, historyMask, x + dx, y + dy) != 0u) {
-            if (bit < 24u) lo |= 1u << bit;
-            else hi |= 1u << (bit - 24u);
-        }
-    }
-    if (width > 1u) {
-        lo = simd_sum(lo);
-        hi = simd_sum(hi);
-    }
 }
 
 inline void jbw_observe(uint seed, device uint *words, device const uint *history,
@@ -203,15 +233,11 @@ inline void jbw_observe(uint seed, device uint *words, device const uint *histor
         obs[i] = absent ? 0.0f : jbw_energy(item);
     }
     float3 scent = jbw_scentAt(seed, x, y, step, history, historyMask, response, slane, width);
-    uint lo, hi;
-    jbw_masks(seed, x, y, history, historyMask, slane, width, lo, hi);
     if (width > 1u) simdgroup_barrier(mem_flags::mem_device);
     if (slane != 0u) return;
     obs[8] = scent.x; obs[9] = scent.y; obs[10] = scent.z;
     obs[11] = float(words[3]);
     for (uint i = 0u; i < 4u; i++) obs[12u + i] = float(words[4u + i]);
-    words[8] = lo;
-    words[9] = hi;
 }
 
 inline float jbw_step(uint seed, uint action, device uint *words, device uint *history,
@@ -240,7 +266,7 @@ inline float jbw_step(uint seed, uint action, device uint *words, device uint *h
         if (action == 0u && words[3] != 0u) {
             int x = as_type<int>(words[0]), y = as_type<int>(words[1]);
             uint item = jbw_itemAt(seed, x, y);
-            if (jbw_destroyedAt(history, historyMask, x, y) == step) {
+            if (jbw_destroyedAt(history, historyMask, x, y) == step + 1u) {
                 float sign = (step / 100000u & 1u) == 0u ? 1.0f : -1.0f;
                 if (item == JBW_JELLY) reward = sign;
                 else if (item == JBW_ONION) reward = -sign;

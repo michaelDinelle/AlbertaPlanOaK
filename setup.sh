@@ -15,4 +15,4 @@ mkdir -p "$ROOT/.build"
 xcrun -sdk macosx metal -fno-fast-math -c "$ROOT/Sources/Kernels.metal" -o "$ROOT/.build/OakKernel.air"
 xcrun -sdk macosx metallib "$ROOT/.build/OakKernel.air" -o "$ROOT/.build/OakKernel.metallib"
 swift build -c release
-echo "Setup complete. Run: ./fleet.py run <steps>"
+echo "Setup complete. Run: ./fleet.py run"

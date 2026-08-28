@@ -27,7 +27,7 @@ import { mountSceneHost, type HostFrameInfo, type SceneHostHandle } from './scen
 export interface TheaterInputs {
   active: RunDetail | null;
   policy: Policy;
-  baselinePointer: string | undefined;
+  baselineId: string | undefined;
   baselinePending: boolean;
   live: boolean;
 }
@@ -201,7 +201,7 @@ function computeTargetKey(): string {
     String(heroSeed(sel.selection) ?? ''),
     sel.policy,
     pending ? 'pending' : 'settled',
-    inp !== null && inp.active === null ? `missing:${inp.baselinePointer ?? ''}` : '',
+    inp !== null && inp.active === null ? `missing:${inp.baselineId ?? ''}` : '',
   ].join('|');
 }
 
@@ -261,9 +261,9 @@ function mountHero(): void {
       status: 'error',
       note: `No ${sel.policy} baseline to play`,
       noteDetail:
-        inp.baselinePointer === undefined
-          ? `no ${sel.policy} baseline pointer for this fleet`
-          : `could not load the ${sel.policy} baseline run ${inp.baselinePointer}`,
+        inp.baselineId === undefined
+          ? `no ${sel.policy} baseline for this fleet`
+          : `could not load the ${sel.policy} baseline run ${inp.baselineId}`,
       policy: sel.policy,
       ticks: [],
     });

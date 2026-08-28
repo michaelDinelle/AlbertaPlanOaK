@@ -8,16 +8,10 @@ export const REPO_ROOT = resolve(FRONTEND_DIR, '..');
 export const DIST_DIR = resolve(FRONTEND_DIR, 'dist');
 
 export const DEFAULT_BENCH_ROOT = resolve(REPO_ROOT, '.oak-benchmarks');
-export const DEFAULT_BASELINES_ROOT = resolve(REPO_ROOT, '.oak-baselines');
 
 export function benchRootFromEnv(env: Record<string, string | undefined> = process.env): string {
   const raw = env['OAK_BENCH_DIR'];
   return raw && raw.length > 0 ? resolve(raw) : DEFAULT_BENCH_ROOT;
-}
-
-export function baselinesRootFromEnv(env: Record<string, string | undefined> = process.env): string {
-  const raw = env['OAK_BASELINES_DIR'];
-  return raw && raw.length > 0 ? resolve(raw) : DEFAULT_BASELINES_ROOT;
 }
 
 export function portFromEnv(env: Record<string, string | undefined> = process.env): number {

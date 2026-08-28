@@ -73,7 +73,7 @@ export function EnvWall({
     const q = query.trim().toLowerCase();
     const shown = envList.filter((id) => q === '' || nameOf(id).toLowerCase().includes(q));
     const seedCount = (id: EnvId): number => seedsFor(recordings, id).length;
-    const reward = (id: EnvId): number => detail?.summary?.envs[id]?.finalRate.iqmZ ?? -Infinity;
+    const reward = (id: EnvId): number => detail?.summary?.envs[id]?.finalRate.iqm ?? -Infinity;
     const sorted = [...shown].sort((a, b) =>
       sort === 'name'
         ? nameOf(a).localeCompare(nameOf(b))

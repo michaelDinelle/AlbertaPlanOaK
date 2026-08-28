@@ -33,13 +33,9 @@ function summaryPoints(run: RunDetail | null, envId: string | null): XY[] | null
   if (run === null || envId === null) return null;
   const summary = run.summary;
   const env = summary?.envs[envId];
-  const z = env?.curves.iqmZ;
-  if (summary === null || summary === undefined || env === undefined || z === undefined) return null;
-  const span = env.ceiling - env.floor;
-  return seriesRows(
-    summary.curveSteps,
-    z.map((value) => (value === null ? null : env.floor + value * span)),
-  );
+  const iqm = env?.curves.iqm;
+  if (summary === null || summary === undefined || env === undefined || iqm === undefined) return null;
+  return seriesRows(summary.curveSteps, iqm);
 }
 
 const SPARSE_SAMPLES = 4;

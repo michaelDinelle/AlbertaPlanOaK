@@ -48,9 +48,7 @@ constant uint OAK_MEGA_STAGE_MASK [[function_constant(25)]];
 constant uint OAK_MEGA_STAGES = is_function_constant_defined(OAK_MEGA_STAGE_MASK)
     ? OAK_MEGA_STAGE_MASK : 0xffffffffu;
 
-constant uint OAK_SPL_CAP [[function_constant(26)]];
-constant uint OAK_SPL_LIMIT = is_function_constant_defined(OAK_SPL_CAP) ? OAK_SPL_CAP : 32u;
-constant uint OAK_SPL = (32u / OAK_MEGA_G) < OAK_SPL_LIMIT ? (32u / OAK_MEGA_G) : OAK_SPL_LIMIT;
+constant uint OAK_SPL = min(32u / OAK_MEGA_G, max(1u, OAK_SPEC_ANCHOR_COUNT / 32u));
 
 inline void laneSyncDev() {
     if (OAK_SPL == 1u) simdgroup_barrier(mem_flags::mem_device);
@@ -80,12 +78,8 @@ struct KernelConfig {
 };
 
 constant uint OAK_SIMD_WIDTH = 32u;
-constant uint OAK_SHAPE_PLAN_PERIOD [[function_constant(32)]];
-constant uint OAK_PLAN_PERIOD = is_function_constant_defined(OAK_SHAPE_PLAN_PERIOD)
-    ? OAK_SHAPE_PLAN_PERIOD : 32u;
-constant uint OAK_SHAPE_PERCEPT_BUDGET [[function_constant(33)]];
-constant uint OAK_PERCEPT_BUDGET = is_function_constant_defined(OAK_SHAPE_PERCEPT_BUDGET)
-    ? OAK_SHAPE_PERCEPT_BUDGET : 32u;
+constant uint OAK_PLAN_PERIOD = 32u;
+constant uint OAK_PERCEPT_BUDGET = 32u;
 
 inline uint2 diagSketchBits(uint featureIndex) {
     uint2 h = uint2(featureIndex * 0x9E3779B9u, (featureIndex + 0x632BE59Bu) * 0x85EBCA6Bu);
@@ -97,12 +91,8 @@ inline uint2 diagSketchBits(uint featureIndex) {
     return h;
 }
 
-constant uint OAK_SHAPE_GATE_BANK [[function_constant(34)]];
-constant uint OAK_GATE_BANK = is_function_constant_defined(OAK_SHAPE_GATE_BANK)
-    ? OAK_SHAPE_GATE_BANK : 7u;
-constant uint OAK_SHAPE_OPTION_COUNT [[function_constant(35)]];
-constant uint OAK_OPTION_COUNT = is_function_constant_defined(OAK_SHAPE_OPTION_COUNT)
-    ? OAK_SHAPE_OPTION_COUNT : 32u;
+constant uint OAK_GATE_BANK = 7u;
+constant uint OAK_OPTION_COUNT = 32u;
 constant uint OAK_GATE_GROUPS = 2u;
 constant uint OAK_ANCHORS_MAX =
     ((OAK_ENV_OBS_MAX + 2u * OAK_ENV_ACT_MAX + 2u + OAK_SIMD_WIDTH - 1u) / OAK_SIMD_WIDTH) * OAK_SIMD_WIDTH;
@@ -442,7 +432,7 @@ kernel void oak_shape_probe(device OakShapeProbe *out [[buffer(0)]],
     out->uKeep0n = uint(agent.parked - uintArena) + agent.optionCount;
 }
 
-constant uint OAK_ENV_TABLE_STRIDE = 13u + OAK_POSE_LEN;
+constant uint OAK_ENV_TABLE_STRIDE = 12u + OAK_POSE_LEN;
 
 kernel void oak_env_table_probe(device uint *out [[buffer(0)]],
                                 uint tid [[thread_position_in_grid]]) {
@@ -452,8 +442,9 @@ kernel void oak_env_table_probe(device uint *out [[buffer(0)]],
     out[2] = OAK_ENV_ACT_MAX;
     out[3] = OAK_ENV_WORDS_MAX;
     out[4] = OAK_ENV_CLASSIC_OBS_MAX;
+    out[5] = OAK_ENV_CONSTANT_WORDS;
     for (uint i = 0u; i < OAK_ENV_COUNT; ++i) {
-        device uint *row = out + 5u + i * OAK_ENV_TABLE_STRIDE;
+        device uint *row = out + 6u + i * OAK_ENV_TABLE_STRIDE;
         row[0] = OAK_ENV_SPECS[i].nameHash;
         row[1] = OAK_ENV_SPECS[i].obsDimNatural;
         row[2] = OAK_ENV_SPECS[i].actionKind;
@@ -462,13 +453,17 @@ kernel void oak_env_table_probe(device uint *out [[buffer(0)]],
         row[5] = OAK_ENV_SPECS[i].gridW;
         row[6] = OAK_ENV_SPECS[i].gridH;
         row[7] = OAK_ENV_SPECS[i].controlHz;
-        row[8] = OAK_ENV_SPECS[i].stepFlops;
-        row[9] = OAK_ENV_SPECS[i].envStateWords;
-        row[10] = OAK_ENV_SPECS[i].mjIndex;
-        row[11] = OAK_ENV_SPECS[i].laneThreads;
-        for (uint s = 0u; s < OAK_POSE_LEN; ++s) row[12u + s] = OAK_ENV_SPECS[i].slots[s];
-        row[12u + OAK_POSE_LEN] = OAK_ENV_SPECS[i].persistentEntryWords;
+        row[8] = OAK_ENV_SPECS[i].envStateWords;
+        row[9] = OAK_ENV_SPECS[i].mjIndex;
+        row[10] = OAK_ENV_SPECS[i].laneThreads;
+        for (uint s = 0u; s < OAK_POSE_LEN; ++s) row[11u + s] = OAK_ENV_SPECS[i].slots[s];
+        row[11u + OAK_POSE_LEN] = OAK_ENV_SPECS[i].persistentEntryWords;
     }
+}
+
+kernel void oak_env_constants_init(device float *out [[buffer(0)]],
+                                    uint tid [[thread_position_in_grid]]) {
+    if (tid == 0u) jbw_buildResponse(out);
 }
 
 inline device uint *activeFeatures(Agent agent, uint slot) { return agent.activeFeature + slot * activeCount(agent.anchorCount); }

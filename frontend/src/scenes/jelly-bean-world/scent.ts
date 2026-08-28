@@ -2,19 +2,19 @@ import { ClampToEdgeWrapping } from 'three';
 import type * as THREE from 'three';
 import { makeDataTexture } from '@kit/textures';
 import {
+  jbwBlockField,
   jbwCandidate,
   jbwItemAt,
   jbwScentIndex,
   JBW_BLOCK,
+  JBW_BLOCK_ITEMS,
   JBW_DESTRUCTION_LIFETIME,
   JBW_EMPTY,
-  JBW_OCCLUSION,
   JBW_SCENT,
   JBW_SCENT_CELLS,
   JBW_SCENT_DECAY,
   JBW_SCENT_DIFFUSION,
   JBW_SCENT_RADIUS,
-  JBW_VISUAL_RANGE,
 } from '@sim/envs/jellybeanworld';
 
 export const FIELD_SIZE = 256;
@@ -122,42 +122,6 @@ export class ScentField {
     this.dirty = true;
   }
 
-  sample(x: number, y: number, step: number, out: Float32Array): Float32Array {
-    out[0] = 0;
-    out[1] = 0;
-    out[2] = 0;
-    const reach = JBW_SCENT_RADIUS - 1;
-    const firstX = Math.floor((x - reach) / JBW_BLOCK);
-    const lastX = Math.floor((x + reach) / JBW_BLOCK);
-    const firstY = Math.floor((y - reach) / JBW_BLOCK);
-    const lastY = Math.floor((y + reach) / JBW_BLOCK);
-    for (let by = firstY; by <= lastY; by++) {
-      for (let bx = firstX; bx <= lastX; bx++) {
-        const at = jbwCandidate(this.seed, bx, by);
-        const dx = at[0] - x;
-        const dy = at[1] - y;
-        if (dx <= -JBW_SCENT_RADIUS || dx >= JBW_SCENT_RADIUS) continue;
-        if (dy <= -JBW_SCENT_RADIUS || dy >= JBW_SCENT_RADIUS) continue;
-        const item = jbwItemAt(this.seed, at[0], at[1]);
-        const scent = JBW_SCENT[item];
-        if (!scent) continue;
-        const cell = jbwScentIndex(dx, dy);
-        let value = this.kernel[this.steady + cell] ?? 0;
-        const removed = this.scars.get(scarKey(at[0], at[1]));
-        if (removed !== undefined) {
-          const age = step - removed;
-          if (age >= JBW_DESTRUCTION_LIFETIME) continue;
-          value -= this.kernel[(age < 0 ? 0 : age) * JBW_SCENT_CELLS + cell] ?? 0;
-        }
-        if (value <= 0) continue;
-        out[0] = (out[0] ?? 0) + scent[0] * value;
-        out[1] = (out[1] ?? 0) + scent[1] * value;
-        out[2] = (out[2] ?? 0) + scent[2] * value;
-      }
-    }
-    return out;
-  }
-
   depleted(x: number, y: number): boolean {
     return this.scars.has(scarKey(x, y));
   }
@@ -193,12 +157,15 @@ export class ScentField {
 
     for (let by = firstY; by <= lastY; by++) {
       for (let bx = firstX; bx <= lastX; bx++) {
-        const at = jbwCandidate(this.seed, bx, by);
-        const item = jbwItemAt(this.seed, at[0], at[1]);
-        if (item === JBW_EMPTY) continue;
-        const scent = JBW_SCENT[item];
-        if (!scent || (scent[0] === 0 && scent[1] === 0 && scent[2] === 0)) continue;
-        this.deposit(at[0], at[1], scent, step);
+        const block = jbwBlockField(this.seed, bx, by);
+        for (let slot = 0; slot < JBW_BLOCK_ITEMS; slot++) {
+          const at = jbwCandidate(block, bx, by, slot);
+          const item = jbwItemAt(this.seed, at[0], at[1]);
+          if (item === JBW_EMPTY) continue;
+          const scent = JBW_SCENT[item];
+          if (!scent || (scent[0] === 0 && scent[1] === 0 && scent[2] === 0)) continue;
+          this.deposit(at[0], at[1], scent, step);
+        }
       }
     }
     this.encode();
@@ -258,24 +225,7 @@ export class ScentField {
     }
   }
 
-  occluders(agentX: number, agentY: number, out: Float32Array): number {
-    const range = JBW_VISUAL_RANGE;
-    const max = Math.floor(out.length / 3);
-    let n = 0;
-    for (let dy = -range; dy <= range; dy++) {
-      for (let dx = -range; dx <= range; dx++) {
-        if (dx === 0 && dy === 0) continue;
-        if (n >= max) return n;
-        const weight = JBW_OCCLUSION[jbwItemAt(this.seed, agentX + dx, agentY + dy)] ?? 0;
-        if (weight <= 0) continue;
-        out[n * 3] = agentX + dx;
-        out[n * 3 + 1] = agentY + dy;
-        out[n * 3 + 2] = weight;
-        n++;
-      }
-    }
-    return n;
-  }
+
 
   dispose(): void {
     this.texture.dispose();

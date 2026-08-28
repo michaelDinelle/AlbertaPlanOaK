@@ -20,8 +20,6 @@ export interface RunMeta {
   finishedAt?: string;
   envSchedule: EnvScheduleEntry[];
   envCatalog: unknown[];
-  flopsPerStep: number;
-  envFlopsPerStep: Record<string, number>;
   gpuSeconds?: number;
 }
 
@@ -35,18 +33,6 @@ export type Ci95 = [number, number];
 
 export interface RateSummary {
   iqm: number;
-  ci95: Ci95;
-  iqmZ: number;
-  ci95Z: Ci95;
-}
-
-export interface ZSummary {
-  iqm: number;
-  ci95: Ci95;
-}
-
-export interface ForgettingSummary {
-  phiIQM: number;
   ci95: Ci95;
 }
 
@@ -66,7 +52,7 @@ export interface DivergenceSummary {
 }
 
 export interface EnvCurves {
-  iqmZ: (number | null)[];
+  iqm: (number | null)[];
 }
 
 export interface PlasticityTrack {
@@ -75,40 +61,15 @@ export interface PlasticityTrack {
 }
 
 export interface EnvSummary {
-  floor: number;
-  ceiling: number;
   finalRate: RateSummary;
+  forgetting: RateSummary;
   divergence: DivergenceSummary;
   curves: EnvCurves;
   plasticity?: Record<string, PlasticityTrack>;
 }
 
-export interface ProfileSummary {
-  tau: number[];
-  fraction: number[];
-  ci95: [number[], number[]];
-}
-
-export interface FrontierSummary {
-  cumFlopsPerLane: number[];
-  zIQM: (number | null)[];
-}
-
 export interface AggregateSummary {
-  finalZ: ZSummary;
-  lifetimeZ: ZSummary;
-  optimalityGap: { mean: number; ci95: Ci95 };
-  iprZ90: number;
-  forgetting: ForgettingSummary;
   divergence: DivergenceSummary;
-  profile: ProfileSummary;
-  frontier: FrontierSummary;
-}
-
-export interface ComputeSummary {
-  flopsPerStep: number;
-  envFlopsPerStep: Record<string, number>;
-  gpuSeconds?: number;
 }
 
 export interface ProbImprovement {
@@ -118,29 +79,26 @@ export interface ProbImprovement {
 }
 
 export interface BaselineComparison {
-  run: string;
   probImprovement: ProbImprovement;
 }
 
 export interface BootstrapSpec {
   baseSeed: number;
   reps: number;
-  curveReps: number;
   method: string;
 }
 
 export interface RunSummary {
   complete: boolean;
   generatedAt: string;
-  scale: string;
   horizon: number;
   maxStep: number;
   seedsPerEnv: number;
   curveSteps: number[];
+  curveSeconds: number[];
   plasticitySteps: number[];
   envs: Record<string, EnvSummary>;
   aggregate: AggregateSummary;
-  compute: ComputeSummary;
   bootstrap: BootstrapSpec;
   vsBaselines?: Partial<Record<BaselinePolicy, BaselineComparison>>;
 }

@@ -25,7 +25,7 @@ struct KernelScalars {
 }
 
 struct FleetEnvCfg {
-  var laneCount, episodeLen, recordCapacity, runHorizon: UInt32
+  var laneCount, recordCapacity, persistentMask: UInt32
   var invObsFloor: Float
 }
 struct LaneSnapshot {
@@ -224,7 +224,7 @@ final class Shared<T> {
 }
 struct EnvSpec {
   static let poseLen = 9
-  static let stride = 13 + poseLen
+  static let stride = 12 + poseLen
   static let slotNames = [
     "none", "x", "y", "gx", "gy", "kx", "ky", "carry", "gates", "tokens", "cue", "heading",
     "effort", "banana", "onion", "jellyBean", "truffle", "depletionLo", "depletionHi",
@@ -237,7 +237,6 @@ struct EnvSpec {
   let gridW: Int
   let gridH: Int
   let controlHz: Int
-  let stepFlops: Double
   let envStateWords: Int
   let mjIndex: Int
   let laneThreads: Int
@@ -248,6 +247,11 @@ struct EnvSpec {
     guard code >= 0, code < slotNames.count else { return "none" }
     return slotNames[code]
   }
+}
+
+struct EnvTable {
+  let specs: [EnvSpec]
+  let constantWords: Int
 }
 
 final class Engine {
@@ -284,20 +288,12 @@ final class Engine {
     return uints.p + kd.uintBase + (lane - kd.firstLane) * kd.uintTotal
   }
   static let simdWidth = 32
-  static let saturatingThreadgroups = 256
-  static func applyAgentShape(_ constants: MTLFunctionConstantValues, _ shape: Main.AgentShape) {
-    for (index, value) in shape.functionConstants {
-      var v = UInt32(value)
-      constants.setConstantValue(&v, type: .uint, index: index)
-    }
-  }
   static func runShapeProbe(
-    _ dev: MTLDevice, _ lib: MTLLibrary, obsDim: Int, dPolicy: Int, shape: Main.AgentShape
+    _ dev: MTLDevice, _ lib: MTLLibrary, obsDim: Int, dPolicy: Int
   ) throws -> ShapeProbe {
     precondition(
       MemoryLayout<ShapeProbe>.stride == 144, "ShapeProbe layout drifted from OakShapeProbe")
     let constants = MTLFunctionConstantValues()
-    applyAgentShape(constants, shape)
     var o32 = UInt32(obsDim)
     constants.setConstantValue(&o32, type: .uint, index: OakConst.specObsDim.rawValue)
     var d32 = UInt32(dPolicy)
@@ -321,10 +317,10 @@ final class Engine {
     cb.waitUntilCompleted()
     return outB.contents().bindMemory(to: ShapeProbe.self, capacity: 1).pointee
   }
-  static func runEnvTableProbe(_ dev: MTLDevice, _ lib: MTLLibrary) throws -> [EnvSpec] {
+  static func runEnvTableProbe(_ dev: MTLDevice, _ lib: MTLLibrary) throws -> EnvTable {
     let fn = lib.makeFunction(name: "oak_env_table_probe")!
     let pipe = try dev.makeComputePipelineState(function: fn)
-    let words = 5 + Main.envIdsByKind.count * EnvSpec.stride
+    let words = 6 + Main.envIdsByKind.count * EnvSpec.stride
     guard let outB = dev.makeBuffer(length: words * 4, options: [.storageModeShared]),
       let pq = dev.makeCommandQueue(), let cb = pq.makeCommandBuffer(),
       let enc = cb.makeComputeCommandEncoder()
@@ -341,17 +337,16 @@ final class Engine {
       throw err("Env table count drift: kernel \(tbl[0]) vs host \(Main.envIdsByKind.count).")
     }
     let specs = (0..<Main.envIdsByKind.count).map { i in
-      let row = 5 + i * EnvSpec.stride
+      let row = 6 + i * EnvSpec.stride
       return EnvSpec(
         nameHash: tbl[row], naturalO: Int(tbl[row + 1]), actionKind: Int(tbl[row + 2]),
         actionCount: Int(tbl[row + 3]), actionParams: Int(tbl[row + 4]),
         gridW: Int(tbl[row + 5]), gridH: Int(tbl[row + 6]),
-        controlHz: Int(tbl[row + 7]), stepFlops: Double(tbl[row + 8]),
-        envStateWords: Int(tbl[row + 9]),
-        mjIndex: tbl[row + 10] == 0xffff_ffff ? -1 : Int(tbl[row + 10]),
-        laneThreads: Int(tbl[row + 11]),
-        slots: (0..<EnvSpec.poseLen).map { Int(tbl[row + 12 + $0]) },
-        persistentEntryWords: Int(tbl[row + 12 + EnvSpec.poseLen]))
+        controlHz: Int(tbl[row + 7]), envStateWords: Int(tbl[row + 8]),
+        mjIndex: tbl[row + 9] == 0xffff_ffff ? -1 : Int(tbl[row + 9]),
+        laneThreads: Int(tbl[row + 10]),
+        slots: (0..<EnvSpec.poseLen).map { Int(tbl[row + 11 + $0]) },
+        persistentEntryWords: Int(tbl[row + 11 + EnvSpec.poseLen]))
     }
     if let bad = specs.first(where: { $0.mjIndex >= 0 && $0.laneThreads <= 1 }) {
       throw err(
@@ -370,15 +365,14 @@ final class Engine {
         "Env maxima drift: kernel obs/act max \(tbl[1])/\(tbl[2]) vs table "
           + "\(specs.map(\.naturalO).max()!)/\(specs.map(\.actionCount).max()!).")
     }
-    return specs
+    return EnvTable(specs: specs, constantWords: Int(tbl[5]))
   }
-  let shape: Main.AgentShape
-  init(laneEnvs: [String], batch b: Int, dev: MTLDevice, shape: Main.AgentShape) throws {
-    self.shape = shape
+  init(
+    laneEnvs: [String], batch b: Int, dev: MTLDevice, lib: MTLLibrary,
+    envTable table: [EnvSpec]
+  ) throws {
     precondition(b >= 1 && laneEnvs.count == b, "Engine batch/laneEnvs mismatch")
     batch = b
-    let lib = try dev.makeLibrary(URL: try requireFreshMetallib())
-    let table = try Engine.runEnvTableProbe(dev, lib)
     var runs: [(kind: UInt32, firstLane: Int, count: Int)] = []
     var seen = Set<UInt32>()
     for (i, env) in laneEnvs.enumerated() {
@@ -402,12 +396,11 @@ final class Engine {
       let naturalO = spec.naturalO
       let dk = spec.actionParams
       let sp = try probeCache[r.kind] ?? Engine.runShapeProbe(
-        dev, lib, obsDim: naturalO, dPolicy: dk, shape: shape)
+        dev, lib, obsDim: naturalO, dPolicy: dk)
       probeCache[r.kind] = sp
       let anchors = Int(sp.anchorCount)
       precondition(anchors % Engine.simdWidth == 0, "perception budget must tile the simd width")
-      precondition(
-        Int(sp.rank) == anchors + anchors * 2 * shape.gates, "gate-bank identity broken")
+      precondition(Int(sp.rank) == anchors * 3, "gate-bank identity broken")
       precondition(Int(sp.stateStride) % 4 == 0, "stateStride must stay 16B-aligned")
       let cfgB = dev.makeBuffer(
         length: MemoryLayout<KernelConfig>.stride, options: [.storageModeShared])!
@@ -621,7 +614,7 @@ struct RecordCodec {
       grid([0, 1, 2, 3, 4, 5]),
       grid([0, 1, 2, 3]),
       grid([0, 2]),
-      RecordCodec(category: "jellyBean", fields: (0..<9).map { RecordField($0) }),
+      RecordCodec(category: "jellyBean", fields: (0..<7).map { RecordField($0) }),
     ]
   }()
   static func table(_ envKind: UInt32) throws -> RecordCodec {
@@ -1165,62 +1158,6 @@ final class TapeWriter {
     let parts = "\(sysctlString("hw.model"))|\(dev.name)|\(ProcessInfo.processInfo.processorCount)"
     return String(sha256Hex(Array(parts.utf8).withUnsafeBytes { UnsafeRawBufferPointer($0) }).prefix(16))
   }
-  struct AgentShape {
-    var perception = 32
-    var planning = "rotating"
-    var gates = 7
-    var options = 32
-
-    static let fields = ["perception", "planning", "gates", "options"]
-
-    static func parse(_ spec: String?) throws -> AgentShape {
-      var shape = AgentShape()
-      guard let spec, !spec.trimmingCharacters(in: .whitespaces).isEmpty else { return shape }
-      for field in spec.split(separator: ",") {
-        let parts = field.split(separator: "=", maxSplits: 1)
-        guard parts.count == 2 else {
-          throw err("Agent shape field '\(field)' is not key=value; fields: \(fields.joined(separator: ", ")).")
-        }
-        let key = parts[0].trimmingCharacters(in: .whitespaces)
-        let value = parts[1].trimmingCharacters(in: .whitespaces)
-        func positive() throws -> Int {
-          guard let n = Int(value), n > 0 else {
-            throw err("Agent shape '\(key)' needs a positive integer, got '\(value)'.")
-          }
-          return n
-        }
-        switch key {
-        case "perception": shape.perception = try positive()
-        case "gates": shape.gates = try positive()
-        case "options": shape.options = try positive()
-        case "planning":
-          guard ["rotating", "every-step"].contains(value) else {
-            throw err("Agent shape 'planning' is rotating or every-step, got '\(value)'.")
-          }
-          shape.planning = value
-        default:
-          throw err("Unknown agent shape field '\(key)'; fields: \(Self.fields.joined(separator: ", ")).")
-        }
-      }
-      return shape
-    }
-
-    var planPeriod: Int { planning == "every-step" ? 0 : 32 }
-    var functionConstants: [(Int, Int)] {
-      [(32, planPeriod), (33, perception), (34, gates), (35, options)]
-    }
-    var isKeeper: Bool {
-      perception == 32 && planning == "rotating" && gates == 7 && options == 32
-    }
-    var name: String {
-      isKeeper ? "keeper"
-        : "perception=\(perception),planning=\(planning),gates=\(gates),options=\(options)"
-    }
-    var meta: [String: Any] {
-      ["name": name, "perception": perception, "planning": planning,
-       "gates": gates, "options": options]
-    }
-  }
   static let envIdsByKind: [String] = [
     "HalfCheetah-v4", "FourRooms-cont-v0", "DeepSea-cont-v0", "KeyCorridor-cont-v0",
     "Acrobot-cont-v0", "MountainCar-cont-v0", "CartPole-cont-v0", "Pendulum-cont-v0",
@@ -1228,42 +1165,6 @@ final class TapeWriter {
     "ProceduralMaze-cont-v0", "HighDimMaze-cont-v0", "POMaze-cont-v0", "DelayedChain-cont-v0",
     "JellyBeanWorld-cont-v0",
   ]
-  static func policyFlopsPerStep(
-    _ policy: String, kind: Int, spec: EnvSpec, off: ShapeProbe?, d: Int
-  ) -> Double {
-    let env = spec.stepFlops
-    let obs = Double(spec.naturalO)
-    let actions = Double(spec.actionCount)
-    switch policy {
-    case "oak":
-      let sp = off!
-      let rank = Double(sp.rank)
-      let options = Double(sp.optionCount)
-      let anchors = Double(sp.anchorCount)
-      let levels = Double(sp.traceLevels)
-      let gateGroups = (rank / anchors - 1) / levels
-      let active = anchors * (1 + gateGroups)
-      let nursery = Double(sp.nursery)
-      let policyN = Double(max(d / 2, 1))
-      return options * active * (56 + 2 * policyN) + active * 256 + 16 * (rank - options)
-        + 13 * nursery + 4 * policyN * active + obs * (3 * levels + 10) + env
-    case "ppo":
-      let hidden = 64.0
-      let rolloutSteps = 128.0
-      let epochs = 4.0
-      let minibatch = 32.0
-      let adamFlopsPerParam = 11.0
-      let params = 2 * obs * hidden + 3 * hidden + hidden * actions + actions + 1
-        + (spec.actionKind == 0 ? actions : 0)
-      let forward = 2 * params
-      let backward = 2 * forward
-      let updatesPerStep = epochs / minibatch
-      return forward + epochs * (forward + backward) + forward / rolloutSteps
-        + adamFlopsPerParam * params * updatesPerStep + env
-    default:
-      return 120 + 2 * actions + env
-    }
-  }
   static func envKind(_ envId: String) throws -> UInt32 {
     guard let i = envIdsByKind.firstIndex(of: envId) else {
       throw err("Unknown env '\(envId)'. Known: \(envIdsByKind.joined(separator: ", ")).")
@@ -1308,8 +1209,8 @@ final class TapeWriter {
     let envConstantsBuf: MTLBuffer
     let ecfg: FleetEnvCfg
     init(
-      _ dev: MTLDevice, seeds: [Int], laneEnvKinds: [UInt32], envTable: [EnvSpec],
-      episodeLen: Int, steps: Int
+      _ dev: MTLDevice, lib: MTLLibrary, seeds: [Int], laneEnvKinds: [UInt32],
+      envTable: [EnvSpec], envConstantWords: Int, steps: Int
     ) throws {
       func makeBuf(_ len: Int) throws -> MTLBuffer {
         guard let b = dev.makeBuffer(
@@ -1424,45 +1325,27 @@ final class TapeWriter {
         let sp = mjScratchOffBuf.contents().bindMemory(to: UInt32.self, capacity: B)
         for i in 0..<B { sp[i] = scratchOffsets[i] }
       }
-      if laneEnvKinds.contains(16) {
-        let radius = 33, cells = 561, lifetime = 2000
-        var response = [Float](repeating: 0, count: cells * lifetime)
-        func index(_ x0: Int, _ y0: Int) -> Int {
-          var x = abs(x0), y = abs(y0)
-          if y > x { swap(&x, &y) }
-          return x * (x + 1) / 2 + y
-        }
-        response[0] = 1
-        for t in 1..<lifetime {
-          let prev = (t - 1) * cells, curr = t * cells
-          for i in 0..<cells { response[curr + i] = 0.4 * response[prev + i] }
-          response[curr] += 1
-          response[curr + cells - 1] += 0.28 * response[prev + cells - 2]
-          for y in 0..<(radius - 1) {
-            response[curr + cells - radius + y] += 0.14 * (
-              response[prev + index(radius - 2, y)]
-                + response[prev + index(radius - 1, y + 1)]
-                + response[prev + index(radius - 1, y - 1)])
-          }
-          for x in 0..<(radius - 1) {
-            for y in 0...x {
-              response[curr + index(x, y)] += 0.14 * (
-                response[prev + index(x + 1, y)] + response[prev + index(x - 1, y)]
-                  + response[prev + index(x, y + 1)] + response[prev + index(x, y - 1)])
-            }
-          }
-        }
-        let constants = try makeBuf(response.count * 4)
-        response.withUnsafeBytes {
-          constants.contents().copyMemory(from: $0.baseAddress!, byteCount: $0.count)
-        }
-        envConstantsBuf = constants
-      } else {
-        envConstantsBuf = try makeBuf(16)
+      let constants = try makeBuf(envConstantWords * 4)
+      guard let fn = lib.makeFunction(name: "oak_env_constants_init"),
+        let queue = dev.makeCommandQueue(), let cb = queue.makeCommandBuffer(),
+        let enc = cb.makeComputeCommandEncoder()
+      else { throw err("Environment constants initialization failed.") }
+      let pipe = try dev.makeComputePipelineState(function: fn)
+      enc.setComputePipelineState(pipe)
+      enc.setBuffer(constants, offset: 0, index: 0)
+      enc.dispatchThreads(MTLSize(width: 1, height: 1, depth: 1),
+                          threadsPerThreadgroup: MTLSize(width: 1, height: 1, depth: 1))
+      enc.endEncoding()
+      cb.commit()
+      cb.waitUntilCompleted()
+      guard cb.status == .completed else {
+        let message = cb.error?.localizedDescription ?? "unknown Metal error"
+        throw err("Environment constants initialization failed: \(message).")
       }
+      envConstantsBuf = constants
       ecfg = FleetEnvCfg(
-        laneCount: UInt32(B), episodeLen: UInt32(episodeLen),
-        recordCapacity: UInt32(recordCapacity), runHorizon: UInt32(steps),
+        laneCount: UInt32(B), recordCapacity: UInt32(recordCapacity),
+        persistentMask: UInt32(persistentSlots - 1),
         invObsFloor: 1 / Float(64))
     }
   }
@@ -1481,17 +1364,11 @@ final class TapeWriter {
     guard core == Engine.simdWidth else {
       throw err("simd width \(core) is not the \(Engine.simdWidth) the kernel is compiled for.")
     }
-    func threadgroupCount(_ g: Int) -> Int {
-      engine.kinds.reduce(0) { $0 + ($1.count + g - 1) / g }
-    }
-    var autoG = 2
-    for candidate in [32, 16, 8, 4, 2]
-    where engine.kinds.allSatisfy({ $0.count % candidate == 0 && $0.firstLane % candidate == 0 })
-      && threadgroupCount(candidate) >= Engine.saturatingThreadgroups
-    {
-      autoG = candidate
-      break
-    }
+    let megaG = [32, 16, 8, 4, 2, 1].first {
+      candidate in engine.kinds.allSatisfy {
+        $0.count % candidate == 0 && $0.firstLane % candidate == 0
+      }
+    }!
     func uintEnv(_ name: String) throws -> UInt32? {
       guard let raw = e[name] else { return nil }
       guard let v = UInt32(raw.trimmingCharacters(in: .whitespaces)) else {
@@ -1499,10 +1376,7 @@ final class TapeWriter {
       }
       return v
     }
-    let megaG = try uintEnv("OAK_MEGA_LANES_PER_TG").flatMap { Int($0) } ?? autoG
     let stageMask = try uintEnv("OAK_MEGA_STAGE_MASK")
-    let splCapRaw = try uintEnv("OAK_SPL_CAP")
-    let megaW = core * megaG
     func baseConstants() -> MTLFunctionConstantValues {
       let c = MTLFunctionConstantValues()
       ablations.apply(to: c)
@@ -1536,14 +1410,10 @@ final class TapeWriter {
       }
       let c = baseConstants()
       Engine.applyShapeConstants(c, kd.cfg)
-      Engine.applyAgentShape(c, engine.shape)
       var k32 = kd.kind
       c.setConstantValue(&k32, type: .uint, index: OakConst.specEnvKind.rawValue)
       var g32 = UInt32(gk)
       c.setConstantValue(&g32, type: .uint, index: OakConst.megaG.rawValue)
-      var spl32 = UInt32(min(
-        32 / gk, splCapRaw.flatMap { Int($0) } ?? max(1, Int(kd.off.anchorCount) / 32)))
-      c.setConstantValue(&spl32, type: .uint, index: 26)
       let desc = MTLComputePipelineDescriptor()
       desc.computeFunction = try lib.makeFunction(name: "oak_megastep", constantValues: c)
       desc.label = "oak_megastep \(Main.envIdsByKind[Int(kd.kind)])"
@@ -1560,9 +1430,7 @@ final class TapeWriter {
     }
     for (ki, pipe) in variantPipes.enumerated() {
       let gk = kindMegaG[ki]
-      let spl = min(
-        32 / gk, splCapRaw.flatMap { Int($0) }
-          ?? max(1, Int(engine.kinds[ki].off.anchorCount) / 32))
+      let spl = min(32 / gk, max(1, Int(engine.kinds[ki].off.anchorCount) / 32))
       let slotBytes = laneSlotBytes(gk, spl)
       guard gk >= 1, core * gk * spl <= pipe.maxTotalThreadsPerThreadgroup,
         slotBytes <= dev.maxThreadgroupMemoryLength
@@ -1635,9 +1503,7 @@ final class TapeWriter {
           enc.setBytes(&span, length: MemoryLayout<SIMD3<UInt32>>.stride, index: OakBuf.aux2.rawValue)
           enc.setBuffer(bufs.diagAccumBuf, offset: 0, index: OakBuf.diagAccum.rawValue)
           let gk = kindMegaG[run.kindIdx]
-          let spl = min(
-            32 / gk, splCapRaw.flatMap { Int($0) }
-              ?? max(1, Int(kd.off.anchorCount) / 32))
+          let spl = min(32 / gk, max(1, Int(kd.off.anchorCount) / 32))
           enc.setThreadgroupMemoryLength(laneSlotBytes(gk, spl), index: 0)
           enc.dispatchThreadgroups(
             MTLSize(width: run.tgCount, height: 1, depth: 1),
@@ -1764,7 +1630,7 @@ final class TapeWriter {
   }
   static func fleetGPU(
     _ policy: String, _ seeds: [Int], _ steps: Int, _ root: URL, _ laneEnvs: [String],
-    _ ablations: AblationSpec, _ shape: AgentShape
+    _ ablations: AblationSpec
   ) throws {
     guard laneEnvs.count == seeds.count else {
       throw err("laneEnvs (\(laneEnvs.count)) must match seed count (\(seeds.count)).")
@@ -1773,19 +1639,19 @@ final class TapeWriter {
     let e = ProcessInfo.processInfo.environment
     guard let dev = MTLCreateSystemDefaultDevice() else { throw err("Metal unavailable.") }
     let lib = try dev.makeLibrary(URL: try requireFreshMetallib())
+    let envProbe = try Engine.runEnvTableProbe(dev, lib)
+    let envTable = envProbe.specs
     let engine: Engine?
     let q: MTLCommandQueue
-    let envTable: [EnvSpec]
     if policy == "oak" {
-      let eng = try Engine(laneEnvs: laneEnvs, batch: seeds.count, dev: dev, shape: shape)
+      let eng = try Engine(
+        laneEnvs: laneEnvs, batch: seeds.count, dev: dev, lib: lib, envTable: envTable)
       engine = eng
       q = eng.q
-      envTable = eng.envTable
     } else {
       engine = nil
       guard let queue = dev.makeCommandQueue() else { throw err("Metal unavailable.") }
       q = queue
-      envTable = try Engine.runEnvTableProbe(dev, lib)
     }
     do {
       func fnv1a(_ s: String) -> UInt32 {
@@ -1806,36 +1672,15 @@ final class TapeWriter {
         }
       }
     }
-    var offByKind: [UInt32: ShapeProbe] = [:]
-    var dByKind: [UInt32: Int] = [:]
-    engine?.kinds.forEach {
-      offByKind[$0.kind] = $0.off
-      dByKind[$0.kind] = $0.d
-    }
-    var envFlopsPerStep: [String: Double] = [:]
-    var flopsSum = 0.0
-    for kindU in laneEnvKinds {
-      let kind = Int(kindU)
-      let envId = envIdsByKind[kind]
-      let flops = envFlopsPerStep[envId] ?? policyFlopsPerStep(
-        policy, kind: kind, spec: envTable[kind], off: offByKind[kindU],
-        d: dByKind[kindU] ?? envTable[kind].actionParams)
-      envFlopsPerStep[envId] = flops
-      flopsSum += flops
-    }
-    Self.pendingMeta["agentShape"] = shape.meta
     Self.pendingMeta["hardware"] = Self.hardwareInfo(dev)
     Self.pendingMeta["hardwareKey"] = Self.hardwareKey(dev)
-    Self.pendingMeta["envFlopsPerStep"] = envFlopsPerStep
-    Self.pendingMeta["flopsPerStep"] = flopsSum / Double(laneEnvKinds.count)
     try Self.writeRunMeta(root, envTable)
     for flag in ["OAK_PROBE_FTZ", "OAK_PROBE_FIXEDIDX", "OAK_MEGA_STAGE_MASK"] where e[flag] != nil {
       fputs("\(flag)=\(e[flag]!): timing instrument, trajectories are garbage\n", stderr)
     }
-    let episodeLen = max(e["OAK_EPISODE_STEPS"].flatMap(Int.init) ?? 0, 0)
     let bufs = try FleetBuffers(
-      dev, seeds: seeds, laneEnvKinds: laneEnvKinds, envTable: envTable,
-      episodeLen: episodeLen, steps: steps)
+      dev, lib: lib, seeds: seeds, laneEnvKinds: laneEnvKinds, envTable: envTable,
+      envConstantWords: envProbe.constantWords, steps: steps)
     let pipes: FleetPipes
     if let engine {
       pipes = try oakPipes(engine, lib, dev, bufs, ablations, e)
@@ -2420,7 +2265,6 @@ final class TapeWriter {
     fputs(
       "OaK fleet: policy=\(policy) B=\(seedValues.count) lanes × \(steps) steps on \(envDesc) (ablation=\(ablations.label), dir=\(dir.path))\n",
       stderr)
-    let shape = try AgentShape.parse(env["OAK_AGENT_SHAPE"])
-    try fleetGPU(policy, seedValues, steps, dir, laneEnvs, ablations, shape)
+    try fleetGPU(policy, seedValues, steps, dir, laneEnvs, ablations)
   }
 }

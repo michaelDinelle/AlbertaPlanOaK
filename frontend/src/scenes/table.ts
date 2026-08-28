@@ -1,4 +1,6 @@
 import type { EnvId } from '@shared/envs';
+import { ENV_IDS } from '@shared/envs';
+import type { SceneRegistry } from '@kit/types';
 import type { Palette, PaletteName } from '@kit/tokens';
 
 export type PaletteToken = readonly [PaletteName, keyof Palette];
@@ -13,27 +15,32 @@ export interface SceneRow {
   bloom: number;
   burst?: number;
   fog: FogRecipe;
+  load: SceneRegistry[EnvId];
 }
 
 export const SCENES: Record<EnvId, SceneRow> = {
-  'HalfCheetah-v4': { slug: 'half-cheetah', bloom: 0.42, fog: { from: ['dusk', 'fog'], blend: [[['dusk', 'skyTop'], 0.55]] } },
-  'FourRooms-cont-v0': { slug: 'four-rooms', bloom: 0.45, burst: 110, fog: { from: ['noon', 'fog'] } },
-  'DeepSea-cont-v0': { slug: 'deep-sea', bloom: 0.52, burst: 96, fog: { from: ['underwater', 'fog'] } },
-  'KeyCorridor-cont-v0': { slug: 'key-corridor', bloom: 0.3, burst: 110, fog: { from: ['morning', 'fog'] } },
-  'Acrobot-cont-v0': { slug: 'acrobot', bloom: 0.46, burst: 110, fog: { from: ['dawn', 'fog'] } },
-  'MountainCar-cont-v0': { slug: 'mountain-car', bloom: 0.44, burst: 84, fog: { from: ['dusk', 'fog'] } },
-  'CartPole-cont-v0': { slug: 'cart-pole', bloom: 0.34, fog: { from: ['noon', 'fog'] } },
-  'Pendulum-cont-v0': { slug: 'pendulum', bloom: 0.54, fog: { from: ['night', 'fog'] } },
-  'Chain-cont-v0': { slug: 'chain', bloom: 0.34, burst: 120, fog: { from: ['afternoon', 'fog'] } },
-  'LargeDeepSea-cont-v0': { slug: 'large-deep-sea', bloom: 0.48, burst: 130, fog: { from: ['abyss', 'fog'] } },
-  'MultiKeyCorridor-cont-v0': { slug: 'multi-key-corridor', bloom: 0.42, burst: 120, fog: { from: ['morning', 'fog'] } },
-  'MemoryChain-cont-v0': { slug: 'memory-chain', bloom: 0.62, burst: 130, fog: { from: ['cave', 'fog'] } },
-  'ProceduralMaze-cont-v0': { slug: 'procedural-maze', bloom: 0.44, burst: 110, fog: { from: ['noon', 'fog'] } },
-  'HighDimMaze-cont-v0': { slug: 'high-dim-maze', bloom: 0.42, burst: 110, fog: { from: ['afternoon', 'fog'] } },
-  'POMaze-cont-v0': { slug: 'po-maze', bloom: 0.38, burst: 120, fog: { from: ['dawn', 'fog'], blend: [[['dawn', 'skyTop'], 0.62], [['night', 'skyTop'], 0.62]] } },
-  'DelayedChain-cont-v0': { slug: 'delayed-chain', bloom: 0.62, burst: 150, fog: { from: ['night', 'fog'] } },
-  'JellyBeanWorld-cont-v0': { slug: 'jelly-bean-world', bloom: 0.5, burst: 108, fog: { from: ['afternoon', 'fog'], blend: [[['dusk', 'fog'], 0.45]] } },
+  'HalfCheetah-v4': { slug: 'half-cheetah', bloom: 0.42, fog: { from: ['dusk', 'fog'], blend: [[['dusk', 'skyTop'], 0.55]] }, load: () => import('./half-cheetah/index') },
+  'FourRooms-cont-v0': { slug: 'four-rooms', bloom: 0.45, burst: 110, fog: { from: ['noon', 'fog'] }, load: () => import('./four-rooms/index') },
+  'DeepSea-cont-v0': { slug: 'deep-sea', bloom: 0.52, burst: 96, fog: { from: ['underwater', 'fog'] }, load: () => import('./deep-sea/index') },
+  'KeyCorridor-cont-v0': { slug: 'key-corridor', bloom: 0.3, burst: 110, fog: { from: ['morning', 'fog'] }, load: () => import('./key-corridor/index') },
+  'Acrobot-cont-v0': { slug: 'acrobot', bloom: 0.46, burst: 110, fog: { from: ['dawn', 'fog'] }, load: () => import('./acrobot/index') },
+  'MountainCar-cont-v0': { slug: 'mountain-car', bloom: 0.44, burst: 84, fog: { from: ['dusk', 'fog'] }, load: () => import('./mountain-car/index') },
+  'CartPole-cont-v0': { slug: 'cart-pole', bloom: 0.34, fog: { from: ['noon', 'fog'] }, load: () => import('./cart-pole/index') },
+  'Pendulum-cont-v0': { slug: 'pendulum', bloom: 0.54, fog: { from: ['night', 'fog'] }, load: () => import('./pendulum/index') },
+  'Chain-cont-v0': { slug: 'chain', bloom: 0.34, burst: 120, fog: { from: ['afternoon', 'fog'] }, load: () => import('./chain/index') },
+  'LargeDeepSea-cont-v0': { slug: 'large-deep-sea', bloom: 0.48, burst: 130, fog: { from: ['abyss', 'fog'] }, load: () => import('./large-deep-sea/index') },
+  'MultiKeyCorridor-cont-v0': { slug: 'multi-key-corridor', bloom: 0.42, burst: 120, fog: { from: ['morning', 'fog'] }, load: () => import('./multi-key-corridor/index') },
+  'MemoryChain-cont-v0': { slug: 'memory-chain', bloom: 0.62, burst: 130, fog: { from: ['cave', 'fog'] }, load: () => import('./memory-chain/index') },
+  'ProceduralMaze-cont-v0': { slug: 'procedural-maze', bloom: 0.44, burst: 110, fog: { from: ['noon', 'fog'] }, load: () => import('./procedural-maze/index') },
+  'HighDimMaze-cont-v0': { slug: 'high-dim-maze', bloom: 0.42, burst: 110, fog: { from: ['afternoon', 'fog'] }, load: () => import('./high-dim-maze/index') },
+  'POMaze-cont-v0': { slug: 'po-maze', bloom: 0.38, burst: 120, fog: { from: ['dawn', 'fog'], blend: [[['dawn', 'skyTop'], 0.62], [['night', 'skyTop'], 0.62]] }, load: () => import('./po-maze/index') },
+  'DelayedChain-cont-v0': { slug: 'delayed-chain', bloom: 0.62, burst: 150, fog: { from: ['night', 'fog'] }, load: () => import('./delayed-chain/index') },
+  'JellyBeanWorld-cont-v0': { slug: 'jelly-bean-world', bloom: 0.5, burst: 108, fog: { from: ['afternoon', 'fog'], blend: [[['dusk', 'fog'], 0.45]] }, load: () => import('./jelly-bean-world/index') },
 };
+
+export const sceneRegistry = Object.fromEntries(
+  ENV_IDS.map((envId) => [envId, SCENES[envId].load]),
+) as SceneRegistry;
 
 export function slugOf(envId: EnvId): string {
   return SCENES[envId].slug;

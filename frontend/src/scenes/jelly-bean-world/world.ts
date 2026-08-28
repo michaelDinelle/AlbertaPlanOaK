@@ -22,6 +22,8 @@ import {
   buildBeacon,
   HALO_GLOW,
   HALO_WHITEN,
+  DECAL_CAPACITY,
+  DRAW_RADIUS,
   ITEM_CAPACITY,
   ITEM_GLOW,
   ITEM_KINDS,
@@ -32,18 +34,15 @@ import {
 import {
   JBW_BANANA,
   JBW_COLOR,
-  JBW_FIELD_OF_VIEW,
   JBW_JELLY,
   JBW_ONION,
   JBW_TREE,
   JBW_TRUFFLE,
-  JBW_VISUAL_RANGE,
   JBW_WALL,
   jbwCollectible,
 } from '@sim/envs/jellybeanworld';
 import { FIELD_SIZE, type ScentField } from './scent';
 
-export const DRAW_RADIUS = 520;
 export const GROUND_PERIOD = 256;
 export const GROUND_EXTENT = 1900;
 export const GROUND_SEGMENTS = 560;
@@ -60,7 +59,6 @@ const SHADOW_MAP_X = 4096;
 const SHADOW_MAP_Y = 1365;
 const MAP_MARK = 0.42;
 const ZERO_MOTION = { hover: 0, bob: 0, spin: 0 };
-export const DECAL_CAPACITY = 8192;
 const DECAL_DIM = 0.22;
 const BEACON_CAPACITY = 512;
 const SHELL_SCALE = 1.06;
@@ -77,7 +75,6 @@ export const CAM_POLAR = 1.2;
 export const CAM_FOLLOW = 2.6;
 
 const FRONT_WIDTH = 44;
-export const OCCLUDER_LIMIT = 64;
 
 export interface OrchardSkin {
   grassLow: THREE.Color;
@@ -177,11 +174,6 @@ export interface ScentPaint {
   uFrontColor: { value: THREE.Color };
   uFrontMix: { value: number };
   uAgent: { value: THREE.Vector2 };
-  uFacing: { value: number };
-  uHalfFov: { value: number };
-  uViewRange: { value: number };
-  uOccluderCount: { value: number };
-  uOccluders: { value: Float32Array };
   uMapBlend: { value: number };
   uMapGround: { value: THREE.Color };
   uGridGain: { value: number };
@@ -204,11 +196,6 @@ uniform float uFrontWidth;
 uniform vec3 uFrontColor;
 uniform float uFrontMix;
 uniform vec2 uAgent;
-uniform float uFacing;
-uniform float uHalfFov;
-uniform float uViewRange;
-uniform int uOccluderCount;
-uniform vec3 uOccluders[ 64 ];
 uniform float uMapBlend;
 uniform vec3 uMapGround;
 uniform float uGridGain;
@@ -223,34 +210,11 @@ float orchardLattice( const in vec2 p ) {
 	return max( line.x * att.x, line.y * att.y );
 }
 
-float orchardWrap( const in float a ) {
-	return a - 6.2831853 * floor( ( a + 3.1415927 ) / 6.2831853 );
-}
-
 float orchardVisibility( const in vec2 p ) {
-	vec2 d = p - uAgent;
-	float dist = length( d );
-	if ( dist >= uViewRange ) return 0.0;
-	float beta = dist <= 0.5 ? 1.5707963 : asin( 0.5 / dist );
-	float span = 2.0 * beta;
-	float delta = orchardWrap( atan( d.y, d.x ) - uFacing );
-	float seen = min( delta + beta, uHalfFov ) - max( delta - beta, -uHalfFov );
-	if ( seen <= 0.0 ) return 0.0;
-	float blocked = 0.0;
-	for ( int i = 0; i < 64; i++ ) {
-		if ( i >= uOccluderCount ) break;
-		vec3 o = uOccluders[ i ];
-		vec2 od = o.xy - uAgent;
-		float odist = length( od );
-		if ( odist >= dist ) continue;
-		float ob = odist <= 0.5 ? 1.5707963 : asin( 0.5 / odist );
-		float oa = orchardWrap( atan( od.y, od.x ) - uFacing );
-		float overlap = min( delta + beta, oa + ob ) - max( delta - beta, oa - ob );
-		if ( overlap <= 0.0 ) continue;
-		blocked += o.z * ( overlap / span );
-	}
-	float edge = 1.0 - smoothstep( uViewRange * 0.62, uViewRange, dist );
-	return ( seen / span ) * max( 0.0, 1.0 - blocked ) * edge;
+	vec2 d = abs( p - uAgent );
+	vec2 w = fwidth( p );
+	vec2 inside = vec2( 1.0 ) - smoothstep( vec2( 1.5 ) - w, vec2( 1.5 ) + w, d );
+	return inside.x * inside.y;
 }
 `;
 
@@ -350,11 +314,6 @@ export function paintScent(material: OakMaterial, paint: ScentPaint): void {
     shader.uniforms.uFrontColor = paint.uFrontColor;
     shader.uniforms.uFrontMix = paint.uFrontMix;
     shader.uniforms.uAgent = paint.uAgent;
-    shader.uniforms.uFacing = paint.uFacing;
-    shader.uniforms.uHalfFov = paint.uHalfFov;
-    shader.uniforms.uViewRange = paint.uViewRange;
-    shader.uniforms.uOccluderCount = paint.uOccluderCount;
-    shader.uniforms.uOccluders = paint.uOccluders;
     shader.uniforms.uMapBlend = paint.uMapBlend;
     shader.uniforms.uMapGround = paint.uMapGround;
     shader.uniforms.uGridGain = paint.uGridGain;
@@ -398,7 +357,7 @@ export interface OrchardWorld extends WorldCore {
   decalTint(item: number, out: THREE.Color): THREE.Color;
   setFront(edge: number, mix: number): void;
   setScentOrigin(x: number, y: number): void;
-  setSight(x: number, y: number, facing: number, count: number): void;
+  setSight(x: number, y: number): void;
   setBreeze(amount: number): void;
   heightAt(x: number, z: number): number;
   setMap(blend: number, distance: number): void;
@@ -445,11 +404,6 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene, field: ScentFi
     uFrontColor: { value: skin.front.clone() },
     uFrontMix: { value: 0 },
     uAgent: { value: new THREE.Vector2(0, 0) },
-    uFacing: { value: 0 },
-    uHalfFov: { value: JBW_FIELD_OF_VIEW / 2 },
-    uViewRange: { value: JBW_VISUAL_RANGE },
-    uOccluderCount: { value: 0 },
-    uOccluders: { value: new Float32Array(OCCLUDER_LIMIT * 3) },
     uMapBlend: { value: 0 },
     uMapGround: { value: skin.mapGround.clone() },
     uGridGain: { value: 0 },
@@ -824,10 +778,8 @@ export function buildWorld(ctx: SceneContext, scene: THREE.Scene, field: ScentFi
       setScentOrigin(x, y) {
         paint.uScentOrigin.value.set(x, y);
       },
-      setSight(x, y, facing, count) {
+      setSight(x, y) {
         paint.uAgent.value.set(x, y);
-        paint.uFacing.value = facing;
-        paint.uOccluderCount.value = count;
       },
       setMap(blend, distance) {
         const k = clamp01(blend);

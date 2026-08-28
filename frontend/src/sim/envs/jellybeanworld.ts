@@ -16,17 +16,14 @@ export const JBW_BANANAS = 3;
 export const JBW_ONIONS = 4;
 export const JBW_JELLIES = 5;
 export const JBW_TRUFFLES = 6;
-export const JBW_DEPLETION_LO = 7;
-export const JBW_DEPLETION_HI = 8;
 
 export const JBW_SCENT_DECAY = 0.4;
 export const JBW_SCENT_DIFFUSION = 0.14;
-export const JBW_SCENT_RADIUS = 33;
-export const JBW_SCENT_CELLS = 561;
+export const JBW_SCENT_RADIUS = 17;
+export const JBW_SCENT_CELLS = 153;
 export const JBW_DESTRUCTION_LIFETIME = 2000;
-export const JBW_VISUAL_RANGE = 8;
-export const JBW_FIELD_OF_VIEW = Math.PI / 2;
 export const JBW_BLOCK = 16;
+export const JBW_BLOCK_ITEMS = 4;
 
 export const JBW_SCENT: readonly (readonly [number, number, number])[] = [
   [0, 0, 0],
@@ -49,12 +46,6 @@ export const JBW_COLOR: readonly (readonly [number, number, number])[] = [
 ];
 
 export const JBW_OCCLUSION: readonly number[] = [0, 0, 0, 0, 1, 0.1, 0];
-
-export function jbwEnergy(item: number): number {
-  const color = JBW_COLOR[item];
-  if (!color) return 0;
-  return color[0] + color[1] + color[2];
-}
 
 export function jbwBlocks(item: number): boolean {
   return item === JBW_WALL || item === JBW_TREE;
@@ -95,9 +86,25 @@ export function jbwField(seed: number, x: number, y: number, stream: number): re
   return philox4x32_10(seed, 3, x >>> 0, y >>> 0, stream, 0);
 }
 
-export function jbwCandidate(seed: number, bx: number, by: number): readonly [number, number] {
-  const r = jbwField(seed, bx, by, 16);
-  return [bx * 16 + ((r[0] ?? 0) & 15), by * 16 + ((r[1] ?? 0) & 15)];
+export function jbwBlockField(seed: number, bx: number, by: number): readonly number[] {
+  return jbwField(seed, bx, by, 16);
+}
+
+export function jbwCandidate(
+  block: readonly number[],
+  bx: number,
+  by: number,
+  slot: number,
+): readonly [number, number] {
+  const bits = ((block[0] ?? 0) >>> (8 * slot)) & 255;
+  return [bx * 16 + (bits & 15), by * 16 + ((bits >>> 4) & 15)];
+}
+
+export function jbwTypeOf(block: readonly number[], ecology: readonly number[], slot: number): number {
+  const roll = ((block[1] ?? 0) >>> (8 * slot)) & 255;
+  if (((ecology[1] ?? 0) & 3) === 0) return (roll & 31) === 0 ? JBW_TRUFFLE : JBW_TREE;
+  const pick = roll % 3;
+  return pick === 0 ? JBW_BANANA : pick === 1 ? JBW_JELLY : JBW_ONION;
 }
 
 export function jbwWallAt(seed: number, x: number, y: number): boolean {
@@ -114,21 +121,15 @@ export function jbwItemAt(seed: number, x: number, y: number): number {
   if (jbwWallAt(seed, x, y)) return JBW_WALL;
   const bx = floorDiv(x, 16);
   const by = floorDiv(y, 16);
-  const p = jbwCandidate(seed, bx, by);
-  if (p[0] !== x || p[1] !== y) return JBW_EMPTY;
-  const r = jbwField(seed, bx, by, 16);
-  const ecology = jbwField(seed, floorDiv(x, 64), floorDiv(y, 64), 64);
-  if (((ecology[1] ?? 0) & 3) === 0) return ((r[3] ?? 0) & 31) === 0 ? JBW_TRUFFLE : JBW_TREE;
-  if (((ecology[0] ?? 0) & 3) === 0) return ((r[2] ?? 0) & 1) === 0 ? JBW_BANANA : JBW_JELLY;
-  return ((r[2] ?? 0) & 3) === 0 ? JBW_ONION : JBW_EMPTY;
+  const block = jbwBlockField(seed, bx, by);
+  for (let slot = 0; slot < JBW_BLOCK_ITEMS; slot++) {
+    const p = jbwCandidate(block, bx, by, slot);
+    if (p[0] !== x || p[1] !== y) continue;
+    return jbwTypeOf(block, jbwField(seed, floorDiv(x, 64), floorDiv(y, 64), 64), slot);
+  }
+  return JBW_EMPTY;
 }
 
-export function jbwDepleted(pose: ArrayLike<number>, dx: number, dy: number): boolean {
-  let bit = (dy + 3) * 7 + dx + 3;
-  if (dy > 0 || (dy === 0 && dx > 0)) bit--;
-  const mask = bit < 24 ? pose[JBW_DEPLETION_LO] : pose[JBW_DEPLETION_HI];
-  return ((Math.trunc(mask ?? 0) >>> (bit % 24)) & 1) !== 0;
-}
 
 const inventories = [JBW_BANANAS, JBW_ONIONS, JBW_JELLIES, JBW_TRUFFLES] as const;
 const items = ['banana', 'onion', 'jellyBean', 'truffle'] as const;

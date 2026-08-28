@@ -1,6 +1,6 @@
 import { open } from 'node:fs/promises';
 import { join, normalize, resolve, sep } from 'node:path';
-import { DIST_DIR, HOSTNAME, baselinesRootFromEnv, benchRootFromEnv, portFromEnv } from './config';
+import { DIST_DIR, HOSTNAME, benchRootFromEnv, portFromEnv } from './config';
 import { corsHeaders } from './cors';
 import { statOrNull } from './fs';
 import { findRecording, type PoseIndex } from './recordings';
@@ -8,7 +8,6 @@ import { RunIndex, buildRunDetail } from './runIndex';
 
 export interface AppOptions {
   benchRoot?: string;
-  baselinesRoot?: string;
   distDir?: string;
   production?: boolean;
 }
@@ -158,17 +157,16 @@ async function servePose(req: Request, index: PoseIndex, lane: number): Promise<
 
 export function createApp(opts: AppOptions = {}): App {
   const benchRoot = opts.benchRoot ?? benchRootFromEnv();
-  const baselinesRoot = opts.baselinesRoot ?? baselinesRootFromEnv();
   const distDir = resolve(opts.distDir ?? DIST_DIR);
   const production = opts.production ?? process.env['NODE_ENV'] === 'production';
 
-  const index = new RunIndex({ benchRoot, baselinesRoot });
+  const index = new RunIndex({ benchRoot });
 
   async function handleApi(req: Request, segs: string[]): Promise<Response> {
     const head = segs[1];
 
     if (head === 'health' && segs.length === 2) {
-      return json({ ok: true, benchRoot, baselinesRoot, production });
+      return json({ ok: true, benchRoot, production });
     }
 
     if (head !== 'runs') return fail(404, 'unknown endpoint');
@@ -184,7 +182,7 @@ export function createApp(opts: AppOptions = {}): App {
 
     if (segs.length === 3) {
       const recs = await index.recordingsFor(run.id);
-      return json(await buildRunDetail(run, recs, index.baselines()));
+      return json(await buildRunDetail(run, recs));
     }
 
     const sub = segs[3];

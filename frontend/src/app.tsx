@@ -12,7 +12,6 @@ import { envShares, resolveFeaturedRun, runDateLabel, runEnvs, runLabel, runLabe
 import { CommandPalette } from './panels/CommandPalette';
 import { POLICY_TOKENS } from './panels/charts';
 import { PlaybackBar, PolicySwitch } from './panels/PlaybackBar';
-import { OrchardReadout } from './panels/OrchardReadout';
 import { StatsPanel, type PanelView } from './panels/StatsPanel';
 import {
   adoptDefaultEnv,
@@ -34,7 +33,7 @@ import { setTransport, transportSnapshot } from './playback/store';
 import { setTheaterInputs, stepBySteps, useStageMeta } from './theater/controller';
 import { seedsFor } from './theater/loader';
 import { TheaterStage } from './theater/TheaterStage';
-import { sceneRegistry } from './scenes/registry';
+import { sceneRegistry } from './scenes/table';
 import { EnvTileButton } from './wall/EnvTileButton';
 import { EnvWall } from './wall/EnvWall';
 import { watchRuns } from './toasts';
@@ -130,10 +129,10 @@ export function App() {
   });
   const detail = detailQ.data ?? null;
 
-  const ppoPointer = detail?.baselines.ppo;
-  const randomPointer = detail?.baselines.random;
-  const ppoQ = useQuery({ ...baselineDetailQuery(ppoPointer ?? ''), enabled: ppoPointer !== undefined });
-  const randomQ = useQuery({ ...baselineDetailQuery(randomPointer ?? ''), enabled: randomPointer !== undefined });
+  const ppoId = detail?.baselines.ppo;
+  const randomId = detail?.baselines.random;
+  const ppoQ = useQuery({ ...baselineDetailQuery(ppoId ?? ''), enabled: ppoId !== undefined });
+  const randomQ = useQuery({ ...baselineDetailQuery(randomId ?? ''), enabled: randomId !== undefined });
   const ppoDetail = ppoQ.data ?? null;
   const randomDetail = randomQ.data ?? null;
   const runs = useMemo<Record<Policy, RunDetail | null>>(
@@ -141,15 +140,15 @@ export function App() {
     [detail, ppoDetail, randomDetail],
   );
 
-  const pointer = sel.policy === 'oak' ? undefined : detail?.baselines[sel.policy];
+  const baselineId = sel.policy === 'oak' ? undefined : detail?.baselines[sel.policy];
   const active = sel.policy === 'oak'
     ? detail
-    : pointer === undefined ? null : sel.policy === 'ppo' ? ppoDetail : randomDetail;
+    : baselineId === undefined ? null : sel.policy === 'ppo' ? ppoDetail : randomDetail;
   const baselinePending =
     sel.policy !== 'oak'
     && (detail === null
       ? detailQ.isPending
-      : pointer !== undefined && (sel.policy === 'ppo' ? ppoQ : randomQ).isPending);
+      : baselineId !== undefined && (sel.policy === 'ppo' ? ppoQ : randomQ).isPending);
 
   const envList = useMemo(() => (detail === null ? [] : runEnvs(detail.meta, detail.recordings)), [detail]);
   const wallEnvs = envList.length > 0 ? envList : ENV_IDS;
@@ -203,11 +202,11 @@ export function App() {
     setTheaterInputs({
       active,
       policy: sel.policy,
-      baselinePointer: pointer,
+      baselineId,
       baselinePending,
       live: sel.policy === 'oak' && live,
     });
-  }, [active, sel.policy, pointer, baselinePending, live]);
+  }, [active, sel.policy, baselineId, baselinePending, live]);
 
   useEffect(() => {
     const runId = sel.runId;
@@ -345,7 +344,6 @@ export function App() {
       )}
       <div className="pointer-events-none absolute inset-x-0 bottom-4 z-30 grid grid-cols-[1fr_minmax(0,760px)_1fr] items-end gap-3 px-4">
         <div className="flex flex-col items-start gap-3 justify-self-start">
-          <OrchardReadout />
           <EnvTileButton onOpen={() => setWallOpen(true)} />
         </div>
         <PlaybackBar stride={stride} live={live} fullscreenTarget={rootRef} />

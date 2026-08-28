@@ -13,8 +13,7 @@ import type {
 } from '@kit/types';
 import type { SimEvent } from '@sim/types';
 import { decoders } from '@sim/registry';
-import { sceneRegistry } from '../scenes/registry';
-import { SCENES } from '../scenes/table';
+import { SCENES, sceneRegistry } from '../scenes/table';
 import { advanceCursor, collectEvents, makeFrameCursor } from './player';
 
 export interface HostFrameInfo {

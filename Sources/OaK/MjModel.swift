@@ -2,13 +2,8 @@ import Foundation
 
 struct MjEntry {
   let nameHash: UInt32
-  let byteOffset: Int
-  let nq, nv, nu, nbody, ngeom, njnt, npair, nconMax, nefcMax, nM: Int
-  var stateWords: Int { nq + nv + nu + nv }
-  var scratchWords: Int {
-    MjBlob.scratchWords(
-      nv: nv, nbody: nbody, ngeom: ngeom, nconMax: nconMax, nefcMax: nefcMax, nM: nM)
-  }
+  let stateWords: Int
+  let scratchWords: Int
 }
 
 struct MjBlob {
@@ -32,21 +27,35 @@ struct MjBlob {
       throw err("mjmodels.bin header is not MJML.")
     }
     let count = Int(words[1])
+    guard count <= (data.count - 8) / 48 else {
+      throw err("mjmodels.bin model table exceeds the file.")
+    }
+    let tableBytes = 8 + count * 48
     var entries: [MjEntry] = []
+    var previousOffset = tableBytes
     for i in 0..<count {
       let base = 2 + i * 12
+      let byteOffset = Int(words[base + 1])
+      let ordered = i == 0 ? byteOffset >= previousOffset : byteOffset > previousOffset
+      guard ordered, byteOffset % 4 == 0, byteOffset < data.count else {
+        throw err("mjmodels.bin model (i) has an invalid payload offset.")
+      }
+      let nq = Int(words[base + 2])
+      let nv = Int(words[base + 3])
+      let nu = Int(words[base + 4])
+      let nbody = Int(words[base + 5])
+      let ngeom = Int(words[base + 6])
+      let nconMax = Int(words[base + 9])
+      let nefcMax = Int(words[base + 10])
+      let nM = Int(words[base + 11])
       entries.append(
         MjEntry(
-          nameHash: words[base], byteOffset: Int(words[base + 1]),
-          nq: Int(words[base + 2]), nv: Int(words[base + 3]), nu: Int(words[base + 4]),
-          nbody: Int(words[base + 5]), ngeom: Int(words[base + 6]), njnt: Int(words[base + 7]),
-          npair: Int(words[base + 8]), nconMax: Int(words[base + 9]),
-          nefcMax: Int(words[base + 10]), nM: Int(words[base + 11])))
+          nameHash: words[base], stateWords: nq + 2 * nv + nu,
+          scratchWords: scratchWords(
+            nv: nv, nbody: nbody, ngeom: ngeom, nconMax: nconMax,
+            nefcMax: nefcMax, nM: nM)))
+      previousOffset = byteOffset
     }
     return MjBlob(data: data, entries: entries)
-  }
-
-  func entry(nameHash: UInt32) -> MjEntry? {
-    entries.first { $0.nameHash == nameHash }
   }
 }

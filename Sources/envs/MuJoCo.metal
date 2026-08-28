@@ -2160,7 +2160,7 @@ inline void mj_observe(uint envKind, constant uint *mjModels, device const uint 
 
 inline float mj_step_env(uint envKind, constant uint *mjModels, device uint *envState,
                          device float *scratch, uint seed, thread const float *ctrl,
-                         thread uint &elapsed, thread uint &resets, uint episodeLen,
+                         thread uint &elapsed, thread uint &resets,
                          device float *obs, thread uint &done, uint slane) {
     done = 0u;
     switch (envKind) {
@@ -2170,7 +2170,7 @@ inline float mj_step_env(uint envKind, constant uint *mjModels, device uint *env
         E0::Work w = E0::bindWork(scratch);
         bool entryTerm = false;
         float reward;
-        if ((episodeLen != 0u && elapsed >= episodeLen) || entryTerm) {
+        if (entryTerm) {
             if (slane == 0u) mjR_cheetah(m, s, seed, elapsed, resets);
             simdgroup_barrier(mem_flags::mem_device);
             elapsed = simd_broadcast_first(elapsed);
@@ -2186,7 +2186,7 @@ inline float mj_step_env(uint envKind, constant uint *mjModels, device uint *env
             uint term = 0u;
             reward = mjStep_cheetah(m, s, w, ctrl, obs, term, slane);
             elapsed++;
-            done = (term != 0u || (episodeLen != 0u && elapsed >= episodeLen)) ? 1u : 0u;
+            done = term != 0u ? 1u : 0u;
         }
         reward = simd_broadcast_first(reward);
         done = simd_broadcast_first(done);

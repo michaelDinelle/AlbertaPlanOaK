@@ -24,6 +24,7 @@ constant uint OAK_ENV_CLASSIC_OBS_MAX = 17u;
 constant uint OAK_ENV_ACT_MAX   = 6u;
 constant uint OAK_ENV_WORDS_MAX = 10u;
 constant uint OAK_SAMPLE_SCRATCH = ((OAK_ENV_ACT_MAX + 3u) / 4u) * 4u;
+constant uint OAK_ENV_CONSTANT_WORDS = JBW_RESPONSE_WORDS;
 
 constant uint OAK_SLOT_NONE    =  0u;
 constant uint OAK_SLOT_X       =  1u;
@@ -49,48 +50,48 @@ constant uint OAK_SLOT_Q       = 32u;
 
 struct OakEnvSpec {
     uint nameHash; uint obsDimNatural; uint actionKind; uint actionCount; uint actionParams;
-    uint gridW; uint gridH; uint controlHz; uint stepFlops; uint envStateWords; uint mjIndex;
+    uint gridW; uint gridH; uint controlHz; uint envStateWords; uint mjIndex;
     uint laneThreads;
     uint slots[OAK_POSE_LEN];
     uint persistentEntryWords;
 };
 
 constant OakEnvSpec OAK_ENV_SPECS[OAK_ENV_COUNT] = {
-    { 0x9d7fd44bu, 17u, 0u, 6u, 12u, 0u, 0u, 20u, 33214u, 33u, 0u, 32u,
+    { 0x9d7fd44bu, 17u, 0u, 6u, 12u, 0u, 0u, 20u, 33u, 0u, 32u,
       { OAK_SLOT_Q + 0u, OAK_SLOT_Q + 1u, OAK_SLOT_Q + 2u, OAK_SLOT_Q + 3u, OAK_SLOT_Q + 4u, OAK_SLOT_Q + 5u, OAK_SLOT_Q + 6u, OAK_SLOT_Q + 7u, OAK_SLOT_Q + 8u } },
-    { 0x8014a187u, 17u, 1u, 4u, 12u, 11u, 11u, 8u, 60u, 10u, 0xffffffffu, 1u,
+    { 0x8014a187u, 17u, 1u, 4u, 12u, 11u, 11u, 8u, 10u, 0xffffffffu, 1u,
       { OAK_SLOT_X, OAK_SLOT_Y, OAK_SLOT_GOAL_X, OAK_SLOT_GOAL_Y, OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE } },
-    { 0x56af5bf2u, 8u, 1u, 2u, 12u, 8u, 8u, 8u, 30u, 10u, 0xffffffffu, 1u,
+    { 0x56af5bf2u, 8u, 1u, 2u, 12u, 8u, 8u, 8u, 10u, 0xffffffffu, 1u,
       { OAK_SLOT_Y, OAK_SLOT_X, OAK_SLOT_GOAL_Y, OAK_SLOT_GOAL_X, OAK_SLOT_EFFORT, OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE } },
-    { 0xdd537ebau, 14u, 1u, 4u, 12u, 9u, 7u, 8u, 70u, 10u, 0xffffffffu, 1u,
+    { 0xdd537ebau, 14u, 1u, 4u, 12u, 9u, 7u, 8u, 10u, 0xffffffffu, 1u,
       { OAK_SLOT_X, OAK_SLOT_Y, OAK_SLOT_GOAL_X, OAK_SLOT_GOAL_Y, OAK_SLOT_KEY_X, OAK_SLOT_KEY_Y, OAK_SLOT_CARRY, OAK_SLOT_GATES, OAK_SLOT_NONE } },
-    { 0x93531833u, 7u, 1u, 3u, 12u, 0u, 0u, 5u, 400u, 10u, 0xffffffffu, 1u,
+    { 0x93531833u, 7u, 1u, 3u, 12u, 0u, 0u, 5u, 10u, 0xffffffffu, 1u,
       { OAK_SLOT_Q + 0u, OAK_SLOT_Q + 1u, OAK_SLOT_Q + 2u, OAK_SLOT_Q + 3u, OAK_SLOT_EFFORT, OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE } },
-    { 0xf5b3ddc8u, 3u, 1u, 3u, 12u, 0u, 0u, 30u, 40u, 10u, 0xffffffffu, 1u,
+    { 0xf5b3ddc8u, 3u, 1u, 3u, 12u, 0u, 0u, 30u, 10u, 0xffffffffu, 1u,
       { OAK_SLOT_Q + 0u, OAK_SLOT_Q + 1u, OAK_SLOT_NONE, OAK_SLOT_EFFORT, OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE } },
-    { 0x41f9937du, 5u, 1u, 2u, 12u, 0u, 0u, 50u, 60u, 10u, 0xffffffffu, 1u,
+    { 0x41f9937du, 5u, 1u, 2u, 12u, 0u, 0u, 50u, 10u, 0xffffffffu, 1u,
       { OAK_SLOT_Q + 0u, OAK_SLOT_Q + 1u, OAK_SLOT_Q + 2u, OAK_SLOT_Q + 3u, OAK_SLOT_EFFORT, OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE } },
-    { 0x69bbbb73u, 4u, 0u, 1u, 12u, 0u, 0u, 20u, 60u, 10u, 0xffffffffu, 1u,
+    { 0x69bbbb73u, 4u, 0u, 1u, 12u, 0u, 0u, 20u, 10u, 0xffffffffu, 1u,
       { OAK_SLOT_Q + 0u, OAK_SLOT_Q + 1u, OAK_SLOT_EFFORT, OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE } },
-    { 0x7b267422u, 2u, 1u, 2u, 12u, 16u, 1u, 8u, 25u, 10u, 0xffffffffu, 1u,
+    { 0x7b267422u, 2u, 1u, 2u, 12u, 16u, 1u, 8u, 10u, 0xffffffffu, 1u,
       { OAK_SLOT_X, OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE } },
-    { 0xb96ddc3du, 8u, 1u, 2u, 12u, 16u, 16u, 8u, 30u, 10u, 0xffffffffu, 1u,
+    { 0xb96ddc3du, 8u, 1u, 2u, 12u, 16u, 16u, 8u, 10u, 0xffffffffu, 1u,
       { OAK_SLOT_Y, OAK_SLOT_X, OAK_SLOT_GOAL_Y, OAK_SLOT_GOAL_X, OAK_SLOT_EFFORT, OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE } },
-    { 0x4c3c2d3fu, 17u, 1u, 4u, 12u, 17u, 7u, 8u, 80u, 10u, 0xffffffffu, 1u,
+    { 0x4c3c2d3fu, 17u, 1u, 4u, 12u, 17u, 7u, 8u, 10u, 0xffffffffu, 1u,
       { OAK_SLOT_X, OAK_SLOT_Y, OAK_SLOT_GOAL_X, OAK_SLOT_GOAL_Y, OAK_SLOT_TOKENS, OAK_SLOT_GATES, OAK_SLOT_EFFORT, OAK_SLOT_NONE, OAK_SLOT_NONE } },
-    { 0xcf293fd7u, 6u, 1u, 2u, 12u, 32u, 1u, 8u, 40u, 10u, 0xffffffffu, 1u,
+    { 0xcf293fd7u, 6u, 1u, 2u, 12u, 32u, 1u, 8u, 10u, 0xffffffffu, 1u,
       { OAK_SLOT_X, OAK_SLOT_NONE, OAK_SLOT_CUE, OAK_SLOT_EFFORT, OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE } },
-    { 0xd75dd5f9u, 17u, 1u, 4u, 12u, 11u, 11u, 8u, 90u, 10u, 0xffffffffu, 1u,
+    { 0xd75dd5f9u, 17u, 1u, 4u, 12u, 11u, 11u, 8u, 10u, 0xffffffffu, 1u,
       { OAK_SLOT_X, OAK_SLOT_Y, OAK_SLOT_GOAL_X, OAK_SLOT_GOAL_Y, OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE } },
-    { 0xbfeb2b7au, 16u, 1u, 6u, 12u, 11u, 11u, 8u, 70u, 10u, 0xffffffffu, 1u,
+    { 0xbfeb2b7au, 16u, 1u, 6u, 12u, 11u, 11u, 8u, 10u, 0xffffffffu, 1u,
       { OAK_SLOT_X, OAK_SLOT_Y, OAK_SLOT_GOAL_X, OAK_SLOT_GOAL_Y, OAK_SLOT_HEADING, OAK_SLOT_EFFORT, OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE } },
-    { 0x0582e383u, 15u, 1u, 4u, 12u, 11u, 11u, 8u, 70u, 10u, 0xffffffffu, 1u,
+    { 0x0582e383u, 15u, 1u, 4u, 12u, 11u, 11u, 8u, 10u, 0xffffffffu, 1u,
       { OAK_SLOT_X, OAK_SLOT_Y, OAK_SLOT_GOAL_X, OAK_SLOT_GOAL_Y, OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE } },
-    { 0x56184b96u, 3u, 1u, 2u, 12u, 32u, 1u, 8u, 30u, 10u, 0xffffffffu, 1u,
+    { 0x56184b96u, 3u, 1u, 2u, 12u, 32u, 1u, 8u, 10u, 0xffffffffu, 1u,
       { OAK_SLOT_X, OAK_SLOT_NONE, OAK_SLOT_CUE, OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE, OAK_SLOT_NONE } },
-    { 0x194be817u, 16u, 1u, 3u, 12u, 0u, 0u, 8u, 12000u, 10u, 0xffffffffu, 32u,
+    { 0x194be817u, 16u, 1u, 3u, 12u, 0u, 0u, 8u, 10u, 0xffffffffu, 32u,
       { OAK_SLOT_X, OAK_SLOT_Y, OAK_SLOT_HEADING, OAK_SLOT_BANANA, OAK_SLOT_ONION,
-        OAK_SLOT_JELLY, OAK_SLOT_TRUFFLE, OAK_SLOT_DEPLETION_LO, OAK_SLOT_DEPLETION_HI }, 3u },
+        OAK_SLOT_JELLY, OAK_SLOT_TRUFFLE, OAK_SLOT_NONE, OAK_SLOT_NONE }, 3u },
 };
 
 inline float env_step(uint envKind, uint seed, thread const float *ctrl,
