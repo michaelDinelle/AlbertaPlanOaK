@@ -1,4 +1,6 @@
-import { useEffect, useRef, type ReactNode } from 'react';
+import { useEffect, useRef, useState, type ReactNode } from 'react';
+import { createPortal } from 'react-dom';
+import { motion, useReducedMotion } from 'motion/react';
 import { clsx } from 'clsx';
 import { CartesianGrid, ComposedChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts';
 import type { TooltipPayload } from 'recharts/types/state/tooltipSlice';
@@ -302,6 +304,71 @@ export function Label({ children, hint }: { children: ReactNode; hint?: string }
   return (
     <span className={clsx(TXT.label, hint !== undefined && 'cursor-help')} title={hint}>
       {children}
+    </span>
+  );
+}
+
+export function Hotkey({
+  label,
+  keyName,
+  side,
+  align,
+  children,
+}: {
+  label: string;
+  keyName?: string;
+  side?: 'above' | 'below';
+  align?: 'start' | 'center' | 'end';
+  children: ReactNode;
+}) {
+  const anchor = useRef<HTMLSpanElement | null>(null);
+  const [box, setBox] = useState<DOMRect | null>(null);
+  const reduced = useReducedMotion() === true;
+  const show = (): void => {
+    const el = anchor.current;
+    if (el !== null) setBox(el.getBoundingClientRect());
+  };
+  const hide = (): void => setBox(null);
+  const above = side === 'above';
+  const at = align ?? 'start';
+  return (
+    <span
+      ref={anchor}
+      className="flex"
+      onPointerEnter={show}
+      onPointerLeave={hide}
+      onPointerDown={hide}
+      onFocus={show}
+      onBlur={hide}
+    >
+      {children}
+      {box !== null &&
+        createPortal(
+          <div
+            aria-hidden
+            className="pointer-events-none fixed z-[100] flex w-0"
+            style={{
+              left: at === 'center' ? box.left + box.width / 2 : at === 'end' ? box.right : box.left,
+              justifyContent: at === 'center' ? 'center' : at === 'end' ? 'flex-end' : 'flex-start',
+              ...(above
+                ? { bottom: window.innerHeight - box.top + 6 }
+                : { top: box.bottom + 6 }),
+            }}
+          >
+            <motion.span
+              initial={reduced ? false : { opacity: 0 }}
+              animate={{ opacity: 1 }}
+              transition={{ duration: 0.12 }}
+              className="flex items-center gap-1.5 whitespace-nowrap rounded-md border border-white/15 bg-ground px-2 py-1 text-2xs text-ink shadow-lg"
+            >
+              {label}
+              {keyName !== undefined && (
+                <kbd className="rounded-sm border border-white/15 bg-white/10 px-1 font-mono leading-4">{keyName}</kbd>
+              )}
+            </motion.span>
+          </div>,
+          document.body,
+        )}
     </span>
   );
 }

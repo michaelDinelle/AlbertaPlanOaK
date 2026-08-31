@@ -18,7 +18,7 @@ import {
 import { STR } from '../strings';
 import { seedsFor } from '../theater/loader';
 import { SPEEDS } from '../url/codec';
-import type { PanelView } from './StatsPanel';
+import { PANEL_VIEWS, type PanelView } from './StatsPanel';
 
 function Shortcut({ children }: { children: string }) {
   return (
@@ -57,6 +57,7 @@ export function CommandPalette({
   envList,
   setView,
   openWall,
+  openAbout,
   panelHidden,
   togglePanel,
   fullscreenTarget,
@@ -67,6 +68,7 @@ export function CommandPalette({
   envList: readonly EnvId[];
   setView: (view: PanelView) => void;
   openWall: () => void;
+  openAbout: () => void;
   panelHidden: boolean;
   togglePanel: () => void;
   fullscreenTarget: { current: HTMLElement | null };
@@ -141,8 +143,13 @@ export function CommandPalette({
                 ))}
               </Command.Group>
               <Command.Group heading={STR.palette.panels}>
-                {(Object.keys(STR.panels) as PanelView[]).map((view) => (
-                  <Item key={view} onPick={done(() => setView(view))} hint={STR.palette.show(STR.panels[view])}>
+                {PANEL_VIEWS.map((view, index) => (
+                  <Item
+                    key={view}
+                    onPick={done(() => setView(view))}
+                    hint={STR.palette.showKey(STR.panels[view], String(index + 1))}
+                    shortcut={String(index + 1)}
+                  >
                     {STR.palette.show(STR.panels[view])}
                   </Item>
                 ))}
@@ -151,6 +158,9 @@ export function CommandPalette({
                 </Item>
               </Command.Group>
               <Command.Group heading={STR.palette.actions}>
+                <Item onPick={done(openAbout)} hint={STR.about.open} shortcut="?">
+                  {STR.palette.about}
+                </Item>
                 <Item
                   onPick={done(() => setTransport({ playing: !transportSnapshot().playing }))}
                   hint={STR.palette.playPause}
@@ -176,7 +186,7 @@ export function CommandPalette({
                 <Item
                   onPick={done(togglePanel)}
                   hint={panelHidden ? STR.bar.showPanel : STR.bar.hidePanel}
-                  shortcut="h"
+                  shortcut="c"
                 >
                   {panelHidden ? STR.palette.showPanel : STR.palette.hidePanel}
                 </Item>

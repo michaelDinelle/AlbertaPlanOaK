@@ -5,8 +5,8 @@
   --color-ground: oklch(16.3% 0 0);
   --color-line: oklch(29.3% 0 0);
   --color-ink: oklch(96% 0 0);
-  --color-ink-dim: oklch(78% 0 0);
-  --color-ink-faint: oklch(62% 0 0);
+  --color-ink-dim: oklch(88% 0 0);
+  --color-ink-faint: oklch(77% 0 0);
   --color-accent: oklch(77.7% 0.128 238.9);
   --color-seed: oklch(88% 0.135 86.1);
   --color-good: oklch(79.4% 0.149 142.9);
@@ -32,8 +32,12 @@
   --radius-md: 10px;
   --radius-lg: 14px;
 
-  --text-2xs: 11px;
-  --text-2xs--line-height: 15px;
+  --text-2xs: 12px;
+  --text-2xs--line-height: 16px;
+  --text-xs: 13px;
+  --text-xs--line-height: 19px;
+  --text-sm: 15px;
+  --text-sm--line-height: 21px;
 }
 
 @utility glass {
@@ -62,8 +66,10 @@
 
 @layer base {
   :root {
-    --glass-tint-floor: oklch(13% 0 0 / 0.57);
-    --glass-tint-ceil: oklch(13% 0 0 / 0.71);
+    --dock-width: 400px;
+    --gutter: 1rem;
+    --glass-tint-floor: oklch(13% 0 0 / 0.64);
+    --glass-tint-ceil: oklch(13% 0 0 / 0.78);
     --glass-tint: linear-gradient(180deg, var(--glass-tint-floor), var(--glass-tint-ceil));
     --glass-line: oklch(100% 0 0 / 0.13);
     --glass-highlight: oklch(100% 0 0 / 0.5);
@@ -76,7 +82,7 @@
     background: var(--color-ground);
     color: var(--color-ink);
     font-family: var(--font-sans);
-    font-size: 13px;
+    font-size: 14px;
     font-weight: 450;
     line-height: 1.5;
     -webkit-font-smoothing: antialiased;

@@ -4,15 +4,17 @@ import { clsx } from 'clsx';
 import { ChevronDown, PanelRightOpen } from 'lucide-react';
 import { ENV_IDS } from '@shared/envs';
 import type { Policy, RunDetail, RunIndexEntry } from '@shared/types';
+import { AboutOaK } from './about/AboutOaK';
+import { aboutSeen, markAboutSeen } from './about/seen';
 import { baselineDetailQuery, runDetailQuery, runsQuery } from './data/queries';
 import { Panel } from './glass/Panel';
 import { formatStep } from './lib/format';
 import { cycleEnv, keyAction } from './lib/keymap';
 import { envShares, resolveFeaturedRun, runDateLabel, runEnvs, runLabel, runLabelFor, runShortId, sortRuns } from './lib/run';
 import { CommandPalette } from './panels/CommandPalette';
-import { POLICY_TOKENS } from './panels/charts';
+import { Hotkey, POLICY_TOKENS } from './panels/charts';
 import { PlaybackBar, PolicySwitch } from './panels/PlaybackBar';
-import { StatsPanel, type PanelView } from './panels/StatsPanel';
+import { PANEL_VIEWS, StatsPanel, type PanelView } from './panels/StatsPanel';
 import {
   adoptDefaultEnv,
   adoptFromUrl,
@@ -159,9 +161,15 @@ export function App() {
   const [view, setView] = useState<PanelView>('reward');
   const [wallOpen, setWallOpen] = useState(false);
   const [paletteOpen, setPaletteOpen] = useState(false);
+  const [aboutOpen, setAboutOpen] = useState(() => !aboutSeen());
   const [panelHidden, setPanelHidden] = useState(false);
   const [panelSettled, setPanelSettled] = useState(false);
   const rootRef = useRef<HTMLDivElement | null>(null);
+
+  const closeAbout = (): void => {
+    setAboutOpen(false);
+    markAboutSeen();
+  };
 
   useEffect(() => {
     if (!panelHidden) {
@@ -275,7 +283,20 @@ export function App() {
         case 'panel':
           setPanelHidden((hidden) => !hidden);
           break;
+        case 'view': {
+          const next = PANEL_VIEWS[action.index];
+          if (next !== undefined) {
+            setView(next);
+            setPanelHidden(false);
+          }
+          break;
+        }
+        case 'about':
+          if (aboutOpen) closeAbout();
+          else setAboutOpen(true);
+          break;
         case 'escape':
+          if (aboutOpen) break;
           if (wallOpen) setWallOpen(false);
           else unpromote();
           break;
@@ -283,7 +304,7 @@ export function App() {
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [envList, stride, wallOpen, paletteOpen, policies]);
+  }, [envList, stride, wallOpen, paletteOpen, aboutOpen, policies]);
 
   const notice = runsQ.isError
     ? {
@@ -314,7 +335,7 @@ export function App() {
       </div>
       <div
         className={clsx(
-          'pointer-events-none absolute bottom-20 right-4 top-4 z-20 w-[400px] max-w-[calc(100vw-2rem)] transition-[transform,opacity] duration-300 ease-out motion-reduce:transition-none',
+          'pointer-events-none absolute bottom-20 right-(--gutter) top-(--gutter) z-20 w-(--dock-width) max-w-[calc(100vw-2*var(--gutter))] transition-[transform,opacity] duration-300 ease-out motion-reduce:transition-none',
           panelHidden ? 'translate-x-[calc(100%+1rem)] opacity-0' : 'translate-x-0 opacity-100',
         )}
       >
@@ -325,20 +346,23 @@ export function App() {
             runs={runs}
             active={active}
             onHide={() => setPanelHidden(true)}
+            onAbout={() => setAboutOpen(true)}
           />
         )}
       </div>
       {panelHidden && panelSettled && (
         <div className="absolute right-4 top-4 z-20">
           <Panel>
-            <button
-              type="button"
-              title={STR.bar.showPanel}
-              onClick={() => setPanelHidden(false)}
-              className="flex size-9 items-center justify-center rounded-lg text-ink-dim transition-colors hover:bg-white/10 hover:text-ink active:bg-white/15"
-            >
-              <PanelRightOpen className="size-4" />
-            </button>
+            <Hotkey label={STR.bar.showPanel} keyName="c" align="end">
+              <button
+                type="button"
+                aria-label={STR.bar.showPanel}
+                onClick={() => setPanelHidden(false)}
+                className="flex size-9 items-center justify-center rounded-lg text-ink-dim transition-colors hover:bg-white/10 hover:text-ink active:bg-white/15"
+              >
+                <PanelRightOpen className="size-4" />
+              </button>
+            </Hotkey>
           </Panel>
         </div>
       )}
@@ -361,12 +385,14 @@ export function App() {
           envList={wallEnvs}
           setView={setView}
           openWall={() => setWallOpen(true)}
+          openAbout={() => setAboutOpen(true)}
           panelHidden={panelHidden}
           togglePanel={() => setPanelHidden((hidden) => !hidden)}
           fullscreenTarget={rootRef}
           onClose={() => setPaletteOpen(false)}
         />
       )}
+      {aboutOpen && <AboutOaK onClose={closeAbout} />}
     </div>
   );
 }

@@ -13,7 +13,7 @@ import {
 } from 'lucide-react';
 import type { Policy, RunDetail, RunIndexEntry } from '@shared/types';
 import { Panel } from '../glass/Panel';
-import { Label, POLICY_ORDER } from './charts';
+import { Hotkey, Label, POLICY_ORDER } from './charts';
 import { formatCount, formatStep } from '../lib/format';
 import { runLabelFor } from '../lib/run';
 import { setTransport, useTransport } from '../playback/store';
@@ -35,28 +35,32 @@ function BarButton({
   on,
   disabled,
   title,
+  keyName,
   onClick,
   children,
 }: {
   on?: boolean;
   disabled?: boolean;
   title: string;
+  keyName?: string;
   onClick: () => void;
   children: ReactNode;
 }) {
   return (
-    <button
-      type="button"
-      disabled={disabled}
-      title={title}
-      onClick={onClick}
-      className={clsx(
-        'flex h-7 min-w-7 items-center justify-center rounded-md px-1.5 font-mono text-2xs transition-colors active:bg-white/15',
-        disabled === true ? 'pointer-events-none text-ink-faint' : on === true ? 'bg-accent/20 text-accent' : 'text-ink hover:bg-white/10',
-      )}
-    >
-      {children}
-    </button>
+    <Hotkey label={title} keyName={keyName} side="above" align="center">
+      <button
+        type="button"
+        disabled={disabled}
+        aria-label={title}
+        onClick={onClick}
+        className={clsx(
+          'flex h-7 min-w-7 items-center justify-center rounded-md px-1.5 font-mono text-2xs transition-colors active:bg-white/15',
+          disabled === true ? 'pointer-events-none text-ink-faint' : on === true ? 'bg-accent/20 text-accent' : 'text-ink hover:bg-white/10',
+        )}
+      >
+        {children}
+      </button>
+    </Hotkey>
   );
 }
 
@@ -89,17 +93,16 @@ export function PolicySwitch({
         const run = labelOf(policy);
         const absent = run === null;
         const on = sel.policy === policy;
+        const hint = absent
+          ? policy === 'oak' ? STR.notices.noRun : STR.bar.noBaseline(STR.policy[policy])
+          : STR.bar.watchRun(STR.policy[policy], run);
         return (
+          <Hotkey key={policy} label={hint} keyName={absent ? undefined : 'p'} side="above" align="center">
           <button
-            key={policy}
             type="button"
             aria-disabled={absent}
             aria-pressed={on}
-            title={
-              absent
-                ? policy === 'oak' ? STR.notices.noRun : STR.bar.noBaseline(STR.policy[policy])
-                : STR.bar.watchRun(STR.policy[policy], run)
-            }
+            aria-label={hint}
             onClick={absent ? undefined : () => selectPolicy(policy)}
             className={clsx(
               'flex h-8 items-center rounded-md px-3 text-xs font-medium transition-colors',
@@ -112,6 +115,7 @@ export function PolicySwitch({
           >
             {STR.policy[policy]}
           </button>
+          </Hotkey>
         );
       })}
     </Panel>
@@ -188,21 +192,22 @@ export function PlaybackBar({
     <Panel className={clsx('flex h-12 items-center gap-1 px-2', idle && 'opacity-80')}>
       <BarButton
         title={transport.playing ? STR.bar.pause : STR.bar.play}
+        keyName={STR.bar.keySpace}
         disabled={idle}
         onClick={() => setTransport({ playing: !transport.playing })}
       >
         {transport.playing ? <Pause className="size-3.5" /> : <Play className="size-3.5" />}
       </BarButton>
-      <BarButton title={STR.bar.farBack} disabled={idle} onClick={() => stepBySteps(-200 * jump)}>
+      <BarButton title={STR.bar.farBack} keyName={STR.bar.keyFarBack} disabled={idle} onClick={() => stepBySteps(-200 * jump)}>
         <ChevronsLeft className="size-3.5" />
       </BarButton>
-      <BarButton title={STR.bar.back} disabled={idle} onClick={() => stepBySteps(-20 * jump)}>
+      <BarButton title={STR.bar.back} keyName={STR.bar.keyBack} disabled={idle} onClick={() => stepBySteps(-20 * jump)}>
         <ChevronLeft className="size-3.5" />
       </BarButton>
-      <BarButton title={STR.bar.ahead} disabled={idle} onClick={() => stepBySteps(20 * jump)}>
+      <BarButton title={STR.bar.ahead} keyName={STR.bar.keyAhead} disabled={idle} onClick={() => stepBySteps(20 * jump)}>
         <ChevronRight className="size-3.5" />
       </BarButton>
-      <BarButton title={STR.bar.farAhead} disabled={idle} onClick={() => stepBySteps(200 * jump)}>
+      <BarButton title={STR.bar.farAhead} keyName={STR.bar.keyFarAhead} disabled={idle} onClick={() => stepBySteps(200 * jump)}>
         <ChevronsRight className="size-3.5" />
       </BarButton>
 
@@ -276,12 +281,13 @@ export function PlaybackBar({
       </BarButton>
 
       <Divider />
-      <BarButton on={sel.debug} title={STR.bar.debug} onClick={toggleDebug}>
+      <BarButton on={sel.debug} title={STR.bar.debug} keyName="g" onClick={toggleDebug}>
         <ScanEye className="size-3.5" />
       </BarButton>
       <BarButton
         on={fullscreen}
         title={fullscreen ? STR.bar.windowed : STR.bar.fullscreen}
+        keyName="f"
         onClick={() => {
           if (document.fullscreenElement !== null) void document.exitFullscreen();
           else fullscreenTarget.current?.requestFullscreen().catch(() => {});

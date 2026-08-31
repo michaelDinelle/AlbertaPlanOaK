@@ -11,7 +11,7 @@ import type { SeedRow } from '../tape/derive';
 import { scrubToStep, stageMetaSnapshot } from '../theater/controller';
 import { seedsFor } from '../theater/loader';
 import { navigate } from '../url/useUrlState';
-import { Label, TXT, cssVar, withAlpha } from './charts';
+import { Hotkey, Label, TXT, cssVar, withAlpha } from './charts';
 
 function drawSpark(
   canvas: HTMLCanvasElement,
@@ -271,15 +271,18 @@ export function SeedList({ active }: { active: RunDetail | null }) {
         <span className={TXT.dataDim}>
           {rows !== null && rows.length > 0 ? formatCount(rows.length) : ''}
         </span>
-        <button
-          type="button"
-          onClick={cycleSortMode}
-          title={STR.seeds.sort}
-          className={clsx('ml-auto flex items-center gap-1 rounded-md border border-white/10 px-1.5 py-0.5 hover:border-white/25 hover:text-ink', TXT.bodyDim)}
-        >
-          <ArrowUpDown className="size-2.5" />
-          {STR.seeds.sortBy[sel.sort]}
-        </button>
+        <span className="ml-auto flex">
+          <Hotkey label={STR.seeds.sort} keyName="s" align="end">
+            <button
+              type="button"
+              onClick={cycleSortMode}
+              className={clsx('flex items-center gap-1 rounded-md border border-white/10 px-1.5 py-0.5 hover:border-white/25 hover:text-ink', TXT.bodyDim)}
+            >
+              <ArrowUpDown className="size-2.5" />
+              {STR.seeds.sortBy[sel.sort]}
+            </button>
+          </Hotkey>
+        </span>
       </div>
       <div className="min-h-0 flex-1 overflow-y-auto pr-1">
         {rows === null && <div className={clsx('px-2 py-3', TXT.bodyDim)}>{STR.reward.reading}</div>}
