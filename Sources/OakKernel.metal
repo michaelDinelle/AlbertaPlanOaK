@@ -128,7 +128,7 @@ struct Agent {
     device KernelScalars *scalars;
 };
 
-inline uint activeCount(uint anchorCount) { return anchorCount * (1u + OAK_GATE_GROUPS); }
+inline uint activeCount(uint anchorCount) { return anchorCount * (1u + OAK_CONSTRUCTED_PER_ANCHOR); }
 
 inline Agent make_agent(device float *params, device float *stateArena, device uint *uintArena,
                     device KernelScalars *scalars,
@@ -300,13 +300,13 @@ inline KernelConfig deriveConfig(uint obsDim, uint actionParams) {
     KernelConfig cfgOut;
     cfgOut.obsDim = obsDim;
     cfgOut.actionParamCount = actionParams;
-    uint anchors = OAK_PERCEPT_BUDGET;
-    cfgOut.rank = anchors * (1u + OAK_GATE_GROUPS * OAK_GATE_BANK);
+    uint anchors = anchorsForStream(obsDim, actionParams);
+    cfgOut.rank = anchors * (1u + OAK_CONSTRUCTED_PER_ANCHOR * OAK_CANDIDATES_PER_SLOT);
     cfgOut.optionCount = OAK_OPTION_COUNT;
     cfgOut.linearAnchorCount = anchors;
-    cfgOut.obsTraceLevels = OAK_GATE_BANK;
+    cfgOut.obsTraceLevels = OAK_CANDIDATES_PER_SLOT;
     cfgOut.nurseryCount = cfgOut.rank;
-    uint featureTimeScale = anchors * (1u + OAK_GATE_BANK);
+    uint featureTimeScale = anchors * (1u + OAK_CANDIDATES_PER_SLOT);
     cfgOut.invRank = 1.0f / float(featureTimeScale);
     cfgOut.invOptionCount = 1.0f / float(cfgOut.optionCount);
     cfgOut.metaEta = 1.0f / float(featureTimeScale) / float(max(featureTimeScale + cfgOut.actionParamCount, 1u));
@@ -325,9 +325,9 @@ struct OakShapeProbe {
     uint stAlphaAct, stBetaAct, uOptFeature, uParentA, uParentB, uKind, uNurParentA;
     float invRank, invOptionCount, metaEta, sampleSigma, invTwoSigmaSquared, actorAlphaDenom;
     uint stKeep0, stKeep0n, stKeep1, stKeep1n, uKeep0, uKeep0n;
-    uint simdWidth, spl, perceptBudget, gateBank, gateGroups, planPeriod;
+    uint simdWidth, spl, candidatesPerSlot, constructedPerAnchor, planPeriod;
 };
-static_assert(sizeof(OakShapeProbe) == 168, "OakShapeProbe layout drifted from the Swift mirror");
+static_assert(sizeof(OakShapeProbe) == 164, "OakShapeProbe layout drifted from the Swift mirror");
 
 kernel void oak_shape_probe(device OakShapeProbe *out [[buffer(0)]],
                             device float *params [[buffer(1)]],
@@ -379,9 +379,8 @@ kernel void oak_shape_probe(device OakShapeProbe *out [[buffer(0)]],
     out->uKeep0n = uint(agent.parked - uintArena) + agent.optionCount;
     out->simdWidth = OAK_SIMD_WIDTH;
     out->spl = OAK_SPL;
-    out->perceptBudget = OAK_PERCEPT_BUDGET;
-    out->gateBank = OAK_GATE_BANK;
-    out->gateGroups = OAK_GATE_GROUPS;
+    out->candidatesPerSlot = OAK_CANDIDATES_PER_SLOT;
+    out->constructedPerAnchor = OAK_CONSTRUCTED_PER_ANCHOR;
     out->planPeriod = OAK_PLAN_PERIOD;
 }
 
@@ -449,7 +448,7 @@ inline uint jointFeatureTile(float activationA, float activationB, uint sourceRe
 }
 
 inline bool wasActive(device const uint *previousActive, uint anchors, uint i) {
-    return i < anchors || previousActive[anchors + (i - anchors) / OAK_GATE_BANK] == i;
+    return i < anchors || previousActive[anchors + (i - anchors) / OAK_CANDIDATES_PER_SLOT] == i;
 }
 inline float heldDuration(float raw) { return isfinite(raw) ? max(1.0f, raw) : 1.0f; }
 
@@ -847,9 +846,9 @@ inline void constructFeatures(Agent agent,
         }
         tile2 = zoomedFeatureTile(curr[tileSourceIndex(agent, sourceIndex)], occupancy + 1u);
     }
-    for (uint g = 0u; g < OAK_GATE_GROUPS; ++g) {
+    for (uint g = 0u; g < OAK_CONSTRUCTED_PER_ANCHOR; ++g) {
     uint groupTile = (g == 0u) ? tile : tile2;
-    uint bankLo = agent.anchorCount + (ai + g * agent.anchorCount) * OAK_GATE_BANK, bankHi = bankLo + OAK_GATE_BANK;
+    uint bankLo = agent.anchorCount + (ai + g * agent.anchorCount) * OAK_CANDIDATES_PER_SLOT, bankHi = bankLo + OAK_CANDIDATES_PER_SLOT;
     uint winner = bankLo + groupTile;
     float winningValue = 0.0f;
     for (uint i = bankLo; i < bankHi; ++i) {
@@ -1280,46 +1279,44 @@ static inline void replaceWorstFeature(Agent agent, uint tid, threadgroup float 
         if (agent.lastStopAge[k] < 0xffffffffu) agent.lastStopAge[k] += 1u;
     }
     simdgroup_barrier(mem_flags::mem_device);
-    if (tid == 0u) {
+    haveWorst = simd_shuffle(haveWorst, (ushort)0);
+    worstFeature = simd_shuffle(worstFeature, (ushort)0);
+    worstUtility = simd_shuffle(worstUtility, (ushort)0);
+    worstRedundancy = simd_shuffle(worstRedundancy, (ushort)0);
+    worstDownstream = simd_shuffle(worstDownstream, (ushort)0);
     uint candidateStart = agent.anchorCount;
-    uint eligible = 0u;
-    float eligibleUtilSum = 0.0f, eligibleRedundancySum = 0.0f, eligibleDownstreamSum = 0.0f;
-    for (uint i = candidateStart; i < agent.featureCount; ++i) {
+    uint eligiblePartial = 0u;
+    float eligibleUtilPartial = 0.0f, eligibleRedundancyPartial = 0.0f, eligibleDownstreamPartial = 0.0f;
+    for (uint i = candidateStart + tid; i < agent.featureCount; i += OAK_SIMD_WIDTH) {
         float4 e = *(device const float4 *)&agent.replaceScore[i * 4u];
         if (e.w > 0.0f) {
-            eligible += 1u;
-            eligibleUtilSum += e.x;
-            eligibleRedundancySum += e.y;
-            eligibleDownstreamSum += e.z;
+            eligiblePartial += 1u;
+            eligibleUtilPartial += e.x;
+            eligibleRedundancyPartial += e.y;
+            eligibleDownstreamPartial += e.z;
         }
     }
+    uint eligible = simd_sum(eligiblePartial);
+    float eligibleUtilSum = simd_sum(eligibleUtilPartial);
+    float eligibleRedundancySum = simd_sum(eligibleRedundancyPartial);
+    float eligibleDownstreamSum = simd_sum(eligibleDownstreamPartial);
     uint worst = (haveWorst != 0u) ? worstFeature : candidateStart;
 
     if (!OAK_ABLATE_GENERATE_AND_TEST) {
-
         uint staleLimit = agent.featureCount * agent.optionCount;
-        uint staleOption = 0u;
-        for (uint k2 = 1u; k2 < agent.optionCount; ++k2) {
-            if (agent.parked[k2] == 0u || agent.lastStopAge[k2] < staleLimit) continue;
-            staleOption = k2; break;
+        uint parkedStale = 0xffffffffu, unparkedStale = 0xffffffffu;
+        for (uint k2 = 1u + tid; k2 < agent.optionCount; k2 += OAK_SIMD_WIDTH) {
+            if (agent.lastStopAge[k2] < staleLimit) continue;
+            if (agent.parked[k2] != 0u) parkedStale = min(parkedStale, k2);
+            else unparkedStale = min(unparkedStale, k2);
         }
-        if (staleOption == 0u) {
-            for (uint k2 = 1u; k2 < agent.optionCount; ++k2) {
-                if (agent.parked[k2] != 0u || agent.lastStopAge[k2] < staleLimit) continue;
-                staleOption = k2; break;
-            }
-        }
+        parkedStale = simd_min(parkedStale);
+        unparkedStale = simd_min(unparkedStale);
+        uint staleOption = (parkedStale != 0xffffffffu) ? parkedStale
+            : ((unparkedStale != 0xffffffffu) ? unparkedStale : 0u);
         if (staleOption != 0u) {
             uint k = staleOption;
-            agent.optionAge[k] = 0u;
-            agent.lastStopAge[k] = 0u;
-            agent.optionUtility[k] = float(agent.featureCount);
-            agent.actorAdvantage[k] = 0.0f;
-            agent.optionAverageReward[k] = 0.0f;
-            agent.optionModelAverageReward[k] = 0.0f;
-            agent.parked[k] = 0u;
-            uint feat = agent.optionFeature[k] % agent.featureCount;
-            for (uint i = 0u; i < agent.featureCount; ++i) {
+            for (uint i = tid; i < agent.featureCount; i += OAK_SIMD_WIDTH) {
                 agent.optionValue[(i) * agent.optionCount + k] = 0.0f;
                 agent.optionValueAux[(i) * agent.optionCount + k] = 0.0f;
                 agent.optionReward[(i) * agent.optionCount + k] = 0.0f;
@@ -1327,13 +1324,24 @@ static inline void replaceWorstFeature(Agent agent, uint tid, threadgroup float 
                 agent.optionNextValue[(i) * agent.optionCount + k] = 0.0f;
                 agent.optionNextValueAux[(i) * agent.optionCount + k] = 0.0f;
             }
-            agent.optionValue[(feat) * agent.optionCount + k] = agent.planScratch[PLAN_SCRATCH_INV_SQRT_FEATURES];
-            tgStash[k * 4u + 0u] = 0.0f;
-            tgStash[k * 4u + 1u] = 0.0f;
-            tgStash[k * 4u + 2u] = 0.0f;
-            tgStash[k * 4u + 3u] = 0.0f;
+            if (tid == 0u) {
+                agent.optionAge[k] = 0u;
+                agent.lastStopAge[k] = 0u;
+                agent.optionUtility[k] = float(agent.featureCount);
+                agent.actorAdvantage[k] = 0.0f;
+                agent.optionAverageReward[k] = 0.0f;
+                agent.optionModelAverageReward[k] = 0.0f;
+                agent.parked[k] = 0u;
+                uint feat = agent.optionFeature[k] % agent.featureCount;
+                agent.optionValue[(feat) * agent.optionCount + k] = agent.planScratch[PLAN_SCRATCH_INV_SQRT_FEATURES];
+                tgStash[k * 4u + 0u] = 0.0f;
+                tgStash[k * 4u + 1u] = 0.0f;
+                tgStash[k * 4u + 2u] = 0.0f;
+                tgStash[k * 4u + 3u] = 0.0f;
+            }
         }
     }
+    simdSyncDev();
 
     float invEligible = 1.0f / float(max(eligible, 1u));
     float meanEligibleUtil = eligibleUtilSum * invEligible;
@@ -1349,74 +1357,85 @@ static inline void replaceWorstFeature(Agent agent, uint tid, threadgroup float 
         && bestNursery != 0xffffffffu
         && bestNurseryBound > worstUtility + worstDownstream;
     if (doReplace && worst < agent.featureCount) {
-        uint pa = agent.nurseryParentA[bestNursery] % agent.featureCount;
-        uint pb = agent.nurseryParentB[bestNursery] % agent.featureCount;
-        uint kind = agent.nurseryKind[bestNursery] % 4u;
-        uint birth = agent.featureBirthCount[worst] + 1u;
-        agent.featureBirthCount[worst] = birth;
-        agent.featureParentA[worst] = pa;
-        agent.featureParentB[worst] = pb;
-        agent.featureKind[worst] = kind;
-
-        agent.featureAge[worst] = agent.nurseryAge[bestNursery];
-        agent.featureMean[worst] = agent.nurseryStats[(bestNursery) * 4u];
-        agent.featureSecondMoment[worst] = agent.nurseryStats[(bestNursery) * 4u + 1u];
-        agent.featureUtility[worst] = agent.nurseryStats[(bestNursery) * 4u + 2u];
-        agent.valueWeight[worst] = 0.0f; agent.bonusWeight[worst] = 0.0f;
-
-        uint seedParentA = 0u, seedParentB = (agent.featureCount > 1u) ? 1u : 0u;
-        float bestA = -FLT_MAX, bestB = -FLT_MAX;
         uint featureLimit = agent.featureCount;
-        for (uint i = 0u; i < featureLimit; ++i) {
+        float bestA = -FLT_MAX;
+        uint bestAIndex = 0u;
+        for (uint i = tid; i < featureLimit; i += OAK_SIMD_WIDTH) {
             if (i == worst) continue;
             float parentUtility = agent.featureUtility[i];
             if (!isfinite(parentUtility)) parentUtility = -FLT_MAX;
-            if (parentUtility > bestA) { bestA = parentUtility; seedParentA = i; }
+            if (parentUtility > bestA) { bestA = parentUtility; bestAIndex = i; }
         }
-        for (uint i = 0u; i < featureLimit; ++i) {
+        float bestAAll = simd_max(bestA);
+        uint seedParentA = (bestAAll == -FLT_MAX) ? 0u
+            : simd_min(bestA == bestAAll ? bestAIndex : 0xffffffffu);
+        float bestB = -FLT_MAX;
+        uint bestBIndex = 0u;
+        for (uint i = tid; i < featureLimit; i += OAK_SIMD_WIDTH) {
             if (i == worst || i == seedParentA) continue;
             float decor = 1.0f / (1.0f + fabs(curr[i] * curr[seedParentA]));
             float parentUtility = agent.featureUtility[i] * decor;
             if (!isfinite(parentUtility)) parentUtility = -FLT_MAX;
-            if (parentUtility > bestB) { bestB = parentUtility; seedParentB = i; }
+            if (parentUtility > bestB) { bestB = parentUtility; bestBIndex = i; }
         }
-        agent.nurseryParentA[bestNursery] = seedParentA;
-        agent.nurseryParentB[bestNursery] = seedParentB;
-        agent.nurseryKind[bestNursery] = (agent.nurseryKind[bestNursery] + 1u) % 4u;
-        agent.nurseryAge[bestNursery] = 0u;
-        agent.nurseryStats[(bestNursery) * 4u] = 0.0f;
-        agent.nurseryStats[(bestNursery) * 4u + 1u] = 0.0f;
-        agent.nurseryStats[(bestNursery) * 4u + 2u] = 0.0f;
-        agent.nurseryStats[(bestNursery) * 4u + 3u] = 0.0f;
+        float bestBAll = simd_max(bestB);
+        uint seedParentB = (bestBAll == -FLT_MAX) ? ((agent.featureCount > 1u) ? 1u : 0u)
+            : simd_min(bestB == bestBAll ? bestBIndex : 0xffffffffu);
+        if (tid == 0u) {
+            uint pa = agent.nurseryParentA[bestNursery] % agent.featureCount;
+            uint pb = agent.nurseryParentB[bestNursery] % agent.featureCount;
+            uint kind = agent.nurseryKind[bestNursery] % 4u;
+            uint birth = agent.featureBirthCount[worst] + 1u;
+            agent.featureBirthCount[worst] = birth;
+            agent.featureParentA[worst] = pa;
+            agent.featureParentB[worst] = pb;
+            agent.featureKind[worst] = kind;
 
-        float initialStepSize = 1.0f / float(activeCount(agent.anchorCount));
-        agent.valueAlpha[worst] = initialStepSize;
-        agent.valueBeta[worst] = log(agent.valueAlpha[worst]); agent.valueH[worst] = 0.0f; agent.valueGradEnergy[worst] = 0.0f;
-        agent.optionValueAlpha[worst] = initialStepSize;
-        agent.optionValueBeta[worst] = log(agent.optionValueAlpha[worst]); agent.optionValueH[worst] = 0.0f; agent.optionValueGradEnergy[worst] = 0.0f;
-        agent.modelAlpha[worst] = initialStepSize;
-        agent.modelBeta[worst] = log(agent.modelAlpha[worst]); agent.modelH[worst] = 0.0f; agent.modelGradEnergy[worst] = 0.0f;
+            agent.featureAge[worst] = agent.nurseryAge[bestNursery];
+            agent.featureMean[worst] = agent.nurseryStats[(bestNursery) * 4u];
+            agent.featureSecondMoment[worst] = agent.nurseryStats[(bestNursery) * 4u + 1u];
+            agent.featureUtility[worst] = agent.nurseryStats[(bestNursery) * 4u + 2u];
+            agent.valueWeight[worst] = 0.0f; agent.bonusWeight[worst] = 0.0f;
 
-        uint k = 1u;
-        float worstOptionDemand = FLT_MAX;
-        for (uint ok = 1u; ok < agent.optionCount; ++ok) {
-            float use = agent.optionUtility[ok] + agent.optionPriority[ok];
-            if (!isfinite(use)) use = FLT_MAX;
-            if (agent.optionFeature[ok] == worst) { k = ok; worstOptionDemand = -FLT_MAX; break; }
-            if (use < worstOptionDemand) { worstOptionDemand = use; k = ok; }
+            agent.nurseryParentA[bestNursery] = seedParentA;
+            agent.nurseryParentB[bestNursery] = seedParentB;
+            agent.nurseryKind[bestNursery] = (agent.nurseryKind[bestNursery] + 1u) % 4u;
+            agent.nurseryAge[bestNursery] = 0u;
+            agent.nurseryStats[(bestNursery) * 4u] = 0.0f;
+            agent.nurseryStats[(bestNursery) * 4u + 1u] = 0.0f;
+            agent.nurseryStats[(bestNursery) * 4u + 2u] = 0.0f;
+            agent.nurseryStats[(bestNursery) * 4u + 3u] = 0.0f;
+
+            float initialStepSize = 1.0f / float(activeCount(agent.anchorCount));
+            agent.valueAlpha[worst] = initialStepSize;
+            agent.valueBeta[worst] = log(agent.valueAlpha[worst]); agent.valueH[worst] = 0.0f; agent.valueGradEnergy[worst] = 0.0f;
+            agent.optionValueAlpha[worst] = initialStepSize;
+            agent.optionValueBeta[worst] = log(agent.optionValueAlpha[worst]); agent.optionValueH[worst] = 0.0f; agent.optionValueGradEnergy[worst] = 0.0f;
+            agent.modelAlpha[worst] = initialStepSize;
+            agent.modelBeta[worst] = log(agent.modelAlpha[worst]); agent.modelH[worst] = 0.0f; agent.modelGradEnergy[worst] = 0.0f;
+
+            uint k = 1u;
+            float worstOptionDemand = FLT_MAX;
+            for (uint ok = 1u; ok < agent.optionCount; ++ok) {
+                float use = agent.optionUtility[ok] + agent.optionPriority[ok];
+                if (!isfinite(use)) use = FLT_MAX;
+                if (agent.optionFeature[ok] == worst) { k = ok; worstOptionDemand = -FLT_MAX; break; }
+                if (use < worstOptionDemand) { worstOptionDemand = use; k = ok; }
+            }
+            agent.optionAge[k] = 0u; agent.optionFeature[k] = worst; agent.optionUtility[k] = float(agent.featureCount);
+            agent.actorAdvantage[k] = 0.0f;
+            agent.optionAverageReward[k] = 0.0f;
+            agent.optionModelAverageReward[k] = 0.0f;
+            agent.optionFitness[k] = 0.0f;
+            agent.lastStopAge[k] = 0u;
+
+            agent.replaceSlot[0] = 1u; agent.replaceSlot[1] = worst;
+            agent.replaceSlot[2] = k; agent.replaceSlot[3] = birth;
         }
-        agent.optionAge[k] = 0u; agent.optionFeature[k] = worst; agent.optionUtility[k] = float(agent.featureCount);
-        agent.actorAdvantage[k] = 0.0f;
-        agent.optionAverageReward[k] = 0.0f;
-        agent.optionModelAverageReward[k] = 0.0f;
-        agent.optionFitness[k] = 0.0f;
-        agent.lastStopAge[k] = 0u;
-
-        agent.replaceSlot[0] = 1u; agent.replaceSlot[1] = worst;
-        agent.replaceSlot[2] = k; agent.replaceSlot[3] = birth;
-    } else {
+    } else if (tid == 0u) {
         agent.replaceSlot[0] = 0u;
     }
+    if (tid == 0u) {
     if (agent.replaceSlot[0] == 0u && !OAK_ABLATE_GENERATE_AND_TEST
         && (agent.stepCount % max(agent.optionCount, 1u)) == 0u) {
 

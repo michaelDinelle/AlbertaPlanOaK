@@ -197,7 +197,7 @@ struct ShapeProbe {
   var stAlphaAct, stBetaAct, uOptFeature, uParentA, uParentB, uKind, uNurParentA: UInt32
   var invRank, invOptionCount, metaEta, sampleSigma, sampleInv2S2, actorAlphaDenom: Float
   var stKeep0, stKeep0n, stKeep1, stKeep1n, uKeep0, uKeep0n: UInt32
-  var simdWidth, spl, perceptBudget, gateBank, gateGroups, planPeriod: UInt32
+  var simdWidth, spl, candidatesPerSlot, constructedPerAnchor, planPeriod: UInt32
 }
 struct RewardSlices {
   let state: [(Int, Int)]
@@ -287,7 +287,7 @@ final class Engine {
     _ dev: MTLDevice, _ lib: MTLLibrary, obsDim: Int, dPolicy: Int
   ) throws -> ShapeProbe {
     precondition(
-      MemoryLayout<ShapeProbe>.stride == 168, "ShapeProbe layout drifted from OakShapeProbe")
+      MemoryLayout<ShapeProbe>.stride == 164, "ShapeProbe layout drifted from OakShapeProbe")
     let constants = MTLFunctionConstantValues()
     var o32 = UInt32(obsDim)
     constants.setConstantValue(&o32, type: .uint, index: OakConst.specObsDim.rawValue)
@@ -295,7 +295,7 @@ final class Engine {
     constants.setConstantValue(&d32, type: .uint, index: OakConst.specActionParams.rawValue)
     let fn = try lib.makeFunction(name: "oak_shape_probe", constantValues: constants)
     let pipe = try dev.makeComputePipelineState(function: fn)
-    guard let outB = dev.makeBuffer(length: 168, options: [.storageModeShared]),
+    guard let outB = dev.makeBuffer(length: 164, options: [.storageModeShared]),
       let dummy = dev.makeBuffer(length: 16, options: [.storageModeShared]),
       let pq = dev.makeCommandQueue(), let cb = pq.makeCommandBuffer(),
       let enc = cb.makeComputeCommandEncoder()
@@ -393,12 +393,11 @@ final class Engine {
         dev, lib, obsDim: naturalO, dPolicy: dk)
       probeCache[r.kind] = sp
       let anchors = Int(sp.anchorCount)
-      precondition(anchors == Int(sp.perceptBudget), "anchors must be the declared perception budget")
       precondition(
         anchors % Int(sp.simdWidth) == 0, "perception budget must tile the simd width")
       precondition(
-        Int(sp.rank) == anchors * (1 + Int(sp.gateGroups) * Int(sp.gateBank)),
-        "gate-bank identity broken")
+        Int(sp.rank) == anchors * (1 + Int(sp.constructedPerAnchor) * Int(sp.candidatesPerSlot)),
+        "constructed-feature identity broken")
       precondition(Int(sp.stateStride) % 4 == 0, "stateStride must stay 16B-aligned")
       let cfgB = dev.makeBuffer(
         length: MemoryLayout<KernelConfig>.stride, options: [.storageModeShared])!
@@ -1395,9 +1394,15 @@ final class TapeWriter {
     var variantPipes: [MTLComputePipelineState] = []
     var kindMegaG: [Int] = []
     let tgOptionCount = Int(engine.kinds[0].off.optionCount)
+    func laneSlotBytes(_ gk: Int) -> Int {
+      (5 * tgOptionCount + 1) * gk * MemoryLayout<Float>.stride
+    }
     for (ki, kd) in engine.kinds.enumerated() {
       var gk = megaG
-      while gk > 1, gk * Int(kd.off.anchorCount) > core * core { gk /= 2 }
+      while gk > 1,
+        gk * Int(kd.off.anchorCount) > core * core
+          || laneSlotBytes(gk) > dev.maxThreadgroupMemoryLength
+      { gk /= 2 }
       guard kd.firstLane % gk == 0, kd.count % gk == 0 else {
         throw err(
           "Env block [\(kd.firstLane), +\(kd.count)) must start and size on multiples of megaG=\(gk)."
@@ -1418,9 +1423,6 @@ final class TapeWriter {
     }
     guard variantPipes.allSatisfy({ $0.threadExecutionWidth == core }) else {
       throw err("simd width \(core) differs across specialized pipelines.")
-    }
-    func laneSlotBytes(_ gk: Int) -> Int {
-      (5 * tgOptionCount + 1) * gk * MemoryLayout<Float>.stride
     }
     for (ki, pipe) in variantPipes.enumerated() {
       let gk = kindMegaG[ki]
