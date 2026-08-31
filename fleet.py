@@ -18,7 +18,6 @@ from arch.bootstrap import MovingBlockBootstrap
 from lifelines import KaplanMeierFitter
 from lifelines.utils import restricted_mean_survival_time
 from rliable import library as rly
-from rliable import metrics as rl_metrics
 from scipy.optimize import isotonic_regression
 from statsmodels.stats.proportion import proportion_confint
 
@@ -200,7 +199,11 @@ def take(vectors: dict[str, np.ndarray], lanes: np.ndarray) -> dict[str, np.ndar
 
 
 def iqm(v: np.ndarray) -> float:
-    return float(rl_metrics.aggregate_iqm(np.asarray(v, float)))
+    a = np.asarray(v, float).ravel()
+    lower = int(0.25 * a.shape[0])
+    upper = a.shape[0] - lower
+    trimmed = np.partition(a, (lower, upper - 1))
+    return float(trimmed[lower:upper].mean())
 
 
 def impute_worst(v: np.ndarray) -> np.ndarray:
@@ -263,7 +266,14 @@ def agg_iqm(scores: np.ndarray) -> np.ndarray:
 
 
 def agg_prob_improvement(x: np.ndarray, y: np.ndarray) -> np.ndarray:
-    return np.array([rl_metrics.probability_of_improvement(x, y)])
+    pairs = x.shape[0] * y.shape[0]
+    per_task = np.empty(x.shape[1])
+    for task in range(x.shape[1]):
+        ranked = np.sort(y[:, task])
+        beaten = np.searchsorted(ranked, x[:, task], "left").sum()
+        matched = np.searchsorted(ranked, x[:, task], "right").sum() - beaten
+        per_task[task] = (beaten + 0.5 * matched) / pairs
+    return np.array([per_task.mean()])
 
 
 def ci_pair(ci: np.ndarray) -> list:
@@ -636,7 +646,7 @@ def record_policy(candidate: dict, policy: str, identity: dict) -> dict:
     output = None
     log = None
     if policy != "oak":
-        log = open(root / "run.log", "w")
+        log = open(root.parent / f"{policy}.log", "w")
         output = log
     try:
         rc = subprocess.run(
@@ -655,8 +665,9 @@ def record_policy(candidate: dict, policy: str, identity: dict) -> dict:
         raise SystemExit(f"{root}: run shape differs from {candidate['root']}")
     if int(run["tape"]["ends"][-1]) < run["meta"]["steps"]:
         raise SystemExit(f"{root}: incomplete")
-    cmd_report(argparse.Namespace(root=root))
-    (root / ".done").touch()
+    if policy != "oak":
+        cmd_report(argparse.Namespace(root=root))
+        (root / ".done").touch()
     print(f"[fleet] {policy} complete", flush=True)
     return run
 

@@ -1875,8 +1875,16 @@ inline void mjObs_cheetah(E0::State s, device float *obs) {
     for (int i = 0; i < 9; i++) obs[8 + i] = s.qvel[i];
 }
 
+inline uint mjFell_cheetah(thread const E0::Work &w) {
+    for (int c = 0; c < w.ncon; c++)
+        if (w.conRows[c] != 0 && (w.conB1[c] == 1 || w.conB2[c] == 1)) return 1u;
+    return 0u;
+}
+
 inline float mjStep_cheetah(thread const E0::Model &m, E0::State s, thread E0::Work &w,
-                        thread const float *ctrl, device float *obs, thread uint &term, uint slane) {
+                        thread const float *ctrl, device float *obs, uint seed,
+                        thread uint &elapsed, thread uint &resets,
+                        thread uint &term, uint slane) {
     float xb = s.qpos[0];
     for (int u = 0; u < 6; u++) s.ctrl[u] = ctrl[u];
     int fs = int(m.spec[7]);
@@ -1885,8 +1893,12 @@ inline float mjStep_cheetah(thread const E0::Model &m, E0::State s, thread E0::W
     float xv = (s.qpos[0] - xb) / dt;
     float ctrlCost = 0.0f;
     for (int u = 0; u < 6; u++) ctrlCost += m.spec[4]*ctrl[u]*ctrl[u];
+    term = mjFell_cheetah(w);
+    if (term != 0u) {
+        if (slane == 0u) mjR_cheetah(m, s, seed, elapsed, resets);
+        simdgroup_barrier(mem_flags::mem_device);
+    }
     mjObs_cheetah(s, obs);
-    term = 0u;
     return m.spec[6]*xv - ctrlCost;
 }
 
@@ -1931,7 +1943,7 @@ inline float mj_step_env(uint envKind, constant uint *mjModels, device uint *env
         E0::Work w = E0::bindWork(scratch);
         float reward;
         uint term = 0u;
-        reward = mjStep_cheetah(m, s, w, ctrl, obs, term, slane);
+        reward = mjStep_cheetah(m, s, w, ctrl, obs, seed, elapsed, resets, term, slane);
         elapsed++;
         done = term != 0u ? 1u : 0u;
         reward = simd_broadcast_first(reward);
