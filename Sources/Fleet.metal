@@ -63,8 +63,6 @@ struct OakLaneSnapshot {
 };
 static_assert(sizeof(OakLaneSnapshot) == 36, "OakLaneSnapshot layout drifted from the Swift mirror");
 
-constant uint OAK_DIAG_K = 64u;
-constant uint OAK_DIAG_GRAM = OAK_DIAG_K * OAK_DIAG_K;
 constant uint OAK_DIAG_PPO_PARAMS =
     ((2u * OAK_ENV_OBS_MAX * OAK_DIAG_K + 2u * OAK_DIAG_K + OAK_DIAG_K * OAK_ENV_ACT_MAX
       + 2u * OAK_ENV_ACT_MAX + OAK_DIAG_K + 1u) + 3u) & ~3u;

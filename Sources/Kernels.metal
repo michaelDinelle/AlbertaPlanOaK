@@ -21,6 +21,7 @@ using namespace metal;
 #include "envs/DelayedChain.metal"
 #include "envs/JellyBeanWorld.metal"
 #include "Env.metal"
+#include "Geometry.metal"
 #include "Fleet.metal"
 #include "OakKernel.metal"
 #include "Baseline.metal"

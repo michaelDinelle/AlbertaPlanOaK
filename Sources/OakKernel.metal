@@ -41,8 +41,6 @@ constant uint OAK_MEGA_STAGE_MASK [[function_constant(25)]];
 constant uint OAK_MEGA_STAGES = is_function_constant_defined(OAK_MEGA_STAGE_MASK)
     ? OAK_MEGA_STAGE_MASK : 0xffffffffu;
 
-constant uint OAK_SPL = 1u;
-
 inline void simdSyncDev() { simdgroup_barrier(mem_flags::mem_device); }
 
 inline void simdSyncTg() { simdgroup_barrier(mem_flags::mem_threadgroup); }
@@ -60,10 +58,6 @@ struct KernelConfig {
     float actorAlphaDenom;
 };
 
-constant uint OAK_SIMD_WIDTH = 32u;
-constant uint OAK_PLAN_PERIOD = 32u;
-constant uint OAK_PERCEPT_BUDGET = 32u;
-
 inline uint2 diagSketchBits(uint featureIndex) {
     uint2 h = uint2(featureIndex * 0x9E3779B9u, (featureIndex + 0x632BE59Bu) * 0x85EBCA6Bu);
     h ^= h >> 16u;
@@ -74,15 +68,7 @@ inline uint2 diagSketchBits(uint featureIndex) {
     return h;
 }
 
-constant uint OAK_GATE_BANK = 7u;
-constant uint OAK_OPTION_COUNT = 32u;
-constant uint OAK_GATE_GROUPS = 2u;
-constant uint OAK_ANCHORS_MAX =
-    ((OAK_ENV_OBS_MAX + 2u * OAK_ENV_ACT_MAX + 2u + OAK_SIMD_WIDTH - 1u) / OAK_SIMD_WIDTH) * OAK_SIMD_WIDTH;
-constant uint OAK_ACTIVE_SLOTS_MAX = OAK_ANCHORS_MAX * (1u + OAK_GATE_GROUPS) / OAK_SIMD_WIDTH;
-constant uint OAK_POLICY_MAX = OAK_ENV_ACT_MAX;
-constant uint PLAN_INV_SQRT_FEATURES = 2u;
-static_assert(OAK_DIAG_K == 2u * OAK_SIMD_WIDTH, "sketch width is two sign words per feature");
+constant uint PLAN_SCRATCH_INV_SQRT_FEATURES = 2u;
 
 constant uint FEATURE_PRODUCT = 0u;
 constant uint FEATURE_NORMALIZED_SUM = 1u;
@@ -315,12 +301,12 @@ inline KernelConfig deriveConfig(uint obsDim, uint actionParams) {
     cfgOut.obsDim = obsDim;
     cfgOut.actionParamCount = actionParams;
     uint anchors = OAK_PERCEPT_BUDGET;
-    cfgOut.rank = anchors + anchors * OAK_GATE_BANK * 2u;
+    cfgOut.rank = anchors * (1u + OAK_GATE_GROUPS * OAK_GATE_BANK);
     cfgOut.optionCount = OAK_OPTION_COUNT;
     cfgOut.linearAnchorCount = anchors;
-    cfgOut.obsTraceLevels = cfgOut.rank / (2u * anchors);
+    cfgOut.obsTraceLevels = OAK_GATE_BANK;
     cfgOut.nurseryCount = cfgOut.rank;
-    uint featureTimeScale = anchors + anchors * OAK_GATE_BANK;
+    uint featureTimeScale = anchors * (1u + OAK_GATE_BANK);
     cfgOut.invRank = 1.0f / float(featureTimeScale);
     cfgOut.invOptionCount = 1.0f / float(cfgOut.optionCount);
     cfgOut.metaEta = 1.0f / float(featureTimeScale) / float(max(featureTimeScale + cfgOut.actionParamCount, 1u));
@@ -339,8 +325,9 @@ struct OakShapeProbe {
     uint stAlphaAct, stBetaAct, uOptFeature, uParentA, uParentB, uKind, uNurParentA;
     float invRank, invOptionCount, metaEta, sampleSigma, invTwoSigmaSquared, actorAlphaDenom;
     uint stKeep0, stKeep0n, stKeep1, stKeep1n, uKeep0, uKeep0n;
+    uint simdWidth, spl, perceptBudget, gateBank, gateGroups, planPeriod;
 };
-static_assert(sizeof(OakShapeProbe) == 144, "OakShapeProbe layout drifted from the Swift mirror");
+static_assert(sizeof(OakShapeProbe) == 168, "OakShapeProbe layout drifted from the Swift mirror");
 
 kernel void oak_shape_probe(device OakShapeProbe *out [[buffer(0)]],
                             device float *params [[buffer(1)]],
@@ -390,6 +377,12 @@ kernel void oak_shape_probe(device OakShapeProbe *out [[buffer(0)]],
     out->stKeep1n = 4u * agent.nurseryCount;
     out->uKeep0 = 0u;
     out->uKeep0n = uint(agent.parked - uintArena) + agent.optionCount;
+    out->simdWidth = OAK_SIMD_WIDTH;
+    out->spl = OAK_SPL;
+    out->perceptBudget = OAK_PERCEPT_BUDGET;
+    out->gateBank = OAK_GATE_BANK;
+    out->gateGroups = OAK_GATE_GROUPS;
+    out->planPeriod = OAK_PLAN_PERIOD;
 }
 
 constant uint OAK_ENV_TABLE_STRIDE = 12u + OAK_POSE_LEN;
@@ -1334,7 +1327,7 @@ static inline void replaceWorstFeature(Agent agent, uint tid, threadgroup float 
                 agent.optionNextValue[(i) * agent.optionCount + k] = 0.0f;
                 agent.optionNextValueAux[(i) * agent.optionCount + k] = 0.0f;
             }
-            agent.optionValue[(feat) * agent.optionCount + k] = agent.planScratch[PLAN_INV_SQRT_FEATURES];
+            agent.optionValue[(feat) * agent.optionCount + k] = agent.planScratch[PLAN_SCRATCH_INV_SQRT_FEATURES];
             tgStash[k * 4u + 0u] = 0.0f;
             tgStash[k * 4u + 1u] = 0.0f;
             tgStash[k * 4u + 2u] = 0.0f;
@@ -1505,7 +1498,7 @@ static inline void replaceWorstFeature(Agent agent, uint tid, threadgroup float 
         simdgroup_barrier(mem_flags::mem_device);
         if (tid == 0u) {
             uint optionFeatureIndex = (agent.replaceSlot[0] == 1u) ? worst : (agent.optionFeature[k] % agent.featureCount);
-            agent.optionValue[optionFeatureIndex * agent.optionCount + k] = agent.planScratch[PLAN_INV_SQRT_FEATURES];
+            agent.optionValue[optionFeatureIndex * agent.optionCount + k] = agent.planScratch[PLAN_SCRATCH_INV_SQRT_FEATURES];
         }
     }
 }
@@ -1798,7 +1791,7 @@ kernel void oak_fleet_init(device float *params [[buffer(0)]],
             agent.importanceStaging[k] = 1.0f;
         }
 
-        agent.planScratch[PLAN_INV_SQRT_FEATURES] = rsqrt(float(max(agent.featureCount, 1u)));
+        agent.planScratch[PLAN_SCRATCH_INV_SQRT_FEATURES] = rsqrt(float(max(agent.featureCount, 1u)));
         for (uint k = 0u; k < agent.optionCount; ++k) agent.parked[k] = 0u;
     }
 }

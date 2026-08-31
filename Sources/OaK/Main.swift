@@ -102,10 +102,6 @@ enum Diag {
   static let ppoAdamV = ppoAdamT + 1
   static func ppoGram(_ params: Int) -> Int { ppoAdamV + params }
   static func ppoFloats(_ params: Int) -> Int { ppoAdamV + params + gram }
-  static func oakRank(_ spec: EnvSpec) -> Int {
-    let anchors = max(32, (spec.naturalO + spec.actionParams + 2 + 31) / 32 * 32)
-    return anchors * 15
-  }
 }
 
 struct AblationSpec {
@@ -201,6 +197,7 @@ struct ShapeProbe {
   var stAlphaAct, stBetaAct, uOptFeature, uParentA, uParentB, uKind, uNurParentA: UInt32
   var invRank, invOptionCount, metaEta, sampleSigma, sampleInv2S2, actorAlphaDenom: Float
   var stKeep0, stKeep0n, stKeep1, stKeep1n, uKeep0, uKeep0n: UInt32
+  var simdWidth, spl, perceptBudget, gateBank, gateGroups, planPeriod: UInt32
 }
 struct RewardSlices {
   let state: [(Int, Int)]
@@ -286,12 +283,11 @@ final class Engine {
     let kd = kind(of: lane)
     return uints.p + kd.uintBase + (lane - kd.firstLane) * kd.uintTotal
   }
-  static let simdWidth = 32
   static func runShapeProbe(
     _ dev: MTLDevice, _ lib: MTLLibrary, obsDim: Int, dPolicy: Int
   ) throws -> ShapeProbe {
     precondition(
-      MemoryLayout<ShapeProbe>.stride == 144, "ShapeProbe layout drifted from OakShapeProbe")
+      MemoryLayout<ShapeProbe>.stride == 168, "ShapeProbe layout drifted from OakShapeProbe")
     let constants = MTLFunctionConstantValues()
     var o32 = UInt32(obsDim)
     constants.setConstantValue(&o32, type: .uint, index: OakConst.specObsDim.rawValue)
@@ -299,7 +295,7 @@ final class Engine {
     constants.setConstantValue(&d32, type: .uint, index: OakConst.specActionParams.rawValue)
     let fn = try lib.makeFunction(name: "oak_shape_probe", constantValues: constants)
     let pipe = try dev.makeComputePipelineState(function: fn)
-    guard let outB = dev.makeBuffer(length: 144, options: [.storageModeShared]),
+    guard let outB = dev.makeBuffer(length: 168, options: [.storageModeShared]),
       let dummy = dev.makeBuffer(length: 16, options: [.storageModeShared]),
       let pq = dev.makeCommandQueue(), let cb = pq.makeCommandBuffer(),
       let enc = cb.makeComputeCommandEncoder()
@@ -397,8 +393,12 @@ final class Engine {
         dev, lib, obsDim: naturalO, dPolicy: dk)
       probeCache[r.kind] = sp
       let anchors = Int(sp.anchorCount)
-      precondition(anchors % Engine.simdWidth == 0, "perception budget must tile the simd width")
-      precondition(Int(sp.rank) == anchors * 15, "gate-bank identity broken")
+      precondition(anchors == Int(sp.perceptBudget), "anchors must be the declared perception budget")
+      precondition(
+        anchors % Int(sp.simdWidth) == 0, "perception budget must tile the simd width")
+      precondition(
+        Int(sp.rank) == anchors * (1 + Int(sp.gateGroups) * Int(sp.gateBank)),
+        "gate-bank identity broken")
       precondition(Int(sp.stateStride) % 4 == 0, "stateStride must stay 16B-aligned")
       let cfgB = dev.makeBuffer(
         length: MemoryLayout<KernelConfig>.stride, options: [.storageModeShared])!
@@ -1260,8 +1260,16 @@ final class TapeWriter {
       var diagFloats = 0
       let ppoP = Diag.ppoParams(
         obsMax: envTable.map(\.naturalO).max()!, actMax: envTable.map(\.actionCount).max()!)
+      var oakRankByKind: [UInt32: Int] = [:]
+      for kind in Set(laneEnvKinds) {
+        let spec = envTable[Int(kind)]
+        oakRankByKind[kind] = Int(
+          try Engine.runShapeProbe(
+            dev, lib, obsDim: spec.naturalO, dPolicy: spec.actionParams
+          ).rank)
+      }
       for kind in laneEnvKinds {
-        diagFloats += max(Diag.oakFloats(Diag.oakRank(envTable[Int(kind)])), Diag.ppoFloats(ppoP))
+        diagFloats += max(Diag.oakFloats(oakRankByKind[kind]!), Diag.ppoFloats(ppoP))
       }
       diagOutBuf = try makeBuf(2 * diagFloats * 4)
       memset(diagAccumBuf.contents(), 0, diagAccumBuf.length)
@@ -1358,8 +1366,9 @@ final class TapeWriter {
     let snapPipe = try pipeline("oak_fleet_snapshot")
     let B = bufs.B
     let core = snapPipe.threadExecutionWidth
-    guard core == Engine.simdWidth else {
-      throw err("simd width \(core) is not the \(Engine.simdWidth) the kernel is compiled for.")
+    let declared = Int(engine.kinds[0].off.simdWidth)
+    guard core == declared else {
+      throw err("simd width \(core) is not the \(declared) the kernel is compiled for.")
     }
     let megaG = [32, 16, 8, 4, 2, 1].first {
       candidate in engine.kinds.allSatisfy {
