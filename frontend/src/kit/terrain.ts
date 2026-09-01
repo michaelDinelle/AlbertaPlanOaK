@@ -281,9 +281,9 @@ export function makeTerrain(opts: TerrainOptions): TerrainHandle {
     const h10 = heights[j0 * nx + i0 + 1] as number;
     const h01 = heights[(j0 + 1) * nx + i0] as number;
     const h11 = heights[(j0 + 1) * nx + i0 + 1] as number;
-    const a = h00 + (h10 - h00) * tx;
-    const b = h01 + (h11 - h01) * tx;
-    return a + (b - a) * tz;
+    return tx + tz <= 1
+      ? h00 + (h10 - h00) * tx + (h01 - h00) * tz
+      : h11 + (h01 - h11) * (1 - tx) + (h10 - h11) * (1 - tz);
   };
 
   const sampleNormal = (x: number, z: number, out: THREE.Vector3): THREE.Vector3 => {

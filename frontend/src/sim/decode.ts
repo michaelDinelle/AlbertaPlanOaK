@@ -1,6 +1,13 @@
 import { isEnvId } from '@shared/envs';
 import { OFF_DONE, OFF_POSE, POSE_LEN, RECORD_FLOATS } from './record';
-import { NO_EVENTS, type EnvDecoder, type EnvFrame, type RawRecording, type SimEvent } from './types';
+import {
+  NO_EVENTS,
+  type EnvDecoder,
+  type EnvFrame,
+  type EventStream,
+  type RawRecording,
+  type SimEvent,
+} from './types';
 
 
 export class DecodeError extends Error {
@@ -37,13 +44,6 @@ function checkIds<St>(raw: RawRecording, decoder: EnvDecoder<St>): void {
   }
 }
 
-export interface EventStream {
-  steps: Int32Array;
-  kinds: Uint16Array;
-  types: readonly SimEvent['type'][];
-  count: number;
-}
-
 export interface RecordingLens {
   readonly frameCount: number;
   frameAt(i: number): EnvFrame;
@@ -60,9 +60,15 @@ export function lensRecording<St>(
   const st = decoder.initStatic(raw.seed);
   const init = decoder.initFrame(raw.seed, st);
 
-  let eventSteps = new Int32Array(1024);
-  let eventKinds = new Uint16Array(1024);
-  let eventCount = 0;
+  const typeNames: SimEvent['type'][] = [];
+  const stream: EventStream = {
+    steps: new Int32Array(1024),
+    kinds: new Uint16Array(1024),
+    cellX: new Int32Array(1024),
+    cellY: new Int32Array(1024),
+    types: typeNames,
+    count: 0,
+  };
   const typeIds = new Map<SimEvent['type'], number>();
   let processed = 0;
 
@@ -89,22 +95,31 @@ export function lensRecording<St>(
       checkRow(raw.data.subarray(row * RECORD_FLOATS, (row + 1) * RECORD_FLOATS), row);
       processed = row + 1;
       for (const event of eventsAt(processed)) {
-        if (eventCount === eventSteps.length) {
-          const steps = new Int32Array(eventCount * 2);
-          const kinds = new Uint16Array(eventCount * 2);
-          steps.set(eventSteps);
-          kinds.set(eventKinds);
-          eventSteps = steps;
-          eventKinds = kinds;
+        if (stream.count === stream.steps.length) {
+          const steps = new Int32Array(stream.count * 2);
+          const kinds = new Uint16Array(stream.count * 2);
+          const cellX = new Int32Array(stream.count * 2);
+          const cellY = new Int32Array(stream.count * 2);
+          steps.set(stream.steps);
+          kinds.set(stream.kinds);
+          cellX.set(stream.cellX);
+          cellY.set(stream.cellY);
+          stream.steps = steps;
+          stream.kinds = kinds;
+          stream.cellX = cellX;
+          stream.cellY = cellY;
         }
         let id = typeIds.get(event.type);
         if (id === undefined) {
           id = typeIds.size;
           typeIds.set(event.type, id);
+          typeNames.push(event.type);
         }
-        eventSteps[eventCount] = row;
-        eventKinds[eventCount] = id;
-        eventCount += 1;
+        stream.steps[stream.count] = row;
+        stream.kinds[stream.count] = id;
+        stream.cellX[stream.count] = event.type === 'collection' ? event.x : 0;
+        stream.cellY[stream.count] = event.type === 'collection' ? event.y : 0;
+        stream.count += 1;
       }
     }
   };
@@ -117,7 +132,7 @@ export function lensRecording<St>(
     frameAt,
     eventsAt,
     get events() {
-      return { steps: eventSteps, kinds: eventKinds, types: [...typeIds.keys()], count: eventCount };
+      return stream;
     },
     extend() {
       const before = processed;

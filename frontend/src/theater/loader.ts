@@ -12,7 +12,7 @@ import {
   scanNextChunk,
 } from '@sim/record';
 import { decoders } from '@sim/registry';
-import { NO_EVENTS, type EnvDecoder } from '@sim/types';
+import { EMPTY_EVENT_STREAM, NO_EVENTS, type EnvDecoder } from '@sim/types';
 
 export interface TheaterTarget {
   runId: string;
@@ -35,7 +35,16 @@ export function recordingRef(
   return null;
 }
 
-export const TICK_KINDS = ['goal', 'door', 'key', 'cue', 'done'] as const;
+export const TICK_KINDS = [
+  'goal',
+  'collection',
+  'door',
+  'key',
+  'cue',
+  'teleport',
+  'resurface',
+  'done',
+] as const;
 export type TickKind = (typeof TICK_KINDS)[number];
 
 export interface TimelineTick {
@@ -140,6 +149,7 @@ export function makeInitialSource(entry: EnvEntry, envId: EnvId, seed: number): 
     geometry: decoder.geometry(st, seed),
     frameCount: 1,
     complete: false,
+    events: EMPTY_EVENT_STREAM,
     frameAt: () => init,
     eventsAt: () => NO_EVENTS,
   };
@@ -192,6 +202,9 @@ export function loadHero(options: HeroOptions): HeroHandle {
     },
     get complete() {
       return fullyFetched && !live;
+    },
+    get events() {
+      return lens !== null ? lens.events : EMPTY_EVENT_STREAM;
     },
     frameAt: (i) => (lens !== null ? lens.frameAt(i) : initFrame),
     eventsAt: (i) => (lens !== null ? lens.eventsAt(i) : NO_EVENTS),

@@ -27,11 +27,15 @@ export const ITEM_KINDS: readonly number[] = [
 ];
 
 export const AGENT_SPAN = 2;
-const BEACON_HEIGHT = 34;
-const BEACON_BASE = 0.62;
-const BEACON_TOP = 0.2;
+const BEACON_HEIGHT = 22;
+const BEACON_BASE = 0.74;
+const BEACON_TOP = 0.3;
 const BEACON_POOL = 6.4;
-const BEACON_LIFT = 1.6;
+const BEACON_LIFT = 1.2;
+const BEACON_INTENSITY = 0.7;
+const BEACON_OPACITY = 0.3;
+const BEACON_POOL_GLOW = 0.7;
+const BEACON_POOL_OPACITY = 0.3;
 
 export const ITEM_MOTION: Record<number, { hover: number; bob: number; spin: number }> = {
   [JBW_BANANA]: { hover: AGENT_SPAN * 0.52, bob: AGENT_SPAN * 0.11, spin: 1.4 },
@@ -63,17 +67,19 @@ export const DRAW_RADIUS = 520;
 
 const DRAW_BLOCKS = ((2 * DRAW_RADIUS) / JBW_BLOCK + 2) ** 2;
 const CANDIDATES = DRAW_BLOCKS * JBW_BLOCK_ITEMS;
+const WALL_CELLS = DRAW_BLOCKS * JBW_BLOCK;
 
 export const ITEM_CAPACITY: Record<number, number> = {
   [JBW_BANANA]: CANDIDATES,
   [JBW_ONION]: CANDIDATES,
   [JBW_JELLY]: CANDIDATES,
-  [JBW_WALL]: CANDIDATES,
+  [JBW_WALL]: WALL_CELLS,
   [JBW_TREE]: CANDIDATES,
   [JBW_TRUFFLE]: CANDIDATES,
 };
 
 export const DECAL_CAPACITY = CANDIDATES;
+export const DEBUG_CELL_CAPACITY = CANDIDATES + WALL_CELLS;
 
 function bananaGeometry(skin: OrchardSkin): THREE.BufferGeometry {
   const parts: ColoredPart[] = [];
@@ -243,8 +249,8 @@ export function buildBeacon(color: THREE.ColorRepresentation, capacity: number):
   geometry.translate(0, BEACON_HEIGHT / 2 + BEACON_LIFT, 0);
   const uniforms = {
     uColor: { value: new THREE.Color(color) },
-    uIntensity: { value: 1.5 },
-    uOpacity: { value: 0.52 },
+    uIntensity: { value: BEACON_INTENSITY },
+    uOpacity: { value: BEACON_OPACITY },
     uTime: { value: 0 },
   };
   const material = new THREE.ShaderMaterial({
@@ -268,10 +274,10 @@ export function buildBeacon(color: THREE.ColorRepresentation, capacity: number):
 
   const poolGeometry = new THREE.PlaneGeometry(BEACON_POOL, BEACON_POOL);
   poolGeometry.rotateX(-Math.PI / 2);
-  const poolMaterial = emissiveMaterial(color, 1.25, {
+  const poolMaterial = emissiveMaterial(color, BEACON_POOL_GLOW, {
     map: radialSprite(64, 2.1),
     transparent: true,
-    opacity: 0.42,
+    opacity: BEACON_POOL_OPACITY,
     depthWrite: false,
     blending: THREE.AdditiveBlending,
     name: 'orchardBeaconPool',
@@ -290,8 +296,8 @@ export function buildBeacon(color: THREE.ColorRepresentation, capacity: number):
     setTime(t) {
       uniforms.uTime.value = t;
       const breath = 1 + 0.09 * Math.sin(t * 0.73) + 0.05 * Math.sin(t * 1.9 + 1.1);
-      uniforms.uIntensity.value = 1.5 * breath;
-      setEmissiveIntensity(poolMaterial, 1.25 * breath);
+      uniforms.uIntensity.value = BEACON_INTENSITY * breath;
+      setEmissiveIntensity(poolMaterial, BEACON_POOL_GLOW * breath);
     },
     dispose() {
       mesh.dispose();

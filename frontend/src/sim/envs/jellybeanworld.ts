@@ -45,7 +45,7 @@ export const JBW_COLOR: readonly (readonly [number, number, number])[] = [
   [0.42, 0.24, 0.13],
 ];
 
-export const JBW_OCCLUSION: readonly number[] = [0, 0, 0, 0, 1, 0.1, 0];
+export const JBW_ENERGY: readonly number[] = [0, 2.04, 1.68, 1.29, 1.34, 0.53, 0.79];
 
 export function jbwBlocks(item: number): boolean {
   return item === JBW_WALL || item === JBW_TREE;
@@ -58,7 +58,8 @@ export function jbwCollectible(item: number): boolean {
 export const JBW_POLARITY_PERIOD = 100000;
 
 export function jbwPolarity(step: number): 1 | -1 {
-  return (Math.floor(step / JBW_POLARITY_PERIOD) & 1) === 0 ? 1 : -1;
+  const envStep = step + 1;
+  return (Math.floor(envStep / JBW_POLARITY_PERIOD) & 1) === 0 ? 1 : -1;
 }
 
 export function jbwWallLine(seed: number, bx: number, by: number): readonly [boolean, number] | null {
@@ -103,7 +104,11 @@ export function jbwCandidate(
 export function jbwTypeOf(block: readonly number[], ecology: readonly number[], slot: number): number {
   const roll = ((block[1] ?? 0) >>> (8 * slot)) & 255;
   if (((ecology[1] ?? 0) & 3) === 0) return (roll & 31) === 0 ? JBW_TRUFFLE : JBW_TREE;
-  const pick = roll % 3;
+  const roll24 =
+    roll |
+    ((((block[2] ?? 0) >>> (8 * slot)) & 255) << 8) |
+    ((((block[3] ?? 0) >>> (8 * slot)) & 255) << 16);
+  const pick = roll24 % 3;
   return pick === 0 ? JBW_BANANA : pick === 1 ? JBW_JELLY : JBW_ONION;
 }
 
@@ -149,7 +154,9 @@ export const jellyBeanWorldDecoder: EnvDecoder<number> = {
         const item = items[i] ?? 'banana';
         const sign = jbwPolarity(next.step);
         const reward: -1 | 0 | 1 = item === 'jellyBean' ? sign : item === 'onion' ? (sign === 1 ? -1 : 1) : 0;
-        return [{ type: 'collection', item, reward }];
+        const x = Math.round(next.pose[JBW_X] ?? 0);
+        const y = Math.round(next.pose[JBW_Y] ?? 0);
+        return [{ type: 'collection', item, reward, x, y }];
       }
     }
     return NO_EVENTS;

@@ -8,9 +8,47 @@ export type SimEvent =
   | { type: 'cue'; value: 0 | 1 }
   | { type: 'teleport' }
   | { type: 'resurface' }
-  | { type: 'collection'; item: 'banana' | 'onion' | 'jellyBean' | 'truffle'; reward: -1 | 0 | 1 };
+  | {
+      type: 'collection';
+      item: 'banana' | 'onion' | 'jellyBean' | 'truffle';
+      reward: -1 | 0 | 1;
+      x: number;
+      y: number;
+    };
 
 export const NO_EVENTS: SimEvent[] = Object.freeze([]) as unknown as SimEvent[];
+
+export const SIM_EVENT_TYPES = [
+  'goal',
+  'done',
+  'key',
+  'door',
+  'cue',
+  'teleport',
+  'resurface',
+  'collection',
+] as const satisfies readonly SimEvent['type'][];
+
+type CoversAllSimEvents = Exclude<SimEvent['type'], (typeof SIM_EVENT_TYPES)[number]>;
+export const SIM_EVENT_TYPES_COMPLETE: CoversAllSimEvents extends never ? true : never = true;
+
+export interface EventStream {
+  steps: Int32Array;
+  kinds: Uint16Array;
+  cellX: Int32Array;
+  cellY: Int32Array;
+  types: readonly SimEvent['type'][];
+  count: number;
+}
+
+export const EMPTY_EVENT_STREAM: EventStream = {
+  steps: new Int32Array(0),
+  kinds: new Uint16Array(0),
+  cellX: new Int32Array(0),
+  cellY: new Int32Array(0),
+  types: [],
+  count: 0,
+};
 
 export interface EnvFrame {
   step: number;

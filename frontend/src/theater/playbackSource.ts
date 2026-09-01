@@ -1,5 +1,5 @@
 import type { EnvId } from '@shared/envs';
-import type { EnvFrame, EnvGeometry, SimEvent } from '@sim/types';
+import type { EnvFrame, EnvGeometry, EventStream, SimEvent } from '@sim/types';
 import type { FrameState } from '@kit/types';
 
 export interface PlaybackClock {
@@ -58,6 +58,7 @@ export interface PlaybackSource {
   geometry: EnvGeometry;
   readonly frameCount: number;
   readonly complete: boolean;
+  readonly events: EventStream;
   frameAt(i: number): EnvFrame;
   eventsAt(i: number): readonly SimEvent[];
 }

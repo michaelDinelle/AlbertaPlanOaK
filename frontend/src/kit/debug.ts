@@ -87,6 +87,7 @@ export class CellBoxes {
     geometry.setAttribute('position', this.posAttr);
     geometry.setAttribute('color', this.colAttr);
     geometry.boundingSphere = new THREE.Sphere(new THREE.Vector3(), 1e5);
+    geometry.setDrawRange(0, 0);
     this.object = new THREE.LineSegments(geometry, material);
     this.object.name = name;
     this.object.frustumCulled = false;
@@ -146,8 +147,14 @@ export class CellBoxes {
   }
 
   commit(): void {
-    this.pos.fill(0, this.o * 3);
+    this.object.geometry.setDrawRange(0, this.o);
+    const used = this.o * 3;
+    if (used === 0) return;
+    this.posAttr.clearUpdateRanges();
+    this.posAttr.addUpdateRange(0, used);
     this.posAttr.needsUpdate = true;
+    this.colAttr.clearUpdateRanges();
+    this.colAttr.addUpdateRange(0, used);
     this.colAttr.needsUpdate = true;
   }
 }
@@ -181,6 +188,8 @@ export class GroundTruthOverlay {
 
   private readonly grid: GridGeometry | null;
   private readonly anchored: boolean;
+  private readonly cellCapacity: number;
+  private readonly cellMaterial: THREE.LineBasicMaterial;
   private cells: CellBoxes | null = null;
   private conePos: Float32Array | null = null;
   private coneAttr: THREE.BufferAttribute | null = null;
@@ -225,9 +234,10 @@ export class GroundTruthOverlay {
     const wall = lineMaterial(opts.wallColor ?? 0x8fa6c4, 0.55);
     const goal = lineMaterial(TOKENS.celebrationGold, 0.95);
     this.materials.push(main, wall, goal);
+    this.cellCapacity = opts.cellCapacity ?? 1;
+    this.cellMaterial = wall;
 
     if (this.anchored) {
-      this.cells = this.addCells(opts.cellCapacity ?? 1, 'oakDebugCells', wall);
       const cone = segments(MAX_CONE, main, 'oakDebugCone');
       this.conePos = cone.positions;
       this.coneAttr = cone.attr;
@@ -262,6 +272,7 @@ export class GroundTruthOverlay {
     const boxes = new CellBoxes(capacity, name, material);
     this.geometries.push(boxes.geometry);
     this.group.add(boxes.object);
+    applyDebugLayer(boxes.object);
     return boxes;
   }
 
@@ -283,7 +294,8 @@ export class GroundTruthOverlay {
   }
 
   cellBoxes(): CellBoxes {
-    if (!this.cells) throw new Error('overlay has no cell boxes');
+    if (!this.anchored) throw new Error('overlay has no cell boxes');
+    this.cells ??= this.addCells(this.cellCapacity, 'oakDebugCells', this.cellMaterial);
     return this.cells;
   }
 

@@ -1,6 +1,6 @@
 import type * as THREE from 'three';
 import type { EnvId } from '@shared/envs';
-import type { EnvGeometry, SimEvent } from '@sim/types';
+import type { EnvGeometry, EventStream, SimEvent } from '@sim/types';
 import type { DesignTokens } from './tokens';
 
 export type SceneEvent = SimEvent;
@@ -16,6 +16,7 @@ export interface FrameUpdate {
   state: FrameState;
   prev: FrameState | null;
   events: readonly SceneEvent[];
+  eventLog: EventStream;
   dtReal: number;
   scrubbed: boolean;
 }

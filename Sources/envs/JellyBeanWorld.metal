@@ -31,7 +31,10 @@ inline int2 jbw_candidate(uint4 block, int bx, int by, uint slot) {
 inline uint jbw_typeOf(uint4 block, uint4 ecology, uint slot) {
     uint roll = (block.y >> (8u * slot)) & 255u;
     if ((ecology.y & 3u) == 0u) return (roll & 31u) == 0u ? JBW_TRUFFLE : JBW_TREE;
-    uint pick = roll % 3u;
+    uint roll24 = roll
+        | (((block.z >> (8u * slot)) & 255u) << 8u)
+        | (((block.w >> (8u * slot)) & 255u) << 16u);
+    uint pick = roll24 % 3u;
     return pick == 0u ? JBW_BANANA : pick == 1u ? JBW_JELLY : JBW_ONION;
 }
 
@@ -187,6 +190,14 @@ inline float3 jbw_scentAt(uint seed, int x, int y, uint step,
             uint4 ecology = jbw_field(seed, jbw_floorDiv(bx * 16, 64), jbw_floorDiv(by * 16, 64), 64u);
             for (uint slot = 0u; slot < JBW_BLOCK_ITEMS; slot++) {
                 int2 p = jbw_candidate(block, bx, by, slot);
+                bool duplicate = false;
+                for (uint prior = 0u; prior < slot; prior++) {
+                    if (all(jbw_candidate(block, bx, by, prior) == p)) {
+                        duplicate = true;
+                        break;
+                    }
+                }
+                if (duplicate) continue;
                 int dx = p.x - x, dy = p.y - y;
                 if (abs(dx) >= int(JBW_RESPONSE_RADIUS) || abs(dy) >= int(JBW_RESPONSE_RADIUS)) continue;
                 if (jbw_wallHit(wall, bx, by, p.x, p.y)) continue;

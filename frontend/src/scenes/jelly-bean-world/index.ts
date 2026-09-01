@@ -15,36 +15,38 @@ import {
   jbwItemAt,
   jbwPolarity,
   jbwWallLine,
-  JBW_BANANAS,
   JBW_BLOCK,
   JBW_BLOCK_ITEMS,
   JBW_EMPTY,
+  JBW_ENERGY,
   JBW_HEADING,
-  JBW_JELLIES,
-  JBW_ONIONS,
-  JBW_TRUFFLES,
   JBW_TRUFFLE,
   JBW_WALL,
   JBW_X,
   JBW_Y,
   jbwCollectible,
-  jbwBlocks,
 } from '@sim/envs/jellybeanworld';
-import { AGENT_SPAN, DECAL_CAPACITY, DRAW_RADIUS, ITEM_KINDS, ITEM_MOTION } from './actors';
-import { buildScentKernel, ScentField } from './scent';
+import {
+  AGENT_SPAN,
+  DEBUG_CELL_CAPACITY,
+  DECAL_CAPACITY,
+  DRAW_RADIUS,
+  ITEM_KINDS,
+  ITEM_MOTION,
+} from './actors';
+import { CollectionLog } from './collectionlog';
+import { scentAtCell } from './fieldmath';
+import { SenseRing, SENSE_DIRECTIONS } from './sense';
 import {
   buildWorld,
   CAM_AZIMUTH,
   CAM_DISTANCE,
   CAM_FOLLOW,
-  CAM_FAR,
-  CAM_MAX_DISTANCE,
-  MAP_FULL,
-  MAP_START,
   CAM_NEAR,
   CAM_POLAR,
   type OrchardWorld,
 } from './world';
+import { makeOrchardView, type OrchardView } from './view';
 
 const UNIT_GRID: GridSize = { w: 1, h: 1 };
 
@@ -67,23 +69,19 @@ const FRONT_SPAN = 220;
 const BLOCK_BIAS = 1 << 18;
 const BLOCK_SPAN = 1 << 19;
 const BLOCK_CACHE_LIMIT = 40000;
-const DEBUG_CELL_CAPACITY = 16384;
-const SENSE_SPAN = 1.5;
 const GRID_GAIN = 0.34;
+const ENERGY_PEAK = Math.max(...JBW_ENERGY);
 const IDENTITY = new THREE.Quaternion();
 const DECAL_LIFT = 0.05;
-
-const INVENTORY_SLOTS: readonly number[] = [JBW_BANANAS, JBW_ONIONS, JBW_JELLIES, JBW_TRUFFLES];
 
 class WindfallOrchardScene extends StageScene<OrchardWorld> {
   protected readonly stageName = 'windfallOrchard';
 
   private wisp: Wisp | null = null;
-  private field: ScentField | null = null;
+  private readonly clog = new CollectionLog();
+  private view: OrchardView | null = null;
   private seed = 0;
 
-  private readonly inventory = new Float32Array(INVENTORY_SLOTS.length);
-  private inventoryReady = false;
   private rate = 0;
   private rateStep = 0;
   private harvest = 0.35;
@@ -108,13 +106,13 @@ class WindfallOrchardScene extends StageScene<OrchardWorld> {
   private readonly bloomPos = new THREE.Vector3();
   private readonly groundPos = new THREE.Vector3();
   private readonly counts = new Map<number, number>();
-  private sightX = Number.NaN;
-  private sightY = Number.NaN;
   private readonly blocks = new Map<number, Int32Array>();
   private blockX = Number.NaN;
   private blockY = Number.NaN;
   private itemsDirty = true;
-  private readonly debugCone = new Float32Array(SENSE_SPAN * 2 * 4 * 6);
+  private sense: SenseRing | null = null;
+  private readonly energies = new Float32Array(8);
+  private readonly debugCone = new Float32Array(0);
   private readonly debugAgent: Vec3Tuple = [0, 0, 0];
   private boxes: CellBoxes | null = null;
   private debugWas = false;
@@ -126,13 +124,7 @@ class WindfallOrchardScene extends StageScene<OrchardWorld> {
 
   protected buildWorld(ctx: SceneContext): OrchardWorld {
     this.seed = ctx.seed;
-    const field = new ScentField(
-      ctx.seed,
-      buildScentKernel(),
-      ctx.renderer.capabilities.getMaxAnisotropy(),
-    );
-    this.field = field;
-    return buildWorld(ctx, this.scene, field);
+    return buildWorld(ctx, this.scene);
   }
 
   protected buildActors(ctx: SceneContext, world: OrchardWorld): void {
@@ -150,20 +142,25 @@ class WindfallOrchardScene extends StageScene<OrchardWorld> {
     );
     this.wisp = wisp;
     this.scene.add(wisp.group);
+    const sense = new SenseRing(this.accent);
+    this.sense = sense;
+    this.scene.add(sense.group);
     const agentLight = world.rig.points[0];
     if (agentLight) agentLight.color.set(this.accent);
     const bloomLight = world.rig.points[1];
     if (bloomLight) bloomLight.color.set(this.gold);
   }
 
-  protected rigOptions(): OrbitRigOptions {
+  protected rigOptions(ctx: SceneContext): OrbitRigOptions {
+    const view = makeOrchardView(ctx.size.width, ctx.size.height);
+    this.view = view;
     return {
       target: [0, 0.4, 0],
       distance: CAM_DISTANCE,
       azimuth: CAM_AZIMUTH,
       polar: CAM_POLAR,
       follow: CAM_FOLLOW,
-      limits: { maxDistance: CAM_MAX_DISTANCE },
+      limits: { maxDistance: view.maxDistance },
     };
   }
 
@@ -177,33 +174,16 @@ class WindfallOrchardScene extends StageScene<OrchardWorld> {
       frame: (state) => {
         const ax = Math.round(state.pose[JBW_X] ?? 0);
         const ay = Math.round(state.pose[JBW_Y] ?? 0);
-        const heading = Math.round(state.pose[JBW_HEADING] ?? 0) & 3;
-        const ox = this.frameX;
-        const oy = this.frameY;
-        const oz = this.frameZ;
-        const cone = this.debugCone;
-        let c = 0;
-        const edge = (sx: number, sy: number, ex: number, ey: number): void => {
-          cone[c++] = sx - ox; cone[c++] = this.surface(sx, sy) - oy; cone[c++] = sy - oz;
-          cone[c++] = ex - ox; cone[c++] = this.surface(ex, ey) - oy; cone[c++] = ey - oz;
-        };
-        for (let i = 0; i < SENSE_SPAN * 2; i++) {
-          const t = -SENSE_SPAN + i;
-          edge(ax + t, ay - SENSE_SPAN, ax + t + 1, ay - SENSE_SPAN);
-          edge(ax + t, ay + SENSE_SPAN, ax + t + 1, ay + SENSE_SPAN);
-          edge(ax - SENSE_SPAN, ay + t, ax - SENSE_SPAN, ay + t + 1);
-          edge(ax + SENSE_SPAN, ay + t, ax + SENSE_SPAN, ay + t + 1);
-        }
-        this.debugAgent[0] = ax - ox;
-        this.debugAgent[1] = this.surface(ax, ay) - oy;
-        this.debugAgent[2] = ay - oz;
+        this.debugAgent[0] = ax - this.frameX;
+        this.debugAgent[1] = this.surface(ax, ay) - this.frameY;
+        this.debugAgent[2] = ay - this.frameZ;
         return {
-          originX: ox,
-          originY: oy,
-          originZ: oz,
+          originX: this.frameX,
+          originY: this.frameY,
+          originZ: this.frameZ,
           agent: this.debugAgent,
-          cone,
-          coneCount: c / 3,
+          cone: this.debugCone,
+          coneCount: 0,
         };
       },
     };
@@ -212,24 +192,21 @@ class WindfallOrchardScene extends StageScene<OrchardWorld> {
   protected start(_ctx: SceneContext, world: OrchardWorld): void {
     this.surface = (x, z) => world.heightAt(x, z);
     this.camera.near = CAM_NEAR;
-    this.camera.far = CAM_FAR;
+    this.camera.far = this.view?.far ?? 3600;
     this.camera.updateProjectionMatrix();
     world.setTime(0);
     world.setOrigin(0, 0);
     this.wisp?.setCell(0, 0, UNIT_GRID);
   }
 
-  private readInventory(pose: Float32Array): number {
-    let gained = 0;
-    for (let i = 0; i < INVENTORY_SLOTS.length; i++) {
-      const slot = INVENTORY_SLOTS[i] ?? 0;
-      const now = pose[slot] ?? 0;
-      const was = this.inventory[i] ?? 0;
-      if (this.inventoryReady && now > was) gained += now - was;
-      this.inventory[i] = now;
-    }
-    this.inventoryReady = true;
-    return gained;
+  override resize(size: Parameters<StageScene<OrchardWorld>['resize']>[0]): void {
+    super.resize(size);
+    const view = makeOrchardView(size.width, size.height);
+    this.view = view;
+    const rig = this.rig;
+    if (rig) rig.limits.maxDistance = view.maxDistance;
+    this.camera.far = view.far;
+    this.camera.updateProjectionMatrix();
   }
 
   private advanceRate(step: number, credit: number): void {
@@ -269,7 +246,7 @@ class WindfallOrchardScene extends StageScene<OrchardWorld> {
     return packed;
   }
 
-  private rebuildItems(world: OrchardWorld, ax: number, ay: number, field: ScentField): void {
+  private rebuildItems(world: OrchardWorld, ax: number, ay: number, step: number): void {
     const counts = this.counts;
     for (const kind of ITEM_KINDS) counts.set(kind, 0);
     this.decalCount = 0;
@@ -291,7 +268,7 @@ class WindfallOrchardScene extends StageScene<OrchardWorld> {
           const wx = packed[i] ?? 0;
           const wy = packed[i + 1] ?? 0;
           const item = packed[i + 2] ?? 0;
-          if (jbwCollectible(item) && field.depleted(wx, wy)) continue;
+          if (jbwCollectible(item) && this.clog.depleted(wx, wy, step)) continue;
           this.write(world, counts, item, wx, wy);
         }
       }
@@ -364,7 +341,7 @@ class WindfallOrchardScene extends StageScene<OrchardWorld> {
       );
     }
     if ((ITEM_MOTION[item]?.hover ?? 0) > 0) this.markCell(world, item, wx, ground, wy);
-    if (item === JBW_TRUFFLE) this.markLegendary(world, wx, ground, wy);
+    if (item === JBW_TRUFFLE) this.markScentColumn(world, wx, ground, wy);
   }
 
   private markCell(world: OrchardWorld, item: number, wx: number, ground: number, wy: number): void {
@@ -379,7 +356,7 @@ class WindfallOrchardScene extends StageScene<OrchardWorld> {
     this.decalCount++;
   }
 
-  private markLegendary(world: OrchardWorld, wx: number, ground: number, wy: number): void {
+  private markScentColumn(world: OrchardWorld, wx: number, ground: number, wy: number): void {
     const beacon = world.beacon;
     if (this.beaconCount >= beacon.mesh.instanceMatrix.count) return;
     this.place.set(wx, ground, wy);
@@ -393,8 +370,7 @@ class WindfallOrchardScene extends StageScene<OrchardWorld> {
 
   protected tick(frame: FrameUpdate, { world, pool, rig, time }: Stage<OrchardWorld>): void {
     const wisp = this.wisp;
-    const field = this.field;
-    if (!wisp || !field) return;
+    if (!wisp) return;
 
     const pose = frame.state.pose;
     const step = frame.state.step;
@@ -410,17 +386,17 @@ class WindfallOrchardScene extends StageScene<OrchardWorld> {
       this.frontAt = -Infinity;
       this.rate = 0;
       this.rateStep = step;
-      this.sightX = Number.NaN;
       this.itemsDirty = true;
-      this.inventoryReady = false;
       this.harvest = 0.35;
-      field.resetScars();
       wisp.setCell(ax, ay, UNIT_GRID);
       wisp.snap();
       rig.snap();
     }
 
-    const gained = this.readInventory(pose);
+    if (this.clog.sync(frame.eventLog)) {
+      world.scentField.sync(this.clog.log, this.clog.version);
+      this.itemsDirty = true;
+    }
     const polarity = jbwPolarity(step);
     if (polarity !== this.polarity) {
       this.polarity = polarity;
@@ -433,7 +409,8 @@ class WindfallOrchardScene extends StageScene<OrchardWorld> {
       const ev = frame.events[i];
       if (!ev || ev.type !== 'collection') continue;
       credit += ev.reward;
-      this.bloomPos.set(ax, this.surface(ax, ay) + BLOOM_Y, ay);
+      this.itemsDirty = true;
+      this.bloomPos.set(ev.x, this.surface(ev.x, ev.y) + BLOOM_Y, ev.y);
       this.groundPos.set(this.bloomPos.x, this.bloomPos.y - BLOOM_Y, this.bloomPos.z);
       if (ev.reward >= 0) {
         pool.burst(this.bloomPos, this.accent, BURST_SCALE, time);
@@ -444,10 +421,6 @@ class WindfallOrchardScene extends StageScene<OrchardWorld> {
       } else {
         pool.sigh(SIGH_STRENGTH, this.bloomPos, time);
       }
-    }
-    if (gained > 0) {
-      field.scar(ax, ay, step);
-      this.itemsDirty = true;
     }
 
     this.advanceRate(step, credit);
@@ -465,19 +438,11 @@ class WindfallOrchardScene extends StageScene<OrchardWorld> {
       envelope(frontAge, FRONT_SECONDS, 1.4) * 1.6,
     );
 
-    field.update(ax, ay, step);
-    const origin = field.origin;
-    world.setScentOrigin(origin[0], origin[1]);
-    if (ax !== this.sightX || ay !== this.sightY) {
-      this.sightX = ax;
-      this.sightY = ay;
-      world.setSight(ax, ay);
-    }
-
+    world.scentField.frame(step, ax, ay);
     world.setOrigin(ax, ay);
     world.setHour(this.harvest);
-    const zoom = rig.state.distance;
-    world.setMap(smoothstep01((zoom - MAP_START) / (MAP_FULL - MAP_START)), zoom);
+    const view = this.view;
+    if (view) world.setZoom(view.shadowSpan(rig.state.distance));
     world.setBreeze(0.25 + 0.75 * this.harvest);
     if (this.debugOn !== this.debugWas) {
       this.debugWas = this.debugOn;
@@ -487,10 +452,10 @@ class WindfallOrchardScene extends StageScene<OrchardWorld> {
     const blockX = Math.floor(ax / JBW_BLOCK);
     const blockY = Math.floor(ay / JBW_BLOCK);
     if (this.itemsDirty || blockX !== this.blockX || blockY !== this.blockY) {
+      this.rebuildItems(world, ax, ay, step);
       this.itemsDirty = false;
       this.blockX = blockX;
       this.blockY = blockY;
-      this.rebuildItems(world, ax, ay, field);
     }
 
     if (ax !== wisp.cellX || ay !== wisp.cellY) {
@@ -501,6 +466,27 @@ class WindfallOrchardScene extends StageScene<OrchardWorld> {
     wisp.face(heading === 0 ? { dx: 0, dy: -1 } : heading === 1 ? { dx: 1, dy: 0 } : heading === 2 ? { dx: 0, dy: 1 } : { dx: -1, dy: 0 });
     wisp.update(frame.dtReal, time);
     wisp.group.position.y = this.surface(ax, ay);
+
+    const sense = this.sense;
+    if (sense) {
+      for (let i = 0; i < 8; i++) {
+        const dir = SENSE_DIRECTIONS[(2 * heading + i) & 7] ?? [0, 0];
+        const wx = ax + dir[0];
+        const wy = ay + dir[1];
+        const item = jbwItemAt(this.seed, wx, wy);
+        const absent = jbwCollectible(item) && this.clog.depleted(wx, wy, step);
+        this.energies[i] = absent ? 0 : JBW_ENERGY[item] ?? 0;
+      }
+      const scent = scentAtCell(
+        this.seed,
+        this.clog.collected,
+        step,
+        ax,
+        ay,
+        world.scentField.kernel,
+      );
+      sense.update(ax, ay, heading, this.surface, this.energies, ENERGY_PEAK, scent);
+    }
 
     const bloom = envelope(time - this.bloomAt, BLOOM_SECONDS, 2.2);
     const agentLight = world.rig.points[0];
@@ -522,11 +508,10 @@ class WindfallOrchardScene extends StageScene<OrchardWorld> {
   protected drop(): void {
     this.wisp?.dispose();
     this.wisp = null;
-    this.field?.dispose();
-    this.field = null;
+    this.sense?.dispose();
+    this.sense = null;
     this.counts.clear();
     this.blocks.clear();
-    this.inventoryReady = false;
     this.bloomAt = -Infinity;
     this.frontAt = -Infinity;
   }

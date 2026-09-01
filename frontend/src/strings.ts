@@ -3,6 +3,16 @@ import type { Policy } from '@shared/types';
 export const STR = {
   app: 'OaK',
   policy: { oak: 'OaK', ppo: 'PPO', random: 'Random' } as Record<Policy, string>,
+  jbw: {
+    reward: 'REWARD',
+    flip: (steps: string) => `flips in ${steps} steps`,
+    jelly: 'jelly',
+    onion: 'onion',
+    banana: 'banana',
+    truffle: 'truffle',
+    beacon: 'scent only',
+    zero: '0',
+  },
   bar: {
     play: 'Play',
     pause: 'Pause',

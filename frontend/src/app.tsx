@@ -13,6 +13,7 @@ import { cycleEnv, keyAction } from './lib/keymap';
 import { envShares, resolveFeaturedRun, runDateLabel, runEnvs, runLabel, runLabelFor, runShortId, sortRuns } from './lib/run';
 import { CommandPalette } from './panels/CommandPalette';
 import { Hotkey, POLICY_TOKENS } from './panels/charts';
+import { JbwLegend } from './panels/JbwLegend';
 import { PlaybackBar, PolicySwitch } from './panels/PlaybackBar';
 import { PANEL_VIEWS, StatsPanel, type PanelView } from './panels/StatsPanel';
 import {
@@ -368,6 +369,7 @@ export function App() {
       )}
       <div className="pointer-events-none absolute inset-x-0 bottom-4 z-30 grid grid-cols-[1fr_minmax(0,760px)_1fr] items-end gap-3 px-4">
         <div className="flex flex-col items-start gap-3 justify-self-start">
+          {sel.envId === 'JellyBeanWorld-cont-v0' && <JbwLegend />}
           <EnvTileButton onOpen={() => setWallOpen(true)} />
         </div>
         <PlaybackBar stride={stride} live={live} fullscreenTarget={rootRef} />

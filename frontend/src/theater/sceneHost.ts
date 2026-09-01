@@ -130,6 +130,7 @@ export async function mountSceneHost(
     state,
     prev: null,
     events: eventBuffer,
+    eventLog: options.source.events,
     dtReal: 0,
     scrubbed: true,
   };
@@ -237,6 +238,7 @@ export async function mountSceneHost(
     else eventBuffer.length = 0;
 
     frameUpdate.prev = hadPrevious ? previous : null;
+    frameUpdate.eventLog = source.events;
     frameUpdate.dtReal = dtReal;
     frameUpdate.scrubbed = !step.sequential;
     scene.update(frameUpdate);

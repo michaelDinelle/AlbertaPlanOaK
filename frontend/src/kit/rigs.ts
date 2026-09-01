@@ -152,34 +152,52 @@ export function makeOrbitRig(opts: OrbitRigOptions = {}): OrbitRig {
   apply();
 
   const canvas = opts.canvas ?? null;
-  let dragging = false;
-  let lastX = 0;
-  let lastY = 0;
-  let activePointer = -1;
-
+  const pointers = new Map<number, { x: number; y: number }>();
   let panning = false;
+  let pinchSpan = 0;
+
+  const pinch = (): { span: number; x: number; y: number } => {
+    const [a, b] = [...pointers.values()];
+    if (!a || !b) return { span: 0, x: 0, y: 0 };
+    return {
+      span: Math.hypot(a.x - b.x, a.y - b.y),
+      x: (a.x + b.x) / 2,
+      y: (a.y + b.y) / 2,
+    };
+  };
+
   const onPointerDown = (e: PointerEvent): void => {
-    if (e.button !== 0 && e.button !== 1 && e.button !== 2) return;
-    dragging = true;
-    panning = e.button !== 0 || e.shiftKey;
-    activePointer = e.pointerId;
-    lastX = e.clientX;
-    lastY = e.clientY;
+    if (e.pointerType === 'mouse' && e.button !== 0 && e.button !== 1 && e.button !== 2) return;
+    pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+    panning = e.pointerType === 'mouse' && (e.button !== 0 || e.shiftKey);
+    if (pointers.size === 2) pinchSpan = pinch().span;
     canvas?.setPointerCapture?.(e.pointerId);
   };
   const onPointerMove = (e: PointerEvent): void => {
-    if (!dragging || e.pointerId !== activePointer) return;
-    const dx = e.clientX - lastX;
-    const dy = e.clientY - lastY;
-    lastX = e.clientX;
-    lastY = e.clientY;
+    const previous = pointers.get(e.pointerId);
+    if (!previous) return;
+    if (pointers.size === 2) {
+      const before = pinch();
+      pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+      const after = pinch();
+      if (pinchSpan > 0 && after.span > 0) {
+        desired.distance *= pinchSpan / after.span;
+        clampOrbit(desired, limits);
+      }
+      pinchSpan = after.span;
+      rig.pan(after.x - before.x, after.y - before.y);
+      return;
+    }
+    const dx = e.clientX - previous.x;
+    const dy = e.clientY - previous.y;
+    pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+    if (pointers.size !== 1) return;
     if (panning) rig.pan(dx, dy);
     else rig.orbit(-dx * rotateSpeed, -dy * rotateSpeed);
   };
   const onPointerUp = (e: PointerEvent): void => {
-    if (e.pointerId !== activePointer) return;
-    dragging = false;
-    activePointer = -1;
+    if (!pointers.delete(e.pointerId)) return;
+    pinchSpan = pointers.size === 2 ? pinch().span : 0;
     canvas?.releasePointerCapture?.(e.pointerId);
   };
   const onWheel = (e: WheelEvent): void => {

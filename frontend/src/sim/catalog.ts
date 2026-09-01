@@ -54,10 +54,11 @@ function readEntry(v: unknown, at: number): EnvEntry {
   const o = v as Record<string, unknown>;
   const what = `envCatalog[${at}]`;
   const envId = requireString(o?.['envId'], `${what}.envId`);
+  const category = requireString(o['category'], `${what}.category`);
   return {
     envId,
     controlHz: requireNumber(o['controlHz'], `${what}.controlHz`),
-    discretePose: requireString(o['category'], `${what}.category`) === 'grid',
+    discretePose: category === 'grid' || category === 'jellyBean',
     fields: requireArray(o['fields'], `${what}.fields`).map((f, i) =>
       readField(f, `${what}.fields[${i}]`),
     ),
