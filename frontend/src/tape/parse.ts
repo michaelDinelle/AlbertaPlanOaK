@@ -130,7 +130,7 @@ export async function fetchTape(runId: string, prev: Tape | null, signal?: Abort
     if (cause instanceof DOMException && cause.name === 'AbortError') throw cause;
     throw new ApiError(0, url, cause instanceof Error ? cause.message : String(cause));
   }
-  if (response.status === 416) {
+  if (response.status === 204 || response.status === 416) {
     if (prev !== null) return prev;
     throw new ApiError(response.status, url, 'empty tape');
   }

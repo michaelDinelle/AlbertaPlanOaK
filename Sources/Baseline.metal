@@ -89,7 +89,7 @@ kernel void random_megastep(device OakFleetLane *lanes [[buffer(6)]],
         if (slane == 0u) {
             uint stepNum = lane->steps;
             accumulateReward(lane, reward, stepNum, ecfg);
-            recordPose(envK, mjModels, envState, ctrl, stepNum, done, ecfg, recordSlot, recordBuf, laneIdx);
+            recordPose(envK, mjModels, envState, ctrl, stepNum, done, reward, ecfg, recordSlot, recordBuf, laneIdx);
         }
         simdgroup_barrier(mem_flags::mem_device);
     }
@@ -465,7 +465,7 @@ kernel void ppo_megastep(device float *params [[buffer(0)]],
             if (tid == 0u) {
                 uint stepNum = lane->steps;
                 accumulateReward(lane, reward, stepNum, ecfg);
-                recordPose(envK, mjModels, envState, ctrl, stepNum, done, ecfg,
+                recordPose(envK, mjModels, envState, ctrl, stepNum, done, reward, ecfg,
                            recordSlot, recordBuf, laneIdx);
                 float safeReward = isfinite(reward) ? reward : 0.0f;
                 R[PPO_ROLL_REW + t] = ppoScaleReward(S, safeReward, done);

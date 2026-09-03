@@ -19,6 +19,7 @@ export const POLICY_TOKENS: Record<Policy, string> = {
 };
 
 export const POLICY_ORDER = Object.keys(POLICY_TOKENS) as readonly Policy[];
+export const BEST_TOKEN = 'var(--color-best)';
 
 export interface XY {
   x: number;
@@ -162,6 +163,7 @@ export function TimeChart({
   yLabel,
   rightLabel,
   overlay,
+  yDomain,
   children,
 }: {
   label: string;
@@ -176,6 +178,7 @@ export function TimeChart({
   yLabel?: string;
   rightLabel?: string;
   overlay?: ReactNode;
+  yDomain?: readonly [number, number];
   children: ReactNode;
 }) {
   return (
@@ -211,6 +214,8 @@ export function TimeChart({
           <YAxis
             yAxisId="y"
             width={AXIS_WIDTH}
+            domain={yDomain === undefined ? ['auto', 'auto'] : [yDomain[0], yDomain[1]]}
+            allowDataOverflow={yDomain !== undefined}
             tickFormatter={yFormat ?? ((value: number) => formatRate(value))}
             tick={TICK}
             axisLine={false}

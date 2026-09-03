@@ -123,6 +123,23 @@ export function windowedRates(tape: Tape, lanes: readonly number[], win: number)
   });
 }
 
+export interface CumulativeReward {
+  x: number[];
+  perLane: number[][];
+}
+
+export function cumulativeReward(tape: Tape, lanes: readonly number[]): CumulativeReward {
+  const f = fieldIndex(tape, 'rewardSum');
+  const x: number[] = [];
+  for (let r = 0; r < tape.rows; r++) x.push(tape.stepEnd[r] ?? 0);
+  const perLane = lanes.map((lane) => {
+    const out: number[] = [];
+    for (let r = 0; r < tape.rows; r++) out.push(tapeValue(tape, f, r, lane));
+    return out;
+  });
+  return { x, perLane };
+}
+
 export function rhoBinned(tape: Tape, lanes: readonly number[]): BinnedRates {
   const f = fieldIndex(tape, 'rho');
   return binnedRates(tape, lanes, (row, lane) => tapeValue(tape, f, row, lane));

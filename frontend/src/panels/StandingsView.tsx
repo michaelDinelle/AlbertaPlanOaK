@@ -16,13 +16,13 @@ interface Mark {
 
 export function StandingsView({ runs }: { runs: Record<Policy, RunDetail | null> }) {
   const selection = useSelection();
-  const keeper = runs.oak?.summary ?? null;
+  const oakSummary = runs.oak?.summary ?? null;
   const { rows, oakAhead, ppoAhead, close } = useMemo(() => {
-    if (keeper === null) return { rows: [], oakAhead: 0, ppoAhead: 0, close: 0 };
+    if (oakSummary === null) return { rows: [], oakAhead: 0, ppoAhead: 0, close: 0 };
     let oakAhead = 0;
     let ppoAhead = 0;
     let close = 0;
-    const rows = Object.keys(keeper.envs).map((envId) => {
+    const rows = Object.keys(oakSummary.envs).map((envId) => {
       const marks = POLICY_ORDER.flatMap((policy): Mark[] => {
         const final = runs[policy]?.summary?.envs[envId]?.finalRate;
         return final === undefined || !Number.isFinite(final.iqm)
@@ -41,14 +41,14 @@ export function StandingsView({ runs }: { runs: Record<Policy, RunDetail | null>
         name: isEnvId(envId) ? nameOf(envId) : envId,
         marks,
         oak: oak?.value ?? -Infinity,
-        probability: keeper.vsBaselines?.ppo?.probImprovement.envs[envId],
+        probability: oakSummary.vsBaselines?.ppo?.probImprovement.envs[envId],
       };
     });
     rows.sort((a, b) => b.oak - a.oak);
     return { rows, oakAhead, ppoAhead, close };
-  }, [keeper, runs]);
+  }, [oakSummary, runs]);
 
-  if (keeper === null) {
+  if (oakSummary === null) {
     return <div className={clsx('px-2 py-6 text-center', TXT.bodyDim)}>{STR.standings.needsSummary}</div>;
   }
 

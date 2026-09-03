@@ -1,6 +1,6 @@
 import { useMemo, useSyncExternalStore } from 'react';
 import type { EnvScheduleEntry } from '@shared/types';
-import type { BinnedRates, SeedRow, SurvivalSeries } from './derive';
+import type { BinnedRates, CumulativeReward, SeedRow, SurvivalSeries } from './derive';
 
 export interface DeriveResults {
   rates: BinnedRates;
@@ -8,12 +8,13 @@ export interface DeriveResults {
   rho: BinnedRates;
   survival: SurvivalSeries;
   rows: SeedRow[];
+  cumulativeReward: CumulativeReward;
 }
 
 export type DeriveMode = keyof DeriveResults;
 
 export type DeriveSpec =
-  | { mode: 'rho' | 'survival'; lanes: number[] }
+  | { mode: 'rho' | 'survival' | 'cumulativeReward'; lanes: number[] }
   | { mode: 'rates' | 'windowedRates'; lanes: number[]; win: number }
   | {
       mode: 'rows';

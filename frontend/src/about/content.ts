@@ -18,7 +18,7 @@ export const STAGES = {
     name: ['Feature', 'Construction'],
     plan: 'Construct a new feature of state out of the stream, and keep the ones that turn out to matter.',
     handoff: 'a feature worth attaining',
-    symbols: ['constructFeatures()', 'anchorsForStream()', 'CONSTRUCTED_PER_ANCHOR = 2', 'CANDIDATES_PER_SLOT = 7'],
+    symbols: ['constructFeatures()', 'perceptsForStream()', 'CONSTRUCTED_PER_PERCEPT', 'CANDIDATES_PER_SLOT'],
   },
   st: {
     key: 'st',
@@ -34,7 +34,7 @@ export const STAGES = {
     name: ['Option'],
     plan: 'Learn an option: a policy that solves the subtask, running until its stopping condition fires.',
     handoff: 'behaviour, and what it did next',
-    symbols: ['emitOptionActions()', 'blendKeyboard()', 'importanceStaging', 'OPTION_COUNT = 32'],
+    symbols: ['emitOptionActions()', 'blendKeyboard()', 'importanceStaging', 'OPTION_COUNT'],
   },
   m: {
     key: 'm',
@@ -50,7 +50,7 @@ export const STAGES = {
     name: ['Planning'],
     plan: 'Plan with the option models — and let planning decide what is worth perceiving next.',
     handoff: 'utility — which feature dies next',
-    symbols: ['planAllOptions()', 'optionPriority', 'updateUtilities()', 'PLAN_PERIOD = 32'],
+    symbols: ['planAllOptions()', 'optionPriority', 'updateUtilities()', 'PLAN_PERIOD'],
   },
 } satisfies Record<StageKey, Stage>;
 

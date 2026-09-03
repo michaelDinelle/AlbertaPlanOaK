@@ -45,7 +45,7 @@ export function HealthView({
 }) {
   const sel = useSelection();
   const summary = active?.summary ?? null;
-  const keeper = runs.oak?.summary ?? null;
+  const oakSummary = runs.oak?.summary ?? null;
   const lanes = useMemo(
     () => (active === null || sel.envId === null ? null : envLanes(active.meta, sel.envId)),
     [active, sel.envId],
@@ -78,18 +78,18 @@ export function HealthView({
   }, [rates]);
 
   const capacity = useMemo(() => {
-    const steps = keeper?.plasticitySteps ?? [];
+    const steps = oakSummary?.plasticitySteps ?? [];
     if (steps.length === 0 || sel.envId === null) return null;
     const pull = (
-      summaryOf: typeof keeper,
+      summaryOf: typeof oakSummary,
       field: string,
     ): (number | null)[] | null => {
       const track = summaryOf?.envs[sel.envId ?? '']?.plasticity?.[field];
       return track !== undefined && track.iqm.length === steps.length ? track.iqm : null;
     };
-    const oakDormant = pull(keeper, 'dormantFraction');
+    const oakDormant = pull(oakSummary, 'dormantFraction');
     const ppoDormant = pull(runs.ppo?.summary ?? null, 'dormantFraction');
-    const oakErank = pull(keeper, 'erank');
+    const oakErank = pull(oakSummary, 'erank');
     const ppoErank = pull(runs.ppo?.summary ?? null, 'erank');
     const tracks = [oakDormant, ppoDormant, oakErank, ppoErank];
     if (tracks.every((t) => t === null)) return null;
@@ -101,7 +101,7 @@ export function HealthView({
       oakErank: oakErank === null ? [] : seriesRows(steps, oakErank),
       ppoErank: ppoErank === null ? [] : seriesRows(steps, ppoErank),
     };
-  }, [keeper, runs.ppo, sel.envId]);
+  }, [oakSummary, runs.ppo, sel.envId]);
 
   const know = useMemo(() => {
     if (rates === null || rho === null) return null;

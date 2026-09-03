@@ -76,7 +76,7 @@ function RunChip({
           <div className="flex flex-col">
             <span className="font-mono text-xs text-ink">{runLabelFor(active.id, entries, active)}</span>
             <span className="font-mono text-2xs text-ink-dim">
-              {STR.run.facts(envShares(active.meta).length, formatStep(active.meta.steps))}
+              {STR.run.facts(envShares(active.meta).length, formatStep(active.meta.steps), active.meta.preset)}
             </span>
           </div>
           {entry?.inFlight === true && (
@@ -103,13 +103,13 @@ function RunChip({
             >
               <span className="flex items-center gap-2 text-xs text-ink">
                 {runDateLabel(run.startedAt)}
-                {run.role === 'keeper' && <span className="text-accent">keeper</span>}
+                {run.role === 'best' && <span className="text-best">{STR.best}</span>}
                 {run.policy !== 'oak' && <span style={{ color: POLICY_TOKENS[run.policy] }}>{STR.policy[run.policy]}</span>}
                 {run.ablationLabel !== 'none' && <span className="text-ink-dim">{run.ablationLabel}</span>}
                 {run.inFlight && <span className="size-1.5 motion-safe:animate-pulse rounded-full bg-good" title={STR.bar.live} />}
               </span>
               <span className="font-mono text-2xs tabular-nums text-ink-dim">
-                {runShortId(run.id)} · {STR.run.facts(run.envIds.length, formatStep(run.steps))}
+                {runShortId(run.id)} · {STR.run.facts(run.envIds.length, formatStep(run.steps), run.preset)}
               </span>
             </button>
           ))}
@@ -132,6 +132,9 @@ export function App() {
   });
   const detail = detailQ.data ?? null;
 
+  const bestId = useMemo(() => entries?.find((run) => run.role === 'best')?.id, [entries]);
+  const bestQ = useQuery({ ...baselineDetailQuery(bestId ?? ''), enabled: bestId !== undefined && bestId !== sel.runId });
+  const best = bestId !== undefined && bestId !== sel.runId ? bestQ.data ?? null : null;
   const ppoId = detail?.baselines.ppo;
   const randomId = detail?.baselines.random;
   const ppoQ = useQuery({ ...baselineDetailQuery(ppoId ?? ''), enabled: ppoId !== undefined });
@@ -345,6 +348,7 @@ export function App() {
             view={view}
             setView={setView}
             runs={runs}
+            best={best}
             active={active}
             onHide={() => setPanelHidden(true)}
             onAbout={() => setAboutOpen(true)}

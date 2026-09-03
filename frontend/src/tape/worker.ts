@@ -1,12 +1,5 @@
 import { fetchTape, type Tape } from './parse';
-import {
-  buildSeedRows,
-  nextRowDueMs,
-  rhoBinned,
-  survivalSeries,
-  tapeWindowSteps,
-  windowedRates,
-} from './derive';
+import { buildSeedRows, cumulativeReward, nextRowDueMs, rhoBinned, survivalSeries, tapeWindowSteps, windowedRates } from './derive';
 import type { DeriveMode, DeriveResults, DeriveSpec, TapeProgress, WorkerRequest, WorkerResponse } from './store';
 
 const tapes = new Map<string, Tape>();
@@ -51,6 +44,8 @@ function derive(tape: Tape, spec: DeriveSpec): DeriveResults[DeriveMode] {
     case 'rates':
     case 'windowedRates':
       return windowedRates(tape, spec.lanes, spec.win);
+    case 'cumulativeReward':
+      return cumulativeReward(tape, spec.lanes);
     case 'rho':
       return rhoBinned(tape, spec.lanes);
     case 'survival':

@@ -17,6 +17,7 @@ export function StatsPanel({
   view,
   setView,
   runs,
+  best,
   active,
   onHide,
   onAbout,
@@ -24,6 +25,7 @@ export function StatsPanel({
   view: PanelView;
   setView: (view: PanelView) => void;
   runs: Record<Policy, RunDetail | null>;
+  best: RunDetail | null;
   active: RunDetail | null;
   onHide: () => void;
   onAbout: () => void;
@@ -68,7 +70,7 @@ export function StatsPanel({
           </Hotkey>
         </span>
       </div>
-      {view === 'reward' && <RewardView runs={runs} active={active} />}
+      {view === 'reward' && <RewardView runs={runs} best={best} active={active} />}
       {view === 'standings' && <StandingsView runs={runs} />}
       {view === 'compute' && <ComputeView runs={runs} />}
       {view === 'health' && <HealthView runs={runs} active={active} />}

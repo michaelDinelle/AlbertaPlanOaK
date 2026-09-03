@@ -152,25 +152,60 @@
     const id = "lg-filter-" + (++uid);
     const scales = [o.scale, o.scale + o.chroma, o.scale + 2 * o.chroma];
     const parts = buildFilter(id, scales);
+    const refractive =
+      "url(#" + id + ") blur(" + o.blur + "px) saturate(" + o.saturate + ")";
+    const REFRESH_MS = 120;
+    const STRETCH_LIMIT = 1.125;
+    let mapW = 0;
+    let mapH = 0;
+    let lastRefresh = -Infinity;
+    let timer = null;
+    let generation = 0;
+
+    function fit(w, h) {
+      parts.feImage.setAttribute("width", w);
+      parts.feImage.setAttribute("height", h);
+    }
 
     function refresh() {
       const w = el.offsetWidth;
       const h = el.offsetHeight;
       if (!w || !h) return;
-      const radius = resolveRadius(el, w, h, o.radius);
-      parts.feImage.setAttribute("href", makeMap(w, h, radius, o.border, o.mapBlur));
-      parts.feImage.setAttribute("width", w);
-      parts.feImage.setAttribute("height", h);
+      lastRefresh = performance.now();
+      mapW = w;
+      mapH = h;
+      const url = makeMap(w, h, resolveRadius(el, w, h, o.radius), o.border, o.mapBlur);
+      const mine = ++generation;
+      const image = new Image();
+      image.src = url;
+      const apply = function () {
+        if (mine !== generation) return;
+        parts.feImage.setAttribute("href", url);
+        fit(el.offsetWidth, el.offsetHeight);
+        el.style.backdropFilter = refractive;
+      };
+      image.decode().then(apply, apply);
+    }
+
+    function stretched(w, h) {
+      if (!mapW || !mapH) return true;
+      const rw = w / mapW;
+      const rh = h / mapH;
+      return rw > STRETCH_LIMIT || rw < 1 / STRETCH_LIMIT || rh > STRETCH_LIMIT || rh < 1 / STRETCH_LIMIT;
     }
 
     refresh();
-    el.style.backdropFilter =
-      "url(#" + id + ") blur(" + o.blur + "px) saturate(" + o.saturate + ")";
 
-    let timer = null;
     const ro = new ResizeObserver(function () {
+      const w = el.offsetWidth;
+      const h = el.offsetHeight;
+      if (!w || !h) return;
+      fit(w, h);
+      if (!stretched(w, h)) return;
+      const wait = lastRefresh + REFRESH_MS - performance.now();
       clearTimeout(timer);
-      timer = setTimeout(refresh, 120);
+      if (wait <= 0) refresh();
+      else timer = setTimeout(refresh, wait);
     });
     ro.observe(el);
 
@@ -178,6 +213,7 @@
       supported: true,
       refresh: refresh,
       destroy: function () {
+        generation++;
         ro.disconnect();
         clearTimeout(timer);
         parts.filter.remove();

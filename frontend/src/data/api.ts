@@ -51,6 +51,10 @@ export function tapeUrl(runId: string): string {
   return apiUrl(`/runs/${encodeURIComponent(runId)}/tape`);
 }
 
+export function rewardUrl(runId: string, envId: string, part: 'pack' | 'idx'): string {
+  return apiUrl(`/runs/${encodeURIComponent(runId)}/reward/${encodeURIComponent(envId)}/${part}`);
+}
+
 export function recordingUrl(runId: string, envId: string, seed: number): string {
   return apiUrl(`/runs/${encodeURIComponent(runId)}/recordings/${encodeURIComponent(envId)}/${seed}`);
 }

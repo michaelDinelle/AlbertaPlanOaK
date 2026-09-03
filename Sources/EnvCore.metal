@@ -31,7 +31,7 @@ inline float wrapPi(float angle) {
 }
 
 constant uint OAK_POSE_LEN = 9u;
-constant uint OAK_RECORD_FLOATS = 1u + OAK_POSE_LEN;
+constant uint OAK_RECORD_FLOATS = 2u + OAK_POSE_LEN;
 
 inline int2 gridDelta(uint direction) {
     switch (direction & 3u) {

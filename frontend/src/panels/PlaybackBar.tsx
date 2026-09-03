@@ -10,6 +10,7 @@ import {
   Pause,
   Play,
   ScanEye,
+  Scissors,
 } from 'lucide-react';
 import type { Policy, RunDetail, RunIndexEntry } from '@shared/types';
 import { Panel } from '../glass/Panel';
@@ -82,6 +83,7 @@ export function PolicySwitch({
   entries: readonly RunIndexEntry[] | undefined;
 }) {
   const sel = useSelection();
+  const transport = useTransport();
   const labelOf = (policy: Policy): string | null => {
     const id = policy === 'oak' ? runs.oak?.id : runs.oak?.baselines[policy];
     return id === undefined ? null : runLabelFor(id, entries, runs[policy]);
@@ -118,6 +120,10 @@ export function PolicySwitch({
           </Hotkey>
         );
       })}
+      <Divider />
+      <BarButton on={transport.slice} title={transport.slice ? STR.bar.sliceOff : STR.bar.slice} onClick={() => setTransport({ slice: !transport.slice })}>
+        <Scissors size={14} />
+      </BarButton>
     </Panel>
   );
 }
@@ -141,6 +147,9 @@ export function PlaybackBar({
   const headRef = useRef<HTMLDivElement | null>(null);
   const inputRef = useRef<HTMLInputElement | null>(null);
   const readoutRef = useRef<HTMLDivElement | null>(null);
+  const paceRef = useRef<HTMLSpanElement | null>(null);
+  const speedRef = useRef(transport.speed);
+  speedRef.current = transport.speed;
 
   useEffect(
     () =>
@@ -158,6 +167,11 @@ export function PlaybackBar({
           formatStep(frame.totalSteps),
           formatClock(frame.simTime),
         );
+        if (paceRef.current !== null) {
+          const governed = frame.rate > 0 && frame.rate < speedRef.current * 0.9;
+          paceRef.current.style.visibility = governed ? 'visible' : 'hidden';
+          if (governed) paceRef.current.textContent = STR.bar.livePace(frame.rate < 10 ? frame.rate.toFixed(1) : frame.rate.toFixed(0));
+        }
       }),
     [],
   );
@@ -189,7 +203,7 @@ export function PlaybackBar({
   };
 
   return (
-    <Panel className={clsx('flex h-12 items-center gap-1 px-2', idle && 'opacity-80')}>
+    <Panel className={clsx('flex h-12 w-[760px] max-w-full items-center gap-1 px-2', idle && 'opacity-80')}>
       <BarButton
         title={transport.playing ? STR.bar.pause : STR.bar.play}
         keyName={STR.bar.keySpace}
@@ -277,8 +291,14 @@ export function PlaybackBar({
 
       <Divider />
       <BarButton title={STR.bar.speed(transport.speed)} onClick={cycleSpeed}>
-        ×{transport.speed}
+        <span className="inline-block w-9 text-center tabular-nums">×{transport.speed}</span>
       </BarButton>
+      <span
+        ref={paceRef}
+        style={{ visibility: 'hidden' }}
+        className="inline-block w-[9ch] whitespace-nowrap text-right font-mono text-2xs tabular-nums text-good"
+        title={STR.bar.livePaceHint}
+      />
 
       <Divider />
       <BarButton on={sel.debug} title={STR.bar.debug} keyName="g" onClick={toggleDebug}>

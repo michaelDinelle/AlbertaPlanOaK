@@ -3,6 +3,7 @@ import type { Policy } from '@shared/types';
 export const STR = {
   app: 'OaK',
   policy: { oak: 'OaK', ppo: 'PPO', random: 'Random' } as Record<Policy, string>,
+  best: 'Best',
   jbw: {
     reward: 'REWARD',
     flip: (steps: string) => `flips in ${steps} steps`,
@@ -31,6 +32,8 @@ export const STR = {
     watch: (name: string) => `Watch the ${name} fleet`,
     watchRun: (name: string, run: string) => `Watch the ${name} fleet — ${run}`,
     noBaseline: (name: string) => `No recorded ${name} baseline for this run`,
+    slice: 'Slice every policy curve at the current step',
+    sliceOff: 'Show the full horizon',
     policyLabel: 'policy',
     hidePanel: 'Hide the side panel',
     showPanel: 'Show the side panel',
@@ -38,6 +41,8 @@ export const STR = {
     fullscreen: 'Fill the screen',
     windowed: 'Back to the window',
     live: 'Being recorded right now',
+    livePace: (rate: string) => `live ×${rate}`,
+    livePaceHint: 'Holding just behind the recording head — playing at the pace new steps arrive',
     idle: 'nothing playing',
     readout: (step: string, total: string, clock: string) => `step ${step} of ${total} · ${clock}`,
     start: 'start',
@@ -101,7 +106,7 @@ export const STR = {
   },
   run: {
     commit: (id: string) => `commit ${id} — click to choose a run`,
-    facts: (envs: number, steps: string) => `${envs} envs · ${steps} steps`,
+    facts: (envs: number, steps: string, preset: string) => `${envs} envs · ${steps} steps · ${preset}`,
     switchTo: (label: string) => `Watch this run: ${label}`,
   },
   panels: { reward: 'Reward', standings: 'Standings', compute: 'Compute', health: 'Health' },
@@ -115,6 +120,7 @@ export const STR = {
     erank: 'erank',
   },
   reward: {
+    noValue: '—',
     title: 'Reward per step',
     titleHint: (win: string) => `trailing ${win}-step mean · IQM of seeds · band 10–90th percentile`,
     range: '10–90% of seeds',
@@ -127,9 +133,11 @@ export const STR = {
   seeds: {
     title: 'Seeds',
     titleHint: 'lifetime reward per step · click to stage',
+    titleHintSliced: 'trailing reward per step at the playhead · click to stage',
     sort: 'Change the sort',
     sortBy: { rate: 'by reward', seed: 'by number', retention: 'by retention' },
     promote: (n: number) => `Put seed ${n} on the stage`,
+    release: (n: number) => `Release seed ${n} · back to the leader`,
     unplayable: (n: number) => `Seed ${n} has no recording to play`,
     diverged: 'diverged',
     divergedAt: (step: string) => `diverged at step ${step}`,

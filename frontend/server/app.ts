@@ -36,7 +36,7 @@ function decodeSegments(pathname: string): string[] | null {
   return out;
 }
 
-type RangeSpec = { start: number; end: number } | 'unsatisfiable' | null;
+type RangeSpec = { start: number; end: number } | 'unsatisfiable' | 'empty' | null;
 
 export function parseRangeHeader(header: string | null, size: number): RangeSpec {
   if (header === null) return null;
@@ -51,6 +51,7 @@ export function parseRangeHeader(header: string | null, size: number): RangeSpec
 
   if (!/^\d+$/.test(rawStart)) return null;
   const start = Number(rawStart);
+  if (start === size && rawEnd.length === 0) return 'empty';
   if (start >= size) return 'unsatisfiable';
   if (rawEnd.length === 0) return { start, end: size - 1 };
   if (!/^\d+$/.test(rawEnd)) return null;
@@ -80,6 +81,11 @@ function conditional(
   const ifRange = req.headers.get('if-range');
   const rangeValid = ifRange === null || (etag !== null && ifRange.trim() === etag);
   const range = rangeValid ? parseRangeHeader(req.headers.get('range'), size) : null;
+  if (range === 'empty') {
+    return {
+      done: new Response(null, { status: 204, headers: { ...base, 'content-range': `bytes */${size}` } }),
+    };
+  }
   if (range === 'unsatisfiable') {
     return {
       done: new Response(null, { status: 416, headers: { ...base, 'content-range': `bytes */${size}` } }),
@@ -170,6 +176,15 @@ export function createServer() {
 
     if (sub === 'tape' && segs.length === 4) {
       return serveStatic(req, join(run.dir, 'tape.bin'), 'application/octet-stream');
+    }
+
+    if (sub === 'reward' && segs.length === 6) {
+      const envId = segs[4];
+      const part = segs[5];
+      if (envId === undefined || !/^[A-Za-z0-9._-]+$/.test(envId) || (part !== 'pack' && part !== 'idx')) {
+        return fail(404, 'unknown reward stream');
+      }
+      return serveStatic(req, join(run.dir, 'reward', `${envId}.${part}`), 'application/octet-stream');
     }
 
     if (sub === 'recordings' && segs.length === 6) {

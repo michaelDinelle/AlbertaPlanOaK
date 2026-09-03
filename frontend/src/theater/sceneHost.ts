@@ -21,6 +21,7 @@ export interface HostFrameInfo {
   step: number;
   simTime: number;
   frameMs: number;
+  rate: number;
 }
 
 export interface SceneHostOptions {
@@ -109,6 +110,9 @@ export async function mountSceneHost(
     get loop() {
       return source.complete;
     },
+    get edge() {
+      return source.edge;
+    },
   };
   let clock = makePlaybackClock(clockSource, source.controlHz);
   clock.speed = options.speed && options.speed > 0 ? options.speed : 1;
@@ -140,6 +144,7 @@ export async function mountSceneHost(
     step: 0,
     simTime: 0,
     frameMs: 0,
+    rate: 0,
   };
 
   const sizeOf = (): SceneSize => ({
@@ -204,13 +209,9 @@ export async function mountSceneHost(
 
   await buildScene();
 
-  let sizeFrame = 0;
+  let sizeDirty = false;
   const scheduleSize = (): void => {
-    if (sizeFrame !== 0) return;
-    sizeFrame = requestAnimationFrame(() => {
-      sizeFrame = 0;
-      applySize();
-    });
+    sizeDirty = true;
   };
   const observer = typeof ResizeObserver === 'undefined' ? null : new ResizeObserver(scheduleSize);
   observer?.observe(container);
@@ -223,6 +224,10 @@ export async function mountSceneHost(
   const tick = (now: number): void => {
     raf = requestAnimationFrame(tick);
     if (!scene || !post) return;
+    if (sizeDirty) {
+      sizeDirty = false;
+      applySize();
+    }
     const frameMs = lastWall === 0 ? 0 : now - lastWall;
     const dtReal = lastWall === 0 ? 0 : Math.min(0.1, frameMs / 1000);
     lastWall = now;
@@ -256,6 +261,7 @@ export async function mountSceneHost(
     info.step = state.step;
     info.simTime = state.simTime;
     info.frameMs = frameMs;
+    info.rate = clock.rate;
     options.onFrame?.(info);
   };
   raf = requestAnimationFrame(tick);

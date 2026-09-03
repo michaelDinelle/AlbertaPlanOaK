@@ -189,7 +189,7 @@ inline void accumulateReward(device OakFleetLane *lane, float reward, uint stepN
 }
 
 inline void recordPose(uint envK, constant uint *mjModels, device uint *envState,
-                       thread const float *ctrl, uint stepNum, uint done,
+                       thread const float *ctrl, uint stepNum, uint done, float reward,
                        constant OakFleetEnvCfg &ecfg,
                        device const int *recordSlot, device float *recordBuf, uint gid) {
     if (ecfg.recordCapacity != 0u) {
@@ -214,6 +214,7 @@ inline void recordPose(uint envK, constant uint *mjModels, device uint *envState
                 + (ulong)slot;
             dst[0] = float(done);
             for (uint i = 0u; i < OAK_POSE_LEN; i++) dst[(i + 1u) * lanes] = pose[i];
+            dst[(OAK_POSE_LEN + 1u) * lanes] = reward;
         }
     }
 }

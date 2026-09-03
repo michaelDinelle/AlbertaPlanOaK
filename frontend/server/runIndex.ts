@@ -89,7 +89,7 @@ function readRunMeta(raw: string): RunMeta | null {
   const o = parsed as Record<string, unknown>;
   if (typeof o['batch'] !== 'number' || typeof o['steps'] !== 'number') return null;
   if (!Array.isArray(o['seeds']) || !Array.isArray(o['envSchedule'])) return null;
-  if (typeof o['ablationLabel'] !== 'string') return null;
+  if (typeof o['ablationLabel'] !== 'string' || typeof o['preset'] !== 'string') return null;
   const policy = o['policy'];
   if (policy !== 'oak' && policy !== 'ppo' && policy !== 'random') return null;
   if (!Array.isArray(o['envCatalog']) || o['envCatalog'].length === 0) return null;
@@ -177,7 +177,7 @@ export class RunIndex {
     }
   });
 
-  private async loadRun(id: string, dir: string, keeper: string | null): Promise<ResolvedRun | null> {
+  private async loadRun(id: string, dir: string, best: string | null): Promise<ResolvedRun | null> {
     const metaStat = await statOrNull(join(dir, 'meta.json'));
     if (metaStat === null) return null;
     const meta = await this.readMeta(join(dir, 'meta.json'));
@@ -207,7 +207,8 @@ export class RunIndex {
         hasSummary: summary !== null,
         hasRecordings,
         policy: meta.policy,
-        role: id === keeper ? 'keeper' : null,
+        preset: meta.preset,
+        role: id === best ? 'best' : null,
       },
     };
   }
@@ -232,12 +233,12 @@ export class RunIndex {
       dirNames = [];
     }
 
-    const keeper = await this.readPointer(join(this.benchRoot, '..', 'keeper'));
+    const best = await this.readPointer(join(this.benchRoot, '..', 'best'));
     const next = new Map<string, ResolvedRun>();
     const rejected: string[] = [];
 
     for (const id of dirNames) {
-      const run = await this.loadRun(id, join(this.benchRoot, id), keeper);
+      const run = await this.loadRun(id, join(this.benchRoot, id), best);
       if (run === null) {
         if ((await statOrNull(join(this.benchRoot, id, 'meta.json'))) !== null) rejected.push(id);
         continue;
@@ -262,8 +263,8 @@ export class RunIndex {
       return a < b ? 1 : a > b ? -1 : 0;
     });
 
-    if (keeper !== null && !next.has(keeper)) {
-      console.warn(`[oak-frontend] keeper artifact is absent: ${keeper}`);
+    if (best !== null && !next.has(best)) {
+      console.warn(`[oak-frontend] best artifact is absent: ${best}`);
     }
     for (const run of [...next.values()]) {
       if (run.meta.policy !== 'oak') continue;
@@ -271,7 +272,7 @@ export class RunIndex {
         const id = `${run.id}:${policy}`;
         const dir = join(run.dir, 'baselines', policy);
         if ((await statOrNull(join(dir, '.done'))) === null) continue;
-        const baseline = await this.loadRun(id, dir, keeper);
+        const baseline = await this.loadRun(id, dir, best);
         if (baseline === null || baseline.meta.policy !== policy
           || !baseline.entry.complete || !baseline.entry.hasSummary) continue;
         next.set(id, baseline);

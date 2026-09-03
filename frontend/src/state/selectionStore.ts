@@ -96,15 +96,17 @@ export function electLeader(recorded: readonly number[]): void {
 export function promote(seed: number, playable: (seed: number) => boolean): void {
   const next = promoteSeed(store.get().selection, seed, playable);
   if (next === store.get().selection) return;
-  store.patch({ selection: next });
-  navigate({ seed });
+  const at = clockStep();
+  store.patch({ selection: next, pendingSeekStep: at });
+  navigate({ seed, at: at ?? 0 });
 }
 
 export function unpromote(): void {
   const next = escapeSelection(store.get().selection);
   if (next === store.get().selection) return;
-  store.patch({ selection: next });
-  navigate({ seed: null });
+  const at = clockStep();
+  store.patch({ selection: next, pendingSeekStep: at });
+  navigate({ seed: null, at: at ?? 0 });
 }
 
 export function cycleSortMode(): void {

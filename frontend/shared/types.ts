@@ -10,15 +10,34 @@ export type Policy = 'oak' | 'ppo' | 'random';
 
 export type BaselinePolicy = 'ppo' | 'random';
 
+export interface AgentShape {
+  percepts: number;
+  features: number;
+  activeFeaturesPerStep: number;
+  nursery: number;
+  options: number;
+  optionsPerThread: number;
+  traceLevels: number;
+  featureTimeScale: number;
+  actorStepDenominator: number;
+}
+
+export interface RunGeometry {
+  envIds: string[];
+  shape: AgentShape;
+}
+
 export interface RunMeta {
   batch: number;
   seeds: number[];
   steps: number;
   ablationLabel: string;
   policy: Policy;
+  preset: string;
   startedAt?: string;
   envSchedule: EnvScheduleEntry[];
   envCatalog: unknown[];
+  geometry?: RunGeometry[];
 }
 
 export const TAPE_MAGIC = 0x544b414f;
@@ -102,7 +121,8 @@ export interface RunIndexEntry {
   hasSummary: boolean;
   hasRecordings: boolean;
   policy: Policy;
-  role: 'keeper' | null;
+  preset: string;
+  role: 'best' | null;
 }
 
 export interface RecordingRef {

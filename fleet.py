@@ -23,6 +23,50 @@ from statsmodels.stats.proportion import proportion_confint
 
 REPO = Path(__file__).resolve().parent
 BENCH = REPO / ".oak-benchmarks"
+BASELINE_STORE = BENCH / "baselines"
+ENVIRONMENT_SOURCES = ("Sources/EnvCore.metal", "Sources/Env.metal", "Sources/Baseline.metal",
+                       "Sources/envs", "Sources/OaK/Resources")
+
+
+def environment_digest() -> str:
+    digest = hashlib.sha256()
+    for entry in ENVIRONMENT_SOURCES:
+        base = REPO / entry
+        paths = sorted(p for p in base.rglob("*") if p.is_file()) if base.is_dir() else [base]
+        for path in paths:
+            digest.update(str(path.relative_to(REPO)).encode())
+            digest.update(b"\0")
+            digest.update(path.read_bytes())
+            digest.update(b"\0")
+    return digest.hexdigest()
+
+
+def baseline_identity(meta: dict) -> str:
+    digest = hashlib.sha256()
+    digest.update(json.dumps({key: meta[key] for key in ("envSchedule", "seeds", "steps", "batch")},
+                             sort_keys=True).encode())
+    digest.update(environment_digest().encode())
+    return digest.hexdigest()[:40]
+
+
+def stored_baseline(meta: dict, policy: str) -> Path | None:
+    root = BASELINE_STORE / baseline_identity(meta) / policy
+    if not (root / ".done").is_file():
+        return None
+    run = load(root)
+    if run["meta"]["policy"] != policy or not same_run_shape({"meta": meta}, run):
+        raise SystemExit(f"{root}: stored baseline does not match the schedule it is filed under")
+    if int(run["tape"]["ends"][-1]) < run["meta"]["steps"]:
+        raise SystemExit(f"{root}: stored baseline is incomplete")
+    return root
+
+
+def link_baseline(candidate_root: Path, policy: str, stored: Path) -> None:
+    link = candidate_root / "baselines" / policy
+    link.parent.mkdir(exist_ok=True)
+    if link.is_symlink() or link.exists():
+        return
+    link.symlink_to(os.path.relpath(stored, link.parent), target_is_directory=True)
 
 BOOT_REPS = 50_000
 BOOT_BASE_SEED = 20260817
@@ -238,13 +282,13 @@ def delivered_iqm(v: np.ndarray, horizon: int) -> float:
     return iqm(v)
 
 
-def paired(keeper: dict, cand: dict, keys: tuple[str, ...], stat,
+def paired(best: dict, cand: dict, keys: tuple[str, ...], stat,
            horizon: int, seed: int) -> np.ndarray:
     rng = np.random.default_rng(seed)
-    n = len(keeper[keys[0]])
+    n = len(best[keys[0]])
     idx = rng.integers(0, n, size=(GATE_REPS, n))
     return np.array([stat(*[cand[key][row] for key in keys], horizon)
-                     - stat(*[keeper[key][row] for key in keys], horizon) for row in idx])
+                     - stat(*[best[key][row] for key in keys], horizon) for row in idx])
 
 
 def fl(x) -> float | None:
@@ -467,16 +511,16 @@ def slice_checks(tag: str, k: dict, c: dict, horizon: int,
     return out
 
 
-def throughput_check(keeper: dict, candidate: dict) -> tuple[str, str, str, bool]:
-    ks = float(keeper["meta"]["stepsPerSecond"])
+def throughput_check(best: dict, candidate: dict) -> tuple[str, str, str, bool]:
+    ks = float(best["meta"]["stepsPerSecond"])
     cs = float(candidate["meta"]["stepsPerSecond"])
-    kh = keeper["meta"]["hardwareKey"]
+    kh = best["meta"]["hardwareKey"]
     ch = candidate["meta"]["hardwareKey"]
     if kh != ch:
-        return ("throughput", "FAIL", f"hardware differs: keeper {kh}, candidate {ch}", False)
+        return ("throughput", "FAIL", f"hardware differs: best {kh}, candidate {ch}", False)
     delta = cs - ks
     return ("throughput", "PASS" if delta >= 0.0 else "FAIL",
-            f"steps/s candidate {cs:,.0f} keeper {ks:,.0f} d {delta:+,.0f} on {ch}", False)
+            f"steps/s candidate {cs:,.0f} best {ks:,.0f} d {delta:+,.0f} on {ch}", False)
 
 
 def _fail(msg: str) -> int:
@@ -484,24 +528,24 @@ def _fail(msg: str) -> int:
     return 2
 
 
-def gate(keeper: dict, candidate: dict) -> int:
-    for label, run in (("keeper", keeper), ("candidate", candidate)):
+def gate(best: dict, candidate: dict) -> int:
+    for label, run in (("best", best), ("candidate", candidate)):
         if run["meta"]["policy"] != "oak":
             return _fail(f"GATE ERROR: {label} policy is {run['meta']['policy']}")
         if int(run["tape"]["ends"][-1]) < run["meta"]["steps"]:
             return _fail(f"GATE ERROR: {label} incomplete")
-    if not same_run_shape(keeper, candidate):
+    if not same_run_shape(best, candidate):
         return _fail("GATE ERROR: environment, seed, horizon, or lane schedule differs")
-    if keeper["meta"]["ablationLabel"] != candidate["meta"]["ablationLabel"]:
+    if best["meta"]["ablationLabel"] != candidate["meta"]["ablationLabel"]:
         return _fail("GATE ERROR: ablation differs")
     if not (candidate["root"] / "summary.json").exists():
         return _fail("GATE ERROR: candidate summary missing")
     baseline_runs(candidate)
-    slices = env_slices(keeper)
+    slices = env_slices(best)
     env_ids = sorted(slices)
     print(f"  environments ({len(env_ids)}): {', '.join(env_ids)}")
-    horizon = keeper["meta"]["steps"]
-    keeper_vectors = lane_vectors(keeper)
+    horizon = best["meta"]["steps"]
+    best_vectors = lane_vectors(best)
     candidate_vectors = lane_vectors(candidate)
     rows, wins, regressions = [], [], []
 
@@ -516,13 +560,13 @@ def gate(keeper: dict, candidate: dict) -> int:
     for env in env_ids:
         lanes = slices[env]
         collect(env, slice_checks(
-            env, take(keeper_vectors, lanes), take(candidate_vectors, lanes),
+            env, take(best_vectors, lanes), take(candidate_vectors, lanes),
             horizon, GATE_ENV_CHECKS))
     all_lanes = np.concatenate([slices[env] for env in env_ids])
     collect("fleet", slice_checks(
-        "fleet", take(keeper_vectors, all_lanes), take(candidate_vectors, all_lanes),
+        "fleet", take(best_vectors, all_lanes), take(candidate_vectors, all_lanes),
         horizon, GATE_FLEET_CHECKS))
-    collect("fleet", [throughput_check(keeper, candidate)])
+    collect("fleet", [throughput_check(best, candidate)])
     scope_width = max(len(row[1]) for row in rows)
     check_width = max(len(row[2]) for row in rows)
     for status, scope, name, detail, win in rows:
@@ -538,35 +582,35 @@ def gate(keeper: dict, candidate: dict) -> int:
     return 0
 
 
-def keeper_hash() -> str:
+def best_hash() -> str:
     try:
-        name = (REPO / "keeper").read_text().strip()
+        name = (REPO / "best").read_text().strip()
     except OSError as error:
-        raise SystemExit("keeper pointer missing") from error
+        raise SystemExit("best pointer missing") from error
     if not name:
-        raise SystemExit("keeper pointer empty")
+        raise SystemExit("best pointer empty")
     return name
 
 
-def keeper_run() -> dict:
-    name = keeper_hash()
+def best_run() -> dict:
+    name = best_hash()
     root = BENCH / name
     if not root.is_dir():
-        raise SystemExit(f"keeper artifact missing: {root}")
+        raise SystemExit(f"best artifact missing: {root}")
     run = load(root)
     if run["meta"]["policy"] != "oak":
-        raise SystemExit(f"keeper policy is {run['meta']['policy']}")
+        raise SystemExit(f"best policy is {run['meta']['policy']}")
     if int(run["tape"]["ends"][-1]) < run["meta"]["steps"]:
-        raise SystemExit(f"keeper incomplete: {root}")
+        raise SystemExit(f"best incomplete: {root}")
     return run
 
 
-def write_keeper(name: str) -> None:
-    (REPO / "keeper").write_text(name + "\n")
+def write_best(name: str) -> None:
+    (REPO / "best").write_text(name + "\n")
 
 
 def cmd_gate(args) -> int:
-    return gate(keeper_run(), load(args.candidate))
+    return gate(best_run(), load(args.candidate))
 
 
 def env_schedule(meta: dict) -> str:
@@ -638,9 +682,16 @@ def benchmark_env(meta: dict, policy: str, root: Path) -> dict[str, str]:
 
 
 def record_policy(candidate: dict, policy: str, identity: dict) -> dict:
-    root = candidate["root"] if policy == "oak" else candidate["root"] / "baselines" / policy
     if policy != "oak":
+        stored = stored_baseline(candidate["meta"], policy)
+        if stored is not None:
+            link_baseline(candidate["root"], policy, stored)
+            print(f"[fleet] {policy} reused from {stored.relative_to(BENCH)}", flush=True)
+            return load(stored)
+        root = BASELINE_STORE / baseline_identity(candidate["meta"]) / policy
         root.mkdir(parents=True)
+    else:
+        root = candidate["root"]
     if file_sha256(REPO / ".build/release/OaK") != identity["binary"]:
         raise SystemExit("release executable changed during the science run")
     output = None
@@ -668,19 +719,22 @@ def record_policy(candidate: dict, policy: str, identity: dict) -> dict:
     if policy != "oak":
         cmd_report(argparse.Namespace(root=root))
         (root / ".done").touch()
+        link_baseline(candidate["root"], policy, root)
     print(f"[fleet] {policy} complete", flush=True)
     return run
 
 
 def cmd_run(args) -> int:
-    keeper_run()
+    best_run()
     if os.environ.get("OAK_BENCH_POLICY", "oak") != "oak":
         raise SystemExit("science runs use the oak policy")
+    if args.preset:
+        subprocess.run([str(REPO / "setup.sh"), "--preset", args.preset], cwd=REPO, check=True)
     subprocess.run(["swift", "build", "-c", "release"], cwd=REPO, check=True)
     identity = artifact_identity()
     name = identity["id"]
-    if name == keeper_hash():
-        raise SystemExit(f"{name} is already the keeper")
+    if name == best_hash():
+        raise SystemExit(f"{name} is already the best")
     root = BENCH / name
     if root.exists():
         raise SystemExit(f"artifact already exists: {root}")
@@ -691,7 +745,8 @@ def cmd_run(args) -> int:
     log = BENCH / f"{name}.log"
     with open(log, "x") as output:
         process = subprocess.Popen(
-            [sys.executable, str(Path(__file__).resolve()), "job", name],
+            [sys.executable, str(Path(__file__).resolve()), "job", name]
+            + (["--steps", str(args.steps)] if args.steps else []),
             stdout=output, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
             start_new_session=True, cwd=REPO)
     print(f"DETACHED PID {process.pid}\n  {log}\n  {root}/.done")
@@ -703,18 +758,30 @@ def cmd_job(args) -> int:
     identity = json.loads((root / "identity.json").read_text())
     if identity != artifact_identity() or identity["id"] != args.name:
         raise SystemExit("science identity changed before the run started")
-    keeper = keeper_run()
-    candidate = {"root": root, "meta": keeper["meta"]}
-    oak = record_policy(candidate, "oak", identity)
-    record_policy(oak, "ppo", identity)
-    record_policy(oak, "random", identity)
+    best = best_run()
+    meta = dict(best["meta"])
+    if args.steps:
+        meta["steps"] = int(args.steps)
+    candidate = {"root": root, "meta": meta}
+    for policy in ("ppo", "random"):
+        stored = stored_baseline(meta, policy)
+        if stored is not None:
+            link_baseline(root, policy, stored)
+    record_policy(candidate, "oak", identity)
+    record_policy(candidate, "ppo", identity)
+    record_policy(candidate, "random", identity)
     cmd_report(argparse.Namespace(root=root))
-    result = gate(keeper, load(root))
+    if meta["steps"] != best["meta"]["steps"]:
+        print(f"[fleet] horizon {meta['steps']:,} differs from the best's {best['meta']['steps']:,}: recorded without a gate", flush=True)
+        (root / ".done").touch()
+        print("[fleet] DONE", flush=True)
+        return 0
+    result = gate(best, load(root))
     if result == 0:
-        write_keeper(args.name)
-        print(f"[fleet] keeper {args.name}", flush=True)
+        write_best(args.name)
+        print(f"[fleet] best {args.name}", flush=True)
     elif result == 1:
-        print(f"[fleet] keeper stays {keeper_hash()}", flush=True)
+        print(f"[fleet] best stays {best_hash()}", flush=True)
     else:
         raise SystemExit("gate could not compare the completed run")
     (root / ".done").touch()
@@ -725,9 +792,12 @@ def cmd_job(args) -> int:
 def main() -> int:
     ap = argparse.ArgumentParser()
     sub = ap.add_subparsers(dest="cmd", required=True)
-    sub.add_parser("run")
+    rp = sub.add_parser("run")
+    rp.add_argument("--steps", type=int)
+    rp.add_argument("--preset")
     jp = sub.add_parser("job")
     jp.add_argument("name")
+    jp.add_argument("--steps", type=int)
     pp = sub.add_parser("report")
     pp.add_argument("root", type=Path)
     gp = sub.add_parser("gate")

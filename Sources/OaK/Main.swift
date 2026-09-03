@@ -11,8 +11,8 @@ let lockName = ".oak-benchmark.lock"
 typealias Raw = UnsafeMutableRawPointer
 
 struct KernelConfig {
-  var obsDim, rank, optionCount, actionParamCount, obsTraceLevels, linearAnchorCount: UInt32
-  var invRank, invOptionCount, metaEta: Float
+  var obsDim, featureCount, optionCount, actionParamCount, obsTraceLevels, perceptCount: UInt32
+  var invFeatureTimeScale, invOptionCount, metaEta: Float
   var agentCount, paramStride, stateStride, uintStride: UInt32
   var nurseryCount: UInt32
   var sampleSigma: Float
@@ -50,15 +50,15 @@ enum OakConst: Int {
   case ablateGenerateAndTest = 11
   case megaG = 12
   case specObsDim = 13
-  case specRank = 14
+  case specFeatureCount = 14
   case specOptionCount = 15
   case specActionParams = 16
   case specTraceLevels = 17
-  case specAnchorCount = 18
+  case specPerceptCount = 18
   case specParamStride = 19
   case specStateStride = 20
   case specUintStride = 21
-  case specInvRank = 22
+  case specInvFeatureTimeScale = 22
   case specInvOptionCount = 23
   case specMetaEta = 24
   case megaStageMask = 25
@@ -91,7 +91,7 @@ enum Diag {
   static let accumSumAbsHiddenActor = accumGram + gram
   static let accumSumAbsHiddenCritic = accumSumAbsHiddenActor + k
   static let accumFloats = accumSumAbsHiddenCritic + k
-  static func oakFloats(_ rank: Int) -> Int { 5 * rank + 3 + gram }
+  static func oakFloats(_ featureCount: Int) -> Int { 5 * featureCount + 3 + gram }
   static func ppoParams(obsMax: Int, actMax: Int) -> Int {
     (2 * obsMax * k + 2 * k + k * actMax + 2 * actMax + k + 1 + 3) & ~3
   }
@@ -180,6 +180,13 @@ func requireFreshMetallib() throws -> URL {
   }
   return lib
 }
+func presetName(_ lib: MTLLibrary) throws -> String {
+  let markers = lib.functionNames.filter { $0.hasPrefix("oak_preset_") }
+  guard markers.count == 1, let marker = markers.first else {
+    throw err("The Metal library must carry exactly one oak_preset_* marker, found \(markers).")
+  }
+  return String(marker.dropFirst("oak_preset_".count))
+}
 func mtlSize(_ width: Int) -> MTLSize {
   MTLSize(width: width, height: 1, depth: 1)
 }
@@ -190,14 +197,15 @@ func sha256Hex(_ buf: UnsafeRawBufferPointer) -> String {
 }
 
 struct ShapeProbe {
-  var rank, optionCount, nursery, traceLevels, anchorCount: UInt32
+  var featureCount, optionCount, nursery, traceLevels, perceptCount: UInt32
   var paramStride, stateStride, uintStride: UInt32
   var pPsi, pOptPolicy, stUtilOpt: UInt32
   var stAlpha, stBeta, stAlphaPsi, stBetaPsi, stAlphaModel, stBetaModel: UInt32
   var stAlphaAct, stBetaAct, uOptFeature, uParentA, uParentB, uKind, uNurParentA: UInt32
-  var invRank, invOptionCount, metaEta, sampleSigma, sampleInv2S2, actorAlphaDenom: Float
+  var invFeatureTimeScale, invOptionCount, metaEta, sampleSigma, sampleInv2S2, actorAlphaDenom: Float
   var stKeep0, stKeep0n, stKeep1, stKeep1n, uKeep0, uKeep0n: UInt32
-  var simdWidth, spl, candidatesPerSlot, constructedPerAnchor, planPeriod: UInt32
+  var simdWidth, spl, candidatesPerSlot, constructedPerPercept, planPeriod: UInt32
+  var activeFeatures, featureTimeScale, optionsPerThread: UInt32
 }
 struct RewardSlices {
   let state: [(Int, Int)]
@@ -287,7 +295,7 @@ final class Engine {
     _ dev: MTLDevice, _ lib: MTLLibrary, obsDim: Int, dPolicy: Int
   ) throws -> ShapeProbe {
     precondition(
-      MemoryLayout<ShapeProbe>.stride == 164, "ShapeProbe layout drifted from OakShapeProbe")
+      MemoryLayout<ShapeProbe>.stride == 176, "ShapeProbe layout drifted from OakShapeProbe")
     let constants = MTLFunctionConstantValues()
     var o32 = UInt32(obsDim)
     constants.setConstantValue(&o32, type: .uint, index: OakConst.specObsDim.rawValue)
@@ -295,7 +303,7 @@ final class Engine {
     constants.setConstantValue(&d32, type: .uint, index: OakConst.specActionParams.rawValue)
     let fn = try lib.makeFunction(name: "oak_shape_probe", constantValues: constants)
     let pipe = try dev.makeComputePipelineState(function: fn)
-    guard let outB = dev.makeBuffer(length: 164, options: [.storageModeShared]),
+    guard let outB = dev.makeBuffer(length: 176, options: [.storageModeShared]),
       let dummy = dev.makeBuffer(length: 16, options: [.storageModeShared]),
       let pq = dev.makeCommandQueue(), let cb = pq.makeCommandBuffer(),
       let enc = cb.makeComputeCommandEncoder()
@@ -392,20 +400,20 @@ final class Engine {
       let sp = try probeCache[r.kind] ?? Engine.runShapeProbe(
         dev, lib, obsDim: naturalO, dPolicy: dk)
       probeCache[r.kind] = sp
-      let anchors = Int(sp.anchorCount)
+      let percepts = Int(sp.perceptCount)
       precondition(
-        anchors % Int(sp.simdWidth) == 0, "perception budget must tile the simd width")
+        percepts % Int(sp.simdWidth) == 0, "perception budget must tile the simd width")
       precondition(
-        Int(sp.rank) == anchors * (1 + Int(sp.constructedPerAnchor) * Int(sp.candidatesPerSlot)),
+        Int(sp.featureCount) == percepts * (1 + Int(sp.constructedPerPercept) * Int(sp.candidatesPerSlot)),
         "constructed-feature identity broken")
       precondition(Int(sp.stateStride) % 4 == 0, "stateStride must stay 16B-aligned")
       let cfgB = dev.makeBuffer(
         length: MemoryLayout<KernelConfig>.stride, options: [.storageModeShared])!
       cfgB.contents().bindMemory(to: KernelConfig.self, capacity: 1).initialize(
         to: KernelConfig(
-          obsDim: UInt32(naturalO), rank: sp.rank, optionCount: sp.optionCount,
+          obsDim: UInt32(naturalO), featureCount: sp.featureCount, optionCount: sp.optionCount,
           actionParamCount: UInt32(dk), obsTraceLevels: sp.traceLevels,
-          linearAnchorCount: sp.anchorCount, invRank: sp.invRank,
+          perceptCount: sp.perceptCount, invFeatureTimeScale: sp.invFeatureTimeScale,
           invOptionCount: sp.invOptionCount, metaEta: sp.metaEta,
           agentCount: UInt32(b), paramStride: sp.paramStride,
           stateStride: sp.stateStride, uintStride: sp.uintStride,
@@ -440,13 +448,13 @@ final class Engine {
     scalars = scalarsB.contents().bindMemory(to: KernelScalars.self, capacity: batch)
     for kd in kinds {
       let sp = kd.off
-      let rank = Int(sp.rank)
+      let featureCount = Int(sp.featureCount)
       let k = Int(sp.optionCount)
       let rn = Int(sp.nursery)
-      let anchors = Int(sp.anchorCount)
+      let percepts = Int(sp.perceptCount)
       let psi = Int(sp.pPsi)
-      let inv = 1 / sqrt(Float(rank))
-      let alpha0 = 1 / Float(2 * Int(sp.anchorCount))
+      let inv = 1 / sqrt(Float(featureCount))
+      let alpha0 = 1 / Float(2 * Int(sp.perceptCount))
       let traceChannels = max(Int(sp.traceLevels) * kd.naturalO, 1)
       let basis = 1 / Float(max(kd.d, 1))
       for local in 0..<kd.count {
@@ -456,20 +464,20 @@ final class Engine {
         let ls = state.p + kd.stateBase + local * kd.stateTotal
         let lu = uints.p + kd.uintBase + local * kd.uintTotal
         for n in 0..<rn {
-          lu[Int(sp.uNurParentA) + n] = UInt32(n % ((n % 4 == 3) ? traceChannels : anchors))
-          lu[Int(sp.uNurParentA) + rn + n] = UInt32((n * 7 + 3) % anchors)
+          lu[Int(sp.uNurParentA) + n] = UInt32(n % ((n % 4 == 3) ? traceChannels : percepts))
+          lu[Int(sp.uNurParentA) + rn + n] = UInt32((n * 7 + 3) % percepts)
           lu[Int(sp.uNurParentA) + 2 * rn + n] = UInt32(n % 4)
         }
-        for i in 0..<rank {
-          if i >= anchors {
-            let idx = i - anchors
+        for i in 0..<featureCount {
+          if i >= percepts {
+            let idx = i - percepts
             if idx < traceChannels {
               lu[Int(sp.uParentA) + i] = UInt32(idx)
               lu[Int(sp.uParentB) + i] = 0
               lu[Int(sp.uKind) + i] = 3
             } else {
-              lu[Int(sp.uParentA) + i] = UInt32(idx % anchors)
-              lu[Int(sp.uParentB) + i] = UInt32((idx * 7 + 3) % anchors)
+              lu[Int(sp.uParentA) + i] = UInt32(idx % percepts)
+              lu[Int(sp.uParentB) + i] = UInt32((idx * 7 + 3) % percepts)
               lu[Int(sp.uKind) + i] = UInt32(idx % 3)
             }
           } else {
@@ -483,7 +491,7 @@ final class Engine {
         for kk in 0..<k {
           lu[Int(sp.uOptFeature) + kk] = UInt32(kk)
           lp[psi + kk * k + kk] = inv
-          ls[Int(sp.stUtilOpt) + kk] = Float(rank)
+          ls[Int(sp.stUtilOpt) + kk] = Float(featureCount)
           ls[Int(sp.stAlphaAct) + kk] = 1
           ls[Int(sp.stBetaAct) + kk] = 0
           let h = UInt32(truncatingIfNeeded: lane &* 2_654_435_761 &+ kk &* 40_503 &+ 977)
@@ -496,9 +504,9 @@ final class Engine {
   }
   static func applyShapeConstants(_ constants: MTLFunctionConstantValues, _ cfg: KernelConfig) {
     let us: [(OakConst, UInt32)] = [
-      (.specObsDim, cfg.obsDim), (.specRank, cfg.rank), (.specOptionCount, cfg.optionCount),
+      (.specObsDim, cfg.obsDim), (.specFeatureCount, cfg.featureCount), (.specOptionCount, cfg.optionCount),
       (.specActionParams, cfg.actionParamCount), (.specTraceLevels, cfg.obsTraceLevels),
-      (.specAnchorCount, cfg.linearAnchorCount), (.specParamStride, cfg.paramStride),
+      (.specPerceptCount, cfg.perceptCount), (.specParamStride, cfg.paramStride),
       (.specStateStride, cfg.stateStride), (.specUintStride, cfg.uintStride),
       (.specNursery, cfg.nurseryCount),
     ]
@@ -507,7 +515,7 @@ final class Engine {
       constants.setConstantValue(&v, type: .uint, index: fc.rawValue)
     }
     let fs: [(OakConst, Float)] = [
-      (.specInvRank, cfg.invRank), (.specInvOptionCount, cfg.invOptionCount),
+      (.specInvFeatureTimeScale, cfg.invFeatureTimeScale), (.specInvOptionCount, cfg.invOptionCount),
       (.specMetaEta, cfg.metaEta),
     ]
     for (fc, val) in fs {
@@ -622,7 +630,8 @@ struct RecordCodec {
   }
 }
 
-let recordFloats = 1 + EnvSpec.poseLen
+let recordFloats = 2 + EnvSpec.poseLen
+let recordRewardField = 1 + EnvSpec.poseLen
 let quantizeLimit = 4.6e18
 
 func putVarint(_ out: inout [UInt8], _ value: Int64) {
@@ -893,6 +902,80 @@ final class RecordWriter: @unchecked Sendable {
   }
 }
 
+final class RewardStreamWriter {
+  static let packMagic: UInt32 = 0x4B50_5752
+  static let idxMagic: UInt32 = 0x5849_5752
+  private final class Block {
+    let pack: FileHandle
+    let idx: FileHandle
+    let firstLane: Int
+    let laneCount: Int
+    var packBytes: Int
+    init(pack: FileHandle, idx: FileHandle, firstLane: Int, laneCount: Int, packBytes: Int) {
+      self.pack = pack
+      self.idx = idx
+      self.firstLane = firstLane
+      self.laneCount = laneCount
+      self.packBytes = packBytes
+    }
+  }
+  private let blocks: [Block]
+
+  init(root: URL, laneEnvKinds: [UInt32], envIdsByKind: [String]) throws {
+    let dir = root.appendingPathComponent("reward")
+    try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+    var blocks: [Block] = []
+    var lane = 0
+    while lane < laneEnvKinds.count {
+      let kind = laneEnvKinds[lane]
+      var end = lane
+      while end < laneEnvKinds.count && laneEnvKinds[end] == kind { end += 1 }
+      let name = envIdsByKind[Int(kind)]
+      let packURL = dir.appendingPathComponent("\(name).pack")
+      let idxURL = dir.appendingPathComponent("\(name).idx")
+      FileManager.default.createFile(atPath: packURL.path, contents: nil)
+      FileManager.default.createFile(atPath: idxURL.path, contents: nil)
+      let pack = try FileHandle(forWritingTo: packURL)
+      let idx = try FileHandle(forWritingTo: idxURL)
+      var packHead = Data()
+      packHead.appendLE(Self.packMagic)
+      try pack.write(contentsOf: packHead)
+      var idxHead = Data()
+      for v: UInt32 in [Self.idxMagic, UInt32(end - lane)] { idxHead.appendLE(v) }
+      try idx.write(contentsOf: idxHead)
+      blocks.append(Block(pack: pack, idx: idx, firstLane: lane, laneCount: end - lane, packBytes: packHead.count))
+      lane = end
+    }
+    self.blocks = blocks
+  }
+
+  func appendWindow(_ rp: UnsafePointer<Float>, capacity: Int, stepStart: Int, stepCount: Int, laneCount: Int) throws {
+    for block in blocks {
+      var rows = [Float](repeating: 0, count: stepCount * block.laneCount)
+      for i in 0..<stepCount {
+        let plane = rp + ((stepStart + i) % capacity) * recordFloats * laneCount + recordRewardField * laneCount
+        for l in 0..<block.laneCount { rows[i * block.laneCount + l] = plane[block.firstLane + l] }
+      }
+      let compressed = try rows.withUnsafeBufferPointer { try (Data(buffer: $0) as NSData).compressed(using: .zlib) as Data }
+      try block.pack.write(contentsOf: compressed)
+      var record = Data()
+      record.appendLE(UInt32(stepStart))
+      record.appendLE(UInt32(stepCount))
+      record.appendLE(UInt64(block.packBytes))
+      record.appendLE(UInt32(compressed.count))
+      try block.idx.write(contentsOf: record)
+      block.packBytes += compressed.count
+    }
+  }
+
+  func close() throws {
+    for block in blocks {
+      try block.pack.close()
+      try block.idx.close()
+    }
+  }
+}
+
 final class PoseTapeWriter {
   static let packMagic: UInt32 = 0x504B_414F
   static let idxMagic: UInt32 = 0x494B_414F
@@ -1033,9 +1116,9 @@ final class OakDiagHost: @unchecked Sendable {
   init(laneRanks: [Int]) {
     var offsets: [Int] = []
     var cursor = 0
-    for rank in laneRanks {
+    for featureCount in laneRanks {
       offsets.append(cursor)
-      cursor += rank
+      cursor += featureCount
     }
     ageOffsets = offsets
     prevAge = .allocate(capacity: max(cursor, 1))
@@ -1182,7 +1265,7 @@ final class TapeWriter {
   struct FleetPipes {
     let label: String
     let encodeInit: (MTLComputeCommandEncoder) -> Void
-    let encodeMegastep: (MTLComputeCommandEncoder, Int, Int) -> Void
+    let encodeMegastep: (MTLCommandBuffer, Int, Int) -> Void
     let encodeSnapshot: (MTLComputeCommandEncoder, Int) -> Void
     let laneHashes: (Int, UnsafeRawPointer) -> [String: String]
     let diagFields: [String]
@@ -1265,7 +1348,7 @@ final class TapeWriter {
         oakRankByKind[kind] = Int(
           try Engine.runShapeProbe(
             dev, lib, obsDim: spec.naturalO, dPolicy: spec.actionParams
-          ).rank)
+          ).featureCount)
       }
       for kind in laneEnvKinds {
         diagFloats += max(Diag.oakFloats(oakRankByKind[kind]!), Diag.ppoFloats(ppoP))
@@ -1394,13 +1477,35 @@ final class TapeWriter {
     var variantPipes: [MTLComputePipelineState] = []
     var kindMegaG: [Int] = []
     let tgOptionCount = Int(engine.kinds[0].off.optionCount)
+    var geometries: [[String: Any]] = []
+    for kd in engine.kinds {
+      let sp = kd.off
+      let shape: [String: Any] = [
+        "percepts": Int(sp.perceptCount), "features": Int(sp.featureCount),
+        "activeFeaturesPerStep": Int(sp.activeFeatures), "nursery": Int(sp.nursery),
+        "options": Int(sp.optionCount), "optionsPerThread": Int(sp.optionsPerThread),
+        "traceLevels": Int(sp.traceLevels), "featureTimeScale": Int(sp.featureTimeScale),
+        "actorStepDenominator": Int(sp.actorAlphaDenom),
+      ]
+      let envId = Main.envIdsByKind[Int(kd.kind)]
+      if let i = geometries.firstIndex(where: { NSDictionary(dictionary: $0["shape"] as! [String: Any]).isEqual(to: shape) }) {
+        geometries[i]["envIds"] = (geometries[i]["envIds"] as! [String]) + [envId]
+      } else {
+        geometries.append(["envIds": [envId], "shape": shape])
+        let line = "OaK shape: percepts \(sp.perceptCount) | features \(sp.featureCount) | active per step \(sp.activeFeatures)"
+          + " | nursery \(sp.nursery) | options \(sp.optionCount) (\(sp.optionsPerThread) per wave thread)"
+          + " | trace levels \(sp.traceLevels) | tracking floor \(sp.featureTimeScale) steps | actor step ÷\(Int(sp.actorAlphaDenom))"
+        FileHandle.standardError.write((line + "\n").data(using: .utf8)!)
+      }
+    }
+    Self.pendingMeta["geometry"] = geometries
     func laneSlotBytes(_ gk: Int) -> Int {
       (5 * tgOptionCount + 1) * gk * MemoryLayout<Float>.stride
     }
     for (ki, kd) in engine.kinds.enumerated() {
       var gk = megaG
       while gk > 1,
-        gk * Int(kd.off.anchorCount) > core * core
+        gk * Int(kd.off.perceptCount) > core * core
           || laneSlotBytes(gk) > dev.maxThreadgroupMemoryLength
       { gk /= 2 }
       guard kd.firstLane % gk == 0, kd.count % gk == 0 else {
@@ -1453,13 +1558,13 @@ final class TapeWriter {
     }
     let laneTG = mtlSize(
       min(64, initPipe.maxTotalThreadsPerThreadgroup, snapPipe.maxTotalThreadsPerThreadgroup))
-    let laneRanks = engine.laneKindIdx.map { Int(engine.kinds[$0].off.rank) }
+    let laneRanks = engine.laneKindIdx.map { Int(engine.kinds[$0].off.featureCount) }
     let diagHost = OakDiagHost(laneRanks: laneRanks)
     var diagBase: [Int] = []
     var diagHalf = 0
     for kd in engine.kinds {
       diagBase.append(diagHalf)
-      diagHalf += kd.count * Diag.oakFloats(Int(kd.off.rank))
+      diagHalf += kd.count * Diag.oakFloats(Int(kd.off.featureCount))
     }
     precondition(2 * diagHalf * 4 <= bufs.diagOutBuf.length, "diagOut arena undersized")
     let diagPtr = bufs.diagOutBuf.contents().bindMemory(to: Float.self, capacity: 2 * diagHalf)
@@ -1473,7 +1578,7 @@ final class TapeWriter {
           enc.setBuffer(engine.uints.b, offset: kd.uintBase * 4, index: OakBuf.uints.rawValue)
           enc.setBuffer(kd.configB, offset: 0, index: OakBuf.config.rawValue)
           var ce = ecfg
-          ce.invObsFloor = 1 / Float(2 * Int(kd.off.anchorCount))
+          ce.invObsFloor = 1 / Float(2 * Int(kd.off.perceptCount))
           enc.setBytes(&ce, length: MemoryLayout<FleetEnvCfg>.stride, index: OakBuf.envCfg.rawValue)
           enc.setBuffer(bufs.envKindsBuf, offset: 0, index: OakBuf.aux0.rawValue)
           var off = UInt32(kd.firstLane)
@@ -1481,7 +1586,8 @@ final class TapeWriter {
           enc.dispatchThreads(mtlSize(kd.count), threadsPerThreadgroup: laneTG)
         }
       },
-      encodeMegastep: { enc, n, base in
+      encodeMegastep: { cb, n, base in
+        guard let enc = cb.makeComputeCommandEncoder(dispatchType: .concurrent) else { return }
         for run in envRuns {
           let kd = engine.kinds[run.kindIdx]
           bindFleet(enc, variantPipes[run.kindIdx])
@@ -1490,7 +1596,7 @@ final class TapeWriter {
           enc.setBuffer(engine.uints.b, offset: kd.uintBase * 4, index: OakBuf.uints.rawValue)
           enc.setBuffer(kd.configB, offset: 0, index: OakBuf.config.rawValue)
           var ce = ecfg
-          ce.invObsFloor = 1 / Float(2 * Int(kd.off.anchorCount))
+          ce.invObsFloor = 1 / Float(2 * Int(kd.off.perceptCount))
           enc.setBytes(&ce, length: MemoryLayout<FleetEnvCfg>.stride, index: OakBuf.envCfg.rawValue)
           enc.setBuffer(bufs.recordSlotBuf, offset: 0, index: OakBuf.aux0.rawValue)
           enc.setBuffer(bufs.recordBuf, offset: 0, index: OakBuf.aux1.rawValue)
@@ -1503,7 +1609,7 @@ final class TapeWriter {
             MTLSize(width: run.tgCount, height: 1, depth: 1),
             threadsPerThreadgroup: mtlSize(core * gk))
         }
-        enc.memoryBarrier(scope: [.buffers])
+        enc.endEncoding()
       },
       encodeSnapshot: { enc, half in
         var fullScan: UInt32 = 1
@@ -1518,7 +1624,7 @@ final class TapeWriter {
           var ctl = SIMD4<UInt32>(
             UInt32(half * B), UInt32(kd.firstLane),
             UInt32(half * diagHalf + diagBase[ki]),
-            UInt32(Diag.oakFloats(Int(kd.off.rank))))
+            UInt32(Diag.oakFloats(Int(kd.off.featureCount))))
           enc.setBytes(&ctl, length: MemoryLayout<SIMD4<UInt32>>.stride, index: OakBuf.aux1.rawValue)
           enc.setBytes(&fullScan, length: 4, index: OakBuf.aux2.rawValue)
           enc.setBuffer(bufs.diagAccumBuf, offset: 0, index: OakBuf.diagAccum.rawValue)
@@ -1560,18 +1666,18 @@ final class TapeWriter {
       diagValues: { half, lane, stepCount in
         let ki = engine.laneKindIdx[lane]
         let kd = engine.kinds[ki]
-        let rank = Int(kd.off.rank)
-        let floats = Diag.oakFloats(rank)
+        let featureCount = Int(kd.off.featureCount)
+        let floats = Diag.oakFloats(featureCount)
         let rec = diagPtr + half * diagHalf + diagBase[ki] + (lane - kd.firstLane) * floats
         let prevAge = diagHost.prevAge + diagHost.ageOffsets[lane]
-        var ages = [UInt32](repeating: 0, count: rank)
-        for i in 0..<rank { ages[i] = rec[i].bitPattern }
+        var ages = [UInt32](repeating: 0, count: featureCount)
+        for i in 0..<featureCount { ages[i] = rec[i].bitPattern }
         var dormantFraction = Float.nan
         if diagHost.hasPrev[lane] {
-          var delta = [Double](repeating: .nan, count: rank)
+          var delta = [Double](repeating: .nan, count: featureCount)
           var sum = 0.0
           var validCount = 0
-          for i in 0..<rank {
+          for i in 0..<featureCount {
             let d = ages[i] &- prevAge[i]
             if d <= UInt32(stepCount) {
               delta[i] = Double(d)
@@ -1582,27 +1688,27 @@ final class TapeWriter {
           let mean = validCount > 0 ? sum / Double(validCount) : 0
           if mean > 0 {
             var dormant = 0
-            for i in 0..<rank where delta[i].isFinite && delta[i] / mean < DiagMath.dormantTau {
+            for i in 0..<featureCount where delta[i].isFinite && delta[i] / mean < DiagMath.dormantTau {
               dormant += 1
             }
-            dormantFraction = Float(dormant) / Float(rank)
+            dormantFraction = Float(dormant) / Float(featureCount)
           }
         }
-        let utility = (0..<rank).map { Double(abs(rec[rank + $0])) }
-        let births = rec[5 * rank]
+        let utility = (0..<featureCount).map { Double(abs(rec[featureCount + $0])) }
+        let births = rec[5 * featureCount]
         let birthsPerStep: Float = diagHost.hasPrev[lane] && stepCount > 0
           ? (births - diagHost.prevBirths[lane]) / Float(stepCount) : .nan
-        func alphas(_ off: Int) -> [Double] { (0..<rank).map { Double(rec[off + $0]) } }
-        let valueQ = DiagMath.logQuantiles(alphas(2 * rank), [0.1, 0.5, 0.9])
-        let optionQ = DiagMath.logQuantiles(alphas(3 * rank), [0.5])
-        let modelQ = DiagMath.logQuantiles(alphas(4 * rank), [0.5])
-        for i in 0..<rank { prevAge[i] = ages[i] }
+        func alphas(_ off: Int) -> [Double] { (0..<featureCount).map { Double(rec[off + $0]) } }
+        let valueQ = DiagMath.logQuantiles(alphas(2 * featureCount), [0.1, 0.5, 0.9])
+        let optionQ = DiagMath.logQuantiles(alphas(3 * featureCount), [0.5])
+        let modelQ = DiagMath.logQuantiles(alphas(4 * featureCount), [0.5])
+        for i in 0..<featureCount { prevAge[i] = ages[i] }
         diagHost.prevBirths[lane] = births
         diagHost.hasPrev[lane] = true
         return [
           dormantFraction, DiagMath.dormantFraction(utility), birthsPerStep,
-          rec[5 * rank + 1], rec[5 * rank + 2],
-          DiagMath.erank(rec + 5 * rank + 3),
+          rec[5 * featureCount + 1], rec[5 * featureCount + 2],
+          DiagMath.erank(rec + 5 * featureCount + 3),
           valueQ[0], valueQ[1], valueQ[2], optionQ[0], modelQ[0],
         ]
       }
@@ -1619,6 +1725,9 @@ final class TapeWriter {
     let e = ProcessInfo.processInfo.environment
     guard let dev = MTLCreateSystemDefaultDevice() else { throw err("Metal unavailable.") }
     let lib = try dev.makeLibrary(URL: try requireFreshMetallib())
+    let preset = try presetName(lib)
+    Self.pendingMeta["preset"] = preset
+    fputs("OaK preset: \(preset)\n", stderr)
     let envProbe = try Engine.runEnvTableProbe(dev, lib)
     let envTable = envProbe.specs
     let engine: Engine?
@@ -1767,7 +1876,8 @@ final class TapeWriter {
         enc.setBuffer(bufs.envKindsBuf, offset: 0, index: OakBuf.aux0.rawValue)
         enc.dispatchThreads(mtlSize(stepThreads), threadsPerThreadgroup: stepTG)
       },
-      encodeMegastep: { enc, n, base in
+      encodeMegastep: { cb, n, base in
+        guard let enc = cb.makeComputeCommandEncoder(dispatchType: .concurrent) else { return }
         bindCommon(enc, stepPipe)
         enc.setBuffer(bufs.recordSlotBuf, offset: 0, index: OakBuf.aux0.rawValue)
         enc.setBuffer(bufs.recordBuf, offset: 0, index: OakBuf.aux1.rawValue)
@@ -1778,6 +1888,7 @@ final class TapeWriter {
         }
         enc.dispatchThreads(mtlSize(stepThreads), threadsPerThreadgroup: stepTG)
         enc.memoryBarrier(scope: [.buffers])
+        enc.endEncoding()
       },
       encodeSnapshot: { enc, half in
         bindCommon(enc, snapPipe)
@@ -1833,7 +1944,9 @@ final class TapeWriter {
     let fm = FileManager.default
     let B = bufs.B
     let dev = q.device
+    pthread_set_qos_class_self_np(QOS_CLASS_UTILITY, 0)
     let poseTape = try PoseTapeWriter(root: root, laneEnvKinds: laneEnvKinds, seeds: seeds)
+    let rewardStream = try RewardStreamWriter(root: root, laneEnvKinds: laneEnvKinds, envIdsByKind: Main.envIdsByKind)
     let maxChunkSteps = bufs.maxChunkSteps
     let windowSteps = bufs.windowSteps
     let recordCapacity = bufs.recordCapacity
@@ -1851,6 +1964,7 @@ final class TapeWriter {
     defer {
       try? hashHandle?.close()
       try? poseTape.close()
+      try? rewardStream.close()
       staging.deallocate()
     }
     let timing = e["OAK_FLEET_TIMING"] == "1"
@@ -1911,6 +2025,7 @@ final class TapeWriter {
         UnsafePointer(staging), capacity: windowSteps, stepStart: start, stepCount: count
       ) { st.error = $0 }
       if st.didFail, let e = st.error { throw e }
+      try rewardStream.appendWindow(UnsafePointer(staging), capacity: windowSteps, stepStart: start, stepCount: count, laneCount: B)
       st.lastDrainStep = step
       if timing {
         let ms = Double(DispatchTime.now().uptimeNanoseconds - t0) / 1e6
@@ -2012,14 +2127,14 @@ final class TapeWriter {
         throw err("Failed to encode Metal command.")
       }
       cb.encodeWaitForEvent(chunkOrder, value: chunkSeq)
-      guard let enc = cb.makeComputeCommandEncoder(dispatchType: .concurrent) else {
-        throw err("Failed to encode Metal command.")
-      }
-      pipes.encodeMegastep(enc, target - step, step)
+      pipes.encodeMegastep(cb, target - step, step)
       if isWindow {
+        guard let enc = cb.makeComputeCommandEncoder(dispatchType: .concurrent) else {
+          throw err("Failed to encode Metal command.")
+        }
         pipes.encodeSnapshot(enc, snapHalf)
+        enc.endEncoding()
       }
-      enc.endEncoding()
       chunkSeq += 1
       cb.encodeSignalEvent(chunkOrder, value: chunkSeq)
       let thisHalf = snapHalf
@@ -2030,10 +2145,10 @@ final class TapeWriter {
       if isWindow { lastWindowStep = target }
       cb.addCompletedHandler { cb in
         let gpuT = cb.gpuEndTime - cb.gpuStartTime
-        if explicitN == nil, gpuT > 0, nSteps > 0 {
-          let fit = max(1, min(Int(0.016 / (gpuT / Double(nSteps))), maxChunkSteps))
+        if gpuT > 0, nSteps > 0 {
+          let perStep = gpuT / Double(nSteps)
           tuneLock.lock()
-          tunedN = max(1, min(fit, tunedN * 4))
+          if explicitN == nil { tunedN = max(1, min(max(1, min(Int(0.016 / perStep), maxChunkSteps)), tunedN * 4)) }
           tuneLock.unlock()
         }
         let cbError = cb.error
@@ -2213,7 +2328,7 @@ final class TapeWriter {
     }
     if fm.fileExists(atPath: dir.path),
       !(try fm.contentsOfDirectory(atPath: dir.path).filter {
-        $0 != ".DS_Store" && $0 != "identity.json"
+        $0 != ".DS_Store" && $0 != "identity.json" && $0 != "baselines"
       }).isEmpty
     {
       if env["OAK_METRICS_STORAGE"] != nil {

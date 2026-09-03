@@ -1,6 +1,5 @@
 import type { EnvId } from '@shared/envs';
 import type { Policy, RecordingRef, RunDetail } from '@shared/types';
-import type { PlaybackSource } from './playbackSource';
 import { entryFor, parseCatalog } from '@sim/catalog';
 import { nameOf } from '../scenes/table';
 import { createStore } from '../state/store';
@@ -22,6 +21,7 @@ import {
   type TimelineTick,
 } from './loader';
 import { clampPosition } from './player';
+import { liveEdgeBufferFrames, type PlaybackSource } from './playbackSource';
 import { mountSceneHost, type HostFrameInfo, type SceneHostHandle } from './sceneHost';
 
 export interface TheaterInputs {
@@ -77,6 +77,7 @@ export interface StageFrame {
   step: number;
   totalSteps: number;
   simTime: number;
+  rate: number;
 }
 
 const frameListeners = new Set<(frame: StageFrame) => void>();
@@ -88,7 +89,7 @@ export function subscribeStageFrame(listener: (frame: StageFrame) => void): () =
   };
 }
 
-const frameScratch: StageFrame = { position: 0, frameCount: 1, step: 0, totalSteps: 0, simTime: 0 };
+const frameScratch: StageFrame = { position: 0, frameCount: 1, step: 0, totalSteps: 0, simTime: 0, rate: 0 };
 
 let container: HTMLElement | null = null;
 let disposeQueued = false;
@@ -160,14 +161,20 @@ function applyDebug(): void {
   sceneHost?.setDebug(debug);
 }
 
+function liveStartFrame(source: PlaybackSource): number {
+  const edge = source.edge;
+  const head = source.frameCount - 1;
+  return edge === null ? head : Math.max(0, head - Math.round(liveEdgeBufferFrames(edge)));
+}
+
 function resolvePendingFrame(handle: HeroHandle, source: PlaybackSource): number {
   const pending = selectionSnapshot().pendingSeekStep;
   if (pending === null) return 0;
   if (source.frameCount <= 1) return 0;
   const total = handle.totalSteps;
-  const frame = clampPosition(frameFromStep(Math.min(pending, total), total, source.frameCount), source.frameCount);
-  if (pending <= total || source.complete) consumePendingSeek(pending);
-  return frame;
+  if (pending > total && !source.complete) return liveStartFrame(source);
+  consumePendingSeek(pending);
+  return clampPosition(frameFromStep(Math.min(pending, total), total, source.frameCount), source.frameCount);
 }
 
 function publishHeroMeta(handle: HeroHandle): void {
@@ -186,6 +193,7 @@ function onFrame(info: HostFrameInfo): void {
   frameScratch.step = info.step;
   frameScratch.totalSteps = totalSteps();
   frameScratch.simTime = info.simTime;
+  frameScratch.rate = info.rate;
   for (const listener of frameListeners) listener(frameScratch);
   publishPosition(stepFromFrame(info.position, frameScratch.totalSteps, frameScratch.frameCount));
 }
@@ -216,13 +224,18 @@ function retarget(): void {
   mountHero();
 }
 
+let liveStarted = false;
+
 function applyPendingSeek(): void {
   const pending = selectionSnapshot().pendingSeekStep;
   if (pending === null || !attached || hero === null || sceneHost === null) return;
-  const handle = hero;
-  const host = sceneHost;
-  const frame = resolvePendingFrame(handle, handle.source);
-  host.seek(frame);
+  if (pending > hero.totalSteps && !hero.source.complete) {
+    if (liveStarted || !hero.fetched) return;
+    liveStarted = true;
+    sceneHost.seek(liveStartFrame(hero.source));
+    return;
+  }
+  sceneHost.seek(resolvePendingFrame(hero, hero.source));
 }
 
 function mountHero(): void {
@@ -235,6 +248,7 @@ function mountHero(): void {
   }
   hero = null;
   attached = false;
+  liveStarted = false;
   if (container === null || inp === null || sel.envId === null) {
     setStageMeta({ ...EMPTY_META, policy: sel.policy });
     return;
@@ -313,6 +327,7 @@ function mountHero(): void {
       seed,
       horizonSteps: run.meta.steps,
       live: inp.live,
+      startedAt: run.meta.startedAt === undefined ? null : Date.parse(run.meta.startedAt),
     });
     heroCache.set(cacheKey, handle);
     for (const [oldKey, old] of heroCache) {
@@ -332,7 +347,10 @@ function mountHero(): void {
   queueStage(async () => {
     if (container === null || gen !== generation) return;
     const attachSource = heroHandle.source.frameCount > 1 ? heroHandle.source : makeInitialSource(entry, env, seed);
-    if (attachSource === heroHandle.source) attached = true;
+    if (attachSource === heroHandle.source) {
+      attached = true;
+      liveStarted = heroHandle.fetched;
+    }
     const at = resolvePendingFrame(heroHandle, attachSource);
     if (sceneHost === null) {
       const transport = transportSnapshot();
@@ -367,6 +385,7 @@ function mountHero(): void {
         if (container === null || gen !== generation || hero !== heroHandle || sceneHost === null) return;
         if (!attached) {
           attached = true;
+          liveStarted = heroHandle.fetched;
           const at = resolvePendingFrame(heroHandle, heroHandle.source);
           await sceneHost.setSource(heroHandle.source, { at });
           applyTransport();
@@ -447,7 +466,7 @@ export function scrubToStep(step: number): void {
   const total = hero.totalSteps;
   if (target > total && !source.complete) {
     setPendingSeek(target);
-    sceneHost.seek(source.frameCount - 1);
+    sceneHost.seek(liveStartFrame(source));
     return;
   }
   setPendingSeek(null);

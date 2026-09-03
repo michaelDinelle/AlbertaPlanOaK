@@ -1,7 +1,7 @@
 import type { EnvEntry } from '@sim/catalog';
 import type { EnvId } from '@shared/envs';
 import type { RecordingRef } from '@shared/types';
-import type { PlaybackSource } from './playbackSource';
+import type { LiveEdge, PlaybackSource } from './playbackSource';
 import { recordingUrl } from '../data/api';
 import { lensRecording, type RecordingLens } from '@sim/decode';
 import {
@@ -121,12 +121,14 @@ export interface HeroOptions extends TheaterTarget {
   entry: EnvEntry;
   horizonSteps: number;
   live: boolean;
+  startedAt: number | null;
   onUpdate?(): void;
   onError?(error: Error): void;
 }
 
 export interface HeroHandle {
   readonly source: PlaybackSource;
+  readonly fetched: boolean;
   readonly loadedSteps: number;
   readonly totalSteps: number;
   readonly bytes: number;
@@ -149,6 +151,7 @@ export function makeInitialSource(entry: EnvEntry, envId: EnvId, seed: number): 
     geometry: decoder.geometry(st, seed),
     frameCount: 1,
     complete: false,
+    edge: null,
     events: EMPTY_EVENT_STREAM,
     frameAt: () => init,
     eventsAt: () => NO_EVENTS,
@@ -181,6 +184,24 @@ export function loadHero(options: HeroOptions): HeroHandle {
   let destroyed = false;
   let lens: RecordingLens | null = null;
   let updateTimer: number | null = null;
+  const edge: LiveEdge = { framesPerSecond: 0, chunkFrames: 0 };
+  let edgeAt = 0;
+  let edgeSteps = 0;
+  let arrivals = 0;
+  const observeArrival = (): void => {
+    const now = performance.now();
+    const seconds = (now - edgeAt) / 1000;
+    const steps = decodedSteps - edgeSteps;
+    if (seconds < 0.5 || steps <= 0) return;
+    arrivals++;
+    if (arrivals > 1) {
+      const instant = steps / seconds;
+      edge.framesPerSecond = edge.framesPerSecond > 0 ? (edge.framesPerSecond + instant) / 2 : instant;
+      edge.chunkFrames = (edge.chunkFrames + steps) / 2;
+    }
+    edgeAt = now;
+    edgeSteps = decodedSteps;
+  };
   let onUpdate = options.onUpdate ?? null;
   let onError = options.onError ?? null;
   const abort = new AbortController();
@@ -203,6 +224,9 @@ export function loadHero(options: HeroOptions): HeroHandle {
     get complete() {
       return fullyFetched && !live;
     },
+    get edge() {
+      return live && edge.framesPerSecond > 0 ? edge : null;
+    },
     get events() {
       return lens !== null ? lens.events : EMPTY_EVENT_STREAM;
     },
@@ -219,6 +243,7 @@ export function loadHero(options: HeroOptions): HeroHandle {
       return;
     }
     lens.extend();
+    if (fullyFetched) observeArrival();
     if (updateTimer === null) {
       updateTimer = requestAnimationFrame(() => {
         updateTimer = null;
@@ -251,6 +276,7 @@ export function loadHero(options: HeroOptions): HeroHandle {
       const payload = await inflateChunk(view, next);
       decodeChunkPayload(payload, desc, next.stepCount, raw.data, decodedSteps * RECORD_FLOATS);
       decodedSteps += next.stepCount;
+      if (next.stepCount > edge.chunkFrames) edge.chunkFrames = next.stepCount;
       scanOffset = next.byteOffset + next.byteLength;
       decodedAny = true;
     }
@@ -292,6 +318,11 @@ export function loadHero(options: HeroOptions): HeroHandle {
   const run = async (): Promise<void> => {
     await fetchFrom(0);
     fullyFetched = true;
+    edgeAt = performance.now();
+    edgeSteps = decodedSteps;
+    if (options.startedAt !== null && decodedSteps > 0) {
+      edge.framesPerSecond = decodedSteps / Math.max(1, (Date.now() - options.startedAt) / 1000);
+    }
     onUpdate?.();
     let lastGrewAt = performance.now();
     let intervalMs = 0;
@@ -323,6 +354,9 @@ export function loadHero(options: HeroOptions): HeroHandle {
 
   return {
     source,
+    get fetched() {
+      return fullyFetched;
+    },
     get loadedSteps() {
       return decodedSteps;
     },

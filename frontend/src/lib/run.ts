@@ -60,7 +60,7 @@ export function runEnvs(
 export function sortRuns(entries: readonly RunIndexEntry[]): RunIndexEntry[] {
   return [...entries].sort((a, b) => {
     if (a.inFlight !== b.inFlight) return a.inFlight ? -1 : 1;
-    if (a.role !== b.role) return a.role === 'keeper' ? -1 : 1;
+    if (a.role !== b.role) return a.role === 'best' ? -1 : 1;
     const ta = a.startedAt ? Date.parse(a.startedAt) : 0;
     const tb = b.startedAt ? Date.parse(b.startedAt) : 0;
     if (tb !== ta) return tb - ta;
@@ -69,8 +69,8 @@ export function sortRuns(entries: readonly RunIndexEntry[]): RunIndexEntry[] {
 }
 
 export function resolveFeaturedRun(entries: readonly RunIndexEntry[]): { runId: string | null } {
-  const keeper = entries.find((entry) => entry.role === 'keeper');
-  if (keeper?.hasRecordings === true) return { runId: keeper.id };
+  const best = entries.find((entry) => entry.role === 'best');
+  if (best?.hasRecordings === true) return { runId: best.id };
 
   const started = (entry: RunIndexEntry): number => (entry.startedAt ? Date.parse(entry.startedAt) : 0);
   const newest = (list: readonly RunIndexEntry[]): RunIndexEntry | null =>
@@ -108,7 +108,7 @@ export function runLabelSource(
 
 export function runLabel(entry: RunLabelSource): string {
   const parts = [runDateLabel(entry.startedAt)];
-  if (entry.role === 'keeper') parts.push('keeper');
+  if (entry.role === 'best') parts.push('best');
   if (entry.policy !== 'oak') parts.push(entry.policy);
   if (entry.ablationLabel !== 'none') parts.push(entry.ablationLabel);
   parts.push(runShortId(entry.id));

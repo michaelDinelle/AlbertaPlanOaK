@@ -4,9 +4,10 @@ import { createStore } from '../state/store';
 export interface TransportState {
   playing: boolean;
   speed: number;
+  slice: boolean;
 }
 
-const transport = createStore<TransportState>({ playing: true, speed: DEFAULT_SPEED });
+const transport = createStore<TransportState>({ playing: true, speed: DEFAULT_SPEED, slice: false });
 
 export const transportSnapshot = transport.get;
 export const subscribeTransport = transport.subscribe;
@@ -15,7 +16,7 @@ export const useTransport = transport.use;
 export function setTransport(patch: Partial<TransportState>): void {
   const now = transport.get();
   const next = { ...now, ...patch };
-  if (next.playing === now.playing && next.speed === now.speed) return;
+  if (next.playing === now.playing && next.speed === now.speed && next.slice === now.slice) return;
   transport.set(next);
 }
 
