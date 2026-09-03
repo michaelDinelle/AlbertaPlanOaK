@@ -14,7 +14,7 @@ constant uint OAK_OPTION_COUNT = 128u;
 constant uint OAK_PERCEPT_COUNT = 128u;
 kernel void oak_preset_max() {}
 #elif defined(OAK_PRESET_ULTRA)
-constant uint OAK_OPTION_COUNT = 192u;
+constant uint OAK_OPTION_COUNT = 160u;
 constant uint OAK_PERCEPT_COUNT = 160u;
 kernel void oak_preset_ultra() {}
 #else
