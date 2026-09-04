@@ -9,6 +9,10 @@ constant uint OAK_CONSTRUCTED_PER_PERCEPT = 2u;
 constant uint OAK_OPTION_COUNT = 32u;
 constant uint OAK_PERCEPT_COUNT = 32u;
 kernel void oak_preset_base() {}
+#elif defined(OAK_PRESET_PRO)
+constant uint OAK_OPTION_COUNT = 64u;
+constant uint OAK_PERCEPT_COUNT = 64u;
+kernel void oak_preset_pro() {}
 #elif defined(OAK_PRESET_MAX)
 constant uint OAK_OPTION_COUNT = 128u;
 constant uint OAK_PERCEPT_COUNT = 128u;
@@ -18,7 +22,7 @@ constant uint OAK_OPTION_COUNT = 160u;
 constant uint OAK_PERCEPT_COUNT = 160u;
 kernel void oak_preset_ultra() {}
 #else
-#error "compile with exactly one geometry preset: -DOAK_PRESET_BASE, -DOAK_PRESET_MAX or -DOAK_PRESET_ULTRA"
+#error "compile with exactly one geometry preset: -DOAK_PRESET_BASE, -DOAK_PRESET_PRO, -DOAK_PRESET_MAX or -DOAK_PRESET_ULTRA"
 #endif
 constant uint OAK_OPTIONS_PER_THREAD = OAK_OPTION_COUNT / OAK_SIMD_WIDTH;
 constant uint OAK_PLAN_PERIOD = 32u;

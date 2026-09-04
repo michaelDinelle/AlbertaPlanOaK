@@ -13,8 +13,8 @@ while [ $# -gt 0 ]; do
 done
 if [ -z "$PRESET" ] && [ -f "$PRESET_FILE" ]; then PRESET="$(cat "$PRESET_FILE")"; fi
 case "$PRESET" in
-  base|max|ultra) ;;
-  *) echo "choose a geometry preset: ./setup.sh --preset base|max|ultra" >&2; exit 1 ;;
+  base|pro|max|ultra) ;;
+  *) echo "choose a geometry preset: ./setup.sh --preset base|pro|max|ultra" >&2; exit 1 ;;
 esac
 command -v python3.11 >/dev/null || { echo "python3.11 not found." >&2; exit 1; }
 

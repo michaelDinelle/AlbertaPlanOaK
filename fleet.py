@@ -538,6 +538,8 @@ def gate(best: dict, candidate: dict) -> int:
         return _fail("GATE ERROR: environment, seed, horizon, or lane schedule differs")
     if best["meta"]["ablationLabel"] != candidate["meta"]["ablationLabel"]:
         return _fail("GATE ERROR: ablation differs")
+    if best["meta"]["preset"] != candidate["meta"]["preset"]:
+        return _fail("GATE ERROR: geometry preset differs")
     if not (candidate["root"] / "summary.json").exists():
         return _fail("GATE ERROR: candidate summary missing")
     baseline_runs(candidate)
@@ -771,12 +773,14 @@ def cmd_job(args) -> int:
     record_policy(candidate, "ppo", identity)
     record_policy(candidate, "random", identity)
     cmd_report(argparse.Namespace(root=root))
-    if meta["steps"] != best["meta"]["steps"]:
-        print(f"[fleet] horizon {meta['steps']:,} differs from the best's {best['meta']['steps']:,}: recorded without a gate", flush=True)
+    completed = load(root)
+    if (meta["steps"], completed["meta"]["preset"]) != (best["meta"]["steps"], best["meta"]["preset"]):
+        print(f"[fleet] {completed['meta']['preset']} at {meta['steps']:,} steps is not the best's"
+              f" {best['meta']['preset']} at {best['meta']['steps']:,}: recorded without a gate", flush=True)
         (root / ".done").touch()
         print("[fleet] DONE", flush=True)
         return 0
-    result = gate(best, load(root))
+    result = gate(best, completed)
     if result == 0:
         write_best(args.name)
         print(f"[fleet] best {args.name}", flush=True)
