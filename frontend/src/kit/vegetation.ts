@@ -1,7 +1,7 @@
 import * as THREE from 'three';
 import type { WorldBuilder } from './world';
 import { oakMaterial, oakUniforms } from './materials';
-import type { OakMaterial } from './materials';
+import { SpatialInstances, type InstanceModel } from './instances';
 import { streamFor } from './rng';
 
 export interface ScatterArea {
@@ -36,11 +36,9 @@ export interface ScatterOptions {
 
 export interface VegetationHandle {
   group: THREE.Group;
-  meshes: THREE.InstancedMesh[];
-  materials: OakMaterial[];
-  count: number;
+  models: InstanceModel[];
+  staticInstances: SpatialInstances[];
   setTime(t: number): void;
-  retint(color: THREE.ColorRepresentation, secondary?: THREE.ColorRepresentation): void;
   setWind(amplitude: number, frequency?: number): void;
   dispose(): void;
 }
@@ -117,21 +115,7 @@ function buildScatter(
   const hueJitter = opts.hueJitter ?? 0.16;
   const windAmp = opts.wind ?? defaults.wind ?? 0;
 
-  const meshes: THREE.InstancedMesh[] = [];
-  const materials: OakMaterial[] = [];
-  const counts = new Array<number>(archetypes.length).fill(0);
-  for (const p of placements) counts[p.variant] = (counts[p.variant] ?? 0) + 1;
-
-  const matrix = new THREE.Matrix4();
-  const position = new THREE.Vector3();
-  const quaternion = new THREE.Quaternion();
-  const euler = new THREE.Euler();
-  const scaleVec = new THREE.Vector3();
-  const color = new THREE.Color();
-
-  for (let a = 0; a < archetypes.length; a++) {
-    const spec = archetypes[a] as ArchetypeSpec;
-    const n = counts[a] ?? 0;
+  const instances = archetypes.map((spec, a) => {
     const material = oakMaterial({
       color: spec.color,
       roughness: 0.9,
@@ -145,77 +129,37 @@ function buildScatter(
         : {}),
       name: `${group.name}:${a}`,
     });
-    materials.push(material);
-
-    const mesh = new THREE.InstancedMesh(spec.geometry, material, Math.max(1, n));
-    mesh.name = `${group.name}:mesh${a}`;
-    mesh.count = 0;
-    mesh.castShadow = opts.castShadow ?? defaults.castShadow;
-    mesh.receiveShadow = opts.receiveShadow ?? false;
-    mesh.instanceColor = new THREE.InstancedBufferAttribute(new Float32Array(Math.max(1, n) * 3), 3);
-    meshes.push(mesh);
-  }
-
-  const written = new Array<number>(archetypes.length).fill(0);
-  for (const p of placements) {
-    const mesh = meshes[p.variant];
-    if (!mesh) continue;
-    const i = written[p.variant] ?? 0;
-    position.set(p.x, p.y, p.z);
-    euler.set(0, p.yaw, 0);
-    quaternion.setFromEuler(euler);
-    scaleVec.set(p.scale, p.scale * p.stretch, p.scale);
-    matrix.compose(position, quaternion, scaleVec);
-    mesh.setMatrixAt(i, matrix);
-    const k = 1 + (p.jitter - 0.5) * 2 * hueJitter;
-    color.setRGB(k, k * (1 - hueJitter * 0.25 * (p.jitter - 0.5)), k * (1 + hueJitter * 0.2 * (p.jitter - 0.5)));
-    mesh.setColorAt(i, color);
-    written[p.variant] = i + 1;
-  }
-
-  let total = 0;
-  for (let a = 0; a < meshes.length; a++) {
-    const mesh = meshes[a] as THREE.InstancedMesh;
-    const n = written[a] ?? 0;
-    mesh.count = n;
-    mesh.instanceMatrix.needsUpdate = true;
-    if (mesh.instanceColor) mesh.instanceColor.needsUpdate = true;
-    mesh.computeBoundingSphere();
-    total += n;
-    if (n > 0) group.add(mesh);
-  }
-
-  const tintA = new THREE.Color();
-  const tintB = new THREE.Color();
+    const source = new SpatialInstances([{
+      geometry: spec.geometry, material, padding: windAmp ? spec.windHeight : 0,
+      castShadow: opts.castShadow ?? defaults.castShadow, receiveShadow: opts.receiveShadow ?? false,
+    }]);
+    const selected = placements.filter(p => p.variant === a), transform = new THREE.Object3D(), color = new THREE.Color();
+    const matrices = new Float32Array(selected.length * 16), colors = new Float32Array(selected.length * 3);
+    selected.forEach((p, i) => {
+      transform.position.set(p.x, p.y, p.z);
+      transform.rotation.set(0, p.yaw, 0);
+      transform.scale.set(p.scale, p.scale * p.stretch, p.scale);
+      transform.updateMatrix(); transform.matrix.toArray(matrices, i * 16);
+      const k = 1 + (p.jitter - 0.5) * 2 * hueJitter;
+      color.setRGB(k, k * (1 - hueJitter * 0.25 * (p.jitter - 0.5)), k * (1 + hueJitter * 0.2 * (p.jitter - 0.5))).toArray(colors, i * 3);
+    });
+    source.scatter(matrices, colors);
+    group.add(source.group);
+    return source;
+  });
+  const models = instances.flatMap(source => source.models);
   return {
-    group,
-    meshes,
-    materials,
-    count: total,
+    group, models,
+    staticInstances: instances.filter(source => source.models[0]!.castShadow && !windAmp),
     setTime(t) {
-      for (const m of materials) oakUniforms(m)?.setTime(t);
-    },
-    retint(primary, secondary) {
-      tintA.set(primary);
-      if (secondary !== undefined) tintB.set(secondary);
-      for (let i = 0; i < materials.length; i++) {
-        const m = materials[i] as OakMaterial;
-        if (secondary !== undefined && materials.length > 1) {
-          m.color.copy(tintA).lerp(tintB, i / (materials.length - 1));
-        } else {
-          m.color.copy(tintA);
-        }
-      }
+      for (const model of models) oakUniforms(model.material)?.setTime(t);
     },
     setWind(amplitude, frequency) {
-      for (const m of materials) oakUniforms(m)?.setWind(amplitude, frequency);
+      for (const model of models) oakUniforms(model.material)?.setWind(amplitude, frequency);
     },
     dispose() {
-      for (const mesh of meshes) mesh.dispose();
-      for (const spec of archetypes) spec.geometry.dispose();
-      for (const m of materials) m.dispose();
-      meshes.length = 0;
-      materials.length = 0;
+      for (const source of instances) source.dispose();
+      for (const model of models) { model.geometry.dispose(); model.material.dispose(); }
       group.removeFromParent();
       group.clear();
     },

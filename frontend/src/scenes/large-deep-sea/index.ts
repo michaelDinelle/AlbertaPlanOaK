@@ -1,6 +1,6 @@
 import { PULSE_SECONDS } from '@kit/celebrate';
 import { CELL } from '@kit/grid';
-import { makeSceneView, type SceneView } from '../jelly-bean-world/view';
+import { makeSceneView, type SceneView } from '@kit/view';
 import { LARGE_DEEPSEA_ACTION, LARGE_DEEPSEA_COL, LARGE_DEEPSEA_GX, LARGE_DEEPSEA_GY, LARGE_DEEPSEA_ROW } from '@sim/envs/largedeepsea';
 import type { GroundTruthOptions } from '@kit/debug';
 import { clampCell, type GridSize } from '@kit/grid';

@@ -8,7 +8,7 @@ import type { FrameUpdate, SceneContext, SceneFactory, SceneSize } from '@kit/ty
 import { Wisp } from '@kit/wisp';
 import { philoxDraw } from '@sim/philox';
 import type { EventStream, GridCell, GridGeometry } from '@sim/types';
-import { makeSceneView, type SceneView } from '../jelly-bean-world/view';
+import { makeSceneView, type SceneView } from '@kit/view';
 import { buildCueCrystal, buildExitMouth, buildTraveler, type CueCrystalHandle, type ExitMouthHandle } from './actors';
 import { buildWorld, CUE_CELL, CHOICE_CELL, readCue, readPos, resolveGrid, type WorldHandle } from './world';
 

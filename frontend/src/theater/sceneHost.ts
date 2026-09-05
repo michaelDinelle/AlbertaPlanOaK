@@ -1,4 +1,5 @@
 import * as THREE from 'three';
+import { MeshoptSimplifier } from 'meshoptimizer/simplifier';
 import type { EnvId } from '@shared/envs';
 import { makePlaybackClock, sampleFrame, type PlaybackSource, type PlaybackClock } from './playbackSource';
 import { celebrationPulse } from '@kit/celebrate';
@@ -181,7 +182,8 @@ export async function mountSceneHost(
     const size = sizeOf();
     const currentLoader = loader;
     if (!currentLoader) throw new SceneHostError(`no scene registered for ${envId}`);
-    const factory = (await currentLoader()).default;
+    const [loaded] = await Promise.all([currentLoader(), MeshoptSimplifier.ready]);
+    const factory = loaded.default;
     if (destroyed || generation !== buildGeneration) return;
     const module = factory();
     const context: SceneContext = {
@@ -219,11 +221,14 @@ export async function mountSceneHost(
   const onWindowResize = (): void => scheduleSize();
   window.addEventListener('resize', onWindowResize);
 
+  let inView = true;
+  const visibility = new IntersectionObserver(entries => { inView = entries[0]!.isIntersecting; });
+  visibility.observe(canvas);
   let raf = 0;
   let lastWall = 0;
   const tick = (now: number): void => {
     raf = requestAnimationFrame(tick);
-    if (!scene || !post) return;
+    if (!scene || !post || document.hidden || !inView) { lastWall = 0; return; }
     if (sizeDirty) {
       sizeDirty = false;
       applySize();
@@ -329,6 +334,7 @@ export async function mountSceneHost(
       destroyed = true;
       cancelAnimationFrame(raf);
       observer?.disconnect();
+      visibility.disconnect();
       window.removeEventListener('resize', onWindowResize);
       scene?.dispose();
       post?.dispose();

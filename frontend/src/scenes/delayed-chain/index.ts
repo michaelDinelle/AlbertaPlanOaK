@@ -1,5 +1,5 @@
 import { PULSE_SECONDS } from '@kit/celebrate';
-import { makeSceneView, type SceneView } from '../jelly-bean-world/view';
+import { makeSceneView, type SceneView } from '@kit/view';
 import { DELAYEDCHAIN_ACTION, DELAYEDCHAIN_POS } from '@sim/envs/delayedchain';
 import type { GroundTruthOptions } from '@kit/debug';
 import { cellToWorld, cellToWorldVec, type GridSize } from '@kit/grid';

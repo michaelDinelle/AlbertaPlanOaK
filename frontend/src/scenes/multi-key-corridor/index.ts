@@ -1,5 +1,5 @@
 import { philoxDraw } from '@sim/philox';
-import { makeSceneView, type SceneView } from '../jelly-bean-world/view';
+import { makeSceneView, type SceneView } from '@kit/view';
 import { MKC_CARRY, MKC_GATES, MKC_GX, MKC_GY, MKC_X, MKC_Y, mkcBit } from '@sim/envs/multikeycorridor';
 import type { GroundTruthOptions } from '@kit/debug';
 import { CELL, cellToWorldVec, clampCell, type GridSize } from '@kit/grid';

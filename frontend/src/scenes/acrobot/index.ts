@@ -3,7 +3,7 @@ import type { OrbitRigOptions } from '@kit/rigs';
 import { StageScene, type Stage } from '@kit/stage';
 import type { FrameUpdate, SceneContext, SceneFactory } from '@kit/types';
 import { ACROBOT_TH1, ACROBOT_TH2 } from '@sim/envs/acrobot';
-import { makeSceneView, type SceneView } from '../jelly-bean-world/view';
+import { makeSceneView, type SceneView } from '@kit/view';
 import { buildArm, type ArmHandle } from './actors';
 import { buildWorld, pivotAnchor, type WorldHandle } from './world';
 

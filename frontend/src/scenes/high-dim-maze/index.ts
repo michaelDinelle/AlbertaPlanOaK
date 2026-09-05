@@ -1,4 +1,4 @@
-import { makeSceneView, type SceneView } from '../jelly-bean-world/view';
+import { makeSceneView, type SceneView } from '@kit/view';
 import type { GroundTruthOptions } from '@kit/debug';
 import { CELL, cellToWorldVec, clampCell, type GridSize } from '@kit/grid';
 import { blendTokens, clamp01, envelope } from '@kit/mix';

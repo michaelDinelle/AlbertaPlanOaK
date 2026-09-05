@@ -34,7 +34,7 @@ export const SCENES: Record<EnvId, SceneRow> = {
   'HighDimMaze-cont-v0': { slug: 'high-dim-maze', bloom: 0.42, burst: 110, fog: { from: ['afternoon', 'fog'] }, load: () => import('./high-dim-maze/index') },
   'POMaze-cont-v0': { slug: 'po-maze', bloom: 0.38, burst: 120, fog: { from: ['dawn', 'fog'], blend: [[['dawn', 'skyTop'], 0.62], [['night', 'skyTop'], 0.62]] }, load: () => import('./po-maze/index') },
   'DelayedChain-cont-v0': { slug: 'delayed-chain', bloom: 0.62, burst: 150, fog: { from: ['night', 'fog'] }, load: () => import('./delayed-chain/index') },
-  'JellyBeanWorld-cont-v0': { slug: 'jelly-bean-world', bloom: 0.5, burst: 108, fog: { from: ['afternoon', 'fog'], blend: [[['dusk', 'fog'], 0.45]] }, load: () => import('./jelly-bean-world/index') },
+  'JellyBeanWorld-cont-v0': { slug: 'jelly-bean-world', bloom: 0.38, burst: 108, fog: { from: ['afternoon', 'fog'], blend: [[['dusk', 'fog'], 0.45]] }, load: () => import('./jelly-bean-world/index') },
 };
 
 export const sceneRegistry = Object.fromEntries(

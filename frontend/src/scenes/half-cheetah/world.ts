@@ -3,6 +3,7 @@ import { mergeGeometries, mergeVertices } from 'three/addons/utils/BufferGeometr
 import { applyFog, makeLightRig, type LightRig } from '@kit/lighting';
 import { buildAurora } from '@kit/aurora';
 import { mountainGeometry } from '@kit/mountains';
+import { leafSurface } from '@kit/leaves';
 import { oakMaterial, oakUniforms } from '@kit/materials';
 import { rngAt } from '@kit/rng';
 import { skyFromPalette, type SkyHandle } from '@kit/sky';
@@ -10,7 +11,7 @@ import type { Palette } from '@kit/tokens';
 import type { SceneContext } from '@kit/types';
 import type { VegetationHandle } from '@kit/vegetation';
 import { makeWorld, type WorldCore } from '@kit/world';
-import { makeContinuousSurface, makeSceneryBank, type ViewCoverage } from '../jelly-bean-world/view';
+import { makeContinuousSurface, makeSceneryBank, type ViewCoverage } from '@kit/view';
 import { makePrairieTerrain, prairieGroundHeight, prairiePlacement, prairieRidge } from './terrain';
 
 export { prairieHeight } from './terrain';
@@ -64,10 +65,10 @@ export function makeLandscape(scene: THREE.Scene, name: string, palette: Palette
   };
 }
 
-export function prairieGrass() {
+export function prairieGrass(blades = 6) {
   const positions: number[] = [], colors: number[] = [];
   const root = new THREE.Color(0x667044), tip = new THREE.Color(0xc2b875), color = new THREE.Color();
-  for (let blade = 0; blade < 6; blade++) {
+  for (let blade = 0; blade < blades; blade++) {
     const angle = blade * 2.3999632, radius = 0.07 * Math.sqrt(blade);
     const height = 0.16 + 0.18 * (0.5 + 0.5 * Math.sin(blade * 4.1));
     const vertices: THREE.Vector3[] = [];
@@ -92,63 +93,64 @@ export function prairieGrass() {
   return { geometry, material };
 }
 
-function aspenTree(world: ReturnType<typeof makeWorld>) {
+export function aspenTree(world: ReturnType<typeof makeWorld>, foliage = ['#8ca357', '#c6ce8a', '#a6bd70', '#d1d28b']) {
   const canvas = document.createElement('canvas');
-  canvas.width = canvas.height = 256;
+  canvas.width = 128; canvas.height = 256;
   const ctx = canvas.getContext('2d');
   if (!ctx) throw new Error('aspen texture canvas unavailable');
-  for (let i = 0; i < 110; i++) {
-    const angle = i * 2.3999632, radius = Math.sqrt(i / 110);
-    const x = 128 + Math.cos(angle) * radius * 112, y = 128 + Math.sin(angle) * radius * 112;
-    ctx.fillStyle = ['#8ca357', '#c6ce8a', '#a6bd70', '#d1d28b'][i % 4]!;
-    ctx.beginPath();
-    ctx.ellipse(x, y, 6 + i % 3, 9 + i % 4, angle, 0, Math.PI * 2);
-    ctx.fill();
+  ctx.fillStyle = '#f7f3df'; ctx.fillRect(0, 0, 128, 256);
+  for (let i = 0; i < 90; i++) {
+    ctx.strokeStyle = i % 4 ? '#bbb6a4' : '#5b5e50'; ctx.lineWidth = i % 4 ? 0.6 : 1.5;
+    ctx.beginPath(); ctx.ellipse((i * 37) % 128, 8 + (i * 71) % 240, 2 + i % 9, 0.6 + i % 3, 0, 0, Math.PI); ctx.stroke();
   }
-  ctx.fillStyle = '#ffffff';
-  ctx.fillRect(0, 0, 4, 4);
-  const map = world.own(new THREE.CanvasTexture(canvas));
-  map.colorSpace = THREE.SRGBColorSpace;
-  const parts: THREE.BufferGeometry[] = [];
-  const add = (geometry: THREE.BufferGeometry, color: number, wood = false) => {
-    const colors = new Float32Array(geometry.getAttribute('position').count * 3), tint = new THREE.Color(color);
-    for (let i = 0; i < colors.length / 3; i++) colors.set([tint.r, tint.g, tint.b], i * 3);
-    geometry.setAttribute('color', new THREE.BufferAttribute(colors, 3));
-    if (wood) {
-      const uv = geometry.getAttribute('uv');
-      for (let i = 0; i < uv.count; i++) uv.setXY(i, 0.006, 0.994);
-    }
-    parts.push(geometry.toNonIndexed());
-    geometry.dispose();
+  ctx.fillStyle = '#ffffff'; ctx.fillRect(0, 0, 8, 8);
+  const map = world.own(new THREE.CanvasTexture(canvas)); map.colorSpace = THREE.SRGBColorSpace;
+  const palette = foliage.map(color => new THREE.Color(color));
+  const pieces: THREE.BufferGeometry[] = [];
+  const add = (source: THREE.BufferGeometry, color: THREE.Color, leaf = false) => {
+    const geometry = source, uv = geometry.getAttribute('uv');
+    if (!geometry.hasAttribute('aLeaf')) geometry.setAttribute('aLeaf', new THREE.Float32BufferAttribute(new Float32Array(uv.count * 2).fill(-2), 2));
+    const colors = new Float32Array(geometry.getAttribute('position').count * 3);
+    for (let i = 0; i < uv.count; i++) { color.toArray(colors, i * 3); if (leaf) uv.setXY(i, 0.02, 0.985); }
+    geometry.setAttribute('color', new THREE.BufferAttribute(colors, 3)); pieces.push(geometry);
   };
-  add(new THREE.CylinderGeometry(0.025, 0.085, 3.4, 7).translate(0, 1.66, 0), 0xc4c4b0, true);
-  for (let i = 0; i < 15; i++) {
-    const angle = i * 2.4, y = 1.35 + i * 0.15;
-    const spread = 0.62 * Math.sin((i + 1) / 17 * Math.PI);
-    const end = new THREE.Vector3(Math.cos(angle) * spread, y + 0.32, Math.sin(angle) * spread);
-    const start = new THREE.Vector3(0, y, 0), branch = end.clone().sub(start);
-    const wood = new THREE.CylinderGeometry(0.006, 0.021, branch.length(), 5);
-    wood.applyQuaternion(new THREE.Quaternion().setFromUnitVectors(new THREE.Vector3(0, 1, 0), branch.normalize()));
-    wood.translate(end.x / 2, (y + end.y) / 2, end.z / 2);
-    add(wood, 0x979680, true);
-    for (let face = 0; face < 2; face++) {
-      const leaves = new THREE.PlaneGeometry(0.95, 1.05);
-      leaves.rotateY(angle + face * Math.PI / 2);
-      leaves.rotateZ(Math.sin(i * 1.7) * 0.2);
-      leaves.translate(end.x, end.y, end.z);
-      add(leaves, 0xffffff);
+  add(new THREE.CylinderGeometry(0.018, 0.11, 3.7, 10).translate(0, 1.82, 0), new THREE.Color(0xffffff));
+  for (let i = 0; i < 18; i++) {
+    const angle = i * 2.39996, y = 1.15 + i * 0.148, spread = Math.sin((i + 2) / 21 * Math.PI) * 0.86;
+    const end = new THREE.Vector3(Math.cos(angle) * spread, y + 0.38, Math.sin(angle) * spread);
+    const start = new THREE.Vector3(0, y, 0), direction = end.clone().sub(start);
+    add(new THREE.CylinderGeometry(0.004, 0.019, direction.length(), 5).applyQuaternion(new THREE.Quaternion().setFromUnitVectors(THREE.Object3D.DEFAULT_UP, direction.clone().normalize())).translate(...start.add(end).multiplyScalar(0.5).toArray()), new THREE.Color(0xd1cdbb));
+    if (!palette.length) {
+      const snow = new THREE.CapsuleGeometry(0.048, Math.max(0, direction.length() - 0.08), 4, 10);
+      snow.applyQuaternion(new THREE.Quaternion().setFromUnitVectors(THREE.Object3D.DEFAULT_UP, direction.clone().normalize())).translate(end.x * 0.5, y + direction.y * 0.5 + 0.045, end.z * 0.5);
+      add(snow, new THREE.Color(0xf3f6ff), true);
+      for (let fork = 0; fork < 4; fork++) {
+        const t = 0.45 + fork * 0.15, base = new THREE.Vector3(end.x * t, y + direction.y * t, end.z * t), tip = base.clone().add(new THREE.Vector3(Math.cos(angle + fork - 1.5) * 0.24, 0.2 + fork * 0.035, Math.sin(angle + fork - 1.5) * 0.24));
+        const branch = tip.clone().sub(base);
+        add(new THREE.CylinderGeometry(0.002, 0.007, branch.length(), 6).applyQuaternion(new THREE.Quaternion().setFromUnitVectors(THREE.Object3D.DEFAULT_UP, branch.normalize())).translate(...base.add(tip).multiplyScalar(0.5).toArray()), new THREE.Color(0xa8a5ac));
+      }
+    }
+    const count = palette.length ? 38 : 0;
+    for (let j = 0; j < count; j++) {
+      const t = j / count, azimuth = j * 2.39996 + angle, radial = Math.sqrt(t) * 0.52;
+      const orientation = new THREE.Quaternion().setFromEuler(new THREE.Euler(azimuth * 0.7, azimuth, Math.sin(j * 1.7) * 0.8, 'ZYX'));
+      const center = new THREE.Vector3(end.x + Math.cos(azimuth) * radial, end.y + Math.sin(j * 3.7) * radial * 0.9, end.z + Math.sin(azimuth) * radial);
+      const leaf = new THREE.BufferGeometry().setAttribute('position', new THREE.Float32BufferAttribute([0, -0.1425, 0.017, 0.111, 0, -0.009, 0, 0.1425, 0.017, -0.111, 0, -0.009], 3)).setIndex([0, 1, 2, 0, 2, 3]);
+      leaf.setAttribute('uv', new THREE.Float32BufferAttribute(new Float32Array(8), 2));
+      leaf.setAttribute('aLeaf', new THREE.Float32BufferAttribute([0, -1.5, 1.5, 0, 0, 1.5, -1.5, 0], 2));
+      leaf.applyQuaternion(orientation).translate(center.x, center.y, center.z);
+      leaf.computeVertexNormals(); add(leaf, palette[(i + j) % palette.length]!, true);
     }
   }
-  const geometry = mergeGeometries(parts);
-  for (const part of parts) part.dispose();
-  const material = oakMaterial({ map, vertexColors: true, roughness: 0.95, side: THREE.DoubleSide, toonSteps: 6, toonSoftness: 1, toonFloor: 0.6 });
-  material.alphaTest = 0.3;
-  material.alphaToCoverage = true;
-  return { geometry, material };
+  const geometry = mergeGeometries(pieces); pieces.forEach(piece => piece.dispose());
+  const material = new THREE.MeshStandardMaterial({ map, vertexColors: true, roughness: 0.92, side: THREE.DoubleSide });
+  const depth = world.own(new THREE.MeshDepthMaterial({ depthPacking: THREE.RGBADepthPacking }));
+  leafSurface(material, depth);
+  return { geometry, material, depth };
 }
 
-export function fieldstones(world: ReturnType<typeof makeWorld>) {
-  const geometry = new THREE.SphereGeometry(0.4, 20, 12);
+export function fieldstoneGeometry(segments = 20, rings = 12) {
+  const geometry = new THREE.SphereGeometry(0.4, segments, rings);
   const position = geometry.getAttribute('position'), colors = new Float32Array(position.count * 3);
   const stone = new THREE.Color(0xf5f2ec), lichen = new THREE.Color(0xc4c19a), color = new THREE.Color();
   for (let i = 0; i < position.count; i++) {
@@ -161,6 +163,11 @@ export function fieldstones(world: ReturnType<typeof makeWorld>) {
   }
   geometry.setAttribute('color', new THREE.BufferAttribute(colors, 3));
   geometry.computeVertexNormals();
+  return geometry;
+}
+
+export function fieldstones(world: ReturnType<typeof makeWorld>) {
+  const geometry = fieldstoneGeometry();
   const map = world.own(new THREE.TextureLoader().load('/textures/prairie-fieldstone.webp'));
   map.colorSpace = THREE.SRGBColorSpace;
   map.wrapS = map.wrapT = THREE.MirroredRepeatWrapping;
@@ -374,7 +381,7 @@ float worldHash(vec2 p, uint seed) {
 float worldNoise(vec2 p, float period, uint seed) {
   vec2 cell = floor(p);
   vec2 f = fract(p);
-  f = f * f * f * (f * (f * 6.0 - 15.0) + 10.0);
+  f = f * f * (3.0 - 2.0 * f);
   vec2 a = mod(cell, period);
   vec2 b = mod(cell + 1.0, period);
   float value = mix(mix(worldHash(a, seed), worldHash(vec2(b.x, a.y), seed), f.x), mix(worldHash(vec2(a.x, b.y), seed), worldHash(b, seed), f.x), f.y);
@@ -466,10 +473,8 @@ export function extendVegetation(
     bark?: THREE.ColorRepresentation;
   },
 ) {
-  const count = Math.ceil(options.perTile / source.meshes.length);
-  for (const mesh of source.meshes) {
-    const geometry = mesh.geometry;
-    const material = mesh.material;
+  const count = Math.ceil(options.perTile / source.models.length);
+  for (const { geometry, material } of source.models) {
     if (!/^oak(Broadleaf|Conifer|BareTree)$/.test(geometry.name) || geometry.userData.treeTint) continue;
     if (!(material instanceof THREE.MeshStandardMaterial)) throw new Error('tree surface material required');
     const positions = geometry.getAttribute('position');
@@ -489,11 +494,11 @@ export function extendVegetation(
     material.color.set(0xffffff);
     geometry.userData.treeTint = true;
   }
-  const banks = source.meshes.map((mesh, variant) => makeSceneryBank({
+  const banks = source.models.map((model, variant) => makeSceneryBank({
     name: `${options.name}${variant}`, seed: options.seed + variant,
     tileSize: options.tileSize, perTile: count,
-    geometry: mesh.geometry, material: mesh.material as THREE.Material,
-    colorA: 0xd8d8d8, colorB: 0xffffff, castShadow: mesh.castShadow,
+    geometry: model.geometry, material: model.material,
+    colorA: 0xd8d8d8, colorB: 0xffffff, castShadow: model.castShadow,
     fill(tx, tz, rng, write) {
       for (let i = 0; i < count; i++) {
         const x = (tx + rng()) * options.tileSize;
@@ -508,6 +513,7 @@ export function extendVegetation(
   }));
   return {
     meshes: banks.map((bank) => bank.mesh),
+    staticInstances: banks.flatMap(bank => bank.staticInstances),
     setView(coverage: ViewCoverage) {
       for (const bank of banks) bank.setView(coverage);
     },

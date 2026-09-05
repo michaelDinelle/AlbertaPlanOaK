@@ -11,7 +11,7 @@ import { makeWater } from '@kit/water';
 import { makeWorld, type WorldCore } from '@kit/world';
 import { DELAYEDCHAIN_END, DELAYEDCHAIN_L } from '@sim/envs/delayedchain';
 import type { EnvGeometry, GridGeometry } from '@sim/types';
-import { makeContinuousSurface, makeSceneryBank, type ViewCoverage } from '../jelly-bean-world/view';
+import { makeContinuousSurface, makeSceneryBank, type ViewCoverage } from '@kit/view';
 import { extendWater } from '../half-cheetah/world';
 import { grassClumpGeometry } from '@kit/vegetation';
 import { buildAurora, type AuroraHandle } from '@kit/aurora';

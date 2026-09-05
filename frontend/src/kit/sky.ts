@@ -25,6 +25,7 @@ export interface GradientSkyOptions {
   sunGlowPower?: number;
 
   stars?: boolean | SkyStarOptions;
+  moon?: boolean;
   radius?: number;
   dither?: number;
   name?: string;
@@ -93,7 +94,20 @@ void main() {
 		float sz = max( uSunSize, 0.002 );
 		float disc = smoothstep( cos( sz * 1.4 ), cos( sz * 0.85 ), cosA );
 		float glow = pow( max( cosA, 0.0 ), max( uSunGlowPower, 1.0 ) );
+#ifdef HAS_MOON
+    vec3 right = normalize(cross(sd, vec3(0.0, 1.0, 0.0))), up = cross(right, sd);
+    vec2 p = vec2(dot(dir, right), dot(dir, up)) / sin(sz);
+    float r2 = dot(p, p), edge = max(fwidth(r2), 0.001);
+    disc = 1.0 - smoothstep(1.0 - edge, 1.0 + edge, r2);
+    vec3 normal = vec3(p, sqrt(max(0.0, 1.0 - r2)));
+    float maria = sin(p.x * 8.0 + sin(p.y * 5.0)) * sin(p.y * 7.0 - p.x * 3.0);
+    float craters = sin(p.x * 43.0 + sin(p.y * 27.0)) * sin(p.y * 39.0 + p.x * 17.0);
+    float shade = (0.3 + 0.7 * max(dot(normal, normalize(vec3(-0.5, 0.4, 0.8))), 0.0)) * (0.78 + 0.16 * maria + 0.04 * craters);
+    col = mix(col, uSunColor * shade * uSunHdr, disc);
+    col += uSunColor * glow * uSunGlow;
+#else
 		col += uSunColor * ( disc * uSunHdr + glow * uSunGlow );
+#endif
 	}
 
 #endif
@@ -163,7 +177,7 @@ export function makeGradientSky(opts: GradientSkyOptions) {
     uniforms: uniforms as unknown as Record<string, THREE.IUniform>,
     vertexShader: VERT,
     fragmentShader: FRAG,
-    defines: { ...(hasSun ? { HAS_SUN: 1 } : {}), ...(hasStars ? { HAS_STARS: 1 } : {}) },
+    defines: { ...(hasSun ? { HAS_SUN: 1 } : {}), ...(opts.moon ? { HAS_MOON: 1 } : {}), ...(hasStars ? { HAS_STARS: 1 } : {}) },
     side: THREE.BackSide,
     depthWrite: false,
     depthTest: false,

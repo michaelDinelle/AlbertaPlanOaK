@@ -1,4 +1,4 @@
-import { makeSceneView, type SceneView } from '../jelly-bean-world/view';
+import { makeSceneView, type SceneView } from '@kit/view';
 import { PROCMAZE_GX, PROCMAZE_GY, PROCMAZE_X, PROCMAZE_Y } from '@sim/envs/proceduralmaze';
 import type { GroundTruthOptions } from '@kit/debug';
 import { CELL, cellToWorldVec, clampCell, type GridSize } from '@kit/grid';

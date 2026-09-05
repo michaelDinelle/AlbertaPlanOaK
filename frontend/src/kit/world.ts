@@ -1,7 +1,10 @@
 import * as THREE from 'three';
+import { cacheStaticShadows } from './shadows';
+import type { SpatialInstances } from './instances';
 
 export interface Disposable {
   dispose(): void;
+  staticInstances?: SpatialInstances[];
 }
 
 export interface Timed {
@@ -39,10 +42,23 @@ export function makeWorld(name: string): WorldBuilder {
   const owned: Disposable[] = [];
   const timed: Timed[] = [];
   const sized: PixelSized[] = [];
-  return {
+  let shadows: ReturnType<typeof cacheStaticShadows> | undefined;
+  const builder: WorldBuilder = {
     group,
-    add: (object) => (group.add(object), object),
-    own: (handle) => (owned.push(handle), handle),
+    add(object) {
+      let parent = object.parent;
+      while (parent && parent !== group) parent = parent.parent;
+      if (!parent) group.add(object);
+      return object;
+    },
+    own(handle) {
+      owned.push(handle);
+      if (handle.staticInstances?.length) {
+        shadows ??= cacheStaticShadows(builder);
+        for (const source of handle.staticInstances) shadows.add(source);
+      }
+      return handle;
+    },
     time: (handle) => (timed.push(handle), handle),
     size: (handle) => (sized.push(handle), handle),
     seal<H extends WorldCore>(extra: Omit<H, keyof WorldCore>, hooks: WorldHooks = {}): H {
@@ -68,4 +84,5 @@ export function makeWorld(name: string): WorldBuilder {
       return { ...core, ...extra } as H;
     },
   };
+  return builder;
 }

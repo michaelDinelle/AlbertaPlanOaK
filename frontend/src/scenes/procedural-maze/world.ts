@@ -16,7 +16,7 @@ import { makeWorld, type WorldCore } from '@kit/world';
 import { PROCMAZE_H, PROCMAZE_W } from '@sim/envs/proceduralmaze';
 import type { EnvGeometry, GridGeometry } from '@sim/types';
 import { ivyLeafGeometry, makeLandscape } from '../key-corridor/world';
-import { makeSceneryBank, type ViewCoverage } from '../jelly-bean-world/view';
+import { makeSceneryBank, type ViewCoverage } from '@kit/view';
 
 export const SUN_DIR: readonly [number, number, number] = [-0.36, 0.874, -0.325];
 

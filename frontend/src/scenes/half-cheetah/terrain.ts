@@ -1,7 +1,7 @@
 import * as THREE from 'three';
 import { terrainNoise as noise } from '@kit/mountains';
 import type { WorldBuilder } from '@kit/world';
-import type { ViewCoverage } from '../jelly-bean-world/view';
+import type { ViewCoverage } from '@kit/view';
 
 const smooth = THREE.MathUtils.smoothstep;
 

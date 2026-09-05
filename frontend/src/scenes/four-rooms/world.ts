@@ -1,6 +1,6 @@
 import { sculptureMaterial } from '../key-corridor/world';
 import { makeLandscape } from '../key-corridor/world';
-import type { ViewCoverage } from '../jelly-bean-world/view';
+import type { ViewCoverage } from '@kit/view';
 import * as THREE from 'three';
 import {
   buildCellField,

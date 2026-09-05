@@ -1,8 +1,8 @@
 import * as THREE from 'three';
-import { oakUniforms } from '@kit/materials';
-import { DEFAULT_ORBIT_LIMITS, type OrbitRig, type OrbitRigOptions, type OrbitState } from '@kit/rigs';
-import { makeTileBank, type TileBankOptions } from '@kit/tiles';
-import type { SceneContext, SceneSize } from '@kit/types';
+import { oakUniforms } from './materials';
+import { DEFAULT_ORBIT_LIMITS, type OrbitRig, type OrbitRigOptions, type OrbitState } from './rigs';
+import { makeTileBank, type TileBankOptions } from './tiles';
+import type { SceneContext, SceneSize } from './types';
 
 export type ViewAnchor = readonly [number, number, number];
 
@@ -31,7 +31,7 @@ export function makeSceneView(
   bounds: SceneBounds,
   anchor: ViewAnchor,
   composition: OrbitState,
-  maxDistance = DEFAULT_ORBIT_LIMITS.maxDistance,
+  minFar = 256,
 ): SceneView {
   const radius = Math.hypot(
     bounds.max[0] - bounds.min[0],
@@ -49,7 +49,7 @@ export function makeSceneView(
     target: anchor,
     distance: composition.distance,
     follow: 0,
-    limits: { maxDistance: Math.max(maxDistance, composition.distance * 4) },
+    limits: { maxDistance: Math.max(composition.distance, Math.min(DEFAULT_ORBIT_LIMITS.maxDistance, composition.distance * 4)), maxPolar: Math.max(DEFAULT_ORBIT_LIMITS.maxPolar, composition.polar) },
   };
   return {
     options,
@@ -70,8 +70,8 @@ export function makeSceneView(
       const reach = Math.max(0, level);
       coverage.x = position.x + (rig.target.x - position.x) * reach;
       coverage.z = position.z + (rig.target.z - position.z) * reach;
-      coverage.nearRadius = Math.max(radius, distance * Math.max(1, reach) * (1 + tanD));
-      coverage.far = Math.max(256, coverage.nearRadius * 6);
+      coverage.nearRadius = distance * Math.max(1, reach) * (1 + tanD);
+      coverage.far = Math.max(minFar, Math.max(radius, coverage.nearRadius) * 6);
       coverage.radius = coverage.far * Math.hypot(1, tanD) + distance;
       if (rig.camera.far !== coverage.far) {
         rig.camera.far = coverage.far;
@@ -100,6 +100,7 @@ export interface ContinuousSurfaceOptions {
   metalness?: number;
   emissive?: THREE.ColorRepresentation;
   segments?: number;
+  radius?: number;
 }
 
 export interface ContinuousSurface {
@@ -129,7 +130,7 @@ export function makeContinuousSurface(opts: ContinuousSurfaceOptions): Continuou
   geometry.rotateX(-Math.PI / 2);
   const uniforms = {
     uLandCenter: { value: new THREE.Vector2() },
-    uLandRadius: { value: DEFAULT_ORBIT_LIMITS.maxDistance * 16 },
+    uLandRadius: { value: opts.radius ?? DEFAULT_ORBIT_LIMITS.maxDistance * 16 },
     uLandSeed: { value: (opts.seed ?? 0) % 65536 },
     uLandTime: { value: 0 },
     uLandA: { value: new THREE.Color(opts.colorA) },
@@ -217,150 +218,25 @@ diffuseColor.rgb *= color;
   };
 }
 
-export type SceneryBankOptions = Omit<TileBankOptions, 'tilesX' | 'tilesZ' | 'backX' | 'backZ'> & {
+export type SceneryBankOptions = TileBankOptions & {
+  depth?: THREE.Material;
   tileSize: number;
 };
 
 export function makeSceneryBank(opts: SceneryBankOptions): {
-  mesh: THREE.InstancedMesh;
+  mesh: THREE.Group;
   setView(coverage: ViewCoverage): void;
   dispose(): void;
+  staticInstances: import('./instances').SpatialInstances[];
 } {
-  const center = { value: new THREE.Vector2() };
-  const material = opts.material.clone();
   const oak = oakUniforms(opts.material);
-  if (oak) {
-    Object.defineProperty(material, 'oak', { value: oak });
-    material.userData.oak = oak;
-  }
-  const compile = opts.material.onBeforeCompile;
-  material.customProgramCacheKey = () => `${opts.material.customProgramCacheKey()}|scenery-edge|${opts.tileSize}`;
-  material.onBeforeCompile = (shader, renderer) => {
-    compile.call(opts.material, shader, renderer);
-    shader.uniforms.uSceneryCenter = center;
-    shader.vertexShader = shader.vertexShader
-      .replace('#include <common>', '#include <common>\nvarying vec3 vSceneryPosition;')
-      .replace('#include <project_vertex>', `
-vec4 sceneryPosition = vec4(transformed, 1.0);
-#ifdef USE_INSTANCING
-sceneryPosition = instanceMatrix * sceneryPosition;
-#endif
-vSceneryPosition = (modelMatrix * sceneryPosition).xyz;
-#include <project_vertex>
-`);
-    shader.fragmentShader = shader.fragmentShader
-      .replace('#include <common>', '#include <common>\nuniform vec2 uSceneryCenter;\nvarying vec3 vSceneryPosition;')
-      .replace('#include <clipping_planes_fragment>', `#include <clipping_planes_fragment>
-float sceneryFade = 1.0 - smoothstep(${(opts.tileSize * 6).toFixed(3)}, ${(opts.tileSize * 7.2).toFixed(3)}, length(vSceneryPosition.xz - uSceneryCenter));
-if (sceneryFade < fract(sin(dot(gl_FragCoord.xy, vec2(12.9898, 78.233))) * 43758.5453)) discard;
-`);
-  };
-  const bank = makeTileBank({
-    ...opts,
-    material,
-    tilesX: 17,
-    tilesZ: 17,
-    backX: 8,
-    backZ: 8,
-  });
-  const source = bank.mesh;
-  const capacity = source.instanceMatrix.count;
-  const mesh = new THREE.InstancedMesh(opts.geometry, material, capacity);
-  mesh.name = opts.name;
-  mesh.castShadow = source.castShadow;
-  mesh.receiveShadow = source.receiveShadow;
-  mesh.frustumCulled = false;
-  mesh.count = 0;
-  mesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
-  mesh.instanceColor = new THREE.InstancedBufferAttribute(new Float32Array(capacity * 3), 3).setUsage(THREE.DynamicDrawUsage);
-  opts.geometry.computeBoundingSphere();
-  const bounds = opts.geometry.boundingSphere!;
-  const spheres = new Float32Array(capacity * 4);
-  const indices = new Uint32Array(capacity);
-  const planes = new Float64Array(24).fill(Number.NaN);
-  let sourceVersion = -1;
-  let active = 0;
-  let centerX = Number.NaN;
-  let centerZ = Number.NaN;
+  const bank = makeTileBank(opts);
   return {
-    mesh,
+    mesh: bank.mesh,
+    staticInstances: opts.castShadow && !oak?.flags.wind && !(opts.material instanceof THREE.ShaderMaterial) ? [bank.instances] : [],
     setView(coverage) {
-      center.value.set(coverage.x, coverage.z);
-      bank.setOrigin(Math.floor(coverage.x / opts.tileSize), Math.floor(coverage.z / opts.tileSize));
-      const matrices = source.instanceMatrix.array;
-      const colors = source.instanceColor!.array;
-      let dirty = sourceVersion !== source.instanceMatrix.version;
-      if (dirty) {
-        sourceVersion = source.instanceMatrix.version;
-        active = 0;
-        for (let i = 0; i < capacity; i++) {
-          const m = i * 16;
-          const sx = Math.hypot(matrices[m]!, matrices[m + 1]!, matrices[m + 2]!);
-          const sy = Math.hypot(matrices[m + 4]!, matrices[m + 5]!, matrices[m + 6]!);
-          const sz = Math.hypot(matrices[m + 8]!, matrices[m + 9]!, matrices[m + 10]!);
-          const scale = Math.max(sx, sy, sz);
-          if (scale === 0) continue;
-          const c = bounds.center;
-          const s = active * 4;
-          indices[active++] = i;
-          spheres[s] = matrices[m]! * c.x + matrices[m + 4]! * c.y + matrices[m + 8]! * c.z + matrices[m + 12]!;
-          spheres[s + 1] = matrices[m + 1]! * c.x + matrices[m + 5]! * c.y + matrices[m + 9]! * c.z + matrices[m + 13]!;
-          spheres[s + 2] = matrices[m + 2]! * c.x + matrices[m + 6]! * c.y + matrices[m + 10]! * c.z + matrices[m + 14]!;
-          spheres[s + 3] = bounds.radius * scale * 1.2 + 1;
-        }
-      }
-      for (let i = 0; i < 6; i++) {
-        const plane = coverage.frustum.planes[i]!;
-        const p = i * 4;
-        if (planes[p] !== plane.normal.x || planes[p + 1] !== plane.normal.y || planes[p + 2] !== plane.normal.z || planes[p + 3] !== plane.constant) dirty = true;
-        planes[p] = plane.normal.x;
-        planes[p + 1] = plane.normal.y;
-        planes[p + 2] = plane.normal.z;
-        planes[p + 3] = plane.constant;
-      }
-      if (centerX !== coverage.x || centerZ !== coverage.z) dirty = true;
-      if (!dirty) return;
-      centerX = coverage.x;
-      centerZ = coverage.z;
-      const output = mesh.instanceMatrix.array;
-      const tints = mesh.instanceColor!.array;
-      let visible = 0;
-      for (let i = 0; i < active; i++) {
-        const s = i * 4;
-        const x = spheres[s]!;
-        const y = spheres[s + 1]!;
-        const z = spheres[s + 2]!;
-        const r = spheres[s + 3]!;
-        const distance = Math.hypot(x - coverage.x, z - coverage.z);
-        if (distance - r > opts.tileSize * 7.2) continue;
-        let outside = false;
-        if (!mesh.castShadow || distance > coverage.nearRadius * 2 + r) {
-          for (let p = 0; p < 24; p += 4) {
-            if (planes[p]! * x + planes[p + 1]! * y + planes[p + 2]! * z + planes[p + 3]! < -r) {
-              outside = true;
-              break;
-            }
-          }
-        }
-        if (outside) continue;
-        const index = indices[i]!;
-        for (let k = 0; k < 16; k++) output[visible * 16 + k] = matrices[index * 16 + k]!;
-        for (let k = 0; k < 3; k++) tints[visible * 3 + k] = colors[index * 3 + k]!;
-        visible++;
-      }
-      mesh.count = visible;
-      mesh.instanceMatrix.clearUpdateRanges();
-      mesh.instanceMatrix.addUpdateRange(0, visible * 16);
-      mesh.instanceMatrix.needsUpdate = true;
-      mesh.instanceColor!.clearUpdateRanges();
-      mesh.instanceColor!.addUpdateRange(0, visible * 3);
-      mesh.instanceColor!.needsUpdate = true;
+      bank.setOrigin(Math.floor(coverage.x / opts.tileSize), Math.floor(coverage.z / opts.tileSize), Math.ceil(coverage.nearRadius / opts.tileSize) + 8);
     },
-    dispose() {
-      bank.dispose();
-      mesh.dispose();
-      mesh.removeFromParent();
-      material.dispose();
-    },
+    dispose() { bank.dispose(); },
   };
 }

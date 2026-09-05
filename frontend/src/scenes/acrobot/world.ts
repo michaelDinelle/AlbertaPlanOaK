@@ -10,7 +10,7 @@ import type { WorldCore } from '@kit/world';
 import { AB_L1, AB_L2 } from '@sim/envs/acrobot';
 import type { EnvGeometry } from '@sim/types';
 import { fieldstones, makeLandscape, prairieGrass } from '../half-cheetah/world';
-import type { ViewCoverage } from '../jelly-bean-world/view';
+import type { ViewCoverage } from '@kit/view';
 
 export const WATER_Y = -(AB_L1 + AB_L2) - 0.42;
 const smooth = THREE.MathUtils.smoothstep;

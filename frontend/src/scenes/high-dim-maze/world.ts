@@ -13,7 +13,7 @@ import { grassClumpGeometry, rockGeometry } from '@kit/vegetation';
 import { makeWorld, type WorldCore } from '@kit/world';
 import { HIGHDIMMAZE_H, HIGHDIMMAZE_W } from '@sim/envs/highdimmaze';
 import type { EnvGeometry, GridGeometry } from '@sim/types';
-import { makeContinuousSurface, makeSceneryBank, type ViewCoverage } from '../jelly-bean-world/view';
+import { makeContinuousSurface, makeSceneryBank, type ViewCoverage } from '@kit/view';
 
 export function resolveGrid(geometry: EnvGeometry): GridGeometry {
   const grid = geometry.grid;

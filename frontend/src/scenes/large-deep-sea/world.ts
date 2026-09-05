@@ -12,7 +12,7 @@ import type { SceneContext } from '@kit/types';
 import { makeWorld, type WorldCore } from '@kit/world';
 import { LARGE_DEEPSEA_N } from '@sim/envs/largedeepsea';
 import type { EnvGeometry, GridGeometry } from '@sim/types';
-import { makeContinuousSurface, makeSceneryBank, type ViewCoverage } from '../jelly-bean-world/view';
+import { makeContinuousSurface, makeSceneryBank, type ViewCoverage } from '@kit/view';
 import { causticLighting, coralGeometry, shelfLandscape } from '../deep-sea/world';
 
 export function resolveGrid(geometry: EnvGeometry): GridGeometry {

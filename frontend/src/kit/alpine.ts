@@ -2,6 +2,7 @@ import * as THREE from 'three';
 import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
 import { terrainNoise as noise } from './mountains';
 import type { WorldBuilder } from './world';
+import { SpatialInstances } from './instances';
 
 const smooth = THREE.MathUtils.smoothstep;
 
@@ -73,19 +74,10 @@ export function spruce(world: WorldBuilder) {
 }
 
 export function scatter(world: WorldBuilder, geometry: THREE.BufferGeometry, material: THREE.Material, transforms: THREE.Matrix4[], name: string) {
-  const tiles = new Map<string, THREE.Matrix4[]>();
-  for (const matrix of transforms) {
-    const key = `${Math.floor(matrix.elements[12]! / 64)},${Math.floor(matrix.elements[14]! / 64)}`;
-    if (!tiles.has(key)) tiles.set(key, []);
-    tiles.get(key)!.push(matrix);
-  }
-  for (const matrices of tiles.values()) {
-    const mesh = world.own(new THREE.InstancedMesh(geometry, material, matrices.length));
-    mesh.name = name;
-    matrices.forEach((matrix, i) => mesh.setMatrixAt(i, matrix));
-    mesh.computeBoundingSphere();
-    world.add(mesh);
-  }
+  const instances = world.own(new SpatialInstances([{ geometry, material, padding: 1 }]));
+  instances.group.name = name;
+  instances.scatter(Float32Array.from(transforms.flatMap(matrix => matrix.elements)));
+  world.add(instances.group);
 }
 
 export function alpineGroundMaterial(world: WorldBuilder, waterLevel: number) {

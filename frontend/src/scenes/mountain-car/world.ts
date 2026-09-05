@@ -13,7 +13,7 @@ import { streamFor } from '@kit/rng';
 import type { SkyHandle } from '@kit/sky';
 import { makeTerrain } from '@kit/terrain';
 import { extendVegetation, makeLandscape, makeSceneTerrain } from '../half-cheetah/world';
-import type { ViewCoverage } from '../jelly-bean-world/view';
+import type { ViewCoverage } from '@kit/view';
 import { valueNoise2 } from '@kit/textures';
 import { TOKENS, type Palette } from '@kit/tokens';
 import type { SceneContext } from '@kit/types';

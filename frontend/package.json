@@ -21,6 +21,7 @@
     "recharts": "^3.10.1",
     "sonner": "^2.0.8",
     "three": "^0.185.1",
+    "meshoptimizer": "^1.1.1",
     "virtua": "^0.50.1"
   },
   "devDependencies": {

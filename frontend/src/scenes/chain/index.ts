@@ -6,7 +6,7 @@ import { StageScene, type Stage } from '@kit/stage';
 import type { FrameUpdate, SceneContext, SceneFactory } from '@kit/types';
 import type { GridGeometry } from '@sim/types';
 import { CHAIN_L, CHAIN_POS } from '@sim/envs/chain';
-import { makeSceneView, type SceneView } from '../jelly-bean-world/view';
+import { makeSceneView, type SceneView } from '@kit/view';
 import { buildCrossing, buildRover, chainX, deckHeight } from './actors';
 import { buildWorld, type WorldHandle } from './world';
 

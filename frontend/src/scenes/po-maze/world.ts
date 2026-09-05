@@ -13,7 +13,7 @@ import { coniferTreeGeometry, scatterGrass, scatterRocks } from '@kit/vegetation
 import { makeWorld, type WorldCore } from '@kit/world';
 import { POMAZE_H, POMAZE_W } from '@sim/envs/pomaze';
 import type { EnvGeometry, GridGeometry } from '@sim/types';
-import { makeContinuousSurface, makeSceneryBank, type ViewCoverage } from '../jelly-bean-world/view';
+import { makeContinuousSurface, makeSceneryBank, type ViewCoverage } from '@kit/view';
 
 export const BUBBLE_OUTER = CELL * 2;
 export const REVEAL_RADIUS = 3.2;

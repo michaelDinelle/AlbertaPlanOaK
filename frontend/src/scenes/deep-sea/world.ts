@@ -9,7 +9,7 @@ import type { SceneContext } from '@kit/types';
 import { flowerGeometry, rockGeometry } from '@kit/vegetation';
 import { makeWorld, type WorldCore } from '@kit/world';
 import type { GridGeometry } from '@sim/types';
-import { makeContinuousSurface, makeSceneryBank, type ViewCoverage } from '../jelly-bean-world/view';
+import { makeContinuousSurface, makeSceneryBank, type ViewCoverage } from '@kit/view';
 import { isReef, reefDepthY, reefSkin, shelfTint, terraceShelves, SHELF_THICKNESS, TERRACE_DESCENT, type ReefSkin } from './reef';
 
 export function causticLighting(material: THREE.MeshStandardMaterial, strength = 0.075): { setTime(t: number): void } {

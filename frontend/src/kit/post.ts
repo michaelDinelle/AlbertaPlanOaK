@@ -1,12 +1,13 @@
 import * as THREE from 'three';
 import { EffectComposer } from 'three/examples/jsm/postprocessing/EffectComposer.js';
 import { RenderPass } from 'three/examples/jsm/postprocessing/RenderPass.js';
-import { ShaderPass } from 'three/examples/jsm/postprocessing/ShaderPass.js';
 import { OutputPass } from 'three/examples/jsm/postprocessing/OutputPass.js';
 import { UnrealBloomPass } from 'three/examples/jsm/postprocessing/UnrealBloomPass.js';
 import type { SceneSize } from './types';
 import { TOKENS } from './tokens';
 import type { FogRecipe } from '../scenes/table';
+import { prepareInstances } from './instances';
+export const MSAA_SAMPLES = 4;
 
 const BLOOM_THRESHOLD = 0.85;
 
@@ -23,15 +24,6 @@ function resolveFog(recipe: FogRecipe): number {
   return color.getHex();
 }
 
-export interface GradeUniforms {
-  tDiffuse: { value: THREE.Texture | null };
-  uLift: { value: THREE.Vector3 };
-  uTint: { value: THREE.Color };
-  uTintStrength: { value: number };
-  uGamma: { value: number };
-  uVignette: { value: number };
-}
-
 export interface ComposerHandle {
   setBloomPulse(t01: number): void;
   render(deltaTime: number): void;
@@ -40,60 +32,11 @@ export interface ComposerHandle {
 }
 
 export const BLOOM_RESOLUTION_SCALE = 0.5;
-export const MSAA_SAMPLES = 4;
 
 export function pulsedBloomStrength(base: number, t01: number): number {
   const t = t01 < 0 ? 0 : t01 > 1 ? 1 : t01;
   return base * (1 + 1.2 * t);
 }
-
-const GRADE_VERT =  `
-varying vec2 vUv;
-void main() {
-	vUv = uv;
-	gl_Position = projectionMatrix * modelViewMatrix * vec4( position, 1.0 );
-}
-`;
-
-const GRADE_FRAG =  `
-uniform sampler2D tDiffuse;
-uniform vec3 uLift;
-uniform vec3 uTint;
-uniform float uTintStrength;
-uniform float uGamma;
-uniform float uVignette;
-varying vec2 vUv;
-
-void main() {
-	vec4 texel = texture2D( tDiffuse, vUv );
-	vec3 col = max( texel.rgb, 0.0 );
-
-	col += uLift * ( 1.0 - smoothstep( 0.0, 0.35, col ) );
-
-	col = mix( col, col * uTint, uTintStrength );
-
-	col = pow( col, vec3( uGamma ) );
-
-	float d = distance( vUv, vec2( 0.5 ) );
-	col *= 1.0 - uVignette * smoothstep( 0.34, 0.86, d );
-
-	gl_FragColor = vec4( max( col, 0.0 ), texel.a );
-}
-`;
-
-export const OakGradeShader = {
-  name: 'OakGradeShader',
-  uniforms: {
-    tDiffuse: { value: null as THREE.Texture | null },
-    uLift: { value: new THREE.Vector3(0.004, 0.004, 0.004) },
-    uTint: { value: new THREE.Color(0xffffff) },
-    uTintStrength: { value: 0.14 },
-    uGamma: { value: 1.0 },
-    uVignette: { value: 0.34 },
-  },
-  vertexShader: GRADE_VERT,
-  fragmentShader: GRADE_FRAG,
-};
 
 export function buildComposer(
   renderer: THREE.WebGLRenderer,
@@ -123,6 +66,8 @@ export function buildComposer(
   composer.setSize(width, height);
 
   const renderPass = new RenderPass(scene, camera);
+  const beforeRender = scene.onBeforeRender;
+  scene.onBeforeRender = (...args) => { beforeRender.apply(scene, args); prepareInstances(scene, renderer, args[2]); };
   composer.addPass(renderPass);
 
   const bloom = new UnrealBloomPass(
@@ -136,12 +81,17 @@ export function buildComposer(
   );
   composer.addPass(bloom);
 
-  const gradePass = new ShaderPass(OakGradeShader);
-  const gradeUniforms = gradePass.uniforms as unknown as GradeUniforms;
-  gradeUniforms.uTint.value.set(resolveFog(post.fog));
-  composer.addPass(gradePass);
-
   const outputPass = new OutputPass();
+  outputPass.uniforms.uTint = { value: new THREE.Color(resolveFog(post.fog)) };
+  outputPass.material.fragmentShader = outputPass.material.fragmentShader
+    .replace('uniform sampler2D tDiffuse;', 'uniform sampler2D tDiffuse; uniform vec3 uTint;')
+    .replace('gl_FragColor = texture2D( tDiffuse, vUv );', `
+vec3 col = max(texture2D(tDiffuse, vUv).rgb, 0.0);
+col += vec3(0.004) * (1.0 - smoothstep(0.0, 0.35, col));
+col = mix(col, col * uTint, 0.14);
+col *= 1.0 - 0.34 * smoothstep(0.34, 0.86, distance(vUv, vec2(0.5)));
+gl_FragColor = vec4(max(col, 0.0), 1.0);
+`);
   composer.addPass(outputPass);
 
   const resizeBloom = (w: number, h: number, ratio: number) => {
@@ -169,11 +119,9 @@ export function buildComposer(
     dispose() {
       composer.removePass(renderPass);
       composer.removePass(bloom);
-      composer.removePass(gradePass);
       composer.removePass(outputPass);
-      renderPass.dispose();
+      renderPass.dispose(); scene.onBeforeRender = beforeRender;
       bloom.dispose();
-      gradePass.dispose();
       outputPass.dispose();
       composer.dispose();
       target.dispose();

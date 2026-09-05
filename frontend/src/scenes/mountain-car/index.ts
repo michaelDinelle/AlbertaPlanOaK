@@ -1,7 +1,7 @@
 import type { GroundTruthOptions } from '@kit/debug';
 import { envelope } from '@kit/mix';
 import { type OrbitRigOptions } from '@kit/rigs';
-import { makeSceneView, type SceneView } from '../jelly-bean-world/view';
+import { makeSceneView, type SceneView } from '@kit/view';
 import { StageScene, type Stage } from '@kit/stage';
 import type { FrameState, FrameUpdate, SceneContext, SceneFactory, SceneSize } from '@kit/types';
 import { MC_GOAL_POS, MC_START_POS, MOUNTAINCAR_ACTION, MOUNTAINCAR_POS, MOUNTAINCAR_VEL, mountainCarForce, mountainCarSlope } from '@sim/envs/mountaincar';

@@ -55,7 +55,7 @@ export const DEFAULT_ORBIT_LIMITS: OrbitLimits = Object.freeze({
   minAzimuth: -Infinity,
   maxAzimuth: Infinity,
   minDistance: 2,
-  maxDistance: 140,
+  maxDistance: 36,
 });
 
 const PAN_SPEED = 0.0022;

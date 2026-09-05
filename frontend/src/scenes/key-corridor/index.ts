@@ -1,4 +1,4 @@
-import { makeSceneView, type SceneView } from '../jelly-bean-world/view';
+import { makeSceneView, type SceneView } from '@kit/view';
 import { KEYCORRIDOR_CARRY, KEYCORRIDOR_GATE, KEYCORRIDOR_GX, KEYCORRIDOR_GY, KEYCORRIDOR_KX, KEYCORRIDOR_KY, KEYCORRIDOR_X, KEYCORRIDOR_Y } from '@sim/envs/keycorridor';
 import type { GroundTruthOptions } from '@kit/debug';
 import { CELL, cellToWorldVec, clampCell, type GridSize } from '@kit/grid';

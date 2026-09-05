@@ -1,4 +1,4 @@
-import { makeSceneView, type SceneView } from '../jelly-bean-world/view';
+import { makeSceneView, type SceneView } from '@kit/view';
 import { FOURROOMS_GX, FOURROOMS_GY, FOURROOMS_X, FOURROOMS_Y } from '@sim/envs/fourrooms';
 import { CELL, cellToWorldVec, clampCell, type GridSize } from '@kit/grid';
 import type { GroundTruthOptions } from '@kit/debug';

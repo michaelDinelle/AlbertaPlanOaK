@@ -1,6 +1,6 @@
 import { PULSE_SECONDS } from '@kit/celebrate';
 import { CELL } from '@kit/grid';
-import { makeSceneView, type SceneView } from '../jelly-bean-world/view';
+import { makeSceneView, type SceneView } from '@kit/view';
 import type { GroundTruthOptions } from '@kit/debug';
 import type { GridSize } from '@kit/grid';
 import { clamp01, envelope } from '@kit/mix';

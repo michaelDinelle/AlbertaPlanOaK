@@ -1,700 +1,131 @@
 import * as THREE from 'three';
-import { applyFog, makeLightRig, type LightRig } from '@kit/lighting';
-import { emissiveMaterial, oakMaterial, type OakMaterial } from '@kit/materials';
-import { blendTokens, clamp01, luminance, shade } from '@kit/mix';
-import {
-  makeAmbientParticles,
-  type AmbientParticlesHandle,
-} from '@kit/particles';
-import { hash2f } from '@kit/rng';
-import { skyFromPalette, type SkyHandle } from '@kit/sky';
-import { TOKENS, type Palette } from '@kit/tokens';
+import { CSM } from 'three/addons/csm/CSM.js';
+import { buildAurora } from '@kit/aurora';
+import { valueNoise2 } from '@kit/textures';
 import type { SceneContext } from '@kit/types';
-import { flowerGeometry, grassClumpGeometry } from '@kit/vegetation';
-import { radialSprite, valueNoise2 } from '@kit/textures';
-import { makeSceneTerrain } from '../half-cheetah/world';
-import { makeWorld, type WorldCore } from '@kit/world';
-import {
-  buildBeacon,
-  HALO_GLOW,
-  HALO_WHITEN,
-  DECAL_CAPACITY,
-  ITEM_CAPACITY,
-  ITEM_GLOW,
-  ITEM_KINDS,
-  ITEM_MOTION,
-  orchardItemGeometry,
-  type BeaconHandle,
-} from './actors';
-import {
-  JBW_BANANA,
-  JBW_COLOR,
-  JBW_JELLY,
-  JBW_ONION,
-  JBW_TREE,
-  JBW_TRUFFLE,
-  JBW_WALL,
-  jbwCollectible,
-} from '@sim/envs/jellybeanworld';
-import { FIELD_EDGE, FIELD_TEXELS } from './fieldmath';
+import type { WorldCore } from '@kit/world';
+import { makeLandscape, makeSceneTerrain } from '../half-cheetah/world';
+import { winterWeather } from './ambience';
+import { FIELD_TEXELS, TILE_CELLS } from './fieldmath';
+import { ItemField } from './items';
 import { ScentField } from './scentfield';
-import { makeSceneryBank, type ContinuousSurface, type ViewCoverage } from './view';
+import type { ViewCoverage } from '@kit/view';
 
-export const FOG_EXTENT = 1980;
-export const SCATTER_TILE = 24;
-export const SHADOW_REACH = 300;
-export const SHADOW_SPAN = 108;
-const SLAB_LOW = -10;
-const SLAB_HIGH = 15;
-export const SHADOW_MAP_X = 4096;
-const SHADOW_MAP_Y = 1365;
-const ZERO_MOTION = { hover: 0, bob: 0, spin: 0 };
-const DECAL_DIM = 0.22;
-const BEACON_CAPACITY = 512;
-const SHELL_SCALE = 1.06;
+export type ParklandWorld = ReturnType<typeof buildWorld>;
 
-export const SUN_AZIMUTH = 0.68 + Math.PI;
-
-const FRONT_WIDTH = 44;
-
-export interface OrchardSkin {
-  grassLow: THREE.Color;
-  grassHigh: THREE.Color;
-  soil: THREE.Color;
-  banana: THREE.Color;
-  onion: THREE.Color;
-  jelly: THREE.Color;
-  truffle: THREE.Color;
-  stone: THREE.Color;
-  moss: THREE.Color;
-  bark: THREE.Color;
-  canopyLow: THREE.Color;
-  canopyHigh: THREE.Color;
-  papery: THREE.Color;
-  bloom: THREE.Color;
-  scentA: THREE.Color;
-  scentB: THREE.Color;
-  scentC: THREE.Color;
-  ripe: THREE.Color;
-  spoiled: THREE.Color;
-  front: THREE.Color;
-  scentColumn: THREE.Color;
-}
-
-function itemGlow(item: number, skin: OrchardSkin, target: number): number {
-  if (!jbwCollectible(item)) return 0;
-  const luma = luminance(itemHue(item, skin));
-  if (!(luma > 0)) throw new Error(`orchard hue ${item} has no luminance`);
-  return target / luma;
-}
-
-function itemHue(item: number, skin: OrchardSkin): THREE.Color {
-  if (item === JBW_BANANA) return skin.banana;
-  if (item === JBW_ONION) return skin.onion;
-  if (item === JBW_JELLY) return skin.jelly;
-  if (item === JBW_TRUFFLE) return skin.truffle;
-  if (item === JBW_TREE) return skin.canopyLow;
-  return skin.stone;
-}
-
-function paperHue(item: number, palette: Palette, k: number): THREE.Color {
-  const c = JBW_COLOR[item];
-  if (!c) throw new Error(`no paper colour for item ${item}`);
-  const base = new THREE.Color().setRGB(c[0], c[1], c[2], THREE.SRGBColorSpace);
-  return blendTokens(base, palette.sun, k);
-}
-
-export function orchardSkin(palette: Palette): OrchardSkin {
-  const accents = TOKENS.accents;
-  const leaf = accents['four-rooms'] ?? TOKENS.celebrationGold;
-  const ember = accents['high-dim-maze'] ?? TOKENS.celebrationGold;
-  return {
-    grassLow: blendTokens(blendTokens(palette.groundA, leaf, 0.72), palette.hemiGround, 0.2),
-    grassHigh: blendTokens(blendTokens(palette.groundB, leaf, 0.56), palette.sun, 0.14),
-    soil: shade(blendTokens(blendTokens(palette.groundA, leaf, 0.55), ember, 0.16), 0.12),
-    banana: paperHue(JBW_BANANA, palette, 0.14),
-    onion: paperHue(JBW_ONION, palette, 0.14),
-    jelly: paperHue(JBW_JELLY, palette, 0.12),
-    truffle: paperHue(JBW_TRUFFLE, palette, 0.16),
-    stone: paperHue(JBW_WALL, palette, 0.3),
-    moss: blendTokens(leaf, palette.hemiGround, 0.55),
-    bark: shade(blendTokens(ember, palette.hemiGround, 0.6), 0.3),
-    canopyLow: paperHue(JBW_TREE, palette, 0.22),
-    canopyHigh: paperHue(JBW_TREE, palette, 0.3),
-    papery: blendTokens(palette.skyBottom, palette.sun, 0.35),
-    bloom: blendTokens(palette.sun, TOKENS.celebrationGold, 0.4),
-    scentA: paperHue(JBW_JELLY, palette, 0.34),
-    scentB: paperHue(JBW_BANANA, palette, 0.3),
-    scentC: paperHue(JBW_ONION, palette, 0.24),
-    ripe: blendTokens(TOKEN_ONE, TOKENS.celebrationGold, 0.22),
-    spoiled: blendTokens(TOKEN_ONE, palette.hemiSky, 0.62),
-    front: blendTokens(palette.hemiSky, palette.skyTop, 0.4),
-    scentColumn: blendTokens(paperHue(JBW_TRUFFLE, palette, 0.4), palette.fog, 0.45),
-  };
-}
-
-const TOKEN_ONE = 0xffffff;
-
-export interface ScentPaint {
-  uScentTex: { value: THREE.Texture | null };
-  uScentOrigin: { value: THREE.Vector2 };
-  uScentOn: { value: number };
-  uScentGain: { value: number };
-  uScentGlow: { value: number };
-  uFrontEdge: { value: number };
-  uFrontWidth: { value: number };
-  uFrontColor: { value: THREE.Color };
-  uFrontMix: { value: number };
-  uGridGain: { value: number };
-  uGridColor: { value: THREE.Color };
-}
-
-const PAINT_DECL = `
-uniform sampler2D uScentTex;
+export function buildWorld(ctx: SceneContext, scene: THREE.Scene) {
+  const land = makeLandscape(scene, 'winterCandyLand', ctx.tokens.palettes.night, 'night', {
+    sky: { sunDir: [-0.42, 0.17, -0.89], moon: true, sunColor: 0xe2ecff, sunSize: 0.021, sunHdr: 1.4, sunGlow: 0.025, topSpread: 0.36, stars: { intensity: 3.5, density: 180, threshold: 0.97, size: 0.1, twinkle: 0.1, color: 0xdcecff } },
+    light: { pointCount: 0, shadowMapSize: 2048 }, fogDensity: 0.00018,
+  });
+  const { world, sky, rig, fog } = land;
+  sky.setColors(0x10142f, 0x80506f, 0x414a6c);
+  world.time(world.own(buildAurora(sky, 0xf28ac9, 2.6))).setGain(2.1);
+  rig.sun.color.set(0xc4d9ff); rig.sun.intensity = 1.8; rig.sun.castShadow = false;
+  rig.hemi.color.set(0xc9c9ef); rig.hemi.groundColor.set(0x6b527c); rig.hemi.intensity = 1.3;
+  fog.color.set(0x775970);
+  const weather = winterWeather(world, ctx.seed), vision = { value: new Float32Array(9) }, agent = { value: new THREE.Vector2() };
+  const heightAt = (x: number, z: number) => 0.45 + (valueNoise2(x / 44, z / 44, 8192, ctx.seed) - 0.5) * 3.6 + (valueNoise2(x / 140, z / 140, 8192, ctx.seed ^ 0x51ed) - 0.5) * 12 + valueNoise2((x + z * 0.4) / 9, z / 22, 8192, ctx.seed ^ 0xa817) ** 3 * 1.4;
+  const scent = world.own(new ScentField(ctx.renderer, ctx.seed)), debug = { value: 0 };
+  const terrain = world.own(world.time(makeSceneTerrain({
+    name: 'sculptedSnow', seed: ctx.seed, segments: 256, radius: 8192,
+    colorA: 0xffffff, colorB: 0xeff3ff,
+    height: `return 0.45 + (worldNoise(p / 44.0, 8192.0, ${ctx.seed >>> 0}u) - 0.5) * 3.6 + (worldNoise(p / 140.0, 8192.0, ${(ctx.seed ^ 0x51ed) >>> 0}u) - 0.5) * 12.0 + pow(worldNoise(vec2(p.x + p.y * 0.4, p.y) / vec2(9.0, 22.0), 8192.0, ${(ctx.seed ^ 0xa817) >>> 0}u), 3.0) * 1.4;`,
+  }, heightAt, { roughness: 1, toonSteps: 0 })));
+  const compile = terrain.material.onBeforeCompile;
+  terrain.material.onBeforeCompile = (shader, renderer) => {
+    compile(shader, renderer);
+    Object.assign(shader.uniforms, { uScent: { value: scent.texture }, uScentOrigin: { value: scent.origin }, uDebug: debug, uVision: vision, uAgent: agent });
+    shader.fragmentShader = shader.fragmentShader.replace('#include <common>', `#include <common>
+uniform sampler2D uScent;
 uniform vec2 uScentOrigin;
-uniform float uScentOn;
-uniform float uScentGain;
-uniform float uScentGlow;
-uniform float uFrontEdge;
-uniform float uFrontWidth;
-uniform vec3 uFrontColor;
-uniform float uFrontMix;
-uniform float uGridGain;
-uniform vec3 uGridColor;
-varying vec3 vOrchard;
+uniform float uDebug, uVision[9];
+uniform vec2 uAgent;
 
-float orchardLattice( const in vec2 p ) {
-	vec2 w = fwidth( p );
-	vec2 edge = abs( fract( p ) - 0.5 ) / max( w, vec2( 1e-4 ) );
-	vec2 line = vec2( 1.0 ) - smoothstep( vec2( 0.4 ), vec2( 1.4 ), edge );
-	vec2 att = vec2( 1.0 ) / ( vec2( 1.0 ) + 4.0 * w );
-	return max( line.x * att.x, line.y * att.y );
+`)
+      .replace('#include <color_fragment>', `#include <color_fragment>
+float drift = landNoise(vLandPosition.xz * vec2(0.22, 0.08));
+float crust = landNoise(vLandPosition.xz * 2.5);
+vec3 snowColor = mix(vec3(0.72, 0.83, 1.0), vec3(1.0, 0.91, 0.97), drift);
+diffuseColor.rgb *= snowColor * (0.94 + 0.06 * crust);
+`)
+      .replace('#include <emissivemap_fragment>', `#include <emissivemap_fragment>
+vec2 scentUV = (vLandPosition.xz - uScentOrigin + 0.5) / ${FIELD_TEXELS.toFixed(1)};
+vec4 field = texture2D(uScent, scentUV);
+vec2 edge = smoothstep(vec2(0.0), vec2(0.025), scentUV) * smoothstep(vec2(0.0), vec2(0.025), 1.0 - scentUV);
+float inside = edge.x * edge.y * field.a;
+vec3 concentration = max(field.rgb, vec3(0.0));
+float mass = dot(concentration, vec3(1.0));
+vec3 scentColor = concentration / max(max(concentration.r, max(concentration.g, concentration.b)), 0.00001);
+float strength = (1.0 - exp(-mass * 0.38)) * inside;
+float level = log2(1.0 + mass * 4.0) * 1.6;
+float width = max(fwidth(level), 0.015);
+float contour = 1.0 - smoothstep(width * 0.45, width * 1.1, abs(fract(level + 0.5) - 0.5));
+contour *= smoothstep(0.2, 0.7, level) * (1.0 - smoothstep(0.35, 1.0, width));
+diffuseColor.rgb = mix(diffuseColor.rgb, scentColor * 0.45, strength * (0.035 + uDebug * 0.42));
+totalEmissiveRadiance += scentColor * strength * (0.008 + contour * (0.055 + 0.36 * uDebug));
+vec2 gridWidth = max(fwidth(vLandPosition.xz), vec2(0.00001));
+vec2 grid = abs(fract(vLandPosition.xz) - 0.5) / gridWidth;
+float line = (1.0 - smoothstep(0.25, 1.25, min(grid.x, grid.y))) * (1.0 - smoothstep(0.25, 0.9, max(gridWidth.x, gridWidth.y)));
+vec2 survey = abs(fract((vLandPosition.xz + 0.5) / 16.0 - 0.5) - 0.5) * 16.0 / gridWidth;
+float major = 1.0 - smoothstep(0.5, 1.5, min(survey.x, survey.y));
+totalEmissiveRadiance += vec3(0.2, 0.59, 0.7) * max(line * 0.48, major * 0.72) * uDebug;
+vec2 localVision = vLandPosition.xz - uAgent, cell = floor(localVision + 0.5);
+if (all(lessThan(abs(cell), vec2(1.5))) && dot(cell, cell) > 0.0) {
+  float signal = 1.0 - exp(-uVision[int((cell.y + 1.0) * 3.0 + cell.x + 1.0)]);
+  float border = 0.5 - max(abs(localVision.x - cell.x), abs(localVision.y - cell.y));
+  float edgeWidth = max(fwidth(border), 0.015);
+  float outline = 1.0 - smoothstep(edgeWidth, edgeWidth * 2.2, border);
+  vec3 visionColor = vec3(0.13, 0.66, 0.84);
+  totalEmissiveRadiance += visionColor * (0.09 + uDebug * 0.85) * (outline + signal * 0.14);
+  diffuseColor.rgb = mix(diffuseColor.rgb, visionColor * 0.5, (0.03 + uDebug * 0.16) * (0.3 + signal));
 }
-
-vec4 orchardFieldAt( const in vec2 cell ) {
-	vec2 uv = ( cell - uScentOrigin ) / ${FIELD_TEXELS.toFixed(1)};
-	vec4 field = texture2D( uScentTex, uv );
-	vec2 edge = abs( uv - 0.5 ) * 2.0;
-	float inside = ( 1.0 - smoothstep( ${FIELD_EDGE}, 1.0, edge.x ) ) * ( 1.0 - smoothstep( ${FIELD_EDGE}, 1.0, edge.y ) );
-	field.a *= inside * uScentOn;
-	return field;
-}
-`;
-
-const PAINT_TINT = `
-vec4 orchardScent = orchardFieldAt( vOrchard.xz );
-vec3 orchardTint = orchardScent.rgb;
-float orchardMass = orchardScent.a;
-float orchardFront = uFrontMix * ( 1.0 - smoothstep( 0.0, uFrontWidth, abs( vOrchard.x + vOrchard.z - uFrontEdge ) ) );
-diffuseColor.rgb = mix( diffuseColor.rgb, orchardTint, clamp( orchardMass * uScentGain, 0.0, 1.0 ) );
-diffuseColor.rgb = mix( diffuseColor.rgb, diffuseColor.rgb * uFrontColor, orchardFront );
-`;
-
-const PAINT_GLOW = `
-totalEmissiveRadiance += orchardTint * orchardMass * uScentGlow;
-`;
-
-export interface ItemMotion {
-  hover: number;
-  bob: number;
-  spin: number;
-}
-
-const FLOAT_DECL = `
-uniform float uItemTime;
-uniform float uItemHover;
-uniform float uItemBob;
-uniform float uItemSpin;
-`;
-
-const FLOAT_APPLY = `
-{
-	vec3 orchardOrigin = instanceMatrix[ 3 ].xyz;
-	float orchardPhase = orchardOrigin.x * 0.7 + orchardOrigin.z * 1.3;
-	float orchardAngle = uItemTime * uItemSpin + orchardPhase;
-	float orchardCos = cos( orchardAngle );
-	float orchardSin = sin( orchardAngle );
-	transformed.xz = vec2(
-		orchardCos * transformed.x - orchardSin * transformed.z,
-		orchardSin * transformed.x + orchardCos * transformed.z
-	);
-	transformed.y += uItemHover + sin( uItemTime * 2.1 + orchardPhase ) * uItemBob;
-}
-`;
-
-export function animateItems(
-  material: OakMaterial,
-  time: { value: number },
-  motion: ItemMotion,
-): void {
-  const base = material.onBeforeCompile;
-  const baseKey = material.customProgramCacheKey;
-  material.customProgramCacheKey = () => `${baseKey ? baseKey.call(material) : ''}|float`;
-  const hover = { value: motion.hover };
-  const bob = { value: motion.bob };
-  const spin = { value: motion.spin };
-  material.onBeforeCompile = (shader, renderer) => {
-    base.call(material, shader, renderer);
-    shader.uniforms.uItemTime = time;
-    shader.uniforms.uItemHover = hover;
-    shader.uniforms.uItemBob = bob;
-    shader.uniforms.uItemSpin = spin;
-    shader.vertexShader = shader.vertexShader
-      .replace('#include <common>', `#include <common>\n${FLOAT_DECL}`)
-      .replace('#include <begin_vertex>', `#include <begin_vertex>\n${FLOAT_APPLY}`);
+`);
   };
-}
+  world.add(terrain.mesh);
+  const items = new ItemField(world, ctx.seed, heightAt);
+  world.own({ dispose() {}, staticInstances: items.staticInstances });
+  let shadows: CSM | undefined, projection = '';
+  world.own({ dispose() { shadows?.remove(); for (const light of shadows?.lights ?? []) light.dispose(); shadows?.dispose(); } });
+  const handle = {
+    items, scent, heightAt, debug, vision, agent,
+    setView(coverage: ViewCoverage, camera: THREE.PerspectiveCamera) {
+      land.setView(coverage, camera, terrain);
+      weather.setView(camera.position.x, heightAt(camera.position.x, camera.position.z), camera.position.z);
+      if (!shadows) {
+        rig.sun.removeFromParent();
+        shadows = new CSM({ camera, parent: world.group, cascades: 3, maxFar: 2304, shadowMapSize: 2048, lightDirection: rig.sunDirection.clone().negate(), lightIntensity: 1.8, lightMargin: 80, lightFar: 6000, shadowBias: -0.000015, mode: 'custom', customSplitsCallback: (_count, near, far, breaks) => { for (const depth of [Math.min(40, far * 0.16), Math.min(260, far * 0.52), far]) breaks.push(Math.max(near, depth) / far); } });
+        shadows.fade = true;
+        for (const light of shadows.lights) { light.color.copy(rig.sun.color); light.shadow.normalBias = 0.025; }
+        const materials = new Set<THREE.Material>();
+        scene.traverse(object => { if (object instanceof THREE.Mesh) for (const material of Array.isArray(object.material) ? object.material : [object.material]) if (material instanceof THREE.MeshStandardMaterial) materials.add(material.userData.sourceMaterial ?? material); });
+        for (const material of items.materials) if (material instanceof THREE.MeshStandardMaterial) materials.add(material);
+        for (const material of materials) {
+          const before = material.onBeforeCompile, key = material.customProgramCacheKey(); shadows.setupMaterial(material); const cascade = material.onBeforeCompile;
+          const cascadeUniforms: Record<string, THREE.IUniform> = {};
+          material.customProgramCacheKey = () => `${key}|cascades`;
+          material.onBeforeCompile = (shader, renderer) => {
+            before.call(material, shader, renderer); cascade.call(material, shader, renderer);
+            for (const name of ['CSM_cascades', 'cameraNear', 'shadowFar']) shader.uniforms[name] = cascadeUniforms[name] ??= shader.uniforms[name]!;
 
-export function paintScent(material: THREE.MeshStandardMaterial, paint: ScentPaint): void {
-  const base = material.onBeforeCompile;
-  const baseKey = material.customProgramCacheKey;
-  material.customProgramCacheKey = () => `${baseKey ? baseKey.call(material) : ''}|orchard`;
-  material.onBeforeCompile = (shader, renderer) => {
-    base.call(material, shader, renderer);
-    shader.uniforms.uScentTex = paint.uScentTex;
-    shader.uniforms.uScentOrigin = paint.uScentOrigin;
-    shader.uniforms.uScentOn = paint.uScentOn;
-    shader.uniforms.uScentGain = paint.uScentGain;
-    shader.uniforms.uScentGlow = paint.uScentGlow;
-    shader.uniforms.uFrontEdge = paint.uFrontEdge;
-    shader.uniforms.uFrontWidth = paint.uFrontWidth;
-    shader.uniforms.uFrontColor = paint.uFrontColor;
-    shader.uniforms.uFrontMix = paint.uFrontMix;
-    shader.uniforms.uGridGain = paint.uGridGain;
-    shader.uniforms.uGridColor = paint.uGridColor;
-    shader.vertexShader = shader.vertexShader
-      .replace('#include <common>', '#include <common>\nvarying vec3 vOrchard;')
-      .replace(
-        '#include <project_vertex>',
-        '#include <project_vertex>\nvOrchard = ( modelMatrix * vec4( transformed, 1.0 ) ).xyz;',
-      );
-    shader.fragmentShader = shader.fragmentShader
-      .replace('#include <common>', `#include <common>\n${PAINT_DECL}`)
-      .replace('diffuseColor.rgb *= color;', `diffuseColor.rgb *= color;\n${PAINT_TINT}`)
-      .replace('#include <emissivemap_fragment>', `#include <emissivemap_fragment>\n${PAINT_GLOW}`)
-      .replace(
-        '#include <opaque_fragment>',
-        'outgoingLight += uGridColor * orchardLattice( vOrchard.xz ) * uGridGain;\n#include <opaque_fragment>',
-      );
-  };
-}
-
-export function orchardHeight(seed: number, x: number, z: number): number {
-  const a = valueNoise2(x / 32, z / 32, 8, seed);
-  const b = valueNoise2(x / 16, z / 16, 16, seed ^ 0x51ed);
-  return (a - 0.5) * 6.2 * 2 + (b - 0.5) * 6.2 * 0.44;
-}
-
-export interface OrchardWorld extends WorldCore {
-  rig: LightRig;
-  sky: SkyHandle;
-  terrain: ContinuousSurface;
-  paint: ScentPaint;
-  scentField: ScentField;
-  items: Map<number, THREE.InstancedMesh>;
-  decals: THREE.InstancedMesh;
-  shells: Map<number, THREE.InstancedMesh>;
-  cellColor: Float32Array;
-  beacon: BeaconHandle;
-  setOrigin(x: number, z: number): void;
-  setView(coverage: ViewCoverage, camera: THREE.Camera): void;
-  setHour(hour: number): void;
-  setRipeness(jellyRipe: number): void;
-  decalTint(item: number, out: THREE.Color): THREE.Color;
-  setFront(edge: number, mix: number): void;
-  setBreeze(amount: number): void;
-  heightAt(x: number, z: number): number;
-  setZoom(shadowSpan: number): void;
-}
-
-export function buildWorld(ctx: SceneContext, scene: THREE.Scene): OrchardWorld {
-  const w = makeWorld('windfallOrchard');
-  const palette = TOKENS.palettes.dusk;
-  const pale = TOKENS.palettes.afternoon;
-  const skin = orchardSkin(palette);
-  const scentField = new ScentField(ctx.renderer, ctx.seed, {
-    scentA: [skin.scentA.r, skin.scentA.g, skin.scentA.b],
-    scentB: [skin.scentB.r, skin.scentB.g, skin.scentB.b],
-    scentC: [skin.scentC.r, skin.scentC.g, skin.scentC.b],
-    wall: [skin.stone.r, skin.stone.g, skin.stone.b],
-  });
-  w.own(scentField);
-
-  const sky = w.time(skyFromPalette(palette, 'dusk', { radius: 1, sunSize: 0.042 }));
-  w.add(sky.mesh);
-  w.own(sky);
-
-  const rig = makeLightRig(palette, {
-    sunDir: sky.sunDirection,
-    pointCount: 2,
-    pointDistance: 14,
-    sunDistanceScale: 3.2,
-    shadowMapSize: [SHADOW_MAP_X, SHADOW_MAP_Y],
-  });
-  rig.sun.shadow.normalBias = 0.4;
-  rig.sun.shadow.radius = 2.4;
-  w.add(rig.group);
-  w.own(rig);
-
-  const fog = applyFog(scene, palette, FOG_EXTENT);
-
-  const paint: ScentPaint = {
-    uScentTex: { value: scentField.texture },
-    uScentOrigin: { value: scentField.origin },
-    uScentOn: scentField.readiness,
-    uScentGain: { value: 0.55 },
-    uScentGlow: { value: 0.07 },
-    uFrontEdge: { value: -1e6 },
-    uFrontWidth: { value: FRONT_WIDTH },
-    uFrontColor: { value: skin.front.clone() },
-    uFrontMix: { value: 0 },
-    uGridGain: { value: 0 },
-    uGridColor: { value: new THREE.Color(TOKENS.uiCyan) },
-  };
-
-  const terrain = w.own(w.time(makeSceneTerrain({
-    name: 'orchardGround', seed: ctx.seed, segments: 128,
-    colorA: skin.grassLow, colorB: skin.grassHigh,
-    height: `float a = worldNoise(p / 32.0, 8.0, ${ctx.seed >>> 0}u); float b = worldNoise(p / 16.0, 16.0, ${(ctx.seed ^ 0x51ed) >>> 0}u); return (a - 0.5) * 12.4 + (b - 0.5) * 2.728;`,
-    detail: `float h = clamp((p.y + 5.4) / 10.8, 0.0, 1.0); color = h < 0.42 ? mix(vec3(${skin.soil.r}, ${skin.soil.g}, ${skin.soil.b}), uLandA, h / 0.42) : mix(uLandA, uLandB, (h - 0.42) / 0.58);`,
-  }, (x, z) => orchardHeight(ctx.seed, x, z), {
-    roughness: 0.94, rimColor: palette.skyHorizon, rimStrength: 0.16,
-    toonSteps: 3, toonSoftness: 0.42, toonFloor: 0.24,
-  })));
-  w.add(terrain.mesh);
-  paintScent(terrain.material, paint);
-
-  const itemTime = { value: 0 };
-  const surfaceAt = (x: number, z: number): number => orchardHeight(ctx.seed, x, z);
-  const items = new Map<number, THREE.InstancedMesh>();
-  for (const kind of ITEM_KINDS) {
-    const geometry = orchardItemGeometry(kind, skin);
-    w.own(geometry);
-    const material = oakMaterial({
-      vertexColors: true,
-      flatShading: true,
-      roughness: 0.9,
-      rimColor: palette.skyHorizon,
-      rimStrength: 0.34,
-      toonSteps: 3,
-      toonSoftness: 0.4,
-      toonFloor: 0.3,
-      emissive: itemHue(kind, skin),
-      emissiveIntensity: itemGlow(kind, skin, ITEM_GLOW),
-      name: `orchardItem${kind}`,
-    });
-    w.own(material);
-    animateItems(material, itemTime, ITEM_MOTION[kind] ?? ZERO_MOTION);
-    const mesh = new THREE.InstancedMesh(geometry, material, ITEM_CAPACITY[kind] ?? 128);
-    mesh.name = `orchardItems${kind}`;
-    mesh.castShadow = (ITEM_MOTION[kind]?.hover ?? 0) === 0;
-    mesh.receiveShadow = true;
-    mesh.frustumCulled = false;
-    mesh.count = 0;
-    w.add(mesh);
-    w.own(mesh);
-    items.set(kind, mesh);
-  }
-
-  const decalGeometry = new THREE.PlaneGeometry(1, 1);
-  decalGeometry.rotateX(-Math.PI / 2);
-  w.own(decalGeometry);
-  const decalMaterial = emissiveMaterial(TOKEN_ONE, 0.9, {
-    map: w.own(radialSprite(64, 2.2)),
-    transparent: true,
-    opacity: 0.5,
-    depthWrite: false,
-    blending: THREE.AdditiveBlending,
-    name: 'orchardDecal',
-  });
-  w.own(decalMaterial);
-  const decals = new THREE.InstancedMesh(decalGeometry, decalMaterial, DECAL_CAPACITY);
-  decals.name = 'orchardDecals';
-  decals.instanceColor = new THREE.InstancedBufferAttribute(new Float32Array(DECAL_CAPACITY * 3), 3);
-  decals.castShadow = false;
-  decals.receiveShadow = false;
-  decals.frustumCulled = false;
-  decals.renderOrder = 2;
-  decals.count = 0;
-  w.add(decals);
-  w.own(decals);
-
-  const shells = new Map<number, THREE.InstancedMesh>();
-  for (const kind of ITEM_KINDS) {
-    const motion = ITEM_MOTION[kind] ?? ZERO_MOTION;
-    if (motion.hover <= 0) continue;
-    const source = items.get(kind);
-    if (!source) continue;
-    const shellGeometry = source.geometry.clone();
-    shellGeometry.scale(SHELL_SCALE, SHELL_SCALE, SHELL_SCALE);
-    w.own(shellGeometry);
-    const tint = blendTokens(itemHue(kind, skin), TOKEN_ONE, HALO_WHITEN);
-    const shellMaterial = emissiveMaterial(tint, HALO_GLOW / luminance(tint), {
-      transparent: true,
-      opacity: 0.42,
-      depthWrite: false,
-      side: THREE.DoubleSide,
-      blending: THREE.AdditiveBlending,
-      name: `orchardShell${kind}`,
-    });
-    w.own(shellMaterial);
-    animateItems(shellMaterial as unknown as OakMaterial, itemTime, motion);
-    const shell = new THREE.InstancedMesh(shellGeometry, shellMaterial, ITEM_CAPACITY[kind] ?? 128);
-    shell.name = `orchardShells${kind}`;
-    shell.castShadow = false;
-    shell.receiveShadow = false;
-    shell.frustumCulled = false;
-    shell.renderOrder = 4;
-    shell.count = 0;
-    w.add(shell);
-    w.own(shell);
-    shells.set(kind, shell);
-  }
-
-  const cellColor = new Float32Array((Math.max(...ITEM_KINDS) + 1) * 3);
-  for (const kind of ITEM_KINDS) {
-    const hue = itemHue(kind, skin);
-    cellColor[kind * 3] = hue.r;
-    cellColor[kind * 3 + 1] = hue.g;
-    cellColor[kind * 3 + 2] = hue.b;
-  }
-
-  const beacon = w.time(buildBeacon(skin.scentColumn, BEACON_CAPACITY));
-  w.add(beacon.mesh);
-  w.add(beacon.pool);
-  w.own(beacon);
-
-  const grassGeometry = grassClumpGeometry(4, 0.4, 0.05);
-  w.own(grassGeometry);
-  const grassMaterial = oakMaterial({
-    vertexColors: true,
-    flatShading: true,
-    roughness: 0.95,
-    rimColor: palette.skyHorizon,
-    rimStrength: 0.2,
-    toonSteps: 3,
-    toonSoftness: 0.5,
-    toonFloor: 0.5,
-    wind: { amplitude: 0.02, frequency: 1.05, height: 0.5 },
-    name: 'orchardGrass',
-  });
-  w.own(grassMaterial);
-  const grassBank = makeSceneryBank({
-    geometry: grassGeometry,
-    material: grassMaterial,
-    tileSize: SCATTER_TILE,
-    perTile: 96,
-    colorA: skin.grassLow,
-    colorB: skin.grassHigh,
-    seed: ctx.seed,
-    name: 'orchardGrassBank',
-    fill: (tx, tz, rng, write) => {
-      const x0 = tx * SCATTER_TILE;
-      const z0 = tz * SCATTER_TILE;
-      for (let i = 0; i < 96; i++) {
-        const x = x0 + rng() * SCATTER_TILE;
-        const z = z0 + rng() * SCATTER_TILE;
-        write(
-          x,
-          surfaceAt(x, z),
-          z,
-          rng() * Math.PI,
-          0.52 + rng() * 0.66,
-          0.72 + rng() * 0.7,
-          rng(),
-        );
+          };
+        }
+      }
+      const next = `${camera.aspect}:${camera.fov}:${camera.near}:${camera.far}`;
+      if (projection !== next) { shadows.updateFrustums(); projection = next; }
+      shadows.update();
+      const shadowDepth = Math.round((coverage.x * rig.sunDirection.x + coverage.z * rig.sunDirection.z) / TILE_CELLS) * TILE_CELLS;
+      for (let i = 0; i < shadows.cascades; i++) {
+        const light = shadows.lights[i]!, frustum = shadows.frustums[i]!, matrix = camera.matrixWorld.elements;
+        const shift = shadowDepth + light.shadow.camera.far / 2 - light.position.dot(rig.sunDirection);
+        light.position.addScaledVector(rig.sunDirection, shift); light.target.position.addScaledVector(rig.sunDirection, shift);
+        let bottom = Infinity;
+        for (const vertices of [frustum.vertices.near, frustum.vertices.far]) for (const vertex of vertices) bottom = Math.min(bottom, matrix[1]! * vertex.x + matrix[5]! * vertex.y + matrix[9]! * vertex.z + matrix[13]!);
+        light.shadow.autoUpdate = bottom <= items.canopyHeight + (3.6 + 12) / 2;
+        light.shadow.needsUpdate = !light.shadow.map;
+        light.updateMatrixWorld(); light.target.updateMatrixWorld(); light.shadow.updateMatrices(light);
       }
     },
-  });
-  w.add(grassBank.mesh);
-  w.own(grassBank);
-
-  const flowerGeo = flowerGeometry(5);
-  w.own(flowerGeo);
-  const flowerMaterial = oakMaterial({
-    vertexColors: true,
-    flatShading: true,
-    roughness: 0.88,
-    rimColor: palette.skyHorizon,
-    rimStrength: 0.26,
-    toonSteps: 3,
-    toonSoftness: 0.5,
-    toonFloor: 0.46,
-    wind: { amplitude: 0.024, frequency: 1.3, height: 0.4 },
-    name: 'orchardFlowers',
-  });
-  w.own(flowerMaterial);
-  const flowerBank = makeSceneryBank({
-    geometry: flowerGeo,
-    material: flowerMaterial,
-    tileSize: SCATTER_TILE,
-    perTile: 7,
-    colorA: skin.bloom,
-    colorB: skin.papery,
-    seed: ctx.seed ^ 0x2c91,
-    name: 'orchardFlowerBank',
-    fill: (tx, tz, rng, write) => {
-      const x0 = tx * SCATTER_TILE;
-      const z0 = tz * SCATTER_TILE;
-      for (let i = 0; i < 7; i++) {
-        if (rng() > 0.62) continue;
-        const x = x0 + rng() * SCATTER_TILE;
-        const z = z0 + rng() * SCATTER_TILE;
-        write(
-          x,
-          surfaceAt(x, z),
-          z,
-          rng() * Math.PI * 2,
-          0.42 + rng() * 0.4,
-          0.9 + rng() * 0.4,
-          rng(),
-        );
-      }
-    },
-  });
-  w.add(flowerBank.mesh);
-  w.own(flowerBank);
-
-  const pollen: AmbientParticlesHandle = w.time(
-    makeAmbientParticles({
-      preset: 'pollen',
-      count: 300,
-      seed: ctx.seed ^ 0x77ab,
-      bounds: { halfX: 120, halfY: 16, halfZ: 120, y: 15 },
-      color: skin.bloom,
-    }),
-  );
-  w.add(pollen.points);
-  w.own(pollen);
-
-  const sunDir = new THREE.Vector3();
-  const baseAzimuth = SUN_AZIMUTH;
-  let fogBase = fog.density;
-  const grassWind = grassMaterial.oak;
-  const flowerWind = flowerMaterial.oak;
-  const lightProbe = new THREE.Object3D();
-  const probePoint = new THREE.Vector3();
-  const shadowCentre = new THREE.Vector3();
-  const shadowInverse = new THREE.Matrix4();
-
-  let shadowSpanNow = SHADOW_SPAN;
-
-  const fitShadow = (cx: number, cz: number): void => {
-    const elevation = Math.max(0.02, Math.min(1, rig.sunDirection.y));
-    const horizon = Math.sqrt(Math.max(1e-6, 1 - elevation * elevation));
-    const halfSlab = (SLAB_HIGH - SLAB_LOW) / 2;
-    const halfX = shadowSpanNow;
-    const halfY = shadowSpanNow * elevation + halfSlab * horizon;
-    const depth = shadowSpanNow * horizon + halfSlab * elevation;
-    shadowCentre.set(cx, (SLAB_LOW + SLAB_HIGH) / 2, cz);
-    lightProbe.position.copy(shadowCentre).addScaledVector(rig.sunDirection, SHADOW_REACH);
-    lightProbe.lookAt(shadowCentre);
-    lightProbe.updateMatrixWorld();
-    probePoint.copy(shadowCentre).applyMatrix4(shadowInverse.copy(lightProbe.matrixWorld).invert());
-    const qx = (2 * halfX) / SHADOW_MAP_X;
-    const qy = (2 * halfY) / SHADOW_MAP_Y;
-    probePoint.x = Math.round(probePoint.x / qx) * qx;
-    probePoint.y = Math.round(probePoint.y / qy) * qy;
-    probePoint.applyMatrix4(lightProbe.matrixWorld);
-    rig.setShadowExtent(probePoint, halfX, halfY, SHADOW_REACH, depth + halfSlab);
   };
-
-  const setHour = (hour: number): void => {
-    const t = 0.7 + 0.3 * clamp01(hour);
-    sky.setColors(
-      blendTokens(pale.skyTop, palette.skyTop, t),
-      blendTokens(pale.skyHorizon, palette.skyHorizon, t),
-      blendTokens(pale.skyBottom, palette.skyBottom, t),
-    );
-    rig.sun.color.copy(blendTokens(pale.sun, palette.sun, t));
-    rig.sun.intensity = pale.sunIntensity + (palette.sunIntensity - pale.sunIntensity) * t;
-    rig.hemi.color.copy(blendTokens(pale.hemiSky, palette.hemiSky, t));
-    rig.hemi.groundColor.copy(blendTokens(pale.hemiGround, palette.hemiGround, t));
-    rig.hemi.intensity = pale.hemiIntensity + (palette.hemiIntensity - pale.hemiIntensity) * t;
-    fog.color.copy(blendTokens(pale.fog, palette.fog, t));
-    fog.density = fogBase * (1 - 0.08 * t);
-    const elevation = 0.36 - 0.1 * t;
-    const radial = Math.sqrt(Math.max(1e-4, 1 - elevation * elevation));
-    sunDir.set(Math.sin(baseAzimuth) * radial, elevation, Math.cos(baseAzimuth) * radial);
-    sky.setSunDirection(sunDir.x, sunDir.y, sunDir.z);
-    rig.setSunDirection(sunDir.x, sunDir.y, sunDir.z);
-    paint.uScentGain.value = 0.42 + 0.28 * t;
-    paint.uScentGlow.value = 0.04 + 0.09 * t;
-    for (let i = 0; i < rig.points.length; i++) {
-      const light = rig.points[i];
-      if (light) light.intensity = 0.08 + 0.9 * t;
-    }
-    pollen.setDensity(0.24 + 0.76 * t);
-  };
-
-  const ripeColor = new THREE.Color();
-  const ripeness = new Float32Array(cellColor.length / 3).fill(1);
-  const setRipeness = (jellyRipe: number): void => {
-    const k = clamp01(jellyRipe);
-    ripeness[JBW_JELLY] = k;
-    ripeness[JBW_ONION] = 1 - k;
-  };
-
-  setHour(0.4);
-  setRipeness(1);
-
-  return w.seal<OrchardWorld>(
-    {
-      rig,
-      sky,
-      terrain,
-      paint,
-      scentField,
-      items,
-      decals,
-      shells,
-      cellColor,
-      beacon,
-      setOrigin(x, z) {
-        pollen.points.position.set(x, 0, z);
-        fitShadow(x, z);
-      },
-      setView(coverage, camera) {
-        terrain.setView(coverage);
-        grassBank.setView(coverage);
-        flowerBank.setView(coverage);
-        sky.mesh.position.copy(camera.position);
-        sky.mesh.scale.setScalar(coverage.far * 0.85);
-        fogBase = 2.8 / coverage.far;
-        fog.density = fogBase;
-      },
-      setHour,
-      setRipeness,
-      decalTint(item, out) {
-        const t = item * 3;
-        const ripe = ripeness[item] ?? 1;
-        ripeColor.copy(skin.spoiled).lerp(skin.ripe, ripe);
-        return out
-          .setRGB(cellColor[t] ?? 1, cellColor[t + 1] ?? 1, cellColor[t + 2] ?? 1)
-          .multiply(ripeColor)
-          .multiplyScalar(DECAL_DIM + (1 - DECAL_DIM) * ripe);
-      },
-      setFront(edge, mix) {
-        paint.uFrontEdge.value = edge;
-        paint.uFrontMix.value = clamp01(mix);
-      },
-      setZoom(shadowSpan) {
-        shadowSpanNow = shadowSpan;
-      },
-      heightAt: surfaceAt,
-      setBreeze(amount) {
-        grassWind.setWind(0.016 + 0.028 * clamp01(amount));
-        flowerWind.setWind(0.02 + 0.03 * clamp01(amount));
-      },
-    },
-    {
-      time(t) {
-        itemTime.value = t;
-        grassMaterial.oak.setTime(t);
-        flowerMaterial.oak.setTime(t);
-        const drift = hash2f(1, 2, ctx.seed) * 0.4;
-        pollen.points.rotation.y = Math.sin(t * 0.02 + drift) * 0.05;
-      },
-    },
-  );
+  return world.seal<WorldCore & typeof handle>(handle);
 }

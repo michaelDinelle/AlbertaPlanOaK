@@ -141,24 +141,25 @@ const RIM_APPLY =  `
 }
 `;
 
-const WIND_DECL =  `
+export const WIND_DECL = `
 uniform float uTime;
 uniform float uWindAmp;
 uniform float uWindFreq;
 uniform float uWindHeight;
+vec3 oakWind(vec3 p, vec3 origin) {
+  float sway = clamp(p.y / max(uWindHeight, 0.0001), 0.0, 1.0); sway *= sway;
+  float phase = uTime * uWindFreq + origin.x * 0.7 + origin.z * 1.3;
+  return p + vec3(sin(phase), 0.0, cos(phase * 0.83) * 0.6) * uWindAmp * sway;
+}
 `;
 
-const WIND_APPLY =  `
+const WIND_APPLY = `
 {
-	vec3 oakOrigin = modelMatrix[ 3 ].xyz;
-	#ifdef USE_INSTANCING
-		oakOrigin = ( modelMatrix * vec4( instanceMatrix[ 3 ].xyz, 1.0 ) ).xyz;
-	#endif
-	float oakSway = clamp( transformed.y / max( uWindHeight, 0.0001 ), 0.0, 1.0 );
-	oakSway *= oakSway;
-	float oakPhase = uTime * uWindFreq + oakOrigin.x * 0.7 + oakOrigin.z * 1.3;
-	transformed.x += sin( oakPhase ) * uWindAmp * oakSway;
-	transformed.z += cos( oakPhase * 0.83 ) * uWindAmp * 0.6 * oakSway;
+  vec3 oakOrigin = modelMatrix[3].xyz;
+  #ifdef USE_INSTANCING
+    oakOrigin = (modelMatrix * vec4(instanceMatrix[3].xyz, 1.0)).xyz;
+  #endif
+  transformed = oakWind(transformed, oakOrigin);
 }
 `;
 

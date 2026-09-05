@@ -1,7 +1,7 @@
 import { Matrix4 } from 'three';
 import { defaultFkToWorld, type GroundTruthOptions } from '@kit/debug';
 import { type OrbitRigOptions } from '@kit/rigs';
-import { makeSceneView, type SceneView } from '../jelly-bean-world/view';
+import { makeSceneView, type SceneView } from '@kit/view';
 import { StageScene, type Stage } from '@kit/stage';
 import type { FrameUpdate, SceneContext, SceneFactory } from '@kit/types';
 import { FK_FLOATS, FK_POINT_INDEX } from '@sim/fk/cheetah';

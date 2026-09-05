@@ -1,4 +1,4 @@
-import { makeContinuousSurface, makeSceneryBank, type ViewCoverage } from '../jelly-bean-world/view';
+import { makeContinuousSurface, makeSceneryBank, type ViewCoverage } from '@kit/view';
 import * as THREE from 'three';
 import {
   buildCellField,

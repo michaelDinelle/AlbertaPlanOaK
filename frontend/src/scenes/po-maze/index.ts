@@ -1,4 +1,4 @@
-import { makeSceneView, type SceneView } from '../jelly-bean-world/view';
+import { makeSceneView, type SceneView } from '@kit/view';
 import { POMAZE_GX, POMAZE_GY, POMAZE_X, POMAZE_Y } from '@sim/envs/pomaze';
 import type { GroundTruthOptions } from '@kit/debug';
 import { CELL, cellToWorldVec, clampCell, type GridSize } from '@kit/grid';

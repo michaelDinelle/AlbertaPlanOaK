@@ -1,7 +1,7 @@
 import type { GroundTruthOptions } from '@kit/debug';
 import { clampRange } from '@kit/mix';
 import { type OrbitRigOptions } from '@kit/rigs';
-import { makeSceneView, type SceneView } from '../jelly-bean-world/view';
+import { makeSceneView, type SceneView } from '@kit/view';
 import { StageScene, type Stage } from '@kit/stage';
 import type { FrameState, FrameUpdate, SceneContext, SceneFactory } from '@kit/types';
 import { PD_L, PD_MAX_SPEED, PD_MAX_TORQUE, PENDULUM_TH, PENDULUM_THDOT, PENDULUM_TORQUE, wrapPi } from '@sim/envs/pendulum';

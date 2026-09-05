@@ -1,5 +1,6 @@
 import * as THREE from 'three';
 import { rngAt, type Rng } from './rng';
+import { SpatialInstances } from './instances';
 
 export type TileWriter = (
   x: number,
@@ -21,18 +22,16 @@ export function bankKey(name: string): number {
 }
 
 export interface TileBankHandle {
-  mesh: THREE.InstancedMesh;
-  setOrigin(tileX: number, tileZ: number): void;
+  mesh: THREE.Group;
+  instances: SpatialInstances;
+  setOrigin(tileX: number, tileZ: number, radius: number): void;
   dispose(): void;
 }
 
 export interface TileBankOptions {
   geometry: THREE.BufferGeometry;
   material: THREE.Material;
-  tilesX: number;
-  tilesZ: number;
-  backX: number;
-  backZ: number;
+  depth?: THREE.Material;
   perTile: number;
   colorA: THREE.ColorRepresentation;
   colorB: THREE.ColorRepresentation;
@@ -46,15 +45,10 @@ export interface TileBankOptions {
 const Z_STRIDE = 0x9e3779b1;
 
 export function makeTileBank(opts: TileBankOptions): TileBankHandle {
-  const slots = Math.max(1, opts.tilesX * opts.tilesZ);
-  const capacity = Math.max(1, slots * opts.perTile);
-  const mesh = new THREE.InstancedMesh(opts.geometry, opts.material, capacity);
+  const batches = new SpatialInstances([{ ...opts, padding: 1 }]);
+  const mesh = batches.group;
   mesh.name = opts.name;
-  mesh.castShadow = opts.castShadow ?? false;
-  mesh.receiveShadow = opts.receiveShadow ?? false;
-  mesh.frustumCulled = false;
-  mesh.instanceColor = new THREE.InstancedBufferAttribute(new Float32Array(capacity * 3), 3);
-
+  const matrices = new Float32Array(opts.perTile * 16), colors = new Float32Array(opts.perTile * 3);
   const matrix = new THREE.Matrix4();
   const position = new THREE.Vector3();
   const quaternion = new THREE.Quaternion();
@@ -65,10 +59,10 @@ export function makeTileBank(opts: TileBankOptions): TileBankHandle {
   const colorA = new THREE.Color(opts.colorA);
   const colorB = new THREE.Color(opts.colorB);
   const color = new THREE.Color();
-  const zero = new THREE.Matrix4().makeScale(0, 0, 0);
 
-  let originX = Number.NaN;
-  let originZ = Number.NaN;
+  let region = '';
+  const tiles = new Map<string, { x: number; z: number }>();
+  let pending: [number, number][] = [];
   let cursor = 0;
   let limit = 0;
 
@@ -80,57 +74,39 @@ export function makeTileBank(opts: TileBankOptions): TileBankHandle {
     if (normal) quaternion.premultiply(groundRotation.setFromUnitVectors(up, normal));
     scaleVec.set(scale, scale * stretch, scale);
     matrix.compose(position, quaternion, scaleVec);
-    mesh.setMatrixAt(cursor, matrix);
+    matrix.toArray(matrices, cursor * 16);
     color.copy(colorA).lerp(colorB, mix01 < 0 ? 0 : mix01 > 1 ? 1 : mix01);
-    mesh.setColorAt(cursor, color);
+    color.toArray(colors, cursor * 3);
     cursor++;
   };
 
-  const slotTileX = new Int32Array(slots).fill(0x7fffffff);
-  const slotTileZ = new Int32Array(slots).fill(0x7fffffff);
   const bank = bankKey(opts.name);
 
-  const fillSlot = (slot: number, ix: number, iz: number): void => {
-    cursor = slot * opts.perTile;
-    limit = cursor + opts.perTile;
+  const fillTile = (ix: number, iz: number): void => {
+    cursor = 0;
+    limit = opts.perTile;
     opts.fill(ix, iz, rngAt(ix, (bank ^ Math.imul(iz, Z_STRIDE)) | 0, opts.seed), write);
-    for (let i = cursor; i < limit; i++) mesh.setMatrixAt(i, zero);
-    slotTileX[slot] = ix;
-    slotTileZ[slot] = iz;
-  };
-
-  const rebuild = (tileX: number, tileZ: number): void => {
-    const firstX = tileX - opts.backX;
-    const firstZ = tileZ - opts.backZ;
-    let touched = false;
-    for (let tz = 0; tz < opts.tilesZ; tz++) {
-      const iz = firstZ + tz;
-      const wz = ((iz % opts.tilesZ) + opts.tilesZ) % opts.tilesZ;
-      for (let tx = 0; tx < opts.tilesX; tx++) {
-        const ix = firstX + tx;
-        const wx = ((ix % opts.tilesX) + opts.tilesX) % opts.tilesX;
-        const slot = wz * opts.tilesX + wx;
-        if (slotTileX[slot] === ix && slotTileZ[slot] === iz) continue;
-        fillSlot(slot, ix, iz);
-        touched = true;
-      }
-    }
-    if (!touched) return;
-    mesh.instanceMatrix.needsUpdate = true;
-    if (mesh.instanceColor) mesh.instanceColor.needsUpdate = true;
+    const key = `${ix}:${iz}`;
+    tiles.set(key, { x: ix, z: iz });
+    batches.set(key, matrices.subarray(0, cursor * 16), colors.subarray(0, cursor * 3));
   };
 
   return {
-    mesh,
-    setOrigin(tileX, tileZ) {
-      if (tileX === originX && tileZ === originZ) return;
-      originX = tileX;
-      originZ = tileZ;
-      rebuild(tileX, tileZ);
+    mesh, instances: batches,
+    setOrigin(tileX, tileZ, radius) {
+      const next = `${tileX}:${tileZ}:${radius}`;
+      if (next !== region) {
+        region = next; pending = [];
+        for (const [key, { x, z }] of tiles) if (Math.abs(x - tileX) > radius + 2 || Math.abs(z - tileZ) > radius + 2) { batches.delete(key); tiles.delete(key); }
+        for (let z = tileZ - radius; z <= tileZ + radius; z++) for (let x = tileX - radius; x <= tileX + radius; x++) if (!tiles.has(`${x}:${z}`)) pending.push([x,z]);
+        const distance = ([x,z]: [number,number]) => (x - tileX) ** 2 + (z - tileZ) ** 2;
+        pending.sort((a,b) => distance(b) - distance(a));
+      }
+      const start = performance.now();
+      while (pending.length && performance.now() - start < 1.5) fillTile(...pending.pop()!);
     },
     dispose() {
-      mesh.dispose();
-      mesh.removeFromParent();
+      batches.dispose();
     },
   };
 }
